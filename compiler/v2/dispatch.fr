@@ -13,7 +13,6 @@ CompilerDispatch :: @struct(
 
 Task :: @rec @struct(
     action: Action,
-    waiting_for: ?*Task,
     parent: ?*Task,
     id: i64, // TODO: remove
     done: bool = false,
@@ -44,7 +43,9 @@ OverloadAttempt :: @struct(
     options: List(FuncId),
     state: i64 = 0,
     needed_coerce: bool = false,
-    arg_index: i64 = 0,
+    prev_count := 0,
+    prev_index := 0,
+    got_methods := false,
 );
 
 fn init(a: Alloc) CompilerDispatch = {
@@ -68,17 +69,17 @@ poll_in_place :: fn(self: *SelfHosted, $T: Type, $f: @Fn() Maybe(T)) Res(T) #gen
             fn Ok(it)  => return(Ok = it[]);
             fn Err(it) => return(Err = it[]);
             fn Suspend(new_dep) => {
-                t := self.new_task(new_dep[][], .None, .None);
+                t := self.new_task(new_dep[][], .None);
                 @try(self.poll_until_finished(t)) return;
             };
         };
     }
 };
 
-fn new_task(self: *SelfHosted, action: Action, waiting_for: ?*Task, parent: ?*Task) *Task = {
+fn new_task(self: *SelfHosted, action: Action, parent: ?*Task) *Task = {
     new_task := self.get_alloc().alloc(Task, 1);
     new_task := new_task.ptr;
-    new_task[] = (action = action, waiting_for = waiting_for, parent = parent, id = self.dispatch.next_task_id, trace = .None);
+    new_task[] = (action = action, parent = parent, id = self.dispatch.next_task_id, trace = .None);
     self.dispatch.next_task_id += 1;
     new_task
 }
@@ -98,8 +99,6 @@ fn poll_until_finished(self: *SelfHosted, task: *Task) Result(void, *CompileErro
     }
 }
 
-// TODO: we never set waiting_for! decide if we want that or remove it. 
-
 // this is a dumb way to factor this but i want to call it from examples/compiler_gui too. 
 fn poll_loop_body(self: *SelfHosted, task_in: **Task, out: *Result(void, *CompileError)) bool = {
     task := task_in[];
@@ -107,13 +106,8 @@ fn poll_loop_body(self: *SelfHosted, task_in: **Task, out: *Result(void, *Compil
         task_in[] = task;
         return(false)
     };
-    if task.waiting_for { next | 
-        task = next;
-        continue();
-    };
     
     finished :: fn() void => {
-        @debug_assert(task.waiting_for.is_none(), "made itself wait??");
         task.done = true;
         if task.parent { next | 
             task = next;
@@ -176,8 +170,7 @@ fn poll_loop_body(self: *SelfHosted, task_in: **Task, out: *Result(void, *Compil
         }
         fn Ok() => finished();
         fn Suspend(next) => {
-            @debug_assert(task.waiting_for.is_none(), "already waiting??");
-            t := self.new_task(next[], .None, (Some = task));
+            t := self.new_task(next[], (Some = task));
             task = t;
             continue();
         }
@@ -187,11 +180,6 @@ fn poll_loop_body(self: *SelfHosted, task_in: **Task, out: *Result(void, *Compil
 
 ::tagged(Action);
 fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
-    if task.waiting_for { dep |  
-        // TODO: this should be unreachable now. 
-        @debug_assert(!task.done, "task done but still has dependencies");
-        return(Suspend = dep.action&);
-    };
     if task.done {
         return(.Ok);
     };
@@ -248,7 +236,7 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                         // TODO: make sure all mutual_callees are compiled somewhere. but rn this only decides mutual if we see that we're already working on it.
                         //       (easy direct cases are added in sema tho)
                     } else {
-                        t := self.new_task((Jit = callee), .None, .None);
+                        t := self.new_task((Jit = callee), .None);
                         waiting&.push(t);
                     };
                 } else {
@@ -282,7 +270,7 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                 @log_event("% mutual calls %", fid.as_index(), callee.as_index()) self;
                 callee_func := self.get_function(callee);
                 if !callee_func.get_flag(.AsmDone) {
-                    t := self.new_task((Jit = callee), .None, .None);
+                    t := self.new_task((Jit = callee), .None);
                     waiting&.push(t);
                 } else {
                     // TODO: why does only the x64 version get here with a shim and not EnsuredCompiled?
@@ -312,6 +300,9 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
             };
             res := self.resolve_in_overload_set_new(call.arg, f);
             zone_end(zone);
+            if !res&.is(.Suspend) {
+                self.recycle_funcid&.push(f.options.maybe_uninit);
+            };
             fid := @check(res) return;
             f_value := self.to_values(FuncId, fid);
             //call.f.set(f_value, fid); // THIS TYPE CHECKS! :FUCKED
@@ -328,14 +319,6 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
 }
 
 fn is_mutually_recursive(task: *Task, callee: FuncId) bool = {
-    //while => task.waiting_for.is_some() {
-    //    task = task.waiting_for.unwrap();
-    //    @if_let(task.action) fn Jit(other) => {
-    //        if other == callee {
-    //            return(true);
-    //        };
-    //    };
-    //};
     while => task.parent.is_some() {
         task = task.parent.expect("some so unwrap");
         @if_let(task.action) fn Jit(other) => {

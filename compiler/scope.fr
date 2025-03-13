@@ -88,8 +88,9 @@ fn renumber_expr(self: *SelfHosted, expr: *FatExpr, initial: ?Ty(Var, Var)) void
 
 /// Implementation /// 
 
-Scopes :: @struct(
-    scopes: List(Scope),
+// TODO: why does this have to be @rec only when targetting linux?? this feels like a bug?? -- Mar 13, 2025
+Scopes :: @rec @struct(
+    scopes: BucketArray(Scope),
     // Indexed by var id.
     // Invarient: all but last bucket are full. Never push_all since that might allocate a non full bucket and then indexes will be wrong. 
     // :push_type_when_create_new_var when i start creating new vars elsewhere, need to remember to push a none here! didn't have to in the old version because it was a hashmap.
@@ -109,11 +110,10 @@ VarInfo :: @struct(
     debug_name: Symbol, // TODO: redundant with ProgramIndex
 );
 
-// TODO: use unmanaged List/HashMap so not storing the allocator a billon times. 
 Scope :: @struct(
     parent: ScopeId,
     vars: RawList(Var),
-    const_lookup: HashMap(Symbol, Var),
+    const_lookup := zeroed RawHashMap(Symbol, Var),
     nullable_use: *UseScopes,
     visit := 0,
     loc: Span,
@@ -133,7 +133,7 @@ UseScopeEntry :: @struct(
 
 fn index(self: *Scopes, i: ScopeId) *Scope = {
     i := i.as_index();
-    self.scopes.index(i)
+    self.scopes&.nested_index(i)
 }
 
 fn as_index(i: ScopeId) i64 = {
@@ -144,7 +144,6 @@ fn as_index(i: ScopeId) i64 = {
 fn new_scope(self: *Scopes, parent: ScopeId, a: Alloc, loc: Span) ScopeId = {
     s: Scope = (
         vars = empty(), 
-        const_lookup = init(a),
         parent = parent,
         nullable_use = UseScopes.ptr_from_int(0),
         loc = loc,
@@ -551,7 +550,7 @@ fn decl_var(self: *SelfHosted, s: ScopeId, name: Symbol, kind: VarType, loc: Spa
     if kind == .Const {
         empty: Ty(FatExpr, LazyType) = ((expr = (Poison = placeholder), loc = loc, ty = UnknownType, done = false), .Infer);
         scopes.constants&.push(empty);
-        prev := scope.const_lookup&.insert(name, var);
+        prev := scope.const_lookup&.insert(name, var, self.get_alloc());
     } else {
         scopes.constants&.push(Ty(FatExpr, LazyType).zeroed());  // EvilUninit
     };
@@ -810,7 +809,7 @@ fn decl(self: *RenumberVars, name: *ScopeId) void = {
     each new_vars { old | 
         self.decl_new(old);
     };
-    new_constants: HashMap(Symbol, Var) = init(a);
+    new_constants := zeroed RawHashMap(Symbol, Var);
     each old_scope.const_lookup& { (k, v) |
         new := v[];
         self.decl_new(new&);
@@ -819,7 +818,7 @@ fn decl(self: *RenumberVars, name: *ScopeId) void = {
         expr := self.compiler.clone(v._0&);
         ty := self.compiler.clone(v._1&);
         self.scope.put_constant(new, expr, ty);
-        new_constants&.insert(new.name, new);
+        new_constants&.insert(new.name, new, self.compiler.get_alloc());
     };
     new_scope := self.scope[id]&;
     new_scope.vars = new_vars.as_raw();

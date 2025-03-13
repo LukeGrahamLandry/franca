@@ -27,6 +27,8 @@ so needing to call unquote_placeholders isn't anymore restricted.
 
 - there's some bug that breaks a test if i try to intern the string in pack_strings()
 
+- speed up resolve_in_overload_set_new: program/samples/own 1258/506/269 -> 1099/382/189. 
+
 ## (Mar 11)
 
 - improving guess type_of to work on fields and it broke 

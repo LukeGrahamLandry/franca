@@ -8,6 +8,15 @@ DynCallShim :: @tagged(Pending: u32, Ready: rawptr);
 
 fn call_dynamic_values(self: *SelfHosted, f_ptr: i64, f_ty: FnType, args_value: []u8) Values = {
     callee := self.dyncalls&.get_ptr(f_ty&) || {
+        // 
+        // This is super stupid. we should reuse the shim when the types have the same repr. 
+        // ie. currently, if you call some `fn(foo: *T) void` we'd make a new shim for every T, 
+        // even though that doesn't change the calling convention.
+        // However, we only get to this slow path 282 times (self.fr) which is nothing. 
+        // The whole call_dynamic_values is 15/1258 main thread samples, and that is including the callee
+        // (so any comptime code other than #macro and #x86_bytes). 
+        // -- Mar 12, 2025
+        //
         self.create_dyncall_shim(f_ty);
         self.dyncalls&.get_ptr(f_ty&).unwrap()
     };
@@ -61,17 +70,19 @@ fn wait_for_symbol(shared: *CodegenShared, id: u32) rawptr = {
     };
     
     @if(use_threads) {
-        zone := zone_begin(.Wait);
+        if !symbol_is_ready(shared, id) {
+            zone := zone_begin(.Wait);
+            
+            u32.atomic_set(shared.waiting_for_symbol&, 1);
+            prev := shared.waiting_for_bouba;
+            while => prev != codegen_queue_size && !symbol_is_ready(shared, id) {
+                Futex'wait(shared.waiting_for_bouba&, prev);
+                prev = shared.waiting_for_bouba;
+            };
+            u32.atomic_set(shared.waiting_for_symbol&, 0);
         
-        u32.atomic_set(shared.waiting_for_symbol&, 1);
-        prev := shared.waiting_for_bouba;
-        while => prev != codegen_queue_size && !symbol_is_ready(shared, id) {
-            Futex'wait(shared.waiting_for_bouba&, prev);
-            prev = shared.waiting_for_bouba;
+            zone_end(zone);
         };
-        u32.atomic_set(shared.waiting_for_symbol&, 0);
-    
-        zone_end(zone);
     };
     
     lock(shared.m.icache_mutex&);
