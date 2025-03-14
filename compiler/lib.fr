@@ -164,20 +164,19 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         // but means when you call a function pointer value it might be in the other module which is creepy, 
         // and we end up compiling many things an extra time. 
         // ie. if you put #log_ir on general_allocator()_fn, you'll see it 3 times. 
-        USE_SAME_MODULE :: false;
+        USE_SAME_MODULE :: true;
         
         shared := @if(USE_SAME_MODULE, self.comptime_codegen, {
             m := @uninitialized QbeModule;
             init_default_module(m&, (arch = query_current_arch(), os = query_current_os(), type = .JitOnly), true);
             self.other_module = (Some = m&);
-            shared: *CodegenShared = init(m&, self.get_alloc(), @as(CodegenWorker) codegen_thread_main);
+            shared: *CodegenShared = init(m&, self.get_alloc(), @as(CodegenWorker) codegen_thread_main, true);
             shared
         });
         
         m := shared.m;
         
-        // :JitMemProtect
-        @if(use_threads) apple_thread_jit_write_protect(true);  // :JitMemProtect this thread wants to execute
+        apple_thread_jit_write_protect(true);  // :JitMemProtect this thread wants to execute
         
         f := c.get_unique_named("driver") || c.get_unique_named("main") || panic("expected a function called main or driver.");
         
@@ -186,8 +185,8 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
             c.get_jitted(f);
         }, {
             main_thread_pump(self.comp(), shared, @slice(f));
-            @if(use_threads) shared.join_codegen_thread();
-            @if(!use_threads) shared.m.emit_suspended_inlinables();  // when using apple's jit bullshit this has to happen on the other thread!
+            shared.join_codegen_thread();
+            @if(!shared.threaded) shared.m.emit_suspended_inlinables();  // when using apple's jit bullshit this has to happen on the other thread!
         });
         
         { // :TodoLinux
@@ -196,7 +195,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
             @if(show_backend_stats())
             @eprintln(">>> jitted % bytes of code.", code_count);
             @if(show_backend_stats())
-            @eprintln(">>> compiled % in [CPU Time] frontend: %ms, codegen: R:%ms", name, frontend, shared.codegen_time);  // :WrongClockTime
+            @eprintln(">>> compiled % in %ms", name, frontend);  // :WrongClockTime
         };
         cc := or m.get_addr(name) {
             @panic("ICE: lost %", name)
@@ -359,7 +358,7 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
         stack_base = i64.int_from_ptr(stack_base&),
         comptime_libraries = init(a),
         vtable = init_driver_vtable(),
-        comptime_codegen = init(m, a, @as(CodegenWorker) codegen_thread_main),
+        comptime_codegen = init(m, a, @as(CodegenWorker) codegen_thread_main, false),
         dyncalls = init(a),
         pending_took_pointer = list(a),
         shim_callback_alloc = init(page_allocator, 1.shift_left(14)),

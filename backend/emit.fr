@@ -116,7 +116,7 @@ fn make_exec(self: *QbeModule) void = {
     
     // it seems to want `addr` to be page aligned
     res := mprotect(rawptr_from_int(page_start), u8.int_from_ptr(end[]) - page_start, prot); 
-    @assert_eq(res.value, 0, "mprotect failed %", get_errno());
+    @assert_eq(res.value, 0, "mprotect failed %", @if(::is_linking_libc(), get_errno(), "??"));
     clear_instruction_cache(u8.raw_from_ptr(self.start_of_writable_code), u8.raw_from_ptr(end[]));  // IMPORTANT
 }
 
@@ -275,6 +275,13 @@ fn emit_data_to_segment(self: *QbeModule, dat: *Qbe.Dat, seg: SegmentType) void 
     } // returns
 }
 
+fn with_write_protect(m: *QbeModule, $body: @Fn() void) void = {
+    xxx := m.need_write_protect;
+    @if(xxx) apple_thread_jit_write_protect(false);
+    body();
+    @if(xxx) apple_thread_jit_write_protect(true);
+}
+
 // :ThreadSafety we can't have both threads fucking with self.segments
 fn add_code_bytes(m: *QbeModule, name_id: u32, bytes: []u8) void = {
     use_symbol(m, name_id) { s |
@@ -284,7 +291,9 @@ fn add_code_bytes(m: *QbeModule, name_id: u32, bytes: []u8) void = {
     code.align_to(4);  // todo: only for arm
     start_offset := ptr_diff(code.mmapped.ptr, code.next);
     dest := slice(code.next, bytes.len);
-    dest.copy_from(bytes);
+    with_write_protect m {
+        dest.copy_from(bytes);
+    };
     code.next = code.next.offset(bytes.len);
     
     m.do_jit_fixups(name_id, .Code, start_offset);
@@ -402,6 +411,12 @@ fn do_jit_fixups(self: *QbeModule, id: u32, segment: SegmentType, final_offset: 
 ::tagged(FixupType);
 
 fn do_fixups(self: *QbeModule, address: rawptr, symbol: *SymbolInfo) void = {
+    with_write_protect self { 
+        do_fixups_impl(self, address, symbol);
+    };
+}
+
+fn do_fixups_impl(self: *QbeModule, address: rawptr, symbol: *SymbolInfo) void = {
     assert(!self.fixups_locked, "you cannot add more fixups after emitting for aot");
     symbol.jit_addr = address;  
     if self.goal.type == .JitOnly {

@@ -105,24 +105,16 @@ fn main() void = {
     ::if(*FILE);
     ::ptr_utils(FILE);
     //@eprintln(";% -> %", inpath, outpath);
+    ::if(Fd);
     outfile := if run {    
-        fopen("/dev/null".sym().c_str(), "w")
+        open_trunc(@as(CStr) "/dev/null").unwrap()
     } else {
         if outpath == "-" {
-            fdopen(STD_OUT, "a")
+            STD_OUT
         } else {
-            fopen(outpath.maybe_borrow_cstr(temp()), "w")
+            open_trunc(outpath.maybe_borrow_cstr(temp())) || @panic("failed to open output '%'", outpath)
         }
     };
-    !outfile.is_null(); // TODO: compiler bug. tried to call uncompiled if you do it first in the macro. :FUCKED
-    @assert(!outfile.is_null(), "failed to open output '%'", outpath);
-    infile := if inpath == "-" {
-        fdopen(STD_IN, "r")
-    } else {
-        fopen(inpath.maybe_borrow_cstr(temp()), "r")
-    };
-    @assert(!infile.is_null(), "failed to open input '%'", inpath);
-    
     handle_dbg :: fn(s: CStr) void = ();
     
     handle_fn :: fn(fnn: *Qbe.Fn) void = {
@@ -134,7 +126,6 @@ fn main() void = {
     src := temp().read_to_string_or_crash(inpath);
     src&.push_all("\n"); // HACK
     src := src.items();
-    
     parse :: import("@/backend/meta/parse.fr").parse_top_level;
     res := parse(global_module, src, handle_data, handle_fn);
     if res&.is_err() {
@@ -144,11 +135,9 @@ fn main() void = {
     global_module.emit_suspended_inlinables();
     chunks := {global_module[].target.finish_module}(global_module);
     for chunks { chunk | 
-        write(outfile, chunk);
+        write(outfile&, chunk);
     };
-    fclose(outfile);
-    
-    fclose(infile);
+    @if(outpath != "-") { close(outfile); };
     if run {
         @if(is_linking_libc()) global_module.fill_from_libc();
         global_module.make_exec();

@@ -138,8 +138,28 @@ fn clear_instruction_cache(beg: rawptr, len: i64) void =
     clear_instruction_cache(beg, beg.offset(len));
 
 // :JitMemProtect
-fn apple_thread_jit_write_protect(executable_on_current_thread: bool) void #target_os = (fn($os) => @match(os) {
-    fn macos()  => pthread_jit_write_protect_np(executable_on_current_thread);  
-    fn linux()  => ();  // they let you have WX memory so this isn't a thing
-    fn wasip1() => ();  // should compile error? makes no sense here.
+fn apple_thread_jit_write_protect(executable_on_current_thread: bool) void #target_os = (fn($os) => @if(os == .macos) {
+    I_AM_THE_MPROTECT_NOW :: true; 
+    @if(!I_AM_THE_MPROTECT_NOW) {
+        pthread_jit_write_protect_np(executable_on_current_thread);
+        return();
+    };
+    @if(query_current_arch() != .aarch64) return();
+    
+    // See /devlog.md/Mar 13, 2025/
+    // they seem to always be the same?
+    // A, B, C := (3472275312702652419, 2310346747086372864, 2310346747088470016);
+    A, B, C := (magic(0xc10c), magic(0xc118), magic(0xc110));
+    if(A.bit_and(0xFF) == 0, => return());
+    // MSR(if(executable_on_current_thread, => B, => C), 0xd51cf2e0); // S3_4_C15_C2_7  // clearly this one is bad...
+    MSR(if(executable_on_current_thread, => B, => C), 0xd51ef1a0);    // S3_6_C15_C1_5
+    fence();
+    
+    magic :: fn(i: i64) => i64.ptr_from_int(0xFFFFF0000.bit_or(i))[];
+    MSR :: fn(x: i64, $msr: u32) void = {
+        fn xxx();
+        fn xxx(x: i64) void #asm #aarch64 #c_call = (msr, 0xd5033fdf, 0xD65F03C0); // msr, isb, ret
+        fn xxx(x: i64) void #x86_bytes #c_call #asm = (fn(out) = out.push_all(@slice(0xc3, 0xc3))); // unreachable
+        xxx(x)
+    };
 });

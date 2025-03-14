@@ -171,25 +171,8 @@ fn RawHashMap($K: Type, $V: Type) Type = {
         panic("Unreachable unless you set the load factor to 100%")
     }
     
-    fn resize(self: *Self, gpa: Alloc) void = {
-        old_arr := self.arr;
-        self.arr = gpa.alloc(Entry, old_arr.len.mul(2).max(4));
-        each(self.arr) {slot|
-            slot.hash = 0;
-        };
-        self.capacity = self.arr.len.mul(load_percent).div(100);
-        real_len := 0;
-        each(old_arr) {old_slot|
-            if(old_slot.hash.ne(0).and(old_slot.hash.ne(1))) {
-                new_slot := self.find_slot(old_slot.key&, old_slot.hash);
-                new_slot[] = old_slot[];
-                real_len += 1;
-            };
-        };
-        self.len_including_tombstones = real_len;
-        
-        gpa.dealloc(Entry, old_arr);
-    }
+    fn resize(self: *Self, gpa: Alloc) void #inline = 
+        hashmap_expand_erased(ptr_cast_unchecked(Self, RawHashMapErased, self), size_of(Entry), align_of(Entry), gpa, load_percent);
     
     // TODO: have a bake_relocatable_value that calls this to help reproducible builds. 
     fn zero_unused_slots(self: *Self) void = {
@@ -225,6 +208,41 @@ fn RawHashMap($K: Type, $V: Type) Type = {
     
     Self
 }
+
+// :Polymorphise
+RawHashMapErased :: @struct(entries: rawptr, entry_count: i64, len_including_tombstones: i64, capacity: i64);
+hashmap_expand_erased :: fn(self: *RawHashMapErased, entry_size: i64, entry_align: i64, gpa: Alloc, load_percent: i64) void #noinline = {
+    old_mem, old_count := (self.entries, self.entry_count);
+    new_count := max(old_count * 2, 4);
+    new_mem   := u8.raw_from_ptr(gpa.alloc_raw(new_count * entry_size, entry_align).as_ptr());
+    
+    index_hash :: fn(mem, i) => i64.ptr_from_raw(mem.offset(i * entry_size));
+    slice_slot :: fn(mem, i) => u8.ptr_from_raw(mem.offset(i * entry_size)).slice(entry_size);
+    
+    range(0, new_count) { i |
+        index_hash(new_mem, i)[] = 0;
+    };
+    self.capacity = new_count * load_percent / 100;
+    real_len := 0;
+    range(0, old_count) { old_i |
+        h := index_hash(old_mem, old_i)[];
+        if h != 0 && h != 1 {
+            // Same as find_slot() but assumes the key is not already in the table so doesn't need to call the eq() overload. 
+            // The new size is always bigger than the old one, so there will always be space for all the entries. 
+            new_i := h.mod(new_count); 
+            while => index_hash(new_mem, new_i)[] != 0 {
+                new_i = mod(new_i + 1, new_count)
+            };
+            slice_slot(new_mem, new_i).copy_from(slice_slot(old_mem, old_i));
+            real_len += 1;
+        };
+    };
+    self.len_including_tombstones = real_len;
+    
+    gpa.dealloc_raw(self.entries, self.entry_count * entry_size, entry_align);
+    self.entry_count = new_count;
+    self.entries = new_mem;
+};
 
 fn HashSet($V: Type) Type = {
     // TODO: fixed. change this to void -- Feb 8, 2025
