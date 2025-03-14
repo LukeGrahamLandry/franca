@@ -3,20 +3,34 @@ fn open_read(path: CStr) FdResult #target_os = (fn($os) => {
     open(path, @as(i64) F.Read)
 });
 
-// TODO: no auto run tests use open_trunc or open_append
-// TODO: can't pass create since i don't pass mode!
-fn open_append(path: CStr) FdResult #target_os = (fn($os) => {
-    F :: LibcType(os).OpenFlag;
-    flag := (@as(i64) F.Write).bit_or(@as(i64) F.Append); // .bit_or(@as(i64) F.Create)
-    open(path, flag)
-});
+fn open_append(path: CStr) FdResult = 
+    open_or_create(path, false);
 
-// TODO: can't pass create since i don't pass mode!
-fn open_trunc(path: CStr) FdResult #target_os = (fn($os) => {
-    F :: LibcType(os).OpenFlag;
-    flag := (@as(i64) F.Write).bit_or(@as(i64) F.Truncate); // .bit_or(@as(i64) F.Create)
-    open(path, flag)
-});
+fn open_trunc(path: CStr) FdResult = 
+    open_or_create(path, true);
+
+// TODO: don't set executable flag all the time, let them choose. it just so happens that im mostly writing executables. 
+// TODO: optional arguments to make it not painful to have these all just be one function
+
+fn open_or_create(path: CStr, $truncate: bool) FdResult = {
+    return impl(path);  // TODO: make $ and #target_os work together (but also i want to replace #target_os with something less insane so maybe don't bother)
+    impl :: fn(path: CStr) FdResult #target_os = (fn($os) => {
+        L :: LibcType(os);
+        F :: L.OpenFlag;
+        flag := (@as(i64) F.Write).bit_or(@as(i64) F.Create);
+        @if(truncate) {
+            flag = flag.bit_or(@as(i64) F.Truncate);
+        };
+        mode: i64 = (@as(u16) L.FileMode.OwnerAll).zext();
+        
+        // TODO: make #c_variadic work with conflicting overloads like this
+        open :: fn(path: CStr, flags: i64, /* mode */) FdResult #libc #c_variadic;
+        @if(is_linking_libc(), 
+            open(path, flag, mode), 
+            openat(L.AT_FDCWD, path, flag, mode),
+        )
+    });
+}
 
 // TODO: it wont close the directory if you use an early return from the body!!
 // TODO: is readdir_r deprecated everywhere or is that just a linux thing.

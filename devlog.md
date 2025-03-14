@@ -41,8 +41,7 @@ or i just failed at reading the assembly.
 im not super confident, like what is `0xc10c` even for? 
 oh well S3_6_C15_C1_5 instead just works. 
 
-<details>
-```
+<details><code>
 libsystem_pthread.dylib`pthread_jit_write_protect_np:
     0x18cf390ac <+0>:   pacibsp 
     0x18cf390b0 <+4>:   stp    x29, x30, [sp, #-0x10]!
@@ -184,11 +183,9 @@ libsystem_pthread.dylib`pthread_jit_write_protect_np.cold.1:
     0x18cf3c44c <+24>: ldp    x20, x21, [sp], #0x10
     0x18cf3c450 <+28>: brk    #0x1
 }
-```
-</details>
+</code></details>
 
-<details>
-```
+<details><code>
 pthread_jit_write_protect_np(x0: bool) {
   x8 = magic(0xc10c)
   x9: u8 = x8[]
@@ -287,11 +284,9 @@ pthread_jit_write_protect_np.cold.1() {
     x21 = gCRAnnotations
     fault(1)
 }
-```
-</details>
+</code></details>
 
-<details>
-```
+<details><code>
 pthread_jit_write_protect_np(want_exec: bool) {
   A = magic(0xc10c)[];
   B = magic(0xc118)[];
@@ -315,10 +310,11 @@ pthread_jit_write_protect_np(want_exec: bool) {
   }
   return
 }
-```
-</details>
+</code></details>
 
 - manually polymorphise hashmap:resize
+- all tests down to 16.3
+- finally use the version of open() that creates the file instead of exec-ing touch and chmod all over the place
 
 ## (Mar 12)
 

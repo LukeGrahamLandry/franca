@@ -7,13 +7,13 @@
 
 ##
 
+- #c_variadic + conflicting overload (ie for open()) where you want the non-va version to also be #syscall. maybe that's not worth fixing. 
 - #c_variadic as part of CallConv so function pointers work 
 - compiler/values.fr has a big comment
 - :TodoLinux
-- 1331 relocations seems like a lot
 - ask the os for the correct page size
 - hello_va doesn't work on linux??
-- compile all the examples in run_tests: aoc, the gui programs, old_backend, bf 
+- compile all the examples in run_tests: aoc, the gui programs, bf 
 - make sure all the allocators respect required alignment 
 - make comptime.fr exporting stuff less painful 
 - make namespacing nice enough that i can have less stuff loaded in every program by `core.fr`
@@ -66,8 +66,6 @@ the right/fast/safe/whatever thing to do is also the easy thing to do.
 - allow #libc before #link_rename
 - tests for failing progeams. ie. panic backtrace
 - remove clowns (places where we exec things instead of using libc)
-  - write_entire_file create file
-  - chmod
   - makedir
 - clean up import_c ref tracking
 - context() leak allocator
@@ -99,10 +97,7 @@ ie. `fn init() Self = (arr = @as(Slice(Entry)) empty(), len_including_tombstones
 - detect if you try to do the jit thing with the backend library from jitted code on macos instead of just `bus error`-ing
 - make `#where` based on argument names instead of order.
 - `#where` access constant arguments of the call
-- 🤡 don't fork+exec for touch+chmod 🤡 (+ fix my write_entire_file to create it if needed)
-- figure out what `-Wl,-z,common-page-size=65536,-z,max-page-size=65536` does so blink can run my elf faster
 - wasm stackifier
-- cross arch repro is broken again
 - fix compiler_gui so it sees all functions from a full compile
 - output_elf: relocatable object, dynamic library
 - Wasip1Libc
@@ -119,8 +114,6 @@ ie. `fn init() Self = (arr = @as(Slice(Entry)) empty(), len_including_tombstones
   - AbiHackSpan
   - `@rec` in backend/ir.fr and wasm/instructions:Wasm
 - more calling convention tests between jitted code and c.
-- make (logical not) an intrinsic
-- bring back lex error for unterminated comment.
 - `Illegal place expression: GetNamed` is not as helpful as "tried to assign to undeclared variable %"
 - αcτµαlly pδrταblε εxεcµταblε
 - probably want to port the build stuff. https://github.com/jart/cosmopolitan/blob/master/tool/build/apelink.c
@@ -131,18 +124,15 @@ ie. `fn init() Self = (arr = @as(Slice(Entry)) empty(), len_including_tombstones
 - check that the keyword between block arguments is correct (ie `if a {| b } else {| c }` should require `else` not some other identifier),
   and use that as an argument name for overloading.
 - have a test where you force inline everything that's not recursive to stress test the backend dealing with large functions.
-- broke repro again. is there a certain size of program is doesn't like?
 - fix run_tests/qbe-jit and add that to CI
 - make macros more similar to functions. it's weird that the syntax is slightly different.
   you should be able to overload off some argument types and have others be a symbolic ast node?
   but that would make overload resolution even more fragile which might be a bad idea.
 - `Type Error` should tell you where the difference is! and use the right names for enums, etc.
 - `place expression expected pointer dereference` when you forget a `[]` after a call and field access should tell you that.
-- either fix new emit_ir run_tests naming or just change run_tests to generate a big file and compile it as its own thing.
 - combine include_bytes and #include_std somehow
 - @switch should just be @inline_switch if the thing is constant.
 - `fn fmodf(f32, f32) f32 #libc;` should treat them as types not arg names
-- try semaphores
 - fix overflow when lexing large float literals
 - make compilation order of struct sizing less sketchy for offset_of
 - propagate types through constants. `a: u32 : 0; b := a;` b should have type u32 even though int literals default to i64.
