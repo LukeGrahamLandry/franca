@@ -111,7 +111,7 @@ fn newtmp(f: *Qbe.Fn, debug_hint: Str, k: Qbe.Cls) Qbe.Ref = {
     f.tmp&.grow(t + 1);
     f.tmp.slice(t, t + 1).set_zeroed();
     tmp := f.tmp.index(t);
-    @if(TRACK_IR_NAMES) {
+    @if(f.globals.track_ir_names()) {
         l: List(u8) = (maybe_uninit = tmp.name&.items(), len = 0, gpa = panicking_allocator); // :UnacceptablePanic
         debug_hint.len = min(debug_hint.len, 70);
         @fmt(l&, "%.%", debug_hint, t);
@@ -124,11 +124,9 @@ fn newtmp(f: *Qbe.Fn, debug_hint: Str, k: Qbe.Cls) Qbe.Ref = {
     TMP(t)
 }
 
-:: {
-    fn eq(a: Qbe.Sym, b: Qbe.Sym) bool #inline = 
-        a.id == b.id;
-    fn ne(a: Qbe.Sym, b: Qbe.Sym) bool #inline = !(a == b);
-};
+fn eq(a: Qbe.Sym, b: Qbe.Sym) bool #inline = 
+    a.id == b.id;
+fn ne(a: Qbe.Sym, b: Qbe.Sym) bool #inline = !(a == b);
 
 fn newcon(f: *Qbe.Fn, c0: *Qbe.Con) Qbe.Ref = {
     // deduplicate
@@ -333,10 +331,13 @@ fn default_init(f: *Qbe.Fn, m: *QbeModule) void = {
     // For the comptime usecase, the is_float will be wrong for some targets but that's fine becuase register numbers will just be moved to the real function, 
     
     t := f.globals.target;
+    old := m.track_ir_names;
+    m.track_ir_names = false;
     range(0, Qbe.Tmp0) { i |
         is_float := t.fpr0 <= i.intcast() && i.intcast() < (t.fpr0 + t.nfpr);
    	    assert_eq(f.newtmp("r", if(is_float, => .Kd, => .Kl)), TMP(i));
     };
+    m.track_ir_names = old;
     assert_eq(f.ntmp.zext(), Qbe.Tmp0);
 }
 
@@ -482,9 +483,7 @@ VMagTemp :: 0xca88abe;
 ::ptr_utils(QListHeader);
 ::ptr_utils(*QListHeader);
 
-fn calloc(nitems: i64, size: i64) rawptr #libc;
-
-fn vnew(len: i64, esz: i64, where: i64, m: *QbeModule) rawptr #inline = {
+fn vnew(len: i64, esz: i64, where: i64, m: *QbeModule) rawptr = {
     cap := 2;
     while => cap < len {
         cap *= 2;
@@ -500,11 +499,8 @@ fn vnew(len: i64, esz: i64, where: i64, m: *QbeModule) rawptr #inline = {
         unlock(m.intern_mutex&);
         mem
     };
-    v := ptr_cast_unchecked(i64, QListHeader, v.ptr);
-    v.where = where;
-    v.m = m;
-    v.cap = cap;
-    v.esz = esz;
+    v  := ptr_cast_unchecked(i64, QListHeader, v.ptr);
+    v[] = (where = where, m = m, cap = cap, esz = esz);
     QListHeader.raw_from_ptr(v.offset(1))
 }
 
@@ -582,7 +578,7 @@ fn QList($T: Type) Type = {
     }
     
     // ensure capacity is >= len
-    fn grow(s: *Self, len: i64) void = {
+    fn grow(s: *Self, len: i64) void #inline = {
         v := Self.raw_from_ptr(s);
         vgrow(v, len);
     }
@@ -605,9 +601,8 @@ fn QList($T: Type) Type = {
         s.first.offset(i)
     }
     
-    fn index_unchecked(s: Self, i: i64) *T = {
-        s.first.offset(i)
-    }
+    fn index_unchecked(s: Self, i: i64) *T = 
+        s.first.offset(i);
 
     fn index(s: *Self, i: i64) *T #inline = 
         s[].index(i);
@@ -635,6 +630,9 @@ fn QList($T: Type) Type = {
         self[count[].intcast()] = t;
         count[] += 1;
     }
+    
+    fn bake_relocatable_value(self: *Self) []BakedEntry =
+        panic("bake QList as constant is not supported");
     
     Self
 }
@@ -843,10 +841,10 @@ fn for_phi(b: *Qbe.Blk, $body: @Fn(p: *Qbe.Phi) void) void = {
     };
 }
 
-fn for_jump_targets(b: *Qbe.Blk, $body: @Fn(s: *Qbe.Blk) void) void = 
+fn for_jump_targets(b: *Qbe.Blk, $body: @Fn(s: *Qbe.Blk) void #duplicated) void = 
     for_jump_targets_mut(b, fn(b) => body(b[]));
 
-fn for_jump_targets_mut(b: *Qbe.Blk, $body: @Fn(s: **Qbe.Blk) void) void = {
+fn for_jump_targets_mut(b: *Qbe.Blk, $body: @Fn(s: **Qbe.Blk) void #duplicated) void = {
     ::enum(Qbe.J);
     //targets := get_jump_targets(b);
     //enumerate targets { i, s |
@@ -912,6 +910,21 @@ fn new_type(m: *QbeModule, type: Qbe.Typ) i64 = {
     push(m.types, m.number_of_types&, type);
     unlock(m.types_mutex&);
     i
+}
+
+// TODO: call it from elsewhere
+fn new_phi(f: *Qbe.Fn, b: *Qbe.Blk, k: Qbe.Cls, reserve_args: i64) *Qbe.Phi = {
+    prev := b.phi;
+    b.phi = temp().box(Qbe.Phi); 
+    b.phi[] = (
+        cls = k, 
+        to = f.newtmp("c", k),
+        narg = 0,
+        blk = new(reserve_args),
+        arg = new(reserve_args),
+        link = prev,
+    );
+    b.phi
 }
 
 //////////////////
@@ -1101,14 +1114,11 @@ fn KBASE(k: Qbe.Cls) i64 #inline = {
     x
 }
 
-// TODO: compiler bug. this shouldn't need to be in a block. this just delays adding it to the overload set so it doesn't get confused.
-:: {
-    fn eq(a: Qbe.Ref, b: Qbe.Ref) bool #inline = 
-        a.type3_val29 == b.type3_val29;
-        
-    fn ne(a: Qbe.Ref, b: Qbe.Ref) bool #inline = 
-        a.type3_val29 != b.type3_val29;
-};
+fn eq(a: Qbe.Ref, b: Qbe.Ref) bool #inline = 
+    a.type3_val29 == b.type3_val29;
+    
+fn ne(a: Qbe.Ref, b: Qbe.Ref) bool #inline = 
+    a.type3_val29 != b.type3_val29;
 
 fn rtype(r: Qbe.Ref) Qbe.RegKind #inline = {
     r != QbeNull || return(.RNull);
@@ -1229,12 +1239,16 @@ FIXED_CONST_COUNT :: 2;
 
 // TODO: init array from tuple. and also real bit fields. so this doesn't suck as bad. 
 fn make_ins(op: Qbe.O, k: Qbe.Cls, out: Qbe.Ref, in1: Qbe.Ref, in2: Qbe.Ref) Qbe.Ins #inline = 
-    (op30_cls2 = pack_op_cls(op, k), arg = init(@slice(in1, in2)), to = out);
+    (op30_cls2 = pack_op_cls(op, k), arg = @array(in1, in2), to = out);
  
 // so you can @assert_eq
 fn display(self: Qbe.Ref, out: *List(u8)) void = {
     @fmt(out, "%:%", self.rtype(), self.val());
 }
+
+fn track_ir_names(m: *QbeModule) bool #inline = {
+    @if(TRACK_IR_NAMES, m.track_ir_names, false)
+} 
 
 ///////////////////////////////////////////////////////////////////////////////
 

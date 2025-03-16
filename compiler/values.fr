@@ -558,11 +558,24 @@ fn get_info_is_ready(self: *SelfHosted, ty: Type) bool = {
 }
 
 :: as_ref(TypeMeta);
-fn get_info(self: *SelfHosted, ty: Type) *TypeMeta = {
-    ty := self.raw_type(ty);
-    old := self.type_extra&.nested_index(ty.as_index());
-    if old.is_sized {
-        return(old);
+fn get_info(self: *SelfHosted, ty_original: Type) *TypeMeta = {
+    // there are a lot of Enum / Placeholder -> Named which always have the same repr. 
+    // amortise the cost of raw_type(). 
+    old_original := self.type_extra&.nested_index(ty_original.as_index());
+    if old_original.is_sized {
+        return(old_original);
+    };
+    ty  := self.raw_type(ty_original);
+    ::if(*TypeMeta);
+    old := if ty != ty_original {
+        old := self.type_extra&.nested_index(ty.as_index());
+        if old.is_sized {
+            old_original[] = old[];
+            return(old_original);
+        };
+        old
+    } else {
+        old_original
     };
     
     // TODO: when i didnt have some of the trunc impls this had a "tried to call missing function"
@@ -682,9 +695,15 @@ fn get_info(self: *SelfHosted, ty: Type) *TypeMeta = {
         }
         @default => unreachable();
     };
-    info.inferred_name = old.inferred_name;  // save if we poked this in before. 
+    name := old.inferred_name;  // save if we poked this in before.
+    if ty != ty_original {
+        name := old_original.inferred_name;
+        old_original[] = info;
+        old_original.inferred_name = name;
+    };
     old[] = info;
-    old
+    old.inferred_name = name;
+    old_original
 }
 
 fn raw_type(c: *SelfHosted, ty: Type) Type = 

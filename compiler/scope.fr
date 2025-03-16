@@ -516,10 +516,10 @@ fn find_var_in_scope_inner(self: *SelfHosted, name: Symbol, s: ScopeId, for_use:
     
         // Reverse so you get the shadowing first.
         s := scope.vars&; // :UpdateBoot
-        each_rev s { v |
-            if(v.name == name, => {
-                return(Some = v[])
-            });
+        // 1.8M
+        each_rev s { v | 
+            // 7.0M
+            if(v.name == name, => return(Some = v[]));
         };
         .None
     };
@@ -613,7 +613,10 @@ fn handle_expr(self: *ResolveScope, expr: *FatExpr) Result(DoMore, *CompileError
     @match(expr.expr&) {
         fn GetParsed(index) => {
             e := @try(self.compiler.parser.finish_pending(index[])) return;
+            z := zone_begin(.CloneExpr);
+            @if(ENABLE_TRACY) ___tracy_emit_zone_name(z, @tfmt("%", index.id));
             expr[] = self.compiler.clone(e&); // clone is important! you end up with multiple copies of the same pending parse. 
+            zone_end(z);
             @try(self.walk_expr(expr)) return;
             return(Ok = DoMore.Break);
         }
@@ -789,7 +792,7 @@ fn decl(self: *RenumberVars, name: *Var) void = {
     self.decl_new(name);
 }
 
-fn update(self: *RenumberVars, name: *Var) void = {
+fn update(self: *RenumberVars, name: *Var) void #inline = {
     if self.mapping.vars&.get_ptr(name[]) { new |
         name[] = new[];
     };

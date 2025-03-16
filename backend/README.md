@@ -24,6 +24,7 @@ You can still print out the ir as human readable text between passes and modify 
   (or painfully scavenged from whatever amd tables i can find).
 - Jit compile your program and run it in memory without needing to emit/link an executable.
   You can freely call between jit and aot code (even extern-c code from other compilers) because they follow the same standard abi.
+  (This is what Franca uses for compile-time execution).
 - Emit Mach-O executables directly without depending on an external linker or make relocatable objects for linking with other languages.
 - Ad-hoc signetures for Mach-O binaries so you can target macOS without depending on Apple's `codesign` program.
 - Added a Web Assembly target (outputs the binary format directly).
@@ -49,11 +50,13 @@ You can still print out the ir as human readable text between passes and modify 
   > but it lets you access instructions that we don't know about without calling convention spilling overhead.  
   > example use case: a c compiler implementing `__builtin_clzl` as a single instruction.
   > (not well tested because franca doesn't use it yet but it will likely be converted eventually).
-- arm abi fixes
-  - respect the platform register (it gets zeroed when you context switch on macos).
-  - large FHA (ie. struct of 4 doubles)
 - Removed support for thread locals. Franca achieves an equivilent by passing around an implicit env parameter.
 - Removed support for custom section names.
+
+#### fixed upstream
+
+- arm abi: respect the platform register (it gets zeroed when you context switch on macos) [issue](https://lists.sr.ht/~mpu/qbe/%3CCAHT_M7NPc_vufQ7hj+JwdB2cVrZKOmKmRk2z8ETLJ4T9=25YRw@mail.gmail.com%3E)
+- arm abi: large FHA (ie. struct of 4 doubles) [issue](https://lists.sr.ht/~mpu/qbe/%3CCAHT_M7Pp-6_vSjOd-WkRt4ACJWLrKq=YpgUrnzW0Vy=T-7AFYg@mail.gmail.com%3E)
 
 ### Optimisations
 

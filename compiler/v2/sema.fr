@@ -1565,7 +1565,7 @@ fn compile_call(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
         @default => .None;
     };
     
-    if arg.is_raw_unit() && f.expr&.is(.Closure) && f.expr.Closure.get_flag(.AllowRtCapture) {
+    if f.expr&.is(.Closure) && f.expr.Closure.get_flag(.AllowRtCapture) {
         f.expr.Closure.set_flag(.Once);
     };
     
@@ -1634,6 +1634,7 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
     f_expr := expr.expr.Call.f;
     arg_expr := expr.expr.Call.arg;
     @debug_assert(!f_expr.ty.is_unknown(), "call_direct expected fn expr to be compiled");
+
     fid := @check(self.immediate_eval_expr(f_expr, f_expr.ty)) return;
     fid := FuncId.assume_cast(fid&)[];
     @log_event("compile direct call %", fid) self;
@@ -1660,7 +1661,7 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
         
         // This creates a new function with only runtime args, and updates the arg_expr accordingly. 
         zone := zone_begin(.BakeConstArgs);
-        res := self.curry_const_args(fid, f_expr, arg_expr);
+        res := self.curry_const_args(fid, f_expr, arg_expr, zone);
         zone_end(zone);
         fid = @check(res) return;
         func = self.get_function(fid);
@@ -1932,14 +1933,18 @@ fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, request
         // TODO: decide what #once with const args should mean. 
         temp := aliased_body[];
         aliased_body.expr = (Poison = .OnceUsed);
+        aliased_body.loc = expr_out.loc;
         func.set_flag(.OnceConsumed);
         temp
     } else {
-        aliased_body.deep_clone(self.get_alloc())
+        z := zone_begin(.CloneExpr);
+        e := aliased_body.deep_clone(self.get_alloc());
+        zone_end(z);
+        e
     };
     loc := arg_expr.loc;
-    // the second case would be sufficient for correctness but this is so common (if(_,!,!), loop(!), etc) that it makes me less sad. 
-    if arg_expr.is_raw_unit() {
+    // :NotForCorrectness the second case would be sufficient but this is so common (if(_,!,!), loop(!), etc) that it makes me less sad. 
+    if arg_expr.is_raw_unit() {  // 
         // TODO: if !may_have_early_return, should be able to just inline the value but it doesnt work!
         //       similarly i cant have ret_label:None so im clearly wrong. its `not callable` in overloading.rs. trying to call the cond of an if??
         //       -- Jun 16
@@ -1974,9 +1979,9 @@ fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, request
 }
 
 // TODO: this still has the problem of disallowing const args that require type hint of previous const args. 
-fn const_args_key(self: *SelfHosted, original_f: FuncId, arg_expr: *FatExpr) Maybe(Values) #once = {
+fn const_args_key(self: *SelfHosted, original_f: FuncId, arg_expr: *FatExpr) Maybe(Ty(Values, Type)) #once = {
     func := self[original_f]&;
-    ::if(Maybe(Values));
+    ::if(Maybe(Ty(Values, Type)));
     if func.arg.bindings.len == 1 {
         // Hack to pass hint for single const arg becuase the compiler does it. 
         if !func.arg.bindings[0].ty&.is(.Infer) {
@@ -1986,7 +1991,7 @@ fn const_args_key(self: *SelfHosted, original_f: FuncId, arg_expr: *FatExpr) May
         @check(self.compile_expr(arg_expr, func.finished_arg.want())) return;
         ty := func.finished_arg.or(=> arg_expr.ty);
         value := @check(self.immediate_eval_expr(arg_expr, ty)) return;
-        (Ok = value)
+        (Ok = (value, ty))
     } else {
         check_len :: fn(len: i64) => {
             if func.arg.bindings.len != len {
@@ -2024,6 +2029,7 @@ fn const_args_key(self: *SelfHosted, original_f: FuncId, arg_expr: *FatExpr) May
         all_const_args: List(u8) = list(self.get_alloc());
         i := 0;
         has_seen_first_const := false;
+        types := Type.list(temp());
         enumerate func.arg.bindings { i, binding |
             continue :: local_return;
             if(binding.kind != .Const, => continue());
@@ -2049,8 +2055,12 @@ fn const_args_key(self: *SelfHosted, original_f: FuncId, arg_expr: *FatExpr) May
             // TODO: remove? -- Aug 13
             //       You might not need this. I was hoping it would fix deconstruct_values but i think this is only used in the map. 
             self.aligned_append_value(all_const_args&, value, arg_ty);
+            types&.push(arg_ty);
         };
-        (Ok = all_const_args.items().to_value())
+        (Ok = (
+            all_const_args.items().to_value(), 
+            self.tuple_of(types.items())
+        ))
     }
 }
 
@@ -2109,13 +2119,23 @@ MemoKey :: Ty(FuncId, Values);
 // TODO: to allow #generic, this lazyily infers param types on the new function.
 //       it would avoid redundant work to do that on the original func for params that don't depend on constants. 
 //       that would jsut require compile_expr to be able to yield on a Poison.Argument, and we catch that here and just ignore. 
-fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg_expr: *FatExpr) Maybe(FuncId) #once = {
+fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg_expr: *FatExpr, zone: TraceCtx) Maybe(FuncId) #once = {
     // TODO: no #target_os
-    key: MemoKey = (original_f, @check(self.const_args_key(original_f, arg_expr)) return);
+    value, type := @check(self.const_args_key(original_f, arg_expr)) return;
+    key: MemoKey = (original_f, value);
+    @if(ENABLE_TRACY) ___tracy_emit_zone_name(zone, self.comp().log(arg_expr));
+    
+    // this doesn't help. remove it? 
+    //to_zero: ReadBytes = (bytes = key._1&.bytes(), i = 0);
+    //self.comp().zero_padding(type, to_zero&);
+    
     if self.dispatch.const_bound_memo&.get(key&) { new_f |
-        @log_event("reuse baked const args % -> % (%)", original_f, new_f, key._1&) self;
+        @log_event("reuse baked const args % -> % %", original_f, new_f, self.log(key._1&, type)) self;
         func := self.get_function(new_f);
         if func.get_flag(.AnyConstArgs) {
+            @check(self.ensure_resolved_sign(new_f)) return;
+            @try(self.ensure_resolved_body(new_f)) return;
+            
             original := self.get_function(original_f);
             if func.arg.bindings.len == original.arg.bindings.len {
                 return(self.curry_const_args_inner(original_f, new_f, f_expr, arg_expr, 0));
@@ -2153,9 +2173,7 @@ fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg
         renumber&.walk_func(new_func&);
     };
     new_fid := self.add_function(new_func);
-    @log_event("bake const args % -> %", original_f, new_fid) self;
-    @check(self.ensure_resolved_sign(new_fid)) return;
-    @try(self.ensure_resolved_body(new_fid)) return;
+    @log_event("bake const args % -> % %", original_f, new_fid, self.log(key._1&, type)) self;
     //@println("%", self.get_function(new_fid).log(self));
     // TODO: mark func as in progress somehow so nobody can yield on it. 
     //       tho really i feel like you want to make this whole operation yield-able,
@@ -2164,6 +2182,9 @@ fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg
     // Note: putting it in super early! this ensures that if you try to call the function while compiling it, 
     //       you don't keep spawning new variations that can never be finished. 
     self.dispatch.const_bound_memo&.insert(key, new_fid);
+    
+    @check(self.ensure_resolved_sign(new_fid)) return;
+    @try(self.ensure_resolved_body(new_fid)) return;
     
     self.curry_const_args_inner(original_f, new_fid, f_expr, arg_expr, 0)
 }
@@ -2197,7 +2218,7 @@ fn curry_const_args_inner(self: *SelfHosted, original_f: FuncId, new_fid: FuncId
             arg_expr.ty
         };
         value := @check(self.immediate_eval_expr(arg_expr, arg_type)) return;
-        @check(self.bind_const_arg(new_fid, name, value, arg_expr.ty, arg_expr.loc)) return;
+        @check(self.bind_const_arg(new_fid, name, value, arg_expr.ty, arg_expr.loc, binding)) return;
 
         func.finished_arg = .None;  // TODO: we know its void because we removed the only argument.
         self.set(f_expr, FuncId, new_fid);
@@ -2255,7 +2276,7 @@ fn curry_const_args_inner(self: *SelfHosted, original_f: FuncId, new_fid: FuncId
             
             // bind_const_arg handles adding closure captures.
             // since it needs to do a remap, it gives back the new argument names so we can adjust our bindings acordingly. dont have to deal with it above since there's only one.
-            @check(self.bind_const_arg(new_fid, name, value, arg_expr.ty, arg_expr.loc)) return;
+            @check(self.bind_const_arg(new_fid, name, value, arg_expr.ty, arg_expr.loc, b)) return;
             // No remove from arg here because bind_const_arg calls remove_named.
             removed_count += 1;
         };
@@ -2275,7 +2296,7 @@ fn curry_const_args_inner(self: *SelfHosted, original_f: FuncId, new_fid: FuncId
 //       and have self.can_assign take an optional context thingy that tells why it wanted that type, 
 //       and try to stick the variable in there sometimes? or show it if the type error happens from a baked thing. 
 // The argument type is evaluated in the function declaration's scope, the argument value is evaluated in the caller's scope.
-fn bind_const_arg(self: *SelfHosted, o_f: FuncId, arg_name: Var, arg_value: Values, arg_ty_found: Type, loc: Span) Maybe(void) = {
+fn bind_const_arg(self: *SelfHosted, o_f: FuncId, arg_name: Var, arg_value: Values, arg_ty_found: Type, loc: Span, b: *Binding) Maybe(void) = {
     // I don't want to renumber, so make sure to do the clone before resolving.
     // TODO: reslove captured constants anyway so dont haveto do the chain lookup redundantly on each speciailization. -- Apr 24
     @log_event("Bind $% = %", arg_name&.log(self), arg_value&) self;
@@ -2304,8 +2325,30 @@ fn bind_const_arg(self: *SelfHosted, o_f: FuncId, arg_name: Var, arg_value: Valu
             if arg_func_obj.get_flag(.YesContext) {
                 func.set_flag(.YesContext);
             };
+            
+            // :NotForCorrectness
+            if arg_func_obj.get_flag(.WasLambdaLiteral) {
+                // Currently, we only every bind const args for a specific callsite 
+                // (and then deduplicate if the same consts are used for another call). 
+                // If any @Fn argument was a literal closure expression (ie foo(fn() => ...)), 
+                // we know we will never find another call to this specialization 
+                // (because that literal closure is a unique value that was never bound to a name). 
+                // So we can destroy this specialization when we inline it to the callsite (avoiding a deep_clone()).  -- Mar 15, 2025
+                func.set_flag(.Once);
+                
+                if b.get_tag(Flag.duplicated.ident()).is_some() {
+                    // remember for later in case they pass it to something NOT marked #duplicated
+                    arg_func_obj.set_flag(.AllowDuplicated);  
+                };
+                
+                if !arg_func_obj.get_flag(.AllowDuplicated) {
+                    // if this parameter was marked #duplicated (on the callee's declaration), 
+                    // it is allowed to be called multiple times in the body. 
+                    // otherwise you're promising to only call it once so we can avoid a copy. 
+                    arg_func_obj.set_flag(.Once);
+                }
+            }
         };
-        
         
         // If we're passing a lambda arg, infer its return type based on the param's hint (not just the callsite). 
         //      f :: fn(x: @Fn() @enum(a, b)) void = { x(); } // callsite doesn't give a hint because statement discards value. 
@@ -3431,9 +3474,8 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
                 func.set_flag(.UnsafeNoopCast);
                 func.set_flag(.BodyIsSpecial);
             };
-            @case(Flag.target_os.ident()) => {
-                func.set_flag(.TargetSplit);
-            };
+            @case(Flag.target_os.ident())  => func.set_flag(.TargetSplit);
+            @case(Flag.duplicated.ident()) => func.set_flag(.AllowDuplicated);
             @case(Flag.import.ident())   => {
                 func.set_flag(.BodyIsSpecial);
                 //func.set_flag(.NoMangle);

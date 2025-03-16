@@ -57,9 +57,6 @@ fn RawHashMap($K: Type, $V: Type) Type = {
     
     fn init() Self #fold = (arr = @as(Slice(Entry)) empty(), len_including_tombstones = 0, capacity = 0);
     
-    ::?*V;
-    ::if_opt(*V, ?V);
-    ::if(?V);
     ::if(?*V);
     ::if(u64);
     
@@ -70,79 +67,60 @@ fn RawHashMap($K: Type, $V: Type) Type = {
         hasher&.hash(key);
         h := hasher&.end();
         // I use 0 to indicate an empty slot and 1 as a tombstone to mark removals. 
-        // TODO: compiler bug! u64 auto casts to i64 here for some reason??
-        h := if(h.bit_and(mask).eq(@as(u64) 0), => h.add(@as(u64) 4), => h);
+        h := if(h.bit_and(mask) == 0, => h + 4, => h);
         // TODO: stupid!!
         h: i64 = h.bitcast();
         h.abs()
     };
     
     fn insert(self: *Self, key: K, value: V, gpa: Alloc) ?V = {
-        full := self.len_including_tombstones.add(1).gt(self.capacity);
+        full := self.len_including_tombstones >= self.capacity;
         if(full, => self.resize(gpa)); // does it sooner than necessary (if replacing a slot) but thats fine. 
-        h := key&.checked_hash();
+        h    := key&.checked_hash();
         slot := self.find_slot(key&, h);
-        
-        ::if(?V);
-        @switch(slot.hash) {
-            @case(0) fn() ?V => {
-                slot[] = (hash = h, key = key, value = value);
-                self.len_including_tombstones += 1;
-                .None
-            };
-            @case(1) fn() ?V => {
-                slot[] = (hash = h, key = key, value = value);
-                .None
-            };
-            @default fn(_: i64) ?V => {
-                old := slot.value;
-                slot.value = value;
-                (Some = old)
-            };
-        }
+        if slot.hash != 0 && slot.hash != 1 {
+            old := slot.value;
+            slot.value = value;
+            return(Some = old);
+        };
+        self.len_including_tombstones += int(slot.hash == 0);
+        slot[] = (hash = h, key = key, value = value);
+        .None
     }
-
 
     fn get(self: *Self, key: K) ?V #inline = self.get(key&);
     fn get_ptr(self: *Self, key: K) ?*V #inline = self.get_ptr(key&);
     
     fn get(self: *Self, key: *K) ?V = {
-        found: ?*V = self.get_ptr(key);
-        @match(found) {
-            (fn Some(t) ?V = some(t[]));
-            (fn None(t) ?V = none());
+        @match(self.get_ptr(key)) {
+            fn Some(t) => (Some = t[]);
+            fn None(t) => .None;
         }
     }
     
     /// SAFETY: the returned pointer is invalid after a call to 'insert' (which may trigger a resize)
     fn get_ptr(self: *Self, key: *K) ?*V = {
-        ::if(?*V);
-        if(self.len_including_tombstones.eq(0), => (None = ())) {
-            slot := self.find_slot(key, key.checked_hash());
-            if(slot.hash.eq(0), => (None = ()), => (Some = slot.value&))
-        } 
+        if(self.len_including_tombstones == 0, => return(.None));
+        slot := self.find_slot(key, key.checked_hash());
+        if(slot.hash == 0, => .None, => (Some = slot.value&))
     }
     
     // this lets you do weird stuff where key matching doesn't mean really exactly the same. 
     fn get_key(self: *Self, key: *K) ?K = {
-        ::if(?K); // :sema_regression just order tho? 
-        if(self.len_including_tombstones.eq(0), => (None = ())) {
-            slot := self.find_slot(key, key.checked_hash());
-            if(slot.hash.eq(0), => (None = ()), => (Some = slot.key))
-        } 
+        if(self.len_including_tombstones == 0, => return(.None));
+        slot := self.find_slot(key, key.checked_hash());
+        if(slot.hash == 0, => .None, => (Some = slot.key))
     }
     
     fn remove(self: *Self, key: K) ?V #inline = self.remove(key&);
     
     // Note: this doesn't adjust self.len_including_tombstones! because we use that for resizing so need to account for the tombstone.
     fn remove(self: *Self, key: *K) ?V = {
-        if(self.len_including_tombstones.eq(0), => (None = ())) {
-            slot := self.find_slot(key, key.checked_hash());
-            if(slot.hash.eq(0), => (None = ())) {
-                slot.hash = 1; // tombstone
-                (Some = slot.value)
-            }
-        } 
+        if(self.len_including_tombstones == 0, => return(.None));
+        slot := self.find_slot(key, key.checked_hash());
+        if(slot.hash == 0, => return(.None));
+        slot.hash = 1; // tombstone
+        (Some = slot.value)
     }
     
     fn clear(self: *Self) void = {
@@ -157,11 +135,9 @@ fn RawHashMap($K: Type, $V: Type) Type = {
         
         range(0, self.arr.len) { _ |
             check := self.arr[i]&;
-            if check.hash == h && check.key& == key {
+            // 0 means empty, not in map
+            if check.hash == 0 || (check.hash == h && check.key& == key) {
                 return(check);
-            };
-            if check.hash == 0 {
-                return(check);  // empty, not in map
             };
             // 1 => placeholder for a removed value
             // othewise, continue, might have been bumped
@@ -175,14 +151,8 @@ fn RawHashMap($K: Type, $V: Type) Type = {
         hashmap_expand_erased(ptr_cast_unchecked(Self, RawHashMapErased, self), size_of(Entry), align_of(Entry), gpa, load_percent);
     
     // TODO: have a bake_relocatable_value that calls this to help reproducible builds. 
-    fn zero_unused_slots(self: *Self) void = {
-        each self.arr { slot |
-            if slot.hash == 0 || slot.hash == 1 {
-                slot.key = K.zeroed();
-                slot.value = V.zeroed();
-            };
-        };
-    }
+    fn zero_unused_slots(self: *Self) void = 
+        hashmap_erased_zero_unused_slots(ptr_cast_unchecked(Self, RawHashMapErased, self), size_of(Entry));
     
     fn for_keys(self: *Self, $body: @Fn(key: K) void) void = {
         each self { (k, _) |
@@ -242,6 +212,17 @@ hashmap_expand_erased :: fn(self: *RawHashMapErased, entry_size: i64, entry_alig
     gpa.dealloc_raw(self.entries, self.entry_count * entry_size, entry_align);
     self.entry_count = new_count;
     self.entries = new_mem;
+};
+
+// :Polymorphise
+hashmap_erased_zero_unused_slots :: fn(self: *RawHashMapErased, entry_size: i64) void #noinline = {
+    range(0, self.entry_count) { i |
+        h := i64.ptr_from_raw(self.entries.offset(i * entry_size))[];
+        if h == 0 || h == 1 {
+            slot := u8.ptr_from_raw(self.entries.offset(i * entry_size + 8)).slice(entry_size - 8);
+            slot.set_zeroed();
+        }
+    };
 };
 
 fn HashSet($V: Type) Type = {

@@ -1,4 +1,34 @@
-## 
+
+## (Mar 14/15)
+
+- trying to reduce the number of redundant copies made when passing lambdas as `$@Fn`. 
+there are some situations where you know the value is unique so the specialization doesn't need to be saved. 
+(A = just use aliased_body, B = needed clone). 
+```
+before = (A = 3016,  B = 33065)
+{|     = (A = 13588, B = 22493)
+()=>   = (A = 16164, B = 19925)
+```
+i think it does't help as much as it looks like it should because the body is often GetParsed which is trivial to copy. 
+
+require marking parameters that will be called multiple times as `#duplicated`. 
+which is kinda dumb cause the compiler could figure that out for you, 
+but i care about trying to reduce binary bloat so it's kinda nice to have a marker for it. 
+
+- dont allocate a new string of `_i` for every tuple field (210000 times). 
+same speed, just makes me feel better. 
+- less raw_type() when getting TypeMeta (since they have same repr)
+- don't track ir names unless logging
+- sprinkle more #inline around.
+- down to 1.03s for self compile. not bad, 4 days ago it was 1.33s (at commit "remove legacy example").  
+lie: extrapolating this rate of improvement, i expect it to compile instantly in 2 weeks :)
+- sad day i didn't catch this. 10 stars for Quentin:
+ 		if (s > sz * 4095u) {
+-			i = &(Ins){Oaddr, Kl, TMP(IP0), {r}};
++			i = &(Ins){Oaddr, Kl, TMP(IP1), {r}};
+That fixes import_c: wuffs/std/gzip
+
+## (Mar 13)
 
 - fix which end of the stack is passed to clone() on linux. which makes self compile work on blink. 
 

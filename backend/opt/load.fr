@@ -338,19 +338,21 @@ fn def(c: *LoadCtx, sl: MSlice, requested_bits: u64, b: *Qbe.Blk, i: ?*Qbe.Ins, 
     // Don't want to bloat the code by uselessly splating out a single load into many earlier loads. 
     
     final_value := c.f.newtmp("ld", sl.cls);
-    p := temp().box_zeroed(Qbe.Phi); 
-    c.nlog += 1;
-    c.ilog&.grow(c.nlog);
-    ist := c.ilog[c.nlog - 1]&;
-    ist.is_phi = true;
-    ist.bid = b.id.bitcast();
-    ist.new.phi.m = sl;
-    ist.new.phi.p = p;
-    p.to = final_value;
-    p.cls = sl.cls;
-    p.narg = b.npred;
-    p.arg = new(p.narg.zext());
-    p.blk = new(p.narg.zext());
+    p := temp().box(Qbe.Phi); 
+    push(c.ilog&, c.nlog&, (
+        is_phi = true, 
+        bid = b.id.bitcast(), 
+        new = (phi = (m = sl, p = p)),
+        index_in_block = 0, num = 0, // these two don't matter
+    ));
+    p[] = (
+        to = final_value, 
+        cls = sl.cls, 
+        narg = b.npred, 
+        arg = new(p.narg.zext()),
+        blk = new(p.narg.zext()),
+        link = zeroed(*Qbe.Phi),
+    );
     range(0, b.npred.zext()) { np |
         bp    := b.pred[np];
         can_insert_load  := bp.s2.is_null() && il.type != .LNoLoad && bp.loop < il.blk.loop;
@@ -396,16 +398,15 @@ fn cast(c: *LoadCtx, r: *Qbe.Ref, cls: Qbe.Cls, l: *Loc) void = {
 }
 
 fn iins(c: *LoadCtx, cls: Qbe.Cls, op: Qbe.O, a0: Qbe.Ref, a1: Qbe.Ref, l: *Loc) Qbe.Ref = {
-    c.nlog += 1;
-    c.ilog&.grow(c.nlog);
-    ist := c.ilog.index(c.nlog - 1);
-    ist.is_phi = false;
-    ist.num = c.inum;
-    c.inum += 1;
-    ist.bid = l.blk.id.bitcast();
-    ist.index_in_block = l.index_in_block;
     r := c.f.newtmp("ld", cls);
-    ist.new.ins = make_ins(op, cls, r, a0, a1);
+    push(c.ilog&, c.nlog&, (
+        is_phi = false,
+        num = c.inum,
+        bid = l.blk.id.bitcast(),
+        index_in_block = l.index_in_block,
+        new = (ins = make_ins(op, cls, r, a0, a1)),
+    ));
+    c.inum += 1;
     r
 }
 
@@ -448,7 +449,7 @@ fn load_masked(c: *LoadCtx, sl: MSlice, requested_bits: u64, l: *Loc) Qbe.Ref = 
     address
 }
 
-fn killsl(c: *LoadCtx, r: Qbe.Ref, sl: MSlice) bool = {
+fn killsl(c: *LoadCtx, r: Qbe.Ref, sl: MSlice) bool #inline = {
     if(rtype(sl.ref) != .RTmp, => return(false));
     t := c.f.get_temporary(sl.ref);
     a := t.alias&;
@@ -461,7 +462,7 @@ fn killsl(c: *LoadCtx, r: Qbe.Ref, sl: MSlice) bool = {
 }
 
 // 1 -> 0xFF, 2 -> 0xFFFF, etc
-fn ones_mask_of_size(bytes: i32) u64 = (BIT(8*(bytes.intcast())-1)*2-1); /* must work when bytes==8 */
+fn ones_mask_of_size(bytes: i32) u64 #inline = (BIT(8*(bytes.intcast())-1)*2-1); /* must work when bytes==8 */
 
 fn size_of_store(i: *Qbe.Ins) i32 = {
     i.maybe_store().expect("valid op for size_of_store")
