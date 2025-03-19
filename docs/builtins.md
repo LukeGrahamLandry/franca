@@ -1,91 +1,111 @@
 ## Function Tags
 
-## Expression Macros
+### creating ast nodes
 
 - @slice(a, b, c)
   - create a slice of elements on the stack
 - @if(cond, true_expr, false_expr)
-  - for runtime conditions, prefer calling `if(bool, $@Fn() T, $@Fn() T) T` from the standard libary.
+  - for runtime conditions, prefer calling `fn if(bool, $@Fn() T, $@Fn() T) T` from the standard libary.
     note that the macro accepts expressions directly and causes only one to be evaluated at runtime.
     while the function forces you to explicitly pass functions.
   - however, if cond is constant, the condition will be folded in the front end and only the active branch will be emitted.
     the in-active branch is allowed to contain invalid code.
     you can use `@if(@run cond, t, f)` to assert that this folding is possible.
-- @\_uninitialized
-  - prefer calling `uninitialized($T) T` from the standard libary.
-  - create uninitilized memory. illegal to read but you can write over it.
+- `fn uninitialized(T) #macro
+  - create uninitilized memory. it is considered disrespectful to read from it but you can write over it.
 
-fn enum(arg: FatExpr, target: FatExpr) FatExpr
+- `fn loop(e) #macro`
+- `fn as(T, e) #macro`
 
-fn as(T: FatExpr, e: FatExpr) FatExpr
+### bake
 
-fn type(e: FatExpr) FatExpr #outputs(Type) #macro #ct #comptime_addr(%);\n", type_macro);
+- `fn lookup_baked(addr: i64) ?BakedVarId`
+  - check if a pointer in the comptime address space already has already been baked as a relocatable value for AOT compilation
+- `fn cache_baked(addr: i64, id: BakedVarId) ?BakedVarId`
+  - like lookup_baked but creates the mapping if one didn't exist already
+- `fn dyn_bake_relocatable_value(raw_bytes: Slice(u8), ty: Type, force_default_handling: bool) Slice(BakedEntry)`
+  - dynamically invoke the right version of bake_relocatable_value (without a $Type)
+  - this is useful (to call on your fields) when writting your own bake_relocatable_value implementation
+- `fn bake_value(v: BakedVar) BakedVarId`
 
-fn struct(arg: FatExpr) FatExpr #outputs(Type) #macro #ct #comptime_addr(%);\n", struct_macro_wrap);
+### for writing macros
 
-fn tagged(arg: FatExpr) FatExpr #outputs(Type) #macro #ct #comptime_addr(%);\n", tagged_macro_wrap);
+- `fn rawptr_from_value(value: *Values) rawptr`
+- `fn str(i: Symbol) Str` / `fn sym(i: Str) Symbol` / `fn c_str(s: Symbol) CStr`
+  - access the compiler's string pool
+- `fn compile_ast(e: FatExpr) FatExpr`
+  - Infers the type and avoids some redundant work if you duplicate 
+  the ast node in a bunch of places after calling this (which is really 
+  something you shouldn't do but i'm not strict about it yet). 
+- `fn compile_error(msg: Str, loc: Span) Never`
+  - crash with an error message referencing a specific source location
+- `fn debug_log_ast(expr: FatExpr) void` / `fn debug_log_type(type: Type) void` / `fn debug_log_func(expr: *Func) void`
+  - useful for debugging macros
 
-fn loop(e: FatExpr) FatExpr
-fn builtin(t: FatExpr) FatExpr
+### settings
 
-fn Fn(Arg: FatExpr, Ret: FatExpr) FatExpr #outputs(Type) #macro #ct #comptime_addr(%);\n", fn_type_macro_erase);
-fn FnPtr(Arg: FatExpr, Ret: FatExpr) FatExpr #outputs(Type) #macro #ct #comptime_addr(%);\n", fn_ptr_type_macro_erase);
-fn Fn(Ret: FatExpr) FatExpr #outputs(Type) #macro #ct #comptime_addr(%);\n", fn_type_macro_single);
-fn FnPtr(Ret: FatExpr) FatExpr #outputs(Type) #macro #ct #comptime_addr(%);\n", fn_ptr_type_macro_single);
+- `fn get_comptime_environment() *ComptimeEnvironment`
+  - for smuggling information between the compiler, the driver, and the comptime code. 
+- `fn safety_check_enabled(check: SafetyCheck) bool`
+  - read from build options (only exists because it's needed before EnumMap can be compiled when bootings)
+- `fn current_compiler_context() CompCtx`
+- `__builtin_compiler_has_feature :: fn(s: Str) bool`
+- `fn ast_alloc() Alloc`
 
-## Comptime Functions
+### creating types
 
-fn lookup_baked(addr: i64) ?BakedVarId
-fn cache_baked(addr: i64, id: BakedVarId) ?BakedVarId
-fn dyn_bake_relocatable_value(raw_bytes: Slice(u8), ty: Type, force_default_handling: bool) Slice(BakedEntry)
-fn operator_star_prefix(T: Type) Type
-fn Label(Ret: Type) Type
+- `fn operator_star_prefix(inner: Type) Type`
+- `fn Ty(fst: Type, snd: Type) Type` 
+- `fn Ty(types: []Type) Type`
+- `fn Fn(Arg: Type, Ret: Type) Type`
+- `fn FnPtr(arg: Type, ret: Type) Type`
+- `fn IntType(bits: i64, signed: bool) Type`
+- `fn Fn(Arg, Ret) #macro #outputs(Type)`
+- `fn FnPtr(Arg, Ret) #macro #outputs(Type)`
+- `fn Fn(Ret) #macro #outputs(Type)`
+- `fn Fn(FnPtr) #macro #outputs(Type)`
+- `fn struct(fields) #macro #outputs(Type)`
+- `fn union(fields) #macro #outputs(Type)`
+- `fn tagged(cases) #macro #outputs(Type)`
+- `fn enum(cases) #macro #outputs(Type)`
+- `fn enum(Type, cases) #macro #outputs(Type)`
 
-fn debug_log_int(i: i64) void
-fn debug_log_str(i: Str) void
+### reflection
 
-fn str(i: Symbol) Str
+- `fn resolve_overload(os: OverloadSet, arg: Type, ret: Type, loc: Span) FuncId`
+- `fn get_function_ast(fid: FuncId, resolve_sign: bool, resolve_body: bool, infer_sign: bool, infer_body: bool) *Func`
+- `fn get_type_info_ref(T: Type) *TypeInfo`
+- `fn Tag(tagged: Type) Type`
+- `fn size_of(T: Type) i64`
+- `fn tag_value(E: Type, case_name: Symbol) i64`
+- `fn get_meta(s: Type) TypeMeta`
+- `fn type(e) #macro #outputs(Type)`
+  - get the type of an expression (may run comptime code, will not run runtime code)
+- `fn intern_type_ref(info: *TypeInfo) Type`
+  - create a new type 
+- `fn require_layout_ready(type: Type) void`
 
-fn sym(i: Str) Symbol
+### scopes
 
-fn get_comptime_environment() \*ComptimeEnvironment
+- `fn import(descriptor: Str) ScopeId`
+- `fn scope_from_value(ty: Type, ptr: rawptr) ?ScopeId`
+- `fn get_constants(s: ScopeId) []Symbol`
+- `fn get_constant(s: ScopeId, name: Symbol, type: Type, out: rawptr) bool`
+- `fn get_constant(s: ScopeId, name: Symbol) ?Ty(rawptr, Type)`
 
-fn by_the_way_you_are_compiling_the_compiler_right_now_just_a_helpful_hint() void
+### internal
 
-fn compile_error(msg: Str, loc: Span) Never #
-
-fn bake_value(v: BakedVar) BakedVarId
-
-fn safety_check_enabled(check: SafetyCheck) bool
-
-fn get_type_info_ref(T: Type) \*TypeInfo
-
-fn Ty(fst: Type, snd: Type) Type
-fn Ty(fst: Type, snd: Type, trd: Type) Type
-fn Ty(fst: Type, snd: Type, trd: Type, frt: Type) Type
-fn rawptr_from_value(value: \*Values) rawptr
-
-fn get_build_options(c: *SelfHosted) *BuildOptions
-
-fn Tag(tagged: Type) Type
-fn Fn(Arg: Type, Ret: Type) Type
-fn IntType(bits: i64, signed: bool) Type
-
-fn unquote_macro_apply_placeholders(t: Slice(FatExpr)) FatExpr
-fn literal_ast(ty: Type, ptr: rawptr) FatExpr
-fn const_eval(expr: FatExpr, ty: Type, result: rawptr) void
-
-fn size_of(T: Type) i64
-fn get_type_info(T: Type) TypeInfo
-fn debug_log_ast(expr: FatExpr) void
-fn debug_log_type(type: Type) void
-fn intern_type_ref(info: \*TypeInfo) Type
-fn compile_ast(e: FatExpr) FatExpr
-fn symbol(e: FatExpr) FatExpr
-fn tag_value(E: Type, case_name: Symbol) i64
-fn c_str(s: Symbol) CStr
-fn assert_compile_error(e: FatExpr) FatExpr
-fn FnPtr(arg: Type, ret: Type) Type
-fn get_meta(s: Type) TypeMeta
-
-## Intrinsics
+- `fn builtin(t) #macro`
+  - some types have fixed ids so they can be used as constants in the compiler codebase. it should not be called directly. 
+- `fn unquote_macro_apply_placeholders(t: Slice(FatExpr)) FatExpr`
+  - calls to this are generated by the compiler for `@{ @[] }` syntax. it should not be called directly. 
+- `fn literal_ast(ty: Type, ptr: rawptr) FatExpr` 
+  - prefer the typesafe library version: `fn literal(e) #macro #outputs(FatExpr)` 
+- `fn const_eval(expr: FatExpr, ty: Type, result: rawptr) void`
+  - prefer the typesafe library version: `fn const_eval($T: Type) (@Fn(value: FatExpr) T)
+- `fn assert_compile_error(e: FatExpr) FatExpr #macro #outputs(*CompileError)`
+  - try to compile a block of code with the expectation that it will fail. 
+  - this is used for testing the compiler. it should not be relied on, as some types of 
+  compile error will report and exit without unwinding. 
+- `fn debug_log_int(i: i64) void` / `fn debug_log_str(i: Str) void` / `fn debug_log_bool(i: bool) void`
+  - These only exist for debugging the compiler when everything's broken so can't even compile the one defined in the language.

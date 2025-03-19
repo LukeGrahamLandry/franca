@@ -26,7 +26,7 @@ fn good4inl(f: *Qbe.Fn) bool = {
     blkmerge(f);
     fillrpo(f);
     fillpreds(f);
-    fill_use(f);
+    //fill_use(f);
     
     if f.nblk != 1 || f.vararg || f.start.jmp.type == .hlt {
         return(false);
@@ -69,11 +69,11 @@ fn cloneblk(m: *QbeModule, b: *Qbe.Blk) *Qbe.Blk = {
     inlb
 }
 
-// Note: this goes in the inlining cache so it can't use temp() memory.
+// Note: this goes in the inlining cache so it can't use temp() memory.  // TODODODOTODODODODODO 🤡
 fn clone(f: *Qbe.Fn) *Qbe.Fn = {
     m := f.globals;
     lock(m.intern_mutex&); 
-    inlfn := m.forever&.borrow().box_zeroed(Qbe.Fn); // :HardcodeAlloc
+    inlfn := m.forever&.borrow().box_zeroed(Qbe.Fn);
     unlock(m.intern_mutex&); 
     inlfn.retty = f.retty;
     inlfn.nblk = f.nblk;
@@ -84,12 +84,14 @@ fn clone(f: *Qbe.Fn) *Qbe.Fn = {
     n: i64 = f.ntmp.zext();
     inlfn.ntmp = f.ntmp;
     inlfn.tmp = m.new_long_life(n);
+    // can't just start at Qbe.Tmp0 because it might not be suspended and later passes need that stuff
+    // TODO: could reconstruct it later as needed (like default_init does)
     inlfn.tmp.slice(0, n).copy_from(f.tmp.slice(0, n));
+    // TODO: now the names aren't stored by value so they can point into temp() // TODODODOTODODODODODO 🤡
     range(Qbe.Tmp0, n) { i |
         t := inlfn.tmp.index(i);
         t.visit = -1; // used when remapping 
         t.use.first = Qbe.Use.ptr_from_int(0);  // don't try to reuse memory in clear_usage_info if this function is suspended. 
-        t.def = Qbe.Ins.ptr_from_int(0);  // shouldn't matter?
     };
     
     inlfn.ncon = f.ncon;
@@ -99,7 +101,6 @@ fn clone(f: *Qbe.Fn) *Qbe.Fn = {
     @debug_assert(f.nmem == 0, "shouldn't need to inline clone f.mem");
     @debug_assert(f.nblk == 1, "don't know how to inline that");
     inlfn.start = cloneblk(m, f.start);
-    @if(m.track_ir_names()) inlfn.name&.items().copy_from(f.name&.items()); // useless, just lazy way to make the debug logging better
     inlfn
 }
 
@@ -127,7 +128,6 @@ fn inlsave(f: *Qbe.Fn) bool = {
         result = !symbol.referenced;
     };
     result
-    
 }
 
 // TODO: if you want to have multiple threads compiling together can't use the visit field of the cached tmps. 
@@ -163,7 +163,7 @@ fn getinlref(inlfn: *Qbe.Fn, inlr: Qbe.Ref, f: *Qbe.Fn, c: *InlineCtx) Qbe.Ref =
             t := inlfn.tmp[inlr.val()]&;
             if t.visit == -1 {
                 // first time seeing this ref: need to create an equivalent in the caller.  
-                t.visit = f.newtmp(t.name().str() /*:SLOW*/, t.cls).val().intcast();
+                t.visit = f.newtmp(t.name(), t.cls).val().intcast();
                 c.to_clear&.push(t);  // after inlining this call, reset visit to -1 for next time we inline this function. 
             };
             TMP(t.visit)
@@ -286,7 +286,7 @@ fn inlbins(inlfn: *Qbe.Fn, f: *Qbe.Fn, c: *InlineCtx) void = {
             if i1.op() == .blit1 {
                 @debug_assert(rtype(i1.arg&[0]) == .RInt);
                 /* TODO - deeply dubious/overlapping */
-                i1.arg&[0] = INT(abs(rsval(i1.arg&[0]).intcast())); // :FUCKED
+                i1.arg&[0] = INT(abs(rsval(i1.arg&[0]).intcast()));
             };
         };
     };

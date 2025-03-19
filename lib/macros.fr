@@ -27,7 +27,6 @@ fn literal(arg: FatExpr) FatExpr = @{
 
 fn as(T: Type, expr: FatExpr) FatExpr = as(@literal T, expr);
 
-// TODO: once i have an asm backend, this can become a jump table which is pretty cool. 
 // TODO: this has a referential transparency problem
 #macro 
 fn match(arg: FatExpr, target: FatExpr) FatExpr = {
@@ -70,7 +69,7 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
     
     ::if(FatExpr);
     @{
-        arg_val := @[if(is_ptr, => @{ @as(void)unit }, => arg)];
+        arg_val := @[if(is_ptr, => @{}, => arg)];
         arg_ptr := @[if(is_ptr, =>arg, => @{ arg_val& })];
         :: tagged(@[@literal enum_type]);
         tag_val := arg_ptr.tag().raw();
@@ -153,8 +152,6 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
                         expand_case_body(handler_body.expr.Closure);
                     } else {
                         // TODO: better error message if its a call because they forgot a semi-colon. 
-                        //debug_log_ast(handler_body[]);
-                        //
                         
                         branch := handler_body.expr.PrefixMacro&;
                         name := macro_at_default_helper(handler_body);
@@ -189,20 +186,12 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
 }
 
 fn macro_at_default_helper(handler_body: *FatExpr) Symbol = {
-    assert(handler_body.expr&.is(.PrefixMacro), "expected @default");
-    branch := handler_body.expr.PrefixMacro&;
-    macro := branch.handler;
-    
-    name := @symbol EXPECTED_AT_DEFAULT_TODO_BETTER_ERROR_REPORTING;
-    if macro.expr&.is(.GetNamed) {
-        name = macro.expr.GetNamed;
+    msg :: "Expected expression in @match body to be @default";
+    if !handler_body.expr&.is(.PrefixMacro) {
+        compile_error(msg, handler_body.loc);
     };
-    if macro.expr&.is(.UndeclaredVar) {
-        name = macro.expr.UndeclaredVar.name;
-    };
-    if macro.expr&.is(.GetVar) {
-        name = macro.expr.GetVar.name;
-    };
+    handler := handler_body.expr.PrefixMacro.handler;
+    name := handler.ident() || compile_error(msg, handler.loc);
     name
 }
 
@@ -501,9 +490,9 @@ fn raw();
 fn from_raw();
 
 fn expect_enum(T: Type) void = {
-    info := get_type_info(T);
+    info := get_type_info_ref(T);
     // TODO: this doesn't compile with trying to eq on **FnBody ?????! :FUCKED
-    //assert(info&.is(.Enum), "expected enum type");
+    //assert(info.is(.Enum), "expected enum type");
     //assert(info.Enum.sequential, "expected enum elements to be sequential");
 }
 
@@ -533,8 +522,10 @@ fn enum_basic($T: Type) void = {
 fn enum($T: Type) void = {
     ::enum_basic(T);
     
-    fn ordinal(e: T) i64 #inline = 
-        e&.try_ordinal().unwrap();
+    fn ordinal(e: T) i64 #inline = {
+        :: ?i64;
+        e&.try_ordinal().unwrap()
+    }
     
     fn display(self: T, out: *List(u8)) void #inline = 
         display(self&, out);
@@ -613,8 +604,8 @@ fn from_raw($T: Type) void = {
 }
 
 fn enum_cases(T: Type) []Ty(Symbol, Values) = {
-    info := get_type_info(T);
-    assert(info&.is(.Enum), "expected enum type");
+    info := get_type_info_ref(T);
+    assert(info.is(.Enum), "expected enum type");
     info.Enum.fields.items()
 }
 
@@ -689,7 +680,7 @@ fn inline_match(container: FatExpr, target: FatExpr) FatExpr #macro = {
     info := get_type_info_ref(enum_type);
     
     is_ptr := false;
-    tag_expr := @literal unit;
+    tag_expr := @literal ();
     if info.is(.Ptr) {
         enum_type = (@as(*Type) info.Ptr&)[];
         info = get_type_info_ref(enum_type);
@@ -831,16 +822,28 @@ fn if_else(handlers: FatExpr) FatExpr #macro = {
     body
 }
 
-// TODO: use this in @match/@switch
+fn symbol();
+
+:: @if(::has_feature("@franca/fewer_builtins")) {
+    fn symbol(e: FatExpr) FatExpr #macro #outputs(Symbol) = 
+        @literal e&.ident().unwrap();
+    
+    // TODO: this is so unserious, i should just have nice var-args
+    fn Ty(a: Type, b: Type, c: Type) Type #fold =
+        Ty(@slice(a, b, c));
+    
+    fn Ty(a: Type, b: Type, c: Type, d: Type) Type #fold =
+        Ty(@slice(a, b, c, d));
+};
+
+// this can't use @match because we want to use it from the implementation of @match
 fn ident(self: *FatExpr) ?Symbol = {
-    @match(self.expr&) {
-        fn GetVar(v)   => (Some = v.name);
-        fn GetNamed(v) => (Some = v[]);
-        fn String(v)   => (Some = v[]);
-        fn ContextualField(v) => (Some = v[]);
-        fn UndeclaredVar(v) => (Some = v.name);
-        @default => .None;
-    }
+    if(self.expr&.is(.GetVar),          => return(Some = self.expr.GetVar.name));
+    if(self.expr&.is(.GetNamed),        => return(Some = self.expr.GetNamed));
+    if(self.expr&.is(.String),          => return(Some = self.expr.String));
+    if(self.expr&.is(.ContextualField), => return(Some = self.expr.ContextualField));
+    if(self.expr&.is(.UndeclaredVar),   => return(Some = self.expr.UndeclaredVar.name));
+    .None
 }
 
 // build a bit mask to check if an enum(int) or tagged is in a comptime known set. 
@@ -896,8 +899,8 @@ fn is(arg: FatExpr) FatExpr #macro #outputs(bool) = {
         });
     };
     
-    if count < 64 && is_sequential_enum(type) {
-        @ct_assert(high - low < 64, arg.loc, "@is args do not fit in a 64-bit mask");
+    if high - low < 64 {
+        fits_mask := count < 64 && is_sequential_enum(type);
         mask := 0;
         for values { o | 
             mask = mask.bit_or(1.shift_left(o - low));
@@ -905,7 +908,8 @@ fn is(arg: FatExpr) FatExpr #macro #outputs(bool) = {
         return(@{ 
             key: i64 = @[inspect].raw().int() - @[@literal low];
             k := 1.shift_left(key);
-            bit_and(k, @[@literal mask]) == k
+            bounds := @[@if(fits_mask, @literal true, @{ key >= 0 && key < 64 })];
+            bounds && bit_and(k, @[@literal mask]) == k
         });
     };
     

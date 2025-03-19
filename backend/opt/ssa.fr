@@ -205,7 +205,7 @@ fn nnew(f: *Qbe.Fn, r: Qbe.Ref, b: *Qbe.Blk, up: *QbeName) *QbeName #inline = {
 }
 
 fn refindex(f: *Qbe.Fn, t: i64) Qbe.Ref #inline =
-    f.newtmp(f.tmp.index(t).name().str() /*TODO: ugh strlen*/, f.tmp[t].cls);
+    f.newtmp(f.tmp.index(t).name(), f.tmp[t].cls);
 
 /* fill usage, width, phi, and class information
  * must not change .visit fields
@@ -216,15 +216,16 @@ fn fill_use(f: *Qbe.Fn) void = {
         for_phi b { p |
             @debug_assert(rtype(p.to) == .RTmp, "can only assign to tmp");
             phi_to := p.to.val();
-            f.tmp[phi_to].defining_block = b.id;
-            f.tmp[phi_to].ndef += 1;
-            f.tmp[phi_to].cls = p.cls;
-            phi_to = phi_dest(phi_to, f.tmp);
+            t := f.tmp.index(phi_to);
+            t.defining_block = b.id;
+            t.ndef += 1;
+            t.cls = p.cls;
+            t.def = Qbe.Ins.ptr_from_int(0);
+            phi_to = phi_dest(phi_to, f);
             range(0, p.narg.zext()) { a | 
-                if rtype(p.arg[a]) == .RTmp {
+                if adduse(f, p.arg[a], .UPhi, b, Qbe.Phi.raw_from_ptr(p)) {
                     arg := p.arg[a].val();
-                    adduse(f.tmp.index(arg), .UPhi, b, Qbe.Phi.raw_from_ptr(p));
-                    arg = phi_dest(arg, f.tmp);
+                    arg = phi_dest(arg, f);
                     if arg != phi_to {
                         f.tmp[arg].phi = phi_to.intcast();
                     };
@@ -243,42 +244,38 @@ fn fill_use(f: *Qbe.Fn) void = {
             };
             
             for i.arg& { arg | 
-                if rtype(arg) == .RTmp {
-                    t := f.get_temporary(arg);
-                    adduse(t, .UIns, b, Qbe.Ins.raw_from_ptr(i));
-                };
+                adduse(f, arg, .UIns, b, Qbe.Ins.raw_from_ptr(i));
             };
         };
         
-        if rtype(b.jmp.arg) == .RTmp {
-            adduse(f.get_temporary(b.jmp.arg), .UJmp, b, 0.rawptr_from_int());
-        };
+        adduse(f, b.jmp.arg, .UJmp, b, 0.rawptr_from_int());
     };
 }
 
 // TODO: damn if only we had a language feature to make this look less silly... (hint: @tagged)
-fn adduse(tmp: *Qbe.Tmp, ty: Qbe.UseType, b: *Qbe.Blk, ptr: rawptr) void #inline = { 
-    if tmp.use.first.is_null() {
-        // it's a register
-        return();
-    };
-   
+fn adduse(f: *Qbe.Fn, r: Qbe.Ref, ty: Qbe.UseType, b: *Qbe.Blk, ptr: rawptr) bool #inline = { 
+    if(rtype(r) != .RTmp || isreg(r), => return(false));
+    tmp := f.get_temporary(r);
     @debug_assert(tmp.nuse >= 0, "negative nuse");
     push(tmp.use&, tmp.nuse&, (type = ty, bid = b.id, u = (r = ptr)));
+    true
 }
 
 fn clear_usage_info(f: *Qbe.Fn) void = {
     each f.tmp.slice(Qbe.Tmp0, f.ntmp.zext()) { t | 
-        t.def = Qbe.Ins.ptr_from_int(0); // this isn't an array, 
         t.ndef = 0;
-        t.defining_block = -1;
-        t.cls = .Kw;
-        t.phi = 0;
-        t.width = .WFull;
         t.nuse = 0;
+        t.phi = 0;
         if t.use.first.is_null() {
             t.use = new(0);
         }; // else we can just reuse the memory 
+        
+        @if(::safety_check_enabled(.DebugAssertions)) {
+            t.def = Qbe.Ins.ptr_from_int(0); // this isn't an array
+            t.defining_block = -1;
+            t.width = .WFull;
+            t.cls = .Kw;
+        };
     };
 }
 

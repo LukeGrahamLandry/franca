@@ -18,7 +18,6 @@ OverloadSetData :: @struct(
     pending: RawList(FuncId),
     inline_cache: Ty(OverloadKey, FuncId),
     table   := zeroed RawHashMap(OverloadKey, FuncId),
-    methods := zeroed RawHashMap(Type, void),
 );
 
 fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(Ty(bool, bool)) #once = {
@@ -674,6 +673,9 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                 };
                 @err_assert(k.raw() < 4 && o.raw() < ::Qbe.O.enum_count(), "invalid argument in #ir") return;
                 func.set_flag(.Intrinsic);
+                if o.can_fold() {
+                    func.set_flag(.TryConstantFold);
+                };
                 i := find_or_create_impl(func.body&, self.get_alloc(), .NewIntrinsic);
                 i.ir_op  = @as(i32) o;
                 i.ir_cls = @as(i32) k;
@@ -1317,10 +1319,10 @@ fn compile_quote(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe
 
     unquote_placeholders := @unwrap(self.env.unquote_placeholders, "quote during boot") return;
     
-    // note: do this before fucking with the expr because it will yield the first time!
-    @check(self.infer_arguments(unquote_placeholders)) return;
-    @check(self.infer_return(unquote_placeholders)) return;
     if self.get_fn_callable(unquote_placeholders).is_none() {
+        // note: do this before fucking with the expr because it will yield the first time!
+        @check(self.infer_arguments(unquote_placeholders)) return;
+        @check(self.infer_return(unquote_placeholders)) return;
         return(Suspend = self.wait_for(Jit = unquote_placeholders));
     };
     
@@ -2422,19 +2424,10 @@ fn infer_arguments(self: *SelfHosted, fid: FuncId) Maybe(Type) = {
     types := @check(self.infer_type(func.arg&)) return;
     type := self.tuple_of(types);
     func.finished_arg = (Some = type);  // :const_args_are_not_const_in_tuple
-    if func.var_name& { var |
-        if !func.get_flag(.Generic) && !func.get_flag(.DisallowInOverloadSet) && !func.get_flag(.AllowRtCapture) && !self.is_empty_constant(var[]) {
-            os, _ := @check(self.find_const(var[], self.get_or_create_type(OverloadSet).want())) return;
-            i  := OverloadSet.assume_cast(os&)[].as_index();
-            os := self.dispatch.overloads&.nested_index(i);
-            first_type := func.first_par_type();
-            os.methods&.insert(first_type, (), self.get_alloc());
-        };
-    };
     (Ok = type)
 }
 
-fn first_par_type(func: *Func) Type = 
+fn first_par_type(func: *Func) Type #inline = 
     func.arg.bindings&.index(0)[].ty&.ty().unwrap();
 
 fn get_arg_types_non_blocking(func: *Func, args: *List(ResultType)) void #once = {
@@ -2566,6 +2559,13 @@ fn adjust_named_arguments(self: *SelfHosted, fid: FuncId, arg_expr: *FatExpr) Re
 }
 
 // TODO: this is very non-linear with number of overloads. :SLOW :SLOW :SLOW
+// 
+// This is a super fagile adhoc thing that really needs to be rewritten. 
+// Preferably with an attempt at formalizing what shapes of code we accept, 
+// instead of just "eh you know if it doesnt compile just add some casts maybe". 
+// I think the important principle is to never look at the body of the function you're trying to call. 
+// Require all the information for resolving the overload to be present in the header. 
+//
 fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *OverloadAttempt) Maybe(FuncId) #once = {
     overloads := self.dispatch.overloads&.nested_index(attempt.os.as_index());
     
@@ -2615,7 +2615,6 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
         arg_expr.ty = self.tuple_of(types.items());
     };
     
-    // this does catch some but doesn't help much. TODO: maybe remove
     if !arg_expr.ty.is_unknown() {
         req := UnknownType;
         @if_let(attempt.call.requested) fn Specific(t) => {
@@ -2663,18 +2662,20 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
         };
     };
     
+    fn const_coercable(self: *SelfHosted, t: Type) bool #inline =  
+        t == FuncId || @is(self.get_type(t), .Int, .Fn, .FnPtr);
+    
     if !attempt.got_methods {
         first_arg := arg_expr.items().index(0);
         r := self.type_of(first_arg);
-        if r&.is(.Ok) && !self.get_type(r.Ok).is(.Int) {  // TODO: make this work for ints :(
+        // if we know this argument can coerce, don't do the filtering
+        if r&.is(.Ok) && !self.const_coercable(r.Ok) {
             first_type := r.Ok;
-            if overloads.methods&.get(first_type) {
-                unordered_retain attempt.options& { fid | 
-                    func := self.get_function(fid[]);
-                    func.get_flag(.UnboundGenerics) || func.finished_arg.is_none() || func.first_par_type() == first_type
-                };
-                attempt.prev_index = attempt.options.len;
+            unordered_retain attempt.options& { fid | 
+                func := self.get_function(fid[]);
+                func.get_flag(.UnboundGenerics) || func.finished_arg.is_none() || func.first_par_type() == first_type
             };
+            attempt.prev_index = attempt.options.len;
         };
     };
     

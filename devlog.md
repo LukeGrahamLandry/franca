@@ -1,3 +1,20 @@
+## (Mar 16/17/18)
+
+- make Tmp/Blk name field a slice instead of an array so it takes less memory when empty
+- have track_ir_names on the Fn instead of the module so the threads don't stomp on each other
+- remove a few compiler builtins
+- don't need the hashtable for methods cache in overloadset since im scanning the array and looking at the Func's par type anyway. 
+just need to not do that filtering when it's a type that might coerce (like a FuncId). 
+- clean up the math intrinsic fucntion defs a bit. still super verbose since i don't want to enable_franca_ir_types() in every program.
+- often a low number of parallel moves in rega, don't bother zeroing 64 every time. 
+- can take out the copy of struct pars in abi because my emit_ir always generates a copy itself. 
+- suspicious of register hinting in ralloctry. it seems that taking it out saves 10% code size. 
+```
+>>> 1088940 bytes of code, 66600 bytes of data.
+>>>  972244 bytes of code, 66600 bytes of data
+```
+- occasionally getting to 0.945s now
+- i can cheat and make 60fps.fr look a lot better by carefully not using `__string_escapes` (\n) because that's jitted every time
 
 ## (Mar 14/15)
 

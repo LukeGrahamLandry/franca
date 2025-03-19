@@ -6,26 +6,7 @@
 
 // TODO: float to int rounding
 
-fn add(a: i64, b: i64) i64 #ir(.add, .Kl)   #fold; // +
-fn sub(a: i64, b: i64) i64 #ir(.sub, .Kl)   #fold; // -
-fn mul(a: i64, b: i64) i64 #ir(.mul, .Kl)   #fold; // *
-fn div(a: i64, b: i64) i64 #ir(.div, .Kl)   #fold; // /
-fn eq(a: i64, b: i64) bool  #ir(.ceql, .Kl)  #fold; // ==
-fn ne(a: i64, b: i64) bool  #ir(.cnel, .Kl)  #fold; // !=
-fn le(a: i64, b: i64) bool  #ir(.cslel, .Kl) #fold; // <=
-fn ge(a: i64, b: i64) bool  #ir(.csgel, .Kl) #fold; // >=
-fn lt(a: i64, b: i64) bool  #ir(.csltl, .Kl) #fold; // <
-fn gt(a: i64, b: i64) bool  #ir(.csgtl, .Kl) #fold; // >
-
 // TODO: define behaviour when shift > log size. make it a SafetyCheck
-fn shift_left(value: i64, shift_amount: i64) i64             #ir(.shl, .Kl) #fold;
-fn shift_right_logical(value: i64, shift_amount: i64) i64    #ir(.shr, .Kl) #fold;
-fn shift_right_arithmetic(value: i64, shift_amount: i64) i64 #ir(.sar, .Kl) #fold;
-fn bit_or(a: i64, b: i64) i64   #ir(.or, .Kl)  #fold;
-fn bit_and(a: i64, b: i64) i64 #ir(.and, .Kl) #fold;
-fn bit_xor(a: i64, b: i64) i64 #ir(.xor, .Kl) #fold;
-fn bit_xor(a: u64, b: u64) u64 #ir(.xor, .Kl) #fold;
-fn bit_not(a: i64) i64 #fold = bit_xor(a, -1);
 
 fn int_from_rawptr(ptr: rawptr) i64 #ir(.copy, .Kl);
 fn rawptr_from_int(ptr: i64) rawptr #ir(.copy, .Kl);
@@ -71,8 +52,6 @@ fn zext(v: u8)  i64  #ir(.extub, .Kl) #fold;
 fn zext(v: u8)  u16  #ir(.extub, .Kw) #fold;
 
 fn bit_or(a: i16, b: i16) i16 #redirect(Ty(i32, i32), i32);
-fn bit_or(a: i32, b: i32) i32 #ir(.or, .Kw);
-fn shift_left(a: i32, b: i64) i32 #ir(.shl, .Kw);
 fn zext(v: u8) i32 #ir(.extub, .Kw) #fold;
 
 fn int(a: f64) i64     #ir(.dtosi, .Kl); // preserves the value (not the bit pattern)
@@ -87,33 +66,10 @@ fn intcast(v: i32) i64 #ir(.extsw, .Kl);
 fn zext(v: i16) i32    #ir(.extsh, .Kw);
 fn zext(v: i16) i64    #ir(.extsh, .Kl);
 
-fn div_mod(big: i64, divisor: i64) Ty(i64, i64) #inline = {
-    d := big / divisor;
-    (d, big - d * divisor)
-}
-
-fn mod(big: i64, divisor: i64) i64 #ir(.rem, .Kl);
-fn mod(big: u64, divisor: u64) u64 #ir(.urem, .Kl);
-fn max(a: i64, b: i64) i64 #inline = if(lt(a, b), =>b, =>a);
-fn min(a: i64, b: i64) i64 #inline = if(gt(a, b), =>b, =>a);
 ::if(f64);
 fn max(a: f64, b: f64) f64 #inline = if(lt(a, b), =>b, =>a);
 fn min(a: f64, b: f64) f64 #inline = if(gt(a, b), =>b, =>a);
-fn max(a: u64, b: u64) u64 = {
-    @debug_assert(a >= 0 && b >= 0, "TODO: remove this with new backend that does proper unsigned compares");
-    @if(a < b, b, a)
-}
-fn neg(a: i64) i64 #fold #ir(.neg, .Kl);
-fn neg(a: i16) i16 #fold #redirect(i64, i64); // TODO: sign extension?
-fn neg(a: i32) i32 #fold #ir(.neg, .Kw);
 
-fn abs(val: i64) i64 = {
-    all_sign_bit := val.shift_right_arithmetic(63);
-    // +) nop 
-    // -) subtract one and flip all the bits. https://en.wikipedia.org/wiki/Two%27s_complement
-    bit_xor(val + all_sign_bit, all_sign_bit)
-}
-fn abs(val: i32) i32 = if(val.ge(0), => val, => val.neg()); // TODO: wait for new backend where im consistant about int repr
 fn eq(lhs: Symbol, rhs: Symbol) bool #redirect(Ty(u32, u32), bool);
 fn to_bool(b: i64) bool = 
     b != 0;
@@ -223,22 +179,109 @@ fn Ord($T: Type) void = {
 
 fn int(i: i64) i64 #unsafe_noop_cast;
 fn int(i: u8)  i64 #inline = i.zext();    ::Ord(u8);
-fn int(i: u32) i64 #inline = i.zext();    ::Ord(u32);
+fn int(i: u32) i64 #inline = i.zext();
 fn int(i: u64) i64 #inline = i.bitcast(); 
-fn int(i: i32) i64 #inline = i.intcast(); ::Ord(i32);
+fn int(i: i32) i64 #inline = i.intcast();
 fn int(i: u16) i64 #inline = i.zext();    ::Ord(u16);
 fn int(i: i16) i64 #inline = i.zext();    ::Ord(i16);// TODO: wrong!!! signed
 
-fn eq(lhs: u64, rhs: u64) bool #ir(.ceql, .Kl);
-fn ne(lhs: u64, rhs: u64) bool #ir(.cnel, .Kl);
-fn lt(lhs: u64, rhs: u64) bool #ir(.cultl, .Kl);
-fn le(lhs: u64, rhs: u64) bool #ir(.culel, .Kl);
-fn gt(lhs: u64, rhs: u64) bool #ir(.cugtl, .Kl);
-fn ge(lhs: u64, rhs: u64) bool #ir(.cugel, .Kl);
-
-// TODO: new backend has single instruction 32 bit math. use them here.
-
-::{
+// TODO: this is silly. should just be able to pass Kw vs Kl as a comptime value without it being painful. 
+:: {
+    Num(u64, false, true);
+    Num(i64, true, true);
+    Num(u32, false, false);
+    Num(i32, true, false);
+    
+    Num :: fn($T: Type, $signed: bool, $wide: bool) void = {
+        fn min(a: T, b: T) T #inline #fold = @if(gt(a, b), b, a);
+        fn max(a: T, b: T) T #inline #fold = @if(lt(a, b), b, a);
+        fn bit_not(a: T) T #fold = bit_xor(a, 0 - 1);  
+        
+        // TODO: infer #fold when all calls are #fold and there are no loads/stores? 
+        //       the latter is nontrivial if you want to allow struct arguments  
+        
+        fn div_mod(big: T, divisor: T) Ty(T, T) #inline #fold = {
+            d := big / divisor;
+            (d, big - d * divisor)
+        }
+        
+        @if(signed) {
+            fn abs(val: T) T = {
+                all_sign_bit := val.shift_right_arithmetic(size_of(T) * 8 - 1);
+                // +) nop 
+                // -) subtract one and flip all the bits. https://en.wikipedia.org/wiki/Two%27s_complement
+                bit_xor(val + all_sign_bit, all_sign_bit)
+            }
+            
+            fn neg(a: T) T #fold = 0 - a;
+        };
+        
+        @if(wide, {
+            fn bit_or(lhs: T, rhs: T) T #ir(.or, .Kl) #fold;  // :UpdateBoot don't need to manually mark this as #fold
+            fn bit_and(lhs: T, rhs: T) T #ir(.and, .Kl);
+            fn bit_xor(a: T, b: T) T #ir(.xor, .Kl);
+            
+            fn shift_right_logical(value: T, shift_amount: i64) T #ir(.shr, .Kl);
+            fn shift_right_arithmetic(value: T, shift_amount: i64) T #ir(.sar, .Kl);
+            fn shift_left(value: T, shift_amount: i64) T #ir(.shl, .Kl);
+        
+            fn add(a: T, b: T) T #ir(.add, .Kl);
+            fn sub(a: T, b: T) T #ir(.sub, .Kl);
+            fn mul(a: T, b: T) T #ir(.mul, .Kl);
+        
+            fn eq(lhs: T, rhs: T) bool #ir(.ceql, .Kl);
+            fn ne(lhs: T, rhs: T) bool #ir(.cnel, .Kl);
+            @if(signed, {
+                fn div(a: T, b: T) T #ir(.div, .Kl);
+                fn mod(a: T, b: T) T #ir(.rem, .Kl);
+            
+                fn lt(lhs: T, rhs: T) bool #ir(.csltl, .Kl);
+                fn le(lhs: T, rhs: T) bool #ir(.cslel, .Kl);
+                fn gt(lhs: T, rhs: T) bool #ir(.csgtl, .Kl);
+                fn ge(lhs: T, rhs: T) bool #ir(.csgel, .Kl);
+            }, {
+                fn div(a: T, b: T) T #ir(.udiv, .Kl);
+                fn mod(a: T, b: T) T #ir(.urem, .Kl);
+            
+                fn lt(lhs: T, rhs: T) bool #ir(.cultl, .Kl);
+                fn le(lhs: T, rhs: T) bool #ir(.culel, .Kl);
+                fn gt(lhs: T, rhs: T) bool #ir(.cugtl, .Kl);
+                fn ge(lhs: T, rhs: T) bool #ir(.cugel, .Kl);
+            });
+        }, {
+            fn bit_or(lhs: T, rhs: T) T #ir(.or, .Kw);
+            fn bit_and(lhs: T, rhs: T) T #ir(.and, .Kw);
+            fn bit_xor(a: T, b: T) T #ir(.xor, .Kw);
+            
+            fn shift_right_logical(value: T, shift_amount: i64) T #ir(.shr, .Kw);
+            fn shift_right_arithmetic(value: T, shift_amount: i64) T #ir(.sar, .Kw);
+            fn shift_left(value: T, shift_amount: i64) T #ir(.shl, .Kw);
+        
+            fn add(a: T, b: T) T #ir(.add, .Kw);
+            fn sub(a: T, b: T) T #ir(.sub, .Kw);
+            fn mul(a: T, b: T) T #ir(.mul, .Kw);
+            
+            fn eq(lhs: T, rhs: T) bool #ir(.ceqw, .Kl);
+            fn ne(lhs: T, rhs: T) bool #ir(.cnew, .Kl);
+            @if(signed, {
+                fn div(a: T, b: T) T #ir(.div, .Kw);
+                fn mod(a: T, b: T) T #ir(.rem, .Kw);
+            
+                fn lt(lhs: T, rhs: T) bool #ir(.csltw, .Kl);
+                fn le(lhs: T, rhs: T) bool #ir(.cslew, .Kl);
+                fn gt(lhs: T, rhs: T) bool #ir(.csgtw, .Kl);
+                fn ge(lhs: T, rhs: T) bool #ir(.csgew, .Kl);
+            }, {
+                fn div(a: T, b: T) T #ir(.udiv, .Kw);
+                fn mod(a: T, b: T) T #ir(.urem, .Kw);
+            
+                fn lt(lhs: T, rhs: T) bool #ir(.cultw, .Kl);
+                fn le(lhs: T, rhs: T) bool #ir(.culew, .Kl);
+                fn gt(lhs: T, rhs: T) bool #ir(.cugtw, .Kl);
+                fn ge(lhs: T, rhs: T) bool #ir(.cugew, .Kl);
+            });
+        });
+    };
     UNum :: fn($T: Type) void = {
         fn add(lhs: T, rhs: T) T = lhs.int().add(rhs.int()).trunc();
         fn sub(lhs: T, rhs: T) T = lhs.int().sub(rhs.int()).trunc();
@@ -250,36 +293,11 @@ fn ge(lhs: u64, rhs: u64) bool #ir(.cugel, .Kl);
     };
     UNum(u8); 
     UNum(u16);
-    UNum(u32);
-    UNum(i32);
-    // div/mod/min/max would be wrong for u64 because signed. 
 };
-
-#redirect(Ty(i64, i64), i64) #fold fn shift_left(value: u64, shift_amount: i64) u64;
-#redirect(Ty(i64, i64), i64)  fn bit_or(lhs: u64, rhs: u64) u64;
-#redirect(Ty(i64, i64), i64)  fn bit_and(lhs: u64, rhs: u64) u64;
-#redirect(i64, i64)           fn bit_not(value: u64) u64;
-#redirect(Ty(i64, i64), i64)  fn mul(lhs: u64, rhs: u64) u64;
-#redirect(Ty(i64, i64), i64)  fn add(lhs: u64, rhs: u64) u64;
-#redirect(Ty(i64, i64), i64)  fn sub(lhs: u64, rhs: u64) u64;  // TODO: does llvm make signed overflow UB?
-
-fn div(lhs: u64, rhs: u64) u64 #ir(.udiv, .Kl);
-
-fn bit_or(lhs: u32, rhs: u32) u32 #ir(.or, .Kw);
-    
-fn bit_and(lhs: u32, rhs: u32) u32 #ir(.and, .Kw);
-
-fn shift_left(value: u32, shift_amount: i64) u32 #ir(.shl, .Kw);
 
 fn bit_or(lhs: u8, rhs: u8) u8 #ir(.or, .Kw) = 
     lhs.int().bit_or(rhs.int()).trunc();
 // TODO: bit_not can't just redirect because that would flip the leading zeros too. 
-
-fn shift_right_logical(value: u32, shift_amount: i64) u32 #ir(.shr, .Kw);
-fn shift_right_logical(value: u64, shift_amount: i64) u64 #ir(.shr, .Kl);
-fn shift_right_logical(value: i32, shift_amount: i64) i32 #ir(.shr, .Kw);
-
-fn bit_and(a: i32, b: i32) i32 #redirect(Ty(u32, u32), u32);
 
 // TODO: :SLOW?
 fn pow(base: i64, exp: i64) i64 = {

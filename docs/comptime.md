@@ -14,48 +14,6 @@ There are exactly two limitations:
     (because the child process won't have the compiler's thread 
     so if you try to call a function that hasn't been compiled yet, it never will be).
 
-## Inserting Ir for Constant Folding
-
-The franca self hosted backend started as a port of [Qbe](https://c9x.me/compile/) and 
-one of the optimisation passes is constant folding. Part of that requires the ability 
-to take any ir operation and evaluate it. A simple implementation of this may involve 
-a giant switch statement over all the operations and all the primitive types you support. 
-
-Here's an excerpt from Qbe's [fold.c](https://c9x.me/git/qbe.git/tree/fold.c?id=5e9726946dcb9248dbd34ded1bdd4f7af8dc2d31): 
-
-```
-case Osar:  x = (w ? l.s : (int32_t)l.s) >> (r.u & (31|w<<5)); break;
-case Oshr:  x = (w ? l.u : (uint32_t)l.u) >> (r.u & (31|w<<5)); break;
-case Oshl:  x = l.u << (r.u & (31|w<<5)); break;
-```
-
-It becomes an awkward dance to figure out the right incantation to make the c compiler 
-generate exactly the instruction you need to get bitwise matching output as if you'd 
-generated code to do the operation at runtime instead. 
-
-error prone.   
-we already have codegen that understands our ir.   
-
-It would be convenient if we could write code like this instead: 
-
-```
-// pseudocode
-fn eval(rt_o: Op, rt_k: Cls, a0: Bits, a1: Bits) Bits = {
-  for_enum Op { $ct_o |  // add, sub, etc.
-    for_enum Cls { $ct_k |  // i64, f32, etc.
-      if can_fold(ct_o, ct_k) && rt_o == ct_o && rt_k == ct_k {
-        f :: /* somehow ask the compiler to insert code that runs ct_o here */;
-        return f(a0, a1);
-      };
-    };
-  };
-}
-```
-
-The full code for this is at the bottom of `backend/opt/fold.fr` (the do_fold function). 
-It's more code than I'd like and it's less obvious than the giant switch but it does the job 
-and I'm sure the language can be refined farther to make it less painful. 
-
 ## DSLs in Strings
 
 The franca self hosted backend started as a port of [Qbe](https://c9x.me/compile/) and there 
@@ -201,3 +159,47 @@ code needed that library.
 ## Observing the Environment
 
 how do you embed the current git hash in a c program. 
+
+## Inserting Ir for Constant Folding
+
+> This is a bad example because it's cheating by being part of the compiler but it's still kinda neat. 
+
+The franca self hosted backend started as a port of [Qbe](https://c9x.me/compile/) and 
+one of the optimisation passes is constant folding. Part of that requires the ability 
+to take any ir operation and evaluate it. A simple implementation of this may involve 
+a giant switch statement over all the operations and all the primitive types you support. 
+
+Here's an excerpt from Qbe's [fold.c](https://c9x.me/git/qbe.git/tree/fold.c?id=5e9726946dcb9248dbd34ded1bdd4f7af8dc2d31): 
+
+```
+case Osar:  x = (w ? l.s : (int32_t)l.s) >> (r.u & (31|w<<5)); break;
+case Oshr:  x = (w ? l.u : (uint32_t)l.u) >> (r.u & (31|w<<5)); break;
+case Oshl:  x = l.u << (r.u & (31|w<<5)); break;
+```
+
+It becomes an awkward dance to figure out the right incantation to make the c compiler 
+generate exactly the instruction you need to get bitwise matching output as if you'd 
+generated code to do the operation at runtime instead. 
+
+error prone.   
+we already have codegen that understands our ir.   
+
+It would be convenient if we could write code like this instead: 
+
+```
+// pseudocode
+fn eval(rt_o: Op, rt_k: Cls, a0: Bits, a1: Bits) Bits = {
+  for_enum Op { $ct_o |  // add, sub, etc.
+    for_enum Cls { $ct_k |  // i64, f32, etc.
+      if can_fold(ct_o, ct_k) && rt_o == ct_o && rt_k == ct_k {
+        f :: /* somehow ask the compiler to insert code that runs ct_o here */;
+        return f(a0, a1);
+      };
+    };
+  };
+}
+```
+
+The full code for this is at the bottom of `backend/opt/fold.fr` (the do_fold function). 
+It's more code than I'd like and it's less obvious than the giant switch but it does the job 
+and I'm sure the language can be refined farther to make it less painful. 

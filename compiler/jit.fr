@@ -69,32 +69,32 @@ fn wait_for_symbol(shared: *CodegenShared, id: u32) rawptr = {
         r
     };
     
-    @if(shared.threaded) {
-        if !symbol_is_ready(shared, id) {
-            zone := zone_begin(.Wait);
-            
-            u32.atomic_set(shared.waiting_for_symbol&, 1);
-            prev := shared.waiting_for_bouba;
-            while => prev != codegen_queue_size && !symbol_is_ready(shared, id) {
-                Futex'wait(shared.waiting_for_bouba&, prev);
-                prev = shared.waiting_for_bouba;
-            };
-            u32.atomic_set(shared.waiting_for_symbol&, 0);
+    @if(shared.threaded)
+    if !symbol_is_ready(shared, id) {
+        zone := zone_begin(.Wait);
         
-            zone_end(zone);
+        u32.atomic_set(shared.waiting_for_symbol&, 1);
+        prev := shared.waiting_for_bouba;
+        while => prev != codegen_queue_size && !symbol_is_ready(shared, id) {
+            Futex'wait(shared.waiting_for_bouba&, prev);
+            prev = shared.waiting_for_bouba;
         };
+        u32.atomic_set(shared.waiting_for_symbol&, 0);
+    
+        zone_end(zone);
+        lock(shared.m.icache_mutex&);
     };
     
-    lock(shared.m.icache_mutex&);
     c := rawptr.zeroed();
     use_symbol(shared.m, id) { symbol | 
         c = symbol.jit_addr;
     };
-    shared.m.bump_dirty_new();
-    unlock(shared.m.icache_mutex&);
+    @if(shared.threaded) {
+        shared.m.bump_dirty_new();
+        unlock(shared.m.icache_mutex&);
+    };
     c
 }
-
 
 // Creates a function with the signeture (arg_array: *u8, ret_array: *u8, callee: fnptr) -> void.
 // It starts compiling on self.comptime_codegen and you have to get the result out of self.dyncalls when it's ready. 
@@ -273,9 +273,8 @@ fn create_jit_shim(self: CompCtx, shared: *CodegenShared, fid: FuncId, handler_c
         do_the_call.phi.blk[1] = f.start;
         do_the_call.phi.arg&[1] = target;
         
-        name_block :: fn(b: *Qbe.Blk, name: Str) = @if(TRACK_IR_NAMES) {
-            l := fixed_list(b.name&.items()); // :UnacceptablePanic
-            @fmt(l&, "%", name);
+        name_block :: fn(b: *Qbe.Blk, name: Str) = {
+            b.name = name;
         };
         
         // convert to arguments
@@ -424,15 +423,6 @@ report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHo
                     a + b + c
                 })
             };
-        };
-        
-        // I AM BAD AT MY JOB
-        // I AM BAD AT MY JOB
-        // I AM BAD AT MY JOB
-        // I AM BAD AT MY JOB
-        // I AM BAD AT MY JOB
-        if self.comptime_codegen.m.goal.arch == .x86_64 {
-            usleep(10);  // this helps the thing where you get stuck in a shim loop until you segfault FIX ME PLEASE -- Feb 27, 2025
         };
         
         if result.is_null() {

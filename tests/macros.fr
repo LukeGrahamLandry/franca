@@ -94,25 +94,21 @@
     
     fn unwrap_or_99(m: Option4(i64)) i64 = @match(m) {
         // you don't need the argument type because we know the enum type.
-        fn Some(payload) i64 = payload;
-        fn None() i64 = 99;
+        fn Some(payload) => payload;
+        fn None() => 99;
     };
     
     yes: Option4(i64) = (Some = 12);
-    no: Option4(i64) = (None = unit);
+    no: Option4(i64) = (None = ());
     assert_eq(unwrap_or_99(yes), 12);
     assert_eq(unwrap_or_99(no), 99);
     
-    // TODO: you shouldn't need to name the None void argument! broke when i force inlined => functions. 
-    //       for that matter, these should work with just = instead of =>. the above do??! 
-    //       "var no name not unit" isn't checking for expressions that evaluate to unit? so it sees the load from the enum as something bad. 
-    //       and that only happens when inlining because that's what adds DeclVarPattern -- May 19
     // @match can return any type. 
-    fn is_some4(m: Option4(i64)) bool =     // // compared to rust:
-        @match(m) {                         // match m {
-            fn Some(_) => true;             //   Some(_) => true
-            fn None(_) => false;            //   None => flase
-        };                                  // }
+    fn is_some4(m: Option4(i64)) bool =
+        @match(m) {
+            fn Some() => true;
+            fn None() => false;
+        }
     
     assert_eq(is_some4(yes), true);
     assert_eq(is_some4(no), false);
@@ -154,7 +150,7 @@
     fn to_bool(b: MyBool) bool = {
         if(eq(b, MyBool.True), => true) {
             if(eq(b, MyBool.False), => false, 
-                fn() bool = panic("Unrechable: Invalid Enum Value")
+                => panic("Unrechable: Invalid Enum Value")
             )
         }
     }
@@ -224,13 +220,13 @@
     E :: @tagged(aaa: i64, bbb: Str);
     e : E = (aaa = 123);
     u := @match(e&) {
-        (fn aaa(arg: *i64) i64 = arg[]);
-        (fn bbb(arg: *Str) i64 = 2);
+        (fn aaa(arg) => arg[]);
+        (fn bbb(arg) => 2);
     };
     assert_eq(u, 123);
     
     u := @match(e&) {
-        (fn bbb(arg: *Str) i64 = 52);
+        (fn bbb(arg) => 52);
         @default => 25;
     };
     assert_eq(u, 25);
@@ -295,10 +291,9 @@ fn range_switch() #test = {
     v += 1;
     assert_eq(v, 1);
     
-    // TODO: this doesn't work because it tries to lex as a comment.
-    //z := 50;
-    //z /= 2;
-    //assert_eq(z, 25);
+    z := 50;
+    z /= 2;
+    assert_eq(z, 25);
     
     // lhs can be a pointer dereference 
     vv := v&;
@@ -318,7 +313,7 @@ fn range_switch() #test = {
     // so the += syntax is not the same as this, which calls the function twice. 
     blow_up_moon()[] = add(blow_up_moon()[], 1);
     assert_eq(v, 5);
-    assert_eq(moons_remaining, 2.neg());
+    assert_eq(moons_remaining, -2);
     
     rust_example :: """
     fn main() {
@@ -336,14 +331,33 @@ fn range_switch() #test = {
 
 #test fn format_string(canary: i64) i64 = {
     output: List(u8) = list(temp());
-    // TODO: without brackets it parses as anotation on stmt and doesnt call the macro
-    (@fmt(output&, "Hello %! % %", "World", "abc", 1));
+    @fmt(output&, "Hello %! % %", "World", "abc", 1);
     words := output&.items();
     expected := "Hello World! abc 1";
     assert_eq(true, eq(words, expected));
     
     assert_eq(true, eq(@concat("Hello ", "World!", " abc 1") temp(), expected));
     assert_eq(true, eq(@concat("h", "i") temp(), "hi") );
+    
+    concat :: fn(arg: FatExpr, rt_alloc: FatExpr) FatExpr #macro = {
+        args := arg.expr.Tuple.items();
+        actions: List(FatExpr) = list(args.len(), ast_alloc());
+        
+        @{
+            join_list: List(u8) = list(@[rt_alloc]);
+            @[{
+                enumerate args { i, param | 
+                    // TODO: having () in the cast instead of lit(void) stopped working when I changed some things to use the infallible imm_eval_known which is weird -- Apr 21 
+                    action := @{ @as(void) push_all(join_list&, @as(Str) @[param[]]) };
+                    actions&.push(action);
+                };
+                
+                arg.expr.Tuple = actions.as_raw();
+                arg
+            }];
+            join_list&.items() // leak! since the caller won't know the capacity
+        }
+    }
     
     canary
 }
@@ -361,7 +375,7 @@ fn range_switch() #test = {
     // This is the more useful situation. 
     v: ?i64 = .None;
     e: E = @match(v) {
-        fn Some(_) => .a;
+        fn Some() => .a;
         fn None() => .b;
     };
 }

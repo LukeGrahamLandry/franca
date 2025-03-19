@@ -8,7 +8,7 @@ A self sufficient programming language.
 - keep it small enough to be maintained by one person
 - learn as much as possible, which means not leaning on tools/libraries written by someone else
 - be fast enough that you never spend time waiting  
-  (currently unacceptable; it takes 1.3 seconds to compile itself)
+  (currently unacceptable; it takes a whole second to compile itself)
 
 ## Features
 

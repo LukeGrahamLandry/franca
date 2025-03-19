@@ -23,26 +23,27 @@ RMap :: @struct(
     live: Qbe.BSet,
     len: i64,  // numbers of registers used so far
 );
-  
+
+PMove :: @struct(
+    src:  Qbe.Ref, 
+    dest: Qbe.Ref, 
+    cls:  Qbe.Cls, 
+);
+
 RegaCtx :: @struct(
     f: *Qbe.Fn,
-    regu: u64,          /* registers used */
-    pm: Array(@struct(
-        src:  Qbe.Ref, 
-        dest: Qbe.Ref, 
-        cls:  Qbe.Cls, 
-    ), Qbe.Tmp0),       /* parallel move constructed */
-    npm:   i64,         /* size of pm */
-    loop:  i32,         /* current loop level */
+    regu: u64,       /* registers used */
+    pm: List(PMove), /* parallel move constructed */
+    loop:  i32,      /* current loop level */
     added_moves:  u32, 
     added_blocks: u32,
 );
 
 fn hint(c: *RegaCtx, t: i64) *i32 #inline = 
-    c.f.tmp[phi_dest(t, c.f.tmp)].hint.register&;
+    c.f.tmp[phi_dest(t, c.f)].hint.register&;
 
 fn sethint(c: *RegaCtx, t: i64, r: i64) void = {
-    p := c.f.tmp[phi_dest(t, c.f.tmp)]&;
+    p := c.f.tmp[phi_dest(t, c.f)]&;
     if p.hint.register == -1 || p.hint.weight > c.loop {
         p.hint.register = r.intcast();
         p.hint.weight = c.loop;
@@ -120,7 +121,7 @@ fn ralloctry(c: *RegaCtx, m: *RMap, t: i32, try: bool) Qbe.Ref = {
         if try {
             return(QbeNull);
         };
-        to_avoid := c.f.tmp[phi_dest(t, c.f.tmp)].hint.avoid;
+        to_avoid := c.f.tmp[phi_dest(t, c.f)].hint.avoid;
         to_avoid  = to_avoid.bit_or(m.live.t[]); // include those already allocated
         
         ::if(Ty(i32, i32));
@@ -145,7 +146,38 @@ fn ralloctry(c: *RegaCtx, m: *RMap, t: i32, try: bool) Qbe.Ref = {
     r_hinted := c.hint(t)[].intcast();
     if r_hinted != -1 && r_hinted != r_allocated {
         // if we didn't get where we wanted, remember that we should be swapped in if r_hinted frees up. 
-        m.wait_list&[r_hinted] = t.intcast();
+
+        // TODO: the hinting sounds like a good idea but seems to generate worse code. 
+        //       is there something weird about the shape of code i output that confuses it somehow? 
+        // 1098396 -> 1003912
+        // qbe does this but it makes the code size 10% bigger and not faster. 
+        // it seems to generate a useless move to restore local variables after a call? 
+        // T64 was allocated R20 but wants R1
+        // @println("T% was allocated R% but wants R%", t, r_allocated, r_hinted);
+        // which like does make sense but we have to somehow remember that it's already there or it inserts a bunch of useless stuff
+        // but its hard to think about because we're going backwards
+        // is it too dumb to add an extra pass that tries harder to remove redundant copies? probably. 
+        // the other places hints are added are useful it seems.
+        //
+        /*
+        R20 =l copy R1
+    	# R1 =l copy R1
+    	call $no_epar, C33
+    	R1 =l copy R20
+    	R20 =l copy R1
+    	# R1 =l copy R1
+    	call $no_epar, C33
+        ------
+	
+        R20 =l copy R1
+		R1 =l copy R20  <-- still dumb
+		call $no_epar, C33
+		R1 =l copy R20
+		call $no_epar, C33
+        */
+        @if(ADD_TO_REG_WAIT_LIST) {
+            m.wait_list&[r_hinted] = t.intcast();
+        };
     };
     TMP(r_allocated)
 }
@@ -184,16 +216,12 @@ fn rfree_at_index(c: *RegaCtx, m: *RMap, t: i64, i: i64) i64 = {
     r
 }
 
-fn pmadd(c: *RegaCtx, src: Qbe.Ref, dst: Qbe.Ref, k: Qbe.Cls) void = {
-    @assert(c.npm < Qbe.Tmp0, "cannot have more moves than registers");
-    m := c.pm&[c.npm]&;
-    m.src = src;
-    m.dest = dst;
-    m.cls = k;
-    c.npm += 1;
-}
+fn pmadd(c: *RegaCtx, src: Qbe.Ref, dst: Qbe.Ref, k: Qbe.Cls) void #inline = 
+    c.pm&.push(src = src, dest = dst, cls = k);
 
 PMStat :: @enum(i64) (ToMove, Moving, Moved);
+
+ADD_TO_REG_WAIT_LIST :: false;
 
 // :Explain
 // note: k is a pointer. we mutate back up through levels of recursion. 
@@ -210,12 +238,12 @@ fn pmrec(c: *RegaCtx, status: []PMStat, i: i64, k: *Qbe.Cls) i64 = {
     ::assert(Qbe.Cls.Ks.raw().bit_or(Qbe.Cls.Kd.raw()) == Qbe.Cls.Kd.raw(), "Cls numbers");
     k[] = @as(Qbe.Cls) @as(i32) k[].raw().bit_or(c.pm&[i].cls.raw());
     j := 0;
-    while => j < c.npm && c.pm&[j].dest != c.pm&[i].src {
+    while => j < c.pm.len && c.pm&[j].dest != c.pm&[i].src {
         j += 1;
     };
     cycle := -1;
     ::if(PMStat);
-    s := if(j == c.npm, => PMStat.Moved, => status[j]);
+    s := if(j == c.pm.len, => PMStat.Moved, => status[j]);
     @match(s) {
         fn Moving() => {
             cycle = j; /* start of cycle */
@@ -245,9 +273,9 @@ fn pmrec(c: *RegaCtx, status: []PMStat, i: i64, k: *Qbe.Cls) i64 = {
 }
 ::enum_basic(PMStat);
 fn pmgen(c: *RegaCtx) void = {
-    status := temp().alloc_zeroed(PMStat, c.npm);
-    @debug_assert(c.npm == 0 || status[c.npm-1] == .ToMove, "zero init is ToMove");
-    range(0, c.npm) { i | 
+    status := temp().alloc_zeroed(PMStat, c.pm.len);
+    ::assert(PMStat.zeroed() == .ToMove, "zero init is ToMove");
+    range(0, c.pm.len) { i | 
         if status[i] == .ToMove {
             k := c.pm&[i].cls;
             c.pmrec(status, i, k&);
@@ -304,7 +332,7 @@ fn do_parallel_moves(c: *RegaCtx, b: *Qbe.Blk, last_move: *Qbe.Ins, m: *RMap) *Q
             }
         };
     };
-    c.npm = 0;
+    c.pm&.clear();
     range(0, m.len) { n |
         t  := m.tmps&[n].intcast();
         spill_slot  := c.f.tmp[t].slot;
@@ -350,7 +378,7 @@ fn insert(c: *RegaCtx, r: *Qbe.Ref, rs: *Array(*Qbe.Ref, 4), p: i64) void = {
     }
 }
 
-fn do_block_instructions(c: *RegaCtx, b: *Qbe.Blk, cur: *RMap) void = {
+fn do_block_instructions(c: *RegaCtx, b: *Qbe.Blk, cur: *RMap) void = { // #log_ir("RIS") = {
     T := c.f.globals.target;
     reg_args := Array(*Qbe.Ref, 4).zeroed(); reg_args := reg_args&;
 
@@ -502,7 +530,7 @@ carve :: fn(ba: **Qbe.Blk, bb: **Qbe.Blk) bool = {
  */
 fn register_allocation(f: *Qbe.Fn) void = {
     /* 1. setup */
-    c: RegaCtx = (f = f, regu = 0, pm = get_field_type(RegaCtx, @symbol pm).zeroed(), npm = 0, loop = MAX_i32, added_moves = 0, added_blocks = 0); c := c&;
+    c: RegaCtx = (f = f, regu = 0, pm = PMove.list(temp()), loop = MAX_i32, added_moves = 0, added_blocks = 0); c := c&;
     rl := Array(i32, Qbe.Tmp0).zeroed(); rl := rl&.items();
     blk := temp().alloc_zeroed(*Qbe.Blk, f.nblk.zext());
     end := temp().alloc_zeroed(RMap, f.nblk.zext());
@@ -632,7 +660,7 @@ fn register_allocation(f: *Qbe.Fn) void = {
             };
         };
 
-        c.npm = 0;
+        c.pm&.clear();
         range(0, m.len) { j |
             t := m.tmps&[j].intcast();
             r := m.regs&[j].intcast();
@@ -690,7 +718,7 @@ fn emit_phi_blocks(c: *RegaCtx, beg: []RMap, end: []RMap) void = {
         //@debug_assert(!b.s1.identical(b.s2), "i think these are removed and my behaviour here differs if not"); // :SketchyIterTargets
         for_jump_targets_mut b { ps |
             s := ps[];
-            c.npm = 0;
+            c.pm&.clear();
             for_phi s { p |
                 continue :: local_return;
                 dst := p.to;
@@ -726,7 +754,7 @@ fn emit_phi_blocks(c: *RegaCtx, beg: []RMap, end: []RMap) void = {
                 b1.link = blist;
                 blist = b1;
                 f.nblk += 1;
-                name_phi_block(b, s, b1);
+                name_phi_block(f, b, s, b1);
                 b1.nins = moves_inserted.trunc();
                 c.added_moves += b1.nins;
                 c.added_blocks += 1;
@@ -743,16 +771,20 @@ fn emit_phi_blocks(c: *RegaCtx, beg: []RMap, end: []RMap) void = {
     };
 };
 
-fn name_phi_block(source: *Qbe.Blk, dest: *Qbe.Blk, inserted: *Qbe.Blk) void = {
-    @if(TRACK_IR_NAMES) {
-        // TODO: ugh. garbage. you just want to truncate if not enough space in the buffer.
-        l: List(u8) = (maybe_uninit = inserted.name&.items(), len = 0, gpa = panicking_allocator); // :UnacceptablePanic
-        @fmt(l&, "%_%", source.name(), dest.name());
+fn name_phi_block(f: *Qbe.Fn, source: *Qbe.Blk, dest: *Qbe.Blk, inserted: *Qbe.Blk) void #inline = {
+    @if(f.track_ir_names()) {
+        inserted.name = @tfmt("%_%", source.name(), dest.name());
     };
 }
 
 // we want our parameters to be assgned to thier abi registers so we don't actually have to do a copy. 
 fn set_param_copy_hints(c: *RegaCtx) void = {
+    // turning this off makes x64 fail tests. encoding.ssa mem4.ssa 
+    // which is scary cause it should be just an optimisation. 
+    // so hopefully ive revealed some other subtle problem. TODO! 
+    @if(!ADD_TO_REG_WAIT_LIST && c.f.globals.goal.arch == .aarch64) return();
+    // 1004012 -> 981364
+    
     for_insts_forward c.f.start { i |
         if i.op() != .copy || !isreg(i.arg&[0]) {
             return();

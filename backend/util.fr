@@ -20,11 +20,11 @@ fn isreg(r: Qbe.Ref) bool #inline =
 // tmp[t].phi has which id was the .to of a phi with t as an arg. 
 // this looks up a chain of phis to see where t is going to end up. 
 // if its not used as a phi arg, that's just itself. 
-fn phi_dest(t: i64, tmp: QList(Qbe.Tmp)) i64 = {
-    t1 := tmp[t].phi.zext();
+fn phi_dest(t: i64, f: *Qbe.Fn) i64 = {
+    t1 := f.tmp[t].phi.zext();
     if(t1 == 0, => return(t)); // t was not a phi arg
-    t1 = phi_dest(t1, tmp);
-    tmp[t].phi = t1.intcast();  // cache long chains
+    t1 = phi_dest(t1, f);
+    f.tmp[t].phi = t1.intcast();  // cache long chains
     t1
 }
 
@@ -111,10 +111,8 @@ fn newtmp(f: *Qbe.Fn, debug_hint: Str, k: Qbe.Cls) Qbe.Ref = {
     f.tmp&.grow(t + 1);
     f.tmp.slice(t, t + 1).set_zeroed();
     tmp := f.tmp.index(t);
-    @if(f.globals.track_ir_names()) {
-        l: List(u8) = (maybe_uninit = tmp.name&.items(), len = 0, gpa = panicking_allocator); // :UnacceptablePanic
-        debug_hint.len = min(debug_hint.len, 70);
-        @fmt(l&, "%.%", debug_hint, t);
+    @if(f.track_ir_names()) {
+        tmp.name = @tfmt("%.%", debug_hint, t);
     };
     tmp.cls = k;
     tmp.slot = -1;
@@ -329,16 +327,13 @@ fn default_init(f: *Qbe.Fn, m: *QbeModule) void = {
     assert_eq(f.ncon.zext(), FIXED_CONST_COUNT);
     // Add temporaries representing physical registers.
     // For the comptime usecase, the is_float will be wrong for some targets but that's fine becuase register numbers will just be moved to the real function, 
-    
     t := f.globals.target;
-    old := m.track_ir_names;
-    m.track_ir_names = false;
     range(0, Qbe.Tmp0) { i |
         is_float := t.fpr0 <= i.intcast() && i.intcast() < (t.fpr0 + t.nfpr);
    	    assert_eq(f.newtmp("r", if(is_float, => .Kd, => .Kl)), TMP(i));
     };
-    m.track_ir_names = old;
     assert_eq(f.ntmp.zext(), Qbe.Tmp0);
+    f.track_ir_names = TRACK_IR_NAMES;
 }
 
 fn is_symbol(f: *Qbe.Fn, r: Qbe.Ref) bool = 
@@ -1246,9 +1241,8 @@ fn display(self: Qbe.Ref, out: *List(u8)) void = {
     @fmt(out, "%:%", self.rtype(), self.val());
 }
 
-fn track_ir_names(m: *QbeModule) bool #inline = {
-    @if(TRACK_IR_NAMES, m.track_ir_names, false)
-} 
+fn track_ir_names(f: *Qbe.Fn) bool #inline =
+    @if(TRACK_IR_NAMES, f.track_ir_names, false);
 
 ///////////////////////////////////////////////////////////////////////////////
 

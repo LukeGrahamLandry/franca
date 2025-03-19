@@ -1,4 +1,3 @@
-// TODO: less stupid code for accessing constant values!
 // TODO: always check for zero sized type instead of == void
 
 EmitIr :: @struct(
@@ -41,13 +40,7 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
         // :bake_relocatable_value
         {comp.vtable.check_for_new_aot_bake_overloads}(comp.data); 
     };
-    // TODO
-    //func := comp.get_function(f);
-    //if find_impl(func.body&, .DynamicImport).is_some() && when == .Aot {
-    //    return(.Ok);
-    //};
     
-    //@if(f.as_index() == 56053, panic("foo")); // TODO: this fails safety check here. 
     entry := bouba_acquire(shared, idx);
     m := shared.m;
     result: CRes(void) = .Ok;
@@ -57,7 +50,6 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
         func := comp.get_function(f); 
         opts := comp.get_build_options();
         env := comp.get_comptime_env();
-        //@if(TRACE_SHIMS) @println("emit_ir % %", f, comp.get_string(func.name));
         self: EmitIr = (
             f = temp().box(Qbe.Fn),
             program = comp,
@@ -95,12 +87,8 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
         res: CRes(void) = .Ok;
         ::tagged(@type response);
         if !response&.is(.ReplacedIr) {
-            n := self.f.globals.track_ir_names&;
-            old := n[];
-            entry.track_ir_names = self.entry.logging.len > 0 || self.program.get_build_options()[].always_track_ir_names;
-            n[] = entry.track_ir_names;
+            self.f.track_ir_names = self.entry.logging.len > 0 || opts.always_track_ir_names;
             res = self&.emit_body(f);
-            n[] = old;
         };
         self.f.lnk.export = export;
         
@@ -246,10 +234,17 @@ fn compile_for_arg(self: *EmitIr, arg: *FatExpr) CRes([]Qbe.Ins) = {
                     continue();
                 };
                 // aggregate
-                // TODO: you really want to do `fn Deref(ref) => @try(self.compile_expr(ref, .Scalar)) return;`
-                //       to skip an extra blit that the abi stuff will do for you. 
-                //       but we don't know if a later argument expression will modify that memory. 
-                r      := @try(self.compile_expr(val, .NewMemory)) return;
+                // TODO: you really want to skip an extra blit that the abi stuff will do for you. 
+                //       but we don't know if a later argument expression will modify that memory.  
+                //       TODO: make a test that fails if you do this
+                //       currently doing it saves 30ms on self compile (and im not even doing it for GetVar) -- Mar 16
+                //       alternatively, be able to tell the backend we promise the arg memory is noalias so it doesn't have to blit. 
+                UNSOUND_SKIP_EXTRA_BLIT :: false;
+                r := if UNSOUND_SKIP_EXTRA_BLIT && val.expr&.is(.Deref) { 
+                    @try(self.compile_expr(val.expr.Deref, .Scalar)) return
+                } else {
+                    @try(self.compile_expr(val, .NewMemory)) return
+                };
                 r_type := self.get_aggregate(ty);
                 make_ins(.argc, .Kl, QbeNull, r_type, r)
             };
@@ -1516,13 +1511,11 @@ fn record_var_decl(self: *EmitIr, name: Var, value: IrVar) void #inline = {
         ::@assert(IrVar.Tag().enum_count() == 2, "update IrVar repr");
         r := value.Local;
         t := self.f.get_temporary(r);
-        @if(self.f.globals.track_ir_names()) {
-            l := fixed_list(t.name&.items());
-            @fmt(l&, "%.%", name, r.val());
+        @if(self.f.track_ir_names()) {
+            t.name = @tfmt("%.%", name, r.val());
         };
     };
 }
-
 
 // IMPORTANT: you can't use f.emit because threads. 
 fn emit(self: *EmitIr, o: Qbe.O, k: Qbe.Cls, dest: Qbe.Ref, a0: Qbe.Ref, a1: Qbe.Ref) void #inline = {
@@ -1662,11 +1655,7 @@ fn get_aggregate(self: CompCtx, m: *CodegenShared, ty: Type) Qbe.Ref = {
         result.size = info.stride_bytes.zext();
         @debug_assert(result.size != 0, "ICE: treating zero size type % as an aggragate", self.log(ty));
         result.align_log2 = (@as(i64) info.align_bytes.zext()).trailing_zeros().intcast(); // TODO: do this faster
-        //@println("%", )
-        @if(m.m.track_ir_names()) {
-            l := fixed_list(result.name&.items());
-            @fmt(l&, "T%", ty.as_index());
-        };
+        // TODO: track names
         i := @match(type) {
             fn Named(it)    => self.get_aggregate(m, it._0).val();
             fn Enum(it)     => self.get_aggregate(m, it.raw).val();
@@ -1892,9 +1881,8 @@ fn store_op(self: CompCtx, ty: Type) Qbe.O = @match(self.get_type(ty)) {
 
 fn new_block(self: *EmitIr, debug: Str) *Qbe.Blk = {   
     b := temp().box_zeroed(Qbe.Blk);
-    @if(self.f.globals.track_ir_names()) {
-        l := fixed_list(b.name&.items()); // :UnacceptablePanic
-        @fmt(l&, "b%_%", self.next_block_name, debug);
+    @if(self.f.track_ir_names()) {
+        b.name = @tfmt("b%_%", self.next_block_name, debug);
         self.next_block_name += 1; // not the same as blocks.len because we remove for unused local returns. 
     };
     b.ins = new(0);

@@ -69,14 +69,9 @@ fn List($T: Type) Type = {
     fn clone(from: Self) Self #inline = from&.clone();
     
     fn deep_clone(self: *Self, a: Alloc) Self = {
-        @if(!T.has_pointers(), { self.items().clone(a) }, {
-            s: Self = list(self.len, a);
-            s.len = self.len;
-            enumerate self { i, e |
-                s[i] = e.deep_clone(a);
-            };
-            s
-        })
+        in  := self.items();
+        out := in&.deep_clone(a);
+        assume_owned(out, a)
     }
     
     fn items(self: *Self) Slice(T) #inline = {
@@ -395,6 +390,9 @@ fn RawList($T: Type) Type = {
         (Some = self.index(self.len - 1))
     }
     
+    fn slice(self: Self, first: i64, past_last: i64) []T #inline = 
+        self.items().slice(first, past_last);
+    
     Self
 }
 
@@ -402,14 +400,6 @@ fn RawList($T: Type) Type = {
 fn deep_clone(self: ~S, a: Alloc) Deref(S) = {
     s := self.items();
     s&.deep_clone(a).as_raw_list()
-}
-
-// TODO: this is really inefficient if you already own 'a'
-fn concat(a: Str, b: Str, gpa: Alloc) List(u8) = {
-    c: List(u8) = list(a.len().add(b.len()), gpa);
-    c&.push_all(a);
-    c&.push_all(b);
-    c
 }
 
 fn split(haystack: Str, needle: Str, gpa: Alloc) List(Str) = {
@@ -437,10 +427,6 @@ fn split(haystack: Str, needle: Str, gpa: Alloc) List(Str) = {
     lines
 }
 
-// TODO: better error message if you call this on Ptr(Str)
-fn split_lines(s: Str, gpa: Alloc) List(Str) #inline = 
-    split(s, "\n", gpa); 
-
 // It's such a pain to google an ascii table every time.  
 // Since this is #fold, the length check happens during compilation if the argument to a call is a constant.
 // So this function can take the place of a char literal in other languages without new syntax. 
@@ -460,16 +446,10 @@ fn ascii(s: Str) u8 #fold = {
     c.trunc()
 }
 
-// TODO
-fn push(self: *List(u8), v: i64) void = 
-    self.push(@as(u8) v.trunc());
-
-
-
 fn reserve_type(bytes: *List(u8), $T: Type) *T #generic = {
     bytes.reserve(T.size_of());
     ptr := bytes.maybe_uninit.ptr.offset(bytes.len);
-    // TODO: do we really care?
+    // TODO: is alignment real?
     //@debug_assert(u8.int_from_ptr(ptr).mod(T.align_of()) == 0, "unaligned reserve");
     ptr := ptr_cast_unchecked(u8, T, ptr);
     bytes.len += T.size_of();
@@ -486,8 +466,7 @@ fn zero_pad_to_align(bytes: *List(u8), align: i64) void = {
             bytes.push(0);
         };
     };
-    // TODO: this seems to make it fault all the time :FUCKED -- Nov 28
-    //@debug_assert_eq(bytes.len.mod(align), 0, "alignment confusion. allocation aligned differently from our length.");
+    @debug_assert_eq(bytes.len.mod(align), 0, "alignment confusion. allocation aligned differently from our length.");
 }
 
 fn zero_pad_len_to_align(bytes: *List(u8), align: i64) void = {

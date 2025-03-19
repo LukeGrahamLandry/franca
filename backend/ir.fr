@@ -1,6 +1,6 @@
 // Adapted from Qbe. MIT License. © 2015-2024 Quentin Carbonneaux <quentin@c9x.me>
 
-TRACK_IR_NAMES :: true;  // costs ~40ms (out of 1050)
+TRACK_IR_NAMES :: true; 
 
 Qbe :: @rec @struct(
     Tmp0 :: 64, // first non-reg temporary
@@ -25,43 +25,26 @@ Qbe :: @rec @struct(
         Inlining = "G".char(),
         Block = "B".char(),
     ),
-    Cls :: @enum(i32) (  // :QbeClsi16
-        Kw = 0, // :JretOrder :StoreOrder
-        Kl = 1,
-        Ks = 2,
-        Kd = 3,
+    Cls :: @enum(i32) (
+        Kw, // :JretOrder :StoreOrder
+        Kl,
+        Ks,
+        Kd,
         
-        // The ones below aren't real, they just exist for the abi. So they're only used for [call args, entry args, ret]. 
-        
-        // signed/unsigned byte/half
-        Ksb = 4, /* matches Oarg/Opar/Jret */
-        Kub = 5,
-        Ksh = 6,
-        Kuh = 7,
-     
-        // A pointer to a struct passed by value, treated as Wl in the ir.
-        // But the type will be in one of the instruction Ref fields, 
-        // and the backend can use that to decide if it actually needs to be passed in registers.
-        Kc = 8,  // TODO: i never use this. remove it. 
-     
-        K0 = 9, // void (for returns)  // TODO: i never use this. remove it. 
-    
-        Kx = 10, /* "top" class (see usecheck() and clsmerge()) */
-        
-        Ke = 11, /* erroneous mode */
-        // Km = Qbe.Cls.Kl, /* memory pointer */
+        Kx, /* "top" class (see usecheck() and clsmerge()) */
+        Ke, /* erroneous mode */
     ),
     RegKind :: @enum(i32) (
-        RTmp = 0,
-        RCon = 1,
-        RInt = 2,
-        RType = 3, /* last kind to come out of the parser */
-        RSlot = 4,
-        RCall = 5,
-        RMem = 6,
+        RTmp,
+        RCon,
+        RInt,  // used for blit1, arm load offset, llcast, J.switch
+        RType,
+        RSlot, // inserted by isel+abi
+        RCall, // inserted by abi
+        RMem,  // for 3-arg instructions. inserted by isel
         
         // TODO: very confusing if you make this -1 and try to match on it
-        RNull = 7, // represented as (RTmp, 0) but useful for comparisons
+        RNull, // represented as (RTmp, 0) but useful for comparisons
     ), // u3
     Target :: @struct(
         apple: bool,
@@ -139,16 +122,11 @@ Qbe :: @rec @struct(
         gen: Qbe.BSet,
         nlive: Array(i32, 2),
         loop: i32,
-        name: @if(TRACK_IR_NAMES, Array(u8, 32), void),
+        name: Str,
         
         wasm_type: i32, // TODO: surely i can union this with some other field
     ),
-    UseType :: @enum(i32) (
-        UXXX,
-        UPhi,
-        UIns,
-        UJmp,
-    ),
+    UseType :: @enum(i32) (UXXX, UPhi, UIns, UJmp),
     Use :: @struct(
         type: Qbe.UseType,
         bid: i32,
@@ -195,7 +173,7 @@ Qbe :: @rec @struct(
         LPtr,
     ),
     Tmp :: @struct(
-        name: @if(TRACK_IR_NAMES, Array(u8, 80), void),
+        name: Str,
         def: *Qbe.Ins, // TODO: nullable
         use: QList(Qbe.Use),
         ndef: u32,  // once in ssa form this will always be 0 or 1, but we use this field while constructing ssa form.
@@ -203,7 +181,7 @@ Qbe :: @rec @struct(
         defining_block: i32,
         cost: u32,
         slot: i32,  /* -1 for unset */
-        cls: Qbe.Cls,  // :QbeClsi16
+        cls: Qbe.Cls,
         hint: @struct(
             register: i32, // r /* or -1 */
             weight: i32,   // w
@@ -214,11 +192,7 @@ Qbe :: @rec @struct(
         width: Qbe.TmpType, 
         visit: i32,  // this is just a place that passes can stick some internal information without needing to alloc thier own array and pass it around. 
     ),
-    ConType :: @enum(i32) (
-        CUndef,
-        CBits,
-        CAddr,
-    ),
+    ConType :: @enum(i32) (CUndef, CBits, CAddr),
     Con :: @struct(
         type: Qbe.ConType,
         sym := Qbe.Sym.zeroed(),
@@ -268,8 +242,8 @@ Qbe :: @rec @struct(
         vararg: bool,
         dynalloc: bool,
         leaf: bool,
-        name: @if(TRACK_IR_NAMES, Array(u8, 80), void),
         read_only: bool,
+        track_ir_names: bool,
         lnk: Qbe.Lnk,
         
         globals: *QbeModule,
@@ -304,7 +278,7 @@ Qbe :: @rec @struct(
         len: u32, /* or index in typ[] for FTyp */
     ),
     Typ :: @struct(
-        name: @if(TRACK_IR_NAMES, Array(u8, 80), void),
+        name: Str,
         is_dark: bool,  // is it an opaque type where we only know the size and alignment. 
         is_union: bool, 
         align_log2: i32,
@@ -661,9 +635,11 @@ QbeUndef :: ref(.RCon, 0); ::enum_basic(Qbe.RegKind);
 // the literal value 0
 QbeConZero :: ref(.RCon, 1);
 
-fn name(s: *Qbe.Tmp) CStr = @if(TRACK_IR_NAMES, (ptr = s.name&.as_ptr()), "");
-fn name(s: *Qbe.Blk) CStr = @if(TRACK_IR_NAMES, (ptr = s.name&.as_ptr()), "");
-fn name(s: *Qbe.Fn)  Str  = s.globals.str(s.lnk.id);
-fn name(s: *Qbe.Typ) CStr = @if(TRACK_IR_NAMES, (ptr = s.name&.as_ptr()), "");
+// TODO: don't call these when merging for formatting names 
+//       but have these fmt numbers to display if the string is empty. 
+fn name(s: *Qbe.Tmp) Str = s.name;
+fn name(s: *Qbe.Blk) Str = @if(s.name.len == 0, @tfmt("%", s.id), s.name);
+fn name(s: *Qbe.Fn)  Str = s.globals.str(s.lnk.id);
+fn name(s: *Qbe.Typ) Str = s.name;
 
 ::enum_basic(Qbe.DebugKey);

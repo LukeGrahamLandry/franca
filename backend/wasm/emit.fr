@@ -19,7 +19,7 @@ fn emit_func_wasm32(f: *Qbe.Fn) void = {
         f = f,
         m = f.globals,
         locals = temp().alloc(i32, f.ntmp.zext()),
-        a = (maybe_uninit = (ptr = code.next, len = code.cap() - code.len()), len = 0, gpa = panicking_allocator),
+        a = fixed_list(ptr = code.next, len = code.cap() - code.len()),
         block_stack = list(temp()), 
     ); e := e&;
    
@@ -290,11 +290,11 @@ fn fixup_wasm32(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_re
     @match(fixup.type) {
         fn WasmIndex() => {
             @debug_assert_ne(symbol.got_lookup_offset, -1, "missing index for $%", symbol.name);
-            lst: List(u8) = (maybe_uninit = (ptr = u8.ptr_from_raw(fixup.patch_at), len = WASM_INDEX_PADDING), len = 0, gpa = panicking_allocator);
+            lst: List(u8) = fixed_list(ptr = u8.ptr_from_raw(fixup.patch_at), len = WASM_INDEX_PADDING);
             leb128_unsigned(lst&, symbol.got_lookup_offset);
         }
         fn WasmAddr(it) => {
-            lst: List(u8) = (maybe_uninit = (ptr = u8.ptr_from_raw(fixup.patch_at), len = WASM_INDEX_PADDING), len = 0, gpa = panicking_allocator);
+            lst: List(u8) = fixed_list(ptr = u8.ptr_from_raw(fixup.patch_at), len = WASM_INDEX_PADDING);
             o := @if(it.wide, Wasm.Inst.I64_Const, Wasm.Inst.I32_Const);
             lst&.push(@as(u8) o);
             value := if(symbol.segment == .Code, => symbol.got_lookup_offset, => symbol.offset + it.increment.zext());
@@ -351,7 +351,7 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     
     code_segment := m.segments&[.Code]&;
     chunks := list([]u8, temp());
-    cursor: List(u8) = (maybe_uninit = (ptr = code_segment.mmapped.ptr, len = COMMANDS_SIZE_GUESS), len = 0, gpa = panicking_allocator);  // :UnacceptablePanic
+    cursor: List(u8) = fixed_list(ptr = code_segment.mmapped.ptr, len = COMMANDS_SIZE_GUESS);  // :UnacceptablePanic
     push_buf :: fn($body: @Fn(buf: *List(u8)) void) void = {
         start := cursor.len;
         body(cursor&);
@@ -414,7 +414,7 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     };
     
     fn write_limits(buf: *List(u8), min: i64, max: ?i64) void = {
-        buf.push(int(max.is_some()));
+        buf.push(int(max.is_some()).trunc());
         leb128_unsigned(buf, min);
         if max { max |
             leb128_unsigned(buf, max);
@@ -452,7 +452,7 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
         push_buf { buf |
             buf.push(@as(u8) Wasm.Section.Global);
             uleb_patch_delta buf {
-                push(buf, 1 + int(m.wasm_any_pare)); // length of globals vector
+                push(buf, 1 + int(m.wasm_any_pare).trunc()); // length of globals vector
                 
                 // __stackbase
                 push(buf, @as(u8) Wasm.ValType.I32); // type
