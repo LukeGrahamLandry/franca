@@ -205,7 +205,7 @@ fn load_module(self: *LoadWasm) void = {
         
         self.return_types = local_func_type.ret.items();
         self.emit_the_code();
-        self.end_block();
+        //self.end_block();
         //self.emit_return(self.return_types);
         
         self.f.lnk.export = true; // TODO
@@ -323,7 +323,8 @@ fn emit_the_code(self: *LoadWasm) void = {
         ::enum(Wasm.Inst);
         
         if self.get_blk()[].jmp.type != .Jxxx && !@is(inst, .End, .Unreachable, .Nop) {
-            @panic("more instructions in block that has already been terminated.");
+            printfn(self.f, self.f.globals.debug_out);
+            @panic("more instructions @% which has already been terminated. (TODO: this happens when there is unreachable code after a BR instruction but that is likely not what you wanted anyway)", self.get_blk()[].id);
         };
         
         // Single byte unary/binary instructions are found in the table. 
@@ -453,6 +454,11 @@ fn emit_the_code(self: *LoadWasm) void = {
                 self.push_block(block_type, true);
                 self.phi_to_stack(self.get_blk());
             }
+            fn Block() => {
+                block_type := self.read_s();  // TODO: use this for something. 
+                self.push_block(block_type, false);
+                self.phi_to_stack(self.get_blk());
+            }
             fn End() => self.end_block();
             fn If() => {
                 block_type := self.read_s();  // TODO: use this for something. 
@@ -483,7 +489,27 @@ fn emit_the_code(self: *LoadWasm) void = {
             }
             fn BrIf() => {
                 depth: i64 = self.read_u().bitcast();
-                panic("TODO: brif");
+                target := self.blocks.len - depth - 1; 
+                
+                it         := self.blocks[target];
+                dest       := @if(it.loop, it.continue, it.break);
+                block_type := dest.visit.intcast();
+                if_block := self.get_blk();
+                if_block.jmp = (type = .jnz, arg = self.stack&.pop().expect("arg on stack for If"));
+                stack := self.stack.items().clone(temp());
+                self.stack_to_phi(if_block, dest);
+                if_block.s1 = dest;
+                
+                new := self.link_new_block();
+                new.visit = preleb(.EmptyBlock);
+                block_entry := self.blocks[self.blocks.len - 1]&;
+                self.f.copy_instructions_from_scratch_reversed_which_means_forwards(block_entry.current);
+                block_entry.current = new;
+                if_block.s2 = new;
+                self.stack = stack;
+            }
+            fn Drop() => {
+                self.stack&.pop().unwrap();
             }
             @default => {
                 @panic("unhandled unstruction %", self.src[self.cursor - 1]);
@@ -499,7 +525,7 @@ fn stack_to_phi(self: *LoadWasm, src: *Qbe.Blk, dest: *Qbe.Blk) void = {
         init_empty_phis(self.f, dest.phi&, arg_types);
     };
     for_phi dest { p |
-        p.push(src, self.stack&.pop().expect("value for phi"));
+        p.push(src, self.stack&.pop() || @panic("missing value for phi % -> % %", src.id, dest.id, { printfn(self.f, self.f.globals.debug_out); ""}));
     };
 }
 

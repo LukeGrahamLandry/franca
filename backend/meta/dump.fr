@@ -191,6 +191,15 @@ fn printins(f: *Qbe.Fn, i: *Qbe.Ins, out: *List(u8)) void = {
         write(out, ", ");
         printref(i.arg&[1], f, out);
     };
+    
+    if i.op() == .flow {
+        F :: import("@/backend/wasm/isel.fr")'Flow;
+        ::enum(F);
+        @fmt(out, " # %", @as(F) @as(i64) i.arg&[0].rsval().intcast());
+        if i.arg&[1] != QbeNull {
+            @fmt(out, " @%", f.rpo[i.arg&[1].rsval().intcast()].name());
+        };
+    };
 };
 
 fn printfn(f: *Qbe.Fn, out: *List(u8)) void = {
@@ -208,7 +217,12 @@ fn printfn(f: *Qbe.Fn, out: *List(u8)) void = {
     };
     for_blocks f { b | 
         continue :: local_return;
-        @fmt(out, "@%\n", b.name());
+        @fmt(out, "@%", b.name());
+        @if(b.npred > 0) @fmt(out, " # preds: ");
+        for_pred b { p | 
+            @fmt(out, "@%, ", p.name());
+        };
+        @fmt(out, "\n");
         for_phi b { p | 
             write(out, "\t");
             printphi(f, p, out);
@@ -296,8 +310,7 @@ fn printjmp(f: *Qbe.Fn, b: *Qbe.Blk, out: *List(u8)) void = {
             @fmt(out, "@% %, ", case.name(), value);
         };
     } else {
-        if b.jmp.type != .Jxxx {
-            assert(!b.s1.is_null() && !b.s2.is_null(), "missing branch target");
+        if b.jmp.type != .Jxxx && !b.s1.is_null() && !b.s2.is_null() {
             @fmt(out, "@%, @%", b.s1.name(), b.s2.name());
         } else {
             @fmt(out, "%, %", Qbe.Blk.int_from_ptr(b.s1), Qbe.Blk.int_from_ptr(b.s2));

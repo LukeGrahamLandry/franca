@@ -82,6 +82,9 @@ fn wasm_isel(f: *Qbe.Fn) void = {
             f.emit(.pop, p.cls, p.to, QbeNull, QbeNull);
         };
         
+        if !identical(f.start, b) {
+            f.emit(.nop, .Kw, QbeNull, QbeNull, QbeNull);  // Just to be helpful, insert a slot to put a O.flow:loop without reallocating. 
+        };
         f.copy_instructions_from_scratch(b);
     };
     
@@ -146,7 +149,16 @@ fn wasm_type_preleb(t: Wasm.ValType) i32 = {
 }
 
 fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
-    if(try_kill_inst(f, i), => return());
+    k := i.cls();
+    is_pop := i.op() == .pop;
+    if try_kill_inst(f, i) {
+        if is_pop {
+            // inserted after a call by abi. even tho we don't use the value, 
+            // we need to do some stack book-keeping to satisfy the verifier. 
+            f.emit(.pop, k, QbeNull, QbeNull, QbeNull);
+        };
+        return();
+    };
     
     @match(i.op()) {
         fn push() => {
@@ -289,4 +301,131 @@ fn insert_blocks_for_conditional_phis(f: *Qbe.Fn) void = {
     };
     @debug_assert(last_block.link.is_null());
     last_block.link = new_blocks_list;
+}
+
+// 
+// https://medium.com/leaningtech/solving-the-structured-control-flow-problem-once-and-for-all-5123117b1ee2
+//
+// for reducible control flow,
+// forward edges are a DAG. use that to sort the blocks in topological order. 
+// all blocks in a loop must be dominated by the loop header. 
+// each loop goes inside a loop-end. backedges become Br. 
+// for forward edges that are consecutive topologicallly, do nothing. 
+// otherwise insert block-end so the destination is just after the end (so you can Br forward to it). 
+// starting point of those blocks doesn't matter but nicer if 
+// "just outside the outermost scope that closes between the break and the end of the scope." 
+// 
+// for more readable output, 
+// when sorting, after adding a block to the ordering, visit successors with that block as only forward predecessor first.  
+// if a block has only once forward predecessor it can go directly inside a branching statement in that predecessor. 
+//
+
+Flow :: @enum(i64) (end, loop, block, if, else, br, br_if);
+
+fn wasm_flow(f: *Qbe.Fn) void = {
+    fillpreds(f);
+    fillrpo(f);
+    set_link_from_rpo(f);
+    
+    ::enum(Flow);
+    
+    // TODO: push to the previous block instead so you don't have to shift all the instructions 
+    fn prepend(b: *Qbe.Blk, i: Qbe.Ins) void = {  // :SLOW
+        b.ins&.grow(b.nins.zext() + 1);
+        j := 0;
+        cond :: fn() => (b.ins.index(j).op() == .flow && (b.ins[j].arg&[0] == INT(Flow.loop.raw()) || b.ins[j].arg&[1].rsval() > i.arg&[1].rsval()));
+        while => j < b.nins.zext() && (is_par(b.ins.index(j).op()) || cond()) {
+            j += 1;
+        };
+        if b.ins.index(j).op() == .nop {
+            b.ins[j] = i;
+            return();
+        };
+        b.ins.slice(0, b.nins.zext() + 1).copy_overlapping(j + 1, j, b.nins.zext() - j);
+        b.ins[j] = i;
+        b.nins += 1;
+    }
+    
+    for_blocks f { b |
+        b.visit = -1;
+    };
+    
+    fn INT(i: *Qbe.Blk) Qbe.Ref #inline = INT(i.id.intcast());
+    fn INT(i: Flow) Qbe.Ref #inline     = INT(i.raw());
+
+    Loop :: @struct(entry: i32, end: i32);
+    loop_stack := list(Loop, temp());
+    range(0, f.nblk.zext()) { i |
+        b := f.rpo[i];
+        
+        is_loop := false;
+        end_of_loop: i32 = -1;
+        for_pred b { p |
+            end_of_loop = max(end_of_loop, p.id);
+            if !is_loop && p.id >= b.id {
+                // this block is the start of a loop
+                prepend(b, make_ins(.flow, .Kw, QbeNull, INT(Flow.loop), INT(b)));
+                is_loop = true;
+            };
+        };  
+        if is_loop {
+            loop_stack&.push(entry = b.id, end = end_of_loop);
+            s := f.rpo[end_of_loop.intcast()]&;
+            @debug_assert_eq(s.visit, @as(i32) -1, "ICE: hoping that you're only ever the end of one loop");
+            s.visit = b.id;
+        };
+        
+        invert_cond := b.jmp.type == .jnz && b.s1.id == b.id + 1;
+        if invert_cond {
+            // we want to fall through as the true branch so will br_if to jump away when the condition is false
+            push(b, make_ins(.push, .Kw, QbeNull, QbeConZero, QbeNull));
+            push(b, make_ins(.ceqw, .Kw, QbeNull, QbeNull, QbeNull));
+        };
+        
+        x := -1;
+        for_jump_targets b { s |
+            continue :: local_return;
+            x += 1;
+            br := @if(b.jmp.type == .jnz && x == 0, Flow.br_if, Flow.br);
+            
+            dest := INT(s.id.intcast());
+            if s.id <= b.id {
+                // back edge / continue
+                push(b, make_ins(.flow, .Kw, QbeNull, INT(br), dest));
+                continue();
+            };
+            
+            // forward edge / break
+            
+            if b.id + 1 == s.id {
+                @debug_assert_ne(br, .br_if);
+                continue();
+            };
+            
+            start := (=> {
+                break :: local_return;
+                // TODO: keep track of blocks as well so we can pull it closer
+                for_rev loop_stack&.items() { l |
+                    if l.end >= s.id {
+                        // src and dest are both inside the loop `l`
+                        break f.rpo[l.entry.intcast()];
+                    };
+                };
+                f.start
+            })();
+            // TODO: don't insert redundant blocks if there are multiple jumps to the same place. 
+            prepend(start, make_ins(.flow, .Kw, QbeNull, INT(Flow.block.raw()), dest));
+            
+            prepend(s, make_ins(.flow, .Kw, QbeNull, INT(Flow.end.raw()), dest));
+            push(b, make_ins(.flow, .Kw, QbeNull, INT(br), dest));
+        };
+        
+        if b.visit != -1 {
+            // insert the end of a loop
+            push(b, make_ins(.flow, .Kw, QbeNull, INT(Flow.end), INT(b.visit.intcast())));
+            l := loop_stack&.pop().unwrap();
+            @debug_assert_eq(l.end, b.id, "ICE: bad loop nesting");
+            @debug_assert_eq(l.entry, b.visit, "ICE: bad loop nesting");
+        };
+    };
 }

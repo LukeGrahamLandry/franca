@@ -1,3 +1,6 @@
+
+- for wasm, need to be careful about try_kill_inst, because you still need a pop even if you don't need the value so the stack works out. 
+
 ## (Mar 16/17/18)
 
 - make Tmp/Blk name field a slice instead of an array so it takes less memory when empty

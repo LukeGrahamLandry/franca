@@ -34,7 +34,10 @@ fn emit_func_wasm32(f: *Qbe.Fn) void = {
     
     pack_locals(e);
     
-    emit_block(e, e.f.start);
+    //emit_block(e, e.f.start);
+    for_blocks e.f { b |
+        emit_block(e, b);
+    };
     e.op(.Unreachable);  // keep the verifier happy (wihtout this the implicit return needs to typecheck)
     e.op(.End);
     code.next = code.next.offset(e.a.len());
@@ -111,51 +114,83 @@ fn to_wasm_type(k: Qbe.Cls) Wasm.ValType = {
     wasm_type[k.raw().zext()]
 }
 
-// TODO: this way of recreating nested structure is super dumb,
-//       if you get unlucky the same block will be emitted multiple times. 
-//       even trivial cases like a branch that rejoins will generate garbage redundant code. 
 fn emit_block(e: *EmitWasmFn, b: *Qbe.Blk) void = {
-    depth := 0;
-    for_rev e.block_stack& { check |
-        if check.identical(b) {
-            e.op(.Br);
-            leb128_unsigned(e.a&, depth);
-            return();
-        };
-        depth += 1;
-    };
-
-    e.block_stack&.push(b);
-    e.op(.Loop);
+    //depth := 0;
+    //for_rev e.block_stack& { check |
+    //    if check.identical(b) {
+    //        e.op(.Br);
+    //        leb128_unsigned(e.a&, depth);
+    //        return();
+    //    };
+    //    depth += 1;
+    //};
+    //e.op(.Loop);
     
-    leb128_signed(e.a&, b.wasm_type.intcast());
     
+    F :: import("@/backend/wasm/isel.fr")'Flow;
     for_insts_forward b { i |
-        emit(e, i);
+        if i.op() == .flow {
+            flow := @as(F) @as(i64) i.arg&[0].rsval().intcast();
+            e.op(@match(flow) {  // TODO: this is silly
+                fn block() => .Block;
+                fn loop() => .Loop;
+                fn if() => .If;
+                fn else() => .Else;
+                fn end() => .End;
+                fn br() => .Br;
+                fn br_if() => .BrIf;
+            });
+            s := @if(i.arg&[1] == QbeNull, Qbe.Blk.ptr_from_int(0), e.f.rpo[i.arg&[1].rsval().intcast()]);
+            
+            if @is(flow, .block, .loop) {
+                leb128_signed(e.a&, b.wasm_type.intcast());
+                e.block_stack&.push(s);
+            };
+            if @is(flow, .br, .br_if) {
+                break :: local_return;
+                depth := 0;
+                for_rev e.block_stack& { check |
+                    if check.identical(s) {
+                        leb128_unsigned(e.a&, depth);
+                        break();
+                    };
+                    depth += 1;
+                };
+                @panic("missing % target @% -> @%\n", flow, b.name(), s.name());
+            };
+            
+            if flow == .end {
+                s1 := e.block_stack&.pop().unwrap();
+                @debug_assert(identical(s, s1), "ICE: bad nesting. expected to end @% but found @%\n", s.name(), s1.name());
+            };
+        } else {
+            emit(e, i);
+        }
     };
     
     @match(b.jmp.type) {
         fn ret0() => e.op(.Return);
         fn hlt()  => e.op(.Unreachable);
-        fn jmp() => {
-            emit_block(e, b.s1);
-            e.op(.Unreachable);
-        }
-        fn jnz() => {
-            e.block_stack&.push(zeroed(*Qbe.Blk));
-            e.op(.If);
-            e.a&.push(@as(u8) Wasm.ValType.EmptyBlock);
-            emit_block(e, b.s1);
-            e.op(.Else);
-            emit_block(e, b.s2);
-            e.op(.End);
-            e.block_stack&.pop();
-            e.op(.Unreachable);
-        }
+        fn jmp() => ();
+        //{
+        //    emit_block(e, b.s1);
+        //    e.op(.Unreachable);
+        //}
+        fn jnz() => ();
+        //{
+        //    e.block_stack&.push(zeroed(*Qbe.Blk));
+        //    e.op(.If);
+        //    e.a&.push(@as(u8) Wasm.ValType.EmptyBlock);
+        //    emit_block(e, b.s1);
+        //    e.op(.Else);
+        //    emit_block(e, b.s2);
+        //    e.op(.End);
+        //    e.block_stack&.pop();
+        //    e.op(.Unreachable);
+        //}
         @default => @panic("invalid terminator");
     };
-    e.op(.End);
-    e.block_stack&.pop();
+    //e.op(.End);
 }
 fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
     if Wasm'lookup_wasm_encoding(i.op(), i.cls()) { byte |
@@ -246,9 +281,9 @@ fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
                 e.op(.Drop);
                 return();
             };
-            @debug_assert(rtype(i.to) == .RTmp);
+            @debug_assert(rtype(i.to) == .RTmp, "pop to tmp");
             local_index := e.locals[i.to.val()];
-            @debug_assert_ne(local_index, -1, "write to tmp without assigned local");
+            @debug_assert_ne(local_index, -1, "write to % without assigned local", i.to);
             e.op(.LocalSet);
             leb128_unsigned(e.a&, local_index.zext());
         }
