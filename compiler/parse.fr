@@ -987,18 +987,21 @@ fn parse_binding_after_name(self: *Parser, name: Symbol, kind: VarType) CRes(Bin
     ::if(?FatExpr); ::if(LazyType);
     default_: FatExpr = binding_missing_default(); // TODO: "shadows" the magic @default
     ty := LazyType.Infer;
-    
+    ann := zeroed(*Annotations);
     @match(self.peek()) {
         fn Colon() => {
             self.pop();
             if self.maybe(.Squiggle) {
                 name: Symbol = @try(self.pop_name("after '~'")) return;
                 ty = (UnboundGeneric = name);
+                ann = @try(self.parse_nullable_annotations()) return;
             } else {
                 if self.peek_tag() != .Equals {
                     e := @try(self.parse_expr(Prec_None)) return;
                     ty = (PendingEval = e);
+                    ann = @try(self.parse_nullable_annotations()) return;
                 };
+                
                 if self.maybe(.Equals) {
                     e := @try(self.parse_expr(Prec_None)) return;
                     default_ = e;
@@ -1017,14 +1020,15 @@ fn parse_binding_after_name(self: *Parser, name: Symbol, kind: VarType) CRes(Bin
             e := @try(self.parse_expr(Prec_None)) return;
             default_ = e;
         }
-        fn Equals() => {
+        fn Equals() => {    
             self.pop();
             e := @try(self.parse_expr(Prec_None)) return;
             default_ = e;
         }
-        @default => ();
+        @default => {   // ie: `callee { arg #ann | body }`
+            ann = @try(self.parse_nullable_annotations()) return;
+        };
     };
-    ann := @try(self.parse_nullable_annotations()) return; 
     (Ok = (name = (Ident = name), ty = ty, nullable_tag = ann, default = default_, kind = kind))
 }
 
@@ -1047,17 +1051,13 @@ fn pop_name(self: *Parser, msg: Str) Result(Symbol, *CompileError) = {
 
 FnDef :: @struct(name: ?Symbol, arg: Pattern, ret: LazyType, tags: List(Annotation), loc: Span);
 fn fn_def_signeture(self: *Parser, loc: Span, allow_name: bool) Result(FnDef, *CompileError) = {
-    ::if(?Symbol);
-    name: ?Symbol = if(not(allow_name), => .None) {
-        @match(self.peek()) {
-            fn Symbol(name) => {
-                self.pop();
-                loc = self.last.span;  // if there's a name, use that as the loc for the function because that's nicer for the ide. 
-                (Some = name)
-            }
-            @default => .None;
-        }
+    name: ?Symbol = .None;
+    @if(allow_name) @if_let(self.peek()) fn Symbol(n) => {
+        self.pop();
+        loc = self.last.span;  // if there's a name, use that as the loc for the function because that's nicer for the ide. 
+        name = (Some = n)
     };
+    
     cant_start_return_expression :: fn(t: TokenType) bool = {
         @is(t&, .Equals, .Semicolon, .Pipe, .FatRightArrow, .Hash)
     };

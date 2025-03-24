@@ -1,5 +1,25 @@
 
+## 
+
+- experimenting with representing wasm blocks with marker instructions 
+so it's easier to split out restructuring control flow from emitting the code. 
 - for wasm, need to be careful about try_kill_inst, because you still need a pop even if you don't need the value so the stack works out. 
+- import_wasm: implement conditional branch
+- deduplicate wasm block types
+- kinda waste of time tracking down why get_fn_callable doesn't get called as often as i expected but at least i understand the program better now. 
+- in import_c/import_wasm i do this thing with a giant struct that has both the state 
+that is kept for the whole compilation unit and the stuff that gets reset every function. 
+because it's easy to just pass that as the first argument to everything and then always have all your globals. 
+would be better to keep the two seperate so you don't forget to reset something, 
+but then `long.foo` becomes `long.short.foo` which is annoying. 
+could do the c thing where you have an anonymous struct field and inherit the names. 
+that would be nice because import_c/ffi/export_type could use that and then using c libraries that did that would feel natural. 
+- it's kinda unfortunate how much code it takes. 
+- to make it feel more integrated, make it work with struct initialization as well 
+- allow `#where` without a condition to not name the parameter type,
+so you can have it almost look like a dynamic language and just specialize for every call.  
+- FuckedJunkPointerExpr seems to have fixed itself sometime in the last 6 months, that's very good for business. 
+i wonder if i was cured as soon as i stopped using llvm. 
 
 ## (Mar 16/17/18)
 
@@ -2843,6 +2863,18 @@ Really i just want to be able to have generics that don't add to overload sets u
   its slightly less ugly than the old thing, and less code, and saves 10ms self-compiling. :ConfusingPrims
 - made the parser more strict about semicolons after declarations.
 - finally fixed field_ordering
+
+```
+// : FuckedJunkPointerExpr
+// it doesn't work on linux if you don't do this 
+// but it was fine on macos arm and x64. 
+// what the actual fuck
+// and like... this is the only thing
+// changing this made it self compile... and reproducible build. 
+// so like this line is the only thing in the whole compiler that is different on linux.    
+// inline_match: the need for this (in addition to normal match) when self-compiling was added in "or syntax, remove tag bits, etc"
+case_access = case_access.expr.Block.result[];
+```
 
 ## more more linux (Sep 17)
 

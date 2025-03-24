@@ -1,10 +1,9 @@
-#test fn simple_structs(_canary: i64) i64 = {
+#test fn simple_structs() void = {
     Person :: @struct(age: i64, gender: i64);
     
     assert_eq(@type Person, Type);
     
-    // Create a struct by calling the ializer. 
-    // We need to specify the type so it can resolve the overload even if there are multiple with the same field names and types. (If they're unique, it can infer).
+    // We need to specify the type in case if there are multiple with the same field names and types. (If they're unique, it can infer).
     bob: Person = (age = 24, gender = 42);
     assert_eq(@type bob, Person);
     
@@ -36,8 +35,7 @@
     assert_eq(bob_again.age, 99);
     assert_eq(bob.age, 25);  // The original has not been mutated. 
     
-    // `!deref` or `[]` can load a whole struct from a pointer at once. 
-    // TODO: this should just be the same as get() but that's not using generics yet so can only do scalars. 
+    // `[]` will load a whole struct from a pointer at once. 
     bob_part_three: Person = cat.owner;  // This is a copy
     bob_part_three.age = 5;
     assert_eq(bob_part_three.age, 5);
@@ -76,7 +74,6 @@
         ),
         whiskers = true,
     );
-    // struct 'var's can be reassigned
     // No type annotation needed because it remembers. 
     tent = (
         tax_payer = bob&,
@@ -90,13 +87,8 @@
     @assert_compile_error a.hello;  
     @assert_compile_error tent.hello;  
     
-    // TODO: same lexical sanity check for assert_compile_error as asser t_eq (just use the word assert). 
-    // TODO: Struct declarations are always const.
-    // @assert_compile_error { let Thing: Type = @struct(legs: i64); };
-    
-    // TODO: assert_compile_error of consts doesnt work because they get hoisted out of the block. 
-    // A raw map literal is illegal if the compiler can't infer a type. 
-    // @assert_compile_error {   let Thing = (legs = i64);   };
+    // A raw pattern literal is illegal if the compiler can't infer a type. 
+    @assert_compile_error { thing := (legs = i64); };
     
     // Structs are passed by copy (or probably const pointer if you don't mutate)
     fn mutate_copy(who: Person) void = {
@@ -107,7 +99,6 @@
     assert_eq(bob.age, 25);
     
     // Pass a pointer if you want to mutate the original. 
-    // TODO: maybe field access should just maintain you the same level of indirection instead of always being pointers. 
     fn mutate_real(who: *Person) void = {
         who.age = 12; // Note: we auto deref through the pointer
     }
@@ -126,14 +117,9 @@
     bill := make_someone(17);
     assert_eq(bill.age, 17);
     
-  
-    
     constant : A : (a = 9, b = 8);
     // TODO: because of how fields/places work, you can't read an individual field because you can't take its address. 
     //       this used to work but i took it out because it was unreachable after i switched enums from just being a constant struct. -- May 4
-    
-    
-    _canary
 }
 
 #test fn tagged_unions() = {
@@ -148,16 +134,17 @@
     assert_eq(@type yes, @type no);  // same type even with different payloads
     
     // You can manually check the tag if you try hard enough. (I also have macros for nice matching)
-    // It's illegal to access a non-active field. 
     :: tagged(Maybe_i64); // instantiate the polymorphic function we're about to use. 
     assert_eq(yes&.tag().ordinal(), tag_value(Maybe_i64, @symbol Some));
     assert_eq(no&.tag().ordinal(), tag_value(Maybe_i64, @symbol None));
     
-    // Like structs, dot syntax is a place expression. 
-    // It's illegal to access a non-active field. // TODO: be able to !assert_runtime_error
+    // Like structs, dot syntax is a place expression so you can get/set the payload like a normal field. 
+    // It's disrespectful to access a non-active field 
     assert_eq(yes.Some, 12);  
     xx: void = no.None;
+    yes.Some = 13;  // note: this won't change the tag for you
     
+    // i guess we're doing tuples now
     things := (1, 2, 3);
     things._2 = 4;
     assert_eq(things._0, 1);
@@ -166,7 +153,7 @@
     
     ///////////////
     
-    AA :: @tagged(a: i64, b: i64); // TODO: crazy error when this is called A too so it shadows. 
+    AA :: @tagged(a: i64, b: i64); 
     
     n := 3;
     a: AA = (a = n);
@@ -175,6 +162,7 @@
 }
 
 /// Tricky result slot aliasing
+// TODO: this is stupid. just because zig does it doesn't make it a good idea. 
 #test fn rls_aliasing(_canary: i64) i64 = {
     A :: @struct(a: i64, b: i64);
     
@@ -297,6 +285,9 @@ fn cyclic_indirection() = {
     assert_eq(b.get_it(), 4);
 }
 
+// it's pretty dumb that the type annotations don't go in the normal place (instead adding more colons). 
+// but i don't super care right now and this was easier to implement. 
+// the main use for this syntax is functions with multiple return values so the type can be infered from the call and it doesn't matter. 
 #test fn destructuring() = {
     (a: i64, b: i64) := (1, 2); // tuple
     get_pair :: fn() Ty(i64, i64) #noinline = (2, 3);
@@ -337,14 +328,14 @@ fn cyclic_indirection() = {
 // TODO: test that ambiguity with actual named arg is an error.
 #test fn aggragate_literals_as_kwarg() = {
     things: List(?i64) = list(temp());
-    things&.push(Some = 123);
+    things&.push(Some = 123);  // no extra brackets
     assert_eq(things.len, 1);
     
     Many :: @struct(a: i64, b: i64);
     things: List(Many) = list(temp());
     things&.push((a = 1, b = 2));
     assert_eq(things.len, 1);
-    things&.push(a = 3, b = 4);
+    things&.push(a = 3, b = 4);  // no extra brackets
     assert_eq(things.len, 2);
 }
 
@@ -457,4 +448,42 @@ fn tagged_passed_as_value() = {
     // llvm backend had trouble with this. 
     // because i said the signeture of the function is (i64, i64, i64) but tried to pass (i64, i64, i32). 
     f(0, (b = (a = x[1]))); 
+}
+
+fn using_a_field() void #test = {
+    A :: @struct(a: i64, b: i64);
+    B :: @struct(d: i64, c: A #use);
+    check :: fn(s) => @assert(s.a == s.c.a && s.a == 1 && s.b == s.c.b && s.b == 2 && s.d == 3);
+    
+    s: B = (c = (a = 1, b = 2), d = 3);  // nested
+    check(s&);
+    s: B = (a = 1, b = 2, d = 3);        // flat
+    check(s&);
+    s: B = (c = (a = 1), b = 2, d = 3);  // mixed
+    check(s&);
+    
+    // through a pointer
+    C :: @struct(d: i64, c: *A #use);
+    x: C = (c = s.c&, d = 3);
+    check(x&);
+    
+    // self-referential
+    D :: @rec @struct(c: A #use, next: *D, d := 3);
+    x := zeroed D;
+    s: D = (a = 1, b = 2, next = x&);
+    check(s&);
+}
+
+fn match_through_use() #test = {
+    A :: @tagged(a: i64, b: Str);
+    B :: @struct(c: A #use, d: i64);
+    check :: fn(s: *B) => @match(s) {
+        fn a(it) => assert_eq(it[], 5);
+        fn b(it) => unreachable();
+    };
+    
+    s: B = (c = (a = 5), d = 4);  // nested
+    check(s&);
+    s: B = (a = 5, d = 4);        // flat
+    check(s&);
 }

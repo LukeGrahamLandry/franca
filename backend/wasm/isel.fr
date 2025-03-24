@@ -32,8 +32,6 @@ fn wasm_isel(f: *Qbe.Fn) void = {
     for_blocks f { b | 
         f.reset_scratch();
         
-        b.wasm_type = wasm_block_type_from_phis(f.globals, b);
-        
         // Last thing before we jump to another block: push phi values to the stack. 
         @match(b.jmp.type) {
             fn ret0() => {
@@ -44,7 +42,6 @@ fn wasm_isel(f: *Qbe.Fn) void = {
             }
             fn hlt()  => ();
             fn jmp() => {
-                // TODO: backwards?
                 for_phi b.s1 { p |
                     arg := p.arg.index(index_in_phi(b, p))[];
                     f.emit(.push, p.cls, QbeNull, arg, QbeNull);
@@ -88,11 +85,10 @@ fn wasm_isel(f: *Qbe.Fn) void = {
         f.copy_instructions_from_scratch(b);
     };
     
-    // emit() looks at the first `b.loop = block_arg_count` pops to know block type.  
-    for_blocks f { b | 
-        b.phi = zeroed(@type b.phi);
-    };
+    // phis are now represented as block arguments, but keep them anyway so emit() can use them to know block types. 
+    
     f.retr = QbeNull;
+    wasm_flow(f);
 
     when_debug(f, .InstSelect) { out | 
         write(out, "\n> After instruction selection:\n");
@@ -109,30 +105,6 @@ fn for_phi_rev_TODOSLOW(b: *Qbe.Blk, $body: @Fn(p: *Qbe.Phi) void) void = {
     for_rev phis { p |
         body(p);
     };
-}
-
-// We need a type annotation for the block's affect on the stack: (incoming phis) -> (outgoing phis)
-fn wasm_block_type_from_phis(m: *QbeModule, b: *Qbe.Blk) i32 = {
-    has_inputs  := !b.phi.is_null();
-    has_outputs := b.jmp.type == .jmp && !b.s1.phi.is_null();
-    has_multiple_outputs := has_outputs && !b.s1.phi.link.is_null();
-    
-    if !has_inputs {
-        //if(!has_outputs,          => return(wasm_type_preleb(.EmptyBlock)));                 // () -> ()
-        //if(!has_multiple_outputs, => return(wasm_type_preleb(to_wasm_type(b.s1.phi.cls))));  // () -> (k)
-        return(wasm_type_preleb(.EmptyBlock))
-    };
-    // Otherwise it's an index into the type table. 
-    
-    pack_wasm_result_type m { $yield_arg #duplicated |
-        for_phi_rev_TODOSLOW b { p |
-            yield_arg(p.cls);
-        };
-    } and { $yield_ret |
-        //for_phi b.s1 { p |
-        //    yield_ret(p.cls);
-        //};
-    }
 }
 
 // returns the number that when encoded in sleb128 will encode this type. 
@@ -319,7 +291,10 @@ fn insert_blocks_for_conditional_phis(f: *Qbe.Fn) void = {
 // when sorting, after adding a block to the ordering, visit successors with that block as only forward predecessor first.  
 // if a block has only once forward predecessor it can go directly inside a branching statement in that predecessor. 
 //
+// TODO: deal with irreducible control flow. I think franca code can't produce that but the c compiler will. 
+//
 
+// TODO: either actually use if/else or remove them
 Flow :: @enum(i64) (end, loop, block, if, else, br, br_if);
 
 fn wasm_flow(f: *Qbe.Fn) void = {
@@ -353,24 +328,24 @@ fn wasm_flow(f: *Qbe.Fn) void = {
     fn INT(i: *Qbe.Blk) Qbe.Ref #inline = INT(i.id.intcast());
     fn INT(i: Flow) Qbe.Ref #inline     = INT(i.raw());
 
+    end_of_loop :: fn(b: *Qbe.Blk) i32 = {
+        eol: i32 = -1;
+        for_pred b { p |
+            eol = max(eol, p.id);
+        };
+        eol
+    };
+    
     Loop :: @struct(entry: i32, end: i32);
     loop_stack := list(Loop, temp());
     range(0, f.nblk.zext()) { i |
         b := f.rpo[i];
-        
-        is_loop := false;
-        end_of_loop: i32 = -1;
-        for_pred b { p |
-            end_of_loop = max(end_of_loop, p.id);
-            if !is_loop && p.id >= b.id {
-                // this block is the start of a loop
-                prepend(b, make_ins(.flow, .Kw, QbeNull, INT(Flow.loop), INT(b)));
-                is_loop = true;
-            };
-        };  
-        if is_loop {
-            loop_stack&.push(entry = b.id, end = end_of_loop);
-            s := f.rpo[end_of_loop.intcast()]&;
+        eol := b.end_of_loop();
+        if eol >= b.id {
+            // This block is the start of a loop 
+            prepend(b, make_ins(.flow, .Kw, QbeNull, INT(Flow.loop), INT(b)));
+            loop_stack&.push(entry = b.id, end = eol);
+            s := f.rpo[eol.intcast()]&;
             @debug_assert_eq(s.visit, @as(i32) -1, "ICE: hoping that you're only ever the end of one loop");
             s.visit = b.id;
         };
@@ -413,10 +388,17 @@ fn wasm_flow(f: *Qbe.Fn) void = {
                 };
                 f.start
             })();
-            // TODO: don't insert redundant blocks if there are multiple jumps to the same place. 
-            prepend(start, make_ins(.flow, .Kw, QbeNull, INT(Flow.block.raw()), dest));
             
-            prepend(s, make_ins(.flow, .Kw, QbeNull, INT(Flow.end.raw()), dest));
+            block := INT(Flow.block);
+            exists := false;
+            for_insts_forward start { i |  // TODO: don't iterate the whole thing since we know its at the beginning or not at all :SLOW
+                exists = exists || (i.op() == .flow && i.arg&[0] == block && i.arg&[1] == dest);
+            };
+            if !exists {
+                // this is the first time we've branched to dest in this scope
+                prepend(start, make_ins(.flow, .Kw, QbeNull, block, dest));
+                prepend(s, make_ins(.flow, .Kw, QbeNull, INT(Flow.end.raw()), dest));
+            };
             push(b, make_ins(.flow, .Kw, QbeNull, INT(br), dest));
         };
         

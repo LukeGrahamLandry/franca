@@ -137,6 +137,15 @@ fn Slice($T: Type) Type = {
         buf
     }
     
+    fn unordered_remove(self: Self, index: i64) ?T #inline = {
+        if(index >= self.len, => return(.None));  // TODO: why not just debug assert?
+        out := self[index];
+        if index != self.len - 1 {
+            self[index] = self[self.len - 1];
+        };
+        (Some = out)
+    }
+    
     Self
 }
 
@@ -306,7 +315,7 @@ fn as_array();
 // A value type fixed size array. Like [T; len] in Rust or [len] T in Zig.
 fn Array($T: Type, $count: i64) Type = {
     Self :: {
-        // TODO: HACK. I should be able to call intern_type directly but can't call deconstruct_values on a tagged thing. this mostly just works by luck. -- May 27
+        // :UpdateBoot I should be able to call intern_type directly but can't call deconstruct_values on a tagged thing. this mostly just works by luck. -- May 27
         info: TypeInfo = (Array = (inner = T, len = count.trunc()));
         intern_type_ref(info&)
     };
@@ -464,11 +473,11 @@ fn DeriveIndexable($Self: Type, $T: Type) void = {
     fn contains(self: Self, needle: T) bool = 
         self.contains(needle&);
     
-    fn contains(self: Self, needle: []T) bool = {
-        if(self.len < needle.len, => return(false));
-        range(0, self.len - needle.len + 1) { i |
+    fn contains(self: Self, contiguous: []T) bool = {
+        if(self.len < contiguous.len, => return(false));
+        range(0, self.len - contiguous.len + 1) { i |
             continue :: local_return;
-            enumerate needle { j, a | 
+            enumerate contiguous { j, a | 
                 if(!(a == self.index(i + j)), => continue()); 
             };
             return(true);
@@ -476,11 +485,14 @@ fn DeriveIndexable($Self: Type, $T: Type) void = {
         false
     }
     
-    fn contains(self: Self, $where: @Fn(e: *T) bool) bool = {
-        each self { check |
-            if(where(check), => { return(true); });
+    fn contains(self: Self, $where: @Fn(e: *T) bool) bool =
+        index_of(self, where).is_some();
+    
+    fn index_of(self: Self, $where: @Fn(e: *T) bool) ?i64 = {
+        enumerate self { i, check |
+            if(where(check), => return(Some = i));
         };
-        false
+        .None
     }
     
     // TODO: add addr_eq/identical if that's really what you want but like... it never is I feel. 

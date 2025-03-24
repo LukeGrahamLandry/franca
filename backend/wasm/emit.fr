@@ -34,7 +34,6 @@ fn emit_func_wasm32(f: *Qbe.Fn) void = {
     
     pack_locals(e);
     
-    //emit_block(e, e.f.start);
     for_blocks e.f { b |
         emit_block(e, b);
     };
@@ -50,6 +49,7 @@ fn emit_func_wasm32(f: *Qbe.Fn) void = {
 
 // im so impressed that this works
 fn pack_wasm_result_type(m: *QbeModule, $iter_args: @Fn(yield: @Fn(k: Qbe.Cls) void) void, $iter_ret: @Fn(yield: @Fn(k: Qbe.Cls) void) void) i32 = {
+    prev_len := m.stubs&.len();    
     m.stubs&.reserve(Wasm.ValType)[] = .ResultStart;
     body :: fn($iter) => {
         count := m.stubs&.reserve(u8);
@@ -63,8 +63,16 @@ fn pack_wasm_result_type(m: *QbeModule, $iter_args: @Fn(yield: @Fn(k: Qbe.Cls) v
     };
     body(iter_args);
     body(iter_ret);
-    // TODO: deduplicate these
     c := m.wasm_function_type_count&;
+    
+    // deduplicate them. there are likely a small set of block types repeated a lot. 
+    bytes := m.stubs.mmapped.slice(prev_len, m.stubs&.len());
+    if m.wasm_types_cache&.get(bytes) { i |
+        m.stubs.next = m.stubs.next.offset(-bytes.len());  // take it back now yall
+        return i;
+    };
+    m.wasm_types_cache&.insert(bytes, c[]);
+    
     c[] += 1;
     c[] - 1
 }
@@ -111,58 +119,15 @@ fn pack_locals(e: *EmitWasmFn) void = {
 
 fn to_wasm_type(k: Qbe.Cls) Wasm.ValType = {
     wasm_type :: @const_slice(Wasm.ValType.I32, .I64, .F32, .F64);
-    wasm_type[k.raw().zext()]
+    wasm_type;  // HACK FIXME 
+    xxx: i64 = k.raw().zext();
+    wasm_type[xxx]
 }
 
 fn emit_block(e: *EmitWasmFn, b: *Qbe.Blk) void = {
-    //depth := 0;
-    //for_rev e.block_stack& { check |
-    //    if check.identical(b) {
-    //        e.op(.Br);
-    //        leb128_unsigned(e.a&, depth);
-    //        return();
-    //    };
-    //    depth += 1;
-    //};
-    //e.op(.Loop);
-    
-    
-    F :: import("@/backend/wasm/isel.fr")'Flow;
     for_insts_forward b { i |
         if i.op() == .flow {
-            flow := @as(F) @as(i64) i.arg&[0].rsval().intcast();
-            e.op(@match(flow) {  // TODO: this is silly
-                fn block() => .Block;
-                fn loop() => .Loop;
-                fn if() => .If;
-                fn else() => .Else;
-                fn end() => .End;
-                fn br() => .Br;
-                fn br_if() => .BrIf;
-            });
-            s := @if(i.arg&[1] == QbeNull, Qbe.Blk.ptr_from_int(0), e.f.rpo[i.arg&[1].rsval().intcast()]);
-            
-            if @is(flow, .block, .loop) {
-                leb128_signed(e.a&, b.wasm_type.intcast());
-                e.block_stack&.push(s);
-            };
-            if @is(flow, .br, .br_if) {
-                break :: local_return;
-                depth := 0;
-                for_rev e.block_stack& { check |
-                    if check.identical(s) {
-                        leb128_unsigned(e.a&, depth);
-                        break();
-                    };
-                    depth += 1;
-                };
-                @panic("missing % target @% -> @%\n", flow, b.name(), s.name());
-            };
-            
-            if flow == .end {
-                s1 := e.block_stack&.pop().unwrap();
-                @debug_assert(identical(s, s1), "ICE: bad nesting. expected to end @% but found @%\n", s.name(), s1.name());
-            };
+            e.emit_flow(b, i);
         } else {
             emit(e, i);
         }
@@ -171,27 +136,64 @@ fn emit_block(e: *EmitWasmFn, b: *Qbe.Blk) void = {
     @match(b.jmp.type) {
         fn ret0() => e.op(.Return);
         fn hlt()  => e.op(.Unreachable);
+        // These are represented as O.flow instructions 
         fn jmp() => ();
-        //{
-        //    emit_block(e, b.s1);
-        //    e.op(.Unreachable);
-        //}
         fn jnz() => ();
-        //{
-        //    e.block_stack&.push(zeroed(*Qbe.Blk));
-        //    e.op(.If);
-        //    e.a&.push(@as(u8) Wasm.ValType.EmptyBlock);
-        //    emit_block(e, b.s1);
-        //    e.op(.Else);
-        //    emit_block(e, b.s2);
-        //    e.op(.End);
-        //    e.block_stack&.pop();
-        //    e.op(.Unreachable);
-        //}
         @default => @panic("invalid terminator");
     };
-    //e.op(.End);
 }
+
+fn emit_flow(e: *EmitWasmFn, b: *Qbe.Blk, i: *Qbe.Ins) void = {
+    F :: import("@/backend/wasm/isel.fr")'Flow;
+    flow := @as(F) @as(i64) i.arg&[0].rsval().intcast();
+    e.op(@match(flow) {  // TODO: this is silly
+        fn block() => .Block;
+        fn loop() => .Loop;
+        fn if() => .If;
+        fn else() => .Else;
+        fn end() => .End;
+        fn br() => .Br;
+        fn br_if() => .BrIf;
+    });
+    s := @if(i.arg&[1] == QbeNull, Qbe.Blk.ptr_from_int(0), e.f.rpo[i.arg&[1].rsval().intcast()]);
+    
+    // my loops never produce an output (because they never fall through, you break out to a block). 
+    // blocks output whatever types thier end block expects. 
+    // TODO: cache wasm_type_preleb(.EmptyBlock) for the common case (but really should deduplicate all types)
+    if @is(flow, .block, .loop) {
+        type := pack_wasm_result_type e.f.globals { $yield_arg #duplicated |
+            for_phi_rev_TODOSLOW b { p |
+                yield_arg(p.cls);
+            };
+        } and { $yield_ret |
+            @if(flow == .block)
+            for_phi_rev_TODOSLOW s { p |
+                yield_ret(p.cls);
+            };
+        };
+        leb128_signed(e.a&, type.intcast());
+        e.block_stack&.push(s);
+    };
+    
+    if @is(flow, .br, .br_if) {
+        break :: local_return;
+        depth := 0;
+        for_rev e.block_stack& { check |
+            if check.identical(s) {
+                leb128_unsigned(e.a&, depth);
+                break();
+            };
+            depth += 1;
+        };
+        @panic("missing % target @% -> @%\n", flow, b.name(), s.name());
+    };
+    
+    if flow == .end {
+        s1 := e.block_stack&.pop().unwrap();
+        @debug_assert(identical(s, s1), "ICE: bad nesting. expected to end @% but found @%\n", s.name(), s1.name());
+    };
+}
+
 fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
     if Wasm'lookup_wasm_encoding(i.op(), i.cls()) { byte |
         e.a&.push(byte);

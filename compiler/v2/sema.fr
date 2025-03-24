@@ -176,6 +176,22 @@ fn compile_place_expr(self: *SelfHosted, place: *FatExpr, requested: ResultType,
             // Note: compile_expr may have already walked the container because it has to check if its an enum/scope.
             @check(self.compile_place_expr(f.container, .None, false)) return;
             done := f.container.done;
+            
+            path := list(*Field, temp()); 
+            if !self.find_field_use(f.container.ty, f.name, path&) {
+                inner, _ := self.deref_depth(f.container.ty);
+                return(Err = self.error(InvalidField = (span = Span.zeroed(), container = inner, name = f.name)));
+            };
+            if path.len > 0 {
+                @check(self.deref_one(f.container)) return;  // TODO: dumb
+                xxx := path.items();
+                each_rev xxx { it |
+                    e := self.box(f.container[]);  // TODO: compiler bug if you inline this !!
+                    f.container.expr = (FieldAccess = (container = e, name = it.name, no_dot_call = false));
+                    f.container.ty = it.ty;
+                };
+                @check(self.compile_place_expr(f.container, .None, false)) return;
+            };
 
             name := f.name;
             bytes, field_val_ty, depth := @try(self.field_access_get_type(f.container.ty, name)) return;
@@ -228,6 +244,33 @@ fn compile_place_expr(self: *SelfHosted, place: *FatExpr, requested: ResultType,
     .Ok
 }
 
+// TODO: require_unique_field_names should check #use as well
+// TODO: loops when pointers
+fn find_field_use(self: *SelfHosted, base_type: Type, name: Symbol, path: *List(*Field)) bool = {
+    type, _ := self.deref_depth(base_type);
+    info := self.get_type(type);
+    @match(info) {
+        fn Tagged(f) => f.cases.contains(fn(it) => it._0 == name);
+        fn Struct(f) => {
+            each f.fields { it | 
+                if it.name == name {
+                    return(true);
+                }
+            };
+            each f.fields { it | 
+                if it.has_tag(Flag.use.ident()) {
+                    if self.find_field_use(it.ty, name, path) {
+                        path.push(it);
+                        return(true);
+                    };
+                }
+            };
+            false
+        }
+        @default => false;
+    }
+}
+
 fn compile_deref_place(self: *SelfHosted, place: *FatExpr, requested: ResultType, want_deref: bool) Maybe(void) = {
     @debug_assert(place.expr&.is(.Deref));
     arg := place.expr.Deref;
@@ -249,23 +292,26 @@ fn compile_deref_place(self: *SelfHosted, place: *FatExpr, requested: ResultType
     .Ok
 }
 
-// :PlaceExpr
-fn field_access_get_type(self: *SelfHosted, container_input_type: Type, name: Symbol) Res(Ty(i64, Type, i64)) #once = {  // (off, field_type, ptr_depth)
-    // Pointers never have fields, so the thing behind the pointer, shouldn't be a pointer.
-    // This lets you write `self: *Self; self.name` instead of  `self: *Self; self[].name`.
+fn deref_depth(self: *SelfHosted, type: Type) Ty(Type, i64) = { 
     depth := 0;    
-    inner := self.raw_type(container_input_type);
+    inner := self.raw_type(type);
     while => self.unptr_ty(inner) { next_inner | 
         inner = self.raw_type(next_inner);
         depth += 1;
     };
-    
+    (inner, depth)
+}
+
+// :PlaceExpr
+fn field_access_get_type(self: *SelfHosted, container_input_type: Type, name: Symbol) Res(Ty(i64, Type, i64)) #once = {  // (off, field_type, ptr_depth)
+    // Pointers never have fields, so the thing behind the pointer, shouldn't be a pointer.
+    // This lets you write `self: *Self; self.name` instead of `self: *Self; self[].name`.
+    inner, depth := self.deref_depth(container_input_type);
     self.finish_layout(inner);
+    
     @match(self.get_type(inner)) {
         fn Struct(f) => each f.fields { f | 
-            if f.name == name {
-                return(Ok = (f.byte_offset, f.ty, depth));
-            };
+            if(f.name == name, => return(Ok = (f.byte_offset, f.ty, depth)));
         };
         fn Tagged(f) => each f.cases { f |
             if f._0 == name {
@@ -1362,6 +1408,7 @@ fn compile_fn_ptr(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
     @err_assert(!func.get_flag(.AnyConstArgs), "cannot take pointer to function with const args") return;
     
     self.took_pointer_value(fid);
+    expr.done = true;
     
     // Instead of self.add_callee(fid)
     if self.dispatch.enclosing_function { current_f |
@@ -1393,53 +1440,90 @@ fn construct_struct_literal(self: *SelfHosted, expr: *FatExpr, requested: Result
                 @err_assert(bindings.len == 1, "% is a union, value should have one active varient not %", self.log_type(requested), bindings.len) return;
             };
             
-            done := true;
+            to_remove := list(i64, temp());
             enumerate bindings { i, b | 
+                continue :: local_return;
                 name := or b.ident() {
                     return(@err("struct literal requires field names"))
                 };
                 // Note: I'm not reordering them here because i want to define evaluation order to be the order you write them in not the declaration order. 
                 //       (because there might be side effects)
-                field := or find_struct_field(f, name, i) {
+                if find_struct_field(f, name, i) { field |
+                    // common case: it was just a normal field
+                    // can't compile the value yet since there might be #use later that fill poke fields backwards 
+                    b.ty = (Finished = field.ty);
+                    continue();
+                };
+                
+                // we didn't find the field but it might be a field of an inner #use struct
+                path := list(*Field, temp());
+                if !self.find_field_use(raw_container_type, name, path&) {
                     return(@err("Tried to assign unknown field %", self.pool.get(name)))
                 };
+                top_field := path[0];
+                
+                // there might be an incomplete inner pattern to add this binding to
+                each bindings { it |
+                    check_name := it.ident() || return(@err("struct literal requires field names"));
+                    if check_name == top_field.name {
+                        // some other field in the outer pattern is an incomplete pattern for the #use struct 
+                        @try(self.poke_used_binding(it, b)) return;
+                        to_remove&.push(i);
+                        continue();
+                    };
+                };
+                
+                // this is the first time finding something for this #use struct so start a new inner pattern. 
+                // it might still be invalid (if it's a #use on a pointer field), but we'll catch that when we try to compile after this whole loop. 
+                new := Binding.list(self.get_alloc()); // TODO: reserve the number of fields this struct has? 
+                new&.push(b[]);
+                b.default.expr = (StructLiteralP = (bindings = new.as_raw(), loc = b.default.loc));
+                b.default.ty = UnknownType;
+                b.name = (Ident = top_field.name);
+                b.ty = (Finished = top_field.ty);
+            };
+            for_rev to_remove { i |
+                bindings.items().unordered_remove(i);
+                bindings.len -= 1;
+            };
+            
+            // since we allow incomplete patterns that get filled in later by a #use field, 
+            // can't compile any of the values until we've seen them all. 
+            // also it's not ok if you suspend before going through to_remove. 
+            done := true;
+            enumerate bindings { i, b | 
                 value := or b.get_default() {
                     return(@err("struct literal requires field value (use '=' not ':')"))
                 };
-                @check(self.compile_expr(value, (Specific = field.ty))) return;
+                ty := b.unwrap_ty();
+                @check(self.compile_expr(value, (Specific = ty))) return;
                 done = done && value.done;
                 self.last_loc = pattern.loc;
-                @check(self.can_assign(field.ty, value.ty)) return;
+                @check(self.can_assign(ty, value.ty)) return;
             };
             
             // If they're missing some, check for default values.
             if !f.is_union && f.fields.len != bindings.len {
                 enumerate f.fields { i, field | 
                     continue :: local_return;
-                    each bindings { b |   // :SLOW
-                        if b.ident() { n | 
-                            if(n == field.name, => continue());
-                        };
-                    };
                     
-                    default := @unwrap(field.get_default(), "Missing required field %", self.pool.get(field.name)) return;
-                    value, ty := @check(self.find_const(default, field.ty.want())) return;
-                    expr := synthetic_ty((Value = (bytes = value, coerced = false)), pattern.loc, ty);
-                    @check(self.coerce_const_expr(expr&, field.ty.want(), false)) return;  // TODO: find_const should do this for you instead
-                    expr.done = true;
+                    // did they provide a value for this field? 
+                    if(i < bindings.len && bindings.index(i).ident().unwrap() == field.name, => continue());  // :NotForCorrectness
+                    if(bindings.contains(fn(b) => b.ident().unwrap() == field.name), => continue());
                     
-                    // we don't have to do it in order anymore but it means emit_bc will find it faster. 
-                    bindings.insert(
-                        i,
+                    default := @unwrap(field.get_default(), "Missing required field % (no default value provided)", self.pool.get(field.name)) return;
+                    bindings.push(
                         (
                             name = (Ident = field.name),
-                            ty = (Finished = ty), 
+                            ty = (Finished = field.ty), 
                             nullable_tag = zeroed(*Annotations),
-                            default = expr,
+                            default = synthetic_ty((GetVar = default), pattern.loc, UnknownType),
                             kind = .Var,
                         ),
                         self.get_alloc()
                     );
+                    // TODO: would be more clear to manually do the find_const->coerce_const_expr here? this way is less code but less explicit. 
+                    @check(self.compile_expr(bindings.index(bindings.len - 1)[].default&, (Specific = field.ty))) return;
                 };
                 @err_assert(f.fields.len == bindings.len, "ICE: struct field count mismatch but we don't know which is missing") return;
             };
@@ -1469,6 +1553,19 @@ fn construct_struct_literal(self: *SelfHosted, expr: *FatExpr, requested: Result
             @err("No field % exists in %", self.pool.get(name), self.log_type(requested))
         }
         @default => @err("found struct literal but expected % = %", requested, self.log_type(requested));
+    }
+}
+
+// adding more weird tree manipulation is kinda ass but it's nice to not make emit_ir deal with #use 
+// given @struct(foo: @struct(x = 0, 1 = 1) #use); 
+// (foo = (x = 0), y = 1)); -> (foo = (x = 0, y = 1));
+fn poke_used_binding(self: *SelfHosted, dest: *Binding, src: *Binding) CRes(void) #once = {
+    @match(dest.get_default().unwrap()[].expr&) {
+        fn StructLiteralP(it) => {
+            it.bindings&.push(src[], self.get_alloc());
+            .Ok
+        }
+        @default => @err("trying to assign #use-d field but the value for inner struct is not a pattern"); // incomprehensible
     }
 }
 
@@ -2338,7 +2435,7 @@ fn bind_const_arg(self: *SelfHosted, o_f: FuncId, arg_name: Var, arg_value: Valu
                 // So we can destroy this specialization when we inline it to the callsite (avoiding a deep_clone()).  -- Mar 15, 2025
                 func.set_flag(.Once);
                 
-                if b.get_tag(Flag.duplicated.ident()).is_some() {
+                if b.has_tag(Flag.duplicated.ident()) {
                     // remember for later in case they pass it to something NOT marked #duplicated
                     arg_func_obj.set_flag(.AllowDuplicated);  
                 };
@@ -2399,7 +2496,7 @@ fn infer_type(self: *SelfHosted, b: *LazyType) Maybe(?Type) #inline = {
         fn EvilUninit() => panic("ICE: nothing creates this: eviluninit binding"); 
         fn Returning(_) => return(@err("ICE: tried to infer on LazyType.Returning... figure out what to do about that..."));
         fn Infer() => (Ok = .None);
-        fn UnboundGeneric() => return(@err("ICE: tried to infer on unbound generic placeholder"));
+        fn UnboundGeneric() => return(@err("tried to infer on unbound generic placeholder (missing #where annotation?)"));
         fn Generic() => return(@err("ICE: tried to infer on bound generic placeholder"));
     }
 }
@@ -2409,7 +2506,7 @@ fn infer_type(self: *SelfHosted, bindings: *Pattern) Maybe([]Type) = {
     each bindings.bindings { b |
         ty := or @check(self.infer_type(b.ty&)) return {
             // TODO: really thats not what you want for closures tho... 
-            return(@err("function arguments must have type annotation (cannot be inferred)"))
+            return(@err("function arguments must have type annotation (cannot be inferred unless you say #where)"))
         };
         types&.push(ty);
     };
@@ -2518,6 +2615,7 @@ fn type_of(self: *SelfHosted, expr: *FatExpr) Maybe(Type) = {
                 return(@err("for now we don't guess type for scope access"));
             };
             // TODO: this forces it to know layout which we don't actually care about yet
+            // TODO: #use
             _, field_val_ty, _ := @try(self.field_access_get_type(container, f.name)) return;
             (Ok = field_val_ty)
         }
@@ -3109,10 +3207,6 @@ fn check_promote_id_to_func(self: *SelfHosted, fid: FuncId, f_ty: FnType) Maybe(
     func := self.get_function(fid);
     //@println("check_promote_id_to_func func <- funcid %", self.log_type(self.intern_type(Fn = f_ty)));
     //partial_args := @check(self.infer_arguments_partial(fid)) return;
-    // TODO: adding this fixes or_wrong_type (but only if you add type annotations) but breaks more other stuff. 
-    //if !func.ret&.is(.Infer) {
-    //    @try(self.poll_in_place(Type, => self.infer_return(fid))) return;
-    //};
     
     // this allows missing type annotations on '=' function args in situations like import_c's parser handlers. 
     // TODO: kinda hack that '=>' ones can't be done here. 
@@ -3133,7 +3227,6 @@ fn check_promote_id_to_func(self: *SelfHosted, fid: FuncId, f_ty: FnType) Maybe(
         @if_let(func.body&) fn Normal(body) => {
             guessed := self.type_of(body);
             @if_let(guessed) fn Ok(type) => {
-                //@println("guessed! %", self.log_type(type));
                 func.ret = (Finished = type);
                 func.finished_ret = (Some = type);
             };
@@ -3574,15 +3667,27 @@ fn compile_get_var(self: *SelfHosted, expr: *FatExpr, requested: ResultType, old
 
 fn took_pointer_value(self: *SelfHosted, fid: FuncId) void = {
     func := self.get_function(fid);
-    if !func.get_flag(.TookPointerValue) { // TODO: only if already compiled?
-        old := self.comptime_codegen.m.get_addr(self.comp().fmt_fn_name(fid));
+    if !func.get_flag(.TookPointerValue) {
+        m    := self.comptime_codegen.m;
+        id   := m.intern(self.comp().fmt_fn_name(fid)); 
+        done := false;
+        use_symbol(m, id) { s |
+            // We might have already compiled the function but didn't know we'd need to remember its address. (ie. #test fn large_struct_ret_return).
+            // TODO: make sure im testing the case where is was already jitted so these are not null
+            remember :: fn(a: rawptr) => {
+                a := a.int_from_rawptr();
+                if(a != 0, => self.created_jit_fn_ptr_value(fid, a));
+            };
+            remember(s.shim_addr);
+            remember(s.jit_addr);
+            //@println("% J% S%", s.name, s.jit_addr, s.shim_addr);
+            //got_addr := m.segment_address(.ConstantData, s.got_lookup_offset);
+            //remember(rawptr.ptr_from_raw(got_addr)[]);
+            done = !s.jit_addr.is_null();
+        };
         // Note: else is not `Suspend = self.wait_for(Jit = fid)` because of cycles, we defer to the backend to deal with finializing it. 
         //       a better system would be to generate a shim right now so we'd always have an address? 
-        if old { ptr |
-            // We already compiled the function but didn't know we'd need to remember its address. (ie. #test fn large_struct_ret_return).
-            self.created_jit_fn_ptr_value(fid, ptr.int_from_rawptr())
-        } else {
-            id := self.comptime_codegen.m.intern(self.comp().fmt_fn_name(fid));  // looks silly to cache this but time it before removing!
+        if !done && self.comptime_codegen.threaded { // looks silly to cache the `id` but time it before removing!
             self.pending_took_pointer&.push(@as(Ty(FuncId, u32)) (fid, id));
         };
     };
@@ -4192,7 +4297,7 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
     if expr.expr&.is(.Value) {
         ok := @check(self.ask_coerce_const_expr(expr, ret_ty, false)) return;
         if ok {
-            if self.check_quick_eval(expr, ret_ty) { val |
+            if self.check_quick_eval(expr, ret_ty) { val |            
                 self.dispatch.enclosing_function = old_func;
                 return(Ok = val);
             };
@@ -4215,7 +4320,6 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
     // so we don't try to call something that isn't compiled yet. 
     walk: MarkNotDone = ();
     walk&.walk_expr(expr);
-    
     fake_func := make_func(def, (Some = expr[]), false);
     // We didn't bother setting a scope because we don't need one, the expression will already have been resolved. 
     fake_func&.set_flag(.ResolvedBody);

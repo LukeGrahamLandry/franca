@@ -7,6 +7,10 @@
 
 ##
 
+- cure remaining stds
+- #use field in guess_type for #where
+- test compile error for conflicting #use
+- make auto deref always work
 - #c_variadic + conflicting overload (ie for open()) where you want the non-va version to also be #syscall. maybe that's not worth fixing. 
 - #c_variadic as part of CallConv so function pointers work 
 - compiler/values.fr has a big comment

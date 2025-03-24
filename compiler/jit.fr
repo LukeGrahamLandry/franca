@@ -206,10 +206,11 @@ fn create_jit_shim(self: CompCtx, shared: *CodegenShared, fid: FuncId, handler_c
     m := shared.m;
     entry := bouba_acquire(shared, shared.bouba_idx&);
     c := self.data.cast()[][];
+    id: u32 = 0;
     push_dynamic_context {
         context(DefaultContext)[].temporary_allocator = entry.arena&;
         
-        id := m.intern(@tfmt("%__shim", fid));
+        id = m.intern(@tfmt("%__shim", fid));
         
         // create a new function
         f := temp().box(Qbe.Fn);
@@ -308,6 +309,12 @@ fn create_jit_shim(self: CompCtx, shared: *CodegenShared, fid: FuncId, handler_c
         do_the_call.link = not_ready;
     };
     enqueue_task(shared, entry);
+    
+    // in sema, we never push to pending_took_pointer when not threaded. 
+    // so we need to track the shims here instead of letting get_fn_callable deal with it
+    if !shared.threaded && func.get_flag(.TookPointerValue) {
+        self.data.cast()[][].created_jit_fn_ptr_value(fid, shared.wait_for_symbol(id).int_from_rawptr());
+    };
 }
 
 fn shallow_jit_func(self: *SelfHosted, fid: FuncId) void = {
@@ -471,9 +478,7 @@ fn get_fn_callable(self: *SelfHosted, fid: FuncId) ?rawptr = {
     if !func.get_flag(.RealAsmDone) && !func.get_flag(.AlreadyHasShim) {
         return(.None);
     };
-    if self.comptime_codegen.threaded {
-        self.update_pending_took_pointer();
-    };
+    self.update_pending_took_pointer();
     c := wait_for_symbol(self.comptime_codegen, id);
     if !c.is_null() {
         if func.get_flag(.TookPointerValue) || ENABLE_TRACY || TRACE_CALLS {

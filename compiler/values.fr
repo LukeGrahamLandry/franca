@@ -113,6 +113,24 @@ fn bake_relocatable_body(c: *SelfHosted, value: []u8, type: Type, out: *List(Bak
             out.push(off = reloc_off, target = (FuncId = fid));
             return(.Ok);
         };
+        
+        // TODO: have this slow fallback for ICE reporting
+        //m := c.comptime_codegen.m;
+        //for_symbols m { _, s |
+        //    if s.got_lookup_offset != -1 {
+        //        got_addr := m.segment_address(.ConstantData, s.got_lookup_offset);
+        //        check := i64.ptr_from_raw(got_addr)[];
+        //        if check == first_word {
+        //            @println("found in got % %", s.name, check);
+        //        };
+        //    }
+        //    if s.jit_addr.int_from_rawptr() == first_word {
+        //        @println("found jit % %", s.name, first_word);
+        //    }
+        //    if s.shim_addr.int_from_rawptr() == first_word {
+        //        @println("found shim % %", s.name, first_word);
+        //    }
+        //};
     };
     @debug_assert_ge(value.len, 8, "we only support 64-bit targets so how can it contains_pointers but be small?");
     
@@ -184,7 +202,7 @@ fn bake_relocatable_body(c: *SelfHosted, value: []u8, type: Type, out: *List(Bak
         // TODO: explain that it's fine if it's reachable by an alias that knows the type
         // TODO: record it and see if we find an alias that knows the type later? 
         //       that sounds slow but wouldn't happen very often. 
-        fn VoidPtr() => return(@err("You can't have a void pointer as a constant. The compiler can't tell how many bytes to put in the final executable."));
+        fn VoidPtr() => return(@err("You can't have a void pointer % as a constant. The compiler can't tell how many bytes to put in the final executable.", first_word));
         @default => return(@err("ICE: constant that contains_pointers is a type that doesn't make any sense."));
     };
     .Ok
@@ -249,6 +267,7 @@ Baked :: @struct(
 BakeHandler :: @FnPtr(self: rawptr) Slice(BakedEntry);
 
 fn update_pending_took_pointer(c: *SelfHosted) void = {
+    @debug_assert(!c.comptime_codegen.threaded || c.pending_took_pointer.len == 0, "when comptime codegen is on the main thread there's no need to track jit pointers lazily");
     // TODO: have it tell us when pointers are ready. :SLOW
     found := false;
     m := c.comptime_codegen.m;

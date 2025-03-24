@@ -28,6 +28,7 @@ fn literal(arg: FatExpr) FatExpr = @{
 fn as(T: Type, expr: FatExpr) FatExpr = as(@literal T, expr);
 
 // TODO: this has a referential transparency problem
+// TODO: maybe @inline_match shouldn't be a thing and this should just notice and do the right thing. 
 #macro 
 fn match(arg: FatExpr, target: FatExpr) FatExpr = {
     loc := arg.loc;
@@ -36,24 +37,31 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
     enum_type := arg.ty;
     info := get_type_info_ref(enum_type);
     
-    un_raw := enum_type.get_type_info_ref();
-    if un_raw.is(.Enum) {
+    if info.is(.Enum) {
         // TODO: use new switch expression -- Jul 26
-        return(match_on_enum(arg, un_raw, stmts));
+        return(match_on_enum(arg, info, stmts));
     };
     
-    is_ptr := false;
+    want_pointer := false;
     if info.is(.Ptr) {
         enum_type = (@as(*Type) info.Ptr&)[];
         info = get_type_info_ref(enum_type);
-        is_ptr = true;
+        want_pointer = true;
     };
-    ptr_ty := *enum_type;  // this is unfortunate syntax. we're creating a pointer ~type~
     
     @ct_assert(!info.is(.Enum), arg.loc, "to @match on an @enum, dereference the pointer"); // TODO: just do it
+    
+    if info.is(.Struct) {
+        count, name, out := (0, zeroed Symbol, UnknownType);
+        find_used_tagged(enum_type, count&, name&, out&);
+        @ct_assert(count == 1, arg.loc, "tried to @match on a @struct (this would be valid if there was a #use on exactly one @enum/@tagged field)");
+        arg = make_field_access(arg, name, loc, want_pointer);
+        enum_type = out;
+        info = get_type_info_ref(enum_type);
+    };
+    
     @ct_assert(info.is(.Tagged), arg.loc, "@match expected argument type to be @tagged.");
     info := info.Tagged;
-    
     varients := info.cases.items();
 
     // TODO: typecheck err message (forgot to deref !tag) points at the wrong location in the expression. (1)
@@ -61,16 +69,13 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
     // TODO: check that no duplicate handlers
     // TODO: give error message here if invalid name instead of it showing up later in the generated code. (3)
     //       maybe add a 'fn compile_error(Span, Str)' instead of making you use panic so its more clear and you can attach context.
-    // TODO: infer function argument type since we know it must match the enum payload,
-    //       but allow no arg if you just want to use it as a switch. 
     // TODO: use default arguments as value eq guards. 
     
     cases: List(Ty(i64, FatExpr)) = list(ast_alloc());
-    
     ::if(FatExpr);
     @{
-        arg_val := @[if(is_ptr, => @{}, => arg)];
-        arg_ptr := @[if(is_ptr, =>arg, => @{ arg_val& })];
+        arg_val := @[if(want_pointer, => @{}, => arg)];
+        arg_ptr := @[if(want_pointer, =>arg, => @{ arg_val& })];
         :: tagged(@[@literal enum_type]);
         tag_val := arg_ptr.tag().raw();
         // TODO: when safety checks are on don't do the default branch even for garbage tag.
@@ -94,19 +99,20 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
                 i -= 1;
                 
                 expand_case_body :: fn(closure: *Func) void => {
-                    index := tag_value(enum_type, closure.name); // they're always sequential (TODO: assert on the enum type)
-                    name, ty := varients.get(index);
-                    assert(name.eq(closure.name), "ICE: bad enum index");
+                    // for now we don't let users specifiy the tag type so we know the enum will be sequential
+                    case_value := varients.index_of(fn(it) => it._0 == closure.name) 
+                        || compile_error("bad name in @match", closure.loc); 
+                    name, ty := varients[case_value];
                     
-                    if(is_ptr){
+                    if want_pointer {
                         p: TypeInfo = (Ptr = ty);
-                        ty = intern_type(p); // TODO: should work to pass @as(TypeInfo) (Ptr = ty) directly
+                        ty = intern_type(p); // :UpdateBoot should work to pass @as(TypeInfo) (Ptr = ty) directly
                     };
             
                     // If they didn't say the argument type, we can fill it in based on the varient name. 
                     // If they don't put an argument, just ignore the value. Have to set the type because it defaults to void. 
                     bindings := closure.arg.bindings.items();
-                    if(bindings.len.eq(1)){
+                    if bindings.len == 1 {
                         first := bindings[0]&;
                         infer := first.ty&.is(.Infer);
                         no_name := first.name&.is(.None); 
@@ -115,26 +121,10 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
                         };
                     };
                     loc := closure.loc;
-                    case_access := @{ arg_ptr.___ };
-                    case_access := case_access.expr.Block.result[];
-                    case_access.expr.FieldAccess.name = name;  // (3)
-                    tag := @{ tag_value(@[@literal(Type) enum_type], @[@literal(name)]) };
-                    if(is_ptr){
-                        case_access = @{ @[case_access]& };
-                        // :FuckedJunkPointerExpr
-                        // HACK :FUCKED Sep 17
-                        // it doesn't work on linux if you don't do this 
-                        // but it was fine on macos arm and x64. 
-                        // what the actual fuck
-                        // and like... this is the only thing
-                        // changing this made it self compile... and reproducible build. 
-                        // so like this line is the only thing in the whole compiler that is different on linux.    
-                        case_access = case_access.expr.Block.result[];
-                    };
-                    case_access.loc = loc;
-                    count = count.add(1);
+                    case_access := make_field_access(@{ arg_ptr }, name, loc, want_pointer);
+                    count = count + 1;
                     callable: FatExpr = (expr = (Closure = closure), loc = closure.loc, ty = UnknownType, done = false); 
-                    case := (index, @{ @[callable](@[case_access]) } );
+                    case := (case_value, @{ @[callable](@[case_access]) } );
                     cases&.push(case);
                 };
                 
@@ -183,6 +173,35 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
             make_switch(@{ tag_val }, default, cases)
         }]
     }
+}
+
+fn find_used_tagged(type: Type, count: *i64, s: *Symbol, out: *Type) void = {
+    info := get_type_info_ref(type);
+    info.is(.Struct) || return();
+    each info.Struct.fields { it |
+        ::ptr_utils(Annotations);
+        has_use := !it.nullable_tag.is_null() && it.nullable_tag.items().contains(fn(it) => it.name == @symbol use);
+        if has_use {
+            if get_type_info_ref(it.ty).is(.Tagged) {
+                out[] = it.ty;
+                count[] = count[] + 1;
+                s[] = it.name;
+            } else {
+                find_used_tagged(it.ty, count, s, out)
+            }
+        };
+    };
+};
+
+fn make_field_access(e: FatExpr, name: Symbol, loc: Span, want_pointer: bool) FatExpr = {
+    e := @{ @[e].___ };
+    e := e.expr.Block.result[];
+    e.expr.FieldAccess.name = name;  // (3)
+    if want_pointer {
+        e = @{ @[e]& };
+    };
+    e.loc = loc;
+    e
 }
 
 fn macro_at_default_helper(handler_body: *FatExpr) Symbol = {
@@ -722,15 +741,7 @@ fn inline_match(container: FatExpr, target: FatExpr) FatExpr #macro = {
                 };
             };
             // TODO: allow non-ptr
-            case_access := @{ @[container][].___ };
-            case_access := case_access.expr.Block.result[];
-            case_access.expr.FieldAccess.name = name;  // (3)
-            if is_ptr {
-                case_access = @{ @[case_access]& };
-                // :FuckedJunkPointerExpr
-                // the need for this (in addition to normal match) when self-compiling was added in "or syntax, remove tag bits, etc"
-                case_access = case_access.expr.Block.result[];
-            };
+            case_access := make_field_access(@{ @[container][] }, name, loc, is_ptr);
             callable: FatExpr = (expr = (Closure = closure), loc = closure.loc, ty = UnknownType, done = false); 
             @{ @[callable](@[case_access]) }
         };

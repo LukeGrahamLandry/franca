@@ -296,3 +296,32 @@ fn let_me_panic() #test = {
     
     a(false);
 }
+
+/*
+this is a situation where we need to call created_jit_fn_ptr_value on the shim's address. 
+
+the address of `func` is never created as a int/Value in sema. 
+it hasn't been jitted yet when it gets to took_pointer_value so that's just recorded as a flag. 
+since func() is in mutual_callees of init_data(), a shim is created in shallow_jit_func and put in the GOT.  
+an Expr::FnPtr gets to emit_ir and func_ref() makes a Con without creating the address. 
+since comptime uses got_indirection_instead_of_patches, it becomes a GOT lookup. 
+so when init_data runs to create the constant, you get the address of that shim, 
+and when you go to bake that constant, we need to be able to track it back to func(). 
+but notice that get_fn_callable was never called for func(), so create_jit_shim needs to know about TookPointerValue. 
+-- Mar 23, 2025 
+*/
+fn tracking_shims_in_data() void #test = {
+    F         :: @FnPtr() i64;
+    Callable  :: @struct(callee: F);
+    func      :: fn() i64 = int_from_ptr(Callable, data);
+    data      :: init_data();
+    init_data :: fn() *Callable = {  // inlined @static so you can tell what's going on
+        d := box_zeroed(ast_alloc(), Callable);
+        d[] = (callee = func);
+        d
+    };
+    
+    x := data[]'callee();
+    y := Callable.ptr_from_int(x);
+    @assert_eq(x, y'callee());
+}
