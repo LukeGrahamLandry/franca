@@ -22,6 +22,8 @@
 // TODO: use fill_backend_vtable to toggle between recompiling 
 //       and using the host's backend when running as a driver 
 //       (see import_c for an example). 
+// TODO: add an examples/bf that uses this
+// TODO: add more serious auto tests
 
 fn main() void = {
     args := cli_args();
@@ -287,13 +289,13 @@ fn create_globals(self: *LoadWasm) void = {
         // TODO: offset the index by number of imported globals
         id := self.m.intern(@tfmt("G%$%", local_global_i, self.module_name));
         self.global_names[local_global_i] = id;
-        create_var(self.m, id) { dat |
-            dat.type = @if(global.type == .I32 || global.type == .F32, .DW, .DL);
-            value, k := const_eval_wasm_expr(global.init_expr.items());
-            dat.u.num = value; 
-            self.m.new_emit_data(dat&);
-            self.global_cls[local_global_i] = k;
-        };
+        
+        value, k := const_eval_wasm_expr(global.init_expr.items());  // TODO: is this k always the same as global.type?
+        self.global_cls[local_global_i] = k;
+        self.m.emit_data(
+            id = id, 
+            template = (Bytes = (ptr = ptr_cast_unchecked(i64, u8, value&), len = 4 + 4 * int(k.is_wide()))), 
+        );
     };
     
     self.tables = libc_allocator.alloc(u32, self.w.tables.len); // :Leak
@@ -307,47 +309,34 @@ fn create_globals(self: *LoadWasm) void = {
         
         // Reserve some memory for the starting values in the table. 
         found := false;
-        create_var(self.m, table_initial) { dat |
-            each self.w.elements { elem | 
-                if elem.table.id.zext() == table_i {
-                    @assert(!found, "TODO: init multiple parts of a table");
-                    found = true;
-                    off, k := const_eval_wasm_expr(elem.active_offset_expr.items());
-                    @assert_eq(off, 0, "TODO: init table offset non-zero");
-                    @assert_ge(elem.funcs.len, table.limits.min.zext(), "TODO: init table < table.min");
-                    dat.type = .DL;
-                    dat.is_ref = true;
-                    for elem.funcs { f_id | 
-                        dat.u.ref = (id = self.functions[f_id.id.zext()], off = 0);
-                        self.m.new_emit_data(dat&);
-                    };
-                    dat.is_ref = false;
+        each self.w.elements { elem | 
+            if elem.table.id.zext() == table_i {
+                @assert(!found, "TODO: init multiple parts of a table");
+                found = true;
+                off, k := const_eval_wasm_expr(elem.active_offset_expr.items());
+                @assert_eq(off, 0, "TODO: init table offset non-zero");
+                @assert_ge(elem.funcs.len, table.limits.min.zext(), "TODO: init table < table.min");
+                r := temp().alloc(Dat2.Reloc, elem.funcs.len);
+                enumerate elem.funcs { i, f_id | 
+                    r[i] = (off = trunc(off + i * size_of(rawptr)), id = self.functions[f_id.id.zext()]);
                 };
+                self.m.emit_data(
+                    id = table_initial, 
+                    template = (Zeroes = r.len * size_of(rawptr)), 
+                    relocations = r,
+                );
             };
         };
         @assert(found, "TODO: uninit table");
         
-        // Reserve a symbol to hold the address of the table
-        create_var(self.m, table_pointer) { dat |
-            dat.type = .DL;
-            dat.is_ref = true;
-            dat.u.ref = (id = table_initial, off = 0);
-            self.m.new_emit_data(dat&);
-            dat.is_ref = false;
-        };
+        // Reserve a symbol to hold the address of the table since we want to be able to resize it later
+        self.m.emit_data(
+            id = table_pointer, 
+            template = (Zeroes = size_of(rawptr)), 
+            relocations = @slice(@as(Dat2.Reloc) (off = 0, id = table_initial)),
+        );
     };
 }   
-
-fn create_var(m: *QbeModule, id: u32, $init: @Fn(dat: *Qbe.Dat) void) void = {
-    lnk: Qbe.Lnk = (id = id);
-    dat := Qbe.Dat.zeroed();
-    dat.lnk = lnk&;
-    dat.type = .DStart;
-    m.new_emit_data(dat&);
-    init(dat);
-    dat.type = .DEnd;
-    m.new_emit_data(dat&);
-}
 
 BlockEntry :: @struct(continue: *Qbe.Blk, break: *Qbe.Blk, current: *Qbe.Blk, loop: bool);
 

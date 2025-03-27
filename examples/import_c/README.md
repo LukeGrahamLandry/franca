@@ -9,6 +9,12 @@ A C11 compiler adapted from <https://github.com/rui314/chibicc>.
 - removed support for x87 80-bit long doubles
 - convert static variables to a struct explicitly passed around so you can have multiple compilation contexts at the same time. 
 - (temporarily) removed support for: thread locals, atomics, `_Alignas`
+- simplify preprocessor by tracking a stack of disabled macros instead of storing a hideset on each token
+- optimize handling of large zero initialized static arrays
+- fixed sizeof to ignore flexible array member 
+- export to the franca compiler's type/function data structures so you don't need to manually write bindings to c libraries. 
+(WIP. for demos, see `examples/bf/c_source.fr` and `examples/view_image.fr`). 
+- optionally use the franca calling convention (passing a hidden environment pointer)
 
 ## Chibicc License
 

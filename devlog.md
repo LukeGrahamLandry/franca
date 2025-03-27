@@ -1,5 +1,18 @@
 
-## 
+## (Mar 24-26)
+
+- make it easy to run more tests (with run_tests.fr -- deps)
+- fixed float const coerce + overload 
+- fixed c sizeof on static struct with flex array
+- starting a more interesting demo of import_c/ffi that uses wuffs. 
+needed to be careful about cycles in types so everything's a placeholder that gets patched in a sketchy way. 
+making export_data work is painful, need to think about this more.  
+- speaking of which have i really never allowed cycles in constants in my frontend? oof, fixed that. 
+- having a bit of a moment about weird unicode 
+- convert worker/seal_debug_info/import_c/import_wasm to use a nicer data structure than Qbe.Dat. 
+- re-enable memmove for large blits. 992260 -> 939304 is 5%, that's kinda big. TODO: x64 as well
+
+## (Mar 19-23)
 
 - experimenting with representing wasm blocks with marker instructions 
 so it's easier to split out restructuring control flow from emitting the code. 
@@ -16,6 +29,8 @@ could do the c thing where you have an anonymous struct field and inherit the na
 that would be nice because import_c/ffi/export_type could use that and then using c libraries that did that would feel natural. 
 - it's kinda unfortunate how much code it takes. 
 - to make it feel more integrated, make it work with struct initialization as well 
+- needing to match on a field of a struct when you want a tagged type with common fields
+is something that always annoyed me about rust so i think it will be great success once i can actually use it in the compiler. 
 - allow `#where` without a condition to not name the parameter type,
 so you can have it almost look like a dynamic language and just specialize for every call.  
 - FuckedJunkPointerExpr seems to have fixed itself sometime in the last 6 months, that's very good for business. 

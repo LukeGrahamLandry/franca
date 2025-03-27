@@ -2,14 +2,6 @@
 
 A self sufficient programming language.  
 
-## Goals
-
-- make a language stable enough to use for future projects
-- keep it small enough to be maintained by one person
-- learn as much as possible, which means not leaning on tools/libraries written by someone else
-- be fast enough that you never spend time waiting  
-  (currently unacceptable; it takes a whole second to compile itself)
-
 ## Features
 
 - full compile-time code execution: anything you can do at runtime, you can do at comptime 
@@ -51,11 +43,40 @@ Binaries for other platforms are available as [github actions artifacts](https:/
 
 - The franca compiler itself is written in franca ([./compiler])
 - Lightly optimising multi-platform codegen backend ([./backend]) (based on Qbe)
-- A C11 compiler good enough to compile the lua interpreter ([./examples/import_c]) (based on Chibicc)
+- A C11 compiler (using that backend^) good enough to compile the lua interpreter ([./examples/import_c]) (based on Chibicc)
 - Comptime code generation demos ([./examples/bf])
 - Simple graphics (`./examples/{farm_game.fr, edit.fr}`) (using Sokol, DearImGui)
 - Boring obj-dump-like utilities (`./examples/{dump_macho.fr, dump_elf.fr, dump_wasm.fr}`)
 - Animated ascii-art mandelbrot set by recompiling every frame ([./examples/60fps.fr])
+
+## Goals
+
+- make a language stable enough to use for future projects
+- keep it small enough to be maintained by one person
+- learn as much as possible, which means not leaning on tools/libraries written by someone else
+- be fast enough that you never spend time waiting  
+  (currently unacceptable; it takes a whole second to compile itself)
+
+Just to be clear, I don't know any information. None of the things ending up doing in this project were things I knew how to do or even knew i wanted to do. 
+This is the first project I've worked on that is big enough that the limiting factor is how much I can remember about code I wrote a long time ago. 
+
+But it turns out you can google the cpu spec and then type in the bits and then suddenly you have a jit compiler that like works and stuff. 
+And when you want to write an optimiser or a c compiler or a graphics library you can just google ones people have done before 
+and you can just type in the code they typed in and convert it line by line and change things that don't make sense 
+(and then change them back when you realize the first person knew what they were doing), 
+and at the end of that process you'll understand a new thing. 
+
+I make no claim that this code is good or robust or fit for a particular purpose. 
+My only claim is that if i work on it for four hours a day, every day, it will get better every day, 
+and after a year of that it turns out it's like really a lot better than i ever imagined it would be. 
+
+Whenever there's a choice between learning something and being useful, I'd rather do the learning one. 
+The output I care about here is not this specific program being the best it can be, 
+the goal is (my ability to make cool things go up) and rate at which (my ability to make cool things) go up, go up. 
+The pattern I've seen is that future me is invariably better equipped to make the right choices than current me. 
+The reaction I want when someone sees this is not "damn this guy made a cool compiler", it's "damn the next thing this guy makes is gonna be fucking awesome". 
+
+> It's not symmetrical or perfect; But it's beautiful and it's mine; What else can I do?
 
 ## Tradeoffs
 

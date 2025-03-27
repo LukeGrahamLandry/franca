@@ -46,12 +46,13 @@ Obj :: @rec @struct(
     sent_to_backend: bool,
     refs: []*Obj,
     def: *Obj,
-    franca: FuncId,
+    franca_f: FuncId,
+    franca_v: BakedVarId,
 );
 Relocation :: @rec @struct(
     next: *Relocation,
     offset: i32,
-    label: CStr,  // TODO: why does chibicc have an extra *indirection here?
+    obj: *Obj,
     addend: i64,
 );
 Node :: @rec @struct(
@@ -134,7 +135,6 @@ Initializer :: @rec @struct {
     next: *Initializer;
     ty: *CType;
     tok: *Token;
-    is_flexible: bool;
 
     // If it's not an aggregate type and has an initializer,
     // `expr` has an initialization expression.
@@ -151,6 +151,7 @@ Initializer :: @rec @struct {
     // this is a HACK that makes wuffs/gitplayer compile 30% faster by skipping useless write_gvar_data. 
     // it still allocates the initializers tho which is stupid. 
     all_zeros: bool;
+    is_flexible: bool;
 };
 
 // For local variable initializer.
@@ -203,6 +204,7 @@ Ctx :: @rec @struct {
     preserve_franca_env: bool;
     franca_env: Qbe.Ref;
     franca: ?CompCtx;
+    franca_namespace: ScopeId;
     
     /// Tokenize
     current_file: *File;
@@ -344,32 +346,13 @@ fn new_var_node(c: *Ctx, var: *Obj, tok: *Token) *Node = {
 
 fn new_cast(c: *Ctx, expr: *Node, ty: *CType) *Node = {
     c.add_type(expr);
-    
-    // :ParamTypeList
-    // chibicc is linked list enthused so storing the parameters of a function type
-    // uses the `next` field so you need to make a copy of the whole type struct 
-    // every it's used in a function signeture. but we want to elide redundant casts 
-    // so gen_addr doesn't have to deal with casts and can't try to accidently cast through 
-    // a pointer which doesn't make any sense. 
-    // 
-    // this is wrong if you ever copied a type and modified it to represent a different type. 
-    // i think the only thing that does that is _Atomic. so before adding that back i should 
-    // replace parameter types with a slice and then this hack goes away
-    while => ty.origin.is_null().not() {
-        ty = ty.origin;
-    };
-    while => expr.ty.origin.is_null().not() {
-        expr.ty = expr.ty.origin;
-    };
-    
     if(expr.ty.identical(ty), => return(expr));
     
     node := temp().box_zeroed(Node);
     node.kind = .ND_CAST;
     node.tok = expr.tok;
     node.lhs = expr;
-    // TODO: chibicc does a copy here but i don't know why. do you ever mutate the type in a way that shouldn't be shared?
-    node.ty = ty; // c.copy_type(ty);
+    node.ty = ty; 
     node.current_block = expr.current_block; // HACK: this is super confusing, hopefully it will go away with asts
     
     //node.lvalue = expr.lvalue;  // :FrontendConstantFolding, TODO: but this is wrong, we're assuming its a noop cast but what if its a truncation
@@ -467,12 +450,13 @@ fn create_stack_slot(c: *Ctx, var: *Obj) void = {
     push(c.f.start, make_ins(.alloc8, .Kl, var.stack_slot, c.f.getcon(var.ty.size.intcast()), QbeNull));  // TODO: smaller align stack slots
 }
 
-fn new_gvar(c: *Ctx, name: Str, ty: *CType) *Obj = {
+fn new_gvar(c: *Ctx, name: Str, ty: *CType, tok: *Token) *Obj = {
     var := c.new_var(name, ty, c.arena);
     var.next = c.globals;
     var.is_static = true;
     var.is_definition = true;
     var.global_symbol = (Some = c.m.mangle(var));
+    var.tok = tok;
     c.globals = var;
     c.refs&.push(var);
     var
@@ -484,11 +468,11 @@ fn new_unique_name(c: *Ctx) Str = {
     s
 }
 
-fn new_anon_gvar(c: *Ctx, ty: *CType) *Obj = 
-    c.new_gvar(c.new_unique_name(), ty);
+fn new_anon_gvar(c: *Ctx, ty: *CType, tok: *Token) *Obj = 
+    c.new_gvar(c.new_unique_name(), ty, tok);
 
-fn new_string_literal(c: *Ctx, p: []u8, ty: *CType) *Obj = {
-    var := c.new_anon_gvar(ty);
+fn new_string_literal(c: *Ctx, p: []u8, ty: *CType, tok: *Token) *Obj = {
+    var := c.new_anon_gvar(ty, tok);
     var.init_data = p;
     var.init_data_needs_null_terminator = true;
     var
@@ -970,7 +954,7 @@ fn declaration(c: *Ctx, tok: *Token, basety: *CType, attr: ?*VarAttr) *Token = {
         if attr { attr |
             if attr.is_static {
                 // static locals are secretly globals
-                var := c.new_anon_gvar(ty);
+                var := c.new_anon_gvar(ty, start);
                 c.push_scope(c.get_ident(ty.name))[].var = var;
                 if equal(tok, "=") {
                     c.gvar_initializer(tok&, tok.next, var);
@@ -1389,17 +1373,10 @@ fn initializer(c: *Ctx, rest: **Token, tok: *Token, ty: *CType, new_ty: **CType)
     };
     init := c.new_initializer(ty, true);
     c.initializer2(rest, tok, init);
-
-    has_flex := ty.is_flexible && @is(ty.kind, .TY_STRUCT, .TY_UNION);
-    ::if(@type init.ty);
-    new_ty[] = if(!has_flex, => init.ty) {
-        ty = c.copy_struct_type(ty);
-        hack := ty.members;
-        mem := hack.end_linked();
-        mem.ty = init.children[mem.idx.intcast()].ty;
-        ty.size += mem.ty.size;
-        ty
-    };
+    // if there was a flexible array member chibicc makes a new type to track the exact size of this instantiation. 
+    // but [https://www.sigbus.info/n1570#6.7.2.1p18] "In particular, the size of the structure is as if the flexible 
+    // array member were omitted except that it may have more trailing padding than the omission would imply"
+    new_ty[] = init.ty;
     init
 }
 
@@ -1546,7 +1523,6 @@ fn write_gvar_data(c: *Ctx, cur: *Relocation, init: *Initializer, ty: *CType, bu
         };
         return(cur);
     };
-
     if ty.kind == .TY_STRUCT {
         if true {
             break :: local_return;
@@ -1567,6 +1543,11 @@ fn write_gvar_data(c: *Ctx, cur: *Relocation, init: *Initializer, ty: *CType, bu
                 };
             };
         };
+        if ty.has_flex() {
+            child := init.children[init.children.len - 1];
+            cur = c.write_gvar_data(cur, child, child.ty, buf, off + ty.size.intcast());
+        };
+        
         return(cur);
     };
 
@@ -1596,11 +1577,29 @@ fn write_gvar_data(c: *Ctx, cur: *Relocation, init: *Initializer, ty: *CType, bu
 
     rel := c.arena.box(Relocation);
     rel.offset = off.intcast();
-    rel.label = label;
+    rel.obj = c.find_pending_dep(label, init.expr.tok);
     rel.addend = val;
     cur.next = rel;
     cur.next
 }
+
+fn find_pending_dep(c: *Ctx, label: u32, tok: *Token) *Obj = {
+    for c.refs { ref |
+        id := ref.global_symbol.expect("known symbol");
+        if id == label {
+            return ref;
+        }
+    }
+    @error_tok(c, tok, "import_c: ICE: failed to find obj dependency on %", c.m.str(label))
+}
+
+fn has_flex(ty: *CType) bool = 
+    ty.is_flexible && @is(ty.kind, .TY_STRUCT, .TY_UNION);
+
+// ty.size doesn't count the flexible array member because sizeof is not supposed to include it, 
+// but we need to include it when allocating storage for static variables. 
+fn size(init: *Initializer) i64 = 
+    init.ty.size.intcast() + if(init.ty.has_flex(), => init.children[init.children.len - 1].size(), => 0);
 
 // Initializers for global variables are evaluated at compile-time and
 // embedded to .data section. This function serializes Initializer
@@ -1612,7 +1611,8 @@ fn gvar_initializer(c: *Ctx, rest: **Token, tok: *Token, var: *Obj) void = {
         return();
     };
     head := Relocation.zeroed();
-    buf := c.arena.alloc_zeroed(u8, var.ty.size.intcast());
+    
+    buf := c.arena.alloc_zeroed(u8, init.size());
     c.write_gvar_data(head&, init, var.ty, buf, 0);
     var.init_data = buf;
     var.rel = head.next;
@@ -1918,7 +1918,7 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr) *Token = {
         f.is_definition = f.is_definition || equal(tok, "{");
         f
     } else {
-        f := c.new_gvar(name_str, ty);
+        f := c.new_gvar(name_str, ty, tok);
         f.is_function = true;
         f.is_definition = equal(tok, "{");
         f.is_static = attr.is_static || (attr.is_inline && !attr.is_extern);
@@ -1968,11 +1968,11 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr) *Token = {
     // automatically defined as a local variable containing the
     // current function name.
     c.push_scope("__func__")[].var =
-    c.new_string_literal(f_name, c.array_of(ty_char, f_name.len));
+    c.new_string_literal(f_name, c.array_of(ty_char, f_name.len), tok);
     
     // [GNU] __FUNCTION__ is yet another name of __func__.
     c.push_scope("__FUNCTION__")[].var =
-    c.new_string_literal(f_name, c.array_of(ty_char, f_name.len));
+    c.new_string_literal(f_name, c.array_of(ty_char, f_name.len), tok);
     
     _ := c.compound_stmt(tok&, tok);
     if c.b.jmp.type == .Jxxx {
@@ -2011,7 +2011,7 @@ fn global_variable(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr) *Token 
         ty := c.declarator(tok&, tok, basety);
         if(ty.name.is_null(), => @error_tok(c, ty.name_pos, "variable name omitted"));
 
-        var := c.new_gvar(c.get_ident(ty.name), ty);
+        var := c.new_gvar(c.get_ident(ty.name), ty, ty.name_pos);
         var.is_definition = !attr.is_extern;
         var.is_static = attr.is_static;
         var.is_tls = attr.is_tls;
@@ -2102,7 +2102,7 @@ fn find_matching_name(first: *Obj, goal: *Obj) ?*Obj #once = {
 fn declare_builtin_functions(c: *Ctx) void = {
     ty := c.func_type(c.pointer_to(ty_void));
     ty.params = @const_slice(ty_int);
-    c.builtin_alloca = c.new_gvar("alloca", ty);
+    c.builtin_alloca = c.new_gvar("alloca", ty, zeroed(*Token));
     c.builtin_alloca.is_definition = false;
 }
 
@@ -2461,7 +2461,7 @@ parse_bracketed :: fn(c, rest, tok) #prefix(.@"(") = {
         is_compound_literal := equal(tok, "{");
         if is_compound_literal {
             if c.scope.next.is_null() {  // global
-                var := c.new_anon_gvar(ty);
+                var := c.new_anon_gvar(ty, tok);
                 c.gvar_initializer(rest, tok, var);
                 c.new_var_node(var, start)
             } else {  // local
@@ -2542,7 +2542,7 @@ parse_ident :: fn(c, rest, tok) #prefix(.TK_IDENT) = {
 
 parse_string :: fn(c, rest, tok) #prefix(.TK_STR) = {
     s: []u8 = (ptr = tok.val.str_buf, len = tok.ty.size.intcast());
-    var := c.new_string_literal(s, tok.ty);
+    var := c.new_string_literal(s, tok.ty, tok);
     rest[] = tok.next;
     node := c.new_var_node(var, tok);
     c.gen_expr(node);
@@ -3287,7 +3287,7 @@ fn eval(c: *Ctx, node: *Node) i64 = {
 // is a pointer to a global variable and n is a postiive/negative
 // number. The latter form is accepted only as an initialization
 // expression for a global variable.
-fn eval2(c: *Ctx, node: *Node) Ty(i64, ?CStr) = {  // (off, label)
+fn eval2(c: *Ctx, node: *Node) Ty(i64, ?u32) = {  // (off, label)
     if !c.is_const_expr(node) {
         @error_tok(c, node.tok, "expected a constant expression");
     };
@@ -3307,7 +3307,7 @@ fn eval2(c: *Ctx, node: *Node) Ty(i64, ?CStr) = {  // (off, label)
         @error_tok(c, node.tok, "ICE: unevaluated constant");
     };
     con := c.f.get_constant(r);
-    label: ?CStr = @if(con.type == .CAddr, (Some = c.m.str(con.sym.id).slow_convert_to_c_string()), .None);
+    label: ?u32 = @if(con.type == .CAddr, (Some = con.sym.id), .None);
     (con.bits.i, label)
 }
 
@@ -3513,12 +3513,7 @@ fn gen_expr(c: *Ctx, node: *Node) Qbe.Ref = {
     if(node.r != QbeNull, => return(node.r));
     c.add_type(node);
     if(c.f.is_null() || c.speculate, => return(node.r));
-    prev := c.b;
-    if !node.current_block.is_null() {  // HACK. should go away as i emit code more incrementally. 
-        c.b = node.current_block;
-    };
     node.r = c.gen_expr_inner(node);
-    c.b = prev;
     node.r
 }
 

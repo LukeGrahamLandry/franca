@@ -14,6 +14,9 @@ i don't super want to be in the business of writing a tiered jit at this stage.
 - writing an interpreter that lets you do everything that native code can seems like a massive pain. 
 - it limits the compiler to running in environments that behave like real computers. 
 like wasm is a pain, i think creating a new module every time i add a function is not super feasable. 
+- this also plays into the unsafety thing, any random library can run aritrary code at comptime and that code 
+is real native code that can do whatever it wants. but also any random library can run arbitrary code in your program 
+anyway so it's not really that different. 
 
 ## spending a register on dynamic scope
 

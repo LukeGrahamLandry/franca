@@ -108,19 +108,19 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
             
             if self.new_constants.len != 0 {
                 entry2 := bouba_acquire(shared, idx);
-                self.new_constants = self.new_constants.items().clone(entry2.arena&.borrow());
                 push_dynamic_context {
                     context(DefaultContext)[].temporary_allocator = entry2.arena&;
-                    out := Qbe.Dat.list(self.new_constants.len * 4, temp());
+                    out := Dat2.list(self.new_constants.len, temp());
                     for self.new_constants { id |
-                        emit_constant(comp, m, id, out&);
+                        out&.push(emit_constant(comp, m, id));
                     };
-                    sync_driver_message(comp.data.cast()[][], (EmitDataEnd = (
-                        internal = Qbe.Dat.raw_from_ptr(out&.as_ptr()), 
-                        count = out.len,
-                        internal_module = QbeModule.raw_from_ptr(m),
-                    )));
-                    entry2.task = (AotVar = out.items());
+                    // :TodoChangeMessageEmitDataEndToUseBakedValueInsteadOfBackendDat
+                    //sync_driver_message(comp.data.cast()[][], (EmitDataEnd = (
+                    //    internal = Qbe.Dat.raw_from_ptr(out&.as_ptr()), 
+                    //    count = out.len,
+                    //    internal_module = QbeModule.raw_from_ptr(m),
+                    //)));
+                    entry2.task = (AotVar2 = out.items());
                 };
                 enqueue_task(shared, entry2);
             };
@@ -715,6 +715,7 @@ fn compile_stmt(self: *EmitIr, stmt: *FatStmt) CRes(void) = {
                     name    := @unwrap(b.var(), "tuple binding requires name") return;
                     element := self.offset(base, f.byte_offset);
                     @debug_assert(b.ty&.is(.Finished), "variable not typechecked");
+                    @debug_assert_ne(f.byte_offset, FIELD_LAYOUT_NOT_DONE, "field % not ready", self.program.get_string(f.name));
                     self.declare_var_mem(name, element, b.ty.Finished);
                 };
             };
@@ -823,6 +824,7 @@ fn compile_expr(self: *EmitIr, expr: *FatExpr, p: Placement) CRes(Qbe.Ref) = {
                     base := self.get_memory(p, expr_ty);
                     range(0, f.fields.len) { i |
                         dest := self.offset(base, f.fields[i].byte_offset);
+                        @debug_assert_ne(f.fields[i].byte_offset, FIELD_LAYOUT_NOT_DONE, "field % not ready", self.program.get_string(f.fields[i].name));
                         @try(self.compile_expr(values[i]&, (Blit = dest))) return;
                     };
                     base
@@ -1108,30 +1110,10 @@ fn emit_constant(self: *EmitIr, value: *Values, p: Placement, expr_ty: Type, loc
     if(p&.is(.Discard), => return(Ok = QbeNull));  // TODO: bake_relocatable_value side effect? 
     info := self.program.get_info(expr_ty);
     
-    // :SLOW all_zeroes is redundant with emit_relocatable_constant but for now we can't emit_relocatable_constant_body on something
-    // with small fields + pointers, but its fine to emit as bytes if all zeros. 
-    all_zero := value.all_zeroes();
-    
-    use_int_literal := value.is(.Small) && (!info.contains_pointers() || self.when == .Jit || all_zero) && store_by_size[value.Small._1.zext()] != .Oxxx;
+    use_int_literal := value.is(.Small) && (!info.contains_pointers() || self.when == .Jit || value.Small._0 == 0) && store_by_size[value.Small._1.zext()] != .Oxxx;
     if use_int_literal {
         v := self.f.getcon(value.Small._0);
         return(Ok = self.scalar_result(p, v, expr_ty));
-    };
-    
-    if all_zero {
-        dest := self.get_memory(p, expr_ty);
-        size := value.len();
-        off := 0;
-        z := self.f.getcon(0);  // QbeConZero
-        each blit_op_table { o |
-            while => size >= o.size {
-                d := self.offset(dest, off);
-                self.emit(o.store, .Kw, QbeNull, z, d);
-                size -= o.size;
-                off  += o.size;
-            };
-        };
-        return(Ok = dest);
     };
     
     @match(self.when) {
@@ -1455,6 +1437,7 @@ fn construct_aggregate(self: *EmitIr, pattern: *Pattern, requested: Type, p: Pla
                     return(@err("field name mismatch (ICE: should be checked by sema)"))
                 };
                 expr := b.get_default().unwrap();
+                @debug_assert_ne(field.byte_offset, FIELD_LAYOUT_NOT_DONE, "field % not ready", self.program.get_string(field.name));
                 dest := self.offset(base, field.byte_offset);
                 _ := @try(self.compile_expr(expr, (Blit = dest))) return;
             };

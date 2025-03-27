@@ -80,50 +80,6 @@ fn unptr_ty(c: CompCtx, ty: Type) ?Type = {
     }
 }
 
-fn flat_tuple_types(self: CompCtx, ty: Type) List(Type) = {
-    @match(self.get_type(ty)) {
-        fn Struct(f) => {
-            out: List(Type) = list(temp());
-            each f.fields { f | 
-                out&.push_all(self.flat_tuple_types(f.ty).items());
-            };
-            out
-        }
-        fn Enum(f) => self.flat_tuple_types(f.raw);
-        fn Named(f) => self.flat_tuple_types(f._0);
-        // TODO: this is sketchy
-        fn Tagged(f) => {
-            slots: i64 = self.slot_count(ty).zext();
-            varients: List(List(Type)) = list(f.cases.len, temp());
-            for f.cases { f |
-                var := self.flat_tuple_types(f._1);
-                if var.len > 0 {
-                    varients&.push(var);
-                };
-            };
-            if varients.len() == 1 {
-                varients[0]&.insert(0, i64);
-                @debug_assert_eq(slots, varients[0].len(), "varients");
-                return(varients[0]);
-            };
-            // TODO: hack
-            i64.repeated(slots, temp())
-        }
-        fn Array(f) => {
-            out := self.flat_tuple_types(f.inner);
-            single := out.len;
-            // TODO: fix underflow. better ban 0 len array -- Jul 9
-            range(0, f.len.zext() - 1) { i|
-                // reslice everytime because we might reallocate. TODO: just reserve at the beginning.  -- Jul 6
-                out&.push_all(out.items().slice(0, single));
-            };
-            out
-        }
-        fn void() => list(temp());
-        @default => ty.repeated(1, temp());
-    }
-}
-
 fn get_comptime_env(comp: CompCtx) *ComptimeEnvironment = 
     ComptimeEnvironment.ptr_from_raw(comp.get_build_options()[].env);
 
@@ -221,7 +177,7 @@ fn tuple_of(self: CompCtx, types: []Type) Type = {
                     ty = ty[],
                     nullable_tag = zeroed(*Annotations),
                     default = zeroed(Var),
-                    byte_offset = 99999999999,
+                    byte_offset = FIELD_LAYOUT_NOT_DONE,
                 );
             };
             self.intern_type(Struct = (
@@ -234,6 +190,8 @@ fn tuple_of(self: CompCtx, types: []Type) Type = {
         };
     }
 }
+
+FIELD_LAYOUT_NOT_DONE :: 99999999999;
 
 ///////////////////////////
 // TODO: should try to clean these up.
@@ -735,6 +693,7 @@ BakedValue :: @struct {
     align: u32 = 1;
     export: bool = false;
     loc: Span;
+    jit_addr := 0;
 };
 
 BakedReloc :: @struct {

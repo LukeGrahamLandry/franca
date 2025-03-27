@@ -38,6 +38,15 @@ typedef struct { char a, b[]; } T65;
 T65 g65 = {'f','o','o',0};
 T65 g66 = {'f','o','o','b','a','r',0};
 
+typedef struct T66 T66;
+struct T66 { int data; T66 *next; };
+
+T66 g67[] = {
+    { .data = 1, .next = &g67[1] },
+    { .data = 2, .next = &g67[2] },
+    { .data = 3, .next = &g67[0] }
+};
+
 int main() {
   ASSERT(1, ({ int x[3]={1,2,3}; x[0]; }));
   ASSERT(2, ({ int x[3]={1,2,3}; x[1]; }));
@@ -129,7 +138,6 @@ int main() {
   ASSERT(3, sizeof(g19));
 
   ASSERT(0, memcmp(g17, "foobar", 7));
-  printf("%s\n", "foobar\0\0\0");
   ASSERT(0, memcmp(g18, "foobar\0\0\0", 10));
   ASSERT(0, memcmp(g19, "foo", 3));
 
@@ -179,8 +187,11 @@ int main() {
   ASSERT(3, sizeof(g60));
   ASSERT(6, sizeof(g61));
 
-  ASSERT(4, sizeof(g65));  // clang disagrees
-  ASSERT(7, sizeof(g66));  // clang disagrees
+  // chibicc thinks these are 4/7 because it remembers what the initializer 
+  // said for the flexible array memeber.  but that's not what clang does. 
+  ASSERT(1, sizeof(g65)); 
+  ASSERT(1, sizeof(g66));
+  
   ASSERT(0, strcmp(g65.b, "oo"));
   ASSERT(0, strcmp(g66.b, "oobar"));
 
@@ -254,6 +265,13 @@ int main() {
 
   ASSERT(16, ({ char x[]={[2 ... 10]='a', [7]='b', [15 ... 15]='c', [3 ... 5]='d'}; sizeof(x); }));
   ASSERT(0, ({ char x[]={[2 ... 10]='a', [7]='b', [15 ... 15]='c', [3 ... 5]='d'}; memcmp(x, "\0\0adddabaaa\0\0\0\0c", 16); }));  
+  
+  // self referential
+  ASSERT(1, ({ 
+    T66 *a = g67; 
+    T66 *b = a->next->next->next; 
+    a->data == 1 && a->next->data == 2 && a->next->next->data == 3 && b->data == 1 && a == b; 
+  }));
 
   printf("OK\n");
   return 0;

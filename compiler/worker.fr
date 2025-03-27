@@ -294,11 +294,12 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
             // TODO: interaction with shims is confusing
             
         }
-        fn AotVar(it) => {
-            each it { d |
-                m.new_emit_data(d);
-            };
-        }
+        fn AotVar(it) => each it { d |
+            m.new_emit_data(d);
+        };
+        fn AotVar2(it) => each it { d |
+            m.emit_data(d[]);
+        };
     };
     entry.task = .Dead; 
     @if(ENABLE_ENABLE_TRACY) zone_end(zone);
@@ -330,6 +331,7 @@ CodegenTask :: @tagged(
     Bounce: @struct(lnk: *Qbe.Lnk, target: u32),
     AotVar: []Qbe.Dat,
     Shim: @struct(f: *Qbe.Fn, shim_for: u32),
+    AotVar2: []Dat2,
 );
 
 CodegenEntry :: @struct(
@@ -439,69 +441,40 @@ fn join_codegen_thread(shared: *CodegenShared) void = {
 }
 
 // this puts a bunch of stuff in temp(), it's expected to be used in the context of a CodegenEntry. 
-fn emit_constant(comp: CompCtx, m: *QbeModule, id: BakedVarId, out: *List(Qbe.Dat)) void = {
+// TODO: this is so annoying. the data structures are so similar because the two sides need to know the same information. 
+//       but i can't quite make them the same because you need to allow multiple modules on one frontend context. 
+fn emit_constant(comp: CompCtx, m: *QbeModule, id: BakedVarId) Dat2 = {
     value := comp.get_baked(id);
-    idx: i64 = id.id.zext();
-    
-    lnk := temp().box(Qbe.Lnk);
-    lnk[] = (id = m.intern(@tfmt("g%", idx)));  // TODO: allow exporting vars
-    next_dat :: fn() => {
-        out.push(Qbe.Dat.zeroed());
-        dat := out.index(out.len - 1);
-        dat.lnk = lnk;
-        dat
-    };
-    
-    {
-        dat := next_dat();
-        dat.type = .DStart;
-    };
-    
-    if value.relocations.len == 0 {
-        @match(value.template) {
-            fn Zeroes(len) => {
-                dat := next_dat();
-                dat.type = .DZ;
-                dat.u.num = len;
-            }
-            fn Bytes(bytes) => {
-                dat := next_dat();
-                dat.type = .DB;
-                dat.is_str = true;
-                dat.u.str = bytes;
-            }
-        };
-    } else {
-        // TODO: just poke in the symbols and pass the whole thing to the backend thread. :SLOW
-        bake_iter_legacy value { inner |
-            dat := next_dat();
-            @match(inner) {
-                (fn FnPtr(f) => {
-                    dat.type = .DL;
-                    // TODO: hack because of new deduplication
-                    func := comp.get_function(f);
-                    @if_let(func.body&) fn Redirect(inner) => {
-                        f = inner[];
-                    };
-                    dat.is_ref = true;
-                    dat.u.ref = (id = m.intern(comp.fmt_fn_name(f)), off = 0);
-                    // TODO: make sure we emitted the function. 
-                });
-                (fn AddrOf(id) => {
-                    dat.type = .DL;
-                    dat.is_ref = true;
-                    fuck := @tfmt("g%", @as(i64) id.id.zext());
-                    dat.u.ref = (id = m.intern(fuck), off = 0);
-                });
-                (fn Num(v) => {
-                    dat.type = .DL; // TODO: small prims
-                    dat.u.num = v.value;
-                });
+    (
+        id = m.intern(@tfmt("g%", id.id)),  
+        align = value.align,
+        export = false,  // TODO: allow exporting vars 
+        template = @match(value.template) {  // this is ass
+            fn Zeroes(it) => (Zeroes = it);
+            fn Bytes(it) => (Bytes = it);
+        },
+        relocations = {
+            r := temp().alloc(Dat2.Reloc, value.relocations.len);
+            enumerate r { i, r |
+                it := value.relocations.index(i);
+                // TODO: you can't be doing string formatting in here common man
+                r[] = (
+                    off = it.off,
+                    id = @match(it.target) {
+                        fn FuncId(f) => {
+                            func := comp.get_function(f);
+                            @if_let(func.body&) fn Redirect(inner) => {
+                                f = inner[];
+                            };
+                            m.intern(comp.fmt_fn_name(f))
+                        }
+                        fn BakedVarId(id) => m.intern(@tfmt("g%", id.id));
+                    },
+                );
             };
-        };
-    };
-    dat := next_dat();
-    dat.type = .DEnd;
+            r
+        }
+    )
 }
 
 fn set_debug_types(m: *QbeModule, s: Str, value: bool) void = {

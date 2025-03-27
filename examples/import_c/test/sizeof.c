@@ -96,8 +96,16 @@ int main() {
   ASSERT(4, sizeof(1f/2));
   ASSERT(8, sizeof(1.0/2));
 
-
   ASSERT(1, sizeof(main));
+
+  struct Foo { long a; long b[]; };
+  struct Foo foo = { .a = 123 };
+  static struct Foo bar = { .a = 123, .b = { 1, 2, 3 } };
+  struct Bar { char a; long b[]; };
+  ASSERT(8, sizeof(struct Foo));
+  ASSERT(8, sizeof(foo));
+  ASSERT(8, sizeof(bar));
+  ASSERT(8, sizeof(struct Bar));
 
   printf("OK\n");
   return 0;

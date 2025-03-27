@@ -34,13 +34,15 @@ TODO:
         the very end of compilation but my general goal is to be more unordered not less so that would be unfortunate. 
 */
 
-fn bake_relocatable_constant(c: *SelfHosted, value: []u8, type: Type, loc: Span) Result(BakedVarId, *CompileError) = {
+// since pointers might have cycles, forced_id is used so you can add a cache entry for and address before it's been emitted. 
+fn bake_relocatable_constant(c: *SelfHosted, value: []u8, type: Type, loc: Span, forced_id: ?BakedVarId) Result(BakedVarId, *CompileError) = {
     to_zero: ReadBytes = (bytes = value, i = 0);
     c.comp().zero_padding(type, to_zero&);  // Needed for reproducible builds!
     
     jit_ptr := u8.int_from_ptr(value.ptr);
-    // values <= 8 bytes are stored inline so thier jit_addr is not useful. 
-    if value.len() > 8 {
+    // - values <= 8 bytes are stored inline so thier jit_addr is not useful. 
+    // - when forced_id is set, it's a pointer that we've already checked the cache for (but now the placeholder will be there)
+    if value.len() > 8 && forced_id.is_none() {
         // TODO: this barely does anything! cause like cstr and slice don't go through this function. they call dyn_bake_relocatable_value. -- Jun 30
         //       this is the right idea, they just need to check thier pointers against the cache first. 
         if c.baked.lookup&.get(jit_ptr) { v | 
@@ -49,12 +51,22 @@ fn bake_relocatable_constant(c: *SelfHosted, value: []u8, type: Type, loc: Span)
         };
     };
     
+    finish :: fn(v: BakedValue) Never => {
+        if forced_id { id |
+            c.baked.values&.nested_index(id.id.zext())[] = v;
+            return(Ok = id)
+        } else {
+            return(Ok = c.put_baked(v, (Some = jit_ptr)))
+        };
+        unreachable()  // TODO: this shouldn't be needed
+    };
+    
     // TODO: storing jit_ptr in put_baked is sketchy for small values,
     //       but currently it's only used for jit constant access and if it were small you'd have just loaded it directly in emit_bc. -- Nov 3
     
     // TODO: is it really that helpful to tell the backend to use zeroinitilizer? could at least have a faster memcmp. 
     if value.all_zeroes() {
-        return(Ok = c.put_baked((template = (Zeroes = value.len()), loc = loc), (Some = jit_ptr)));
+        finish(template = (Zeroes = value.len()), loc = loc);
     };
     
     // Eventually we'll recurse to something with no pointers. ie Str -> [u8; n]
@@ -63,7 +75,7 @@ fn bake_relocatable_constant(c: *SelfHosted, value: []u8, type: Type, loc: Span)
         // If this is actually a top level Value and the is less than 8, 
         // this is very very bad because it would be stored inline and not have a stable address. 
         // BUT we also recurse here when following pointers so we can't deny small values here. 
-        return(Ok = c.put_baked((template = (Bytes = value), loc = loc), (Some = jit_ptr)));
+        finish(template = (Bytes = value), loc = loc);
     };
     
     out := BakedReloc.list(c.get_alloc());
@@ -82,7 +94,7 @@ fn bake_relocatable_constant(c: *SelfHosted, value: []u8, type: Type, loc: Span)
         }
     };
     
-    (Ok = c.put_baked((template = (Bytes = value), loc = loc, relocations = out&.items()), (Some = jit_ptr)))
+    finish(template = (Bytes = value), loc = loc, relocations = out&.items())
 }
 
 // TODO: make sure baked.lookup actually ever helps. might need to add checks in more places.
@@ -165,7 +177,9 @@ fn bake_relocatable_body(c: *SelfHosted, value: []u8, type: Type, out: *List(Bak
             inner_info := c.get_info(inner[]);
             ptr := u8.ptr_from_int(first_word);
             data := slice(ptr, inner_info.stride_bytes.zext());
-            id := @try(c.bake_relocatable_constant(data, inner[], Span.zeroed())) return;
+            _, id := c.reserve_baked(Some = first_word);  // avoid cycles
+            id2 := @try(c.bake_relocatable_constant(data, inner[], Span.zeroed(), (Some = id))) return;
+            @debug_assert_eq(id.id, id2.id);
             out.push(off = reloc_off, target = (BakedVarId = id));
         }
         fn Struct(f) => {
@@ -233,16 +247,27 @@ fn created_jit_fn_ptr_value(self: *SelfHosted, f: FuncId, ptr: i64) void = {
     self.baked.functions&.insert(ptr, f);
 }
 
-
-fn put_baked(c: *SelfHosted, v: BakedValue, jit_ptr: ?i64) BakedVarId = {
-    id: BakedVarId = (id = c.baked.values.len.trunc());
-    push(c.baked.values&, v); 
+fn reserve_baked(c: *SelfHosted, jit_ptr: ?i64) Ty(*BakedValue, BakedVarId) #inline = {
+    v := c.baked.values&;
+    id: BakedVarId = (id = v.len.trunc());
     if jit_ptr { ptr | 
         c.baked.lookup&.insert(ptr, id); // TODO: check unique? 
     };
+    v.push(zeroed BakedValue);
+    dest := v.nested_index(id.id.zext());
+    (dest, id)
+}
+
+fn put_baked(c: *SelfHosted, v: BakedValue, jit_ptr: ?i64) BakedVarId #inline = {
+    dest, id := c.reserve_baked(jit_ptr);
+    if jit_ptr { ptr | 
+        v.jit_addr = ptr;
+    };
+    dest[] = v;
     id
 }
 
+// TODO: change the api we expose so you don't need this anymore
 fn emit_relocatable_constant_body(c: *SelfHosted, bytes: Slice(u8), ty: Type, force_default_handling: bool) Res(Slice(BakedEntry)) = {
     out := BakedReloc.list(temp());  // doesn't escape!
     // TODO: zero here? 
@@ -402,6 +427,7 @@ fn chop_prefix(self: *SelfHosted, prefix: Type, t: *ReadBytes) ?Values #once = {
 // You need this for reproducible builds!
 // Without calling this on when baking constants, you can leak comptime addresses in @tagged padding (which happened in get_or_create_type in the compiler).
 // TODO: decide if i need to do this for baked arg key hashing. 
+// TODO: this should probably go through pointers but for baking constants that's handled as we recurse. 
 fn zero_padding(program: CompCtx, ty: Type, bytes: *ReadBytes) PRes = {
     info := program.get_info(ty);
 

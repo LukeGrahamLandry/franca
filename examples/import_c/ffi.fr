@@ -10,16 +10,39 @@
 //       a QbeModule but there's two of them. 
 // TODO: and for comptime need to materialize all the variables as normal memory (not just BakedValue). 
 //
+// TODO: don't give functions thier real names in the QbeModule so you can use multiple c projects without worrying about conflicts
+//
+
+fn enable_franca_ffi(c: *Ctx, fr: CompCtx, namespace: ScopeId) void = {
+    c.franca = (Some = fr);
+    c.preserve_franca_env = true;
+    c.franca_namespace = namespace;
+}
 
 fn export_type(c: *Ctx, type: *CType, decay_arrays: bool) Type = {
     fr := c.franca.unwrap();
     use_cache := !(decay_arrays && type.kind == .TY_ARRAY);
     if(type.franca != UnknownType && use_cache, => return(type.franca));
-    info := c.export_type_info(type, decay_arrays);
-    id   := fr.intern_type(info);
-    if use_cache {
-        type.franca = id;
+    nominal := @is(type.kind, .TY_STRUCT, .TY_UNION, .TY_ENUM);
+    
+    ::if(Type);
+    id := if !nominal {
+        info := c.export_type_info(type, decay_arrays);
+        id := fr.intern_type(info);
+        if use_cache {
+            type.franca = id;
+        }
+        id
+    } else {
+        id := fr.intern_type(.Placeholder);  // avoid cycles
+        if use_cache {
+            type.franca = id;
+        }
+        info := c.export_type_info(type, decay_arrays);
+        fr.get_type(id)[] = info;  // go directly to jail do not pass go do not collect two hundred dollars 
+        id
     }
+    
     // TODO: give it the name as well? 
     // TODO: give it the TypeMeta
     id
@@ -37,7 +60,7 @@ fn export_type_info(c: *Ctx, type: *CType, decay_arrays: bool) TypeInfo = {
         fn TY_DOUBLE()  => .F64;
         fn TY_LDOUBLE() => .F64;
         // TODO: don't throw away the names 
-        fn TY_ENUM() => (Int = (bit_count = 4, signed = false));
+        fn TY_ENUM() => (Int = (bit_count = 32, signed = false));
         fn TY_PTR() => @match(type.base.kind) {
             fn TY_VOID() => .VoidPtr;
             fn TY_FUNC() => {
@@ -93,17 +116,25 @@ fn export_members(c: *Ctx, type: *CType, is_union: bool) TypeInfo = {
     (Struct = (fields = fields.as_raw(), layout_done = true, is_tuple = false, is_union = is_union, scope = NOSCOPE))
 }
 
+fn add_to_scope(c: CompCtx, s: ScopeId, name: Symbol, foreign_type: Type, value: ~T) void #where = {
+   (c.vtable.add_to_scope)(c.data, s, name, foreign_type, T.raw_from_ptr(value&));
+}
+
+// TODO: allow passing in a namespace to lookup external functions in (and don't auto recurse upward) 
+// so you can tell if you update a library and it starts calling weird shit suddenly or you can give it your
+// own versions that limit its access to the file system or whatever.  
 fn export_func(c: *Ctx, obj: *Obj) FuncId = {
-    @debug_assert(obj.is_function && obj.is_definition);
-    if(obj.franca != FuncId.zeroed(), => return(obj.franca));
+    @debug_assert(obj.is_function, "expected func");
+    if(obj.franca_f != FuncId.zeroed(), => return(obj.franca_f));
     fr := c.franca.unwrap();
-    fn_type := c.export_type(obj.ty, false);
-    fn_type := fr.get_type(fn_type)[].Fn;
+    f_ty := c.export_type(obj.ty, false);
+    fn_type := fr.get_type(f_ty)[].Fn;
     
+    name := fr.intern_string(obj.name.str());
     loc := Span.zeroed();  // TODO: translate this too!
     func: Func = (
         annotations = empty(),
-        callees = empty(),  // TODO: should fill this out
+        callees = empty(),
         mutual_callees = empty(),
         var_name = .None,
         finished_arg = (Some = fn_type.arg),
@@ -111,25 +142,94 @@ fn export_func(c: *Ctx, obj: *Obj) FuncId = {
         cc = (Some = .CCallReg),
         return_var = .None,
         scope = .None,
-        body = (Ir = (fn_internal = Qbe.Fn.int_from_ptr(obj.f), module_internal = QbeModule.int_from_ptr(c.m))),
+        body = @if(obj.is_definition, 
+            (Ir = (fn_internal = Qbe.Fn.int_from_ptr(obj.f), module_internal = QbeModule.int_from_ptr(c.m))),
+            (DynamicImport = name),
+        ),
         arg = (bindings = empty(), loc = loc),  // TODO: does bindings matter if we already have finished_arg? 
         ret = (Finished = fn_type.ret),
-        name = fr.intern_string(obj.name.str()),
+        name = name,
         loc = loc,
     );
+    
     func&.set_flag(.ResolvedSign);
     func&.set_flag(.ResolvedBody);
     func&.set_flag(.EnsuredCompiled);
     fid := fr.intern_func(func&);
-    obj.franca = fid;
-    //func := fr.get_function(fid);
+    func := fr.get_function(fid);
+    if obj.is_definition && !(c.franca_namespace == NOSCOPE) {
+        // TODO: put `static` functions in an inner namespace for each file so we can mimic seperate compilation units
+        // TODO: have a thing for striping prefixes since we have a higher level idea of scopes
+        fr.add_to_scope(c.franca_namespace, name, f_ty, fid);
+    }
+    obj.franca_f = fid;  // save this before translating the callgraph so we don't get stuck in cycles
+    follow_refs(c, obj, (Some = func));
     fid
 }
 
+follow_refs :: fn(c: *Ctx, obj: *Obj, caller: ?*Func) void = {
+    if obj.is_definition {
+        fr := c.franca.unwrap();
+        for obj.refs { ref |
+            while => !ref.def.is_null() {
+                ref = ref.def;
+            }
+            @if(!ref.is_local)
+            if ref.is_function {
+                callee := c.export_func(ref);
+                // TODO: decide callee vs mutual callee more intelligently? 
+                if caller { func |
+                    func.mutual_callees&.push(callee, fr.get_alloc());
+                }
+            } else {
+                id := c.export_data(ref);
+                // TODO: need to track that dependency somehow (like callees)
+            }
+        }
+    }
+}
+
+// TODO: need to return BakedVarId to support aot instead of specifically poking it into the backend module we have
+// TODO: want to have it work like callees where you only actually emit it to the module when you know it's reachable
 fn export_data(c: *Ctx, obj: *Obj) BakedVarId = {
     @debug_assert(!obj.is_function && obj.is_definition);
     fr := c.franca.unwrap();
-    // TODO
+    ::AutoEq(BakedVarId); ::RefEq(BakedVarId);
+    if(obj.franca_v != BakedVarId.zeroed(), => return(obj.franca_v));
+    obj.franca_v = fr'vtable'reserve_baked(fr.data, .None);
+    dest := fr.get_baked(obj.franca_v);
+    
+    ::ptr_utils(@type obj.rel[]);
+    no_init_data := obj.init_data.ptr.is_null();
+    // can't just be obj.ty.size because it might have a flexible array member
+    total_size   := if(no_init_data, => obj.ty.size.intcast(), => obj.init_data.len) + int(obj.init_data_needs_null_terminator);
+    is_zeroed    := no_init_data || is_all_zeroes(obj.init_data);
+    dest[] = (
+        template = @if(is_zeroed, (Zeroes = total_size), (Bytes = {
+            if obj.init_data_needs_null_terminator {
+                d := fr.get_alloc().alloc(u8, obj.init_data.len + 1);
+                d.slice(0, d.len - 1).copy_from(obj.init_data);
+                d
+            } else {
+                obj.init_data
+            }
+        })),
+        relocations = ({
+            relocs := BakedReloc.list(fr.get_alloc());
+            for_linked obj.rel { rel |
+                @assert_eq(rel.addend, 0, "TODO: import_c: support addend");
+                relocs&.push(
+                    off = rel.offset.bitcast(),
+                    target = @if(rel.obj.is_function, (FuncId = c.export_func(rel.obj)), (BakedVarId = c.export_data(rel.obj))),
+                    backend_symbol = rel.obj.global_symbol.unwrap(),
+                );
+            };
+            relocs.items()
+        }),
+        loc = zeroed Span, // TODO
+    );
+    follow_refs(c, obj, .None);
+    obj.franca_v
 }
 
 #use("@/compiler/ast_external.fr");
@@ -137,4 +237,3 @@ C :: import("@/examples/import_c/lib.fr");
 Ctx :: C.Compile.Ctx;
 Obj :: C.Compile.Obj;
 CType :: C.Types.CType;
-

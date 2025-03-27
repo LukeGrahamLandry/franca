@@ -29,6 +29,7 @@ fn init_ctx(c: *Compile.Ctx, m: *QbeModule) void = {
     c.hide_stack = list(c.arena);
     c.m = m;
     c.franca = .None;
+    c.franca_namespace = NOSCOPE;
     
     // you need this before calling parse() in compile because the preprocessor calls into const_expr
     {
@@ -113,80 +114,47 @@ fn emit_the_code(c: *Compile.Ctx, ctx: *CodegenShared, obj: *Compile.Obj) void =
                 fill_lnk(f.lnk&, obj, ctx.m);
                 entry.task = (Func = f);
             } else {
-                entry.task = (AotVar = translate_data(ctx.m, obj));
+                entry.task = (AotVar2 = translate_data(ctx.m, obj));
             };
         };
         enqueue_task(ctx, entry);
     };
 }
 
-// TODO: do i need a way of asking for a certain alignment?
-fn translate_data(m: *QbeModule, obj: *Compile.Obj) []Qbe.Dat = {
-    out := Qbe.Dat.list(3, temp());
-    lnk := temp().box(Qbe.Lnk);
-    fill_lnk(lnk, obj, m);
+// TODO: implement _Alignas
+fn translate_data(m: *QbeModule, obj: *Compile.Obj) []Dat2 = {
+    ::ptr_utils(@type obj.rel[]);
+    no_init_data := obj.init_data.ptr.is_null();
+    // can't just be obj.ty.size because it might have a flexible array member
+    total_size   := if(no_init_data, => obj.ty.size.intcast(), => obj.init_data.len) + int(obj.init_data_needs_null_terminator);
+    is_zeroed    := no_init_data || is_all_zeroes(obj.init_data);
     
-    next_dat :: fn() => {
-        out&.push(Qbe.Dat.zeroed());
-        dat := out.index(out.len - 1);
-        dat.lnk = lnk;
-        dat
-    };
-    
-    { dat := next_dat(); dat.type = .DStart; };
-    
-    if true {
-        break :: local_return;
-        
-        ::ptr_utils(@type obj.rel[]);
-        if obj.rel.is_null() {
-            dat := next_dat(); 
-            
-            // TODO: stupid that it's slower to do `int a[9999] = {0}` than `int a[9999];`
-            if obj.init_data.ptr.is_null() || is_all_zeroes(obj.init_data) {
-                dat = dat.offset(-1); out.len -= 1;  // HACK
-                dat.type = .DZeroInit; 
-                dat.u.num = obj.ty.size.intcast();
-                break();
-            };
-            @debug_assert_eq(obj.init_data.len, obj.ty.size.intcast(), "init_data wrong size for type.\n%", obj.init_data);
-            dat.type = .DB; 
-            dat.is_str = true;
-            dat.u.str = obj.init_data;
+    out := Dat2.list(1, temp());
+    out&.push(
+        export = !obj.is_static,
+        id = obj.global_symbol || m.mangle(obj),
+        template = @if(is_zeroed, (Zeroes = total_size), (Bytes = {
             if obj.init_data_needs_null_terminator {
-                dat := next_dat(); 
-                dat.type = .DB; 
-                dat.u.num = 0;
+                // TODO: doing an extra copy here is unfortunate
+                d := temp().alloc(u8, obj.init_data.len + 1);
+                d.slice(0, d.len - 1).copy_from(obj.init_data);
+                d
+            } else {
+                obj.init_data
+            }
+        })),
+        relocations = ({
+            relocs := Dat2.Reloc.list(temp());
+            for_linked obj.rel { rel |
+                relocs&.push(
+                    off = rel.offset.bitcast(),
+                    id = rel.obj.global_symbol.unwrap(),
+                    addend = rel.addend,
+                );
             };
-            break();
-        };
-        @debug_assert_eq(obj.init_data.len, obj.ty.size.intcast(), "init_data wrong size for type.\n%", obj.init_data);
-        pos := 0;
-        rel := obj.rel;
-        for_linked rel { rel |
-            @assert_eq(rel.offset.mod(8), 0, "pointer in constant storage must be 8-byte aligned");
-            before := obj.init_data.slice(pos, rel.offset.intcast());
-            if before.len > 0 {
-                dat := next_dat(); 
-                dat.type = .DB; 
-                dat.is_str = true;
-                dat.u.str = before;
-            };
-            pos = rel.offset.intcast() + 8;
-            dat := next_dat(); 
-            dat.type = .DL; 
-            dat.is_ref = true;
-            dat.u.ref = (id = m.intern(rel.label.str()), off = rel.addend);
-        };
-        if pos < obj.ty.size.intcast() {
-            dat := next_dat(); 
-            dat.type = .DB; 
-            dat.is_str = true;
-            dat.u.str = obj.init_data.rest(pos);
-        };
-    };
-    
-    { dat := next_dat(); dat.type = .DEnd; };
+            relocs.items()
+        }),
+    );    
     out.items()
 }
 
@@ -208,7 +176,8 @@ fn mangle(m: *QbeModule, obj: *Compile.Obj) u32 = {
     ::ptr_utils(@type obj.tok[]);
     name := obj.name.str();
     if obj.is_static && !obj.tok.is_null() {
-        name = @tfmt("%@%", name, obj.tok.file.name); // not very rigorous
+        // also doesn't work because we call before deciding if it's static sometimes
+        //name = @tfmt("%@%", name, obj.tok.file.name); // not very rigorous
     };
     m.intern(name)
 }

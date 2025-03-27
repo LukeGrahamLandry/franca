@@ -1,0 +1,117 @@
+main :: fn() void = {
+    file_count, problem_count := (0, 0);
+    for_franca_files "." { path, content | 
+        check_file(path, content, problem_count&);
+        file_count += 1;
+    }
+    @println("Scanned % files and found % problems", file_count, problem_count);
+    if problem_count != 0 {
+        exit(1);
+    }
+}
+
+fn for_franca_files(root: CStr, $body: @Fn(path: Str, content: Str) void) void = {
+    dirs := CStr.list(general_allocator());
+    dirs&.push(root);
+    scratch := u8.list(general_allocator());
+    while => dirs.len != 0 { 
+        dir := dirs&.pop().unwrap();
+        walk_directory dir { entry |
+            ::enum(DirEntType);
+            @match(entry.type) {
+                fn File() => if entry.name.ends_with(".fr") {
+                    path := @tfmt("%/%", dir, entry.name);
+                    scratch&.read_and_push_or_crash(path);
+                    body(path, scratch.items());
+                    scratch&.clear();
+                }
+                fn Directory() => if entry.name != ".." && entry.name != "." {
+                    path := @fmt_cstr("%/%\0", dir, entry.name);  // :LEAK and means you can't reset temp
+                    dirs&.push(path);
+                }
+                @default => ();
+            }
+        }
+    }
+    dirs&.drop();
+    scratch&.drop();
+}
+
+MAX_LINE_LENGTH         :: 365;
+MAX_AVERAGE_LINE_LENGTH :: 128;
+
+check_file :: fn(path: Str, content: Str, problem_count: *i64) void = {
+    !path.ends_with(".g.fr") || return();
+    
+    Utf8 :: import("@/examples/import_c/unicode.fr");
+    magic_tag :: "#allow_bidirectional_unicode_text_in_next_block";  // {}
+    // https://blog.rust-lang.org/2021/11/01/cve-2021-42574.html
+    illegal_unicode :: @const_slice(@as(u32) 0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2066, 0x2067, 0x2068, 0x2069);
+    
+    State :: @enum(deny, allow_after_open, allow_until_close); ::enum(State);
+    
+    i, line_start, line_count, j, block_depth, state_depth, state := (0, 0, 1, 0, 0, 0, State.deny);
+    while => i < content.len {
+        c, codepoint_length := Utf8'decode_utf8(content.rest(i));
+        if c == "\n".char().trunc() {
+            line_count += 1;
+            line_length := i - line_start;
+            if line_length > MAX_LINE_LENGTH {
+                @eprintln("line % of % is too long (%/%).%", line_count, path, content.slice(line_start, i), line_length, MAX_LINE_LENGTH);
+                problem_count[] += 1;
+            }
+            line_start = i;
+        }
+        
+        is_block_start, is_block_end := (c == "{".char().trunc(), c == "}".char().trunc());
+        block_depth += int(is_block_start);
+        block_depth -= int(is_block_end);
+        
+        @match(state) {
+            fn deny() => if j < magic_tag.len() && c == magic_tag[j].zext() {
+                j += 1;
+                if j == magic_tag.len() {
+                    state = .allow_after_open;
+                }
+            } else {
+                j = 0;
+            }
+            fn allow_after_open() => if is_block_start {
+                state = .allow_until_close;
+            }
+            fn allow_until_close() => if is_block_end && block_depth == state_depth {
+                state = .deny;
+            }
+        }
+        
+        if state != .allow_until_close && c > 127 && illegal_unicode.contains(c) {
+            @eprintln("line % of % contains illegal unicode codepoint % <- base ten.%", line_count, path, c, content.slice(line_start, i));
+            problem_count[] += 1;
+        }
+        i += codepoint_length;
+    }
+    average_line_length := content.len / line_count;  // includes blank lines
+    if average_line_length > MAX_AVERAGE_LINE_LENGTH {
+        @eprintln("% has too long lines on average (%/%)", path, average_line_length, MAX_AVERAGE_LINE_LENGTH);
+        problem_count[] += 1;
+    }
+}
+
+#allow_bidirectional_unicode_text_in_next_block
+example_of_creepy_unicode :: fn() #test = {
+    // https://github.com/golang/go/issues/20209
+    bits, str, mask := (0, "HERE BE DRAGONS!‮10x‭", 0
+    );
+    for(str, fn(char) => while(=> char > 0, => {
+        bits += char.zext().bit_and(mask);
+        char = char.shift_right_logical(1);
+    }));
+    assert_eq(bits, 0);  // NOT 73
+    
+    // https://blog.rust-lang.org/2021/11/01/cve-2021-42574.html
+    access_level, blow_up_moon := ("user", false);
+    if access_level != "user‮ ⁦// Check if admin⁩ ⁦" {
+        blow_up_moon = true;
+    }
+    assert_eq(blow_up_moon, true);
+}

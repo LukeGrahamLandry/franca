@@ -174,7 +174,6 @@ fn new_zeroed_symbol(self: *QbeModule, dat: *Qbe.Dat) void = {
         next[] = next[].offset(dat.u.num);
     };
 }
-
 // TODO: be able to specify mutable or constant
 fn new_emit_data(self: *QbeModule, dat: *Qbe.Dat) void = {
     ::enum(@type dat.type);
@@ -188,6 +187,70 @@ fn new_emit_data(self: *QbeModule, dat: *Qbe.Dat) void = {
 
 fn emit_data_to_segment(self: *QbeModule, dat: *Qbe.Dat) void = 
     emit_data_to_segment(self, dat, .MutableData);
+
+Dat2 :: @struct {
+    Reloc :: @struct(off: u32, id: u32, addend: i64 = 0);
+    Template :: @tagged(Bytes: []u8, Zeroes: i64);
+    template: Template;
+    relocations: []Reloc = empty(); 
+    align: u32 = 1;
+    seg := SegmentType.MutableData;
+    id: u32;
+    export: bool = false;  // TODO: compiler bug if you move this up :FUCKED
+};
+
+// TODO: remove all uses of Qbe.Dat and replace it with this
+//       meta/parse, compiler/emit_ir, meta/dump
+// Reserve a chunk of memory in the module's data segment, fill it with the right bytes, and record the necessary relocations. 
+// The memory in `dat` is not needed after this call, caller can free it. 
+fn emit_data(self: *QbeModule, dat: Dat2) void = {
+    assert(!self.fixups_locked, "you cannot add more data after emitting for aot");
+    ::tagged(@type dat.template);
+    
+    if dat.template&.is(.Zeroes) && dat.relocations.len == 0 {
+        // TODO: i want to remvoe this limitation so you can use this function
+        //       to materialize things made by import_c or meta/parse. 
+        @debug_assert_ne(self.goal.type, .JitOnly, "TODO: the franca compiler doens't do this because the data's already in the comptime address space\nat the very least you need to mmap something for ZeroInitData before you can turn this on.");
+        
+        dat.seg = .ZeroInitData;
+    };
+    
+    segment := self.segments&.index(dat.seg);
+    
+    segment.align_to(8);  // TODO
+    next := segment.next&;
+    start_off := segment.len();
+    dest := @match(dat.template) {
+        fn Zeroes(size) => next[].slice(size);  // it will already be zeroed since it's from the page allocator
+        fn Bytes(bytes) => {
+            dest := next[].slice(bytes.len);
+            dest.copy_from(bytes);
+            dest
+        }
+    };
+    next[] = next[].offset(dest.len);
+    maybe_add_export(self, dat.id, dat.export);
+    self.do_jit_fixups(dat.id, dat.seg, start_off);
+    
+    each dat.relocations { r |
+        @assert_eq(r.off.mod(8), 0, "sorry can't do unaligned constants yet");
+        ptr := ptr_cast_unchecked(u8, i64, dest.index(r.off.zext()));
+        use_symbol(self, r.id) { symbol | 
+            mark_referenced(self, r.id, symbol);
+            if self.get_addr(symbol) { value |
+                ptr[] = int_from_rawptr(value._0) + r.addend;
+            };
+            // Since we need the absolute address in memory, even local symbols need a relocation. 
+            push_fixup(self, symbol, (patch_at = i64.raw_from_ptr(ptr), type = (DataAbsolute = (increment = r.addend))));
+            if self.goal.arch != .wasm32 && self.goal.type == .Relocatable && !symbol.local_but_marked_for_relocation {
+                lock(self.intern_mutex&);
+                self.local_needs_reloc&.push(r.id);
+                unlock(self.intern_mutex&);
+                symbol.local_but_marked_for_relocation = true;
+            };
+        };
+    };
+}
 
 fn emit_data_to_segment(self: *QbeModule, dat: *Qbe.Dat, seg: SegmentType) void = {
     assert(!self.fixups_locked, "you cannot add more data after emitting for aot");
@@ -572,22 +635,6 @@ fn live_segment_part(m: *QbeModule, s: SegmentType) []u8 = {
     s.mmapped.slice(0, ptr_diff(s.mmapped.ptr, s.next))
 }
 
-fn declare_bytes(m: *QbeModule, bytes: []u8, name: Str) u32 = {
-    dat := Qbe.Dat.zeroed();
-    lnk := Qbe.Lnk.zeroed();
-    dat.lnk = lnk&;
-    dat.lnk.id = m.intern(name);
-    dat.type = .DStart;
-    m.new_emit_data(dat&);
-    dat.type = .DB;
-    dat.u.str = bytes;
-    dat.is_str = true;
-    m.new_emit_data(dat&);
-    dat.type = .DEnd;
-    m.new_emit_data(dat&);
-    dat.lnk.id
-}
-
 fn seal_debug_info(m: *QbeModule, debug_source_code: []u8, include: bool, files_bytes: []u8) void = {
     if m.goal.type == .Exe {
         // TODO: figure out how to make this work for .Relocatable
@@ -597,39 +644,42 @@ fn seal_debug_info(m: *QbeModule, debug_source_code: []u8, include: bool, files_
     };
     
     AotDebugInfo :: import("@/lib/crash_report.fr").AotDebugInfo;
-
-    dat := Qbe.Dat.zeroed();
-    lnk := Qbe.Lnk.zeroed();
-    dat.lnk = lnk&;
-    dat.lnk.id = m.intern("__franca_aot_debug_info");
+    
+    id := m.intern("__franca_aot_debug_info");
     if !include || m.goal.type == .Relocatable {
-        dat.u.num = size_of(AotDebugInfo);
-        m.new_zeroed_symbol(dat&);
+        m.emit_data(id = id, template = (Zeroes = size_of(AotDebugInfo)), align = 8);
         return();
     };
     // TODO: figure out how to make this work for .Relocatable
     
-    // TODO: don't force having a name for these. 
-    code_p    := m.intern("__franca_code_segment");
-    m.do_jit_fixups(code_p, .Code, text_padding);
-    header_p  := m.declare_bytes(m.debug_headers.items(), "__franca_debug_headers");
-    payload_p := m.declare_bytes(m.debug_data.items(), "__franca_debug_data");
-    source_p  := m.declare_bytes(debug_source_code, "__franca_debug_source");
-    files_p   := m.declare_bytes(files_bytes, "__franca_debug_files");
-    
-    dat.type = .DStart;
-    m.new_emit_data(dat&);
     code := m.segments&.index(.Code);
-    ::assert_eq(size_of(AotDebugInfo), size_of(i64) * 12);
-    dat.type = .DL; dat.u.num = 1; m.new_emit_data(dat&);  // version
-    append_slice(m, dat&, code_p, ptr_diff(code.mmapped.ptr, code.next) - text_padding);
-    append_slice(m, dat&, header_p, m.debug_headers.len);
-    append_slice(m, dat&, payload_p, m.debug_data.len);
-    append_slice(m, dat&, source_p, debug_source_code.len);
-    append_slice(m, dat&, files_p, files_bytes.len);
-    dat.type = .DL; dat.u.num = 0; m.new_emit_data(dat&);  // nullable_cached_codemap
-    dat.type = .DEnd;
-    m.new_emit_data(dat&);
+    data: AotDebugInfo = (
+        version = 1,
+        code_segment = (ptr = code.mmapped.ptr.offset(text_padding), len = ptr_diff(code.mmapped.ptr, code.next) - text_padding),
+        headers = m.debug_headers.items(),
+        payload = m.debug_data.items(),
+        source = debug_source_code,
+        files = files_bytes,
+        nullable_cached_codemap = zeroed rawptr,
+    );
+    // TODO: don't force having a name for these. 
+    names := @const_slice("__franca_code_segment", "__franca_debug_headers", "__franca_debug_data", "__franca_debug_source", "__franca_debug_files");
+
+    i := 0;
+    r := temp().alloc(Dat2.Reloc, 5);
+    inline_for get_fields(AotDebugInfo) { $f | 
+        @if(::(size_of(f[].ty) == 16)) {
+            // a relocation for the data pointer of this field
+            r[i] = (id = m.intern(names[i]), off = f[].byte_offset.trunc());
+            if i > 0 { // skip code_segment since that's already in the executable 
+                // a seperate symbol for the raw bytes this field references
+                m.emit_data(id = r[i].id, template = (Bytes = AotDebugInfo.get_field_ptr(data&, f)[]), align = 8);
+            };
+            i += 1;
+        };
+    };
+    ::[]AotDebugInfo;
+    m.emit_data(id = id, template = (Bytes = data&.slice(1).interpret_as_bytes()), align = 8);
 }
 
 // requires including codemap.fr
@@ -644,17 +694,6 @@ fn encode_debug_files(files: []File) Ty([]u8, []u8) = {
         push_all(headers&, file.name);
     };
     (source.items(), headers.items())
-}
-
-fn append_slice(m: *QbeModule, dat: *Qbe.Dat, ptr: u32, len: i64) void = {
-    dat.type = .DL;
-    dat.u.ref = (id = ptr, off = 0);
-    dat.is_ref = true;
-    m.new_emit_data(dat);
-    dat.is_ref = false;
-    dat.type = .DL;
-    dat.u.num = len;
-    m.new_emit_data(dat);
 }
 
 fn start_debug_info(m: *QbeModule, s: *SymbolInfo) void = {

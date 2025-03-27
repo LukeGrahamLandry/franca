@@ -139,7 +139,7 @@ fn init_driver_vtable() *ImportVTable = {
     };
     
     vtable.emit_relocatable_constant = fn(c: Compiler, ty: Type, value: []u8, loc: Span) Res(BakedVarId) = {
-        c.cast()[][].bake_relocatable_constant(value, ty, loc)
+        c.cast()[][].bake_relocatable_constant(value, ty, loc, .None)
     };
     vtable.log_expr = fn(c: Compiler, e: *FatExpr) Str = {
         log(e, c.cast()[][])
@@ -215,6 +215,51 @@ fn init_driver_vtable() *ImportVTable = {
         
     vtable.intern_func = fn(c, info) = 
         c.cast()[][].add_function(info[]);
+    
+    vtable.add_to_scope = fn(c, s, name, type, value) = {
+        loc   := zeroed Span;
+        c     := c.cast()[][];
+        value := u8.ptr_from_raw(value).slice(c.get_info(type)[].stride_bytes.zext());
+        scope := c.scopes.index(s);
+        var   := scope.const_lookup&.get(name) || {
+            res := c.decl_var(s, name, .Const, loc, .Unknown);
+            @assert(res&.is(.Ok));
+            res.Ok
+        };
+        expr: FatExpr = (expr = (Value = (bytes = to_value(value, c.get_alloc()), coerced = false)), ty = type, loc = loc, done = true);
+        c.scopes.put_constant(var, expr, (Finished = type));
+    };
+    vtable.reserve_baked = fn(c, jit_addr) = {
+        _, id := c.cast()[][].reserve_baked(jit_addr);
+        id
+    };
+    
+    vtable.materialize_in_jit_address_space = fn(c: Compiler, module: rawptr, id: BakedVarId) rawptr = {
+        self := c.cast()[][];
+        m := QbeModule.ptr_from_raw(module);
+        v := self.baked.values&.nested_index(id.id.zext());
+        if(v.jit_addr != 0, => return(v.jit_addr.rawptr_from_int()));
+        shared := self.comptime_codegen;
+        @debug_assert(m.identical(shared.m), "TODO: materialize_in_jit_address_space only works in comptime_codegen");
+        @debug_assert(!shared.threaded, "TODO: deal with multithreaded materialize_in_jit_address_space");
+        // :TodoChangeMessageEmitDataEndToUseBakedValueInsteadOfBackendDat
+        
+        yield :: fn(p: *u8) Never => {
+            v.jit_addr = u8.int_from_ptr(p);
+            self.baked.lookup&.insert(v.jit_addr, id);
+            return(u8.raw_from_ptr(p))
+        };
+        
+        // Make sure the simple case of a giant static zero init array is cheap 
+        // (and that we don't touch the memory since im not good about translating data dependencies in import_c:ffi yet so everything gets materialized even if it's not used). 
+        @if_let(v.template) fn Zeroes(size) => if v.relocations.len == 0 && size > 4096 {
+            yield page_allocator.alloc(u8, size).as_ptr();  // :LEAK
+        };
+        
+        panic("TODO: materialize_in_jit_address_space");
+        
+        zeroed rawptr
+    };
     
     the_vtable
 }
