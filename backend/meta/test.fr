@@ -12,6 +12,7 @@ HELP :: """
     -x64         target x64 instead of your native arch (useful for Rosetta 2) 
     -arm         target arm64 instead of your native arch
     -h           show this help text
+    -w           target wasm32 and run with examples/import_wasm
 """;
 // TODO: mkdir -p target/out chmod +x target/out/q.exe
 fn main() void = {
@@ -27,6 +28,7 @@ fn main() void = {
     i := 0;
     flags := "";
     use_llvm := false;
+    wasm_runner: ?Str = .None;
     while => i < args.len {
         continue :: local_return;
         arg := args[i].str(); i += 1;
@@ -59,6 +61,10 @@ fn main() void = {
                 };
                 @case("-l") => {
                     use_llvm = true;
+                };
+                @case("-w") => {
+                    wasm_runner = (Some = "./w.out");
+                    arch = .wasm32;
                 };
                 @default => @panic("unhandled flag '%'", arg);
             };
@@ -95,7 +101,7 @@ fn main() void = {
         skip := arch != .aarch64 && file.ends_with("-arm.ssa");
         skip := skip || (arch != .x86_64 && file.ends_with("-amd.ssa"));
         if !skip {
-            pass := run_one(qbe_bin, file, verbose, arch, flags, use_llvm);
+            pass := run_one(qbe_bin, file, verbose, arch, flags, use_llvm, wasm_runner);
             (@if(pass, passed&, failed&))[] += 1;
         } else {
             @println("%[skip]", f_pad(file, 40, .After));
@@ -112,7 +118,7 @@ fn main() void = {
     exit((failed != 0).int());
 }
 
-fn run_one(qbe_path: Str, file_path: Str, verbose: bool, arch: Arch, flags: Str, use_llvm: bool) bool #inline = {
+fn run_one(qbe_path: Str, file_path: Str, verbose: bool, arch: Arch, flags: Str, use_llvm: bool, wasm_runner: ?Str) bool #inline = {
     ::FmtPad(Str);
     mark := mark_temporary_storage();
     src := temp().read_to_string_or_crash(file_path).items(); // :panic
@@ -131,12 +137,23 @@ fn run_one(qbe_path: Str, file_path: Str, verbose: bool, arch: Arch, flags: Str,
     args := Str.list(temp());
     if driver.is_some() {
         args&.push("-c");
+        if wasm_runner.is_some() {
+            println("todo: c+wasm");
+            return false;
+        }
     };
     if use_llvm {
         args&.push("-l");
     };
     args&.push("-t");
-    args&.push(qbe_target_name(arch, query_current_os()));
+    if wasm_runner.is_some() {
+        // TODO: import_wasm shouldn't care about the file extension
+        exe_path = "target/out/q.wasm";
+        my_path = exe_path;
+        args&.push("wasm32");
+    } else {
+        args&.push(qbe_target_name(arch, query_current_os()));
+    };
     args&.push("-o");
     args&.push(@if(use_llvm, ll_path, my_path));
     if flags != "" {
@@ -147,10 +164,14 @@ fn run_one(qbe_path: Str, file_path: Str, verbose: bool, arch: Arch, flags: Str,
     a := timestamp();
     run(qbe_path, "gen ir");
     b := timestamp();
-        
+    
     clang_triple := target_triple(arch, query_current_os());
     
     if use_llvm {
+        if wasm_runner.is_some() {
+            println("todo: llvm+wasm");
+            return false;
+        }
         args&.clear();
         if driver.is_some() {
             args&.push("-c");
@@ -195,6 +216,10 @@ fn run_one(qbe_path: Str, file_path: Str, verbose: bool, arch: Arch, flags: Str,
         run("clang", "link");
     }; // else we have our own codesign implementation so we're done
     args&.clear();
+    if wasm_runner { wasm_runner |
+        args&.push(exe_path);
+        exe_path = wasm_runner;
+    };
     args&.push_all(@slice("a", "b", "c"));
     ok, out, err := exec_and_catch(exe_path, args.items(), temp());
     if !ok {

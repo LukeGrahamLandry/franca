@@ -1,7 +1,7 @@
 //! https://github.com/WebAssembly/tool-conventions/blob/main/BasicCABI.md
 //! - non-scalar aggragates are always passed by pointer 
 //! - aggragate return pointer is prepended to arguments
-//! - varargs pointer is appended to arguments (TODO)
+//! - varargs pointer is appended to arguments
 //! - need an entry in the type table for the function's signeture. 
 //! - hidden env parameter is passed in a global (which is good enough until i want to support some extension that adds threads)
 
@@ -58,11 +58,12 @@ fn wasm_abi(f: *Qbe.Fn) void = {
             pending_indirect_return = QbeNull;
         };
     
+        is_va := false;
         for_insts_rev b { i | 
             continue :: local_return;
             i := i[];
             
-            @debug_assert(!@is(i.op(), .vaarg, .vastart, .argv), "TODO: wasm c-varargs, env");
+            @debug_assert(!@is(i.op(), .vaarg, .vastart), "TODO: wasm c-varargs");
             if i.op() == .call {
                 type := type_index_for_call(f, b, i);
                 if f.get_sym(i.arg&[0]) { id, off | 
@@ -99,16 +100,34 @@ fn wasm_abi(f: *Qbe.Fn) void = {
             // TODO: we need to know argument types for indirect_call but don't want to rely on consecutive pushes holding cls
             
             if is_arg(i.op()) {
-                if i.op() == .arge {
-                    i[] = make_ins(.global_set, .Kl, QbeNull, f.symcon(m.wasm_symbol_env_parameter), i.arg&[0]);
-                } else {
+                if rtype(i.arg&[0]) == .RType {
                     // TODO: check if they said its a type but really there's only one scalar and it should be converted to a load. 
-                    if rtype(i.arg&[0]) == .RType {
-                        i.arg&[0] = i.arg&[1];
-                    };
-                    i.set_op(.push);
+                    // it's a pointer to a struct. just pass the pointer. 
+                    i.arg&[0] = i.arg&[1];
+                    i.set_op(.arg);
+                };
+                if is_va {
+                    size: i32 = if(i.cls().is_wide(), => 4, => 8);
+                    f.slot = f.slot.align_to(size);
+                    store_op := store_ops[i.cls().raw().zext()];
+                    i[] = make_ins(store_op, .Kw, QbeNull, i.arg&[0], SLOT(f.slot));
+                    f.slot += size;
+                };
+                @if(!is_va) @match(i.op()) {
+                    fn arge() => {
+                        i[] = make_ins(.global_set, .Kl, QbeNull, f.symcon(m.wasm_symbol_env_parameter), i.arg&[0]);
+                    }
+                    fn argv() => {  // TODO: this is wrong because we're going backwards; fuck me
+                        is_va = true;
+                        i[] = make_ins(.push, .Kw, QbeNull, SLOT(f.slot), QbeNull);
+                    }
+                    fn arg() => {
+                        i.set_op(.push);
+                    }
+                    @default => unreachable();
                 };
             } else {
+                is_va = false;
                 check_pending_indirect_return();
             };
             
@@ -157,8 +176,13 @@ fn type_index_for_call(f: *Qbe.Fn, b: *Qbe.Blk, call: *Qbe.Ins) i32 = {
         if !void && !scalar {
             yield_arg(.Kw);
         };
+        va := false;
         for(arg0, call) { i |
-            if i.op() != .arge {
+            if i.op() == .argv {
+                va = true;
+                yield_arg(.Kw);
+            };
+            if !va && i.op() != .arge {
                 yield_arg(i.cls());
             };
         };

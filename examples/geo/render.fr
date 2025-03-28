@@ -1,0 +1,206 @@
+TURN_SPEED :: 0.01;
+MOVE_SPEED :: 0.01;
+
+// first i tried making a dumb .obj file but meshlab ran out of memory trying to render it for my 185MB point cloud. 
+
+// no fancy triangulation stuff. just put the raw points on the screen. 
+fn draw_point_cloud(state: *State) void = {
+    a := timestamp();
+    sgl := state.draw.default_context&;
+    sgl.begin(.POINTS);
+    sgl.load_identity();
+    sgl.color = pack_rgba(1.0, 0.0, 0.0, 1.0);
+    sgl.point_size = 0.5;
+    
+    // TODO: caching these is dumb but it's so fun to me that i can compute things at comptime. 
+    //       and also my jit is really bad at arithmetic 6609829 times. 
+    max_intensity :: 183;
+    colours :: {
+        c := ast_alloc().alloc(u32, max_intensity);
+        enumerate c { i, c |
+            hue := clamp(i.float() / max_intensity.float(), 0.0, 1.0) * 360.0;
+            c[] = hsv2rgb(hue, 1.0, 1.0, 1.0);
+        }
+        c
+    }
+    
+    each state.records { r |
+        f :: fn(x) => (@as(i64) x.zext()).float().cast() / 500000.0;
+        x, y, z := (f(r.x), f(r.y), f(r.z));
+        i: i64 = r.intensity.zext();
+        c := @if(i < colours.len(), colours[i], 0xFFFFFFFF);
+        sgl.v3f_c1i(x, y, z, c);
+    }
+    if sgl.error.vertices_full {
+        @println("too many vertices");
+    }
+    
+    sgl.end();
+    b := timestamp();
+    @println("% points in %ms", state.records.len, b - a);
+}
+
+fn fmod(a: f64, b: f64) f64 #libc;
+
+// https://en.wikipedia.org/wiki/HSL_and_HSV#HSV_to_RGB_alternative
+// i dont do common subexpression elimination so this is kinda dumb, 
+// but i'm morally opposed to changing the code instead of fixing the compiler. 
+fn hsv2rgb(H: f64, S: f64, V: f64, a: f64) u32 = {
+    f :: fn(n) => {
+        k := fmod(n.float() + (H / 60.0), 6.0);
+        V - V * S * max(0.0, min(min(k, 4 - k), 1.0))
+    }
+    pack_rgba(f(5), f(3), f(1), a)
+}
+
+/////////////////////////
+
+launch :: fn(state: *State) void = {
+    state.env = get_dynamic_context();
+    state.draw = general_allocator().box(@type state.draw[]);
+    desc := SappDesc.zeroed();
+    desc.init_userdata_cb = do_init;
+    desc.frame_userdata_cb = do_render;
+    desc.event_userdata_cb = do_event;
+    desc.user_data = State.raw_from_ptr(state);
+    desc.logger.func = slog_func;
+    desc.window_title = "Point Cloud Viewer";
+    //desc.width = 400;
+    //desc.height = 200;
+    sapp_run(desc&);
+}
+
+do_init :: fn(userdata: rawptr) void = {
+    state := State.ptr_from_raw(userdata);
+    set_dynamic_context(state.env);
+    
+    desc := SgDesc.zeroed();
+    desc.environment = sglue_environment();
+    desc.logger.func = slog_func;
+    sg_setup(desc&);
+    
+    vertices_needed := state.records.len * 5;
+    @println("for raw data, need % vertices", vertices_needed);
+    desc: Sgl.Desc = (
+        allocator = general_allocator(),
+        context = (
+            max_vertices = vertices_needed.intcast(),
+            lazy_record = true,
+        ),
+    );
+    setup(state.draw, desc&);
+    
+    desc := SgPipelineDesc.zeroed();
+    colour := desc.colors&[0]&;
+    colour.blend.enabled = true;
+    colour.blend.src_factor_rgb = .SRC_ALPHA;
+    colour.blend.dst_factor_rgb = .ONE_MINUS_SRC_ALPHA;
+    desc.alpha_to_coverage_enabled = true;
+    desc.depth.write_enabled = true;
+    desc.depth.compare = .LESS_EQUAL;
+    
+    init_pipeline(state.draw.default_context&, state.pipe&, desc&);
+    state.pass_action.colors&[0].load_action = .CLEAR;
+    state.pass_action.colors&[0].clear_value = (r = 0.3, g = 0.3, b = 0.3, a = 1.0);
+};
+
+fn sqrtf(a: f32) f32 #libc;
+fn sin_cos(rad: f32) Ty(f32, f32) = {
+    s := rad.sinf();
+    (s, sqrtf(1.0 - s*s))
+}
+
+do_render :: fn(userdata: rawptr) void = {
+    state := State.ptr_from_raw(userdata);
+    set_dynamic_context(state.env);
+    mark := mark_temporary_storage();
+    
+    sgl := state.draw.default_context&;
+    if state.vertex_dirty {
+        sgl.rewind();
+        sgl.defaults();
+        sgl.viewport(0.intcast(), 0.intcast(), sapp_width(), sapp_height(), true);
+        sgl.load_pipeline(state.pipe);
+        draw_point_cloud(state);
+        sgl.update_vertex_buffer();
+        state.vertex_dirty = false;
+    };
+    
+    update_camera(state, sgl.uniforms[0].mvp&);
+    
+    desc := SgPass.zeroed();
+    desc.action = state.pass_action;
+    desc.swapchain = sglue_swapchain();
+    desc.swapchain.width = sapp_width();
+    desc.swapchain.height = sapp_height();
+    sg_begin_pass(desc&);
+    sgl.draw_layer(0);
+    sg_end_pass();
+    sg_commit();
+    reset_temporary_storage(mark);
+};
+
+fn update_camera(state: *State, mvp: *Sgl.Matrix) void = {
+    look_dir, forward, right := {
+        sp, cp := state.pitch.sin_cos();
+        sy, cy := state.yaw.sin_cos();
+        (vec3(cp * cy, sp, cp * sy), vec3(cy, 0.0, sy), vec3(-sy, 0.0, cy))
+    };
+
+    state.camera_pos     += forward * state.dx * MOVE_SPEED.cast();
+    state.camera_pos     += right * state.dz * MOVE_SPEED.cast();
+    state.camera_pos&[1] += state.dy * MOVE_SPEED;
+    state.pitch += state.d_pitch * TURN_SPEED;
+    state.yaw += state.d_yaw * TURN_SPEED;
+    
+    state.pitch = fmodf(state.pitch, 2.0*3.141592);
+    state.yaw = fmodf(state.yaw, 2.0*3.141592);
+    
+    state.d_pitch = 0;
+    state.d_yaw   = 0;
+    
+    //@println("% % %", cx * 1000.0, cy * 1000.0, cz * 1000.0);
+    view := @uninitialized Sgl.Matrix;
+    identity(view&);
+    lookat(view&, state.camera_pos, state.camera_pos + look_dir, vec3(0.0, 1.0, 0.0));  // eye, center, up
+    
+    //@println("% %", state.pitch * 1000.0, state.yaw * 1000.0);
+    
+    projection := @uninitialized Sgl.Matrix;
+    identity(projection&);
+    aspect := intcast(sapp_width() / sapp_height()).float().cast();
+    perspective(projection&, deg_to_rad(60.0), aspect, 0.01, 10.0);
+    
+    matmul4(mvp, projection&, view&);
+}
+
+do_event :: fn(event: *SappEvent, userdata: rawptr) void = {
+    state := State.ptr_from_raw(userdata);
+    set_dynamic_context(state.env);
+    
+    ::enum(@type event.type); ::enum(@type event.key_code);
+    
+    if event.type == .MOUSE_MOVE {
+        state.d_pitch += event.mouse_dy;
+        state.d_yaw   += event.mouse_dx;
+    };
+    
+    dir, sign := @match(event.key_code) {
+        fn W()          => (state.dx&, 1);
+        fn S()          => (state.dx&, -1);
+        fn A()          => (state.dz&, -1);
+        fn D()          => (state.dz&, 1);
+        fn LEFT_SHIFT() => (state.dy&, -1);
+        fn SPACE()      => (state.dy&, 1);
+        fn ESCAPE()     => exit(0);
+        @default        => return();         // !!
+    };
+    
+    if event.type == .KEY_DOWN {
+        dir[] = sign.float().cast();
+    };
+    if event.type == .KEY_UP {
+        dir[] = 0;
+    };
+};
+

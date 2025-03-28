@@ -656,8 +656,8 @@ fn get_info(self: *SelfHosted, ty_original: Type) *TypeMeta = {
                 first = false;
                 
                 info := self.get_info(arg.ty);
-                align = align.max(info.align_bytes);
-                @debug_assert_eq(arg.byte_offset.mod(info.align_bytes.zext()), 0, "ICE: unaligned field");
+                a := self.alignment(arg, info);
+                align = align.max(a.trunc());
                 @debug_assert(f.is_union || arg.byte_offset >= bytes, "ICE: fields not in order in %", self.log_type(ty)); // TODO: assert not past max_u16 or better have a safety checking intcast
                 end := arg.byte_offset + info.stride_bytes.zext();
                 if f.is_union {
@@ -670,11 +670,7 @@ fn get_info(self: *SelfHosted, ty_original: Type) *TypeMeta = {
                 pointers = pointers.or(info.contains_pointers);
             };
             
-            extra := bytes.mod(align.zext());
-            if extra != 0 {
-                bytes += align.zext() - extra;
-            };
-            
+            bytes = align_to(bytes, align.zext());
             @assert_lt(bytes, 1.shift_left(32), "cannot have a type larger than 4GB");
             new(size, align, pointers, bytes.trunc())
         }
@@ -783,6 +779,21 @@ fn finish_layout_deep(self: *SelfHosted, ty: Type) void = {
     };
 }
 
+// TODO: supporting #align makes it much slower (30ms ??) which is really unfortunate FIXME but i need it for now
+//       i dont understand how this can take so long when the branch is so predictable. 
+//       ohhhh, it's still slow even if you `if false {` which the backend will remove. 
+//       so it's probably just that #where is really really slow. thats bad! very very bad! 
+//       -- Mar 27
+fn alignment(self: *SelfHosted, f: *Field, info: *TypeMeta) i64 #inline = {
+    @if(!f.nullable_tag.is_null()) // redundant. 
+    if f.get_tag(Flag.align.ident()) { a | 
+        res := self.poll_in_place(i64, => self.eval(a.args&, i64));
+        res := self.unwrap_report_error(i64, res);
+        return res;
+    };
+    info.align_bytes.zext()
+}
+
 fn finish_layout(self: *SelfHosted, ty: Type) void = {
     ty := self.raw_type(ty);
     info := self.get_type(ty);
@@ -802,10 +813,8 @@ fn finish_layout(self: *SelfHosted, ty: Type) void = {
                 p.byte_offset = 0;
                 if !f.is_union {
                     info := self.get_info(p.ty);
-                    inv_pad := bytes.mod(info.align_bytes.zext());
-                    if inv_pad != 0 {
-                        bytes += info.align_bytes.zext() - inv_pad;
-                    };
+                    a    := self.alignment(p, info);
+                    bytes = align_to(bytes, a);
                     p.byte_offset = bytes;
                     
                     // TODO: this must be wrong? surely you dont want to have the array padding out to alignment if its just a nested struct.

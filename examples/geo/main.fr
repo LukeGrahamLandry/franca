@@ -1,0 +1,51 @@
+#include_std("graphics/src/lib.fr");
+
+#use("@/examples/geo/las.fr");
+Render :: import("@/examples/geo/render.fr");
+
+State :: @struct {
+    pipe: Sgl.Pipeline;
+    pass_action: SgPassAction;
+    env: rawptr;
+    draw: *Sgl.Common;
+    records: []PointFormat._1;
+    vertex_dirty: bool;
+    pitch: f32;
+    yaw: f32;
+    camera_pos: Vec3;
+    d_pitch: f32;
+    d_yaw: f32;
+    dx: f32;
+    dy: f32;
+    dz: f32;
+};
+
+fn main() void = {
+    state := zeroed State;
+    input := read_file_from_last_arg();
+    state.records = load_las_points(input);
+    state.vertex_dirty = true;
+    Render'launch(state&);
+}
+
+fn driver(vtable: *ImportVTable) void #export = {    
+    src := "#include_std(\"lib/core.fr\");".clone(temp());
+    the_code := temp().read_to_string_or_crash("examples/geo/main.fr");  // TODO: don't depend on cwd.
+    src&.push_all(the_code.items());
+    
+    opts := vtable.default_build_options();
+    opts.retain_function_names = true;
+    comp := vtable.new_with_src(src.items(), opts);
+    c := vtable.with(comp);
+    
+    libs := c.empty_libs();
+    libs&.add_lib(sokol_macos_lib);
+    
+    main_sym := {vtable.intern_string}(comp, "main");
+    main_f := {vtable.find_unique_func}(comp, main_sym).unwrap();
+    
+    // for now only suport running jitted
+    ptr := c.get_jitted(main_f);
+    f := assume_types_fn(Arg = void, Ret = void, ptr = ptr);
+    f();
+}

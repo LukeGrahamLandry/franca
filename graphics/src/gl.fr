@@ -12,6 +12,10 @@ ContextDesc :: @struct(
     color_format := SgPixelFormat.DEFAULT,
     depth_format := SgPixelFormat.DEFAULT,
     sample_count: i32 = 0,
+    // when true, you need to manually call ctx.rewind() and ctx.update_vertex_buffer(). 
+    // my idea is that this gives a smoother transition between the immediate mode api 
+    // and doing something more serious where you track vertex buffers yourself. 
+    lazy_record := false,
 );
 Desc :: @struct(
     context: ContextDesc, // settings for the default_context
@@ -304,7 +308,10 @@ fn make_commit_listener(ctx: *Context) SgCommitListener = {
     (user_data = Context.raw_from_ptr(ctx), func = fn(userdata: rawptr) void = {
         // called from inside sokol-gfx sg_commit()
         if(userdata.is_null(), => return());
-        rewind(Context.ptr_from_raw(userdata));
+        ctx := Context.ptr_from_raw(userdata);
+        if !ctx.desc.lazy_record {
+            rewind(ctx);
+        };
     })
 }
 
@@ -356,7 +363,7 @@ fn vtx(ctx: *Context, x: f32, y: f32, z: f32, u: f32, v: f32, rgba: u32) void = 
 
 /* current top-of-stack matrix */
 fn matrix(ctx: *Context, mode: MatrixMode) *Matrix = 
-    ctx.matrix_stack&.index(.PROJECTION).index(ctx.matrix_tos&[.PROJECTION].zext());
+    ctx.matrix_stack&.index(mode).index(ctx.matrix_tos&[mode].zext());
 
 /* get pointer to current top-of-stack of current matrix mode */
 fn matrix(ctx: *Context) *Matrix = 
@@ -386,6 +393,7 @@ fn setup_common(sgl: *Common) void = {
     sgl.def_smp = sg_make_sampler(smp_desc&);
     @debug_assert(sgl.def_smp.id != SG_INVALID_ID.trunc());
 
+    // TODO: surely this is generated code. do a comptime thing instead
     // one shader for all contexts
     shd_desc := SgShaderDesc.zeroed();
     a := shd_desc.attrs&;
@@ -438,6 +446,12 @@ fn discard_common(sgl: *Common) void = {
     sg_pop_debug_group();
 }
 
+fn update_vertex_buffer(ctx: *Context) void = {
+    ctx.update_frame_id = ctx.frame_id;
+    range: SgRange = (ptr = Vertex.raw_from_ptr(ctx.vertices.ptr), size = ctx.vertices.len * size_of(Vertex));
+    sg_update_buffer(ctx.vbuf, range&);
+}
+
 fn draw_layer(ctx: *Context, layer_id: i32) void = {
     if(ctx.vertices.len <= 0 || ctx.commands.len <= 0, => return());
     sg_push_debug_group("sokol-gl");
@@ -447,10 +461,8 @@ fn draw_layer(ctx: *Context, layer_id: i32) void = {
     cur_smp_id: u32 = SG_INVALID_ID;
     cur_uniform_index: i32 = -1;
 
-    if ctx.update_frame_id != ctx.frame_id {
-        ctx.update_frame_id = ctx.frame_id;
-        range: SgRange = (ptr = Vertex.raw_from_ptr(ctx.vertices.ptr), size = ctx.vertices.len * size_of(Vertex));
-        sg_update_buffer(ctx.vbuf, range&);
+    if ctx.update_frame_id != ctx.frame_id && !ctx.desc.lazy_record {
+        ctx.update_vertex_buffer();
     };
 
     // render all successfully recorded commands (this may be less than the
@@ -691,10 +703,15 @@ fn identity(m: *Matrix) void =
     });
 
 fn transpose(dst: *Matrix, m: *Matrix) void = {
-    @debug_assert(dst != m);
+    @debug_assert(!identical(dst, m), "use transpose_in_place");
     range(0, 4, fn(c) => range(0, 4) { r |
         dst[r, c] = m[c, r];
     });
+}
+
+fn transpose_in_place(m: *Matrix) void = {
+    src := m[];
+    transpose(m, src&);
 }
 
 fn index(m: *Matrix, ij: Ty(i64, i64)) *f32 = 
@@ -713,6 +730,10 @@ fn matmul4(p: *Matrix, a: *Matrix, b: *Matrix) void = {
 
 fn mul(dst: *Matrix, m: *Matrix) void =
     matmul4(dst, dst, m);
+
+fn sinf(a: f32) f32 #libc;
+fn cosf(a: f32) f32 #libc;
+fn sqrtf(a: f32) f32 #libc;
 
 fn rotate(dst: *Matrix, a: f32, x: f32, y: f32, z: f32) void = {
     s := sinf(a);
@@ -734,36 +755,37 @@ fn rotate(dst: *Matrix, a: f32, x: f32, y: f32, z: f32) void = {
     zs := z * s;
     one_c := 1.0 - c;
 
-    matrix_t m;
-    m.v[0][0] = (one_c * xx) + c;
-    m.v[1][0] = (one_c * xy) - zs;
-    m.v[2][0] = (one_c * zx) + ys;
-    m.v[3][0] = 0.0;
-    m.v[0][1] = (one_c * xy) + zs;
-    m.v[1][1] = (one_c * yy) + c;
-    m.v[2][1] = (one_c * yz) - xs;
-    m.v[3][1] = 0.0;
-    m.v[0][2] = (one_c * zx) - ys;
-    m.v[1][2] = (one_c * yz) + xs;
-    m.v[2][2] = (one_c * zz) + c;
-    m.v[3][2] = 0.0;
-    m.v[0][3] = 0.0;
-    m.v[1][3] = 0.0;
-    m.v[2][3] = 0.0;
-    m.v[3][3] = 1.0;
-    mul(dst, &m);
+    m := @uninitialized Matrix; m := m&;
+    m[0, 0] = (one_c * xx) + c;
+    m[1, 0] = (one_c * xy) - zs;
+    m[2, 0] = (one_c * zx) + ys;
+    m[3, 0] = 0.0;
+    m[0, 1] = (one_c * xy) + zs;
+    m[1, 1] = (one_c * yy) + c;
+    m[2, 1] = (one_c * yz) - xs;
+    m[3, 1] = 0.0;
+    m[0, 2] = (one_c * zx) - ys;
+    m[1, 2] = (one_c * yz) + xs;
+    m[2, 2] = (one_c * zz) + c;
+    m[3, 2] = 0.0;
+    m[0, 3] = 0.0;
+    m[1, 3] = 0.0;
+    m[2, 3] = 0.0;
+    m[3, 3] = 1.0;
+    mul(dst, m);
 }
 
 fn scale(dst: *Matrix, x: f32, y: f32, z: f32) void = range(0, 4) { r |
-    dst.v[0][r] *= x;
-    dst.v[1][r] *= y;
-    dst.v[2][r] *= z;
+    dst[0, r] *= x;
+    dst[1, r] *= y;
+    dst[2, r] *= z;
 };
 
 fn translate(dst: *Matrix, x: f32, y: f32, z: f32) void = range(0, 4) { r |
-    dst.v[3][r] = dst.v[0][r]*x + dst.v[1][r]*y + dst.v[2][r]*z + dst.v[3][r];
+    dst[3, r] = dst[0, r]*x + dst[1, r]*y + dst[2, r]*z + dst[3, r];
 };
 
+// FIXME
 fn frustum(dst: *Matrix, left: f32, r: right, bottom: f32, top: f32, znear: f32, zfar: f32) void = {
     x := (2.0 * znear)   / (right - left);
     y := (2.0 * znear)   / (top - bottom);
@@ -779,6 +801,7 @@ fn frustum(dst: *Matrix, left: f32, r: right, bottom: f32, top: f32, znear: f32,
     mul(dst, m&);
 }
 
+// FIXME
 fn ortho(dst: *Matrix, left: f32, right: f32, bottom: f32, top: f32, znear: f32, zfar: f32) void = {
     m: @uninitialized Matrix;
     m.v[0][0] = 2.0 / (right - left);
@@ -809,18 +832,18 @@ fn perspective(dst: *Matrix, fovy: f32, aspect: f32, znear: f32, zfar: f32) void
         return();
     };
     cotan := cosf(fovy / 2.0) / sine;
-    m: @uninitialized Matrix;
-    identity(m&);
-    m.v[0][0] = cotan / aspect;
-    m.v[1][1] = cotan;
-    m.v[2][2] = -(zfar + znear) / delta_z;
-    m.v[2][3] = -1.0;
-    m.v[3][2] = -2.0 * znear * zfar / delta_z;
-    m.v[3][3] = 0.0;
-    mul(dst, m&);
+    m := @uninitialized Matrix; m := m&;
+    identity(m);
+    m[0, 0] = cotan / aspect;
+    m[1, 1] = cotan;
+    m[2, 2] = -(zfar + znear) / delta_z;
+    m[2, 3] = -1.0;
+    m[3, 2] = -2.0 * znear * zfar / delta_z;
+    m[3, 3] = 0.0;
+    mul(dst, m);
 }
 
-fn normalize(v: *Array(f32, 3)) void = {
+fn normalize(v: *Vec3) void = {
     r := sqrtf(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
     if(r == 0.0, => return());
     v[0] /= r;
@@ -828,40 +851,30 @@ fn normalize(v: *Array(f32, 3)) void = {
     v[2] /= r;
 }
 
-fn cross(v1: *Array(f32, 3), v2: *Array(f32, 3), res: *Array(f32, 3)) void = {
+// TODO: only one that's (src, dest) for some reason
+fn cross(v1: *Vec3, v2: *Vec3, res: *Vec3) void = {
     res[0] = v1[1]*v2[2] - v1[2]*v2[1];
     res[1] = v1[2]*v2[0] - v1[0]*v2[2];
     res[2] = v1[0]*v2[1] - v1[1]*v2[0];
 }
 
-fn lookat(dst: *Matrix,
-    eye_x: f32, eye_y: f32, eye_z: f32,
-    center_x: f32, center_y: f32, center_z: f32,
-    up_x: f32, up_y: f32, up_z: f32) void = {
-    fwd := @uninitialized Array(f32, 3); fwd := fwd&;
-    side := @uninitialized Array(f32, 3); side := side&;
-    up := @uninitialized Array(f32, 3); up := up&;
+fn lookat(dst: *Matrix, eye: Vec3, center: Vec3, up: Vec3) void = {
+    side := Vec3.zeroed();
+    fwd := center - eye;
+    normalize(fwd&);
+    cross(fwd&, up&, side&);
+    normalize(side&);
+    cross(side&, fwd&, up&);
 
-    fwd[0] = center_x - eye_x; fwd[1] = center_y - eye_y; fwd[2] = center_z - eye_z;
-    up[0] = up_x; up[1] = up_y; up[2] = up_z;
-    normalize(fwd);
-    cross(fwd, up, side);
-    normalize(side);
-    cross(side, fwd, up);
-
-    m: @uninitialized Matrix;
-    identity(m&);
-    m.v[0][0] = side[0];
-    m.v[1][0] = side[1];
-    m.v[2][0] = side[2];
-    m.v[0][1] = up[0];
-    m.v[1][1] = up[1];
-    m.v[2][1] = up[2];
-    m.v[0][2] = -fwd[0];
-    m.v[1][2] = -fwd[1];
-    m.v[2][2] = -fwd[2];
-    mul(dst, m&);
-    translate(dst, -eye_x, -eye_y, -eye_z);
+    m := @uninitialized Matrix; m := m&;
+    identity(m);
+    inline_range(0, 3) { i |
+        m[i, 0] = side&[i];
+        m[i, 1] = up&[i];
+        m[i, 2] = -fwd&[i];
+    };
+    mul(dst, m);
+    translate(dst, -eye&[0], -eye&[1], -eye&[2]);
 }
 
 //
@@ -896,7 +909,7 @@ fn v2f_c1i(ctx: *Context, x: f32, y: f32, rgba: u32) void =
     vtx(ctx, x, y, 0.0, ctx.u, ctx.v, rgba);
 
 fn v3f_c3f(ctx: *Context, x: f32, y: f32, z: f32, r: f32, g: f32, b: f32) void =
-    vtx(ctx, x, y, z, ctx.u, ctx.v, pack_rgbaf(r, g, b, 1.0));
+    vtx(ctx, x, y, z, ctx.u, ctx.v, pack_rgba(r, g, b, 1.0));
 
 fn v3f_c3b(ctx: *Context, x: f32, y: f32, z: f32, r: u8, g: u8, b: u8) void =
     vtx(ctx, x, y, z, ctx.u, ctx.v, pack_rgbab(r, g, b, 255));

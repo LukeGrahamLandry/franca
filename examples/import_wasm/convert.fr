@@ -30,9 +30,9 @@ fn main() void = {
     for args { arg | 
         arg := arg.str();
         if arg.ends_with(".wasm") {
-            @eprint("Loading '%'", arg);
+            //@eprint("Loading '%'", arg);
             bytes := temp().read_to_string_or_crash(arg).items(); // :panic
-            @eprintln(" (% bytes).", bytes.len);
+            //@eprintln(" (% bytes).", bytes.len);
             module := QbeModule.zeroed();
             init_default_module(module&, (type = .JitOnly, os = query_current_os(), arch = query_current_arch()), false);
             a := libc_allocator;
@@ -50,8 +50,10 @@ fn main() void = {
             };
             wasm&.load_module();
             
-            buf := page_allocator.alloc(u8, wasm.w.memories[0].min.zext() * wasm_page_size);
+            buf := page_allocator.alloc(u8, 1.shift_left(32)); // wasm.w.memories[0].min.zext() * wasm_page_size);
             wasm_context_pointer := u8.int_from_ptr(buf.ptr);
+            heap_base :: @static(u32) 0;
+            heap_base[] = trunc(buf.len - 1);
             
             if p.w.data.len > 0 {
                 @assert_eq(p.w.data.len, 1, "TODO: multiple datas");
@@ -79,9 +81,13 @@ fn main() void = {
                     }
                     puts :: fn(ctx: *u8, p: u32) void = {
                         s: CStr = (ptr = ctx.offset(p.zext()));
-                        @print("%", s);
+                        @println("%", s);
                     }
                     labs :: fn(ctx: *u8, i: i64) i64 = i.abs();
+                    calloc :: fn(ctx: *u8, m: u32, n: u32) u32 = {  // HACK
+                        heap_base[] -= align_to(m*n, 16);
+                        heap_base[]
+                    }
                 }
             }
             exports := comptime_exports(Exports);
@@ -384,7 +390,7 @@ fn emit_the_code(self: *LoadWasm) void = {
                 fn load() => {
                     align := self.read_u();
                     offset := self.read_u();
-                    addr := self.stack&.pop().unwrap();
+                    addr := self.stack&.pop().expect("stack for load addr");
                     addr := self.compute_address(addr, offset.bitcast());
                     
                     result := self.f.newtmp("load", encoding.cls);
@@ -394,8 +400,8 @@ fn emit_the_code(self: *LoadWasm) void = {
                 fn store() => {
                     align := self.read_u();
                     offset := self.read_u();
-                    value := self.stack&.pop().unwrap();
-                    addr := self.stack&.pop().unwrap();
+                    value := self.stack&.pop().expect("stack for store value");
+                    addr := self.stack&.pop().expect("stack for store addr");
                     addr := self.compute_address(addr, offset.bitcast());
                     a0 = value; a1 = addr; r = QbeNull; 
                 };
@@ -505,7 +511,7 @@ fn emit_the_code(self: *LoadWasm) void = {
                 self.stack = stack;
             }
             fn Drop() => {
-                self.stack&.pop().unwrap();
+                self.stack&.pop().expect("stack for store drop");
             }
             @default => @panic("unhandled unstruction %", self.src[self.cursor - 1]);
         }

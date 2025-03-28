@@ -1,5 +1,5 @@
 
-## (Mar 24-26)
+## (Mar 24-27)
 
 - make it easy to run more tests (with run_tests.fr -- deps)
 - fixed float const coerce + overload 
@@ -11,6 +11,19 @@ making export_data work is painful, need to think about this more.
 - having a bit of a moment about weird unicode 
 - convert worker/seal_debug_info/import_c/import_wasm to use a nicer data structure than Qbe.Dat. 
 - re-enable memmove for large blits. 992260 -> 939304 is 5%, that's kinda big. TODO: x64 as well
+
+- isel for wasm byteswap (which sucks)
+- start wasm varargs, but did it backwards so it doesn't work yet
+- backend/meta/test run with import_wasm
+
+- starting a first-person-3d example program. 
+10000 years of scrounging around in my old projects to try to remember how to make the matrices work. 
+i think it's still not clipping so i can see behind me? or i just typoed a negative sign somewhere random, who knows!
+- speed regression because of #align field tag which is super unfortunate   
+//       supporting #align makes it much slower (30ms ??) which is really unfortunate FIXME but i need it for now  
+//       i dont understand how this can take so long when the branch is so predictable.   
+//       ohhhh, it's still slow even if you `if false {` which the backend will remove.   
+//       so it's probably just that #where is really really slow. thats bad! very very bad!   
 
 ## (Mar 19-23)
 

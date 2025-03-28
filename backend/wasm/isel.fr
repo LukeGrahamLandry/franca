@@ -155,6 +155,10 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
         fn cuod() => panic("TODO: wasm fcmp (un?)ordered");
         fn cos()  => panic("TODO: wasm fcmp (un?)ordered");
         fn cuos() => panic("TODO: wasm fcmp (un?)ordered");
+        fn byteswap() => {
+            f.sel_byteswap(i);
+            return();
+        }
         @default => {
             if is_par(i.op()) || (@is(i.op(), .pop)) {  // TODO: call_indirect
                 f.emit(i[]);
@@ -355,6 +359,7 @@ fn wasm_flow(f: *Qbe.Fn) void = {
             // we want to fall through as the true branch so will br_if to jump away when the condition is false
             push(b, make_ins(.push, .Kw, QbeNull, QbeConZero, QbeNull));
             push(b, make_ins(.ceqw, .Kw, QbeNull, QbeNull, QbeNull));
+            s := b.s1; b.s1 = b.s2; b.s2 = s;
         };
         
         x := -1;
@@ -373,7 +378,7 @@ fn wasm_flow(f: *Qbe.Fn) void = {
             // forward edge / break
             
             if b.id + 1 == s.id {
-                @debug_assert_ne(br, .br_if);
+                @debug_assert_ne(br, .br_if, "% %", b.name(), { printfn(f, f.globals.debug_out); "" });
                 continue();
             };
             
@@ -411,3 +416,28 @@ fn wasm_flow(f: *Qbe.Fn) void = {
         };
     };
 }
+
+emitter_for_wasm :: fn(f: *Qbe.Fn, o: Qbe.O, k: Qbe.Cls, r: Qbe.Ref, a0: Qbe.Ref, a1: Qbe.Ref) void = {
+    i := make_ins(o, k, r, a0, a1);
+    sel_wasm(f, i&);
+};
+
+// i hate this so much
+fn sel_byteswap(f: *Qbe.Fn, i: *Qbe.Ins) void = @emit_instructions((f = f, emit = emitter_for_wasm), (i.cls(), i.arg&[0], i.to), """
+@start
+    %mask     =0 copy 18446462603027742720 # 0xFFFF0000FFFF0000
+    %mask_odd =0 xor %mask, -1
+    %even     =0 and %1, %mask
+    %odd      =0 and %1, %mask_odd
+    %even_l   =0 rotl %even, 16
+    %odd_r    =0 rotr %odd, 16
+    %x        =0 or %even_l, %odd_r
+    
+    %Mask     =0 copy 71777214294589695 # 0x00FF00FF00FF00FF
+    %Mask_odd =0 xor %Mask, -1
+    %Even     =0 and %x, %Mask
+    %Odd      =0 and %x, %Mask_odd
+    %Even_l   =0 rotl %Even, 8
+    %Odd_r    =0 rotr %Odd, 8
+    %2        =0 or %Even_l, %Odd_r
+""");
