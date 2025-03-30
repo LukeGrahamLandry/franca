@@ -8,7 +8,8 @@ State :: @struct {
     pass_action: SgPassAction;
     env: rawptr;
     draw: *Sgl.Common;
-    records: []PointFormat._1;
+    point_bytes: []u8;
+    header: *Header;
     vertex_dirty: bool;
     pitch: f32;
     yaw: f32;
@@ -18,12 +19,46 @@ State :: @struct {
     dx: f32;
     dy: f32;
     dz: f32;
+    hi: Vec3;
+    lo: Vec3;
+    model_yaw: f32;
+    d_model_yaw: f32;
+};
+
+fn check_las_version(input: []u8) Ty(*Header, []u8) = {
+    xxx := input;
+    h := xxx&.pop_type(Header);
+    @assert_eq(h.fourcc, 0x4653414C, "bad magic for las file. expected LASF");
+    @println("version = %.%", h.version_major, h.version_minor);
+    is_legacy := h.version_minor < 4;
+    @println("fmt = %, len = %, count = %", h.point_record_format, h.point_record_length, h.legacy_point_record_count);
+    @assert_le(h.point_record_format, 10, "unknown point record format");
+    @assert(h.point_record_format == 1, "TODO: implement more point formats");
+    expected_bytes: i64 = h.point_record_length.zext() * h.legacy_point_record_count.zext();
+    //expected_bytes: i64 = size_of(PointFormat._1) * h.legacy_point_record_count.zext();
+    max_possible := input.len - size_of(Header) - h.offset_to_point_data.zext();
+    @println("% %", h.legacy_point_record_count, h.point_record_count);
+    records := input.subslice(h.offset_to_point_data.zext(), min(expected_bytes, max_possible));
+    (h, records)
+}
+
+Args :: @struct {
+    path: CStr = "";
+    mmap := false;
 };
 
 fn main() void = {
+    args := parse_args();
     state := zeroed State;
-    input := read_file_from_last_arg();
-    state.records = load_las_points(input);
+    input := if args.mmap {
+        mmap_read(args.path) || @panic("failed to open %", args.path)
+    } else {
+        general_allocator().read_to_string_or_crash(args.path.str()).items()
+    }
+    
+    h, bytes := check_las_version(input);
+    state.point_bytes = bytes;
+    state.header = h;
     state.vertex_dirty = true;
     Render'launch(state&);
 }
@@ -48,4 +83,39 @@ fn driver(vtable: *ImportVTable) void #export = {
     ptr := c.get_jitted(main_f);
     f := assume_types_fn(Arg = void, Ret = void, ptr = ptr);
     f();
+}
+
+// :ugly
+fn parse_args() Args = {
+    a: Args = ();
+    i := 0; 
+    args := cli_args();
+    while => i < args.len {
+        continue :: local_return;
+        arg := args[i].str();
+        i += 1;
+        if arg.starts_with("-") {
+            arg = arg.rest(1);
+            ::enum(Fields(Args));
+            inline_for_enum Fields(Args) { $ff |
+                f :: ff[];
+                if arg == f.name_str() {
+                    @inline_switch(Args.FieldType(f)) {
+                        @case(bool) => {
+                            Args.get_field(a&, f)[] = true;
+                            continue();
+                        }
+                        @case(CStr) => {
+                            Args.get_field(a&, f)[] = args[i];
+                            i += 1;
+                            continue();
+                        }
+                        @default => @panic("unhandled field type %", f);
+                    }
+                }
+            };
+            @panic("invalid argument -%", arg);
+        };
+    };
+    a
 }

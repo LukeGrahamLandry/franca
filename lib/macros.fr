@@ -205,7 +205,7 @@ fn make_field_access(e: FatExpr, name: Symbol, loc: Span, want_pointer: bool) Fa
 }
 
 fn macro_at_default_helper(handler_body: *FatExpr) Symbol = {
-    msg :: "Expected expression in @match body to be @default";
+    msg :: "Expected expression to be @default";
     if !handler_body.expr&.is(.PrefixMacro) {
         compile_error(msg, handler_body.loc);
     };
@@ -401,6 +401,32 @@ fn switch(arg: FatExpr, handlers: FatExpr) FatExpr = {
             body
         }]
     }
+}
+
+#macro fn inline_switch(arg: FatExpr, target: FatExpr) FatExpr = {
+    @ct_assert(target.expr&.is(.Block), target.loc, "@inline_switch expected Block of handlers");
+    handlers := target.expr.Block.body.items();
+    inspected := compile_ast(@{ :: @[arg] });
+    each handlers { stmt |
+        continue :: local_return;
+        if(stmt.stmt&.is(.Noop), => continue());
+        @ct_assert(stmt.stmt&.is(.Eval), stmt.loc, "@inline_switch expected @case");
+        handler_body := stmt.stmt.Eval&;
+        branch       := handler_body.expr.PrefixMacro&;
+        name := macro_at_default_helper(handler_body);
+        matches := @switch(name) {
+            // TODO: still typechecks if you don't have the [] on arg! :FUCKED
+            @case(@symbol case) => const_eval(bool)(@{ @[inspected] == @[branch.arg[]] });
+            // TODO: assert this is the last one
+            // TODO: pass the value as arg like normal @switch
+            @case(@symbol default) => true; 
+            @default => compile_error(@tfmt("expected @case / @default but found %", name.str()), stmt.loc); 
+        }
+        if matches {
+            return @{ @[branch.target[]]() };
+        }
+    };
+    compile_error("@inline_switch no match and no @default branch", target.loc)
 }
 
 fn get_type_int(e: FatExpr) IntTypeInfo = {

@@ -179,3 +179,20 @@ fn read_file_from_last_arg() Str = {
     path := args[args.len - 1].str(); 
     temp().read_to_string_or_crash(path).items() // :panic
 }
+
+// it sounds like this would be a good idea but it seems to actually be super slow the first time 
+fn mmap_read(path: CStr) Result([]u8, void) #target_os = (fn($os) => {
+    O :: LibcType(os);
+    f := open(path, @as(i64) O.OpenFlag.Read) || return(.Err);
+    len := f.lseek(0, .End) || {
+        close(f); // TODO: defer
+        return(.Err)
+    };
+    f.lseek(0, .Set);
+    m := mmap(zeroed rawptr, len, @as(i64) MapProt.Read, @as(i64) O.MapFlag.Private, f, 0);
+    close(f);
+    if m.int_from_rawptr() <= 0 {
+        return(.Err);
+    };
+    (Ok = (ptr = u8.ptr_from_raw(m), len = len))
+});

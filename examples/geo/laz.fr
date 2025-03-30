@@ -1,0 +1,215 @@
+// https://downloads.rapidlasso.de/doc/LAZ_Specification_1.4_R1.pdf
+
+/*
+Arithmetic Coding:
+You have some alphabet of symbols and want to compress a sequence of them. 
+Encoded as one very precise number from 0.0-1.0. 
+Split the range by probability of each symbol so if 10% are As, then 0.0-0.1 means first symbol is A. 
+Then split the range again for the next symbol so 0.00-0.01 means AA. 
+
+It seems, to do it optimially, the compressor would pre-scan the data and generate a table of probabilities 
+and then give that to the decompressor (but that would take extra space in the file). 
+Instead, LAZ starts by assuming a uniform distribution and updates the weights as you go. 
+Since both sides use the same updating algorithm, you don't need to send any extra information. 
+It also helps when patterns change (ie. a billion zeros followed by a billion ones won't be seen as 50/50 random data). 
+Since the probabilities depend on the previous symbols, you can't seek to an arbitrary position without 
+decompressing everything before it. 
+
+One data stream is one of those high precision numbers. The file has many data streams. 
+Many different decoders operate on the same stream at once. 
+You only look at a rolling window of four bytes at a time. 
+Four types of decoder: Symbol, Bit, Raw, Integer(8/16/32). 
+
+The uncompressed las records have a one-to-one mapping to the laz ones. 
+There are many instances of the decoders (each with thier own set of distribution tables), 
+and when reading a field, you choose which decoder to use based on the values of previous fields. 
+This allows taking advantage of correlations between fields but means there are 
+super convoluted special case rules about the relationships between all the fields. 
+Since the fields are generally encoded as a diff from the previous record, the first record is not compressed. 
+*/
+
+Stream :: @struct {
+    remaining: []u8;
+    value: u32;
+    length: u32;
+}
+
+fn init(self: *Stream) void = {  // 9.3.1
+    self.value = self.remaining&.pop_type(u32)[].byteswap();
+    self.length = MAX_u32;
+}
+
+fn maybe_renorm_dec_interval(self: *Stream) void #inline = {  // 9.4.1
+    while => self.length < 1.shift_left(24) {
+        self.value = self.value.shift_left(8);
+        self.value += self.remaining&.pop_type(u8).zext();
+        self.length = self.length.shift_left(8);
+    }
+}
+
+// Arithmetic coding with an alphabet of 0..<symbols
+SymbolDecoder :: @struct {
+    symbols: i64;  // <MAX_SYMBOLS
+    symbol_counts: []u16;  // how many times seen 
+    distribution: []u16;  // lower bound. 0-32k -> 0.0-1.0
+    update_cycle: i64; 
+    symbols_until_update: i64;
+    total_count: u32;
+}
+
+fn init(self: *SymbolDecoder, symbols: i64, buf: []u16) void = {  // 10.2.2
+    @debug_assert_eq(buf.len, symbols * 2, "SymbolDecoder.buf");
+    self.symbols = symbols;
+    self.symbol_counts = buf.slice(0, symbols);
+    self.symbols_until_update = buf.slice(symbols, symbols * 2);
+    each self.symbol_counts { s |
+        s[] = 1;
+    }
+    self.update_distribution();
+    self.update_cycle = (symbols + 6) / 2;
+    self.symbols_until_update = self.update_cycle;
+}
+
+fn update_distribution(self: *SymbolDecoder) void = {  // 10.2.3
+    if self.total_count > 1.shift_left(15) {
+        // can't just /2 here because we don't know parity of the counts so the rounding will be wrong half the time
+        self.total_count = 0; 
+        each self.symbol_counts { s |
+            s[] /= 2;
+            self.total_count += s[];
+        }
+    }
+    
+    sum: u32 = 0;
+    scale := 1.shift_left(31) / self.total_count; 
+    range(0, self.symbols) { n |
+        self.distribution[n] = (scale * sum).shift_right_logical(16);
+        sum += self.symbol_counts[n];
+    }
+    
+    max_update_cycle := (self.symbols + 6) * 8;
+    self.update_cycle = min(self.update_cycle * 5 / 4, max_update_cycle);
+    self.symbols_until_update = self.update_cycle;
+}
+
+fn decode_symbol(self: *SymbolDecoder, stream: *Stream) i64 = {  // 10.2.4.1
+    ltmp   := stream.length.shift_right_logical(15);
+    symbol := 0;
+    while => self.distributions[symbol] * ltmp > stream.value {  // :SLOW
+        symbol += 1;
+        @debug_assert_lt(symbol, self.symbols);
+    }
+    
+    diff       := self.distributions[symbol] * ltmp;
+    self.value -= diff;
+    is_last    := symbol == self.symbols - 1;
+    high       := if(is_last, => stream.length, => distribution[symbol+1] * ltmp);
+    stream.length = high - diff;
+    
+    stream.maybe_renorm_dec_interval();
+    self.symbol_count[symbol] += 1;
+    self.symbols_until_update -= 1;
+    if self.symbols_until_update == 0 {
+        self.update_distribution();
+    }
+    
+    symbol
+}
+
+// Specialization (with different constants) of SymbolDecoder with an alphabet of 0/1
+BitDecoder :: @struct {
+    bit_0_count: u16 = 1;
+    bit_count: u16 = 2;
+    bit_0_prob: u16 = 4096;  // 0-8k -> 0.0-1.0
+    update_cycle: u16 = 4;
+    bits_until_update: u16 = 4;
+}
+
+fn init(self: *BitDecoder) void = 
+    self[] = ();
+
+fn update_bit_distribution(self: *BitDecoder) void = {  // 10.3.3
+    self.bit_count += self.update_cycle;
+    if self.bit_count > 8192 {
+        self.bit_count = (self.bit_count + 1) / 2;
+        self.bit_0_count = (self.bit_0_count + 1) / 2;
+        if bit_0_count == bit_count {
+            self.bit_count += 1;
+        }
+    }
+    
+    self.bit_0_prob = 1.shift_left(31) / self.bit_count * self.bit_0_count / 1.shift_left(18);
+    self.update_cycle = min(self.update_cycle * 5 / 4, 64);
+    self.bits_until_update = self.update_cycle;
+}
+
+fn decode_bit(self: *BitDecoder, stream: *Stream) bool = {
+    l         := stream.length / 1.shift_left(13);
+    threshold := self.bit_0_prob * l;
+    bit       := stream.value >= threshold;
+    if bit {
+        stream.value  -= threshold;
+        stream.length -= threshold; 
+    } else {
+        stream.length  = threshold;
+        self.bit_0_count += 1;
+    }
+    
+    stream.maybe_renorm_dec_interval();
+    self.bits_until_update -= 1;
+    if self.bits_until_update == 0 {
+        self.update_bit_distribution();
+    }
+    
+    bit
+}
+
+// No compression; just pulling bits out of the stream. 
+fn raw_decoder(self: *Stream, bit_count: i64) i64 = {  // 10.4.2
+    shift := 0;
+    n     := 0;
+    loop {
+        last       := bit_count <= 19;
+        bc         := if(last, => bit_count, => 16);
+        self.length = self.length.shift_right_logical(bc);
+        raw        := self.value / self.length;
+        self.value -= self.length * raw;
+        n          += raw.zext().shift_left(shift);
+        bit_count  -= 16;
+        shift      += 16;
+        self.maybe_renorm_dec_interval();
+        if(last, => return(n));
+    }
+}
+
+// The stream encodes the signed difference from the previous value. 
+IntegerDecoder :: @struct {
+    n: i64;
+    k_coder: SymbolDecoder;
+    corrector0: BitDecoder;
+    correctors: *Array(SymbolDecoder, 33);  // "shared among instances for one field"
+}
+
+fn init(self: *IntegerDecoder, n: i64, buf: []u16) void = {
+    self.n = n;
+    self.k_coder&.init(self.n, buf);
+    self.bit_decoder&.init(self.n);
+}
+
+// returns (diff, k) because you sometimes need k for making decisions about later fields 
+fn read_difference(self: *IntegerDecoder, stream: *Stream) Ty(i64, i64) = {  // 10.5.3
+    k := self.k_coder&.decode_symbol();  // index of highest set bit
+    c := @if_else {
+        @if(k == 0)  => self.corrector0&.decode_bit(stream).int();
+        @if(k == 32) => -1.shift_left(31);
+        @else => {
+            c := self.correctors.index(k).decode_symbol(stream);
+            if k > 8 {
+                lower_bits := raw_decoder(stream, k - 8);
+                c = c.shift_left(k - 8) + lower_bits;
+            }
+            c - if(c >= 1.shift_left(k - 1), => -1, => 1.shift_left(k) - 1)
+        }
+    }
+    (c, k)
+}
