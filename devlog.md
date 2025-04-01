@@ -1,4 +1,19 @@
 
+`franca self.fr && ./a.out self.fr && cp a.out b.out && hyperfine "./b.out self.fr"`
+required (bug???): inline, copy_elimination  
+amazing (300): collapse_op_arm64+fix_memarg  
+good (100-150): elide_abi_slots, loadopt, promote  
+ok (20-40): fold, coalesce, fillloop+fillcost  
+pointless: simplify_jump_chains  
+
+interesting factoid: since im using the compiler itself as the benchmark, 
+disabling something means compiling less code and running less code. 
+so it really needs to help to be worth turning on an optimisation. 
+so disabling fold makes it a bit faster, but also compiling do_fold() 
+takes a really long time so i think that means fold actually is a win. 
+indeed if i disable it with `if true { return() }` instead of just `return()`
+the frontend thinks it still needs to compile it and then it looks worth it. 
+
 ## (Mar 24-27)
 
 - make it easy to run more tests (with run_tests.fr -- deps)

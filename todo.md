@@ -83,6 +83,12 @@ the right/fast/safe/whatever thing to do is also the easy thing to do.
 also stop pasting around code for handling the multi-part ops
 - check enum names are unique
 - combine places that do multiple walk_ast/clone passes (renumber/unmark_done)
+- quest to get rid of magic numbers
+  - laz/return_map_m table
+  - view_image/g_src_ptr__mona_lisa_21_32_q50_jpeg
+  - BlockAlloc powers of 2
+  - x64/arm/wasm/macho/elf but there's no winning there
+  - boot but i really don't want to write the compiler again... so idk what to do about that
 
 ## tests
 
@@ -182,6 +188,33 @@ really need an option to error on insane сharaсters.
 this is interesting for... seсurity... сan you tell why? 
 (hint: paste the letter с into google and think about why the first result is Си_(язык_программирования)). 
 also this: https://github.com/golang/go/issues/20209
+
+## demos 
+
+- finish examples/view_image (which means finishing examples/import_c/ffi)
+- go through c++26 reflection examples and make sure i can do them better https://isocpp.org/files/papers/P2996R4.html
+- examples/bf that translates to wasm and then uses examples/import_wasm to run it
+- get wasm to work well enough that i can make a compiler-explorer like thing for the .ssa/.c/.wasm 
+(.fr is probably harder because need to figure out how to jit. is making a new module for every function feasable?)
+- https://andrewkelley.me/post/string-matching-comptime-perfect-hashing-zig.html
+- fix examples/compiler_gui
+- rust format! macro. they have format_args! builtin to the compiler which is kinda funny
+- make graphics/shaders translation support a more interesting subset of the language 
+
+## make it not suck
+
+- `#[derive]`, hash, print. should be fixed by #where (but now im afraid that might be super slow because of the #align fiasco)
+- numeric stuff sucks because of all the casting and it's bad about letting constants/literals coerce correctly
+- comptime feature flags like use_threads, graphics::backend, os/arch.
+need to support them being different at comptime and runtime in a uniform way. 
+- using foreign libraries. as soon as you need to write your own driver it's super annoying. 
+- nested error messages. need to be able to show more than one source location. 
+- keep reducing the amount of stuff in the prelude 
+- allow adding your own fields to the dynamic environment parameter
+- i really need to output debug info
+- nested array syntax is kinda ass. `Symbol.Array(2).Array(3)` and `Array(Array(Symbol, 2), 3)` 
+is much worse than zig's `[3][2]Symbol`, even c's `Symbol the_name_in_the_middle[3][2]` 
+has the numbers in the right order at least. rust has my problem too `[[Symbol; 2]; 3]` but nicer special case syntax for it. 
 
 ##
 

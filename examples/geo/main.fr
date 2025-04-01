@@ -1,15 +1,26 @@
 #include_std("graphics/src/lib.fr");
 
-#use("@/examples/geo/las.fr");
 Render :: import("@/examples/geo/render.fr");
+Las :: import("@/examples/geo/las.fr");
+Laz :: import("@/examples/geo/laz.fr");
+
+LasFile :: @struct {
+    input: []u8;
+    data: []u8;
+    vlr: ?*Laz.SpecialVlr;
+    laz_items: []Laz.ItemRecord;
+}
+
+fn header(self: *LasFile) *Las.Header = {
+    peek_type(self.input, Las.Header)
+}
 
 State :: @struct {
     pipe: Sgl.Pipeline;
     pass_action: SgPassAction;
     env: rawptr;
     draw: *Sgl.Common;
-    point_bytes: []u8;
-    header: *Header;
+    file: LasFile;
     vertex_dirty: bool;
     pitch: f32;
     yaw: f32;
@@ -23,23 +34,35 @@ State :: @struct {
     lo: Vec3;
     model_yaw: f32;
     d_model_yaw: f32;
+    is_compressed: bool;
 };
 
-fn check_las_version(input: []u8) Ty(*Header, []u8) = {
-    xxx := input;
-    h := xxx&.pop_type(Header);
+PointData :: @struct {
+    x: u32;
+    y: u32;
+    z: u32;
+    intensity: u16;
+}
+
+fn check_las_version(input: []u8) LasFile = {
+    h := input.peek_type(Las.Header);
     @assert_eq(h.fourcc, 0x4653414C, "bad magic for las file. expected LASF");
     @println("version = %.%", h.version_major, h.version_minor);
     is_legacy := h.version_minor < 4;
-    @println("fmt = %, len = %, count = %", h.point_record_format, h.point_record_length, h.legacy_point_record_count);
-    @assert_le(h.point_record_format, 10, "unknown point record format");
-    @assert(h.point_record_format == 1, "TODO: implement more point formats");
-    expected_bytes: i64 = h.point_record_length.zext() * h.legacy_point_record_count.zext();
-    //expected_bytes: i64 = size_of(PointFormat._1) * h.legacy_point_record_count.zext();
-    max_possible := input.len - size_of(Header) - h.offset_to_point_data.zext();
-    @println("% %", h.legacy_point_record_count, h.point_record_count);
-    records := input.subslice(h.offset_to_point_data.zext(), min(expected_bytes, max_possible));
-    (h, records)
+    format := h.point_record_format;
+    @println("fmt = %, len = %, count = %, vlr_count = %", format, h.point_record_length, h.legacy_point_record_count, h.vlr_count);
+    is_compressed := format >= 128;
+    format -= 128 * int(is_compressed).trunc();
+    @assert(format < 6, "TODO: implement more point formats");
+    records := input.rest(h.offset_to_point_data.zext());
+    file: LasFile = (input = input, data = records, vlr = .None, laz_items = empty());
+    if is_compressed {
+        vv, iits := Laz'laz_header(input) 
+            || @panic("expected compressed laz file but couldn't find special header");  // TODO: result
+        file.vlr = (Some = vv);
+        file.laz_items = iits;
+    }
+    file
 }
 
 Args :: @struct {
@@ -56,9 +79,7 @@ fn main() void = {
         general_allocator().read_to_string_or_crash(args.path.str()).items()
     }
     
-    h, bytes := check_las_version(input);
-    state.point_bytes = bytes;
-    state.header = h;
+    state.file = check_las_version(input);
     state.vertex_dirty = true;
     Render'launch(state&);
 }

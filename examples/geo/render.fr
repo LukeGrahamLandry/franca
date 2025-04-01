@@ -1,12 +1,12 @@
 TURN_SPEED :: 0.005;
 MOVE_SPEED :: 0.015;
-MAX_VERTICES :: 1_000_000;
+MAX_VERTICES :: 10_000_000;
 VERTICES_PER_POINT :: 6;
 
 // first i tried making a dumb .obj file but meshlab ran out of memory trying to render it for my 185MB point cloud. 
 
 // no fancy triangulation stuff. just put the raw points on the screen. 
-fn draw_point_cloud(state: *State) void = {
+fn draw_point_cloud(state: *State, $next_point: @Fn() PointData) void = {
     a := timestamp();
     sgl := state.draw.default_context&;
     sgl.begin(.POINTS);
@@ -31,44 +31,41 @@ fn draw_point_cloud(state: *State) void = {
         vec3(f(r.x), f(r.y), f(r.z))
     }
     
-    bytes := state.point_bytes;
+    bytes := state.file.data;
     max_points :: MAX_VERTICES / VERTICES_PER_POINT;
-    step_bytes: i64 = state.header.point_record_length.zext();
+    step_bytes: i64 = state.file&.header()[].point_record_length.zext();
     point_count: i64 = bytes.len / step_bytes;
     step_points := max(1, point_count / max_points);
     
-    hi := to_vec(record(0));
-    lo := hi;
-    // :SLOW
-    //each records { r |
-    //    v := to_vec(r);
-    //    hi = max(hi, v);
-    //    lo = min(lo, v);
-    //}
-    
-    record :: fn(i) => ptr_cast_unchecked(u8, PointFormat._1, state.point_bytes.ptr.offset(i * step_bytes));
+    lo := vec3(99999999.0, 99999999.0, 99999999.0);
+    hi := lo * @as(f32) -1.0;
     percent :: fn(v, l, h) => (v - l) / (h - l);
     
     //off := vec3(state.header.x_offset.cast(), state.header.y_offset.cast(), state.header.z_offset.cast());
     average := vec3(0, 0, 0);
     
-    i := 0;
+    i, j := (0, 0);
     while => i < point_count {
-        r := record(i);
-        i += step_points;
+        continue :: local_return;
+        j -= 1;
+        i += 1;
+        r := next_point();  // when decompressing, always need to eat points, even if we just discard the data. 
+        if(j > 0, => continue());
+        j = step_points;
         
         i: i64 = r.intensity.zext();
-        max_intensity :: 10000;
+        max_intensity :: 65000;
         hue := clamp(i.float() / max_intensity.float() * 5.0, 0.0, 1.0) * 360.0;
         //c := @if(i < colours.len(), colours[i], 0xFFFFFFFF);
         v := to_vec(r);
-        //hue := percent(v&[2], lo&[2], hi&[2]).cast() * 360.0;
+        //hue := percent(v&[2], lo&[2], hi&[2]).cast() * 360.0;   // only makes sense if you pre-pass to calculate
         c := hsv2rgb(hue, 1.0, 1.0, 1.0);
         sgl.v3f_c1i(v, c);
         
         //average += v * ((@as(f32)1.0) / (point_count/max_points).float().cast());
         
         //@println("(%, %, %)", v&[0], v&[1], v&[2]);
+        // there are min/max fields in the header but it seems they tend to lie
         hi = max(hi, v);
         lo = min(lo, v);
     }
@@ -131,14 +128,35 @@ do_render :: fn(userdata: rawptr) void = {
         sgl.defaults();
         sgl.viewport(0.intcast(), 0.intcast(), sapp_width(), sapp_height(), true);
         sgl.load_pipeline(state.pipe);
-        draw_point_cloud(state);
+        if state.file.vlr { vlr |
+            for state.file.laz_items { i |
+                ::enum(@type i.type);
+                @println("% % %", i.type, i.size, i.version);
+            };
+            ::enum(@type vlr.compressor);
+            @assert_eq(vlr.compressor, .chunked, "unsupported laz compressor");
+            
+            chunks := chunk_table(state.file&, temp());
+            stream := zeroed Laz.Stream;
+            iter: Laz.Iterator = init(state.file.laz_items, temp(), stream&);
+            
+            println("TODO");
+            exit(1);
+        } else {
+            i := 0;
+            step_bytes: i64 = state.file&.header()[].point_record_length.zext();
+            draw_point_cloud state {
+                r := ptr_cast_unchecked(u8, Las.Format._1, state.file.data.ptr.offset(i * step_bytes));
+                i += 1;
+                (x = r.x, y = r.y, z = r.z, intensity = r.intensity)
+            }
+        };
         sgl.update_vertex_buffer();
         state.vertex_dirty = false;
-    };
+    };    
     
     mvp := sgl.uniforms[0].mvp&;
-    
-    h := state.header;
+    h := state.file&.header();
     center := (state.lo + (state.hi - state.lo) * 0.5);
     
     state.model_yaw += state.d_model_yaw;
@@ -271,8 +289,7 @@ do_init :: fn(userdata: rawptr) void = {
     desc.logger.func = slog_func;
     sg_setup(desc&);
     
-    vertices_needed := min(state.header.legacy_point_record_count.zext() * 6, MAX_VERTICES);
-    @println("for raw data, need % vertices", vertices_needed);
+    vertices_needed := min(state.file&.header()[].legacy_point_record_count.zext() * 6, MAX_VERTICES);
     desc: Sgl.Desc = (
         allocator = general_allocator(),
         context = (

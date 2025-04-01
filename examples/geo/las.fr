@@ -49,13 +49,41 @@ Header :: @struct {
     point_record_count_by_return: Array(u64, 15) #align(1);
 }
 
-PointFormat :: @struct {
+VariableRecord :: @struct {
+    reserved: u16;
+    user_id: Array(u8, 16);
+    record_id: u16;
+    length: u16;
+    description: Array(u8, 32);
+};
+
+fn for_vlr(input: []u8, $body: @Fn(header: *VariableRecord, data: []u8) void) void = {
+    h := input.peek_type(Header);
+    // will always be 375 in new versions of the format but not old ones! (and even that you can't just poptype because alignment padding)
+    input = input.rest(h.header_size.zext());
+    range(0, h.vlr_count.zext()) { _ |
+        h := input&.pop_type(VariableRecord);
+        l: i64 = h.length.zext();
+        body(h, input.slice(0, l));
+        input = input.rest(l);
+    };
+}
+
+Format :: @struct {
+    #use("@/lib/bit_fields.fr");
+    
     _0 :: @struct {
+        Flags :: @bit_fields(  // TODO: wrong direction? 
+            return_number     := 3,
+            number_of_returns := 3,
+            scan_direction    := 1,
+            edge_of_flight    := 1,
+        );
         x: u32;
         y: u32;
         z: u32;
         intensity: u16;
-        flags: u8;
+        bit_byte: Flags;
         class: u8;
         scan_angle_rank: i8;
         user_data: u8;
@@ -65,4 +93,19 @@ PointFormat :: @struct {
         base: _0 #use;
         gps_time: f64 #align(1);
     }
+    _2 :: @struct {
+        base: _0 #use;
+        c: Colour;
+    }
+    _3 :: @struct {
+        base: _0 #use;
+        gps_time: f64 #align(1);
+        c: Colour;
+    }
+}
+
+Colour :: @struct {
+    r: u16;
+    g: u16;
+    b: u16;
 }
