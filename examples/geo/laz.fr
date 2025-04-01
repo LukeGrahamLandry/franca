@@ -35,9 +35,9 @@ Stream :: @struct {
     length: u32;
 }
 
-fn init(self: *Stream) void = {  // 9.3.1
-    self[] = (input = input, value = input.cast_front_unaligned(u32)[].byteswap(), i = 4, length = MAX_u32);
-}
+fn init(input: []u8) Stream =   // 9.3.1
+    (input = input, value = input.peek_type(u32)[].byte_swap(), i = 4, length = MAX_u32);
+
 
 fn maybe_renorm_dec_interval(self: *Stream) void #inline = {  // 9.4.1
     while => self.length < 1.shift_left(24) {
@@ -67,6 +67,7 @@ fn init(self: *Symbol, symbols: i64, buf: []u16) void = {  // 10.2.2
     each self.symbol_counts { s |
         s[] = 1;
     }
+    self.total_count = symbols;
     self.update_distribution();
     self.update_cycle = (symbols + 6) / 2;
     self.symbols_until_update = self.update_cycle;
@@ -77,7 +78,7 @@ fn update_distribution(self: *Symbol) void = {  // 10.2.3
         // can't just /2 here because we don't know parity of the counts so the rounding will be wrong half the time
         self.total_count = 0; 
         each self.symbol_counts { s |
-            s[] /= 2;
+            s[] = (s[] + 1) / 2;
             self.total_count += s[].zext();
         }
     }
@@ -98,21 +99,24 @@ fn update_distribution(self: *Symbol) void = {  // 10.2.3
 
 fn decode_symbol(self: *Symbol, stream: *Stream) i64 = {  // 10.2.4.1
     ltmp   := stream.length.shift_right_logical(15);
-    symbol := 0;
+    symbol := -1;
     symbols := self.symbol_counts.len;
-    while => self.distributions[symbol] * ltmp > stream.value {  // :SLOW
-        symbol += 1;
-        @debug_assert_lt(symbol, symbols);
-    }
-    
-    diff       := self.distributions[symbol] * ltmp;
-    self.value -= diff;
+    range(0, symbols) { s |  // :SLOW
+        if self.distribution[s].zext() * ltmp <= stream.value { 
+            symbol = s;
+        }
+    };
+    @debug_assert_ne(symbol, -1, "not found");
+
+    diff       := self.distribution[symbol].zext() * ltmp;
+    stream.value -= diff;
     is_last    := symbol == symbols - 1;
-    high       := if(is_last, => stream.length, => distribution[symbol+1] * ltmp);
+    high       := @if(is_last, stream.length, self.distribution[symbol+1].zext() * ltmp);
     stream.length = high - diff;
     
     stream.maybe_renorm_dec_interval();
-    self.symbol_count[symbol] += 1;
+    self.total_count += 1;
+    self.symbol_counts[symbol] += 1;
     self.symbols_until_update -= 1;
     if self.symbols_until_update == 0 {
         self.update_distribution();
@@ -152,19 +156,18 @@ fn update_bit_distribution(self: *Bit) void = {  // 10.3.3
     if self.bit_count > 8192 {
         self.bit_count = (self.bit_count + 1) / 2;
         self.bit_0_count = (self.bit_0_count + 1) / 2;
-        if bit_0_count == bit_count {
-            self.bit_count += 1;
-        }
+        self.bit_count += int(self.bit_0_count == self.bit_count).trunc();
     }
     
-    self.bit_0_prob = 1.shift_left(31) / self.bit_count * self.bit_0_count / 1.shift_left(18);
+    p := 1.shift_left(31) / self.bit_count.to(i64) * self.bit_0_count.to(i64) / 1.shift_left(18);
+    self.bit_0_prob = p.to(u16);
     self.update_cycle = min(self.update_cycle * 5 / 4, 64);
     self.bits_until_update = self.update_cycle;
 }
 
 fn decode_bit(self: *Bit, stream: *Stream) bool = {
     l         := stream.length / 1.shift_left(13);
-    threshold := self.bit_0_prob * l;
+    threshold := self.bit_0_prob.to(u32) * l;
     bit       := stream.value >= threshold;
     if bit {
         stream.value  -= threshold;
@@ -187,18 +190,20 @@ fn decode_bit(self: *Bit, stream: *Stream) bool = {
 fn raw_decoder(self: *Stream, bit_count: i64) i64 = {  // 10.4.2
     shift := 0;
     n     := 0;
-    loop {
+    inline_range(0, 4) { _ |
         last       := bit_count <= 19;
         bc         := if(last, => bit_count, => 16);
         self.length = self.length.shift_right_logical(bc);
         raw        := self.value / self.length;
         self.value -= self.length * raw;
         n          += raw.zext().shift_left(shift);
-        bit_count  -= 16;
-        shift      += 16;
+        bit_count  -= bc;
+        shift      += bc;
         self.maybe_renorm_dec_interval();
+        @debug_assert_eq(n, n.bit_and(1.shift_left(shift) - 1), "laz: too many bits!");
         if(last, => return(n));
     }
+    unreachable()
 }
 
 //
@@ -214,28 +219,29 @@ Integers :: @struct {
 }
 
 fn init(self: *Integers, instances: i64, n_bit: i64, a: Alloc) void = {
-    init(self.k_coder&, instances, fn(_) => n_bit, a);
+    init(self.k_coder&, instances, fn(_) => n_bit + 1, a);
     self.corrector0 = a.alloc(Bit, instances);
     each(self.corrector0, fn(it) => it.init());
     init(self.correctors&, n_bit, fn(i) => 1.shift_left(min(i + 1, 8)), a);
 }
 
-// TODO: do i need to sign extend? 
 // returns (diff, k) because you sometimes need k for making decisions about later fields 
 fn read_difference(self: *Integers, stream: *Stream, which: i64) Ty(i64, i64) = {  // 10.5.3
     k := self.k_coder&.decode_symbol(stream, which);  // index of highest set bit (of magnetude, not like in a two's complement way)
     c := @if_else {
         @if(k == 0)  => self.corrector0.index(which).decode_bit(stream).int();
-        @if(k == 32) => -1.shift_left(31);
+        @if(k == 32) => MIN_i32;
         @else => {
             c := self.correctors&.decode_symbol(stream, k - 1);
             if k > 8 {
                 lower_bits := raw_decoder(stream, k - 8);
                 c = c.shift_left(k - 8) + lower_bits;
             }
-            c - if(c >= 1.shift_left(k - 1), => -1, => 1.shift_left(k) - 1)
-        }
-    }
+            c - @if(c >= 1.shift_left(k - 1), -1, 1.shift_left(k) - 1)
+        };
+    };
+    @println("which = % k = % difference = %", which, k, c);
+    c := c.intcast().intcast();  // sign extend
     (c, k)
 }
 
@@ -289,18 +295,18 @@ fn laz_header(input: []u8) ?Ty(*SpecialVlr, []ItemRecord) = {
 #use("@/lib/bit_fields.fr");
 
 Point10 :: @struct {
-    Changed :: @bit_fields(  // TODO: which way?
-        bit_byte  := 1,
-        intensity := 1,
-        class     := 1,
-        angle     := 1,
-        user      := 1,
+    Changed :: @bit_fields(
         source    := 1,
-        _         := 3,
+        user      := 1,
+        angle     := 1,
+        class     := 1,
+        intensity := 1,
+        bit_byte  := 1,
+        _         := 2,
     );
     changed:   Symbol;
     bit_byte:  Symbols;   // instance chosen by previous
-    intensity: Integers;  // first record treated as 0. 
+    intensity: Integers;
     class:     Symbols;
     angle:     Symbols;
     user:      Symbols;
@@ -309,10 +315,10 @@ Point10 :: @struct {
     y:         Integers;
     z:         Integers;
     
-    prev_point: Las.Format._3;
+    prev: Las.Format._0;
     prev_intensity_by_m: Array(u16, 16);
-    prev_z_by_l: Array(u32, 8);
-    streaming_median: u32.Array(5).Array(16).Array(2);  // [xy][m][i]
+    prev_z_by_l: Array(i32, 8);
+    streaming_median: i32.Array(5).Array(16).Array(2);  // [xy][m][i]
     streaming_median_parity: Array(bool, 2);
 }
 
@@ -328,7 +334,7 @@ return_map_m :: @const_slice(@as(u8)
      8,  9, 10, 11, 12, 13, 14, 15,
 );
 
-number_return_level :: ast_alloc().alloc_init(u8, 64, fn(i) => 
+return_map_l :: ast_alloc().alloc_init(u8, 64, fn(i) => 
     i.mod(8).sub(i/8).abs().trunc());
 
 fn init(a: Alloc) *Point10 = {  // 13.1
@@ -345,6 +351,8 @@ fn init(a: Alloc) *Point10 = {  // 13.1
     init(self.bit_byte&, 256, fn(_) => 256, a);
     self.prev_intensity_by_m&.items().set_zeroed();
     self.prev_z_by_l&.items().set_zeroed();
+    self.streaming_median&.items().set_zeroed();
+    self.streaming_median_parity&.items().set_zeroed();
     self
 }
 
@@ -356,39 +364,44 @@ Las :: import("@/examples/geo/las.fr");
 //
 // updates self.prev (intended to be a building block of a more usable api). 
 fn next(self: *Point10, s: *Stream) void = {  // 13.1
-    point   := self.prev_point&;
+    point   := self.prev&;
     changed := self.changed&.decode_symbol(s);
+    @println("BAR %", changed);
     changed := bit_cast_unchecked(u8, Point10.Changed, changed.trunc());
     
+    BitByte :: Las.Format._0.Flags;
     if changed.get(.bit_byte) == 1 {
-        point.bit_byte = self.bit_byte&.decode_symbol(s, point.bit_byte.zext());
+        b := bit_cast_unchecked(BitByte, u8, point.bit_byte);
+        b := self.bit_byte&.decode_symbol(s, b.zext());
+        point.bit_byte = bit_cast_unchecked(u8, BitByte, b.trunc());
     }
     
-    r, n := (point.bit_byte.get(.return_number), point.bit_byte.get(number_of_returns));
-    m    := index8x8(Point10.return_map_m, r, n);
-    l    := index8x8(Point10.return_map_l, r, n);
+    r, n := (point.bit_byte.get(.return_number), point.bit_byte.get(.number_of_returns));
+    m    := index8x8(return_map_m, r, n);
+    l    := index8x8(return_map_l, r, n);
     
     point.intensity = self.prev_intensity_by_m&[m];
     if changed.get(.intensity) == 1 {
         d_intensity, _ := self.intensity&.read_difference(s, min(m, 3));
-        point.intensity += d_intensity;   // TODO: casting? 
+        point.intensity += d_intensity.trunc();   // TODO: casting? 
         self.prev_intensity_by_m&[m] = point.intensity;
     }
     
     if changed.get(.class) == 1 {
-        point.class = self.class&.decode_symbol(s, point.class);
+        point.class = self.class&.decode_symbol(s, point.class.zext()).trunc();
     }
     
     if changed.get(.angle) == 1 {
-        point.angle /*mod*/+= self.angle&.decode_symbol(s, point.bit_byte.get(.scan_direction));
+        point.angle /*mod*/+= self.angle&.decode_symbol(s, point.bit_byte.get(.scan_direction)).trunc();
     }
     
     if changed.get(.user) == 1 {
-        point.user_data = self.class&.decode_symbol(s, point.user_data);
+        point.user_data = self.class&.decode_symbol(s, point.user_data.zext()).trunc();
     }
     
     if changed.get(.source) == 1 {
-        point.point_source_id += self.point_source_id&.decode_symbol(s, point.point_source_id);
+        d, _ := self.source&.read_difference(s, point.point_source_id.zext());
+        point.point_source_id += d.trunc();
     }
     
     clamp_bit :: fn(k, bit) => 
@@ -397,33 +410,41 @@ fn next(self: *Point10, s: *Stream) void = {  // 13.1
     dx, kX := self.x&.read_difference(s, int(n == 1));
     dy, kY := self.y&.read_difference(s, clamp_bit(kX, 20));
     kXY := (kX + kY) / 2;
-    dz, _ := self.y&.read_difference(s, clamp_bit(kXY, 18));
+    dz, _ := self.z&.read_difference(s, clamp_bit(kXY, 18));
+    @println("kX = % kY = % kXY = %", kX, kY, kXY);
     
     delta_median :: fn(delta, ci) => {
         rolling     := self.streaming_median&.index(ci).index(m);
         median      := rolling[2];
-        new         := median + delta;
+        new         := median + delta.intcast();
         hi          := self.streaming_median_parity&.index(ci);
         i, dir, end := @if(hi[], (4, -1, 0), (0, 1, 4));
         hi[] = if(new == median, => !hi[], => new < median);
         rolling[i] = new;
-        inline_range(0, 4) { _ |
-            if rolling[i] * dir > rolling[i + dir] {
-                rolling.items().swap(i, i + dir);
-                i += dir;
-            };
-        };
+        
+        sort :: import("@/lib/sort.fr")'quicksort(i32, fn(a, b) => a[] < b[]);
+        sort(rolling.items()); // :SLOW
+        // TODO: can be faster than that since we know we're only inserting one 
+        //inline_range(0, 4) { _ |
+        //    xxx := rolling[i] * dir.intcast();
+        //    if xxx > rolling[i + dir] {
+        //        rolling.items().swap(i, i + dir);
+        //        i += dir;
+        //    };
+        //};
+        @println("rolling: % % % % %", rolling[0], rolling[1], rolling[2], rolling[3], rolling[4]);
         new
     }
     
     point.x += delta_median(dx, 0);
     point.y += delta_median(dy, 1);
-    self.prev_z_by_l&[l] += dz;
+    @println("Z: prev_l = % d = %", self.prev_z_by_l&[l], dz);
+    self.prev_z_by_l&[l] += dz.intcast();
     point.z = self.prev_z_by_l&[l];
 }
 
-fn index8x8(self: []u8, i: i64, j: i64) u8 =   // TODO: wrong direction? 
-    self[i * 8 + j]
+fn index8x8(self: []u8, i: i64, j: i64) i64 =   // TODO: wrong direction? 
+    self[i * 8 + j].zext(); // TODO: probably shouldn't compile if you forget this semicolon
 
 GPSTime11 :: @struct {
     Frame :: @struct {
@@ -447,7 +468,6 @@ fn init(a: Alloc) *GPSTime11 = {
     self.frames&.items().set_zeroed();
     self
 } 
-// TODO: The previous GPS time[0] for reference frame 0 is initialized with the GPS time of the first,uncompressed item.
 
 // the bits of the float are represted as i64 with the deltas encoded. 
 // somehow this is an infinite nightmare. 
@@ -455,12 +475,12 @@ fn next(self: *GPSTime11, s: *Stream) f64 = {  // 13.2
     f := self.frames&.index(self.frame);
     if f.delta == 0 {
         case0 := self.case0&.decode_symbol(s); 
-        return @switch(case0) {
+        return(@switch(case0) {
             @case(0) => f.previous.bitcast();
             @case(1) => {
                 d_low, _   := self.d_low&.read_difference(s, 0);
                 f.previous += d_low;
-                f.delta     = f_low;
+                f.delta     = d_low;
                 f.counter   = 0;
                 f.previous.bitcast()
             }
@@ -469,7 +489,7 @@ fn next(self: *GPSTime11, s: *Stream) f64 = {  // 13.2
                 self.frame = mod(self.frame + case0 - 3 + 1, 4);
                 self.next(s)
             };
-        }
+        });
     } 
     
     case := self.case&.decode_symbol(s) ;
@@ -484,7 +504,7 @@ fn next(self: *GPSTime11, s: *Stream) f64 = {  // 13.2
                 @if(case == 1)  => 1;
                 @if(case <= 9)  => 2;
                 @if(case < 500) => 3;
-                @default        => 4;
+                @else        => 4;
             }
             d_low, _  := self.d_low&.read_difference(s, instance);
             f.previous  += f.delta * case + d_low;
@@ -504,7 +524,7 @@ fn next(self: *GPSTime11, s: *Stream) f64 = {  // 13.2
         @else => {
             self.frame = mod(self.frame + case - 513 + 1, 4);
             return(self.next(s))
-        }
+        };
     };
     f.previous.bitcast()
 }
@@ -543,7 +563,7 @@ RGB12 :: @struct {
         green_high := 1,
         blue_low   := 1,
         blue_high  := 1,
-        all_same   := 1,  // green+blue not stored
+        NOT_all_same   := 1,  // green+blue ARE stored (this is backwards from what the spec says !!!)
         _          := 1,
     );  
     changed: Symbol;
@@ -569,14 +589,17 @@ fn get(self: *RGB12, colour: i64, byte: i64) *Symbol =
 // updates self.prev (intended to be used as a building block of a more usable api)
 fn next(self: *RGB12, s: *Stream) void = {  // 13.3
     changed := self.changed&.decode_symbol(s);
+    @println("FOO % %", changed, changed.bit_and(1.shift_left(6)) != 0);
     changed := bit_cast_unchecked(u8, RGB12.Changed, changed.trunc());
     
     // TODO: ive gotta be making this look worse than it is
     add_byte :: fn(word, delta, diff, shift) => {
-        mask  := 0xFF.shift_left(shift * 8);
-        prev  := clamp(word[].bit_and(mask) + diff.shift_left(shift * 8), 0, 255); 
+        @println("word = % delta = % diff = % shift = %", word[], delta, diff, shift);
+        mask: i64 = 0xFF.shift_left(shift * 8);
+        w: i64 = word[].zext();
+        prev  := clamp(w.bit_and(mask) + diff.shift_left(shift * 8), 0, 255.shift_left(shift * 8)); 
         byte  := bit_and(prev + delta.shift_left(shift * 8), mask);
-        word[] = bit_or(word[].bit_and(bit_not(mask)), byte);
+        word[] = bit_or(w.bit_and(bit_not(mask)), byte).trunc();
     }
     
     r_lo := 0;
@@ -591,9 +614,14 @@ fn next(self: *RGB12, s: *Stream) void = {  // 13.3
         add_byte(self.prev.r&, r_hi, 0, 1);
     }
     
-    if changed.get(.all_same) == 1 {
-        prev.g = prev.r;
-        prev.b = prev.r;
+    // :LazSpecLies
+    // !!!! this is backwards !!!!
+    // "If bit 6 is set, Green and Blue are equal to the uncompressed value of Red"
+    // and by that we mean the complete opposite of that somehow. 
+    // ???? garbage ???? am i losing my mind? 
+    if changed.get(.NOT_all_same) == 0 {
+        self.prev.g = self.prev.r;
+        self.prev.b = self.prev.r;
         return()
     }
     
@@ -606,11 +634,12 @@ fn next(self: *RGB12, s: *Stream) void = {  // 13.3
     }
 
     g_hi := 0;
-    if changed.get(.green_hi) == 1 { 
+    if changed.get(.green_high) == 1 { 
         g_hi = self.get(1, 1).decode_symbol(s);
         add_byte(self.prev.g&, g_hi, r_hi, 1);
     }
     
+    // :LazSpecLies
     // TODO: do i care enough to tell them they have a typo in thier spec? 
     // (hopefully this is a mistake or im just super confused) in the "dBlue (high)" section on page 58:
     // lower byte of Blue := (dBlue (low) + clamp255(higher byte of Blue (previous item) + diff) + 256) MOD 256.
@@ -618,24 +647,23 @@ fn next(self: *RGB12, s: *Stream) void = {  // 13.3
     // TODO: round_towards_0 is just what normal division is right?
     //       this is them trying to make thier spec not depend on c's semantics i guess? 
     
-    if changed.get(.blue_lo) == 1 { 
+    if changed.get(.blue_low) == 1 { 
         b_lo := self.get(2, 0).decode_symbol(s);
         add_byte(self.prev.b&, b_lo, (r_lo+g_lo)/2, 0);
     }
     
-    if changed.get(.blue_hi) == 1 { 
+    if changed.get(.blue_high) == 1 { 
         b_hi := self.get(2, 1).decode_symbol(s);
         add_byte(self.prev.b&, b_hi, (r_hi+g_hi)/2, 1);
     }
 }
 
-// this data needs to be interpreted differently depending on the Compressor. 
-// I don't support the adaptive sizes yet!
 Chunks :: @struct {
     chunks: [][]u8;
+    points_per_chunk: i64;  // TODO: support the adaptive sizes!
 }
 
-// `data` is input[offset_to_point_data..] === ([0] = off, [8..] = (compressed bytes), [off] = (table))
+// file.data is file.input[offset_to_point_data..] === ([0] = off, [8..] = (compressed bytes), [off] = (table))
 fn chunk_table(file: *LasFile, a: Alloc) Chunks = {
     offset_to_chunk_table := file.data.peek_type(i64)[];  // absolute file position
     println(offset_to_chunk_table);
@@ -649,24 +677,30 @@ fn chunk_table(file: *LasFile, a: Alloc) Chunks = {
     
     table := file.input.rest(offset_to_chunk_table);
     version := table.peek_type(u32)[];
+    @debug_assert_eq(version, 0);
     count := table.rest(4).peek_type(u32)[];
     @println("version = % count = %", version, count);
     @assert_ne(file.vlr.unwrap()[].chunk_size, 0xFFFFFFFF, "TODO: support variable point count chunks");
     
-    chunks := a.alloc([]u8, count.zext());
-    c := zeroed Integers;
-    init(c&, 1, 32, a);
-    
-    prev_size := 0;
-    each chunks { it |
-        //delta, _ := c&.read_difference(stream, 0);
-        
-        //prev_size += delta;
-    };
-    
     // helpfully the chunk table data itself is compressed as well. FML
     
-    todo()
+    chunks := a.alloc([]u8, count.zext());
+    c := zeroed Integers;
+    init(c&, 1, 32, temp());
+    stream: Stream = init(table.rest(8));
+    
+    prev_size := 0;
+    data := file.data.rest(8);  // skip the off we read before
+    enumerate chunks { i, it |
+        delta, _ := c&.read_difference(stream&, 0);
+        prev_size += delta;
+        prev_size = prev_size.intcast().intcast();
+        @debug_assert_ge(prev_size, 0, "i don't think so man");
+        it[] = data.slice(0, prev_size);
+        data = data.rest(prev_size);
+    };
+    vlr := file.vlr.unwrap();
+    (chunks = chunks, points_per_chunk = vlr.chunk_size.zext())
 }
 
 #use("@/lib/collections/enum_map.fr");
@@ -676,44 +710,66 @@ Iterator :: @struct {
     gps: *GPSTime11;
     rgb: *RGB12;
     has: EnumMap(ItemRecord.Kind, bool);
-    stream: *Stream;
+    stream: Stream;
 }
 
-fn init(items: []ItemRecord, a: Alloc, s: *Stream) Iterator = {
-    has := zeroed EnumMap(ItemRecord.Kind, bool);
+fn init(items: []ItemRecord, a: Alloc, chunk: []u8) Iterator = {
+    self: Iterator = (
+        has = zeroed(EnumMap(ItemRecord.Kind, bool)), 
+        point = init(a), 
+        gps = init(a), 
+        rgb = init(a), 
+        stream = zeroed Stream,
+    );
     
+    i := 0;
     for items { it |
-        @assert(!has&[it.type], "invalid laz file. item % is repeated", it.type);
-        @assert(@is(it.type, .Point10, .GPSTime11, .RGB12), "item % is not supported", it.type);
-        has&[it.type] = true;
+        @println("% %", it.type, self.has&[it.type]);
+        // TODO: compiler bug?? why does RGB12 start set?? 
+        //@assert(!self.has&[it.type], "invalid laz file. item % is repeated", it.type);
+        self.has&[it.type] = true;
+        
+        // first read one uncompressed item as the starting point. 
+        // this eats bytes from the input data *before* we start using the bit stream
+        @match(it.type) {
+            fn Point10() => {
+                self.point.prev = chunk.rest(i).peek_type(Las.Format._0)[];
+            } 
+            fn GPSTime11() => {
+                self.gps.frames&[0].previous = chunk.rest(i).peek_type(i64)[];
+            } 
+            fn RGB12() => {
+                self.rgb.prev = chunk.rest(i).peek_type(Las.Format.Colour)[];
+            } 
+            @default => @panic("item % is not supported", it.type);
+        };
+        i += it.size.zext();
     };
     
-    self: Iterator = (has = has, point = init(a), gps = init(a), rgb = init(a), stream = s);
-    self&.start();
+    self.stream = init(chunk.rest(i));
     self
-}
-
-fn start(self: *Iterator) void = {
-    if self.has&[.Point10] {
-        
-    }
-    if self.has&[.GPSTime11] {
-        
-    }
-    if self.has&[.RGB12] {
-        
-    }
 }
 
 fn next(self: *Iterator) PointData = {
     if self.has&[.Point10] {
-        self.point.next(self.stream);
+        println("A");
+        self.point.next(self.stream&);
     }
     if self.has&[.GPSTime11] {
-        _ := self.gps.next(self.stream);
+        println("B");
+        _ := self.gps.next(self.stream&);
+        x: i64 = _.bitcast();
+        @println("gps %", x);
     }
     if self.has&[.RGB12] {
-        _ := self.rgb.next(self.stream);
-    }
-    (x = self.point.x, y = self.point.y, z = self.point.z, intensity = self.point.intensity)
+        println("C");
+        _ := self.rgb.next(self.stream&);
+        @println("rgb % % %", self.rgb.prev.r, self.rgb.prev.g, self.rgb.prev.b);
+    };
+    (
+        x = self.point.prev.x, 
+        y = self.point.prev.y, 
+        z = self.point.prev.z, 
+        intensity = self.point.prev.intensity
+    )
 }

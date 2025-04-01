@@ -1,4 +1,44 @@
 
+## 
+
+one hundred and one point cloud mistakes
+
+- not setting total_count before calling update_distribution the first time 
+- chunk size delta is always 1... decode_symbol is always 0...
+i imagined distributions as ordered lower bounds so 
+`while => self.distribution[symbol].zext() * ltmp > stream.value { symbol += 1;`
+but no, thats not the same. now more sane: first is high because it's delta from 0 and then rest are smaller. 
+- hmm 2148447271 sure looks negative. but -2147097928 is also not sane
+- k_coder.init(n_bit + 1) 
+- ugh failed copy paste. `self.distribution[symbol]` -> `self.distribution[s]`
+- cheating by looking at the rust one's output on my file. 
+im right for entries 0-18 in the chunk table. 
+then im wrong: `k = 13 c = 214 lower_bits = 25 c = 6873 k = 13 c = 6874`
+final c is supposed to be -34919. huh, k is supposed to be 16. 
+dumbass i was was cleverly storing the count of symbols seen to avoid re-summing them 
+to check when to halve in update_distribution but wasn't incrementing it in decode_symbol. 
+so now i can get through the chunks table. 
+- off by 8 because i didn't skip the offset in chunk_table before reading the first chunk
+- i had the order of bit_fields backwards. tho in my defense, the spec reverses the order of the table randomly. 
+- now i can read the first compressed xyz successfully. 
+- rust one thinks the colours are all the same but mine are different. 
+do i have the bit order reversed again? no. :LazSpecLies
+RGB in changed bit set, the one for r being identical to g/b is backwards from the spec????
+or im going crazy and can't read. 
+spec says "If bit 6 is set, Green and Blue are equal to the uncompressed value of Red", 
+but the c++ code says `if (sym & (1 << 6)) { NOT equal } else { equal }` https://github.com/LASzip/LASzip/blob/master/src/lasreaditemcompressed_v2.cpp#L477
+- now im right for points 0-3. 
+4 should be `4294605888 4294935618 4294967247` but i get `4294605952 4294935618 4294967247` then colours are garbage. 
+i was clamping to 255 for the high byte instead of 255<<8. 
+fixes colours but not positions. 
+i32 vs u32 in streaming_median fixes it. 
+- on the plus side, i know why i had a bonus half rocket ship on the other side of the universe, the coordinates are supposed to be signed. 
+- now 8.x is wrong. wasn't sorting streaming_median correctly.
+- 16.z -215 vs -271. typo used self.y& again
+- 77.z -3008 vs -350. (big jump tho. progress). 
+
+## (Mar 31)
+
 `franca self.fr && ./a.out self.fr && cp a.out b.out && hyperfine "./b.out self.fr"`
 required (bug???): inline, copy_elimination  
 amazing (300): collapse_op_arm64+fix_memarg  

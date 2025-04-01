@@ -6,14 +6,9 @@ VERTICES_PER_POINT :: 6;
 // first i tried making a dumb .obj file but meshlab ran out of memory trying to render it for my 185MB point cloud. 
 
 // no fancy triangulation stuff. just put the raw points on the screen. 
-fn draw_point_cloud(state: *State, $next_point: @Fn() PointData) void = {
-    a := timestamp();
+fn draw_point_cloud(state: *State, point_count: i64, $next_point: @Fn() PointData) void = {
     sgl := state.draw.default_context&;
-    sgl.begin(.POINTS);
-    sgl.load_identity();
-    sgl.color = pack_rgba(1.0, 0.0, 0.0, 1.0);
-    sgl.point_size = 0.5;
-    
+
     // TODO: caching these is dumb but it's so fun to me that i can compute things at comptime. 
     //       and also my jit is really bad at arithmetic 6609829 times. 
     //max_intensity :: 183;
@@ -27,14 +22,11 @@ fn draw_point_cloud(state: *State, $next_point: @Fn() PointData) void = {
     //}
     
     to_vec :: fn(r) => {
-        f :: fn(x) => (@as(i64) x.zext()).float().cast();
+        f :: fn(x) => (@as(i64) x.intcast()).float().cast();
         vec3(f(r.x), f(r.y), f(r.z))
     }
     
-    bytes := state.file.data;
     max_points :: MAX_VERTICES / VERTICES_PER_POINT;
-    step_bytes: i64 = state.file&.header()[].point_record_length.zext();
-    point_count: i64 = bytes.len / step_bytes;
     step_points := max(1, point_count / max_points);
     
     lo := vec3(99999999.0, 99999999.0, 99999999.0);
@@ -72,7 +64,7 @@ fn draw_point_cloud(state: *State, $next_point: @Fn() PointData) void = {
     state.lo = lo;
     state.hi = hi;
     
-    @println("(%, %, %) (%, %, %)", hi&[0], hi&[1], hi&[2], lo&[0], lo&[1], lo&[2]);
+    //@println("(%, %, %) (%, %, %)", hi&[0], hi&[1], hi&[2], lo&[0], lo&[1], lo&[2]);
     
     // mark the center for debugging rotation
     sgl.point_size = 10.0;
@@ -85,10 +77,6 @@ fn draw_point_cloud(state: *State, $next_point: @Fn() PointData) void = {
     if sgl.error.vertices_full {
         @println("too many vertices");
     }
-    
-    sgl.end();
-    b := timestamp();
-    @println("% points in %ms", point_count / step_points, b - a);
 }
 
 fn fmod(a: f64, b: f64) f64 #libc;
@@ -128,6 +116,12 @@ do_render :: fn(userdata: rawptr) void = {
         sgl.defaults();
         sgl.viewport(0.intcast(), 0.intcast(), sapp_width(), sapp_height(), true);
         sgl.load_pipeline(state.pipe);
+        
+        a := timestamp();
+        sgl.begin(.POINTS);
+        sgl.load_identity();
+        sgl.point_size = 0.5;
+            
         if state.file.vlr { vlr |
             for state.file.laz_items { i |
                 ::enum(@type i.type);
@@ -137,20 +131,41 @@ do_render :: fn(userdata: rawptr) void = {
             @assert_eq(vlr.compressor, .chunked, "unsupported laz compressor");
             
             chunks := chunk_table(state.file&, temp());
-            stream := zeroed Laz.Stream;
-            iter: Laz.Iterator = init(state.file.laz_items, temp(), stream&);
             
-            println("TODO");
-            exit(1);
+            //for chunks.chunks { chunk | 
+            chunk := chunks.chunks[0];
+                mark := mark_temporary_storage();
+                iter: Laz.Iterator = init(state.file.laz_items, temp(), chunk);
+                @println("% % %", iter.point.prev.x, iter.point.prev.y, iter.point.prev.z);
+                // TODO: don't lose the first point!
+                n := 0;
+                draw_point_cloud(state, 78) { // chunks.points_per_chunk - 1) {
+                    p := iter&.next();
+                    @println("%. % % % i=%", n, p.x, p.y, p.z, p.intensity);
+                    n += 1;
+                    p
+                };
+                //@println("bytes consumed %/%", iter.stream.i, iter.stream.input.len);
+                reset_temporary_storage(mark);
+            //};
+            
+            //println("TODO");
+            //exit(1);
         } else {
             i := 0;
             step_bytes: i64 = state.file&.header()[].point_record_length.zext();
-            draw_point_cloud state {
+            point_count: i64 = state.file.data.len / step_bytes;
+            draw_point_cloud(state, point_count) {
                 r := ptr_cast_unchecked(u8, Las.Format._1, state.file.data.ptr.offset(i * step_bytes));
                 i += 1;
                 (x = r.x, y = r.y, z = r.z, intensity = r.intensity)
             }
         };
+        
+        sgl.end();
+        b := timestamp();
+        @println("%ms", b - a);
+        
         sgl.update_vertex_buffer();
         state.vertex_dirty = false;
     };    
