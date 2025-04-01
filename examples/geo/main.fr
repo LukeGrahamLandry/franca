@@ -35,6 +35,8 @@ State :: @struct {
     model_yaw: f32;
     d_model_yaw: f32;
     is_compressed: bool;
+    chunk_i: i64;
+    chunks: Laz.Chunks;
 };
 
 PointData :: @struct {
@@ -53,7 +55,7 @@ fn check_las_version(input: []u8) LasFile = {
     @println("fmt = %, len = %, count = %, vlr_count = %", format, h.point_record_length, h.legacy_point_record_count, h.vlr_count);
     is_compressed := format >= 128;
     format -= 128 * int(is_compressed).trunc();
-    @assert(format < 6, "TODO: implement more point formats");
+    @assert_lt(format, 6, "TODO: implement more point formats");
     records := input.rest(h.offset_to_point_data.zext());
     file: LasFile = (input = input, data = records, vlr = .None, laz_items = empty());
     if is_compressed {
@@ -68,11 +70,14 @@ fn check_las_version(input: []u8) LasFile = {
 Args :: @struct {
     path: CStr = "";
     mmap := false;
+    o: CStr = "";
+    unsafe := false;
 };
 
 fn main() void = {
     args := parse_args();
     state := zeroed State;
+    state.env = get_dynamic_context();
     input := if args.mmap {
         mmap_read(args.path) || @panic("failed to open %", args.path)
     } else {
@@ -80,6 +85,12 @@ fn main() void = {
     }
     
     state.file = check_las_version(input);
+    if state.file.vlr { vlr |
+        ::enum(@type state.file.laz_items[0].type);
+        ::enum(@type vlr.compressor);
+        @assert_eq(vlr.compressor, .chunked, "unsupported laz compressor");
+        state.chunks = chunk_table(state.file&, general_allocator());
+    };
     state.vertex_dirty = true;
     Render'launch(state&);
 }
@@ -89,8 +100,16 @@ fn driver(vtable: *ImportVTable) void #export = {
     the_code := temp().read_to_string_or_crash("examples/geo/main.fr");  // TODO: don't depend on cwd.
     src&.push_all(the_code.items());
     
+    args := parse_args();
     opts := vtable.default_build_options();
     opts.retain_function_names = true;
+    if args.unsafe {
+        s := opts.safety_checks&;
+        s.insert(.Bounds, false);
+        s.insert(.DebugAssertions, false);
+        s.insert(.InvalidTag, false);
+    };
+    start := timestamp();
     comp := vtable.new_with_src(src.items(), opts);
     c := vtable.with(comp);
     
@@ -100,11 +119,42 @@ fn driver(vtable: *ImportVTable) void #export = {
     main_sym := {vtable.intern_string}(comp, "main");
     main_f := {vtable.find_unique_func}(comp, main_sym).unwrap();
     
-    // for now only suport running jitted
-    ptr := c.get_jitted(main_f);
-    f := assume_types_fn(Arg = void, Ret = void, ptr = ptr);
-    f();
+    exe_path := args.o.str();
+    want_jit := exe_path.len() == 0;
+    if want_jit {
+        println("Running in comptime JIT");
+        ptr := c.get_jitted(main_f);
+        f := assume_types_fn(Arg = void, Ret = void, ptr = ptr);
+        f();
+        return();
+    }
+    println("Creating an AOT executable");
+   
+    #use("@/compiler/ast_external.fr", "@/lib/sys/subprocess.fr");
+    m := QbeModule.zeroed();
+    init_default_module_dyn(m&, vtable, (arch = query_current_arch(), os = .macos, type = .Relocatable));  // :HardcodeOs
+    bytes := emit_qbe_included_dyn(m&, c&, @slice(main_f), .WrapMain);
+    end := timestamp();
+    @println(">>> compile: %ms <<<", end - start);
+    out := open_trunc(@fmt_cstr("%.o", exe_path)).unwrap();
+    for(bytes&){ bucket |
+        out&.write(bucket);
+    };
+    out.close();
+    // TODO: get these from the lib. 
+    a := SOKOL_MACOS_LINK_ARGS;
+    args := libs&.get_aot_objects();
+    args&.push_all(a&.items());
+    args&.push_all(@slice (@tfmt("%.o", exe_path), "-o", exe_path));   
+    args&.push_all(@slice ("-target", target_triple(m.goal.arch, m.goal.os)));   
+    @println("building aot exe: %", args.items());
+    start := timestamp();
+    success := run_cmd_blocking("clang", args.items());
+    end := timestamp();
+    assert(success, "clang failed");
+    @println(">>> link: %ms <<<", end - start);
 }
+SOKOL_MACOS_LINK_ARGS :: @array("-framework", "Metal", "-framework", "MetalKit", "-framework", "Cocoa", "-framework", "QuartzCore");
 
 // :ugly
 fn parse_args() Args = {
@@ -140,3 +190,5 @@ fn parse_args() Args = {
     };
     a
 }
+
+#include_std("backend/lib.fr");

@@ -36,6 +36,7 @@ i32 vs u32 in streaming_median fixes it.
 - now 8.x is wrong. wasn't sorting streaming_median correctly.
 - 16.z -215 vs -271. typo used self.y& again
 - 77.z -3008 vs -350. (big jump tho. progress). 
+the corrector for k=0 needs to be shared like the others. i was doing 1 per instance. 
 
 ## (Mar 31)
 

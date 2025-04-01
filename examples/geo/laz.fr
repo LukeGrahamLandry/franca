@@ -35,8 +35,9 @@ Stream :: @struct {
     length: u32;
 }
 
-fn init(input: []u8) Stream =   // 9.3.1
-    (input = input, value = input.peek_type(u32)[].byte_swap(), i = 4, length = MAX_u32);
+fn init(input: []u8) Stream = {  // 9.3.1
+    (input = input, value = input.peek_type(u32)[].byte_swap(), i = 4, length = MAX_u32)
+}
 
 
 fn maybe_renorm_dec_interval(self: *Stream) void #inline = {  // 9.4.1
@@ -61,7 +62,7 @@ fn to(v: ~Src, $Dest: Type) Dest #where =
     @if(size_of(Src) > size_of(Dest), v.trunc(), v.zext());
     
 fn init(self: *Symbol, symbols: i64, buf: []u16) void = {  // 10.2.2
-    @debug_assert_eq(buf.len, symbols * 2, "Symbol.buf");
+    @debug_assert_eq(buf.len, symbols * 2, "Symbol.buf");    
     self.symbol_counts = buf.slice(0, symbols);
     self.distribution = buf.slice(symbols, symbols * 2);
     each self.symbol_counts { s |
@@ -88,6 +89,7 @@ fn update_distribution(self: *Symbol) void = {  // 10.2.3
     symbols := self.symbol_counts.len;
     range(0, symbols) { n |
         xxx := (scale * sum).shift_right_logical(16);
+        @debug_assert_le(xxx, 0xFFFF);
         self.distribution[n] = xxx.to(u16);
         sum += self.symbol_counts[n].zext();
     }
@@ -97,10 +99,12 @@ fn update_distribution(self: *Symbol) void = {  // 10.2.3
     self.symbols_until_update = self.update_cycle;
 }
 
+// TODO: speed this up! it takes 74% of the time
 fn decode_symbol(self: *Symbol, stream: *Stream) i64 = {  // 10.2.4.1
     ltmp   := stream.length.shift_right_logical(15);
     symbol := -1;
     symbols := self.symbol_counts.len;
+    // TODO: make a table of these
     range(0, symbols) { s |  // :SLOW
         if self.distribution[s].zext() * ltmp <= stream.value { 
             symbol = s;
@@ -113,7 +117,7 @@ fn decode_symbol(self: *Symbol, stream: *Stream) i64 = {  // 10.2.4.1
     is_last    := symbol == symbols - 1;
     high       := @if(is_last, stream.length, self.distribution[symbol+1].zext() * ltmp);
     stream.length = high - diff;
-    
+
     stream.maybe_renorm_dec_interval();
     self.total_count += 1;
     self.symbol_counts[symbol] += 1;
@@ -166,9 +170,10 @@ fn update_bit_distribution(self: *Bit) void = {  // 10.3.3
 }
 
 fn decode_bit(self: *Bit, stream: *Stream) bool = {
-    l         := stream.length / 1.shift_left(13);
+    l         := stream.length.shift_right_logical(13);
     threshold := self.bit_0_prob.to(u32) * l;
     bit       := stream.value >= threshold;
+    //@println("decode_bitA value % length % bit % t % p % u %", stream.value, stream.length, bit, threshold, self.bit_0_prob, self.bits_until_update);
     if bit {
         stream.value  -= threshold;
         stream.length -= threshold; 
@@ -183,6 +188,7 @@ fn decode_bit(self: *Bit, stream: *Stream) bool = {
         self.update_bit_distribution();
     }
     
+    //@println("decode_bitB value % length %", stream.value, stream.length);
     bit
 }
 
@@ -214,22 +220,22 @@ fn raw_decoder(self: *Stream, bit_count: i64) i64 = {  // 10.4.2
 //
 Integers :: @struct {
     k_coder: Symbols;     // [i:n]
-    corrector0: []Bit;    // [i:]
+    corrector0: Bit;   
     correctors: Symbols;  // [:n]
 }
 
 fn init(self: *Integers, instances: i64, n_bit: i64, a: Alloc) void = {
     init(self.k_coder&, instances, fn(_) => n_bit + 1, a);
-    self.corrector0 = a.alloc(Bit, instances);
-    each(self.corrector0, fn(it) => it.init());
+    init(self.corrector0&);
     init(self.correctors&, n_bit, fn(i) => 1.shift_left(min(i + 1, 8)), a);
 }
 
 // returns (diff, k) because you sometimes need k for making decisions about later fields 
 fn read_difference(self: *Integers, stream: *Stream, which: i64) Ty(i64, i64) = {  // 10.5.3
+    //@println("value % length %", stream.value, stream.length);
     k := self.k_coder&.decode_symbol(stream, which);  // index of highest set bit (of magnetude, not like in a two's complement way)
     c := @if_else {
-        @if(k == 0)  => self.corrector0.index(which).decode_bit(stream).int();
+        @if(k == 0)  => self.corrector0&.decode_bit(stream).int();
         @if(k == 32) => MIN_i32;
         @else => {
             c := self.correctors&.decode_symbol(stream, k - 1);
@@ -240,7 +246,7 @@ fn read_difference(self: *Integers, stream: *Stream, which: i64) Ty(i64, i64) = 
             c - @if(c >= 1.shift_left(k - 1), -1, 1.shift_left(k) - 1)
         };
     };
-    @println("which = % k = % difference = %", which, k, c);
+    //@println("which = % k = % difference = %", which, k, c);
     c := c.intcast().intcast();  // sign extend
     (c, k)
 }
@@ -366,7 +372,7 @@ Las :: import("@/examples/geo/las.fr");
 fn next(self: *Point10, s: *Stream) void = {  // 13.1
     point   := self.prev&;
     changed := self.changed&.decode_symbol(s);
-    @println("BAR %", changed);
+    //@println("BAR %", changed);
     changed := bit_cast_unchecked(u8, Point10.Changed, changed.trunc());
     
     BitByte :: Las.Format._0.Flags;
@@ -411,7 +417,7 @@ fn next(self: *Point10, s: *Stream) void = {  // 13.1
     dy, kY := self.y&.read_difference(s, clamp_bit(kX, 20));
     kXY := (kX + kY) / 2;
     dz, _ := self.z&.read_difference(s, clamp_bit(kXY, 18));
-    @println("kX = % kY = % kXY = %", kX, kY, kXY);
+    //@println("kX = % kY = % kXY = %", kX, kY, kXY);
     
     delta_median :: fn(delta, ci) => {
         rolling     := self.streaming_median&.index(ci).index(m);
@@ -432,13 +438,13 @@ fn next(self: *Point10, s: *Stream) void = {  // 13.1
         //        i += dir;
         //    };
         //};
-        @println("rolling: % % % % %", rolling[0], rolling[1], rolling[2], rolling[3], rolling[4]);
+        //@println("rolling: % % % % %", rolling[0], rolling[1], rolling[2], rolling[3], rolling[4]);
         new
     }
     
     point.x += delta_median(dx, 0);
     point.y += delta_median(dy, 1);
-    @println("Z: prev_l = % d = %", self.prev_z_by_l&[l], dz);
+    //@println("Z: prev_l = % d = %", self.prev_z_by_l&[l], dz);
     self.prev_z_by_l&[l] += dz.intcast();
     point.z = self.prev_z_by_l&[l];
 }
@@ -460,6 +466,7 @@ GPSTime11 :: @struct {
 }
 
 fn init(a: Alloc) *GPSTime11 = {
+
     self := a.box(GPSTime11);
     init(self.d_low&, 9, 32, a);
     init(self.case&, 516, a.alloc(u16, 516 * 2));
@@ -589,12 +596,12 @@ fn get(self: *RGB12, colour: i64, byte: i64) *Symbol =
 // updates self.prev (intended to be used as a building block of a more usable api)
 fn next(self: *RGB12, s: *Stream) void = {  // 13.3
     changed := self.changed&.decode_symbol(s);
-    @println("FOO % %", changed, changed.bit_and(1.shift_left(6)) != 0);
+    //@println("FOO % %", changed, changed.bit_and(1.shift_left(6)) != 0);
     changed := bit_cast_unchecked(u8, RGB12.Changed, changed.trunc());
     
     // TODO: ive gotta be making this look worse than it is
     add_byte :: fn(word, delta, diff, shift) => {
-        @println("word = % delta = % diff = % shift = %", word[], delta, diff, shift);
+        //@println("word = % delta = % diff = % shift = %", word[], delta, diff, shift);
         mask: i64 = 0xFF.shift_left(shift * 8);
         w: i64 = word[].zext();
         prev  := clamp(w.bit_and(mask) + diff.shift_left(shift * 8), 0, 255.shift_left(shift * 8)); 
@@ -713,20 +720,19 @@ Iterator :: @struct {
     stream: Stream;
 }
 
-fn init(items: []ItemRecord, a: Alloc, chunk: []u8) Iterator = {
-    self: Iterator = (
-        has = zeroed(EnumMap(ItemRecord.Kind, bool)), 
-        point = init(a), 
-        gps = init(a), 
-        rgb = init(a), 
-        stream = zeroed Stream,
-    );
+fn init(its: []ItemRecord, a: Alloc, chunk: []u8) Iterator = {
+    self := @uninitialized Iterator;
+    self.point = init(a);
+    self.gps = init(a);
+    self.rgb = init(a);
+    // TODO: compiler bug with  self: Iterator = (has = zeroed(EnumMap(ItemRecord.Kind, bool)),  <... rest>) :here
+    self.has.data&.items().set_zeroed();
     
     i := 0;
-    for items { it |
-        @println("% %", it.type, self.has&[it.type]);
-        // TODO: compiler bug?? why does RGB12 start set?? 
-        //@assert(!self.has&[it.type], "invalid laz file. item % is repeated", it.type);
+    for its { it |
+        //@println("% %", it.type, self.has&[it.type]);
+        // TODO: compiler bug?? why does RGB12 start set?? :here
+        @assert(!self.has&[it.type], "invalid laz file. item % is repeated", it.type);
         self.has&[it.type] = true;
         
         // first read one uncompressed item as the starting point. 
@@ -752,19 +758,19 @@ fn init(items: []ItemRecord, a: Alloc, chunk: []u8) Iterator = {
 
 fn next(self: *Iterator) PointData = {
     if self.has&[.Point10] {
-        println("A");
+        //println("A");
         self.point.next(self.stream&);
     }
     if self.has&[.GPSTime11] {
-        println("B");
+        //println("B");
         _ := self.gps.next(self.stream&);
         x: i64 = _.bitcast();
-        @println("gps %", x);
+        //@println("gps %", x);
     }
     if self.has&[.RGB12] {
-        println("C");
+        //println("C");
         _ := self.rgb.next(self.stream&);
-        @println("rgb % % %", self.rgb.prev.r, self.rgb.prev.g, self.rgb.prev.b);
+        //@println("rgb % % %", self.rgb.prev.r, self.rgb.prev.g, self.rgb.prev.b);
     };
     (
         x = self.point.prev.x, 
