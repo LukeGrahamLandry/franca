@@ -105,10 +105,14 @@ fn decode_symbol(self: *Symbol, stream: *Stream) i64 = {  // 10.2.4.1
     symbol := -1;
     symbols := self.symbol_counts.len;
     // TODO: make a table of these
-    range(0, symbols) { s |  // :SLOW
-        if self.distribution[s].zext() * ltmp <= stream.value { 
-            symbol = s;
-        }
+    if true {
+        break :: local_return;
+        range_rev(0, symbols) { s |  // :SLOW
+            if self.distribution[s].zext() * ltmp <= stream.value { 
+                symbol = s;
+                break();
+            }
+        };
     };
     @debug_assert_ne(symbol, -1, "not found");
 
@@ -173,7 +177,7 @@ fn decode_bit(self: *Bit, stream: *Stream) bool = {
     l         := stream.length.shift_right_logical(13);
     threshold := self.bit_0_prob.to(u32) * l;
     bit       := stream.value >= threshold;
-    //@println("decode_bitA value % length % bit % t % p % u %", stream.value, stream.length, bit, threshold, self.bit_0_prob, self.bits_until_update);
+    
     if bit {
         stream.value  -= threshold;
         stream.length -= threshold; 
@@ -188,7 +192,6 @@ fn decode_bit(self: *Bit, stream: *Stream) bool = {
         self.update_bit_distribution();
     }
     
-    //@println("decode_bitB value % length %", stream.value, stream.length);
     bit
 }
 
@@ -232,7 +235,6 @@ fn init(self: *Integers, instances: i64, n_bit: i64, a: Alloc) void = {
 
 // returns (diff, k) because you sometimes need k for making decisions about later fields 
 fn read_difference(self: *Integers, stream: *Stream, which: i64) Ty(i64, i64) = {  // 10.5.3
-    //@println("value % length %", stream.value, stream.length);
     k := self.k_coder&.decode_symbol(stream, which);  // index of highest set bit (of magnetude, not like in a two's complement way)
     c := @if_else {
         @if(k == 0)  => self.corrector0&.decode_bit(stream).int();
@@ -246,7 +248,6 @@ fn read_difference(self: *Integers, stream: *Stream, which: i64) Ty(i64, i64) = 
             c - @if(c >= 1.shift_left(k - 1), -1, 1.shift_left(k) - 1)
         };
     };
-    //@println("which = % k = % difference = %", which, k, c);
     c := c.intcast().intcast();  // sign extend
     (c, k)
 }
@@ -372,7 +373,6 @@ Las :: import("@/examples/geo/las.fr");
 fn next(self: *Point10, s: *Stream) void = {  // 13.1
     point   := self.prev&;
     changed := self.changed&.decode_symbol(s);
-    //@println("BAR %", changed);
     changed := bit_cast_unchecked(u8, Point10.Changed, changed.trunc());
     
     BitByte :: Las.Format._0.Flags;
@@ -417,7 +417,6 @@ fn next(self: *Point10, s: *Stream) void = {  // 13.1
     dy, kY := self.y&.read_difference(s, clamp_bit(kX, 20));
     kXY := (kX + kY) / 2;
     dz, _ := self.z&.read_difference(s, clamp_bit(kXY, 18));
-    //@println("kX = % kY = % kXY = %", kX, kY, kXY);
     
     delta_median :: fn(delta, ci) => {
         rolling     := self.streaming_median&.index(ci).index(m);
@@ -444,7 +443,6 @@ fn next(self: *Point10, s: *Stream) void = {  // 13.1
     
     point.x += delta_median(dx, 0);
     point.y += delta_median(dy, 1);
-    //@println("Z: prev_l = % d = %", self.prev_z_by_l&[l], dz);
     self.prev_z_by_l&[l] += dz.intcast();
     point.z = self.prev_z_by_l&[l];
 }
@@ -596,12 +594,10 @@ fn get(self: *RGB12, colour: i64, byte: i64) *Symbol =
 // updates self.prev (intended to be used as a building block of a more usable api)
 fn next(self: *RGB12, s: *Stream) void = {  // 13.3
     changed := self.changed&.decode_symbol(s);
-    //@println("FOO % %", changed, changed.bit_and(1.shift_left(6)) != 0);
     changed := bit_cast_unchecked(u8, RGB12.Changed, changed.trunc());
     
     // TODO: ive gotta be making this look worse than it is
     add_byte :: fn(word, delta, diff, shift) => {
-        //@println("word = % delta = % diff = % shift = %", word[], delta, diff, shift);
         mask: i64 = 0xFF.shift_left(shift * 8);
         w: i64 = word[].zext();
         prev  := clamp(w.bit_and(mask) + diff.shift_left(shift * 8), 0, 255.shift_left(shift * 8)); 
@@ -758,19 +754,13 @@ fn init(its: []ItemRecord, a: Alloc, chunk: []u8) Iterator = {
 
 fn next(self: *Iterator) PointData = {
     if self.has&[.Point10] {
-        //println("A");
         self.point.next(self.stream&);
     }
     if self.has&[.GPSTime11] {
-        //println("B");
         _ := self.gps.next(self.stream&);
-        x: i64 = _.bitcast();
-        //@println("gps %", x);
     }
     if self.has&[.RGB12] {
-        //println("C");
         _ := self.rgb.next(self.stream&);
-        //@println("rgb % % %", self.rgb.prev.r, self.rgb.prev.g, self.rgb.prev.b);
     };
     (
         x = self.point.prev.x, 

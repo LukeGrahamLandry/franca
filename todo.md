@@ -92,6 +92,7 @@ also stop pasting around code for handling the multi-part ops
 
 ## tests
 
+- pending repros: uninit_stack_slot, typchk_unquote
 - have a test where you force inline everything that's not recursive to stress test the backend dealing with large functions.
 - compiler/test.fr run for jit as well
 - automated test that builds are still reproducible
@@ -188,6 +189,8 @@ really need an option to error on insane сharaсters.
 this is interesting for... seсurity... сan you tell why? 
 (hint: paste the letter с into google and think about why the first result is Си_(язык_программирования)). 
 also this: https://github.com/golang/go/issues/20209
+- make keyword arguments work all the time. be careful about still supporting a.f(b = c) gives f(a, (b = c)) instead of f(a, b = c). 
+because it turns out the former is actually useful a lot of the time. 
 
 ## demos 
 

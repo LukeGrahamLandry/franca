@@ -10,8 +10,6 @@
     
     // you can use @(_) to put more complex expressions that resolve to a macro. 
     assert_eq(5, @(second_expr)(2) 5);  // this one is redundant
-    // TODO: this shouldn't need to be explicit #generic since its used in a const context. even :: doesnt help which is annoying.  
-    //       im guessing its a problem with fn type_of because it worked briefly before i had to change that to fix @as       -- Apr 21
     fn get_second_expr() OverloadSet = second_expr; 
     assert_eq(5, @(get_second_expr())(2) 5);  // this one does a comptime call to decide which macro to call. 
     
@@ -29,8 +27,7 @@
     fn is_declared(target: FatExpr) FatExpr = {
         loc := target.loc;
         if(target.expr&.is(.GetVar), => {
-            // TODO: @{ true } should work here. 
-            target = @literal true;
+            target = @{ true };
         }, => 
             if(target.expr&.is(.GetNamed) || target.expr&.is(.UndeclaredVar), => {
                 target = @literal false;
@@ -191,7 +188,7 @@
     
     fn is_a(b: Up3) bool = @switch(b) {
         @case(.a) => true;
-        @default  => false; // todo this should work as not a closure
+        @default  => false;
     };
     
     assert_eq(true, is_a(Up3.a));
@@ -201,10 +198,10 @@
     // You can use infered values when you don't care. 
     // Type is i64 and values start at 0. 
     Up3Again :: @enum(a, b, c);
-    aa := Up3Again.a;  // TODO: if this var is named 'a', it things is_a is capturing it?? cause of the .a i guess -- May 4
-    assert_eq(@as(i64) aa, 0);
-    aa = .b;
-    assert_eq(@as(i64) aa, 1);
+    a := Up3Again.a;
+    assert_eq(@as(i64) a, 0);
+    a = .b;
+    assert_eq(@as(i64) a, 1);
     
     hello: MyBool = .True;
     assert_eq(hello.to_bool(), true);
@@ -232,7 +229,6 @@
     assert_eq(u, 25);
 }
 
-/* TODO: this was never running 
 fn range_switch() #test = {
     use_range :: fn(b: i64) i64 = {
         @switch(b) {
@@ -245,18 +241,20 @@ fn range_switch() #test = {
     
     assert_eq(1, use_range(123));
     assert_eq(2, use_range(200));
-    assert_eq(2, use_range(150));
+    assert_eq(2, use_range(250));
     assert_eq(3, use_range(300));
     assert_eq(3, use_range(325));
     assert_eq(4, use_range(400));
     assert_eq(4, use_range(50));
+    assert_eq(4, use_range(150));
 }
-*/
 
-// tttt :: @{ 0 };
-// TODO: this is broken with quick_eval egarly calling functions becuase it doesn't know that it has access to the result -- Apr 21
+// this was broken with quick_eval egarly calling functions becuase it doesn't know that it has access to the result -- Apr 21, 2024
 // Note: the const_eval means you can access the compiler context, which is required for the placeholder expansion, dispite assigning to a let. 
-// aatttt := :: '<tttt>';  
+fn const_eval_init_rt() #test = {
+    tttt :: @{ 0 };
+    aatttt := :: @{ @[tttt] };
+}
 
 #test fn macro_hygiene() = {
     #macro
@@ -416,7 +414,6 @@ fn range_switch() #test = {
     assert_eq(e.unpack(), 999);
 }
 
-/*
 #test fn compiler_doesnt_like_new_match() = {
     fn as_ref2(self: *?FatExpr) ?*FatExpr = {
         ::if(?*FatExpr); // TODO: it tries to resolve the overload before it evals the closure's return type -- Apr 25
@@ -425,16 +422,22 @@ fn range_switch() #test = {
         },  fn() ?*FatExpr => .None)
     }
     
+    // TODO: try calling this to make sure it gets compiled. it might work now but i cant tell
     log : rawptr : fn(self: *Binding, out: *List(u8), depth: i64) void = {
         // TODO: this only works if you bring the condition out into another variable
         //       broke when switching nested ifs to switch -- Jul 28
-        if self.default&.as_ref2() {e: *FatExpr|
+        if self.default&.as_ref2() { e |
             out.push_all(" = ");
         };
     };
     log;   
+    
+    @run {
+        foo: ?FatExpr = (Some = @{ bar });
+        bar := foo&.as_ref2();
+        assert(bar.is_some(), "!");
+    };
 }
-*/
  
 #test fn if_chains() = {
     a := @if_else {
@@ -472,8 +475,7 @@ fn range_switch() #test = {
 fn meta_offset_of() #test = {
     Foo :: @struct(a: Str, b: u32, c: bool, d: Str);
     F :: Fields(Foo);
-    // TODO: these should work as a ContextualField
-    @assert_eq(offset_of(Foo, F.a), 0);
+    @assert_eq(offset_of(Foo, .a), 0);
     @assert_eq(offset_of(Foo, F.b), 16);
     @assert_eq(offset_of(Foo, F.c), 20);
     @assert_eq(offset_of(Foo, F.d), 24); 
@@ -490,6 +492,7 @@ fn lighter_macro_syntax() #test = {
         exit(1);
     };
     
+    // TODO
     //@if false {
     //    this_wont_compile
     //};
@@ -525,7 +528,7 @@ fn weird_switch_values() void #test = {
     assert_eq(foo(.d), 8);
 }
 
-/*
+/* :FUCKED
 // TODO: only the first element of the @slice in unquote_placeholders is getting typechecked that it wants FatExpr not *FatExpr? 
 fn typchk_unquote() #test = @assert_compile_error :: {
     x := @{ @foo(123) };
