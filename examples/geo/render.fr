@@ -1,8 +1,9 @@
 TURN_SPEED :: 0.005;
-MOVE_SPEED :: 0.015;
-MAX_VERTICES :: 1_000_000;
+MOVE_SPEED :: 0.035;
+MAX_VERTICES :: 20_000_000;
 VERTICES_PER_POINT :: 6;
 max_points :: MAX_VERTICES / VERTICES_PER_POINT;
+chunks_per_frame :: 2;
 
 // first i tried making a dumb .obj file but meshlab ran out of memory trying to render it for my 185MB point cloud. 
 
@@ -27,7 +28,6 @@ fn draw_point_cloud(state: *State, $next_point: @Fn() ?PointData) void = {
         vec3(f(r.x), f(r.y), f(r.z))
     }
     
-    
     lo := state.lo;
     hi := state.hi;
     percent :: fn(v, l, h) => (v - l) / (h - l);
@@ -39,30 +39,23 @@ fn draw_point_cloud(state: *State, $next_point: @Fn() ?PointData) void = {
         i: i64 = r.intensity.zext();
         max_intensity :: 65000;
         hue := clamp(i.float() / max_intensity.float() * 5.0, 0.0, 1.0) * 360.0;
-        //c := @if(i < colours.len(), colours[i], 0xFFFFFFFF);
         v := to_vec(r);
-        //hue := percent(v&[2], lo&[2], hi&[2]).cast() * 360.0;   // only makes sense if you pre-pass to calculate
         c := hsv2rgb(hue, 1.0, 1.0, 1.0);
         sgl.v3f_c1i(v, c);
         
-        //average += v * ((@as(f32)1.0) / (point_count/max_points).float().cast());
-        
-        //@println("(%, %, %)", v&[0], v&[1], v&[2]);
         // there are min/max fields in the header but it seems they tend to lie
         hi = max(hi, v);
         lo = min(lo, v);
     }
     state.lo = lo;
     state.hi = hi;
-    //@println("(%, %, %) (%, %, %)", hi&[0], hi&[1], hi&[2], lo&[0], lo&[1], lo&[2]);
     
     // mark the center for debugging rotation
-    //sgl.point_size = 10.0;
-    //center := (state.lo + (state.hi - state.lo) * 0.5);
-    //sgl.v3f_c1i(center, 0xFFFFFFFF);
-    //sgl.v3f_c1i(average, 0xFF00FFFF);
-    
-    //sgl.v3f_c1i(vec3(0, 0, 0), 0xFFF00FFF);
+    if false {
+        sgl.point_size = 10.0;
+        center := (state.lo + (state.hi - state.lo) * 0.5);
+        sgl.v3f_c1i(center, 0xFFFFFFFF);
+    }
     
     if sgl.error.vertices_full {
         @println("too many vertices");
@@ -88,8 +81,6 @@ fn hsv2rgb(H: f64, S: f64, V: f64, a: f64) u32 = {
 
 fn sqrtf(a: f32) f32 #libc;
 fn sin_cos(rad: f32) Ty(f32, f32) = {
-    //s := rad.sinf();
-    //(s, sqrtf(1.0 - s*s))
     (rad.sinf(), rad.cosf())
 }
 
@@ -100,48 +91,22 @@ do_render :: fn(userdata: rawptr) void = {
     set_dynamic_context(state.env);
     mark := mark_temporary_storage();
     sgl := state.draw.default_context&;
-    if state.vertex_dirty {
+    if state.chunk_i == 0 {
+        state.lo = vec3(99999999.0, 99999999.0, 99999999.0);
+        state.hi = state.lo * @as(f32) -1.0;
+    
         sgl.rewind();
         sgl.defaults();
         sgl.viewport(0.intcast(), 0.intcast(), sapp_width(), sapp_height(), true);
         sgl.load_pipeline(state.pipe);
         
-        a := timestamp();
         sgl.begin(.POINTS);
         sgl.load_identity();
         sgl.point_size = 0.5;
         
-        if state.file.vlr { vlr |
-            chunks := state.chunks&;
+        if state.file.vlr.is_none() {
+            state.chunk_i = 1;
             
-            state.lo = vec3(99999999.0, 99999999.0, 99999999.0);
-            state.hi = state.lo * @as(f32) -1.0;
-            step_points := max(1, chunks.points_per_chunk * chunks.chunks.len / max_points);
-            @println("%", step_points);
-            
-            for chunks.chunks.slice(0, chunks.chunks.len - 1) { chunk | 
-                continue :: local_return;
-                state.chunk_i += 1;
-                if state.chunk_i.mod(5) != 0 {
-                    continue();
-                }
-                mark := mark_temporary_storage();
-                iter: Laz.Iterator = init(state.file.laz_items, temp(), chunk);
-                // TODO: don't lose the first point!
-                n := 0;
-                draw_point_cloud(state) { // chunks.points_per_chunk - 1) {
-                    range(n, min(step_points + n, chunks.points_per_chunk-1)) { _ |
-                        n += 1;
-                        iter&.next();
-                    };
-                    n += 1;
-                    @if(n >= chunks.points_per_chunk, .None, (Some = iter&.next()))
-                };
-                @debug_assert_eq(iter.stream.i, iter.stream.input.len, "decompression did not consume all bytes");
-                println(state.chunk_i);
-                reset_temporary_storage(mark);
-            };
-        } else {
             i := 0;
             step_bytes: i64 = state.file&.header()[].point_record_length.zext();
             point_count: i64 = state.file.data.len / step_bytes;
@@ -156,38 +121,78 @@ do_render :: fn(userdata: rawptr) void = {
                     (Some = (x = r.x, y = r.y, z = r.z, intensity = r.intensity))
                 })
             }
+            
+            sgl.end();
+            sgl.update_vertex_buffer();
+            state.vertex_dirty = false;
+        }
+    }
+    
+    chunks := state.chunks&;
+    @if(state.chunk_i < chunks.chunks.len - 1)
+    if state.file.vlr { vlr |
+        state.vertex_dirty = false;
+        if state.chunk_i != 0 {
+            sgl.in_begin = true;
+            sgl.commands.len -= 1;
         };
         
-        sgl.end();
-        b := timestamp();
-        @println("%ms", b - a);
+        step_points := max(1, chunks.points_per_chunk * chunks.chunks.len / max_points);
         
+        reps := min(chunks_per_frame, chunks.chunks.len - state.chunk_i - 1);
+        range(0, reps) { _ |
+            chunk := chunks.chunks[state.chunk_i];
+            state.chunk_i += 1;
+            iter: Laz.Iterator = init(state.file.laz_items, temp(), chunk);
+            // TODO: don't lose the first point!
+            n := 0;
+            draw_point_cloud(state) {
+                range(n, min(step_points + n, chunks.points_per_chunk-1)) { _ |
+                    n += 1;
+                    iter&.next();
+                };
+                n += 1;
+                @if(n >= chunks.points_per_chunk, .None, (Some = iter&.next()))
+            };
+            @debug_assert_eq(iter.stream.i, iter.stream.input.len, "decompression did not consume all bytes");
+        }
+        sgl.end();
         sgl.update_vertex_buffer();
-        state.vertex_dirty = false;
-    };    
-    
+    } 
+
     mvp := sgl.uniforms[0].mvp&;
     h := state.file&.header();
     center := (state.lo + (state.hi - state.lo) * 0.5);
     
     state.model_yaw += state.d_model_yaw;
+    state.model_pitch += state.d_model_pitch;
     model := @uninitialized Sgl.Matrix;
     identity(model&);
-    foo: f32 = frame_index[].float().cast() * 1.1;
-    translate(model&, vec3(0, @if(state.file.vlr.is_some(), 2.5, -2.5), 0));
-    SCALE: f32 = 1.0 / @if(state.file.vlr.is_some(), 10000.0, 1000000000.0); // HACK
-    //SCALE: f32 = 1.0 / 10000.0;
-    //SCALE: f32 = 1.0 / 100000000.0;
-    //SCALE: f32 = 1.0 / 100000.0;
-    scale(model&, SCALE, SCALE, SCALE);
-    translate(model&, center);
+
+    // you'd think this would work but somehow no? different than the ones i calculate. 
+    //h  := state.file&.header();
+    //hi := vec3(h.x_max.cast(), h.y_max.cast(), h.z_max.cast());
+    //lo := vec3(h.x_min.cast(), h.y_min.cast(), h.z_min.cast());
     
-    //SCALE: f32 =  1.0 + frame_index[].float().cast() * 0.01;
-    //scale(model&, SCALE, SCALE, SCALE);
+    hi := state.hi;
+    lo := state.lo;
+    ss := hi - lo;
+    ss := max(max(ss&[0], ss&[1]), ss&[2]);
+    ss: f32 = 19.0 / ss / 4.0;
+    scale(model&, ss, ss, ss);
     
-    rotate(model&, deg_to_rad(state.model_yaw), 0.0, 1.0, 0.0);
+    // there's something i don't quite understand about the ordering here but this seems to work
+    
+    // also, want to put it at the origin so you don't need to wander around to find it. 
     translate(model&, -center);
-    frame_index[] += 1;
+    translate(model&, vec3(5.0 / ss, 0.0, 0.0));
+    
+    // want to rotate around the center point of the model,
+    // so translate to (0,0,0), apply the rotation and then translate back. 
+    translate(model&, center);
+    rotate(model&, deg_to_rad(state.model_yaw), 0.0, 1.0, 0.0);
+    rotate(model&, deg_to_rad(state.model_pitch), 1.0, 0.0, 0.0);
+    translate(model&, -center);
     
     identity(mvp);
     update_camera(state, mvp);
@@ -262,6 +267,8 @@ do_event :: fn(event: *SappEvent, userdata: rawptr) void = {
         fn SPACE()      => (state.dy&, 1);
         fn LEFT()       => (state.d_model_yaw&, -1);
         fn RIGHT()      => (state.d_model_yaw&, 1);
+        fn UP()         => (state.d_model_pitch&, -1);
+        fn DOWN()       => (state.d_model_pitch&, 1);
         fn ESCAPE()     => exit(0);
         @default        => return();         // !!
     };

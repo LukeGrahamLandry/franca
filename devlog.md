@@ -1,3 +1,18 @@
+## (Apr 2)
+
+- binary search instead of linear scan, makes decode_symbol go from 74% time (15k samples) to 58% (6k samples). 
+(the original thing where i always scanned the whole list was extra dumb 
+but going backwards and stopping at the first match was still 14k samples, so binary much better). 
+- fix delta_median to just do swaps after inserting instead of quicksorting the whole thing.
+2270 samples of inner_sort (22% of all) gone at the cost of next() self samples 340 -> 490, so great success. 
+- also i saw `inner_sort__13494` and `inner_sort__13476` which should just be calling the 
+same specialization... am i really making a new copy for every callsite?? 
+I really hope so because that would be great compile speed improvement to fix. 
+ohh, not quite, it's because i do `sort :: import("@/lib/sort.fr")'quicksort(i32, fn(a, b) => a[] < b[]);`
+inside the closure that gets inlined twice so it doesn't know that the comparison function is the same. 
+it re-handle_compile_func_body for each and they get a new FuncId. 
+so that would be fixed if emit_capturing_call treated AllowRtCapture and #inline the same 
+so didn't repeat work that way. not as exciting tho. 
 
 ## Mar 31 / Apr 1
 

@@ -39,7 +39,6 @@ fn init(input: []u8) Stream = {  // 9.3.1
     (input = input, value = input.peek_type(u32)[].byte_swap(), i = 4, length = MAX_u32)
 }
 
-
 fn maybe_renorm_dec_interval(self: *Stream) void #inline = {  // 9.4.1
     while => self.length < 1.shift_left(24) {
         self.value = self.value.shift_left(8);
@@ -99,38 +98,46 @@ fn update_distribution(self: *Symbol) void = {  // 10.2.3
     self.symbols_until_update = self.update_cycle;
 }
 
-// TODO: speed this up! it takes 74% of the time
+fn eval(self: *Symbol, s: i64, ltmp: u32) u32 #inline = 
+    self.distribution[s].zext() * ltmp;
+
+fn predict_next_symbol(self: *Symbol, value: u32, ltmp: u32) i64 #inline = {
+    count := self.symbol_counts.len;
+    s     := count / 2;
+    span  := count;
+    loop {
+        span /= 2;
+        s    -= int(s >= count);  // prevent the last one from going out of bounds
+        if self.eval(s, ltmp) <= value {
+            done  := s == count - 1 /* ditto^ */ || self.eval(s+1, ltmp) > value;
+            !done || return(s);
+            s += span;
+        } else {
+            s -= span;
+        }
+    }
+}
+
+// TODO: speed this up! it takes 74% of the time. binary search -> 58%
 fn decode_symbol(self: *Symbol, stream: *Stream) i64 = {  // 10.2.4.1
     ltmp   := stream.length.shift_right_logical(15);
-    symbol := -1;
-    symbols := self.symbol_counts.len;
-    // TODO: make a table of these
-    if true {
-        break :: local_return;
-        range_rev(0, symbols) { s |  // :SLOW
-            if self.distribution[s].zext() * ltmp <= stream.value { 
-                symbol = s;
-                break();
-            }
-        };
-    };
-    @debug_assert_ne(symbol, -1, "not found");
+    s      := self.predict_next_symbol(stream.value, ltmp);
 
-    diff       := self.distribution[symbol].zext() * ltmp;
+    diff         := self.eval(s, ltmp);
     stream.value -= diff;
-    is_last    := symbol == symbols - 1;
-    high       := @if(is_last, stream.length, self.distribution[symbol+1].zext() * ltmp);
+    is_last      := s == self.symbol_counts.len - 1;
+    high         := @if(is_last, stream.length, self.eval(s+1, ltmp));
     stream.length = high - diff;
 
     stream.maybe_renorm_dec_interval();
     self.total_count += 1;
-    self.symbol_counts[symbol] += 1;
+    self.symbol_counts[s] += 1;
     self.symbols_until_update -= 1;
     if self.symbols_until_update == 0 {
         self.update_distribution();
     }
     
-    symbol
+    s
 }
 
 Symbols :: @struct(cases: []Symbol);
@@ -423,21 +430,29 @@ fn next(self: *Point10, s: *Stream) void = {  // 13.1
         median      := rolling[2];
         new         := median + delta.intcast();
         hi          := self.streaming_median_parity&.index(ci);
-        i, dir, end := @if(hi[], (4, -1, 0), (0, 1, 4));
-        hi[] = if(new == median, => !hi[], => new < median);
-        rolling[i] = new;
         
-        sort :: import("@/lib/sort.fr")'quicksort(i32, fn(a, b) => a[] < b[]);
-        sort(rolling.items()); // :SLOW
-        // TODO: can be faster than that since we know we're only inserting one 
-        //inline_range(0, 4) { _ |
-        //    xxx := rolling[i] * dir.intcast();
-        //    if xxx > rolling[i + dir] {
-        //        rolling.items().swap(i, i + dir);
-        //        i += dir;
-        //    };
-        //};
-        //@println("rolling: % % % % %", rolling[0], rolling[1], rolling[2], rolling[3], rolling[4]);
+        if hi[] {
+            break :: local_return;
+            rolling[4] = new;
+            range_rev(1, 5) { i |
+                if rolling[i] < rolling[i - 1] {
+                    rolling.items().swap(i, i - 1);
+                } else {
+                    break();
+                }
+            };
+        } else {
+            break :: local_return;
+            rolling[0] = new;
+            range(0, 4) { i |
+                if rolling[i] > rolling[i + 1] {
+                    rolling.items().swap(i, i + 1);
+                } else {
+                    break();
+                }
+            };
+        };
+        hi[] = if(new == median, => !hi[], => new < median);
         new
     }
     
@@ -726,7 +741,6 @@ fn init(its: []ItemRecord, a: Alloc, chunk: []u8) Iterator = {
     
     i := 0;
     for its { it |
-        //@println("% %", it.type, self.has&[it.type]);
         // TODO: compiler bug?? why does RGB12 start set?? :here
         @assert(!self.has&[it.type], "invalid laz file. item % is repeated", it.type);
         self.has&[it.type] = true;
