@@ -260,6 +260,42 @@ fn init_driver_vtable() *ImportVTable = {
         
         zeroed rawptr
     };
+   
+    vtable.replace_body_source = fn(c: Compiler, fid: FuncId, new_source: Str) CRes(void) = {
+        self := c.cast()[][];
+        func := self.get_function(fid);
+        @err_assert(func.get_flag(.NoInline), "replace_body_source on inlinable function will be very confusing") return;
+        has_shim := func.get_flag(.AlreadyHasShim);
+        asm_done := func.get_flag(.RealAsmDone);
+        
+        span := self.codemap.add_file("replace_body_source", new_source);
+        parsed := self.parser.push_parse(new_source, span);
+        new_body: FuncImpl = (Normal = (expr = (GetParsed = parsed), ty = UnknownType, done = false, loc = span));
+        
+        func.body = new_body;
+        // TODO: should be able to inline this
+        flags := @slice(FnFlag.ResolvedBody, .EnsuredCompiled, .AsmDone, .AlreadyHasShim, .RealAsmDone);
+        for flags { it |
+            func.unset_flag(it);
+        };
+        
+        if !asm_done {
+            return(.Ok);
+        };
+        
+        if !has_shim {
+            self.create_jit_shim(fid); 
+        };
+        
+        m  := self.comptime_codegen.m;
+        id := self.comptime_jit_symbol_id(fid);
+        use_symbol(m, id) { s |
+            s.jit_addr = 0.rawptr_from_int();
+            s.kind = .Pending;
+        };
+        
+        .Ok
+    };
     
     the_vtable
 }
