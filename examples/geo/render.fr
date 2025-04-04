@@ -1,9 +1,10 @@
 TURN_SPEED :: 0.005;
-MOVE_SPEED :: 0.035;
+MOVE_SPEED :: 0.045;
 MAX_VERTICES :: 20_000_000;
 VERTICES_PER_POINT :: 6;
 max_points :: MAX_VERTICES / VERTICES_PER_POINT;
 chunks_per_frame :: 2;
+USE_COLOUR :: false;
 
 // first i tried making a dumb .obj file but meshlab ran out of memory trying to render it for my 185MB point cloud. 
 
@@ -37,10 +38,16 @@ fn draw_point_cloud(state: *State, $next_point: @Fn() ?PointData) void = {
     
     while => next_point() { r |
         i: i64 = r.intensity.zext();
-        max_intensity :: 65000;
-        hue := clamp(i.float() / max_intensity.float() * 5.0, 0.0, 1.0) * 360.0;
+        
+        c := @if(USE_COLOUR, {
+            c :: fn(x) => (@as(i64) x.zext()).float() / 1.shift_left(16).float();
+            pack_rgba(c(r.rgb.r), c(r.rgb.g), c(r.rgb.b), 1.0)
+        }, {
+            max_intensity :: 65000;
+            hue := clamp(i.float() / max_intensity.float() * 5.0, 0.0, 1.0) * 360.0;
+            hsv2rgb(hue, 1.0, 1.0, 1.0)
+        });
         v := to_vec(r);
-        c := hsv2rgb(hue, 1.0, 1.0, 1.0);
         sgl.v3f_c1i(v, c);
         
         // there are min/max fields in the header but it seems they tend to lie
@@ -118,7 +125,7 @@ do_render :: fn(userdata: rawptr) void = {
                     
                     r := ptr_cast_unchecked(u8, Las.Format._1, state.file.data.ptr.offset(i * step_bytes));
                     i += 1;
-                    (Some = (x = r.x, y = r.y, z = r.z, intensity = r.intensity))
+                    (Some = (x = r.x, y = r.y, z = r.z, intensity = r.intensity, rgb = zeroed Las.Format.Colour))
                 })
             }
             
@@ -220,13 +227,15 @@ fn update_camera(state: *State, mvp: *Sgl.Matrix) void = {
     normalize(forward&);
     normalize(right&);
 
-    // TODO: adjust speeds for frame rate
+    now := timestamp_s();
+    dt := (now - state.prev_frame_time).cast() * 30.0;
+    state.prev_frame_time = now;
     
-    state.camera_pos     += forward * state.dx * MOVE_SPEED.cast();
-    state.camera_pos     += right * state.dz * MOVE_SPEED.cast();
-    state.camera_pos&[1] += state.dy * MOVE_SPEED;
-    state.pitch += state.d_pitch * TURN_SPEED;
-    state.yaw += state.d_yaw * TURN_SPEED;
+    state.camera_pos     += forward * state.dx * MOVE_SPEED.cast() * dt;
+    state.camera_pos     += right * state.dz * MOVE_SPEED.cast() * dt;
+    state.camera_pos&[1] += state.dy * MOVE_SPEED * dt;
+    state.pitch += state.d_pitch * TURN_SPEED * dt;
+    state.yaw += state.d_yaw * TURN_SPEED * dt;
     
     limit: f32 = 3.1415 / 2.0;
     state.pitch = clamp(state.pitch, -limit, limit);  // don't let you flip your neck backwards because that feels bad
@@ -327,5 +336,6 @@ do_init :: fn(userdata: rawptr) void = {
     state.pass_action.colors&[0].load_action = .CLEAR;
     state.pass_action.colors&[0].clear_value = (r = 0.3, g = 0.3, b = 0.3, a = 1.0);
     
-    sapp_lock_mouse(true)
+    sapp_lock_mouse(true);
+    state.prev_frame_time = timestamp_s();
 };

@@ -6,6 +6,15 @@
 - wasm:     get all the ssa tests working. some have c drivers so either need to output linkable wasm or use import_c
 - linux:    finish transcribing structs so FRANCA_BACKTRACE=true works. make all the tests pass with -syscalls
 
+## 
+
+- add a print for Dat2
+- `fn emit_llvm(m: *QbeModule, dat: *Qbe.Dat) void = {` update to new Dat2
+- :TodoChangeMessageEmitDataEndToUseBakedValueInsteadOfBackendDat
+- adding #align was a compile speed regression
+- formalize ENABLE_INCREMENTAL in backend/arm64/emit (+ support on amd64)
+- finish amd64/isel/NEW_ADDR_FOLDING
+
 ## language consistancy
 
 - #c_variadic + conflicting overload (ie for open()) where you want the non-va version to also be #syscall. maybe that's not worth fixing. 
@@ -40,6 +49,7 @@ b = .a;
 - `@Fn(a, b) ...` means a different thing than `fn(a, b) ...` (the former sees types, the latter sees parameter names). 
 - there are no clear rules about how const coercion works
 - the body of a `=>` function gets re-sema-ed every time you call it (which makes inline_for hurt compile times more than it should)
+- having the crt linux stuff in franca_runtime_init means you can't use the backend without the franca frontend and target linux exe
 
 ## library robustness
 
@@ -89,6 +99,7 @@ also stop pasting around code for handling the multi-part ops
   - BlockAlloc powers of 2
   - x64/arm/wasm/macho/elf but there's no winning there
   - boot but i really don't want to write the compiler again... so idk what to do about that
+- extend hacky_incremental into something that can be used seriously 
 
 ## tests
 

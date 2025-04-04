@@ -479,7 +479,6 @@ GPSTime11 :: @struct {
 }
 
 fn init(a: Alloc) *GPSTime11 = {
-
     self := a.box(GPSTime11);
     init(self.d_low&, 9, 32, a);
     init(self.case&, 516, a.alloc(u16, 516 * 2));
@@ -612,11 +611,12 @@ fn next(self: *RGB12, s: *Stream) void = {  // 13.3
     changed := bit_cast_unchecked(u8, RGB12.Changed, changed.trunc());
     
     // TODO: ive gotta be making this look worse than it is
-    add_byte :: fn(word, delta, diff, shift) => {
+    add_byte :: fn(word: *u16, delta, diff, shift) => {
         mask: i64 = 0xFF.shift_left(shift * 8);
         w: i64 = word[].zext();
-        prev  := clamp(w.bit_and(mask) + diff.shift_left(shift * 8), 0, 255.shift_left(shift * 8)); 
-        byte  := bit_and(prev + delta.shift_left(shift * 8), mask);
+        byte := w.shift_right_logical(shift * 8).bit_and(0xFF) + diff + 256;
+        byte := clamp(byte, 0, 0xFF).add(delta).bit_and(0xFF);
+        byte  = byte.shift_left(shift * 8);
         word[] = bit_or(w.bit_and(bit_not(mask)), byte).trunc();
     }
     
@@ -645,6 +645,8 @@ fn next(self: *RGB12, s: *Stream) void = {  // 13.3
     
     // TODO: they talk a lot about calculating the difference from prev but we already have the delta right? 
     
+    prev_g := self.prev.g;
+    
     g_lo := 0;
     if changed.get(.green_low) == 1 { 
         g_lo = self.get(1, 0).decode_symbol(s);
@@ -656,6 +658,10 @@ fn next(self: *RGB12, s: *Stream) void = {  // 13.3
         g_hi = self.get(1, 1).decode_symbol(s);
         add_byte(self.prev.g&, g_hi, r_hi, 1);
     }
+    
+    //delta_g :i64= prev_g.zext() - self.prev.g.zext();
+    //g_lo := delta_g.bit_and(0xFF);
+    //g_hi := delta_g.shift_right_logical(8).bit_and(0xFF);
     
     // :LazSpecLies
     // TODO: do i care enough to tell them they have a typo in thier spec? 
@@ -732,16 +738,16 @@ Iterator :: @struct {
 }
 
 fn init(its: []ItemRecord, a: Alloc, chunk: []u8) Iterator = {
-    self := @uninitialized Iterator;
-    self.point = init(a);
-    self.gps = init(a);
-    self.rgb = init(a);
-    // TODO: compiler bug with  self: Iterator = (has = zeroed(EnumMap(ItemRecord.Kind, bool)),  <... rest>) :here
-    self.has.data&.items().set_zeroed();
+    self: Iterator = (
+        has = zeroed EnumMap(ItemRecord.Kind, bool),
+        point = init(a),
+        gps = init(a),
+        rgb = init(a),
+        stream = zeroed Stream,
+    );
     
     i := 0;
     for its { it |
-        // TODO: compiler bug?? why does RGB12 start set?? :here
         @assert(!self.has&[it.type], "invalid laz file. item % is repeated", it.type);
         self.has&[it.type] = true;
         
@@ -780,6 +786,7 @@ fn next(self: *Iterator) PointData = {
         x = self.point.prev.x, 
         y = self.point.prev.y, 
         z = self.point.prev.z, 
-        intensity = self.point.prev.intensity
+        intensity = self.point.prev.intensity,
+        rgb = self.rgb.prev,
     )
 }

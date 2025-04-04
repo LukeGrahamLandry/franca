@@ -708,14 +708,15 @@ fn compile_stmt(self: *EmitIr, stmt: *FatStmt) CRes(void) = {
                 base := @try(self.compile_expr(f.value&, .NewMemory)) return;
                 info := self.program.get_type(f.value.ty);
                 @err_assert(info.is(.Struct), "destructure must be tuple") return;
+                @debug_assert(info.Struct.layout_done, "ICE: layout not done (DeclVarPattern)");
                 fields := info.Struct.fields&;
                 @debug_assert_eq(fields.len, f.binding.bindings.len, "destructure size mismatch");
                 enumerate f.binding.bindings.items() { i, b |
                     f       := fields[i]&;
                     name    := @unwrap(b.var(), "tuple binding requires name") return;
                     element := self.offset(base, f.byte_offset);
-                    @debug_assert(b.ty&.is(.Finished), "variable not typechecked");
-                    @debug_assert_ne(f.byte_offset, FIELD_LAYOUT_NOT_DONE, "field % not ready", self.program.get_string(f.name));
+                    @debug_assert(b.ty&.is(.Finished), "ICE: variable not typechecked");
+                    @debug_assert_ne(f.byte_offset, FIELD_LAYOUT_NOT_DONE, "ICE: field % not ready (DeclVarPattern)", self.program.get_string(f.name));
                     self.declare_var_mem(name, element, b.ty.Finished);
                 };
             };
@@ -1416,6 +1417,7 @@ fn construct_aggregate(self: *EmitIr, pattern: *Pattern, requested: Type, p: Pla
     raw_container_ty := self.program.raw_type(requested);
     (Ok = @match(self.program.get_type(raw_container_ty)) {
         fn Struct(f) => {
+            @debug_assert(f.layout_done, "ICE: layout not done (construct_aggregate)");
             expected := f.fields.len;
             if f.is_union {
                 @debug_assert_eq(pattern.bindings.len, 1, "union must have exactly one active field");
@@ -1433,11 +1435,11 @@ fn construct_aggregate(self: *EmitIr, pattern: *Pattern, requested: Type, p: Pla
             base := self.get_memory(p, raw_container_ty);
             enumerate pattern.bindings& { i, b | 
                 name := @unwrap(b.ident(), "map literal entry needs name (while initilizing %)", self.program.log(requested)) return;
-                field := or find_struct_field(f, name, i - 1) {
+                field := or find_struct_field(f, name, i) {
                     return(@err("field name mismatch (ICE: should be checked by sema)"))
                 };
                 expr := b.get_default().unwrap();
-                @debug_assert_ne(field.byte_offset, FIELD_LAYOUT_NOT_DONE, "field % not ready", self.program.get_string(field.name));
+                @debug_assert_ne(field.byte_offset, FIELD_LAYOUT_NOT_DONE, "field % not ready (construct_aggregate)", self.program.get_string(field.name));
                 dest := self.offset(base, field.byte_offset);
                 _ := @try(self.compile_expr(expr, (Blit = dest))) return;
             };

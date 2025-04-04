@@ -19,8 +19,6 @@
 
 // TODO: be stricter about checking for invalid input
 // TODO: `%.6 =s mul s_0x1p-1, s_0x1.fffffe091ff3dp+127`
-// TODO: dont loop when no new line at end of file 
-// TODO: use Dat2 here and in dump and then i can get rid of Qbe.Dat
 
 Replacement :: @struct(key: i64, r: Qbe.Ref);
 
@@ -49,7 +47,7 @@ QParseCtx :: @struct(
 // you will want to generate the ir in memory instead of uselessly writing out text and parsing it back again. 
 //
 // TODO: this is more useful if you let them pass a userdata pointer but for now i want to match the qbe interface. 
-fn parse_top_level(m: *QbeModule, src: Str, yield_data: @FnPtr(*Qbe.Dat) void, yield_func: @FnPtr(*Qbe.Fn) void) Result(void, Str) = {
+fn parse_top_level(m: *QbeModule, src: Str, yield_data: @FnPtr(Dat2) void, yield_func: @FnPtr(*Qbe.Fn) void) Result(void, Str) = {
     self: QParseCtx = init(m, src); 
     self := self&;
     self.f.default_init(m);  // :NeedFunctionInitForData
@@ -103,9 +101,12 @@ fn parse_top_level(m: *QbeModule, src: Str, yield_data: @FnPtr(*Qbe.Dat) void, y
             self.f = temp().box(Qbe.Fn);  // TODO: shouldn't really need to do this? but debug_stomp_after breaks otherwise. 
             self.f.default_init(m);
             
-            @if_let(self.parse_data(export, yield_data)) fn Err(msg) => {
-                @fmt(self.error&, "% near line %", msg, self.line);
-                return(Err = self.error.items());
+            @match(self.parse_data(export)) {
+                fn Err(msg) => {
+                    @fmt(self.error&, "% near line %", msg, self.line);
+                    return(Err = self.error.items());
+                };
+                fn Ok(dat) => yield_data(dat);
             };
             continue();
         };
@@ -691,16 +692,25 @@ fn parse_number(self: *QParseCtx) i64 = {
 }
 
 // example: `data $s = { l $pointer, b "hello", b 0 }`
-fn parse_data(self: *QParseCtx, export: bool, yield: @FnPtr(*Qbe.Dat) void) Result(void, Str) = {
+fn parse_data(self: *QParseCtx, export: bool) Result(Dat2, Str) = {
+    relocations: List(Dat2.Reloc) = list(temp());
+    bytes: List(u8) = list(temp());
+    zero_count := 0;
+    all_zeroes := true;
+    move_zeroes :: fn() => if all_zeroes {
+        bytes&.push_zeroes(zero_count);
+        all_zeroes = false;
+    };
+
     if !self.eat("$") {
         return(Err = "expected '$name' after 'data'");
     };
     name := self.eat_word();
+    id := self.f.globals.intern(name);
     if !self.eat("=") {
         return(Err = "expected '=' after 'data $name'");
     };
-    dat := Qbe.Dat.zeroed();
-    lnk: Qbe.Lnk = (export = export, id = self.f.globals.intern(name));
+    align: u32 = 1;
     if self.eat("align") {
         // :NeedFunctionInitForData
         c := self.parse_ref();
@@ -711,52 +721,47 @@ fn parse_data(self: *QParseCtx, export: bool, yield: @FnPtr(*Qbe.Dat) void) Resu
         if c.type != .CBits {
             return(Err = "expect number after 'data $name = align'");
         };
-        lnk.align = c.bits.i.trunc();
+        align = c.bits.i.trunc();
     };
-    dat.type = .DStart;
-    dat.lnk = lnk&;
-    yield(dat&);
     self.skip_lines();
     if !self.eat("{") {
         return(Err = "expected '{' to begin data");
     };
     self.skip_lines();
     had_comma := true;
+    dat_type := -1;
     // TODO: this gets confused if the file doesn't end in a new line. 
     while => self.cursor < self.input.len && !self.check("}") {
-        dat.is_ref = false;
-        dat.is_str = false;
-        dat.has_quotes_and_escapes = false;
-        dat.u.str = Str.zeroed();
         // allow { b 1 2 3 } instead of { b 1, b 2, b 3 }
         if had_comma {
-            dat.type = @switch(self.input[self.cursor]) {
-                @case("b".ascii()) => .DB;
-                @case("l".ascii()) => .DL;
-                @case("z".ascii()) => .DZ;
-                @case("h".ascii()) => .DH;
-                @case("w".ascii()) => .DW;
+            dat_type = @switch(self.input[self.cursor]) {
+                @case("b".ascii()) => 1;
+                @case("l".ascii()) => 8;
+                @case("z".ascii()) => -1;
+                @case("h".ascii()) => 2;
+                @case("w".ascii()) => 4;
                 @default => return(Err = @tfmt("expected b/h/w/l/z prefix for data entry in %", name));
             };
             self.cursor += 1;
+            @println("%", dat_type);
         };
         self.skip_blanks();
         if self.input[self.cursor] == "\"".ascii() {
-            start := self.cursor;
+            if(dat_type != 1, => return(Err = @tfmt("expected 'b' prefix for string literal in %", name)));
             self.cursor += 1;
-            // TODO: bounds
+            start := self.cursor;
+            // going over the list twice is silly but i only use this for tests so i don't care. 
             while => self.input[self.cursor] != "\"".ascii() {
                 if self.input[self.cursor] == "\\".ascii() {
                     self.cursor += 1;
                 };
                 self.cursor += 1;
+                if(self.cursor >= self.input.len, => return(Err = "unterminated string literal"));
             };
+            s := self.input.slice(start, self.cursor);
             self.cursor += 1;
-            dat.u.str = self.input.slice(start, self.cursor);
-            // TODO: remove this when I'm fully done using qbe's text asm output
-            dat.u.str.ptr = { x := maybe_borrow_cstr(dat.u.str, temp()); x.ptr };
-            dat.is_str = true;
-            dat.has_quotes_and_escapes = true;
+            move_zeroes();
+            expand_string_escapes(s, bytes&);
         } else {
             // :NeedFunctionInitForData
             r := self.parse_ref();
@@ -766,28 +771,43 @@ fn parse_data(self: *QParseCtx, export: bool, yield: @FnPtr(*Qbe.Dat) void) Resu
             c := self.f.get_constant(r);
             @match(c.type) {
                 fn CBits() => {
-                    dat.u.num = c.bits.i;
+                    if dat_type == -1 {
+                        if all_zeroes {                        
+                            zero_count += c.bits.i;
+                        } else {
+                            bytes&.push_zeroes(c.bits.i);
+                        };
+                    } else {          
+                        move_zeroes();
+                        bytes&.reserve(8);
+                        dest := ptr_cast_unchecked(u8, i64, bytes&.as_ptr().offset(bytes.len));
+                        dest[] = c.bits.i;  // only support little endian so this is fine // TODO: is alignment real? 
+                        bytes.len += dat_type;
+                    }
                 }
-                fn CAddr() => {
-                    dat.is_ref = true;
-                    dat.u.ref.id = c.sym.id;
-                    dat.u.ref.off = c.bits.i;
+                fn CAddr() => {                
+                    if(dat_type != 8, => return(Err = @tfmt("expected 'l' prefix for address (of '%') in %", self.m.str(c.sym.id), name)));
+                    move_zeroes();
+                    relocations&.push(off = bytes.len.trunc(), id = c.sym.id, addend = c.bits.i);
+                    bytes&.push_zeroes(8);
                 }
                 @default => return(Err = "unreachable constant");
             };
         };
-        yield(dat&);
         had_comma = self.eat(",");
         self.skip_lines();
     };
     self.eat(",");
-    dat.type = .DEnd;
-    yield(dat&);
     if !self.eat("}") {
         return(Err = "expected '}' to end data");
-    };
-    
-    .Ok
+    };    
+    (Ok = (
+        relocations = relocations.items(),
+        template = @if(all_zeroes, (Zeroes = zero_count), (Bytes = bytes.items())),
+        id = id,
+        export = export,
+        align = align,
+    ))
 }
 
 fn parse_type(self: *QParseCtx) Result(void, Str) = {

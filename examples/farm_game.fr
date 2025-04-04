@@ -24,6 +24,7 @@ World :: @struct(
     farm_area: Rect,
     msg: List(u8),
     msg_timer: i64 = 0,
+    truck_area: Rect,
 );
 
 Player :: @struct(pos: Pos, inventory: ?Object = .None, dx: f64 = 0.0, dy: f64 = 0.0);
@@ -73,8 +74,10 @@ fn load_default_world(self: *World) void = {
     self.shops[0].price = 5;
     self.shops[0].item = (Some = (Crop = (type = .Tomato, age = .Seed)));
     self.farm_area = (pos = (x = 350.0, y = 300.0), w = 500.0, h = 500.0);
+    self.truck_area = (pos = (x = 350.0 + 500.0 + 40, y = 300.0), w = 200.0, h = 200.0);
     self.farm = list(allocator); // :fucked you aren't forced to set this before
     self.msg = list(allocator);
+    self.requests = list(allocator);
 }
 
 
@@ -174,7 +177,7 @@ do_render :: fn(userdata: rawptr) void = {
     sdtx.color = pack_rgba(0.5, 0.5, 0.2, 1.0);
     sdtx.pos.x = 0.0;
     sdtx.pos.y = 0.0;
-    sdtx.put(@tfmt("You have % rubles\0", state.world.money));
+    sdtx.put(@tfmt("You have % rubles", state.world.money));
     
     if state.world.msg_timer > 0 {
         sdtx.color = pack_rgba(1.0, 0.5, 0.2, 1.0);
@@ -225,6 +228,7 @@ do_render :: fn(userdata: rawptr) void = {
     sgl.draw_square(0.0, 0.0, 20.0, blue);
     
     sgl.draw(state.world.farm_area, light_brown);
+    sgl.draw(state.world.truck_area, brown);
     each state.world.farm { planted | 
         sgl.draw_object((Crop = planted.crop), planted.pos);
     };
@@ -284,47 +288,46 @@ do_render :: fn(userdata: rawptr) void = {
     reset_temporary_storage(mark);
 };
 
-// TODO: dependency problem so can't go in the eq overload set :(
-fn eqq(a: SappEventType, b: SappEventType) bool = (@as(i32) a).eq(@as(i32) b);
-fn eqq(a: SappKeycode, b: SappKeycode) bool = (@as(i32) a).eq(@as(i32) b);
+::enum(SappEventType);
+::enum(SappKeycode);
 
 do_event :: fn(event: *SappEvent, userdata: rawptr) void = {
     state := State.ptr_from_raw(userdata);
     set_dynamic_context(state.env);
    
-    if event.type.eqq(.KEY_DOWN) {
-        if event.key_code.eqq(.Q) {
+    if event.type == .KEY_DOWN {
+        if event.key_code == .ESCAPE {
             exit(0);
         };
         
-        if event.key_code.eqq(.W) {
+        if event.key_code == .W {
             state.world.player.dy = -1;
         };
-        if event.key_code.eqq(.A) {
+        if event.key_code == .A {
             state.world.player.dx = -1;
         };
-        if event.key_code.eqq(.S) {
+        if event.key_code == .S {
             state.world.player.dy = 1;
         };
-        if event.key_code.eqq(.D) {
+        if event.key_code == .D {
             state.world.player.dx = 1;
         };
-        if event.key_code.eqq(.SPACE) {
+        if event.key_code == .SPACE {
             state.do_interact();
         };
     };
     
-    if event.type.eqq(.KEY_UP) {
-        if event.key_code.eqq(.W) {
+    if event.type == .KEY_UP {
+        if event.key_code == .W {
             state.world.player.dy = 0;
         };
-        if event.key_code.eqq(.A) {
+        if event.key_code == .A {
             state.world.player.dx = 0;
         };
-        if event.key_code.eqq(.S) {
+        if event.key_code == .S {
             state.world.player.dy = 0;
         };
-        if event.key_code.eqq(.D) {
+        if event.key_code == .D {
             state.world.player.dx = 0;
         };
     };
@@ -332,6 +335,16 @@ do_event :: fn(event: *SappEvent, userdata: rawptr) void = {
 
 fn do_interact(state: *State) void = {
     player := state.world.player&;
+    
+    DONE :: return;
+    
+    say :: fn(a: FatExpr) FatExpr #macro = @{
+        state.world.msg&.clear();
+        @[format_into(@{ state.world.msg& }, a&.items(), a.loc)];
+        state.world.msg_timer = 100;
+        DONE();
+    }
+    
     each state.world.shelves { shelf | 
         if center_overlaps(player.pos, base_size, shelf.pos, base_size) {
             temp := player.inventory;
@@ -348,37 +361,28 @@ fn do_interact(state: *State) void = {
                     player.inventory = shop.item;
                     return();
                 } else {
-                    state.world.msg&.clear();
-                    @fmt(state.world.msg&, "You need % more rubles to afford this item\0", shop.price - state.world.money);
-                    state.world.msg_timer = 100;
-                    return();
+                    @say("You need % more rubles to afford this item", shop.price - state.world.money);
                 };
             };    
         };
     };
-    if center_overlaps(state.world.player.pos, base_size, state.world.farm_area.pos, state.world.farm_area.w) {
+    
+    ::enum(CropType);
+    on_farm := center_overlaps(state.world.player.pos, base_size, state.world.farm_area.pos, state.world.farm_area.w);
+    on_truck := center_overlaps(state.world.player.pos, base_size, state.world.truck_area.pos, state.world.truck_area.w);
+    
+    if on_farm {
         @match(player.inventory) {
             fn Some(item) => {
                 // Try to plant a seed
                 @match(item) {
                     fn Crop(crop) => {
-                        if crop.age == Growth.Seed {
-                            player.inventory = .None;
-                            state.world.farm&.push(pos = player.pos, crop = crop);
-                            return();
-                        } else {
-                            state.world.msg&.clear();
-                            @fmt(state.world.msg&, "You can only plant seeds!\0");
-                            state.world.msg_timer = 100;
-                        };
-                        
-                    }
-                    @default => {
-                        state.world.msg&.clear();
-                        @fmt(state.world.msg&, "You can only plant seeds but you are holding %.\0", item&.tag());
-                        state.world.msg_timer = 100;
+                        crop.age == Growth.Seed || @say("Your % is fully grown. you can't plant it again.", crop.type);
+                        player.inventory = .None;
+                        state.world.farm&.push(pos = player.pos, crop = crop);
                         return();
-                    };
+                    }
+                    @default => @say("You can only plant seeds but you are holding %.", item&.tag());
                 }
             }
             fn None() => {
@@ -395,9 +399,21 @@ fn do_interact(state: *State) void = {
             }
         }
     };
-    state.world.msg&.clear();
-    @fmt(state.world.msg&, "There is nothing to interact with here\0");
-    state.world.msg_timer = 100;
+    
+    @if(on_truck)
+    if player.inventory { item |
+        @if_let(item) fn Crop(crop) => {
+            crop.age == .Ready || @say("Trying to sell % seed. try growing letting it grow first!", crop.type);
+            r := state.world.requests&;
+            i := r.index_of(fn(it) => it[] == crop.type) 
+                || @say("Trying to sell % but that is not a requested item", crop.type);
+            r.ordered_remove(i);
+            return();
+        }
+        @say("You can only sell crops (you are holding %)", item&.tag());
+    }
+    
+    @say("There is nothing to interact with here");
 }
 
 ::enum(Growth);

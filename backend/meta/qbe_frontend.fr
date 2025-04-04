@@ -6,7 +6,7 @@
 //       I'm a bit worried that there might be some shapes of programs that Franca never generates but I can't articulate an example.        
 
 #include_std("backend/lib.fr");
-#include_std("backend/llvm/target.fr");
+//#include_std("backend/llvm/target.fr");  // TODO: update for Dat2
 
 fn main() void = { 
     // Have to smuggle this through qbe's parser callback that doesn't let you pass a data pointer.
@@ -99,7 +99,8 @@ fn main() void = {
         global_module[].debug.items()[d] = true;
     };
     if use_llvm[] {
-        use_llvm_backend(global_module);
+        @panic("TODO: update for Dat2");
+        // use_llvm_backend(global_module);
     };
     
     ::if(Fd);
@@ -117,8 +118,8 @@ fn main() void = {
     handle_fn :: fn(fnn: *Qbe.Fn) void = {
         run_qbe_passes(fnn);
     };
-    handle_data :: fn(d: *Qbe.Dat) void = {
-        global_module.new_emit_data(d);
+    handle_data :: fn(d: Dat2) void = {
+        global_module.emit_data(d);
     };
     src := temp().read_to_string_or_crash(inpath);
     src&.push_all("\n"); // HACK
@@ -146,6 +147,32 @@ fn main() void = {
         exit(status);
     };
     exit(0);
+}
+
+// This is not what you want if you care about cross compiling!
+fn fill_from_libc(self: *QbeModule) void = {
+    Dyn :: import("@/lib/dynamic_lib.fr");
+
+    // :SLOW insanely inefficient way of doing this. especially when someone tries to add multiple libs. 
+    // TODO: store a list of the pending ones so don't have to iterate them all. 
+    // This is not what you want if you care about cross compiling!
+    fn fill_pending_dynamic_imports(self: *QbeModule, lib: Dyn.Handle) void = {
+        for_symbols self { id, symbol |  // :SLOW  just keep list of pending symbols instead
+            if symbol.kind == .Pending {
+                self.imports&.push(id); 
+                if lib.get(symbol.name) { found |
+                    symbol.kind = .DynamicPatched;
+                    self.do_fixups(found, symbol);
+                };
+            };
+        };
+    }
+
+    for find_os_libc_dylib() { libc_path | 
+        if Dyn'open(libc_path) { libc |
+            self.fill_pending_dynamic_imports(libc);
+        };
+    };
 }
 
 HELP :: """qbe_frontend [OPTIONS] {file.ssa, -}

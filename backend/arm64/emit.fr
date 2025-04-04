@@ -11,6 +11,8 @@
 
 // TODO: need to replace all the .goal checks when we want to support ELF
 
+ENABLE_INCREMENTAL :: true;  // TODO: make this a build option or do something less slow
+
 ArmState :: @struct(
     m: *QbeModule,
     f: *Qbe.Fn,
@@ -80,12 +82,11 @@ fn fixup_arm64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
                 @fmt_write(self.debug_out, "# patch addr % refs %=%\n", fixup.patch_at, address, symbol.name);
             };
             inst: []u32 = (ptr = u32.ptr_from_raw(fixup.patch_at), len = 2);
-            if local {
+            if local && !(ENABLE_INCREMENTAL && self.goal.type == .JitOnly) {
                 i_page, i_off := encode_adrp_add(address.offset(it.increment.zext()), fixup.patch_at, @as(u5) it.r);
                 inst[0] = i_page;
                 inst[1] = i_off;
             } else {
-                // TODO: untested
                 new_got_reloc[] = load_from_got(self, symbol, it.r, inst, address).or_else(=> new_got_reloc[]);
                 it.got_load = true;
             };
@@ -349,10 +350,9 @@ fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
                 // we've already compiled it so just compute its address directly.
                 distance := self.m.distance_between(.Code, self.m.current_offset(.Code), symbol.segment, symbol.offset + inc);
                 if self.f.globals.debug["T".char()] {
-                    write(self.m.debug_out, @tfmt("# direct offset % for '%' %[%]\n", distance, self.m.str(c.sym.id), symbol.segment, symbol.offset));
+                    @fmt(self.m.debug_out, "# direct offset % for '%' %[%]\n", distance, symbol.name, symbol.segment, symbol.offset);
                 };
-                xxx := symbol.segment != .Code;
-                @debug_assert(xxx || distance < 0, "we must be jumping backwards");
+                @debug_assert(symbol.segment != .Code || distance < 0, "we must be jumping backwards");
                 dest := self.m.segment_address(symbol.segment, symbol.offset + inc);
                 i_page, i_off := encode_adrp_add(dest, patch_addr, @as(u5) dest_reg);
                 self.inst(i_page);
@@ -665,7 +665,11 @@ fn emitins(self: *ArmState, i: *Qbe.Ins, b: *Qbe.Blk) void = {
                 
                 use_symbol(self.m, c.sym.id) { symbol |
                     patch_at := u8.raw_from_ptr(self.m.segments&[.Code].next);
-                    @match(symbol.kind) {
+                    kind := symbol.kind;
+                    if kind == .Local && ENABLE_INCREMENTAL && self.m.goal.type == .JitOnly {
+                        kind = .Pending;
+                    };
+                    @match(kind) {
                         fn DynamicPatched() => {
                             new_got_slot: ?Fixup = .None;
                             patch: Fixup = (patch_at = patch_at, type = .Call);

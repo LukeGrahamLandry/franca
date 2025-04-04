@@ -1,3 +1,144 @@
+## 
+
+- update ssa parser to use new Dat2
+
+## (Apr 3) Thinking About Incremental Compilation
+
+maybe that mini project makes me change my opinion on incremental compilation.  
+because like this progam compiles in `<`200ms but it still felt annoyingly slow in a way
+that working on the compiler never felt. there were times when i was just playing around 
+with which direction you had to multiply matrices or how to map intensity values to colours 
+in a pretty way, and there was a phase after i had laz decompression working but before i had 
+chunk streaming where you had to stare at the blank window for a couple seconds while it loaded 
+on the first frame before you could see if the changes worked. so it wasn't that the compiler was slow,
+it was that you lost the state that was built up before you got to the interesting part. 
+and like ok i could add to the interface and let you change transformations or whatever in the program 
+but thats not what i want, i just want to change the number in the code man. 
+there's no reason that has to suck so much. 
+
+also this is fucking amazing to me https://www.youtube.com/watch?v=yY1FSsUV-8c  
+sure as hell can't do that in my language right now, not that i want to, but it's kinda sad that i couldn't. 
+
+the simple case might not even be hard. like there's an infinite amount of work in trying to make it 
+track dependencies if you want to allow inlining while doing incremental compilation or what if you want
+to change struct layout? does that have to rewrite all the objects in memory somehow? do you need to 
+provide a remapping function every time you add a field? that can't be a good idea. or what if function 
+arguments change? or maybe another thread is running in a function while you're trying to replace it? 
+or if it's for aot you have to make sure you have space in the sections or you have to change all the offsets
+and keep enough information to map the binary's symbol table back into FuncIds in the compiler frontend. 
+for things that have $constant parameters, you need to be able to trace back all the specializations 
+and recompile them too, even worse for #macros or any comptime code that has side effects. 
+like what about the functions that get reflected on to generate shader code? 
+
+so like ok, i accept that i don't have the resources to solve the hard problem well 
+while making the kind of language i want to make (ie. not java). 
+
+but also, the usecase i was describing above doesn't actually care about any of those problems? 
+like there might be a very high quality of life improvement just in being able to tag one pure 
+function that does some math as `#incremental` and then while running jitted you can just edit 
+the text and have it hot load when you save the file and use the new version on the next frame. 
+and i know people do a hot loading thing in c or whatever where you call some functions through a dylib 
+but first, the base time to `echo "int add(int a, int b) {return a + b;}" >> a.c && time gcc a.c -dynamiclib` 
+is 80ms, can't be doing that for every function presumably. then how to you have it call other functions 
+in your main program? are we suddenly in crazy town again where you're making a plugin system for every 
+program? i just want to change a number man. or maybe you have the whole thing that runs every frame in 
+the dylib and the hotloading part is just to keep the data in memory. that would probably work, if its like
+200ms to compile the thing that's fast enough to be fine but it feels like the one advantage i have is 
+that i built the whole foundation of my compiler so i don't have to be limited to serializing everything 
+through an executable. 
+
+i already have a lot of machinery for dealing with the combination of dependency cycles and arbitrary comptime execution. 
+there are situations where you need to know the literal address of a function before it can be compiled, 
+and i do that by making shims that save thier arguments and then call into the compiler to finish compiling 
+the real function. so all i'd need to do to hotswap a simple function is replace it's body expression 
+with one parsed from the changed file and then conveniently forget that it had already been compiled so 
+calling through the shim would just redo the work and get the new version. and that doesn't address any of the 
+hard problems but it might just work? 
+
+the painful thing is that i try to make direct calls since that's way way way faster but when running in incremental 
+mode you probably always want to go through the got so you can get the new shim if needed. 
+a hacky soloution good enough for a tiny demo is to compile a new callsite every time but that isn't good enough 
+because it makes the calling code look insane. so then what are the options? 
+- always call through the GOT. that makes everything slower to enable the rare swapping case. feels bad. 
+- track the patches like for aot and stomp in the new address in the machine code. 
+that's more memory usage (but maybe not in a way i care about), makes the decision about which patches 
+need to be applied more confusing. right now i know that for JitOnly, it's always no patches or one GOT patch. 
+need to deal with flushing the instruction cache. 
+- could patch just the beginning of the old callee's machine code to call the new shim the first time it gets patched. 
+that has the same caching problem and it's extra scary if another thread's inside that function (tho maybe i don't care 
+about that case for now). 
+- require manually marking `#incremental` and then only do the slow GOT thing for those. 
+
+have to think about what problem im trying to solve. 
+honestly i want a flashy demo that i can point to as something cool that was made easier by 
+controlling every stage of the compiler. but i also want something that doesn't feel like it's trying too hard. 
+i want it to fall out of the work i already did so it feels natural. not like i spent months making a whole 
+new system to enable this but sort of like the way comptime feels where like oh of course you can call a c 
+function, why would i go out of my way to stop you from doing that. 
+my whole goal is kind of to have something where it's not like im trying to be better than other compilers/runtimes,
+i don't want it to be interesting that mine's good, it should be interesting that other ones are super limiting after a lot more work. 
+
+just have a build option that makes it always call through GOT is the easiest answer. 
+but then suddenly my single compilation unit thing kinda sucks because "oh your 
+high level ui thing needs hot loading? ok i helpfully disabled inlining in your matrix math library
+so your whole program's slow now. you're welcome." 
+that can't be the policy. 
+
+---
+
+:ByteOffsetUninitRootCause
+
+fixed the compiler bug with unset field.byte_offset. 
+this is a bit over kill for a fix with a two character diff but in the spirit of not letting confusion fester: 
+
+i had this: 
+```
+enumerate pattern.bindings& { i, b | 
+  field := or find_struct_field(f, ..., i - 1) {
+```
+which passed -1 as the guess for index 0. 
+```
+if index_guess >= f.fields.len || f.fields[index_guess].name != name { 
+```
+so since i use signed numbers for everything, -1 is `<` the length, and my bounds checking doesn't check 
+that it's possitive because im silly so it would just read whatever memory is behind the fields array. 
+and i guess most of the time that word happens to not match the name you want so it does the scan to find the right one, 
+but for this specific layout i bet the last thing allocated was a smaller version of that fields array that got resized. 
+so thats why the name was there and that's why the number we got for byte_offset was FIELD_LAYOUT_NOT_DONE 
+which made me assume it was a compilation order problem. 
+
+and that's why the bug was so sensitive to field order / count. 
+it happens when the last field's index is a length that will cause a List resize 
+and the construct_aggregate uses that field in index 0, so offsetting backwards 1 will 
+get you a matching name because you get the old version of that same field, just without the 
+byte_offset set because that resize was while building up the struct before calculating layout. 
+
+and if the compiler had debug checks off, it would generate code with the field offset being 99999999999 
+in the initializer so that's why it would either crash (if that wasn't a valid address) or when you tried to 
+read the field it have some bits set instead of being zeroed (because the initialization was way the fuck somewhere else). 
+but accessing the field later used the right offset because sema/field_access_get_type didn't have that bug. 
+
+but also why would i think typing the -1 was a good idea? 
+because 5 months ago i pasted that emit_ir from the old emit_bc which had this
+```
+i := 0;
+each f.fields { field | 
+    continue :: local_return;
+    i += 1;
+    if(field.kind == .Const, => continue());
+    // ... 
+    field := or find_struct_field(f, name, i - 1) {
+```
+because it was from before i reworked scoping and seperated constant and runtime fields. 
+
+it's fascinating how broken it can be and still mostly work. 
+
+--- 
+
+- clock_ms nanos off by 1000
+- clean up farm_game screen messages a bit
+- examples/geo scale movement by dt so you don't move slower while loading
+
 ## (Apr 2)
 
 - binary search instead of linear scan, makes decode_symbol go from 74% time (15k samples) to 58% (6k samples). 

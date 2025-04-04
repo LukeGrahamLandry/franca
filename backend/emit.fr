@@ -150,43 +150,7 @@ fn maybe_add_export(self: *QbeModule, id: u32, export: bool) void = {
 }
 
 // TODO: can still use bss if there's only pointers and all data is zeros.
-// TODO: instead of making frontend call this specifically, have the other 
-//       one decide. so do_jit_fixups on DEnd instead and switch?
-fn new_zeroed_symbol(self: *QbeModule, dat: *Qbe.Dat) void = {
-    // the advantage of using bss is that you don't have to fill your executable with zeros
-    // if you have large static arrays. when jitting, we need to use memory anyway so just 
-    // treat it like normal data. 
-    if self.goal.type == .JitOnly {
-        dat.type = .DStart;
-        self.new_emit_data(dat);
-        dat.type = .DZ;
-        self.new_emit_data(dat);
-        dat.type = .DEnd;
-        self.new_emit_data(dat);
-    } else {
-        seg := SegmentType.ZeroInitData;
-        segment := self.segments&.index(seg);
-        next := segment.next&;
-        segment.align_to(8);
-        maybe_add_export(self, dat.lnk.id, dat.lnk.export);
-        off := segment.mmapped.ptr.ptr_diff(next[]);
-        self.do_jit_fixups(dat.lnk.id, seg, off);
-        next[] = next[].offset(dat.u.num);
-    };
-}
 // TODO: be able to specify mutable or constant
-fn new_emit_data(self: *QbeModule, dat: *Qbe.Dat) void = {
-    ::enum(@type dat.type);
-    
-    if self.debug["P".char()] {
-        print_dat(self, dat, self.debug_out);
-    };
-    emit := self.target.data;
-    emit(self, dat);
-}
-
-fn emit_data_to_segment(self: *QbeModule, dat: *Qbe.Dat) void = 
-    emit_data_to_segment(self, dat, .MutableData);
 
 Dat2 :: @struct {
     Reloc :: @struct(off: u32, id: u32, addend: i64 = 0);
@@ -196,11 +160,9 @@ Dat2 :: @struct {
     align: u32 = 1;
     seg := SegmentType.MutableData;
     id: u32;
-    export: bool = false;  // TODO: compiler bug if you move this up :FUCKED
+    export: bool = false;
 };
 
-// TODO: remove all uses of Qbe.Dat and replace it with this
-//       meta/parse, compiler/emit_ir, meta/dump
 // Reserve a chunk of memory in the module's data segment, fill it with the right bytes, and record the necessary relocations. 
 // The memory in `dat` is not needed after this call, caller can free it. 
 fn emit_data(self: *QbeModule, dat: Dat2) void = {
@@ -214,7 +176,6 @@ fn emit_data(self: *QbeModule, dat: Dat2) void = {
         
         dat.seg = .ZeroInitData;
     };
-    
     segment := self.segments&.index(dat.seg);
     
     segment.align_to(8);  // TODO
@@ -227,7 +188,7 @@ fn emit_data(self: *QbeModule, dat: Dat2) void = {
             dest.copy_from(bytes);
             dest
         }
-    };
+    };    
     next[] = next[].offset(dest.len);
     maybe_add_export(self, dat.id, dat.export);
     self.do_jit_fixups(dat.id, dat.seg, start_off);
@@ -250,92 +211,6 @@ fn emit_data(self: *QbeModule, dat: Dat2) void = {
             };
         };
     };
-}
-
-fn emit_data_to_segment(self: *QbeModule, dat: *Qbe.Dat, seg: SegmentType) void = {
-    assert(!self.fixups_locked, "you cannot add more data after emitting for aot");
-    data_segment := self.segments&.index(seg);
-    segment := data_segment;
-    next := segment.next&;
-    ::enum(@type dat.type);
-    @match(dat.type) {
-        fn DZeroInit() => self.new_zeroed_symbol(dat);
-        fn DStart() => {
-            segment.align_to(8);
-            id := dat.lnk.id;
-            maybe_add_export(self, id, dat.lnk.export);
-            off := segment.mmapped.ptr.ptr_diff(next[]);
-            self.do_jit_fixups(id, seg, off);
-        }
-        fn DEnd() => {
-            @assert_lt(ptr_diff(segment.mmapped.ptr, next[]), segment.mmapped.len, "too much data");  
-        };
-        fn DZ() => {
-            next[].slice(dat.u.num).set_zeroed();
-            next[] = next[].offset(dat.u.num);
-        }
-        fn DB() => {
-            @debug_assert(!dat.is_ref, "can't have a byte sized pointer");
-            len := if dat.is_str {
-                s := dat.u.str;
-                if dat.has_quotes_and_escapes {
-                    // When building ir manually you'll probably just give us the raw bytes.
-                    // But this makes it easy to run Qbe's text based tests. Really the parser should handle this. 
-                    q :: "\"".ascii();
-                    @debug_assert(s[0] == q && s[s.len - 1] == q, "strings are quoted");
-                    s = s.slice(1, s.len - 1); // quotes
-                    space_left := segment.mmapped.len - ptr_diff(segment.mmapped.ptr, next[]);
-                    @assert(space_left > 0, "data segment full");
-                    dest: List(u8) = fixed_list(ptr = next[], len = space_left);
-                    expand_string_escapes(s, dest&);
-                    dest.len
-                } else {
-                    (@as([]u8) (ptr = next[], len = s.len)).copy_from(s);
-                    s.len
-                }
-            } else {
-                next[][] = dat.u.num.trunc();
-                1
-            };
-            next[] = next[].offset(len);
-        }
-        fn DL() => {
-            @assert_eq(u8.int_from_ptr(next[]).mod(8), 0, "sorry can't do unaligned constants yet");
-            ptr := ptr_cast_unchecked(u8, i64, next[]);
-            if dat.is_ref {
-                id := dat.u.ref.id;
-                use_symbol(self, id) { symbol | 
-                    mark_referenced(self, id, symbol);
-                    if self.get_addr(symbol) { value |
-                        ptr[] = int_from_rawptr(value._0) + dat.u.ref.off;
-                    };
-                    // Since we need the absolute address in memory, even local symbols need a relocation. 
-                    push_fixup(self, symbol, (patch_at = u8.raw_from_ptr(next[]), type = (DataAbsolute = (increment = dat.u.ref.off))));
-                    if self.goal.arch != .wasm32 && self.goal.type == .Relocatable && !symbol.local_but_marked_for_relocation {
-                        lock(self.intern_mutex&);
-                        self.local_needs_reloc&.push(id);
-                        unlock(self.intern_mutex&);
-                        symbol.local_but_marked_for_relocation = true;
-                    };
-                };
-            } else {
-                ptr[] = dat.u.num;
-            };
-            next[] = next[].offset(8);
-        }
-        fn DW() =>  {
-            @debug_assert(!dat.is_ref, "can't have a w sized pointer");
-            @assert_eq(u8.int_from_ptr(next[]).mod(4), 0, "sorry can't do unaligned constants yet");
-            ptr_cast_unchecked(u8, u32, next[])[] = dat.u.num.trunc();
-            next[] = next[].offset(4);
-        }
-        fn DH() =>  {
-            @debug_assert(!dat.is_ref, "can't have a h sized pointer");
-            @assert_eq(u8.int_from_ptr(next[]).mod(2), 0, "sorry can't do unaligned constants yet");
-            ptr_cast_unchecked(u8, u16, next[])[] = dat.u.num.trunc();
-            next[] = next[].offset(2);
-        }
-    } // returns
 }
 
 fn with_write_protect(m: *QbeModule, $body: @Fn() void) void = {
@@ -401,32 +276,6 @@ fn for_symbols(m: *QbeModule, $body: @Fn(id: u32, s: *SymbolInfo) void) void = {
             body(trunc(id), symbol);
         };
         bucket.n = n; // unlock
-    };
-}
-
-// This is not what you want if you care about cross compiling!
-fn fill_from_libc(self: *QbeModule) void = {
-    Dyn :: import("@/lib/dynamic_lib.fr");
-
-    // :SLOW insanely inefficient way of doing this. especially when someone tries to add multiple libs. 
-    // TODO: store a list of the pending ones so don't have to iterate them all. 
-    // This is not what you want if you care about cross compiling!
-    fn fill_pending_dynamic_imports(self: *QbeModule, lib: Dyn.Handle) void = {
-        for_symbols self { id, symbol |  // :SLOW  just keep list of pending symbols instead
-            if symbol.kind == .Pending {
-                self.imports&.push(id); 
-                if lib.get(symbol.name) { found |
-                    symbol.kind = .DynamicPatched;
-                    self.do_fixups(found, symbol);
-                };
-            };
-        };
-    }
-
-    for find_os_libc_dylib() { libc_path | 
-        if Dyn'open(libc_path) { libc |
-            self.fill_pending_dynamic_imports(libc);
-        };
     };
 }
 
