@@ -1,6 +1,6 @@
 TURN_SPEED :: 0.005;
 MOVE_SPEED :: 0.045;
-MAX_VERTICES :: 20_000_000;
+MAX_VERTICES :: 30_000_000;
 VERTICES_PER_POINT :: 6;
 max_points :: MAX_VERTICES / VERTICES_PER_POINT;
 chunks_per_frame :: 2;
@@ -11,18 +11,6 @@ USE_COLOUR :: false;
 // no fancy triangulation stuff. just put the raw points on the screen. 
 fn draw_point_cloud(state: *State, $next_point: @Fn() ?PointData) void = {
     sgl := state.draw.default_context&;
-
-    // TODO: caching these is dumb but it's so fun to me that i can compute things at comptime. 
-    //       and also my jit is really bad at arithmetic 6609829 times. 
-    //max_intensity :: 183;
-    //colours :: {
-    //    c := ast_alloc().alloc(u32, max_intensity);
-    //    enumerate c { i, c |
-    //        hue := clamp(i.float() / max_intensity.float() * 5.0, 0.0, 1.0) * 360.0;
-    //        c[] = hsv2rgb(hue, 1.0, 1.0, 1.0);
-    //    }
-    //    c
-    //}
     
     to_vec :: fn(r) => {
         f :: fn(x) => (@as(i64) x.intcast()).float().cast();
@@ -40,7 +28,7 @@ fn draw_point_cloud(state: *State, $next_point: @Fn() ?PointData) void = {
         i: i64 = r.intensity.zext();
         
         c := @if(USE_COLOUR, {
-            c :: fn(x) => (@as(i64) x.zext()).float() / 1.shift_left(16).float();
+            c :: fn(x) => (@as(i64) x.zext()).float() / 1.shift_left(8).float();
             pack_rgba(c(r.rgb.r), c(r.rgb.g), c(r.rgb.b), 1.0)
         }, {
             max_intensity :: 65000;
@@ -136,17 +124,16 @@ do_render :: fn(userdata: rawptr) void = {
     }
     
     chunks := state.chunks&;
-    @if(state.chunk_i < chunks.chunks.len - 1)
+    @if(state.chunk_i < chunks.chunks.len)
     if state.file.vlr { vlr |
         state.vertex_dirty = false;
         if state.chunk_i != 0 {
             sgl.in_begin = true;
-            sgl.commands.len -= 1;
+            sgl.commands.len -= 1;  // :HACK to persist the vertices accross frames
         };
         
         step_points := max(1, chunks.points_per_chunk * chunks.chunks.len / max_points);
-        
-        reps := min(chunks_per_frame, chunks.chunks.len - state.chunk_i - 1);
+        reps := min(chunks_per_frame, chunks.chunks.len - state.chunk_i);
         range(0, reps) { _ |
             chunk := chunks.chunks[state.chunk_i];
             state.chunk_i += 1;
@@ -154,17 +141,25 @@ do_render :: fn(userdata: rawptr) void = {
             // TODO: don't lose the first point!
             n := 0;
             draw_point_cloud(state) {
-                range(n, min(step_points + n, chunks.points_per_chunk-1)) { _ |
-                    n += 1;
+                yield :: local_return;
+                // because the last chunk probably won't be full 
+                bail_finished_chunk :: fn() => if iter.stream.i == iter.stream.input.len {  
+                    yield(.None);
+                };
+                end := min(step_points + n, chunks.points_per_chunk-1);
+                range(n, end) { _ |
+                    bail_finished_chunk();
                     iter&.next();
                 };
-                n += 1;
+                bail_finished_chunk();
+                n = end + 1;
                 @if(n >= chunks.points_per_chunk, .None, (Some = iter&.next()))
             };
             @debug_assert_eq(iter.stream.i, iter.stream.input.len, "decompression did not consume all bytes");
         }
         sgl.end();
-        sgl.update_vertex_buffer();
+        // TODO: silly that this re-syncs all the old points? is sg_append_buffer what i want instead?
+        sgl.update_vertex_buffer();  
     } 
 
     mvp := sgl.uniforms[0].mvp&;

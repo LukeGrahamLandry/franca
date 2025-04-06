@@ -70,6 +70,24 @@ fn compile_file(c: *Compile.Ctx, path: Str) Result(*Compile.Obj, Str) = {
 }
 
 fn emit_the_code(c: *Compile.Ctx, ctx: *CodegenShared, obj: *Compile.Obj) void = {
+    for_defs(c, obj) { obj | 
+        entry := bouba_acquire(ctx, ctx.bouba_idx&);
+        push_dynamic_context {
+            context(DefaultContext)[].temporary_allocator = entry.arena&;
+            id := obj.global_symbol.unwrap();
+            if obj.is_function {
+                f := obj.f;
+                fill_lnk(f.lnk&, obj, ctx.m);
+                entry.task = (Func = f);
+            } else {
+                entry.task = (AotVar2 = translate_data(ctx.m, obj));
+            };
+        };
+        enqueue_task(ctx, entry);
+    };
+}
+
+fn for_defs(c: *Compile.Ctx, obj: *Compile.Obj, $body: @Fn(obj: *Compile.Obj) void) void = {
     :: ptr_utils(Compile.Obj);
     work := list(*Compile.Obj, temp());
     while => !obj.next.is_null() {
@@ -104,20 +122,7 @@ fn emit_the_code(c: *Compile.Ctx, ctx: *CodegenShared, obj: *Compile.Obj) void =
                 //@println("skip % (from %)", ref.name, obj.name);
             };
         };
-        
-        entry := bouba_acquire(ctx, ctx.bouba_idx&);
-        push_dynamic_context {
-            context(DefaultContext)[].temporary_allocator = entry.arena&;
-            id := obj.global_symbol.unwrap();
-            if obj.is_function {
-                f := obj.f;
-                fill_lnk(f.lnk&, obj, ctx.m);
-                entry.task = (Func = f);
-            } else {
-                entry.task = (AotVar2 = translate_data(ctx.m, obj));
-            };
-        };
-        enqueue_task(ctx, entry);
+        body(obj);
     };
 }
 

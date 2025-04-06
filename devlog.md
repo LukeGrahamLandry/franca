@@ -1,6 +1,35 @@
-## 
+## (Apr 4-6)
 
 - update ssa parser to use new Dat2
+- what's the difference between `0xAC ⇒ i64.extend_i32_s` and `0xC4 ⇒ i64.extend32_s`,
+one is i32->i64 and one is i64->i64?
+- some of the ssa tests have a harness written in c that i use clang to compile. 
+so instead of that, have it use examples/import_c and just add the c functions to the same 
+module without going though an object file. 
+old way was annoying because 
+  - relying on a system installed thing is uncool
+  - it means i need to support outputting a relocatable object file before i can run most of my tests on a new platform 
+  - it's kinda slow? 
+  if i have a 70ms tax on each of 45 tests that i want to run on 3 architectures, 
+  thats suddenly an extra 10 seconds every time you change something which seems unreasonable. 
+  ```
+  before: backend/test/sum.ssa                    [ok] 4ms, 85ms
+  after:  backend/test/sum.ssa                    [ok] 7ms, 12ms
+  ```
+
+the new way doesn't quite work tho. 16 fail. 
+- was discarding c functions it thought were unreachable because it thought that was the whole program. 7
+- a few additions to standard headers in include.fr. 4
+- c parser didn't allow `type function(), variable;`. 1
+- fix crash when accessing anonymous union fields. 0
+
+time to run backend/meta/test.fr:
+- old: 4.31s
+- new: 0.95s
+
+still have to run the slow version because it tests relocatable objects and compares c abi to a known good compiler. 
+
+so now i can run more wasm tests. passing 16 -> 29.
 
 ## (Apr 3) Thinking About Incremental Compilation
 

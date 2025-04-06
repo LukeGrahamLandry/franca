@@ -122,7 +122,8 @@ fn wasm_type_preleb(t: Wasm.ValType) i32 = {
 
 fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
     k := i.cls();
-    is_pop := i.op() == .pop;
+    o := i.op();
+    is_pop := o == .pop;
     if try_kill_inst(f, i) {
         if is_pop {
             // inserted after a call by abi. even tho we don't use the value, 
@@ -132,7 +133,7 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
         return();
     };
     
-    @match(i.op()) {
+    @match(o) {
         fn push() => {
             @debug_assert(i.to == QbeNull);
             f.wasm_push(i.cls(), i.arg&[0]);  // fixarg
@@ -148,8 +149,11 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
             f.emit(i[]);
             return();
         }
-        fn loadsw() => if i.cls() == .Kw {
-            i.set_op(.load);
+        fn loadsw() => if k == .Kw {
+            o = .load;
+        };
+        fn loaduw() => if k == .Kw {
+            o = .load;
         };
         fn cod()  => panic("TODO: wasm fcmp (un?)ordered");
         fn cuod() => panic("TODO: wasm fcmp (un?)ordered");
@@ -160,7 +164,7 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
             return();
         }
         @default => {
-            if is_par(i.op()) || (@is(i.op(), .pop)) {  // TODO: call_indirect
+            if is_par(o) || (@is(o, .pop)) {  // TODO: call_indirect
                 f.emit(i[]);
                 return();
             };
@@ -172,35 +176,60 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
     };
 
     // our cmp can return Kw or Kl, but wasm always returns I32
-    if iscmp(i.op()) && i.cls() == .Kl {
+    if iscmp(o) && i.cls() == .Kl {
         i.set_cls(.Kw);
         f.emit(.extuw, .Kl, QbeNull, QbeNull, QbeNull);
     };
     
-    g := @is(i.op(), .global_get, .global_set);
-    if g {
-        f.emit(i.op(), i.cls(), QbeNull, i.arg&[0], QbeNull);
-    } else {
-        // copy is just push+pop, no actual op
-        if i.op() != .copy {
-            f.emit(i.op(), i.cls(), QbeNull, QbeNull, QbeNull);
+    // wasm doesn't have zero extend from 8/16 so it becomes a mask
+    if @is(o, .extub, .extuh) {
+        mask: i64 = @if(o == .extub, 0x00FF, 0xFFFF);
+        if i.cls() == .Kl {
+            // TODO: this isn't right. we don't know if the argument was W or L
+            f.emit(.extuw, .Kl, QbeNull, QbeNull, QbeNull);
         };
+        f.emit(.and, k, QbeNull, QbeNull, QbeNull);
+        f.emit(.push, k, QbeNull, f.getcon(mask), QbeNull);
+        f.wasm_push(argcls(i, 0), i.arg&[0]);
+        return()
     };
     
-    if is_store(i.op()) {
+    if @is(o, .global_get, .global_set) {
+        f.emit(o, i.cls(), QbeNull, i.arg&[0], QbeNull);
+        if o == .global_set {
+            f.wasm_push(argcls(i, 1), i.arg&[1]);
+        };
+        return()
+    };
+
+    // copy is just push+pop, no actual op
+    if o != .copy {
+        f.emit(o, i.cls(), QbeNull, QbeNull, QbeNull);
+    };
+    
+    if is_store(o) {
         k := argcls(i, 0);
         f.wasm_push(k, i.arg&[0]);
         wasm_push_addr(f, i.arg&[1]);
         return();
     };
     
-    if is_load(i.op()) {
+    if is_load(o) {
         wasm_push_addr(f, i.arg&[0]);
         return();
     };
     
+    // flip the order. condition goes last. 
+    if o == .sel1 {
+        sel0 := i.offset(-1);
+        @debug_assert_eq(sel0.op(), .sel0);
+        f.wasm_push(.Kw, sel0.arg&[0]);
+        sel0.set_nop();
+        // TODO: fix if condition was an L
+    };
+    
     enumerate_rev i.arg&.items() { idx, a |
-        if a[] != QbeNull && !(g && idx == 0) {
+        if a[] != QbeNull {
             k := argcls(i, idx);
             f.wasm_push(k, a[]);
         };

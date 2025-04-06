@@ -17,7 +17,11 @@ int main() {
 
   ASSERT(3, ({struct { union { int a,b; }; union { int c,d; }; } x; x.a=3; x.b; }));
   ASSERT(5, ({struct { union { int a,b; }; union { int c,d; }; } x; x.d=5; x.c; }));
-
+  
+  // chibicc can do the first but faults on the second
+  ASSERT(123, ({ struct a { struct { long b; void *c; }; } d = { .b = 123 }; d.b; }));
+  ASSERT(123, ({ struct a { union { long b; void *c; }; } d = { .b = 123 }; d.b; }));
+  
   printf("OK\n");
   return 0;
 }

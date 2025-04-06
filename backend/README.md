@@ -28,9 +28,9 @@ You can still print out the ir as human readable text between passes and modify 
 - Emit Mach-O executables directly without depending on an external linker or make relocatable objects for linking with other languages.
 - Ad-hoc signetures for Mach-O binaries so you can target macOS without depending on Apple's `codesign` program.
 - Added a Web Assembly target (outputs the binary format directly).
-  - WIP
+  - WIP: mandelbrot works, not much else
 - Emit Elf executables directly
-  - WIP: I can't do reloctatable or dynamic libraries yet.
+  - WIP: I can't do reloctatable or dynamic libraries yet and exes rely on franca_runtime_init
 - Removed the RISC-V target for now because I haven't done thier instruction encoding yet.
 
 ### Features

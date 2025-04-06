@@ -20,6 +20,8 @@
 #use("@/examples/import_c/lib.fr");
 #use(Tokens);
 
+// TODO: unlinkedlistify this
+// TODO: i find the is_* fields more confusing than just using @tagged
 Obj :: @rec @struct(
     next: *Obj,
     name: CStr,
@@ -939,18 +941,27 @@ fn compute_vla_size(c: *Ctx, ty: *CType) Qbe.Ref = {
     ty.vla_size
 }
 
-// declaration = declspec (declarator ("=" expr)? ("," declarator ("=" expr)?)*)? ";"
-fn declaration(c: *Ctx, tok: *Token, basety: *CType, attr: ?*VarAttr) *Token = {
-    start := tok;
+// TODO: sane error message for `, $body: @Fn(),`
+fn declarators(c: *Ctx, tok: **Token, basety: *CType, first_declarator: *CType, $body: @Fn(decl: *CType) void #duplicated) void = {
+    body(first_declarator); // TODO: only call once with do while
+    while => !consume_end(tok, ";") {
+        tok[] = c.skip(tok[], ",");
+        ty := c.declarator(tok, tok[], basety);
+        body(ty);
+    };
+}
 
-    comma_sep(c, tok&, ";") {
+// declaration = declspec (declarator ("=" expr)? ("," declarator ("=" expr)?)*)? ";"
+fn declaration(c: *Ctx, tok: *Token, basety: *CType, attr: ?*VarAttr, first_declarator: *CType, expect_var: bool) *Token = {
+    start := tok;
+    declarators(c, tok&, basety, first_declarator) { ty |
         continue :: local_return;
-        ty := c.declarator(tok&, tok, basety);
         if(ty.kind == .TY_VOID, => @error_tok(c, tok, "variable declared void"));
         if ty.name.is_null() {
+            @if(!expect_var) continue();
             @error_tok(c, ty.name_pos, "variable name omitted");
         };
-
+        
         if attr { attr |
             if attr.is_static {
                 // static locals are secretly globals
@@ -1090,7 +1101,7 @@ fn struct_designator(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *Member = 
 
     for_linked ty.members { mem |
         continue :: local_return;
-        is_anon := mem.ty.kind == .TY_STRUCT && mem.name.is_null();
+        is_anon := (@is(mem.ty.kind, .TY_STRUCT, .TY_UNION)) && mem.name.is_null();
         if is_anon {
             if get_struct_member(mem.ty, tok) { _ |
                 rest[] = start;
@@ -1651,12 +1662,18 @@ fn compound_stmt(c: *Ctx, rest: **Token, tok: *Token) *Node = {
             @if(SPAM) @println("type name! %", tok.str());
             attr   := VarAttr.zeroed();
             basety := c.declspec(tok&, tok, (Some = attr&));
-            tok = @if_else {
-                @if(attr.is_typedef)  => c.parse_typedef(tok, basety);
-                // TODO: error if it has a body
-                @if(c.is_function(tok)) => c.function(tok, basety, attr&);
-                @if(attr.is_extern)   => c.global_variable(tok, basety, attr&);
-                @else => c.declaration(tok, basety, (Some = attr&));
+            
+            tok = if attr.is_typedef {
+                c.parse_typedef(tok, basety)
+            } else {
+                expect_var := !equal(tok, ";");
+                ty := c.declarator(tok&, tok, basety);
+                @if_else {
+                    // TODO: error if it has a body
+                    @if(ty.kind == .TY_FUNC) => c.function(tok, basety, attr&, ty);
+                    @if(attr.is_extern)   => c.global_variable(tok, basety, attr&, ty, expect_var);
+                    @else => c.declaration(tok, basety, (Some = attr&), ty, expect_var);
+                }
             };
         } else {
             cur = (Some = c.stmt(tok&, tok));
@@ -1904,10 +1921,9 @@ fn find_func(c: *Ctx, name: Str) ?*Obj = {
 }
 
 // TODO: this clears a bunch of state that won't work if nested function decls are allowed
-fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr) *Token = {
+fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *Token = {
     prev_refs := c.refs;
     c.refs = list(c.arena);
-    ty := c.declarator(tok&, tok, basety);
     if(ty.name.is_null(), => @error_tok(c, ty.name_pos, "function name omitted"));
     name_str := c.get_ident(ty.name);
 
@@ -1950,6 +1966,12 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr) *Token = {
     c.f.vararg = ty.is_variadic;
     rty := ty.return_ty;
     c.f.retty = c.ir_index(rty);
+    
+    if equal(tok, ",") {
+        tok = c.skip(tok, ",");
+        ty := c.declarator(tok&, tok, basety);
+        return c.global_variable(tok, basety, attr, ty, true);
+    };
     
     tok = c.skip(tok, "{");
 
@@ -2004,12 +2026,16 @@ fn move_current_refs(c: *Ctx, dest: *Obj) void = {
     c.refs&.clear();
 }
 
-fn global_variable(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr) *Token = {
+fn global_variable(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, first_declarator: *CType, expect_var: bool) *Token = {
     prev_refs := c.refs;
     c.refs = list(c.arena);
-    comma_sep(c, tok&, ";") {
-        ty := c.declarator(tok&, tok, basety);
-        if(ty.name.is_null(), => @error_tok(c, ty.name_pos, "variable name omitted"));
+    
+    declarators(c, tok&, basety, first_declarator) { ty |
+        continue :: local_return;
+        if ty.name.is_null() {
+            @if(!expect_var) continue();
+            @error_tok(c, ty.name_pos, "variable name omitted");
+        };
 
         var := c.new_gvar(c.get_ident(ty.name), ty, ty.name_pos);
         var.is_definition = !attr.is_extern;
@@ -2029,15 +2055,6 @@ fn global_variable(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr) *Token 
     };
     c.refs = prev_refs;
     tok
-}
-
-// Lookahead tokens and returns true if a given token is a start
-// of a function definition or declaration.
-fn is_function(c: *Ctx, tok: *Token) bool = {
-    if(equal(tok, ";"), => return(false));
-    dummy := CType.zeroed();
-    ty    := c.declarator(tok&, tok, dummy&);
-    ty.kind == .TY_FUNC
 }
 
 // Remove redundant tentative definitions.
@@ -2114,16 +2131,20 @@ fn parse(c: *Ctx, tok: *Token) *Obj = {
     while => tok.kind != .TK_EOF {
         attr := VarAttr.zeroed();
         basety := c.declspec(tok&, tok, (Some = attr&));
-        tok = @if_else {
-            @if(attr.is_typedef)    => c.parse_typedef(tok, basety);
-            @if(c.is_function(tok)) => {
+        tok = if attr.is_typedef {
+            c.parse_typedef(tok, basety)
+        } else {
+            expect_var := !equal(tok, ";");
+            ty := c.declarator(tok&, tok, basety);
+            if ty.kind == .TY_FUNC {
                 prev := c.f;   // :TopLevelFunction
-                tok := c.function(tok, basety, attr&);
+                tok := c.function(tok, basety, attr&, ty);
                 c.f = prev;
                 c.b = c.f.start; // HACK
                 tok
-            };
-            @else                   => c.global_variable(tok, basety, attr&);
+            } else {
+                c.global_variable(tok, basety, attr&, ty, expect_var)
+            }
         };
         
         // TODO: reset temp() here? but then if want to delay adding functions to the module, 
@@ -2970,7 +2991,9 @@ for_ :: fn(c, rest, tok) #prefix(.for, .ND_STMT) = {
         tok = c.skip(tok.next, "(");
         if c.is_type_name(tok) {
             basety := c.declspec(tok&, tok, .None);
-            tok = c.declaration(tok, basety, .None);
+            expect_var := !equal(tok, ";");
+            ty := c.declarator(tok&, tok, basety);
+            tok = c.declaration(tok, basety, .None, ty, expect_var);
         } else {
             c.expr_stmt(tok&, tok);
         };

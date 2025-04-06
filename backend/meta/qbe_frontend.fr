@@ -8,6 +8,8 @@
 #include_std("backend/lib.fr");
 //#include_std("backend/llvm/target.fr");  // TODO: update for Dat2
 
+INCLUDE_MY_C_COMPILER :: true;
+
 fn main() void = { 
     // Have to smuggle this through qbe's parser callback that doesn't let you pass a data pointer.
     global_module :: @static(QbeModule);
@@ -26,6 +28,7 @@ fn main() void = {
     arch := query_current_arch();
     os := query_current_os();
     use_llvm :: @static(bool) false;
+    iamtheccompilernow := false;
     while => args.len > 0 {
         a := args[0].str();
         @switch(a) {
@@ -81,6 +84,11 @@ fn main() void = {
                 use_llvm[] = true;
                 pop();
             };
+            @case("-cc") => {
+                @assert(INCLUDE_MY_C_COMPILER, "didn't INCLUDE_MY_C_COMPILER can't -cc");
+                iamtheccompilernow = true;
+                pop();
+            };
             @default => {
                 if a.ends_with(".fr") {// TODO: ugh don't care about the file extension 
                     pop();
@@ -125,11 +133,43 @@ fn main() void = {
     src&.push_all("\n"); // HACK
     src := src.items();
     parse :: import("@/backend/meta/parse.fr").parse_top_level;
-    res := parse(global_module, src, handle_data, handle_fn);
+    res := parse(global_module, src, handle_data, handle_fn, iamtheccompilernow);
     if res&.is_err() {
         panic(res.Err);
     };
-    
+    @if(INCLUDE_MY_C_COMPILER) if iamtheccompilernow {
+        #use("@/examples/import_c/lib.fr");
+        m := global_module;
+        c := Compile.Ctx.zeroed();
+        init_ctx(c&, m);
+        
+        objs := catch_call(c&, *Compile.Obj) {
+            // TODO: this way of doing it means you lose location information which sucks
+            tok := c&.tokenize_string(">>>driver", res.Ok&);
+            tok  = c&.Preprocess'preprocess(tok);
+            c&.Compile'parse(tok)
+        };
+        objs := objs.or(panic);
+        
+        // not using for_defs because that assumes the wrong root (it doesn't know about our .ssa functions)
+        // if you want to use this for serious programs (instead of the tiny tests), 
+        // should change that so you get the optimisation formerly known as LTO
+        for_linked objs { obj |
+            if obj.is_definition {
+                id := obj.global_symbol.unwrap();
+                if obj.is_function {
+                    f := obj.f;
+                    fill_lnk(f.lnk&, obj, m);
+                    run_qbe_passes(f);
+                } else {
+                    for translate_data(m, obj) { dat |
+                        m.emit_data(dat);
+                    }
+                }
+            }
+        }
+    }
+
     global_module.emit_suspended_inlinables();
     chunks := {global_module[].target.finish_module}(global_module);
     for chunks { chunk | 

@@ -1,5 +1,8 @@
 #include "test.h"
 
+int f(), x;
+int y, g();
+
 int main() {
   ASSERT(1, sizeof(char));
   ASSERT(2, sizeof(short));
@@ -87,6 +90,7 @@ int main() {
   ASSERT(4, sizeof(float));
   ASSERT(8, sizeof(double));
 
+  // clang doesn't like 'f' without a '.'
   ASSERT(4, sizeof(1f+2));
   ASSERT(8, sizeof(1.0+2));
   ASSERT(4, sizeof(1f-2));
@@ -97,6 +101,11 @@ int main() {
   ASSERT(8, sizeof(1.0/2));
 
   ASSERT(1, sizeof(main));
+  
+  ASSERT(1, sizeof(f));
+  ASSERT(1, sizeof(g));
+  ASSERT(4, sizeof(x));
+  ASSERT(4, sizeof(y));
 
   struct Foo { long a; long b[]; };
   struct Foo foo = { .a = 123 };

@@ -2,19 +2,32 @@ A C11 compiler adapted from <https://github.com/rui314/chibicc>.
 
 ## Changes from Chibicc
 
-- use the franca compiler backend instead of generating amd64 assembly as text and depending on someone else's assembler and linker. 
-- less verbose style of handling operator precedence.
-- removed some GNU extensions: labels-as-values, case ranges
-- removed support for inline assembly
-- removed support for x87 80-bit long doubles
-- convert static variables to a struct explicitly passed around so you can have multiple compilation contexts at the same time. 
-- (temporarily) removed support for: thread locals, atomics, `_Alignas`
-- simplify preprocessor by tracking a stack of disabled macros instead of storing a hideset on each token
-- optimize handling of large zero initialized static arrays
+### Fixes
+
 - fixed sizeof to ignore flexible array member 
+- allow `type function(), variable;` (which means `function :: fn() type; variable: type;`)
+- don't segfault when accessing anonymous union fields
+
+### Features
+
+- use the franca compiler backend instead of generating amd64 assembly as text and depending on someone else's assembler and linker. 
 - export to the franca compiler's type/function data structures so you don't need to manually write bindings to c libraries. 
 (WIP. for demos, see `examples/bf/c_source.fr` and `examples/view_image.fr`). 
 - optionally use the franca calling convention (passing a hidden environment pointer)
+
+### Refactors 
+
+- less verbose style of handling operator precedence.
+- convert static variables to a struct explicitly passed around so you can have multiple compilation contexts at the same time. 
+- simplify preprocessor by tracking a stack of disabled macros instead of storing a hideset on each token
+- optimize handling of large zero initialized static arrays
+
+### Regressions
+
+- (temporarily) removed support for: thread locals, atomics, `_Alignas`
+- removed some GNU extensions: labels-as-values, case ranges
+- removed support for inline assembly
+- removed support for x87 80-bit long doubles
 
 ## Chibicc License
 

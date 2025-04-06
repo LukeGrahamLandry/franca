@@ -33,11 +33,13 @@ QParseCtx :: @struct(
     line := 0,
     out: Alloc,
     blk := Qbe.Blk.ptr_from_int(0),
-    ret := Qbe.J.Jxxx,
-    // TODO: use this for reporting more errors that are only allowed when used as a template. 
-    allow_unterminated_block := false, // for comptime templates
     types: HashMap(Str, i64),
     m: *QbeModule,
+    c_comments: List(u8),
+    ret := Qbe.J.Jxxx,
+    collect_c_comments := false,
+    // TODO: use this for reporting more errors that are only allowed when used as a template. 
+    allow_unterminated_block := false, // for comptime templates
 );
 
 // :ThreadSafety
@@ -47,8 +49,9 @@ QParseCtx :: @struct(
 // you will want to generate the ir in memory instead of uselessly writing out text and parsing it back again. 
 //
 // TODO: this is more useful if you let them pass a userdata pointer but for now i want to match the qbe interface. 
-fn parse_top_level(m: *QbeModule, src: Str, yield_data: @FnPtr(Dat2) void, yield_func: @FnPtr(*Qbe.Fn) void) Result(void, Str) = {
-    self: QParseCtx = init(m, src); 
+fn parse_top_level(m: *QbeModule, src: Str, yield_data: @FnPtr(Dat2) void, yield_func: @FnPtr(*Qbe.Fn) void, collect_c_comments: bool) Result(List(u8), Str) = {
+    self: QParseCtx = init(m, src);
+    self.collect_c_comments = collect_c_comments;
     self := self&;
     self.f.default_init(m);  // :NeedFunctionInitForData
     
@@ -115,7 +118,7 @@ fn parse_top_level(m: *QbeModule, src: Str, yield_data: @FnPtr(Dat2) void, yield
         };
         
         if self.cursor >= self.input.len {
-            return(.Ok);
+            return(Ok = self.c_comments);
         };
         if self.skip_lines() == 1 && self.cursor < self.input.len {
             return(Err = @tfmt("expected new line. near line %\n", self.line));
@@ -131,15 +134,34 @@ fn skip_lines(self: *QParseCtx) i64 = {
         n += 1;
         self.skip_blanks();
         if self.eat("#") {  // comment
-            while => !self.check("\n") && self.cursor < self.input.len {
-                self.cursor += 1;
-            };
+            if self.collect_c_comments && self.eat(">>> driver") {
+                self.collect_c_comment();
+            } else {
+                self.eat_line();
+            }
         };
         self.eat("\n") && self.cursor < self.input.len
     };
     self.line += n - 1;
     self.skip_blanks();
     n
+}
+
+fn eat_line(self: *QParseCtx) void #inline = {
+    while => !self.check("\n") && self.cursor < self.input.len {
+        self.cursor += 1;
+    };
+}
+
+fn collect_c_comment(self: *QParseCtx) void = {
+    dowhile {
+        start := self.cursor;
+        self.eat_line();
+        self.cursor += int(self.cursor < self.input.len);
+        self.c_comments&.push_all(self.input.slice(start, self.cursor));
+        
+        self.eat("#") && !self.eat("<<<")
+    }
 }
 
 fn init(m: *QbeModule, src: Str) QParseCtx = (
@@ -152,12 +174,11 @@ fn init(m: *QbeModule, src: Str) QParseCtx = (
     out = temp(),
     types = init(m.forever&.borrow()), // see :ThreadSafety comment above!
     m = m,
+    c_comments = list(general_allocator()),
 );
 
 fn parse_body(self: *QParseCtx) Result(Ty(*Qbe.Fn, []Replacement), Str) = {
-    while => self.parse_line() {
-        self.skip_lines();
-    };
+    dowhile(=> self.parse_line());
     self.end_block(.None);
     if self.error.len != 0 {
         return(Err = self.error.items());

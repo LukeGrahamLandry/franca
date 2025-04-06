@@ -5,15 +5,16 @@
 - graphics: finish porting macos/app from objective c
 - wasm:     get all the ssa tests working. some have c drivers so either need to output linkable wasm or use import_c
 - linux:    finish transcribing structs so FRANCA_BACKTRACE=true works. make all the tests pass with -syscalls
+- external: make it not a 100 line copy-paste to setup a driver that links an object file
+- llvm:     get all the ssa tests working
 
-## 
+## stuff i broke
 
 - add a print for Dat2
 - `fn emit_llvm(m: *QbeModule, dat: *Qbe.Dat) void = {` update to new Dat2
 - :TodoChangeMessageEmitDataEndToUseBakedValueInsteadOfBackendDat
 - adding #align was a compile speed regression
 - formalize ENABLE_INCREMENTAL in backend/arm64/emit (+ support on amd64)
-- finish amd64/isel/NEW_ADDR_FOLDING
 
 ## language consistancy
 
@@ -82,6 +83,7 @@ the right/fast/safe/whatever thing to do is also the easy thing to do.
 - for import_c, decide when to reset temp() and audit all the allocations in tok/pre
 - default arg values (any const expr and inject at callsite? or based on other args so generate shims or multiple entry points to the function)
 - clean up what goes in lib/build.fr vs lib/sys/fs.fr
+- make fetching dependencies (ie. lua for testing import_c) not embarrassing
 
 ## cleanup 
 
@@ -100,6 +102,8 @@ also stop pasting around code for handling the multi-part ops
   - x64/arm/wasm/macho/elf but there's no winning there
   - boot but i really don't want to write the compiler again... so idk what to do about that
 - extend hacky_incremental into something that can be used seriously 
+- finish amd64/isel/NEW_ADDR_FOLDING
+- argparse thing (like i started for examples/geo). im getting bored of 50 line switch every time
 
 ## tests
 
@@ -214,6 +218,9 @@ because it turns out the former is actually useful a lot of the time.
 - fix examples/compiler_gui
 - rust format! macro. they have format_args! builtin to the compiler which is kinda funny
 - make graphics/shaders translation support a more interesting subset of the language 
+- profiler gui. it's silly that i have to open CLion just for it to run DTrace and draw a graph
+- something that generates point clouds / LAZ files so you can use the geo demo without 
+needing to go find some data in the right format (and without me including a blob for it)   
 
 ## make it not suck
 
