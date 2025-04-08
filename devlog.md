@@ -1,3 +1,30 @@
+
+## (Apr 7)
+
+what the actual fuck?? am i going insane??? 
+my program is suddenly slow but not if i run it in a profiler?
+im losing my mind apparently.  
+i run it in warp: `./a.out self.fr  1.45s user 0.09s system 105% cpu 1.464 tota`
+i run it in terminal.app: `./a.out self.fr  1.41s user 0.09s system 142% cpu 1.053 total`
+oh you know just... restart warp... to turn threads back on in programs it execs????!!
+how can that even be possible?? 
+how can it be that i am forced to choose between being able to click with the mouse
+where i want the cursor to be and being able to run a process that spawns a thread. 
+written in rust by the way. ai built in by the way. garbage. 
+why does everything have to be so hard? 
+
+---
+
+getting more wasm tests passing. 
+- they don't have a cmp ordered/unordered. so replace with nan check. (isel2)
+- more work on varargs abi
+- sel_wasm was try_kill_inst on unused par
+- truncl on retw
+- don't try to export data symbols as functions. fixed many that returned via `int a;`. passing 31 -> 43
+- need my own printf
+- push_slot_addr was going backwards
+- untangling when pointers are i64 vs i32 is gonna be a nightmare
+
 ## (Apr 4-6)
 
 - update ssa parser to use new Dat2

@@ -22,8 +22,10 @@ fn wasm_isel(f: *Qbe.Fn) void = {
     // so use a local that doesn't escape so it doesn't have to reload it on every single stack access. 
     stackbase := f.symcon(f.globals.wasm_symbol_stackbase);
     did_sp_load := false; // :UGLY
+    f.slot = align_to(f.slot, 16);
+    fslot := f.slot;
     if f.slot > 0 {
-        f.retr = f.newtmp("SP", .Kw);
+        f.retr = f.newtmp("SP", .Kl);
         f.get_temporary(f.retr)[].nuse = 99; // HACK
     } else {
         f.retr = QbeNull;
@@ -36,11 +38,11 @@ fn wasm_isel(f: *Qbe.Fn) void = {
         @match(b.jmp.type) {
             fn ret0() => {
                 if f.slot > 0 && !f.leaf {
-                    f.emit(.global_set, .Kw, QbeNull, stackbase, QbeNull);
-                    f.wasm_push(.Kw, f.retr);
+                    f.emit(.global_set, .Kl, QbeNull, stackbase, QbeNull);
+                    f.wasm_push(.Kl, f.retr);
                 };
             }
-            fn hlt()  => ();
+            fn hlt() => ();
             fn jmp() => {
                 for_phi b.s1 { p |
                     arg := p.arg.index(index_in_phi(b, p))[];
@@ -56,22 +58,25 @@ fn wasm_isel(f: *Qbe.Fn) void = {
         };
         @debug_assert(b.jmp.arg == QbeNull);
         
-        do_sp_load :: fn() => if f.slot > 0 {
-            f.emit(.pop, .Kw, f.retr, QbeNull, QbeNull);
-            f.emit(.global_get, .Kw, QbeNull, stackbase, QbeNull);
+        maybe_sp_load :: fn() => if !did_sp_load && f.slot > 0 {
+            if !f.leaf {
+                f.emit(.global_set, .Kl, QbeNull, stackbase, QbeNull);
+                f.emit(.sub, .Kl, QbeNull, QbeNull, QbeNull);
+                f.wasm_push(.Kl, f.getcon(f.slot.intcast()));
+                f.wasm_push(.Kl, f.retr);
+            };
+            
+            f.emit(.pop, .Kl, f.retr, QbeNull, QbeNull);
+            f.emit(.global_get, .Kl, QbeNull, stackbase, QbeNull);
             did_sp_load = true;
         };
         
         for_insts_rev b { i |
-            if !did_sp_load && i[].op() == .par {
-                do_sp_load();
-            };
+            if(i[].op() == .par, => maybe_sp_load());
             sel_wasm(f, i[]);
         };
         
-        if !did_sp_load && f.start.identical(b) {
-            do_sp_load();
-        };
+        if(f.start.identical(b), => maybe_sp_load());
         
         // First thing that happens: any incoming phis are on the stack (as block arguments) and we pop them into thier locals. 
         
@@ -89,6 +94,7 @@ fn wasm_isel(f: *Qbe.Fn) void = {
     
     f.retr = QbeNull;
     wasm_flow(f);
+    @debug_assert_eq(f.slot, fslot, "can't make new slots after incrementing SP");
 
     when_debug(f, .InstSelect) { out | 
         write(out, "\n> After instruction selection:\n");
@@ -123,9 +129,8 @@ fn wasm_type_preleb(t: Wasm.ValType) i32 = {
 fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
     k := i.cls();
     o := i.op();
-    is_pop := o == .pop;
-    if try_kill_inst(f, i) {
-        if is_pop {
+    if o != .par && try_kill_inst(f, i) {
+        if o == .pop {
             // inserted after a call by abi. even tho we don't use the value, 
             // we need to do some stack book-keeping to satisfy the verifier. 
             f.emit(.pop, k, QbeNull, QbeNull, QbeNull);
@@ -155,10 +160,10 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
         fn loaduw() => if k == .Kw {
             o = .load;
         };
-        fn cod()  => panic("TODO: wasm fcmp (un?)ordered");
-        fn cuod() => panic("TODO: wasm fcmp (un?)ordered");
-        fn cos()  => panic("TODO: wasm fcmp (un?)ordered");
-        fn cuos() => panic("TODO: wasm fcmp (un?)ordered");
+        fn cod()  => { sel_nan_cmp(f, i, .ceqd, .and); return(); };
+        fn cuod() => { sel_nan_cmp(f, i, .cned, .or); return(); };
+        fn cos()  => { sel_nan_cmp(f, i, .ceqs, .and); return(); };
+        fn cuos() => { sel_nan_cmp(f, i, .cnes, .or); return(); };
         fn byteswap() => {
             f.sel_byteswap(i);
             return();
@@ -205,6 +210,11 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
     // copy is just push+pop, no actual op
     if o != .copy {
         f.emit(o, i.cls(), QbeNull, QbeNull, QbeNull);
+    } else {
+        // TODO: need to do this for every op
+        if need_trunc(f, i.cls(), i.arg&[0]) {
+            f.emit(.truncl, .Kw, QbeNull, QbeNull, QbeNull);
+        };
     };
     
     if is_store(o) {
@@ -237,25 +247,36 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
 }
 
 fn wasm_push(f: *Qbe.Fn, k: Qbe.Cls, r: Qbe.Ref) void = {
-    if rtype(r) == .RTmp {
-        slot_offset := f.get_temporary(r)[].slot;
-        if slot_offset != -1 {
-            // TODO: i think i want to split the memory folding out from coming out of ssa form. 
-            //r = SLOT(slot_offset);
-            if k == .Kl {
-                f.emit(.extuw, k, QbeNull, QbeNull, QbeNull);
-                k = Qbe.Cls.Kw;
+    @match(rtype(r)) {
+        fn RTmp() => {
+            slot_offset := f.get_temporary(r)[].slot;
+            if slot_offset != -1 {
+                return(push_slot_addr(f, k, slot_offset));
             };
-            slot_offset = f.slot - slot_offset;
-            // Stack grows downwards and __stack_base points to the bottom of our frame. 
-            SP := f.retr;
-            @debug_assert(SP != QbeNull);
-            ins := make_ins(.add, k, QbeNull, SP, f.getcon(slot_offset.intcast()));
-            f.sel_wasm(ins&);
-            return();
-        };
+        }
+        fn RSlot() => return(push_slot_addr(f, k, r.rsval()));
+        @default => ();
     };
     f.emit(.push, k, QbeNull, r, QbeNull);
+}
+
+fn push_slot_addr(f: *Qbe.Fn, k: Qbe.Cls, slot_offset: i32) void = {
+    // TODO: i think i want to split the memory folding out from coming out of ssa form. 
+    //r = SLOT(slot_offset);
+    //if k == .Kl {
+    //    f.emit(.extuw, k, QbeNull, QbeNull, QbeNull);
+    //    k = Qbe.Cls.Kw;
+    //};
+    //slot_offset = f.slot - slot_offset;
+    // Stack grows downwards and __stack_base points to the bottom of our frame. 
+    SP := f.retr;
+    @debug_assert(SP != QbeNull);
+    ins := make_ins(.add, .Kl, QbeNull, SP, f.getcon(slot_offset.intcast()));
+    f.sel_wasm(ins&);
+}
+
+fn need_trunc(f: *Qbe.Fn, k: Qbe.Cls, r: Qbe.Ref) bool = {
+    k == .Kw && rtype(r) == .RTmp && f.get_temporary(r)[].cls == .Kl
 }
 
 fn wasm_pop(f: *Qbe.Fn, k: Qbe.Cls, r: Qbe.Ref) void = {
@@ -330,6 +351,8 @@ fn insert_blocks_for_conditional_phis(f: *Qbe.Fn) void = {
 // TODO: either actually use if/else or remove them
 Flow :: @enum(i64) (end, loop, block, if, else, br, br_if);
 
+// this is the only architecture of which the news has come to harvard.
+// there may be many others but they havent been discovered.
 fn wasm_flow(f: *Qbe.Fn) void = {
     fillpreds(f);
     fillrpo(f);
@@ -440,18 +463,19 @@ fn wasm_flow(f: *Qbe.Fn) void = {
             // insert the end of a loop
             push(b, make_ins(.flow, .Kw, QbeNull, INT(Flow.end), INT(b.visit.intcast())));
             l := loop_stack&.pop().unwrap();
-            @debug_assert_eq(l.end, b.id, "ICE: bad loop nesting");
+            @debug_assert_eq(l.end, b.id, "ICE: bad loop nesting %", { printfn(f, f.globals.debug_out); "" });
             @debug_assert_eq(l.entry, b.visit, "ICE: bad loop nesting");
         };
     };
 }
 
-emitter_for_wasm :: fn(f: *Qbe.Fn, o: Qbe.O, k: Qbe.Cls, r: Qbe.Ref, a0: Qbe.Ref, a1: Qbe.Ref) void = {
-    i := make_ins(o, k, r, a0, a1);
-    sel_wasm(f, i&);
-};
+// several operations that all interesting cpus have but we have to pretend don't exist 
+// and just hope the other side notices the pattern. waste of everyones time. 
+// TODO: i wonder if there's a blessed pattern you're supposed to use to make sure they fix it. 
+//       "idiom recognition" is the magic phrase. 
 
-// i hate this so much
+// use rotations to swap groups of 4 and then swap groups of 2.
+// same constants work for both widths because i truncate on emit.
 fn sel_byteswap(f: *Qbe.Fn, i: *Qbe.Ins) void = @emit_instructions((f = f, emit = emitter_for_wasm), (i.cls(), i.arg&[0], i.to), """
 @start
     %mask     =0 copy 18446462603027742720 # 0xFFFF0000FFFF0000
@@ -470,3 +494,20 @@ fn sel_byteswap(f: *Qbe.Fn, i: *Qbe.Ins) void = @emit_instructions((f = f, emit 
     %Odd_r    =0 rotr %Odd, 8
     %2        =0 or %Even_l, %Odd_r
 """);
+
+// o: !(nan|nan), uo: (nan|nan)
+fn sel_nan_cmp(f: *Qbe.Fn, i: *Qbe.Ins, cmp: Qbe.O, join: Qbe.O) void = {
+    f.emit(.pop, .Kw, i.to, QbeNull, QbeNull);
+    f.emit(join, .Kw, QbeNull, QbeNull, QbeNull);
+    f.emit(cmp, .Kw, QbeNull, QbeNull, QbeNull);
+    f.wasm_push(i.cls(), i.arg&[1]);
+    f.wasm_push(i.cls(), i.arg&[1]);
+    f.emit(cmp, .Kw, QbeNull, QbeNull, QbeNull);
+    f.wasm_push(i.cls(), i.arg&[0]);
+    f.wasm_push(i.cls(), i.arg&[0]);
+}
+
+emitter_for_wasm :: fn(f: *Qbe.Fn, o: Qbe.O, k: Qbe.Cls, r: Qbe.Ref, a0: Qbe.Ref, a1: Qbe.Ref) void = {
+    i := make_ins(o, k, r, a0, a1);
+    sel_wasm(f, i&);
+};

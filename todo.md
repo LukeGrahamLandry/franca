@@ -15,6 +15,8 @@
 - :TodoChangeMessageEmitDataEndToUseBakedValueInsteadOfBackendDat
 - adding #align was a compile speed regression
 - formalize ENABLE_INCREMENTAL in backend/arm64/emit (+ support on amd64)
+- `./q.out -t wasm32 -o target/out/q.wasm -cc backend/test/abi8.ssa -d AI`
+%�%.104 =w pop
 
 ## language consistancy
 
@@ -101,9 +103,15 @@ also stop pasting around code for handling the multi-part ops
   - BlockAlloc powers of 2
   - x64/arm/wasm/macho/elf but there's no winning there
   - boot but i really don't want to write the compiler again... so idk what to do about that
+  - some of the qbe ssa tests are generated: vararg2, strspn, strcmp, queen, mem3, cprime, abi8
 - extend hacky_incremental into something that can be used seriously 
 - finish amd64/isel/NEW_ADDR_FOLDING
-- argparse thing (like i started for examples/geo). im getting bored of 50 line switch every time
+- argparse thing (like i started for examples/geo). im getting bored of 50 line switch every time. 
+- as an extension of that it would be cool if all the demo programs could be both 
+and exe and a dylib so if you want to run from cli it parses to a struct and calls the impl,
+but if you're calling from a program you can import the struct, dlopen the thing, 
+and not need to serialize the arguments to a string. 
+- seperate out the platform specific fields of QbeModule
 
 ## tests
 
@@ -124,6 +132,7 @@ also stop pasting around code for handling the multi-part ops
 - make it clear that you can't do this: `franca self.fr && ./a.out driver.dylib run b.fr`. 
 it doesn't like that you stomp a.out, default_driver:run should pick a unique path probably. 
 or just default to jitting and force you to enable aot by specifying an output path. 
+- sort the array of test files so you can always diff the output without hoping the file system iterates in a consistant order
 
 ## error messages
 

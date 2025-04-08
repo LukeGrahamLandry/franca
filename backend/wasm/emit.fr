@@ -1,7 +1,7 @@
 //! - Wasm is a bit annoying because it's designed to be compact and fast to load, not to be output in one pass. 
 //!   For example, you can't know the index of any functions until you know how many imports there are. 
 //! - It requires structured control flow. 
-// TODO: rotr, rotl, byteswap, selCC, cas (?),  
+// TODO: cas (?)
 
 EmitWasmFn :: @struct(
     m: *QbeModule,
@@ -94,10 +94,10 @@ fn pack_locals(e: *EmitWasmFn) void = {
     // TODO: this probably isn't worth the time. 
     // Declaration of locals uses run-length-encoding so group by type to shrink the module. 
     k_ :: @const_slice(Qbe.Cls.Kw, .Kl, .Ks, .Kd);
-    wasm_type_ :: @const_slice(Wasm.ValType.I32, .I64, .F32, .F64);
     entries := 0;
     range(0, 4) { i |
-        k, wasm_type := (k_[i], wasm_type_[i]);
+        k := k_[i];
+        wasm_type := to_wasm_type(k);
         prev_locals := total_locals;
         range(Qbe.Tmp0, e.f.ntmp.zext()) { i |
             t := e.f.tmp.index(i);
@@ -120,7 +120,7 @@ fn pack_locals(e: *EmitWasmFn) void = {
 
 fn to_wasm_type(k: Qbe.Cls) Wasm.ValType = {
     wasm_type :: @const_slice(Wasm.ValType.I32, .I64, .F32, .F64);
-    wasm_type;  // HACK FIXME 
+    wasm_type;  // HACK FIXME :FUCKED
     xxx: i64 = k.raw().zext();
     wasm_type[xxx]
 }
@@ -200,11 +200,11 @@ fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
         e.a&.push(byte);
         if maybe_load(i) { size |
             e.a&.push(@as(u8) size.zext().trailing_zeros().trunc());  // align hint
-            e.a&.push(0);
+            e.a&.push(0);  // offset  TODO: use this
         };
         if maybe_store(i) { size | 
             e.a&.push(@as(u8) size.zext().trailing_zeros().trunc());  // align hint
-            e.a&.push(0);
+            e.a&.push(0);  // offset  TODO: use this
         };
         return();
     };
@@ -271,12 +271,10 @@ fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
                 e.op(.LocalGet);
                 leb128_unsigned(e.a&, local_index.zext());
             }
-            fn RSlot() => {
-                eprintln("TODO");
-            }
+            fn RSlot() => @panic("unlowered RSlot");
             @default => {
                 printfn(e.f, e.m.debug_out);
-                @panic("invalid argument for op push");
+                @panic("invalid argument for op push %", i.arg&[0]);
             };
         };
         fn pop() => {
@@ -305,7 +303,12 @@ fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
         }
         fn nop()    => ();
         fn dbgloc() => ();
-        fn sel1()   => e.op(.Select);
+        fn sel1()   => {
+            e.op(.Select);
+            leb128_unsigned(e.a&, 1);  // vector of types
+            ::enum(Wasm.ValType);
+            leb128_unsigned(e.a&, to_wasm_type(i.cls()).raw().zext()); 
+        }
         @default => @panic("TODO: wasm encoding for % %", i.op(), { printfn(e.f, e.f.globals.debug_out); "" });
     };
 }
@@ -485,6 +488,7 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
         // TODO: this will have to change if we want to allow frontends to create thier own wasm globals. 
     
         // Create a global for the stack pointer
+        memory_reserved = align_to(memory_reserved, 16);
         memory_reserved += stack_size;
         stack_base := memory_reserved;  // :WasmZeroPage
         
@@ -494,11 +498,11 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
                 push(buf, 1 + int(m.wasm_any_pare).trunc()); // length of globals vector
                 
                 // __stackbase
-                push(buf, @as(u8) Wasm.ValType.I32); // type
+                push(buf, @as(u8) Wasm.ValType.I64); // type
                 push(buf, 1); // mutable
                 
                 // initial value
-                push(buf, @as(u8) Wasm.Inst.I32_Const);
+                push(buf, @as(u8) Wasm.Inst.I64_Const);
                 leb128_signed(buf, stack_base);
                 push(buf, @as(u8) Wasm.Inst.End);
                 
@@ -523,6 +527,7 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
             leb128_unsigned(buf, m.exports.len);
             for m.exports& { id |
                 use_symbol(m, id) { s |
+                    @debug_assert_ne(s.got_lookup_offset, -1, "unassigned got_lookup_offset %", s.name);
                     leb128_unsigned(buf, s.name.len);
                     push_all(buf, s.name);
                     buf.push(@as(u8) Wasm.ImportType.Func);

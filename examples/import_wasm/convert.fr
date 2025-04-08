@@ -15,102 +15,192 @@
 
 // TODO: validation
 // TODO: tables, vector ops, call_indirect, br_table, br_if, drop, select, memory grow/init/size/copy/fill, data drop,
-//       T.eqz, clz, ctz, popcnt, rot, abs, ceil, floor, trunc, nearest, sqrt, min, max, copysign, trunc_sat, some other conversions
+//       T.eqz, abs, ceil, floor, trunc, nearest, sqrt, min, max, copysign, trunc_sat, some other conversions
 //       multiple return values, ref.*
 // TODO: provide standard c api so could run other people's tests? https://github.com/WebAssembly/wasm-c-api/blob/main/include/wasm.h
 // TODO: use fill_backend_vtable to toggle between recompiling 
 //       and using the host's backend when running as a driver 
 //       (see import_c for an example). 
 // TODO: add an examples/bf that uses this
-// TODO: add more serious auto tests
 
 fn main() void = {
     args := cli_args();
-    for args { arg | 
-        arg := arg.str();
+    logging := "";
+    i := 0;
+    wasm_file := "";
+    while => i < args.len {
+        arg := args[i].str(); i += 1;
+        if arg == "-d" {
+            @assert_lt(i, args.len, "expected arg after -d");
+            logging = args[i].str(); i += 1;
+        }
         if arg.ends_with(".wasm") {
-            //@eprint("Loading '%'", arg);
-            bytes := temp().read_to_string_or_crash(arg).items(); // :panic
-            //@eprintln(" (% bytes).", bytes.len);
-            module := QbeModule.zeroed();
-            init_default_module(module&, (type = .JitOnly, os = query_current_os(), arch = query_current_arch()), false);
-            a := libc_allocator;
-            wasm: LoadWasm = (
-                m = module&,
-                w = empty(a),
-                stack = list(a),
-                locals = empty(),
-                blocks = list(temp()),
-                preserve_franca_env = true,
-            );
-            p: ParseWasm = (w = wasm.w&, src = bytes);
-            or parse_wasm(p&) { e |
-                @panic("% (at byte index %)", e, p.cursor);
-            };
-            wasm&.load_module();
-            
-            buf := page_allocator.alloc(u8, 1.shift_left(32)); // wasm.w.memories[0].min.zext() * wasm_page_size);
-            wasm_context_pointer := u8.int_from_ptr(buf.ptr);
-            heap_base :: @static(u32) 0;
-            heap_base[] = trunc(buf.len - 1);
-            
-            if p.w.data.len > 0 {
-                @assert_eq(p.w.data.len, 1, "TODO: multiple datas");
-                data := wasm.w.data[0]&;
-                expr := data.active_offset_expr;
-                @assert_ne(expr.len, 0, "TODO: passive data");
-                off, k := const_eval_wasm_expr(expr.items());
-                @debug_assert_eq(k, .Kw, "offset expression");
-                buf.subslice(off, data.bytes.len).copy_from(data.bytes.items());
-            };
-            
-            module&.emit_suspended_inlinables();
-            
-            Exports :: @struct {
-                host :: @struct {
-                    write :: fn(ctx: *u8, ptr: u32, len: u32) void = {
-                        s: []u8 = (ptr = ctx.offset(ptr.zext()), len = len.zext());
-                        println(s);
+            @assert_eq(wasm_file, "", "can only specify one wasm file to run");
+            wasm_file = arg;
+        }
+    }
+
+    bytes := temp().read_to_string_or_crash(wasm_file).items(); // :panic
+    exec_wasm_file(Exports, bytes, logging);
+}
+
+fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str) void = {
+    //@eprintln(" (% bytes).", bytes.len);
+    module := QbeModule.zeroed();
+    init_default_module(module&, (type = .JitOnly, os = query_current_os(), arch = query_current_arch()), false);
+    a := libc_allocator;
+    module&.set_debug_types(logging, true);
+    wasm: LoadWasm = (
+        m = module&,
+        w = empty(a),
+        stack = list(a),
+        locals = empty(),
+        blocks = list(temp()),
+        preserve_franca_env = true,
+    );
+    p: ParseWasm = (w = wasm.w&, src = bytes);
+    or parse_wasm(p&) { e |
+        @panic("% (at byte index %)", e, p.cursor);
+    };
+    wasm&.load_module();
+    
+    buf := page_allocator.alloc(u8, 1.shift_left(32)); // wasm.w.memories[0].min.zext() * wasm_page_size);
+    wasm_context_pointer := u8.int_from_ptr(buf.ptr);
+    heap_base[] = trunc(buf.len - 1);
+    
+    if p.w.data.len > 0 {
+        @assert_eq(p.w.data.len, 1, "TODO: multiple datas");
+        data := wasm.w.data[0]&;
+        expr := data.active_offset_expr;
+        @assert_ne(expr.len, 0, "TODO: passive data");
+        off, k := const_eval_wasm_expr(expr.items());
+        @debug_assert_eq(k, .Kw, "offset expression");
+        buf.subslice(off, data.bytes.len).copy_from(data.bytes.items());
+    };
+    
+    module&.emit_suspended_inlinables();
+    
+    exports := comptime_exports(Exports);
+    each p.w.imports& { it |
+        name := @tfmt("%$%", it.name.items(), it.module.items());  // :leak
+        if exports.get(name) { addr |
+            module&.put_jit_addr(module&.intern(name), addr);
+        } else {
+            @println("ERROR: missing import '%'", name);
+        }
+    }
+    
+    module&.make_exec();
+    
+    main := p.w.exports&.items().index_of(fn(it) => it.name.items() == "main")
+        || @panic("expected export called 'main'");
+    main := p.w.exports[main].id;
+    n := wasm.functions[main.zext()];
+    f, _ := or module&.get_addr(n) {
+        @panic("couldn't find %: %", n, wasm.m.str(n));
+    };
+    //@println(">>> Calling %", wasm.m.str(n));
+    f := assume_types_fn(Arg = Ty(i64, u32, u32), Ret = i64, ptr = f);
+    result := f(wasm_context_pointer, 1, 0);
+    if result != 0 {
+        @eprintln(">>> returned %", result);
+    };
+    page_allocator.dealloc(buf);
+}
+
+heap_base :: @static(u32) 0;  // TODO: BAD!
+
+// TODO: make it easy to ship these as a binary form of the ir so you can inline accross host calls. 
+Exports :: @struct {
+    host :: @struct {
+        write :: fn(ctx: *u8, ptr: u32, len: u32) void = {
+            s: []u8 = (ptr = ctx.offset(ptr.zext()), len = len.zext());
+            println(s);
+        }
+    }
+    env :: @struct {
+        putchar :: fn(ctx: *u8, c: u8) void = {
+            s: []u8 = (ptr = c&, len = 1);
+            print(s);
+        }
+        puts :: fn(ctx: *u8, p: u32) void = {
+            s: CStr = (ptr = ctx.offset(p.zext()));
+            @println("%", s);
+        }
+        strlen :: fn(ctx: *u8, p: u32) i64 = {
+            s: CStr = (ptr = ctx.offset(p.zext()));
+            s.slow_len()
+        }
+        labs :: fn(ctx: *u8, i: i64) i64 = i.abs();
+        calloc :: fn(ctx: *u8, m: u32, n: u32) u32 = {  // HACK
+            heap_base[] -= align_to(m*n, 16);
+            heap_base[]
+        }
+        vprintf :: fn(ctx: *u8, fmt: u32, valist: u32) u32 = {
+            arg_p := ptr_cast_unchecked(u8, i64, ctx.offset(valist.zext()));
+            printf_impl(ctx, fmt, arg_p)
+        }
+        printf :: fn(ctx: *u8, fmt: u32, args: i64) u32 = {
+            printf_impl(ctx, fmt, args&)
+        }
+    }
+}
+
+printf_impl :: fn(ctx: *u8, fmt: u32, args: *i64) u32 = {
+    i := 0;
+    c :: fn(i) => ctx.offset(i + fmt.zext())[];
+    get_arg :: fn($T) T #generic => {
+        args[] = align_to(args[], ::align_of(T));
+        value := ptr_cast_unchecked(u8, T, ctx.offset(args[]))[];
+        args[] += ::size_of(T);
+        value
+    };
+    putchar :: Exports.env.putchar;
+    while => c(i) != 0 {
+        if c(i) != "%".ascii() {
+            putchar(ctx, c(i));  // :SLOW
+            i += 1;
+        } else {
+            i += 1;
+            @switch(c(i)) {
+                @case("l".ascii()) => {
+                    if c(i + 1) == "d".ascii() {
+                        i += 2;
+                        @print("%", get_arg(i64));
                     }
                 }
-                env :: @struct {
-                    putchar :: fn(ctx: *u8, c: u8) void = {
-                        s: []u8 = (ptr = c&, len = 1);
-                        print(s);
-                    }
-                    puts :: fn(ctx: *u8, p: u32) void = {
-                        s: CStr = (ptr = ctx.offset(p.zext()));
-                        @println("%", s);
-                    }
-                    labs :: fn(ctx: *u8, i: i64) i64 = i.abs();
-                    calloc :: fn(ctx: *u8, m: u32, n: u32) u32 = {  // HACK
-                        heap_base[] -= align_to(m*n, 16);
-                        heap_base[]
-                    }
+                @case("d".ascii()) => {
+                    i += 1;
+                    @print("%", get_arg(i32));
                 }
-            }
-            exports := comptime_exports(Exports);
-            // TODO: only do the ones they ask for 
-            each exports { k, v |
-                module&.put_jit_addr(module&.intern(k), v[]);
-            }
-            module&.make_exec();
-            
-            main := p.w.exports&.items().index_of(fn(it) => it.name.items() == "main")
-                || @panic("expected export called 'main'");
-            main := p.w.exports[main].id;
-            n := wasm.functions[main.zext()];
-            f, _ := or module&.get_addr(n) {
-                @panic("couldn't find %: %", n, wasm.m.str(n));
-            };
-            //@println(">>> Calling %", wasm.m.str(n));
-            f := assume_types_fn(Arg = i64, Ret = i64, ptr = f);
-            result := f(wasm_context_pointer);
-            if result != 0 {
-                @eprintln(">>> returned %", result);
+                @case("g".ascii()) => {
+                    i += 1;
+                    @print("%", get_arg(f64));
+                }
+                @case("c".ascii()) => {
+                    i += 1;
+                    putchar(ctx, get_arg(u32).trunc());
+                }
+                @case("s".ascii()) => {
+                    i += 1;
+                    p := get_arg(i64);  // TODO: this should be u32 but then the ir needs to know what's a pointer 
+                    
+                    // when this was in the Exports struct
+                    // this isn't what you want anyway but its still a compiler bug
+                    //puts(ctx, p);  // TODO: You can't have a void pointer 4582761636 as a constant :FUCKED
+                    
+                    s: CStr = (ptr = ctx.offset(p));
+                    @print("%", s);
+                }
+                @case("%".ascii()) => {
+                    putchar(ctx, c(i));  // :SLOW
+                    i += 1;
+                }
+                @default => ();
             };
         };
     };
+    0  // TODO: return the number of chars printed? 
 }
 
 // Take a struct like { Module :: { Func :: fn(); } } and create a map [func$module -> fnptr]
@@ -513,6 +603,7 @@ fn emit_the_code(self: *LoadWasm) void = {
             fn Drop() => {
                 self.stack&.pop().expect("stack for store drop");
             }
+            fn Select() => panic("TODO: select");
             @default => @panic("unhandled unstruction %", self.src[self.cursor - 1]);
         }
     }
@@ -617,9 +708,10 @@ fn compute_address(self: *LoadWasm, addr: Qbe.Ref, offset: i64) Qbe.Ref = {
     f := self.f;
     r0 := f.newtmp("a", .Kl);
     r1 := f.newtmp("a", .Kl);
-    r2 := f.newtmp("a", .Kl);
     f.emit(.extuw, .Kl, r0, addr, QbeNull);
     f.emit(.add, .Kl, r1, self.base_pointer, r0);
+    if(offset == 0, => return(r1));
+    r2 := f.newtmp("a", .Kl);
     f.emit(.add, .Kl, r2, r1, f.getcon(offset));
     r2
 }
