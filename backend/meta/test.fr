@@ -5,82 +5,35 @@
 // TODO: have an option to run jitted instead of creating a binary
 // TODO: don't just shit executables everywhere with fixed names. want to be able to run things in parallel. 
 
-HELP :: """
-[test.fr] [options] ['all' or list of .ssa files]
-    -v           show output on failure.  
-    -bin=./foo   test the executable './foo' instead of the default ('./backend/meta/qbe_frontend.fr')
-    -x64         target x64 instead of your native arch (useful for Rosetta 2) 
-    -arm         target arm64 instead of your native arch
-    -h           show this help text
-    -cc          use my c compiler (for test harnesses) instead of a system wide one
-    -w           target wasm32 and run with examples/import_wasm
-    -l           FIXME
-    -WIPskipfailing
-""";
+Args :: @struct {
+    // TODO: i want to allow the annotation on the end even when there's a default value
+    bin: Str  #help("use precompiled backend executable") = "./backend/meta/qbe_frontend.fr"; 
+    v:   bool #help("show output on failure") = false;
+    x64: bool #help("target x64 instead of your native arch (useful for Rosetta 2)") = false;
+    arm: bool #help("target arm64 instead of your native arch") = false;
+    h:   bool #help("show this help text") = false;
+    cc:  bool #help("use my c compiler (for test harnesses) instead of a system wide one") = false;
+    l:   bool #help("FIXME") = false;
+    w:   bool #help("target wasm32 and run with examples/import_wasm") = false;
+    WIPskipfailing: bool = false;
+    paths: []Str #rest = empty();
+    d: Str #help("log intermediate representation") = "";
+}
 
 // TODO: mkdir -p target/out chmod +x target/out/q.exe
 fn main() void = {
-    // TODO: cli args for these too
-    tests_folder := "backend/test";
-    qbe_bin := "./backend/meta/qbe_frontend.fr";
+    #use("@/lib/args.fr");
+    tests_folder := "backend/test";   // TODO: cli args for this too
+    args := parse_args(Args);
+    HELP :: collect_help(Args, "[test.fr] [options] ['all' or list of .ssa files]");
     
     to_run := Str.list(temp());
-    args := cli_args();
-    args := args.slice_pop_first();
-    verbose := false;
-    arch := query_current_arch();
-    i := 0;
-    flags := "";
-    use_llvm := false;
     wasm_runner: ?Str = .None;
-    WIPskipfailing := false;
-    iamthecompilernow := false;
-    while => i < args.len {
+    
+    for args.paths { arg |
         continue :: local_return;
-        arg := args[i].str(); i += 1;
         
-        if arg.starts_with("-bin=") {  // before the ends_with(".fr") check
-            qbe_bin = arg.slice(5, arg.len);
-            continue();
-        };
         if arg == "franca" || arg.ends_with(".fr") {
-            continue();
-        };
-        if arg.starts_with("-") {
-            @switch(arg) {
-                @case("-x86") => panic("did you mean -x64?");
-                @case("-x64") => {
-                    arch = .x86_64;  
-                };
-                @case("-arm") => {
-                    arch = .aarch64;  
-                };
-                @case("-v") => {
-                    verbose = true;
-                };
-                @case("-h") => {
-                    print(HELP);
-                    exit(0);
-                };
-                @case("-d") => {
-                    flags = args[i].str(); i += 1;
-                };
-                @case("-l") => {
-                    use_llvm = true;
-                };
-                @case("-w") => {
-                    wasm_runner = (Some = "./w.out");
-                    arch = .wasm32;
-                    iamthecompilernow = true;  // assume this until i can output linkable wasm
-                };
-                @case("-WIPskipfailing") => {
-                    WIPskipfailing = true;
-                };
-                @case("-cc") => {
-                    iamthecompilernow = true;
-                };
-                @default => @panic("unhandled flag '%'", arg);
-            };
             continue();
         };
         if arg == "all" {
@@ -100,7 +53,24 @@ fn main() void = {
         @panic("unknown argument %\n", arg);
     };
     
-    @assert(!WIPskipfailing || arch == .wasm32);
+    arch: Arch = @if_else {
+        @if(args.x64) => .x86_64;
+        @if(args.arm) => .aarch64;
+        @else => query_current_arch();
+    }
+    if args.h {
+        print(HELP);
+        exit(0);
+    };
+    if args.w {
+        wasm_runner = (Some = "./w.out");
+        arch = .wasm32;
+        args.cc = true;  // assume this until i can output linkable wasm
+        @assert(!args.x64 && !args.arm, "conflicting arch");
+    };
+    
+    @assert(!args.WIPskipfailing || arch == .wasm32);
+    @assert(!args.x64 || !args.arm, "conflicting arch");
    
     if to_run.is_empty() {
         eprintln(HELP);
@@ -108,18 +78,18 @@ fn main() void = {
     };
     passed := 0;
     failed := 0;
-    @eprintln("Testing '%'", qbe_bin);
-    if qbe_bin.ends_with(".fr") {
+    @eprintln("Testing '%'", args.bin);
+    if args.bin.ends_with(".fr") {
         eprintln("note: this is slow because it recompiles the backend from scratch for each test.");
     };
     for to_run { file |
         skip := false
         || (arch != .aarch64 && file.ends_with("-arm.ssa"))
         || (arch != .x86_64 && file.ends_with("-amd.ssa"))
-        || (WIPskipfailing && !expect_pass_on_wasm.contains(fn(it) => file.ends_with(@tfmt("%.ssa", it[]))))  // allocations georg
+        || (args.WIPskipfailing && !expect_pass_on_wasm.contains(fn(it) => file.ends_with(@tfmt("%.ssa", it[]))))  // allocations georg
         ;
         if !skip {
-            pass := run_one(qbe_bin, file, verbose, arch, flags, use_llvm, wasm_runner, iamthecompilernow);
+            pass := run_one(args.bin, file, args.v, arch, args.d, args.l, wasm_runner, args.cc);
             (@if(pass, passed&, failed&))[] += 1;
         } else {
             @println("%[skip]", f_pad(file, 40, .After));
@@ -129,7 +99,7 @@ fn main() void = {
         @println("\nAll is fine! (passed % tests)", passed);
     } else {
         @println("\n% of % tests failed.", failed, failed + passed);
-        if !verbose {
+        if !args.v {
             println("(run with -v to see output)");
         };
     };

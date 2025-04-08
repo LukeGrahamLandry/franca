@@ -106,12 +106,12 @@ also stop pasting around code for handling the multi-part ops
   - some of the qbe ssa tests are generated: vararg2, strspn, strcmp, queen, mem3, cprime, abi8
 - extend hacky_incremental into something that can be used seriously 
 - finish amd64/isel/NEW_ADDR_FOLDING
-- argparse thing (like i started for examples/geo). im getting bored of 50 line switch every time. 
-- as an extension of that it would be cool if all the demo programs could be both 
+- as an extension of argparse it would be cool if all the demo programs could be both 
 and exe and a dylib so if you want to run from cli it parses to a struct and calls the impl,
 but if you're calling from a program you can import the struct, dlopen the thing, 
 and not need to serialize the arguments to a string. 
 - seperate out the platform specific fields of QbeModule
+- finish curing stds
 
 ## tests
 

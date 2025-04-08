@@ -1,0 +1,85 @@
+fn parse_args($Args: Type) Args #generic = {
+    a: Args = ();
+    i := 1; // skip the first. it's the exe 
+    args := cli_args();
+    extra := Str.list(temp());
+    
+    is_rest :: fn(it: *Field) => !it.nullable_tag.is_null() && it.nullable_tag.contains(fn(it) => it[].name == (@symbol rest));
+    
+    rest_field :: {
+        f := Args.get_fields();
+        i := index_of(f, is_rest);
+        @match(i) {
+            fn Some(i) => (Some = f.index(i));
+            fn None() => (?*Field).None;
+        }
+    };
+    
+    while => i < args.len {
+        continue :: local_return;
+        arg := args[i].str();
+        i += 1;
+        if arg.starts_with("-") {
+            arg = arg.rest(1);
+            ::enum(Fields(Args));
+            inline_for_enum Fields(Args) { $ff |
+                f :: ff[];
+                @if(:: !is_rest(Args.get_fields().index(f.raw())))
+                if arg == f.name_str() {
+                    Args.get_field(a&, f)[] = parse_from_args(args, i&);
+                    continue();
+                };
+            };
+            @panic("invalid argument -%", arg);
+        } else {
+            // TODO: need to deal with skipping franca args when running jitted
+            //_ := rest_field || @panic("invalid argument '%'", arg);
+            extra&.push(arg);
+        };
+    };
+    
+    @if(::rest_field.is_some()) {
+        Args.get_field_ptr(a&, ::{ f := rest_field; f.Some })[] = extra.items();
+    }
+    
+    a
+}
+
+fn collect_help(Args: Type, prefix: Str) Str #fold = {
+    s := u8.list(ast_alloc());
+    @fmt(s&, "%\n", prefix);
+    
+    width := 0;
+    each Args.get_fields() { it |
+        width = max(width, it.name.str().len());
+    };
+    
+    each Args.get_fields() { it |
+        continue :: local_return;
+        has_tags := !it.nullable_tag.is_null();
+        is_rest  := has_tags && it.nullable_tag.contains(fn(i) => i.name == (@symbol rest));
+        if(is_rest, => continue());
+        ::FmtPad(Str);
+        @fmt(s&, "  -%  ", f_pad(it.name.str(), width, .After));
+        @if(has_tags) each it.nullable_tag { it |
+            if it.name == (@symbol help) {
+                s&.push_all(const_eval(Str)(it.args));
+            }
+        };
+        @fmt(s&, "\n");
+    };
+    s.items()
+}
+
+fn parse_from_args(args: []CStr, i: *i64) Str = {
+    s: CStr = parse_from_args(args, i);
+    s.str()
+}
+
+fn parse_from_args(args: []CStr, i: *i64) CStr = {
+    i[] += 1;
+    args[i[] - 1]
+}
+
+fn parse_from_args(args: []CStr, i: *i64) bool = 
+    true;

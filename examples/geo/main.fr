@@ -78,8 +78,10 @@ Args :: @struct {
     unsafe := false;
 };
 
+getargs :: import("@/lib/args.fr").parse_args;  // TODO: the way const shadowing works is stupid
+
 fn main() void = {
-    args := parse_args();
+    args := getargs(Args);
     state := zeroed State;
     state.env = get_dynamic_context();
     state.chunk_i = 0;
@@ -105,7 +107,7 @@ fn driver(vtable: *ImportVTable) void #export = {
     the_code := temp().read_to_string_or_crash("examples/geo/main.fr");  // TODO: don't depend on cwd.
     src&.push_all(the_code.items());
     
-    args := parse_args();
+    args := getargs(Args);
     opts := vtable.default_build_options();
     opts.retain_function_names = true;
     if args.unsafe {
@@ -160,40 +162,5 @@ fn driver(vtable: *ImportVTable) void #export = {
     @println(">>> link: %ms <<<", end - start);
 }
 SOKOL_MACOS_LINK_ARGS :: @array("-framework", "Metal", "-framework", "MetalKit", "-framework", "Cocoa", "-framework", "QuartzCore");
-
-// :ugly
-fn parse_args() Args = {
-    a: Args = ();
-    i := 0; 
-    args := cli_args();
-    while => i < args.len {
-        continue :: local_return;
-        arg := args[i].str();
-        i += 1;
-        if arg.starts_with("-") {
-            arg = arg.rest(1);
-            ::enum(Fields(Args));
-            inline_for_enum Fields(Args) { $ff |
-                f :: ff[];
-                if arg == f.name_str() {
-                    @inline_switch(Args.FieldType(f)) {
-                        @case(bool) => {
-                            Args.get_field(a&, f)[] = true;
-                            continue();
-                        }
-                        @case(CStr) => {
-                            Args.get_field(a&, f)[] = args[i];
-                            i += 1;
-                            continue();
-                        }
-                        @default => @panic("unhandled field type %", f);
-                    }
-                }
-            };
-            @panic("invalid argument -%", arg);
-        };
-    };
-    a
-}
 
 #include_std("backend/lib.fr");

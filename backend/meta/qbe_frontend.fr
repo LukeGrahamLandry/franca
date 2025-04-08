@@ -10,109 +10,64 @@
 
 INCLUDE_MY_C_COMPILER :: true;
 
+Args :: @struct {
+    t: TargetId #help("target environment") = .native;
+    o: Str #help("output file path") = "-";
+    d: Str #help("log intermediate representation") = "";
+    r: bool #help("jit and run main() without outputting an exe. can call functions from libc.") = false;
+    c: bool #help("output a relocatable object file") = false;
+    l: bool #help("TODO: output llvm ir instead") = false;
+    h: bool #help("show this help text") = false;
+    cc: bool #help("use my import_c to compile '>>> driver' comments") = false;
+    @"t?": bool #help("TODO: query the native target") = false;
+    paths: []Str #rest = empty();
+}
+
 fn main() void = { 
     // Have to smuggle this through qbe's parser callback that doesn't let you pass a data pointer.
     global_module :: @static(QbeModule);
     
-    outpath := "-";
+    #use("@/lib/args.fr");
+    HELP :: collect_help(Args, "qbe_frontend [OPTIONS] {file.ssa, -}");
+    args := parse_args(Args);
+    
+    ::enum(TargetId);
+    arch, os := args.t.splat_env();
+    if args.h {
+        print(HELP);
+        exit(0);
+    }
+    if args.@"t?" {
+        exit(0); // TODO: qbe prints the name of default target
+    }
+    
+    outpath := args.o;
     inpath := "-";
-    run := false;
-    debug := false;
-    args := cli_args();
-    pop :: fn() => {
-        args.ptr = args.ptr.offset(1);
-        args.len -= 1;
+    debug := args.d != "";
+    for args.paths { a |
+        if !a.ends_with(".fr") {// TODO: ugh don't care about the file extension 
+            if a.starts_with("-") && a != "-" {
+                @panic("Unknown option %", a);
+            };
+            inpath = a;
+        }
     };
-    flags := i64.list(temp());
-    goal: QbeOutputPurpose = .Exe;
-    arch := query_current_arch();
-    os := query_current_os();
-    use_llvm :: @static(bool) false;
-    iamtheccompilernow := false;
-    while => args.len > 0 {
-        a := args[0].str();
-        @switch(a) {
-            @case("-t?") => exit(0); // TODO: qbe prints the name of default target
-            @case("-t") => { 
-                pop();
-                target := args[0].str(); // TODO
-                @switch(target) {
-                    @case("arm64_apple") => { arch = .aarch64; os = .macos; };
-                    @case("amd64_apple") => { arch = .x86_64; os = .macos; };
-                    @case("amd64_sysv")  => { arch = .x86_64; os = .linux; };
-                    @case("arm64")       => { arch = .aarch64; os = .linux; };
-                    @case("wasm32") => { arch = .wasm32; os = .wasip1; };
-                    @default => @panic("unsupported target option '%'", target);
-                };
-                pop();
-            };
-            @case("franca") => pop();
-            @case("-o") => {
-                pop();
-                outpath = args[0].str();
-                pop();
-            };
-            @case("-d") => {
-                debug = true;
-                pop();
-                for args[0].str() { c |     
-                    found := false;
-                    for_enum Qbe.DebugKey { key | 
-                        if key.raw() == c.zext() {
-                            found = true;
-                        }
-                    };
-                    @assert(found, "invalid -d flag %", c);
-                    flags&.push(c.zext());
-                };
-                pop();
-            };
-            @case("-r") => {
-                run = true;
-                goal = .JitOnly;
-                pop();
-            };
-            @case("-h") => {
-                print(HELP);
-                exit(0);
-            };
-            @case("-c") => {
-                goal = .Relocatable;
-                pop();
-            };
-            @case("-l") => {
-                use_llvm[] = true;
-                pop();
-            };
-            @case("-cc") => {
-                @assert(INCLUDE_MY_C_COMPILER, "didn't INCLUDE_MY_C_COMPILER can't -cc");
-                iamtheccompilernow = true;
-                pop();
-            };
-            @default => {
-                if a.ends_with(".fr") {// TODO: ugh don't care about the file extension 
-                    pop();
-                } else {
-                    if a.starts_with("-") && a != "-" {
-                        @panic("Unknown option %", a);
-                    };
-                    inpath = a;
-                    pop();
-                }
-            };
-        };
+    goal: QbeOutputPurpose = @if_else {
+        @if(args.r) => .JitOnly;
+        @if(args.c) => .Relocatable;
+        @else => .Exe;
     };
+    @assert(!args.cc || INCLUDE_MY_C_COMPILER, "didn't INCLUDE_MY_C_COMPILER can't -cc");
+    @assert(!(args.c && args.r), "conflicting output type");
     init_default_module(global_module, (type = goal, os = os, arch = arch), false);
-    for flags { d | 
-        global_module[].debug.items()[d] = true;
-    };
-    if use_llvm[] {
+    set_debug_types(global_module, args.d, true);
+    if args.l {
         @panic("TODO: update for Dat2");
         // use_llvm_backend(global_module);
     };
     
     ::if(Fd);
-    outfile := if run {    
+    outfile := if args.r {    
         open_trunc(@as(CStr) "/dev/null").unwrap()
     } else {
         if outpath == "-" {
@@ -121,7 +76,6 @@ fn main() void = {
             open_trunc(outpath.maybe_borrow_cstr(temp())) || @panic("failed to open output '%'", outpath)
         }
     };
-    handle_dbg :: fn(s: CStr) void = ();
     
     handle_fn :: fn(fnn: *Qbe.Fn) void = {
         run_qbe_passes(fnn);
@@ -133,11 +87,11 @@ fn main() void = {
     src&.push_all("\n"); // HACK
     src := src.items();
     parse :: import("@/backend/meta/parse.fr").parse_top_level;
-    res := parse(global_module, src, handle_data, handle_fn, iamtheccompilernow);
+    res := parse(global_module, src, handle_data, handle_fn, args.cc);
     if res&.is_err() {
         panic(res.Err);
     };
-    @if(INCLUDE_MY_C_COMPILER) if iamtheccompilernow {
+    @if(INCLUDE_MY_C_COMPILER) if args.cc {
         #use("@/examples/import_c/lib.fr");
         m := global_module;
         c := Compile.Ctx.zeroed();
@@ -176,7 +130,7 @@ fn main() void = {
         write(outfile&, chunk);
     };
     @if(outpath != "-") { close(outfile); };
-    if run {
+    if args.r {
         @if(is_linking_libc()) global_module.fill_from_libc();
         global_module.make_exec();
         f := or global_module.get_addr("main") {
@@ -187,6 +141,23 @@ fn main() void = {
         exit(status);
     };
     exit(0);
+}
+
+TargetId :: @enum(i64) (native, arm64_apple, amd64_apple, amd64_sysv, arm64, wasm32);
+fn splat_env(t: TargetId) Ty(Arch, Os) = @match(t) {
+    fn arm64_apple() => (.aarch64, .macos);
+    fn amd64_apple() => (.x86_64, .macos);
+    fn amd64_sysv()  => (.x86_64, .linux);
+    fn arm64()       => (.aarch64, .linux);
+    fn wasm32()      => (.wasm32, .wasip1);
+    fn native()      => (query_current_arch(), query_current_os());
+};
+
+// TODO: use #where
+fn parse_from_args(args: []CStr, i: *i64) TargetId = {
+    n: Str = parse_from_args(args, i);
+    t := TargetId.from_name(n);
+    t || @panic("invalid target '%'", n)
 }
 
 // This is not what you want if you care about cross compiling!
@@ -214,12 +185,3 @@ fn fill_from_libc(self: *QbeModule) void = {
         };
     };
 }
-
-HELP :: """qbe_frontend [OPTIONS] {file.ssa, -}
-	-h          prints this help.
-	-o file     output to file.
-	-d <flags>  dump debug information.
-	-r          jit and run main() without outputting asglobal_module.
-	            can call functions from libc.
-	-l          output llvm ir instead
-""";
