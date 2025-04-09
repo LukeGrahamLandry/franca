@@ -782,14 +782,32 @@ fn finish_layout_deep(self: *SelfHosted, ty: Type) void = {
 // TODO: supporting #align makes it much slower (30ms ??) which is really unfortunate FIXME but i need it for now
 //       i dont understand how this can take so long when the branch is so predictable. 
 //       ohhhh, it's still slow even if you `if false {` which the backend will remove. 
-//       so it's probably just that #where is really really slow. thats bad! very very bad! 
-//       -- Mar 27
-fn alignment(self: *SelfHosted, f: *Field, info: *TypeMeta) i64 #inline = {
-    @if(!f.nullable_tag.is_null()) // redundant. 
-    if f.get_tag(Flag.align.ident()) { a | 
-        res := self.poll_in_place(i64, => self.eval(a.args&, i64));
-        res := self.unwrap_report_error(i64, res);
-        return res;
+//       so it's probably just that #where is really really slow. thats bad! very very bad!
+//       no it's not that because the first run after you comment it out is still slow. 
+//       -- Mar 27 
+//       this costs 40ms somehow 
+//       in fact, the !null case is NEVER taken in the compiler, 
+//       you're telling me a correctly predicted branch costs 40ms/16427 = 2.4us? really? 
+//       its still slow if that's `if false`, which gets sccp-ed out (i can check asm). 
+//       so ok back to my theory of the problem is compile time. 
+//       #inline doesn't matter
+//       0: >>> [CPU Time] frontend: 1007ms, codegen: 475ms
+//       then comment out condition
+//       1: >>> [CPU Time] frontend: 1013ms, codegen: 476ms
+//       2: >>> [CPU Time] frontend: 976ms, codegen: 434ms
+//       so since 1 was slow. the problem can't be the time to sema the slow code. 
+//       the slow thing is the generated code. 
+//       ohhh, hmmmm, this is unfortunate. maybe it's about spilling locals. 
+//       the first diff is fast saves x19-x22 and slow saves x19-x25. 
+//       dont really understand how it can change the backend time so much as well. 
+//       -- Apr 9
+fn alignment(self: *SelfHosted, f: *Field, info: *TypeMeta) i64 = {
+    if f.nullable_tag.is_null() {  // redundant. 
+        if f.get_tag(Flag.align.ident()) { a | 
+            res := self.poll_in_place(i64, => self.eval(a.args&, i64));
+            res := self.unwrap_report_error(i64, res);
+            return res;
+        };
     };
     info.align_bytes.zext()
 }

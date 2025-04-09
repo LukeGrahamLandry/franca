@@ -1,3 +1,21 @@
+## (Apr 9)
+
+found something that is maybe really useful for me: 
+https://docs.kernel.org/userspace-api/landlock.html
+because im kinda freaked out that like the first time i run some tests after changing something in the backend, 
+maybe i broke something and oops the register allocator put the wrong number there and 
+now your syscall changed to be deleting an important file or whatever. 
+because like when random garbage happens by mistake because the compiler broke while experimenting, 
+you might catch the bug immediately but you still had to run it once and then you're 
+just getting lucky that most permutations of a given program are crash and not do something scary. 
+a simple example might be oops swapped the read syscall to write so instead of reading all your 
+source files into this uninitialized memory, i wrote over all your source files with garabge. 
+it would be nice to have guarentees against that. 
+
+eventually i want to do some sort of capabilities thing (as a language? or just in the libraries?) 
+to make it easy to say hey my png library can't make http request or whatever. 
+but anything i do like that needs to depend on the compiler working but one of the things 
+i want to defend against is a buggy compiler stomping on stuff. 
 
 ## (Apr 7)
 

@@ -132,7 +132,7 @@ and not need to serialize the arguments to a string.
 - make it clear that you can't do this: `franca self.fr && ./a.out driver.dylib run b.fr`. 
 it doesn't like that you stomp a.out, default_driver:run should pick a unique path probably. 
 or just default to jitting and force you to enable aot by specifying an output path. 
-- sort the array of test files so you can always diff the output without hoping the file system iterates in a consistant order
+- sort the array of test files so you can always diff the output without hoping the file system iterates in a consistant order 
 
 ## error messages
 
@@ -245,6 +245,7 @@ need to support them being different at comptime and runtime in a uniform way.
 - nested array syntax is kinda ass. `Symbol.Array(2).Array(3)` and `Array(Array(Symbol, 2), 3)` 
 is much worse than zig's `[3][2]Symbol`, even c's `Symbol the_name_in_the_middle[3][2]` 
 has the numbers in the right order at least. rust has my problem too `[[Symbol; 2]; 3]` but nicer special case syntax for it. 
+- bit flags, @tagged abi. see sys/linux/LandLock
 
 ##
 

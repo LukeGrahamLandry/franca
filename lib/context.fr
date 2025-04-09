@@ -20,7 +20,8 @@ DefaultContext :: @struct(
 // note: whatever you had in the context at comptime is NOT baked into your program (unlike all other reachable memory).
 // For jitted code, you inherit the compiler's context. (TODO: maybe that should only be for comptime/drivers)
 franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CStr) void = {
-    if(query_current_os() == .linux, => fix_stack_linux(argc&, argv&, envp&));
+    os := import("@/lib/sys/process.fr")'query_current_os();
+    if(os == .linux, => fix_stack_linux(argc&, argv&, envp&));
 
     CAPTURE :: @static(@FnPtr() void);
     CAPTURE[] = user;
@@ -248,3 +249,24 @@ fn set_new_thread_id(ctx: *DefaultContext) void= {
     NEXT_THREAD_ID :: @static(i64) 1;  // :ThreadIdStartsAtOne
     ctx.thread_index = i64.atomic_inc(NEXT_THREAD_ID);
 }
+
+// - We saved (argc, argv) from the entry point (but someone might have changed it in the context).  
+// - The memory returned here is shared with other threads. So it's probably a bad plan to mutate it. 
+fn cli_args() []CStr = {
+    context(DefaultContext)[].cli_arguments
+}
+
+// - We saved (envp) from the entry point (but someone might have changed it in the context).  
+// - Have to iterate every time you look something up, so if you want multiple you're better off writing the loop yourself. 
+// - The memory returned here is shared with other threads. So it's probably a bad plan to mutate it. 
+// - fn getenv(name: CStr) CStr #libc;
+fn get_environment_variable(name: Str) ?CStr = {
+    envp := context(DefaultContext)[].environment_variables;
+    while => !envp[].ptr.is_null() {
+        if starts_with(envp[], name) && envp[][name.len] == "=".ascii() {
+            return(Some = (ptr = envp[].ptr.offset(name.len + 1)));
+        };
+        envp = envp.offset(1);
+    };
+    .None
+}    

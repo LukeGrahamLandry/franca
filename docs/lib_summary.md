@@ -26,6 +26,7 @@ available to every program (you can access them with `import()` or `#use`).
 - dynamic_lib
 - jump: dynamic nonlocal returns (setjmp/longjmp)
 - sort
+- args: very simple/limited cli argument parsing by reflecting on struct fields 
 
 ## backend
 
