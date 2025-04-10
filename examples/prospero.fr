@@ -1,0 +1,221 @@
+// https://www.mattkeeter.com/projects/prospero
+// - at comptime, fetch thier examples and parse them into a simple Program struct to embed in the exe. 
+
+AstExternal :: import("@/compiler/ast_external.fr");
+#include_std("backend/lib.fr");
+#include_std("compiler/worker.fr");
+
+fn main() void = {
+    vtable := ImportVTable.zeroed();
+    AstExternal'fill_backend_vtable(vtable&);
+    import("@/lib/crash_report.fr")'hook_backtrace();
+    impl(vtable&);
+}
+
+fn driver(vtable: *ImportVTable) void = 
+    impl(vtable);
+
+fn impl(v: *ImportVTable) void = {
+    programs := :: collect_examples(ast_alloc());
+    m := zeroed QbeModule;
+    init_default_module_dyn(m&, v, (type = .JitOnly, os = query_current_os(), arch = query_current_arch()));
+    //m.debug["P".char()] = true;
+    each programs { p |
+        mark := mark_temporary_storage();
+        f := temp().box(Qbe.Fn);
+        default_init(f, m&);
+        compile_program(f, p);
+        run_qbe_passes(f);
+        reset_temporary_storage(mark);
+    };
+    
+    imports := @slice("fmax", "fmin", "log", "exp", "sin", "cos", "sqrt", "fabs");
+    Dyn :: import("@/lib/dynamic_lib.fr");
+    for find_os_libc_dylib() { libc_path | 
+        if Dyn'open(libc_path) { lib |
+            for imports { name |
+                n := m&.intern(name);
+                if lib.get(name) { found |
+                    put_jit_addr(m&, n, found);
+                }
+            };
+        };
+    };
+    m&.emit_suspended_inlinables();
+    make_exec(m&);
+    
+    s := "prospero";
+    f := get_addr(m&, s).unwrap();
+    f := bit_cast_unchecked(rawptr, @FnPtr(x: f64, y: f64, z: f64) f64, f);
+    out := u8.list(temp());
+    @fmt(out&, "P3 1024 1024 255\n");
+    range_rev(0, 1024) { y |
+        range(0, 1024) { x |
+            hit := f(x.float() / 1024.0 * 2.0 - 1.0, y.float() / 1024.0 * 2.0 - 1.0, 0.0) > 0.0;
+            c := @if(hit, 0, 255);
+            @fmt(out&, "% % % ", c, c, c);
+        };
+        @fmt(out&, "\n");
+    };
+    print(out.items());
+}
+
+fn compile_program(f: *Qbe.Fn, p: *Program) void = {
+    vars := @slice(f.newtmp("x", .Kd), f.newtmp("y", .Kd), f.newtmp("z", .Kd));
+    vals := temp().alloc_init(Qbe.Ref, p.o.len, fn(_) => f.newtmp("v", .Kd));
+    f.start = temp().box_zeroed(Qbe.Blk);
+    f.start.ins = new(vals.len);
+    f.nblk = 1;
+    f.lnk.id = f.globals.intern(p.name);
+    emit :: fn(f: *Qbe.Fn, o: Qbe.O, k: Qbe.Cls, r: Qbe.Ref, a: Qbe.Ref, b: Qbe.Ref) void = { f.start.push(make_ins(o, k, r, a, b)); };
+    
+    for vars { v |
+        f.emit(.par, .Kd, v, QbeNull, QbeNull);
+    };
+    f.start.jmp = (type = .retd, arg = vals[vals.len - 1]);
+    
+    range(0, p.o.len) { i |
+        r, a, b := (vals[i], vals[p.a[i].zext()], vals[p.b[i].zext()]);
+        @match(p.o[i]) {
+            fn const() => f.emit(.copy, .Kd, r, f.getcon(p.consts[p.a[i].zext()].bitcast()), QbeNull);
+            fn var() => f.emit(.copy, .Kd, r, vars[p.a[i].zext()], QbeNull);
+            fn neg() => f.emit(.neg, .Kd, r, a, QbeNull);
+            fn add() => f.emit(.add, .Kd, r, a, b);
+            fn sub() => f.emit(.sub, .Kd, r, a, b);
+            fn mul() => f.emit(.mul, .Kd, r, a, b);
+            fn div() => f.emit(.div, .Kd, r, a, b);
+            fn sqrt() => f.call("sqrt", r, a, .None);
+            fn exp()  => f.call("exp", r, a, .None);
+            fn ln()   => f.call("log", r, a, .None);
+            fn cos()  => f.call("cos", r, a, .None);
+            fn sin()  => f.call("sin", r, a, .None);
+            fn abs()  => f.call("fabs", r, a, (Some = b));
+            fn max()  => f.call("fmax", r, a, (Some = b));
+            fn min()  => f.call("fmin", r, a, (Some = b));
+        };
+    };
+    
+    call :: fn(f: *Qbe.Fn, name: Str, r: Qbe.Ref, a: Qbe.Ref, b: ?Qbe.Ref) void = {
+        name := f.globals.intern(name);
+        f.emit(.arg, .Kd, QbeNull, a, QbeNull);
+        if b { b | 
+            f.emit(.arg, .Kd, QbeNull, b, QbeNull);
+        };
+        f.emit(.call, .Kd, r, f.symcon(name), QbeNull);
+    }
+}
+
+Operation :: @enum(u8) (
+    const,  // consts[a]
+    var,    // (x, y)[a]
+    neg, sqrt, abs, exp, ln, cos, sin, // unary(a)
+    add, sub, mul, div, max, min,  // binary(a, b)
+);
+
+Program :: @struct {
+    name: Str;
+    consts: []f64;
+    o: []Operation;
+    a: []u16;
+    b: []u16;
+}
+
+fn collect_examples(a: Alloc) []Program = {
+    ::import("@/examples/testing.fr");
+    
+    programs := Program.list(a);
+    folder   := fetch_or_crash("https://github.com/mkeeter/fidget/archive/baef3e38653fc5deecd48b730ca0e234e6d01f79.zip", 827878, "1224f8f982fe891e501c9d4a6aa0a4abb03e65022ee3118dccd7f17c2f3f7105", "fidget-baef3e38653fc5deecd48b730ca0e234e6d01f79");
+    walk_directory(@fmt_cstr("%/models", folder)) { e |
+        if e.name.ends_with(".vm") {
+            m := mark_temporary_storage();  // TODO: if not temp()
+            n := e.name.slice(0, e.name.len - 3);
+            s := temp().read_to_string_or_crash(@tfmt("%/models/%", folder, e.name)).items();
+            p := parse_program(a, n, s);
+            programs&.push(p);
+            reset_temporary_storage(m);
+        };
+    };
+    
+    programs.items()
+}
+
+fn parse_program(al: Alloc, name: Str, s: Str) Program = {
+    #use("@/lib/collections/map.fr");
+    consts, o, a, b := (f64.list(temp()), Operation.list(temp()), u16.list(temp()), u16.list(temp()));
+    names: HashMap(Str, u16) = init(temp());
+    
+    if true {
+        break :: local_return;
+        i := 0;
+        while => i < s.len {
+            continue :: local_return;
+            if(i >= s.len, => break());
+            while => s[i].is_ascii_whitespace() {
+                i += 1;
+                if(i >= s.len, => break());
+            }
+            if s[i] == "#".ascii() {
+                while => s[i] != "\n".ascii() {
+                    i += 1;
+                }
+                continue();
+            }
+            
+            eat_word :: fn() Str => {
+                while => s[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+                start := i;
+                while => !s[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+                s.slice(start, i)
+            }
+            eat_arg :: fn() u16 => {
+                s := eat_word();
+                names&.get(s) || @panic("undeclared variable '%'", s)
+            }
+            
+            name := eat_word();
+            names&.insert(name, o.len.trunc());
+            op := eat_word();
+            
+            (o2: Operation, a2: u16, b2: u16) := @switch(op) {
+                @case("const") => {
+                    s := @fmt_cstr("%", eat_word());
+                    atof :: fn(s: CStr) f64 #libc;  // TODO: write my own 
+                    consts&.push(atof(s));
+                    (.const, consts.len.sub(1).trunc(), 0)
+                }
+                @case("var-x") => (.var, 0, 0);
+                @case("var-y") => (.var, 1, 0);
+                @case("var-z") => (.var, 2, 0);
+                @case("square") => {
+                    x := eat_arg();
+                    (.mul, x, x)
+                }
+                @default => {
+                    ::enum(Operation);
+                    o := Operation.from_name(op) 
+                        || @panic("invalid operation '%' in '%'", op, name);
+                    a := eat_arg();
+                    b := @if(o.raw() >= Operation.add.raw(), eat_arg(), 0);
+                    (o, a, b)
+                };
+            };
+            o&.push(o2);
+            a&.push(a2);
+            b&.push(b2);
+            continue();
+        }
+    }
+    //@eprintln("% is % bytes", name, consts.len*8 + o.len*3*2);
+    ::[]u16; ::[]Operation; ::[]f64;
+    (
+        name = name.shallow_copy(al), 
+        consts = consts.items().shallow_copy(al),
+        o = o.items().shallow_copy(al),
+        a = a.items().shallow_copy(al),
+        b = b.items().shallow_copy(al),
+    )
+}
