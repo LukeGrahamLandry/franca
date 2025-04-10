@@ -1,5 +1,9 @@
 // https://www.mattkeeter.com/projects/prospero
-// - at comptime, fetch thier examples and parse them into a simple Program struct to embed in the exe. 
+// They've got some ssa programs that represent pretty pictures. 
+// - at comptime, fetch thier examples and parse them into a simple Program struct to embed in the exe
+// - at runtime, generate ir and use my jit to compile the functions
+// - call the function for each pixel and write out a ppm image
+// note: only the 2d examples work 
 
 AstExternal :: import("@/compiler/ast_external.fr");
 #include_std("backend/lib.fr");
@@ -19,8 +23,8 @@ fn impl(v: *ImportVTable) void = {
     programs := :: collect_examples(ast_alloc());
     m := zeroed QbeModule;
     init_default_module_dyn(m&, v, (type = .JitOnly, os = query_current_os(), arch = query_current_arch()));
-    //m.debug["P".char()] = true;
     each programs { p |
+        continue :: local_return;
         mark := mark_temporary_storage();
         f := temp().box(Qbe.Fn);
         default_init(f, m&);
@@ -29,35 +33,43 @@ fn impl(v: *ImportVTable) void = {
         reset_temporary_storage(mark);
     };
     
-    imports := @slice("fmax", "fmin", "log", "exp", "sin", "cos", "sqrt", "fabs");
-    Dyn :: import("@/lib/dynamic_lib.fr");
-    for find_os_libc_dylib() { libc_path | 
-        if Dyn'open(libc_path) { lib |
-            for imports { name |
-                n := m&.intern(name);
-                if lib.get(name) { found |
-                    put_jit_addr(m&, n, found);
-                }
-            };
-        };
-    };
-    m&.emit_suspended_inlinables();
-    make_exec(m&);
+    finalize_module(m&);
     
     s := "prospero";
-    f := get_addr(m&, s).unwrap();
+    f := get_addr(m&, s) || @panic("missing demo '%'", s);
     f := bit_cast_unchecked(rawptr, @FnPtr(x: f64, y: f64, z: f64) f64, f);
     out := u8.list(temp());
-    @fmt(out&, "P3 1024 1024 255\n");
+    draw(out&, f);
+    print(out.items());
+}
+
+fn draw(out: *List(u8), f: @FnPtr(x: f64, y: f64, z: f64) f64) void = {
+    @fmt(out, "P3 1024 1024 255\n");
     range_rev(0, 1024) { y |
         range(0, 1024) { x |
             hit := f(x.float() / 1024.0 * 2.0 - 1.0, y.float() / 1024.0 * 2.0 - 1.0, 0.0) > 0.0;
             c := @if(hit, 0, 255);
-            @fmt(out&, "% % % ", c, c, c);
+            @fmt(out, "% % % ", c, c, c);
         };
-        @fmt(out&, "\n");
+        @fmt(out, "\n");
     };
-    print(out.items());
+}
+
+fn finalize_module(m: *QbeModule) void = {
+    imports := @slice("log", "exp", "sin", "cos", "fabs");
+    Dyn :: import("@/lib/dynamic_lib.fr");
+    for find_os_libc_dylib() { libc_path | 
+        if Dyn'open(libc_path) { lib |
+            for imports { name |
+                n := m.intern(name);
+                if lib.get(name) { found |
+                    put_jit_addr(m, n, found);
+                }
+            };
+        };
+    };
+    m.emit_suspended_inlinables();
+    make_exec(m);
 }
 
 fn compile_program(f: *Qbe.Fn, p: *Program) void = {
@@ -67,7 +79,7 @@ fn compile_program(f: *Qbe.Fn, p: *Program) void = {
     f.start.ins = new(vals.len);
     f.nblk = 1;
     f.lnk.id = f.globals.intern(p.name);
-    emit :: fn(f: *Qbe.Fn, o: Qbe.O, k: Qbe.Cls, r: Qbe.Ref, a: Qbe.Ref, b: Qbe.Ref) void = { f.start.push(make_ins(o, k, r, a, b)); };
+    f.lnk.export = true;
     
     for vars { v |
         f.emit(.par, .Kd, v, QbeNull, QbeNull);
@@ -84,17 +96,20 @@ fn compile_program(f: *Qbe.Fn, p: *Program) void = {
             fn sub() => f.emit(.sub, .Kd, r, a, b);
             fn mul() => f.emit(.mul, .Kd, r, a, b);
             fn div() => f.emit(.div, .Kd, r, a, b);
-            fn sqrt() => f.call("sqrt", r, a, .None);
+            fn sqrt() => f.emit(.sqrt, .Kd, r, a, QbeNull);
             fn exp()  => f.call("exp", r, a, .None);
             fn ln()   => f.call("log", r, a, .None);
             fn cos()  => f.call("cos", r, a, .None);
             fn sin()  => f.call("sin", r, a, .None);
             fn abs()  => f.call("fabs", r, a, (Some = b));
-            fn max()  => f.call("fmax", r, a, (Some = b));
-            fn min()  => f.call("fmin", r, a, (Some = b));
+            fn max()  => f.emit(.max, .Kd, r, a, b);
+            fn min()  => f.emit(.min, .Kd, r, a, b);
         };
     };
     
+    emit :: fn(f: *Qbe.Fn, o: Qbe.O, k: Qbe.Cls, r: Qbe.Ref, a: Qbe.Ref, b: Qbe.Ref) void = { 
+        f.start.push(make_ins(o, k, r, a, b)); 
+    }
     call :: fn(f: *Qbe.Fn, name: Str, r: Qbe.Ref, a: Qbe.Ref, b: ?Qbe.Ref) void = {
         name := f.globals.intern(name);
         f.emit(.arg, .Kd, QbeNull, a, QbeNull);
@@ -208,9 +223,8 @@ fn parse_program(al: Alloc, name: Str, s: Str) Program = {
             b&.push(b2);
             continue();
         }
-    }
-    //@eprintln("% is % bytes", name, consts.len*8 + o.len*3*2);
-    ::[]u16; ::[]Operation; ::[]f64;
+    };
+    
     (
         name = name.shallow_copy(al), 
         consts = consts.items().shallow_copy(al),

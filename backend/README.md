@@ -39,6 +39,7 @@ You can still print out the ir as human readable text between passes and modify 
   (in my brief profiling qbe -O2, it spends 40% of its time parsing the input text. i don't know how that's possible, maybe apple's fgetc is slow).
 - Added some instructions
   - bit manipulation: byte swap, rotate left/right, count trailing/leading zeros, count ones
+  - floats: sqrt, min, max
   - atomic compare-and-swap 
   - conditional select (ie. `a ? b : c`)
   - syscall

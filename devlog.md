@@ -17,6 +17,36 @@ to make it easy to say hey my png library can't make http request or whatever.
 but anything i do like that needs to depend on the compiler working but one of the things 
 i want to defend against is a buggy compiler stomping on stuff. 
 
+---
+
+- was reminded of https://www.mattkeeter.com/projects/prospero/ and did one with my jit.
+hella slow but i love it anyway. so neat to see the math spit out words. 
+- fixed bug in make_exec() where it wouldn't work if the code spanned multiple pages. 
+no idea what i was thinking when i typed that. yikes! 
+but previously it was only used for `qbe_frontend -r` 
+(which i don't test because i didn't used to have -cc) 
+so this was the first real stress of it. 
+- added a float sqrt instruction to the backend. 
+reassuringly, its the same speed as libc on examples/toy/pi.fr (1.5s hard vs 4.1s soft)
+but saves a lot of spilling on prospero i guess. 
+- added instructions for float min/max
+
+```
+franca driver.dylib build examples/prospero.fr -o a.out -unsafe && hyperfine "./a.out > /dev/null"
+libc: 3.782 s ±  0.024 s 
+sqrt: 3.445 s ±  0.008 s
+fmin: 2.576 s ±  0.022 s
+fmax: 1.557 s ±  0.002 s
+(for reference some other guy's cranelift one is 0.673s on my computer so mine is still super slow)
+```
+
+I could support sqrt/min/max for ints 
+but they don't give me cpu instructions for that so meh, 
+it would just be for symmetry. 
+
+TODO: sqrt/min/max on amd64
+TODO: test backend with -r now that i have -cc
+
 ## (Apr 7)
 
 what the actual fuck?? am i going insane??? 
