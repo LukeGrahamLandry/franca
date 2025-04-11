@@ -15,12 +15,13 @@ Args :: @struct {
     cc:  bool #help("use my c compiler (for test harnesses) instead of a system wide one") = false;
     l:   bool #help("FIXME") = false;
     w:   bool #help("target wasm32 and run with examples/import_wasm") = false;
+    jit: bool #help("don't generate binaries, just run jitted code in memory.") = false;
     WIPskipfailing: bool = false;
     paths: []Str #rest = empty();
     d: Str #help("log intermediate representation") = "";
 }
 
-// TODO: mkdir -p target/out chmod +x target/out/q.exe
+// TODO: mkdir -p target/out 
 fn main() void = {
     #use("@/lib/args.fr");
     tests_folder := "backend/test";   // TODO: cli args for this too
@@ -66,9 +67,9 @@ fn main() void = {
     if args.w {
         wasm_runner = (Some = "./w.out");
         arch = .wasm32;
-        args.cc = true;  // assume this until i can output linkable wasm
         @assert(!args.x64 && !args.arm, "conflicting arch");
     };
+    args.cc = args.cc || args.jit || args.w;  // assume this until i can output linkable wasm
     
     @assert(!args.WIPskipfailing || arch == .wasm32);
     @assert(!args.x64 || !args.arm, "conflicting arch");
@@ -90,7 +91,7 @@ fn main() void = {
         || (args.WIPskipfailing && !expect_pass_on_wasm.contains(fn(it) => file.ends_with(@tfmt("%.ssa", it[]))))  // allocations georg
         ;
         if !skip {
-            pass := run_one(args.bin, file, args.v, arch, args.d, args.l, wasm_runner, args.cc);
+            pass := run_one(args&, file, arch, wasm_runner);
             (@if(pass, passed&, failed&))[] += 1;
         } else {
             @println("%[skip]", f_pad(file, 40, .After));
@@ -107,8 +108,9 @@ fn main() void = {
     exit((failed != 0).int());
 }
 
-fn run_one(qbe_path: Str, file_path: Str, verbose: bool, arch: Arch, flags: Str, use_llvm: bool, wasm_runner: ?Str, iamthecompilernow: bool) bool #inline = {
+fn run_one(arg: *Args, file_path: Str, arch: Arch, wasm_runner: ?Str) bool #inline = {
     ::FmtPad(Str);
+    qbe_path, verbose, flags, use_llvm, iamthecompilernow := (arg.bin, arg.v, arg.d, arg.l, arg.cc);
     mark := mark_temporary_storage();
     src := temp().read_to_string_or_crash(file_path).items(); // :panic
     driver_path := "target/out/driver.c";
@@ -116,7 +118,6 @@ fn run_one(qbe_path: Str, file_path: Str, verbose: bool, arch: Arch, flags: Str,
     obj_path_driver := "target/out/d.o";
     exe_path := "target/out/q.exe";
     ll_path := "target/out/q.ll";
-    c := timestamp();
     @print("%", f_pad(file_path, 40, .After));
     
     driver := extract_section(src, "driver");
@@ -146,8 +147,6 @@ fn run_one(qbe_path: Str, file_path: Str, verbose: bool, arch: Arch, flags: Str,
     } else {
         args&.push(qbe_target_name(arch, query_current_os()));
     };
-    args&.push("-o");
-    args&.push(@if(use_llvm, ll_path, my_path));
     if flags != "" {
         args&.push("-d");
         args&.push(flags);
@@ -157,12 +156,23 @@ fn run_one(qbe_path: Str, file_path: Str, verbose: bool, arch: Arch, flags: Str,
     }
     args&.push(file_path);
     a := timestamp();
-    run(qbe_path, "gen ir");
+    
+    if arg.jit {
+        args&.push("-r");
+        args&.push("--");
+        exe_path = qbe_path;
+    } else {
+        args&.push("-o");
+        args&.push(@if(use_llvm, ll_path, my_path));
+    }
+    
+    @if(!arg.jit) run(qbe_path, "gen ir");
     b := timestamp();
     
     clang_triple := target_triple(arch, query_current_os());
     
     if use_llvm {
+        @debug_assert(!arg.jit);
         if wasm_runner.is_some() {
             println("todo: llvm+wasm");
             return false;
@@ -175,15 +185,15 @@ fn run_one(qbe_path: Str, file_path: Str, verbose: bool, arch: Arch, flags: Str,
         run("clang", "llvm");
     };
 
-    run :: fn(exe: Str, what: Str) => {
-        if verbose {
-            @print("\n% ", exe);
-            for args { a |
-                @print("% ", a);
-            };
-            println("");
+    show :: fn(exe: Str, what: Str) => if verbose {
+        @print("\n% ", exe);
+        for args { a |
+            @print("% ", a);
         };
-        
+        println("");
+    };
+    run :: fn(exe: Str, what: Str) => {
+        show(exe, what);
         ok, out, err := exec_and_catch(exe, args.items(), temp());
         if !ok {
             @println("[fail %]", what);
@@ -210,12 +220,13 @@ fn run_one(qbe_path: Str, file_path: Str, verbose: bool, arch: Arch, flags: Str,
         args&.push_all(@slice(obj_path_mine, "-o", exe_path, "-target", clang_triple));
         run("clang", "link");
     }; // else we have our own codesign implementation so we're done
-    args&.clear();
+    @if(!arg.jit) args&.clear();
     if wasm_runner { wasm_runner |
         args&.push(exe_path);
         exe_path = wasm_runner;
     };
     args&.push_all(@slice("a", "b", "c"));
+    show(exe_path, "run");
     ok, out, err := exec_and_catch(exe_path, args.items(), temp());
     if !ok {
         @println("[fail run]");
@@ -226,7 +237,7 @@ fn run_one(qbe_path: Str, file_path: Str, verbose: bool, arch: Arch, flags: Str,
         // HACK because macos has a panic attack if it aborts 
         // (like it does when you dyld[XXXXX]: Symbol not found: XXXXX)
         // and then you rewrite the file and try to run the new program. 
-        if wasm_runner.is_none() {
+        if wasm_runner.is_none() && !arg.jit {
             args&.clear();
             args&.push(exe_path);
             run("rm", "");  // 🤡
@@ -245,7 +256,11 @@ fn run_one(qbe_path: Str, file_path: Str, verbose: bool, arch: Arch, flags: Str,
         };
     }; 
     d := timestamp();
-    @println("[ok] %ms, %ms", b - a, d - c);
+    if arg.jit {
+        @println("[ok] %ms", d - a);
+    } else {
+        @println("[ok] %ms, %ms", b - a, d - b);
+    }
     
     reset_temporary_storage(mark);
     true

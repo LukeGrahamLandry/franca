@@ -1,9 +1,12 @@
 // https://www.mattkeeter.com/projects/prospero
 // They've got some ssa programs that represent pretty pictures. 
+// "Assembly language for shapes" is such a cool idea.
 // - at comptime, fetch thier examples and parse them into a simple Program struct to embed in the exe
 // - at runtime, generate ir and use my jit to compile the functions
 // - call the function for each pixel and write out a ppm image
 // note: only the 2d examples work 
+// TODO: i want to make this a self contained example that doesn't need to fetch thier program. 
+//       so i guess i need to figure out how to make sdf fonts and convert those to ssa? 
 
 AstExternal :: import("@/compiler/ast_external.fr");
 #include_std("backend/lib.fr");
@@ -23,31 +26,199 @@ fn impl(v: *ImportVTable) void = {
     programs := :: collect_examples(ast_alloc());
     m := zeroed QbeModule;
     init_default_module_dyn(m&, v, (type = .JitOnly, os = query_current_os(), arch = query_current_arch()));
-    each programs { p |
-        continue :: local_return;
-        mark := mark_temporary_storage();
-        f := temp().box(Qbe.Fn);
-        default_init(f, m&);
-        compile_program(f, p);
-        run_qbe_passes(f);
-        reset_temporary_storage(mark);
-    };
-    
-    finalize_module(m&);
-    
+    do_imports(m&);
     s := "prospero";
-    f := get_addr(m&, s) || @panic("missing demo '%'", s);
-    f := bit_cast_unchecked(rawptr, @FnPtr(x: f64, y: f64, z: f64) f64, f);
+    p := programs.find(fn(it) => it.name == s)
+        || @panic("missing model '%'", s);
+    
+    f0 := temp().box(Qbe.Fn);
+    default_init(f0, m&);
+    compile_program(f0, p);
+    n := 64+3+p.o.len;
+    top := compile(dup(f0), p.name);
+    s: RecState = (
+        f0 = f0,
+        vals = temp().alloc(f32, n),
+        scratch = temp().alloc(Interval, n),
+        pixels = init_bitset(1024 * 1024),
+        top = top,
+    );
+    i: Interval = (min = -1.0, max = 1.0);
+    quad_rec(s&, (x = i, y = i), 6);
+    @eprintln("%/%", s.yes, s.no+s.yes);
+    
     out := u8.list(temp());
-    draw(out&, f);
+    draw(out&, s.pixels);
     print(out.items());
 }
 
-fn draw(out: *List(u8), f: @FnPtr(x: f64, y: f64, z: f64) f64) void = {
+Interval2 :: @struct {
+    x: Interval;
+    y: Interval;
+}
+
+RecState :: @struct {
+    f0: *Qbe.Fn;
+    pixels: Qbe.BSet;
+    vals: []f32;
+    scratch: []Interval;
+    yes := 0;
+    no := 0;
+    top: F;
+}
+
+fn quad_rec(s: *RecState, int: Interval2, depth: i64) void = {
+    n: Interval = (min = NaN, max = NaN);
+    known := optimise_intervals(s.f0, @slice(int.x, int.y, n), s.scratch, false);
+    if !known.is_nan() {
+        if known.min > 0.0  {
+            iter_intervals(int.x, int.y) { x, y, i |
+                s.pixels&.bsset(i);
+            }
+        };
+        if (known.max < 0.0 || known.min > 0.0) {
+            s.yes += 1;
+            return();
+        };
+    }
+
+    if depth == 0 {
+        s.no += 1;
+        if false {
+            iter_intervals(int.x, int.y) { x, y, i |
+                hit := interpret(s.f0, s.vals, x, y) > 0.0;
+                if hit {
+                    s.pixels&.bsset(i);
+                };
+            };
+        } else {
+            if false {
+                f := dup(s.f0);
+                optimise_intervals(f, @slice(int.x, int.y, n), s.scratch, true);
+                
+                m := f.globals;
+                code := m.segments&.index(.Code);
+                code.align_to(page_size());
+                prev := code.next;
+                mark := mark_temporary_storage();
+                
+                name := @tfmt("%", timestamp());
+                f := compile(f, name);
+                draw(s.pixels, f, int.x, int.y);
+                
+                prot := bit_or(@as(i64) MapProt.Write, @as(i64) MapProt.Read);
+                mprotect(u8.raw_from_ptr(prev), ptr_diff(prev, code.next), prot).unwrap(); 
+                code.next = prev;
+                m.start_of_writable_code = prev;
+            } else {
+                draw(s.pixels, s.top, int.x, int.y);
+            }
+        }
+        return();
+    }
+
+    for_quads int { it |
+        quad_rec(s, it, depth - 1);
+    };
+}
+
+fn for_quads(int: Interval2, $do: @Fn(i: Interval2) void #duplicated) void = {
+    wx := abs(int.x.max - int.x.min) / 2;
+    wy := abs(int.y.max - int.y.min) / 2;
+    do(x = (min = int.x.min, max = int.x.min + wx), y = (min = int.y.max - wy, max = int.y.max));
+    do(x = (min = int.x.max - wx, max = int.x.max), y = (min = int.y.max - wy, max = int.y.max));
+    do(x = (min = int.x.min, max = int.x.min + wx), y = (min = int.y.min, max = int.y.min + wy));
+    do(x = (min = int.x.max - wx, max = int.x.max), y = (min = int.y.min, max = int.y.min + wy));
+}
+
+F :: @FnPtr(x: f64, y: f64, z: f64) f64;
+
+fn compile(f: *Qbe.Fn, name: Str) F = {
+    m := f.globals;
+    f.lnk.id = m.intern(name);
+    run_qbe_passes(f);
+    emit_suspended_inlinables(m);
+    make_exec(m);
+    f := get_addr(m, name).unwrap();
+    f := bit_cast_unchecked(rawptr, F, f);
+    f
+}
+
+fn maybe_fill(f: *Qbe.Fn, int: Interval2, pixels: Qbe.BSet) bool = {
+    r := f.start.jmp.arg;
+    if(r.rtype() != .RCon, => return(false));
+    hit := f.get_constant(r)[].bits.d > 0.0;
+    if hit {
+        iter_intervals(int.x, int.y) { x, y, i |
+            pixels&.bsset(i);
+        }
+    };
+    true
+}
+
+fn dup(f0: *Qbe.Fn) *Qbe.Fn = {
+    f := temp().box(Qbe.Fn);
+    f[] = f0[];
+    f.start = temp().box(Qbe.Blk);
+    f.start[] = f0.start[];
+    f.start.ins = new(f.start.nins.zext());
+    f.tmp = new(f.ntmp.zext());
+    f.con = new(f.ncon.zext());
+    f.tmp.slice(0, f.ntmp.zext()).copy_from(f0.tmp.slice(0, f.ntmp.zext()));
+    f.con.slice(0, f.ncon.zext()).copy_from(f0.con.slice(0, f.ncon.zext()));
+    f.start.ins.slice(0, f.start.nins.zext()).copy_from(f0.start.ins.slice(0, f.start.nins.zext()));
+    f
+}
+
+fn interpret(f: *Qbe.Fn, vals: []f32, x: f64, y: f64) f32 = {
+    vals[64+0] = x.cast();
+    vals[64+1] = y.cast();
+    for_insts_forward f.start { i |
+        @match(i.op()) {
+            fn copy() => @match(rtype(i.arg&[0])) {
+                fn RTmp() => { vals[i.to.val()] = vals[i.arg&[0].val()]; }
+                fn RCon() => { vals[i.to.val()] = f.get_constant(i.arg&[0])[].bits.d.cast(); }
+                @default => ();
+            };
+            fn par() => ();
+            @default => {
+                a: u32 = vals[i.arg&[0].val()].bitcast();
+                b: u32 = vals[i.arg&[1].val()].bitcast();
+                do_fold(i.op(), .Ks, f32.raw_from_ptr(vals.index(i.to.val())), a.zext(), b.zext());
+            };
+        }
+    };
+    
+    vals[f.start.jmp.arg.val()]
+}
+
+fn iter_intervals(x_int: Interval, y_int: Interval, $body: @Fn(x: f64, y: f64, i: i64) void) void = {
+    back :: fn(n) => int((n.cast() + 1.0) / 2.0 * 1024.0);
+    range_rev(back(y_int.min), back(y_int.max)) { y |
+        range(back(x_int.min), back(x_int.max)) { x |
+            continue :: local_return;
+            move :: fn(n) => n.float() / 1024.0 * 2.0 - 1.0;
+            i := y * 1024 + x;
+            body(move(x), move(y), i);
+        };
+    };
+}
+
+fn draw(out: Qbe.BSet, f: @FnPtr(x: f64, y: f64, z: f64) f64, x_int: Interval, y_int: Interval) void = {
+    iter_intervals(x_int, y_int) { x, y, i |
+        hit := f(x, y, 0.0) > 0.0;
+        if hit {
+            out&.bsset(i);
+        }
+    };
+}
+
+fn draw(out: *List(u8), pixels: Qbe.BSet) void = {
     @fmt(out, "P3 1024 1024 255\n");
     range_rev(0, 1024) { y |
         range(0, 1024) { x |
-            hit := f(x.float() / 1024.0 * 2.0 - 1.0, y.float() / 1024.0 * 2.0 - 1.0, 0.0) > 0.0;
+            i := y * 1024 + x;
+            hit := bshas(pixels&, i);
             c := @if(hit, 0, 255);
             @fmt(out, "% % % ", c, c, c);
         };
@@ -55,7 +226,7 @@ fn draw(out: *List(u8), f: @FnPtr(x: f64, y: f64, z: f64) f64) void = {
     };
 }
 
-fn finalize_module(m: *QbeModule) void = {
+fn do_imports(m: *QbeModule) void = {
     imports := @slice("log", "exp", "sin", "cos", "fabs");
     Dyn :: import("@/lib/dynamic_lib.fr");
     for find_os_libc_dylib() { libc_path | 
@@ -68,8 +239,103 @@ fn finalize_module(m: *QbeModule) void = {
             };
         };
     };
-    m.emit_suspended_inlinables();
-    make_exec(m);
+};
+
+Interval  :: @struct(min: f32, max: f32);
+
+fn is_nan(self: Interval) bool = 
+    is_nan(self.min + self.max);
+
+fn optimise_intervals(f: *Qbe.Fn, vars: []Interval, ints: []Interval, $mut: bool) Interval = {
+    ints.interpret_as_bytes().set_bytes(255);  // all ones is a nan
+    @debug_assert_ge(f.ntmp, f.ncon, "TODO: a,b:= will bounds check fail if there are more constants than vars");
+    
+    k := 0;
+    j := f.start.ins.first;
+    while => j.op() == .par {
+        ints[j.to.val()] = vars[k];
+        k += 1;
+        j = j.offset(1);
+    }
+    
+    end := f.start.ins.first.offset(f.start.nins.zext());
+    while => !identical(j, end) {
+        continue :: local_return;
+        i := j; j = i.offset(1);
+        a, b := (ints[i.arg&[0].val()], ints[i.arg&[1].val()]);
+        
+        xx := a.is_nan() && rtype(i.arg&[0]) == .RTmp;
+        if xx || (b.is_nan() && i.arg&[1] != QbeNull) {
+            // maybe you want to continue here. 
+            // but since i don't do anything unless we know bounds on the final output, 
+            // and you probably use all values in the output, maybe we just give up here. 
+            // continue(); 
+            return(min = NaN, max = NaN);
+        };
+        
+        sqrt :: fn(x: f32) f32 #ir(.sqrt, .Ks);
+        min :: fn(x: f32, y: f32) f32 #ir(.min, .Ks);
+        max :: fn(x: f32, y: f32) f32 #ir(.max, .Ks);
+        
+        new: Interval = @match(i.op()) {
+            fn copy() => @match(rtype(i.arg&[0])) {
+                fn RTmp() => a;
+                fn RCon() => {
+                    x := f.get_constant(i.arg&[0])[].bits.d.cast();
+                    (min = x, max = x)
+                }
+                @default => @panic("bad copy source");
+            };
+            fn add() => (min = a.min + b.min, max = a.max + b.max);
+            fn sub() => (min = a.min - b.max, max = a.max - b.min);
+            fn mul() => {
+                // https://en.wikipedia.org/wiki/Interval_arithmetic
+                v0, v1, v2, v3 := (a.min*b.min, a.min*b.max, a.max*b.min, a.max*b.max);
+                (min = v0.min(v1).min(v2).min(v3), max = v0.max(v1).max(v2).max(v3))
+            }
+            fn neg() => {
+                v0, v1 := (-a.min, -a.max);
+                (min = v0.min(v1), max = v0.max(v1))
+            }
+            fn div() => continue();  // TODO: steal from wikipedia
+            fn min() => @if_else { 
+                @if(a.max < b.min) => a;
+                @if(b.max < a.min) => b;
+                @else => (min = min(a.min, b.min), max = min(a.max, b.max));
+            };
+            fn max() => @if_else { 
+                @if(a.min > b.max) => a;
+                @if(b.min > a.max) => b;
+                @else => (min = max(a.min, b.min), max = max(a.max, b.max));
+            };
+            // TODO: is it really this simple? 
+            // we're not doing complex numbers so if it could be negative, who knows man just skip it
+            fn sqrt() => {
+                if(a.min < 0.0, => continue());
+                (min = a.min.sqrt(), max = a.max.sqrt())
+            }
+            @default => continue();
+        };
+        ints[i.to.val()] = new;
+        @if(mut) if rtype(i.arg&[0]) != .RCon && new.min == new.max {
+            r := f.getcon(new.min.cast().bitcast());
+            i[] = make_ins(.copy, .Kd, i.to, r, QbeNull);
+        };
+    };
+    
+    r := f.start.jmp.arg&;
+    @debug_assert_eq(rtype(r[]), .RTmp);
+    final := ints[r[].val()];
+
+    @if(mut) if !final.is_nan() {
+        if final.min > 0.0  {
+            r[] = f.getcon(1.0.bitcast());
+        }
+        if final.max <= 0.0 {
+            r[] = f.getcon(-1.0.bitcast());
+        }
+    }
+    final
 }
 
 fn compile_program(f: *Qbe.Fn, p: *Program) void = {

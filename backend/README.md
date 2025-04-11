@@ -74,6 +74,7 @@ You can still print out the ir as human readable text between passes and modify 
   - all: load float constants from memory (instead of using int immediate + fmov)
   - arm: bit field immediate to load int more constants in a single instruction
   - amd: negating floats by xoring from memory
+  - amd: use spilled floats directly from memory
 
 ## Qbe License
 

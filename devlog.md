@@ -1,3 +1,7 @@
+## (Apr 11)
+
+playing with interval arithmetic: 1.034 s ±  0.002 s
+
 ## (Apr 9)
 
 found something that is maybe really useful for me: 
@@ -19,6 +23,28 @@ i want to defend against is a buggy compiler stomping on stuff.
 
 ---
 
+:SlowAlignmentAnnotation about fn alignment() in compiler/values.fr:
+no it's not compile speed because the first run after you comment it out is still slow. 
+this costs 40ms somehow 
+in fact, the !null case is NEVER taken in the compiler, 
+you're telling me a correctly predicted branch costs 40ms/16427 = 2.4us? really? 
+its still slow if that's `if false`, which gets sccp-ed out (i can check asm). 
+so ok back to my theory of the problem is compile time. 
+#inline doesn't matter
+0: frontend: 1007ms, codegen: 475ms
+then comment out condition
+1: frontend: 1013ms, codegen: 476ms
+2: frontend: 976ms, codegen: 434ms
+so since 1 was slow. the problem can't be the time to sema the slow code. 
+the slow thing is the generated code. 
+ohhh, hmmmm, this is unfortunate. maybe it's about spilling locals. 
+the first diff is fast saves x19-x22 and slow saves x19-x25. 
+dont really understand how it can change the backend time so much as well. 
+but no, didn't i just say `if false` didn't fix it? 
+clearly im confused about something. 
+
+---
+
 - was reminded of https://www.mattkeeter.com/projects/prospero/ and did one with my jit.
 hella slow but i love it anyway. so neat to see the math spit out words. 
 - fixed bug in make_exec() where it wouldn't work if the code spanned multiple pages. 
@@ -37,15 +63,26 @@ libc: 3.782 s ±  0.024 s
 sqrt: 3.445 s ±  0.008 s
 fmin: 2.576 s ±  0.022 s
 fmax: 1.557 s ±  0.002 s
-(for reference some other guy's cranelift one is 0.673s on my computer so mine is still super slow)
 ```
+(for reference some other guy's cranelift one is 0.673s on my computer so mine is still super slow)
 
 I could support sqrt/min/max for ints 
 but they don't give me cpu instructions for that so meh, 
 it would just be for symmetry. 
 
-TODO: sqrt/min/max on amd64
-TODO: test backend with -r now that i have -cc
+- added sqrt/min/max on amd64
+- this did reveal a bug on x64 (for other instructions as well) 
+memargs thinks float ops can access memory but the encoding tables don't deal with that. 
+and some (ie. add) need to be 1 instead of 2 because they won't let you encode both directions (dest can't be memory). 
+for now i don't care enough to deal with it so i'll just hack it out. 
+the memargs is only used to save a few instructions when things are spilled, 
+it won't merge an explicit load/store into an arithmetic instruction anyway, 
+so i assume it can't help that much. 
+- run the .ssa tests jitted as part of run_tests
+
+TODO: another bug! doesn't work if you run it like this `franca backend/meta/test.fr isel4.ssa -jit` same with abi1.ssa
+TODO: use the new instructions from lib/math.fr
+TODO: ops.ssa test for the new instructions
 
 ## (Apr 7)
 
@@ -335,11 +372,12 @@ making export_data work is painful, need to think about this more.
 - starting a first-person-3d example program. 
 10000 years of scrounging around in my old projects to try to remember how to make the matrices work. 
 i think it's still not clipping so i can see behind me? or i just typoed a negative sign somewhere random, who knows!
-- speed regression because of #align field tag which is super unfortunate   
+- speed regression because of #align field tag which is super unfortunate :SlowAlignmentAnnotation
 //       supporting #align makes it much slower (30ms ??) which is really unfortunate FIXME but i need it for now  
 //       i dont understand how this can take so long when the branch is so predictable.   
 //       ohhhh, it's still slow even if you `if false {` which the backend will remove.   
 //       so it's probably just that #where is really really slow. thats bad! very very bad!   
+
 
 ## (Mar 19-23)
 
