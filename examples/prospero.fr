@@ -1,9 +1,16 @@
 // https://www.mattkeeter.com/projects/prospero
 // They've got some ssa programs that represent pretty pictures. 
 // "Assembly language for shapes" is such a cool idea.
-// - at comptime, fetch thier examples and parse them into a simple Program struct to embed in the exe
+//
+// the basic structure of this program is:
+// - at comptime, fetch their examples and parse them into a simple Program struct to embed in the exe
 // - at runtime, generate ir and use my jit to compile the functions
 // - call the function for each pixel and write out a ppm image
+// but there are some tricks to make it faster:
+// - recurse down a quad tree and calculate the intervals of outputs based on the input intervals
+// - if output interval is statically known positive or negative, no more work for that region
+// - to evaluate a pixel use the expression after interval simplification
+// 
 // note: only the 2d examples work 
 // TODO: i want to make this a self contained example that doesn't need to fetch thier program. 
 //       so i guess i need to figure out how to make sdf fonts and convert those to ssa? 
@@ -24,6 +31,7 @@ fn driver(vtable: *ImportVTable) void =
 
 fn impl(v: *ImportVTable) void = {
     programs := :: collect_examples(ast_alloc());
+    //programs := collect_examples(temp());
     m := zeroed QbeModule;
     init_default_module_dyn(m&, v, (type = .JitOnly, os = query_current_os(), arch = query_current_arch()));
     do_imports(m&);
@@ -32,19 +40,31 @@ fn impl(v: *ImportVTable) void = {
         || @panic("missing model '%'", s);
     
     f0 := temp().box(Qbe.Fn);
-    default_init(f0, m&);
-    compile_program(f0, p);
+    if !M {
+        default_init(f0, m&);
+        compile_program(f0, p);
+    }
     n := 64+3+p.o.len;
-    top := compile(dup(f0), p.name);
     s: RecState = (
-        f0 = f0,
+        f = temp().alloc(Qbe.Fn, N+2),
         vals = temp().alloc(f32, n),
-        scratch = temp().alloc(Interval, n),
+        ints = temp().alloc(Interval, n),
         pixels = init_bitset(1024 * 1024),
-        top = top,
+        top = @if(M, zeroed F, compile(dup(f0), p.name)),
+        needed = init_bitset(n),
+        copy = temp().alloc_zeroed(Qbe.Ref, n),
+        jit_at = max(0, N - 2),
     );
+    each s.f { f |
+        f.start = temp().box_zeroed(Qbe.Blk);
+        f.start.ins = new(n);
+    };
+    f := s.f.index(N+1);
+    default_init(f, m&);
+    compile_program(f, p);
+    
     i: Interval = (min = -1.0, max = 1.0);
-    quad_rec(s&, (x = i, y = i), 6);
+    quad_rec(s&, (x = i, y = i), N);
     @eprintln("%/%", s.yes, s.no+s.yes);
     
     out := u8.list(temp());
@@ -58,18 +78,40 @@ Interval2 :: @struct {
 }
 
 RecState :: @struct {
-    f0: *Qbe.Fn;
+    f: []Qbe.Fn;
     pixels: Qbe.BSet;
     vals: []f32;
-    scratch: []Interval;
+    ints: []Interval;
     yes := 0;
     no := 0;
     top: F;
+    needed: Qbe.BSet;
+    copy: []Qbe.Ref;
+    jit_at: i64;
+    n := 0;
 }
 
+N :: @if(I, 9, 8);
+M :: true;
+I :: false;
+
 fn quad_rec(s: *RecState, int: Interval2, depth: i64) void = {
+    f := s.f.index(depth);
+    f0 := s.f.index(depth+1);
+    if M {
+        dup(f, f0);
+    } else {
+        f = f0;
+    };
+
     n: Interval = (min = NaN, max = NaN);
-    known := optimise_intervals(s.f0, @slice(int.x, int.y, n), s.scratch, false);
+    
+    known := optimise_intervals(f, int&, s, M);
+    f0.ncon = f.ncon;
+    f0.con = f.con;
+    
+    // Check if the whole output range is positive or negative, 
+    // then we already know the colour of all the pixels. 
     if !known.is_nan() {
         if known.min > 0.0  {
             iter_intervals(int.x, int.y) { x, y, i |
@@ -81,38 +123,31 @@ fn quad_rec(s: *RecState, int: Interval2, depth: i64) void = {
             return();
         };
     }
+    
+    @if(M) {
+        dead_code(s, f);
+        renumber(f);
+    };
 
+    if M && !I && depth == s.jit_at {
+        mark := mark_temporary_storage();
+        f := dup(f);
+        s.top = compile(f, @tfmt("%", s.n));
+        s.n += 1;
+        reset_temporary_storage(mark);
+    }
+    
     if depth == 0 {
         s.no += 1;
-        if false {
+        if I {
             iter_intervals(int.x, int.y) { x, y, i |
-                hit := interpret(s.f0, s.vals, x, y) > 0.0;
+                hit := interpret(f, s.vals, x, y) > 0.0;
                 if hit {
                     s.pixels&.bsset(i);
                 };
             };
         } else {
-            if false {
-                f := dup(s.f0);
-                optimise_intervals(f, @slice(int.x, int.y, n), s.scratch, true);
-                
-                m := f.globals;
-                code := m.segments&.index(.Code);
-                code.align_to(page_size());
-                prev := code.next;
-                mark := mark_temporary_storage();
-                
-                name := @tfmt("%", timestamp());
-                f := compile(f, name);
-                draw(s.pixels, f, int.x, int.y);
-                
-                prot := bit_or(@as(i64) MapProt.Write, @as(i64) MapProt.Read);
-                mprotect(u8.raw_from_ptr(prev), ptr_diff(prev, code.next), prot).unwrap(); 
-                code.next = prev;
-                m.start_of_writable_code = prev;
-            } else {
-                draw(s.pixels, s.top, int.x, int.y);
-            }
+            draw(s.pixels, s.top, int.x, int.y);
         }
         return();
     }
@@ -120,6 +155,47 @@ fn quad_rec(s: *RecState, int: Interval2, depth: i64) void = {
     for_quads int { it |
         quad_rec(s, it, depth - 1);
     };
+}
+
+// remove instructions with unused results
+fn dead_code(s: *RecState, f: *Qbe.Fn) void = {
+    bszero(s.needed&);
+    s.needed&.bsset(f.start.jmp.arg.val());
+    f.reset_scratch();
+    for_insts_rev f.start { i |
+        if i.to == QbeNull || s.needed&.bshas(i.to.val())  {
+            each i.arg& { a |
+                if rtype(a[]) == .RTmp {
+                    s.needed&.bsset(a[].val());
+                }
+            };
+            f.emit(i[][]);
+        };
+    };
+    changed := f.len_scratch() != f.start.nins.zext();
+    @if(changed) f.copy_instructions_from_scratch(f.start); 
+}
+
+// shrink the tmp array
+fn renumber(f: *Qbe.Fn) void = {
+    j := Qbe.Tmp0;
+    for_insts_forward f.start { i |
+        each i.arg& { a |
+            if rtype(a[]) == .RTmp {
+                a[] = TMP(f.get_temporary(a[])[].visit);
+            }
+        };
+        
+        if i.to != QbeNull {
+            f.get_temporary(i.to)[].visit = j.trunc();
+            i.to = TMP(j);
+        }
+        
+        j += 1;
+    };
+    f.ntmp = j.trunc();
+    a := f.start.jmp.arg&;
+    a[] = TMP(f.get_temporary(a[])[].visit);
 }
 
 fn for_quads(int: Interval2, $do: @Fn(i: Interval2) void #duplicated) void = {
@@ -156,6 +232,17 @@ fn maybe_fill(f: *Qbe.Fn, int: Interval2, pixels: Qbe.BSet) bool = {
     true
 }
 
+// since i only append to con/tmp and they don't have any useful information, 
+// the functions can just share and i don't need to spend time copying them. 
+fn dup(dest: *Qbe.Fn, src: *Qbe.Fn) void = {
+    i, b := (dest.start.ins, dest.start);
+    dest[] = src[];
+    dest.start = b;
+    dest.start[] = src.start[];
+    dest.start.ins = i;
+    dest.start.ins.slice(0, src.start.nins.zext()).copy_from(src.start.ins.slice(0, src.start.nins.zext()));
+}
+
 fn dup(f0: *Qbe.Fn) *Qbe.Fn = {
     f := temp().box(Qbe.Fn);
     f[] = f0[];
@@ -181,6 +268,7 @@ fn interpret(f: *Qbe.Fn, vals: []f32, x: f64, y: f64) f32 = {
                 @default => ();
             };
             fn par() => ();
+            fn nop() => ();
             @default => {
                 a: u32 = vals[i.arg&[0].val()].bitcast();
                 b: u32 = vals[i.arg&[1].val()].bitcast();
@@ -246,15 +334,21 @@ Interval  :: @struct(min: f32, max: f32);
 fn is_nan(self: Interval) bool = 
     is_nan(self.min + self.max);
 
-fn optimise_intervals(f: *Qbe.Fn, vars: []Interval, ints: []Interval, $mut: bool) Interval = {
-    ints.interpret_as_bytes().set_bytes(255);  // all ones is a nan
+fn optimise_intervals(f: *Qbe.Fn, input: *Interval2, s: *RecState, $mut: bool) Interval = {
+    s.ints.interpret_as_bytes().set_bytes(255);  // all ones is a nan
+    s.copy.interpret_as_bytes().set_bytes(0); 
     @debug_assert_ge(f.ntmp, f.ncon, "TODO: a,b:= will bounds check fail if there are more constants than vars");
+    r := f.start.jmp.arg&;
+    //if r[].rtype() == .RCon {
+    //    x := f.get_constant(r[])[].bits.d.cast();
+    //    return(min = x, max = x)
+    //};
     
     k := 0;
     j := f.start.ins.first;
+    s.ints[64+0] = input.x;
+    s.ints[64+1] = input.y;
     while => j.op() == .par {
-        ints[j.to.val()] = vars[k];
-        k += 1;
         j = j.offset(1);
     }
     
@@ -262,20 +356,41 @@ fn optimise_intervals(f: *Qbe.Fn, vars: []Interval, ints: []Interval, $mut: bool
     while => !identical(j, end) {
         continue :: local_return;
         i := j; j = i.offset(1);
-        a, b := (ints[i.arg&[0].val()], ints[i.arg&[1].val()]);
+        a, b := (s.ints[i.arg&[0].val()], s.ints[i.arg&[1].val()]);
+        
+        // remove useless copy chains
+        @if(mut) {
+            each i.arg& { a |
+                if rtype(a[]) == .RTmp {
+                    r := s.copy[a[].val()];
+                    if r != QbeNull {
+                        a[] = r;
+                    }
+                }
+            };
+            
+            if i.op() == .copy && rtype(i.arg&[0]) == .RTmp {
+                s.copy[i.to.val()] = i.arg&[0];
+            };
+        };
         
         xx := a.is_nan() && rtype(i.arg&[0]) == .RTmp;
         if xx || (b.is_nan() && i.arg&[1] != QbeNull) {
-            // maybe you want to continue here. 
-            // but since i don't do anything unless we know bounds on the final output, 
-            // and you probably use all values in the output, maybe we just give up here. 
-            // continue(); 
-            return(min = NaN, max = NaN);
+            continue(); 
         };
         
         sqrt :: fn(x: f32) f32 #ir(.sqrt, .Ks);
         min :: fn(x: f32, y: f32) f32 #ir(.min, .Ks);
         max :: fn(x: f32, y: f32) f32 #ir(.max, .Ks);
+        
+        // when min/max args have intervals that don't overlap, only care about one side. 
+        only :: fn(n) => {
+            @if(mut) {
+                i[] = make_ins(.copy, .Kd, i.to, i.arg&[n], QbeNull);
+                s.copy[i.to.val()] = i.arg&[n];
+            };
+            @if(n == 0, a, b)
+        }
         
         new: Interval = @match(i.op()) {
             fn copy() => @match(rtype(i.arg&[0])) {
@@ -293,48 +408,45 @@ fn optimise_intervals(f: *Qbe.Fn, vars: []Interval, ints: []Interval, $mut: bool
                 v0, v1, v2, v3 := (a.min*b.min, a.min*b.max, a.max*b.min, a.max*b.max);
                 (min = v0.min(v1).min(v2).min(v3), max = v0.max(v1).max(v2).max(v3))
             }
+            // mul specialized for -1
             fn neg() => {
                 v0, v1 := (-a.min, -a.max);
                 (min = v0.min(v1), max = v0.max(v1))
             }
             fn div() => continue();  // TODO: steal from wikipedia
             fn min() => @if_else { 
-                @if(a.max < b.min) => a;
-                @if(b.max < a.min) => b;
+                @if(a.max < b.min) => only(0);
+                @if(b.max < a.min) => only(1);
                 @else => (min = min(a.min, b.min), max = min(a.max, b.max));
             };
             fn max() => @if_else { 
-                @if(a.min > b.max) => a;
-                @if(b.min > a.max) => b;
+                @if(a.min > b.max) => only(0);
+                @if(b.min > a.max) => only(1);
                 @else => (min = max(a.min, b.min), max = max(a.max, b.max));
             };
-            // TODO: is it really this simple? 
             // we're not doing complex numbers so if it could be negative, who knows man just skip it
             fn sqrt() => {
-                if(a.min < 0.0, => continue());
+                if a.max < 0.0 {
+                    @debug_assert(a.min < 0, "% %", a.min, a.max);
+                }
+                if(a.min < 0.0 || a.max < 0.0 || a.is_nan(), => continue());
                 (min = a.min.sqrt(), max = a.max.sqrt())
             }
             @default => continue();
         };
-        ints[i.to.val()] = new;
+        @debug_assert_le(new.min, new.max, "thats not in order %", i.op());
+        
+        s.ints[i.to.val()] = new;
+        
+        // if the range is exact, convert it to the constant
         @if(mut) if rtype(i.arg&[0]) != .RCon && new.min == new.max {
             r := f.getcon(new.min.cast().bitcast());
             i[] = make_ins(.copy, .Kd, i.to, r, QbeNull);
         };
     };
     
-    r := f.start.jmp.arg&;
     @debug_assert_eq(rtype(r[]), .RTmp);
-    final := ints[r[].val()];
-
-    @if(mut) if !final.is_nan() {
-        if final.min > 0.0  {
-            r[] = f.getcon(1.0.bitcast());
-        }
-        if final.max <= 0.0 {
-            r[] = f.getcon(-1.0.bitcast());
-        }
-    }
+    final := s.ints[r[].val()];
     final
 }
 
@@ -342,7 +454,7 @@ fn compile_program(f: *Qbe.Fn, p: *Program) void = {
     vars := @slice(f.newtmp("x", .Kd), f.newtmp("y", .Kd), f.newtmp("z", .Kd));
     vals := temp().alloc_init(Qbe.Ref, p.o.len, fn(_) => f.newtmp("v", .Kd));
     f.start = temp().box_zeroed(Qbe.Blk);
-    f.start.ins = new(vals.len);
+    f.start.ins = new(vals.len+3);
     f.nblk = 1;
     f.lnk.id = f.globals.intern(p.name);
     f.lnk.export = true;
@@ -354,6 +466,7 @@ fn compile_program(f: *Qbe.Fn, p: *Program) void = {
     
     range(0, p.o.len) { i |
         r, a, b := (vals[i], vals[p.a[i].zext()], vals[p.b[i].zext()]);
+        ::enum(Operation);
         @match(p.o[i]) {
             fn const() => f.emit(.copy, .Kd, r, f.getcon(p.consts[p.a[i].zext()].bitcast()), QbeNull);
             fn var() => f.emit(.copy, .Kd, r, vars[p.a[i].zext()], QbeNull);
@@ -405,7 +518,11 @@ fn collect_examples(a: Alloc) []Program = {
     ::import("@/examples/testing.fr");
     
     programs := Program.list(a);
-    folder   := fetch_or_crash("https://github.com/mkeeter/fidget/archive/baef3e38653fc5deecd48b730ca0e234e6d01f79.zip", 827878, "1224f8f982fe891e501c9d4a6aa0a4abb03e65022ee3118dccd7f17c2f3f7105", "fidget-baef3e38653fc5deecd48b730ca0e234e6d01f79");
+    folder   := fetch_or_crash(
+        "https://github.com/mkeeter/fidget/archive/baef3e38653fc5deecd48b730ca0e234e6d01f79.zip", 
+        827878, "1224f8f982fe891e501c9d4a6aa0a4abb03e65022ee3118dccd7f17c2f3f7105", 
+        "fidget-baef3e38653fc5deecd48b730ca0e234e6d01f79",
+    );
     walk_directory(@fmt_cstr("%/models", folder)) { e |
         if e.name.ends_with(".vm") {
             m := mark_temporary_storage();  // TODO: if not temp()
@@ -420,6 +537,7 @@ fn collect_examples(a: Alloc) []Program = {
     programs.items()
 }
 
+// a list of instructions like `out op arg0 arg1`
 fn parse_program(al: Alloc, name: Str, s: Str) Program = {
     #use("@/lib/collections/map.fr");
     consts, o, a, b := (f64.list(temp()), Operation.list(temp()), u16.list(temp()), u16.list(temp()));

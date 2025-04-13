@@ -233,7 +233,8 @@ fn init_driver_vtable() *ImportVTable = {
         _, id := c.cast()[][].reserve_baked(jit_addr);
         id
     };
-    
+   
+    // :HackyImportC maybe this is actually fine i just need to rename it because it's not specific to jitting.  
     vtable.materialize_in_jit_address_space = fn(c: Compiler, module: rawptr, id: BakedVarId) rawptr = {
         self := c.cast()[][];
         m := QbeModule.ptr_from_raw(module);
@@ -243,22 +244,16 @@ fn init_driver_vtable() *ImportVTable = {
         @debug_assert(m.identical(shared.m), "TODO: materialize_in_jit_address_space only works in comptime_codegen");
         @debug_assert(!shared.threaded, "TODO: deal with multithreaded materialize_in_jit_address_space");
         // :TodoChangeMessageEmitDataEndToUseBakedValueInsteadOfBackendDat
-        
-        yield :: fn(p: *u8) Never => {
-            v.jit_addr = u8.int_from_ptr(p);
-            self.baked.lookup&.insert(v.jit_addr, id);
-            return(u8.raw_from_ptr(p))
+
+        dat := self.comp().emit_constant(m, id);
+        emit_data(m, dat);
+        p := zeroed rawptr;
+        use_symbol(m, dat.id) { s |
+            p = s.jit_addr;
         };
-        
-        // Make sure the simple case of a giant static zero init array is cheap 
-        // (and that we don't touch the memory since im not good about translating data dependencies in import_c:ffi yet so everything gets materialized even if it's not used). 
-        @if_let(v.template) fn Zeroes(size) => if v.relocations.len == 0 && size > 4096 {
-            yield page_allocator.alloc(u8, size).as_ptr();  // :LEAK
-        };
-        
-        panic("TODO: materialize_in_jit_address_space");
-        
-        zeroed rawptr
+        v.jit_addr = int_from_rawptr(p);
+        self.baked.lookup&.insert(v.jit_addr, id);
+        p
     };
    
     vtable.replace_body_source = fn(c: Compiler, fid: FuncId, new_source: Str) CRes(void) = {

@@ -19,6 +19,65 @@ fn enable_franca_ffi(c: *Ctx, fr: CompCtx, namespace: ScopeId) void = {
     c.franca_namespace = namespace;
 }
 
+// GARBAGE: for now all the import_c stuff is very experimental. the api will eventually get less painful. 
+fn import_c(fr: CompCtx, namespace: ScopeId, c_source: Str) void = {
+    m := do_not_do_this_it_is_not_ok_TODO();
+    c := C'Compile.Ctx.zeroed();
+    C'init_ctx(c&, m);
+    c&.enable_franca_ffi(fr, namespace);
+    
+    push_dynamic_context { // TODO: why am i doing this. just mark temp
+        a: ArenaAlloc = init(page_allocator, 10000);  // :Leak
+        context(DefaultContext)[].temporary_allocator = a&;
+        objs := catch_call(c&, *C.Compile.Obj) {
+            src: List(u8) = assume_owned(c_source, temp());
+            tok := c&.tokenize_string("wuffs", src&);
+            tok  = c&.C'Preprocess'preprocess(tok);
+            c&.parse(tok)
+        }
+        objs := or objs { err | 
+            panic(err)
+        }
+        
+        for_linked objs { obj |
+            if obj.is_function && obj.is_definition {
+                export_func(c&, obj);
+            }
+        }
+        
+        // add all the typedefs to the scope
+        // TODO: this gets things from other header files too which might not be what you want. 
+        //       like what if you want to use a library that typedef-ed u32 for themselves? now you can't #use it. that sucks. 
+        // TODO: what if they didn't have a typedef for it and just referred to it as `struct Foo` or whatever
+        // TODO: something for removing prefixes
+        for_linked c.scope { sc |
+            each sc.vars& { name, value |
+                if !value.type_def.is_null() {
+                    type := export_type(c&, value.type_def, false);
+                    fr.add_to_scope(namespace, fr.intern_string(name), Type, type);
+                }
+                obj := value.var;
+                if !obj.is_null() && !obj.is_function && obj.is_definition {
+                    id       := export_data(c&, obj);
+                    type     := export_type(c&, c&.pointer_to(obj.ty), false);
+                    jit_addr := fr'vtable'materialize_in_jit_address_space(fr.data, QbeModule.raw_from_ptr(m), id);
+                    fr.add_to_scope(namespace, fr.intern_string(name), type, jit_addr);
+                };
+            }
+        }
+    }
+}
+
+// :HackyImportC
+// :FUCKED this will break if i change field offsets
+do_not_do_this_it_is_not_ok_TODO :: fn() *QbeModule = {
+    a := context(DefaultContext)[].comptime.int_from_rawptr() + 1064;
+    b := i64.ptr_from_int(a)[];
+    c := b + 24;
+    d := i64.ptr_from_int(c)[];
+    QbeModule.ptr_from_int(d)
+}
+
 fn export_type(c: *Ctx, type: *CType, decay_arrays: bool) Type = {
     fr := c.franca.unwrap();
     use_cache := !(decay_arrays && type.kind == .TY_ARRAY);
@@ -150,11 +209,33 @@ fn export_func(c: *Ctx, obj: *Obj) FuncId = {
         ret = (Finished = fn_type.ret),
         name = name,
         loc = loc,
+        //comptime_jit_symbol_id = obj.global_symbol.unwrap(),
+        //has_comptime_jit_symbol_id = true,
     );
+    
+    id := obj.global_symbol.unwrap();
+    if obj.is_definition {
+        obj.f.lnk.id = id;
+    }
     
     func&.set_flag(.ResolvedSign);
     func&.set_flag(.ResolvedBody);
-    func&.set_flag(.EnsuredCompiled);
+    
+    if obj.is_definition {
+        func&.set_flag(.EnsuredCompiled);
+    } else {
+        func&.set_flag(.BodyIsSpecial);
+        a := list(Annotation, fr.get_alloc());
+        xxx: FatExpr = (expr = (Value = (bytes = (Small = (0, 0)), coerced = false)), loc = loc, done = true, ty = void);  // :get_or_create_type
+        a&.push(name = fr.intern_string("libc"), args = xxx);
+        
+        // :HackyImportC
+        // TODO: this is stupid man don't write code like this
+        xxx: FatExpr = (expr = (Value = (bytes = (Small = (id.zext(), 8)), coerced = false)), loc = loc, done = true, ty = i64);  // :get_or_create_type
+        a&.push(name = fr.intern_string("hacksmuggleimportcid"), args = xxx);
+        
+        func.annotations = a.as_raw();
+    };
     fid := fr.intern_func(func&);
     func := fr.get_function(fid);
     if obj.is_definition && !(c.franca_namespace == NOSCOPE) {
@@ -174,11 +255,13 @@ follow_refs :: fn(c: *Ctx, obj: *Obj, caller: ?*Func) void = {
             while => !ref.def.is_null() {
                 ref = ref.def;
             }
-            @if(!ref.is_local)
-            if ref.is_function {
+            
+            @if(!ref.is_local && !identical(obj, ref))
+            if ref.is_function {            
                 callee := c.export_func(ref);
                 // TODO: decide callee vs mutual callee more intelligently? 
                 if caller { func |
+                    cc := fr.get_function(callee);
                     func.mutual_callees&.push(callee, fr.get_alloc());
                 }
             } else {
@@ -192,7 +275,7 @@ follow_refs :: fn(c: *Ctx, obj: *Obj, caller: ?*Func) void = {
 // TODO: need to return BakedVarId to support aot instead of specifically poking it into the backend module we have
 // TODO: want to have it work like callees where you only actually emit it to the module when you know it's reachable
 fn export_data(c: *Ctx, obj: *Obj) BakedVarId = {
-    @debug_assert(!obj.is_function && obj.is_definition);
+    @debug_assert(!obj.is_function && obj.is_definition, "want data def %", obj.name.str());
     fr := c.franca.unwrap();
     ::AutoEq(BakedVarId); ::RefEq(BakedVarId);
     if(obj.franca_v != BakedVarId.zeroed(), => return(obj.franca_v));
@@ -221,7 +304,6 @@ fn export_data(c: *Ctx, obj: *Obj) BakedVarId = {
                 relocs&.push(
                     off = rel.offset.bitcast(),
                     target = @if(rel.obj.is_function, (FuncId = c.export_func(rel.obj)), (BakedVarId = c.export_data(rel.obj))),
-                    backend_symbol = rel.obj.global_symbol.unwrap(),
                 );
             };
             relocs.items()

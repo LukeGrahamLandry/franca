@@ -1,6 +1,53 @@
+## (Apr 12)
+
+:AssemblyLanguageForShapes
+
+instead of always evaluating the original expression, recompile the simplified version
+a few steps down the quad tree and then use that for all the children. 
+`976.1 ms ±  14.9 ms`
+
+clealy im missing something cause theirs takes 44ms. 
+it does make me feel a bit better that a clean build of their thing takes 53 seconds. 
+so they run 22x faster but at least my language that compiles 100x faster. 
+oh and dont forget im cheating by preprocessing the input a bit but it's 10ms and im so bad that doesn't matter yet. 
+and like their jit is way more specialized for this than mine so i could accept that mine is 
+too slow to recompile enough to take advantage of the interval simplifications, 
+but it doesn't matter, it's still fast with --eval=vm, so the trick is entirely that you 
+skip work with the interval stuff. maybe my interpreter is just so bad it dwarfs all the work you save? 
+
+i sure am doing a lot of libsystem_platform_memmove, like a lot, a lot, like half the time. 
+i guess i'm always copying the whole big function's tmps even once they've shrunk a lot. 
+yep, if when doing the dead code elimination, i also renumber, it goes away. 
+now i can scale from 6 to 8 levels and speed up, and jit an extra level deeper.
+`718.8 ms ±   1.3 ms` now only 16x to go, sounds like a lot when you put it that way. 
+
+don't need to copy con/tmp since i only append: `661.6 ms ±   0.8 ms`
+
+---
+
+the problem i was having with import_c/ffi was that the symbol id in the c compiler doesnt 
+match the mangled name the franca frontend wants to use. 
+```
+// wrong because different name id
+// > self.entry.task = (Func = f);
+
+// this doesn't work because ffi didn't put stuff in args
+// > self.bounce_body(self.f.symcon(f.lnk.id), .call);
+
+self.entry.task = (Bounce = (lnk = self.f.lnk&, target = f.lnk.id));
+```
+
+and then same sort of trick for imports (from forward declarations).
+so that works for functions now. but now i have to do the same for 
+data. i was hoping i could make it work before making it sane but 
+im really going down a garbage direction here, so maybe i need to rethink.
+
 ## (Apr 11)
 
+:AssemblyLanguageForShapes
 playing with interval arithmetic: 1.034 s ±  0.002 s
+- recurse down a quad tree and optimise based on input ranges 
+so if the output is known +/- you don't need to evaluate each pixel.
 
 ## (Apr 9)
 
@@ -44,6 +91,8 @@ but no, didn't i just say `if false` didn't fix it?
 clearly im confused about something. 
 
 ---
+
+:AssemblyLanguageForShapes
 
 - was reminded of https://www.mattkeeter.com/projects/prospero/ and did one with my jit.
 hella slow but i love it anyway. so neat to see the math spit out words. 

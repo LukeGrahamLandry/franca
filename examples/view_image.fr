@@ -5,76 +5,35 @@ Wuffs :: add_wuffs();
 
 go :: fn() #use(Wuffs) = {
     data := g_src_ptr__mona_lisa_21_32_q50_jpeg;
+    @println("%", u8.int_from_ptr(data.ptr));
     channels_in_file :i32= 0;
     src_w :i32= 0;
     src_h :i32= 0;
     bytes_per_pixel :i32= 3; 
-    src_pixels := stbi_load_from_memory(data.ptr, data.len.intcast(), src_w&, src_h&, channels_in_file&, bytes_per_pixel);
+    //xxxx :rawptr: stbi_load_from_memory;
+    //xxxxx:= xxxx;
+    //@println("call: %", xxxxx);
+    src_pixels := stbi_load_from_memory(data.ptr, data.len.intcast(), src_w&, src_h&, zeroed(*i32), bytes_per_pixel);
+    @println("called!");
 }
 
 C :: import("@/examples/import_c/lib.fr");
 #include_std("backend/lib.fr");
-  
+
 // GARBAGE: for now all the import_c stuff is very experimental. the api will eventually get less painful. 
 fn add_wuffs() ScopeId = {
     get :: import("@/examples/testing.fr").fetch_or_crash;
     root := get("https://github.com/google/wuffs/archive/b1174882799a6d39796a14c9b28fb4977144a480.zip", 16126015, "2725c410cd083fbd76740936a3310fe9dd1c022ce701655e3819123e6fa8339c", "wuffs-b1174882799a6d39796a14c9b28fb4977144a480");
     Ffi :: import("@/examples/import_c/ffi.fr");
     namespace := scope_of(Type, @struct(___HACK :: 123));
-    
     fr := current_compiler_context();
-    m := do_not_do_this_it_is_not_ok_TODO();
-    c := C'Compile.Ctx.zeroed();
-    C'init_ctx(c&, m);
-    c&.Ffi'enable_franca_ffi(fr, namespace);
-    
     c_source := @tfmt("""
         #define WUFFS_IMPLEMENTATION
         #define WUFFS_CONFIG__ENABLE_DROP_IN_REPLACEMENT__STB
         typedef struct{} FILE;
         #include "%/release/c/wuffs-unsupported-snapshot.c"
     """, root);
-    fid: ?FuncId = .None;
-    push_dynamic_context {
-        a: ArenaAlloc = init(page_allocator, 10000);  // :Leak
-        context(DefaultContext)[].temporary_allocator = a&;
-        objs := catch_call(c&, *C.Compile.Obj) {
-            src: List(u8) = assume_owned(c_source, temp());
-            tok := c&.tokenize_string("wuffs", src&);
-            tok  = c&.C'Preprocess'preprocess(tok);
-            c&.parse(tok)
-        }
-        objs := or objs { err | 
-            panic(err)
-        }
-        
-        for_linked objs { obj |
-            if obj.is_function && obj.is_definition {
-                Ffi'export_func(c&, obj);
-            }
-        }
-        
-        // add all the typedefs to the scope
-        // TODO: this gets things from other header files too which might not be what you want. 
-        //       like what if you want to use a library that typedef-ed u32 for themselves? now you can't #use it. that sucks. 
-        // TODO: what if they didn't have a typedef for it and just referred to it as `struct Foo` or whatever
-        // TODO: something for removing prefixes
-        for_linked c.scope { sc |
-            each sc.vars& { name, value |
-                if !value.type_def.is_null() {
-                    type := Ffi'export_type(c&, value.type_def, false);
-                    fr.add_to_scope(namespace, fr.intern_string(name), Type, type);
-                }
-                if !value.var.is_null() {
-                    id       := Ffi'export_data(c&, value.var);
-                    type     := Ffi'export_type(c&, c&.pointer_to(value.var.ty), false);
-                    jit_addr := fr'vtable'materialize_in_jit_address_space(fr.data, QbeModule.raw_from_ptr(m), id);
-                    fr.add_to_scope(namespace, fr.intern_string(name), type, jit_addr);
-                };
-            }
-        }
-    }
-    
+    Ffi'import_c(fr, namespace, c_source);
     println("done exporting c");
     namespace
 }

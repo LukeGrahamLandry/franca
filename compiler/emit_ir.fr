@@ -124,6 +124,32 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
                 };
                 enqueue_task(shared, entry2);
             };
+            
+            // :HackyImportC
+            @if_let(func.body) fn Ir(it) => {
+                entry := bouba_acquire(shared, idx);
+                f := Qbe.Fn.ptr_from_int(it.fn_internal);
+                entry.task = (Func = f);
+                enqueue_task(shared, entry);
+            };
+            
+            // :HackyImportC
+            //if func.body&.is(.DynamicImport) {
+                each func.annotations { a |
+                    if a.name == Flag.hacksmuggleimportcid.ident() {
+                        c_id: u32 = a.args.expr.Value.bytes.Small._0.trunc();
+                        f_id := self.f.lnk.id;
+                        entry := bouba_acquire(shared, idx);
+                        push_dynamic_context {
+                            context(DefaultContext)[].temporary_allocator = entry.arena&;
+                            lnk := temp().box_zeroed(Qbe.Lnk);
+                            lnk.id = c_id;
+                            entry.task = (Bounce = (lnk = lnk, target = f_id));
+                            enqueue_task(shared, entry);
+                        };
+                    }
+                };
+            //}
         };
     };
     result
@@ -414,7 +440,7 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = { // #log_ir("AIR")
         }
         // copy-paste from above
         fn DynamicImport(name) => {
-            @err_assert(self.when == .Aot, "we hit a dynamicimport with no comptimeaddr for jit. the frontend should make sure this doesn't happen") return;
+            @err_assert(self.when == .Aot, "we hit a dynamicimport with no comptimeaddr for jit. the frontend should make sure this doesn't happen. \nTODO: this happens when compiling targetting libc from a compiler built without libc on linux") return;
             self.aot_import_body(name[]);
             return(.Ok)
         };
@@ -458,9 +484,15 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = { // #log_ir("AIR")
         fn Ir(it) => {
             f := Qbe.Fn.ptr_from_int(it.fn_internal);
             m := QbeModule.ptr_from_int(it.module_internal);
-            f.lnk = self.f.lnk;
+            // :HackyImportC
             if identical(m, self.m) {
-                self.entry.task = (Func = f);
+                // wrong because different name id
+                // > self.entry.task = (Func = f);
+            
+                // this doesn't work because ffi didn't put stuff in args
+                // > self.bounce_body(self.f.symcon(f.lnk.id), .call);
+                
+                self.entry.task = (Bounce = (lnk = self.f.lnk&, target = f.lnk.id));
                 return(.Ok);
             };
             
