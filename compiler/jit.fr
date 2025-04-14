@@ -338,11 +338,19 @@ fn shallow_jit_func(self: *SelfHosted, fid: FuncId) void = {
     };
     
     _ := self.unwrap_report_error(void, emit_ir(self.comp(), self.comptime_codegen, fid, .Jit, self.comptime_codegen.bouba_idx&, pending&, true));
+    
+    shared := self.comptime_codegen;
+    if !shared.threaded && func.get_flag(.TookPointerValue) {
+        id := self.comptime_jit_symbol_id(fid);
+        self.created_jit_fn_ptr_value(fid, shared.wait_for_symbol(id).int_from_rawptr());
+    };
+    
     func.set_flag(.RealAsmDone);
     func.set_flag(.AsmDone);
     for pending& { callee |
         if !self.get_function(callee).get_flag(.AsmDone) {
             self.create_jit_shim(callee); 
+            func.mutual_callees&.push(callee, self.get_alloc());  // TODO: shouldn't need this its just for import_c
         };
     };
     // TODO: this isn't what you want because it bleeds into the aot stuff.

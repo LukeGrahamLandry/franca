@@ -1,3 +1,28 @@
+## (Apr 14) 
+
+- jitted wuffs_drop_in__stb__load1 is calling a null function pointer. 
+ok wuffs_base__image_decoder__set_quirk does a weird vtable lookup thing. 
+- oh, maybe that makes sense. it's a function pointer in memory, and normally when 
+jitting franca code, you'd only be able to produce that situation by writing an address from
+comptime code so the compiler would already have made a shim for you or you wouldn't have the address, 
+but with the c compiler, you can get to emit_data with a relocation to something that hasn't 
+been compiled yet, but we do always push_fixup. 
+- ok i think the path is, it's only reachable through the data relocation, it gets added to EmitIr.pending,
+then those go to create_jit_shim, but that doesn't do the fixups, because franca code won't need it. 
+so then you never call through the shim and it never notices it needs to be compiled. 
+- so if im right, then adding to mutual_callees in the loop over pending in shallow_jit_func should fix it? 
+yeah, now it gets to do_jit_fixups, and i just have to take out the part where i clear them if got_indirection_instead_of_patches,
+because now you do in fact need the data patches, and that makes it work on jit. 
+but, taking out that clear of the patches breaks aot, things don't end up in baked.functions anymore. 
+- so the problem there is that for normal jitting franca, the address you'd put in memory would be a shim, 
+and create_jit_shim records that address if TookPointerValue, but now that we want to patch over that 
+as soon as the real address is ready, the one we try to lookup when baking will be different, 
+so that's fixed by just recording the real address after emit_ir. 
+- which actually that's much better anyway maybe, because now jitted code calling through a vtable 
+doesn't need to take a super slow detour through the compiler every single call. 
+so i probably do want to keep it this way even if import_c didn't need it. 
+- yikes. that wasm pretty convoluted. it would be nice if i could design this to be less of an error prone infinite nightmare. 
+
 ## (Apr 13)
 
 - new system where you always compile into a different module and copy over was a lot easier. 
@@ -19,7 +44,7 @@ and bounce_body isn't making the right par instructions because im not setting t
 easy fix.
 - forgot to move f.retty
 - move switch
-- oh damn, good progress. view_image.fr works aot but not jit. dies in wuffs_drop_in__stb__load1.
+- oh damn, good progress. view_image.fr works aot but not jit. 
 
 ## (Apr 12)
 
