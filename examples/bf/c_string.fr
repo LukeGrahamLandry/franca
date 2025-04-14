@@ -2,11 +2,11 @@ C :: import("@/examples/import_c/lib.fr");
 #include_std("backend/lib.fr");
 
 to_c_source :: fn(code: Str, name: Str) []u8 = {
-    out := u8.list(code.len * 5, temp()); 
+    out := u8.list(code.len * 5, ast_alloc()); 
     #use("@/examples/bf/README.fr");
     ::enum(Bf);
     
-    @fmt(out&, "void putchar(unsigned char); unsigned char getchar(); void %(unsigned char *p, void (*putchar)(unsigned char), unsigned char (*getchar)(void)) {", name);
+    @fmt(out&, "void %(unsigned char *p, void (*putchar)(unsigned char), unsigned char (*getchar)(void)) {", name);
 	for code { c | @switch(@as(Bf) c) {
         @case(.Inc)    => out&.push_all("(*p)+=1;");
         @case(.Dec)    => out&.push_all("(*p)-=1;");
@@ -34,43 +34,9 @@ main :: fn() void = :: {
 }
 
 // GARBAGE: for now all the import_c stuff is very experimental. the api will eventually get less painful. 
-fn to_function(bf_source: Str, name: Str) FuncId = {
-    fr := current_compiler_context();
-    m := do_not_do_this_it_is_not_ok_TODO();
-    c := C'Compile.Ctx.zeroed();
-    C'init_ctx(c&, m);
-    import("@/examples/import_c/ffi.fr")'enable_franca_ffi(c&, fr, NOSCOPE);
-    
-    c_source := to_c_source(bf_source, name); 
-    fid: ?FuncId = .None;
-    push_dynamic_context {
-        a: ArenaAlloc = init(page_allocator, 10000);  // :Leak
-        context(DefaultContext)[].temporary_allocator = a&;
-        objs := catch_call(c&, *C.Compile.Obj) {
-            src: List(u8) = assume_owned(c_source, temp());
-            tok := c&.tokenize_string("generated_bf", src&);
-            tok  = c&.C'Preprocess'preprocess(tok);
-            c&.parse(tok)
-        }
-        objs := or objs { err | 
-            panic(err)
-        }
-        
-        Ffi :: import("@/examples/import_c/ffi.fr");
-        for_linked objs { obj |
-            if obj.name.str() == name {
-                fid = (Some = Ffi'export_func(c&, obj));
-            }
-        }
-    }
-    
-    fid.unwrap()
-}
-
-do_not_do_this_it_is_not_ok_TODO :: fn() *QbeModule = {
-    a := context(DefaultContext)[].comptime.int_from_rawptr() + 1064;
-    b := i64.ptr_from_int(a)[];
-    c := b + 24;
-    d := i64.ptr_from_int(c)[];
-    QbeModule.ptr_from_int(d)
+fn to_function($bf_source: Str, $name: Str) FuncId = {
+    c_source :: to_c_source(bf_source, name); 
+    Ffi :: import("@/examples/import_c/ffi.fr");
+    S :: Ffi'include(c_source);
+    S.print_hello_world_from_c
 }

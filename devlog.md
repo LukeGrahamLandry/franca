@@ -1,3 +1,26 @@
+## (Apr 13)
+
+- new system where you always compile into a different module and copy over was a lot easier. 
+- translating types really sucks tho. 
+- this fails a safety check:
+```
+b := baz(b);
+@assert(b.a == 5.0 && b.b&[0] == 1 && b.b&[1] == 1);
+```
+but not if you split into two @assert and not if you print something before, and not if you specify a return type for the enclosing function. 
+confused. TODO!
+- also broke bf/c_source. now an `idom` is randomly null? that's gotta be a memory thing now that people are sharing temp. 
+thats unfortunate. but no i can disable reset_retaining_capacity and it still happens. 
+oh it's because for_blocks goes by `link` and `sdom` goes by `rpo` so if i take some blocks out 
+of the link chain, `sdom` still sees them so i need to copy them. 
+- `Assertion Failed: cant inline call with wrong argument type. (callee = strlen__27729, caller = bar__27728)`
+when you try to aot. didn't happen when jitting because aot tries to reorder to help inlining. 
+and bounce_body isn't making the right par instructions because im not setting the func.args bindings.
+easy fix.
+- forgot to move f.retty
+- move switch
+- oh damn, good progress. view_image.fr works aot but not jit. dies in wuffs_drop_in__stb__load1.
+
 ## (Apr 12)
 
 :AssemblyLanguageForShapes
@@ -41,6 +64,11 @@ and then same sort of trick for imports (from forward declarations).
 so that works for functions now. but now i have to do the same for 
 data. i was hoping i could make it work before making it sane but 
 im really going down a garbage direction here, so maybe i need to rethink.
+
+- oof, `rel := c.arena.box(Relocation);` instead of zeroed so .next was garbage,
+not caught before because import_c doesn't reset temp. a rare one that i can't make 
+an excuse for it not being memory safety related. but still why's that a linked list anyway, 
+doesn't spark joy. 
 
 ## (Apr 11)
 

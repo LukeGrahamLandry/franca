@@ -13,6 +13,14 @@
 // TODO: don't give functions thier real names in the QbeModule so you can use multiple c projects without worrying about conflicts
 //
 
+// TODO: don't make src be comptime (need to be able make a new scope)
+fn include($src: Str) ScopeId = {
+    namespace := scope_of(Type, @struct(___HACK :: 123));
+    fr := current_compiler_context();
+    include(fr, namespace, src);
+    namespace
+}
+
 fn enable_franca_ffi(c: *Ctx, fr: CompCtx, namespace: ScopeId) void = {
     c.franca = (Some = fr);
     c.preserve_franca_env = true;
@@ -20,18 +28,22 @@ fn enable_franca_ffi(c: *Ctx, fr: CompCtx, namespace: ScopeId) void = {
 }
 
 // GARBAGE: for now all the import_c stuff is very experimental. the api will eventually get less painful. 
-fn import_c(fr: CompCtx, namespace: ScopeId, c_source: Str) void = {
-    m := do_not_do_this_it_is_not_ok_TODO();
+fn include(fr: CompCtx, namespace: ScopeId, c_source: Str) void = {
+    m := fr.get_alloc().box(QbeModule);
     c := C'Compile.Ctx.zeroed();
+    // TODO: my whole compilation model doesn't work because c wants if-defs :HardcodeOs
+    init_default_module_dyn(m, fr.vtable, (arch = .aarch64, os = .macos, type = .JitOnly));
     C'init_ctx(c&, m);
     c&.enable_franca_ffi(fr, namespace);
     
-    push_dynamic_context { // TODO: why am i doing this. just mark temp
+    push_dynamic_context { // TODO: why am i doing this. just mark temp, oh but it's confusing how long it needs to live because the fns go in temp
         a: ArenaAlloc = init(page_allocator, 10000);  // :Leak
         context(DefaultContext)[].temporary_allocator = a&;
         objs := catch_call(c&, *C.Compile.Obj) {
-            src: List(u8) = assume_owned(c_source, temp());
-            tok := c&.tokenize_string("wuffs", src&);
+            //src: List(u8) = assume_owned(c_source, temp());
+            src: List(u8) = list(temp());
+            src&.push_all(c_source);
+            tok := c&.tokenize_string("import_cTODO", src&);
             tok  = c&.C'Preprocess'preprocess(tok);
             c&.parse(tok)
         }
@@ -41,7 +53,7 @@ fn import_c(fr: CompCtx, namespace: ScopeId, c_source: Str) void = {
         
         for_linked objs { obj |
             if obj.is_function && obj.is_definition {
-                export_func(c&, obj);
+                _ := export_func(c&, obj);
             }
         }
         
@@ -57,25 +69,16 @@ fn import_c(fr: CompCtx, namespace: ScopeId, c_source: Str) void = {
                     fr.add_to_scope(namespace, fr.intern_string(name), Type, type);
                 }
                 obj := value.var;
-                if !obj.is_null() && !obj.is_function && obj.is_definition {
-                    id       := export_data(c&, obj);
-                    type     := export_type(c&, c&.pointer_to(obj.ty), false);
-                    jit_addr := fr'vtable'materialize_in_jit_address_space(fr.data, QbeModule.raw_from_ptr(m), id);
-                    fr.add_to_scope(namespace, fr.intern_string(name), type, jit_addr);
-                };
+                // TODO: should make this work
+                //if !obj.is_null() && !obj.is_function && obj.is_definition {
+                //    id       := export_data(c&, obj);
+                //    type     := export_type(c&, c&.pointer_to(obj.ty), false);
+                //    jit_addr := fr'vtable'materialize_in_jit_address_space(fr.data, QbeModule.raw_from_ptr(m), id);
+                //    fr.add_to_scope(namespace, fr.intern_string(name), type, jit_addr);
+                //};
             }
         }
     }
-}
-
-// :HackyImportC
-// :FUCKED this will break if i change field offsets
-do_not_do_this_it_is_not_ok_TODO :: fn() *QbeModule = {
-    a := context(DefaultContext)[].comptime.int_from_rawptr() + 1064;
-    b := i64.ptr_from_int(a)[];
-    c := b + 24;
-    d := i64.ptr_from_int(c)[];
-    QbeModule.ptr_from_int(d)
 }
 
 fn export_type(c: *Ctx, type: *CType, decay_arrays: bool) Type = {
@@ -188,6 +191,17 @@ fn export_func(c: *Ctx, obj: *Obj) FuncId = {
     fr := c.franca.unwrap();
     f_ty := c.export_type(obj.ty, false);
     fn_type := fr.get_type(f_ty)[].Fn;
+    f := obj.f;
+    
+    id := obj.global_symbol.unwrap();
+    n := if obj.is_definition {
+        obj.f.lnk.id = id;
+        obj.f.ncon.intcast()
+    } else {
+        0
+    };
+    data  := temp().alloc(BakedVarId, n);
+    funcs := temp().alloc(FuncId, n);
     
     name := fr.intern_string(obj.name.str());
     loc := Span.zeroed();  // TODO: translate this too!
@@ -202,20 +216,27 @@ fn export_func(c: *Ctx, obj: *Obj) FuncId = {
         return_var = .None,
         scope = .None,
         body = @if(obj.is_definition, 
-            (Ir = (fn_internal = Qbe.Fn.int_from_ptr(obj.f), module_internal = QbeModule.int_from_ptr(c.m))),
-            (DynamicImport = name),
+            (Ir = (fn_internal = Qbe.Fn.int_from_ptr(obj.f), data = data, funcs = funcs)),
+            (Empty = ()),
         ),
-        arg = (bindings = empty(), loc = loc),  // TODO: does bindings matter if we already have finished_arg? 
+        arg = (bindings = empty(), loc = loc),
         ret = (Finished = fn_type.ret),
         name = name,
         loc = loc,
-        //comptime_jit_symbol_id = obj.global_symbol.unwrap(),
-        //has_comptime_jit_symbol_id = true,
     );
     
-    id := obj.global_symbol.unwrap();
-    if obj.is_definition {
-        obj.f.lnk.id = id;
+    // TODO: Later i think it would be nice to preserve the argument names. 
+    // For now i need this anyway for emit_par_instructions so you can inline through bounce_body when it's an import. 
+    args := fr.arg_types(fn_type.arg);
+    func.arg.bindings = init(fr.get_alloc(), args.len);
+    for args { a |
+        func.arg.bindings&.push((
+            name = .None,
+            ty = (Finished = a),
+            nullable_tag = zeroed(*Annotations),
+            default = binding_missing_default(),
+            kind = .Var,
+        ), panicking_allocator);
     }
     
     func&.set_flag(.ResolvedSign);
@@ -227,13 +248,7 @@ fn export_func(c: *Ctx, obj: *Obj) FuncId = {
         func&.set_flag(.BodyIsSpecial);
         a := list(Annotation, fr.get_alloc());
         xxx: FatExpr = (expr = (Value = (bytes = (Small = (0, 0)), coerced = false)), loc = loc, done = true, ty = void);  // :get_or_create_type
-        a&.push(name = fr.intern_string("libc"), args = xxx);
-        
-        // :HackyImportC
-        // TODO: this is stupid man don't write code like this
-        xxx: FatExpr = (expr = (Value = (bytes = (Small = (id.zext(), 8)), coerced = false)), loc = loc, done = true, ty = i64);  // :get_or_create_type
-        a&.push(name = fr.intern_string("hacksmuggleimportcid"), args = xxx);
-        
+        a&.push(name = fr.intern_string("libc"), args = xxx);  // TODO: don't assume libc
         func.annotations = a.as_raw();
     };
     fid := fr.intern_func(func&);
@@ -244,32 +259,34 @@ fn export_func(c: *Ctx, obj: *Obj) FuncId = {
         fr.add_to_scope(c.franca_namespace, name, f_ty, fid);
     }
     obj.franca_f = fid;  // save this before translating the callgraph so we don't get stuck in cycles
-    follow_refs(c, obj, (Some = func));
+    
+    if obj.is_definition {
+        enumerate f.con.slice(0, f.ncon.intcast()) { i, con |
+            if con.type == .CAddr {
+                ref := find_ref(obj, con.sym.id);
+                if ref.is_function {
+                    funcs[i] = c.export_func(ref);
+                    // TODO: decide callee vs mutual callee more intelligently? 
+                    func.callees&.push(funcs[i], fr.get_alloc());
+                } else {
+                    data[i] = c.export_data(ref);
+                }
+            }
+        };
+    }
     fid
 }
 
-follow_refs :: fn(c: *Ctx, obj: *Obj, caller: ?*Func) void = {
-    if obj.is_definition {
-        fr := c.franca.unwrap();
-        for obj.refs { ref |
+find_ref :: fn(obj: *Obj, id: u32) *Obj = {
+    for obj.refs { ref |
+        if !ref.is_local && ref.global_symbol.unwrap() == id {
             while => !ref.def.is_null() {
                 ref = ref.def;
             }
-            
-            @if(!ref.is_local && !identical(obj, ref))
-            if ref.is_function {            
-                callee := c.export_func(ref);
-                // TODO: decide callee vs mutual callee more intelligently? 
-                if caller { func |
-                    cc := fr.get_function(callee);
-                    func.mutual_callees&.push(callee, fr.get_alloc());
-                }
-            } else {
-                id := c.export_data(ref);
-                // TODO: need to track that dependency somehow (like callees)
-            }
+            return ref;
         }
     }
+    @panic("couldn't find ref for id=%", id)
 }
 
 // TODO: need to return BakedVarId to support aot instead of specifically poking it into the backend module we have
@@ -310,7 +327,6 @@ fn export_data(c: *Ctx, obj: *Obj) BakedVarId = {
         }),
         loc = zeroed Span, // TODO
     );
-    follow_refs(c, obj, .None);
     obj.franca_v
 }
 
