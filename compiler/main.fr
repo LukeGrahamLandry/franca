@@ -15,6 +15,8 @@ ENABLE_LOGGING_CALLBACKS :: false;
 // FRANCA_QUINE 
 //
 
+want_backtrace :: @static(bool);
+
 fn main() void = {
     vtable := init_driver_vtable();
     if ENABLE_TRACY {
@@ -28,30 +30,9 @@ fn main() void = {
         panic("Expected cli argument: a path to a franca file."); // or driver shared library
     };
     
-    want_backtrace :: @static(bool);
     want_backtrace[] = get_environment_variable("FRANCA_BACKTRACE").is_some() || ALWAYS_BE_SIGNALLING;
     
-    @if(is_linking_libc()) {  // TODO
-        #use(MacosLibc);  // TODO: linux
-        Crash'catch_signals(handle_signal);
-        handle_signal :: fn(s: i64, info: *SigInfo, ctx: *UContext) void = {
-            n := info.signal_number;
-            ::enum(@type n);
-            if ctx.mc_size == size_of(Arm64MachineContext) 
-            && n == .IllegalInstruction 
-            && u32.ptr_from_raw(ctx.mc.arm64.thread.pc)[] == Arm.branch_target_marker 
-            {
-                return();
-            };
-            if want_backtrace[] {
-                Crash'show_trace_and_exit(s, info, ctx);
-            };
-            if n.raw() < SignalNum.enum_count() {
-                scary_log(n.name_str());
-            };
-            exit(1);
-        };
-    };
+    @if(is_linking_libc()) do_signals();
     if want_backtrace[] {
         Crash'push_resolver(@import_symbol "__franca_aot_debug_info", find_in_debug_info);
         Crash'request_backtrace_on_panic();
@@ -81,3 +62,26 @@ fn main() void = {
         });
     };
 }
+
+fn do_signals() void #target_os = (fn($os) => {
+    @if(::(os != .macos)) return();  // :TodoLinux :HardcodeOs
+    C :: LibcType(os);
+    Crash'catch_signals(handle_signal);
+    handle_signal :: fn(s: i64, info: *C.SigInfo, ctx: *C.UContext) void = {
+        n := info.signal_number;
+        ::enum(@type n);
+        if ctx.mc_size == size_of(C.Arm64MachineContext) 
+        && n == .IllegalInstruction 
+        && u32.ptr_from_raw(ctx.mc.arm64.thread.pc)[] == Arm.branch_target_marker 
+        {
+            return();
+        };
+        if want_backtrace[] {
+            Crash'show_trace_and_exit(s, info, ctx);
+        };
+        if n.raw() < C.SignalNum.enum_count() {
+            scary_log(n.name_str());
+        };
+        exit(1);
+    };
+});

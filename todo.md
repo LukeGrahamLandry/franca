@@ -1,7 +1,6 @@
 ## Quest Lines
 
 - compiler: add a defer expression that lets you run cleanup from a closure even if you jump out past it
-- import_c: get it working well enough to use wuffs's generated c code to make an image viewer
 - graphics: finish porting macos/app from objective c
 - wasm:     get all the ssa tests working. some have c drivers so either need to output linkable wasm or use import_c
 - linux:    finish transcribing structs so FRANCA_BACKTRACE=true works. make all the tests pass with -syscalls
@@ -86,6 +85,9 @@ the right/fast/safe/whatever thing to do is also the easy thing to do.
 - default arg values (any const expr and inject at callsite? or based on other args so generate shims or multiple entry points to the function)
 - clean up what goes in lib/build.fr vs lib/sys/fs.fr
 - make fetching dependencies (ie. lua for testing import_c) not embarrassing
+- import_c/ffi has a big comment
+- implement examples/testing.fr/fetch_or_crash() with import_c (wuffs and libcurl) instead of exec-ing shit
+- use import_c for the parts of sokol i haven't ported yet (can't for the mac stuff because thats objective c)
 
 ## cleanup 
 
@@ -99,7 +101,6 @@ also stop pasting around code for handling the multi-part ops
 - combine places that do multiple walk_ast/clone passes (renumber/unmark_done)
 - quest to get rid of magic numbers
   - laz/return_map_m table
-  - view_image/g_src_ptr__mona_lisa_21_32_q50_jpeg
   - BlockAlloc powers of 2
   - x64/arm/wasm/macho/elf but there's no winning there
   - boot but i really don't want to write the compiler again... so idk what to do about that
@@ -121,7 +122,7 @@ and not need to serialize the arguments to a string.
 - automated test that builds are still reproducible
 - fix the test programs to not all write to `./a.out` or whatever so they can run in parallel.  
 - test compile error for conflicting #use
-- compile all the examples in run_tests: aoc, the gui programs, bf 
+- compile all the examples in run_tests: aoc, toy
 - repro doesn't work when you do `-repeat`
 - more calling convention tests between jitted code and c.
 - have one command that lets me run the tests on all targets
@@ -133,6 +134,14 @@ and not need to serialize the arguments to a string.
 it doesn't like that you stomp a.out, default_driver:run should pick a unique path probably. 
 or just default to jitting and force you to enable aot by specifying an output path. 
 - sort the array of test files so you can always diff the output without hoping the file system iterates in a consistant order 
+- think about how to test the gui programs more convincingly than just that they produce a binary
+- run the deps tests in github actions
+
+## linux
+
+- signal handlers (the compiler does it and tests/basic_libc.fr)
+- relocatable and shared libraries (backend/elf/emit.fr)
+- shader translation for the gui examples
 
 ## error messages
 
@@ -215,6 +224,8 @@ this is interesting for... seсurity... сan you tell why?
 also this: https://github.com/golang/go/issues/20209
 - make keyword arguments work all the time. be careful about still supporting a.f(b = c) gives f(a, (b = c)) instead of f(a, b = c). 
 because it turns out the former is actually useful a lot of the time. 
+- would be cool if this worked: `S :: @struct(TAG :: .c); Tag :: @enum(a, b, c); a: Tag = S.TAG;`, 
+usecase: examples/lox Obj header
 
 ## demos 
 

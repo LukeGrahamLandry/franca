@@ -18,7 +18,7 @@ Vm :: @struct(
 Table :: RawHashMap(*ObjString, Value);
 
 fn init_vm() Vm = {
-    self := @uninitialized Vm; // TODO: no uninit
+    self := zeroed Vm;
     self.gc = general_allocator();
     self.stack = list(stack_max, general_allocator());  // EXTRA: grow stack
     self.objects = Obj.ptr_from_int(0); // EVIL
@@ -30,7 +30,6 @@ fn init_vm() Vm = {
 }
 
 fn drop(self: *Vm) void = {
-    // self.chunk.drop(); // TODO: but for now its always on the stack. 
     self.stack&.drop();
     self.compiler_locals&.drop();
     self.globals&.drop(self.gc);
@@ -41,7 +40,7 @@ fn drop(self: *Vm) void = {
 InterpretResult :: @enum(i64) (Ok, CompileError, RuntimeError, SuspendPrint); ::enum(InterpretResult);
 
 fn interpret(self: *Vm, source: Str, $print: Fn(Value, void)) InterpretResult = {
-    chunk: Chunk = init();
+    chunk: Chunk = init();    
     ::if(InterpretResult);
     self.compiler_locals&.clear();
     result := if(compile(self, source, chunk&)) {
@@ -66,6 +65,7 @@ fn interpret(self: *Vm, chunk: *Chunk, $print: Fn(Value, void)) InterpretResult 
         if result == .SuspendPrint {
             print(self.last_return);
         } else {
+            self.chunk = Chunk.ptr_from_int(0);
             return(result);
         };
     }
@@ -75,11 +75,12 @@ is_falsy :: fn(v: Value) bool = v.is_bool().and(=> v.to_bool().not()).or(v.is_ni
                 
 fn run(self: *Vm) InterpretResult = {
     out := InterpretResult.RuntimeError;
-    debug: List(u8) = list(general_allocator());
+    debug: List(u8) = list(temp());  // :LEAK someone needs to reset temp in this program
     
     loop {
         continue :: local_return;
-        @if(::debug_trace_execution, {
+        @if(debug_trace_execution) {
+            
             debug&.clear();
             @fmt(debug&, "       stack:");
             for(self.stack&.as_ptr(), self.stack_top) {slot|
@@ -96,7 +97,7 @@ fn run(self: *Vm) InterpretResult = {
             self.chunk.dis_inst(debug&, i);
             
             print(debug&.items());
-        }, ());
+        };
         
         instruction := self.read_byte();
         
@@ -273,12 +274,14 @@ fn run(self: *Vm) InterpretResult = {
 }
 
 fn push(self: *Vm, value: Value) void = {
+    @debug_assert(self.stack.len < self.stack.maybe_uninit.len);
     self.stack_top[] = value;
     self.stack_top = self.stack_top.offset(1);
     self.stack.len += 1; // redundant. but fixes safety check using locals
 }
 
 fn pop(self: *Vm) Value = {
+    @debug_assert(self.stack.len >= 1);
     self.stack_top = self.stack_top.offset(1.neg());
     self.stack.len -= 1; // redundant. but fixes safety check using locals
     self.stack_top[]

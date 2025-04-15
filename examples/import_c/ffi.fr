@@ -1,16 +1,33 @@
 /// Here we translate the c compiler's representation to the franca compiler's representation. 
 /// This allows franca programs to use our types/functions/variables. 
+
 //
-// TODO: it would save a lot of effort if the c compiler used the franca data structures 
-//        for everything. but then there's an awkward coupling. I like that this also works 
-//        as a stand alone c compiler so it feels like a more impressive demo of "hey this is
-//        just a normal program that we happen to run at comptime to generate some code sometimes". 
-//
-// TODO: making this work for both AOT+JIT is painful because we want to generate code into 
-//       a QbeModule but there's two of them. 
-// TODO: and for comptime need to materialize all the variables as normal memory (not just BakedValue). 
-//
-// TODO: don't give functions thier real names in the QbeModule so you can use multiple c projects without worrying about conflicts
+// This mostly works: you can seamlessly use a library written in c without writing function/struct 
+// signetures and call that code at comptime or runtime just like it were written in franca. 
+// TODO: However, there are still some glaring problems: 
+// - you can only import #libc things
+// - should allow the c code to call franca without retyping signatures but that's hard
+//   because the franca compiler wants to do everything out of order and the c compiler 
+//   wants everything forward declared. you can't even parse until you know the type names. 
+// - need more control over imports. should be able to redirect malloc to your own allocator, 
+//   but you don't want to require typing out all the names. 
+// - translate bit fields to @bit_fields (and make sure their abi matches). 
+// - translate to #c_variadic
+// - cross compilation doesn't work because my whole compilation model relies on being strict 
+//   about only having target splits on a function call boundary, but c programs just 
+//   use the preprocessor to change things at random. so i'm forced to compile everything twice. 
+// - copying between modules in emit_ir is much less confusing than what i was trying to do before,
+//   but feels wasteful. especially if i end up recompiling the thing anyway for cross compile. 
+// - either way, re-copying the Typ-s every function is slow, so fix that.  
+// - need to let you access data variables
+// - rename materialize_in_jit_address_space but also nobody calls it now. until i fix ^ 
+// - you can't access preprocessor stuff. if constants are #define instead of enum, we don't export them. 
+//   or something like tracy that defines the public nice names as macros, you can't call that from franca. 
+// - need to keep enum names and translate enum types to @enum
+// - it would save a lot of effort if the c compiler used the franca data structures 
+//   for everything. but then there's an awkward coupling. I like that this also works 
+//   as a stand alone c compiler so it feels like a more impressive demo of "hey this is
+//   just a normal program that we happen to run at comptime to generate some code sometimes". 
 //
 
 // TODO: don't make src be comptime (need to be able make a new scope)
@@ -31,7 +48,7 @@ fn enable_franca_ffi(c: *Ctx, fr: CompCtx, namespace: ScopeId) void = {
 fn include(fr: CompCtx, namespace: ScopeId, c_source: Str) void = {
     m := fr.get_alloc().box(QbeModule);
     c := C'Compile.Ctx.zeroed();
-    // TODO: my whole compilation model doesn't work because c wants if-defs :HardcodeOs
+    // :HardcodeOs
     init_default_module_dyn(m, fr.vtable, (arch = .aarch64, os = .macos, type = .JitOnly));
     C'init_ctx(c&, m);
     c&.enable_franca_ffi(fr, namespace);
@@ -40,9 +57,7 @@ fn include(fr: CompCtx, namespace: ScopeId, c_source: Str) void = {
         a: ArenaAlloc = init(page_allocator, 10000);  // :Leak
         context(DefaultContext)[].temporary_allocator = a&;
         objs := catch_call(c&, *C.Compile.Obj) {
-            //src: List(u8) = assume_owned(c_source, temp());
-            src: List(u8) = list(temp());
-            src&.push_all(c_source);
+            src: List(u8) = assume_owned(c_source, temp());
             tok := c&.tokenize_string("import_cTODO", src&);
             tok  = c&.C'Preprocess'preprocess(tok);
             c&.parse(tok)

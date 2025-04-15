@@ -82,20 +82,21 @@ Obj :: @rec @struct(
     next: *Obj,
 );
 
-ObjString :: @struct(
-    obj: Obj,
-    data: Str,
-    hash: i64 = 0,
-);
+ObjString :: @struct {
+    TAG :: ObjType.String;
+    obj: Obj;
+    data: Str;
+    hash: i64 = 0;
+};
 
 fn obj_type(self: Value) ObjType #inline = {
     o := self.to_obj();
     o.type
 }
 
-allocate_obj :: fn(self: *Vm, $T: Type, tag: ObjType) *T #generic = {
+allocate_obj :: fn(self: *Vm, $T: Type) *T #generic = {
     mem := self.gc.alloc(T, 1);
-    mem.ptr.obj.type = tag;
+    mem.ptr.obj.type = T.TAG;
     mem.ptr.obj.next = self.objects;
     self.objects = mem.ptr.obj&;
     mem.ptr
@@ -110,7 +111,7 @@ fn copy_string(self: *Vm, s: Str) *ObjString = {
 }
 
 fn take_string(self: *Vm, s: Str) *ObjString = {
-    o := self.allocate_obj(ObjString, ObjType.String);
+    o := self.allocate_obj(ObjString);
     o.data = s;
     o.update_hash();
     
@@ -133,12 +134,13 @@ fn take_string(self: *Vm, s: Str) *ObjString = {
             // It was interned!
             // TODO: don't allocate and then immediately free the objheader.
             //       we should just be freeing the bytes here. 
+            @debug_assert(identical(self.objects, o.obj&));
             self.objects = o.obj.next; // we know we just made this so its the most recent
             self.free_obj(o.obj&);
             return(slot.key);
         };
     };
-        
+    
     fn slow_find_slot(self: *Table, key: *ObjString) *Table.E = {
         i := key.hash.mod(self.arr.len); // TODO: power of two trick
         
@@ -191,7 +193,6 @@ fn free_objects(self: *Vm) void = {
 }
 
 fn free_obj(self: *Vm, obj: *Obj) void = {
-    //@println("[FREE] [%]", v);
     @match(obj.type) {
         fn String() => {
             obj := obj.to_value().to_string();

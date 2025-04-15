@@ -1,5 +1,7 @@
 ## (Apr 14) 
 
+> fixing import_c/ffi jit
+
 - jitted wuffs_drop_in__stb__load1 is calling a null function pointer. 
 ok wuffs_base__image_decoder__set_quirk does a weird vtable lookup thing. 
 - oh, maybe that makes sense. it's a function pointer in memory, and normally when 
@@ -21,7 +23,37 @@ so that's fixed by just recording the real address after emit_ir.
 - which actually that's much better anyway maybe, because now jitted code calling through a vtable 
 doesn't need to take a super slow detour through the compiler every single call. 
 so i probably do want to keep it this way even if import_c didn't need it. 
-- yikes. that wasm pretty convoluted. it would be nice if i could design this to be less of an error prone infinite nightmare. 
+- yikes. that was pretty convoluted. it would be nice if i could design this to be less of an error prone infinite nightmare. 
+
+---
+
+> making linux presentable 
+
+- trying to use a -syscalls compiler to aot compile a program that links libc:
+`we hit a dynamicimport with no comptimeaddr for jit. the frontend should make sure this doesn't happen.` 
+because use_raw_syscalls is shared for comptime+runtime so it decides it wants the #libc version 
+and then when it can't call dlopen to get it, it gives up. 
+i guess the easy way out there is for emit_ir to choose the #syscall version for jit if it's not linking libc, 
+regardless of what you asked for. 
+- that doesn't help for situations like 
+memmove/memset where i want to prefer the optimised libc versions if you're linking that 
+anyway but fallback to mine if not. i could fix that in the same way, if i make my versions 
+use the same name and just have #libc and also a body and change emit_ir to prioritize 
+imports over normal body. 
+- but it feels kinda bad that i've been avoiding thinking about how to redesign TargetSplit for a long time. 
+maybe i'll just turn off fast memcpy until im ready to deal with that. 
+- more important is that the compiler doesn't work with glibc. 
+- for one thing i seem to have lost the `/lib/x86_64-linux-gnu/` when switching to multiple 
+paths in find_os_libc_dylib, but actually that seems to not matter. 
+#include <gnu/lib-names.h> LIBC_SO is just `libc.so.6` so i guess it figures it out. 
+which should have been obvious since i can cross compile hello world and that's fine. 
+it's just running the compiler itself that dies. 
+oh im stupid ok `#use(MacosLibc);  // TODO: linux` no shit 
+- turn off one basic_libc signals test for now
+- at some point since i wrote toy/cpuid.fr i fixed abi for Array(u32, 3) to not return in memory so it broke
+- lox_main `double free or corruption (out)`. i guess it works with -syscalls because my allocator doesn't check and i get lucky. 
+unfortunately turning on debug_trace_execution in the vm fixes it since that debug printing was using the same allocator. 
+welp i cant do it, time to pack up and become a garbage (collected) language i guess. 
 
 ## (Apr 13)
 
