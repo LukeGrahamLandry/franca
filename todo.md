@@ -88,6 +88,8 @@ the right/fast/safe/whatever thing to do is also the easy thing to do.
 - import_c/ffi has a big comment
 - implement examples/testing.fr/fetch_or_crash() with import_c (wuffs and libcurl) instead of exec-ing shit
 - use import_c for the parts of sokol i haven't ported yet (can't for the mac stuff because thats objective c)
+- shouldn't have `alloc` be the nice name, it should be `alloc_uninit`
+- :ThisSureIsABigBlit
 
 ## cleanup 
 

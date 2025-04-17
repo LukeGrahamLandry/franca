@@ -15,193 +15,45 @@
 
 // TODO: validation
 // TODO: tables, vector ops, call_indirect, br_table, br_if, drop, select, memory grow/init/size/copy/fill, data drop,
-//       T.eqz, abs, ceil, floor, trunc, nearest, sqrt, min, max, copysign, trunc_sat, some other conversions
+//       T.eqz, abs, ceil, floor, trunc, nearest, copysign, trunc_sat, some other conversions
 //       multiple return values, ref.*
 // TODO: provide standard c api so could run other people's tests? https://github.com/WebAssembly/wasm-c-api/blob/main/include/wasm.h
-// TODO: use fill_backend_vtable to toggle between recompiling 
-//       and using the host's backend when running as a driver 
-//       (see import_c for an example). 
-// TODO: add an examples/bf that uses this
 
-fn main() void = {
-    args := cli_args();
-    logging := "";
-    i := 0;
-    wasm_file := "";
-    while => i < args.len {
-        arg := args[i].str(); i += 1;
-        if arg == "-d" {
-            @assert_lt(i, args.len, "expected arg after -d");
-            logging = args[i].str(); i += 1;
-        }
-        if arg.ends_with(".wasm") {
-            @assert_eq(wasm_file, "", "can only specify one wasm file to run");
-            wasm_file = arg;
-        }
-    }
-    
-    #use("@/lib/sys/fs.fr");
-    bytes := temp().read_to_string_or_crash(wasm_file).items(); // :panic
-    exec_wasm_file(Exports, bytes, logging);
-}
+fn init(m: *QbeModule, w: *WasmModule, a: Alloc) LoadWasm = (
+    m = m,
+    w = w,
+    stack = list(a),
+    locals = empty(),
+    blocks = list(temp()),
+    preserve_franca_env = true,
+);
 
-fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str) void = {
-    //@eprintln(" (% bytes).", bytes.len);
-    module := QbeModule.zeroed();
-    init_default_module(module&, (type = .JitOnly, os = query_current_os(), arch = query_current_arch()), false);
-    a := libc_allocator;
-    module&.set_debug_types(logging, true);
-    wasm: LoadWasm = (
-        m = module&,
-        w = empty(a),
-        stack = list(a),
-        locals = empty(),
-        blocks = list(temp()),
-        preserve_franca_env = true,
-    );
-    p: ParseWasm = (w = wasm.w&, src = bytes);
-    or parse_wasm(p&) { e |
-        @panic("% (at byte index %)", e, p.cursor);
-    };
-    wasm&.load_module();
-    
-    buf := page_allocator.alloc(u8, 1.shift_left(32)); // wasm.w.memories[0].min.zext() * wasm_page_size);
-    wasm_context_pointer := u8.int_from_ptr(buf.ptr);
-    heap_base[] = trunc(buf.len - 1);
-    
-    if p.w.data.len > 0 {
-        @assert_eq(p.w.data.len, 1, "TODO: multiple datas");
-        data := wasm.w.data[0]&;
-        expr := data.active_offset_expr;
-        @assert_ne(expr.len, 0, "TODO: passive data");
-        off, k := const_eval_wasm_expr(expr.items());
-        @debug_assert_eq(k, .Kw, "offset expression");
-        buf.subslice(off, data.bytes.len).copy_from(data.bytes.items());
-    };
-    
-    module&.emit_suspended_inlinables();
-    
-    exports := comptime_exports(Exports);
-    each p.w.imports& { it |
+fn fill_imports(self: *LoadWasm, imports: *RawHashMap(Str, rawptr)) void = {
+    each self.w.imports& { it |
         name := @tfmt("%$%", it.name.items(), it.module.items());  // :leak
-        if exports.get(name) { addr |
-            module&.put_jit_addr(module&.intern(name), addr);
+        if imports.get(name) { addr |
+            self.m.put_jit_addr(self.m.intern(name), addr);
         } else {
-            @println("ERROR: missing import '%'", name);
+            @panic("ERROR: missing import '%'", name);
         }
-    }
-    
-    module&.make_exec();
-    
-    main := p.w.exports&.items().index_of(fn(it) => it.name.items() == "main")
-        || @panic("expected export called 'main'");
-    main := p.w.exports[main].id;
-    n := wasm.functions[main.zext()];
-    f, _ := or module&.get_addr(n) {
-        @panic("couldn't find %: %", n, wasm.m.str(n));
     };
-    //@println(">>> Calling %", wasm.m.str(n));
-    f := assume_types_fn(Arg = Ty(i64, u32, u32), Ret = i64, ptr = f);
-    result := f(wasm_context_pointer, 1, 0);
-    if result != 0 {
-        @eprintln(">>> returned %", result);
-    };
-    page_allocator.dealloc(u8, buf);
 }
 
-heap_base :: @static(u32) 0;  // TODO: BAD!
-
-// TODO: make it easy to ship these as a binary form of the ir so you can inline accross host calls. 
-Exports :: @struct {
-    host :: @struct {
-        write :: fn(ctx: *u8, ptr: u32, len: u32) void = {
-            s: []u8 = (ptr = ctx.offset(ptr.zext()), len = len.zext());
-            println(s);
-        }
-    }
-    env :: @struct {
-        putchar :: fn(ctx: *u8, c: u8) void = {
-            s: []u8 = (ptr = c&, len = 1);
-            print(s);
-        }
-        puts :: fn(ctx: *u8, p: u32) void = {
-            s: CStr = (ptr = ctx.offset(p.zext()));
-            @println("%", s);
-        }
-        strlen :: fn(ctx: *u8, p: u32) i64 = {
-            s: CStr = (ptr = ctx.offset(p.zext()));
-            s.slow_len()
-        }
-        labs :: fn(ctx: *u8, i: i64) i64 = i.abs();
-        calloc :: fn(ctx: *u8, m: u32, n: u32) u32 = {  // HACK
-            heap_base[] -= align_to(m*n, 16);
-            heap_base[]
-        }
-        vprintf :: fn(ctx: *u8, fmt: u32, valist: u32) u32 = {
-            arg_p := ptr_cast_unchecked(u8, i64, ctx.offset(valist.zext()));
-            printf_impl(ctx, fmt, arg_p)
-        }
-        printf :: fn(ctx: *u8, fmt: u32, args: i64) u32 = {
-            printf_impl(ctx, fmt, args&)
-        }
-    }
-}
-
-printf_impl :: fn(ctx: *u8, fmt: u32, args: *i64) u32 = {
+fn collect_exports(self: *LoadWasm, a: Alloc) []u32 = {
+    count := 0;
+    each self.w.exports& { it |
+        ::enum(@type it.type);
+        count += int(it.type == .Func);
+    };
+    e := a.alloc(u32, count);
     i := 0;
-    c :: fn(i) => ctx.offset(i + fmt.zext())[];
-    get_arg :: fn($T) T #generic => {
-        args[] = align_to(args[], ::align_of(T));
-        value := ptr_cast_unchecked(u8, T, ctx.offset(args[]))[];
-        args[] += ::size_of(T);
-        value
-    };
-    putchar :: Exports.env.putchar;
-    while => c(i) != 0 {
-        if c(i) != "%".ascii() {
-            putchar(ctx, c(i));  // :SLOW
+    each self.w.exports& { it |
+        if it.type == .Func {
+            e[i] = self.functions[it.id.zext()];
             i += 1;
-        } else {
-            i += 1;
-            @switch(c(i)) {
-                @case("l".ascii()) => {
-                    if c(i + 1) == "d".ascii() {
-                        i += 2;
-                        @print("%", get_arg(i64));
-                    }
-                }
-                @case("d".ascii()) => {
-                    i += 1;
-                    @print("%", get_arg(i32));
-                }
-                @case("g".ascii()) => {
-                    i += 1;
-                    @print("%", get_arg(f64));
-                }
-                @case("c".ascii()) => {
-                    i += 1;
-                    putchar(ctx, get_arg(u32).trunc());
-                }
-                @case("s".ascii()) => {
-                    i += 1;
-                    p := get_arg(i64);  // TODO: this should be u32 but then the ir needs to know what's a pointer 
-                    
-                    // when this was in the Exports struct
-                    // this isn't what you want anyway but its still a compiler bug
-                    //puts(ctx, p);  // TODO: You can't have a void pointer 4582761636 as a constant :FUCKED
-                    
-                    s: CStr = (ptr = ctx.offset(p));
-                    @print("%", s);
-                }
-                @case("%".ascii()) => {
-                    putchar(ctx, c(i));  // :SLOW
-                    i += 1;
-                }
-                @default => ();
-            };
         };
     };
-    0  // TODO: return the number of chars printed? 
+    e
 }
 
 // Take a struct like { Module :: { Func :: fn(); } } and create a map [func$module -> fnptr]
@@ -245,11 +97,10 @@ fn const_eval_wasm_expr(expr: []u8) Ty(i64, Qbe.Cls) = {
 
 LoadWasm :: @struct(
     m: *QbeModule,
-    w: WasmModule,
+    w: *WasmModule,
     src := "",
     cursor := 0,
     module_name := "module",
-    data_symbol: []u32 = empty(),
     global_names: []u32 = empty(),
     global_cls: []Qbe.Cls = empty(),
     tables: []u32 = empty(),
@@ -267,89 +118,100 @@ LoadWasm :: @struct(
     franca_env := QbeNull,
 );
 
-fn create_init_func(self: *LoadWasm) void = {
-    //f := Qbe.Fn.zeroed();
-    //self.f = f&;
-    //self.f.default_init(self.m);
-    //f.lnk.id = self.m.intern("init");
-    //self.f.start = newblk();
-    //self.stack&.clear();
-    //self.datas = libc_allocator.alloc(u32, self.w.data.len);
-    //enumerate self.w.data { i, it |
-    //    name := @tfmt("%_f%", self.module_name, local_func_i);    // :WasmNameMangling
-    //    self.data_symbol[i] = 
-    //};
-    //self.f.copy_instructions_from_scratch_reversed_which_means_forwards(self.f.start);
-    //self.f.start.jmp.type = .ret0;
-    //self.f.nblk = 1;
-    //printfn(self.f, self.f.globals.debug_out);
+fn create_init_func(self: *LoadWasm) u32 = {
+    f := Qbe.Fn.zeroed(); f := f&;
+    f.default_init(self.m);
+    f.lnk.id = self.m.intern(@tfmt("init$%$", self.module_name));
+    f.lnk.export = true;
+    f.start = newblk();
+    f.start.jmp = (type = .ret0, arg = QbeNull);
+    f.nblk = 1;
+    // TODO: i think i need to keep the data symbols for passive segments and then need to do this at the beginning before the other functions. 
+    base := f.newtmp("base", .Kl);
+    f.emit(.par, .Kl, base, QbeNull, QbeNull);
+    enumerate self.w.data { i, data |
+        expr := data.active_offset_expr;
+        @assert_ne(expr.len, 0, "TODO: passive data");
+        off, k := const_eval_wasm_expr(expr.items());
+        @debug_assert_eq(k, .Kw, "offset expression");
+        id := self.m.intern(@tfmt("data%$%$", i, self.module_name));
+        self.m.emit_data(template = (Bytes = data.bytes.items()), id = id);
+        dest := f.newtmp("dat", .Kl);
+        // TODO: this sucks really really bad if we actually emit all the instructions for large blits :ThisSureIsABigBlit
+        f.emit(.add, .Kl, dest, base, f.getcon(off));
+        f.emit(.blit0, .Kw, QbeNull, f.symcon(id), dest);
+        f.emit(.blit1, .Kw, QbeNull, INT(data.bytes.len), QbeNull);
+    };
+    f.copy_instructions_from_scratch_reversed_which_means_forwards(f.start);
+    run_qbe_passes(f);  // :ThisIsWhereWeEmit
+    f.lnk.id
 }
 
 preleb :: import("@/backend/wasm/isel.fr").wasm_type_preleb;
 
 fn load_module(self: *LoadWasm) void = {
     self.create_globals();
-    self.create_init_func();  // TODO
     
-    enumerate self.w.code& { local_func_i, code | 
-        global_func_i := local_func_i + self.w.imported_function_count;
+    range(0, self.w.code.len) { i |
         mark := mark_temporary_storage();
         f := Qbe.Fn.zeroed();
-        self.f = f&;
-        self.f.default_init(self.m);
-        
-        f.lnk.id = self.functions[global_func_i];
-        
-        type_index := self.function_types[global_func_i];
-        
-        signature := self.w.types[type_index.id.zext()]&;
-        self.stack&.clear();
-        self.locals = temp().alloc(Qbe.Ref, code.total_local_count + signature.arg.len);
-        self.blocks = list(temp());
-        self.base_pointer = self.f.newtmp("wasm_globals", .Kl);
-        if self.preserve_franca_env {
-            self.franca_env = self.f.newtmp("env", .Kl);
-            self.f.emit(.pare, .Kl, self.franca_env, QbeNull, QbeNull);
-        }
-        self.f.emit(.par, .Kl, self.base_pointer, QbeNull, QbeNull);
-        
-        // parameters come in as locals not on the stack
-        range(0, signature.arg.len) { i |
-            k := signature.arg[i].cls();
-            self.locals[i] = self.f.newtmp(@tfmt("L%", i), k);
-            self.f.emit(.par, k, self.locals[i], QbeNull, QbeNull);
-        };
-        
-        {
-            i := signature.arg.len;
-            for code.locals& { local |
-                k := local.type.cls();
-                range(0, local.count) { _ |
-                    self.locals[i] = self.f.newtmp(@tfmt("L%", i), k);
-                    i += 1;
-                };
-            };
-        };
-        
-        self.src = code.insts.items();
-        self.cursor = 0;
-        
-        self.link = self.f.start&;
-        // you can't br targtting the outer scope of the function so only `current` matters. 
-        self.blocks&.push(current = self.link_new_block(), continue = Qbe.Blk.ptr_from_int(0), break = Qbe.Blk.ptr_from_int(0), loop = false);
-        self.push_block(preleb(.EmptyBlock).intcast(), false);
-        
-        self.return_types = signature.ret.items();
-        self.emit_the_code();
-        
-        self.f.lnk.export = true; // TODO
-        
-        //each self.f.globals.debug { d | 
-            //d[] = true;
-        //};
-        run_qbe_passes(self.f);
+        self.translate_func(i, f&);
+        run_qbe_passes(f&);  // :ThisIsWhereWeEmit
         reset_temporary_storage(mark);
     };
+};
+
+fn translate_func(self: *LoadWasm, local_func_i: i64, f: *Qbe.Fn) void = {
+    code := self.w.code.index(local_func_i);
+    global_func_i := local_func_i + self.w.imported_function_count;
+    self.f = f;
+    self.f.default_init(self.m);
+    
+    f.lnk.id = self.functions[global_func_i];
+    
+    type_index := self.function_types[global_func_i];
+    
+    signature := self.w.types[type_index.id.zext()]&;
+    self.stack&.clear();
+    self.locals = temp().alloc(Qbe.Ref, code.total_local_count + signature.arg.len);
+    self.blocks = list(temp());
+    self.base_pointer = self.f.newtmp("wasm_globals", .Kl);
+    if self.preserve_franca_env {
+        self.franca_env = self.f.newtmp("env", .Kl);
+        self.f.emit(.pare, .Kl, self.franca_env, QbeNull, QbeNull);
+    }
+    self.f.emit(.par, .Kl, self.base_pointer, QbeNull, QbeNull);
+    
+    // parameters come in as locals not on the stack
+    range(0, signature.arg.len) { i |
+        k := signature.arg[i].cls();
+        self.locals[i] = self.f.newtmp(@tfmt("L%", i), k);
+        self.f.emit(.par, k, self.locals[i], QbeNull, QbeNull);
+    };
+    
+    {
+        i := signature.arg.len;
+        for code.locals& { local |
+            k := local.type.cls();
+            range(0, local.count) { _ |
+                self.locals[i] = self.f.newtmp(@tfmt("L%", i), k);
+                i += 1;
+            };
+        };
+    };
+    
+    self.src = code.insts.items();
+    self.cursor = 0;
+    
+    self.link = self.f.start&;
+    // you can't br targtting the outer scope of the function so only `current` matters. 
+    self.blocks&.push(current = self.link_new_block(), continue = Qbe.Blk.ptr_from_int(0), break = Qbe.Blk.ptr_from_int(0), loop = false);
+    self.push_block(preleb(.EmptyBlock).intcast(), false);
+    
+    self.return_types = signature.ret.items();
+    self.emit_the_code();
+    
+    self.f.lnk.export = true; // TODO: kind depends if this is the final thing. if it's aot into a franca program, you want to to TOFKALTO
 }
 
 // choose names for functions, globals, tables

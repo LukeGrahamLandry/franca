@@ -37,6 +37,10 @@ Binaries for other platforms are available as [github actions artifacts](https:/
 
 > There is vauge work towards targetting wasm and llvm, but it is not yet usable. 
 
+## Documentation
+
+Some does exist, see the `docs/README.md`.
+
 ## Example Programs
 
 > The following philosophical objections apply: The most significant program written in your language is its own compiler. 
@@ -77,6 +81,15 @@ The pattern I've seen is that future me is invariably better equipped to make th
 The reaction I want when someone sees this is not "damn this guy made a cool compiler", it's "damn the next thing this guy makes is gonna be fucking awesome". 
 
 > It's not symmetrical or perfect; But it's beautiful and it's mine; What else can I do?
+
+## Credits 
+
+Franca includes code from ported other (permissively licenced) projects.  
+Individual files have license headers that reference thier original authors.
+
+- qbe for `backend`
+- chibicc for `examples/import_c`
+- sokol for `graphics`
 
 ## Tradeoffs
 

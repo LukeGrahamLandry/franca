@@ -1,5 +1,3 @@
-## Function Tags
-
 ### creating ast nodes
 
 - @slice(a, b, c)

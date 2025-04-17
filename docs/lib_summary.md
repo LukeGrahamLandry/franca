@@ -23,6 +23,8 @@ available to every program (you can access them with `import()` or `#use`).
   - threads
   - terminal: cli colours, interactive input
   - subprocess: launch other programs
+  - fs: interact with files
+  - process: get information about your execution environment 
 - dynamic_lib
 - jump: dynamic nonlocal returns (setjmp/longjmp)
 - sort
@@ -42,6 +44,10 @@ The rest of these are mainly for internal use but might also be useful for other
 - meta
   - parse: read strings of qbe-style ir (see meta/qbe_frontend.fr for example usage). 
   - template: use parse^ at comptime to generate code for emitting blocks of ir patched with runtime parameters. 
+
+## examples
+
+- import_c/ffi: compile c code and call it without writing bindings
 
 ## compiler 
 

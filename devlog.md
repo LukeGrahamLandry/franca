@@ -1,3 +1,9 @@
+## (Apr 15)
+
+- started splitting up import_wasm to make it useable from comptime
+- removed some old unused function tags
+- attempting to write more documentation
+
 ## (Apr 14) 
 
 > fixing import_c/ffi jit
