@@ -11,7 +11,9 @@ and one with braces that looks like a block. They mean the same thing. Franca ha
 system; different structs are different types even if they have the same fields. 
 
 You create an instance of a struct type with an initializer expression like `(name = value, etc)`. 
-Structs fields can have default values that are used if an initializer does not provide that field. 
+Structs fields can have (constant) default values that are used if an initializer 
+does not provide that field. It is a compile error if a field that does not have a default 
+value is not specified in the initializer expression. 
 
 Like other native languages, struct variables default to being stored on the thread's callstack 
 unless you explicitly allocate dynamic memory and use that instead. 
@@ -31,6 +33,14 @@ s: S = (a = aa, b = cc);
 There are no private fields, no constructors, and no destructors. 
 There are no methods but you can use structs as a namespace by 
 defining constant fields (with `::`). 
+
+A struct with one field has the same representation as that field's type. 
+A struct with zero fields requires no memory (same representation as `void`), 
+so you can use a `HashMap(K, void)` as a `HashSet(K)`. 
+
+If all the fields have default values, you can have an empty initializer like `s: Foo = ();`, 
+since all the fields have constant known values, this is equivalent to a memcpy from a blessed 
+template version of the struct (even if it's not implemented that way). 
 
 ## Tuples
 
@@ -58,17 +68,21 @@ An enum is a (type-safe) set of named values (generally integers).
 E :: @enum(i64) (a, b, c);
 
 foo: E = .a;
+foo = .b;
+bar := E.b;
 ```
 
 ## Unions
 
+A union stores one value from a set of types in overlapping memory. 
 Since the union doesn't know which type it currently contains, 
 you have to track that information seperatly. This is almost never what you want. 
 It is extremely easy to accidentally invoke behaviour considered disrespectful. 
 
 ## Tagged Unions
 
-This is just a bit of sugar around a struct that contains an enum and a union. 
+This is what rust calls an enum. 
+It's just a bit of sugar around a struct that contains an enum and a union. 
 For example, you could write this: 
 
 ```
@@ -84,8 +98,27 @@ but that's a bit tedious to use and can be written more succinctly as:
 T :: @tagged(a: A, b: B);
 ```
 
-You can also use this with `@match` to access the payload safely 
-(you can't forget to check the tag because only the correct branch will execute). 
+You can also use this with `@match` to access the payload safely. 
+You can't forget to check the tag because only the correct branch will execute. 
+
+```
+t: T = (a = value_of_type_a);
+
+@match(t) {
+  fn a(it) => use_type_a(it);
+  fn b(it) => use_type_b(it);
+}
+```
+
+You can unsafely access the payload with dot syntax (same as a struct field). 
+Currently the compiler does not insert a tag check when you do that so it's the 
+same as using a union but with extra memory overhead (to store the tag). 
+Assigning the payload with field syntax does not change the tag so you should 
+only assign to the currently active member (doing otherwise is considered disrespectful). 
+
+When a varient has a payload of void you can initialize it with just `.Name` like an enum. 
+
+One special tagged union type is `Option(T)`, which is only special because it has syntax sugar: `?T`. 
 
 ## Arrays
 
@@ -98,6 +131,9 @@ changes made by the callee).
 a: Array(i64, 3) = @array(0, 1, 2);
 one := a&[1];
 ```
+
+Indexing past the end of an array is considered disrespectful 
+(and will trigger an assertion if you have bounds checks enabled). 
 
 ## Dynamic Collections
 
@@ -114,8 +150,8 @@ and then store that allocator internally for use by other functions.
 The raw version forces you to pass an allocator to each call that needs one. 
 
 - Slice: Some contiguous memory (of runtime known size) represented by a pair of a length 
-and a pointer to the first element. What c# calls a Span. The type is written as `Slice(T)` 
-or, since it's so common, you can use the sugar: `[]T`. 
+and a pointer to the first element. What c# calls a Span. Since this type is so common, 
+it has sugar: `[]T`. 
 - List/RawList: Append items and when you run out of space it will reallocate to be twice as big. 
 Items are stored contiguously so you can access them as a slice. C++ calls this a vector, 
 Go calls this a slice.
@@ -131,3 +167,8 @@ You cannot get a pointer to an individual value (since bits are not addressable)
 - BucketArray: A List of Lists. When you run out of space to append items, it makes a new list 
 without reallocating the old ones. So items have a stable memory address (you can safely hold 
 a pointer accross a resize). 
+
+Indexing past the end of a collection is considered disrespectful 
+(and will trigger an assertion if you have bounds checks enabled). 
+
+Calling drop on a collection generally won't recursively call drop on it's elements. 

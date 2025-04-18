@@ -3,7 +3,7 @@
 This is a brief overview that should show you enough franca syntax that you 
 can start reading examples programs. Nothing here is a super cool language feature, 
 it's just the basic stuff that most programs will use and has a direct translation 
-into other languages. I suspect that if you've used any of (zig,rust,jai,c,c++) 
+into other languages. I suspect that if you've used any of (zig,rust,jai,c,c++,d) 
 this will all feel fairly natural. If you get bored, go look at an example, and 
 come back when you get confused. 
 
@@ -12,7 +12,7 @@ come back when you get confused.
 To run a franca program, pass a file path as a command line argument to the compiler. 
 That will just-in-time compile main() to native machine code and run it. 
 
-The incantation for outputing an AOT binary is slightly longer but it also 
+The incantation for outputting an AOT binary is slightly longer but it also 
 doesn't matter until you know more of the language. Anything that works
 in AOT code will work in JIT code (if not, it's a compiler bug). 
 
@@ -26,11 +26,11 @@ main :: fn() void = {
 
 ## Declarations
 
-Variables are declared with `name: Type = value`.
+Variables are declared with `name: Type = value;`.
 Often the type can be inferred from the value, in which case 
-you can leave out the type so `name := value` (and that behaves like auto in c++). 
+you can leave out the type so `name := value;` (and that behaves like auto in c++). 
 
-Assignment to an existing variable is `name = new_value`. 
+Assignment to an existing variable is `name = new_value;`. 
 
 You cannot leave off the value part of a declaration. You can create a zero 
 initialized variable with `t := zeroed T;` or an uninitialized variable with 
@@ -61,11 +61,19 @@ This is adding the function to an overload set called `f` instead of declaring a
 In this style, there can be many declarations of `f` as long as the argument/return types are 
 different so the compiler can unambiguously tell which function you intended to call. 
 
+A function parameter with a `$` before the name must have its value known 
+at compile time for each callsite (this is spelled `comptime` in zig). 
+
+Variables with the same names shadow each other (including when declared multiple times 
+in the same scope, the new variable is used after its declaration). Constants can be shadowed 
+in child scopes but since they are order independent, a constant can only be defined once in each scope. 
+
 ## Operators 
 
 These all behave as you'd expect. 
 
 - math: `+ - * /`
+- assignment: `= += -= *= /=`
 - equality: `== !=`
 - comparison: `> < >= <=`
 - not: `!`
@@ -75,6 +83,9 @@ However there is no syntax sugar for bitwise shift/xor/and/or/not, modulo, or ex
 
 Operators can be overloaded for user defined types but that's not important yet. 
 By the time you need that you'll be able to find an example of how to do it. 
+
+The operator `::` is reused (from declaring a constant), as a prefix it forces
+an expression to be evaluated at compile time (this is spelled `comptime` in zig). 
 
 ## Pointers
 
@@ -91,25 +102,11 @@ It means the same thing as suffix `[0]` in c which is more commenly written as a
 - Field accesses are auto-dereferenced. So if even foo is a pointer you can do `foo.bar`
 without a special glyph for `->`. 
 - You can create a null pointer with `zeroed(*T)` or `T.ptr_from_int(0)`. 
-Generally you should prefer using a type `?T` with the value `.None` when 
+Generally you should prefer using a type `?*T` with the value `.None` when 
 a value may not be present. 
 - The operator for indexing a list/slice is suffix `[i]` (like most languages). 
 That returns a value. You can do `.index(i)` to get a pointer to the element. 
 - A pointer type is spelled `*T` (like Zig)
-
-## Calls
-
-By far the most common operation is calling a function and franca has a variety of syntax options for doing so. 
-For example, all the operators described above desugar to function calls. 
-
-The basic call syntax is `f(a, b)` which calls `f` and passes it two arguments: `a` and `b`. 
-The value `f` could be a compile time function or overload set OR a runtime known function pointer. 
-
-You can also use dot calls if that feels more familier. 
-The example above becomes `a.f(b)`, which means exactly the same thing (there's still no vtable lookup). 
-Note this syntax conflicts with field access so sometimes you might need to do `(a.f)(b)`,
-which means read the field called `f` on the value `a` as a function value and call it with 
-the single argument `b`. As a less paren heavy option, `a'f(b)` means the same thing (`f` is a field not a function). 
 
 ## Trailing Expressions 
 
@@ -126,6 +123,22 @@ add_one :: fn(a: i64) i64 = {
 Most of the time you don't need a semicolon after a closing brace in the middle of a block. 
 But you will see a lot of examples where I have extra semicolons because it used to be required 
 so now i have the muscle memory to add them. 
+
+## Calls
+
+By far the most common operation is calling a function and franca has a variety of syntax options for doing so. 
+For example, all the operators described above desugar to function calls. 
+
+The basic call syntax is `f(a, b)` which calls `f` and passes it two arguments: `a` and `b`. 
+The value `f` could be a compile time function or overload set OR a runtime known function pointer. 
+
+You can also use dot calls if that feels more familier. 
+The example above becomes `a.f(b)`, which means exactly the same thing (there's still no vtable lookup). 
+Note this syntax conflicts with field access so sometimes you might need to do `(a.f)(b)`,
+which means read the field called `f` on the value `a` as a function value and call it with 
+the single argument `b`. As a less paren heavy option, `a'f(b)` means the same thing (`f` is a field not a function). 
+
+When there is only one argument, you can write the call as `f a;` instead of `f(a)`. 
 
 ## Control Flow
 
@@ -181,7 +194,7 @@ a `=>` before the body. When you call a lambda function the implementation is
 pasted into that callsite (without creating a new stack frame at runtime) so it 
 can access any variables from the caller's stack frame. 
 
-Franca does not have real closures. Lambdas created with `=>` can not escape
+Franca does not have real closures. Lambdas can not escape
 thier scope and can only be called when the callee is constantly known. 
 Since the implementation is inlined at every callsite, they cannot be recursive. 
 You can have multiple levels of nested lambda but you cannot have a lambda that 
@@ -231,6 +244,23 @@ if c {
 }
 ```
 
+The type annotation for a lambda (or function) value looks like `@Fn(a: A, b: B) R`. 
+So a function that takes a lambda parameter would be declared like: 
+
+```
+f :: fn($callee: @Fn(n: i64) i64, x: i64) i64 = {
+  callee(x + 1) * 2
+}
+```
+
+Lambda values can be assigned to constants just like normal functions: 
+
+```
+g :: fn(a, b) => a + b;
+g(1, 2);
+f(g, 5);
+```
+
 ## Early Returns
 
 Inside a function (that has a `=` before the body), you can use `return` to exit early. 
@@ -240,10 +270,9 @@ you need to do `return();`, the former will just evaluate the value called `retu
 Sorry about that! It makes porting code from other languages kinda suck because it's easy to make that mistake. 
 When returning a value, it's fine to leave off the parens, `return x;` does what you'd expect. 
 
-Inside a lambda (that has a `=>` before the body), you can use `local_return` to exit early. 
+Inside a lambda (a fn with `=>` or trailing block to a call), you can use `local_return` to exit early. 
 Franca does not have keywords for break/continue. However, the trailing block of an 
 if/while/for/etc is in fact a lambda expression so you can use `local_return` to exit early. 
-
 `local_return` always refers to the inner most nested lambda. However, it is a constant 
 value of type `LabelId` and it can be given a name like any other value. Using local_return 
 directly is almost never what you want, using it to create a named label is much more useful. 
@@ -313,7 +342,9 @@ a struct with constant declarations, or a string (which is treated the same as w
 
 - C style `//` comments go until the end of the line. 
 - Multiline comments with `/*` and `*/` (they nest like in rust). 
-- You can also use multiline string literals as comments if you're in the mood: `"""text""";`
+- You can use multiline string literals as comments if you're in the mood: `"""text""";`
+- Since typechecking is lazy you can also comment out code with `@if(false) { body };` or 
+`_ :: fn() = { body };`
 
 ## Literals
 
@@ -323,7 +354,7 @@ a struct with constant declarations, or a string (which is treated the same as w
   - binary: 0b10011010010
   - float: 1234.0
 - string
-  - "single line" (escape sequences like \n, \t, \0, \\, \")
+  - "single line" (escape sequences like `\n \t \0 \\ \"`)
   - """multiline""" (no escapes, a backslash is just a backslash)
 
 Numbers can have underscores. They have no meaning but may help readability: 1_000_000 == 1000000. 
@@ -368,7 +399,7 @@ you're passing AST nodes to some code that executes at comptime and returns an A
 An Abstract Syntax Tree is how the compiler represents your program internally while doing 
 semantic analysis. 
 
-The macro system deserves it's own more detailed documentation but the important thing 
+The macro system deserves its own more detailed documentation but the important thing 
 to know is that macro calls start with a `@` and do not eagarly evaluate thier arguments. 
 How the argument expressions are used is entirely up to the callee. This provides some 
 extra flexibility to create constructs that can't be expressed as normal franca code. 

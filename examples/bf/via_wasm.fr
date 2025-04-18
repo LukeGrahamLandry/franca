@@ -1,0 +1,225 @@
+// compile a bf program to a wasm module. 
+// then import the wasm module to call it from franca. 
+
+main :: fn() void = {
+    /*
+    mem := temp().alloc_zeroed(u8, 30000);
+    print_hello_world(mem.ptr, 0);
+    */
+    println("Hello World!");  // cheat until this is finished
+}
+
+print_hello_world :: to_function(import("@/examples/bf/README.fr").HELLO_WORLD)'main;
+
+// These are the functions we allow the wasm module to import. 
+Exports :: @struct {
+    env :: @struct {
+        putchar :: fn(_: *u8, c: u8) void = {
+            s: []u8 = (ptr = c&, len = 1);
+            print(s);
+        }
+        getchar :: fn(_: *u8) u8 = {
+            getchar :: fn() u8 #libc;
+            getchar()
+        }
+    }
+};
+
+// TODO: src shouldn't need to be const, just needs to run at comptime. :FfiNamespaceHacks
+fn to_function($bf_source: []u8) ScopeId = {
+    wasm := to_wasm_module(temp(), bf_source).items();
+    #use("@/examples/import_wasm/ffi.fr");
+    namespace := scope_of(Type, @struct(___HACK :: 123));
+    public    := scope_of(Type, Exports);
+    include(wasm, current_compiler_context(), namespace, public);
+    namespace
+}
+
+// translates the bf to wasm bytecode (which goes in the CODE section). 
+// imports = [putchar, getchar], locals[0] = the pointer
+// since all the indices are low, leb encoding is always one byte and i don't have to worry about it. 
+to_wasm_bytecode :: fn(out: *List(u8), code: Str) void = {
+    #use("@/examples/bf/README.fr");
+    ::enum(Bf);
+    
+	for code { c | @switch(@as(Bf) c) {
+        @case(.Inc) => deref(.add);
+        @case(.Dec) => deref(.sub);
+        @case(.Right) => move(.add);
+        @case(.Left)  => move(.sub);
+        @case(.Output) => {
+            get(); 
+            op(.loadub, .Kw); out.push(0); out.push(0);
+            inst(.Call); out.push(0);
+            inst(.Drop)
+        }
+        @case(.Input)  => {
+            get(); 
+            inst(.Call); out.push(1);
+            op(.storeb, .Kw); out.push(0); out.push(0);
+        }
+        @case(.Open)   => {
+            inst(.Block);  // def break
+            out.push(@as(u8) Wasm.ValType.EmptyBlock);
+            inst(.Loop);   // def continue
+            out.push(@as(u8) Wasm.ValType.EmptyBlock);
+            
+            get();
+            op(.loadub, .Kw); out.push(0); out.push(0);
+            inst(.I32_Const); out.push(0);
+            op(.ceqw, .Kw);
+            inst(.BrIf); out.push(1);  // goto break
+        }
+        @case(.Close)  => {
+            inst(.Br); out.push(0);  // goto continue
+            inst(.End);  // of loop
+            inst(.End);  // of block
+        }
+        @default()     => ();
+    }}
+    inst(.Return);  // TODO: this shouldn't be required but i am bad at my job and import_wasm chokes on implicit return 
+    inst(.End);  // of the function
+    
+    // Some helpers used above:
+    
+    inst :: fn(i: Wasm.Inst) => 
+        out.push(i.raw());
+    op :: fn($o: Qbe.O, $k: Qbe.Cls) => 
+        out.push(:: { b := lookup_wasm_encoding(o, k); b.unwrap() });
+    get :: fn() => {
+        inst(.LocalGet); out.push(0);
+    }
+    set :: fn() => {
+        inst(.LocalSet); out.push(0);
+    }
+    deref :: fn($o: Qbe.O) => {
+        get();
+        get();
+        op(.loadub, .Kw); out.push(0); out.push(0);
+        inst(.I32_Const); out.push(1);
+        op(o, .Kw);
+        op(.storeb, .Kw); out.push(0); out.push(0);
+    }
+    move :: fn($o: Qbe.O) => {
+        get();
+        inst(.I32_Const); out.push(1);
+        op(o, .Kw);
+        set();
+    };
+}
+
+// TODO: im not sure if it makes a more interesting example to write out the bytes manually like this 
+//       or to import some abstraction for making modules in a way that doesn't suck. 
+// create a wasm module that exports a single function called "main"
+// in general you need to use leb128_unsigned but i don't because i know the indices are low enough to fit in one byte. 
+// this returns a normal wasm module (you can write it to a file and run it with examples/import_wasm/run.fr if you want). 
+to_wasm_module :: fn(a: Alloc, code: Str) List(u8) = {
+    out := u8.list(a); out := out&;
+    out.push_all(Wasm.version_magic); 
+    
+    // We need 3 function types: putchar, getchar, and our exported function. 
+    {
+        out.push(@as(u8) Wasm.Section.Type);
+        out.push(1+4+5+4); // number of bytes
+        out.push(3);  // number of types
+        
+        // (u32) -> (u32)
+        out.push(@as(u8) Wasm.ValType.ResultStart);
+        out.push(1);
+        out.push(@as(u8) Wasm.ValType.I32);
+        out.push(1);
+        out.push(@as(u8) Wasm.ValType.I32);
+        
+        // () -> (u32)
+        out.push(@as(u8) Wasm.ValType.ResultStart);
+        out.push(0);
+        out.push(1);
+        out.push(@as(u8) Wasm.ValType.I32);
+        
+        // (u32) -> ()
+        out.push(@as(u8) Wasm.ValType.ResultStart);
+        out.push(1);
+        out.push(@as(u8) Wasm.ValType.I32);
+        out.push(0);
+    };
+    
+    // We need two imports: putchar and getchar
+    {
+        out.push(@as(u8) Wasm.Section.Import);
+        out.leb128_unsigned(1+(1+3+1+7+2)*2);  // number of bytes
+        out.push(2);  // number of imports
+        
+        out.push(3);  // module name length
+        out.push_all("env");
+        out.push(7);  // function name length
+        out.push_all("putchar");  
+        out.push(@as(u8) Wasm.ImportType.Func);
+        out.push(0);  // type index
+        
+        out.push(3);
+        out.push_all("env");
+        out.push(7);
+        out.push_all("getchar");
+        out.push(@as(u8) Wasm.ImportType.Func);
+        out.push(1);
+    };
+    
+    // We are required to forward declare our function. 
+    {
+        out.push(@as(u8) Wasm.Section.Function);
+        out.push(2);  // number of bytes
+        
+        out.push(1);  // number of local functions
+        out.push(2);  // type index
+    };
+    
+    // We need to ask for "a memory" (even tho everyone wants a memory?)
+    {
+        out.push(@as(u8) Wasm.Section.Memory);
+        out.push(3); // number of bytes
+        out.push(1); // number of memories
+        
+        out.push(0); // has max?
+        out.push(1); // min number of pages
+    };
+    
+    // Make our one function public
+    {
+        out.push(@as(u8) Wasm.Section.Export);
+        out.leb128_unsigned(1+1+4+1+1);  // number of bytes
+        out.push(1);  // number of exports
+        
+        out.push(4);  // name length
+        out.push_all("main");
+        out.push(@as(u8) Wasm.ImportType.Func);
+        out.push(2);  // function index (includes imports)
+    };
+    
+    // Now we're finally allowed to give the function body. This is the meat of the module. 
+    {
+        out.push(@as(u8) Wasm.Section.Code);
+        confusing_patch out {
+            out.push(1);  // number of functions
+            confusing_patch out {
+                out.push(0);  // number of non-parameter locals
+                to_wasm_bytecode(out, code);
+            }
+        }
+    };
+    
+    out[]
+}
+
+// this reserves a blank space and then goes back and fills in the number of bytes the body wrote.  
+fn confusing_patch(out: *List(u8), $body: @Fn() void) void = {
+    N :: 4;
+    out.push_zeroes(N);
+    start := out.len;
+    body();
+    length := out.len - start;
+    out.len -= length + N;
+    leb128_unsigned(out, length, N);
+    out.len += length;
+}
+
+#include_std("backend/lib.fr");

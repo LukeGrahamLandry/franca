@@ -10,6 +10,7 @@
 - bf: include a brainfuck program in a franca program with various flavours of meta-programming. 
 - repl: a franca repl using the comptime jit.
 - hacky_incremental: call a function in a loop and hot load recompile it when the file changes
+- view_image: print a jpeg of the mona lisa to the terminal by importing a c library (lib:wuffs)
 
 - farm_game: draws some rectangles on the screen with sokol (lib:sokol)
 - dearimgui_demo: calls ImGui::ShowDemoWindow (lib:sokol, lib:dearimgui)
@@ -29,4 +30,3 @@
 ## broken / wip
 
 - compiler_gui
-- view_image

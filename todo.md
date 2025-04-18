@@ -16,6 +16,7 @@
 - formalize ENABLE_INCREMENTAL in backend/arm64/emit (+ support on amd64)
 - `./q.out -t wasm32 -o target/out/q.wasm -cc backend/test/abi8.ssa -d AI`
 %�%.104 =w pop
+- fast memcpy (need to deal with fallback when not linking a libc)
 
 ## language consistancy
 
@@ -90,6 +91,8 @@ the right/fast/safe/whatever thing to do is also the easy thing to do.
 - use import_c for the parts of sokol i haven't ported yet (can't for the mac stuff because thats objective c)
 - shouldn't have `alloc` be the nice name, it should be `alloc_uninit`
 - :ThisSureIsABigBlit
+- :RethinkTheFfiCompileApi
+- make import_wasm not crash on implicit return 
 
 ## cleanup 
 
@@ -138,6 +141,7 @@ or just default to jitting and force you to enable aot by specifying an output p
 - sort the array of test files so you can always diff the output without hoping the file system iterates in a consistant order 
 - think about how to test the gui programs more convincingly than just that they produce a binary
 - run the deps tests in github actions
+- test using import_(c, wasm)/ffi from a precompiled driver to make sure they're not relying on being in their own compilation context 
 
 ## linux
 

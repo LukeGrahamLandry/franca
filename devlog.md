@@ -1,3 +1,55 @@
+## (Apr 16/17)
+
+- documentation is hard
+- making sure every example program as a comment saying what it does
+- examples/toy/spill.fr doesn't demonstrate the thing i was trying to 
+- view_image: use colour escape codes instead of outputting PPM
+- new examples/bf: create a wasm module 
+- rediscovered that import_wasm doesn't support implicit return at the end of a function 
+
+```
+- code {  // [85..<104]
+    Block "" { 
+        Loop "" { // 1: 
+            LocalGet(0);
+            I32_loadub(a = 0, o = 0);
+            I32_Const(0);
+            I32_ceqw();
+            BrIf(1); // :0
+            Br(0); // :1
+        }; 
+    }; // 0:
+}; 
+
+export function $main$module() {  # nblk=8
+@0
+	%env.65 =l pare
+	%wasm_globals.64 =l par
+	%L0.66 =w par
+	jmp @1
+@1 # preds: @0, 
+	jmp @3
+@2 # preds: @4, 
+	Jxxx 0, 0
+@3 # preds: @1, 
+	jmp @5
+@4 # preds: @5, @6, 
+	jmp @2
+@5 # preds: @3, @7, 
+	%getL0.67 =w copy %L0.66
+	%a.68 =l extuw %getL0.67
+	%a.69 =l add %wasm_globals.64, %a.68
+	%load.70 =w loadub %a.69
+	%wasm.71 =w ceqw %load.70, 0
+	jnz %wasm.71, @4, @7
+@6
+	jmp @4
+@7 # preds: @5, 
+	jmp @5
+}
+IR failed typecheck: block @2 is used undefined
+```
+
 ## (Apr 15)
 
 - started splitting up import_wasm to make it useable from comptime

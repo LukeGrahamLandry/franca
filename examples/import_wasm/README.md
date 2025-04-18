@@ -24,3 +24,4 @@ i just wrote.
 you to be able to do more when running in a browser than when compiled to 
 native code. so since browser lets you import wasm module and call a 
 function, native code should also let you do that. 
+- it's nice to have more examples of the backend api

@@ -214,6 +214,12 @@ If the syscall is not supported on that platform use `_` instead of a number.
 This can be present on the same function as `#libc` and which implementation 
 is used depends on the `BuildOptions` set by the driver program. 
 
+### ir
+
+Used internally to implement functions that should map to some cpu instruction 
+the backend knows how to generate. The argument is an operation and a primitive type. 
+The correct machine code will be inserted at the callsite instead of a function call. 
+
 ### redirect
 
 Instead of providing a body, have calls redirect to another function instead. 

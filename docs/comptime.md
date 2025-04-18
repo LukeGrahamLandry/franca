@@ -132,7 +132,7 @@ long add_with_ffi(long a, long b) {
 """;
 
 :: {
-    write_entire_file("./add.c", SRC) || @panic("TODO: create file");
+    write_entire_file_or_crash("./add.c", SRC);
     args := @slice("add.c", "-dynamiclib", "-o", "adder_dependency.dylib");
     run_cmd_blocking("clang", args) || @panic("failed compile");
     lib := dlopen("adder_dependency.dylib", DlFlag.Lazy);
