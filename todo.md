@@ -17,11 +17,12 @@
 - `./q.out -t wasm32 -o target/out/q.wasm -cc backend/test/abi8.ssa -d AI`
 %�%.104 =w pop
 - fast memcpy (need to deal with fallback when not linking a libc)
+- prospero fails a safety check now
 
 ## language consistancy
 
 - #c_variadic + conflicting overload (ie for open()) where you want the non-va version to also be #syscall. maybe that's not worth fixing. 
-- #c_variadic as part of CallConv so function pointers work 
+- #c_variadic as part of FnType (or CallConv?) so function pointers work 
 - #use field in guess_type for #where
 - make auto deref always work (you shouldn't need to `[]` for constants or returned structs)
 - hello_va doesn't work on linux??

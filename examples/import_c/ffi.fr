@@ -12,7 +12,6 @@
 // - need more control over imports. should be able to redirect malloc to your own allocator, 
 //   but you don't want to require typing out all the names. 
 // - translate bit fields to @bit_fields (and make sure their abi matches). 
-// - translate to #c_variadic
 // - cross compilation doesn't work because my whole compilation model relies on being strict 
 //   about only having target splits on a function call boundary, but c programs just 
 //   use the preprocessor to change things at random. so i'm forced to compile everything twice. 
@@ -28,7 +27,14 @@
 //   for everything. but then there's an awkward coupling. I like that this also works 
 //   as a stand alone c compiler so it feels like a more impressive demo of "hey this is
 //   just a normal program that we happen to run at comptime to generate some code sometimes". 
-//
+// - put `static` functions in an inner namespace for each file so we can mimic seperate compilation units
+// - have a thing for removing prefixes since we have a higher level idea of scopes
+// - franca can't have a function pointer to a #c_variadic function so you can only have 
+//   (...) as a direct export or used internally. can't have a * to one in struct, param, etc.
+// - currently i only export typedefs. need to be able to use things without like `struct Foo` or whatever
+// - things from other header files are exported too too which might not be what you want. 
+//   like what if you want to use a library that typedef-ed u32 for themselves? now you can't #use it. that sucks. 
+// 
 
 // TODO: don't make src be comptime (need to be able make a new scope)  :FfiNamespaceHacks
 fn include($src: Str) ScopeId = {
@@ -73,10 +79,6 @@ fn include(fr: CompCtx, namespace: ScopeId, c_source: Str) void = {
         }
         
         // add all the typedefs to the scope
-        // TODO: this gets things from other header files too which might not be what you want. 
-        //       like what if you want to use a library that typedef-ed u32 for themselves? now you can't #use it. that sucks. 
-        // TODO: what if they didn't have a typedef for it and just referred to it as `struct Foo` or whatever
-        // TODO: something for removing prefixes
         for_linked c.scope { sc |
             each sc.vars& { name, value |
                 if !value.type_def.is_null() {
@@ -160,7 +162,6 @@ fn export_type_info(c: *Ctx, type: *CType, decay_arrays: bool) TypeInfo = {
         fn TY_STRUCT() => c.export_members(type, false);
         fn TY_UNION()  => c.export_members(type, true);
         fn TY_FUNC() => {
-            !type.is_variadic || @error_tok(c, type.name, "TODO: track #c_variadic as part of FnType for c->franca export");
             // TODO: track no_return
             
             args := Type.list(fr.get_alloc());  // TODO: cap
@@ -226,19 +227,13 @@ fn export_func(c: *Ctx, obj: *Obj) FuncId = {
     // TODO: Later i think it would be nice to preserve the argument names. 
     // For now i need this anyway for emit_par_instructions so you can inline through bounce_body when it's an import. 
     args := fr.arg_types(fn_type.arg);
-    func.arg.bindings = init(fr.get_alloc(), args.len);
-    for args { a |
-        func.arg.bindings&.push((
-            name = .None,
-            ty = (Finished = a),
-            nullable_tag = zeroed(*Annotations),
-            default = binding_missing_default(),
-            kind = .Var,
-        ), panicking_allocator);
-    }
-    
+    fill_bindings(func&, fr, args);
     func&.set_flag(.ResolvedSign);
     func&.set_flag(.ResolvedBody);
+    
+    if obj.ty.is_variadic {
+        func&.set_flag(.CVariadic);
+    };
     
     if obj.is_definition {
         func.body = (Ir = (fn_internal = Qbe.Fn.int_from_ptr(obj.f), data = data, funcs = funcs));
@@ -253,8 +248,6 @@ fn export_func(c: *Ctx, obj: *Obj) FuncId = {
     fid := fr.intern_func(func&);
     func := fr.get_function(fid);
     if obj.is_definition && !(c.franca_namespace == NOSCOPE) {
-        // TODO: put `static` functions in an inner namespace for each file so we can mimic seperate compilation units
-        // TODO: have a thing for striping prefixes since we have a higher level idea of scopes
         fr.add_to_scope(c.franca_namespace, name, f_ty, fid);
     }
     obj.franca_f = fid;  // save this before translating the callgraph so we don't get stuck in cycles

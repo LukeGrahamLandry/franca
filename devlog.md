@@ -1,3 +1,25 @@
+## (Apr 18)
+
+- get import_wasm working well enough to do the bf example hello world
+- just adding `.CVariadic` isn't enough to let me call an import_c `...` function. 
+for some reason it has a result type so is calling tuple_types to check the args expression, 
+but it doesn't do that if i'm just calling a function written in franca. what's the difference? 
+hmmm, this is unfortunate. it matters if we have it as a `FuncId` (call_direct immediately), 
+or a `Fn` (first compile the arg then call_direct). 
+just making import_c say the constants it create are of type FuncId makes it work. 
+but that feels fragile, it should matter if it's FuncId or a Fn. 
+Oh the difference i suppose is that when you have a parameter of type `@Fn` it will 
+be a Fn and when you call a normal function it gets it's type from an `Expr::Closure` 
+which always says `FuncId` because you don't want to force the arguments to infer too early. 
+ok so then if you take out the difference and make it just do call_direct on the `@Fn` as well, 
+it tries to infer_arguments on the fid to get the arg_ty instead of just looking at the 
+type of the callee ast node. but when you pass a closure you don't put type annotations, 
+you expect to get them from the parameter's type annotation instead. so just need to pull 
+down that check to a place where we know it's not variadic but before asking the 
+function to infer args. very bad sign that im relieved to have changed something 
+in the sema file without causing the world to collapse around me. 
+- fixed a `unhandled node type CVariadicMarker` when you try to `::` a varargs call 
+
 ## (Apr 16/17)
 
 - documentation is hard

@@ -1352,6 +1352,7 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
             };
         }
         fn DataSymbol() => ();
+        fn CVariadicMarker() => ();
         @default => @panic("TODO: unhandled node type %: %", expr.expr&.tag(), expr.log(self));
     };
     self.last_loc = old_loc;
@@ -1710,11 +1711,7 @@ fn compile_call(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
         
             expr.ty = it.ty.ret;
         }
-        fn Fn(it) => {
-            // This happens to be an easy case where we already know the argument type.
-            @check(self.compile_expr(arg, (Specific = it.arg))) return;
-            return(self.call_direct(expr, requested));
-        }
+        fn Fn(it) => return(self.call_direct(expr, requested));
         fn Label(it) => {
             @check(self.compile_expr(arg, (Specific = it[]))) return;
             @check(self.can_assign(it[], arg.ty)) return;
@@ -1755,6 +1752,11 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
     @try(self.adjust_named_arguments(fid, arg_expr)) return;
     
     if func.get_flag(.AnyConstArgs) {
+        @if_let(self.get_type(f_expr.ty)) fn Fn(it) => {
+            arg_ty = it.arg;
+            @check(self.compile_expr(arg_expr, (Specific = it.arg))) return;
+        };
+    
         @err_assert(!is_variadic, "TODO: support #c_variadic with constant arguments") return;
         @check(self.ensure_resolved_sign(fid)) return;
         
@@ -1802,7 +1804,14 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
     };
     
     if will_inline {
-        @err_assert(!is_variadic, "TODO: support #inline with constant arguments") return;
+        @err_assert(!is_variadic, "TODO: support #inline with varargs") return;
+        
+        @if(arg_ty == UnknownType)
+        @if_let(self.get_type(f_expr.ty)) fn Fn(it) => {
+            arg_ty = it.arg;
+            @check(self.compile_expr(arg_expr, (Specific = it.arg))) return;
+        };
+    
         if capturing {
             // We want to allow for polymorphic arguments, but its better if we can infer the annotated ones before duplicating.
             // currently this is just an optimisation.  
