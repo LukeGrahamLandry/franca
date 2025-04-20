@@ -407,6 +407,6 @@ extra flexibility to create constructs that can't be expressed as normal franca 
 Macro calls look like basic function calls `@f(a, b, c)` or no parens if there is only 
 one argument `@f a` but can also have an extra expression after the closing paren like `@f(a) b`. 
 
-If you come accross `@{ foo }` and `@[foo]` it's probably good to know that those 
+If you come across `@{ foo }` and `@[foo]` it's probably good to know that those 
 mean quote and unquote but that's not important yet. They're useful when writing macros 
 not when using macros. 

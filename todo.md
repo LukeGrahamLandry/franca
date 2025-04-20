@@ -53,6 +53,7 @@ b = .a;
 - there are no clear rules about how const coercion works
 - the body of a `=>` function gets re-sema-ed every time you call it (which makes inline_for hurt compile times more than it should)
 - having the crt linux stuff in franca_runtime_init means you can't use the backend without the franca frontend and target linux exe
+- @rec and #generic suck
 
 ## library robustness
 

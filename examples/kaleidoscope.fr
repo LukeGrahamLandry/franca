@@ -1,0 +1,734 @@
+//
+// https://llvm.org/docs/tutorial
+// This is an implementation of the LLVM Kaleidoscope tutorial, using the Franca Backend instead. 
+// Kaleidoscope/Chapter8/toy.cpp is 814 lines (not counting blank/comment). 
+// Let's see how franca/backend compares to c++/llvm. 
+// https://github.com/llvm/llvm-project/blob/eb78b9b42f56c59a7fec7fae8f14b570e0a94646/llvm/examples/Kaleidoscope/Chapter8/toy.cpp
+//
+// This is the unfortunate size of language where most of the code ends up being the parser somehow. 
+// It has variables (always f64), (non-first-class) functions, if expressions, for loops.
+// It also lets you define your own unary/binary operators and choose thier precedence, 
+// which feels a bit out of place for an example of how to use a codegen backend. 
+// Regardless, it's a nice self contained example of a common compiler structure: 
+// [source]->lex->[tokens]->parse->[ast]->codegen1->[ir]->codegen2->[executable]->run. 
+// There's no rule you need to do it that way but it's a fun coinkydink that roughly everyone does. 
+// 
+// At the end of this file there's an example Kaleidoscope program that prints a mandelbrot set. 
+//
+
+Token :: @enum(
+    // keywords
+    def, extern, if, then, else, for, in, binary, unary, var, 
+    // other
+    identifier, number, eof,
+    // unknown tokens are their ascii character offset by Token.enum_count
+);
+
+Ctx :: @struct {
+    // lex
+    ident: Str;
+    num: f64;
+    src: Str;
+    i: i64;
+    line: i64;
+    
+    // parse
+    token: i64;
+    binary_precedence: HashMap(i64, i64);  // we have user defined operators so this needs to be dynamic
+    functions: HashMap(u32, *Proto);
+    
+    // codegen
+    m: *QbeModule;
+    f: *Qbe.Fn;
+    b: *Qbe.Blk;
+    link: **Qbe.Blk;
+    vars: HashMap(Str, Qbe.Ref);
+    top_level: u32;
+}
+
+KExpr :: @rec @tagged(
+    Number: f64,
+    Variable: Str,
+    Assign: @struct(name: Str, value: *KExpr),
+    Call: @struct(callee: u32, args: []KExpr),
+    If: @struct(cond: *KExpr, then: *KExpr, else: *KExpr),
+    For: @struct(name: Str, start: *KExpr, end: *KExpr, step: *KExpr, body: *KExpr),
+    VarIn: @struct(body: *KExpr, vars: []Ty(Str, *KExpr)),
+    Function: @struct(proto: Proto, body: *KExpr),
+);
+
+Proto :: @struct(id: u32, args: []Str, operator: i64 = Token.identifier.raw(), prec := 0);
+
+R :: Result(*KExpr, Str);
+RR :: Result(Qbe.Ref, Str);
+E :: fn(s: Str) => (Err = s);
+
+fn get_token(c: *Ctx) i64 = {
+    if c.i >= c.src.len {
+        return Token.eof.raw();
+    }
+
+    while => c.src[c.i].is_ascii_whitespace() {
+        c.line += int(c.src[c.i] == "\n".ascii());
+        c.i += 1;
+        if c.i >= c.src.len {
+            return Token.eof.raw();
+        }
+    }
+    
+    // identifiers start with a letter but can contain digits later
+    if c.src[c.i].is_ascii_alpha() {
+        start := c.i;
+        while => c.src[c.i].is_ascii_alpha() || c.src[c.i].is_ascii_digit() {
+            c.i += 1;
+        }
+        c.ident = c.src.slice(start, c.i);
+        
+        // This is not what a fast lexer looks like but it's simple 
+        // (TODO: could do like examples/import_c/tokenize.fr/read_punct)
+        inline_for_enum Token { $it |
+            @if(@run (it[].raw() <= Token.var.raw())) {
+                if c.ident == (@run it[].name_str()) {
+                    return it[].raw();
+                }
+            }
+        }
+        return Token.identifier.raw();
+    }
+
+    in_number :: fn() => c.src[c.i].is_ascii_digit() || c.src[c.i] == ".".ascii();
+    if in_number() {
+        start := c.i;
+        while => in_number() {
+            c.i += 1;
+        }
+
+        // TODO: can't be calling libc for stuff like this  
+        strtod :: fn(str: CStr, end_out: **u8) f64 #libc; 
+        s := c.src.slice(start, c.i).maybe_borrow_cstr(temp()); // :SLOW i am bad at my job 
+        c.num = strtod(s, zeroed(**u8));
+        return Token.number.raw();
+    }
+    
+    if c.src[c.i] == "#".ascii() {
+        while => c.i < c.src.len && c.src[c.i] != "\n".ascii() {
+            c.i += 1;
+        }
+        return c.get_token();
+    }
+    
+    // unknown character could be a user defined operator
+    c.i += 1;
+    c.src[c.i - 1].zext() + Token.enum_count()
+}
+
+fn pop_token(c: *Ctx) i64 = {
+    c.token = c.get_token();
+    c.token
+}
+
+fn parse_paren(c: *Ctx) R = {
+    c.pop_token(); // (
+    e := @try(c.parse_expression()) return;
+    if c.token != tok(")") {
+        return E("expected a close paren");
+    }
+    c.pop_token(); // )
+    (Ok = e)
+}
+
+// an identifier could be a variable reference or the start of a function call
+fn parse_identifier(c: *Ctx) R = {
+    name := c.ident;
+    c.pop_token();  // ident
+    if c.token != tok("(") {
+        return node(Variable = name);
+    }
+    
+    // Otherwise it's a call to a named function
+    c.pop_token(); // (
+    args := list(KExpr, temp());
+    if c.token != tok(")") {
+        break :: local_return;
+        loop {
+            args&.push((@try(c.parse_expression()) return)[]);
+            if c.token == tok(")") {
+                break()
+            }
+            @try(c.consumes(",")) return;
+        }
+    }
+
+    c.pop_token();  // )
+    node(Call = (callee = c.m.intern(name), args = args.items()))
+}
+
+// `if c then t else f`
+fn parse_if(c: *Ctx) R = {
+    @try(c.consume(.if)) return;
+    cond := @try(c.parse_expression()) return;
+    @try(c.consume(.then)) return;
+    then := @try(c.parse_expression()) return;
+    @try(c.consume(.else)) return;
+    else := @try(c.parse_expression()) return;
+    node(If = (cond = cond, then = then, else = else))
+}
+
+// `for name = start, end, step in body`
+fn parse_for(c: *Ctx) R = {
+    @try(c.consume(.for)) return;
+    name := c.ident;
+    @try(c.consume(.identifier)) return;
+    @try(c.consumes("=")) return;
+    start := @try(c.parse_expression()) return;
+    @try(c.consumes(",")) return;
+    end := @try(c.parse_expression()) return;
+    
+    ::if(*KExpr);
+    step: *KExpr = if c.token == tok(",") {
+        c.pop_token();
+        @try(c.parse_expression()) return
+    } else {
+        // syntactically the step value is optional. defaults to 1.0. 
+        e := temp().box(KExpr);
+        e[] = (Number = 1.0);
+        e
+    };
+
+    @try(c.consume(.in)) return;
+    body := @try(c.parse_expression()) return;
+    node(For = (name = name, start = start, end = end, step = step, body = body))
+}
+
+// `var name = init in body`
+fn parse_var(c: *Ctx) R = {
+    @try(c.consume(.var)) return;
+    vars := list(Ty(Str, *KExpr), temp());
+    if c.token != Token.identifier.raw() {
+        return E("expected identifier");
+    }
+    
+    dowhile {
+        name := c.ident;
+        @try(c.consume(.identifier)) return;
+    
+        ::if(*KExpr);
+        init: *KExpr = if c.token == tok("=") {
+            c.consumes("=");
+            @try(c.parse_expression()) return
+        } else {
+            // syntactically the initializer is optional. if it's missing, default to zero.
+            e := temp().box(KExpr);
+            e[] = (Number = 0.0);
+            e
+        }
+        push(vars&, (name, init));
+    
+        done := c.token != tok(","); 
+        if !done {
+            c.consumes(",");
+        };
+        !done
+    }
+    
+    @try(c.consume(.in)) return;
+    body := @try(c.parse_expression()) return;
+    node(VarIn = (vars = vars.items(), body = body))
+}
+
+fn parse_primary(c: *Ctx) R = {
+    @match(@as(Token) c.token) {
+        fn number() => {
+            n := c.num;
+            c.pop_token();
+            node(Number = n)
+        }
+        fn identifier() => c.parse_identifier();
+        fn if()  => c.parse_if();
+        fn for() => c.parse_for();
+        fn var() => c.parse_var();
+        @default => {
+            if c.token == tok("(") {
+                return c.parse_paren();
+            } 
+            E("expected expression")
+        };
+    }
+}
+
+fn parse_unary(c: *Ctx) R = {
+    if c.token < Token.enum_count() || c.token == tok("(") || c.token == tok("(") {
+        // this token is not a valid unary operator
+        return c.parse_primary();
+    };
+    
+    t := c.token;
+    c.pop_token();
+    rhs := @try(c.parse_unary()) return;
+    node(Call = (
+        callee = c.m.intern(operator_name(true, t)), 
+        args = (ptr = rhs, len = 1),
+    ))
+}
+
+fn parse_bin_right(c: *Ctx, start_prec: i64, lhs: *KExpr) R = {
+    loop {
+        tok_prec := c.binary_precedence&.get(c.token) || return(Ok = lhs);
+        if(tok_prec < start_prec, => return(Ok = lhs));
+        
+        op := c.token;
+        c.pop_token(); 
+        rhs := @try(c.parse_unary()) return;
+        next_prec := c.binary_precedence&.get(c.token) || -1;
+        if tok_prec < next_prec {
+            rhs = @try(c.parse_bin_right(tok_prec + 1, rhs)) return;
+        }
+        
+        if op == tok("=") {
+            if(!lhs.is(.Variable), => return(E("only identifiers can be assigned to")));
+            lhs[] = (Assign = (name = lhs.Variable, value = rhs));
+        } else {
+            e := temp().alloc(KExpr, 3);
+            e[0] = (Call = (
+                callee = c.m.intern(operator_name(false, op)),
+                args = e.rest(1),
+            ));
+            e[1] = lhs[];
+            e[2] = rhs[];
+            lhs = e.index(0);
+        }
+    }
+}
+
+fn parse_expression(c: *Ctx) R = {
+    lhs := @try(c.parse_unary()) return;
+    c.parse_bin_right(0, lhs)
+}
+
+fn parse_prototype(c: *Ctx) Result(Proto, Str) = {
+    prec := 30;
+    operator := c.token;
+    n, name := @match(@as(Token) c.token) {
+        fn identifier() => {
+            c.pop_token();
+            (0, c.ident)
+        }
+        fn unary() => {
+            operator = c.pop_token();
+            if(operator < Token.enum_count(), => return(E("expected operator in definition")));
+            c.pop_token();
+            (1, operator_name(true, operator))
+        }
+        fn binary() => {
+            operator = c.pop_token();
+            if(operator < Token.enum_count(), => return(E("expected operator in definition")));
+            c.pop_token();
+            if c.token == Token.number.raw() {
+                if(c.num < 1 || c.num > 100, => return(E(@tfmt("invalid precedence % must be 1..100", c.num))));
+                prec = int(c.num);
+                c.pop_token();
+            };
+            (2, operator_name(false, operator))
+        }
+        @default => return(E("expected name for function definition"));
+    };
+    
+    @try(c.consumes("(")) return;
+    names := Str.list(temp());
+    while => c.token == Token.identifier.raw() {
+        names&.push(c.ident);
+        c.pop_token();
+    }
+    @try(c.consumes(")")) return;
+    if(n != 0 && n != names.len, => return(E("invalid parameter count in operator definition")));
+    
+    (Ok = (id = c.m.intern(name), args = names.items(), operator = operator, prec = prec))
+}
+
+// def P E
+fn parse_def(c: *Ctx) R = {
+    @try(c.consume(.def)) return;
+    proto := @try(c.parse_prototype()) return;
+    body  := @try(c.parse_expression()) return;
+    
+    node(Function = (proto = proto, body = body))
+}
+
+fn parse_top_level(c: *Ctx) R = {
+    body := @try(c.parse_expression()) return;
+    
+    // wrap it up in a function so we can call it later
+    id := c.m.intern("@toplevel");
+    c.top_level = id;
+    node(Function = (proto = (id = id, args = empty()), body = body))
+}
+
+fn codegen(c: *Ctx, it: *Ast(.Number)) RR = {
+    (Ok = c.f.getcon(it[].bitcast()))
+}
+
+fn get_var(c: *Ctx, name: Str) RR = {
+    r := c.vars&.get(name) 
+        || return(Err = @tfmt("unknown variable '%'", name));
+    if(r == QbeNull, => return(Err = @tfmt("variable '%' has gone out of scope", name)));
+    (Ok = r)
+}
+
+fn codegen(c: *Ctx, it: *Ast(.Variable)) RR = {
+    src  := @try(c.get_var(it[])) return;
+    dest := c.f.newtmp("var", .Kd);
+    c.f.emit(.copy, .Kd, dest, src, QbeNull);
+    (Ok = dest)
+}
+
+fn codegen(c: *Ctx, it: *Ast(.Assign)) RR = {
+    dest := @try(c.get_var(it.name)) return;
+    src  := @try(c.codegen(it.value)) return;
+    c.f.emit(.copy, .Kd, dest, src, QbeNull);
+    (Ok = src)
+}
+
+fn codegen(c: *Ctx, it: *Ast(.Call)) RR = {
+    proto := c.functions&.get(it.callee) 
+        || return(E(@tfmt("tried to call undeclared function '%'", c.m.str(it.callee))));
+    if proto.args.len != it.args.len {
+        return E("incorrect arity");
+    }
+    
+    args := Qbe.Ref.list(temp());
+    each it.args { e |
+        args&.push(@try(c.codegen(e)) return);
+    };
+    for args { a |
+        c.f.emit(.arg, .Kd, QbeNull, a, QbeNull);
+    };
+    
+    r := c.f.newtmp("ret", .Kd);
+    c.f.emit(.call, .Kd, r, c.f.symcon(it.callee), QbeNull);
+    (Ok = r)
+}
+
+fn codegen(c: *Ctx, it: *Ast(.If)) RR = {
+    // all values in the language are f64, coerce it to a boolean we can branch on
+    cond_f := @try(c.codegen(it.cond)) return;
+    cond_b := c.f.newtmp("cond", .Kw);
+    c.f.emit(.cned, .Kw, cond_b, cond_f, c.f.getcon(0));  // 0.0=false otherwise true
+    c.f.copy_instructions_from_scratch_reversed_which_means_forwards(c.b);
+    
+    // create two prongs for the branch and a phi for when they rejoin
+    src    := c.b;
+    src.s1  = c.push_block();  // then
+    src.s2  = c.push_block();  // else
+    src.jmp = (type = .jnz, arg = cond_b);
+    join   := c.push_block();
+    p      := new_phi(c.f, join, .Kd, 2);
+    
+    // emit <then> branch, goto join, and add the result as an option in the phi
+    c.b = src.s1;
+    r := @try(c.codegen(it.then)) return;
+    p.push(c.b, r);
+    c.f.copy_instructions_from_scratch_reversed_which_means_forwards(c.b);
+    c.b.jmp.type = .jmp;
+    c.b.s1 = join;
+    
+    // ditto <else>
+    c.b = src.s2;
+    r := @try(c.codegen(it.else)) return;
+    p.push(c.b, r);
+    c.f.copy_instructions_from_scratch_reversed_which_means_forwards(c.b);
+    c.b.jmp.type = .jmp;
+    c.b.s1 = join;
+    
+    // continue execution after the join point
+    c.b = join;
+    (Ok = p.to)
+}
+
+// kaleidoscope for loops always execute at least once, like do-while, not like c's for loops. 
+fn codegen(c: *Ctx, it: *Ast(.For)) RR = {
+    start := @try(c.codegen(it.start)) return;
+    var := c.f.newtmp("for", .Kd);
+    c.f.emit(.copy, .Kd, var, start, QbeNull);
+    c.f.copy_instructions_from_scratch_reversed_which_means_forwards(c.b);
+    shadow := c.vars&.get(it.name) || QbeNull;
+    c.vars&.insert(it.name, var);
+    
+    loop := c.push_block();
+    c.b.s1 = loop;
+    c.b.jmp.type = .jmp;
+    
+    c.b = loop;
+    _ := @try(c.codegen(it.body)) return;
+    step := @try(c.codegen(it.step)) return;
+    cond_d := @try(c.codegen(it.end)) return;
+    
+    cond_b := c.f.newtmp("cond", .Kw);
+    c.f.emit(.add, .Kd, var, var, step);  // increment the counter
+    c.f.emit(.cned, .Kw, cond_b, cond_d, QbeConZero);  // coerce condition to bool
+    c.f.copy_instructions_from_scratch_reversed_which_means_forwards(c.b);
+
+    join := c.push_block();
+    c.b.jmp = (type = .jnz, arg = cond_b);
+    c.b.s1 = loop;
+    c.b.s2 = join;
+    c.b = join;
+
+    c.vars&.insert(it.name, shadow);  // restore the outer scope's variable
+    (Ok = QbeConZero)
+}
+
+fn codegen(c: *Ctx, it: *Ast(.VarIn)) RR = {
+    shadow := Qbe.Ref.list(it.vars.len, temp());
+
+    for it.vars { v |
+        name, init := v;
+        value := @try(c.codegen(init)) return;
+        
+        shadow&.push(c.vars&.get(name) || QbeNull);
+        c.vars&.insert(name, value);
+    }
+    
+    r := @try(c.codegen(it.body)) return;
+    range(0, it.vars.len) { i |
+        c.vars&.insert(it.vars[i]._0, shadow[i]);
+    };
+    (Ok = r)
+}
+
+fn codegen(c: *Ctx, it: *Ast(.Function)) RR = {
+    c.functions&.insert(it.proto.id, it.proto&);
+    if it.proto.operator != Token.identifier.raw() && it.proto.args.len == 2 {
+        c.binary_precedence&.insert(it.proto.operator, it.proto.prec);
+    }
+    
+    c.start_fn(it.proto.id);
+    for it.proto.args { name |
+        r := c.f.newtmp(name, .Kd);
+        c.f.emit(.par, .Kd, r, QbeNull, QbeNull);
+        c.vars&.insert(name, r);
+    };
+    
+    r := @try(c.codegen(it.body)) return;
+    c.f.copy_instructions_from_scratch_reversed_which_means_forwards(c.b);
+    c.b.jmp = (type = .retd, arg = r);
+    c.end_fn();
+    (Ok = QbeConZero)
+}
+
+fn codegen(c: *Ctx, it: *KExpr) RR = {
+    @generic_match(it, fn(it) => c.codegen(it))
+}
+
+fn compile_loop(c: *Ctx) Result(void, Str) = {
+    loop {
+        @match(@as(Token) c.token) {
+            fn def() => {
+                def := @try(c.parse_def()) return;
+                @debug_assert(def.is(.Function));
+                @try(c.codegen(def.Function&)) return;
+            }
+            fn extern() => {
+                @try(c.consume(.extern)) return;
+                proto := @try(c.parse_prototype()) return;
+                p := temp().box(Proto);
+                p[] = proto;
+                c.functions&.insert(p.id, p);
+            }
+            fn eof() => return(.Ok);  
+            @default => {
+                if c.token == tok(";") {
+                    c.pop_token();
+                } else {
+                    def := @try(c.parse_top_level()) return;
+                    @debug_assert(def.is(.Function));
+                    @try(c.codegen(def.Function&)) return;
+                }
+            };
+        }
+    }
+}
+
+main :: fn() void = {
+    m := zeroed QbeModule;
+    init_default_module(m&, (arch = .aarch64, os = .macos, type = .JitOnly), false);  // :hardcodeos lazy
+    c: *Ctx = init(general_allocator(), EXAMPLE_PROGRAM, m&);
+    @match(c.compile_loop()) {
+        fn Ok() => ();
+        fn Err(s) => @panic("%\n before line %", s, c.line);
+    }
+    
+    c.m.maybe_add_export(c.top_level, true);
+    c.m.emit_suspended_inlinables();
+    c.m.make_exec();
+    f, _ := c.m.get_addr(c.top_level).expect("top level expression");
+    f := assume_types_fn(Arg = void, Ret = void, ptr = f);
+    f();
+}
+
+fn init(a: Alloc, src: Str, m: *QbeModule) *Ctx = {
+    c := a.box_zeroed(Ctx);
+    c.src = src;
+    c.m = m;
+    c.binary_precedence = init(general_allocator());
+    c.functions = init(general_allocator());
+    c.vars = init(general_allocator());
+    c.f = general_allocator().box(Qbe.Fn);
+    
+    add_builtin(c, "<", 10) { f, r, a0, a1 |
+        b := f.newtmp("cmp", .Kw);
+        f.emit(.cltd, .Kw, b, a0, a1);
+        f.emit(.uwtof, .Kd, r, b, QbeNull);
+    };
+    add_builtin(c, "+", 20) { f, r, a0, a1 |
+        f.emit(.add, .Kd, r, a0, a1);
+    };
+    add_builtin(c, "-", 20) { f, r, a0, a1 |
+        f.emit(.sub, .Kd, r, a0, a1);
+    };
+    add_builtin(c, "*", 40) { f, r, a0, a1 |
+        f.emit(.mul, .Kd, r, a0, a1);
+    };
+    
+    c.m.put_jit_addr(c.m.intern("putchard"), @as(rawptr) (fn(d: f64) f64 = {
+        c: u8 = d.int().trunc();
+        print(@as(Str) (ptr = c&, len = 1));  // :SLOW (unbuffered)
+        0.0
+    }));
+    c.m.put_jit_addr(c.m.intern("printd"), @as(rawptr) (fn(d: f64) f64 = {
+        @println("%", d);  // :SLOW (unbuffered)
+        0.0
+    }));
+    
+    c.pop_token();
+    c
+}
+
+fn add_builtin(c: *Ctx, $t: Str, prec: i64, $body: @Fn(f: *Qbe.Fn, r: Qbe.Ref, a0: Qbe.Ref, a1: Qbe.Ref) void) void = {
+    c.start_fn(c.m.intern(operator_name(false, tok(t))));
+    c.binary_precedence&.insert(tok(t), prec);
+    p := temp().box(Proto);
+    p[] = (id = c.f.lnk.id, args = empty(), operator = tok(t), prec = prec);
+    p.args.len = 2; // HACK
+    c.functions&.insert(c.f.lnk.id, p);
+    a0, a1, r := (c.f.newtmp("a0", .Kd), c.f.newtmp("a0", .Kd), c.f.newtmp("result", .Kd));
+    c.f.emit(.par, .Kd, a0, QbeNull, QbeNull);
+    c.f.emit(.par, .Kd, a1, QbeNull, QbeNull);
+    body(c.f, r, a0, a1);
+    c.f.copy_instructions_from_scratch_reversed_which_means_forwards(c.b);
+    c.f.start.jmp = (type = .retd, arg = r);
+    c.end_fn();
+}
+
+fn start_fn(c: *Ctx, id: u32) void = {
+    default_init(c.f, c.m);
+    c.f.lnk.id = id;
+    c.f.lnk.export = true;  // TODO: shouldn't need this. we export top_level at the end anyway
+    c.link = c.f.start&;
+    c.b = c.push_block();
+}
+
+fn end_fn(c: *Ctx) void = {
+    c.vars&.clear();
+    run_qbe_passes(c.f);
+}
+
+Ast :: fn(T: Tag(KExpr)) Type = get_variant_type(KExpr, T);
+
+fn push_block(c: *Ctx) *Qbe.Blk = {
+    b := temp().box_zeroed(Qbe.Blk);
+    c.link[] = b;
+    b.id = c.f.nblk;
+    c.f.nblk += 1;
+    c.link = b.link&;
+    b
+}
+
+fn tok($s: Str) i64 = {
+    @run @assert(s.len() == 1);
+    s[0].zext() + Token.enum_count()
+}
+
+// TODO: annoying that this can't be called `consume` because my overload resolution is shitty
+fn consumes(c: *Ctx, $expect: Str) Result(void, Str) = {
+    if(c.token != tok(expect), => return(Err = @tfmt("expected '%'", expect)));
+    c.pop_token();
+    .Ok
+}
+
+fn consume(c: *Ctx, expect: Token) Result(void, Str) = {
+    if(c.token != expect.raw(), => return(Err = @tfmt("expected %", expect)));
+    c.pop_token();
+    .Ok
+}
+
+fn node(it: KExpr) R = {
+    e := temp().box(KExpr);
+    e[] = it;
+    (Ok = e)
+}
+
+fn operator_name(unary: bool, t: i64) Str = {
+    @tfmt("@%%", @if(unary, "unary", "binary"), t)
+}
+
+#use("@/lib/collections/map.fr");
+#include_std("backend/lib.fr");
+
+::enum(Token);
+::tagged(KExpr);
+
+// from https://llvm.org/docs/tutorial/MyFirstLanguageFrontend/LangImpl06.html#kicking-the-tires
+EXAMPLE_PROGRAM :: """
+extern printd(x);
+extern putchard(char);
+
+def unary-(v)
+  0-v;
+
+def binary> 10 (LHS RHS)
+  RHS < LHS;
+
+def binary| 5 (LHS RHS)
+  if LHS then
+    1
+  else if RHS then
+    1
+  else
+    0;
+
+def binary : 1 (x y) y;
+
+def printdensity(d)
+  if d > 8 then
+    putchard(32)  # ' '
+  else if d > 4 then
+    putchard(46)  # '.'
+  else if d > 2 then
+    putchard(43)  # '+'
+  else
+    putchard(42); # '*'
+
+def mandelconverger(real imag iters creal cimag)
+    if iters > 255 | (real*real + imag*imag > 4) then
+    iters
+    else
+    mandelconverger(real*real - imag*imag + creal,
+                    2*real*imag + cimag,
+                    iters+1, creal, cimag);
+
+def mandelconverge(real imag)
+    mandelconverger(real, imag, 0, real, imag);
+
+def mandelhelp(xmin xmax xstep   ymin ymax ystep)
+    for y = ymin, y < ymax, ystep in (
+    (for x = xmin, x < xmax, xstep in
+        printdensity(mandelconverge(x,y)))
+    : putchard(10)
+    )
+
+def mandel(realstart imagstart realmag imagmag)
+    mandelhelp(realstart, realstart+realmag*78, realmag,
+                imagstart, imagstart+imagmag*40, imagmag);
+
+mandel(-2.3, -1.3, 0.05, 0.07);
+""";

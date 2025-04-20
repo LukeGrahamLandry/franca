@@ -1,3 +1,7 @@
+## (Apr 20)
+
+- new example: kaleidoscope (little language from llvm tutorial)
+
 ## (Apr 19)
 
 - finish converting old versions of some asm intrinsics to a test
