@@ -22,7 +22,7 @@
 // - rename materialize_in_jit_address_space but also nobody calls it now. until i fix ^ 
 // - you can't access preprocessor stuff. if constants are #define instead of enum, we don't export them. 
 //   or something like tracy that defines the public nice names as macros, you can't call that from franca. 
-// - need to keep enum names and translate enum types to @enum
+// - you can't access anon enums (they should just be constants i guess)
 // - it would save a lot of effort if the c compiler used the franca data structures 
 //   for everything. but then there's an awkward coupling. I like that this also works 
 //   as a stand alone c compiler so it feels like a more impressive demo of "hey this is
@@ -34,7 +34,10 @@
 // - currently i only export typedefs. need to be able to use things without like `struct Foo` or whatever
 // - things from other header files are exported too too which might not be what you want. 
 //   like what if you want to use a library that typedef-ed u32 for themselves? now you can't #use it. that sucks. 
-// 
+// - support pragma pack/alignas so need to do the field layout / TypeMeta here
+// - track no_return and export it as Never
+// - #use anon struct fields
+//
 
 // TODO: don't make src be comptime (need to be able make a new scope)  :FfiNamespaceHacks
 fn include($src: Str) ScopeId = {
@@ -138,8 +141,27 @@ fn export_type_info(c: *Ctx, type: *CType, decay_arrays: bool) TypeInfo = {
         fn TY_FLOAT()   => .F32;
         fn TY_DOUBLE()  => .F64;
         fn TY_LDOUBLE() => .F64;
-        // TODO: don't throw away the names 
-        fn TY_ENUM() => (Int = (bit_count = 32, signed = false));
+        fn TY_ENUM() => {
+            seq := true;
+            fields := list(Ty(Symbol, Values), type.param_names.len, fr.get_alloc());
+            prev := -1;
+            enumerate type.param_names { i, it |
+                // this wont work if it was declared in an inner scope, 
+                // but i guess then you wouldn't be able to export it anyway. 
+                var := c.find_var(it[]) || @panic("failed to find enum value %", it[].str());
+                @assert(identical(var.enum_ty, type), "expected '%' to be an enum", it[].str());
+                push(fields&, (fr.intern_string(it[].str()), (Small = (var.enum_val, 8))));
+                
+                seq = seq && var.enum_val == prev + 1;
+                prev = var.enum_val;
+            };
+            
+            (Enum = (
+                raw = u32,  // :get_or_create_type
+                fields = fields.as_raw(),
+                sequential = seq,
+            ))
+        }
         fn TY_PTR() => @match(type.base.kind) {
             fn TY_VOID() => .VoidPtr;
             fn TY_FUNC() => {
@@ -162,9 +184,7 @@ fn export_type_info(c: *Ctx, type: *CType, decay_arrays: bool) TypeInfo = {
         fn TY_STRUCT() => c.export_members(type, false);
         fn TY_UNION()  => c.export_members(type, true);
         fn TY_FUNC() => {
-            // TODO: track no_return
-            
-            args := Type.list(fr.get_alloc());  // TODO: cap
+            args := Type.list(type.params.len, fr.get_alloc());
             for type.params { par | 
                 args&.push(c.export_type(par, true));
             };
@@ -183,6 +203,7 @@ fn export_members(c: *Ctx, type: *CType, is_union: bool) TypeInfo = {
     fr := c.franca.unwrap();
     fields := Field.list(fr.get_alloc());  // TODO: cap
     for_linked type.members { mem |
+        @assert(!mem.is_bitfield, "TODO: export bit field to franca");
         fields&.push(
             name = fr.intern_string(mem.name.str()),
             ty = c.export_type(mem.ty, false),
@@ -214,11 +235,6 @@ fn export_func(c: *Ctx, obj: *Obj) FuncId = {
     };
     data  := temp().alloc_zeroed(BakedVarId, n);
     funcs := temp().alloc_zeroed(FuncId, n);
-    
-    // TODO: this confuses it?  `tried to emit function with $const parameter`  -- Apr 14, 2025
-    //if obj.name.str() == "wuffs_base__image_decoder__set_quirk" {
-    //    printfn(f, f.globals.debug_out);
-    //}
     
     name := fr.intern_string(obj.name.str());
     loc := Span.zeroed();  // TODO: translate this too!

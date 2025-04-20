@@ -17,7 +17,6 @@
 - `./q.out -t wasm32 -o target/out/q.wasm -cc backend/test/abi8.ssa -d AI`
 %�%.104 =w pop
 - fast memcpy (need to deal with fallback when not linking a libc)
-- prospero fails a safety check now
 
 ## language consistancy
 
@@ -278,6 +277,7 @@ has the numbers in the right order at least. rust has my problem too `[[Symbol; 
   - :DumbNameAlias NoMangle
   - AbiHackSpan
   - `@rec` in backend/ir.fr and wasm/instructions:Wasm
+  - use sqrt/min/max
 - αcτµαlly pδrταblε εxεcµταblε
 - probably want to port the build stuff. https://github.com/jart/cosmopolitan/blob/master/tool/build/apelink.c
   i assume i can make it less complicated since i'm the one generating the thing in the first place?

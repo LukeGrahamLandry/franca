@@ -1,0 +1,65 @@
+//
+// This is why my tests call three_trillion_dollars_does_not_buy_an_operating_system_that_works(). 
+//
+// (i would be thrilled to learn im wrong about this somehow)
+// macos has a panic attack if you write an exe, run it, it aborts
+// and then you rewrite the file and try to run the new program. it like remembers 
+// that path was an evil one and just dies immediately. 
+// calling exit(1) is fine but calling abort() or (dyld[XXXXX]: Symbol not found: XXXXX) 
+// is do directly to jail do not pass go do not collect two hundred dollars. 
+//
+// This program lets you curse an executable. 
+//
+
+fn main() void = {
+    a := cli_args();
+    i := 0;
+    while => a[i].str() != "--" {
+        i += 1;
+    };
+    i += 1;
+    path := a[i].str();
+    @println("cursing executable: %", path);
+    
+    original := read_entire_file(temp(), path).unwrap();
+    magic    :: import("@/backend/macho/bits.fr").macho_magic;
+    @assert_eq(magic, ptr_cast_unchecked(u8, u32, original.ptr)[], "expected a Mach-O file");
+    
+    // write an executable that will crash
+    write_entire_file_or_crash(path, BAD_MACHO_BYTES);
+    
+    // fork+exec it, this will crash (as it should)
+    ok, _, _ := exec_and_catch(path, empty(), temp());
+    @assert(!ok, "our evil_main() didn't crash");
+    
+    // put it back to normal
+    write_entire_file_or_crash(path, original);
+    
+    // fork+exec it, this will fail (!!!)
+    ok, _, _ := exec_and_catch(path, empty(), temp());
+    @assert(!ok, "our curse didn't work");
+}
+
+BAD_MACHO_BYTES :: {
+    c   := current_compiler_context();
+    fid := bad_main;
+    m   := zeroed QbeModule;
+    out := u8.list(ast_alloc());
+    
+    init_default_module_dyn(m&, c.vtable, 
+        (arch = .aarch64, os = .macos, type = .Exe),  // :hardcodearch 
+    );
+    buckets := emit_qbe_included_dyn(m&, c&, @slice(fid), .WrapMain);
+    for(buckets&, fn(it) => out&.push_all(it));
+    out.items()
+};
+
+bad_main :: fn() void = {
+    abort :: fn() Never #libc;
+    abort();
+};
+
+#use("@/lib/sys/fs.fr");
+#use("@/lib/sys/terminal.fr");
+#use("@/lib/sys/subprocess.fr");
+#include_std("backend/lib.fr");

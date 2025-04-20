@@ -1,3 +1,17 @@
+## (Apr 19)
+
+- finish converting old versions of some asm intrinsics to a test
+- the problem i was having with lox was only slightly a memory safety thing. 
+im using mod to map hashes to indices so it doesn't like negative numbers so 
+checked_hash does an `abs` but in lox i have a copy-paste of some of it that 
+caches the obj hashes and that wasn't calling abs so everything got super confused i guess. 
+once again it is revealed that using i64 for slice indexing and not bounds checking for negative 
+numbers is a supid idea. maybe the memory safety argument isn't that the problems are super 
+common or hard to fix, it's that you're giving small bugs the power to break everything 
+instead of being localized. 
+- fixed prospero safety checking on decreasing ntmp too soon 
+- experimenting with the rules for writing to a file while it is executing on linux (and various emulators). 
+
 ## (Apr 18)
 
 - get import_wasm working well enough to do the bf example hello world
@@ -19,6 +33,12 @@ down that check to a place where we know it's not variadic but before asking the
 function to infer args. very bad sign that im relieved to have changed something 
 in the sema file without causing the world to collapse around me. 
 - fixed a `unhandled node type CVariadicMarker` when you try to `::` a varargs call 
+- import_c keep enum names and export them to be useable from franca
+- removed "VoidPtr: hack to match old behaviour and still call intern_type at the beginning", 
+so now c `*void` will export as franca `rawptr` (without `Type Error: expected rawptr but found rawptr`).
+- still don't know why there were two entries for .VoidPtr in the fixed types but we used the latter 
+one so it's fine to just skip an index. it seems i just randomly added an extra one when i
+started hardcoding type id numbers (10 months ago). maybe i just didn't notice it was already there? 
 
 ## (Apr 16/17)
 

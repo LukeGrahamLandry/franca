@@ -1,0 +1,43 @@
+// 
+// This program reads all the bytes from the running executable, and then tries 
+// to open that file with a truncating write and write all the same bytes back 
+// again. Ideally this would not cause any change to the file. 
+// 
+// - on macos: it's fine. the program exits successfully and the file is unchanged. 
+// - on real linux: the open() returns an error, the file is unchanged, and you get my panic message.
+// - on orbstack rosetta linux: it depends... 
+//     - AOT: the open() does not return, the program exits without an error message, 
+//            but the file is truncated to 0 bytes. 
+//     - JIT: the open()/write() work, the file remains unchanged, the "goodbye" message prints. 
+//            but when the jitted main() returns, the process crashes without an error message. 
+// - on blink linux: it's fine. same as macos. 
+//   (need to compile with -syscalls and comment out interactive_read_line)
+// 
+// If you remove() the file before trying to open for writing, it will work as expected 
+// (and cause no change) on both operating systems.
+// 
+
+fn main() void = {
+    path := cli_args()[0];
+    @println("current executable: %", path);
+    data := read_entire_file(temp(), path.str()).unwrap();
+    
+    if false {  // enable this to make it work on linux
+        _ := remove(path);
+    }
+    
+    pause :: fn(s) => {
+        ignore := u8.list(temp());
+        @println("Press <enter> to %", s);
+        interactive_read_line(ignore&);
+    };
+    
+    pause("write over the currently executing program with its own data again");
+    write_entire_file_or_crash(path.str(), data);
+    println("done writing");
+    pause("return from main()");
+    println("goodbye");
+}
+
+#use("@/lib/sys/fs.fr");
+#use("@/lib/sys/terminal.fr");

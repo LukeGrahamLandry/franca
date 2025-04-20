@@ -193,9 +193,9 @@ fn renumber(f: *Qbe.Fn) void = {
         
         j += 1;
     };
-    f.ntmp = j.trunc();
     a := f.start.jmp.arg&;
     a[] = TMP(f.get_temporary(a[])[].visit);
+    f.ntmp = j.trunc();
 }
 
 fn for_quads(int: Interval2, $do: @Fn(i: Interval2) void #duplicated) void = {
@@ -329,7 +329,12 @@ fn do_imports(m: *QbeModule) void = {
     };
 };
 
-Interval  :: @struct(min: f32, max: f32);
+Interval :: @struct {
+    nan: Interval : (min = NaN, max = NaN);
+
+    min: f32;
+    max: f32;
+};
 
 fn is_nan(self: Interval) bool = 
     is_nan(self.min + self.max);
@@ -337,13 +342,9 @@ fn is_nan(self: Interval) bool =
 fn optimise_intervals(f: *Qbe.Fn, input: *Interval2, s: *RecState, $mut: bool) Interval = {
     s.ints.interpret_as_bytes().set_bytes(255);  // all ones is a nan
     s.copy.interpret_as_bytes().set_bytes(0); 
-    @debug_assert_ge(f.ntmp, f.ncon, "TODO: a,b:= will bounds check fail if there are more constants than vars");
     r := f.start.jmp.arg&;
-    //if r[].rtype() == .RCon {
-    //    x := f.get_constant(r[])[].bits.d.cast();
-    //    return(min = x, max = x)
-    //};
-    
+    @debug_assert_ne(r[].rtype(), .RCon);
+
     k := 0;
     j := f.start.ins.first;
     s.ints[64+0] = input.x;
@@ -356,7 +357,10 @@ fn optimise_intervals(f: *Qbe.Fn, input: *Interval2, s: *RecState, $mut: bool) I
     while => !identical(j, end) {
         continue :: local_return;
         i := j; j = i.offset(1);
-        a, b := (s.ints[i.arg&[0].val()], s.ints[i.arg&[1].val()]);
+        a, b := @if(rtype(i.arg&[0]) == .RTmp, 
+            (s.ints[i.arg&[0].val()], s.ints[i.arg&[1].val()]),
+            (Interval.nan, Interval.nan),
+        );
         
         // remove useless copy chains
         @if(mut) {
