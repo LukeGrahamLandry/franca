@@ -2,6 +2,7 @@
 
 - run: execute a wasm module as though it were a native program.
 - ffi: import a wasm module so that another franca program can call its functions.
+(WIP)
 
 ## Limitations
 

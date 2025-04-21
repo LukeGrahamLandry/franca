@@ -3,6 +3,7 @@
 - lox: bytecode vm for the language from craftinginterpreters.com (only ch 14-22 so far)
 
 - prospero: render CSG images by evaluating expressions with optimisations based on interval arithmetic
+- kaleidoscope: jit for a tiny expression langauge (based on an llvm tutorial)
 - dump_macho, dump_elf, dump_wasm: inspect executable files
 - macho_loader: mmap a mach-O executable and run it (just like the dynamic loader would)
 - default_driver: a driver program that can be used to build other franca programs 
@@ -11,6 +12,7 @@
 - repl: a franca repl using the comptime jit.
 - hacky_incremental: call a function in a loop and hot load recompile it when the file changes
 - view_image: print a jpeg of the mona lisa to the terminal by importing a c library (lib:wuffs)
+- turing_art: randomized turing machines draw on a colourful canvas
 
 - farm_game: draws some rectangles on the screen with sokol (lib:sokol)
 - dearimgui_demo: calls ImGui::ShowDemoWindow (lib:sokol, lib:dearimgui)

@@ -1,6 +1,38 @@
 ## (Apr 20)
 
-- new example: kaleidoscope (little language from llvm tutorial)
+- uninspired so perhaps more playing with example programs is in my future. 
+- new example: kaleidoscope (little language from llvm tutorial). 
+  - that was quite successful. wrote a nontrivial program, didn't find any compiler bugs, 
+it pretty much just worked like a normal language, thats crazy man. 
+  - it's less code than the c++ version which is pleasing
+  - had a confusion with the backend api when you try to get_addr for 
+  something inlineable that you forgot to mark exported. so added an 
+  assertion message for that. 
+- making driver use different module than comptime makes running bigger 
+  programs with `franca foo.fr` much faster (950ms -> 650ms for kaleidoscope),
+  because then i do them on different threads. 
+  also means you won't have jit shims. is that the semantics i want? 
+  feels kinda sad to not take advantage of host and target being the same 
+  to only compile things once if used at both comptime and runtime. 
+  also leads to a sad situation where putting `::` in front of your `main()` body
+  (which should be the same when running jitted) makes it much slower. 
+  so maybe what i really want is for the comptime situation to adapt to whether 
+  the program seems large and notice the situation where you want to do a call 
+  immediately to make progress so should do it on the same thread. 
+  because the last attempt at using another thread for all comptime stuff 
+  was slower because i naively block to wait for everything in case i call it. 
+  the other thing was floating the idea of using more jit shims so you could do things 
+  like `qbe_frontend.fr` only compiles the c compiler if you actually use it. 
+  so the other perspective is compiling in parallel is less important if you can
+  just skip compiling most of the program. doing both would be better tho. 
+- new example: turing_art
+  - embarasing amount of time wasted once again on negative mod. 
+  maybe i should give up and have mod/rem/(whatever the fuck else) like zig. 
+  kinda annoying that the one you're supposed to call "mod" is not the normal programming one. 
+
+THINGS I ALWAYS LOSE 
+- https://torstencurdt.com/tech/posts/modulo-of-negative-numbers/
+- https://www.chiark.greenend.org.uk/~sgtatham/coroutines.html
 
 ## (Apr 19)
 

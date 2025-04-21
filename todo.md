@@ -233,10 +233,18 @@ also this: https://github.com/golang/go/issues/20209
 because it turns out the former is actually useful a lot of the time. 
 - would be cool if this worked: `S :: @struct(TAG :: .c); Tag :: @enum(a, b, c); a: Tag = S.TAG;`, 
 usecase: examples/lox Obj header
+- make writing macros easier
+  - make it easy to have to dump out all the macro expansions so you can see what's going on 
+  - have the inverse of `@[]`, you want to be able to describe the structure you're 
+  expecting as an argument and pick bits out
+  - allow attatching a parent scope to an expression so you can split a macro into 
+  sub-fuctions without nesting them lexically (see backend/meta/template for a painful example)
+  - somehow preserve the original structure so your program can know the types of stuff 
+  and also the shape of code at the same time. currently sema stomps on the nodes. 
+  (see graphics/shaders for a painful example)
 
 ## demos 
 
-- finish examples/view_image (which means finishing examples/import_c/ffi)
 - go through c++26 reflection examples and make sure i can do them better https://isocpp.org/files/papers/P2996R4.html
 - examples/bf that translates to wasm and then uses examples/import_wasm to run it
 - get wasm to work well enough that i can make a compiler-explorer like thing for the .ssa/.c/.wasm 
@@ -335,7 +343,6 @@ has the numbers in the right order at least. rust has my problem too `[[Symbol; 
 - function that take a slice of args called like variadic functions.
 - u32/u16 pointers as indexes into per type arrays. deref trait so that can be a library feature? want to be able to toggle easily not at every use so can benchmark
 - command line argument parser
-- getters and setters so enums and flag sets could be done in the language and still have natural syntax.
 - should really have a more extensible way of describing an environment.
   - ie. what arch? do you have the compiler context? what os? do you have libc?
   - the end goal for this would be to expose what imports each module needs and let the comptime resolve differently if you really wanted.

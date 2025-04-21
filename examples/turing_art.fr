@@ -1,0 +1,144 @@
+// 
+// I found this: https://maximecb.github.io/Turing-Drawings/ and it's so fucking charming. 
+// 
+// Basic idea of a turing machine is you have an infinite tape and your 
+// little robot is at one cell of the tape and can write symbols on it. 
+// Every step you read the symbol at the current position then 
+// write a symbol, move, and set your state to something. 
+// So your program is just a table: (old_state, old_symbol) -> (new_state, new_symbol, move_direction). 
+// 
+// Their extension to make it not a super boring computer science school exercise
+// is just to make the states be colours and the tape be the screen, 
+// and then suddenly your programs spit out little pictures. 
+// It's super easy to generate a program: just fill the table with random bytes. 
+// Most of them will be garbage but sometimes they move in interesting ways. 
+// 
+// Controls: <space> to go to next rules, <r> to reset canvas but keep rules, <q> to quit. 
+// 
+
+Move :: @enum(u8) (Left, Right, Up, Down);
+Rule :: @struct(symbol: u8, state: u8, move: Move);
+
+fn randomize(rules: []Rule, n_symbols: i64, n_states: i64) void = {
+    rand :: fn() i64 #libc;  // TODO: don't use libc for this. bleh. 
+    @debug_assert_eq(rules.len, n_symbols * n_states);
+    each rules { it |
+        it[] = (
+            symbol = rand().abs().mod(n_symbols).trunc(),
+            state = rand().abs().mod(n_states).trunc(),
+            move = @as(Move) @as(u8) rand().mod(Move.enum_count()).trunc(),
+        );
+        @debug_assert_lt(it.symbol, n_symbols.trunc());
+    };
+}
+
+fn tick(canvas: []u8, state: *u8, i: *i64, rules: []Rule, n_symbols: i64, w: i64) void #inline = {
+    cell   := canvas.index(i[]);
+    r: i64 = state[].zext() * n_symbols + cell[].zext();
+    
+    rule   := rules[r];
+    cell[]  = rule.symbol;
+    state[] = rule.state;
+    
+    ::enum(Move);
+    @match(rule.move) {
+        fn Left()  => move(i, w, -1, 0);
+        fn Right() => move(i, w, 1, 0);
+        fn Up()    => move(i, w, 0, 1);
+        fn Down()  => move(i, w, 0, -1);
+    };
+    
+    move :: fn(i: *i64, w: i64, dx: i64, dy: i64) void #inline = {
+        y, x := i[].div_mod(w);
+        x = mod(x + dx + w, w);
+        y = mod(y + dy + w, w);
+        i[] = y * w + x;
+    };
+}
+
+main :: fn() void = {
+    srand :: fn(seed: u32) void #libc;
+    srand(12345678);
+    
+    a := temp();
+    w, n_symbols, n_states, ticks_per_frame, delay := (40, 3, 4, 1000, 10);
+    canvas := a.alloc_zeroed(u8, w*w);
+    rules  := a.alloc(Rule, n_symbols * n_states);
+    randomize(rules, n_symbols, n_states);
+    
+    state: u8 = 0;
+    pos := 0;
+    
+    Term :: import("@/lib/sys/terminal.fr");
+    context(DefaultContext)[].panic_hook = fn(s: Str) Never = {
+        Term'end_raw(STD_IN);
+        print(Term.end_other); 
+        eprintln(s);
+        exit(1)
+    };
+    print(Term.start_other);
+    Term'start_raw(STD_IN);
+    
+    out := u8.list(a);
+    loop {
+        range(0, ticks_per_frame) { _ |
+            tick(canvas, state&, pos&, rules, n_symbols, w);
+        };
+        
+        range(0, w) { y |
+            range(0, w) { x |
+                i := y * w + x;
+                state := canvas[i];
+                hue := (@as(i64) state.zext()).float() / n_states.float() * 360.0;
+                
+                r, g, b := hsv2rgb(hue, 1.0, 1.0);
+                @fmt(out&, Term.set_colour, r, g, b);
+                @fmt(out&, "█");
+            };
+            @fmt(out&, "\n");
+        };
+        print(out.items());
+        @fmt(out&, Term.reset);
+        @fmt(out&, Term.set_cursor, 0, 0);
+        out&.clear();
+        usleep(delay.trunc() * 1000);
+        
+        if get_input() { c |
+            @switch(c) {
+                @case("q".ascii()) => {
+                    Term'end_raw(STD_IN);
+                    print(Term.end_other); 
+                    return();
+                };
+                @case(" ".ascii()) => {
+                    randomize(rules, n_symbols, n_states);
+                    pos = 0;
+                    state = 0;
+                    canvas.set_zeroed();
+                };
+                @case("r".ascii()) => {
+                    pos = 0;
+                    state = 0;
+                    canvas.set_zeroed();
+                };
+                @default => ();
+            };
+        };
+    };
+}
+
+fn hsv2rgb(H: f64, S: f64, V: f64) Ty(i64, i64, i64) = {
+    fmod :: fn(a: f64, b: f64) f64 #libc;
+    f :: fn(n) => {
+        k := fmod(n.float() + (H / 60.0), 6.0);
+        int(abs(V - V * S * max(0.0, min(min(k, 4 - k), 1.0))) * 255.0)
+    };
+    (f(5), f(3), f(1))
+}
+
+fn get_input() ?u8 = {
+    c: u8 = 0;
+    len := read(STD_IN, c&, 1).unwrap();
+    ::if(?u8);
+    if(len > 0, => (Some = c), => .None)
+}

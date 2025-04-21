@@ -25,25 +25,26 @@ Token :: @enum(
 );
 
 Ctx :: @struct {
-    // lex
-    ident: Str;
-    num: f64;
-    src: Str;
-    i: i64;
-    line: i64;
-    
-    // parse
-    token: i64;
-    binary_precedence: HashMap(i64, i64);  // we have user defined operators so this needs to be dynamic
-    functions: HashMap(u32, *Proto);
-    
-    // codegen
-    m: *QbeModule;
-    f: *Qbe.Fn;
-    b: *Qbe.Blk;
-    link: **Qbe.Blk;
-    vars: HashMap(Str, Qbe.Ref);
-    top_level: u32;
+    lex: @struct {
+        ident: Str;
+        num: f64;
+        src: Str;
+        i: i64;
+        line: i64;
+    } #use;
+    parse: @struct {
+        token: i64;
+        binary_precedence: HashMap(i64, i64);  // we have user defined operators so this needs to be dynamic
+        arity: HashMap(u32, i64);
+    } #use;
+    codegen: @struct {
+        m: *QbeModule;
+        f: *Qbe.Fn;
+        b: *Qbe.Blk;
+        link: **Qbe.Blk;
+        vars: HashMap(Str, Qbe.Ref);
+        top_level: List(u32);
+    } #use;
 }
 
 KExpr :: @rec @tagged(
@@ -54,7 +55,6 @@ KExpr :: @rec @tagged(
     If: @struct(cond: *KExpr, then: *KExpr, else: *KExpr),
     For: @struct(name: Str, start: *KExpr, end: *KExpr, step: *KExpr, body: *KExpr),
     VarIn: @struct(body: *KExpr, vars: []Ty(Str, *KExpr)),
-    Function: @struct(proto: Proto, body: *KExpr),
 );
 
 Proto :: @struct(id: u32, args: []Str, operator: i64 = Token.identifier.raw(), prec := 0);
@@ -128,12 +128,9 @@ fn pop_token(c: *Ctx) i64 = {
 }
 
 fn parse_paren(c: *Ctx) R = {
-    c.pop_token(); // (
+    @try(c.consumes("(")) return;
     e := @try(c.parse_expression()) return;
-    if c.token != tok(")") {
-        return E("expected a close paren");
-    }
-    c.pop_token(); // )
+    @try(c.consumes(")")) return;
     (Ok = e)
 }
 
@@ -211,7 +208,7 @@ fn parse_var(c: *Ctx) R = {
     dowhile {
         name := c.ident;
         @try(c.consume(.identifier)) return;
-    
+        
         ::if(*KExpr);
         init: *KExpr = if c.token == tok("=") {
             c.consumes("=");
@@ -223,7 +220,7 @@ fn parse_var(c: *Ctx) R = {
             e
         }
         push(vars&, (name, init));
-    
+        
         done := c.token != tok(","); 
         if !done {
             c.consumes(",");
@@ -345,24 +342,6 @@ fn parse_prototype(c: *Ctx) Result(Proto, Str) = {
     (Ok = (id = c.m.intern(name), args = names.items(), operator = operator, prec = prec))
 }
 
-// def P E
-fn parse_def(c: *Ctx) R = {
-    @try(c.consume(.def)) return;
-    proto := @try(c.parse_prototype()) return;
-    body  := @try(c.parse_expression()) return;
-    
-    node(Function = (proto = proto, body = body))
-}
-
-fn parse_top_level(c: *Ctx) R = {
-    body := @try(c.parse_expression()) return;
-    
-    // wrap it up in a function so we can call it later
-    id := c.m.intern("@toplevel");
-    c.top_level = id;
-    node(Function = (proto = (id = id, args = empty()), body = body))
-}
-
 fn codegen(c: *Ctx, it: *Ast(.Number)) RR = {
     (Ok = c.f.getcon(it[].bitcast()))
 }
@@ -389,9 +368,9 @@ fn codegen(c: *Ctx, it: *Ast(.Assign)) RR = {
 }
 
 fn codegen(c: *Ctx, it: *Ast(.Call)) RR = {
-    proto := c.functions&.get(it.callee) 
+    arity := c.arity&.get(it.callee) 
         || return(E(@tfmt("tried to call undeclared function '%'", c.m.str(it.callee))));
-    if proto.args.len != it.args.len {
+    if arity != it.args.len {
         return E("incorrect arity");
     }
     
@@ -483,9 +462,11 @@ fn codegen(c: *Ctx, it: *Ast(.VarIn)) RR = {
     for it.vars { v |
         name, init := v;
         value := @try(c.codegen(init)) return;
+        dest := c.f.newtmp(name, .Kd);
+        c.f.emit(.copy, .Kd, dest, value, QbeNull);
         
         shadow&.push(c.vars&.get(name) || QbeNull);
-        c.vars&.insert(name, value);
+        c.vars&.insert(name, dest);
     }
     
     r := @try(c.codegen(it.body)) return;
@@ -495,24 +476,24 @@ fn codegen(c: *Ctx, it: *Ast(.VarIn)) RR = {
     (Ok = r)
 }
 
-fn codegen(c: *Ctx, it: *Ast(.Function)) RR = {
-    c.functions&.insert(it.proto.id, it.proto&);
-    if it.proto.operator != Token.identifier.raw() && it.proto.args.len == 2 {
-        c.binary_precedence&.insert(it.proto.operator, it.proto.prec);
+fn codegen(c: *Ctx, proto: Proto, body: *KExpr) Result(void, Str) = {
+    c.arity&.insert(proto.id, proto.args.len);
+    if proto.operator != Token.identifier.raw() && proto.args.len == 2 {
+        c.binary_precedence&.insert(proto.operator, proto.prec);
     }
     
-    c.start_fn(it.proto.id);
-    for it.proto.args { name |
+    c.start_fn(proto.id);
+    for proto.args { name |
         r := c.f.newtmp(name, .Kd);
         c.f.emit(.par, .Kd, r, QbeNull, QbeNull);
         c.vars&.insert(name, r);
     };
     
-    r := @try(c.codegen(it.body)) return;
+    r := @try(c.codegen(body)) return;
     c.f.copy_instructions_from_scratch_reversed_which_means_forwards(c.b);
     c.b.jmp = (type = .retd, arg = r);
     c.end_fn();
-    (Ok = QbeConZero)
+    .Ok
 }
 
 fn codegen(c: *Ctx, it: *KExpr) RR = {
@@ -523,25 +504,29 @@ fn compile_loop(c: *Ctx) Result(void, Str) = {
     loop {
         @match(@as(Token) c.token) {
             fn def() => {
-                def := @try(c.parse_def()) return;
-                @debug_assert(def.is(.Function));
-                @try(c.codegen(def.Function&)) return;
+                @try(c.consume(.def)) return;
+                proto := @try(c.parse_prototype()) return;
+                body  := @try(c.parse_expression()) return;
+                @try(c.codegen(proto, body)) return;
             }
             fn extern() => {
                 @try(c.consume(.extern)) return;
                 proto := @try(c.parse_prototype()) return;
-                p := temp().box(Proto);
-                p[] = proto;
-                c.functions&.insert(p.id, p);
+                c.arity&.insert(proto.id, proto.args.len);
             }
             fn eof() => return(.Ok);  
             @default => {
                 if c.token == tok(";") {
                     c.pop_token();
                 } else {
-                    def := @try(c.parse_top_level()) return;
-                    @debug_assert(def.is(.Function));
-                    @try(c.codegen(def.Function&)) return;
+                    // it's some top level expression
+                    body := @try(c.parse_expression()) return;
+                    
+                    // wrap it up in a function so we can call it later
+                    id := c.m.intern(@tfmt("@toplevel%", c.top_level.len));
+                    c.top_level&.push(id);
+                    c.m.maybe_add_export(id, true);
+                    @try(c.codegen((id = id, args = empty()), body)) return;
                 }
             };
         }
@@ -550,19 +535,26 @@ fn compile_loop(c: *Ctx) Result(void, Str) = {
 
 main :: fn() void = {
     m := zeroed QbeModule;
-    init_default_module(m&, (arch = .aarch64, os = .macos, type = .JitOnly), false);  // :hardcodeos lazy
+    init_default_module(m&, (arch = query_current_arch(), os = query_current_os(), type = .JitOnly), false);
     c: *Ctx = init(general_allocator(), EXAMPLE_PROGRAM, m&);
     @match(c.compile_loop()) {
         fn Ok() => ();
         fn Err(s) => @panic("%\n before line %", s, c.line);
     }
     
-    c.m.maybe_add_export(c.top_level, true);
     c.m.emit_suspended_inlinables();
     c.m.make_exec();
-    f, _ := c.m.get_addr(c.top_level).expect("top level expression");
-    f := assume_types_fn(Arg = void, Ret = void, ptr = f);
-    f();
+    
+    out := f64.list(temp());
+    for c.top_level { id |
+        f, _ := c.m.get_addr(id).expect("top level");
+        f := assume_types_fn(Arg = void, Ret = f64, ptr = f);
+        out&.push(f());
+    };
+    @assert(
+        out[0] == 0.0 && out[1] == 55.0 && out[2] == 55.0, 
+        "hardcoded result changed. did you change the program?",
+    );
 }
 
 fn init(a: Alloc, src: Str, m: *QbeModule) *Ctx = {
@@ -570,9 +562,10 @@ fn init(a: Alloc, src: Str, m: *QbeModule) *Ctx = {
     c.src = src;
     c.m = m;
     c.binary_precedence = init(general_allocator());
-    c.functions = init(general_allocator());
+    c.arity = init(general_allocator());
     c.vars = init(general_allocator());
     c.f = general_allocator().box(Qbe.Fn);
+    c.top_level = list(general_allocator());
     
     add_builtin(c, "<", 10) { f, r, a0, a1 |
         b := f.newtmp("cmp", .Kw);
@@ -588,6 +581,8 @@ fn init(a: Alloc, src: Str, m: *QbeModule) *Ctx = {
     add_builtin(c, "*", 40) { f, r, a0, a1 |
         f.emit(.mul, .Kd, r, a0, a1);
     };
+    // assignment has special handling (so I don't provide an implementation here). 
+    c.binary_precedence&.insert(tok("="), 2);
     
     c.m.put_jit_addr(c.m.intern("putchard"), @as(rawptr) (fn(d: f64) f64 = {
         c: u8 = d.int().trunc();
@@ -606,10 +601,7 @@ fn init(a: Alloc, src: Str, m: *QbeModule) *Ctx = {
 fn add_builtin(c: *Ctx, $t: Str, prec: i64, $body: @Fn(f: *Qbe.Fn, r: Qbe.Ref, a0: Qbe.Ref, a1: Qbe.Ref) void) void = {
     c.start_fn(c.m.intern(operator_name(false, tok(t))));
     c.binary_precedence&.insert(tok(t), prec);
-    p := temp().box(Proto);
-    p[] = (id = c.f.lnk.id, args = empty(), operator = tok(t), prec = prec);
-    p.args.len = 2; // HACK
-    c.functions&.insert(c.f.lnk.id, p);
+    c.arity&.insert(c.f.lnk.id, 2);
     a0, a1, r := (c.f.newtmp("a0", .Kd), c.f.newtmp("a0", .Kd), c.f.newtmp("result", .Kd));
     c.f.emit(.par, .Kd, a0, QbeNull, QbeNull);
     c.f.emit(.par, .Kd, a1, QbeNull, QbeNull);
@@ -622,7 +614,6 @@ fn add_builtin(c: *Ctx, $t: Str, prec: i64, $body: @Fn(f: *Qbe.Fn, r: Qbe.Ref, a
 fn start_fn(c: *Ctx, id: u32) void = {
     default_init(c.f, c.m);
     c.f.lnk.id = id;
-    c.f.lnk.export = true;  // TODO: shouldn't need this. we export top_level at the end anyway
     c.link = c.f.start&;
     c.b = c.push_block();
 }
@@ -677,7 +668,8 @@ fn operator_name(unary: bool, t: i64) Str = {
 ::enum(Token);
 ::tagged(KExpr);
 
-// from https://llvm.org/docs/tutorial/MyFirstLanguageFrontend/LangImpl06.html#kicking-the-tires
+// mandel from https://llvm.org/docs/tutorial/MyFirstLanguageFrontend/LangImpl06.html#kicking-the-tires
+// fib from https://llvm.org/docs/tutorial/MyFirstLanguageFrontend/LangImpl07.html#id5
 EXAMPLE_PROGRAM :: """
 extern printd(x);
 extern putchard(char);
@@ -731,4 +723,21 @@ def mandel(realstart imagstart realmag imagmag)
                 imagstart, imagstart+imagmag*40, imagmag);
 
 mandel(-2.3, -1.3, 0.05, 0.07);
+
+def fib(x)
+  if (x < 3) then
+    1
+  else
+    fib(x-1)+fib(x-2);
+
+def fibi(x)
+  var a = 1, b = 1, c in
+  (for i = 3, i < x in
+     c = a + b :
+     a = b :
+     b = c) :
+  b;
+
+fib(10);
+fibi(10);
 """;
