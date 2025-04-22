@@ -241,10 +241,16 @@ fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
                                 e.op(.F64_Const);
                                 e.a&.reserve_type(f64)[] = c.bits.d;
                             }
-                            @default => {
-                                e.op(@if(i.cls().is_wide(), .I64_Const, .I32_Const));
+                            fn Kw() => {
+                                e.op(.I32_Const);
+                                i := c.bits.i.intcast().intcast();
+                                leb128_signed(e.a&, i);
+                            }
+                            fn Kl() => {
+                                e.op(.I64_Const);
                                 leb128_signed(e.a&, c.bits.i);
-                            };
+                            }
+                            @default => unreachable();
                         };
                     }
                     fn CAddr() => {
@@ -372,6 +378,7 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     @if(show_backend_stats())
     @eprintln(">>> % bytes of code, % bytes of data.", code_count, data_size);
     
+    // import functions ids start at zero. 
     // we need to know how many imports there are before we can start patching anything. 
     for_symbols m { id, symbol | // :SLOW  just keep list of pending symbols instead
         if symbol.kind == .Pending && symbol.fixups.len != 0 {
@@ -381,6 +388,10 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
         };
     };
     
+    // our own function ids come after all the imports, but we already started assigning numbers so apply that offset here. 
+    // this is also where we do fixups (ie. to get a function pointer out of a table). 
+    // if we were just doing functions we could use `local_needs_reloc` instead of iterating 
+    // every symbol but there are also globals in the data segment which need fixups as well. 
     for_symbols m { id, symbol |
         if symbol.referenced || symbol.fixups.len != 0 {
             if symbol.kind == .Local && symbol.segment == .Code {
@@ -470,7 +481,7 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
         uleb_patch_delta buf {
             buf.push(1); // length of tables vec
             buf.push(@as(u8) Wasm.ValType.FuncRef); 
-            number_of_functions := m.imports.len + m.exports.len;
+            number_of_functions := f_count + m.imports.len;
             write_limits(buf, number_of_functions, (Some = number_of_functions));
         };
     };
@@ -554,8 +565,9 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
             leb128_unsigned(buf, 0);
             push(buf, @as(u8) Wasm.Inst.End);
             
-            leb128_unsigned(buf, f_count);  // length
-            range(0, f_count) { i |
+            n := f_count+m.imports.len;
+            leb128_unsigned(buf, n);  // length
+            range(0, n) { i |
                 leb128_unsigned(buf, i);
             };
         };

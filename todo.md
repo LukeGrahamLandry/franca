@@ -94,6 +94,9 @@ the right/fast/safe/whatever thing to do is also the easy thing to do.
 - :ThisSureIsABigBlit
 - :RethinkTheFfiCompileApi
 - make import_wasm not crash on implicit return 
+- it would be nice if the backend did a bit of typechecking when you were 
+targetting wasm so it could give you the errors instead of producing a program 
+that fails the wasm verifier
 
 ## cleanup 
 

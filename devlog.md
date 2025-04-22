@@ -1,3 +1,38 @@
+## (Apr 21) chipping away at wasm tests
+
+- ops.ssa
+  - hack my fake printf to make it display right
+- vararg2.ssa 
+  - gets `unable to read i32 leb128: i32.const value` from wasm2wat, 
+maybe if you want 0xFFFFFFFF you need to encode that as -1 with sleb? so i need to sign 
+extend c.bits.i before trying to encode it. 
+  - doing that makes it get hella type errors so i guess that's progress. 
+  thats that vaabi is putting RSlot and im emitting those as Kl without truncating. 
+  - fixing that leaves it with just call errors. 
+  oh ok, i think the rules are you need to put the instruction for `...` 
+  even if there's no varargs being passed for that call, which my c compiler doesnt do. 
+  - but doing that breaks a bunch of old tests because the c drivers were forward declaring 
+  like `void f()` which was treated the same as `void f(...)` so it thinks its doing a va-call 
+  but since the def isn't va it might get inlined even though my inlining wants to not deal with va. 
+  - fixing that and now it's `allocating so many bytes bro`... in push_float, 
+  unless you `@eprintln("%", self.f.ncon);` in there, that changes it to `con oob` somewhere the fuck else. 
+  memory thing i guess? changes if you fmt into temp() or general_allocator(). sad. 
+  was resetting temp but telling it to assume_owned(self.stack, temp()) and just clear it when starting a function. 
+  silly!
+- abi5.ssa
+  - convert pending_indirect_return to a stack slot
+  - don't add the indirect return to the signeture twice
+- abi1.ssa
+  - changed the test to not assign temps for the result of void call. 
+  - works if i align to 16 before a va call instead of 8. very afraid that's just luck because i don't understand. 
+- abi3.ssa
+  - indirect calls super didn't work. especially if you're trying to call an import. 
+  i guess i started implementing that and then got struck by lightning perhaps? 
+  pretty easy fix tho. 
+- split conaddr.ssa because writeto0 isn't special on wasm
+- 48 -> 57
+- started some docs about generics
+
 ## (Apr 20)
 
 - uninspired so perhaps more playing with example programs is in my future. 

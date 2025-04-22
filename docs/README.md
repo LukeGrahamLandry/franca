@@ -6,6 +6,7 @@ and some things are dumb enough that I should defend myself.
 
 - introduction: just enough syntax to be dangerous 
 - aggregates: more complicated types like structs, enums, slices, etc. 
+- generics: how to write functions that work for arbitrary types
 - compilation: high level overview of the franca compilation model
 - annotations: how to attach metadata to franca programs and query it from comptime code
 - comptime: example usecases for full compile time execution

@@ -5,6 +5,8 @@
 //! - need an entry in the type table for the function's signeture. 
 //! - hidden env parameter is passed in a global (which is good enough until i want to support some extension that adds threads)
 
+// TODO: untangle Kw vs Kl: vararg, indirect return
+
 fn wasm_abi(f: *Qbe.Fn) void = {
     m := f.globals;
     
@@ -18,6 +20,7 @@ fn wasm_abi(f: *Qbe.Fn) void = {
                 i[] = make_ins(.global_get, .Kl, i.to, f.symcon(m.wasm_symbol_env_parameter), QbeNull);
             }
             fn parc() => {
+                // TODO: we're supposed to insert a copy here
                 // TODO: check if they said its a type but really there's only one scalar so the ir expects a pointer but we got a value. 
                 i.set_op(.par);
                 i.arg&[0] = QbeNull;
@@ -27,7 +30,7 @@ fn wasm_abi(f: *Qbe.Fn) void = {
     };
     
     // TODO: check if they said its a type but really there's only one scalar 
-    retr := @if(f.retty != -1, f.newtmp("abi", .Kw), QbeNull);
+    retr := @if(f.retty != -1, f.newtmp("abi", .Kl), QbeNull);
     ret_cls := Qbe.Cls.Ke;
     
     for_blocks f { b |
@@ -116,7 +119,7 @@ fn wasm_abi(f: *Qbe.Fn) void = {
         if retr != QbeNull && f.start.identical(b) {
             // prepend aggragate return pointer to our parameters
             f.move_end_of_block_to_scratch(b, b.ins.first, changed&);
-            f.emit(.par, .Kw, retr, QbeNull, QbeNull);
+            f.emit(.par, .Kl, retr, QbeNull, QbeNull);
         };
         
         if changed {
@@ -124,11 +127,10 @@ fn wasm_abi(f: *Qbe.Fn) void = {
         };
     };
     
+    f.slot = f.slot.align_to(4);
+    
     use_symbol(m, f.lnk.id) { s |
         s.wasm_type_index = pack_wasm_result_type m { $yield_arg #duplicated |
-            if retr != QbeNull {
-                yield_arg(.Kw);
-            };
             for_pars f { i |
                 yield_arg(i.cls());
             };
@@ -168,8 +170,6 @@ sel_call :: fn(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) *Qbe.Ins = {
             f.emit(.pop, i.cls(), i.to, QbeNull, QbeNull);
         };
     } else {
-        // TODO: convert this into an alloc or RSlot or something
-        eprintln(":todo this wont work");
         pending_indirect_return = i.to;
     };
     i.to = QbeNull;
@@ -191,7 +191,10 @@ sel_call :: fn(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) *Qbe.Ins = {
             f.slot += size;
         };
         if i.op() == .argv {
-            f.slot = f.slot.align_to(8);
+            @debug_assert(!is_va);
+            // TODO: why does this need to be 16 not 8? am i losing my mind? 8 fails abi1.ssa
+            //       im afraid it's just luck that this works
+            f.slot = f.slot.align_to(16);  
             va_slot = SLOT(f.slot);
             is_va = true;
             args = args.slice(0, j);  // remove the rest of the args
@@ -219,7 +222,11 @@ sel_call :: fn(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) *Qbe.Ins = {
     };
     
     if pending_indirect_return != QbeNull {
-        f.emit(.push, .Kl, QbeNull, pending_indirect_return, QbeNull);
+        t := m.get_type(type.intcast());
+        f.slot = align_to(f.slot, 1.shift_left(t.align_log2.intcast()));
+        f.emit(.push, .Kw, QbeNull, SLOT(f.slot), QbeNull);
+        f.emit(.copy, i.cls(), pending_indirect_return, SLOT(f.slot), QbeNull);
+        f.slot += t.size.intcast();
     };
     
     arg0

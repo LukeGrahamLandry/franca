@@ -208,6 +208,11 @@ Ctx :: @rec @struct {
     franca: ?CompCtx;
     franca_namespace: ScopeId;
     
+    // should `void f()` be treated the same as `void f(...)` instead of `void f(void)`
+    // c23 says no, before says yes. but mostly it doesn't matter because sane programs say the `...` anyway. 
+    // this matters for wasm because it checks signetures and va means append a pointer to the args. 
+    empty_prototype_means_variadic: bool;
+    
     /// Tokenize
     current_file: *File;
     at_bol: bool;  // True if the current position is at the beginning of a line
@@ -742,7 +747,7 @@ fn func_params(c: *Ctx, rest: **Token, tok: *Token, ret: *CType) *CType = {
     ty := c.func_type(ret);
     ty.params = params.items();
     ty.param_names = names.items();
-    ty.is_variadic = is_variadic || params.len == 0;
+    ty.is_variadic = is_variadic || (params.len == 0 && c.empty_prototype_means_variadic);
     rest[] = tok.next;
     ty
 }
@@ -3768,6 +3773,12 @@ fn gen_call(c: *Ctx, callee: *Node, function_ty: *CType, arg: []*Node, tok: *Tok
         // TODO: b/h arg/par
         r := c.gen_expr(arg);
         arguments&.push(arg_ins(r, arg.ty.cls(), c.ir_index(arg.ty)));
+    };
+    
+    // tell the backend that it's variadic even if we're not passing any va-args (needed for wasm). 
+    // TODO: make sure the franca frontend does this too 
+    if variadic_marker_index == 0 {
+        arguments&.push(make_ins(.argv, .Kw, QbeNull, QbeNull, QbeNull));
     };
     
     ::ptr_utils(Obj);

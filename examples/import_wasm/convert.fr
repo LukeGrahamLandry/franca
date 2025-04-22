@@ -22,7 +22,7 @@
 fn init(m: *QbeModule, w: *WasmModule, a: Alloc) LoadWasm = (
     m = m,
     w = w,
-    stack = list(a),
+    stack = list(temp()),
     locals = empty(),
     blocks = list(temp()),
     preserve_franca_env = true,
@@ -172,9 +172,9 @@ fn translate_func(self: *LoadWasm, local_func_i: i64, f: *Qbe.Fn) void = {
     type_index := self.function_types[global_func_i];
     
     signature := self.w.types[type_index.id.zext()]&;
-    self.stack&.clear();
     self.locals = temp().alloc(Qbe.Ref, code.total_local_count + signature.arg.len);
     self.blocks = list(temp());
+    self.stack = list(temp());
     self.base_pointer = self.f.newtmp("wasm_globals", .Kl);
     if self.preserve_franca_env {
         self.franca_env = self.f.newtmp("env", .Kl);
@@ -611,7 +611,11 @@ fn emit_return(self: *LoadWasm) void = {
 
 fn emit_call_from_stack(self: *LoadWasm, callee: Qbe.Ref, type: Wasm.TypeIdx) void = {
     type := self.w.types[type.id.zext()]&;
-    @assert_le(type.arg.len, self.stack.len, "not enough stack for call");
+    @assert_le(
+        type.arg.len, self.stack.len, 
+        "not enough stack for call to % %", callee, 
+        @if(rtype(callee) == .RCon, self.m.str(self.f.get_constant(callee)[].sym.id), ""),
+    );
     if self.preserve_franca_env {
         self.f.emit(.arge, .Kl, QbeNull, self.franca_env, QbeNull);
     }

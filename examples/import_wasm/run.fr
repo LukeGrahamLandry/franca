@@ -119,6 +119,7 @@ Exports :: @struct {
     }
 }
 
+// blehhhhh todo
 printf_impl :: fn(ctx: *u8, fmt: u32, args: *i64) u32 = {
     i := 0;
     c :: fn(i) => ctx.offset(i + fmt.zext())[];
@@ -137,9 +138,14 @@ printf_impl :: fn(ctx: *u8, fmt: u32, args: *i64) u32 = {
             i += 1;
             @switch(c(i)) {
                 @case("l".ascii()) => {
-                    if c(i + 1) == "d".ascii() {
-                        i += 2;
+                    if c(i + 1) == "l".ascii() && c(i + 2) == "d".ascii() {
+                        i += 3;
                         @print("%", get_arg(i64));
+                    } else {
+                        if c(i + 1) == "d".ascii() {
+                            i += 2;
+                            @print("%", get_arg(i64));
+                        }
                     }
                 }
                 @case("d".ascii()) => {
@@ -148,7 +154,21 @@ printf_impl :: fn(ctx: *u8, fmt: u32, args: *i64) u32 = {
                 }
                 @case("g".ascii()) => {
                     i += 1;
-                    @print("%", get_arg(f64));
+                    snprintf :: fn(buf: *u8, len: i64, fmt: CStr) void #c_variadic #libc;
+                    x := get_arg(f64);
+                    //@print("%", x);  // TODO: just fix my float printing to not suck
+                    buf := @uninitialized Array(u8, 64);
+                    snprintf(buf&.as_ptr(), 64, "%g", x);
+                    @print("%", @as(CStr) (ptr = buf&.as_ptr()));
+                }
+                @case("f".ascii()) => {  // TODO: this is a copy-paste
+                    i += 1;
+                    snprintf :: fn(buf: *u8, len: i64, fmt: CStr) void #c_variadic #libc;
+                    x := get_arg(f64); 
+                    //@print("%", x);  // TODO: just fix my float printing to not suck
+                    buf := @uninitialized Array(u8, 64);
+                    snprintf(buf&.as_ptr(), 64, "%f", x);
+                    @print("%", @as(CStr) (ptr = buf&.as_ptr()));
                 }
                 @case("c".ascii()) => {
                     i += 1;
@@ -164,6 +184,24 @@ printf_impl :: fn(ctx: *u8, fmt: u32, args: *i64) u32 = {
                     
                     s: CStr = (ptr = ctx.offset(p));
                     @print("%", s);
+                }
+                // TODO: fix this!! i just dont care rn. 
+                @case("#".ascii()) => {
+                    @assert_eq(ctx.offset(i + fmt.zext()).slice(5), "#010x", "HACK to make ops.ssa work");
+                    i += 5;
+                    x := get_arg(u32);
+                    out := u8.list(temp());
+                    range_rev(0, 4) { i |
+                        push_hex_byte(out&, x.shift_right_logical(8*i).trunc(), false);
+                    };
+                    @print("0x%", out.items());
+                }
+                // TODO: fix this!! i just dont care rn. 
+                @case(".".ascii()) => {
+                    @assert_eq(ctx.offset(i + fmt.zext()).slice(4), ".17s", "HACK to make abi8.ssa work");
+                    i += 4;
+                    p := get_arg(i64);  // TODO: this should be u32 but then the ir needs to know what's a pointer 
+                    @print("%", ctx.offset(p).slice(17));
                 }
                 @case("%".ascii()) => {
                     putchar(ctx, c(i));  // :SLOW

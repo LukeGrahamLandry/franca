@@ -105,7 +105,7 @@ The compiler inherently understands how to include values of the basic types in 
 - Integers are trivial.
 - @struct/Array recursively includes thier fields (zeroing padding).
 - @tagged recursively includes the fields of the active varient (zeroing padding).
-- Ptr(T) recursively includes T and registers an appropriate relocation with the linker.
+- `*T` recursively includes T and registers an appropriate relocation with the linker.
 - Fn and Type decay to an opaque integer id (the only runtime use is comparing them for equality).
 - FnPtr looks up the backing function, ensures its added to the executable, and asks the linker for a relocation.
 
@@ -129,9 +129,11 @@ but the extra power is there if you need it.
 
 > `BakedEntry/BakedVar` are semantically equivalent cranelift's `DataDescription`.
 
-It is illigal to lie about the type of a constant.
+It is considered disrespectful to lie about the type of a constant.
 For example if you cast a pointer to an integer, store that in a constant, and then cast it back at runtime,
 the value behind the pointer won't have been considered reachable and the number will just be a useless address in the compiler's address space.
 Its fine to do all the bit-casts you want during comptime, all that matters is the final type seen by the compiler when the executable is created.
 
 Currently `bake_relocatable_value` is only called if the type contains some type of pointer and some byte of the value is non-zero. 
+
+TODO: internal pointers are not yet supported. 

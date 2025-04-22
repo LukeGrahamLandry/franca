@@ -11,7 +11,6 @@ You can still print out the ir as human readable text between passes and modify 
 - Franca (../compiler/emit_ir.fr)
 - Qbe IR (./meta/parse.fr)
 - C11    (../examples/import_c/compile.fr)
-  - WIP
 - Wasm   (../examples/import_wasm/convert.fr)
   - WIP
 
@@ -29,6 +28,7 @@ You can still print out the ir as human readable text between passes and modify 
 - Ad-hoc signetures for Mach-O binaries so you can target macOS without depending on Apple's `codesign` program.
 - Added a Web Assembly target (outputs the binary format directly).
   - WIP: mandelbrot works, not much else
+  - WIP: does not correctly follow the extern-c abi
 - Emit Elf executables directly
   - WIP: I can't do reloctatable or dynamic libraries yet and exes rely on franca_runtime_init
 - Removed the RISC-V target for now because I haven't done thier instruction encoding yet.
