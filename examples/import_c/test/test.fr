@@ -18,9 +18,11 @@ fn main() void = {
 
 fn driver(vtable: *ImportVTable) void = {
     USE_HOST_BACKEND :: true;
+    @if(USE_HOST_BACKEND) @eprintln(">>> USING HOST BACKEND");
     @if(USE_HOST_BACKEND, run_tests(vtable), main());
 }
 
+// TODO
 // "alignof.c" needs backend support for _Alignas on globals
 // "atomic.c" needs backend support for CAS
 // "tls.c" implement _Thread_Local with env (higher level that uses franca's context?)
@@ -31,13 +33,36 @@ fn run_tests(vtable: *ImportVTable) void = {
     ::import("@/examples/testing.fr");
     tests_folder := "examples/import_c/test";
     
+    // me when we live at the ugly factory
+    // TODO: the obvious clean up here is i want a higher level thing that 
+    //       lets you choose a host and target environment and run whatever 
+    //       tests in that context. cause there's lots of ways to run things:  
+    //       normal, rosetta, orb, blink, import_wasm, wasmtime 
+    a := query_current_arch();
+    outpath: CStr = "./c.out";
+    exe_path := outpath;
+    i := 0;
+    args := cli_args();
+    child_args: []Str = empty();
+    while => i < args.len {
+        if args[i] == "-w" {
+            i += 1;
+            a = .wasm32;
+            exe_path = args[i];
+            outpath = "./c.wasm";
+            child_args = @slice("./c.wasm");
+        }
+        i += 1
+    }
+    
+    outpath: CStr = @if(a == .wasm32, "./c.wasm", "./c.out");
     if JUST_ONE {
-        file := "a.c";
+        file := "function.c";
         path := @tfmt("%/%", tests_folder, file);
-        or compile_one_file(vtable, path) { err |
+        or compile_one_file(vtable, path, a, outpath) { err |
             panic(err);
         };
-        ok, out, err := exec_and_catch("./c.out", empty(), todo_allocator);
+        ok, out, err := exec_and_catch(exe_path.str(), child_args, todo_allocator);
         println(out.items());
         println(err.items());
         exit(int(!ok));
@@ -47,18 +72,17 @@ fn run_tests(vtable: *ImportVTable) void = {
     run_tests_main(Str, files.items(), fn(a) => a[]) { file | 
         yield :: local_return;
         path := @tfmt("%/%", tests_folder, file);
-        or compile_one_file(vtable, path) { err |
+        or compile_one_file(vtable, path, a, outpath) { err |
             yield(false, fixed_list(empty()), err.assume_owned(temp()), "");
         };
-        ok, out, err := exec_and_catch("./c.out", empty(), todo_allocator);
+        ok, out, err := exec_and_catch(exe_path.str(), child_args, todo_allocator);
         ok := ok && out.items().ends_with("OK\n");
         (ok, out, err, "")
     };
 }
 
-fn compile_one_file(vtable: *ImportVTable, path: Str) Result(void, Str) = {
+fn compile_one_file(vtable: *ImportVTable, path: Str, a: Arch, outpath: CStr) Result(void, Str) = {
     m := @uninitialized QbeModule;
-    a := query_current_arch();
     
     m&.C'AstExternal'init_default_module_dyn(vtable, (arch = a, os = query_current_os(), type = .Exe));
     @if(LOG_IR) {
@@ -80,8 +104,7 @@ fn compile_one_file(vtable: *ImportVTable, path: Str) Result(void, Str) = {
     emit_the_code(c&, ctx, prog);
     join_codegen_thread(ctx);
 
-    outpath := "./c.out";
-    outfile := open_trunc(outpath.maybe_borrow_cstr(temp())).unwrap();
+    outfile := open_trunc(outpath).unwrap();
     chunks := {m.target.finish_module}(m&);
     for chunks { chunk | 
         write(outfile&, chunk);

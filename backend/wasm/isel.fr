@@ -26,7 +26,8 @@ fn wasm_isel(f: *Qbe.Fn) void = {
     did_sp_load := false; // :UGLY
     f.slot = align_to(f.slot, 16);
     fslot := f.slot;
-    if (f.slot > 0 || f.dynalloc) {
+    need_sp := f.slot > 0 || f.dynalloc || f.varcall;
+    if need_sp {
         f.retr = f.newtmp("SP", .Kl);
         f.get_temporary(f.retr)[].nuse = 99; // HACK
     } else {
@@ -44,8 +45,7 @@ fn wasm_isel(f: *Qbe.Fn) void = {
         // Last thing before we jump to another block: push phi values to the stack. 
         @match(b.jmp.type) {
             fn ret0() => {
-                xxxxx := (f.slot > 0 || f.dynalloc);
-                if xxxxx && !f.leaf {
+                if need_sp && !f.leaf {
                     f.emit(.global_set, .Kl, QbeNull, stackbase, QbeNull);
                     f.wasm_push(.Kl, saved_stack);
                 };
@@ -66,7 +66,7 @@ fn wasm_isel(f: *Qbe.Fn) void = {
         };
         @debug_assert(b.jmp.arg == QbeNull);
         
-        maybe_sp_load :: fn() => if !did_sp_load && (f.slot > 0 || f.dynalloc) {
+        maybe_sp_load :: fn() => if !did_sp_load && need_sp {
             if !f.leaf {
                 if saved_stack != f.retr {
                     f.emit(.pop, .Kl, saved_stack, QbeNull, QbeNull);
@@ -299,7 +299,7 @@ fn push_slot_addr(f: *Qbe.Fn, k: Qbe.Cls, slot_offset: i32) void = {
     //slot_offset = f.slot - slot_offset;
     // Stack grows downwards and __stack_base points to the bottom of our frame. 
     SP := f.retr;
-    @debug_assert(SP != QbeNull);
+    @debug_assert(SP != QbeNull, "missing SP %", { printfn(f, f.globals.debug_out); "" });
     ins := make_ins(.add, .Kl, QbeNull, SP, f.getcon(slot_offset.intcast()));
     f.sel_wasm(ins&);
 }

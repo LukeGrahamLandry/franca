@@ -27,6 +27,22 @@
 - 57 -> 69. that's all the `.ssa` tests working, with my wasm runtime tho. 
 next step is to make sure they all verify correctly i guess. 
 pretty close: 11 of 69 tests failed.
+- so the question is would i rather do soul crushing truncation adventure or make the c compiler work for wasm? 
+import_c/test/test.fr: 23 of 35 tests failed.
+- confusion about when debug assertions are enabled because when you jit run it uses the compiler's backend to avoid needing to compile it. 
+wasted some time finding where it was asserting because my report_crash wasn't giving me something 
+useful. TODO: maybe it gets confused by having multiple threads? 
+- vararg call always tries to pass something based on SP even if no args actually passed 
+so since f.slot==0, it didn't load SP and then wasm_push_addr asserted. 
+ooo that helped a lot: 8 of 35 tests failed.
+- it's looking like this might just work immediately for free? 
+just adding more libc stuff to import_wasm/run: strcmp/memcmp/memcpy/strncmp/sprintf/vsprintf. 
+1 of 35 tests failed.
+- function.c seems to be the only hard one. there are many (non-overlapping) chunks of calls 
+i can remove that make it work. something doesn't like when a function is too big? 
+but it can't be the backend. most of my programs have some monster functions. 
+maybe im doing leb wrong when a wasm function is too big? but i feel like 
+lengths of data and stuff are always big so that seems unlikely. 
 
 ## (Apr 21) chipping away at wasm tests
 
