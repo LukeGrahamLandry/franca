@@ -27,7 +27,7 @@ the `arg` field has `Binding`s which has a `nullable_tag` field.
 
 - asking the compiler for special treatment without adding new syntax (see builtins below)
 - generating cli help messages (lib/args.fr used by backend/meta/test.fr)
-- adding extra metadata for translating to MSL (graphics/src/shaders.fr used by graphics/src/debug_text.fr)
+- adding extra metadata for translating to MSL (graphics/shaders.fr used by graphics/debug_text.fr)
 - creating a table for a parser that calls a function depending which token it sees (examples/import_c/compile.fr)
 
 ## Syntax Example 
