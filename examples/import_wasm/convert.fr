@@ -137,7 +137,8 @@ fn create_init_func(self: *LoadWasm) u32 = {
         id := self.m.intern(@tfmt("data%$%$", i, self.module_name));
         self.m.emit_data(template = (Bytes = data.bytes.items()), id = id);
         dest := f.newtmp("dat", .Kl);
-        // TODO: this sucks really really bad if we actually emit all the instructions for large blits :ThisSureIsABigBlit
+        // :ThisSureIsABigBlit I AM BAD AT MY JOB
+        // TODO: this sucks really really bad if we actually emit all the instructions for large blits 
         f.emit(.add, .Kl, dest, base, f.getcon(off));
         f.emit(.blit0, .Kw, QbeNull, f.symcon(id), dest);
         f.emit(.blit1, .Kw, QbeNull, INT(data.bytes.len), QbeNull);
@@ -466,7 +467,21 @@ fn emit_the_code(self: *LoadWasm) void = {
             fn Drop() => {
                 self.stack&.pop().expect("stack for store drop");
             }
-            fn Select() => panic("TODO: select");
+            fn Select() => {
+                count := self.read_u();
+                @assert_eq(count, 1, "TODO: multi-value");
+                k := cls(@as(Wasm.ValType) @as(u8) self.src[self.cursor]);
+                self.cursor += 1;
+                @assert(k.is_int(), "TODO: select on floats");
+
+                result := self.f.newtmp("select", k);
+                cond := self.stack&.pop().expect("stack for sel-cond");
+                f := self.stack&.pop().expect("stack for sel-false");
+                t := self.stack&.pop().expect("stack for sel-true");
+                self.f.emit(.sel0, .Kw, QbeNull, cond, QbeNull);
+                self.f.emit(.sel1, k, result, t, f);
+                self.stack&.push(result);
+            }
             @default => @panic("unhandled unstruction %", self.src[self.cursor - 1]);
         }
     }

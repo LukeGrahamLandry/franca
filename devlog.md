@@ -1,3 +1,33 @@
+## (Apr 22)
+
+- mem1.ssa
+  - use the right index for indirect return type
+- call1.ssa
+  - DataAbsolute fixup for function index
+- load1.ssa
+  - wan't calling wasm_push for phi args so if they had an slot assigned from an alloc, 
+    the var was never written to.  
+- fold3.ssa
+  - implement Select in import_wasm
+  - TODO: doesn't pass verifier but works on my runtime
+- dynalloc.ssa
+  - very half-assed implementation of alloca because i never use it
+- strspn.ssa
+  - `bad loop nesting Expected (10 == 9)`
+  - i think im getting screwed by "with the constraint that once a loop starts 
+  all the subsequent blocks must be dominated by the loop header, until all the
+  loop blocks have appeared"
+  - but like the stuff i stole from qbe is already doing a thing about counting 
+  how deeply nested a loop is and using that for the rpo thing if it's been computed 
+  already. is there any chance that's the same as what i want and i just need to call that 
+  and then re-rpo? it seems like yes... test works.
+  hopefully that's real and not just it happened to mix the order around in a way that fixed my one test. 
+- echo.ssa
+  - need to pass it the cli args. untangling u32 vs u64 will be sad if i ever want to run someone else's wasm module. 
+- 57 -> 69. that's all the `.ssa` tests working, with my wasm runtime tho. 
+next step is to make sure they all verify correctly i guess. 
+pretty close: 11 of 69 tests failed.
+
 ## (Apr 21) chipping away at wasm tests
 
 - ops.ssa

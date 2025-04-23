@@ -16,7 +16,7 @@ Args :: @struct {
     l:   bool #help("FIXME") = false;
     w:   bool #help("target wasm32 and run with examples/import_wasm") = false;
     jit: bool #help("don't generate binaries, just run jitted code in memory.") = false;
-    WIPskipfailing: bool = false;
+    verify: bool #help("run wasm2wat to make sure it typechecks") = false;
     paths: []Str #rest = empty();
     d: Str #help("log intermediate representation") = "";
 }
@@ -71,7 +71,6 @@ fn main() void = {
     };
     args.cc = args.cc || args.jit || args.w;  // assume this until i can output linkable wasm
     
-    @assert(!args.WIPskipfailing || arch == .wasm32);
     @assert(!args.x64 || !args.arm, "conflicting arch");
    
     if to_run.is_empty() {
@@ -89,7 +88,6 @@ fn main() void = {
         || (arch != .aarch64 && file.ends_with("-arm.ssa"))
         || (arch != .x86_64 && file.ends_with("-amd.ssa"))
         || (arch == .wasm32 && file.ends_with("-na.ssa"))
-        || (args.WIPskipfailing && expect_fail_on_wasm.contains(fn(it) => file.ends_with(@tfmt("%.ssa", it[]))))  // allocations georg
         ;
         if !skip {
             pass := run_one(args&, file, arch, wasm_runner);
@@ -222,8 +220,10 @@ fn run_one(arg: *Args, file_path: Str, arch: Arch, wasm_runner: ?Str) bool #inli
         run("clang", "link");
     }; // else we have our own codesign implementation so we're done
     @if(!arg.jit) args&.clear();
+    old_exe_path := exe_path;
     if wasm_runner { wasm_runner |
         args&.push(exe_path);
+        args&.push("--");
         exe_path = wasm_runner;
     };
     args&.push_all(@slice("a", "b", "c"));
@@ -252,6 +252,12 @@ fn run_one(arg: *Args, file_path: Str, arch: Arch, wasm_runner: ?Str) bool #inli
         };
     }; 
     d := timestamp();
+    
+    if arg.verify && wasm_runner.is_some() {
+        args&.clear();
+        args&.push(old_exe_path);
+        run("wasm2wat", "verify");
+    }
     if arg.jit {
         @println("[ok] %ms", d - a);
     } else {
@@ -301,11 +307,6 @@ fn skip_line(s: Str) Str = {
         s = s.slice_pop_first();
     }
 }
-
-expect_fail_on_wasm :: @const_slice(
-    "echo", "mem1", "call1", "fold3", "isel4", "load1", "load2",
-    "alias1", "fixup2", "strspn", "dynalloc", "isel5",
-);
 
 #use("@/lib/sys/subprocess.fr");
 #use("@/lib/sys/fs.fr");

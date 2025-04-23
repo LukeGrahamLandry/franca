@@ -191,6 +191,9 @@ fn emit_flow(e: *EmitWasmFn, b: *Qbe.Blk, i: *Qbe.Ins) void = {
     
     if flow == .end {
         s1 := e.block_stack&.pop().unwrap();
+        if !identical(s, s1) {
+            printfn(e.f, e.f.globals.debug_out);
+        };
         @debug_assert(identical(s, s1), "ICE: bad nesting. expected to end @% but found @%\n", s.name(), s1.name());
     };
 }
@@ -231,28 +234,7 @@ fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
             fn RCon() => {
                 c := e.f.get_constant(i.arg&[0]);
                 @match(c.type) {
-                    fn CBits() => {
-                        @match(i.cls()) {
-                            fn Ks() => {
-                                e.op(.F32_Const);
-                                e.a&.reserve_type(f32)[] = c.bits.s.s;
-                            }
-                            fn Kd() => {
-                                e.op(.F64_Const);
-                                e.a&.reserve_type(f64)[] = c.bits.d;
-                            }
-                            fn Kw() => {
-                                e.op(.I32_Const);
-                                i := c.bits.i.intcast().intcast();
-                                leb128_signed(e.a&, i);
-                            }
-                            fn Kl() => {
-                                e.op(.I64_Const);
-                                leb128_signed(e.a&, c.bits.i);
-                            }
-                            @default => unreachable();
-                        };
-                    }
+                    fn CBits() => e.push_bits(c, i.cls());
                     fn CAddr() => {
                         use_symbol(e.m, c.sym.id) { symbol | 
                             // if it's a function address we have to wait until the end to know its index in the table. 
@@ -313,11 +295,32 @@ fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
             e.op(.Select);
             leb128_unsigned(e.a&, 1);  // vector of types
             ::enum(Wasm.ValType);
-            leb128_unsigned(e.a&, to_wasm_type(i.cls()).raw().zext()); 
+            push(e.a&, to_wasm_type(i.cls()).raw()); 
         }
         @default => @panic("TODO: wasm encoding for % %", i.op(), { printfn(e.f, e.f.globals.debug_out); "" });
     };
 }
+
+fn push_bits(e: *EmitWasmFn, c: *Qbe.Con, k: Qbe.Cls) void = @match(k) {
+    fn Ks() => {
+        e.op(.F32_Const);
+        e.a&.reserve_type(f32)[] = c.bits.s.s;
+    }
+    fn Kd() => {
+        e.op(.F64_Const);
+        e.a&.reserve_type(f64)[] = c.bits.d;
+    }
+    fn Kw() => {
+        e.op(.I32_Const);
+        i := c.bits.i.intcast().intcast();
+        leb128_signed(e.a&, i);
+    }
+    fn Kl() => {
+        e.op(.I64_Const);
+        leb128_signed(e.a&, c.bits.i);
+    }
+    @default => unreachable();
+};
 
 fn index_patch(e: *EmitWasmFn, id: u32, _space: Wasm.ImportType) void = {
     use_symbol(e.m, id) { s |
@@ -349,7 +352,16 @@ fn fixup_wasm32(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_re
             @debug_assert_ge(value, 0, "missing index for $%", symbol.name);
             leb128_unsigned(lst&, value);
         }
-        @default => panic("invalid fixup type for wasm");
+        fn DataAbsolute(it) => {
+            if symbol.segment == .Code {
+                @debug_assert(it.increment == 0 && symbol.got_lookup_offset >= 0, "invalid code fixup");
+                i64.ptr_from_raw(fixup.patch_at)[] = symbol.got_lookup_offset;
+            } else {
+                // the symbol's offset already includes :WasmZeroPage
+                i64.ptr_from_raw(fixup.patch_at)[] = symbol.offset + it.increment;
+            }
+        }
+        @default => @panic("invalid fixup type for wasm %", fixup.type&.tag());
     };
 }
 

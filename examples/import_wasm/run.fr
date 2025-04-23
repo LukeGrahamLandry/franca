@@ -12,24 +12,31 @@ fn main() void = {
     logging := "";
     i := 0;
     wasm_file := "";
-    while => i < args.len {
-        arg := args[i].str(); i += 1;
-        if arg == "-d" {
-            @assert_lt(i, args.len, "expected arg after -d");
-            logging = args[i].str(); i += 1;
-        }
-        if arg.ends_with(".wasm") {
-            @assert_eq(wasm_file, "", "can only specify one wasm file to run");
-            wasm_file = arg;
+    if true {
+        break :: local_return;
+        while => i < args.len {
+            arg := args[i].str(); i += 1;
+            if arg == "-d" {
+                @assert_lt(i, args.len, "expected arg after -d");
+                logging = args[i].str(); i += 1;
+            }
+            if arg.ends_with(".wasm") {
+                @assert_eq(wasm_file, "", "can only specify one wasm file to run");
+                wasm_file = arg;
+            }
+            if arg == "--" {
+                break();
+            }
         }
     }
+    args := args.rest(i - 1);  // meh, for now: argv[0] == "--"
     
     #use("@/lib/sys/fs.fr");
     bytes := temp().read_to_string_or_crash(wasm_file).items(); // :panic
-    exec_wasm_file(Exports, bytes, logging);
+    exec_wasm_file(Exports, bytes, logging, args);
 }
 
-fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str) void = {
+fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str, args: []CStr) void = {
     module := QbeModule.zeroed(); m := module&;
     init_default_module(m, (type = .JitOnly, os = query_current_os(), arch = query_current_arch()), false);
     a := libc_allocator;
@@ -44,6 +51,26 @@ fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str) void = {
     buf := page_allocator.alloc(u8, 1.shift_left(32)); // wasm.w.memories[0].min.zext() * wasm_page_size);
     wasm_context_pointer := u8.int_from_ptr(buf.ptr);
     heap_base[] = trunc(buf.len - 1);
+
+    // write the cli arguments into memory the module can access. 
+    // i'm making each entry in argv 8 bytes because then my programs 
+    // that use Kl for pointers don't need to change, but it means 
+    // you probably won't have success using this with anyone else's wasm modules. 
+    argc, argv := {
+        arg_offsets := i64.list(temp());
+        for args { s | 
+            s := s.str();
+            heap_base[] -= align_to(s.len.trunc() + 1, 16);
+            buf.subslice(heap_base[].zext(), s.len).copy_from(s);
+            buf[heap_base[].zext() + s.len] = 0;
+            arg_offsets&.push(heap_base[].zext());
+        };
+        arg_offsets&.push(0);
+        src := arg_offsets.items().interpret_as_bytes();
+        heap_base[] -= align_to(src.len, 16).trunc();
+        buf.subslice(heap_base[].zext(), src.len).copy_from(src);
+        (arg_offsets.len - 1, heap_base[])
+    };
     
     self: LoadWasm = init(m, w&, libc_allocator);
     self&.load_module();
@@ -67,7 +94,7 @@ fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str) void = {
     };
     //@println(">>> Calling %", wasm.m.str(n));
     f := assume_types_fn(Arg = Ty(i64, u32, u32), Ret = i64, ptr = f);
-    result := f(wasm_context_pointer, 1, 0);
+    result := f(wasm_context_pointer, argc.trunc(), argv);
     if result != 0 {
         @eprintln(">>> returned %", result);
     };
@@ -116,9 +143,14 @@ Exports :: @struct {
         abort :: fn(ctx: *u8) void = {
             panic("wasm called abort");
         }
+        exit :: fn(ctx: *u8, status: u32) void = {
+            exit :: fn(s: i64) Never #libc;
+            exit(status.zext());
+        }
     }
 }
 
+// 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 
 // blehhhhh todo
 printf_impl :: fn(ctx: *u8, fmt: u32, args: *i64) u32 = {
     i := 0;
@@ -184,6 +216,17 @@ printf_impl :: fn(ctx: *u8, fmt: u32, args: *i64) u32 = {
                     
                     s: CStr = (ptr = ctx.offset(p));
                     @print("%", s);
+                }
+                // TODO: fix this!! i just dont care rn. 
+                @case("0".ascii()) => {
+                    @assert_eq(ctx.offset(i + fmt.zext()).slice(3), "08x", "HACK to make load2.ssa work");
+                    i += 3;
+                    x := get_arg(u32);
+                    out := u8.list(temp());
+                    range_rev(0, 4) { i |
+                        push_hex_byte(out&, x.shift_right_logical(8*i).trunc(), false);
+                    };
+                    @print("%", out.items());
                 }
                 // TODO: fix this!! i just dont care rn. 
                 @case("#".ascii()) => {

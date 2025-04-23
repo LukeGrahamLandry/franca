@@ -11,6 +11,8 @@
 // TODO: remove redundant push-pop pairs
 // TODO: reorder + flip args to create redundant push-pop pairs
 // TODO: if a local is used again but also by the next instruction, use local.tee
+// TODO: address offset folding 
+// TODO: more tests for dynalloc
 
 fn wasm_isel(f: *Qbe.Fn) void = {
     assign_alloc_slots(f);
@@ -24,11 +26,16 @@ fn wasm_isel(f: *Qbe.Fn) void = {
     did_sp_load := false; // :UGLY
     f.slot = align_to(f.slot, 16);
     fslot := f.slot;
-    if f.slot > 0 {
+    if (f.slot > 0 || f.dynalloc) {
         f.retr = f.newtmp("SP", .Kl);
         f.get_temporary(f.retr)[].nuse = 99; // HACK
     } else {
         f.retr = QbeNull;
+    };
+    saved_stack := f.retr;
+    
+    if f.dynalloc {
+        saved_stack = f.newtmp("BP", .Kl);
     };
     
     for_blocks f { b | 
@@ -37,16 +44,17 @@ fn wasm_isel(f: *Qbe.Fn) void = {
         // Last thing before we jump to another block: push phi values to the stack. 
         @match(b.jmp.type) {
             fn ret0() => {
-                if f.slot > 0 && !f.leaf {
+                xxxxx := (f.slot > 0 || f.dynalloc);
+                if xxxxx && !f.leaf {
                     f.emit(.global_set, .Kl, QbeNull, stackbase, QbeNull);
-                    f.wasm_push(.Kl, f.retr);
+                    f.wasm_push(.Kl, saved_stack);
                 };
             }
             fn hlt() => ();
             fn jmp() => {
                 for_phi b.s1 { p |
                     arg := p.arg.index(index_in_phi(b, p))[];
-                    f.emit(.push, p.cls, QbeNull, arg, QbeNull);
+                    f.wasm_push(p.cls, arg);
                 };
             }
             fn jnz() => {
@@ -58,8 +66,13 @@ fn wasm_isel(f: *Qbe.Fn) void = {
         };
         @debug_assert(b.jmp.arg == QbeNull);
         
-        maybe_sp_load :: fn() => if !did_sp_load && f.slot > 0 {
+        maybe_sp_load :: fn() => if !did_sp_load && (f.slot > 0 || f.dynalloc) {
             if !f.leaf {
+                if saved_stack != f.retr {
+                    f.emit(.pop, .Kl, saved_stack, QbeNull, QbeNull);
+                    f.wasm_push(.Kl, f.retr);
+                };
+            
                 f.emit(.global_set, .Kl, QbeNull, stackbase, QbeNull);
                 f.emit(.sub, .Kl, QbeNull, QbeNull, QbeNull);
                 f.wasm_push(.Kl, f.getcon(f.slot.intcast()));
@@ -207,6 +220,22 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
         return()
     };
 
+    if is_alloc(o) {  // dynamic size alloca
+        // TODO: align THIS IS NOT FINISHED
+        // TODO: this feels about right but i haven't actually thought about it at all and theres only one test that uses it.
+        SP := f.retr;
+        @debug_assert_ne(SP, QbeNull, "ICE: alloca without loading stack");
+        stackbase := f.symcon(f.globals.wasm_symbol_stackbase);
+        f.emit(.global_set, .Kl, QbeNull, stackbase, QbeNull);  // save for callees
+        f.emit(.push, .Kl, QbeNull, SP, QbeNull);
+        f.emit(.push, .Kl, QbeNull, SP, QbeNull);  // result of this inst
+        f.emit(.pop, .Kl, SP, QbeNull, QbeNull);  // save locally
+        i.set_op(.sub);  // decrement sp
+        o = .sub;
+        i.arg&[1] = i.arg&[0];
+        i.arg&[0] = SP;
+    };
+    
     // copy is just push+pop, no actual op
     if o != .copy {
         f.emit(o, i.cls(), QbeNull, QbeNull, QbeNull);
@@ -356,7 +385,18 @@ Flow :: @enum(i64) (end, loop, block, if, else, br, br_if);
 fn wasm_flow(f: *Qbe.Fn) void = {
     fillpreds(f);
     fillrpo(f);
+    fillloop(f);
+    fillrpo(f);
     set_link_from_rpo(f);
+    
+    // dot a.dot -Tsvg > a.svg && open a.svg
+    //@println("digraph{");
+    //for_blocks f { b |
+    //    for_jump_targets b { s |
+    //        @println("\"%  #%  L%\" -> \"%  #%  L%\"", b.name, b.id, b.loop, s.name, s.id, s.loop);
+    //    };
+    //}
+    //@println("}");
     
     ::enum(Flow);
     
@@ -377,13 +417,10 @@ fn wasm_flow(f: *Qbe.Fn) void = {
         b.nins += 1;
     }
     
-    for_blocks f { b |
-        b.visit = -1;
-    };
-    
     fn INT(i: *Qbe.Blk) Qbe.Ref #inline = INT(i.id.intcast());
     fn INT(i: Flow) Qbe.Ref #inline     = INT(i.raw());
 
+    // find the last block that branches backwards to `b`
     end_of_loop :: fn(b: *Qbe.Blk) i32 = {
         eol: i32 = -1;
         for_pred b { p |
@@ -401,9 +438,6 @@ fn wasm_flow(f: *Qbe.Fn) void = {
             // This block is the start of a loop 
             prepend(b, make_ins(.flow, .Kw, QbeNull, INT(Flow.loop), INT(b)));
             loop_stack&.push(entry = b.id, end = eol);
-            s := f.rpo[eol.intcast()]&;
-            @debug_assert_eq(s.visit, @as(i32) -1, "ICE: hoping that you're only ever the end of one loop");
-            s.visit = b.id;
         };
         
         invert_cond := b.jmp.type == .jnz && b.s1.id == b.id + 1;
@@ -459,12 +493,10 @@ fn wasm_flow(f: *Qbe.Fn) void = {
             push(b, make_ins(.flow, .Kw, QbeNull, INT(br), dest));
         };
         
-        if b.visit != -1 {
+        while => loop_stack.len > 0 && loop_stack[loop_stack.len - 1].end == b.id {
             // insert the end of a loop
-            push(b, make_ins(.flow, .Kw, QbeNull, INT(Flow.end), INT(b.visit.intcast())));
             l := loop_stack&.pop().unwrap();
-            @debug_assert_eq(l.end, b.id, "ICE: bad loop nesting %", { printfn(f, f.globals.debug_out); "" });
-            @debug_assert_eq(l.entry, b.visit, "ICE: bad loop nesting");
+            push(b, make_ins(.flow, .Kw, QbeNull, INT(Flow.end), INT(l.entry.intcast()))); 
         };
     };
 }
