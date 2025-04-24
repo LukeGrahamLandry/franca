@@ -33,6 +33,19 @@ which is starting to sound slow for such a niche usecase).
 and gives you junk (that's not 0 or 1) when `common()` uses `#unsafe_noop_cast`. 
 rn you're supposed to need a redundant `[]` in a call like that. TODO!
 - ayy window on the screen!
+- very long time on ok so most of the events work but nothings drawing on the screen. 
+hmmm, thats weird, updateTrackingAreas has a panic in it but it isn't getting 
+called even tho i call it directly. oh fucker. i register the method `updateTrackingAreas:`
+which is not the same as `updateTrackingAreas` (has no argument so no `:`). 
+so now that gets called and i get mouse enter/leave events, still no drawing tho. 
+- ten thousand years of trying to make it actually draw. like i have no recourse 
+when it just does nothing. i guess i can just keep making other stuff work and see if it 
+comes to me. 
+- if i turn on high_dpi i get `MTLTextureDescriptor has width of zero. MTLTextureDescriptor has height of zero`,
+hmm, im reading backingScaleFactor as a f32 instead of f64. 
+now no crash but still no drawing... 
+aaaaaaaaaaaaaaa same for setContentsScale, needs to be f64.
+criiiiiii, now it works!
 
 ## (Apr 22)
 

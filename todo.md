@@ -18,6 +18,12 @@
 %�%.104 =w pop
 - fast memcpy (need to deal with fallback when not linking a libc)
 
+## compiler bug
+
+- `@debug_assert(macos.common().valid, "not valid");` compiles 
+and gives you junk (that's not 0 or 1) when `common()` uses `#unsafe_noop_cast`. 
+rn you're supposed to need a redundant `[]` in a call like that. 
+
 ## cross compiling
 
 - graphics: the build_for_graphics driver function dlopens a bunch of macos stuff
@@ -104,6 +110,7 @@ the right/fast/safe/whatever thing to do is also the easy thing to do.
 - it would be nice if the backend did a bit of typechecking when you were 
 targetting wasm so it could give you the errors instead of producing a program 
 that fails the wasm verifier
+- comptime thing to generate SgShaderDesc
 
 ## cleanup 
 
@@ -285,7 +292,6 @@ has the numbers in the right order at least. rust has my problem too `[[Symbol; 
 
 ##
 
-- graphics: finish updating documentation to not use c syntax
 - translate a more serious subset of my language into the shader languages
 - use []u8 and interpret_as_bytes instead of SgRange
 - :GfxLogging
