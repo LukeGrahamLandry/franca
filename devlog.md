@@ -1,3 +1,39 @@
+## (Apr 23/24)
+
+- stop copy pasting around the driver that links the graphics libraries. 
+i still want to think of a nicer way to deal with it 
+but just pasting it around in protest is silly. 
+- resurrect my previous attempt at porting sokol_app from objective c
+- app example program that just shows all the events 
+- doing an insane waste of time dance to smuggle the pointer 
+through an objc instance variable because i've been brain washed that static variables are bad, 
+even though you'd probably never have multiple app contexts anyway (i assume there's a more sane 
+way to have multiple windows if that's all you need). 
+- 
+```
+2025-04-24 02:12:34.808 franca[17698:5068346] *** NSForwarding: warning: object 0x6000011d84e0 of class 'FrancaView' does not implement methodSignatureForSelector: -- trouble ahead
+2025-04-24 02:12:34.808 franca[17698:5068346] *** NSForwarding: warning: object 0x6000011d84e0 of class 'FrancaView' does not implement doesNotRecognizeSelector: -- abort
+```
+that means you didn't extend NSObject (or anything because everything extends NSObject). 
+happened because i tried to extend something before getting that class so passed nil as my super. 
+- the thing were you can send any message to nil and just get nil back with no error 
+message is kinda ass actually. like please just crash and burn and tell me whats wrong. 
+like oh you typed `@objc macos.window.alloc();` instead of `macos.window = @objc c.MyWindow.alloc()`
+that's not an error, thats actually fine, no window tho, good luck with that. 
+at least in normal c every little mistake makes you segfault and a debugger can 
+tell you where it happened.
+- objc_msgSendSuper isn't magic. you need to tell it what point in the chain you are. 
+- it's a bit scarry that i never use the _stret versions of objc_msgSend. 
+it's very possible i've just gotten lucky so far cause most things are just `id` anyway. 
+the meta lesson here is it would be super cool if DriverMessage::EmitDataEnd
+were easy enough to use that it would be feasable to check
+(but i guess that would need it to send you a message in the middle of doing abi stuff 
+which is starting to sound slow for such a niche usecase). 
+- ooo! compiler bug. `@debug_assert(macos.common().valid, "not valid");` compiles 
+and gives you junk (that's not 0 or 1) when `common()` uses `#unsafe_noop_cast`. 
+rn you're supposed to need a redundant `[]` in a call like that. TODO!
+- ayy window on the screen!
+
 ## (Apr 22)
 
 - mem1.ssa

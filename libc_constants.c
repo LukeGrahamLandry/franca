@@ -21,6 +21,13 @@
 #include <errno.h>
 
 #include <sys/utsname.h>
+#include <AppKit/AppKit.h>
+#include <Metal/Metal.h>
+#include <MetalKit/MetalKit.h>
+#include <CoreGraphics/CoreGraphics.h>
+#include <QuartzCore/QuartzCore.h>
+#include <objc/runtime.h>
+#include <objc/message.h>
 
 int main() {
   // TODO: this should be a bitflag. presumably PROT_NONE is always 0.

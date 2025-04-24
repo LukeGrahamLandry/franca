@@ -1,0 +1,612 @@
+// cross-platform application wrapper
+// Adapted from sokol_app.h - https://github.com/floooh/sokol
+// zlib/libpng license. Copyright (c) 2018 Andre Weissflog.
+// 
+// Changes from Sokol:
+// - removed builtin default app icon
+// - just use the fields for 
+//   sapp_request_quit, sapp_cancel_quit, sapp_quit, sapp_consume_event, 
+//   sapp_get_mouse_cursor, sapp_mouse_locked, sapp_mouse_shown, sapp_is_fullscreen, 
+//   sapp_sample_count, sapp_frame_count, sapp_query_desc, sapp_userdata, sapp_isvalid, 
+//   sapp_dpi_scale, sapp_keyboard_shown, sapp_get_num_dropped_files
+
+Macos :: import("@/graphics/macos/app.fr");
+
+max_icon_images :: 8;
+
+Event :: @struct(
+    frame_count: u64,
+    type: EventType,
+    key_code: Keycode,
+    char_code: u32,
+    key_repeat: bool,
+    modifiers: Modifiers,
+    mouse_button: Mousebutton,
+    mouse_x: f32,
+    mouse_y: f32,
+    mouse_dx: f32,
+    mouse_dy: f32,
+    scroll_x: f32,
+    scroll_y: f32,
+    window_width: i64,
+    window_height: i64,
+    framebuffer_width: i64,
+    framebuffer_height: i64,
+);
+Desc :: @struct(
+    init_cb: @FnPtr(userdata: rawptr) void,
+    frame_cb: @FnPtr(userdata: rawptr) void,
+    cleanup_cb: @FnPtr(userdata: rawptr) void = fn(_) = (),
+    event_cb: @FnPtr(userdata: rawptr, event: *Event) void,
+    user_data: rawptr,
+    width: i32 = 640,
+    height: i32 = 480,
+    sample_count: i32 = 1,
+    swap_interval: i32 = 1,
+    high_dpi := false,
+    fullscreen := false,
+    alpha := false,
+    window_title: CStr = "Untitled Window",
+    enable_clipboard := false,
+    clipboard_size: i32 = 8192,
+    enable_dragndrop := false,
+    max_dropped_files: i32 = 1,
+    max_dropped_file_path_length: i32 = 2048,
+    icon := IconDesc.zeroed(),
+    allocator: Alloc,
+);
+ImageDesc :: @struct(
+    width: i32,
+    height: i32,
+    pixels: []u8,
+);
+IconDesc :: @struct(
+    sokol_default: bool,
+    images: Array(ImageDesc, 8),
+);
+Common :: @rec @struct(
+    // For personal sanity, it feels better if this struct is the same size on all target platforms. 
+    // But we still statically know what type it will be because you're only targetting one platform at a time. 
+    // SAFETY: This must stay the first field! 
+    impl_storage: @union(macos: Macos.Impl, todo: i64),
+    desc: Desc,
+    valid: bool,
+    fullscreen: bool,
+    first_frame: bool,
+    init_called: bool,
+    cleanup_called: bool,
+    quit_requested: bool,
+    quit_ordered: bool,
+    event_consumed: bool,
+    onscreen_keyboard_shown: bool,
+    window_width: i64,
+    window_height: i64,
+    framebuffer_width: i64,
+    framebuffer_height: i64,
+    sample_count: i64,
+    swap_interval: i64,
+    dpi_scale: f32,
+    frame_count: i64,
+    timing: Timing,
+    event: Event,
+    mouse: Mouse,
+    clipboard: Clipboard,
+    drop: Drop,
+    default_icon_desc: IconDesc,
+    // For most platforms, this is just some constant data. 
+    keycodes: []Keycode,
+);
+Clipboard :: @struct(
+    enabled: bool,
+    buffer: []u8,
+);
+Drop :: @struct(
+    enabled: bool,
+    max_files: i64,
+    max_path_length: i64,
+    num_files: i64,
+    buffer: []u8,
+);
+Mouse :: @struct(
+    x: f32,
+    y: f32,
+    dx: f32,
+    dy: f32,
+    shown: bool,
+    locked: bool,
+    pos_valid: bool,
+    current_cursor: MouseCursor,
+);
+Timing :: void; // TODO
+
+// SAFETY: impl_storage is the first field so the pointers are interchangeable. 
+fn impl(s: *Common) *Macos.Impl = ptr_cast_unchecked(Common, Macos.Impl, s);
+fn common(s: *Macos.Impl) *Common = ptr_cast_unchecked(Macos.Impl, Common, s);
+
+fn call_init(sapp: *Common) void = {
+    sapp'desc'init_cb(sapp.desc.user_data);
+    sapp.init_called = true;
+}
+
+fn call_frame(sapp: *Common) void = {
+    if(!sapp.init_called || sapp.cleanup_called, => return()); 
+    sapp'desc'frame_cb(sapp.desc.user_data);
+}
+
+fn call_cleanup(sapp: *Common) void = {
+    if(sapp.cleanup_called, => return());
+    sapp'desc'cleanup_userdata_cb(sapp.desc.user_data);
+    sapp.cleanup_called = true;
+}
+
+fn call_event(sapp: *Common, e: *Event) bool = {
+    if !sapp.cleanup_called {
+        sapp'desc'event_cb(sapp.desc.user_data, e);
+    };
+    prev := sapp.event_consumed;
+    sapp.event_consumed = false;
+    prev
+}
+
+fn dropped_file_path_ptr(sapp: *Common, idx: i64) Str = {
+    @debug_assert(sapp.drop.buffer);
+    @debug_assert(index >= 0 && index <= sapp.drop.max_files);
+    offset := index * sapp.drop.max_path_length;
+    @debug_assert(offset < sapp.drop.buf_size);
+    return &sapp.drop.buffer[offset];
+}
+
+fn init_state(sapp: *Common, desc: *Desc) void = {
+    @debug_assert(desc.width >= 0);
+    @debug_assert(desc.height >= 0);
+    @debug_assert(desc.sample_count >= 0);
+    @debug_assert(desc.swap_interval >= 0);
+    @debug_assert(desc.clipboard_size >= 0);
+    @debug_assert(desc.max_dropped_files >= 0);
+    @debug_assert(desc.max_dropped_file_path_length >= 0);
+    ::[]Common;
+    sapp.slice(1).set_zeroed();  // CLEAR_ARC_STRUCT
+    sapp.desc = desc[];
+    sapp.first_frame = true;
+    // NOTE: sapp.desc.width/height may be 0! Platform backends need to deal with this
+    sapp.window_width = sapp.desc.width.intcast();
+    sapp.window_height = sapp.desc.height.intcast();
+    sapp.framebuffer_width = sapp.window_width;
+    sapp.framebuffer_height = sapp.window_height;
+    sapp.sample_count = sapp.desc.sample_count.intcast();
+    sapp.swap_interval = sapp.desc.swap_interval.intcast();
+    @debug_assert(SOKOL_BACKEND.is_metal(), "TODO: copy html5_canvas_selector to buffer. html5_ask_leave_site");
+    sapp.clipboard.enabled = sapp.desc.enable_clipboard;
+    @assert(!sapp.desc.enable_clipboard, "TODO: enable_clipboard");
+    // TODO
+    //if sapp.clipboard.enabled {
+    //    sapp.clipboard.buf_size = sapp.desc.clipboard_size;
+    //    sapp.clipboard.buffer = (char*) sapp.malloc_clear((size_t)sapp.clipboard.buf_size);
+    //}
+    sapp.drop.enabled = sapp.desc.enable_dragndrop;
+    @assert(!sapp.drop.enabled, "TODO: enable_dragndrop");
+    //if (sapp.drop.enabled) {
+    //    sapp.drop.max_files = sapp.desc.max_dropped_files;
+    //    sapp.drop.max_path_length = sapp.desc.max_dropped_file_path_length;
+    //    sapp.drop.buf_size = sapp.drop.max_files * sapp.drop.max_path_length;
+    //    sapp.drop.buffer = (char*) sapp.malloc_clear((size_t)sapp.drop.buf_size);
+    //}
+    @assert(sapp.desc.window_title.str().len() == 0, "TODO: window_title");
+    //sapp.strcpy(sapp.desc.window_title, sapp.window_title, sizeof(sapp.window_title));
+    //sapp.desc.window_title = sapp.window_title;
+    sapp.dpi_scale = 1.0;
+    sapp.fullscreen = sapp.desc.fullscreen;
+    sapp.mouse.shown = true;
+    // TODO: timing
+    //sapp.timing_init(sapp.timing&);
+}
+
+fn discard_state(sapp: *Common) void = {
+    if (sapp.clipboard.enabled) {
+        @debug_assert(sapp.clipboard.buffer);
+        sapp.free((void*)sapp.clipboard.buffer);
+    }
+    if (sapp.drop.enabled) {
+        @debug_assert(sapp.drop.buffer);
+        sapp.free((void*)sapp.drop.buffer);
+    }
+    sapp.CLEAR_ARC_STRUCT(sapp.t, _sapp);
+}
+
+fn init_event(sapp: *Common, type: EventType) void = {
+    e := sapp.event&;
+    ::[]Event;
+    e.slice(1).set_zeroed();
+    e.type = type;
+    e.frame_count = sapp.frame_count.bitcast();
+    e.mouse_button = .INVALID;
+    e.window_width = sapp.window_width;
+    e.window_height = sapp.window_height;
+    e.framebuffer_width = sapp.framebuffer_width;
+    e.framebuffer_height = sapp.framebuffer_height;
+    e.mouse_x = sapp.mouse.x;
+    e.mouse_y = sapp.mouse.y;
+    e.mouse_dx = sapp.mouse.dx;
+    e.mouse_dy = sapp.mouse.dy;
+}
+
+fn events_enabled(sapp: *Common) bool = sapp.init_called;
+
+SAPP_MAX_KEYCODES :: 512; 
+
+fn translate_key(sapp: *Common, scan_code: i64) Keycode = {
+    ok := scan_code >= 0 && scan_code < SAPP_MAX_KEYCODES;
+    if(!ok, => return(.INVALID));
+    sapp.keycodes[scan_code]
+}
+
+fn clear_drop_buffer(sapp: *Common) void = {
+    if (sapp.drop.enabled) {
+        @debug_assert(sapp.drop.buffer);
+        sapp.clear(sapp.drop.buffer, (size_t)sapp.drop.buf_size);
+    }
+}
+
+fn frame(sapp: *Common) void = {
+    if (sapp.first_frame) {
+        sapp.first_frame = false;
+        sapp.call_init();
+    }
+    sapp.call_frame();
+    sapp.frame_count += 1;
+}
+
+fn image_validate(desc: *ImageDesc) bool = {
+    @debug_assert(desc.width > 0);
+    @debug_assert(desc.height > 0);
+    @debug_assert(desc.pixels.ptr != 0);
+    @debug_assert(desc.pixels.size > 0);
+    const size_t wh_size = (size_t)(desc.width * desc.height) * sizeof(uint32_t);
+    ok := wh_size == desc.pixels.size;
+    @if(!ok) sapp.ERROR(IMAGE_DATA_SIZE_MISMATCH);
+    ok
+}
+
+fn image_bestmatch(image_descs: []ImageDesc, num_images: i64, width: i64, height: i64) i64 = {
+    least_diff := 0x7FFFFFFF;
+    least_index := 0;
+    range(0, num_images) { i |
+        diff := (image_descs[i].width * image_descs[i].height) - (width * height);
+        if diff < 0 {
+            diff = -diff;
+        };
+        if diff < least_diff {
+            least_diff = diff;
+            least_index = i;
+        };
+    };
+    least_index
+}
+
+fn icon_num_images(desc: *IconDesc) i64 = {
+    range(0, SAPP_MAX_ICONIMAGES) { i |
+        if desc.images[i].pixels.ptr.is_null() {
+            return(i);
+        }
+    };
+    SAPP_MAX_ICONIMAGES
+}
+
+// TODO
+fn validate_icon_desc(desc: *IconDesc, num_images: i64) bool = {/*
+    @debug_assert(num_images <= SAPP_MAX_ICONIMAGES);
+    for (int i = 0; i < num_images; i++) {
+        img_desc := desc.images[i]&;
+        if (!sapp.image_validate(img_desc)) {
+            return false;
+        }
+    };*/
+    true
+}
+
+fn run(sapp: *Common, desc: Desc) Never = {
+    sapp.init_state(desc&);
+    sapp.keycodes = sapp.impl().keytable();
+    sapp.impl().run(sapp.desc&)
+}
+
+fn frame_duration(sapp: *Common) f64 = {
+    sapp.timing_get_avg(sapp.timing&)
+}
+
+fn color_format(sapp: *Common) SgPixelFormat = {
+    @debug_assert(SOKOL_BACKEND.is_metal());
+    .BGRA8
+}
+
+fn depth_format(sapp: *Common) SgPixelFormat = {
+    .DEPTH_STENCIL
+}
+
+fn high_dpi(sapp: *Common) bool = {
+    sapp.desc.high_dpi && sapp.dpi_scale >= 1.5
+}
+
+fn show_keyboard(sapp: *Common, show: bool) void = {
+    // mobile only
+}
+
+fn toggle_fullscreen(sapp: *Common) void = {
+    sapp.macos_toggle_fullscreen();
+}
+
+/* NOTE that sapp_show_mouse() does not "stack" like the Win32 or macOS API functions! */
+fn show_mouse(sapp: *Common, show: bool) void = {
+    if sapp.mouse.shown != show {
+        sapp.macos_update_cursor(sapp.mouse.current_cursor, show);
+    };
+    sapp.mouse.shown = show;
+}
+
+fn lock_mouse(sapp: *Common, lock: bool) void = {
+    sapp.macos_lock_mouse(lock);
+}
+
+fn set_mouse_cursor(sapp: *Common, cursor: MouseCursor) void = {
+    if sapp.mouse.current_cursor != cursor {
+        sapp.macos_update_cursor(cursor, sapp.mouse.shown);
+    };
+    sapp.mouse.current_cursor = cursor;
+}
+
+/* NOTE: on HTML5, sapp_set_clipboard_string() must be called from within event handler! */
+fn set_clipboard_string(sapp: *Common, str: Str) void = {
+    if(!sapp.clipboard.enabled, => return());
+    sapp.macos_set_clipboard_string(str);
+    sapp.strcpy(str, sapp.clipboard.buffer, sapp.clipboard.buf_size);
+}
+
+fn get_clipboard_string(sapp: *Common) Str = {
+    if(!sapp.clipboard.enabled, => return(""));
+    sapp.impl().get_clipboard_string()
+}
+
+fn set_window_title(sapp: *Common, title: Str) void = {
+    sapp.strcpy(title, sapp.window_title, sizeof(sapp.window_title));
+    sapp.macos_update_window_title();
+}
+
+fn set_icon(sapp: *Common, desc: *IconDesc) void = {
+    num_images := icon_num_images(desc);
+    if(num_images == 0, => return());
+    @debug_assert(num_images > 0 && num_images <= max_icon_images);
+    if(!validate_icon_desc(desc, num_images), => return());
+    sapp.impl().set_icon(desc, num_images);
+}
+
+fn get_dropped_file_path(sapp: *Common, idx: i64) Str = {
+    @panic("TODO: get_dropped_file_path");
+    //@debug_assert(sapp.drop.enabled);
+    //@debug_assert(idx >= 0 && idx < sapp.drop.num_files);
+    //@debug_assert(sapp.drop.buffer);
+    //if(!sapp.drop.enabled, => return("")); 
+    //if(idx < 0 || idx >= sapp.drop.max_files, => return("")); 
+    //return (const char*) sapp.dropped_file_path_ptr(idx);
+}
+
+fn width(sapp: *Common) i64 = sapp.framebuffer_width;
+fn height(sapp: *Common) i64 = sapp.framebuffer_height;
+
+// sokol_glue.h -- glue helper functions for sokol headers
+fn sglue_environment(sapp: *Common) SgEnvironment = {
+    env := zeroed SgEnvironment;
+    env.defaults.color_format = sapp.color_format();
+    env.defaults.depth_format = sapp.depth_format();
+    env.defaults.sample_count = sapp.sample_count.intcast();
+    env.metal.device = sapp.impl().metal_get_device();
+    // TODO: update for d3d11/wgpu
+    @debug_assert(SOKOL_BACKEND.is_metal());
+    env
+}
+
+// sokol_glue.h -- glue helper functions for sokol headers
+fn sglue_swapchain(sapp: *Common) SgSwapchain = {
+    swapchain := zeroed SgSwapchain;
+    swapchain.width = sapp.width().intcast();
+    swapchain.height = sapp.height().intcast();
+    swapchain.sample_count = sapp.sample_count.intcast();
+    swapchain.color_format = sapp.color_format();
+    swapchain.depth_format = sapp.depth_format();
+    swapchain.metal.current_drawable = sapp.impl().metal_get_current_drawable();
+    swapchain.metal.depth_stencil_texture = sapp.impl().metal_get_depth_stencil_texture();
+    swapchain.metal.msaa_color_texture = sapp.impl().metal_get_msaa_color_texture();
+    // TODO: update for d3d11/wgpu/gl
+    @debug_assert(SOKOL_BACKEND.is_metal());
+    swapchain
+}
+
+//
+// The rest is just very long enums
+//
+
+EventType :: @enum(i32) (
+    INVALID,
+    KEY_DOWN,
+    KEY_UP,
+    CHAR,
+    MOUSE_DOWN,
+    MOUSE_UP,
+    MOUSE_SCROLL,
+    MOUSE_MOVE,
+    MOUSE_ENTER,
+    MOUSE_LEAVE,
+    TOUCHES_BEGAN,
+    TOUCHES_MOVED,
+    TOUCHES_ENDED,
+    TOUCHES_CANCELLED,
+    RESIZED,
+    ICONIFIED,
+    RESTORED,
+    FOCUSED,
+    UNFOCUSED,
+    SUSPENDED,
+    RESUMED,
+    QUIT_REQUESTED,
+    CLIPBOARD_PASTED,
+    FILES_DROPPED,
+);
+Mousebutton :: @enum(i32) (
+    LEFT = 0,
+    RIGHT = 1,
+    MIDDLE = 2,
+    INVALID = 256,
+);
+MouseCursor :: @enum(i32) (
+    DEFAULT,
+    ARROW,
+    IBEAM,
+    CROSSHAIR,
+    POINTING_HAND,
+    RESIZE_EW,
+    RESIZE_NS,
+    RESIZE_NWSE,
+    RESIZE_NESW,
+    RESIZE_ALL,
+    NOT_ALLOWED,
+);
+Modifiers :: @(import("@/lib/bit_fields.fr").bit_fields)(
+    shift        := 1,
+    control      := 1,
+    alt          := 1,
+    super        := 1,
+    left_mouse   := 1,
+    right_mouse  := 1,
+    middle_mouse := 1,
+    _ := 25,
+);
+LogItem :: @enum(i32) (
+    OK,
+    MALLOC_FAILED,
+    MACOS_INVALID_NSOPENGL_PROFILE,
+    IMAGE_DATA_SIZE_MISMATCH,
+    DROPPED_FILE_PATH_TOO_LONG,
+    CLIPBOARD_STRING_TOO_BIG,
+);
+Keycode :: @enum(u16) (
+    INVALID = 0,
+    SPACE = 32,
+    APOSTROPHE = 39,
+    COMMA = 44,
+    MINUS = 45,
+    PERIOD = 46,
+    SLASH = 47,
+    _0 = 48,
+    _1 = 49,
+    _2 = 50,
+    _3 = 51,
+    _4 = 52,
+    _5 = 53,
+    _6 = 54,
+    _7 = 55,
+    _8 = 56,
+    _9 = 57,
+    SEMICOLON = 59,
+    EQUAL = 61,
+    A = 65,
+    B = 66,
+    C = 67,
+    D = 68,
+    E = 69,
+    F = 70,
+    G = 71,
+    H = 72,
+    I = 73,
+    J = 74,
+    K = 75,
+    L = 76,
+    M = 77,
+    N = 78,
+    O = 79,
+    P = 80,
+    Q = 81,
+    R = 82,
+    S = 83,
+    T = 84,
+    U = 85,
+    V = 86,
+    W = 87,
+    X = 88,
+    Y = 89,
+    Z = 90,
+    LEFT_BRACKET = 91,
+    BACKSLASH = 92,
+    RIGHT_BRACKET = 93,
+    GRAVE_ACCENT = 96,
+    WORLD_1 = 161,
+    WORLD_2 = 162,
+    ESCAPE = 256,
+    ENTER = 257,
+    TAB = 258,
+    BACKSPACE = 259,
+    INSERT = 260,
+    DELETE = 261,
+    RIGHT = 262,
+    LEFT = 263,
+    DOWN = 264,
+    UP = 265,
+    PAGE_UP = 266,
+    PAGE_DOWN = 267,
+    HOME = 268,
+    END = 269,
+    CAPS_LOCK = 280,
+    SCROLL_LOCK = 281,
+    NUM_LOCK = 282,
+    PRINT_SCREEN = 283,
+    PAUSE = 284,
+    F1 = 290,
+    F2 = 291,
+    F3 = 292,
+    F4 = 293,
+    F5 = 294,
+    F6 = 295,
+    F7 = 296,
+    F8 = 297,
+    F9 = 298,
+    F10 = 299,
+    F11 = 300,
+    F12 = 301,
+    F13 = 302,
+    F14 = 303,
+    F15 = 304,
+    F16 = 305,
+    F17 = 306,
+    F18 = 307,
+    F19 = 308,
+    F20 = 309,
+    F21 = 310,
+    F22 = 311,
+    F23 = 312,
+    F24 = 313,
+    F25 = 314,
+    KP_0 = 320,
+    KP_1 = 321,
+    KP_2 = 322,
+    KP_3 = 323,
+    KP_4 = 324,
+    KP_5 = 325,
+    KP_6 = 326,
+    KP_7 = 327,
+    KP_8 = 328,
+    KP_9 = 329,
+    KP_DECIMAL = 330,
+    KP_DIVIDE = 331,
+    KP_MULTIPLY = 332,
+    KP_SUBTRACT = 333,
+    KP_ADD = 334,
+    KP_ENTER = 335,
+    KP_EQUAL = 336,
+    LEFT_SHIFT = 340,
+    LEFT_CONTROL = 341,
+    LEFT_ALT = 342,
+    LEFT_SUPER = 343,
+    RIGHT_SHIFT = 344,
+    RIGHT_CONTROL = 345,
+    RIGHT_ALT = 346,
+    RIGHT_SUPER = 347,
+    MENU = 348,
+);

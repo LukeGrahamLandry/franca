@@ -438,64 +438,7 @@ fn main() void = {
     sapp_run(desc&);
 }
 
-SOKOL_MACOS_LINK_ARGS :: @array("-framework", "Metal", "-framework", "MetalKit", "-framework", "Cocoa", "-framework", "QuartzCore");
-
-// TODO: test that all the functions that appear in the generated bindings are in the dylib. 
-//       ie. right now the imgui ones won't be because i haven't added that to SOKOL_C yet. -- Jul 4
-// TODO: when my c_bindgen works, stop using sokol_zig, and write out the header interdependencies for which you have to include first. 
-//       or really I guess one big generate off the same c file you'd compile makes more sense? 
-//       also write test that diffs against the old one so they don't change unexpectedly.
-// TODO: make it easy to pass -DNDEBUG for release builds. 
-
-fn driver(vtable: *ImportVTable) void #export = {    
-    #use("@/lib/sys/fs.fr");
-    src := "#include_std(\"lib/core.fr\");".clone(temp());
-    the_code := temp().read_to_string_or_crash("examples/farm_game.fr");  // TODO: don't depend on cwd.
-    src&.push_all(the_code.items());
-    
-    opts := vtable.default_build_options();
-    opts.retain_function_names = true;
-    comp := vtable.new_with_src(src.items(), opts);
-    c := vtable.with(comp);
-    
-    libs := c.empty_libs();
-    //libs&.intercept_imports();
-    libs&.add_lib(sokol_macos_lib);
-    
-    main_sym := {vtable.intern_string}(comp, "main");
-    main_f := {vtable.find_unique_func}(comp, main_sym).unwrap();
-    
-    want_jit := false;
-    for cli_args() { a |
-        want_jit = want_jit || a == "-jit";
-    };
-    if want_jit {
-        ptr := c.get_jitted(main_f);
-        f := assume_types_fn(Arg = void, Ret = void, ptr = ptr);
-        f();
-        exit(0);
-    };
-    println("Created an AOT executable. Pass -jit to run in the comptime-jit instead");
-   
-    #use("@/compiler/ast_external.fr", "@/lib/sys/subprocess.fr");
-    m := QbeModule.zeroed();
-    init_default_module_dyn(m&, vtable, (arch = query_current_arch(), os = .macos, type = .Relocatable));  // :HardcodeOs
-    ir_text := emit_qbe_included_dyn(m&, c&, @slice(main_f), .WrapMain);
-    
-    out := open_trunc("farm.o").unwrap();
-    for(ir_text&){ bucket |
-        out&.write(bucket);
-    };
-    out.close();
-    // TODO: get these from the lib. 
-    a := SOKOL_MACOS_LINK_ARGS;
-    args := libs&.get_aot_objects();
-    args&.push_all(a&.items());
-    args&.push_all(@slice ("farm.o", "-o", "farm.out"));   
-    args&.push_all(@slice ("-target", target_triple(m.goal.arch, m.goal.os)));   
-    @println("building aot exe: %", args.items());
-    success := run_cmd_blocking("clang", args.items());
-    assert(success, "clang failed");
-}
+fn driver(vtable: *ImportVTable) void = 
+    build_for_graphics(vtable, "examples/farm_game.fr"); 
 
 #include_std("backend/lib.fr");

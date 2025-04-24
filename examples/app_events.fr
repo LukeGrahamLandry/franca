@@ -1,0 +1,166 @@
+// 
+// Example of how to use graphics/app.fr 
+// Opens a window and reports all the events it receives 
+//
+
+#include_std("graphics/lib.fr");
+
+State :: @struct(
+    pass_action: SgPassAction,
+    text: Sdtx.Common,
+    app: Sapp.Common,
+    env: rawptr,
+    lines: List(List(u8)),
+);
+
+do_init :: fn(userdata: rawptr) void = {
+    state := State.ptr_from_raw(userdata);
+    set_dynamic_context(state.env);
+    
+    desc := SgDesc.zeroed();
+    desc.environment = state.app&.sglue_environment();
+    desc.logger.func = slog_func;
+    sg_setup(desc&);
+    
+    a := general_allocator();
+    desc: Sdtx.Desc = (
+        allocator = a,
+        context = (),
+    );
+    desc.fonts&[0] = Sdtx.font.cpc;
+    
+    sdtx_setup(state.text&, desc&);
+    
+    state.pass_action.colors&[0].load_action = .CLEAR;
+    state.pass_action.colors&[0].clear_value = (r = 0.156, g = 0.156, b = 0.156, a = 1);
+    
+    N :: 50;
+    state.lines = List(u8).list(N, a);
+    range(0, N) { i |
+        state.lines&.push(u8.list(a));
+    };
+};
+
+do_render :: fn(userdata: rawptr) void = {
+    state := State.ptr_from_raw(userdata);
+    set_dynamic_context(state.env);
+    mark := mark_temporary_storage();
+    sapp := state.app&;
+    
+    sdtx := state.text.default_context&;
+    sdtx.color = pack_rgba(235, 219, 178, 255);
+    sdtx.canvas(sapp.width().float().div(1.75).cast(), sapp.height().float().div(1.75).cast());
+    
+    sdtx.pos.y = 0;
+    each_rev state.lines& { it |
+        sdtx.pos.x = 0;
+        sdtx.put(it.items()); 
+        sdtx.pos.y += 1;
+    };
+    
+    desc := SgPass.zeroed();
+    desc.action = state.pass_action;
+    desc.swapchain = sapp.sglue_swapchain();
+    desc.swapchain.width = sapp.width().intcast();
+    desc.swapchain.height = sapp.height().intcast();
+    sg_begin_pass(desc&);
+    
+    sdtx := state.text.default_context&;
+    sdtx.draw_layer(0);
+    
+    sg_end_pass();
+    sg_commit();
+    reset_temporary_storage(mark);
+};
+
+fn fmt_event(out: *List(u8), event: *Sapp.Event, sapp: *Sapp.Common) void = {
+    @fmt(out, "% ", event.type);
+    
+    if @is(event.type, .KEY_DOWN, .KEY_UP) {
+        @fmt(out, "% ", event.key_code);
+        F :: (@type event.modifiers).Wide.Fields();
+        ::enum(F);
+        inline_for_enum F { $it |
+            if event.modifiers.get(it[]) != 0 {
+                @fmt(out, "+%", it[]);
+            }
+        };
+    };
+    if @is(event.type, .CHAR) {
+        @fmt(out, "% ", event.char_code);
+    };
+    if event.key_repeat && @is(event.type, .KEY_DOWN, .CHAR) {
+        @fmt(out, "(repeat) ");
+    };
+    if @is(event.type, .MOUSE_DOWN, .MOUSE_UP) {
+        @fmt(out, "% (%, %) ", event.mouse_button, event.mouse_x, event.mouse_y);
+    };
+    if @is(event.type, .MOUSE_MOVE) {
+        @fmt(out, "(%, %) (%, %) ", event.mouse_dx, event.mouse_dy, event.mouse_x, event.mouse_y);
+    };
+    if @is(event.type, .MOUSE_SCROLL) {
+        @fmt(out, "(%, %) (%, %) ", event.scroll_x, event.scroll_y, event.mouse_x, event.mouse_y);
+    };
+    if @is(event.type, .RESIZED) {
+        @fmt(out, "(%, %) (%, %) ", event.window_width, event.window_height, event.framebuffer_width, event.framebuffer_height);
+    };
+    if @is(event.type, .CLIPBOARD_PASTED) {
+        s := sapp.get_clipboard_string();
+        @fmt(out, "(%) % ", s.len, s);
+    };
+    if @is(event.type, .FILES_DROPPED) {
+        n: i64 = sapp.drop.num_files;
+        @fmt(out, "%", n);
+        range(0, n) { i |
+            s := sapp.get_dropped_file_path(i);
+            @fmt(out, "\n- (%) %", s.len, s);
+        };
+    }
+}
+
+do_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
+    state := State.ptr_from_raw(userdata);
+    set_dynamic_context(state.env);
+    ::enum(Sapp.EventType);
+    ::enum(Sapp.Keycode);
+    ::enum(Sapp.Mousebutton);
+    
+    sapp := state.app&;
+    out := state.lines&.ordered_remove(0).unwrap(); // :SLOW
+    out&.clear();
+    fmt_event(out&, event, sapp);
+    state.lines&.push(out);
+    
+    if event.type == .KEY_DOWN && event.key_code == .ESCAPE {
+        sapp.quit_requested = true;
+    }
+};
+
+fn main() void = {
+    // TODO: when i want to support targetting wasm, this won't work because run returns immedately so the stack frame is gone
+    state := State.zeroed();
+    state.env = get_dynamic_context();
+    desc := SappDesc.zeroed();
+    state.app&.run(
+        init_cb = do_init,
+        frame_cb = do_render,
+        event_cb = do_event,
+        user_data = State.raw_from_ptr(state&),
+        window_title = "",
+        //enable_clipboard = true,
+        //clipboard_size = 8192,
+        //enable_dragndrop = true,
+        //max_dropped_files = 8,
+        //max_dropped_file_path_length = 8192,
+        allocator = general_allocator(),
+    );
+    @panic("TODO: run returned so our stack frame is junk now");
+}
+
+
+fn driver(vtable: *ImportVTable) void = 
+    build_for_graphics(vtable, "examples/app_events.fr");
+
+#include_std("backend/lib.fr");
+
+#use("@/lib/sys/fs.fr");

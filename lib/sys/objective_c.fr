@@ -1,0 +1,136 @@
+// https://opensource.apple.com/source/objc4/objc4-709/runtime/runtime.h.auto.html
+// https://opensource.apple.com/source/objc4/objc4-706/runtime/objc.h.auto.html
+
+ObjCClass    :: @struct(_: rawptr);
+ObjCObject   :: @struct(isa: ObjCClass);
+ObjCId       :: *ObjCObject;
+ObjCSelector :: @struct(_: rawptr);
+ObjCProtocol :: @struct(_: rawptr);
+ObjCIVar :: @struct(_: rawptr);
+
+ObjCSuper :: @struct(receiver: ObjCId, super_class: ObjCClass);
+
+// TODO: fix loop trying to compile if no driver to supply a #import (TODO: have i done this by now?)
+
+// If you look at apple's objc/message.h, these function signetures have a `...`
+// as though they used the c variadic call abi, don't let this fool you! 
+// It's actually something totally different! You use it by casting the function pointer 
+// to the signeture you want. The abi is the same as if you were calling a normal c function
+// with the signeture of the target method (shifted by 2 for self, sel) NOT a varargs call. 
+// On the sysv abi they happen to be the same but apple's arm64 abi is different. 
+// TODO: do i actually have to call the _stret versions for it to know the args are shifted one extra? 
+//       it's very possible i've just gotten lucky so far. 
+fn objc_msgSend(/* self, sel, ... good luck */) void #import("objc"); 
+fn objc_msgSendSuper(/* *ObjCSuper, sel, ... good luck */) void #import("objc");  
+
+fn objc_getClass(name: CStr) ObjCClass #import("objc");
+fn sel_getUid(name: CStr) ObjCSelector #import("objc");
+fn objc_allocateClassPair(superclass: ObjCClass, name: CStr, extraBytes: i64) ObjCClass #import("objc");
+fn objc_registerClassPair(cls: ObjCClass) void #import("objc");
+// imp is a function pointer (reciever, selector, <any other args>)
+fn class_addMethod(cls: ObjCClass, name: ObjCSelector, imp: rawptr, types: CStr) bool #import("objc"); 
+fn objc_autoreleasePoolPush() rawptr #import("objc");
+fn objc_autoreleasePoolPop(ctx: rawptr) void #import("objc");
+fn class_addIvar(class: ObjCClass, name: CStr, size: i64, align_log2: u8, types: CStr) bool #import("objc");
+fn object_setInstanceVariable(obj: ObjCId, name: CStr, value: rawptr) ObjCIVar #import("objc");
+fn object_getInstanceVariable(obj: ObjCId, name: CStr, out_value: *rawptr) ObjCIVar #import("objc");
+fn objc_getProtocol(name: CStr) ObjCProtocol #import("objc");
+fn class_addProtocol(class: ObjCClass, protocol: ObjCProtocol) void #import("objc");
+
+// This makes a point of forcing all selectors (method + param names) to be constant,
+// so the calls to sel_getUid could (in theory) be batched at program startup. 
+fn objc(ret_reciever_arg_pattern: FatExpr) FatExpr #macro = 
+    objc_call_impl(ret_reciever_arg_pattern, false);
+
+fn objc_super(ret_reciever_arg_pattern: FatExpr) FatExpr #macro = 
+    objc_call_impl(ret_reciever_arg_pattern, true);
+
+fn objc_call_impl(a: FatExpr, super: bool) FatExpr = {
+    callee := @if(super, objc_msgSendSuper, objc_msgSend);
+    
+    args_type: List(Type) = list(temp());
+    args: List(FatExpr) = list(ast_alloc());
+    selector: List(u8) = list(ast_alloc());
+    placeholder := @{ panic("this will be replaced with the selector uid") };
+    
+    ret_ty := ObjCId; // default when you use call syntax. works for void as well because you can just ignore it.
+    if true {
+        break :: local_return;
+        loop {
+            @match(a.expr&) {
+                fn Call(it) => {
+                    name := it.f.ident() || compile_error("@objc call f must be named", it.f.loc);
+                    no_args := !@is(it.arg.expr&, .Tuple, .StructLiteralP);
+                    @match(it.arg.expr&) {
+                        fn Tuple(it) => {
+                            @ct_assert(it.len == 2, a.loc, "objc message send with multiple arguments needs names");
+                            it[0] = compile_ast(it[0]);
+                            args_type&.push(it[0].ty);
+                            args_type&.push(ObjCSelector);
+                            args&.push(it[0]);
+                            args&.push(placeholder);
+                            @fmt(selector&, "%:", name.str());
+                            
+                            @if_let(it[1].expr&) fn StructLiteralP(it) => {
+                                b := it.bindings&;
+                                
+                                e := compile_ast(b[0].default);
+                                args_type&.push(e.ty);
+                                args&.push(e);
+                                
+                                range(1, b.len) { i |
+                                    b := b.index(i);
+                                    name := or b.ident() {
+                                        compile_error("Expected param name", a.loc)
+                                    };
+                                    value := b.default;
+                                    @fmt(selector&, "%:", name.str());
+                                    value := compile_ast(value);
+                                    args&.push(value);
+                                    args_type&.push(value.ty);
+                                };
+                                
+                                break()
+                            };
+                            
+                            it[1] = compile_ast(it[1]);
+                            args_type&.push(it[1].ty);
+                            args&.push(it[1]);
+                            break();
+                        }
+                        fn StructLiteralP(_) => compile_error("@objc reciever can't have name", it.arg.loc);
+                        @default => {
+                            reciever := compile_ast(it.arg[]);
+                            args_type&.push(reciever.ty);
+                            args_type&.push(ObjCSelector);
+                            args&.push(reciever);
+                            args&.push(placeholder);
+                            selector&.push_all(name.str());
+                            break();
+                        };
+                    };
+                }
+                fn PrefixMacro(it) => {
+                    loc := it.handler.loc;
+                    msg :: "@objc expected @as";
+                    handler := it.handler.ident() || compile_error(msg, loc);
+                    @ct_assert(handler == @symbol as, loc, msg);
+                    ret_ty = const_eval(Type)(it.arg[]);
+                    a = it.target[];
+                    // continue
+                }
+                @default => compile_error("@objc expected rec.m(args)", a.loc);
+            };
+        };
+    };
+    
+    arg_ty := Ty(args_type.items());
+    selector := selector.items().sym().c_str();
+    // TODO: you don't want to call this every time, but you can't do it at comptime.  :SLOW
+    args[1] = @{ sel_getUid(@[@literal selector]) };  
+    arg_pattern: FatExpr = (expr = (Tuple = args.as_raw()), ty = UnknownType, done = false, loc = a.loc);
+    @{
+        f := @run assume_types_fn(@[@literal arg_ty], @[@literal ret_ty], @as(rawptr) @as(FnPtr(void, void)) @[@literal callee]);
+        f(@[arg_pattern])
+    }
+}

@@ -18,6 +18,13 @@
 %�%.104 =w pop
 - fast memcpy (need to deal with fallback when not linking a libc)
 
+## cross compiling
+
+- graphics: the build_for_graphics driver function dlopens a bunch of macos stuff
+- import_c: if you call something at both comptime and runtime it needs to redo the 
+c frontend work because of `#ifdef ARCH/OS`. C also lets you have different function/struct
+bodies on different targets which i don't deal with well. 
+
 ## language consistancy
 
 - #c_variadic + conflicting overload (ie for open()) where you want the non-va version to also be #syscall. maybe that's not worth fixing. 

@@ -11,12 +11,8 @@ CGPoint :: @struct(x: f64, y: f64);
 CGRect  :: @struct(origin: CGPoint, size: CGSize);
 
 STATE :: @static(AppState);
-::ptr_utils(MacosLibc.ObjCObject);
 
-// TODO: this is garbage. make #use work better at top level. 
-ObjCId :: MacosLibc.ObjCId;
-ObjCClass :: MacosLibc.ObjCClass;
-ObjCSelector :: MacosLibc.ObjCSelector;
+#include_std("lib/sys/objective_c.fr");
 
 AppState :: @struct(
     title: Str,
@@ -55,18 +51,19 @@ fn main() void = {
     NSView   := class("NSView");
     NSString := class("NSString");
     
-    NSApp[] = @objc_msg(ObjCId, NSApplication, (sharedApplication = ()));
+    NSApp[] = @objc NSApplication.sharedApplication();
+    ::ptr_utils(ObjCObject);
     @assert(!NSApp[].is_null(), "NSApp null");
     // ~After~ calling sharedApplication, you can appkit.get_constant(ObjCId, "NSApp").unwrap() and get the same value it returns. 
     // Which is the same as a c program declaring NSApp as an extern variable, but there's no need. 
     
-    ok := @objc_msg(bool, NSApp[], (setActivationPolicy = 0));
+    ok := @objc @as(bool) NSApp[].setActivationPolicy(0);
     @assert(ok, "setActivationPolicy");
-    window := @objc_msg(ObjCId, NSWindow, (alloc = ()));
+    window := @objc NSWindow.alloc();
     @assert(!window.is_null());
     
     rect: CGRect = (origin = (x = 0, y = 0), size = (width = f.width.float(), height = f.height.float()));
-    window = @objc_msg(ObjCId, window, (initWithContentRect = rect, styleMask = 3, backing = 2, defer = false));
+    window = @objc window.initWithContentRect(rect, styleMask = 3, backing = 2, defer = false);
     
     // We have to give it a class with a callback
     Delegate := objc_allocateClassPair(NSObject, "SoftDrawDelegate", 0);
@@ -74,48 +71,48 @@ fn main() void = {
     objc_registerClassPair(Delegate);
     should_close_callback: rawptr : fn(self: ObjCId, sel: ObjCSelector, window: ObjCId) bool = {
         println("Goodbye World!");
-        @objc_msg(void, NSApp[], (terminate = NSApp[]));
+        @objc NSApp[].terminate(NSApp[]);
         true
     };
-    delegate := @objc_msg(ObjCId, Delegate, (alloc = ()));
-    delegate = @objc_msg(ObjCId, delegate, (init = ()));
+    delegate := @objc Delegate.alloc();
+    delegate = @objc delegate.init();
     @assert(!delegate.is_null());
-    @objc_msg(void, window, (setDelegate = delegate));
+    @objc window.setDelegate(delegate);
     
     // Now another...
     View := objc_allocateClassPair(NSView, "SoftDrawView", 0);
-    class_addMethod(View, "drawRect:".sel_getUid(), draw_rect_callback, @as(CStr) "i@:@@");
+    class_addMethod(View, "drawRect:".sel_getUid(), draw_rect_callback, "");//@as(CStr) "i@:@@");
     objc_registerClassPair(View);
     
-    view := @objc_msg(ObjCId, View, (alloc = ()));
-    view = @objc_msg(ObjCId, view, (init = ()));
+    view := @objc View.alloc();
+    @objc view.init();
     @assert(!view.is_null());
-    @objc_msg(void, window, (setContentView = view));
+    @objc window.setContentView(view);
     // TODO: could smuggle a pointer through to the callback with objc_setAssociatedObject 
     
-    title := @objc_msg(ObjCId, NSString, (stringWithUTF8String = @as(CStr) "SoftDraw Demo"));
+    title := @objc NSString.stringWithUTF8String(@as(CStr) "SoftDraw Demo");
     @assert(!title.is_null());
-    @objc_msg(void, window, (setTitle = title));
-    @objc_msg(void, window, (makeKeyAndOrderFront = ObjCId.zeroed()));
-    @objc_msg(void, window, (center = ()));
-    @objc_msg(void, NSApp[], (activateIgnoringOtherApps = true));
+    @objc window.setTitle(title);
+    @objc window.makeKeyAndOrderFront(ObjCId.zeroed());
+    @objc window.center();
+    @objc NSApp[].activateIgnoringOtherApps(true);
     
     NSDefaultRunLoopMode := appkit.get_constant(ObjCId, "NSDefaultRunLoopMode").unwrap();
     @assert(!NSDefaultRunLoopMode.is_null(), "NSApp null");
     loop {  // TODO: do i have to do reference counting things? 
-        content := @objc_msg(ObjCId, window, (contentView = ()));
+        content := @objc window.contentView();
         @assert(!content.is_null());
-        @objc_msg(void, content, (setNeedsDisplay = true));
+        @objc content.setNeedsDisplay(true);
         
         MAX_u64 :: 0xFFFFFFFFFFFFFFFF;
-        event := @objc_msg(ObjCId, NSApp[], (nextEventMatchingMask = MAX_u64, untilDate = ObjCId.zeroed(), inMode = NSDefaultRunLoopMode, dequeue = true));
+        event := @objc NSApp[].nextEventMatchingMask(MAX_u64, untilDate = ObjCId.zeroed(), inMode = NSDefaultRunLoopMode, dequeue = true);
 
         if !event.is_null() {
-            type := @objc_msg(i64, event, (type = ()));
+            type := @objc @as(i64) event.type();
             // TODO: actually handle the event
-            @objc_msg(void, NSApp[], (sendEvent = event));
+            @objc NSApp[].sendEvent(event);
         };
-        usleep(@as(u32) trunc(1000.mul(16)));
+        usleep(@as(u32) trunc(1000 * 16));
     };
 }
 
@@ -134,8 +131,8 @@ fn CGContextDrawImage(c: ObjCId, rect: CGRect, image: ObjCId) void #import("Core
 draw_rect_callback: rawptr : fn(self: ObjCId, sel: ObjCSelector, r: CGRect) void = {
     f := STATE; // TODO: could smuggle this here with objc_getAssociatedObject
     NSGraphicsContext := class("NSGraphicsContext");
-    context := @objc_msg(ObjCId, NSGraphicsContext, (currentContext = ()));
-    context := @objc_msg(ObjCId, context, (graphicsPort = ()));
+    context := @objc NSGraphicsContext.currentContext();
+    context := @objc context.graphicsPort();
     space := CGColorSpaceCreateDeviceRGB();
     provider := CGDataProviderCreateWithData(0, f.buf.ptr, f.width * f.height * 4, 0);
     kCGImageAlphaNoneSkipFirst :: 6;
@@ -163,6 +160,7 @@ fn get_constant(lib: Dyn.Handle, $T: Type, $name: Str) ?T #generic = {
 }
 
 Dyn :: import("@/lib/dynamic_lib.fr");
+#use("@/lib/sys/fs.fr");
 
 fn driver(vtable: *ImportVTable) void #export = {    
     src := "#include_std(\"lib/core.fr\");".clone(temp());
