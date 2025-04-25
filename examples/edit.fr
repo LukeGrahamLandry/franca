@@ -17,6 +17,7 @@ State :: @struct(
     env: rawptr,
     buffers: List(TextBuffer),
     selected_buffer: i64,
+    app: Sapp.Common, // :ThisIsOnTheStackWhichWontWorkOnWasm
 );
 
 allocator :: libc_allocator;
@@ -25,8 +26,9 @@ do_init :: fn(userdata: rawptr) void = {
     state := State.ptr_from_raw(userdata);
     set_dynamic_context(state.env);
     
+    sapp := state.app&;
     desc := SgDesc.zeroed();
-    desc.environment = sglue_environment();
+    desc.environment = sapp.sglue_environment();
     desc.logger.func = slog_func;
     sg_setup(desc&);
     
@@ -38,12 +40,12 @@ do_init :: fn(userdata: rawptr) void = {
     sdtx_setup(state.text, desc&);
     
     b := state.buffers.index(0);
-    b.at.w = sapp_widthf().cast() / 2;
-    b.at.h = sapp_heightf().cast();
+    b.at.w = sapp.width().float() / 2;
+    b.at.h = sapp.height().float();
     b := state.buffers.index(1);
-    b.at.w = sapp_widthf().cast() / 2;
-    b.at.h = sapp_heightf().cast();
-    b.at.pos.x = sapp_widthf().cast() / 2;
+    b.at.w = sapp.width().float() / 2;
+    b.at.h = sapp.height().float();
+    b.at.pos.x = sapp.width().float() / 2;
     
     state.pass_action.colors&[0].load_action = .CLEAR;
     state.pass_action.colors&[0].clear_value = (r = 0.156, g = 0.156, b = 0.156, a = 1);
@@ -62,12 +64,7 @@ do_render :: fn(userdata: rawptr) void = {
         draw_text(state, b);
     };
     
-    desc := SgPass.zeroed();
-    desc.action = state.pass_action;
-    desc.swapchain = sglue_swapchain();
-    desc.swapchain.width = sapp_width();
-    desc.swapchain.height = sapp_height();
-    sg_begin_pass(desc&);
+    state.app&.glue_sg_begin_pass(state.pass_action);
     
     sdtx := state.text.default_context&;
     sdtx.draw_layer(0);
@@ -77,17 +74,12 @@ do_render :: fn(userdata: rawptr) void = {
     reset_temporary_storage(mark);
 };
 
-// TODO: dependency problem so can't go in the eq overload set :(
-fn eqq(a: SappEventType, b: SappEventType) bool = (@as(i32) a).eq(@as(i32) b);
-fn eqq(a: SappKeycode, b: SappKeycode) bool = (@as(i32) a).eq(@as(i32) b);
-
 scroll_speed :: -2.0;
 
-do_event :: fn(event: *SappEvent, userdata: rawptr) void = {
+do_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
     state := State.ptr_from_raw(userdata);
-    set_dynamic_context(state.env);
    
-    if event.type.eqq(.MOUSE_DOWN) {
+    if event.type == .MOUSE_DOWN {
         pos: Pos = (x = event.mouse_x.cast(), y = event.mouse_y.cast());
         enumerate state.buffers& { i, b |
             if b.at.contains(pos) {
@@ -96,13 +88,13 @@ do_event :: fn(event: *SappEvent, userdata: rawptr) void = {
         };
     };
     
-    if event.type.eqq(.KEY_DOWN) {
-        if event.key_code.eqq(.ESCAPE) {
-            exit(0);
+    if event.type == .KEY_DOWN {
+        if event.key_code == .ESCAPE {
+            state.app.quit_requested = true;
         };
     };
     
-    if event.type.eqq(.MOUSE_SCROLL) {
+    if event.type == .MOUSE_SCROLL {
         if state.selected_buffer() { b |
             b.render.x += event.scroll_x.cast() * scroll_speed;
             b.render.y += event.scroll_y.cast() * scroll_speed;
@@ -136,14 +128,14 @@ fn main() void = {
     };
     state.buffers&.push(load_new_buffer("compiler/v2/sema.fr", allocator));
     state.buffers&.push(load_new_buffer("examples/edit.fr", allocator));
-    desc := SappDesc.zeroed();
-    desc.init_userdata_cb = do_init;
-    desc.frame_userdata_cb = do_render;
-    desc.event_userdata_cb = do_event;
-    desc.user_data = State.raw_from_ptr(state&);
-    desc.logger.func = slog_func;
-    desc.window_title = "pleasejustletmeeditthetext".maybe_borrow_cstr(temp());
-    sapp_run(desc&);
+    state.app&.run(
+        init_cb = do_init,
+        frame_cb = do_render,
+        event_cb = do_event,
+        user_data = State.raw_from_ptr(state&),
+        //window_title = "pleasejustletmeeditthetext", // TODO
+        allocator = general_allocator(),
+    );
 }
 
 fn driver(vtable: *ImportVTable) void = 
@@ -171,7 +163,8 @@ fn draw_text(state: *State, self: *TextBuffer) void = {
     
     sdtx := state.text.default_context&;
     sdtx.color = pack_rgba(235, 219, 178, 255);
-    sdtx.canvas(sapp_width().intcast().float().div(1.75).cast(), sapp_height().intcast().float().div(1.75).cast());
+    sapp := state.app&;
+    sdtx.canvas(sapp.width().float().div(1.75).cast(), sapp.height().float().div(1.75).cast());
     
     // the fractional component of your scroll position is used to offset the text rendering on the screen.
     // and the integral component chooses which range of lines we draw.

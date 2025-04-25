@@ -48,7 +48,9 @@ fn pack_rgba(r: f32, g: f32, b: f32, a: f32) u32 =
     pack_rgba(r.cast(), g.cast(), b.cast(), a.cast());
 
 // TODO: more composable system for linking foreign libraries
+// TODO: it's very sad that this driver takes 120ms to compile
 fn build_for_graphics(vtable: *ImportVTable, input_path: Str) void = {
+    start := timestamp();
     #use("@/lib/sys/fs.fr");
     src := "#include_std(\"lib/core.fr\");".clone(temp());
     the_code := temp().read_to_string_or_crash(input_path);  // TODO: don't depend on cwd.
@@ -98,6 +100,7 @@ fn build_for_graphics(vtable: *ImportVTable, input_path: Str) void = {
     main_f := {vtable.find_unique_func}(comp, main_sym).unwrap();
     
     if want_jit {
+        // TODO: doing it this way uses the single threaded comptime jit context. :SLOW
         ptr := get_jitted(ctx, main_f);
         f := assume_types_fn(Arg = void, Ret = void, ptr = ptr);
         f();
@@ -114,6 +117,9 @@ fn build_for_graphics(vtable: *ImportVTable, input_path: Str) void = {
         out&.write(bucket);
     };
     out.close();
+    
+    end := timestamp();
+    @eprintln(">>> compiled in %ms", end - start);
     // TODO: get these from the lib. 
     SOKOL_MACOS_LINK_ARGS :: @array("-framework", "Metal", "-framework", "MetalKit", "-framework", "Cocoa", "-framework", "QuartzCore");
     a := SOKOL_MACOS_LINK_ARGS;
@@ -124,4 +130,6 @@ fn build_for_graphics(vtable: *ImportVTable, input_path: Str) void = {
     @println("building aot exe: %", args.items());
     success := run_cmd_blocking("clang", args.items());
     assert(success, "clang failed");
+    link_end := timestamp();
+    @eprintln(">>> linked in %ms", link_end - end);
 }

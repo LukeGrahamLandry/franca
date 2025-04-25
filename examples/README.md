@@ -14,6 +14,7 @@
 - view_image: print a jpeg of the mona lisa to the terminal by importing a c library (lib:wuffs)
 - turing_art: randomized turing machines draw on a colourful canvas
 
+- app_events: open a window and display all the (key/mouse/etc) events received (lib:sokol)
 - farm_game: draws some rectangles on the screen with sokol (lib:sokol)
 - dearimgui_demo: calls ImGui::ShowDemoWindow (lib:sokol, lib:dearimgui)
 - edit: view a text file (lib:sokol)

@@ -82,16 +82,16 @@ frame_index :: @static(i64) 0;
 
 do_render :: fn(userdata: rawptr) void = {
     state := State.ptr_from_raw(userdata);
-    set_dynamic_context(state.env);
     mark := mark_temporary_storage();
     sgl := state.draw.default_context&;
+    sapp := state.app&;
     if state.chunk_i == 0 {
         state.lo = vec3(99999999.0, 99999999.0, 99999999.0);
         state.hi = state.lo * @as(f32) -1.0;
     
         sgl.rewind();
         sgl.defaults();
-        sgl.viewport(0.intcast(), 0.intcast(), sapp_width(), sapp_height(), true);
+        sgl.viewport(0.intcast(), 0.intcast(), sapp.width().intcast(), sapp.height().intcast(), true);
         sgl.load_pipeline(state.pipe);
         
         sgl.begin(.POINTS);
@@ -199,12 +199,7 @@ do_render :: fn(userdata: rawptr) void = {
     update_camera(state, mvp);
     mul(mvp, model&);
     
-    desc := SgPass.zeroed();
-    desc.action = state.pass_action;
-    desc.swapchain = sglue_swapchain();
-    desc.swapchain.width = sapp_width();
-    desc.swapchain.height = sapp_height();
-    sg_begin_pass(desc&);
+    sapp.glue_sg_begin_pass(state.pass_action);
     sgl.draw_layer(0);
     sg_end_pass();
     sg_commit();
@@ -243,16 +238,16 @@ fn update_camera(state: *State, mvp: *Sgl.Matrix) void = {
     
     projection := @uninitialized Sgl.Matrix;
     identity(projection&);
-    aspect := intcast(sapp_width() / sapp_height()).float().cast();
+    sapp := state.app&;
+    aspect := (sapp.width() / sapp.height()).float().cast();
     perspective(projection&, deg_to_rad(70.0), aspect, 0.01, 100.0);
     
     mul(mvp, projection&);
     mul(mvp, view&);
 }
 
-do_event :: fn(event: *SappEvent, userdata: rawptr) void = {
+do_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
     state := State.ptr_from_raw(userdata);
-    set_dynamic_context(state.env);
     
     ::enum(@type event.type); ::enum(@type event.key_code);
     
@@ -288,22 +283,21 @@ do_event :: fn(event: *SappEvent, userdata: rawptr) void = {
 
 launch :: fn(state: *State) void = {
     state.draw = general_allocator().box(@type state.draw[]);
-    desc := SappDesc.zeroed();
-    desc.init_userdata_cb = do_init;
-    desc.frame_userdata_cb = do_render;
-    desc.event_userdata_cb = do_event;
-    desc.user_data = State.raw_from_ptr(state);
-    desc.logger.func = slog_func;
-    desc.window_title = "Point Cloud Viewer";
-    sapp_run(desc&);
+    state.app&.run(
+        init_cb = do_init,
+        frame_cb = do_render,
+        event_cb = do_event,
+        user_data = State.raw_from_ptr(state),
+        allocator = general_allocator(),
+        //window_title = "Point Cloud Viewer", // TODO
+    );
 }
 
 do_init :: fn(userdata: rawptr) void = {
     state := State.ptr_from_raw(userdata);
-    set_dynamic_context(state.env);
     
     desc := SgDesc.zeroed();
-    desc.environment = sglue_environment();
+    desc.environment = state.app&.sglue_environment();
     desc.logger.func = slog_func;
     sg_setup(desc&);
     
@@ -330,6 +324,6 @@ do_init :: fn(userdata: rawptr) void = {
     state.pass_action.colors&[0].load_action = .CLEAR;
     state.pass_action.colors&[0].clear_value = (r = 0.3, g = 0.3, b = 0.3, a = 1.0);
     
-    sapp_lock_mouse(true);
+    state.app&.lock_mouse(true);
     state.prev_frame_time = timestamp_s();
 };

@@ -1,6 +1,7 @@
 #include_std("graphics/lib.fr");
 
 State :: @struct(
+    app: Sapp.Common,  // :ThisIsOnTheStackWhichWontWorkOnWasm
     pipe: Sgl.Pipeline,
     pass_action: SgPassAction,
     x: f64,
@@ -8,7 +9,6 @@ State :: @struct(
     dx: f64,
     dy: f64,
     world: World,
-    env: rawptr,
     text: *Sdtx.Common,
     draw: *Sgl.Common,
 );
@@ -83,10 +83,10 @@ fn load_default_world(self: *World) void = {
 
 do_init :: fn(userdata: rawptr) void = {
     state := State.ptr_from_raw(userdata);
-    set_dynamic_context(state.env);
+    sapp := state.app&;
     
     desc := SgDesc.zeroed();
-    desc.environment = sglue_environment();
+    desc.environment = sapp.sglue_environment();
     desc.logger.func = slog_func;
     sg_setup(desc&);
     
@@ -143,7 +143,7 @@ base_size :: 50.0;
 
 do_render :: fn(userdata: rawptr) void = {
     state := State.ptr_from_raw(userdata);
-    set_dynamic_context(state.env);
+    sapp := state.app&;
     mark := mark_temporary_storage();
     do_update :: fn(state: *State) void = {
         state.x += state.dx;
@@ -166,11 +166,11 @@ do_render :: fn(userdata: rawptr) void = {
     sdtx := state.text.default_context&;
     
     sgl.defaults();
-    sgl.viewport(0.intcast(), 0.intcast(), sapp_width(), sapp_height(), true);
+    sgl.viewport(0.intcast(), 0.intcast(), sapp.width().intcast(), sapp.height().intcast(), true);
     sgl.load_pipeline(state.pipe);
     
     sdtx.color = pack_rgba(0.0, 0.0, 1.0, 1.0);
-    sdtx.canvas(sapp_width().intcast().float().div(2.0).cast(), sapp_height().intcast().float().div(2.0).cast());
+    sdtx.canvas(sapp.width().float().div(2.0).cast(), sapp.height().float().div(2.0).cast());
     sdtx.pos.x = state.x.cast();
     sdtx.pos.y = state.y.cast();
     sdtx.put("hello world");
@@ -187,11 +187,12 @@ do_render :: fn(userdata: rawptr) void = {
     };
     sgl.begin(.QUADS);
    
-    fn draw(sgl: *Sgl.Context, area: Rect, colour: Colour) void = {
+    fn draw(s: *State, area: Rect, colour: Colour) void = {
+        sgl, sapp := (s.draw.default_context&, s.app&);
         sgl.color = pack_rgba(colour.r, colour.g, colour.b, colour.a);
         
-        w := sapp_width().intcast().float();
-        h := sapp_height().intcast().float();
+        w := sapp.width().float();
+        h := sapp.height().float();
         
         x1 := area.pos.x.sub(0.0).div(w).sub(1.0).cast();
         x2 := area.pos.x.add(area.w).div(w).sub(1.0).cast();
@@ -204,10 +205,10 @@ do_render :: fn(userdata: rawptr) void = {
         sgl.v2f(x1, y2);
     }
     
-    fn draw_square(sgl: *Sgl.Context, x: f64, y: f64, size: f64, colour: Colour) void = 
-        sgl.draw(@as(Rect) (pos = (x = x, y = y), w = size, h = size), colour);
+    fn draw_square(s: *State, x: f64, y: f64, size: f64, colour: Colour) void = 
+        s.draw(@as(Rect) (pos = (x = x, y = y), w = size, h = size), colour);
     
-    fn draw_object(sgl: *Sgl.Context, ty: Object, pos: Pos) void = {
+    fn draw_object(s: *State, ty: Object, pos: Pos) void = {
         @match(ty) {
             fn Crop(crop) => {
                 fraction := @match(crop.age) {
@@ -215,45 +216,46 @@ do_render :: fn(userdata: rawptr) void = {
                     fn Ready() => 1.5;
                 };
                 c := find_center(pos, fraction);
-                sgl.draw_square(c.x, c.y, base_size / fraction, green);
+                s.draw_square(c.x, c.y, base_size / fraction, green);
                 
             }
-            @default => sgl.draw_square(pos.x, pos.y, base_size / 3, green);
+            @default => s.draw_square(pos.x, pos.y, base_size / 3, green);
         }
     }
     
+    s := state;
     sgl.load_identity();
-    sgl.draw_square(100.0, 100.0, 20.0, yellow);
-    sgl.draw_square(200.0, 200.0, 20.0, green);
-    sgl.draw_square(0.0, 0.0, 20.0, blue);
+    s.draw_square(100.0, 100.0, 20.0, yellow);
+    s.draw_square(200.0, 200.0, 20.0, green);
+    s.draw_square(0.0, 0.0, 20.0, blue);
     
-    sgl.draw(state.world.farm_area, light_brown);
-    sgl.draw(state.world.truck_area, brown);
+    s.draw(state.world.farm_area, light_brown);
+    s.draw(state.world.truck_area, brown);
     each state.world.farm { planted | 
-        sgl.draw_object((Crop = planted.crop), planted.pos);
+        s.draw_object((Crop = planted.crop), planted.pos);
     };
     
     each state.world.shelves {obj|
-        sgl.draw_square(obj.pos.x, obj.pos.y, base_size, brown);
+        s.draw_square(obj.pos.x, obj.pos.y, base_size, brown);
         if obj.holding { item |
-            sgl.draw_object(item, obj.pos);
+            s.draw_object(item, obj.pos);
         };
     };
     each state.world.shops {obj|
-        sgl.draw_square(obj.pos.x, obj.pos.y, base_size, light_brown);
+        s.draw_square(obj.pos.x, obj.pos.y, base_size, light_brown);
         if obj.item { item | 
-            sgl.draw_object(item, obj.pos);
+            s.draw_object(item, obj.pos);
         };
     };
     
     fn draw(player: *Player) void => {
-        sgl.draw_square(player.pos.x, player.pos.y, base_size, black_transparent);
+        s.draw_square(player.pos.x, player.pos.y, base_size, black_transparent);
         if player.inventory { item | 
-            sgl.draw_object(item, player.pos);
+            s.draw_object(item, player.pos);
         };
         // TODO: do the math
         c := find_center(player.pos, 5);
-        sgl.draw_square(c.x, c.y, base_size / 5, red);
+        s.draw_square(c.x, c.y, base_size / 5, red);
     }
     
     fn find_center(pos: Pos, frac: f64) Pos = {
@@ -264,21 +266,16 @@ do_render :: fn(userdata: rawptr) void = {
     
     sgl.end();
     
-    width := sapp_width().intcast().float().div(16.0);
-    if state.x > width - 11.0 || state.x < 0.0 {
+    w := sapp.width().float().div(16.0);
+    if state.x > w - 11.0 || state.x < 0.0 {
         state.dx *= 1.0.neg();
     };
-    height := sapp_height().intcast().float().div(16.0);
-    if state.y > height - 1.0 || state.y < 0.0 {
+    h := sapp.height().float().div(16.0);
+    if state.y > h - 1.0 || state.y < 0.0 {
         state.dy *= 1.0.neg();
     };
     
-    desc := SgPass.zeroed();
-    desc.action = state.pass_action;
-    desc.swapchain = sglue_swapchain();
-    desc.swapchain.width = sapp_width();
-    desc.swapchain.height = sapp_height();
-    sg_begin_pass(desc&);
+    sapp.glue_sg_begin_pass(state.pass_action);
     
     sgl.draw_layer(0);
     sdtx.draw_layer(0);
@@ -288,12 +285,11 @@ do_render :: fn(userdata: rawptr) void = {
     reset_temporary_storage(mark);
 };
 
-::enum(SappEventType);
-::enum(SappKeycode);
+::enum(Sapp.EventType);
+::enum(Sapp.Keycode);
 
-do_event :: fn(event: *SappEvent, userdata: rawptr) void = {
+do_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
     state := State.ptr_from_raw(userdata);
-    set_dynamic_context(state.env);
    
     if event.type == .KEY_DOWN {
         if event.key_code == .ESCAPE {
@@ -425,17 +421,16 @@ fn center_overlaps(me: Pos, me_size: f64, obj: Pos, obj_size: f64) bool = {
 fn main() void = {
     println("Hello World");
     state := State.zeroed();
-    state.env = get_dynamic_context();
     state.text = allocator.box(@type state.text[]);
     state.draw = allocator.box(@type state.draw[]);
-    desc := SappDesc.zeroed();
-    desc.init_userdata_cb = do_init;
-    desc.frame_userdata_cb = do_render;
-    desc.event_userdata_cb = do_event;
-    desc.user_data = State.raw_from_ptr(state&);
-    desc.logger.func = slog_func;
-    desc.window_title = "Arstotzkan Farmer 4".maybe_borrow_cstr(temp());
-    sapp_run(desc&);
+    state.app&.run(
+        init_cb = do_init,
+        frame_cb = do_render,
+        event_cb = do_event,
+        user_data = State.raw_from_ptr(state&),
+        allocator = general_allocator(),
+        //window_title = "Arstotzkan Farmer 4",  // TODO
+    );
 }
 
 fn driver(vtable: *ImportVTable) void = 
