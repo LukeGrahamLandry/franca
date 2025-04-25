@@ -1,4 +1,4 @@
-## (Apr 23/24)
+## (Apr 23/24) porting sokol_app
 
 - stop copy pasting around the driver that links the graphics libraries. 
 i still want to think of a nicer way to deal with it 
@@ -46,6 +46,60 @@ hmm, im reading backingScaleFactor as a f32 instead of f64.
 now no crash but still no drawing... 
 aaaaaaaaaaaaaaa same for setContentsScale, needs to be f64.
 criiiiiii, now it works!
+- ... but only jitted. when aot, `NSApplication.sharedApplication()` returns null. 
+wtf, i feel like that's not supposed to happen. im linking the same frameworks 
+as the sokol one that works and i still have app_events_old.fr which works. 
+i guess sokol uses the `NSApp` symbol instead of that return value. 
+running jitted, NSApp is null until you call sharedApplication, and then it's the same 
+as that return value. running aot, NSApp is always something and sharedApplication returns null.  
+but the aot one is -6215112630617299873 which doesn't look like a pointer (jitted it's 5198880496 
+which is in the normal range) and doesn't work (run() returns). 
+can dlopen AppKit at runtime and it's the same as my import so that's not the problem. 
+- oh also what the fuck! i was thinking oh i wish i could turn off alsr to compare the pointers to classes, 
+but NSApplication is 8812562848 both aot and jitted which is really strange. 
+just to make sure im not insane, if i print out one of my function pointers it changes every 
+run which makes sense to me. ok if i dlsym to get objc_msgSend it also is the same every time 
+so i guess there's only one copy of the dynamic libraries? 
+but i thought the way that worked was sure there's only one real copy but you still map 
+it into a randomized place for every process? clearly not tho? anyway, doesn't matter for my problem. 
+just interesting that my intution for aslr is somehow totally wrong. 
+- i would believe that my `#import` of a fn hack won't work aot because 
+i'll always make a shim for them but that doesn't explain why sharedApplication() returns null. 
+yeah that's where the number that doesn't look like a pointer comes from. 
+lol, -6215112630617299873 is 0xA9BF7BFDD503245F, look familiar? 
+```
+0000000100023a78 <_NSApp__11722>:
+100023a78: d503245f    	bti	c
+100023a7c: a9bf7bfd    	stp	x29, x30, [sp, #-0x10]!
+```
+so now sharedApplication and NSApp[] are the same aot but it's null so that doesn't help me. 
+- ok im going crazy. if setting a breakpoint in lldb for objc_msgSend (which is hard
+because you have to break in main first before setting the breakpoint or you get 
+stuck stepping through the loader) x0 is 0, you don't even get to the implementation, 
+it just bails out because the reciever is null. but if i print out c.NSApplication 
+before calling sharedApplication i get something reasonable. 
+why is my code doing this: 
+```
+a.out`objc_msgSend__10538:
+->  0x100024004 <+0>:  bti    c
+    0x100024008 <+4>:  stp    x29, x30, [sp, #-0x10]!
+    0x10002400c <+8>:  mov    x29, sp
+    0x100024010 <+12>: mov    w0, #0x0 ; =0 
+    0x100024014 <+16>: bl     0x10002c8a8    ; symbol stub for: objc_msgSend
+    0x100024018 <+20>: ldp    x29, x30, [sp], #0x10
+    0x10002401c <+24>: ret   
+```
+oh well great success, if i change `objc_msgSend :: fn() void #import("objc");`
+to `objc_msgSend :: fn(asdas: i64) void #import("objc");` (and same for objc_msgSendSuper), 
+it works now. so problem was in emit_ir, aot_import_body/bounce_body/emit_par_instructions 
+it tries to put par/arg to forward, and `if info.stride_bytes == 0` uses `QbeConZero`
+because clearly you don't need a par for a void arg... right... right...?
+so here just casting it to a function pointer didn't let the callee see the real args, 
+since it helpfully set your x0 to the blessed value of void (0). wild. 
+i guess that's a compiler bug, i probably shouldn't be injecting code 
+inside your function call that zeroes registers at random, but also it's 
+kinda reasonable if it's considered disrespectful to lie about a function's signeture. 
+anyway, rare W for lldb. 
 
 ## (Apr 22)
 

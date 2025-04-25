@@ -23,6 +23,7 @@
 - `@debug_assert(macos.common().valid, "not valid");` compiles 
 and gives you junk (that's not 0 or 1) when `common()` uses `#unsafe_noop_cast`. 
 rn you're supposed to need a redundant `[]` in a call like that. 
+- aot_import_body probably shouldn't zero x0 just because it thinks the param is void
 
 ## cross compiling
 
