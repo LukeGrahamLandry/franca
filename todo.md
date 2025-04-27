@@ -68,6 +68,9 @@ b = .a;
 - the body of a `=>` function gets re-sema-ed every time you call it (which makes inline_for hurt compile times more than it should)
 - having the crt linux stuff in franca_runtime_init means you can't use the backend without the franca frontend and target linux exe
 - @rec and #generic suck
+- reporducible builds depend on compilation order because of var id (like if you iterate a scope) 
+or function ids which end up in your binary. this is actually fine currently because 
+the frontend is single threaded but maybe it's not a great idea in the long term. 
 
 ## library robustness
 

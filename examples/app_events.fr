@@ -1,70 +1,133 @@
 // 
 // Example of how to use graphics/app.fr 
-// Opens a window and reports all the events it receives 
-//
+// Opens a window and reports all the events it receives. 
+// Press the number keys to exercise other features. 
+// Also 8 bit font rendering with graphics/debugtext.fr 
+// Hopefully this example shows you how to use all the features of both libraries. 
+// 
 
 #include_std("graphics/lib.fr");
 
-State :: @struct(
-    pass_action: SgPassAction,
-    text: Sdtx.Common,
-    app: Sapp.Common,  // :ThisIsOnTheStackWhichWontWorkOnWasm
-    lines: List(List(u8)),
-);
+// Simple driver program that links the graphics libraries (not all are written in franca yet). 
+fn driver(vtable: *ImportVTable) void = 
+    build_for_graphics(vtable, "examples/app_events.fr");
+
+// The program entry point just calls into the app library to open a window. 
+// - init() will be called on the first frame (so once the window is already open). 
+// - render() will be called once per frame at a good time for your program to draw stuff. 
+// - event() will called as we get events from the operating system (an arbitrary number of times per frame). 
+// - cleanup() will be called if the application exits gracefully (since some platforms never return once you start thier event loop). 
+fn main() void = {
+    // TODO: when i want to support targetting wasm, this won't work because run returns immedately so the stack frame is gone :ThisIsOnTheStackWhichWontWorkOnWasm
+    state := State.zeroed();
+    state.app&.run(
+        init_cb = do_init,
+        frame_cb = do_render,
+        event_cb = do_event,
+        user_data = State.raw_from_ptr(state&),
+        window_title = "example: app_events",
+        enable_clipboard = true,
+        enable_dragndrop = true,
+        allocator = general_allocator(),
+        //fullscreen = true,
+        icon = @slice(make_a_texture(temp(), 128, 128, 0)),
+    );
+    // unreachable on most platforms (but not web)
+    @panic("TODO: run returned so our stack frame is junk now");
+}
+
+State :: @struct {
+    pass_action: SgPassAction;
+    text: Sdtx.Common;
+    app: Sapp.Common;  // :ThisIsOnTheStackWhichWontWorkOnWasm
+    lines: List(Line);
+    font: i64;
+    deny_quit: bool;
+    icon: i64;
+};
+
+Line :: @struct {
+    text: List(u8);
+    colour: u32;
+    font: i32;
+};
+
+builtin_font_count :: 6;
+font_names :: ast_alloc().alloc_zeroed([]u8, builtin_font_count);
+font_pixels :: ast_alloc().alloc_zeroed([]u8, builtin_font_count);
 
 do_init :: fn(userdata: rawptr) void = {
     state := State.ptr_from_raw(userdata);
     
     desc := SgDesc.zeroed();
-    desc.environment = state.app&.sglue_environment();
+    desc.environment = state.app&.glue_environment();
     desc.logger.func = slog_func;
     sg_setup(desc&);
     
     a := general_allocator();
-    desc: Sdtx.Desc = (
+    load_all_default_fonts(font_pixels, font_names);
+    state.text&.setup(
         allocator = a,
-        context = (),
+        fonts = font_pixels,
+        // You can also load just a specific font if you want: 
+        // fonts = @slice(Sdtx.font.cpc),
     );
-    desc.fonts&[0] = Sdtx.font.cpc;
-    
-    sdtx_setup(state.text&, desc&);
     
     state.pass_action.colors&[0].load_action = .CLEAR;
     state.pass_action.colors&[0].clear_value = (r = 0.156, g = 0.156, b = 0.156, a = 1);
     
+    // Prepare a bunch of empty lines to be filled in by do_event()
     N :: 50;
-    state.lines = List(u8).list(N, a);
+    state.lines = Line.list(N, a);
     range(0, N) { i |
-        state.lines&.push(u8.list(a));
+        state.lines&.push(text = u8.list(a), colour = 0, font = 0);
     };
-    @fmt(state.lines.index(N-1), "try pressing a key!");
 };
 
 do_render :: fn(userdata: rawptr) void = {
     state := State.ptr_from_raw(userdata);
-    mark := mark_temporary_storage();
     sapp := state.app&;
     
+    // Record text rendering commands. 
+    // You're allowed to call sdtx.put() anywhere in the frame (even in the event handler), 
+    // that just doesn't help this program because we want to remember a few lines of past events. 
     sdtx := state.text.default_context&;
-    sdtx.color = pack_rgba(235, 219, 178, 255);
     sdtx.canvas(sapp.width().float().div(1.75).cast(), sapp.height().float().div(1.75).cast());
     
+    // Show help text / current state. 
     sdtx.pos.y = 0;
+    sdtx.font = state.font.intcast();
+    sdtx.color = green;
+    sdtx.put("ESC: request quit\n"); 
+    sdtx.put("1: set title\n"); 
+    sdtx.put(@tfmt("2: lock mouse (%)\n", sapp.mouse.locked)); 
+    sdtx.put(@tfmt("3: hide mouse (%)\n", !sapp.mouse.shown)); 
+    sdtx.put(@tfmt("4: change cursor (%)\n", sapp.mouse.cursor)); 
+    sdtx.put(@tfmt("5: change font (%)\n", font_names[state.font])); 
+    sdtx.put(@tfmt("6: deny quit (%)\n", state.deny_quit)); 
+    sdtx.put("7: copy to clipboard\n"); 
+    sdtx.put("8: paste from clipboard\n"); 
+    sdtx.put(@tfmt("9: fullscreen (%)\n", sapp.fullscreen)); 
+    sdtx.put("0: change app icon\n");
+
+    // Show the lines we collected in the event handler. 
     each_rev state.lines& { it |
+        sdtx.color = it.colour;
+        sdtx.font = it.font;
         sdtx.pos.x = 0;
-        sdtx.put(it.items()); 
+        sdtx.put(it.text.items()); 
         sdtx.pos.y += 1;
     };
-    
+
+    // Now actually render the frame. 
     sapp.glue_sg_begin_pass(state.pass_action);
-    sdtx := state.text.default_context&;
-    sdtx.draw_layer(0);
-    
+    sdtx.draw_layer(0);  // Execute the text commands we just recorded. 
     sg_end_pass();
     sg_commit();
-    reset_temporary_storage(mark);
 };
 
+// Grab all the interesting values out of the event. 
+// Not all fields are valid on all event types. 
 fn fmt_event(out: *List(u8), event: *Sapp.Event, sapp: *Sapp.Common) void = {
     @fmt(out, "% ", event.type);
     
@@ -97,8 +160,8 @@ fn fmt_event(out: *List(u8), event: *Sapp.Event, sapp: *Sapp.Common) void = {
         @fmt(out, "(%, %) (%, %) ", event.window_width, event.window_height, event.framebuffer_width, event.framebuffer_height);
     };
     if @is(event.type, .CLIPBOARD_PASTED) {
-        s := sapp.get_clipboard_string();
-        @fmt(out, "(%) % ", s.len, s);
+        s := sapp.get_clipboard_string().items();
+        @fmt(out, "(%) \n%", s.len, s);
     };
     if @is(event.type, .FILES_DROPPED) {
         n: i64 = sapp.drop.num_files;
@@ -110,45 +173,163 @@ fn fmt_event(out: *List(u8), event: *Sapp.Event, sapp: *Sapp.Common) void = {
     }
 }
 
+grey   :: pack_rgba(235, 219, 178, 255);
+red    :: pack_rgba(235, 0, 0, 255);
+green  :: pack_rgba(0, 235, 0, 255);
+blue   :: pack_rgba(0, 200, 235, 255);
+
 do_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
     state := State.ptr_from_raw(userdata);
-    ::enum(Sapp.EventType);
-    ::enum(Sapp.Keycode);
-    ::enum(Sapp.Mousebutton);
+    sapp  := state.app&;
+
+    // Little helper to save some text to display on future frames. 
+    report :: fn(colour: u32, $body: @Fn(out: *List(u8)) void) void => {
+        out := state.lines&.ordered_remove(0).unwrap(); // :SLOW
+        out.text&.clear();
+        body(out.text&);
+        out.colour = colour;
+        out.font = state.font.trunc();
+        state.lines&.push(out);
+    };
     
-    sapp := state.app&;
-    out := state.lines&.ordered_remove(0).unwrap(); // :SLOW
-    out&.clear();
-    fmt_event(out&, event, sapp);
-    state.lines&.push(out);
+    // Display all the information on the event object. 
+    report grey { out |
+        fmt_event(out, event, sapp);
+    };
     
-    if event.type == .KEY_DOWN && event.key_code == .ESCAPE {
-        sapp.quit_requested = true;
+    // The user pressing the X button is actually just an event you're free to ignore. 
+    if state.deny_quit && event.type == .QUIT_REQUESTED {
+        sapp.quit_requested = false;  // say we changed our mind... 
+        report red { out |
+            @fmt(out, "press 6 to enable quit events");
+        };
     }
+    
+    // Other than just reporting events, we can ask the app to do some useful things. 
+    // Let's map those to key presses. 
+    if(event.type != .KEY_DOWN, => return());
+    @match(event.key_code) {
+        fn ESCAPE() => {
+            // Exit the application after sending a QUIT_REQUESTED event.
+            // You could also call exit(0) but that won't call your cleanup callback. 
+            sapp.quit_requested = true;
+        }
+        fn _1() => {
+            // Change the text in the title bar. 
+            sapp.set_window_title(@fmt_cstr("set title at %", timestamp()));
+            
+            report red { out |
+                @fmt(out, "changed the title!");
+            };
+        }
+        fn _2() => {
+            // Lock/Unlock the mouse pointer so it can't/can leave the screen. 
+            // (useful when you want mouse movement to control looking around in 3d)
+            sapp.lock_mouse(!sapp.mouse.locked);  // toggle
+            
+            report red { out |
+                @fmt(out, "the mouse is %!", @if(sapp.mouse.locked, "locked", "unlocked"));
+            };
+        }
+        fn _3() => {
+            // Hide/Show the mouse pointer.
+            sapp.show_mouse(!sapp.mouse.shown);  // toggle
+            
+            report red { out |
+                @fmt(out, "the mouse is %!", @if(sapp.mouse.shown, "shown", "hidden"));
+            };
+        }
+        fn _4() => {
+            // Cycle the mouse cursor image. 
+            count :: Sapp.MouseCursor.enum_count();
+            old := sapp.mouse.cursor;
+            new := @as(Sapp.MouseCursor) @as(u32) mod(1 + @as(u32) old, count);
+            sapp.set_mouse_cursor(new);
+            
+            report red { out |
+                @fmt(out, "the mouse is % (%/%)", new, @as(u32) new, count);
+            };
+        }
+        fn _5() => {
+            // Cycle the font
+            state.font = mod(state.font + 1, builtin_font_count);
+            
+            // Show what all the characters look like in the new font. 
+            range_rev(0, 7) { i |
+                report blue { out |
+                    range(0, 32) { j |
+                        out.push(trunc(i*32+j+32));
+                    };
+                };
+            };
+            
+            report red { out |
+                @fmt(out, "the font is % (%/%)", font_names[state.font], state.font, builtin_font_count);
+            };
+        }
+        fn _6() => {
+            state.deny_quit = !state.deny_quit;
+            
+            report red { out |
+                @fmt(out, "% quit events!", @if(state.deny_quit, "ignoring", "allowing"));
+            };
+        }
+        fn _7() => {
+            // copy something to the system clipboard
+            sapp.set_clipboard_string(@fmt_cstr("copied at %", timestamp()));
+            
+            report red { out |
+                @fmt(out, "copied something to clipboard!");
+            };
+        }
+        fn _8() => {
+            // You don't need to wait for a paste event to read the system clipboard. 
+            report red { out |
+                s := sapp.get_clipboard_string();
+                @fmt(out, "read clipboard (%)\n%", s.len, s.items());
+            };
+        }
+        fn _9() => {
+            sapp.toggle_fullscreen();
+        }
+        fn _0() => {
+            state.icon = mod(state.icon + 1, 8);
+            pixels := make_a_texture(temp(), 128, 128, state.icon);
+            sapp.set_icon(@slice(pixels));
+            report red { out |
+                @fmt(out, "changed app icon (%/%)", state.icon, 8);
+            };
+        }
+        @default => ();
+    };
 };
 
-fn main() void = {
-    // TODO: when i want to support targetting wasm, this won't work because run returns immedately so the stack frame is gone :ThisIsOnTheStackWhichWontWorkOnWasm
-    state := State.zeroed();
-    state.app&.run(
-        init_cb = do_init,
-        frame_cb = do_render,
-        event_cb = do_event,
-        user_data = State.raw_from_ptr(state&),
-        window_title = "",
-        //enable_clipboard = true,
-        //clipboard_size = 8192,
-        //enable_dragndrop = true,
-        //max_dropped_files = 8,
-        //max_dropped_file_path_length = 8192,
-        allocator = general_allocator(),
-    );
-    @panic("TODO: run returned so our stack frame is junk now");
+// produce some RGBA bytes that form a pretty pattern 
+fn make_a_texture(a: Alloc, w: i64, h: i64, n: i64) Sapp.ImageDesc = {
+    p := a.alloc_init(u32, w*h) { i |
+        y, x := i.div_mod(w);
+        c := bit_xor(x, y).shift_left(n);
+        pack_rgba(c, c, c, 255)
+    };
+    (pixels = p.interpret_as_bytes(), width = w, height = h)
 }
 
-fn driver(vtable: *ImportVTable) void = 
-    build_for_graphics(vtable, "examples/app_events.fr");
+// TODO: not consistant order (when you change the code).
+//       that makes sense i guess, it's a hashtable based on the VarId so compilation order matters. 
+fn load_all_default_fonts(font_bytes: [][]u8, font_names: [][]u8) void = {
+    i := 0;
+    inline_for (get_constants(Sdtx.font)) { $name | 
+        want :: {
+            _, type := get_constant(Sdtx.font, name[]).unwrap(); 
+            type == []u8
+        };
+        @if(want) {
+            font_bytes[i] = ::get_constant([]u8, Sdtx.font, name[]).unwrap();
+            font_names[i] = ::name[].str();
+            i += 1;
+        };
+    };
+    @debug_assert_eq(i, builtin_font_count);
+}
 
 #include_std("backend/lib.fr");
-
-#use("@/lib/sys/fs.fr");

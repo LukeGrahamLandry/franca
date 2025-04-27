@@ -1,3 +1,36 @@
+## (Apr 25/26)
+
+- port example programs to use the new app.fr
+- debugtext: don't hold on to the pixels after copying into a texture. 
+make it easy to change the font data after setup if you want.
+don't limit you to 8 fonts. like none of that really matters because anything real 
+would use a real font but also the limits are arbitrary and i find that makes
+the code more confusing cause im always looking for the place where it matters. 
+- app_events: extend the example to use features where you get to change stuff about your window. 
+makes it less minimal which is sad but i figure its more useful if it tries to use 
+every feature possible so i can at least vaguely test them. 
+- TODO: should see if sokol_app also resets the cursor image when you change the window title. 
+- started poking at sokol_gfx.h, there sure is a lot of pool stuff that would be a lot less painful in a language with generics. 
+`_SG_TRACE_ARGS` is gonna be a great thing to play with comptime for. 
+- ive discovered wsl really doesn't like my compiler. 12 seconds is like a long time. whats going on. 
+- finish copy/paste, file drop event, toggle full screen
+- somehow objc blocks are forbidden knowledge. from my brief googling it seems 
+theres no runtime function or method that will let me create one out of a c function pointer. 
+and yet i apparently need to pass one to addLocalMonitorForEventsMatchingMask if 
+i want it to not randomly ignore all key up events while holding command. 
+why are we doing garbage waste of time suddenly? 
+- if i get to the point of making it work on linux i'd really like to be able to 
+do the x11 thing with orb. 
+this worked: https://www.nickgregorich.com/posts/gui-in-orbstack-machines/
+i gave up on the ssh key thing and had to make myself a password, 
+which is hard when you don't have a password. `sudo passwd luke`
+- weird that when i messed up my set_icon CGImageCreate flags it was different jitted and aot.
+- doing set_icon at startup doesn't work. 
+you get weird blank page image, but so does sokol-samples/sapp/icon-sapp.c 
+(and it's not even trying to set it at first) so it's not my fault i guess. 
+maybe blank page vs little terminal is something about how long it takes the process to open a window, 
+and it's just not allowing you to set the icon before calling run(). 
+
 ## (Apr 23/24) porting sokol_app
 
 - stop copy pasting around the driver that links the graphics libraries. 

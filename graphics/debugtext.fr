@@ -3,19 +3,27 @@
 //! zlib/libpng license. Copyright (c) 2020 Andre Weissflog.
 // 
 // Changes from Sokol:
-// - remove printf-like functions. i don't have c-style varargs. can use @fmt into a temp buffer instead.
+// - remove printf-like functions. i don't like c-style varargs. can use @fmt into a temp buffer instead.
 // - remove getters/setters for ctx's pos/color.
 // - remove global _sdtx and context pool. instead pass the context explicitly to every call. 
+//   (caller manages the memory for the contexts but maybe that's annoying, idk)
 // - remove byte array clutter. load font data from readable string. 
+// - removed the 8 font limit
+//
+// For serious programs you probably want to bring your own (perhaps more curvy) 
+// text rendering system but it's very convenient to be able to just put stuff on 
+// the screen if you want to quickly look at some values that change every frame. 
+// 
+// TODO: some sort of centralized logging system when returning an error. 
+//       (stick it in the dynamic environment and use it elsewhere as well)
 //
 
-max_fonts   :: 8; 
 init_cookie :: 0xACBAABCB;  // purposely different from the c version
 
 /* Describes the initialization parameters of a rendering context. Creating
-    * additional rendering contexts is useful if you want to render in
-    * different sokol-gfx rendering passes, or when rendering several layers
-    * of text. */
+* additional rendering contexts is useful if you want to render in
+* different sokol-gfx rendering passes, or when rendering several layers
+* of text. */
 ContextDesc :: @struct(
     max_commands:  i32 = 4096,              // max number of draw commands, each layer transition counts as a command
     char_buf_size: i32 = 4096,              // max number of characters rendered in one frame
@@ -27,15 +35,16 @@ ContextDesc :: @struct(
     sample_count:  i32 = 0,                 // MSAA sample count of target render pass
 );
 
-/* Describes the sokol-debugtext API initialization parameters. 
-    * Passed to the sdtx_setup() function. */
 Desc :: @struct(
-    fonts := Array([]u8, max_fonts).zeroed(), // up to 8 fonts descriptions. 
-    context: ContextDesc,                     // the default context creation parameters
+    fonts: [][]u8, // packed font data (see data/fonts.fr for builtins)
+    context: ContextDesc = (),  // the default context creation parameters
     allocator: Alloc,
 );
 
-/* bits           FONT DATA FORMAT
+// Builtin fonts (you can provide your own as well).
+font :: import("@/graphics/data/fonts.fr");
+
+/* bits       PACKED FONT DATA FORMAT
 7 6 5 4 3 2 1 0
 . . . X X . . .     byte 0: 0x18
 . . X X X X . .     byte 1: 0x3C
@@ -69,7 +78,7 @@ Context :: @struct(
     pos: Float2,         // in character grid coordinates
     tab_width: f32,
     color: u32,               // 0xAABBGGRR
-    franca_dynamic_context: rawptr,
+    franca_dynamic_context: rawptr,  // TODO: remove this when i port sokol_gfx.h to franca 
 );
 Common :: @rec @struct(
     init_cookie: u32,
@@ -80,11 +89,8 @@ Common :: @rec @struct(
     // This is not special. It's just some storage you can use to avoid an 
     // extra allocation in the simple case where you only want a single context. 
     default_context: Context,
-    font_pixels: []u8,
+    font_count: i64,  // This can't change dynamically because they're baked into a gpu texture in setup()
 );
-
-// Builtin fonts (you can provide your own as well).
-font :: import("@/graphics/data/fonts.fr");
 
 Shaders :: @struct(
     InV  :: @struct(position: Vec2 #attribute(0), texcoord0: Vec2 #attribute(1), color0: Vec4 #attribute(2)),
@@ -174,14 +180,16 @@ fn destroy(ctx: *Context) void = {
     ctx[] = Context.zeroed();
 }
 
-fn sdtx_setup(sdtx: *Common, desc: *Desc) void = {
+// SAFETY: do not move `sdtx` after calling this (it stashes an internal pointer)
+fn setup(sdtx: *Common, desc: Desc) void = {
     c := desc.context&;
     @debug_assert_gt(c.canvas_width, 0.0, "bad canvas_width");
     @debug_assert_gt(c.canvas_height, 0.0, "bad canvas_height");
     @debug_assert_gt(c.char_buf_size, 0, "bad char_buf_size");
     sdtx[] = zeroed(Common);
     sdtx.init_cookie = init_cookie;
-    sdtx.desc = desc[];
+    sdtx.desc = desc; 
+    desc := sdtx.desc&; 
     sg_push_debug_group("sokol-debugtext");
 
     // TODO: sketchy. im using a newer version of debugtext than the rest of the stuff i have so these field names are from a different version than the shaders are. 
@@ -222,28 +230,8 @@ fn sdtx_setup(sdtx: *Common, desc: *Desc) void = {
     SG_INVALID_ID: u32 = 0;
     @debug_assert(sdtx.shader.id != SG_INVALID_ID);
 
-    // unpack font data
-    unpacked_font_size :: 256 * 8 * 8;
-    sdtx.font_pixels = desc.allocator.alloc(u8, max_fonts * unpacked_font_size);
-    range(0, max_fonts) { i |
-        font_desc := sdtx.desc.fonts&[i];
-        out_pixels := sdtx.font_pixels.slice(i * unpacked_font_size, (i + 1) * unpacked_font_size);
-        if font_desc.len != 0 {
-            unpack_font(font_desc, out_pixels);
-        } else {
-            out_pixels.set_bytes(0xFF);
-        };
-    };
-
-    // create font texture and sampler
-    img_desc := SgImageDesc.zeroed();
-    img_desc.width = 256 * 8;
-    img_desc.height = max_fonts * 8;
-    img_desc.pixel_format = .R8;
-    img_desc.data.subimage&.index(0).index(0)[] = (ptr = u8.raw_from_ptr(sdtx.font_pixels.ptr), size = sdtx.font_pixels.len);
-    img_desc.label = "sdtx-font-texture";
-    sdtx.font_img = sg_make_image(img_desc&);
-    @debug_assert(sdtx.font_img.id != SG_INVALID_ID);
+    sdtx.set_font_data(desc.fonts);
+    desc.fonts = empty();  // made the texture so we don't need the input bytes anymore. 
 
     smp_desc := SgSamplerDesc.zeroed();
     smp_desc.min_filter = .NEAREST;
@@ -259,8 +247,35 @@ fn sdtx_setup(sdtx: *Common, desc: *Desc) void = {
     init_context(sdtx, sdtx.default_context&, sdtx.desc.context&);
 }
 
+fn set_font_data(sdtx: *Common, fonts: [][]u8) void = {
+    sdtx.font_img = bake_font_texture(fonts);
+    sdtx.font_count = fonts.len;
+}
+
+bake_font_texture :: fn(fonts: [][]u8) SgImage = {
+    // unpack font data
+    // we just need this to init the texture, so throw it away immediately after
+    unpacked_font_size :: 256 * 8 * 8;
+    font_count := fonts.len;
+    font_pixels := temp().alloc(u8, font_count * unpacked_font_size);
+    enumerate fonts { i, font_desc |
+        out_pixels := font_pixels.slice(i * unpacked_font_size, (i + 1) * unpacked_font_size);
+        unpack_font(font_desc[], out_pixels);
+    };
+    
+    img_desc := SgImageDesc.zeroed();
+    img_desc.width = 256 * 8;
+    img_desc.height = font_count.trunc() * 8;
+    img_desc.pixel_format = .R8;
+    img_desc.data.subimage&.index(0).index(0)[] = (ptr = u8.raw_from_ptr(font_pixels.ptr), size = font_pixels.len);
+    img_desc.label = "sdtx-font-texture";
+    font_img := sg_make_image(img_desc&);
+    @debug_assert(font_img.id != SG_INVALID_ID);
+    font_img
+}
+
 // If you made multiple contexts, it's your job to destroy them.
-fn sdtx_shutdown(sdtx: *Common) void = {
+fn shutdown(sdtx: *Common) void = {
     ::ptr_utils(Common);
     @debug_assert(init_cookie == sdtx.init_cookie);
     if !sdtx.default_context.common.is_null() {
@@ -352,7 +367,7 @@ fn put(ctx: *Context, str: []u8) void #inline =
 
 // unpack linear 8x8 bit-per-pixel font data into 2D byte-per-pixel texture data
 unpack_font :: fn(font_desc: []u8, out_pixels: []u8) void #once = {
-    @debug_assert(256 * 8 == font_desc.len);
+    @assert_eq(256 * 8, font_desc.len, "Invalid font data (need 8 bytes per char * 256 chars)");
     ptr := font_desc.ptr;
     range(0, 255) { chr |
         range(0, 8) { line |
@@ -403,9 +418,9 @@ fn render_char(ctx: *Context, c: u8) void #once = {
         // glyph width and height in font texture space
         // NOTE: the '+1' and '-2' fixes texture bleeding into the neighboring font texture cell
         uvw: u16 = @as(i64) 0x10000 / 0x100;
-        uvh: u16 = @as(i64) 0x10000 / max_fonts;
+        uvh: u16 = trunc(@as(i64) 0x10000 / ctx.common.font_count);
         u0: u16 = (c.zext() * uvw) + 1;
-        v0: u16 = (ctx.font.trunc() * uvh) + 1;
+        v0: u16 = trunc((ctx.font.intcast() * uvh.zext()) + 1);
         u1 := (u0 + uvw) - 2;
         v1 := (v0 + uvh) - 2;
         c := ctx.color;

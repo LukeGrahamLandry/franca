@@ -4,14 +4,15 @@
 //
 // Changes from Sokol
 // - no dependency on an objective-c compiler
+// - wait until after setActivationPolicy to set the startup icon/fullscreen (otherwise it doesn't work)
 //
-// TODO: draw the rest of the fucking owl
 // TODO: figure out where the objective c compiler inserts reference counting instructions. 
 //       i'm probably leaking everything or letting it free everything out from under me. 
-//       :FUCKED
-// TODO: lock mouse, hide mouse, toggle full screen, paste, drop files, set icon, 
-//       keyup_monitor, timing, window_title, macos_update_window_title, set_mouse_cursor, 
-//       macos_set_clipboard_string
+// TODO: timing
+// TODO: keep the changed cursor if the mouse leaves and then comes back 
+//      (maybe the resize <-> is eating it when you mouse over the border)
+// TODO: setting the title also resets the mouse cursor to default. 
+// TODO: i kinda want to let you paste images NSPasteboardTypePNG
 // TODO: 86760b60423d18f07f2fdb0a4f00553d4229034a
 
 #include_std("lib/sys/objective_c.fr");
@@ -32,6 +33,7 @@ Impl :: @struct(
     env: rawptr,
 );
 
+// TODO: these #tags don't do anything but maybe they should generate register_objective_c_classes()
 Classes :: @struct(
     MyAppDelegate: ObjCClass #declare #extends(NSObject) #implements(NSApplicationDelegate),
     MyWindow: ObjCClass #declare #extends(NSWindow),
@@ -48,10 +50,15 @@ Classes :: @struct(
     NSString: ObjCClass,
     NSArray: ObjCClass,
     NSTrackingArea: ObjCClass,
+    NSURL: ObjCClass,
+    NSImage: ObjCClass,
+    NSImageView: ObjCClass,
+    NSConcreteGlobalBlock: ObjCClass,
     NSPasteboardTypeFileURL: ObjCId, 
     NSPasteboardTypeString: ObjCId,
     kCAFilterNearest: ObjCId,
-    NSApp: ObjCId,  // instance the represents the current app
+    kCFAllocatorDefault: ObjCId,
+    NSApp: ObjCId,  // instance that represents the current app
 );
 
 fn run(m: *Impl, desc: *Sapp.Desc) Never = {
@@ -65,38 +72,38 @@ fn run(m: *Impl, desc: *Sapp.Desc) Never = {
     // sanity
     inline_for_enum Classes.Fields() { $it |
         v := Classes.get_field(c, it[])[];
-        @debug_assert_ne(0, bit_cast_unchecked(@type v, i64, v), "missing %", it[]);
+        xxx := :: it[].name_str();
+        if xxx != "kCFAllocatorDefault" {  // UGH
+            @debug_assert_ne(0, bit_cast_unchecked(@type v, i64, v), "missing %", it[]);
+        };
     };
 
-    // set the application dock icon as early as possible, otherwise
-    // the dummy icon will be visible for a short time
-    //sapp.set_icon(sapp.desc.icon&);  // TODO
     m.app_dlg = @objc init(@objc alloc(c.MyAppDelegate));
     object_setInstanceVariable(m.app_dlg, "franca_sapp", Impl.raw_from_ptr(m));
     @objc c.NSApp.setDelegate(m.app_dlg);
 
-    // TODO: figure out what type it wants me to pass it for callbacks
-    /*
     // workaround for "no key-up sent while Cmd is pressed" taken from GLFW:
-    //NSEvent* (^keyup_monitor)(NSEvent*) = ^NSEvent* (NSEvent* event) {
-    keyup_monitor: rawptr : fn(event: ObjCId) ObjCId = {
-        flags := @objc @as(i64) event.modifierFlags();
-        NSEventModifierFlagCommand :: 1.shift_left(20);
-        if flags.bit_and(NSEventModifierFlagCommand) != 0 {
-            @objc sendEvent(@objc NSApp.keyWindow(), event);
-        };
-        event
-    };
     NSEventMaskKeyUp :: 1.shift_left(11);
-    
-    m.keyup_monitor = @objc c.NSEvent.addLocalMonitorForEventsMatchingMask(NSEventMaskKeyUp, handler = keyup_monitor);
-    */
-    
+    B :: please_just_make_a_fucking_block__LEAK;
+    aBlock := B(sapp.desc.allocator, Impl.raw_from_ptr(m), @as(rawptr) keyup_monitor, c.NSConcreteGlobalBlock);
+    m.keyup_monitor = @objc c.NSEvent.addLocalMonitorForEventsMatchingMask(NSEventMaskKeyUp, handler = aBlock);
+
     @objc c.NSApp.run();
     // NOTE: [NSApp run] never returns, instead cleanup code
     // must be put into applicationWillTerminate
     unreachable()
 }
+
+keyup_monitor :: fn(self: *Block_literal_1, event: ObjCId) ObjCId = {
+    macos := Impl.ptr_from_raw(self.userdata);
+    set_dynamic_context(macos.env);
+    flags := @objc @as(i64) event.modifierFlags();
+    NSEventModifierFlagCommand :: 1.shift_left(20);
+    if flags.bit_and(NSEventModifierFlagCommand) != 0 {
+        @objc sendEvent(@objc macos.classes.NSApp.keyWindow(), event);
+    };
+    event
+};
 
 // TODO: if i decide talking to objective c is something i want to be good at, 
 //       i can definitely do a fancy comptime thing to make this not suck. 
@@ -113,6 +120,9 @@ fn register_objective_c_classes(self: *Impl) void = {
     c.MTKView = objc_getClass("MTKView");
     c.NSArray = objc_getClass("NSArray");
     c.NSTrackingArea = objc_getClass("NSTrackingArea");
+    c.NSURL = objc_getClass("NSURL");    
+    c.NSImage = objc_getClass("NSImage");
+    c.NSImageView = objc_getClass("NSImageView");
     
     c.MyAppDelegate = objc_allocateClassPair(c.NSObject, "FrancaAppDelegate", 0);
     c.MyWindow = objc_allocateClassPair(c.NSWindow, "FrancaWindow", 0);
@@ -183,6 +193,7 @@ fn register_objective_c_classes(self: *Impl) void = {
     Dyn :: import("@/lib/dynamic_lib.fr");
     a := Dyn'open("/System/Library/Frameworks/AppKit.framework/AppKit").expect("open AppKit");
     q := Dyn'open("/System/Library/Frameworks/QuartzCore.framework/QuartzCore").expect("open QuartzCore");
+    g := Dyn'open("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics").expect("open CoreGraphics");
     
     c.kCAFilterNearest = {  // HACK
         ObjCId.ptr_from_raw(@as(rawptr) q.dlsym("kCAFilterNearest"))[]
@@ -193,6 +204,14 @@ fn register_objective_c_classes(self: *Impl) void = {
     c.NSPasteboardTypeString = {  // HACK
         ObjCId.ptr_from_raw(@as(rawptr) a.dlsym("NSPasteboardTypeString"))[]
     };
+    objc := Dyn'open("/usr/lib/libobjc.dylib").expect("open objc");
+    c.NSConcreteGlobalBlock = {  // HACK
+        bit_cast_unchecked(rawptr, ObjCClass, @as(rawptr) objc.dlsym("_NSConcreteGlobalBlock"))
+    };
+    c.kCFAllocatorDefault = {  // HACK
+        ObjCId.ptr_from_raw(@as(rawptr) g.dlsym("kCFAllocatorDefault"))[]
+    };
+    
     
     /*
     // IMPORTANT: this #import fn() trick doesn't work aot because you always get a shim 
@@ -217,6 +236,7 @@ fn macos_discard_state(m: *Impl) void = {
         @objc m.classes.NSEvent.removeMonitor(m.keyup_monitor);
         // NOTE: removeMonitor also releases the object
         m.keyup_monitor = ObjCId.zeroed();
+        // TODO: this still leaks the block because i said it was global
     };
     @objc m.tracking_area.release();
     @objc m.app_dlg.release();
@@ -228,23 +248,21 @@ fn macos_discard_state(m: *Impl) void = {
 }
 
 fn init_cursors(self: *Impl) void = {
-    NSCursor := self.classes.NSCursor;
+    C := self.classes.NSCursor;
     c := self.cursors&;
     
     c[.DEFAULT] = ObjCId.zeroed(); // not a bug
-    c[.ARROW] = @objc NSCursor.arrowCursor();
-    c[.IBEAM] = @objc NSCursor.IBeamCursor();
-    c[.CROSSHAIR] = @objc NSCursor.crosshairCursor();
-    c[.POINTING_HAND] = @objc NSCursor.pointingHandCursor();
-    // TODO: sokol uses _windowResizeNorthWestSouthEastCursor, _windowResizeNorthEastSouthWestCursor, _windowResizeNorthSouthCursor, _windowResizeEastWestCursor
+    c[.ARROW] = @objc C.arrowCursor();
+    c[.IBEAM] = @objc C.IBeamCursor();
+    c[.CROSSHAIR] = @objc C.crosshairCursor();
+    c[.POINTING_HAND] = @objc C.pointingHandCursor();
     // TODO: use [NSCursor frameResizeCursorFromPosition:inDirections:] ?
-    hand_for_now := @objc NSCursor.closedHandCursor();
-    c[.RESIZE_EW] = hand_for_now;
-    c[.RESIZE_NS] = hand_for_now;
-    c[.RESIZE_NWSE] = hand_for_now;
-    c[.RESIZE_NESW] = hand_for_now;
-    c[.RESIZE_ALL] = hand_for_now;
-    c[.NOT_ALLOWED] = @objc NSCursor.operationNotAllowedCursor();
+    c[.RESIZE_EW] = @objc C._windowResizeEastWestCursor();
+    c[.RESIZE_NS] = @objc C._windowResizeNorthSouthCursor();
+    c[.RESIZE_NWSE] = @objc C._windowResizeNorthWestSouthEastCursor();
+    c[.RESIZE_NESW] = @objc C._windowResizeNorthEastSouthWestCursor();
+    c[.RESIZE_ALL] = @objc C.closedHandCursor();
+    c[.NOT_ALLOWED] = @objc C.operationNotAllowedCursor();
 }
 
 fn macos_mods(sapp: *Sapp.Common, ev: ObjCId) Sapp.Modifiers = { // ev: NSEvent
@@ -348,46 +366,49 @@ fn update_dimensions(macos: *Impl) void = {
     };
 }
 
-fn macos_toggle_fullscreen() void = {
+fn toggle_fullscreen(macos: *Impl) void = {
     /* NOTE: the sapp.fullscreen flag is also notified by the
        windowDidEnterFullscreen / windowDidExitFullscreen
-       event handlers
-    */
+       event handlers */
+    sapp := macos.common();
     sapp.fullscreen = !sapp.fullscreen;
     @objc macos.window.toggleFullScreen(ObjCId.zeroed());
 }
 
-fn macos_set_clipboard_string(str: Str) void = {
+fn set_clipboard_string(macos: *Impl, s: CStr) void = {
     pool := objc_autoreleasePoolPush();
-    NSPasteboard* pasteboard = [NSPasteboard generalPasteboard];
-    [pasteboard declareTypes:@[NSPasteboardTypeString] owner:nil];
-    [pasteboard setString:@(str) forType:NSPasteboardTypeString];
+    c := macos.classes&;
+    p := @objc c.NSPasteboard.generalPasteboard();
+    types := @objc c.NSArray.arrayWithObject(c.NSPasteboardTypeString);
+    @objc p.declareTypes(types, owner = zeroed(ObjCId));
+    s := @objc c.NSString.stringWithUTF8String(s);
+    @objc p.setString(s, forType = c.NSPasteboardTypeString);
     objc_autoreleasePoolPop(pool);
 }
 
-fn get_clipboard_string(self: *Impl) Str = {
-    @panic("macos_get_clipboard_string")/*
-    sapp := self.common();
-    SOKOL_ASSERT(sapp.clipboard.buffer);
+fn get_clipboard_string(self: *Impl) *RawList(u8) = {
+    sapp, c := (self.common(), self.classes&);
     pool := objc_autoreleasePoolPush();
-    sapp.clipboard.buffer[0] = 0;
+    buf := sapp.clipboard.buffer&;
+    buf.len = 0;
     pasteboard := @objc c.NSPasteboard.generalPasteboard();
-    if (![[pasteboard types] containsObject:NSPasteboardTypeString]) {
-        objc_autoreleasePoolPop(pool);
-        return sapp.clipboard.buffer;
+    types := @objc pasteboard.types();
+    if @objc @as(bool) types.containsObject(c.NSPasteboardTypeString) {
+        s := @objc pasteboard.stringForType(c.NSPasteboardTypeString);
+        // TODO: warn if paste fails somehow
+        if !s.is_null() {
+            s := @objc @as(CStr) s.UTF8String();
+            s := s.str();
+            buf.reserve(s.len, sapp.desc.allocator);
+            buf.len = s.len;
+            buf.items().copy_from(s);
+        };
     }
-    str := @objc pasteboard.stringForType(c.NSPasteboardTypeString);
-    if str.is_null() {
-        objc_autoreleasePoolPop(pool);
-        return(sapp.clipboard.buffer);
-    };
-    sapp.strcpy([str UTF8String], sapp.clipboard.buffer, sapp.clipboard.buf_size);
     objc_autoreleasePoolPop(pool);
-    sapp.clipboard.buffer */
+    buf
 }
 
-fn macos_update_window_title() void = {
-    title: CStr = "TODO: sapp.macos_update_window_title";  // sapp.window_title
+fn set_window_title(macos: *Impl, title: CStr) void = {
     NSString := macos.classes.NSString;
     title := @objc NSString.stringWithUTF8String(title);
     @objc macos.window.setTitle(title);
@@ -446,6 +467,7 @@ fn lock_mouse(macos: *Impl, lock: bool) void = {
     NSCursor := macos.classes.NSCursor;
     fn CGAssociateMouseAndMouseCursorPosition(connected: bool) void #import("CoreGraphics");
     CGAssociateMouseAndMouseCursorPosition(!sapp.mouse.locked);
+    // TODO: why not allow locking the mouse without hiding it? maybe that's never what you want? 
     if sapp.mouse.locked {
         @objc NSCursor.hide();
     } else {
@@ -455,54 +477,59 @@ fn lock_mouse(macos: *Impl, lock: bool) void = {
 
 ::if(ObjCId);
 
-fn macos_update_cursor(cursor: Sapp.MouseCursor, shown: bool) void = {
+fn update_cursor(macos: *Impl, cursor: Sapp.MouseCursor, shown: bool) void = {
+    sapp := macos.common();
     NSCursor := macos.classes.NSCursor;
     // show/hide cursor only if visibility status has changed (required because show/hide stacks)
     if shown != sapp.mouse.shown {
         if(shown, => @objc NSCursor.unhide(), => @objc NSCursor.hide());
     };
     // update cursor type
-    cursor_obj := macos.cursors[cursor];
+    cursor_obj := macos.cursors&[cursor];
     if cursor_obj.is_null() {
         cursor_obj = @objc NSCursor.arrowCursor();
     };
     @objc cursor_obj.set();
 }
 
-// TODO
-fn set_icon(impl: *Impl, icon_desc: *Sapp.IconDesc, num_images: i64) void = {/*
+fn set_icon(macos: *Impl, icon_desc: []Sapp.ImageDesc) void = {
+    c := macos.classes&;
     dock_tile := @objc c.NSApp.dockTile();
     wanted := @objc @as(CGSize) dock_tile.size();
-    img_index := sapp.image_bestmatch(icon_desc->images, num_images, wanted.width, wanted.height);
-    img_desc := icon_desc.images[img_index]&;
+    img_desc := image_bestmatch(icon_desc, wanted.width.int(), wanted.height.int());
 
-    CGColorSpaceRef cg_color_space = CGColorSpaceCreateDeviceRGB();
-    CFDataRef cf_data = CFDataCreate(kCFAllocatorDefault, (const UInt8*)img_desc->pixels.ptr, (CFIndex)img_desc->pixels.size);
-    CGDataProviderRef cg_data_provider = CGDataProviderCreateWithCFData(cf_data);
-    CGImageRef cg_img = CGImageCreate(
-        (size_t)img_desc->width,    // width
-        (size_t)img_desc->height,   // height
-        8,                          // bitsPerComponent
-        32,                         // bitsPerPixel
-        (size_t)img_desc->width * 4,// bytesPerRow
-        cg_color_space,             // space
-        kCGImageAlphaLast | kCGImageByteOrderDefault,  // bitmapInfo
-        cg_data_provider,           // provider
-        NULL,                       // decode
-        false,                      // shouldInterpolate
-        kCGRenderingIntentDefault);
+    // :PastedMacosBindings
+    // TODO: why not just CGDataProviderCreateWithData?
+    fn CGColorSpaceCreateDeviceRGB() ObjCId #import("CoreGraphics"); // CGColorSpaceRef
+    fn CFDataCreate(allocator: ObjCId, data: *u8, size: i64) ObjCId #import("CoreGraphics"); // CFDataRef
+    fn CGDataProviderCreateWithCFData(cf_data: ObjCId) ObjCId #import("CoreGraphics"); // CGDataProviderRef
+    fn CGImageCreate(width: i64, height: i64, bitsPerComponent: i64, bitsPerPixel: i64, 
+        bytesPerRow: i64, space: ObjCId, bitmapInfo: i64, provider: ObjCId, decode: i64, 
+        shouldInterpolate: bool, intent: u32) ObjCId #import("CoreGraphics"); // CGImageRef
+    // TODO: are these different than an objc release() message? 
+    fn CFRelease(it: ObjCId) void #import("CoreGraphics");
+    fn CGDataProviderRelease(it: ObjCId) void #import("CoreGraphics");
+    fn CGColorSpaceRelease(it: ObjCId) void #import("CoreGraphics");
+    fn CGImageRelease(it: ObjCId) void #import("CoreGraphics");
+    
+    cg_color_space := CGColorSpaceCreateDeviceRGB();
+    cf_data := CFDataCreate(c.kCFAllocatorDefault, img_desc.pixels.ptr, img_desc.pixels.len);
+    cg_data_provider := CGDataProviderCreateWithCFData(cf_data);
+    bitmapInfo := bit_or(3, 1.shift_left(12));
+    kCGRenderingIntentDefault :: 0;
+    flags  := bit_or(3, 8192); // kCGImageAlphaLast|kCGBitmapByteOrder32Little
+    cg_img := CGImageCreate(img_desc.width, img_desc.height, 8, 32, img_desc.width * 4, cg_color_space, flags, cg_data_provider, 0, false, kCGRenderingIntentDefault);
     CFRelease(cf_data);
     CGDataProviderRelease(cg_data_provider);
     CGColorSpaceRelease(cg_color_space);
 
-    c := macos.classes&;
     ns_image := @objc c.NSImage.alloc();
-    ns_image := @objc ns_image.initWithCGImage(cg_img, size = dock_tile.size);
-    dock_tile.contentView = @obc_msg c.NSImageView.imageViewWithImage(ns_image);
-    @obc_msg dock_tile.display();
-    sapp.OBJC_RELEASE(ns_image);
+    ns_image := @objc ns_image.initWithCGImage(cg_img, size = @objc @as(i64) dock_tile.size());
+    @objc dock_tile.setContentView(@objc c.NSImageView.imageViewWithImage(ns_image));
+    @objc dock_tile.display();
+    @objc ns_image.release();
     CGImageRelease(cg_img);
-*/}
+}
 
 fn macos_frame(sapp: *Sapp.Common) void = {
     sapp.frame();
@@ -533,6 +560,7 @@ applicationDidFinishLaunching :: fn(app_delegate: ObjCId, sel: ObjCSelector, _aN
     sapp, macos := GET(app_delegate);
     c := macos.classes&;
     macos.init_cursors();
+    
     screen := @objc c.NSScreen.mainScreen();
     if ((sapp.window_width == 0) || (sapp.window_height == 0)) {
         // use 4/5 of screen size (if they explicitly pass zeroes)
@@ -553,8 +581,7 @@ applicationDidFinishLaunching :: fn(app_delegate: ObjCId, sel: ObjCSelector, _aN
     macos.window = w;
     @debug_assert(!w.is_null());
     @objc w.setReleasedWhenClosed(false); // this is necessary for proper cleanup in applicationWillTerminate
-    title := @objc c.NSString.stringWithUTF8String(sapp.desc.window_title);
-    @objc w.setTitle(title);
+    macos.set_window_title(sapp.desc.window_title);
     @objc w.setAcceptsMouseMovedEvents(true);
     @objc w.setRestorable(true);
 
@@ -585,11 +612,18 @@ applicationDidFinishLaunching :: fn(app_delegate: ObjCId, sel: ObjCSelector, _aN
     @objc layer.setMagnificationFilter(c.kCAFilterNearest);
     @objc w.center();
     sapp.valid = true;
-    if sapp.fullscreen {
-        /* ^^^ on GL, this already toggles a rendered frame, so set the valid flag before */
-        @objc w.toggleFullScreen(app_delegate);
-    };
     @objc c.NSApp.setActivationPolicy(0); // NSApplicationActivationPolicyRegular
+    
+    if sapp.fullscreen {
+        @println("full screen");
+        /* ^^^ on GL, this already toggles a rendered frame, so set the valid flag before */
+        @objc w.toggleFullScreen(app_delegate);  // this doesn't work before setActivationPolicy
+    };
+    
+    // "set the application dock icon as early as possible, otherwise the dummy icon will be visible for a short time" 
+    // but this doesn't work if you do it before setActivationPolicy so it's moved here. 
+    sapp.set_icon(sapp.desc.icon);
+    
     @objc c.NSApp.activateIgnoringOtherApps(true);
     nil := ObjCId.zeroed();
     @objc w.makeKeyAndOrderFront(nil);
@@ -709,41 +743,38 @@ draggingEntered :: fn(window: ObjCId, sel: ObjCSelector, sender: ObjCId) i64 =
 draggingUpdated :: fn(window: ObjCId, sel: ObjCSelector, sender: ObjCId) i64 = 
     1; // NSDragOperationCopy
 
-//- (BOOL)performDragOperation:(id<NSDraggingInfo>)sender {
 performDragOperation :: fn(window: ObjCId, sel: ObjCSelector, sender: ObjCId) bool = {
-@panic("TODO:");
-/*
     //#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 101300
-    pboard := @objc sender.draggingPasteboard();  // NSPasteboard *
-    types := @objc pboard.getTypes();
-    can_drop := @objc @as(bool) types.containsObject(c.NSPasteboardTypeFileURL);
+    sapp, macos := GET(window);
+    d, a, c  := (sapp.drop&, sapp.desc.allocator, macos.classes&);
+    pboard   := @objc sender.draggingPasteboard();  // NSPasteboard *
+    can_drop := @objc @as(bool) (@objc pboard.types()).containsObject(c.NSPasteboardTypeFileURL);
     if(!can_drop, => return(false));
-    sapp.clear_drop_buffer();
-    sapp.drop.num_files = ((int)pboard.pasteboardItems.count > sapp.drop.max_files) ? sapp.drop.max_files : (int)pboard.pasteboardItems.count;
-    drop_failed := false;
-    if true {
-        break :: local_return;
-        range(0, sapp.drop.num_files) { i |
-            NSURL *fileUrl = [NSURL fileURLWithPath:[pboard.pasteboardItems[(NSUInteger)i] stringForType:NSPasteboardTypeFileURL]];
-            if (!sapp.strcpy(fileUrl.standardizedURL.path.UTF8String, sapp.dropped_file_path_ptr(i), sapp.drop.max_path_length)) {
-                sapp.ERROR(DROPPED_FILE_PATH_TOO_LONG);
-                drop_failed = true;
-                break();
-            }
-        }
-    };
-    if !drop_failed && sapp.events_enabled() {
-        sapp.macos_mouse_update_from_nspoint(sender.draggingLocation, true);
+    files := @objc pboard.pasteboardItems();
+    d.num_files = @objc @as(i64) files.count();
+    
+    d.buffer.len = 0;
+    d.starts.len = 0;
+    d.starts&.reserve(d.num_files, a);
+    range(0, d.num_files) { i |
+        d.starts&.push(d.buffer.len, a);
+        it := @objc files.objectAtIndex(i);
+        it := @objc it.stringForType(c.NSPasteboardTypeFileURL);
+        it := @objc c.NSURL.fileURLWithPath(it);
+        it := @objc it.standardizedURL();
+        it := @objc it.path();
+        it := @objc @as(CStr) it.UTF8String();
+        d.buffer&.push_all(it.str(), a);
+        d.buffer&.push(0, a); // for good luck
+    }
+    d.starts&.push(d.buffer.len, a);  // for the end of last one
+    if sapp.events_enabled() {
+        sapp.macos_mouse_update_from_nspoint(@objc @as(CGPoint) sender.draggingLocation(), true);
         sapp.init_event(.FILES_DROPPED);
-        sapp.event.modifiers = sapp.macos_mods(nil);
-        sapp.call_event(&sapp.event);
-    };
-    if drop_failed {
-        sapp.clear_drop_buffer();
-        sapp.drop.num_files = 0;
+        sapp.event.modifiers = sapp.macos_mods(ObjCId.zeroed());
+        sapp.call_event(sapp.event&);
     };
     true
-    */
 }
 
 // TODO: for gl: override timerFired and prepareOpenGL on view
@@ -1136,7 +1167,7 @@ fn keytable(self: *Impl) []Sapp.Keycode = {
     )
 }
 
-// TODO: this is a paste from examples/soft_draw.fr do i want to write more official bindings to the apple stuff? 
+// TODO: this is a paste from examples/soft_draw.fr do i want to write more official bindings to the apple stuff? :PastedMacosBindings
 CGSize  :: @struct(width: f64, height: f64);
 CGPoint :: @struct(x: f64, y: f64);
 CGRect  :: @struct(origin: CGPoint, size: CGSize);  // same as NSRect
