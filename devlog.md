@@ -1,3 +1,21 @@
+- im ready to give up. 
+```
+if (!is_apple_gpu) {
+    _sg.mtl.use_shared_storage_mode = false;
+} else {
+    _sg.mtl.use_shared_storage_mode = true;
+}
+```
+- something i don't understand
+```
+bnd.pip = _sg_lookup_pipeline(&_sg.pools, _sg.cur_pipeline.id);
+if (0 == bnd.pip) {
+    _sg.next_draw_valid = false;
+}
+SOKOL_ASSERT(bnd.pip->shader && (bnd.pip->cmn.shader_id.id == bnd.pip->shader->slot.id));
+const _sg_shader_t* shd = bnd.pip->shader;
+```
+
 ## (Apr 25/26)
 
 - port example programs to use the new app.fr

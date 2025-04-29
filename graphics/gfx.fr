@@ -19,64 +19,43 @@ fn ASSERT_METAL() void = @debug_assert(SOKOL_BACKEND.is_metal());
 //
 
 // resource pool slots
-typedef struct {
-    uint32_t id;
-    sg_resource_state state;
-} _sg_slot_t;
 
-// resource tracking (for keeping track of gpu-written storage resources
-typedef struct {
-    uint32_t size;
-    uint32_t cur;
-    uint32_t* items;
-} _sg_tracker_t;
-
-// constants
-enum {
-    _SG_STRING_SIZE = 32,
-    _SG_SLOT_SHIFT = 16,
-    _SG_SLOT_MASK = (1<<_SG_SLOT_SHIFT)-1,
-    _SG_MAX_POOL_SIZE = (1<<_SG_SLOT_SHIFT),
-    _SG_DEFAULT_BUFFER_POOL_SIZE = 128,
-    _SG_DEFAULT_IMAGE_POOL_SIZE = 128,
-    _SG_DEFAULT_SAMPLER_POOL_SIZE = 64,
-    _SG_DEFAULT_SHADER_POOL_SIZE = 32,
-    _SG_DEFAULT_PIPELINE_POOL_SIZE = 64,
-    _SG_DEFAULT_ATTACHMENTS_POOL_SIZE = 16,
-    _SG_DEFAULT_UB_SIZE = 4 * 1024 * 1024,
-    _SG_DEFAULT_MAX_DISPATCH_CALLS_PER_PASS = 1024,
-    _SG_DEFAULT_MAX_COMMIT_LISTENERS = 1024,
-    _SG_DEFAULT_WGPU_BINDGROUP_CACHE_SIZE = 1024,
+SlotHeader :: @struct {
+    id: u32;
+    state: SgResourceState;
 };
 
-// fixed-size string
-typedef struct {
-    char buf[_SG_STRING_SIZE];
-} _sg_str_t;
+// resource tracking (for keeping track of gpu-written storage resources
+_sg_tracker_t :: RawList(u32);
 
-// helper macros
-#define _sg_def(val, def) (((val) == 0) ? (def) : (val))
-#define _sg_def_flt(val, def) (((val) == 0.0f) ? (def) : (val))
-#define _sg_min(a,b) (((a)<(b))?(a):(b))
-#define _sg_max(a,b) (((a)>(b))?(a):(b))
-#define _sg_clamp(v,v0,v1) (((v)<(v0))?(v0):(((v)>(v1))?(v1):(v)))
-#define _sg_fequal(val,cmp,delta) ((((val)-(cmp))> -(delta))&&(((val)-(cmp))<(delta)))
-#define _sg_ispow2(val) ((val&(val-1))==0)
-#define _sg_stats_add(key,val) {if(_sg.stats_enabled){ _sg.stats.key+=val;}}
+_SG_STRING_SIZE :: 32;
+_SG_SLOT_SHIFT :: 16;
+_SG_SLOT_MASK :: (1<<_SG_SLOT_SHIFT)-1;
+_SG_MAX_POOL_SIZE :: (1<<_SG_SLOT_SHIFT);
+_SG_DEFAULT_BUFFER_POOL_SIZE :: 128;
+_SG_DEFAULT_IMAGE_POOL_SIZE :: 128;
+_SG_DEFAULT_SAMPLER_POOL_SIZE :: 64;
+_SG_DEFAULT_SHADER_POOL_SIZE :: 32;
+_SG_DEFAULT_PIPELINE_POOL_SIZE :: 64;
+_SG_DEFAULT_ATTACHMENTS_POOL_SIZE :: 16;
+_SG_DEFAULT_UB_SIZE :: 4 * 1024 * 1024;
+_SG_DEFAULT_MAX_DISPATCH_CALLS_PER_PASS :: 1024;
+_SG_DEFAULT_MAX_COMMIT_LISTENERS :: 1024;
+_SG_DEFAULT_WGPU_BINDGROUP_CACHE_SIZE :: 1024;
 
-typedef struct {
-    int size;
-    int append_pos;
-    bool append_overflow;
-    uint32_t update_frame_index;
-    uint32_t append_frame_index;
-    int num_slots;
-    int active_slot;
-    sg_buffer_type type;
-    sg_usage usage;
-} _sg_buffer_common_t;
+BufferCommon :: @struct {
+    size: i32;
+    append_pos: i32;
+    append_overflow bool;
+    update_frame_index: u32;
+    append_frame_index: u32;
+    num_slots: i32;
+    active_slot: i32;
+    type: SgBufferType;
+    usage: SgUsage;
+};
 
-fn _sg_buffer_common_init(_sg_buffer_common_t* cmn, const sg_buffer_desc* desc) {
+fn _sg_buffer_common_init(cmn: *BufferCommon, desc: *SgBufferDesc) void = {
     cmn.size = (int)desc.size;
     cmn.append_pos = 0;
     cmn.append_overflow = false;
@@ -88,22 +67,22 @@ fn _sg_buffer_common_init(_sg_buffer_common_t* cmn, const sg_buffer_desc* desc) 
     cmn.usage = desc.usage;
 }
 
-typedef struct {
-    uint32_t upd_frame_index;
-    int num_slots;
-    int active_slot;
-    sg_image_type type;
-    bool render_target;
-    int width;
-    int height;
-    int num_slices;
-    int num_mipmaps;
-    sg_usage usage;
-    sg_pixel_format pixel_format;
-    int sample_count;
-} _sg_image_common_t;
+ImageCommon :: @struct {
+    upd_frame_index: u32;
+    num_slots: i32;
+    active_slot: i32;
+    type: SgImageType;
+    render_target: bool;
+    width: i32;
+    height: i32;
+    num_slices: i32;
+    num_mipmaps: i32;
+    usage: SgUsage;
+    pixel_format: SgPixelFormat;
+    sample_count: i32;
+};
 
-fn _sg_image_common_init(_sg_image_common_t* cmn, const sg_image_desc* desc) {
+fn _sg_image_common_init(cmn: *ImageCommon, desc: *Image.Desc) {
     cmn.upd_frame_index = 0;
     cmn.num_slots = (desc.usage == SG_USAGE_IMMUTABLE) ? 1 : SG_NUM_INFLIGHT_FRAMES;
     cmn.active_slot = 0;
@@ -118,55 +97,55 @@ fn _sg_image_common_init(_sg_image_common_t* cmn, const sg_image_desc* desc) {
     cmn.sample_count = desc.sample_count;
 }
 
-fn _sg_sampler_common_init(_sg_sampler_common_t* cmn, const sg_sampler_desc* desc) {
+fn _sg_sampler_common_init(cmn: *SamplerCommon, desc: *Sampler.Desc) {
     cmn[] = desc.common;
 }
 
-typedef struct {
-    sg_shader_attr_base_type base_type;
-} _sg_shader_attr_t;
+_sg_shader_attr_t :: @struct {
+    base_type: sg_shader_attr_base_type;
+};
 
-typedef struct {
-    sg_shader_stage stage;
-    uint32_t size;
-} _sg_shader_uniform_block_t;
+_sg_shader_uniform_block_t ::  @struct {
+    stage: sg_shader_stage;
+    uint32_t size: u32;
+};
 
-typedef struct {
-    sg_shader_stage stage;
-    bool readonly;
-} _sg_shader_storage_buffer_t;
+_sg_shader_storage_buffer_t :: @struct {
+    stage: sg_shader_stage;
+    readonly: bool;
+};
 
-typedef struct {
-    sg_shader_stage stage;
-    sg_image_type image_type;
-    sg_image_sample_type sample_type;
-    bool multisampled;
-} _sg_shader_image_t;
+_sg_shader_image_t :: @struct {
+    stage: sg_shader_stage;
+    image_type: sg_image_type;
+    sample_type: sg_image_sample_type;
+    multisampled: bool;
+};
 
-typedef struct {
-    sg_shader_stage stage;
-    sg_sampler_type sampler_type;
-} _sg_shader_sampler_t;
+_sg_shader_sampler_t :: @struct {
+    stage: sg_shader_stage;
+    sampler_type: sg_sampler_type;
+};
 
 // combined image sampler mappings, only needed on GL
-typedef struct {
-    sg_shader_stage stage;
-    uint8_t image_slot;
-    uint8_t sampler_slot;
-} _sg_shader_image_sampler_t;
+_sg_shader_image_sampler_t :: @struct {
+    stage: sg_shader_stage;
+    image_slot: u8;
+    sampler_slot: u8;
+};
 
-typedef struct {
-    uint32_t required_bindings_and_uniforms;
-    bool is_compute;
-    _sg_shader_attr_t attrs[SG_MAX_VERTEX_ATTRIBUTES];
-    _sg_shader_uniform_block_t uniform_blocks[SG_MAX_UNIFORMBLOCK_BINDSLOTS];
-    _sg_shader_storage_buffer_t storage_buffers[SG_MAX_STORAGEBUFFER_BINDSLOTS];
-    _sg_shader_image_t images[SG_MAX_IMAGE_BINDSLOTS];
-    _sg_shader_sampler_t samplers[SG_MAX_SAMPLER_BINDSLOTS];
-    _sg_shader_image_sampler_t image_samplers[SG_MAX_IMAGE_SAMPLER_PAIRS];
-} _sg_shader_common_t;
+ShaderCommon :: @struct {
+    required_bindings_and_uniforms: u32;
+    is_compute: bool;
+    attrs: Array(_sg_shader_attr_t, SG_MAX_VERTEX_ATTRIBUTES);
+    uniform_blocks: Array(_sg_shader_uniform_block_t, SG_MAX_UNIFORMBLOCK_BINDSLOTS);
+    storage_buffers: Array(_sg_shader_storage_buffer_t, SG_MAX_STORAGEBUFFER_BINDSLOTS);
+    images: Array(_sg_shader_image_t, SG_MAX_IMAGE_BINDSLOTS);
+    samplers: Array(_sg_shader_sampler_t, SG_MAX_SAMPLER_BINDSLOTS);
+    image_samplers: Array(_sg_shader_image_sampler_t, SG_MAX_IMAGE_SAMPLER_PAIRS);
+};
 
-fn _sg_shader_common_init(_sg_shader_common_t* cmn, const sg_shader_desc* desc) {
+fn _sg_shader_common_init(cmn: *ShaderCommon, const sg_shader_desc* desc: *Shader.Desc) void = {
     cmn.is_compute = desc.compute_func.source || desc.compute_func.bytecode.ptr;
     for (size_t i = 0; i < SG_MAX_VERTEX_ATTRIBUTES; i++) {
         cmn.attrs[i].base_type = desc.attrs[i].base_type;
@@ -225,15 +204,16 @@ fn _sg_shader_common_init(_sg_shader_common_t* cmn, const sg_shader_desc* desc) 
     }
 }
 
-typedef struct {
-    bool vertex_buffer_layout_active[SG_MAX_VERTEXBUFFER_BINDSLOTS];
-    bool use_instanced_draw;
-    bool is_compute;
-    uint32_t required_bindings_and_uniforms;
+PipelineCommon :: @struct {
+    vertex_buffer_layout_active: Array(bool, SG_MAX_VERTEXBUFFER_BINDSLOTS);
+    use_instanced_draw: bool;
+    is_compute: bool;
+    required_bindings_and_uniforms: u32;
     common: SgPipelineShared #use;
-} _sg_pipeline_common_t;
+    shader: *Shader.T;
+};
 
-fn _sg_pipeline_common_init(_sg_pipeline_common_t* cmn, const sg_pipeline_desc* desc) {
+fn _sg_pipeline_common_init(cmn: *Pipeline.Common, desc: *Pipeline.Desc) {
     @debug_assert((desc.color_count >= 0) && (desc.color_count <= SG_MAX_COLOR_ATTACHMENTS));
 
     // FIXME: most of this isn't needed for compute pipelines
@@ -255,126 +235,101 @@ fn _sg_pipeline_common_init(_sg_pipeline_common_t* cmn, const sg_pipeline_desc* 
     }
 }
 
-_sg_attachment_common_t :: SgAttachmentDesc;
+AttachmentsCommon :: @struct {
+    width: i32;
+    height: i32;
+    num_colors: i32;
+    colors: Array(SgAttachmentDesc, SG_MAX_COLOR_ATTACHMENTS);
+    resolves: Array(SgAttachmentDesc, SG_MAX_COLOR_ATTACHMENTS);
+    depth_stencil: SgAttachmentDesc;
+};
 
-typedef struct {
-    int width;
-    int height;
-    int num_colors;
-    _sg_attachment_common_t colors[SG_MAX_COLOR_ATTACHMENTS];
-    _sg_attachment_common_t resolves[SG_MAX_COLOR_ATTACHMENTS];
-    _sg_attachment_common_t depth_stencil;
-} _sg_attachments_common_t;
-
-fn _sg_attachment_common_init(_sg_attachment_common_t* cmn, const sg_attachment_desc* desc) {
-    cmn.image_id = desc.image;
-    cmn.mip_level = desc.mip_level;
-    cmn.slice = desc.slice;
-}
-
-fn _sg_attachments_common_init(_sg_attachments_common_t* cmn, const sg_attachments_desc* desc, int width, int height) {
+fn attachments_common_init(cmn: *Attachments.Common, desc: *Attachments.Desc, width: i32, height: i32) void = {
     @debug_assert((width > 0) && (height > 0));
     cmn.width = width;
     cmn.height = height;
-    for (int i = 0; i < SG_MAX_COLOR_ATTACHMENTS; i++) {
+    range(0, SG_MAX_COLOR_ATTACHMENTS) { i |
         if (desc.colors[i].image.id != SG_INVALID_ID) {
-            cmn.num_colors++;
-            _sg_attachment_common_init(&cmn.colors[i], &desc.colors[i]);
-            _sg_attachment_common_init(&cmn.resolves[i], &desc.resolves[i]);
+            cmn.num_colors += 1;
+            cmn.colors&[i] = desc.colors&[i];
+            cmn.resolves&[i] = desc.resolves&[i];
         }
     }
     if (desc.depth_stencil.image.id != SG_INVALID_ID) {
-        _sg_attachment_common_init(&cmn.depth_stencil, &desc.depth_stencil);
+        cmn.depth_stencil = desc.depth_stencil;
     }
 }
 
-// POOL STRUCTS
+_SG_INVALID_SLOT_INDEX :: 0;  // NOT a (random number chosen by fair die roll)
 
-// this *MUST* remain 0
-#define _SG_INVALID_SLOT_INDEX (0)
-
-typedef struct {
-    int num;        // number of allocated commit listener items
-    int upper;      // the current upper index (no valid items past this point)
-    sg_commit_listener* items;
-} _sg_commit_listeners_t;
+_sg_commit_listeners_t :: RawList(sg_commit_listener);
 
 // resolved resource bindings struct
-typedef struct {
-    _sg_pipeline_t* pip;
-    int vb_offsets[SG_MAX_VERTEXBUFFER_BINDSLOTS];
-    int ib_offset;
-    *Buffer.T vbs[SG_MAX_VERTEXBUFFER_BINDSLOTS];
-    *Buffer.T ib;
-    *Image.T imgs[SG_MAX_IMAGE_BINDSLOTS];
-    *Sampler.T smps[SG_MAX_SAMPLER_BINDSLOTS];
-    *Buffer.T sbufs[SG_MAX_STORAGEBUFFER_BINDSLOTS];
-} _sg_bindings_t;
-
-typedef struct {
-    bool sample;
-    bool filter;
-    bool render;
-    bool blend;
-    bool msaa;
-    bool depth;
-} _sg_pixelformat_info_t;
-
-Self :: @struct {
-    bool valid;
-    sg_desc desc;       // original desc with default values patched in
-    uint32_t frame_index;
-    struct {
-        bool valid;
-        bool in_pass;
-        bool is_compute;
-        sg_attachments atts_id;     // SG_INVALID_ID in a swapchain pass
-        _sg_attachments_t* atts;    // 0 in a swapchain pass
-        int width;
-        int height;
-        struct {
-            sg_pixel_format color_fmt;
-            sg_pixel_format depth_fmt;
-            int sample_count;
-        } swapchain;
-    } cur_pass;
-    sg_pipeline cur_pipeline;
-    bool next_draw_valid;
-    uint32_t required_bindings_and_uniforms;    // used to check that bindings and uniforms are applied after applying pipeline
-    uint32_t applied_bindings_and_uniforms;     // bits 0..7: uniform blocks, bit 8: bindings
-    sg_log_item validate_error;
-    struct {
-        _sg_tracker_t readwrite_sbufs;  // tracks read/write storage buffers used in compute pass
-    } compute;
-    pools: EnumMap(PoolType, DynPool),
-    sg_backend backend;
-    sg_features features;
-    sg_limits limits;
-    _sg_pixelformat_info_t formats[_SG_PIXELFORMAT_NUM];
-    bool stats_enabled;
-    sg_frame_stats stats;
-    sg_frame_stats prev_stats;
-    _sg_mtl_backend_t mtl;
-    sg_trace_hooks hooks;
-    _sg_commit_listeners_t commit_listeners;
+_sg_bindings_t :: @struct {
+    pip: *Pipeline.T;
+    vb_offsets: Array(i32, SG_MAX_VERTEXBUFFER_BINDSLOTS);
+    ib_offset: i32;
+    vbs: Array(*Buffer.T, SG_MAX_VERTEXBUFFER_BINDSLOTS);
+    ib: *Buffer.T;
+    imgs: Array(*Image.T, SG_MAX_IMAGE_BINDSLOTS);
+    smps: Array(*Sampler.T, SG_MAX_SAMPLER_BINDSLOTS);
+    sbufs: Array(*Buffer.T, SG_MAX_STORAGEBUFFER_BINDSLOTS);
 };
 
-#define _SG_PANIC(code) _sg_log(SG_LOGITEM_ ##code, 0, 0, __LINE__)
-#define _SG_ERROR(code) _sg_log(SG_LOGITEM_ ##code, 1, 0, __LINE__)
-#define _SG_WARN(code) _sg_log(SG_LOGITEM_ ##code, 2, 0, __LINE__)
-#define _SG_INFO(code) _sg_log(SG_LOGITEM_ ##code, 3, 0, __LINE__)
-#define _SG_LOGMSG(code,msg) _sg_log(SG_LOGITEM_ ##code, 3, msg, __LINE__)
+Self :: @struct {
+    mtl: Metal.Impl;
+    valid: bool;
+    desc: SgDesc;    // original desc with default values patched in
+    frame_index: i32;
+    cur_pass: @struct {
+        valid: bool;
+        in_pass: bool;
+        is_compute: bool;
+        atts_id: Attachments;     // SG_INVALID_ID in a swapchain pass
+        atts: *Attachments.T;    // 0 in a swapchain pass
+        width: i32;
+        height: i32;
+        swapchain: @struct {
+            color_fmt: SgPixelFormat;
+            depth_fmt: SgPixelFormat;
+            sample_count: i32;
+        };
+    };
+    cur_pipeline: Pipeline;
+    next_draw_valid: bool;
+    required_bindings_and_uniforms: u32;    // used to check that bindings and uniforms are applied after applying pipeline
+    applied_bindings_and_uniforms: u32;     // bits 0..7: uniform blocks, bit 8: bindings
+    validate_error: SgLogItem;
+    compute: @struct {
+        readwrite_sbufs: _sg_tracker_t;  // tracks read/write storage buffers used in compute pass
+    };
+    pools: EnumMap(PoolType, DynPool),
+    backend: SgBackend;
+    features: SgFeatures;
+    limits: SgLimits;
+    formats: EnumMap(SgPixelFormat, _sg_pixelformat_info_t);
+    stats_enabled: bool;
+    stats: sg_frame_stats;
+    prev_stats: sg_frame_stats;
+    hooks: sg_trace_hooks;
+    commit_listeners: _sg_commit_listeners_t;
+};
 
-static void _sg_log(sg_log_item log_item, uint32_t log_level, const char* msg, uint32_t line_nr) {
-    if (_sg.desc.logger.func) {
+fn impl(sg: *Self) *Metal.Impl = {
+    ASSERT_METAL();
+    self.mtl&
+}
+
+fn _sg_log(log_item: sg_log_item, log_level: u32, msg: CStr, line_nr: u32) void = {
+    if (sg.desc.logger.func) {
         const char* filename = 0;
-        #if defined(SOKOL_DEBUG)
+        if SOKOL_DEBUG {
             filename = __FILE__;
             if (0 == msg) {
                 msg = _sg_log_messages[log_item];
             }
-        #endif
-        _sg.desc.logger.func("sg", log_level, (uint32_t)log_item, msg, line_nr, filename, _sg.desc.logger.user_data);
+        }
+        sg.desc.logger.func("sg", log_level, (uint32_t)log_item, msg, line_nr, filename, sg.desc.logger.user_data);
     } else {
         // for log level PANIC it would be 'undefined behaviour' to continue
         if (log_level == 0) {
@@ -383,52 +338,26 @@ static void _sg_log(sg_log_item log_item, uint32_t log_level, const char* msg, u
     }
 }
 
-fn _sg_clear(void* ptr, size_t size) {
-    @debug_assert(ptr && (size > 0));
-    memset(ptr, 0, size);
-}
-
-fn bool _sg_strempty(const _sg_str_t* str) {
-    return 0 == str.buf[0];
-}
-
-fn const char* _sg_strptr(const _sg_str_t* str) {
-    return &str.buf[0];
-}
-
-fn _sg_strcpy(_sg_str_t* dst, const char* src) {
-    @debug_assert(dst);
-    if (src) {
-        strncpy(dst.buf, src, _SG_STRING_SIZE);
-        dst.buf[_SG_STRING_SIZE-1] = 0;
-    } else {
-        _sg_clear(dst.buf, _SG_STRING_SIZE);
-    }
-}
-
-fn uint32_t _sg_align_u32(uint32_t val, uint32_t align) {
+fn _sg_align_u32(val: u32, align: u32) u32 = {
     @debug_assert((align > 0) && ((align & (align - 1)) == 0));
-    return (val + (align - 1)) & ~(align - 1);
+    (val + (align - 1)) & ~(align - 1)
 }
 
-typedef struct { int x, y, w, h; } _sg_recti_t;
+_sg_recti_t :: @struct(x: i32, y: i32, w: i32, h: i32);
 
-fn _sg_recti_t _sg_clipi(int x, int y, int w, int h, int clip_width, int clip_height) {
-    x = _sg_min(_sg_max(0, x), clip_width-1);
-    y = _sg_min(_sg_max(0, y), clip_height-1);
+fn clipi(x: i32, y: i32, w: i32, h: i32, clip_width: i32, clip_height: i32) _sg_recti_t = {
+    x = min(max(0, x), clip_width-1);
+    y = min(max(0, y), clip_height-1);
     if ((x + w) > clip_width) {
         w = clip_width - x;
     }
     if ((y + h) > clip_height) {
         h = clip_height - y;
     }
-    w = _sg_max(w, 1);
-    h = _sg_max(h, 1);
-    const _sg_recti_t res = { x, y, w, h };
-    return res;
+    (x = x, y = y, w = max(w, 1), h = max(h, 1))
 }
 
-fn _sg_vertexformat_bytesize(sg_vertex_format it) i32 = @map_enum(it) (
+fn vertexformat_bytesize(it: SgVertexFormat) i32 = @map_enum(it) (
     FLOAT  = 4, FLOAT2  = 8, FLOAT3  = 12, FLOAT4  = 16, 
     INT    = 4, INT2    = 8, INT3    = 12, INT4    = 16, 
     UINT   = 4, UINT2   = 8, UINT3   = 12, UINT4   = 16,
@@ -438,7 +367,7 @@ fn _sg_vertexformat_bytesize(sg_vertex_format it) i32 = @map_enum(it) (
     UINT10_N2 = 4, HALF2 = 4, HALF4 = 8, INVALID = 0,
 );
 
-fn sg_shader_attr_base_type _sg_vertexformat_basetype(sg_vertex_format fmt) {
+fn vertexformat_basetype(fmt: SgVertexFormat) sg_shader_attr_base_type = {
     if @is(fmt, .FLOAT, .FLOAT2, .FLOAT3, .FLOAT4, .HALF2, .HALF4, .BYTE4N, .UBYTE3N, .SHORT2N, .USHORT2N, .USHORT4N, .UINT10_N2) {
         return(.FLOAT);
     };
@@ -451,14 +380,14 @@ fn sg_shader_attr_base_type _sg_vertexformat_basetype(sg_vertex_format fmt) {
     unreachable()
 }
 
-fn uint32_t _sg_uniform_alignment(sg_uniform_type type, int array_count, sg_uniform_layout ub_layout) {
+fn uniform_alignment(type: sg_uniform_type, array_count: i32, ub_layout: sg_uniform_layout) u32 = {
     if(ub_layout == .NATIVE, => return(1));
     @debug_assert(array_count > 0);
     if(array_count != 1, => return(16));
     @map_enum(type) (FLOAT = 4, INT = 4, FLOAT2 = 8, INT2 = 8, FLOAT3 = 16, FLOAT4 = 16, INT3 = 16, INT4 = 16, MAT4 = 16)
 }
 
-fn _sg_uniform_size(type: sg_uniform_type, array_count: u32, ub_layout: sg_uniform_layout) u32 = {
+fn uniform_size(type: sg_uniform_type, array_count: u32, ub_layout: sg_uniform_layout) u32 = {
     @debug_assert(array_count > 0);
     single := @map_enum(type) (FLOAT = 4, INT = 4, FLOAT2 = 8, INT2 = 8, FLOAT3 = 12, INT3 = 12, FLOAT4 = 16, INT4 = 16, MAT4 = 64);
     if array_count == 1 || ub_layout == .NATIVE || type == .MAT4 {
@@ -467,29 +396,32 @@ fn _sg_uniform_size(type: sg_uniform_type, array_count: u32, ub_layout: sg_unifo
     16 * array_count
 }
 
-fn _sg_is_compressed_pixel_format(sg_pixel_format fmt) bool = {
-    @is(fmt, .BC1_RGBA, .BC2_RGBA, .BC3_RGBA, .BC3_SRGBA, .BC4_R, .BC4_RSN, .BC5_RG, .BC5_RGSN, .BC6H_RGBF, .BC6H_RGBUF, .BC7_RGBA, .BC7_SRGBA, .ETC2_RGB8, .ETC2_SRGB8, .ETC2_RGB8A1, .ETC2_RGBA8, .ETC2_SRGB8A8, .EAC_R11, .EAC_R11SN, .EAC_RG11, .EAC_RG11SN, .ASTC_4x4_RGBA, .ASTC_4x4_SRGBA)
-}
+fn is_compressed(fmt: SgPixelFormat) bool = @is(fmt, 
+    .BC1_RGBA, .BC2_RGBA, .BC3_RGBA, .BC3_SRGBA, .BC4_R, .BC4_RSN, 
+    .BC5_RG, .BC5_RGSN, .BC6H_RGBF, .BC6H_RGBUF, .BC7_RGBA, .BC7_SRGBA, 
+    .ETC2_RGB8, .ETC2_SRGB8, .ETC2_RGB8A1, .ETC2_RGBA8, .ETC2_SRGB8A8, 
+    .EAC_R11, .EAC_R11SN, .EAC_RG11, .EAC_RG11SN, .ASTC_4x4_RGBA, .ASTC_4x4_SRGBA,
+);
 
-fn _sg_is_valid_rendertarget_color_format(sg_pixel_format fmt) bool = {
+fn is_valid_rendertarget_color_format(fmt: sg_pixel_format) bool = {
     const int fmt_index = (int) fmt;
     @debug_assert((fmt_index >= 0) && (fmt_index < _SG_PIXELFORMAT_NUM));
-    return _sg.formats[fmt_index].render && !_sg.formats[fmt_index].depth;
+    return sg.formats[fmt_index].render && !sg.formats[fmt_index].depth;
 }
 
-fn bool _sg_is_valid_rendertarget_depth_format(sg_pixel_format fmt) {
+fn is_valid_rendertarget_depth_format(sg: *Self, fmt: sg_pixel_format) bool = {
     const int fmt_index = (int) fmt;
     @debug_assert((fmt_index >= 0) && (fmt_index < _SG_PIXELFORMAT_NUM));
-    return _sg.formats[fmt_index].render && _sg.formats[fmt_index].depth;
+    sg.formats[fmt_index].render && sg.formats[fmt_index].depth
 }
 
-fn bool _sg_is_depth_or_depth_stencil_format(sg_pixel_format fmt) bool = 
+fn is_depth_or_depth_stencil_format(fmt: sg_pixel_format) bool = 
     @is(fmt, .DEPTH, .DEPTH_STENCIL);
 
-fn _sg_is_depth_stencil_format(sg_pixel_format fmt) bool = 
+fn is_depth_stencil_format(fmt: sg_pixel_format) bool = 
     fmt == .DEPTH_STENCIL;
 
-fn _sg_pixelformat_bytesize(it: sg_pixel_format) i32 = @if_else {
+fn pixelformat_bytesize(it: sg_pixel_format) i32 = @if_else {
     @if(@is(it, .R8, .R8SN, .R8UI, .R8SI)) => 1;
     @if(@is(it, .R16, .R16SN, .R16UI, .R16SI, .R16F, .RG8, .RG8SN, .RG8UI, .RG8SI)) => 2;
     @if(@is(it, .R32UI, .R32SI, .R32F, .RG16, .RG16SN, .RG16UI, .RG16SI, .RG16F, .RGBA8)) => 4;
@@ -500,19 +432,19 @@ fn _sg_pixelformat_bytesize(it: sg_pixel_format) i32 = @if_else {
     @else => unreachable();
 };
 
-fn int _sg_roundup(int val, int round_to) {
+fn _sg_roundup(val: i32, round_to: i32) i32 = {
     return (val+(round_to-1)) & ~(round_to-1);
 }
 
-fn uint32_t _sg_roundup_u32(uint32_t val, uint32_t round_to) {
+fn _sg_roundup_u32(val: u32, round_to: u32) u32 = {
     return (val+(round_to-1)) & ~(round_to-1);
 }
 
-fn uint64_t _sg_roundup_u64(uint64_t val, uint64_t round_to) {
+fn _sg_roundup_u64(val: u64, round_to: u64) u64 = {
     return (val+(round_to-1)) & ~(round_to-1);
 }
 
-fn bool _sg_multiple_u64(uint64_t val, uint64_t of) {
+fn _sg_multiple_u64(val: u64, of: u64) bool = {
     return (val & (of-1)) == 0;
 }
 
@@ -520,7 +452,7 @@ fn bool _sg_multiple_u64(uint64_t val, uint64_t of) {
 
     see ComputePitch in https://github.com/microsoft/DirectXTex/blob/master/DirectXTex/DirectXTexUtil.cpp
 */
-fn int _sg_row_pitch(sg_pixel_format it, int width, int row_align) {
+fn row_pitch(it: sg_pixel_format, width: i32, row_align: i32) i32 = {
     pitch := @if_else {
         @if(@is(it, 
             .BC1_RGBA, .BC4_R, .BC4_RSN, .ETC2_RGB8, .ETC2_SRGB8, 
@@ -531,13 +463,13 @@ fn int _sg_row_pitch(sg_pixel_format it, int width, int row_align) {
             .BC6H_RGBF, .BC6H_RGBUF, .BC7_RGBA, .BC7_SRGBA, .ETC2_RGBA8, 
             .ETC2_SRGB8A8, .EAC_RG11, .EAC_RG11SN, .ASTC_4x4_RGBA, .ASTC_4x4_SRGBA,
         )) => max(16, ((width + 3) / 4) * 16);
-        @else => width * _sg_pixelformat_bytesize(it); 
+        @else => width * pixelformat_bytesize(it); 
     };
     _sg_roundup(pitch, row_align)
 }
 
 // compute the number of rows in a surface depending on pixel format
-fn _sg_num_rows(sg_pixel_format fmt, int height) i32 = {
+fn _sg_num_rows(fmt: sg_pixel_format, height: i32) i32 = {
     adjust := @is(fmt, 
         .BC1_RGBA, BC4_R, .BC4_RSN, .ETC2_RGB8, .ETC2_SRGB8, .ETC2_RGB8A1, .ETC2_RGBA8, .ETC2_SRGB8A8,
         .EAC_R11, .EAC_R11SN, .EAC_RG11, .EAC_RG11SN, .BC2_RGBA, .BC3_RGBA, .BC3_SRGBA, .BC5_RG, 
@@ -547,16 +479,16 @@ fn _sg_num_rows(sg_pixel_format fmt, int height) i32 = {
 }
 
 // return size of a mipmap level
-fn int _sg_miplevel_dim(int base_dim, int mip_level) {
-    return _sg_max(base_dim >> mip_level, 1);
+fn _sg_miplevel_dim(base_dim: i32, mip_level: i32) i32 = {
+    return max(base_dim >> mip_level, 1);
 }
 
 /* return pitch of a 2D subimage / texture slice
     see ComputePitch in https://github.com/microsoft/DirectXTex/blob/master/DirectXTex/DirectXTexUtil.cpp
 */
-fn int _sg_surface_pitch(sg_pixel_format fmt, int width, int height, int row_align) {
+fn surface_pitch(fmt: sg_pixel_format, width: i32, height: i32, row_align: i32) i32 = {
     int num_rows = _sg_num_rows(fmt, height);
-    return num_rows * _sg_row_pitch(fmt, width, row_align);
+    return num_rows * row_pitch(fmt, width, row_align);
 }
 
 // TODO: damn this needs to be less painful 
@@ -564,244 +496,104 @@ fn set_fields(a: FatExpr) FatExpr #macro = @{
     it := @[a&.items()[0]];
     @[{
         body := @{};
-        for a&.items()
+        for a&.items() { e | 
+            body = @{ 
+                @[body];
+                get_field(@type it[], it, @[e])[] = true;
+            };
+        };
         body
     }]
-    inline_for Fields(@type it[]) { $f |
-        
-    };
 };
 
 // capability table pixel format helper functions
 // TODO: do a comptime thing to make these more succinct (maybe just pass in a $Str with the letters?)
-fn _sg_pixelformat_all(_sg_pixelformat_info_t* pfi) void = 
+fn _sg_pixelformat_all(pfi: *_sg_pixelformat_info_t) void = 
     @set_fields(pfi, .sample, .filter, .blend, .render, .msaa);
 
-fn _sg_pixelformat_s(_sg_pixelformat_info_t* pfi) void = 
+fn _sg_pixelformat_s(pfi: *_sg_pixelformat_info_t) void = 
     @set_fields(pfi, .sample);
 
-fn _sg_pixelformat_sf(_sg_pixelformat_info_t* pfi) void = 
+fn _sg_pixelformat_sf(pfi: *_sg_pixelformat_info_t) void = 
     @set_fields(pfi, .sample, .filter);
 
-fn _sg_pixelformat_sr(_sg_pixelformat_info_t* pfi) void = 
+fn _sg_pixelformat_sr(pfi: *_sg_pixelformat_info_t) void = 
     @set_fields(pfi, .sample, .render);
 
-fn _sg_pixelformat_sfr(_sg_pixelformat_info_t* pfi) void = 
+fn _sg_pixelformat_sfr(pfi: *_sg_pixelformat_info_t) void = 
     @set_fields(pfi, .sample, .filter, .render);
 
-fn _sg_pixelformat_srmd(_sg_pixelformat_info_t* pfi) void = 
+fn _sg_pixelformat_srmd(pfi: *_sg_pixelformat_info_t) void = 
     @set_fields(pfi, .sample, .render, .mssa, .depth);
 
-fn _sg_pixelformat_srm(_sg_pixelformat_info_t* pfi) void = 
+fn _sg_pixelformat_srm(pfi: *_sg_pixelformat_info_t) void = 
     @set_fields(pfi, .sample, .render, .mssa);
 
-fn _sg_pixelformat_sfrm(_sg_pixelformat_info_t* pfi) void = 
+fn _sg_pixelformat_sfrm(pfi: *_sg_pixelformat_info_t) void = 
     @set_fields(pfi, .sample, .filter, .render, .mssa);
     
-fn _sg_pixelformat_sbrm(_sg_pixelformat_info_t* pfi) void = 
+fn _sg_pixelformat_sbrm(pfi: *_sg_pixelformat_info_t) void = 
     @set_fields(pfi, .sample, .blend, .render, .mssa);
 
-fn _sg_pixelformat_sbr(_sg_pixelformat_info_t* pfi) void = 
+fn _sg_pixelformat_sbr(pfi: *_sg_pixelformat_info_t) void = 
     @set_fields(pfi, .sample, .blend, .render);
 
-fn _sg_pixelformat_sfbr(_sg_pixelformat_info_t* pfi) void = 
+fn _sg_pixelformat_sfbr(pfi: *_sg_pixelformat_info_t) void = 
     @set_fields(pfi, .sample, .filter, .blend, .render);
 
-fn sg_pass_action _sg_pass_action_defaults(const sg_pass_action* action) {
+fn _sg_pass_action_defaults(action: *SgPassAction) SgPassAction = {
     @debug_assert(action);
     sg_pass_action res = *action;
     for (int i = 0; i < SG_MAX_COLOR_ATTACHMENTS; i++) {
         it := res.colors[i]&;
         if (it.load_action == .DEFAULT) {
-            it.load_action = SG_LOADACTION_CLEAR;
-            it.clear_value.r = SG_DEFAULT_CLEAR_RED;
-            it.clear_value.g = SG_DEFAULT_CLEAR_GREEN;
-            it.clear_value.b = SG_DEFAULT_CLEAR_BLUE;
-            it.clear_value.a = SG_DEFAULT_CLEAR_ALPHA;
+            it.load_action = .CLEAR;
+            // random colour chosen by fair die roll
+            it.clear_value = (r = 0.5, g = 0.5, b = 0.5, a = 1.0);
         }
         if (it.store_action == .DEFAULT) {
-            it.store_action = SG_STOREACTION_STORE;
+            it.store_action = .STORE;
         }
     }
     
     if (res.depth.load_action == .DEFAULT) {
-        res.depth.load_action = SG_LOADACTION_CLEAR;
+        res.depth.load_action = .CLEAR;
         res.depth.clear_value = SG_DEFAULT_CLEAR_DEPTH;
     }
     if (res.depth.store_action == .DEFAULT) {
-        res.depth.store_action = SG_STOREACTION_DONTCARE;
+        res.depth.store_action = .DONTCARE;
     }
     if (res.stencil.load_action == .DEFAULT) {
-        res.stencil.load_action = SG_LOADACTION_CLEAR;
+        res.stencil.load_action = .CLEAR;
         res.stencil.clear_value = SG_DEFAULT_CLEAR_STENCIL;
     }
     if (res.stencil.store_action == .DEFAULT) {
-        res.stencil.store_action = SG_STOREACTION_DONTCARE;
+        res.stencil.store_action = .DONTCARE;
     }
-    return res;
+    res
 }
 
-// TODO: do a meta programming thing to generate these
-
-fn _sg_setup_backend(const sg_desc* desc) {
-    sg.impl().setup_backend(desc);
+fn pool_init(pool: *DynPool, a: Alloc, num: i64, sizeof_t: i64) void = {
+    @debug_assert(num >= 1 && num < _SG_MAX_POOL_SIZE);
+    pool[] = (
+        sizeof_t = sizeof_t,
+        // slot 0 is reserved for the 'invalid id', so bump the pool size by 1
+        size = num + 1,
+        data = a.alloc_raw((num + 1) * sizeof_t, 8),
+        // generation counters indexable by pool slot index, slot 0 is reserved
+        gen_ctrs = a.alloc_zeroed(u32, num + 1),
+        // it's not a bug to only reserve 'num' here
+        // never allocate the zero-th pool item since the invalid id is 0
+        free_queue = a.alloc_init(i32, num, fn(i) => num - i),
+        queue_top = num + 1,
+    );
 }
 
-fn _sg_discard_backend(void) {
-    sg.impl().discard_backend();
-}
-
-fn _sg_reset_state_cache(void) {
-    sg.impl().reset_state_cache();
-}
-
-static inline sg_resource_state _sg_create_buffer(*Buffer.T buf, const sg_buffer_desc* desc) {
-    sg.impl().create_buffer(buf, desc)
-}
-
-fn discard(sg: *Self, buf: *Buffer.T) void =
-    sg.impl().discard_buffer(buf);
-
-static inline sg_resource_state _sg_create_image(*Image.T img, const sg_image_desc* desc) {
-    sg.impl().create_image(img, desc)
-}
-
-fn discard(sg: *Self, img: *Image.T) void =
-    sg.impl().discard_image(buf);
-}
-
-static inline sg_resource_state _sg_create_sampler(*Sampler.T smp, const sg_sampler_desc* desc) {
-    sg.impl().create_sampler(smp, desc)
-}
-
-fn _sg_discard_sampler(*Sampler.T smp) {
-    sg.impl().discard_sampler(smp);
-}
-
-static inline sg_resource_state _sg_create_shader(_sg_shader_t* shd, const sg_shader_desc* desc) {
-    sg.impl().create_shader(shd, desc)
-}
-
-fn _sg_discard_shader(_sg_shader_t* shd) {
-    sg.impl().discard_shader(shd);
-}
-
-static inline sg_resource_state _sg_create_pipeline(_sg_pipeline_t* pip, _sg_shader_t* shd, const sg_pipeline_desc* desc) {
-    sg.impl().create_pipeline(pip, shd, desc)
-}
-
-fn _sg_discard_pipeline(_sg_pipeline_t* pip) {
-    sg.impl().discard_pipeline(pip);
-}
-
-static inline sg_resource_state _sg_create_attachments(_sg_attachments_t* atts, *Image.T* color_images, *Image.T* resolve_images, *Image.T ds_image, const sg_attachments_desc* desc) {
-    sg.impl().create_attachments(atts, color_images, resolve_images, ds_image, desc);
-}
-
-fn _sg_discard_attachments(_sg_attachments_t* atts) {
-    sg.impl().discard_attachments(atts);
-}
-
-static inline *Image.T _sg_attachments_color_image(const _sg_attachments_t* atts, int index) {
-    sg.impl().attatchments_color_image(atts, index)
-}
-
-static inline *Image.T _sg_attachments_resolve_image(const _sg_attachments_t* atts, int index) {
-    sg.impl().attachments_resolve_image(atts, index)
-}
-
-static inline *Image.T _sg_attachments_ds_image(const _sg_attachments_t* atts) {
-    sg.impl().attachments_ds_image(atts)
-}
-
-fn _sg_begin_pass(const sg_pass* pass) {
-    sg.impl().begin_pass(pass);
-}
-
-fn _sg_end_pass(void) {
-    sg.impl().end_pass()
-}
-
-fn _sg_apply_viewport(int x, int y, int w, int h, bool origin_top_left) {
-    sg.impl().apply_viewport(x, y, w, h, origin_top_left);
-}
-
-fn _sg_apply_scissor_rect(int x, int y, int w, int h, bool origin_top_left) {
-    sg.impl().apply_scissor_rect(x, y, w, h, origin_top_left);
-}
-
-fn _sg_apply_pipeline(_sg_pipeline_t* pip) {
-    sg.impl().apply_pipeline(pip);
-}
-
-static inline bool _sg_apply_bindings(_sg_bindings_t* bnd) {
-    sg.impl().apply_bindings(bnd)
-}
-
-fn _sg_apply_uniforms(int ub_slot, const sg_range* data) {
-    sg.impl().apply_uniforms(ub_slot, data);
-}
-
-fn _sg_draw(int base_element, int num_elements, int num_instances) {
-    sg.impl().draw(base_element, num_elements, num_instances);
-}
-
-fn _sg_dispatch(int num_groups_x, int num_groups_y, int num_groups_z) {
-    sg.impl().dispatch(num_groups_x, num_groups_y, num_groups_z);
-}
-
-fn _sg_commit(void) {
-    sg.impl().commit();
-}
-
-fn _sg_update_buffer(*Buffer.T buf, const sg_range* data) {
-    sg.impl().update_buffer(buf, data);
-}
-
-fn _sg_append_buffer(*Buffer.T buf, const sg_range* data, bool new_frame) {
-    sg.impl().append_buffer(buf, data, new_frame);
-}
-
-fn _sg_update_image(*Image.T img, const sg_image_data* data) {
-    sg.impl().update_image(img, data);
-}
-
-fn _sg_push_debug_group(const char* name) {
-    ASSERT_METAL();
-    _sg_mtl_push_debug_group(name);
-}
-
-fn _sg_pop_debug_group(void) {
-    ASSERT_METAL();
-    _sg_mtl_pop_debug_group();
-}
-
-fn _sg_pool_init(_sg_pool_t* pool, int num) {
-    @debug_assert(pool && (num >= 1));
-    // slot 0 is reserved for the 'invalid id', so bump the pool size by 1
-    pool.size = num + 1;
-    pool.queue_top = 0;
-    // generation counters indexable by pool slot index, slot 0 is reserved
-    size_t gen_ctrs_size = sizeof(uint32_t) * (size_t)pool.size;
-    pool.gen_ctrs = (uint32_t*)_sg_malloc_clear(gen_ctrs_size);
-    // it's not a bug to only reserve 'num' here
-    pool.free_queue = (int*) _sg_malloc_clear(sizeof(int) * (size_t)num);
-    // never allocate the zero-th pool item since the invalid id is 0
-    for (int i = pool.size-1; i >= 1; i--) {
-        pool.free_queue[pool.queue_top++] = i;
-    }
-}
-
-fn _sg_pool_discard(_sg_pool_t* pool) {
-    @debug_assert(pool);
-    @debug_assert(pool.free_queue);
-    _sg_free(pool.free_queue);
-    pool.free_queue = 0;
-    @debug_assert(pool.gen_ctrs);
-    _sg_free(pool.gen_ctrs);
-    pool.gen_ctrs = 0;
-    pool.size = 0;
-    pool.queue_top = 0;
+fn pool_discard(pool: *DynPool, a: Alloc) void = {
+    a.dealloc_raw(p.data, p.sizeof_t * p.size, 8);
+    a.dealloc(i32, pool.free_queue);
+    a.dealloc(u32, pool.gen_ctrs);
+    pool[] = zeroed DynPool;
 }
 
 fn alloc_index(pool: *DynPool) i32 = {
@@ -828,45 +620,21 @@ fn free_index(pool: *DynPool, slot_index: i32) void = {
     @debug_assert(pool.queue_top <= (pool.size-1));
 }
 
-fn _sg_slot_reset(_sg_slot_t* slot) {
-    @debug_assert(slot);
-    _sg_clear(slot, sizeof(_sg_slot_t));
-}
-
-fn _sg_setup_pools(_sg_pools_t* p, const sg_desc* desc) {
-    @debug_assert(p);
-    @debug_assert(desc);
+fn setup_pools(sg: *Self, desc: *SgDesc) void = {
     // note: the pools here will have an additional item, since slot 0 is reserved
-    
-    fn setup_pool(&p.image_pool, &p.images, desc.image_pool_size) void = {
-        @debug_assert((desc.shader_pool_size > 0) && (desc.shader_pool_size < _SG_MAX_POOL_SIZE));
-        _sg_pool_init(&p.shader_pool, desc.shader_pool_size);
-        size_t shader_pool_byte_size = sizeof(_sg_shader_t) * (size_t)p.shader_pool.size;
-        p.shaders = (_sg_shader_t*) _sg_malloc_clear(shader_pool_byte_size);
-    }
-    
-    setup_pool(p.buffer_pool&, p.buffers&, desc.buffer_pool_size);
-    setup_pool(p.image_pool&, p.images&, desc.image_pool_size);
-    setup_pool(p.sampler_pool&, p.samplers&, desc.sampler_pool_size);
-    setup_pool(p.shader_pool&, p.shaders&, desc.shader_pool_size);
-    setup_pool(p.pipeline_pool&, p.pipelines&, desc.pipeline_pool_size);
-    setup_pool(p.attachments_pool&, p.attachments&, desc.attachments_pool_size);
+    X :: fn($R, count) => pool_init(sg.pools.index(R.Tag), sg.allocator, count, size_of(R.T));
+    X(Buffer, desc.buffer_pool_size);
+    X(Image, desc.image_pool_size);
+    X(Sampler, desc.sampler_pool_size);
+    X(Shader, desc.shader_pool_size);
+    X(Pipeline, desc.pipeline_pool_size);
+    X(Attachment, desc.attachments_pool_size);
 }
 
-fn _sg_discard_pools(_sg_pools_t* p) {
-    @debug_assert(p);
-    _sg_free(p.attachments); p.attachments = 0;
-    _sg_free(p.pipelines);   p.pipelines = 0;
-    _sg_free(p.shaders);     p.shaders = 0;
-    _sg_free(p.samplers);    p.samplers = 0;
-    _sg_free(p.images);      p.images = 0;
-    _sg_free(p.buffers);     p.buffers = 0;
-    _sg_pool_discard(&p.attachments_pool);
-    _sg_pool_discard(&p.pipeline_pool);
-    _sg_pool_discard(&p.shader_pool);
-    _sg_pool_discard(&p.sampler_pool);
-    _sg_pool_discard(&p.image_pool);
-    _sg_pool_discard(&p.buffer_pool);
+fn discard_pools(sg: *Self) void = {
+    for_enum PoolType { it |
+        pool_discard(sg.pools&.index(it), sg.allocator);
+    };
 }
 
 /* allocate the slot at slot_index:
@@ -893,11 +661,11 @@ fn slot_alloc(pool: *DynPool, slot_index: i32) u32 = {
     slot.id
 }
 
-fn get_slot(pool: *DynPool, slot_index: i32) *_sg_slot_t = 
-    _sg_slot_t.ptr_from_raw(pool.data.offset(pool.sizeof_t));
+fn get_slot(pool: *DynPool, slot_index: i32) *SlotHeader = 
+    SlotHeader.ptr_from_raw(pool.data.offset(pool.sizeof_t));
 
 // extract slot index from id
-fn int _sg_slot_index(uint32_t id) {
+fn _sg_slot_index(id: u32) i32 = {
     int slot_index = (int) (id & _SG_SLOT_MASK);
     @debug_assert(_SG_INVALID_SLOT_INDEX != slot_index);
     return slot_index;
@@ -923,52 +691,20 @@ fn discard_all_resources(sg: *Self) void = {
     };
 }
 
-fn _sg_tracker_init(_sg_tracker_t* tracker, uint32_t num) {
-    @debug_assert(tracker);
-    @debug_assert(num > 0);
-    @debug_assert(0 == tracker.size);
-    @debug_assert(0 == tracker.cur);
-    @debug_assert(0 == tracker.items);
-    tracker.size = (uint32_t)num;
-    tracker.items = (uint32_t*)_sg_malloc_clear(num * sizeof(uint32_t));
-}
-
-fn _sg_tracker_discard(_sg_tracker_t* tracker) {
-    @debug_assert(tracker);
-    if (tracker.items) {
-        _sg_free(tracker.items);
-    }
-    tracker.size = 0;
-    tracker.cur = 0;
-    tracker.items = 0;
-}
-
-fn _sg_tracker_reset(_sg_tracker_t* tracker) {
-    @debug_assert(tracker && tracker.items);
-    tracker.cur = 0;
-}
-
-fn bool _sg_tracker_add(_sg_tracker_t* tracker, uint32_t res_id) {
-    @debug_assert(tracker && tracker.items);
-    if(tracker.cur >= tracker.size, => return(false));
-    tracker.items[tracker.cur++] = res_id;
-    true
-}
-
-fn _sg_validate_begin() void = if SOKOL_DEBUG {
-    _sg.validate_error = SG_LOGITEM_OK;
+fn _sg_validate_begin(sg: *Self) void = if SOKOL_DEBUG {
+    sg.validate_error = SG_LOGITEM_OK;
 };
 
-fn _sg_validate_end() bool = {
+fn _sg_validate_end(sg: *Self) bool = {
     @if(!SOKOL_DEBUG) return(true);
-    if(_sg.validate_error == SG_LOGITEM_OK, => return(true));
-    #if !defined(SOKOL_VALIDATE_NON_FATAL)
-        _SG_PANIC(VALIDATION_FAILED);
-    #endif
+    if(sg.validate_error == SG_LOGITEM_OK, => return(true));
+    //#if !defined(SOKOL_VALIDATE_NON_FATAL)
+    //    _SG_PANIC(VALIDATION_FAILED);
+    //#endif
     false
 }
 
-fn _sg_validate_buffer_desc(const sg_buffer_desc* desc) bool = @validate(sg) {
+fn validate(sg: *Self, desc: *Buffer.Desc) bool = @validate(sg) {
     @debug_assert(desc);
     @V(desc._start_canary == 0, VALIDATE_BUFFERDESC_CANARY);
     @V(desc._end_canary == 0, VALIDATE_BUFFERDESC_CANARY);
@@ -988,13 +724,12 @@ fn _sg_validate_buffer_desc(const sg_buffer_desc* desc) bool = @validate(sg) {
         @V(desc.data.size == 0, VALIDATE_BUFFERDESC_EXPECT_ZERO_DATA_SIZE);
     }
     if (desc.type == SG_BUFFERTYPE_STORAGEBUFFER) {
-        @V(_sg.features.compute, VALIDATE_BUFFERDESC_STORAGEBUFFER_SUPPORTED);
+        @V(sg.features.compute, VALIDATE_BUFFERDESC_STORAGEBUFFER_SUPPORTED);
         @V(_sg_multiple_u64(desc.size, 4), VALIDATE_BUFFERDESC_STORAGEBUFFER_SIZE_MULTIPLE_4);
     }
 };
 
-fn _sg_validate_image_data(const sg_image_data* data, sg_pixel_format fmt, int width, int height, int num_faces, int num_mips, int num_slices) void = {
-    @if(!SOKOL_DEBUG) return();
+fn validate(data: *SgImageData, fmt: SgPixelFormat, width: i32, height: i32, num_faces: i32, num_mips: i32, num_slices: i32) void = {
     range(0, num_faces) { face_index |
         range(0, num_mips) { mip_index |
             has_data := data.subimage[face_index][mip_index].ptr != 0;
@@ -1009,7 +744,7 @@ fn _sg_validate_image_data(const sg_image_data* data, sg_pixel_format fmt, int w
     }
 }
 
-fn _sg_validate_image_desc(const sg_image_desc* desc) bool = @validate(sg) {
+fn validate(sg: *Self, desc: *Image.Desc) bool = @validate(sg) {
     @debug_assert(desc);
     @V(desc._start_canary == 0, VALIDATE_IMAGEDESC_CANARY);
     @V(desc._end_canary == 0, VALIDATE_IMAGEDESC_CANARY);
@@ -1021,32 +756,31 @@ fn _sg_validate_image_desc(const sg_image_desc* desc) bool = @validate(sg) {
                             (0 != desc.mtl_textures[0]) ||
                             (0 != desc.d3d11_texture) ||
                             (0 != desc.wgpu_texture);
-    if (_sg_is_depth_or_depth_stencil_format(fmt)) {
+    if (is_depth_or_depth_stencil_format(fmt)) {
         @V(desc.type != SG_IMAGETYPE_3D, VALIDATE_IMAGEDESC_DEPTH_3D_IMAGE);
     }
     if (desc.render_target) {
         @debug_assert(((int)fmt >= 0) && ((int)fmt < _SG_PIXELFORMAT_NUM));
-        @V(_sg.formats[fmt].render, VALIDATE_IMAGEDESC_RT_PIXELFORMAT);
+        @V(sg.formats[fmt].render, VALIDATE_IMAGEDESC_RT_PIXELFORMAT);
         @V(usage == SG_USAGE_IMMUTABLE, VALIDATE_IMAGEDESC_RT_IMMUTABLE);
         @V(desc.data.subimage[0][0].ptr==0, VALIDATE_IMAGEDESC_RT_NO_DATA);
         if (desc.sample_count > 1) {
-            @V(_sg.formats[fmt].msaa, VALIDATE_IMAGEDESC_NO_MSAA_RT_SUPPORT);
+            @V(sg.formats[fmt].msaa, VALIDATE_IMAGEDESC_NO_MSAA_RT_SUPPORT);
             @V(desc.num_mipmaps == 1, VALIDATE_IMAGEDESC_MSAA_NUM_MIPMAPS);
             @V(desc.type != SG_IMAGETYPE_3D, VALIDATE_IMAGEDESC_MSAA_3D_IMAGE);
             @V(desc.type != SG_IMAGETYPE_CUBE, VALIDATE_IMAGEDESC_MSAA_CUBE_IMAGE);
         }
     } else {
         @V(desc.sample_count == 1, VALIDATE_IMAGEDESC_MSAA_BUT_NO_RT);
-        valid_nonrt_fmt := !_sg_is_valid_rendertarget_depth_format(fmt);
+        valid_nonrt_fmt := !sg.is_valid_rendertarget_depth_format(fmt);
         @V(valid_nonrt_fmt, VALIDATE_IMAGEDESC_NONRT_PIXELFORMAT);
-        is_compressed := _sg_is_compressed_pixel_format(desc.pixel_format);
         is_immutable := (usage == SG_USAGE_IMMUTABLE);
-        if (is_compressed) {
+        if is_compressed(desc.pixel_format) {
             @V(is_immutable, VALIDATE_IMAGEDESC_COMPRESSED_IMMUTABLE);
         }
         if (!injected && is_immutable) {
             // image desc must have valid data
-            _sg_validate_image_data(&desc.data,
+            validate(&desc.data,
                 desc.pixel_format,
                 desc.width,
                 desc.height,
@@ -1071,7 +805,7 @@ fn _sg_validate_image_desc(const sg_image_desc* desc) bool = @validate(sg) {
     }
 };
 
-fn _sg_validate_sampler_desc(const sg_sampler_desc* desc) bool = @validate(sg) {
+fn validate(sg: *Self, desc: *Sampler.Desc) bool = @validate(sg) {
     @debug_assert(desc);
     @V(desc._start_canary == 0, VALIDATE_SAMPLERDESC_CANARY);
     @V(desc._end_canary == 0, VALIDATE_SAMPLERDESC_CANARY);
@@ -1084,17 +818,12 @@ fn _sg_validate_sampler_desc(const sg_sampler_desc* desc) bool = @validate(sg) {
     }
 };
 
-typedef struct {
-    uint64_t lo, hi;
-} _sg_u128_t;
+_sg_u128_t :: @struct {
+    lo: i64;
+    hi: i64;
+};
 
-fn _sg_u128_t _sg_u128(void) {
-    _sg_u128_t res;
-    _sg_clear(&res, sizeof(res));
-    return res;
-}
-
-fn _sg_u128_t _sg_validate_set_slot_bit(_sg_u128_t bits, sg_shader_stage stage, uint8_t slot) {
+fn _sg_validate_set_slot_bit(bits: _sg_u128_t, stage: sg_shader_stage, slot: u8) _sg_u128_t = {
     switch (stage) {
         case SG_SHADERSTAGE_NONE:
             @debug_assert(slot < 128);
@@ -1123,8 +852,8 @@ fn _sg_u128_t _sg_validate_set_slot_bit(_sg_u128_t bits, sg_shader_stage stage, 
     return bits;
 }
 
-fn bool _sg_validate_slot_bits(_sg_u128_t bits, sg_shader_stage stage, uint8_t slot) {
-    _sg_u128_t mask = _sg_u128();
+fn _sg_validate_slot_bits(bits: _sg_u128_t, stage: sg_shader_stage, slot: u8) bool = {
+    _sg_u128_t mask = zeroed(_sg_u128_t);
     switch (stage) {
         case SG_SHADERSTAGE_NONE:
             @debug_assert(slot < 128);
@@ -1169,7 +898,7 @@ V :: fn(a: FatExpr) FatExpr #macro = @{
     };
 };
 
-fn _sg_validate_shader_desc(const sg_shader_desc* desc) bool = @validate(sg) {
+fn validate(sg: *Self, desc: *Shader.Desc) bool = @validate(sg) {
     @debug_assert(desc);
     bool is_compute_shader = (desc.compute_func.source != 0) || (desc.compute_func.bytecode.ptr != 0);
     _sg_validate_begin();
@@ -1214,9 +943,9 @@ fn _sg_validate_shader_desc(const sg_shader_desc* desc) bool = @validate(sg) {
         @V(desc.compute_func.bytecode.size > 0, VALIDATE_SHADERDESC_NO_BYTECODE_SIZE);
     }
 
-    _sg_u128_t msl_buf_bits = _sg_u128();
-    _sg_u128_t msl_tex_bits = _sg_u128();
-    _sg_u128_t msl_smp_bits = _sg_u128();
+    _sg_u128_t msl_buf_bits = zeroed(_sg_u128_t);
+    _sg_u128_t msl_tex_bits = zeroed(_sg_u128_t);
+    _sg_u128_t msl_smp_bits = zeroed(_sg_u128_t);
     ASSERT_METAL();
     for (size_t ub_idx = 0; ub_idx < SG_MAX_UNIFORMBLOCK_BINDSLOTS; ub_idx++) {
         const sg_shader_uniform_block* ub_desc = &desc.uniform_blocks[ub_idx];
@@ -1306,12 +1035,12 @@ fn _sg_validate_shader_desc(const sg_shader_desc* desc) bool = @validate(sg) {
     _sg_validate_end()
 }
 
-fn _sg_validate_pipeline_desc(const sg_pipeline_desc* desc) bool = @validate(sg) {
+fn validate(sg: *Self, desc: *Pipeline.Desc) bool = @validate(sg) {
     @debug_assert(desc);
     @V(desc._start_canary == 0, VALIDATE_PIPELINEDESC_CANARY);
     @V(desc._end_canary == 0, VALIDATE_PIPELINEDESC_CANARY);
     @V(desc.shader.id != SG_INVALID_ID, VALIDATE_PIPELINEDESC_SHADER);
-    const _sg_shader_t* shd = _sg_lookup_shader(&_sg.pools, desc.shader.id);
+    const _sg_shader_t* shd = _sg_lookup_shader(&sg.pools, desc.shader.id);
     @V(0 != shd, VALIDATE_PIPELINEDESC_SHADER);
     if (shd) {
         @V(shd.slot.state == SG_RESOURCESTATE_VALID, VALIDATE_PIPELINEDESC_SHADER);
@@ -1330,7 +1059,7 @@ fn _sg_validate_pipeline_desc(const sg_pipeline_desc* desc) bool = @validate(sg)
                 @debug_assert(a_state.buffer_index < SG_MAX_VERTEXBUFFER_BINDSLOTS);
                 // vertex format must match expected shader attribute base type (if provided)
                 if (shd.cmn.attrs[attr_index].base_type != SG_SHADERATTRBASETYPE_UNDEFINED) {
-                    if (_sg_vertexformat_basetype(a_state.format) != shd.cmn.attrs[attr_index].base_type) {
+                    if (vertexformat_basetype(a_state.format) != shd.cmn.attrs[attr_index].base_type) {
                         @V(false, VALIDATE_PIPELINEDESC_ATTR_BASETYPE_MISMATCH);
                         _SG_LOGMSG(VALIDATE_PIPELINEDESC_ATTR_BASETYPE_MISMATCH, "attr format:");
                         _SG_LOGMSG(VALIDATE_PIPELINEDESC_ATTR_BASETYPE_MISMATCH, _sg_vertexformat_to_string(a_state.format));
@@ -1369,11 +1098,11 @@ fn _sg_validate_pipeline_desc(const sg_pipeline_desc* desc) bool = @validate(sg)
     }
 };
 
-fn _sg_validate_attachments_desc(const sg_attachments_desc* desc) bool = @validate(sg) {
+fn validate(sg: *Self, desc: *Attachments.Desc) bool = @validate(sg) {
     @debug_assert(desc);
     @V(desc._start_canary == 0, VALIDATE_ATTACHMENTSDESC_CANARY);
     @V(desc._end_canary == 0, VALIDATE_ATTACHMENTSDESC_CANARY);
-    bool atts_cont = true;
+    atts_cont := true;
     int color_width = -1, color_height = -1, color_sample_count = -1;
     bool has_color_atts = false;
     for (int att_index = 0; att_index < SG_MAX_COLOR_ATTACHMENTS; att_index++) {
@@ -1384,7 +1113,7 @@ fn _sg_validate_attachments_desc(const sg_attachments_desc* desc) bool = @valida
         }
         @V(atts_cont, VALIDATE_ATTACHMENTSDESC_NO_CONT_COLOR_ATTS);
         has_color_atts = true;
-        const *Image.T img = _sg_lookup_image(&_sg.pools, att.image.id);
+        const *Image.T img = _sg_lookup_image(&sg.pools, att.image.id);
         @V(img, VALIDATE_ATTACHMENTSDESC_IMAGE);
         if (0 != img) {
             @V(img.slot.state == SG_RESOURCESTATE_VALID, VALIDATE_ATTACHMENTSDESC_IMAGE);
@@ -1406,14 +1135,14 @@ fn _sg_validate_attachments_desc(const sg_attachments_desc* desc) bool = @valida
                 @V(color_height == _sg_miplevel_dim(img.cmn.height, att.mip_level), VALIDATE_ATTACHMENTSDESC_IMAGE_SIZES);
                 @V(color_sample_count == img.cmn.sample_count, VALIDATE_ATTACHMENTSDESC_IMAGE_SAMPLE_COUNTS);
             }
-            @V(_sg_is_valid_rendertarget_color_format(img.cmn.pixel_format), VALIDATE_ATTACHMENTSDESC_COLOR_INV_PIXELFORMAT);
+            @V(is_valid_rendertarget_color_format(img.cmn.pixel_format), VALIDATE_ATTACHMENTSDESC_COLOR_INV_PIXELFORMAT);
 
             // check resolve attachment
             const sg_attachment_desc* res_att = &desc.resolves[att_index];
             if (res_att.image.id != SG_INVALID_ID) {
                 // associated color attachment must be MSAA
                 @V(img.cmn.sample_count > 1, VALIDATE_ATTACHMENTSDESC_RESOLVE_COLOR_IMAGE_MSAA);
-                const *Image.T res_img = _sg_lookup_image(&_sg.pools, res_att.image.id);
+                const *Image.T res_img = _sg_lookup_image(&sg.pools, res_att.image.id);
                 @V(res_img, VALIDATE_ATTACHMENTSDESC_RESOLVE_IMAGE);
                 if (res_img != 0) {
                     @V(res_img.slot.state == SG_RESOURCESTATE_VALID, VALIDATE_ATTACHMENTSDESC_RESOLVE_IMAGE);
@@ -1437,7 +1166,7 @@ fn _sg_validate_attachments_desc(const sg_attachments_desc* desc) bool = @valida
     bool has_depth_stencil_att = false;
     if (desc.depth_stencil.image.id != SG_INVALID_ID) {
         const sg_attachment_desc* att = &desc.depth_stencil;
-        const *Image.T img = _sg_lookup_image(&_sg.pools, att.image.id);
+        const *Image.T img = _sg_lookup_image(&sg.pools, att.image.id);
         @V(img, VALIDATE_ATTACHMENTSDESC_DEPTH_IMAGE);
         has_depth_stencil_att = true;
         if (img) {
@@ -1455,13 +1184,13 @@ fn _sg_validate_attachments_desc(const sg_attachments_desc* desc) bool = @valida
             @V((color_width == -1) || (color_width == _sg_miplevel_dim(img.cmn.width, att.mip_level)), VALIDATE_ATTACHMENTSDESC_DEPTH_IMAGE_SIZES);
             @V((color_height == -1) || (color_height == _sg_miplevel_dim(img.cmn.height, att.mip_level)), VALIDATE_ATTACHMENTSDESC_DEPTH_IMAGE_SIZES);
             @V((color_sample_count == -1) || (color_sample_count == img.cmn.sample_count), VALIDATE_ATTACHMENTSDESC_DEPTH_IMAGE_SAMPLE_COUNT);
-            @V(_sg_is_valid_rendertarget_depth_format(img.cmn.pixel_format), VALIDATE_ATTACHMENTSDESC_DEPTH_INV_PIXELFORMAT);
+            @V(sg.is_valid_rendertarget_depth_format(img.cmn.pixel_format), VALIDATE_ATTACHMENTSDESC_DEPTH_INV_PIXELFORMAT);
         }
     }
     @V(has_color_atts || has_depth_stencil_att, VALIDATE_ATTACHMENTSDESC_NO_ATTACHMENTS);
 };
 
-fn _sg_validate_begin_pass(const sg_pass* pass) bool = @validate(sg) {
+fn validate_begin_pass(sg: *Self, pass: *SgPass) bool = @validate(sg) {
     const bool is_compute_pass = pass.compute;
     const bool is_swapchain_pass = !is_compute_pass && (pass.attachments.id == SG_INVALID_ID);
     const bool is_offscreen_pass = !(is_compute_pass || is_swapchain_pass);
@@ -1493,24 +1222,24 @@ fn _sg_validate_begin_pass(const sg_pass* pass) bool = @validate(sg) {
         ASSERT_METAL();
     } else {
         // this is an 'offscreen pass'
-        const _sg_attachments_t* atts = _sg_lookup_attachments(&_sg.pools, pass.attachments.id);
+        const _sg_attachments_t* atts = _sg_lookup_attachments(&sg.pools, pass.attachments.id);
         if (atts) {
             @V(atts.slot.state == SG_RESOURCESTATE_VALID, VALIDATE_BEGINPASS_ATTACHMENTS_VALID);
             for (int i = 0; i < SG_MAX_COLOR_ATTACHMENTS; i++) {
                 const _sg_attachment_common_t* color_att = &atts.cmn.colors[i];
-                const *Image.T color_img = _sg_attachments_color_image(atts, i);
+                color_img := sg.impl().attachments_color_image(atts, i);
                 if (color_img) {
                     @V(color_img.slot.state == SG_RESOURCESTATE_VALID, VALIDATE_BEGINPASS_COLOR_ATTACHMENT_IMAGE);
                     @V(color_img.slot.id == color_att.image_id.id, VALIDATE_BEGINPASS_COLOR_ATTACHMENT_IMAGE);
                 }
                 const _sg_attachment_common_t* resolve_att = &atts.cmn.resolves[i];
-                const *Image.T resolve_img = _sg_attachments_resolve_image(atts, i);
+                const *Image.T resolve_img = sg.impl().attachments_resolve_image(atts, i);
                 if (resolve_img) {
                     @V(resolve_img.slot.state == SG_RESOURCESTATE_VALID, VALIDATE_BEGINPASS_RESOLVE_ATTACHMENT_IMAGE);
                     @V(resolve_img.slot.id == resolve_att.image_id.id, VALIDATE_BEGINPASS_RESOLVE_ATTACHMENT_IMAGE);
                 }
             }
-            const *Image.T ds_img = _sg_attachments_ds_image(atts);
+            const *Image.T ds_img = sg.impl().attachments_ds_image(atts);
             if (ds_img) {
                 const _sg_attachment_common_t* att = &atts.cmn.depth_stencil;
                 @V(ds_img.slot.state == SG_RESOURCESTATE_VALID, VALIDATE_BEGINPASS_DEPTHSTENCIL_ATTACHMENT_IMAGE);
@@ -1534,18 +1263,18 @@ fn _sg_validate_begin_pass(const sg_pass* pass) bool = @validate(sg) {
     }
 };
 
-fn _sg_validate_apply_viewport(int x, int y, int width, int height, bool origin_top_left) bool = @validate(sg) {
-    @V(_sg.cur_pass.in_pass && !_sg.cur_pass.is_compute, VALIDATE_AVP_RENDERPASS_EXPECTED);
+fn validate_apply_viewport(sg: *Self, x: i32, y: i32, width: i32, height: i32, origin_top_left: bool) bool = @validate(sg) {
+    @V(sg.cur_pass.in_pass && !sg.cur_pass.is_compute, VALIDATE_AVP_RENDERPASS_EXPECTED);
 };
 
-fn _sg_validate_apply_scissor_rect(int x, int y, int width, int height, bool origin_top_left) bool = @validate(sg) {
-    @V(_sg.cur_pass.in_pass && !_sg.cur_pass.is_compute, VALIDATE_ASR_RENDERPASS_EXPECTED);
+fn _sg_validate_apply_scissor_rect(sg: *Self, x: i32, y: i32, width: i32, height: i32, origin_top_left: bool) bool = @validate(sg) {
+    @V(sg.cur_pass.in_pass && !sg.cur_pass.is_compute, VALIDATE_ASR_RENDERPASS_EXPECTED);
 };
 
-fn _sg_validate_apply_pipeline(sg_pipeline pip_id) bool = @validate(sg) {
+fn _sg_validate_apply_pipeline(sg: *Self, pip_id: Pipeline) bool = @validate(sg) {
     // the pipeline object must be alive and valid
     @V(pip_id.id != SG_INVALID_ID, VALIDATE_APIP_PIPELINE_VALID_ID);
-    const _sg_pipeline_t* pip = _sg_lookup_pipeline(&_sg.pools, pip_id.id);
+    const _sg_pipeline_t* pip = _sg_lookup_pipeline(&sg.pools, pip_id.id);
     @V(pip != 0, VALIDATE_APIP_PIPELINE_EXISTS);
     if (!pip) {
         return _sg_validate_end();
@@ -1553,28 +1282,28 @@ fn _sg_validate_apply_pipeline(sg_pipeline pip_id) bool = @validate(sg) {
     @V(pip.slot.state == SG_RESOURCESTATE_VALID, VALIDATE_APIP_PIPELINE_VALID);
     // the pipeline's shader must be alive and valid
     @debug_assert(pip.shader);
-    @V(_sg.cur_pass.in_pass, VALIDATE_APIP_PASS_EXPECTED);
+    @V(sg.cur_pass.in_pass, VALIDATE_APIP_PASS_EXPECTED);
     @V(pip.shader.slot.id == pip.cmn.shader_id.id, VALIDATE_APIP_SHADER_EXISTS);
     @V(pip.shader.slot.state == SG_RESOURCESTATE_VALID, VALIDATE_APIP_SHADER_VALID);
     if (pip.cmn.is_compute) {
-        @V(_sg.cur_pass.is_compute, VALIDATE_APIP_COMPUTEPASS_EXPECTED);
+        @V(sg.cur_pass.is_compute, VALIDATE_APIP_COMPUTEPASS_EXPECTED);
     } else {
-        @V(!_sg.cur_pass.is_compute, VALIDATE_APIP_RENDERPASS_EXPECTED);
+        @V(!sg.cur_pass.is_compute, VALIDATE_APIP_RENDERPASS_EXPECTED);
         // check that pipeline attributes match current pass attributes
-        if (_sg.cur_pass.atts_id.id != SG_INVALID_ID) {
+        if (sg.cur_pass.atts_id.id != SG_INVALID_ID) {
             // an offscreen pass
-            const _sg_attachments_t* atts = _sg.cur_pass.atts;
+            const _sg_attachments_t* atts = sg.cur_pass.atts;
             @debug_assert(atts);
-            @V(atts.slot.id == _sg.cur_pass.atts_id.id, VALIDATE_APIP_CURPASS_ATTACHMENTS_EXISTS);
+            @V(atts.slot.id == sg.cur_pass.atts_id.id, VALIDATE_APIP_CURPASS_ATTACHMENTS_EXISTS);
             @V(atts.slot.state == SG_RESOURCESTATE_VALID, VALIDATE_APIP_CURPASS_ATTACHMENTS_VALID);
 
             @V(pip.cmn.color_count == atts.cmn.num_colors, VALIDATE_APIP_ATT_COUNT);
             for (int i = 0; i < pip.cmn.color_count; i++) {
-                const *Image.T att_img = _sg_attachments_color_image(atts, i);
+                const *Image.T att_img = sg.impl().attachments_color_image(atts, i);
                 @V(pip.cmn.colors[i].pixel_format == att_img.cmn.pixel_format, VALIDATE_APIP_COLOR_FORMAT);
                 @V(pip.cmn.sample_count == att_img.cmn.sample_count, VALIDATE_APIP_SAMPLE_COUNT);
             }
-            const *Image.T att_dsimg = _sg_attachments_ds_image(atts);
+            const *Image.T att_dsimg = sg.impl().attachments_ds_image(atts);
             if (att_dsimg) {
                 @V(pip.cmn.depth.pixel_format == att_dsimg.cmn.pixel_format, VALIDATE_APIP_DEPTH_FORMAT);
             } else {
@@ -1583,16 +1312,16 @@ fn _sg_validate_apply_pipeline(sg_pipeline pip_id) bool = @validate(sg) {
         } else {
             // default pass
             @V(pip.cmn.color_count == 1, VALIDATE_APIP_ATT_COUNT);
-            @V(pip.cmn.colors[0].pixel_format == _sg.cur_pass.swapchain.color_fmt, VALIDATE_APIP_COLOR_FORMAT);
-            @V(pip.cmn.depth.pixel_format == _sg.cur_pass.swapchain.depth_fmt, VALIDATE_APIP_DEPTH_FORMAT);
-            @V(pip.cmn.sample_count == _sg.cur_pass.swapchain.sample_count, VALIDATE_APIP_SAMPLE_COUNT);
+            @V(pip.cmn.colors[0].pixel_format == sg.cur_pass.swapchain.color_fmt, VALIDATE_APIP_COLOR_FORMAT);
+            @V(pip.cmn.depth.pixel_format == sg.cur_pass.swapchain.depth_fmt, VALIDATE_APIP_DEPTH_FORMAT);
+            @V(pip.cmn.sample_count == sg.cur_pass.swapchain.sample_count, VALIDATE_APIP_SAMPLE_COUNT);
         }
     }
 }
 
-fn _sg_validate_apply_bindings(const sg_bindings* bindings) bool = @validate(sg) {
+fn _sg_validate_apply_bindings(sg: *Self, bindings: *sg_bindings) bool = @validate(sg) {
     // must be called in a pass
-    @V(_sg.cur_pass.in_pass, VALIDATE_ABND_PASS_EXPECTED);
+    @V(sg.cur_pass.in_pass, VALIDATE_ABND_PASS_EXPECTED);
 
     // bindings must not be empty
     bool has_any_bindings = bindings.index_buffer.id != SG_INVALID_ID;
@@ -1611,8 +1340,8 @@ fn _sg_validate_apply_bindings(const sg_bindings* bindings) bool = @validate(sg)
     @V(has_any_bindings, VALIDATE_ABND_EMPTY_BINDINGS);
 
     // a pipeline object must have been applied
-    @V(_sg.cur_pipeline.id != SG_INVALID_ID, VALIDATE_ABND_PIPELINE);
-    const _sg_pipeline_t* pip = _sg_lookup_pipeline(&_sg.pools, _sg.cur_pipeline.id);
+    @V(sg.cur_pipeline.id != SG_INVALID_ID, VALIDATE_ABND_PIPELINE);
+    const _sg_pipeline_t* pip = _sg_lookup_pipeline(&sg.pools, sg.cur_pipeline.id);
     @V(pip != 0, VALIDATE_ABND_PIPELINE_EXISTS);
     if (!pip) {
         return _sg_validate_end();
@@ -1621,7 +1350,7 @@ fn _sg_validate_apply_bindings(const sg_bindings* bindings) bool = @validate(sg)
     @debug_assert(pip.shader && (pip.cmn.shader_id.id == pip.shader.slot.id));
     const _sg_shader_t* shd = pip.shader;
 
-    if (_sg.cur_pass.is_compute) {
+    if (sg.cur_pass.is_compute) {
         for (size_t i = 0; i < SG_MAX_VERTEXBUFFER_BINDSLOTS; i++) {
             @V(bindings.vertex_buffers[i].id == SG_INVALID_ID, VALIDATE_ABND_COMPUTE_EXPECTED_NO_VBS);
         }
@@ -1632,7 +1361,7 @@ fn _sg_validate_apply_bindings(const sg_bindings* bindings) bool = @validate(sg)
                 @V(bindings.vertex_buffers[i].id != SG_INVALID_ID, VALIDATE_ABND_EXPECTED_VB);
                 // buffers in vertex-buffer-slots must be of type SG_BUFFERTYPE_VERTEXBUFFER
                 if (bindings.vertex_buffers[i].id != SG_INVALID_ID) {
-                    const *Buffer.T buf = _sg_lookup_buffer(&_sg.pools, bindings.vertex_buffers[i].id);
+                    const *Buffer.T buf = _sg_lookup_buffer(&sg.pools, bindings.vertex_buffers[i].id);
                     @V(buf != 0, VALIDATE_ABND_VB_EXISTS);
                     if (buf && buf.slot.state == SG_RESOURCESTATE_VALID) {
                         @V(SG_BUFFERTYPE_VERTEXBUFFER == buf.cmn.type, VALIDATE_ABND_VB_TYPE);
@@ -1643,7 +1372,7 @@ fn _sg_validate_apply_bindings(const sg_bindings* bindings) bool = @validate(sg)
         }
     }
 
-    if (_sg.cur_pass.is_compute) {
+    if (sg.cur_pass.is_compute) {
         @V(bindings.index_buffer.id == SG_INVALID_ID, VALIDATE_ABND_COMPUTE_EXPECTED_NO_IB);
     } else {
         // index buffer expected or not, and index buffer still exists
@@ -1656,7 +1385,7 @@ fn _sg_validate_apply_bindings(const sg_bindings* bindings) bool = @validate(sg)
         }
         if (bindings.index_buffer.id != SG_INVALID_ID) {
             // buffer in index-buffer-slot must be of type SG_BUFFERTYPE_INDEXBUFFER
-            const *Buffer.T buf = _sg_lookup_buffer(&_sg.pools, bindings.index_buffer.id);
+            const *Buffer.T buf = _sg_lookup_buffer(&sg.pools, bindings.index_buffer.id);
             @V(buf != 0, VALIDATE_ABND_IB_EXISTS);
             if (buf && buf.slot.state == SG_RESOURCESTATE_VALID) {
                 @V(SG_BUFFERTYPE_INDEXBUFFER == buf.cmn.type, VALIDATE_ABND_IB_TYPE);
@@ -1670,17 +1399,17 @@ fn _sg_validate_apply_bindings(const sg_bindings* bindings) bool = @validate(sg)
         if (shd.cmn.images[i].stage != SG_SHADERSTAGE_NONE) {
             @V(bindings.images[i].id != SG_INVALID_ID, VALIDATE_ABND_EXPECTED_IMAGE_BINDING);
             if (bindings.images[i].id != SG_INVALID_ID) {
-                const *Image.T img = _sg_lookup_image(&_sg.pools, bindings.images[i].id);
+                const *Image.T img = _sg_lookup_image(&sg.pools, bindings.images[i].id);
                 @V(img != 0, VALIDATE_ABND_IMG_EXISTS);
                 if (img && img.slot.state == SG_RESOURCESTATE_VALID) {
                     @V(img.cmn.type == shd.cmn.images[i].image_type, VALIDATE_ABND_IMAGE_TYPE_MISMATCH);
-                    if (!_sg.features.msaa_image_bindings) {
+                    if (!sg.features.msaa_image_bindings) {
                         @V(img.cmn.sample_count == 1, VALIDATE_ABND_IMAGE_MSAA);
                     }
                     if (shd.cmn.images[i].multisampled) {
                         @V(img.cmn.sample_count > 1, VALIDATE_ABND_EXPECTED_MULTISAMPLED_IMAGE);
                     }
-                    const _sg_pixelformat_info_t* info = &_sg.formats[img.cmn.pixel_format];
+                    const _sg_pixelformat_info_t* info = &sg.formats[img.cmn.pixel_format];
                     switch (shd.cmn.images[i].sample_type) {
                         case SG_IMAGESAMPLETYPE_FLOAT:
                             @V(info.filter, VALIDATE_ABND_EXPECTED_FILTERABLE_IMAGE);
@@ -1701,7 +1430,7 @@ fn _sg_validate_apply_bindings(const sg_bindings* bindings) bool = @validate(sg)
         if (shd.cmn.samplers[i].stage != SG_SHADERSTAGE_NONE) {
             @V(bindings.samplers[i].id != SG_INVALID_ID, VALIDATE_ABND_EXPECTED_SAMPLER_BINDING);
             if (bindings.samplers[i].id != SG_INVALID_ID) {
-                const *Sampler.T smp = _sg_lookup_sampler(&_sg.pools, bindings.samplers[i].id);
+                const *Sampler.T smp = _sg_lookup_sampler(&sg.pools, bindings.samplers[i].id);
                 @V(smp != 0, VALIDATE_ABND_SMP_EXISTS);
                 if (smp) {
                     if (shd.cmn.samplers[i].sampler_type == SG_SAMPLERTYPE_COMPARISON) {
@@ -1725,7 +1454,7 @@ fn _sg_validate_apply_bindings(const sg_bindings* bindings) bool = @validate(sg)
         if (shd.cmn.storage_buffers[i].stage != SG_SHADERSTAGE_NONE) {
             @V(bindings.storage_buffers[i].id != SG_INVALID_ID, VALIDATE_ABND_EXPECTED_STORAGEBUFFER_BINDING);
             if (bindings.storage_buffers[i].id != SG_INVALID_ID) {
-                const *Buffer.T sbuf = _sg_lookup_buffer(&_sg.pools, bindings.storage_buffers[i].id);
+                const *Buffer.T sbuf = _sg_lookup_buffer(&sg.pools, bindings.storage_buffers[i].id);
                 @V(sbuf != 0, VALIDATE_ABND_STORAGEBUFFER_EXISTS);
                 if (sbuf) {
                     @V(sbuf.cmn.type == SG_BUFFERTYPE_STORAGEBUFFER, VALIDATE_ABND_STORAGEBUFFER_BINDING_BUFFERTYPE);
@@ -1739,12 +1468,12 @@ fn _sg_validate_apply_bindings(const sg_bindings* bindings) bool = @validate(sg)
     }
 };
 
-fn _sg_validate_apply_uniforms(int ub_slot, const sg_range* data) bool = @validate(sg) {
+fn _sg_validate_apply_uniforms(sg: *Self, ub_slot: i32, data: []u8) bool = @validate(sg) {
     @debug_assert((ub_slot >= 0) && (ub_slot < SG_MAX_UNIFORMBLOCK_BINDSLOTS));
-    @V(_sg.cur_pass.in_pass, VALIDATE_AU_PASS_EXPECTED);
-    @V(_sg.cur_pipeline.id != SG_INVALID_ID, VALIDATE_AU_NO_PIPELINE);
-    const _sg_pipeline_t* pip = _sg_lookup_pipeline(&_sg.pools, _sg.cur_pipeline.id);
-    @debug_assert(pip && (pip.slot.id == _sg.cur_pipeline.id));
+    @V(sg.cur_pass.in_pass, VALIDATE_AU_PASS_EXPECTED);
+    @V(sg.cur_pipeline.id != SG_INVALID_ID, VALIDATE_AU_NO_PIPELINE);
+    const _sg_pipeline_t* pip = _sg_lookup_pipeline(&sg.pools, sg.cur_pipeline.id);
+    @debug_assert(pip && (pip.slot.id == sg.cur_pipeline.id));
     @debug_assert(pip.shader && (pip.shader.slot.id == pip.cmn.shader_id.id));
 
     const _sg_shader_t* shd = pip.shader;
@@ -1752,41 +1481,41 @@ fn _sg_validate_apply_uniforms(int ub_slot, const sg_range* data) bool = @valida
     @V(data.size == shd.cmn.uniform_blocks[ub_slot].size, VALIDATE_AU_SIZE);
 };
 
-fn _sg_validate_draw(int base_element, int num_elements, int num_instances) bool = @validate(sg) {
-    @V(_sg.cur_pass.in_pass && !_sg.cur_pass.is_compute, VALIDATE_DRAW_RENDERPASS_EXPECTED);
+fn _sg_validate_draw(sg: *Self, base_element: i32, num_elements: i32, num_instances: i32) bool = @validate(sg) {
+    @V(sg.cur_pass.in_pass && !sg.cur_pass.is_compute, VALIDATE_DRAW_RENDERPASS_EXPECTED);
     @V(base_element >= 0, VALIDATE_DRAW_BASEELEMENT);
     @V(num_elements >= 0, VALIDATE_DRAW_NUMELEMENTS);
     @V(num_instances >= 0, VALIDATE_DRAW_NUMINSTANCES);
-    @V(_sg.required_bindings_and_uniforms == _sg.applied_bindings_and_uniforms, VALIDATE_DRAW_REQUIRED_BINDINGS_OR_UNIFORMS_MISSING);
+    @V(sg.required_bindings_and_uniforms == sg.applied_bindings_and_uniforms, VALIDATE_DRAW_REQUIRED_BINDINGS_OR_UNIFORMS_MISSING);
 };
 
-fn _sg_validate_dispatch(int num_groups_x, int num_groups_y, int num_groups_z) bool = @validate(sg) = {
-    @V(_sg.cur_pass.in_pass && _sg.cur_pass.is_compute, VALIDATE_DISPATCH_COMPUTEPASS_EXPECTED);
+fn _sg_validate_dispatch(sg: *Self, num_groups_x: i32, num_groups_y: i32, num_groups_z: i32) bool = @validate(sg) = {
+    @V(sg.cur_pass.in_pass && sg.cur_pass.is_compute, VALIDATE_DISPATCH_COMPUTEPASS_EXPECTED);
     @V((num_groups_x >= 0) && (num_groups_x < (1<<16)), VALIDATE_DISPATCH_NUMGROUPSX);
     @V((num_groups_y >= 0) && (num_groups_y < (1<<16)), VALIDATE_DISPATCH_NUMGROUPSY);
     @V((num_groups_z >= 0) && (num_groups_z < (1<<16)), VALIDATE_DISPATCH_NUMGROUPSZ);
-    @V(_sg.required_bindings_and_uniforms == _sg.applied_bindings_and_uniforms, VALIDATE_DRAW_REQUIRED_BINDINGS_OR_UNIFORMS_MISSING);
+    @V(sg.required_bindings_and_uniforms == sg.applied_bindings_and_uniforms, VALIDATE_DRAW_REQUIRED_BINDINGS_OR_UNIFORMS_MISSING);
 };
 
-fn _sg_validate_update_buffer(const *Buffer.T buf, const sg_range* data) bool = @validate(sg) = {
+fn _sg_validate_update_buffer(sg: *Self, buf: *Buffer.T, data: []u8) bool = @validate(sg) = {
     @debug_assert(buf && data && data.ptr);
     @V(buf.cmn.usage != SG_USAGE_IMMUTABLE, VALIDATE_UPDATEBUF_USAGE);
     @V(buf.cmn.size >= (int)data.size, VALIDATE_UPDATEBUF_SIZE);
-    @V(buf.cmn.update_frame_index != _sg.frame_index, VALIDATE_UPDATEBUF_ONCE);
-    @V(buf.cmn.append_frame_index != _sg.frame_index, VALIDATE_UPDATEBUF_APPEND);
+    @V(buf.cmn.update_frame_index != sg.frame_index, VALIDATE_UPDATEBUF_ONCE);
+    @V(buf.cmn.append_frame_index != sg.frame_index, VALIDATE_UPDATEBUF_APPEND);
 }
 
-fn _sg_validate_append_buffer(const *Buffer.T buf, const sg_range* data) bool = @validate(sg) = {
+fn _sg_validate_append_buffer(sg: *Self, buf: *Buffer.T, data: []u8) bool = @validate(sg) = {
     @debug_assert(buf && data && data.ptr);
     @V(buf.cmn.usage != SG_USAGE_IMMUTABLE, VALIDATE_APPENDBUF_USAGE);
     @V(buf.cmn.size >= (buf.cmn.append_pos + (int)data.size), VALIDATE_APPENDBUF_SIZE);
-    @V(buf.cmn.update_frame_index != _sg.frame_index, VALIDATE_APPENDBUF_UPDATE);
+    @V(buf.cmn.update_frame_index != sg.frame_index, VALIDATE_APPENDBUF_UPDATE);
 }
 
-fn validate(const *Image.T img, const sg_image_data* data) bool = @validate(sg) = {
+fn validate(sg: *Self, img: *Image.T, data: *sg_image_data) bool = @validate(sg) = {
     @debug_assert(img && data);
     @V(img.cmn.usage != SG_USAGE_IMMUTABLE, VALIDATE_UPDIMG_USAGE);
-    @V(img.cmn.upd_frame_index != _sg.frame_index, VALIDATE_UPDIMG_ONCE);
+    @V(img.cmn.upd_frame_index != sg.frame_index, VALIDATE_UPDIMG_ONCE);
     _sg_validate_image_data(data,
         img.cmn.pixel_format,
         img.cmn.width,
@@ -1796,7 +1525,7 @@ fn validate(const *Image.T img, const sg_image_data* data) bool = @validate(sg) 
         img.cmn.num_slices);
 }
 
-fn sg_buffer_desc _sg_buffer_desc_defaults(const sg_buffer_desc* desc) {
+fn desc_defaults(desc: *Buffer.Desc) Buffer.Desc = {
     sg_buffer_desc def = *desc;
     def.type = _sg_def(def.type, SG_BUFFERTYPE_VERTEXBUFFER);
     def.usage = _sg_def(def.usage, SG_USAGE_IMMUTABLE);
@@ -1806,15 +1535,15 @@ fn sg_buffer_desc _sg_buffer_desc_defaults(const sg_buffer_desc* desc) {
     return def;
 }
 
-fn sg_image_desc _sg_image_desc_defaults(const sg_image_desc* desc) {
+fn desc_defaults(desc: *Image.Desc) Image.Desc = {
     sg_image_desc def = *desc;
     def.type = _sg_def(def.type, SG_IMAGETYPE_2D);
     def.num_slices = _sg_def(def.num_slices, 1);
     def.num_mipmaps = _sg_def(def.num_mipmaps, 1);
     def.usage = _sg_def(def.usage, SG_USAGE_IMMUTABLE);
     if (desc.render_target) {
-        def.pixel_format = _sg_def(def.pixel_format, _sg.desc.environment.defaults.color_format);
-        def.sample_count = _sg_def(def.sample_count, _sg.desc.environment.defaults.sample_count);
+        def.pixel_format = _sg_def(def.pixel_format, sg.desc.environment.defaults.color_format);
+        def.sample_count = _sg_def(def.sample_count, sg.desc.environment.defaults.sample_count);
     } else {
         def.pixel_format = _sg_def(def.pixel_format, SG_PIXELFORMAT_RGBA8);
         def.sample_count = _sg_def(def.sample_count, 1);
@@ -1822,7 +1551,7 @@ fn sg_image_desc _sg_image_desc_defaults(const sg_image_desc* desc) {
     return def;
 }
 
-fn sg_sampler_desc _sg_sampler_desc_defaults(const sg_sampler_desc* desc) {
+fn desc_defaults(desc: *Sampler.Desc) Sampler.Desc {
     sg_sampler_desc def = *desc;
     def.min_filter = _sg_def(def.min_filter, SG_FILTER_NEAREST);
     def.mag_filter = _sg_def(def.mag_filter, SG_FILTER_NEAREST);
@@ -1837,7 +1566,7 @@ fn sg_sampler_desc _sg_sampler_desc_defaults(const sg_sampler_desc* desc) {
     return def;
 }
 
-fn sg_shader_desc _sg_shader_desc_defaults(const sg_shader_desc* desc) {
+fn desc_defaults(desc: *Shader.Desc) Shader.Desc = {
     sg_shader_desc def = *desc;
     def.vertex_func.entry = _sg_def(def.vertex_func.entry, "_main");
     def.fragment_func.entry = _sg_def(def.fragment_func.entry, "_main");
@@ -1874,7 +1603,7 @@ fn sg_shader_desc _sg_shader_desc_defaults(const sg_shader_desc* desc) {
     return def;
 }
 
-fn sg_pipeline_desc _sg_pipeline_desc_defaults(const sg_pipeline_desc* desc) {
+fn desc_defaults(desc: *Pipeline.Desc) Pipeline.Desc = {
     sg_pipeline_desc def = *desc;
 
     // FIXME: should we actually do all this stuff for a compute pipeline?
@@ -1883,7 +1612,7 @@ fn sg_pipeline_desc _sg_pipeline_desc_defaults(const sg_pipeline_desc* desc) {
     def.index_type = _sg_def(def.index_type, SG_INDEXTYPE_NONE);
     def.cull_mode = _sg_def(def.cull_mode, SG_CULLMODE_NONE);
     def.face_winding = _sg_def(def.face_winding, SG_FACEWINDING_CW);
-    def.sample_count = _sg_def(def.sample_count, _sg.desc.environment.defaults.sample_count);
+    def.sample_count = _sg_def(def.sample_count, sg.desc.environment.defaults.sample_count);
 
     def.stencil.front.compare = _sg_def(def.stencil.front.compare, SG_COMPAREFUNC_ALWAYS);
     def.stencil.front.fail_op = _sg_def(def.stencil.front.fail_op, SG_STENCILOP_KEEP);
@@ -1895,7 +1624,7 @@ fn sg_pipeline_desc _sg_pipeline_desc_defaults(const sg_pipeline_desc* desc) {
     def.stencil.back.pass_op = _sg_def(def.stencil.back.pass_op, SG_STENCILOP_KEEP);
 
     def.depth.compare = _sg_def(def.depth.compare, SG_COMPAREFUNC_ALWAYS);
-    def.depth.pixel_format = _sg_def(def.depth.pixel_format, _sg.desc.environment.defaults.depth_format);
+    def.depth.pixel_format = _sg_def(def.depth.pixel_format, sg.desc.environment.defaults.depth_format);
     if (def.colors[0].pixel_format == SG_PIXELFORMAT_NONE) {
         // special case depth-only rendering, enforce a color count of 0
         def.color_count = 0;
@@ -1907,7 +1636,7 @@ fn sg_pipeline_desc _sg_pipeline_desc_defaults(const sg_pipeline_desc* desc) {
     }
     for (int i = 0; i < def.color_count; i++) {
         sg_color_target_state* cs = &def.colors[i];
-        cs.pixel_format = _sg_def(cs.pixel_format, _sg.desc.environment.defaults.color_format);
+        cs.pixel_format = _sg_def(cs.pixel_format, sg.desc.environment.defaults.color_format);
         cs.write_mask = _sg_def(cs.write_mask, SG_COLORMASK_RGBA);
         sg_blend_state* bs = &def.colors[i].blend;
         bs.op_rgb = _sg_def(bs.op_rgb, SG_BLENDOP_ADD);
@@ -1956,7 +1685,7 @@ fn sg_pipeline_desc _sg_pipeline_desc_defaults(const sg_pipeline_desc* desc) {
         if (use_auto_offset) {
             a_state.offset = auto_offset[a_state.buffer_index];
         }
-        auto_offset[a_state.buffer_index] += _sg_vertexformat_bytesize(a_state.format);
+        auto_offset[a_state.buffer_index] += vertexformat_bytesize(a_state.format);
     }
     // compute vertex strides if needed
     for (int buf_index = 0; buf_index < SG_MAX_VERTEXBUFFER_BINDSLOTS; buf_index++) {
@@ -1969,9 +1698,11 @@ fn sg_pipeline_desc _sg_pipeline_desc_defaults(const sg_pipeline_desc* desc) {
     return def;
 }
 
-fn sg_attachments_desc _sg_attachments_desc_defaults(const sg_attachments_desc* desc) {
+fn desc_defaults(desc: *Attachments.Desc) Attachments.Desc = {
     desc[]
 }
+
+Metal :: import("@/graphics/macos/gfx.fr");
 
 // https://floooh.github.io/2018/06/17/handles-vs-pointers.html
 /*
@@ -1982,12 +1713,12 @@ fn sg_attachments_desc _sg_attachments_desc_defaults(const sg_attachments_desc* 
     its pool slot has been reused for a new object)
 */
 
-Buffer      :: Resource(.Buffer, _sg_buffer_t);  // vertex- and index-buffers
-Image       :: Resource(.Image, _sg_image_t);  // images used as textures and render-pass attachments
-Sampler     :: Resource(.Sampler, _sg_sampler_t);  // sampler objects describing how a texture is sampled in a shader
-Shader      :: Resource(.Shader, _sg_shader_t);  // vertex- and fragment-shaders and shader interface information
-Pipeline    :: Resource(.Pipeline, _sg_pipeline_t);  // associated shader and vertex-layouts, and render states
-Attachments :: Resource(.Attachments, _sg_attatchments_t);  // a baked collection of render pass attachment images
+Buffer :: Resource(.Buffer, SgBufferDesc, BufferCommon, Metal.Buffer);  // vertex- and index-buffers
+Image :: Resource(.Image, SgImageDesc, ImageCommon, Metal.Image);  // images used as textures and render-pass attachments
+Sampler :: Resource(.Sampler, SgSamplerDesc, SamplerCommon, Metal.Sampler);  // sampler objects describing how a texture is sampled in a shader
+Shader :: Resource(.Shader, SgShaderDesc, ShaderCommon, Metal.Shader);  // vertex- and fragment-shaders and shader interface information
+Pipeline :: Resource(.Pipeline, SgPipelineDesc, PipelineCommon, Metal.Pipeline);  // associated shader and vertex-layouts, and render states
+Attachments :: Resource(.Attachments, SgAttachmentsDec, AttachmentsCommon, Metal.Attachments);  // a baked collection of render pass attachment images
 
 PoolType :: @enum(u8) (Buffer, Image, Sampler, Shader, Pipeline, Attatchments);
 
@@ -2000,11 +1731,19 @@ DynPool :: @struct {
     data: rawptr;  // first of []T
 };
 
-fn Resource($_Tag: PoolType, $_T: Type) Type = {
+fn Resource($_Tag: PoolType, $_Desc: Type, $_Common: Type, $_Impl: Type) Type = {
     I :: @struct {
         id: u32;
         Tag :: _Tag;
-        T :: _T;  // The internal data we store
+        // The internal data we store in the pool
+        T :: @struct {
+            slot: SlotHeader;
+            cmn: Common;
+            mtl: Impl;
+        };     
+        Desc :: _Desc;  // Info the user gives us to create one 
+        Common :: _Common;
+        Impl :: _Impl;
     };
     
     fn alloc(sg: *Self) I #trace_args = {
@@ -2021,12 +1760,12 @@ fn Resource($_Tag: PoolType, $_T: Type) Type = {
     }
     
     fn make(sg: *Self, desc: *I.Desc) I #trace_args = {
-        @debug_assert(_sg.valid);
+        @debug_assert(sg.valid);
         @debug_assert(desc);
-        desc_def: I.Desc = _sg_shader_desc_defaults(desc);
+        desc_def: I.Desc = desc_defaults(desc);
         id: I = sg.alloc();
         if (id.id != SG_INVALID_ID) {
-            _sg_shader_t* shd = _sg_shader_at(&_sg.pools, shd_id.id);
+            _sg_shader_t* shd = _sg_shader_at(&sg.pools, shd_id.id);
             @debug_assert(shd && (shd.slot.state == SG_RESOURCESTATE_ALLOC));
             _sg_init_shader(shd, &desc_def);
             @debug_assert((shd.slot.state == SG_RESOURCESTATE_VALID) || (shd.slot.state == SG_RESOURCESTATE_FAILED));
@@ -2064,11 +1803,11 @@ fn Resource($_Tag: PoolType, $_T: Type) Type = {
         p := sg.pools&.index(I.Tag);
         SOKOL_ASSERT((it->slot.state == SG_RESOURCESTATE_ALLOC) && (it->slot.id != SG_INVALID_ID));
         p.free_index(_sg_slot_index(it.slot.id));
-        p.slot = zeroed _sg_slot_t;
+        p.slot = zeroed SlotHeader;
     }
     
     fn init(sg: *Self, id: I, desc: *I.Desc) void #trace_args = {
-        @debug_assert(_sg.valid);
+        @debug_assert(sg.valid);
         desc_def := sg.desc_defaults(desc);
         it := sg.lookup(id) || return();
         if (it.slot.state == SG_RESOURCESTATE_ALLOC) {
@@ -2081,9 +1820,9 @@ fn Resource($_Tag: PoolType, $_T: Type) Type = {
     
     // TODO: sampler/shader/pipeline/attatchments are the same but buffer/image are different
     fn sg_shader_info sg_query_shader_info(sg_shader smp_id) {
-        @debug_assert(_sg.valid);
+        @debug_assert(sg.valid);
         info := zeroed sg_shader_info;
-        smp := _sg_lookup_shader(&_sg.pools, smp_id.id) || return(info);
+        smp := _sg_lookup_shader(&sg.pools, smp_id.id) || return(info);
         info.slot.state = smp.slot.state;
         info.slot.res_id = smp.slot.id;
         info
@@ -2095,11 +1834,12 @@ fn Resource($_Tag: PoolType, $_T: Type) Type = {
         it.slot.state
     }
     
-    fn destroy(sg: *Self, id: I) void #trace_args = {
-        @debug_assert(_sg.valid);
+    fn uninit(sg: *Self, id: I) void #trace_args = {
+        @debug_assert(sg.valid);
         it := sg.lookup(id) || return();
         if ((it.slot.state == SG_RESOURCESTATE_VALID) || (it.slot.state == SG_RESOURCESTATE_FAILED)) {
-            _sg_uninit_shader(shd);
+            sg.impl().discard(it);
+            reset_to_alloc_state(shd);
             @debug_assert(shd.slot.state == SG_RESOURCESTATE_ALLOC);
         } else {
             _SG_ERROR(UNINIT_SHADER_INVALID_STATE);
@@ -2107,8 +1847,8 @@ fn Resource($_Tag: PoolType, $_T: Type) Type = {
     }
     
     fn sg_fail_shader(sg_shader shd_id) void #trace_args = {
-        @debug_assert(_sg.valid);
-        shd := _sg_lookup_shader(&_sg.pools, shd_id.id) || return();
+        @debug_assert(sg.valid);
+        shd := _sg_lookup_shader(&sg.pools, shd_id.id) || return();
         if (shd.slot.state == SG_RESOURCESTATE_ALLOC) {
             shd.slot.state = SG_RESOURCESTATE_FAILED;
         } else {
@@ -2116,17 +1856,11 @@ fn Resource($_Tag: PoolType, $_T: Type) Type = {
         }
     }
     
-    fn _sg_uninit_shader(_sg_shader_t* shd) {
-        @debug_assert(shd && ((shd.slot.state == SG_RESOURCESTATE_VALID) || (shd.slot.state == SG_RESOURCESTATE_FAILED)));
-        _sg_discard_shader(shd);
-        _sg_reset_shader_to_alloc_state(shd);
-    }
-    
     // TODO: buffer/image/sampler/shader are the same but pipeline/attatchments is different
     fn _sg_init_shader(_sg_shader_t* shd, const sg_shader_desc* desc) {
         @debug_assert(shd && (shd.slot.state == SG_RESOURCESTATE_ALLOC));
         @debug_assert(desc);
-        if (_sg_validate_shader_desc(desc)) {
+        if (validate(desc)) {
             _sg_shader_common_init(&shd.cmn, desc);
             shd.slot.state = _sg_create_shader(shd, desc);
         } else {
@@ -2134,39 +1868,37 @@ fn Resource($_Tag: PoolType, $_T: Type) Type = {
         }
         @debug_assert((shd.slot.state == SG_RESOURCESTATE_VALID)||(shd.slot.state == SG_RESOURCESTATE_FAILED));
     }
-
-    fn sg_destroy_shader(sg_shader shd_id) void #trace_args(.before) = {
-        @debug_assert(_sg.valid);
-        shd := _sg_lookup_shader(&_sg.pools, shd_id.id) || return();
-        if ((shd.slot.state == SG_RESOURCESTATE_VALID) || (shd.slot.state == SG_RESOURCESTATE_FAILED)) {
-            _sg_uninit_shader(shd);
-            @debug_assert(shd.slot.state == SG_RESOURCESTATE_ALLOC);
+    
+    fn destroy(sg: *Self, id: I) void #trace_args(.before) = {
+        @debug_assert(sg.valid);
+        it := sg.lookup(id) || return();
+        if ((it.slot.state == SG_RESOURCESTATE_VALID) || (it.slot.state == SG_RESOURCESTATE_FAILED)) {
+            sg.uninit(it);
+            @debug_assert(it.slot.state == SG_RESOURCESTATE_ALLOC);
         }
-        if (shd.slot.state == SG_RESOURCESTATE_ALLOC) {
-            _sg_dealloc_shader(shd);
-            @debug_assert(shd.slot.state == SG_RESOURCESTATE_INITIAL);
+        if (it.slot.state == SG_RESOURCESTATE_ALLOC) {
+            sg.dealloc(it);
+            @debug_assert(it.slot.state == SG_RESOURCESTATE_INITIAL);
         }
     }
     
-    fn _sg_reset_shader_to_alloc_state(_sg_shader_t* shd) {
-        @debug_assert(shd);
-        _sg_slot_t slot = shd.slot;
-        _sg_clear(shd, sizeof(*shd));
-        shd.slot = slot;
-        shd.slot.state = SG_RESOURCESTATE_ALLOC;
+    fn reset_to_alloc_state(it: *I.T) void = {
+        id := it.slot.id;
+        it[] = zeroed I.T;
+        it.slot = (id = id, state = .ALLOC);
     }
     
     I
 }
 
-fn _sg_init_pipeline(_sg_pipeline_t* pip, const sg_pipeline_desc* desc) {
+fn init_pipeline(sg: *Self, atts: *Pipeline.T, desc: *Pipeline.Desc) void = {
     @debug_assert(pip && (pip.slot.state == SG_RESOURCESTATE_ALLOC));
     @debug_assert(desc);
     if (_sg_validate_pipeline_desc(desc)) {
-        _sg_shader_t* shd = _sg_lookup_shader(&_sg.pools, desc.shader.id);
+        _sg_shader_t* shd = _sg_lookup_shader(&sg.pools, desc.shader.id);
         if (shd && (shd.slot.state == SG_RESOURCESTATE_VALID)) {
             _sg_pipeline_common_init(&pip.cmn, desc);
-            pip.slot.state = _sg_create_pipeline(pip, shd, desc);
+            pip.slot.state = sg.impl().create_pipeline(pip, shd, desc);
         } else {
             pip.slot.state = SG_RESOURCESTATE_FAILED;
         }
@@ -2176,7 +1908,7 @@ fn _sg_init_pipeline(_sg_pipeline_t* pip, const sg_pipeline_desc* desc) {
     @debug_assert((pip.slot.state == SG_RESOURCESTATE_VALID)||(pip.slot.state == SG_RESOURCESTATE_FAILED));
 }
 
-fn _sg_init_attachments(_sg_attachments_t* atts, const sg_attachments_desc* desc) {
+fn init_attachments(sg: *Self, atts: *Attachments.T, desc: *Attachments.Desc) void = {
     @debug_assert(atts && atts.slot.state == SG_RESOURCESTATE_ALLOC);
     @debug_assert(desc);
     if !_sg_validate_attachments_desc(desc)) {
@@ -2184,15 +1916,14 @@ fn _sg_init_attachments(_sg_attachments_t* atts, const sg_attachments_desc* desc
         return();
     };
     // lookup pass attachment image pointers
-    *Image.T color_images[SG_MAX_COLOR_ATTACHMENTS] = { 0 };
-    *Image.T resolve_images[SG_MAX_COLOR_ATTACHMENTS] = { 0 };
-    *Image.T ds_image = 0;
+    color_images := zeroed Array(*Image.T, SG_MAX_COLOR_ATTACHMENTS);
+    resolve_images := zeroed Array(*Image.T, SG_MAX_COLOR_ATTACHMENTS);
+    ds_image := zeroed(*Image.T);
     // NOTE: validation already checked that all surfaces are same width/height
-    int width = 0;
-    int height = 0;
-    for (int i = 0; i < SG_MAX_COLOR_ATTACHMENTS; i++) {
+    width, height := (0, 0);
+    range(0, SG_MAX_COLOR_ATTACHMENTS) { i |
         if (desc.colors[i].image.id) {
-            color_images[i] = _sg_lookup_image(&_sg.pools, desc.colors[i].image.id);
+            color_images[i] = _sg_lookup_image(&sg.pools, desc.colors[i].image.id);
             if (!(color_images[i] && color_images[i].slot.state == SG_RESOURCESTATE_VALID)) {
                 atts.slot.state = SG_RESOURCESTATE_FAILED;
                 return();
@@ -2202,7 +1933,7 @@ fn _sg_init_attachments(_sg_attachments_t* atts, const sg_attachments_desc* desc
             height = _sg_miplevel_dim(color_images[i].cmn.height, mip_level);
         }
         if (desc.resolves[i].image.id) {
-            resolve_images[i] = _sg_lookup_image(&_sg.pools, desc.resolves[i].image.id);
+            resolve_images[i] = _sg_lookup_image(&sg.pools, desc.resolves[i].image.id);
             if (!(resolve_images[i] && resolve_images[i].slot.state == SG_RESOURCESTATE_VALID)) {
                 atts.slot.state = SG_RESOURCESTATE_FAILED;
                 return();
@@ -2210,7 +1941,7 @@ fn _sg_init_attachments(_sg_attachments_t* atts, const sg_attachments_desc* desc
         }
     }
     if (desc.depth_stencil.image.id) {
-        ds_image = _sg_lookup_image(&_sg.pools, desc.depth_stencil.image.id);
+        ds_image = _sg_lookup_image(&sg.pools, desc.depth_stencil.image.id);
         if (!(ds_image && ds_image.slot.state == SG_RESOURCESTATE_VALID)) {
             atts.slot.state = SG_RESOURCESTATE_FAILED;
             return();
@@ -2220,42 +1951,26 @@ fn _sg_init_attachments(_sg_attachments_t* atts, const sg_attachments_desc* desc
         height = _sg_miplevel_dim(ds_image.cmn.height, mip_level);
     }
     _sg_attachments_common_init(&atts.cmn, desc, width, height);
-    atts.slot.state = _sg_create_attachments(atts, color_images, resolve_images, ds_image, desc);
+    atts.slot.state = sg.impl().create_attachments(atts, color_images, resolve_images, ds_image, desc);
     @debug_assert((atts.slot.state == SG_RESOURCESTATE_VALID)||(atts.slot.state == SG_RESOURCESTATE_FAILED));
 }
 
-fn _sg_setup_commit_listeners(const sg_desc* desc) {
-    @debug_assert(desc.max_commit_listeners > 0);
-    @debug_assert(0 == _sg.commit_listeners.items);
-    @debug_assert(0 == _sg.commit_listeners.num);
-    @debug_assert(0 == _sg.commit_listeners.upper);
-    _sg.commit_listeners.num = desc.max_commit_listeners;
-    const size_t size = (size_t)_sg.commit_listeners.num * sizeof(sg_commit_listener);
-    _sg.commit_listeners.items = (sg_commit_listener*)_sg_malloc_clear(size);
-}
-
-fn _sg_discard_commit_listeners(void) {
-    @debug_assert(0 != _sg.commit_listeners.items);
-    _sg_free(_sg.commit_listeners.items);
-    _sg.commit_listeners.items = 0;
-}
-
-fn _sg_notify_commit_listeners(void) {
-    @debug_assert(_sg.commit_listeners.items);
-    for (int i = 0; i < _sg.commit_listeners.upper; i++) {
-        const sg_commit_listener* listener = &_sg.commit_listeners.items[i];
+fn _sg_notify_commit_listeners(sg: *Self) void = {
+    @debug_assert(sg.commit_listeners.items);
+    for (int i = 0; i < sg.commit_listeners.upper; i++) {
+        const sg_commit_listener* listener = &sg.commit_listeners.items[i];
         if (listener.func) {
             listener.func(listener.user_data);
         }
     }
 }
 
-fn bool _sg_add_commit_listener(const sg_commit_listener* new_listener) {
+fn _sg_add_commit_listener(sg: *Self, new_listener: *sg_commit_listener) bool = {
     @debug_assert(new_listener && new_listener.func);
-    @debug_assert(_sg.commit_listeners.items);
+    @debug_assert(sg.commit_listeners.items);
     // first check if the listener hadn't been added already
-    for (int i = 0; i < _sg.commit_listeners.upper; i++) {
-        const sg_commit_listener* slot = &_sg.commit_listeners.items[i];
+    for (int i = 0; i < sg.commit_listeners.upper; i++) {
+        const sg_commit_listener* slot = &sg.commit_listeners.items[i];
         if ((slot.func == new_listener.func) && (slot.user_data == new_listener.user_data)) {
             _SG_ERROR(IDENTICAL_COMMIT_LISTENER);
             return false;
@@ -2263,16 +1978,16 @@ fn bool _sg_add_commit_listener(const sg_commit_listener* new_listener) {
     }
     // first try to plug a hole
     sg_commit_listener* slot = 0;
-    for (int i = 0; i < _sg.commit_listeners.upper; i++) {
-        if (_sg.commit_listeners.items[i].func == 0) {
-            slot = &_sg.commit_listeners.items[i];
+    for (int i = 0; i < sg.commit_listeners.upper; i++) {
+        if (sg.commit_listeners.items[i].func == 0) {
+            slot = &sg.commit_listeners.items[i];
             break();
         }
     }
     if (!slot) {
         // append to end
-        if (_sg.commit_listeners.upper < _sg.commit_listeners.num) {
-            slot = &_sg.commit_listeners.items[_sg.commit_listeners.upper++];
+        if (sg.commit_listeners.upper < sg.commit_listeners.num) {
+            slot = &sg.commit_listeners.items[sg.commit_listeners.upper++];
         }
     }
     if (!slot) {
@@ -2283,11 +1998,11 @@ fn bool _sg_add_commit_listener(const sg_commit_listener* new_listener) {
     return true;
 }
 
-fn bool _sg_remove_commit_listener(const sg_commit_listener* listener) {
-    @debug_assert(listener && listener.func);
-    @debug_assert(_sg.commit_listeners.items);
-    for (int i = 0; i < _sg.commit_listeners.upper; i++) {
-        sg_commit_listener* slot = &_sg.commit_listeners.items[i];
+fn remove_commit_listener(sg: *Self, listener: *sg_commit_listener) bool = {
+    @debug_assert(sg.valid && listener && listener.func);
+    @debug_assert(sg.commit_listeners.items);
+    for (int i = 0; i < sg.commit_listeners.upper; i++) {
+        sg_commit_listener* slot = &sg.commit_listeners.items[i];
         // both the function pointer and user data must match!
         if ((slot.func == listener.func) && (slot.user_data == listener.user_data)) {
             slot.func = 0;
@@ -2300,29 +2015,28 @@ fn bool _sg_remove_commit_listener(const sg_commit_listener* listener) {
     return false;
 }
 
-fn _sg_setup_compute(const sg_desc* desc) {
+fn setup_compute(sg: *Self, desc: *SgDesc) void = {
     @debug_assert(desc && (desc.max_dispatch_calls_per_pass > 0));
-    const uint32_t max_tracked_sbufs = (uint32_t)desc.max_dispatch_calls_per_pass * SG_MAX_STORAGEBUFFER_BINDSLOTS;
-    _sg_tracker_init(&_sg.compute.readwrite_sbufs, max_tracked_sbufs);
+    max_tracked_sbufs := desc.max_dispatch_calls_per_pass * SG_MAX_STORAGEBUFFER_BINDSLOTS;
+    sg.compute.readwrite_sbufs = init(sg.allocator, max_tracked_sbufs);
 }
 
-fn _sg_discard_compute(void) {
-    _sg_tracker_discard(&_sg.compute.readwrite_sbufs);
+fn discard_compute(sg: *Self) void = {
+    sg.compute.readwrite_sbufs&.drop(sg.allocator);
 }
 
-fn _sg_compute_pass_track_storage_buffer(*Buffer.T sbuf, bool readonly) {
-    @debug_assert(sbuf);
-    if(readonly, => return());
-    _sg_tracker_add(&_sg.compute.readwrite_sbufs, sbuf.slot.id);
+fn compute_pass_track_storage_buffer(sg: *Self, sbuf: *Buffer.T, readonly: bool) void = {
+    if !readonly {
+        try_push(sg.compute.readwrite_sbufs&, sbuf.slot.id);
+    }
 }
 
-fn _sg_compute_on_endpass(void) {
-    @debug_assert(_sg.cur_pass.in_pass);
-    @debug_assert(_sg.cur_pass.is_compute);
-    _sg_tracker_reset(&_sg.compute.readwrite_sbufs);
+fn compute_on_endpass(sg: *Self) void = {
+    @debug_assert(sg.cur_pass.in_pass && sg.cur_pass.is_compute);
+    sg.compute.readwrite_sbufs.len = 0;
 }
 
-fn sg_desc _sg_desc_defaults(const sg_desc* desc) {
+fn desc_defaults(desc: *SgDesc) SgDesc = {
     /*
         NOTE: on WebGPU, the default color pixel format MUST be provided,
         cannot be a default compile-time constant.
@@ -2345,74 +2059,66 @@ fn sg_desc _sg_desc_defaults(const sg_desc* desc) {
     return res;
 }
 
-fn sg_pass _sg_pass_defaults(const sg_pass* pass) {
+fn pass_defaults(pass: *sg_pass) sg_pass = {
     sg_pass res = *pass;
+    // ... this sure isn't a program?
     if (!res.compute) {
         if (res.compute && res.attachments.id == SG_INVALID_ID) {
             // this is a swapchain-pass
-            res.swapchain.sample_count = _sg_def(res.swapchain.sample_count, _sg.desc.environment.defaults.sample_count);
-            res.swapchain.color_format = _sg_def(res.swapchain.color_format, _sg.desc.environment.defaults.color_format);
-            res.swapchain.depth_format = _sg_def(res.swapchain.depth_format, _sg.desc.environment.defaults.depth_format);
+            res.swapchain.sample_count = _sg_def(res.swapchain.sample_count, sg.desc.environment.defaults.sample_count);
+            res.swapchain.color_format = _sg_def(res.swapchain.color_format, sg.desc.environment.defaults.color_format);
+            res.swapchain.depth_format = _sg_def(res.swapchain.depth_format, sg.desc.environment.defaults.depth_format);
         }
         res.action = _sg_pass_action_defaults(&res.action);
     }
-    return res;
+    res
 }
 
-fn void sg_setup(const sg_desc* desc) {
+fn setup(sg: *Self, desc: SgDesc) void = {
     @debug_assert(desc);
     @debug_assert((desc._start_canary == 0) && (desc._end_canary == 0));
     @debug_assert((desc.allocator.alloc_fn && desc.allocator.free_fn) || (!desc.allocator.alloc_fn && !desc.allocator.free_fn));
     _SG_CLEAR_ARC_STRUCT(_sg_state_t, _sg);
-    _sg.desc = _sg_desc_defaults(desc);
-    _sg_setup_pools(&_sg.pools, &_sg.desc);
-    _sg_setup_compute(&_sg.desc);
-    _sg_setup_commit_listeners(&_sg.desc);
-    _sg.frame_index = 1;
-    _sg.stats_enabled = true;
-    _sg_setup_backend(&_sg.desc);
-    _sg.valid = true;
+    sg.desc = _sg_desc_defaults(desc); desc := ();
+    _sg_setup_pools(&sg.pools, &sg.desc);
+    _sg_setup_compute(&sg.desc);
+    @debug_assert(sg.desc.max_commit_listeners > 0);
+    sg.commit_listeners = init(sg.allocator, sg.desc.max_commit_listeners);
+    sg.frame_index = 1;
+    sg.stats_enabled = true;
+    sg.impl().setup_backend(&sg.desc);
+    sg.valid = true;
 }
 
-fn sg_shutdown(sg: *Self) void = {
-    _sg_discard_all_resources(&_sg.pools);
-    _sg_discard_backend();
-    _sg_discard_commit_listeners();
-    _sg_discard_compute();
-    _sg_discard_pools(&_sg.pools);
-    _SG_CLEAR_ARC_STRUCT(_sg_state_t, _sg);
+fn shutdown(sg: *Self) void = {
+    sg.discard_all_resources();
+    sg.impl().discard_backend();
+    sg.commit_listeners&.drop(sg.allocator);
+    sg.discard_compute();
+    sg.discard_pools();
+    sg[] = zereod Self;
 }
 
-fn sg_pixelformat_info sg_query_pixelformat(sg_pixel_format fmt) {
-    @debug_assert(_sg.valid);
-    int fmt_index = (int) fmt;
-    @debug_assert((fmt_index > SG_PIXELFORMAT_NONE) && (fmt_index < _SG_PIXELFORMAT_NUM));
-    const _sg_pixelformat_info_t* src = &_sg.formats[fmt_index];
-    sg_pixelformat_info res;
-    _sg_clear(&res, sizeof(res));
-    res.sample = src.sample;
-    res.filter = src.filter;
-    res.render = src.render;
-    res.blend = src.blend;
-    res.msaa = src.msaa;
-    res.depth = src.depth;
-    res.compressed = _sg_is_compressed_pixel_format(fmt);
-    if (!res.compressed) {
-        res.bytes_per_pixel = _sg_pixelformat_bytesize(fmt);
-    }
-    return res;
+fn query_pixelformat(sg: *Self, fmt: SgPixelFormat) SgPixelFormatInfo = {
+    @debug_assert(sg.valid);
+    c := is_compressed(fmt);
+    (
+        flags = sg.formats[@as(i64) fmt], 
+        compressed = c, 
+        bytes_per_pixel = @if(c, 0, pixelformat_bytesize(fmt)),
+    )
 }
 
-fn int sg_query_row_pitch(sg_pixel_format fmt, int width, int row_align_bytes) {
-    @debug_assert(_sg.valid);
+fn sg_query_row_pitch(fmt: SgPixelFormat, width: i32, row_align_bytes: i32) i32 = {
+    @debug_assert(sg.valid);
     @debug_assert(width > 0);
     @debug_assert((row_align_bytes > 0) && _sg_ispow2(row_align_bytes));
     @debug_assert(((int)fmt > SG_PIXELFORMAT_NONE) && ((int)fmt < _SG_PIXELFORMAT_NUM));
-    _sg_row_pitch(fmt, width, row_align_bytes)
+    row_pitch(fmt, width, row_align_bytes)
 }
 
-fn int sg_query_surface_pitch(sg_pixel_format fmt, int width, int height, int row_align_bytes) {
-    @debug_assert(_sg.valid);
+fn sg_query_surface_pitch(fmt: SgPixelFormat, width: i32, height i32, row_align_bytes: i32) i32 = {
+    @debug_assert(sg.valid);
     @debug_assert((width > 0) && (height > 0));
     @debug_assert((row_align_bytes > 0) && _sg_ispow2(row_align_bytes));
     @debug_assert(((int)fmt > SG_PIXELFORMAT_NONE) && ((int)fmt < _SG_PIXELFORMAT_NUM));
@@ -2420,20 +2126,20 @@ fn int sg_query_surface_pitch(sg_pixel_format fmt, int width, int height, int ro
 }
 
 fn install_trace_hooks(sg: *Self, trace_hooks: *sg_trace_hooks) sg_trace_hooks = {
-    @debug_assert(_sg.valid);
+    @debug_assert(sg.valid);
     @debug_assert(trace_hooks);
-    sg_trace_hooks old_hooks = _sg.hooks;
+    sg_trace_hooks old_hooks = sg.hooks;
     if SOKOL_TRACE_HOOKS {
-        _sg.hooks = trace_hooks[];
+        sg.hooks = trace_hooks[];
     } else {
         _SG_WARN(TRACE_HOOKS_NOT_ENABLED);
     }
     old_hooks
 }
 
-fn sg_begin_pass(const sg_pass* pass) void #trace_args(.tail) = {
-    @debug_assert(_sg.valid);
-    cur := _sg.cur_pass&;
+fn sg_begin_pass(sg: *Self, pass: *sg_pass) void #trace_args(.tail) = {
+    @debug_assert(sg.valid);
+    cur := sg.cur_pass&;
     @debug_assert(!cur.valid);
     @debug_assert(!cur.in_pass);
     @debug_assert(pass);
@@ -2446,7 +2152,7 @@ fn sg_begin_pass(const sg_pass* pass) void #trace_args(.tail) = {
         if (pass_def.attachments.id != SG_INVALID_ID) {
             // an offscreen pass
             @debug_assert(cur.atts == 0);
-            cur.atts = _sg_lookup_attachments(&_sg.pools, pass_def.attachments.id);
+            cur.atts = _sg_lookup_attachments(&sg.pools, pass_def.attachments.id);
             if (0 == cur.atts) {
                 _SG_ERROR(BEGINPASS_ATTACHMENT_INVALID);
                 return();
@@ -2471,99 +2177,98 @@ fn sg_begin_pass(const sg_pass* pass) void #trace_args(.tail) = {
     cur.valid = true;  // may be overruled by backend begin-pass functions
     cur.in_pass = true;
     cur.is_compute = pass_def.compute;
-    _sg_begin_pass(&pass_def);
+    sg.impl().begin_pass(&pass_def);
 }
 
-fn sg_apply_viewport(int x, int y, int width, int height, bool origin_top_left) void #trace_args = {
-    @debug_assert(_sg.valid);
-    if(!_sg_validate_apply_viewport(x, y, width, height, origin_top_left), => return());
+fn apply_viewport(sg: *Self, x: i32, y: i32, width: i32, height: i32, origin_top_left: bool) void #trace_args = {
+    @debug_assert(sg.valid);
+    if(!sg.validate_apply_viewport(x, y, width, height, origin_top_left), => return());
     _sg_stats_add(num_apply_viewport, 1);
-    if(!_sg.cur_pass.valid, => return());
-    _sg_apply_viewport(x, y, width, height, origin_top_left);
+    if(!sg.cur_pass.valid, => return());
+    sg.impl().apply_viewport(x, y, width, height, origin_top_left);
 }
 
-fn void sg_apply_viewportf(float x, float y, float width, float height, bool origin_top_left) {
-    sg_apply_viewport((int)x, (int)y, (int)width, (int)height, origin_top_left);
+fn apply_viewportf(sg: *Self, x: f32, y: f32, width: f32, height: f32, origin_top_left: bool) void = {
+    sg.apply_viewport((int)x, (int)y, (int)width, (int)height, origin_top_left);
 }
 
-fn sg_apply_scissor_rect(int x, int y, int width, int height, bool origin_top_left) void #trace_args(.tail) = {
-    @debug_assert(_sg.valid);
+fn apply_scissor_rect(sg: *Self, x: i32, y: i32, width: i32, height: i32, origin_top_left: bool) void #trace_args(.tail) = {
+    @debug_assert(sg.valid);
     if(!_sg_validate_apply_scissor_rect(x, y, width, height, origin_top_left), => return());
     _sg_stats_add(num_apply_scissor_rect, 1);
-    if(!_sg.cur_pass.valid, => return());
-    _sg_apply_scissor_rect(x, y, width, height, origin_top_left);
+    if(!sg.cur_pass.valid, => return());
+    sg.impl().apply_scissor_rect(x, y, width, height, origin_top_left);
 }
 
-fn void sg_apply_scissor_rectf(float x, float y, float width, float height, bool origin_top_left) {
-    sg_apply_scissor_rect((int)x, (int)y, (int)width, (int)height, origin_top_left);
+fn apply_scissor_rectf(sg: *Self, x: f32, y: f32, width: f32, height: f32, origin_top_left: bool) void = {
+    sg.apply_scissor_rect((int)x, (int)y, (int)width, (int)height, origin_top_left);
 }
 
-fn void sg_apply_pipeline(sg_pipeline pip_id) void #trace(.tail) {
-    @debug_assert(_sg.valid);
+fn sg_apply_pipeline(sg: *Self, pip_id: Pipeline) void #trace(.tail) = {
+    @debug_assert(sg.valid);
     _sg_stats_add(num_apply_pipeline, 1);
     if (!_sg_validate_apply_pipeline(pip_id)) {
-        _sg.next_draw_valid = false;
+        sg.next_draw_valid = false;
         return();
     }
-    if(!_sg.cur_pass.valid, => return());
-    _sg.cur_pipeline = pip_id;
-    _sg_pipeline_t* pip = _sg_lookup_pipeline(&_sg.pools, pip_id.id);
+    if(!sg.cur_pass.valid, => return());
+    sg.cur_pipeline = pip_id;
+    _sg_pipeline_t* pip = _sg_lookup_pipeline(&sg.pools, pip_id.id);
     @debug_assert(pip);
 
-    _sg.next_draw_valid = (SG_RESOURCESTATE_VALID == pip.slot.state);
-    if(!_sg.next_draw_valid, => return());
+    sg.next_draw_valid = (SG_RESOURCESTATE_VALID == pip.slot.state);
+    if(!sg.next_draw_valid, => return());
 
     @debug_assert(pip.shader && (pip.shader.slot.id == pip.cmn.shader_id.id));
-    _sg_apply_pipeline(pip);
+    sg.impl().apply_pipeline(pip);
 
     // set the expected bindings and uniform block flags
-    _sg.required_bindings_and_uniforms = pip.cmn.required_bindings_and_uniforms | pip.shader.cmn.required_bindings_and_uniforms;
-    _sg.applied_bindings_and_uniforms = 0;
+    sg.required_bindings_and_uniforms = pip.cmn.required_bindings_and_uniforms | pip.shader.cmn.required_bindings_and_uniforms;
+    sg.applied_bindings_and_uniforms = 0;
 }
 
-fn void sg_apply_bindings(const sg_bindings* bindings) {
-    @debug_assert(_sg.valid);
+fn apply_bindings(sg: *Self, bindings: *sg_bindings) void = {
+    @debug_assert(sg.valid);
     @debug_assert(bindings);
     @debug_assert((bindings._start_canary == 0) && (bindings._end_canary==0));
     _sg_stats_add(num_apply_bindings, 1);
-    _sg.applied_bindings_and_uniforms |= (1 << SG_MAX_UNIFORMBLOCK_BINDSLOTS);
+    sg.applied_bindings_and_uniforms |= (1 << SG_MAX_UNIFORMBLOCK_BINDSLOTS);
     if (!_sg_validate_apply_bindings(bindings)) {
-        _sg.next_draw_valid = false;
+        sg.next_draw_valid = false;
         return();
     }
-    if(!_sg.cur_pass.valid || !_sg.next_draw_valid, => return());
+    if(!sg.cur_pass.valid || !sg.next_draw_valid, => return());
 
-    _sg_bindings_t bnd;
-    _sg_clear(&bnd, sizeof(bnd));
-    bnd.pip = _sg_lookup_pipeline(&_sg.pools, _sg.cur_pipeline.id);
-    if (0 == bnd.pip) {
-        _sg.next_draw_valid = false;
-    }
+    bnd := zeroed _sg_bindings_t;
+    bnd.pip = sg.lookup(sg.cur_pipeline.id)  || {
+        sg.next_draw_valid = false;
+        return()
+    };
     @debug_assert(bnd.pip.shader && (bnd.pip.cmn.shader_id.id == bnd.pip.shader.slot.id));
-    const _sg_shader_t* shd = bnd.pip.shader;
+    shd := bnd.pip.shader;
 
-    if (!_sg.cur_pass.is_compute) {
+    if (!sg.cur_pass.is_compute) {
         for (size_t i = 0; i < SG_MAX_VERTEXBUFFER_BINDSLOTS; i++) {
             if (bnd.pip.cmn.vertex_buffer_layout_active[i]) {
                 @debug_assert(bindings.vertex_buffers[i].id != SG_INVALID_ID);
-                bnd.vbs[i] = _sg_lookup_buffer(&_sg.pools, bindings.vertex_buffers[i].id);
+                bnd.vbs[i] = _sg_lookup_buffer(&sg.pools, bindings.vertex_buffers[i].id);
                 bnd.vb_offsets[i] = bindings.vertex_buffer_offsets[i];
                 if (bnd.vbs[i]) {
-                    _sg.next_draw_valid &= (SG_RESOURCESTATE_VALID == bnd.vbs[i].slot.state);
-                    _sg.next_draw_valid &= !bnd.vbs[i].cmn.append_overflow;
+                    sg.next_draw_valid &= (SG_RESOURCESTATE_VALID == bnd.vbs[i].slot.state);
+                    sg.next_draw_valid &= !bnd.vbs[i].cmn.append_overflow;
                 } else {
-                    _sg.next_draw_valid = false;
+                    sg.next_draw_valid = false;
                 }
             }
         }
         if (bindings.index_buffer.id) {
-            bnd.ib = _sg_lookup_buffer(&_sg.pools, bindings.index_buffer.id);
+            bnd.ib = _sg_lookup_buffer(&sg.pools, bindings.index_buffer.id);
             bnd.ib_offset = bindings.index_buffer_offset;
             if (bnd.ib) {
-                _sg.next_draw_valid &= (SG_RESOURCESTATE_VALID == bnd.ib.slot.state);
-                _sg.next_draw_valid &= !bnd.ib.cmn.append_overflow;
+                sg.next_draw_valid &= (SG_RESOURCESTATE_VALID == bnd.ib.slot.state);
+                sg.next_draw_valid &= !bnd.ib.cmn.append_overflow;
             } else {
-                _sg.next_draw_valid = false;
+                sg.next_draw_valid = false;
             }
         }
     }
@@ -2571,11 +2276,11 @@ fn void sg_apply_bindings(const sg_bindings* bindings) {
     for (int i = 0; i < SG_MAX_IMAGE_BINDSLOTS; i++) {
         if (shd.cmn.images[i].stage != SG_SHADERSTAGE_NONE) {
             @debug_assert(bindings.images[i].id != SG_INVALID_ID);
-            bnd.imgs[i] = _sg_lookup_image(&_sg.pools, bindings.images[i].id);
+            bnd.imgs[i] = _sg_lookup_image(&sg.pools, bindings.images[i].id);
             if (bnd.imgs[i]) {
-                _sg.next_draw_valid &= (SG_RESOURCESTATE_VALID == bnd.imgs[i].slot.state);
+                sg.next_draw_valid &= (SG_RESOURCESTATE_VALID == bnd.imgs[i].slot.state);
             } else {
-                _sg.next_draw_valid = false;
+                sg.next_draw_valid = false;
             }
         }
     }
@@ -2583,11 +2288,11 @@ fn void sg_apply_bindings(const sg_bindings* bindings) {
     for (size_t i = 0; i < SG_MAX_SAMPLER_BINDSLOTS; i++) {
         if (shd.cmn.samplers[i].stage != SG_SHADERSTAGE_NONE) {
             @debug_assert(bindings.samplers[i].id != SG_INVALID_ID);
-            bnd.smps[i] = _sg_lookup_sampler(&_sg.pools, bindings.samplers[i].id);
+            bnd.smps[i] = _sg_lookup_sampler(&sg.pools, bindings.samplers[i].id);
             if (bnd.smps[i]) {
-                _sg.next_draw_valid &= (SG_RESOURCESTATE_VALID == bnd.smps[i].slot.state);
+                sg.next_draw_valid &= (SG_RESOURCESTATE_VALID == bnd.smps[i].slot.state);
             } else {
-                _sg.next_draw_valid = false;
+                sg.next_draw_valid = false;
             }
         }
     }
@@ -2595,118 +2300,117 @@ fn void sg_apply_bindings(const sg_bindings* bindings) {
     for (size_t i = 0; i < SG_MAX_STORAGEBUFFER_BINDSLOTS; i++) {
         if (shd.cmn.storage_buffers[i].stage != SG_SHADERSTAGE_NONE) {
             @debug_assert(bindings.storage_buffers[i].id != SG_INVALID_ID);
-            bnd.sbufs[i] = _sg_lookup_buffer(&_sg.pools, bindings.storage_buffers[i].id);
+            bnd.sbufs[i] = _sg_lookup_buffer(&sg.pools, bindings.storage_buffers[i].id);
             if (bnd.sbufs[i]) {
-                _sg.next_draw_valid &= (SG_RESOURCESTATE_VALID == bnd.sbufs[i].slot.state);
-                if (_sg.cur_pass.is_compute) {
-                    _sg_compute_pass_track_storage_buffer(bnd.sbufs[i], shd.cmn.storage_buffers[i].readonly);
+                sg.next_draw_valid &= (SG_RESOURCESTATE_VALID == bnd.sbufs[i].slot.state);
+                if (sg.cur_pass.is_compute) {
+                    sg.compute_pass_track_storage_buffer(bnd.sbufs[i], shd.cmn.storage_buffers[i].readonly);
                 }
             } else {
-                _sg.next_draw_valid = false;
+                sg.next_draw_valid = false;
             }
         }
     }
 
-    if (_sg.next_draw_valid) {
-        _sg.next_draw_valid &= _sg_apply_bindings(&bnd);
+    if (sg.next_draw_valid) {
+        sg.next_draw_valid &= sg.impl().apply_bindings(&bnd);
         _SG_TRACE_ARGS(apply_bindings, bindings);  // TODO
     }
 }
 
-fn sg_apply_uniforms(int ub_slot, const sg_range* data) void #trace(.tail) = {
-    @debug_assert(_sg.valid);
+fn apply_uniforms(sg: *Self, ub_slot: i32, data: []u8) void #trace(.tail) = {
+    @debug_assert(sg.valid);
     @debug_assert((ub_slot >= 0) && (ub_slot < SG_MAX_UNIFORMBLOCK_BINDSLOTS));
     @debug_assert(data && data.ptr && (data.size > 0));
     _sg_stats_add(num_apply_uniforms, 1);
     _sg_stats_add(size_apply_uniforms, (uint32_t)data.size);
-    _sg.applied_bindings_and_uniforms |= 1 << ub_slot;
+    sg.applied_bindings_and_uniforms |= 1 << ub_slot;
     if (!_sg_validate_apply_uniforms(ub_slot, data)) {
-        _sg.next_draw_valid = false;
+        sg.next_draw_valid = false;
         return();
     }
-    if(!_sg.cur_pass.valid || !_sg.next_draw_valid, => return());
-    _sg_apply_uniforms(ub_slot, data);
+    if(!sg.cur_pass.valid || !sg.next_draw_valid, => return());
+    sg.impl().apply_uniforms(ub_slot, data);
 }
 
-fn sg_draw(int base_element, int num_elements, int num_instances) void #trace(.tail) = {
-    @debug_assert(_sg.valid);
+fn draw(sg: *Self, base_element: i32, num_elements: i32, num_instances: i32) void #trace(.tail) = {
+    @debug_assert(sg.valid);
     if(!_sg_validate_draw(base_element, num_elements, num_instances), => return());
     _sg_stats_add(num_draw, 1);
-    if(!_sg.cur_pass.valid || !_sg.next_draw_valid, => return()) {
+    if(!sg.cur_pass.valid || !sg.next_draw_valid, => return()) {
     // skip no-op draws
     if((0 == num_elements) || (0 == num_instances, => return()) {
-    _sg_draw(base_element, num_elements, num_instances);
+    sg.impl().draw(base_element, num_elements, num_instances);
 }
 
-fn sg_dispatch(int num_groups_x, int num_groups_y, int num_groups_z) void #trace(.tail) = {
-    @debug_assert(_sg.valid);
+fn dispatch(sg: *Self, num_groups_x: i32, num_groups_y: i32, num_groups_z: i32) void #trace(.tail) = {
+    @debug_assert(sg.valid);
     if(!_sg_validate_dispatch(num_groups_x, num_groups_y, num_groups_z), => return());
     _sg_stats_add(num_dispatch, 1);
-    if(!_sg.cur_pass.valid || !_sg.next_draw_valid, => return());
+    if(!sg.cur_pass.valid || !sg.next_draw_valid, => return());
     // skip no-op dispatches
     if((0 == num_groups_x) || (0 == num_groups_y) || (0 == num_groups_z), => return());
-    _sg_dispatch(num_groups_x, num_groups_y, num_groups_z);
+    sg.impl().dispatch(num_groups_x, num_groups_y, num_groups_z);
 }
 
-fn sg_end_pass() void #trace = {
-    @debug_assert(_sg.valid);
-    @debug_assert(_sg.cur_pass.in_pass);
+fn end_pass(sg: *Self) void #trace = {
+    @debug_assert(sg.valid);
+    @debug_assert(sg.cur_pass.in_pass);
     _sg_stats_add(num_passes, 1);
-    // NOTE: don't exit early if !_sg.cur_pass.valid
-    _sg_end_pass();
-    _sg.cur_pipeline.id = SG_INVALID_ID;
-    if (_sg.cur_pass.is_compute) {
-        _sg_compute_on_endpass();
+    // NOTE: don't exit early if !sg.cur_pass.valid
+    sg.impl().end_pass();
+    sg.cur_pipeline.id = SG_INVALID_ID;
+    if (sg.cur_pass.is_compute) {
+        sg.compute_on_endpass();
     }
-    _sg_clear(&_sg.cur_pass, sizeof(_sg.cur_pass));
+    sg.cur_pass = zeroed @type sg.cur_pass;
 }
 
-fn void sg_commit(void) {
-    @debug_assert(_sg.valid);
-    @debug_assert(!_sg.cur_pass.valid);
-    @debug_assert(!_sg.cur_pass.in_pass);
-    _sg_commit();
-    _sg.stats.frame_index = _sg.frame_index;
-    _sg.prev_stats = _sg.stats;
-    _sg_clear(&_sg.stats, sizeof(_sg.stats));
+fn commit(sg: *Self) void = {
+    @debug_assert(sg.valid);
+    @debug_assert(!sg.cur_pass.valid);
+    @debug_assert(!sg.cur_pass.in_pass);
+    sg.impl().commit();
+    sg.stats.frame_index = sg.frame_index;
+    sg.prev_stats = sg.stats;
+    _sg_clear(&sg.stats, sizeof(sg.stats));
     _sg_notify_commit_listeners();
     _SG_TRACE_NOARGS(commit);
-    _sg.frame_index++;
+    sg.frame_index += 1;
 }
 
-fn sg_reset_state_cache() void = {
-    @debug_assert(_sg.valid);
-    _sg_reset_state_cache();
-    _SG_TRACE_NOARGS(reset_state_cache);
+fn reset_state_cache(sg: *Self) void #trace = {
+    @debug_assert(sg.valid);
+    sg.impl().reset_state_cache();
 }
 
-fn sg_update_buffer(sg_buffer buf_id, const sg_range* data) void #trace = {
-    @debug_assert(_sg.valid);
+fn update_buffer(sg: *Self, buf_id: Buffer, data: []u8) void #trace = {
+    @debug_assert(sg.valid);
     @debug_assert(data && data.ptr && (data.size > 0));
     _sg_stats_add(num_update_buffer, 1);
     _sg_stats_add(size_update_buffer, (uint32_t)data.size);
-    *Buffer.T buf = _sg_lookup_buffer(&_sg.pools, buf_id.id);
+    buf := sg.lookup(buf_id);
     if ((data.size > 0) && buf && (buf.slot.state == SG_RESOURCESTATE_VALID)) {
         if (_sg_validate_update_buffer(buf, data)) {
             @debug_assert(data.size <= (size_t)buf.cmn.size);
             // only one update allowed per buffer and frame
-            @debug_assert(buf.cmn.update_frame_index != _sg.frame_index);
+            @debug_assert(buf.cmn.update_frame_index != sg.frame_index);
             // update and append on same buffer in same frame not allowed
-            @debug_assert(buf.cmn.append_frame_index != _sg.frame_index);
-            _sg_update_buffer(buf, data);
-            buf.cmn.update_frame_index = _sg.frame_index;
+            @debug_assert(buf.cmn.append_frame_index != sg.frame_index);
+            sg.impl().update_buffer(buf, data);
+            buf.cmn.update_frame_index = sg.frame_index;
         }
     }
 }
 
-fn sg_append_buffer(sg_buffer buf_id, const sg_range* data) i64 #trace = {
-    @debug_assert(_sg.valid);
+fn append_buffer(sg: *Self, buf_id: Buffer, data: []u8) i64 #trace = {
+    @debug_assert(sg.valid);
     @debug_assert(data && data.ptr);
     _sg_stats_add(num_append_buffer, 1);
     _sg_stats_add(size_append_buffer, (uint32_t)data.size);
-    buf := _sg_lookup_buffer(&_sg.pools, buf_id.id) || return(0);  // FIXME: should we return -1 here?
+    buf := _sg_lookup_buffer(&sg.pools, buf_id.id) || return(0);  // FIXME: should we return -1 here?
     // rewind append cursor in a new frame
-    if (buf.cmn.append_frame_index != _sg.frame_index) {
+    if (buf.cmn.append_frame_index != sg.frame_index) {
         buf.cmn.append_pos = 0;
         buf.cmn.append_overflow = false;
     }
@@ -2721,72 +2425,72 @@ fn sg_append_buffer(sg_buffer buf_id, const sg_range* data) i64 #trace = {
         if (_sg_validate_append_buffer(buf, data)) {
             if (!buf.cmn.append_overflow && (data.size > 0)) {
                 // update and append on same buffer in same frame not allowed
-                @debug_assert(buf.cmn.update_frame_index != _sg.frame_index);
-                _sg_append_buffer(buf, data, buf.cmn.append_frame_index != _sg.frame_index);
+                @debug_assert(buf.cmn.update_frame_index != sg.frame_index);
+                sg.impl().append_buffer(buf, data, buf.cmn.append_frame_index != sg.frame_index);
                 buf.cmn.append_pos += (int) _sg_roundup_u64(data.size, 4);
-                buf.cmn.append_frame_index = _sg.frame_index;
+                buf.cmn.append_frame_index = sg.frame_index;
             }
         }
     }
     start_pos
 }
 
-fn sg_query_buffer_overflow(sg_buffer buf_id) bool = 
-    query(buf_id, fn(it) => it.cmn.append_overflow, false);
+fn query_buffer_overflow(sg: *Self, buf_id: Buffer) bool = 
+    sg.query(buf_id, fn(it) => it.cmn.append_overflow, false);
 
-fn bool sg_query_buffer_will_overflow(sg_buffer buf_id, size_t size) {
-    @debug_assert(_sg.valid);
-    buf := _sg_lookup_buffer(&_sg.pools, buf_id.id) || return(false);
+fn query_buffer_will_overflow(sg: *Self, buf_id: Buffer, size: i64) bool = {
+    @debug_assert(sg.valid);
+    buf := _sg_lookup_buffer(&sg.pools, buf_id.id) || return(false);
     bool result = false;
     int append_pos = buf.cmn.append_pos;
     // rewind append cursor in a new frame
-    if (buf.cmn.append_frame_index != _sg.frame_index) {
+    if (buf.cmn.append_frame_index != sg.frame_index) {
         append_pos = 0;
     }
     append_pos + _sg_roundup((int)size, 4)) > buf.cmn.size
 }
 
-fn void sg_update_image(sg_image img_id, const sg_image_data* data) void #trace = {
-    @debug_assert(_sg.valid);
+fn update_image(sg: *Self, img_id: Image, data: *sg_image_data) void #trace = {
+    @debug_assert(sg.valid);
     _sg_stats_add(num_update_image, 1);
-    for (int face_index = 0; face_index < SG_CUBEFACE_NUM; face_index++) {
-        for (int mip_index = 0; mip_index < SG_MAX_MIPMAPS; mip_index++) {
+    range(0, SG_CUBEFACE_NUM) { face_index |
+        range(0, SG_MAX_MIPMAPS) { mip_index |
             if (data.subimage[face_index][mip_index].size == 0) {
                 break();
             }
             _sg_stats_add(size_update_image, (uint32_t)data.subimage[face_index][mip_index].size);
         }
     }
-    img := _sg_lookup_image(&_sg.pools, img_id.id) || return();
+    img := _sg_lookup_image(&sg.pools, img_id.id) || return();
     if img.slot.state == SG_RESOURCESTATE_VALID {
         if (validate(img, data)) {
-            @debug_assert(img.cmn.upd_frame_index != _sg.frame_index);
-            _sg_update_image(img, data);
-            img.cmn.upd_frame_index = _sg.frame_index;
+            @debug_assert(img.cmn.upd_frame_index != sg.frame_index);
+            sg.impl().update_image(img, data);
+            img.cmn.upd_frame_index = sg.frame_index;
         }
     }
 }
 
-fn sg_push_debug_group(const char* name) void #trace = {
-    @debug_assert(_sg.valid);
+fn push_debug_group(sg: *Self, name: CStr) void #trace = {
+    @debug_assert(sg.valid);
     @debug_assert(name);
-    _sg_push_debug_group(name);
+    sg.impl().push_debug_group(name);
 }
 
-fn sg_pop_debug_group() void #trace = {
-    @debug_assert(_sg.valid);
-    _sg_pop_debug_group();
+fn pop_debug_group(sg: *Self) void #trace = {
+    @debug_assert(sg.valid);
+    sg.impl().pop_debug_group();
 }
 
 // just use the field for:
 // sg_enable_frame_stats, sg_disable_frame_stats, sg_frame_stats_enabled, sg_query_frame_stats
 // sg_isvalid, sg_query_desc, sg_query_backend, sg_query_features, sg_query_limits
 
-fn sg_buffer_info sg_query_buffer_info(sg_buffer buf_id) {
-    @debug_assert(_sg.valid);
+fn query_buffer_info(sg: *Self, buf_id: Buffer) sg_buffer_info = {
+    @debug_assert(sg.valid);
     sg_buffer_info info;
     _sg_clear(&info, sizeof(info));
-    const *Buffer.T buf = _sg_lookup_buffer(&_sg.pools, buf_id.id);
+    const *Buffer.T buf = _sg_lookup_buffer(&sg.pools, buf_id.id);
     if(buf.is_null(), => return(info));
     info.slot.state = buf.slot.state;
     info.slot.res_id = buf.slot.id;
@@ -2800,10 +2504,10 @@ fn sg_buffer_info sg_query_buffer_info(sg_buffer buf_id) {
     info
 }
 
-fn sg_image_info sg_query_image_info(sg_image img_id) {
-    @debug_assert(_sg.valid);
+fn query_image_info(sg: *Self, img_id: Image) sg_image_info = {
+    @debug_assert(sg.valid);
     info := zeroed sg_image_info;
-    img := _sg_lookup_image(&_sg.pools, img_id.id) || return(info);
+    img := _sg_lookup_image(&sg.pools, img_id.id) || return(info);
     info.slot.state = img.slot.state;
     info.slot.res_id = img.slot.id;
     info.upd_frame_index = img.cmn.upd_frame_index;
@@ -2813,29 +2517,29 @@ fn sg_image_info sg_query_image_info(sg_image img_id) {
     info
 }
 
-fn sg_buffer_desc sg_query_buffer_desc(sg_buffer buf_id) {
-    @debug_assert(_sg.valid);
+fn query_buffer_desc(sg: *Self, buf_id: Buffer) Buffer.Desc = {
+    @debug_assert(sg.valid);
     d := zeroed sg_buffer_desc;
-    buf := _sg_lookup_buffer(&_sg.pools, buf_id.id) || return(d);
+    buf := _sg_lookup_buffer(&sg.pools, buf_id.id) || return(d);
     d.size = (size_t)buf.cmn.size;
     d.type = buf.cmn.type;
     d.usage = buf.cmn.usage;
     d
 }
 
-fn sg_query_buffer_size(sg_buffer buf_id) i64 = 
-    query(buf_id, fn(it) => it.cmn.size, 0);
+fn query_buffer_size(sg: *Self, buf_id: Buffer) i64 = 
+    sg.query(buf_id, fn(it) => it.cmn.size, 0);
 
-fn sg_query_buffer_type(sg_buffer buf_id) sg_buffer_type = 
-    query(buf_id, fn(it) => it.cmn.type, _SG_BUFFERTYPE_DEFAULT);
+fn query_buffer_type(sg: *Self, buf_id: Buffer) SgBufferType = 
+    sg.query(buf_id, fn(it) => it.cmn.type, _SG_BUFFERTYPE_DEFAULT);
 
-fn sg_query_buffer_usage(sg_buffer buf_id) sg_usage = 
-    query(buf_id, fn(it) => it.cmn.usage, _SG_USAGE_DEFAULT);
+fn query_buffer_usage(sg: *Self, buf_id: Buffer) SgUsage = 
+    sg.query(buf_id, fn(it) => it.cmn.usage, _SG_USAGE_DEFAULT);
 
-fn sg_image_desc sg_query_image_desc(sg_image img_id) {
-    @debug_assert(_sg.valid);
+fn query_image_desc(sg: *Self, img_id: Image) Image.Desc = {
+    @debug_assert(sg.valid);
     d := zeroed sg_image_desc;
-    img := _sg_lookup_image(&_sg.pools, img_id.id) || return(d);
+    img := _sg_lookup_image(&sg.pools, img_id.id) || return(d);
     d.type = img.cmn.type;
     d.render_target = img.cmn.render_target;
     d.width = img.cmn.width;
@@ -2848,46 +2552,46 @@ fn sg_image_desc sg_query_image_desc(sg_image img_id) {
     d
 }
 
-fn sg_query(id: Handle, $body: @Fn(it: *Handle.Payload) Out, default: Out) Out = {
-    @debug_assert(_sg.valid);
-    it := _sg_lookup_image(&_sg.pools, img_id.id) || return(default);
+fn query(sg: *Self, id: ~Handle, $body: @Fn(it: *Handle.T) Out, default: ~Out) Out #where = {
+    @debug_assert(sg.valid);
+    it := sg.lookup(id) || return(default);
     body(it)
 }
 
-fn sg_query_image_type(sg_image img_id) sg_image_type = 
-    query(img_id, fn(it) => it.cmn.type, .DEFAULT);
+fn query_image_type(sg: *Self, img_id: Image) SgImageType = 
+    sg.query(img_id, fn(it) => it.cmn.type, .DEFAULT);
 
-fn sg_query_image_width(sg_image img_id) int = 
-    query(img_id, fn(it) => it.cmn.width, 0);
+fn query_image_width(sg: *Self, img_id: Image) i32 = 
+    sg.query(img_id, fn(it) => it.cmn.width, 0);
 
-fn sg_query_image_height(sg_image img_id) int = 
-    query(img_id, fn(it) => it.cmn.height, 0);
+fn query_image_height(sg: *Self, img_id: Image) i32 = 
+    sg.query(img_id, fn(it) => it.cmn.height, 0);
 
-fn sg_query_image_num_slices(sg_image img_id) int = 
-    query(img_id, fn(it) => it.cmn.num_slices, 0);
+fn query_image_num_slices(sg: *Self, img_id: Image) i32 = 
+    sg.query(img_id, fn(it) => it.cmn.num_slices, 0);
 
-fn sg_query_image_num_mipmaps(sg_image img_id) int = 
-    query(img_id, fn(it) => it.cmn.num_mipmaps, 0);
+fn sg_query_image_num_mipmaps(sg: *Self, img_id: Image) i32 = 
+    sg.query(img_id, fn(it) => it.cmn.num_mipmaps, 0);
 
-fn sg_query_image_pixelformat(sg_image img_id) sg_pixel_format = 
-    query(img_id, fn(it) => it.cmn.pixel_format, .DEFAULT);
+fn query_image_pixelformat(sg: *Self, img_id: Image) SgPixelFormat = 
+    sg.query(img_id, fn(it) => it.cmn.pixel_format, .DEFAULT);
 
-fn sg_query_image_usage(sg_image img_id) sg_usage = 
-    query(img_id, fn(it) => it.cmn.usage, .DEFAULT);
+fn query_image_usage(sg: *Self, img_id: Image) SgUsage = 
+    sg.query(img_id, fn(it) => it.cmn.usage, .DEFAULT);
 
-fn sg_query_image_sample_count(sg_image img_id) int = 
-    query(img_id, fn(it) => it.cmn.sample_count, .DEFAULT);
+fn query_image_sample_count(sg: *Self, img_id: Image) i32 = 
+    sg.query(img_id, fn(it) => it.cmn.sample_count, 0);
 
-fn sg_query_sampler_desc(sg_sampler smp_id) sg_sampler_desc = {
-    @debug_assert(_sg.valid);
-    smp := _sg_lookup_sampler(&_sg.pools, smp_id.id) || return(zeroed(@type smp.cmn));
+fn query_sampler_desc(sg: *Self, smp_id: Sampler) Sampler.Desc = {
+    @debug_assert(sg.valid);
+    smp := _sg_lookup_sampler(&sg.pools, smp_id.id) || return(zeroed(@type smp.cmn));
     smp.cmn
 }
 
-fn sg_shader_desc sg_query_shader_desc(sg_shader shd_id) {
-    @debug_assert(_sg.valid);
+fn query_shader_desc(sg: *Self, shd_id: Shader) Shader.Desc = {
+    @debug_assert(sg.valid);
     desc := zeroed sg_shader_desc;
-    shd := _sg_lookup_shader(&_sg.pools, shd_id.id) || return(desc);
+    shd := _sg_lookup_shader(&sg.pools, shd_id.id) || return(desc);
     for (size_t ub_idx = 0; ub_idx < SG_MAX_UNIFORMBLOCK_BINDSLOTS; ub_idx++) {
         sg_shader_uniform_block* ub_desc = &desc.uniform_blocks[ub_idx];
         const _sg_shader_uniform_block_t* ub = &shd.cmn.uniform_blocks[ub_idx];
@@ -2924,16 +2628,16 @@ fn sg_shader_desc sg_query_shader_desc(sg_shader shd_id) {
     desc
 }
 
-fn sg_pipeline_desc sg_query_pipeline_desc(sg_pipeline pip_id) {
-    @debug_assert(_sg.valid);
-    pip := _sg_lookup_pipeline(&_sg.pools, pip_id.id) || return(zeroed SgPipelineDesc);
+fn query_pipeline_desc(sg: *Self, pip_id: Pipeline) Pipeline.Desc = {
+    @debug_assert(sg.valid);
+    pip := _sg_lookup_pipeline(&sg.pools, pip_id.id) || return(zeroed SgPipelineDesc);
     pip.cmn.common
 }
 
-fn sg_query_attachments_desc(sg_attachments atts_id) sg_attachments_desc = {
-    @debug_assert(_sg.valid);
+fn query_attachments_desc(sg: *Self, atts_id: Attachments) Attachments.Desc = {
+    @debug_assert(sg.valid);
     desc := zeroed sg_attachments_desc;
-    atts := _sg_lookup_attachments(&_sg.pools, atts_id.id) || return(desc);
+    atts := _sg_lookup_attachments(&sg.pools, atts_id.id) || return(desc);
     range(0, atts.cmn.num_colors) { i |
         desc.colors&[i] = atts.cmn.colors&[i];
     }
