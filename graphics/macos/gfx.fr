@@ -16,6 +16,7 @@ ASSERT_NOT_IOS :: fn() => ();
 ASSERT_NOT_OLD :: fn() => ();
 
 _SG_MTL_UB_ALIGN :: { ASSERT_NOT_IOS(); 256 };
+_SG_MTL_INVALID_SLOT_INDEX :: 0;
 
 ReleaseItem :: @struct {
     frame_index: u32;   // frame index at which it is safe to release this resource
@@ -24,29 +25,29 @@ ReleaseItem :: @struct {
 
 IdPool :: @struct {
     pool: id("NSMutableArray");
-    num_slots: i32;
-    free_queue_top: i32;
+    num_slots: i64;
+    free_queue_top: i64;
     free_queue: []i32;
-    release_queue_front: i32;
-    release_queue_back: i32;
+    release_queue_front: i64;
+    release_queue_back: i64;
     release_queue: []ReleaseItem;
 };
 
 Buffer :: @struct {
-    buf: Array(i32, SG_NUM_INFLIGHT_FRAMES);  // index into _sg_mtl_pool
+    buf: Array(Id("MTLBuffer"), Sg.SG_NUM_INFLIGHT_FRAMES);  // index into _sg_mtl_pool
 };
 
 Image :: @struct {
-    tex: Array(i32, SG_NUM_INFLIGHT_FRAMES);
+    tex: Array(Id("MTLTexture"), Sg.SG_NUM_INFLIGHT_FRAMES);
 };
 
 Sampler :: @struct {
-    sampler_state: i32;
+    sampler_state: Id("MTLSamplerState");
 };
 
 _sg_mtl_shader_func_t :: @struct {
-    mtl_lib: i32;
-    mtl_func: i32;
+    mtl_lib: Id("MTLLibrary");
+    mtl_func: Id("MTLFunction");
 };
 
 Shader :: @struct {
@@ -54,23 +55,23 @@ Shader :: @struct {
     fragment_func: _sg_mtl_shader_func_t;
     compute_func: _sg_mtl_shader_func_t;
     threads_per_threadgroup: MTLSize;
-    ub_buffer_n: Array(u8, SG_MAX_UNIFORMBLOCK_BINDSLOTS);
-    img_texture_n: Array(u8, SG_MAX_IMAGE_BINDSLOTS);
-    smp_sampler_n: Array(u8, SG_MAX_SAMPLER_BINDSLOTS);
-    sbuf_buffer_n: Array(u8, SG_MAX_STORAGEBUFFER_BINDSLOTS);
+    ub_buffer_n: Array(u8, Sg.SG_MAX_UNIFORMBLOCK_BINDSLOTS);
+    img_texture_n: Array(u8, Sg.SG_MAX_IMAGE_BINDSLOTS);
+    smp_sampler_n: Array(u8, Sg.SG_MAX_SAMPLER_BINDSLOTS);
+    sbuf_buffer_n: Array(u8, Sg.SG_MAX_STORAGEBUFFER_BINDSLOTS);
 };
 
 Pipeline :: @struct {
-    prim_type: MTLPrimitiveType;
+    prim_type: M("MTLPrimitiveType");
     index_size: i32;
-    index_type: MTLIndexType;
-    cull_mode: MTLCullMode;
-    winding: MTLWinding;
+    index_type: M("MTLIndexType");
+    cull_mode: M("MTLCullMode");
+    winding: M("MTLWinding");
     stencil_ref: u32;
     threads_per_threadgroup: MTLSize;
-    cps: i32;    // MTLComputePipelineState
-    rps: i32;    // MTLRenderPipelineState
-    dss: i32;    // MTLDepthStencilState
+    cps: Id("MTLComputePipelineState");
+    rps: Id("MTLRenderPipelineState");
+    dss: Id("MTLDepthStencilState");
 };
 
 Attachment :: @struct {
@@ -78,17 +79,20 @@ Attachment :: @struct {
 };
 
 Attachments :: @struct {
-    colors: Array(Attachment, SG_MAX_COLOR_ATTACHMENTS);
-    resolves: Array(Attachment, SG_MAX_COLOR_ATTACHMENTS);
+    colors: Array(Attachment, Sg.SG_MAX_COLOR_ATTACHMENTS);
+    resolves: Array(Attachment, Sg.SG_MAX_COLOR_ATTACHMENTS);
     depth_stencil: Attachment;
 };
 
 // resource binding state cache
-_SG_MTL_MAX_STAGE_UB_BINDINGS :: SG_MAX_UNIFORMBLOCK_BINDSLOTS;
-_SG_MTL_MAX_STAGE_UB_SBUF_BINDINGS :: _SG_MTL_MAX_STAGE_UB_BINDINGS + SG_MAX_STORAGEBUFFER_BINDSLOTS;
-_SG_MTL_MAX_STAGE_BUFFER_BINDINGS :: _SG_MTL_MAX_STAGE_UB_SBUF_BINDINGS + SG_MAX_VERTEXBUFFER_BINDSLOTS;
-_SG_MTL_MAX_STAGE_IMAGE_BINDINGS :: SG_MAX_IMAGE_BINDSLOTS;
-_SG_MTL_MAX_STAGE_SAMPLER_BINDINGS :: SG_MAX_SAMPLER_BINDSLOTS;
+_SG_MTL_MAX_STAGE_UB_BINDINGS :: Sg.SG_MAX_UNIFORMBLOCK_BINDSLOTS;
+_SG_MTL_MAX_STAGE_UB_SBUF_BINDINGS :: _SG_MTL_MAX_STAGE_UB_BINDINGS + Sg.SG_MAX_STORAGEBUFFER_BINDSLOTS;
+_SG_MTL_MAX_STAGE_BUFFER_BINDINGS :: _SG_MTL_MAX_STAGE_UB_SBUF_BINDINGS + Sg.SG_MAX_VERTEXBUFFER_BINDSLOTS;
+_SG_MTL_MAX_STAGE_IMAGE_BINDINGS :: Sg.SG_MAX_IMAGE_BINDSLOTS;
+_SG_MTL_MAX_STAGE_SAMPLER_BINDINGS :: Sg.SG_MAX_SAMPLER_BINDSLOTS;
+
+
+StateCacheEntry :: fn($T, $N) => EnumMap(SgShaderStage, Array(T, N));
 
 StateCache :: @struct {
     cur_pipeline: *Sg.Pipeline.T;
@@ -96,23 +100,17 @@ StateCache :: @struct {
     cur_indexbuffer: *Sg.Buffer.T;
     cur_indexbuffer_id: Sg.Buffer;
     cur_indexbuffer_offset: i32;
-    cur_vs_buffer_offsets: Array(int, _SG_MTL_MAX_STAGE_BUFFER_BINDINGS);
-    cur_vs_buffer_ids: Array(Sg.Buffer, _SG_MTL_MAX_STAGE_BUFFER_BINDINGS);
-    cur_fs_buffer_ids: Array(Sg.Buffer, _SG_MTL_MAX_STAGE_BUFFER_BINDINGS);
-    cur_cs_buffer_ids: Array(Sg.Buffer, _SG_MTL_MAX_STAGE_BUFFER_BINDINGS);
-    cur_vs_image_ids: Array(Sg.Image, _SG_MTL_MAX_STAGE_IMAGE_BINDINGS);
-    cur_fs_image_ids: Array(Sg.Image, _SG_MTL_MAX_STAGE_IMAGE_BINDINGS);
-    cur_cs_image_ids: Array(Sg.Image, _SG_MTL_MAX_STAGE_IMAGE_BINDINGS);
-    cur_vs_sampler_ids: Array(Sg.Sampler, _SG_MTL_MAX_STAGE_SAMPLER_BINDINGS);
-    cur_fs_sampler_ids: Array(Sg.Sampler, _SG_MTL_MAX_STAGE_SAMPLER_BINDINGS);
-    cur_cs_sampler_ids: Array(Sg.Sampler, _SG_MTL_MAX_STAGE_SAMPLER_BINDINGS);
+    cur_vs_buffer_offsets: Array(i32, _SG_MTL_MAX_STAGE_BUFFER_BINDINGS);
+    buffer: StateCacheEntry(Sg.Buffer, _SG_MTL_MAX_STAGE_BUFFER_BINDINGS);
+    image: StateCacheEntry(Sg.Image, _SG_MTL_MAX_STAGE_IMAGE_BINDINGS);
+    sampler: StateCacheEntry(Sg.Sampler, _SG_MTL_MAX_STAGE_SAMPLER_BINDINGS);
 };
 
 Impl :: @struct {
     sg: *Sg.Self;
     valid: bool;
     use_shared_storage_mode: bool;
-    cur_frame_rotate_index: u32;
+    cur_frame_rotate_index: i64;
     ub_size: i32;
     cur_ub_offset: i32;
     cur_ub_base_ptr: *u8;
@@ -125,35 +123,49 @@ Impl :: @struct {
     render_cmd_encoder: id("MTLRenderCommandEncoder");
     compute_cmd_encoder: id("MTLComputeCommandEncoder");
     cur_drawable: id("CAMetalDrawable");
-    uniform_buffers: Array(id("MTLBuffer"), SG_NUM_INFLIGHT_FRAMES);
+    uniform_buffers: Array(id("MTLBuffer"), Sg.SG_NUM_INFLIGHT_FRAMES);
+    pass_completed_sem: id("_NSConcreteGlobalBlock");
 };
 
-fn to_mtl(it: SgLoadAction) MTLLoadAction = @map_enum(it) 
+// TODO: collect all the strings passed to this at comptime and load 
+//       all the classes at startup so you don't have to check every time 
+//       and don't have to worry about races. 
+// TODO: decide if i like this style or the one in app.fr more and switch one of them. 
+fn cls($name: Str) ObjCClass = {
+    cache :: @static(ObjCClass) zeroed(ObjCClass);
+    if bit_cast_unchecked(ObjCClass, i64, cache[]) == 0 {
+        cache[] = objc_getClass(::name.sym().c_str());
+    }
+    cache[]
+}
+
+fn to_mtl(it: SgLoadAction) M("MTLLoadAction") = @map_enum(it) 
     (CLEAR = 2, LOAD = 1, DONTCARE = 0);
 
-fn to_mtl(it: SgStoreAction, resolve: bool) MTLStoreAction = {
+fn to_mtl(it: SgStoreAction, resolve: bool) M("MTLStoreAction") = {
+    ::enum(@type it);
     @debug_assert(@is(it, .STORE, .DONTCARE));
     @if(it == .STORE, @if(resolve, 3, 1), @if(resolve, 2, 0))
 }
 
-fn to_mtl(sg: *Sg.Self) MTLResourceOptions = {
+fn resource_options_storage_mode_managed_or_shared(mtl: *Impl) M("MTLResourceOptions") = {
     ASSERT_NOT_IOS();
     @if(mtl.use_shared_storage_mode, /*Shared*/ 0, /*Managed*/ 1.shift_left(4))
 }
 
-fn to_mtl(it: SgUsage) MTLResourceOptions = {
+fn to_mtl(mtl: *Impl, it: SgUsage) M("MTLResourceOptions") = {
     @debug_assert(@is(it, .IMMUTABLE, .DYNAMIC, .STREAM));
-    x := _sg_mtl_resource_options_storage_mode_managed_or_shared();
+    x := mtl.resource_options_storage_mode_managed_or_shared();
     if it != .IMMUTABLE {
         X |= MTLResourceCPUCacheModeWriteCombined;
     };
     x
 }
 
-fn to_mtl(it: SgVertexStep) MTLVertexStepFunction = @map_enum(it)
+fn to_mtl(it: SgVertexStep) M("MTLVertexStepFunction") = @map_enum(it)
     (PER_VERTEX = 1, PER_INSTANCE = 2);
 
-fn to_mtl(it: SgVertexFormat) MTLVertexFormat = @map_enum(it) (
+fn to_mtl(it: SgVertexFormat) M("MTLVertexFormat") = @map_enum(it) (
     Float = 28, Float2 = 29, Float3 = 30, Float4 = 31,
     Int = 32, Int2 = 33, Int3 = 34, Int4 = 35,
     UInt = 36, UInt2 = 37, UInt3 = 38, UInt4 = 39,
@@ -163,10 +175,10 @@ fn to_mtl(it: SgVertexFormat) MTLVertexFormat = @map_enum(it) (
     UINT10_N2 = 41, Half2 = 25, Half4 = 27,
 );
 
-fn to_mtl(it: SgPrimitiveType) MTLPrimitiveType = @map_enum(it) 
+fn to_mtl(it: SgPrimitiveType) M("MTLPrimitiveType") = @map_enum(it) 
     (POINTS = 0, LINES = 1, LINE_STRIP = 2, TRIANGLES = 3, TRIANGLE_STRIP = 3);
 
-fn to_mtl(it: SgPixelFormat) MTLPixelFormat = {
+fn to_mtl(it: SgPixelFormat) M("MTLPixelFormat") = {
     ASSERT_NOT_IOS();
     @enum_map(it) (
         R8 = 10, R8SN = 12, R8UI = 13, R8SI = 14,
@@ -186,7 +198,7 @@ fn to_mtl(it: SgPixelFormat) MTLPixelFormat = {
     )
 }
 
-fn to_mtl(m: SgColorMask) MTLColorWriteMask = {
+fn to_mtl(m: SgColorMask) M("MTLColorWriteMask") = {
     MTLColorWriteMask mtl_mask = MTLColorWriteMaskNone;
     if (m & SG_COLORMASK_R) {
         mtl_mask |= MTLColorWriteMaskRed;
@@ -203,10 +215,10 @@ fn to_mtl(m: SgColorMask) MTLColorWriteMask = {
     return mtl_mask;
 }
 
-fn to_mtl(it: SgBlendOp) MTLBlendOperation = @map_enum(it) 
+fn to_mtl(it: SgBlendOp) M("MTLBlendOperation") = @map_enum(it) 
     (ADD = 0, SUBTRACT = 1, REVERSE_SUBTRACT = 2, MIN = 3, MAX = 4);
 
-fn to_mtl(it: SgBlendFactor) MTLBlendFactor = @map_enum(it) (
+fn to_mtl(it: SgBlendFactor) M("MTLBlendFactor") = @map_enum(it) (
     ZERO = 0, ONE = 1, 
     SRC_COLOR = 2, ONE_MINUS_SRC_COLOR = 3,
     ALPHA     = 4, ONE_MINUS_SRC_ALPHA = 5, 
@@ -217,42 +229,42 @@ fn to_mtl(it: SgBlendFactor) MTLBlendFactor = @map_enum(it) (
     BLEND_ALPHA = 13, ONE_MINUS_BLEND_ALPHA = 14,
 );
 
-fn to_mtl(it: SgCompareFunc) MTLCompareFunction = @map_enum(it) 
+fn to_mtl(it: SgCompareFunc) M("MTLCompareFunction") = @map_enum(it) 
     (NEVER = 0, LESS = 1, EQUAL = 2, LESS_EQUAL = 3, GREATER = 4, NOT_EQUAL = 5, GREATER_EQUAL = 6, ALWAYS = 7);
 
-fn to_mtl(it: SgStencilOp) MTLStencilOperation = @map_enum(it)
+fn to_mtl(it: SgStencilOp) M("MTLStencilOperation") = @map_enum(it)
     (KEEP = 0, ZERO = 1, REPLACE = 2, INCR_CLAMP = 3, DECR_CLAMP = 4, INVERT = 5, INCR_WRAP = 6, DECR_WRAP = 7);
 
-fn to_mtl(it: SgCullMode) MTLCullMode = @map_enum(it) 
+fn to_mtl(it: SgCullMode) M("MTLCullMode") = @map_enum(it) 
     (NONE = MTLCullModeNone, FRONT = MTLCullModeFront, BACK = MTLCullModeBack);
 
-fn to_mtl(it: SgFaceWinding) MTLWinding = @map_enum(it) 
+fn to_mtl(it: SgFaceWinding) M("MTLWinding") = @map_enum(it) 
     (CW = MTLWindingClockwise, CCW = MTLWindingCounterClockwise);
 
-fn to_mtl(it: SgIndexType) MTLIndexType = @map_enum(it) 
+fn to_mtl(it: SgIndexType) M("MTLIndexType") = @map_enum(it) 
     (UINT16 = MTLIndexTypeUInt16, UINT32 = MTLIndexTypeUInt32);
 
-fn int to_mtl(it: SgIndexType) i32 = @map_enum(it) 
+fn to_mtl(it: SgIndexType) i32 = @map_enum(it) 
     (None = 0, UINT16 = 2, UINT32 = 4);
 
-fn to_mtl(it: SgImageType) MTLTextureType = @map_enum(it)
+fn to_mtl(it: SgImageType) M("MTLTextureType") = @map_enum(it)
     (_2D = 2, CUBE = 5, _3D = 7, ARRAY = 3);
 
-fn to_mtl(mtl: *Impl, w: SgWrap) MTLSamplerAddressMode = {
+fn to_mtl(mtl: *Impl, w: SgWrap) M("MTLSamplerAddressMode") = {
     ASSERT_NOT_OLD();
     b := mtl.sg.features.image_clamp_to_border;
     @map_enum(w) (REPEAT = 2, CLAMP_TO_EDGE = 0, CLAMP_TO_BORDER = @if(b, 5, 0), MIRRORED_REPEAT = 3)
 }
 
-fn to_mtl(it: SgBorderColor) MTLSamplerBorderColor = {
+fn to_mtl(it: SgBorderColor) M("MTLSamplerBorderColor") = {
     ASSERT_NOT_OLD();
     @map_enum(it) (TRANSPARENT_BLACK = 0, OPAQUE_BLACK = 1, OPAQUE_WHITE = 2)
 }
 
-fn mtl_minmag(it: SgFilter) MTLSamplerMinMagFilter = @enum_map(it)
+fn mtl_minmag(it: SgFilter) M("MTLSamplerMinMagFilter") = @enum_map(it)
     (NEAREST = 0, LINEAR = 1);
 
-fn mtl_mip(f: SgFilter) MTLSamplerMipFilter = @enum_map(it) 
+fn mtl_mip(f: SgFilter) M("MTLSamplerMipFilter") = @enum_map(it) 
     (NEAREST = 1, LINEAR = 2);
 
 fn _sg_mtl_vertexbuffer_bindslot(sokol_bindslot: i64) i64 =
@@ -270,19 +282,19 @@ fn init_pool(mtl: *Impl, desc: *SgDesc) void = {
             2 * desc.pipeline_pool_size +
             desc.attachments_pool_size +
             128
-        );
-    p.pool = [NSMutableArray arrayWithCapacity:(NSUInteger)p.num_slots];
-    _SG_OBJC_RETAIN(p.pool);
-    NSNull* null = [NSNull null];
+        ).intcast();
+    p.pool = @objc cls("NSMutableArray").arrayWithCapacity(@as(i64) p.num_slots);
+    @objc p.pool.retain();
+    null := @objc cls("NSNull").null();
     range(0, p.num_slots) { _ |
         @objc p.pool.addObject(null);
     }
-    @debug_assert([p.pool count] == (NSUInteger)p.num_slots);
+    @debug_assert((@objc @as(i64) p.pool.count()) == @as(i64) p.num_slots);
     // a queue of currently free slot indices
     p.free_queue_top = 0;
-    a := mtl.sg.allocator;
+    a := mtl.sg.desc.allocator;
     // pool slot 0 is reserved!
-    p.free_queue = a.alloc_init(i32, p.num_slots, fn(i) => p.num_slots - 1 - i);
+    p.free_queue = a.alloc_init(i32, p.num_slots, fn(i) => intcast p.num_slots - 1 - i);
     // a circular queue which holds release items (frame index when a resource is to be released, and the resource's pool index
     p.release_queue_front = 0;
     p.release_queue_back = 0;
@@ -299,11 +311,12 @@ fn destroy_pool(mtl: *Impl) void = {
 }
 
 // get a new free resource pool slot
-fn _sg_mtl_alloc_pool_slot(mtl: *Impl) i32 = {
+fn alloc_pool_slot(mtl: *Impl) i32 = {
     p := mtl.idpool&;
     @debug_assert(p.free_queue_top > 0);
-    const int slot_index = p.free_queue[--p.free_queue_top];
-    @debug_assert((slot_index > 0) && (slot_index < p.num_slots));
+    p.free_queue_top -= 1;
+    slot_index := p.free_queue[p.free_queue_top];
+    @debug_assert((slot_index > 0) && (slot_index < p.num_slots.intcast()));
     slot_index
 }
 
@@ -311,44 +324,48 @@ fn _sg_mtl_alloc_pool_slot(mtl: *Impl) i32 = {
 fn free_pool_slot(mtl: *Impl, slot_index: i32) void = {
     p := mtl.idpool&;
     @debug_assert(p.free_queue_top < p.num_slots);
-    @debug_assert((slot_index > 0) && (slot_index < p.num_slots));
-    p.free_queue[p.free_queue_top++] = slot_index;
+    @debug_assert((slot_index > 0) && (slot_index < p.num_slots.intcast()));
+    p.free_queue[p.free_queue_top] = slot_index;
+    p.free_queue_top += 1;
 }
 
 // add an MTLResource to the pool, return pool index or 0 if input was 'nil'
-fn add_resource(mtl: *Impl, res: ObjCId) i32 = {
+fn add_resource(mtl: *Impl, res: id("T")) Id("T") = {
     if(res.is_nil(), => return(_SG_MTL_INVALID_SLOT_INDEX));
-    _sg_stats_add(metal.idpool.num_added, 1);
-    slot_index := _sg_mtl_alloc_pool_slot();
+    mtl.sg.stat(.mtl_idpool_num_added, 1);
+    slot_index := mtl.alloc_pool_slot();
     // NOTE: the NSMutableArray will take ownership of its items
-    @debug_assert([NSNull null] == mtl.idpool.pool[(NSUInteger)slot_index]);
-    mtl.idpool.pool[(NSUInteger)slot_index] = res;
+    //@debug_assert([NSNull null] == mtl.idpool.pool[@as(i64) slot_index]);  // TODO
+    @objc mtl.idpool.pool.replaceObjectAtIndex(res, atIndex = @as(i64) slot_index.intcast());
     slot_index
 }
 
 /*  mark an MTLResource for release, this will put the resource into the
     deferred-release queue, and the resource will then be released N frames later. */
-fn release_resource(mtl: *Impl, frame_index: u32, slot_index: i32) void = {
+fn release_resource(mtl: *Impl, frame_index: u32, slot_index: Id("T")) void = {
     if slot_index == _SG_MTL_INVALID_SLOT_INDEX {
         /* this means that a nil value was provided to mtl.add_resource */
         return();
     }
     p := mtl.idpool&;
-    _sg_stats_add(metal.idpool.num_released, 1);
-    @debug_assert((slot_index > 0) && (slot_index < p.num_slots));
-    @debug_assert([NSNull null] != p.pool[(NSUInteger)slot_index]);
-    int release_index = p.release_queue_front++;
+    mtl.sg.stat(.mtl_idpool_num_released, 1);
+    @debug_assert((slot_index > 0) && (slot_index < p.num_slots.intcast()));
+    //@debug_assert([NSNull null] != p.pool[@as(i64) slot_index]);  // TODO
+    release_index := p.release_queue_front;
+    p.release_queue_front += 1;
     if (p.release_queue_front >= p.num_slots) {
         // wrap-around
         p.release_queue_front = 0;
     }
     // release queue full?
     @debug_assert(p.release_queue_front != p.release_queue_back);
-    @debug_assert(0 == p.release_queue[release_index].frame_index);
-    const uint32_t safe_to_release_frame_index = frame_index + SG_NUM_INFLIGHT_FRAMES + 1;
-    p.release_queue[release_index].frame_index = safe_to_release_frame_index;
-    p.release_queue[release_index].slot_index = slot_index;
+    @debug_assert(p.release_queue[release_index].frame_index == 0);
+    safe_to_release_frame_index := frame_index + Sg.SG_NUM_INFLIGHT_FRAMES + 1;
+    p.release_queue[release_index] = (frame_index = safe_to_release_frame_index, slot_index = slot_index);
 }
+
+// NSNull: you're not allowed to put nil in an NSMutableArray (even tho everything's a pointer anyway?), 
+// so they have a magic sentinal value to use instead of nil. nil != [NSNull null]. 
 
 // run garbage-collection pass on all resources in the release-queue
 fn garbage_collect(mtl: *Impl, frame_index: u32) void = {
@@ -358,20 +375,23 @@ fn garbage_collect(mtl: *Impl, frame_index: u32) void = {
             // don't need to check further, release-items past this are too young
             return();
         }
-        _sg_stats_add(metal.idpool.num_garbage_collected, 1);
+        mtl.sg.stat(.mtl_num_garbage_collected, 1);
         // safe to release this resource
-        const int slot_index = p.release_queue[p.release_queue_back].slot_index;
-        @debug_assert((slot_index > 0) && (slot_index < p.num_slots));
+        slot_index := p.release_queue[p.release_queue_back].slot_index;
+        @debug_assert((slot_index > 0) && (slot_index < p.num_slots.intcast()));
         // note: the NSMutableArray takes ownership of its items, assigning an NSNull object will
         // release the object, no matter if using ARC or not
-        @debug_assert(p.pool[(NSUInteger)slot_index] != [NSNull null]);
-        p.pool[(NSUInteger)slot_index] = [NSNull null];
+        // use 
+        null := @objc cls("NSNull").null();
+        i: i64 = slot_index.intcast();
+        @debug_assert(bit_cast_unchecked(ObjCId, i64, null) != bit_cast_unchecked(ObjCId, i64, @objc p.pool.objectAtIndex(i)));
+        @objc p.pool.replaceObjectAtIndex(null, atIndex = i);
         // put the now free pool index back on the free queue
         mtl.free_pool_slot(slot_index);
         // reset the release queue slot and advance the back index
         p.release_queue[p.release_queue_back].frame_index = 0;
         p.release_queue[p.release_queue_back].slot_index = _SG_MTL_INVALID_SLOT_INDEX;
-        p.release_queue_back++;
+        p.release_queue_back += 1;
         if (p.release_queue_back >= p.num_slots) {
             // wrap-around
             p.release_queue_back = 0;
@@ -379,125 +399,80 @@ fn garbage_collect(mtl: *Impl, frame_index: u32) void = {
     }
 }
 
-fn get_id(mtl: *Impl, slot_index: i32) ObjCId = 
+fn get_id(mtl: *Impl, slot_index: Id("T")) id("T") = 
     @objc mtl.idpool.pool.objectAtIndex(@as(i64) slot_index.intcast());
 
 fn clear_state_cache(mtl: *Impl) void = {
     mtl.state_cache = zeroed @type mtl.state_cache;
 }
 
+MTLGPUFamily :: @enum(u32) (Apple1 = 1001, Apple7 = 1007, Mac2 = 2002, Metal3 = 5001);
+
+fn supports_family(mtl: *Impl, family: MTLGPUFamily) bool =
+    @objc @as(bool) mtl.device.supportsFamily(family);
+
 // https://developer.apple.com/metal/Metal-Feature-Set-Tables.pdf
 fn init_caps(mtl: *Impl) void = {
     ASSERT_NOT_IOS();
-    mtl.sg.backend = SG_BACKEND_METAL_MACOS;
-    mtl.sg.features.origin_top_left = true;
-    mtl.sg.features.mrt_independent_blend_state = true;
-    mtl.sg.features.mrt_independent_write_mask = true;
-    mtl.sg.features.compute = true;
-    mtl.sg.features.msaa_image_bindings = true;
-
-    mtl.sg.features.image_clamp_to_border = false;
+    //mtl.sg.backend = SG_BACKEND_METAL_MACOS;
+    
     ASSERT_NOT_OLD();
-    mtl.sg.features.image_clamp_to_border = [mtl.device supportsFamily:MTLGPUFamilyApple7]
-                                            || [mtl.device supportsFamily:MTLGPUFamilyMac2];
-    if (!mtl.sg.features.image_clamp_to_border) {
-        mtl.sg.features.image_clamp_to_border = [mtl.device supportsFamily:MTLGPUFamilyMetal3];
-    }
+    mtl.sg.features = (
+        origin_top_left = true,
+        mrt_independent_blend_state = true,
+        mrt_independent_write_mask = true,
+        compute = true,
+        msaa_image_bindings = true,
+        image_clamp_to_border = mtl.supports_family(.Apple7) || mtl.supports_family(.Mac2) || mtl.supports_family(.Metal3),
+    );
 
     ASSERT_NOT_IOS();
-    mtl.sg.limits.max_image_size_2d = 16 * 1024;
-    mtl.sg.limits.max_image_size_cube = 16 * 1024;
-    mtl.sg.limits.max_image_size_3d = 2 * 1024;
-    mtl.sg.limits.max_image_size_array = 16 * 1024;
-    mtl.sg.limits.max_image_array_layers = 2 * 1024;
-    mtl.sg.limits.max_vertex_attrs = SG_MAX_VERTEX_ATTRIBUTES;
-
-    _sg_pixelformat_all(&mtl.sg.formats[SG_PIXELFORMAT_R8]);
-    _sg_pixelformat_all(&mtl.sg.formats[SG_PIXELFORMAT_R8SN]);
-    _sg_pixelformat_srm(&mtl.sg.formats[SG_PIXELFORMAT_R8UI]);
-    _sg_pixelformat_srm(&mtl.sg.formats[SG_PIXELFORMAT_R8SI]);
-    _sg_pixelformat_all(&mtl.sg.formats[SG_PIXELFORMAT_R16]);
-    _sg_pixelformat_all(&mtl.sg.formats[SG_PIXELFORMAT_R16SN]);
+    mtl.sg.limits = (
+        max_image_size_2d = 16 * 1024,
+        max_image_size_cube = 16 * 1024,
+        max_image_size_3d = 2 * 1024,
+        max_image_size_array = 16 * 1024,
+        max_image_array_layers = 2 * 1024,
+        max_vertex_attrs = Sg.SG_MAX_VERTEX_ATTRIBUTES,
+    );
+    
     ASSERT_NOT_IOS();
-    _sg_pixelformat_srm(&mtl.sg.formats[SG_PIXELFORMAT_R16UI]);
-    _sg_pixelformat_srm(&mtl.sg.formats[SG_PIXELFORMAT_R16SI]);
-    _sg_pixelformat_all(&mtl.sg.formats[SG_PIXELFORMAT_R16F]);
-    _sg_pixelformat_all(&mtl.sg.formats[SG_PIXELFORMAT_RG8]);
-    _sg_pixelformat_all(&mtl.sg.formats[SG_PIXELFORMAT_RG8SN]);
-    _sg_pixelformat_srm(&mtl.sg.formats[SG_PIXELFORMAT_RG8UI]);
-    _sg_pixelformat_srm(&mtl.sg.formats[SG_PIXELFORMAT_RG8SI]);
-    _sg_pixelformat_sr(&mtl.sg.formats[SG_PIXELFORMAT_R32UI]);
-    _sg_pixelformat_sr(&mtl.sg.formats[SG_PIXELFORMAT_R32SI]);
-    ASSERT_NOT_IOS();
-    _sg_pixelformat_all(&mtl.sg.formats[SG_PIXELFORMAT_R32F]);
-    ASSERT_NOT_IOS();
-    _sg_pixelformat_all(&mtl.sg.formats[SG_PIXELFORMAT_RG16]);
-    _sg_pixelformat_all(&mtl.sg.formats[SG_PIXELFORMAT_RG16SN]);
-    _sg_pixelformat_srm(&mtl.sg.formats[SG_PIXELFORMAT_RG16UI]);
-    _sg_pixelformat_srm(&mtl.sg.formats[SG_PIXELFORMAT_RG16SI]);
-    _sg_pixelformat_all(&mtl.sg.formats[SG_PIXELFORMAT_RG16F]);
-    _sg_pixelformat_all(&mtl.sg.formats[SG_PIXELFORMAT_RGBA8]);
-    _sg_pixelformat_all(&mtl.sg.formats[SG_PIXELFORMAT_SRGB8A8]);
-    _sg_pixelformat_all(&mtl.sg.formats[SG_PIXELFORMAT_RGBA8SN]);
-    _sg_pixelformat_srm(&mtl.sg.formats[SG_PIXELFORMAT_RGBA8UI]);
-    _sg_pixelformat_srm(&mtl.sg.formats[SG_PIXELFORMAT_RGBA8SI]);
-    _sg_pixelformat_all(&mtl.sg.formats[SG_PIXELFORMAT_BGRA8]);
-    _sg_pixelformat_all(&mtl.sg.formats[SG_PIXELFORMAT_RGB10A2]);
-    _sg_pixelformat_all(&mtl.sg.formats[SG_PIXELFORMAT_RG11B10F]);
-    ASSERT_NOT_IOS();
-    _sg_pixelformat_sf(&mtl.sg.formats[SG_PIXELFORMAT_RGB9E5]);
-    _sg_pixelformat_srm(&mtl.sg.formats[SG_PIXELFORMAT_RG32UI]);
-    _sg_pixelformat_srm(&mtl.sg.formats[SG_PIXELFORMAT_RG32SI]);
-    ASSERT_NOT_IOS();
-    _sg_pixelformat_all(&mtl.sg.formats[SG_PIXELFORMAT_RG32F]);
-    ASSERT_NOT_IOS();
-    _sg_pixelformat_all(&mtl.sg.formats[SG_PIXELFORMAT_RGBA16]);
-    _sg_pixelformat_all(&mtl.sg.formats[SG_PIXELFORMAT_RGBA16SN]);
-    _sg_pixelformat_srm(&mtl.sg.formats[SG_PIXELFORMAT_RGBA16UI]);
-    _sg_pixelformat_srm(&mtl.sg.formats[SG_PIXELFORMAT_RGBA16SI]);
-    _sg_pixelformat_all(&mtl.sg.formats[SG_PIXELFORMAT_RGBA16F]);
-    ASSERT_NOT_IOS();
-    _sg_pixelformat_srm(&mtl.sg.formats[SG_PIXELFORMAT_RGBA32UI]);
-    _sg_pixelformat_srm(&mtl.sg.formats[SG_PIXELFORMAT_RGBA32SI]);
-    _sg_pixelformat_all(&mtl.sg.formats[SG_PIXELFORMAT_RGBA32F]);
-    _sg_pixelformat_srmd(&mtl.sg.formats[SG_PIXELFORMAT_DEPTH]);
-    _sg_pixelformat_srmd(&mtl.sg.formats[SG_PIXELFORMAT_DEPTH_STENCIL]);
-    _sg_pixelformat_sf(&mtl.sg.formats[SG_PIXELFORMAT_BC1_RGBA]);
-    _sg_pixelformat_sf(&mtl.sg.formats[SG_PIXELFORMAT_BC2_RGBA]);
-    _sg_pixelformat_sf(&mtl.sg.formats[SG_PIXELFORMAT_BC3_RGBA]);
-    _sg_pixelformat_sf(&mtl.sg.formats[SG_PIXELFORMAT_BC3_SRGBA]);
-    _sg_pixelformat_sf(&mtl.sg.formats[SG_PIXELFORMAT_BC4_R]);
-    _sg_pixelformat_sf(&mtl.sg.formats[SG_PIXELFORMAT_BC4_RSN]);
-    _sg_pixelformat_sf(&mtl.sg.formats[SG_PIXELFORMAT_BC5_RG]);
-    _sg_pixelformat_sf(&mtl.sg.formats[SG_PIXELFORMAT_BC5_RGSN]);
-    _sg_pixelformat_sf(&mtl.sg.formats[SG_PIXELFORMAT_BC6H_RGBF]);
-    _sg_pixelformat_sf(&mtl.sg.formats[SG_PIXELFORMAT_BC6H_RGBUF]);
-    _sg_pixelformat_sf(&mtl.sg.formats[SG_PIXELFORMAT_BC7_RGBA]);
-    _sg_pixelformat_sf(&mtl.sg.formats[SG_PIXELFORMAT_BC7_SRGBA]);
-    ASSERT_NOT_IOS();
+    @fill_formats(mtl.sg.formats&) (
+        sfbrm = (.R8, .R8SN, .R16, .R16SN, .R16F, .RG8, .RG8SN, .R32F, .RG16, 
+            .RG16SN, .RG16F, .RGBA8, .SRGB8A8, .RGBA8SN, .BGRA8, .RGB10A2, .RG11B10F, 
+            .RG32F, .RGBA16, .RGBA16SN, .RGBA16F, .RGBA32F),
+        srm = (.R8UI, .R8SI, .R16UI, .R16SI, .RG8UI, .RG8SI, .RG16UI, .RG16SI, .RGBA8UI, 
+            .RGBA8SI, .RG32UI, .RG32SI, .RGBA16UI, .RGBA16SI, .RGBA32UI, .RGBA32SI),
+        sr = (.R32UI, .R32SI),
+        sf = (.RGB9E5, .BC1_RGBA, .BC2_RGBA, .BC3_RGBA, .BC3_SRGBA, .BC4_R, .BC4_RSN, 
+            .BC5_RG, .BC5_RGSN, .BC6H_RGBF, .BC6H_RGBUF, .BC7_RGBA, .BC7_SRGBA),
+        srmd = (.DEPTH, .DEPTH_STENCIL),
+    );
 }
 
+fn ns_str(s: CStr) id("NSString") = 
+    @objc cls("NSString").stringWithUTF8String(s);
+
 //-- main Metal backend state and functions ------------------------------------
-fn setup_backend(mtl: *Impl, desc: *sg_desc) void = {
+fn setup_backend(mtl: *Impl, desc: *SgDesc) void = {
     // assume already zero-initialized
-    @debug_assert(desc);
-    @debug_assert(desc.environment.metal.device);
+    @debug_assert(!desc.environment.metal.device.is_null());
     @debug_assert(desc.uniform_buffer_size > 0);
-    _sg_mtl_init_pool(desc);
-    _sg_mtl_clear_state_cache();
+    mtl.init_pool(desc);
+    mtl.clear_state_cache();  // ... not assuming already zero-initialized?
     mtl.valid = true;
     mtl.ub_size = desc.uniform_buffer_size;
-    mtl.sem = dispatch_semaphore_create(SG_NUM_INFLIGHT_FRAMES);
-    mtl.device = (__bridge id<MTLDevice>) desc.environment.metal.device;
-    mtl.cmd_queue = [mtl.device newCommandQueue];
+    mtl.sem = dispatch_semaphore_create(Sg.SG_NUM_INFLIGHT_FRAMES);
+    mtl.device = bit_cast_unchecked(rawptr, id("MTLDevice"), desc.environment.metal.device);
+    mtl.cmd_queue = @objc mtl.device.newCommandQueue();
 
-    for (int i = 0; i < SG_NUM_INFLIGHT_FRAMES; i++) {
-        mtl.uniform_buffers[i] = [mtl.device
-            newBufferWithLength:(NSUInteger)mtl.ub_size
-            options:MTLResourceCPUCacheModeWriteCombined|MTLResourceStorageModeShared
-        ];
-        if SOKOL_DEBUG {
-            mtl.uniform_buffers[i].label = [NSString stringWithFormat:@"sg-uniform-buffer.%d", i];
+    range(0, Sg.SG_NUM_INFLIGHT_FRAMES) { i |
+        o := 1; // MTLResourceCPUCacheModeWriteCombined|MTLResourceStorageModeShared;
+        mtl.uniform_buffers&[i] = @objc mtl.device.newBufferWithLength(@as(i64) mtl.ub_size.intcast(), options = o);
+        if Sg.SOKOL_DEBUG {
+            // TODO: is this supposed to use the varargs abi? or can i just use a normal selector based on the named args? 
+            //       either way i need to change @objc to allow this
+            //@objc mtl.uniform_buffers&[i].setLabel(@objc cls("NSString").stringWithFormat(ns_str("sg-uniform-buffer.%d"), i));
         }
     }
 
@@ -507,10 +482,10 @@ fn setup_backend(mtl: *Impl, desc: *sg_desc) void = {
         ASSERT_NOT_OLD();
         // on Intel Macs, always use managed resources even though the
         // device says it supports unified memory (because of texture restrictions)
-        is_apple_gpu := [mtl.device supportsFamily:MTLGPUFamilyApple1];
+        is_apple_gpu := mtl.supports_family(.Apple1);  
         mtl.use_shared_storage_mode = is_apple_gpu;
     };
-    init_caps();
+    mtl.init_caps();
 }
 
 fn discard_backend(mtl: *Impl) void = {
@@ -556,17 +531,17 @@ fn create_buffer(mtl: *Impl, buf: *Sg.Buffer.T, desc: *Sg.Buffer.Desc) sg_resour
         } else {
             if (desc.data.ptr) {
                 @debug_assert(desc.data.size > 0);
-                mtl_buf = [mtl.device newBufferWithBytes:desc.data.ptr length:(NSUInteger)buf.cmn.size options:mtl_options];
+                mtl_buf = [mtl.device newBufferWithBytes:desc.data.ptr length:@as(i64) buf.cmn.size options:mtl_options];
             } else {
                 // this is guaranteed to zero-initialize the buffer
-                mtl_buf = [mtl.device newBufferWithLength:(NSUInteger)buf.cmn.size options:mtl_options];
+                mtl_buf = [mtl.device newBufferWithLength:@as(i64) buf.cmn.size options:mtl_options];
             }
             if (nil == mtl_buf) {
                 _SG_ERROR(METAL_CREATE_BUFFER_FAILED);
                 return SG_RESOURCESTATE_FAILED;
             }
         }
-        if SOKOL_DEBUG && desc.label {
+        if Sg.SOKOL_DEBUG && desc.label {
             mtl_buf.label = [NSString stringWithFormat:@"%s.%d", desc.label, slot];
         }
         buf.mtl.buf[slot] = mtl.add_resource(mtl_buf);
@@ -579,7 +554,7 @@ fn discard_buffer(mtl: *Impl, buf: *Sg.Buffer.T) void = {
     @debug_assert(buf);
     range(0, buf.cmn.num_slots) { slot | 
         // it's valid to call release resource with '0'
-        _sg_mtl_release_resource(mtl.sg.frame_index, buf.mtl.buf[slot]);
+        mtl.release_resource(mtl.sg.frame_index, buf.mtl.buf[slot]);
     }
 }
 
@@ -590,11 +565,11 @@ fn copy_image_data(mtl: *Impl, img: *Sg.Image.T, mtl_tex: id("MTLTexture"), data
         range(0, img.cmn.num_mipmaps) { mip_index |
             @debug_assert(data.subimage[face_index][mip_index].ptr);
             @debug_assert(data.subimage[face_index][mip_index].size > 0);
-            const uint8_t* data_ptr = (const uint8_t*)data.subimage[face_index][mip_index].ptr;
-            const int mip_width = _sg_miplevel_dim(img.cmn.width, mip_index);
-            const int mip_height = _sg_miplevel_dim(img.cmn.height, mip_index);
-            int bytes_per_row = _sg_row_pitch(img.cmn.pixel_format, mip_width, 1);
-            int bytes_per_slice = _sg_surface_pitch(img.cmn.pixel_format, mip_width, mip_height, 1);
+            data_ptr := (const uint8_t*)data.subimage[face_index][mip_index].ptr;
+            mip_width := _sg_miplevel_dim(img.cmn.width, mip_index);
+            mip_height := _sg_miplevel_dim(img.cmn.height, mip_index);
+            bytes_per_row := _sg_row_pitch(img.cmn.pixel_format, mip_width, 1);
+            bytes_per_slice := _sg_surface_pitch(img.cmn.pixel_format, mip_width, mip_height, 1);
             /* bytesPerImage special case: https://developer.apple.com/documentation/metal/mtltexture/1515679-replaceregion
 
                 "Supply a nonzero value only when you copy data to a MTLTextureType3D type texture"
@@ -608,18 +583,18 @@ fn copy_image_data(mtl: *Impl, img: *Sg.Image.T, mtl_tex: id("MTLTexture"), data
             } else {
                 (1, 0)
             };
-            region: MTLRegion = (size = (width = (NSUInteger)mip_width, height = (NSUInteger)mip_height, depth = (NSUInteger)mip_depth);
+            region: MTLRegion = (size = (width = @as(i64) mip_width, height = @as(i64) mip_height, depth = @as(i64) mip_depth);
 
             range(0, num_slices) { slice_index | 
                 mtl_slice_index := @if(img.cmn.type == SG_IMAGETYPE_CUBE, face_index, slice_index);
                 slice_offset := slice_index * bytes_per_slice;
                 @debug_assert((slice_offset + bytes_per_slice) <= (int)data.subimage[face_index][mip_index].size);
                 [mtl_tex replaceRegion:region
-                    mipmapLevel:(NSUInteger)mip_index
-                    slice:(NSUInteger)mtl_slice_index
+                    mipmapLevel:@as(i64) mip_index
+                    slice:@as(i64) mtl_slice_index
                     withBytes:data_ptr + slice_offset
-                    bytesPerRow:(NSUInteger)bytes_per_row
-                    bytesPerImage:(NSUInteger)bytes_per_image];
+                    bytesPerRow:@as(i64) bytes_per_row
+                    bytesPerImage:@as(i64) bytes_per_image];
             }
         }
     }
@@ -633,16 +608,16 @@ fn _sg_mtl_init_texdesc_common(it: id("MTLTextureDescriptor"), img: *Sg.Image.T)
         _SG_ERROR(METAL_TEXTURE_FORMAT_NOT_SUPPORTED);
         return false;
     }
-    @objc it.width = (NSUInteger)img.cmn.width;
-    @objc it.height = (NSUInteger)img.cmn.height;
+    @objc it.width = @as(i64) img.cmn.width;
+    @objc it.height = @as(i64) img.cmn.height;
     if (SG_IMAGETYPE_3D == img.cmn.type) {
-        @objc it.depth = (NSUInteger)img.cmn.num_slices;
+        @objc it.depth = @as(i64) img.cmn.num_slices;
     } else {
         @objc it.depth = 1;
     }
-    it.mipmapLevelCount = (NSUInteger)img.cmn.num_mipmaps;
+    it.mipmapLevelCount = @as(i64) img.cmn.num_mipmaps;
     if (SG_IMAGETYPE_ARRAY == img.cmn.type) {
-        @objc it.arrayLength = (NSUInteger)img.cmn.num_slices;
+        @objc it.arrayLength = @as(i64) img.cmn.num_slices;
     } else {
         @objc it.arrayLength = 1;
     }
@@ -657,20 +632,23 @@ fn _sg_mtl_init_texdesc_common(it: id("MTLTextureDescriptor"), img: *Sg.Image.T)
 }
 
 // initialize MTLTextureDescriptor with rendertarget attributes
-fn init_texdesc_rt(mtl_desc: id("MTLTextureDescriptor"), img: *Sg.Image.T) {
+fn init_texdesc_rt(mtl_desc: id("MTLTextureDescriptor"), img: *Sg.Image.T) void = {
     @debug_assert(img.cmn.render_target);
-    @objc mtl_desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+    @objc mtl_desc.usage = bit_or(MTLTextureUsageShaderRead, MTLTextureUsageRenderTarget);
     @objc mtl_desc.resourceOptions = MTLResourceStorageModePrivate;
 }
 
 // initialize MTLTextureDescriptor with MSAA attributes
-fn init_texdesc_rt_msaa(it: id("MTLTextureDescriptor"), img: *Sg.Image.T) {
+fn init_texdesc_rt_msaa(it: id("MTLTextureDescriptor"), img: *Sg.Image.T) void = {
     @debug_assert(img.cmn.sample_count > 1);
-    @objc it.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+    @objc it.usage = bit_or(MTLTextureUsageShaderRead, MTLTextureUsageRenderTarget);
     @objc it.resourceOptions = MTLResourceStorageModePrivate;
     @objc it.textureType = MTLTextureType2DMultisample;
-    @objc it.sampleCount = (NSUInteger)img.cmn.sample_count;
+    @objc it.sampleCount = @as(i64) img.cmn.sample_count;
 }
+
+new :: fn($classname: Str) id(classname) #generic = 
+    @objc (@objc cls(classname).alloc()).init();
 
 fn create_image(mtl: *Impl, img: *Sg.Image.T, desc: *Sg.Image.Desc) sg_resource_state = {
     @debug_assert(img && desc);
@@ -682,7 +660,7 @@ fn create_image(mtl: *Impl, img: *Sg.Image.T, desc: *Sg.Image.Desc) sg_resource_
     }
 
     // initialize a Metal texture descriptor
-    mtl_desc := [[MTLTextureDescriptor alloc] init];
+    mtl_desc := new "MTLTextureDescriptor";
     if (!_sg_mtl_init_texdesc_common(mtl_desc, img)) {
         release(mtl_desc);
         return SG_RESOURCESTATE_FAILED;
@@ -710,7 +688,7 @@ fn create_image(mtl: *Impl, img: *Sg.Image.T, desc: *Sg.Image.Desc) sg_resource_
                 _sg_mtl_copy_image_data(img, mtl_tex, &desc.data);
             }
         }
-        if SOKOL_DEBUG && desc.label {
+        if Sg.SOKOL_DEBUG && desc.label {
             mtl_tex.label = [NSString stringWithFormat:@"%s.%d", desc.label, slot];
         }
         img.mtl.tex[slot] = mtl.add_resource(mtl_tex);
@@ -731,12 +709,12 @@ fn discard(mtl: *Impl, img: *Sg.Image.T) void = {
 fn create(mtl: *Impl, smp: *Sg.Sampler.T, desc: *Sg.Sampler.Desc) sg_resource_state = {
     @debug_assert(smp && desc);
     id<MTLSamplerState> mtl_smp;
-    const bool injected = (0 != desc.mtl_sampler);
+    injected := (0 != desc.mtl_sampler);
     if (injected) {
         @debug_assert(desc.mtl_sampler);
         mtl_smp = (__bridge id<MTLSamplerState>) desc.mtl_sampler;
     } else {
-        it := [[MTLSamplerDescriptor alloc] init];
+        it := new "MTLSamplerDescriptor";
         @objc it.setSAddressMode(to_mtl(desc.wrap_u));
         @objc it.setTAddressMode(to_mtl(desc.wrap_v));
         @objc it.setRAddressMode(to_mtl(desc.wrap_w));
@@ -753,10 +731,10 @@ fn create(mtl: *Impl, smp: *Sg.Sampler.T, desc: *Sg.Sampler.Desc) sg_resource_st
         @objc it.maxAnisotropy = desc.max_anisotropy;
         @objc it.normalizedCoordinates = YES;
         @objc it.compareFunction = _sg_mtl_compare_func(desc.compare);
-        if SOKOL_DEBUG && desc.label {
+        if Sg.SOKOL_DEBUG && desc.label {
             @objc it.label = [NSString stringWithUTF8String:desc.label];
         }
-        mtl_smp = [mtl.device newSamplerStateWithDescriptor:it];
+        mtl_smp = @objc mtl.device.newSamplerStateWithDescriptor(it);
         @objc it.release();
         if (nil == mtl_smp) {
             _SG_ERROR(METAL_CREATE_SAMPLER_FAILED);
@@ -774,7 +752,13 @@ fn discard(mtl: *Impl, smp: *Sg.Sampler.T) void = {
     _sg_mtl_release_resource(mtl.sg.frame_index, smp.mtl.sampler_state);
 }
 
+
+// TODO: why doesn't #include_std work here? 
+// TODO: i don't think i deduplicate accross import and #include_std so this will be the wrong type
+#use("@/lib/sys/objective_c.fr");
 fn id(classname: Str) Type = ObjCId;
+fn Id(classname: Str) Type = i32;  // an index into the idpool
+fn M(enumname: Str) Type = u32;  // a metal api enum
 
 fn create_shader_func(mtl: *Impl, func: *sg_shader_function, label: CStr, label_ext: CStr, res: *_sg_mtl_shader_func_t) bool = {
     @debug_assert(res.mtl_lib == _SG_MTL_INVALID_SLOT_INDEX);
@@ -790,7 +774,7 @@ fn create_shader_func(mtl: *Impl, func: *sg_shader_function, label: CStr, label_
         release(lib_data);
         lib
     } else {
-        src := @objc c.NSString.stringWithUTF8String(func.source);
+        src := @objc cls("NSString").stringWithUTF8String(func.source);
         @objc mtl.device.newLibraryWithSource(src, options = zeroed(ObjCId), error = err&)
     };
     if !err.is_nil() {
@@ -798,7 +782,7 @@ fn create_shader_func(mtl: *Impl, func: *sg_shader_function, label: CStr, label_
         _SG_LOGMSG(METAL_SHADER_COMPILATION_OUTPUT, [err.localizedDescription UTF8String]);
      }
     if(mtl_lib.is_nil(), => return(false));
-    if SOKOL_DEBUG && label {
+    if Sg.SOKOL_DEBUG && label {
         @debug_assert(label_ext);
         mtl_lib.label = [NSString stringWithFormat:@"%s.%s", label, label_ext];
     }
@@ -813,15 +797,15 @@ fn create_shader_func(mtl: *Impl, func: *sg_shader_function, label: CStr, label_
     res.mtl_func = mtl.add_resource(mtl_func);
     release(mtl_lib);
     release(mtl_func);
-    return true;
+    true
 }
 
 fn release(self: ObjCId) void = @objc self.release();
 
-fn discard_shader_func(mtl: *Impl, func: *_sg_mtl_shader_func_t) void = {
+fn discard(mtl: *Impl, func: _sg_mtl_shader_func_t) void = {
     // it is valid to call _sg_mtl_release_resource with a 'null resource'
-    _sg_mtl_release_resource(mtl.sg.frame_index, func.mtl_func);
-    _sg_mtl_release_resource(mtl.sg.frame_index, func.mtl_lib);
+    mtl.release_resource(mtl.sg.frame_index, func.mtl_func);
+    mtl.release_resource(mtl.sg.frame_index, func.mtl_lib);
 }
 
 // NOTE: this is an out-of-range check for MSL bindslots that's also active in release mode
@@ -842,6 +826,7 @@ fn ensure_msl_bindslot_ranges(mtl: *Impl, desc: *Sg.Shader.Desc) bool = {
 }
 
 MTLSize :: @struct(width: u64, height: u64, depth: u64);
+
 fn create_shader(mtl: *Impl, shd: *Sg.Shader.T, desc: *Sg.Shader.Desc) sg_resource_state = {
     @debug_assert(shd && desc);
 
@@ -852,23 +837,22 @@ fn create_shader(mtl: *Impl, shd: *Sg.Shader.T, desc: *Sg.Shader.Desc) sg_resour
     }
     
     shd.mtl.threads_per_threadgroup = (
-        width = (NSUInteger)desc.mtl_threads_per_threadgroup.x,
-        height = (NSUInteger)desc.mtl_threads_per_threadgroup.y,
-        depth = (NSUInteger)desc.mtl_threads_per_threadgroup.z,
+        width = @as(i64) desc.mtl_threads_per_threadgroup.x,
+        height = @as(i64) desc.mtl_threads_per_threadgroup.y,
+        depth = @as(i64) desc.mtl_threads_per_threadgroup.z,
     );
 
-    // copy resource bindslot mappings
-    for (size_t i = 0; i < SG_MAX_UNIFORMBLOCK_BINDSLOTS; i++) {
-        shd.mtl.ub_buffer_n[i] = desc.uniform_blocks[i].msl_buffer_n;
+    enumerate shd.mtl.ub_buffer_n& { i, it |
+        it[] = desc.uniform_blocks&[i].msl_buffer_n;
     }
-    for (size_t i = 0; i < SG_MAX_STORAGEBUFFER_BINDSLOTS; i++) {
-        shd.mtl.sbuf_buffer_n[i] = desc.storage_buffers[i].msl_buffer_n;
+    enumerate shd.mtl.sbuf_buffer_n& { i, it |
+        it[] = desc.storage_buffers&[i].msl_buffer_n;
     }
-    for (size_t i = 0; i < SG_MAX_IMAGE_BINDSLOTS; i++) {
-        shd.mtl.img_texture_n[i] = desc.images[i].msl_texture_n;
+    enumerate shd.mtl.img_texture_n& { i, it |
+        it[] = desc.images&[i].msl_texture_n;
     }
-    for (size_t i = 0; i < SG_MAX_SAMPLER_BINDSLOTS; i++) {
-        shd.mtl.smp_sampler_n[i] = desc.samplers[i].msl_sampler_n;
+    enumerate shd.mtl.smp_sampler_n& { i, it |
+        it[] = desc.samplers&[i].msl_sampler_n;
     }
 
     // create metal library and function objects
@@ -883,17 +867,17 @@ fn create_shader(mtl: *Impl, shd: *Sg.Shader.T, desc: *Sg.Shader.Desc) sg_resour
         shd_valid &= _sg_mtl_create_shader_func(&desc.compute_func, desc.label, "cs", &shd.mtl.compute_func);
     }
     if (!shd_valid) {
-        mtl.discard_shader_func(&shd.mtl.vertex_func);
-        mtl.discard_shader_func(&shd.mtl.fragment_func);
-        mtl.discard_shader_func(&shd.mtl.compute_func);
+        mtl.discard(shd.mtl.vertex_func);
+        mtl.discard(shd.mtl.fragment_func);
+        mtl.discard(shd.mtl.compute_func);
     }
     return shd_valid ? SG_RESOURCESTATE_VALID : SG_RESOURCESTATE_FAILED;
 }
 
 fn discard(mtl: *Impl, shd: *Sg.Shader.T) void = {
-    mtl.discard_shader_func(&shd.mtl.vertex_func);
-    mtl.discard_shader_func(&shd.mtl.fragment_func);
-    mtl.discard_shader_func(&shd.mtl.compute_func);
+    mtl.discard(shd.mtl.vertex_func);
+    mtl.discard(shd.mtl.fragment_func);
+    mtl.discard(shd.mtl.compute_func);
 }
 
 MTLMutabilityImmutable :: 2;
@@ -905,28 +889,28 @@ fn create_pipeline(mtl: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg
     pip.shader = shd;
 
     if (pip.cmn.is_compute) {
-        NSError* err = NULL;
-        MTLComputePipelineDescriptor* cp_desc = [[MTLComputePipelineDescriptor alloc] init];
+        err := zeroed id("NSError");
+        cp_desc := new "MTLComputePipelineDescriptor";
         cp_desc.computeFunction = mtl.get_id(shd.mtl.compute_func.mtl_func);
         cp_desc.threadGroupSizeIsMultipleOfThreadExecutionWidth = true;
         for (size_t i = 0; i < SG_MAX_STORAGEBUFFER_BINDSLOTS; i++) {
             const sg_shader_stage stage = shd.cmn.storage_buffers[i].stage;
             @debug_assert((stage != SG_SHADERSTAGE_VERTEX) && (stage != SG_SHADERSTAGE_FRAGMENT));
             if ((stage == SG_SHADERSTAGE_COMPUTE) && shd.cmn.storage_buffers[i].readonly) {
-                const NSUInteger mtl_slot = shd.mtl.sbuf_buffer_n[i];
+                mtl_slot := shd.mtl.sbuf_buffer_n[i];
                 cp_desc.buffers[mtl_slot].mutability = MTLMutabilityImmutable;
             }
         }
-        if SOKOL_DEBUG && desc.label {
+        if Sg.SOKOL_DEBUG && desc.label {
             cp_desc.label = [NSString stringWithFormat:@"%s", desc.label];
         }
-        id<MTLComputePipelineState> mtl_cps = [mtl.device
+        mtl_cps := [mtl.device
             newComputePipelineStateWithDescriptor:cp_desc
             options:MTLPipelineOptionNone
             reflection:nil
             error:&err];
         release(cp_desc);
-        if (nil == mtl_cps) {
+        if mtl_cps.is_nil() {
             @debug_assert(err);
             _SG_ERROR(METAL_CREATE_CPS_FAILED);
             _SG_LOGMSG(METAL_CREATE_CPS_OUTPUT, [err.localizedDescription UTF8String]);
@@ -947,7 +931,7 @@ fn create_pipeline(mtl: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg
         pip.mtl.stencil_ref = desc.stencil.ref;
 
         // create vertex-descriptor
-        MTLVertexDescriptor* vtx_desc = [MTLVertexDescriptor vertexDescriptor];
+        vtx_desc := @objc cls("MTLVertexDescriptor").vertexDescriptor();
         for (NSUInteger attr_index = 0; attr_index < SG_MAX_VERTEX_ATTRIBUTES; attr_index++) {
             const sg_vertex_attr_state* a_state = &desc.layout.attrs[attr_index];
             if (a_state.format == SG_VERTEXFORMAT_INVALID) {
@@ -955,18 +939,20 @@ fn create_pipeline(mtl: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg
             }
             @debug_assert(a_state.buffer_index < SG_MAX_VERTEXBUFFER_BINDSLOTS);
             @debug_assert(pip.cmn.vertex_buffer_layout_active[a_state.buffer_index]);
-            vtx_desc.attributes[attr_index].format = _sg_mtl_vertex_format(a_state.format);
-            vtx_desc.attributes[attr_index].offset = (NSUInteger)a_state.offset;
-            vtx_desc.attributes[attr_index].bufferIndex = _sg_mtl_vertexbuffer_bindslot((size_t)a_state.buffer_index);
+            it := @objc (@objc vtx_desc.attributes()).objectAtIndex(attr_index);
+            @objc it.setFormat(to_mtl(a_state.format));
+            @objc it.setOffset(@as(i64) a_state.offset);
+            @objc it.setBufferIndex(_sg_mtl_vertexbuffer_bindslot((size_t)a_state.buffer_index));
         }
         for (NSUInteger layout_index = 0; layout_index < SG_MAX_VERTEXBUFFER_BINDSLOTS; layout_index++) {
             if (pip.cmn.vertex_buffer_layout_active[layout_index]) {
-                const sg_vertex_buffer_layout_state* l_state = &desc.layout.buffers[layout_index];
-                const NSUInteger mtl_vb_slot = _sg_mtl_vertexbuffer_bindslot(layout_index);
+                l_state := desc.layout.buffers&.index(layout_index);
+                mtl_vb_slot := _sg_mtl_vertexbuffer_bindslot(layout_index);
                 @debug_assert(l_state.stride > 0);
-                vtx_desc.layouts[mtl_vb_slot].stride = (NSUInteger)l_state.stride;
-                vtx_desc.layouts[mtl_vb_slot].stepFunction = _sg_mtl_step_function(l_state.step_func);
-                vtx_desc.layouts[mtl_vb_slot].stepRate = (NSUInteger)l_state.step_rate;
+                it := @objc (@objc vtx_desc.layouts()).objectAtIndex(mtl_vb_slot);
+                @objc it.stride = @as(i64) l_state.stride;
+                @objc it.stepFunction = _sg_mtl_step_function(l_state.step_func);
+                @objc it.stepRate = @as(i64) l_state.step_rate;
                 if (SG_VERTEXSTEP_PER_INSTANCE == l_state.step_func) {
                     // NOTE: not actually used in _sg_mtl_draw()
                     pip.cmn.use_instanced_draw = true;
@@ -975,13 +961,13 @@ fn create_pipeline(mtl: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg
         }
 
         // render-pipeline descriptor
-        rp_desc := [[MTLRenderPipelineDescriptor alloc] init];
+        rp_desc := new "MTLRenderPipelineDescriptor";
         @objc rp_desc.vertexDescriptor = vtx_desc;
         @debug_assert(shd.mtl.vertex_func.mtl_func != _SG_MTL_INVALID_SLOT_INDEX);
         @objc rp_desc.vertexFunction = mtl.get_id(shd.mtl.vertex_func.mtl_func);
         @debug_assert(shd.mtl.fragment_func.mtl_func != _SG_MTL_INVALID_SLOT_INDEX);
         @objc rp_desc.fragmentFunction = mtl.get_id(shd.mtl.fragment_func.mtl_func);
-        @objc rp_desc.rasterSampleCount = (NSUInteger)desc.sample_count;
+        @objc rp_desc.rasterSampleCount = @as(i64) desc.sample_count;
         @objc rp_desc.alphaToCoverageEnabled = desc.alpha_to_coverage_enabled;
         @objc rp_desc.alphaToOneEnabled = NO;
         @objc rp_desc.rasterizationEnabled = YES;
@@ -990,9 +976,9 @@ fn create_pipeline(mtl: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg
             @objc rp_desc.stencilAttachmentPixelFormat = _sg_mtl_pixel_format(desc.depth.pixel_format);
         }
         at := @objc rp_desc.colorAttachments();
-        for (NSUInteger i = 0; i < (NSUInteger)desc.color_count; i++) {
+        for (NSUInteger i = 0; i < @as(i64) desc.color_count; i++) {
             @debug_assert(i < SG_MAX_COLOR_ATTACHMENTS);
-            const sg_color_target_state* cs = &desc.colors[i];
+            cs := desc.colors&[i]&;
             it := @objc at.objectAtIndex(i);
             @objc it.pixelFormat = _sg_mtl_pixel_format(cs.pixel_format);
             @objc it.writeMask = _sg_mtl_color_write_mask(cs.write_mask);
@@ -1007,13 +993,13 @@ fn create_pipeline(mtl: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg
         // set buffer mutability for all read-only buffers (vertex buffers and read-only storage buffers)
         for (size_t i = 0; i < SG_MAX_VERTEXBUFFER_BINDSLOTS; i++) {
             if (pip.cmn.vertex_buffer_layout_active[i]) {
-                const NSUInteger mtl_slot = _sg_mtl_vertexbuffer_bindslot(i);
-                rp_desc.vertexBuffers[mtl_slot].mutability = MTLMutabilityImmutable;
+                mtl_slot := _sg_mtl_vertexbuffer_bindslot(i);
+                rp_desc.vertexBuffers[@as(i64) mtl_slot].mutability = MTLMutabilityImmutable;
             }
         }
         for (size_t i = 0; i < SG_MAX_STORAGEBUFFER_BINDSLOTS; i++) {
-            const NSUInteger mtl_slot = shd.mtl.sbuf_buffer_n[i];
-            const sg_shader_stage stage = shd.cmn.storage_buffers[i].stage;
+            mtl_slot := shd.mtl.sbuf_buffer_n[i];
+            stage := shd.cmn.storage_buffers[i].stage;
             @debug_assert(stage != SG_SHADERSTAGE_COMPUTE);
             if (stage == SG_SHADERSTAGE_VERTEX) {
                 @debug_assert(shd.cmn.storage_buffers[i].readonly);
@@ -1023,11 +1009,11 @@ fn create_pipeline(mtl: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg
                 rp_desc.fragmentBuffers[mtl_slot].mutability = MTLMutabilityImmutable;
             }
         }
-        if SOKOL_DEBUG && desc.label {
+        if Sg.SOKOL_DEBUG && desc.label {
             rp_desc.label = [NSString stringWithFormat:@"%s", desc.label];
         }
-        NSError* err = NULL;
-        id<MTLRenderPipelineState> mtl_rps = [mtl.device newRenderPipelineStateWithDescriptor:rp_desc error:&err];
+        err := zeroed id("NSError");
+        mtl_rps := @objc mtl.device.newRenderPipelineStateWithDescriptor(rp_desc, error = err&);
         release(rp_desc);
         if (nil == mtl_rps) {
             @debug_assert(err);
@@ -1039,12 +1025,12 @@ fn create_pipeline(mtl: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg
         release(mtl_rps);
 
         // depth-stencil-state
-        ds_desc := [[MTLDepthStencilDescriptor alloc] init];
+        ds_desc := new "MTLDepthStencilDescriptor";
         @objc ds_desc.setDepthCompareFunction(_sg_mtl_compare_func(desc.depth.compare));
         @objc ds_desc.setDepthWriteEnabled(desc.depth.write_enabled);
         if (desc.stencil.enabled) {
-            const sg_stencil_face_state* sb = &desc.stencil.back;
-            it := [[MTLStencilDescriptor alloc] init];
+            sb := desc.stencil.back&;
+            it := new "MTLStencilDescriptor";
             @objc ds_desc.setBackFaceStencil(it);
             @objc it.setStencilFailureOperation(_sg_mtl_stencil_op(sb.fail_op));
             @objc it.setDepthFailureOperation(_sg_mtl_stencil_op(sb.depth_fail_op));
@@ -1053,7 +1039,7 @@ fn create_pipeline(mtl: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg
             @objc it.setReadMask(desc.stencil.read_mask);
             @objc it.setWriteMask(desc.stencil.write_mask);
             const sg_stencil_face_state* sf = &desc.stencil.front;
-            it := [[MTLStencilDescriptor alloc] init];
+            it := new "MTLStencilDescriptor";
             @objc ds_desc.setFrontFaceStencil(it);
             @objc it.setStencilFailureOperation(_sg_mtl_stencil_op(sf.fail_op));
             @objc it.setDepthFailureOperation(_sg_mtl_stencil_op(sf.depth_fail_op));
@@ -1062,10 +1048,10 @@ fn create_pipeline(mtl: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg
             @objc it.setReadMask(desc.stencil.read_mask);
             @objc it.setWriteMask(desc.stencil.write_mask);
         }
-        if SOKOL_DEBUG && desc.label {
+        if Sg.SOKOL_DEBUG && desc.label {
             ds_desc.label = [NSString stringWithFormat:@"%s.dss", desc.label];
         }
-        id<MTLDepthStencilState> mtl_dss = [mtl.device newDepthStencilStateWithDescriptor:ds_desc];
+        mtl_dss := mtl.device.newDepthStencilStateWithDescriptor(ds_desc);
         release(ds_desc);
         if (nil == mtl_dss) {
             _SG_ERROR(METAL_CREATE_DSS_FAILED);
@@ -1085,12 +1071,9 @@ fn discard(mtl: *Impl, pip: *Pipeline.T) void = {
 }
 
 fn create_attachments(mtl: *Impl, atts: *Sg.Attachments.T, color_images: **Sg.Image.T, resolve_images: **Sg.Image.T, ds_img: *Sg.Image.T, desc: *Sg.Attachments.Desc) sg_resource_state = {
-    @debug_assert(atts && desc);
-    @debug_assert(color_images && resolve_images);
-
     // copy image pointers
     range(0, atts.cmn.num_colors) { i |
-        color_desc := &desc.colors&.index(i);
+        color_desc := desc.colors&.index(i);
         @debug_assert(color_desc.image.id != SG_INVALID_ID);
         @debug_assert(0 == atts.mtl.colors[i].image);
         @debug_assert(color_images[i] && (color_images[i].slot.id == color_desc.image.id));
@@ -1138,29 +1121,22 @@ fn bind_uniform_buffers(mtl: *Impl) void = {
     // remain valid for the entire pass. Only binding offsets will be updated
     // in sg_apply_uniforms()
     if (mtl.sg.cur_pass.is_compute) {
-        @debug_assert(nil != mtl.compute_cmd_encoder);
-        for (size_t slot = 0; slot < SG_MAX_UNIFORMBLOCK_BINDSLOTS; slot++) {
-            [mtl.compute_cmd_encoder
-                setBuffer:mtl.uniform_buffers[mtl.cur_frame_rotate_index]
-                offset:0
-                atIndex:slot];
+        @debug_assert(!mtl.compute_cmd_encoder.is_nil());
+        range(0, Sg.SG_MAX_UNIFORMBLOCK_BINDSLOTS) { slot |
+            b := mtl.uniform_buffers&[mtl.cur_frame_rotate_index];
+            @objc mtl.compute_cmd_encoder.setBuffer(b, offset = 0, atIndex = slot);
         }
     } else {
-        @debug_assert(nil != mtl.render_cmd_encoder);
-        for (size_t slot = 0; slot < SG_MAX_UNIFORMBLOCK_BINDSLOTS; slot++) {
-            [mtl.render_cmd_encoder
-                setVertexBuffer:mtl.uniform_buffers[mtl.cur_frame_rotate_index]
-                offset:0
-                atIndex:slot];
-            [mtl.render_cmd_encoder
-                setFragmentBuffer:mtl.uniform_buffers[mtl.cur_frame_rotate_index]
-                offset:0
-                atIndex:slot];
+        @debug_assert(!mtl.render_cmd_encoder.is_nil());
+        range(0, Sg.SG_MAX_UNIFORMBLOCK_BINDSLOTS) { slot |
+            b := mtl.uniform_buffers&[mtl.cur_frame_rotate_index];
+            @objc mtl.render_cmd_encoder.setBuffer(b, offset = 0, atIndex = slot);
+            @objc mtl.render_cmd_encoder.setFragmentBuffer(b, offset = 0, atIndex = slot);
         }
     }
 }
 
-fn begin_compute_pass(mtl: *Impl, pass: *sg_pass) void = {
+fn begin_compute_pass(mtl: *Impl, pass: *SgPass) void = {
     @debug_assert(!mtl.cmd_buffer.is_nil());
     @debug_assert(mtl.compute_cmd_encoder.is_nil());
     @debug_assert(mtl.render_cmd_encoder.is_nil());
@@ -1173,106 +1149,93 @@ fn begin_compute_pass(mtl: *Impl, pass: *sg_pass) void = {
         return();
     }
 
-    if SOKOL_DEBUG && pass.label {
-        mtl.compute_cmd_encoder.label = @objc c.NSString.stringWithUTF8String(pass.label);
+    if Sg.SOKOL_DEBUG && !pass.label.is_null() {
+        @objc mtl.compute_cmd_encoder.setLabel(@objc cls("NSString").stringWithUTF8String(pass.label));
     }
 }
 
-fn begin_render_pass(mtl: *Impl, pass: *sg_pass) void = {
-    @debug_assert(pass);
-    @debug_assert(nil != mtl.cmd_buffer);
-    @debug_assert(nil == mtl.render_cmd_encoder);
-    @debug_assert(nil == mtl.compute_cmd_encoder);
+fn begin_render_pass(mtl: *Impl, pass: *SgPass) void = {
+    @debug_assert(!mtl.cmd_buffer.is_nil());
+    @debug_assert(mtl.render_cmd_encoder.is_nil());
+    @debug_assert(mtl.compute_cmd_encoder.is_nil());
 
-    const _sg_attachments_t* atts = mtl.sg.cur_pass.atts;
-    const sg_swapchain* swapchain = &pass.swapchain;
-    const sg_pass_action* action = &pass.action;
-
-    MTLRenderPassDescriptor* pass_desc = [MTLRenderPassDescriptor renderPassDescriptor];
-    @debug_assert(pass_desc);
-    if (atts) {
+    atts := mtl.sg.cur_pass.atts;
+    swapchain := pass.swapchain&;
+    action := pass.action&;
+    MTLClearColor :: @struct(red: f64, green: f64, blue: f64, alpha: f64);
+    setClearColor :: fn(it, c) => {
+        c: MTLClearColor = (red = c.r.cast(), green = c.g.cast(), blue = c.b.cast(), alpha = c.a.cast());
+        @objc it.setClearColor(c);
+    } 
+    
+    pass_desc := @objc cls("MTLRenderPassDescriptor").renderPassDescriptor();
+    if !atts.is_null() {
         // setup pass descriptor for offscreen rendering
-        @debug_assert(atts.slot.state == SG_RESOURCESTATE_VALID);
+        ::enum(@type atts.slot.state);
+        @debug_assert(atts.slot.state == .VALID);
         at := @objc pass_desc.colorAttachments();
-        for (NSUInteger i = 0; i < (NSUInteger)atts.cmn.num_colors; i++) {
-            ca := @objc at.objectAtIndex(i);
-            cmn_color_att := &atts.cmn.colors[i];
-            mtl_color_att := &atts.mtl.colors[i];
-            color_att_img := mtl_color_att.image;
-            cmn_resolve_att := &atts.cmn.resolves[i];
-            mtl_resolve_att := &atts.mtl.resolves[i];
-            resolve_att_img := mtl_resolve_att.image;
-            @debug_assert(color_att_img.slot.state == SG_RESOURCESTATE_VALID);
-            @debug_assert(color_att_img.slot.id == cmn_color_att.image_id.id);
-            @debug_assert(color_att_img.mtl.tex[color_att_img.cmn.active_slot] != _SG_MTL_INVALID_SLOT_INDEX);
-            @objc ca.loadAction = _sg_mtl_load_action(action.colors[i].load_action);
-            @objc ca.storeAction = _sg_mtl_store_action(action.colors[i].store_action, resolve_att_img != 0);
-            c := action.colors[i].clear_value;
-            @objc ca.clearColor = MTLClearColorMake(c.r, c.g, c.b, c.a);
-            @objc ca.texture = mtl.get_id(color_att_img.mtl.tex[color_att_img.cmn.active_slot]);
-            @objc ca.level = (NSUInteger)cmn_color_att.mip_level;
-            switch (color_att_img.cmn.type) {
-                case SG_IMAGETYPE_CUBE:
-                case SG_IMAGETYPE_ARRAY:
-                    @objc ca.slice = (NSUInteger)cmn_color_att.slice;
-                    break;
-                case SG_IMAGETYPE_3D:
-                    @objc ca.depthPlane = (NSUInteger)cmn_color_att.slice;
-                    break;
-                default: break;
+        
+        check :: fn(att, other) => {
+            @debug_assert(att.slot.state == .VALID);
+            @debug_assert(att.slot.id == other.image.id);
+            @debug_assert(att.mtl.tex&[att.cmn.active_slot.intcast()] != 0); // _SG_MTL_INVALID_SLOT_INDEX
+        };
+        
+        slice_or_depth :: fn(self, img, att) => {
+            if @is(img.cmn.type, .CUBE, .ARRAY) {
+                @objc self.setResolveSlice(@as(i64) att.slice.intcast());
             }
-            if (resolve_att_img) {
-                @debug_assert(resolve_att_img.slot.state == SG_RESOURCESTATE_VALID);
-                @debug_assert(resolve_att_img.slot.id == cmn_resolve_att.image_id.id);
-                @debug_assert(resolve_att_img.mtl.tex[resolve_att_img.cmn.active_slot] != _SG_MTL_INVALID_SLOT_INDEX);
-                @objc ca.resolveTexture = mtl.get_id(resolve_att_img.mtl.tex[resolve_att_img.cmn.active_slot]);
-                @objc ca.resolveLevel = (NSUInteger)cmn_resolve_att.mip_level;
-                switch (resolve_att_img.cmn.type) {
-                    case SG_IMAGETYPE_CUBE:
-                    case SG_IMAGETYPE_ARRAY:
-                        @objc ca.resolveSlice = (NSUInteger)cmn_resolve_att.slice;
-                        break;
-                    case SG_IMAGETYPE_3D:
-                        @objc ca.resolveDepthPlane = (NSUInteger)cmn_resolve_att.slice;
-                        break;
-                    default: break;
-                }
+            if img.cmn.type == ._3D {
+                @objc self.setResolveDepthPlane(@as(i64) att.slice.intcast());
             }
         }
-        const _sg_image_t* ds_att_img = atts.mtl.depth_stencil.image;
-        if (0 != ds_att_img) {
-            @debug_assert(ds_att_img.slot.state == SG_RESOURCESTATE_VALID);
-            @debug_assert(ds_att_img.slot.id == atts.cmn.depth_stencil.image_id.id);
-            @debug_assert(ds_att_img.mtl.tex[ds_att_img.cmn.active_slot] != _SG_MTL_INVALID_SLOT_INDEX);
-            d := @objc pass_desc.depthAttachment();
-            @objc d.texture = mtl.get_id(ds_att_img.mtl.tex[ds_att_img.cmn.active_slot]);
-            @objc d.loadAction = _sg_mtl_load_action(action.depth.load_action);
-            @objc d.storeAction = _sg_mtl_store_action(action.depth.store_action, false);
-            @objc d.clearDepth = action.depth.clear_value;
-            const _sg_attachment_common_t* cmn_ds_att = &atts.cmn.depth_stencil;
-            switch (ds_att_img.cmn.type) {
-                case SG_IMAGETYPE_CUBE:
-                case SG_IMAGETYPE_ARRAY:
-                    @objc d.slice = (NSUInteger)cmn_ds_att.slice;
-                    break;
-                case SG_IMAGETYPE_3D:
-                    @objc d.resolveDepthPlane = (NSUInteger)cmn_ds_att.slice;
-                    break;
-                default: break;
+        
+        setTexture :: fn(it, img) => @objc it.setTexture(mtl.get_id(img.mtl.tex&[img.cmn.active_slot.intcast()]));
+        range(0, atts.cmn.num_colors.intcast()) { i |
+            ca := @objc at.objectAtIndex(i);
+            cmn_color_att := atts.cmn.colors&[i]&;
+            color_att_img := atts.mtl.colors&[i].image;
+            cmn_resolve_att := atts.cmn.resolves&[i]&;
+            resolve_att_img := atts.mtl.resolves&[i].image;
+            check(color_att_img, cmn_color_att);
+            @objc ca.setLoadAction(to_mtl(action.colors&[i].load_action));
+            ::ptr_utils(@type resolve_att_img[]);
+            @objc ca.setStoreAction(to_mtl(action.colors&[i].store_action, !resolve_att_img.is_null()));
+            c := action.colors&[i].clear_value;
+            setClearColor(ca, action.colors&[i].clear_value);
+            setTexture(ca, color_att_img);
+            @objc ca.setLevel(@as(i64) cmn_color_att.mip_level.intcast());
+            ::enum(@type color_att_img.cmn.type);
+            if @is(color_att_img.cmn.type, .CUBE, .ARRAY) {
+                @objc ca.setSlice(@as(i64) cmn_color_att.slice.intcast());
             }
-            if (_sg_is_depth_stencil_format(ds_att_img.cmn.pixel_format)) {
+            if color_att_img.cmn.type == ._3D {
+                @objc ca.setDepthPlane(@as(i64) cmn_color_att.slice.intcast());
+            }
+            if !resolve_att_img.is_null() {
+                check(resolve_att_img, cmn_resolve_att);
+                @objc ca.setResolveTexture(mtl.get_id(resolve_att_img.mtl.tex&[resolve_att_img.cmn.active_slot.intcast()]));
+                @objc ca.setResolveLevel(@as(i64) cmn_resolve_att.mip_level.intcast());
+                slice_or_depth(ca, resolve_att_img, cmn_resolve_att);
+            }
+        }
+        ds_att_img := atts.mtl.depth_stencil.image;
+        if !ds_att_img.is_null() {
+            check(ds_att_img, atts.cmn.depth_stencil);
+            d := @objc pass_desc.depthAttachment();
+            setTexture(d, ds_att_img);
+            @objc d.setLoadAction(to_mtl(action.depth.load_action));
+            @objc d.setStoreAction(to_mtl(action.depth.store_action, false));
+            @objc d.setClearDepth(action.depth.clear_value);
+            cmn_ds_att := atts.cmn.depth_stencil&;
+            slice_or_depth(d, ds_att_img, cmn_ds_att);
+            if is_depth_stencil_format(ds_att_img.cmn.pixel_format) {
                 sa := @objc pass_desc.stencilAttachment();
-                @objc sa.texture = mtl.get_id(ds_att_img.mtl.tex[ds_att_img.cmn.active_slot]);
-                @objc sa.loadAction = _sg_mtl_load_action(action.stencil.load_action);
-                @objc sa.storeAction = _sg_mtl_store_action(action.depth.store_action, false);
-                @objc sa.clearStencil = action.stencil.clear_value;
-                t := ds_att_img.cmn.type;
-                if @is(t, .CUBE, .ARRAY) {
-                    @objc sa.slice = (NSUInteger)cmn_ds_att.slice;
-                }
-                if @is(t, ._3D) {
-                    @objc sa.resolveDepthPlane = (NSUInteger)cmn_ds_att.slice;
-                }
+                setTexture(sa, ds_att_img);
+                @objc sa.setLoadAction(to_mtl(action.stencil.load_action));
+                @objc sa.setStoreAction(to_mtl(action.depth.store_action, false));
+                @objc sa.setClearStencil(action.stencil.clear_value);
+                slice_or_depth(sa, ds_att_img, cmn_ds_att);
             }
         }
     } else {
@@ -1282,48 +1245,47 @@ fn begin_render_pass(mtl: *Impl, pass: *sg_pass) void = {
         // current drawable is also valid in a minimized window
         // ===
         // an MTKView current_drawable will not be valid if window is minimized, don't do any rendering in this case
-        if (0 == swapchain.metal.current_drawable) {
+        if swapchain.metal.current_drawable.is_null() {
             mtl.sg.cur_pass.valid = false;
             return;
         }
         // pin the swapchain resources into memory so that they outlive their command buffer
         // (this is necessary because the command buffer doesn't retain references)
-        int pass_desc_ref = mtl.add_resource(pass_desc);
-        _sg_mtl_release_resource(mtl.sg.frame_index, pass_desc_ref);
+        pass_desc_ref := mtl.add_resource(pass_desc);
+        mtl.release_resource(mtl.sg.frame_index, pass_desc_ref);
 
-        mtl.cur_drawable = (__bridge id<CAMetalDrawable>) swapchain.metal.current_drawable;
-        ca := @objc (@objc pass_desc.colorAttachments()).objectAtIndex(0);
+        mtl.cur_drawable = bit_cast_unchecked(rawptr, id("CAMetalDrawable"), swapchain.metal.current_drawable);
+        ca := @objc pass_desc.colorAttachments();
+        ca := @objc ca.objectAtIndex(0);
         if (swapchain.sample_count > 1) {
             // multi-sampling: render into msaa texture, resolve into drawable texture
-            id<MTLTexture> msaa_tex = (__bridge id<MTLTexture>) swapchain.metal.msaa_color_texture;
-            @debug_assert(msaa_tex != nil);
-            @objc ca.texture = msaa_tex;
-            @objc ca.resolveTexture = mtl.cur_drawable.texture;
-            @objc ca.storeAction = MTLStoreActionMultisampleResolve;
+            msaa_tex := bit_cast_unchecked(rawptr, id("MTLTexture"), swapchain.metal.msaa_color_texture);
+            @debug_assert(!msaa_tex.is_nil());
+            @objc ca.setTexture(msaa_tex);
+            @objc ca.setResolveTexture(@objc mtl.cur_drawable.texture());
+            @objc ca.setStoreAction(2); // MTLStoreActionMultisampleResolve
         } else {
             // non-msaa: render into current_drawable
-            @objc ca.texture = mtl.cur_drawable.texture;
-            @objc ca.storeAction = MTLStoreActionStore;
+            @objc ca.setTexture(@objc mtl.cur_drawable.texture());
+            @objc ca.setStoreAction(1); // MTLStoreActionStore
         }
-        @objc ca.loadAction = _sg_mtl_load_action(action.colors[0].load_action);
-        c := action.colors[0].clear_value;
-        @objc ca.clearColor = MTLClearColorMake(c.r, c.g, c.b, c.a);
+        @objc ca.setLoadAction(to_mtl(action.colors&[0].load_action));
+        setClearColor(ca, action.colors&[0].clear_value);
 
         // optional depth-stencil texture
-        if (swapchain.metal.depth_stencil_texture) {
-            id<MTLTexture> ds_tex = (__bridge id<MTLTexture>) swapchain.metal.depth_stencil_texture;
-            @debug_assert(ds_tex != nil);
+        if !swapchain.metal.depth_stencil_texture.is_null() {
+            ds_tex := bit_cast_unchecked(rawptr, id("MTLTexture"), swapchain.metal.depth_stencil_texture);
             d := @objc pass_desc.depthAttachment();
-            @objc d.texture = ds_tex;
-            @objc d.storeAction = MTLStoreActionDontCare;
-            @objc d.loadAction = _sg_mtl_load_action(action.depth.load_action);
-            @objc d.clearDepth = action.depth.clear_value;
-            if (_sg_is_depth_stencil_format(swapchain.depth_format)) {
+            @objc d.setTexture(ds_tex);
+            @objc d.setStoreAction(0); // MTLStoreActionDontCare
+            @objc d.setLoadAction(to_mtl(action.depth.load_action));
+            @objc d.setClearDepth(action.depth.clear_value);
+            if is_depth_stencil_format(swapchain.depth_format) {
                 sa := @objc pass_desc.stencilAttachment();
-                @objc sa.texture = ds_tex;
-                @objc sa.storeAction = MTLStoreActionDontCare;
-                @objc sa.loadAction = _sg_mtl_load_action(action.stencil.load_action);
-                @objc sa.clearStencil = action.stencil.clear_value;
+                @objc sa.setTexture(ds_tex);
+                @objc sa.setStoreAction(0); // MTLStoreActionDontCare
+                @objc sa.setLoadAction(to_mtl(action.stencil.load_action));
+                @objc sa.setClearStencil(action.stencil.clear_value);
             }
         }
     }
@@ -1338,39 +1300,49 @@ fn begin_render_pass(mtl: *Impl, pass: *sg_pass) void = {
         return();
     }
 
-    if SOKOL_DEBUG && pass.label {
-        mtl.render_cmd_encoder.label = [NSString stringWithUTF8String:pass.label];
+    if Sg.Sg.SOKOL_DEBUG && !pass.label.is_null() {
+        @objc mtl.render_cmd_encoder.setLabel(@objc cls("NSString").stringWithUTF8String(pass.label));
     }
 }
 
-fn begin_pass(mtl: *Impl, pass: *sg_pass) void = {
-    @debug_assert(pass);
-    @debug_assert(mtl.cmd_queue);
-    @debug_assert(nil == mtl.compute_cmd_encoder);
-    @debug_assert(nil == mtl.render_cmd_encoder);
-    @debug_assert(nil == mtl.cur_drawable);
-    _sg_mtl_clear_state_cache();
+fn is_null(self: CStr) bool = self.ptr.is_null();
+
+// TODO: where to #import this from?
+DISPATCH_TIME_FOREVER :: bit_not(0);
+fn dispatch_semaphore_wait(dsema: id("OS_dispatch_semaphore"), timeout: i64) i64 #import("CoreFoundation");
+fn dispatch_semaphore_create(value: i64) id("OS_dispatch_semaphore") #import("CoreFoundation");
+    
+fn begin_pass(mtl: *Impl, pass: *SgPass) void = {
+    @debug_assert(!mtl.cmd_queue.is_nil());
+    @debug_assert(mtl.compute_cmd_encoder.is_nil());
+    @debug_assert(mtl.render_cmd_encoder.is_nil());
+    @debug_assert(mtl.cur_drawable.is_nil());
+    mtl.clear_state_cache();
 
     // if this is the first pass in the frame, create one command buffer and blit-cmd-encoder for the entire frame
-    if (nil == mtl.cmd_buffer) {
+    if mtl.cmd_buffer.is_nil() {
         // block until the oldest frame in flight has finished
         dispatch_semaphore_wait(mtl.sem, DISPATCH_TIME_FOREVER);
-        mtl.cmd_buffer = if mtl.sg.desc.mtl_use_command_buffer_with_retained_references) {
+        ::if(ObjCId);
+        mtl.cmd_buffer = if mtl.sg.desc.mtl_use_command_buffer_with_retained_references {
             @objc mtl.cmd_queue.commandBuffer()
         } else {
-            @objc mtl.cmd_queue.commandBufferWithUnretainedReferences();
+            @objc mtl.cmd_queue.commandBufferWithUnretainedReferences()
         };
         @objc mtl.cmd_buffer.enqueue();
-        [mtl.cmd_buffer addCompletedHandler:^(id<MTLCommandBuffer> cmd_buf) {
-            // NOTE: this code is called on a different thread!
-            _ := cmd_buf;
-            dispatch_semaphore_signal(mtl.sem);
-        }];
+        todo();
+        @objc mtl.cmd_buffer.addCompletedHandler(mtl.pass_completed_sem);
+        // TODO: please_just_make_a_fucking_block__LEAK
+        //[mtl.cmd_buffer addCompletedHandler:^(id<MTLCommandBuffer> cmd_buf) {
+        //    // NOTE: this code is called on a different thread!
+        //    _ := cmd_buf;
+        //    dispatch_semaphore_signal(mtl.sem);
+        //}];
     }
 
     // if this is first pass in frame, get uniform buffer base pointer
-    if (0 == mtl.cur_ub_base_ptr) {
-        mtl.cur_ub_base_ptr = (uint8_t*)[mtl.uniform_buffers[mtl.cur_frame_rotate_index] contents];
+    if mtl.cur_ub_base_ptr.is_null() {
+        mtl.cur_ub_base_ptr = @objc @as(*u8) mtl.uniform_buffers&[mtl.cur_frame_rotate_index].contents();
     }
 
     if (pass.compute) {
@@ -1381,7 +1353,7 @@ fn begin_pass(mtl: *Impl, pass: *sg_pass) void = {
 
     // bind uniform buffers, those bindings remain valid for the entire pass
     if mtl.sg.cur_pass.valid {
-        _sg_mtl_bind_uniform_buffers();
+        mtl.bind_uniform_buffers();
     }
 }
 
@@ -1398,13 +1370,14 @@ fn end_pass(mtl: *Impl) void = {
 
         ASSERT_NOT_IOS();
         // synchronize any managed buffers written by the GPU
-        if (_sg_mtl_resource_options_storage_mode_managed_or_shared() == MTLResourceStorageModeManaged) {
-            if (mtl.sg.compute.readwrite_sbufs.cur > 0) {
+        ASSERT_NOT_IOS();
+        if !mtl.use_shared_storage_mode {
+            if (mtl.sg.compute.readwrite_sbufs.len > 0) {
                 blit_cmd_encoder := @objc mtl.cmd_buffer.blitCommandEncoder();
-                for (uint32_t i = 0; i < mtl.sg.compute.readwrite_sbufs.cur; i++) {
                 for mtl.sg.compute.readwrite_sbufs { it |
                     if mtl.sg.lookup(it) { sbuf |
-                        [blit_cmd_encoder synchronizeResource:mtl.get_id(sbuf.mtl.buf[sbuf.cmn.active_slot])];
+                        it := mtl.get_id(sbuf.mtl.buf&[@as(i64) sbuf.cmn.active_slot.intcast()]);
+                        @objc blit_cmd_encoder.synchronizeResource(it);
                     }
                 }
                 @objc blit_cmd_encoder.endEncoding();
@@ -1418,30 +1391,33 @@ fn end_pass(mtl: *Impl) void = {
     }
 }
 
+fn is_nil(self: ObjCId) bool = 
+    bit_cast_unchecked(ObjCId, i64, self) == 0;
+
 fn commit(mtl: *Impl) void = {
-    @debug_assert(nil == mtl.render_cmd_encoder);
-    @debug_assert(nil == mtl.compute_cmd_encoder);
-    @debug_assert(nil != mtl.cmd_buffer);
+    @debug_assert(mtl.render_cmd_encoder.is_nil());
+    @debug_assert(mtl.compute_cmd_encoder.is_nil());
+    @debug_assert(!mtl.cmd_buffer.is_nil());
 
     // commit the frame's command buffer
     @objc mtl.cmd_buffer.commit();
 
     // garbage-collect resources pending for release
-    mtl.garbage_collect(mtl.mtl.sg.frame_index);
+    mtl.garbage_collect(mtl.sg.frame_index);
 
     // rotate uniform buffer slot
-    if (++mtl.cur_frame_rotate_index >= SG_NUM_INFLIGHT_FRAMES) {
+    mtl.cur_frame_rotate_index += 1;
+    if mtl.cur_frame_rotate_index >= Sg.SG_NUM_INFLIGHT_FRAMES {
         mtl.cur_frame_rotate_index = 0;
     }
     mtl.cur_ub_offset = 0;
-    mtl.cur_ub_base_ptr = 0;
+    mtl.cur_ub_base_ptr = u8.ptr_from_int(0);
     // NOTE: MTLCommandBuffer is autoreleased
-    mtl.cmd_buffer = nil;
+    mtl.cmd_buffer = zeroed ObjCId;
 }
 
 fn apply_viewport(mtl: *Impl, x: i32, y: i32, w: i32, h: i32, origin_top_left: bool) void = {
-    @debug_assert(nil != mtl.render_cmd_encoder);
-    @debug_assert(mtl.sg.cur_pass.height > 0);
+    @debug_assert(!mtl.render_cmd_encoder.is_nil() && mtl.sg.cur_pass.height > 0);
     MTLViewport :: @struct(originX: f64, originY: f64, width: f64, height: f64, znear: f64, zfar: f64);
     vp: MTLViewport = (
         originX = (double) x,
@@ -1455,24 +1431,21 @@ fn apply_viewport(mtl: *Impl, x: i32, y: i32, w: i32, h: i32, origin_top_left: b
 }
 
 fn apply_scissor_rect(mtl: *Impl, x: i32, y: i32, w: i32, h: i32, origin_top_left: bool) void = {
-    @debug_assert(nil != mtl.render_cmd_encoder);
-    @debug_assert(mtl.sg.cur_pass.width > 0);
-    @debug_assert(mtl.sg.cur_pass.height > 0);
+    @debug_assert(!mtl.render_cmd_encoder,is_nil() && mtl.sg.cur_pass.width > 0 && mtl.sg.cur_pass.height > 0);
     // clip against framebuffer rect
     clip: _sg_recti_t = clipi(x, y, w, h, mtl.sg.cur_pass.width, mtl.sg.cur_pass.height);
     MTLScissorRect :: @struct(x: u64, y: u64, width: u64, height: u64);
     r: MTLScissorRect = (
-        x = (NSUInteger)clip.x,
-        y = (NSUInteger) (origin_top_left ? clip.y : (mtl.sg.cur_pass.height - (clip.y + clip.h))),
-        width = (NSUInteger)clip.w,
-        height = (NSUInteger)clip.h,
+        x = @as(i64) clip.x,
+        y = @as(i64)  (origin_top_left ? clip.y : (mtl.sg.cur_pass.height - (clip.y + clip.h))),
+        width = @as(i64) clip.w,
+        height = @as(i64) clip.h,
     );
     [mtl.render_cmd_encoder setScissorRect:r];
 }
 
 fn apply_pipeline(mtl: *Impl, pip: *Sg.Pipeline.T) void = {
-    @debug_assert(pip);
-    @debug_assert(pip.shader && (pip.cmn.shader_id.id == pip.shader.slot.id));
+    @debug_assert(!pip.shader.is_null() && pip.cmn.shader_id.id == pip.shader.slot.id);
     if (mtl.state_cache.cur_pipeline_id.id != pip.slot.id) {
         mtl.state_cache.cur_pipeline = pip;
         mtl.state_cache.cur_pipeline_id.id = pip.slot.id;
@@ -1506,7 +1479,6 @@ fn apply_pipeline(mtl: *Impl, pip: *Sg.Pipeline.T) void = {
 }
 
 fn apply_bindings(mtl: *Impl, bnd: *_sg_bindings_t) bool = {
-    @debug_assert(bnd);
     @debug_assert(bnd.pip);
     @debug_assert(bnd.pip && bnd.pip.shader);
     @debug_assert(bnd.pip.shader.slot.id == bnd.pip.cmn.shader_id.id);
@@ -1528,31 +1500,47 @@ fn apply_bindings(mtl: *Impl, bnd: *_sg_bindings_t) bool = {
         // apply vertex buffers
         range(0, SG_MAX_VERTEXBUFFER_BINDSLOTS) { i |
             continue :: local_return;
-            const _sg_buffer_t* vb = bnd.vbs[i];
+            vb := bnd.vbs[i];
             if(vb == 0, => continue());
             mtl_slot := _sg_mtl_vertexbuffer_bindslot(i);
             @debug_assert(mtl_slot < _SG_MTL_MAX_STAGE_BUFFER_BINDINGS);
             vb_offset := bnd.vb_offsets[i];
-            if ((sc.cur_vs_buffer_ids[mtl_slot].id != vb.slot.id) ||
+            cur := sc.buffer&.index(.Vertex).index(mtl_slot);
+            if ((cur.id != vb.slot.id) ||
                 (sc.cur_vs_buffer_offsets[mtl_slot] != vb_offset))
             {
                 sc.cur_vs_buffer_offsets[mtl_slot] = vb_offset;
-                if (sc.cur_vs_buffer_ids[mtl_slot].id != vb.slot.id) {
+                if (cur.id != vb.slot.id) {
                     // vertex buffer has changed
-                    sc.cur_vs_buffer_ids[mtl_slot].id = vb.slot.id;
+                    cur.id = vb.slot.id;
                     @debug_assert(vb.mtl.buf[vb.cmn.active_slot] != _SG_MTL_INVALID_SLOT_INDEX);
                     [mtl.render_cmd_encoder setVertexBuffer:mtl.get_id(vb.mtl.buf[vb.cmn.active_slot])
-                        offset:(NSUInteger)vb_offset
+                        offset:@as(i64) vb_offset
                         atIndex:mtl_slot];
                 } else {
                     // only vertex buffer offset has changed
-                    [mtl.render_cmd_encoder setVertexBufferOffset:(NSUInteger)vb_offset atIndex:mtl_slot];
+                    [mtl.render_cmd_encoder setVertexBufferOffset:@as(i64) vb_offset atIndex:mtl_slot];
                 }
                 _sg_stats_add(metal.bindings.num_set_vertex_buffer, 1);
             }
         }
     }
-
+    
+    apply :: fn(stage, entry, res, mtl_slot, $v, $f, $c) => {
+        ids := entry.index(stage);
+        enc := @if(stage == .COMPUTE, mtl.compute_cmd_encoder, mtl.render_cmd_encoder);
+        @debug_assert(nil != enc);
+        if ids[mtl_slot].id != res.slot.id {
+            ids[mtl_slot].id = res.slot.id;
+            s := @match(stage) {
+                fn VERTEX()   => v(enc, mtl_slot);
+                fn FRAGMENT() => f(enc, mtl_slot);
+                fn COMPUTE()  => c(enc, mtl_slot);
+            };
+            sg.stat(s, 1);
+        }
+    }
+    
     // apply image bindings
     range(0, SG_MAX_IMAGE_BINDSLOTS) { i |
         continue :: local_return;
@@ -1560,95 +1548,63 @@ fn apply_bindings(mtl: *Impl, bnd: *_sg_bindings_t) bool = {
         if (img == 0, => continue());
         @debug_assert(img.mtl.tex[img.cmn.active_slot] != _SG_MTL_INVALID_SLOT_INDEX);
         stage := shd.cmn.images[i].stage;
-        @debug_assert((stage == SG_SHADERSTAGE_VERTEX) || (stage == SG_SHADERSTAGE_FRAGMENT) || (stage == SG_SHADERSTAGE_COMPUTE));
         mtl_slot := shd.mtl.img_texture_n[i];
         @debug_assert(mtl_slot < _SG_MTL_MAX_STAGE_IMAGE_BINDINGS);
         
-        enc, ids, stats := @match(stage) {
-            fn VERTEX()   => (mtl.render_cmd_encoder, sc.cur_vs_image_ids&, metal.bindings.num_set_vertex_texture&);
-            fn FRAGMENT() => (mtl.render_cmd_encoder, sc.cur_fs_image_ids&, metal.bindings.num_set_fragment_texture&);
-            fn COMPUTE()  => (mtl.compute_cmd_encoder, sc.cur_cs_image_ids&, metal.bindings.num_set_compute_texture&);
+        id := mtl.get_id(img.mtl.tex[img.cmn.active_slot]);  // todo: rather not hoist
+        apply(stage, sc.image&, img, mtl_slot) { e, s |
+            @objc e.setVertexTexture(id, atIndex = s);
+            .mtl_bindings_num_set_vertex_texture
+        } fragment { e, s |
+            @objc e.setFragmentTexture(id, atIndex = s);
+            .mtl_bindings_num_set_fragment_texture
+        } compute { e, s |
+            @objc e.setTexture(id, atIndex = s);
+            .mtl_bindings_num_set_compute_texture
         };
-        @debug_assert(nil != enc);
-        if ids[mtl_slot].id != img.slot.id {
-            ids[mtl_slot].id = img.slot.id;
-            id := mtl.get_id(img.mtl.tex[img.cmn.active_slot]);
-            @match(stage) {
-                fn VERTEX()   => @objc enc.setVertexTexture(id, atIndex = mtl_slot);
-                fn FRAGMENT() => @objc enc.setFragmentTexture(id, atIndex = mtl_slot);
-                fn COMPUTE()  => @objc enc.setTexture(id, atIndex = mtl_slot);
-            };
-            stats[] += 1;
-        }
     }
 
     // apply sampler bindings
     range(0, SG_MAX_SAMPLER_BINDSLOTS) { i |
         continue :: local_return;
-        const smp: *Sg.Sampler.T = bnd.smps[i];
+        smp := bnd.smps[i];
         if (smp == 0, => continue());
         @debug_assert(smp.mtl.sampler_state != _SG_MTL_INVALID_SLOT_INDEX);
-        const sg_shader_stage stage = shd.cmn.samplers[i].stage;
-        @debug_assert((stage == SG_SHADERSTAGE_VERTEX) || (stage == SG_SHADERSTAGE_FRAGMENT) || (stage == SG_SHADERSTAGE_COMPUTE));
-        const NSUInteger mtl_slot = shd.mtl.smp_sampler_n[i];
+        stage := shd.cmn.samplers[i].stage;
+        mtl_slot := shd.mtl.smp_sampler_n[i];
         @debug_assert(mtl_slot < _SG_MTL_MAX_STAGE_SAMPLER_BINDINGS);
-        if (stage == SG_SHADERSTAGE_VERTEX) {
-            @debug_assert(nil != mtl.render_cmd_encoder);
-            if (sc.cur_vs_sampler_ids[mtl_slot].id != smp.slot.id) {
-                sc.cur_vs_sampler_ids[mtl_slot].id = smp.slot.id;
-                [mtl.render_cmd_encoder setVertexSamplerState:mtl.get_id(smp.mtl.sampler_state) atIndex:mtl_slot];
-                _sg_stats_add(metal.bindings.num_set_vertex_sampler_state, 1);
-            }
-        } else if (stage == SG_SHADERSTAGE_FRAGMENT) {
-            @debug_assert(nil != mtl.render_cmd_encoder);
-            if (sc.cur_fs_sampler_ids[mtl_slot].id != smp.slot.id) {
-                sc.cur_fs_sampler_ids[mtl_slot].id = smp.slot.id;
-                [mtl.render_cmd_encoder setFragmentSamplerState:mtl.get_id(smp.mtl.sampler_state) atIndex:mtl_slot];
-                _sg_stats_add(metal.bindings.num_set_fragment_sampler_state, 1);
-            }
-        } else if (stage == SG_SHADERSTAGE_COMPUTE) {
-            @debug_assert(nil != mtl.compute_cmd_encoder);
-            if (sc.cur_cs_sampler_ids[mtl_slot].id != smp.slot.id) {
-                sc.cur_cs_sampler_ids[mtl_slot].id = smp.slot.id;
-                [mtl.compute_cmd_encoder setSamplerState:mtl.get_id(smp.mtl.sampler_state) atIndex:mtl_slot];
-                _sg_stats_add(metal.bindings.num_set_compute_sampler_state, 1);
-            }
-        }
+        id := mtl.get_id(smp.mtl.sampler_state);  // todo: rather not hoist
+        apply(stage, sc.sampler&, smp, mtl_slot) { e, s |
+            @objc e.setVertexSamplerState(id, atIndex = s);
+            .mtl_bindings_num_set_vertex_sampler_state
+        } fragment { e, s |
+            @objc e.setFragmentSamplerState(id, atIndex = s);
+            .mtl_bindings_num_set_fragmnet_sampler_state
+        } compute { e, s |
+            @objc e.setSamplerState(id, atIndex = s);
+            .mtl_bindings_num_set_compute_sampler_state
+        };
     }
 
     // apply storage buffer bindings
     range(0, SG_MAX_STORAGEBUFFER_BINDSLOTS) { i |
-        const _sg_buffer_t* sbuf = bnd.sbufs[i];
-        if (sbuf == 0) {
-            continue;
-        }
+        sbuf := bnd.sbufs[i];
+        if(sbuf == 0, => continue());
         @debug_assert(sbuf.mtl.buf[sbuf.cmn.active_slot] != _SG_MTL_INVALID_SLOT_INDEX);
-        const sg_shader_stage stage = shd.cmn.storage_buffers[i].stage;
-        @debug_assert((stage == SG_SHADERSTAGE_VERTEX) || (stage == SG_SHADERSTAGE_FRAGMENT) || (stage == SG_SHADERSTAGE_COMPUTE));
-        const NSUInteger mtl_slot = shd.mtl.sbuf_buffer_n[i];
+        stage := shd.cmn.storage_buffers[i].stage;
+        mtl_slot := shd.mtl.sbuf_buffer_n[i];
         @debug_assert(mtl_slot < _SG_MTL_MAX_STAGE_UB_SBUF_BINDINGS);
-        if (stage == SG_SHADERSTAGE_VERTEX) {
-            @debug_assert(nil != mtl.render_cmd_encoder);
-            if (sc.cur_vs_buffer_ids[mtl_slot].id != sbuf.slot.id) {
-                sc.cur_vs_buffer_ids[mtl_slot].id = sbuf.slot.id;
-                [mtl.render_cmd_encoder setVertexBuffer:mtl.get_id(sbuf.mtl.buf[sbuf.cmn.active_slot]) offset:0 atIndex:mtl_slot];
-                _sg_stats_add(metal.bindings.num_set_vertex_buffer, 1);
-            }
-        } else if (stage == SG_SHADERSTAGE_FRAGMENT) {
-            @debug_assert(nil != mtl.render_cmd_encoder);
-            if (sc.cur_fs_buffer_ids[mtl_slot].id != sbuf.slot.id) {
-                sc.cur_fs_buffer_ids[mtl_slot].id = sbuf.slot.id;
-                [mtl.render_cmd_encoder setFragmentBuffer:mtl.get_id(sbuf.mtl.buf[sbuf.cmn.active_slot]) offset:0 atIndex:mtl_slot];
-                _sg_stats_add(metal.bindings.num_set_fragment_buffer, 1);
-            }
-        } else if (stage == SG_SHADERSTAGE_COMPUTE) {
-            @debug_assert(nil != mtl.compute_cmd_encoder);
-            if (sc.cur_cs_buffer_ids[mtl_slot].id != sbuf.slot.id) {
-                sc.cur_cs_buffer_ids[mtl_slot].id = sbuf.slot.id;
-                [mtl.compute_cmd_encoder setBuffer:mtl.get_id(sbuf.mtl.buf[sbuf.cmn.active_slot]) offset:0 atIndex:mtl_slot];
-                _sg_stats_add(metal.bindings.num_set_compute_buffer, 1);
-            }
-        }
+        id := mtl.get_id(sbuf.mtl.buf[sbuf.cmn.active_slot]);
+        apply(stage, sc.buffer&, sbuf, mtl_slot) { e, s |
+            @objc e.setVertexBuffer(id, offset = 0, atIndex = s);
+            .mtl_bindings_num_set_vertex_buffer
+        } fragment { e, s |
+            @objc e.setFragmentBuffer(id, offset = 0, atIndex = s);
+            .mtl_bindings_num_set_fragment_buffer
+        } compute { e, s |
+            @objc e.setBuffer(id, offset = 0, atIndex = s);
+            .mtl_bindings_num_set_compute_buffer
+        };
     }
     return true;
 }
@@ -1672,15 +1628,15 @@ fn apply_uniforms(mtl: *Impl, ub_slot: i32, data: []u8) void = {
     memcpy(dst, data.ptr, data.size);
     if (stage == SG_SHADERSTAGE_VERTEX) {
         @debug_assert(nil != mtl.render_cmd_encoder);
-        [mtl.render_cmd_encoder setVertexBufferOffset:(NSUInteger)mtl.cur_ub_offset atIndex:mtl_slot];
+        [mtl.render_cmd_encoder setVertexBufferOffset:@as(i64) mtl.cur_ub_offset atIndex:mtl_slot];
         _sg_stats_add(metal.uniforms.num_set_vertex_buffer_offset, 1);
     } else if (stage == SG_SHADERSTAGE_FRAGMENT) {
         @debug_assert(nil != mtl.render_cmd_encoder);
-        [mtl.render_cmd_encoder setFragmentBufferOffset:(NSUInteger)mtl.cur_ub_offset atIndex:mtl_slot];
+        [mtl.render_cmd_encoder setFragmentBufferOffset:@as(i64) mtl.cur_ub_offset atIndex:mtl_slot];
         _sg_stats_add(metal.uniforms.num_set_fragment_buffer_offset, 1);
     } else if (stage == SG_SHADERSTAGE_COMPUTE) {
         @debug_assert(nil != mtl.compute_cmd_encoder);
-        [mtl.compute_cmd_encoder setBufferOffset:(NSUInteger)mtl.cur_ub_offset atIndex:mtl_slot];
+        [mtl.compute_cmd_encoder setBufferOffset:@as(i64) mtl.cur_ub_offset atIndex:mtl_slot];
         _sg_stats_add(metal.uniforms.num_set_compute_buffer_offset, 1);
     } else {
         SOKOL_UNREACHABLE;
@@ -1697,19 +1653,19 @@ fn draw(mtl: *Impl, base_element: i32, num_elements: i32, num_instances: i32) vo
         @debug_assert(sc.cur_indexbuffer && (sc.cur_indexbuffer.slot.id == sc.cur_indexbuffer_id.id));
         const _sg_buffer_t* ib = sc.cur_indexbuffer;
         @debug_assert(ib.mtl.buf[ib.cmn.active_slot] != _SG_MTL_INVALID_SLOT_INDEX);
-        const NSUInteger index_buffer_offset = (NSUInteger) (sc.cur_indexbuffer_offset + base_element * sc.cur_pipeline.mtl.index_size);
+        const NSUInteger index_buffer_offset = @as(i64)  (sc.cur_indexbuffer_offset + base_element * sc.cur_pipeline.mtl.index_size);
         [mtl.render_cmd_encoder drawIndexedPrimitives:sc.cur_pipeline.mtl.prim_type
-            indexCount:(NSUInteger)num_elements
+            indexCount:@as(i64) num_elements
             indexType:sc.cur_pipeline.mtl.index_type
             indexBuffer:mtl.get_id(ib.mtl.buf[ib.cmn.active_slot])
             indexBufferOffset:index_buffer_offset
-            instanceCount:(NSUInteger)num_instances];
+            instanceCount:@as(i64) num_instances];
     } else {
         // non-indexed rendering
         [mtl.render_cmd_encoder drawPrimitives:sc.cur_pipeline.mtl.prim_type
-            vertexStart:(NSUInteger)base_element
-            vertexCount:(NSUInteger)num_elements
-            instanceCount:(NSUInteger)num_instances];
+            vertexStart:@as(i64) base_element
+            vertexCount:@as(i64) num_elements
+            instanceCount:@as(i64) num_instances];
     }
 }
 
@@ -1718,9 +1674,9 @@ fn dispatch(mtl: *Impl, num_groups_x: i32, num_groups_y: i32, num_groups_z: i32)
     @debug_assert(mtl.state_cache.cur_pipeline && (mtl.state_cache.cur_pipeline.slot.id == mtl.state_cache.cur_pipeline_id.id));
     cur_pip := mtl.state_cache.cur_pipeline;
     thread_groups: MTLSize = (
-        width = (NSUInteger)num_groups_x,
-        height = (NSUInteger)num_groups_y,
-        depth = (NSUInteger)num_groups_z,
+        width = @as(i64) num_groups_x,
+        height = @as(i64) num_groups_y,
+        depth = @as(i64) num_groups_z,
     );
     threads_per_threadgroup := cur_pip.mtl.threads_per_threadgroup;
     [mtl.compute_cmd_encoder dispatchThreadgroups:thread_groups threadsPerThreadgroup:threads_per_threadgroup];
@@ -1758,7 +1714,7 @@ fn append_buffer(mtl: *Impl, buf: *Sg.Buffer.T, data: []u8, new_frame: bool) voi
     memcpy(dst_ptr, data.ptr, data.size);
     ASSERT_NOT_IOS();
     if (_sg_mtl_resource_options_storage_mode_managed_or_shared() == MTLResourceStorageModeManaged) {
-        r: NSRange = (location = (NSUInteger)buf.cmn.append_pos, length = (NSUInteger)data.size);
+        r: NSRange = (location = @as(i64) buf.cmn.append_pos, length = @as(i64) data.size);
         @objc mtl_buf.didModifyRange(r);
     }
 }

@@ -398,14 +398,8 @@ SgPixelFormat :: @enum(i32) (
     NUM,
 );
 
-_sg_pixelformat_info_t :: @struct(
-    sample: bool, 
-    filter: bool, 
-    render: bool, 
-    blend: bool, 
-    msaa: bool, 
-    depth: bool,
-);
+PixFmtInfo :: @enum(u32) (sample, filter, render, blend, mssa, depth);
+_sg_pixelformat_info_t :: EnumMap(PixFmtInfo, bool);
 
 SgPixelformatInfo :: @struct(
     flags: _sg_pixelformat_info_t #use,
@@ -417,7 +411,7 @@ SgFeatures :: @struct(
     image_clamp_to_border: bool,
     mrt_independent_blend_state: bool,
     mrt_independent_write_mask: bool,
-    storage_buffer: bool,
+    compute: bool,
     msaa_image_bindings: bool,
 );
 SgLimits :: @struct(
@@ -427,8 +421,8 @@ SgLimits :: @struct(
     max_image_size_array: i32,
     max_image_array_layers: i32,
     max_vertex_attrs: i32,
-    gl_max_vertex_uniform_components: i32,
-    gl_max_combined_texture_image_units: i32,
+    gl_max_vertex_uniform_components: i32 = 0,
+    gl_max_combined_texture_image_units: i32 = 0,
 );
 SgResourceState :: @enum(i32) (
     INITIAL,
@@ -660,21 +654,15 @@ SgStoreAction :: @enum(i32) (
     STORE,
     DONTCARE,
 );
-SgColorAttachmentAction :: @struct(
+
+AttachmentAction :: fn($Clear) => @struct(
     load_action: SgLoadAction,
     store_action: SgStoreAction,
-    clear_value: SgColor,
+    clear_value: Clear,
 );
-SgDepthAttachmentAction :: @struct(
-    load_action: SgLoadAction,
-    store_action: SgStoreAction,
-    clear_value: f32,
-);
-SgStencilAttachmentAction :: @struct(
-    load_action: SgLoadAction,
-    store_action: SgStoreAction,
-    clear_value: u8,
-);
+SgColorAttachmentAction :: AttachmentAction(SgColor);
+SgDepthAttachmentAction :: AttachmentAction(f32);
+SgStencilAttachmentAction :: AttachmentAction(u8);
 SgPassAction :: @struct(
     colors: Array(SgColorAttachmentAction, 4),
     depth: SgDepthAttachmentAction,
@@ -712,9 +700,10 @@ SgSwapchain :: @struct(
 SgPass :: @struct(
     _start_canary: u32,
     action: SgPassAction,
-    attachments: SgAttachments,
+    attachments: Sg.Attachments,
     swapchain: SgSwapchain,
     label: CStr,
+    compute: bool,
     _end_canary: u32,
 );
 SgBindings :: @struct(
@@ -1472,10 +1461,19 @@ SgLogItem :: @enum(i32) (
     VALIDATE_UPDIMG_ONCE,
     VALIDATION_FAILED,
 );
+/*
+    NOTE: on WebGPU, the default color pixel format MUST be provided,
+    cannot be a default compile-time constant.
+*/
+// TODO: this confuses me. color_format default depends on backend, so i guess we're telling 
+//       it what the defaults are, not asking for them to be a certain thing? 
+//       but these are what's used for "creating render target images", doesn't that mean 
+//       you can never use the defaults because it will be randomly different depending on the platform? 
+//       i feel like my mental model for whats going on is wrong. 
 SgEnvironmentDefaults :: @struct(
-    color_format: SgPixelFormat,
-    depth_format: SgPixelFormat,
-    sample_count: i32,
+    color_format: SgPixelFormat, 
+    depth_format := SgPixelFormat.DEPTH_STENCIL,
+    sample_count: i32 = 1,
 );
 SgMetalEnvironment :: @struct(
     device: rawptr,
@@ -1487,11 +1485,13 @@ SgD3d11Environment :: @struct(
 SgWgpuEnvironment :: @struct(
     device: rawptr,
 );
+// you can use app.fr/glue_environment() to get one of these 
+// or open a window yourself and gives us the context pointers. 
 SgEnvironment :: @struct(
-    defaults: SgEnvironmentDefaults,
-    metal: SgMetalEnvironment,
-    d3d11: SgD3d11Environment,
-    wgpu: SgWgpuEnvironment,
+    defaults: SgEnvironmentDefaults = (),
+    metal := zeroed SgMetalEnvironment,
+    d3d11 := zeroed SgD3d11Environment,
+    wgpu := zeroed SgWgpuEnvironment,
 );
 SgCommitListener :: @struct(
     func: @FnPtr(rawptr) void,
@@ -1506,26 +1506,28 @@ SgLogger :: @struct(
     func: @FnPtr(CStr, u32, u32, CStr, u32, CStr, rawptr) void,
     user_data: rawptr,
 );
+
 SgDesc :: @struct(
-    _start_canary: u32,
-    buffer_pool_size: i32,
-    image_pool_size: i32,
-    sampler_pool_size: i32,
-    shader_pool_size: i32,
-    pipeline_pool_size: i32,
-    attachments_pool_size: i32,
-    uniform_buffer_size: i32,
-    max_commit_listeners: i32,
-    disable_validation: bool,
-    d3d11_shader_debugging: bool,
-    mtl_force_managed_storage_mode: bool,
-    mtl_use_command_buffer_with_retained_references: bool,
-    wgpu_disable_bindgroups_cache: bool,
-    wgpu_bindgroups_cache_size: i32,
-    allocator: SgAllocator,
-    logger: SgLogger,
+    _start_canary: u32 = 0,
+    buffer_pool_size: i32 = 128,
+    image_pool_size: i32 = 128,
+    sampler_pool_size: i32 = 64,
+    shader_pool_size: i32 = 32,
+    pipeline_pool_size: i32 = 64,
+    attachments_pool_size: i32 = 16,
+    uniform_buffer_size: i32 = 4 * 1024 * 1024,
+    max_dispatch_calls_per_pass: i32 = 1024,
+    max_commit_listeners: i32 = 1024,
+    disable_validation: bool = false,
+    d3d11_shader_debugging := false,
+    mtl_force_managed_storage_mode := false,
+    mtl_use_command_buffer_with_retained_references := false,
+    wgpu_disable_bindgroups_cache := false,
+    wgpu_bindgroups_cache_size: i32 = 1024,
+    allocator: Alloc,
+    //logger: SgLogger,  // TODO :GfxLogging
     environment: SgEnvironment,
-    _end_canary: u32,
+    _end_canary: u32 = 0,
 );
 fn sg_setup(desc: *SgDesc) void #import("sokol");
 fn sg_shutdown() void #import("sokol");

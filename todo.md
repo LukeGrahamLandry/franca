@@ -1,11 +1,27 @@
 ## Quest Lines
 
 - compiler: add a defer expression that lets you run cleanup from a closure even if you jump out past it
-- graphics: finish porting macos/app from objective c
-- wasm:     get all the ssa tests working. some have c drivers so either need to output linkable wasm or use import_c
+- wasm:     get all the ssa tests passing verifier
 - linux:    finish transcribing structs so FRANCA_BACKTRACE=true works. make all the tests pass with -syscalls
 - external: make it not a 100 line copy-paste to setup a driver that links an object file
 - llvm:     get all the ssa tests working
+
+## Graphics
+
+- finish gfx-metal
+- example program that tries to use all features
+- dearimgui backend
+- support x11 / opengl / glsl
+- support web (depends on finishing wasm backend), don't use emscripten
+- revive compiler_gui (try to export all info to the driver so it can run in comptime)
+- provide the same c api as sokol so can test with their examples? 
+- translate a more serious subset of my language into the shader languages
+- use []u8 and interpret_as_bytes instead of SgRange
+- :GfxLogging
+- inspection gui like sokol_gfx_imgui
+- i enjoyed https://sotrh.github.io/learn-wgpu/, an implementation of that would be a good example program
+- replace cimgui
+- https://github.com/id-Software/DOOM
 
 ## stuff i broke
 
@@ -17,6 +33,7 @@
 - `./q.out -t wasm32 -o target/out/q.wasm -cc backend/test/abi8.ssa -d AI`
 %�%.104 =w pop
 - fast memcpy (need to deal with fallback when not linking a libc)
+- to build on linux from -syscalls to linking libc you need to turn off ENABLE_COMMANDS in default_driver.fr
 
 ## compiler bug
 
@@ -24,6 +41,7 @@
 and gives you junk (that's not 0 or 1) when `common()` uses `#unsafe_noop_cast`. 
 rn you're supposed to need a redundant `[]` in a call like that. 
 - aot_import_body probably shouldn't zero x0 just because it thinks the param is void
+- fix the infinite loop when a constant references itself
 
 ## cross compiling
 
@@ -296,9 +314,6 @@ has the numbers in the right order at least. rust has my problem too `[[Symbol; 
 
 ##
 
-- translate a more serious subset of my language into the shader languages
-- use []u8 and interpret_as_bytes instead of SgRange
-- :GfxLogging
 - fix compiler_gui so it sees all functions from a full compile
 - output_elf: relocatable object, dynamic library
 - Wasip1Libc
