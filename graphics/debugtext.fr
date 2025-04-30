@@ -39,6 +39,7 @@ Desc :: @struct(
     fonts: [][]u8, // packed font data (see data/fonts.fr for builtins)
     context: ContextDesc = (),  // the default context creation parameters
     allocator: Alloc,
+    sg: *Sg.Self,
 );
 
 // Builtin fonts (you can provide your own as well).
@@ -67,8 +68,8 @@ Context :: @struct(
     update_frame_id: u32,
     vertices: RawList(Vertex),
     commands: RawList(Command),
-    vbuf: SgBuffer,
-    pip: SgPipeline,
+    vbuf: Sg.Buffer,
+    pip: Sg.Pipeline,
     font: i32,                // index into the fonts array
     cur_layer_id: i32,        // call set_layer instead of changing this directly (it needs to do some command buffer bookkeeping). 
     glyph_size: Float2,  // pixels per character grid unit
@@ -83,13 +84,14 @@ Context :: @struct(
 Common :: @rec @struct(
     init_cookie: u32,
     desc:     Desc,
-    font_img: SgImage,
-    font_smp: SgSampler,
-    shader:   SgShader,
+    font_img: Sg.Image,
+    font_smp: Sg.Sampler,
+    shader:   Sg.Shader,
     // This is not special. It's just some storage you can use to avoid an 
     // extra allocation in the simple case where you only want a single context. 
     default_context: Context,
     font_count: i64,  // This can't change dynamically because they're baked into a gpu texture in setup()
+    sg: *Sg.Self,
 );
 
 Shaders :: @struct(
@@ -109,9 +111,9 @@ Shaders :: @struct(
 );
 
 // fills in an empty `ctx` based on settings from `in_desc`.
-// ERRORS: if sg_add_commit_listener fails (returns false and text will not be rendered).
+// ERRORS: if add_commit_listener fails (returns false and text will not be rendered).
 fn init_context(sdtx: *Common, ctx: *Context, in_desc: *ContextDesc) bool = {
-    sg_push_debug_group("sokol-debugtext");
+    sdtx.sg.push_debug_group("sokol-debugtext");
     ctx.desc = in_desc[];
     ctx.common = sdtx;
     a := sdtx.desc.allocator;
@@ -122,12 +124,12 @@ fn init_context(sdtx: *Common, ctx: *Context, in_desc: *ContextDesc) bool = {
     ctx.commands = init(a, ctx.desc.max_commands.zext());
     set_layer(ctx, 0);
 
-    vbuf_desc := SgBufferDesc.zeroed();
-    vbuf_desc.size = ctx.vertices.cap * size_of(Vertex);
-    vbuf_desc.type = .VERTEXBUFFER;
-    vbuf_desc.usage = .STREAM;
-    vbuf_desc.label = "sdtx-vbuf";
-    ctx.vbuf = sg_make_buffer(vbuf_desc&);
+    ctx.vbuf = sdtx.sg.make(
+        size = ctx.vertices.cap * size_of(Vertex),
+        type = .VERTEXBUFFER,
+        usage = .STREAM,
+        label = "sdtx-vbuf",
+    );
     @debug_assert(ctx.vbuf.id != 0);
 
     pip_desc := SgPipelineDesc.zeroed();
@@ -150,7 +152,7 @@ fn init_context(sdtx: *Common, ctx: *Context, in_desc: *ContextDesc) bool = {
         ),
     );
     pip_desc.label = "sdtx-pipeline";
-    ctx.pip = sg_make_pipeline(pip_desc&);
+    ctx.pip = sdtx.sg.make(pip_desc);
     @debug_assert(ctx.pip.id != 0);
 
     ctx.glyph_size.x = 8.0 / ctx.desc.canvas_width;
@@ -158,8 +160,8 @@ fn init_context(sdtx: *Common, ctx: *Context, in_desc: *ContextDesc) bool = {
     ctx.tab_width = ctx.desc.tab_width.intcast().float().cast();
     ctx.color = 0xFF00FFFF;
 
-    ok := sg_add_commit_listener(make_commit_listener(ctx));
-    sg_pop_debug_group();
+    ok := sdtx.sg.add_commit_listener(make_commit_listener(ctx));
+    sdtx.sg.pop_debug_group();
     ok
 }
 
@@ -172,11 +174,11 @@ fn destroy(ctx: *Context) void = {
     if !ctx.commands.ptr.is_null() {
         drop(ctx.vertices&, ctx.common.allocator);
     };
-    sg_push_debug_group("sokol_debugtext");
-    sg_destroy_buffer(ctx.vbuf);
-    sg_destroy_pipeline(ctx.pip);
-    sg_remove_commit_listener(sdtx_make_commit_listener(ctx));
-    sg_pop_debug_group();
+    sdtx.sg.push_debug_group("sokol_debugtext");
+    sdtx.sg.destroy_buffer(ctx.vbuf);
+    sdtx.sg.destroy_pipeline(ctx.pip);
+    sdtx.sg.remove_commit_listener(sdtx_make_commit_listener(ctx));
+    sdtx.sg.pop_debug_group();
     ctx[] = Context.zeroed();
 }
 
@@ -187,10 +189,11 @@ fn setup(sdtx: *Common, desc: Desc) void = {
     @debug_assert_gt(c.canvas_height, 0.0, "bad canvas_height");
     @debug_assert_gt(c.char_buf_size, 0, "bad char_buf_size");
     sdtx[] = zeroed(Common);
+    sdtx.sg = desc.sg;
     sdtx.init_cookie = init_cookie;
     sdtx.desc = desc; 
     desc := sdtx.desc&; 
-    sg_push_debug_group("sokol-debugtext");
+    sdtx.sg.push_debug_group("sokol-debugtext");
 
     // TODO: sketchy. im using a newer version of debugtext than the rest of the stuff i have so these field names are from a different version than the shaders are. 
     //       but it seems fine so i guess it was just name changes. 
@@ -226,33 +229,33 @@ fn setup(sdtx: *Common, desc: Desc) void = {
         glsl_name = "tex_smp",
     );
     choose_shader_impl(SOKOL_BACKEND, shd_desc&, Sdtx.Shaders);
-    sdtx.shader = sg_make_shader(shd_desc&);
+    sdtx.shader = sdtx.sg.make(shd_desc);
     SG_INVALID_ID: u32 = 0;
     @debug_assert(sdtx.shader.id != SG_INVALID_ID);
 
     sdtx.set_font_data(desc.fonts);
     desc.fonts = empty();  // made the texture so we don't need the input bytes anymore. 
 
-    smp_desc := SgSamplerDesc.zeroed();
-    smp_desc.min_filter = .NEAREST;
-    smp_desc.mag_filter = .NEAREST;
-    smp_desc.wrap_u = .CLAMP_TO_EDGE;
-    smp_desc.wrap_v = .CLAMP_TO_EDGE;
-    smp_desc.label = "sdtx-font-sampler";
-    sdtx.font_smp = sg_make_sampler(smp_desc&);
+    sdtx.font_smp = sdtx.sg.make(
+        min_filter = .NEAREST,
+        mag_filter = .NEAREST,
+        wrap_u = .CLAMP_TO_EDGE,
+        wrap_v = .CLAMP_TO_EDGE,
+        label = "sdtx-font-sampler",
+    );
     @debug_assert(SG_INVALID_ID != sdtx.font_smp.id);
 
-    sg_pop_debug_group();
+    sdtx.sg.pop_debug_group();
     
     init_context(sdtx, sdtx.default_context&, sdtx.desc.context&);
 }
 
 fn set_font_data(sdtx: *Common, fonts: [][]u8) void = {
-    sdtx.font_img = bake_font_texture(fonts);
+    sdtx.font_img = sdtx.sg.make(bake_font_texture(fonts));
     sdtx.font_count = fonts.len;
 }
 
-bake_font_texture :: fn(fonts: [][]u8) SgImage = {
+bake_font_texture :: fn(fonts: [][]u8) Sg.Image.Desc = {
     // unpack font data
     // we just need this to init the texture, so throw it away immediately after
     unpacked_font_size :: 256 * 8 * 8;
@@ -267,11 +270,9 @@ bake_font_texture :: fn(fonts: [][]u8) SgImage = {
     img_desc.width = 256 * 8;
     img_desc.height = font_count.trunc() * 8;
     img_desc.pixel_format = .R8;
-    img_desc.data.subimage&.index(0).index(0)[] = (ptr = u8.raw_from_ptr(font_pixels.ptr), size = font_pixels.len);
+    img_desc.data.subimage&[0]&[0] = font_pixels;
     img_desc.label = "sdtx-font-texture";
-    font_img := sg_make_image(img_desc&);
-    @debug_assert(font_img.id != SG_INVALID_ID);
-    font_img
+    img_desc
 }
 
 // If you made multiple contexts, it's your job to destroy them.
@@ -281,11 +282,11 @@ fn shutdown(sdtx: *Common) void = {
     if !sdtx.default_context.common.is_null() {
         destroy(sdtx.default_context&);
     };
-    sg_push_debug_group("sokol-debugtext");
-    sg_destroy_sampler(sdtx.font_smp);
-    sg_destroy_image(sdtx.font_img);
-    sg_destroy_shader(sdtx.shader);
-    sg_pop_debug_group();
+    sdtx.sg.push_debug_group("sokol-debugtext");
+    sdtx.sg.destroy_sampler(sdtx.font_smp);
+    sdtx.sg.destroy_image(sdtx.font_img);
+    sdtx.sg.destroy_shader(sdtx.shader);
+    sdtx.sg.pop_debug_group();
     sdtx.init_cookie = 0;
 }
 
@@ -318,25 +319,24 @@ fn draw_layer(ctx: *Context, layer_id: i32) void = {
     sdtx := ctx.common;
     @debug_assert(init_cookie == sdtx.init_cookie);
     if(ctx.vertices.len <= 0 || ctx.commands.len <= 0, => return());
-    sg_push_debug_group("sokol-debugtext");
+    sdtx.sg.push_debug_group("sokol-debugtext");
 
     if ctx.update_frame_id != ctx.frame_id {
         ctx.update_frame_id = ctx.frame_id;
-        range: SgRange = (ptr = Vertex.raw_from_ptr(ctx.vertices.ptr), size = ctx.vertices.len * size_of(Vertex));
-        sg_update_buffer(ctx.vbuf, range&);
+        sdtx.sg.update_buffer(ctx.vbuf, ctx.vertices.items().interpret_as_bytes());
     };
 
-    sg_apply_pipeline(ctx.pip);
+    sdtx.sg.apply_pipeline(ctx.pip);
     bindings := SgBindings.zeroed();
     bindings.vertex_buffers&[0] = ctx.vbuf;
     bindings.images&[0] = sdtx.font_img;
     bindings.samplers&[0] = sdtx.font_smp;
-    sg_apply_bindings(bindings&);
+    sdtx.sg.apply_bindings(bindings&);
     each(ctx.commands, fn(cmd) => if cmd.layer_id == layer_id {
         @debug_assert(cmd.num_vertices.mod(6) == 0);
-        sg_draw(cmd.first_vertex, cmd.num_vertices, 1);
+        sdtx.sg.draw(cmd.first_vertex, cmd.num_vertices, 1);
     });
-    sg_pop_debug_group();
+    sdtx.sg.pop_debug_group();
 }
 
 /* set a new virtual canvas size in screen pixels */
@@ -453,7 +453,7 @@ fn rewind(ctx: *Context) void = {
 fn make_commit_listener(ctx: *Context) SgCommitListener = {
     ctx.franca_dynamic_context = get_dynamic_context();
     (user_data = Context.raw_from_ptr(ctx), func = fn(userdata: rawptr) void = {
-        // called from inside sokol-gfx sg_commit()
+        // called from inside sokol-gfx sdtx.sg.commit()
         if(userdata.is_null(), => return());
         ctx := Context.ptr_from_raw(userdata);
         set_dynamic_context(ctx.franca_dynamic_context);

@@ -9,6 +9,7 @@
 ## Graphics
 
 - finish gfx-metal
+- clean up defaults (i can put defaults in a struct field. need to make it play nice with arrays `(x, ..())`
 - example program that tries to use all features
 - dearimgui backend
 - support x11 / opengl / glsl
@@ -42,6 +43,7 @@ and gives you junk (that's not 0 or 1) when `common()` uses `#unsafe_noop_cast`.
 rn you're supposed to need a redundant `[]` in a call like that. 
 - aot_import_body probably shouldn't zero x0 just because it thinks the param is void
 - fix the infinite loop when a constant references itself
+- :NoInlineImport
 
 ## cross compiling
 
@@ -201,6 +203,7 @@ or just default to jitting and force you to enable aot by specifying an output p
   - maybe loc should be a specific token so you don't highlight the whole expression just to complain about a function signature
   - macros should show both expansion site and code that generated it.
 - better error message from backend if you forget nunion=1 on a struct
+- `pattern match on non-tuple but expected % args` should show the callee as well
 
 ## language decisions
 

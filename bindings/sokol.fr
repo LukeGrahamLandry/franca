@@ -284,28 +284,7 @@ fn sapp_gl_get_framebuffer() u32 #import("sokol");
 fn sapp_gl_get_major_version() i32 #import("sokol");
 fn sapp_gl_get_minor_version() i32 #import("sokol");
 fn sapp_android_get_native_activity() rawptr #import("sokol");
-SgBuffer :: @struct(
-    id: u32,
-);
-SgImage :: @struct(
-    id: u32,
-);
-SgSampler :: @struct(
-    id: u32,
-);
-SgShader :: @struct(
-    id: u32,
-);
-SgPipeline :: @struct(
-    id: u32,
-);
-SgAttachments :: @struct(
-    id: u32,
-);
-SgRange :: @struct(
-    ptr: rawptr,
-    size: usize,
-);
+
 SgColor :: @struct(
     r: f32,
     g: f32,
@@ -515,21 +494,33 @@ SgBorderColor :: @enum(i32) (
     OPAQUE_WHITE,
     NUM,
 );
+
+
 SgVertexFormat :: @enum(i32) (
     INVALID,
     FLOAT,
     FLOAT2,
     FLOAT3,
     FLOAT4,
+    INT,
+    INT2,
+    INT3,
+    INT4,
+    UINT,
+    UINT2,
+    UINT3,
+    UINT4,
     BYTE4,
     BYTE4N,
     UBYTE4,
     UBYTE4N,
     SHORT2,
     SHORT2N,
+    USHORT2,
     USHORT2N,
     SHORT4,
     SHORT4N,
+    USHORT4,
     USHORT4N,
     UINT10_N2,
     HALF2,
@@ -622,6 +613,8 @@ SgBlendOp :: @enum(i32) (
     ADD,
     SUBTRACT,
     REVERSE_SUBTRACT,
+    MIN,
+    MAX,
     NUM,
 );
 SgColorMask :: @enum(i32) (
@@ -708,30 +701,31 @@ SgPass :: @struct(
 );
 SgBindings :: @struct(
     _start_canary: u32,
-    vertex_buffers: Array(SgBuffer, 8),
+    vertex_buffers: Array(Sg.Buffer, 8),
     vertex_buffer_offsets: Array(i32, 8),
-    index_buffer: SgBuffer,
+    index_buffer: Sg.Buffer,
     index_buffer_offset: i32,
-    images: Array(SgImage, 16),
-    samplers: Array(SgSampler, 16),
-    storage_buffers: Array(SgBuffer, 8),
+    images: Array(Sg.Image, 16),
+    samplers: Array(Sg.Sampler, 16),
+    storage_buffers: Array(Sg.Buffer, 8),
     _end_canary: u32,
 );
 SgBufferDesc :: @struct(
-    _start_canary: u32,
-    size: usize,
-    type: SgBufferType,
-    usage: SgUsage,
-    data: SgRange,
-    label: CStr,
-    gl_buffers: Array(u32, 2),
-    mtl_buffers: Array(rawptr, 2),
-    d3d11_buffer: rawptr,
-    wgpu_buffer: rawptr,
-    _end_canary: u32,
+    size := 0,  // will default to data.len if provided
+    type := SgBufferType.VERTEXBUFFER,
+    usage := SgUsage.IMMUTABLE,
+    data: []u8 = empty(),
+    label: CStr = "",
+    gl_buffers := zeroed Array(u32, 2),
+    mtl_buffers := zeroed Array(rawptr, 2),
+    d3d11_buffer := zeroed rawptr,
+    wgpu_buffer := zeroed rawptr,
 );
+// TODO: why is this not just a flat byte array?
+//       there's this whole replaceRegion dance where we calculate where to put each part. 
+//       maybe different backends want you to layout your CUBE differently? idk
 SgImageData :: @struct(
-    subimage: Array(Array(SgRange, 16), 6),
+    subimage: Array(Array([]u8, 16), 6),
 );
 SgImageDesc :: @struct(
     _start_canary: u32,
@@ -756,34 +750,35 @@ SgImageDesc :: @struct(
     _end_canary: u32,
 );
 
+FLT_MAX: f32 : bitcast(0b01111111011111111111111111111111);
+
 SamplerCommon :: @struct(
-    min_filter: SgFilter,
-    mag_filter: SgFilter,
-    mipmap_filter: SgFilter,
-    wrap_u: SgWrap,
-    wrap_v: SgWrap,
-    wrap_w: SgWrap,
-    min_lod: f32,
-    max_lod: f32,
-    border_color: SgBorderColor,
-    compare: SgCompareFunc,
-    max_anisotropy: u32,
+    min_filter := SgFilter.NEAREST,
+    mag_filter := SgFilter.NEAREST,
+    mipmap_filter := SgFilter.NEAREST,
+    wrap_u := SgWrap.REPEAT,
+    wrap_v := SgWrap.REPEAT,
+    wrap_w := SgWrap.REPEAT,
+    min_lod: f32 = FLT_MAX,
+    max_lod: f32 = 0,
+    border_color := SgBorderColor.OPAQUE_BLACK,
+    compare := SgCompareFunc.NEVER,
+    max_anisotropy: u32 = 1,
 );
 
 SgSamplerDesc :: @struct(
-    _start_canary: u32,
     common: SamplerCommon #use,
-    label: CStr,
-    gl_sampler: u32,
-    mtl_sampler: rawptr,
-    d3d11_sampler: rawptr,
-    wgpu_sampler: rawptr,
-    _end_canary: u32,
+    label: CStr = "",
+    gl_sampler: u32 = 0,
+    mtl_sampler := zeroed rawptr,
+    d3d11_sampler := zeroed rawptr,
+    wgpu_sampler := zeroed rawptr,
 );
 SgShaderStage :: @enum(i32) (
     NONE,
     VERTEX,
     FRAGMENT,
+    COMPUTE,
 );
 SgShaderFunction :: @struct(
     source: CStr,
@@ -792,6 +787,7 @@ SgShaderFunction :: @struct(
     d3d11_target: CStr,
 );
 SgShaderVertexAttr :: @struct(
+    base_type: Sg.ShaderAttrBaseType = .Undefined,
     glsl_name: CStr,
     hlsl_sem_name: CStr,
     hlsl_sem_index: u8,
@@ -844,42 +840,48 @@ SgShaderDesc :: @struct(
     _start_canary: u32,
     vertex_func: SgShaderFunction,
     fragment_func: SgShaderFunction,
+    compute_func: SgShaderFunction,
     attrs: Array(SgShaderVertexAttr, 16),
     uniform_blocks: Array(SgShaderUniformBlock, 8),
     storage_buffers: Array(SgShaderStorageBuffer, 8),
     images: Array(SgShaderImage, 16),
     samplers: Array(SgShaderSampler, 16),
     image_sampler_pairs: Array(SgShaderImageSamplerPair, 16),
+    mtl_threads_per_threadgroup: SgMtlShaderThreadsPerThreadGroup,
     label: CStr,
     _end_canary: u32,
 );
+SgMtlShaderThreadsPerThreadGroup :: @struct {
+    x: i32; y: i32; z: i32;
+};
 SgVertexBufferLayoutState :: @struct(
     stride: i32,
-    step_func: SgVertexStep,
-    step_rate: i32,
+    step_func := SgVertexStep.PER_VERTEX,
+    step_rate: i32 = 1,
 );
 SgVertexAttrState :: @struct(
-    buffer_index: i32,
-    offset: i32,
-    format: SgVertexFormat,
+    buffer_index: i32 = 0,
+    offset: i32 = 0,
+    format := SgVertexFormat.INVALID,
 );
 SgVertexLayoutState :: @struct(
     buffers: Array(SgVertexBufferLayoutState, 8),
     attrs: Array(SgVertexAttrState, 16),
 );
 SgStencilFaceState :: @struct(
-    compare: SgCompareFunc,
-    fail_op: SgStencilOp,
-    depth_fail_op: SgStencilOp,
-    pass_op: SgStencilOp,
+    compare := SgCompareFunc.ALWAYS,
+    fail_op := SgStencilOp.KEEP,
+    depth_fail_op := SgStencilOp.KEEP,
+    pass_op := SgStencilOp.KEEP,
 );
+
 SgStencilState :: @struct(
-    enabled: bool,
-    front: SgStencilFaceState,
-    back: SgStencilFaceState,
-    read_mask: u8,
-    write_mask: u8,
-    ref: u8,
+    enabled: bool = false,
+    front: SgStencilFaceState = (),
+    back: SgStencilFaceState = (),
+    read_mask: u8 = 0,
+    write_mask: u8 = 0,
+    ref: u8 = 0,
 );
 SgDepthState :: @struct(
     pixel_format: SgPixelFormat,
@@ -905,19 +907,20 @@ SgColorTargetState :: @struct(
 );
 
 SgPipelineShared :: @struct(
-    shader: SgShader,
+    compute := false,
+    shader: Sg.Shader,
     layout: SgVertexLayoutState,
     depth: SgDepthState,
-    stencil: SgStencilState,
-    color_count: i32,
+    stencil: SgStencilState = (),
+    color_count: i32 = 0,  // defaults to 1 if not depth only
     colors: Array(SgColorTargetState, 4),
-    primitive_type: SgPrimitiveType,
-    index_type: SgIndexType,
-    cull_mode: SgCullMode,
-    face_winding: SgFaceWinding,
-    sample_count: i32,
-    blend_color: SgColor,
-    alpha_to_coverage_enabled: bool,
+    primitive_type := SgPrimitiveType.TRIANGLES,
+    index_type := SgIndexType.NONE,
+    cull_mode := SgCullMode.NONE,
+    face_winding := SgFaceWinding.CW,
+    sample_count: i32 = 0,  // set from environment.defaults
+    blend_color := zeroed SgColor,
+    alpha_to_coverage_enabled := false,
 );
 
 SgPipelineDesc :: @struct(
@@ -927,7 +930,7 @@ SgPipelineDesc :: @struct(
     _end_canary: u32,
 );
 SgAttachmentDesc :: @struct(
-    image: SgImage,
+    image: Sg.Image,
     mip_level: i32,
     slice: i32,
 );

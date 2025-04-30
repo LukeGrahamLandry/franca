@@ -15,6 +15,7 @@ if (0 == bnd.pip) {
 SOKOL_ASSERT(bnd.pip->shader && (bnd.pip->cmn.shader_id.id == bnd.pip->shader->slot.id));
 const _sg_shader_t* shd = bnd.pip->shader;
 ```
+- this is something im jealous of https://makepad.dev/
 
 ## (Apr 25/26)
 
