@@ -565,7 +565,7 @@ fn _sg_pass_action_defaults(action: *SgPassAction) SgPassAction = {
     res
 }
 
-fn pool_init(pool: *DynPool, a: Alloc, num: i64, sizeof_t: i64) void = {
+fn init_pool(pool: *DynPool, a: Alloc, num: i64, sizeof_t: i64) void #once = {
     @debug_assert(num >= 1 && num < _SG_MAX_POOL_SIZE);
     pool[] = (
         sizeof_t = sizeof_t,
@@ -577,8 +577,9 @@ fn pool_init(pool: *DynPool, a: Alloc, num: i64, sizeof_t: i64) void = {
         // it's not a bug to only reserve 'num' here
         // never allocate the zero-th pool item since the invalid id is 0
         free_queue = a.alloc_init(i32, num, fn(i) => intcast num - i),
-        queue_top = intcast num + 1,
+        queue_top = intcast num,
     );
+    pool.data.set_zeroed();
 }
 
 fn pool_discard(pool: *DynPool, a: Alloc) void = {
@@ -592,14 +593,13 @@ fn alloc_index(pool: *DynPool) i32 = {
     if(pool.queue_top <= 0, => return(_SG_INVALID_SLOT_INDEX));  // pool exhausted
     pool.queue_top -= 1;
     slot_index := pool.free_queue[intcast pool.queue_top];
-    @debug_assert((slot_index > 0) && (slot_index < pool.size));
+    @println("alloc slot % (pool=%)", slot_index, DynPool.raw_from_ptr(pool));
+    @debug_assert((slot_index > 0) && (slot_index < pool.size), "bad slot_index %", slot_index);
     slot_index
 }
 
 fn free_index(pool: *DynPool, slot_index: i32) void = {
     @debug_assert((slot_index > _SG_INVALID_SLOT_INDEX) && (slot_index < pool.size));
-    @debug_assert(pool);
-    @debug_assert(pool.free_queue);
     @debug_assert(pool.queue_top < pool.size);
     if SOKOL_DEBUG {
         // debug check against double-free
@@ -614,7 +614,7 @@ fn free_index(pool: *DynPool, slot_index: i32) void = {
 
 fn setup_pools(sg: *Self, desc: *SgDesc) void = {
     // note: the pools here will have an additional item, since slot 0 is reserved
-    X :: fn($R, count) => pool_init(sg.pools&.index(R.Tag), desc.allocator, count.intcast(), size_of(R.T));
+    X :: fn($R, count) => init_pool(sg.pools&.index(R.Tag), desc.allocator, count.intcast(), size_of(R.T));
     X(Buffer, desc.buffer_pool_size);
     X(Image, desc.image_pool_size);
     X(Sampler, desc.sampler_pool_size);
@@ -642,9 +642,9 @@ fn slot_alloc(pool: *DynPool, slot_index: i32) u32 = {
        the slot)
     */
     slot := pool.get_slot(slot_index);
-    @debug_assert((slot_index > _SG_INVALID_SLOT_INDEX) && (slot_index < pool.size));
-    @debug_assert(slot.id == SG_INVALID_ID);
-    @debug_assert(slot.state == .INITIAL);
+    @debug_assert((slot_index > _SG_INVALID_SLOT_INDEX) && (slot_index < pool.size), "bad pool.size %", pool.size);
+    @debug_assert_eq(slot.id, SG_INVALID_ID, "bad id");
+    @debug_assert_eq(slot.state, .INITIAL);
     pool.gen_ctrs[intcast slot_index] += 1;
     ctr := pool.gen_ctrs[intcast slot_index];
     slot.id = bit_or(ctr.shift_left(_SG_SLOT_SHIFT), bitcast slot_index.bit_and(_SG_SLOT_MASK));

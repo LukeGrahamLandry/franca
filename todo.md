@@ -23,6 +23,7 @@
 - i enjoyed https://sotrh.github.io/learn-wgpu/, an implementation of that would be a good example program
 - replace cimgui
 - https://github.com/id-Software/DOOM
+- implement #trace
 
 ## stuff i broke
 

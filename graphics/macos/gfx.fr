@@ -280,11 +280,12 @@ fn init_pool(mtl: *Impl, desc: *SgDesc) void = {
         @objc p.pool.addObject(null);
     }
     @debug_assert((@objc @as(i64) p.pool.count()) == @as(i64) p.num_slots);
-    // a queue of currently free slot indices
-    p.free_queue_top = 0;
     a := mtl.sg.desc.allocator;
+    // a queue of currently free slot indices
     // pool slot 0 is reserved!
     p.free_queue = a.alloc_init(i32, p.num_slots, fn(i) => intcast p.num_slots - 1 - i);
+    p.free_queue_top = p.num_slots - 1;
+    
     // a circular queue which holds release items (frame index when a resource is to be released, and the resource's pool index
     p.release_queue_front = 0;
     p.release_queue_back = 0;
@@ -303,7 +304,7 @@ fn destroy_pool(mtl: *Impl) void = {
 // get a new free resource pool slot
 fn alloc_pool_slot(mtl: *Impl) i32 = {
     p := mtl.idpool&;
-    @debug_assert(p.free_queue_top > 0);
+    @debug_assert(p.free_queue_top > 0, "free_queue empty");
     p.free_queue_top -= 1;
     slot_index := p.free_queue[p.free_queue_top];
     @debug_assert((slot_index > 0) && (slot_index < p.num_slots.intcast()));
@@ -326,7 +327,7 @@ fn add_resource(mtl: *Impl, res: id("T")) Id("T") = {
     slot_index := mtl.alloc_pool_slot();
     // NOTE: the NSMutableArray will take ownership of its items
     //@debug_assert([NSNull null] == mtl.idpool.pool[@as(i64) slot_index]);  // TODO
-    @objc mtl.idpool.pool.replaceObjectAtIndex(res, atIndex = @as(i64) slot_index.intcast());
+    @objc mtl.idpool.pool.replaceObjectAtIndex(@as(i64) slot_index.intcast(), withObject = res);
     slot_index
 }
 
@@ -375,7 +376,7 @@ fn garbage_collect(mtl: *Impl, frame_index: u32) void = {
         null := @objc cls("NSNull").null();
         i: i64 = slot_index.intcast();
         @debug_assert(bit_cast_unchecked(ObjCId, i64, null) != bit_cast_unchecked(ObjCId, i64, @objc p.pool.objectAtIndex(i)));
-        @objc p.pool.replaceObjectAtIndex(null, atIndex = i);
+        @objc p.pool.replaceObjectAtIndex(i, withObject = null);
         // put the now free pool index back on the free queue
         mtl.free_pool_slot(slot_index);
         // reset the release queue slot and advance the back index
@@ -390,7 +391,7 @@ fn garbage_collect(mtl: *Impl, frame_index: u32) void = {
 }
 
 fn get_id(mtl: *Impl, slot_index: Id("T")) id("T") = 
-    @objc mtl.idpool.pool.objectAtIndex(@as(i64) slot_index.intcast());
+    @objc mtl.idpool.pool.objectAtIndexedSubscript(@as(i64) slot_index.intcast());
 
 fn clear_state_cache(mtl: *Impl) void = {
     mtl.state_cache = zeroed @type mtl.state_cache;
@@ -455,6 +456,17 @@ fn setup_backend(mtl: *Impl, desc: *SgDesc) void = {
     mtl.sem = dispatch_semaphore_create(Sg.SG_NUM_INFLIGHT_FRAMES);
     mtl.device = bit_cast_unchecked(rawptr, id("MTLDevice"), desc.environment.metal.device);
     mtl.cmd_queue = @objc mtl.device.newCommandQueue();
+    
+    {
+        // TODO: this is a paste from app.fr
+        Dyn :: import("@/lib/dynamic_lib.fr");
+        objc := Dyn'open("/usr/lib/libobjc.dylib").expect("open objc");  // HACK
+        Block := bit_cast_unchecked(rawptr, ObjCId, @as(rawptr) objc.dlsym("_NSConcreteGlobalBlock"));
+        
+        B :: please_just_make_a_fucking_block__LEAK;
+        aBlock := B(mtl.sg.desc.allocator, Impl.raw_from_ptr(mtl), @as(rawptr) pass_completed_handler, Block);
+        mtl.pass_completed_sem = bit_cast_unchecked(rawptr, ObjCId, aBlock);
+    };
 
     range(0, Sg.SG_NUM_INFLIGHT_FRAMES) { i |
         o := 1; // MTLResourceCPUCacheModeWriteCombined|MTLResourceStorageModeShared;
@@ -707,7 +719,7 @@ fn create(mtl: *Impl, smp: *Sg.Sampler.T, desc: *Sg.Sampler.Desc) SgResourceStat
         it := new "MTLSamplerDescriptor";
         if (mtl.sg.features.image_clamp_to_border) {
             ASSERT_NOT_OLD();
-            @objc it.setVorderColor(to_mtl(desc.border_color));
+            @objc it.setBorderColor(to_mtl(desc.border_color));
         }
         @objc_set(it) (
             sAddressMode = mtl.to_mtl(desc.wrap_u),
@@ -878,7 +890,7 @@ fn create(mtl: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg.Pipeline
     
     fn set_immutable(self: ObjCId, mtl_slot: ~T) void #where = {
         // TODO: I don't super understand why you can't nest these. @objc #macro bug? 
-        self := @objc self.objectAtIndex(mtl_slot);
+        self := @objc self.objectAtIndexedSubscript(mtl_slot);
         @objc self.setMutability(MTLMutabilityImmutable);
     }
 
@@ -941,7 +953,7 @@ fn create(mtl: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg.Pipeline
             @debug_assert(a_state.buffer_index < Sg.SG_MAX_VERTEXBUFFER_BINDSLOTS);
             @debug_assert(pip.cmn.vertex_buffer_layout_active&[intcast a_state.buffer_index]);
             xx := @objc vtx_desc.attributes();
-            it := @objc xx.objectAtIndex(attr_index);
+            it := @objc xx.objectAtIndexedSubscript(attr_index);
             @objc it.setFormat(to_mtl(a_state.format));
             @objc it.setOffset(@as(i64) intcast a_state.offset);
             @objc it.setBufferIndex(_sg_mtl_vertexbuffer_bindslot(intcast a_state.buffer_index));
@@ -952,7 +964,7 @@ fn create(mtl: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg.Pipeline
                 mtl_vb_slot := _sg_mtl_vertexbuffer_bindslot(layout_index);
                 @debug_assert(l_state.stride > 0);
                 xx := @objc vtx_desc.layouts();
-                it := @objc xx.objectAtIndex(mtl_vb_slot);
+                it := @objc xx.objectAtIndexedSubscript(mtl_vb_slot);
                 @objc_set(it) (
                     stride = @as(i64) intcast l_state.stride,
                     stepFunction = to_mtl(l_state.step_func),
@@ -986,7 +998,7 @@ fn create(mtl: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg.Pipeline
         range(0, intcast desc.color_count) { i |
             @debug_assert(i < Sg.SG_MAX_COLOR_ATTACHMENTS);
             cs := desc.colors&[i]&;
-            it := @objc at.objectAtIndex(i);
+            it := @objc at.objectAtIndexedSubscript(i);
             @objc_set(it) (
                 pixelFormat = to_mtl(cs.pixel_format),
                 writeMask = to_mtl(cs.write_mask),
@@ -1139,7 +1151,7 @@ fn bind_uniform_buffers(mtl: *Impl) void = {
         @debug_assert(!mtl.render_cmd_encoder.is_nil());
         range(0, Sg.SG_MAX_UNIFORMBLOCK_BINDSLOTS) { slot |
             b := mtl.uniform_buffers&[mtl.cur_frame_rotate_index];
-            @objc mtl.render_cmd_encoder.setBuffer(b, offset = 0, atIndex = slot);
+            @objc mtl.render_cmd_encoder.setVertexBuffer(b, offset = 0, atIndex = slot);
             @objc mtl.render_cmd_encoder.setFragmentBuffer(b, offset = 0, atIndex = slot);
         }
     }
@@ -1201,7 +1213,7 @@ fn begin_render_pass(mtl: *Impl, pass: *SgPass) void = {
         
         setTexture :: fn(it, img) => @objc it.setTexture(mtl.get_id(img.mtl.tex&[img.cmn.active_slot.intcast()]));
         range(0, atts.cmn.num_colors.intcast()) { i |
-            ca := @objc at.objectAtIndex(i);
+            ca := @objc at.objectAtIndexedSubscript(i);
             cmn_color_att := atts.cmn.colors&[i]&;
             color_att_img := atts.mtl.colors&[i].image;
             cmn_resolve_att := atts.cmn.resolves&[i]&;
@@ -1265,7 +1277,7 @@ fn begin_render_pass(mtl: *Impl, pass: *SgPass) void = {
 
         mtl.cur_drawable = bit_cast_unchecked(rawptr, id("CAMetalDrawable"), swapchain.metal.current_drawable);
         ca := @objc pass_desc.colorAttachments();
-        ca := @objc ca.objectAtIndex(0);
+        ca := @objc ca.objectAtIndexedSubscript(0);
         if (swapchain.sample_count > 1) {
             // multi-sampling: render into msaa texture, resolve into drawable texture
             msaa_tex := bit_cast_unchecked(rawptr, id("MTLTexture"), swapchain.metal.msaa_color_texture);
@@ -1320,7 +1332,8 @@ fn is_null(self: CStr) bool = self.ptr.is_null();
 DISPATCH_TIME_FOREVER :: bit_not(0);
 fn dispatch_semaphore_wait(dsema: id("OS_dispatch_semaphore"), timeout: i64) i64 #import("CoreFoundation");
 fn dispatch_semaphore_create(value: i64) id("OS_dispatch_semaphore") #import("CoreFoundation");
-    
+fn dispatch_semaphore_signal(dsema: id("OS_dispatch_semaphore")) i64 #import("CoreFoundation");
+
 fn begin_pass(mtl: *Impl, pass: *SgPass) void = {
     @debug_assert(!mtl.cmd_queue.is_nil());
     @debug_assert(mtl.compute_cmd_encoder.is_nil());
@@ -1339,14 +1352,7 @@ fn begin_pass(mtl: *Impl, pass: *SgPass) void = {
             @objc mtl.cmd_queue.commandBufferWithUnretainedReferences()
         };
         @objc mtl.cmd_buffer.enqueue();
-        todo();
         @objc mtl.cmd_buffer.addCompletedHandler(mtl.pass_completed_sem);
-        // TODO: please_just_make_a_fucking_block__LEAK
-        //[mtl.cmd_buffer addCompletedHandler:^(id<MTLCommandBuffer> cmd_buf) {
-        //    // NOTE: this code is called on a different thread!
-        //    _ := cmd_buf;
-        //    dispatch_semaphore_signal(mtl.sem);
-        //}];
     }
 
     // if this is first pass in frame, get uniform buffer base pointer
@@ -1365,6 +1371,12 @@ fn begin_pass(mtl: *Impl, pass: *SgPass) void = {
         mtl.bind_uniform_buffers();
     }
 }
+
+pass_completed_handler :: fn(self: *Block_literal_1, _: id"MTLCommandBuffer") void = {
+    // NOTE: this code is called on a different thread!
+    mtl := Impl.ptr_from_raw(self.userdata);
+    dispatch_semaphore_signal(mtl.sem);
+};
 
 fn end_pass(mtl: *Impl) void = {
     if !mtl.render_cmd_encoder.is_nil() {
@@ -1739,7 +1751,7 @@ fn push_debug_group(mtl: *Impl, name: CStr) void = {
 }
 
 fn pop_debug_group(mtl: *Impl) void =
-    @objc @as(void) mtl.encoder().popDebugGroup(name);
+    @objc @as(void) mtl.encoder().popDebugGroup();
 
 fn encoder(mtl: *Impl) ObjCId = {
     enc := mtl.render_cmd_encoder;

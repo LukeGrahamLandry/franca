@@ -1,3 +1,16 @@
+
+Mistakes 
+- pool.queue_top off by one
+- replaceObjectAtIndex:atIndex:
+- setVorderColor
+- init_pool calling alloc_raw without zeroing
+- objectAtIndex vs objectAtIndexedSubscript
+- setBuffer vs setVertexBuffer
+- `popDebugGroup:` because i said `mtl.encoder().popDebugGroup(name);` (instead of no args) so it sent the overload set id called `name`
+- !!!! it works !!!!
+
+##
+
 - im ready to give up. 
 ```
 if (!is_apple_gpu) {
