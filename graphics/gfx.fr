@@ -8,18 +8,32 @@
 // 
 // Changes from Sokol
 // - generics are a surprise tool that can help us later
+// - just use the field for: sg_isvalid, sg_query_backend, sg_query_features, sg_query_limits
+// - removed the query_*_(desc/info/____) functions
+// - no limit for commit listeners. removing doesn't make holes in the array 
+//   so the order will be different. 
+// - _start_canary is not super exciting to me
+//
+// UNFINISHED
+// - logging and trace hooks don't work
+// - init(Attachments) 
+// - compute shaders
+// - validate Shader.Desc _sg_validate_slot_bits
+// - shutdown (dealloc/deinit/fail resources)
+// - move structs from bindings/sokol to here
+// - clean up defaults (compiler: implement partial array literals that respect default fields)
 // 
-
-// TODO: go through an replace my @eprintln with a proper logging system
-
-SOKOL_DEBUG :: true;  // TODO
-fn ASSERT_METAL() void = @debug_assert(SOKOL_BACKEND.is_metal());
-
 // TODO: meta programming thing to replace _SG_TRACE_ARGS with #trace
 //       call sg_trace_hooks with args and return value. 
 //       (.tail) there are early returns but only hook the fallthough at the end
 //       (.before) do it before the implementation 
 //
+// TODO: go through an replace my @eprintln with a proper logging system
+// 
+
+SOKOL_DEBUG :: true;  // TODO: use .DebugAssertions
+fn ASSERT_METAL() void = @debug_assert(SOKOL_BACKEND.is_metal());
+
 
 SlotHeader :: @struct {
     id: u32;
@@ -320,7 +334,7 @@ Self :: @rec @struct {
     next_draw_valid: bool;
     required_bindings_and_uniforms: u32;    // used to check that bindings and uniforms are applied after applying pipeline
     applied_bindings_and_uniforms: u32;     // bits 0..7: uniform blocks, bit 8: bindings
-    validate_error: SgLogItem;
+    validate_error: Str;
     compute: @struct {
         readwrite_sbufs: _sg_tracker_t;  // tracks read/write storage buffers used in compute pass
     };
@@ -495,7 +509,8 @@ fn _sg_multiple_u64(val: i64, of: i64) bool =
 
     see ComputePitch in https://github.com/microsoft/DirectXTex/blob/master/DirectXTex/DirectXTexUtil.cpp
 */
-fn row_pitch(it: SgPixelFormat, width: i32, row_align: i32) i32 = {
+fn row_pitch(it: SgPixelFormat, width: i32, row_align_bytes: i32) i32 = {
+    @debug_assert(width > 0 && (row_align_bytes > 0) && ispow2(row_align_bytes));
     pitch := @if_else {
         @if(@is(it, 
             .BC1_RGBA, .BC4_R, .BC4_RSN, .ETC2_RGB8, .ETC2_SRGB8, 
@@ -508,7 +523,7 @@ fn row_pitch(it: SgPixelFormat, width: i32, row_align: i32) i32 = {
         )) => intcast max(16, ((intcast width + 3) / 4) * 16);
         @else => width * pixelformat_bytesize(it); 
     };
-    _sg_roundup(pitch, row_align)
+    _sg_roundup(pitch, row_align_bytes)
 }
 
 // compute the number of rows in a surface depending on pixel format
@@ -526,12 +541,15 @@ miplevel_dim :: fn(base_dim: i32, mip_level: i32) i32 = {
     max(base_dim.shift_right_arithmetic(intcast mip_level), 1)
 }
 
+ispow2 :: fn(val: i32) bool = val.bit_and(val-1) == 0;
+
 /* return pitch of a 2D subimage / texture slice
     see ComputePitch in https://github.com/microsoft/DirectXTex/blob/master/DirectXTex/DirectXTexUtil.cpp
 */
-fn surface_pitch(fmt: SgPixelFormat, width: i32, height: i32, row_align: i32) i32 = {
+fn surface_pitch(fmt: SgPixelFormat, width: i32, height: i32, row_align_bytes: i32) i32 = {
+    @debug_assert((width > 0) && (height > 0) && (row_align_bytes > 0) && ispow2(row_align_bytes));
     num_rows := num_rows(fmt, height);
-    return num_rows * row_pitch(fmt, width, row_align);
+    num_rows * row_pitch(fmt, width, row_align_bytes)
 }
 
 fn _sg_pass_action_defaults(action: *SgPassAction) SgPassAction = {
@@ -683,14 +701,13 @@ fn discard_all_resources(sg: *Self) void = {
 }
 
 fn _sg_validate_begin(sg: *Self) void = if SOKOL_DEBUG {
-    sg.validate_error = .OK;
+    sg.validate_error = "";
 };
 
 fn _sg_validate_end(sg: *Self) bool = {
     @if(!SOKOL_DEBUG) return(true);
-    ::enum(@type sg.validate_error);
-    if(sg.validate_error == .OK, => return(true));
-    @panic("%", sg.validate_error);
+    if(sg.validate_error.len == 0, => return(true));
+    panic(sg.validate_error);
     false
 }
 
@@ -808,6 +825,7 @@ _sg_u128_t :: @struct {
     hi: i64;
 };
 
+// TODO
 fn _sg_validate_set_slot_bit(bits: _sg_u128_t, stage: SgShaderStage, slot: u8) _sg_u128_t = {
     switch (stage) {
         case .NONE:
@@ -837,6 +855,7 @@ fn _sg_validate_set_slot_bit(bits: _sg_u128_t, stage: SgShaderStage, slot: u8) _
     return bits;
 }
 
+// TODO
 fn _sg_validate_slot_bits(bits: _sg_u128_t, stage: SgShaderStage, slot: u8) bool = {
     _sg_u128_t mask = zeroed(_sg_u128_t);
     switch (stage) {
@@ -1761,6 +1780,7 @@ fn Resource($_Tag: PoolType, $_Desc: Type, $_Common: Type, $_Impl: Type) Type = 
         (Some = it)
     }
     
+    // TODO
     fn dealloc(sg: *Self, id: I) void #trace_args = {
         it := sg.lookup(id) || return();
         if (it.slot.state == SG_RESOURCESTATE_ALLOC) {
@@ -1770,6 +1790,7 @@ fn Resource($_Tag: PoolType, $_Desc: Type, $_Common: Type, $_Impl: Type) Type = 
         }
     }
     
+    // TODO
     fn dealloc(sg: *Self, it: *I.T) void = {
         p := sg.pools&.index(I.Tag);
         SOKOL_ASSERT((it->slot.state == SG_RESOURCESTATE_ALLOC) && (it->slot.id != SG_INVALID_ID));
@@ -1789,24 +1810,7 @@ fn Resource($_Tag: PoolType, $_Desc: Type, $_Common: Type, $_Impl: Type) Type = 
         }
     }
     
-    // TODO: sampler/shader/pipeline/attatchments are the same but buffer/image are different
-    ::@if(::!@is(I.Tag, .Buffer, .Image)) {
-        fn sg_query_info(sg: *Self, id: I) I.Info = {
-            @debug_assert(sg.valid);
-            info := zeroed I.Info;
-            it := sg.lookup(id) || return(info);
-            info.slot.state = it.slot.state;
-            info.slot.res_id = it.slot.id;
-            info
-        }
-    };
-    
-    fn query_state(sg: *Self, id: I) sg_resource_state = {
-        @debug_assert(sg.valid);
-        it := sg.lookup(id) || return(.INVALID);
-        it.slot.state
-    }
-    
+    // TODO
     fn uninit(sg: *Self, id: I) void #trace_args = {
         @debug_assert(sg.valid);
         it := sg.lookup(id) || return();
@@ -1819,6 +1823,7 @@ fn Resource($_Tag: PoolType, $_Desc: Type, $_Common: Type, $_Impl: Type) Type = 
         }
     }
     
+    // TODO
     fn fail(sg: *Self, id: I) void #trace_args = {
         @debug_assert(sg.valid);
         it := sg.lookup(id) || return();
@@ -1829,7 +1834,6 @@ fn Resource($_Tag: PoolType, $_Desc: Type, $_Common: Type, $_Impl: Type) Type = 
         }
     }
     
-    // TODO: buffer/image/sampler/shader are the same but pipeline/attatchments is different
     ::@if(::!@is(I.Tag, .Pipeline, .Attachments)) {
         fn init(sg: *Self, it: *I.T, desc: *I.Desc) SgResourceState = {
             @debug_assert(it.slot.state == .ALLOC);
@@ -1839,6 +1843,7 @@ fn Resource($_Tag: PoolType, $_Desc: Type, $_Common: Type, $_Impl: Type) Type = 
         }
     };
     
+    // TODO
     fn destroy(sg: *Self, id: I) void #trace_args(.before) = {
         @debug_assert(sg.valid);
         it := sg.lookup(id) || return();
@@ -1872,6 +1877,7 @@ fn init(sg: *Self, pip: *Pipeline.T, desc: *Pipeline.Desc) SgResourceState = {
     s
 }
 
+// TODO
 fn init(sg: *Self, atts: *Attachments.T, desc: *Attachments.Desc) SgResourceState = {
     @debug_assert(atts && atts.slot.state == SG_RESOURCESTATE_ALLOC);
     @debug_assert(desc);
@@ -1919,19 +1925,16 @@ fn init(sg: *Self, atts: *Attachments.T, desc: *Attachments.Desc) SgResourceStat
     @debug_assert((atts.slot.state == .VALID)||(atts.slot.state == SG_RESOURCESTATE_FAILED));
 }
 
-// - no limit for commit listeners. removing doesn't make holes in the array 
-//   so the order will be different. 
 // - trying to add_commit_listener() twice needs to stay an "error" 
 //   because i don't guarentee fnptr stability (ie. with jit shims)
 fn eq(a: *SgCommitListener, b: *SgCommitListener) bool = {
     identical(a.user_data, b.user_data) && bit_cast_unchecked(@type a.func, i64, a.func) == bit_cast_unchecked(@type b.func, i64, b.func)
 }
 
-fn notify_commit_listeners(sg: *Self) void = {
+fn notify_commit_listeners(sg: *Self) void = 
     for sg.commit_listeners { listener |
         listener'func(listener.user_data);
-    }
-}
+    };
 
 fn add_commit_listener(sg: *Self, new_listener: SgCommitListener) bool = {
     added := add_unique(sg.commit_listeners&, new_listener, sg.desc.allocator);
@@ -1971,6 +1974,7 @@ fn compute_on_endpass(sg: *Self) void = {
 
 fn pass_defaults(sg: *Self, pass: *SgPass) SgPass = {
     res := pass[];
+    // TODO
     // ... this sure isn't a program?
     if (!res.compute) {
         if (res.compute && res.attachments.id == SG_INVALID_ID) {
@@ -2016,34 +2020,6 @@ fn query_pixelformat(sg: *Self, fmt: SgPixelFormat) SgPixelFormatInfo = {
         compressed = c, 
         bytes_per_pixel = @if(c, 0, pixelformat_bytesize(fmt)),
     )
-}
-
-fn sg_query_row_pitch(fmt: SgPixelFormat, width: i32, row_align_bytes: i32) i32 = {
-    @debug_assert(sg.valid);
-    @debug_assert(width > 0);
-    @debug_assert((row_align_bytes > 0) && _sg_ispow2(row_align_bytes));
-    @debug_assert(((int)fmt > SG_PIXELFORMAT_NONE) && ((int)fmt < _SG_PIXELFORMAT_NUM));
-    row_pitch(fmt, width, row_align_bytes)
-}
-
-fn sg_query_surface_pitch(fmt: SgPixelFormat, width: i32, height: i32, row_align_bytes: i32) i32 = {
-    @debug_assert(sg.valid);
-    @debug_assert((width > 0) && (height > 0));
-    @debug_assert((row_align_bytes > 0) && _sg_ispow2(row_align_bytes));
-    @debug_assert(((int)fmt > SG_PIXELFORMAT_NONE) && ((int)fmt < _SG_PIXELFORMAT_NUM));
-    _sg_surface_pitch(fmt, width, height, row_align_bytes)
-}
-
-fn install_trace_hooks(sg: *Self, trace_hooks: *sg_trace_hooks) sg_trace_hooks = {
-    @debug_assert(sg.valid);
-    @debug_assert(trace_hooks);
-    sg_trace_hooks old_hooks = sg.hooks;
-    if SOKOL_TRACE_HOOKS {
-        sg.hooks = trace_hooks[];
-    } else {
-        _SG_WARN(TRACE_HOOKS_NOT_ENABLED);
-    }
-    old_hooks
 }
 
 fn begin_pass(sg: *Self, pass: *SgPass) void #trace_args(.tail) = {
@@ -2245,6 +2221,7 @@ fn draw(sg: *Self, base_element: i32, num_elements: i32, num_instances: i32) voi
     sg.impl().draw(base_element, num_elements, num_instances);
 }
 
+// TODO
 fn dispatch(sg: *Self, num_groups_x: i32, num_groups_y: i32, num_groups_z: i32) void #trace(.tail) = {
     @debug_assert(sg.valid);
     if(!_sg_validate_dispatch(num_groups_x, num_groups_y, num_groups_z), => return());
@@ -2303,6 +2280,7 @@ fn update_buffer(sg: *Self, buf_id: Buffer, data: []u8) void #trace = {
     }
 }
 
+// TODO
 fn append_buffer(sg: *Self, buf_id: Buffer, data: []u8) i64 #trace = {
     @debug_assert(sg.valid);
     @debug_assert(data && data.ptr);
@@ -2335,21 +2313,7 @@ fn append_buffer(sg: *Self, buf_id: Buffer, data: []u8) i64 #trace = {
     start_pos
 }
 
-fn query_buffer_overflow(sg: *Self, buf_id: Buffer) bool = 
-    sg.query(buf_id, fn(it) => it.cmn.append_overflow, false);
-
-fn query_buffer_will_overflow(sg: *Self, buf_id: Buffer, size: i64) bool = {
-    @debug_assert(sg.valid);
-    buf := _sg_lookup_buffer(&sg.pools, buf_id.id) || return(false);
-    bool result = false;
-    int append_pos = buf.cmn.append_pos;
-    // rewind append cursor in a new frame
-    if (buf.cmn.append_frame_index != sg.frame_index) {
-        append_pos = 0;
-    }
-    append_pos + _sg_roundup((int)size, 4)) > buf.cmn.size
-}
-
+// TODO
 fn update_image(sg: *Self, img_id: Image, data: *sg_image_data) void #trace = {
     @debug_assert(sg.valid);
     _sg_stats_add(num_update_image, 1);
@@ -2379,170 +2343,6 @@ fn push_debug_group(sg: *Self, name: CStr) void #trace = {
 fn pop_debug_group(sg: *Self) void #trace = {
     @debug_assert(sg.valid);
     sg.impl().pop_debug_group();
-}
-
-// just use the field for:
-// sg_enable_frame_stats, sg_disable_frame_stats, FrameStat_enabled, sg_query_frame_stats
-// sg_isvalid, sg_query_desc, sg_query_backend, sg_query_features, sg_query_limits
-
-fn query_buffer_info(sg: *Self, buf_id: Buffer) sg_buffer_info = {
-    @debug_assert(sg.valid);
-    sg_buffer_info info;
-    _sg_clear(&info, sizeof(info));
-    const *Buffer.T buf = _sg_lookup_buffer(&sg.pools, buf_id.id);
-    if(buf.is_null(), => return(info));
-    info.slot.state = buf.slot.state;
-    info.slot.res_id = buf.slot.id;
-    info.update_frame_index = buf.cmn.update_frame_index;
-    info.append_frame_index = buf.cmn.append_frame_index;
-    info.append_pos = buf.cmn.append_pos;
-    info.append_overflow = buf.cmn.append_overflow;
-    ASSERT_METAL();
-    info.num_slots = buf.cmn.num_slots;
-    info.active_slot = buf.cmn.active_slot;
-    info
-}
-
-fn query_image_info(sg: *Self, img_id: Image) sg_image_info = {
-    @debug_assert(sg.valid);
-    info := zeroed sg_image_info;
-    img := _sg_lookup_image(&sg.pools, img_id.id) || return(info);
-    info.slot.state = img.slot.state;
-    info.slot.res_id = img.slot.id;
-    info.upd_frame_index = img.cmn.upd_frame_index;
-    ASSERT_METAL();
-    info.num_slots = img.cmn.num_slots;
-    info.active_slot = img.cmn.active_slot;
-    info
-}
-
-fn query_buffer_desc(sg: *Self, buf_id: Buffer) Buffer.Desc = {
-    @debug_assert(sg.valid);
-    d := zeroed sg_buffer_desc;
-    buf := _sg_lookup_buffer(&sg.pools, buf_id.id) || return(d);
-    d.size = (size_t)buf.cmn.size;
-    d.type = buf.cmn.type;
-    d.usage = buf.cmn.usage;
-    d
-}
-
-fn query_buffer_size(sg: *Self, buf_id: Buffer) i64 = 
-    sg.query(buf_id, fn(it) => it.cmn.size, 0);
-
-fn query_buffer_type(sg: *Self, buf_id: Buffer) SgBufferType = 
-    sg.query(buf_id, fn(it) => it.cmn.type, _SG_BUFFERTYPE_DEFAULT);
-
-fn query_buffer_usage(sg: *Self, buf_id: Buffer) SgUsage = 
-    sg.query(buf_id, fn(it) => it.cmn.usage, _SG_USAGE_DEFAULT);
-
-fn query_image_desc(sg: *Self, img_id: Image) Image.Desc = {
-    @debug_assert(sg.valid);
-    d := zeroed sg_image_desc;
-    img := _sg_lookup_image(&sg.pools, img_id.id) || return(d);
-    d.type = img.cmn.type;
-    d.render_target = img.cmn.render_target;
-    d.width = img.cmn.width;
-    d.height = img.cmn.height;
-    d.num_slices = img.cmn.num_slices;
-    d.num_mipmaps = img.cmn.num_mipmaps;
-    d.usage = img.cmn.usage;
-    d.pixel_format = img.cmn.pixel_format;
-    d.sample_count = img.cmn.sample_count;
-    d
-}
-
-fn query(sg: *Self, id: ~Handle, $body: @Fn(it: *Handle.T) Out, default: ~Out) Out #where = {
-    @debug_assert(sg.valid);
-    it := sg.lookup(id) || return(default);
-    body(it)
-}
-
-fn query_image_type(sg: *Self, img_id: Image) SgImageType = 
-    sg.query(img_id, fn(it) => it.cmn.type, .DEFAULT);
-
-fn query_image_width(sg: *Self, img_id: Image) i32 = 
-    sg.query(img_id, fn(it) => it.cmn.width, 0);
-
-fn query_image_height(sg: *Self, img_id: Image) i32 = 
-    sg.query(img_id, fn(it) => it.cmn.height, 0);
-
-fn query_image_num_slices(sg: *Self, img_id: Image) i32 = 
-    sg.query(img_id, fn(it) => it.cmn.num_slices, 0);
-
-fn sg_query_image_num_mipmaps(sg: *Self, img_id: Image) i32 = 
-    sg.query(img_id, fn(it) => it.cmn.num_mipmaps, 0);
-
-fn query_image_pixelformat(sg: *Self, img_id: Image) SgPixelFormat = 
-    sg.query(img_id, fn(it) => it.cmn.pixel_format, .DEFAULT);
-
-fn query_image_usage(sg: *Self, img_id: Image) SgUsage = 
-    sg.query(img_id, fn(it) => it.cmn.usage, .DEFAULT);
-
-fn query_image_sample_count(sg: *Self, img_id: Image) i32 = 
-    sg.query(img_id, fn(it) => it.cmn.sample_count, 0);
-
-fn query_sampler_desc(sg: *Self, smp_id: Sampler) Sampler.Desc = {
-    @debug_assert(sg.valid);
-    smp := _sg_lookup_sampler(&sg.pools, smp_id.id) || return(zeroed(@type smp.cmn));
-    smp.cmn
-}
-
-fn query_shader_desc(sg: *Self, shd_id: Shader) Shader.Desc = {
-    @debug_assert(sg.valid);
-    desc := zeroed sg_shader_desc;
-    shd := _sg_lookup_shader(&sg.pools, shd_id.id) || return(desc);
-    for (size_t ub_idx = 0; ub_idx < SG_MAX_UNIFORMBLOCK_BINDSLOTS; ub_idx++) {
-        sg_shader_uniform_block* ub_desc = &desc.uniform_blocks[ub_idx];
-        const _sg_shader_uniform_block_t* ub = &shd.cmn.uniform_blocks[ub_idx];
-        ub_desc.stage = ub.stage;
-        ub_desc.size = ub.size;
-    }
-    for (size_t sbuf_idx = 0; sbuf_idx < SG_MAX_STORAGEBUFFER_BINDSLOTS; sbuf_idx++) {
-        sg_shader_storage_buffer* sbuf_desc = &desc.storage_buffers[sbuf_idx];
-        const _sg_shader_storage_buffer_t* sbuf = &shd.cmn.storage_buffers[sbuf_idx];
-        sbuf_desc.stage = sbuf.stage;
-        sbuf_desc.readonly = sbuf.readonly;
-    }
-    for (size_t img_idx = 0; img_idx < SG_MAX_IMAGE_BINDSLOTS; img_idx++) {
-        sg_shader_image* img_desc = &desc.images[img_idx];
-        const _sg_shader_image_t* img = &shd.cmn.images[img_idx];
-        img_desc.stage = img.stage;
-        img_desc.image_type = img.image_type;
-        img_desc.sample_type = img.sample_type;
-        img_desc.multisampled = img.multisampled;
-    }
-    for (size_t smp_idx = 0; smp_idx < SG_MAX_SAMPLER_BINDSLOTS; smp_idx++) {
-        sg_shader_sampler* smp_desc = &desc.samplers[smp_idx];
-        const _sg_shader_sampler_t* smp = &shd.cmn.samplers[smp_idx];
-        smp_desc.stage = smp.stage;
-        smp_desc.sampler_type = smp.sampler_type;
-    }
-    for (size_t img_smp_idx = 0; img_smp_idx < SG_MAX_IMAGE_SAMPLER_PAIRS; img_smp_idx++) {
-        sg_shader_image_sampler_pair* img_smp_desc = &desc.image_sampler_pairs[img_smp_idx];
-        const _sg_shader_image_sampler_t* img_smp = &shd.cmn.image_samplers[img_smp_idx];
-        img_smp_desc.stage = img_smp.stage;
-        img_smp_desc.image_slot = img_smp.image_slot;
-        img_smp_desc.sampler_slot = img_smp.sampler_slot;
-    }
-    desc
-}
-
-fn query_pipeline_desc(sg: *Self, pip_id: Pipeline) Pipeline.Desc = {
-    @debug_assert(sg.valid);
-    pip := _sg_lookup_pipeline(&sg.pools, pip_id.id) || return(zeroed Pipeline.Desc);
-    pip.cmn.common
-}
-
-fn query_attachments_desc(sg: *Self, atts_id: Attachments) Attachments.Desc = {
-    @debug_assert(sg.valid);
-    desc := zeroed sg_attachments_desc;
-    atts := _sg_lookup_attachments(&sg.pools, atts_id.id) || return(desc);
-    range(0, atts.cmn.num_colors) { i |
-        desc.colors&[i] = atts.cmn.colors&[i];
-    }
-    desc.depth_stencil.image = atts.cmn.depth_stencil.image_id;
-    desc.depth_stencil.mip_level = atts.cmn.depth_stencil.mip_level;
-    desc.depth_stencil.slice = atts.cmn.depth_stencil.slice;
 }
 
 // @map_enum(e) (name = val, ..); where e: @enum(name); -> @type val

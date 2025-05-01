@@ -26,6 +26,11 @@
 - implement #trace
 - don't dlopen stuff in build_for_graphics when doing AOT
 - send frameworks to backend and tell it which lib to import each function from. so i don't need the linker for AOT
+- test that runs all the interactive things in sequence
+- geo: `// TODO: the controls feel really bad. you can like lose key presses.`
+make sure that's not something i broke (i think it was always like that, 
+just a problem with how that program is doing directions not with the app lib)
+- generate the shader desc structs instead of pasting them
 
 ## stuff i broke
 

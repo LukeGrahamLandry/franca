@@ -3,6 +3,10 @@
 `franca/graphics` is a collection of libraries for writing programs that don't live 
 in a terminal. It will open a window, listen for events, draw pixels on the screen, etc. 
 
+```
+app.fr : gfx.fr :: winit : wgpu
+```
+
 Take all of this with a grain of salt; I know much less about gpu stuff than I 
 know about compiler stuff. A major part of why I'm converting the gfx code to 
 my language is to force myself to look at it all in the hopes of understanding 
@@ -15,7 +19,7 @@ abstraction layer.
 ## examples
 
 - app_events: tries to use all features of app.fr and debugtext.fr
-- geo: decompresses LAz files, draws 3d point clouds, and lets you fly around
+- geo: decompresses LAZ files, draws 3d point clouds, and lets you fly around
 - farm_game: a 2d game drawn with coloured rectangles
 - edit: opens a text file and lets you scroll around
 

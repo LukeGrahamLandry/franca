@@ -1,5 +1,12 @@
 
-## Apr (30)
+##
+
+- there's a bunch of `sg_query_*` functions that don't spark joy. 
+the sokol-samples pretty much don't use them. 
+i think if i add them back it would be as part of something that provides 
+the same c abi as sokol so you could drop in try their tests. 
+
+## (Apr 30) porting sokol_gfx
 
 Mistakes (after it compiled)
 - pool.queue_top off by one
@@ -189,7 +196,7 @@ inside your function call that zeroes registers at random, but also it's
 kinda reasonable if it's considered disrespectful to lie about a function's signeture. 
 anyway, rare W for lldb. 
 
-## (Apr 22)
+## (Apr 22) wasm backend
 
 - mem1.ssa
   - use the right index for indirect return type

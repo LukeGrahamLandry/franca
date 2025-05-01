@@ -6,9 +6,15 @@ Franca ports of various things useful for creating cross platform graphical appl
 
 ## https://github.com/floooh/sokol
 
-- app: app framework wrapper (entry + window + 3D-context + input)
+- gfx: 3D-API abstraction layer
+- app: open a window, get a 3D-context, handle input events
 - gl: OpenGL 1.x style immediate-mode rendering API
 - debugtext: a simple ASCII text renderer using vintage home computer fonts
+
+## Other
+
+- shaders: translate a subset of franca to MSL
+- vec: 2/3/4-D linear algebra
 
 ## Tradeoffs vs Sokol
 
@@ -30,7 +36,7 @@ A few changes are fairly clear improvements:
   (instead of pasting a massive byte array into your c program).
 - Write shaders as annotated franca functions and use comptime introspection to translate them into shader languages.  
   (instead of writing it in glsl-ish and using a seperate build step to translate it into... you guessed it... a massive byte array to paste into your c program).
-- No dependency on a c and objective-c compiler (eventually). 
+- No dependency on an objective-c compiler
 - Less code per code. 
 
 ## Sokol License 
