@@ -321,10 +321,15 @@ fn shallow_jit_func(self: *SelfHosted, fid: FuncId) void = {
     pending := FuncId.list(temp());
     @if(TRACE_SHIMS) @println("shallow jit F%: %", fid.as_index(), self.log_name(fid));
     func := self.get_function(fid);  
-    if func.body&.is(.DynamicImport) {
+    
+    if func.body&.is(.DynamicImport) && func.body.DynamicImport.comptime == 0 {
+        // It's an import but we don't have a jit pointer for it (== didn't find it in a dylib). 
+        // So there's nothing we can do. Just make a jit shim so trying to call it 
+        // will safely error with "tried to call uncompiled". 
         self.create_jit_shim(fid); 
         return();
     };
+    
     //for func.callees& { fid |
     //    if !self.get_function(fid).get_flag(.AsmDone) {
     //        self.create_jit_shim(fid); 
@@ -458,6 +463,7 @@ report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHo
                     };
                 };
                 if !first {
+                
                     // If its an import we're never gonna make progress by trying to compile it. 
                     if func.get_flag(.BodyIsSpecial) {
                         @panic("Tried to call uncompiled function:\n %", self.get_function(fid).log(self));

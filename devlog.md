@@ -1,10 +1,24 @@
 
-##
+## (May 1)
 
 - there's a bunch of `sg_query_*` functions that don't spark joy. 
 the sokol-samples pretty much don't use them. 
 i think if i add them back it would be as part of something that provides 
 the same c abi as sokol so you could drop in try their tests. 
+- cleanup: unify DynamicImport with ComptimeAddr. makes stuff look less confusing, 
+you kinda had to treat them the same before anyway. 
+- added new syntax, `..` to spread a value across a tuple, which when 
+combined with coercing to arrays makes using default fields for the 
+desc structs much more tenable. 
+- not sure if that was the right choice. it's not really an expressivity improvement.
+you could just have a macro do the trivial desugaring. it would maybe feel better if it was 
+became a macro call but then you need to give macros access to the requested type which im not 
+ready to deal with. it really makes the code more pleasent than it would be if you 
+had to do `@spread_array(Array(SgLongNameDesc, 4)) ((a = 1), (a = 1),);`
+- found crippling mistake where emit_ir/construct_aggregate/Array would 
+evaluate to one past the end of the array instead of the start, just didn't 
+matter because an `Expr::Tuple` wouldn't become an array before. 
+- bad sign for my tiny graphics tests that the Desc stuff seemed to work with that broken
 
 ## (Apr 30) porting sokol_gfx
 

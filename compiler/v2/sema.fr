@@ -605,16 +605,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
         (Ok = self.pool.insert_owned(ir)) 
     }
     
-    found_comptime_import :: fn(addr: rawptr) => {
-        self.put_jitted_import(fid, addr);
-        impls: List(FuncImpl) = list(2, self.get_alloc());
-        impls&.push(ComptimeAddr = addr.int_from_rawptr());
-        impls&.push(DynamicImport = func.name);
-        
-        //func.set_flag(.NoMangle);
-        func.body = (Merged = impls.as_raw());
-    };
-       
+    // TODO: find_import/resolve_comptime_import/resolve_comptime_import all kinda do the same thing
     find_import :: fn(lib_name: Symbol) bool => {
         ret :: local_return;
         handle2 := self.comptime_libraries&.get(lib_name);
@@ -622,7 +613,12 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
         while => handle2 { handle |
             name := self.get_link_name(func);
             if handle.get(name) { addr |
-                found_comptime_import(addr);
+                self.put_jitted_import(fid, addr);
+                
+                impl := find_or_create_impl(func.body&, self.get_alloc(), .DynamicImport);
+                impl[] = (name = func.name, lib = lib_name, comptime = addr.int_from_rawptr());
+                
+                //func.set_flag(.NoMangle);
                 ret(true);
             };
             handle2 = .None;
@@ -637,7 +633,9 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
         };
         // :AssumeDones
         // TODO: how to catch if it actually doesn't exist or they typo-ed the #import string.
-        func.body = (DynamicImport = func.name);
+        impl := find_or_create_impl(func.body&, self.get_alloc(), .DynamicImport);
+        impl.name = func.name;
+        impl.lib = lib_name;
         //@if(func.name != Flag.___this_function_is_not_real_im_just_testing_the_franca_compiler.ident())
             //@eprintln("TODO: maybe missing import %", self.log_name(fid));
         @try(self.create_jit_shim(fid)) return;
@@ -661,7 +659,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                 // :io_driver
                 lib_name := @match(tag.non_void_arg()) {
                     fn Some(lib_name) => @check(self.eval_str(lib_name)) return;
-                    fn None() => self.pool.insert_owned("");
+                    fn None() => Flag.SYMBOL_ZERO.ident();
                 };
                 
                 if !find_import(lib_name) {
@@ -678,7 +676,8 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                 ::as_ref(FatExpr);
                 value := @unwrap(tag.non_void_arg(), "#comptime_addr requires arg") return;
                 ptr := @check(self.eval(value, i64)) return;
-                func.body = (ComptimeAddr = ptr);
+                impl := find_or_create_impl(func.body&, self.get_alloc(), .DynamicImport);
+                impl.comptime = ptr;
                 ptr := ptr.rawptr_from_int();
                 self.put_jitted_import(fid, ptr);
                 func.set_flag(.YesContext);
@@ -1005,8 +1004,15 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
             };
         }
         fn Tuple(parts) => {
-            requested_types := @try(self.tuple_types(requested, parts.len)) return;
+            requested_types := @try(self.tuple_types_arr(requested, parts.len)) return;
             types: List(Type) = list(parts.len, temp()); 
+            
+            // TODO: handle spread to single element correctly. ie. x: Array(i64, 2) = (0, ..1);
+            // if lengths don't match, handle spread syntax or error out
+            if requested_types.len != parts.len {
+                @check(self.expand_spread(parts, requested_types)) return;
+            };
+            
             done := true;
             enumerate parts { i, part | 
                 if !part.done {
@@ -1021,6 +1027,14 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
                 expr.ty = self.tuple_of(types.items());
                 self.finish_layout_deep(expr.ty);
             };  // TODO: else :type_check
+            
+            // homogeneous tuple literals to coerce to arrays
+            @if_let(requested) fn Specific(ty) => if ty != expr.ty {
+                @if_let(self.get_type(ty)) fn Array(it) => if parts.len == it.len.zext() {
+                    expr.ty = ty;
+                    // TODO: do i need to re-typecheck each part or did passing it in as requested handle that?
+                };
+            };
         }
         fn PrefixMacro() => {
             @check(self.compile_prefix_macro(expr)) return;
@@ -1358,6 +1372,27 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
     self.last_loc = old_loc;
     self.dispatch.enclosing_function = todo_dont_lose;
     @debug_assert(!expr.ty.is_unknown(), "[compile_expr] Unknown type for %", expr.log(self));
+    .Ok
+}
+
+fn expand_spread(self: *SelfHosted, parts: *RawList(FatExpr), requested_types: []ResultType) Maybe(void) = {
+    want, found := (requested_types.len, parts.len);
+    is_spread := parts[parts.len - 1].expr&.is(.Spread);
+    @err_assert(is_spread && want > found && parts.len > 0, "Type Error: tuple arity mismatch. expected % but found % (spread=%)", want, found, is_spread) return;
+    extra := want - (found - 1);
+    spread_value := parts[found - 1].expr.Spread;
+    spread_ty := requested_types[want - 1];
+    // TODO: better error message if you try to coerce V:() to something that doesn't have all default fields. 
+    @check(self.compile_expr(spread_value, spread_ty)) return;
+    // TODO: type check that all the new elements are the same type
+    parts.len -= 1;  // AFTER the yield
+    
+    // TODO: only evaluate spread_value once, this would be super easy in emit_ir but making new variables here is painful.  
+    a := self.get_alloc();
+    parts.reserve(extra, a);
+    range(0, extra) { _ |
+        parts.push(spread_value.deep_clone(a), a);
+    };
     .Ok
 }
 

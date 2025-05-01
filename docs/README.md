@@ -13,3 +13,5 @@ and some things are dumb enough that I should defend myself.
 - concessions: rambling defense of some language design decisions
 - lib_summary: list of useful code provided with the franca distribution 
 - builtins: list of magic functions provided by the franca compiler 
+- graphics: notes about the franca `graphics` library (gpu rendering)
+- backend: notes about the franca `backend` library (codegen NOT website) 

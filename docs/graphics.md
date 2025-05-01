@@ -1,4 +1,4 @@
-# notes about ../graphics
+# notes about `@/graphics`
 
 `franca/graphics` is a collection of libraries for writing programs that don't live 
 in a terminal. It will open a window, listen for events, draw pixels on the screen, etc. 

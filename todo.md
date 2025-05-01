@@ -11,7 +11,7 @@
 - finish gfx-metal. need to make sure everything is reachable
 - example program that tries to use all features
 - finish gfx validation and enable that based on DebugAssetions
-- clean up defaults (i can put defaults in a struct field. need to make it play nice with arrays `(x, ..())`
+- clean up defaults
 - dearimgui backend
 - support x11 / opengl / glsl
 - support web (depends on finishing wasm backend), don't use emscripten
@@ -51,9 +51,8 @@ and gives you junk (that's not 0 or 1) when `common()` uses `#unsafe_noop_cast`.
 rn you're supposed to need a redundant `[]` in a call like that. 
 - aot_import_body probably shouldn't zero x0 just because it thinks the param is void
 - fix the infinite loop when a constant references itself
-- :NoInlineImport
 - `@struct(a: A #use = (),);`
-- tests/todo/b.fr
+- tests/todo/b.fr (might even be a parser bug? always a surprise when that's the problem)
 
 ## cross compiling
 
@@ -64,6 +63,8 @@ bodies on different targets which i don't deal with well.
 
 ## language consistancy
 
+- :NoInlineImport
+- ._N and .len on Array
 - #c_variadic + conflicting overload (ie for open()) where you want the non-va version to also be #syscall. maybe that's not worth fixing. 
 - #c_variadic as part of FnType (or CallConv?) so function pointers work 
 - #use field in guess_type for #where
@@ -101,6 +102,8 @@ b = .a;
 - reporducible builds depend on compilation order because of var id (like if you iterate a scope) 
 or function ids which end up in your binary. this is actually fine currently because 
 the frontend is single threaded but maybe it's not a great idea in the long term. 
+- don't evaluate the spread value of `..` multiple times
+- make `..` work when it's redundantly spreading a single item (rn it's an error)
 
 ## library robustness
 
@@ -294,6 +297,15 @@ usecase: examples/lox Obj header
   - somehow preserve the original structure so your program can know the types of stuff 
   and also the shape of code at the same time. currently sema stomps on the nodes. 
   (see graphics/shaders for a painful example)
+- more stuff with the spread operator `..`,
+  - in a call: maybe force that for varargs? or have it mean to look for default arguments in the function? 
+  both of those would maybe feel better if they just worked but maybe you'd rather 
+  have it be opt-in since it makes the overload resolution situation even more expensive. 
+  - in a structliteralp: update syntax? but it would be so easy to just write a macro like `@objc_set` for normal structs.  
+  - as a binary operator: give a new overload you could use for indexing like `arr[a..b]`
+- give macros access to the requested type
+- fomalize init from literals? like implement `Expr::Tuple` -> `Array` in "userspace"?
+but that's really going towards crazy town (cough swift/c++ cough)
 
 ## demos 
 

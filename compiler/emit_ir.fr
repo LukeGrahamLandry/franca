@@ -49,6 +49,7 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
         ::tagged(Placement);
         func := comp.get_function(f); 
         opts := comp.get_build_options();
+        
         env := comp.get_comptime_env();
         self: EmitIr = (
             f = temp().box(Qbe.Fn),
@@ -339,13 +340,13 @@ fn bounce_body(self: *EmitIr, callee: Qbe.Ref, o: Qbe.O) void = {
     self.finalize_blocks();
 }
 
-fn aot_import_body(self: *EmitIr, name: Symbol) void = {
+fn aot_import_body(self: *EmitIr, info: DynamicImport) void = {
     // :DumbNameAlias
     // TODO: use FnFlag.NoMangle instead but that doesn't work with the old backends calling the same 
     //       fmt_fn_name until they also don't try to make bounce functions.
     g := self.m.goal&;
     func := self.program.get_function(self.func);
-    real_name := self.program.check_link_rename(name, func, (arch = g.arch, os = g.os));
+    real_name := self.program.check_link_rename(info.name, func, (arch = g.arch, os = g.os));
     target := self.m.intern(real_name);
     self.bounce_body(self.f.symcon(target), .call);
 }
@@ -368,8 +369,8 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = { // #log_ir("AIR")
     };
     
     T :: FuncImpl.Tag();
-    prio_amd :: @const_slice(T.NewIntrinsic, T.Normal, T.Intrinsic, T.ComptimeAddr, T.TargetOsSplit, T.X86AsmBytes, T.Redirect, T.DynamicImport, T.Ir);
-    prio_arm :: @const_slice(T.NewIntrinsic, T.Normal, T.Intrinsic, T.ComptimeAddr, T.TargetOsSplit, T.JittedAarch64, T.Redirect, T.DynamicImport, T.Ir);
+    prio_amd :: @const_slice(T.NewIntrinsic, T.Normal, T.Intrinsic, T.TargetOsSplit, T.X86AsmBytes, T.Redirect, T.DynamicImport, T.Ir);
+    prio_arm :: @const_slice(T.NewIntrinsic, T.Normal, T.Intrinsic, T.TargetOsSplit, T.JittedAarch64, T.Redirect, T.DynamicImport, T.Ir);
     impl := or choose_impl(func.body&, @if(self.m.goal.arch == .aarch64, prio_arm, prio_amd)) {
         if self.want_syscall(self.func, true) { syscall_number |
             self.bounce_body(self.f.getcon(syscall_number), .syscall);
@@ -403,19 +404,15 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = { // #log_ir("AIR")
             self.finalize_blocks();
             return(.Ok)
         }
-        fn ComptimeAddr(it) => {
-            @match(self.when) {
-                fn Aot() => self.aot_import_body(func.name);
-                fn Jit() => {
-                    self.entry.task = (JitImport = (lnk = self.f.lnk&, addr = rawptr_from_int(it[])));
-                }
-            };
-            return(.Ok)
-        }
         // copy-paste from above
         fn DynamicImport(name) => {
-            @err_assert(self.when == .Aot, "we hit a dynamicimport with no comptimeaddr for jit. the frontend should make sure this doesn't happen. \nTODO: this happens when compiling targetting libc from a compiler built without libc on linux") return;
-            self.aot_import_body(name[]);
+            @match(self.when) {
+                fn Aot() => self.aot_import_body(name[]);
+                fn Jit() => {
+                    @err_assert(name.comptime != 0, "we hit a dynamicimport with no comptimeaddr for jit\nthe frontend should make sure this doesn't happen. \nTODO: this happens when compiling targetting libc from a compiler built without libc on linux") return;
+                    self.entry.task = (JitImport = (lnk = self.f.lnk&, addr = rawptr_from_int(name.comptime)));
+                }
+            };
             return(.Ok)
         };
         fn TargetOsSplit(_) => {
@@ -813,6 +810,7 @@ fn compile_expr(self: *EmitIr, expr: *FatExpr, p: Placement) CRes(Qbe.Ref) = {
             };
             @err_assert(!(p&.is(.ScalarTransient) || p&.is(.Scalar) || p&.is(.Assign)), "ICE: non single field struct as scalar") return;
             raw := self.program.raw_type(expr.ty); // TODO: do i need this? 
+            // TODO: this is sad/pastey
             @match(self.program.get_type(raw)) {
                fn Struct(f) => {
                     @err_assert(f.layout_done, "ICE: struct layout not ready.") return;
@@ -835,7 +833,7 @@ fn compile_expr(self: *EmitIr, expr: *FatExpr, p: Placement) CRes(Qbe.Ref) = {
                         @try(self.compile_expr(value, (Blit = mem))) return;
                         mem = self.offset(mem, element_size);
                     };
-                    mem
+                    base
                 }
                 @default => return(@err("Expr::Tuple should have struct type not %. (0/1 element tuple maybe?)", self.program.log(raw)));
             }
@@ -928,10 +926,10 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
                         a1 := if(arg.len == 1, => QbeNull, => @try(self.compile_expr(arg[1]&, .ScalarTransient)) return);
                         return(self.emit_intrinsic_old(op, p, @slice(a0, a1), caller, f_ty.ret));
                     }
-                    fn DynamicImport(name) => if self.when == .Aot {
+                    fn DynamicImport(info) => if self.when == .Aot {
                         g := self.m.goal&;
                         // TODO: should cache #link_rename because it's weird if i call the user's function a billion times. 
-                        real_name := self.program.check_link_rename(name[], func, (arch = g.arch, os = g.os));
+                        real_name := self.program.check_link_rename(info.name, func, (arch = g.arch, os = g.os));
                         callee_r = self.f.symcon(self.m.intern(real_name));
                     };
                     @default => unreachable();
