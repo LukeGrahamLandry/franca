@@ -1,5 +1,7 @@
 
-Mistakes 
+## Apr (30)
+
+Mistakes (after it compiled)
 - pool.queue_top off by one
 - replaceObjectAtIndex:atIndex:
 - setVorderColor
@@ -8,6 +10,27 @@ Mistakes
 - setBuffer vs setVertexBuffer
 - `popDebugGroup:` because i said `mtl.encoder().popDebugGroup(name);` (instead of no args) so it sent the overload set id called `name`
 - !!!! it works !!!!
+
+- still lots of stuff that's unreachable from app_events.fr tho
+- funny that it takes ~100ms longer to compile which is a net win once i get rid of the linker
+- oof, get_slot() not even using slot_index
+- updated farm_game, edit
+- build_for_graphics `-jit` use a seperate backend thread: 324ms -> 254ms. 
+- but that driver itself is an extra 119ms which is way to slow
+- `geo` has lots its points. just gray :(
+my depth stuff is fucked somehow? 
+it doesn't like `SgPipelineDesc.depth.compare = .LESS_EQUAL;`
+it works if i make it GREATER/GREATER_EQUAL, did i like flip a coordinate somewhere somehow?
+but no, if i do `>` i can like see through it in a creepy way, 
+or maybe i just lost some defaults, since anything that has arrays in it is kinda unfinished 
+until i have better array literals. 
+maybe doing the validation stuff will magically reveal the problem?
+seems like no luck.
+found a line that makes it work if i comment it out `@objc d.setClearDepth(action.depth.clear_value);`
+ha, classic blunder: that field is an f32. objc seems to mostly want f64. 
+but not always (setBlendColorRed:green:blue:alpha:) so i can't just make it an error. 
+- that was pretty successful all things considered, 
+collected a bunch of things to improve in the compiler which was kinda the hope. 
 
 ##
 

@@ -921,10 +921,8 @@ fn create(mtl: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg.Pipeline
         release(cp_desc);
         if mtl_cps.is_nil() {
             @debug_assert(!err.is_nil());
-            // TODO
-            //_SG_ERROR(METAL_CREATE_CPS_FAILED);
-            //_SG_LOGMSG(METAL_CREATE_CPS_OUTPUT, 
-            @eprintln("METAL_CREATE_CPS_FAILED %", @objc @as(CStr) (@objc err.localizedDescription()).UTF8String());
+            _SG_ERROR("METAL_CREATE_CPS_FAILED");
+            _SG_LOGMSG("METAL_CREATE_CPS_FAILED", @objc @as(CStr) (@objc err.localizedDescription()).UTF8String());
             return(.FAILED);
         }
         pip.mtl.cps = mtl.add_resource(mtl_cps);
@@ -999,6 +997,7 @@ fn create(mtl: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg.Pipeline
             @debug_assert(i < Sg.SG_MAX_COLOR_ATTACHMENTS);
             cs := desc.colors&[i]&;
             it := @objc at.objectAtIndexedSubscript(i);
+            @debug_assert(!it.is_nil());
             @objc_set(it) (
                 pixelFormat = to_mtl(cs.pixel_format),
                 writeMask = to_mtl(cs.write_mask),
@@ -1037,9 +1036,8 @@ fn create(mtl: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg.Pipeline
         release(rp_desc);
         if mtl_rps.is_nil() {
             @debug_assert(!err.is_nil());
-            //_SG_ERROR(METAL_CREATE_RPS_FAILED);
-            //_SG_LOGMSG(METAL_CREATE_RPS_OUTPUT,
-            @eprintln("METAL_CREATE_RPS_FAILED %", @objc @as(CStr) (@objc err.localizedDescription()).UTF8String());
+            _SG_ERROR("METAL_CREATE_RPS_FAILED");
+            _SG_LOGMSG("METAL_CREATE_RPS_FAILED", @objc @as(CStr) (@objc err.localizedDescription()).UTF8String());
             return(.FAILED);
         }
         pip.mtl.rps = mtl.add_resource(mtl_rps);
@@ -1074,7 +1072,7 @@ fn create(mtl: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg.Pipeline
         mtl_dss := @objc mtl.device.newDepthStencilStateWithDescriptor(ds_desc);
         release(ds_desc);
         if mtl_dss.is_nil() {
-            eprintln("METAL_CREATE_DSS_FAILED"); // TODO
+            _SG_ERROR("METAL_CREATE_DSS_FAILED"); 
             return(.FAILED);
         }
         pip.mtl.dss = mtl.add_resource(mtl_dss);
@@ -1121,20 +1119,19 @@ fn create(mtl: *Impl, atts: *Sg.Attachments.T, color_images: **Sg.Image.T, resol
 // TODO: make `_` not be a real identifier so you can ignore both of these with one. 
 fn discard(_: *Impl, __: *Sg.Attachments.T) void = ();
 
-fn attachments_color_image(_: *Impl, atts: *Sg.Attachments.T, index: i32) *Sg.Image.T = {
-    // NOTE: may return null
-    @debug_assert(atts && (index >= 0) && (index < SG_MAX_COLOR_ATTACHMENTS));
-    atts.mtl.colors[index].image
+fn attachments_color_image(_: *Impl, atts: *Sg.Attachments.T, index: i64) ?*Sg.Image.T = {
+    i := atts.mtl.colors&[index].image;
+    @if(i.is_null(), .None, (Some = i))
 }
 
-fn attachments_resolve_image(_: *Impl, atts: *Sg.Attachments.T, index: i32) *Sg.Image.T = {
-    // NOTE: may return null
-    atts.mtl.resolves[@as(i64) index].image
+fn attachments_resolve_image(_: *Impl, atts: *Sg.Attachments.T, index: i64) ?*Sg.Image.T = {
+    i := atts.mtl.resolves&[@as(i64) index].image;
+    @if(i.is_null(), .None, (Some = i))
 }
 
-fn attachments_ds_image(_: *Impl, atts: *Sg.Attachments.T) *Sg.Image.T = {
-    // NOTE: may return null
-    atts.mtl.depth_stencil.image
+fn attachments_ds_image(_: *Impl, atts: *Sg.Attachments.T) ?*Sg.Image.T = {
+    i := atts.mtl.depth_stencil.image;
+    @if(i.is_null(), .None, (Some = i))
 }
 
 fn bind_uniform_buffers(mtl: *Impl) void = {
@@ -1296,17 +1293,20 @@ fn begin_render_pass(mtl: *Impl, pass: *SgPass) void = {
         // optional depth-stencil texture
         if !swapchain.metal.depth_stencil_texture.is_null() {
             ds_tex := bit_cast_unchecked(rawptr, id("MTLTexture"), swapchain.metal.depth_stencil_texture);
-            d := @objc pass_desc.depthAttachment();
-            @objc d.setTexture(ds_tex);
-            @objc d.setStoreAction(0); // MTLStoreActionDontCare
-            @objc d.setLoadAction(to_mtl(action.depth.load_action));
-            @objc d.setClearDepth(action.depth.clear_value);
+            @debug_assert(!ds_tex.is_null());
+            @objc_set(@objc pass_desc.depthAttachment()) (
+                texture = ds_tex,
+                storeAction = 0, // MTLStoreActionDontCare
+                loadAction = to_mtl(action.depth.load_action),
+                clearDepth = @as(f64) cast action.depth.clear_value,
+            );
             if is_depth_stencil_format(swapchain.depth_format) {
-                sa := @objc pass_desc.stencilAttachment();
-                @objc sa.setTexture(ds_tex);
-                @objc sa.setStoreAction(0); // MTLStoreActionDontCare
-                @objc sa.setLoadAction(to_mtl(action.stencil.load_action));
-                @objc sa.setClearStencil(action.stencil.clear_value);
+                @objc_set(@objc pass_desc.stencilAttachment()) (
+                    texture = ds_tex,
+                    storeAction = 0, // MTLStoreActionDontCare
+                    loadAction = to_mtl(action.stencil.load_action),
+                    clearStencil = action.stencil.clear_value,
+                );
             }
         }
     }
@@ -1441,10 +1441,10 @@ fn apply_viewport(mtl: *Impl, x: i32, y: i32, w: i32, h: i32, origin_top_left: b
     @debug_assert(!mtl.render_cmd_encoder.is_nil() && mtl.sg.cur_pass.height > 0);
     MTLViewport :: @struct(originX: f64, originY: f64, width: f64, height: f64, znear: f64, zfar: f64);
     vp: MTLViewport = (
-        originX = (double) x,
-        originY = (double) (origin_top_left ? y : (mtl.sg.cur_pass.height - (y + h))),
-        width   = (double) w,
-        height  = (double) h,
+        originX = float intcast(x),
+        originY = float intcast(@if(origin_top_left, y, (mtl.sg.cur_pass.height - (y + h)))),
+        width   = float intcast(w),
+        height  = float intcast(h),
         znear   = 0.0,
         zfar    = 1.0,
     );
@@ -1452,17 +1452,17 @@ fn apply_viewport(mtl: *Impl, x: i32, y: i32, w: i32, h: i32, origin_top_left: b
 }
 
 fn apply_scissor_rect(mtl: *Impl, x: i32, y: i32, w: i32, h: i32, origin_top_left: bool) void = {
-    @debug_assert(!mtl.render_cmd_encoder,is_nil() && mtl.sg.cur_pass.width > 0 && mtl.sg.cur_pass.height > 0);
+    @debug_assert(!mtl.render_cmd_encoder.is_nil() && mtl.sg.cur_pass.width > 0 && mtl.sg.cur_pass.height > 0);
     // clip against framebuffer rect
-    clip: _sg_recti_t = clipi(x, y, w, h, mtl.sg.cur_pass.width, mtl.sg.cur_pass.height);
-    MTLScissorRect :: @struct(x: u64, y: u64, width: u64, height: u64);
+    clip: Sg._sg_recti_t = clipi(x, y, w, h, mtl.sg.cur_pass.width, mtl.sg.cur_pass.height);
+    MTLScissorRect :: @struct(x: i64, y: i64, width: i64, height: i64);
     r: MTLScissorRect = (
-        x = @as(i64) clip.x,
-        y = @as(i64)  (origin_top_left ? clip.y : (mtl.sg.cur_pass.height - (clip.y + clip.h))),
-        width = @as(i64) clip.w,
-        height = @as(i64) clip.h,
+        x = intcast clip.x,
+        y = intcast @if(origin_top_left, clip.y, mtl.sg.cur_pass.height - (clip.y + clip.h)),
+        width = intcast clip.w,
+        height = intcast clip.h,
     );
-    [mtl.render_cmd_encoder setScissorRect:r];
+    @objc mtl.render_cmd_encoder.setScissorRect(r);
 }
 
 fn apply_pipeline(mtl: *Impl, pip: *Sg.Pipeline.T) void = {
@@ -1634,38 +1634,40 @@ fn apply_bindings(mtl: *Impl, bnd: *Sg.ResolvedBindings) bool = {
 }
 
 fn apply_uniforms(mtl: *Impl, ub_slot: i32, data: []u8) void = {
-    @debug_assert((ub_slot >= 0) && (ub_slot < SG_MAX_UNIFORMBLOCK_BINDSLOTS));
-    @debug_assert(((size_t)mtl.cur_ub_offset + data.size) <= (size_t)mtl.ub_size);
-    @debug_assert((mtl.cur_ub_offset & (_SG_MTL_UB_ALIGN-1)) == 0);
+    @debug_assert((ub_slot >= 0) && (ub_slot < Sg.SG_MAX_UNIFORMBLOCK_BINDSLOTS));
+    @debug_assert((mtl.cur_ub_offset + intcast data.len) <= mtl.ub_size);
+    @debug_assert(mtl.cur_ub_offset.bit_and(_SG_MTL_UB_ALIGN - 1) == 0);
     pip := mtl.state_cache.cur_pipeline;
-    @debug_assert(pip && pip.shader_t);
     @debug_assert(pip.slot.id == mtl.state_cache.cur_pipeline_id.id);
-    shd := pip.shader_t;
-    @debug_assert(shd.slot.id == pip.cmn.shader_id.id);
-    @debug_assert(data.size == shd.cmn.uniform_blocks[ub_slot].size);
+    shd := pip.cmn.shader_t;
+    @debug_assert(shd.slot.id == pip.cmn.shader.id);
+    @debug_assert(data.len == zext shd.cmn.uniform_blocks&[intcast ub_slot].size);
 
-    stage := shd.cmn.uniform_blocks[ub_slot].stage;
-    mtl_slot := shd.mtl.ub_buffer_n[ub_slot];
+    stage := shd.cmn.uniform_blocks&[intcast ub_slot].stage;
+    mtl_slot := shd.mtl.ub_buffer_n&[intcast ub_slot];
 
     // copy to global uniform buffer, record offset into cmd encoder, and advance offset
-    uint8_t* dst = &mtl.cur_ub_base_ptr[mtl.cur_ub_offset];
-    memcpy(dst, data.ptr, data.size);
-    if (stage == SG_SHADERSTAGE_VERTEX) {
-        @debug_assert(nil != mtl.render_cmd_encoder);
-        [mtl.render_cmd_encoder setVertexBufferOffset:@as(i64) mtl.cur_ub_offset atIndex:mtl_slot];
-        _sg_stats_add(metal.uniforms.num_set_vertex_buffer_offset, 1);
-    } else if (stage == SG_SHADERSTAGE_FRAGMENT) {
-        @debug_assert(nil != mtl.render_cmd_encoder);
-        [mtl.render_cmd_encoder setFragmentBufferOffset:@as(i64) mtl.cur_ub_offset atIndex:mtl_slot];
-        _sg_stats_add(metal.uniforms.num_set_fragment_buffer_offset, 1);
-    } else if (stage == SG_SHADERSTAGE_COMPUTE) {
-        @debug_assert(nil != mtl.compute_cmd_encoder);
-        [mtl.compute_cmd_encoder setBufferOffset:@as(i64) mtl.cur_ub_offset atIndex:mtl_slot];
-        _sg_stats_add(metal.uniforms.num_set_compute_buffer_offset, 1);
-    } else {
-        SOKOL_UNREACHABLE;
+    dst := mtl.cur_ub_base_ptr.offset(intcast mtl.cur_ub_offset);
+    dst.slice(data.len).copy_from(data);
+    @match(stage) {
+        fn VERTEX() => {
+            @debug_assert(!mtl.render_cmd_encoder.is_null());
+            @objc mtl.render_cmd_encoder.setVertexBufferOffset(mtl.cur_ub_offset, atIndex = mtl_slot);
+            mtl.sg.stat(.mtl_uniforms_num_set_vertex_buffer_offset, 1);
+        }
+        fn FRAGMENT() => {
+            @debug_assert(!mtl.render_cmd_encoder.is_null());
+            @objc mtl.render_cmd_encoder.setFragmentBufferOffset(mtl.cur_ub_offset, atIndex = mtl_slot);
+            mtl.sg.stat(.mtl_uniforms_num_set_fragment_buffer_offset, 1);
+        }
+        fn COMPUTE() => {
+            @debug_assert(!mtl.compute_cmd_encoder.is_null());
+            @objc mtl.compute_cmd_encoder.setBufferOffset(mtl.cur_ub_offset, atIndex = mtl_slot);
+            mtl.sg.stat(.mtl_uniforms_num_set_compute_buffer_offset, 1);
+        }
+        @default => unreachable();
     }
-    mtl.cur_ub_offset = _sg_roundup(mtl.cur_ub_offset + (int)data.size, _SG_MTL_UB_ALIGN);
+    mtl.cur_ub_offset = _sg_roundup(mtl.cur_ub_offset + intcast data.len, _SG_MTL_UB_ALIGN);
 }
 
 fn draw(mtl: *Impl, base_element: i32, num_elements: i32, num_instances: i32) void = {

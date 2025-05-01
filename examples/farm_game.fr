@@ -11,6 +11,7 @@ State :: @struct(
     world: World,
     text: *Sdtx.Common,
     draw: *Sgl.Common,
+    sg: Sg.Self,
 );
 
 World :: @struct(
@@ -85,23 +86,24 @@ do_init :: fn(userdata: rawptr) void = {
     state := State.ptr_from_raw(userdata);
     sapp := state.app&;
     
-    desc := SgDesc.zeroed();
-    desc.environment = sapp.glue_environment();
-    desc.logger.func = slog_func;
-    sg_setup(desc&);
+    state.sg&.setup(
+        environment = sapp.glue_environment(),
+        allocator = allocator,
+    );
     
-    desc: Sgl.Desc = (
+    state.draw.setup(
         allocator = allocator,
         context = (),
+        sg = state.sg&,
     );
-    setup(state.draw, desc&);
     
     state.text.setup(
         allocator = allocator,
         fonts = @slice(Sdtx.font.kc854),
+        sg = state.sg&,
     );
     
-    desc := SgPipelineDesc.zeroed();
+    desc: SgPipelineDesc = ();
     // This makes transperency work
     colour := desc.colors&[0]&;
     // TODO: struct update sytax. colour.blend = (enabled = true, src_factor_rgb = .SRC_ALPHA, dst_factor_rgb = .ONE_MINUS_SRC_ALPHA, ..)
@@ -273,13 +275,13 @@ do_render :: fn(userdata: rawptr) void = {
         state.dy *= 1.0.neg();
     };
     
-    sapp.glue_sg_begin_pass(state.pass_action);
+    sapp.glue_sg_begin_pass(state.sg&, state.pass_action);
     
     sgl.draw_layer(0);
     sdtx.draw_layer(0);
     
-    sg_end_pass();
-    sg_commit();
+    state.sg&.end_pass();
+    state.sg&.commit();
     reset_temporary_storage(mark);
 };
 
@@ -427,7 +429,7 @@ fn main() void = {
         event_cb = do_event,
         user_data = State.raw_from_ptr(state&),
         allocator = general_allocator(),
-        //window_title = "Arstotzkan Farmer 4",  // TODO
+        window_title = "Arstotzkan Farmer 4",
     );
 }
 

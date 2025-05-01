@@ -18,6 +18,7 @@ State :: @struct(
     buffers: List(TextBuffer),
     selected_buffer: i64,
     app: Sapp.Common, // :ThisIsOnTheStackWhichWontWorkOnWasm
+    sg: Sg.Self,
 );
 
 allocator :: libc_allocator;
@@ -27,14 +28,15 @@ do_init :: fn(userdata: rawptr) void = {
     set_dynamic_context(state.env);
     
     sapp := state.app&;
-    desc := SgDesc.zeroed();
-    desc.environment = sapp.glue_environment();
-    desc.logger.func = slog_func;
-    sg_setup(desc&);
+    state.sg&.setup(
+        environment = sapp.glue_environment(),
+        allocator = allocator,
+    );
     
     state.text.setup(
         allocator = allocator,
         fonts = @slice(Sdtx.font.cpc),
+        sg = state.sg&,
     );
     
     b := state.buffers.index(0);
@@ -62,13 +64,14 @@ do_render :: fn(userdata: rawptr) void = {
         draw_text(state, b);
     };
     
-    state.app&.glue_sg_begin_pass(state.pass_action);
+    sg := state.sg&;
+    state.app&.glue_sg_begin_pass(sg, state.pass_action);
     
     sdtx := state.text.default_context&;
     sdtx.draw_layer(0);
     
-    sg_end_pass();
-    sg_commit();
+    sg.end_pass();
+    sg.commit();
     reset_temporary_storage(mark);
 };
 

@@ -8,22 +8,24 @@
 
 ## Graphics
 
-- finish gfx-metal
-- clean up defaults (i can put defaults in a struct field. need to make it play nice with arrays `(x, ..())`
+- finish gfx-metal. need to make sure everything is reachable
 - example program that tries to use all features
+- finish gfx validation and enable that based on DebugAssetions
+- clean up defaults (i can put defaults in a struct field. need to make it play nice with arrays `(x, ..())`
 - dearimgui backend
 - support x11 / opengl / glsl
 - support web (depends on finishing wasm backend), don't use emscripten
 - revive compiler_gui (try to export all info to the driver so it can run in comptime)
 - provide the same c api as sokol so can test with their examples? 
 - translate a more serious subset of my language into the shader languages
-- use []u8 and interpret_as_bytes instead of SgRange
 - :GfxLogging
 - inspection gui like sokol_gfx_imgui
 - i enjoyed https://sotrh.github.io/learn-wgpu/, an implementation of that would be a good example program
 - replace cimgui
 - https://github.com/id-Software/DOOM
 - implement #trace
+- don't dlopen stuff in build_for_graphics when doing AOT
+- send frameworks to backend and tell it which lib to import each function from. so i don't need the linker for AOT
 
 ## stuff i broke
 
@@ -45,6 +47,8 @@ rn you're supposed to need a redundant `[]` in a call like that.
 - aot_import_body probably shouldn't zero x0 just because it thinks the param is void
 - fix the infinite loop when a constant references itself
 - :NoInlineImport
+- `@struct(a: A #use = (),);`
+- tests/todo/b.fr
 
 ## cross compiling
 

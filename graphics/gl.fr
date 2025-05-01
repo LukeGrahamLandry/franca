@@ -20,6 +20,7 @@ Desc :: @struct(
     context: ContextDesc, // settings for the default_context
     face_winding := SgFaceWinding.CCW,
     allocator: Alloc,
+    sg: *Sg.Self,
 );
 Vertex :: @struct(
     pos: Array(f32, 3),
@@ -199,7 +200,7 @@ fn init_pipeline(ctx: *Context, pip: *Pipeline, in_desc: *SgPipelineDesc) bool =
             /* quads are emulated via triangles, use the same pipeline object */
             pip[i] = pip[.TRIANGLES];
         } else {
-            pip[i] = sg_make_pipeline(desc&);
+            pip[i] = ctx.common.desc.sg.make(desc);
             if pip[i].id == SG_INVALID_ID.trunc() {
                 return(false);
                 //ERROR(MAKE_PIPELINE_FAILED); :GfxLogging
@@ -209,18 +210,18 @@ fn init_pipeline(ctx: *Context, pip: *Pipeline, in_desc: *SgPipelineDesc) bool =
     true
 }
 
-fn destroy_pipeline(pip: *Pipeline) void = {
-    sg_push_debug_group("sokol-gl");
+fn destroy_pipeline(sg: *Sg.Self, pip: *Pipeline) void = {
+    sg.push_debug_group("sokol-gl");
     for_enum PrimitiveType { i |
         if i != .QUADS {
-            sg_destroy_pipeline(pip[i]);
+            sg.destroy_pipeline(pip[i]);
         };
     };
-    sg_pop_debug_group();
+    sg.pop_debug_group();
     pip[] = zeroed(@type pip);
 }
 
-fn current_pipeline(ctx: *Context) SgPipeline = 
+fn current_pipeline(ctx: *Context) Sg.Pipeline = 
     ctx.pip_stack&.index(ctx.pip_tos.zext())[ctx.cur_prim_type];
 
 fn init_context(sgl: *Common, ctx: *Context, in_desc: *ContextDesc) bool = {
@@ -230,6 +231,7 @@ fn init_context(sgl: *Common, ctx: *Context, in_desc: *ContextDesc) bool = {
     ctx.frame_id = 1;
     ctx.cur_img = sgl.def_img;
     ctx.cur_smp = sgl.def_smp;
+    sg := sgl.desc.sg;
 
     // allocate buffers
     a := sgl.desc.allocator;
@@ -238,25 +240,24 @@ fn init_context(sgl: *Common, ctx: *Context, in_desc: *ContextDesc) bool = {
     ctx.commands = init(a, ctx.desc.max_commands.zext());
 
     // create sokol-gfx resource objects
-    sg_push_debug_group("sokol-gl");
-
-    vbuf_desc := SgBufferDesc.zeroed();
-    vbuf_desc.size = ctx.vertices.cap * size_of(Vertex);
-    vbuf_desc.type = .VERTEXBUFFER;
-    vbuf_desc.usage = .STREAM;
-    vbuf_desc.label = "sgl-vertex-buffer";
-    ctx.vbuf = sg_make_buffer(vbuf_desc&);
+    sg.push_debug_group("sokol-gl");
+    ctx.vbuf = sg.make(
+        size = ctx.vertices.cap * size_of(Vertex),
+        type = .VERTEXBUFFER,
+        usage = .STREAM,
+        label = "sgl-vertex-buffer",
+    );
     @debug_assert(ctx.vbuf.id != SG_INVALID_ID.trunc());
     ctx.bind.vertex_buffers&[0] = ctx.vbuf;
 
-    def_pip_desc := SgPipelineDesc.zeroed();
+    def_pip_desc: SgPipelineDesc = ();
     def_pip_desc.depth.write_enabled = true;
     init_pipeline(ctx, ctx.def_pip&, def_pip_desc&) || return(false);
-    if !sg_add_commit_listener(make_commit_listener(ctx)) {
+    if !sg.add_commit_listener(make_commit_listener(ctx)) {
         //ERROR(ADD_COMMIT_LISTENER_FAILED); :GfxLogging
         return(false)
     };
-    sg_pop_debug_group();
+    sg.pop_debug_group();
 
     // default state
     ctx.color = 0xFFFFFFFF;
@@ -276,11 +277,12 @@ fn destroy(ctx: *Context) void = {
     drop(ctx.vertices&, a);
     drop(ctx.uniforms&, a);
     drop(ctx.commands&, a);
-    sg_push_debug_group("sokol-gl");
-    sg_destroy_buffer(ctx.vbuf);
-    destroy_pipeline(ctx.def_pip);
-    sg_remove_commit_listener(make_commit_listener(ctx));
-    sg_pop_debug_group();
+    sg := ctx.common.desc.sg;
+    sg.push_debug_group("sokol-gl");
+    sg.destroy_buffer(ctx.vbuf);
+    sg.destroy_pipeline(ctx.def_pip);
+    sg.remove_commit_listener(make_commit_listener(ctx));
+    sg.pop_debug_group();
 
     ctx[] = zeroed(@type ctx[]);
 }
@@ -305,7 +307,7 @@ fn rewind(ctx: *Context) void = {
 
 fn make_commit_listener(ctx: *Context) SgCommitListener = {
     (user_data = Context.raw_from_ptr(ctx), func = fn(userdata: rawptr) void = {
-        // called from inside sokol-gfx sg_commit()
+        // called from inside sokol-gfx sg.commit()
         if(userdata.is_null(), => return());
         ctx := Context.ptr_from_raw(userdata);
         if !ctx.desc.lazy_record {
@@ -370,7 +372,8 @@ fn matrix(ctx: *Context) *Matrix =
 
 // create resources which are shared between all contexts
 fn setup_common(sgl: *Common) void = {
-    sg_push_debug_group("sokol-gl");
+    sg := sgl.desc.sg;
+    sg.push_debug_group("sokol-gl");
 
     pixels := @uninitialized Array(u8, 64 * size_of(u32));
     pixels&.items().set_bytes(0xFF);
@@ -381,15 +384,15 @@ fn setup_common(sgl: *Common) void = {
     img_desc.height = 8;
     img_desc.num_mipmaps = 1;
     img_desc.pixel_format = .RGBA8;
-    img_desc.data.subimage&[0]&[0] = (ptr = u8.raw_from_ptr(pixels&.as_ptr()), size = pixels&.len());  // We sure hope it's making a copy i guess?
+    img_desc.data.subimage&[0]&[0] = pixels&.items();
     img_desc.label = "sgl-default-texture";
-    sgl.def_img = sg_make_image(img_desc&);
+    sgl.def_img = sg.make(img_desc);
     @debug_assert(sgl.def_img.id != SG_INVALID_ID.trunc());
 
-    smp_desc := SgSamplerDesc.zeroed();
-    smp_desc.min_filter = .NEAREST;
-    smp_desc.mag_filter = .NEAREST;
-    sgl.def_smp = sg_make_sampler(smp_desc&);
+    sgl.def_smp = sg.make(
+        min_filter = .NEAREST,
+        mag_filter = .NEAREST,
+    );
     @debug_assert(sgl.def_smp.id != SG_INVALID_ID.trunc());
 
     // TODO: surely this is generated code. do a comptime thing instead
@@ -431,31 +434,32 @@ fn setup_common(sgl: *Common) void = {
     );
     shd_desc.label = "sgl-shader";
     choose_shader_impl(SOKOL_BACKEND, shd_desc&, Shaders);
-    sgl.shd = sg_make_shader(shd_desc&);
+    sgl.shd = sg.make(shd_desc);
     @debug_assert(sgl.shd.id != SG_INVALID_ID.trunc());
-    sg_pop_debug_group();
+    sg.pop_debug_group();
 }
 
 // discard resources which are shared between all contexts
 fn discard_common(sgl: *Common) void = {
-    sg_push_debug_group("sokol-gl");
-    sg_destroy_image(sgl.def_img);
-    sg_destroy_sampler(sgl.def_smp);
-    sg_destroy_shader(sgl.shd);
-    sg_pop_debug_group();
+    sg.push_debug_group("sokol-gl");
+    sg.destroy_image(sgl.def_img);
+    sg.destroy_sampler(sgl.def_smp);
+    sg.destroy_shader(sgl.shd);
+    sg.pop_debug_group();
 }
 
 fn update_vertex_buffer(ctx: *Context) void = {
     ctx.update_frame_id = ctx.frame_id;
-    range: SgRange = (ptr = Vertex.raw_from_ptr(ctx.vertices.ptr), size = ctx.vertices.len * size_of(Vertex));
-    sg_update_buffer(ctx.vbuf, range&);
+    range := ctx.vertices.items().interpret_as_bytes();
+    ctx.common.desc.sg.update_buffer(ctx.vbuf, range);
 }
 
 fn draw_layer(ctx: *Context, layer_id: i32) void = {
     if(ctx.vertices.len <= 0 || ctx.commands.len <= 0, => return());
-    sg_push_debug_group("sokol-gl");
+    sg := ctx.common.desc.sg;
+    sg.push_debug_group("sokol-gl");
 
-    cur_pip_id: u32 = SG_INVALID_ID;  // TODO: these shouldn't need a type since the constant has a type.
+    cur_pip_id: u32 = SG_INVALID_ID;  // TODO: these shouldn't need a type since the constant has a type. :Compiler
     cur_img_id: u32 = SG_INVALID_ID;
     cur_smp_id: u32 = SG_INVALID_ID;
     cur_uniform_index: i32 = -1;
@@ -471,11 +475,11 @@ fn draw_layer(ctx: *Context, layer_id: i32) void = {
         if(cmd.layer_id != layer_id, => continue());
         ::tagged(Args);
         @match(cmd.args&) {
-            fn Viewport(args)    =>     sg_apply_viewport(args.x, args.y, args.w, args.h, args.origin_top_left);
-            fn ScissorRect(args) => sg_apply_scissor_rect(args.x, args.y, args.w, args.h, args.origin_top_left);
+            fn Viewport(args)    =>     sg.apply_viewport(args.x, args.y, args.w, args.h, args.origin_top_left);
+            fn ScissorRect(args) => sg.apply_scissor_rect(args.x, args.y, args.w, args.h, args.origin_top_left);
             fn Draw(args) => {
                 if args.pip.id != cur_pip_id {
-                    sg_apply_pipeline(args.pip);
+                    sg.apply_pipeline(args.pip);
                     cur_pip_id = args.pip.id;
                     /* when pipeline changes, also need to re-apply uniforms and bindings */
                     cur_img_id = SG_INVALID_ID;
@@ -485,29 +489,30 @@ fn draw_layer(ctx: *Context, layer_id: i32) void = {
                 if cur_img_id != args.img.id || cur_smp_id != args.smp.id {
                     ctx.bind.images&[0] = args.img;
                     ctx.bind.samplers&[0] = args.smp;
-                    sg_apply_bindings(ctx.bind&);
+                    sg.apply_bindings(ctx.bind&);
                     cur_img_id = args.img.id;
                     cur_smp_id = args.smp.id;
                 };
                 if cur_uniform_index != args.uniform_index {
-                    ub_range: SgRange = (ptr = Uniform.raw_from_ptr(ctx.uniforms.index(args.uniform_index.zext())), size = size_of(Uniform));
-                    sg_apply_uniforms(0, ub_range&);
+                    ub_range := ctx.uniforms.slice(args.uniform_index.zext(), 1).interpret_as_bytes();
+                    sg.apply_uniforms(0, ub_range);
                     cur_uniform_index = args.uniform_index;
                 };
                 /* FIXME: what if number of vertices doesn't match the primitive type? */
                 if args.num_vertices > 0 {
-                    sg_draw(args.base_vertex, args.num_vertices, 1);
+                    sg.draw(args.base_vertex, args.num_vertices, 1);
                 };
             };
         };
     };
-    sg_pop_debug_group();
+    sg.pop_debug_group();
 }
 
-fn setup(sgl: *Common, desc: *Desc) void = {
+fn setup(sgl: *Common, desc: Desc) void = {
     sgl[] = zeroed(@type sgl[]);
     sgl.init_cookie = init_cookie;
-    sgl.desc = desc[];
+    sgl.desc = desc;
+    @debug_assert(desc.sg.valid, "must setup sg before sgl");
     setup_common(sgl);
     init_context(sgl, sgl.default_context&, sgl.desc.context&);
 }
