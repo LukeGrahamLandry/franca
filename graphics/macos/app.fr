@@ -110,6 +110,12 @@ keyup_monitor :: fn(self: *Block_literal_1, event: ObjCId) ObjCId = {
 fn register_objective_c_classes(self: *Impl) void = {
     c := self.classes&;
     
+    // TODO: since i don't link all the frameworks properly (when i don't actually 
+    //       import a real symbol from them) so you need to dlopen some stuff before 
+    //       trying to get the classes or they wont exist. 
+    Dyn :: import("@/lib/dynamic_lib.fr");
+    _ := Dyn'open("/System/Library/Frameworks/MetalKit.framework/MetalKit").expect("open MetalKit");
+    
     inline_for_enum Classes.Fields() { $it |
         v := Classes.get_field(c, it[]);
         @if(@run(ObjCClass == @type v[])) {
@@ -182,46 +188,12 @@ fn register_objective_c_classes(self: *Impl) void = {
     objc_registerClassPair(c.MyWindowDelegate);
     objc_registerClassPair(c.MyView);
     
-    // TODO: Expr::DataSymbol needs to let you say which library to import from 
-
-    Dyn :: import("@/lib/dynamic_lib.fr");
-    a := Dyn'open("/System/Library/Frameworks/AppKit.framework/AppKit").expect("open AppKit");
-    q := Dyn'open("/System/Library/Frameworks/QuartzCore.framework/QuartzCore").expect("open QuartzCore");
-    g := Dyn'open("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics").expect("open CoreGraphics");
-    
-    c.kCAFilterNearest = {  // HACK
-        ObjCId.ptr_from_raw(@as(rawptr) q.dlsym("kCAFilterNearest"))[]
-    };
-    c.NSPasteboardTypeFileURL = {  // HACK
-        ObjCId.ptr_from_raw(@as(rawptr) a.dlsym("NSPasteboardTypeFileURL"))[]
-    };
-    c.NSPasteboardTypeString = {  // HACK
-        ObjCId.ptr_from_raw(@as(rawptr) a.dlsym("NSPasteboardTypeString"))[]
-    };
-    objc := Dyn'open("/usr/lib/libobjc.dylib").expect("open objc");
-    c.NSConcreteGlobalBlock = {  // HACK
-        bit_cast_unchecked(rawptr, ObjCId, @as(rawptr) objc.dlsym("_NSConcreteGlobalBlock"))
-    };
-    c.kCFAllocatorDefault = {  // HACK
-        ObjCId.ptr_from_raw(@as(rawptr) g.dlsym("kCFAllocatorDefault"))[]
-    };
-    
-    
-    /*
-    // IMPORTANT: this #import fn() trick doesn't work aot because you always get a shim 
-    c.kCAFilterNearest = {  // HACK
-        kCAFilterNearest :: fn() void #import("QuartzCore");
-        ObjCId.ptr_from_raw(@as(rawptr) kCAFilterNearest)[]
-    };
-    c.NSPasteboardTypeFileURL = {  // HACK
-        NSPasteboardTypeFileURL :: fn() void #import("AppKit");
-        ObjCId.ptr_from_raw(@as(rawptr) NSPasteboardTypeFileURL)[]
-    };
-    c.NSPasteboardTypeString = {  // HACK
-        NSPasteboardTypeString :: fn() void #import("AppKit");
-        ObjCId.ptr_from_raw(@as(rawptr) NSPasteboardTypeString)[]
-    };
-    */
+    c.kCAFilterNearest = ObjCId.ptr_from_raw(@import_symbol("kCAFilterNearest", "QuartzCore"))[];
+    c.NSPasteboardTypeFileURL = ObjCId.ptr_from_raw(@import_symbol("NSPasteboardTypeFileURL", "AppKit"))[];
+    c.NSPasteboardTypeString = ObjCId.ptr_from_raw(@import_symbol("NSPasteboardTypeString", "AppKit"))[];
+    c.kCFAllocatorDefault = ObjCId.ptr_from_raw(@import_symbol("kCFAllocatorDefault", "CoreFoundation"))[];
+    // runtime for objective c blocks is in libsystem not libobjc
+    c.NSConcreteGlobalBlock = bit_cast_unchecked(rawptr, ObjCId, @import_symbol("_NSConcreteGlobalBlock", "libc"));
 }
 
 fn macos_discard_state(m: *Impl) void = {
@@ -495,13 +467,13 @@ fn set_icon(macos: *Impl, icon_desc: []Sapp.ImageDesc) void = {
     // :PastedMacosBindings
     // TODO: why not just CGDataProviderCreateWithData?
     fn CGColorSpaceCreateDeviceRGB() ObjCId #import("CoreGraphics"); // CGColorSpaceRef
-    fn CFDataCreate(allocator: ObjCId, data: *u8, size: i64) ObjCId #import("CoreGraphics"); // CFDataRef
+    fn CFDataCreate(allocator: ObjCId, data: *u8, size: i64) ObjCId #import("CoreFoundation"); // CFDataRef
     fn CGDataProviderCreateWithCFData(cf_data: ObjCId) ObjCId #import("CoreGraphics"); // CGDataProviderRef
     fn CGImageCreate(width: i64, height: i64, bitsPerComponent: i64, bitsPerPixel: i64, 
         bytesPerRow: i64, space: ObjCId, bitmapInfo: i64, provider: ObjCId, decode: i64, 
         shouldInterpolate: bool, intent: u32) ObjCId #import("CoreGraphics"); // CGImageRef
     // TODO: are these different than an objc release() message? 
-    fn CFRelease(it: ObjCId) void #import("CoreGraphics");
+    fn CFRelease(it: ObjCId) void #import("CoreFoundation");
     fn CGDataProviderRelease(it: ObjCId) void #import("CoreGraphics");
     fn CGColorSpaceRelease(it: ObjCId) void #import("CoreGraphics");
     fn CGImageRelease(it: ObjCId) void #import("CoreGraphics");

@@ -125,6 +125,7 @@ QbeModule :: @rec @struct(
     need_write_protect: bool,
     use_map_jit_on_apple_silicon: bool,
     wasm_types_cache: HashMap([]u8, i32),
+    libraries: RawList(Str),  // :SLOW but n=4 so like it's probably fine 
 );
 
 #use("@/lib/collections/map.fr");
@@ -154,7 +155,12 @@ fn init_default_module(m: *QbeModule, goal: QbeTargetEnv, expecting_rwx: bool) v
     dis: DisassemblerFunc = @if(is_linking_libc(), llvm_mc_dis, 
         fn(out: *List(u8), _: []u8, __: Arch) = out.push_all("no disassembler included\n"),
     );
-    init(m, 1.shift_left(25), general_allocator(), goal, expecting_rwx, dis)
+    init(m, 1.shift_left(25), general_allocator(), goal, expecting_rwx, dis);
+    
+    // :DefaultToLibc
+    // just make it work with the new library tracking. 
+    // assume any imports are from libc like before.
+    m.libraries&.push("libc", general_allocator()); 
 }
 
 // 
@@ -318,6 +324,7 @@ fn init(m: *QbeModule, segment_size: i64, gpa: Alloc, goal: QbeTargetEnv, expect
     m.llvm_global_type_buf  = list(general_allocator());
     m.llvm_global_code_buf  = list(general_allocator());
     m.wasm_types_cache      = init(general_allocator());
+    m.libraries&.push("", general_allocator());
     
     unlock(m.intern_mutex&);
 }

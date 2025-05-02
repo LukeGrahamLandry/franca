@@ -240,8 +240,12 @@ fn output_macho(m: *QbeModule) [][]u8 = {
     m := e.m;
     // note: virtual_segment_offset is only good when MachoExe because we skip segments for MachoRelocatable. 
     if e.m.goal.type == .Exe || m.goal.type == .Dynamic {
-        // TODO: don't assume you want libc. but on macos you always do. 
-        macho_load_dylib(e.commands&, e.command_count&, .LinkLibrary, "/usr/lib/libSystem.B.dylib");
+        // Need to always ask for every library the frontend added even if no symbols from it 
+        // were actually imported because they might be using objc_getClass at runtime. 
+        for e.m.libraries.items().rest(1) { name | 
+            name := guess_path(name);
+            macho_load_dylib(e.commands&, e.command_count&, .LinkLibrary, name);
+        };
         
         emit_exe_fixups(e&, chained&);
         zero_pad_len_to_align(chained&, 16);
@@ -385,8 +389,15 @@ fn emit_exe_fixups(e: *EmitMacho, chained: *List(u8)) void #inline = {
     for symbols { s |
         if s.kind != .Local {
             n := chained.len - symbols_offset;
-            // TODO: don't assume libc
-            imports_bytes[s.got_lookup_offset] = construct(lib_ordinal = 1, weak = 0, name_offset = n);
+            // :DefaultToLibc
+            // don't forget :force_dep_on_memmove_hack when you remove this
+            if s.library == 0 {
+                ::?u32;
+                s.library = e.m.find_library("libc") || {
+                    @panic("import % from unknown library", s.name)
+                };
+            };
+            imports_bytes[s.got_lookup_offset] = construct(lib_ordinal = s.library.zext(), weak = 0, name_offset = n);
             
             append_sym_name(chained, s.name);
         };
@@ -463,6 +474,14 @@ fn emit_exe_fixups(e: *EmitMacho, chained: *List(u8)) void #inline = {
         cmd[] = (offset = new_file_offset.trunc(), size = (chained.len - chained_size).trunc());  // :CodeIsFirst its fine to change this, you just have to do the math here. 
     };
 }
+
+// :HACK. the user should provide these paths but for now it just needs to work so i can stop using the linker for graphics examples. 
+// -- May 1, 2025
+guess_path :: fn(name: Str) Str = @switch(name) {
+    @case("libc") => "/usr/lib/libSystem.dylib";
+    @case("objc") => "/usr/lib/libobjc.dylib";
+    @default => @tfmt("/System/Library/Frameworks/%.framework/%", name, name);
+};
 
 WipFixup :: @struct(
     page_index: i64,
@@ -640,6 +659,7 @@ fn emit_reloc_symbols(e: *EmitMacho, chained: *List(u8)) void #inline = {
         entry.name_offset = trunc(chained.len - strings_start);
         append_sym_name(chained, s.name);
         append_relocations(i + base, id[], e.m, e.relocations, e.load_commands);
+        @eprintln("% from %", s.name, @if(s.library != 0, e.m.libraries[s.library.zext()], "?????"));
     };
     base += e.m.imports.len;
     syms_cmd.strings_size = trunc(chained.len - strings_start);
@@ -741,7 +761,8 @@ fn append_relocations(symbol_table_index: i64, id: u32, m: *QbeModule, relocatio
         rs.reserve_type(RelocationFields)[] = r;
     };
 };
-    
+
+// These are for lib_ordinal
 fn macho_load_dylib(commands: *List(u8), command_count: *i64, cmd: LoadCommand, name: Str) void = {
     start := commands.len;
     h := commands.reserve_type(LoadCommandHeader);

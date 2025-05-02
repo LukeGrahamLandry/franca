@@ -35,8 +35,10 @@ each imported symbol. In general the linker is responsable for papering
 over that difference, so if you're fine with that dependency you can just 
 use the Relocatable output format and everything should "just work" like 
 it would in C. Otherwise, you need to supply the library name along with 
-the symbol name for any imports. That library name probably is in the form 
-of a file path that is different for each target platform. Good luck. 
+the symbol name for any imports. Ideally, the library name would be in the form 
+of a file path that is different for each target platform and the frontend would 
+be resoponsible for handling that but currently the backend has special 
+support for handling macOS frameworks hacked in. 
 
 For jitting, we don't do anything special to help with imports. 
 The frontend is expected to call dlopen or whatever and just pass 

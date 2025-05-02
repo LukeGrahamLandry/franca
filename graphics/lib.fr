@@ -52,11 +52,6 @@ fn pack_rgba(r: f32, g: f32, b: f32, a: f32) u32 =
 // TODO: it's very sad that this driver takes 120ms to compile
 fn build_for_graphics(vtable: *ImportVTable, input_path: Str) void = {
     start := timestamp();
-    #use("@/lib/sys/fs.fr");
-    src := "#include_std(\"lib/core.fr\");".clone(temp());
-    the_code := temp().read_to_string_or_crash(input_path);  // TODO: don't depend on cwd.
-    src&.push_all(the_code.items());
-    
     opts := vtable.default_build_options();
     opts.retain_function_names = true;
     
@@ -71,39 +66,27 @@ fn build_for_graphics(vtable: *ImportVTable, input_path: Str) void = {
         want_jit = want_jit || a == "-jit";
     };
     
-    comp := vtable.new_with_src(src.items(), input_path, opts);
+    src := @tfmt("""#include_std("lib/core.fr");#include_std("%");""", input_path);
+    comp := vtable.new_with_src(src, input_path, opts);
     ctx := vtable.with(comp);
     
-    libs := ctx.empty_libs();
-    //libs&.intercept_imports();
-    //libs&.add_lib(sokol_macos_lib);
-    
-    {
-        // TODO: this fucks you for cross compiling. don't do this!
+    os: Os = .macos;  // :HardcodeOs
+    if os == .macos && want_jit {
         Dyn :: import("@/lib/dynamic_lib.fr");
-        objc := Dyn'open("/usr/lib/libobjc.dylib").expect("open objc");
-        ctx.add_comptime_library(ctx.intern_string("objc"), objc);
-        cg := Dyn'open("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics").expect("open CoreGraphics");
-        ctx.add_comptime_library(ctx.intern_string("CoreGraphics"), cg);
-        ak := Dyn'open("/System/Library/Frameworks/AppKit.framework/AppKit").expect("open AppKit");
-        ctx.add_comptime_library(ctx.intern_string("AppKit"), ak);
-        m := Dyn'open("/System/Library/Frameworks/Metal.framework/Metal").expect("open Metal");
-        ctx.add_comptime_library(ctx.intern_string("Metal"), m);
-        q := Dyn'open("/System/Library/Frameworks/QuartzCore.framework/QuartzCore").expect("open QuartzCore");
-        ctx.add_comptime_library(ctx.intern_string("QuartzCore"), q);
-        mk := Dyn'open("/System/Library/Frameworks/MetalKit.framework/MetalKit").expect("open MetalKit");
-        ctx.add_comptime_library(ctx.intern_string("MetalKit"), mk);
-        c := Dyn'open("/System/Library/Frameworks/Cocoa.framework/Cocoa").expect("open Cocoa");
-        ctx.add_comptime_library(ctx.intern_string("Cocoa"), c);
-        cf := Dyn'open("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation").expect("open CoreFoundation");
-        ctx.add_comptime_library(ctx.intern_string("CoreFoundation"), cf);
+        libs :: @const_slice("objc", "CoreGraphics", "Metal", "QuartzCore", "AppKit", "MetalKit", "Cocoa", "CoreFoundation");
+        
+        for libs { name |
+            path := import("@/backend/macho/emit.fr")'guess_path(name);
+            dyn := Dyn'open(path) || @panic("missing dylib: %", path);
+            ctx.add_comptime_library(ctx.intern_string(name), dyn);
+        };
     };
     
     main_sym := {vtable.intern_string}(comp, "main");
     main_f := {vtable.find_unique_func}(comp, main_sym).unwrap();
     
     m := QbeModule.zeroed();
-    init_default_module_dyn(m&, vtable, (arch = query_current_arch(), os = .macos, type = @if(want_jit, .JitOnly, .Relocatable)));  // :HardcodeOs
+    init_default_module_dyn(m&, vtable, (arch = query_current_arch(), os = os, type = @if(want_jit, .JitOnly, .Exe))); 
     bytes := emit_qbe_included_dyn(m&, ctx&, @slice(main_f), .WrapMain); 
     
     if want_jit {
@@ -116,9 +99,9 @@ fn build_for_graphics(vtable: *ImportVTable, input_path: Str) void = {
         exit(0);
     };
     
-    #use("@/compiler/ast_external.fr", "@/lib/sys/subprocess.fr");
+    #use("@/compiler/ast_external.fr", "@/lib/sys/subprocess.fr", "@/lib/sys/fs.fr");
     
-    out := open_trunc("a.o").unwrap();
+    out := open_trunc("a.out").unwrap();
     for(bytes&){bucket|
         out&.write(bucket);
     };
@@ -126,16 +109,4 @@ fn build_for_graphics(vtable: *ImportVTable, input_path: Str) void = {
     
     end := timestamp();
     @eprintln(">>> compiled in %ms", end - start);
-    // TODO: get these from the lib. 
-    SOKOL_MACOS_LINK_ARGS :: @array("-framework", "Metal", "-framework", "MetalKit", "-framework", "Cocoa", "-framework", "QuartzCore");
-    a := SOKOL_MACOS_LINK_ARGS;
-    args := libs&.get_aot_objects();
-    args&.push_all(a&.items());
-    args&.push_all(@slice ("a.o", "-o", "a.out"));    
-    args&.push_all(@slice ("-target", target_triple(m.goal.arch, m.goal.os)));   
-    @println("building aot exe: %", args.items());
-    success := run_cmd_blocking("clang", args.items());
-    assert(success, "clang failed");
-    link_end := timestamp();
-    @eprintln(">>> linked in %ms", link_end - end);
 }

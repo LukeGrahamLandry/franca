@@ -28,13 +28,13 @@ SymbolInfo :: @struct(
     //  local: offset in the segment
     // import: offset in stubs to trampoline (if function)
     offset: i64,
+    jit_addr: rawptr, // valid when kind == .DynamicPatched and goal == .JitOnly
+    shim_addr: rawptr, // TODO: it would be great if i didn't need this
     kind: SymbolKind,
     local_but_marked_for_relocation: bool,
-    is_thread_local: bool,  
     referenced: bool,  // took address or called before knowing it was inlinable so you must actually emit the function.
-    jit_addr: rawptr, // valid when kind == .DynamicPatched and goal == .JitOnly
-    size: i64,  // only set for functions currently. 
-    shim_addr: rawptr, // TODO: it would be great if i didn't need this
+    size: u32,  // only set for functions currently. 
+    library: u32,  // for imports. index into m.libraries. 0 is reserved for locals
     wasm_type_index: i32,
     //wasm_space: Wasm.ImportType, // TODO: chunky
 );
@@ -42,7 +42,7 @@ SymbolInfo :: @struct(
 ::enum_basic(SymbolKind);
 
 // TODO: deal with matching on an @enum(u8) on llvm
-SymbolKind :: @enum(i64) (
+SymbolKind :: @enum(u8) (
     // We haven't compiled this yet so we've emitted references as lookups into a table in the data section. 
     // 
     // It might also be a dynamic import. 
@@ -98,6 +98,29 @@ fn len(s: *SegmentCursor) i64 =
 fn cap(s: *SegmentCursor) i64 = 
     s.mmapped.len;
 
+// TODO: this is stupid
+fn set_library(m: *QbeModule, sym_id: u32, name: Str) void = {
+    i := m.find_library(name) || {
+        m.libraries&.push(name.shallow_copy(general_allocator()), general_allocator());
+        trunc(m.libraries.len - 1)
+    };
+    
+    use_symbol(m, sym_id) { s | 
+        @debug_assert(s.library == 0 || s.library == i, "set_library(%) conflict % %", s.name, i, s.library);
+        s.library = i;
+    };
+}
+
+// :SLOW
+fn find_library(m: *QbeModule, name: Str) ?u32 = {
+    enumerate m.libraries { i, check |
+        if name == check[] {
+            return(Some = i.trunc());
+        }
+    };
+    .None
+}
+
 // TODO: what about import stubs? 
 // but also you only need to do this if you don't want WX memory so like meh. 
 fn make_exec(self: *QbeModule) void = {
@@ -148,7 +171,7 @@ fn get_addr(self: *QbeModule, symbol: *SymbolInfo) ?Ty(rawptr, i64) = {
     if(symbol.kind != .Local, => return(.None));
     segment := self.segments&[symbol.segment];
     addr    := segment.mmapped.ptr.offset(symbol.offset);
-    (Some = (u8.raw_from_ptr(addr), symbol.size))
+    (Some = (u8.raw_from_ptr(addr), symbol.size.zext()))
 }
 
 fn maybe_add_export(self: *QbeModule, id: u32, export: bool) void = if export {
@@ -263,7 +286,7 @@ fn finish_function(m: *QbeModule, dest: []u8, name_id: u32) void #inline = {
     lock(m.icache_mutex&);
     m.last_function_end = dest.ptr.offset(dest.len);
     use_symbol(m, name_id) { s |
-        s.size = dest.len;
+        s.size = dest.len.trunc();
         end_debug_info(m, s);
     };
     if m.got_indirection_instead_of_patches && m.goal.type == .JitOnly && m.goal.arch == .aarch64 {
@@ -571,7 +594,7 @@ fn start_debug_info(m: *QbeModule, s: *SymbolInfo) void = {
 }
 
 fn end_debug_info(m: *QbeModule, s: *SymbolInfo) void = {
-    leb128_unsigned(m.debug_headers&, s.size);
+    leb128_unsigned(m.debug_headers&, s.size.zext());
     // TODO: length prefix but that's annoying
     leb128_unsigned(m.debug_data&, 0);
     leb128_unsigned(m.debug_data&, 0);

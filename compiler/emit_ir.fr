@@ -340,7 +340,7 @@ fn bounce_body(self: *EmitIr, callee: Qbe.Ref, o: Qbe.O) void = {
     self.finalize_blocks();
 }
 
-fn aot_import_body(self: *EmitIr, info: DynamicImport) void = {
+fn aot_import_body(self: *EmitIr, info: *DynamicImport) void = {
     // :DumbNameAlias
     // TODO: use FnFlag.NoMangle instead but that doesn't work with the old backends calling the same 
     //       fmt_fn_name until they also don't try to make bounce functions.
@@ -348,6 +348,13 @@ fn aot_import_body(self: *EmitIr, info: DynamicImport) void = {
     func := self.program.get_function(self.func);
     real_name := self.program.check_link_rename(info.name, func, (arch = g.arch, os = g.os));
     target := self.m.intern(real_name);
+    // TODO: silly that it's considered disrespectful to call your library "SYMBOL_ZERO"
+    if info.lib != Flag.SYMBOL_ZERO.ident() {
+        // TODO: probably want to give the backend the path to put in the exe, not our symbolic name, 
+        //       and also maybe preintern with the backend to get an ordinal that's just in lib space 
+        //       instead of needing to check every time
+        set_library(self.m, target, self.program.get_string(info.lib));
+    };
     self.bounce_body(self.f.symcon(target), .call);
 }
 
@@ -405,12 +412,12 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = { // #log_ir("AIR")
             return(.Ok)
         }
         // copy-paste from above
-        fn DynamicImport(name) => {
+        fn DynamicImport(info) => {
             @match(self.when) {
-                fn Aot() => self.aot_import_body(name[]);
+                fn Aot() => self.aot_import_body(info);
                 fn Jit() => {
-                    @err_assert(name.comptime != 0, "we hit a dynamicimport with no comptimeaddr for jit\nthe frontend should make sure this doesn't happen. \nTODO: this happens when compiling targetting libc from a compiler built without libc on linux") return;
-                    self.entry.task = (JitImport = (lnk = self.f.lnk&, addr = rawptr_from_int(name.comptime)));
+                    @err_assert(info.comptime != 0, "we hit a dynamicimport with no comptimeaddr for jit\nthe frontend should make sure this doesn't happen. \nTODO: this happens when compiling targetting libc from a compiler built without libc on linux") return;
+                    self.entry.task = (JitImport = (lnk = self.f.lnk&, addr = rawptr_from_int(info.comptime)));
                 }
             };
             return(.Ok)
@@ -773,8 +780,15 @@ fn compile_expr(self: *EmitIr, expr: *FatExpr, p: Placement) CRes(Qbe.Ref) = {
             src := @try(self.addr_macro(expr, .ScalarTransient)) return; // get the pointer
             self.deref(src, p, expr_ty)
         }
-        fn DataSymbol(name) => {
-            name := self.program.get_string(name[]);
+        fn DataSymbol(info) => {
+            name := self.program.get_string(info.name);
+            if info.lib != Flag.SYMBOL_ZERO.ident() {
+                if self.when == .Jit && info.comptime != 0 {
+                    return(Ok = self.scalar_result(p, self.f.getcon(info.comptime), i64));   // :get_or_create_type
+                };
+                // TODO: if jitting and not ready yet, we could make this be a call to a shim that returns the symbol?
+                self.m.set_library(self.m.intern(name), self.program.get_string(info.lib));
+            };
             self.scalar_result(p, self.f.symcon(name), i64)  // :get_or_create_type
         }
         fn Deref(arg) => {

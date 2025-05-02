@@ -1,3 +1,17 @@
+## (May 2)
+
+- make the backend's library tracking just default to libc like it did before 
+so i don't need to deal with the old .ssa tests yet. 
+- make `Expr::DataSymbol` let you say which library to import from so 
+can get rid of the dlopens in macos/app.fr
+- handle DataSymbol for jitting. just look it up in comptime_libraries like i do for functions. 
+
+- TODO: allow linking to something without importing any symbols so you get the objc classes from it. 
+- TODO: replace the func$module thing i used to do for wasm with the new libs thing
+- TODO: unify add_comptime_library with the paths output in the exe but need to be careful about target platform. 
+- TODO: allow importing symbols from different libraries but the same name so current system 
+where you have a flat namespace and each symbol knows its library as an extra piece of 
+metadata doesn't work at all. 
 
 ## (May 1)
 
@@ -19,6 +33,20 @@ had to do `@spread_array(Array(SgLongNameDesc, 4)) ((a = 1), (a = 1),);`
 evaluate to one past the end of the array instead of the start, just didn't 
 matter because an `Expr::Tuple` wouldn't become an array before. 
 - bad sign for my tiny graphics tests that the Desc stuff seemed to work with that broken
+- want to stop using a linker for graphics programs so need to pass which 
+library each symbol comes from all the way through to the backend. helpfully 
+i already have that information since i need to know which dylib to look in when jitting. 
+- as a starting point, super hacky thing that assumes the `/System/Library/Frameworks/`
+path structure, eventually that should be done by the driver program i guess but 
+this is already much better than "eh check libsystem.dylib, good luck" which was the old strategy. 
+- hmmm, now trying to get the NSCursor class returns nil. 
+right ok, some frameworks you link to just load objective c classes into the runtime, 
+even without you directly importing a symbol from it. 
+just dlopen-ing it is good enough but you probably want it to just work. 
+- TODO: think about why i'm unwilling to go through the dynamic loader to 
+get objc class references (just calling runtime functions instead) but i don't apply 
+that logic to real symbol imports (could just call dlopen in franca runtime init and only 
+use the loader to get libc, need libc on macos because the dylibs aren't real files you can find)
 
 ## (Apr 30) porting sokol_gfx
 
