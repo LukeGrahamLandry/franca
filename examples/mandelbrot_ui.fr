@@ -1,5 +1,5 @@
-// - a triangle without using a buffer
-// - mandelbrot set in that triangle
+// - a rectangle without using a buffer
+// - fragment shader to draw mandelbrot set
 
 #include_std("graphics/lib.fr");
 #include_std("backend/lib.fr");
@@ -10,25 +10,28 @@ driver :: fn(vtable: *ImportVTable) void =
 Shaders :: @struct {
     OutV :: @struct(pos: Vec4 #position);
     InV :: @struct();
-    vs   :: fn(_: InV, i: u32 #vertex_id) OutV = (
-        pos = @vec(
-            @if(i == 2, 1.0, 0.0),
-            @if(i == 0, 1.0, 0.0),
-            @if(i == 1, 1.0, 0.0),
-            1.0,
-        ),
-    );
+    vs   :: fn(_: InV, i: u32 #vertex_id) OutV = {
+        xy := @if(i == 0, @vec(-1.0, 1.0),
+              @if(i == 1, @vec(-1.0, -1.0),
+              @if(i == 2, @vec(1.0, -1.0),
+              @if(i == 3, @vec(1.0, 1.0),
+              @if(i == 4, @vec(1.0, -1.0),
+              @if(i == 5, @vec(-1.0, 1.0),
+              @vec(0.0, 0.0)))))));
+        (pos = @vec(xy, 0.0, 1.0))
+    }
     OutF :: @struct(frag_color: Vec4 #color(0));
+    // TODO: float2 has 8 byte alignment in msl but not for me
+    UniF :: @struct(scale: f32, _msl_pad: f32 = 0.0, offset: Vec2);
     // FIXME PLEASE. it works tho :)
-    fs   :: fn(in: OutV) Shaders.OutF = {
-        z := @vec(0.0, 0.0);
+    fs   :: fn(in: OutV, uni: UniF #buffer(0)) Shaders.OutF = {
         c := @swizzle in.pos.xy;
-        xxxx :f32= 1200.0;
-        c = c / @vec(xxxx, xxxx);
-        denom := 5.0;
-        c = c - @vec(1.0 / denom, 0.0);
-        i :f32= 0.0;
+        c = c * @vec(uni.scale, uni.scale);
+        c += uni.offset;
+        z := @vec(0.0, 0.0);
+        
         zSq := z * z;
+        i :f32= 0.0;
         zy :f32= 0.0;
         zx :f32= 0.0;
         one :f32= 1.0;
@@ -62,17 +65,56 @@ main :: fn() void =
 
 State :: @struct {
     pipe: Sg.Pipeline;
+    params: Shaders.UniF;
+    dragging: bool;
 };
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    state.params = (scale = 1.0 / 300.0, offset = (v = (-3.0, -1.0)));
     shd_desc := SgShaderDesc.zeroed();
     choose_shader_impl(SOKOL_BACKEND, shd_desc&, Shaders);
+    shd_desc.uniform_blocks&[0] = (
+        stage = .FRAGMENT,
+        size = size_of(Shaders.UniF),
+        msl_buffer_n = 0,
+    );
     state.pipe = sg.make(
         shader = sg.make(shd_desc),
     );
 }
 
-fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = ();
+fn vec2(splat: f32) Vec2 = (v = (splat, splat));
+
+fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
+    @match(event.type) {
+        fn MOUSE_SCROLL() => {
+            if state.params.scale < 0.00000001 && event.scroll_y > 0 {
+                return();
+            }
+            // center the zoom on the mouse pointer instead of at (0, 0)
+            // by calculating how much the offset at the mouse position would change between the zoom levels, 
+            // and counteract that by applying translation 
+            delta := event.scroll_y * state.params.scale / -100.0;
+            pos: Vec2 = (v = (event.mouse_x, event.mouse_y));
+            pos0 := pos * vec2(state.params.scale);
+            pos1 := pos * vec2(state.params.scale + delta);
+            state.params.offset -= (pos1 - pos0);
+            state.params.scale += delta;
+        }
+        fn MOUSE_DOWN() => {
+            state.dragging = true;
+        }
+        fn MOUSE_UP() => {
+            state.dragging = false;
+        }
+        fn MOUSE_MOVE() => if state.dragging {
+            speed := -state.params.scale;
+            delta := vec2(event.mouse_dx, event.mouse_dy);
+            state.params.offset += delta * vec2(speed);
+        }
+        @default => ();
+    }
+}
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     // Now actually render the frame. 
@@ -80,9 +122,11 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         load_action = .CLEAR,
         clear_value = (r = 0.156, g = 0.156, b = 0.156, a = 1),
     ), ..)));
+    ::[]Shaders.UniF;
 
     sg.apply_pipeline(state.pipe);
-    sg.draw(0, 3, 1);
+    sg.apply_uniforms(0, state.params&.slice(1).interpret_as_bytes());
+    sg.draw(0, 6, 1);
     sg.end_pass();
 };
 
