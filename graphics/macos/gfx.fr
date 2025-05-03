@@ -4,7 +4,7 @@
 // 
 // Changes from Sokol:
 // - no dependency on an objective-c compiler
-// - removed ios, opengl, and macos <13 support (temporarily?)
+// - removed [ios, opengl, and macos <13] support (temporarily?)
 // 
 // UNFINISHED
 // - im not setting labels
@@ -1134,6 +1134,7 @@ fn attachments_resolve_image(_: *Impl, atts: *Sg.Attachments.T, index: i64) ?*Sg
 
 fn attachments_ds_image(_: *Impl, atts: *Sg.Attachments.T) ?*Sg.Image.T = {
     i := atts.mtl.depth_stencil.image;
+    ::ptr_utils(@type i[]);
     @if(i.is_null(), .None, (Some = i))
 }
 
@@ -1175,22 +1176,19 @@ fn begin_compute_pass(mtl: *Impl, pass: *SgPass) void = {
     }
 }
 
+MTLClearColor :: @struct(red: f64, green: f64, blue: f64, alpha: f64);
+fn to_mtl(c: SgColor) MTLClearColor =
+    (red = c.r.cast(), green = c.g.cast(), blue = c.b.cast(), alpha = c.a.cast());
+
 fn begin_render_pass(mtl: *Impl, pass: *SgPass) void = {
     @debug_assert(!mtl.cmd_buffer.is_nil());
     @debug_assert(mtl.render_cmd_encoder.is_nil());
     @debug_assert(mtl.compute_cmd_encoder.is_nil());
 
-    atts := mtl.sg.cur_pass.atts;
-    swapchain := pass.swapchain&;
-    action := pass.action&;
-    MTLClearColor :: @struct(red: f64, green: f64, blue: f64, alpha: f64);
-    setClearColor :: fn(it, c) => {
-        c: MTLClearColor = (red = c.r.cast(), green = c.g.cast(), blue = c.b.cast(), alpha = c.a.cast());
-        @objc it.setClearColor(c);
-    } 
-    
     pass_desc := @objc cls("MTLRenderPassDescriptor").renderPassDescriptor();
-    if !atts.is_null() {
+    action := pass.action&;
+    atts := mtl.sg.cur_pass.atts;
+    if !atts.is_null() { // TODO: UNTESTED
         // setup pass descriptor for offscreen rendering
         ::enum(@type atts.slot.state);
         @debug_assert(atts.slot.state == .VALID);
@@ -1211,21 +1209,23 @@ fn begin_render_pass(mtl: *Impl, pass: *SgPass) void = {
             }
         }
         
-        setTexture :: fn(it, img) => @objc it.setTexture(mtl.get_id(img.mtl.tex&[img.cmn.active_slot.intcast()]));
+        get_texture :: fn(img) => mtl.get_id(img.mtl.tex&[img.cmn.active_slot.intcast()]);
         range(0, atts.cmn.num_colors.intcast()) { i |
             ca := @objc at.objectAtIndexedSubscript(i);
             cmn_color_att := atts.cmn.colors&[i]&;
             color_att_img := atts.mtl.colors&[i].image;
-            cmn_resolve_att := atts.cmn.resolves&[i]&;
             resolve_att_img := atts.mtl.resolves&[i].image;
             check(color_att_img, cmn_color_att);
-            @objc ca.setLoadAction(to_mtl(action.colors&[i].load_action));
             ::ptr_utils(@type resolve_att_img[]);
-            @objc ca.setStoreAction(to_mtl(action.colors&[i].store_action, !resolve_att_img.is_null()));
-            c := action.colors&[i].clear_value;
-            setClearColor(ca, action.colors&[i].clear_value);
-            setTexture(ca, color_att_img);
-            @objc ca.setLevel(@as(i64) cmn_color_att.mip_level.intcast());
+            it := action.colors&.index(i);
+            have_resolve := !resolve_att_img.is_null();
+            @objc_set(ca) (
+                load_action = to_mtl it.load_action,
+                store_action = to_mtl(it.store_action, have_resolve),
+                clearColor = to_mtl it.clear_value,
+                texture = get_texture(color_att_img),
+                level = @as(i64) cmn_color_att.mip_level.intcast(),
+            );
             ::enum(@type color_att_img.cmn.type);
             if @is(color_att_img.cmn.type, .CUBE, .ARRAY) {
                 @objc ca.setSlice(@as(i64) cmn_color_att.slice.intcast());
@@ -1233,7 +1233,8 @@ fn begin_render_pass(mtl: *Impl, pass: *SgPass) void = {
             if color_att_img.cmn.type == ._3D {
                 @objc ca.setDepthPlane(@as(i64) cmn_color_att.slice.intcast());
             }
-            if !resolve_att_img.is_null() {
+            if have_resolve {
+                cmn_resolve_att := atts.cmn.resolves&[i]&;
                 check(resolve_att_img, cmn_resolve_att);
                 @objc ca.setResolveTexture(mtl.get_id(resolve_att_img.mtl.tex&[resolve_att_img.cmn.active_slot.intcast()]));
                 @objc ca.setResolveLevel(@as(i64) cmn_resolve_att.mip_level.intcast());
@@ -1244,22 +1245,28 @@ fn begin_render_pass(mtl: *Impl, pass: *SgPass) void = {
         if !ds_att_img.is_null() {
             check(ds_att_img, atts.cmn.depth_stencil);
             d := @objc pass_desc.depthAttachment();
-            setTexture(d, ds_att_img);
-            @objc d.setLoadAction(to_mtl(action.depth.load_action));
-            @objc d.setStoreAction(to_mtl(action.depth.store_action, false));
-            @objc d.setClearDepth(action.depth.clear_value);
+            @objc_set(d) (
+                texture = get_texture(ds_att_img),
+                loadAction = to_mtl action.depth.load_action,
+                storeAction = to_mtl(action.depth.store_action, false),
+                clearDepth = action.depth.clear_value,
+            );
             cmn_ds_att := atts.cmn.depth_stencil&;
             slice_or_depth(d, ds_att_img, cmn_ds_att);
             if is_depth_stencil_format(ds_att_img.cmn.pixel_format) {
                 sa := @objc pass_desc.stencilAttachment();
-                setTexture(sa, ds_att_img);
-                @objc sa.setLoadAction(to_mtl(action.stencil.load_action));
-                @objc sa.setStoreAction(to_mtl(action.depth.store_action, false));
-                @objc sa.setClearStencil(action.stencil.clear_value);
+                @objc_set(sa) (
+                    texture = get_texture(ds_att_img),
+                    loadAction = to_mtl action.stencil.load_action,
+                    storeAction = to_mtl(action.depth.store_action, false),
+                    clearStencil = action.stencil.clear_value,
+                );
                 slice_or_depth(sa, ds_att_img, cmn_ds_att);
             }
         }
     } else {
+        swapchain := pass.swapchain&;
+    
         // setup pass descriptor for swapchain rendering
         //
         // NOTE: at least in macOS Sonoma this no longer seems to be the case, the
@@ -1291,7 +1298,7 @@ fn begin_render_pass(mtl: *Impl, pass: *SgPass) void = {
             @objc ca.setStoreAction(1); // MTLStoreActionStore
         }
         @objc ca.setLoadAction(to_mtl(action.colors&[0].load_action));
-        setClearColor(ca, action.colors&[0].clear_value);
+        @objc ca.setClearColor(action.colors&[0].clear_value.to_mtl());
 
         // optional depth-stencil texture
         if !swapchain.metal.depth_stencil_texture.is_null() {
@@ -1482,22 +1489,18 @@ fn apply_pipeline(mtl: *Impl, pip: *Sg.Pipeline.T) void = {
             e := mtl.render_cmd_encoder;
             @debug_assert(!e.is_nil());
             c := pip.cmn.blend_color;
+            mtl.sg.stat(.mtl_num_apply_render_pipeline, 1);
+            @debug_assert(pip.mtl.rps != 0 && pip.mtl.dss != 0);
+            
             @objc e.setBlendColorRed(c.r, green = c.g, blue = c.b, alpha = c.a);
-            mtl.sg.stat(.mtl_pipeline_num_set_blend_color, 1);
-            @objc e.setCullMode(pip.mtl.cull_mode);
-            mtl.sg.stat(.mtl_pipeline_num_set_cull_mode, 1);
-            @objc e.setFrontFacingWinding(pip.mtl.winding);
-            mtl.sg.stat(.mtl_pipeline_num_set_front_facing_winding, 1);
-            @objc e.setStencilReferenceValue(pip.mtl.stencil_ref);
-            mtl.sg.stat(.mtl_pipeline_num_set_stencil_reference_value, 1);
             @objc e.setDepthBias(pip.cmn.depth.bias, slopeScale = pip.cmn.depth.bias_slope_scale, clamp = pip.cmn.depth.bias_clamp);
-            mtl.sg.stat(.mtl_pipeline_num_set_depth_bias, 1);
-            @debug_assert(pip.mtl.rps != _SG_MTL_INVALID_SLOT_INDEX);
-            @objc e.setRenderPipelineState(mtl.get_id(pip.mtl.rps));
-            mtl.sg.stat(.mtl_pipeline_num_set_render_pipeline_state, 1);
-            @debug_assert(pip.mtl.dss != _SG_MTL_INVALID_SLOT_INDEX);
-            @objc e.setDepthStencilState(mtl.get_id(pip.mtl.dss));
-            mtl.sg.stat(.mtl_pipeline_num_set_depth_stencil_state, 1);
+            @objc_set(e) (
+                cullMode = pip.mtl.cull_mode,
+                frontFacingWinding = pip.mtl.winding,
+                stencilReferenceValue = pip.mtl.stencil_ref,
+                renderPipelineState = mtl.get_id(pip.mtl.rps),
+                depthStencilState = mtl.get_id(pip.mtl.dss),
+            );
         }
     }
 }
@@ -1696,8 +1699,8 @@ fn draw(mtl: *Impl, base_element: i32, num_elements: i32, num_instances: i32) vo
     } else {
         // non-indexed rendering
         @objc mtl.render_cmd_encoder.drawPrimitives(prim,
-            vertexStart = @as(i64) intcast base_element,
-            vertexCount = @as(i64) intcast num_elements,
+            vertexStart   = @as(i64) intcast base_element,
+            vertexCount   = @as(i64) intcast num_elements,
             instanceCount = @as(i64) intcast num_instances,
         );
     }
@@ -1708,9 +1711,9 @@ fn dispatch(mtl: *Impl, num_groups_x: i32, num_groups_y: i32, num_groups_z: i32)
     @debug_assert(mtl.state_cache.cur_pipeline && (mtl.state_cache.cur_pipeline.slot.id == mtl.state_cache.cur_pipeline_id.id));
     cur_pip := mtl.state_cache.cur_pipeline;
     thread_groups: MTLSize = (
-        width = @as(i64) num_groups_x,
+        width  = @as(i64) num_groups_x,
         height = @as(i64) num_groups_y,
-        depth = @as(i64) num_groups_z,
+        depth  = @as(i64) num_groups_z,
     );
     threads_per_threadgroup := cur_pip.mtl.threads_per_threadgroup;
     [mtl.compute_cmd_encoder dispatchThreadgroups:thread_groups threadsPerThreadgroup:threads_per_threadgroup];

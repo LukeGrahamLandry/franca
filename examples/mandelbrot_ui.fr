@@ -1,16 +1,77 @@
+// - a triangle without using a buffer
+// - mandelbrot set in that triangle
+
 #include_std("graphics/lib.fr");
 #include_std("backend/lib.fr");
 
 driver :: fn(vtable: *ImportVTable) void = 
     Easy'build_for_graphics(vtable, "examples/mandelbrot_ui.fr");
 
+Shaders :: @struct {
+    OutV :: @struct(pos: Vec4 #position);
+    InV :: @struct();
+    vs   :: fn(_: InV, i: u32 #vertex_id) OutV = (
+        pos = @vec(
+            @if(i == 2, 1.0, 0.0),
+            @if(i == 0, 1.0, 0.0),
+            @if(i == 1, 1.0, 0.0),
+            1.0,
+        ),
+    );
+    OutF :: @struct(frag_color: Vec4 #color(0));
+    // FIXME PLEASE. it works tho :)
+    fs   :: fn(in: OutV) Shaders.OutF = {
+        z := @vec(0.0, 0.0);
+        c := @swizzle in.pos.xy;
+        xxxx :f32= 1200.0;
+        c = c / @vec(xxxx, xxxx);
+        denom := 5.0;
+        c = c - @vec(1.0 / denom, 0.0);
+        i :f32= 0.0;
+        zSq := z * z;
+        zy :f32= 0.0;
+        zx :f32= 0.0;
+        one :f32= 1.0;
+        inline_range(0, 100) { _ |
+            z.y = z.x * 2.0 * z.y;
+            z.x = zSq.x - zSq.y;
+            z = z + c;
+            zSq = z * z;
+            
+            i = i + @if(zSq.x + zSq.y < 4.0, 0.0, one / 10.0);
+        };
+        
+        cc := @vec(i, 1.0, 1.0, 1.0); 
+        K := @vec(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+        six := @vec(6.0, 6.0, 6.0);
+        p := abs(fract((@swizzle cc.xxx) + (@swizzle K.xyz)) * six - (@swizzle K.www));
+        out := mix(@swizzle K.xxx, clamp(p - (@swizzle K.xxx), 0.0, 1.0), cc.y) * (@swizzle cc.zzz);
+        out2 := @if(zSq.x + zSq.y < 4.0, @vec(0.0, 0.0, 0.0), out);
+        (frag_color = @vec(out2.x, out2.y, out2.z, 1.0))
+        //(frag_color = @vec(i, 0.0, 0.0, 1.0))
+    }
+};
+
+fract :: fn(a: Vec3) Vec3 = (); 
+fn abs(a: Vec3) Vec3 = ();
+fn mix(a: Vec3, b: Vec3, c: f32) Vec3 = ();
+fn clamp(a: Vec3, b: f64, c: f32) Vec3 = ();
+
 main :: fn() void = 
     Easy'start(State);
 
 State :: @struct {
+    pipe: Sg.Pipeline;
 };
 
-fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = ();
+fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    shd_desc := SgShaderDesc.zeroed();
+    choose_shader_impl(SOKOL_BACKEND, shd_desc&, Shaders);
+    state.pipe = sg.make(
+        shader = sg.make(shd_desc),
+    );
+}
+
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = ();
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
@@ -19,7 +80,9 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         load_action = .CLEAR,
         clear_value = (r = 0.156, g = 0.156, b = 0.156, a = 1),
     ), ..)));
-    // TODO: call draw()
+
+    sg.apply_pipeline(state.pipe);
+    sg.draw(0, 3, 1);
     sg.end_pass();
 };
 

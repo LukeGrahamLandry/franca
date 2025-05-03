@@ -34,9 +34,12 @@ fn compile_to_shader_source(fid: FuncId, backend: RenderBackend, is_vertex: bool
     ret_name := self&.type_name(expr.ty);
     @fmt(self.stmts&, "\n% % %(", if(is_vertex, => "vertex", => "fragment"), ret_name, "main0");
     args := func.arg.bindings&;
-    name := args.index(0).ident().unwrap().str();
-    type := self&.type_name(args[0]&.unwrap_ty());
-    @fmt(self.stmts&, "% % [[stage_in]]", type, name);
+    if args.len > 0 {
+        if args.index(0).ident() { name |
+            type := self&.type_name(args[0]&.unwrap_ty());
+            @fmt(self.stmts&, "% % [[stage_in]]", type, name.str());
+        };
+    }
     
     ::ptr_utils(Annotations);
     if args.len > 1 {
@@ -49,8 +52,13 @@ fn compile_to_shader_source(fid: FuncId, backend: RenderBackend, is_vertex: bool
         } else {
             buf := u8.list(temp());
             name := args[1]&.ident().unwrap();
-            msl_field(self&, buf&, name, *type, args[1].nullable_tag);
-            self.stmts&.push_all(", constant "); // HACK
+            if get_type_info_ref(type).is(.Int) {
+                msl_field(self&, buf&, name, type, args[1].nullable_tag);
+                self.stmts&.push_all(", "); // HACK
+            } else {
+                msl_field(self&, buf&, name, *type, args[1].nullable_tag);
+                self.stmts&.push_all(", constant "); // HACK
+            };
             self.stmts&.push_all(buf.items());
         };
     };
@@ -58,7 +66,7 @@ fn compile_to_shader_source(fid: FuncId, backend: RenderBackend, is_vertex: bool
     @fmt(self.stmts&, ") {\n");
     
     result := msl_expr(self&, expr);
-    @fmt(self.stmts&, "    return %;\n}\n", result);
+    @fmt(self.stmts&, "\treturn %;\n}\n", result);
     self.decls&.push_all(self.stmts.items());
     self.decls.items()
 }
@@ -107,13 +115,15 @@ fn msl_declare(self: *Translate, name: Str, info: *TypeInfo) void = {
     @match(info) {
         fn Struct(it) => {
             buf := u8.list(temp());
-            msl_fields(self, buf&, it, "    ", ";\n");
+            msl_fields(self, buf&, it, "\t", ";\n");
             @fmt(self.decls&, "\nstruct % {\n%};\n", name, buf.items());
         }
-        @default => panic("TODO: msl_declare more types");
+        @default => {
+            debug_log_type(current_compiler_context().intern_type(info[]));
+            panic("TODO: msl_declare more types")
+        };
     };
 }
-
 
 fn msl_expr(self: *Translate, e: *FatExpr) Str = {
     flat :: fn(e: *FatExpr) void = {
@@ -140,15 +150,12 @@ fn msl_expr(self: *Translate, e: *FatExpr) Str = {
     flat(e);
     @match(e.expr&) {
         fn StructLiteralP(it) => {
-            v := @tfmt("v%", self.next_var);
-            self.next_var += 1;
-            type := self.type_name(e.ty);
-            @fmt(self.stmts&, "    % % = {};\n", type, v);
+            v := self.declare_var(e.ty, (Some = "{}"));
             each it.bindings& { b |
                 value := b.get_default().expect("value for struct literal");
                 value := self.msl_expr(value);
                 name  := b.ident().expect("field name for struct literal").str();
-                @fmt(self.stmts&, "    %.% = %;\n", v, name, value);
+                @fmt(self.stmts&, "\t%.% = %;\n", v, name, value);
             };
             v
         }
@@ -157,12 +164,26 @@ fn msl_expr(self: *Translate, e: *FatExpr) Str = {
                 v: f64 = bitcast(it.bytes.Small._0);
                 return(@tfmt("%.0", v));  // TODO: correct fractional part
             };
+            if e.ty == f32 {
+                v: i64 = it.bytes.Small._0;
+                v: u32 = v.trunc();
+                v: f32 = v.bitcast();
+                return(@tfmt("%.0", v));  // TODO: correct fractional part
+            };
+            if get_type_info_ref(e.ty).is(.Int) {
+                v: i64 = it.bytes.Small._0;
+                return(@tfmt("%", v));
+            };
             if get_func_id(e) { fid |
                 func := get_function_ast(fid, false, false, false, false);
                 return(func.name.str());
             };
+            if e.ty == void {
+                return("()");  // TODO: avoid getting here
+            }
             
-            "??"
+            debug_log_type(e.ty);
+            compile_error("unhandled expression value type in shader", e.loc)
         }
         fn Deref(it) => {
             flat(it[]);
@@ -179,8 +200,27 @@ fn msl_expr(self: *Translate, e: *FatExpr) Str = {
         fn GetNamed(it)    => str(it[]);
         fn FieldAccess(it) => self.field_access(it.container, it.name);
         fn Block(it) => {
-            @ct_assert(it.body.len == 0 && it.ret_label.is_none(), e.loc, "TODO: handle complex blocks in shader translation");
-            self.msl_expr(it.result)
+            if it.ret_label { ret_label |
+                if e.ty != void {
+                    @fmt(self.stmts&, "\t% B__%;\n", self.type_name(e.ty), ret_label.to_index());
+                }
+            }
+            each it.body { e |
+                self.msl_stmt(e);
+            };
+            result := self.msl_expr(it.result);
+            if it.ret_label { ret_label |
+                if e.ty != void {
+                    @fmt(self.stmts&, "\tB__% = %;\n", ret_label.to_index(), result);
+                    result = @tfmt("B__%", ret_label.to_index());
+                } else {
+                    result = "";
+                };
+                // labeled statements are not supported in Metal
+                //@fmt(self.stmts&, "BL__%:\n", ret_label.to_index());
+            };
+            
+            result
         }
         fn Call(it) => {
             dot_call := false;
@@ -215,6 +255,9 @@ fn msl_expr(self: *Translate, e: *FatExpr) Str = {
                 @case("sub") => self.binary("-", it.arg);
                 @case("mul") => self.binary("*", it.arg);
                 @case("div") => self.binary("/", it.arg);
+                @case("ne") => self.binary("!=", it.arg);
+                @case("eq") => self.binary("==", it.arg);
+                @case("lt") => self.binary("<", it.arg);
                 @default => @tfmt("%(%)", f, self.msl_expr(it.arg));
             }
         }
@@ -228,11 +271,61 @@ fn msl_expr(self: *Translate, e: *FatExpr) Str = {
             };
             out.items()
         }
+        fn If(it) => {
+            // TODO: any zero size type not just void
+            out_var := if(e.ty == void, => "", => self.declare_var(e.ty, .None));
+            cond := self.msl_expr(it.cond);
+            @fmt(self.stmts&, "if (%) {\n", cond);
+            value := self.msl_expr(it.if_true);
+            @fmt(self.stmts&, "% = %;\n} else {\n", out_var, value);
+            value :=  self.msl_expr(it.if_false);
+            @fmt(self.stmts&, "% = %;\n}\n", out_var, value);
+            out_var
+        }
         @default => {
             debug_log_ast(e[]);
             compile_error("unhandled expression type in shader", e.loc)
         };
     }
+}
+
+fn msl_stmt(self: *Translate, e: *FatStmt) void = {
+    @match(e.stmt&) {
+        fn Noop() => ();
+        fn Eval(it) => {
+            self.msl_expr(it);
+        }
+        fn Decl(it) => {
+            name := str(it.name.Var.name);  // TODO
+            t := it.default.ty;
+            value := self.msl_expr(it.default&);
+            @fmt(self.stmts&, "\t% % = %;\n", self.type_name(t), name, value);
+        }
+        fn Set(it) => {
+            value := self.msl_expr(it.value&);
+            place := self.msl_expr(it.place&);
+            @fmt(self.stmts&, "% = %;\n", place, value);
+        }
+        fn DeclVarPattern(it) => {
+            @ct_assert(it.binding.bindings.len == 1, e.loc, "TODO: multi-DeclVarPattern");
+            self.declare_var(it.value.ty, (Some = self.msl_expr(it.value&)));
+        }
+        @default => {
+            compile_error("unhandled stmt type in shader", e.loc);
+        };
+    }
+}
+
+fn declare_var(self: *Translate, ty: Type, init: ?Str) Str = {
+    v := @tfmt("v%", self.next_var);
+    self.next_var += 1;
+    type := self.type_name(ty);
+    if init { init |
+        @fmt(self.stmts&, "\t% % = %;\n", type, v, init);
+    } else {
+        @fmt(self.stmts&, "\t% %;\n", type, v);
+    };
+    v
 }
 
 fn get_func_id(e: *FatExpr) ?FuncId = {
@@ -264,6 +357,10 @@ fn binary(self: *Translate, op: Str, arg: *FatExpr) Str = {
 fn type_name(self: *Translate, type: Type) Str = {
     @switch(type) {
         @case(f32)  => "float";
+        @case(f64)  => "float";  // double is not supported in metal. TODO: maybe we should make this a hard error
+        @case(i32)  => "int";
+        @case(u32)  => "unsigned int";
+        @case(i64)  => "long";
         @case(Vec2) => "float2";
         @case(Vec3) => "float3";
         @case(Vec4) => "float4";
