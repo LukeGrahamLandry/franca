@@ -1,7 +1,6 @@
 #include_std("graphics/lib.fr");
 
 State :: @struct(
-    app: Sapp.Common,  // :ThisIsOnTheStackWhichWontWorkOnWasm
     pipe: Sgl.Pipeline,
     pass_action: SgPassAction,
     x: f64,
@@ -9,9 +8,11 @@ State :: @struct(
     dx: f64,
     dy: f64,
     world: World,
-    text: *Sdtx.Common,
-    draw: *Sgl.Common,
+    text: Sdtx.Self,
+    draw: Sgl.Self,
     sg: Sg.Self,
+    w: i64,
+    h: i64,
 );
 
 World :: @struct(
@@ -82,25 +83,19 @@ fn load_default_world(self: *World) void = {
 }
 
 
-do_init :: fn(userdata: rawptr) void = {
-    state := State.ptr_from_raw(userdata);
-    sapp := state.app&;
+fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    sapp.set_window_title("Arstotzkan Farmer 4");
     
-    state.sg&.setup(
-        environment = sapp.glue_environment(),
-        allocator = allocator,
-    );
-    
-    state.draw.setup(
+    state.draw&.setup(
         allocator = allocator,
         context = (),
-        sg = state.sg&,
+        sg = sg,
     );
     
-    state.text.setup(
+    state.text&.setup(
         allocator = allocator,
         fonts = @slice(Sdtx.font.kc854),
-        sg = state.sg&,
+        sg = sg,
     );
     
     init_pipeline(state.draw.default_context&, state.pipe&, (colors = (
@@ -138,10 +133,7 @@ black_transparent: Colour : (r = 0, g = 0, b = 0, a = 100);
 Rect :: @struct(pos: Pos, w: f64, h: f64);
 base_size :: 50.0;
 
-do_render :: fn(userdata: rawptr) void = {
-    state := State.ptr_from_raw(userdata);
-    sapp := state.app&;
-    mark := mark_temporary_storage();
+fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     do_update :: fn(state: *State) void = {
         state.x += state.dx;
         state.y += state.dy;
@@ -161,6 +153,8 @@ do_render :: fn(userdata: rawptr) void = {
     
     sgl := state.draw.default_context&;
     sdtx := state.text.default_context&;
+    state.w = sapp.width();
+    state.h = sapp.height();
     
     sgl.defaults();
     sgl.viewport(0.intcast(), 0.intcast(), sapp.width().intcast(), sapp.height().intcast(), true);
@@ -185,11 +179,9 @@ do_render :: fn(userdata: rawptr) void = {
     sgl.begin(.QUADS);
    
     fn draw(s: *State, area: Rect, colour: Colour) void = {
-        sgl, sapp := (s.draw.default_context&, s.app&);
+        sgl := s.draw.default_context&;
         sgl.color = pack_rgba(colour.r, colour.g, colour.b, colour.a);
-        
-        w := sapp.width().float();
-        h := sapp.height().float();
+        w, h := (s.w.float(), s.h.float());
         
         x1 := area.pos.x.sub(0.0).div(w).sub(1.0).cast();
         x2 := area.pos.x.add(area.w).div(w).sub(1.0).cast();
@@ -272,22 +264,18 @@ do_render :: fn(userdata: rawptr) void = {
         state.dy *= 1.0.neg();
     };
     
-    sapp.glue_begin_pass(state.sg&, state.pass_action);
+    Easy'glue_begin_pass(sapp, sg, state.pass_action);
     
     sgl.draw_layer(0);
     sdtx.draw_layer(0);
     
-    state.sg&.end_pass();
-    state.sg&.commit();
-    reset_temporary_storage(mark);
+    sg.end_pass();
 };
 
 ::enum(Sapp.EventType);
 ::enum(Sapp.Keycode);
 
-do_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
-    state := State.ptr_from_raw(userdata);
-   
+fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     if event.type == .KEY_DOWN {
         if event.key_code == .ESCAPE {
             exit(0);
@@ -415,22 +403,10 @@ fn center_overlaps(me: Pos, me_size: f64, obj: Pos, obj_size: f64) bool = {
     center.x > obj.x && center.x < obj.x + obj_size && center.y > obj.y && center.y < obj.y + obj_size
 }
 
-fn main() void = {
-    println("Hello World");
-    state := State.zeroed();
-    state.text = allocator.box(@type state.text[]);
-    state.draw = allocator.box(@type state.draw[]);
-    state.app&.run(
-        init_cb = do_init,
-        frame_cb = do_render,
-        event_cb = do_event,
-        user_data = State.raw_from_ptr(state&),
-        allocator = general_allocator(),
-        window_title = "Arstotzkan Farmer 4",
-    );
-}
+fn main() void = 
+    Easy'start(State);
 
 fn driver(vtable: *ImportVTable) void = 
-    build_for_graphics(vtable, "examples/farm_game.fr"); 
+    Easy'build_for_graphics(vtable, "examples/farm_game.fr"); 
 
 #include_std("backend/lib.fr");

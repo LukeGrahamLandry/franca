@@ -5,6 +5,8 @@ so i don't need to deal with the old .ssa tests yet.
 - make `Expr::DataSymbol` let you say which library to import from so 
 can get rid of the dlopens in macos/app.fr
 - handle DataSymbol for jitting. just look it up in comptime_libraries like i do for functions. 
+- graphics/easy.fr for less boiler plate in little examples where most of the code ends up being just starting the default window
+- naming consistancy (sapp/sgl/sdtx).Common -> Self
 
 - TODO: allow linking to something without importing any symbols so you get the objc classes from it. 
 - TODO: replace the func$module thing i used to do for wasm with the new libs thing

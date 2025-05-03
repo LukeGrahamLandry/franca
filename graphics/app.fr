@@ -14,7 +14,7 @@
 //   sapp_dpi_scale, sapp_keyboard_shown, sapp_get_num_dropped_files
 // 
 // UNFINISHED
-// - don't have timing stuff
+// - don't have timing stuff (frame_duration)
 //
 // temp() is reset after each render() or event() call. 
 //
@@ -67,7 +67,7 @@ ImageDesc :: @struct(
     height: i64,
     pixels: []u8,
 );
-Common :: @rec @struct(
+Self :: @rec @struct(
     // For personal sanity, it feels better if this struct is the same size on all target platforms. 
     // But we still statically know what type it will be because you're only targetting one platform at a time. 
     // SAFETY: This must stay the first field! 
@@ -121,28 +121,28 @@ Mouse :: @struct(
 Timing :: void; // TODO
 
 // SAFETY: impl_storage is the first field so the pointers are interchangeable. 
-fn impl(s: *Common) *Macos.Impl = ptr_cast_unchecked(Common, Macos.Impl, s);
-fn common(s: *Macos.Impl) *Common = ptr_cast_unchecked(Macos.Impl, Common, s);
+fn impl(s: *Self) *Macos.Impl = ptr_cast_unchecked(Self, Macos.Impl, s);
+fn common(s: *Macos.Impl) *Self = ptr_cast_unchecked(Macos.Impl, Self, s);
 
-fn call_init(sapp: *Common) void = {
+fn call_init(sapp: *Self) void = {
     sapp'desc'init_cb(sapp.desc.user_data);
     sapp.init_called = true;
 }
 
-fn call_frame(sapp: *Common) void = {
+fn call_frame(sapp: *Self) void = {
     if(!sapp.init_called || sapp.cleanup_called, => return()); 
     mark := mark_temporary_storage();
     sapp'desc'frame_cb(sapp.desc.user_data);
     reset_temporary_storage(mark);
 }
 
-fn call_cleanup(sapp: *Common) void = {
+fn call_cleanup(sapp: *Self) void = {
     if(sapp.cleanup_called, => return());
     sapp'desc'cleanup_cb(sapp.desc.user_data);
     sapp.cleanup_called = true;
 }
 
-fn call_event(sapp: *Common, e: *Event) bool = {
+fn call_event(sapp: *Self, e: *Event) bool = {
     if !sapp.cleanup_called {
         mark := mark_temporary_storage();
         sapp'desc'event_cb(sapp.desc.user_data, e);
@@ -153,12 +153,12 @@ fn call_event(sapp: *Common, e: *Event) bool = {
     prev
 }
 
-fn init_state(sapp: *Common, desc: *Desc) void = {
+fn init_state(sapp: *Self, desc: *Desc) void = {
     @debug_assert(desc.width >= 0);
     @debug_assert(desc.height >= 0);
     @debug_assert(desc.sample_count >= 0);
     @debug_assert(desc.swap_interval >= 0);
-    ::[]Common;
+    ::[]Self;
     sapp.slice(1).set_zeroed();
     sapp.desc = desc[];
     sapp.first_frame = true;
@@ -180,7 +180,7 @@ fn init_state(sapp: *Common, desc: *Desc) void = {
 }
 
 // this will get called automatically when the application quits. do not call it directly. 
-fn discard_state(sapp: *Common) void = {
+fn discard_state(sapp: *Self) void = {
     if sapp.clipboard.enabled {
         sapp.clipboard.buffer&.drop(sapp.desc.allocator);
     }
@@ -191,7 +191,7 @@ fn discard_state(sapp: *Common) void = {
     sapp.valid = false;
 }
 
-fn init_event(sapp: *Common, type: EventType) void = {
+fn init_event(sapp: *Self, type: EventType) void = {
     e := sapp.event&;
     ::[]Event;
     e.slice(1).set_zeroed();
@@ -208,23 +208,23 @@ fn init_event(sapp: *Common, type: EventType) void = {
     e.mouse_dy = sapp.mouse.dy;
 }
 
-fn events_enabled(sapp: *Common) bool = sapp.init_called;
+fn events_enabled(sapp: *Self) bool = sapp.init_called;
 
 SAPP_MAX_KEYCODES :: 512; 
 
-fn translate_key(sapp: *Common, scan_code: i64) Keycode = {
+fn translate_key(sapp: *Self, scan_code: i64) Keycode = {
     ok := scan_code >= 0 && scan_code < SAPP_MAX_KEYCODES;
     if(!ok, => return(.INVALID));
     sapp.keycodes[scan_code]
 }
 
-fn clear_drop_buffer(sapp: *Common) void = {
+fn clear_drop_buffer(sapp: *Self) void = {
     if(!sapp.drop.enabled, => return());
     @debug_assert(sapp.drop.buffer);
     sapp.clear(sapp.drop.buffer, (size_t)sapp.drop.buf_size);
 }
 
-fn frame(sapp: *Common) void = {
+fn frame(sapp: *Self) void = {
     if (sapp.first_frame) {
         sapp.first_frame = false;
         sapp.call_init();
@@ -257,51 +257,48 @@ fn validate_icon_desc(desc: []ImageDesc) void = {
     };
 }
 
-fn run(sapp: *Common, desc: Desc) Never = {
+fn run(sapp: *Self, desc: Desc) Never = {
+    @debug_assert(!sapp.valid);
     sapp.init_state(desc&);
     sapp.keycodes = sapp.impl().keytable();
     sapp.impl().run(sapp.desc&)
 }
 
-fn frame_duration(sapp: *Common) f64 = {
-    sapp.timing_get_avg(sapp.timing&)
-}
-
-fn color_format(sapp: *Common) SgPixelFormat = {
-    @debug_assert(SOKOL_BACKEND.is_metal());
+fn color_format(sapp: *Self) SgPixelFormat = {
+    ASSERT_METAL();
     .BGRA8
 }
 
-fn depth_format(sapp: *Common) SgPixelFormat = {
+fn depth_format(sapp: *Self) SgPixelFormat = {
     .DEPTH_STENCIL
 }
 
-fn high_dpi(sapp: *Common) bool = {
+fn high_dpi(sapp: *Self) bool = {
     sapp.desc.high_dpi && sapp.dpi_scale >= 1.5
 }
 
-fn show_keyboard(sapp: *Common, show: bool) void = {
-    @panic("mobile only");
-}
-
-fn toggle_fullscreen(sapp: *Common) void = {
+fn toggle_fullscreen(sapp: *Self) void = {
     sapp.impl().toggle_fullscreen();
 }
 
 fn ne(a: bool, b: bool) bool = int(a) != int(b);  // TODO
 
 /* NOTE that sapp_show_mouse() does not "stack" like the Win32 or macOS API functions! */
-fn show_mouse(sapp: *Common, show: bool) void = {
+fn show_mouse(sapp: *Self, show: bool) void = {
+    @debug_assert(sapp.valid);
     if sapp.mouse.shown != show {
         sapp.impl().update_cursor(sapp.mouse.cursor, show);
     };
     sapp.mouse.shown = show;
 }
 
-fn lock_mouse(sapp: *Common, lock: bool) void = 
+fn lock_mouse(sapp: *Self, lock: bool) void = {
+    @debug_assert(sapp.valid);
     sapp.impl().lock_mouse(lock);
+}
 
-fn set_mouse_cursor(sapp: *Common, cursor: MouseCursor) void = {
+fn set_mouse_cursor(sapp: *Self, cursor: MouseCursor) void = {
+    @debug_assert(sapp.valid);
     if sapp.mouse.cursor != cursor {
         sapp.impl().update_cursor(cursor, sapp.mouse.shown);
     };
@@ -309,22 +306,26 @@ fn set_mouse_cursor(sapp: *Common, cursor: MouseCursor) void = {
 }
 
 /* NOTE: on HTML5, sapp_set_clipboard_string() must be called from within event handler! */
-fn set_clipboard_string(sapp: *Common, str: CStr) void = {
+fn set_clipboard_string(sapp: *Self, str: CStr) void = {
+    @debug_assert(sapp.valid);
     if(!sapp.clipboard.enabled, => return());
     sapp.impl().set_clipboard_string(str);
 }
 
 // SAFETY: Memory valid until next call (you can steal the buffer out of the pointer if you want) 
-fn get_clipboard_string(sapp: *Common) *RawList(u8) = {
+fn get_clipboard_string(sapp: *Self) *RawList(u8) = {
+    @debug_assert(sapp.valid);
     if(!sapp.clipboard.enabled, => return(sapp.clipboard.buffer&));  // empty
     sapp.impl().get_clipboard_string()
 }
 
-fn set_window_title(sapp: *Common, title: CStr) void = {
+fn set_window_title(sapp: *Self, title: CStr) void = {
+    @debug_assert(sapp.valid);
     sapp.impl().set_window_title(title);
 }
 
-fn set_icon(sapp: *Common, desc: []ImageDesc) void = {
+fn set_icon(sapp: *Self, desc: []ImageDesc) void = {
+    @debug_assert(sapp.valid);
     if(desc.len == 0, => return());
     validate_icon_desc(desc);
     sapp.impl().set_icon(desc);
@@ -332,58 +333,19 @@ fn set_icon(sapp: *Common, desc: []ImageDesc) void = {
 
 // SAFETY: Memory valid until the next file drop event. 
 // I helpfully put a null terminator after the string since you probably want to pass it to libc. 
-fn get_dropped_file_path(sapp: *Common, i: i64) Str = {
+fn get_dropped_file_path(sapp: *Self, i: i64) Str = {
+    @debug_assert(sapp.valid);
     d := sapp.drop&;
     @debug_assert(d.enabled && i >= 0 && i < d.num_files);
     @debug_assert(d.num_files + 1 == d.starts.len, "internal invarient");
     d.buffer.slice(d.starts[i], d.starts[i + 1] - 1 /*null*/)
 }
 
-fn width(sapp: *Common) i64 = sapp.framebuffer_width;
-fn height(sapp: *Common) i64 = sapp.framebuffer_height;
-
-//
-// Glue: integration with gfx.fr
-//
-
-// sokol_glue.h -- glue helper functions for sokol headers
-fn glue_environment(sapp: *Common) SgEnvironment = {
-    env := zeroed SgEnvironment;
-    env.defaults.color_format = sapp.color_format();
-    env.defaults.depth_format = sapp.depth_format();
-    env.defaults.sample_count = sapp.sample_count.intcast();
-    env.metal.device = sapp.impl().metal_get_device();
-    // TODO: update for d3d11/wgpu
-    @debug_assert(SOKOL_BACKEND.is_metal());
-    env
+fn width(sapp: *Self) i64 = { 
+    @debug_assert(sapp.valid);
+    sapp.framebuffer_width
 }
-
-// sokol_glue.h -- glue helper functions for sokol headers
-fn glue_swapchain(sapp: *Common) SgSwapchain = {
-    swapchain := zeroed SgSwapchain;
-    swapchain.width = sapp.width().intcast();
-    swapchain.height = sapp.height().intcast();
-    swapchain.sample_count = sapp.sample_count.intcast();
-    swapchain.color_format = sapp.color_format();
-    swapchain.depth_format = sapp.depth_format();
-    swapchain.metal.current_drawable = sapp.impl().metal_get_current_drawable();
-    swapchain.metal.depth_stencil_texture = sapp.impl().metal_get_depth_stencil_texture();
-    swapchain.metal.msaa_color_texture = sapp.impl().metal_get_msaa_color_texture();
-    // TODO: update for d3d11/wgpu/gl
-    @debug_assert(SOKOL_BACKEND.is_metal());
-    swapchain
-}
-
-// added this because im lazy. not a high value thing once you start
-// doing fancy stuff but it makes simple examples look less confusing. 
-fn glue_begin_pass(sapp: *Sapp.Common, sg: *Sg.Self, action: SgPassAction) void = {
-    desc := SgPass.zeroed();
-    desc.action = action;
-    desc.swapchain = sapp.glue_swapchain();
-    desc.swapchain.width = sapp.width().intcast();
-    desc.swapchain.height = sapp.height().intcast();
-    sg.begin_pass(desc&);
-}
+fn height(sapp: *Self) i64 = sapp.framebuffer_height;
 
 //
 // The rest is just very long enums
