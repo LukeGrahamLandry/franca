@@ -1,3 +1,9 @@
+## (May 3)
+
+- i want to work on making my shader translation better but i think 
+it's a bad idea to do that while i only have Metal because i don't know 
+what things are different elsewhere so maybe first i'll add back the wgpu backend. 
+
 ## (May 2)
 
 - make the backend's library tracking just default to libc like it did before 
@@ -7,6 +13,8 @@ can get rid of the dlopens in macos/app.fr
 - handle DataSymbol for jitting. just look it up in comptime_libraries like i do for functions. 
 - graphics/easy.fr for less boiler plate in little examples where most of the code ends up being just starting the default window
 - naming consistancy (sapp/sgl/sdtx).Common -> Self
+- started a new mandelbrot example. add `if` to shader translation. 
+- very sad that metal doesn't give you goto
 
 - TODO: allow linking to something without importing any symbols so you get the objc classes from it. 
 - TODO: replace the func$module thing i used to do for wasm with the new libs thing
@@ -239,6 +247,7 @@ i guess that's a compiler bug, i probably shouldn't be injecting code
 inside your function call that zeroes registers at random, but also it's 
 kinda reasonable if it's considered disrespectful to lie about a function's signeture. 
 anyway, rare W for lldb. 
+:TodoDontZeroX0WhenVoid
 
 ## (Apr 22) wasm backend
 

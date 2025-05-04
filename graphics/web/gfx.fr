@@ -1,0 +1,2259 @@
+// simple 3D API wrapper
+// Adapted from sokol_gfx.h - https://github.com/floooh/sokol
+// zlib/libpng license. Copyright (c) 2018 Andre Weissflog.
+
+fn ASSERT_NOT_WEBSITE() void = ();
+WGPU. :: import("@/graphics/web/webgpu.fr");
+
+#define _SG_WGPU._ROWPITCH_ALIGN (256)
+#define _SG_WGPU._MAX_UNIFORM_UPDATE_SIZE (1<<16) // also see WGPU.Limits.maxUniformBufferBindingSize
+#define _SG_WGPU._NUM_BINDGROUPS (2) // 0: uniforms, 1: images, samplers, storage buffers
+#define _SG_WGPU._UB_BINDGROUP_INDEX (0)
+#define _SG_WGPU._IMG_SMP_SBUF_BINDGROUP_INDEX (1)
+#define _SG_WGPU._MAX_UB_BINDGROUP_ENTRIES (SG_MAX_UNIFORMBLOCK_BINDSLOTS)
+#define _SG_WGPU._MAX_UB_BINDGROUP_BIND_SLOTS (2 * SG_MAX_UNIFORMBLOCK_BINDSLOTS)
+#define _SG_WGPU._MAX_IMG_SMP_SBUF_BINDGROUP_ENTRIES (SG_MAX_IMAGE_BINDSLOTS + SG_MAX_SAMPLER_BINDSLOTS + SG_MAX_STORAGEBUFFER_BINDSLOTS)
+#define _SG_WGPU._MAX_IMG_SMP_SBUF_BIND_SLOTS (128)
+
+typedef struct _sg_buffer_s {
+    _sg_slot_t slot;
+    _sg_buffer_common_t cmn;
+    struct {
+        WGPU.Buffer buf;
+    } wgpu;
+} buffer_t;
+typedef buffer_t _sg_buffer_t;
+
+typedef struct _sg_image_s {
+    _sg_slot_t slot;
+    _sg_image_common_t cmn;
+    struct {
+        WGPU.Texture tex;
+        WGPU.TextureView view;
+    } wgpu;
+} image_t;
+typedef image_t _sg_image_t;
+
+typedef struct _sg_sampler_s {
+    _sg_slot_t slot;
+    _sg_sampler_common_t cmn;
+    struct {
+        WGPU.Sampler smp;
+    } wgpu;
+} sampler_t;
+typedef sampler_t _sg_sampler_t;
+
+typedef struct {
+    WGPU.ShaderModule module;
+    _sg_str_t entry;
+} shader_func_t;
+
+typedef struct _sg_shader_s {
+    _sg_slot_t slot;
+    _sg_shader_common_t cmn;
+    struct {
+        shader_func_t vertex_func;
+        shader_func_t fragment_func;
+        shader_func_t compute_func;
+        WGPU.BindGroupLayout bgl_ub;
+        WGPU.BindGroup bg_ub;
+        WGPU.BindGroupLayout bgl_img_smp_sbuf;
+        // a mapping of sokol-gfx bind slots to setBindGroup dynamic-offset-array indices
+        uint8_t ub_num_dynoffsets;
+        uint8_t ub_dynoffsets[SG_MAX_UNIFORMBLOCK_BINDSLOTS];
+        // indexed by sokol-gfx bind slot:
+        uint8_t ub_grp0_bnd_n[SG_MAX_UNIFORMBLOCK_BINDSLOTS];
+        uint8_t img_grp1_bnd_n[SG_MAX_IMAGE_BINDSLOTS];
+        uint8_t smp_grp1_bnd_n[SG_MAX_SAMPLER_BINDSLOTS];
+        uint8_t sbuf_grp1_bnd_n[SG_MAX_STORAGEBUFFER_BINDSLOTS];
+    } wgpu;
+} shader_t;
+typedef shader_t _sg_shader_t;
+
+typedef struct _sg_pipeline_s {
+    _sg_slot_t slot;
+    _sg_pipeline_common_t cmn;
+    _sg_shader_t* shader;
+    struct {
+        WGPU.RenderPipeline rpip;
+        WGPU.ComputePipeline cpip;
+        WGPU.Color blend_color;
+    } wgpu;
+} pipeline_t;
+typedef pipeline_t _sg_pipeline_t;
+
+typedef struct {
+    _sg_image_t* image;
+    WGPU.TextureView view;
+} attachment_t;
+
+typedef struct _sg_attachments_s {
+    _sg_slot_t slot;
+    _sg_attachments_common_t cmn;
+    struct {
+        attachment_t colors[SG_MAX_COLOR_ATTACHMENTS];
+        attachment_t resolves[SG_MAX_COLOR_ATTACHMENTS];
+        attachment_t depth_stencil;
+    } wgpu;
+} attachments_t;
+typedef attachments_t _sg_attachments_t;
+
+// a pool of per-frame uniform buffers
+typedef struct {
+    uint32_t num_bytes;
+    uint32_t offset;    // current offset into buf
+    uint8_t* staging;   // intermediate buffer for uniform data updates
+    WGPU.Buffer buf;     // the GPU-side uniform buffer
+    uint32_t bind_offsets[SG_MAX_UNIFORMBLOCK_BINDSLOTS];   // NOTE: index is sokol-gfx ub slot index!
+} uniform_buffer_t;
+
+typedef struct {
+    uint32_t id;
+} bindgroup_handle_t;
+
+typedef enum {
+    _SG_WGPU._BINDGROUPSCACHEITEMTYPE_NONE           = 0,
+    _SG_WGPU._BINDGROUPSCACHEITEMTYPE_IMAGE          = 0x00001111,
+    _SG_WGPU._BINDGROUPSCACHEITEMTYPE_SAMPLER        = 0x00002222,
+    _SG_WGPU._BINDGROUPSCACHEITEMTYPE_STORAGEBUFFER  = 0x00003333,
+    _SG_WGPU._BINDGROUPSCACHEITEMTYPE_PIPELINE       = 0x00004444,
+} bindgroups_cache_item_type_t;
+
+#define _SG_WGPU._BINDGROUPSCACHEKEY_NUM_ITEMS (1 + _SG_WGPU._MAX_IMG_SMP_SBUF_BINDGROUP_ENTRIES)
+typedef struct {
+    uint64_t hash;
+    // the format of cache key items is BBBBTTTTIIIIIIII
+    // where
+    //  - BBBB is 2x the WGPU. binding
+    //  - TTTT is the bindgroups_cache_item_type_t
+    //  - IIIIIIII is the resource id
+    //
+    // where the item type is a per-resource-type bit pattern
+    uint64_t items[_SG_WGPU._BINDGROUPSCACHEKEY_NUM_ITEMS];
+} bindgroups_cache_key_t;
+
+typedef struct {
+    uint32_t num;           // must be 2^n
+    uint32_t index_mask;    // mask to turn hash into valid index
+    bindgroup_handle_t* items;
+} bindgroups_cache_t;
+
+typedef struct {
+    _sg_slot_t slot;
+    WGPU.BindGroup bindgroup;
+    bindgroups_cache_key_t key;
+} bindgroup_t;
+
+typedef struct {
+    _sg_pool_t pool;
+    bindgroup_t* bindgroups;
+} bindgroups_pool_t;
+
+typedef struct {
+    struct {
+        sg_buffer buffer;
+        uint64_t offset;
+    } vbs[SG_MAX_VERTEXBUFFER_BINDSLOTS];
+    struct {
+        sg_buffer buffer;
+        uint64_t offset;
+    } ib;
+    bindgroup_handle_t bg;
+} bindings_cache_t;
+
+// the WGPU. backend state
+typedef struct {
+    bool valid;
+    bool use_indexed_draw;
+    WGPU.Device dev;
+    WGPU.SupportedLimits limits;
+    WGPU.Queue queue;
+    WGPU.CommandEncoder cmd_enc;
+    WGPU.RenderPassEncoder rpass_enc;
+    WGPU.ComputePassEncoder cpass_enc;
+    WGPU.BindGroup empty_bind_group;
+    const _sg_pipeline_t* cur_pipeline;
+    sg_pipeline cur_pipeline_id;
+    uniform_buffer_t uniform;
+    bindings_cache_t bindings_cache;
+    bindgroups_cache_t bindgroups_cache;
+    bindgroups_pool_t bindgroups_pool;
+} backend_t;
+
+SgWgpuSamplerInfo :: @struct(
+    smp: rawptr,
+);
+SgWgpuShaderInfo :: @struct(
+    vs_mod: rawptr,
+    fs_mod: rawptr,
+    bgl: rawptr,
+);
+SgWgpuPipelineInfo :: @struct(
+    pip: rawptr,
+);
+SgWgpuAttachmentsInfo :: @struct(
+    color_view: Array(rawptr, 4),
+    resolve_view: Array(rawptr, 4),
+    ds_view: rawptr,
+);
+
+:: ASSERT_NOT_WEBSITE();
+// FIXME: webgpu.h differences between Dawn and Emscripten webgpu.h
+wgpuBufferReference :: wgpuBufferAddRef;
+wgpuTextureReference :: wgpuTextureAddRef;
+wgpuTextureViewReference :: wgpuTextureViewAddRef;
+wgpuSamplerReference :: wgpuSamplerAddRef;
+SType_ShaderModuleWGSLDescriptor :: WGPU.SType_ShaderSourceWGSL;
+
+fn to_wgpu(b: bool) WGPU.OptionalBool = 
+    @if(b, .True, .False);
+
+fn WGPU.BufferUsage to_wgpu(sg_buffer_type t, sg_usage u) {
+    // FIXME: change to WGPU.BufferUsage once Emscripten and Dawn webgpu.h agree
+    int res = 0;
+    if (SG_BUFFERTYPE_VERTEXBUFFER == t) {
+        res = WGPU.BufferUsage_Vertex;
+    } else if (SG_BUFFERTYPE_STORAGEBUFFER == t) {
+        res = WGPU.BufferUsage_Storage;
+    } else {
+        res = WGPU.BufferUsage_Index;
+    }
+    if (SG_USAGE_IMMUTABLE != u) {
+        res |= WGPU.BufferUsage_CopyDst;
+    }
+    return (WGPU.BufferUsage)res;
+}
+
+fn to_wgpu(view: WGPU.TextureView, a: SgLoadAction) WGPU.LoadOp = {
+    if (0 == view) {
+        return WGPU.LoadOp_Undefined;
+    } else switch (a) {
+        case SG_LOADACTION_CLEAR:
+        case SG_LOADACTION_DONTCARE:
+            return WGPU.LoadOp_Clear;
+        case SG_LOADACTION_LOAD:
+            return WGPU.LoadOp_Load;
+        default:
+            SOKOL_UNREACHABLE;
+            return WGPU.LoadOp_Force32;
+    }
+}
+
+fn to_wgpu(view: WGPU.TextureView, it: SgStoreAction) WGPU.StoreOp = 
+    @if(view.is_null(), .Undefined, @map_enum(it) 
+        (STORE = .Store, DONTCARE = .Discard));
+
+fn to_wgpu(it: SgImageType) WGPU.TextureViewDimension = @map_enum(it)
+    (_2D = ._2D, CUBE = .CUBE, _3D = ._3D, ARRAY = .2DArray);
+
+fn to_wgpu(it: SgImageType) WGPU.TextureDimension = 
+    @if(it == ._3D, ._3D, ._2D);
+
+fn WGPU.TextureSampleType to_wgpu(sg_image_sample_type t, bool msaa) {
+    switch (t) {
+        case SG_IMAGESAMPLETYPE_FLOAT:  return msaa ? WGPU.TextureSampleType_UnfilterableFloat : WGPU.TextureSampleType_Float;
+        case SG_IMAGESAMPLETYPE_DEPTH:  return WGPU.TextureSampleType_Depth;
+        case SG_IMAGESAMPLETYPE_SINT:   return WGPU.TextureSampleType_Sint;
+        case SG_IMAGESAMPLETYPE_UINT:   return WGPU.TextureSampleType_Uint;
+        case SG_IMAGESAMPLETYPE_UNFILTERABLE_FLOAT: return WGPU.TextureSampleType_UnfilterableFloat;
+        default: SOKOL_UNREACHABLE;     return WGPU.TextureSampleType_Force32;
+    }
+}
+
+fn to_wgpu(t: SgSamplerType) WGPU.SamplerBindingType = @map_enum(it)
+    (FILTERING = .Filtering, COMPARISON = .Comparison, NONFILTERING = .NonFiltering);
+
+fn to_wgpu(it: SgWrap) WGPU.AddressMode = @map_enum(it)
+    (REPEAT = .Repeat, CLAMP_TO_EDGE = .ClampToEdge, CLAMP_TO_BORDER = .ClampToEdge, MIRRORED_REPEAT = .MirrorRepeat);
+
+fn to_wgpu(it: SgFilter) WGPU.FilterMode = @map_enum(it)
+    (NEAREST = .Nearest, LINEAR = .Linear);
+
+fn to_wgpu(it: SgFilter) WGPU.MipmapFilterMode = @map_enum(it)
+    (NEAREST = .Nearest, LINEAR = .Linear);
+
+// NOTE: there's no WGPU.IndexFormat_None
+fn to_wgpu(it: SgIndexType) WGPU.IndexFormat = 
+    @if(it == .UInt16, .Uint16, .Uint32);
+
+fn to_wgpu(prim_type: SgPrimitiveType, idx_type: SgIndexType) WGPU.IndexFormat = {
+    if (idx_type == SG_INDEXTYPE_NONE) {
+        return WGPU.IndexFormat_Undefined;
+    } else if ((prim_type == SG_PRIMITIVETYPE_LINE_STRIP) || (prim_type == SG_PRIMITIVETYPE_TRIANGLE_STRIP)) {
+        return indexformat(idx_type);
+    } else {
+        return WGPU.IndexFormat_Undefined;
+    }
+}
+
+fn to_wgpu(it: SgVertexStep) WGPU.VertexStepMode = 
+    @if(it == .PER_VERTEX, .Vertex, .Instance);
+
+fn WGPU.VertexFormat to_wgpu(sg_vertex_format f) {
+    switch (f) {
+        case SG_VERTEXFORMAT_FLOAT:         return WGPU.VertexFormat_Float32;
+        case SG_VERTEXFORMAT_FLOAT2:        return WGPU.VertexFormat_Float32x2;
+        case SG_VERTEXFORMAT_FLOAT3:        return WGPU.VertexFormat_Float32x3;
+        case SG_VERTEXFORMAT_FLOAT4:        return WGPU.VertexFormat_Float32x4;
+        case SG_VERTEXFORMAT_INT:           return WGPU.VertexFormat_Sint32;
+        case SG_VERTEXFORMAT_INT2:          return WGPU.VertexFormat_Sint32x2;
+        case SG_VERTEXFORMAT_INT3:          return WGPU.VertexFormat_Sint32x3;
+        case SG_VERTEXFORMAT_INT4:          return WGPU.VertexFormat_Sint32x4;
+        case SG_VERTEXFORMAT_UINT:          return WGPU.VertexFormat_Uint32;
+        case SG_VERTEXFORMAT_UINT2:         return WGPU.VertexFormat_Uint32x2;
+        case SG_VERTEXFORMAT_UINT3:         return WGPU.VertexFormat_Uint32x3;
+        case SG_VERTEXFORMAT_UINT4:         return WGPU.VertexFormat_Uint32x4;
+        case SG_VERTEXFORMAT_BYTE4:         return WGPU.VertexFormat_Sint8x4;
+        case SG_VERTEXFORMAT_BYTE4N:        return WGPU.VertexFormat_Snorm8x4;
+        case SG_VERTEXFORMAT_UBYTE4:        return WGPU.VertexFormat_Uint8x4;
+        case SG_VERTEXFORMAT_UBYTE4N:       return WGPU.VertexFormat_Unorm8x4;
+        case SG_VERTEXFORMAT_SHORT2:        return WGPU.VertexFormat_Sint16x2;
+        case SG_VERTEXFORMAT_SHORT2N:       return WGPU.VertexFormat_Snorm16x2;
+        case SG_VERTEXFORMAT_USHORT2:       return WGPU.VertexFormat_Uint16x2;
+        case SG_VERTEXFORMAT_USHORT2N:      return WGPU.VertexFormat_Unorm16x2;
+        case SG_VERTEXFORMAT_SHORT4:        return WGPU.VertexFormat_Sint16x4;
+        case SG_VERTEXFORMAT_SHORT4N:       return WGPU.VertexFormat_Snorm16x4;
+        case SG_VERTEXFORMAT_USHORT4:       return WGPU.VertexFormat_Uint16x4;
+        case SG_VERTEXFORMAT_USHORT4N:      return WGPU.VertexFormat_Unorm16x4;
+        case SG_VERTEXFORMAT_UINT10_N2:     return WGPU.VertexFormat_Unorm10_10_10_2;
+        case SG_VERTEXFORMAT_HALF2:         return WGPU.VertexFormat_Float16x2;
+        case SG_VERTEXFORMAT_HALF4:         return WGPU.VertexFormat_Float16x4;
+        default:
+            SOKOL_UNREACHABLE;
+            return WGPU.VertexFormat_Force32;
+    }
+}
+
+fn to_wgpu(t: SgPrimitiveType) WGPU.PrimitiveTopology = @map_enum(it)
+    (POINTS = .PointList, LINES = .LineList, LINE_STRIP = .LineStrip, TRIANGLES = .TriangleList, TRIANGLE_STRIP = .TriangleStrip);
+
+fn to_wgpu(it: SgFaceWinding) WGPU.FrontFace = 
+    @if(it == .CCW, .CCW, .CW);
+
+fn to_wgpu(it: SgCullMode) WGPU.CullMode = @enum_map(it)
+    (NONE = .None, FRONT = .Front, BACK = .Back);
+
+fn to_wgpu(p: SgPixelFormat) WGPU.TextureFormat = {
+    switch (p) {
+        case SG_PIXELFORMAT_NONE:           return WGPU.TextureFormat_Undefined;
+        case SG_PIXELFORMAT_R8:             return WGPU.TextureFormat_R8Unorm;
+        case SG_PIXELFORMAT_R8SN:           return WGPU.TextureFormat_R8Snorm;
+        case SG_PIXELFORMAT_R8UI:           return WGPU.TextureFormat_R8Uint;
+        case SG_PIXELFORMAT_R8SI:           return WGPU.TextureFormat_R8Sint;
+        case SG_PIXELFORMAT_R16UI:          return WGPU.TextureFormat_R16Uint;
+        case SG_PIXELFORMAT_R16SI:          return WGPU.TextureFormat_R16Sint;
+        case SG_PIXELFORMAT_R16F:           return WGPU.TextureFormat_R16Float;
+        case SG_PIXELFORMAT_RG8:            return WGPU.TextureFormat_RG8Unorm;
+        case SG_PIXELFORMAT_RG8SN:          return WGPU.TextureFormat_RG8Snorm;
+        case SG_PIXELFORMAT_RG8UI:          return WGPU.TextureFormat_RG8Uint;
+        case SG_PIXELFORMAT_RG8SI:          return WGPU.TextureFormat_RG8Sint;
+        case SG_PIXELFORMAT_R32UI:          return WGPU.TextureFormat_R32Uint;
+        case SG_PIXELFORMAT_R32SI:          return WGPU.TextureFormat_R32Sint;
+        case SG_PIXELFORMAT_R32F:           return WGPU.TextureFormat_R32Float;
+        case SG_PIXELFORMAT_RG16UI:         return WGPU.TextureFormat_RG16Uint;
+        case SG_PIXELFORMAT_RG16SI:         return WGPU.TextureFormat_RG16Sint;
+        case SG_PIXELFORMAT_RG16F:          return WGPU.TextureFormat_RG16Float;
+        case SG_PIXELFORMAT_RGBA8:          return WGPU.TextureFormat_RGBA8Unorm;
+        case SG_PIXELFORMAT_SRGB8A8:        return WGPU.TextureFormat_RGBA8UnormSrgb;
+        case SG_PIXELFORMAT_RGBA8SN:        return WGPU.TextureFormat_RGBA8Snorm;
+        case SG_PIXELFORMAT_RGBA8UI:        return WGPU.TextureFormat_RGBA8Uint;
+        case SG_PIXELFORMAT_RGBA8SI:        return WGPU.TextureFormat_RGBA8Sint;
+        case SG_PIXELFORMAT_BGRA8:          return WGPU.TextureFormat_BGRA8Unorm;
+        case SG_PIXELFORMAT_RGB10A2:        return WGPU.TextureFormat_RGB10A2Unorm;
+        case SG_PIXELFORMAT_RG11B10F:       return WGPU.TextureFormat_RG11B10Ufloat;
+        case SG_PIXELFORMAT_RG32UI:         return WGPU.TextureFormat_RG32Uint;
+        case SG_PIXELFORMAT_RG32SI:         return WGPU.TextureFormat_RG32Sint;
+        case SG_PIXELFORMAT_RG32F:          return WGPU.TextureFormat_RG32Float;
+        case SG_PIXELFORMAT_RGBA16UI:       return WGPU.TextureFormat_RGBA16Uint;
+        case SG_PIXELFORMAT_RGBA16SI:       return WGPU.TextureFormat_RGBA16Sint;
+        case SG_PIXELFORMAT_RGBA16F:        return WGPU.TextureFormat_RGBA16Float;
+        case SG_PIXELFORMAT_RGBA32UI:       return WGPU.TextureFormat_RGBA32Uint;
+        case SG_PIXELFORMAT_RGBA32SI:       return WGPU.TextureFormat_RGBA32Sint;
+        case SG_PIXELFORMAT_RGBA32F:        return WGPU.TextureFormat_RGBA32Float;
+        case SG_PIXELFORMAT_DEPTH:          return WGPU.TextureFormat_Depth32Float;
+        case SG_PIXELFORMAT_DEPTH_STENCIL:  return WGPU.TextureFormat_Depth32FloatStencil8;
+        case SG_PIXELFORMAT_BC1_RGBA:       return WGPU.TextureFormat_BC1RGBAUnorm;
+        case SG_PIXELFORMAT_BC2_RGBA:       return WGPU.TextureFormat_BC2RGBAUnorm;
+        case SG_PIXELFORMAT_BC3_RGBA:       return WGPU.TextureFormat_BC3RGBAUnorm;
+        case SG_PIXELFORMAT_BC3_SRGBA:      return WGPU.TextureFormat_BC3RGBAUnormSrgb;
+        case SG_PIXELFORMAT_BC4_R:          return WGPU.TextureFormat_BC4RUnorm;
+        case SG_PIXELFORMAT_BC4_RSN:        return WGPU.TextureFormat_BC4RSnorm;
+        case SG_PIXELFORMAT_BC5_RG:         return WGPU.TextureFormat_BC5RGUnorm;
+        case SG_PIXELFORMAT_BC5_RGSN:       return WGPU.TextureFormat_BC5RGSnorm;
+        case SG_PIXELFORMAT_BC6H_RGBF:      return WGPU.TextureFormat_BC6HRGBFloat;
+        case SG_PIXELFORMAT_BC6H_RGBUF:     return WGPU.TextureFormat_BC6HRGBUfloat;
+        case SG_PIXELFORMAT_BC7_RGBA:       return WGPU.TextureFormat_BC7RGBAUnorm;
+        case SG_PIXELFORMAT_BC7_SRGBA:      return WGPU.TextureFormat_BC7RGBAUnormSrgb;
+        case SG_PIXELFORMAT_ETC2_RGB8:      return WGPU.TextureFormat_ETC2RGB8Unorm;
+        case SG_PIXELFORMAT_ETC2_RGB8A1:    return WGPU.TextureFormat_ETC2RGB8A1Unorm;
+        case SG_PIXELFORMAT_ETC2_RGBA8:     return WGPU.TextureFormat_ETC2RGBA8Unorm;
+        case SG_PIXELFORMAT_ETC2_SRGB8:     return WGPU.TextureFormat_ETC2RGB8UnormSrgb;
+        case SG_PIXELFORMAT_ETC2_SRGB8A8:   return WGPU.TextureFormat_ETC2RGBA8UnormSrgb;
+        case SG_PIXELFORMAT_EAC_R11:        return WGPU.TextureFormat_EACR11Unorm;
+        case SG_PIXELFORMAT_EAC_R11SN:      return WGPU.TextureFormat_EACR11Snorm;
+        case SG_PIXELFORMAT_EAC_RG11:       return WGPU.TextureFormat_EACRG11Unorm;
+        case SG_PIXELFORMAT_EAC_RG11SN:     return WGPU.TextureFormat_EACRG11Snorm;
+        case SG_PIXELFORMAT_RGB9E5:         return WGPU.TextureFormat_RGB9E5Ufloat;
+        case SG_PIXELFORMAT_ASTC_4x4_RGBA:  return WGPU.TextureFormat_ASTC4x4Unorm;
+        case SG_PIXELFORMAT_ASTC_4x4_SRGBA: return WGPU.TextureFormat_ASTC4x4UnormSrgb;
+        // NOT SUPPORTED
+        case SG_PIXELFORMAT_R16:
+        case SG_PIXELFORMAT_R16SN:
+        case SG_PIXELFORMAT_RG16:
+        case SG_PIXELFORMAT_RG16SN:
+        case SG_PIXELFORMAT_RGBA16:
+        case SG_PIXELFORMAT_RGBA16SN:
+            return WGPU.TextureFormat_Undefined;
+
+        default:
+            SOKOL_UNREACHABLE;
+            return WGPU.TextureFormat_Force32;
+    }
+}
+
+fn WGPU.CompareFunction to_wgpu(sg_compare_func f) {
+    switch (f) {
+        case SG_COMPAREFUNC_NEVER:          return WGPU.CompareFunction_Never;
+        case SG_COMPAREFUNC_LESS:           return WGPU.CompareFunction_Less;
+        case SG_COMPAREFUNC_EQUAL:          return WGPU.CompareFunction_Equal;
+        case SG_COMPAREFUNC_LESS_EQUAL:     return WGPU.CompareFunction_LessEqual;
+        case SG_COMPAREFUNC_GREATER:        return WGPU.CompareFunction_Greater;
+        case SG_COMPAREFUNC_NOT_EQUAL:      return WGPU.CompareFunction_NotEqual;
+        case SG_COMPAREFUNC_GREATER_EQUAL:  return WGPU.CompareFunction_GreaterEqual;
+        case SG_COMPAREFUNC_ALWAYS:         return WGPU.CompareFunction_Always;
+        default:
+            SOKOL_UNREACHABLE;
+            return WGPU.CompareFunction_Force32;
+    }
+}
+
+fn to_wgpu(it: SgStencilOp) WGPU.StencilOperation = @map_enum(it)
+    (KEEP = .Keep, ZERO = .Zero, REPLACE = .Replace, INCR_CLAMP = .IncrementClamp, DECR_CLAMP = .DecrementClamp, INVERT = .Infert, INCR_WRAP = .IncrementWrap, DECR_WRAP = .DecrementWrap);
+
+fn to_wgpu(it: SgBlendOp) WGPU.BlendOperation = @map_enum(it)
+    (ADD = .Add, SUBTRACT = .Subtract, REVERSE_SUBTRACT = .ReverseSubtract, MIN = .Min, MAX = .Max);
+
+fn to_wgpu(it: SgBlendFactor) WGPU.BlendFactor = {
+    switch (f) {
+        case SG_BLENDFACTOR_ZERO:                   return WGPU.BlendFactor_Zero;
+        case SG_BLENDFACTOR_ONE:                    return WGPU.BlendFactor_One;
+        case SG_BLENDFACTOR_SRC_COLOR:              return WGPU.BlendFactor_Src;
+        case SG_BLENDFACTOR_ONE_MINUS_SRC_COLOR:    return WGPU.BlendFactor_OneMinusSrc;
+        case SG_BLENDFACTOR_SRC_ALPHA:              return WGPU.BlendFactor_SrcAlpha;
+        case SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA:    return WGPU.BlendFactor_OneMinusSrcAlpha;
+        case SG_BLENDFACTOR_DST_COLOR:              return WGPU.BlendFactor_Dst;
+        case SG_BLENDFACTOR_ONE_MINUS_DST_COLOR:    return WGPU.BlendFactor_OneMinusDst;
+        case SG_BLENDFACTOR_DST_ALPHA:              return WGPU.BlendFactor_DstAlpha;
+        case SG_BLENDFACTOR_ONE_MINUS_DST_ALPHA:    return WGPU.BlendFactor_OneMinusDstAlpha;
+        case SG_BLENDFACTOR_SRC_ALPHA_SATURATED:    return WGPU.BlendFactor_SrcAlphaSaturated;
+        case SG_BLENDFACTOR_BLEND_COLOR:            return WGPU.BlendFactor_Constant;
+        case SG_BLENDFACTOR_ONE_MINUS_BLEND_COLOR:  return WGPU.BlendFactor_OneMinusConstant;
+        // FIXME: separate blend alpha value not supported?
+        case SG_BLENDFACTOR_BLEND_ALPHA:            return WGPU.BlendFactor_Constant;
+        case SG_BLENDFACTOR_ONE_MINUS_BLEND_ALPHA:  return WGPU.BlendFactor_OneMinusConstant;
+        default:
+            SOKOL_UNREACHABLE;
+            return WGPU.BlendFactor_Force32;
+    }
+}
+
+fn WGPU.ColorWriteMask colorwritemask(uint8_t m) {
+    // FIXME: change to WGPU.ColorWriteMask once Emscripten and Dawn webgpu.h agree
+    int res = 0;
+    if (0 != (m & SG_COLORMASK_R)) {
+        res |= WGPU.ColorWriteMask_Red;
+    }
+    if (0 != (m & SG_COLORMASK_G)) {
+        res |= WGPU.ColorWriteMask_Green;
+    }
+    if (0 != (m & SG_COLORMASK_B)) {
+        res |= WGPU.ColorWriteMask_Blue;
+    }
+    if (0 != (m & SG_COLORMASK_A)) {
+        res |= WGPU.ColorWriteMask_Alpha;
+    }
+    return (WGPU.ColorWriteMask)res;
+}
+
+fn to_wgpu(sg_shader_stage stage) WGPU.ShaderStage = @map_enum{
+    switch (stage) {
+        case SG_SHADERSTAGE_VERTEX: return WGPU.ShaderStage_Vertex;
+        case SG_SHADERSTAGE_FRAGMENT: return WGPU.ShaderStage_Fragment;
+        case SG_SHADERSTAGE_COMPUTE: return WGPU.ShaderStage_Compute;
+        default: SOKOL_UNREACHABLE; return WGPU.ShaderStage_None;
+    }
+}
+
+fn void init_caps(wgpu: *Impl, void) {
+    wgpu.sg.backend = SG_BACKEND_WGPU.;
+    wgpu.sg.features.origin_top_left = true;
+    wgpu.sg.features.image_clamp_to_border = false;
+    wgpu.sg.features.mrt_independent_blend_state = true;
+    wgpu.sg.features.mrt_independent_write_mask = true;
+    wgpu.sg.features.compute = true;
+    wgpu.sg.features.msaa_image_bindings = true;
+
+    wgpuDeviceGetLimits(wgpu.dev, &wgpu.limits);
+
+    const WGPU.Limits* l = &wgpu.limits.limits;
+    wgpu.sg.limits.max_image_size_2d = (int) l.maxTextureDimension2D;
+    wgpu.sg.limits.max_image_size_cube = (int) l.maxTextureDimension2D; // not a bug, see: https://github.com/gpuweb/gpuweb/issues/1327
+    wgpu.sg.limits.max_image_size_3d = (int) l.maxTextureDimension3D;
+    wgpu.sg.limits.max_image_size_array = (int) l.maxTextureDimension2D;
+    wgpu.sg.limits.max_image_array_layers = (int) l.maxTextureArrayLayers;
+    wgpu.sg.limits.max_vertex_attrs = SG_MAX_VERTEX_ATTRIBUTES;
+
+    // NOTE: no WGPU.TextureFormat_R16Unorm
+    _sg_pixelformat_all(&wgpu.sg.formats[SG_PIXELFORMAT_R8]);
+    _sg_pixelformat_all(&wgpu.sg.formats[SG_PIXELFORMAT_RG8]);
+    _sg_pixelformat_all(&wgpu.sg.formats[SG_PIXELFORMAT_RGBA8]);
+    _sg_pixelformat_all(&wgpu.sg.formats[SG_PIXELFORMAT_SRGB8A8]);
+    _sg_pixelformat_all(&wgpu.sg.formats[SG_PIXELFORMAT_BGRA8]);
+    _sg_pixelformat_all(&wgpu.sg.formats[SG_PIXELFORMAT_R16F]);
+    _sg_pixelformat_all(&wgpu.sg.formats[SG_PIXELFORMAT_RG16F]);
+    _sg_pixelformat_all(&wgpu.sg.formats[SG_PIXELFORMAT_RGBA16F]);
+    _sg_pixelformat_all(&wgpu.sg.formats[SG_PIXELFORMAT_RGB10A2]);
+
+    _sg_pixelformat_sf(&wgpu.sg.formats[SG_PIXELFORMAT_R8SN]);
+    _sg_pixelformat_sf(&wgpu.sg.formats[SG_PIXELFORMAT_RG8SN]);
+    _sg_pixelformat_sf(&wgpu.sg.formats[SG_PIXELFORMAT_RGBA8SN]);
+
+    // FIXME: can be made renderable via extension
+    _sg_pixelformat_sf(&wgpu.sg.formats[SG_PIXELFORMAT_RG11B10F]);
+
+    // NOTE: msaa rendering is possible in WebGPU, but no resolve
+    // which is a combination that's not currently supported in sokol-gfx
+    _sg_pixelformat_sr(&wgpu.sg.formats[SG_PIXELFORMAT_R8UI]);
+    _sg_pixelformat_sr(&wgpu.sg.formats[SG_PIXELFORMAT_R8SI]);
+    _sg_pixelformat_sr(&wgpu.sg.formats[SG_PIXELFORMAT_RG8UI]);
+    _sg_pixelformat_sr(&wgpu.sg.formats[SG_PIXELFORMAT_RG8SI]);
+    _sg_pixelformat_sr(&wgpu.sg.formats[SG_PIXELFORMAT_RGBA8UI]);
+    _sg_pixelformat_sr(&wgpu.sg.formats[SG_PIXELFORMAT_RGBA8SI]);
+    _sg_pixelformat_sr(&wgpu.sg.formats[SG_PIXELFORMAT_R16UI]);
+    _sg_pixelformat_sr(&wgpu.sg.formats[SG_PIXELFORMAT_R16SI]);
+    _sg_pixelformat_sr(&wgpu.sg.formats[SG_PIXELFORMAT_RG16UI]);
+    _sg_pixelformat_sr(&wgpu.sg.formats[SG_PIXELFORMAT_RG16SI]);
+    _sg_pixelformat_sr(&wgpu.sg.formats[SG_PIXELFORMAT_RGBA16UI]);
+    _sg_pixelformat_sr(&wgpu.sg.formats[SG_PIXELFORMAT_RGBA16SI]);
+    _sg_pixelformat_sr(&wgpu.sg.formats[SG_PIXELFORMAT_R32UI]);
+    _sg_pixelformat_sr(&wgpu.sg.formats[SG_PIXELFORMAT_R32SI]);
+    _sg_pixelformat_sr(&wgpu.sg.formats[SG_PIXELFORMAT_RG32UI]);
+    _sg_pixelformat_sr(&wgpu.sg.formats[SG_PIXELFORMAT_RG32SI]);
+    _sg_pixelformat_sr(&wgpu.sg.formats[SG_PIXELFORMAT_RGBA32UI]);
+    _sg_pixelformat_sr(&wgpu.sg.formats[SG_PIXELFORMAT_RGBA32SI]);
+
+    if (wgpuDeviceHasFeature(wgpu.dev, WGPU.FeatureName_Float32Filterable)) {
+        _sg_pixelformat_sfr(&wgpu.sg.formats[SG_PIXELFORMAT_R32F]);
+        _sg_pixelformat_sfr(&wgpu.sg.formats[SG_PIXELFORMAT_RG32F]);
+        _sg_pixelformat_sfr(&wgpu.sg.formats[SG_PIXELFORMAT_RGBA32F]);
+    } else {
+        _sg_pixelformat_sr(&wgpu.sg.formats[SG_PIXELFORMAT_R32F]);
+        _sg_pixelformat_sr(&wgpu.sg.formats[SG_PIXELFORMAT_RG32F]);
+        _sg_pixelformat_sr(&wgpu.sg.formats[SG_PIXELFORMAT_RGBA32F]);
+    }
+
+    _sg_pixelformat_srmd(&wgpu.sg.formats[SG_PIXELFORMAT_DEPTH]);
+    _sg_pixelformat_srmd(&wgpu.sg.formats[SG_PIXELFORMAT_DEPTH_STENCIL]);
+
+    _sg_pixelformat_sf(&wgpu.sg.formats[SG_PIXELFORMAT_RGB9E5]);
+
+    if (wgpuDeviceHasFeature(wgpu.dev, WGPU.FeatureName_TextureCompressionBC)) {
+        _sg_pixelformat_sf(&wgpu.sg.formats[SG_PIXELFORMAT_BC1_RGBA]);
+        _sg_pixelformat_sf(&wgpu.sg.formats[SG_PIXELFORMAT_BC2_RGBA]);
+        _sg_pixelformat_sf(&wgpu.sg.formats[SG_PIXELFORMAT_BC3_RGBA]);
+        _sg_pixelformat_sf(&wgpu.sg.formats[SG_PIXELFORMAT_BC3_SRGBA]);
+        _sg_pixelformat_sf(&wgpu.sg.formats[SG_PIXELFORMAT_BC4_R]);
+        _sg_pixelformat_sf(&wgpu.sg.formats[SG_PIXELFORMAT_BC4_RSN]);
+        _sg_pixelformat_sf(&wgpu.sg.formats[SG_PIXELFORMAT_BC5_RG]);
+        _sg_pixelformat_sf(&wgpu.sg.formats[SG_PIXELFORMAT_BC5_RGSN]);
+        _sg_pixelformat_sf(&wgpu.sg.formats[SG_PIXELFORMAT_BC6H_RGBF]);
+        _sg_pixelformat_sf(&wgpu.sg.formats[SG_PIXELFORMAT_BC6H_RGBUF]);
+        _sg_pixelformat_sf(&wgpu.sg.formats[SG_PIXELFORMAT_BC7_RGBA]);
+        _sg_pixelformat_sf(&wgpu.sg.formats[SG_PIXELFORMAT_BC7_SRGBA]);
+    }
+    if (wgpuDeviceHasFeature(wgpu.dev, WGPU.FeatureName_TextureCompressionETC2)) {
+        _sg_pixelformat_sf(&wgpu.sg.formats[SG_PIXELFORMAT_ETC2_RGB8]);
+        _sg_pixelformat_sf(&wgpu.sg.formats[SG_PIXELFORMAT_ETC2_SRGB8]);
+        _sg_pixelformat_sf(&wgpu.sg.formats[SG_PIXELFORMAT_ETC2_RGB8A1]);
+        _sg_pixelformat_sf(&wgpu.sg.formats[SG_PIXELFORMAT_ETC2_RGBA8]);
+        _sg_pixelformat_sf(&wgpu.sg.formats[SG_PIXELFORMAT_ETC2_SRGB8A8]);
+        _sg_pixelformat_sf(&wgpu.sg.formats[SG_PIXELFORMAT_EAC_R11]);
+        _sg_pixelformat_sf(&wgpu.sg.formats[SG_PIXELFORMAT_EAC_R11SN]);
+        _sg_pixelformat_sf(&wgpu.sg.formats[SG_PIXELFORMAT_EAC_RG11]);
+        _sg_pixelformat_sf(&wgpu.sg.formats[SG_PIXELFORMAT_EAC_RG11SN]);
+    }
+
+    if (wgpuDeviceHasFeature(wgpu.dev, WGPU.FeatureName_TextureCompressionASTC)) {
+        _sg_pixelformat_sf(&wgpu.sg.formats[SG_PIXELFORMAT_ASTC_4x4_RGBA]);
+        _sg_pixelformat_sf(&wgpu.sg.formats[SG_PIXELFORMAT_ASTC_4x4_SRGBA]);
+    }
+}
+
+fn void uniform_buffer_init(wgpu: *Impl, const sg_desc* desc) {
+    @debug_assert(0 == wgpu.uniform.staging);
+    @debug_assert(0 == wgpu.uniform.buf);
+
+    // Add the max-uniform-update size (64 KB) to the requested buffer size,
+    // this is to prevent validation errors in the WebGPU implementation
+    // if the entire buffer size is used per frame. 64 KB is the allowed
+    // max uniform update size on NVIDIA
+    //
+    // FIXME: is this still needed?
+    wgpu.uniform.num_bytes = (uint32_t)(desc.uniform_buffer_size + _SG_WGPU._MAX_UNIFORM_UPDATE_SIZE);
+    wgpu.uniform.staging = (uint8_t*)_sg_malloc(wgpu.uniform.num_bytes);
+
+    WGPU.BufferDescriptor ub_desc;
+    _sg_clear(&ub_desc, sizeof(ub_desc));
+    ub_desc.size = wgpu.uniform.num_bytes;
+    ub_desc.usage = WGPU.BufferUsage_Uniform|WGPU.BufferUsage_CopyDst;
+    wgpu.uniform.buf = wgpuDeviceCreateBuffer(wgpu.dev, &ub_desc);
+    @debug_assert(wgpu.uniform.buf);
+}
+
+fn void uniform_buffer_discard(wgpu: *Impl, void) {
+    if (wgpu.uniform.buf) {
+        wgpuBufferRelease(wgpu.uniform.buf);
+        wgpu.uniform.buf = 0;
+    }
+    if (wgpu.uniform.staging) {
+        _sg_free(wgpu.uniform.staging);
+        wgpu.uniform.staging = 0;
+    }
+}
+
+fn void uniform_buffer_on_commit(wgpu: *Impl, void) {
+    wgpuQueueWriteBuffer(wgpu.queue, wgpu.uniform.buf, 0, wgpu.uniform.staging, wgpu.uniform.offset);
+    _sg_stats_add(wgpu.uniforms.size_write_buffer, wgpu.uniform.offset);
+    wgpu.uniform.offset = 0;
+    _sg_clear(wgpu.uniform.bind_offsets, sizeof(wgpu.uniform.bind_offsets));
+}
+
+fn void bindgroups_pool_init(const sg_desc* desc) {
+    @debug_assert((desc.wgpu_bindgroups_cache_size > 0) && (desc.wgpu_bindgroups_cache_size < _SG_MAX_POOL_SIZE));
+    bindgroups_pool_t* p = &wgpu.bindgroups_pool;
+    @debug_assert(0 == p.bindgroups);
+    const int pool_size = desc.wgpu_bindgroups_cache_size;
+    _sg_pool_init(&p.pool, pool_size);
+    size_t pool_byte_size = sizeof(bindgroup_t) * (size_t)p.pool.size;
+    p.bindgroups = (bindgroup_t*) _sg_malloc_clear(pool_byte_size);
+}
+
+fn void bindgroups_pool_discard(void) {
+    bindgroups_pool_t* p = &wgpu.bindgroups_pool;
+    @debug_assert(p.bindgroups);
+    _sg_free(p.bindgroups); p.bindgroups = 0;
+    _sg_pool_discard(&p.pool);
+}
+
+fn bindgroup_t* bindgroup_at(uint32_t bg_id) {
+    @debug_assert(SG_INVALID_ID != bg_id);
+    bindgroups_pool_t* p = &wgpu.bindgroups_pool;
+    int slot_index = _sg_slot_index(bg_id);
+    @debug_assert((slot_index > _SG_INVALID_SLOT_INDEX) && (slot_index < p.pool.size));
+    return &p.bindgroups[slot_index];
+}
+
+fn bindgroup_t* lookup_bindgroup(uint32_t bg_id) {
+    if (SG_INVALID_ID != bg_id) {
+        bindgroup_t* bg = bindgroup_at(bg_id);
+        if (bg.slot.id == bg_id) {
+            return bg;
+        }
+    }
+    return 0;
+}
+
+fn bindgroup_handle_t alloc_bindgroup(void) {
+    bindgroups_pool_t* p = &wgpu.bindgroups_pool;
+    bindgroup_handle_t res;
+    int slot_index = _sg_pool_alloc_index(&p.pool);
+    if (_SG_INVALID_SLOT_INDEX != slot_index) {
+        res.id = _sg_slot_alloc(&p.pool, &p.bindgroups[slot_index].slot, slot_index);
+    } else {
+        res.id = SG_INVALID_ID;
+        _SG_ERROR(WGPU._BINDGROUPS_POOL_EXHAUSTED);
+    }
+    return res;
+}
+
+fn void dealloc_bindgroup(bindgroup_t* bg) {
+    @debug_assert(bg && (bg.slot.state == SG_RESOURCESTATE_ALLOC) && (bg.slot.id != SG_INVALID_ID));
+    bindgroups_pool_t* p = &wgpu.bindgroups_pool;
+    _sg_pool_free_index(&p.pool, _sg_slot_index(bg.slot.id));
+    _sg_slot_reset(&bg.slot);
+}
+
+fn void reset_bindgroup_to_alloc_state(bindgroup_t* bg) {
+    @debug_assert(bg);
+    _sg_slot_t slot = bg.slot;
+    _sg_clear(bg, sizeof(bindgroup_t));
+    bg.slot = slot;
+    bg.slot.state = SG_RESOURCESTATE_ALLOC;
+}
+
+// MurmurHash64B (see: https://github.com/aappleby/smhasher/blob/61a0530f28277f2e850bfc39600ce61d02b518de/src/MurmurHash2.cpp#L142)
+fn uint64_t hash(const void* key, int len, uint64_t seed) {
+    const uint32_t m = 0x5bd1e995;
+    const int r = 24;
+    uint32_t h1 = (uint32_t)seed ^ (uint32_t)len;
+    uint32_t h2 = (uint32_t)(seed >> 32);
+    const uint32_t * data = (const uint32_t *)key;
+    while (len >= 8) {
+        uint32_t k1 = *data++;
+        k1 *= m; k1 ^= k1 >> r; k1 *= m;
+        h1 *= m; h1 ^= k1;
+        len -= 4;
+        uint32_t k2 = *data++;
+        k2 *= m; k2 ^= k2 >> r; k2 *= m;
+        h2 *= m; h2 ^= k2;
+        len -= 4;
+    }
+    if (len >= 4) {
+        uint32_t k1 = *data++;
+        k1 *= m; k1 ^= k1 >> r; k1 *= m;
+        h1 *= m; h1 ^= k1;
+        len -= 4;
+    }
+    switch(len) {
+        case 3: h2 ^= (uint32_t)(((unsigned char*)data)[2] << 16);
+        case 2: h2 ^= (uint32_t)(((unsigned char*)data)[1] << 8);
+        case 1: h2 ^= ((unsigned char*)data)[0];
+        h2 *= m;
+    };
+    h1 ^= h2 >> 18; h1 *= m;
+    h2 ^= h1 >> 22; h2 *= m;
+    h1 ^= h2 >> 17; h1 *= m;
+    h2 ^= h1 >> 19; h2 *= m;
+    uint64_t h = h1;
+    h = (h << 32) | h2;
+    return h;
+}
+
+fn uint64_t bindgroups_cache_item(bindgroups_cache_item_type_t type, uint8_t wgpu_binding, uint32_t id) {
+    // key pattern is bbbbttttiiiiiiii
+    const uint64_t bb = (uint64_t)wgpu_binding;
+    const uint64_t tttt = (uint64_t)type;
+    const uint64_t iiiiiiii = (uint64_t)id;
+    return (bb << 56) | (bb << 48) | (tttt << 32) | iiiiiiii;
+}
+
+fn uint64_t bindgroups_cache_pip_item(uint32_t id) {
+    return bindgroups_cache_item(.PIPELINE, 0xFF, id);
+}
+
+fn uint64_t bindgroups_cache_image_item(uint8_t wgpu_binding, uint32_t id) {
+    return bindgroups_cache_item(.IMAGE, wgpu_binding, id);
+}
+
+fn uint64_t bindgroups_cache_sampler_item(uint8_t wgpu_binding, uint32_t id) {
+    return bindgroups_cache_item(.SAMPLER, wgpu_binding, id);
+}
+
+fn uint64_t bindgroups_cache_sbuf_item(uint8_t wgpu_binding, uint32_t id) {
+    return bindgroups_cache_item(.STORAGEBUFFER, wgpu_binding, id);
+}
+
+fn void init_bindgroups_cache_key(wgpu: *Impl, bindgroups_cache_key_t* key, const _sg_bindings_t* bnd) {
+    @debug_assert(bnd);
+    @debug_assert(bnd.pip);
+    const _sg_shader_t* shd = bnd.pip.shader;
+    @debug_assert(shd && shd.slot.id == bnd.pip.cmn.shader_id.id);
+
+    _sg_clear(key.items, sizeof(key.items));
+    key.items[0] = bindgroups_cache_pip_item(bnd.pip.slot.id);
+    for (size_t i = 0; i < SG_MAX_IMAGE_BINDSLOTS; i++) {
+        if (shd.cmn.images[i].stage == SG_SHADERSTAGE_NONE) {
+            continue;
+        }
+        @debug_assert(bnd.imgs[i]);
+        const size_t item_idx = i + 1;
+        @debug_assert(item_idx < _SG_WGPU._BINDGROUPSCACHEKEY_NUM_ITEMS);
+        @debug_assert(0 == key.items[item_idx]);
+        const uint8_t wgpu_binding = shd.wgpu.img_grp1_bnd_n[i];
+        const uint32_t id = bnd.imgs[i].slot.id;
+        key.items[item_idx] = bindgroups_cache_image_item(wgpu_binding, id);
+    }
+    for (size_t i = 0; i < SG_MAX_SAMPLER_BINDSLOTS; i++) {
+        if (shd.cmn.samplers[i].stage == SG_SHADERSTAGE_NONE) {
+            continue;
+        }
+        @debug_assert(bnd.smps[i]);
+        const size_t item_idx = i + 1 + SG_MAX_IMAGE_BINDSLOTS;
+        @debug_assert(item_idx < _SG_WGPU._BINDGROUPSCACHEKEY_NUM_ITEMS);
+        @debug_assert(0 == key.items[item_idx]);
+        const uint8_t wgpu_binding = shd.wgpu.smp_grp1_bnd_n[i];
+        const uint32_t id = bnd.smps[i].slot.id;
+        key.items[item_idx] = bindgroups_cache_sampler_item(wgpu_binding, id);
+    }
+    for (size_t i = 0; i < SG_MAX_STORAGEBUFFER_BINDSLOTS; i++) {
+        if (shd.cmn.storage_buffers[i].stage == SG_SHADERSTAGE_NONE) {
+            continue;
+        }
+        @debug_assert(bnd.sbufs[i]);
+        const size_t item_idx = i + 1 + SG_MAX_IMAGE_BINDSLOTS + SG_MAX_SAMPLER_BINDSLOTS;
+        @debug_assert(item_idx < _SG_WGPU._BINDGROUPSCACHEKEY_NUM_ITEMS);
+        @debug_assert(0 == key.items[item_idx]);
+        const uint8_t wgpu_binding = shd.wgpu.sbuf_grp1_bnd_n[i];
+        const uint32_t id = bnd.sbufs[i].slot.id;
+        key.items[item_idx] = bindgroups_cache_sbuf_item(wgpu_binding, id);
+    }
+    key.hash = hash(&key.items, (int)sizeof(key.items), 0x1234567887654321);
+}
+
+fn bool compare_bindgroups_cache_key(wgpu: *Impl, bindgroups_cache_key_t* k0, bindgroups_cache_key_t* k1) {
+    @debug_assert(k0 && k1);
+    if (k0.hash != k1.hash) {
+        return false;
+    }
+    if (memcmp(&k0.items, &k1.items, sizeof(k0.items)) != 0) {
+        _sg_stats_add(wgpu.bindings.num_bindgroup_cache_hash_vs_key_mismatch, 1);
+        return false;
+    }
+    return true;
+}
+
+fn bindgroup_t* create_bindgroup(wgpu: *Impl, _sg_bindings_t* bnd) {
+    @debug_assert(wgpu.dev);
+    @debug_assert(bnd.pip);
+    const _sg_shader_t* shd = bnd.pip.shader;
+    @debug_assert(shd && (shd.slot.id == bnd.pip.cmn.shader_id.id));
+    _sg_stats_add(wgpu.bindings.num_create_bindgroup, 1);
+    bindgroup_handle_t bg_id = alloc_bindgroup();
+    if (bg_id.id == SG_INVALID_ID) {
+        return 0;
+    }
+    bindgroup_t* bg = bindgroup_at(bg_id.id);
+    @debug_assert(bg && (bg.slot.state == SG_RESOURCESTATE_ALLOC));
+
+    // create wgpu bindgroup object (also see create_shader())
+    WGPU.BindGroupLayout bgl = bnd.pip.shader.wgpu.bgl_img_smp_sbuf;
+    @debug_assert(bgl);
+    WGPU.BindGroupEntry bg_entries[_SG_WGPU._MAX_IMG_SMP_SBUF_BINDGROUP_ENTRIES];
+    _sg_clear(&bg_entries, sizeof(bg_entries));
+    size_t bgl_index = 0;
+    for (size_t i = 0; i < SG_MAX_IMAGE_BINDSLOTS; i++) {
+        if (shd.cmn.images[i].stage == SG_SHADERSTAGE_NONE) {
+            continue;
+        }
+        @debug_assert(bnd.imgs[i]);
+        @debug_assert(bgl_index < _SG_WGPU._MAX_IMG_SMP_SBUF_BINDGROUP_ENTRIES);
+        WGPU.BindGroupEntry* bg_entry = &bg_entries[bgl_index];
+        bg_entry.binding = shd.wgpu.img_grp1_bnd_n[i];
+        bg_entry.textureView = bnd.imgs[i].wgpu.view;
+        bgl_index += 1;
+    }
+    for (size_t i = 0; i < SG_MAX_SAMPLER_BINDSLOTS; i++) {
+        if (shd.cmn.samplers[i].stage == SG_SHADERSTAGE_NONE) {
+            continue;
+        }
+        @debug_assert(bnd.smps[i]);
+        @debug_assert(bgl_index < _SG_WGPU._MAX_IMG_SMP_SBUF_BINDGROUP_ENTRIES);
+        WGPU.BindGroupEntry* bg_entry = &bg_entries[bgl_index];
+        bg_entry.binding = shd.wgpu.smp_grp1_bnd_n[i];
+        bg_entry.sampler = bnd.smps[i].wgpu.smp;
+        bgl_index += 1;
+    }
+    for (size_t i = 0; i < SG_MAX_STORAGEBUFFER_BINDSLOTS; i++) {
+        if (shd.cmn.storage_buffers[i].stage == SG_SHADERSTAGE_NONE) {
+            continue;
+        }
+        @debug_assert(bnd.sbufs[i]);
+        @debug_assert(bgl_index < _SG_WGPU._MAX_IMG_SMP_SBUF_BINDGROUP_ENTRIES);
+        WGPU.BindGroupEntry* bg_entry = &bg_entries[bgl_index];
+        bg_entry.binding = shd.wgpu.sbuf_grp1_bnd_n[i];
+        bg_entry.buffer = bnd.sbufs[i].wgpu.buf;
+        bg_entry.size = (uint64_t) bnd.sbufs[i].cmn.size;
+        bgl_index += 1;
+    }
+    WGPU.BindGroupDescriptor bg_desc;
+    _sg_clear(&bg_desc, sizeof(bg_desc));
+    bg_desc.layout = bgl;
+    bg_desc.entryCount = bgl_index;
+    bg_desc.entries = bg_entries;
+    bg.bindgroup = wgpuDeviceCreateBindGroup(wgpu.dev, &bg_desc);
+    if (bg.bindgroup == 0) {
+        _SG_ERROR(WGPU._CREATEBINDGROUP_FAILED);
+        bg.slot.state = SG_RESOURCESTATE_FAILED;
+        return bg;
+    }
+    init_bindgroups_cache_key(&bg.key, bnd);
+    bg.slot.state = SG_RESOURCESTATE_VALID;
+    return bg;
+}
+
+fn void discard_bindgroup(wgpu: *Impl, bindgroup_t* bg) {
+    @debug_assert(bg);
+    _sg_stats_add(wgpu.bindings.num_discard_bindgroup, 1);
+    if (bg.slot.state == SG_RESOURCESTATE_VALID) {
+        if (bg.bindgroup) {
+            wgpuBindGroupRelease(bg.bindgroup);
+            bg.bindgroup = 0;
+        }
+        reset_bindgroup_to_alloc_state(bg);
+        @debug_assert(bg.slot.state == SG_RESOURCESTATE_ALLOC);
+    }
+    if (bg.slot.state == SG_RESOURCESTATE_ALLOC) {
+        dealloc_bindgroup(bg);
+        @debug_assert(bg.slot.state == SG_RESOURCESTATE_INITIAL);
+    }
+}
+
+fn void discard_all_bindgroups(wgpu: *Impl, void) {
+    bindgroups_pool_t* p = &wgpu.bindgroups_pool;
+    for (int i = 0; i < p.pool.size; i++) {
+        sg_resource_state state = p.bindgroups[i].slot.state;
+        if ((state == SG_RESOURCESTATE_VALID) || (state == SG_RESOURCESTATE_FAILED)) {
+            discard_bindgroup(&p.bindgroups[i]);
+        }
+    }
+}
+
+fn void bindgroups_cache_init(wgpu: *Impl, const sg_desc* desc) {
+    @debug_assert(desc);
+    @debug_assert(wgpu.bindgroups_cache.num == 0);
+    @debug_assert(wgpu.bindgroups_cache.index_mask == 0);
+    @debug_assert(wgpu.bindgroups_cache.items == 0);
+    const int num = desc.wgpu_bindgroups_cache_size;
+    if (num <= 1) {
+        _SG_PANIC(WGPU._BINDGROUPSCACHE_SIZE_GREATER_ONE);
+    }
+    if (!_sg_ispow2(num)) {
+        _SG_PANIC(WGPU._BINDGROUPSCACHE_SIZE_POW2);
+    }
+    wgpu.bindgroups_cache.num = (uint32_t)desc.wgpu_bindgroups_cache_size;
+    wgpu.bindgroups_cache.index_mask = wgpu.bindgroups_cache.num - 1;
+    size_t size_in_bytes = sizeof(bindgroup_handle_t) * (size_t)num;
+    wgpu.bindgroups_cache.items = (bindgroup_handle_t*)_sg_malloc_clear(size_in_bytes);
+}
+
+fn void bindgroups_cache_discard(wgpu: *Impl, void) {
+    if (wgpu.bindgroups_cache.items) {
+        _sg_free(wgpu.bindgroups_cache.items);
+        wgpu.bindgroups_cache.items = 0;
+    }
+    wgpu.bindgroups_cache.num = 0;
+    wgpu.bindgroups_cache.index_mask = 0;
+}
+
+fn void bindgroups_cache_set(wgpu: *Impl, uint64_t hash, uint32_t bg_id) {
+    uint32_t index = hash & wgpu.bindgroups_cache.index_mask;
+    @debug_assert(index < wgpu.bindgroups_cache.num);
+    @debug_assert(wgpu.bindgroups_cache.items);
+    wgpu.bindgroups_cache.items[index].id = bg_id;
+}
+
+fn uint32_t bindgroups_cache_get(wgpu: *Impl, uint64_t hash) {
+    uint32_t index = hash & wgpu.bindgroups_cache.index_mask;
+    @debug_assert(index < wgpu.bindgroups_cache.num);
+    @debug_assert(wgpu.bindgroups_cache.items);
+    return wgpu.bindgroups_cache.items[index].id;
+}
+
+// called from wgpu resource destroy functions to also invalidate any
+// bindgroups cache slot and bindgroup referencing that resource
+fn void bindgroups_cache_invalidate(wgpu: *Impl, bindgroups_cache_item_type_t type, uint32_t id) {
+    const uint64_t key_mask = 0x0000FFFFFFFFFFFF;
+    const uint64_t key_item = bindgroups_cache_item(type, 0, id) & key_mask;
+    @debug_assert(wgpu.bindgroups_cache.items);
+    for (uint32_t cache_item_idx = 0; cache_item_idx < wgpu.bindgroups_cache.num; cache_item_idx++) {
+        const uint32_t bg_id = wgpu.bindgroups_cache.items[cache_item_idx].id;
+        if (bg_id != SG_INVALID_ID) {
+            bindgroup_t* bg = lookup_bindgroup(bg_id);
+            @debug_assert(bg && (bg.slot.state == SG_RESOURCESTATE_VALID));
+            // check if resource is in bindgroup, if yes discard bindgroup and invalidate cache slot
+            bool invalidate_cache_item = false;
+            for (int key_item_idx = 0; key_item_idx < _SG_WGPU._BINDGROUPSCACHEKEY_NUM_ITEMS; key_item_idx++) {
+                if ((bg.key.items[key_item_idx] & key_mask) == key_item) {
+                    invalidate_cache_item = true;
+                    break;
+                }
+            }
+            if (invalidate_cache_item) {
+                discard_bindgroup(bg); bg = 0;
+                bindgroups_cache_set(cache_item_idx, SG_INVALID_ID);
+                _sg_stats_add(wgpu.bindings.num_bindgroup_cache_invalidates, 1);
+            }
+        }
+    }
+}
+
+fn void bindings_cache_clear(wgpu: *Impl, void) {
+    memset(&wgpu.bindings_cache, 0, sizeof(wgpu.bindings_cache));
+}
+
+fn bool bindings_cache_vb_dirty(wgpu: *Impl, size_t index, const _sg_buffer_t* vb, uint64_t offset) {
+    @debug_assert((index >= 0) && (index < SG_MAX_VERTEXBUFFER_BINDSLOTS));
+    if (vb) {
+        return (wgpu.bindings_cache.vbs[index].buffer.id != vb.slot.id)
+            || (wgpu.bindings_cache.vbs[index].offset != offset);
+    } else {
+        return wgpu.bindings_cache.vbs[index].buffer.id != SG_INVALID_ID;
+    }
+}
+
+fn void bindings_cache_vb_update(wgpu: *Impl, size_t index, const _sg_buffer_t* vb, uint64_t offset) {
+    @debug_assert((index >= 0) && (index < SG_MAX_VERTEXBUFFER_BINDSLOTS));
+    if (vb) {
+        wgpu.bindings_cache.vbs[index].buffer.id = vb.slot.id;
+        wgpu.bindings_cache.vbs[index].offset = offset;
+    } else {
+        wgpu.bindings_cache.vbs[index].buffer.id = SG_INVALID_ID;
+        wgpu.bindings_cache.vbs[index].offset = 0;
+    }
+}
+
+fn bool bindings_cache_ib_dirty(wgpu: *Impl, const _sg_buffer_t* ib, uint64_t offset) {
+    if (ib) {
+        return (wgpu.bindings_cache.ib.buffer.id != ib.slot.id)
+            || (wgpu.bindings_cache.ib.offset != offset);
+    } else {
+        return wgpu.bindings_cache.ib.buffer.id != SG_INVALID_ID;
+    }
+}
+
+fn void bindings_cache_ib_update(wgpu: *Impl, const _sg_buffer_t* ib, uint64_t offset) {
+    if (ib) {
+        wgpu.bindings_cache.ib.buffer.id = ib.slot.id;
+        wgpu.bindings_cache.ib.offset = offset;
+    } else {
+        wgpu.bindings_cache.ib.buffer.id = SG_INVALID_ID;
+        wgpu.bindings_cache.ib.offset = 0;
+    }
+}
+
+fn bool bindings_cache_bg_dirty(wgpu: *Impl, const bindgroup_t* bg) {
+    if (bg) {
+        return wgpu.bindings_cache.bg.id != bg.slot.id;
+    } else {
+        return wgpu.bindings_cache.bg.id != SG_INVALID_ID;
+    }
+}
+
+fn void bindings_cache_bg_update(wgpu: *Impl, const bindgroup_t* bg) {
+    if (bg) {
+        wgpu.bindings_cache.bg.id = bg.slot.id;
+    } else {
+        wgpu.bindings_cache.bg.id = SG_INVALID_ID;
+    }
+}
+
+fn void set_img_smp_sbuf_bindgroup(wgpu: *Impl, bindgroup_t* bg) {
+    if (bindings_cache_bg_dirty(bg)) {
+        bindings_cache_bg_update(bg);
+        _sg_stats_add(wgpu.bindings.num_set_bindgroup, 1);
+        if (wgpu.sg.cur_pass.is_compute) {
+            @debug_assert(wgpu.cpass_enc);
+            if (bg) {
+                @debug_assert(bg.slot.state == SG_RESOURCESTATE_VALID);
+                @debug_assert(bg.bindgroup);
+                wgpuComputePassEncoderSetBindGroup(wgpu.cpass_enc, _SG_WGPU._IMG_SMP_SBUF_BINDGROUP_INDEX, bg.bindgroup, 0, 0);
+            } else {
+                wgpuComputePassEncoderSetBindGroup(wgpu.cpass_enc, _SG_WGPU._IMG_SMP_SBUF_BINDGROUP_INDEX, wgpu.empty_bind_group, 0, 0);
+            }
+        } else {
+            @debug_assert(wgpu.rpass_enc);
+            if (bg) {
+                @debug_assert(bg.slot.state == SG_RESOURCESTATE_VALID);
+                @debug_assert(bg.bindgroup);
+                wgpuRenderPassEncoderSetBindGroup(wgpu.rpass_enc, _SG_WGPU._IMG_SMP_SBUF_BINDGROUP_INDEX, bg.bindgroup, 0, 0);
+            } else {
+                wgpuRenderPassEncoderSetBindGroup(wgpu.rpass_enc, _SG_WGPU._IMG_SMP_SBUF_BINDGROUP_INDEX, wgpu.empty_bind_group, 0, 0);
+            }
+        }
+    } else {
+        _sg_stats_add(wgpu.bindings.num_skip_redundant_bindgroup, 1);
+    }
+}
+
+fn bool apply_bindgroup(wgpu: *Impl, _sg_bindings_t* bnd) {
+    if (!wgpu.sg.desc.wgpu_disable_bindgroups_cache) {
+        bindgroup_t* bg = 0;
+        bindgroups_cache_key_t key;
+        init_bindgroups_cache_key(&key, bnd);
+        uint32_t bg_id = bindgroups_cache_get(key.hash);
+        if (bg_id != SG_INVALID_ID) {
+            // potential cache hit
+            bg = lookup_bindgroup(bg_id);
+            @debug_assert(bg && (bg.slot.state == SG_RESOURCESTATE_VALID));
+            if (!compare_bindgroups_cache_key(&key, &bg.key)) {
+                // cache collision, need to delete cached bindgroup
+                _sg_stats_add(wgpu.bindings.num_bindgroup_cache_collisions, 1);
+                discard_bindgroup(bg);
+                bindgroups_cache_set(key.hash, SG_INVALID_ID);
+                bg = 0;
+            } else {
+                _sg_stats_add(wgpu.bindings.num_bindgroup_cache_hits, 1);
+            }
+        } else {
+            _sg_stats_add(wgpu.bindings.num_bindgroup_cache_misses, 1);
+        }
+        if (bg == 0) {
+            // either no cache entry yet, or cache collision, create new bindgroup and store in cache
+            bg = create_bindgroup(bnd);
+            bindgroups_cache_set(key.hash, bg.slot.id);
+        }
+        if (bg && bg.slot.state == SG_RESOURCESTATE_VALID) {
+            set_img_smp_sbuf_bindgroup(bg);
+        } else {
+            return false;
+        }
+    } else {
+        // bindgroups cache disabled, create and destroy bindgroup on the fly (expensive!)
+        bindgroup_t* bg = create_bindgroup(bnd);
+        if (bg) {
+            if (bg.slot.state == SG_RESOURCESTATE_VALID) {
+                set_img_smp_sbuf_bindgroup(bg);
+            }
+            discard_bindgroup(bg);
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn bool apply_index_buffer(wgpu: *Impl, _sg_bindings_t* bnd) {
+    @debug_assert(wgpu.rpass_enc);
+    const _sg_buffer_t* ib = bnd.ib;
+    uint64_t offset = (uint64_t)bnd.ib_offset;
+    if (bindings_cache_ib_dirty(ib, offset)) {
+        bindings_cache_ib_update(ib, offset);
+        if (ib) {
+            const WGPU.IndexFormat format = indexformat(bnd.pip.cmn.index_type);
+            const uint64_t buf_size = (uint64_t)ib.cmn.size;
+            @debug_assert(buf_size > offset);
+            const uint64_t max_bytes = buf_size - offset;
+            wgpuRenderPassEncoderSetIndexBuffer(wgpu.rpass_enc, ib.wgpu.buf, format, offset, max_bytes);
+        /* FIXME: the else-pass should actually set a null index buffer, but that doesn't seem to work yet
+        } else {
+            wgpuRenderPassEncoderSetIndexBuffer(wgpu.rpass_enc, 0, WGPU.IndexFormat_Undefined, 0, 0);
+        */
+        }
+        _sg_stats_add(wgpu.bindings.num_set_index_buffer, 1);
+    } else {
+        _sg_stats_add(wgpu.bindings.num_skip_redundant_index_buffer, 1);
+    }
+    return true;
+}
+
+fn bool apply_vertex_buffers(wgpu: *Impl, _sg_bindings_t* bnd) {
+    @debug_assert(wgpu.rpass_enc);
+    for (uint32_t slot = 0; slot < SG_MAX_VERTEXBUFFER_BINDSLOTS; slot++) {
+        const _sg_buffer_t* vb = bnd.vbs[slot];
+        const uint64_t offset = (uint64_t)bnd.vb_offsets[slot];
+        if (bindings_cache_vb_dirty(slot, vb, offset)) {
+            bindings_cache_vb_update(slot, vb, offset);
+            if (vb) {
+                const uint64_t buf_size = (uint64_t)vb.cmn.size;
+                @debug_assert(buf_size > offset);
+                const uint64_t max_bytes = buf_size - offset;
+                wgpuRenderPassEncoderSetVertexBuffer(wgpu.rpass_enc, slot, vb.wgpu.buf, offset, max_bytes);
+            /* FIXME: the else-pass should actually set a null vertex buffer, but that doesn't seem to work yet
+            } else {
+                wgpuRenderPassEncoderSetVertexBuffer(wgpu.rpass_enc, slot, 0, 0, 0);
+            */
+            }
+            _sg_stats_add(wgpu.bindings.num_set_vertex_buffer, 1);
+        } else {
+            _sg_stats_add(wgpu.bindings.num_skip_redundant_vertex_buffer, 1);
+        }
+    }
+    return true;
+}
+
+fn void setup_backend(wgpu: *Impl, const sg_desc* desc) {
+    @debug_assert(!desc.environment.wgpu.device.is_null());
+    @debug_assert(desc.uniform_buffer_size > 0);
+    wgpu.sg.backend = SG_BACKEND_WGPU.;
+    wgpu.valid = true;
+    wgpu.dev = (WGPU.Device) desc.environment.wgpu.device;
+    wgpu.queue = wgpuDeviceGetQueue(wgpu.dev);
+    @debug_assert(wgpu.queue);
+
+    init_caps();
+    uniform_buffer_init(desc);
+    bindgroups_pool_init(desc);
+    bindgroups_cache_init(desc);
+    bindings_cache_clear();
+
+    // create an empty bind group
+    WGPU.BindGroupLayoutDescriptor bgl_desc;
+    _sg_clear(&bgl_desc, sizeof(bgl_desc));
+    WGPU.BindGroupLayout empty_bgl = wgpuDeviceCreateBindGroupLayout(wgpu.dev, &bgl_desc);
+    @debug_assert(empty_bgl);
+    WGPU.BindGroupDescriptor bg_desc;
+    _sg_clear(&bg_desc, sizeof(bg_desc));
+    bg_desc.layout = empty_bgl;
+    wgpu.empty_bind_group = wgpuDeviceCreateBindGroup(wgpu.dev, &bg_desc);
+    @debug_assert(wgpu.empty_bind_group);
+    wgpuBindGroupLayoutRelease(empty_bgl);
+
+    // create initial per-frame command encoder
+    WGPU.CommandEncoderDescriptor cmd_enc_desc;
+    _sg_clear(&cmd_enc_desc, sizeof(cmd_enc_desc));
+    wgpu.cmd_enc = wgpuDeviceCreateCommandEncoder(wgpu.dev, &cmd_enc_desc);
+    @debug_assert(wgpu.cmd_enc);
+}
+
+fn void discard_backend(wgpu: *Impl, void) {
+    @debug_assert(wgpu.valid);
+    @debug_assert(wgpu.cmd_enc);
+    wgpu.valid = false;
+    discard_all_bindgroups();
+    bindgroups_cache_discard();
+    bindgroups_pool_discard();
+    uniform_buffer_discard();
+    wgpuBindGroupRelease(wgpu.empty_bind_group); wgpu.empty_bind_group = 0;
+    wgpuCommandEncoderRelease(wgpu.cmd_enc); wgpu.cmd_enc = 0;
+    wgpuQueueRelease(wgpu.queue); wgpu.queue = 0;
+}
+
+fn void reset_state_cache(wgpu: *Impl, void) {
+    bindings_cache_clear();
+}
+
+fn sg_resource_state create_buffer(wgpu: *Impl, _sg_buffer_t* buf, const sg_buffer_desc* desc) {
+    @debug_assert(buf && desc);
+    @debug_assert(buf.cmn.size > 0);
+    const bool injected = (0 != desc.wgpu_buffer);
+    if (injected) {
+        buf.wgpu.buf = (WGPU.Buffer) desc.wgpu_buffer;
+        wgpuBufferReference(buf.wgpu.buf);
+    } else {
+        // buffer mapping size must be multiple of 4, so round up buffer size (only a problem
+        // with index buffers containing odd number of indices)
+        const uint64_t wgpu_buf_size = _sg_roundup_u64((uint64_t)buf.cmn.size, 4);
+        const bool map_at_creation = (SG_USAGE_IMMUTABLE == buf.cmn.usage) && (desc.data.ptr);
+
+        WGPU.BufferDescriptor wgpu_buf_desc;
+        _sg_clear(&wgpu_buf_desc, sizeof(wgpu_buf_desc));
+        wgpu_buf_desc.usage = buffer_usage(buf.cmn.type, buf.cmn.usage);
+        wgpu_buf_desc.size = wgpu_buf_size;
+        wgpu_buf_desc.mappedAtCreation = map_at_creation;
+        wgpu_buf_desc.label = stringview(desc.label);
+        buf.wgpu.buf = wgpuDeviceCreateBuffer(wgpu.dev, &wgpu_buf_desc);
+        if (0 == buf.wgpu.buf) {
+            _SG_ERROR(WGPU._CREATE_BUFFER_FAILED);
+            return SG_RESOURCESTATE_FAILED;
+        }
+        // NOTE: assume that WebGPU creates zero-initialized buffers
+        if (map_at_creation) {
+            @debug_assert(desc.data.ptr && (desc.data.size > 0));
+            @debug_assert(desc.data.size <= (size_t)buf.cmn.size);
+            // FIXME: inefficient on WASM
+            void* ptr = wgpuBufferGetMappedRange(buf.wgpu.buf, 0, wgpu_buf_size);
+            @debug_assert(ptr);
+            memcpy(ptr, desc.data.ptr, desc.data.size);
+            wgpuBufferUnmap(buf.wgpu.buf);
+        }
+    }
+    return SG_RESOURCESTATE_VALID;
+}
+
+fn void discard_buffer(wgpu: *Impl, _sg_buffer_t* buf) {
+    @debug_assert(buf);
+    if (buf.cmn.type == SG_BUFFERTYPE_STORAGEBUFFER) {
+        bindgroups_cache_invalidate(_SG_WGPU._BINDGROUPSCACHEITEMTYPE_STORAGEBUFFER, buf.slot.id);
+    }
+    if (buf.wgpu.buf) {
+        wgpuBufferRelease(buf.wgpu.buf);
+    }
+}
+
+fn void copy_buffer_data(wgpu: *Impl, const _sg_buffer_t* buf, uint64_t offset, const sg_range* data) {
+    @debug_assert((offset + data.size) <= (size_t)buf.cmn.size);
+    // WebGPU's write-buffer requires the size to be a multiple of four, so we may need to split the copy
+    // operation into two writeBuffer calls
+    uint64_t clamped_size = data.size & ~3UL;
+    uint64_t extra_size = data.size & 3UL;
+    @debug_assert(extra_size < 4);
+    wgpuQueueWriteBuffer(wgpu.queue, buf.wgpu.buf, offset, data.ptr, clamped_size);
+    if (extra_size > 0) {
+        const uint64_t extra_src_offset = clamped_size;
+        const uint64_t extra_dst_offset = offset + clamped_size;
+        uint8_t extra_data[4] = { 0 };
+        uint8_t* extra_src_ptr = ((uint8_t*)data.ptr) + extra_src_offset;
+        for (size_t i = 0; i < extra_size; i++) {
+            extra_data[i] = extra_src_ptr[i];
+        }
+        wgpuQueueWriteBuffer(wgpu.queue, buf.wgpu.buf, extra_dst_offset, extra_src_ptr, 4);
+    }
+}
+
+fn void copy_image_data(wgpu: *Impl, const _sg_image_t* img, WGPU.Texture wgpu_tex, const sg_image_data* data) {
+    WGPU.TextureDataLayout wgpu_layout;
+    _sg_clear(&wgpu_layout, sizeof(wgpu_layout));
+    WGPU.ImageCopyTexture wgpu_copy_tex;
+    _sg_clear(&wgpu_copy_tex, sizeof(wgpu_copy_tex));
+    wgpu_copy_tex.texture = wgpu_tex;
+    wgpu_copy_tex.aspect = WGPU.TextureAspect_All;
+    WGPU.Extent3D wgpu_extent;
+    _sg_clear(&wgpu_extent, sizeof(wgpu_extent));
+    const int num_faces = (img.cmn.type == SG_IMAGETYPE_CUBE) ? 6 : 1;
+    for (int face_index = 0; face_index < num_faces; face_index++) {
+        for (int mip_index = 0; mip_index < img.cmn.num_mipmaps; mip_index++) {
+            wgpu_copy_tex.mipLevel = (uint32_t)mip_index;
+            wgpu_copy_tex.origin.z = (uint32_t)face_index;
+            int mip_width = _sg_miplevel_dim(img.cmn.width, mip_index);
+            int mip_height = _sg_miplevel_dim(img.cmn.height, mip_index);
+            int mip_slices;
+            switch (img.cmn.type) {
+                case SG_IMAGETYPE_CUBE:
+                    mip_slices = 1;
+                    break;
+                case SG_IMAGETYPE_3D:
+                    mip_slices = _sg_miplevel_dim(img.cmn.num_slices, mip_index);
+                    break;
+                default:
+                    mip_slices = img.cmn.num_slices;
+                    break;
+            }
+            const int row_pitch = _sg_row_pitch(img.cmn.pixel_format, mip_width, 1);
+            const int num_rows = _sg_num_rows(img.cmn.pixel_format, mip_height);
+            if (_sg_is_compressed_pixel_format(img.cmn.pixel_format)) {
+                mip_width = _sg_roundup(mip_width, 4);
+                mip_height = _sg_roundup(mip_height, 4);
+            }
+            wgpu_layout.offset = 0;
+            wgpu_layout.bytesPerRow = (uint32_t)row_pitch;
+            wgpu_layout.rowsPerImage = (uint32_t)num_rows;
+            wgpu_extent.width = (uint32_t)mip_width;
+            wgpu_extent.height = (uint32_t)mip_height;
+            wgpu_extent.depthOrArrayLayers = (uint32_t)mip_slices;
+            const sg_range* mip_data = &data.subimage[face_index][mip_index];
+            wgpuQueueWriteTexture(wgpu.queue, &wgpu_copy_tex, mip_data.ptr, mip_data.size, &wgpu_layout, &wgpu_extent);
+        }
+    }
+}
+
+fn create(wgpu: *Impl, img: *Sg.Image.T, desc: *Sg.Image.Desc) SgResourceState ={
+    @debug_assert(img && desc);
+    const bool injected = (0 != desc.wgpu_texture);
+    if (injected) {
+        img.wgpu.tex = bit_cast_unchecked(rawptr, WGPU.Texture, desc.wgpu_texture);
+        wgpuTextureReference(img.wgpu.tex);
+        img.wgpu.view = bit_cast_unchecked(rawptr, WGPU.TextureView, desc.wgpu_texture_view);
+        if (img.wgpu.view) {
+            wgpuTextureViewReference(img.wgpu.view);
+        }
+    } else {
+        wgpu_tex_desc: WGPU.TextureDescriptor = (
+            label = str(desc.label),
+            usage = {
+                WGPU.TextureUsage_TextureBinding|WGPU.TextureUsage_CopyDst;
+                if (desc.render_target) {
+                    wgpu_tex_desc.usage |= WGPU.TextureUsage_RenderAttachment;
+                }
+            }
+            dimension = texture_dimension(img.cmn.type),
+            size = (
+                width = (uint32_t) img.cmn.width, 
+                height = (uint32_t) img.cmn.height,
+                depthOrArrayLayers = @if(desc.type == .CUBE, 6, (uint32_t) img.cmn.num_slices),
+            ),
+            format = textureformat(img.cmn.pixel_format),
+            mipLevelCount = (uint32_t) img.cmn.num_mipmaps,
+            sampleCount = (uint32_t) img.cmn.sample_count,
+        );
+        img.wgpu.tex = wgpuDeviceCreateTexture(wgpu.dev, wgpu_tex_desc&);
+        if (0 == img.wgpu.tex) {
+            _SG_ERROR(WGPU._CREATE_TEXTURE_FAILED);
+            return SG_RESOURCESTATE_FAILED;
+        }
+        if ((img.cmn.usage == SG_USAGE_IMMUTABLE) && !img.cmn.render_target) {
+            copy_image_data(img, img.wgpu.tex, &desc.data);
+        }
+        wgpu_texview_desc: WGPU.TextureViewDescriptor = (
+            label = stringview(desc.label),
+            dimension = texture_view_dimension(img.cmn.type),
+            mipLevelCount = (uint32_t)img.cmn.num_mipmaps;
+            arrayLayerCount = @match(img.cmn.type) {
+                fn CUBE() => 6;
+                fn ARRAY() => (uint32_t)img.cmn.num_slices;
+                @default => 1;
+            },
+            aspect = if (_sg_is_depth_or_depth_stencil_format(img.cmn.pixel_format)) {
+                .DepthOnly;
+            } else {
+               .All
+            },
+        );
+        img.wgpu.view = wgpuTextureCreateView(img.wgpu.tex, wgpu_texview_desc&);
+        if (0 == img.wgpu.view) {
+            _SG_ERROR(WGPU._CREATE_TEXTURE_VIEW_FAILED);
+            return SG_RESOURCESTATE_FAILED;
+        }
+    };
+    .VALID
+}
+
+fn void discard_image(wgpu: *Impl, _sg_image_t* img) {
+    @debug_assert(img);
+    bindgroups_cache_invalidate(_SG_WGPU._BINDGROUPSCACHEITEMTYPE_IMAGE, img.slot.id);
+    if (img.wgpu.view) {
+        wgpuTextureViewRelease(img.wgpu.view);
+        img.wgpu.view = 0;
+    }
+    if (img.wgpu.tex) {
+        wgpuTextureRelease(img.wgpu.tex);
+        img.wgpu.tex = 0;
+    }
+}
+
+fn sg_resource_state create_sampler(wgpu: *Impl, _sg_sampler_t* smp, const sg_sampler_desc* desc) {
+    @debug_assert(smp && desc);
+    @debug_assert(wgpu.dev);
+    const bool injected = (0 != desc.wgpu_sampler);
+    if (injected) {
+        smp.wgpu.smp = (WGPU.Sampler) desc.wgpu_sampler;
+        wgpuSamplerReference(smp.wgpu.smp);
+    } else {
+        WGPU.SamplerDescriptor wgpu_desc;
+        _sg_clear(&wgpu_desc, sizeof(wgpu_desc));
+        wgpu_desc.label = stringview(desc.label);
+        wgpu_desc.addressModeU = sampler_address_mode(desc.wrap_u);
+        wgpu_desc.addressModeV = sampler_address_mode(desc.wrap_v);
+        wgpu_desc.addressModeW = sampler_address_mode(desc.wrap_w);
+        wgpu_desc.magFilter = sampler_minmag_filter(desc.mag_filter);
+        wgpu_desc.minFilter = sampler_minmag_filter(desc.min_filter);
+        wgpu_desc.mipmapFilter = sampler_mipmap_filter(desc.mipmap_filter);
+        wgpu_desc.lodMinClamp = desc.min_lod;
+        wgpu_desc.lodMaxClamp = desc.max_lod;
+        wgpu_desc.compare = comparefunc(desc.compare);
+        if (wgpu_desc.compare == WGPU.CompareFunction_Never) {
+            wgpu_desc.compare = WGPU.CompareFunction_Undefined;
+        }
+        wgpu_desc.maxAnisotropy = (uint16_t)desc.max_anisotropy;
+        smp.wgpu.smp = wgpuDeviceCreateSampler(wgpu.dev, &wgpu_desc);
+        if (0 == smp.wgpu.smp) {
+            _SG_ERROR(WGPU._CREATE_SAMPLER_FAILED);
+            return SG_RESOURCESTATE_FAILED;
+        }
+    }
+    return SG_RESOURCESTATE_VALID;
+}
+
+fn void discard_sampler(wgpu: *Impl, _sg_sampler_t* smp) {
+    @debug_assert(smp);
+    bindgroups_cache_invalidate(_SG_WGPU._BINDGROUPSCACHEITEMTYPE_SAMPLER, smp.slot.id);
+    if (smp.wgpu.smp) {
+        wgpuSamplerRelease(smp.wgpu.smp);
+        smp.wgpu.smp = 0;
+    }
+}
+
+fn shader_func_t create_shader_func(wgpu: *Impl, const sg_shader_function* func, const char* label) {
+    @debug_assert(func);
+    @debug_assert(func.source);
+    @debug_assert(func.entry);
+
+    shader_func_t res;
+    _sg_clear(&res, sizeof(res));
+    _sg_strcpy(&res.entry, func.entry);
+
+    WGPU.ShaderModuleWGSLDescriptor wgpu_shdmod_wgsl_desc;
+    _sg_clear(&wgpu_shdmod_wgsl_desc, sizeof(wgpu_shdmod_wgsl_desc));
+    wgpu_shdmod_wgsl_desc.chain.sType = WGPU.SType_ShaderModuleWGSLDescriptor;
+    wgpu_shdmod_wgsl_desc.code = stringview(func.source);
+
+    WGPU.ShaderModuleDescriptor wgpu_shdmod_desc;
+    _sg_clear(&wgpu_shdmod_desc, sizeof(wgpu_shdmod_desc));
+    wgpu_shdmod_desc.nextInChain = &wgpu_shdmod_wgsl_desc.chain;
+    wgpu_shdmod_desc.label = stringview(label);
+
+    // NOTE: if compilation fails we won't actually find out in this call since
+    // it always returns a valid module handle, and the GetCompilationInfo() call
+    // is asynchronous
+    res.module = wgpuDeviceCreateShaderModule(wgpu.dev, &wgpu_shdmod_desc);
+    if (0 == res.module) {
+        _SG_ERROR(WGPU._CREATE_SHADER_MODULE_FAILED);
+    }
+    return res;
+}
+
+fn void discard_shader_func(wgpu: *Impl, shader_func_t* func) {
+    if (func.module) {
+        wgpuShaderModuleRelease(func.module);
+        func.module = 0;
+    }
+}
+
+typedef struct { uint8_t sokol_slot, wgpu_slot; } dynoffset_mapping_t;
+
+fn int dynoffset_cmp(const void* a, const void* b) {
+    const dynoffset_mapping_t* aa = (const dynoffset_mapping_t*)a;
+    const dynoffset_mapping_t* bb = (const dynoffset_mapping_t*)b;
+    if (aa.wgpu_slot < bb.wgpu_slot) return -1;
+    else if (aa.wgpu_slot > bb.wgpu_slot) return 1;
+    return 0;
+}
+
+// NOTE: this is an out-of-range check for WGSL bindslots that's also active in release mode
+fn bool ensure_wgsl_bindslot_ranges(const sg_shader_desc* desc) {
+    @debug_assert(desc);
+    for (size_t i = 0; i < SG_MAX_UNIFORMBLOCK_BINDSLOTS; i++) {
+        if (desc.uniform_blocks[i].wgsl_group0_binding_n >= _SG_WGPU._MAX_UB_BINDGROUP_BIND_SLOTS) {
+            _SG_ERROR(WGPU._UNIFORMBLOCK_WGSL_GROUP0_BINDING_OUT_OF_RANGE);
+            return false;
+        }
+    }
+    for (size_t i = 0; i < SG_MAX_STORAGEBUFFER_BINDSLOTS; i++) {
+        if (desc.storage_buffers[i].wgsl_group1_binding_n >= _SG_WGPU._MAX_IMG_SMP_SBUF_BIND_SLOTS) {
+            _SG_ERROR(WGPU._STORAGEBUFFER_WGSL_GROUP1_BINDING_OUT_OF_RANGE);
+            return false;
+        }
+    }
+    for (size_t i = 0; i < SG_MAX_IMAGE_BINDSLOTS; i++) {
+        if (desc.images[i].wgsl_group1_binding_n >= _SG_WGPU._MAX_IMG_SMP_SBUF_BIND_SLOTS) {
+            _SG_ERROR(WGPU._IMAGE_WGSL_GROUP1_BINDING_OUT_OF_RANGE);
+            return false;
+        }
+    }
+    for (size_t i = 0; i < SG_MAX_SAMPLER_BINDSLOTS; i++) {
+        if (desc.samplers[i].wgsl_group1_binding_n >= _SG_WGPU._MAX_IMG_SMP_SBUF_BIND_SLOTS) {
+            _SG_ERROR(WGPU._SAMPLER_WGSL_GROUP1_BINDING_OUT_OF_RANGE);
+            return false;
+        }
+    }
+    return true;
+}
+
+fn sg_resource_state create_shader(wgpu: *Impl, _sg_shader_t* shd, const sg_shader_desc* desc) {
+    @debug_assert(shd && desc);
+    @debug_assert(shd.wgpu.vertex_func.module == 0);
+    @debug_assert(shd.wgpu.fragment_func.module == 0);
+    @debug_assert(shd.wgpu.compute_func.module == 0);
+    @debug_assert(shd.wgpu.bgl_ub == 0);
+    @debug_assert(shd.wgpu.bg_ub == 0);
+    @debug_assert(shd.wgpu.bgl_img_smp_sbuf == 0);
+
+    // do a release-mode bounds-check on wgsl bindslots, even though out-of-range
+    // bindslots can't cause out-of-bounds accesses in the wgpu backend, this
+    // is done to be consistent with the other backends
+    if (!ensure_wgsl_bindslot_ranges(desc)) {
+        return SG_RESOURCESTATE_FAILED;
+    }
+
+    // build shader modules
+    bool shd_valid = true;
+    if (desc.vertex_func.source) {
+        shd.wgpu.vertex_func = create_shader_func(&desc.vertex_func, desc.label);
+        shd_valid &= shd.wgpu.vertex_func.module != 0;
+    }
+    if (desc.fragment_func.source) {
+        shd.wgpu.fragment_func = create_shader_func(&desc.fragment_func, desc.label);
+        shd_valid &= shd.wgpu.fragment_func.module != 0;
+    }
+    if (desc.compute_func.source) {
+        shd.wgpu.compute_func = create_shader_func(&desc.compute_func, desc.label);
+        shd_valid &= shd.wgpu.compute_func.module != 0;
+    }
+    if (!shd_valid) {
+        discard_shader_func(&shd.wgpu.vertex_func);
+        discard_shader_func(&shd.wgpu.fragment_func);
+        discard_shader_func(&shd.wgpu.compute_func);
+        return SG_RESOURCESTATE_FAILED;
+    }
+
+    // create bind group layout and bind group for uniform blocks
+    // NOTE also need to create a mapping of sokol ub bind slots to array indices
+    // for the dynamic offsets array in the setBindGroup call
+    @debug_assert(_SG_WGPU._MAX_UB_BINDGROUP_ENTRIES <= _SG_WGPU._MAX_IMG_SMP_SBUF_BINDGROUP_ENTRIES);
+    WGPU.BindGroupLayoutEntry bgl_entries[_SG_WGPU._MAX_IMG_SMP_SBUF_BINDGROUP_ENTRIES];
+    _sg_clear(bgl_entries, sizeof(bgl_entries));
+    WGPU.BindGroupLayoutDescriptor bgl_desc;
+    _sg_clear(&bgl_desc, sizeof(bgl_desc));
+    WGPU.BindGroupEntry bg_entries[_SG_WGPU._MAX_IMG_SMP_SBUF_BINDGROUP_ENTRIES];
+    _sg_clear(&bg_entries, sizeof(bg_entries));
+    WGPU.BindGroupDescriptor bg_desc;
+    _sg_clear(&bg_desc, sizeof(bg_desc));
+    dynoffset_mapping_t dynoffset_map[SG_MAX_UNIFORMBLOCK_BINDSLOTS];
+    _sg_clear(dynoffset_map, sizeof(dynoffset_map));
+    size_t bgl_index = 0;
+    for (size_t i = 0; i < SG_MAX_UNIFORMBLOCK_BINDSLOTS; i++) {
+        if (shd.cmn.uniform_blocks[i].stage == SG_SHADERSTAGE_NONE) {
+            continue;
+        }
+        shd.wgpu.ub_grp0_bnd_n[i] = desc.uniform_blocks[i].wgsl_group0_binding_n;
+        WGPU.BindGroupEntry* bg_entry = &bg_entries[bgl_index];
+        WGPU.BindGroupLayoutEntry* bgl_entry = &bgl_entries[bgl_index];
+        bgl_entry.binding = shd.wgpu.ub_grp0_bnd_n[i];
+        bgl_entry.visibility = shader_stage(shd.cmn.uniform_blocks[i].stage);
+        bgl_entry.buffer.type = WGPU.BufferBindingType_Uniform;
+        bgl_entry.buffer.hasDynamicOffset = true;
+        bg_entry.binding = bgl_entry.binding;
+        bg_entry.buffer = wgpu.uniform.buf;
+        bg_entry.size = _SG_WGPU._MAX_UNIFORM_UPDATE_SIZE;
+        dynoffset_map[i].sokol_slot = i;
+        dynoffset_map[i].wgpu_slot = bgl_entry.binding;
+        bgl_index += 1;
+    }
+    bgl_desc.entryCount = bgl_index;
+    bgl_desc.entries = bgl_entries;
+    shd.wgpu.bgl_ub = wgpuDeviceCreateBindGroupLayout(wgpu.dev, &bgl_desc);
+    @debug_assert(shd.wgpu.bgl_ub);
+    bg_desc.layout = shd.wgpu.bgl_ub;
+    bg_desc.entryCount = bgl_index;
+    bg_desc.entries = bg_entries;
+    shd.wgpu.bg_ub = wgpuDeviceCreateBindGroup(wgpu.dev, &bg_desc);
+    @debug_assert(shd.wgpu.bg_ub);
+
+    // sort the dynoffset_map by wgpu bindings, this is because the
+    // dynamic offsets of the WebGPU setBindGroup call must be in
+    // 'binding order', not 'bindgroup entry order'
+    qsort(dynoffset_map, bgl_index, sizeof(dynoffset_mapping_t), dynoffset_cmp);
+    shd.wgpu.ub_num_dynoffsets = bgl_index;
+    for (uint8_t i = 0; i < bgl_index; i++) {
+        const uint8_t sokol_slot = dynoffset_map[i].sokol_slot;
+        shd.wgpu.ub_dynoffsets[sokol_slot] = i;
+    }
+
+    // create bind group layout for images, samplers and storage buffers
+    _sg_clear(bgl_entries, sizeof(bgl_entries));
+    _sg_clear(&bgl_desc, sizeof(bgl_desc));
+    bgl_index = 0;
+    for (size_t i = 0; i < SG_MAX_IMAGE_BINDSLOTS; i++) {
+        if (shd.cmn.images[i].stage == SG_SHADERSTAGE_NONE) {
+            continue;
+        }
+        const bool msaa = shd.cmn.images[i].multisampled;
+        shd.wgpu.img_grp1_bnd_n[i] = desc.images[i].wgsl_group1_binding_n;
+        WGPU.BindGroupLayoutEntry* bgl_entry = &bgl_entries[bgl_index];
+        bgl_entry.binding = shd.wgpu.img_grp1_bnd_n[i];
+        bgl_entry.visibility = shader_stage(shd.cmn.images[i].stage);
+        bgl_entry.texture.viewDimension = texture_view_dimension(shd.cmn.images[i].image_type);
+        bgl_entry.texture.sampleType = texture_sample_type(shd.cmn.images[i].sample_type, msaa);
+        bgl_entry.texture.multisampled = msaa;
+        bgl_index += 1;
+    }
+    for (size_t i = 0; i < SG_MAX_SAMPLER_BINDSLOTS; i++) {
+        if (shd.cmn.samplers[i].stage == SG_SHADERSTAGE_NONE) {
+            continue;
+        }
+        shd.wgpu.smp_grp1_bnd_n[i] = desc.samplers[i].wgsl_group1_binding_n;
+        WGPU.BindGroupLayoutEntry* bgl_entry = &bgl_entries[bgl_index];
+        bgl_entry.binding = shd.wgpu.smp_grp1_bnd_n[i];
+        bgl_entry.visibility = shader_stage(shd.cmn.samplers[i].stage);
+        bgl_entry.sampler.type = sampler_binding_type(shd.cmn.samplers[i].sampler_type);
+        bgl_index += 1;
+    }
+    for (size_t i = 0; i < SG_MAX_STORAGEBUFFER_BINDSLOTS; i++) {
+        if (shd.cmn.storage_buffers[i].stage == SG_SHADERSTAGE_NONE) {
+            continue;
+        }
+        shd.wgpu.sbuf_grp1_bnd_n[i] = desc.storage_buffers[i].wgsl_group1_binding_n;
+        WGPU.BindGroupLayoutEntry* bgl_entry = &bgl_entries[bgl_index];
+        bgl_entry.binding = shd.wgpu.sbuf_grp1_bnd_n[i];
+        bgl_entry.visibility = shader_stage(shd.cmn.storage_buffers[i].stage);
+        if (shd.cmn.storage_buffers[i].readonly) {
+            bgl_entry.buffer.type = WGPU.BufferBindingType_ReadOnlyStorage;
+        } else {
+            bgl_entry.buffer.type = WGPU.BufferBindingType_Storage;
+        }
+        bgl_index += 1;
+    }
+    bgl_desc.entryCount = bgl_index;
+    bgl_desc.entries = bgl_entries;
+    shd.wgpu.bgl_img_smp_sbuf = wgpuDeviceCreateBindGroupLayout(wgpu.dev, &bgl_desc);
+    if (shd.wgpu.bgl_img_smp_sbuf == 0) {
+        _SG_ERROR(WGPU._SHADER_CREATE_BINDGROUP_LAYOUT_FAILED);
+        return SG_RESOURCESTATE_FAILED;
+    }
+    return SG_RESOURCESTATE_VALID;
+}
+
+fn void discard_shader(wgpu: *Impl, _sg_shader_t* shd) {
+    @debug_assert(shd);
+    discard_shader_func(&shd.wgpu.vertex_func);
+    discard_shader_func(&shd.wgpu.fragment_func);
+    discard_shader_func(&shd.wgpu.compute_func);
+    if (shd.wgpu.bgl_ub) {
+        wgpuBindGroupLayoutRelease(shd.wgpu.bgl_ub);
+        shd.wgpu.bgl_ub = 0;
+    }
+    if (shd.wgpu.bg_ub) {
+        wgpuBindGroupRelease(shd.wgpu.bg_ub);
+        shd.wgpu.bg_ub = 0;
+    }
+    if (shd.wgpu.bgl_img_smp_sbuf) {
+        wgpuBindGroupLayoutRelease(shd.wgpu.bgl_img_smp_sbuf);
+        shd.wgpu.bgl_img_smp_sbuf = 0;
+    }
+}
+
+fn to_wgpu(it: SgColor) GPU.Color = (
+    r = (double) it.r;
+    g = (double) it.g;
+    b = (double) it.b;
+    a = (double) it.a;
+);
+
+fn sg_resource_state create_pipeline(wgpu: *Impl, _sg_pipeline_t* pip, _sg_shader_t* shd, const sg_pipeline_desc* desc) {
+    @debug_assert(pip && shd && desc);
+    @debug_assert(desc.shader.id == shd.slot.id);
+    @debug_assert(shd.wgpu.bgl_ub);
+    @debug_assert(shd.wgpu.bgl_img_smp_sbuf);
+    pip.shader = shd;
+
+    pip.wgpu.blend_color = to_wgpu desc.blend_color;
+
+    // - @group(0) for uniform blocks
+    // - @group(1) for all image, sampler and storagebuffer resources
+    WGPU.BindGroupLayout wgpu_bgl[_SG_WGPU._NUM_BINDGROUPS];
+    _sg_clear(&wgpu_bgl, sizeof(wgpu_bgl));
+    wgpu_bgl[_SG_WGPU._UB_BINDGROUP_INDEX ] = shd.wgpu.bgl_ub;
+    wgpu_bgl[_SG_WGPU._IMG_SMP_SBUF_BINDGROUP_INDEX] = shd.wgpu.bgl_img_smp_sbuf;
+    WGPU.PipelineLayoutDescriptor wgpu_pl_desc;
+    _sg_clear(&wgpu_pl_desc, sizeof(wgpu_pl_desc));
+    wgpu_pl_desc.bindGroupLayoutCount = _SG_WGPU._NUM_BINDGROUPS;
+    wgpu_pl_desc.bindGroupLayouts = &wgpu_bgl[0];
+    const WGPU.PipelineLayout wgpu_pip_layout = wgpuDeviceCreatePipelineLayout(wgpu.dev, &wgpu_pl_desc);
+    if (0 == wgpu_pip_layout) {
+        _SG_ERROR(WGPU._CREATE_PIPELINE_LAYOUT_FAILED);
+        return SG_RESOURCESTATE_FAILED;
+    }
+    @debug_assert(wgpu_pip_layout);
+
+    if (pip.cmn.is_compute) {
+        WGPU.ComputePipelineDescriptor wgpu_pip_desc;
+        _sg_clear(&wgpu_pip_desc, sizeof(wgpu_pip_desc));
+        wgpu_pip_desc.label = stringview(desc.label);
+        wgpu_pip_desc.layout = wgpu_pip_layout;
+        wgpu_pip_desc.compute.module = shd.wgpu.compute_func.module;
+        wgpu_pip_desc.compute.entryPoint = shd.wgpu.compute_func.entry.buf;
+        pip.wgpu.cpip = wgpuDeviceCreateComputePipeline(wgpu.dev, &wgpu_pip_desc);
+        wgpuPipelineLayoutRelease(wgpu_pip_layout);
+        if (0 == pip.wgpu.cpip) {
+            _SG_ERROR(WGPU._CREATE_COMPUTE_PIPELINE_FAILED);
+            return SG_RESOURCESTATE_FAILED;
+        }
+    } else {
+        wgpu_vb_layouts := zeroed Array(WGPU.VertexBufferLayout, SG_MAX_VERTEXBUFFER_BINDSLOTS);
+        wgpu_vtx_attrs := zeroed Array(Array(WGPU.VertexAttribute, SG_MAX_VERTEXBUFFER_BINDSLOTS), SG_MAX_VERTEX_ATTRIBUTES);
+        int wgpu_vb_num = 0;
+        for (int vb_idx = 0; vb_idx < SG_MAX_VERTEXBUFFER_BINDSLOTS; vb_idx++, wgpu_vb_num++) {
+            const sg_vertex_buffer_layout_state* vbl_state = &desc.layout.buffers[vb_idx];
+            if (0 == vbl_state.stride) {
+                break;
+            }
+            wgpu_vb_layouts[vb_idx].arrayStride = (uint64_t)vbl_state.stride;
+            wgpu_vb_layouts[vb_idx].stepMode = stepmode(vbl_state.step_func);
+            wgpu_vb_layouts[vb_idx].attributes = &wgpu_vtx_attrs[vb_idx][0];
+        }
+        for (int va_idx = 0; va_idx < SG_MAX_VERTEX_ATTRIBUTES; va_idx++) {
+            const sg_vertex_attr_state* va_state = &desc.layout.attrs[va_idx];
+            if (SG_VERTEXFORMAT_INVALID == va_state.format) {
+                break;
+            }
+            const int vb_idx = va_state.buffer_index;
+            @debug_assert(vb_idx < SG_MAX_VERTEXBUFFER_BINDSLOTS);
+            @debug_assert(pip.cmn.vertex_buffer_layout_active[vb_idx]);
+            const size_t wgpu_attr_idx = wgpu_vb_layouts[vb_idx].attributeCount;
+            wgpu_vb_layouts[vb_idx].attributeCount += 1;
+            wgpu_vtx_attrs[vb_idx][wgpu_attr_idx].format = vertexformat(va_state.format);
+            wgpu_vtx_attrs[vb_idx][wgpu_attr_idx].offset = (uint64_t)va_state.offset;
+            wgpu_vtx_attrs[vb_idx][wgpu_attr_idx].shaderLocation = (uint32_t)va_idx;
+        }
+
+        // TODO: I think my policy is that stack frame is valid for the whole function regardless 
+        //       of if the block ends. are we sure that's what i want to commit to? 
+        //       tho since that's not true for loops it's kinda incoherent to make it true for 
+        //       other blocks i guess? :Compiler
+        
+        wgpu_pip_desc: WGPU.RenderPipelineDescriptor = (
+            label = str(desc.label);
+            layout = wgpu_pip_layout;
+            vertex = (
+                module = shd.wgpu.vertex_func.module;
+                entryPoint = shd.wgpu.vertex_func.entry.buf;
+                bufferCount = (size_t)wgpu_vb_num;
+                buffers = &wgpu_vb_layouts[0];
+            ),
+            primitive = (
+                topology = topology(desc.primitive_type),
+                stripIndexFormat = stripindexformat(desc.primitive_type, desc.index_type),
+                frontFace = frontface(desc.face_winding),
+                cullMode = cullmode(desc.cull_mode),
+            ),
+            depthStencil = if desc.depth.pixel_format == .NONE {
+                WGPU.DepthStencilState.ptr_from_int(0)
+            } else {
+                wgpu_ds_state: WGPU.DepthStencilState = (
+                    format = to_wgpu(desc.depth.pixel_format),
+                    depthWriteEnabled = to_wgpu(desc.depth.write_enabled),
+                    depthCompare = to_wgpu(desc.depth.compare),
+                    stencilFront = to_wgpu desc.stencil.front&,
+                    stencilBack = to_wgpu desc.stencil.back&,
+                    stencilReadMask = desc.stencil.read_mask,
+                    stencilWriteMask = desc.stencil.write_mask,
+                    depthBias = (int32_t)desc.depth.bias,
+                    depthBiasSlopeScale = desc.depth.bias_slope_scale,
+                    depthBiasClamp = desc.depth.bias_clamp,
+                );
+                wgpu_ds_state&
+            },
+            multisample = (
+                count = (uint32_t)desc.sample_count;
+                mask = 0xFFFFFFFF;
+                alphaToCoverageEnabled = desc.alpha_to_coverage_enabled;
+            ),
+            fragment = if desc.color_count == 0 {
+                WGPU.FragmentState.ptr_from_int(0)
+            } else {
+                wgpu_ctgt_state := zeroed Array(WGPU.ColorTargetState, SG_MAX_COLOR_ATTACHMENTS);
+                wgpu_frag_state: WGPU.FragmentState = (
+                    module = shd.wgpu.fragment_func.module,
+                    entryPoint = shd.wgpu.fragment_func.entry.buf,
+                    targetCount = (size_t)desc.color_count,
+                    targets = wgpu_ctgt_state&.as_ptr(), 
+                );
+            
+                wgpu_blend_state := @uninitialized Array(WGPU.BlendState, SG_MAX_COLOR_ATTACHMENTS);
+                @debug_assert(desc.color_count < SG_MAX_COLOR_ATTACHMENTS);
+                range(0, desc.color_count) { i |
+                    dest := wgpu_ctgt_state&[i]&;
+                    dest.format = textureformat(desc.colors[i].pixel_format);
+                    dest.writeMask = colorwritemask(desc.colors[i].write_mask);
+                    it := desc.colors[i].blend&;
+                    if it.enabled {
+                        dest.blend = wgpu_blend_state&[i]&;
+                        dest.blend[] = (
+                            color = (
+                                operation = to_wgpu it.op_rgb,
+                                srcFactor = to_wgpu it.src_factor_rgb,
+                                dstFactor = to_wgpu it.dst_factor_rgb,
+                            ),
+                            alpha = (
+                                operation = to_wgpu it.op_alpha,
+                                srcFactor = to_wgpu it.src_factor_alpha,
+                                dstFactor = to_wgpu it.dst_factor_alpha,
+                            ),
+                        );
+                    }
+                };
+                wgpu_frag_state&
+            },
+        );
+        pip.wgpu.rpip = wgpuDeviceCreateRenderPipeline(wgpu.dev, wgpu_pip_desc&);
+        wgpuPipelineLayoutRelease(wgpu_pip_layout);
+        if (0 == pip.wgpu.rpip) {
+            _SG_ERROR(WGPU._CREATE_RENDER_PIPELINE_FAILED);
+            return SG_RESOURCESTATE_FAILED;
+        }
+    }
+    return SG_RESOURCESTATE_VALID;
+}
+
+fn to_wgpu(it: *SgStencilFaceState) WGPU.StencilFaceState = (
+    compare = to_wgpu it.compare,
+    failOp = to_wgpu it.fail_op,
+    depthFailOp = to_wgpu it.depth_fail_op,
+    passOp = to_wgpu it.pass_op,
+);
+
+fn void discard_pipeline(wgpu: *Impl, _sg_pipeline_t* pip) {
+    @debug_assert(pip);
+    bindgroups_cache_invalidate(_SG_WGPU._BINDGROUPSCACHEITEMTYPE_PIPELINE, pip.slot.id);
+    if (pip == wgpu.cur_pipeline) {
+        wgpu.cur_pipeline = 0;
+        wgpu.cur_pipeline_id.id = SG_INVALID_ID;
+    }
+    if (pip.wgpu.rpip) {
+        wgpuRenderPipelineRelease(pip.wgpu.rpip);
+        pip.wgpu.rpip = 0;
+    }
+    if (pip.wgpu.cpip) {
+        wgpuComputePipelineRelease(pip.wgpu.cpip);
+        pip.wgpu.cpip = 0;
+    }
+}
+
+fn sg_resource_state create_attachments(wgpu: *Impl, _sg_attachments_t* atts, _sg_image_t** color_images, _sg_image_t** resolve_images, _sg_image_t* ds_img, const sg_attachments_desc* desc) {
+    @debug_assert(atts && desc);
+    @debug_assert(color_images && resolve_images);
+
+    // copy image pointers and create renderable wgpu texture views
+    for (int i = 0; i < atts.cmn.num_colors; i++) {
+        const sg_attachment_desc* color_desc = &desc.colors[i];
+        _SOKOL_UNUSED(color_desc);
+        @debug_assert(color_desc.image.id != SG_INVALID_ID);
+        @debug_assert(0 == atts.wgpu.colors[i].image);
+        @debug_assert(color_images[i] && (color_images[i].slot.id == color_desc.image.id));
+        @debug_assert(_sg_is_valid_rendertarget_color_format(color_images[i].cmn.pixel_format));
+        @debug_assert(color_images[i].wgpu.tex);
+        atts.wgpu.colors[i].image = color_images[i];
+
+        WGPU.TextureViewDescriptor wgpu_color_view_desc;
+        _sg_clear(&wgpu_color_view_desc, sizeof(wgpu_color_view_desc));
+        wgpu_color_view_desc.baseMipLevel = (uint32_t) color_desc.mip_level;
+        wgpu_color_view_desc.mipLevelCount = 1;
+        wgpu_color_view_desc.baseArrayLayer = (uint32_t) color_desc.slice;
+        wgpu_color_view_desc.arrayLayerCount = 1;
+        atts.wgpu.colors[i].view = wgpuTextureCreateView(color_images[i].wgpu.tex, &wgpu_color_view_desc);
+        if (0 == atts.wgpu.colors[i].view) {
+            _SG_ERROR(WGPU._ATTACHMENTS_CREATE_TEXTURE_VIEW_FAILED);
+            return SG_RESOURCESTATE_FAILED;
+        }
+
+        const sg_attachment_desc* resolve_desc = &desc.resolves[i];
+        if (resolve_desc.image.id != SG_INVALID_ID) {
+            @debug_assert(0 == atts.wgpu.resolves[i].image);
+            @debug_assert(resolve_images[i] && (resolve_images[i].slot.id == resolve_desc.image.id));
+            @debug_assert(color_images[i] && (color_images[i].cmn.pixel_format == resolve_images[i].cmn.pixel_format));
+            @debug_assert(resolve_images[i].wgpu.tex);
+            atts.wgpu.resolves[i].image = resolve_images[i];
+
+            WGPU.TextureViewDescriptor wgpu_resolve_view_desc;
+            _sg_clear(&wgpu_resolve_view_desc, sizeof(wgpu_resolve_view_desc));
+            wgpu_resolve_view_desc.baseMipLevel = (uint32_t) resolve_desc.mip_level;
+            wgpu_resolve_view_desc.mipLevelCount = 1;
+            wgpu_resolve_view_desc.baseArrayLayer = (uint32_t) resolve_desc.slice;
+            wgpu_resolve_view_desc.arrayLayerCount = 1;
+            atts.wgpu.resolves[i].view = wgpuTextureCreateView(resolve_images[i].wgpu.tex, &wgpu_resolve_view_desc);
+            if (0 == atts.wgpu.resolves[i].view) {
+                _SG_ERROR(WGPU._ATTACHMENTS_CREATE_TEXTURE_VIEW_FAILED);
+                return SG_RESOURCESTATE_FAILED;
+            }
+        }
+    }
+    @debug_assert(0 == atts.wgpu.depth_stencil.image);
+    const sg_attachment_desc* ds_desc = &desc.depth_stencil;
+    if (ds_desc.image.id != SG_INVALID_ID) {
+        @debug_assert(ds_img && (ds_img.slot.id == ds_desc.image.id));
+        @debug_assert(_sg_is_valid_rendertarget_depth_format(ds_img.cmn.pixel_format));
+        @debug_assert(ds_img.wgpu.tex);
+        atts.wgpu.depth_stencil.image = ds_img;
+        wgpu_ds_view_desc: WGPU.TextureViewDescriptor = (
+            baseMipLevel = (uint32_t) ds_desc.mip_level,
+            mipLevelCount = 1,
+            baseArrayLayer = (uint32_t) ds_desc.slice,
+            arrayLayerCount = 1,
+        );
+        atts.wgpu.depth_stencil.view = wgpuTextureCreateView(ds_img.wgpu.tex, wgpu_ds_view_desc&);
+        if (0 == atts.wgpu.depth_stencil.view) {
+            _SG_ERROR(WGPU._ATTACHMENTS_CREATE_TEXTURE_VIEW_FAILED);
+            return SG_RESOURCESTATE_FAILED;
+        }
+    }
+    return SG_RESOURCESTATE_VALID;
+}
+
+fn void discard_attachments(wgpu: *Impl, _sg_attachments_t* atts) {
+    @debug_assert(atts);
+    for (int i = 0; i < atts.cmn.num_colors; i++) {
+        if (atts.wgpu.colors[i].view) {
+            wgpuTextureViewRelease(atts.wgpu.colors[i].view);
+            atts.wgpu.colors[i].view = 0;
+        }
+        if (atts.wgpu.resolves[i].view) {
+            wgpuTextureViewRelease(atts.wgpu.resolves[i].view);
+            atts.wgpu.resolves[i].view = 0;
+        }
+    }
+    if (atts.wgpu.depth_stencil.view) {
+        wgpuTextureViewRelease(atts.wgpu.depth_stencil.view);
+        atts.wgpu.depth_stencil.view = 0;
+    }
+}
+
+fn _sg_image_t* attachments_color_image(wgpu: *Impl, const _sg_attachments_t* atts, int index) {
+    @debug_assert(atts && (index >= 0) && (index < SG_MAX_COLOR_ATTACHMENTS));
+    // NOTE: may return null
+    return atts.wgpu.colors[index].image;
+}
+
+fn _sg_image_t* attachments_resolve_image(wgpu: *Impl, const _sg_attachments_t* atts, int index) {
+    @debug_assert(atts && (index >= 0) && (index < SG_MAX_COLOR_ATTACHMENTS));
+    // NOTE: may return null
+    return atts.wgpu.resolves[index].image;
+}
+
+fn _sg_image_t* attachments_ds_image(wgpu: *Impl, const _sg_attachments_t* atts) {
+    // NOTE: may return null
+    @debug_assert(atts);
+    return atts.wgpu.depth_stencil.image;
+}
+
+fn void init_color_att(WGPU.RenderPassColorAttachment* wgpu_att, const sg_color_attachment_action* action, WGPU.TextureView color_view, WGPU.TextureView resolve_view) {
+    wgpu_att.depthSlice = WGPU._DEPTH_SLICE_UNDEFINED;
+    wgpu_att.view = color_view;
+    wgpu_att.resolveTarget = resolve_view;
+    wgpu_att.loadOp = load_op(color_view, action.load_action);
+    wgpu_att.storeOp = store_op(color_view, action.store_action);
+    wgpu_att.clearValue.r = action.clear_value.r;
+    wgpu_att.clearValue.g = action.clear_value.g;
+    wgpu_att.clearValue.b = action.clear_value.b;
+    wgpu_att.clearValue.a = action.clear_value.a;
+}
+
+fn void init_ds_att(WGPU.RenderPassDepthStencilAttachment* wgpu_att, const sg_pass_action* action, sg_pixel_format fmt, WGPU.TextureView view) {
+    wgpu_att.view = view;
+    wgpu_att.depthLoadOp = load_op(view, action.depth.load_action);
+    wgpu_att.depthStoreOp = store_op(view, action.depth.store_action);
+    wgpu_att.depthClearValue = action.depth.clear_value;
+    wgpu_att.depthReadOnly = false;
+    if (_sg_is_depth_stencil_format(fmt)) {
+        wgpu_att.stencilLoadOp = load_op(view, action.stencil.load_action);
+        wgpu_att.stencilStoreOp = store_op(view, action.stencil.store_action);
+    } else {
+        wgpu_att.stencilLoadOp = WGPU.LoadOp_Undefined;
+        wgpu_att.stencilStoreOp = WGPU.StoreOp_Undefined;
+    }
+    wgpu_att.stencilClearValue = action.stencil.clear_value;
+    wgpu_att.stencilReadOnly = false;
+}
+
+fn void begin_compute_pass(wgpu: *Impl, const sg_pass* pass) {
+    WGPU.ComputePassDescriptor wgpu_pass_desc;
+    _sg_clear(&wgpu_pass_desc, sizeof(wgpu_pass_desc));
+    wgpu_pass_desc.label = stringview(pass.label);
+    wgpu.cpass_enc = wgpuCommandEncoderBeginComputePass(wgpu.cmd_enc, &wgpu_pass_desc);
+    @debug_assert(wgpu.cpass_enc);
+    // clear initial bindings
+    wgpuComputePassEncoderSetBindGroup(wgpu.cpass_enc, _SG_WGPU._UB_BINDGROUP_INDEX, wgpu.empty_bind_group, 0, 0);
+    wgpuComputePassEncoderSetBindGroup(wgpu.cpass_enc, _SG_WGPU._IMG_SMP_SBUF_BINDGROUP_INDEX, wgpu.empty_bind_group, 0, 0);
+    _sg_stats_add(wgpu.bindings.num_set_bindgroup, 1);
+}
+
+fn void begin_render_pass(wgpu: *Impl, const sg_pass* pass) {
+    const _sg_attachments_t* atts = wgpu.sg.cur_pass.atts;
+    const sg_swapchain* swapchain = &pass.swapchain;
+    const sg_pass_action* action = &pass.action;
+
+    WGPU.RenderPassDescriptor wgpu_pass_desc;
+    WGPU.RenderPassColorAttachment wgpu_color_att[SG_MAX_COLOR_ATTACHMENTS];
+    WGPU.RenderPassDepthStencilAttachment wgpu_ds_att;
+    _sg_clear(&wgpu_pass_desc, sizeof(wgpu_pass_desc));
+    _sg_clear(&wgpu_color_att, sizeof(wgpu_color_att));
+    _sg_clear(&wgpu_ds_att, sizeof(wgpu_ds_att));
+    wgpu_pass_desc.label = stringview(pass.label);
+    if (atts) {
+        @debug_assert(atts.slot.state == SG_RESOURCESTATE_VALID);
+        for (int i = 0; i < atts.cmn.num_colors; i++) {
+            init_color_att(&wgpu_color_att[i], &action.colors[i], atts.wgpu.colors[i].view, atts.wgpu.resolves[i].view);
+        }
+        wgpu_pass_desc.colorAttachmentCount = (size_t)atts.cmn.num_colors;
+        wgpu_pass_desc.colorAttachments = &wgpu_color_att[0];
+        if (atts.wgpu.depth_stencil.image) {
+            init_ds_att(&wgpu_ds_att, action, atts.wgpu.depth_stencil.image.cmn.pixel_format, atts.wgpu.depth_stencil.view);
+            wgpu_pass_desc.depthStencilAttachment = &wgpu_ds_att;
+        }
+    } else {
+        WGPU.TextureView wgpu_color_view = (WGPU.TextureView) swapchain.wgpu.render_view;
+        WGPU.TextureView wgpu_resolve_view = (WGPU.TextureView) swapchain.wgpu.resolve_view;
+        WGPU.TextureView wgpu_depth_stencil_view = (WGPU.TextureView) swapchain.wgpu.depth_stencil_view;
+        init_color_att(&wgpu_color_att[0], &action.colors[0], wgpu_color_view, wgpu_resolve_view);
+        wgpu_pass_desc.colorAttachmentCount = 1;
+        wgpu_pass_desc.colorAttachments = &wgpu_color_att[0];
+        if (wgpu_depth_stencil_view) {
+            @debug_assert(swapchain.depth_format > SG_PIXELFORMAT_NONE);
+            init_ds_att(&wgpu_ds_att, action, swapchain.depth_format, wgpu_depth_stencil_view);
+            wgpu_pass_desc.depthStencilAttachment = &wgpu_ds_att;
+        }
+    }
+    wgpu.rpass_enc = wgpuCommandEncoderBeginRenderPass(wgpu.cmd_enc, &wgpu_pass_desc);
+    @debug_assert(wgpu.rpass_enc);
+
+    wgpuRenderPassEncoderSetBindGroup(wgpu.rpass_enc, _SG_WGPU._UB_BINDGROUP_INDEX, wgpu.empty_bind_group, 0, 0);
+    wgpuRenderPassEncoderSetBindGroup(wgpu.rpass_enc, _SG_WGPU._IMG_SMP_SBUF_BINDGROUP_INDEX, wgpu.empty_bind_group, 0, 0);
+    _sg_stats_add(wgpu.bindings.num_set_bindgroup, 1);
+}
+
+fn void begin_pass(wgpu: *Impl, const sg_pass* pass) {
+    @debug_assert(pass);
+    @debug_assert(wgpu.dev);
+    @debug_assert(wgpu.cmd_enc);
+    @debug_assert(0 == wgpu.rpass_enc);
+    @debug_assert(0 == wgpu.cpass_enc);
+
+    wgpu.cur_pipeline = 0;
+    wgpu.cur_pipeline_id.id = SG_INVALID_ID;
+    bindings_cache_clear();
+
+    if (pass.compute) {
+        begin_compute_pass(pass);
+    } else {
+        begin_render_pass(pass);
+    }
+}
+
+fn void end_pass(wgpu: *Impl, void) {
+    if (wgpu.rpass_enc) {
+        wgpuRenderPassEncoderEnd(wgpu.rpass_enc);
+        wgpuRenderPassEncoderRelease(wgpu.rpass_enc);
+        wgpu.rpass_enc = 0;
+    }
+    if (wgpu.cpass_enc) {
+        wgpuComputePassEncoderEnd(wgpu.cpass_enc);
+        wgpuComputePassEncoderRelease(wgpu.cpass_enc);
+        wgpu.cpass_enc = 0;
+    }
+}
+
+fn void commit(wgpu: *Impl, void) {
+    @debug_assert(wgpu.cmd_enc);
+
+    uniform_buffer_on_commit();
+
+    WGPU.CommandBufferDescriptor cmd_buf_desc;
+    _sg_clear(&cmd_buf_desc, sizeof(cmd_buf_desc));
+    WGPU.CommandBuffer wgpu_cmd_buf = wgpuCommandEncoderFinish(wgpu.cmd_enc, &cmd_buf_desc);
+    @debug_assert(wgpu_cmd_buf);
+    wgpuCommandEncoderRelease(wgpu.cmd_enc);
+    wgpu.cmd_enc = 0;
+
+    wgpuQueueSubmit(wgpu.queue, 1, &wgpu_cmd_buf);
+    wgpuCommandBufferRelease(wgpu_cmd_buf);
+
+    // create a new render-command-encoder for next frame
+    WGPU.CommandEncoderDescriptor cmd_enc_desc;
+    _sg_clear(&cmd_enc_desc, sizeof(cmd_enc_desc));
+    wgpu.cmd_enc = wgpuDeviceCreateCommandEncoder(wgpu.dev, &cmd_enc_desc);
+}
+
+fn void apply_viewport(wgpu: *Impl, int x, int y, int w, int h, bool origin_top_left) {
+    @debug_assert(wgpu.rpass_enc);
+    // FIXME FIXME FIXME: CLIPPING THE VIEWPORT HERE IS WRONG!!!
+    // (but currently required because WebGPU insists that the viewport rectangle must be
+    // fully contained inside the framebuffer, but this doesn't make any sense, and also
+    // isn't required by the backend APIs)
+    const _sg_recti_t clip = _sg_clipi(x, y, w, h, wgpu.sg.cur_pass.width, wgpu.sg.cur_pass.height);
+    float xf = (float) clip.x;
+    float yf = (float) (origin_top_left ? clip.y : (wgpu.sg.cur_pass.height - (clip.y + clip.h)));
+    float wf = (float) clip.w;
+    float hf = (float) clip.h;
+    wgpuRenderPassEncoderSetViewport(wgpu.rpass_enc, xf, yf, wf, hf, 0.0f, 1.0f);
+}
+
+fn void apply_scissor_rect(wgpu: *Impl, int x, int y, int w, int h, bool origin_top_left) {
+    @debug_assert(wgpu.rpass_enc);
+    const _sg_recti_t clip = _sg_clipi(x, y, w, h, wgpu.sg.cur_pass.width, wgpu.sg.cur_pass.height);
+    uint32_t sx = (uint32_t) clip.x;
+    uint32_t sy = (uint32_t) (origin_top_left ? clip.y : (wgpu.sg.cur_pass.height - (clip.y + clip.h)));
+    uint32_t sw = (uint32_t) clip.w;
+    uint32_t sh = (uint32_t) clip.h;
+    wgpuRenderPassEncoderSetScissorRect(wgpu.rpass_enc, sx, sy, sw, sh);
+}
+
+fn void set_ub_bindgroup(wgpu: *Impl, const _sg_shader_t* shd) {
+    // NOTE: dynamic offsets must be in binding order, not in BindGroupEntry order
+    @debug_assert(shd.wgpu.ub_num_dynoffsets < SG_MAX_UNIFORMBLOCK_BINDSLOTS);
+    uint32_t dyn_offsets[SG_MAX_UNIFORMBLOCK_BINDSLOTS];
+    _sg_clear(dyn_offsets, sizeof(dyn_offsets));
+    for (size_t i = 0; i < SG_MAX_UNIFORMBLOCK_BINDSLOTS; i++) {
+        if (shd.cmn.uniform_blocks[i].stage == SG_SHADERSTAGE_NONE) {
+            continue;
+        }
+        uint8_t dynoffset_index = shd.wgpu.ub_dynoffsets[i];
+        @debug_assert(dynoffset_index < shd.wgpu.ub_num_dynoffsets);
+        dyn_offsets[dynoffset_index] = wgpu.uniform.bind_offsets[i];
+    }
+    if (wgpu.sg.cur_pass.is_compute) {
+        @debug_assert(wgpu.cpass_enc);
+        wgpuComputePassEncoderSetBindGroup(wgpu.cpass_enc,
+            _SG_WGPU._UB_BINDGROUP_INDEX,
+            shd.wgpu.bg_ub,
+            shd.wgpu.ub_num_dynoffsets,
+            dyn_offsets);
+    } else {
+        @debug_assert(wgpu.rpass_enc);
+        wgpuRenderPassEncoderSetBindGroup(wgpu.rpass_enc,
+            _SG_WGPU._UB_BINDGROUP_INDEX,
+            shd.wgpu.bg_ub,
+            shd.wgpu.ub_num_dynoffsets,
+            dyn_offsets);
+    }
+}
+
+fn void apply_pipeline(wgpu: *Impl, _sg_pipeline_t* pip) {
+    @debug_assert(pip);
+    @debug_assert(pip.shader && (pip.shader.slot.id == pip.cmn.shader_id.id));
+    wgpu.cur_pipeline = pip;
+    wgpu.cur_pipeline_id.id = pip.slot.id;
+    if (pip.cmn.is_compute) {
+        @debug_assert(wgpu.sg.cur_pass.is_compute);
+        @debug_assert(pip.wgpu.cpip);
+        @debug_assert(wgpu.cpass_enc);
+        wgpuComputePassEncoderSetPipeline(wgpu.cpass_enc, pip.wgpu.cpip);
+    } else {
+        @debug_assert(!wgpu.sg.cur_pass.is_compute);
+        @debug_assert(pip.wgpu.rpip);
+        @debug_assert(wgpu.rpass_enc);
+        wgpu.use_indexed_draw = (pip.cmn.index_type != SG_INDEXTYPE_NONE);
+        wgpuRenderPassEncoderSetPipeline(wgpu.rpass_enc, pip.wgpu.rpip);
+        wgpuRenderPassEncoderSetBlendConstant(wgpu.rpass_enc, &pip.wgpu.blend_color);
+        wgpuRenderPassEncoderSetStencilReference(wgpu.rpass_enc, pip.cmn.stencil.ref);
+    }
+    // bind groups must be set because pipelines without uniform blocks or resource bindings
+    // will still create 'empty' BindGroupLayouts
+    set_ub_bindgroup(pip.shader);
+    set_img_smp_sbuf_bindgroup(0); // this will set the 'empty bind group'
+}
+
+fn bool apply_bindings(wgpu: *Impl, _sg_bindings_t* bnd) {
+    @debug_assert(bnd);
+    @debug_assert(bnd.pip.shader && (bnd.pip.cmn.shader_id.id == bnd.pip.shader.slot.id));
+    bool retval = true;
+    if (!wgpu.sg.cur_pass.is_compute) {
+        retval &= apply_index_buffer(bnd);
+        retval &= apply_vertex_buffers(bnd);
+    }
+    retval &= apply_bindgroup(bnd);
+    return retval;
+}
+
+fn void apply_uniforms(wgpu: *Impl, int ub_slot, const sg_range* data) {
+    const uint32_t alignment = wgpu.limits.limits.minUniformBufferOffsetAlignment;
+    @debug_assert(wgpu.uniform.staging);
+    @debug_assert((ub_slot >= 0) && (ub_slot < SG_MAX_UNIFORMBLOCK_BINDSLOTS));
+    @debug_assert((wgpu.uniform.offset + data.size) <= wgpu.uniform.num_bytes);
+    @debug_assert((wgpu.uniform.offset & (alignment - 1)) == 0);
+    const _sg_pipeline_t* pip = wgpu.cur_pipeline;
+    @debug_assert(pip && pip.shader);
+    @debug_assert(pip.slot.id == wgpu.cur_pipeline_id.id);
+    const _sg_shader_t* shd = pip.shader;
+    @debug_assert(shd.slot.id == pip.cmn.shader_id.id);
+    @debug_assert(data.size == shd.cmn.uniform_blocks[ub_slot].size);
+    @debug_assert(data.size <= _SG_WGPU._MAX_UNIFORM_UPDATE_SIZE);
+
+    _sg_stats_add(wgpu.uniforms.num_set_bindgroup, 1);
+    memcpy(wgpu.uniform.staging + wgpu.uniform.offset, data.ptr, data.size);
+    wgpu.uniform.bind_offsets[ub_slot] = wgpu.uniform.offset;
+    wgpu.uniform.offset = _sg_roundup_u32(wgpu.uniform.offset + (uint32_t)data.size, alignment);
+
+    set_ub_bindgroup(shd);
+}
+
+fn void draw(wgpu: *Impl, int base_element, int num_elements, int num_instances) {
+    @debug_assert(wgpu.rpass_enc);
+    @debug_assert(wgpu.cur_pipeline && (wgpu.cur_pipeline.slot.id == wgpu.cur_pipeline_id.id));
+    if (SG_INDEXTYPE_NONE != wgpu.cur_pipeline.cmn.index_type) {
+        wgpuRenderPassEncoderDrawIndexed(wgpu.rpass_enc, (uint32_t)num_elements, (uint32_t)num_instances, (uint32_t)base_element, 0, 0);
+    } else {
+        wgpuRenderPassEncoderDraw(wgpu.rpass_enc, (uint32_t)num_elements, (uint32_t)num_instances, (uint32_t)base_element, 0);
+    }
+}
+
+fn void dispatch(wgpu: *Impl, int num_groups_x, int num_groups_y, int num_groups_z) {
+    @debug_assert(wgpu.cpass_enc);
+    wgpuComputePassEncoderDispatchWorkgroups(wgpu.cpass_enc,
+        (uint32_t)num_groups_x,
+        (uint32_t)num_groups_y,
+        (uint32_t)num_groups_z);
+}
+
+fn void update_buffer(wgpu: *Impl, _sg_buffer_t* buf, const sg_range* data) {
+    @debug_assert(data && data.ptr && (data.size > 0));
+    @debug_assert(buf);
+    copy_buffer_data(buf, 0, data);
+}
+
+fn void append_buffer(wgpu: *Impl, _sg_buffer_t* buf, const sg_range* data, bool _new_frame) {
+    @debug_assert(data && data.ptr && (data.size > 0));
+    copy_buffer_data(buf, (uint64_t)buf.cmn.append_pos, data);
+}
+
+fn void update_image(wgpu: *Impl, _sg_image_t* img, const sg_image_data* data) {
+    @debug_assert(img && data);
+    copy_image_data(img, img.wgpu.tex, data);
+}

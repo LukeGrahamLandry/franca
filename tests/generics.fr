@@ -230,3 +230,56 @@ fn enum_name_lookup() #test = {
     assert(from_name(A, "b").unwrap() == .b, "failed lookup");
     assert(from_name(A, "d").is_none(), "failed lookup");
 }
+
+fn making_types() void #test = { 
+    // I don't have good varargs without using a macro so here 
+    // @slice makes my equivalent of a std::span
+    T :: Varient(deduplicate(@slice(i32, i32, u8, i32, u8, f64, i32, f64, f64)));
+    test := zeroed T;
+    // TODO: relying on the type formatting is kinda unfortunate
+    @assert_eq(T.typename().str(), "@tagged(_0: i32,_1: u8,_2: f64,)");
+    
+    deduplicate :: fn(types: []Type) []Type #fold = {
+        @assert(types.len != 0);
+        out := Type.list(ast_alloc());
+        for types { it |
+            out&.add_unique(it);
+        };
+        out.items()
+    };
+    
+    // my equivalent of `std::variant<A, B>` is `@tagged(A: A, B: B)`,
+    // which is a macro so we can't call it with a list of types (unless 
+    // we manually make ast nodes for them). so instead, make a TypeInfo 
+    // value representing the type we want and pass it to the compiler directly. 
+    Varient :: fn(types: []Type) Type #fold = {
+        cases := Ty(Symbol, Type).list(ast_alloc());
+        enumerate types { i, it |
+            // TODO: get the name of the type as a string instead of using numbers :(
+            name := sym(@tfmt("_%", i));
+            push(cases&, (name, it[]));
+        };
+        // TODO: make a TypeInfo.Enum for the tag so you get the proper type checking like @tagged does
+        intern_type(Tagged = (cases = cases.as_raw(), tag = i64))
+    };
+}
+
+// TODO: if you make it lower case 'varient' it calls the outer 
+//       overload set (theres a test with that name) but i can't reporduce in a smaller example. 
+//       :FUCKED
+// i tried this in a standalone file:
+/*
+main :: fn() void = {
+    a(1);
+    b();
+}
+
+fn b() Type = {
+    A :: c(a(@slice(i64, i32)));
+    return A;
+    a :: fn(x: []Type) Type #fold = x[0];
+    c :: fn(x: Type) Type #fold = x;
+}
+
+fn a(x: i64) i64 = x;
+*/

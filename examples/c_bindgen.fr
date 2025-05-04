@@ -659,7 +659,6 @@ fn read_fields(json: *JsonParser, is_struct: bool) []CRecordField = {
                 json.skip_current_value();
                 continue(true);
             };
-            
             if is_struct {
                 if kind == "RecordDecl" {
                     // you're allowed to have an annonymus union as a field in C11
@@ -728,19 +727,21 @@ fn read_enum_fields(json: *JsonParser) []CEnumItem => {
         value := json.next().unwrap();
         if value&.is(.StartDict) {
             kind := json.skip_to_string("kind");
+            if kind == "FullComment" {
+                json.skip_current_value().unwrap();
+                continue(true);
+            };
             @assert_eq(kind, "EnumConstantDecl");
             name := json.skip_to_string("name");
             value: ?Str = .None;
+            depth := json.depth;
             if json.skip_to_tag_opt("inner", .StartList) {_|
                 res := json.next().unwrap();
                 assert(res&.is(.StartDict), "enum inner->[]->{}");
                 if json.skip_to_tag_opt("value", .StringValue) { v | 
                     value = (Some = v.StringValue);
                 };
-                json.skip_current_value().unwrap();
-                res := json.next().unwrap();
-                assert(res&.is(.End), "// TODO: skip_current_value should probably eat the End too?");
-                json.skip_current_value().unwrap();
+                json.skip_until_depth(depth-1);
             };
             fields&.push(name = name, value = value);
             true
