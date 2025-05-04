@@ -6,7 +6,7 @@ Franca ports of various things useful for creating cross platform graphical appl
 
 ## https://github.com/floooh/sokol
 
-- gfx: 3D-API abstraction layer
+- gfx: 3D-API abstraction layer (backends: Metal, WebGPU)
 - app: open a window, get a 3D-context, handle input events
 - gl: OpenGL 1.x style immediate-mode rendering API
 - debugtext: a simple ASCII text renderer using vintage home computer fonts
@@ -15,6 +15,53 @@ Franca ports of various things useful for creating cross platform graphical appl
 
 - shaders: translate a subset of franca to MSL
 - vec: 2/3/4-D linear algebra
+- easy: reduce boilerplate for small example programs
+
+## Changes from Sokol
+
+### app
+
+- removed builtin default app icon
+- removed limits on paste/drop
+- fewer getters (just access fields directly)
+- (macos) no dependency on an objective-c compiler
+- (macos) wait until after setActivationPolicy to set the startup icon/fullscreen (otherwise it doesn't work)
+- UNFINISHED
+  - don't have timing stuff (frame_duration)
+  - only implemented for macos
+  - (macos) not caching objc selectors
+
+### gfx
+
+- generics are a surprise tool that can help us later
+- fewer getters (just access fields directly). removed the `query_*_(desc/info/____)` functions
+- no limit for commit listeners. removing doesn't make holes in the array 
+  so the order will be different. 
+- removed canaries
+- (macos) no dependency on an objective-c compiler
+- (macos) removed ios, opengl, and macos <13 support (temporarily?)
+- UNFINISHED
+  - logging and trace hooks don't work
+  - init(Attachments) 
+  - compute shaders
+  - validate Shader.Desc `_sg_validate_slot_bits`
+  - shutdown (dealloc/deinit/fail resources)
+  - move structs from bindings/sokol to here
+  - clean up defaults (compiler: implement partial array literals that respect default fields)
+  - append/update buffer/image
+  - only implemented for macos
+  - (macos) im not setting labels
+  - (macos) not caching objc selectors
+
+### debugtext
+
+- write the shaders in franca 
+- remove printf-like functions. i don't like c-style varargs. can use @fmt into a temp buffer instead.
+- remove getters/setters for ctx's pos/color.
+- remove global `_sdtx` and context pool. instead pass the context explicitly to every call. 
+  (caller manages the memory for the contexts but maybe that's annoying, idk)
+- remove byte array clutter. load font data from readable string. 
+- removed the 8 font limit
 
 ## Tradeoffs vs Sokol
 
