@@ -197,6 +197,10 @@ or just default to jitting and force you to enable aot by specifying an output p
 - think about how to test the gui programs more convincingly than just that they produce a binary
 - run the deps tests in github actions
 - test using import_(c, wasm)/ffi from a precompiled driver to make sure they're not relying on being in their own compilation context 
+- test crash stack traces
+- make the crash examples work without needing to set the env variable / run jitted
+- TODO: i should probably be making tests for error locations
+- auto test repro (including with -debug-info which doesn't repro currently)
 
 ## linux
 

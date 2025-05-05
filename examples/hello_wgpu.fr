@@ -1,0 +1,67 @@
+// https://github.com/floooh/sokol-samples/blob/master/wgpu/triangle-wgpu.c
+// i'll get rid of this once i do shader translation for wgsl
+
+#include_std("graphics/lib.fr");
+#include_std("backend/lib.fr");
+
+driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics(vtable, "examples/hello_wgpu.fr");
+main   :: fn()                      void = Easy'start(State);
+
+State :: @struct {
+    pipe: Sg.Pipeline;
+    bind: SgBindings;
+    pass_action: SgPassAction;
+};
+
+fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    vertices :: @const_slice(
+        // positions            // colors
+         0.0,  0.5, 0.5,     1.0, 0.0, 0.0, 1.0,
+         0.5, -0.5, 0.5,     0.0, 1.0, 0.0, 1.0,
+        -0.5, -0.5, 0.5,     0.0, 0.0, 1.0, 1.0
+    );
+    state.bind.vertex_buffers&[0] = sg.make(
+        data = vertices.interpret_as_bytes(),
+    );
+    
+    shd: Sg.Shader = sg.make(
+        vertex_func = (source = """
+            struct vs_out {
+                @builtin(position) pos: vec4f,
+                @location(0) color: vec4f,
+            }
+            @vertex fn main(@location(0) pos: vec4f, @location(1) color: vec4f) -> vs_out {
+                var out: vs_out;
+                out.pos = pos;
+                out.color = color;
+                return out;
+            }
+        """),
+        fragment_func = (source = """
+            @fragment fn main(@location(0) color: vec4f) -> @location(0) vec4f {
+                return color;
+            }
+        """),
+    );
+    state.pipe = sg.make(
+        shader = shd,
+        layout = (attrs = (
+            (format = .FLOAT3),
+            (format = .FLOAT4),
+            ..,
+        )),
+    );
+}
+
+fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = ();
+
+fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    Easy'glue_begin_pass(sapp, sg, (colors = ((
+        load_action = .CLEAR,
+        clear_value = (r = 0.156, g = 0.156, b = 0.156, a = 1),
+    ), ..)));
+
+    sg.apply_pipeline(state.pipe);
+    draw(sg = sg, base = 0, elements = 3, instances = 1);
+    sg.end_pass();
+};

@@ -261,7 +261,7 @@ fn ident_list_to_pattern(self: *Parser, idents: *RawList(FatExpr), loc: Span) Re
     bindings: List(Binding) = list(idents.len, self.alloc);
     each idents { expr | 
         @match(expr.expr&) {
-            fn GetNamed(name) => bindings&.push((name = (Ident = name[]), ty = .Infer, nullable_tag = zeroed(*Annotations), default = binding_missing_default(), kind = .Var));
+            fn GetNamed(name) => bindings&.push((name = (Ident = name[]), ty = .Infer, nullable_tag = zeroed(*Annotations), default = binding_missing_default(loc), kind = .Var));
             @default => @report_error("destructuring statment requires tuple with all expressions being single identifier. ") (return, expr.loc);
         };
     };
@@ -910,7 +910,7 @@ fn switch_to_parsing_named(self: *Parser, parts: List(FatExpr), ty: LazyType, lo
             kind = .Const;
             @try(self.parse_expr(Prec_None)) return
         } else {
-            binding_missing_default()
+            binding_missing_default(ident_expr.loc)
         }
     };
     
@@ -933,18 +933,18 @@ fn switch_to_parsing_named(self: *Parser, parts: List(FatExpr), ty: LazyType, lo
 
 fn if_empty_add_unit(self: *List(Binding)) void = {
     if(self.len != 0, => return());
-    self.push(empty_binding());
+    self.push(empty_binding(zeroed Span));
 }
 
 fn empty_pattern(a: Alloc, loc: Span) Pattern = 
-    (bindings = empty_binding().single(a).as_raw_list(), loc = loc);
+    (bindings = empty_binding(loc).single(a).as_raw_list(), loc = loc);
 
-fn empty_binding() Binding #inline = {
+fn empty_binding(loc: Span) Binding #inline = {
     (
         name = .None,
         ty = (Finished = void),
         nullable_tag = zeroed(*Annotations),
-        default = binding_missing_default(),
+        default = binding_missing_default(loc),
         kind = .Var,
     )
 }
@@ -997,7 +997,7 @@ fn parse_pattern(self: *Parser, out: *List(Binding), terminator: TokenType.Tag()
 
 fn parse_binding_after_name(self: *Parser, name: Symbol, kind: VarType) CRes(Binding) #inline = {
     ::if(?FatExpr); ::if(LazyType);
-    default_: FatExpr = binding_missing_default(); // TODO: "shadows" the magic @default
+    default_: FatExpr = binding_missing_default(self.last.span); // TODO: "shadows" the magic @default
     ty := LazyType.Infer;
     ann := zeroed(*Annotations);
     @match(self.peek()) {

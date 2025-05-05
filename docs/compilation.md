@@ -72,12 +72,6 @@ There are several contexts that force an expression to be evaulated at comptime.
 Your program should contain all information required to compile itself.
 I'd rather write build scripts in the same language as the program than in Bash.
 
-> - Same idea as Jai's meta programs (but mine are worse).
-> - build.rs/build.zig don't tightly integrate with the compiler in the same way.
->   - You can't directly inspect the ast or inject a function, they'd rather you generate code as text.
->   - Zig has you chain together declaritive build steps, rust has you use toml files for most things.
->   - Likely more pragmatic for large projects / fewer breaking changes.
-
 ## Compilation Order
 
 I don't guarentee any specific order of compilation. Note that is a very different statement from "I guarentee you won't be able to observe the order of compilation". Any comptime code is free to make syscalls or store global mutable state, its up to you to be careful and not dig yourself into a confusing hole. In general, life is easier if macros are pure functions, so do that when possible. Programs that restrict access to the outside world to the driver portion, rather than the comptime portion, will likely be easier to reason about because then you can easily see a function that runs top to bottom. However, I don't want the compiler to be in the business of saying no, I just want to be able to write a program.
@@ -137,3 +131,25 @@ Its fine to do all the bit-casts you want during comptime, all that matters is t
 Currently `bake_relocatable_value` is only called if the type contains some type of pointer and some byte of the value is non-zero. 
 
 TODO: internal pointers are not yet supported. 
+
+## Reproducible Builds
+
+For a given (franca compiler, source code, target platform) combination, the output 
+AOT binary should be exactly the same bytes no matter what computer does the compiling 
+(including cross compiling!). 
+
+Since Franca allows arbitrary compile time execution, you can trivially choose to do 
+something that defeats reproducibility (like doing an http request to get the current 
+phase of the moon and sticking that in your binary)... so don't do that if you want 
+reproducible builds. The compiler doesn't inject its own non-determinism but it can't 
+fix stupid. Similarly if you use someone else's linker, there's nothing I can do if 
+it decides to mix the bytes around. 
+
+The claim is that reproducibility works for all the example programs in 
+the franca repository. However, the testing for this is not robust yet so it only 
+mostly kinda probably works and it doesn't work at all with `-debug-info`. 
+You can easily check a program by compiling with the environment variable 
+`FRANCA_LOG_STATS=true` (twice) and checking that the `repro: <hash>` line matches. 
+
+When the compiler gets more multi-threaded and more out of order, this might need to 
+be relegated to a special option you can enable at the cost of reduced compile speed. 

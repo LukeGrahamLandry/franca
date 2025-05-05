@@ -1,8 +1,30 @@
-## (May 3)
+## (May 3/4)
 
 - i want to work on making my shader translation better but i think 
 it's a bad idea to do that while i only have Metal because i don't know 
 what things are different elsewhere so maybe first i'll add back the wgpu backend. 
+- I don't understand why my webgpu.h is different than theirs. 
+SupportedLimits vs Limits. 
+theres emscripted vs dawn but they support both (and have a section at the top 
+for dealing with a few differences) so seems it wouldn't be that. 
+- comptime thing to make nice overloads for calling webgpu methods. 
+just strip off the wgpuFirstArgumentType prefix, would be a good test 
+encourage making it easy to add new functions from comptime. kinda bad to 
+make the names different so you can't just google them but the js api has 
+methods so these prefixed names are not useful anyway.  
+had to add to the compiler: get_or_create_overloads and add_to_overload_set. 
+and it relies on typename being its name in that scope: 
+// TODO: `self.get_info_is_ready(ty) &&` but that's never set for .Ptr and i need that for wgpu bindings, 
+//       maybe i should take out ptr again and write the wgpu as @struct(_: rawptr) instead of *@struct(). 
+i did that change and it's also not set for those simple structs, so that still needs to be fixed. 
+- fixed error locations for StructLiteralP type errors 
+- fixed error location for `Poison expression EmptyBindingValue` when you do `name: Type;` in a block
+- fixed aot stack traces on crash. 
+i just fully forgot to do the relocations when i changed to Dat2. 
+really need tests for that. 
+
+// TODO: it would be nice if i could do optional arguments. 
+
 
 ## (May 2)
 
@@ -14,7 +36,8 @@ can get rid of the dlopens in macos/app.fr
 - graphics/easy.fr for less boiler plate in little examples where most of the code ends up being just starting the default window
 - naming consistancy (sapp/sgl/sdtx).Common -> Self
 - started a new mandelbrot example. add `if` to shader translation. 
-- very sad that metal doesn't give you goto
+- very sad that metal doesn't give you goto. 
+not even nested break/continue. it's even worse than wasm :(
 
 - TODO: allow linking to something without importing any symbols so you get the objc classes from it. 
 - TODO: replace the func$module thing i used to do for wasm with the new libs thing

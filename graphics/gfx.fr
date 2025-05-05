@@ -296,7 +296,8 @@ ResolvedBindings :: @struct {
 };
 
 Self :: @rec @struct {
-    mtl: Metal.Impl;
+    mtl: @if(SOKOL_BACKEND == .METAL_MACOS, Metal.Impl, void);
+    wgpu: @if(SOKOL_BACKEND == .WGPU, Webgpu.Impl, void);
     valid: bool;
     desc: SgDesc;    // original desc with default values patched in
     frame_index: u32;
@@ -342,6 +343,7 @@ Stat :: @enum(
     num_apply_pipeline, num_apply_bindings, num_apply_uniforms, num_draw, 
     num_dispatch, num_update_buffer, num_append_buffer, num_update_image,
     size_apply_uniforms, size_update_buffer, size_append_buffer, size_update_image,
+    
     mtl_num_garbage_collected, mtl_idpool_num_released, mtl_idpool_num_added,
     mtl_bindings_num_set_vertex_buffer, mtl_bindings_num_set_compute_texture,
     mtl_bindings_num_set_fragment_texture, mtl_bindings_num_set_vertex_texture, 
@@ -350,15 +352,22 @@ Stat :: @enum(
     mtl_bindings_num_set_fragment_buffer, mtl_num_apply_render_pipeline,
     mtl_uniforms_num_set_compute_buffer_offset, mtl_uniforms_num_set_fragment_buffer_offset,
     mtl_uniforms_num_set_vertex_buffer_offset, 
+    
+    wgpu_uniforms_size_write_buffer, wgpu_uniforms_num_set_bindgroup,
+    wgpu_bindings_num_skip_redundant_bindgroup, wgpu_bindings_num_set_bindgroup, 
+    
+    
 );
 
 fn stat(sg: *Self, stat: Stat, n: u32) void = {
     sg.stats&[stat] += n;
 }
 
-fn impl(sg: *Self) *Metal.Impl = {
-    ASSERT_METAL();
-    sg.mtl&
+Backend :: @if(SOKOL_BACKEND == .METAL_MACOS, Metal, Webgpu);
+
+fn impl(sg: *Self) *Backend.Impl = {
+    //ASSERT_METAL();
+    @if(::(SOKOL_BACKEND == .METAL_MACOS), sg.mtl&, sg.wgpu&)
 }
 
 fn _sg_log(log_item: sg_log_item, log_level: u32, msg: CStr, line_nr: u32) void = {
@@ -471,16 +480,8 @@ fn pixelformat_bytesize(it: SgPixelFormat) i32 = @if_else {
     @else => unreachable();
 };
 
-fn _sg_roundup(val: i32, round_to: i32) i32 = {
+roundup :: fn(val: ~T, round_to: T) T #where = {
     (val+(round_to-1)).bit_and(bit_not(round_to-1))
-}
-
-fn _sg_roundup_u32(val: u32, round_to: u32) u32 = {
-    return (val+(round_to-1)) & ~(round_to-1);
-}
-
-fn _sg_roundup_u64(val: u64, round_to: u64) u64 = {
-    return (val+(round_to-1)) & ~(round_to-1);
 }
 
 fn _sg_multiple_u64(val: i64, of: i64) bool = 
@@ -504,7 +505,7 @@ fn row_pitch(it: SgPixelFormat, width: i32, row_align_bytes: i32) i32 = {
         )) => intcast max(16, ((intcast width + 3) / 4) * 16);
         @else => width * pixelformat_bytesize(it); 
     };
-    _sg_roundup(pitch, row_align_bytes)
+    roundup(pitch, row_align_bytes)
 }
 
 // compute the number of rows in a surface depending on pixel format
@@ -543,6 +544,7 @@ fn _sg_pass_action_defaults(action: *SgPassAction) SgPassAction = {
             // random colour chosen by fair die roll
             it.clear_value = (r = 0.5, g = 0.5, b = 0.5, a = 1.0);
         }
+        ::enum(@type it.store_action);
         if (it.store_action == .DEFAULT) {
             it.store_action = .STORE;
         }
@@ -565,8 +567,8 @@ fn _sg_pass_action_defaults(action: *SgPassAction) SgPassAction = {
     res
 }
 
-fn init_pool(pool: *DynPool, a: Alloc, num: i64, sizeof_t: i64) void #once = {
-    @debug_assert(num >= 1 && num < _SG_MAX_POOL_SIZE);
+fn init_pool(pool: *DynPool, a: Alloc, num: i64, sizeof_t: i64) void = {
+    @debug_assert(num > 0 && num < _SG_MAX_POOL_SIZE);
     pool[] = (
         sizeof_t = sizeof_t,
         // slot 0 is reserved for the 'invalid id', so bump the pool size by 1
@@ -707,7 +709,8 @@ fn validate(sg: *Self, desc: *Buffer.Desc) bool = @validate(sg) {
     } else {
         @V(desc.data.ptr.is_null(), VALIDATE_BUFFERDESC_EXPECT_NO_DATA);
         @V(desc.data.len == 0, VALIDATE_BUFFERDESC_EXPECT_ZERO_DATA_SIZE);
-    }
+    };
+    ::enum(@type desc.type);
     if (desc.type == .STORAGEBUFFER) {
         @V(sg.features.compute, VALIDATE_BUFFERDESC_STORAGEBUFFER_SUPPORTED);
         @V(_sg_multiple_u64(desc.size, 4), VALIDATE_BUFFERDESC_STORAGEBUFFER_SIZE_MULTIPLE_4);
@@ -1676,6 +1679,7 @@ fn desc_defaults(_: *Self, desc: *Attachments.Desc) Attachments.Desc = {
 }
 
 Metal :: import("@/graphics/macos/gfx.fr");
+Webgpu :: import("@/graphics/web/gfx.fr");
 
 // https://floooh.github.io/2018/06/17/handles-vs-pointers.html
 /*
@@ -1686,12 +1690,12 @@ Metal :: import("@/graphics/macos/gfx.fr");
     its pool slot has been reused for a new object)
 */
 
-Buffer :: Resource(.Buffer, SgBufferDesc, BufferCommon, Metal.Buffer);  // vertex- and index-buffers
-Image :: Resource(.Image, SgImageDesc, ImageCommon, Metal.Image);  // images used as textures and render-pass attachments
-Sampler :: Resource(.Sampler, SgSamplerDesc, SamplerCommon, Metal.Sampler);  // sampler objects describing how a texture is sampled in a shader
-Shader :: Resource(.Shader, SgShaderDesc, ShaderCommon, Metal.Shader);  // vertex- and fragment-shaders and shader interface information
-Pipeline :: Resource(.Pipeline, SgPipelineDesc, PipelineCommon, Metal.Pipeline);  // associated shader and vertex-layouts, and render states
-Attachments :: Resource(.Attachments, SgAttachmentsDesc, AttachmentsCommon, Metal.Attachments);  // a baked collection of render pass attachment images
+Buffer :: Resource(.Buffer, SgBufferDesc, BufferCommon, Backend.Buffer);  // vertex- and index-buffers
+Image :: Resource(.Image, SgImageDesc, ImageCommon, Backend.Image);  // images used as textures and render-pass attachments
+Sampler :: Resource(.Sampler, SgSamplerDesc, SamplerCommon, Backend.Sampler);  // sampler objects describing how a texture is sampled in a shader
+Shader :: Resource(.Shader, SgShaderDesc, ShaderCommon, Backend.Shader);  // vertex- and fragment-shaders and shader interface information
+Pipeline :: Resource(.Pipeline, SgPipelineDesc, PipelineCommon, Backend.Pipeline);  // associated shader and vertex-layouts, and render states
+Attachments :: Resource(.Attachments, SgAttachmentsDesc, AttachmentsCommon, Backend.Attachments);  // a baked collection of render pass attachment images
 
 PoolType :: { X :: @enum(u8) (Buffer, Image, Sampler, Shader, Pipeline, Attachments); enum(X); X };
 
@@ -1712,7 +1716,7 @@ fn Resource($_Tag: PoolType, $_Desc: Type, $_Common: Type, $_Impl: Type) Type = 
         T :: @struct {
             slot: SlotHeader;
             cmn: Common;
-            mtl: Impl;
+            mtl: Impl;  // TODO: it's annoying to name them all after their backends so name this something more generic. is "impl" over used?
         };     
         Desc :: _Desc;  // Info the user gives us to create one 
         Common :: _Common;
@@ -2289,7 +2293,7 @@ fn append_buffer(sg: *Self, buf_id: Buffer, data: []u8) i64 #trace = {
                 // update and append on same buffer in same frame not allowed
                 @debug_assert(buf.cmn.update_frame_index != sg.frame_index);
                 sg.impl().append_buffer(buf, data, buf.cmn.append_frame_index != sg.frame_index);
-                buf.cmn.append_pos += (int) _sg_roundup_u64(data.size, 4);
+                buf.cmn.append_pos += (int) roundup_u64(data.size, 4);
                 buf.cmn.append_frame_index = sg.frame_index;
             }
         }
@@ -2374,4 +2378,32 @@ fn fill_formats(dest: FatExpr, pat: FatExpr) FatExpr #macro = {
         };
     };
     body
+}
+
+// platform specific state is the same for metal/webgpu/d3d11
+AttachmentsImpl :: fn($Impl: Type, $Attachment: Type) Type = {
+    A :: @struct {
+        colors: Array(Attachment, Sg.SG_MAX_COLOR_ATTACHMENTS);
+        resolves: Array(Attachment, Sg.SG_MAX_COLOR_ATTACHMENTS);
+        depth_stencil: Attachment;
+        // TODO: will need to deal with extra stuff here but only for gl
+    };
+    
+    fn attachments_color_image(_: *Impl, atts: *Attachments.T, index: i64) ?*Sg.Image.T = {
+        i := atts.mtl.colors&[index].image;
+        @if(i.is_null(), .None, (Some = i))
+    }
+    
+    fn attachments_resolve_image(_: *Impl, atts: *Attachments.T, index: i64) ?*Sg.Image.T = {
+        i := atts.mtl.resolves&[@as(i64) index].image;
+        @if(i.is_null(), .None, (Some = i))
+    }
+    
+    fn attachments_ds_image(_: *Impl, atts: *Attachments.T) ?*Sg.Image.T = {
+        i := atts.mtl.depth_stencil.image;
+        ::ptr_utils(@type i[]);
+        @if(i.is_null(), .None, (Some = i))
+    }
+
+    A
 }

@@ -1543,7 +1543,7 @@ fn construct_struct_literal(self: *SelfHosted, expr: *FatExpr, requested: Result
                 ty := b.unwrap_ty();
                 @check(self.compile_expr(value, (Specific = ty))) return;
                 done = done && value.done;
-                self.last_loc = pattern.loc;
+                self.last_loc = value.loc;
                 @check(self.can_assign(ty, value.ty)) return;
             };
             
@@ -3552,28 +3552,12 @@ fn hoist_constants(self: *SelfHosted, body: []FatStmt) Maybe(void) #once = {
                     //@debug_assert(!func.get_flag(.ResolvedSign), "unresolved"); // TODO!
                     //@debug_assert(!func.get_flag(.ResolvedBody), "unresolved"); // TODO!
                     // TODO: assert placeholdervalue
-                    if self.is_empty_constant(var[]) {
-                        // We're the first to reference this overload set so create it. 
-                        i: OverloadSet = from_index(self.dispatch.overloads.len);
-                        self.dispatch.overloads&.push(
-                            ready = empty(),
-                            name = var.name,
-                            pending = fid.single(self.get_alloc()).as_raw_list(),
-                            // zero is UnknownType which we'll never query so its a fine .None replacement value since i don't have niches yet. 
-                            inline_cache = Ty(OverloadKey, FuncId).zeroed(),
-                        );
-                        os_value := self.to_values(OverloadSet, i);
-                        @check(self.save_const_values(var[], os_value, self.get_or_create_type(OverloadSet), func.loc)) return;
-                        @log_event("create os % (%) for %", i.as_index(), var.log(self), fid) self;
-                        overload_out = (Some = i);
-                    } else {
-                        overloads := @check(self.find_const(var[], self.get_or_create_type(OverloadSet).want())) return;
-                        i := OverloadSet.assume_cast(overloads._0&)[];
-                        os := self.dispatch.overloads&.nested_index(i.as_index());
-                        os.pending&.push(fid, self.get_alloc());
-                        @log_event("add to os % (%) for %", i.as_index(), var.log(self), fid) self;
-                        overload_out = (Some = i);
-                    };
+                    
+                    i := @check(self.get_or_create_overloads(var.name, var.scope, func.loc)) return;
+                    os := self.dispatch.overloads&.nested_index(i.as_index());
+                    os.pending&.push(fid, self.get_alloc());
+                    @log_event("add to os % (%) for %", i.as_index(), var.log(self), fid) self;
+                    overload_out = (Some = i);
                 };
                 
                 @try(self.update_function_metadata(func, overload_out)) return;
@@ -3587,6 +3571,30 @@ fn hoist_constants(self: *SelfHosted, body: []FatStmt) Maybe(void) #once = {
         }
     };
     .Ok
+}
+
+fn get_or_create_overloads(self: *SelfHosted, name: Symbol, scope: ScopeId, loc: Span) Maybe(OverloadSet) = {
+    // TODO: this mapping doesn't use #use which seems bad 
+    var := self.scopes[scope].const_lookup&.get(name) || 
+        @try(self.decl_var(scope, name, .Const, loc, .Unknown)) return;
+    ::if(OverloadSet);
+    (Ok = if self.is_empty_constant(var) {
+        // We're the first to reference this overload set so create it. 
+        i: OverloadSet = from_index(self.dispatch.overloads.len);
+        self.dispatch.overloads&.push(
+            ready = empty(),
+            name = var.name,
+            pending = empty(),
+            // zero is UnknownType which we'll never query so its a fine .None replacement value since i don't have niches yet. 
+            inline_cache = Ty(OverloadKey, FuncId).zeroed(),
+        );
+        os_value := self.to_values(OverloadSet, i);
+        @check(self.save_const_values(var, os_value, self.get_or_create_type(OverloadSet), loc)) return;
+        i
+    } else {
+        overloads := @check(self.find_const(var, self.get_or_create_type(OverloadSet).want())) return;
+        OverloadSet.assume_cast(overloads._0&)[]
+    })
 }
 
 fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Res(void) = {
@@ -3804,7 +3812,7 @@ fn handle_declare_constant(self: *SelfHosted, name: Var, ty: *LazyType, value: *
     
     // infer the more useful name when you do `foo :: fn() = { ... };`
     @if_let(value.expr) fn Closure(func) => {
-        if func.name == @run Flag.Anon.ident() {
+        if func.name == @run Flag.Anon.ident() { // TODO: what if your overload set is `fn Anon()`
             func.name = name.name;
         };
     };
@@ -3826,6 +3834,7 @@ fn handle_declare_constant(self: *SelfHosted, name: Var, ty: *LazyType, value: *
         hole := self.intern_type(.Placeholder);
         @log_event("% = @rec %", name&.log(self), hole) self;
         self.set(value, Type, hole);
+        self.save_guessed_name(hole, name.name);
         // This can't just fallthrough and call update_placeholder at the end of this function like the old version did,
         // because we might suspend while compiling and then next time around we'll forget this value is special. 
         // (we'll just think its already done because we'll see the placeholder).
