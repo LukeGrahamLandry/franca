@@ -25,8 +25,8 @@ ObjCSuper :: @struct(receiver: ObjCId, super_class: ObjCClass);
 //       like i guess this does fix the problem because most of the time you super want to inline that shim, 
 //       but it just looks stupid to have annotations that are clearly redundant (but aren't). 
 // :TodoDontZeroX0WhenVoid
-objc_msgSend :: fn(self: ObjCId, /* self, sel, ... good luck */) void #import("objc") #noinline; 
-objc_msgSendSuper :: fn(self: *ObjCSuper, /* , sel, ... good luck */) void #import("objc") #noinline;  
+objc_msgSend :: fn(self: ObjCId, /* sel, ... good luck */) void #import("objc") #noinline; 
+objc_msgSendSuper :: fn(self: *ObjCSuper, /* sel, ... good luck */) void #import("objc") #noinline;  
 
 fn objc_getClass(name: CStr) ObjCClass #import("objc");
 fn sel_getUid(name: CStr) ObjCSelector #import("objc");
@@ -130,9 +130,7 @@ fn objc_call_impl(a: FatExpr, super: bool) FatExpr = {
     
     arg_ty := Ty(args_type.items());
     selector := selector.items().sym().c_str();
-    // :SLOW :SLOW :SLOW :SLOW
-    // TODO: you don't want to call this every time, but you can't do it at comptime. :CacheSelector
-    args[1] = @{ sel_getUid(@[@literal selector]) };  
+    args[1] = @{ SEL(@[@literal selector]) };  
     arg_pattern: FatExpr = (expr = (Tuple = args.as_raw()), ty = UnknownType, done = false, loc = a.loc);
     xx := @{
         f := @run assume_types_fn(@[@literal arg_ty], @[@literal ret_ty], @[@literal callee]);
@@ -142,7 +140,35 @@ fn objc_call_impl(a: FatExpr, super: bool) FatExpr = {
     xx
 }
 
-// @objc_set(self) (name = val, ...); where self: ObjCId; -> void;
+fn new($classname: Str) id(classname) #generic = 
+    @objc init(@objc cls(classname).alloc());
+
+// TODO: collect all the strings passed to this at comptime and load 
+//       all the classes at startup so you don't have to check every time 
+//       and don't have to worry about races. 
+fn cls($name: Str) ObjCClass = {
+    cache :: @static(ObjCClass) zeroed(ObjCClass);
+    // TODO: This is not getting deduplicated properly? :FUCKED
+    //       but it's also not one per callsite.     NSPasteboard,NSPasteboard are there twice
+    //::println(name);
+    if bit_cast_unchecked(ObjCClass, i64, cache[]) == 0 {
+        cache[] = objc_getClass(::name.sym().c_str());
+    }
+    cache[]
+}
+
+// TODO: this being $ is a notable compile time cost somehow
+fn SEL($name: CStr) ObjCSelector = {
+    //sel_getUid(name)
+    
+    cache := @static(ObjCSelector);
+    if bit_cast_unchecked(ObjCSelector, i64, cache[]) == 0 {
+        cache[] = sel_getUid(name);
+    }
+    cache[]
+}
+
+// @objc_set(self) (name = val, ...); where self: ObjCId; -> void; => @objc self.setName(val);
 fn objc_set(self: FatExpr, pat: FatExpr) FatExpr #macro = as_var self { self |
     @debug_assert(pat.expr&.is(.StructLiteralP));
     body := @{};
@@ -152,9 +178,9 @@ fn objc_set(self: FatExpr, pat: FatExpr) FatExpr #macro = as_var self { self |
         sel  := objc_property_name_to_selector(name);
         arg  := Ty(ObjCId, ObjCSelector, b.default.ty);
         body = @{
-            @[body];  // TODO :CacheSelector
+            @[body];
             f :: assume_types_fn(@[@literal arg], void, @as(rawptr) objc_msgSend);
-            f(@[self], sel_getUid(@[@literal sel]), @[b.default]);
+            f(@[self], SEL(@[@literal sel]), @[b.default]);
         };
     };
     body
@@ -171,7 +197,7 @@ objc_property_name_to_selector :: fn(name: Str) CStr = {
 
 // WHY IS THIS SO FUCKING DIFFICULT BUT EVERYTHING ELSE WAS SO NORMAL ?? am i missing something? 
 // https://clang.llvm.org/docs/Block-ABI-Apple.html
-fn please_just_make_a_fucking_block__LEAK(a: Alloc, userdata: rawptr, callee: rawptr, NSConcreteGlobalBlock: ObjCId) rawptr = {
+fn new_global_block(a: Alloc, userdata: rawptr, callee: rawptr) rawptr = {
     b := a.box_zeroed(Block_literal_1);
     d := a.box_zeroed(Block_literal_1.Desc);
     d.size = size_of(Block_literal_1);
@@ -179,13 +205,14 @@ fn please_just_make_a_fucking_block__LEAK(a: Alloc, userdata: rawptr, callee: ra
     b.userdata = userdata;
     b.invoke = callee;
     b.flags = 0b0_101000_0000000000000000000000;  // BLOCK_HAS_SIGNATURE|BLOCK_IS_GLOBAL
-    b.isa = NSConcreteGlobalBlock;
+    // runtime for objective c blocks is in libsystem not libobjc
+    b.isa = @import_symbol("_NSConcreteGlobalBlock", "libc");
     d.signature = "@:@";
     Block_literal_1.raw_from_ptr(b)
 }
 
 Block_literal_1 :: @struct {
-    isa: ObjCId;
+    isa: rawptr;
     flags: i32;
     reserved: i32;
     invoke: rawptr;
@@ -200,3 +227,142 @@ Block_literal_1 :: @struct {
         signature: CStr;
     };
 };
+
+//
+// See @/graphics/macos/app.fr for example usage. 
+//
+// Provide some constant declarations to define the inheritance hierarchy. 
+// - EXTENDS :: "NSObject";  // required
+// - IMPLEMENTS :: @const_slice("WhateverProtocol");  // optional
+// 
+// Constant function declarations in the scope of `def` will become methods in the new class. 
+// - parameter names matter because they're used to create the selector strings 
+// - a parameter of type ObjCSelector is inserted automatically (because the 
+//   runtime passes one) so your function declaration stays looking like it would in objc. 
+//
+// TODO: non-hacky ivars
+// 
+fn register_objc_class($def: Type) ObjCClass = {
+    spec :: @static(ObjcClassReflect) fill_objc_reflect(def);
+    register_objc_class_outlined(spec)
+}
+
+ObjcClassReflect :: @struct {
+    name: CStr;
+    methods: []ObjcMethodReflect;
+    protocols: []CStr;
+    extends: CStr;
+};
+ObjcMethodReflect :: @struct(callable: rawptr, selector: CStr);
+
+// Speed doesn't matter since this only runs at startup 
+// so avoid code bloat by not specializing this code for each class. 
+fn register_objc_class_outlined(spec: *ObjcClassReflect) ObjCClass = {
+    class := objc_allocateClassPair(objc_getClass(spec.extends), spec.name, 0);
+    for spec.protocols { it |
+        class_addProtocol(class, objc_getProtocol(it));
+    };
+    for spec.methods { it |
+        // TODO: does the type string (last arg) ever matter? 
+        //       maybe it's just fine for me because I'm always implementing 
+        //       protocols so it already knows what the types are? 
+        //       magic words: "objective c type encoding"
+        class_addMethod(class, sel_getUid(it.selector), it.callable, "");
+    };
+    
+    // TODO: reflect to ask for this instead of hardcoding. 
+    //       the normal thing would be you just have the first field 
+    //       be your super class and then you can offset to your own ivars directly 
+    //       without going through the runtime but i think you're not supposed to 
+    //       assume that the size of apple's classes is stable so you can support  
+    //       multiple versions of macos without recompiling. 
+    // must be before register()
+    class_addIvar(class, "franca_sapp", 8, 3, "q"); 
+    
+    objc_registerClassPair(class);
+    class
+}
+
+// outlined to avoid recompiling for every $def
+fn fill_objc_reflect(def: Type) ObjcClassReflect #fold = {
+    #use("@/compiler/ast_external.fr");  // TODO: putting this :HERE breaks var resolution :CompilerBug 
+    ::?[]CStr;
+    @debug_assert_eq(size_of(def), 0, "TODO: use runtime fields as ivars");
+    s := Type.scope_of(def);
+    (
+        // TODO: maybe you should just pass this in because relying on TypeMeta.inferred_name
+        //       is kinda sketchy but also it's really annoying to type everything twice. 
+        name = def.typename().c_str(), 
+        extends = {
+            // TODO: string literal is supposed to coerce to CStr :CompilerBug
+            s := get_constant(Str, s, @symbol EXTENDS) 
+                || @panic("objc class % must provide super class as a constant like `EXTENDS :: \"NSObject\"`");
+            s.sym().c_str()
+        },
+        // TODO: why does this work as []CStr but that ^ doesn't?
+        protocols = get_constant([]CStr, s, @symbol IMPLEMENTS) || {
+            @assert(get_constant(s, @symbol IMPLEMENTS).is_none(), "type error for objc IMPLEMENTS (want []CStr)");
+            empty()
+        },
+        methods = {
+            names := get_constants(s);
+            methods := ObjcMethodReflect.list(names.len, ast_alloc());
+            for names { name |
+                // TODO: this returns Self (a type constant) as well :FUCKED
+                //       it's just based on size not a real type check
+                @if(name != @symbol Self)
+                if get_constant(FuncId, s, name) { fid |
+                    func := get_function_ast(fid, false, false, false, false);
+                    sel := {
+                        args := func.arg.bindings.items();
+                        sel := u8.list(temp());
+                        sel&.push_all(name.str());
+                        // Note: we don't expect people to have a `sel: ObjCSelector` 
+                        //       parameter, we insert that later. 
+                        if args.len > 1 {  // self, ... 
+                            sel&.push_all(":");
+                        }
+                        if args.len > 2 {
+                            // grab the rest based on parameter names
+                            each args.rest(2) { it |
+                                // :HERE
+                                sel&.push_all(it.name.unwrap().str());
+                                sel&.push_all(":");
+                            }
+                        };
+                        
+                        sel.items().sym().c_str()
+                    };
+                    // the runtime passes you the selector as the second argument,
+                    // (to avoid shifting all the arguments to objc_msgSend) 
+                    // which is useless because you already know the selector since  
+                    // it's the one you registered for. so i add a fake parameter 
+                    // to just discard it for you. 
+                    {
+                        @debug_assert(func.finished_arg.is_none());
+                        @debug_assert(!func.get_flag(.MadeVarsForRuntimeArgs));
+                        // TODO: check that you only try to do this once
+                        //       (but the assertion will fire if you do since we compile below)
+                        b: Binding = (
+                            name = (Ident = @symbol _SEL),
+                            ty = (Finished = ObjCSelector),
+                            default = binding_missing_default(func.loc),
+                            kind = .Var,
+                            nullable_tag = zeroed(*Annotations),
+                        );
+                        func.arg.bindings&.insert(1, b, ast_alloc());
+                    };
+                    
+                    // TODO: get_jitted_ptr should set this 
+                    func.set_flag(.TookPointerValue);
+                    
+                    // TODO: just get_constant again with rawptr should coerce :CompilerBug
+                    c := current_compiler_context();
+                    callable := c.get_jitted(fid); // get_constant(rawptr, s, name).unwrap();
+                    push(methods&, (selector = sel, callable = callable));
+                }; 
+            };
+            methods.items()
+        },
+    )
+}

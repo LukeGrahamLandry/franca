@@ -32,7 +32,6 @@ fn init_driver_vtable() *ImportVTable = {
         }
     };
     
-    // TODO: remove unused first arg because comptime_jit is in BuildOptions now.
     vtable.init_compiler = fn(options: *BuildOptions) Compiler = {
         vtable := the_vtable;
         mem := init_self_hosted(options);
@@ -881,7 +880,15 @@ fn fill_export_ffi(out: *List(u8)) void = {
         res := self.poll_in_place(?Values, => self.find_in_scope(s, name, type));
         value := self.unwrap_report_error(?Values, res) || return(false);
         // TODO: do we have to typecheck type_found?
-        dest: []u8 = (ptr = u8.ptr_from_raw(out), len = self.get_info(type)[].stride_bytes.zext());
+        //       answer: YES
+        size: i64 = self.get_info(type)[].stride_bytes.zext();
+        // TODO: this needs to be based on a real coerce + type check not just size. 
+        //       it's totally crippling if you get back a Type when you asked for a FuncId :FUCKED
+        if size != value&.len() {
+            return(false); // TODO: this really should be an error we catch from find_in_scope
+        };
+        //@debug_assert_eq(size, value&.len(), "get_constant() size mismatch");
+        dest: []u8 = (ptr = u8.ptr_from_raw(out), len = size);
         dest.copy_from(value&.bytes());
         true
     };
@@ -901,6 +908,8 @@ fn fill_export_ffi(out: *List(u8)) void = {
         (Some = (value.jit_addr().rawptr_from_int(), type))
     };
     
+    // get a string representation of the type. 
+    // we try to infer this as something reasonable based on constant declarations that had the type on the right.
     @fmt(out, "fn typename(type: Type) Symbol #fold #ct #comptime_addr(%);\n", typename);
     typename: rawptr : fn(type: Type) Symbol = {
         self := current_comptime();

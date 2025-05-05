@@ -57,7 +57,7 @@ SelfHosted :: @rec @struct(
     where_memo: HashMap(WhereKey, FuncId),
     imports: *HashMap(Symbol, ScopeId),  // TODO: very very bad if this struct gets too big?? :FUCKED
     scopes_generation := 0,
-    other_module: ?*QbeModule,
+    other_module: RawList(*QbeModule),
     stack_trace_last_callee: ?FuncId, // bleh
     backtrace_node: *Crash.LocationResolverNode,
     recycle_funcid: List([]FuncId),
@@ -170,10 +170,10 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         USE_SAME_MODULE := false;
         
         shared := @if(USE_SAME_MODULE, self.comptime_codegen, {
-            m := @uninitialized QbeModule;
-            init_default_module(m&, (arch = query_current_arch(), os = query_current_os(), type = .JitOnly), true);
-            self.other_module = (Some = m&);
-            shared: *CodegenShared = init(m&, self.get_alloc(), @as(CodegenWorker) codegen_thread_main, true);
+            m := self.get_alloc().box(QbeModule);
+            init_default_module(m, (arch = query_current_arch(), os = query_current_os(), type = .JitOnly), true);
+            self.other_module&.push(m, self.get_alloc());
+            shared: *CodegenShared = init(m, self.get_alloc(), @as(CodegenWorker) codegen_thread_main, true);
             shared
         });
         m := shared.m;
@@ -367,11 +367,12 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
         shim_callback_alloc = init(page_allocator, 1.shift_left(14)),
         where_memo = init(a),
         imports = a.boxed(HashMap(Symbol, ScopeId), init(a)),
-        other_module = .None,
+        other_module = empty(),
         stack_trace_last_callee = .None,
         backtrace_node = push_resolver(SelfHosted, self, find_function_aa),
         recycle_funcid = list(a),
     );
+    self.other_module&.push(self.comptime_codegen.m, self.get_alloc());
     
     if get_dynamic_context().is_null() {
         scary_log("compiler had null context!");

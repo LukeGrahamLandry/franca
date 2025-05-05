@@ -636,7 +636,6 @@ fn slot_count(self: CompCtx, ty: Type) u16 = {
     self.get_info(ty)[].size_slots
 }
 
-
 fn non_void_arg(a: *Annotation) ?*FatExpr = {
     if(a.args&.is_raw_unit(), => return(.None));
     (Some = a.args&)
@@ -659,6 +658,10 @@ fn fill_backend_vtable(vtable: *ImportVTable) void = {
         m := QbeModule.ptr_from_raw(module_out);
         e := QbeTargetEnv.ptr_from_raw(qbe_env_goal);
         init_default_module(m, e[], false);
+        
+        // Stash the module as a place to look up IP when we're trying to print a stack trace. 
+        @when_building_compiler(fn(self) => 
+            self.other_module&.push(m, self.get_alloc()));
     };
     vtable.run_qbe_passes = fn(f) = {
         f := Qbe.Fn.ptr_from_raw(f);
@@ -671,12 +674,39 @@ fn fill_backend_vtable(vtable: *ImportVTable) void = {
     };
     vtable.drop_qbe_module = fn(m) = {
         m := QbeModule.ptr_from_raw(m);
+        
+        // Impossible to call a function from this module after we drop it so don't 
+        // need to look there when printing stack traces. Also it would be unsafe 
+        // to try if the caller frees the memory of `m[]`.
+        @when_building_compiler(fn(self) => 
+            self.other_module&.unordered_retain(fn(it) => !it[].identical(m)));
+        
         m.drop();
     };
     
     // TODO: this is ugly. but it's a really convenient hack to make the feedback loop for import_wasm/import_c faster. 
     hack := @as(CodegenWorker) codegen_thread_main;
     vtable.codegen_thread_main = ptr_cast_unchecked(@type hack, @type vtable.codegen_thread_main, hack&)[];
+}
+
+// This is kinda HACK because when building the compiler I need to 
+// access `SelfHosted` to track the new `QbeModule`s for stack traces, 
+// but I also want to call this function from main() of programs when 
+// so you can have a driver() that runs jitted fast because it can use 
+// the hosted backend from the `ImportVTable` or a main() that compiles 
+// the backend and fills a vtable with just that for standalone AOT build. 
+// Very fragile because it assumes no other program will stick a variable 
+// called `SelfHosted` in the top level scope. 
+// -- May 5, 2025
+fn when_building_compiler(body: FatExpr) FatExpr #macro = {
+    is_declared :: fn(target: FatExpr) FatExpr #macro = 
+        @literal @is(target.expr&, .GetVar);
+    if(!@is_declared SelfHosted, => return @{});
+
+    @{comptime := context(DefaultContext)[].comptime;
+    if !comptime.is_null() {
+        @[body](SelfHosted.ptr_from_raw(comptime));
+    };}
 }
 
 ////////////////////// 

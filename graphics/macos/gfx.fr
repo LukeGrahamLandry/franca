@@ -117,18 +117,6 @@ Impl :: @struct {
     pass_completed_sem: id("_NSConcreteGlobalBlock");
 };
 
-// TODO: collect all the strings passed to this at comptime and load 
-//       all the classes at startup so you don't have to check every time 
-//       and don't have to worry about races. 
-// TODO: decide if i like this style or the one in app.fr more and switch one of them. 
-fn cls($name: Str) ObjCClass = {
-    cache :: @static(ObjCClass) zeroed(ObjCClass);
-    if bit_cast_unchecked(ObjCClass, i64, cache[]) == 0 {
-        cache[] = objc_getClass(::name.sym().c_str());
-    }
-    cache[]
-}
-
 fn to_mtl(it: SgLoadAction) M("MTLLoadAction") = @map_enum(it) 
     (CLEAR = 2, LOAD = 1, DONTCARE = 0);
 
@@ -448,13 +436,7 @@ fn setup_backend(mtl: *Impl, desc: *SgDesc) void = {
     mtl.cmd_queue = @objc mtl.device.newCommandQueue();
     
     {
-        // TODO: this is a paste from app.fr
-        Dyn :: import("@/lib/dynamic_lib.fr");
-        objc := Dyn'open("/usr/lib/libobjc.dylib").expect("open objc");  // HACK
-        Block := bit_cast_unchecked(rawptr, ObjCId, @as(rawptr) objc.dlsym("_NSConcreteGlobalBlock"));
-        
-        B :: please_just_make_a_fucking_block__LEAK;
-        aBlock := B(mtl.sg.desc.allocator, Impl.raw_from_ptr(mtl), @as(rawptr) pass_completed_handler, Block);
+        aBlock := new_global_block(mtl.sg.desc.allocator, Impl.raw_from_ptr(mtl), @as(rawptr) pass_completed_handler);
         mtl.pass_completed_sem = bit_cast_unchecked(rawptr, ObjCId, aBlock);
     };
 
@@ -639,9 +621,6 @@ fn init_texdesc_rt_msaa(it: id("MTLTextureDescriptor"), img: *Sg.Image.T) void =
         sampleCount = @as(i64) intcast img.cmn.sample_count,
     );
 }
-
-new :: fn($classname: Str) id(classname) #generic = 
-    @objc init(@objc cls(classname).alloc());
 
 fn create(mtl: *Impl, img: *Sg.Image.T, desc: *Sg.Image.Desc) SgResourceState = {
     injected := !desc.mtl_textures&[0].is_null();

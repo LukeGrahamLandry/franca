@@ -1,3 +1,18 @@
+## (May 5)
+
+- fixed stack traces in new modules created in driver program so you can see past `build_for_graphics()` when running jitted. 
+the compiler context now has a list of all QbeModules it knows about for when it wants to reverse lookup a function pointer.  
+- style update in graphics/macos/app.fr to use new/cls/id/objc_set for so it matches `[...]`/gfx.fr
+- make registering objective c classes less painful. 
+take all the functions in a struct and make those be methods on the class. 
+revealed a lot of bugginess with how `get_constant` interacts with 
+literal coerceon (Str -> CStr, FuncId -> rawptr), so that should be improved 
+before i can really argue that other people can use my compiler apis. 
+- doing a cached SEL($CStr) instead of calling sel_getUid for every message send at runtime 
+is a 15ms (5%) compile time cost which seems like a lot. it's only 202 specializations of it. 
+i guess 202 is really a lot more than the 27 im doing for cls() but like... 
+74 microseconds per? is that reasonable? 74000 clock cycles for one $function? 
+
 ## (May 3/4)
 
 - i want to work on making my shader translation better but i think 
@@ -156,6 +171,8 @@ theres no runtime function or method that will let me create one out of a c func
 and yet i apparently need to pass one to addLocalMonitorForEventsMatchingMask if 
 i want it to not randomly ignore all key up events while holding command. 
 why are we doing garbage waste of time suddenly? 
+is pasting struct definitions out of clang docs really what you have to do? 
+https://clang.llvm.org/docs/Block-ABI-Apple.html
 - if i get to the point of making it work on linux i'd really like to be able to 
 do the x11 thing with orb. 
 this worked: https://www.nickgregorich.com/posts/gui-in-orbstack-machines/
