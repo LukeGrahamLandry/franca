@@ -53,6 +53,7 @@ rn you're supposed to need a redundant `[]` in a call like that.
 - fix the infinite loop when a constant references itself
 - `@struct(a: A #use = (),);`
 - tests/todo/b.fr (might even be a parser bug? always a surprise when that's the problem)
+- // TODO: don't segfault if you get a compile error inside a jit_shim. 
 
 ## cross compiling
 

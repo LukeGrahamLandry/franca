@@ -1,3 +1,34 @@
+## (May 6)
+
+- putting this in fill_objc_reflect is such a flex. 
+```
+@assert(func.body&.is(.Normal));
+func.body = (Normal = @{  // :InstrumentObjc
+    scary_log("#### ");
+    scary_log(@[@literal def.typename().str()]);
+    scary_log(" ");
+    scary_log(@[@literal sel.str()]);
+    scary_log("\n");
+    @[func.body.Normal]
+});
+```
+
+- wtf 7 billion years of weird race condition situation and all i have to do 
+is not say i implement CALayerDelegate? apple's example does. why's mine different? 
+every method on that protocol is optional and im not implementing any of them 
+(but neither are they!) and you do have to set the delegate as something (even 
+if it doesn't implement that protocol or it just crashes). hmmmmmmmmmm,
+adding a null check when i call objc_getProtocol and it seems that the string it 
+has as the protocol name is the whole source code of my program. ok yeah that's my fault. 
+so somewhere along the confusion line (either not coercing in get_constant which is a known problem 
+or aliasing a baked Str and CStr which is a known problem) and it lost the null terminator, 
+so that returned null and i gave that to the (reasonably) `_Nonnull` parameter of objc_getProtocol, 
+which then explains why what lldb revealed was `_class_conformsToProtocol_unrealized_nolock` 
+trying to `ldr    w8, [x21, #0x44]` with x21=0. i was just assumed that the null thing 
+was the object not the protocol. in adding an assertion for that it seems NSApplicationDelegate 
+doesn't exist? maybe im not opening AppKit in time, but also it seems fine without? 
+- so now i no MTKView and it seems to mostly work except for depth buffer stuff (so geo example looks weird). 
+
 ## (May 5)
 
 - fixed stack traces in new modules created in driver program so you can see past `build_for_graphics()` when running jitted. 
@@ -12,6 +43,39 @@ before i can really argue that other people can use my compiler apis.
 is a 15ms (5%) compile time cost which seems like a lot. it's only 202 specializations of it. 
 i guess 202 is really a lot more than the 27 im doing for cls() but like... 
 74 microseconds per? is that reasonable? 74000 clock cycles for one $function? 
+
+---
+
+so i want to use my windowing stuff with a native webgpu implementation doing the 
+rendering. hopefully i can make a webgpu context with the same MTLDevice pointer 
+i used for my own metal gfx implementation? notably the sokol-samples for wgpu 
+don't use sokol_app, they use glfw. it seems like webgpu wants me to use a chained 
+struct with SurfaceSourceMetalLayer to give it a CAMetalLayer, but i only have a 
+MTKView which has a CAMetalLayer but maybe doesn't want to share? so my impression 
+is the window will put views on the screen and metal will put pixels into layers 
+and MTKView is apples helpful glue thingy to make it not suck. also public opinion 
+on MTKView seems poor and CAMetalLayer is just better except you have to do more work 
+yourself? which sounds like what i want because this whole project is an exercise in 
+understanding how stuff works by controling as much of it as possible. 
+
+- https://github.com/floooh/sokol/issues/1116
+- https://github.com/floooh/sokol/issues/727
+- https://developer.apple.com/documentation/metal/creating-a-custom-metal-view?language=objc
+- https://github.com/floooh/sokol/pull/1136/files
+  - no mtkview, yes displaylink
+- https://github.com/floooh/sokol/compare/master...sapp-multiwindow
+  - still uses mtkview but also displaylink
+- https://dawn.googlesource.com/dawn/+/refs/heads/main/src/dawn/glfw/utils_metal.mm
+- https://github.com/floooh/sokol-samples/blob/master/wgpu/wgpu_entry_dawn.cc
+- CADisplayLink vs CVDisplayLink?
+
+the extra you have to do is 
+- depth stencil buffer
+- msaa surface
+- render loop (= display link?)
+- poll events
+- something when it resizes? 
+let's just see what happens and if it breaks `examples/geo` then i know the magic words to google. 
 
 ## (May 3/4)
 

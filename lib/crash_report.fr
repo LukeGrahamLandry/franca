@@ -22,10 +22,17 @@ trace_start  :: fn() rawptr #ir(.trace_start, .Kl);
 trace_prev   :: fn(frame: rawptr) rawptr #ir(.trace_prev, .Kl);
 trace_return :: fn(frame: rawptr) rawptr #ir(.trace_return, .Kl);
 
+STASH_ENVIRONMENT :: false; // TODO: formalize this. 
+ENV_STASH :: @static(rawptr);
+
 hook_backtrace :: fn() void = {
     @if(!is_linking_libc()) return(); // TODO
     
     if get_environment_variable("FRANCA_BACKTRACE").is_some() || ALWAYS_BE_SIGNALLING {
+        if STASH_ENVIRONMENT {
+            ENV_STASH[] = get_dynamic_context();
+        };
+    
         push_resolver(@import_symbol "__franca_aot_debug_info", find_in_debug_info);
         request_backtrace_on_panic();
         request_backtrace_on_signal();
@@ -69,6 +76,9 @@ show_trace_and_exit :: fn(s: i64, info: *SigInfo, ctx: *UContext) void = {
     ::@assert_eq(0, offset_of(Arm64MachineContext, Fields(Arm64MachineContext).neon).mod(16), "fp unaligned");
     scary_log("A franca program received a fatal signal.\n");
     
+    if STASH_ENVIRONMENT {
+        set_dynamic_context(ENV_STASH[]);
+    };
     LOOPING :: @static(i64) 0;
     if LOOPING[] == 2 {
         scary_log("... give up\n");

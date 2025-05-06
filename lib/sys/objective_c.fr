@@ -7,6 +7,7 @@ ObjCId       :: *ObjCObject;
 ObjCSelector :: @struct(_: rawptr);
 ObjCProtocol :: @struct(_: rawptr);
 ObjCIVar :: @struct(_: rawptr);
+fn id(classname: Str) Type = ObjCId;
 
 ObjCSuper :: @struct(receiver: ObjCId, super_class: ObjCClass);
 
@@ -47,6 +48,7 @@ fn class_addProtocol(class: ObjCClass, protocol: ObjCProtocol) void #import("obj
 fn objc(ret_reciever_arg_pattern: FatExpr) FatExpr #macro = 
     objc_call_impl(ret_reciever_arg_pattern, false);
 
+// DONT FORGET self is a *ObjCSuper
 fn objc_super(ret_reciever_arg_pattern: FatExpr) FatExpr #macro = 
     objc_call_impl(ret_reciever_arg_pattern, true);
 
@@ -69,6 +71,9 @@ fn objc_call_impl(a: FatExpr, super: bool) FatExpr = {
                         fn Tuple(it) => {
                             @ct_assert(it.len == 2, a.loc, "objc message send with multiple arguments needs names");
                             it[0] = compile_ast(it[0]);
+                            if super {
+                                @ct_assert(it[0].ty == *ObjCSuper, a.loc, "@objc_super first arg needs to be an ObjCSuper");
+                            };
                             args_type&.push(it[0].ty);
                             args_type&.push(ObjCSelector);
                             args&.push(it[0]);
@@ -250,7 +255,7 @@ fn register_objc_class($def: Type) ObjCClass = {
 ObjcClassReflect :: @struct {
     name: CStr;
     methods: []ObjcMethodReflect;
-    protocols: []CStr;
+    protocols: []Str;
     extends: CStr;
 };
 ObjcMethodReflect :: @struct(callable: rawptr, selector: CStr);
@@ -258,10 +263,20 @@ ObjcMethodReflect :: @struct(callable: rawptr, selector: CStr);
 // Speed doesn't matter since this only runs at startup 
 // so avoid code bloat by not specializing this code for each class. 
 fn register_objc_class_outlined(spec: *ObjcClassReflect) ObjCClass = {
-    class := objc_allocateClassPair(objc_getClass(spec.extends), spec.name, 0);
+    prev := objc_getClass(spec.name);
+    @debug_assert(prev._.is_null(), "tried to redeclare class %", spec.name);
+    
+    super := objc_getClass(spec.extends);
+    @debug_assert(!super._.is_null(), "undeclared class % (super for %)", spec.extends, spec.name);
+    class := objc_allocateClassPair(super, spec.name, 0);
+    @debug_assert(!class._.is_null());
+    
     for spec.protocols { it |
-        class_addProtocol(class, objc_getProtocol(it));
+        p := objc_getProtocol(@fmt_cstr("%", it));
+        @debug_assert(!p._.is_null(), "undeclared protocol %", it);
+        class_addProtocol(class, p);
     };
+    
     for spec.methods { it |
         // TODO: does the type string (last arg) ever matter? 
         //       maybe it's just fine for me because I'm always implementing 
@@ -286,7 +301,7 @@ fn register_objc_class_outlined(spec: *ObjcClassReflect) ObjCClass = {
 // outlined to avoid recompiling for every $def
 fn fill_objc_reflect(def: Type) ObjcClassReflect #fold = {
     #use("@/compiler/ast_external.fr");  // TODO: putting this :HERE breaks var resolution :CompilerBug 
-    ::?[]CStr;
+    ::?[]Str;
     @debug_assert_eq(size_of(def), 0, "TODO: use runtime fields as ivars");
     s := Type.scope_of(def);
     (
@@ -299,9 +314,9 @@ fn fill_objc_reflect(def: Type) ObjcClassReflect #fold = {
                 || @panic("objc class % must provide super class as a constant like `EXTENDS :: \"NSObject\"`");
             s.sym().c_str()
         },
-        // TODO: why does this work as []CStr but that ^ doesn't?
-        protocols = get_constant([]CStr, s, @symbol IMPLEMENTS) || {
-            @assert(get_constant(s, @symbol IMPLEMENTS).is_none(), "type error for objc IMPLEMENTS (want []CStr)");
+        // TODO: why does this work as []CStr but that ^ doesn't? ... it doesn't super work tho, it seems to lose the terminator? 
+        protocols = get_constant([]Str, s, @symbol IMPLEMENTS) || {
+            @assert(get_constant(s, @symbol IMPLEMENTS).is_none(), "type error for objc IMPLEMENTS (want []Str)");
             empty()
         },
         methods = {
@@ -312,7 +327,9 @@ fn fill_objc_reflect(def: Type) ObjcClassReflect #fold = {
                 //       it's just based on size not a real type check
                 @if(name != @symbol Self)
                 if get_constant(FuncId, s, name) { fid |
-                    func := get_function_ast(fid, false, false, false, false);
+                    // resolve_body=true so it doesn't get confused when we replace it 
+                    // for debugging :InstrumentObjc
+                    func := get_function_ast(fid, false, true, false, false);
                     sel := {
                         args := func.arg.bindings.items();
                         sel := u8.list(temp());

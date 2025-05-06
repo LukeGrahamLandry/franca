@@ -1,0 +1,110 @@
+//
+// Adhoc bindings for the fruit platform (just the stuff I need).
+//
+// TODO: maybe i should get more serious and provide nice bindings to all of it. 
+//      options: 
+//      - generate from their header files
+//      - use my c compiler to import their header files
+// TODO: license? the dispatch ones are Apache 2.0. 
+//       if the framework headers are ARR does that mean the only legal way to call them 
+//       is be compiled by The Lastest Version of XCode™ ?
+//       does it matter that i typed these and not generated them (presumably it's the same). 
+//
+// TODO: do i want to try to do types for the objective c messages too? 
+//       then probably need a more comprehensive notion of subtyping. 
+// TODO: make sure @import_symbol works as a :: constant and then move those here as well. 
+//
+
+#use("@/lib/sys/objective_c.fr");
+
+fn handles(names: FatExpr) FatExpr #macro = {
+    #use("@/compiler/ast_external.fr");
+    S :: import("@/graphics/macos/frameworks.fr");
+    c := current_compiler_context();
+    each names&.items() { name |
+        // TODO: this should create unique types without the _HACK
+        // TODO: this should work but doesn't give you type checking!
+        //opaque := intern_type(Named = (@struct(_: rawptr), name));
+        name := name.ident().unwrap();
+        opaque := const_eval(Type)(@{ @struct(_: rawptr, _HACK :: @[@literal name]) });  // :SLOW
+        c'vtable'get_type_meta(c.data, opaque)[].inferred_name = name;
+        ::?Symbol;
+        // TODO: make you pass a Span here (since we have one)
+        c.add_to_scope(S, name, Type, opaque);
+    };
+    @{}
+}
+
+//
+// CoreVideo
+//
+
+@handles(CVDisplayLinkRef, CGDirectDisplayID);
+fn CVDisplayLinkCreateWithActiveCGDisplays(displayLinkOut: *CVDisplayLinkRef) voidResult #import("CoreVideo");
+fn CVDisplayLinkSetOutputCallback(displayLink: CVDisplayLinkRef, callback: CVDisplayLinkOutputCallback, userInfo: rawptr) voidResult #import("CoreVideo");
+fn CVDisplayLinkStart(displayLink: CVDisplayLinkRef) voidResult #import("CoreVideo");
+CVDisplayLinkOutputCallback :: @FnPtr(displayLink: CVDisplayLinkRef, inNow: rawptr, inOutputTime: rawptr, flagsIn: i64, flagsOut: *i64, displayLinkContext: rawptr) voidResult;
+fn CVDisplayLinkSetCurrentCGDisplay(displayLink: CVDisplayLinkRef, displayID: CGDirectDisplayID) voidResult #import("CoreVideo");
+
+//
+// Grand Central Dispatch
+//
+
+@handles(dispatch_source_type_t, dispatch_source_t, dispatch_queue_t, OS_dispatch_semaphore_t);
+
+// dispatch_get_main_queue() is `static inline` so we can't call it 
+fn dispatch_get_main_queue() dispatch_queue_t = 
+    //dispatch_queue_t.ptr_from_raw(@import_symbol("_dispatch_main_q", "libc"))[];
+    bit_cast_unchecked(rawptr, dispatch_queue_t, @import_symbol("_dispatch_main_q", "libc"));
+fn dispatch_async_f(queue: dispatch_queue_t, userdata: rawptr, callee: @FnPtr(userdata: rawptr) void) void #import("libc");
+
+fn DISPATCH_SOURCE_TYPE_DATA_ADD() dispatch_source_type_t = 
+    //dispatch_source_type_t.ptr_from_raw(@import_symbol("_dispatch_source_type_data_add", "libc"))[];
+    bit_cast_unchecked(rawptr, dispatch_source_type_t, @import_symbol("_dispatch_source_type_data_add", "libc"));
+fn dispatch_source_create(type: dispatch_source_type_t, handle: u64, mask: u64, queue: dispatch_queue_t) dispatch_source_t #import("libc");
+fn dispatch_set_context(object: dispatch_source_t, userdata: rawptr) void #import("libc");
+// "The context parameter passed to the event handler function is the context of
+//  the dispatch source current at the time the event handler was set." - Tim Apple
+fn dispatch_source_set_event_handler_f(source: dispatch_source_t, handler: @FnPtr(context: rawptr) void) void #import("libc");
+fn dispatch_resume(source: dispatch_source_t) void #import("libc");
+fn dispatch_source_merge_data(source: dispatch_source_t, idk: i64) void #import("libc");
+
+DISPATCH_TIME_FOREVER :: bit_not(0);
+fn dispatch_semaphore_wait(dsema: OS_dispatch_semaphore_t, timeout: i64) i64 #import("libc");
+fn dispatch_semaphore_create(value: i64) OS_dispatch_semaphore_t #import("libc");
+fn dispatch_semaphore_signal(dsema: OS_dispatch_semaphore_t) i64 #import("libc");
+
+// 
+// CoreGraphics
+// 
+
+CGSize  :: @struct(width: f64, height: f64);
+CGPoint :: @struct(x: f64, y: f64);
+CGRect  :: @struct(origin: CGPoint, size: CGSize);  // same as NSRect
+
+fn CGAssociateMouseAndMouseCursorPosition(connected: bool) void #import("CoreGraphics");
+@handles(CGDirectDisplayID);
+fn CGMainDisplayID() CGDirectDisplayID #import("CoreGraphics");
+fn CGDisplayShowCursor(d: CGDirectDisplayID) void #import("CoreGraphics");
+fn CGDisplayHideCursor(d: CGDirectDisplayID) void #import("CoreGraphics");
+
+@handles(CGColorSpaceRef, CFDataRef, CGDataProviderRef, CGImageRef);
+fn CGDataProviderCreateWithData(info: i64, data: *u32, size_bytes: i64, releaseData: i64) CGDataProviderRef #import("CoreGraphics"); // CGDataProviderRef
+fn CGColorSpaceCreateDeviceRGB() CGColorSpaceRef #import("CoreGraphics"); 
+fn CFDataCreate(allocator: ObjCId, data: *u8, size: i64) CFDataRef #import("CoreFoundation"); 
+fn CGDataProviderCreateWithCFData(cf_data: CFDataRef) CGDataProviderRef #import("CoreGraphics"); 
+fn CGImageCreate(width: i64, height: i64, bitsPerComponent: i64, bitsPerPixel: i64, 
+    bytesPerRow: i64, space: CGColorSpaceRef, bitmapInfo: i64, provider: CGDataProviderRef, decode: i64, 
+    shouldInterpolate: bool, intent: u32) CGImageRef #import("CoreGraphics");
+// TODO: are these different than an objc release() message? 
+fn CFRelease(it: ObjCId) void #import("CoreFoundation");
+fn CGDataProviderRelease(it: CGDataProviderRef) void #import("CoreGraphics");
+fn CGColorSpaceRelease(it: CGColorSpaceRef) void #import("CoreGraphics");
+fn CGImageRelease(it: CGImageRef) void #import("CoreGraphics");
+fn CGContextDrawImage(c: id("NSGraphicsContext"), rect: CGRect, image: CGImageRef) void #import("CoreGraphics");
+
+//
+// Metal
+//
+
+fn MTLCreateSystemDefaultDevice() id("MTLDevice") #import("Metal");

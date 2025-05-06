@@ -6,21 +6,18 @@
 //! MIT License. Copyright (c) 2022 Serge Zaitsev
 //!
 
-CGSize  :: @struct(width: f64, height: f64);
-CGPoint :: @struct(x: f64, y: f64);
-CGRect  :: @struct(origin: CGPoint, size: CGSize);
+main :: fn() void = {
+    #use("@/graphics/macos/frameworks.fr");  // raw bindings to apple stuff
+    #use("@/lib/sys/objective_c.fr");  // syntax sugar for calling objc_msgSend
 
-STATE :: @static(@struct(
-    title: Str,
-    width: i64,
-    height: i64,
-    buf: []u32,
-    wnd: ObjCId,
-));
+    STATE :: @static(@struct(
+        title: Str,
+        width: i64,
+        height: i64,
+        buf: []u32,
+        wnd: ObjCId,
+    ));
 
-#include_std("lib/sys/objective_c.fr");
-
-fn main() void = {
     // TODO: have extern variables with #import just like functions. 
     //       so you can have the driver dlopen for you when jitting or have the linker ask for it when doing aot. 
     // You do have to open this dylib to have the classes exist when running at comptime (or i assume pass -framework Cocoa for aot)
@@ -37,11 +34,11 @@ fn main() void = {
     // draw something nice once at the beginning.
     render_mandelbrot(f.buf, f.width, f.height, 0.008);
     
-    NSApplication := class("NSApplication");
-    NSWindow := class("NSWindow"); 
-    NSObject := class("NSObject");
-    NSView   := class("NSView");
-    NSString := class("NSString");
+    NSApplication := cls("NSApplication");
+    NSWindow := cls("NSWindow"); 
+    NSObject := cls("NSObject");
+    NSView   := cls("NSView");
+    NSString := cls("NSString");
     
     NSApp[] = @objc NSApplication.sharedApplication();
     ::ptr_utils(ObjCObject);
@@ -73,8 +70,27 @@ fn main() void = {
     
     // Now another...
     View := objc_allocateClassPair(NSView, "SoftDrawView", 0);
-    class_addMethod(View, "drawRect:".sel_getUid(), draw_rect_callback, "");//@as(CStr) "i@:@@");
+    class_addMethod(View, "drawRect:".sel_getUid(), @as(rawptr) draw_rect_callback, "");//@as(CStr) "i@:@@");
     objc_registerClassPair(View);
+    
+    draw_rect_callback :: fn(self: ObjCId, sel: ObjCSelector, r: CGRect) void = {
+        f := STATE; // TODO: could smuggle this here with objc_getAssociatedObject
+        NSGraphicsContext := cls("NSGraphicsContext");
+        context := @objc NSGraphicsContext.currentContext();
+        context := @objc context.graphicsPort();
+        space := CGColorSpaceCreateDeviceRGB();
+        provider := CGDataProviderCreateWithData(0, f.buf.ptr, f.width * f.height * 4, 0);
+        kCGImageAlphaNoneSkipFirst :: 6;
+        kCGBitmapByteOrder32Little :: 8192;
+        kCGRenderingIntentDefault :: 0;
+        flags :=  kCGImageAlphaNoneSkipFirst.bit_or(kCGBitmapByteOrder32Little);
+        img := CGImageCreate(f.width, f.height, 8, 32, f.width * 4, space, flags, provider, 0, false, kCGRenderingIntentDefault);
+        CGColorSpaceRelease(space);
+        CGDataProviderRelease(provider);
+        rect: CGRect = (origin = (x = 0, y = 0), size = (width = f.width.float(), height = f.height.float()));
+        CGContextDrawImage(context, rect, img);
+        CGImageRelease(img);
+    };
     
     view := @objc View.alloc();
     @objc view.init();
@@ -89,6 +105,7 @@ fn main() void = {
     @objc window.center();
     @objc NSApp[].activateIgnoringOtherApps(true);
     
+    // TODO: just use @import_symbol
     NSDefaultRunLoopMode := appkit.get_constant(ObjCId, "NSDefaultRunLoopMode").unwrap();
     @assert(!NSDefaultRunLoopMode.is_null(), "NSApp null");
     loop {  // TODO: do i have to do reference counting things? 
@@ -108,44 +125,6 @@ fn main() void = {
     };
 }
 
-// TODO: don't segfault if you get a compile error inside a jit_shim. 
-
-// :PastedMacosBindings
-fn CGColorSpaceCreateDeviceRGB() ObjCId #import("CoreGraphics"); // CGColorSpaceRef
-fn CGDataProviderCreateWithData(info: i64, data: *u32, size_bytes: i64, releaseData: i64) ObjCId #import("CoreGraphics"); // CGDataProviderRef
-fn CGImageCreate(width: i64, height: i64, bitsPerComponent: i64, bitsPerPixel: i64, 
-    bytesPerRow: i64, space: ObjCId, bitmapInfo: i64, provider: ObjCId, decode: i64, 
-    shouldInterpolate: bool, intent: u32) ObjCId #import("CoreGraphics"); // CGImageRef
-fn CGColorSpaceRelease(space: ObjCId) void #import("CoreGraphics");
-fn CGDataProviderRelease(img: ObjCId) void #import("CoreGraphics");
-fn CGImageRelease(provider: ObjCId) void #import("CoreGraphics");
-fn CGContextDrawImage(c: ObjCId, rect: CGRect, image: ObjCId) void #import("CoreGraphics");
-
-draw_rect_callback: rawptr : fn(self: ObjCId, sel: ObjCSelector, r: CGRect) void = {
-    f := STATE; // TODO: could smuggle this here with objc_getAssociatedObject
-    NSGraphicsContext := class("NSGraphicsContext");
-    context := @objc NSGraphicsContext.currentContext();
-    context := @objc context.graphicsPort();
-    space := CGColorSpaceCreateDeviceRGB();
-    provider := CGDataProviderCreateWithData(0, f.buf.ptr, f.width * f.height * 4, 0);
-    kCGImageAlphaNoneSkipFirst :: 6;
-    kCGBitmapByteOrder32Little :: 8192;
-    kCGRenderingIntentDefault :: 0;
-    flags :=  kCGImageAlphaNoneSkipFirst.bit_or(kCGBitmapByteOrder32Little);
-    img := CGImageCreate(f.width, f.height, 8, 32, f.width * 4, space, flags, provider, 0, false, kCGRenderingIntentDefault);
-    CGColorSpaceRelease(space);
-    CGDataProviderRelease(provider);
-    rect: CGRect = (origin = (x = 0, y = 0), size = (width = f.width.float(), height = f.height.float()));
-    CGContextDrawImage(context, rect, img);
-    CGImageRelease(img);
-};
-
-fn class($name: Str) ObjCClass = {
-    c := objc_getClass(name.sym().c_str());
-    @assert(!c._.is_null(), name);
-    c
-}
-
 fn get_constant(lib: Dyn.Handle, $T: Type, $name: Str) ?T #generic = {
     ref := dlsym(lib, name.sym().c_str());
     if(ref.is_null(), => return(.None));
@@ -155,6 +134,7 @@ fn get_constant(lib: Dyn.Handle, $T: Type, $name: Str) ?T #generic = {
 Dyn :: import("@/lib/dynamic_lib.fr");
 #use("@/lib/sys/fs.fr");
 
+// TODO: just use build_for_graphics to support AOT
 fn driver(vtable: *ImportVTable) void #export = {    
     src := "#include_std(\"lib/core.fr\");".clone(temp());
     the_code := temp().read_to_string_or_crash("examples/soft_draw.fr");  // TODO: don't depend on cwd.
@@ -164,7 +144,7 @@ fn driver(vtable: *ImportVTable) void #export = {
     objc := Dyn'open("/usr/lib/libobjc.dylib").expect("open objc");
     cg := Dyn'open("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics").expect("open CoreGraphics");
     opts := vtable.default_build_options();
-    comp := vtable.new_with_src(src.items(), opts);
+    comp := vtable.new_with_src(src.items(), "examples/soft_draw.fr", opts);
     ctx := vtable.with(comp);
     ctx.add_comptime_library(ctx.intern_string("objc"), objc);
     ctx.add_comptime_library(ctx.intern_string("CoreGraphics"), cg);

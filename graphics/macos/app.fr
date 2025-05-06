@@ -10,8 +10,11 @@
 // TODO: setting the title also resets the mouse cursor to default. 
 // TODO: i kinda want to let you paste images NSPasteboardTypePNG
 // TODO: 86760b60423d18f07f2fdb0a4f00553d4229034a
+// TODO: if you put it in full screen, moving the cursor to the top should 
+//       show the menu bar so you can get out
 
 #use("@/lib/sys/objective_c.fr");
+#use("@/graphics/macos/frameworks.fr");
 Sapp :: import("@/graphics/app.fr");
 
 Impl :: @struct(
@@ -27,14 +30,10 @@ Impl :: @struct(
     mtl_device: id"MTLDevice",
     classes: Classes,
     env: rawptr,
+    display_link: CVDisplayLinkRef,
+    display_source: dispatch_source_t,
 );
 
-// TODO: these #tags don't do anything but maybe they should generate register_objective_c_classes()
-//       they could be defined as structs with EXTENDS :: "NSObject" maybe? 
-// MyAppDelegate: ObjCClass #declare #extends(NSObject) #implements(NSApplicationDelegate),
-// MyWindow: ObjCClass #declare #extends(NSWindow),
-// MyWindowDelegate: ObjCClass #declare #extends(NSObject) #implements(NSWindowDelegate),
-// MyView: ObjCClass #declare #extends(MTKView),  // TODO: if not metal, NSOpenGLView
 Classes :: @struct(
     NSPasteboardTypeFileURL: ObjCId, 
     NSPasteboardTypeString: ObjCId,
@@ -68,7 +67,7 @@ fn run(m: *Impl, desc: *Sapp.Desc) Never = {
     NSEventMaskKeyUp :: 1.shift_left(11);
     aBlock := new_global_block(sapp.desc.allocator, Impl.raw_from_ptr(m), @as(rawptr) keyup_monitor);
     m.keyup_monitor = @objc cls("NSEvent").addLocalMonitorForEventsMatchingMask(NSEventMaskKeyUp, handler = aBlock);
-
+    
     @objc c.NSApp.run();
     // NOTE: [NSApp run] never returns, instead cleanup code
     // must be put into applicationWillTerminate
@@ -107,7 +106,7 @@ fn register_objective_c_classes(self: *Impl) void = {
     c.kCFAllocatorDefault = ObjCId.ptr_from_raw(@import_symbol("kCFAllocatorDefault", "CoreFoundation"))[];
 }
 
-fn macos_discard_state(m: *Impl) void = {
+fn macos_discard_state(m: *Impl) void = {       
     // NOTE: it's safe to call [release] on a nil object
     if !m.keyup_monitor.is_null() {
         @objc cls("NSEvent").removeMonitor(m.keyup_monitor);
@@ -115,11 +114,13 @@ fn macos_discard_state(m: *Impl) void = {
         m.keyup_monitor = ObjCId.zeroed();
         // TODO: this still leaks the block because i said it was global
     };
+    // TODO: CVDisplayLinkStop CVDisplayLinkRelease :LEAK
+    
     @objc m.tracking_area.release();
     @objc m.app_dlg.release();
     @objc m.win_dlg.release();
     @objc m.view.release();
-    @debug_assert(SOKOL_BACKEND.is_metal());
+    ASSERT_NOT_GL();
     @objc m.mtl_device.release();
     @objc m.window.release();
 }
@@ -206,16 +207,19 @@ fn update_dimensions(macos: *Impl) void = {
     } else {
         sapp.dpi_scale = 1.0;
     };
-    @debug_assert(!macos.view.is_null());
+    @debug_assert(!macos.view.is_nil());
     layer := @objc macos.view.layer();
+    @debug_assert(!layer.is_nil());
     @objc layer.setContentsScale(@as(f64) sapp.dpi_scale.cast()); // NOTE: needed because we set layerContentsPlacement to a non-scaling value in windowWillStartLiveResize.
     bounds := @objc @as(CGRect) macos.view.bounds();
     sapp.window_width = int(bounds.size.width);
     sapp.window_height = int(bounds.size.height);
-    @debug_assert(SOKOL_BACKEND.is_metal());
+    ASSERT_NOT_GL();
     sapp.framebuffer_width = int(bounds.size.width * sapp.dpi_scale.cast());
     sapp.framebuffer_height = int(bounds.size.height * sapp.dpi_scale.cast());
-    fb_size := @objc @as(CGSize) macos.view.drawableSize();  // this is (0, 0) the first time
+    fb_size := @objc @as(CGSize) layer.drawableSize();  // this is (0, 0) the first time 
+    //@println("update_dimensions % % -> % %", fb_size.width, fb_size.height, bounds.size.width, bounds.size.height);
+    
     cur_fb_width  := int(fb_size.width);
     cur_fb_height := int(fb_size.height);
     dim_changed  := (sapp.framebuffer_width != cur_fb_width) ||
@@ -233,9 +237,10 @@ fn update_dimensions(macos: *Impl) void = {
         sapp.window_height = 1;
     };
     if dim_changed {
-        @debug_assert(SOKOL_BACKEND.is_metal());
+        ASSERT_NOT_GL();
         drawable_size: CGSize = (width = sapp.framebuffer_width.float(), height = sapp.framebuffer_height.float());
-        @objc macos.view.setDrawableSize(drawable_size);
+        @objc layer.setDrawableSize(drawable_size);
+        ASSERT_METAL();
         if !sapp.first_frame {
             sapp.app_event(.RESIZED);
         };
@@ -313,11 +318,6 @@ fn macos_mouse_update_from_nsevent(sapp: *Sapp.Self, event: id"NSEvent", clear_d
 }
 
 fn macos_show_mouse(visible: bool) void = {
-    CGDirectDisplayID :: @struct(repr: u32);
-    fn CGMainDisplayID() CGDirectDisplayID #import("CoreGraphics");
-    fn CGDisplayShowCursor(d: CGDirectDisplayID) void #import("CoreGraphics");
-    fn CGDisplayHideCursor(d: CGDirectDisplayID) void #import("CoreGraphics");
-
     /* NOTE: this function is only called when the mouse visibility actually changes */
     main := CGMainDisplayID();
     if(visible, => CGDisplayShowCursor(main), => CGDisplayHideCursor(main));
@@ -339,7 +339,6 @@ fn lock_mouse(macos: *Impl, lock: bool) void = {
         NOTE also that the hide/show of the mouse cursor should properly
         stack with calls to sapp_show_mouse()
     */
-    fn CGAssociateMouseAndMouseCursorPosition(connected: bool) void #import("CoreGraphics");
     CGAssociateMouseAndMouseCursorPosition(!sapp.mouse.locked);
     // TODO: why not allow locking the mouse without hiding it? maybe that's never what you want? 
     if sapp.mouse.locked {
@@ -370,29 +369,16 @@ fn set_icon(macos: *Impl, icon_desc: []Sapp.ImageDesc) void = {
     dock_tile := @objc c.NSApp.dockTile();
     wanted := @objc @as(CGSize) dock_tile.size();
     img_desc := image_bestmatch(icon_desc, wanted.width.int(), wanted.height.int());
-
-    // :PastedMacosBindings
-    // TODO: why not just CGDataProviderCreateWithData?
-    fn CGColorSpaceCreateDeviceRGB() ObjCId #import("CoreGraphics"); // CGColorSpaceRef
-    fn CFDataCreate(allocator: ObjCId, data: *u8, size: i64) ObjCId #import("CoreFoundation"); // CFDataRef
-    fn CGDataProviderCreateWithCFData(cf_data: ObjCId) ObjCId #import("CoreGraphics"); // CGDataProviderRef
-    fn CGImageCreate(width: i64, height: i64, bitsPerComponent: i64, bitsPerPixel: i64, 
-        bytesPerRow: i64, space: ObjCId, bitmapInfo: i64, provider: ObjCId, decode: i64, 
-        shouldInterpolate: bool, intent: u32) ObjCId #import("CoreGraphics"); // CGImageRef
-    // TODO: are these different than an objc release() message? 
-    fn CFRelease(it: ObjCId) void #import("CoreFoundation");
-    fn CGDataProviderRelease(it: ObjCId) void #import("CoreGraphics");
-    fn CGColorSpaceRelease(it: ObjCId) void #import("CoreGraphics");
-    fn CGImageRelease(it: ObjCId) void #import("CoreGraphics");
     
     cg_color_space := CGColorSpaceCreateDeviceRGB();
+    // TODO: why not just CGDataProviderCreateWithData?
     cf_data := CFDataCreate(c.kCFAllocatorDefault, img_desc.pixels.ptr, img_desc.pixels.len);
     cg_data_provider := CGDataProviderCreateWithCFData(cf_data);
     bitmapInfo := bit_or(3, 1.shift_left(12));
     kCGRenderingIntentDefault :: 0;
     flags  := bit_or(3, 8192); // kCGImageAlphaLast|kCGBitmapByteOrder32Little
     cg_img := CGImageCreate(img_desc.width, img_desc.height, 8, 32, img_desc.width * 4, cg_color_space, flags, cg_data_provider, 0, false, kCGRenderingIntentDefault);
-    CFRelease(cf_data);
+    CFRelease(bit_cast_unchecked(@type cf_data, ObjCId, cf_data));
     CGDataProviderRelease(cg_data_provider);
     CGColorSpaceRelease(cg_color_space);
 
@@ -404,11 +390,16 @@ fn set_icon(macos: *Impl, icon_desc: []Sapp.ImageDesc) void = {
     CGImageRelease(cg_img);
 }
 
-fn macos_frame(sapp: *Sapp.Self) void = {
+fn frame(macos: *Impl) void = {
+    sapp := macos.common();
+    pool := objc_autoreleasePoolPush();
+    @debug_assert(SOKOL_BACKEND != .WGPU);
     sapp.frame();
+    @debug_assert(SOKOL_BACKEND != .WGPU);
     if sapp.quit_requested || sapp.quit_ordered {
         @objc sapp.impl()[].window.performClose(0);
-    }
+    };
+    objc_autoreleasePoolPop(pool);
 }
 
 // 
@@ -431,7 +422,7 @@ fn GET(obj: id"T") Ty(*Sapp.Self, *Impl) #inline = {
 
 FrancaAppDelegate :: @struct {
     EXTENDS :: "NSObject";
-    IMPLEMENTS :: @const_slice("NSApplicationDelegate");
+    //IMPLEMENTS :: @const_slice("NSApplicationDelegate");  // TODO: seems to be null?????
     Self :: id"FrancaAppDelegate";
 
     applicationDidFinishLaunching :: fn(app_delegate: Self, _: id"NSNotification") void = {
@@ -468,28 +459,41 @@ FrancaAppDelegate :: @struct {
             delegate = macos.win_dlg,
         );
         object_setInstanceVariable(macos.win_dlg, "franca_sapp", Impl.raw_from_ptr(macos));
-        ASSERT_METAL();
+        ASSERT_NOT_GL();
         max_fps := @objc @as(i64) screen.maximumFramesPerSecond();  // if (@available(macOS 12.0, *))
         
-        fn MTLCreateSystemDefaultDevice() id("MTLDevice") #import("Metal");
         macos.mtl_device = MTLCreateSystemDefaultDevice();
-        v := new "FrancaView";
+        @debug_assert(!macos.mtl_device.is_null(), "MTLCreateSystemDefaultDevice");
+        v := @objc cls("FrancaView").alloc();
         macos.view = v;
         object_setInstanceVariable(v, "franca_sapp", Impl.raw_from_ptr(macos));
-        @objc v.updateTrackingAreas();
+        v = @objc v.initWithFrame(window_rect);
+        macos.view = v;
+        
+        // TODO: make sure i'm doing whatever MTKView was doing with this information:
+        //       swap_interval, sample_count
+        //       metalLayer.depthStencilPixelFormat = 260, // MTLPixelFormatDepth32Float_Stencil8
         @objc_set(v) (
-            preferredFramesPerSecond = max_fps / sapp.swap_interval,
-            device = macos.mtl_device,
-            colorPixelFormat = 80,  // MTLPixelFormatBGRA8Unorm
-            depthStencilPixelFormat = 260,  // MTLPixelFormatDepth32Float_Stencil8
-            sampleCount = sapp.sample_count,
-            autoResizeDrawable = false,
+            wantsLayer = true,
+            // TODO: im not convinced this behaves how i want. maybe i need to override drawRect to do something? 
+            //       i want to always be drawing, without getting stuck in the full screen animation. 
+            layerContentsRedrawPolicy = 2, // NSViewLayerContentsRedrawDuringViewResize
         );
-        @objc w.setContentView(v);
+        macos.setup_display_link();
+        
+        layer := @objc @as(id"CAMetalLayer") v.layer();
+        @objc_set(layer) (
+            delegate = v,
+            device = macos.mtl_device,
+            pixelFormat = 80, // MTLPixelFormatBGRA8Unorm
+            magnificationFilter = c.kCAFilterNearest,
+        );
+        
+        @objc v.updateTrackingAreas();
+        @objc w.setContentView(v);  // this calls viewDidMoveToWindow
         @objc w.makeFirstResponder(v);
         
-        layer := @objc v.layer();
-        @objc layer.setMagnificationFilter(c.kCAFilterNearest);
+        @debug_assert(SOKOL_BACKEND != .WGPU);
         @objc w.center();
         sapp.valid = true;
         @objc c.NSApp.setActivationPolicy(0); // NSApplicationActivationPolicyRegular
@@ -556,12 +560,17 @@ FrancaWindowDelegate :: @struct {
         sapp.quit_ordered
     }
     
+    // TODO: remove this
     windowWillStartLiveResize :: fn(self: Self, _: id"NSNotification") void = {
         sapp, macos := GET(self);
         // Work around the MTKView resizing glitch by "anchoring" the layer to the window corner opposite
         // to the currently manipulated corner (or edge). This prevents the content stretching back and
         // forth during resizing. This is a workaround for this issue: https://github.com/floooh/sokol/issues/700
         // Can be removed if/when migrating to CAMetalLayer: https://github.com/floooh/sokol/issues/727
+        //
+        // TODO: im doing something wrong ig cause im using cametallayer now and it still looks like ass without this
+        //       but only sometimes....? it's like it gets confused....? -- May 6, 2025
+        //
         resizing_from_left := sapp.mouse.x.cast() < sapp.window_width.float()/2;
         resizing_from_top  := sapp.mouse.y.cast() < sapp.window_height.float()/2;
         br, tr, bl, tl := (7, 5, 9, 11); // NSViewLayerContentsPlacement
@@ -671,23 +680,29 @@ FrancaWindow :: @struct {
 };
 
 // TODO: for gl: override timerFired and prepareOpenGL on view
-
 FrancaView :: @struct {
-    EXTENDS :: "MTKView";
+    EXTENDS :: "NSView";
+    IMPLEMENTS :: @const_slice("CALayerDelegate");
     Self :: id"FrancaView";
     
-    drawRect :: fn(self: Self, _rect: CGRect) void = {
-        sapp, _ := GET(self);
-        @debug_assert(SOKOL_BACKEND.is_metal());
-        //sapp.timing_measure(sapp.timing&);  // TODO: timing
-        /* Catch any last-moment input events */
-        // sokol had this commented out
-        // https://github.com/floooh/sokol/pull/483#issuecomment-805148815
-        // sapp.macos_poll_input_events();
-        pool := objc_autoreleasePoolPush();
-        sapp.macos_frame();
-        objc_autoreleasePoolPop(pool);
-        @debug_assert(SOKOL_BACKEND.is_metal());
+    layerClass :: fn(self: Self) ObjCClass = 
+        cls("CAMetalLayer");
+    
+    makeBackingLayer :: fn(self: Self) ObjCId = 
+        @objc cls("CAMetalLayer").layer();
+
+    setFrame :: fn(self: Self, frame: CGRect) void = {
+        ctx: ObjCSuper = (receiver = self, super_class = cls("NSView"));
+        @objc_super ctx&.setFrame(frame);
+        _, macos := GET(self);
+        macos.update_dimensions();
+    }
+    
+    setBounds :: fn(self: Self, bounds: CGRect) void = {
+        ctx: ObjCSuper = (receiver = self, super_class = cls("NSView"));
+        @objc_super ctx&.setBounds(bounds);
+        _, macos := GET(self);
+        macos.update_dimensions();
     }
     
     isOpaque :: fn(_: Self) bool = true;
@@ -696,6 +711,7 @@ FrancaView :: @struct {
     updateTrackingAreas :: fn(self: Self) void = {
         sapp, macos := GET(self);
         
+        ::ptr_utils(@type macos.tracking_area[]);
         if !macos.tracking_area.is_null() {
             @objc self.removeTrackingArea(macos.tracking_area);
             @objc macos.tracking_area.release();
@@ -868,9 +884,58 @@ FrancaView :: @struct {
     }
 };
 
+setup_display_link :: fn(macos: *Impl) void = {
+    macos.display_source = dispatch_source_create(DISPATCH_SOURCE_TYPE_DATA_ADD(), 0, 0, dispatch_get_main_queue());
+    @debug_assert(!macos.display_source._.is_null(), "dispatch_source_create");
+    dispatch_set_context(macos.display_source, Impl.raw_from_ptr(macos));
+    dispatch_source_set_event_handler_f(macos.display_source, display_link_callback2);
+    dispatch_resume(macos.display_source);
+
+    res := CVDisplayLinkCreateWithActiveCGDisplays(macos.display_link&);
+    @assert(res.is_ok(), "CVDisplayLinkCreateWithActiveCGDisplays");
+    @debug_assert(!macos.display_link._.is_null(), "CVDisplayLinkCreateWithActiveCGDisplays");
+    
+    res := CVDisplayLinkSetOutputCallback(macos.display_link, display_link_callback1, bit_cast_unchecked(*Impl, rawptr, macos));
+    @assert(res.is_ok(), "CVDisplayLinkSetOutputCallback");
+
+    disp_id := {
+        screen := @objc cls("NSScreen").mainScreen();
+        devices := @objc screen.deviceDescription();
+        name := @objc cls("NSString").stringWithUTF8String(@as(CStr) "NSScreenNumber");
+        desc := @objc devices.objectForKey(name);
+        @debug_assert(!desc.is_nil(), "CGDirectDisplayID");
+        @objc @as(CGDirectDisplayID) desc.unsignedIntegerValue()
+    };
+    // this needs to be after SetOutputCallback
+    res := CVDisplayLinkSetCurrentCGDisplay(macos.display_link, disp_id);
+    @assert(res.is_ok(), "CVDisplayLinkSetCurrentCGDisplay");
+    
+    res := CVDisplayLinkStart(macos.display_link);
+    @assert(res.is_ok(), "CVDisplayLinkStart");
+}
+
+// 3 trillion dollars buys you way more callbacks per callback than you could ever imagine. 
+// this dance is to call the event/render code on the main thread. 
+
+display_link_callback1 :: fn(displayLink: CVDisplayLinkRef, now: rawptr, outputTime: rawptr, flagsIn: i64, flagsOut: *i64, displayLinkContext: rawptr) voidResult = {
+    macos := bit_cast_unchecked(rawptr, *Impl, displayLinkContext);
+    set_dynamic_context(macos.env);
+    dispatch_source_merge_data(macos.display_source, 1);
+    (value = 0)
+}
+
+display_link_callback2 :: fn(userdata: rawptr) void = {
+    macos := Impl.ptr_from_raw(userdata);
+    set_dynamic_context(macos.env);
+    // TODO: produce a test where you can tell this does somethings
+    /* Catch any last-moment input events */
+    macos.poll_input_events();
+    macos.frame();
+}
+
 // helper function to make GL context active
 fn gl_make_current(sapp: *Sapp.Self) void = {
-    @debug_assert(SOKOL_BACKEND.is_metal());
+    ASSERT_NOT_GL();
 }
 
 fn handle_mouse_press(view: id"FrancaView", event: id"NSEvent", action: Sapp.EventType, which: Sapp.Mousebutton) void = {
@@ -909,34 +974,58 @@ fn handle_mouse_move(view: id"FrancaView", event: id"NSEvent", other: bool) void
     sapp.macos_mouse_event(.MOUSE_MOVE, .INVALID, event);
 }
 
+fn poll_input_events(macos: *Impl) void = {
+    mask := -1;  // gimme everything! 
+
+    pool := objc_autoreleasePoolPush();
+    NSApp := macos.classes.NSApp;
+    NSEventTrackingRunLoopMode := ObjCId.ptr_from_raw(@import_symbol("NSEventTrackingRunLoopMode", "AppKit"))[];
+    loop {
+        // NOTE: using NSDefaultRunLoopMode here causes stuttering in the GL backend,
+        // see: https://github.com/floooh/sokol/issues/486
+        event := @objc NSApp.nextEventMatchingMask(mask, untilDate = zeroed ObjCId, inMode = NSEventTrackingRunLoopMode, dequeue = true);
+        if event.is_null() {
+            objc_autoreleasePoolPop(pool);
+            return();
+        }
+        @objc NSApp.sendEvent(event);
+    }
+}
+
 // my impression is that ObjCId is a rawptr and (__bridge const void*) does nothing
 
 fn metal_get_device(macos: *Impl) rawptr = {
     @debug_assert(macos.common()[].valid, "not valid");
-    @debug_assert(SOKOL_BACKEND.is_metal());
-    bit_cast_unchecked(ObjCId, rawptr, macos.mtl_device)
+    ASSERT_NOT_GL();
+    it := bit_cast_unchecked(ObjCId, rawptr, macos.mtl_device);
+    it
 }
 
 fn metal_get_current_drawable(macos: *Impl) rawptr = {
     @debug_assert(macos.common()[].valid);
-    @debug_assert(SOKOL_BACKEND.is_metal());
-    @objc @as(rawptr) macos.view.currentDrawable()
+    ASSERT_NOT_GL();
+    layer := @objc macos.view.layer();
+    // TODO: maybe we want to make sure they only call this once per frame
+    currentDrawable := @objc @as(rawptr) layer.nextDrawable();
+    currentDrawable
 }
 
 fn metal_get_depth_stencil_texture(macos: *Impl) rawptr = {
     @debug_assert(macos.common()[].valid);
-    @debug_assert(SOKOL_BACKEND.is_metal());
-    @objc @as(rawptr) macos.view.depthStencilTexture()
+    ASSERT_NOT_GL();
+    //@objc @as(rawptr) macos.view.depthStencilTexture()  // :DEPTH
+    zeroed rawptr
 }
 
 fn metal_get_msaa_color_texture(macos: *Impl) rawptr = {
     @debug_assert(macos.common()[].valid);
-    @debug_assert(SOKOL_BACKEND.is_metal());
-    @objc @as(rawptr) macos.view.multisampleColorTexture()
+    ASSERT_NOT_GL();
+    //@objc @as(rawptr) macos.view.multisampleColorTexture()  // :DEPTH
+    zeroed rawptr
 }
 
 fn macos_get_window(macos: *Impl) rawptr = {
-    @debug_assert(SOKOL_BACKEND.is_metal()); // TODO: we just care that it's macos
+    ASSERT_NOT_GL(); // TODO: we just care that it's macos
     bit_cast_unchecked(ObjCId, rawptr, macos.window)
 }
 
@@ -1064,8 +1153,3 @@ fn keytable(self: *Impl) []Sapp.Keycode = {
         (0x4E, .KP_SUBTRACT),
     )
 }
-
-// TODO: this is a paste from examples/soft_draw.fr do i want to write more official bindings to the apple stuff? :PastedMacosBindings
-CGSize  :: @struct(width: f64, height: f64);
-CGPoint :: @struct(x: f64, y: f64);
-CGRect  :: @struct(origin: CGPoint, size: CGSize);  // same as NSRect

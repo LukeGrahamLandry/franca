@@ -10,12 +10,16 @@ build_for_graphics :: fn(vtable: *ImportVTable, input_path: Str) void = {
     opts.retain_function_names = true;
     
     want_jit := false;
+    use_a_linker := false;
     for cli_args() { a |
         if a == "-unsafe" {
             s := opts.safety_checks&;
             s.insert(.Bounds, false);
             s.insert(.DebugAssertions, false);
             s.insert(.InvalidTag, false);
+        };
+        if a == "-keep-names" {
+            use_a_linker = true;
         };
         want_jit = want_jit || a == "-jit";
     };
@@ -28,7 +32,7 @@ build_for_graphics :: fn(vtable: *ImportVTable, input_path: Str) void = {
     
     os: Os = .macos;  // :HardcodeOs
     if os == .macos { // && want_jit { // remove this check so you can just put a '::' in main as a demo
-        libs :: @const_slice("objc", "CoreGraphics", "Metal", "QuartzCore", "AppKit", "MetalKit", "Cocoa", "CoreFoundation");
+        libs :: @const_slice("objc", "CoreGraphics", "Metal", "QuartzCore", "AppKit", "MetalKit", "Cocoa", "CoreFoundation", "CoreVideo");
         
         for libs { name |
             path := import("@/backend/macho/emit.fr")'guess_path(name);
@@ -47,10 +51,15 @@ build_for_graphics :: fn(vtable: *ImportVTable, input_path: Str) void = {
     main_f := {vtable.find_unique_func}(comp, main_sym).unwrap();
     
     m := QbeModule.zeroed();
-    init_default_module_dyn(m&, vtable, (arch = query_current_arch(), os = os, type = @if(want_jit, .JitOnly, .Exe))); 
+    init_default_module_dyn(m&, vtable, (
+        arch = query_current_arch(), 
+        os = os, 
+        type = @if(want_jit, .JitOnly, @if(use_a_linker, .Relocatable, .Exe)),
+    )); 
     bytes := emit_qbe_included_dyn(m&, ctx&, @slice(main_f), .WrapMain); 
     
     if want_jit {
+        @debug_assert(!use_a_linker);
         ptr := m&.get_addr(ctx.fmt_fn_name(main_f)).unwrap();
         end := timestamp();
         m&.make_exec();
@@ -70,6 +79,19 @@ build_for_graphics :: fn(vtable: *ImportVTable, input_path: Str) void = {
     
     end := timestamp();
     @eprintln(">>> compiled in %ms", end - start);
+    
+    if use_a_linker {
+        SOKOL_MACOS_LINK_ARGS :: @array("-framework", "Metal", "-framework", "MetalKit", "-framework", "Cocoa", "-framework", "QuartzCore");
+        a := SOKOL_MACOS_LINK_ARGS;
+        args := Str.list(temp());
+        args&.push_all(a&.items());
+        args&.push_all(@slice ("a.out", "-o", "a.out"));    
+        args&.push_all(@slice ("-target", target_triple(m.goal.arch, m.goal.os)));   
+        @println("building aot exe: %", args.items());
+        success := run_cmd_blocking("clang", args.items());
+        assert(success, "clang failed");
+    };
+    
 }
 
 //
@@ -80,8 +102,8 @@ build_for_graphics :: fn(vtable: *ImportVTable, input_path: Str) void = {
 glue_environment :: fn(sapp: *Sapp.Self) SgEnvironment = {
     env := zeroed SgEnvironment;
     env.defaults.color_format = sapp.color_format();
-    env.defaults.depth_format = sapp.depth_format();
-    env.defaults.sample_count = sapp.sample_count.intcast();
+    env.defaults.depth_format = .NONE;//sapp.depth_format(); :DEPTH
+    env.defaults.sample_count = 1;//sapp.sample_count.intcast(); :DEPTH
     env.metal.device = sapp.impl().metal_get_device();
     // TODO: update for d3d11/wgpu
     @debug_assert(SOKOL_BACKEND.is_metal());
@@ -93,9 +115,9 @@ glue_swapchain :: fn(sapp: *Sapp.Self) SgSwapchain = {
     swapchain := zeroed SgSwapchain;
     swapchain.width = sapp.width().intcast();
     swapchain.height = sapp.height().intcast();
-    swapchain.sample_count = sapp.sample_count.intcast();
+    swapchain.sample_count = 1; // sapp.sample_count.intcast(); :DEPTH
     swapchain.color_format = sapp.color_format();
-    swapchain.depth_format = sapp.depth_format();
+    swapchain.depth_format = .NONE; // sapp.depth_format(); :DEPTH
     swapchain.metal.current_drawable = sapp.impl().metal_get_current_drawable();
     swapchain.metal.depth_stencil_texture = sapp.impl().metal_get_depth_stencil_texture();
     swapchain.metal.msaa_color_texture = sapp.impl().metal_get_msaa_color_texture();
