@@ -26,10 +26,11 @@ Franca ports of various things useful for creating cross platform graphical appl
 - fewer getters (just access fields directly)
 - (macos) no dependency on an objective-c compiler
 - (macos) wait until after setActivationPolicy to set the startup icon/fullscreen (otherwise it doesn't work)
+- (macos) use CAMetalLayer directly (instead of MTKView)
 - UNFINISHED
   - don't have timing stuff (frame_duration)
   - only implemented for macos
-  - (macos) not caching objc selectors
+  - (macos) msaa
 
 ### gfx
 

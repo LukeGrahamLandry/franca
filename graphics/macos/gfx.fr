@@ -114,9 +114,9 @@ Impl :: @struct {
     cmd_buffer: id("MTLCommandBuffer");
     render_cmd_encoder: id("MTLRenderCommandEncoder");
     compute_cmd_encoder: id("MTLComputeCommandEncoder");
-    cur_drawable: id("CAMetalDrawable");
+    cur_drawable: id("MTLDrawable");
     uniform_buffers: Array(id("MTLBuffer"), Sg.SG_NUM_INFLIGHT_FRAMES);
-    pass_completed_sem: id("_NSConcreteGlobalBlock");
+    pass_completed_sem: *Block_literal_1;
 };
 
 fn to_mtl(it: SgLoadAction) M("MTLLoadAction") = @map_enum(it) 
@@ -427,20 +427,17 @@ fn ns_str(s: CStr) id("NSString") =
 //-- main Metal backend state and functions ------------------------------------
 fn setup_backend(mtl: *Impl, desc: *SgDesc) void = {
     // assume already zero-initialized
-    @debug_assert(!desc.environment.metal.device.is_null());
+    @debug_assert(!desc.environment.metal.device.is_nil());
     @debug_assert(desc.uniform_buffer_size > 0);
     mtl.init_pool(desc);
     mtl.clear_state_cache();  // ... not assuming already zero-initialized?
     mtl.valid = true;
     mtl.ub_size = desc.uniform_buffer_size;
     mtl.sem = dispatch_semaphore_create(Sg.SG_NUM_INFLIGHT_FRAMES);
-    mtl.device = bit_cast_unchecked(rawptr, id("MTLDevice"), desc.environment.metal.device);
+    mtl.device = desc.environment.metal.device;
     mtl.cmd_queue = @objc mtl.device.newCommandQueue();
     
-    {
-        aBlock := new_global_block(mtl.sg.desc.allocator, Impl.raw_from_ptr(mtl), @as(rawptr) pass_completed_handler);
-        mtl.pass_completed_sem = bit_cast_unchecked(rawptr, ObjCId, aBlock);
-    };
+    mtl.pass_completed_sem = new_global_block(mtl.sg.desc.allocator, Impl.raw_from_ptr(mtl), @as(rawptr) pass_completed_handler);
 
     range(0, Sg.SG_NUM_INFLIGHT_FRAMES) { i |
         o := 1; // MTLResourceCPUCacheModeWriteCombined|MTLResourceStorageModeShared;
@@ -699,8 +696,8 @@ fn create(mtl: *Impl, smp: *Sg.Sampler.T, desc: *Sg.Sampler.Desc) SgResourceStat
             minFilter = mtl_minmag desc.min_filter,
             magFilter = mtl_minmag desc.mag_filter,
             mipFilter = mtl_mipmap desc.mipmap_filter,
-            lodMinClamp = desc.min_lod,
-            lodMaxClamp = desc.max_lod,
+            lodMinClamp = @as(f32) desc.min_lod,
+            lodMaxClamp = @as(f32) desc.max_lod,
             // FIXME: lodAverage?
             maxAnisotropy = desc.max_anisotropy,
             normalizedCoordinates = true,
@@ -958,8 +955,7 @@ fn create(mtl: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg.Pipeline
             alphaToOneEnabled = false,
             rasterizationEnabled = true,
             // TODO: this is supposed to be optional tho?
-            // :DEPTH
-            //depthAttachmentPixelFormat = to_mtl(desc.depth.pixel_format),
+            depthAttachmentPixelFormat = to_mtl(desc.depth.pixel_format),
         );
         if desc.depth.pixel_format == .DEPTH_STENCIL {
             @objc rp_desc.setStencilAttachmentPixelFormat(to_mtl(desc.depth.pixel_format));
@@ -1027,8 +1023,8 @@ fn create(mtl: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg.Pipeline
                     depthFailureOperation     = to_mtl f.depth_fail_op,
                     depthStencilPassOperation = to_mtl f.pass_op,
                     stencilCompareFunction    = to_mtl f.compare,
-                    readMask  = d.stencil.read_mask,
-                    writeMask = d.stencil.write_mask,
+                    readMask  = @as(u32) d.stencil.read_mask.zext(),
+                    writeMask = @as(u32) d.stencil.write_mask.zext(),
                 );
                 it
             };
@@ -1173,8 +1169,8 @@ fn begin_render_pass(mtl: *Impl, pass: *SgPass) void = {
             it := action.colors&.index(i);
             have_resolve := !resolve_att_img.is_null();
             @objc_set(ca) (
-                load_action = to_mtl it.load_action,
-                store_action = to_mtl(it.store_action, have_resolve),
+                loadAction = to_mtl it.load_action,
+                storeAction = to_mtl(it.store_action, have_resolve),
                 clearColor = to_mtl it.clear_value,
                 texture = get_texture(color_att_img),
                 level = @as(i64) cmn_color_att.mip_level.intcast(),
@@ -1202,7 +1198,7 @@ fn begin_render_pass(mtl: *Impl, pass: *SgPass) void = {
                 texture = get_texture(ds_att_img),
                 loadAction = to_mtl action.depth.load_action,
                 storeAction = to_mtl(action.depth.store_action, false),
-                clearDepth = action.depth.clear_value,
+                clearDepth = @as(f64) cast action.depth.clear_value,
             );
             cmn_ds_att := atts.cmn.depth_stencil&;
             slice_or_depth(d, ds_att_img, cmn_ds_att);
@@ -1219,28 +1215,18 @@ fn begin_render_pass(mtl: *Impl, pass: *SgPass) void = {
         }
     } else {
         swapchain := pass.swapchain&;
-    
-        // setup pass descriptor for swapchain rendering
-        //
-        // NOTE: at least in macOS Sonoma this no longer seems to be the case, the
-        // current drawable is also valid in a minimized window
-        // ===
-        // an MTKView current_drawable will not be valid if window is minimized, don't do any rendering in this case
-        if swapchain.metal.current_drawable.is_null() {
-            mtl.sg.cur_pass.valid = false;
-            return;
-        }
+        @debug_assert(!swapchain.metal.current_drawable.is_nil(), "swapchain pass missing render target");
         // pin the swapchain resources into memory so that they outlive their command buffer
         // (this is necessary because the command buffer doesn't retain references)
         pass_desc_ref := mtl.add_resource(pass_desc);
         mtl.release_resource(mtl.sg.frame_index, pass_desc_ref);
 
-        mtl.cur_drawable = bit_cast_unchecked(rawptr, id("CAMetalDrawable"), swapchain.metal.current_drawable);
+        mtl.cur_drawable = swapchain.metal.current_drawable;
         ca := @objc pass_desc.colorAttachments();
         ca := @objc ca.objectAtIndexedSubscript(0);
         if (swapchain.sample_count > 1) {
             // multi-sampling: render into msaa texture, resolve into drawable texture
-            msaa_tex := bit_cast_unchecked(rawptr, id("MTLTexture"), swapchain.metal.msaa_color_texture);
+            msaa_tex := swapchain.metal.msaa_color_texture;
             @debug_assert(!msaa_tex.is_nil());
             @objc ca.setTexture(msaa_tex);
             @objc ca.setResolveTexture(@objc mtl.cur_drawable.texture());
@@ -1254,9 +1240,9 @@ fn begin_render_pass(mtl: *Impl, pass: *SgPass) void = {
         @objc ca.setClearColor(action.colors&[0].clear_value.to_mtl());
 
         // optional depth-stencil texture
-        if !swapchain.metal.depth_stencil_texture.is_null() {
-            ds_tex := bit_cast_unchecked(rawptr, id("MTLTexture"), swapchain.metal.depth_stencil_texture);
-            @debug_assert(!ds_tex.is_null());
+        if !swapchain.metal.depth_stencil_texture.is_nil() {
+            ds_tex := swapchain.metal.depth_stencil_texture;
+            @debug_assert(!ds_tex.is_nil());
             @objc_set(@objc pass_desc.depthAttachment()) (
                 texture = ds_tex,
                 storeAction = 0, // MTLStoreActionDontCare
@@ -1439,8 +1425,12 @@ fn apply_pipeline(mtl: *Impl, pip: *Sg.Pipeline.T) void = {
             mtl.sg.stat(.mtl_num_apply_render_pipeline, 1);
             @debug_assert(pip.mtl.rps != 0 && pip.mtl.dss != 0);
             
-            @objc e.setBlendColorRed(c.r, green = c.g, blue = c.b, alpha = c.a);
-            @objc e.setDepthBias(pip.cmn.depth.bias, slopeScale = pip.cmn.depth.bias_slope_scale, clamp = pip.cmn.depth.bias_clamp);
+            @objc e.setBlendColorRed(@as(f32) c.r, green = c.g, blue = c.b, alpha = c.a);
+            @objc e.setDepthBias(
+                @as(f32) pip.cmn.depth.bias, 
+                slopeScale = @as(f32) pip.cmn.depth.bias_slope_scale, 
+                clamp = @as(f32) pip.cmn.depth.bias_clamp,
+            );
             @objc_set(e) (
                 cullMode = pip.mtl.cull_mode,
                 frontFacingWinding = pip.mtl.winding,
@@ -1604,17 +1594,17 @@ fn apply_uniforms(mtl: *Impl, ub_slot: i32, data: []u8) void = {
     dst.slice(data.len).copy_from(data);
     @match(stage) {
         fn VERTEX() => {
-            @debug_assert(!mtl.render_cmd_encoder.is_null());
+            @debug_assert(!mtl.render_cmd_encoder.is_nil());
             @objc mtl.render_cmd_encoder.setVertexBufferOffset(mtl.cur_ub_offset, atIndex = mtl_slot);
             mtl.sg.stat(.mtl_uniforms_num_set_vertex_buffer_offset, 1);
         }
         fn FRAGMENT() => {
-            @debug_assert(!mtl.render_cmd_encoder.is_null());
+            @debug_assert(!mtl.render_cmd_encoder.is_nil());
             @objc mtl.render_cmd_encoder.setFragmentBufferOffset(mtl.cur_ub_offset, atIndex = mtl_slot);
             mtl.sg.stat(.mtl_uniforms_num_set_fragment_buffer_offset, 1);
         }
         fn COMPUTE() => {
-            @debug_assert(!mtl.compute_cmd_encoder.is_null());
+            @debug_assert(!mtl.compute_cmd_encoder.is_nil());
             @objc mtl.compute_cmd_encoder.setBufferOffset(mtl.cur_ub_offset, atIndex = mtl_slot);
             mtl.sg.stat(.mtl_uniforms_num_set_compute_buffer_offset, 1);
         }

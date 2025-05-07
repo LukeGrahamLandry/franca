@@ -28,7 +28,7 @@ _sg_tracker_t :: RawList(Buffer);
 
 _SG_STRING_SIZE :: 32;
 _SG_SLOT_SHIFT :: 16;
-_SG_SLOT_MASK :: _SG_SLOT_SHIFT-1;
+_SG_SLOT_MASK :: _SG_MAX_POOL_SIZE-1;
 _SG_MAX_POOL_SIZE :: 1.shift_left(_SG_SLOT_SHIFT);
 _SG_DEFAULT_BUFFER_POOL_SIZE :: 128;
 _SG_DEFAULT_IMAGE_POOL_SIZE :: 128;
@@ -680,6 +680,18 @@ fn discard_all_resources(sg: *Self) void = {
     };
 }
 
+// 
+// This is ~800 lines of super boring validation code. 
+// It does nothing except take up space and be slow. It won't even be included in release binaries. 
+// DO NOT FUCKING REMOVE IT. IT IS BY FAR THE HIGHEST VALUE SERVICE WE PROVIDE. 
+// You ask for pixel on screen by passing 7 structs with 40 fields each. 
+// If you make a mistake you do NOT want:
+// - a) silently no pixel on screen
+// - b) stack trace twenty thousand leagues deep in std::CoreGarbageKit::delegate::manager
+// When you make a mistake we should do everything possible to TELL YOU THE PROBLEM 
+// before handing it off to someone else who we can't control and who probably doesn't give a shit. 
+// 
+
 fn _sg_validate_begin(sg: *Self) void = if SOKOL_DEBUG {
     sg.validate_error = "";
 };
@@ -1047,7 +1059,7 @@ fn validate(sg: *Self, desc: *Pipeline.Desc) bool = @validate(sg) {
                 if (shd.cmn.attrs&[attr_index].base_type != .Undefined) {
                     if (vertexformat_basetype(a_state.format) != shd.cmn.attrs&[attr_index].base_type) {
                         @V(false, VALIDATE_PIPELINEDESC_ATTR_BASETYPE_MISMATCH);
-                        @eprintln("attr format: % shader attr base type: %", a_state.format, shd.cmn.attrs&[attr_index].base_type);
+                        @debug_log("attr format: % shader attr base type: %", a_state.format, shd.cmn.attrs&[attr_index].base_type);
                     }
                 }
                 ASSERT_METAL();
@@ -1189,16 +1201,16 @@ fn validate_begin_pass(sg: *Self, pass: *SgPass) bool = @validate(sg) {
         @V(!@is(pass.swapchain.color_format, .NONE, .DEFAULT), VALIDATE_BEGINPASS_SWAPCHAIN_EXPECT_COLORFORMAT);
         // NOTE: depth buffer is optional, so depth_format is allowed to be invalid
         // NOTE: the GL framebuffer handle may actually be 0
-        @V(!pass.swapchain.metal.current_drawable.is_null(), VALIDATE_BEGINPASS_SWAPCHAIN_METAL_EXPECT_CURRENTDRAWABLE);
+        @V(!pass.swapchain.metal.current_drawable.is_nil(), VALIDATE_BEGINPASS_SWAPCHAIN_METAL_EXPECT_CURRENTDRAWABLE);
         if (pass.swapchain.depth_format == .NONE) {
-            @V(pass.swapchain.metal.depth_stencil_texture.is_null(), VALIDATE_BEGINPASS_SWAPCHAIN_METAL_EXPECT_DEPTHSTENCILTEXTURE_NOTSET);
+            @V(pass.swapchain.metal.depth_stencil_texture.is_nil(), VALIDATE_BEGINPASS_SWAPCHAIN_METAL_EXPECT_DEPTHSTENCILTEXTURE_NOTSET);
         } else {
-            @V(!pass.swapchain.metal.depth_stencil_texture.is_null(), VALIDATE_BEGINPASS_SWAPCHAIN_METAL_EXPECT_DEPTHSTENCILTEXTURE);
+            @V(!pass.swapchain.metal.depth_stencil_texture.is_nil(), VALIDATE_BEGINPASS_SWAPCHAIN_METAL_EXPECT_DEPTHSTENCILTEXTURE);
         }
         if (pass.swapchain.sample_count > 1) {
-            @V(!pass.swapchain.metal.msaa_color_texture.is_null(), VALIDATE_BEGINPASS_SWAPCHAIN_METAL_EXPECT_MSAACOLORTEXTURE);
+            @V(!pass.swapchain.metal.msaa_color_texture.is_nil(), VALIDATE_BEGINPASS_SWAPCHAIN_METAL_EXPECT_MSAACOLORTEXTURE);
         } else {
-            @V(pass.swapchain.metal.msaa_color_texture.is_null(), VALIDATE_BEGINPASS_SWAPCHAIN_METAL_EXPECT_MSAACOLORTEXTURE_NOTSET);
+            @V(pass.swapchain.metal.msaa_color_texture.is_nil(), VALIDATE_BEGINPASS_SWAPCHAIN_METAL_EXPECT_MSAACOLORTEXTURE_NOTSET);
         }
         ASSERT_METAL();
     };
@@ -1235,9 +1247,9 @@ fn validate_begin_pass(sg: *Self, pass: *SgPass) bool = @validate(sg) {
         @V(it.sample_count == 0, VALIDATE_BEGINPASS_SWAPCHAIN_EXPECT_SAMPLECOUNT_NOTSET);
         @V(it.color_format == .DEFAULT, VALIDATE_BEGINPASS_SWAPCHAIN_EXPECT_COLORFORMAT_NOTSET);
         @V(it.depth_format == .DEFAULT, VALIDATE_BEGINPASS_SWAPCHAIN_EXPECT_DEPTHFORMAT_NOTSET);
-        @V(it.metal.current_drawable.is_null(), VALIDATE_BEGINPASS_SWAPCHAIN_METAL_EXPECT_CURRENTDRAWABLE_NOTSET);
-        @V(it.metal.depth_stencil_texture.is_null(), VALIDATE_BEGINPASS_SWAPCHAIN_METAL_EXPECT_DEPTHSTENCILTEXTURE_NOTSET);
-        @V(it.metal.msaa_color_texture.is_null(), VALIDATE_BEGINPASS_SWAPCHAIN_METAL_EXPECT_MSAACOLORTEXTURE_NOTSET);
+        @V(it.metal.current_drawable.is_nil(), VALIDATE_BEGINPASS_SWAPCHAIN_METAL_EXPECT_CURRENTDRAWABLE_NOTSET);
+        @V(it.metal.depth_stencil_texture.is_nil(), VALIDATE_BEGINPASS_SWAPCHAIN_METAL_EXPECT_DEPTHSTENCILTEXTURE_NOTSET);
+        @V(it.metal.msaa_color_texture.is_nil(), VALIDATE_BEGINPASS_SWAPCHAIN_METAL_EXPECT_MSAACOLORTEXTURE_NOTSET);
         ASSERT_METAL();
     }
 };
@@ -1517,8 +1529,8 @@ fn desc_defaults(sg: *Self, desc: *Image.Desc) Image.Desc = {
     return def;
 }
 
-fn _SG_ERROR(s: Str) void = @eprintln("%", s);
-fn _SG_LOGMSG(s: Str, c: CStr) void = @eprintln("%: %", s, c);
+fn _SG_ERROR(s: Str) void = @debug_log("%", s);
+fn _SG_LOGMSG(s: Str, c: CStr) void = @debug_log("%: %", s, c);
 
 fn desc_defaults(_: *Self, desc: *Sampler.Desc) Sampler.Desc = {
     desc[]
@@ -2032,8 +2044,7 @@ fn begin_pass(sg: *Self, pass: *SgPass) void #trace_args(.tail) = {
         } else {
             // a swapchain pass
             sc := pass_def.swapchain&;
-            @debug_assert(sc.width > 0);
-            @debug_assert(sc.height > 0);
+            @debug_assert(sc.width > 0 && sc.height > 0);
             @debug_assert(valid_enum(sc.color_format));
             cur.width = sc.width;
             cur.height = sc.height;
@@ -2183,7 +2194,7 @@ fn apply_bindings(sg: *Self, bindings: *SgBindings) void = {
 fn apply_uniforms(sg: *Self, ub_slot: i32, data: []u8) void #trace(.tail) = {
     @debug_assert(sg.valid);
     @debug_assert((ub_slot >= 0) && (ub_slot < SG_MAX_UNIFORMBLOCK_BINDSLOTS));
-    @debug_assert(!data.ptr.is_null() && data.len > 0);
+    @debug_assert(!data.ptr.is_null() && data.len > 0, "empty uniforms");
     sg.stat(.num_apply_uniforms, 1);
     sg.stat(.size_apply_uniforms, trunc data.len);
     abu := sg.applied_bindings_and_uniforms&;

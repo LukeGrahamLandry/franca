@@ -3,7 +3,7 @@
 
 ObjCClass    :: @struct(_: rawptr);
 ObjCObject   :: @struct(isa: ObjCClass);
-ObjCId       :: *ObjCObject;
+ObjCId       :: @rec @struct(_: rawptr);
 ObjCSelector :: @struct(_: rawptr);
 ObjCProtocol :: @struct(_: rawptr);
 ObjCIVar :: @struct(_: rawptr);
@@ -58,7 +58,7 @@ fn objc_call_impl(a: FatExpr, super: bool) FatExpr = {
     args: List(FatExpr) = list(ast_alloc());
     selector: List(u8) = list(ast_alloc());
     placeholder := @{ panic("this will be replaced with the selector uid") };
-    
+    log := u8.list(temp());
     ret_ty := ObjCId; // default when you use call syntax. works for void as well because you can just ignore it.
     if true {
         break :: local_return;
@@ -67,6 +67,7 @@ fn objc_call_impl(a: FatExpr, super: bool) FatExpr = {
                 fn Call(it) => {
                     name := it.f.ident() || compile_error("@objc call f must be named", it.f.loc);
                     no_args := !@is(it.arg.expr&, .Tuple, .StructLiteralP);
+                    @fmt(log&, "% :: fn(self: ", name.str());
                     @match(it.arg.expr&) {
                         fn Tuple(it) => {
                             @ct_assert(it.len == 2, a.loc, "objc message send with multiple arguments needs names");
@@ -74,6 +75,7 @@ fn objc_call_impl(a: FatExpr, super: bool) FatExpr = {
                             if super {
                                 @ct_assert(it[0].ty == *ObjCSuper, a.loc, "@objc_super first arg needs to be an ObjCSuper");
                             };
+                            @fmt(log&, "%", it[0].ty.typename().str());
                             args_type&.push(it[0].ty);
                             args_type&.push(ObjCSelector);
                             args&.push(it[0]);
@@ -86,6 +88,7 @@ fn objc_call_impl(a: FatExpr, super: bool) FatExpr = {
                                 e := compile_ast(b[0].default);
                                 args_type&.push(e.ty);
                                 args&.push(e);
+                                @fmt(log&, ", _: %", e.ty.typename().str());
                                 
                                 range(1, b.len) { i |
                                     b := b.index(i);
@@ -95,6 +98,7 @@ fn objc_call_impl(a: FatExpr, super: bool) FatExpr = {
                                     value := b.default;
                                     @fmt(selector&, "%:", name.str());
                                     value := compile_ast(value);
+                                    @fmt(log&, ", %: %", name.str(), value.ty.typename().str());
                                     args&.push(value);
                                     args_type&.push(value.ty);
                                 };
@@ -110,6 +114,7 @@ fn objc_call_impl(a: FatExpr, super: bool) FatExpr = {
                         fn StructLiteralP(_) => compile_error("@objc reciever can't have name", it.arg.loc);
                         @default => {
                             reciever := compile_ast(it.arg[]);
+                            @fmt(log&, "%", reciever.ty.typename().str());
                             args_type&.push(reciever.ty);
                             args_type&.push(ObjCSelector);
                             args&.push(reciever);
@@ -133,6 +138,7 @@ fn objc_call_impl(a: FatExpr, super: bool) FatExpr = {
         };
     };
     
+    @fmt(log&, ") % #objc;", ret_ty.typename().str());
     arg_ty := Ty(args_type.items());
     selector := selector.items().sym().c_str();
     args[1] = @{ SEL(@[@literal selector]) };  
@@ -142,22 +148,27 @@ fn objc_call_impl(a: FatExpr, super: bool) FatExpr = {
         f(@[arg_pattern])
     };
     xx.loc = a.loc;
+    //println(log.items());   // :bindings
     xx
 }
 
-fn new($classname: Str) id(classname) #generic = 
-    @objc init(@objc cls(classname).alloc());
+fn new($classname: Str) id(classname) #generic = {
+    it := @objc init(@objc cls(classname).alloc());
+    @debug_assert(!it.is_nil(), "new % failed", classname);
+    it
+}
 
 // TODO: collect all the strings passed to this at comptime and load 
 //       all the classes at startup so you don't have to check every time 
 //       and don't have to worry about races. 
-fn cls($name: Str) ObjCClass = {
+fn cls($classname: Str) ObjCClass = {
     cache :: @static(ObjCClass) zeroed(ObjCClass);
     // TODO: This is not getting deduplicated properly? :FUCKED
     //       but it's also not one per callsite.     NSPasteboard,NSPasteboard are there twice
-    //::println(name);
+    //::@println("% :: @import_class {\n};", classname);  // :bindings
     if bit_cast_unchecked(ObjCClass, i64, cache[]) == 0 {
-        cache[] = objc_getClass(::name.sym().c_str());
+        cache[] = objc_getClass(::classname.sym().c_str());
+        @debug_assert(!cache[]._.is_null(), "class % does not exist", classname);
     }
     cache[]
 }
@@ -168,7 +179,7 @@ fn SEL($name: CStr) ObjCSelector = {
     
     cache := @static(ObjCSelector);
     if bit_cast_unchecked(ObjCSelector, i64, cache[]) == 0 {
-        cache[] = sel_getUid(name);
+        cache[] = sel_getUid(name); // this won't be null even if the selector was never registered
     }
     cache[]
 }
@@ -182,6 +193,7 @@ fn objc_set(self: FatExpr, pat: FatExpr) FatExpr #macro = as_var self { self |
         name := b.ident().unwrap().str();
         sel  := objc_property_name_to_selector(name);
         arg  := Ty(ObjCId, ObjCSelector, b.default.ty);
+        //@println("%: %;", name, b.default.ty.typename().str()); :bindings
         body = @{
             @[body];
             f :: assume_types_fn(@[@literal arg], void, @as(rawptr) objc_msgSend);
@@ -202,7 +214,7 @@ objc_property_name_to_selector :: fn(name: Str) CStr = {
 
 // WHY IS THIS SO FUCKING DIFFICULT BUT EVERYTHING ELSE WAS SO NORMAL ?? am i missing something? 
 // https://clang.llvm.org/docs/Block-ABI-Apple.html
-fn new_global_block(a: Alloc, userdata: rawptr, callee: rawptr) rawptr = {
+fn new_global_block(a: Alloc, userdata: rawptr, callee: rawptr) *Block_literal_1 = {
     b := a.box_zeroed(Block_literal_1);
     d := a.box_zeroed(Block_literal_1.Desc);
     d.size = size_of(Block_literal_1);
@@ -213,7 +225,7 @@ fn new_global_block(a: Alloc, userdata: rawptr, callee: rawptr) rawptr = {
     // runtime for objective c blocks is in libsystem not libobjc
     b.isa = @import_symbol("_NSConcreteGlobalBlock", "libc");
     d.signature = "@:@";
-    Block_literal_1.raw_from_ptr(b)
+    b
 }
 
 Block_literal_1 :: @struct {
@@ -224,7 +236,7 @@ Block_literal_1 :: @struct {
     descriptor: *Desc;
     userdata: rawptr;
     
-    Desc :: @struct {
+    Desc :: @rec @struct {
         reserved := 0;
         size: i64;
         copy_helper: rawptr;
@@ -330,26 +342,7 @@ fn fill_objc_reflect(def: Type) ObjcClassReflect #fold = {
                     // resolve_body=true so it doesn't get confused when we replace it 
                     // for debugging :InstrumentObjc
                     func := get_function_ast(fid, false, true, false, false);
-                    sel := {
-                        args := func.arg.bindings.items();
-                        sel := u8.list(temp());
-                        sel&.push_all(name.str());
-                        // Note: we don't expect people to have a `sel: ObjCSelector` 
-                        //       parameter, we insert that later. 
-                        if args.len > 1 {  // self, ... 
-                            sel&.push_all(":");
-                        }
-                        if args.len > 2 {
-                            // grab the rest based on parameter names
-                            each args.rest(2) { it |
-                                // :HERE
-                                sel&.push_all(it.name.unwrap().str());
-                                sel&.push_all(":");
-                            }
-                        };
-                        
-                        sel.items().sym().c_str()
-                    };
+                    sel := sel_from_params(name.str(), func.arg.bindings.items(), false).c_str();
                     // the runtime passes you the selector as the second argument,
                     // (to avoid shifting all the arguments to objc_msgSend) 
                     // which is useless because you already know the selector since  
@@ -382,4 +375,172 @@ fn fill_objc_reflect(def: Type) ObjcClassReflect #fold = {
             methods.items()
         },
     )
+}
+
+fn sel_from_params(name: Str, args: []Binding, is_static: bool) Symbol = {
+    sel := u8.list(temp());
+    sel&.push_all(name);
+    // Note: we don't expect people to have a `sel: ObjCSelector` 
+    //       parameter, we insert that later. 
+    if args.len > int(!is_static) {  // self, ... 
+        sel&.push_all(":");
+    }
+    if args.len > 1 + int(!is_static) {
+        // grab the rest based on parameter names
+        each args.rest(1 + int(!is_static)) { it |
+            // :HERE
+            sel&.push_all(it.name.unwrap().str());
+            sel&.push_all(":");
+        }
+    };
+    
+    sel.items().sym()
+};
+
+// See @/graphics/macos/frameworks.fr for example usage. 
+// These are only for imports. Use register_objc_class() instead to declare your own new classes. 
+fn class(arg: FatExpr) FatExpr #macro = import_objc(arg, false);
+fn protocol(arg: FatExpr) FatExpr #macro = import_objc(arg, true);
+
+fn import_objc(arg: FatExpr, is_protocol: bool) FatExpr = {
+    #use("@/compiler/ast_external.fr");
+    @ct_assert(arg.expr&.is(.Block), arg.loc, "expected Block for objc import");
+    
+    // TODO: fill in CLASS at startup somehow
+    // TODO: remove RELECT ::
+    T := const_eval(Type)(@{ @struct(_: rawptr, REFLECT :: @[arg], CLASS :: @static(ObjCClass)) });
+    s := Type.scope_of(T);
+    loc := arg.loc;
+    
+    synthesize_func :: fn(func: *Func, name: Symbol, is_static: bool) => {
+        fid := c.intern_func(func);
+        func := c.get_function(fid);  // TODO: footgun. it looks like it would stay valid since you pass a pointer. 
+        func.cc = (Some = .CCallReg);  // TODO: why ??
+        func.body = (Normal = @{ @expand objc_method_import_body(@[@literal T], @[@literal fid], @[@literal is_static]) });
+        if is_static {
+            c.add_to_scope(s, name, FuncId, fid);
+        } else {
+            // namespaced via first parameter being a unique type
+            os := get_or_create_overloads(name, TOP_LEVEL_SCOPE, func.loc);
+            add_to_overload_set(os, fid);
+        };
+    };
+    
+    c := current_compiler_context();
+    each arg.expr.Block.body { stmt |
+        @match(stmt.stmt&) {
+            fn Decl(b) => {
+                name := b.name.unwrap();
+                if b[].get_default() { value |
+                    @ct_assert(b.kind == .Const, value.loc, "imported objc property cannot have a default value");
+                    @switch(name) {
+                        @case(@symbol EXTENDS) => {
+                            // TODO: subtyping
+                        }
+                        @case(@symbol IMPLEMENTS) => {
+                            // TODO: subtyping
+                        }
+                        @default => {
+                            // it's a method
+                            @ct_assert(value.expr&.is(.Closure), value.loc, "expected function in objc import block");
+                            ::tagged(FuncImpl);
+                            func      := value.expr.Closure;
+                            is_static := func.annotations&.items().contains(fn(it) => it.name == @symbol static);
+                            pars      := func.arg.bindings&;
+                            has_self  := pars.len > 0 && !pars[0].ty&.is(.Finished) && pars[0].name.unwrap() == @symbol self;
+                            @ct_assert(func.body&.is(.Empty), value.loc, "function in objc import block cannot have an implementation");
+                            @ct_assert(is_static == !has_self, value.loc, "% explicit untyped 'self' parameter in %method import", @if(is_static, "illegal", "expected"), @if(is_static, "static/class ", ""));
+                            
+                            if !is_static {
+                                // insert a type annotation for the 'self' parameter
+                                pars[0].ty = (Finished = T);
+                            };
+                            synthesize_func(func, name, is_static);
+                        };
+                    };
+                } else {
+                    // it's a property. create a getter/setter
+                    annotations := @if(!b.nullable_tag.is_null(), b.nullable_tag.items(), empty());
+                    is_static   := annotations.contains(fn(it) => it.name == @symbol static);
+                    is_readonly := annotations.contains(fn(it) => it.name == @symbol readonly);
+                    // TODO: create impl
+                    // TODO: add to the scope
+                    
+                    // all properties need a getter
+                    pars := @slice(@as(Binding)
+                        (name = (Ident = @symbol self), ty = (Finished = T), kind = .Var, default = binding_missing_default(loc), nullable_tag = zeroed(*Annotations)),
+                    );
+                    func: Func = (  // bleh this is verbose
+                        annotations = empty(),
+                        callees = empty(),
+                        mutual_callees = empty(),
+                        var_name = .None,
+                        finished_arg = .None,
+                        finished_ret = .None,
+                        cc = (Some = .CCallReg),
+                        return_var = .None,
+                        scope = (Some = Type.scope_of(T)),  // TODO: expose new_scope()
+                        body = .Empty,
+                        arg = (bindings = shallow_copy(pars, ast_alloc()).as_raw_list(), loc = loc),
+                        ret = b.ty,
+                        name = name,
+                        loc = loc,
+                    );
+                    synthesize_func(func&, b.name.unwrap(), is_static);
+                    if !is_readonly {
+                        // need a setter too
+                    }
+                };
+            }
+            fn Noop() => ();
+            @default => @panic("unhandled stmt type %", stmt.stmt&.tag());
+        };
+    };
+    
+    @literal T
+}
+
+// This is outlined so it only runs if you actually try to call the method. 
+// I want to do as little work as possible in `import_objc()` so you're not punished 
+// for classes with many unused methods. 
+fn objc_method_import_body(T: Type, fid: FuncId, is_static: bool) FatExpr = {
+    func := get_function_ast(fid, true, false, true, false);
+    // TODO: duplication with @objc
+    pars := func.arg.bindings&.items();
+    f_ty := func.finished_ty().expect("infer type before compile body");
+    pars.len -= int(f_ty.arg == void);
+    c := current_compiler_context();
+    par_types := c.arg_types(f_ty.arg);
+    selector := sel_from_params(func.name.str(), pars, is_static).c_str();
+    @debug_assert(func.get_flag(.MadeVarsForRuntimeArgs));
+    get :: fn(b: *Binding) FatExpr => (expr = (GetVar = b.name.Var), ty = UnknownType, loc = func.loc, done = false);
+    
+    args := FatExpr.list(pars.len + 1 + int(is_static), ast_alloc());
+    arg_types := Type.list(args.maybe_uninit.len, ast_alloc());
+    if is_static {
+        // TODO: use T.CLASS[] instead but then need to set that at startup
+        args&.push(@{ cls(@[@literal T.typename().str()]) });
+        arg_types&.push(ObjCClass);
+    } else {
+        args&.push(get(pars.index(0)));
+        arg_types&.push(pars[0].ty.Finished);
+    };
+    
+    @println("%", selector);
+    args&.push(@{ SEL(@[@literal selector]) });
+    arg_types&.push(ObjCSelector);
+    
+    range(int(!is_static), pars.len) { i | 
+        args&.push(get(pars.index(i)));
+        arg_types&.push(pars[i].ty.Finished);
+    };
+    
+    arg_ty := Ty(arg_types.items());
+    arg_pattern: FatExpr = (expr = (Tuple = args.as_raw()), ty = UnknownType, done = false, loc = func.loc);
+    xx := @{
+        f := @run assume_types_fn(@[@literal arg_ty], @[@literal f_ty.ret], @as(rawptr) objc_msgSend);
+        f(@[arg_pattern])
+    };
+    xx.loc = func.loc;
+    xx
 }

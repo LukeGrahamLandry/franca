@@ -12,6 +12,8 @@
 // TODO: 86760b60423d18f07f2fdb0a4f00553d4229034a
 // TODO: if you put it in full screen, moving the cursor to the top should 
 //       show the menu bar so you can get out
+// TODO: fix the thing where you stop rendering while animating into full screen 
+//       (happened when using MTKView too and happens in sokol-samples/sapp/sgl-sapp.c)
 
 #use("@/lib/sys/objective_c.fr");
 #use("@/graphics/macos/frameworks.fr");
@@ -29,9 +31,10 @@ Impl :: @struct(
     cursors: EnumMap(Sapp.MouseCursor, id"NSCursor"),
     mtl_device: id"MTLDevice",
     classes: Classes,
-    env: rawptr,
+    env: rawptr,  // franca dynamic environment pointer since we do stuff inside OS callbacks that don't follow our abi
     display_link: CVDisplayLinkRef,
     display_source: dispatch_source_t,
+    depth_texture: id"MTLTexture",
 );
 
 Classes :: @struct(
@@ -85,8 +88,6 @@ keyup_monitor :: fn(self: *Block_literal_1, event: id"NSEvent") id("NSEvent") = 
     event
 };
 
-// TODO: if i decide talking to objective c is something i want to be good at, 
-//       i can definitely do a fancy comptime thing to make this not suck. 
 fn register_objective_c_classes(self: *Impl) void = {    
     // TODO: since i don't link all the frameworks properly (when i don't actually 
     //       import a real symbol from them) so you need to dlopen some stuff before 
@@ -108,7 +109,7 @@ fn register_objective_c_classes(self: *Impl) void = {
 
 fn macos_discard_state(m: *Impl) void = {       
     // NOTE: it's safe to call [release] on a nil object
-    if !m.keyup_monitor.is_null() {
+    if !m.keyup_monitor.is_nil() {
         @objc cls("NSEvent").removeMonitor(m.keyup_monitor);
         // NOTE: removeMonitor also releases the object
         m.keyup_monitor = ObjCId.zeroed();
@@ -144,8 +145,7 @@ fn init_cursors(self: *Impl) void = {
 }
 
 fn macos_mods(sapp: *Sapp.Self, ev: id"NSEvent") Sapp.Modifiers = {
-    ::ptr_utils(@type ev[]);
-    f := @if(ev.is_null(), @objc @as(u32) cls("NSEvent").modifierFlags(), @objc @as(u32) ev.modifierFlags()); // NSEventModifierFlags
+    f := @if(ev.is_nil(), @objc @as(u32) cls("NSEvent").modifierFlags(), @objc @as(u32) ev.modifierFlags()); // NSEventModifierFlags
     b := @objc @as(u32) cls("NSEvent").pressedMouseButtons();
     m := zeroed Sapp.Modifiers;
     X :: fn(mask, bit, $key: Sapp.Modifiers.Wide.Fields()) => {
@@ -241,10 +241,30 @@ fn update_dimensions(macos: *Impl) void = {
         drawable_size: CGSize = (width = sapp.framebuffer_width.float(), height = sapp.framebuffer_height.float());
         @objc layer.setDrawableSize(drawable_size);
         ASSERT_METAL();
+        macos.replace_depth_texture();
+        
         if !sapp.first_frame {
             sapp.app_event(.RESIZED);
         };
     };
+}
+
+// TODO: this is kinda weird. why don't you do this in gfx? why one free texture? 
+//       you could just make this yourself through the normal gfx cross platform api? 
+//       (like you would when rendering onto an offscreen surface). 
+fn replace_depth_texture(macos: *Impl) void = {
+    sapp := macos.common();
+    depth_desc := new "MTLTextureDescriptor";
+    @objc_set(depth_desc) (
+        width       = @as(i64) sapp.framebuffer_width,
+        height      = @as(i64) sapp.framebuffer_height,
+        pixelFormat = sapp.depth_format().to_mtl(),
+        storageMode = 2, // MTLStorageModePrivate,
+        usage       = 4, // MTLTextureUsageRenderTarget,
+    );
+    @objc macos.depth_texture.release();
+    macos.depth_texture = @objc macos.mtl_device.newTextureWithDescriptor(depth_desc);
+    @objc depth_desc.release();
 }
 
 fn toggle_fullscreen(macos: *Impl) void = {
@@ -277,13 +297,15 @@ fn get_clipboard_string(self: *Impl) *RawList(u8) = {
     if @objc @as(bool) types.containsObject(c.NSPasteboardTypeString) {
         s := @objc pasteboard.stringForType(c.NSPasteboardTypeString);
         // TODO: warn if paste fails somehow
-        if !s.is_null() {
+        if !s.is_nil() {
             s := @objc @as(CStr) s.UTF8String();
             s := s.str();
             buf.reserve(s.len, sapp.desc.allocator);
             buf.len = s.len;
             buf.items().copy_from(s);
-        };
+        } else {
+            @debug_log("???? failed to get_clipboard_string");
+        }
     }
     objc_autoreleasePoolPop(pool);
     buf
@@ -358,7 +380,7 @@ fn update_cursor(macos: *Impl, cursor: Sapp.MouseCursor, shown: bool) void = {
     };
     // update cursor type
     cursor_obj := macos.cursors&[cursor];
-    if cursor_obj.is_null() {
+    if cursor_obj.is_nil() {
         cursor_obj = @objc cls("NSCursor").arrowCursor();
     };
     @objc cursor_obj.set();
@@ -430,10 +452,10 @@ FrancaAppDelegate :: @struct {
         c := macos.classes&;
         macos.init_cursors();
         
-        screen := @objc cls("NSScreen").mainScreen();
-        if ((sapp.window_width == 0) || (sapp.window_height == 0)) {
+        screen := NSScreen'mainScreen();
+        if sapp.window_width == 0 || sapp.window_height == 0 {
             // use 4/5 of screen size (if they explicitly pass zeroes)
-            screen_rect := @objc @as(CGRect) screen.frame();
+            screen_rect := screen.frame();
             if sapp.window_width == 0 {
                 sapp.window_width = int((screen_rect.size.width * 4.0) / 5.0);
             }
@@ -448,7 +470,7 @@ FrancaAppDelegate :: @struct {
         object_setInstanceVariable(w, "franca_sapp", Impl.raw_from_ptr(macos));
         w := @objc w.initWithContentRect(window_rect, styleMask = style, backing = 2 /*NSBackingStoreBuffered*/, defer = false);
         macos.window = w;
-        @debug_assert(!w.is_null());
+        @debug_assert(!w.is_nil());
         macos.set_window_title(sapp.desc.window_title);
         
         macos.win_dlg = new "FrancaWindowDelegate";
@@ -461,9 +483,10 @@ FrancaAppDelegate :: @struct {
         object_setInstanceVariable(macos.win_dlg, "franca_sapp", Impl.raw_from_ptr(macos));
         ASSERT_NOT_GL();
         max_fps := @objc @as(i64) screen.maximumFramesPerSecond();  // if (@available(macOS 12.0, *))
+        TODO_USE_THIS := max_fps;
         
         macos.mtl_device = MTLCreateSystemDefaultDevice();
-        @debug_assert(!macos.mtl_device.is_null(), "MTLCreateSystemDefaultDevice");
+        @debug_assert(!macos.mtl_device.is_nil(), "MTLCreateSystemDefaultDevice");
         v := @objc cls("FrancaView").alloc();
         macos.view = v;
         object_setInstanceVariable(v, "franca_sapp", Impl.raw_from_ptr(macos));
@@ -471,8 +494,7 @@ FrancaAppDelegate :: @struct {
         macos.view = v;
         
         // TODO: make sure i'm doing whatever MTKView was doing with this information:
-        //       swap_interval, sample_count
-        //       metalLayer.depthStencilPixelFormat = 260, // MTLPixelFormatDepth32Float_Stencil8
+        //       swap_interval, sample_count, preferredFramesPerSecond = max_fps
         @objc_set(v) (
             wantsLayer = true,
             // TODO: im not convinced this behaves how i want. maybe i need to override drawRect to do something? 
@@ -511,7 +533,7 @@ FrancaAppDelegate :: @struct {
         nil := ObjCId.zeroed();
         @objc w.makeKeyAndOrderFront(nil);
         sapp.impl().update_dimensions();
-        @objc cls("NSEvent").setMouseCoalescingEnabled(false);
+        NSEvent'setMouseCoalescingEnabled(false);
     
         // workaround for window not being focused during a long init callback
         // for details see: https://github.com/floooh/sokol/pull/982
@@ -627,11 +649,10 @@ FrancaWindow :: @struct {
     initWithContentRect :: fn(self: Self, contentRect: CGRect, style: u64, backingStoreType: u64, defer: bool) ObjCId = {
         _, macos := GET(self);
         c := macos.classes;
-        ::ptr_utils(Deref(ObjCId));
         
         ctx: ObjCSuper = (receiver = self, super_class = cls("NSWindow"));
         window := @objc_super ctx&.initWithContentRect(contentRect, styleMask = style, backing = backingStoreType, defer = defer);
-        @debug_assert(!window.is_null(), "initWithContentRect failed??? this won't go well for you");
+        @debug_assert(!window.is_nil(), "initWithContentRect failed??? this won't go well for you");
         //#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 101300
         types := @objc cls("NSArray").arrayWithObject(c.NSPasteboardTypeFileURL);
         @objc window.registerForDraggedTypes(types);
@@ -711,8 +732,7 @@ FrancaView :: @struct {
     updateTrackingAreas :: fn(self: Self) void = {
         sapp, macos := GET(self);
         
-        ::ptr_utils(@type macos.tracking_area[]);
-        if !macos.tracking_area.is_null() {
+        if !macos.tracking_area.is_nil() {
             @objc self.removeTrackingArea(macos.tracking_area);
             @objc macos.tracking_area.release();
         }
@@ -727,7 +747,7 @@ FrancaView :: @struct {
         macos.tracking_area = ta;
         @objc self.addTrackingArea(ta);
         
-        s: ObjCSuper = (receiver = self, super_class = cls"MTKView");
+        s: ObjCSuper = (receiver = self, super_class = cls"NSView");
         @objc_super s&.updateTrackingAreas();
     }
     
@@ -984,7 +1004,7 @@ fn poll_input_events(macos: *Impl) void = {
         // NOTE: using NSDefaultRunLoopMode here causes stuttering in the GL backend,
         // see: https://github.com/floooh/sokol/issues/486
         event := @objc NSApp.nextEventMatchingMask(mask, untilDate = zeroed ObjCId, inMode = NSEventTrackingRunLoopMode, dequeue = true);
-        if event.is_null() {
+        if event.is_nil() {
             objc_autoreleasePoolPop(pool);
             return();
         }
@@ -992,36 +1012,31 @@ fn poll_input_events(macos: *Impl) void = {
     }
 }
 
-// my impression is that ObjCId is a rawptr and (__bridge const void*) does nothing
-
-fn metal_get_device(macos: *Impl) rawptr = {
+fn metal_get_device(macos: *Impl) id("MTLDevice") = {
     @debug_assert(macos.common()[].valid, "not valid");
     ASSERT_NOT_GL();
-    it := bit_cast_unchecked(ObjCId, rawptr, macos.mtl_device);
-    it
+    macos.mtl_device
 }
 
-fn metal_get_current_drawable(macos: *Impl) rawptr = {
+fn metal_get_current_drawable(macos: *Impl) id("CAMetalDrawable") = {
     @debug_assert(macos.common()[].valid);
     ASSERT_NOT_GL();
     layer := @objc macos.view.layer();
     // TODO: maybe we want to make sure they only call this once per frame
-    currentDrawable := @objc @as(rawptr) layer.nextDrawable();
-    currentDrawable
+    @objc layer.nextDrawable()
 }
 
-fn metal_get_depth_stencil_texture(macos: *Impl) rawptr = {
+fn metal_get_depth_stencil_texture(macos: *Impl) id("MTLTexture") = {
     @debug_assert(macos.common()[].valid);
     ASSERT_NOT_GL();
-    //@objc @as(rawptr) macos.view.depthStencilTexture()  // :DEPTH
-    zeroed rawptr
+    macos.depth_texture
 }
 
-fn metal_get_msaa_color_texture(macos: *Impl) rawptr = {
+fn metal_get_msaa_color_texture(macos: *Impl) id("MTLTexture") = {
     @debug_assert(macos.common()[].valid);
     ASSERT_NOT_GL();
     //@objc @as(rawptr) macos.view.multisampleColorTexture()  // :DEPTH
-    zeroed rawptr
+    zeroed ObjCId
 }
 
 fn macos_get_window(macos: *Impl) rawptr = {

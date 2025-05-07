@@ -1,0 +1,117 @@
+#include_std("graphics/lib.fr");
+#include_std("backend/lib.fr");
+
+// TODO: it's not supposed to squash. should look the same when you change the aspect ratio. 
+
+driver :: fn(vtable: *ImportVTable) void = 
+    Easy'build_for_graphics(vtable, "examples/depth_test.fr");
+
+main :: fn() void = 
+    Easy'start(State);
+
+State :: @struct {
+    pipes: Array(Sgl.Pipeline, 4);
+    draw: Sgl.Self;
+};
+
+fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    state.draw&.setup(
+        allocator = general_allocator(),
+        context = (),
+        sg = sg,
+    );
+   
+    depth: SgDepthState = (
+        write_enabled = true,
+        compare = .LESS_EQUAL,
+    );
+    
+    init_pipeline(state.draw.default_context&, state.pipes&.index(0), (
+        cull_mode = .FRONT,
+        depth = depth,
+        face_winding = .CCW,
+    ));
+    
+    init_pipeline(state.draw.default_context&, state.pipes&.index(1), (
+        cull_mode = .BACK,
+        depth = depth,
+        face_winding = .CCW,
+    ));
+    
+    init_pipeline(state.draw.default_context&, state.pipes&.index(2), ());
+    init_pipeline(state.draw.default_context&, state.pipes&.index(3), (
+        depth = depth,
+    ));
+}
+
+fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = ();
+
+fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    sgl := state.draw.default_context&;
+    rot := vec2((@as(i64)sg.frame_index.zext()).float().cast());
+    sgl.viewport(0.intcast(), 0.intcast(), sapp.width().intcast(), sapp.height().intcast(), true);
+    
+    X :: fn(i: i64, pos: Vec3) => {
+        sgl.defaults();  // TODO: catch the mistake if you forget this instead of just giving you garbage
+        sgl.load_pipeline(state.pipes&[i]);
+        sgl.spin_cube(rot, pos);
+    };
+    
+    X(0, vec3(-2.1, -1.0, -15.0));
+    X(1, vec3(-2.0, 1.0, -12.0));
+    X(2, vec3(2.0, 2.0, -12.0));
+    X(3, vec3(2.0, -2.0, -12.0));
+    
+    Easy'glue_begin_pass(sapp, sg, (colors = ((
+        load_action = .CLEAR,
+        clear_value = (r = 0.156, g = 0.156, b = 0.156, a = 1),
+    ), ..)));
+    sgl.draw_layer(0);
+    sg.end_pass();
+};
+
+fn spin_cube(sgl: *Sgl.Context, rot: Vec2, off: Vec3) void = {
+    // https://github.com/floooh/sokol-samples/blob/master/sapp/sgl-sapp.c
+    // MIT License. Copyright (c) 2017 Andre Weissflog
+    
+    sgl.cur_matrix_mode = .PROJECTION;
+    sgl.perspective(deg_to_rad(45.0), 1.0, 0.0, 100.0);
+    
+    sgl.cur_matrix_mode = .MODELVIEW;
+    sgl.translate(off&[0], off&[1], off&[2]);
+    sgl.rotate(deg_to_rad(rot&[0]), 1.0, 0.0, 0.0);
+    sgl.rotate(deg_to_rad(rot&[1]), 0.0, 1.0, 0.0);
+
+    sgl.begin(.QUADS);
+    sgl.c3f(1.0, 0.0, 0.0);
+        sgl.v3f_t2f(-1.0,  1.0, -1.0, -1.0,  1.0);
+        sgl.v3f_t2f( 1.0,  1.0, -1.0,  1.0,  1.0);
+        sgl.v3f_t2f( 1.0, -1.0, -1.0,  1.0, -1.0);
+        sgl.v3f_t2f(-1.0, -1.0, -1.0, -1.0, -1.0);
+    sgl.c3f(0.0, 1.0, 0.0);
+        sgl.v3f_t2f(-1.0, -1.0,  1.0, -1.0,  1.0);
+        sgl.v3f_t2f( 1.0, -1.0,  1.0,  1.0,  1.0);
+        sgl.v3f_t2f( 1.0,  1.0,  1.0,  1.0, -1.0);
+        sgl.v3f_t2f(-1.0,  1.0,  1.0, -1.0, -1.0);
+    sgl.c3f(0.0, 0.0, 1.0);
+        sgl.v3f_t2f(-1.0, -1.0,  1.0, -1.0,  1.0);
+        sgl.v3f_t2f(-1.0,  1.0,  1.0,  1.0,  1.0);
+        sgl.v3f_t2f(-1.0,  1.0, -1.0,  1.0, -1.0);
+        sgl.v3f_t2f(-1.0, -1.0, -1.0, -1.0, -1.0);
+    sgl.c3f(1.0, 0.5, 0.0);
+        sgl.v3f_t2f(1.0, -1.0,  1.0, -1.0,   1.0);
+        sgl.v3f_t2f(1.0, -1.0, -1.0,  1.0,   1.0);
+        sgl.v3f_t2f(1.0,  1.0, -1.0,  1.0,  -1.0);
+        sgl.v3f_t2f(1.0,  1.0,  1.0, -1.0,  -1.0);
+    sgl.c3f(0.0, 0.5, 1.0);
+        sgl.v3f_t2f( 1.0, -1.0, -1.0, -1.0,  1.0);
+        sgl.v3f_t2f( 1.0, -1.0,  1.0,  1.0,  1.0);
+        sgl.v3f_t2f(-1.0, -1.0,  1.0,  1.0, -1.0);
+        sgl.v3f_t2f(-1.0, -1.0, -1.0, -1.0, -1.0);
+    sgl.c3f(1.0, 0.0, 0.5);
+        sgl.v3f_t2f(-1.0,  1.0, -1.0, -1.0,  1.0);
+        sgl.v3f_t2f(-1.0,  1.0,  1.0,  1.0,  1.0);
+        sgl.v3f_t2f( 1.0,  1.0,  1.0,  1.0, -1.0);
+        sgl.v3f_t2f( 1.0,  1.0, -1.0, -1.0, -1.0);
+    sgl.end();
+}

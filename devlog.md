@@ -1,4 +1,4 @@
-## (May 6)
+## (May 6/7)
 
 - putting this in fill_objc_reflect is such a flex. 
 ```
@@ -12,7 +12,6 @@ func.body = (Normal = @{  // :InstrumentObjc
     @[func.body.Normal]
 });
 ```
-
 - wtf 7 billion years of weird race condition situation and all i have to do 
 is not say i implement CALayerDelegate? apple's example does. why's mine different? 
 every method on that protocol is optional and im not implementing any of them 
@@ -28,6 +27,47 @@ trying to `ldr    w8, [x21, #0x44]` with x21=0. i was just assumed that the null
 was the object not the protocol. in adding an assertion for that it seems NSApplicationDelegate 
 doesn't exist? maybe im not opening AppKit in time, but also it seems fine without? 
 - so now i no MTKView and it seems to mostly work except for depth buffer stuff (so geo example looks weird). 
+- :WindingDefault
+- dumb mistake with slot indexes. `16-1` vs `(1<<16)-1`
+- maybe geo just always looks weird, made a better test
+- did an attempt at my own depth buffer and it doesn't work but it also doesn't work 
+in an old commit from when i was using MTKView (but it does work if i do it in sokol-samples). 
+- ok i feel like i gave the not having types thing a solid try but it's just kinda stressful. 
+- can do a similar trick with instrumenting my objc_msgSend wrapper to spit out 
+function signetures that i try to call (with the right parameter names, etc). 
+- just something super hacky that im only going to run once. 
+idk why some of them get `Attempt to use unknown class`, 
+but hey, who cares, im only going to do it once. 
+just interesting to see what it spits out. 
+NSStringFromClass is in Foundation not CoreFoudation. 
+today i learned those are different. 
+```
+X :: @static(bool) false; 
+@if(@[@literal (selector.str() != "UTF8String" && selector.str() != "class"  // these make sense
+&& selector.str() != "updateTrackingAreas" && selector.str() != "setFrame:")])  // but these don't
+if !X[] { // :bindings
+    X[] = true;
+    reciever := @[args[0]];  // sketchy!!!! side effects
+    scary_log(@[@literal log.items().sym().str()]);
+    scary_log(" ");
+    if bit_cast_unchecked(@type reciever, i64, reciever) != 0 {
+        c := @objc @as(ObjCClass) reciever.class();
+        c := NSStringFromClass(c);
+        c := @objc @as(CStr) c.UTF8String();
+        scary_log(c.str());
+        scary_log("\n");
+    }
+};
+```
+
+---
+
+I think if your program contains the sentence "Although this function looks imperative, 
+note that its job is to declaratively construct a build graph that will be executed 
+by an external runner." you are unserious. Like there is not high value in leaving in 
+the random junk from the init template. Have your program be your own program. 
+Tho it's kinda cool that I can search that string on github and find a higher 
+than average percentage of things that interest me. 
 
 ## (May 5)
 

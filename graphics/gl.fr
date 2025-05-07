@@ -20,7 +20,10 @@ ContextDesc :: @struct(
 );
 Desc :: @struct(
     context: ContextDesc, // settings for the default_context
-    face_winding := SgFaceWinding.CCW,
+    // TODO: gl wants the opposite default from using gfx directly
+    //       but since my version has the default inside SgPipelineDesc 
+    //       leaving off the field won't use this default!  :WindingDefault
+    face_winding := SgFaceWinding.CCW, 
     allocator: Alloc,
     sg: *Sg.Self,
 );
@@ -178,6 +181,7 @@ fn init_pipeline(ctx: *Context, pip: *Pipeline, desc: SgPipelineDesc) bool = {
     desc.sample_count = ctx_desc.sample_count;
     if desc.face_winding == .DEFAULT {
         desc.face_winding = sgl.desc.face_winding;
+        // TODO: don't get here becase the field defaults to CW :WindingDefault
     };
     desc.depth.pixel_format = ctx_desc.depth_format;
     if ctx_desc.depth_format == .NONE {
@@ -203,8 +207,8 @@ fn init_pipeline(ctx: *Context, pip: *Pipeline, desc: SgPipelineDesc) bool = {
         } else {
             pip[i] = ctx.common.desc.sg.make(desc);
             if pip[i].id == SG_INVALID_ID.trunc() {
+                @debug_log("SGL_MAKE_PIPELINE_FAILED");
                 return(false);
-                //ERROR(MAKE_PIPELINE_FAILED); :GfxLogging
             };
         };
     };
@@ -255,7 +259,7 @@ fn init_context(sgl: *Self, ctx: *Context, in_desc: *ContextDesc) bool = {
     def_pip_desc.depth.write_enabled = true;
     init_pipeline(ctx, ctx.def_pip&, def_pip_desc) || return(false);
     if !sg.add_commit_listener(make_commit_listener(ctx)) {
-        //ERROR(ADD_COMMIT_LISTENER_FAILED); :GfxLogging
+        @debug_log("ADD_COMMIT_LISTENER_FAILED");
         return(false)
     };
     sg.pop_debug_group();
@@ -322,6 +326,7 @@ fn next_vertex(ctx: *Context) ?*Vertex = {
     if v.is_none() {
         ctx.error.vertices_full = true;
         ctx.error.any = true;
+        @debug_log("vertex buffer full!"); 
     };
     v
 }
@@ -337,6 +342,7 @@ fn next_command(ctx: *Context) ?*Command = {
     if v.is_none() {
         ctx.error.commands_full = true;
         ctx.error.any = true;
+        @debug_log("command buffer full!");
     };
     v
 }
@@ -495,7 +501,7 @@ fn draw_layer(ctx: *Context, layer_id: i32) void = {
                     cur_smp_id = args.smp.id;
                 };
                 if cur_uniform_index != args.uniform_index {
-                    ub_range := ctx.uniforms.slice(args.uniform_index.zext(), 1).interpret_as_bytes();
+                    ub_range := ctx.uniforms.items().subslice(args.uniform_index.zext(), 1).interpret_as_bytes();
                     sg.apply_uniforms(0, ub_range);
                     cur_uniform_index = args.uniform_index;
                 };
@@ -888,6 +894,10 @@ fn lookat(dst: *Matrix, eye: Vec3, center: Vec3, up: Vec3) void = {
 //
 // TODO: these are kinda painful
 //
+
+fn c3f(ctx: *Context, r: f32, g: f32, b: f32) void = {
+    ctx.color = pack_rgba(r, g, b, 1.0);
+}
 
 fn v2f(ctx: *Context, x: f32, y: f32) void = 
     vtx(ctx, x, y, 0.0, ctx.u, ctx.v, ctx.color);

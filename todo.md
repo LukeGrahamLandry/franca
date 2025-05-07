@@ -18,7 +18,7 @@
 - revive compiler_gui (try to export all info to the driver so it can run in comptime)
 - provide the same c api as sokol so can test with their examples? 
 - translate a more serious subset of my language into the shader languages
-- :GfxLogging
+- think about fancy logging system instead of @debug_log in `graphics`
 - inspection gui like sokol_gfx_imgui
 - i enjoyed https://sotrh.github.io/learn-wgpu/, an implementation of that would be a good example program
 - replace cimgui
@@ -152,6 +152,7 @@ that fails the wasm verifier
 
 ## cleanup 
 
+- ImportVTable: implement add_to_scope with add_expr_to_scope
 - make comptime.fr exporting stuff less painful 
 - sema needs to get simplified. 
 - clean up import_c ref tracking
@@ -222,6 +223,8 @@ or just default to jitting and force you to enable aot by specifying an output p
   - macros should show both expansion site and code that generated it.
 - better error message from backend if you forget nunion=1 on a struct
 - `pattern match on non-tuple but expected % args` should show the callee as well
+- when it tells you a #import is null at comptime, say whether the library string was registered. 
+(ie. did you probably typo the lib or the func).
 
 ## language decisions
 
