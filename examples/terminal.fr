@@ -1,0 +1,441 @@
+#include_std("graphics/lib.fr");
+
+/*
+// TODO: this should work but does not 
+Graphics :: import("@/graphics/lib.fr");
+#use(Graphics);
+// TODO: also this should work
+#include_std("bindings/sokol.fr");
+Graphics :: import("@/graphics/lib.fr");
+Sdtx :: Graphics.Sdtx;
+// but then things in the debugtext don't find things in the lib file for some reason. 
+*/
+
+state :: @static(@struct(
+    pass_action: SgPassAction,
+    text: *Sdtx.Self,
+    buffers: List(TextBuffer),
+    selected_buffer: i64,
+    app: Sapp.Self, // :ThisIsOnTheStackWhichWontWorkOnWasm
+    sg: Sg.Self,
+    process: ?RunningProcess,
+    scratch: List(u8),
+    lock_to_bottom: bool,
+    history: RawList(Str),
+    history_index: i64,
+));
+
+allocator :: libc_allocator;
+
+do_init :: fn(userdata: rawptr) void = {
+    state := state; // :Compilerbug
+    sapp := state.app&;
+    state.sg&.setup(
+        environment = Easy'glue_environment(sapp),
+        allocator = allocator,
+    );
+    state.scratch = list(u8, 4*1024*1024, allocator);  // :BigOutputBuffer
+    state.lock_to_bottom = true;
+    state.history_index = 0;
+    state.history&.push("", allocator);
+    state.history&.push("", allocator);
+    
+    state.text.setup(
+        allocator = allocator,
+        fonts = @slice(Sdtx.font.cpc),
+        sg = state.sg&,
+    );
+    
+    b := state.buffers.index(0);
+    b.at.w = sapp.width().float() / state.buffers.len.float();
+    b.at.h = sapp.height().float();
+    if state.buffers.len >= 2 {
+        b := state.buffers.index(1);
+        b.at.w = sapp.width().float() / 2;
+        b.at.h = sapp.height().float();
+        b.at.pos.x = sapp.width().float() / 2;
+    }
+    
+    state.pass_action.colors&[0] = (
+        load_action = .CLEAR,
+        clear_value = (r = 0.156, g = 0.156, b = 0.156, a = 1),
+    );
+};
+
+Colour :: @struct(r: i64, g: i64, b: i64, a := 255);
+Pos :: @struct(x: f64, y: f64);
+Rect :: @struct(pos: Pos, w: f64, h: f64);
+
+do_render :: fn(userdata: rawptr) void = {
+    state := state; // :Compilerbug
+    
+    if state.process& { p |
+        buffer := state.buffers&[0]&;
+        status := poll(p, state.scratch&);
+        buffer.append_string(state.scratch.items());
+        state.scratch&.clear();
+        @match(status) {
+            fn Ok(status) => if status { status |
+                ms := timestamp() - p.start;
+                state.process = .None;
+                buffer.append_string(@tfmt("\nExited with status % (in %ms)\n", status, ms));
+            } else {
+                // still running
+            };
+            fn Err(msg) => buffer.append_string(msg);
+        };
+    };
+    
+    each state.buffers& { b |
+        draw_text(b);
+    };
+    
+    sg := state.sg&;
+    Easy'glue_begin_pass(state.app&, sg, state.pass_action);
+    
+    sdtx := state.text.default_context&;
+    sdtx.draw_layer(0);
+    
+    sg.end_pass();
+    sg.commit();
+};
+
+fn append_string(buffer: *TextBuffer, new: Str) void = {
+    if buffer.lines.len == 0 {
+        buffer.lines&.push(zeroed RawList(u8), buffer.gpa);
+    };
+    last := buffer.lines[buffer.lines.len - 1]&;
+    start := 0;
+    range(0, new.len) { i |
+        if new[i] == "\n".ascii() {
+            line := new.slice(start, i);
+            buffer.max_x = max(buffer.max_x, float(last.len + line.len));
+            last.push_all(line, buffer.gpa);
+            buffer.lines&.push(zeroed RawList(u8), buffer.gpa);
+            last = buffer.lines[buffer.lines.len - 1]&;
+            start = i + 1;
+            if state[].lock_to_bottom && buffer.lines.len > buffer.num_lines_fit_on_screen {
+                // If you're already near the bottom of the document, scroll down as new text
+                // is added so you can see it stream in, but if you carefully scrolled up to 
+                // look at something, don't rip you away from your place. 
+                buffer.render.y = float(buffer.lines.len - buffer.num_lines_fit_on_screen + 5);
+            }
+        };
+    };
+    line := new.rest(start);
+    buffer.max_x = max(buffer.max_x, float(last.len + line.len));
+    last.push_all(line, buffer.gpa);
+}
+
+scroll_speed :: -2.0;
+
+do_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
+    state := state; // :Compilerbug
+    if event.type == .MOUSE_DOWN {
+        pos: Pos = (x = event.mouse_x.cast(), y = event.mouse_y.cast());
+        enumerate state.buffers& { i, b |
+            if b.at.contains(pos) {
+                state.selected_buffer = i;
+                b.cursor = (x = pos.x / 14.0 + b.render.x, y = pos.y / 14.0 + b.render.y);
+                line, col := (b.cursor.y.int(), b.cursor.x.int());
+                if line < b.lines.len {
+                    line := b.lines[line]&;
+                    if col < line.len {
+                        line[col] = "@".ascii();
+                    }
+                }
+            };
+        };
+    };
+    
+    if event.type == .CLIPBOARD_PASTED {
+        if selected_buffer() { buffer |
+            buffer.append_string(state.app&.get_clipboard_string().items());
+        }
+    }
+    
+    if event.type == .KEY_DOWN {
+        if event.key_code == .ESCAPE {
+            state.app.quit_requested = true;
+        };
+        
+        if event.key_code == .BACKSPACE {
+            if selected_buffer() { buffer |
+                if buffer.lines.len > 0 {
+                    last := buffer.lines[buffer.lines.len - 1]&;
+                    if last.len > 0 {
+                        last.len -= 1;
+                    } else {
+                        buffer.lines.len -= 1;
+                    };
+                }
+            };
+        }
+        
+        if event.key_code == .C && event.modifiers.get(.control) != 0 {
+            if state.process& { p |
+                kill(p.pid, @as(i32) SignalNum.Interupt);
+            };
+        }
+        
+        if event.key_code == .UP {
+            if selected_buffer() { buffer |
+                if buffer.lines.len > 0 {
+                    buffer.lines&[buffer.lines.len - 1].len = 0;
+                };
+                state.history_index = max(state.history_index - 1, 0);
+                cmd := state.history[state.history_index];
+                buffer.append_string(cmd);
+            };
+        }
+        
+        if event.key_code == .DOWN {
+            if selected_buffer() { buffer |
+                if buffer.lines.len > 0 {
+                    buffer.lines&[buffer.lines.len - 1].len = 0;
+                }
+                state.history_index = min(state.history_index + 1, state.history.len - 1);
+                cmd := state.history[state.history_index];
+                buffer.append_string(cmd);
+            };
+        }
+        
+        if event.key_code == .ENTER {
+            if selected_buffer() { buffer |
+                if event.modifiers.get(.shift) != 0 {
+                    buffer.append_string("\n");
+                    return();
+                };
+                
+                if buffer.lines.len == 0 {
+                    buffer.lines&.push(zeroed RawList(u8), buffer.gpa);
+                };
+            
+                raw_command := buffer.lines&[buffer.lines.len - 1].items();
+                
+                @debug_assert(state.history.len >= 2);
+                if state.history[state.history.len - 2] != raw_command {
+                    state.history.len -= 1;  // blank
+                    state.history&.push(raw_command.shallow_copy(allocator), allocator);
+                    state.history&.push("", allocator);
+                };
+                state.history_index = state.history.len - 1;
+                
+                cmd := CStr.list(temp());
+                start := 0;
+                range(0, raw_command.len) { i |
+                    if raw_command[i] == " ".ascii() {
+                        cmd&.push(@fmt_cstr("%", raw_command.slice(start, i)));
+                        start = i + 1;
+                    };
+                };
+                cmd&.push(@fmt_cstr("%", raw_command.rest(start)));
+                cmd&.push(zeroed CStr);
+                if cmd[0].str().ends_with(".fr") {
+                    cmd&.insert(0, @as(CStr) "franca");
+                };
+                
+                buffer.append_string("\n");
+                cmd := cmd.items();
+                if state.process.is_none() {
+                    @match(exec(cmd)) {
+                        fn Ok(it) => {
+                            state.process = (Some = it);
+                            buffer.append_string(@tfmt("pid = %, time = %|\n", it.pid, it.start));
+                        }
+                        fn Err(msg) => buffer.append_string(msg);
+                    }
+                };
+                buffer.append_string("=================================|\n");
+            };
+        };
+    };
+    
+    if event.type == .CHAR && event.char_code < 127 && event.modifiers.get(.super) == 0{
+        if selected_buffer() { buffer |
+            s: Str = (ptr = ptr_cast_unchecked(u32, u8, event.char_code&), len = 1);
+            buffer.append_string(s);
+        };
+    };
+    
+    if event.type == .MOUSE_SCROLL {
+        if selected_buffer() { b |
+            b.render.x += event.scroll_x.cast() * scroll_speed;
+            b.render.y += event.scroll_y.cast() * scroll_speed;
+        };
+    };
+};
+
+fn selected_buffer() ?*TextBuffer = {
+    state := state; // :Compilerbug
+    if(state.selected_buffer >= state.buffers.len, => return(.None));
+    (Some = state.buffers.index(state.selected_buffer))
+}
+
+fn main() void = {
+    state := state; // :Compilerbug
+    state[] = zeroed @type state[];
+    state.text = allocator.box(@type state.text[]);
+    state.buffers = list(allocator);
+    state.process = .None;
+    
+    // :SLOW
+    fn load_new_buffer(path: Str, a: Alloc) TextBuffer = {
+        buffer := TextBuffer.zeroed();
+        buffer.gpa = a;
+        input := buffer.gpa.read_to_string_or_crash(path).items(); // :panic :leak
+        buffer&.append_string(input);
+        buffer
+    };
+    //state.buffers&.push(load_new_buffer("compiler/v2/sema.fr", allocator));
+    
+    buffer := TextBuffer.zeroed();
+    buffer.gpa = allocator;
+    push(state.buffers&, buffer);
+    //state.buffers&.push(load_new_buffer("examples/terminal.fr", allocator));
+    state.app&.run(
+        init_cb = do_init,
+        frame_cb = do_render,
+        event_cb = do_event,
+        user_data = zeroed rawptr,
+        window_title = "pls run da program",
+        allocator = general_allocator(),
+        enable_clipboard = true,
+    );
+}
+
+fn driver(vtable: *ImportVTable) void = 
+    Easy'build_for_graphics(vtable, "examples/terminal.fr");
+
+#include_std("backend/lib.fr");
+
+TextBuffer :: @struct(
+    lines: RawList(RawList(u8)),
+    at: Rect,
+    gpa: Alloc,
+    cursor: Pos,
+    render: Pos,
+    max_x: f64,
+    dead: bool,
+    num_lines_fit_on_screen: i64,
+);
+
+fn draw_text(self: *TextBuffer) void = {
+    if(self.dead, => return());
+    state := state; // :Compilerbug
+    SCALE :: 16.0; // (80.0 / 1.75);
+    w, h := (self.at.w, self.at.h);
+    max_line_width := self.max_x - (w / SCALE);
+    self.render.x = max(0, min(self.render.x, max_line_width));
+    state[].lock_to_bottom = self.render.y > self.lines.len.float() - self.num_lines_fit_on_screen.float();
+    self.render.y = max(0, min(self.render.y, self.lines.len.float()));
+    
+    sdtx := state.text.default_context&;
+    sdtx.color = pack_rgba(235, 219, 178, 255);
+    sapp := state.app&;
+    sdtx.canvas(sapp.width().float().div(1.75).cast(), sapp.height().float().div(1.75).cast());
+    
+    // the fractional component of your scroll position is used to offset the text rendering on the screen.
+    // and the integral component chooses which range of lines we draw.
+    sdtx.pos.y = cast(self.at.pos.y / SCALE- (self.render.y - self.render.y.floor()));
+    x := cast(self.at.pos.x / SCALE - (self.render.x - self.render.x.floor()));
+    sdtx.pos.x = x;
+    line_count := int(h / 13.0);
+    self.num_lines_fit_on_screen = line_count;
+    start := min(max(0, self.render.y.int()), self.lines.len);
+    end   := min(start + line_count, self.lines.len);
+    chars_that_fit := int(w / SCALE);
+    range(start, end) { i |
+        line := self.lines&.index(i);
+        col := self.render.x.int();
+        if col < line.len {
+            count := min(line.len - col, chars_that_fit);
+            sdtx.put(line.items().subslice(col, count)); 
+        };
+        sdtx.pos.y += 1;
+        sdtx.pos.x = x;
+    };
+}
+
+fn contains(r: Rect, p: Pos) bool = 
+    p.x > r.pos.x && p.x < r.pos.x + r.w && p.y > r.pos.y && p.y < r.pos.y + r.h;
+
+#use("@/lib/sys/fs.fr");
+
+RunningProcess :: @struct {
+    pipes: Array(Fd, 3);  // in, out, err
+    pid: i32;
+    start: i64;
+};
+
+fn exec(args: []CStr) Result(RunningProcess, Str) = {
+    pipes := zeroed Array(Array(Fd, 2), 3);
+    each pipes& { p |
+        pipe(p) || return(Err = "libc::pipe() failed");
+    };
+    @debug_assert(args[args.len - 1].ptr.is_null());
+    
+    pid := fork();
+    if pid == 0 { // Child
+        dup2(pipes&[0]&[0], STD_IN);
+        dup2(pipes&[1]&[1], STD_OUT);
+        dup2(pipes&[2]&[1], STD_ERR);
+        
+        execvp(args[0], args.ptr);
+        eprintln("libc::execvp() failed!");
+        exit(1);
+    };
+    // else: Parent
+
+    close(pipes&[0]&[0]);  // close the read end
+    close(pipes&[1]&[1]);  // close the write end
+    close(pipes&[2]&[1]);  // "
+    
+    (Ok = (pid = pid, pipes = (pipes&[0]&[1], pipes&[1]&[0], pipes&[2]&[0]), start = timestamp()))
+}
+
+fn poll(self: *RunningProcess, buf: *List(u8)) Result(?i32, Str) = {
+    @debug_assert(buf.maybe_uninit.len > buf.len);
+    flag: u16 = (@as(i64) PollEvents.In).trunc();
+    poll_data: Array(PollFds, 2) = (
+        (fd = self.pipes&[1], events = flag, revents = 0),
+        (fd = self.pipes&[2], events = flag, revents = 0)
+    );
+    poll_data := poll_data&.items();
+
+    status: i32 = 0;
+    _ := poll(poll_data, 0) || return(Err = "libc::poll() failed");
+    done := waitpid(self.pid, status&, @as(i64) WaitPidOptions.NoHang);
+    
+    full := false;
+    each poll_data { p |
+        have_data := (@as(i64) p.revents.zext()).bit_and(@as(i64) PollEvents.In) != 0;
+        if have_data {
+            dowhile {
+                space := buf.maybe_uninit.len - buf.len;
+                len := read(p.fd, buf.maybe_uninit.ptr.offset(buf.len), space)
+                    || return(Err = "libc::read() failed");
+                buf.len += len;
+                full = full || buf.maybe_uninit.len == buf.len;
+                
+                // :BigOutputBuffer (see devlog May 9, 2025)
+                system_pipe_buffer_capacity :: 65536;
+                len == system_pipe_buffer_capacity && len < space
+            };
+        }
+    };
+    
+    // the hope is that you're alllowed to waitpid again after the caller clears the buffer and get the status then
+    // TODO: is that true?
+    if done != 0 && !full {
+        close(self.pipes&[0]);
+        close(self.pipes&[1]);
+        close(self.pipes&[2]);
+        
+        return(Ok = (Some = status));
+    };
+    
+    (Ok = .None)
+};
+
+#include_std("backend/lib.fr");

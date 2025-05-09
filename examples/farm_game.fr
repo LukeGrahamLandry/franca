@@ -1,3 +1,7 @@
+// This is perhaps an unpleasent way to structure a program, idk, 
+// it's relaxing to work on something that's so trivial it doesn't matter. 
+// Don't judge me :)
+
 #include_std("graphics/lib.fr");
 
 State :: @struct(
@@ -13,6 +17,7 @@ State :: @struct(
     sg: Sg.Self,
     w: i64,
     h: i64,
+    pressed: Array(bool, 4),
 );
 
 World :: @struct(
@@ -27,6 +32,9 @@ World :: @struct(
     msg: List(u8),
     msg_timer: i64 = 0,
     truck_area: Rect,
+    round_timer: i64,
+    next_round_timer: i64,
+    round_number: i64,
 );
 
 Player :: @struct(pos: Pos, inventory: ?Object = .None, dx: f64 = 0.0, dy: f64 = 0.0);
@@ -59,7 +67,8 @@ Shop :: @struct(
 allocator :: libc_allocator;
 
 fn load_default_world(self: *World) void = {
-    self.player =  (pos = (x = 50.0, y = 50.0));
+    self[] = zeroed World;
+    self.player = (pos = (x = 150.0, y = 150.0));
     self.shelves = list(allocator);
     self.money = 15;
     range(0, 5) {i|
@@ -80,8 +89,8 @@ fn load_default_world(self: *World) void = {
     self.farm = list(allocator); // :fucked you aren't forced to set this before
     self.msg = list(allocator);
     self.requests = list(allocator);
+    self.next_round_timer = 60*10;
 }
-
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sapp.set_window_title("Arstotzkan Farmer 4");
@@ -118,7 +127,35 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.y = 0.0;
     state.dx = 0.2;
     state.dy = 0.2;
+    
+    state.world&.next_round();
 };
+
+fn next_round(world: *World) void = {
+    extra_time := world.round_timer;
+    world.round_timer = world.next_round_timer;
+    world.next_round_timer -= 5;
+    world.round_number += 1;
+    
+    world.msg&.clear();
+    world.msg_timer = 100;
+    if world.requests.len == 0 {
+        bonus := extra_time / 15;
+        world.money += bonus;
+        @if(extra_time != 0)
+        @fmt(world.msg&, "Order fulfilled early! you earned % bonus rubles", bonus);
+        rand :: fn() i64 #libc;  // TODO: don't use libc for this. bleh. 
+        range(0, 2 + rand().mod(world.round_number)) { _ |
+            world.requests&.push(.Tomato);
+        };
+    } else {
+        prev_round := world.round_number;
+        world.load_default_world();
+        world.next_round();
+        @fmt(world.msg&, "Time's up. You lose!");
+        world.round_timer += prev_round * 25; // a bit more since the transition is jarring
+    };
+}
 
 Colour :: @struct(r: i64, g: i64, b: i64, a := 255);
 Pos :: @struct(x: f64, y: f64);
@@ -133,22 +170,33 @@ black_transparent: Colour : (r = 0, g = 0, b = 0, a = 100);
 Rect :: @struct(pos: Pos, w: f64, h: f64);
 base_size :: 50.0;
 
-fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
-    do_update :: fn(state: *State) void = {
-        state.x += state.dx;
-        state.y += state.dy;
-        player_speed :: 10.0;
-        state.world.player.pos.x += player_speed * state.world.player.dx;
-        state.world.player.pos.y += player_speed * state.world.player.dy;
-        each state.world.farm { planted | 
-            planted.remaining -= 1;
-            if planted.remaining <= 0 {
-                planted.crop.age = .Ready;
-            };
-            // TODO: rotten if remaining < (-something)
+do_update :: fn(state: *State) void = {
+    state.x += state.dx;
+    state.y += state.dy;
+    player_speed :: 10.0;
+    state.world.player.pos.x += player_speed * state.world.player.dx;
+    state.world.player.pos.y += player_speed * state.world.player.dy;
+    unordered_retain state.world.farm& { planted | 
+        planted.remaining -= 1;
+        if planted.remaining <= 0 {
+            planted.crop.age = .Ready;
         };
-        state.world.msg_timer -= 1;  // TODO: overflow
+        
+        planted.remaining > -300 // rot!
     };
+    state.world.msg_timer -= 1;
+    state.world.round_timer -= 1; // TODO: dt
+    
+    if state.world.round_timer <= 0 {
+        state.world&.next_round();
+    };
+};
+  
+fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    state.world.player.dy = float(int(state.pressed&[2]) - int(state.pressed&[0]));
+    state.world.player.dx = float(int(state.pressed&[3]) - int(state.pressed&[1]));
+    // no normalize. i want you to go faster when you're going diagonal. it's more fun than sprint. 
+    // TODO: maybe that should be an upgrade you buy. that would be fun. 
     do_update(state);
     
     sgl := state.draw.default_context&;
@@ -164,16 +212,35 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sdtx.canvas(sapp.width().float().div(2.0).cast(), sapp.height().float().div(2.0).cast());
     sdtx.pos.x = state.x.cast();
     sdtx.pos.y = state.y.cast();
-    sdtx.put("hello world");
+    sdtx.put("click for ruble");
     sdtx.color = pack_rgba(0.5, 0.5, 0.2, 1.0);
     sdtx.pos.x = 0.0;
     sdtx.pos.y = 0.0;
-    sdtx.put(@tfmt("You have % rubles", state.world.money));
+    sdtx.put(@tfmt("You have % rubles.    Round %\n", state.world.money, state.world.round_number));
+    sdtx.put(@tfmt("Shipment due in % frames.\n", state.world.round_timer));
+    sdtx.put(@tfmt("Requests: "));
+    for state.world.requests& { r |
+        sdtx.put(@tfmt("%, ", r));
+    };
+    sdtx.put(@tfmt("\n"));
+    
+    each state.world.farm { planted |
+        sdtx := state.text.default_context&;
+        sdtx.pos.x = planted.pos.x.cast() / 32;
+        sdtx.pos.y = planted.pos.y.cast() / 32;
+        if planted.remaining < 0 {
+            sdtx.color = pack_rgba(0.0, 0.5, 1.0, 1.0);
+            sdtx.put(@tfmt("%", 300 + planted.remaining));
+        } else {
+            sdtx.color = pack_rgba(1.0, 0.0, 0.0, 1.0);
+            sdtx.put(@tfmt("%", planted.remaining));
+        }
+    };
     
     if state.world.msg_timer > 0 {
         sdtx.color = pack_rgba(1.0, 0.5, 0.2, 1.0);
         sdtx.pos.x = 0.0;
-        sdtx.pos.y = 1.0;
+        sdtx.pos.y = 3.0;
         sdtx.put(state.world.msg.items());
     };
     sgl.begin(.QUADS);
@@ -256,7 +323,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sgl.end();
     
     w := sapp.width().float().div(16.0);
-    if state.x > w - 11.0 || state.x < 0.0 {
+    if state.x > w - 14.0 || state.x < 0.0 {
         state.dx *= 1.0.neg();
     };
     h := sapp.height().float().div(16.0);
@@ -272,44 +339,41 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sg.end_pass();
 };
 
-::enum(Sapp.EventType);
-::enum(Sapp.Keycode);
-
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
-    if event.type == .KEY_DOWN {
+    if event.type == .KEY_DOWN && !event.key_repeat {
         if event.key_code == .ESCAPE {
             exit(0);
         };
         
         if event.key_code == .W {
-            state.world.player.dy = -1;
+            state.pressed&[0] = true;
         };
         if event.key_code == .A {
-            state.world.player.dx = -1;
+            state.pressed&[1] = true;
         };
         if event.key_code == .S {
-            state.world.player.dy = 1;
+            state.pressed&[2] = true;
         };
         if event.key_code == .D {
-            state.world.player.dx = 1;
+            state.pressed&[3] = true;
         };
         if event.key_code == .SPACE {
             state.do_interact();
         };
     };
     
-    if event.type == .KEY_UP {
+    if event.type == .KEY_UP && !event.key_repeat {
         if event.key_code == .W {
-            state.world.player.dy = 0;
+            state.pressed&[0] = false;
         };
         if event.key_code == .A {
-            state.world.player.dx = 0;
+            state.pressed&[1] = false;
         };
         if event.key_code == .S {
-            state.world.player.dy = 0;
+            state.pressed&[2] = false;
         };
         if event.key_code == .D {
-            state.world.player.dx = 0;
+            state.pressed&[3] = false;
         };
     };
 };
@@ -389,6 +453,12 @@ fn do_interact(state: *State) void = {
             i := r.index_of(fn(it) => it[] == crop.type) 
                 || @say("Trying to sell % but that is not a requested item", crop.type);
             r.ordered_remove(i);
+            player.inventory = .None;
+            state.world.money += (i + 1) * (1 + @as(i64) crop.type) * 2;
+            if r.len == 0 {
+                state.world&.next_round();
+            };
+            
             return();
         }
         @say("You can only sell crops (you are holding %)", item&.tag());
@@ -400,7 +470,8 @@ fn do_interact(state: *State) void = {
 ::enum(Growth);
 fn center_overlaps(me: Pos, me_size: f64, obj: Pos, obj_size: f64) bool = {
     center: Pos = (x = me.x + me_size / 2, y = me.y + me_size / 2);
-    center.x > obj.x && center.x < obj.x + obj_size && center.y > obj.y && center.y < obj.y + obj_size
+    buffer := 10.0;
+    center.x + buffer> obj.x && center.x - buffer < obj.x + obj_size && center.y + buffer > obj.y && center.y - buffer < obj.y + obj_size
 }
 
 fn main() void = 

@@ -1,3 +1,29 @@
+## (May 9) 
+
+- I was kinda hoping that the graphics stuff would be a fun vacation from compiler 
+but it turns out it's not like super easy either (who knew!), so time for a break. 
+- made the farm_game example playable. game loop where it gives you a list of items
+to get each round and you lose if you don't finish in time. 
+- new project: terminal emulator
+- starting from my old `edit.fr` example so can already draw some text and scroll around
+- exec a process, poll for output every frame, dump the text on the screen
+- type on the bottom line and press enter to run it as a command
+- scroll down as text is added but only if you were already at the bottom, 
+so you can scroll up to look at something while running a program that spews logs 
+without it ripping you away down to the new stuff. 
+- history. up/down arrow to cycle commands
+- control c to send SIGINT to the child process
+- why is mine way slower than warp at running my prospero example? 
+:BigOutputBuffer 
+I only call poll() once per frame, but I want to read as much data 
+as possible (my buffer can be way larger than the OS pipe buffer) so the child 
+process doesn't block with a full pipe while i sleep on the frame timer for another 16 ms. 
+```
+1480ms: in Warp
+3020ms: mine, no loop so 64KB per frame
+1230ms: mine, loop with 4MB buffer
+```
+
 ## (May 8)
 
 - track field declaration Span for nicer error message when you forget a field in a struct literal.
@@ -2556,7 +2582,7 @@ but it seems they have looser rules than real.
   i got as far as it mostly working if i didn't stop at function declarations which meant it was slower,
   but that version fixed `// TODO: compiler bug? do we really want you to be able to bind to chunks which is declared lower in the scope?`,
   so that's interesting. i'll come back to that but for now a small vacation.
-- examples/edit.fr: multiple text boxes
+- examples/terminal.fr
 - renamed some io functions to make it clear that they `_or_crash`
 
 ## (Jan 7)

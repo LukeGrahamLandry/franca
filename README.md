@@ -49,7 +49,7 @@ Some does exist, see the `docs/README.md`.
 - Lightly optimising multi-platform codegen backend ([./backend]) (based on Qbe)
 - A C11 compiler (using that backend^) good enough to compile the lua interpreter ([./examples/import_c]) (based on Chibicc)
 - Comptime code generation demos ([./examples/bf])
-- Simple graphics (`./examples/{farm_game.fr, edit.fr}`) (using Sokol, DearImGui)
+- Simple graphics (`./examples/{farm_game.fr, terminal.fr}`)
 - Boring obj-dump-like utilities (`./examples/{dump_macho.fr, dump_elf.fr, dump_wasm.fr}`)
 - Animated ascii-art mandelbrot set by recompiling every frame ([./examples/60fps.fr])
 
