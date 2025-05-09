@@ -28,8 +28,8 @@ Impl :: @struct(
     app_dlg: id"FrancaAppDelegate",
     win_dlg: id"FrancaWindowDelegate",
     view: id"FrancaView",
-    cursors: EnumMap(Sapp.MouseCursor, id"NSCursor"),
-    mtl_device: id"MTLDevice",
+    cursors: EnumMap(Sapp.MouseCursor, NSCursor),
+    mtl_device: MTLDevice,
     classes: Classes,
     env: rawptr,  // franca dynamic environment pointer since we do stuff inside OS callbacks that don't follow our abi
     display_link: CVDisplayLinkRef,
@@ -38,11 +38,11 @@ Impl :: @struct(
 );
 
 Classes :: @struct(
-    NSPasteboardTypeFileURL: ObjCId, 
-    NSPasteboardTypeString: ObjCId,
+    NSPasteboardTypeFileURL: NSPasteboardType, 
+    NSPasteboardTypeString: NSPasteboardType,
     kCAFilterNearest: ObjCId,
     kCFAllocatorDefault: ObjCId,
-    NSApp: ObjCId,  // instance that represents the current app
+    NSApp: NSApplication,  // instance that represents the current app
 );
 
 fn run(m: *Impl, desc: *Sapp.Desc) Never = {
@@ -51,7 +51,7 @@ fn run(m: *Impl, desc: *Sapp.Desc) Never = {
     m.env = get_dynamic_context();
     
     register_objective_c_classes(m);
-    c.NSApp = @objc cls("NSApplication").sharedApplication();
+    c.NSApp = NSApplication'sharedApplication();
     
     // sanity
     inline_for_enum Classes.Fields() { $it |
@@ -64,26 +64,27 @@ fn run(m: *Impl, desc: *Sapp.Desc) Never = {
 
     m.app_dlg = new "FrancaAppDelegate";
     object_setInstanceVariable(m.app_dlg, "franca_sapp", Impl.raw_from_ptr(m));
-    @objc c.NSApp.setDelegate(m.app_dlg);
+    c.NSApp.setDelegate(m.app_dlg);
 
     // workaround for "no key-up sent while Cmd is pressed" taken from GLFW:
     NSEventMaskKeyUp :: 1.shift_left(11);
     aBlock := new_global_block(sapp.desc.allocator, Impl.raw_from_ptr(m), @as(rawptr) keyup_monitor);
     m.keyup_monitor = @objc cls("NSEvent").addLocalMonitorForEventsMatchingMask(NSEventMaskKeyUp, handler = aBlock);
     
-    @objc c.NSApp.run();
+    c.NSApp.run();
     // NOTE: [NSApp run] never returns, instead cleanup code
     // must be put into applicationWillTerminate
     unreachable()
 }
 
-keyup_monitor :: fn(self: *Block_literal_1, event: id"NSEvent") id("NSEvent") = {
+keyup_monitor :: fn(self: *Block_literal_1, event: NSEvent) NSEvent = {
     macos := Impl.ptr_from_raw(self.userdata);
     set_dynamic_context(macos.env);
-    flags := @objc @as(i64) event.modifierFlags();
+    flags := event.modifierFlags();
     NSEventModifierFlagCommand :: 1.shift_left(20);
     if flags.bit_and(NSEventModifierFlagCommand) != 0 {
-        @objc sendEvent(@objc macos.classes.NSApp.keyWindow(), event);
+        ::NSWindow;
+        macos.classes.NSApp.keyWindow().sendEvent(event);
     };
     event
 };
@@ -102,15 +103,15 @@ fn register_objective_c_classes(self: *Impl) void = {
     
     c := self.classes&;
     c.kCAFilterNearest = ObjCId.ptr_from_raw(@import_symbol("kCAFilterNearest", "QuartzCore"))[];
-    c.NSPasteboardTypeFileURL = ObjCId.ptr_from_raw(@import_symbol("NSPasteboardTypeFileURL", "AppKit"))[];
-    c.NSPasteboardTypeString = ObjCId.ptr_from_raw(@import_symbol("NSPasteboardTypeString", "AppKit"))[];
+    c.NSPasteboardTypeFileURL = NSPasteboardType.ptr_from_raw(@import_symbol("NSPasteboardTypeFileURL", "AppKit"))[];
+    c.NSPasteboardTypeString = NSPasteboardType.ptr_from_raw(@import_symbol("NSPasteboardTypeString", "AppKit"))[];
     c.kCFAllocatorDefault = ObjCId.ptr_from_raw(@import_symbol("kCFAllocatorDefault", "CoreFoundation"))[];
 }
 
 fn macos_discard_state(m: *Impl) void = {       
     // NOTE: it's safe to call [release] on a nil object
     if !m.keyup_monitor.is_nil() {
-        @objc cls("NSEvent").removeMonitor(m.keyup_monitor);
+        NSEvent'removeMonitor(m.keyup_monitor);
         // NOTE: removeMonitor also releases the object
         m.keyup_monitor = ObjCId.zeroed();
         // TODO: this still leaks the block because i said it was global
@@ -127,26 +128,25 @@ fn macos_discard_state(m: *Impl) void = {
 }
 
 fn init_cursors(self: *Impl) void = {
-    C := cls"NSCursor";
     c := self.cursors&;
     
-    c[.DEFAULT] = ObjCId.zeroed(); // not a bug
-    c[.ARROW] = @objc C.arrowCursor();
-    c[.IBEAM] = @objc C.IBeamCursor();
-    c[.CROSSHAIR] = @objc C.crosshairCursor();
-    c[.POINTING_HAND] = @objc C.pointingHandCursor();
+    c[.DEFAULT] = NSCursor'arrowCursor();  // default to arrow
+    c[.ARROW] = NSCursor'arrowCursor();
+    c[.IBEAM] = NSCursor'IBeamCursor();
+    c[.CROSSHAIR] = NSCursor'crosshairCursor();
+    c[.POINTING_HAND] = NSCursor'pointingHandCursor();
     // TODO: use [NSCursor frameResizeCursorFromPosition:inDirections:] ?
-    c[.RESIZE_EW] = @objc C._windowResizeEastWestCursor();
-    c[.RESIZE_NS] = @objc C._windowResizeNorthSouthCursor();
-    c[.RESIZE_NWSE] = @objc C._windowResizeNorthWestSouthEastCursor();
-    c[.RESIZE_NESW] = @objc C._windowResizeNorthEastSouthWestCursor();
-    c[.RESIZE_ALL] = @objc C.closedHandCursor();
-    c[.NOT_ALLOWED] = @objc C.operationNotAllowedCursor();
+    c[.RESIZE_EW] = NSCursor'_windowResizeEastWestCursor();
+    c[.RESIZE_NS] = NSCursor'_windowResizeNorthSouthCursor();
+    c[.RESIZE_NWSE] = NSCursor'_windowResizeNorthWestSouthEastCursor();
+    c[.RESIZE_NESW] = NSCursor'_windowResizeNorthEastSouthWestCursor();
+    c[.RESIZE_ALL] = NSCursor'closedHandCursor();
+    c[.NOT_ALLOWED] = NSCursor'operationNotAllowedCursor();
 }
 
-fn macos_mods(sapp: *Sapp.Self, ev: id"NSEvent") Sapp.Modifiers = {
-    f := @if(ev.is_nil(), @objc @as(u32) cls("NSEvent").modifierFlags(), @objc @as(u32) ev.modifierFlags()); // NSEventModifierFlags
-    b := @objc @as(u32) cls("NSEvent").pressedMouseButtons();
+fn macos_mods(sapp: *Sapp.Self, ev: NSEvent) Sapp.Modifiers = {
+    f := @if(ev._.is_nil(), NSEvent'modifierFlags(), ev.modifierFlags()); // NSEventModifierFlags
+    b := NSEvent'pressedMouseButtons();
     m := zeroed Sapp.Modifiers;
     X :: fn(mask, bit, $key: Sapp.Modifiers.Wide.Fields()) => {
         if mask.bit_and(1.shift_left(bit)) != 0 {
@@ -165,7 +165,7 @@ fn macos_mods(sapp: *Sapp.Self, ev: id"NSEvent") Sapp.Modifiers = {
     m
 }
 
-fn macos_mouse_event(sapp: *Sapp.Self, type: Sapp.EventType, btn: Sapp.Mousebutton, event: id"NSEvent") void = {
+fn macos_mouse_event(sapp: *Sapp.Self, type: Sapp.EventType, btn: Sapp.Mousebutton, event: NSEvent) void = {
     if(!sapp.events_enabled(), => return());
     mod := sapp.macos_mods(event);
     sapp.init_event(type);
@@ -240,8 +240,8 @@ fn update_dimensions(macos: *Impl) void = {
         ASSERT_NOT_GL();
         drawable_size: CGSize = (width = sapp.framebuffer_width.float(), height = sapp.framebuffer_height.float());
         @objc layer.setDrawableSize(drawable_size);
-        ASSERT_METAL();
-        macos.replace_depth_texture();
+        @if(SOKOL_BACKEND == .METAL_MACOS) macos.replace_depth_texture();
+        // TODO: wgpu?
         
         if !sapp.first_frame {
             sapp.app_event(.RESIZED);
@@ -292,12 +292,12 @@ fn get_clipboard_string(self: *Impl) *RawList(u8) = {
     pool := objc_autoreleasePoolPush();
     buf := sapp.clipboard.buffer&;
     buf.len = 0;
-    pasteboard := @objc cls("NSPasteboard").generalPasteboard();
+    pasteboard := NSPasteboard'generalPasteboard();
     types := @objc pasteboard.types();
     if @objc @as(bool) types.containsObject(c.NSPasteboardTypeString) {
-        s := @objc pasteboard.stringForType(c.NSPasteboardTypeString);
+        s := pasteboard.stringForType(c.NSPasteboardTypeString);
         // TODO: warn if paste fails somehow
-        if !s.is_nil() {
+        if !s._.is_nil() {
             s := @objc @as(CStr) s.UTF8String();
             s := s.str();
             buf.reserve(s.len, sapp.desc.allocator);
@@ -335,14 +335,8 @@ fn macos_mouse_update_from_nspoint(sapp: *Sapp.Self, mouse_pos: CGPoint, clear_d
     sapp.mouse.pos_valid = true;
 }
 
-fn macos_mouse_update_from_nsevent(sapp: *Sapp.Self, event: id"NSEvent", clear_dxdy: bool) void = { // NSEvent
+fn macos_mouse_update_from_nsevent(sapp: *Sapp.Self, event: NSEvent, clear_dxdy: bool) void = { // NSEvent
     sapp.macos_mouse_update_from_nspoint(@objc @as(CGPoint) event.locationInWindow(), clear_dxdy);
-}
-
-fn macos_show_mouse(visible: bool) void = {
-    /* NOTE: this function is only called when the mouse visibility actually changes */
-    main := CGMainDisplayID();
-    if(visible, => CGDisplayShowCursor(main), => CGDisplayHideCursor(main));
 }
 
 fn lock_mouse(macos: *Impl, lock: bool) void = {
@@ -363,11 +357,7 @@ fn lock_mouse(macos: *Impl, lock: bool) void = {
     */
     CGAssociateMouseAndMouseCursorPosition(!sapp.mouse.locked);
     // TODO: why not allow locking the mouse without hiding it? maybe that's never what you want? 
-    if sapp.mouse.locked {
-        @objc cls("NSCursor").hide();
-    } else {
-        @objc cls("NSCursor").unhide();
-    };
+    if(sapp.mouse.locked, => NSCursor'hide(), => NSCursor'unhide());
 }
 
 ::if(ObjCId);
@@ -376,14 +366,10 @@ fn update_cursor(macos: *Impl, cursor: Sapp.MouseCursor, shown: bool) void = {
     sapp := macos.common();
     // show/hide cursor only if visibility status has changed (required because show/hide stacks)
     if shown != sapp.mouse.shown {
-        if(shown, => @objc cls("NSCursor").unhide(), => @objc cls("NSCursor").hide());
+        if(shown, => NSCursor'unhide(), => NSCursor'hide());
     };
     // update cursor type
-    cursor_obj := macos.cursors&[cursor];
-    if cursor_obj.is_nil() {
-        cursor_obj = @objc cls("NSCursor").arrowCursor();
-    };
-    @objc cursor_obj.set();
+    macos.cursors&[cursor].set();
 }
 
 fn set_icon(macos: *Impl, icon_desc: []Sapp.ImageDesc) void = {
@@ -415,9 +401,8 @@ fn set_icon(macos: *Impl, icon_desc: []Sapp.ImageDesc) void = {
 fn frame(macos: *Impl) void = {
     sapp := macos.common();
     pool := objc_autoreleasePoolPush();
-    @debug_assert(SOKOL_BACKEND != .WGPU);
+    // TODO: wgpu swapchain something? 
     sapp.frame();
-    @debug_assert(SOKOL_BACKEND != .WGPU);
     if sapp.quit_requested || sapp.quit_ordered {
         @objc sapp.impl()[].window.performClose(0);
     };
@@ -482,11 +467,11 @@ FrancaAppDelegate :: @struct {
         );
         object_setInstanceVariable(macos.win_dlg, "franca_sapp", Impl.raw_from_ptr(macos));
         ASSERT_NOT_GL();
-        max_fps := @objc @as(i64) screen.maximumFramesPerSecond();  // if (@available(macOS 12.0, *))
+        max_fps := screen.maximumFramesPerSecond();  // if (@available(macOS 12.0, *))
         TODO_USE_THIS := max_fps;
         
         macos.mtl_device = MTLCreateSystemDefaultDevice();
-        @debug_assert(!macos.mtl_device.is_nil(), "MTLCreateSystemDefaultDevice");
+        @debug_assert(!macos.mtl_device._.is_nil(), "MTLCreateSystemDefaultDevice");
         v := @objc cls("FrancaView").alloc();
         macos.view = v;
         object_setInstanceVariable(v, "franca_sapp", Impl.raw_from_ptr(macos));
@@ -515,10 +500,11 @@ FrancaAppDelegate :: @struct {
         @objc w.setContentView(v);  // this calls viewDidMoveToWindow
         @objc w.makeFirstResponder(v);
         
-        @debug_assert(SOKOL_BACKEND != .WGPU);
         @objc w.center();
         sapp.valid = true;
-        @objc c.NSApp.setActivationPolicy(0); // NSApplicationActivationPolicyRegular
+        
+        // this lets you select the window and get key events
+        c.NSApp.setActivationPolicy(0); // NSApplicationActivationPolicyRegular
         
         if sapp.fullscreen {
             /* ^^^ on GL, this already toggles a rendered frame, so set the valid flag before */
@@ -529,7 +515,9 @@ FrancaAppDelegate :: @struct {
         // but this doesn't work if you do it before setActivationPolicy so it's moved here. 
         sapp.set_icon(sapp.desc.icon);
         
-        @objc c.NSApp.activateIgnoringOtherApps(true);
+        // this makes it pop to the front when opened
+        c.NSApp.activateIgnoringOtherApps(true);
+        
         nil := ObjCId.zeroed();
         @objc w.makeKeyAndOrderFront(nil);
         sapp.impl().update_dimensions();
@@ -646,12 +634,12 @@ FrancaWindow :: @struct {
     //       if the only place that calls it is myself in applicationDidFinishLaunching, 
     //       this can just be a normal franca function without the super stuff. 
     // Parameter names matter!
-    initWithContentRect :: fn(self: Self, contentRect: CGRect, style: u64, backingStoreType: u64, defer: bool) ObjCId = {
+    initWithContentRect :: fn(self: Self, contentRect: CGRect, styleMask: u64, backing: u64, defer: bool) ObjCId = {
         _, macos := GET(self);
         c := macos.classes;
         
         ctx: ObjCSuper = (receiver = self, super_class = cls("NSWindow"));
-        window := @objc_super ctx&.initWithContentRect(contentRect, styleMask = style, backing = backingStoreType, defer = defer);
+        window := @objc_super ctx&.initWithContentRect(contentRect, styleMask = styleMask, backing = backing, defer = defer);
         @debug_assert(!window.is_nil(), "initWithContentRect failed??? this won't go well for you");
         //#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 101300
         types := @objc cls("NSArray").arrayWithObject(c.NSPasteboardTypeFileURL);
@@ -659,45 +647,45 @@ FrancaWindow :: @struct {
         window
     }
 
-    draggingEntered :: fn(_: Self, __: id"NSDraggingInfo") i64 = 
-        1; // NSDragOperationCopy
+    draggingEntered :: fn(_: Self, __: id"NSDraggingInfo") i64 =  {
+        1 // NSDragOperationCopy
+    }
     
-    draggingUpdated :: fn(_: Self, __: id"NSDraggingInfo") i64 = 
-        1; // NSDragOperationCopy
+    draggingUpdated :: fn(_: Self, __: id"NSDraggingInfo") i64 = {
+        1 // NSDragOperationCopy
+    }
     
-    performDragOperation :: fn(self: Self, sender: id"NSDraggingInfo") bool = {
+    performDragOperation :: fn(self: Self, sender: NSDraggingInfo) bool = {
         //#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 101300
         sapp, macos := GET(self);
         d, a, c  := (sapp.drop&, sapp.desc.allocator, macos.classes&);
-        pboard   := @objc sender.draggingPasteboard();  // NSPasteboard *
-        can_drop := @objc @as(bool) (@objc pboard.types()).containsObject(c.NSPasteboardTypeFileURL);
+        pboard   := sender.draggingPasteboard();
+        xxx := pboard.types();
+        can_drop := xxx.containsObject(c.NSPasteboardTypeFileURL);
         if(!can_drop, => return(false));
-        files := @objc pboard.pasteboardItems();
-        d.num_files = @objc @as(i64) files.count();
+        files := pboard.pasteboardItems();
+        d.num_files = files.count();
         
         d.buffer.len = 0;
         d.starts.len = 0;
         d.starts&.reserve(d.num_files, a);
         range(0, d.num_files) { i |
             d.starts&.push(d.buffer.len, a);
-            it := @objc files.objectAtIndex(i);
-            it := @objc it.stringForType(c.NSPasteboardTypeFileURL);
-            it := @objc cls("NSURL").fileURLWithPath(it);
-            it := @objc it.standardizedURL();
-            it := @objc it.path();
-            it := @objc @as(CStr) it.UTF8String();
-            d.buffer&.push_all(it.str(), a);
+            it := files.objectAtIndex(i).stringForType(c.NSPasteboardTypeFileURL);
+            it := NSURL'fileURLWithPath(it);
+            it := it.standardizedURL().path().UTF8String().str();
+            d.buffer&.push_all(it, a);
             d.buffer&.push(0, a); // for good luck
         }
         d.starts&.push(d.buffer.len, a);  // for the end of last one
         if sapp.events_enabled() {
-            sapp.macos_mouse_update_from_nspoint(@objc @as(CGPoint) sender.draggingLocation(), true);
+            sapp.macos_mouse_update_from_nspoint(sender.draggingLocation(), true);
             sapp.init_event(.FILES_DROPPED);
-            sapp.event.modifiers = sapp.macos_mods(ObjCId.zeroed());
+            sapp.event.modifiers = sapp.macos_mods(NSEvent.zeroed());
             sapp.call_event(sapp.event&);
         };
         true
-    }
+    };
 };
 
 // TODO: for gl: override timerFired and prepareOpenGL on view
@@ -739,7 +727,7 @@ FrancaView :: @struct {
         
         // TODO: i feel like EnabledDuringMouseDrag isn't happening. did i mistype the bits?
         // NSTracking MouseEnteredAndExited|CursorUpdate|ActiveInKeyWindow|AssumeInside|InVisibleRect|EnabledDuringMouseDrag
-        options := 0b11100100101;
+        options: u32 = 0b11100100101;
         
         c := macos.classes&;
         ta := @objc cls("NSTrackingArea").alloc();
@@ -751,7 +739,7 @@ FrancaView :: @struct {
         @objc_super s&.updateTrackingAreas();
     }
     
-    mouseEntered :: fn(self: Self, event: id"NSEvent") void = {
+    mouseEntered :: fn(self: Self, event: NSEvent) void = {
         sapp, macos := GET(self);
         sapp.gl_make_current();
         sapp.macos_mouse_update_from_nsevent(event, true);
@@ -763,7 +751,7 @@ FrancaView :: @struct {
         }
     }
     
-    mouseExited :: fn(self: Self, event: id"NSEvent") void = {
+    mouseExited :: fn(self: Self, event: NSEvent) void = {
         sapp, macos := GET(self);
         sapp.gl_make_current();
         sapp.macos_mouse_update_from_nsevent(event, true);
@@ -772,44 +760,44 @@ FrancaView :: @struct {
         }
     }
     
-    mouseDown :: fn(view: Self, event: id"NSEvent") void = 
+    mouseDown :: fn(view: Self, event: NSEvent) void = 
         handle_mouse_press(view, event, .MOUSE_DOWN, .LEFT);
     
-    mouseUp :: fn(view: Self, event: id"NSEvent") void = 
+    mouseUp :: fn(view: Self, event: NSEvent) void = 
         handle_mouse_press(view, event, .MOUSE_UP, .LEFT);
     
-    rightMouseDown :: fn(view: Self, event: id"NSEvent") void = 
+    rightMouseDown :: fn(view: Self, event: NSEvent) void = 
         handle_mouse_press(view, event, .MOUSE_DOWN, .RIGHT);
     
-    rightMouseUp :: fn(view: Self, event: id"NSEvent") void =  
+    rightMouseUp :: fn(view: Self, event: NSEvent) void =  
         handle_mouse_press(view, event, .MOUSE_UP, .RIGHT);
     
-    otherMouseDown :: fn(view: Self, event: id"NSEvent") void = 
+    otherMouseDown :: fn(view: Self, event: NSEvent) void = 
         handle_mouse_press(view, event, .MOUSE_DOWN, .MIDDLE);
     
-    otherMouseUp :: fn(view: Self, event: id"NSEvent") void = 
+    otherMouseUp :: fn(view: Self, event: NSEvent) void = 
         handle_mouse_press(view, event, .MOUSE_UP, .MIDDLE);
     
-    otherMouseDragged :: fn(view: Self, event: id"NSEvent") void = 
+    otherMouseDragged :: fn(view: Self, event: NSEvent) void = 
         handle_mouse_move(view, event, true);
     
-    mouseMoved :: fn(view: Self, event: id"NSEvent") void = 
+    mouseMoved :: fn(view: Self, event: NSEvent) void = 
         handle_mouse_move(view, event, false);
     
-    mouseDragged :: fn(view: Self, event: id"NSEvent") void = 
+    mouseDragged :: fn(view: Self, event: NSEvent) void = 
         handle_mouse_move(view, event, false);
     
-    rightMouseDragged :: fn(view: Self, event: id"NSEvent") void = 
+    rightMouseDragged :: fn(view: Self, event: NSEvent) void = 
         handle_mouse_move(view, event, false);
     
-    scrollWheel :: fn(view: Self, event: id"NSEvent") void = {
+    scrollWheel :: fn(view: Self, event: NSEvent) void = {
         sapp, macos := GET(view);
         sapp.gl_make_current();
         sapp.macos_mouse_update_from_nsevent(event, true);
         if sapp.events_enabled() {
-            dx := @objc @as(f64) event.scrollingDeltaX();
-            dy := @objc @as(f64) event.scrollingDeltaY();
-            if (@objc @as(bool) event.hasPreciseScrollingDeltas()) {
+            dx := event.scrollingDeltaX();
+            dy := event.scrollingDeltaY();
+            if event.hasPreciseScrollingDeltas() {
                 dx *= 0.1;
                 dy *= 0.1;
             }
@@ -823,28 +811,35 @@ FrancaView :: @struct {
         }
     }
     
-    keyDown :: fn(view: Self, event: id"NSEvent") void = {
+    keyDown :: fn(view: Self, event: NSEvent) void = {
         sapp, macos := GET(view);
         if(!sapp.events_enabled(), => return());
         sapp.gl_make_current();
         mods     := sapp.macos_mods(event);
-        key_code := sapp.translate_key(@objc @as(i64) event.keyCode());
-        repeat := @objc @as(bool) event.isARepeat();
+        key_code := sapp.translate_key(zext event.keyCode());
+        repeat   := event.isARepeat();
         sapp.macos_key_event(.KEY_DOWN, key_code, repeat, mods);
-        chars := @objc event.characters(); // NSString
-        len   := @objc @as(i64) chars.length();
-        if len > 0 {
-            sapp.init_event(.CHAR);
-            sapp.event.modifiers = mods;
-            range(0, len) { i |
-                codepoint := @objc @as(i64) chars.characterAtIndex(i); // unichar
-                if codepoint.bit_and(0xFF00) != 0xF700 {
-                    sapp.event.char_code = codepoint.trunc();
-                    sapp.event.key_repeat = repeat;
-                    sapp.call_event(sapp.event&);
-                };
-            }
-        };
+        if sapp.desc.enable_chars {
+            chars := event.characters();
+            len   := chars.length();
+            if len > 0 {
+                sapp.init_event(.CHAR);
+                sapp.event.modifiers = mods;
+                range(0, len) { i |
+                    // TODO: sokol docs say "the UTF-32 character code" but that's not what this is. 
+                    //       is it impossible to type a character that needs a surrogate? that can't be true. 
+                    //       if you try the little emoji popup thingy you get 
+                    //       "error messaging the mach port for IMKCFRunLoopWakeUpReliable"
+                    utf16_codeunit := chars.characterAtIndex(i);
+                    // don't send it if it's in the "UNICODE Private Area" 
+                    if utf16_codeunit.bit_and(0xFF00) != 0xF700 {
+                        sapp.event.char_code = utf16_codeunit.zext();
+                        sapp.event.key_repeat = repeat;
+                        sapp.call_event(sapp.event&);
+                    }
+                }
+            };
+        }
         ::enum(@type key_code);
         /* if this is a Cmd+V (paste), also send a CLIPBOARD_PASTE event */
         if sapp.clipboard.enabled && mods.get(.super) != 0 && key_code == .V {
@@ -853,32 +848,31 @@ FrancaView :: @struct {
         };
     }
     
-    performKeyEquivalent :: fn(view: Self, event: id"NSEvent") bool = {
+    performKeyEquivalent :: fn(view: Self, event: NSEvent) bool = {
         // fixes Ctrl-Tab keydown not triggering a keyDown event
         // NOTE: it seems that Ctrl-F1 cannot be intercepted the same way, but since
         // this enabled critical accessibility features that's probably a good thing.
         sapp, macos := GET(view);
-        k := @objc @as(i64) event.keyCode();
+        k := event.keyCode();
         ::enum(Sapp.Keycode);
-        if sapp.translate_key(k) == .TAB {
+        if sapp.translate_key(zext k) == .TAB {
             @objc macos.view.keyDown(event);
             return true;
         };
         false
     }
     
-    keyUp :: fn(view: Self, event: id"NSEvent") void = {
+    keyUp :: fn(view: Self, event: NSEvent) void = {
         sapp, macos := GET(view);
         sapp.gl_make_current();
-        key    := sapp.translate_key(@objc @as(i64) event.keyCode());
-        repeat := @objc @as(bool) event.isARepeat();
-        sapp.macos_key_event(.KEY_UP, key, repeat, sapp.macos_mods(event));
+        key := sapp.translate_key(zext event.keyCode());
+        sapp.macos_key_event(.KEY_UP, key, event.isARepeat(), sapp.macos_mods(event));
     }
     
-    flagsChanged :: fn(view: Self, event: id"NSEvent") void = {
+    flagsChanged :: fn(view: Self, event: NSEvent) void = {
         sapp, macos := GET(view);
         old_f := macos.flags_changed_store;
-        new_f := @objc @as(u32) event.modifierFlags();
+        new_f := event.modifierFlags();
         macos.flags_changed_store = new_f;
         key_code := Sapp.Keycode.INVALID;
         down     := false;
@@ -919,9 +913,9 @@ setup_display_link :: fn(macos: *Impl) void = {
     @assert(res.is_ok(), "CVDisplayLinkSetOutputCallback");
 
     disp_id := {
-        screen := @objc cls("NSScreen").mainScreen();
-        devices := @objc screen.deviceDescription();
-        name := @objc cls("NSString").stringWithUTF8String(@as(CStr) "NSScreenNumber");
+        screen := NSScreen'mainScreen();
+        devices := screen.deviceDescription();
+        name := NSString'stringWithUTF8String("NSScreenNumber");
         desc := @objc devices.objectForKey(name);
         @debug_assert(!desc.is_nil(), "CGDirectDisplayID");
         @objc @as(CGDirectDisplayID) desc.unsignedIntegerValue()
@@ -958,7 +952,7 @@ fn gl_make_current(sapp: *Sapp.Self) void = {
     ASSERT_NOT_GL();
 }
 
-fn handle_mouse_press(view: id"FrancaView", event: id"NSEvent", action: Sapp.EventType, which: Sapp.Mousebutton) void = {
+fn handle_mouse_press(view: id"FrancaView", event: NSEvent, action: Sapp.EventType, which: Sapp.Mousebutton) void = {
     sapp, macos := GET(view);
     sapp.gl_make_current();
     sapp.macos_mouse_update_from_nsevent(event, false);
@@ -968,7 +962,7 @@ fn handle_mouse_press(view: id"FrancaView", event: id"NSEvent", action: Sapp.Eve
     //       do i have to somehow set that button to be a real button in the garbage mouse app? 
     // TODO: it seems i get otherButton events with 0/1 for left/right, 
     //       why bother to listen to those individually then? 
-    if which == .MIDDLE && (@objc @as(i64) event.buttonNumber()) != 2 {
+    if which == .MIDDLE && event.buttonNumber() != 2 {
         return()
     }
     sapp.macos_mouse_event(action, which, event);
@@ -982,14 +976,14 @@ fn handle_mouse_press(view: id"FrancaView", event: id"NSEvent", action: Sapp.Eve
     }
 }
 
-fn handle_mouse_move(view: id"FrancaView", event: id"NSEvent", other: bool) void = {
+fn handle_mouse_move(view: id"FrancaView", event: NSEvent, other: bool) void = {
     sapp, macos := GET(view);
     sapp.gl_make_current();
     sapp.macos_mouse_update_from_nsevent(event, false);
-    if(other && (@objc @as(i64) event.buttonNumber()) != 2, => return());
+    if(other && event.buttonNumber() != 2, => return());
     if sapp.mouse.locked {
-        sapp.mouse.dx = cast(@objc @as(f64) event.deltaX());
-        sapp.mouse.dy = cast(@objc @as(f64) event.deltaY());
+        sapp.mouse.dx = cast event.deltaX();
+        sapp.mouse.dy = cast event.deltaY();
     }
     sapp.macos_mouse_event(.MOUSE_MOVE, .INVALID, event);
 }
@@ -1012,7 +1006,7 @@ fn poll_input_events(macos: *Impl) void = {
     }
 }
 
-fn metal_get_device(macos: *Impl) id("MTLDevice") = {
+fn metal_get_device(macos: *Impl) MTLDevice = {
     @debug_assert(macos.common()[].valid, "not valid");
     ASSERT_NOT_GL();
     macos.mtl_device

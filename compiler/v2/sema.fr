@@ -1556,7 +1556,9 @@ fn construct_struct_literal(self: *SelfHosted, expr: *FatExpr, requested: Result
                     if(i < bindings.len && bindings.index(i).ident().unwrap() == field.name, => continue());  // :NotForCorrectness
                     if(bindings.contains(fn(b) => b.ident().unwrap() == field.name), => continue());
                     
-                    default := @unwrap(field.get_default(), "Missing required field % (no default value provided)", self.pool.get(field.name)) return;
+                    default := field.get_default() || 
+                        return(Err = self.error(MissingField = (span = expr.loc, container = requested, name = field.name)));
+                    
                     bindings.push(
                         (
                             name = (Ident = field.name),
@@ -4722,6 +4724,7 @@ fn struct_type(self: *SelfHosted, pattern: *Pattern, is_union: bool) Maybe(Type)
 
 fn make_runtime_field(self: *SelfHosted, b: *Binding) Maybe(Field) #inline = {
     name := b.ident().expect("field name");
+
     ty := or @check(self.infer_type(b.ty&)) return {
         // We need to know the type before we can size the struct. 
         default := @unwrap(b.get_default(), "@struct field without type requires default value.") return;
@@ -4746,6 +4749,8 @@ fn make_runtime_field(self: *SelfHosted, b: *Binding) Maybe(Field) #inline = {
         nullable_tag = b.nullable_tag,
         default = default,
         byte_offset = FIELD_LAYOUT_NOT_DONE,
+        // even if they didn't provide a default expression, this slot will still have location info for the binding
+        loc = b.default.loc, 
     ))
 }
 

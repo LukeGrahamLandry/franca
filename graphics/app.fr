@@ -46,6 +46,7 @@ Desc :: @struct(
     window_title: CStr = "Untitled Window",
     enable_clipboard := false,  // CLIPBOARD_PASTED
     enable_dragndrop := false,  // FILES_DROPPED
+    enable_chars     := true,   // CHAR
     icon: []ImageDesc = empty(),
     allocator: Alloc,
 );
@@ -54,6 +55,7 @@ ImageDesc :: @struct(
     height: i64,
     pixels: []u8,
 );
+// TODO: make Vec2 less unfun to work with and then use that for all the sizes/deltas etc. 
 Self :: @rec @struct(
     // For personal sanity, it feels better if this struct is the same size on all target platforms. 
     // But we still statically know what type it will be because you're only targetting one platform at a time. 
@@ -84,6 +86,8 @@ Self :: @rec @struct(
     drop: Drop,
     // For most platforms, this is just some constant data. 
     keycodes: []Keycode,
+    // Not part of impl_storage because it can be used together with a native backend. 
+    webgpu: import("@/graphics/web/app.fr").GraphicsState,
 );
 Clipboard :: @struct(
     enabled: bool,
@@ -112,6 +116,7 @@ fn impl(s: *Self) *Macos.Impl = ptr_cast_unchecked(Self, Macos.Impl, s);
 fn common(s: *Macos.Impl) *Self = ptr_cast_unchecked(Macos.Impl, Self, s);
 
 fn call_init(sapp: *Self) void = {
+    @if(@run (SOKOL_BACKEND == .WGPU)) sapp.setup_wgpu_native();
     sapp'desc'init_cb(sapp.desc.user_data);
     sapp.init_called = true;
 }
@@ -252,7 +257,9 @@ fn run(sapp: *Self, desc: Desc) Never = {
 }
 
 fn color_format(sapp: *Self) SgPixelFormat = {
-    ASSERT_METAL();
+    // TODO: wgpu 
+    //       do i have to give it the first one i get back from surfacecaps? 
+    //       i don't even have a thing for BGRA8UnormSrgb ?
     .BGRA8
 }
 
@@ -366,7 +373,7 @@ Mousebutton :: @enum(i32) (
     INVALID = 256,
 );
 MouseCursor :: @enum(i32) (
-    DEFAULT,
+    DEFAULT,  // TODO: if this is the same as ARROW on every platform just get rid of it
     ARROW,
     IBEAM,
     CROSSHAIR,

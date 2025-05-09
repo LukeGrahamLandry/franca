@@ -1,3 +1,56 @@
+## (May 8)
+
+- track field declaration Span for nicer error message when you forget a field in a struct literal.
+- hmmm, "invalid vertex step mode for vertex buffer layout" but i can see that im giving it the 
+right number. i can even recompile wgpu and print the number in that error message to make sure 
+it didn't get lost in struct padding or something crazy. ahhhhhhh this is going to suck. 
+it turns out wgpu's copy of webgpu.h is totally differnt from dawn's and i had generated a 
+thing off dawn's and then tried to use wgpu. i kinda assumed that when `webgpu-native/webgpu-headers` 
+said `**NOT STABLE YET!**` they meant oh you know they might be different next year not like right
+now every implementation disagrees completly about what the numbers should be and we've just picked
+one at random to give you. so that's unfortunate. 
+
+```
+// count.fr is skipping graphics/web/ sometimes ??!
+
+// [examples/count.fr] main()
+// SOMEHOW I DONT TRUST THIS
+// THE NEW str() FUCKS IT UP????????? BECAUSE IT HAD A BRANCH AND DIDN'T GET INLINED
+// :Compiler :FUCKED
+// if you change the args0 we check for here the same thing happens on the amd one !!
+// so it quacks like an abi bug but on both backends !!
+// this is very bad perhaps 
+// doesnt happen AOT (even with ajusting this string and running `./a.out examples/count.fr graphics` so it takes the same codepath)
+if args.len >= 2 && args[0].str() == "franca" && args[1].str().ends_with("count.fr") {
+    args = args.rest(2);
+};
+
+// [examples/count.fr] handle_path()
+// adding this fixes it
+_ := @tfmt("%", arg);
+
+// [lib/fmt.fr]
+// fixed by inlining this (which you want it to be anyway but it's 
+// not ok that it doesn't fucking work at all otherwise)
+fn str(self: CStr) Str #inline = 
+    @if(self.ptr.is_null(), empty(), (ptr = self.ptr, len = self.slow_len()));
+
+// [compiler/lex.fr] lex_ident()
+// alternatively fixed by getting rid of this 
+// (which is NOT that it lexed the program itself wrong; count.fr uses the lexer)
+// and like this is stupid anyway but it's a massive problem that i still can't explain what the hell is happening. 
+// i only thought of this because i tried printing in eq(Str, Str) to make sure it was getting the 
+// right thing for the args check in count.fr (which it was, at least with the print in there) and 
+// was annoyed that it was comparing to "fn" a lot in the lexer. 
+@switch(name) {
+  @case("fn") => self.put_token(.Fn);
+  @default fn(s: Str) => {
+      ident := self.pool.insert_owned(name);
+      self.put_token((Symbol = ident))
+  };
+};
+```
+
 ## (May 6/7)
 
 - putting this in fill_objc_reflect is such a flex. 
@@ -59,6 +112,10 @@ if !X[] { // :bindings
     }
 };
 ```
+- they have `_sapp_macos_show_mouse` which is never called?
+- they have a list of cursor images where DEFAULT is carefully stored as nil 
+but the only place you use it you have to check if it's nil before sending it a message. 
+- // TODO: sokol docs say "the UTF-32 character code" but that's not what NSString.characterAtIndex gives you? 
 
 ---
 

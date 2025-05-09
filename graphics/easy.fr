@@ -42,7 +42,10 @@ build_for_graphics :: fn(vtable: *ImportVTable, input_path: Str) void = {
     };
     
     if SOKOL_BACKEND == .WGPU {
-        path := "/Users/luke/Downloads/wgpu-macos-aarch64-debug/lib/libwgpu_native.dylib"; // TODO
+        // 🤡 but it doesn't work yet anyway
+        path := "/Users/luke/Downloads/dawn/out/Debug/src/dawn/native/libwebgpu_dawn.dylib"; // TODO
+        //path := "/Users/luke/Downloads/wgpu-native/target/debug/libwgpu_native.dylib"; // TODO
+        //path := "/Users/luke/Downloads/wgpu-macos-aarch64-debug/lib/libwgpu_native.dylib"; // TODO
         dyn := Dyn'open(path) || @panic("missing dylib: %", path);
         ctx.add_comptime_library(ctx.intern_string("webgpu"), dyn);
     };
@@ -104,9 +107,15 @@ glue_environment :: fn(sapp: *Sapp.Self) SgEnvironment = {
     env.defaults.color_format = sapp.color_format();
     env.defaults.depth_format = sapp.depth_format(); 
     env.defaults.sample_count = 1;//sapp.sample_count.intcast(); :DEPTH
-    env.metal.device = sapp.impl().metal_get_device();
-    // TODO: update for d3d11/wgpu
-    @debug_assert(SOKOL_BACKEND.is_metal());
+    @inline_switch(SOKOL_BACKEND) {
+        @case(.METAL_MACOS) => {
+            env.metal.device = sapp.impl().metal_get_device();
+        }
+        @case(.WGPU) => {
+            env.wgpu.device = sapp.webgpu.device;
+        }
+        @default => panic("TODO: glue_environment");
+    };
     env
 }
 
@@ -118,10 +127,24 @@ glue_swapchain :: fn(sapp: *Sapp.Self) SgSwapchain = {
     swapchain.sample_count = 1; // sapp.sample_count.intcast(); :DEPTH
     swapchain.color_format = sapp.color_format();
     swapchain.depth_format = sapp.depth_format(); 
-    swapchain.metal.current_drawable = sapp.impl().metal_get_current_drawable();
-    swapchain.metal.depth_stencil_texture = sapp.impl().metal_get_depth_stencil_texture();
-    swapchain.metal.msaa_color_texture = sapp.impl().metal_get_msaa_color_texture();
-    ASSERT_METAL();
+    @inline_switch(SOKOL_BACKEND) {
+        @case(.METAL_MACOS) => {
+            swapchain.metal = (
+                current_drawable = sapp.impl().metal_get_current_drawable(),
+                depth_stencil_texture = sapp.impl().metal_get_depth_stencil_texture(),
+                msaa_color_texture = sapp.impl().metal_get_msaa_color_texture(),
+            );
+        }
+        @case(.WGPU) => {
+            //swapchain.wgpu = (
+            //    render_view = ,
+            //    resolve_view = ,
+            //    depth_stencil_view = ,
+            //);
+        }
+        @default => panic("TODO: glue_swapchain");
+    };
+    
     swapchain
 }
 

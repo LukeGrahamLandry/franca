@@ -1,0 +1,125 @@
+// 
+// wgpu has some sample code for integration with glfw: 
+// https://github.com/gfx-rs/wgpu-native/blob/afba393d99a8bc98b57b03a5ae8afa6f6eb72d17/examples/triangle/main.c
+// This is the same idea but for app.fr. 
+//
+// Abstraction will continue until moral improves. 
+// It's a bit like if you make an electron app but then make a canvas 
+// that covers you whole screen and just draw into that.
+//
+
+WGPU :: import("@/graphics/web/webgpu.fr");
+GraphicsState :: @struct {
+    instance: WGPU.Instance;
+    surface: WGPU.Surface;
+    device: WGPU.Device;
+    adapter: WGPU.Adapter;
+    config: WGPU.SurfaceConfiguration;
+};
+
+// TODO: do i have to do anything to get logging info? 
+//       wgpuDevicePushErrorScope/wgpuDevicePopErrorScope?
+fn setup_wgpu_native(sapp: *Sapp.Self) void = {
+    macos: *Sapp.Macos.Impl = sapp.impl();
+    layer := @objc @as(rawptr) macos.view.layer();
+    web := sapp.webgpu&;
+    
+    web.instance = WGPU'wgpuCreateInstance(zeroed(*WGPU.InstanceDescriptor));
+    
+    web.surface = createSurface(web.instance, @ref @as(WGPU.SurfaceDescriptor) (
+        nextInChain = (@ref @as(WGPU.SurfaceSourceMetalLayer) (
+            chain = (sType = .SurfaceSourceMetalLayer),
+            layer = layer,
+        ))[].chain&,
+    ));
+    
+    web.instance.requestAdapter(@ref @as(WGPU.RequestAdapterOptions) (
+        compatibleSurface = web.surface,
+    ), (
+        callback = fn(status, adapter, message, userdata1, _userdata2) void = {
+            ::enum(@type status);   
+            @assert(status == .Success, "requestAdapter: %", message);
+            GraphicsState.ptr_from_raw(userdata1)[].adapter = adapter;
+        },
+        userdata1 = GraphicsState.raw_from_ptr(web),
+    ));
+    @debug_assert(!web.adapter._.is_null(), "we don't fuck with async here");
+
+    web.adapter.requestDevice(zeroed(*WGPU.DeviceDescriptor), (
+        callback = fn(status, device, message, userdata1, _userdata2) void = {
+            ::enum(@type status);
+            @assert(status == .Success, "requestDevice: %", message);
+            GraphicsState.ptr_from_raw(userdata1)[].device = device;
+        },
+        userdata1 = GraphicsState.raw_from_ptr(web),
+    ));
+    @debug_assert(!web.device._.is_null(), "we don't fuck with async here");
+    
+    caps := zeroed WGPU.SurfaceCapabilities;
+    getCapabilities(web.surface, web.adapter, caps&);
+    @debug_assert(caps.formatCount > 0 && caps.alphaModeCount > 0);
+    
+    // TODO: make creating a @bit_fields suck less
+    usage := zeroed WGPU.TextureUsage;
+    usage&.set(.RenderAttachment, 1);
+    
+    web.config = (
+        device = web.device,
+        usage = usage,
+        format = caps.formats[],
+        presentMode = .Fifo,
+        alphaMode = caps.alphaModes[],
+        width = trunc sapp.framebuffer_width,
+        height = trunc sapp.framebuffer_height,
+    );
+    web.surface.configure(web.config&);
+    
+    // TODO: what about depth texture / msaa
+}
+
+native_frame :: fn(sapp: *Sapp.Self) void = {
+/*
+WGPUSurfaceTexture surface_texture;
+wgpuSurfaceGetCurrentTexture(demo.surface, &surface_texture);
+switch (surface_texture.status) {
+case WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal:
+case WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal:
+  // All good, could handle suboptimal here
+  break;
+case WGPUSurfaceGetCurrentTextureStatus_Timeout:
+case WGPUSurfaceGetCurrentTextureStatus_Outdated:
+case WGPUSurfaceGetCurrentTextureStatus_Lost: {
+  // Skip this frame, and re-configure surface.
+  if (surface_texture.texture != NULL) {
+    wgpuTextureRelease(surface_texture.texture);
+  }
+  int width, height;
+  glfwGetWindowSize(window, &width, &height);
+  if (width != 0 && height != 0) {
+    demo.config.width = width;
+    demo.config.height = height;
+    wgpuSurfaceConfigure(demo.surface, &demo.config);
+  }
+  continue;
+}
+case WGPUSurfaceGetCurrentTextureStatus_OutOfMemory:
+case WGPUSurfaceGetCurrentTextureStatus_DeviceLost:
+case WGPUSurfaceGetCurrentTextureStatus_Force32:
+  // Fatal error
+  printf(LOG_PREFIX " get_current_texture status=%#.8x\n",
+         surface_texture.status);
+  abort();
+}
+assert(surface_texture.texture);
+
+wgpuTextureViewRelease(old_frame);
+WGPUTextureView frame =
+    wgpuTextureCreateView(surface_texture.texture, NULL);
+assert(frame);
+old_frame = frame
+*/
+}
+
+native_shutdown :: fn(sapp: *Sapp.Self) void = {
+    // TODO
+}

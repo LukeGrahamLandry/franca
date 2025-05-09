@@ -309,7 +309,9 @@ fn to_wgpu(m: SgColorMask) WGPU.ColorWriteMask = {
     //    res |= WGPU.ColorWriteMask_Alpha;
     //}
     //return (WGPU.ColorWriteMask)res;
-    todo()
+    //todo()
+    // TODO: wgpu UNFINISHED i just want to see what happens
+    (_ = 0) 
 }
 
 fn to_wgpu(it: SgShaderStage) WGPU.ShaderStage = (_ = @map_enum(it)
@@ -407,25 +409,22 @@ fn bindgroups_pool_discard() void = {
     _sg_pool_discard(&p.pool);
 }
 
-fn bindgroup_at(bg_id: uint32_t) *bindgroup_t = {
+fn bindgroup_at(bg_id: u32) *bindgroup_t = {
     @debug_assert(SG_INVALID_ID != bg_id);
-    bindgroups_pool_t* p = &wgpu.bindgroups_pool;
-    int slot_index = _sg_slot_index(bg_id);
+    p := wgpu.bindgroups_pool&;
+    slot_index := _sg_slot_index(bg_id);
     @debug_assert((slot_index > _SG_INVALID_SLOT_INDEX) && (slot_index < p.pool.size));
-    return &p.bindgroups[slot_index];
+    p.bindgroups&[slot_index]&
 }
 
-fn lookup_bindgroup(bg_id: uint32_t) *bindgroup_t = {
-    if (SG_INVALID_ID != bg_id) {
-        bindgroup_t* bg = bindgroup_at(bg_id);
-        if (bg.slot.id == bg_id) {
-            return bg;
-        }
-    }
-    return 0;
+fn lookup_bindgroup(wgpu: *Impl, bg_id: u32) ?*bindgroup_t = {
+    if(bg_id == SG_INVALID_ID, => return(.None));
+    bg := bindgroup_at(bg_id);
+    if(bg.slot.id != bg_id, => return(.None));
+    (Some = bg)
 }
 
-fn alloc_bindgroup() bindgroup_handle_t = {
+fn alloc_bindgroup(wgpu: *Impl) bindgroup_handle_t = {
     bindgroups_pool_t* p = &wgpu.bindgroups_pool;
     bindgroup_handle_t res;
     int slot_index = _sg_pool_alloc_index(&p.pool);
@@ -438,19 +437,11 @@ fn alloc_bindgroup() bindgroup_handle_t = {
     res
 }
 
-fn dealloc_bindgroup(bg: *bindgroup_t) void = {
-    @debug_assert(bg && (bg.slot.state == SG_RESOURCESTATE_ALLOC) && (bg.slot.id != SG_INVALID_ID));
-    bindgroups_pool_t* p = &wgpu.bindgroups_pool;
-    _sg_pool_free_index(&p.pool, _sg_slot_index(bg.slot.id));
-    _sg_slot_reset(&bg.slot);
-}
-
-fn reset_bindgroup_to_alloc_state(bg: *bindgroup_t) void = {
-    @debug_assert(bg);
-    _sg_slot_t slot = bg.slot;
-    _sg_clear(bg, sizeof(bindgroup_t));
-    bg.slot = slot;
-    bg.slot.state = SG_RESOURCESTATE_ALLOC;
+fn dealloc_bindgroup(wgpu: *Impl, bg: *bindgroup_t) void = {
+    @debug_assert(bg.slot.state == .ALLOC && bg.slot.id != SG_INVALID_ID);
+    p := wgpu.bindgroups_pool&;
+    p.free_index(_sg_slot_index(bg.slot.id));
+    bg.slot = zeroed Sg.SlotHeader;
 }
 
 // MurmurHash64B (see: https://github.com/aappleby/smhasher/blob/61a0530f28277f2e850bfc39600ce61d02b518de/src/MurmurHash2.cpp#L142)
@@ -558,89 +549,79 @@ fn compare_bindgroups_cache_key(wgpu: *Impl, k0: *bindgroups_cache_key_t, k1: *b
     true
 }
 
-fn create_bindgroup(wgpu: *Impl, bnd: *Sg.ResolvedBindings) *bindgroup_t = {
-    @debug_assert(wgpu.dev);
-    @debug_assert(bnd.pip);
-    const _sg_shader_t* shd = bnd.pip.shader;
-    @debug_assert(shd && (shd.slot.id == bnd.pip.cmn.shader_id.id));
-    wgpu.sg.stat(wgpu.bindings.num_create_bindgroup, 1);
-    bindgroup_handle_t bg_id = alloc_bindgroup();
-    if (bg_id.id == SG_INVALID_ID) {
-        return 0;
-    }
-    bindgroup_t* bg = bindgroup_at(bg_id.id);
+// .None means pool full. can return Some with state=.FAILED which is confusing perhaps
+fn create_bindgroup(wgpu: *Impl, bnd: *Sg.ResolvedBindings) ?*bindgroup_t = {
+    @debug_assert(!wgpu.dev._.is_null());
+    shd := bnd.pip.cmn.shader_t;
+    @debug_assert(shd.slot.id == bnd.pip.cmn.shader.id);
+    wgpu.sg.stat(.wgpu_bindings_num_create_bindgroup, 1);
+    bg_id := wgpu.alloc_bindgroup();
+    if(bg_id.id == SG_INVALID_ID, => return(.None));
+    bg := bindgroup_at(bg_id.id);
     @debug_assert(bg && (bg.slot.state == SG_RESOURCESTATE_ALLOC));
 
     // create wgpu bindgroup object (also see create_shader())
-    WGPU.BindGroupLayout bgl = bnd.pip.shader.wgpu.bgl_img_smp_sbuf;
+    bgl := bnd.pip.shader.wgpu.bgl_img_smp_sbuf;   // common with the names man...
     @debug_assert(bgl);
-    WGPU.BindGroupEntry bg_entries[MAX_IMG_SMP_SBUF_BINDGROUP_ENTRIES];
-    _sg_clear(&bg_entries, sizeof(bg_entries));
-    size_t bgl_index = 0;
-    for (size_t i = 0; i < SG_MAX_IMAGE_BINDSLOTS; i++) {
-        if (shd.cmn.images[i].stage == SG_SHADERSTAGE_NONE) {
-            continue;
-        }
-        @debug_assert(bnd.imgs[i]);
-        @debug_assert(bgl_index < MAX_IMG_SMP_SBUF_BINDGROUP_ENTRIES);
-        WGPU.BindGroupEntry* bg_entry = &bg_entries[bgl_index];
-        bg_entry.binding = shd.mtl.img_grp1_bnd_n[i];
-        bg_entry.textureView = bnd.imgs[i].wgpu.view;
+    bg_entries := zeroed Array(WGPU.BindGroupEntry, MAX_IMG_SMP_SBUF_BINDGROUP_ENTRIES);
+    bgl_index := 0;
+    rangec(0, Sg.SG_MAX_IMAGE_BINDSLOTS) { i |
+        if(shd.cmn.images[i].stage == .NONE, => continue());
+        @debug_assert(!bnd.imgs[i].is_null());
+        bg_entries[bgl_index] = (
+            binding = shd.mtl.img_grp1_bnd_n[i],
+            textureView = bnd.imgs[i].wgpu.view,
+        );
         bgl_index += 1;
     }
-    for (size_t i = 0; i < SG_MAX_SAMPLER_BINDSLOTS; i++) {
-        if (shd.cmn.samplers[i].stage == SG_SHADERSTAGE_NONE) {
-            continue;
-        }
-        @debug_assert(bnd.smps[i]);
-        @debug_assert(bgl_index < MAX_IMG_SMP_SBUF_BINDGROUP_ENTRIES);
-        WGPU.BindGroupEntry* bg_entry = &bg_entries[bgl_index];
-        bg_entry.binding = shd.mtl.smp_grp1_bnd_n[i];
-        bg_entry.sampler = bnd.smps[i].wgpu.smp;
+    rangec(0, Sg.SG_MAX_SAMPLER_BINDSLOTS) { i |
+        if(shd.cmn.samplers[i].stage == .NONE, => continue());
+        @debug_assert(!bnd.smps[i].is_null());
+        bg_entries&[bgl_index] = (
+            binding = shd.mtl.smp_grp1_bnd_n[i],
+            sampler = bnd.smps[i].wgpu.smp,
+        );
         bgl_index += 1;
     }
-    for (size_t i = 0; i < SG_MAX_STORAGEBUFFER_BINDSLOTS; i++) {
-        if (shd.cmn.storage_buffers[i].stage == SG_SHADERSTAGE_NONE) {
-            continue;
-        }
-        @debug_assert(bnd.sbufs[i]);
-        @debug_assert(bgl_index < MAX_IMG_SMP_SBUF_BINDGROUP_ENTRIES);
-        bg_entry := bg_entries&[bgl_index]&;
-        bg_entry.binding = shd.mtl.sbuf_grp1_bnd_n[i];
-        bg_entry.buffer = bnd.sbufs[i].wgpu.buf;
-        bg_entry.size = (uint64_t) bnd.sbufs[i].cmn.size;
+    rangec(0, Sg.SG_MAX_STORAGEBUFFER_BINDSLOTS) { i |
+        if(shd.cmn.storage_buffers[i].stage == .NONE, => continue());
+        @debug_assert(!bnd.sbufs[i].is_null());
+        bg_entries&[bgl_index] = (
+            binding = shd.mtl.sbuf_grp1_bnd_n[i]
+            buffer = bnd.sbufs[i].wgpu.buf,
+            size = bnd.sbufs[i].cmn.size,
+        );
         bgl_index += 1;
     }
-    bg_desc: WGPU.BindGroupDescriptor = (
-        layout = bgl;
-        entryCount = bgl_index;
-        entries = bg_entries;
-    );
-    bg.bindgroup = wgpuDeviceCreateBindGroup(wgpu.dev, bg_desc&);
-    if (bg.bindgroup == 0) {
-        _SG_ERROR(WGPU._CREATEBINDGROUP_FAILED);
-        bg.slot.state = SG_RESOURCESTATE_FAILED;
-        return bg;
-    }
-    init_bindgroups_cache_key(bg.key&, bnd);
-    bg.slot.state = .VALID;
-    bg
+    bg.bindgroup = wgpu.dev.createBindGroup(@ref @as(WGPU.BindGroupDescriptor) (
+        layout = bgl,
+        entryCount = bgl_index,
+        entries = bg_entries&.as_ptr(),
+    ));
+    if bg.bindgroup._.is_null() {
+        _SG_ERROR("WGPU_CREATEBINDGROUP_FAILED");
+        bg.slot.state = .FAILED;
+    } else {
+        init_bindgroups_cache_key(bg.key&, bnd);
+        bg.slot.state = .VALID;
+    };
+    (Some = bg)
 }
 
 fn discard_bindgroup(wgpu: *Impl, bg: *bindgroup_t) void = {
-    @debug_assert(bg);
-    wgpu.sg.stat(wgpu.bindings.num_discard_bindgroup, 1);
-    if (bg.slot.state == SG_RESOURCESTATE_VALID) {
-        if (bg.bindgroup) {
-            wgpuBindGroupRelease(bg.bindgroup);
-            bg.bindgroup = 0;
-        }
-        reset_bindgroup_to_alloc_state(bg);
-        @debug_assert(bg.slot.state == SG_RESOURCESTATE_ALLOC);
+    wgpu.sg.stat(.wgpu_bindings_num_discard_bindgroup, 1);
+    if (bg.slot.state == .VALID) {
+        if !bg.bindgroup._.is_null() {
+            release(bg.bindgroup);
+            bg.bindgroup = zeroed WGPU.BindGroup;
+        };
+        id := bg.slot.id;
+        bg[] = zeroed @type bg[];
+        bg.slot = (id = id, state = .ALLOC);
     }
-    if (bg.slot.state == SG_RESOURCESTATE_ALLOC) {
-        dealloc_bindgroup(bg);
-        @debug_assert(bg.slot.state == SG_RESOURCESTATE_INITIAL);
+    if bg.slot.state == .ALLOC {
+        wgpu.dealloc_bindgroup(bg);
+        @debug_assert(bg.slot.state == .INITIAL);
     }
 }
 
@@ -655,6 +636,8 @@ fn discard_all_bindgroups(wgpu: *Impl) void = {
 }
 
 _SG_PANIC :: _SG_ERROR;
+
+// TODO: generics again
 
 fn bindgroups_cache_init(wgpu: *Impl, desc: *SgDesc) void #once = {
     num := desc.wgpu_bindgroups_cache_size;
@@ -672,9 +655,9 @@ fn bindgroups_cache_set(wgpu: *Impl, hash: uint64_t, bg_id: uint32_t) void = {
     wgpu.bindgroups_cache.items[index].id = bg_id;
 }
 
-fn bindgroups_cache_get(wgpu: *Impl, hash: uint64_t) uint32_t = {
-    uint32_t index := hash & wgpu.bindgroups_cache.index_mask;
-    return wgpu.bindgroups_cache.items[index].id;
+fn bindgroups_cache_get(wgpu: *Impl, hash: u64) u32 = {
+    index := hash.bit_and(wgpu.bindgroups_cache.index_mask);
+    wgpu.bindgroups_cache.items[index].id
 }
 
 // called from wgpu resource destroy functions to also invalidate any
@@ -787,55 +770,54 @@ fn set_img_smp_sbuf_bindgroup(wgpu: *Impl, bg: ?*bindgroup_t) void = {
 }
 
 fn apply_bindgroup(wgpu: *Impl, bnd: *Sg.ResolvedBindings) bool = {
-    if (!wgpu.sg.desc.wgpu_disable_bindgroups_cache) {
-        bg: ?*bindgroup_t = .None;
-        bindgroups_cache_key_t key;
-        init_bindgroups_cache_key(&key, bnd);
-        uint32_t bg_id = bindgroups_cache_get(key.hash);
-        if (bg_id != SG_INVALID_ID) {
-            // potential cache hit
-            bg = lookup_bindgroup(bg_id);
-            @debug_assert(bg && (bg.slot.state == SG_RESOURCESTATE_VALID));
-            if (!compare_bindgroups_cache_key(&key, &bg.key)) {
-                // cache collision, need to delete cached bindgroup
-                wgpu.sg.stat(wgpu.bindings.num_bindgroup_cache_collisions, 1);
-                discard_bindgroup(bg);
-                bindgroups_cache_set(key.hash, SG_INVALID_ID);
-                bg = 0;
-            } else {
-                wgpu.sg.stat(wgpu.bindings.num_bindgroup_cache_hits, 1);
-            }
-        } else {
-            wgpu.sg.stat(wgpu.bindings.num_bindgroup_cache_misses, 1);
+    if true /*TODO :SLOW TODO*/ || wgpu.sg.desc.wgpu_disable_bindgroups_cache {
+        // bindgroups cache disabled, create and destroy bindgroup on the fly (expensive!)
+        bg := wgpu.create_bindgroup(bnd).expect("pool can't be full when cache disabled");
+        if bg.slot.state == .VALID {
+            wgpu.set_img_smp_sbuf_bindgroup(Some = bg);
         }
-        if (bg == 0) {
-            // either no cache entry yet, or cache collision, create new bindgroup and store in cache
-            bg = create_bindgroup(bnd);
-            bindgroups_cache_set(key.hash, bg.slot.id);
-        }
-        if (bg && bg.slot.state == SG_RESOURCESTATE_VALID) {
-            set_img_smp_sbuf_bindgroup(bg);
+        wgpu.discard_bindgroup(bg);
+        return true;
+    };
+    unreachable();
+    // else, check the cache
+
+    bg: ?*bindgroup_t = .None;
+    key := zeroed bindgroups_cache_key_t;
+    wgpu.init_bindgroups_cache_key(key&, bnd);
+    bg_id := wgpu.bindgroups_cache_get(key.hash);
+    if (bg_id != SG_INVALID_ID) {
+        // potential cache hit
+        bg = wgpu.lookup_bindgroup(bg_id);
+        @debug_assert(bg && (bg.slot.state == SG_RESOURCESTATE_VALID));
+        if !compare_bindgroups_cache_key(key&, bg.key&) {
+            // cache collision, need to delete cached bindgroup
+            wgpu.sg.stat(.wgpu_bindings_num_bindgroup_cache_collisions, 1);
+            discard_bindgroup(bg);
+            bindgroups_cache_set(key.hash, SG_INVALID_ID);
+            bg = .None;
         } else {
-            return false;
+            wgpu.sg.stat(.wgpu_bindings_num_bindgroup_cache_hits, 1);
         }
     } else {
-        // bindgroups cache disabled, create and destroy bindgroup on the fly (expensive!)
-        bindgroup_t* bg = create_bindgroup(bnd);
-        if (bg) {
-            if (bg.slot.state == SG_RESOURCESTATE_VALID) {
-                set_img_smp_sbuf_bindgroup(bg);
-            }
-            discard_bindgroup(bg);
-        } else {
-            return false;
-        }
+        wgpu.sg.stat(.wgpu_bindings_num_bindgroup_cache_misses, 1);
+    }
+    if (bg == 0) {
+        // either no cache entry yet, or cache collision, create new bindgroup and store in cache
+        bg = create_bindgroup(bnd);
+        bindgroups_cache_set(key.hash, bg.slot.id);
+    }
+    if (bg && bg.slot.state == .VALID) {
+        set_img_smp_sbuf_bindgroup(bg);
+    } else {
+        return false;
     };
     true
 }
 
 fn apply_index_buffer(wgpu: *Impl, bnd: *Sg.ResolvedBindings) bool = {
     @debug_assert(wgpu.rpass_enc);
-    const _sg_buffer_t* ib = bnd.ib;
+    ib := bnd.ib;
     uint64_t offset = (uint64_t)bnd.ib_offset;
     if (bindings_cache_ib_dirty(ib, offset)) {
         bindings_cache_ib_update(ib, offset);
@@ -860,7 +842,7 @@ fn apply_index_buffer(wgpu: *Impl, bnd: *Sg.ResolvedBindings) bool = {
 fn apply_vertex_buffers(wgpu: *Impl, bnd: *Sg.ResolvedBindings) bool = {
     @debug_assert(wgpu.rpass_enc);
     for (uint32_t slot = 0; slot < SG_MAX_VERTEXBUFFER_BINDSLOTS; slot++) {
-        const _sg_buffer_t* vb = bnd.vbs[slot];
+        vb := bnd.vbs[slot];
         const uint64_t offset = (uint64_t)bnd.vb_offsets[slot];
         if (bindings_cache_vb_dirty(slot, vb, offset)) {
             bindings_cache_vb_update(slot, vb, offset);
@@ -883,11 +865,11 @@ fn apply_vertex_buffers(wgpu: *Impl, bnd: *Sg.ResolvedBindings) bool = {
 }
 
 fn setup_backend(wgpu: *Impl, desc: *SgDesc) void = {
-    @debug_assert(!desc.environment.wgpu.device.is_null());
+    @debug_assert(!desc.environment.wgpu.device._.is_null());
     @debug_assert(desc.uniform_buffer_size > 0);
     wgpu.sg.backend = .WGPU;
     wgpu.valid = true;
-    wgpu.dev = bit_cast_unchecked(rawptr, WGPU.Device, desc.environment.wgpu.device);
+    wgpu.dev = desc.environment.wgpu.device;
     wgpu.queue = getQueue(wgpu.dev);
     @debug_assert(!wgpu.queue._.is_null());
     wgpu.rpass_enc = .None;
@@ -1428,7 +1410,6 @@ fn create(wgpu: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg.Pipelin
             );
             layout.attributeCount += 1;
         }
-
         ::if(*WGPU.FragmentState);
         ::if(*WGPU.DepthStencilState);
         pip.mtl.rpip = createRenderPipeline(wgpu.dev, @ref @as(WGPU.RenderPipelineDescriptor) (
@@ -1830,14 +1811,13 @@ fn apply_pipeline(wgpu: *Impl, pip: *Sg.Pipeline.T) void = {
 }
 
 fn apply_bindings(wgpu: *Impl, bnd: *Sg.ResolvedBindings) bool = {
-    @debug_assert(bnd);
-    @debug_assert(bnd.pip.shader && (bnd.pip.cmn.shader_id.id == bnd.pip.shader.slot.id));
-    bool retval = true;
+    @debug_assert(bnd.pip.cmn.shader.id == bnd.pip.cmn.shader_t.slot.id);
+    retval := true;
     if (!wgpu.sg.cur_pass.is_compute) {
-        retval &= apply_index_buffer(bnd);
-        retval &= apply_vertex_buffers(bnd);
+        retval = wgpu.apply_index_buffer(bnd) && retval;
+        retval = wgpu.apply_vertex_buffers(bnd) && retval;
     }
-    retval &= apply_bindgroup(bnd);
+    retval = wgpu.apply_bindgroup(bnd) && retval;
     retval
 }
 
@@ -1887,4 +1867,3 @@ fn append_buffer(wgpu: *Impl, buf: *Sg.Buffer.T, data: []u8, _new_frame: bool) v
 
 fn update_image(wgpu: *Impl, img: *Sg.Image.T, data: *SgImageData) void #once = 
     copy_image_data(img, img.wgpu.tex, data);
-

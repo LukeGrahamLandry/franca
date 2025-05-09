@@ -190,8 +190,8 @@ fn objc_set(self: FatExpr, pat: FatExpr) FatExpr #macro = as_var self { self |
     body := @{};
     each pat.expr.StructLiteralP.bindings& { b |
         b.default = compile_ast(b.default);
-        name := b.ident().unwrap().str();
-        sel  := objc_property_name_to_selector(name);
+        name := b.ident().unwrap();
+        sel  := objc_property_name_to_selector(name).c_str();
         arg  := Ty(ObjCId, ObjCSelector, b.default.ty);
         //@println("%: %;", name, b.default.ty.typename().str()); :bindings
         body = @{
@@ -203,13 +203,14 @@ fn objc_set(self: FatExpr, pat: FatExpr) FatExpr #macro = as_var self { self |
     body
 };
 
-objc_property_name_to_selector :: fn(name: Str) CStr = {
+objc_property_name_to_selector :: fn(name: Symbol) Symbol = {
     sel := u8.list(temp());
     sel&.push_all("set");
+    name := name.str(); // immutable!!
     sel&.push(@if(name[0] >= 97 && name[0] <= 122, name[0] - 32, name[0]));  // to upper
     sel&.push_all(name.rest(1));
     sel&.push_all(":");
-    sel.items().sym().c_str()
+    sel.items().sym()
 };
 
 // WHY IS THIS SO FUCKING DIFFICULT BUT EVERYTHING ELSE WAS SO NORMAL ?? am i missing something? 
@@ -335,7 +336,7 @@ fn fill_objc_reflect(def: Type) ObjcClassReflect #fold = {
             names := get_constants(s);
             methods := ObjcMethodReflect.list(names.len, ast_alloc());
             for names { name |
-                // TODO: this returns Self (a type constant) as well :FUCKED
+                // TODO: this returns Self (a type constant) as well :FUCKED :Compiler
                 //       it's just based on size not a real type check
                 @if(name != @symbol Self)
                 if get_constant(FuncId, s, name) { fid |
@@ -399,23 +400,40 @@ fn sel_from_params(name: Str, args: []Binding, is_static: bool) Symbol = {
 
 // See @/graphics/macos/frameworks.fr for example usage. 
 // These are only for imports. Use register_objc_class() instead to declare your own new classes. 
-fn class(arg: FatExpr) FatExpr #macro = import_objc(arg, false);
-fn protocol(arg: FatExpr) FatExpr #macro = import_objc(arg, true);
+fn class(name: FatExpr, arg: FatExpr) FatExpr #macro = import_objc(name, arg, false);
+fn protocol(name: FatExpr, arg: FatExpr) FatExpr #macro = import_objc(name, arg, true);
 
-fn import_objc(arg: FatExpr, is_protocol: bool) FatExpr = {
-    #use("@/compiler/ast_external.fr");
+// This declares the variable of the class name but does not expand the definitions yet until the class is referenced. 
+// 
+// It would be nicer it it were used as `name :: @class {` instead of `@class(name) {`
+// and then just had import_objc_value() here instead of an extra indirection, 
+// but doing it this way makes sure that you get the right thing from typename(), 
+// instead of hoping the compiler's in a good mood. 
+fn import_objc(name: FatExpr, arg: FatExpr, is_protocol: bool) FatExpr = {
     @ct_assert(arg.expr&.is(.Block), arg.loc, "expected Block for objc import");
+    name := name&.ident().unwrap();
+    S :: import("@/graphics/macos/frameworks.fr");
+    c := current_compiler_context();
     
+    c'vtable'add_expr_to_scope(c.data, S, name, @{ @expand import_objc_value(@[@literal name], @[@literal arg], @[@literal is_protocol]) });
+    @{}
+}
+
+// This declares all the overload sets but does not produce thier implementation until one gets called. 
+fn import_objc_value(classname: Symbol, arg: FatExpr, is_protocol: bool) FatExpr = {
+    #use("@/compiler/ast_external.fr");
     // TODO: fill in CLASS at startup somehow
-    // TODO: remove RELECT ::
-    T := const_eval(Type)(@{ @struct(_: rawptr, REFLECT :: @[arg], CLASS :: @static(ObjCClass)) });
+    // TODO: without _HACK you don't get type checking.   :Compiler
+    //       Named has to pass through because it's also used for @rec
+    T := const_eval(Type)(@{ @struct(_: ObjCId, _HACK :: @[@literal classname], CLASS :: @static(ObjCClass)) });
+    T := intern_type(Named = (T, classname));
     s := Type.scope_of(T);
     loc := arg.loc;
     
     synthesize_func :: fn(func: *Func, name: Symbol, is_static: bool) => {
         fid := c.intern_func(func);
         func := c.get_function(fid);  // TODO: footgun. it looks like it would stay valid since you pass a pointer. 
-        func.cc = (Some = .CCallReg);  // TODO: why ??
+        func.cc = (Some = .CCallReg);  // TODO: why? :Compiler
         func.body = (Normal = @{ @expand objc_method_import_body(@[@literal T], @[@literal fid], @[@literal is_static]) });
         if is_static {
             c.add_to_scope(s, name, FuncId, fid);
@@ -463,13 +481,16 @@ fn import_objc(arg: FatExpr, is_protocol: bool) FatExpr = {
                     annotations := @if(!b.nullable_tag.is_null(), b.nullable_tag.items(), empty());
                     is_static   := annotations.contains(fn(it) => it.name == @symbol static);
                     is_readonly := annotations.contains(fn(it) => it.name == @symbol readonly);
-                    // TODO: create impl
-                    // TODO: add to the scope
+
+                    val_type := b.ty; // TODO: don't duplicate this
+                    par_self: Binding = (name = (Ident = @symbol self), ty = (Finished = T), kind = .Var, default = binding_missing_default(loc), nullable_tag = zeroed(*Annotations));
+                    par_val: Binding = (name = (Ident = @symbol value), ty = val_type, kind = .Var, default = binding_missing_default(loc), nullable_tag = zeroed(*Annotations));
+                   
+                    // :WhatScope i don't remember if this is the parent or a new one
+                    // TODO: expose new_scope() ? :Compiler
                     
                     // all properties need a getter
-                    pars := @slice(@as(Binding)
-                        (name = (Ident = @symbol self), ty = (Finished = T), kind = .Var, default = binding_missing_default(loc), nullable_tag = zeroed(*Annotations)),
-                    );
+                    pars := @if(is_static, @as([]Binding) empty(), @slice(par_self));
                     func: Func = (  // bleh this is verbose
                         annotations = empty(),
                         callees = empty(),
@@ -477,18 +498,38 @@ fn import_objc(arg: FatExpr, is_protocol: bool) FatExpr = {
                         var_name = .None,
                         finished_arg = .None,
                         finished_ret = .None,
-                        cc = (Some = .CCallReg),
+                        cc = .None,
                         return_var = .None,
-                        scope = (Some = Type.scope_of(T)),  // TODO: expose new_scope()
+                        scope = (Some = Type.scope_of(T)),  // :WhatScope 
                         body = .Empty,
                         arg = (bindings = shallow_copy(pars, ast_alloc()).as_raw_list(), loc = loc),
-                        ret = b.ty,
+                        ret = val_type,
                         name = name,
                         loc = loc,
                     );
-                    synthesize_func(func&, b.name.unwrap(), is_static);
+                    synthesize_func(func&, name, is_static);
                     if !is_readonly {
                         // need a setter too
+                        name := objc_property_name_to_selector(name).str();  // foo -> setFoo:
+                        name := name.slice(0, name.len - 1).sym();  // chop off the colon 
+                        pars := @if(is_static, @slice(par_val), @slice(par_self, par_val));
+                        func: Func = (  // bleh this is verbose
+                            annotations = empty(),
+                            callees = empty(),
+                            mutual_callees = empty(),
+                            var_name = .None,
+                            finished_arg = .None,
+                            finished_ret = .None,
+                            cc = .None,
+                            return_var = .None,
+                            scope = (Some = Type.scope_of(T)),  // :WhatScope
+                            body = .Empty,
+                            arg = (bindings = shallow_copy(pars, ast_alloc()).as_raw_list(), loc = loc),
+                            ret = (Finished = void),
+                            name = name,
+                            loc = loc,
+                        );
+                        synthesize_func(func&, name, is_static);
                     }
                 };
             }
@@ -496,6 +537,8 @@ fn import_objc(arg: FatExpr, is_protocol: bool) FatExpr = {
             @default => @panic("unhandled stmt type %", stmt.stmt&.tag());
         };
     };
+    last := arg.expr.Block.result;
+    @ct_assert(last.ty == void, last.loc, "illegal trailing expression in objc import block");
     
     @literal T
 }
@@ -526,7 +569,6 @@ fn objc_method_import_body(T: Type, fid: FuncId, is_static: bool) FatExpr = {
         arg_types&.push(pars[0].ty.Finished);
     };
     
-    @println("%", selector);
     args&.push(@{ SEL(@[@literal selector]) });
     arg_types&.push(ObjCSelector);
     

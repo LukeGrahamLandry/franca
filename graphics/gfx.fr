@@ -354,6 +354,7 @@ Stat :: @enum(
     
     wgpu_uniforms_size_write_buffer, wgpu_uniforms_num_set_bindgroup,
     wgpu_bindings_num_skip_redundant_bindgroup, wgpu_bindings_num_set_bindgroup, 
+    wgpu_bindings_num_discard_bindgroup, wgpu_bindings_num_create_bindgroup, 
 );
 
 fn stat(sg: *Self, stat: Stat, n: u32) void = {
@@ -599,13 +600,10 @@ fn alloc_index(pool: *DynPool) i32 = {
 fn free_index(pool: *DynPool, slot_index: i32) void = {
     @debug_assert((slot_index > _SG_INVALID_SLOT_INDEX) && (slot_index < pool.size));
     @debug_assert(pool.queue_top < pool.size);
-    if SOKOL_DEBUG {
-        // debug check against double-free
-        for (int i = 0; i < pool.queue_top; i++) {
-            @debug_assert(pool.free_queue[i] != slot_index);
-        }
-    }
-    pool.free_queue[pool.queue_top] = slot_index;
+    @if(SOKOL_DEBUG) for pool.free_queue.slice(0, zext pool.queue_top) { it |
+        @debug_assert(slot_index != it, "double free pool index");
+    };
+    pool.free_queue[zext pool.queue_top] = slot_index;
     pool.queue_top += 1;
     @debug_assert(pool.queue_top <= (pool.size-1));
 }
@@ -907,28 +905,32 @@ fn is_set(self: SgShaderFunction) bool =
 // TODO: much of this would disappear by using @tagged
 fn validate(sg: *Self, desc: *Shader.Desc) bool = @validate(sg) {
     is_compute_shader := desc.compute_func.has_source() || desc.compute_func.has_bytecode();
-    ASSERT_METAL();
     // on Metal or D3D11, must provide shader source code or byte code
-    if (is_compute_shader) {
-        @V(desc.compute_func.is_set(), VALIDATE_SHADERDESC_COMPUTE_SOURCE_OR_BYTECODE);
+    if @is(SOKOL_BACKEND, .METAL_MACOS) {
+        if (is_compute_shader) {
+            @V(desc.compute_func.is_set(), VALIDATE_SHADERDESC_COMPUTE_SOURCE_OR_BYTECODE);
+        } else {
+            @V(desc.vertex_func.is_set(), VALIDATE_SHADERDESC_VERTEX_SOURCE_OR_BYTECODE);
+            @V(desc.fragment_func.is_set(), VALIDATE_SHADERDESC_FRAGMENT_SOURCE_OR_BYTECODE);
+        }
     } else {
-        @V(desc.vertex_func.is_set(), VALIDATE_SHADERDESC_VERTEX_SOURCE_OR_BYTECODE);
-        @V(desc.fragment_func.is_set(), VALIDATE_SHADERDESC_FRAGMENT_SOURCE_OR_BYTECODE);
-    }
+        if (is_compute_shader) {
+            @V(desc.compute_func.has_source(), VALIDATE_SHADERDESC_COMPUTE_SOURCE);
+        } else {
+            @V(desc.vertex_func.has_source(), VALIDATE_SHADERDESC_VERTEX_SOURCE);
+            @V(desc.fragment_func.has_source(), VALIDATE_SHADERDESC_FRAGMENT_SOURCE);
+        }
+    };
     if (is_compute_shader) {
         @V(!desc.vertex_func.is_set(), VALIDATE_SHADERDESC_INVALID_SHADER_COMBO);
         @V(!desc.fragment_func.is_set(), VALIDATE_SHADERDESC_INVALID_SHADER_COMBO);
     } else {
         @V(!desc.compute_func.is_set(), VALIDATE_SHADERDESC_INVALID_SHADER_COMBO);
     }
-    ASSERT_METAL();
-    if (is_compute_shader) {
+    if is_compute_shader && SOKOL_BACKEND == .METAL_MACOS {
         @V(desc.mtl_threads_per_threadgroup.x > 0, VALIDATE_SHADERDESC_METAL_THREADS_PER_THREADGROUP);
         @V(desc.mtl_threads_per_threadgroup.y > 0, VALIDATE_SHADERDESC_METAL_THREADS_PER_THREADGROUP);
         @V(desc.mtl_threads_per_threadgroup.z > 0, VALIDATE_SHADERDESC_METAL_THREADS_PER_THREADGROUP);
-    }
-    range(0, SG_MAX_VERTEX_ATTRIBUTES) { i |
-        ASSERT_METAL();
     }
     // TODO
     // if shader byte code, the size must also be provided
@@ -940,6 +942,9 @@ fn validate(sg: *Self, desc: *Shader.Desc) bool = @validate(sg) {
     }
     if (0 != desc.compute_func.bytecode.ptr) {
         @V(desc.compute_func.bytecode.size > 0, VALIDATE_SHADERDESC_NO_BYTECODE_SIZE);
+    }
+    range(0, SG_MAX_VERTEX_ATTRIBUTES) { i |
+        ASSERT_METAL();
     }
 
     _sg_u128_t msl_buf_bits = zeroed(_sg_u128_t);
@@ -1061,8 +1066,8 @@ fn validate(sg: *Self, desc: *Pipeline.Desc) bool = @validate(sg) {
                         @V(false, VALIDATE_PIPELINEDESC_ATTR_BASETYPE_MISMATCH);
                         @debug_log("attr format: % shader attr base type: %", a_state.format, shd.cmn.attrs&[attr_index].base_type);
                     }
-                }
-                ASSERT_METAL();
+                };
+                // TODO: d3d11
             }
             // must only use readonly storage buffer bindings in render pipelines
             each shd.cmn.storage_buffers& { it |
@@ -1201,18 +1206,21 @@ fn validate_begin_pass(sg: *Self, pass: *SgPass) bool = @validate(sg) {
         @V(!@is(pass.swapchain.color_format, .NONE, .DEFAULT), VALIDATE_BEGINPASS_SWAPCHAIN_EXPECT_COLORFORMAT);
         // NOTE: depth buffer is optional, so depth_format is allowed to be invalid
         // NOTE: the GL framebuffer handle may actually be 0
-        @V(!pass.swapchain.metal.current_drawable.is_nil(), VALIDATE_BEGINPASS_SWAPCHAIN_METAL_EXPECT_CURRENTDRAWABLE);
-        if (pass.swapchain.depth_format == .NONE) {
-            @V(pass.swapchain.metal.depth_stencil_texture.is_nil(), VALIDATE_BEGINPASS_SWAPCHAIN_METAL_EXPECT_DEPTHSTENCILTEXTURE_NOTSET);
-        } else {
-            @V(!pass.swapchain.metal.depth_stencil_texture.is_nil(), VALIDATE_BEGINPASS_SWAPCHAIN_METAL_EXPECT_DEPTHSTENCILTEXTURE);
-        }
-        if (pass.swapchain.sample_count > 1) {
-            @V(!pass.swapchain.metal.msaa_color_texture.is_nil(), VALIDATE_BEGINPASS_SWAPCHAIN_METAL_EXPECT_MSAACOLORTEXTURE);
-        } else {
-            @V(pass.swapchain.metal.msaa_color_texture.is_nil(), VALIDATE_BEGINPASS_SWAPCHAIN_METAL_EXPECT_MSAACOLORTEXTURE_NOTSET);
-        }
-        ASSERT_METAL();
+        
+        if SOKOL_BACKEND == .METAL_MACOS {
+            @V(!pass.swapchain.metal.current_drawable.is_nil(), VALIDATE_BEGINPASS_SWAPCHAIN_METAL_EXPECT_CURRENTDRAWABLE);
+            if (pass.swapchain.depth_format == .NONE) {
+                @V(pass.swapchain.metal.depth_stencil_texture.is_nil(), VALIDATE_BEGINPASS_SWAPCHAIN_METAL_EXPECT_DEPTHSTENCILTEXTURE_NOTSET);
+            } else {
+                @V(!pass.swapchain.metal.depth_stencil_texture.is_nil(), VALIDATE_BEGINPASS_SWAPCHAIN_METAL_EXPECT_DEPTHSTENCILTEXTURE);
+            }
+            if (pass.swapchain.sample_count > 1) {
+                @V(!pass.swapchain.metal.msaa_color_texture.is_nil(), VALIDATE_BEGINPASS_SWAPCHAIN_METAL_EXPECT_MSAACOLORTEXTURE);
+            } else {
+                @V(pass.swapchain.metal.msaa_color_texture.is_nil(), VALIDATE_BEGINPASS_SWAPCHAIN_METAL_EXPECT_MSAACOLORTEXTURE_NOTSET);
+            }
+        };
+        
     };
     @else => {
         // this is an 'offscreen pass'
@@ -1538,10 +1546,11 @@ fn desc_defaults(_: *Self, desc: *Sampler.Desc) Sampler.Desc = {
 
 fn desc_defaults(_: *Self, desc: *Shader.Desc) Shader.Desc = {
     def := desc[];
-    def.vertex_func.entry = _sg_def(def.vertex_func.entry, "_main");
-    def.fragment_func.entry = _sg_def(def.fragment_func.entry, "_main");
-    def.compute_func.entry = _sg_def(def.compute_func.entry, "_main");
-    ASSERT_METAL();
+    entry: CStr = @if(SOKOL_BACKEND == .METAL_MACOS, "_main", "main");
+    def.vertex_func.entry = _sg_def(def.vertex_func.entry, entry);
+    def.fragment_func.entry = _sg_def(def.fragment_func.entry, entry);
+    def.compute_func.entry = _sg_def(def.compute_func.entry, entry);
+    // TODO: d3d11_target
     def.mtl_threads_per_threadgroup.y = _sg_def(desc.mtl_threads_per_threadgroup.y, 1);
     def.mtl_threads_per_threadgroup.z = _sg_def(desc.mtl_threads_per_threadgroup.z, 1);
     range(0, SG_MAX_UNIFORMBLOCK_BINDSLOTS) { ub_index |
@@ -1739,7 +1748,7 @@ fn Resource($_Tag: PoolType, $_Desc: Type, $_Common: Type, $_Impl: Type) Type = 
         id := if slot_index != 0 {
             p.slot_alloc(slot_index)
         } else {
-            _SG_ERROR("SHADER_POOL_EXHAUSTED");
+            _SG_ERROR("POOL_EXHAUSTED");
             0
         };
         (id = id)
@@ -1778,17 +1787,17 @@ fn Resource($_Tag: PoolType, $_Desc: Type, $_Common: Type, $_Impl: Type) Type = 
     // TODO
     fn dealloc(sg: *Self, id: I) void #trace_args = {
         it := sg.lookup(id) || return();
-        if (it.slot.state == SG_RESOURCESTATE_ALLOC) {
+        if (it.slot.state == .ALLOC) {
             sg.dealloc(it);
         } else {
-            _SG_ERROR(DEALLOC_SHADER_INVALID_STATE);
+            _SG_ERROR(DEALLOC_INVALID_STATE);
         }
     }
     
     // TODO
     fn dealloc(sg: *Self, it: *I.T) void = {
         p := sg.pools&.index(I.Tag);
-        SOKOL_ASSERT((it->slot.state == SG_RESOURCESTATE_ALLOC) && (it->slot.id != SG_INVALID_ID));
+        SOKOL_ASSERT((it->slot.state == .ALLOC) && (it->slot.id != SG_INVALID_ID));
         p.free_index(_sg_slot_index(it.slot.id));
         p.slot = zeroed SlotHeader;
     }
@@ -1801,7 +1810,7 @@ fn Resource($_Tag: PoolType, $_Desc: Type, $_Common: Type, $_Impl: Type) Type = 
             it.slot.state = init(it, &desc_def);
             @debug_assert(@is(shd.slot.state, .VALID, .FAILED));
         } else {
-            _SG_ERROR(INIT_SHADER_INVALID_STATE);
+            _SG_ERROR(INIT_INVALID_STATE);
         }
     }
     
@@ -1809,12 +1818,12 @@ fn Resource($_Tag: PoolType, $_Desc: Type, $_Common: Type, $_Impl: Type) Type = 
     fn uninit(sg: *Self, id: I) void #trace_args = {
         @debug_assert(sg.valid);
         it := sg.lookup(id) || return();
-        if ((it.slot.state == .VALID) || (it.slot.state == SG_RESOURCESTATE_FAILED)) {
+        if ((it.slot.state == .VALID) || (it.slot.state == .FAILED)) {
             sg.impl().discard(it);
             reset_to_alloc_state(shd);
-            @debug_assert(shd.slot.state == SG_RESOURCESTATE_ALLOC);
+            @debug_assert(shd.slot.state == .ALLOC);
         } else {
-            _SG_ERROR(UNINIT_SHADER_INVALID_STATE);
+            _SG_ERROR(UNINIT_INVALID_STATE);
         }
     }
     
@@ -1822,10 +1831,10 @@ fn Resource($_Tag: PoolType, $_Desc: Type, $_Common: Type, $_Impl: Type) Type = 
     fn fail(sg: *Self, id: I) void #trace_args = {
         @debug_assert(sg.valid);
         it := sg.lookup(id) || return();
-        if (it.slot.state == SG_RESOURCESTATE_ALLOC) {
-            it.slot.state = SG_RESOURCESTATE_FAILED;
+        if (it.slot.state == .ALLOC) {
+            it.slot.state = .FAILED;
         } else {
-            _SG_ERROR(FAIL_SHADER_INVALID_STATE);  // TODO
+            _SG_ERROR(FAIL_INVALID_STATE);  // TODO
         }
     }
     
@@ -1842,13 +1851,13 @@ fn Resource($_Tag: PoolType, $_Desc: Type, $_Common: Type, $_Impl: Type) Type = 
     fn destroy(sg: *Self, id: I) void #trace_args(.before) = {
         @debug_assert(sg.valid);
         it := sg.lookup(id) || return();
-        if ((it.slot.state == .VALID) || (it.slot.state == SG_RESOURCESTATE_FAILED)) {
+        if ((it.slot.state == .VALID) || (it.slot.state == .FAILED)) {
             sg.uninit(it);
-            @debug_assert(it.slot.state == SG_RESOURCESTATE_ALLOC);
+            @debug_assert(it.slot.state == .ALLOC);
         }
-        if (it.slot.state == SG_RESOURCESTATE_ALLOC) {
+        if (it.slot.state == S.ALLOC) {
             sg.dealloc(it);
-            @debug_assert(it.slot.state == SG_RESOURCESTATE_INITIAL);
+            @debug_assert(it.slot.state == .INITIAL);
         }
     }
     
