@@ -41,6 +41,10 @@ fn main() void = {
             cfg.target.type = .Relocatable;
             continue();
         };
+        if arg == "-r" {
+            cfg.target.type = .JitOnly;
+            continue();
+        };
         
         add_define :: fn(arg: Str) void => {
             key, value := @match(index_of(arg, "=".ascii())) {
@@ -66,6 +70,9 @@ fn main() void = {
         if arg.ends_with(".o") {
             @panic("je ne parle pas 'object file' (% as input) parce que je ne pas un fucking linker", arg);
         };
+        if arg.ends_with(".fr") || arg == "franca" {
+            continue();  // for running jitted
+        };
         
         if arg == "-arch" {
             i += 1;
@@ -90,7 +97,7 @@ fn main() void = {
             cfg.debug = args[i].str();
             continue();
         };
-        @panic("unknown argument %", arg);
+        @panic("unknown argument '%'", arg);
     };
     if cfg.input_path == "" {
         panic("no input specified");
@@ -120,6 +127,21 @@ fn compile(args: Args) Result(void, Str) = {
     prog := @try(c&.compile_file(args.input_path)) return;
     emit_the_code(c&, ctx, prog);
     join_codegen_thread(ctx);
+    
+    if m.goal.type == .JitOnly {
+        // TODO: :paste from qbe_frontend.fr
+        @if(is_linking_libc()) import("@/backend/meta/qbe_frontend.fr")'fill_from_libc(m&);
+        m&.make_exec();
+        f, _ := m&.get_addr(m&.intern("main")) 
+            || @panic("missing function main()");
+        f := assume_types_fn(Arg = Ty(i64, *CStr), Ret = i64, ptr = f);
+        args := CStr.list(temp());
+        args&.push(@as(CStr) "thisisjittedcodegoodluckwiththat.exe");
+        args&.push(zeroed CStr);
+        status := f(args.len - 1, args.maybe_uninit.ptr);
+        exit(status);
+        
+    }
 
     outfile := open_trunc(args.output_path.maybe_borrow_cstr(temp())).unwrap();
     chunks := {m.target.finish_module}(m&);

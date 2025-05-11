@@ -178,7 +178,7 @@ fn log(self: *FatExpr, pool: *SelfHosted, out: *List(u8), depth: i64) void = {
             out.push_all("\n]");
         }
         fn UndeclaredVar(it) => {
-            @fmt(out, "Undeclared Variable '%' in S%", pool.pool.get(it.name), it.scope.id());
+            @fmt(out, "Undeclared Variable '%' in S%", pool.pool.get(it.name), it.scope.as_index());
         }
         fn Spread(inner) => {
             out.push_all("..");
@@ -399,9 +399,11 @@ fn log(self: *SelfHosted, v: Var) Str = {
     out.items()
 }
 
+//fn id(s: ScopeId) u32 = s.to_index();
+
 fn log(v: *Var, pool: *SelfHosted, out: *List(u8), depth: i64) void = {
     @if(BOOTSTRAP_ONLY_MODE) return();
-    @fmt(out, "%%%%%", pool.pool.get(v.name), "%", v.id, "%", v.scope.id());
+    @fmt(out, "%%%%%", pool.pool.get(v.name), "%", v.id, "%", v.scope.as_index());
 }
 
 fn log(self: *LazyType, pool: *SelfHosted, out: *List(u8), depth: i64) void = {
@@ -663,32 +665,32 @@ fn report_missing_overload(self: *SelfHosted, parts: []FatExpr, overloads: *Over
 unwrap_report_error :: fn(self: *SelfHosted, $T: Type, value: Res(T)) T #generic = {
     @match(value&) {
         fn Ok(it) => it[];
-        fn Err(it) => self.report_error(it[]);
+        fn Err(it) => self.report_error(it[], true);
     }
 };
 
-fn fmt_error(self: *SelfHosted, err: *CompileError, out: *List(u8)) void = {
+fn fmt_error(self: *SelfHosted, err: *CompileError, out: *List(u8), color: bool) void = {
     @if(BOOTSTRAP_ONLY_MODE) return();
     
     err.update_main_span(self.last_loc);
     @match(err) {
         fn Msg(it) => {
-            self.codemap.fmt_error_line(it.span, out);
+            self.codemap.fmt_error_line(it.span, out, color);
             @fmt(out, "Compile Error: %", it.msg);
         };
         fn ExpectedCompileError(loc) => {
-            self.codemap.fmt_error_line(loc[], out);
+            self.codemap.fmt_error_line(loc[], out, color);
             @fmt(out, "Compile Error: @assert_compile_error did not find compile error");
         }
         fn Parse(it) => {
-            self.codemap.fmt_error_line(it.span, out);
+            self.codemap.fmt_error_line(it.span, out, color);
             @fmt(out, "Parse Error: %", it.msg);
         }
         fn TypeMismatch(it) => {
             // TODO: if it was in matching arguments, just report the problem fields. 
             //       for all tuples i guess since we know they're structural. 
             //       bring back the nicer detailed printing i had for a bit in rust. 
-            self.codemap.fmt_error_line(it.span, out);
+            self.codemap.fmt_error_line(it.span, out, color);
             want := self.get_type(it.wanted);
             found := self.get_type(it.found);
             if want.is(.Struct) && found.is(.Struct) {
@@ -712,14 +714,14 @@ fn fmt_error(self: *SelfHosted, err: *CompileError, out: *List(u8)) void = {
             @fmt(out, "Type Error: expected % but found %", self.log_type(it.wanted), self.log_type(it.found));
         }
         fn CoerceConst(it) => {
-            self.codemap.fmt_error_line(it.span, out);
+            self.codemap.fmt_error_line(it.span, out, color);
             @fmt(out, 
                 "Type Error: expected % but found %\nWhile coercing constant: %", 
                 self.log_type(it.wanted), self.log_type(it.found), it.expr.log(self)
             );
         }
         fn InvalidField(it) => {
-            self.codemap.fmt_error_line(it.span, out);
+            self.codemap.fmt_error_line(it.span, out, color);
             extra := if(self.has_fields(it.container), => "", => "\nbut only structs/enums support field access");
             @fmt(out, 
                 "Type Error: expected field % on type % %", 
@@ -727,7 +729,7 @@ fn fmt_error(self: *SelfHosted, err: *CompileError, out: *List(u8)) void = {
             );
         }
         fn MissingField(it) => {
-            self.codemap.fmt_error_line(it.span, out);
+            self.codemap.fmt_error_line(it.span, out, color);
             @fmt(out, 
                 "Missing required field '%' (no default value provided)\n",
                 self.pool.get(it.name), 
@@ -737,7 +739,7 @@ fn fmt_error(self: *SelfHosted, err: *CompileError, out: *List(u8)) void = {
                 each type.fields { f |
                     if f.name == it.name {
                         if !f.loc.is_null() {
-                            self.codemap.fmt_error_line(f.loc, out);
+                            self.codemap.fmt_error_line(f.loc, out, color);
                             out.len -= 1;
                         };
                         return();
@@ -750,13 +752,13 @@ fn fmt_error(self: *SelfHosted, err: *CompileError, out: *List(u8)) void = {
     };
 }
 
-fn report_error2(self: *SelfHosted, err: CompileError) Never = self.report_error(err&);
+fn report_error2(self: *SelfHosted, err: CompileError, color: bool) Never = self.report_error(err&, color);
 
-fn report_error(self: *SelfHosted, err: *CompileError) Never = {
+fn report_error(self: *SelfHosted, err: *CompileError, color: bool) Never = {
     @if(BOOTSTRAP_ONLY_MODE) panic("error");
     maybe_log_scopes(self);
     out: List(u8) = list(temp());
-    self.fmt_error(err, out&);
+    self.fmt_error(err, out&, color);
     panic(out.items())
 }
 
@@ -765,9 +767,9 @@ fn has_fields(self: *SelfHosted, ty: Type) bool = {
     @is(self.get_type(raw_container_ty), .Struct, .Tagged)
 }
 
-fn show_error_line(self: *CodeMap, span: Span) void = {
+fn show_error_line(self: *CodeMap, span: Span, color: bool) void = {
     out: List(u8) = list(temp());
-    self.fmt_error_line(span, out&);
+    self.fmt_error_line(span, out&, color);
     println(out.items());
 }
 
@@ -785,13 +787,13 @@ fn maybe_log_scopes(self: *SelfHosted) void = {
         scope.visit = self.scopes[scope.parent].visit + 1;
         line := self.codemap.get_whole_line(scope.loc);
         @fmt(out&, "%- [S%] %:%:% ", f_rep("  ", scope.visit), i, line.filename, line.line, line.col);
-        @fmt(out&, " parent = (S%) ", scope.parent.id());
+        @fmt(out&, " parent = (S%) ", scope.parent.as_index());
         use := get_use(self, scope_from_index(i.trunc()));
         if use.parents.len > 0 {
             @fmt(out&, ", #use[");
             each use.parents { use |
                 @match(use.who&) {
-                    fn Scope(it) => @fmt(out&, "(S%), ", it[].id());
+                    fn Scope(it) => @fmt(out&, "(S%), ", it[].as_index());
                     fn PendingEval(it) => @fmt(out&, "%%%, ", self.pool.get(it.name), "%", it.id);
                 };
             };

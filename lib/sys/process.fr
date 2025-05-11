@@ -44,24 +44,35 @@ fn get_executable_path(a: Alloc) Str #target_os = (fn($os) => @match(os) {
     fn linux() => {
         path :: @as(CStr) "/proc/self/exe";
         out: List(u8) = list(128, a);
-        loop {
-            len := or readlink(path, out.maybe_uninit.ptr, out.maybe_uninit.len) {
-                // TODO: return error!!
-                panic("error readlink /proc/self/exe I really hope you're using a broken emulator")
-            };
-            
-            if len < out.maybe_uninit.len {
-                out.len = len;
-                return(out.items());
-            } else {
-                // we probably didn't have enough room to read the whole file path, try again. 
-                out&.reserve(out.maybe_uninit.len);
-                // continue();
-            }
-        }
+        if !read_link(path, out&) {
+            // TODO: return error!!
+            panic("error readlink /proc/self/exe I really hope you're using a broken emulator")
+        };
+        return(out.items());
     }
     fn wasip1() => panic("TODO: get_executable_path on wasi");
 });
+
+fn read_link(path: CStr, out: *List(u8)) bool = {
+    start := out.len;
+    if out.maybe_uninit.len == out.len {
+        out.reserve(32);
+    };
+    loop {
+        cap := out.maybe_uninit.len - start;
+        len := readlink(path, out.maybe_uninit.ptr.offset(start), cap) 
+            || return(false);
+        
+        if len < cap {
+            out.len += len;
+            return(true);
+        };
+        @debug_assert_eq(cap, len);
+        
+        // else, we probably didn't have enough room to read the whole file path, try again. 
+        out.reserve(2 * out.maybe_uninit.len);
+    }
+}
 
 fn get_working_directory(a: Alloc) List(u8) = {
     out: List(u8) = list(512, a);

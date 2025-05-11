@@ -6,8 +6,34 @@
 - external: make it not a 100 line copy-paste to setup a driver that links an object file
 - llvm:     get all the ssa tests working
 
+## Terminal
+
+- input text at the cursor. 
+- move around with arrows. click to move cursor. 
+- highlighting, copy
+- cmd click on a file:line:col to open it
+- escape codes: colour, move the cursor, clear the screen
+- send input to stdin
+- raw input mode
+- tab to autocomplete a file path
+- catch faults/panics from the repl
+- option to reset the repl since it leaks memory indefinitely 
+- sexier font (need to fix import_c to make it work on stb_truetype)
+- unicode characters
+- handle quotes in cmd parsing. strip spaces
+- && to run two commands
+- make it compile faster when ENABLE_FRANCA_REPL
+- multiline franca commands
+- restore session when you restart it
+- jump around past commands like warp
+- search
+- environment variable syntax
+- tell child programs that im a terminal. ie. ls gives me one column instead of two. 
+- drag and drop a file to type it's path
+
 ## Graphics
 
+- finsih webgpu
 - finish gfx-metal. need to make sure everything is reachable
 - example program that tries to use all features
 - finish gfx validation and enable that based on DebugAssetions
@@ -24,8 +50,6 @@
 - replace cimgui
 - https://github.com/id-Software/DOOM
 - implement #trace
-- don't dlopen stuff in build_for_graphics when doing AOT
-- send frameworks to backend and tell it which lib to import each function from. so i don't need the linker for AOT
 - test that runs all the interactive things in sequence
 - geo: `// TODO: the controls feel really bad. you can like lose key presses.`
 make sure that's not something i broke (i think it was always like that, 

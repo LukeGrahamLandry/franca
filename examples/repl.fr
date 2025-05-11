@@ -7,32 +7,10 @@ ENABLE_TRACY :: false;
 ENABLE_LOGGING_CALLBACKS :: false;
 
 fn main() void = {
-    // TODO: call functions directly instead of through the vtable and then we don't have to compile the llvm backend
-    vtable := init_driver_vtable();
-    update_global_stdlib_path();
-    prelude := "#include_std(\"lib/core.fr\");\n";
-    comp := {vtable.init_compiler}(vtable.default_build_options()); // TODO: comptime get the current arch
-    c := vtable.with(comp);
-    file := c.add_file("repl!", prelude);
-    self := c.data.cast()[][];
-    id := self.parser.push_parse(prelude, file);
-    stmts := self.parser.finish_pending_stmts(id);
-    stmts := self.unwrap_report_error(RawList(FatStmt), stmts); // TODO: don't return RawList -- Jun 29
-    stmts := stmts.items();
-    {c.vtable.make_and_resolve_and_compile_top_level}(c.data, stmts).unwrap();
-    
-    // TODO: these numbers are experimentally where it happens to put the prelude constants right now. should do something more robust where you can ask it. 
-    scope_id := self.scopes.new_scope(TOP_LEVEL_SCOPE, self.get_alloc(), file);
-    scope := self.scopes[scope_id]&;
-    
     A :: import("@/lib/alloc/fixed_block.fr").BlockAlloc;
     a: A = init(page_allocator);
-    state: ReplState = (
-        program = self, 
-        variables = init(a&.borrow()),
-        top_scope = scope_id,
-        allocator = a&.borrow(),
-    );
+    prelude := "#include_std(\"lib/core.fr\");\n";
+    state := init_repl(a&.borrow(), prelude);
     loop {
         text := "".clone(state.allocator);
         (import("@/lib/sys/terminal.fr").interactive_read_line)(text&);
@@ -43,7 +21,7 @@ fn main() void = {
             fn Ok() => ();
             fn Err(e) => {
                 out: List(u8) = list(a&.borrow());
-                self.fmt_error(e, out&);
+                state.program.fmt_error(e, out&, true);
                 println(out.items());
                 out&.drop();
             }
@@ -58,6 +36,31 @@ ReplState :: @struct(
     top_scope: ScopeId,
     allocator: Alloc,
 );
+
+init_repl :: fn(a: Alloc, prelude: Str) ReplState = {
+    vtable := init_driver_vtable();
+    update_global_stdlib_path();
+    comp := {vtable.init_compiler}(vtable.default_build_options()); // TODO: comptime get the current arch
+    c := vtable.with(comp);
+    file := c.add_file("repl!", prelude);
+    self := c.data.cast()[][];
+    id := self.parser.push_parse(prelude, file);
+    stmts := self.parser.finish_pending_stmts(id);
+    stmts := self.unwrap_report_error(RawList(FatStmt), stmts); // TODO: don't return RawList -- Jun 29
+    stmts := stmts.items();
+    {c.vtable.make_and_resolve_and_compile_top_level}(c.data, stmts).unwrap();
+    
+    // TODO: these numbers are experimentally where it happens to put the prelude constants right now. should do something more robust where you can ask it. 
+    scope_id := self.scopes.new_scope(TOP_LEVEL_SCOPE, self.get_alloc(), file);
+    scope := self.scopes[scope_id]&;
+    
+    (
+        program = self, 
+        variables = init(a),
+        top_scope = scope_id,
+        allocator = a,
+    )
+};
 
 fn run_chunk(state: *ReplState, src: Str) Res(void) = {
     :: WalkAst(ReplState, void);
@@ -77,6 +80,9 @@ fn run_chunk(state: *ReplState, src: Str) Res(void) = {
         
         @match(stmt.stmt&) {
             fn Noop() => ();
+            fn Annotations(a) => each a { a |
+                @println("TODO: #%", self.pool.get(a.name));
+            };
             fn Eval(e) => {
                 value := @try(self.repl_eval(e, .None)) return;
             }

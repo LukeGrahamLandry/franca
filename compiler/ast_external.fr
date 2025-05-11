@@ -362,7 +362,7 @@ fn assume_cast($T: Type, self: *Values) *T #generic = {
     ptr_cast_unchecked(u8, T, b.ptr)
 }
 
-::enum(CallConv);
+//::enum(CallConv);
 
 fn find_impl(self: *FuncImpl, $p: FuncImpl.Tag()) ?*get_variant_type(FuncImpl, p) #generic = {
     if self.tag() == p {
@@ -379,12 +379,15 @@ fn find_impl(self: *FuncImpl, $p: FuncImpl.Tag()) ?*get_variant_type(FuncImpl, p
     .None
 } 
 
-:: {
+add_compiler_hashers :: {
     H :: TrivialHasher;
+    enum(ExecStyle);
+    fn eq(a: FuncId, b: FuncId) bool #redirect(Ty(u32, u32), bool);
+        DerefEq(FuncId);
     
-    fn DerefHash($T: Type) void = {
+    DerefHash :: fn($T: Type) void = {
         fn hash(hasher: *H, a: *T) void #inline = hasher.hash(a[]);
-    }
+    };
     
     #redirect(Ty(*H, *u32), void) fn hash(h: *H, s: *LabelId) void;    AutoHash(TypeInfo, H); AutoEq(TypeInfo);
     DerefHash(*TypeInfo); DerefEq(*TypeInfo);
@@ -426,7 +429,7 @@ fn find_impl(self: *FuncImpl, $p: FuncImpl.Tag()) ?*get_variant_type(FuncImpl, p
     fn hash(hasher: *H, self: *TypeInfoStruct) void = {
         hasher.hash(self.fields&);
         hasher.hash(self.is_tuple&);
-        s := self.scope.id();
+        s := self.scope.as_index();
         hasher.hash(s&);
     }
 };
@@ -558,7 +561,6 @@ fn take(self: *ReadBytes, size: i64) ?[]u8 = {
     (Some = (ptr = ptr, len = size))
 }
 
-::enum(ExecStyle);
 
 Flag :: @enum(i64) (
     SYMBOL_ZERO,
@@ -622,11 +624,6 @@ fn ident(name: Flag) Symbol = {
     symbol_from_id((@as(i64) name).trunc())
 }
 
-:: {
-    fn eq(a: FuncId, b: FuncId) bool #redirect(Ty(u32, u32), bool);
-    DerefEq(FuncId);
-};
-
 fn get_whole_line(c: CompCtx, loc: Span) FrancaCodeLine = {
     {c.vtable.get_whole_line}(c.data, loc)
 }
@@ -689,6 +686,8 @@ fn fill_backend_vtable(vtable: *ImportVTable) void = {
         
         m.drop();
     };
+    
+    #use("@/compiler/worker.fr");
     
     // TODO: this is ugly. but it's a really convenient hack to make the feedback loop for import_wasm/import_c faster. 
     hack := @as(CodegenWorker) codegen_thread_main;
@@ -832,3 +831,10 @@ fn fill_bindings(func: *Func, fr: CompCtx, args: []Type) void = {
 }
 
 TOP_LEVEL_SCOPE :: scope_from_index(4);
+
+fn has_tag(self: *Func, flag: Flag) bool = {
+    each self.annotations { a |
+        if(a.name == flag.ident(), => return(true));
+    };
+    false
+}

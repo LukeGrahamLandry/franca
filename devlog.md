@@ -1,3 +1,8 @@
+## (May 10)
+
+- sending SIGINT to `make` doesn't make it stop. am i supposed to be sending it to 
+all children somehow? SIGKILL works but maybe that's rude. 
+
 ## (May 9) 
 
 - I was kinda hoping that the graphics stuff would be a fun vacation from compiler 
@@ -23,6 +28,24 @@ process doesn't block with a full pipe while i sleep on the frame timer for anot
 3020ms: mine, no loop so 64KB per frame
 1230ms: mine, loop with 4MB buffer
 ```
+- fuse it with the repl.
+- why is mine slower at running all my tests than warp? 33s vs 28s. 
+ahhh right XProtectService eating a core. i have to add my terminal to "run programs that do not meet the system security policy" 
+in system settings like i did for warp and terminal.app. hah, now 26s.
+- im very afraid that security thing in per hash or something so everytime i recompile i have to take it off the 
+list and put it back. i wonder if every time warp updates itself it takes itself off the list 
+so it's actually supposed to be way faster than mine still? seems like no. 
+maybe they do the signing properly and that lets you stay. but it also doesn't forget for me every time, 
+i feel like there's something im missing cause it can't just be random? 
+- mine being open makes WindowServer eat 30% of a core consistantly even when it's not doing anything. 
+nothing else has this problem. actually when i type into zed or warp, WindowServer time shoots up. 
+so maybe i have to ask for my frame rate to be lowered when i know im not drawing anything. 
+do i like toggle on and off my CVDisplayLink? or switch to CADisplayLink so i can use preferredFrameRateRange? 
+but then do i have to deal with polling the other process in another thread? 
+i don't want it to get stuck with a full buffer just because my window is inactive. 
+i can just drop frames im not in the mood for. the cpu usage goes away if you don't call presentDrawable. 
+so i can ask for 60fps and just not produce the frame if there were no events/output since last time. 
+much better, now doing nothing is free as it should be. 
 
 ## (May 8)
 

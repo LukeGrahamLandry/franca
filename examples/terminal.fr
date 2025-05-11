@@ -1,44 +1,56 @@
 #include_std("graphics/lib.fr");
+Repl :: import("@/examples/repl.fr");
 
-/*
-// TODO: this should work but does not 
-Graphics :: import("@/graphics/lib.fr");
-#use(Graphics);
-// TODO: also this should work
-#include_std("bindings/sokol.fr");
-Graphics :: import("@/graphics/lib.fr");
-Sdtx :: Graphics.Sdtx;
-// but then things in the debugtext don't find things in the lib file for some reason. 
-*/
+ENABLE_FRANCA_REPL :: false;
 
-state :: @static(@struct(
+State :: @struct(
     pass_action: SgPassAction,
     text: *Sdtx.Self,
     buffers: List(TextBuffer),
     selected_buffer: i64,
-    app: Sapp.Self, // :ThisIsOnTheStackWhichWontWorkOnWasm
+    app: Sapp.Self,
     sg: Sg.Self,
     process: ?RunningProcess,
     scratch: List(u8),
     lock_to_bottom: bool,
     history: RawList(Str),
     history_index: i64,
-));
+    background: SgColor,
+    font_color: u32,
+    repl: @if(ENABLE_FRANCA_REPL, Repl.ReplState, void),
+    dirty: bool,
+);
+
+// This needs the extra level of indirection so it can be shared with the repl. 
+state :: @static(*State);
 
 allocator :: libc_allocator;
 
 do_init :: fn(userdata: rawptr) void = {
-    state := state; // :Compilerbug
+    state := state[];
     sapp := state.app&;
     state.sg&.setup(
         environment = Easy'glue_environment(sapp),
         allocator = allocator,
     );
+    @if(ENABLE_FRANCA_REPL) {
+        prelude := "#include_std(\"lib/core.fr\");#include_std(\"examples/terminal.fr\");\n";
+        state.repl = Repl'init_repl(allocator, prelude);
+        if Repl.STDLIB_PATH { path |
+            cd(path[]);
+        };
+        res := state.repl&.run_chunk(@tfmt("real_state := State.ptr_from_int(%); state[] = real_state; state := state[];", raw_from_ptr(@type state[], state)));
+        ::Repl;
+        state.repl.program.Repl'unwrap_report_error(void, res);
+    };
     state.scratch = list(u8, 4*1024*1024, allocator);  // :BigOutputBuffer
     state.lock_to_bottom = true;
     state.history_index = 0;
     state.history&.push("", allocator);
     state.history&.push("", allocator);
+    state.background = (r = 0.156, g = 0.156, b = 0.156, a = 1);
+    state.font_color = pack_rgba(235, 219, 178, 255);
+    state.dirty = true;
     
     state.text.setup(
         allocator = allocator,
@@ -54,21 +66,69 @@ do_init :: fn(userdata: rawptr) void = {
         b.at.w = sapp.width().float() / 2;
         b.at.h = sapp.height().float();
         b.at.pos.x = sapp.width().float() / 2;
-    }
+    };
     
-    state.pass_action.colors&[0] = (
-        load_action = .CLEAR,
-        clear_value = (r = 0.156, g = 0.156, b = 0.156, a = 1),
+    putchar :: fn(_: u8) i32 #libc;
+    W :: CHAR_W*2;
+    H :: CHAR_H*2;
+    font_pixels :: {
+        #use(StbTrueType);
+        ttf_buffer := read_to_string_or_crash(temp(), "font.ttf").items();
+        tex_width := 2048;
+        bitmap := temp().alloc(u8, tex_width*tex_width);
+        chars := temp().alloc(stbtt_bakedchar, 1024);
+        result := stbtt_BakeFontBitmap(ttf_buffer.ptr, 0, 32.0, bitmap.ptr, intcast tex_width, intcast tex_width, 33, 128, chars.ptr);
+        @assert(result >= 0, "didn't fit all characters");
+        result := 128-32;    
+        pixels := ast_alloc().alloc_zeroed(u8, 256*W*H);
+        x: f32 = 0; y: f32 = 0;
+        range(0, result) { i |
+            // These are the positions of the texture in the atlas
+            x0, y0, x1, y1 := (@as(i64) chars[i].x0.zext(), @as(i64) chars[i].y0.zext(), @as(i64) chars[i].x1.zext(), @as(i64) chars[i].y1.zext());
+            // These are how much you have to move it to account for the blank part. 
+            // ie. the square above will just cover the filled in part of `_` and this tells us to move it down. 
+            X, Y := (chars[i].xoff.cast().int(), chars[i].yoff.cast().int());
+            range(y0, y1) { j |
+                range(x0, x1) { ii |
+                    c := bitmap[j*tex_width+ii];
+                    xxxx: i64 = (j-y0+(Y+20))*W*256 + (ii-x0+X) + (i+32+1)*W;
+                    pixels[xxxx] = c;
+                }
+            };
+        };
+        out := u8.list(temp());
+        range(0, H) { j |
+            range(W*32, W*127) { ii |
+                c := pixels[j*256*W+ii];
+                chars := " .:ioVM@";
+                push(out&, chars[c.zext().shift_right_logical(5)]);
+            }
+            push(out&, "\n".ascii());
+        };
+        println(out.items());
+        pixels
+    };
+    X := zeroed(Array([]u8, 16));
+    font_img: Sg.Image = state.sg&.make(
+        width = W*256,
+        height = H,
+        pixel_format = .R8,
+        data = (subimage = ((font_pixels, ..empty()), ..X)),
+        label = "font_texture",
     );
+    state.text.font_img = font_img;
+    state.text.default_context.desc.char_to_uv = Sdtx.char_to_uv;
 };
+
+CHAR_W :: 8;
+CHAR_H :: 16;
 
 Colour :: @struct(r: i64, g: i64, b: i64, a := 255);
 Pos :: @struct(x: f64, y: f64);
 Rect :: @struct(pos: Pos, w: f64, h: f64);
 
 do_render :: fn(userdata: rawptr) void = {
-    state := state; // :Compilerbug
-    
+    state := state[];
     if state.process& { p |
         buffer := state.buffers&[0]&;
         status := poll(p, state.scratch&);
@@ -78,7 +138,12 @@ do_render :: fn(userdata: rawptr) void = {
             fn Ok(status) => if status { status |
                 ms := timestamp() - p.start;
                 state.process = .None;
-                buffer.append_string(@tfmt("\nExited with status % (in %ms)\n", status, ms));
+                buffer.append_string(@tfmt("\nExited with status %", status));
+                if ms > 16 {
+                    // if it didn't span multiple frames the time is not super interesting. 
+                    buffer.append_string(@tfmt(" (in % ms)", ms));
+                };
+                buffer.append_string("\n");
             } else {
                 // still running
             };
@@ -86,11 +151,22 @@ do_render :: fn(userdata: rawptr) void = {
         };
     };
     
+    if !state.dirty {
+        // if no events and no text from process, don't render a frame
+        return();
+    };
+    state.dirty = false;
+    
     each state.buffers& { b |
         draw_text(b);
     };
     
     sg := state.sg&;
+    
+    state.pass_action.colors&[0] = (
+        load_action = .CLEAR,
+        clear_value = state.background,
+    );
     Easy'glue_begin_pass(state.app&, sg, state.pass_action);
     
     sdtx := state.text.default_context&;
@@ -101,6 +177,8 @@ do_render :: fn(userdata: rawptr) void = {
 };
 
 fn append_string(buffer: *TextBuffer, new: Str) void = {
+    state := state[];
+    state.dirty = true;
     if buffer.lines.len == 0 {
         buffer.lines&.push(zeroed RawList(u8), buffer.gpa);
     };
@@ -118,7 +196,7 @@ fn append_string(buffer: *TextBuffer, new: Str) void = {
                 // If you're already near the bottom of the document, scroll down as new text
                 // is added so you can see it stream in, but if you carefully scrolled up to 
                 // look at something, don't rip you away from your place. 
-                buffer.render.y = float(buffer.lines.len - buffer.num_lines_fit_on_screen + 5);
+                buffer.render.y = float(buffer.lines.len - buffer.num_lines_fit_on_screen + 1);
             }
         };
     };
@@ -127,16 +205,32 @@ fn append_string(buffer: *TextBuffer, new: Str) void = {
     last.push_all(line, buffer.gpa);
 }
 
-scroll_speed :: -2.0;
+fn echo(s: Str) void = {
+    if selected_buffer() { buffer |
+        buffer.append_string(s);
+    }
+}
+
+fn cd(s: Str) void = {
+    chdir(@fmt_cstr("%", s)) 
+        || echo(@tfmt("failed to set working directory to '%'\n", s));
+}
+
+fn exit() void = {
+    state[].app.quit_requested = true;
+}
 
 do_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
-    state := state; // :Compilerbug
+    state := state[];
+    if event.type != .MOUSE_MOVE {
+        state.dirty = true;
+    }
     if event.type == .MOUSE_DOWN {
         pos: Pos = (x = event.mouse_x.cast(), y = event.mouse_y.cast());
         enumerate state.buffers& { i, b |
             if b.at.contains(pos) {
                 state.selected_buffer = i;
-                b.cursor = (x = pos.x / 14.0 + b.render.x, y = pos.y / 14.0 + b.render.y);
+                b.cursor = (x = pos.x / CHAR_W + b.render.x, y = pos.y / CHAR_H + b.render.y);
                 line, col := (b.cursor.y.int(), b.cursor.x.int());
                 if line < b.lines.len {
                     line := b.lines[line]&;
@@ -148,132 +242,174 @@ do_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
         };
     };
     
-    if event.type == .CLIPBOARD_PASTED {
-        if selected_buffer() { buffer |
-            buffer.append_string(state.app&.get_clipboard_string().items());
-        }
+    if event.type == .RESIZED {
+        // the main buffer always covers the whole window
+        buffer := state.buffers[0]&;
+        buffer.at.w = state.app.framebuffer_width.float();
+        buffer.at.h = state.app.framebuffer_height.float();
     }
     
     if event.type == .KEY_DOWN {
-        if event.key_code == .ESCAPE {
+        if event.key_code == .W && event.modifiers.get(.super) != 0 {
             state.app.quit_requested = true;
         };
         
-        if event.key_code == .BACKSPACE {
-            if selected_buffer() { buffer |
-                if buffer.lines.len > 0 {
-                    last := buffer.lines[buffer.lines.len - 1]&;
-                    if last.len > 0 {
-                        last.len -= 1;
-                    } else {
-                        buffer.lines.len -= 1;
-                    };
-                }
-            };
-        }
-        
+        // ^c -> SIGINT, ^C -> SIGKILL
         if event.key_code == .C && event.modifiers.get(.control) != 0 {
             if state.process& { p |
-                kill(p.pid, @as(i32) SignalNum.Interupt);
+                if event.modifiers.get(.shift) != 0 {
+                    kill(p.pid, @as(i32) SignalNum.Kill);
+                } else {
+                    // TODO: how do i make this work on make? (i assume the nesting is the problem? do i send it to all children somehow?)
+                    kill(p.pid, @as(i32) SignalNum.Interupt);
+                }
+            } else {
+                if selected_buffer() { buffer |
+                    buffer.append_string("nothing is running right now\n");
+                }
+            }
+        }
+        buffer := selected_buffer() || return();
+        
+        if event.key_code == .BACKSPACE && buffer.lines.len > 0 {
+            last := buffer.lines[buffer.lines.len - 1]&;
+            if last.len > 0 {
+                last.len -= 1;
+            } else {
+                buffer.lines.len -= 1;
             };
         }
         
         if event.key_code == .UP {
-            if selected_buffer() { buffer |
-                if buffer.lines.len > 0 {
-                    buffer.lines&[buffer.lines.len - 1].len = 0;
-                };
-                state.history_index = max(state.history_index - 1, 0);
-                cmd := state.history[state.history_index];
-                buffer.append_string(cmd);
+            if buffer.lines.len > 0 {
+                buffer.lines&[buffer.lines.len - 1].len = 0;
             };
+            state.history_index = max(state.history_index - 1, 0);
+            cmd := state.history[state.history_index];
+            buffer.append_string(cmd);
         }
         
         if event.key_code == .DOWN {
-            if selected_buffer() { buffer |
-                if buffer.lines.len > 0 {
-                    buffer.lines&[buffer.lines.len - 1].len = 0;
-                }
-                state.history_index = min(state.history_index + 1, state.history.len - 1);
-                cmd := state.history[state.history_index];
-                buffer.append_string(cmd);
-            };
+            if buffer.lines.len > 0 {
+                buffer.lines&[buffer.lines.len - 1].len = 0;
+            }
+            state.history_index = min(state.history_index + 1, state.history.len - 1);
+            cmd := state.history[state.history_index];
+            buffer.append_string(cmd);
         }
         
+        if event.key_code == .LEFT {
+            buffer.cursor.x = max(buffer.cursor.x - 1, 0);
+        };
+        
+        if event.key_code == .RIGHT{
+            // TODO: get the current line so we know the max 
+        };
+        
         if event.key_code == .ENTER {
-            if selected_buffer() { buffer |
-                if event.modifiers.get(.shift) != 0 {
-                    buffer.append_string("\n");
-                    return();
-                };
-                
-                if buffer.lines.len == 0 {
-                    buffer.lines&.push(zeroed RawList(u8), buffer.gpa);
-                };
+            if event.modifiers.get(.shift) != 0 {
+                buffer.append_string("\n");
+                return();
+            };
             
-                raw_command := buffer.lines&[buffer.lines.len - 1].items();
-                
-                @debug_assert(state.history.len >= 2);
-                if state.history[state.history.len - 2] != raw_command {
-                    state.history.len -= 1;  // blank
-                    state.history&.push(raw_command.shallow_copy(allocator), allocator);
-                    state.history&.push("", allocator);
-                };
-                state.history_index = state.history.len - 1;
-                
-                cmd := CStr.list(temp());
-                start := 0;
-                range(0, raw_command.len) { i |
-                    if raw_command[i] == " ".ascii() {
-                        cmd&.push(@fmt_cstr("%", raw_command.slice(start, i)));
-                        start = i + 1;
-                    };
-                };
-                cmd&.push(@fmt_cstr("%", raw_command.rest(start)));
-                cmd&.push(zeroed CStr);
-                if cmd[0].str().ends_with(".fr") {
-                    cmd&.insert(0, @as(CStr) "franca");
-                };
+            if buffer.lines.len == 0 {
+                buffer.lines&.push(zeroed RawList(u8), buffer.gpa);
+            };
+        
+            raw_command := buffer.lines&[buffer.lines.len - 1].items();
+            if(raw_command == "", => return());
+            
+            @debug_assert(state.history.len >= 2);
+            if state.history[state.history.len - 2] != raw_command {
+                state.history.len -= 1;  // blank
+                state.history&.push(raw_command.shallow_copy(allocator), allocator);
+                state.history&.push("", allocator);
+            };
+            state.history_index = state.history.len - 1;
+            
+            if raw_command.starts_with(";") || raw_command.ends_with(";"){
+                if !raw_command.ends_with(";") {
+                    raw_command = buffer.lines&[buffer.lines.len - 1].items();
+                    buffer.append_string(";");
+                    raw_command.len += 1;
+                }
                 
                 buffer.append_string("\n");
-                cmd := cmd.items();
-                if state.process.is_none() {
-                    @match(exec(cmd)) {
-                        fn Ok(it) => {
-                            state.process = (Some = it);
-                            buffer.append_string(@tfmt("pid = %, time = %|\n", it.pid, it.start));
-                        }
-                        fn Err(msg) => buffer.append_string(msg);
-                    }
-                };
-                buffer.append_string("=================================|\n");
+                @if(ENABLE_FRANCA_REPL, {
+                    result := state.repl&.run_chunk(raw_command);
+                    if result&.is_err() {
+                        out: List(u8) = list(temp());
+                        state.repl.program.fmt_error(result.Err, out&, false);
+                        buffer.append_string(out.items());
+                    };
+                }, echo("This copy of terminal.fr was not compiled with FRANCA_REPL_ENABLED"));
+                //const_eval(void)(@{ import(@[@literal @tfmt("{ result :: { state := state; %;  }; _HACK :: %; };", raw_command, timestamp())]).result });
+                buffer.append_string("\n");
+                return();
             };
+            
+            cmd := CStr.list(temp());
+            start := 0;
+            range(0, raw_command.len) { i |
+                if raw_command[i] == " ".ascii() {
+                    cmd&.push(@fmt_cstr("%", raw_command.slice(start, i)));
+                    start = i + 1;
+                };
+            };
+            cmd&.push(@fmt_cstr("%", raw_command.rest(start)));
+            cmd&.push(zeroed CStr);
+            if cmd[0].str().ends_with(".fr") {
+                cmd&.insert(0, @as(CStr) "franca");
+            };
+            if cmd[0].str() == "cd" {
+                buffer.append_string("\nassuming you meant to call the shell builtin 'cd'\n");
+                if cmd.len > 1 {
+                    cd(cmd[1].str());
+                };
+                return();
+            }
+            
+            buffer.append_string("\n");
+            cmd := cmd.items();
+            if state.process.is_none() {
+                @match(exec(cmd)) {
+                    fn Ok(it) => {
+                        state.process = (Some = it);
+                        buffer.append_string(@tfmt("pid = %, time = %|\n", it.pid, it.start));
+                    }
+                    fn Err(msg) => buffer.append_string(msg);
+                }
+            };
+            buffer.append_string("=================================|\n");
         };
     };
+    buffer := selected_buffer() || return();
     
-    if event.type == .CHAR && event.char_code < 127 && event.modifiers.get(.super) == 0{
-        if selected_buffer() { buffer |
-            s: Str = (ptr = ptr_cast_unchecked(u32, u8, event.char_code&), len = 1);
-            buffer.append_string(s);
-        };
+    if event.type == .CLIPBOARD_PASTED {
+        buffer.append_string(state.app&.get_clipboard_string().items());
+    }
+    
+    if event.type == .CHAR && event.char_code < 127 && event.char_code >= 32 && event.modifiers.get(.super) == 0{
+        s: Str = (ptr = ptr_cast_unchecked(u32, u8, event.char_code&), len = 1);
+        buffer.append_string(s);
     };
     
     if event.type == .MOUSE_SCROLL {
-        if selected_buffer() { b |
-            b.render.x += event.scroll_x.cast() * scroll_speed;
-            b.render.y += event.scroll_y.cast() * scroll_speed;
-        };
+        scroll_speed :: -2.0;
+        buffer.render.x += event.scroll_x.cast() * scroll_speed;
+        buffer.render.y += event.scroll_y.cast() * scroll_speed;
     };
 };
 
 fn selected_buffer() ?*TextBuffer = {
-    state := state; // :Compilerbug
+    state := state[];
     if(state.selected_buffer >= state.buffers.len, => return(.None));
     (Some = state.buffers.index(state.selected_buffer))
 }
 
 fn main() void = {
-    state := state; // :Compilerbug
+    state[] = allocator.box(State);
+    state := state[];
     state[] = zeroed @type state[];
     state.text = allocator.box(@type state.text[]);
     state.buffers = list(allocator);
@@ -322,29 +458,31 @@ TextBuffer :: @struct(
 
 fn draw_text(self: *TextBuffer) void = {
     if(self.dead, => return());
-    state := state; // :Compilerbug
-    SCALE :: 16.0; // (80.0 / 1.75);
+    state := state[];
     w, h := (self.at.w, self.at.h);
-    max_line_width := self.max_x - (w / SCALE);
+    max_line_width := self.max_x - (w / CHAR_W);
     self.render.x = max(0, min(self.render.x, max_line_width));
     state[].lock_to_bottom = self.render.y > self.lines.len.float() - self.num_lines_fit_on_screen.float();
     self.render.y = max(0, min(self.render.y, self.lines.len.float()));
     
     sdtx := state.text.default_context&;
-    sdtx.color = pack_rgba(235, 219, 178, 255);
+    sdtx.color = state.font_color; 
     sapp := state.app&;
-    sdtx.canvas(sapp.width().float().div(1.75).cast(), sapp.height().float().div(1.75).cast());
+    sdtx.desc.canvas_width = state.app.framebuffer_width.float().cast();
+    sdtx.desc.canvas_height = state.app.framebuffer_height.float().cast();
+    sdtx.glyph_size.x = (@as(f32) CHAR_W) / sdtx.desc.canvas_width;
+    sdtx.glyph_size.y = (@as(f32) CHAR_H) / sdtx.desc.canvas_height;
     
     // the fractional component of your scroll position is used to offset the text rendering on the screen.
     // and the integral component chooses which range of lines we draw.
-    sdtx.pos.y = cast(self.at.pos.y / SCALE- (self.render.y - self.render.y.floor()));
-    x := cast(self.at.pos.x / SCALE - (self.render.x - self.render.x.floor()));
+    sdtx.pos.y = cast(self.at.pos.y / CHAR_H - (self.render.y - self.render.y.floor()));
+    x := cast(self.at.pos.x / CHAR_W - (self.render.x - self.render.x.floor()));
     sdtx.pos.x = x;
-    line_count := int(h / 13.0);
+    line_count := int(h / CHAR_H);
     self.num_lines_fit_on_screen = line_count;
     start := min(max(0, self.render.y.int()), self.lines.len);
     end   := min(start + line_count, self.lines.len);
-    chars_that_fit := int(w / SCALE);
+    chars_that_fit := int(w / CHAR_W);
     range(start, end) { i |
         line := self.lines&.index(i);
         col := self.render.x.int();
@@ -437,5 +575,19 @@ fn poll(self: *RunningProcess, buf: *List(u8)) Result(?i32, Str) = {
     
     (Ok = .None)
 };
+
+// TODO: todo.c i cheated and just changed stb_truetype.h for now
+StbTrueType :: {
+    get  :: import("@/examples/testing.fr").fetch_or_crash;
+    root := get("https://github.com/nothings/stb/archive/f0569113c93ad095470c54bf34a17b36646bbbb5.zip", 1754150, "b62be3009cb9d4b6385bd4854bddf72d8e91f4e19d1347d6cf9589b19f70d45d", "stb-f0569113c93ad095470c54bf34a17b36646bbbb5");
+    Ffi  :: import("@/examples/import_c/ffi.fr");
+    namespace :: scope_of(Type, @struct {});
+    c_source := @tfmt("""
+        #define STB_TRUETYPE_IMPLEMENTATION
+        #include "%/stb_truetype.h"
+    """, root);
+    Ffi'include(current_compiler_context(), namespace, c_source);
+    namespace
+}
 
 #include_std("backend/lib.fr");
