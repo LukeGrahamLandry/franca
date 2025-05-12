@@ -8,14 +8,13 @@
 
 ## Terminal
 
+- drag to select any direction not just down+right
 - input text at the cursor. 
 - move around with arrows. click to move cursor. 
-- highlighting, copy
-- cmd click on a file:line:col to open it
+- tab to autocomplete a file path / from history
 - escape codes: colour, move the cursor, clear the screen
 - send input to stdin
 - raw input mode
-- tab to autocomplete a file path
 - catch faults/panics from the repl
 - option to reset the repl since it leaks memory indefinitely 
 - unicode characters
@@ -32,6 +31,8 @@
 actually that's a bit too agressive but certainly stop processing ANSI escape codes. 
 - dynamic font size
 - scroll when you resize to lock the bottom position instead of the top
+- tabs
+- drag a tab out to make a new window
 
 ## Graphics
 
@@ -82,6 +83,7 @@ rn you're supposed to need a redundant `[]` in a call like that.
 - // TODO: don't segfault if you get a compile error inside a jit_shim. 
 - import_c: tests/todo/(a.c, b.c)
 - same string constant as Str and CStr :MiscompileCStr
+- :ConstInFuncOrLoseTemp
 
 ## cross compiling
 

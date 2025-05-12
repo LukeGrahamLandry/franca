@@ -1,3 +1,11 @@
+## (May 11)
+
+- cmd click on a file:line:col to open it
+- skip ansi escape codes
+- discovered :ConstInFuncOrLoseTemp
+- select text and copy to clipboard
+- double/triple click to select word/line
+
 ## (May 10)
 
 - sending SIGINT to `make` doesn't make it stop. am i supposed to be sending it to 
@@ -8,6 +16,7 @@ TODO: tests/todo/a.c, add as test case
 - added `-r` to import_c/cc.fr which mostly works but panics if you try to use it on 
 something that imports stb_truetype, but also it segfaults trying to call the panic handler which is really creepy. 
 TODO: tests/todo/b.c, add a simpler test case to run_tests.fr
+- fixed the spread syntax not going through name resolution
 - use a nice font. had some confusion with how to get the right offsets, 
 like i was rendering `_` at the top of it's cell. since i want a monospace font anyway, 
 can easily poke it into debugtext.fr, just have to make glyph_size not a square. 
@@ -16,6 +25,7 @@ can easily poke it into debugtext.fr, just have to make glyph_size not a square.
 - small string optimisation
 - made non-ascii chars show as filled in squares. 
   - found that `_NSGetExecutablePath` has a null byte on the end
+  - rediscovered that im padding all my strings to 4 byte alignment which is kinda dumb but :MiscompileCStr
 
 ## (May 9) 
 

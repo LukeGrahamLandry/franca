@@ -1,3 +1,14 @@
+// LIMITATIONS: no input to child process. no line wrap. ascii only. no ansi escape codes. no auto complete. no tabs. 
+// 
+// it doesn't have to be the best terminal program, it just has to be good enough that i 
+// don't have to use someone else's thing that occasionally gives you a giant red banner until you 
+// let it update itself to add more AI to keep the VCs happy and change the boldness of the font. 
+// the only feature i want in a terminal is to let me click with the mouse on where i want the cursor to be. 
+// also im going to lose my mind if i have to read that your terminal is gpu accelerated, thats what programs are.
+// the other reason i want this is to embed it in a website when i get to the point of having wasm 
+// demos that want to let you interact with the compiler the same as when it's a native program. 
+// 
+
 #include_std("graphics/lib.fr");
 Repl :: import("@/examples/repl.fr");
 
@@ -15,18 +26,26 @@ State :: @struct(
     lock_to_bottom: bool,
     history: RawList(Str),
     history_index: i64,
-    background: SgColor,
-    font_color: u32,
     repl: @if(ENABLE_FRANCA_REPL, Repl.ReplState, void),
     dirty: bool,
+    theme: ColourTheme,
+    last_click_time: i64,
+    click_count: i64,
 );
+
+ColourTheme :: @struct {
+    background: SgColor = (r = 0.156, g = 0.156, b = 0.156, a = 1);
+    font := pack_rgba(235, 219, 178, 255);
+    highlight := pack_rgba(0.09, 0.09, 0.09, 1);
+    selection := pack_rgba(62, 70, 67, 255);
+}
 
 // This needs the extra level of indirection so it can be shared with the repl. 
 state :: @static(*State);
 
 allocator :: libc_allocator;
 
-do_init :: fn(userdata: rawptr) void = {
+on_init :: fn(userdata: rawptr) void = {
     state := state[];
     sapp := state.app&;
     state.sg&.setup(
@@ -48,15 +67,19 @@ do_init :: fn(userdata: rawptr) void = {
     state.history_index = 0;
     state.history&.push("", allocator);
     state.history&.push("", allocator);
-    state.background = (r = 0.156, g = 0.156, b = 0.156, a = 1);
-    state.font_color = pack_rgba(235, 219, 178, 255);
+    state.theme = ();
+    
     state.dirty = true;
     
     state.text.setup(
         allocator = allocator,
         fonts = @slice(Sdtx.font.cpc),
         sg = state.sg&,
-        context = (char_width = CHAR_W, char_height = CHAR_H),
+        context = (
+            char_buf_size = 16000, 
+            char_width = CHAR_W, 
+            char_height = CHAR_H,
+        ),
     );
     
     b := state.buffers.index(0);
@@ -76,7 +99,7 @@ do_init :: fn(userdata: rawptr) void = {
         tex_width := 256;
         bitmap := temp().alloc(u8, tex_width*tex_width);
         chars := temp().alloc(stbtt_bakedchar, 128-32);
-        result := stbtt_BakeFontBitmap(font_data_ttf.as_ptr(), 0, 32.0, bitmap.ptr, intcast tex_width, intcast tex_width, 33, 128, chars.ptr);
+        result := stbtt_BakeFontBitmap(font_data_ttf().as_ptr(), 0, 32.0, bitmap.ptr, intcast tex_width, intcast tex_width, 33, 128, chars.ptr);
         @assert(result >= 0, "didn't fit all characters");
         // TODO: is this bigger than atlas + metadata? 
         pixels := ast_alloc().alloc_zeroed(u8, 256*W*H);
@@ -94,7 +117,7 @@ do_init :: fn(userdata: rawptr) void = {
                 dest.copy_from(src);
             };
         };
-        // make non ascii bytes show as filled in squares
+        // make non ascii bytes show as filled in cells
         range(0, H) { j |
             base := j*W*256;
             pixels.slice(base + 0, base + 32*W).set_bytes(0xFF);
@@ -119,7 +142,7 @@ Colour :: @struct(r: i64, g: i64, b: i64, a := 255);
 Pos :: @struct(x: f64, y: f64);
 Rect :: @struct(pos: Pos, w: f64, h: f64);
 
-do_render :: fn(userdata: rawptr) void = {
+on_frame :: fn(userdata: rawptr) void = {
     state := state[];
     if state.process& { p |
         buffer := state.buffers&[0]&;
@@ -131,7 +154,7 @@ do_render :: fn(userdata: rawptr) void = {
                 ms := timestamp() - p.start;
                 state.process = .None;
                 buffer.append_string(@tfmt("\nExited with status %", status));
-                if ms > 16 {
+                if ms > 32 {
                     // if it didn't span multiple frames the time is not super interesting. 
                     buffer.append_string(@tfmt(" (in % ms)", ms));
                 };
@@ -156,7 +179,7 @@ do_render :: fn(userdata: rawptr) void = {
     
     state.pass_action.colors&[0] = (
         load_action = .CLEAR,
-        clear_value = state.background,
+        clear_value = state.theme.background,
     );
     Easy'glue_begin_pass(state.app&, sg, state.pass_action);
     
@@ -173,9 +196,42 @@ fn append_string(buffer: *TextBuffer, new: Str) void = {
         buffer.lines&.push(empty_line, buffer.gpa);
     };
     if(new == "", => return());
+    state.dirty = true;
     last := buffer.lines[buffer.lines.len - 1]&;
     start := 0;
-    range(0, new.len) { i |
+    i := 0;
+    while => i < new.len {  
+        continue :: local_return;
+        
+        // I don't handle ansi escape codes yet but they have a fixed pattern 
+        // so skip them so you don't clutter the terminal with junk. 
+        //
+        // TODO: really the franca compiler should just respect whatever the env vars you're 
+        //       supposed to set to set to say what the terminal supports and then this would 
+        //       be less important to me. 
+        // TODO: also this is totally wrong because an escape could be split 
+        //       across two calls to poll() and then we'd get super confused. 
+        //
+        if new[i] == 27 && i + 1 < new.len && new[i + 1] == "[".ascii() {
+            line := new.slice(start, i);
+            buffer.max_x = max(buffer.max_x, float(last.len() + line.len));
+            last.push_all(line, buffer.gpa);
+            
+            i += 2;
+            while => i < new.len && new[i] >= 0x30 && new[i] <= 0x3F {
+                i += 1;
+            }
+            while => i < new.len && new[i] >= 0x20 && new[i] <= 0x2F {
+                i += 1;
+            }
+            if i < new.len && new[i] >= 0x40 && new[i] <= 0x7E {
+                i += 1;
+            }
+            
+            start = i;
+            continue();
+        };
+        
         if new[i] == "\n".ascii() {
             line := new.slice(start, i);
             buffer.max_x = max(buffer.max_x, float(last.len() + line.len));
@@ -190,6 +246,7 @@ fn append_string(buffer: *TextBuffer, new: Str) void = {
                 buffer.render.y = float(buffer.lines.len - buffer.num_lines_fit_on_screen + 1);
             }
         };
+        i += 1;
     };
     line := new.rest(start);
     buffer.max_x = max(buffer.max_x, float(last.len() + line.len));
@@ -211,26 +268,61 @@ fn exit() void = {
     state[].app.quit_requested = true;
 }
 
-do_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
+on_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
     state := state[];
     if event.type != .MOUSE_MOVE {
         state.dirty = true;
-    }
-    if event.type == .MOUSE_DOWN {
-        pos: Pos = (x = event.mouse_x.cast(), y = event.mouse_y.cast());
-        enumerate state.buffers& { i, b |
-            if b.at.contains(pos) {
-                state.selected_buffer = i;
-                b.cursor = (x = pos.x / CHAR_W + b.render.x, y = pos.y / CHAR_H + b.render.y);
-                line, col := (b.cursor.y.int(), b.cursor.x.int());
-                if line < b.lines.len {
-                    line := b.lines[line]&.str();
-                    if col < line.len {
-                        line[col] = "@".ascii();
-                    }
-                }
-            };
-        };
+    } else {
+        update_hover(event);
+        
+        // left mouse + drag -> select text (for copying with cmd+c)
+        if event.modifiers.get(.left_mouse) != 0 {
+            break :: local_return;
+            b, pos := find_mouse(event) || break();
+            state.dirty = true;
+            if b.selection& { sel |
+                sel.end = pos;
+            } else {
+                b.selection = (Some = (start = pos, end = pos));
+            }
+        }
+    };
+    
+    if event.type == .MOUSE_DOWN && event.modifiers.get(.left_mouse) != 0 {
+        b, pos := find_mouse(event) || return();
+        line, col := (pos.y.int(), pos.x.int());
+        b.selection = .None;
+        
+        now := timestamp();
+        if now - state.last_click_time < 400 {
+            break :: local_return;
+            if state.click_count == 0 {
+                // double click -> select word
+                _, start, end := find_link_at(b, line, col) || break();
+                b.selection = (Some = (
+                    start = (x = start.float(), y = line.float()),
+                    end   = (x = end.float(),   y = line.float()),
+                ));
+                state.click_count += 1;
+            } else {
+                // triple click -> select line
+                b.selection = (Some = (
+                    start = (x = 0, y = line.float()),
+                    end   = (x = b.lines[line]&.len().float(), y = line.float()),
+                ));
+                state.click_count = 0;
+            }
+        } else {
+            state.click_count = 0;
+        }
+        state.last_click_time = now;
+        
+        if event.modifiers.get(.super) != 0 {
+            // cmd + left click -> open file path
+            open_link_at(b, line, col);
+            return();
+        }
+        b.cursor = pos;
     };
     
     if event.type == .RESIZED {
@@ -242,6 +334,7 @@ do_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
     
     if event.type == .KEY_DOWN {
         if event.key_code == .W && event.modifiers.get(.super) != 0 {
+            // cmd+w -> exit
             state.app.quit_requested = true;
         };
         
@@ -262,6 +355,10 @@ do_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
         }
         buffer := selected_buffer() || return();
         
+        if event.key_code == .C && event.modifiers.get(.super) != 0 {
+            copy_from_selection(buffer);
+        };
+        
         if event.key_code == .BACKSPACE && buffer.lines.len > 0 {
             last := buffer.lines[buffer.lines.len - 1]&;
             if last.len() > 0 {
@@ -271,24 +368,12 @@ do_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
             };
         }
         
-        // history
         if event.key_code == .UP {
-            if buffer.lines.len > 0 {
-                buffer.lines&[buffer.lines.len - 1]&.set_len(0);
-            };
-            state.history_index = max(state.history_index - 1, 0);
-            cmd := state.history[state.history_index];
-            buffer.append_string(cmd);
+            move_in_history(buffer, true);
         }
         
-        // history
         if event.key_code == .DOWN {
-            if buffer.lines.len > 0 {
-                buffer.lines&[buffer.lines.len - 1]&.set_len(0);
-            }
-            state.history_index = min(state.history_index + 1, state.history.len - 1);
-            cmd := state.history[state.history_index];
-            buffer.append_string(cmd);
+            move_in_history(buffer, false);
         }
         
         if event.key_code == .LEFT {
@@ -328,6 +413,7 @@ do_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
             scroll_speed :: -2.0;
             buffer.render.x += event.scroll_x.cast() * scroll_speed;
             buffer.render.y += event.scroll_y.cast() * scroll_speed;
+            update_hover(event);
         };
         fn MOUSE_MOVE() => if event.modifiers.get(.right_mouse) != 0 {
             state.dirty = true;
@@ -340,6 +426,101 @@ do_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
         @default => ();
     };
 };
+
+copy_from_selection :: fn(self: *TextBuffer) void = {
+    state := state[];
+    sel := self.selection || return();
+    buf := u8.list(temp());
+    
+    startL := max(0, sel.start.y.int());
+    endL   := min(self.lines.len, sel.end.y.int() + 1);
+    range(startL, endL) { i |
+        text := self.lines[i]&.str();
+        left := if(i == startL, => sel.start.x.int().min(text.len), => 0);
+        right := if(i == endL - 1, => sel.end.x.int().min(text.len), => text.len);
+        buf&.push_all(text.slice(left, right));
+        if i != endL - 1 {
+            buf&.push("\n".ascii());
+        }
+    };
+    
+    buf&.push(0);
+    state.app&.set_clipboard_string(ptr = buf.maybe_uninit.ptr); 
+}
+
+move_in_history :: fn(b: *TextBuffer, up: bool) void = {
+    state := state[];
+    if b.lines.len > 0 {
+        b.lines&[b.lines.len - 1]&.set_len(0);
+    }
+    state.history_index = if up {
+        max(state.history_index - 1, 0)
+    } else {
+        min(state.history_index + 1, state.history.len - 1)
+    };
+    cmd := state.history[state.history_index];
+    b.append_string(cmd);
+}
+
+update_hover :: fn(event: *Sapp.Event) void = {
+    state := state[];
+    b, pos := find_mouse(event) || return();
+    new_hover := find_link_at(b, pos.y.int(), pos.x.int());
+    ::AutoEq(@type new_hover); ::AutoEq(Ty(i64, i64, i64));
+    if b.hover& != new_hover& {
+        b.hover = new_hover;
+        state.dirty = true;
+    }
+}
+
+find_mouse :: fn(event: *Sapp.Event) ?Ty(*TextBuffer, Pos) = {
+    pos: Pos = (x = event.mouse_x.cast(), y = event.mouse_y.cast());
+    state := state[];
+    enumerate state.buffers& { i, b |
+        if b.at.contains(pos) {
+            state.selected_buffer = i;
+            pos: Pos = (x = pos.x / CHAR_W + b.render.x, y = pos.y / CHAR_H + b.render.y);
+            return(Some = (b, pos));
+        };
+    };
+    .None
+}
+
+open_link_at :: fn(b: *TextBuffer, line: i64, col: i64) void = {
+    _, start, end := find_link_at(b, line, col) || return();
+    link := b.lines[line]&.str().slice(start, end);
+    // TODO: is `open` a thing on linux? 
+    //       if i use open i have to parse the :line:col suffix anyway because it doesn't like that. 
+    //cmd := @tfmt("open %", link);
+    //b.append_string(cmd);
+    //exec(b, cmd);  // TODO: this is kinda spammy to dump this in your terminal
+    sys_exec(@slice(
+        @fmt_cstr("zed"), // TODO: is there an env var im supposed to look at to know your default editor? 
+        @fmt_cstr("%", link),
+        zeroed CStr,
+    ));
+}
+
+find_link_at :: fn(b: *TextBuffer, line: i64, col: i64) ?Ty(i64, i64, i64) = {
+    if(line >= b.lines.len || line < 0, => return(.None));
+    text := b.lines[line]&.str();
+    if(col >= text.len || col < 0, => return(.None));
+    
+    // spread along the text in both directions
+    start := col;
+    while => start > 0 && !text[start].is_ascii_whitespace() {
+        start -= 1;
+    }
+    if start < text.len - 1 && text[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    end := col;
+    while => end < text.len && !text[end].is_ascii_whitespace() {
+        end += 1;
+    };
+    
+    (Some = (line, start, end))
+}
 
 fn selected_buffer() ?*TextBuffer = {
     state := state[];
@@ -357,22 +538,20 @@ fn main() void = {
     
     // :SLOW
     fn load_new_buffer(path: Str, a: Alloc) TextBuffer = {
-        buffer := TextBuffer.zeroed();
-        buffer.gpa = a;
+        buffer: TextBuffer = empty(a);
         input := buffer.gpa.read_to_string_or_crash(path).items(); // :panic :leak
         buffer&.append_string(input);
         buffer
     };
     //state.buffers&.push(load_new_buffer("compiler/v2/sema.fr", allocator));
     
-    buffer := TextBuffer.zeroed();
-    buffer.gpa = allocator;
+    buffer: TextBuffer = empty(allocator);
     push(state.buffers&, buffer);
     //state.buffers&.push(load_new_buffer("examples/terminal.fr", allocator));
     state.app&.run(
-        init_cb = do_init,
-        frame_cb = do_render,
-        event_cb = do_event,
+        init_cb = on_init,
+        frame_cb = on_frame,
+        event_cb = on_event,
         user_data = zeroed rawptr,
         window_title = "pls run da program",
         allocator = general_allocator(),
@@ -391,11 +570,24 @@ TextBuffer :: @struct(
     at: Rect,
     gpa: Alloc,
     cursor: Pos,
-    render: Pos,
+    render: Pos,  // visual scroll position
     max_x: f64,
     dead: bool,
     num_lines_fit_on_screen: i64,
+    
+    selection: ?Selection,
+    
+    // TODO: can be stale. should call update_hover more (so it shouldn't 
+    //       take an Event, i should just remember the last mouse position)
+    //       - when new text comes in from a process
+    //       - when you type and add text to the line
+    hover: ?Ty(i64, i64, i64),   // (line, start col, end col)
 );
+
+Selection :: @struct {
+    start: Pos;
+    end: Pos;
+};
 
 fn draw_text(self: *TextBuffer) void = {
     if(self.dead, => return());
@@ -407,23 +599,57 @@ fn draw_text(self: *TextBuffer) void = {
     self.render.y = max(0, min(self.render.y, self.lines.len.float()));
     
     sdtx := state.text.default_context&;
-    sdtx.color = state.font_color; 
     sapp := state.app&;
     sdtx.canvas(state.app.framebuffer_width.float().cast(), state.app.framebuffer_height.float().cast());
     
     // the fractional component of your scroll position is used to offset the text rendering on the screen.
     // and the integral component chooses which range of lines we draw.
-    sdtx.pos.y = cast(self.at.pos.y / CHAR_H - (self.render.y - self.render.y.floor()));
     x := cast(self.at.pos.x / CHAR_W - (self.render.x - self.render.x.floor()));
+    y := cast(self.at.pos.y / CHAR_H - (self.render.y - self.render.y.floor()));
     sdtx.pos.x = x;
     line_count := int(h / CHAR_H);
     self.num_lines_fit_on_screen = line_count;
     start := min(max(0, self.render.y.int()), self.lines.len);
     end   := min(start + line_count, self.lines.len);
-    chars_that_fit := int(w / CHAR_W);
+    chars_that_fit := int(w / CHAR_W) + 2;
+    col := self.render.x.int();
+    
+    if self.hover { line, startH, endH | 
+        if line >= start && line < end {
+            sdtx.color = state.theme.highlight; 
+            sdtx.pos.y = y + (line - start).float().cast();
+            sdtx.pos.x = x + (startH - col).float().cast();
+            left  := max(startH, col);
+            right := min(endH, col + chars_that_fit);
+            range(left, right, fn(_) => sdtx.put(0));  // filled in cell
+        }
+    };
+        
+    if self.selection { sel |
+        sdtx.color = state.theme.selection; 
+        startL := max(start, sel.start.y.int());
+        endL   := min(end, sel.end.y.int() + 1);
+        sdtx.pos.y = y + (startL - start).float().cast();
+        sdtx.pos.x = x + (sel.start.x.int() - col).float().cast();
+        range(startL, endL) { i |
+            left := if(i == startL, => sel.start.x.int(), => col);
+            right := if i == endL - 1 {
+                sel.end.x.int().min(self.lines[i]&.len())
+            } else {
+                self.lines[i]&.len()
+            };
+            right = min(right, left + chars_that_fit);
+            range(left, right, fn(_) => sdtx.put(0));  // filled in cell
+            sdtx.pos.y += 1;
+            sdtx.pos.x = x;
+        };
+    };
+
+    sdtx.pos.x = x;
+    sdtx.pos.y = y;
+    sdtx.color = state.theme.font; 
     range(start, end) { i |
         line := self.lines&.index(i).str();
-        col := self.render.x.int();
         if col < line.len {
             count := min(line.len - col, chars_that_fit);
             sdtx.put(line.subslice(col, count)); 
@@ -486,6 +712,14 @@ fn push_all(self: *Line, s: []u8, a: Alloc) void = if self.repr.len <= 0 {
 } else {
     self.repr&.push_all(s, a);
 };
+
+fn empty(a: Alloc) TextBuffer = {
+    b := zeroed TextBuffer;
+    b.gpa = a;
+    b.selection = .None;
+    b.hover = .None;
+    b
+}
 
 fn contains(r: Rect, p: Pos) bool = 
     p.x > r.pos.x && p.x < r.pos.x + r.w && p.y > r.pos.y && p.y < r.pos.y + r.h;
@@ -588,6 +822,7 @@ sys_exec :: fn(args: []CStr) Result(RunningProcess, Str) = {
     };
     @debug_assert(args[args.len - 1].ptr.is_null());
     
+    t := timestamp();
     pid := fork();
     if pid == 0 { // Child
         dup2(pipes&[0]&[0], STD_IN);
@@ -604,7 +839,7 @@ sys_exec :: fn(args: []CStr) Result(RunningProcess, Str) = {
     close(pipes&[1]&[1]);  // close the write end
     close(pipes&[2]&[1]);  // "
     
-    (Ok = (pid = pid, pipes = (pipes&[0]&[1], pipes&[1]&[0], pipes&[2]&[0]), start = timestamp()))
+    (Ok = (pid = pid, pipes = (pipes&[0]&[1], pipes&[1]&[0], pipes&[2]&[0]), start = t))
 }
 
 fn poll(self: *RunningProcess, buf: *List(u8)) Result(?i32, Str) = {
@@ -665,10 +900,12 @@ StbTrueType :: {
     namespace
 }
 
-font_data_ttf :: {
+// TODO: if you don't make it a function i think you go into the compiler at a confusing time 
+//       and it eats your temp() :CompilerBug :ConstInFuncOrLoseTemp   -- May 11, 2025
+font_data_ttf :: fn() []u8 = :: {
     get :: import("@/examples/testing.fr").fetch_or_crash;
-    root := get("https://download.jetbrains.com/fonts/JetBrainsMono-2.304.zip", 5622857, "6f6376c6ed2960ea8a963cd7387ec9d76e3f629125bc33d1fdcd7eb7012f7bbf", "");
-    path := @tfmt("%/fonts/ttf/JetBrainsMonoNL-Bold.ttf", root);
+    root := get("https://download.jetbrains.com/fonts/JetBrainsMono-2.304.zip", 5622857, "6f6376c6ed2960ea8a963cd7387ec9d76e3f629125bc33d1fdcd7eb7012f7bbf", "fonts");
+    path := @tfmt("%/ttf/JetBrainsMonoNL-Bold.ttf", root);
     ast_alloc().read_to_string_or_crash(path).items()
 }
 
