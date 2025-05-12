@@ -18,7 +18,6 @@
 - tab to autocomplete a file path
 - catch faults/panics from the repl
 - option to reset the repl since it leaks memory indefinitely 
-- sexier font (need to fix import_c to make it work on stb_truetype)
 - unicode characters
 - handle quotes in cmd parsing. strip spaces
 - && to run two commands
@@ -28,8 +27,11 @@
 - jump around past commands like warp
 - search
 - environment variable syntax
-- tell child programs that im a terminal. ie. ls gives me one column instead of two. 
-- drag and drop a file to type it's path
+- tell child programs that im a terminal. ie. ls gives me one column instead of two.
+- if something's outputting invalid utf8, switch to hex view,
+actually that's a bit too agressive but certainly stop processing ANSI escape codes. 
+- dynamic font size
+- scroll when you resize to lock the bottom position instead of the top
 
 ## Graphics
 
@@ -78,6 +80,8 @@ rn you're supposed to need a redundant `[]` in a call like that.
 - `@struct(a: A #use = (),);`
 - tests/todo/b.fr (might even be a parser bug? always a surprise when that's the problem)
 - // TODO: don't segfault if you get a compile error inside a jit_shim. 
+- import_c: tests/todo/(a.c, b.c)
+- same string constant as Str and CStr :MiscompileCStr
 
 ## cross compiling
 

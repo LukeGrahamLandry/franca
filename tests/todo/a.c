@@ -1,3 +1,4 @@
+// i do the casting wrong for `c` it truncates to u8 instead of promoting to int
 
 #include "stdio.h"
 int main() {

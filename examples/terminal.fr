@@ -56,6 +56,7 @@ do_init :: fn(userdata: rawptr) void = {
         allocator = allocator,
         fonts = @slice(Sdtx.font.cpc),
         sg = state.sg&,
+        context = (char_width = CHAR_W, char_height = CHAR_H),
     );
     
     b := state.buffers.index(0);
@@ -68,56 +69,47 @@ do_init :: fn(userdata: rawptr) void = {
         b.at.pos.x = sapp.width().float() / 2;
     };
     
-    putchar :: fn(_: u8) i32 #libc;
-    W :: CHAR_W*2;
+    W :: CHAR_W*2;  // TODO: why *2
     H :: CHAR_H*2;
     font_pixels :: {
         #use(StbTrueType);
-        ttf_buffer := read_to_string_or_crash(temp(), "font.ttf").items();
-        tex_width := 2048;
+        tex_width := 256;
         bitmap := temp().alloc(u8, tex_width*tex_width);
-        chars := temp().alloc(stbtt_bakedchar, 1024);
-        result := stbtt_BakeFontBitmap(ttf_buffer.ptr, 0, 32.0, bitmap.ptr, intcast tex_width, intcast tex_width, 33, 128, chars.ptr);
+        chars := temp().alloc(stbtt_bakedchar, 128-32);
+        result := stbtt_BakeFontBitmap(font_data_ttf.as_ptr(), 0, 32.0, bitmap.ptr, intcast tex_width, intcast tex_width, 33, 128, chars.ptr);
         @assert(result >= 0, "didn't fit all characters");
-        result := 128-32;    
+        // TODO: is this bigger than atlas + metadata? 
         pixels := ast_alloc().alloc_zeroed(u8, 256*W*H);
         x: f32 = 0; y: f32 = 0;
-        range(0, result) { i |
+        range(0, 128-32) { i |
             // These are the positions of the texture in the atlas
             x0, y0, x1, y1 := (@as(i64) chars[i].x0.zext(), @as(i64) chars[i].y0.zext(), @as(i64) chars[i].x1.zext(), @as(i64) chars[i].y1.zext());
             // These are how much you have to move it to account for the blank part. 
             // ie. the square above will just cover the filled in part of `_` and this tells us to move it down. 
-            X, Y := (chars[i].xoff.cast().int(), chars[i].yoff.cast().int());
+            x, y := (chars[i].xoff.cast().int(), chars[i].yoff.cast().int());
             range(y0, y1) { j |
-                range(x0, x1) { ii |
-                    c := bitmap[j*tex_width+ii];
-                    xxxx: i64 = (j-y0+(Y+20))*W*256 + (ii-x0+X) + (i+32+1)*W;
-                    pixels[xxxx] = c;
-                }
+                char_w := x1 - x0;
+                src  := bitmap.subslice(j*tex_width + x0, char_w);
+                dest := pixels.subslice((j-y0+(y+20))*W*256 + x + (i+32+1)*W, char_w);
+                dest.copy_from(src);
             };
         };
-        out := u8.list(temp());
+        // make non ascii bytes show as filled in squares
         range(0, H) { j |
-            range(W*32, W*127) { ii |
-                c := pixels[j*256*W+ii];
-                chars := " .:ioVM@";
-                push(out&, chars[c.zext().shift_right_logical(5)]);
-            }
-            push(out&, "\n".ascii());
+            base := j*W*256;
+            pixels.slice(base + 0, base + 32*W).set_bytes(0xFF);
+            pixels.slice(base + 128*W, base + 255*W).set_bytes(0xFF);
         };
-        println(out.items());
         pixels
     };
-    X := zeroed(Array([]u8, 16));
     font_img: Sg.Image = state.sg&.make(
         width = W*256,
         height = H,
         pixel_format = .R8,
-        data = (subimage = ((font_pixels, ..empty()), ..X)),
+        data = (subimage = ((font_pixels, ..empty()), ..zeroed(Array([]u8, 16)))),
         label = "font_texture",
     );
     state.text.font_img = font_img;
-    state.text.default_context.desc.char_to_uv = Sdtx.char_to_uv;
 };
 
 CHAR_W :: 8;
@@ -160,7 +152,6 @@ do_render :: fn(userdata: rawptr) void = {
     each state.buffers& { b |
         draw_text(b);
     };
-    
     sg := state.sg&;
     
     state.pass_action.colors&[0] = (
@@ -178,18 +169,18 @@ do_render :: fn(userdata: rawptr) void = {
 
 fn append_string(buffer: *TextBuffer, new: Str) void = {
     state := state[];
-    state.dirty = true;
     if buffer.lines.len == 0 {
-        buffer.lines&.push(zeroed RawList(u8), buffer.gpa);
+        buffer.lines&.push(empty_line, buffer.gpa);
     };
+    if(new == "", => return());
     last := buffer.lines[buffer.lines.len - 1]&;
     start := 0;
     range(0, new.len) { i |
         if new[i] == "\n".ascii() {
             line := new.slice(start, i);
-            buffer.max_x = max(buffer.max_x, float(last.len + line.len));
+            buffer.max_x = max(buffer.max_x, float(last.len() + line.len));
             last.push_all(line, buffer.gpa);
-            buffer.lines&.push(zeroed RawList(u8), buffer.gpa);
+            buffer.lines&.push(empty_line, buffer.gpa);
             last = buffer.lines[buffer.lines.len - 1]&;
             start = i + 1;
             if state[].lock_to_bottom && buffer.lines.len > buffer.num_lines_fit_on_screen {
@@ -201,7 +192,7 @@ fn append_string(buffer: *TextBuffer, new: Str) void = {
         };
     };
     line := new.rest(start);
-    buffer.max_x = max(buffer.max_x, float(last.len + line.len));
+    buffer.max_x = max(buffer.max_x, float(last.len() + line.len));
     last.push_all(line, buffer.gpa);
 }
 
@@ -233,7 +224,7 @@ do_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
                 b.cursor = (x = pos.x / CHAR_W + b.render.x, y = pos.y / CHAR_H + b.render.y);
                 line, col := (b.cursor.y.int(), b.cursor.x.int());
                 if line < b.lines.len {
-                    line := b.lines[line]&;
+                    line := b.lines[line]&.str();
                     if col < line.len {
                         line[col] = "@".ascii();
                     }
@@ -273,25 +264,27 @@ do_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
         
         if event.key_code == .BACKSPACE && buffer.lines.len > 0 {
             last := buffer.lines[buffer.lines.len - 1]&;
-            if last.len > 0 {
-                last.len -= 1;
+            if last.len() > 0 {
+                last.set_len(last.len() - 1);
             } else {
                 buffer.lines.len -= 1;
             };
         }
         
+        // history
         if event.key_code == .UP {
             if buffer.lines.len > 0 {
-                buffer.lines&[buffer.lines.len - 1].len = 0;
+                buffer.lines&[buffer.lines.len - 1]&.set_len(0);
             };
             state.history_index = max(state.history_index - 1, 0);
             cmd := state.history[state.history_index];
             buffer.append_string(cmd);
         }
         
+        // history
         if event.key_code == .DOWN {
             if buffer.lines.len > 0 {
-                buffer.lines&[buffer.lines.len - 1].len = 0;
+                buffer.lines&[buffer.lines.len - 1]&.set_len(0);
             }
             state.history_index = min(state.history_index + 1, state.history.len - 1);
             cmd := state.history[state.history_index];
@@ -302,7 +295,7 @@ do_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
             buffer.cursor.x = max(buffer.cursor.x - 1, 0);
         };
         
-        if event.key_code == .RIGHT{
+        if event.key_code == .RIGHT {
             // TODO: get the current line so we know the max 
         };
         
@@ -313,91 +306,38 @@ do_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
             };
             
             if buffer.lines.len == 0 {
-                buffer.lines&.push(zeroed RawList(u8), buffer.gpa);
+                buffer.lines&.push(empty_line, buffer.gpa);
             };
         
-            raw_command := buffer.lines&[buffer.lines.len - 1].items();
-            if(raw_command == "", => return());
-            
-            @debug_assert(state.history.len >= 2);
-            if state.history[state.history.len - 2] != raw_command {
-                state.history.len -= 1;  // blank
-                state.history&.push(raw_command.shallow_copy(allocator), allocator);
-                state.history&.push("", allocator);
-            };
-            state.history_index = state.history.len - 1;
-            
-            if raw_command.starts_with(";") || raw_command.ends_with(";"){
-                if !raw_command.ends_with(";") {
-                    raw_command = buffer.lines&[buffer.lines.len - 1].items();
-                    buffer.append_string(";");
-                    raw_command.len += 1;
-                }
-                
-                buffer.append_string("\n");
-                @if(ENABLE_FRANCA_REPL, {
-                    result := state.repl&.run_chunk(raw_command);
-                    if result&.is_err() {
-                        out: List(u8) = list(temp());
-                        state.repl.program.fmt_error(result.Err, out&, false);
-                        buffer.append_string(out.items());
-                    };
-                }, echo("This copy of terminal.fr was not compiled with FRANCA_REPL_ENABLED"));
-                //const_eval(void)(@{ import(@[@literal @tfmt("{ result :: { state := state; %;  }; _HACK :: %; };", raw_command, timestamp())]).result });
-                buffer.append_string("\n");
-                return();
-            };
-            
-            cmd := CStr.list(temp());
-            start := 0;
-            range(0, raw_command.len) { i |
-                if raw_command[i] == " ".ascii() {
-                    cmd&.push(@fmt_cstr("%", raw_command.slice(start, i)));
-                    start = i + 1;
-                };
-            };
-            cmd&.push(@fmt_cstr("%", raw_command.rest(start)));
-            cmd&.push(zeroed CStr);
-            if cmd[0].str().ends_with(".fr") {
-                cmd&.insert(0, @as(CStr) "franca");
-            };
-            if cmd[0].str() == "cd" {
-                buffer.append_string("\nassuming you meant to call the shell builtin 'cd'\n");
-                if cmd.len > 1 {
-                    cd(cmd[1].str());
-                };
-                return();
-            }
-            
-            buffer.append_string("\n");
-            cmd := cmd.items();
-            if state.process.is_none() {
-                @match(exec(cmd)) {
-                    fn Ok(it) => {
-                        state.process = (Some = it);
-                        buffer.append_string(@tfmt("pid = %, time = %|\n", it.pid, it.start));
-                    }
-                    fn Err(msg) => buffer.append_string(msg);
-                }
-            };
-            buffer.append_string("=================================|\n");
+            raw_command := buffer.lines&[buffer.lines.len - 1]&.str();
+            exec(buffer, raw_command);
         };
     };
     buffer := selected_buffer() || return();
     
-    if event.type == .CLIPBOARD_PASTED {
-        buffer.append_string(state.app&.get_clipboard_string().items());
-    }
-    
-    if event.type == .CHAR && event.char_code < 127 && event.char_code >= 32 && event.modifiers.get(.super) == 0{
+    if event.type == .CHAR && event.char_code < 127 && event.char_code >= 32 && event.modifiers.get(.super) == 0 {
         s: Str = (ptr = ptr_cast_unchecked(u32, u8, event.char_code&), len = 1);
         buffer.append_string(s);
     };
     
-    if event.type == .MOUSE_SCROLL {
-        scroll_speed :: -2.0;
-        buffer.render.x += event.scroll_x.cast() * scroll_speed;
-        buffer.render.y += event.scroll_y.cast() * scroll_speed;
+    @match(event.type) {
+        fn CLIPBOARD_PASTED() => {
+            buffer.append_string(state.app&.get_clipboard_string().items());
+        }
+        fn MOUSE_SCROLL() => {
+            scroll_speed :: -2.0;
+            buffer.render.x += event.scroll_x.cast() * scroll_speed;
+            buffer.render.y += event.scroll_y.cast() * scroll_speed;
+        };
+        fn MOUSE_MOVE() => if event.modifiers.get(.right_mouse) != 0 {
+            state.dirty = true;
+            buffer.render.x += event.mouse_dx.cast() * -1.0 / CHAR_W.float();
+            buffer.render.y += event.mouse_dy.cast() * -1.0 / CHAR_H.float();
+        }
+        fn FILES_DROPPED() => if state.app.drop.num_files == 1 {
+            buffer.append_string(state.app&.get_dropped_file_path(0));
+        };
+        @default => ();
     };
 };
 
@@ -437,6 +377,7 @@ fn main() void = {
         window_title = "pls run da program",
         allocator = general_allocator(),
         enable_clipboard = true,
+        enable_dragndrop = true,
     );
 }
 
@@ -446,7 +387,7 @@ fn driver(vtable: *ImportVTable) void =
 #include_std("backend/lib.fr");
 
 TextBuffer :: @struct(
-    lines: RawList(RawList(u8)),
+    lines: RawList(Line),
     at: Rect,
     gpa: Alloc,
     cursor: Pos,
@@ -468,10 +409,7 @@ fn draw_text(self: *TextBuffer) void = {
     sdtx := state.text.default_context&;
     sdtx.color = state.font_color; 
     sapp := state.app&;
-    sdtx.desc.canvas_width = state.app.framebuffer_width.float().cast();
-    sdtx.desc.canvas_height = state.app.framebuffer_height.float().cast();
-    sdtx.glyph_size.x = (@as(f32) CHAR_W) / sdtx.desc.canvas_width;
-    sdtx.glyph_size.y = (@as(f32) CHAR_H) / sdtx.desc.canvas_height;
+    sdtx.canvas(state.app.framebuffer_width.float().cast(), state.app.framebuffer_height.float().cast());
     
     // the fractional component of your scroll position is used to offset the text rendering on the screen.
     // and the integral component chooses which range of lines we draw.
@@ -484,16 +422,70 @@ fn draw_text(self: *TextBuffer) void = {
     end   := min(start + line_count, self.lines.len);
     chars_that_fit := int(w / CHAR_W);
     range(start, end) { i |
-        line := self.lines&.index(i);
+        line := self.lines&.index(i).str();
         col := self.render.x.int();
         if col < line.len {
             count := min(line.len - col, chars_that_fit);
-            sdtx.put(line.items().subslice(col, count)); 
+            sdtx.put(line.subslice(col, count)); 
         };
         sdtx.pos.y += 1;
         sdtx.pos.x = x;
     };
 }
+
+Line :: @struct(
+    // small string optimisation:
+    // a valid list will never have a negative capacity, so if capacity < 0 (high bit is set), 
+    // interpret the rest of the high byte of capacity (which is the 24th byte in this struct 
+    // because two's complement) as the length of a string stored inline in the other 23 bytes. 
+    // 
+    // note length can still be 0..24 with an allocation if you pushed past 24 and then deleted 
+    // some characters, we don't deallocate the list since you're likely to retype them immediately. 
+    repr: RawList(u8),
+);
+
+empty_line: Line : (repr = zeroed RawList(u8));
+
+fn raw_bytes(self: *Line) []u8 = self.slice(1).interpret_as_bytes();
+
+fn str(self: *Line) Str #inline = if self.repr.len <= 0 {
+    b := self.raw_bytes();
+    b.subslice(0, b[23].zext().bit_and(0x7F))
+} else {
+    self.repr.items()
+};
+
+fn len(self: *Line) i64 #inline = if self.repr.len <= 0 {
+    self.repr.len.shift_right_logical(64-8).bit_and(0x7F)
+} else {
+    self.repr.len
+};
+
+fn set_len(self: *Line, new_len: i64) void #inline = if self.repr.len <= 0 {
+    @debug_assert(new_len <= 23 && new_len >= 0);
+    not_high_byte := (@as(i64)0xFF).shift_left(64-8).bit_not();
+    part_of_string := self.repr.len.bit_and(not_high_byte);
+    self.repr.len = new_len.bit_or(0x80).shift_left(64-8).bit_or(part_of_string);
+} else {
+    self.repr.len = new_len;
+};
+
+fn push_all(self: *Line, s: []u8, a: Alloc) void = if self.repr.len <= 0 {
+    l := self.repr.len.shift_right_logical(64-8).bit_and(0x7F);
+    b := self.raw_bytes();
+    if s.len + l > 23 {
+        dest := a.alloc(u8, s.len + l);
+        dest.slice(0, l).copy_from(b.subslice(0, l));
+        dest.rest(l).copy_from(s);
+        self.repr = dest.as_raw_list();
+    } else {
+        self.set_len(l + s.len);  // TODO: why does this need to be first
+        b.subslice(l, s.len).copy_from(s);
+        @debug_assert_le(self.repr.len, 0);
+    }
+} else {
+    self.repr&.push_all(s, a);
+};
 
 fn contains(r: Rect, p: Pos) bool = 
     p.x > r.pos.x && p.x < r.pos.x + r.w && p.y > r.pos.y && p.y < r.pos.y + r.h;
@@ -506,7 +498,90 @@ RunningProcess :: @struct {
     start: i64;
 };
 
-fn exec(args: []CStr) Result(RunningProcess, Str) = {
+fn exec(buffer: *TextBuffer, raw_command: Str) void = {
+    if(raw_command == "", => return());
+    
+    push_history(raw_command);
+    
+    if raw_command.starts_with(";") || raw_command.ends_with(";") {
+        exec_franca(buffer, raw_command);
+    } else {
+        exec_program(buffer, raw_command);
+    }
+}
+
+push_history :: fn(raw_command: Str) void = {
+    state := state[];
+    @debug_assert(state.history.len >= 2);
+    if state.history[state.history.len - 2] != raw_command {
+        state.history.len -= 1;  // blank
+        state.history&.push(raw_command.shallow_copy(allocator), allocator);
+        state.history&.push("", allocator);
+    };
+    state.history_index = state.history.len - 1;
+}
+
+exec_franca :: fn(buffer: *TextBuffer, raw_command: Str) void = {
+    state := state[];
+    if !raw_command.ends_with(";") {
+        raw_command = buffer.lines&[buffer.lines.len - 1]&.str();
+        buffer.append_string(";");
+        raw_command.len += 1;
+    }
+    
+    buffer.append_string("\n");
+    @if(ENABLE_FRANCA_REPL, {
+        result := state.repl&.run_chunk(raw_command);
+        if result&.is_err() {
+            out: List(u8) = list(temp());
+            state.repl.program.fmt_error(result.Err, out&, false);
+            buffer.append_string(out.items());
+        };
+    }, echo("This copy of terminal.fr was not compiled with FRANCA_REPL_ENABLED"));
+    //const_eval(void)(@{ import(@[@literal @tfmt("{ result :: { state := state; %;  }; _HACK :: %; };", raw_command, timestamp())]).result });
+    buffer.append_string("\n");
+}
+
+exec_program :: fn(buffer: *TextBuffer, raw_command: Str) void = {
+    state := state[];
+    cmd := CStr.list(temp());
+    start := 0;
+    range(0, raw_command.len) { i |
+        if raw_command[i] == " ".ascii() {
+            cmd&.push(@fmt_cstr("%", raw_command.slice(start, i)));
+            start = i + 1;
+        };
+    };
+    cmd&.push(@fmt_cstr("%", raw_command.rest(start)));
+    cmd&.push(zeroed CStr);
+    if cmd[0].str().ends_with(".fr") {
+        cmd&.insert(0, @as(CStr) "franca");
+    };
+    if cmd[0].str() == "cd" {
+        buffer.append_string("\nassuming you meant to call the shell builtin 'cd'\n");
+        if cmd.len > 1 {
+            cd(cmd[1].str());
+        };
+        return();
+    }
+    
+    buffer.append_string("\n");
+    cmd := cmd.items();
+    if state.process.is_none() {
+        @match(sys_exec(cmd)) {
+            fn Ok(it) => {
+                state.process = (Some = it);
+                buffer.append_string(@tfmt("pid = %, time = %|\n", it.pid, it.start));
+            }
+            fn Err(msg) => buffer.append_string(msg);
+        };
+        buffer.append_string("=======================\n");
+    } else {
+        buffer.append_string("something is already running.\npress control + c to interrupt it (+ shift to kill it)\n");
+    };
+}
+
+sys_exec :: fn(args: []CStr) Result(RunningProcess, Str) = {
     pipes := zeroed Array(Array(Fd, 2), 3);
     each pipes& { p |
         pipe(p) || return(Err = "libc::pipe() failed");
@@ -588,6 +663,13 @@ StbTrueType :: {
     """, root);
     Ffi'include(current_compiler_context(), namespace, c_source);
     namespace
+}
+
+font_data_ttf :: {
+    get :: import("@/examples/testing.fr").fetch_or_crash;
+    root := get("https://download.jetbrains.com/fonts/JetBrainsMono-2.304.zip", 5622857, "6f6376c6ed2960ea8a963cd7387ec9d76e3f629125bc33d1fdcd7eb7012f7bbf", "");
+    path := @tfmt("%/fonts/ttf/JetBrainsMonoNL-Bold.ttf", root);
+    ast_alloc().read_to_string_or_crash(path).items()
 }
 
 #include_std("backend/lib.fr");

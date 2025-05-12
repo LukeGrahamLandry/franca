@@ -2,6 +2,20 @@
 
 - sending SIGINT to `make` doesn't make it stop. am i supposed to be sending it to 
 all children somehow? SIGKILL works but maybe that's rude. 
+- discovered my problem with stb_truetype, i do the casting wrong in `b: *u8; b[]<<16 + b[]<<8 + b[]`, 
+i truncate to u8 instead of promoting to i32. they only do it in one place so i can just hack it out for now. 
+TODO: tests/todo/a.c, add as test case
+- added `-r` to import_c/cc.fr which mostly works but panics if you try to use it on 
+something that imports stb_truetype, but also it segfaults trying to call the panic handler which is really creepy. 
+TODO: tests/todo/b.c, add a simpler test case to run_tests.fr
+- use a nice font. had some confusion with how to get the right offsets, 
+like i was rendering `_` at the top of it's cell. since i want a monospace font anyway, 
+can easily poke it into debugtext.fr, just have to make glyph_size not a square. 
+- right click and drag to scroll because otherwise i can't go sideways without a trackpad
+- drag and drop a file to paste it's path
+- small string optimisation
+- made non-ascii chars show as filled in squares. 
+  - found that `_NSGetExecutablePath` has a null byte on the end
 
 ## (May 9) 
 

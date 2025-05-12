@@ -6,6 +6,9 @@
 // text rendering system but it's very convenient to be able to just put stuff on 
 // the screen if you want to quickly look at some values that change every frame. 
 // 
+// See examples/app_events.fr for a comprehensive-ish example. 
+// See examples/terminal.fr for a program that uses stb_truetype to load a modern font. 
+//
 // TODO: some sort of centralized logging system when returning an error. 
 //       (stick it in the dynamic environment and use it elsewhere as well)
 //
@@ -27,7 +30,8 @@ ContextDesc :: @struct(
     color_format := SgPixelFormat.zeroed(), // color pixel format of target render pass
     depth_format := SgPixelFormat.zeroed(), // depth pixel format of target render pass
     sample_count:  i32 = 0,                 // MSAA sample count of target render pass
-    char_to_uv: (@FnPtr(font_count: i64, font_index: i64, c: u8) Ty(u16, u16, u16, u16)) = char_to_uv,
+    char_width: f32 = 8.0,
+    char_height: f32 = 8.0,
 );
 
 Desc :: @struct(
@@ -67,7 +71,10 @@ Context :: @struct(
     pip: Sg.Pipeline,
     font: i32,                // index into the fonts array
     cur_layer_id: i32,        // call set_layer instead of changing this directly (it needs to do some command buffer bookkeeping). 
-    glyph_size: Float2,  // pixels per character grid unit
+    // glyph_size = (pixels_per_character / frame_buffer_size) = 1.0 / pixels_per_grid_unit
+    // for the builtin 8x8 fonts, pixels_per_character is always 8 (can be changed in ContextDesc). 
+    // you need to update this when the window resizes (call canvas()).
+    glyph_size: Float2,   
     // origin looks useless because you could just offset all coordinates yourself, 
     // but it allows you to control what happens when a new line or line feed control character sets pos.x = 0;
     origin: Float2,      // in character grid coordinates
@@ -78,6 +85,9 @@ Context :: @struct(
 Self :: @rec @struct(
     init_cookie: u32,
     desc:     Desc,
+    // each font is a single row of monospace characters. 
+    // char_height = image_height / font_count; char_width = image_width / 256;
+    // you can replace this with your own image and use a fancier font with this same api. 
     font_img: Sg.Image,  
     font_smp: Sg.Sampler,
     shader:   Sg.Shader,
@@ -339,8 +349,8 @@ fn canvas(ctx: *Context, w: f32, h: f32) void = {
     @debug_assert(!is_nan(w));
     @debug_assert(!is_nan(h));
     @debug_assert(w > 0.0 && h > 0.0);
-    ctx.glyph_size.x = 8.0 / w;
-    ctx.glyph_size.y = 8.0 / h;
+    ctx.glyph_size.x = ctx.desc.char_width / w;
+    ctx.glyph_size.y = ctx.desc.char_height / h;
     ctx.origin.x = 0.0;
     ctx.origin.y = 0.0;
     ctx.pos.x = 0.0;
@@ -384,7 +394,11 @@ fn ctrl_char(ctx: *Context, c: u8) void #once = {
         };
         @case("\t".ascii()) => (ctx.pos.x - fmodf(ctx.pos.x, ctx.tab_width)) + ctx.tab_width;
         @case(" ".ascii())  => ctx.pos.x + 1.0;
-        @default            => return();
+        @default            => {
+            // sokol_debugtext.h just skips these but i feel like if you give me junk data i should let you know about it 
+            render_char(ctx, 0);
+            ctx.pos.x
+        };
     };
 }
 
@@ -409,7 +423,7 @@ fn render_char(ctx: *Context, c: u8) void #once = {
         x1 := x0 + ctx.glyph_size.x;
         y1 := y0 + ctx.glyph_size.y;
 
-        u0, v0, u1, v1 := ctx'desc'char_to_uv(ctx.common.font_count, ctx.font.intcast(), c);
+        u0, v0, u1, v1 := char_to_uv(ctx.common.font_count, ctx.font.intcast(), c);
         c := ctx.color;
 
         vx := vx.slice(6);

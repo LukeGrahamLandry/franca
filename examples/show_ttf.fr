@@ -1,0 +1,69 @@
+// - use stb_truetype via import_c
+// - TODO: replace my use of asciitable.com
+
+main :: fn() void #use(StbTrueType) = {
+    W :: CHAR_W*2;
+    H :: CHAR_H*2;
+
+    tex_width := 2048;
+    bitmap := temp().alloc(u8, tex_width*tex_width);
+    chars := temp().alloc(stbtt_bakedchar, 1024);
+    result := stbtt_BakeFontBitmap(font_data_ttf.as_ptr(), 0, 32.0, bitmap.ptr, intcast tex_width, intcast tex_width, 33, 128, chars.ptr);
+    @assert(result >= 0, "didn't fit all characters");
+    pixels := temp().alloc_zeroed(u8, 256*W*H);
+    x: f32 = 0; y: f32 = 0;
+    range(0, 128-32) { i |
+        // These are the positions of the texture in the atlas
+        x0, y0, x1, y1 := (@as(i64) chars[i].x0.zext(), @as(i64) chars[i].y0.zext(), @as(i64) chars[i].x1.zext(), @as(i64) chars[i].y1.zext());
+        // These are how much you have to move it to account for the blank part. 
+        // ie. the square above will just cover the filled in part of `_` and this tells us to move it down. 
+        X, Y := (chars[i].xoff.cast().int(), chars[i].yoff.cast().int());
+        range(y0, y1) { j |
+            range(x0, x1) { ii |
+                c := bitmap[j*tex_width+ii];
+                xxxx: i64 = (j-y0+(Y+20))*W*256 + (ii-x0+X) + (i+32+1)*W;
+                pixels[xxxx] = c;
+            }
+        };
+    };
+    out := u8.list(temp());
+    range(0, H) { j |
+        range(W*32, W*127) { ii |
+            c := pixels[j*256*W+ii];
+            chars := " .:ioVM@";
+            push(out&, chars[c.zext().shift_right_logical(5)]);
+        }
+        push(out&, "\n".ascii());
+    };
+    println(out.items());
+};
+
+CHAR_W :: 8;
+CHAR_H :: 16;
+
+special_chars :: "NUL SOH STX ETX EOT ENQ ACK BEL BS TAB LF VT FF CR SO SI DLE DC1 DC2 DC3 DC4 NAK SYN ETB CAN EM SUB ESC FS GS RS US";
+
+// TODO: :psate from examples/terminal.fr
+
+// TODO: todo.c i cheated and just changed stb_truetype.h for now
+StbTrueType :: {
+    get  :: import("@/examples/testing.fr").fetch_or_crash;
+    root := get("https://github.com/nothings/stb/archive/f0569113c93ad095470c54bf34a17b36646bbbb5.zip", 1754150, "b62be3009cb9d4b6385bd4854bddf72d8e91f4e19d1347d6cf9589b19f70d45d", "stb-f0569113c93ad095470c54bf34a17b36646bbbb5");
+    Ffi  :: import("@/examples/import_c/ffi.fr");
+    namespace :: scope_of(Type, @struct {});
+    c_source := @tfmt("""
+        #define STB_TRUETYPE_IMPLEMENTATION
+        #include "%/stb_truetype.h"
+    """, root);
+    Ffi'include(current_compiler_context(), namespace, c_source);
+    namespace
+}
+
+font_data_ttf :: {
+    get :: import("@/examples/testing.fr").fetch_or_crash;
+    root := get("https://download.jetbrains.com/fonts/JetBrainsMono-2.304.zip", 5622857, "6f6376c6ed2960ea8a963cd7387ec9d76e3f629125bc33d1fdcd7eb7012f7bbf", "");
+    path := @tfmt("%/fonts/ttf/JetBrainsMonoNL-Bold.ttf", root);
+    ast_alloc().read_to_string_or_crash(path).items()
+}
+
+#include_std("backend/lib.fr");
