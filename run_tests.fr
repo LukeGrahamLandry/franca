@@ -1,5 +1,29 @@
 HUSH :: @static(bool) false;
 
+S :: const_slice;
+
+bins :: @S(
+    ("compiler/main.fr",             "f.out"),
+    ("examples/import_c/cc.fr",     "cc.out"),
+    ("backend/meta/qbe_frontend.fr", "q.out"),
+    ("backend/meta/test.fr",         "r.out"),
+    ("examples/import_wasm/run.fr",  "w.out"),
+);
+
+// TODO: pass in ./cc.out and ./w.out instead of assuming
+cmds :: @S(
+    @S("./f.out", "compiler/test.fr"),
+    @S("./r.out", "all", "-bin", "./q.out", "-jit"),
+    @S("./r.out", "all", "-bin", "./q.out"),
+    @S("./r.out", "all", "-bin", "./q.out", "-w"),
+    @S("./f.out", "examples/import_c/test/test.fr"),
+    @S("./f.out", "examples/import_c/test/wuffs.fr"),  // dep:wuffs
+    @S("./f.out", "examples/import_c/test/lua.fr"),  // dep:lua
+    @S("./f.out", "driver.dylib", "build", "compiler/main.fr", "-aot", "self", "-unsafe", "-o", "target/release/franca-macos-arm64", "-arch", "aarch64", "-os", "macos"),
+    @S("./f.out", "driver.dylib", "build", "compiler/main.fr", "-aot", "self", "-unsafe", "-o", "target/release/franca-macos-amd64", "-arch", "x86_64", "-os", "macos"),
+    @S("./f.out", "driver.dylib", "build", "compiler/main.fr", "-aot", "self", "-unsafe", "-o", "target/release/franca-linux-amd64", "-arch", "x86_64", "-os", "linux", "-syscalls"),
+);
+
 fn driver(vtable: *ImportVTable) void = {
     #use("@/lib/sys/process.fr");
     #use("@/lib/sys/fs.fr");
@@ -9,147 +33,46 @@ fn driver(vtable: *ImportVTable) void = {
     did := 0;
     franca_path := get_executable_path(temp());  // TODO: cli arg to set this 
     driver_path := "examples/default_driver.fr";
-    made_test_file_this_time := false;
-    made_driver_this_time    := false;
-    use_x64 := false;
-    use_dylib := true;
     for c {s: CStr|
-        s : Str = s.str();
-        continue :: local_return;
-        if !start {
-            if(!(s == "--"), => { continue(); });
-            start = true;
-        };
-        did += 1;
-        @switch(s) {
+        @switch(s.str()) {
             @case("--") => ();
             @case("-hush") => {
                 HUSH[] = true;
             };
-            @case("-x64") => {
-                use_x64 = true;
-            };
-            @case("-no-dylib") => {
-                use_dylib = false;
-            };
             @case("boot") => run_boot(vtable);
             @case("github") => {
-                run_boot(vtable);
                 sh(@slice("mkdir", "-p", "target/release")); // 🤡
-                path := "target/release/franca-macos-arm64";
-                sh(@slice("./b.out", "driver.dylib", "build", "compiler/main.fr", "-aot", "self", "-unsafe", "-o", path, "-arch", "aarch64", "-os", "macos"));
-                path := "target/release/franca-macos-amd64";
-                sh(@slice("./b.out", "driver.dylib", "build", "compiler/main.fr", "-aot", "self", "-unsafe", "-o", path, "-arch", "x86_64", "-os", "macos"));
-                path := "target/release/franca-linux-amd64";
-                sh(@slice("./b.out", "driver.dylib", "build", "compiler/main.fr", "-aot", "self", "-unsafe", "-o", path, "-arch", "x86_64", "-os", "linux", "-syscalls"));
+                run_boot(vtable);
             };
             @case("deps") => {
-                //sh(@slice(franca_path, "examples/dearimgui_demo.fr"));
-                // TODO: make this a bit faster so it's not annoying to run it as well. 
-                //       but output is visual anyway so it's annoying to check. could check that counts of each pixel are right. 
-                sh(@slice(franca_path, driver_path, "build", "examples/prospero.fr", "-o", "./a.out"));
-                
                 sh(@slice(franca_path, "tests/need_llvm/x64_encoding.fr"));
-                
-                sh(@slice(franca_path, driver_path, "build", "examples/view_image.fr", "-o", "./a.out"));
-                // running jitted is clearly a bit fragile so this should be tested but it's really annoying spam. 
-                //sh(@slice(franca_path, "examples/view_image.fr"));
-                
-                cc := "cc.out";
-                sh(@slice(franca_path, driver_path, "build", "examples/import_c/cc.fr", "-o", cc));
-                sh(@slice(franca_path, "examples/import_c/test/wuffs.fr"));
-                sh(@slice(franca_path, "examples/import_c/test/lua.fr"));
             };
-            @default => {
-                if s.starts_with("aot-") {
-                    s.ptr = s.ptr.offset(4);
-                    s.len -= 4;
-                    if use_dylib && !made_driver_this_time {
-                        made_driver_this_time = true;
-                        path := "driver.dylib"; // TODO: don't stomp something good
-                        cmd := @slice(franca_path, driver_path, "build", driver_path, "-dynamiclib", "-o", path);
-                        sh(cmd);
-                        driver_path = path;
-                    };
-                    
-                    {
-                        path := "./c.out";
-                    };
-                    cmd := Str.list(temp());
-                    cmd&.push_all(@slice(franca_path, driver_path, "run", "", "-aot", s));
-                    if use_x64 {
-                        cmd&.push_all(@slice("-arch", "x86_64"));
-                    };
-                    cmd := cmd.items();
-                    sh(@slice(franca_path, "compiler/test.fr"));
+            @case("core") => {
+                path := "driver.dylib"; // TODO: don't stomp something good
+                cmd := @slice(franca_path, driver_path, "build", driver_path, "-dynamiclib", "-o", path);
+                sh(cmd);
+                driver_path = path;
                 
-                    {
-                        sh(@slice(franca_path, driver_path, "build", "backend/meta/qbe_frontend.fr", "-o", "./q.out"));
-                        sh(@slice(franca_path, driver_path, "build", "backend/meta/test.fr", "-o", "./r.out"));
-                    
-                        cmd := Str.list(temp());
-                        cmd&.push_all(@slice("./r.out", "all", "-bin", "./q.out"));
-                        cmd&.push("-jit");
-                        sh(cmd.items()); 
-                        cmd&.pop();
-                        if use_x64 {
-                            cmd&.push("-x64");
-                        };
-                        sh(cmd.items()); 
-                        if use_x64 {
-                            cmd&.pop();
-                        };
-                        cmd&.push("-w");
-                        //cmd&.push("-verify");  // TODO!
-                        sh(@slice(franca_path, driver_path, "build", driver_path, "examples/import_wasm/run.fr", "-o", "./w.out"));
-                        sh(cmd.items()); 
-                    };
-                    cmd[2] = "run";
-                    cmd[3] = "examples/import_c/test/test.fr";
+                for bins { code, dest |
+                    sh(@slice(franca_path, driver_path, "build", code, "-o", dest));
+                };
+                
+                for cmds { cmd | 
                     sh(cmd);
-                    
-                    sh(@slice(franca_path, driver_path, "run", "examples/import_c/test/ffi.fr"));
-                    
-                    
-                    ::import("@/examples/testing.fr");
-                    files := collect_with_extension("examples/aoc", ".fr").unwrap();
-                    run_tests_main(Str, files.items(), fn(a) => a[]) { file | 
-                        ok, out, err := exec_and_catch(franca_path, @slice(driver_path, "build", @tfmt("examples/aoc/%", file[])), todo_allocator);
-                        (ok, out, err, "")
-                    };
-                    
-                    // this are interactive so we just compile them. TODO: run one frame and show screen shot as a sanity check? 
-                    sh(@slice(franca_path, "examples/farm_game.fr"));
-                    sh(@slice(franca_path, "examples/terminal.fr"));
-                    sh(@slice(franca_path, "examples/app_events.fr"));
-                    sh(@slice(franca_path, "examples/geo/main.fr"));
-                    
-                } else {
-                    if s != "" {
-                        @println("Unknown argument '%'", s);
-                        println(HELP);
-                    };
+                };
+            
+                sh(@slice(franca_path, driver_path, "run", "examples/import_c/test/ffi.fr"));
+                
+                ::import("@/examples/testing.fr");
+                files := collect_with_extension("examples/aoc", ".fr").unwrap();
+                run_tests_main(Str, files.items(), fn(a) => a[]) { file | 
+                    ok, out, err := exec_and_catch(franca_path, @slice(driver_path, "build", @tfmt("examples/aoc/%", file[])), todo_allocator);
+                    (ok, out, err, "")
                 };
             };
+            @default => ();
         };
     };
-    
-    if(did <= 1, => println(HELP));
-    // TODO: have -verbose instead of -hush. 
-    //       scan for - flags first so it's less annoying to toggle them. 
-    HELP :: """
-    > This is the build script for the Franca compiler.
-    > If you are trying to run a different Franca program, see examples/default_driver.fr instead.
-    
-    start with '--' to seperate from compiler arguments, then any of the following:
-
-    boot: recompile using the old version in ./boot and then run some tests. 
-    -hush: later commands will not output as much logging information.
-    """.undent(4, ast_alloc());
-
-    // TODO: do this in the loop
-    //reset_temporary_storage();
-    // TODO: see if it breaks if you run new ones in thier own namespaces in the same compiler instance as ^ 
 }
 
 #include_std("backend/lib.fr");
@@ -165,7 +88,7 @@ fn run_boot(vtable: *ImportVTable) void = {
     sh(@slice("cp", "a.out", "b.out"));
     sh(@slice("./b.out", "examples/default_driver.fr", "build", "compiler/main.fr", "-aot", "self", "-o", "b.out"));
     h := if(HUSH[], => "-hush", => "");
-    sh(@slice("./b.out", "run_tests.fr", "--", h, "aot-self")); // TODO:, "aot-legacy")); // , "examples-no-deps")); 
+    sh(@slice("./b.out", "run_tests.fr", "core"));
     println("ok!");
 }
 

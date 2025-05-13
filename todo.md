@@ -8,7 +8,7 @@
 
 ## Terminal
 
-- drag to select any direction not just down+right
+- crashes if you `cd "";` twice in the repl
 - input text at the cursor. 
 - move around with arrows. click to move cursor. 
 - tab to autocomplete a file path / from history
@@ -29,10 +29,11 @@
 - tell child programs that im a terminal. ie. ls gives me one column instead of two.
 - if something's outputting invalid utf8, switch to hex view,
 actually that's a bit too agressive but certainly stop processing ANSI escape codes. 
-- dynamic font size
+- rebake the texture for dynamic font size so i can handle when you move between monitors with different dpi correctly
 - scroll when you resize to lock the bottom position instead of the top
 - tabs
 - drag a tab out to make a new window
+- auto-scroll if you put the mouse at the edge of the screen while highlighting to grow your selection
 
 ## Graphics
 
@@ -81,9 +82,12 @@ rn you're supposed to need a redundant `[]` in a call like that.
 - `@struct(a: A #use = (),);`
 - tests/todo/b.fr (might even be a parser bug? always a surprise when that's the problem)
 - // TODO: don't segfault if you get a compile error inside a jit_shim. 
-- import_c: tests/todo/(a.c, b.c)
+- import_c: tests/todo/b.c
 - same string constant as Str and CStr :MiscompileCStr
 - :ConstInFuncOrLoseTemp
+- `graphics` programs don't work on amd64. 
+with -keep-names: `ld: invalid use of rip-relative addressing in '_junk' to '__NSConcreteGlobalBlock'`
+- tests/todo/(a.fr, c.fr, d.fr)
 
 ## cross compiling
 

@@ -1,3 +1,17 @@
+## (May 13)
+
+- change font size based on dpi scale at startup
+
+## (May 12)
+
+- convoluted example that makes an ascii table png
+- experimenting with why my font feels blurry. it's because i had high_dpi=false, 
+so i was taking the perfect font, rendering it small and then letting the os
+scale it up instead of just rendering it to the right size in the first place? 
+- cleaned up the test program a bit
+- tab to complete from history
+- drag to select any direction not just down+right
+
 ## (May 11)
 
 - cmd click on a file:line:col to open it
@@ -5,6 +19,32 @@
 - discovered :ConstInFuncOrLoseTemp
 - select text and copy to clipboard
 - double/triple click to select word/line
+- fixed early truncation in import_c. i don't super understand why i had that problem and chibicc didn't but oh well. 
+so now stb_truetype works in my c compiler without patching it. 
+
+---
+
+it's sad that this makes me feel better https://github.com/profullstack/smashlang/blob/cdf3f2576c8be0cdf8259223e8fed8f6af4dcd88/src/compiler.rs#L32
+i don't quite understand the scam but it's definitly entirely ai produced. 
+there's hella stuff in `runtime` but how are you running it when `// In a real implementation, this would be a complete interpreter`. 
+but it really looks real. like if i were scanning resumes, there's kinda looks better than mine, 
+but then you start looking at it and discover:
+```
+/// CompiledFunction represents a compiled function that can be executed
+pub struct CompiledFunction {
+    // In a real implementation, this would contain JIT-compiled code
+    result: i64,
+}
+```
+i'd feel so guilty if this is a real person and im just trash talking their thing but like...
+https://github.com/profullstack/smashlang/commit/0afe8c53eb0bb687997fd976f5d592799a40ac69
+"feat(compiler): Add support for Linux target platforms"
+no it fucking doesn't, that is not a program at all, but it really really looks 
+like a program if you haven't quite seen a program before. 
+i like "fix compiler" https://github.com/profullstack/smashlang/commit/ca574c8e54b3380cf071ca679b12964650204592#diff-b654b512cb7fbcfcbd4eb750cad8b8c2128385631e195fed3f2671304de76cf5
+where they had kinda an llvm thing going on but instead now it's kinda a c thing and then disappeared too later. 
+"Key Skills & Competencies: AI-Augmented Development: Proficient in using conversational AI assistants (e.g., Cursor, ChatGPT, GitHub Copilot) to generate, review, and refactor code efficiently."
+i would NOT have guessed...
 
 ## (May 10)
 
@@ -12,7 +52,6 @@
 all children somehow? SIGKILL works but maybe that's rude. 
 - discovered my problem with stb_truetype, i do the casting wrong in `b: *u8; b[]<<16 + b[]<<8 + b[]`, 
 i truncate to u8 instead of promoting to i32. they only do it in one place so i can just hack it out for now. 
-TODO: tests/todo/a.c, add as test case
 - added `-r` to import_c/cc.fr which mostly works but panics if you try to use it on 
 something that imports stb_truetype, but also it segfaults trying to call the panic handler which is really creepy. 
 TODO: tests/todo/b.c, add a simpler test case to run_tests.fr

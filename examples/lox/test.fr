@@ -2,8 +2,12 @@
 //! Currently checks exact output for programs that are not supposed to error but otherwise just expects 
 //! runtime vs compile error to be correct (my error messages don't match). 
 
+#use("@/examples/testing.fr");
 fn main() void = {
     args := cli_args();
+    
+    get  :: fetch_or_crash;
+    root := get("https://github.com/munificent/craftinginterpreters/archive/4a840f70f69c6ddd17cfef4f6964f8e1bcd8c3d4.zip", 10662749, "c4c8a07244f778c4946358ffad0c047adad9819d15524568a07d98c1a6d73af1", "craftinginterpreters-4a840f70f69c6ddd17cfef4f6964f8e1bcd8c3d4");
     
     go := false;
     total, pass := (0, 0);
@@ -22,6 +26,13 @@ fn main() void = {
         total += yes + no;
         pass += yes;
     };
+    if total == 0 {
+        // TODO: limit the default run ones to what i pass so far and then add this to the auto test
+        yes, no := run_test_at_path(@tfmt("%/test", root));
+        total += yes + no;
+        pass += yes;
+    };
+    
     @println("Passed %/% tests.", pass, total);
     exit(if(pass == total, => 0, => 1));
 }
@@ -37,8 +48,23 @@ fn run_test_at_path(s: Str) Ty(i64, i64) = {
             (0, 1)
         }
     } else {
-        // TODO: recurse through directories 
-        (0, 0)
+        children := Str.list(temp());
+        (walk_directory(s.maybe_borrow_cstr(temp())) { e |
+            continue :: local_return;
+            interesting := e.name.ends_with(".lox") || e.is(.Directory);
+            if interesting && e.name != "." && e.name != ".." {
+                children&.push(@tfmt("%/%", s, e.name));
+            };
+        }) || @panic("walk dir '%' failed", s);
+        sort :: import("@/lib/sort.fr")'quicksort(Str, order_strings);
+        sort(children.items());
+        
+        a, b := (0, 0);
+        for children { it |
+            c, d := run_test_at_path(it);
+            a += c; b += d;
+        };
+        (a, b)
     }
 }
 
@@ -104,6 +130,8 @@ fn expected_output(src: Str) TestResult = {
     (Ok = want)
 }
 
+#use("@/lib/collections/map.fr");
+#use("@/lib/sys/fs.fr");
 #include_std("examples/lox/chunk.fr");  // TODO: rename this macro
 #include_std("examples/lox/value.fr");
 #include_std("examples/lox/vm.fr");

@@ -1,0 +1,59 @@
+// Concatenates all source files in the franca repository into one. 
+
+main :: fn() void = {
+    bytes := collect();
+    write_entire_file_or_crash("a.txt", bytes);
+    @println("a.txt\nsha256: %\nsize: %", sha256_hex(bytes), bytes.len);
+}
+
+collect :: fn() Str = {
+    collect :: fn() []Str = {
+        extensions := @const_slice(".fr", ".md", ".ssa", ".c");
+        files := Str.list(temp());
+        dirs := Str.list(temp());
+        dirs&.push(".");
+        while => dirs&.pop() { s |
+            prev_f, prev_d := (files.len, dirs.len);
+            (walk_directory(s.maybe_borrow_cstr(temp())) { e |
+                continue :: local_return;
+                if e.is(.Directory) {
+                    skip := @const_slice(".git", "target");
+                    if(s == "." && skip.contains(e.name), => continue());
+                    skip := @const_slice(".", "..", "node_modules", "tracy", "cimgui", "test_wasm_rt");
+                    if(skip.contains(e.name), => continue());
+                    
+                    dirs&.push(@tfmt("%/%", s, e.name));
+                } else {
+                    for extensions { ext |
+                        if e.name.ends_with(ext) {
+                            path := @tfmt("%/%", s, e.name);
+                            if(path == "./examples/parsegen/boot.g.fr", => continue());
+                            files&.push(path);
+                            continue();
+                        }
+                    }
+                }
+            }) || @panic("walk dir '%' failed", s);
+            sort :: import("@/lib/sort.fr")'quicksort(Str, order_strings);
+            sort(files.items().rest(prev_f));
+            sort(dirs.items().rest(prev_d));
+        };
+        files.items()
+    }
+    
+    files := collect();
+    
+    names := u8.list(temp());
+    contents := u8.list(temp());
+    @fmt(names&, "%\n", files.len);
+    for files { path |
+        start := contents.len;
+        read_and_push_or_crash(contents&, path);
+        @fmt(names&, "% % % %\n", contents.len - start, start, path.len, path);
+    };
+    names&.push_all(contents.items());
+    names.items()
+}
+
+#use("@/lib/sys/fs.fr", "@/examples/testing.fr", "@/backend/macho/sha256.fr");
+#include_std("backend/lib.fr");

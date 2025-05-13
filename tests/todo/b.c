@@ -14,7 +14,7 @@ int main(int argc, char **argv)
    int c = (argc > 1 ? atoi(argv[1]) : 'a');
     int s = (argc > 2 ? atoi(argv[2]) : 20);
    
-   char *path = argc > 3 ? argv[3] : "font.ttf";
+   char *path = argc > 3 ? argv[3] : "/Users/luke/Downloads/JetBrainsMono-2.304(5)/fonts/ttf/JetBrainsMonoNL-SemiBoldItalic.ttf";
    printf("%d %d %d %d %d %s %ld\n", w,h,i,j,c, path, ttf_buffer);
    fread(ttf_buffer, 1, 1<<25, fopen(path, "rb"));
 

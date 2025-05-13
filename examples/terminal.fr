@@ -1,4 +1,4 @@
-// LIMITATIONS: no input to child process. no line wrap. ascii only. no ansi escape codes. no auto complete. no tabs. 
+// LIMITATIONS: no input to child process. no line wrap. ascii only. no ansi escape codes. no tabs. 
 // 
 // it doesn't have to be the best terminal program, it just has to be good enough that i 
 // don't have to use someone else's thing that occasionally gives you a giant red banner until you 
@@ -31,6 +31,7 @@ State :: @struct(
     theme: ColourTheme,
     last_click_time: i64,
     click_count: i64,
+    scale: f64,  // height = 2 * scale
 );
 
 ColourTheme :: @struct {
@@ -67,6 +68,7 @@ on_init :: fn(userdata: rawptr) void = {
     state.history_index = 0;
     state.history&.push("", allocator);
     state.history&.push("", allocator);
+    state.scale = 8 * state.app.dpi_scale.cast();
     state.theme = ();
     
     state.dirty = true;
@@ -76,9 +78,9 @@ on_init :: fn(userdata: rawptr) void = {
         fonts = @slice(Sdtx.font.cpc),
         sg = state.sg&,
         context = (
-            char_buf_size = 16000, 
-            char_width = CHAR_W, 
-            char_height = CHAR_H,
+            char_buf_size = 32768, 
+            char_width = state.scale.cast(), 
+            char_height = state.scale.cast() * 2,
         ),
     );
     
@@ -92,18 +94,19 @@ on_init :: fn(userdata: rawptr) void = {
         b.at.pos.x = sapp.width().float() / 2;
     };
     
-    W :: CHAR_W*2;  // TODO: why *2
-    H :: CHAR_H*2;
-    font_pixels :: {
+    W := state.scale;
+    H := state.scale * 2;
+    font_pixels := {
         #use(StbTrueType);
-        tex_width := 256;
+        tex_width := 1024;
         bitmap := temp().alloc(u8, tex_width*tex_width);
         chars := temp().alloc(stbtt_bakedchar, 128-32);
-        result := stbtt_BakeFontBitmap(font_data_ttf().as_ptr(), 0, 32.0, bitmap.ptr, intcast tex_width, intcast tex_width, 33, 128, chars.ptr);
+        result := stbtt_BakeFontBitmap(font_data_ttf().as_ptr(), 0, state.scale.cast() * 2, bitmap.ptr, intcast tex_width, intcast tex_width, 33, 128, chars.ptr);
         @assert(result >= 0, "didn't fit all characters");
         // TODO: is this bigger than atlas + metadata? 
-        pixels := ast_alloc().alloc_zeroed(u8, 256*W*H);
+        pixels := ast_alloc().alloc_zeroed(u8, 256*int(W*H));
         x: f32 = 0; y: f32 = 0;
+        baseline := int(state.scale / 16 * 20);
         range(0, 128-32) { i |
             // These are the positions of the texture in the atlas
             x0, y0, x1, y1 := (@as(i64) chars[i].x0.zext(), @as(i64) chars[i].y0.zext(), @as(i64) chars[i].x1.zext(), @as(i64) chars[i].y1.zext());
@@ -113,30 +116,27 @@ on_init :: fn(userdata: rawptr) void = {
             range(y0, y1) { j |
                 char_w := x1 - x0;
                 src  := bitmap.subslice(j*tex_width + x0, char_w);
-                dest := pixels.subslice((j-y0+(y+20))*W*256 + x + (i+32+1)*W, char_w);
+                dest := pixels.subslice((j-y0+(y+baseline))*W.int()*256 + x + (i+32+1)*W.int(), char_w);
                 dest.copy_from(src);
             };
         };
         // make non ascii bytes show as filled in cells
-        range(0, H) { j |
-            base := j*W*256;
-            pixels.slice(base + 0, base + 32*W).set_bytes(0xFF);
-            pixels.slice(base + 128*W, base + 255*W).set_bytes(0xFF);
+        range(0, H.int()) { j |
+            base := j*W.int()*256;
+            pixels.slice(base + 0, base + 32*W.int()).set_bytes(0xFF);
+            pixels.slice(base + 128*W.int(), base + 255*W.int()).set_bytes(0xFF);
         };
         pixels
     };
     font_img: Sg.Image = state.sg&.make(
-        width = W*256,
-        height = H,
+        width = W.int().intcast()*256,
+        height = H.int().intcast(),
         pixel_format = .R8,
         data = (subimage = ((font_pixels, ..empty()), ..zeroed(Array([]u8, 16)))),
         label = "font_texture",
     );
     state.text.font_img = font_img;
 };
-
-CHAR_W :: 8;
-CHAR_H :: 16;
 
 Colour :: @struct(r: i64, g: i64, b: i64, a := 255);
 Pos :: @struct(x: f64, y: f64);
@@ -355,6 +355,30 @@ on_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
         }
         buffer := selected_buffer() || return();
         
+        if event.key_code == .TAB {
+            last := buffer.lines[buffer.lines.len - 1]&;
+            prefix := last.str();
+            found: ?Str = .None;
+            for state.history { check |
+                if check.starts_with(prefix) {
+                    if found& { prev |
+                        start := min(prev.len, check.len);
+                        i := prefix.len;
+                        while => i < start && prev[i] == check[i] { 
+                            i += 1;
+                        };
+                        prev[] = prev[].slice(0, i);
+                    } else {
+                        found = (Some = check);
+                    }
+                }
+            };
+            if found { found |
+                last.set_len(0);
+                last.push_all(found, buffer.gpa);
+            }
+        }
+        
         if event.key_code == .C && event.modifiers.get(.super) != 0 {
             copy_from_selection(buffer);
         };
@@ -417,8 +441,8 @@ on_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
         };
         fn MOUSE_MOVE() => if event.modifiers.get(.right_mouse) != 0 {
             state.dirty = true;
-            buffer.render.x += event.mouse_dx.cast() * -1.0 / CHAR_W.float();
-            buffer.render.y += event.mouse_dy.cast() * -1.0 / CHAR_H.float();
+            buffer.render.x += event.mouse_dx.cast() * -1.0 / state.scale;
+            buffer.render.y += event.mouse_dy.cast() * -1.0 / (state.scale * 2);
         }
         fn FILES_DROPPED() => if state.app.drop.num_files == 1 {
             buffer.append_string(state.app&.get_dropped_file_path(0));
@@ -429,7 +453,7 @@ on_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
 
 copy_from_selection :: fn(self: *TextBuffer) void = {
     state := state[];
-    sel := self.selection || return();
+    sel := fix(self.selection || return());
     buf := u8.list(temp());
     
     startL := max(0, sel.start.y.int());
@@ -471,6 +495,7 @@ update_hover :: fn(event: *Sapp.Event) void = {
         b.hover = new_hover;
         state.dirty = true;
     }
+    state.app&.set_mouse_cursor(@if(b.hover.is_none(), .ARROW, .POINTING_HAND));
 }
 
 find_mouse :: fn(event: *Sapp.Event) ?Ty(*TextBuffer, Pos) = {
@@ -479,7 +504,7 @@ find_mouse :: fn(event: *Sapp.Event) ?Ty(*TextBuffer, Pos) = {
     enumerate state.buffers& { i, b |
         if b.at.contains(pos) {
             state.selected_buffer = i;
-            pos: Pos = (x = pos.x / CHAR_W + b.render.x, y = pos.y / CHAR_H + b.render.y);
+            pos: Pos = (x = pos.x / state.scale + b.render.x, y = pos.y / (state.scale * 2) + b.render.y);
             return(Some = (b, pos));
         };
     };
@@ -557,6 +582,7 @@ fn main() void = {
         allocator = general_allocator(),
         enable_clipboard = true,
         enable_dragndrop = true,
+        high_dpi = true,
     );
 }
 
@@ -584,16 +610,25 @@ TextBuffer :: @struct(
     hover: ?Ty(i64, i64, i64),   // (line, start col, end col)
 );
 
+// in `state.selection`, `start` is always the first place you clicked (not the higher up one)
 Selection :: @struct {
     start: Pos;
     end: Pos;
 };
 
+// reorder `start`/`end` so `start` is above `end`
+fn fix(sel: Selection) Selection = {
+    if sel.start.y > sel.end.y {
+        t := sel.start; sel.start = sel.end; sel.end = t;
+    }
+    sel
+}
+
 fn draw_text(self: *TextBuffer) void = {
     if(self.dead, => return());
     state := state[];
     w, h := (self.at.w, self.at.h);
-    max_line_width := self.max_x - (w / CHAR_W);
+    max_line_width := self.max_x - (w / state.scale);
     self.render.x = max(0, min(self.render.x, max_line_width));
     state[].lock_to_bottom = self.render.y > self.lines.len.float() - self.num_lines_fit_on_screen.float();
     self.render.y = max(0, min(self.render.y, self.lines.len.float()));
@@ -604,15 +639,18 @@ fn draw_text(self: *TextBuffer) void = {
     
     // the fractional component of your scroll position is used to offset the text rendering on the screen.
     // and the integral component chooses which range of lines we draw.
-    x := cast(self.at.pos.x / CHAR_W - (self.render.x - self.render.x.floor()));
-    y := cast(self.at.pos.y / CHAR_H - (self.render.y - self.render.y.floor()));
+    x := cast(self.at.pos.x / state.scale - (self.render.x - self.render.x.floor()));
+    y := cast(self.at.pos.y / (state.scale * 2) - (self.render.y - self.render.y.floor()));
     sdtx.pos.x = x;
-    line_count := int(h / CHAR_H);
+    line_count := int(h / (state.scale * 2)) + 1;
     self.num_lines_fit_on_screen = line_count;
     start := min(max(0, self.render.y.int()), self.lines.len);
     end   := min(start + line_count, self.lines.len);
-    chars_that_fit := int(w / CHAR_W) + 2;
+    chars_that_fit := int(w / state.scale) + 2;
     col := self.render.x.int();
+    
+    // building the highlight rectangle out of single char cells like this is stupid
+    // and slow but like... it's fine for this program. 
     
     if self.hover { line, startH, endH | 
         if line >= start && line < end {
@@ -624,8 +662,9 @@ fn draw_text(self: *TextBuffer) void = {
             range(left, right, fn(_) => sdtx.put(0));  // filled in cell
         }
     };
-        
+    
     if self.selection { sel |
+        sel := sel.fix();
         sdtx.color = state.theme.selection; 
         startL := max(start, sel.start.y.int());
         endL   := min(end, sel.end.y.int() + 1);
@@ -910,3 +949,12 @@ font_data_ttf :: fn() []u8 = :: {
 }
 
 #include_std("backend/lib.fr");
+
+// example usage:
+// { S :: @static(@type state); S[] = state; go(fn() void = { loop {| usleep(100000); S[].theme.background.r += 0.01; S[].dirty = true; } } ); };
+fn go(body: @FnPtr() void) void = {
+    #use("@/lib/sys/threads.fr");
+    F :: @FnPtr() void;
+    ::F; // :OverloadingConfusedCoerce
+    start_thread(F, fn(b: *F) void = b[](), body&);
+}

@@ -1,0 +1,213 @@
+// - demonstrate that import_c can handle stb_truetype and stb_image_write
+// - replace my use of asciitable.com (in an over complicated way)
+
+main :: fn() void = {
+    font := load_font(16);
+    out := u8.list(temp());
+    range(0, font.h) { j |
+        W := font.w/(128-32);
+        range(W*32, W*127) { ii |
+            if j*font.w+ii < font.pixels.len {
+                c := font.pixels[j*font.w+ii];
+                chars := " .:ioVM@";
+                push(out&, chars[c.zext().shift_right_logical(5)]);
+            }
+        }
+        push(out&, "\n".ascii());
+    };
+    println(out.items());
+    font := load_font(8);
+    
+    out := u8.list(temp());
+    canvas := new_canvas(950, 1110, font);
+    build_ascii_table(canvas&);
+    out&.clear();
+    write_png(canvas.out&, out&);
+    path := "./target/ascii_table.png";
+    write_entire_file_or_crash(path, out.items());
+    @println("wrote that to %", path);
+};
+
+new_canvas :: fn(w: i64, h: i64, font: Texture) Canvas = (
+    font = font, 
+    out = (
+        pixels = temp().alloc_zeroed(u8, w*h),
+        w = w, 
+        h = h,
+    ),
+    char_w = font.w / (128-32),
+    char_h = font.h,
+);
+
+load_font :: fn(size: i64) Texture #use(Stb) = {
+    W := size / 2;
+    H := size;
+
+    tex_width := 2048;
+    bitmap := temp().alloc(u8, tex_width*tex_width);
+    chars := temp().alloc(stbtt_bakedchar, 1024);
+    result := stbtt_BakeFontBitmap(font_data_ttf().as_ptr(), 0, size.float().cast(), bitmap.ptr, intcast tex_width, intcast tex_width, 33, 128, chars.ptr);
+    @assert(result >= 0, "didn't fit all characters");
+    N_CHAR :: 128-32;
+    pixels := temp().alloc_zeroed(u8, N_CHAR*W*H);
+    x: f32 = 0; y: f32 = 0;
+    range(0, N_CHAR) { i |
+        // These are the positions of the texture in the atlas
+        x0, y0, x1, y1 := (@as(i64) chars[i].x0.zext(), @as(i64) chars[i].y0.zext(), @as(i64) chars[i].x1.zext(), @as(i64) chars[i].y1.zext());
+        // These are how much you have to move it to account for the blank part. 
+        // ie. the square above will just cover the filled in part of `_` and this tells us to move it down. 
+        X, Y := (chars[i].xoff.cast().int(), chars[i].yoff.cast().int());
+        base_line := int(size.float()/1.6); // TODO: can i ask the font for this?
+        range(y0, y1) { j |
+            range(x0, x1) { ii |
+                c := bitmap[j*tex_width+ii];
+                xxxx: i64 = (j-y0+(Y+base_line))*W*N_CHAR + (ii-x0+X) + (i+1)*W;
+                pixels[xxxx] = c;
+            }
+        };
+    };
+
+    (pixels = pixels, w = W*N_CHAR, h = H)
+}
+
+build_ascii_table :: fn(canvas: *Canvas) void = {
+    left, top := (1, 1);
+    x, y := (left, top);
+    buf := u8.list(temp());
+    spacing := 15;
+    special_chars := special_chars.split(" ", temp());
+    range(0, 4) { i |
+        canvas.put(x&, y&, left, @tfmt("DEC HEX CHR\n"));
+        range(0, 32) { j |
+            c := i*32+j;
+            if c < 10 {
+                buf&.push_all(" ");
+            }
+            if c < 100 {
+                buf&.push_all(" ");
+            }
+            @fmt(buf&, "%  ", c);
+            buf&.push_hex_byte(trunc c, true);
+            if c < 32 {
+                buf&.push_all(" ");
+                name := special_chars[c];
+                if name.len == 2 {
+                    buf&.push_all(" ");
+                }
+                buf&.push_all(name);
+            } else {
+                buf&.push_all("  ");
+                buf&.push(trunc c);
+            }
+            if c == 127 {
+                buf.len -= 2;
+                buf&.push_all("DEL");
+            }
+            buf&.push_all("\n");
+            canvas.put(x&, y&, left, buf.items());
+            buf&.clear();
+        };
+        y = top;
+        left += spacing;
+        x = left;
+    };
+};
+
+Texture :: @struct {
+    pixels: []u8;
+    w: i64;
+    h: i64;
+}
+
+Canvas :: @struct {
+    font: Texture;
+    out: Texture;
+    char_w: i64;
+    char_h: i64;
+};
+
+fn put(self: *Canvas, x: *i64, y: *i64, left: i64, s: []u8) void = {
+    x2, y2 := put(self, x[], y[], left, s);
+    x[] = x2; y[] = y2;
+}
+
+fn put(self: *Canvas, x: i64, y: i64, left: i64, s: []u8) Ty(i64, i64) = {
+    for s { c | 
+        if c == "\n".ascii() {
+            x = left;
+            y += 1;
+        } else {
+            @if(c != " ".ascii()) self.put(x, y, c);
+            x += 1;
+        }
+    };
+    (x, y)
+}
+
+fn put(self: *Canvas, x: i64, y: i64, c: u8) void = {
+    if c < 32 || c > 127 {
+        c = 32;
+    }
+    range(0, self.char_h) { i |
+        src := self.font&.char_row(c.zext() - 32, i, self.char_w);
+        dest := self.out&.char_row(x, y*self.char_h + i, self.char_w);
+        dest.copy_from(src);
+    };
+}
+
+fn write_png(self: *Texture, out: *List(u8)) void = {
+    #use(Stb);
+    // TODO: stbi_write_func doesn't work as a type annotation here
+    callback :: fn(context: rawptr, data: rawptr, size: i32) void = {
+        data := u8.ptr_from_raw(data).slice(size.zext());
+        List(u8).ptr_from_raw(context).push_all(data);
+    };
+    res := stbi_write_png_to_func(callback, List(u8).raw_from_ptr(out), intcast self.w, intcast self.h, 1, u8.raw_from_ptr(self.pixels.ptr), intcast self.w);
+    @assert(res != 0, "failed to write image");
+}
+
+fn write_ascii(self: *Texture, out: *List(u8)) void = {
+    range(0, self.h) { j |
+        range(0, self.w) { i |
+            c := self.pixels[j*self.w+i];
+            chars := " .:ioVM@";
+            push(out, chars[c.zext().shift_right_logical(5)]);
+        }
+        push(out, "\n".ascii());
+    };
+}
+
+fn char_row(self: *Texture, x: i64, y: i64, width: i64) []u8 = {
+    h := y * self.w;
+    self.pixels.slice(h + x*width, h + (x+1)*width)
+}
+
+special_chars :: "NUL SOH STX ETX EOT ENQ ACK BEL BS TAB LF VT FF CR SO SI DLE DC1 DC2 DC3 DC4 NAK SYN ETB CAN EM SUB ESC FS GS RS US";
+
+// TODO: :psate from examples/terminal.fr
+
+// TODO: todo.c i cheated and just changed stb_truetype.h for now
+Stb :: {
+    get  :: import("@/examples/testing.fr").fetch_or_crash;
+    root := get("https://github.com/nothings/stb/archive/f0569113c93ad095470c54bf34a17b36646bbbb5.zip", 1754150, "b62be3009cb9d4b6385bd4854bddf72d8e91f4e19d1347d6cf9589b19f70d45d", "stb-f0569113c93ad095470c54bf34a17b36646bbbb5");
+    Ffi  :: import("@/examples/import_c/ffi.fr");
+    namespace :: scope_of(Type, @struct {});
+    c_source := @tfmt("""
+        #define STB_TRUETYPE_IMPLEMENTATION
+        #include "%/stb_truetype.h"
+        #define STB_IMAGE_WRITE_IMPLEMENTATION
+        #include "%/stb_image_write.h"
+    """, root, root);
+    Ffi'include(current_compiler_context(), namespace, c_source);
+    namespace
+}
+
+// :ConstInFuncOrLoseTemp
+font_data_ttf :: fn() []u8 = :: {
+    get :: import("@/examples/testing.fr").fetch_or_crash;
+    root := get("https://download.jetbrains.com/fonts/JetBrainsMono-2.304.zip", 5622857, "6f6376c6ed2960ea8a963cd7387ec9d76e3f629125bc33d1fdcd7eb7012f7bbf", "fonts");
+    path := @tfmt("%/ttf/JetBrainsMonoNL-Bold.ttf", root);
+    ast_alloc().read_to_string_or_crash(path).items()
+}
+
+#include_std("backend/lib.fr");

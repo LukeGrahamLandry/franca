@@ -29,6 +29,24 @@ int main() {
   
   ASSERT(4, ({ short x[1] = { 5 }; x[0] -= 1; x[0]; }));
   
+  // kinda related casting mistake. i was truncating to char too enthusiastically. 
+  ASSERT(0, ({ 
+    unsigned char a = 0x12;
+    unsigned char b = 0x34;
+    unsigned int c = (a<<8) + b;
+    unsigned int d = 0x1234;
+    unsigned int e = ((int)a<<8) + b;
+    
+    unsigned char y = 5;
+    int x = ~y;
+    unsigned long z = 5;
+    int xx = ~z;
+    
+    // since im testing casting stuff here, it feels like using `==` is tempting fate. 
+    char result[64];
+    sprintf(result, "%#04x %#04x %#04x %d %d", c, d, e, x, xx);
+    strcmp(result, "0x1234 0x1234 0x1234 -6 -6");
+  }));
 
   printf("OK\n");
   return 0;
