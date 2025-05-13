@@ -81,16 +81,10 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
         self.f.lnk.no_inline = func.get_flag(.NoInline);
         self.f.lnk.id = m.intern(self&.fmt_fn_name(self.func));  // TODO: set export 
         self.entry.logging = self.program.get_log_types(f);
-        response := sync_driver_message(comp.data.cast()[][], 
-            (EmitIrStart = (when = when, fid = self.func, internal = Qbe.Fn.raw_from_ptr(self.f)))
-        );
         entry.task = (Func = self.f);
         res: CRes(void) = .Ok;
-        ::tagged(@type response);
-        if !response&.is(.ReplacedIr) {
-            self.f.track_ir_names = self.entry.logging.len > 0 || opts.always_track_ir_names;
-            res = self&.emit_body(f);
-        };
+        self.f.track_ir_names = self.entry.logging.len > 0 || opts.always_track_ir_names;
+        res = self&.emit_body(f);
         self.f.lnk.export = export;
         
         if res&.is_err() {
@@ -102,9 +96,6 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
                 func.set_flag(.NoContext);
             };
             
-            @if_let(self.entry.task) fn Func(it) => {
-                sync_driver_message(comp.data.cast()[][], (EmitIrEnd = (when = when, fid = f, internal = Qbe.Fn.raw_from_ptr(it), ir_type = Flag.self.ident())));
-            };
             enqueue_task(shared, self.entry);
             
             if self.new_constants.len != 0 {
@@ -115,12 +106,6 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
                     for self.new_constants { id |
                         out&.push(emit_constant(comp, m, id));
                     };
-                    // :TodoChangeMessageEmitDataEndToUseBakedValueInsteadOfBackendDat
-                    //sync_driver_message(comp.data.cast()[][], (EmitDataEnd = (
-                    //    internal = Qbe.Dat.raw_from_ptr(out&.as_ptr()), 
-                    //    count = out.len,
-                    //    internal_module = QbeModule.raw_from_ptr(m),
-                    //)));
                     entry2.task = (AotVar2 = out.items());
                 };
                 enqueue_task(shared, entry2);

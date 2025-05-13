@@ -3,57 +3,6 @@
 //! and passing that to the compiler, just be careful about ABI breakage).
 //! For sanity's sake, the compiler itself should be buildable with these defaults so its not super painful to change the ABI. 
 
-fn sync_driver_message(self: *SelfHosted, in: DriverMessage) DriverResult = {
-    in: []DriverMessage = (ptr = in&, len = 1);
-    out: DriverResult = .Continue;
-    out: []DriverResult = (ptr = out&, len = 1);
-    f := self.get_build_options()[].handle_message;
-    f(in, out);
-    if out.index(0).is(.Continue) {
-        builtin_driver_callback(in, out);
-    };
-    out[0]
-}
-
-// TODO: put this in the vtable as well so they can super()? 
-fn builtin_driver_callback(in: []DriverMessage, out: []DriverResult) void = {
-    self := current_comptime();
-    enumerate in { i, msg |
-        out[i] = @match(msg) {
-            fn ReadSourceCode(it) => {
-                name := self.pool.get(it.path);
-                ::if(?Str);
-                a := self.get_alloc();
-                src: ?Str = if name == "compiler" {
-                    code: List(u8) = list(self.get_alloc());
-                    fill_export_ffi(code&);
-                    (Some = code.items())
-                } else {
-                    lib := STDLIB_PATH[].unwrap();
-                    check := @tfmt("%/%", lib, name);
-                    out := u8.list(a);
-                    if read_and_push(out&, check) {
-                        (Some = out.items())
-                    } else {
-                        if read_and_push(out&, name) {
-                            (Some = out.items())
-                        } else {
-                            .None
-                        }
-                    }
-                };
-                (String = src)
-            }
-            fn Log(it) => {
-                eprintln(it.message);
-                .Continue
-            }
-            @default => .Continue;
-        };
-    };
-}
-
-
 // TODO: remove ExportVTable. i think the message @tagged is less painful
 fn default_driver_exports() ExportVTable = {
     vtable: ExportVTable = (
@@ -66,12 +15,31 @@ fn default_driver_exports() ExportVTable = {
 //////////////////////////////////
 /// Entry points from the compiler
 
+fn get_include_std(a: Alloc, name: Str) ?Str = {
+    ::if(?Str);
+    if name == "compiler" {
+        code: List(u8) = list(a);
+        fill_export_ffi(code&);
+        (Some = code.items())
+    } else {
+        lib := STDLIB_PATH[].unwrap();
+        check := @tfmt("%/%", lib, name);
+        out := u8.list(a);
+        if read_and_push(out&, check) {
+            (Some = out.items())
+        } else {
+            if read_and_push(out&, name) {
+                (Some = out.items())
+            } else {
+                .None
+            }
+        }
+    }
+}
+
 fn get_include_std(c: *SelfHosted, name: Str) ?WaitingParse = {
     zone := zone_begin(.LoadFile); // TODO: defer
-    result := c.sync_driver_message(ReadSourceCode = (path = c.pool.insert_owned(name)));
-    ::tagged(@type result);
-    @assert(result&.is(.String), "bad ReadSourceCode impl");
-    src := result.String || return(.None);
+    src := get_include_std(c.get_alloc(), name) || return(.None);
     file := c.codemap.add_file(name, src);
     id := push_parse(c.parser, src, file);
     zone_end(zone);

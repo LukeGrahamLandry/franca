@@ -64,7 +64,6 @@ just a problem with how that program is doing directions not with the app lib)
 
 - add a print for Dat2
 - `fn emit_llvm(m: *QbeModule, dat: *Qbe.Dat) void = {` update to new Dat2
-- :TodoChangeMessageEmitDataEndToUseBakedValueInsteadOfBackendDat
 - adding #align was a compile speed regression
 - formalize ENABLE_INCREMENTAL in backend/arm64/emit (+ support on amd64)
 - `./q.out -t wasm32 -o target/out/q.wasm -cc backend/test/abi8.ssa -d AI`

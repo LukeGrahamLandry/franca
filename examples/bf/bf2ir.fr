@@ -16,122 +16,63 @@
 //! So it looks less ugly but isn't as quirky and fun as mine. To each thier own. 
 //!
 
-print_hello_world :: fn(mem: *u8) void #bf2ir = HELLO_WORLD;
-
-add_numbers :: fn(mem: *u8) void #bf2ir = "[->+<]";
+ToBf :: @struct {
+    print_hello_world :: fn(mem: *u8) void = HELLO_WORLD;
+    
+    add_numbers :: fn(mem: *u8) void = "[->+<]";
+};
 
 fn main() void = {
-    // TODO: in the compiler scan the function for references to uncompiled symbols?
-    //       but we can't even reference it by name. 
-    //       here we force it to send us a message about these first so we see thier id. 
-    //       but this is bad because it relies on compiling blocks in order. 
-    ::if false {
-        putchar(getchar());  
-    };
-    
     mem := @slice(@as(u8) 12, @as(u8) 13);
-    add_numbers(mem.ptr);
+    ToBf'add_numbers(mem.ptr);
     assert_eq(mem, @slice(@as(u8) 0, @as(u8) 25));
     
     mem: List(u8) = repeated(0, 30000, temp());
-    print_hello_world(mem.maybe_uninit.ptr);
-    
-    // HACK: for runtime the order is backwards
-    if false {
-        putchar(getchar());  
-    };
+    ToBf'print_hello_world(mem.maybe_uninit.ptr);
 }
 
-#include_std("backend/lib.fr");
-
-// TODO: this kinda sucks. do i want to do down the path of letting you access your stack frame from the callback? 
-comp   :: @static(CompCtx);
-ready  :: @static(bool) false;  // TODO: this is super trash because new_with_src starts compiling before we set comp[]. 
-symbol_mark :: @static(Symbol);
-
-XX :: @struct(
-    // TODO: this is wrong because there can be multiple modules
-    putchar_id: ?u32 = .None,
-    getchar_id: ?u32 = .None,
-);
-state :: @static(XX);
-
-fn driver(v: *ImportVTable) void = {
-    state[] = ();
-    opts   := v.default_build_options();
-    opts.handle_message = handle;
-    src    := "#include_std(\"lib/core.fr\");#include_std(\"examples/bf/bf2ir.fr\");";
-    comp[]  = v.with(v.new_with_src(src, "-", opts));
-    symbol_mark[] = comp[].intern_string("bf2ir");
-    ready[] = true;
-    fid    := comp[].get_unique_named("main").unwrap();
+:: {
+    m := ast_alloc().box(QbeModule);
+    fr := current_compiler_context();
+    init_default_module_dyn(m, fr.vtable, (arch = .aarch64, os = .macos, type = .JitOnly));
     
-    o := false;
-    path := "";
-    for cli_args() { arg |
-        if o {
-            path = arg.str();
-            o = false;
-        };
-        if arg == "-o" {
-            o = true;
-        };
-    };
+    // TODO: it's dumb that some of the important QLists always use temp()
+    t := ast_alloc().box(ArenaAlloc);
+    t[] = init(ast_alloc(), 1000);
+    context(DefaultContext)[].temporary_allocator = t;
     
-    if path == "" {
-        callee := comp[].get_jitted(fid);
-        callee := assume_types_fn(Arg = void, Ret = void, ptr = callee);
-        callee();
-    } else {
-        m := QbeModule.zeroed();
-        #use("@/compiler/ast_external.fr");
-        #use("@/lib/sys/fs.fr");
-        init_default_module_dyn(m&, v, (arch = query_current_arch(), os = query_current_os(), type = .Exe));
-        bytes := emit_qbe_included_dyn(m&, comp, @slice(fid), .WrapMain);
-        out := open_trunc(maybe_borrow_cstr(path, temp())).unwrap();
-        for bytes& { bucket |
-            out&.write(bucket);
+    s := Type.scope_of(ToBf);
+    for get_constants(s) { name |
+        fid := get_constant(FuncId, s, name).unwrap();
+        func := get_function_ast(fid, true, true, false, false);
+        ::tagged(FuncImpl);
+        @debug_assert(func.body&.is(.Normal));
+        code := const_eval(Str)(func.body.Normal);
+        
+        f := ast_alloc().box(Qbe.Fn);
+        default_init(f, m);
+        f.lnk.id = m.intern(func.name.str());
+        convert(f, code);
+        f.rpo = new(f.nblk.zext());
+        i := 0;
+        for_blocks f { b |
+            b.id = trunc i;
+            f.rpo[i] = b;
+            i += 1;
         };
-        out.close();
+        
+        data := ast_alloc().alloc_zeroed(BakedVarId, f.ncon.zext());
+        funcs := ast_alloc().alloc_zeroed(FuncId, f.ncon.zext());
+        funcs[2] = getchar;  // order matters
+        funcs[3] = putchar;
+        func.body = (Ir = (
+            fn_internal = Qbe.Fn.int_from_ptr(f),
+            data = data,
+            funcs = funcs,
+        ));
+        func.set_flag(.EnsuredCompiled);
     };
-}
-
-fn handle(in: []DriverMessage, out: []DriverResult) void = {
-    @if(ready[])
-    enumerate in { i, it |
-        @match(it) {
-            fn CompileBodyStart(it) => {
-                func := comp[].get_function(it.fid);
-                if is_marked_bf(func) {
-                    func.body.Normal.done = true; // TODO: be more serious. return .Break?
-                };
-            }
-            fn EmitIrStart(it) => {
-                f := Qbe.Fn.ptr_from_raw(it.internal);
-                func := comp[].get_function(it.fid);
-                name := comp[].get_string(func.name);
-                if name == "putchar" {
-                    state[].putchar_id = (Some = f.lnk.id);
-                };
-                if name == "getchar" {
-                    state[].getchar_id = (Some = f.lnk.id);
-                };
-                if is_marked_bf(func) {
-                    // TODO: be able to create Str type
-                    expr := func.body.Normal&;
-                    expr.done = false;  // undo the hack above
-                    comp[]'vtable'compile_ast(comp[].data, expr, UnknownType);
-                    code := const_eval_outside(Str)(expr[], expr.ty);
-                    convert(f, code);
-                    
-                    out[i] = .ReplacedIr;
-                    return(); // TODO: this doesn't work if we were passed multiple things but we can't call super here.
-                };
-            };
-            @default => ();
-        }
-    };
-}
+};
 
 fn convert(f: *Qbe.Fn, code: []u8) void = {
     mem    := f.newtmp("mem", .Kl);
@@ -162,8 +103,9 @@ fn convert(f: *Qbe.Fn, code: []u8) void = {
         """);
     };
     
-    getchar := f.symcon(state[].getchar_id.unwrap());
-    putchar := f.symcon(state[].putchar_id.unwrap());
+    // order matters because of FuncImpl.Ir
+    getchar := f.symcon(f.globals.intern("getchar"));
+    putchar := f.symcon(f.globals.intern("putchar"));
     
     loop_stack := list(*Qbe.Blk, temp());
     for code { c |
@@ -221,20 +163,5 @@ fn convert(f: *Qbe.Fn, code: []u8) void = {
     b.jmp.type = .ret0;
 }
 
-fn is_marked_bf(func: *Func) bool = {
-    each func.annotations { a |
-        if a.name == symbol_mark[] {
-            return(true);
-        };
-    };
-    false
-}
-
-// using the normal comptime version should be find inside handle() because context will be set
-fn const_eval_outside($OuterType: Type) (@Fn(value: FatExpr, InnerType: Type) OuterType) #generic = (fn(value: FatExpr, InnerType: Type) OuterType = {
-    out := @uninitialized OuterType;
-    const_eval(value, InnerType, OuterType.raw_from_ptr(out&));
-    out
-});
-
 #use("@/examples/bf/README.fr");
+#include_std("backend/lib.fr");
