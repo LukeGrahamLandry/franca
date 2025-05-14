@@ -132,11 +132,11 @@ bindgroup_t :: @struct {
 bindings_cache_t :: @struct {
     vbs: Array(@struct {
         buffer: Sg.Buffer;
-        offset: u64;
+        offset: i64;
     }, Sg.SG_MAX_VERTEXBUFFER_BINDSLOTS);
     ib: @struct {
         buffer: Sg.Buffer;
-        offset: u64;
+        offset: i64;
     };
     bg: bindgroup_handle_t;
 };
@@ -295,23 +295,16 @@ fn to_wgpu(it: SgBlendFactor) WGPU.BlendFactor = @map_enum(it) (
 
 fn to_wgpu(m: SgColorMask) WGPU.ColorWriteMask = {
     // FIXME: change to WGPU.ColorWriteMask once Emscripten and Dawn webgpu.h agree
-    //int res = 0;
-    //if (0 != (m & SG_COLORMASK_R)) {
-    //    res |= WGPU.ColorWriteMask_Red;
-    //}
-    //if (0 != (m & SG_COLORMASK_G)) {
-    //    res |= WGPU.ColorWriteMask_Green;
-    //}
-    //if (0 != (m & SG_COLORMASK_B)) {
-    //    res |= WGPU.ColorWriteMask_Blue;
-    //}
-    //if (0 != (m & SG_COLORMASK_A)) {
-    //    res |= WGPU.ColorWriteMask_Alpha;
-    //}
-    //return (WGPU.ColorWriteMask)res;
-    //todo()
-    // TODO: wgpu UNFINISHED i just want to see what happens
-    (_ = 0) 
+    
+    res: u64 = 0;
+    X :: fn(s: SgColorMask, w) => if bit_and((@as(u32) m), @as(u32) s) != 0 {
+        res = res.bit_or(w);
+    };
+    X(.R, WGPU.ColorWriteMask.Red);
+    X(.G, WGPU.ColorWriteMask.Green);
+    X(.B, WGPU.ColorWriteMask.Blue);
+    X(.A, WGPU.ColorWriteMask.Alpha);
+    (_ = res)
 }
 
 fn to_wgpu(it: SgShaderStage) WGPU.ShaderStage = (_ = @map_enum(it)
@@ -327,7 +320,10 @@ fn init_caps(wgpu: *Impl) void = {
         msaa_image_bindings = true,
     );
 
+    canary := wgpu.queue;
     getLimits(wgpu.dev, wgpu.limits&);
+    @debug_assert(identical(canary._, wgpu.queue._), "they grew the limits struct and overwrote our other fields");
+    
     l := wgpu.limits&;
     wgpu.sg.limits = (
         max_image_size_2d = bitcast l.maxTextureDimension2D,
@@ -352,6 +348,8 @@ fn init_caps(wgpu: *Impl) void = {
         sf = (.R8SN, .RG8SN, .RGBA8SN, .RGB9E5, .RG11B10F),   
         srmd = (.DEPTH, .DEPTH_STENCIL),
     );
+    
+    // TODO: ask for these features in web/app.fr/pre_init ?
     
     ::enum(WGPU.Bool);
     if hasFeature(wgpu.dev, .Float32Filterable) == .True {
@@ -409,12 +407,12 @@ fn bindgroups_pool_discard() void = {
     _sg_pool_discard(&p.pool);
 }
 
-fn bindgroup_at(bg_id: u32) *bindgroup_t = {
-    @debug_assert(SG_INVALID_ID != bg_id);
+fn bindgroup_at(wgpu: *Impl, bg_id: u32) *bindgroup_t = {
+    @debug_assert(bg_id != Sg.SG_INVALID_ID);
     p := wgpu.bindgroups_pool&;
     slot_index := _sg_slot_index(bg_id);
-    @debug_assert((slot_index > _SG_INVALID_SLOT_INDEX) && (slot_index < p.pool.size));
-    p.bindgroups&[slot_index]&
+    @debug_assert((slot_index > Sg._SG_INVALID_SLOT_INDEX) && (slot_index < p.size));
+    ptr_cast_unchecked(u8, bindgroup_t, p.data.ptr.offset(slot_index.intcast() * size_of(bindgroup_t)))
 }
 
 fn lookup_bindgroup(wgpu: *Impl, bg_id: u32) ?*bindgroup_t = {
@@ -425,16 +423,15 @@ fn lookup_bindgroup(wgpu: *Impl, bg_id: u32) ?*bindgroup_t = {
 }
 
 fn alloc_bindgroup(wgpu: *Impl) bindgroup_handle_t = {
-    bindgroups_pool_t* p = &wgpu.bindgroups_pool;
-    bindgroup_handle_t res;
-    int slot_index = _sg_pool_alloc_index(&p.pool);
-    if (_SG_INVALID_SLOT_INDEX != slot_index) {
-        res.id = _sg_slot_alloc(&p.pool, &p.bindgroups[slot_index].slot, slot_index);
+    p := wgpu.bindgroups_pool&;
+    slot_index := alloc_index(p);
+    ::if(u32);
+    (id = if (Sg._SG_INVALID_SLOT_INDEX != slot_index) {
+        p.slot_alloc(slot_index)
     } else {
-        res.id = SG_INVALID_ID;
-        _SG_ERROR(WGPU._BINDGROUPS_POOL_EXHAUSTED);
-    }
-    res
+        _SG_ERROR("WGPU_BINDGROUPS_POOL_EXHAUSTED");
+        SG_INVALID_ID
+    })
 }
 
 fn dealloc_bindgroup(wgpu: *Impl, bg: *bindgroup_t) void = {
@@ -444,99 +441,65 @@ fn dealloc_bindgroup(wgpu: *Impl, bg: *bindgroup_t) void = {
     bg.slot = zeroed Sg.SlotHeader;
 }
 
-// MurmurHash64B (see: https://github.com/aappleby/smhasher/blob/61a0530f28277f2e850bfc39600ce61d02b518de/src/MurmurHash2.cpp#L142)
-fn hash(key: rawptr, len: int, seed: uint64_t) uint64_t = {
-    const uint32_t m = 0x5bd1e995;
-    const int r = 24;
-    uint32_t h1 = (uint32_t)seed ^ (uint32_t)len;
-    uint32_t h2 = (uint32_t)(seed >> 32);
-    const uint32_t * data = (const uint32_t *)key;
-    while (len >= 8) {
-        uint32_t k1 = *data++;
-        k1 *= m; k1 ^= k1 >> r; k1 *= m;
-        h1 *= m; h1 ^= k1;
-        len -= 4;
-        uint32_t k2 = *data++;
-        k2 *= m; k2 ^= k2 >> r; k2 *= m;
-        h2 *= m; h2 ^= k2;
-        len -= 4;
-    }
-    if (len >= 4) {
-        uint32_t k1 = *data++;
-        k1 *= m; k1 ^= k1 >> r; k1 *= m;
-        h1 *= m; h1 ^= k1;
-        len -= 4;
-    }
-    switch(len) {
-        case 3: h2 ^= (uint32_t)(((unsigned char*)data)[2] << 16);
-        case 2: h2 ^= (uint32_t)(((unsigned char*)data)[1] << 8);
-        case 1: h2 ^= ((unsigned char*)data)[0];
-        h2 *= m;
+fn hash(key: []u64) u64 = {
+    // TODO: sokol uses MurmurHash64B. i can earn a better hash function by producing a benchmark where it matters. 
+    x: u64 = 1;
+    for key { k |
+        // :CompilerBug shouldn't need this `bitcast` but the high bit is set so it freaks out
+        x += k * bitcast 15120273018600372767;  // high quality prime number chosen by fair die roll (certainly not the nsa) (i googled "64 bit primes")
     };
-    h1 ^= h2 >> 18; h1 *= m;
-    h2 ^= h1 >> 22; h2 *= m;
-    h1 ^= h2 >> 17; h1 *= m;
-    h2 ^= h1 >> 19; h2 *= m;
-    uint64_t h = h1;
-    h = (h << 32) | h2;
-    return h;
+    x
 }
 
 fn bindgroups_cache_item(type: bindgroups_cache_item_type_t, wgpu_binding: u8, id: u32) u64 = {
     // key pattern is bbbbttttiiiiiiii
-    const uint64_t bb = (uint64_t)wgpu_binding;
-    const uint64_t tttt = (uint64_t)type;
-    const uint64_t iiiiiiii = (uint64_t)id;
-    return (bb << 56) | (bb << 48) | (tttt << 32) | iiiiiiii;
+    bb: u64 = @as(u64) zext wgpu_binding;
+    tttt: u64 = @as(u64) uext @as(u32) type;
+    iiiiiiii: u64 = uext id;
+    bb.shift_left(56).bit_or(bb.shift_left(48)).bit_or(tttt.shift_left(32)).bit_or(iiiiiiii)
 }
 
 fn init_bindgroups_cache_key(wgpu: *Impl, key: *bindgroups_cache_key_t, bnd: *Sg.ResolvedBindings) void = {
-    @debug_assert(bnd);
-    @debug_assert(bnd.pip);
-    const _sg_shader_t* shd = bnd.pip.shader;
-    @debug_assert(shd && shd.slot.id == bnd.pip.cmn.shader_id.id);
+    @debug_assert(!bnd.pip.is_null());
+    shd := bnd.pip.shader_t;
+    @debug_assert(shd.slot.id == bnd.pip.cmn.shader.id);
 
-    _sg_clear(key.items, sizeof(key.items));
-    key.items[0] = bindgroups_cache_item(.PIPELINE, 0xFF, bnd.pip.slot.id);
-    for (size_t i = 0; i < SG_MAX_IMAGE_BINDSLOTS; i++) {
-        if (shd.cmn.images[i].stage == SG_SHADERSTAGE_NONE) {
-            continue;
-        }
-        @debug_assert(bnd.imgs[i]);
-        const size_t item_idx = i + 1;
+    set_zeroed(key.items&.items());
+    key.items&[0] = bindgroups_cache_item(.Pipeline, 0xFF, bnd.pip.slot.id);
+    rangec(0, Sg.SG_MAX_IMAGE_BINDSLOTS) { i, $continue |
+        if(shd.cmn.images&[i].stage == .NONE, => continue());
+        @debug_assert(!bnd.imgs&[i].is_null());
+        item_idx := i + 1;
         @debug_assert(item_idx < BINDGROUPSCACHEKEY_NUM_ITEMS);
-        @debug_assert(0 == key.items[item_idx]);
-        const uint8_t wgpu_binding = shd.mtl.img_grp1_bnd_n[i];
-        const uint32_t id = bnd.imgs[i].slot.id;
-        key.items[item_idx] = bindgroups_cache_item(.IMAGE, wgpu_binding, id);
+        @debug_assert(key.items&[item_idx] == 0);
+        wgpu_binding := shd.mtl.img_grp1_bnd_n&[i];
+        id := bnd.imgs&[i].slot.id;
+        key.items&[item_idx] = bindgroups_cache_item(.Image, wgpu_binding, id);
     }
-    for (size_t i = 0; i < SG_MAX_SAMPLER_BINDSLOTS; i++) {
-        if (shd.cmn.samplers[i].stage == SG_SHADERSTAGE_NONE) {
-            continue;
-        }
-        @debug_assert(bnd.smps[i]);
-        const size_t item_idx = i + 1 + SG_MAX_IMAGE_BINDSLOTS;
+    rangec(0, Sg.SG_MAX_SAMPLER_BINDSLOTS) { i, $continue |
+        if(shd.cmn.samplers&[i].stage == .NONE, => continue());
+        @debug_assert(!bnd.smps&[i].is_null());
+        item_idx := i + 1 + Sg.SG_MAX_IMAGE_BINDSLOTS;
         @debug_assert(item_idx < BINDGROUPSCACHEKEY_NUM_ITEMS);
-        @debug_assert(0 == key.items[item_idx]);
-        const uint8_t wgpu_binding = shd.mtl.smp_grp1_bnd_n[i];
-        const uint32_t id = bnd.smps[i].slot.id;
-        key.items[item_idx] = bindgroups_cache_item(.SAMPLER, wgpu_binding, id);
+        @debug_assert(key.items&[item_idx] == 0);
+        wgpu_binding := shd.mtl.smp_grp1_bnd_n&[i];
+        id := bnd.smps&[i].slot.id;
+        key.items&[item_idx] = bindgroups_cache_item(.Sampler, wgpu_binding, id);
     }
-    for (size_t i = 0; i < SG_MAX_STORAGEBUFFER_BINDSLOTS; i++) {
-        if (shd.cmn.storage_buffers[i].stage == SG_SHADERSTAGE_NONE) {
-            continue;
-        }
-        @debug_assert(bnd.sbufs[i]);
-        const size_t item_idx = i + 1 + SG_MAX_IMAGE_BINDSLOTS + SG_MAX_SAMPLER_BINDSLOTS;
+    rangec(0, Sg.SG_MAX_STORAGEBUFFER_BINDSLOTS) { i, $continue |
+        if(shd.cmn.storage_buffers&[i].stage == .NONE, => continue());
+        @debug_assert(!bnd.sbufs&[i].is_null());
+        item_idx := i + 1 + Sg.SG_MAX_IMAGE_BINDSLOTS + Sg.SG_MAX_SAMPLER_BINDSLOTS;
         @debug_assert(item_idx < BINDGROUPSCACHEKEY_NUM_ITEMS);
-        @debug_assert(0 == key.items[item_idx]);
-        const uint8_t wgpu_binding = shd.mtl.sbuf_grp1_bnd_n[i];
-        const uint32_t id = bnd.sbufs[i].slot.id;
-        key.items[item_idx] = bindgroups_cache_item(.STORAGEBUFFER, wgpu_binding, id);
+        @debug_assert(key.items&[item_idx] == 0);
+        wgpu_binding := shd.mtl.sbuf_grp1_bnd_n&[i];
+        id := bnd.sbufs&[i].slot.id;
+        key.items&[item_idx] = bindgroups_cache_item(.StorageBuffer, wgpu_binding, id);
     }
-    key.hash = hash(&key.items, (int)sizeof(key.items), 0x1234567887654321);
+    key.hash = hash(key.items&.items());
 }
 
+// TODO
 fn compare_bindgroups_cache_key(wgpu: *Impl, k0: *bindgroups_cache_key_t, k1: *bindgroups_cache_key_t) bool = {
     @debug_assert(k0 && k1);
     if (k0.hash != k1.hash) {
@@ -551,45 +514,45 @@ fn compare_bindgroups_cache_key(wgpu: *Impl, k0: *bindgroups_cache_key_t, k1: *b
 
 // .None means pool full. can return Some with state=.FAILED which is confusing perhaps
 fn create_bindgroup(wgpu: *Impl, bnd: *Sg.ResolvedBindings) ?*bindgroup_t = {
-    @debug_assert(!wgpu.dev._.is_null());
+    @debug_assert(!wgpu.dev._.is_null(), "missing device");
     shd := bnd.pip.cmn.shader_t;
-    @debug_assert(shd.slot.id == bnd.pip.cmn.shader.id);
+    @debug_assert_eq(shd.slot.id, bnd.pip.cmn.shader.id, "stale shader");
     wgpu.sg.stat(.wgpu_bindings_num_create_bindgroup, 1);
     bg_id := wgpu.alloc_bindgroup();
     if(bg_id.id == SG_INVALID_ID, => return(.None));
-    bg := bindgroup_at(bg_id.id);
-    @debug_assert(bg && (bg.slot.state == SG_RESOURCESTATE_ALLOC));
+    bg := wgpu.bindgroup_at(bg_id.id);
+    @debug_assert_eq(bg.slot.state, .ALLOC);
 
     // create wgpu bindgroup object (also see create_shader())
-    bgl := bnd.pip.shader.wgpu.bgl_img_smp_sbuf;   // common with the names man...
-    @debug_assert(bgl);
+    bgl := bnd.pip.shader_t.mtl.bgl_img_smp_sbuf;
+    @debug_assert(!bgl._.is_null(), "expected call create_shader first");
     bg_entries := zeroed Array(WGPU.BindGroupEntry, MAX_IMG_SMP_SBUF_BINDGROUP_ENTRIES);
     bgl_index := 0;
-    rangec(0, Sg.SG_MAX_IMAGE_BINDSLOTS) { i |
-        if(shd.cmn.images[i].stage == .NONE, => continue());
-        @debug_assert(!bnd.imgs[i].is_null());
-        bg_entries[bgl_index] = (
-            binding = shd.mtl.img_grp1_bnd_n[i],
-            textureView = bnd.imgs[i].wgpu.view,
+    rangec(0, Sg.SG_MAX_IMAGE_BINDSLOTS) { i, $continue |
+        if(shd.cmn.images&[i].stage == .NONE, => continue());
+        @debug_assert(!bnd.imgs&[i].is_null());
+        bg_entries&[bgl_index] = (
+            binding = zext shd.mtl.img_grp1_bnd_n&[i],
+            textureView = bnd.imgs&[i].mtl.view,
         );
         bgl_index += 1;
     }
-    rangec(0, Sg.SG_MAX_SAMPLER_BINDSLOTS) { i |
-        if(shd.cmn.samplers[i].stage == .NONE, => continue());
-        @debug_assert(!bnd.smps[i].is_null());
+    rangec(0, Sg.SG_MAX_SAMPLER_BINDSLOTS) { i, $continue |
+        if(shd.cmn.samplers&[i].stage == .NONE, => continue());
+        @debug_assert(!bnd.smps&[i].is_null());
         bg_entries&[bgl_index] = (
-            binding = shd.mtl.smp_grp1_bnd_n[i],
-            sampler = bnd.smps[i].wgpu.smp,
+            binding = zext shd.mtl.smp_grp1_bnd_n&[i],
+            sampler = bnd.smps&[i].mtl.smp,
         );
         bgl_index += 1;
     }
-    rangec(0, Sg.SG_MAX_STORAGEBUFFER_BINDSLOTS) { i |
-        if(shd.cmn.storage_buffers[i].stage == .NONE, => continue());
-        @debug_assert(!bnd.sbufs[i].is_null());
+    rangec(0, Sg.SG_MAX_STORAGEBUFFER_BINDSLOTS) { i, $continue |
+        if(shd.cmn.storage_buffers&[i].stage == .NONE, => continue());
+        @debug_assert(!bnd.sbufs&[i].is_null());
         bg_entries&[bgl_index] = (
-            binding = shd.mtl.sbuf_grp1_bnd_n[i]
-            buffer = bnd.sbufs[i].wgpu.buf,
-            size = bnd.sbufs[i].cmn.size,
+            binding = zext shd.mtl.sbuf_grp1_bnd_n&[i]
+            buffer = bnd.sbufs&[i].mtl.buf,
+            size = intcast bnd.sbufs&[i].cmn.size,
         );
         bgl_index += 1;
     }
@@ -602,7 +565,7 @@ fn create_bindgroup(wgpu: *Impl, bnd: *Sg.ResolvedBindings) ?*bindgroup_t = {
         _SG_ERROR("WGPU_CREATEBINDGROUP_FAILED");
         bg.slot.state = .FAILED;
     } else {
-        init_bindgroups_cache_key(bg.key&, bnd);
+        wgpu.init_bindgroups_cache_key(bg.key&, bnd);
         bg.slot.state = .VALID;
     };
     (Some = bg)
@@ -692,43 +655,41 @@ fn bindings_cache_clear(wgpu: *Impl) void = {
     wgpu.bindings_cache = zeroed @type wgpu.bindings_cache;
 }
 
-fn bindings_cache_vb_dirty(wgpu: *Impl, index: i64, vb: *Sg.Buffer.T, offset: uint64_t) bool = {
-    @debug_assert((index >= 0) && (index < SG_MAX_VERTEXBUFFER_BINDSLOTS));
-    if (vb) {
-        return (wgpu.bindings_cache.vbs[index].buffer.id != vb.slot.id)
-            || (wgpu.bindings_cache.vbs[index].offset != offset);
+fn bindings_cache_vb_dirty(wgpu: *Impl, index: i64, vb: *Sg.Buffer.T, offset: i64) bool = {
+    @debug_assert((index >= 0) && (index < Sg.SG_MAX_VERTEXBUFFER_BINDSLOTS));
+    dest := wgpu.bindings_cache.vbs&[index]&;
+    if !vb.is_null() {
+        dest.buffer.id != vb.slot.id || dest.offset != offset
     } else {
-        return wgpu.bindings_cache.vbs[index].buffer.id != SG_INVALID_ID;
+        dest.buffer.id != 0
     }
 }
 
-fn bindings_cache_vb_update(wgpu: *Impl, index: i64, vb: *Sg.Buffer.T, offset: u64) void = {
-    @debug_assert((index >= 0) && (index < SG_MAX_VERTEXBUFFER_BINDSLOTS));
-    if (vb) {
-        wgpu.bindings_cache.vbs[index].buffer.id = vb.slot.id;
-        wgpu.bindings_cache.vbs[index].offset = offset;
+fn bindings_cache_vb_update(wgpu: *Impl, index: i64, vb: *Sg.Buffer.T, offset: i64) void = {
+    @debug_assert((index >= 0) && (index < Sg.SG_MAX_VERTEXBUFFER_BINDSLOTS));
+    dest := wgpu.bindings_cache.vbs&[index]&;
+    if !vb.is_null() {
+        dest[] = (buffer = (id = vb.slot.id), offset = offset);
     } else {
-        wgpu.bindings_cache.vbs[index].buffer.id = SG_INVALID_ID;
-        wgpu.bindings_cache.vbs[index].offset = 0;
+        dest[] = zeroed @type dest[];
     }
 }
 
-fn bindings_cache_ib_dirty(wgpu: *Impl, ib: *Sg.Buffer.T, offset: u64) bool = {
-    if (ib) {
-        return (wgpu.bindings_cache.ib.buffer.id != ib.slot.id)
-            || (wgpu.bindings_cache.ib.offset != offset);
+fn bindings_cache_ib_dirty(wgpu: *Impl, ib: *Sg.Buffer.T, offset: i64) bool = {
+    dest := wgpu.bindings_cache.ib&;
+    if !ib.is_null() {
+        dest.buffer.id != ib.slot.id || dest.offset != offset
     } else {
-        return wgpu.bindings_cache.ib.buffer.id != SG_INVALID_ID;
+        dest.buffer.id != 0
     }
 }
 
-fn bindings_cache_ib_update(wgpu: *Impl, ib: *Sg.Buffer.T, offset: u64) void = {
-    if (ib) {
-        wgpu.bindings_cache.ib.buffer.id = ib.slot.id;
-        wgpu.bindings_cache.ib.offset = offset;
+fn bindings_cache_ib_update(wgpu: *Impl, ib: *Sg.Buffer.T, offset: i64) void = {
+    dest := wgpu.bindings_cache.ib&;
+    if !ib.is_null() {
+        dest[] = (buffer = (id = ib.slot.id), offset = offset);
     } else {
-        wgpu.bindings_cache.ib.buffer.id = SG_INVALID_ID;
-        wgpu.bindings_cache.ib.offset = 0;
+        dest[] = zeroed @type dest[];
     }
 }
 
@@ -815,51 +776,53 @@ fn apply_bindgroup(wgpu: *Impl, bnd: *Sg.ResolvedBindings) bool = {
     true
 }
 
+// TODO: same shape: apply_X_buffer, bindings_cache_X_dirty, bindings_cache_X_update
+
 fn apply_index_buffer(wgpu: *Impl, bnd: *Sg.ResolvedBindings) bool = {
-    @debug_assert(wgpu.rpass_enc);
+    rpass_enc := wgpu.rpass_enc.expect("in render pass");
     ib := bnd.ib;
-    uint64_t offset = (uint64_t)bnd.ib_offset;
-    if (bindings_cache_ib_dirty(ib, offset)) {
-        bindings_cache_ib_update(ib, offset);
-        if (ib) {
-            const WGPU.IndexFormat format = indexformat(bnd.pip.cmn.index_type);
-            const uint64_t buf_size = (uint64_t)ib.cmn.size;
-            @debug_assert(buf_size > offset);
-            const uint64_t max_bytes = buf_size - offset;
-            setIndexBuffer(wgpu.rpass_enc, ib.wgpu.buf, format, offset, max_bytes);
-        /* FIXME: the else-pass should actually set a null index buffer, but that doesn't seem to work yet
-        } else {
-            setIndexBuffer(wgpu.rpass_enc, 0, WGPU.IndexFormat_Undefined, 0, 0);
-        */
-        }
-        wgpu.sg.stat(wgpu.bindings.num_set_index_buffer, 1);
+    offset := intcast bnd.ib_offset;
+    if !wgpu.bindings_cache_ib_dirty(ib, offset) {
+        wgpu.sg.stat(.wgpu_bindings_num_skip_redundant_index_buffer, 1);
+        return true;
+    }
+    wgpu.bindings_cache_ib_update(ib, offset);
+    if !ib.is_null() {
+        format := to_wgpu(bnd.pip.cmn.index_type);
+        buf_size := intcast ib.cmn.size;
+        @debug_assert(buf_size > offset);
+        max_bytes := buf_size - offset;
+        setIndexBuffer(rpass_enc, ib.mtl.buf, format, offset, max_bytes);
+    /* FIXME: the else-pass should actually set a null index buffer, but that doesn't seem to work yet
     } else {
-        wgpu.sg.stat(wgpu.bindings.num_skip_redundant_index_buffer, 1);
-    };
+        setIndexBuffer(rpass_enc, 0, WGPU.IndexFormat_Undefined, 0, 0);
+    */
+    }
+    wgpu.sg.stat(.wgpu_bindings_num_set_index_buffer, 1);
     true
 }
 
 fn apply_vertex_buffers(wgpu: *Impl, bnd: *Sg.ResolvedBindings) bool = {
-    @debug_assert(wgpu.rpass_enc);
-    for (uint32_t slot = 0; slot < SG_MAX_VERTEXBUFFER_BINDSLOTS; slot++) {
-        vb := bnd.vbs[slot];
-        const uint64_t offset = (uint64_t)bnd.vb_offsets[slot];
-        if (bindings_cache_vb_dirty(slot, vb, offset)) {
-            bindings_cache_vb_update(slot, vb, offset);
-            if (vb) {
-                const uint64_t buf_size = (uint64_t)vb.cmn.size;
-                @debug_assert(buf_size > offset);
-                const uint64_t max_bytes = buf_size - offset;
-                setVertexBuffer(wgpu.rpass_enc, slot, vb.wgpu.buf, offset, max_bytes);
-            /* FIXME: the else-pass should actually set a null vertex buffer, but that doesn't seem to work yet
-            } else {
-                setVertexBuffer(wgpu.rpass_enc, slot, 0, 0, 0);
-            */
-            }
-            wgpu.sg.stat(wgpu.bindings.num_set_vertex_buffer, 1);
+    rpass_enc := wgpu.rpass_enc.expect("in render pass");
+    rangec(0, Sg.SG_MAX_VERTEXBUFFER_BINDSLOTS) { slot, $continue |
+        vb := bnd.vbs&[slot];
+        offset: i64 = intcast bnd.vb_offsets&[slot];
+        if !wgpu.bindings_cache_vb_dirty(slot, vb, offset) {
+            wgpu.sg.stat(.wgpu_bindings_num_skip_redundant_vertex_buffer, 1);
+            continue();
+        };
+        wgpu.bindings_cache_vb_update(slot, vb, offset);
+        if !vb.is_null() {
+            buf_size: i64 = intcast vb.cmn.size;
+            @debug_assert(buf_size > offset);
+            max_bytes := buf_size - offset;
+            setVertexBuffer(rpass_enc, trunc slot, vb.mtl.buf, offset, max_bytes);
+        /* FIXME: the else-pass should actually set a null vertex buffer, but that doesn't seem to work yet
         } else {
-            wgpu.sg.stat(wgpu.bindings.num_skip_redundant_vertex_buffer, 1);
+            setVertexBuffer(rpass_enc, slot, 0, 0, 0);
+        */
         }
+        wgpu.sg.stat(.wgpu_bindings_num_set_vertex_buffer, 1);
     };
     true
 }
@@ -895,6 +858,7 @@ fn setup_backend(wgpu: *Impl, desc: *SgDesc) void = {
     @debug_assert(!wgpu.cmd_enc._.is_null());
 }
 
+// TODO
 fn discard_backend(wgpu: *Impl) void = {
     @debug_assert(wgpu.valid);
     @debug_assert(wgpu.cmd_enc);
@@ -950,6 +914,7 @@ fn create(wgpu: *Impl, buf: *Sg.Buffer.T, desc: *Sg.Buffer.Desc) SgResourceState
     .VALID
 }
 
+// TODO
 fn discard_buffer(wgpu: *Impl, buf: *Sg.Buffer.T) void = {
     @debug_assert(!buf.is_null());
     if (buf.cmn.type == .STORAGEBUFFER) {
@@ -960,6 +925,7 @@ fn discard_buffer(wgpu: *Impl, buf: *Sg.Buffer.T) void = {
     }
 }
 
+// TODO
 fn copy_buffer_data(wgpu: *Impl, buf: *Sg.Buffer.T, offset: u64, data: []u8) void = {
     @debug_assert((offset + data.size) <= (size_t)buf.cmn.size);
     @debug_assert(!data.ptr.is_null() && data.size > 0);
@@ -982,6 +948,7 @@ fn copy_buffer_data(wgpu: *Impl, buf: *Sg.Buffer.T, offset: u64, data: []u8) voi
     }
 }
 
+// TODO
 fn copy_image_data(wgpu: *Impl, img: *Sg.Image.T, wgpu_tex: *WGPU.Texture, data: *SgImageData) void = {
     wgpu_copy_tex := zeroed WGPU.ImageCopyTexture;
     wgpu_copy_tex.texture = wgpu_tex;
@@ -1017,6 +984,7 @@ fn copy_image_data(wgpu: *Impl, img: *Sg.Image.T, wgpu_tex: *WGPU.Texture, data:
     }
 }
 
+// TODO
 fn create(wgpu: *Impl, img: *Sg.Image.T, desc: *Sg.Image.Desc) SgResourceState ={
     @debug_assert(img && desc);
     const bool injected = (0 != desc.wgpu_texture);
@@ -1078,6 +1046,7 @@ fn create(wgpu: *Impl, img: *Sg.Image.T, desc: *Sg.Image.Desc) SgResourceState =
     .VALID
 }
 
+// TODO
 fn discard_image(wgpu: *Impl, img: *Sg.Image.T) void = {
     @debug_assert(img);
     bindgroups_cache_invalidate(BINDGROUPSCACHEITEMTYPE_IMAGE, img.slot.id);
@@ -1091,6 +1060,7 @@ fn discard_image(wgpu: *Impl, img: *Sg.Image.T) void = {
     }
 }
 
+// TODO
 fn create(wgpu: *Impl, smp: *Sg.Sampler.T, desc: *Sg.Sampler.Desc) SgResourceState = {
     @debug_assert(smp && desc);
     @debug_assert(wgpu.dev);
@@ -1124,6 +1094,7 @@ fn create(wgpu: *Impl, smp: *Sg.Sampler.T, desc: *Sg.Sampler.Desc) SgResourceSta
     .VALID
 }
 
+// TODO
 fn discard_sampler(wgpu: *Impl, smp: *Sg.Sampler.T) void = {
     @debug_assert(smp);
     bindgroups_cache_invalidate(BINDGROUPSCACHEITEMTYPE_SAMPLER, smp.slot.id);
@@ -1318,6 +1289,7 @@ fn create(wgpu: *Impl, shd: *Sg.Shader.T, desc: *Sg.Shader.Desc) SgResourceState
     .VALID
 }
 
+// TODO
 fn discard_shader(wgpu: *Impl, shd: *Sg.Shader.T) void = {
     @debug_assert(shd);
     discard_shader_func(shd.mtl.vertex_func&);
@@ -1512,6 +1484,7 @@ fn to_wgpu(it: *SgStencilFaceState) WGPU.StencilFaceState = (
     passOp = to_wgpu it.pass_op,
 );
 
+// TODO
 fn discard_pipeline(wgpu: *Impl, pip: *Sg.Pipeline.T) void = {
     @debug_assert(pip);
     bindgroups_cache_invalidate(BINDGROUPSCACHEITEMTYPE_PIPELINE, pip.slot.id);
@@ -1531,6 +1504,7 @@ fn discard_pipeline(wgpu: *Impl, pip: *Sg.Pipeline.T) void = {
     }
 }
 
+// TODO
 fn create(wgpu: *Impl, atts: *Sg.Attachments.T, color_images: **Sg.Image.T, resolve_images: **Sg.Image.T, ds_img: *Sg.Image.T, desc: *Sg.Attachments.Desc) SgResourceState = {
     @debug_assert(atts && desc);
     @debug_assert(color_images && resolve_images);
@@ -1598,6 +1572,7 @@ fn to_wgpu(it: *SgAttachmentDesc) WGPU.TextureViewDescriptor = (
     arrayLayerCount = 1,
 );
 
+// TODO
 fn discard_attachments(wgpu: *Impl, atts: *Sg.Attachments.T) void = {
     @debug_assert(atts);
     for (int i = 0; i < atts.cmn.num_colors; i++) {
@@ -1674,14 +1649,12 @@ fn begin_render_pass(wgpu: *Impl, pass: *SgPass) void = {
             wgpu_pass_desc.depthStencilAttachment = wgpu_ds_att&;
         }
     } else {
-        wgpu_color_view := bit_cast_unchecked(rawptr, WGPU.TextureView, swapchain.wgpu.render_view);
-        wgpu_resolve_view := bit_cast_unchecked(rawptr, WGPU.TextureView, swapchain.wgpu.resolve_view);
-        wgpu_depth_stencil_view := bit_cast_unchecked(rawptr, WGPU.TextureView, swapchain.wgpu.depth_stencil_view);
-        wgpu_color_att&[0] = init_color_att(action.colors&[0]&, wgpu_color_view, wgpu_resolve_view);
+        wgpu_color_att&[0] = init_color_att(action.colors&[0]&, swapchain.wgpu.render_view, swapchain.wgpu.resolve_view);
         wgpu_pass_desc.colorAttachmentCount = 1;
         wgpu_pass_desc.colorAttachments = wgpu_color_att&.as_ptr();
-        if !wgpu_depth_stencil_view._.is_null() {
-            wgpu_ds_att := init_ds_att(action, swapchain.depth_format, wgpu_depth_stencil_view);
+        depth_view := swapchain.wgpu.depth_stencil_view;
+        if !depth_view._.is_null() {
+            wgpu_ds_att := init_ds_att(action, swapchain.depth_format, depth_view);
             wgpu_pass_desc.depthStencilAttachment = wgpu_ds_att&;
         }
     }
@@ -1695,9 +1668,7 @@ fn begin_render_pass(wgpu: *Impl, pass: *SgPass) void = {
 }
 
 fn begin_pass(wgpu: *Impl, pass: *SgPass) void #once = {
-    // TODO
-    //@debug_assert(wgpu.dev);
-    //@debug_assert(wgpu.cmd_enc);
+    @debug_assert(!wgpu.dev._.is_null() && !wgpu.cmd_enc._.is_null());
     @debug_assert(wgpu.rpass_enc.is_none() && wgpu.cpass_enc.is_none());
 
     wgpu.cur_pipeline = .None;
@@ -1726,7 +1697,6 @@ fn end_pass(wgpu: *Impl) void = {
 
 fn commit(wgpu: *Impl) void = {
     @debug_assert(!wgpu.cmd_enc._.is_null());
-
     wgpu.uniform_buffer_on_commit();
 
     cmd_buf_desc := zeroed WGPU.CommandBufferDescriptor;
@@ -1743,6 +1713,7 @@ fn commit(wgpu: *Impl) void = {
     wgpu.cmd_enc = createCommandEncoder(wgpu.dev, cmd_enc_desc&);
 }
 
+// TODO
 fn apply_viewport(wgpu: *Impl, x: i32, y: i32, w: i32, h: i32, origin_top_left: bool) void = {
     @debug_assert(wgpu.rpass_enc);
     // FIXME FIXME FIXME: CLIPPING THE VIEWPORT HERE IS WRONG!!!
@@ -1757,6 +1728,7 @@ fn apply_viewport(wgpu: *Impl, x: i32, y: i32, w: i32, h: i32, origin_top_left: 
     setViewport(wgpu.rpass_enc, xf, yf, wf, hf, 0.0f, 1.0f);
 }
 
+// TODO
 fn apply_scissor_rect(wgpu: *Impl, x: i32, y: i32, w: i32, h: i32, origin_top_left: bool) void = {
     @debug_assert(wgpu.rpass_enc);
     const _sg_recti_t clip = _sg_clipi(x, y, w, h, wgpu.sg.cur_pass.width, wgpu.sg.cur_pass.height);

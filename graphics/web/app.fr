@@ -1,11 +1,12 @@
 // 
-// wgpu has some sample code for integration with glfw: 
-// https://github.com/gfx-rs/wgpu-native/blob/afba393d99a8bc98b57b03a5ae8afa6f6eb72d17/examples/triangle/main.c
-// This is the same idea but for app.fr. 
-//
 // Abstraction will continue until moral improves. 
-// It's a bit like if you make an electron app but then make a canvas 
+// Using Dawn is a bit like if you make an electron app but then make a canvas 
 // that covers you whole screen and just draw into that.
+//
+// This is cannibalized from various sample code for integration with glfw: 
+//  wgpu: https://github.com/gfx-rs/wgpu-native/blob/afba393d99a8bc98b57b03a5ae8afa6f6eb72d17/examples/triangle/main.c
+// sokol: https://github.com/floooh/sokol-samples/blob/d94da3bbb54695801eb5daf2c3ee4638305e5f0a/wgpu/wgpu_entry_swapchain.c
+// This is the same idea but for app.fr (which sokol_app.h doesn't do?)
 //
 
 WGPU :: import("@/graphics/web/webgpu.fr");
@@ -15,11 +16,18 @@ GraphicsState :: @struct {
     device: WGPU.Device;
     adapter: WGPU.Adapter;
     config: WGPU.SurfaceConfiguration;
+    
+    depth_tex: WGPU.Texture;
+    msaa_tex: WGPU.Texture;
+    depth_view: WGPU.TextureView;
+    msaa_view: WGPU.TextureView;
+    swapchain_view: WGPU.TextureView;
+    old_frame: WGPU.TextureView;
 };
 
 // TODO: do i have to do anything to get logging info? 
 //       wgpuDevicePushErrorScope/wgpuDevicePopErrorScope?
-fn setup_wgpu_native(sapp: *Sapp.Self) void = {
+pre_init :: fn(sapp: *Sapp.Self) void = {
     macos: *Sapp.Macos.Impl = sapp.impl();
     layer := @objc @as(rawptr) macos.view.layer();
     web := sapp.webgpu&;
@@ -32,6 +40,7 @@ fn setup_wgpu_native(sapp: *Sapp.Self) void = {
             layer = layer,
         ))[].chain&,
     ));
+    @debug_assert(!web.surface._.is_null(), "createSurface");
     
     web.instance.requestAdapter(@ref @as(WGPU.RequestAdapterOptions) (
         compatibleSurface = web.surface,
@@ -44,8 +53,21 @@ fn setup_wgpu_native(sapp: *Sapp.Self) void = {
         userdata1 = GraphicsState.raw_from_ptr(web),
     ));
     @debug_assert(!web.adapter._.is_null(), "we don't fuck with async here");
-
-    web.adapter.requestDevice(zeroed(*WGPU.DeviceDescriptor), (
+    
+    web.adapter.requestDevice(@ref @as(WGPU.DeviceDescriptor) (
+        requiredFeatureCount = 1,
+        requiredFeatures = @ref WGPU.FeatureName.Depth32FloatStencil8,
+        uncapturedErrorCallbackInfo = (
+            callback = fn(device, kind, message, env, __) void = {
+                ::enum(@type kind);
+                set_dynamic_context(env);
+                if kind != .NoError {
+                    @panic("dawn says your code is bad and you should feel bad:\n %", message);
+                }
+            }, 
+            userdata1 = get_dynamic_context(),
+        ),
+    ), (
         callback = fn(status, device, message, userdata1, _userdata2) void = {
             ::enum(@type status);
             @assert(status == .Success, "requestDevice: %", message);
@@ -74,52 +96,62 @@ fn setup_wgpu_native(sapp: *Sapp.Self) void = {
     );
     web.surface.configure(web.config&);
     
-    // TODO: what about depth texture / msaa
+    // TODO: what about depth texture / msaa :DEPTH
 }
 
-native_frame :: fn(sapp: *Sapp.Self) void = {
-/*
-WGPUSurfaceTexture surface_texture;
-wgpuSurfaceGetCurrentTexture(demo.surface, &surface_texture);
-switch (surface_texture.status) {
-case WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal:
-case WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal:
-  // All good, could handle suboptimal here
-  break;
-case WGPUSurfaceGetCurrentTextureStatus_Timeout:
-case WGPUSurfaceGetCurrentTextureStatus_Outdated:
-case WGPUSurfaceGetCurrentTextureStatus_Lost: {
-  // Skip this frame, and re-configure surface.
-  if (surface_texture.texture != NULL) {
-    wgpuTextureRelease(surface_texture.texture);
-  }
-  int width, height;
-  glfwGetWindowSize(window, &width, &height);
-  if (width != 0 && height != 0) {
-    demo.config.width = width;
-    demo.config.height = height;
-    wgpuSurfaceConfigure(demo.surface, &demo.config);
-  }
-  continue;
-}
-case WGPUSurfaceGetCurrentTextureStatus_OutOfMemory:
-case WGPUSurfaceGetCurrentTextureStatus_DeviceLost:
-case WGPUSurfaceGetCurrentTextureStatus_Force32:
-  // Fatal error
-  printf(LOG_PREFIX " get_current_texture status=%#.8x\n",
-         surface_texture.status);
-  abort();
-}
-assert(surface_texture.texture);
+fn get_swapchain(wgpu: *GraphicsState) SgWgpuSwapchain = (
+    render_view = @if(wgpu.msaa_view._.is_null(), wgpu.swapchain_view, wgpu.msaa_view),
+    resolve_view = @if(wgpu.msaa_view._.is_null(), zeroed(WGPU.TextureView), wgpu.swapchain_view),
+    depth_stencil_view = wgpu.depth_view,
+);
 
-wgpuTextureViewRelease(old_frame);
-WGPUTextureView frame =
-    wgpuTextureCreateView(surface_texture.texture, NULL);
-assert(frame);
-old_frame = frame
-*/
+pre_frame :: fn(sapp: *Sapp.Self) void = {
+    surface_tex := zeroed WGPU.SurfaceTexture;
+    web := sapp.webgpu&;
+    web.instance.processEvents();  // TODO: does this do anything? does it need to go at the end?
+    
+    web.surface.getCurrentTexture(surface_tex&);
+    ::enum(@type surface_tex.status);
+    if @is(surface_tex.status, .Timeout, .Outdated, .Lost) {
+        panic("todo: failed surface");
+        // Skip this frame, and re-configure surface.
+        //if (surface_texture.texture != NULL) {
+        //    wgpuTextureRelease(surface_texture.texture);
+        //}
+        //int width, height;
+        //glfwGetWindowSize(window, &width, &height);
+        //if (width != 0 && height != 0) {
+        //    demo.config.width = width;
+        //    demo.config.height = height;
+        //    wgpuSurfaceConfigure(demo.surface, &demo.config);
+        //}
+        // TODO: the wgpu example skips the frame?
+        return();
+    };
+    if !@is(surface_tex.status, .SuccessOptimal, .SuccessSuboptimal) {
+        @panic("getCurrentTexture");
+    };
+    @debug_assert(!surface_tex.texture._.is_null());
+    web.swapchain_view = createView(surface_tex.texture, zeroed(*WGPU.TextureViewDescriptor));
+    release(surface_tex.texture);
+    @debug_assert(!web.swapchain_view._.is_null());
+}
+
+post_frame :: fn(sapp: *Sapp.Self) void = {
+    web := sapp.webgpu&;
+    release(web.swapchain_view);
+    web.swapchain_view = zeroed @type web.swapchain_view;
+    present(web.surface);
 }
 
 native_shutdown :: fn(sapp: *Sapp.Self) void = {
     // TODO
+}
+
+print_error :: fn(status: WGPU.PopErrorScopeStatus, kind: WGPU.ErrorType, message: Str, env: rawptr, __: rawptr) void = {
+    ::enum(@type kind);
+    set_dynamic_context(env);
+    if kind != .NoError {
+        @panic("dawn says your code is bad and you should feel bad:\n %", message);
+    }
 }

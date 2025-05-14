@@ -32,6 +32,7 @@ actually that's a bit too agressive but certainly stop processing ANSI escape co
 - tabs
 - drag a tab out to make a new window
 - auto-scroll if you put the mouse at the edge of the screen while highlighting to grow your selection
+- undo
 
 ## Graphics
 
@@ -57,6 +58,9 @@ actually that's a bit too agressive but certainly stop processing ANSI escape co
 make sure that's not something i broke (i think it was always like that, 
 just a problem with how that program is doing directions not with the app lib)
 - generate the shader desc structs instead of pasting them
+- :LazyMagicNumbers
+- :DEPTH (which is also for msaa)
+- bindgroups_cache 
 
 ## stuff i broke
 
@@ -85,6 +89,7 @@ rn you're supposed to need a redundant `[]` in a call like that.
 - `graphics` programs don't work on amd64. 
 with -keep-names: `ld: invalid use of rip-relative addressing in '_junk' to '__NSConcreteGlobalBlock'`
 - tests/todo/(a.fr, c.fr, d.fr)
+- literal for a 64 bit integer with the high bit set shouldn't need a bit cast 
 
 ## cross compiling
 
@@ -256,6 +261,8 @@ or just default to jitting and force you to enable aot by specifying an output p
 - `pattern match on non-tuple but expected % args` should show the callee as well
 - when it tells you a #import is null at comptime, say whether the library string was registered. 
 (ie. did you probably typo the lib or the func).
+- integer overflow of a literal
+- contextual field not found should show the type's declaration location 
 
 ## language decisions
 

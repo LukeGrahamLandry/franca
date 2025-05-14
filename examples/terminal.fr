@@ -396,14 +396,15 @@ on_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
             copy_from_selection(buffer);
         };
         
-        if event.key_code == .BACKSPACE && buffer.lines.len > 0 {
+        @debug_assert(buffer.lines.len > 0);
+        if event.key_code == .BACKSPACE {
+            @debug_assert(buffer.cursor.y >= 0);
             l := min(buffer.cursor.y.int(), buffer.lines.len - 1);
             last := buffer.lines[l]&;
             if last.len() > 0 {
                 i := min(buffer.cursor.x.int(), last.len()) - 1;
                 last.remove_at(i);
-                buffer.cursor.x = i.float();
-                buffer.cursor.y = l.float();
+                buffer.set_cursor(x = i.float(), y = l.float());
             } else {
                 // TODO: this is wrong if we care about deleting text from anyline
                 buffer.lines.len = max(buffer.lines.len - 1, 1);
@@ -452,7 +453,7 @@ on_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
         l := min(buffer.cursor.y.int(), buffer.lines.len - 1);
         last := buffer.lines[l]&;
         last.insert_at(buffer.cursor.x.int(), s, buffer.gpa);
-        buffer.cursor.x += s.len.float();
+        buffer.set_cursor(x = buffer.cursor.x + s.len.float(), y = buffer.cursor.y);
     };
     
     @match(event.type) {
@@ -720,6 +721,7 @@ fn draw_text(self: *TextBuffer) void = {
     };
     
     // draw the cursor as a narrow bar
+    // TODO: this is an overly hacky thing to do. just have another character slot with a narrow texture (like byte 1 or whatever)
     {
         sdtx.pos.x = x + (self.cursor.x.int() - col).float().cast();
         sdtx.pos.y = y + (self.cursor.y.int() - start).float().cast();
@@ -813,13 +815,14 @@ fn insert_at(self: *Line, i: i64, s: Str, a: Alloc) void = {
         dest.slice(0, i).copy_from(prev.slice(0, i));
         dest.slice(i, i + s.len).copy_from(s);
         dest.rest(i + s.len).copy_from(prev.rest(i));
+        // :LEAK
         self.repr = dest.as_raw_list();
         return()
     };
     
-    self.repr.len += i;
+    self.repr.len += s.len;
     buf := self.repr.items();
-    buf.copy_overlapping(buf.len + s.len, i, s.len);
+    buf.copy_overlapping(i + s.len, i, prev.len - i);
     buf.slice(i, i + s.len).copy_from(s);
 }
 

@@ -1,3 +1,40 @@
+## (May 14)
+
+- another round of working on webgpu support
+- `Unsupported texture format TextureFormat::Depth32FloatStencil8, reason: requires feature FeatureName::Depth32FloatStencil8`
+but if i getFeatures() i can see that it does support that feature? 
+i guess i have to ask for it specifically somewhere? 
+yeah, when you create the device, need to say up front what features you need. 
+i guess that's fair, nicer to crash and burn at the beginning than the first time you try to do something interesting. 
+- now it crashes in uniform_buffer_on_commit calling writeBuffer. 
+which is especially offensive because i don't have any uniforms? 
+is writeBuffer of zero bytes an illegal build technique? 
+thats what sokol does tho? 
+- other than that, their error messages are like very reasonable. 10/10 would uncapturedErrorCallbackInfo again.  
+- ah fnucker, i shouldn't have complemented them. submit() crashes silently. 
+but if i comment that out too i do get exciting purple rectangle (which isn't what i asked 
+for which makes sense as i comment out the asking) but at least im successfully giving dawn access to my window. 
+- is there any chance that if i make DAWN_ENABLE_ASAN be ON it will give me a stack trace? 
+nope. glad i waited 4.5 minutes for that to compile...
+ah! but real lldb finds the debug symbols! amazing. either clion's copy of lldb is garbage 
+or asking for address sanitizer sprinkled some fairy dust on it. 
+- 0x800000004 doesn't look like the pointer i want for my WGPU.Queue... 
+and indeed it sure is not the pointer that getqueue returned at the beginning, 
+so i super fucked it up somehow. 
+oh dear their Limits struct is bigger than mine so when i asked them to fill it,
+it clobbered a bunch of other shit. thats rather unfortunate. 
+so what we've learned is you're super not allowed to use use a webgpu.h, 
+you have to regenerate it all the time. 
+- much closer now. i get the right background colour. still no triangle tho. 
+- now i have to go scrounge around for anything else i turned off.
+that was easy. colorwritemask. triangle works!
+- i like that opening webgpu.h in zed consumes 400% cpu forever 
+(written in rust btw, rendered on the gpu btw), 
+but maybe that's `clangd`'s fault
+- i don't think it's the right triangle but it's hard to tell because i can't 
+get the sokol-samples that use webgpu to compile. surely it's supposed to look the same 
+as the sapp ones. oh yeah, i was giving it a []f64 instead of []f32. 
+
 ## (May 13)
 
 - change font size based on dpi scale at startup
