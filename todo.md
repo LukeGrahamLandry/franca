@@ -9,9 +9,7 @@
 ## Terminal
 
 - crashes if you `cd "";` twice in the repl
-- input text at the cursor. 
-- move around with arrows. click to move cursor. 
-- tab to autocomplete a file path / from history
+- tab to autocomplete a file path 
 - escape codes: colour, move the cursor, clear the screen
 - send input to stdin
 - raw input mode

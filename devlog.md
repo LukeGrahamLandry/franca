@@ -1,6 +1,8 @@
 ## (May 13)
 
 - change font size based on dpi scale at startup
+- move around with arrows. click to move cursor. 
+- input text at the cursor. 
 
 ## (May 12)
 

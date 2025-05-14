@@ -39,6 +39,7 @@ ColourTheme :: @struct {
     font := pack_rgba(235, 219, 178, 255);
     highlight := pack_rgba(0.09, 0.09, 0.09, 1);
     selection := pack_rgba(62, 70, 67, 255);
+    cursor := pack_rgba(0, 204, 255, 255);
 }
 
 // This needs the extra level of indirection so it can be shared with the repl. 
@@ -94,49 +95,50 @@ on_init :: fn(userdata: rawptr) void = {
         b.at.pos.x = sapp.width().float() / 2;
     };
     
-    W := state.scale;
-    H := state.scale * 2;
-    font_pixels := {
-        #use(StbTrueType);
-        tex_width := 1024;
-        bitmap := temp().alloc(u8, tex_width*tex_width);
-        chars := temp().alloc(stbtt_bakedchar, 128-32);
-        result := stbtt_BakeFontBitmap(font_data_ttf().as_ptr(), 0, state.scale.cast() * 2, bitmap.ptr, intcast tex_width, intcast tex_width, 33, 128, chars.ptr);
-        @assert(result >= 0, "didn't fit all characters");
-        // TODO: is this bigger than atlas + metadata? 
-        pixels := ast_alloc().alloc_zeroed(u8, 256*int(W*H));
-        x: f32 = 0; y: f32 = 0;
-        baseline := int(state.scale / 16 * 20);
-        range(0, 128-32) { i |
-            // These are the positions of the texture in the atlas
-            x0, y0, x1, y1 := (@as(i64) chars[i].x0.zext(), @as(i64) chars[i].y0.zext(), @as(i64) chars[i].x1.zext(), @as(i64) chars[i].y1.zext());
-            // These are how much you have to move it to account for the blank part. 
-            // ie. the square above will just cover the filled in part of `_` and this tells us to move it down. 
-            x, y := (chars[i].xoff.cast().int(), chars[i].yoff.cast().int());
-            range(y0, y1) { j |
-                char_w := x1 - x0;
-                src  := bitmap.subslice(j*tex_width + x0, char_w);
-                dest := pixels.subslice((j-y0+(y+baseline))*W.int()*256 + x + (i+32+1)*W.int(), char_w);
-                dest.copy_from(src);
-            };
-        };
-        // make non ascii bytes show as filled in cells
-        range(0, H.int()) { j |
-            base := j*W.int()*256;
-            pixels.slice(base + 0, base + 32*W.int()).set_bytes(0xFF);
-            pixels.slice(base + 128*W.int(), base + 255*W.int()).set_bytes(0xFF);
-        };
-        pixels
-    };
+    font_pixels := load_font_pixels(state.scale, general_allocator());
     font_img: Sg.Image = state.sg&.make(
-        width = W.int().intcast()*256,
-        height = H.int().intcast(),
+        width = state.scale.int().intcast()*256,
+        height = state.scale.mul(2).int().intcast(),
         pixel_format = .R8,
         data = (subimage = ((font_pixels, ..empty()), ..zeroed(Array([]u8, 16)))),
         label = "font_texture",
     );
     state.text.font_img = font_img;
 };
+
+fn load_font_pixels(scale: f64, a: Alloc) []u8 #use(StbTrueType) = {
+    W := scale;
+    H := scale * 2;
+    tex_width := (128-32) * scale.int() / 4;  // TODO: think about how to choose this number correctly
+    bitmap := temp().alloc(u8, tex_width*tex_width);
+    chars := temp().alloc(stbtt_bakedchar, 128-32);
+    result := stbtt_BakeFontBitmap(font_data_ttf().as_ptr(), 0, scale.cast() * 2, bitmap.ptr, intcast tex_width, intcast tex_width, 33, 128, chars.ptr);
+    @assert(result >= 0, "didn't fit all characters");
+    // TODO: is this bigger than atlas + metadata? 
+    pixels := a.alloc_zeroed(u8, 256*int(W*H));
+    x: f32 = 0; y: f32 = 0;
+    baseline := int(scale / 16 * 20);
+    range(0, 128-32) { i |
+        // These are the positions of the texture in the atlas
+        x0, y0, x1, y1 := (@as(i64) chars[i].x0.zext(), @as(i64) chars[i].y0.zext(), @as(i64) chars[i].x1.zext(), @as(i64) chars[i].y1.zext());
+        // These are how much you have to move it to account for the blank part. 
+        // ie. the square above will just cover the filled in part of `_` and this tells us to move it down. 
+        x, y := (chars[i].xoff.cast().int(), chars[i].yoff.cast().int());
+        range(y0, y1) { j |
+            char_w := x1 - x0;
+            src  := bitmap.subslice(j*tex_width + x0, char_w);
+            dest := pixels.subslice((j-y0+(y+baseline))*W.int()*256 + x + (i+32+1)*W.int(), char_w);
+            dest.copy_from(src);
+        };
+    };
+    // make non ascii bytes show as filled in cells
+    range(0, H.int()) { j |
+        base := j*W.int()*256;
+        pixels.slice(base + 0, base + 32*W.int()).set_bytes(0xFF);
+        pixels.slice(base + 128*W.int(), base + 255*W.int()).set_bytes(0xFF);
+    };
+    pixels
+}
 
 Colour :: @struct(r: i64, g: i64, b: i64, a := 255);
 Pos :: @struct(x: f64, y: f64);
@@ -192,9 +194,6 @@ on_frame :: fn(userdata: rawptr) void = {
 
 fn append_string(buffer: *TextBuffer, new: Str) void = {
     state := state[];
-    if buffer.lines.len == 0 {
-        buffer.lines&.push(empty_line, buffer.gpa);
-    };
     if(new == "", => return());
     state.dirty = true;
     last := buffer.lines[buffer.lines.len - 1]&;
@@ -251,6 +250,16 @@ fn append_string(buffer: *TextBuffer, new: Str) void = {
     line := new.rest(start);
     buffer.max_x = max(buffer.max_x, float(last.len() + line.len));
     last.push_all(line, buffer.gpa);
+    
+    if buffer.cursor.y != buffer.lines.len.float() - 1 {
+        buffer.put_cursor_at_end();
+    }
+}
+
+fn put_cursor_at_end(buffer: *TextBuffer) void = {
+    last := buffer.lines[buffer.lines.len - 1]&;
+    buffer.cursor.y = buffer.lines.len.float() - 1;
+    buffer.cursor.x = last.len().float();
 }
 
 fn echo(s: Str) void = {
@@ -279,6 +288,7 @@ on_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
         if event.modifiers.get(.left_mouse) != 0 {
             break :: local_return;
             b, pos := find_mouse(event) || break();
+            b.set_cursor(pos);
             state.dirty = true;
             if b.selection& { sel |
                 sel.end = pos;
@@ -312,8 +322,10 @@ on_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
                 ));
                 state.click_count = 0;
             }
+            b.set_cursor(b.selection.Some.end);
         } else {
             state.click_count = 0;
+            b.set_cursor(pos);
         }
         state.last_click_time = now;
         
@@ -321,8 +333,7 @@ on_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
             // cmd + left click -> open file path
             open_link_at(b, line, col);
             return();
-        }
-        b.cursor = pos;
+        };
     };
     
     if event.type == .RESIZED {
@@ -356,6 +367,7 @@ on_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
         buffer := selected_buffer() || return();
         
         if event.key_code == .TAB {
+            // tab -> autocomplete from history
             last := buffer.lines[buffer.lines.len - 1]&;
             prefix := last.str();
             found: ?Str = .None;
@@ -376,6 +388,7 @@ on_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
             if found { found |
                 last.set_len(0);
                 last.push_all(found, buffer.gpa);
+                buffer.put_cursor_at_end();
             }
         }
         
@@ -384,11 +397,17 @@ on_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
         };
         
         if event.key_code == .BACKSPACE && buffer.lines.len > 0 {
-            last := buffer.lines[buffer.lines.len - 1]&;
+            l := min(buffer.cursor.y.int(), buffer.lines.len - 1);
+            last := buffer.lines[l]&;
             if last.len() > 0 {
-                last.set_len(last.len() - 1);
+                i := min(buffer.cursor.x.int(), last.len()) - 1;
+                last.remove_at(i);
+                buffer.cursor.x = i.float();
+                buffer.cursor.y = l.float();
             } else {
-                buffer.lines.len -= 1;
+                // TODO: this is wrong if we care about deleting text from anyline
+                buffer.lines.len = max(buffer.lines.len - 1, 1);
+                buffer.put_cursor_at_end();
             };
         }
         
@@ -400,33 +419,40 @@ on_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
             move_in_history(buffer, false);
         }
         
+        if event.key_code == .A && event.modifiers.get(.control) != 0 {
+            buffer.cursor.x = 0;
+        };
+        
         if event.key_code == .LEFT {
             buffer.cursor.x = max(buffer.cursor.x - 1, 0);
+            // TODO: off the end to prev line?
         };
         
         if event.key_code == .RIGHT {
-            // TODO: get the current line so we know the max 
+            buffer.set_cursor(x = buffer.cursor.x + 1, y = buffer.cursor.y);
+            // TODO: off the end to next line?
         };
         
         if event.key_code == .ENTER {
             if event.modifiers.get(.shift) != 0 {
                 buffer.append_string("\n");
+                buffer.cursor.x = 0;
                 return();
             };
             
-            if buffer.lines.len == 0 {
-                buffer.lines&.push(empty_line, buffer.gpa);
-            };
-        
             raw_command := buffer.lines&[buffer.lines.len - 1]&.str();
             exec(buffer, raw_command);
+            buffer.cursor.x = 0;
         };
     };
     buffer := selected_buffer() || return();
     
     if event.type == .CHAR && event.char_code < 127 && event.char_code >= 32 && event.modifiers.get(.super) == 0 {
         s: Str = (ptr = ptr_cast_unchecked(u32, u8, event.char_code&), len = 1);
-        buffer.append_string(s);
+        l := min(buffer.cursor.y.int(), buffer.lines.len - 1);
+        last := buffer.lines[l]&;
+        last.insert_at(buffer.cursor.x.int(), s, buffer.gpa);
+        buffer.cursor.x += s.len.float();
     };
     
     @match(event.type) {
@@ -484,6 +510,7 @@ move_in_history :: fn(b: *TextBuffer, up: bool) void = {
     };
     cmd := state.history[state.history_index];
     b.append_string(cmd);
+    b.put_cursor_at_end();
 }
 
 update_hover :: fn(event: *Sapp.Event) void = {
@@ -550,7 +577,9 @@ find_link_at :: fn(b: *TextBuffer, line: i64, col: i64) ?Ty(i64, i64, i64) = {
 fn selected_buffer() ?*TextBuffer = {
     state := state[];
     if(state.selected_buffer >= state.buffers.len, => return(.None));
-    (Some = state.buffers.index(state.selected_buffer))
+    b := state.buffers.index(state.selected_buffer);
+    @debug_assert(b.lines.len > 0);
+    (Some = b)
 }
 
 fn main() void = {
@@ -624,6 +653,12 @@ fn fix(sel: Selection) Selection = {
     sel
 }
 
+fn set_cursor(self: *TextBuffer, pos: Pos) void = {
+    y := pos.y.max(0).min(self.lines.len.float() - 1);
+    self.cursor.y = y;
+    self.cursor.x = pos.x.max(0).min(self.lines[y.int()]&.len().float());
+}
+
 fn draw_text(self: *TextBuffer) void = {
     if(self.dead, => return());
     state := state[];
@@ -682,6 +717,18 @@ fn draw_text(self: *TextBuffer) void = {
             sdtx.pos.y += 1;
             sdtx.pos.x = x;
         };
+    };
+    
+    // draw the cursor as a narrow bar
+    {
+        sdtx.pos.x = x + (self.cursor.x.int() - col).float().cast();
+        sdtx.pos.y = y + (self.cursor.y.int() - start).float().cast();
+        sdtx.color = state.theme.cursor;
+        cursor_fraction :: 4.0;
+        sdtx.glyph_size.x /= cursor_fraction;
+        sdtx.pos.x *= cursor_fraction;
+        sdtx.put(0); 
+        sdtx.glyph_size.x *= cursor_fraction;
     };
 
     sdtx.pos.x = x;
@@ -752,9 +799,42 @@ fn push_all(self: *Line, s: []u8, a: Alloc) void = if self.repr.len <= 0 {
     self.repr&.push_all(s, a);
 };
 
+fn insert_at(self: *Line, i: i64, s: Str, a: Alloc) void = {
+    prev := self.str();
+    if i >= prev.len {
+        self.push_all(s, a);
+        return()
+    };
+    
+    // TODO: share code with slowly_prepend_all (thats just offset = 0)
+    
+    if self.repr.len <= 0 || prev.len + s.len >= self.repr.cap {
+        dest := a.alloc(u8, prev.len + s.len);
+        dest.slice(0, i).copy_from(prev.slice(0, i));
+        dest.slice(i, i + s.len).copy_from(s);
+        dest.rest(i + s.len).copy_from(prev.rest(i));
+        self.repr = dest.as_raw_list();
+        return()
+    };
+    
+    self.repr.len += i;
+    buf := self.repr.items();
+    buf.copy_overlapping(buf.len + s.len, i, s.len);
+    buf.slice(i, i + s.len).copy_from(s);
+}
+
+fn remove_at(self: *Line, i: i64) void = {
+    prev := self.str();
+    if i < prev.len {
+        prev.copy_overlapping(i, i + 1, prev.len - i - 1);
+    };
+    self.set_len(prev.len - 1);
+}
+
 fn empty(a: Alloc) TextBuffer = {
     b := zeroed TextBuffer;
     b.gpa = a;
+    b.lines&.push(empty_line, b.gpa);
     b.selection = .None;
     b.hover = .None;
     b
