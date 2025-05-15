@@ -1,0 +1,74 @@
+Recorder :: @struct {
+    events: BucketArray(Sapp.Event);
+}
+
+fn init(a: Alloc) Recorder = {
+    (events = init(10, a))
+}
+
+fn push(self: *Recorder, event: *Sapp.Event) void = {
+    self.events&.push(event[]);
+}
+
+fn save(self: *Recorder, out: *List(u8)) void = {
+    for self.events& { events |
+        out.push_all(events.interpret_as_bytes());
+    };
+}
+
+Recording :: @struct {
+    events: []Sapp.Event;
+}
+
+fn load(bytes: []u8, a: Alloc) Recording = {
+    (events = (
+        ptr = ptr_cast_unchecked(u8, Sapp.Event, bytes.ptr), 
+        len = bytes.len / size_of(Sapp.Event),
+    ))
+}
+
+fn replay(self: Recording, app: *Sapp.Self, desc: Sapp.Desc) Never = {
+    State :: @struct {
+        recording: Recording;
+        app: *Sapp.Self;
+        desc: Sapp.Desc;
+        cursor: i64 = 0;
+    };
+    state: State = (recording = self, app = app, desc = desc);
+    state.app.run(
+        init_cb = on_init,
+        frame_cb = on_frame,
+        event_cb = on_event,
+        user_data = State.raw_from_ptr(state&),
+        allocator = desc.allocator,
+        high_dpi = true,
+    );
+    unreachable();
+    
+    on_init :: fn(userdata: rawptr) void = {
+        state := State.ptr_from_raw(userdata);
+        state'desc'init_cb(state.desc.user_data);
+    };
+    
+    on_frame :: fn(userdata: rawptr) void = {
+        state := State.ptr_from_raw(userdata);
+        
+        e := state.recording.events;
+        if state.cursor < e.len {
+            state'desc'event_cb(state.desc.user_data, e.index(state.cursor));
+            state.cursor += 1;
+        }
+        
+        state'desc'frame_cb(state.desc.user_data);
+    };
+    
+    on_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
+        state := State.ptr_from_raw(userdata);
+    
+        if event.type == .KEY_DOWN && event.key_code == .W && event.modifiers.get(.super) != 0 {
+            state.app.quit_requested = true;
+        }
+        
+        // drop any other events (use the recorded ones instead)
+    };
+}

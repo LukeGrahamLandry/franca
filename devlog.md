@@ -17,7 +17,7 @@ for which makes sense as i comment out the asking) but at least im successfully 
 - is there any chance that if i make DAWN_ENABLE_ASAN be ON it will give me a stack trace? 
 nope. glad i waited 4.5 minutes for that to compile...
 ah! but real lldb finds the debug symbols! amazing. either clion's copy of lldb is garbage 
-or asking for address sanitizer sprinkled some fairy dust on it. 
+or asking for address sanitizer sprinkled some fairy dust on it (nope, clion still doesn't know whats going on). 
 - 0x800000004 doesn't look like the pointer i want for my WGPU.Queue... 
 and indeed it sure is not the pointer that getqueue returned at the beginning, 
 so i super fucked it up somehow. 
@@ -33,7 +33,7 @@ that was easy. colorwritemask. triangle works!
 but maybe that's `clangd`'s fault
 - i don't think it's the right triangle but it's hard to tell because i can't 
 get the sokol-samples that use webgpu to compile. surely it's supposed to look the same 
-as the sapp ones. oh yeah, i was giving it a []f64 instead of []f32. 
+as the sapp ones. oh yeah, i was giving it a `[]f64` instead of `[]f32`. 
 
 ## (May 13)
 

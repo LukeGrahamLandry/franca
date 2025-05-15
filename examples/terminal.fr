@@ -13,6 +13,7 @@
 Repl :: import("@/examples/repl.fr");
 
 ENABLE_FRANCA_REPL :: false;
+Replay :: import("@/graphics/replay.fr");
 
 State :: @struct(
     pass_action: SgPassAction,
@@ -32,6 +33,7 @@ State :: @struct(
     last_click_time: i64,
     click_count: i64,
     scale: f64,  // height = 2 * scale
+    recording: ?Replay'Recorder,
 );
 
 ColourTheme :: @struct {
@@ -71,6 +73,7 @@ on_init :: fn(userdata: rawptr) void = {
     state.history&.push("", allocator);
     state.scale = 8 * state.app.dpi_scale.cast();
     state.theme = ();
+    state.recording = .None;
     
     state.dirty = true;
     
@@ -85,15 +88,18 @@ on_init :: fn(userdata: rawptr) void = {
         ),
     );
     
-    b := state.buffers.index(0);
-    b.at.w = sapp.width().float() / state.buffers.len.float();
-    b.at.h = sapp.height().float();
-    if state.buffers.len >= 2 {
-        b := state.buffers.index(1);
-        b.at.w = sapp.width().float() / 2;
-        b.at.h = sapp.height().float();
-        b.at.pos.x = sapp.width().float() / 2;
-    };
+    w_width := sapp.width().float();
+    w_height := sapp.height().float();
+    
+    buffer: TextBuffer = empty(allocator);
+    //buffer.at.pos = (x = 20, y = 10);
+    buffer.at.w = w_width - 20; // - 200;
+    buffer.at.h = w_height;
+    push(state.buffers&, buffer);
+    
+    //buffer: TextBuffer = empty(allocator);
+    //buffer.at = (pos = (x = w_width - 200, y = 10), w = 100, h = 100);
+    //push(state.buffers&, buffer);
     
     font_pixels := load_font_pixels(state.scale, general_allocator());
     font_img: Sg.Image = state.sg&.make(
@@ -265,6 +271,7 @@ fn put_cursor_at_end(buffer: *TextBuffer) void = {
 fn echo(s: Str) void = {
     if selected_buffer() { buffer |
         buffer.append_string(s);
+        buffer.put_cursor_at_end();
     }
 }
 
@@ -279,6 +286,10 @@ fn exit() void = {
 
 on_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
     state := state[];
+    if state.recording& { it |
+        it.push(event);
+    };
+    
     if event.type != .MOUSE_MOVE {
         state.dirty = true;
     } else {
@@ -364,6 +375,23 @@ on_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
                 }
             }
         }
+        
+        if event.key_code == .R && event.modifiers.get(.control) != 0 && event.modifiers.get(.shift) != 0 {
+            if state.recording { it |
+                out := u8.list(temp());
+                it&.save(out&);
+                path := @tfmt("target/replay/%.bin", timestamp());
+                write_entire_file_or_crash(path, out.items());
+                echo @tfmt("stopped recording. saved replay to %\n", path);
+                println(path);
+                
+                state.recording = .None;  // :LEAK
+            } else {
+                state.recording = (Some = init(general_allocator()));
+                echo "started recording\n";
+            }  
+        }
+        
         buffer := selected_buffer() || return();
         
         if event.key_code == .TAB {
@@ -403,12 +431,16 @@ on_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
             last := buffer.lines[l]&;
             if last.len() > 0 {
                 i := min(buffer.cursor.x.int(), last.len()) - 1;
+                if i < 0 {
+                    // TODO: merge lines
+                    return();
+                }
                 last.remove_at(i);
                 buffer.set_cursor(x = i.float(), y = l.float());
             } else {
-                // TODO: this is wrong if we care about deleting text from anyline
-                buffer.lines.len = max(buffer.lines.len - 1, 1);
-                buffer.put_cursor_at_end();
+                new_l := max(l - 1, 0);
+                buffer.set_cursor(x = buffer.lines[new_l]&.len().float(), y = new_l.float());
+                buffer.lines&.ordered_remove(l);
             };
         }
         
@@ -532,7 +564,10 @@ find_mouse :: fn(event: *Sapp.Event) ?Ty(*TextBuffer, Pos) = {
     enumerate state.buffers& { i, b |
         if b.at.contains(pos) {
             state.selected_buffer = i;
-            pos: Pos = (x = pos.x / state.scale + b.render.x, y = pos.y / (state.scale * 2) + b.render.y);
+            pos: Pos = (
+                x = (pos.x - b.at.pos.x) / state.scale + b.render.x, 
+                y = (pos.y - b.at.pos.y) / (state.scale * 2) + b.render.y,
+            );
             return(Some = (b, pos));
         };
     };
@@ -591,6 +626,25 @@ fn main() void = {
     state.buffers = list(allocator);
     state.process = .None;
     
+    
+    i := 0;
+    a := cli_args();
+    while => i < a.len - 1 { 
+        if a[i] == "-replay" {
+            path := a[i + 1];
+            bytes := read_to_string_or_crash(temp(), path.str());
+            recording: Replay'Recording = load(bytes.items(), general_allocator());
+            replay(recording, state.app&, (
+                init_cb = on_init,
+                frame_cb = on_frame,
+                event_cb = on_event,
+                user_data = zeroed rawptr,
+                allocator = general_allocator(),
+            ));
+        };
+        i += 1;
+    };
+    
     // :SLOW
     fn load_new_buffer(path: Str, a: Alloc) TextBuffer = {
         buffer: TextBuffer = empty(a);
@@ -600,8 +654,6 @@ fn main() void = {
     };
     //state.buffers&.push(load_new_buffer("compiler/v2/sema.fr", allocator));
     
-    buffer: TextBuffer = empty(allocator);
-    push(state.buffers&, buffer);
     //state.buffers&.push(load_new_buffer("examples/terminal.fr", allocator));
     state.app&.run(
         init_cb = on_init,
@@ -738,6 +790,12 @@ fn draw_text(self: *TextBuffer) void = {
     sdtx.color = state.theme.font; 
     range(start, end) { i |
         line := self.lines&.index(i).str();
+        
+        debug_small_strings :: false;
+        if debug_small_strings {
+            sdtx.color = @if(self.lines[i].repr.len < 0, 0xFF00FF00, 0xFF0000FF);
+        }
+        
         if col < line.len {
             count := min(line.len - col, chars_that_fit);
             sdtx.put(line.subslice(col, count)); 
@@ -749,8 +807,8 @@ fn draw_text(self: *TextBuffer) void = {
 
 Line :: @struct(
     // small string optimisation:
-    // a valid list will never have a negative capacity, so if capacity < 0 (high bit is set), 
-    // interpret the rest of the high byte of capacity (which is the 24th byte in this struct 
+    // a valid list will never have a negative length, so if length < 0 (high bit is set), 
+    // interpret the rest of the high byte of length (which is the 24th byte in this struct 
     // because two's complement) as the length of a string stored inline in the other 23 bytes. 
     // 
     // note length can still be 0..24 with an allocation if you pushed past 24 and then deleted 
@@ -758,24 +816,25 @@ Line :: @struct(
     repr: RawList(u8),
 );
 
-empty_line: Line : (repr = zeroed RawList(u8));
+// len = 0 means it has an allocation. this has the high bit set so it's in small mode. 
+empty_line: Line : (repr = (ptr = zeroed(*u8), cap = 0, len = 0x80.shift_left(64-8)));
 
 fn raw_bytes(self: *Line) []u8 = self.slice(1).interpret_as_bytes();
 
-fn str(self: *Line) Str #inline = if self.repr.len <= 0 {
+fn str(self: *Line) Str #inline = if self.repr.len < 0 {
     b := self.raw_bytes();
     b.subslice(0, b[23].zext().bit_and(0x7F))
 } else {
     self.repr.items()
 };
 
-fn len(self: *Line) i64 #inline = if self.repr.len <= 0 {
+fn len(self: *Line) i64 #inline = if self.repr.len < 0 {
     self.repr.len.shift_right_logical(64-8).bit_and(0x7F)
 } else {
     self.repr.len
 };
 
-fn set_len(self: *Line, new_len: i64) void #inline = if self.repr.len <= 0 {
+fn set_len(self: *Line, new_len: i64) void #inline = if self.repr.len < 0 {
     @debug_assert(new_len <= 23 && new_len >= 0);
     not_high_byte := (@as(i64)0xFF).shift_left(64-8).bit_not();
     part_of_string := self.repr.len.bit_and(not_high_byte);
@@ -784,13 +843,14 @@ fn set_len(self: *Line, new_len: i64) void #inline = if self.repr.len <= 0 {
     self.repr.len = new_len;
 };
 
-fn push_all(self: *Line, s: []u8, a: Alloc) void = if self.repr.len <= 0 {
+fn push_all(self: *Line, s: []u8, a: Alloc) void = if self.repr.len < 0 {
     l := self.repr.len.shift_right_logical(64-8).bit_and(0x7F);
     b := self.raw_bytes();
     if s.len + l > 23 {
         dest := a.alloc(u8, s.len + l);
         dest.slice(0, l).copy_from(b.subslice(0, l));
         dest.rest(l).copy_from(s);
+        self.drop(a);
         self.repr = dest.as_raw_list();
     } else {
         self.set_len(l + s.len);  // TODO: why does this need to be first
@@ -799,6 +859,10 @@ fn push_all(self: *Line, s: []u8, a: Alloc) void = if self.repr.len <= 0 {
     }
 } else {
     self.repr&.push_all(s, a);
+};
+
+fn drop(self: *Line, a: Alloc) void = if self.repr.len >= 0 {
+    self.repr&.drop(a);
 };
 
 fn insert_at(self: *Line, i: i64, s: Str, a: Alloc) void = {
@@ -810,12 +874,12 @@ fn insert_at(self: *Line, i: i64, s: Str, a: Alloc) void = {
     
     // TODO: share code with slowly_prepend_all (thats just offset = 0)
     
-    if self.repr.len <= 0 || prev.len + s.len >= self.repr.cap {
+    if self.repr.len < 0 || prev.len + s.len >= self.repr.cap {
         dest := a.alloc(u8, prev.len + s.len);
         dest.slice(0, i).copy_from(prev.slice(0, i));
         dest.slice(i, i + s.len).copy_from(s);
         dest.rest(i + s.len).copy_from(prev.rest(i));
-        // :LEAK
+        self.drop(a);
         self.repr = dest.as_raw_list();
         return()
     };
@@ -827,6 +891,7 @@ fn insert_at(self: *Line, i: i64, s: Str, a: Alloc) void = {
 }
 
 fn remove_at(self: *Line, i: i64) void = {
+    @debug_assert_ge(i, 0);
     prev := self.str();
     if i < prev.len {
         prev.copy_overlapping(i, i + 1, prev.len - i - 1);
