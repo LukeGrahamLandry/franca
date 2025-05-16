@@ -134,3 +134,7 @@ when you call commit().
 - uniforms
   - data that's the same for many runs of a shader. 
   ie. for every vertex in a scene, the player's camera transform is the same. 
+
+## Alignment
+
+Vec3 is a bad plan!

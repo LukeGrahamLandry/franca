@@ -90,6 +90,7 @@ rn you're supposed to need a redundant `[]` in a call like that.
 with -keep-names: `ld: invalid use of rip-relative addressing in '_junk' to '__NSConcreteGlobalBlock'`
 - tests/todo/(a.fr, c.fr, d.fr)
 - literal for a 64 bit integer with the high bit set shouldn't need a bit cast 
+- `fn vec2(x, y) = (v = (x, y));` miscompiles if inlined but i can't reproduce it in a simple test. 
 
 ## cross compiling
 

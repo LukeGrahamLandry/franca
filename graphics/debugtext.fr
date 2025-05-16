@@ -56,7 +56,7 @@ font :: import("@/graphics/data/fonts.fr");
 . . . . . . . .     byte 7: 0x00 */
 
 Float2  :: @struct(x: f32, y: f32);
-Vertex  :: @struct(x: f32, y: f32, u: u16, v: u16, color: u32);
+Vertex  :: Shaders.InV;
 Command :: @struct(layer_id: i32, first_vertex: i32, num_vertices: i32);
 
 // Set pos/origin/color/font to whatever you like before calling `put` to control how those characters are drawn. 
@@ -99,12 +99,16 @@ Self :: @rec @struct(
 );
 
 Shaders :: @struct(
-    InV  :: @struct(position: Vec2 #attribute(0), texcoord0: Vec2 #attribute(1), color0: Vec4 #attribute(2)),
+    InV  :: @struct(
+        pos: Vec2, 
+        uv: UShort2, 
+        color: UByte4,
+    ),
     OutV :: @struct(uv: Vec2 #user(locn0), color: Vec4 #user(locn1), pos: Vec4 #position),
-    vs   :: fn(in: Shaders.InV) Shaders.OutV = (
-        pos = @vec(in.position * (@vec(2.0, -2.0)) + @vec(-1.0, 1.0), 0.0, 1.0),
-        uv = in.texcoord0,
-        color = in.color0,
+    vs   :: fn(in: Buf(Shaders.InV) #buffer(0), v: u32 #vertex_id) Shaders.OutV = (
+        pos = @vec(in[v].pos * (@vec(2.0, -2.0)) + @vec(-1.0, 1.0), 0.0, 1.0),
+        uv = in[v].uv.unpack(),
+        color = in[v].color.unpack(),
     ),
     InF  :: @struct(uv: Vec2 #user(locn0), color: Vec4 #user(locn1)),
     OutF :: @struct(frag_color: Vec4 #color(0)),
@@ -130,17 +134,13 @@ fn init_context(sdtx: *Self, ctx: *Context, in_desc: *ContextDesc) bool = {
 
     ctx.vbuf = sdtx.sg.make(
         size = ctx.vertices.cap * size_of(Vertex),
-        type = .VERTEXBUFFER,
+        type = .STORAGEBUFFER,
         usage = .STREAM,
         label = "sdtx-vbuf",
     );
     @debug_assert(ctx.vbuf.id != 0);
 
     pip_desc: SgPipelineDesc = ();
-    pip_desc.layout.buffers&[0].stride = size_of(Vertex);
-    pip_desc.layout.attrs&[0].format = .FLOAT2;
-    pip_desc.layout.attrs&[1].format = .USHORT2N;
-    pip_desc.layout.attrs&[2].format = .UBYTE4N;
     pip_desc.shader = sdtx.shader;
     pip_desc.index_type = .NONE;
     pip_desc.sample_count = ctx.desc.sample_count;
@@ -207,9 +207,6 @@ fn setup(sdtx: *Self, desc: Desc) void = {
     // common shader for all contexts
     shd_desc := SgShaderDesc.zeroed();
     shd_desc.label = "sokol-debugtext-shader";
-    shd_desc.attrs&[0] = (glsl_name = "position",  hlsl_sem_name = "TEXCOORD", hlsl_sem_index = 0);
-    shd_desc.attrs&[1] = (glsl_name = "texcoord0", hlsl_sem_name = "TEXCOORD", hlsl_sem_index = 1);
-    shd_desc.attrs&[2] = (glsl_name = "color0",    hlsl_sem_name = "TEXCOORD", hlsl_sem_index = 2);
     shd_desc.images&[0] = (
         stage = .FRAGMENT, 
         image_type = ._2D, 
@@ -231,6 +228,12 @@ fn setup(sdtx: *Self, desc: Desc) void = {
         image_slot = 0,
         sampler_slot = 0,
         glsl_name = "tex_smp",
+    );
+    shd_desc.storage_buffers&[0] = (
+        wgsl_group1_binding_n = 0,
+        msl_buffer_n = 0,
+        stage = .VERTEX,
+        readonly = true,
     );
     choose_shader_impl(SOKOL_BACKEND, shd_desc&, Sdtx.Shaders);
     sdtx.shader = sdtx.sg.make(shd_desc);
@@ -332,7 +335,7 @@ fn draw_layer(ctx: *Context, layer_id: i32) void = {
 
     sdtx.sg.apply_pipeline(ctx.pip);
     bindings := SgBindings.zeroed();
-    bindings.vertex_buffers&[0] = ctx.vbuf;
+    bindings.storage_buffers&[0] = ctx.vbuf;
     bindings.images&[0] = sdtx.font_img;
     bindings.samplers&[0] = sdtx.font_smp;
     sdtx.sg.apply_bindings(bindings&);
@@ -424,16 +427,16 @@ fn render_char(ctx: *Context, c: u8) void #once = {
         y1 := y0 + ctx.glyph_size.y;
 
         u0, v0, u1, v1 := char_to_uv(ctx.common.font_count, ctx.font.intcast(), c);
-        c := ctx.color;
+        c: UByte4 = (_ = ctx.color);
 
         vx := vx.slice(6);
-        vx[0] = (x = x0, y = y0, u = u0, v = v0, color = c);
-        vx[1] = (x = x1, y = y0, u = u1, v = v0, color = c);
-        vx[2] = (x = x1, y = y1, u = u1, v = v1, color = c);
+        vx[0] = (pos = vec2(x0, y0), uv = pack(u0, v0), color = c);
+        vx[1] = (pos = vec2(x1, y0), uv = pack(u1, v0), color = c);
+        vx[2] = (pos = vec2(x1, y1), uv = pack(u1, v1), color = c);
         
-        vx[3] = (x = x0, y = y0, u = u0, v = v0, color = c);
-        vx[4] = (x = x1, y = y1, u = u1, v = v1, color = c);
-        vx[5] = (x = x0, y = y1, u = u0, v = v1, color = c);
+        vx[3] = (pos = vec2(x0, y0), uv = pack(u0, v0), color = c);
+        vx[4] = (pos = vec2(x1, y1), uv = pack(u1, v1), color = c);
+        vx[5] = (pos = vec2(x0, y1), uv = pack(u0, v1), color = c);
     }};
     ctx.pos.x += 1.0;
 }

@@ -1,3 +1,36 @@
+## (May 15)
+
+- so the metal docs have an example where they have same program written as (a storage 
+buffer (which is just an array) indexed by vertex_index) or (using `[[stage_in]]` and 
+telling it attribute locations and it picks them out and passes you the struct). 
+the first way makes way more sense because there aren't seperate uniforms and vertex inputs 
+now, it's just one example of a global variable is an array that you index into. 
+- can i get hello_wgpu to work with that? it runs but no triangle. huh, alignment 
+rules are different somehow? with the vertex buffer i was giving it 7 floats per,
+saying they were vec3f,vec4f in attributes but 2 vec4fs in the shader and that was fine. 
+but when using a storage buffer you need to give it 8 floats per (even if you say vec3f 
+in the shader there's padding). but now that works. i don't understand why vertex buffer 
+doesn't need padding. surely it's not using the extra info about attributes to like recopy everything 
+into a new buffer to realign it right? maybe it's doing an SOA thing? or maybe the alignment 
+rules on storage buffers are just totally arbitrary. mystery. 
+- so does that mean i can get rid of all the code that talks about vertex buffers?
+  - if it means wasting a bunch of space on alignment padding that's quite unfortunate 
+  - sokol exposes vertex_buffer_offsets but you can do that for storage buffers too. 
+  metal's setBuffer makes it trivial and webgpu has dynamic offsets (tho maybe more limited?)
+  - instancing doesn't care: https://webgpufundamentals.org/webgpu/lessons/webgpu-storage-buffers.html#a-instancing
+  - indexing doesn't care: https://github.com/floooh/sokol-samples/blob/master/sapp/vertexpull-sapp.c
+  - different limits might be a problem. metal just says you get 31 buffers, good luck, 
+  but webgpu splits up the limits with defaults being maxStorageBuffersPerShaderStage=8 and maxVertexBuffers=8,
+  so if you can use both you get 16 and 8 is kinda a lot less than 16. 
+  - maybe old versions of opengl doesn't have storage buffers? don't care. 
+- hmm, the thing where you tell it the types of the fields, they're not the types of 
+the fields in the shader, it like reinterprets them into floats between when the cpu writes 
+them and your shader code gets to have them. but i can't ask for that on normal buffers so 
+do i just lose if i don't want my 8 bytes of uv+colour to become 24 bytes? cause like 
+for colour i could write the code myself with bitshifts but wgsl doesn't give you u16 so...?
+ahhh, everyone has unpackXXXX functions that do the int->float stuff. ok it's fine. 
+
+
 ## (May 14)
 
 - another round of working on webgpu support
