@@ -113,7 +113,16 @@ fn set_annotations(info: *IoField, annotations: []Annotation) void = {
             @case(@symbol input) => {
                 info.builtin = .input;
             };
-            @default => ();
+            @case(@symbol user) => {
+                info.builtin = .user;
+            };
+            @case(@symbol colour) => {
+                info.builtin = .colour;
+            };
+            @case(@symbol point_size) => {
+                info.builtin = .point_size;
+            };
+            @default => @println("unknown shader annotation: %", it.name.str());
         }
     };
 }
@@ -441,6 +450,18 @@ fn place_expr(self: *Function, e: *FatExpr) u32 = {
             //self.body&.push(op = .AddrOf, a = v, type = self.type_name(e.ty));
             //self.body.len.sub(1).trunc()
         };
+        fn Call(it) => {
+            fr := current_compiler_context();
+            fid := fr.assert_get_func_id(it.f);
+            func := fr.get_function(fid);
+            // TODO: don't just assume by name like this 🤡 
+            @ct_assert(func.name == @symbol index, e.loc, "TODO: call in place expr in shader");
+            args := it.arg.items();
+            place := self.msl_expr(args.index(0));
+            value := self.msl_expr(args.index(1));
+            self.body&.push(op = .Index, a = place, b = value, type = self.type_name(e.ty));
+            return self.body.len.sub(1).trunc();
+        }
         @default => {
             debug_log_ast(e[]);
             compile_error("TODO: place expr in shader", e.loc)
@@ -471,9 +492,6 @@ fn type_name(self: *Function, type: Type) u16 = {
     if self.type_lookup&.get(type) { it |
         return(it);
     };
-    if size_of(type) == 0 {
-        return(0);
-    };
     s_info: SType = @switch(type) {
         @case(f32)  => (Scalar = .F32);
         @case(f64)  => (Scalar = .F32);  // double is not supported in metal. TODO: maybe we should make this a hard error
@@ -489,7 +507,6 @@ fn type_name(self: *Function, type: Type) u16 = {
         @case(ShaderSampler)   => .Sampler;
         @case(UShort2) => (Scalar = .I32);
         @case(UByte4)  => (Scalar = .I32);
-        @case(void)    => .Void;
         @default => {
             info := get_type_info_ref(type);
             @if_else {
@@ -510,6 +527,7 @@ fn type_name(self: *Function, type: Type) u16 = {
                     };
                     (Struct = (fields = out.items()))
                 };
+                @if(size_of(type) == 0) => return(0);
                 @else => @panic("TODO: handle % in shader translation", type.typename().str());
             }
         };
@@ -569,6 +587,7 @@ AstOp :: @enum(u16) (
     GetField, // 
     GetVarField,
     AddrOf,  // (var)
+    Index,
 
     neg, not, bit_not, 
     fract, abs,
@@ -595,6 +614,7 @@ BuiltinProperty :: @enum(u32) (
     vertex_index,
     colour, 
     input,
+    user,
 );
 
 SType :: @tagged(

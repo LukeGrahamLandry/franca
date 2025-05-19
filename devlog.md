@@ -1,3 +1,22 @@
+## (May 19)
+
+- it's very easy to just silently get garbage
+  - if you forget `[[stage_in]`
+  - if you put `[[buffer(0)]]` on a struct of texture/sampler. 
+  (so it's fine to put your bindings in a struct but it can't be the same struct as your other stuff?)
+- if i were to generate the relection info for the vertex types, 
+it could be more succinct because you wouldn't need to say .unpack() 
+anywhere but i find it super confusing when trying to figure out which 
+cpu side data goes into which part of the shader. it's easier for me 
+if they're the same type on both sides so you can watch it flow through. 
+- similarly, the vertex output and fragment input ("varying" variables?) 
+being different structs makes it less clear that they're the same. 
+TODO: is it slower if you say you need `#position` as an input to the fragment 
+shader but don't use it? cause it seems like that's the only disadvantage. 
+surely the other guy's copy of llvm notices that if it matters. 
+i guess it's confusing if its a magic fragment input like `front_facing`, 
+but i could always just let you nest structs or have that as a seperate argument. 
+
 ## (May 15)
 
 - so the metal docs have an example where they have same program written as (a storage 
@@ -29,7 +48,6 @@ them and your shader code gets to have them. but i can't ask for that on normal 
 do i just lose if i don't want my 8 bytes of uv+colour to become 24 bytes? cause like 
 for colour i could write the code myself with bitshifts but wgsl doesn't give you u16 so...?
 ahhh, everyone has unpackXXXX functions that do the int->float stuff. ok it's fine. 
-
 
 ## (May 14)
 

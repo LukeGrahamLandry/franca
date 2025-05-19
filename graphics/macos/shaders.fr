@@ -2,9 +2,12 @@
 // body[i] produces a value in variable `v{i}` of type `T{body[i].type}`.
 // instructions of type Void are executed for side effects.
 
+
+Counters :: @struct(user: u16, sampler: u16, texture: u16);
+
 emit_all :: fn(self: *Function, out: *List(u8)) void = {
     @fmt(out, MSL_PRELUDE);
-    
+    n := zeroed Counters;
     enumerate self.types& { i, info |
         if !info.is(.Void) {
             @fmt(out, "typedef ");
@@ -25,13 +28,13 @@ emit_all :: fn(self: *Function, out: *List(u8)) void = {
             fn Struct(it) => {
                 @fmt(out, "struct {\n");
                 enumerate it.fields { j, it |
-                    @fmt(out, "        ");
-                    msl_annotation(it, out, it.name.str());
+                    @fmt(out, "    ");
+                    self.msl_annotation(it, out, it.name.str(), n&);
                     @fmt(out, ";\n");
                 };
                 @fmt(out, "}");
             };
-            fn Ptr(it) => @fmt(out, "device T% *", it[]);
+            fn Ptr(it) => @fmt(out, "device T%*", it[]);
         };
         if !info.is(.Void) {
             @fmt(out, " T%;\n", i);
@@ -41,7 +44,7 @@ emit_all :: fn(self: *Function, out: *List(u8)) void = {
     @debug_assert(self.stage != .COMPUTE);
     @fmt(out, "\n% T% %(", if(self.stage == .VERTEX, => "vertex", => "fragment"), self.ret, "main0");
     enumerate self.input { i, it |
-        msl_annotation(it, out, @tfmt("v%", i+1));
+        self.msl_annotation(it, out, @tfmt("v%", i+1), n&);
         if i != self.input.len - 1 {
             @fmt(out, ", ")
         }
@@ -50,7 +53,7 @@ emit_all :: fn(self: *Function, out: *List(u8)) void = {
     emit_body(self, out);
 }
 
-msl_annotation :: fn(it: *IoField, out: *List(u8), name: Str) void = {
+msl_annotation :: fn(self: *Function, it: *IoField, out: *List(u8), name: Str, n: *Counters) void = {
     if it.uniform {
         @fmt(out, "constant ");
     }
@@ -59,11 +62,28 @@ msl_annotation :: fn(it: *IoField, out: *List(u8), name: Str) void = {
         @fmt(out, "& ");
     }
     @fmt(out, "%", name);
+    info := self.types[it.type.zext()]&;
+    @match(info) {  // TODO: do these do anything?
+        fn Texture() => {
+            @fmt(out, " [[texture(%)]]", n.texture);
+            n.texture += 1;
+        }
+        fn Sampler() => {
+            @fmt(out, " [[sampler(%)]]", n.sampler);
+            n.sampler += 1;
+        }
+        @default => ();
+    };
+    
     @match(it.builtin) {
         fn vertex_index() => @fmt(out, " [[vertex_id]]");
         fn position()     => @fmt(out, " [[position]]");
-        fn colour()       => @fmt(out, " [[color(0)]]");
+        fn colour()       => @fmt(out, " [[color(0)]]");  // todo: don't think this does anything
         fn input()     => @fmt(out, " [[stage_in]]");
+        fn user()       => {
+            @fmt(out, " [[user(locn%)]]", n.user);
+            n.user += 1;
+        }
         @default => ();  // TODO
     };
     if it.buffer != 255 {
@@ -74,9 +94,23 @@ msl_annotation :: fn(it: *IoField, out: *List(u8), name: Str) void = {
 emit_body :: fn(self: *Function, out: *List(u8)) void = {
     fr := current_compiler_context();
     
+    by_type := temp().alloc_zeroed(RawList(u32), self.types.len);
     enumerate self.body { i, inst |
         if inst.type != 0 {
-            @fmt(out, "    T% v%;\n", inst.type, i);
+            by_type[inst.type.zext()]&.push(i.trunc(), self.gpa);
+        }
+    };
+    
+    enumerate by_type { type, vars |
+        if vars.len > 0 {
+            @fmt(out, "    T% ", type);
+            for vars { i |
+                @fmt(out, "v%,", i);
+            };
+            if vars.len != 0 {
+                out.len -= 1;
+            };
+            @fmt(out, ";\n");
         }
     };
     
@@ -89,11 +123,13 @@ emit_body :: fn(self: *Function, out: *List(u8)) void = {
         inst := self.body[i];
         if(@is(inst.op, .Join, .Par, .Nop), => continue());
         
-        @fmt(out, ";\n");
-        indentation -= int(@is(inst.op, .End, .Else));
-        range(0, indentation, fn(_) => @fmt(out, "    "));
-        indentation += int(@is(inst.op, .Loop, .If, .Else));
-        if(inst.type != 0, => @fmt(out, "v% = ", i));
+        if inst.op != .Arg {
+            @fmt(out, ";\n");
+            indentation -= int(@is(inst.op, .End, .Else));
+            range(0, indentation, fn(_) => @fmt(out, "    "));
+            indentation += int(@is(inst.op, .Loop, .If, .Else));
+            if(inst.type != 0, => @fmt(out, "v% = ", i));
+        }
         
         name := msl_operator(inst.op);
         if name != "" {
@@ -240,6 +276,7 @@ fn msl_operator(op: AstOp) Str = @match(op) {
     fn gt() => ">";
     fn le() => "<=";
     fn ge() => ">=";
+    fn Index() => "+";
     @default => "";
 };
 
@@ -249,7 +286,7 @@ fn msl_function(op: AstOp) Str = @match(op) {
     fn abs() => "abs";
     fn fract() => "fract";
     fn u2x16() => "unpack_unorm2x16_to_float";
-    fn u4x8() => "unpack_unorm2x16_to_float";
+    fn u4x8() => "unpack_unorm4x8_to_float";
     fn vec2() => "float2";
     fn clamp() => "clamp";
     fn mix() => "mix";
