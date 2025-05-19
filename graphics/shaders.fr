@@ -2,15 +2,23 @@
 //! Eventually I want to make this a more serious target that supports a useful subset of the language. 
 //! But for now I just need trivial math for debugtext/gl. 
 
-// i guess it's socially acceptable for this to get a lot bigger
-// - sokol-tools/shdc: 8k + SPIRV-Cross: 62k + glslang: 72k
-// - naga: 64k
-// - tint: 120k
+//
+// Types/Intrinsics in the shader langauges
+//
+// TODO: cpu implementations of these so you can run shaders on cpu as well for debugging. 
+//       want to pair that with a gfx backend that does software rendering. 
+//       move these to vec.fr ?
+//
 
 ShaderTexture2f :: @struct();
 ShaderSampler :: @struct();
 fn sample(t: ShaderTexture2f, s: ShaderSampler, uv: Vec2) Vec4 #metal_method = ();
 fn mul(m: Sgl.Matrix, v: Vec4) Vec4 = ();
+
+fract :: fn(a: Vec3) Vec3 = (); 
+fn abs(a: Vec3) Vec3 = ();
+fn mix(a: Vec3, b: Vec3, c: f32) Vec3 = ();
+fn clamp(a: Vec3, b: f64, c: f32) Vec3 = ();
 
 fn Buf($T: Type) Type = {
     Self :: @struct(_: *T, ShaderBufferElement :: T);
@@ -23,14 +31,15 @@ fn Buf($T: Type) Type = {
 UShort2 :: @struct(_: u32);
 UByte4  :: @struct(_: u32);
 
-// TODO: cpu implementations of these so you can run shaders on cpu as well for debugging. 
-//       want to pair that with a gfx backend that does software rendering. 
-//       move these to vec.fr ?
 fn unpack(self: UShort2) Vec2 #builtin(.u2x16) = ();
 fn unpack(self: UByte4) Vec4 #builtin(.u4x8) = ();
 
 fn pack(u: u16, v: u16) UShort2 = 
     (_ = v.zext().shift_left(16).bit_or(u.zext()));
+
+//
+// Convert a Franca function into my shader IR. 
+//
 
 // This must be called at comptime!
 #use("@/compiler/ast_external.fr") 
@@ -38,304 +47,221 @@ fn compile_to_shader_source(fid: FuncId, backend: RenderBackend, is_vertex: bool
     ::enum(RenderBackend);
     ::tagged(FuncImpl);
     @assert(backend == .METAL_MACOS, "TODO: support non-metal shader languages");
+    fr := current_compiler_context();
     func := get_function_ast(fid, true, true, true, true);
     l := func.loc;
-    @ct_assert(func.body&.is(.Normal), l, "expected normal expr function body for shader");
-    expr := func.body.Normal&;
     
-    self: Translate = (
-        stmts = list(ast_alloc()), 
-        decls = list(ast_alloc()), 
-        types = init(temp()),
-        uniforms_var = Var.zeroed(),
-    );
-    self.decls&.push_all(MSL_PRELUDE);
+    a := ast_alloc();
+    self: Function = (
+        input = list(a),
+        body = list(a),
+        types = list(a),
+        type_lookup = init(a),
+        locals = init(a),
+        stage = @if(is_vertex, .VERTEX, .FRAGMENT),
+        name = @symbol main0,
+        ret = 0,
+        gpa = a,
+    ); self := self&;
     
-    ret_name := self&.type_name(expr.ty);
-    @fmt(self.stmts&, "\n% % %(", if(is_vertex, => "vertex", => "fragment"), ret_name, "main0");
+    // so we can use 0 as a placeholder 
+    self.types&.push(.Void);
+    self.body&.push(op = .Nop);
+    
+    ::enum(AstOp); ::enum(Scalar); ::tagged(SType); ::enum(BuiltinProperty);
+    
     args := func.arg.bindings&;
-    if args.len > 0 {
-        if args.index(0).ident() { name |
-            type := args[0]&.unwrap_ty();
-            ty_name := self&.type_name(type);
-            if args[0].nullable_tag.is_null() {
-                @fmt(self.stmts&, "% % [[stage_in]]", ty_name, name.str());
-            } else {
-                msl_field(self&, self.stmts&, name, type, args[0].nullable_tag);
-                //@fmt(self.stmts&, "% % [[buffer(0)]]", type, name.str());
-            }
-        };
-    }
+    each args { a |
+        @debug_assert(a.ty&.is(.Finished));
+        @debug_assert(a.name&.is(.Var));
+        self.locals&.insert(a.name.Var.id, self.body.len.trunc());
+        self.body&.push(op = .Nop); // .Par, type = self.type_name(a.ty.Finished));
+        
+        @ct_assert(!a.nullable_tag.is_null(), a.default.loc, "unannotated shader input");
+        info: IoField = (name = a.name.Var.name, type = self.type_name(a.ty.Finished));
+        set_annotations(info&, a.nullable_tag.items());
+        self.input&.push(info);
+    };
     
-    ::ptr_utils(Annotations);
-    if args.len > 1 {
-        type := args[1]&.unwrap_ty();
-        if args[1].nullable_tag.is_null() {
-            type := get_type_info_ref(type);
-            @ct_assert(type.is(.Struct), func.loc, "second arg to shader entry point must be a struct");
-            msl_fields(self&, self.stmts&, type.Struct&, ", ", "");
-            self.uniforms_var = args[1]&.var().unwrap();
-        } else {
-            buf := u8.list(temp());
-            name := args[1]&.ident().unwrap();
-            if get_type_info_ref(type).is(.Int) {
-                msl_field(self&, buf&, name, type, args[1].nullable_tag);
-                self.stmts&.push_all(", "); // HACK
-            } else {
-                msl_field(self&, buf&, name, *type, args[1].nullable_tag);
-                self.stmts&.push_all(", constant "); // HACK
+    @ct_assert(func.body&.is(.Normal), l, "expected normal expr function body for shader");
+    e := func.body.Normal&;
+    self.ret = self.type_name(e.ty);
+    
+    self.translate(e);
+    
+    out := u8.list(self.gpa);
+    import("@/graphics/macos/shaders.fr")'emit_all(self, out&);
+    out.items()
+}
+
+fn set_annotations(info: *IoField, annotations: []Annotation) void = {
+    each annotations { it |
+        @switch(it.name) {
+            @case(@symbol uniform) => {
+                info.buffer = const_eval(u8)(it.args);
+                info.uniform = true;
             };
-            self.stmts&.push_all(buf.items());
-        };
-    };
-    
-    @fmt(self.stmts&, ") {\n");
-    
-    result := msl_expr(self&, expr);
-    @fmt(self.stmts&, "\treturn %;\n}\n", result);
-    self.decls&.push_all(self.stmts.items());
-    //println(self.decls.items());
-    self.decls.items()
-}
-
-MSL_PRELUDE :: """
-#include <metal_stdlib>
-#include <simd/simd.h>
-using namespace metal;
-""";
-
-Translate :: @struct(
-    stmts: List(u8),
-    decls: List(u8),
-    types: import("@/lib/collections/map.fr")'HashMap(Type, Str),
-    next_var: i64 = 0,
-    uniforms_var: Var,
-);
-
-fn msl_fields(self: *Translate, buf: *List(u8), it: *get_variant_type(TypeInfo, .Struct), before: Str, after: Str) void = {
-    each it.fields { f |
-        push_all(buf, before);
-        msl_field(self, buf, f.name, f.ty, f.nullable_tag);
-        push_all(buf, after);
-    };
-}
-
-fn msl_field(self: *Translate, buf: *List(u8), name: Symbol, type: Type, nullable_tag: *Annotations) void = {
-    @fmt(buf, "% %", self.type_name(type), name.str());
-    if !nullable_tag.is_null() {
-        each nullable_tag { it |
-            @fmt(buf, " [[%", it.name.str());
-            if it.non_void_arg() { arg | 
-                if arg.ident() { n |
-                    @fmt(buf, "(%)", n.str());
-                } else {
-                    @ct_assert(arg.expr&.is(.Value), arg.loc, "TODO: more msl_fields #");
-                    @fmt(buf, "(%)", arg.expr.Value.bytes.Small._0);
-                };
+            @case(@symbol buffer) => {
+                info.buffer = const_eval(u8)(it.args);
             };
-            push_all(buf, "]]");
-        };
-    };
-}
-
-fn msl_declare(self: *Translate, name: Str, info: *TypeInfo) void = {
-    @match(info) {
-        fn Struct(it) => {
-            buf := u8.list(temp());
-            msl_fields(self, buf&, it, "\t", ";\n");
-            @fmt(self.decls&, "\nstruct % {\n%};\n", name, buf.items());
-        }
-        @default => {
-            debug_log_type(current_compiler_context().intern_type(info[]));
-            panic("TODO: msl_declare more types")
-        };
-    };
-}
-
-fn msl_expr(self: *Translate, e: *FatExpr) Str = {
-    flat :: fn(e: *FatExpr) void = {
-        @match(e.expr&) {
-            fn Block(it) => {
-                if it.body.len == 0 && it.ret_label.is_none() {
-                    flat(it.result);
-                    e[] = it.result[];
-                }
-            }
-            fn Cast(it) => {
-                e[] = it[][];
-            }
-            fn Deref(it) => {
-                flat(it[]);
-                @if_let(it.expr&) fn Addr(inner) => {
-                    e[] = inner[][];
-                };
-            }
+            @case(@symbol vertex_id) => {
+                info.builtin = .vertex_index;
+            };
+            @case(@symbol position) => {
+                info.builtin = .position;
+            };
+            @case(@symbol input) => {
+                info.builtin = .input;
+            };
             @default => ();
-        };
+        }
     };
-    
+}
+
+fn translate(self: *Function, e: *FatExpr) void = {
+    debug_log_ast(e[]);
+    result := self.msl_expr(e);
+    @if(e.ty != void) self.body&.push(op = .Return, a = result);
+    self.body&.push(op = .End);
+    @debug_assert(self.body.len < MAX_u32 && self.types.len < MAX_u16, "index overflow in shader ir");
+}
+
+#use("@/lib/collections/map.fr");
+
+fn msl_expr(self: *Function, e: *FatExpr) u32 = {
+    x := self.msl_expr2(e);
+    @assert(x < self.body.len.trunc());
+    x
+}
+
+fn msl_expr2(self: *Function, e: *FatExpr) u32 = {
+    fr := current_compiler_context();
+    e_type := self.type_name(e.ty);
     flat(e);
     @match(e.expr&) {
         fn StructLiteralP(it) => {
-            v := self.declare_var(e.ty, (Some = "{}"));
+            place: u32 = self.body.len.trunc();
+            self.body&.push(op = .Join, type = e_type);
             each it.bindings& { b |
                 value := b.get_default().expect("value for struct literal");
                 value := self.msl_expr(value);
-                name  := b.ident().expect("field name for struct literal").str();
-                @fmt(self.stmts&, "\t%.% = %;\n", v, name, value);
+                name  := b.ident().expect("field name for struct literal");
+                self.body&.push(op = .SetVarField, a = place, b = value, c = name.id());
             };
-            v
+            place
         }
         fn Value(it) => {
-            if e.ty == f64 {
-                v: f64 = bitcast(it.bytes.Small._0);
-                return(@tfmt("%.0", v));  // TODO: correct fractional part
-            };
-            if e.ty == f32 {
-                v: i64 = it.bytes.Small._0;
-                v: u32 = v.trunc();
-                v: f32 = v.bitcast();
-                return(@tfmt("%.0", v));  // TODO: correct fractional part
-            };
-            if get_type_info_ref(e.ty).is(.Int) {
-                v: i64 = it.bytes.Small._0;
-                return(@tfmt("%", v));
-            };
-            if get_func_id(e) { fid |
-                func := get_function_ast(fid, false, false, false, false);
-                each func.annotations { a |
-                    if a.name == @symbol builtin {
-                        op := const_eval(BuiltinOp)(a.args);
-                        ::enum(BuiltinOp);
-                        return(@match(op) {
-                            fn u2x16() = "unpack_unorm2x16_to_float";
-                            fn u4x8() = "unpack_unorm4x8_to_float";
-                            @default => panic("todo: shader builtin");
-                        });
-                    }
+            op := AstOp.Constant;
+            bits: u32 = @if_else {
+                @if(e.ty == f64) => {
+                    // TODO: maybe trying to use doubles should be a hard error
+                    v: f64 = bitcast(it.bytes.Small._0);
+                    v: f32 = v.cast();
+                    v.bitcast()
                 };
-                return(func.name.str());
-            };
-            if e.ty == void {
-                return("()");  // TODO: avoid getting here
-            }
-            if e.ty == bool {
-                return(@tfmt("%", it.bytes.Small._0 != 0));
-            };
+                @if(e.ty == f32) => it.bytes.Small._0.trunc();
+                @if(get_type_info_ref(e.ty).is(.Int) || e.ty == bool) => {
+                    it.bytes.Small._0.trunc()
+                };
+                @if(e.ty == void) => {
+                    // TODO: avoid getting here
+                    op = .Nop;
+                    0
+                }
+                @else => {
+                    debug_log_type(e.ty);
+                    compile_error("unhandled expression value type in shader", e.loc)
+                };
+            }; 
             
-            debug_log_type(e.ty);
-            compile_error("unhandled expression value type in shader", e.loc)
+            self.body&.push(op = op, a = bits, type = e_type);
+            trunc(self.body.len - 1)
         }
-        fn Deref(it) => {
-            flat(it[]);
-            @ct_assert(it.expr&.is(.PtrOffset), e.loc, "TODO: handle complex deref in shader translation");
-            it := it.expr.PtrOffset&;
-            name := it.name;
-            flat(it.ptr);
-            if it.ptr.expr&.is(.Addr) {
-                it.ptr = it.ptr.expr.Addr;
-            };
-            self.field_access(it.ptr, name)
-        }
-        fn GetVar(it)      => str(it.name);
-        fn GetNamed(it)    => str(it[]);
-        fn FieldAccess(it) => self.field_access(it.container, it.name);
+        fn GetVar(it)      => self.locals&.get(it.id).unwrap();
+        fn GetNamed(it)    => compile_error(@tfmt("undeclared variable %", it[].str()), e.loc);
+        fn FieldAccess(it) => self.field_access(it.container, e.ty, it.name);
         fn PtrOffset(it) => {
+        // THIS IS ALL A GARBAGE WASTE OF TIME
             @ct_assert(it.ptr.ty == *Vec2 || it.ptr.ty == *Vec3 || it.ptr.ty == *Vec4, e.loc, "TODO: hack #use");
             if it.ptr.expr&.is(.Addr) {
                 it.ptr = it.ptr.expr.Addr;
             };
+            // TODO
             self.msl_expr(it.ptr)
         }
+        fn Deref(_) => {
+            ptr, name := e.as_deref_field().expect("a&.b[]");
+            self.field_access(ptr, e.ty, name)
+        }
         fn Block(it) => {
-            if it.ret_label { ret_label |
-                if e.ty != void {
-                    @fmt(self.stmts&, "\t% B__%;\n", self.type_name(e.ty), ret_label.to_index());
-                }
-            }
+            // TODO: ret_label
             each it.body { e |
                 self.msl_stmt(e);
             };
-            result := self.msl_expr(it.result);
-            if it.ret_label { ret_label |
-                if e.ty != void {
-                    @fmt(self.stmts&, "\tB__% = %;\n", ret_label.to_index(), result);
-                    result = @tfmt("B__%", ret_label.to_index());
-                } else {
-                    result = "";
-                };
-                // labeled statements are not supported in Metal
-                //@fmt(self.stmts&, "BL__%:\n", ret_label.to_index());
-            };
-            
-            result
+            self.msl_expr(it.result)
         }
         fn Call(it) => {
-            dot_call := false;
-            if get_func_id(it.f) { fid |
-                func := get_function_ast(fid, false, false, false, false);
-                each func.annotations { a |
-                    if a.name == @symbol metal_method {
-                        dot_call = true;
-                    };
-                };
+            args_e := it.arg.items();
+            args := self.gpa.alloc(u32, args_e.len);
+            enumerate args_e { i, e |
+                args[i] = self.msl_expr(e);
             };
-            f := self.msl_expr(it.f);
-            if dot_call {
-                @ct_assert(it.arg.expr&.is(.Tuple), e.loc, "TODO: #metal_method with one arg");
-                parts := it.arg.expr.Tuple&;
-                first := self.msl_expr(parts[0]&);
-                parts.len -= 1;
-                parts.ptr = parts.ptr.offset(1);
-                parts.cap -= 1;
-                rest := self.msl_expr(it.arg);
-                return(@tfmt("%.%(%)", first, f, rest));
-            };
-            f := @switch(f) {
-                @case("vec2") => "float2";
-                @case("vec3") => "float3";
-                @case("vec4") => "float4";
-                @default => f;
-            };
-            @switch(f) {
-                @case("neg") => @tfmt("-%", self.msl_expr(it.arg));
-                @case("add") => self.binary("+", it.arg);
-                @case("sub") => self.binary("-", it.arg);
-                @case("mul") => self.binary("*", it.arg);
-                @case("div") => self.binary("/", it.arg);
-                @case("ne") => self.binary("!=", it.arg);
-                @case("eq") => self.binary("==", it.arg);
-                @case("lt") => self.binary("<", it.arg);
-                @case("index") => {
-                    parts := it.arg.expr.Tuple&;
-                    @ct_assert(it.arg.expr&.is(.Tuple) && parts.len == 2, it.arg.loc, "operator_index expected two arguments");
-                    a0 := self.msl_expr(parts.index(0));
-                    a1 := self.msl_expr(parts.index(1));
-                    @tfmt("%[%]", a0, a1) 
-                };
-                @default => @tfmt("%(%)", f, self.msl_expr(it.arg));
+            
+            fid := fr.assert_get_func_id(it.f);
+            func := fr.get_function(fid);
+            ::enum(AstOp);
+
+            // TODO: need to be more structured about this because what if you have user declared overloads of these. 
+            names := @const_slice(
+                "vec2", "vec3", "vec4", "neg", "add", "sub", "mul", "div", 
+                "eq", "ne", "lt", "gt", "le", "ge", "index", "bit_or", "bit_and", "bit_not",
+                "not", "sample", "clamp", "min", "max", "fract", "abs", "mix",
+            );
+            if names.contains(func.name.str()) {
+                op := AstOp.from_name(func.name.str());
+                return(self.emit_builtin(op.unwrap(), args, e_type));
             }
+
+            each func.annotations { a |
+                if a.name == @symbol builtin {
+                    op := const_eval(AstOp)(a.args);
+                    return(self.emit_builtin(op, args, e_type));
+                }
+            }
+            
+            // not a builtin -> user defined function
+            debug_log_func(func);
+            panic("TODO: implement user functions in shader translation.");
+            for args { a |
+                self.body&.push(op = .Arg, a = a);
+            };
+            self.body&.push(op = .Call, a = fid.to_index(), type = e_type);
+            trunc(self.body.len - 1)
         }
         fn Tuple(it) => {
-            // No outer brackets. Only allowed in as outer argument to a call.
-            out := u8.list(temp());
-            prefix := "";
             each it { it |
-                @fmt(out&, "%%", prefix, self.msl_expr(it));
-                prefix = ", ";
+                @ct_assert(it.ty == void, e.loc, "TODO: shader tuple");
+                _ := self.msl_expr(it);
             };
-            out.items()
+            0
         }
         fn If(it) => {
-            // TODO: any zero size type not just void
-            out_var := if(e.ty == void, => "", => self.declare_var(e.ty, .None));
+            join: u32 = trunc @if(e_type == 0, 0, self.body.len);
+            if(join != 0, => self.body&.push(op = .Join, type = e_type));
+            
             cond := self.msl_expr(it.cond);
-            @fmt(self.stmts&, "if (%) {\n", cond);
+            self.body&.push(op = .If, a = cond);
             value := self.msl_expr(it.if_true);
-            @fmt(self.stmts&, "% = %;\n} else {\n", out_var, value);
-            value :=  self.msl_expr(it.if_false);
-            @fmt(self.stmts&, "% = %;\n}\n", out_var, value);
-            out_var
+            if(join != 0, => self.body&.push(op = .SetVar, a = join, b = value));
+            self.body&.push(op = .Else);
+            value := self.msl_expr(it.if_false);
+            if(join != 0, => self.body&.push(op = .SetVar, a = join, b = value));
+            self.body&.push(op = .End);
+            
+            return join;
+        }
+        fn Addr(it) => {
+            panic("Addr expor")
         }
         @default => {
             debug_log_ast(e[]);
@@ -344,181 +270,365 @@ fn msl_expr(self: *Translate, e: *FatExpr) Str = {
     }
 }
 
-fn msl_stmt(self: *Translate, e: *FatStmt) void = {
+fn flat(e: *FatExpr) void = {
+    @match(e.expr&) {
+        fn Block(it) => {
+            if it.body.len == 0 && it.ret_label.is_none() {
+                flat(it.result);
+                e[] = it.result[];
+            }
+        }
+        fn Cast(it) => {
+            e[] = it[][];
+        }
+        fn Deref(it) => {
+            flat(it[]);
+            @if_let(it.expr&) fn Addr(inner) => {
+                e[] = inner[][];
+            };
+        }
+        @default => ();
+    };
+};
+
+fn as_deref_field(e: *FatExpr) ?Ty(*FatExpr, Symbol) = {
+    if(!e.expr&.is(.Deref), => return(.None));
+    it := e.expr.Deref;
+    // THIS IS ALL A GARBAGE WASTE OF TIME
+    flat(it);
+    if(!it.expr&.is(.PtrOffset), => return(.None));
+    //@ct_assert(it.expr&.is(.PtrOffset), e.loc, "TODO: handle complex deref in shader translation");
+    it := it.expr.PtrOffset&;
+    name := it.name;
+    flat(it.ptr);
+    if it.ptr.expr&.is(.PtrOffset) && is_vec(it.ptr.expr.PtrOffset.ptr.ty) {
+        it.ptr = it.ptr.expr.PtrOffset.ptr;
+    };
+    if it.ptr.expr&.is(.Addr) {
+        t := Deref(it.ptr.ty);
+        it.ptr = it.ptr.expr.Addr;
+        it.ptr.ty = t;
+    };
+    (Some = (it.ptr, name))
+}
+
+fn is_vec(t: Type) bool = 
+    t == *Vec2 || t == *Vec3 || t == *Vec4 || t == Vec2 || t == Vec3 || t == Vec4;
+
+fn field_access(self: *Function, e: *FatExpr, f_type: Type, name: Symbol) u32 = {
+    if is_vec(e.ty) {
+        place := self.msl_expr(e);
+        self.body&.push(op = .Swizzle, a = place, b = swizzle_bits(name), type = self.type_name(f_type));
+    } else {
+        if as_var_place(e) { e |
+            place := self.place_expr(e);
+            self.body&.push(op = .GetVarField, a = place, b = name.id(), type = self.type_name(f_type));
+        } else {
+            place := self.place_expr(e);
+            self.body&.push(op = .GetField, a = place, b = name.id(), type = self.type_name(f_type));
+        }
+    };
+    trunc(self.body.len - 1)
+}
+
+fn emit_builtin(self: *Function, f: AstOp, args: []u32, e_type: u16) u32 = {
+    if f == .vec4 { // args.len > 3 {
+        for args { a |
+            self.body&.push(op = .Arg, a = a);
+        };
+    }
+    self.body&.push(
+        op = f, 
+        type = e_type, 
+        a = @if(args.len >= 1, args[0], 0),
+        b = @if(args.len >= 2, args[1], 0), 
+        c = @if(args.len >= 3, args[2], 0),
+    );
+    trunc(self.body.len - 1)
+} 
+
+fn msl_stmt(self: *Function, e: *FatStmt) void = {
     @match(e.stmt&) {
         fn Noop() => ();
         fn Eval(it) => {
-            self.msl_expr(it);
+            _ := self.msl_expr(it);
         }
         fn Decl(it) => {
-            name := str(it.name.Var.name);  // TODO
-            t := it.default.ty;
-            value := self.msl_expr(it.default&);
-            @fmt(self.stmts&, "\t% % = %;\n", self.type_name(t), name, value);
+            result := self.msl_expr(it.default&);
+            @debug_assert(it.name&.is(.Var));
+            
+            @debug_assert(it.ty&.is(.Finished));
+            if it.ty.Finished != void {
+                self.locals&.insert(it.name.Var.id, result);
+            };
         }
         fn Set(it) => {
-            value := self.msl_expr(it.value&);
-            place := self.msl_expr(it.place&);
-            @fmt(self.stmts&, "% = %;\n", place, value);
+        // THIS IS ALL A GARBAGE WASTE OF TIME
+            if it.place&.as_field_access() { ptr, name |
+                if is_vec(ptr.ty) {
+                    //panic("Aa");
+                    //ptr = ptr.
+                }
+                if ptr.as_var_place() { place |
+                    place := self.msl_expr(place);
+                    value := self.msl_expr(it.value&);
+                    self.body&.push(op = .SetVarField, a = place, b = value, c = name.id());
+                    return()
+                }
+            };
+            
+            if it.place&.as_var_place() { place |
+                place := self.msl_expr(place);
+                value := self.msl_expr(it.value&);
+                self.body&.push(op = .SetVar, a = place, b = value);
+            } else {
+                place := self.place_expr(it.place&);
+                value := self.msl_expr(it.value&);
+                self.body&.push(op = .SetDeref, a = place, b = value);
+            }
         }
         fn DeclVarPattern(it) => {
             @ct_assert(it.binding.bindings.len == 1, e.loc, "TODO: multi-DeclVarPattern");
-            self.declare_var(it.value.ty, (Some = self.msl_expr(it.value&)));
+            result := self.msl_expr(it.value&);
+            if it.value.ty != void {
+                name := it.binding.bindings[0].name;
+                @debug_assert(name&.is(.Var));
+                self.locals&.insert(name.Var.id, result);
+            }
         }
         @default => {
             compile_error("unhandled stmt type in shader", e.loc);
         };
-    }
-}
-
-fn declare_var(self: *Translate, ty: Type, init: ?Str) Str = {
-    v := @tfmt("v%", self.next_var);
-    self.next_var += 1;
-    type := self.type_name(ty);
-    if init { init |
-        @fmt(self.stmts&, "\t% % = %;\n", type, v, init);
-    } else {
-        @fmt(self.stmts&, "\t% %;\n", type, v);
     };
-    v
 }
 
-fn get_func_id(e: *FatExpr) ?FuncId = {
-    @if_let(e.expr&) fn Value(it) => {
-        info := get_type_info_ref(e.ty);
-        if e.ty == FuncId || info.is(.Fn) {
-            return(Some = ptr_cast_unchecked(i64, FuncId, it.bytes.Small._0&)[]);
+fn assert_get_func_id(fr: CompCtx, e: *FatExpr) FuncId = {
+    @ct_assert(e.expr&.is(.Value), e.loc, "Callee must be const-known in shader translation");
+    info := fr.get_type(e.ty);
+    @ct_assert(e.ty == FuncId || info.is(.Fn), e.loc, "invalid callee type");
+    fid: FuncId = e.expr.Value.bytes.Small._0.from_index();
+    fid
+}
+
+fn place_expr(self: *Function, e: *FatExpr) u32 = {
+// THIS IS ALL A GARBAGE WASTE OF TIME
+    if e.as_field_access() { ptr, name |
+        place := self.place_expr(ptr);
+        self.body&.push(
+            op = .AddrField, 
+            a = place, 
+            b = name.id(), 
+            type = self.type_name(e.ty),
+        );
+        return self.body.len.sub(1).trunc();
+    };
+    
+    @match(e.expr) {
+        fn GetVar(it) => {
+            v := self.msl_expr(e);
+            return v;
+            // TODO
+            //t := self.type_name(e.ty);
+            //@debug_assert(t != 0, "void var??????? %", it.name.str());
+            //self.body&.push(op = .AddrOf, a = v, type = t);
+            //return self.body.len.sub(1).trunc();  // TODO: it type checks without this line ??? :CompilerBug :FUCKED
         };
-    };
-    .None
-}
-
-fn field_access(self: *Translate, container: *FatExpr, name: Symbol) Str = {
-    if container.expr&.is(.GetVar) && container.expr.GetVar == self.uniforms_var {
-        name.str()
-    } else {
-        @tfmt("%.%", self.msl_expr(container), name.str())
+        fn Deref(it)  => self.msl_expr(e);
+        fn Addr(it) => {
+            v := self.msl_expr(it);
+            return v; 
+            // TODO
+            //self.body&.push(op = .AddrOf, a = v, type = self.type_name(e.ty));
+            //self.body.len.sub(1).trunc()
+        };
+        @default => {
+            debug_log_ast(e[]);
+            compile_error("TODO: place expr in shader", e.loc)
+        };
     }
 }
 
-fn binary(self: *Translate, op: Str, arg: *FatExpr) Str = {
-    parts := arg.expr.Tuple&;
-    @ct_assert(arg.expr&.is(.Tuple) && parts.len == 2, arg.loc, "operator % expected two arguments", op);
-    a0 := self.msl_expr(parts.index(0));
-    a1 := self.msl_expr(parts.index(1));
-    @tfmt("(% % %)", a0, op, a1)
+fn as_field_access(e: *FatExpr) ?Ty(*FatExpr, Symbol) = {
+    @match(e.expr&) {
+        fn FieldAccess(it) => (Some = (it.container, it.name));
+        fn PtrOffset(it) => (Some = (it.ptr, it.name));
+        fn Deref() => as_deref_field(e);
+        @default => .None;
+    }
 }
 
-fn type_name(self: *Translate, type: Type) Str = {
-    @switch(type) {
-        @case(f32)  => "float";
-        @case(f64)  => "float";  // double is not supported in metal. TODO: maybe we should make this a hard error
-        @case(i32)  => "int";
-        @case(u32)  => "unsigned int";
-        @case(i64)  => "long";
-        @case(bool)  => "bool";
-        @case(Vec2) => "float2";
-        @case(Vec3) => "float3";
-        @case(Vec4) => "float4";
-        @case(Sgl.Matrix) => "float4x4";
-        @case(ShaderTexture2f) => "texture2d<float>";
-        @case(ShaderSampler) => "sampler";
-        @case(UShort2) => "unsigned int";
-        @case(UByte4) => "unsigned int";
+fn as_var_place(e: *FatExpr) ?*FatExpr = {
+    if(e.expr&.is(.GetVar), => return(Some = e));
+    if(!e.expr&.is(.Deref), => return(.None));
+    e := e.expr.Deref;
+    if(!e.expr&.is(.Addr), => return(.None));
+    e := e.expr.Addr;
+    if(!e.expr&.is(.GetVar), => return(.None));
+    (Some = e)
+}
+
+fn type_name(self: *Function, type: Type) u16 = {
+    if self.type_lookup&.get(type) { it |
+        return(it);
+    };
+    if size_of(type) == 0 {
+        return(0);
+    };
+    s_info: SType = @switch(type) {
+        @case(f32)  => (Scalar = .F32);
+        @case(f64)  => (Scalar = .F32);  // double is not supported in metal. TODO: maybe we should make this a hard error
+        @case(i32)  => (Scalar = .I32);
+        @case(u32)  => (Scalar = .U32);
+        @case(i64)  => (Scalar = .I32);  // ^
+        @case(bool) => (Scalar = .Bool);
+        @case(Vec2) => (Vector = (inner = .F32, len = 2));
+        @case(Vec3) => (Vector = (inner = .F32, len = 3));
+        @case(Vec4) => (Vector = (inner = .F32, len = 4));
+        @case(Sgl.Matrix)      => (Matrix = (inner = .F32, row = 4, col = 4));
+        @case(ShaderTexture2f) => .Texture;
+        @case(ShaderSampler)   => .Sampler;
+        @case(UShort2) => (Scalar = .I32);
+        @case(UByte4)  => (Scalar = .I32);
+        @case(void)    => .Void;
         @default => {
             info := get_type_info_ref(type);
-            if type.has_const_field(@symbol ShaderBufferElement) {
-                T := get_constant(Type, Type.scope_of(type), @symbol ShaderBufferElement).unwrap();
-                return(@tfmt("device %*", self.type_name(T)));
-            }
-            @if_let(info) fn Ptr(inner) => {
-                return(@tfmt("%&", self.type_name(inner[])));
-            };
-            ::?Str;
-            or self.types&.get(type) {
-                name := @tfmt("T%", self.next_var);
-                self.next_var += 1;
-                self.msl_declare(name, get_type_info_ref(type));
-                self.types&.insert(type, name);
-                name
+            @if_else {
+                @if(type.has_const_field(@symbol ShaderBufferElement)) => {
+                    T := get_constant(Type, Type.scope_of(type), @symbol ShaderBufferElement).unwrap();
+                    (Ptr = self.type_name(T))
+                }
+                @if(info.is(.Ptr)) => (Ptr = self.type_name(info.Ptr));
+                @if(info.is(.Struct)) => {
+                    fs := info.Struct.fields;
+                    out := IoField.list(fs.len, self.gpa);
+                    each fs { f |
+                        info: IoField = (name = f.name, type = self.type_name(f.ty));
+                        if !f.nullable_tag.is_null() {
+                            set_annotations(info&, f.nullable_tag.items());
+                        }
+                        out&.push(info);
+                    };
+                    (Struct = (fields = out.items()))
+                };
+                @else => @panic("TODO: handle % in shader translation", type.typename().str());
             }
         };
-    }
+    };
+
+    i: u16 = self.types.len.trunc();
+    self.types&.push(s_info);
+    self.type_lookup&.insert(type, i);
+    i
 }
 
-// TODO: use these. 
-//       it feels a bit silly to convert my ast -> basically my own ast again 
-//       but otherwise it's so painful to do multiple backends 
-//       and i think i want to try switching the source from being ast to ir at some point. 
+fn swizzle_bits(s: Symbol) u32 = {
+    s := s.str();
+    
+    res := 0;
+    @assert_le(s.len, 4, "invalid swizzle size");
+    for s { c |
+        res = res.shift_left(8);
+        i := "xr".contains(c).int() + "yg".contains(c).int()*2 + "zb".contains(c).int()*4 + "wa".contains(c).int()*8;
+        if i == 0 {
+            @panic("invalid vector component %", c);
+        }
+        res += i;
+    };
+    res.trunc()
+}
+
+// 
+// Flat IR that can be rendered into shader programs for each backend. 
 //
 
-Ast :: @rec @tagged(
-    GetBuiltin: BuiltinProperty,
-    Op: @struct(op: BuiltinOp, args: []Ast),
-    Call: @struct(callee: FuncId, args: []Ast),
-    Constant: @struct(type: *SType, bits: i64),
-    If: @struct(cond: *Ast, true: *Ast, false: *Ast),
-    Set: @struct(place: *Ast, value: *Ast),
-    Field: @struct(place: *Ast, n: u32),
-    Loop: @struct(body: *Ast),
-    Block: []Ast,
+Ast :: @struct(op: AstOp, type: u16 = 0, a: u32 = 0, b: u32 = 0, c: u32 = 0);
+
+AstOp :: @enum(u16) (
+    ParBuiltin,  // (BuiltinProperty)
+    Par,
+    Arg, // (val)
+    Call, // (FuncId)
+    Constant, // (bits)
+    SetDeref, // (place addr, value)
+    Field, // (place, n)
+    Swizzle, // (place, xyzw bitset)
+    Loop,
+    If, // (cond)
+    Else, 
+    End,
     Nop,
-    Var: u32,
-    Break,
-    Continue,
-    Return: *Ast,
+    GetVar, // (var) // needed when accessing mutable variables that might change before used
+    Break, 
+    Continue, 
+    Return, // (val)
+    Join,  // placeholder to declare a var that will be filled in by later instructions
+    SetVar, // (place, value)
+    Deref, // (place)
+    SetVarField,  // (var, value, Symbol)
+    AddrField, // (place, Symbol)
+    GetField, // 
+    GetVarField,
+    AddrOf,  // (var)
+
+    neg, not, bit_not, 
+    fract, abs,
+    addr_of, load,
+    u2x16, u4x8,
+    
+    vec2, 
+    add, sub, mul, div, 
+    and, or,
+    bit_and, bit_or,
+    eq, ne, lt, gt, le, ge, 
+    min, max,
+    
+    vec3, 
+    sample, mix, clamp, 
+    
+    vec4,
 );
 
-BuiltinProperty :: @enum(
+BuiltinProperty :: @enum(u32) (
+    none,
     position,
     point_size,
     vertex_index,
-    color, 
-);
-
-BuiltinOp :: @enum(
-    add, sub, mul, div, 
-    and, or, not, 
-    bit_and, bit_or, bit_not, 
-    neg, 
-    eq, ne, lt, gt, le, ge, 
-    sample, 
-    vec2, vec3, vec4,
-    addr_of, load,
-    fract, abs, mix, clamp, min, max,
-    u2x16, u4x8,
+    colour, 
+    input,
 );
 
 SType :: @tagged(
+    Void: void,
     Scalar: Scalar, 
-    Vector: @struct(inner: Scalar, len: u32),
-    Matrix: @struct(inner: Scalar, col: u32, row: u32),
+    Vector: @struct(inner: Scalar, len: u8),
+    Matrix: @struct(inner: Scalar, col: u8, row: u8),
     Texture,
     Sampler,
-    Struct: @struct(fields: []SField),
+    Struct: @struct(fields: []IoField),
+    Ptr: u16,
 );
-
-SField :: @struct(
-    name: Symbol,
-    type: *SType,
-);
-
-Scalar :: @enum(I32, F32, Bool);
 
 IoField :: @struct(
-    var: u32,
-    type: *SType,
     name: Symbol,
-    builtin: BuiltinProperty,
+    builtin := BuiltinProperty.none,
+    type: u16,
+    buffer: u8 = 255,
+    uniform := false,
 );
 
+Scalar :: @enum(u8) (I32, U32, F32, Bool);
+
+// TODO: don't be lazy used typed indices
 Function :: @struct(
-    input: []IoField,
-    output: []IoField,
-    bindings: []IoField,
-    uniforms: []IoField,
-    body: *Ast,
-    vars: List(*SType),
+    input: List(IoField),
+    body: List(Ast),  // 0 is nop // S
+    types: List(SType),  // 0 is void // T
+    type_lookup: HashMap(Type, u16),
+    locals: HashMap(u32, u32), // V -> S
+    stage: SgShaderStage,
+    name: Symbol,
+    ret: u16, // T
+    gpa: Alloc,
 );
 
 //

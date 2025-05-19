@@ -27,12 +27,7 @@ Desc :: @struct(
     allocator: Alloc,
     sg: *Sg.Self,
 );
-Vertex :: @struct(
-    pos: Array(f32, 3),
-    uv: Array(f32, 2),
-    color: u32,
-    psize: f32,
-);
+Vertex :: Shaders.InV;
 Matrix :: @struct(v: Array(Array(f32, 4), 4));
 Uniform :: @struct(
     mvp: Matrix,  /* model-view-projection matrix */
@@ -127,19 +122,23 @@ Command :: @struct(
 );
 
 Shaders :: @struct(
+    // TODO: Vec4 being 16 aligned is annoying. this could be 7 floats instead of 8 but unless 
+    //       i store pos as x,y,z separately, the struct would still need alignment padding. 
+    //       so 12% waste by not doing the normal vertex buffer thing :(
+    //       metal has packed_float4 but webgpu doesn't. could use an array i guess? 
     InV  :: @struct(
-        position: Vec4 #attribute(0), 
-        texcoord0: Vec2 #attribute(1), 
-        color0: Vec4 #attribute(2), 
-        psize: f32 #attribute(3),
+        pos: Vec4,
+        uv: Vec2,
+        color: UByte4,
+        psize: f32,
     ),
     OutV :: @struct(uv: Vec4 #user(locn0), color: Vec4 #user(locn1), pos: Vec4 #position, psize: f32 #point_size),
     UniV :: @struct(mvp: Matrix, tm: Matrix),
-    vs   :: fn(in: Shaders.InV, uni: Shaders.UniV #buffer(0)) Shaders.OutV = (
-        pos = uni.mvp * in.position,
-        uv = uni.tm * @vec(in.texcoord0, 0.0, 1.0),
-        color = in.color0,
-        psize = in.psize,
+    vs   :: fn(in: Buf(Shaders.InV) #buffer(1), uni: Shaders.UniV #buffer(0), v: u32 #vertex_id) Shaders.OutV = (
+        pos = uni.mvp * in[v].pos,
+        uv = uni.tm * @vec(in[v].uv, 0.0, 1.0),
+        color = in[v].color.unpack(),
+        psize = in[v].psize,
     ),
     InF  :: @struct(uv: Vec4 #user(locn0), color: Vec4 #user(locn1)),
     OutF :: @struct(frag_color: Vec4 #color(0)),
@@ -157,28 +156,6 @@ fn init_pipeline(ctx: *Context, pip: *Pipeline, desc: SgPipelineDesc) bool = {
     /* create a new desc with 'patched' shader and pixel format state */
     ctx_desc := ctx.desc&;
     sgl := ctx.common;
-    desc.layout.buffers&[0].stride = size_of(Vertex);
-    V :: Fields(Vertex);
-    {
-        pos := desc.layout.attrs&.index(0);
-        pos.offset = offset_of(Vertex, V.pos);
-        pos.format = .FLOAT3;
-    };
-    {
-        uv := desc.layout.attrs&.index(1);
-        uv.offset = offset_of(Vertex, V.uv);
-        uv.format = .FLOAT2;
-    };
-    {
-        rgba := desc.layout.attrs&.index(2);
-        rgba.offset = offset_of(Vertex, V.color);
-        rgba.format = .UBYTE4N;
-    };
-    {
-        psize := desc.layout.attrs&.index(3);
-        psize.offset = offset_of(Vertex, V.psize);
-        psize.format = .FLOAT;
-    };
     if desc.shader.id == SG_INVALID_ID.trunc() {
         desc.shader = sgl.shd;
     };
@@ -253,12 +230,12 @@ fn init_context(sgl: *Self, ctx: *Context, in_desc: *ContextDesc) bool = {
     sg.push_debug_group("sokol-gl");
     ctx.vbuf = sg.make(
         size = ctx.vertices.cap * size_of(Vertex),
-        type = .VERTEXBUFFER,
+        type = .STORAGEBUFFER,
         usage = .STREAM,
         label = "sgl-vertex-buffer",
     );
     @debug_assert(ctx.vbuf.id != SG_INVALID_ID.trunc());
-    ctx.bind.vertex_buffers&[0] = ctx.vbuf;
+    ctx.bind.storage_buffers&[0] = ctx.vbuf;
 
     def_pip_desc: SgPipelineDesc = ();
     def_pip_desc.depth.write_enabled = true;
@@ -367,9 +344,9 @@ fn vtx(ctx: *Context, x: f32, y: f32, z: f32, u: f32, v: f32, rgba: u32) void = 
         vtx[] = vtx.offset(-2)[];
     };
     vtx := next_vertex(ctx) || return();
-    vtx.pos&[0] = x; vtx.pos&[1] = y; vtx.pos&[2] = z;
-    vtx.uv&[0] = u; vtx.uv&[1] = v;
-    vtx.color = rgba;
+    vtx.pos.v = (x, y, z, 1.0);
+    vtx.uv.v = (u, v);
+    vtx.color = (_ = rgba);
     vtx.psize = ctx.point_size;
     ctx.quad_vtx_count += 1;
 }
@@ -443,6 +420,12 @@ fn setup_common(sgl: *Self) void = {
         image_slot = 0,
         sampler_slot = 0,
         glsl_name = "tex_smp",
+    );
+    shd_desc.storage_buffers&[0] = (
+        wgsl_group1_binding_n = 1,
+        msl_buffer_n = 1,
+        stage = .VERTEX,
+        readonly = true,
     );
     shd_desc.label = "sgl-shader";
     choose_shader_impl(SOKOL_BACKEND, shd_desc&, Shaders);
@@ -587,7 +570,7 @@ fn defaults(ctx: *Context) void = {
 // ERRORS: if there is not enough space in the command buffer (returns false)
 fn viewport(ctx: *Context, x: i32, y: i32, w: i32, h: i32, origin_top_left: bool) bool = {
     @debug_assert(init_cookie == ctx.common.init_cookie);
-    @debug_assert(!ctx.in_begin);
+    @debug_assert(!ctx.in_begin, "you must call viewport() before begin() (or you forgot to call end() last frame)");
     cmd := next_command(ctx) || return(false);
     cmd.layer_id = ctx.layer_id;
     cmd.args = (Viewport = (
@@ -626,7 +609,7 @@ fn texture(ctx: *Context, img: SgImage, smp: SgSampler) void = {
 }
 
 fn end(ctx: *Context) void = {
-    @debug_assert(ctx.in_begin);
+    @debug_assert(ctx.in_begin, "called end() outside begin()");
     @debug_assert(ctx.vertices.len >= ctx.base_vertex.intcast());
     ctx.in_begin = false;
 
@@ -697,7 +680,6 @@ fn push_matrix(ctx: *Context) void = {
 }
 
 fn pop_matrix(ctx: *Context) void = {
-    @debug_assert((ctx.cur_matrix_mode >= 0) && (ctx.cur_matrix_mode < SGL_NUM_MATRIXMODES));
     ctx.matrix_dirty = true;
     if ctx.matrix_tos&[ctx.cur_matrix_mode] > 0 {
         ctx.matrix_tos&[ctx.cur_matrix_mode] -= 1;

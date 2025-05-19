@@ -73,6 +73,23 @@ just a problem with how that program is doing directions not with the app lib)
 - fast memcpy (need to deal with fallback when not linking a libc)
 - to build on linux from -syscalls to linking libc you need to turn off ENABLE_COMMANDS in default_driver.fr
 
+## Introspection 
+
+try to mark places that rely on running inside the same compiler context and not from a driver 
+since i probably want to precompile these eventually and will need to deal with non-fixed
+types, etc. should also document that distinction more thoroughly. 
+
+the big examples are import_c, import_wasm, shader compiler, objc bindings, backend ir parser. 
+
+kinda sad to need to recompile the whole c compiler from scratch 
+any time you want to compile a program that want's a nice font. 
+makes my start up time look even worse than it actually is. 
+
+The alternative school of thought is that i could go full linker and be able to 
+give types a stable identity accross compiles and patch out the type constants 
+so you could cache code that runs at comptime without it needing to do everything 
+through the ImportVTable explicitly. but that feels a bit too wishy washy to me? idk. 
+
 ## compiler bug
 
 - `@debug_assert(macos.common().valid, "not valid");` compiles 

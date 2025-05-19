@@ -1,0 +1,269 @@
+// Shader IR -> Metal Shader Language source code.
+// body[i] produces a value in variable `v{i}` of type `T{body[i].type}`.
+// instructions of type Void are executed for side effects.
+
+emit_all :: fn(self: *Function, out: *List(u8)) void = {
+    @fmt(out, MSL_PRELUDE);
+    
+    enumerate self.types& { i, info |
+        if !info.is(.Void) {
+            @fmt(out, "typedef ");
+        }
+        @match(info) {
+            fn Void() => ();
+            fn Scalar(it) => out.push_all(@match(it[]) {
+                fn F32() => "float";
+                fn I32() => "int";
+                fn U32() => "unsigned int";
+                fn Bool() => "bool";
+            });
+            // TODO: int vec
+            fn Vector(it) => @fmt(out, "float%", it.len);
+            fn Matrix(it) => @fmt(out, "float%x%", it.col, it.row); // TODO: flipped?
+            fn Texture() => @fmt(out, "texture2d<float>");
+            fn Sampler() => @fmt(out, "sampler");
+            fn Struct(it) => {
+                @fmt(out, "struct {\n");
+                enumerate it.fields { j, it |
+                    @fmt(out, "        ");
+                    msl_annotation(it, out, it.name.str());
+                    @fmt(out, ";\n");
+                };
+                @fmt(out, "}");
+            };
+            fn Ptr(it) => @fmt(out, "device T% *", it[]);
+        };
+        if !info.is(.Void) {
+            @fmt(out, " T%;\n", i);
+        }
+    };
+    
+    @debug_assert(self.stage != .COMPUTE);
+    @fmt(out, "\n% T% %(", if(self.stage == .VERTEX, => "vertex", => "fragment"), self.ret, "main0");
+    enumerate self.input { i, it |
+        msl_annotation(it, out, @tfmt("v%", i+1));
+        if i != self.input.len - 1 {
+            @fmt(out, ", ")
+        }
+    };
+    @fmt(out, ") {\n");
+    emit_body(self, out);
+}
+
+msl_annotation :: fn(it: *IoField, out: *List(u8), name: Str) void = {
+    if it.uniform {
+        @fmt(out, "constant ");
+    }
+    @fmt(out, "T% ", it.type);
+    if it.uniform {
+        @fmt(out, "& ");
+    }
+    @fmt(out, "%", name);
+    @match(it.builtin) {
+        fn vertex_index() => @fmt(out, " [[vertex_id]]");
+        fn position()     => @fmt(out, " [[position]]");
+        fn colour()       => @fmt(out, " [[color(0)]]");
+        fn input()     => @fmt(out, " [[stage_in]]");
+        @default => ();  // TODO
+    };
+    if it.buffer != 255 {
+        @fmt(out, " [[buffer(%)]]", it.buffer);
+    }
+}
+
+emit_body :: fn(self: *Function, out: *List(u8)) void = {
+    fr := current_compiler_context();
+    
+    enumerate self.body { i, inst |
+        if inst.type != 0 {
+            @fmt(out, "    T% v%;\n", inst.type, i);
+        }
+    };
+    
+    i := -1;
+    first_arg := -1;
+    indentation := 1;
+    while => i < self.body.len - 1 {
+        continue :: local_return;
+        i += 1;
+        inst := self.body[i];
+        if(@is(inst.op, .Join, .Par, .Nop), => continue());
+        
+        @fmt(out, ";\n");
+        indentation -= int(@is(inst.op, .End, .Else));
+        range(0, indentation, fn(_) => @fmt(out, "    "));
+        indentation += int(@is(inst.op, .Loop, .If, .Else));
+        if(inst.type != 0, => @fmt(out, "v% = ", i));
+        
+        name := msl_operator(inst.op);
+        if name != "" {
+            if inst.b != 0 {
+                @fmt(out, "v% % v%", inst.a, name, inst.b);
+            } else {
+                @fmt(out, "%v%", name, inst.a);
+            };
+            continue();
+        };
+        
+        name := msl_function(inst.op);
+        if name != "" {
+            if inst.b != 0 {
+                if inst.c != 0 {
+                    @fmt(out, "%(v%, v%, v%)", name, inst.a, inst.b, inst.c);
+                } else {
+                    @fmt(out, "%(v%, v%)", name, inst.a, inst.b);
+                };
+            } else {
+                @fmt(out, "%(v%)", name, inst.a);
+            };
+            continue();
+        };
+        
+        name := msl_function_multi(inst.op);
+        if name != "" { // TODO: share with Call below
+            @fmt(out, "%(", name);
+            @debug_assert(first_arg != -1, "malformed shader call '%'", name);
+            args := self.body.items().slice(first_arg, i);
+            for args { a |
+                @fmt(out, "v%, ", a.a);
+            };
+            out.len -= 2 * int(args.len != 0);  // no trailing comma :(
+            @fmt(out, ")");
+            first_arg = -1;
+            continue();
+        };
+        
+        @match(inst.op) {
+            fn Loop() => out.push_all("while (true) {");
+            fn If()   => @fmt(out, "if (v%) {", inst.a);
+            fn Else() => out.push_all("} else {");
+            fn End()  => out.push_all("}");
+            fn Break()    => out.push_all("break");
+            fn Continue() => out.push_all("continue");
+            fn Return()   => @fmt(out, "return v%", inst.a);
+            fn Arg() => {
+                if first_arg == -1 {
+                    first_arg = i;
+                };
+                continue();
+            }
+            fn Call() => {
+                if first_arg == -1 {
+                    first_arg = i;
+                };
+                args := self.body.items().slice(first_arg, i);
+                
+                fid: FuncId = from_index(inst.a.zext());
+                func := fr.get_function(fid);
+                @fmt(out, "%(", fr.get_string(func.name));
+                for args { a |
+                    @fmt(out, "v%, ", a.a);
+                };
+                @fmt(out, ")");
+                
+                first_arg = -1;
+            }
+            fn Constant() => {
+                info := self.types[inst.type.zext()]&;
+                @debug_assert(info.is(.Scalar));
+                emit_bits(out, inst.a, info.Scalar);
+            }
+            fn sample() => @fmt(out, "v%.sample(v%, v%)", inst.a, inst.b, inst.c);
+            fn SetVar() => @fmt(out, "v% = v%", inst.a, inst.b);
+            fn SetVarField() => {
+                name: Symbol = inst.c.symbol_from_id();
+                @fmt(out, "v%.% = v%", inst.a, name.str(), inst.b);
+            }
+            fn SetDeref() => @fmt(out, "*v% = v%", inst.a, inst.b);
+            fn AddrField() => {
+                name: Symbol = inst.b.symbol_from_id();
+                @fmt(out, "&v%.%", inst.a, name.str());
+            }
+            fn GetField() => {
+                name: Symbol = inst.b.symbol_from_id();
+                @fmt(out, "v%->%", inst.a, name.str());
+            }
+            fn GetVarField() => {
+                name: Symbol = inst.b.symbol_from_id();
+                @fmt(out, "v%.%", inst.a, name.str());
+            }
+            fn Swizzle() => {
+                @fmt(out, "v%.", inst.a);
+                bits := inst.b;
+                range_rev(0, 4) { i |
+                    bits :i64= zext bits.shift_right_logical(i*8).bit_and(0xFF);
+                    if bits != 0 {
+                        c := "xyzw"[bits.trailing_zeros()];
+                        out.push(c);
+                    }
+                };
+            }
+            @default => @panic("todo: msl %", inst.op);
+        };
+        
+        if first_arg != -1 {
+            //for self.body.items().slice(0, i) { it |
+            //    @println("% % % %", it.op, it.a, it.b, it.c);
+            //};
+            @panic("loose args in shader translation. inst %", i);
+        }
+    };
+}
+
+fn emit_bits(out: *List(u8), v: u32, type: Scalar) void = @match(type) {
+    fn F32() => {
+        v: f32 = v.bitcast();
+        @fmt(out, "%.0", v);  // TODO: correct fractional part
+    }
+    fn I32()  => @fmt(out, "%", v);
+    fn U32()  => @fmt(out, "%", v);
+    fn Bool() => @fmt(out, "%", v != 0 );
+};
+
+fn msl_operator(op: AstOp) Str = @match(op) {
+    fn AddrOf() => "&";
+    fn Deref() => "*";
+    fn add() => "+";
+    fn sub() => "-";
+    fn mul() => "*";
+    fn div() => "/";
+    fn neg() => "-";
+    fn not() => "~";
+    fn and() => "&&";
+    fn or() => "||";
+    fn bit_and() => "&";
+    fn bit_or() => "|";
+    fn bit_not() => "~";
+    fn eq() => "==";
+    fn ne() => "!=";
+    fn lt() => "<";
+    fn gt() => ">";
+    fn le() => "<=";
+    fn ge() => ">=";
+    @default => "";
+};
+
+fn msl_function(op: AstOp) Str = @match(op) {
+    fn min() => "min";
+    fn max() => "max";
+    fn abs() => "abs";
+    fn fract() => "fract";
+    fn u2x16() => "unpack_unorm2x16_to_float";
+    fn u4x8() => "unpack_unorm2x16_to_float";
+    fn vec2() => "float2";
+    fn clamp() => "clamp";
+    fn mix() => "mix";
+    fn vec3() => "float3";
+    @default => "";
+};
+
+fn msl_function_multi(op: AstOp) Str = @match(op) {
+    fn vec4() => "float4";
+    @default => "";
+};
+
+MSL_PRELUDE :: """
+#include <metal_stdlib>
+#include <simd/simd.h>
+using namespace metal;
+""";
