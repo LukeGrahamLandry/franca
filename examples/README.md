@@ -17,7 +17,7 @@
 - app_events: open a window and display all the (key/mouse/etc) events received 
 - mandelbrot_ui: interactive mandelbrot set but fast because gpu
 - farm_game: draws some rectangles on the screen
-- edit: view a text file
+- terminal: minimal terminal emulator that can exec processes and show thier output. (lib:stb_truetype)
 - geo: decompress a LAZ file and render the point cloud
 - soft_draw: a minimal graphical mandelbrot program for macOS
 

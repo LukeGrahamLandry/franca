@@ -1,5 +1,11 @@
+## (May 20)
+
+- shader translation for wgsl
+- webgpu: if you call surface.present after trying to skip a frame makes it flash like crazy
+
 ## (May 19)
 
+- a few days of slow progress. redoing shader translation
 - it's very easy to just silently get garbage
   - if you forget `[[stage_in]`
   - if you put `[[buffer(0)]]` on a struct of texture/sampler. 

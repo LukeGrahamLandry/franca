@@ -1,0 +1,64 @@
+#include_std("graphics/lib.fr");
+#include_std("backend/lib.fr");
+
+driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics(vtable, "examples/hello_triangle.fr");
+main   :: fn()                      void = Easy'start(State);
+
+State :: @struct {
+    pipe: Sg.Pipeline;
+    bind: SgBindings;
+    pass_action: SgPassAction;
+};
+
+Shaders :: @struct(
+    InV  :: @struct(pos: Vec4, color: Vec4),
+    OutV :: @struct(pos: Vec4 #position, color: Vec4 #user),
+    vs   :: fn(in: Buf(Shaders.InV) #buffer(0), v: u32 #vertex_id) Shaders.OutV = (
+        pos = in[v].pos,
+        color = in[v].color,
+    ),
+    OutF :: @struct(color: Vec4 #colour),
+    fs   :: fn(in: Shaders.OutV #input) Shaders.OutF = (
+        color = in.color,
+    ),
+);
+
+fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    vertices :: @const_slice(@as(f32)
+        // positions            // colors
+         0.0,  0.5, 0.5, 1.0,     1.0, 0.0, 0.0, 1.0,
+         0.5, -0.5, 0.5, 1.0,     0.0, 1.0, 0.0, 1.0,
+        -0.5, -0.5, 0.5, 1.0,     0.0, 0.0, 1.0, 1.0
+    );
+    state.bind.storage_buffers&[0] = sg.make(
+        type = .STORAGEBUFFER,
+        data = vertices.interpret_as_bytes(),
+    );
+    
+    shd_desc := SgShaderDesc.zeroed();
+    choose_shader_impl(SOKOL_BACKEND, shd_desc&, Shaders);
+    shd_desc.storage_buffers&[0] = (
+        wgsl_group1_binding_n = 0,
+        stage = .VERTEX,
+        readonly = true,
+    );
+
+    state.pipe = sg.make(
+        shader = sg.make(shd_desc),
+    );
+}
+
+fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = ();
+
+fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    Easy'glue_begin_pass(sapp, sg, (colors = ((
+        load_action = .CLEAR,
+        clear_value = (r = 0.156, g = 0.156, b = 0.156, a = 1),
+    ), ..)));
+
+    sg.apply_pipeline(state.pipe);
+    sg.apply_bindings(state.bind&);
+    draw(sg = sg, base = 0, elements = 3, instances = 1);
+    sg.end_pass();
+    sg.commit();
+};

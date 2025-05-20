@@ -1,6 +1,12 @@
 //! Warning: This is extremely limited to the point of being mostly useless!
 //! Eventually I want to make this a more serious target that supports a useful subset of the language. 
 //! But for now I just need trivial math for debugtext/gl. 
+//  (can't even do casts, loops, or function definitions)
+//
+// :UGLY this is not something i would be proud of if it was the only thing i was doing. 
+//       seems like a problem. 
+// - my @swizzle syntax is garbage
+//
 
 //
 // Types/Intrinsics in the shader langauges
@@ -18,7 +24,7 @@ fn mul(m: Sgl.Matrix, v: Vec4) Vec4 = ();
 fract :: fn(a: Vec3) Vec3 = (); 
 fn abs(a: Vec3) Vec3 = ();
 fn mix(a: Vec3, b: Vec3, c: f32) Vec3 = ();
-fn clamp(a: Vec3, b: f64, c: f32) Vec3 = ();
+fn clamp(a: Vec3, b: Vec3, c: Vec3) Vec3 = ();
 
 fn Buf($T: Type) Type = {
     Self :: @struct(_: *T, ShaderBufferElement :: T);
@@ -41,12 +47,26 @@ fn pack(u: u16, v: u16) UShort2 =
 // Convert a Franca function into my shader IR. 
 //
 
+DUMP_SHADERS :: true;
+fn choose_shader_impl($backend: RenderBackend, shd_desc: *SgShaderDesc, $data: Type) void = {
+    vv, ff := (shd_desc.vertex_func&, shd_desc.fragment_func&);
+    @if(is_metal(backend)) {
+        vv.entry = "main0";
+        ff.entry = "main0";
+    };
+    vv.source = :: compile_to_shader_source(data.vs, backend, true).sym().c_str();
+    ff.source = :: compile_to_shader_source(data.fs, backend, false).sym().c_str();
+    if DUMP_SHADERS {
+        @println("%", vv.source);
+        @println("%", ff.source);
+    };
+}
+
 // This must be called at comptime!
 #use("@/compiler/ast_external.fr") 
 fn compile_to_shader_source(fid: FuncId, backend: RenderBackend, is_vertex: bool) Str = {
     ::enum(RenderBackend);
     ::tagged(FuncImpl);
-    @assert(backend == .METAL_MACOS, "TODO: support non-metal shader languages");
     fr := current_compiler_context();
     func := get_function_ast(fid, true, true, true, true);
     l := func.loc;
@@ -59,7 +79,7 @@ fn compile_to_shader_source(fid: FuncId, backend: RenderBackend, is_vertex: bool
         type_lookup = init(a),
         locals = init(a),
         stage = @if(is_vertex, .VERTEX, .FRAGMENT),
-        name = @symbol main0,
+        name = @if(SOKOL_BACKEND == .METAL_MACOS, @symbol main0, @symbol main),
         ret = 0,
         gpa = a,
     ); self := self&;
@@ -90,7 +110,12 @@ fn compile_to_shader_source(fid: FuncId, backend: RenderBackend, is_vertex: bool
     self.translate(e);
     
     out := u8.list(self.gpa);
-    import("@/graphics/macos/shaders.fr")'emit_all(self, out&);
+    @match(backend) {
+        fn METAL_MACOS() => import("@/graphics/macos/shaders.fr")'emit_all(self, out&);
+        fn WGPU() => import("@/graphics/web/shaders.fr")'emit_all(self, out&);
+        @default => @panic("TODO: support non-metal shader languages");
+    }
+    
     out.items()
 }
 
@@ -122,13 +147,14 @@ fn set_annotations(info: *IoField, annotations: []Annotation) void = {
             @case(@symbol point_size) => {
                 info.builtin = .point_size;
             };
+            @case(@symbol bind) => ();
             @default => @println("unknown shader annotation: %", it.name.str());
         }
     };
 }
 
 fn translate(self: *Function, e: *FatExpr) void = {
-    debug_log_ast(e[]);
+    @if(DUMP_SHADERS) debug_log_ast(e[]);
     result := self.msl_expr(e);
     @if(e.ty != void) self.body&.push(op = .Return, a = result);
     self.body&.push(op = .End);
