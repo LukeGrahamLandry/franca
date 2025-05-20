@@ -1,0 +1,191 @@
+// 
+// https://www.youtube.com/watch?v=qS4H6PEcCCA 
+// (Epicycles, complex Fourier series and Homer Simpson's orbit - Mathologer)
+// e^(i*t) = cos(t) + i*sin(t)
+// point * e^(frequency i t) 
+// as t goes 0-2pi, the output goes around the circle `frequency` times starting and ending at `point`
+// the trick we're doing is mapping a function `f(t: f32) -> Complex` 
+// which is periodic over 0-2pi (represents the shape being traced) onto 
+// a sum of those Pe^itF terms. 
+// in the sum: frequencies are integers 0, 1, -1, 2, -2, etc. 
+// there's algebra where you can calculate each coefficient point based on the integral of `f` over 0-2pi. 
+// the discrete fourier transform just means doing that from a set of the output points from `f` instead? 
+// https://en.wikipedia.org/wiki/Discrete_Fourier_transform#math_Eq.1
+//
+
+// (i think): len(in) is number of points and len(out) is number of circles. they don't need to match. 
+//            but that doesn't seem true, it works much better when they're the same? 
+fn discrete_fourier(in: []Vec2, out: []Vec2) void = {
+    enumerate out { k, X |
+        result := vec2(0, 0);
+        t := -2.0 * PI * k.float() / in.len.float();
+        enumerate in { n, x |
+            result += complex_mul(x[], pow_ei((t * n.float()).cast()));
+        };
+        // TODO: i feel like im making up the extra '/' here but otherwise the numbers get way too big
+        X[] = result / vec2(in.len.float().cast());
+    };
+}
+
+// This is :ugly and also doesn't work! wip!
+
+fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    sgl := state.draw.default_context&;
+    rot := vec2((@as(i64)sg.frame_index.zext()).float().cast());
+    
+    sgl.viewport(0.intcast(), 0.intcast(), 500, 500, true);
+    sgl.defaults();
+    sgl.load_pipeline(state.pipe);
+    
+    fn fmod(a: f64, b: f64) f64 #libc;
+    sgl.begin(.LINES);
+    t := fmod(sg.frame_index.zext().float() / 100.0, PI*2.0).cast();
+    point := vec2(0.0);
+    last_point := point;
+    
+    // needs to be odd so the lines draw between the points
+    sgl.color = pack_rgba(255, 0, 0, 255);
+    sgl.v3f(0.0, 0.0, 0.0);  
+    
+    enumerate state.coefficients { ii, C |
+        i := ii + 1;
+        c := (i/2).float().cast() * @if(i.mod(2) == 0, 1, -1);
+        point += complex_mul(C[], pow_ei(t * c));
+        sgl.v3f(point.x, point.y, 0.0);  
+        
+        sgl.color = pack_rgba(0, 255, 0, 255);
+        r := norm(point - last_point);
+        sgl.circle(r, vec3(last_point.x, last_point.y, 0.0), 20);
+        
+        sgl.color = pack_rgba(255, 0, 0, 255);
+        sgl.v3f(point.x, point.y, 0.0);
+        
+        last_point = point;
+    }; 
+    sgl.end();
+    
+    sgl.draw_points(state.points.items(), 100);
+    sgl.draw_points(state.coefficients.items(), 200);
+    steps :: 100.0;
+    
+    points := state.coefficients.items();
+    green := 0;
+    //sgl.begin(.POINTS);
+    sgl.begin(.LINES);
+    outer_t := t;
+    last_point := vec2(0.0);
+    first_point: ?Vec2 = .None;
+    range(0, steps) { i |
+        step: f32 = (PI * 2.0 / steps);
+        t := i.float().cast() * step;
+        point := vec2(0.0);
+        enumerate points { i, C |
+            i := i + 1;
+            c := (i/2).float().cast() * @if(i.mod(2) == 0, 1, -1);
+            point += complex_mul(C[], pow_ei(t * c));
+        }; 
+        hit := abs(t-outer_t) <= step/2;
+        sgl.point_size = 5.0;
+        sgl.color = pack_rgba(i * 255 / steps.int(), green, @if(hit, 255, 0), 255);
+        if first_point.is_none() && sgl.cur_prim_type == .LINES {
+            first_point = (Some = point);
+        } else {
+            sgl.v3f(point.x, point.y, @if(hit, 0.1, 0.0));
+            if sgl.cur_prim_type == .LINES {
+                sgl.v3f(last_point.x, last_point.y, @if(hit, 0.1, 0.0));
+            }
+        }
+        last_point = point;
+    };
+    if first_point { first_point |
+        sgl.v3f(last_point.x, last_point.y, 0.0);
+        sgl.v3f(first_point.x, first_point.y, 0.0);
+    };
+    sgl.end();
+    
+    draw_points :: fn(sgl: *Sgl.Context, points: []Vec2, green: i64) void = {
+        sgl.begin(.POINTS);
+        enumerate points { i, it |
+            point := it[];
+            sgl.point_size = 5.0;
+            sgl.color = pack_rgba(i * 255 / points.len, green, 0, 255);
+            sgl.v3f(point.x, point.y, 0.0);
+        };
+        sgl.end();
+    }
+    
+    Easy'glue_begin_pass(sapp, sg, (colors = ((
+        load_action = .CLEAR,
+        clear_value = (r = 0.156, g = 0.156, b = 0.156, a = 1),
+    ), ..)));
+    sgl.draw_layer(0);
+    sg.end_pass();
+    sg.commit();
+};
+
+driver :: fn(vtable: *ImportVTable) void = 
+    Easy'build_for_graphics(vtable, "examples/epicycles.fr");
+
+main :: fn() void = 
+    Easy'start(State);
+
+State :: @struct {
+    pipe: Sgl.Pipeline;
+    draw: Sgl.Self;
+    coefficients: List(Vec2);
+    points: List(Vec2);
+};
+
+fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    state.draw&.setup(
+        allocator = general_allocator(),
+        context = (),
+        sg = sg,
+    );
+    
+    state.points = list(general_allocator());
+    state.coefficients = list(general_allocator());
+    
+    init_pipeline(state.draw.default_context&, state.pipe&, ());
+}
+
+fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
+    @match(event.type) {
+        fn MOUSE_MOVE() => if event.modifiers.get(.left_mouse) != 0 {
+            p := vec2(event.mouse_x, -event.mouse_y) / vec2(250.0) - vec2(1, -1);
+            state.points&.push(p);
+        }
+        fn MOUSE_UP() => {
+            n := state.points.len;
+            state.coefficients&.reserve(n);
+            state.coefficients.len = n;
+            discrete_fourier(state.points.items(), state.coefficients.items());
+        }
+        fn MOUSE_DOWN() => {
+            state.coefficients&.clear();
+            state.points&.clear();
+        }
+        @default => ();
+    }
+}
+
+fn circle(sgl: *Sgl.Context, r: f32, c: Vec3, n: i64) void = {
+    @debug_assert_eq(sgl.cur_prim_type, .LINES);
+    a :: fn(i: i64) f32 => (i.float() / n.float() * PI * 2.0).cast();
+    range(0, n) { i |
+        aa, bb := (pow_ei(a(i)) * vec2(r), pow_ei(a(i+1)) * vec2(r));
+        sgl.v3f(aa.x + c.x, aa.y + c.y, c.z);
+        sgl.v3f(bb.x + c.x, bb.y + c.y, c.z);
+    };
+}
+
+fn complex_mul(a: Vec2, b: Vec2) Vec2 = 
+    vec2(a.x*b.x - a.y * b.y, a.x*b.y + a.y * b.x);
+
+fn pow_ei(t: f32) Vec2 = {
+    s, c := sin_cos(t);
+    vec2(c, s)
+}
+
+#include_std("graphics/lib.fr");
+#include_std("backend/lib.fr");
