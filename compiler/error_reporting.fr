@@ -2,27 +2,6 @@
 fn log(self: *FatExpr, pool: *SelfHosted, out: *List(u8), depth: i64) void = {
     @if(BOOTSTRAP_ONLY_MODE) return();
     
-    @if(ENABLE_ASK_OWNERSHIP) {
-        stack_base := 0;
-        bad := pool.get_alloc().owns_memory(FatExpr, self) == .No;
-        bad = bad && temp().owns_memory(FatExpr, self) == .No;
-        top := i64.int_from_ptr(stack_base&);
-        // TODO: stack shouldn't be accepted really. could allow the first call to be stack but inner pointers really can't be.      
-        on_stack := false;
-        bad = bad && !{ // not
-            ptr := FatExpr.int_from_ptr(self);
-            on_stack = ptr >= top && ptr <= pool.stack_base; // stack grows down!
-            on_stack
-        };
-        if bad { 
-            @fmt(out, "[bad expr ptr %]", FatExpr.int_from_ptr(self));
-            return(); 
-        };
-        if on_stack {
-            out.push_all("[stack expr ptr]:");
-        };
-    };
-    
     if out.len > 2048 {
         out.push_all("<...>");
         return();
@@ -208,7 +187,11 @@ fn log(values: *Values, self: *SelfHosted, out: *List(u8), ty: Type) void = {
         @fmt(out, "[UnknownType]%", values);
         return();
     };
-    info := self.get_type(ty);
+    info := self.get_type(ty);    
+    if info.is(.Placeholder) {
+        @fmt(out, "[UnfinishedType%]%", ty.as_index(), values);
+        return();
+    };
     meta := self.get_info(ty);
     if meta.is_sized && values.len() != meta.stride_bytes.zext() {
         @fmt(out, "[SIZE MISMATCH FOR %]%", self.log_type(ty), values);
@@ -493,21 +476,18 @@ fn log_type_inner(self: *SelfHosted, safe_rec: *DynamicBitSet, out: *List(u8), t
     
     info := self.get_type(ty);
     
-    // TODO: this needs to not do it when it has generic parameters because it hides information.
-    // TODO: `self.get_info_is_ready(ty) && ` but is_sized isn't getting set for `@struct(_: rawptr)` ? wgpu bindings 
-    if (@is(info, .Struct, .Tagged, .Enum, .Placeholder, .Named)) {
-        info := self.get_info(ty);
-        n := info.inferred_name.id();
-        min := Flag.first_dumb_type_name.ident().id();
-        max := Flag.last_dumb_type_name.ident().id();
-        // TODO: probably better is to not stomp the name if its a dumb one? 
-        if info.inferred_name != Flag.SYMBOL_ZERO.ident() && (n < min || n > max) {
-            s := self.pool.get(info.inferred_name);
-            if s.len > 1 { // HACK, unhelpful generics are often T. TODO: track more information about where stuff came from.
-                @fmt(out, "%", s);
-                return();
-            };
+    if info.is(.Placeholder) {
+        if ty == UnknownType {
+            @fmt(out, "-?-");
+        } else {
+            @fmt(out, "UnfinishedPlaceHolder%", ty.as_index());
         };
+        return();
+    };
+    
+    if self.get_guessed_name(ty) { name |
+        @fmt(out, "%", self.pool.get(name));
+        return();
     };
     if safe_rec.get(ty.as_index()) {
         @fmt(out, "TY%", ty.as_index());
@@ -516,14 +496,7 @@ fn log_type_inner(self: *SelfHosted, safe_rec: *DynamicBitSet, out: *List(u8), t
     safe_rec.set(ty.as_index());
 
     @match(info) {
-        fn Placeholder() => {
-            if ty == UnknownType {
-                @fmt(out, "-?-");
-                
-            } else {
-                @fmt(out, "UnfinishedPlaceHolder%", ty.as_index());
-            };
-        }
+        fn Placeholder() => unreachable();
         fn Never() => out.push_all("Never");
         fn F64()   => out.push_all("f64");
         fn F32()   => out.push_all("f32");

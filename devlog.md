@@ -1,7 +1,32 @@
+## (May 21)
+
+- made dump_wasm.fr show types after Call/GetLocal/SetLocal, 
+which is redundant but it's silly to make it harder for myself every time 
+by needing to scroll up to the top and remember indices. 
+- trying to make the .ssa tests pass wasm type check
+  - vararg1.ssa: `function d $f(l %x, ...) {` imported as `extern double f(int, ...);`
+  - isel5.ssa: import_c was always emitting `!` as a Kl which i guess is silly (because it 
+  doesn't match the ty_int the compiler thinks the expression outputs) 
+  but the backend is supposed to allow truncating that so added it to subtyping.ssa test. 
+- fixing ENABLE_TRACY bitrot. 
+  - it prints `Unfinished Type 20` and then segfaults. 
+  - works if you don't try to log a Values for the zone name in curry_const_args
+  - the crash was because it was recursivly trying to log_type in a debug_assert 
+  that the field offsets make sense and they don't make sense because get_info 
+  for an unfinished placeholder says the align is 0 because it's supposed to be unreachable. 
+  - so the root problem there is that im calling get_info to check if there's an inferred type name, 
+  but get_info does a memoized sizing thing so you can't call it at random times, 
+  and i used to correctly check if it was already done before calling it in log_type but i 
+  took that out to make names for opaque `@struct(_: rawptr)` work because they don't seem 
+  to get sized in time when i try to generate nicer wgpu bindings. 
+- TODO: register_objc_class jits the methods to fill the vtable even if they're only called at runtime. 
+should use shims :SLOW
+
 ## (May 20)
 
-- shader translation for wgsl
+- shader translation for wgsl (unfinished: texture/sampler bindings)
 - webgpu: if you call surface.present after trying to skip a frame makes it flash like crazy
+- start epicycles example
 
 ## (May 19)
 

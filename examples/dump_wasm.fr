@@ -18,19 +18,23 @@ fn main() void = {
     
     out := u8.list(temp()); out := out&;
     
+    import_types := temp().alloc(Wasm.TypeIdx, w.imported_function_count);
     ::enum(Wasm.ValType);
     if w.imports.len > 0 {
         @fmt(out, "=== BEGIN IMPORT SECTION ===\n");
+        n := 0;
         each w.imports { it |
             ::tagged(@type it.desc);
             @fmt(out, "- '%' from '%' is a %", it.name.items(), it.module.items(), it.desc&.tag());
             @if_let(it.desc) fn Function(it) => {
                 @fmt(out, "\n    - ");
                 show_type(out, w, it);  
+                import_types[n] = it; n += 1;
             };
             @fmt(out, "\n");
         };
         @fmt(out, "=== END IMPORT SECTION ===\n\n");
+        @debug_assert_eq(n, w.imported_function_count);
     } else {
         @fmt(out, "=== NO IMPORTS ===\n\n");
     };
@@ -55,7 +59,7 @@ fn main() void = {
                 @fmt(out, "(passive)\n");
             } else {
                 @fmt(out, "active at offset ");
-                dump_wasm_expr(w, input, it.active_offset_expr.items(), out);
+                dump_wasm_expr(w, input, it.active_offset_expr.items(), out, import_types);
             };
         };
         @fmt(out, "=== END DATA SECTION ===\n\n");
@@ -81,7 +85,7 @@ fn main() void = {
                 @fmt(out, "(passive)\n");
             } else {
                 @fmt(out, "active at offset ");
-                dump_wasm_expr(w, input, it.active_offset_expr.items(), out);
+                dump_wasm_expr(w, input, it.active_offset_expr.items(), out, import_types);
             };
             @fmt(out, "  Functions: [");
             for it.funcs { id |
@@ -98,7 +102,7 @@ fn main() void = {
         @fmt(out, "=== BEGIN GLOBAL SECTION ===\n");
         each w.globals { it |
             @fmt(out, "- % %\n  init ", if(it.mutable, => "mutable", => "constant"), it.type);
-            dump_wasm_expr(w, input, it.init_expr.items(), out);
+            dump_wasm_expr(w, input, it.init_expr.items(), out, import_types);
         };
         @fmt(out, "=== END GLOBAL SECTION ===\n\n");
     } else {
@@ -121,10 +125,13 @@ fn main() void = {
     };
     
     f_count := min(w.functions.len, w.code.len);
+    locals := Wasm.ValType.list(temp());
     enumerate w.code { i, code | 
         @fmt(out, "[F%]: \n- signeture ", i);
         if i < w.functions.len {
-            show_type(out, w, w.functions[i]);
+            ty := w.functions[i];
+            show_type(out, w, ty);
+            locals&.push_all(w.types[ty.id.zext()].arg.items());
         } else {
             @fmt(out, "(ERROR: missing. only % entries signeture section)", w.functions.len);
         };
@@ -135,20 +142,26 @@ fn main() void = {
             @fmt(out, "- (non-argument) locals: ");
             each code.locals { it |
                 @fmt(out, "(% x %), ", it.type, it.count);
+                locals&.push_repeated(it.count, it.type);
             };
             @fmt(out, "\n");
         };
         
         @fmt(out, "- code ");
-        dump_wasm_expr(w, input, code.insts.items(), out);
+        dump_wasm_expr(w, input, code.insts.items(), out, import_types, locals.items());
+        locals&.clear();
     };
     @fmt(out, "=== END FUNCTION/CODE SECTION ===\n");
     
     print(out.items());
 }
 
+// TODO: this sucks. should allow default parameter values. :Compiler
+fn dump_wasm_expr(w: *WasmModule, i: []u8, is: []u8, o: *List(u8), it: []Wasm.TypeIdx) void = 
+    dump_wasm_expr(w, i, is, o, it, empty());
+
 fn lookup_wasm_encoding(); // TODO shouldn't need to do this
-fn dump_wasm_expr(w: *WasmModule, full_input: []u8, insts: []u8, out: *List(u8)) void = {
+fn dump_wasm_expr(w: *WasmModule, full_input: []u8, insts: []u8, out: *List(u8), import_types: []Wasm.TypeIdx, local_types: []Wasm.ValType) void = {
     start := ptr_diff(full_input.ptr, insts.ptr);
     @fmt(out, "{  // [%..<%]", start, start + insts.len);
     c := 0;
@@ -256,6 +269,11 @@ fn dump_wasm_expr(w: *WasmModule, full_input: []u8, insts: []u8, out: *List(u8))
         if @is(inst, .LocalGet, .LocalSet, .LocalTee, .GlobalGet, .GlobalSet, .Br, .BrIf) {
             arg := push_leb(false);
             @fmt(out, ");");
+            
+            if @is(inst, .LocalGet, .LocalSet) {
+                @fmt(out, " //; %", local_types[arg]);
+            };
+            
             if @is(inst, .Br, .BrIf) {
                 if arg < stack.len {
                     it := stack[stack.len - arg - 1];
@@ -294,9 +312,12 @@ fn dump_wasm_expr(w: *WasmModule, full_input: []u8, insts: []u8, out: *List(u8))
             v := push_leb(false);
             @fmt(out, "); ");
             if v < w.imported_function_count {
-                @fmt(out, "  // import");
+                @fmt(out, "  // import; ");
+                show_type(out, w, import_types[v]);
             } else {
-                @fmt(out, "  // F%", v - w.imported_function_count);
+                id := v - w.imported_function_count;
+                @fmt(out, "  // F%; ", id);
+                show_type(out, w, w.functions[id]);
             };
             continue()
         };

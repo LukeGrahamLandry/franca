@@ -1,7 +1,7 @@
 #include_std("compiler/profile.fr");
 
 Futex :: import("@/lib/sys/sync/futex.fr");
-ENABLE_ENABLE_TRACY :: false;
+ENABLE_ENABLE_TRACY :: get_environment_variable("FRANCA_TRACY").is_some();
 
 // this will always emit everything callees reachable from `fns` (so no jit-shims will remain at the end). 
 // so it's suitable for AOT compilation, but you can still use it for JIT if you want. 
@@ -44,7 +44,7 @@ fn main_thread_pump(comp: CompCtx, shared: *CodegenShared, fns: []FuncId) void =
             continue();
         }; // might have been added multiple times
         
-        {comp.vtable.report_aot_progress}(comp.data, fid, true, 1);
+        {comp.vtable.report_aot_progress}(comp.data, fid, true, 1 /*AotPump*/);
         func := comp.get_function(fid);
         // Note: compile before checking callees! // TODO: return error instead
         xx := {comp.vtable.compile_func}(comp.data, fid, .Aot);  // TODO: fix parsing to allow this as a quick expr
@@ -72,7 +72,7 @@ fn main_thread_pump(comp: CompCtx, shared: *CodegenShared, fns: []FuncId) void =
             panic("emir_ir failed!");
         };
         
-        {comp.vtable.report_aot_progress}(comp.data, fid, false, 1);
+        {comp.vtable.report_aot_progress}(comp.data, fid, false, 1 /*AotPump*/);
         current := work_stack&.pop().unwrap();
         @assert_eq(current, fid, "order messed up");
         for pending { c |  // HACK
@@ -209,7 +209,7 @@ fn enqueue_task(shared: *CodegenShared, old_entry: *CodegenEntry) void = {
 }
 
 fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
-    zone := @if(ENABLE_ENABLE_TRACY, zone_begin(.EmitAot), ());
+    zone := @if(ENABLE_ENABLE_TRACY, zone_begin(.Backend), ());
     logging := entry.logging;
     entry.logging = "";
     context(DefaultContext)[].temporary_allocator = entry.arena&;

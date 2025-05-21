@@ -31,7 +31,6 @@ Command :: @struct(
     os: Os, 
     goal := QbeOutputPurpose.Exe, // invalid
     n := 1,
-    profile := false,
     syscalls := false,
     maintain_it_with_zig := false,
     new_llvm := false,
@@ -82,14 +81,12 @@ fn do_it(vtable: *ImportVTable, cmd: *Command) void = {
     
     c := load_file(cmd.input_file, vtable, build_options);
     
-    ENABLE_TRACY :: false;
+    enable_tracy := get_environment_variable("FRANCA_TRACY").is_some();
     libs := ComptimeLibs.zeroed();
-    @if(ENABLE_TRACY) {
-        libs = c.empty_libs();
-        if cmd.profile {
-            libs&.add_lib(tracy_lib);
-            cmd.goal = .Relocatable;
-        };  
+    @if(enable_tracy) {
+        libs = c.empty_libs();  // TODO: get rid of this. it's from back when driver was involved instead of add_comptime_library
+        libs&.add_lib(tracy_lib);
+        cmd.goal = .Relocatable;
     };
     if cmd.goal == .JitOnly {
         assert(cmd.action != .build, "selected jit backend with 'build' so no artifact will be produced.");
@@ -141,18 +138,16 @@ fn do_it(vtable: *ImportVTable, cmd: *Command) void = {
     write_to_output();
     @eprintln(">>> Wrote % to %", cmd.goal, cmd.output_file);
     
-    @if(ENABLE_TRACY) {
-        if cmd.profile {
-            @if(!ENABLE_COMMANDS) panic("tried to run command");
-            start := timestamp();
-            args := Str.list(temp());
-            args&.push_all(@slice("-o", cmd.output_file, cmd.output_file));
-            args&.push_all(libs&.get_aot_objects().items());
-            success := run_cmd_blocking("g++", args.items()); 
-            assert(success, "link failed");
-            end := timestamp();
-            @println("[link time: %ms]", end - start);
-        };
+    @if(enable_tracy) {
+        @if(!ENABLE_COMMANDS) panic("tried to run command");
+        start := timestamp();
+        args := Str.list(temp());
+        args&.push_all(@slice("-o", cmd.output_file, cmd.output_file));
+        args&.push_all(libs&.get_aot_objects().items());
+        success := run_cmd_blocking("g++", args.items()); 
+        assert(success, "link failed");
+        end := timestamp();
+        @println("[link time: %ms]", end - start);
     };
     m&.drop();  // for -repeat, leak less memory 
 
@@ -280,9 +275,6 @@ fn parse_cli_args() Command = {
             @case("-ctx=implicit") => { 
                 cfg.implicit_context = true; 
                 set_ctx = true;
-            };
-            @case("-ltracy") => { 
-                cfg.profile = true; 
             };
             @case("-syscalls") => { 
                 cfg.syscalls = true; 

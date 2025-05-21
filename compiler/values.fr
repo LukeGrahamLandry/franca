@@ -559,6 +559,37 @@ fn save_guessed_name(self: *SelfHosted, type: Type, name: Symbol) void = {
     };
 }
 
+
+// TODO: this needs to not do it when it has generic parameters because it hides information.
+// TODO: `self.get_info_is_ready(ty) && ` but is_sized isn't getting set for `@struct(_: rawptr)` ? wgpu bindings 
+// the `get_info_is_ready` is very important or you get fucked by FRANCA_TRACY trying to size structs before the fields are ready. 
+fn get_guessed_name(self: *SelfHosted, type: Type) ?Symbol = {
+    loop {
+        info := self.get_type(type);
+        nominal := @is(info, .Struct, .Tagged, .Enum, .Named);
+        if nominal {
+            info := self.type_extra&.nested_index(type.as_index());
+            n := info.inferred_name.id();
+            min := Flag.first_dumb_type_name.ident().id();
+            max := Flag.last_dumb_type_name.ident().id();
+            // TODO: probably better is to not stomp the name if its a dumb one? 
+            if info.inferred_name != Flag.SYMBOL_ZERO.ident() && (n < min || n > max) {
+                s := self.pool.get(info.inferred_name);
+                if s.len > 1 { // HACK, unhelpful generics are often T. TODO: track more information about where stuff came from.
+                    return(Some = info.inferred_name);
+                };
+            };
+        }; 
+        
+        @match(info) {
+            fn Named(it) => {
+                type = it._0;
+            }
+            @default => return(.None);
+        };
+    }
+}
+
 fn update_placeholder(self: *SelfHosted, placeholder_slot: Type, real_type: Type, name: Symbol) void = {
     idx := placeholder_slot.as_index();
     slot := self.types&.nested_index(idx);
@@ -610,6 +641,7 @@ fn get_info_is_ready(self: *SelfHosted, ty: Type) bool = {
 }
 
 :: as_ref(TypeMeta);
+// You can't call log_type in here (like in the debug_asserts) because log_type calls this and you'll get stuck recursing!
 fn get_info(self: *SelfHosted, ty_original: Type) *TypeMeta = {
     // there are a lot of Enum / Placeholder -> Named which always have the same repr. 
     // amortise the cost of raw_type(). 
@@ -643,18 +675,12 @@ fn get_info(self: *SelfHosted, ty_original: Type) *TypeMeta = {
     };
     
     info := @match(self.get_type(ty)) {
-        fn Placeholder() => {
-            // TODO: you're fucked if you get here and keep trying to compile (so should panic) 
-            //       but if it's already an error and you're just trying to log_type to report it, 
-            //       then this is fine.
-            @eprintln("Unfinished type %", ty.as_index()); // TODO: err!
-            new(0, 0, false, 0)
-        }
+        fn Placeholder() => @panic("Unfinished type %", ty.as_index()); // TODO: err!
         fn Struct(f) => {
             // TODO: shouldn't need to do this here. instead do it in the event loop. 
             //       old sema didn't need this, it just obsessively calledfinish_layout every time it produced a value. 
             self.finish_layout(ty); 
-            @debug_assert(f.layout_done, "ICE: layout not done! %", self.log_type(ty));
+            @debug_assert(f.layout_done, "ICE: layout not done! T%", ty);
             size: u16 = 0;
             align: u16 = 1;
             pointers := false;
@@ -668,7 +694,8 @@ fn get_info(self: *SelfHosted, ty_original: Type) *TypeMeta = {
                 info := self.get_info(arg.ty);
                 a := self.alignment(arg, info);
                 align = align.max(a.trunc());
-                @debug_assert(f.is_union || arg.byte_offset >= bytes, "ICE: fields not in order in %", self.log_type(ty)); // TODO: assert not past max_u16 or better have a safety checking intcast
+                @debug_assert(arg.byte_offset != FIELD_LAYOUT_NOT_DONE, "ICE: field offset for % not known", self.pool.get(arg.name));
+                @debug_assert(f.is_union || arg.byte_offset >= bytes, "ICE: fields not in order in T% field: % at % is before %", ty, self.pool.get(arg.name), arg.byte_offset, bytes); // TODO: assert not past max_u16 or better have a safety checking intcast
                 end := arg.byte_offset + info.stride_bytes.zext();
                 if f.is_union {
                     size = size.max(info.size_slots);
