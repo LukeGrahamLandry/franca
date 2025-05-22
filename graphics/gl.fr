@@ -2,40 +2,70 @@
 //! Adapted from sokol_gl.h - https://github.com/floooh/sokol
 //! zlib/libpng license. Copyright (c) 2018 Andre Weissflog.
 
+// 
+// I always get confused by coordinate systems. 
+// You call viewport() to tell it what rectangle of the screen to draw on in window pixel coordinates, 
+// so if you pass sapp.framebuffer_(width/height), it cover the whole window. 
+// the vertex coordinates are from (-1.0, 1.0) so if you have the viewport cover a non-square 
+// window, the messed up aspect ratio leaks into your vertex coordinates and your drawings 
+// will stretch as the window resizes unless you apply the inverse scale to get back to 
+// a 1:1 aspect ratio. 
+// 
+// To start drawing, you call sgl.begin(PrimitiveType) then call the sgl.vtx(...) functions 
+// to add vertices (which are interpreted differently depending on the primitive). 
+// - LINES are kinda useless since you can't control the width so you probably want to make your own with QUADS instead. 
+// - QUADS aren't a real gpu thing, we just output two triangles. 
+// - POINTS are a real gpu thing (useful if all your quads are squares) and you can control their size with sgl.point_size. 
+// When you're done a shape, call sgl.end(), which conceptually corresponds to a draw call but we try to 
+// merge them for you if no uniforms changed. This is just recording commands that will be executed 
+// when you call sgl.draw_layer(0) in your render pass. 
+//
+// There are vtx() overloads that let you leave off colour/uv/point_size and use the defaults 
+// set on the Sgl.Context, so you can update those fields to affect multiple vtx() calls. 
+// Those fields live in the vertex data so you can change them between vtx() calls as often as you want. 
+// The rest: transforms/image/sampler/pipeline are only stored when you call end(), 
+// so they're shared by all the vertices of a shape. 
+//
+// You're free to create multiple instances of Sgl.Self (you'll need to if you want to 
+// render into multiple gfx off screen passes). They can share the same `defaults: Shared` 
+// resources. 
+//
+
+// TODO: I think this would be less confusing if Context became Self and 
+//       just stored another copy of the shared default gpu state. 
+
 Sg :: import("@/graphics/gfx.fr");
 
 /* Describes the initialization parameters of a rendering context.
  * Creating additional contexts is useful if you want to render
  * in separate sokol-gfx passes. */
-ContextDesc :: @struct(
+Desc :: @struct(
     max_vertices: i32 = 65536,
     max_commands: i32 = 16384,
-    color_format := SgPixelFormat.DEFAULT,
-    depth_format := SgPixelFormat.DEFAULT,
-    sample_count: i32 = 0,
+    defaults: Shared = (),
     // when true, you need to manually call ctx.rewind() and ctx.update_vertex_buffer(). 
     // my idea is that this gives a smoother transition between the immediate mode api 
     // and doing something more serious where you track vertex buffers yourself. 
     lazy_record := false,
-);
-Desc :: @struct(
-    context: ContextDesc, // settings for the default_context
-    // TODO: gl wants the opposite default from using gfx directly
-    //       but since my version has the default inside SgPipelineDesc 
-    //       leaving off the field won't use this default!  :WindingDefault
-    face_winding := SgFaceWinding.CCW, 
+    
     allocator: Alloc,
     sg: *Sg.Self,
 );
+
+PipeDesc :: @struct {
+    color_format := SgPixelFormat.DEFAULT;
+    depth_format := SgPixelFormat.DEFAULT;
+    pip: SgPipelineDesc #use = ();
+};
+
 Vertex :: Shaders.InV;
 Matrix :: @struct(v: Array(Array(f32, 4), 4));
 Uniform :: @struct(
     mvp: Matrix,  /* model-view-projection matrix */
     tm: Matrix,   /* texture matrix */
 );
-Context :: @rec @struct(
-    common: *Self,
-    desc: ContextDesc,
+Self :: @rec @struct(
+    init_cookie: u32,
     frame_id: u32,
     update_frame_id: u32,
     vertices: RawList(Vertex),
@@ -69,19 +99,21 @@ Context :: @rec @struct(
     /* matrix stacks */
     cur_matrix_mode: MatrixMode,
     matrix_tos: EnumMap(MatrixMode, i32),
+    // don't access directly because matrix_dirty needs to be set
     matrix_stack: EnumMap(MatrixMode, Array(Matrix, max_stack_depth)),
+    
+    defaults: Shared,
+    lazy_record: bool,
 );
+
+Shared :: @struct {
+    img: Sg.Image   = (id = Sg.SG_INVALID_ID); // a default white texture
+    smp: Sg.Sampler = (id = Sg.SG_INVALID_ID); // a default sampler
+    shd: Sg.Shader  = (id = Sg.SG_INVALID_ID); // same shader for all contexts
+};
+
 #use("@/lib/collections/enum_map.fr");
-Self :: @rec @struct(
-    init_cookie: u32,
-    desc: Desc,
-    def_img: Sg.Image,   // a default white texture
-    def_smp: Sg.Sampler, // a default sampler
-    shd: Sg.Shader,      // same shader for all contexts
-    // This is not special. It's just some storage you can use to avoid an 
-    // extra allocation in the simple case where you only want a single context. 
-    default_context: Context,
-);
+
 /* Errors are reset each frame after calling draw_layer(), 
     * get the last error code from `ctx.error` */
 Error :: @struct(
@@ -149,26 +181,27 @@ Shaders :: @struct(
 
 ::enum(SgPixelFormat); ::enum(SgFaceWinding);
 
-fn init_pipeline(ctx: *Context, pip: *Pipeline, desc: SgPipelineDesc) bool = {
+fn init_pipeline(ctx: *Self, pip: *Pipeline, sg: *Sg.Self, desc: PipeDesc) bool = {
     ::enum(SgColorMask);
     
     /* create a new desc with 'patched' shader and pixel format state */
-    ctx_desc := ctx.desc&;
-    sgl := ctx.common;
     if desc.shader.id == SG_INVALID_ID.trunc() {
-        desc.shader = sgl.shd;
+        desc.shader = ctx.defaults.shd;
     };
     desc.index_type = .NONE;
-    desc.sample_count = ctx_desc.sample_count;
-    if desc.face_winding == .DEFAULT {
-        desc.face_winding = sgl.desc.face_winding;
-        // TODO: don't get here becase the field defaults to CW :WindingDefault
-    };
-    desc.depth.pixel_format = ctx_desc.depth_format;
-    if ctx_desc.depth_format == .NONE {
+    
+    // TODO: sokol_gl wants the opposite default from using gfx directly
+    //       but since my version has the default inside SgPipelineDesc 
+    //       leaving off the field won't use this default!  :WindingDefault
+    //if desc.face_winding == .DEFAULT {
+    //    desc.face_winding = ctx_desc.face_winding;
+    //};
+    
+    desc.depth.pixel_format = desc.depth_format;
+    if desc.depth_format == .NONE {
         desc.depth.write_enabled = false;
     };
-    desc.colors&[0].pixel_format = ctx_desc.color_format;
+    desc.colors&[0].pixel_format = desc.color_format;
     if desc.colors&[0].write_mask == .DEFAULT {
         desc.colors&[0].write_mask = .RGB;
     };
@@ -186,7 +219,7 @@ fn init_pipeline(ctx: *Context, pip: *Pipeline, desc: SgPipelineDesc) bool = {
             /* quads are emulated via triangles, use the same pipeline object */
             pip[i] = pip[.TRIANGLES];
         } else {
-            pip[i] = ctx.common.desc.sg.make(desc);
+            pip[i] = sg.make(desc.pip);
             if pip[i].id == SG_INVALID_ID.trunc() {
                 @debug_log("SGL_MAKE_PIPELINE_FAILED");
                 return(false);
@@ -207,23 +240,24 @@ fn destroy_pipeline(sg: *Sg.Self, pip: *Pipeline) void = {
     pip[] = zeroed(@type pip);
 }
 
-fn current_pipeline(ctx: *Context) Sg.Pipeline = 
+fn current_pipeline(ctx: *Self) Sg.Pipeline = 
     ctx.pip_stack&.index(ctx.pip_tos.zext())[ctx.cur_prim_type];
 
-fn init_context(sgl: *Self, ctx: *Context, in_desc: *ContextDesc) bool = {
-    ctx.desc = in_desc[];
-    ctx.common = sgl;
+fn init_context(ctx: *Self, desc: *Desc) bool = {
+    ctx.defaults = desc.defaults;
+    ctx.lazy_record = desc.lazy_record;
+    
     // NOTE: frame_id must be non-zero, so that updates trigger in first frame
     ctx.frame_id = 1;
-    ctx.cur_img = sgl.def_img;
-    ctx.cur_smp = sgl.def_smp;
-    sg := sgl.desc.sg;
+    ctx.cur_img = ctx.defaults.img;
+    ctx.cur_smp = ctx.defaults.smp;
+    sg := desc.sg;
 
     // allocate buffers
-    a := sgl.desc.allocator;
-    ctx.vertices = init(a, ctx.desc.max_vertices.zext());
-    ctx.uniforms = init(a, ctx.desc.max_commands.zext());
-    ctx.commands = init(a, ctx.desc.max_commands.zext());
+    a := desc.allocator;
+    ctx.vertices = init(a, desc.max_vertices.zext());
+    ctx.uniforms = init(a, desc.max_commands.zext());
+    ctx.commands = init(a, desc.max_commands.zext());
 
     // create sokol-gfx resource objects
     sg.push_debug_group("sokol-gl");
@@ -236,9 +270,9 @@ fn init_context(sgl: *Self, ctx: *Context, in_desc: *ContextDesc) bool = {
     @debug_assert(ctx.vbuf.id != SG_INVALID_ID.trunc());
     ctx.bind.storage_buffers&[0] = ctx.vbuf;
 
-    def_pip_desc: SgPipelineDesc = ();
+    def_pip_desc: PipeDesc = ();
     def_pip_desc.depth.write_enabled = true;
-    init_pipeline(ctx, ctx.def_pip&, def_pip_desc) || return(false);
+    init_pipeline(ctx, ctx.def_pip&, sg, def_pip_desc) || return(false);
     if !sg.add_commit_listener(make_commit_listener(ctx)) {
         @debug_log("ADD_COMMIT_LISTENER_FAILED");
         return(false)
@@ -258,12 +292,10 @@ fn init_context(sgl: *Self, ctx: *Context, in_desc: *ContextDesc) bool = {
 
 // Releases the resources owned by this context. 
 // You are still responsible for cleaning up the memory holding the Context struct itself. 
-fn destroy(ctx: *Context) void = {
-    a := ctx.common.allocator;
+fn destroy(ctx: *Self, sg: *Sg.Self, a: Alloc) void = {
     drop(ctx.vertices&, a);
     drop(ctx.uniforms&, a);
     drop(ctx.commands&, a);
-    sg := ctx.common.desc.sg;
     sg.push_debug_group("sokol-gl");
     sg.destroy_buffer(ctx.vbuf);
     sg.destroy_pipeline(ctx.def_pip);
@@ -273,14 +305,14 @@ fn destroy(ctx: *Context) void = {
     ctx[] = zeroed(@type ctx[]);
 }
 
-fn begin(ctx: *Context, mode: PrimitiveType) void = {
+fn begin(ctx: *Self, mode: PrimitiveType) void = {
     ctx.in_begin = true;
     ctx.base_vertex = ctx.vertices.len.intcast();
     ctx.quad_vtx_count = 0;
     ctx.cur_prim_type = mode;
 }
 
-fn rewind(ctx: *Context) void = {
+fn rewind(ctx: *Self) void = {
     ctx.frame_id += 1;
     ctx.vertices.len = 0;
     ctx.uniforms.len = 0;
@@ -291,18 +323,18 @@ fn rewind(ctx: *Context) void = {
     ctx.matrix_dirty = true;
 }
 
-fn make_commit_listener(ctx: *Context) SgCommitListener = {
-    (user_data = Context.raw_from_ptr(ctx), func = fn(userdata: rawptr) void = {
+fn make_commit_listener(ctx: *Self) SgCommitListener = {
+    (user_data = Self.raw_from_ptr(ctx), func = fn(userdata: rawptr) void = {
         // called from inside sokol-gfx sg.commit()
         if(userdata.is_null(), => return());
-        ctx := Context.ptr_from_raw(userdata);
-        if !ctx.desc.lazy_record {
+        ctx := Self.ptr_from_raw(userdata);
+        if !ctx.lazy_record {
             rewind(ctx);
         };
     })
 }
 
-fn next_vertex(ctx: *Context) ?*Vertex = {
+fn next_vertex(ctx: *Self) ?*Vertex = {
     v := ctx.vertices&.next_uninit();
     if v.is_none() {
         ctx.error.vertices_full = true;
@@ -312,13 +344,13 @@ fn next_vertex(ctx: *Context) ?*Vertex = {
     v
 }
 
-fn cur_command(ctx: *Context) ?*Command #inline = {
+fn cur_command(ctx: *Self) ?*Command #inline = {
     if(ctx.commands.len <= 0, => return(.None)); 
     (Some = ctx.commands.index(ctx.commands.len - 1))
 }
 
 // TODO: copy-paste
-fn next_command(ctx: *Context) ?*Command = {
+fn next_command(ctx: *Self) ?*Command = {
     v := ctx.commands&.next_uninit();
     if v.is_none() {
         ctx.error.commands_full = true;
@@ -330,7 +362,7 @@ fn next_command(ctx: *Context) ?*Command = {
 
 // sets `ctx.error.vertices_full` if the vertex buffer is full.
 // so you can once at the end of a frame rather than on every call.
-fn vtx(ctx: *Context, x: f32, y: f32, z: f32, u: f32, v: f32, rgba: u32) void = {
+fn vtx(ctx: *Self, x: f32, y: f32, z: f32, u: f32, v: f32, rgba: u32) void = {
     @debug_assert(ctx.in_begin);
     ::ptr_utils(Vertex);
     /* handle non-native primitive types */
@@ -351,16 +383,15 @@ fn vtx(ctx: *Context, x: f32, y: f32, z: f32, u: f32, v: f32, rgba: u32) void = 
 }
 
 /* current top-of-stack matrix */
-fn matrix(ctx: *Context, mode: MatrixMode) *Matrix = 
+fn matrix(ctx: *Self, mode: MatrixMode) *Matrix = 
     ctx.matrix_stack&.index(mode).index(ctx.matrix_tos&[mode].zext());
 
 /* get pointer to current top-of-stack of current matrix mode */
-fn matrix(ctx: *Context) *Matrix = 
+fn matrix(ctx: *Self) *Matrix = 
     matrix(ctx, ctx.cur_matrix_mode);
 
 // create resources which are shared between all contexts
-fn setup_common(sgl: *Self) void = {
-    sg := sgl.desc.sg;
+fn create_defaults(sg: *Sg.Self) Shared = {
     sg.push_debug_group("sokol-gl");
 
     pixels := @uninitialized Array(u8, 64 * size_of(u32));
@@ -374,14 +405,12 @@ fn setup_common(sgl: *Self) void = {
     img_desc.pixel_format = .RGBA8;
     img_desc.data.subimage&[0]&[0] = pixels&.items();
     img_desc.label = "sgl-default-texture";
-    sgl.def_img = sg.make(img_desc);
-    @debug_assert(sgl.def_img.id != SG_INVALID_ID.trunc());
+    img := sg.make(img_desc);
 
-    sgl.def_smp = sg.make(
+    smp: Sg.Sampler = sg.make(
         min_filter = .NEAREST,
         mag_filter = .NEAREST,
     );
-    @debug_assert(sgl.def_smp.id != SG_INVALID_ID.trunc());
 
     // TODO: surely this is generated code. do a comptime thing instead
     // one shader for all contexts
@@ -428,29 +457,29 @@ fn setup_common(sgl: *Self) void = {
     );
     shd_desc.label = "sgl-shader";
     choose_shader_impl(SOKOL_BACKEND, shd_desc&, Shaders);
-    sgl.shd = sg.make(shd_desc);
-    @debug_assert(sgl.shd.id != SG_INVALID_ID.trunc());
+    shd := sg.make(shd_desc);
     sg.pop_debug_group();
+    
+    (shd = shd, img = img, smp = smp)
 }
 
 // discard resources which are shared between all contexts
-fn discard_common(sgl: *Self) void = {
+fn discard(self: Shared, sg: *Self) void = {
     sg.push_debug_group("sokol-gl");
-    sg.destroy_image(sgl.def_img);
-    sg.destroy_sampler(sgl.def_smp);
-    sg.destroy_shader(sgl.shd);
+    sg.destroy_image(self.def_img);
+    sg.destroy_sampler(self.def_smp);
+    sg.destroy_shader(self.shd);
     sg.pop_debug_group();
 }
 
-fn update_vertex_buffer(ctx: *Context) void = {
+fn update_vertex_buffer(ctx: *Self, sg: *Sg.Self) void = {
     ctx.update_frame_id = ctx.frame_id;
     range := ctx.vertices.items().interpret_as_bytes();
-    ctx.common.desc.sg.update_buffer(ctx.vbuf, range);
+    sg.update_buffer(ctx.vbuf, range);
 }
 
-fn draw_layer(ctx: *Context, layer_id: i32) void = {
+fn draw_layer(ctx: *Self, sg: *Sg.Self, layer_id: i32) void = {
     if(ctx.vertices.len <= 0 || ctx.commands.len <= 0, => return());
-    sg := ctx.common.desc.sg;
     sg.push_debug_group("sokol-gl");
 
     cur_pip_id: u32 = SG_INVALID_ID;  // TODO: these shouldn't need a type since the constant has a type. :Compiler
@@ -458,8 +487,8 @@ fn draw_layer(ctx: *Context, layer_id: i32) void = {
     cur_smp_id: u32 = SG_INVALID_ID;
     cur_uniform_index: i32 = -1;
 
-    if ctx.update_frame_id != ctx.frame_id && !ctx.desc.lazy_record {
-        ctx.update_vertex_buffer();
+    if ctx.update_frame_id != ctx.frame_id && !ctx.lazy_record {
+        ctx.update_vertex_buffer(sg);
     };
 
     // render all successfully recorded commands (this may be less than the
@@ -469,7 +498,7 @@ fn draw_layer(ctx: *Context, layer_id: i32) void = {
         if(cmd.layer_id != layer_id, => continue());
         ::tagged(Args);
         @match(cmd.args&) {
-            fn Viewport(args)    =>     sg.apply_viewport(args.x, args.y, args.w, args.h, args.origin_top_left);
+            fn Viewport(args)    => sg.apply_viewport(args.x, args.y, args.w, args.h, args.origin_top_left);
             fn ScissorRect(args) => sg.apply_scissor_rect(args.x, args.y, args.w, args.h, args.origin_top_left);
             fn Draw(args) => {
                 if args.pip.id != cur_pip_id {
@@ -505,10 +534,9 @@ fn draw_layer(ctx: *Context, layer_id: i32) void = {
 fn setup(sgl: *Self, desc: Desc) void = {
     sgl[] = zeroed(@type sgl[]);
     sgl.init_cookie = init_cookie;
-    sgl.desc = desc;
     @debug_assert(desc.sg.valid, "must setup sg before sgl");
-    setup_common(sgl);
-    init_context(sgl, sgl.default_context&, sgl.desc.context&);
+    desc.defaults = create_defaults(desc.sg);  // tODO
+    init_context(sgl, desc&);
 }
 
 fn shutdown(sgl: *Self) void = {
@@ -524,17 +552,17 @@ fn shutdown(sgl: *Self) void = {
     sgl.init_cookie = 0;
 }
 
-fn load_pipeline(ctx: *Context, pip: Pipeline) void #inline = {
+fn load_pipeline(ctx: *Self, pip: Pipeline) void #inline = {
     @debug_assert((ctx.pip_tos >= 0) && (ctx.pip_tos.zext() < max_stack_depth));
     ctx.pip_stack&[ctx.pip_tos.zext()] = pip;
 }
 
-fn load_default_pipeline(ctx: *Context) void = {
+fn load_default_pipeline(ctx: *Self) void = {
     @debug_assert((ctx.pip_tos >= 0) && (ctx.pip_tos.zext() < max_stack_depth));
     ctx.pip_stack&[ctx.pip_tos.zext()] = ctx.def_pip;
 }
 
-fn push_pipeline(ctx: *Context) void = if ctx.pip_tos < max_stack_depth - 1 {
+fn push_pipeline(ctx: *Self) void = if ctx.pip_tos < max_stack_depth - 1 {
     ctx.pip_tos += 1;
     ctx.pip_stack[ctx.pip_tos] = ctx.pip_stack[ctx.pip_tos-1];
 } else {
@@ -542,22 +570,21 @@ fn push_pipeline(ctx: *Context) void = if ctx.pip_tos < max_stack_depth - 1 {
     ctx.error.any = true;
 };
 
-fn pop_pipeline(ctx: *Context) void = if ctx.pip_tos > 0 {
+fn pop_pipeline(ctx: *Self) void = if ctx.pip_tos > 0 {
     ctx.pip_tos -= 1;
 } else {
     ctx.error.stack_underflow = true;
     ctx.error.any = true;
 };
 
-fn defaults(ctx: *Context) void = {
+fn defaults(ctx: *Self) void = {
     @debug_assert(!ctx.in_begin);
     ctx.u = 0.0; ctx.v = 0.0;
     ctx.color = 0xFFFFFFFF;
     ctx.point_size = 1.0;
     ctx.texturing_enabled = false;
-    sgl := ctx.common;
-    ctx.cur_img = sgl.def_img;
-    ctx.cur_smp = sgl.def_smp;
+    ctx.cur_img = ctx.defaults.img;
+    ctx.cur_smp = ctx.defaults.smp;
     load_default_pipeline(ctx);
     identity(matrix(ctx, .TEXTURE));
     identity(matrix(ctx, .MODELVIEW));
@@ -567,8 +594,8 @@ fn defaults(ctx: *Context) void = {
 }
 
 // ERRORS: if there is not enough space in the command buffer (returns false)
-fn viewport(ctx: *Context, x: i32, y: i32, w: i32, h: i32, origin_top_left: bool) bool = {
-    @debug_assert(init_cookie == ctx.common.init_cookie);
+fn viewport(ctx: *Self, x: i32, y: i32, w: i32, h: i32, origin_top_left: bool) bool = {
+    @debug_assert(init_cookie == ctx.init_cookie);
     @debug_assert(!ctx.in_begin, "you must call viewport() before begin() (or you forgot to call end() last frame)");
     cmd := next_command(ctx) || return(false);
     cmd.layer_id = ctx.layer_id;
@@ -581,11 +608,11 @@ fn viewport(ctx: *Context, x: i32, y: i32, w: i32, h: i32, origin_top_left: bool
 
 fn f_int(x: i32) f32 = x.cast().int().intcast();  // TODO: i have a #ir for this
 
-fn viewport(ctx: *Context, x: f32, y: f32, w: f32, h: f32, origin_top_left: bool) bool = 
+fn viewport(ctx: *Self, x: f32, y: f32, w: f32, h: f32, origin_top_left: bool) bool = 
     viewport(ctx, x.f_int(), y.f_int(), w.f_int(), h.f_int(), origin_top_left);
 
 // ERRORS: if there is not enough space in the command buffer (returns false)
-fn scissor_rect(ctx: *Context, x: i32, y: i32, w: i32, h: i32, origin_top_left: bool) bool = {
+fn scissor_rect(ctx: *Self, x: i32, y: i32, w: i32, h: i32, origin_top_left: bool) bool = {
     @debug_assert(ctx.common.init_cookie == init_cookie);
     @debug_assert(!ctx.in_begin);
     cmd := next_command(ctx) || return(false);
@@ -598,16 +625,16 @@ fn scissor_rect(ctx: *Context, x: i32, y: i32, w: i32, h: i32, origin_top_left: 
     );
 }
 
-fn scissor_rect(ctx: *Context, x: f32, y: f32, w: f32, h: f32, origin_top_left: bool) bool = 
+fn scissor_rect(ctx: *Self, x: f32, y: f32, w: f32, h: f32, origin_top_left: bool) bool = 
     scissor_rect(ctx, x.int(), y.int(), w.int(), h.int(), origin_top_left);
 
-fn texture(ctx: *Context, img: SgImage, smp: SgSampler) void = {
+fn texture(ctx: *Self, img: SgImage, smp: SgSampler) void = {
     @debug_assert(!ctx.in_begin);
-    ctx.cur_img = @if(img.id != SG_INVALID_ID, img, ctx.common.def_img);
-    ctx.cur_smp = @if(smp.id != SG_INVALID_ID, smp, ctx.common.def_smp);
+    ctx.cur_img = @if(img.id != SG_INVALID_ID, img, ctx.defaults.img);
+    ctx.cur_smp = @if(smp.id != SG_INVALID_ID, smp, ctx.defaults.smp);
 }
 
-fn end(ctx: *Context) void = {
+fn end(ctx: *Self) void = {
     @debug_assert(ctx.in_begin, "called end() outside begin()");
     @debug_assert(ctx.vertices.len >= ctx.base_vertex.intcast());
     ctx.in_begin = false;
@@ -629,9 +656,8 @@ fn end(ctx: *Context) void = {
 
     // check if command can be merged with current command
     pip := current_pipeline(ctx);
-    sgl := ctx.common;
-    img := @if(ctx.texturing_enabled, ctx.cur_img, sgl.def_img);
-    smp := @if(ctx.texturing_enabled, ctx.cur_smp, sgl.def_smp);
+    img := @if(ctx.texturing_enabled, ctx.cur_img, ctx.defaults.img);
+    smp := @if(ctx.texturing_enabled, ctx.cur_smp, ctx.defaults.smp);
     cur_cmd := cur_command(ctx);
     if cur_cmd { cmd |
         @if_let(cmd.args&) fn Draw(args) => {
@@ -665,7 +691,7 @@ fn end(ctx: *Context) void = {
     );
 }
 
-fn push_matrix(ctx: *Context) void = {
+fn push_matrix(ctx: *Self) void = {
     ctx.matrix_dirty = true;
     if ctx.matrix_tos&[ctx.cur_matrix_mode] < max_stack_depth - 1 {
         src := matrix(ctx);
@@ -678,7 +704,7 @@ fn push_matrix(ctx: *Context) void = {
     }
 }
 
-fn pop_matrix(ctx: *Context) void = {
+fn pop_matrix(ctx: *Self) void = {
     ctx.matrix_dirty = true;
     if ctx.matrix_tos&[ctx.cur_matrix_mode] > 0 {
         ctx.matrix_tos&[ctx.cur_matrix_mode] -= 1;
@@ -687,6 +713,10 @@ fn pop_matrix(ctx: *Context) void = {
         ctx.error.any = true;
     };
 }
+
+// 
+// The interesting part is done now. The rest just make calling into it less annoying. 
+// 
 
 //
 // Matrix Math
@@ -878,86 +908,94 @@ fn lookat(dst: *Matrix, eye: Vec3, center: Vec3, up: Vec3) void = {
 }
 
 //
+// Vertex Helpers
 // TODO: these are kinda painful
 //
 
-fn c3f(ctx: *Context, r: f32, g: f32, b: f32) void = {
+fn c3f(ctx: *Self, r: f32, g: f32, b: f32) void = {
     ctx.color = pack_rgba(r, g, b, 1.0);
 }
 
-fn v2f(ctx: *Context, x: f32, y: f32) void = 
+fn v2f(ctx: *Self, xy: Vec2) void = 
+    ctx.v2f(xy.x, xy.y);
+
+fn v2f(ctx: *Self, x: f32, y: f32) void = 
     vtx(ctx, x, y, 0.0, ctx.u, ctx.v, ctx.color);
 
-fn v3f(ctx: *Context, x: f32, y: f32, z: f32) void = 
+fn v3f(ctx: *Self, x: f32, y: f32, z: f32) void = 
     vtx(ctx, x, y, z, ctx.u, ctx.v, ctx.color);
 
-fn v2f_t2f(ctx: *Context, x: f32, y: f32, u: f32, v: f32) void = 
+fn v2f_t2f(ctx: *Self, x: f32, y: f32, u: f32, v: f32) void = 
     vtx(ctx, x, y, 0.0, u, v, ctx.color);
 
-fn v3f_t2f(ctx: *Context, x: f32, y: f32, z: f32, u: f32, v: f32) void = 
+fn v3f_t2f(ctx: *Self, x: f32, y: f32, z: f32, u: f32, v: f32) void = 
     vtx(ctx, x, y, z, u, v, ctx.color);
 
-fn v2f_c3f(ctx: *Context, x: f32, y: f32, r: f32, g: f32, b: f32) void = 
+fn v2f_c3f(ctx: *Self, x: f32, y: f32, r: f32, g: f32, b: f32) void = 
     vtx(ctx, x, y, 0.0, ctx.u, ctx.v, pack_rgbaf(r, g, b, 1.0));
 
-fn v2f_c3b(ctx: *Context, x: f32, y: f32, r: u8, g: u8, b: u8) void = 
+fn v2f_c3b(ctx: *Self, x: f32, y: f32, r: u8, g: u8, b: u8) void = 
     vtx(ctx, x, y, 0.0, ctx.u, ctx.v, pack_rgbab(r, g, b, 255));
 
-fn v2f_c4f(ctx: *Context, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32) void = 
+fn v2f_c4f(ctx: *Self, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32) void = 
     vtx(ctx, x, y, 0.0, ctx.u, ctx.v, pack_rgbaf(r, g, b, a));
 
-fn v2f_c4b(ctx: *Context, x: f32, y: f32, r: u8, g: u8, b: u8, a: u8) void =
+fn v2f_c4b(ctx: *Self, x: f32, y: f32, r: u8, g: u8, b: u8, a: u8) void =
     vtx(ctx, x, y, 0.0, ctx.u, ctx.v, pack_rgbab(r, g, b, a));
 
-fn v2f_c1i(ctx: *Context, x: f32, y: f32, rgba: u32) void =
+fn v2f_c1i(ctx: *Self, x: f32, y: f32, rgba: u32) void =
     vtx(ctx, x, y, 0.0, ctx.u, ctx.v, rgba);
 
-fn v3f_c3f(ctx: *Context, x: f32, y: f32, z: f32, r: f32, g: f32, b: f32) void =
+fn v3f_c3f(ctx: *Self, x: f32, y: f32, z: f32, r: f32, g: f32, b: f32) void =
     vtx(ctx, x, y, z, ctx.u, ctx.v, pack_rgba(r, g, b, 1.0));
 
-fn v3f_c3b(ctx: *Context, x: f32, y: f32, z: f32, r: u8, g: u8, b: u8) void =
+fn v3f_c3b(ctx: *Self, x: f32, y: f32, z: f32, r: u8, g: u8, b: u8) void =
     vtx(ctx, x, y, z, ctx.u, ctx.v, pack_rgbab(r, g, b, 255));
 
-fn v3f_c4f(ctx: *Context, x: f32, y: f32, z: f32, r: f32, g: f32, b: f32, a: f32) void = 
+fn v3f_c4f(ctx: *Self, x: f32, y: f32, z: f32, r: f32, g: f32, b: f32, a: f32) void = 
     vtx(ctx, x, y, z, ctx.u, ctx.v, pack_rgbaf(r, g, b, a));
 
-fn v3f_c4b(ctx: *Context, x: f32, y: f32, z: f32, r: u8, g: u8, b: u8, a: u8) void =
+fn v3f_c4b(ctx: *Self, x: f32, y: f32, z: f32, r: u8, g: u8, b: u8, a: u8) void =
     vtx(ctx, x, y, z, ctx.u, ctx.v, pack_rgbab(r, g, b, a));
 
-fn v3f_c1i(ctx: *Context, v: Vec3, rgba: u32) void =
+fn v3f_c1i(ctx: *Self, v: Vec3, rgba: u32) void =
     vtx(ctx, v&[0], v&[1], v&[2], ctx.u, ctx.v, rgba);
 
-fn v2f_t2f_c3f(ctx: *Context, x: f32, y: f32, u: f32, v: f32, r: f32, g: f32, b: f32) void =
+fn v2f_t2f_c3f(ctx: *Self, x: f32, y: f32, u: f32, v: f32, r: f32, g: f32, b: f32) void =
     vtx(ctx, x, y, 0.0, u, v, pack_rgbaf(r, g, b, 1.0));
 
-fn v2f_t2f_c3b(ctx: *Context, x: f32, y: f32, u: f32, v: f32, r: u8, g: u8, b: u8) void =
+fn v2f_t2f_c3b(ctx: *Self, x: f32, y: f32, u: f32, v: f32, r: u8, g: u8, b: u8) void =
     vtx(ctx, x, y, 0.0, u, v, pack_rgbab(r, g, b, 255));
 
-fn v2f_t2f_c4f(ctx: *Context, x: f32, y: f32, u: f32, v: f32, r: f32, g: f32, b: f32, a: f32) void =
+fn v2f_t2f_c4f(ctx: *Self, x: f32, y: f32, u: f32, v: f32, r: f32, g: f32, b: f32, a: f32) void =
     vtx(ctx, x, y, 0.0, u, v, pack_rgbaf(r, g, b, a));
 
-fn v2f_t2f_c4b(ctx: *Context, x: f32, y: f32, u: f32, v: f32, r: u8, g: u8, b: u8, a: u8) void =
+fn v2f_t2f_c4b(ctx: *Self, x: f32, y: f32, u: f32, v: f32, r: u8, g: u8, b: u8, a: u8) void =
     vtx(ctx, x, y, 0.0, u, v, pack_rgbab(r, g, b, a));
 
-fn v2f_t2f_c1i(ctx: *Context, x: f32, y: f32, u: f32, v: f32, rgba: u32) void =
+fn v2f_t2f_c1i(ctx: *Self, x: f32, y: f32, u: f32, v: f32, rgba: u32) void =
     vtx(ctx, x, y, 0.0, u, v, rgba);
 
-fn v3f_t2f_c3f(ctx: *Context, x: f32, y: f32, z: f32, u: f32, v: f32, r: f32, g: f32, b: f32) void =
+fn v3f_t2f_c3f(ctx: *Self, x: f32, y: f32, z: f32, u: f32, v: f32, r: f32, g: f32, b: f32) void =
     vtx(ctx, x, y, z, u, v, pack_rgbaf(r, g, b, 1.0));
 
-fn v3f_t2f_c3b(ctx: *Context, x: f32, y: f32, z: f32, u: f32, v: f32, r: u8, g: u8, b: u8) void =
+fn v3f_t2f_c3b(ctx: *Self, x: f32, y: f32, z: f32, u: f32, v: f32, r: u8, g: u8, b: u8) void =
     vtx(ctx, x, y, z, u, v, pack_rgbab(r, g, b, 255));
 
-fn v3f_t2f_c4f(ctx: *Context, x: f32, y: f32, z: f32, u: f32, v: f32, r: f32, g: f32, b: f32, a: f32) void =
+fn v3f_t2f_c4f(ctx: *Self, x: f32, y: f32, z: f32, u: f32, v: f32, r: f32, g: f32, b: f32, a: f32) void =
     vtx(ctx, x, y, z, u, v, pack_rgbaf(r, g, b, a));
 
-fn v3f_t2f_c4b(ctx: *Context, x: f32, y: f32, z: f32, u: f32, v: f32, r: u8, g: u8, b: u8, a: u8) void = 
+fn v3f_t2f_c4b(ctx: *Self, x: f32, y: f32, z: f32, u: f32, v: f32, r: u8, g: u8, b: u8, a: u8) void = 
     vtx(ctx, x, y, z, u, v, pack_rgbab(r, g, b, a));
 
 fn v3f_t2f_c1i(x: f32, y: f32, z: f32, u: f32, v: f32, rgba: u32) void =
     vtx(ctx,x, y, z, u, v, rgba);
 
-fn load_identity(ctx: *Context) void = {
+// 
+// Transform Helpers
+//
+  
+fn load_identity(ctx: *Self) void = {
     ctx.matrix_dirty = true;
     identity(matrix(ctx));
 }
@@ -967,59 +1005,59 @@ fn as_matrix(m: []f32) *Matrix = {
     ptr_cast_unchecked(From = f32, To = Matrix, m.ptr)
 }
 
-fn load_matrix(ctx: *Context, m: *Matrix) void = {
+fn load_matrix(ctx: *Self, m: *Matrix) void = {
     ctx.matrix_dirty = true;
     matrix(ctx)[] = m[];
 }
 
-fn load_transpose_matrix(ctx: *Context, m: *Matrix) void = {
+fn load_transpose_matrix(ctx: *Self, m: *Matrix) void = {
     ctx.matrix_dirty = true;
     transpose(matrix(ctx), m);
 }
 
-fn mult_matrix(ctx: *Context, m: *Matrix) void = {
+fn mult_matrix(ctx: *Self, m: *Matrix) void = {
     ctx.matrix_dirty = true;
     mul(matrix(ctx), m);
 }
 
-fn mult_transpose_matrix(ctx: *Context, m: *Matrix) void = {
+fn mult_transpose_matrix(ctx: *Self, m: *Matrix) void = {
     ctx.matrix_dirty = true;
     m0 := @uninitialized Matrix;
     transpose(m0&, m);
     mul(matrix(ctx), m0&);
 }
 
-fn rotate(ctx: *Context, angle_rad: f32, x: f32, y: f32, z: f32) void = {
+fn rotate(ctx: *Self, angle_rad: f32, x: f32, y: f32, z: f32) void = {
     ctx.matrix_dirty = true;
     rotate(matrix(ctx), angle_rad, x, y, z);
 }
 
-fn scale(ctx: *Context, x: f32, y: f32, z: f32) void = {
+fn scale(ctx: *Self, x: f32, y: f32, z: f32) void = {
     ctx.matrix_dirty = true;
     scale(matrix(ctx), x, y, z);
 }
 
-fn translate(ctx: *Context, x: f32, y: f32, z: f32) void = {
+fn translate(ctx: *Self, x: f32, y: f32, z: f32) void = {
     ctx.matrix_dirty = true;
     translate(matrix(ctx), vec3(x, y, z));
 }
 
-fn frustum(ctx: *Context, l: f32, r: f32, b: f32, t: f32, n: f32, f: f32) void = {
+fn frustum(ctx: *Self, l: f32, r: f32, b: f32, t: f32, n: f32, f: f32) void = {
     ctx.matrix_dirty = true;
     frustum(matrix(ctx), l, r, b, t, n, f);
 }
 
-fn ortho(ctx: *Context, l: f32, r: f32, b: f32, t: f32, n: f32, f: f32) void = {
+fn ortho(ctx: *Self, l: f32, r: f32, b: f32, t: f32, n: f32, f: f32) void = {
     ctx.matrix_dirty = true;
     ortho(matrix(ctx), l, r, b, t, n, f);
 }
 
-fn perspective(ctx: *Context, fov_y: f32, aspect: f32, z_near: f32, z_far: f32) void = {
+fn perspective(ctx: *Self, fov_y: f32, aspect: f32, z_near: f32, z_far: f32) void = {
     ctx.matrix_dirty = true;
     perspective(matrix(ctx), fov_y, aspect, z_near, z_far);
 }
 
-fn lookat(ctx: *Context, eye_x: f32, eye_y: f32, eye_z: f32, center_x: f32, center_y: f32, center_z: f32, up_x: f32, up_y: f32, up_z: f32) void = {
+fn lookat(ctx: *Self, eye_x: f32, eye_y: f32, eye_z: f32, center_x: f32, center_y: f32, center_z: f32, up_x: f32, up_y: f32, up_z: f32) void = {
     ctx.matrix_dirty = true;
     lookat(matrix(ctx), eye_x, eye_y, eye_z, center_x, center_y, center_z, up_x, up_y, up_z);
 }

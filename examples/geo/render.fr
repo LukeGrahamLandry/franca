@@ -10,7 +10,7 @@ USE_COLOUR :: false;
 
 // no fancy triangulation stuff. just put the raw points on the screen. 
 fn draw_point_cloud(state: *State, $next_point: @Fn() ?PointData) void = {
-    sgl := state.draw.default_context&;
+    sgl := state.draw;
     
     to_vec :: fn(r) => {
         f :: fn(x) => (@as(i64) x.intcast()).float().cast();
@@ -78,7 +78,7 @@ frame_index :: @static(i64) 0;
 
 do_render :: fn(userdata: rawptr) void = {
     state := State.ptr_from_raw(userdata);
-    sgl := state.draw.default_context&;
+    sgl := state.draw;
     sapp := state.app&;
     sg := state.sg&;
     if state.chunk_i == 0 {
@@ -113,7 +113,7 @@ do_render :: fn(userdata: rawptr) void = {
             }
             
             sgl.end();
-            sgl.update_vertex_buffer();
+            sgl.update_vertex_buffer(sg);
             state.vertex_dirty = false;
         }
     }
@@ -154,7 +154,7 @@ do_render :: fn(userdata: rawptr) void = {
         }
         sgl.end();
         // TODO: silly that this re-syncs all the old points? is sg_append_buffer what i want instead?
-        sgl.update_vertex_buffer();  
+        sgl.update_vertex_buffer(sg);  
     } 
 
     mvp := sgl.uniforms[0].mvp&;
@@ -196,7 +196,7 @@ do_render :: fn(userdata: rawptr) void = {
     mul(mvp, model&);
     
     Easy'glue_begin_pass(sapp, sg, state.pass_action);
-    sgl.draw_layer(0);
+    sgl.draw_layer(sg, 0);
     sg.end_pass();
     sg.commit();
 };
@@ -302,13 +302,11 @@ do_init :: fn(userdata: rawptr) void = {
     state.draw.setup(
         allocator = general_allocator(),
         sg = sg,
-        context = (
-            max_vertices = vertices_needed.intcast(),
-            lazy_record = true,
-        ),
+        max_vertices = vertices_needed.intcast(),
+        lazy_record = true,
     );
     
-    desc: SgPipelineDesc = (
+    desc: Sgl.PipeDesc = (
         alpha_to_coverage_enabled = true,
         depth = (
             pixel_format = .DEFAULT,
@@ -321,7 +319,7 @@ do_init :: fn(userdata: rawptr) void = {
     colour.blend.src_factor_rgb = .SRC_ALPHA;
     colour.blend.dst_factor_rgb = .ONE_MINUS_SRC_ALPHA;
     
-    init_pipeline(state.draw.default_context&, state.pipe&, desc);
+    init_pipeline(state.draw, state.pipe&, sg, desc);
     state.pass_action.colors&[0] = (
         load_action = .CLEAR,
         clear_value = (r = 0.3, g = 0.3, b = 0.3, a = 1.0),

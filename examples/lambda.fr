@@ -1,0 +1,264 @@
+// 
+// https://www.youtube.com/watch?v=RcVA8Nj6HEo
+// https://tromp.github.io/cl/diagrams.html
+// https://en.wikipedia.org/wiki/Lambda_calculus
+//
+// TODO: 
+// - make my diagrams look the same as theirs 
+// - evaluate the expressions so you can watch them change
+// - ui for entering an expression without recompiling
+// - something macro-ish so you can enter programs without 
+//   pasting the incantation for true/one/add/etc. every time
+// - make it take up the full screen without messing up the controls
+// - some of the lines flicker when you zoom out too much
+// 
+
+program :: "λn.λf.n(λc.λa.λb.c b(λx.a (b x)))(λx.λy.x)(λx.x)f";
+//program :: "λx.λy.λz.(x z)(y z)";
+//program :: "λx.λy.x (λz.y z)";
+//program :: "λx.λy.y x";
+
+fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    sgl := state.draw&;
+    rot := vec2((@as(i64)sg.frame_index.zext()).float().cast());
+    
+    w := 500; // max(sapp.framebuffer_width, sapp.framebuffer_height);
+    //state.screen = w.float().cast();
+    
+    sgl.defaults();
+    sgl.viewport(0.intcast(), 0.intcast(), w.intcast(), w.intcast(), true); // sapp.framebuffer_width.intcast(), sapp.framebuffer_height.intcast(), true);
+    sgl.load_pipeline(state.pipe);
+    
+    sgl.cur_matrix_mode = .MODELVIEW;
+    
+    stack :: @static(List(f32));
+    stack[] = list(temp());
+    
+    show :: fn(sgl: *Sgl.Self, l: *L, depth: f32, left: f32) Ty(f32, f32) = {
+        stack := stack;
+        W: f32 = 0.1;
+        @match(l) {
+            fn Def(it) => {
+                y := depth;
+                stack.push(depth);
+                a, tall := sgl.show(it[], depth + 1, left);
+                sgl.color = pack_rgba(0, 255, 0, 255);
+                sgl.line(vec2(left, y), vec2((left + a), y), W);
+                stack.pop();
+                (a, tall)
+            }
+            fn Call(it) => {
+                a, t1 := sgl.show(it._0, depth + 1, left);
+                b, t2 := sgl.show(it._1, depth + 1, left + a);
+                sgl.color = pack_rgba(0, 0, 255, 255);
+                y := depth;
+                sgl.line(vec2(left, y), vec2(left + a, y), W*2);
+                (a + b, max(t1, t2) + 1)
+            }
+            fn Get(it) => {
+                x: f32 = left;
+                old := stack[stack.len - it[]];
+                sgl.color = pack_rgba(255, 0, 0, 255);
+                sgl.line(vec2(x, old), vec2(x, depth), W);
+                (1, 0)
+            }
+        }
+    };
+    
+    
+    sgl.begin(.QUADS);
+    sgl.cur_matrix_mode = .MODELVIEW;
+    sgl.load_identity();
+    sgl.scale(1.0 / 250.0, 1.0 / 250.0, 0.0);
+    sgl.translate(state.pos.x, state.pos.y, 0.0);
+    sgl.scale(state.scale, state.scale, 0.0);
+    sgl.scale(50.0, -50.0, 0.0);
+        sgl.show(state.program, 0, 0);
+    sgl.end();
+   
+    sdtx := state.text.default_context&;
+    sdtx.color = pack_rgba(1.0, 1.0, 1.0, 1.0);
+    sdtx.canvas(sapp.width().float().div(2.0).cast(), sapp.height().float().div(2.0).cast());
+    sdtx.put(@tfmt("%", state.program)); 
+    
+    Easy'glue_begin_pass(sapp, sg, state.pass_action);
+    
+    sgl.draw_layer(sg, 0);
+    sdtx.draw_layer(0);
+    
+    sg.end_pass();
+    sg.commit();
+};
+
+State :: @struct {
+    pipe: Sgl.Pipeline;
+    draw: Sgl.Self;
+    text: Sdtx.Self;
+    pos: Vec2;
+    scale: f32;
+    last_pos: Vec2;
+    mouse: Vec2;
+    screen: f32;
+    program: *L;
+    pass_action: SgPassAction;
+};
+
+fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    state.draw&.setup(
+        allocator = general_allocator(),
+        sg = sg,
+    );
+    state.text&.setup(
+        allocator = general_allocator(),
+        fonts = @slice(Sdtx.font.kc854),
+        sg = sg,
+    );
+    
+    state.scale = 1.0;
+    state.program = program.parse(general_allocator());
+    @println("%", state.program);
+    
+    state.pass_action.colors&[0] = (
+        load_action = .CLEAR,
+        clear_value = (r = 0.156, g = 0.156, b = 0.156, a = 1),
+    );
+    
+    init_pipeline(state.draw&, state.pipe&, sg, ());
+}
+
+// drag to pan and scroll to zoom
+fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
+    screen := vec2(sapp.framebuffer_width.float().cast(), sapp.framebuffer_height.float().cast());
+    @match(event.type) {
+        fn MOUSE_MOVE() => {
+            if event.modifiers.get(.left_mouse) != 0 {
+                state.pos += vec2(event.mouse_dx, -event.mouse_dy);// * vec2(state.scale);
+            }
+            p := vec2(event.mouse_x - 250, -event.mouse_y + 250);
+            state.last_pos = (p - state.pos) / vec2(state.scale);
+        }
+        fn MOUSE_SCROLL() => {
+            if(state.scale < 0.00000001 && event.scroll_y > 0, => return());
+            delta := event.scroll_y * state.scale / -100.0;
+            pos: Vec2 = (v = (event.mouse_x - 250, -event.mouse_y + 250));
+            pos = (pos - state.pos) / vec2(state.scale);
+            pos0 := pos * vec2(state.scale);
+            pos1 := pos * vec2(state.scale + delta);
+            state.pos -= (pos1 - pos0);
+            state.scale += delta;
+        }
+        @default => ();
+    }
+}
+
+fn line(sgl: *Sgl.Self, a: Vec2, b: Vec2, width: f32) void = {
+    dir := normalize(a - b) * vec2(width / 2);
+    dir := vec2(-dir.y, dir.x);  // perpendicular
+    
+    sgl.v2f(a - dir);
+    sgl.v2f(b - dir);
+    sgl.v2f(b + dir);
+    sgl.v2f(a + dir);
+}
+
+fn square(sgl: *Sgl.Self, center: Vec2, width: f32) void = {
+    sgl.line(vec2(center.x, center.y + width/2), vec2(center.x, center.y - width/2), width);
+}
+
+driver :: fn(vtable: *ImportVTable) void = 
+    Easy'build_for_graphics(vtable, "examples/lambda.fr");
+
+main :: fn() void = 
+    Easy'start(State);
+
+#include_std("graphics/lib.fr");
+#include_std("backend/lib.fr");
+
+L :: @rec @tagged(
+    Def: *L,
+    Call: Ty(*L, *L),
+    Get: i64,
+);
+
+
+fn parse(lambda_expression: Str, a: Alloc) *L = {
+    p: Parse = (
+        vars = a.alloc_zeroed(i64, 26), 
+        a = a,
+        s = lambda_expression,
+    );
+    return p&.parse();
+
+    Parse :: @struct(
+        vars: []i64,
+        a: Alloc,
+        s: Str,
+    );
+    
+    parse :: fn(self: *Parse) *L = {
+        l := self.parse2();
+        while => self.s.len > 0 && !self.s.starts_with(")") {
+            l2 := self.a.box(L);
+            l2[] = (Call = (l, self.parse2()));
+            l = l2;
+        }
+        l
+    }
+    
+    parse2 :: fn(self: *Parse) *L = {
+        while => self.s.starts_with(" ") {
+            self.s = self.s.rest(1);
+        };
+        if self.s.starts_with("λ") {
+            self.s = self.s.rest("λ".len());
+            shadow: Array(i64, 26) = init(self.vars);
+            
+            n := 0;
+            while => !self.s.starts_with(".") {
+                each self.vars { it |
+                    it[] += int(it[] != 0);
+                };
+                
+                name := self.s[0] - "a".ascii();
+                self.vars[name.zext()] = 1;
+                n += 1;
+                self.s = self.s.rest(1);
+            }
+            self.s = self.s.rest(1);
+            
+            l := self.parse();
+            range(0, n) { _ |
+                l2 := self.a.box(L);
+                l2[] = (Def = l);
+                l = l2;
+            };
+            
+            self.vars.copy_from(shadow&.items());
+            return l;
+        }
+        
+        if self.s.starts_with("(") {
+            self.s = self.s.rest(1);
+            l := self.parse();
+            @assert(self.s.starts_with(")"), "unclosed paren");
+            self.s = self.s.rest(1);
+            return l;
+        }
+        
+        name := self.s[0] - "a".ascii();
+        i := self.vars[name.zext()];
+        @assert_ne(i, 0, "free variable: %", self.s.slice(0, 1));
+        self.s = self.s.rest(1);
+        l := self.a.box(L);
+        l[] = (Get = i);
+        l
+    }
+}
+
+fn display(self: *L, out: *List(u8)) void = {
+    @match(self) {
+        fn Def(it)  => @fmt(out, "/%", it[]);
+        fn Call(it) => @fmt(out, "(% %)", it._0, it._1);
+        fn Get(it)  => @fmt(out, "%", it[]);
+    }
+}
