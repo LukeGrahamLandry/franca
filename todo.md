@@ -6,7 +6,13 @@
 - external: make it not a 100 line copy-paste to setup a driver that links an object file
 - llvm:     get all the ssa tests working
 
-## Terminal
+## Unfinished Examples
+
+- epicycles: make it actually trace the correct path
+- lambda: imporove diagrams and implement evaluation
+- import_wasm: make it usable for libraries written in other languages
+
+### Terminal
 
 - crashes if you `cd "";` twice in the repl
 - tab to autocomplete a file path 
@@ -108,6 +114,7 @@ with -keep-names: `ld: invalid use of rip-relative addressing in '_junk' to '__N
 - tests/todo/(a.fr, c.fr, d.fr)
 - literal for a 64 bit integer with the high bit set shouldn't need a bit cast 
 - `fn vec2(x, y) = (v = (x, y));` miscompiles if inlined but i can't reproduce it in a simple test. 
+- :UseDoesntWork
 
 ## cross compiling
 

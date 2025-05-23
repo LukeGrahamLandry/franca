@@ -190,7 +190,8 @@ fn init(m: *QbeModule, segment_size: i64, gpa: Alloc, goal: QbeTargetEnv, expect
     m.forever = init(gpa, size_of(Qbe.Ins) * 1.shift_left(20) + size_of(SymbolBucket) * IMask + 1.shift_left(10));
     forever := m.forever&.borrow();
     m.segments = EnumMap(SegmentType, SegmentCursor).zeroed();
-    m.use_map_jit_on_apple_silicon = expecting_rwx && goal.type == .JitOnly && goal.arch == .aarch64 && goal.os == .macos;
+    expecting_rwx = expecting_rwx && goal.type == .JitOnly;
+    m.use_map_jit_on_apple_silicon = expecting_rwx && goal.arch == .aarch64 && goal.os == .macos;
     
     mem := if !m.use_map_jit_on_apple_silicon {
         page_allocator.alloc(u8, segment_size * 3)
@@ -222,7 +223,8 @@ fn init(m: *QbeModule, segment_size: i64, gpa: Alloc, goal: QbeTargetEnv, expect
     if !m.use_map_jit_on_apple_silicon && expecting_rwx {
         // Only the code segment needs to be executable. 
         prot := bit_or(@as(i64) MapProt.Exec, bit_or(@as(i64) MapProt.Read, @as(i64) MapProt.Write));
-        mprotect(u8.raw_from_ptr(mem.ptr), segment_size, prot).unwrap();
+        mprotect(u8.raw_from_ptr(mem.ptr), segment_size, prot) 
+            || @panic("mprotect failed while creating Module");
     };
    
     // :SegmentsAreTheSameSize 

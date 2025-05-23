@@ -122,15 +122,11 @@ fn newtmp(f: *Qbe.Fn, debug_hint: Str, k: Qbe.Cls) Qbe.Ref = {
     TMP(t)
 }
 
-fn eq(a: Qbe.Sym, b: Qbe.Sym) bool #inline = 
-    a.id == b.id;
-fn ne(a: Qbe.Sym, b: Qbe.Sym) bool #inline = !(a == b);
-
 fn newcon(f: *Qbe.Fn, c0: *Qbe.Con) Qbe.Ref = {
     // deduplicate
     range(1, f.ncon.zext()) { i |
         c1 := f.con.index(i);
-        if c0.type == c1.type && c0.bits.i == c1.bits.i && c0.sym == c1.sym {
+        if c0.sym == c1.sym && c0.bits._0 == c1.bits._0 && c0.bits._1 == c1.bits._1 {
             return(CON(i));
         };
     };
@@ -139,26 +135,18 @@ fn newcon(f: *Qbe.Fn, c0: *Qbe.Con) Qbe.Ref = {
     CON(f.ncon.zext() - 1)
 }
 
-// TODO: is it worth the copy paste instead of calling newcon to avoid comparing .sym everytime?
-fn getcon(f: *Qbe.Fn, val: i64) Qbe.Ref = {
-    // deduplicate
-    range(1, f.ncon.zext()) { c |
-        cc := f.con[c]&;
-        if cc.type == .CBits && cc.bits.i == val {
-            return(CON(c));
-        };
-    };
-
-    push(f.con&, f.ncon&, (type = .CBits, bits = (i = val)));
-    CON(f.ncon.zext() - 1)
-}
+fn getcon(f: *Qbe.Fn, val: i64) Qbe.Ref = 
+    f.symcon(Qbe.no_symbol, val);
 
 // TODO: call this from elsewhere
 fn symcon(f: *Qbe.Fn, name: Str) Qbe.Ref = 
     f.symcon(f.globals.intern(name));
 
-fn symcon(f: *Qbe.Fn, id: u32) Qbe.Ref = {
-    con: Qbe.Con = (type = .CAddr, sym = (id = id), bits = (i = 0));
+fn symcon(f: *Qbe.Fn, id: u32) Qbe.Ref = 
+    f.symcon(id, 0);
+
+fn symcon(f: *Qbe.Fn, id: u32, off: i64) Qbe.Ref = {
+    con: Qbe.Con = con(id, off);
     f.newcon(con&)
 }
 
@@ -166,15 +154,25 @@ fn new_mem(f: *Qbe.Fn, base: Qbe.Ref, index: Qbe.Ref, offset: i64, scale: i32) Q
     push(f.mem&, f.nmem&, (
         base   = base,
         index  = index,
-        offset = (
-            type = @if(scale == 0, .CUndef, .CBits),
-            bits = (i = offset),
-            sym  = (id = 0),
-        ),
+        offset = con(Qbe.no_symbol, offset),
         scale  = scale,
     ));
     MEM(f.nmem.zext() - 1)
 }
+
+fn type(self: *Qbe.Con) Qbe.ConType = 
+    @if(self.sym == Qbe.no_symbol, .CBits, .CAddr);
+
+fn bits(self: *Qbe.Con) i64 = 
+    self.bits._1.zext().shift_left(32).bit_or(self.bits._0.zext());
+
+fn set_bits(self: *Qbe.Con, i: i64) void = {
+    self.bits._1 = i.shift_right_logical(32).trunc();
+    self.bits._0 = i.trunc();
+}
+
+fn con(sym: u32, bits: i64) Qbe.Con = 
+    (sym = sym, bits = (bits.trunc(), bits.shift_right_logical(32).trunc()));
 
 // TODO: use slices 
 
@@ -204,7 +202,7 @@ fn salloc(rt: Qbe.Ref, rs: Qbe.Ref, f: *Qbe.Fn) bool = {
     */
     f.dynalloc = true;
     if rtype(rs) == .RCon {
-        sz := f.con[rs.val()].bits.i;
+        sz := f.con[rs.val()]&.bits();
         if sz < 0 || sz >= MAX_i32 - 15 {
             @panic("invalid alloc size %", sz);
         };
@@ -337,7 +335,7 @@ fn default_init(f: *Qbe.Fn, m: *QbeModule) void = {
 }
 
 fn is_symbol(f: *Qbe.Fn, r: Qbe.Ref) bool = 
-    rtype(r) == .RCon && f.get_constant(r)[].type == .CAddr;
+    rtype(r) == .RCon && f.get_constant(r).type() == .CAddr;
 
 fn get_type(m: *QbeModule, i: i64) *Qbe.Typ = { // :ThreadSafety you have to be in the mutex. todo: make this less error prone
     @debug_assert_lt(i, m.number_of_types, "type index out of bounds");
@@ -878,16 +876,16 @@ fn for_pars(f: *Qbe.Fn, $body: @Fn(i: *Qbe.Ins) void) void =
 fn get_int(f: *Qbe.Fn, r: Qbe.Ref) ?i64 #inline = {
     if(rtype(r) != .RCon, => return(.None));
     c := f.get_constant(r);
-    if(c.type != .CBits, => return(.None));
-    (Some = c.bits.i)
+    if(c.type() != .CBits, => return(.None));
+    (Some = c.bits())
 }
 
 // (id, offset)
 fn get_sym(f: *Qbe.Fn, r: Qbe.Ref) ?Ty(u32, i64) #inline = {
     if(rtype(r) != .RCon, => return(.None));
     c := f.get_constant(r);
-    if(c.type != .CAddr, => return(.None));
-    (Some = (c.sym.id, c.bits.i))
+    if(c.type() != .CAddr, => return(.None));
+    (Some = (c.sym, c.bits()))
 }
 
 fn push(phi: *Qbe.Phi, blk: *Qbe.Blk, arg: Qbe.Ref) void = {

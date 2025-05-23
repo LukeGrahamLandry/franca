@@ -57,7 +57,7 @@ fn amd64_isel(f: *Qbe.Fn) void = {
 fn noimm(r: Qbe.Ref, f: *Qbe.Fn, o: Qbe.O) bool = {
     if(rtype(r) != .RCon, => return(false));
     c := f.get_constant(r);
-    @match(c.type) {
+    @match(c.type()) {
         /* we only support the 'small'
          * code model of the ABI, this
          * means that we can always
@@ -66,8 +66,7 @@ fn noimm(r: Qbe.Ref, f: *Qbe.Fn, o: Qbe.O) bool = {
         // jitting on linux you can reasonably have <4GB constant address, but since call instruction 
         // is relative, you might not be able to reach all the way down there in 32 bits of immediate. 
         // i think 64-bit macOS never gives out the bottom 4GB of address space so it doesn't come up. 
-        fn CBits() => c.bits.i < MIN_i32 || c.bits.i > MAX_i32 || o == .call;
-        @default => panic("invalid constant");
+        fn CBits() => c.bits() < MIN_i32 || c.bits() > MAX_i32 || o == .call;
     }
 }
 
@@ -155,9 +154,7 @@ fn collapse_op_amd64(f: *Qbe.Fn, i: *Qbe.Ins, bid: i32) void = {
     };
     @debug_assert(mem.offset.type != .CAddr || (mem.index == QbeNull && mem.base == QbeNull), "generated illegal addressing mode");
     if(mem.base == r && mem.index == QbeNull && mem.offset.bits.i == 0, => return());
-    //if mem.base == QbeNull && mem.index == QbeNull && mem.offset.type == .CUndef {
-    //    printfn(f, f.globals.debug_out);
-    //};
+
     chuse(r, 1, f);  // because merge_amd_addr -1
     m := f.new_mem(mem);
     chuse(m, 1, f);
@@ -199,14 +196,14 @@ fn merge_amd_addr(f: *Qbe.Fn, mem: *Qbe.Addr) void = {
                         swap = true;
                     };
                     if f.is_symbol(a0) {
-                        if mem.index == QbeNull && mem.offset.type != .CAddr {
+                        if mem.index == QbeNull && mem.offset&.type() != .CAddr {
                             if f.get_int(a1) { off |
                                 @debug_assert_eq(mem.scale, 1);
                                 new_offset := mem.offset;
                                 x := addcon(new_offset&, f.get_constant(a0), 1);
                                 y := addcon(new_offset&, f.get_constant(a1), 1);
                                 @debug_assert(x && y, "failed to merge constants in $%", f.name());
-                                if fits_in_i32(new_offset.bits.i) {
+                                if fits_in_i32(new_offset&.bits()) {
                                     mem.offset = new_offset;
                                     mem.base = QbeNull;
                                     return();
@@ -224,10 +221,10 @@ fn merge_amd_addr(f: *Qbe.Fn, mem: *Qbe.Addr) void = {
                         return();
                     };
                     if f.get_int(a0) { off |
-                        if fits_in_i32(off + mem.offset.bits.i) {
+                        if fits_in_i32(off + mem.offset&.bits()) {
                             chuse(a1, 1, f);
                             chuse(mem.base, -1, f);
-                            mem.offset.bits.i += off;
+                            mem.offset&.set_bits(mem.offset&.bits() + off);
                             mem.base = a1;
                             continue();
                         };
@@ -251,16 +248,16 @@ fn merge_amd_addr(f: *Qbe.Fn, mem: *Qbe.Addr) void = {
                 fn addr() => {
                     m := f.get_memory(a0);
                     if mem.index == QbeNull {
-                        if mem.offset.bits.i == 0 && mem.offset.type != .CAddr {
+                        if mem.offset&.bits() == 0 && mem.offset&.type() != .CAddr {
                             chuse(mem.base, -1, f);
                             mem[] = m[];
                             continue();
                         };
                     };
-                    if m.index == QbeNull && mem.offset.type != .CAddr {
+                    if m.index == QbeNull && mem.offset&.type() != .CAddr {
                         chuse(mem.base, -1, f);
-                        mem.offset.type = m.offset.type;
-                        mem.offset.bits.i += m.offset.bits.i;
+                        mem.offset.sym = m.offset.sym;
+                        mem.offset&.set_bits(mem.offset&.bits() + m.offset&.bits());
                         mem.base = m.base;
                         continue();
                     };
@@ -306,10 +303,11 @@ fn merge_amd_addr(f: *Qbe.Fn, mem: *Qbe.Addr) void = {
                         t := a0; a0 = a1; a1 = t; 
                     };
                     if f.get_int(a0) { off |
-                        if fits_in_i32(mem.offset.bits.i + off * s) {
+                        value := mem.offset&.bits() + off * s;
+                        if fits_in_i32(value) {
                             chuse(mem.index, -1, f);
                             chuse(a1, 1, f);
-                            mem.offset.bits.i += off * s;
+                            mem.offset&.set_bits(value);
                             mem.index = a1;
                             continue();
                         };
@@ -364,7 +362,7 @@ fn seladdr(r: *Qbe.Ref, f: *Qbe.Fn) void = {
             return();
         };
     };
-    mem: Qbe.Addr = (base = r[], index = QbeNull, scale = 1, offset = (type = .CBits, bits = (i = 0)));
+    mem: Qbe.Addr = (base = r[], index = QbeNull, scale = 1, offset = con(Qbe.no_symbol, 0));
     if NEW_ADDR_FOLDING {
         if mem.base.rtype() == .RTmp {
             def := f.get_temporary(mem.base)[].def;
@@ -387,7 +385,7 @@ fn seladdr(r: *Qbe.Ref, f: *Qbe.Fn) void = {
 }
 
 fn fix_amd_mem(f: *Qbe.Fn, mem: *Qbe.Addr) void = {
-    @debug_assert(mem.offset.type != .CAddr || (mem.index == QbeNull && mem.base == QbeNull), "generated illegal addressing mode");
+    @debug_assert(mem.offset&.type() != .CAddr || (mem.index == QbeNull && mem.base == QbeNull), "generated illegal addressing mode");
     
     for (@slice(mem.index&, mem.base&)) { a |
         if rtype(a[]) == .RCon {
@@ -401,26 +399,21 @@ fn fix_amd_mem(f: *Qbe.Fn, mem: *Qbe.Addr) void = {
     
     base_val := mem.base.rsval();
     if rtype(mem.base) == .RSlot && base_val >= 0 {
-        off := mem.offset.bits.i&;
-        new := base_val.intcast() + off[];
+        new := base_val.intcast() + mem.offset&.bits();
         if new >= 0 {
             mem.base = SLOT(new);
-            off[] = 0;
+            mem.offset&.set_bits(0);
         };
     };
     
-    ty := mem.offset.type&;
-    valid_offset := fits_in_i32(mem.offset.bits.i);
+    valid_offset := fits_in_i32(mem.offset&.bits());
     if !valid_offset {
         // This makes sense when jitting, you're allowed to just stick hard coded references in your code. 
-        @assert(mem.index == QbeNull && mem.base == QbeNull && ty[] == .CBits, "TODO: folded memory access to >4GB constant address");
+        @assert(mem.index == QbeNull && mem.base == QbeNull && mem.offset&.type() == .CBits, "TODO: folded memory access to >4GB constant address");
         r1 := f.newtmp("isel", .Kl);
-        f.emit(.copy, .Kl, r1, f.getcon(mem.offset.bits.i), QbeNull);
-        mem.offset.bits.i = 0;
+        f.emit(.copy, .Kl, r1, f.getcon(mem.offset&.bits()), QbeNull);
+        mem.offset&.set_bits(0);
         mem.base = r1;
-    };
-    if mem.offset.bits.i == 0 && ty[] == .CBits {
-        ty[] = .CUndef;
     };
 }
 
@@ -876,18 +869,12 @@ fn seljmp(b: *Qbe.Blk, f: *Qbe.Fn) void = {
 // c0 += c1 * m;
 // returns false if this cannot be done. 
 fn addcon(c0: *Qbe.Con, c1: *Qbe.Con, m: i64) bool = {
-    if(m != 1 && c1.type == .CAddr, => return(false));  // can't scale a symbol
-    if (c0.type == .CUndef) {
-        c0[] = c1[];
-        c0.bits.i *= m;
-    } else {
-        if c1.type == .CAddr {
-            if(c0.type == .CAddr, => return(false));  // can't have two symbols
-            c0.type = .CAddr;
-            c0.sym = c1.sym;
-        };
-        c0.bits.i += c1.bits.i * m;
+    if(m != 1 && c1.type() == .CAddr, => return(false));  // can't scale a symbol
+    if c1.type() == .CAddr {
+        if(c0.type() == .CAddr, => return(false));  // can't have two symbols
+        c0.sym = c1.sym;
     };
+    c0.set_bits(c1.bits() * m);
     true
 }
 

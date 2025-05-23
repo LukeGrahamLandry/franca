@@ -218,8 +218,8 @@ fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
             e.op(.Call);
             @debug_assert(i.arg&[0].rtype() == .RCon, "use call_indirect for non-constant callee");
             c := e.f.get_constant(i.arg&[0]);
-            @debug_assert(c.type == .CAddr && c.bits.i == 0, "wasm can only call symbols");
-            e.index_patch(c.sym.id, .Func);
+            @debug_assert(c.type() == .CAddr && c.bits() == 0, "wasm can only call symbols");
+            e.index_patch(c.sym, .Func);
         }
         fn call_indirect() => {
             e.m.wasm_has_any_indirect_calls = true;
@@ -234,24 +234,26 @@ fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
         fn push() => @match(rtype(i.arg&[0])) {
             fn RCon() => {
                 c := e.f.get_constant(i.arg&[0]);
-                @match(c.type) {
+                @match(c.type()) {
                     fn CBits() => e.push_bits(c, i.cls());
                     fn CAddr() => {
-                        use_symbol(e.m, c.sym.id) { symbol | 
+                        use_symbol(e.m, c.sym) { symbol | 
                             // if it's a function address we have to wait until the end to know its index in the table. 
                             if symbol.kind == .Local && symbol.segment == .MutableData {
                                 e.op(@if(i.cls().is_wide(), .I64_Const, .I32_Const));
-                                leb128_signed(e.a&, symbol.offset + c.bits.i);
+                                leb128_signed(e.a&, symbol.offset + c.bits());
                             } else {
                                 @debug_assert(symbol.segment != .ConstantData, "TODO: ConstantData");
                                 patch_at := u8.raw_from_ptr(e.a.maybe_uninit.ptr.offset(e.a.len));
-                                push_fixup(e.m, symbol, (patch_at = patch_at, type = (WasmAddr = (wide = i.cls().is_wide(), increment = c.bits.i.trunc()))));
+                                push_fixup(e.m, symbol, (
+                                    patch_at = patch_at, 
+                                    type = (WasmAddr = (wide = i.cls().is_wide(), increment = c.bits().trunc())),
+                                ));
                                 // note: we don't push an op here. 
                                 e.pad(WASM_INDEX_PADDING);  // TODO: might need more space than this.
                             };
                         };
                     }
-                    fn CUndef() => unreachable();
                 };
             }
             fn RTmp() => {
@@ -305,20 +307,20 @@ fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
 fn push_bits(e: *EmitWasmFn, c: *Qbe.Con, k: Qbe.Cls) void = @match(k) {
     fn Ks() => {
         e.op(.F32_Const);
-        e.a&.reserve_type(f32)[] = c.bits.s.s;
+        e.a&.reserve_type(u32)[] = c.bits().trunc();  // f32
     }
     fn Kd() => {
         e.op(.F64_Const);
-        e.a&.reserve_type(f64)[] = c.bits.d;
+        e.a&.reserve_type(i64)[] = c.bits(); // f64
     }
     fn Kw() => {
         e.op(.I32_Const);
-        i := c.bits.i.intcast().intcast();
+        i := c.bits().intcast().intcast();
         leb128_signed(e.a&, i);
     }
     fn Kl() => {
         e.op(.I64_Const);
-        leb128_signed(e.a&, c.bits.i);
+        leb128_signed(e.a&, c.bits());
     }
     @default => unreachable();
 };

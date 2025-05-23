@@ -90,15 +90,16 @@ Qbe :: @rec @struct(
         cls: Qbe.Cls, // size changed but alignment padding makes it the same (TODO: remove comment when dont need to match abi with old version)
         link: *Qbe.Phi,
     ),
+    BlkJmp :: @rec @struct(
+        type: Qbe.J, // :QbeJi16
+        arg: Qbe.Ref,
+    ),
     // note: only specific fields are copied into the inlining cache. 
     Blk :: @rec @struct(
         phi: *Qbe.Phi,
         ins: QList(Qbe.Ins),
         nins: u32,
-        jmp: @struct(
-            type: Qbe.J, // :QbeJi16
-            arg: Qbe.Ref,
-        ),
+        jmp: Qbe.BlkJmp,
         // jmp: s1=dest, s2=null
         // jnz: s1=then(1), s2=else(0)
         // switch: frontend only (lowered to if-else chain, not jump table). arg is an RInt index into Fn.switches
@@ -132,9 +133,6 @@ Qbe :: @rec @struct(
         bid: i32,
         u: @union(ins: *Qbe.Ins, phi: *Qbe.Phi, r: rawptr),
     ),
-    Sym :: @struct(
-        id: u32,
-    ),
     AliasType :: @enum(i32) ( // :OddMeansStack
         ABot = 0,
         ALoc = 1, /* stack local */
@@ -149,7 +147,7 @@ Qbe :: @rec @struct(
         base: i32,
         offset: i64,
         u: @union(
-            sym: Qbe.Sym,
+            sym: u32,
             loc: @struct(
                 sz: i32, /* -1 if > NBit */
                 m: u64,
@@ -192,13 +190,11 @@ Qbe :: @rec @struct(
         width: Qbe.TmpType, 
         visit: i32,  // this is just a place that passes can stick some internal information without needing to alloc thier own array and pass it around. 
     ),
-    ConType :: @enum(i32) (CUndef, CBits, CAddr),
+    ConType :: @enum(i32) (CBits, CAddr),
+    no_symbol :: 0xFFFFFFFF,
     Con :: @struct(
-        type: Qbe.ConType,
-        sym := Qbe.Sym.zeroed(),
-        // note: don't want junk in the high bits if inititialize through s field. 
-        bits: @union(i: i64, d: f64, s: @struct(s: f32, _: u32 = 0)),
-        flt: u8 = 0, /* 1 to print as s, 2 to print as d */
+        bits: Ty(u32, u32), 
+        sym: u32 = Qbe.no_symbol,
     ),
     // RMem is inserted by isel to represent some instructions that need more than three arguments. 
     // 
@@ -225,6 +221,7 @@ Qbe :: @rec @struct(
     ),
     // note: only specific fields are copied into the inlining cache. 
     Fn :: @rec @struct(
+        globals: *QbeModule,
         start: *Qbe.Blk,
         tmp: QList(Qbe.Tmp),  
         con: QList(Qbe.Con),
@@ -247,7 +244,6 @@ Qbe :: @rec @struct(
         varcall: bool, // only used for wasm
         lnk: Qbe.Lnk,
         
-        globals: *QbeModule,
         escaping_slots: Qbe.BSet,
         switches: QList(Qbe.SwitchPayload),
         switch_count: u32,

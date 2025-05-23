@@ -2510,6 +2510,7 @@ parse_bracketed :: fn(c, rest, tok) #prefix(.@"(") = {
         node := if equal(tok.next, "{") {
             // This is a [GNU] statement expresssion.
             node := c.compound_stmt(tok&, tok.next.next);
+            ::ptr_utils(@type node.ty[]);
             @if(node.ty.is_null() || node.ty.kind == .TY_VOID)
             @error_tok(c, node.tok, "statement expression returning void is not supported");
             node
@@ -2551,6 +2552,7 @@ parse_ident :: fn(c, rest, tok) #prefix(.TK_IDENT) = {
             node.ty = var.ty;
             return(node);
         };
+        ::ptr_utils(@type sc.enum_ty[]);
         if(!sc.enum_ty.is_null(), => return(c.new_num(sc.enum_val, tok)));
     };
 
@@ -2579,10 +2581,8 @@ parse_string :: fn(c, rest, tok) #prefix(.TK_STR) = {
 };
 
 parse_number :: fn(c, rest, tok) #prefix(.TK_NUM) = {
+    // could be a float or an int. backend just cares about the bits. 
     node := c.new_num(tok.val.i, tok, tok.ty);
-    if is_flonum(tok.ty) {
-        c.f.get_constant(node.r)[].flt = 2;
-    };
     rest[] = tok.next;
     node
 };
@@ -3338,8 +3338,8 @@ fn eval2(c: *Ctx, node: *Node) Ty(i64, ?u32) = {  // (off, label)
         @error_tok(c, node.tok, "ICE: unevaluated constant");
     };
     con := c.f.get_constant(r);
-    label: ?u32 = @if(con.type == .CAddr, (Some = con.sym.id), .None);
-    (con.bits.i, label)
+    label: ?u32 = @if(con.type() == .CAddr, (Some = con.sym), .None);
+    (con.bits(), label)
 }
 
 fn is_const_expr(c: *Ctx, node: *Node) bool = { 
@@ -3364,9 +3364,9 @@ fn eval_double(c: *Ctx, node: *Node) f64 = {
         @error_tok(c, node.tok, "ICE: unevaluated constant");
     };
     con := c.f.get_constant(node.r);
-    ::enum(@type con.type);
-    @debug_assert_eq(con.type, .CBits);
-    con.bits.d
+    ::enum(@type con.type());
+    @debug_assert_eq(con.type(), .CBits);
+    con.bits().bitcast()
 }
 
 // Convert op= operators to expressions containing an assignment.

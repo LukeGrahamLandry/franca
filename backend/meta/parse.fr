@@ -607,8 +607,7 @@ fn parse_ref(self: *QParseCtx) Qbe.Ref = {
         if self.eat("+") {
             off = self.parse_number();
         };
-        con: Qbe.Con = (sym = (id = self.f.globals.intern(name)), type = .CAddr, bits = (i = off));
-        return(self.f.newcon(con&));
+        return self.f.symcon(self.f.globals.intern(name), off);
     };
     if thread {
         @fmt(self.error&, "prefix 'thread' can only be used on an $address");
@@ -675,7 +674,6 @@ fn parse_ref(self: *QParseCtx) Qbe.Ref = {
         i *= @if(negative, -1.0, 1.0);
         i: i64 = if(is_float, => i.cast().bitcast().zext(), => i.bitcast());
         c := self.f.getcon(i);
-        self.f.get_constant(c)[].flt = if(is_float, => 1, => 2);
         return(c);
     };
     if self.eat(".") {
@@ -742,10 +740,10 @@ fn parse_data(self: *QParseCtx, export: bool) Result(Dat2, Str) = {
             return(Err = "expect number after 'data $name = align'");
         };
         c := self.f.get_constant(c);
-        if c.type != .CBits {
+        if c.type() != .CBits {
             return(Err = "expect number after 'data $name = align'");
         };
-        align = c.bits.i.trunc();
+        align = c.bits().trunc();
     };
     self.skip_lines();
     if !self.eat("{") {
@@ -792,29 +790,28 @@ fn parse_data(self: *QParseCtx, export: bool) Result(Dat2, Str) = {
                 return(Err = "expected \"string\" or $variable or numeric constant for data entry");
             };
             c := self.f.get_constant(r);
-            @match(c.type) {
+            @match(c.type()) {
                 fn CBits() => {
                     if dat_type == -1 {
                         if all_zeroes {                        
-                            zero_count += c.bits.i;
+                            zero_count += c.bits();
                         } else {
-                            bytes&.push_zeroes(c.bits.i);
+                            bytes&.push_zeroes(c.bits());
                         };
                     } else {          
                         move_zeroes();
                         bytes&.reserve(8);
                         dest := ptr_cast_unchecked(u8, i64, bytes&.as_ptr().offset(bytes.len));
-                        dest[] = c.bits.i;  // only support little endian so this is fine // TODO: is alignment real? 
+                        dest[] = c.bits();  // only support little endian so this is fine // TODO: is alignment real? 
                         bytes.len += dat_type;
                     }
                 }
                 fn CAddr() => {                
-                    if(dat_type != 8, => return(Err = @tfmt("expected 'l' prefix for address (of '%') in %", self.m.str(c.sym.id), name)));
+                    if(dat_type != 8, => return(Err = @tfmt("expected 'l' prefix for address (of '%') in %", self.m.str(c.sym), name)));
                     move_zeroes();
-                    relocations&.push(off = bytes.len.trunc(), id = c.sym.id, addend = c.bits.i);
+                    relocations&.push(off = bytes.len.trunc(), id = c.sym, addend = c.bits());
                     bytes&.push_zeroes(8);
                 }
-                @default => return(Err = "unreachable constant");
             };
         };
         had_comma = self.eat(",");

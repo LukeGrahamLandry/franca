@@ -338,15 +338,15 @@ fn align_to(m: *QbeModule, segment: SegmentType, align: i64) void = {
 
 // TODO: rename this. 
 fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
-    use_symbol(self.m, c.sym.id) { symbol |
+    use_symbol(self.m, c.sym) { symbol |
         patch_addr := self.m.segment_address(.Code, self.m.current_offset(.Code));
         
-        @debug_assert(c.bits.i >= 0 && c.bits.i < MAX_i32);
+        @debug_assert(c.bits() >= 0 && c.bits() < MAX_i32);
         // :ArmAddendReloc 
         // I'm too lazy to add a new relocation type right now (its a whole seperate one for the addend i think? theres no slot on pageoff for it)
         // So for now i just generate a few extra instructions when making a relinkable object
         //
-        inc := if(self.m.goal.type == .Relocatable, => 0, => c.bits.i);
+        inc := if(self.m.goal.type == .Relocatable, => 0, => c.bits());
         patch: Fixup = (patch_at = patch_addr, type = (InReg = (r = dest_reg, increment = inc.trunc())));
         @match(symbol.kind) {
             fn DynamicPatched() => self.immediate_fixup_got(dest_reg, inc, symbol);
@@ -380,13 +380,13 @@ fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
             }
         };
     };
-    if self.m.goal.type == .Relocatable && c.bits.i != 0 { // :ArmAddendReloc
-        check :: fn(cond) => @assert(cond, "TODO: loadaddr of % with offset %", self.m.str(c.sym.id), c.bits.i);
-        check(c.bits.i > 0);
-        self.inst(add_im(Bits.X64, @as(u5) dest_reg, @as(u5) dest_reg, @as(u12) c.bits.i, 0));
-        if c.bits.i >= 4096 {
-            check(c.bits.i < 4096.shift_left(12));
-            self.inst(add_im(Bits.X64, @as(u5) dest_reg, @as(u5) dest_reg, @as(u12) @as(i64) c.bits.i.shift_right_logical(16), 1));
+    if self.m.goal.type == .Relocatable && c.bits() != 0 { // :ArmAddendReloc
+        check :: fn(cond) => @assert(cond, "TODO: loadaddr of % with offset %", self.m.str(c.sym), c.bits());
+        check(c.bits() > 0);
+        self.inst(add_im(Bits.X64, @as(u5) dest_reg, @as(u5) dest_reg, @as(u12) @as(i64) c.bits(), 0));
+        if c.bits() >= 4096 {
+            check(c.bits() < 4096.shift_left(12));
+            self.inst(add_im(Bits.X64, @as(u5) dest_reg, @as(u5) dest_reg, @as(u12) @as(i64) c.bits().shift_right_logical(16), 1));
         }
     };
 }
@@ -409,18 +409,18 @@ fn immediate_fixup_got(self: *ArmState, dest_reg: i64, inc: i64, symbol: *Symbol
 
 fn loadcon(self: *ArmState, c: *Qbe.Con, r: i64, k: Qbe.Cls) void #once = {
     w := is_wide(k);
-    n := c.bits.i;
-    if c.type == .CAddr {
+    n := c.bits();
+    if c.type() == .CAddr {
         self.loadaddr_bits(c, r);
         if !w {
-            @eprintln("# Taking the low 32 bits of the symbol '%', you can do that but it's an odd choice so perhaps was a mistake $%", self.m.str(c.sym.id), self.f.name());
+            @eprintln("# Taking the low 32 bits of the symbol '%', you can do that but it's an odd choice so perhaps was a mistake $%", self.m.str(c.sym), self.f.name());
             // we could warn on this if we were feeling friendly. 
             i := make_ins(.extuw, .Kw, TMP(r+1), TMP(r+1), QbeNull);
             self.emitins(i&, zeroed(*Qbe.Blk));
         };
         return();
     };
-    @debug_assert(c.type == .CBits, "bad constant");
+    @debug_assert(c.type() == .CBits, "bad constant");
     s := Bits.X64;
     if !w {
         s = .W32;
@@ -564,8 +564,8 @@ fn emitins(self: *ArmState, i: *Qbe.Ins, b: *Qbe.Blk) void = {
             fn RTmp() => a1.int_reg();
             fn RMem() => {
                 m := self.f.get_memory(a1);
-                offset = m.offset.bits.i / size.zext();
-                @debug_assert_eq(offset * size.zext(), m.offset.bits.i, "store offset not a multiple of size");
+                offset = m.offset&.bits() / size.zext();
+                @debug_assert_eq(offset * size.zext(), m.offset&.bits(), "store offset not a multiple of size");
                 m.base.int_reg()
             }
             @default => panic("bad address type for store");
@@ -668,11 +668,9 @@ fn emitins(self: *ArmState, i: *Qbe.Ins, b: *Qbe.Blk) void = {
             callee := a0;
             if rtype(callee) == .RCon {
                 c := self.f.get_constant(a0);
-                if c.type != .CAddr || c.bits.i != 0 {
-                    panic("invalid call argument");
-                };
+                @assert(c.type() == .CAddr && c.bits() == 0, "invalid call argument");
                 
-                use_symbol(self.m, c.sym.id) { symbol |
+                use_symbol(self.m, c.sym) { symbol |
                     patch_at := u8.raw_from_ptr(self.m.segments&[.Code].next);
                     kind := symbol.kind;
                     if kind == .Local && ENABLE_INCREMENTAL && self.m.goal.type == .JitOnly && self.m.got_indirection_instead_of_patches {
@@ -737,8 +735,8 @@ fn emitins(self: *ArmState, i: *Qbe.Ins, b: *Qbe.Blk) void = {
             }
             fn RCon() => {
                 c := self.f.get_constant(a1);
-                @debug_assert(is_int(i.cls()) && c.bits.i.bit_and(1.shift_left(12) - 1) == c.bits.i && c.type == .CBits);
-                self.inst(add_im(si, i.to.int_reg(), a0.int_reg(), @as(u12) c.bits.i, 0));
+                @debug_assert(is_int(i.cls()) && c.bits().bit_and(1.shift_left(12) - 1) == c.bits() && c.type() == .CBits);
+                self.inst(add_im(si, i.to.int_reg(), a0.int_reg(), @as(u12) @as(i64) c.bits(), 0));
             }
             fn RMem() => {
                 @debug_assert(is_int(i.cls()));
@@ -953,10 +951,10 @@ fn encode_cmp(self: *ArmState, i: *Qbe.Ins, $no_negate: u1) void = {
         self.inst(@bits(si, no_negate, 0b101011, Shift.LSL, 0b0, b, 0b000000, a, 0b11111)); 
     } else {
         c := self.f.get_constant(a1);
-        @debug_assert(c.type == .CBits, "cmp to addr");
-        no_shift := c.bits.i.bit_and(1.shift_left(12) - 1) == c.bits.i;
-        encoded  := if(no_shift, => c.bits.i, => c.bits.i.shift_right_logical(12));
-        @debug_assert_eq(encoded.bit_and(1.shift_left(12) - 1).shift_left(int(!no_shift) * 12), c.bits.i, "failed encode cmp");
+        @debug_assert(c.type() == .CBits, "cmp to addr");
+        no_shift := c.bits().bit_and(1.shift_left(12) - 1) == c.bits();
+        encoded  := if(no_shift, => c.bits(), => c.bits().shift_right_logical(12));
+        @debug_assert_eq(encoded.bit_and(1.shift_left(12) - 1).shift_left(int(!no_shift) * 12), c.bits(), "failed encode cmp");
         self.inst(@bits(si, no_negate, 0b1100010, @if(no_shift, 0b0, 0b1), @as(u12) encoded, a0.int_reg(), 0b11111));
     }
 }

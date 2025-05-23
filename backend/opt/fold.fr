@@ -192,9 +192,9 @@ fn fold_sel_part2(f: *FoldCtx, isel1: *Qbe.Ins) void = {
 }
 
 fn iscon(c: *Qbe.Con, w: bool, k: u64) bool = {
-    c.type == .CBits 
-    && (!w || (@as(u64) c.bits.i.bitcast()) == k) 
-    && ( w || (@as(u32) c.bits.i.trunc())   == k.trunc())
+    c.type() == .CBits 
+    && (!w || (@as(u64) c.bits().bitcast()) == k) 
+    && ( w || (@as(u32) c.bits().trunc())   == k.trunc())
 }
 
 fn latval(f: *FoldCtx, r: Qbe.Ref) i32 = @match(rtype(r)) {
@@ -328,20 +328,18 @@ fn opfold(f: *Qbe.Fn, op: Qbe.O, cls: Qbe.Cls, l: i32, r: i32) i32 = {
 
 fn try_fold(op: Qbe.O, cls: Qbe.Cls, cl: *Qbe.Con, cr: *Qbe.Con) ?Qbe.Con = {
     c := Qbe.Con.zeroed();
-    c.type = .CBits;
-    if cl.type != .CBits || cr.type != .CBits {
+    c.sym = Qbe.no_symbol;  // .CBits
+    if cl.type() != .CBits || cr.type() != .CBits {
         if(!cls.is_int() || !(@is(op, .add, .sub)), => return(.None));
         // This is used for constant expression evaluation in import_c.
         // TODO: but sometimes you'd be better off doing this in isel when you could have the offsets as part of the memory access and create fewer relocations. 
-        @debug_assert(cl.type != .CUndef && cr.type != .CUndef, "i think .CUndef is only for RMem's offset");
-        if cr.type == .CAddr {
+        if cr.type() == .CAddr {
             if op == .add {
                 t := cl; cl = cr; cr = t;
             };
-            if(cr.type == .CAddr, => return(.None));
+            if(cr.type() == .CAddr, => return(.None));
         };
-        c.type = .CAddr;
-        c.sym = cl.sym;
+        c.sym = cl.sym;  // .CAddr
     };
     
     w := cls.is_wide();
@@ -353,11 +351,12 @@ fn try_fold(op: Qbe.O, cls: Qbe.Cls, cl: *Qbe.Con, cr: *Qbe.Con) ?Qbe.Con = {
         };
     };
     
-    r  := i64.raw_from_ptr(c.bits.i&);
-    do_fold(op, cls, r, cl.bits.i, cr.bits.i);
+    r  := 0;
+    do_fold(op, cls, i64.raw_from_ptr(r&), cl.bits(), cr.bits());
     if !is_wide(cls) {
-        c.bits.i = c.bits.i.bit_and(0xffffffff);  // TODO: should be redundant?
+        r = r.bit_and(0xffffffff);  // TODO: should be redundant?
     };
+    c&.set_bits(r);
     (Some = c)
 }
 

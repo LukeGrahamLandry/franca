@@ -59,20 +59,20 @@ fn simplify_div_like(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins, changed: *bool) void 
     i.cls().is_int()            || return();
     rtype(r) == .RCon           || return();
     c := f.get_constant(r);
-    c.type == .CBits            || return();
-    ispow2(c.bits.i.bitcast())  || return();
+    c.type() == .CBits            || return();
+    ispow2(c.bits().bitcast())  || return();
     // The divisor is a constant power of 2. 
     
     is_rem := @is(i.op(), .urem, .rem);
     is_signed := @is(i.op(), .div, .rem);
     
-    c.bits.i != 0 || return();
-    if c.bits.i == 1 {
+    c.bits() != 0 || return();
+    if c.bits() == 1 {
         r := if(is_rem, => QbeConZero, => i.arg&[0]);
         i[] = make_ins(.copy, i.cls(), i.to, r, QbeNull);
     };
     
-    n := trailing_zeros(c.bits.i);
+    n := trailing_zeros(c.bits());
     
     o: Qbe.O = @if(is_rem, .and, @if(is_signed, .sar, .shr));
     magic := @if(is_rem, 1.shift_left(n) - 1, n);
@@ -132,8 +132,7 @@ fn expand_blit(f: *Qbe.Fn, dest: Qbe.Ref, src: Qbe.Ref, blit_size: i64) void #on
     if f.globals.goal.type != .JitOnly && f.globals.goal.arch == .aarch64 && blit_size > 128  {  // :force_dep_on_memmove_hack
         // TODO: ugh, really shouldn't do this sort of thing. but it makes the generated code easier to read. 
         s := f.getcon(blit_size.abs());
-        c: Qbe.Con = (type = .CAddr, sym = (id = f.globals.symbol_memmove), bits = (i = 0));
-        m := f.newcon(c&);
+        m := f.symcon(f.globals.symbol_memmove);
         f.emit(.copy, .Kl, QbeNull, TMP(1), QbeNull);
         f.emit(.call, .Kl, QbeNull, m, CALL(0b001100001));  // TODO: bad bad bad! hardcoded output of abi pass.
         f.emit(.copy, .Kl, TMP(3), s, QbeNull);

@@ -264,23 +264,11 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
             if !func.get_flag(.RealAsmDone) {
                 shallow_jit_func(self, fid);
             };
-           
-            // created function pointers are always added as mutual_callees to be more chill about loops. 
-            for func.mutual_callees { callee |
-                @log_event("% mutual calls %", fid.as_index(), callee.as_index()) self;
-                callee_func := self.get_function(callee);
-                if !callee_func.get_flag(.AsmDone) {
-                    t := self.new_task((Jit = callee), .None);
-                    waiting&.push(t);
-                } else {
-                    // TODO: why does only the x64 version get here with a shim and not EnsuredCompiled?
-                    @debug_assert(callee_func.get_flag(.EnsuredCompiled) || callee_func.get_flag(.AlreadyHasShim), "mutual callee / fnptr should be compiled. % calls %", self.log_name(fid), self.log_name(callee));
-                };
-            };
-            if waiting.len != 0 {
-                @log_event("sleep on %/% mutual callees", waiting.len, func.mutual_callees.len) self;
-                return(Suspend = self.wait_for(All = waiting));
-            };
+            
+            // Previously we would push Jit tasks for func.mutual_callees here, 
+            // but now we rely on shims being created since you often put a function 
+            // pointer in a vtable without actually calling it at comptime -- May 22, 2025
+            
             // :AssumeDone
             // TODO: we wont have a callable pointer if you're cross compiling and this function is in an #target_os block.
             //       should make a shim that gives a useful message if you try to call it at comptime by mistake. 

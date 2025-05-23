@@ -1,3 +1,37 @@
+## (May 22)
+
+- silly source of tiny slowness: when you have a function that returns a vtable, 
+so it has to make function pointers, im not using shims so they get jitted even 
+if you never call them at comptime. which is especially sad because the comptime 
+module doesn't run the backend in a seperate thread (because doing that without 
+being able to reorder things means im just waiting on it for tiny functions all 
+the time) so it's even slower than it sounds. 
+  - happens in import_c:comptime_init_rules_table, graphics:register_objective_c_classes
+  - took a lot of looking around to find the right place but the fix for the import_c case 
+  is trivial: just don't loop over mutual_callees at the end of dispatch.fr::exec_task()::Jit.v 
+  it was just going through ask_coerce_const_expr. 
+  - `./trace.out driver.dylib build examples/import_c/cc.fr -keep-names`: 
+  before: running Backend for do_fold takes 4ms and happened twice, one of which was on the main thread. 
+  after the fix, it's just once and on the codegen thread. 
+  - the graphics is going through CompCtx.git_jitted, 
+  fix: just make a shim instead of polling on Action.Jit
+  - same result. ie. now macos_mods only goes through the backend once. 
+  - very marginal speed improvement (~10ms on hello_triangle) but it made the code simpler
+  so thats a win
+  
+--- 
+
+My theory is that really good fine grained incremental compilation takes an infinite amount 
+of work and is something that I don't have the resources to do well. However, the current 
+state is that it's a 300ms tax to recompile import_c every time you compile a program that 
+uses a font. So maybe a middle ground where we don't try to cache individual functions in 
+the program you're editing but the libraries you never change and have a very thin api 
+can just be reused. 
+
+I can't quite articulate why this feels different than linkers to me. 
+
+
+
 ## (May 21)
 
 - made dump_wasm.fr show types after Call/GetLocal/SetLocal, 

@@ -171,9 +171,11 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         // when true, the driver can have jit shims (so it might not be fully compiled before you call into it). 
         USE_SAME_MODULE := false;
         
+        cache_it := false && !USE_SAME_MODULE && query_current_os() == .macos; // TODO
+        
         shared := @if(USE_SAME_MODULE, self.comptime_codegen, {
             m := self.get_alloc().box(QbeModule);
-            init_default_module(m, (arch = query_current_arch(), os = query_current_os(), type = .JitOnly), true);
+            init_default_module(m, (arch = query_current_arch(), os = query_current_os(), type = @if(cache_it, .Dynamic, .JitOnly)), true);
             self.other_module&.push(m, self.get_alloc());
             shared: *CodegenShared = init(m, self.get_alloc(), @as(CodegenWorker) codegen_thread_main, true);
             shared
@@ -202,9 +204,12 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
             @if(show_backend_stats())
             @eprintln(">>> compiled % in %ms", name, frontend);  // :WrongClockTime
         };
-        cc := or m.get_addr(name) {
-            @panic("ICE: lost %", name)
-        };
+        
+        cc := /*if cache_it {
+            import("@/compiler/incremental.fr")'write_and_load_cached(m, c, f)
+        } else {*/
+            m.get_addr(name) || @panic("ICE: lost %", name)
+        /*}(*/;
         
         maybe_log_scopes(self);
         

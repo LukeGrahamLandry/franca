@@ -334,7 +334,7 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
                 e.a&.push(pack_rex_si(i&.cls() == .Kl, r0, r1, DONT_CARE_REG));  // TODO: elide
                 e.a&.push(0x69);
                 e.a&.push(pack_modrm(ModrmMode.Direct, r1, r0));
-                e.push_imm(c.bits.i, 4);
+                e.push_imm(c.bits(), 4);
                 return();
             };
             convert_to_2address(e, i&);
@@ -417,9 +417,9 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
             if(i.to == QbeNull || i.arg&[0] == QbeNull, => return());
             if(i.to == i.arg&[0], => return());
             
-            is_long_const := i&.cls() == .Kl && t0 == .RCon && e.f.get_constant(i.arg&[0])[].type == .CBits;
+            is_long_const := i&.cls() == .Kl && t0 == .RCon && e.f.get_constant(i.arg&[0]).type() == .CBits;
             if is_long_const {
-                value := e.f.con[i.arg&[0].val()].bits.i;
+                value := e.f.con[i.arg&[0].val()]&.bits();
                 if rtype(i.to) == .RSlot && (value < MIN_i32 || value > MAX_i32) {
                     slot_hi := SLOT(i.to.rsval() + 1*4);
                     hi := value.shift_right_logical(32);
@@ -434,13 +434,13 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
             if t0 == .RCon {
                 c := e.f.get_constant(i.arg&[0]);
                 if isreg(i.to) {
-                    if c.type == .CAddr {
+                    if c.type() == .CAddr {
                         ins := make_ins(.addr, i&.cls(), i.to, i.arg&[0], QbeNull);
                         emitins(ins, e);
                         return();
                     };
-                    if c.type == .CBits && is_int(i&.cls()) {
-                        value := c.bits.i;
+                    if c.type() == .CBits && is_int(i&.cls()) {
+                        value := c.bits();
                         
                         // TODO: doesn't work because it sets flags but isel doesn't know!
                         // This is a silly size optimisation: 2 byte encoding instead of 6,
@@ -497,9 +497,9 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
             r := i.arg&[0];
             if rtype(r) == .RCon {
                 c := e.f.get_constant(r);
-                @debug_assert(c.type == .CAddr);
+                @debug_assert(c.type() == .CAddr);
                 done := false;
-                use_symbol(e.m, c.sym.id) { symbol | 
+                use_symbol(e.m, c.sym) { symbol | 
                     done = symbol.kind != .Local && (e.m.got_indirection_instead_of_patches || symbol.kind == .DynamicPatched);
                     if done {
                         if ensure_got_slot(e.m, symbol, symbol.jit_addr) { it |
@@ -533,9 +533,9 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
             @match(rtype(i.arg&[0])) {
                 fn RCon() => {
                     c := e.f.get_constant(i.arg&[0]);
-                    off := c.bits.i;
-                    @debug_assert(c.type == .CAddr, "cannot call a constant");
-                    use_symbol(e.m, c.sym.id) { symbol |
+                    off := c.bits();
+                    @debug_assert(c.type() == .CAddr, "cannot call a constant");
+                    use_symbol(e.m, c.sym) { symbol |
                         @debug_assert_eq(off, 0, "call to offset from symbol $% seems like a mistake?", symbol.name);
                         current_offset := e.start_of_function + e.a.len();
                         @match(symbol.kind) {
@@ -570,7 +570,10 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
                                 } else {
                                     // Otherwise this will get patched to a local or __stub call later. 
                                     patch_at := u8.raw_from_ptr(e.a.maybe_uninit.ptr.offset(e.a.len + 1));
-                                    fix: Fixup = (patch_at = patch_at, type = (RipDisp32 = (increment = c.bits.i.trunc(), call = true)));
+                                    fix: Fixup = (
+                                        patch_at = patch_at, 
+                                        type = (RipDisp32 = (increment = c.bits().trunc(), call = true)),
+                                    );
                                     push_fixup(e.m, symbol, fix);
                                     e.a&.push(@as(u8) PrimaryOp.CallImm32); 
                                     e.a&.push_u32(0);
@@ -797,12 +800,8 @@ fn fix_memarg_slot(e: *AmdState, r: *Qbe.Ref) void = {
     if(rtype(r[]) != .RMem, => return());
     m := e.f.get_memory(r[]);
     if rtype(m.base) == .RSlot {
-        @debug_assert(@is(m.offset.type, .CBits, .CUndef), "bits"); 
-        if m.offset.type == .CUndef {
-            m.offset.bits.i = 0;
-        };
-        m.offset.bits.i = m.offset.bits.i + slot(m.base, e);
-        m.offset.type = .CBits;
+        @debug_assert_eq(m.offset&.type(), .CBits); 
+        m.offset&.set_bits(m.offset&.bits() + slot(m.base, e));
         m.base = TMP(e.fp);
     };
 }
@@ -839,15 +838,15 @@ fn encode(e: *AmdState, i: *Qbe.Ins, w: bool, immediate_size: i64) EncodedArgs =
         @debug_assert(t0 != .RMem, "cannot encode two memory arguments");
         m := e.f.get_memory(r1)[]; // copy!
         
-        if m.offset.type == .CAddr {
+        if m.offset&.type() == .CAddr {
             @debug_assert(m.base == QbeNull && m.index == QbeNull, "cannot encode const SIB");
             c := m.offset&;
             @debug_assert(t0 != .RCon, "TODO: con + disp?");
             // :copy_paste_con_addr
             rr0 := r0.int_reg_d();
-            off := c.bits.i - immediate_size;
+            off := c.bits() - immediate_size;
             return(
-                patch = (Some = (off, c.sym.id)), 
+                patch = (Some = (off, c.sym)), 
                 disp_size = .D32,
                 disp = off,
                 modrm = pack_modrm(.Indirect00, .rbp, rr0),  // disp is RIP relative
@@ -857,13 +856,13 @@ fn encode(e: *AmdState, i: *Qbe.Ins, w: bool, immediate_size: i64) EncodedArgs =
             );
         };
         
-        valid_offset := fits_in_i32(m.offset.bits.i);
+        valid_offset := fits_in_i32(m.offset&.bits());
         if !valid_offset {
             printfn(e.f, e.f.globals.debug_out);
         };
-        @debug_assert(valid_offset, "cannot encode offset %", m.offset.bits.i); 
-        small := m.offset.bits.i <= 127 && m.offset.bits.i >= -128;
-        no_disp := m.offset.bits.i == 0 && m.index != TMP(Amd64Reg.RBP) && m.index != TMP(Amd64Reg.R13);
+        @debug_assert(valid_offset, "cannot encode offset %", m.offset&.bits()); 
+        small := m.offset&.bits() <= 127 && m.offset&.bits() >= -128;
+        no_disp := m.offset&.bits() == 0 && m.index != TMP(Amd64Reg.RBP) && m.index != TMP(Amd64Reg.R13);
         disp_size: Displacement = @if(no_disp, .D0, @if(small, .D8, .D32)); // more - than +!
         
         special_base := m.base == TMP(Amd64Reg.RBP) || m.base == TMP(Amd64Reg.R13);
@@ -877,7 +876,7 @@ fn encode(e: *AmdState, i: *Qbe.Ins, w: bool, immediate_size: i64) EncodedArgs =
             m.index = TMP(Amd64Reg.RSP); // sentinal for just base+disp
         };
         
-        disp := m.offset.bits.i;
+        disp := m.offset&.bits();
         mode: ModrmMode = @match(disp_size) {
             fn D0()  => .Indirect00;
             fn D8()  => .Indirect01;
@@ -890,9 +889,6 @@ fn encode(e: *AmdState, i: *Qbe.Ins, w: bool, immediate_size: i64) EncodedArgs =
             mode = .Indirect00;
             disp_size = .D32;
             no_disp = false;
-        };
-        if m.offset.type == .CUndef {
-            m.offset.bits.i = 0;
         };
         
         ri, rb, rr0 := (m.index.int_reg_d(), m.base.int_reg_d(), r0.int_reg_d());
@@ -907,7 +903,7 @@ fn encode(e: *AmdState, i: *Qbe.Ins, w: bool, immediate_size: i64) EncodedArgs =
     
     if t1 == .RCon {
         c := e.f.get_constant(i.arg&[1]);
-        if c.type == .CAddr {
+        if c.type() == .CAddr {
             // :copy_paste_con_addr
             rr0 := r0.int_reg_d();
             // The distance is relative to the end of the instruction, 
@@ -915,9 +911,9 @@ fn encode(e: *AmdState, i: *Qbe.Ins, w: bool, immediate_size: i64) EncodedArgs =
             // becuase the linker doesn't give a shit about what instructions we're using, 
             // its just gonna plonk in the distance from the patch to the symbol. 
             // TODO: maybe it would be better if we also did the -4 for the displacement here but that requires removing it everywhere else. 
-            off := c.bits.i - immediate_size;
+            off := c.bits() - immediate_size;
             return(
-                patch = (Some = (off, c.sym.id)), 
+                patch = (Some = (off, c.sym)), 
                 disp_size = .D32,
                 disp = off,
                 modrm = pack_modrm(.Indirect00, .rbp, rr0),  // disp is RIP relative
@@ -929,9 +925,9 @@ fn encode(e: *AmdState, i: *Qbe.Ins, w: bool, immediate_size: i64) EncodedArgs =
         
         // TODO: this might be backwards because you might be ina situation where both args are constant. 
         //       we're adding a source of confusion for zero benifit because i don't want to deal with changing the isel right now. 
-        if c.type == .CBits && t0 == .RTmp {
+        if c.type() == .CBits && t0 == .RTmp {
             rr0 := r0.int_reg_d();
-            disp := c.bits.i;
+            disp := c.bits();
             return(
                 disp_size = .D32, 
                 disp = disp, 
@@ -988,10 +984,9 @@ fn arg_t(e: *AmdState, r: Qbe.Ref) AmdArgType = @match(rtype(r)) {
     fn RMem() => .M;
     fn RCon() => {
         c := e.f.get_constant(r);
-        @match(c.type) {
-            fn CBits() => @if(c.bits.i <= 127 && c.bits.i >= -128, .imm8, .imm32);
+        @match(c.type()) {
+            fn CBits() => @if(c.bits() <= 127 && c.bits() >= -128, .imm8, .imm32);
             fn CAddr() => .M; // rel
-            @default => unreachable();
         }
     }
     @default => .none;
@@ -1006,7 +1001,7 @@ fn assemble(e: *AmdState, i: *Qbe.Ins) void = {
     a0, a1 := (arg_t(e, i.arg&[0]), arg_t(e, i.arg&[1]));
     
     w := i.cls() == .Kl || i.cls() == .Kd || i.op() == .storel || i.op() == .stored;
-    ext_index := int((i.arg&[1] == QbeNull || (rtype(i.arg&[1]) == .RCon && e.f.get_constant(i.arg&[1])[].type == .CBits)));  
+    ext_index := int((i.arg&[1] == QbeNull || (rtype(i.arg&[1]) == .RCon && e.f.get_constant(i.arg&[1]).type() == .CBits)));  
     
     xxx :: amd64_encoding_table();
     table, offsets := xxx;
@@ -1044,7 +1039,7 @@ fn assemble(e: *AmdState, i: *Qbe.Ins) void = {
     };
     
     if rtype(i.arg&[0]) == .RMem || (rtype(i.arg&[1]) != .RMem && rtype(i.arg&[0]) == .RCon) {
-        @debug_assert(rtype(i.arg&[0]) == .RMem || e.f.get_constant(i.arg&[0])[].type == .CAddr);
+        @debug_assert(rtype(i.arg&[0]) == .RMem || e.f.get_constant(i.arg&[0]).type() == .CAddr);
         // which direction it goes doesn't matter because the memory always has to be in SIB
         i.arg&.items().swap(0, 1); // HACK
     };
@@ -1066,17 +1061,17 @@ fn assemble(e: *AmdState, i: *Qbe.Ins) void = {
     b.prefix = prefix;
     push_instruction(e, b, opcode);
     if entry.a0 == .imm8 {
-        push_imm(e, e.f.get_constant(a0_old)[].bits.i, 1);
+        push_imm(e, e.f.get_constant(a0_old).bits(), 1);
     };
     if entry.a1 == .imm8 {
-        push_imm(e, e.f.get_constant(a1_old)[].bits.i, 1);
+        push_imm(e, e.f.get_constant(a1_old).bits(), 1);
     };
     if entry.a0 == .imm32 {
-        imm := e.f.get_constant(a0_old)[].bits.i;
+        imm := e.f.get_constant(a0_old).bits();
         push_imm(e, imm, 4);
     };
     if entry.a1 == .imm32 {
-        imm := e.f.get_constant(a1_old)[].bits.i;
+        imm := e.f.get_constant(a1_old).bits();
         push_imm(e, imm, 4);
     };
 }
