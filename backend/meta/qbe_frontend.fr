@@ -19,6 +19,7 @@ Args :: @struct {
     l: bool #help("TODO: output llvm ir instead") = false;
     h: bool #help("show this help text") = false;
     cc: bool #help("use my import_c to compile '>>> driver' comments") = false;
+    frc: bool #help("output .frc binary ir") = false;
     @"t?": bool #help("TODO: query the native target") = false;
     paths: []Str #rest = empty();
 }
@@ -66,10 +67,11 @@ fn main() void = {
     goal: QbeOutputPurpose = @if_else {
         @if(args.r) => .JitOnly;
         @if(args.c) => .Relocatable;
+        @if(args.frc) => .Cached;
         @else => .Exe;
     };
     @assert(!args.cc || INCLUDE_MY_C_COMPILER, "didn't INCLUDE_MY_C_COMPILER can't -cc");
-    @assert(!(args.c && args.r), "conflicting output type");
+    @assert_le(int(args.c) + int(args.r) + int(args.frc), 1, "conflicting output type");
     init_default_module(global_module, (type = goal, os = os, arch = arch), false);
     set_debug_types(global_module, args.d, true);
     if args.l {
@@ -88,53 +90,62 @@ fn main() void = {
         }
     };
     
-    handle_fn :: fn(fnn: *Qbe.Fn) void = {
-        run_qbe_passes(fnn);
-    };
-    handle_data :: fn(d: Dat2) void = {
-        global_module.emit_data(d);
-    };
     src := temp().read_to_string_or_crash(inpath);
     src&.push_all("\n"); // HACK
     src := src.items();
-    parse :: import("@/backend/meta/parse.fr").parse_top_level;
-    res := parse(global_module, src, handle_data, handle_fn, args.cc);
-    if res&.is_err() {
-        panic(res.Err);
-    };
-    @if(INCLUDE_MY_C_COMPILER) if args.cc {
-        #use("@/examples/import_c/lib.fr");
-        m := global_module;
-        c := Compile.Ctx.zeroed();
-        init_ctx(c&, m);
-        
-        objs := catch_call(c&, *Compile.Obj) {
-            // TODO: this way of doing it means you lose location information which sucks
-            tok := c&.tokenize_string(">>>driver", res.Ok&);
-            tok  = c&.Preprocess'preprocess(tok);
-            c&.Compile'parse(tok)
+    
+    m := global_module;
+    magic8 := ptr_cast_unchecked(u8, u64, src.ptr)[];
+    if magic8 == Incremental.Header.M {
+        header: *Incremental.Header = check(src);
+        t := Incremental'pack_target(m.goal.arch, m.goal.os);
+        @assert_eq(header.arch_os, t, "% was compiled for different target", inpath);
+        compile_all_symbols(header, m);
+    } else {
+        handle_data :: fn(d: Dat2) void = {
+            global_module.emit_data(d);
         };
-        objs := objs.or(panic);
+        parse :: import("@/backend/meta/parse.fr").parse_top_level;
+        res := parse(global_module, src, handle_data, run_qbe_passes, args.cc);
+        if res&.is_err() {
+            panic(res.Err);
+        };
         
-        // not using for_defs because that assumes the wrong root (it doesn't know about our .ssa functions)
-        // if you want to use this for serious programs (instead of the tiny tests), 
-        // should change that so you get the optimisation formerly known as LTO
-        for_linked objs { obj |
-            if obj.is_definition {
-                id := obj.global_symbol.unwrap();
-                if obj.is_function {
-                    f := obj.f;
-                    fill_lnk(f.lnk&, obj, m);
-                    run_qbe_passes(f);
-                } else {
-                    for translate_data(m, obj) { dat |
-                        m.emit_data(dat);
+        // TODO: scoping super doesn't work :FUCKED :Compiler repro at tests/todo/e.fr -- May 24 2025
+        //       if the #use is in the `if` block, it can't find the `res` variable
+        #use("@/examples/import_c/lib.fr");
+        @if(INCLUDE_MY_C_COMPILER) 
+        if args.cc {
+            c := Compile.Ctx.zeroed();
+            init_ctx(c&, m);
+            objs := catch_call(c&, *Compile.Obj) {
+                // TODO: this way of doing it means you lose location information which sucks
+                tok := c&.tokenize_string(">>>driver", res.Ok&);
+                tok  = c&.Preprocess'preprocess(tok);
+                c&.Compile'parse(tok)
+            };
+            objs := objs.or(panic);
+            
+            // not using for_defs because that assumes the wrong root (it doesn't know about our .ssa functions)
+            // if you want to use this for serious programs (instead of the tiny tests), 
+            // should change that so you get the optimisation formerly known as LTO
+            for_linked objs { obj |
+                if obj.is_definition {
+                    id := obj.global_symbol.unwrap();
+                    if obj.is_function {
+                        f := obj.f;
+                        fill_lnk(f.lnk&, obj, m);
+                        run_qbe_passes(f);
+                    } else {
+                        for translate_data(m, obj) { dat |
+                            m.emit_data(dat);
+                        }
                     }
                 }
             }
-        }
-    }
-
+        };
+    };
+    
     global_module.emit_suspended_inlinables();
     chunks := {global_module[].target.finish_module}(global_module);
     for chunks { chunk | 
@@ -196,6 +207,8 @@ fn fill_from_libc(self: *QbeModule) void = {
             self.fill_pending_dynamic_imports(libc);
         };
     };
+    
+    self.flush_debug();
 }
 
 #use("@/lib/sys/fs.fr");

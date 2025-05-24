@@ -100,15 +100,30 @@ fn cap(s: *SegmentCursor) i64 =
 
 // TODO: this is stupid
 fn set_library(m: *QbeModule, sym_id: u32, name: Str) void = {
-    i := m.find_library(name) || {
-        m.libraries&.push(name.shallow_copy(general_allocator()), general_allocator());
-        trunc(m.libraries.len - 1)
-    };
+    i := m.find_library(name) ||    
+        m.new_library(name);
     
     use_symbol(m, sym_id) { s | 
         @debug_assert(s.library == 0 || s.library == i, "set_library(%) conflict % %", s.name, i, s.library);
         s.library = i;
     };
+    
+    @if(enable_incremental()) if m.save { save |
+        id := save.map_sym(m, sym_id);
+        save.sym[id].segment = .Import;
+        save.sym[id].imp.lib = (off = i - 1, count = 1);
+    };
+}
+
+fn new_library(m: *QbeModule, name: Str) u32 = {
+    i: u32 = trunc(m.libraries.len);
+    m.libraries&.push(name.shallow_copy(general_allocator()), general_allocator());
+    
+    @if(enable_incremental()) if m.save { save |
+        save.lib&.push(name = save.push(name));
+    };
+    
+    i
 }
 
 // :SLOW
@@ -205,6 +220,18 @@ fn emit_data(self: *QbeModule, dat: Dat2) void = {
     assert(!self.fixups_locked, "you cannot add more data after emitting for aot");
     ::tagged(@type dat.template);
     
+    @if(enable_incremental())
+    if self.save { save |
+        each dat.relocations { r |
+            use_symbol(self, r.id) { symbol | 
+                mark_referenced(self, r.id, symbol);
+            }
+        };
+        
+        save.push(self, dat&);
+        return();
+    };
+    
     if dat.template&.is(.Zeroes) && dat.relocations.len == 0 {
         // TODO: i want to remvoe this limitation so you can use this function
         //       to materialize things made by import_c or meta/parse. 
@@ -271,6 +298,12 @@ fn with_write_protect(m: *QbeModule, $body: @Fn() void) void = {
 
 // :ThreadSafety we can't have both threads fucking with self.segments
 fn add_code_bytes(m: *QbeModule, name_id: u32, bytes: []u8) void = {
+    @if(enable_incremental())
+    if m.save { save |
+        save.push_asm(m, bytes, name_id);
+        return();
+    };
+    
     use_symbol(m, name_id) { s |
         start_debug_info(m, s);
     };
@@ -431,6 +464,12 @@ fn ensure_got_slot(self: *QbeModule, symbol: *SymbolInfo, jit_address: rawptr) ?
 }
 
 fn emit_fn(f: *Qbe.Fn) void = {
+    @if(enable_incremental())
+    if f.globals.save { save | 
+        save.push(f);
+        return();
+    };
+    
     m := f.globals;
     code := m.segments&[.Code]&;
     start_offset := code.len();
@@ -501,7 +540,7 @@ fn main_entry_point_vaddr(m: *QbeModule) i64 = {
     @debug_assert_ne(m.goal.arch, .wasm32, "only makes sense for native targets");
     @debug_assert_ne(m.goal.type, .Dynamic, "shared libraries don't have an entry point");
     @debug_assert(m.fixups_locked, "this is not threadsafe");
-    symbol := m.get_symbol_info(m.intern("main"));
+    symbol := m.get_symbol_info(m.intern("main"));  // :HardcodeMain
     assert(symbol.kind == .Local, "no exported main function?");
     @debug_assert_ge(symbol.offset, COMMANDS_SIZE_GUESS + SIZE_OF_STUBS);
     symbol.offset

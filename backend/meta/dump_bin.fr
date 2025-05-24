@@ -1,0 +1,52 @@
+// unbuffered! :SLOW
+main :: fn() void = {
+    input := read_file_from_last_arg();
+    header: *Incremental.Header = check(input);
+    m := @uninitialized QbeModule; m := m&;
+    init_empty_for_template_only(m, general_allocator());
+    
+    @println("(size = %, arch_os = %)", input.len, header.arch_os);
+    
+    @println("=== % dep ===", header.dep.count);
+    range(0, header.dep.count.zext()) { i |
+        it: Incremental'Ref(Incremental.Dep) = (off = i.trunc(), count = 1);
+        it := header.get(it)[0];
+        @println("- % % %", header.get(it.filename), it.file_len, it.hashcode&);
+    };
+    
+    @println("=== % sym ===", header.sym.count);
+    range(0, header.sym.count.zext()) { i |
+        i: Incremental'Ref(Incremental.Sym) = (off = i.trunc(), count = 1);
+        it := header.get(i)[0];
+        ::enum(@type it.segment);
+        @print("- '%' is % ", header.get(it.name), it.segment);
+        if @is(it.segment, .MutableData, .ConstantData, .ZeroInitData) {
+            @println("(align = %, size = %, relocs = %)",  
+                1.shift_left(it.align_log2.zext()), it.dat.bytes.count, it.dat.rel.count);
+        } else {
+            @match(it.segment) {
+                fn Invalid() => @println("!!");
+                fn Code() => {
+                    @println("(nblk = %, ncon = %, nmem = %)", 
+                        it.fnc.blk.count, it.fnc.con.count, it.fnc.mem.count);
+                    f := @uninitialized Qbe.Fn;
+                    load(header, m, f&, i);
+                    out := u8.list(temp());
+                    printfn(f&, out&);
+                    println(out.items());
+                }
+                fn MachineCode() => {
+                    @println("(size = %)", it.dat.bytes.count);
+                }
+                fn Import() => {
+                    lib := header.get(it.imp.lib)[0];
+                    @println("(lib = %)", header.get(lib.name));
+                }
+                @default => ();
+            }
+        }
+    };
+}
+
+#include_std("backend/lib.fr");
+#use("@/lib/sys/fs.fr");

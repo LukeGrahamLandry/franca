@@ -918,3 +918,28 @@ fn find_function(self: *SelfHosted, addr: i64, callee: *?FuncId, m: *QbeModule) 
     if(out.len > 0, => return(Some = out));
     .None
 }
+
+// used for .frc when there's no debug info. 
+// TODO: move this to backend and always push_resolver() when you create a module? 
+find_ip_in_module :: fn(m: *QbeModule, addr: rawptr) ?Str = {
+    addr := addr.int_from_rawptr();
+    code := m.segments&.index(.Code);
+    code_start := u8.int_from_ptr(code.mmapped.ptr);
+    if addr < code_start || addr >= code_start + code.len() {
+        return(.None);
+    };
+    
+    if addr >= u8.int_from_ptr(m.stubs.mmapped.ptr) && addr <= u8.int_from_ptr(m.stubs.next) {
+        return(Some = "GOT stub");
+    };
+    
+    out := "";
+    for_symbols m { id, s |
+        jit_addr := s.jit_addr.int_from_rawptr();
+        dist := addr - jit_addr;
+        if dist >= 0 && dist < s.size.zext() {
+            return(Some = s.name);
+        };
+    };
+    .None
+};

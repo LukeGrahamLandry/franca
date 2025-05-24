@@ -126,8 +126,20 @@ QbeModule :: @rec @struct(
     use_map_jit_on_apple_silicon: bool,
     wasm_types_cache: HashMap([]u8, i32),
     libraries: RawList(Str),  // :SLOW but n=4 so like it's probably fine 
+    save: ?@if(enable_incremental(), *Incremental.Writer, i64),
 );
 
+fn enable_incremental() bool #fold = { 
+    is_declared :: fn(target: FatExpr) FatExpr #macro = 
+        @literal (ptr_cast_unchecked(@type target.expr, i64, target.expr&)[] == 12);
+        
+    @if(::@is_declared __builtin_compiler_has_featureNEWIHATEMYLIFE, 
+        __builtin_compiler_has_featureNEWIHATEMYLIFE("@franca/field_use"), 
+        false,
+    )
+};
+
+Incremental :: import("@/backend/incremental.fr");
 #use("@/lib/collections/map.fr");
 
 DisassemblerFunc :: @FnPtr(out: *List(u8), code: []u8, arch: Arch) void;
@@ -140,8 +152,7 @@ QbeTargetEnv :: @struct(
     type: QbeOutputPurpose,
 );
 
-// TODO: remove AsmText
-QbeOutputPurpose :: @enum(i64) (AsmText, JitOnly, Exe, Relocatable, Dynamic);
+QbeOutputPurpose :: @enum(i64) (Cached, JitOnly, Exe, Relocatable, Dynamic);
 ::enum(QbeOutputPurpose);
 
 MAX_GOT_SIZE :: 1.shift_left(15);
@@ -160,7 +171,7 @@ fn init_default_module(m: *QbeModule, goal: QbeTargetEnv, expecting_rwx: bool) v
     // :DefaultToLibc
     // just make it work with the new library tracking. 
     // assume any imports are from libc like before.
-    m.libraries&.push("libc", general_allocator()); 
+    m.new_library("libc");
 }
 
 // 
@@ -187,8 +198,15 @@ fn init(m: *QbeModule, segment_size: i64, gpa: Alloc, goal: QbeTargetEnv, expect
     m[] = QbeModule.zeroed();
     lock(m.intern_mutex&);  // surely this does nothing at this point but just for fun
     m.dis = dis;
+    m.save = .None;
     m.forever = init(gpa, size_of(Qbe.Ins) * 1.shift_left(20) + size_of(SymbolBucket) * IMask + 1.shift_left(10));
     forever := m.forever&.borrow();
+    @if(enable_incremental())
+    if goal.type == .Cached {
+        writer := forever.box(Incremental.Writer);
+        writer[] = init(general_allocator());
+        m.save = (Some = writer);
+    };
     m.segments = EnumMap(SegmentType, SegmentCursor).zeroed();
     expecting_rwx = expecting_rwx && goal.type == .JitOnly;
     m.use_map_jit_on_apple_silicon = expecting_rwx && goal.arch == .aarch64 && goal.os == .macos;
@@ -309,6 +327,7 @@ fn init(m: *QbeModule, segment_size: i64, gpa: Alloc, goal: QbeTargetEnv, expect
         }
     };
     t.finish_module = @if_else {
+        @if(m.goal.type == .Cached) => @if(enable_incremental(), Incremental'finish_module, unreachable());
         @if(m.goal.arch == .wasm32)  => EmitWasm.output_wasm_module;
         @if(m.goal.type == .JitOnly) => (fn(m: *QbeModule) [][]u8 = empty());
         @if(m.goal.os == .macos)     => import("@/backend/macho/emit.fr").output_macho;
@@ -346,6 +365,8 @@ fn init_empty_for_template_only(m: *QbeModule, gpa: Alloc) void = {
     m.target = forever.box_zeroed(@type m.target[]);
     m.types[] = m.new_long_life(0); // TODO: check the magic in QbeBuilder.init to make sure you remember to do this. 
     m.curi[] = m.insb.index_unchecked(Qbe.MaxInstructions);
+    m.debug_out_storage = list(forever);
+    m.debug_out = m.debug_out_storage&;
 }
 
 // TODO: this should go away eventually 

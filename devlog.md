@@ -1,3 +1,22 @@
+## (May 23/24)
+
+- im very suspicious that my terminal starts lying about your 
+programs crashing if you let it run too long. or im just going crazy. 
+either is entirely possible at this point. something to look out for...
+- got to the point of having a binary form of the ir i can write and read back. 
+running it works for "hello world" but nothing else. 
+- one dumb mistake: forgot other info it needs from the Qbe.Fn: reg/slot/leaf/vararg,
+which fixed it for mandelbrot but still not everything. 
+- idk why im trying to start with the main compiler for this. 
+better strategy is just run the .ssa tests through it first. 
+yeah `6 of 71 tests failed.` but they're helpfully fairly minimal examples. 
+- call1.ssa: it's not emitting add_one (called through the vtable)
+was skipping the part of emit_data where i mark_referenced for any relocations. 
+- fault-na.ssa: wasn't outputting size for Dat2.template.Zeroes
+- all .ssa work now. 
+- TODO: my previous thing with shims for mutual_callees broke jitting the graphics programs
+`Terminating app due to uncaught exception 'NSInvalidArgumentException', reason: '+[NSApplication ]: unrecognized selector sent to class`
+
 ## (May 22)
 
 - silly source of tiny slowness: when you have a function that returns a vtable, 
@@ -18,7 +37,8 @@ the time) so it's even slower than it sounds.
   - same result. ie. now macos_mods only goes through the backend once. 
   - very marginal speed improvement (~10ms on hello_triangle) but it made the code simpler
   so thats a win
-  
+- made Qbe.Con smaller
+
 --- 
 
 My theory is that really good fine grained incremental compilation takes an infinite amount 

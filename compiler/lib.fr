@@ -141,10 +141,45 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
     
     if !path.ends_with(".fr") {
         if Dyn'open(path) { handle |
-            ref := handle.get("driver") || @panic("opened '%' as shared library but failed to get symbol 'driver'", path);
+            ref := handle.get("driver") || 
+                (handle.get("main") ||
+                    @panic("opened '%' as shared library but failed to get symbol 'driver'", path));
             @eprintln("Loaded precompiled driver '%'", path);
             callee = (Some = ptr_cast_unchecked(rawptr, F, ref&)[]);
-        };
+        } else {
+            // :UGLY
+            @if(enable_incremental()) {
+                a := general_allocator();
+                bytes := read_entire_file(a, path).unwrap();
+                magic8 := ptr_cast_unchecked(u8, u64, bytes.ptr)[];
+                if magic8 == Incremental.Header.M {
+                    header: *Incremental.Header = check(bytes);
+                    @eprintln("Loading precompiled driver '%'", path);
+                    @assert_eq(header.arch_os, Incremental'pack_current_target(), ".frc was compiled for a different target");
+                    
+                    m := a.box(QbeModule);
+                    init_default_module(m, (
+                        arch = query_current_arch(), 
+                        os = query_current_os(), 
+                        type = .JitOnly,
+                    ), false);
+                    
+                    compile_all_symbols(header, m);
+                    // TODO: factor the above out
+                    
+                    m.emit_suspended_inlinables();  // TODO: shouldn't matter because inlining is over
+                    import("@/backend/meta/qbe_frontend.fr")'fill_from_libc(m);
+                    
+                    i: Incremental'Ref(Incremental.Sym) = (off = header.entry, count = 1);
+                    name := header.get(header.get(i)[0].name);
+                    cc := m.get_addr(name) || @panic("ICE: lost %", name);
+                    @eprintln("calling %", name);
+                    _ := push_resolver(QbeModule, m, find_ip_in_module);
+                    m.make_exec();
+                    callee = (Some = ptr_cast_unchecked(rawptr, F, cc&)[]);
+                };
+            };
+        }
     };
 
     if callee.is_none() {
@@ -171,11 +206,16 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         // when true, the driver can have jit shims (so it might not be fully compiled before you call into it). 
         USE_SAME_MODULE := false;
         
-        cache_it := false && !USE_SAME_MODULE && query_current_os() == .macos; // TODO
+        cache_it := get_environment_variable("FRANCA_CACHE").is_some() 
+            && enable_incremental() && !USE_SAME_MODULE && query_current_os() == .macos; // TODO
         
         shared := @if(USE_SAME_MODULE, self.comptime_codegen, {
             m := self.get_alloc().box(QbeModule);
-            init_default_module(m, (arch = query_current_arch(), os = query_current_os(), type = @if(cache_it, .Dynamic, .JitOnly)), true);
+            init_default_module(m, (
+                arch = query_current_arch(), 
+                os = query_current_os(), 
+                type = @if(cache_it, .Cached, .JitOnly),
+            ), true);
             self.other_module&.push(m, self.get_alloc());
             shared: *CodegenShared = init(m, self.get_alloc(), @as(CodegenWorker) codegen_thread_main, true);
             shared
@@ -205,11 +245,13 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
             @eprintln(">>> compiled % in %ms", name, frontend);  // :WrongClockTime
         };
         
-        cc := /*if cache_it {
-            import("@/compiler/incremental.fr")'write_and_load_cached(m, c, f)
-        } else {*/
-            m.get_addr(name) || @panic("ICE: lost %", name)
-        /*}(*/;
+        if cache_it {
+            write_cache(m, c, f);
+            @println("NOTHING TO RUN.");
+            return(.Ok);
+        };
+        
+        cc := m.get_addr(name) || @panic("ICE: lost %", name);
         
         maybe_log_scopes(self);
         
@@ -222,6 +264,33 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         callee(vtable);
     };
     .Ok
+}
+
+fn write_cache(m: *QbeModule, c: CompCtx, fid: FuncId) void = {
+    self := c.data.cast()[][];
+    
+    @if(enable_incremental()) {
+        writer := m.save.unwrap();
+        finish_imports(writer, m);
+        
+        writer.dep&.reserve(self.codemap.files.len);
+        each self.codemap.files { it |
+            writer.dep&.push(
+                file_len = it.content.len.trunc(),
+                filename = writer.push(it.name),
+                hashcode = Incremental'Sha256'sha256(it.content),
+            );
+        };
+        
+        name := c.fmt_fn_name(fid);
+        entry := writer.map_sym(m, m.intern(name));
+        chunks := writer.to_bytes(Incremental'pack_current_target(), entry.trunc());
+        // TODO: seal_debug_info, add this module as a stack trace thingy 
+        
+        outpath2 :CStr= "./target/franca/run/foo.frc";
+        @eprintln(">>> cache at %", outpath2);
+        write_chunks_or_crash(outpath2, chunks);
+    };
 }
 
 fn dump_tasks(self: *SelfHosted) void = {

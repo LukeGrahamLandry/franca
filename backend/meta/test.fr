@@ -16,6 +16,7 @@ Args :: @struct {
     l:   bool #help("FIXME") = false;
     w:   bool #help("target wasm32 and run with examples/import_wasm") = false;
     jit: bool #help("don't generate binaries, just run jitted code in memory.") = false;
+    frc: bool #help("write out .frc binary ir and then read it back to compile") = false;
     verify: bool #help("run wasm2wat to make sure it typechecks") = false;
     paths: []Str #rest = empty();
     d: Str #help("log intermediate representation") = "";
@@ -69,7 +70,8 @@ fn main() void = {
         arch = .wasm32;
         @assert(!args.x64 && !args.arm, "conflicting arch");
     };
-    args.cc = args.cc || args.jit || args.w;  // assume this until i can output linkable wasm
+    args.cc = args.cc || args.jit || args.frc
+        || args.w;  // assume this until i can output linkable wasm
     
     @assert(!args.x64 || !args.arm, "conflicting arch");
    
@@ -153,6 +155,9 @@ fn run_one(arg: *Args, file_path: Str, arch: Arch, wasm_runner: ?Str) bool #inli
     if iamthecompilernow {
         args&.push("-cc");
     }
+    if arg.frc {
+        args&.push("-frc");
+    }
     args&.push(file_path);
     a := timestamp();
     
@@ -226,6 +231,12 @@ fn run_one(arg: *Args, file_path: Str, arch: Arch, wasm_runner: ?Str) bool #inli
         args&.push("--");
         exe_path = wasm_runner;
     };
+    if arg.frc {
+        args&.push(exe_path);
+        args&.push("-r");
+        args&.push("--");
+        exe_path = qbe_path;
+    };
     args&.push_all(@slice("a", "b", "c"));
     show(exe_path, "run");
     ok, out, err := exec_and_catch(exe_path, args.items(), temp());
@@ -235,7 +246,7 @@ fn run_one(arg: *Args, file_path: Str, arch: Arch, wasm_runner: ?Str) bool #inli
             println(err.items());
             println(out.items());
         };
-        if wasm_runner.is_none() && !arg.jit {
+        if wasm_runner.is_none() && !arg.jit && !arg.frc {
             exe_path.three_trillion_dollars_does_not_buy_an_operating_system_that_works();
         };
         return(false);
