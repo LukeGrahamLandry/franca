@@ -110,20 +110,20 @@ STDLIB_PATH :: @static(?Str) (.None);
 
 fn load_file_in_compiler(vtable: *ImportVTable, path: Str, opts: *BuildOptions) CRes(CompCtx) = {
     // :io_driver
-    prelude := "#include_std(\"lib/core.fr\");";
-    source: List(u8) = prelude.clone(general_allocator());  // TODO: column number on error on first line will be wrong but i dont care. 
-    source&.read_and_push_or_crash(path);  // TODO: error handling
-    if source.len > prelude.len + 4 {
-        maybe_magic := source.items().subslice(prelude.len, 4);
-        check_magic :: fn(M: u32) => 
-            maybe_magic.starts_with(ptr = ptr_cast_unchecked(u32, u8, M&), len = 4);
-        // TODO: comment on architecture 
-        @err_assert(!check_magic(import("@/backend/macho/bits.fr").macho_magic), "load_file_in_compiler: the bytes in '%' look like a Mach-O file, not source code.", path) return;
-    };
+    s := u8.list(general_allocator());
+    @fmt(s&, """#include_std("lib/core.fr");#include_std("%");""", path);  // :LEAK
+    // TODO: put this somewhere else? 
+    //if source.len > prelude.len + 4 {
+    //    maybe_magic := source.items().subslice(prelude.len, 4);
+    //    check_magic :: fn(M: u32) => 
+    //        maybe_magic.starts_with(ptr = ptr_cast_unchecked(u32, u8, M&), len = 4);
+    //    // TODO: comment on architecture 
+    //    @err_assert(!check_magic(import("@/backend/macho/bits.fr").macho_magic), "load_file_in_compiler: the bytes in '%' look like a Mach-O file, not source code.", path) return;
+    //};
     
     comp := {vtable.init_compiler}(opts);
     c := vtable.with(comp);
-    file := c.add_file(path, source.items());
+    file := c.add_file("-", s.items());
     self := c.data.cast();
     stmts := c.data.parse_stmts(file&);
     // TODO: handle error
@@ -138,50 +138,40 @@ Dyn :: import("@/lib/dynamic_lib.fr");
 fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
     F :: @FnPtr(*ImportVTable) void;
     callee: ?F = .None;
+    cachepath := choose_cache_filename(path);
+    no_cache := get_environment_variable("FRANCA_NO_CACHE").is_some();
+    
+    a := general_allocator();
     
     if !path.ends_with(".fr") {
         if Dyn'open(path) { handle |
             ref := handle.get("driver") || 
                 (handle.get("main") ||
                     @panic("opened '%' as shared library but failed to get symbol 'driver'", path));
-            @eprintln("Loaded precompiled driver '%'", path);
+            @eprintln("Loaded precompiled driver: %", path);
             callee = (Some = ptr_cast_unchecked(rawptr, F, ref&)[]);
         } else {
-            // :UGLY
-            @if(enable_incremental()) {
-                a := general_allocator();
-                bytes := read_entire_file(a, path).unwrap();
-                magic8 := ptr_cast_unchecked(u8, u64, bytes.ptr)[];
-                if magic8 == Incremental.Header.M {
-                    header: *Incremental.Header = check(bytes);
-                    @eprintln("Loading precompiled driver '%'", path);
-                    @assert_eq(header.arch_os, Incremental'pack_current_target(), ".frc was compiled for a different target");
-                    
-                    m := a.box(QbeModule);
-                    init_default_module(m, (
-                        arch = query_current_arch(), 
-                        os = query_current_os(), 
-                        type = .JitOnly,
-                    ), false);
-                    
-                    compile_all_symbols(header, m);
-                    // TODO: factor the above out
-                    
-                    m.emit_suspended_inlinables();  // TODO: shouldn't matter because inlining is over
-                    import("@/backend/meta/qbe_frontend.fr")'fill_from_libc(m);
-                    
-                    i: Incremental'Ref(Incremental.Sym) = (off = header.entry, count = 1);
-                    name := header.get(header.get(i)[0].name);
-                    cc := m.get_addr(name) || @panic("ICE: lost %", name);
-                    @eprintln("calling %", name);
-                    _ := push_resolver(QbeModule, m, find_ip_in_module);
-                    m.make_exec();
-                    callee = (Some = ptr_cast_unchecked(rawptr, F, cc&)[]);
-                };
+            // If they passed a .frc file explicitly, don't check that the hashes haven't changed. 
+            // It's just treated as a precompiled program same as if they passed a .dylib. 
+            // This is different from running it with backend/meta/qbe_frontend.fr 
+            // because we pass *ImportVTable in case it's a driver. 
+            @if(enable_incremental()) 
+            if read_cached(a, path) { header |
+                @assert_eq(header.arch_os, Incremental'pack_current_target(), ".frc was compiled for a different target");
+                callee = (Some = compile_cached(header));
+                @eprintln("Loaded precompiled driver: %", path);
             };
         }
+    } else {
+        @if(enable_incremental()) @if(!no_cache)
+        if read_cached(a, cachepath.str()) { header |
+            if header.arch_os == Incremental'pack_current_target() && files_unchanged(header) {
+                if(show_backend_stats(), => @eprintln(">>> hit: %", cachepath));
+                callee = (Some = compile_cached(header));
+            };
+        };
     };
-
+    
     if callee.is_none() {
         safe :: safety_check_enabled(.DebugAssertions);
         start := timestamp();
@@ -206,8 +196,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         // when true, the driver can have jit shims (so it might not be fully compiled before you call into it). 
         USE_SAME_MODULE := false;
         
-        cache_it := get_environment_variable("FRANCA_CACHE").is_some() 
-            && enable_incremental() && !USE_SAME_MODULE && query_current_os() == .macos; // TODO
+        cache_it := !no_cache && enable_incremental() && !USE_SAME_MODULE;
         
         shared := @if(USE_SAME_MODULE, self.comptime_codegen, {
             m := self.get_alloc().box(QbeModule);
@@ -236,19 +225,23 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
             @if(!shared.threaded) shared.m.emit_suspended_inlinables();  // when using apple's jit bullshit this has to happen on the other thread!
         });
         
+        
         { // :TodoLinux
             frontend := clock_ms(MacosLibc.CLOCK_THREAD_CPUTIME_ID);
             code_count := m.segments&[.Code]&.len() - COMMANDS_SIZE_GUESS - SIZE_OF_STUBS;
-            @if(show_backend_stats())
+            @if(show_backend_stats() && !cache_it)
             @eprintln(">>> jitted % bytes of code.", code_count);
             @if(show_backend_stats())
             @eprintln(">>> compiled % in %ms", name, frontend);  // :WrongClockTime
         };
         
         if cache_it {
-            write_cache(m, c, f);
-            @println("NOTHING TO RUN.");
-            return(.Ok);
+            // TODO: seal_debug_info
+            write_cache(m, c, f, cachepath, path);
+            // could do this but really should give a better error message when you get stuck in a loop and crash is probably fine for now
+            //context(DefaultContext)[].comptime = rawptr_from_int(0); 
+            // :SLOW
+            return run_franca_file(vtable, path);
         };
         
         cc := m.get_addr(name) || @panic("ICE: lost %", name);
@@ -266,31 +259,126 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
     .Ok
 }
 
-fn write_cache(m: *QbeModule, c: CompCtx, fid: FuncId) void = {
+fn read_cached(a: Alloc, path: Str) ?*Incremental.Header = {
+    bytes := read_entire_file(a, path) || return(.None);
+    magic8 := ptr_cast_unchecked(u8, u64, bytes.ptr)[];
+    if(magic8 != Incremental.MAGIC, => return(.None));
+    (Some = check(bytes))
+}
+
+// The first Dep in cached .frc files is the hash of the compiler itself. 
+SELF_FILENAME :: "@self";
+
+fn get_self_hash() *Incremental.Sha256.Digest = {
+    stash :: @static(?Array(u32, 8)) (.None);
+    if stash { it |
+        return it;
+    };
+    
+    // :SLOW :SLOW :SLOW
+    // TODO: this should just be precompiled as a constant. 
+    //       it doesn't have to be hash of the exe (which has a recursive problem), source code would be fine. 
+    mark := mark_temporary_storage();
+    path := get_executable_path(temp());
+    bytes := temp().read_to_string_or_crash(path).items();
+    stash[] = (Some = Incremental'Sha256'sha256(bytes));
+    reset_temporary_storage(mark);
+
+    get_self_hash()
+}
+
+fn files_unchanged(header: *Incremental.Header) bool = {
+    if(header.dep.count <= 1, => return(false));
+    
+    it: *Incremental.Dep = header.get(0);
+    if(header.get(it.filename) != SELF_FILENAME, => return(false));
+    if(get_self_hash().items() != it.hashcode&.items(), => return(false));
+    
+    // TODO: save this work of loading + hashing the files even if they changed
+    range(1, header.dep.count.zext()) { i |
+        continue :: local_return;
+        it: *Incremental.Dep = header.get(i.trunc());
+        filename := header.get(it.filename);
+        // "compiler" is the fill_export_ffi string that has virtual addresses in it.
+        // "-" is the generated src string in load_file_in_compiler. 
+        if(filename == "compiler" || filename == "-", => continue());
+        src      := temp().get_include_std(filename) || return(false);
+        if(src.len != it.file_len.zext(), => return(false));
+        hashcode := Incremental'Sha256'sha256(src);
+        if(hashcode&.items() != it.hashcode&.items(), => return(false));
+    };
+    true
+}
+
+fn compile_cached(header: *Incremental.Header) (@FnPtr(*ImportVTable) void) = {
+    a := general_allocator();
+    m := a.box(QbeModule);
+    init_default_module(m, (
+        arch = query_current_arch(), 
+        os = query_current_os(), 
+        type = .JitOnly,
+    ), false);
+    
+    compile_all_symbols(header, m);
+    // TODO: factor the above out
+    
+    m.emit_suspended_inlinables();  // TODO: shouldn't matter because inlining is over
+    import("@/backend/meta/qbe_frontend.fr")'fill_from_libc(m);
+    
+    i: Incremental'Ref(Incremental.Sym) = (off = header.entry_sym, count = 1);
+    name := header.get(header.get(i)[0].name);
+    cc := m.get_addr(name) || @panic("ICE: lost %", name);
+    _ := push_resolver(QbeModule, m, find_ip_in_module);
+    m.make_exec();
+    assume_types_fn(Arg = *ImportVTable, Ret = void, ptr = cc)
+}
+
+// TODO: mkdir
+fn write_cache(m: *QbeModule, c: CompCtx, fid: FuncId, outpath2: CStr, start_path: Str) void = {
     self := c.data.cast()[][];
     
     @if(enable_incremental()) {
         writer := m.save.unwrap();
         finish_imports(writer, m);
         
-        writer.dep&.reserve(self.codemap.files.len);
-        each self.codemap.files { it |
+        entry_dep := Qbe.no_symbol;
+        writer.dep&.reserve(self.codemap.files.len+1);
+        writer.dep&.push(
+            file_len = 0,
+            filename = writer.push(SELF_FILENAME),
+            hashcode = get_self_hash()[],
+        );
+        enumerate self.codemap.files { i, it |
+            @if(it.name != import_literal_file_name)
             writer.dep&.push(
                 file_len = it.content.len.trunc(),
                 filename = writer.push(it.name),
                 hashcode = Incremental'Sha256'sha256(it.content),
             );
+            
+            if entry_dep == Qbe.no_symbol && it.name == start_path /*:SLOW*/ {
+                entry_dep = i.trunc();
+            }
         };
         
         name := c.fmt_fn_name(fid);
-        entry := writer.map_sym(m, m.intern(name));
-        chunks := writer.to_bytes(Incremental'pack_current_target(), entry.trunc());
-        // TODO: seal_debug_info, add this module as a stack trace thingy 
-        
-        outpath2 :CStr= "./target/franca/run/foo.frc";
-        @eprintln(">>> cache at %", outpath2);
+        meta: Incremental.Meta = (
+            arch_os = Incremental'pack_current_target(),
+            entry_sym = writer.map_sym(m, m.intern(name)).trunc(),
+            entry_dep = entry_dep,
+        );
+        chunks := writer.to_bytes(meta);
         write_chunks_or_crash(outpath2, chunks);
+        if show_backend_stats() {
+            @eprintln(">>> save: %", outpath2);
+        }
     };
+}
+
+// TODO: this is dumb: ./a.fr vs a.fr, also unreadable is sad
+fn choose_cache_filename(path: Str) CStr = {
+    digest := Incremental'Sha256'sha256(path);
+    @fmt_cstr("target/franca/cache/%.frc", digest&)
 }
 
 fn dump_tasks(self: *SelfHosted) void = {

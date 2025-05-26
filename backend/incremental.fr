@@ -1,10 +1,9 @@
 Sha256 :: import("@/backend/macho/sha256.fr");
 
+MAGIC :: 0x0001_41434E415246;  // FRANCA__
+
 Header :: @struct {
-    M :: 0x000041434E415246;  // FRANCA__
-    magic_v: u64 = M; 
-    arch_os: u32;
-    entry: u32; // Sym
+    meta: Meta #use;
     dep: Storage(Dep);
     sym: Storage(Sym);
     blk: Storage(Blk);
@@ -14,6 +13,13 @@ Header :: @struct {
     rel: Storage(Dat2.Reloc);
     str: Storage(u8);
     lib: Storage(Lib);
+};
+
+Meta :: @struct {
+    magic_v: u64 = MAGIC;
+    arch_os: u32;
+    entry_sym: u32;
+    entry_dep: u32;
 };
 
 // Hashes of all the input files that contributed to this module. 
@@ -83,6 +89,20 @@ Lib :: @struct {
 };
 
 Storage :: fn($T: Type) Type = {
+    // SAFETY: the serialized data is immediately after the header in memory
+    fn get(self: *Header, i: Ref(T)) []T = {
+        f :: find_storage_field(T);
+        storage := Header.get_field_ptr(self, f);
+        first := T.ptr_from_raw(Header.raw_from_ptr(self).offset(storage.off.zext()));
+        @debug_assert_le(i.off + i.count, storage.count, "%", ::f[].name.str());
+        (ptr = first.offset(i.off.zext()), len = i.count.zext())
+    }
+    
+    fn get(self: *Header, i: u32) *T = {
+        i: Ref(T) = (off = i, count = 1);
+        self.get(i).index(0)
+    }
+
     @struct(
         off: u32 /* bytes from start of header to first element */, 
         count: u32, 
@@ -93,22 +113,14 @@ Storage :: fn($T: Type) Type = {
 Ref :: fn($T: Type) Type = {
     Self :: @struct(off: u32, count: u32, RefElement :: T);
     
-    // SAFETY: the serialized data is immediately after the header in memory
-    fn get(self: *Header, i: Self) []T = {
-        f :: find_storage_field(T);
-        storage := Header.get_field_ptr(self, f);
-        first := T.ptr_from_raw(Header.raw_from_ptr(self).offset(storage.off.zext()));
-        @debug_assert_le(i.off + i.count, storage.count, "%", ::f[].name.str());
-        (ptr = first.offset(i.off.zext()), len = i.count.zext())
-    }
-    
     Self
 };
+
 
 fn check(data: []u8) *Header = {
     @debug_assert(data.len > size_of(Header));
     self := ptr_cast_unchecked(u8, Header, data.ptr);
-    @debug_assert_eq(self.magic_v, Header.M);
+    @debug_assert_eq(self.magic_v, MAGIC);
     
     // TODO
     //range(0, Header.N) { i |
@@ -167,8 +179,11 @@ fn push(self: *Writer, f: *Qbe.Fn) void = {
     id := self.map_sym(f.globals, f.lnk.id);
     
     self.sym[id].segment = .Code;
-    self.sym[id].fnc.con = (off = self.con.len.trunc(), count = f.ncon.bitcast());
-    each f.con.slice(0, f.ncon.zext()) { c |
+    
+    // unfortunatly this includes constants that are no longer used. 
+    // so a function will all uses inlined will still have an Invalud Sym because of this map_sym
+    self.sym[id].fnc.con = (off = self.con.len.trunc(), count = trunc(f.ncon.zext() - fixed_const_count));
+    each f.con.slice(fixed_const_count, f.ncon.zext()) { c |
         self.con&.push(
             sym = @if(c.sym == Qbe.no_symbol, Qbe.no_symbol, trunc self.map_sym(f.globals, c.sym)), 
             bits = c.bits,
@@ -257,16 +272,14 @@ find_storage_field :: fn(T: Type) *Field = {
     unreachable()
 };
 
-fn to_bytes(self: *Writer, arch_os: u32, entry: u32) [][]u8 = {
+fn to_bytes(self: *Writer, meta: Meta) [][]u8 = {
     bytes := list([]u8, temp());
     
     n := size_of(Header);
     header := temp().box(Header);
     ::[]Header;
     bytes&.push(header.slice(1).interpret_as_bytes());
-    header.magic_v = Header.M;
-    header.arch_os = arch_os;
-    header.entry = entry;
+    header.meta = meta;
     
     X :: fn(storage, data) => {
         b := data.items().interpret_as_bytes();
@@ -314,9 +327,13 @@ fn finish_imports(writer: *Writer, m: *QbeModule) void = {
 finish_module :: fn(m: *QbeModule) [][]u8 = {
     writer := m.save.unwrap();
     finish_imports(writer, m);
-    target := Incremental'pack_target(m.goal.arch, m.goal.os);
-    entry := writer.map_sym(m, m.intern("main"));  // :HardcodeMain
-    writer.to_bytes(target, entry.trunc())
+    meta: Incremental.Meta = (
+        arch_os = Incremental'pack_target(m.goal.arch, m.goal.os),
+        entry_sym = writer.map_sym(m, m.intern("main")).trunc(), // :HardcodeMain
+        // TODO: would be nice if you could set this without needing to paste this function
+        entry_dep = Qbe.no_symbol,
+    );
+    writer.to_bytes(meta)
 };
 
 fn load(header: *Header, m: *QbeModule, f: *Qbe.Fn, it: Ref(Sym)) void = {
@@ -325,13 +342,15 @@ fn load(header: *Header, m: *QbeModule, f: *Qbe.Fn, it: Ref(Sym)) void = {
     f.lnk.id = m.intern(header.get(sym.name));
     fnc := sym.fnc&;
     
-    f.ncon = fnc.con.count.bitcast();
-    f.con = new_copy(header.get(fnc.con));  // TODO: probably not worth going over the memory twice? 
-    enumerate header.get(fnc.con) { i, c |
-        if c.sym != Qbe.no_symbol {
-            it: Ref(Sym) = (off = c.sym, count = 1);
+    f.ncon += fnc.con.count.bitcast();
+    f.con&.grow(f.ncon.zext());
+    enumerate header.get(fnc.con) { i, src |
+        dest := f.con[i + fixed_const_count]&;
+        dest[] = src[];
+        if src.sym != Qbe.no_symbol {
+            it: Ref(Sym) = (off = src.sym, count = 1);
             it := header.get(it);
-            f.con[i].sym = m.intern(header.get(it[0].name));
+            dest.sym = m.intern(header.get(it[0].name));
         }
     };
     
@@ -354,6 +373,8 @@ fn load(header: *Header, m: *QbeModule, f: *Qbe.Fn, it: Ref(Sym)) void = {
     f.start = blks.index(0);
     f.nblk = fnc.blk.count.bitcast();
     
+    // TODO: these are pretty chunky. it would be nice to deduplicate them. 
+    //       need to be careful, there might be something in amd64/emit.fr that assumes they don't alias?
     f.nmem = fnc.mem.count.bitcast();
     f.mem = new_copy(header.get(fnc.mem));
     

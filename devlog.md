@@ -1,3 +1,79 @@
+## (May 26)
+
+- don't store (QbeNull, QbeUndef) in con
+- i was right about emitting asm being basically free. 
+```
+franca examples/default_driver.fr build compiler/main.fr -o q.out -keep-names -c -unsafe && gcc q.out -o q.out
+./q.out backend/meta/qbe_frontend.fr backend/test/mandel.ssa -o a.out
+```
+  - uncached samples: 875 main thread + 445 codegen thread
+  - cached samples: all=37
+    - hash files: 9
+    - hash self: 8
+    - read files: 2
+    - dlsym: 8
+    - emit_func_arm64: 5
+    - load(Qbe.Fn): 3
+  - `hash self` i knew was slow and should be done at the compiler's comptime somehow 
+  - the dlsym time seems way to long for 30 imports. 
+  oh, im doing it for every Invalid (from a function that was always inlined).
+  - `hash files` is unfortunate. should i just trust the os last modified date instead? 
+  i really don't trust it, plus it would make the cache files reproducible which just feels creepy. 
+    - ah that's an interesting thought, the `hash self` needs to be of the compiler's source code 
+    not the exe so it's the same for all arches of the compiler, so you can cross compile cache 
+    files and get the same bytes (not that it's useful, just that repro is good for sanity). 
+  but i can save that in a codemap and reuse it if you miss the cache so you don't have to 
+  do it twice. tho that only speeds up the slow path anyway so it's less exciting. 
+  
+TODO:
+- TODO: don't dlsym for invalid
+- mkdir
+- atomic write
+- debug trace with source location
+- keep caches for multiple targets at once?
+- need to be careful if start caching both main+driver from one source file
+
+## (May 25)
+
+- my previous thing with shims for mutual_callees broke jitting the graphics programs
+  - `Terminating app due to uncaught exception 'NSInvalidArgumentException', reason: '+[NSApplication ]: unrecognized selector sent to class`
+  - it's at `NSApplication'sharedApplication()`
+  - it works if i add back the `for mutual_callees: dispatch::Action.Jit`,
+  which is odd because that should only affect comptime code, even though the "runtime" code is 
+  jitted, it still goes through the normal main_thread_pump. 
+  - can filter to the names objc_msgSend/objc_msgSendSuper and it still works,
+  so it isn't even a compilation order thing because those don't have a body to compile, 
+  it's just an import, the only thing it can be doing is calling create_jit_shim but
+  it doesn't work if i just do that. 
+  - it has to be another thing like TodoDontZeroX0WhenVoid because the error changes 
+  if i add another argument to those functions (silent crash instead of apple's backtrace), 
+  but it still works aot. 
+  - difference is not the special case emit_call to DynamicImport when aot. still works without that.
+  - i can fix bounce_body to not emit for void and then aot keeps working without the hack in objc_msgSend's signeture, 
+  but that doesn't help jit (tho does change it to silent crash)
+  - OHHHHH, because create_jit_shim trusts the par types so it's not passing on all the extras when you put other shit in 
+  the call site. when it was `objc_msgSend :: fn(self: ObjcId) void` and you call it with `(cls::NSApplication, sel::sharedApplication`, 
+  the shim passed one argument so only the cls got through and the sel became garbage and you got the nice stack trace. 
+  and then saying there are two params means you get through the dispatch part and the actual implementation crashes 
+  (on the first message that actually needed multiple arguments), and similarly, when i fix stomping x0 and change the sig to void, 
+  the reciever doesn't get through at all and it crashes trying to dereference whatever junk is in x0 after the shim handler. 
+  - now this is particularly offensive because this is the only function where you need to lie about the signeture at the declaration site 
+  and it's an import anyway so there's no need for a shim. 
+  but you don't want to say never shim for imports, because you want to allow things that are only available 
+  at runtime to exist as a function pointer at comptime as long as you don't try to call it. 
+  for now just hack in a `#avoid_shim` that opts in to the old behaviour. 
+  it's fine if you make a shim for the msgsend functions, they just need to be compiled properly 
+  before you try to call through it.
+- always caching the thing in run_franca_file seems to mostly work. 
+  - `examples/bf/code_string.fr` says ` Cannot call init_self_hosted inside another compiler`.
+  because it's looping because it has calls `import()` on a string of source code which 
+  gets added to the CodeMap as a file named `(import literal)` which of course doesn't exist. 
+- something i didn't think about: you need to treat the compiler binary itself as a Dep and put that hash in there too. 
+but it's kinda awkward to get that at comptime, it can't be the same hash as for mach-o codesign
+because you can't add it to the data segment that late. for now just get_executable_path at runtime 
+i guess, bleh. but it's cripplingly broken if i have to delete the cache folder or remember to change the 
+version number every time i recompile the compiler. 
+
 ## (May 23/24)
 
 - im very suspicious that my terminal starts lying about your 
@@ -14,8 +90,6 @@ yeah `6 of 71 tests failed.` but they're helpfully fairly minimal examples.
 was skipping the part of emit_data where i mark_referenced for any relocations. 
 - fault-na.ssa: wasn't outputting size for Dat2.template.Zeroes
 - all .ssa work now. 
-- TODO: my previous thing with shims for mutual_callees broke jitting the graphics programs
-`Terminating app due to uncaught exception 'NSInvalidArgumentException', reason: '+[NSApplication ]: unrecognized selector sent to class`
 
 ## (May 22)
 

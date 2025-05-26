@@ -268,7 +268,19 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
             // Previously we would push Jit tasks for func.mutual_callees here, 
             // but now we rely on shims being created since you often put a function 
             // pointer in a vtable without actually calling it at comptime -- May 22, 2025
-            
+            //
+            // HACK: #avoid_shim is needed for obj_msgSend because it needs to lie about its parameter types so they can't be passed on correctly by the shim. 
+            for func.mutual_callees { callee |
+                callee_func := self.get_function(callee);
+                if callee_func.get_flag(.AvoidJitShim) && !callee_func.get_flag(.AsmDone) {
+                    t := self.new_task((Jit = callee), .None);
+                    waiting&.push(t);
+                };
+            };
+            if waiting.len != 0 {
+                return(Suspend = self.wait_for(All = waiting));
+            };
+
             // :AssumeDone
             // TODO: we wont have a callable pointer if you're cross compiling and this function is in an #target_os block.
             //       should make a shim that gives a useful message if you try to call it at comptime by mistake. 
