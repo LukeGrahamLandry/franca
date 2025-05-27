@@ -53,6 +53,46 @@ fn walk_directory(path: CStr, $body: @Fn(entry: DirEntry) void) bool = {
     }
 }
 
+// TODO: don't be allocations georg
+fn make_dirs(const_path: Str) bool = {
+    path := u8.list(temp());
+    path&.push_all(const_path);
+    path&.pop_path_segment();
+    if path.len > 0 {
+        if !dir_exists(@fmt_cstr("%", path.items())) {
+            if !make_dirs(path.items()) {
+                return false;
+            };
+        };
+    };
+    make_dir(const_path)
+}
+
+fn make_dir(path: Str) bool #target_os = (fn($os) => {
+    L :: LibcType(os);
+    
+    path := maybe_borrow_cstr(path, temp());
+    if dir_exists(path) {
+        return true;
+    };
+    
+    mode: i64 = (@as(u16) FileMode.OwnerAll).zext();
+    if mkdirat(L.AT_FDCWD, path, mode).is_ok() {
+        return true;
+    };
+    
+    false
+});
+
+fn dir_exists(path: CStr) bool = {
+    dir := opendir(path); ::ptr_utils(Dir);
+    if !dir.is_null() {
+        closedir(dir);
+        return true;
+    };
+    false
+}
+
 fn is(e: DirEntry, kind: DirEntType) bool =
     (@as(u8) e.type) == (@as(u8) kind);
 

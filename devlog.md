@@ -1,3 +1,7 @@
+## (May 27)
+
+- remove a couple clowns: mkdir, cp
+
 ## (May 26)
 
 - don't store (QbeNull, QbeUndef) in con
@@ -17,6 +21,9 @@ franca examples/default_driver.fr build compiler/main.fr -o q.out -keep-names -c
   - `hash self` i knew was slow and should be done at the compiler's comptime somehow 
   - the dlsym time seems way to long for 30 imports. 
   oh, im doing it for every Invalid (from a function that was always inlined).
+  i started doing it by tracking imports but it's way easier to just put a check for 
+  `symbol.fixups.len == 0` in the dumb fill_from_libc for now. that makes dlsym be 0 samples as
+  i hoped.
   - `hash files` is unfortunate. should i just trust the os last modified date instead? 
   i really don't trust it, plus it would make the cache files reproducible which just feels creepy. 
     - ah that's an interesting thought, the `hash self` needs to be of the compiler's source code 
@@ -24,14 +31,21 @@ franca examples/default_driver.fr build compiler/main.fr -o q.out -keep-names -c
     files and get the same bytes (not that it's useful, just that repro is good for sanity). 
   but i can save that in a codemap and reuse it if you miss the cache so you don't have to 
   do it twice. tho that only speeds up the slow path anyway so it's less exciting. 
-  
-TODO:
-- TODO: don't dlsym for invalid
-- mkdir
-- atomic write
-- debug trace with source location
-- keep caches for multiple targets at once?
-- need to be careful if start caching both main+driver from one source file
+- it's unfortunate how much slower the caching makes the first run (where it has to create the cache). 
+  - 868ms vs 812ms with FRANCA_NO_CACHE, for `backend/meta/qbe_frontend.fr backend/test/mandel.ssa`,
+  - tho that measurement is fishy because the order matters for the file system's caching maybe? 
+  like that was yes then no but if you do no then yes they're the same speed. 
+  which if i don't think about it too hard could mean it's slower by exactly the amount of time it takes to cold read all the files?
+- did `hash self` as hash of everything in the codemap when compiling the compiler. 
+  - needed some compilation order hacks because the newly increased shim enthusiasm 
+  to make it run after all files are loaded (backend/ARCH/emit.fr is only called through 
+  a vtable so the stuff it `import`s is loaded late). 
+  - brings the fast case above to all=~20 samples.
+- afraid i've introduced spurious failures to examples/bf
+- in compile_all_symbols:  
+  - pre-intern all the names and just index into an array instead of needing to rehash every time
+  - don't call default_init since it needs to recreate the `tmp` array which emit() doesn't even use
+  - saves like 2 samples on backend/meta/qbe_frontend.fr (1.07 ± 0.02 times faster)
 
 ## (May 25)
 
@@ -927,6 +941,7 @@ it pretty much just worked like a normal language, thats crazy man.
 THINGS I ALWAYS LOSE 
 - https://torstencurdt.com/tech/posts/modulo-of-negative-numbers/
 - https://www.chiark.greenend.org.uk/~sgtatham/coroutines.html
+- the name of the rust benchmarking thing is "hyperfine"
 
 ## (Apr 19)
 

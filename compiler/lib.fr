@@ -163,13 +163,27 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
             };
         }
     } else {
+        z := zone_begin(.CheckCache);
         @if(enable_incremental()) @if(!no_cache)
         if read_cached(a, cachepath.str()) { header |
-            if header.arch_os == Incremental'pack_current_target() && files_unchanged(header) {
-                if(show_backend_stats(), => @eprintln(">>> hit: %", cachepath));
-                callee = (Some = compile_cached(header));
-            };
+            break :: local_return;
+            start := timestamp();
+            if(header.arch_os != Incremental'pack_current_target(), => break());
+
+            // This is extra important since im using a very collidable file name in choose_cache_filename 
+            // (just chopping out non _azAZ09 chars. i.e. `a b` and `a.b` become the same). 
+            // TODO: it's unfortunate to have `a.out` not match `./a.out`,
+            //       but that was a problem with the old way too (hash of file name). 
+            entry_dep: *Incremental'Dep = header.get(header.entry_dep);
+            if(header.get(entry_dep.filename) != path, => break());
+            
+            if(!files_unchanged(header), => break());
+            middle := timestamp();
+            callee = (Some = compile_cached(header));
+            end := timestamp();
+            if(show_backend_stats(), => @eprintln(">>> hit: %\n>>> check: %ms, compile: %ms", cachepath, middle-start, end-middle));
         };
+        zone_end(z);
     };
     
     if callee.is_none() {
@@ -185,7 +199,9 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         c := @try(vtable.load_file_in_compiler(path, opts)) return;
         env := c.get_comptime_env();
         @if(show_backend_stats())
-        @eprintln(">>> compiler configuration: context=%, threads=%, debug_assertions=%, host = (%, %)", if(query_context_is_implicit(), => "implicit", => "static"), use_threads, safe, env.comptime_arch, env.comptime_os);
+        @eprintln(">>> compiler configuration: context=%, threads=%, debug_assertions=%, host = (%, %)", 
+            if(query_context_is_implicit(), => "implicit", => "static"), 
+            use_threads, safe, env.comptime_arch, env.comptime_os);
         
         self := c.data.cast()[][];
         
@@ -213,7 +229,9 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         
         apple_thread_jit_write_protect(true);  // :JitMemProtect this thread wants to execute
         
-        f := c.get_unique_named("driver") || c.get_unique_named("main") || panic("expected a function called main or driver.");
+        f := c.get_unique_named("driver") 
+            || c.get_unique_named("main") 
+            || panic("expected a function called main or driver.");
         
         name := c.fmt_fn_name(f);
         @if(USE_SAME_MODULE, {
@@ -237,10 +255,12 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         
         if cache_it {
             // TODO: seal_debug_info
+            make_dirs(cache_dir());
             write_cache(m, c, f, cachepath, path);
             // could do this but really should give a better error message when you get stuck in a loop and crash is probably fine for now
             //context(DefaultContext)[].comptime = rawptr_from_int(0); 
-            // :SLOW
+            // :SLOW 
+            // TODO: dumb that this will read all the files back again to check if they changed
             return run_franca_file(vtable, path);
         };
         
@@ -267,41 +287,50 @@ fn read_cached(a: Alloc, path: Str) ?*Incremental.Header = {
 }
 
 // The first Dep in cached .frc files is the hash of the compiler itself. 
-SELF_FILENAME :: "@self";
+self_filename :: "@self";
+// TODO: im just vaugly hoping this runs after all files have been loaded 
+//       (which it does not in fact. backend/__/emit.fr is through a vtable so happens late)
+self_hash :: @static(Array(u32, 8)) Array(u32, 8).zeroed();
 
-fn get_self_hash() *Incremental.Sha256.Digest = {
-    stash :: @static(?Array(u32, 8)) (.None);
-    if stash { it |
-        return it;
+// TODO: THIS BEHAVIOUR IS CONSIDERED DISRESPECTFUL.
+//       this is a fragile compilation order HACK that user code really shouldn't do 
+//       but it's kinda cute that it works. This gets called from main() and the extra 
+//       indirection with a forced shim ensures that comptime_compute_self_hash() runs 
+//       after all files have been loaded (even the ones through a shim in Qbe.Target vtable). 
+//       this will definitly come back to haunt me because i only test it manually by uncommenting 
+//       a print and eyeballing the list of files.    -- May 26, 2025
+set_self_hash :: fn() void #inline = {
+    hack :: @as(@FnPtr() Array(u32, 8)) comptime_compute_self_hash;
+    self_hash[] = hack();
+};
+
+fn comptime_compute_self_hash() Array(u32, 8) = :: {
+    fr   := current_compiler_context();
+    self := fr.data.cast()[][];
+    hash := zeroed Array(u32, 8);
+    each self.codemap.files { it |
+        // uncomment to check that the compilation order hack with set_self_hash is working. 
+        // println(it.name);  
+        @if(it.name != "compiler")  // repro!
+        range(0, 8) { i |
+            hash&[i] = bit_xor(hash&[i], it.hash&[i]);
+        };
     };
-    
-    // :SLOW :SLOW :SLOW
-    // TODO: this should just be precompiled as a constant. 
-    //       it doesn't have to be hash of the exe (which has a recursive problem), source code would be fine. 
-    mark := mark_temporary_storage();
-    path := get_executable_path(temp());
-    bytes := temp().read_to_string_or_crash(path).items();
-    stash[] = (Some = Incremental'Sha256'sha256(bytes));
-    reset_temporary_storage(mark);
-
-    get_self_hash()
+    hash
 }
 
 fn files_unchanged(header: *Incremental.Header) bool = {
     if(header.dep.count <= 1, => return(false));
     
     it: *Incremental.Dep = header.get(0);
-    if(header.get(it.filename) != SELF_FILENAME, => return(false));
-    if(get_self_hash().items() != it.hashcode&.items(), => return(false));
+    if(header.get(it.filename) != self_filename, => return(false));
+    if(self_hash.items() != it.hashcode&.items(), => return(false));
     
     // TODO: save this work of loading + hashing the files even if they changed
     range(1, header.dep.count.zext()) { i |
         continue :: local_return;
         it: *Incremental.Dep = header.get(i.trunc());
         filename := header.get(it.filename);
-        // "compiler" is the fill_export_ffi string that has virtual addresses in it.
-        // "-" is the generated src string in load_file_in_compiler. 
-        if(filename == "compiler" || filename == "-", => continue());
         src      := temp().get_include_std(filename) || return(false);
         if(src.len != it.file_len.zext(), => return(false));
         hashcode := Incremental'Sha256'sha256(src);
@@ -319,10 +348,11 @@ fn compile_cached(header: *Incremental.Header) (@FnPtr(*ImportVTable) void) = {
         type = .JitOnly,
     ), false);
     
+    z := zone_begin(.AotPump);
     compile_all_symbols(header, m);
-    // TODO: factor the above out
+    zone_end(z);
     
-    m.emit_suspended_inlinables();  // TODO: shouldn't matter because inlining is over
+    // don't need to emit_suspended_inlinables() because the cached functions only go through emit(). 
     import("@/backend/meta/qbe_frontend.fr")'fill_from_libc(m);
     
     i: Incremental'Ref(Incremental.Sym) = (off = header.entry_sym, count = 1);
@@ -333,7 +363,6 @@ fn compile_cached(header: *Incremental.Header) (@FnPtr(*ImportVTable) void) = {
     assume_types_fn(Arg = *ImportVTable, Ret = void, ptr = cc)
 }
 
-// TODO: mkdir
 fn write_cache(m: *QbeModule, c: CompCtx, fid: FuncId, outpath2: CStr, start_path: Str) void = {
     self := c.data.cast()[][];
     
@@ -341,23 +370,25 @@ fn write_cache(m: *QbeModule, c: CompCtx, fid: FuncId, outpath2: CStr, start_pat
         writer := m.save.unwrap();
         finish_imports(writer, m);
         
-        entry_dep := Qbe.no_symbol;
         writer.dep&.reserve(self.codemap.files.len+1);
         writer.dep&.push(
             file_len = 0,
-            filename = writer.push(SELF_FILENAME),
-            hashcode = get_self_hash()[],
+            filename = writer.push(self_filename),
+            hashcode = self_hash[],
         );
-        enumerate self.codemap.files { i, it |
-            @if(it.name != import_literal_file_name)
-            writer.dep&.push(
-                file_len = it.content.len.trunc(),
-                filename = writer.push(it.name),
-                hashcode = Incremental'Sha256'sha256(it.content),
-            );
+        
+        entry_dep := Qbe.no_symbol;
+        each self.codemap.files { it |
+            if is_cachable(it.name) {
+                if entry_dep == Qbe.no_symbol && it.name == start_path /*:SLOW*/ {
+                    entry_dep = writer.dep.len.trunc();
+                };
             
-            if entry_dep == Qbe.no_symbol && it.name == start_path /*:SLOW*/ {
-                entry_dep = i.trunc();
+                writer.dep&.push(
+                    file_len = it.content.len.trunc(),
+                    filename = writer.push(it.name),
+                    hashcode = it.hash,
+                );
             }
         };
         
@@ -369,17 +400,40 @@ fn write_cache(m: *QbeModule, c: CompCtx, fid: FuncId, outpath2: CStr, start_pat
         );
         chunks := writer.to_bytes(meta);
         write_chunks_or_crash(outpath2, chunks);
-        if show_backend_stats() {
-            @eprintln(">>> save: %", outpath2);
-        }
+        if(show_backend_stats(), => @eprintln(">>> save: %", outpath2));
     };
 }
 
+fn is_cachable(name: Str) bool = !(false 
+    // the fill_export_ffi string that has virtual addresses in it.
+    // can't just ignore in files_unchanged() because this would break repro. 
+    || name == "compiler" 
+    // the generated src string in load_file_in_compiler. 
+    // redundant with entry_dep anyway. 
+    || name == "-"
+    // from an `import("{ foo };")`.
+    || name == import_literal_file_name 
+);
+
 // TODO: this is dumb: ./a.fr vs a.fr, also unreadable is sad
+// Also this is very collidable but it's fine beacuse the cache file contains the path of the entry_dep. 
+// I considered using hash of the path but it's annoying to need to dump_bin to see what's in your cache dir. 
 fn choose_cache_filename(path: Str) CStr = {
-    digest := Incremental'Sha256'sha256(path);
-    @fmt_cstr("target/franca/cache/%.frc", digest&)
+    out := u8.list(path.len+25, temp());
+    out&.push_all(cache_dir());
+    for path { c |
+        if c.is_ascii_alpha() || c.is_ascii_digit() {
+            out&.push(c);
+        } else {
+            out&.push("_".ascii());
+        }
+    };
+    out&.push_all(".frc\0");
+    (ptr = out.maybe_uninit.ptr)
 }
+
+fn cache_dir() Str = 
+    @tfmt("%/cache/", get_environment_variable("FRANCA_TARGET_DIR") || "target/franca");
 
 fn dump_tasks(self: *SelfHosted) void = {
     @println("[% active tasks]", self.dispatch.active_tasks.len);

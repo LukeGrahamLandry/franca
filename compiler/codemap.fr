@@ -10,7 +10,9 @@ CodeMap :: @struct(
     files: List(File),
     total_len: u32,
 );
-File :: @struct(name: Str, content: Str, start: u32);
+
+Sha256 :: import("@/backend/macho/sha256.fr");
+File :: @struct(name: Str, content: Str, start: u32, hash: Sha256.Digest);
 
 // TODO: if you name a field gpa, it shadows the argument so you can't use it in later field initializers. -- May 31
 fn init(gpa: Alloc) CodeMap = 
@@ -21,7 +23,12 @@ fn add_file(self: *CodeMap, name: Str, content: Str) Span = {
     @assert_lt(@as(i64) self.total_len.zext() + content.len, 0xFFFFFFFF, "add_file total > 4gb. old len = %, content len = %, content ptr = %", self.total_len, content.len, u8.raw_from_ptr(content.ptr));
     span: Span = (low = self.total_len, high = self.total_len.add(content.len.trunc()));
     self.total_len += content.len.trunc();
-    self.files&.push((name = name, content = content, start = span.low));
+    self.files&.push(
+        name = name, 
+        content = content, 
+        start = span.low,
+        hash = Sha256'sha256(content),
+    );
     //@println("add file: %-%", @as(i64) span.low.zext(), @as(i64) span.high.zext());
     @assert_eq(span.len(), content.len, "Miscompiled????");
     span

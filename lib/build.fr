@@ -1,10 +1,5 @@
-// TODO: this is all super old and needs to be cleaned up -- Mar 5, 2025
 
 LinkTime :: @enum(i64) (Static, Dynamic);
-
-// TODO: hack
-// TODO: switch between clang and clang++ based on lib
-CLANG_PATH :: "/opt/homebrew/opt/llvm/bin/clang++";
 
 fn with(vtable: *ImportVTable, comp: Compiler) CompCtx = 
     (data = comp, vtable = vtable);
@@ -96,7 +91,8 @@ fn save_path_for_lib(env: Ty(Arch, Os), linking: LinkTime, lib_name: Str) Str = 
 
 #redirect(Ty(i64, i64), bool) fn eq(a: LinkTime, b: LinkTime) bool;
 
-// Essentially describing something to pass to clang (after adding some combination of -o -O -c -dynamiclib -static -ast-dump) 
+::display_slice(Str);
+
 ForeignLibrary :: @struct(
     name: Str, // for caching the output file and #import functions knowing which dylib to check. 
     input_files: Slice(Str) = empty(),
@@ -109,64 +105,6 @@ ForeignLibrary :: @struct(
     cpp: bool = false,
 );
 
-ForeignLanguage :: @enum(C, CPlusPlus, ObjectiveC);  // :UNUSED
-
-// TODO: move these to x/<name>
-// TODO: impl build system with these. make it a one-liner to add a dependency to driver. 
-
-wuffs_lib: ForeignLibrary : (
-    name = "wuffs",
-    input_files = "bindings/wuffs/release/c/wuffs-v0.4.c".single(ast_alloc()),
-    macro_defines = "WUFFS_IMPLEMENTATION".single(ast_alloc()),
-);
-
-// TODO: i guess macro_defines needs to be a function you pass the os/arch to. :Linux
-sokol_macos_lib: ForeignLibrary : (
-    name = "sokol",
-    macro_defines = @slice("SOKOL_METAL", "SOKOL_IMPL", "SOKOL_NO_ENTRY") ast_alloc(),
-    include_paths = "bindings/sokol".single(ast_alloc()),
-    macos_frameworks = @slice("Metal", "MetalKit", "Cocoa", "QuartzCore") ast_alloc(),
-    objective_c = true,
-    raw_c_source = (Some = SOKOL_ALL_SOURCE),
-);
-
-SOKOL_ALL_SOURCE :: """
-#include "sokol_app.h"
-#include "sokol_gfx.h"
-#include "sokol_glue.h"
-#include "sokol_log.h"
-#include "sokol_time.h"
-// #include "sokol_audio.h"
-#include "util/sokol_debugtext.h"
-#include "util/sokol_gl.h"
-#include "util/sokol_shape.h"
-""";
-
-
-sokol_and_imgui_macos_lib: ForeignLibrary : (
-    name = "sokol_imgui",
-    macro_defines = @slice("SOKOL_METAL", "SOKOL_IMPL", "SOKOL_NO_ENTRY", "CIMGUI_DEFINE_ENUMS_AND_STRUCTS") ast_alloc(),
-    include_paths = @slice("bindings/sokol", "bindings/cimgui") ast_alloc(),
-    macos_frameworks = @slice("Metal", "MetalKit", "Cocoa", "QuartzCore") ast_alloc(),
-    objective_c = true,
-    raw_c_source = (Some = SOKOL_AND_IMGUI_ALL_SOURCE),
-    allow_at_comptime = false,
-);
-
-SOKOL_AND_IMGUI_ALL_SOURCE :: """
-#include "sokol_app.h"
-#include "sokol_gfx.h"
-#include "sokol_glue.h"
-#include "sokol_log.h"
-#include "sokol_time.h"
-// #include "sokol_audio.h"
-#include "util/sokol_debugtext.h"
-#include "util/sokol_gl.h"
-#include "util/sokol_shape.h"
-#include "cimgui.h"
-#include "util/sokol_imgui.h"
-""";
-
 // TODO: be consistant about figuring out the cwd
 tracy_lib: ForeignLibrary : (
     name = "tracy",
@@ -176,23 +114,6 @@ tracy_lib: ForeignLibrary : (
     cpp = true,
 );
 
-// dont forget recursive clone git submodules
-dearimgui_lib: ForeignLibrary : (
-    name = "dearimgui",
-    include_paths = ("bindings/cimgui").single(ast_alloc()),
-    raw_c_source = (Some = """
-#include "imgui/imgui.cpp"
-#include "imgui/imgui_draw.cpp"
-#include "imgui/imgui_tables.cpp"
-#include "imgui/imgui_widgets.cpp"
-#include "imgui/imgui_demo.cpp"
-#define IMGUI_DEFINE_MATH_OPERATORS
-#include "cimgui.cpp"
-    """),
-    cpp = true,
-);
-
-::display_slice(Str);
 fn build_foreign_cached(lib: ForeignLibrary, env: Ty(Arch, Os), linking: LinkTime) Result(Str, void) = {
     #use("@/lib/sys/fs.fr");
     path := save_path_for_lib(env, linking, lib.name);
@@ -307,49 +228,20 @@ fn qbe_target_name(arch: Arch, os: Os) Str = {
         fn wasm32()  => panic("qbe does not support wasm");
     }
 }
- 
-ComptimeLibs :: @struct(
-    ctx: CompCtx, 
-    handles: import("@/lib/collections/map.fr")'HashMap(Symbol, BuiltLib),
-);
 
-// TODO: all these should get the allocator from the compiler 
-//       so they don't have to use ast_alloc#ct so drivers could be prebuilt as a normal program
-fn empty_libs(ctx: CompCtx) ComptimeLibs = {
-    (ctx = ctx, handles = init(general_allocator()))
-}
-
-BuiltLib :: @struct(
-    aot_object_file: ?Str,
-);
-
-fn add_lib(self: *ComptimeLibs, lib: ForeignLibrary) void = {
-    env := {self.ctx.vtable.comptime_arch}();  // TODO: pass in for cross compiling
+fn add_lib(ctx: CompCtx, lib: ForeignLibrary) Str = {
+    env := {ctx.vtable.comptime_arch}();  // TODO: pass in for cross compiling
     
     ::Result(Str, void);
     aot_path := lib.build_foreign_cached(env, .Static).unwrap();
     
-    name := self.ctx.intern_string(lib.name);
+    name := ctx.intern_string(lib.name);
     if lib.allow_at_comptime {
         jit_path := lib.build_foreign_cached(env, .Dynamic).unwrap(); 
         jit := import("@/lib/dynamic_lib.fr")'open(jit_path) 
             || @panic("failed to open '%' at '%' for comptime", lib.name, jit_path);
-        self.ctx.add_comptime_library(name, jit);
+        ctx.add_comptime_library(name, jit);
     };
     
-    built: BuiltLib = (aot_object_file = (Some = aot_path));
-    prev := self.handles&.insert(name, built);
-    @assert(prev.is_none(), "added lib % twice", lib.name);
-}
-
-fn get_aot_objects(self: *ComptimeLibs) List(Str) = {
-    out: List(Str) = list(self.handles.raw.len_including_tombstones, temp());
-    
-    each self.handles& { _, v | 
-        if v.aot_object_file { path | 
-            out&.push(path);
-        };
-    };
-    
-    out
+    aot_path
 }

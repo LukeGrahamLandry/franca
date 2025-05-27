@@ -338,6 +338,11 @@ It is considered disrespectful if the argument and return types have different m
 This should probably be removed. It just felt cute before i had an optimiser at all (to avoid a load/store through a pointer cast). 
 But now the sane option is just to write out the body and hope it disappears anyway. 
 
+### avoid_shim
+
+This is for functions where you have to lie about parameter types like objc_msgSend.  
+TODO: explain why
+
 ### align
 
 This applies to struct fields. The argument is an integer (number of bytes). 

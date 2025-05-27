@@ -77,15 +77,15 @@ fn do_it(vtable: *ImportVTable, cmd: *Command) void = {
 
     assert(cmd.action == .build || cmd.goal != .Dynamic, "use 'build' with -dynamiclib");
     assert(cmd.action == .build || cmd.goal != .Relocatable, "use `build` to make linkable object (-c)");
+    assert(cmd.action == .build || cmd.goal != .Cached, "use `build` to make cache file (-frc)");
     assert(cmd.action != .test, "i never run tests this way. do i really care? TODO");
     
     c := load_file(cmd.input_file, vtable, build_options);
     
     enable_tracy := get_environment_variable("FRANCA_TRACY").is_some();
-    libs := ComptimeLibs.zeroed();
+    libs := Str.list(temp());
     @if(enable_tracy) {
-        libs = c.empty_libs();  // TODO: get rid of this. it's from back when driver was involved instead of add_comptime_library
-        libs&.add_lib(tracy_lib);
+        libs&.push(c.add_lib(tracy_lib));
         cmd.goal = .Relocatable;
     };
     if cmd.goal == .JitOnly {
@@ -143,7 +143,7 @@ fn do_it(vtable: *ImportVTable, cmd: *Command) void = {
         start := timestamp();
         args := Str.list(temp());
         args&.push_all(@slice("-o", cmd.output_file, cmd.output_file));
-        args&.push_all(libs&.get_aot_objects().items());
+        args&.push_all(libs.items());
         success := run_cmd_blocking("g++", args.items()); 
         assert(success, "link failed");
         end := timestamp();
@@ -179,10 +179,7 @@ fn load_file(path: Str, vtable: *ImportVTable, build_options: *BuildOptions) Com
     src := "\n#include_std(\"lib/core.fr\");".clone(forever);
     src&.push_all(the_code.items());
     comp := vtable.new_with_src(src.items(), path, build_options);
-    c := vtable.with(comp);
-    
-    // TODO: libs
-    c
+    vtable.with(comp)
 }
 
 fn find_first_fr_file(args: []Str) Str = {
@@ -290,6 +287,9 @@ fn parse_cli_args() Command = {
                 // but also thier copy of clang won't accept llvm-ir text so i have to use my clang to make an object file and then thier clang to link it. 
                 // this kind of garbage is why i want to do everything myself... 
                 cfg.maintain_it_with_zig = true;
+            };
+            @case("-frc") => {
+                cfg.goal = .Cached;
             };
             @default => {
                 extra_args&.push(arg);

@@ -6,6 +6,27 @@
 - external: make it not a 100 line copy-paste to setup a driver that links an object file
 - llvm:     get all the ssa tests working
 
+## Caching
+
+- atomic write by renaming the file
+- crash backtrace with source location
+- keep caches for multiple targets at once?
+- need to be careful if start caching both main+driver from one source file
+- make it work for fetch_or_crash. like if you import a c thing, the hashes of 
+those c files should go in your .frc file. it's tempting to just use the hash of 
+the one zip file for the resource but i think being able to printf debug by just 
+editing your local copy of the c files is important. 
+- api for import() of a string that you want to involve in the cache file. 
+rn it just assumes it's generated from your input files so can be safely ignored. 
+- unrelated: fetch_or_crash use my sha256 instead of exec(shasum). will need to parse the hex back to bytes.
+- have examples/default_driver and graphics/easy do it for main(). 
+but then need to deal with including build options in the cache (like -unsafe, -wgpu, ENABLE_TRACY) 
+- do automatic caching for big comptime things (like import_c'include)
+- could do it for the output of import_c as well. i guess that's equivalent 
+to allowing smaller compilation units. like not making you recompile the backend 
+when you work on the frontend. 
+- test that .frc files repro and that you can pass them directly
+
 ## Unfinished Examples
 
 - epicycles: make it actually trace the correct path
@@ -101,7 +122,6 @@ through the ImportVTable explicitly. but that feels a bit too wishy washy to me?
 - `@debug_assert(macos.common().valid, "not valid");` compiles 
 and gives you junk (that's not 0 or 1) when `common()` uses `#unsafe_noop_cast`. 
 rn you're supposed to need a redundant `[]` in a call like that. 
-- aot_import_body probably shouldn't zero x0 just because it thinks the param is void
 - fix the infinite loop when a constant references itself
 - `@struct(a: A #use = (),);`
 - tests/todo/b.fr (might even be a parser bug? always a surprise when that's the problem)
@@ -213,6 +233,7 @@ that fails the wasm verifier
 
 ## cleanup 
 
+- backend: unify SymbolInfo.library with the old name$module i was using for wasm .ssa tests
 - ImportVTable: implement add_to_scope with add_expr_to_scope
 - make comptime.fr exporting stuff less painful 
 - sema needs to get simplified. 
@@ -377,6 +398,8 @@ usecase: examples/lox Obj header
 - give macros access to the requested type
 - fomalize init from literals? like implement `Expr::Tuple` -> `Array` in "userspace"?
 but that's really going towards crazy town (cough swift/c++ cough)
+- formalize something for running code at the end of compilation 
+(instead of using hacks like set_self_hash)
 
 ## demos 
 

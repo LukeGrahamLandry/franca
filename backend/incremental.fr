@@ -1,6 +1,6 @@
 Sha256 :: import("@/backend/macho/sha256.fr");
 
-MAGIC :: 0x0001_41434E415246;  // FRANCA__
+MAGIC :: 0x0002_41434E415246;  // FRANCA__
 
 Header :: @struct {
     meta: Meta #use;
@@ -17,7 +17,9 @@ Header :: @struct {
 
 Meta :: @struct {
     magic_v: u64 = MAGIC;
+    filelen: u32 = 0;  // patched by to_bytes()
     arch_os: u32;
+    // Qbe.no_symbol if this file cannot be executed
     entry_sym: u32;
     entry_dep: u32;
 };
@@ -298,6 +300,12 @@ fn to_bytes(self: *Writer, meta: Meta) [][]u8 = {
     X(header.rel&, self.rel&);
     X(header.str&, self.str&);
     X(header.lib&, self.lib&);
+    header.filelen = n.trunc();
+    
+    // Maybe limitting to 4GB is too small and I should make all the offsets be u64 instead. 
+    // Could probably produce a reasonable program that hit that by embedding a lot of data 
+    // (like 3d meshes maybe) but I already can't do arbitrary sizes because I don't resize 
+    // segments and the constants in ../lib.fr are already kinda low.  -- May 26, 2025
     @assert_lt(n, 0xFFFFFFFF, "overflow");
     
     bytes.items()
@@ -336,21 +344,22 @@ finish_module :: fn(m: *QbeModule) [][]u8 = {
     writer.to_bytes(meta)
 };
 
-fn load(header: *Header, m: *QbeModule, f: *Qbe.Fn, it: Ref(Sym)) void = {
-    f.default_init(m);
+// note: this doesn't call default_init
+fn load(header: *Header, f: *Qbe.Fn, it: Ref(Sym), syms: []u32) void = {
+    m := f.globals;
     sym := header.get(it).index(0);
-    f.lnk.id = m.intern(header.get(sym.name));
+    f.lnk.id = syms[it.off.zext()];
     fnc := sym.fnc&;
     
-    f.ncon += fnc.con.count.bitcast();
-    f.con&.grow(f.ncon.zext());
+    f.con = new(fnc.con.count.zext() + fixed_const_count);
+    f.ncon = 0;
+    push_fixed_consts(f);
+    f.ncon = fixed_const_count.trunc() + fnc.con.count.bitcast();
     enumerate header.get(fnc.con) { i, src |
         dest := f.con[i + fixed_const_count]&;
         dest[] = src[];
         if src.sym != Qbe.no_symbol {
-            it: Ref(Sym) = (off = src.sym, count = 1);
-            it := header.get(it);
-            dest.sym = m.intern(header.get(it[0].name));
+            dest.sym = syms[src.sym.zext()];
         }
     };
     
@@ -358,6 +367,7 @@ fn load(header: *Header, m: *QbeModule, f: *Qbe.Fn, it: Ref(Sym)) void = {
     enumerate header.get(fnc.blk) { i, b |
         blks[i].id = i.trunc();
         blks[i].nins = b.ins.count;
+        // TODO: it's sad that this can't just use the slice because of QList
         blks[i].ins = new_copy(header.get(b.ins));
         blks[i].jmp = b.jmp;
         if b.s1 != Qbe.no_symbol {
@@ -387,14 +397,13 @@ fn load(header: *Header, m: *QbeModule, f: *Qbe.Fn, it: Ref(Sym)) void = {
     f.dynalloc = flags.get(.dynalloc) != 0;
 }
 
-fn load(header: *Header, m: *QbeModule, it: Ref(Sym)) Dat2 = {
-    it := header.get(it).index(0);
+fn load(header: *Header, m: *QbeModule, i: Ref(Sym), syms: []u32) Dat2 = {
+    it := header.get(i).index(0);
     relocs := temp().alloc(Dat2.Reloc, it.dat.rel.count.zext());
     relocs.copy_from(header.get(it.dat.rel));
     each relocs { it |
         if it.id != Qbe.no_symbol {
-            s := header.get(@as(Incremental'Ref(Incremental.Sym)) (off = it.id, count = 1));
-            it.id = m.intern(header.get(s[0].name));
+            it.id = syms[it.id.zext()];
         }
     };
     
@@ -406,8 +415,8 @@ fn load(header: *Header, m: *QbeModule, it: Ref(Sym)) Dat2 = {
         relocations = relocs,
         align = 1.shift_left(@as(i64) it.align_log2.zext()),
         seg = @as(SegmentType) @as(i64) zext(@as(u8) it.segment) - 1,
-        id = m.intern(header.get(it.name)),
-        export = true, // TODO
+        id = syms[i.off.zext()],
+        export = false, // TODO
     )
 }
 
@@ -419,36 +428,59 @@ pack_current_target :: fn() u32 = {
 pack_target :: fn(arch: Arch, os: Os) u32 = 
     bit_or(@as(i64) os, shift_left(@as(i64) arch, 8)).trunc();
 
+fn preintern_syms(header: *Header, m: *QbeModule) []u32 = {
+    count: i64 = header.sym.count.zext();
+    syms := temp().alloc(u32, count);
+    range(0, count) { i |
+        it: *Sym = header.get(i.trunc());
+        syms[i] = m.intern(header.get(it.name));
+    };
+    syms
+}
+
 fn compile_all_symbols(header: *Header, m: *QbeModule) void = {
-    range(0, header.sym.count.zext()) { i |
-        i: Incremental'Ref(Incremental.Sym) = (off = i.trunc(), count = 1);
-        it := header.get(i).index(0);
+    // TODO: maybe entry_sym should be export=true
+    f := @uninitialized Qbe.Fn;
+    default_init(f&, m);
+    
+    syms := preintern_syms(header, m);
+    
+    range(0, syms.len) { i |
+        it: *Sym = header.get(i.trunc());
         
         mark := mark_temporary_storage();
         ::enum(@type it.segment);
         @match(it.segment) {
             fn Code() => {
-                f := @uninitialized Qbe.Fn;
-                load(header, m, f&, i);
-                f.lnk.export = true; // TODO: mark referenced? maybe it doesn't matter because inlining is over
+                i: Ref(Incremental.Sym) = (off = i.trunc(), count = 1);
+                load(header, f&, i, syms);
+                zone := @if(ENABLE_ENABLE_TRACY, zone_begin(.Backend), ());
                 emit_fn(f&);
+                @if(ENABLE_ENABLE_TRACY) zone_end(zone);
             }
             fn MachineCode() => {
-                name := m.intern(header.get(it.name));
-                m.add_code_bytes(name, header.get(it.dat.bytes));
+                m.add_code_bytes(syms[i], header.get(it.dat.bytes));
             }
             fn Import() => {
-                name := m.intern(header.get(it.name));
                 lib := header.get(it.imp.lib);
                 lib := header.get(lib[0].name);
-                m.set_library(name, lib);
+                m.set_library(syms[i], lib);
             }
             fn Invalid() => ();
             @default => {
-                dat := load(header, m, i);
+                i: Ref(Incremental.Sym) = (off = i.trunc(), count = 1);
+                dat := load(header, m, i, syms);
                 m.emit_data(dat);
             };
         };
         reset_temporary_storage(mark);
     };
+    
+    // TODO: it would kinda feel better to keep track of the imports
+    //       instead of making the caller loop over all the symbols again 
+    //       (probably by calling fill_from_libc), but that gets messed up by m.symbol_memmove, 
+    //       which i guess doesn't get set_library called on it (should be fixed anyway). 
+    //       + need to do a more complicated thing to allow non-libc libraries anyway. 
 }
+
+ENABLE_ENABLE_TRACY :: get_environment_variable("FRANCA_TRACY").is_some();
