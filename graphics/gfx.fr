@@ -20,7 +20,7 @@ SOKOL_DEBUG :: true;  // TODO: use .DebugAssertions
 
 SlotHeader :: @struct {
     id: u32;
-    state: SgResourceState;
+    state: ResourceState;
 };
 
 // resource tracking (for keeping track of gpu-written storage resources
@@ -40,7 +40,7 @@ _SG_DEFAULT_UB_SIZE :: 4 * 1024 * 1024;
 _SG_DEFAULT_MAX_DISPATCH_CALLS_PER_PASS :: 1024;
 _SG_DEFAULT_MAX_COMMIT_LISTENERS :: 1024;
 _SG_DEFAULT_WGPU_BINDGROUP_CACHE_SIZE :: 1024;
-SG_INVALID_ID :: 0;
+INVALID_ID :: 0;
 SG_NUM_INFLIGHT_FRAMES :: 2;
 SG_MAX_COLOR_ATTACHMENTS :: 4;
 SG_MAX_UNIFORMBLOCK_MEMBERS :: 16;
@@ -65,11 +65,11 @@ BufferCommon :: @struct {
     append_frame_index: u32;
     num_slots: i32;
     active_slot: i32;
-    type: SgBufferType;
-    usage: SgUsage;
+    type: BufferType;
+    usage: Usage;
 };
 
-fn common_init(cmn: *BufferCommon, desc: *SgBufferDesc) void = {
+fn common_init(cmn: *BufferCommon, desc: *BufferDesc) void = {
     cmn.size = intcast desc.size;
     cmn.append_pos = 0;
     cmn.append_overflow = false;
@@ -85,20 +85,20 @@ ImageCommon :: @struct {
     upd_frame_index: u32;
     num_slots: i32;
     active_slot: i32;
-    type: SgImageType;
+    type: ImageType;
     render_target: bool;
     width: i32;
     height: i32;
     num_slices: i32;
     num_mipmaps: i32;
-    usage: SgUsage;
-    pixel_format: SgPixelFormat;
+    usage: Usage;
+    pixel_format: PixelFormat;
     sample_count: i32;
 };
 
 fn common_init(cmn: *ImageCommon, desc: *Image.Desc) void = {
     cmn.upd_frame_index = 0;
-    cmn.num_slots = @if(desc.usage == .IMMUTABLE, 1, Sg.SG_NUM_INFLIGHT_FRAMES);
+    cmn.num_slots = @if(desc.usage == .IMMUTABLE, 1, SG_NUM_INFLIGHT_FRAMES);
     cmn.active_slot = 0;
     cmn.type = desc.type;
     cmn.render_target = desc.render_target;
@@ -122,30 +122,30 @@ _sg_shader_attr_t :: @struct {
 };
 
 _sg_shader_uniform_block_t ::  @struct {
-    stage: SgShaderStage;
+    stage: ShaderStage;
     size: u32;
 };
 
 _sg_shader_storage_buffer_t :: @struct {
-    stage: SgShaderStage;
+    stage: ShaderStage;
     readonly: bool;
 };
 
 _sg_shader_image_t :: @struct {
-    stage: SgShaderStage;
-    image_type: SgImageType;
-    sample_type: SgImageSampleType;
+    stage: ShaderStage;
+    image_type: ImageType;
+    sample_type: ImageSampleType;
     multisampled: bool;
 };
 
 _sg_shader_sampler_t :: @struct {
-    stage: SgShaderStage;
-    sampler_type: SgSamplerType;
+    stage: ShaderStage;
+    sampler_type: SamplerType;
 };
 
 // combined image sampler mappings, only needed on GL
 _sg_shader_image_sampler_t :: @struct {
-    stage: SgShaderStage;
+    stage: ShaderStage;
     image_slot: u8;
     sampler_slot: u8;
 };
@@ -228,7 +228,7 @@ PipelineCommon :: @struct {
     vertex_buffer_layout_active: Array(bool, SG_MAX_VERTEXBUFFER_BINDSLOTS);
     use_instanced_draw: bool;
     required_bindings_and_uniforms: u32;
-    common: SgPipelineShared #use;
+    common: PipelineShared #use;
     shader_t: *Shader.T;
 };
 
@@ -258,9 +258,9 @@ AttachmentsCommon :: @struct {
     width: i32;
     height: i32;
     num_colors: i32;
-    colors: Array(SgAttachmentDesc, SG_MAX_COLOR_ATTACHMENTS);
-    resolves: Array(SgAttachmentDesc, SG_MAX_COLOR_ATTACHMENTS);
-    depth_stencil: SgAttachmentDesc;
+    colors: Array(AttachmentDesc, SG_MAX_COLOR_ATTACHMENTS);
+    resolves: Array(AttachmentDesc, SG_MAX_COLOR_ATTACHMENTS);
+    depth_stencil: AttachmentDesc;
 };
 
 fn common_init(cmn: *Attachments.Common, desc: *Attachments.Desc, width: i32, height: i32) void = {
@@ -268,20 +268,20 @@ fn common_init(cmn: *Attachments.Common, desc: *Attachments.Desc, width: i32, he
     cmn.width = width;
     cmn.height = height;
     range(0, SG_MAX_COLOR_ATTACHMENTS) { i |
-        if (desc.colors[i].image.id != SG_INVALID_ID) {
+        if (desc.colors[i].image.id != Sg.INVALID_ID) {
             cmn.num_colors += 1;
             cmn.colors&[i] = desc.colors&[i];
             cmn.resolves&[i] = desc.resolves&[i];
         }
     }
-    if (desc.depth_stencil.image.id != SG_INVALID_ID) {
+    if (desc.depth_stencil.image.id != Sg.INVALID_ID) {
         cmn.depth_stencil = desc.depth_stencil;
     }
 }
 
 _SG_INVALID_SLOT_INDEX :: 0;  // NOT a (random number chosen by fair die roll)
 
-_sg_commit_listeners_t :: RawList(SgCommitListener);
+_sg_commit_listeners_t :: RawList(CommitListener);
 
 ResolvedBindings :: @struct {
     pip: *Pipeline.T;
@@ -298,19 +298,19 @@ Self :: @rec @struct {
     mtl: @if(SOKOL_BACKEND == .METAL_MACOS, Metal.Impl, void);
     wgpu: @if(SOKOL_BACKEND == .WGPU, Webgpu.Impl, void);
     valid: bool;
-    desc: SgDesc;    // original desc with default values patched in
+    desc: Desc;    // original desc with default values patched in
     frame_index: u32;
     cur_pass: @struct {
         valid: bool;
         in_pass: bool;
         is_compute: bool;
-        atts_id: Attachments;     // SG_INVALID_ID in a swapchain pass
+        atts_id: Attachments;     // Sg.INVALID_ID in a swapchain pass
         atts: *Attachments.T;    // 0 in a swapchain pass
         width: i32;
         height: i32;
         swapchain: @struct {
-            color_fmt: SgPixelFormat;
-            depth_fmt: SgPixelFormat;
+            color_fmt: PixelFormat;
+            depth_fmt: PixelFormat;
             sample_count: i32;
         };
     };
@@ -323,10 +323,9 @@ Self :: @rec @struct {
         readwrite_sbufs: _sg_tracker_t;  // tracks read/write storage buffers used in compute pass
     };
     pools: EnumMap(PoolType, DynPool);
-    backend: SgBackend;
-    features: SgFeatures;
-    limits: SgLimits;
-    formats: EnumMap(SgPixelFormat, _sg_pixelformat_info_t);
+    features: Features;
+    limits: Limits;
+    formats: EnumMap(PixelFormat, _sg_pixelformat_info_t);
     stats_enabled: bool;
     stats: FrameStat;
     prev_stats: FrameStat;
@@ -407,7 +406,7 @@ fn clipi(x: i32, y: i32, w: i32, h: i32, clip_width: i32, clip_height: i32) _sg_
     (x = x, y = y, w = max(w, 1), h = max(h, 1))
 }
 
-fn vertexformat_bytesize(it: SgVertexFormat) i32 = @map_enum(it) (
+fn vertexformat_bytesize(it: VertexFormat) i32 = @map_enum(it) (
     FLOAT  = 4, FLOAT2  = 8, FLOAT3  = 12, FLOAT4  = 16, 
     INT    = 4, INT2    = 8, INT3    = 12, INT4    = 16, 
     UINT   = 4, UINT2   = 8, UINT3   = 12, UINT4   = 16,
@@ -417,7 +416,7 @@ fn vertexformat_bytesize(it: SgVertexFormat) i32 = @map_enum(it) (
     UINT10_N2 = 4, HALF2 = 4, HALF4 = 8, INVALID = 0,
 );
 
-fn vertexformat_basetype(fmt: SgVertexFormat) ShaderAttrBaseType = {
+fn vertexformat_basetype(fmt: VertexFormat) ShaderAttrBaseType = {
     if @is(fmt, .FLOAT, .FLOAT2, .FLOAT3, .FLOAT4, .HALF2, .HALF4, .BYTE4N, .UBYTE4N, .SHORT2N, .USHORT2N, .USHORT4N, .UINT10_N2) {
         return(.Float);
     };
@@ -446,7 +445,7 @@ fn uniform_size(type: sg_uniform_type, array_count: u32, ub_layout: sg_uniform_l
     16 * array_count
 }
 
-fn is_compressed(fmt: SgPixelFormat) bool = @is(fmt, 
+fn is_compressed(fmt: PixelFormat) bool = @is(fmt, 
     .BC1_RGBA, .BC2_RGBA, .BC3_RGBA, .BC3_SRGBA, .BC4_R, .BC4_RSN, 
     .BC5_RG, .BC5_RGSN, .BC6H_RGBF, .BC6H_RGBUF, .BC7_RGBA, .BC7_SRGBA, 
     .ETC2_RGB8, .ETC2_SRGB8, .ETC2_RGB8A1, .ETC2_RGBA8, .ETC2_SRGB8A8, 
@@ -459,17 +458,17 @@ fn is_valid_rendertarget_color_format(fmt: sg_pixel_format) bool = {
     return sg.formats[fmt_index].render && !sg.formats[fmt_index].depth;
 }
 
-fn is_valid_rendertarget_depth_format(sg: *Self, fmt: SgPixelFormat) bool = {
+fn is_valid_rendertarget_depth_format(sg: *Self, fmt: PixelFormat) bool = {
     sg.formats&[fmt]&[.render] && sg.formats&[fmt]&[.depth]
 }
 
-fn is_depth_or_depth_stencil_format(fmt: SgPixelFormat) bool = 
+fn is_depth_or_depth_stencil_format(fmt: PixelFormat) bool = 
     @is(fmt, .DEPTH, .DEPTH_STENCIL);
 
-fn is_depth_stencil_format(fmt: SgPixelFormat) bool = 
+fn is_depth_stencil_format(fmt: PixelFormat) bool = 
     fmt == .DEPTH_STENCIL;
 
-fn pixelformat_bytesize(it: SgPixelFormat) i32 = @if_else {
+fn pixelformat_bytesize(it: PixelFormat) i32 = @if_else {
     @if(@is(it, .R8, .R8SN, .R8UI, .R8SI)) => 1;
     @if(@is(it, .R16, .R16SN, .R16UI, .R16SI, .R16F, .RG8, .RG8SN, .RG8UI, .RG8SI)) => 2;
     @if(@is(it, .R32UI, .R32SI, .R32F, .RG16, .RG16SN, .RG16UI, .RG16SI, .RG16F, .RGBA8)) => 4;
@@ -491,7 +490,7 @@ fn _sg_multiple_u64(val: i64, of: i64) bool =
 
     see ComputePitch in https://github.com/microsoft/DirectXTex/blob/master/DirectXTex/DirectXTexUtil.cpp
 */
-fn row_pitch(it: SgPixelFormat, width: i32, row_align_bytes: i32) i32 = {
+fn row_pitch(it: PixelFormat, width: i32, row_align_bytes: i32) i32 = {
     @debug_assert(width > 0 && (row_align_bytes > 0) && ispow2(row_align_bytes));
     pitch := @if_else {
         @if(@is(it, 
@@ -509,7 +508,7 @@ fn row_pitch(it: SgPixelFormat, width: i32, row_align_bytes: i32) i32 = {
 }
 
 // compute the number of rows in a surface depending on pixel format
-fn num_rows(fmt: SgPixelFormat, height: i32) i32 = {
+fn num_rows(fmt: PixelFormat, height: i32) i32 = {
     adjust := @is(fmt, 
         .BC1_RGBA, .BC4_R, .BC4_RSN, .ETC2_RGB8, .ETC2_SRGB8, .ETC2_RGB8A1, .ETC2_RGBA8, .ETC2_SRGB8A8,
         .EAC_R11, .EAC_R11SN, .EAC_RG11, .EAC_RG11SN, .BC2_RGBA, .BC3_RGBA, .BC3_SRGBA, .BC5_RG, 
@@ -528,13 +527,13 @@ ispow2 :: fn(val: i32) bool = val.bit_and(val-1) == 0;
 /* return pitch of a 2D subimage / texture slice
     see ComputePitch in https://github.com/microsoft/DirectXTex/blob/master/DirectXTex/DirectXTexUtil.cpp
 */
-fn surface_pitch(fmt: SgPixelFormat, width: i32, height: i32, row_align_bytes: i32) i32 = {
+fn surface_pitch(fmt: PixelFormat, width: i32, height: i32, row_align_bytes: i32) i32 = {
     @debug_assert((width > 0) && (height > 0) && (row_align_bytes > 0) && ispow2(row_align_bytes));
     num_rows := num_rows(fmt, height);
     num_rows * row_pitch(fmt, width, row_align_bytes)
 }
 
-fn _sg_pass_action_defaults(action: *SgPassAction) SgPassAction = {
+fn _sg_pass_action_defaults(action: *PassAction) PassAction = {
     res := action[];
     range(0, SG_MAX_COLOR_ATTACHMENTS) { i |
         it := res.colors&[i]&;
@@ -610,7 +609,7 @@ fn free_index(pool: *DynPool, slot_index: i32) void = {
     @debug_assert(pool.queue_top <= (pool.size-1));
 }
 
-fn setup_pools(sg: *Self, desc: *SgDesc) void = {
+fn setup_pools(sg: *Self, desc: *Desc) void = {
     // note: the pools here will have an additional item, since slot 0 is reserved
     X :: fn($R, count) => init_pool(sg.pools&.index(R.Tag), desc.allocator, count.intcast(), size_of(R.T));
     X(Buffer, desc.buffer_pool_size);
@@ -641,7 +640,7 @@ fn slot_alloc(pool: *DynPool, slot_index: i32) u32 = {
     */
     slot := pool.get_slot(slot_index);
     @debug_assert((slot_index > _SG_INVALID_SLOT_INDEX) && (slot_index < pool.size), "bad pool.size %", pool.size);
-    @debug_assert_eq(slot.id, SG_INVALID_ID, "bad id");
+    @debug_assert_eq(slot.id, Sg.INVALID_ID, "bad id");
     @debug_assert_eq(slot.state, .INITIAL);
     pool.gen_ctrs[intcast slot_index] += 1;
     ctr := pool.gen_ctrs[intcast slot_index];
@@ -726,7 +725,7 @@ fn validate(sg: *Self, desc: *Buffer.Desc) bool = @validate(sg) {
     }
 };
 
-fn validate(data: *SgImageData, fmt: SgPixelFormat, width: i32, height: i32, num_faces: i32, num_mips: i32, num_slices: i32) void = {
+fn validate(data: *ImageData, fmt: PixelFormat, width: i32, height: i32, num_faces: i32, num_mips: i32, num_slices: i32) void = {
     range(0, intcast num_faces) { face_index |
         range(0, intcast num_mips) { mip_index |
             @V( data.subimage&[face_index]&[mip_index].has_data(), VALIDATE_IMAGEDATA_NODATA);
@@ -787,7 +786,7 @@ fn validate(sg: *Self, desc: *Image.Desc) bool = @validate(sg) {
                 desc.num_slices);
         } else {
             // image desc must not have data
-            range(0, SgCubeFace.enum_count()) { face_index |
+            range(0, CubeFace.enum_count()) { face_index |
                 range(0, SG_MAX_MIPMAPS) { mip_index |
                     no_data := desc.data.subimage&[face_index]&[mip_index].ptr.is_null();
                     no_size := desc.data.subimage&[face_index]&[mip_index].len == 0;
@@ -819,7 +818,7 @@ _sg_u128_t :: @struct {
 };
 
 // TODO
-fn _sg_validate_set_slot_bit(bits: _sg_u128_t, stage: SgShaderStage, slot: u8) _sg_u128_t = {
+fn _sg_validate_set_slot_bit(bits: _sg_u128_t, stage: ShaderStage, slot: u8) _sg_u128_t = {
     switch (stage) {
         case .NONE:
             @debug_assert(slot < 128);
@@ -849,7 +848,7 @@ fn _sg_validate_set_slot_bit(bits: _sg_u128_t, stage: SgShaderStage, slot: u8) _
 }
 
 // TODO
-fn _sg_validate_slot_bits(bits: _sg_u128_t, stage: SgShaderStage, slot: u8) bool = {
+fn _sg_validate_slot_bits(bits: _sg_u128_t, stage: ShaderStage, slot: u8) bool = {
     _sg_u128_t mask = zeroed(_sg_u128_t);
     switch (stage) {
         case .NONE:
@@ -895,13 +894,13 @@ V :: fn(a: FatExpr) FatExpr #macro = @{
     };
 };
 
-fn has_source(self: SgShaderFunction) bool = 
+fn has_source(self: ShaderFunction) bool = 
     !self.source.is_null();
 
-fn has_bytecode(self: SgShaderFunction) bool = 
+fn has_bytecode(self: ShaderFunction) bool = 
     !self.bytecode.ptr.is_null();
 
-fn is_set(self: SgShaderFunction) bool = 
+fn is_set(self: ShaderFunction) bool = 
     self.has_source() || self.has_bytecode();
 
 // TODO: much of this would disappear by using @tagged
@@ -1110,7 +1109,7 @@ fn validate(sg: *Self, desc: *Attachments.Desc) bool = @validate(sg) {
     range(0, SG_MAX_COLOR_ATTACHMENTS) { att_index |
         continue :: local_return;
         att := desc.colors&[att_index];
-        if (att.image.id == SG_INVALID_ID) {
+        if (att.image.id == Sg.INVALID_ID) {
             atts_cont = false;
             continue();
         }
@@ -1141,7 +1140,7 @@ fn validate(sg: *Self, desc: *Attachments.Desc) bool = @validate(sg) {
 
             // check resolve attachment
             res_att := desc.resolves&[att_index]&;
-            if (res_att.image.id != SG_INVALID_ID) {
+            if (res_att.image.id != Sg.INVALID_ID) {
                 // associated color attachment must be MSAA
                 @V(img.cmn.sample_count > 1, VALIDATE_ATTACHMENTSDESC_RESOLVE_COLOR_IMAGE_MSAA);
                 res_img := sg.lookup(res_att.image);
@@ -1165,7 +1164,7 @@ fn validate(sg: *Self, desc: *Attachments.Desc) bool = @validate(sg) {
         }
     }
     bool has_depth_stencil_att = false;
-    if (desc.depth_stencil.image.id != SG_INVALID_ID) {
+    if (desc.depth_stencil.image.id != Sg.INVALID_ID) {
         att := desc.depth_stencil&;
         img := sg.lookup(att.image);
         @V(img, VALIDATE_ATTACHMENTSDESC_DEPTH_IMAGE);
@@ -1190,16 +1189,16 @@ fn validate(sg: *Self, desc: *Attachments.Desc) bool = @validate(sg) {
     @V(has_color_atts || has_depth_stencil_att, VALIDATE_ATTACHMENTSDESC_NO_ATTACHMENTS);
 };
 
-fn validate_begin_pass(sg: *Self, pass: *SgPass) bool = @validate(sg) {
+fn validate_begin_pass(sg: *Self, pass: *Pass) bool = @validate(sg) {
     is_compute_pass := pass.compute;
-    is_swapchain_pass := !is_compute_pass && (pass.attachments.id == SG_INVALID_ID);
+    is_swapchain_pass := !is_compute_pass && (pass.attachments.id == Sg.INVALID_ID);
     is_offscreen_pass := !(is_compute_pass || is_swapchain_pass);
     @V(pass._start_canary == 0, VALIDATE_BEGINPASS_CANARY);
     @V(pass._end_canary == 0, VALIDATE_BEGINPASS_CANARY);
     @if_else {
     @if(is_compute_pass) => {
         // this is a compute pass
-        @V(pass.attachments.id == SG_INVALID_ID, VALIDATE_BEGINPASS_EXPECT_NO_ATTACHMENTS);
+        @V(pass.attachments.id == Sg.INVALID_ID, VALIDATE_BEGINPASS_EXPECT_NO_ATTACHMENTS);
     };
     @if(is_swapchain_pass) => {
         @V(pass.swapchain.width > 0, VALIDATE_BEGINPASS_SWAPCHAIN_EXPECT_WIDTH);
@@ -1274,7 +1273,7 @@ fn validate_apply_scissor_rect(sg: *Self, x: i32, y: i32, width: i32, height: i3
 
 fn validate_apply_pipeline(sg: *Self, pip_id: Pipeline) bool = @validate(sg) {
     // the pipeline object must be alive and valid
-    @V(pip_id.id != SG_INVALID_ID, VALIDATE_APIP_PIPELINE_VALID_ID);
+    @V(pip_id.id != Sg.INVALID_ID, VALIDATE_APIP_PIPELINE_VALID_ID);
     pip := sg.lookup(pip_id) || {
         @V(false, VALIDATE_APIP_PIPELINE_EXISTS);
         return(_sg_validate_end(sg))
@@ -1289,7 +1288,7 @@ fn validate_apply_pipeline(sg: *Self, pip_id: Pipeline) bool = @validate(sg) {
     } else {
         @V(!sg.cur_pass.is_compute, VALIDATE_APIP_RENDERPASS_EXPECTED);
         // check that pipeline attributes match current pass attributes
-        if (sg.cur_pass.atts_id.id != SG_INVALID_ID) {
+        if (sg.cur_pass.atts_id.id != Sg.INVALID_ID) {
             // an offscreen pass
             atts := sg.cur_pass.atts;
             @V(atts.slot.id == sg.cur_pass.atts_id.id, VALIDATE_APIP_CURPASS_ATTACHMENTS_EXISTS);
@@ -1316,12 +1315,12 @@ fn validate_apply_pipeline(sg: *Self, pip_id: Pipeline) bool = @validate(sg) {
     }
 }
 
-fn validate_apply_bindings(sg: *Self, bindings: *SgBindings) bool = @validate(sg) {
+fn validate_apply_bindings(sg: *Self, bindings: *Bindings) bool = @validate(sg) {
     // must be called in a pass
     @V(sg.cur_pass.in_pass, VALIDATE_ABND_PASS_EXPECTED);
 
     // bindings must not be empty
-    has_any_bindings := bindings.index_buffer.id != SG_INVALID_ID
+    has_any_bindings := bindings.index_buffer.id != Sg.INVALID_ID
         || !bindings.vertex_buffers&.items().interpret_as_bytes().is_all_zeroes()
         || !bindings.images&.items().interpret_as_bytes().is_all_zeroes()
         || !bindings.samplers&.items().interpret_as_bytes().is_all_zeroes()
@@ -1330,7 +1329,7 @@ fn validate_apply_bindings(sg: *Self, bindings: *SgBindings) bool = @validate(sg
     @V(has_any_bindings, VALIDATE_ABND_EMPTY_BINDINGS);
 
     // a pipeline object must have been applied
-    @V(sg.cur_pipeline.id != SG_INVALID_ID, VALIDATE_ABND_PIPELINE);
+    @V(sg.cur_pipeline.id != Sg.INVALID_ID, VALIDATE_ABND_PIPELINE);
     pip := sg.lookup(sg.cur_pipeline) || {
         @V(false, VALIDATE_ABND_PIPELINE_EXISTS);
         return(_sg_validate_end(sg))
@@ -1346,7 +1345,7 @@ fn validate_apply_bindings(sg: *Self, bindings: *SgBindings) bool = @validate(sg
         range(0, SG_MAX_VERTEXBUFFER_BINDSLOTS) { i |
             if (pip.cmn.vertex_buffer_layout_active&[i]) {
                 v := bindings.vertex_buffers&[i];
-                @V(v.id != SG_INVALID_ID, VALIDATE_ABND_EXPECTED_VB);
+                @V(v.id != Sg.INVALID_ID, VALIDATE_ABND_EXPECTED_VB);
                 // buffers in vertex-buffer-slots must be of type SG_BUFFERTYPE_VERTEXBUFFER
                 if sg.lookup(bindings.vertex_buffers&[i]) { buf |
                     if buf.slot.state == .VALID {
@@ -1362,17 +1361,17 @@ fn validate_apply_bindings(sg: *Self, bindings: *SgBindings) bool = @validate(sg
     }
 
     if (sg.cur_pass.is_compute) {
-        @V(bindings.index_buffer.id == SG_INVALID_ID, VALIDATE_ABND_COMPUTE_EXPECTED_NO_IB);
+        @V(bindings.index_buffer.id == Sg.INVALID_ID, VALIDATE_ABND_COMPUTE_EXPECTED_NO_IB);
     } else {
         // index buffer expected or not, and index buffer still exists
         if (pip.cmn.index_type == .NONE) {
             // pipeline defines non-indexed rendering, but index buffer provided
-            @V(bindings.index_buffer.id == SG_INVALID_ID, VALIDATE_ABND_IB);
+            @V(bindings.index_buffer.id == Sg.INVALID_ID, VALIDATE_ABND_IB);
         } else {
             // pipeline defines indexed rendering, but no index buffer provided
-            @V(bindings.index_buffer.id != SG_INVALID_ID, VALIDATE_ABND_NO_IB);
+            @V(bindings.index_buffer.id != Sg.INVALID_ID, VALIDATE_ABND_NO_IB);
         }
-        if (bindings.index_buffer.id != SG_INVALID_ID) {
+        if (bindings.index_buffer.id != Sg.INVALID_ID) {
             // buffer in index-buffer-slot must be of type SG_BUFFERTYPE_INDEXBUFFER
             if sg.lookup(bindings.index_buffer) { buf |
                 if buf.slot.state == .VALID {
@@ -1404,7 +1403,7 @@ fn validate_apply_bindings(sg: *Self, bindings: *SgBindings) bool = @validate(sg
                 @V(img.cmn.sample_count > 1, VALIDATE_ABND_EXPECTED_MULTISAMPLED_IMAGE);
             }
             info := sg.formats&[img.cmn.pixel_format]&;
-            ::enum(SgImageSampleType);
+            ::enum(ImageSampleType);
             @match(shd.cmn.images&[i].sample_type) {
                 fn FLOAT() => @V(info[.filter], VALIDATE_ABND_EXPECTED_FILTERABLE_IMAGE);
                 fn DEPTH() => @V(info[.depth], VALIDATE_ABND_EXPECTED_DEPTH_IMAGE);
@@ -1422,9 +1421,9 @@ fn validate_apply_bindings(sg: *Self, bindings: *SgBindings) bool = @validate(sg
                 @V(false, VALIDATE_ABND_SMP_EXISTS);
                 continue()
             };
-            ::enum(SgSamplerType);
-            ::enum(SgCompareFunc);
-            ::enum(SgFilter);
+            ::enum(SamplerType);
+            ::enum(CompareFunc);
+            ::enum(Filter);
             if (shd.cmn.samplers&[i].sampler_type == .COMPARISON) {
                 @V(smp.cmn.compare != .NEVER, VALIDATE_ABND_UNEXPECTED_SAMPLER_COMPARE_NEVER);
             } else {
@@ -1449,7 +1448,7 @@ fn validate_apply_bindings(sg: *Self, bindings: *SgBindings) bool = @validate(sg
             @V(sbuf.cmn.type == .STORAGEBUFFER, VALIDATE_ABND_STORAGEBUFFER_BINDING_BUFFERTYPE);
             // read/write bindings are only allowed for immutable buffers
             if (!shd.cmn.storage_buffers&[i].readonly) {
-                ::enum(SgUsage);
+                ::enum(Usage);
                 @V(sbuf.cmn.usage == .IMMUTABLE, VALIDATE_ABND_STORAGEBUFFER_READWRITE_IMMUTABLE);
             }
         }
@@ -1459,7 +1458,7 @@ fn validate_apply_bindings(sg: *Self, bindings: *SgBindings) bool = @validate(sg
 fn validate_apply_uniforms(sg: *Self, ub_slot: i32, data: []u8) bool = @validate(sg) {
     @debug_assert((ub_slot >= 0) && (ub_slot < SG_MAX_UNIFORMBLOCK_BINDSLOTS));
     @V(sg.cur_pass.in_pass, VALIDATE_AU_PASS_EXPECTED);
-    @V(sg.cur_pipeline.id != SG_INVALID_ID, VALIDATE_AU_NO_PIPELINE);
+    @V(sg.cur_pipeline.id != Sg.INVALID_ID, VALIDATE_AU_NO_PIPELINE);
     pip := sg.lookup(sg.cur_pipeline).expect("cur_pipeline");
     @debug_assert(pip.slot.id == sg.cur_pipeline.id);
     shd := pip.cmn.shader_t;
@@ -1710,12 +1709,12 @@ Webgpu :: import("@/graphics/web/gfx.fr");
     its pool slot has been reused for a new object)
 */
 
-Buffer :: Resource(.Buffer, SgBufferDesc, BufferCommon, Backend.Buffer);  // vertex- and index-buffers
-Image :: Resource(.Image, SgImageDesc, ImageCommon, Backend.Image);  // images used as textures and render-pass attachments
-Sampler :: Resource(.Sampler, SgSamplerDesc, SamplerCommon, Backend.Sampler);  // sampler objects describing how a texture is sampled in a shader
-Shader :: Resource(.Shader, SgShaderDesc, ShaderCommon, Backend.Shader);  // vertex- and fragment-shaders and shader interface information
-Pipeline :: Resource(.Pipeline, SgPipelineDesc, PipelineCommon, Backend.Pipeline);  // associated shader and vertex-layouts, and render states
-Attachments :: Resource(.Attachments, SgAttachmentsDesc, AttachmentsCommon, Backend.Attachments);  // a baked collection of render pass attachment images
+Buffer :: Resource(.Buffer, BufferDesc, BufferCommon, Backend.Buffer);  // vertex- and index-buffers
+Image :: Resource(.Image, ImageDesc, ImageCommon, Backend.Image);  // images used as textures and render-pass attachments
+Sampler :: Resource(.Sampler, SamplerDesc, SamplerCommon, Backend.Sampler);  // sampler objects describing how a texture is sampled in a shader
+Shader :: Resource(.Shader, ShaderDesc, ShaderCommon, Backend.Shader);  // vertex- and fragment-shaders and shader interface information
+Pipeline :: Resource(.Pipeline, PipelineDesc, PipelineCommon, Backend.Pipeline);  // associated shader and vertex-layouts, and render states
+Attachments :: Resource(.Attachments, AttachmentsDesc, AttachmentsCommon, Backend.Attachments);  // a baked collection of render pass attachment images
 
 PoolType :: { X :: @enum(u8) (Buffer, Image, Sampler, Shader, Pipeline, Attachments); enum(X); X };
 
@@ -1764,7 +1763,7 @@ fn Resource($_Tag: PoolType, $_Desc: Type, $_Common: Type, $_Impl: Type) Type = 
         @debug_assert(sg.valid);
         desc_def: I.Desc = sg.desc_defaults(desc&);
         id: I = sg.alloc();
-        if id.id != SG_INVALID_ID {
+        if id.id != Sg.INVALID_ID {
             it := sg.at(id);
             @debug_assert(it.slot.state == .ALLOC);
             it.slot.state = sg.init(it, desc_def&);
@@ -1776,7 +1775,7 @@ fn Resource($_Tag: PoolType, $_Desc: Type, $_Common: Type, $_Impl: Type) Type = 
     // returns pointer to resource by id without matching id check
     fn at(sg: *Self, id: I) *I.T = {
         p := sg.pools&.index(I.Tag);
-        @debug_assert(id.id != SG_INVALID_ID);
+        @debug_assert(id.id != Sg.INVALID_ID);
         slot_index := _sg_slot_index(id.id);
         @debug_assert((slot_index > _SG_INVALID_SLOT_INDEX) && (slot_index < p.size));
         ptr_cast_unchecked(u8, I.T, p.data.ptr.offset(slot_index.intcast() * size_of(I.T)))
@@ -1784,7 +1783,7 @@ fn Resource($_Tag: PoolType, $_Desc: Type, $_Common: Type, $_Impl: Type) Type = 
     
     // returns pointer to resource with matching id check, may return 0
     fn lookup(sg: *Self, id: I) ?*I.T = {
-        if(id.id == SG_INVALID_ID, => return(.None));
+        if(id.id == Sg.INVALID_ID, => return(.None));
         it: *I.T = sg.at(id);
         if(it.slot.id != id.id, => return(.None));
         (Some = it)
@@ -1803,7 +1802,7 @@ fn Resource($_Tag: PoolType, $_Desc: Type, $_Common: Type, $_Impl: Type) Type = 
     // TODO
     fn dealloc(sg: *Self, it: *I.T) void = {
         p := sg.pools&.index(I.Tag);
-        SOKOL_ASSERT((it->slot.state == .ALLOC) && (it->slot.id != SG_INVALID_ID));
+        SOKOL_ASSERT((it->slot.state == .ALLOC) && (it->slot.id != Sg.INVALID_ID));
         p.free_index(_sg_slot_index(it.slot.id));
         p.slot = zeroed SlotHeader;
     }
@@ -1845,7 +1844,7 @@ fn Resource($_Tag: PoolType, $_Desc: Type, $_Common: Type, $_Impl: Type) Type = 
     }
     
     ::@if(::!@is(I.Tag, .Pipeline, .Attachments)) {
-        fn init(sg: *Self, it: *I.T, desc: *I.Desc) SgResourceState = {
+        fn init(sg: *Self, it: *I.T, desc: *I.Desc) ResourceState = {
             @debug_assert(it.slot.state == .ALLOC);
             if(!sg.validate(desc), => return(.FAILED));
             common_init(it.cmn&, desc);
@@ -1876,7 +1875,7 @@ fn Resource($_Tag: PoolType, $_Desc: Type, $_Common: Type, $_Impl: Type) Type = 
     I
 }
 
-fn init(sg: *Self, pip: *Pipeline.T, desc: *Pipeline.Desc) SgResourceState = {
+fn init(sg: *Self, pip: *Pipeline.T, desc: *Pipeline.Desc) ResourceState = {
     @debug_assert(pip.slot.state == .ALLOC);
     if(!sg.validate(desc), => return(.FAILED));
     shd := sg.lookup(desc.shader) || return(.FAILED);
@@ -1888,7 +1887,7 @@ fn init(sg: *Self, pip: *Pipeline.T, desc: *Pipeline.Desc) SgResourceState = {
 }
 
 // TODO
-fn init(sg: *Self, atts: *Attachments.T, desc: *Attachments.Desc) SgResourceState = {
+fn init(sg: *Self, atts: *Attachments.T, desc: *Attachments.Desc) ResourceState = {
     @debug_assert(atts && atts.slot.state == SG_RESOURCESTATE_ALLOC);
     @debug_assert(desc);
     if !_sg_validate_attachments_desc(desc)) {
@@ -1937,7 +1936,7 @@ fn init(sg: *Self, atts: *Attachments.T, desc: *Attachments.Desc) SgResourceStat
 
 // - trying to add_commit_listener() twice needs to stay an "error" 
 //   because i don't guarentee fnptr stability (ie. with jit shims)
-fn eq(a: *SgCommitListener, b: *SgCommitListener) bool = {
+fn eq(a: *CommitListener, b: *CommitListener) bool = {
     identical(a.user_data, b.user_data) && bit_cast_unchecked(@type a.func, i64, a.func) == bit_cast_unchecked(@type b.func, i64, b.func)
 }
 
@@ -1946,7 +1945,7 @@ fn notify_commit_listeners(sg: *Self) void =
         listener'func(listener.user_data);
     };
 
-fn add_commit_listener(sg: *Self, new_listener: SgCommitListener) bool = {
+fn add_commit_listener(sg: *Self, new_listener: CommitListener) bool = {
     added := add_unique(sg.commit_listeners&, new_listener, sg.desc.allocator);
     if !added {
         _SG_ERROR("IDENTICAL_COMMIT_LISTENER"); // TODO
@@ -1960,7 +1959,7 @@ fn remove_commit_listener(sg: *Self, listener: sg_commit_listener) bool = {
     true
 }
 
-fn setup_compute(sg: *Self, desc: *SgDesc) void = {
+fn setup_compute(sg: *Self, desc: *Desc) void = {
     @debug_assert((desc.max_dispatch_calls_per_pass > 0));
     max_tracked_sbufs := desc.max_dispatch_calls_per_pass * SG_MAX_STORAGEBUFFER_BINDSLOTS;
     sg.compute.readwrite_sbufs = init(sg.desc.allocator, max_tracked_sbufs.intcast());
@@ -1982,12 +1981,12 @@ fn compute_on_endpass(sg: *Self) void = {
     sg.compute.readwrite_sbufs.len = 0;
 }
 
-fn pass_defaults(sg: *Self, pass: *SgPass) SgPass = {
+fn pass_defaults(sg: *Self, pass: *Pass) Pass = {
     res := pass[];
     // TODO
     // ... this sure isn't a program?
     if (!res.compute) {
-        if (res.compute && res.attachments.id == SG_INVALID_ID) {
+        if (res.compute && res.attachments.id == Sg.INVALID_ID) {
             // this is a swapchain-pass
             res.swapchain.sample_count = _sg_def(res.swapchain.sample_count, sg.desc.environment.defaults.sample_count);
             res.swapchain.color_format = _sg_def(res.swapchain.color_format, sg.desc.environment.defaults.color_format);
@@ -1998,7 +1997,7 @@ fn pass_defaults(sg: *Self, pass: *SgPass) SgPass = {
     res
 }
 
-fn setup(sg: *Self, desc: SgDesc) void = {
+fn setup(sg: *Self, desc: Desc) void = {
     @debug_assert((desc._start_canary == 0) && (desc._end_canary == 0));
     @debug_assert(!sg.valid);
     sg[] = zeroed @type sg[];
@@ -2023,7 +2022,7 @@ fn shutdown(sg: *Self) void = {
     sg[] = zereod Self;
 }
 
-fn query_pixelformat(sg: *Self, fmt: SgPixelFormat) SgPixelFormatInfo = {
+fn query_pixelformat(sg: *Self, fmt: PixelFormat) PixelFormatInfo = {
     @debug_assert(sg.valid);
     c := is_compressed(fmt);
     (
@@ -2033,7 +2032,7 @@ fn query_pixelformat(sg: *Self, fmt: SgPixelFormat) SgPixelFormatInfo = {
     )
 }
 
-fn begin_pass(sg: *Self, pass: *SgPass) void #trace_args(.tail) = {
+fn begin_pass(sg: *Self, pass: *Pass) void #trace_args(.tail) = {
     @debug_assert(sg.valid);
     cur := sg.cur_pass&;
     @debug_assert(!cur.valid);
@@ -2044,7 +2043,7 @@ fn begin_pass(sg: *Self, pass: *SgPass) void #trace_args(.tail) = {
         return();
     }
     if (!pass_def.compute) {
-        if (pass_def.attachments.id != SG_INVALID_ID) {
+        if (pass_def.attachments.id != Sg.INVALID_ID) {
             // an offscreen pass
             ::ptr_utils(@type cur.atts[]);
             @debug_assert(cur.atts.is_null());
@@ -2121,17 +2120,17 @@ fn apply_pipeline(sg: *Self, pip_id: Pipeline) void #trace(.tail) = {
     sg.applied_bindings_and_uniforms = 0;
 }
 
-// this whole thing is just looking up each `I` in SgBindings 
+// this whole thing is just looking up each `I` in Bindings 
 // and putting the `*I.T` in a ResolvedBindings to pass to the backend. 
 // so like if we just had pointers this would be free, so i guess the only 
 // value is that it lets you gracefully skip invalid draws and just log something. 
 // see inner comment.
-fn apply_bindings(sg: *Self, bindings: *SgBindings) void = {
+fn apply_bindings(sg: *Self, bindings: *Bindings) void = {
     @debug_assert(sg.valid);
     @debug_assert((bindings._start_canary == 0) && (bindings._end_canary==0));
     sg.stat(.num_apply_bindings, 1);
     abu := sg.applied_bindings_and_uniforms&;
-    abu[] = bit_or(abu[], 1.shift_left(Sg.SG_MAX_UNIFORMBLOCK_BINDSLOTS));
+    abu[] = bit_or(abu[], 1.shift_left(SG_MAX_UNIFORMBLOCK_BINDSLOTS));
     if (!sg.validate_apply_bindings(bindings)) {
         sg.next_draw_valid = false;
         return();
@@ -2158,12 +2157,12 @@ fn apply_bindings(sg: *Self, bindings: *SgBindings) void = {
     //       mistakes gracefully, so maybe i need to change this back. 
     
     if !sg.cur_pass.is_compute {
-        range(0, Sg.SG_MAX_VERTEXBUFFER_BINDSLOTS) { i |
+        range(0, SG_MAX_VERTEXBUFFER_BINDSLOTS) { i |
             if bnd.pip.cmn.vertex_buffer_layout_active&[i] {
                 ::?*Buffer.T;
                 bnd.vbs&[i] = sg.lookup(bindings.vertex_buffers&[i]) || panic("invalid vertex bind");
                 bnd.vb_offsets&[i] = bindings.vertex_buffer_offsets&[i];
-                ::enum(SgResourceState);
+                ::enum(ResourceState);
                 check(bnd.vbs&[i].slot.state == .VALID);
                 check(!bnd.vbs&[i].cmn.append_overflow);
             };
@@ -2249,7 +2248,7 @@ fn end_pass(sg: *Self) void #trace = {
     sg.stat(.num_passes, 1);
     // NOTE: don't exit early if !sg.cur_pass.valid
     sg.impl().end_pass();
-    sg.cur_pipeline.id = SG_INVALID_ID;
+    sg.cur_pipeline.id = Sg.INVALID_ID;
     if (sg.cur_pass.is_compute) {
         sg.compute_on_endpass();
     }
@@ -2381,13 +2380,13 @@ fn map_enum(key: FatExpr, cases: FatExpr) FatExpr #macro = {
     make_switch(key, @{ panic("invalid value in map_enum") }, branches)
 }
 
-// @fill_formats(fmts&) (sfbrm = (.R8, ..), ..); where fmts: EnumMap(SgPixelFormat, EnumMap(PixFmtInfo, bool)); -> void
+// @fill_formats(fmts&) (sfbrm = (.R8, ..), ..); where fmts: EnumMap(PixelFormat, EnumMap(PixFmtInfo, bool)); -> void
 fn fill_formats(dest: FatExpr, pat: FatExpr) FatExpr #macro = {
     @debug_assert(pat.expr&.is(.StructLiteralP));
     body := @{};
     
     // TODO: kinda a failure that you have to make it ugly like this to save 20ms on every compile. 
-    idx1 := resolve_overload(index, Ty(*EnumMap(SgPixelFormat, EnumMap(PixFmtInfo, bool)), SgPixelFormat), *EnumMap(PixFmtInfo, bool), dest.loc);
+    idx1 := resolve_overload(index, Ty(*EnumMap(PixelFormat, EnumMap(PixFmtInfo, bool)), PixelFormat), *EnumMap(PixFmtInfo, bool), dest.loc);
     idx2 := resolve_overload(index, Ty(*EnumMap(PixFmtInfo, bool), PixFmtInfo), *bool, dest.loc);
     
     each pat.expr.StructLiteralP.bindings& { case |
@@ -2411,23 +2410,23 @@ fn fill_formats(dest: FatExpr, pat: FatExpr) FatExpr #macro = {
 // platform specific state is the same for metal/webgpu/d3d11
 AttachmentsImpl :: fn($Impl: Type, $Attachment: Type) Type = {
     A :: @struct {
-        colors: Array(Attachment, Sg.SG_MAX_COLOR_ATTACHMENTS);
-        resolves: Array(Attachment, Sg.SG_MAX_COLOR_ATTACHMENTS);
+        colors: Array(Attachment, SG_MAX_COLOR_ATTACHMENTS);
+        resolves: Array(Attachment, SG_MAX_COLOR_ATTACHMENTS);
         depth_stencil: Attachment;
         // TODO: will need to deal with extra stuff here but only for gl
     };
     
-    fn attachments_color_image(_: *Impl, atts: *Attachments.T, index: i64) ?*Sg.Image.T = {
+    fn attachments_color_image(_: *Impl, atts: *Attachments.T, index: i64) ?*Image.T = {
         i := atts.mtl.colors&[index].image;
         @if(i.is_null(), .None, (Some = i))
     }
     
-    fn attachments_resolve_image(_: *Impl, atts: *Attachments.T, index: i64) ?*Sg.Image.T = {
+    fn attachments_resolve_image(_: *Impl, atts: *Attachments.T, index: i64) ?*Image.T = {
         i := atts.mtl.resolves&[@as(i64) index].image;
         @if(i.is_null(), .None, (Some = i))
     }
     
-    fn attachments_ds_image(_: *Impl, atts: *Attachments.T) ?*Sg.Image.T = {
+    fn attachments_ds_image(_: *Impl, atts: *Attachments.T) ?*Image.T = {
         i := atts.mtl.depth_stencil.image;
         ::ptr_utils(@type i[]);
         @if(i.is_null(), .None, (Some = i))
@@ -2435,3 +2434,704 @@ AttachmentsImpl :: fn($Impl: Type, $Attachment: Type) Type = {
 
     A
 }
+
+Color :: @struct(r: f32, g: f32, b: f32, a: f32);
+
+PixelFormat :: @enum(u32) (
+    DEFAULT,
+    NONE,
+    R8,
+    R8SN,
+    R8UI,
+    R8SI,
+    R16,
+    R16SN,
+    R16UI,
+    R16SI,
+    R16F,
+    RG8,
+    RG8SN,
+    RG8UI,
+    RG8SI,
+    R32UI,
+    R32SI,
+    R32F,
+    RG16,
+    RG16SN,
+    RG16UI,
+    RG16SI,
+    RG16F,
+    RGBA8,
+    SRGB8A8,
+    RGBA8SN,
+    RGBA8UI,
+    RGBA8SI,
+    BGRA8,
+    RGB10A2,
+    RG11B10F,
+    RGB9E5,
+    RG32UI,
+    RG32SI,
+    RG32F,
+    RGBA16,
+    RGBA16SN,
+    RGBA16UI,
+    RGBA16SI,
+    RGBA16F,
+    RGBA32UI,
+    RGBA32SI,
+    RGBA32F,
+    DEPTH,
+    DEPTH_STENCIL,
+    BC1_RGBA,
+    BC2_RGBA,
+    BC3_RGBA,
+    BC3_SRGBA,
+    BC4_R,
+    BC4_RSN,
+    BC5_RG,
+    BC5_RGSN,
+    BC6H_RGBF,
+    BC6H_RGBUF,
+    BC7_RGBA,
+    BC7_SRGBA,
+    PVRTC_RGB_2BPP,
+    PVRTC_RGB_4BPP,
+    PVRTC_RGBA_2BPP,
+    PVRTC_RGBA_4BPP,
+    ETC2_RGB8,
+    ETC2_SRGB8,
+    ETC2_RGB8A1,
+    ETC2_RGBA8,
+    ETC2_SRGB8A8,
+    EAC_R11,
+    EAC_R11SN,
+    EAC_RG11,
+    EAC_RG11SN,
+    ASTC_4x4_RGBA,
+    ASTC_4x4_SRGBA,
+);
+
+PixFmtInfo :: @enum(u32) (sample, filter, render, blend, msaa, depth);
+_sg_pixelformat_info_t :: EnumMap(PixFmtInfo, bool);
+
+PixelformatInfo :: @struct(
+    flags: _sg_pixelformat_info_t #use,
+    compressed: bool,
+    bytes_per_pixel: i32,
+);
+Features :: @struct(
+    origin_top_left: bool,
+    image_clamp_to_border: bool,
+    mrt_independent_blend_state: bool,
+    mrt_independent_write_mask: bool,
+    compute: bool,
+    msaa_image_bindings: bool,
+);
+Limits :: @struct(
+    max_image_size_2d: i32,
+    max_image_size_cube: i32,
+    max_image_size_3d: i32,
+    max_image_size_array: i32,
+    max_image_array_layers: i32,
+    max_vertex_attrs: i32,
+    gl_max_vertex_uniform_components: i32 = 0,
+    gl_max_combined_texture_image_units: i32 = 0,
+);
+ResourceState :: @enum(u32) (
+    INITIAL,
+    ALLOC,
+    VALID,
+    FAILED,
+    INVALID,
+);
+Usage :: @enum(u32) (
+    DEFAULT,
+    IMMUTABLE,
+    DYNAMIC,
+    STREAM,
+);
+BufferType :: @enum(u32) (
+    DEFAULT,
+    VERTEXBUFFER,
+    INDEXBUFFER,
+    STORAGEBUFFER,
+);
+IndexType :: @enum(u32) (
+    DEFAULT,
+    NONE,
+    UINT16,
+    UINT32,
+);
+ImageType :: @enum(u32) (
+    DEFAULT,
+    _2D,
+    CUBE,
+    _3D,
+    ARRAY,
+);
+ImageSampleType :: @enum(u32) (
+    DEFAULT,
+    FLOAT,
+    DEPTH,
+    SINT,
+    UINT,
+    UNFILTERABLE_FLOAT,
+);
+SamplerType :: @enum(u32) (
+    DEFAULT,
+    FILTERING,
+    NONFILTERING,
+    COMPARISON,
+);
+CubeFace :: @enum(u32) (POS_X, NEG_X, POS_Y, NEG_Y, POS_Z, NEG_Z);
+PrimitiveType :: @enum(u32) (
+    DEFAULT,
+    POINTS,
+    LINES,
+    LINE_STRIP,
+    TRIANGLES,
+    TRIANGLE_STRIP,
+);
+Filter :: @enum(u32) (
+    DEFAULT, 
+    NEAREST, 
+    LINEAR,
+);
+Wrap :: @enum(u32) (
+    DEFAULT,
+    REPEAT,
+    CLAMP_TO_EDGE,
+    CLAMP_TO_BORDER,
+    MIRRORED_REPEAT,
+);
+BorderColor :: @enum(u32) (
+    DEFAULT,
+    TRANSPARENT_BLACK,
+    OPAQUE_BLACK,
+    OPAQUE_WHITE,
+);
+
+VertexFormat :: @enum(u32) (
+    INVALID,
+    FLOAT,
+    FLOAT2,
+    FLOAT3,
+    FLOAT4,
+    INT,
+    INT2,
+    INT3,
+    INT4,
+    UINT,
+    UINT2,
+    UINT3,
+    UINT4,
+    BYTE4,
+    BYTE4N,
+    UBYTE4,
+    UBYTE4N,
+    SHORT2,
+    SHORT2N,
+    USHORT2,
+    USHORT2N,
+    SHORT4,
+    SHORT4N,
+    USHORT4,
+    USHORT4N,
+    UINT10_N2,
+    HALF2,
+    HALF4,
+);
+VertexStep :: @enum(u32) (
+    DEFAULT,
+    PER_VERTEX,
+    PER_INSTANCE,
+);
+UniformType :: @enum(u32) (
+    INVALID,
+    FLOAT,
+    FLOAT2,
+    FLOAT3,
+    FLOAT4,
+    INT,
+    INT2,
+    INT3,
+    INT4,
+    MAT4,
+);
+UniformLayout :: @enum(u32) (
+    DEFAULT,
+    NATIVE,
+    STD140,
+);
+CullMode :: @enum(u32) (
+    DEFAULT,
+    NONE,
+    FRONT,
+    BACK,
+);
+FaceWinding :: @enum(u32) (
+    DEFAULT,
+    CCW,
+    CW,
+);
+CompareFunc :: @enum(u32) (
+    DEFAULT,
+    NEVER,
+    LESS,
+    EQUAL,
+    LESS_EQUAL,
+    GREATER,
+    NOT_EQUAL,
+    GREATER_EQUAL,
+    ALWAYS,
+);
+StencilOp :: @enum(u32) (
+    DEFAULT,
+    KEEP,
+    ZERO,
+    REPLACE,
+    INCR_CLAMP,
+    DECR_CLAMP,
+    INVERT,
+    INCR_WRAP,
+    DECR_WRAP,
+);
+BlendFactor :: @enum(u32) (
+    DEFAULT,
+    ZERO,
+    ONE,
+    SRC_COLOR,
+    ONE_MINUS_SRC_COLOR,
+    SRC_ALPHA,
+    ONE_MINUS_SRC_ALPHA,
+    DST_COLOR,
+    ONE_MINUS_DST_COLOR,
+    DST_ALPHA,
+    ONE_MINUS_DST_ALPHA,
+    SRC_ALPHA_SATURATED,
+    BLEND_COLOR,
+    ONE_MINUS_BLEND_COLOR,
+    BLEND_ALPHA,
+    ONE_MINUS_BLEND_ALPHA,
+);
+BlendOp :: @enum(u32) (
+    DEFAULT,
+    ADD,
+    SUBTRACT,
+    REVERSE_SUBTRACT,
+    MIN,
+    MAX,
+);
+ColorMask :: @enum(u32) (
+    DEFAULT = 0,
+    NONE = 16,
+    R = 1,
+    G = 2,
+    RG = 3,
+    B = 4,
+    RB = 5,
+    GB = 6,
+    RGB = 7,
+    A = 8,
+    RA = 9,
+    GA = 10,
+    RGA = 11,
+    BA = 12,
+    RBA = 13,
+    GBA = 14,
+    RGBA = 15,
+);
+LoadAction :: @enum(u32) (
+    DEFAULT,
+    CLEAR,
+    LOAD,
+    DONTCARE,
+);
+StoreAction :: @enum(u32) (
+    DEFAULT,
+    STORE,
+    DONTCARE,
+);
+
+AttachmentAction :: fn($Clear) => @struct(
+    load_action := LoadAction.DEFAULT,
+    store_action := StoreAction.DEFAULT,
+    clear_value := zeroed Clear,
+);
+ColorAttachmentAction :: AttachmentAction(Color);
+DepthAttachmentAction :: AttachmentAction(f32);
+StencilAttachmentAction :: AttachmentAction(u8);
+PassAction :: @struct(
+    colors: Array(ColorAttachmentAction, 4),
+    depth: DepthAttachmentAction = (),
+    stencil: StencilAttachmentAction = (),
+);
+MetalSwapchain :: @struct(
+    current_drawable: id"CAMetalDrawable",
+    depth_stencil_texture: id"MTLTexture",
+    msaa_color_texture: id"MTLTexture",
+);
+D3d11Swapchain :: @struct(
+    render_view: rawptr,
+    resolve_view: rawptr,
+    depth_stencil_view: rawptr,
+);
+WgpuSwapchain :: @struct(
+    render_view: Webgpu.WGPU.TextureView,
+    resolve_view: Webgpu.WGPU.TextureView,
+    depth_stencil_view: Webgpu.WGPU.TextureView,
+);
+GlSwapchain :: @struct(
+    framebuffer: u32,
+);
+Swapchain :: @struct(
+    width: i32,
+    height: i32,
+    sample_count: i32,
+    color_format: PixelFormat,
+    depth_format: PixelFormat,
+    metal: MetalSwapchain,
+    d3d11: D3d11Swapchain,
+    wgpu: WgpuSwapchain,
+    gl: GlSwapchain,
+);
+Pass :: @struct(
+    _start_canary: u32,
+    action: PassAction,
+    attachments: Attachments,
+    swapchain: Swapchain,
+    label: CStr,
+    compute: bool,
+    _end_canary: u32,
+);
+Bindings :: @struct(
+    _start_canary: u32,
+    vertex_buffers: Array(Buffer, 8),
+    vertex_buffer_offsets: Array(i32, 8),
+    index_buffer: Buffer,
+    index_buffer_offset: i32,
+    images: Array(Image, 16),
+    samplers: Array(Sampler, 16),
+    storage_buffers: Array(Buffer, 8),
+    _end_canary: u32,
+);
+BufferDesc :: @struct(
+    size := 0,  // will default to data.len if provided
+    type := BufferType.VERTEXBUFFER,
+    usage := Usage.IMMUTABLE,
+    data: []u8 = empty(),
+    label: CStr = "",
+    gl_buffers := zeroed Array(u32, 2),
+    mtl_buffers := zeroed Array(rawptr, 2),
+    d3d11_buffer := zeroed rawptr,
+    wgpu_buffer := zeroed rawptr,
+);
+// TODO: why is this not just a flat byte array?
+//       there's this whole replaceRegion dance where we calculate where to put each part. 
+//       maybe different backends want you to layout your CUBE differently? idk
+ImageData :: @struct(
+    subimage: Array(Array([]u8, 16), 6),
+);
+ImageDesc :: @struct(
+    type := zeroed ImageType,
+    render_target := false,
+    width: i32,
+    height: i32,
+    num_slices := zeroed i32,
+    num_mipmaps := zeroed i32,
+    usage := zeroed Usage,
+    pixel_format := zeroed PixelFormat,
+    sample_count := zeroed i32,
+    data: ImageData,
+    label := zeroed CStr,
+    gl_textures := zeroed Array(u32, 2),
+    gl_texture_target := zeroed u32,
+    mtl_textures := zeroed Array(rawptr, 2),
+    d3d11_texture := zeroed rawptr,
+    d3d11_shader_resource_view := zeroed rawptr,
+    wgpu_texture := zeroed rawptr,
+    wgpu_texture_view := zeroed rawptr,
+);
+
+FLT_MAX: f32 : bitcast(0b01111111011111111111111111111111);
+
+SamplerCommon :: @struct(
+    min_filter := Filter.NEAREST,
+    mag_filter := Filter.NEAREST,
+    mipmap_filter := Filter.NEAREST,
+    wrap_u := Wrap.REPEAT,
+    wrap_v := Wrap.REPEAT,
+    wrap_w := Wrap.REPEAT,
+    min_lod: f32 = FLT_MAX,
+    max_lod: f32 = 0,
+    border_color := BorderColor.OPAQUE_BLACK,
+    compare := CompareFunc.NEVER,
+    max_anisotropy: u32 = 1,
+);
+
+SamplerDesc :: @struct {
+    common: SamplerCommon #use = ();
+    label: CStr = "";
+    gl_sampler: u32 = 0;
+    mtl_sampler := zeroed rawptr;
+    d3d11_sampler := zeroed rawptr;
+    wgpu_sampler := zeroed rawptr;
+};
+ShaderStage :: @enum(u32) (
+    NONE,
+    VERTEX,
+    FRAGMENT,
+    COMPUTE,
+);
+// TODO: @tagged(Source: Str, Bytecode: []u8);
+ShaderFunction :: @struct(
+    source := zeroed CStr,
+    bytecode: []u8 = empty(),
+    entry := zeroed CStr,
+    d3d11_target := zeroed CStr,
+);
+ShaderVertexAttr :: @struct(
+    base_type: ShaderAttrBaseType = .Undefined,
+    glsl_name: CStr,
+    hlsl_sem_name: CStr,
+    hlsl_sem_index: u8,
+);
+GlslShaderUniform :: @struct(
+    type: UniformType,
+    array_count: u16,
+    glsl_name: CStr,
+);
+ShaderUniformBlock :: @struct(
+    stage: ShaderStage,
+    size: u32,
+    hlsl_register_b_n: u8 = 0,
+    msl_buffer_n: u8,
+    wgsl_group0_binding_n: u8 = 0,
+    layout := UniformLayout.DEFAULT,
+    glsl_uniforms := zeroed Array(GlslShaderUniform, 16),
+);
+ShaderImage :: @struct(
+    stage: ShaderStage,
+    image_type: ImageType,
+    sample_type: ImageSampleType,
+    multisampled: bool,
+    hlsl_register_t_n: u8,
+    msl_texture_n: u8,
+    wgsl_group1_binding_n: u8,
+);
+ShaderSampler :: @struct(
+    stage: ShaderStage,
+    sampler_type: SamplerType,
+    hlsl_register_s_n: u8,
+    msl_sampler_n: u8,
+    wgsl_group1_binding_n: u8,
+);
+ShaderStorageBuffer :: @struct(
+    stage: ShaderStage,
+    readonly: bool,
+    hlsl_register_t_n: u8 = 0,
+    msl_buffer_n: u8 = 0,
+    wgsl_group1_binding_n: u8 = 0,
+    glsl_binding_n: u8 = 0,
+);
+ShaderImageSamplerPair :: @struct(
+    stage: ShaderStage,
+    image_slot: u8,
+    sampler_slot: u8,
+    glsl_name: CStr,
+);
+ShaderDesc :: @struct(
+    vertex_func := zeroed ShaderFunction,
+    fragment_func := zeroed ShaderFunction,
+    compute_func := zeroed ShaderFunction,
+    attrs := zeroed Array(ShaderVertexAttr, 16),
+    uniform_blocks := zeroed Array(ShaderUniformBlock, 8),
+    storage_buffers := zeroed Array(ShaderStorageBuffer, 8),
+    images := zeroed Array(ShaderImage, 16),
+    samplers := zeroed Array(ShaderSampler, 16),
+    image_sampler_pairs := zeroed Array(ShaderImageSamplerPair, 16),
+    mtl_threads_per_threadgroup := zeroed MtlShaderThreadsPerThreadGroup,
+    label := zeroed CStr,
+);
+MtlShaderThreadsPerThreadGroup :: @struct {
+    x: i32; y: i32; z: i32;
+};
+VertexBufferLayoutState :: @struct(
+    stride: i32,
+    step_func := VertexStep.PER_VERTEX,
+    step_rate: i32 = 1,
+);
+VertexAttrState :: @struct(
+    buffer_index: i32 = 0,
+    offset: i32 = 0,
+    format := VertexFormat.INVALID,
+);
+VertexLayoutState :: @struct(
+    buffers := zeroed Array(VertexBufferLayoutState, 8),
+    attrs := zeroed Array(VertexAttrState, 16),
+);
+StencilFaceState :: @struct(
+    compare := CompareFunc.ALWAYS,
+    fail_op := StencilOp.KEEP,
+    depth_fail_op := StencilOp.KEEP,
+    pass_op := StencilOp.KEEP,
+);
+
+StencilState :: @struct(
+    enabled: bool = false,
+    front: StencilFaceState = (),
+    back: StencilFaceState = (),
+    read_mask: u8 = 0,
+    write_mask: u8 = 0,
+    ref: u8 = 0,
+);
+DepthState :: @struct(
+    pixel_format := PixelFormat.DEFAULT,
+    compare := CompareFunc.DEFAULT,
+    write_enabled: bool = false,
+    bias: f32 = 0,
+    bias_slope_scale: f32 = 0,
+    bias_clamp: f32 = 0,
+);
+BlendState :: @struct(
+    enabled: bool = false,
+    src_factor_rgb := BlendFactor.DEFAULT,
+    dst_factor_rgb := BlendFactor.DEFAULT,
+    op_rgb := BlendOp.DEFAULT,
+    src_factor_alpha := BlendFactor.DEFAULT,
+    dst_factor_alpha := BlendFactor.DEFAULT,
+    op_alpha := BlendOp.DEFAULT,
+);
+ColorTargetState :: @struct(
+    pixel_format := PixelFormat.DEFAULT,
+    write_mask := ColorMask.DEFAULT,
+    blend: BlendState = (),
+);
+
+PipelineShared :: @struct(
+    compute := false,
+    shader := zeroed Shader,
+    layout := zeroed VertexLayoutState,
+    depth: DepthState = (),
+    stencil: StencilState = (),
+    color_count: i32 = 0,  // defaults to 1 if not depth only
+    colors := zeroed Array(ColorTargetState, 4),
+    primitive_type := PrimitiveType.TRIANGLES,
+    index_type := IndexType.NONE,
+    cull_mode := CullMode.NONE,
+    face_winding := FaceWinding.CW,
+    sample_count: i32 = 0,  // set from environment.defaults
+    blend_color := zeroed Color,
+    alpha_to_coverage_enabled := false,
+);
+
+PipelineDesc :: @struct {
+    common: PipelineShared #use = ();
+    label: CStr = "";
+};
+AttachmentDesc :: @struct(
+    image: Image,
+    mip_level: i32,
+    slice: i32,
+);
+AttachmentsDesc :: @struct(
+    _start_canary: u32,
+    colors: Array(AttachmentDesc, 4),
+    resolves: Array(AttachmentDesc, 4),
+    depth_stencil: AttachmentDesc,
+    label: CStr,
+    _end_canary: u32,
+);
+
+SlotInfo :: @struct(
+    state: ResourceState,
+    res_id: u32,
+);
+BufferInfo :: @struct(
+    slot: SlotInfo,
+    update_frame_index: u32,
+    append_frame_index: u32,
+    append_pos: i32,
+    append_overflow: bool,
+    num_slots: i32,
+    active_slot: i32,
+);
+ImageInfo :: @struct(
+    slot: SlotInfo,
+    upd_frame_index: u32,
+    num_slots: i32,
+    active_slot: i32,
+);
+SamplerInfo :: @struct(
+    slot: SlotInfo,
+);
+ShaderInfo :: @struct(
+    slot: SlotInfo,
+);
+PipelineInfo :: @struct(
+    slot: SlotInfo,
+);
+AttachmentsInfo :: @struct(
+    slot: SlotInfo,
+);
+
+/*
+    NOTE: on WebGPU, the default color pixel format MUST be provided,
+    cannot be a default compile-time constant.
+*/
+// TODO: this confuses me. color_format default depends on backend, so i guess we're telling 
+//       it what the defaults are, not asking for them to be a certain thing? 
+//       but these are what's used for "creating render target images", doesn't that mean 
+//       you can never use the defaults because it will be randomly different depending on the platform? 
+//       i feel like my mental model for whats going on is wrong. 
+EnvironmentDefaults :: @struct(
+    color_format: PixelFormat, 
+    depth_format := PixelFormat.DEPTH_STENCIL,
+    sample_count: i32 = 1,
+);
+MetalEnvironment :: @struct(
+    device: import("@/graphics/macos/frameworks.fr").MTLDevice,
+);
+D3d11Environment :: @struct(
+    device: rawptr,
+    device_context: rawptr,
+);
+WgpuEnvironment :: @struct(
+    device: import("@/graphics/web/webgpu.fr").Device,
+);
+// you can use app.fr/glue_environment() to get one of these 
+// or open a window yourself and gives us the context pointers. 
+Environment :: @struct(
+    defaults: EnvironmentDefaults = (),
+    metal := zeroed MetalEnvironment,
+    d3d11 := zeroed D3d11Environment,
+    wgpu := zeroed WgpuEnvironment,
+);
+CommitListener :: @struct(
+    func: @FnPtr(rawptr) void,
+    user_data: rawptr,
+);
+
+Desc :: @struct(
+    _start_canary: u32 = 0,
+    buffer_pool_size: i32 = 128,
+    image_pool_size: i32 = 128,
+    sampler_pool_size: i32 = 64,
+    shader_pool_size: i32 = 32,
+    pipeline_pool_size: i32 = 64,
+    attachments_pool_size: i32 = 16,
+    uniform_buffer_size: i32 = 4 * 1024 * 1024,
+    max_dispatch_calls_per_pass: i32 = 1024,
+    max_commit_listeners: i32 = 1024,
+    disable_validation: bool = false,
+    d3d11_shader_debugging := false,
+    mtl_force_managed_storage_mode := false,
+    mtl_use_command_buffer_with_retained_references := false,
+    wgpu_disable_bindgroups_cache := false,
+    wgpu_bindgroups_cache_size: i32 = 1024,
+    allocator: Alloc,
+    environment: Environment,
+    _end_canary: u32 = 0,
+);
+

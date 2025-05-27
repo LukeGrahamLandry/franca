@@ -8,7 +8,6 @@
 
 ## Caching
 
-- atomic write by renaming the file
 - crash backtrace with source location
 - keep caches for multiple targets at once?
 - need to be careful if start caching both main+driver from one source file
@@ -63,6 +62,7 @@ actually that's a bit too agressive but certainly stop processing ANSI escape co
 
 ## Graphics
 
+- https://github.com/floooh/sokol/commit/50bbbe4521af356c3b0879e1d46e30114feb4e6b
 - finsih webgpu
 - finish gfx-metal. need to make sure everything is reachable
 - example program that tries to use all features
@@ -430,6 +430,18 @@ need to support them being different at comptime and runtime in a uniform way.
 is much worse than zig's `[3][2]Symbol`, even c's `Symbol the_name_in_the_middle[3][2]` 
 has the numbers in the right order at least. rust has my problem too `[[Symbol; 2]; 3]` but nicer special case syntax for it. 
 - bit flags, @tagged abi. see sys/linux/LandLock
+- this would be much less messy
+```
+#use("@/examples/import_c/ffi.fr");
+Stb :: fetch(
+  "https://github.com/nothings/stb/archive/f0569113c93ad095470c54bf34a17b36646bbbb5.zip", 
+  1754150, "b62be3009cb9d4b6385bd4854bddf72d8e91f4e19d1347d6cf9589b19f70d45d",
+);
+StbTrueType :: include { C |
+  C.define("STB_TRUETYPE_IMPLEMENTATION");
+  C.include(Stb, "stb_truetype.h");
+};
+```
 
 ##
 

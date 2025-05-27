@@ -1,7 +1,7 @@
-Sha256 :: import("@/backend/macho/sha256.fr");
+/// This defines the .frc file format used by the franca compiler. 
+/// See @/docs/caching.md
 
 MAGIC :: 0x0002_41434E415246;  // FRANCA__
-
 Header :: @struct {
     meta: Meta #use;
     dep: Storage(Dep);
@@ -92,6 +92,7 @@ Lib :: @struct {
 
 Storage :: fn($T: Type) Type = {
     // SAFETY: the serialized data is immediately after the header in memory
+    // check() ensures that storage.count is within filelen. 
     fn get(self: *Header, i: Ref(T)) []T = {
         f :: find_storage_field(T);
         storage := Header.get_field_ptr(self, f);
@@ -118,17 +119,28 @@ Ref :: fn($T: Type) Type = {
     Self
 };
 
-
 fn check(data: []u8) *Header = {
-    @debug_assert(data.len > size_of(Header));
+    @assert_ge(data.len, size_of(Header));
     self := ptr_cast_unchecked(u8, Header, data.ptr);
-    @debug_assert_eq(self.magic_v, MAGIC);
+    @assert_eq(self.magic_v, MAGIC);
+    @assert_le(self.filelen.zext(), data.len);
     
-    // TODO
-    //range(0, Header.N) { i |
-    //    len := size_of(T) * storage[i].count;
-    //    @debug_assert_le(storage[i].off + len, data.len);
-    //};
+    X :: fn(storage) => {
+        @assert_le(storage.off, self.filelen);
+        s := size_of((@type storage[]).StorageElement);
+        @assert_le(storage.off + storage.count * s.trunc(), self.filelen);
+    };
+    
+    // TODO: generate this
+    X(self.dep&);
+    X(self.sym&);
+    X(self.blk&);
+    X(self.ins&);
+    X(self.con&);
+    X(self.mem&);
+    X(self.rel&);
+    X(self.str&);
+    X(self.lib&);
     
     self
 }
@@ -484,3 +496,4 @@ fn compile_all_symbols(header: *Header, m: *QbeModule) void = {
 }
 
 ENABLE_ENABLE_TRACY :: get_environment_variable("FRANCA_TRACY").is_some();
+Sha256 :: import("@/backend/macho/sha256.fr");

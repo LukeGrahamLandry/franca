@@ -71,7 +71,7 @@ fn make_dirs(const_path: Str) bool = {
 fn make_dir(path: Str) bool #target_os = (fn($os) => {
     L :: LibcType(os);
     
-    path := maybe_borrow_cstr(path, temp());
+    path := as_cstr path;
     if dir_exists(path) {
         return true;
     };
@@ -111,14 +111,14 @@ DirEntry :: @struct(
 
 
 fn file_exists(path: Str) bool = {
-    c := path.maybe_borrow_cstr(temp());
+    c := as_cstr path;
     access(c, @as(i64) AccessMode.Exists).is_ok()
 }
 
 // TODO: i think if im passing Create i also have to pass mode as an extra argument!!!
 // TODO: @try for the libc result types. 
 fn write_entire_file(path: Str, content: Str) bool = {
-    path := maybe_borrow_cstr(path, temp());
+    path := as_cstr path;
     fd := open_trunc(path);
     if(!fd.is_ok(), => return(false));
     fd := fd.unwrap();
@@ -130,27 +130,19 @@ fn write_entire_file(path: Str, content: Str) bool = {
     true
 }
 
-fn write_chunks_or_crash(outpath: CStr, chunks: [][]u8) void = {
-    outfile := open_trunc(outpath) 
-        || @panic("failed to open %", outpath);
+fn write_chunks_or_crash(outpath: Str, chunks /*: [][]u8*/) void #where = {
+    tmp_path := @fmt_cstr("%.atomic", outpath);
+    file := open_trunc(tmp_path) 
+        || @panic("failed to open %", tmp_path);
     for chunks { chunk | 
-        write(outfile&, chunk)
-        || @panic("failed to write %", outpath);
+        write(file&, chunk)
+        || @panic("failed to write %", tmp_path);
     };
-    close(outfile)
-        || @panic("failed to close %", outpath);
-}
-
-// TODO: paste-y^ emit_qbe_included shouldn't return a bucketarray
-fn write_chunks_or_crash(outpath: CStr, chunks: BucketArray(u8)) void = {
-    outfile := open_trunc(outpath) 
-        || @panic("failed to open %", outpath);
-    for chunks& { chunk | 
-        write(outfile&, chunk)
-        || @panic("failed to write %", outpath);
-    };
-    close(outfile)
-        || @panic("failed to close %", outpath);
+    close(file)
+        || @panic("failed to close %", tmp_path);
+    
+    rename(tmp_path, @fmt_cstr("%", outpath))
+        || @panic("failed to swap %", outpath);
 }
 
 fn write_entire_file_or_crash(path: Str, content: Str) void = {
@@ -161,7 +153,7 @@ fn write_entire_file_or_crash(path: Str, content: Str) void = {
 
 fn append_to_file(path: Str, content: Str) bool = {
     if(content.len == 0, => return(true));
-    path := maybe_borrow_cstr(path, temp());
+    path := as_cstr path;
     fd := open_append(path);
     if(!fd.is_ok(), => return(false));
     fd := fd.unwrap();
@@ -218,7 +210,7 @@ fn read_entire_file(a: Alloc, path: Str) ?Str = {
 }
 
 fn read_and_push(out: *List(u8), path: Str) bool = {
-    path := path.maybe_borrow_cstr(temp());
+    path := as_cstr path;
     f := open_read(path) || return(false);
     len := f.lseek(0, .End) || {
         close(f); // TODO: defer

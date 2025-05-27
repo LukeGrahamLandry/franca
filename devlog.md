@@ -1,6 +1,9 @@
 ## (May 27)
 
 - remove a couple clowns: mkdir, cp
+- stop using maybe_borrow_cstr
+- make write_chunks_or_crash atomic (by writing to a different file and renaming)
+- namespace the structs that used to be in bindings/sokol.fr
 
 ## (May 26)
 
