@@ -1,20 +1,3 @@
-//! All communication between the compiler and the outside world should go through the driver program. 
-//! This file has defaults used to load drivers (but they can be skipped entirely by precompiling to a dynamic library,
-//! and passing that to the compiler, just be careful about ABI breakage).
-//! For sanity's sake, the compiler itself should be buildable with these defaults so its not super painful to change the ABI. 
-
-// TODO: remove ExportVTable. i think the message @tagged is less painful
-fn default_driver_exports() ExportVTable = {
-    vtable: ExportVTable = (
-        resolve_comptime_import = .None,
-        log_event = .None,
-    );
-    vtable
-}
-
-//////////////////////////////////
-/// Entry points from the compiler
-
 fn get_include_std(a: Alloc, name: Str) ?Str = {
     ::if(?Str);
     if name == "compiler" {
@@ -40,48 +23,10 @@ fn get_include_std(a: Alloc, name: Str) ?Str = {
 fn get_include_std(c: *SelfHosted, name: Str) ?WaitingParse = {
     zone := zone_begin(.LoadFile); // TODO: defer
     src := get_include_std(c.get_alloc(), name) || return(.None);
-    hash :: import("@/backend/macho/sha256.fr").sha256_hex;
-    //_ := hash(src);  // costs 25ms
     file := c.codemap.add_file(name, src);
     id := push_parse(c.parser, src, file);
     zone_end(zone);
     (Some = id)
-}
-
-fn resolve_comptime_import(self: *SelfHosted, fid: FuncId, func: *Func, lib_name: Symbol) void = {
-    // TODO: allow it to tell us no that doesn't exist
-    opts := self.get_build_options();
-    if opts.driver_vtable_ptr.resolve_comptime_import { callback | 
-        legacy := self.legacy_indirection;
-        // TODO: whose job is it to deal with :link_rename?
-        @match(callback(opts.driver_vtable_user_data, legacy, fid, lib_name, func.name)) {
-            fn Some(addr) => {
-                func.body = (DynamicImport = (name = func.name, lib = lib_name, comptime = addr.int_from_rawptr()));
-                self.put_jitted_import(fid, addr);;
-            }
-            fn None() => {
-                // TODO: warn? have different #import that means we expect not at comptime?
-                func.body = (DynamicImport = (name = func.name, lib = lib_name, comptime = 0));
-            }
-        };
-    };
-}
-
-// Boring. used for the compiler_gui
-fn log_event(fmt_args: FatExpr, compiler: FatExpr) FatExpr #macro = {
-    if DEBUG_SPAM_LOG {
-        return(println(fmt_args));
-    };
-    @if(ENABLE_LOGGING_CALLBACKS, @{
-        c := @[compiler];
-        opts := c.get_build_options();
-        if opts.driver_vtable_ptr.log_event { callback | 
-            legacy := c.legacy_indirection;
-            msg := @tfmt(@[fmt_args]);
-            event: CompilerLogEvent = (Msg = msg);
-            callback(opts.driver_vtable_user_data, legacy, event&);
-        };
-    }, @{ 1 + 1; })
 }
 
 // These record_* things store information for lsp and compiler_gui. 

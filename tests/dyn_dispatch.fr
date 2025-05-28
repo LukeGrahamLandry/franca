@@ -71,4 +71,126 @@ assert_eq(12, unknown.eval());  // We call different implementations through Add
 canary
 }
 
-
+fn dyn_fmt_t() #test = {
+    Show :: @FnPtr(rawptr, *List(u8)) void;
+    
+    // don't need the lengths of the arrays because we counted percent signs at comptime
+    runtime :: fn(writer: *List(u8), s: Str, data_arr: *rawptr, show_arr: *Show) void = {
+        i := 0;
+        for s { c |
+            if c == "%".ascii() {
+                show_arr.offset(i)[](data_arr.offset(i)[], writer); 
+                i += 1;
+            } else {
+                writer.push(c);
+            }
+        };
+    };
+    
+    // Passed in different registers so can't just blindly stuff it in a rawptr
+    is_float :: fn(t: Type) bool = {
+        t == f32 || t == f64 || {
+            t := get_type_info_ref(t);
+            @match(t) {
+                fn Struct(it) => {
+                    for it.fields { it |
+                        if it.ty.is_float() {
+                            return(true);
+                        }
+                    }
+                    false
+                }
+                fn Array(it) => is_float(it.inner);
+                fn Enum(it)  => is_float(it.raw);
+                @default     => false;
+            }
+        }
+    };
+    
+    // Need to pass as `rawptr` but if it's already tiny, i'd rather not add an extra indirection
+    erase_type :: fn(e: FatExpr) Ty(FatExpr, Type) = {
+        e = compile_ast(e);
+        if size_of(e.ty) <= 8 && !is_float(e.ty) {
+            e2 := @{ bit_cast_unchecked(@[@literal e.ty], rawptr, @[e]) };
+            e2.loc = e.loc;
+            return(e2, e.ty);
+        };
+        // TODO: don't copy if it's already GetVar
+        e2 := @{ it := @[e]; raw_from_ptr(@type it, it&) };
+        e2.loc = e.loc;
+        (e2, *e.ty)
+    };
+    
+    show_vtable :: fn($types: Type) []Show = ::{
+        fr := current_compiler_context();
+        // Need this extra fucking around because $const args are deduplicated shallowly
+        types := import("@/compiler/ast_external.fr")'arg_types(fr, types);
+        shows := ast_alloc().alloc(Show, types.len);
+        
+        range(0, types.len) { i |
+            fid := resolve_overload(display, Ty(types[i], *List(u8)), void, zeroed Span);
+            fptr := {fr.vtable.get_jitted_ptr}(fr.data, fid);
+            if !fptr&.is_ok() {
+                fr.report_error(fptr.Err);
+            }
+            fptr := fptr.Ok;
+            shows[i] = bit_cast_unchecked(rawptr, Show, fptr);
+        };
+        shows
+    };
+    
+    dyn_fmt_impl :: fn(writer: FatExpr, args: []FatExpr, s: Str, loc: Span) FatExpr = {
+        ::[]Show;
+        types := ast_alloc().alloc(Type, args.len);  // should be temp()?
+        result := @{
+            data: Array(rawptr, @[@literal args.len]) = @[{
+                actions := ast_alloc().alloc(FatExpr, args.len);
+                enumerate args { i, a |
+                    e, ty := erase_type(a[]);
+                    types[i] = ty;
+                    // this is wasteful but means you get the error in the right place
+                    _ := resolve_overload(display, Ty(ty, *List(u8)), void, a.loc);
+                    actions[i] = e;
+                };
+                e: FatExpr = (expr = (Tuple = actions.as_raw_list()), loc = loc, ty = UnknownType, done = false);
+                e
+            }];
+            vtable := :: show_vtable(@[@literal @if(types.len == 1, types[0], Ty(types))]);
+            runtime(@[writer], @[@literal s], data&.as_ptr(), vtable.as_ptr());
+        };
+        result
+    };
+    
+    dyn_format_into :: fn(writer: FatExpr, args: Slice(FatExpr), loc: Span) FatExpr = {
+        fmt_string := const_eval_string(args[0]);
+        params := args.rest(1);
+        parts := fmt_string.split("%", temp());
+        parts := parts&.items();
+        if(parts.len != params.len + 1, => compile_error("Fmt specifier count mismatch", loc));
+        
+        // if you make this real, do the old behaviuor for no % and "%"
+        dyn_fmt_impl(writer, params, fmt_string, loc)
+    };
+    
+    dyn_fmt :: fn(arg: FatExpr) FatExpr #macro  = {
+        arg := compile_ast(arg);
+        assert(arg.expr&.is(.Tuple), "fmt expected tuple");
+        args := arg.expr.Tuple.items();
+        writer := compile_ast(args[0]);
+        dyn_format_into(writer, args.rest(1), arg.loc)
+    };
+    
+    a := "a1bfooc2d";
+    out := u8.list(temp());
+    @dyn_fmt(out&, "a%b%c%d", 1, "foo", 2);
+    @assert_eq(out.items(), a);
+    out&.clear();
+    @dyn_fmt(out&, "a%b%c%d", 1, "foo", 2); // same vtable
+    @assert_eq(out.items(), a);
+    out&.clear();
+    @dyn_fmt(out&, "a%", "b"); // different vtable
+    @assert_eq(out.items(), "ab");
+    out&.clear();
+    @dyn_fmt(out&, "b%", @as(f64) 5.0);  // floats are special
+    @assert_eq(out.items(), "b5");
+}

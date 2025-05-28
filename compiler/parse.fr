@@ -295,7 +295,6 @@ fn ident_expr_and_maybe_trailing(self: *Parser, name: Symbol, prec: Prec, loc: S
 fn parse_expr(self: *Parser, prec: Prec) ParseRes = {
     self.lex&.peek();
     // TODO: can't access field on rvalue. 
-    // TODO: you can't return a pair at comptime if its not a pair of ints. (u32, u32) gives back 16 bytes from ffi::c and then compiler::jit crashes on it for being the wrong size. 
     e := @try(self.parse_prefix(prec)) return;
     self.parse_infix(e, prec)
 }
@@ -592,12 +591,6 @@ fn parse_infix(self: *Parser, prev: FatExpr, prec: Prec) ParseRes = {
                 e := self.expr((FieldAccess = (container = self.box(prev), name = name, no_dot_call = false)), loc);
                 self.parse_infix(e, prec.with(.Suffix))
             }
-            //fn Tick() => {
-            //    self.pop();
-            //    name := @try(self.pop_name("e.<NAME>")) return;
-            //    e := self.expr((FieldAccess = (container = self.box(prev), name = name, no_dot_call = true)), self.last.span);
-            //    self.parse_infix(e, prec.with(.Suffix))
-            //}
             fn Tick() => {
                 self.pop();
                 name := @try(self.pop_name("e.<NAME>")) return;
@@ -765,30 +758,27 @@ fn expr_call(self: *Parser, f: FatExpr, arg: FatExpr) FatExpr = {
 }
 
 fn push_arg(self: *Parser, call: *FatExpr, callback: FatExpr) void = {
-    // TODO: let else would be nice.
-    @match(call.expr&) {
-        fn Call(f) => {
-            @match(f.arg.expr&) {
-                // TODO: have it work with named arguments. Need to support mixing named and positional.
-                fn Tuple(parts) => {
-                    parts.push(callback, self.alloc);
-                }
-                // Parser flattened empty tuples.
-                fn Value(v) => {
-                    if v.bytes.is_unit() {
-                        f.arg[] = callback;
-                    } else {  
-                        f.arg[] = self.pair(f.arg[], callback, call.loc);
-                    };
-                }
-                @default => {
-                    f.arg = self.box(self.pair(f.arg[], callback, call.loc));
-                };
+    if !call.expr&.is(.Call) {
+        // It might just be a function access. like 'while {| _ } {| _ }' should be valid.
+        call[] = self.expr((Call = (f = self.box(call[]), arg = self.box(callback))), call.loc);
+        return();
+    };
+    f := call.expr.Call&;
+    @match(f.arg.expr&) {
+        // TODO: have it work with named arguments. Need to support mixing named and positional.
+        fn Tuple(parts) => {
+            parts.push(callback, self.alloc);
+        }
+        // Parser flattened empty tuples.
+        fn Value(v) => {
+            if v.bytes.is_unit() {
+                f.arg[] = callback;
+            } else {  
+                f.arg[] = self.pair(f.arg[], callback, call.loc);
             };
         }
         @default => {
-            // It might just be a function access. like 'while {| _ } {| _ }' should be valid.
-            call[] = self.expr((Call = (f = self.box(call[]), arg = self.box(callback))), call.loc);
+            f.arg = self.box(self.pair(f.arg[], callback, call.loc));
         };
     };
 }
@@ -1227,9 +1217,6 @@ fn peek_tag(self: *Parser) TokenType.Tag() = {
 }
 
 fn report_error(fmt_args: FatExpr, ret_loc: FatExpr) FatExpr #macro = {
-    @if(BOOTSTRAP_ONLY_MODE) {
-        fmt_args = @{"---"};
-    };
     @assert_eq(ret_loc.expr&.tag(), Expr.Tag().Tuple, "expected tuple");
     args := ret_loc.expr.Tuple.items();
     result := @{

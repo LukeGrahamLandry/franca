@@ -187,7 +187,6 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
     
     @match(task.action&) {
         fn EvalConstant(v) => {
-            @log_event("[TRY TASK] %: %%%", task.action&.tag(), self.pool.get(v.name.name), "%", v.name.id) self;
             name := v.name;
             var  := self.scopes.get_constant(name);
             var  := var.expect("var should always be known");
@@ -196,7 +195,6 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
         }
         fn CompileBody(fid) => {
             fid := fid[];
-            @log_event("[TRY TASK] %: % %", task.action&.tag(), fid, self.log_name(fid)) self;
             func := self.get_function(fid);
             if !func.get_flag(.EnsuredCompiled) {
                 zone := zone_begin(.SemaFunction); // TODO: defer
@@ -212,10 +210,7 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
         }
         fn Jit(fid) => {
             fid := fid[];
-            @log_event("[TRY TASK] %: % %", task.action&.tag(), fid, self.log_name(fid)) self;
             func := self.get_function(fid);
-            //self.codemap.show_error_line(func.loc);
-            //@log_event("%", func.log(self)) self;
             
             if !func.get_flag(.EnsuredCompiled) {
                 frontend_mutual := self.dispatch.function_in_progress&.get(fid.as_index());
@@ -227,11 +222,9 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
             // when possible, you want to emit_bc for callees first because they might get deduplicated. 
             waiting: List(*Task) = list(self.get_alloc());
             for func.callees { callee |
-                @log_event("% calls %", fid.as_index(), callee.as_index()) self;
                 callee_func := self.get_function(callee);
                 if !callee_func.get_flag(.AsmDone) {
                     if is_mutually_recursive(task, callee) {
-                        //@println("mutual recursion %", callee);
                         // TODO: add to mutual_callees and remove from callees. 
                         // TODO: make sure all mutual_callees are compiled somewhere. but rn this only decides mutual if we see that we're already working on it.
                         //       (easy direct cases are added in sema tho)
@@ -245,7 +238,6 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                 };
             };
             if waiting.len != 0 {
-                @log_event("sleep on %/% callees", waiting.len, func.callees.len) self;
                 return(Suspend = self.wait_for(All = waiting));
             };
             
@@ -256,7 +248,6 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
             ret_ty := func.finished_ret.expect("fill ret");
             @err_assert(!arg_ty.is_unknown() && !ret_ty.is_unknown(), "unknown fn types!!") return;
             
-            //@if(TRACE_SHIMS) @println("dispatch:jit F%: %", fid.as_index(), self.log_name(fid));
             TTT :: FuncImpl.Tag();
             normal_or_intrinsic :: @const_slice(TTT.Normal, TTT.Intrinsic); // ,i T.NewIntrinsic); we don't use emit_ir for comptime yet. 
             
@@ -290,7 +281,6 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
         fn ResolveOverload(f) => {
             self.dispatch.enclosing_function = f.callsite;  // TODO: make test that fails without this.
             overloads := self.dispatch.overloads&.nested_index(f.os.as_index());
-            @log_event("[TRY TASK] %: % %", task.action&.tag(), f.os, self.pool.get(overloads.name)) self;
             @debug_assert(f.call.expr.expr&.is(.Call), "overload resolve must be call");
             call := f.call.expr.expr.Call;
             zone := zone_begin(.SemaOverloads); // TODO: defer
@@ -359,20 +349,19 @@ fn Maybe($T: Type) Type = {
 }
 
 fn wait_for(s: *SelfHosted, t: Action) *Action = {
-    @log_event("[YIELD] %", t&.tag()) s;
     s.dispatch.yield_count += 1;
     mem := s.get_alloc().alloc(Action, 1);
     mem.ptr[] = t;
     mem.ptr
 }
 
-////////////////////
-/// Comptime Jit ///
-////////////////////
+//
+// Comptime Jit
+//
 
 put_jitted_import :: fn(self: *SelfHosted, f: FuncId, addr: rawptr) void = {
     func := self.get_function(f);
-    if func.get_flag(.TookPointerValue) || ENABLE_TRACY || TRACE_CALLS {
+    if func.get_flag(.TookPointerValue) || ENABLE_TRACY {
         self.created_jit_fn_ptr_value(f, addr.int_from_rawptr());
     };
 };

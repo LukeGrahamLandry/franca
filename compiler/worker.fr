@@ -14,7 +14,6 @@ fn main_thread_pump(comp: CompCtx, shared: *CodegenShared, fns: []FuncId) void =
     opts.target_os_bitset = opts.target_os_bitset.bit_or(1.shift_left(shared.m.goal.os.raw()));
     opts.target_arch_bitset = opts.target_arch_bitset.bit_or(1.shift_left(shared.m.goal.arch.raw()));
     
-    @assert(opts.implicit_context_runtime == env.static_context_var.is_none(), "should have baked the static context location already iff no implicit context");
     when := @if(shared.m.goal.type == .JitOnly, ExecStyle.Jit, .Aot);
     // TODO: really you want to mark them export
     for fns { f |
@@ -191,13 +190,14 @@ fn add_ns(t: *TimeSpec, nanoseconds: i64) void = {
     t.seconds += s;
 }
 
-// careful: emit_ir calls this while temp is valid
+// careful: emit_ir calls this while temp is invalid
 fn bouba_acquire(shared: *CodegenShared, idx: *i64) *CodegenEntry = {
     entry := acquire(shared, true, idx).unwrap();
     entry.arena&.reset_retaining_capacity();
     entry
 }
 
+// careful: emit_ir calls this while temp is invalid
 fn enqueue_task(shared: *CodegenShared, old_entry: *CodegenEntry) void = {
     ::tagged(@type old_entry.task);
     @debug_assert(!old_entry.task&.is(.Dead), "tried to enqueue dead task");
@@ -218,20 +218,12 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
         fn Dead() => @panic("dead codegen task %", m.initialized);
         fn Func(f) => {
             @if(ENABLE_ENABLE_TRACY) @if(ENABLE_TRACY) ___tracy_emit_zone_name(zone, f.globals.str(f.lnk.id));
-            //@if(TRACE_SHIMS)
-            //use_symbol(f.globals, f.lnk.id) { s | 
-            //    @println("codegen %", s.name);
-            //};
             f.globals.set_debug_types(logging, true);
             run_qbe_passes(f);
             f.globals.set_debug_types(logging, false);
         }
         fn Shim(it) => {
             m := it.f.globals;
-            //@if(TRACE_SHIMS)
-            //use_symbol(m, it.f.lnk.id) { s | 
-            //    @println("codegen(S) %", s.name);
-            //};
             
             m.set_debug_types(logging, true);
             run_qbe_passes(it.f);
@@ -251,7 +243,6 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
                     push_fixup(m, s, fix);
                 };
                 @debug_assert(s.got_lookup_offset != -1);
-                //@println("shim -> % slot=%", s.name, s.got_lookup_offset);
             };
         }
         fn Asm(it) => {
@@ -351,7 +342,6 @@ fn init(m: *QbeModule, arena: Alloc, worker: CodegenWorker, threaded: bool) *Cod
     s := arena.box_zeroed(CodegenShared); 
     s.threaded = threaded && use_threads;
     m.need_write_protect = !threaded && m.use_map_jit_on_apple_silicon;
-    //@println("threaded=% need_write_protect=% use_map_jit_on_apple_silicon=%", s.threaded, m.need_write_protect, m.use_map_jit_on_apple_silicon);
     s.queue = arena.alloc_zeroed(CodegenEntry, if(s.threaded, => codegen_queue_size, => 1));
     s.m = m;
     s.constants_used = empty(arena);
@@ -369,7 +359,7 @@ fn init(m: *QbeModule, arena: Alloc, worker: CodegenWorker, threaded: bool) *Cod
     s
 }
 
-// careful: emit_ir calls this while temp is valid
+// careful: emit_ir calls this while temp is invalid
 fn acquire(shared: *CodegenShared, $i_am_bouba: bool, idx: *i64) ?*CodegenEntry = {
     queue := shared.queue;
     @if(!shared.threaded) return(Some = queue.index(0));

@@ -9,8 +9,6 @@ EmitIr :: @struct(
     blk: *Qbe.Blk, 
     debug: bool,
     context := QbeNull,
-    static_context_var: ?BakedVarId,
-    dyn_context: bool,
     func: FuncId,
     blocks: List(*Qbe.Blk),
     when: ExecStyle,
@@ -64,8 +62,6 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
             blk = zeroed(*Qbe.Blk),
             blocks = list(temp()),
             debug = opts.debug_info || func.get_flag(.LogIr),
-            dyn_context = if(when == .Aot, => opts.implicit_context_runtime, => opts.implicit_context_comptime),
-            static_context_var = env.static_context_var,
             when = when,
             m = m,
             entry = entry,
@@ -75,9 +71,6 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
             idx = idx,
             pending_set_lib = list(outer_temp),
         );
-        if self.dyn_context && when == .Aot {
-            @debug_assert(self.static_context_var.is_none(), "ICE: dyn_context has static context??");
-        };
         @debug_assert(func.get_flag(.EnsuredCompiled), "fn not compiled?");
         m := self.shared.m;
         self.f.default_init(m);
@@ -252,13 +245,8 @@ fn compile_for_arg(self: *EmitIr, arg: *FatExpr) CRes([]Qbe.Ins) = {
 }
 
 fn context_par_e(self: *EmitIr) void #inline = {
-    if self.dyn_context {
-        // We might remove this instruction at the end if we decide this function can be #no_context. 
-        self.context = self.f.newtmp("context", .Kl);
-        self.emit(.pare, .Kl, self.context, QbeNull, QbeNull);
-    } else {
-        self.context = QbeNull;
-    };
+    self.context = self.f.newtmp("context", .Kl);
+    self.emit(.pare, .Kl, self.context, QbeNull, QbeNull);
 }
 
 fn finalize_blocks(self: *EmitIr) void = {
@@ -482,17 +470,6 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = { // #log_ir("AIR")
     result := @try(self.compile_expr(body, p1)) return;
     
     self.emit_ret(result);
-    
-    has_context := func.get_flag(.YesContext) && !func.get_flag(.NoContext);  // :copy-pastrae
-    if !has_context && self.dyn_context {
-        // :SLOW
-        self.f.start.ins.slice(0, self.f.start.nins.zext() - 1).copy_from(self.f.start.ins.slice(1, self.f.start.nins.zext()));
-        if self.context != QbeNull {
-            self.f.start.ins[self.f.start.nins.zext() - 1] = make_ins(.copy, .Kl, self.context, QbeConZero, QbeNull);  // TODO: why?
-        } else {
-            self.f.start.nins -= 1;
-        };
-    };
     self.finalize_blocks();
     
     .Ok
@@ -582,7 +559,6 @@ fn emit_runtime_call(
     
     self.f.leaf = false;
     if dyn_context && self.context != QbeNull {
-        @debug_assert(self.dyn_context && self.dyn_context, "tried to dyn context with static context");
         self.emit(.arge, .Kl, QbeNull, self.context, QbeNull);
     };
     cast: i64 = self.blk.nins.zext();  // TODO: ugh
@@ -803,7 +779,6 @@ fn compile_expr(self: *EmitIr, expr: *FatExpr, p: Placement) CRes(Qbe.Ref) = {
         fn Uninitialized() => {
             @err_assert(!expr_ty.is_never(), "call exit() to produce a value of type 'Never'") return;
             // Wierd special case I have mixed feelings about. should at least set to sentinal value in debug mode.
-            // TODO: if(opts.zero_init_memory, => self.zero_memory_at_top_of_stack(expr_ty));
             @match(p) {
                 fn Scalar()          => QbeConZero;
                 fn ScalarTransient() => QbeConZero;
@@ -998,57 +973,20 @@ fn emit_intrinsic_new(self: *EmitIr, op: *NewIntrinsicPayload, p: Placement, arg
 fn emit_intrinsic_old(self: *EmitIr, op: *i64, p: Placement, arg: []Qbe.Ref, caller: *Func, expr_ty: Type) CRes(Qbe.Ref) = {
     r := @switch(op[]) {
         @case(INTRINSIC_GET_ENV) => {
-            if self.dyn_context {
-                caller.set_flag(.YesContext);  // TODO: you might have setcontext for yourself
-                self.unify_placement(p&, expr_ty); // because we don't know if they'll set again before using. meh. 
-                self.context
-            } else {
-                if self.when == .Jit {
-                    // We want the jitted program to share the context with the compiler, 
-                    // but we can't access the address of the compiler's static context slot, 
-                    // so we just patch in a call to the compiler's own GetContext. 
-                    // It would be correct to do it this way when using implicit_context, 
-                    // but it's sad to be so wasteful when we could just read the register directly.  -- Nov 23
-                    self.jit_call_1to1(@as(rawptr) builtin_get_dynamic_context, arg[0])
-                } else {
-                    context_var := self.static_context_var.expect("have static_context_var for aot");
-                    self.reference_constant(context_var);
-                    ref := self.f.symcon(@tfmt("g%", context_var.id));
-                    context_val := self.f.newtmp("context", .Kl);
-                    self.emit(.load, .Kl, context_val, ref, QbeNull);
-                    context_val
-                }
-            }
+            caller.set_flag(.YesContext);  // TODO: you might have setcontext for yourself
+            self.unify_placement(p&, expr_ty); // because we don't know if they'll set again before using. meh. 
+            self.context
         };
-        @case(INTRINSIC_SET_ENV) => if self.dyn_context {
+        @case(INTRINSIC_SET_ENV) => {
             if self.context == QbeNull {
                 self.context = self.f.newtmp("context", .Kl);
             };
             self.emit(.copy, .Kl, self.context, arg[0], QbeNull);
             QbeConZero
-        } else {
-            if self.when == .Jit {
-                // see GetContext case
-                self.jit_call_1to1(@as(rawptr) set_dynamic_context, arg[0])
-            } else {
-                context_var := self.static_context_var.expect("have static_context_var for aot");
-                self.reference_constant(context_var);
-                ref := self.f.symcon(@tfmt("g%", context_var.id));
-                self.emit(.storel, .Kw, QbeNull, arg[0], ref);
-                QbeConZero
-            }
         };
         @default => @panic("unchandled old intrinsic %", op[]);
     };
     (Ok = self.scalar_result(p, r, expr_ty))
-}
-
-fn jit_call_1to1(self: *EmitIr, callee: rawptr, arg: Qbe.Ref) Qbe.Ref = {
-    result := self.f.newtmp("c", .Kl);
-    callee := self.f.getcon(callee.int_from_rawptr());
-    self.emit(.arg, .Kl, QbeNull, arg, QbeNull);
-    self.emit(.call, .Kl, result, callee, QbeNull);
-    result
 }
 
 fn func_ref(self: *EmitIr, f_id: FuncId) Qbe.Ref #inline = {
@@ -1186,24 +1124,6 @@ fn reference_constant(self: *EmitIr, id: BakedVarId) void = {
         seen.set(id.id.zext());
         value := self.program.get_baked(id);
         
-        if false {
-            if value.loc.high != 0 && value.loc.low != 0 {
-                self.program.data.cast()[][].codemap.show_error_line(value.loc, true /*TODO*/);
-            };
-            msg := u8.list(temp());
-            @fmt(msg&, "% %: ", value.len(), value.template&.is(.Zeroes));
-            @if_let(value.template) fn Bytes(it) => {
-                for it { it | 
-                    if it >= 32 && it < 127 {
-                        msg&.push(it);
-                    } else {
-                        @fmt(msg&, "'%'", it);
-                    }
-                };
-            };
-            eprintln(msg.items());
-        };
-        
         for value.relocations { it |
             @match(it.target) {
                 fn BakedVarId(it) => self.reference_constant(it);
@@ -1311,8 +1231,6 @@ fn emit_call_if(self: *EmitIr, arg: *FatExpr, p: Placement) CRes(Qbe.Ref) #once 
     };
     (Ok = join_val)
 }
-
-// TODO: use if for single prong (maybe in backend?)
 
 // TODO: use phi for scalars. 
 fn emit_switch(self: *EmitIr, arg: *FatExpr, p: Placement) CRes(Qbe.Ref) #once = {

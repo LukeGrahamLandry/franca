@@ -75,11 +75,6 @@ fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(Ty(bool, bool)) #once =
 fn decl_var_pattern(self: *SelfHosted, stmt: *FatStmt) Maybe(Ty(bool, bool)) #once = {
     @debug_assert(stmt.stmt&.is(.DeclVarPattern));
     bindings, value := (stmt.stmt.DeclVarPattern.binding.bindings&, stmt.stmt.DeclVarPattern.value&);
-    if value.is_raw_unit() {
-        // TODO: typecheck the pattern! this was fine a long time ago when this node was only made by closures. 
-        stmt.stmt = .Noop;
-        return(Ok = (true, false));
-    };
     
     if bindings.len == 1 {
         b := bindings[0]&;
@@ -92,12 +87,11 @@ fn decl_var_pattern(self: *SelfHosted, stmt: *FatStmt) Maybe(Ty(bool, bool)) #on
         // match branch that doesn't specify an argument gets here. (because parser puts in fake Binding with name=None).
         // just to be safe, still keep the expression in case it somehow happens in a different situation and has side effects.
         stmt.stmt = (Eval = value[]);
-        //@println("% %", FatExpr.int_from_ptr(stmt.stmt.Eval&), stmt.stmt.Eval.expr&.tag());
-        //self.codemap.show_error_line(stmt.loc);
-        //println(stmt.stmt.Eval&.log(self));
         @check(self.compile_expr(stmt.stmt.Eval&, .None)) return;
         return(Ok = (stmt.stmt.Eval.done, false));
     };
+    
+    @err_assert(bindings.len == 0 || !value.is_raw_unit(), "tried to destructure void literal to multiple bindings") return;
     
     // So its not a tuple, we don't know how to destructure it (emit_bc does), but we can still type check it. 
     // Even if it was a tuple, all we'd do differently is pass in the ResultTypes seperatly, but now we can just do that for any expression. 
@@ -358,7 +352,6 @@ fn deref_one(self: *SelfHosted, ptr: *FatExpr) Maybe(void) = {
 }
 
 fn decl_var(self: *SelfHosted, name: Var, ty: *LazyType, value: *FatExpr) Maybe(void) = {
-    @log_event("decl_var %", name&.log(self)) self;
     // TODO: this would make sense but i don't actually need it i guess since i store variable types globally.
     //@debug_assert(self.dispatch.enclosing_function.is_some(), "ICE: runtime vars must have an enclosing function");
     no_type := ty.is(.Infer);
@@ -455,7 +448,6 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
             @if_let(b.name) fn Var(name) => {
                 @debug_assert(b.kind == name.kind);
                 is_new := self.scopes.put_var_type(name, b.ty&.unwrap());
-                @log_event("bind param %", name&.log(self)) self;
                 if(!is_new, => return(@err("overwrite arg? %", name&.log(self))));
             };
         };
@@ -521,7 +513,6 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
         ));
     };
     
-    @log_event("body compiled: % %", fid.as_index(), self.log_name(fid)) self;
     func.set_flag(.EnsuredCompiled);
     .Ok
 }
@@ -604,7 +595,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
     }
     
     // TODO: find_import/resolve_comptime_import/resolve_comptime_import all kinda do the same thing
-    find_import :: fn(lib_name: Symbol) bool => {
+    find_import :: fn(lib_name: Symbol) void => {
         ret :: local_return;
         handle2 := self.comptime_libraries&.get(lib_name);
         is_libc := lib_name == Flag.libc.ident(); 
@@ -617,7 +608,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                 impl[] = (name = func.name, lib = lib_name, comptime = addr.int_from_rawptr());
                 
                 //func.set_flag(.NoMangle);
-                ret(true);
+                ret();
             };
             handle2 = .None;
             // :MultiDylibLibc HACK
@@ -634,10 +625,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
         impl := find_or_create_impl(func.body&, self.get_alloc(), .DynamicImport);
         impl.name = func.name;
         impl.lib = lib_name;
-        //@if(func.name != Flag.___this_function_is_not_real_im_just_testing_the_franca_compiler.ident())
-            //@eprintln("TODO: maybe missing import %", self.log_name(fid));
         @try(self.create_jit_shim(fid)) return;
-        false
     };
     
     check_body := true;
@@ -649,9 +637,8 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                 good = true;
                 func.set_flag(.NoContext);
                 
-                if !find_import(Flag.libc.ident()) {
-                    // TODO: else fall back to the driver with resolve_comptime_import?
-                };
+                find_import(Flag.libc.ident());
+                // TODO: else fall back to the driver with resolve_comptime_import?
             };
             @case(Flag.import.ident()) => {
                 // :io_driver
@@ -660,9 +647,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                     fn None() => Flag.SYMBOL_ZERO.ident();
                 };
                 
-                if !find_import(lib_name) {
-                    self.resolve_comptime_import(fid, func, lib_name);
-                };
+                find_import(lib_name);
                 
                 good = true;
             };
@@ -910,11 +895,6 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
                 @check(self.coerce_const_expr(expr, requested, false)) return;
             };
         };
-            //if !self.ask_can_assign(type, expr.ty) {
-            //    @println("% vs %", self.log_type(type), self.log_type(expr.ty));
-            //    @println("%", expr.log(self));
-            //};
-        //};
     };
     @debug_assert(!expr.ty.is_unknown(), "not typed");
     .Ok
@@ -928,7 +908,6 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
     todo_dont_lose := self.dispatch.enclosing_function;
     old_loc := self.last_loc;
     self.last_loc = expr.loc;
-    //@log_event("compile_expr % %", expr.log(self), self.dispatch.enclosing_function&.tag()) self;
     
     @match(expr.expr&) {
         fn Poison(placeholder) => {
@@ -962,9 +941,6 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
             dead := false;
             all_nop := true;
             each f.body { stmt | 
-                // TODO: maybe this is dumb. should give warning? 
-                //       but it makes it faster at compiling -boot-only because i do that by inserting `return()`
-                //       at the ftop of functions and this lets that just delete the unused code without checking it. 
                 if dead { 
                     stmt.stmt = .Noop;
                 } else {
@@ -1136,7 +1112,6 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
                     }
                     fn Specific(f_ty) =>{
                         @if_let(self.get_type(f_ty)) fn Fn(f_ty) => {
-                            @log_event("% infer closure return from requested. %", fid, self.log_type(f_ty.ret)) self;
                             func.ret = (Finished = f_ty.ret);
                         };
                     }
@@ -1423,7 +1398,6 @@ fn compile_quote(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe
     expr_ty := @unwrap(self.env.fat_expr_type, "used quoted ast during bootstrapping") return;
     value := self.to_values(FatExpr, arg[]);
     expr.set(value, expr_ty);
-    @log_event("quote with % placeholders", walk.placeholders.len) self;
         
     if !walk.placeholders.is_empty() {
         walk.placeholders&.push(expr[]);
@@ -1457,7 +1431,6 @@ fn compile_fn_ptr(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
     if self.dispatch.enclosing_function { current_f |
         current := self.get_function(current_f);
         current.mutual_callees&.add_unique(fid, self.get_alloc());
-        @log_event("added % mutual calls %", current_f, fid) self;
         record_function_call(c = self, caller = current_f, callee = fid);
     };
     
@@ -1777,7 +1750,6 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
 
     fid := @check(self.immediate_eval_expr(f_expr, f_expr.ty)) return;
     fid := FuncId.assume_cast(fid&)[];
-    @log_event("compile direct call %", fid) self;
     func := self.get_function(fid);
     
     if func.get_flag(.UnboundGenerics) {
@@ -1830,7 +1802,6 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
         //@check(self.can_assign(arg_ty, arg_expr.ty)) return; TODO: type check
         @check(self.infer_return(fid)) return;
         ret_ty := func.finished_ret.expect("known ret");
-        @log_event("UnsafeNoopCast % -> %", self.log_type(arg_ty), self.log_type(ret_ty)) self;
         expr.expr = (Cast = arg_expr);
         expr.ty = ret_ty;
         expr.done = arg_expr.done;
@@ -1909,7 +1880,6 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
         _ := @check(self.immediate_eval_expr(f_expr, f_expr.ty)) return;
     };
     if func.get_flag(.TryConstantFold) && allow_fold && arg_expr.is_const() {
-        @log_event("TryConstantFold %", expr.log(self)) self;
         value := @check(self.immediate_eval_expr(expr, ret_ty)) return;
         expr.set(value, ret_ty); // TODO: redundant?
         return(.Ok);
@@ -1991,11 +1961,7 @@ fn add_callee(self: *SelfHosted, fid: FuncId) bool = {
         } else {
             current.callees&.add_unique(fid, self.get_alloc());
         };
-        @log_event("added % calls %", current_f, fid) self;
         record_function_call(c = self, caller = current_f, callee = fid);
-    };
-    if is_const_context {
-        @log_event("skip adding callee for %", fid) self;
     };
     is_const_context
 }
@@ -2012,7 +1978,6 @@ fn quick_guess_type(self: *SelfHosted, expr: *FatExpr) ?Type = {
 
 // Replace a call expr with the body of the target function.
 fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, requested: ResultType) Maybe(bool) #once = {
-    @log_event("emit_capturing_call %", f) self;
     @try(self.ensure_resolved_body(f)) return; // it might not be a closure. it might be an inlined thing.
     @debug_assert(expr_out.expr&.is(.Call));
     arg_expr := expr_out.expr.Call.arg;
@@ -2288,7 +2253,6 @@ fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg
     //self.comp().zero_padding(type, to_zero&);
     
     if self.dispatch.const_bound_memo&.get(key&) { new_f |
-        @log_event("reuse baked const args % -> % %", original_f, new_f, self.log(key._1&, type)) self;
         func := self.get_function(new_f);
         if func.get_flag(.AnyConstArgs) {
             @check(self.ensure_resolved_sign(new_f)) return;
@@ -2331,8 +2295,6 @@ fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg
         renumber&.walk_func(new_func&);
     };
     new_fid := self.add_function(new_func);
-    @log_event("bake const args % -> % %", original_f, new_fid, self.log(key._1&, type)) self;
-    //@println("%", self.get_function(new_fid).log(self));
     // TODO: mark func as in progress somehow so nobody can yield on it. 
     //       tho really i feel like you want to make this whole operation yield-able,
     //       currently you could get into a situation with a lot of redundant work i think.  
@@ -2354,7 +2316,6 @@ fn maybe_renumber_and_dup_scope(self: *SelfHosted, new_func: *Func, mapping: *Re
 }
 
 fn curry_const_args_inner(self: *SelfHosted, original_f: FuncId, new_fid: FuncId, f_expr: *FatExpr, arg_expr: *FatExpr, initial_removed_count: i64) Maybe(FuncId) = {
-    @log_event("work baking const args % -> %", original_f, new_fid) self;
     func := self.get_function(new_fid);
     old_func := self.get_function(original_f);
     original_arg_count := old_func.arg.bindings.len();
@@ -2399,7 +2360,6 @@ fn curry_const_args_inner(self: *SelfHosted, original_f: FuncId, new_fid: FuncId
                 
             };
             
-            @log_event("%: check %/%", i, i-removed_count, original_arg_count) self;
             arg_expr := arg_expr.expr.Tuple[i]&;
             if b.kind != .Const {
                 if b.ty&.is(.Infer) {
@@ -2414,7 +2374,6 @@ fn curry_const_args_inner(self: *SelfHosted, original_f: FuncId, new_fid: FuncId
             name := or b.var() {
                 return(@err("arg needs name (unreachable?)"))
             };
-            @log_event("bake arg %: %", i, name&.log(self)) self;
             // TODO: if you yield here, you spam clone the function. 
             
             // We might not be able to know the types expected for each parameter up front (because they can reference previous consts),
@@ -2457,7 +2416,6 @@ fn curry_const_args_inner(self: *SelfHosted, original_f: FuncId, new_fid: FuncId
 fn bind_const_arg(self: *SelfHosted, o_f: FuncId, arg_name: Var, arg_value: Values, arg_ty_found: Type, loc: Span, b: *Binding) Maybe(void) = {
     // I don't want to renumber, so make sure to do the clone before resolving.
     // TODO: reslove captured constants anyway so dont haveto do the chain lookup redundantly on each speciailization. -- Apr 24
-    @log_event("Bind $% = %", arg_name&.log(self), arg_value&) self;
     func := self.get_function(o_f);
     @debug_assert(func.get_flag(.ResolvedBody) && func.get_flag(.ResolvedSign));
     arg_ty := @check(self.get_type_for_arg(func.arg&, arg_name)) return;
@@ -2710,7 +2668,6 @@ fn adjust_named_arguments(self: *SelfHosted, fid: FuncId, arg_expr: *FatExpr) Re
         arg_expr.expr = (Tuple = args.as_raw());
         arg_expr.done = false;
         arg_expr.ty = UnknownType;
-        @log_event("after named %", arg_expr.log(self)) self;
     };
     .Ok
 }
@@ -2800,10 +2757,8 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
                 attempt.options&.push_assume_capacity(option);
             };
         };
-        //@println("% %", attempt.last_ready_count, overloads.ready.len);
         attempt.last_ready_count = overloads.ready.len;
     };
-    @log_event("checking %/% options", attempt.options.len, overloads.ready.len) self;
     want_arity := arity(arg_expr);
     ::if([]FatExpr);
     parts := if(arg_expr.expr&.is(.Tuple), => arg_expr.expr.Tuple.items(), => (ptr = arg_expr, len = 1));
@@ -2891,7 +2846,6 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
     
     if attempt.state < 2 {
         start(2, "");
-        //@println("%) % has % options", attempt.state, self.pool.get(overloads.name), attempt.options.len);
         enumerate parts { arg_index, arg_expr | 
             continue :: local_return;
             type := self.type_of(arg_expr);
@@ -2927,16 +2881,12 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
                         if arg_expr.is_const() { // this helps with :type_through_field
                             res := self.ask_coerce_const_expr(arg_expr, param, true);
                             if res&.is(.Ok) && res.Ok {
-                                @log_event("% [%] allow coerce arg % <- %", fid, arg_index, self.log_type(param), self.log_type(type)) self;
                                 continue();
                             };
                         };
                         
-                        //@log_event("% [%] reject arg % <- %", fid, arg_index, self.log_type(param), self.log_type(type)) self;
                         reject();
                     };
-                    
-                    //@log_event("% [%] allow arg % <- %", fid, arg_index, self.log_type(param), self.log_type(type)) self;
                 };
             };
             are_we_done_yet();
@@ -2949,7 +2899,6 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
     if attempt.state < 3 {
         start(3, "");
         @if_let(attempt.call.requested) fn Specific(type) => {
-            //@println("%) % has % options", attempt.state, self.pool.get(overloads.name), attempt.options.len);
             current_len := attempt.options.len;
             f_i := if(!had_new_overloads, => attempt.prev_index, => attempt.options.len);
             while => f_i > 0 {
@@ -2973,7 +2922,6 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
                 };
             };
             are_we_done_yet();
-            //@println("requested %", self.log_type(type));
         };
         attempt.state = 3;
         end();
@@ -2981,7 +2929,6 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
     
     if attempt.state < 4 {
         start(4, "");
-        //@println("%) % has % options", attempt.state, self.pool.get(overloads.name), attempt.options.len);
         enumerate parts { arg_index, arg_expr | 
             continue :: local_return;
             @check(self.compile_expr(arg_expr, .None)) return2;
@@ -3004,11 +2951,8 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
                 b := func.arg.bindings.index(arg_index);
                 if b.ty&.ty() { param | 
                     if !self.ask_can_assign(param, type) {
-                        //@println("[%] reject arg % <- %", arg_index, self.log_type(param), self.log_type(type));
                         reject();
                     };
-                    
-                    //@println("[%] allow arg % <- %", arg_index, self.log_type(param), self.log_type(type));
                 };
             };
             are_we_done_yet();
@@ -3019,7 +2963,6 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
     
     if attempt.state < 5 {
         start(5, "");
-        //@println("%) % has % options", attempt.state, self.pool.get(overloads.name), attempt.options.len);
         enumerate parts { arg_index, arg_expr | 
             continue :: local_return;
             
@@ -3245,8 +3188,6 @@ fn instantiate_where_generic(self: *SelfHosted, template: FuncId, generic_types:
 
 fn done_resolving_overload(self: *SelfHosted, attempt: *OverloadAttempt, overloads: *OverloadSetData, arg_expr: *FatExpr) FuncId = {
     fid := attempt.options[0];
-    @log_event("selected % from '%'", fid, self.pool.get(overloads.name)) self;
-    
     if !arg_expr.ty.is_unknown() {
         req := UnknownType;
         @if_let(attempt.call.requested) fn Specific(t) => {
@@ -3263,7 +3204,6 @@ fn done_resolving_overload(self: *SelfHosted, attempt: *OverloadAttempt, overloa
 
 fn check_promote_id_to_func(self: *SelfHosted, fid: FuncId, f_ty: FnType) Maybe(void) = {
     func := self.get_function(fid);
-    //@println("check_promote_id_to_func func <- funcid %", self.log_type(self.intern_type(Fn = f_ty)));
     //partial_args := @check(self.infer_arguments_partial(fid)) return;
     
     // this allows missing type annotations on '=' function args in situations like import_c's parser handlers. 
@@ -3295,7 +3235,6 @@ fn check_promote_id_to_func(self: *SelfHosted, fid: FuncId, f_ty: FnType) Maybe(
     if func.finished_ret { ret | 
         @check(self.can_assign(f_ty.ret, ret)) return;
     };
-    //@println("const_coerce func <- funcid %", self.log_type(want));
     .Ok
 }
 
@@ -3348,7 +3287,6 @@ fn resolve_in_overload_set(self: *SelfHosted, f_ty: FnType, i: OverloadSet, loc:
     self.compute_new_overloads(overloads);
     
     interesting: List(FuncId) = list(temp());
-    @log_event("% total options", overloads.ready.len) self;
     for overloads.ready { opt | 
         continue :: local_return;
         func := self.get_function(opt);
@@ -3437,7 +3375,6 @@ fn resolve_in_overload_set(self: *SelfHosted, f_ty: FnType, i: OverloadSet, loc:
     interesting = still_interesting;
     
     if !blocked.is_empty() {
-        @log_event("block len = %", blocked.len) self;
         return(Suspend = blocked[0]);  // TODO: return all? don't just pick one. 
     };
     
@@ -3481,7 +3418,6 @@ fn do_merges(self: *SelfHosted, options: *List(FuncId), os: OverloadSet) Maybe(v
         func.set_flag(.EnsuredCompiled);
     };
     
-    //@println("doing merges %", self.pool.get(overloads.name));
     f_i := options.len;
     while => f_i > 0 {
         continue :: local_return;
@@ -3554,14 +3490,11 @@ fn hoist_constants(self: *SelfHosted, body: []FatStmt) Maybe(void) #once = {
                 if func.var_name& { var |
                     // TODO: allow function name to be any expression that resolves to an OverloadSet so you can overload something in a module with dot syntax.
                     // TODO: distinguish between overload sets that you add to and those that you re-export
-                    //@debug_assert(!func.get_flag(.ResolvedSign), "unresolved"); // TODO!
-                    //@debug_assert(!func.get_flag(.ResolvedBody), "unresolved"); // TODO!
                     // TODO: assert placeholdervalue
                     
                     i := @check(self.get_or_create_overloads(var.name, var.scope, func.loc)) return;
                     os := self.dispatch.overloads&.nested_index(i.as_index());
                     os.pending&.push(fid, self.get_alloc());
-                    @log_event("add to os % (%) for %", i.as_index(), var.log(self), fid) self;
                     overload_out = (Some = i);
                 };
                 
@@ -3743,9 +3676,6 @@ fn took_pointer_value(self: *SelfHosted, fid: FuncId) void = {
             };
             remember(s.shim_addr);
             remember(s.jit_addr);
-            //@println("% J% S%", s.name, s.jit_addr, s.shim_addr);
-            //got_addr := m.segment_address(.ConstantData, s.got_lookup_offset);
-            //remember(rawptr.ptr_from_raw(got_addr)[]);
             done = !s.jit_addr.is_null();
         };
         // Note: else is not `Suspend = self.wait_for(Jit = fid)` because of cycles, we defer to the backend to deal with finializing it. 
@@ -3773,7 +3703,6 @@ fn find_const(self: *SelfHosted, name: Var, requested: ResultType) Maybe(Ty(Valu
     
     var := self.scopes.get_constant(name);
     if var& { var | 
-        //@println("find_const %", name&.log(self));
         // If we've compiled this before, great.
         //     We can't coerce_constant here because we don't have a unique expression node to stick changes into if needed. 
         //     (need to change the expression to create function pointers because they might not be compiled yet)
@@ -3838,7 +3767,6 @@ fn handle_declare_constant(self: *SelfHosted, name: Var, ty: *LazyType, value: *
         };
         real_value_box := invocation.arg;
         hole := self.intern_type(.Placeholder);
-        @log_event("% = @rec %", name&.log(self), hole) self;
         self.set(value, Type, hole);
         self.save_guessed_name(hole, name.name);
         // This can't just fallthrough and call update_placeholder at the end of this function like the old version did,
@@ -3892,7 +3820,6 @@ fn handle_finish_rec_type(self: *SelfHosted, hole: Type, name: Var, value: *FatE
     result_type := @check(self.eval(value, Type)) return;
     assert(result_type != hole, "ICE: @rec resolved to itself");
     self.update_placeholder(hole, result_type, name.name);
-    @log_event("update_placeholder @rec % -> %", hole, result_type) self;
     .Ok
 }
 
@@ -4047,7 +3974,6 @@ fn ask_coerce_const_expr(self: *SelfHosted, expr: *FatExpr, want: Type, query: b
                     @err_assert(expr.expr&.is(.Value), "TODO: imm_eval const int cast") return;
                     value := expr.expr.Value.bytes&;
                     v := @try(value.int_value(have_int[])) return;
-                    //@println(" % % %", min, max, v);
                     if v <= max && v >= min {
                         if(query, => return(Ok = true));
                         value.adjust_int_length(want_int);
@@ -4161,7 +4087,6 @@ fn ask_can_assign_inner(self: *SelfHosted, want: Type, found: Type) bool = {
         }
         fn Fn(f) => {
             if want == FuncId {
-                //@println("can_assign func -> funcid %", self.log_type(want));
                 return(true);
             };
         }
@@ -4209,7 +4134,6 @@ fn ask_can_assign_inner(self: *SelfHosted, want: Type, found: Type) bool = {
         fn Fn(f) => {
             if found == FuncId {
                 // TODO: typecheck!!
-                //@println("can_assign func <- funcid %", self.log_type(want));
                 return(true);
             };
         }
@@ -4248,7 +4172,6 @@ fn resolve_by_type(self: *SelfHosted, os: OverloadSet, f_ty: FnType, loc: Span) 
 ::?FnType;
 fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Values) = {
     self.last_loc = expr.loc;
-    @log_event("imm_eval %", expr.log(self)) self;
     @debug_assert(!ret_ty.is_unknown(), "immediate_eval_expr unknown");
     old_func := self.dispatch.enclosing_function;
     self.dispatch.enclosing_function = .None;
@@ -4315,7 +4238,6 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
                         self.dispatch.enclosing_function = old_func;
                         return(Ok = val);
                     };
-                    //@println("imm call %", self.get_function(fid).log(self));
                 } else {
                     self.dispatch.function_in_progress&.set(fid.as_index());
                     self.dispatch.enclosing_function = old_func;
@@ -4373,7 +4295,6 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
     // This operation is make_lit_function from the old compiler. 
     // We know we'll yield to compile the new function, and don't want its body to alias the old expr. 
     
-    //@println("slow imm eval %", expr.log(self));
     bindings: List(Binding) = list(self.get_alloc());
     bindings&.if_empty_add_unit();
     arg: Pattern = (bindings = bindings.as_raw(), loc = expr.loc);
@@ -4402,21 +4323,9 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
     fake_func&.set_flag(.TryConstantFold);
     fake_func.finished_arg = (Some = void);
     fake_func.finished_ret = (Some = ret_ty);
-    
-    @if(TRACE_CALLS) {  
-        s := expr.log(self);
-        s.len = min(s.len, 45);
-        each s { c |
-            if c[] == "\n".ascii() {
-                c[] = "\\".ascii();
-            };
-        };
-        fake_func.name = self.pool.insert_owned(s.clone(self.get_alloc()).items());
-    };
-    
+   
     fake_func.cc = (Some = .CCallReg);    
     fid := self.add_function(fake_func);
-    @log_event("imm eval wait for lit %: %", fid, expr.log(self)) self;
     f_expr := self.box(self.to_expr(FuncId, fid, expr.loc));
     expr.expr = (Call = (f = f_expr, arg = self.make_unit_expr(expr.loc)));  // so we try this task again, we get an easy function call.
     expr.done = false;
@@ -4523,7 +4432,6 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
 
 fn create_slice_type(self: *SelfHosted, inner: Type, loc: Span) Maybe(Type) = {
     // TODO: this is called 3208 times when self-compiling. Aug 29. 
-    @log_event("Create slice %", inner) self;
     f     := @unwrap(self.env.make_slice_t, "slice type not ready!") return;  
     arg   := self.to_expr(Type, inner, loc);
     value := @check(self.invoke(f, self.box(arg), Type, loc)) return;  // :get_or_create_type
@@ -4563,14 +4471,7 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
     };
     pair := self.tuple_of(@slice(fat_expr_type, fat_expr_type));
     
-    @log_event("call user macro %", invocation.handler.log(self)) self;
     single := invocation.target.is_raw_unit();
-    if single {
-        @log_event("macro input: %", invocation.arg.log(self)) self;
-    } else {
-        @log_event("macro input: (%, %)", invocation.arg.log(self), invocation.target.log(self)) self;
-    };
-    
     @check(self.compile_expr(invocation.handler, .None)) return;
     if invocation.handler.ty == OverloadSet {
         os := @check(self.eval(invocation.handler, OverloadSet)) return; 
@@ -4604,7 +4505,6 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
     zone := zone_begin(.CallDynamic);
     expr[] = callee(invocation.arg[], invocation.target[]);  // :call_dynamic_values
     zone_end(zone);
-    @log_event("macro output: %", expr.log(self)) self;
     .Ok
 }
 
@@ -4923,14 +4823,12 @@ fn handle_expr(self: *Unquote, expr: *FatExpr) Result(DoMore, *CompileError) #on
             //expr_ty := self.compiler.env.fat_expr_type.expect("used unquote ast while bootstrapping");
             // Note: take <arg> but replace the whole <expr>
             idx := self.placeholders.len;
-            //@log_event("Placeholder(%) <- %", idx, arg.log(self.compiler.pool));
             self.placeholders&.push(arg[]);
             expr[] = (expr = (Placeholder = idx), loc = expr.loc, ty = UnknownType, done = false);
         }
         fn Placeholder(idx) => {
             @err_assert(idx < self.placeholders.len, "ICE: invalid unquote placeholder index %", idx) return;
             value := self.placeholders.index(idx); // TODO: make it more obvious that its only one use and the slot is empty.
-            //@log_event("Placeholder(%) -> %", idx, value.log(self.compiler.pool));
             @err_assert(!value.expr&.is(.Poison), "ICE: missing placeholder for unquote") return;
             // This clone fixes a renumbering problem. :double_use_quote
             expr[] = value.deep_clone(self.compiler.get_alloc());

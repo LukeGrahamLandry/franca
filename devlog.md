@@ -8,7 +8,27 @@ when jitting which doesn't need to bake constants.
 yeah, SLOW_MEMORY_DEBUGGING=true, use_threads=false, can't `driver.dylib build examples/toy/hello.fr`
 - fix yesterdays discovery. call set_library on the codegen thread
 - that seems to have fixed the random failures and more cache files repro but still not all. 
-
+also fixed linux, so i guess that just exacerbated the race somehow? 
+- my theory of self_hash being the same accross architectures was wrong :(,
+tho in hindsight it's not unreasonable that you'd load different files, 
+like `lib/sys/linux.fr` doesn't need to be loaded when compiling on mac targetting mac...
+but it is anyway so that doesn't narrow down the problem. 
+oh it's because -syscalls doesn't load lib/sys/subprocess.fr because that's just in llvm_mc_dis(),
+the point remains maybe that's not the best idea tho. 
+- hmmmm i had to add .syscall to amd_flag_op to compile on linux which is fair but why was i able to cross compile to it, that seems bad. 
+nvm, it must be something that runs at comptime but not runtime, which is fine. 
+- experiment with more dynamic `@fmt`
+  - don't use the get_jitted that tries to compile the function first because display(i64) is recursive
+  - call created_jit_fn_ptr_value in vtable.get_jitted_ptr
+  - not any smaller binary. bleh. i guess what you save in codegen you pay in vtable. 
+  but it did find a compiler bug so keeping it as a test program. 
+- got rid of some random junk
+  - why pretend to support static context if i never test it
+  - why have a bunch of commented out prints
+  - why have ExportVTable that i never use
+  - why use a power of 2 in vnew, vgrow does the doubling anyway
+  - test for trying to destructure `void`
+ 
 TODO: use IS_BOOTSTRAPPING to make run_tests -- boot work with latest compiler as well. 
 TODO: clear cache before tests just in case
 
@@ -41,7 +61,7 @@ function $main__720() {  # nblk=2
 ```
 only with -syscalls tho. linking glibc it's fine. and `-frc -syscalls` and then 
 run by the `syscalls` compiler is also fine. 
-TODO: still doesn't work
+mystery
 - complexify backend/incremental.fr/check()   
 // Doing it this way instead of `X :: fn=>; X(self.dep&); ...etc;` saves 4kb (says bloat.fr).   
 // Would be nice if i could let you express that gain without it sucking so much.   

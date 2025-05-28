@@ -191,7 +191,6 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         start := timestamp();
         opts := vtable.default_build_options(); 
         opts.retain_function_names = true;
-        opts.implicit_context_runtime = query_context_is_implicit();
         // this needs to be set based on the host. 
         // ie. if you build the compiler targetting an environment without a libc, 
         // we can't just produce a libc when loading a driver program. 
@@ -270,8 +269,6 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         
         cc := m.get_addr(name) || @panic("ICE: lost %", name);
         
-        maybe_log_scopes(self);
-        
         callee = (Some = assume_types_fn(Arg = *ImportVTable, Ret = void, ptr = cc));
     };
     
@@ -315,8 +312,8 @@ fn comptime_compute_self_hash() Array(u32, 8) = :: {
     @if(!IS_BOOTSTRAPPING) // :UpdateBoot
     each self.codemap.files { it |
         // uncomment to check that the compilation order hack with set_self_hash is working. 
-        // println(it.name);  
         if is_cachable(it.name) {
+            // println(it.name);
             hash = bit_xor(hash, it.hash);
         }
     };
@@ -446,17 +443,6 @@ fn choose_cache_filename(path: Str) Str = {
 fn cache_dir() Str = 
     @tfmt("%/cache/", get_environment_variable("FRANCA_TARGET_DIR") || "target/franca");
 
-fn dump_tasks(self: *SelfHosted) void = {
-    @println("[% active tasks]", self.dispatch.active_tasks.len);
-    out: List(u8) = list(temp());
-    enumerate self.dispatch.active_tasks { i, task | 
-        @fmt(out&, "- [%] ", i);
-        task.action&.log(self, out&);
-        out&.push_all("\n");
-    };
-    println(out.items());
-}
-
 // I'd rather include it in the binary but I do this so I don't have to wait for the compiler to recompile every time I change the lib
 // (maybe include_bytes in a seperate crate would make it better)
 // I also like that users can put the lib somewhere an edit it for thier program. I dont want the compiler to just force its blessed version.
@@ -514,7 +500,6 @@ fn find_std_lib(a: Alloc) ?Str = {
 
 // TODO: pass requested type through generic args so this isn't so clunky. -- Jun 23
 fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
-    opts.implicit_context_comptime = query_context_is_implicit();
     stack_base := 0;
     a: ArenaAlloc = init(page_allocator, 1.shift_left(23));
     arena := a&.borrow().boxed(ArenaAlloc, a);
@@ -617,16 +602,6 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
     self.init_fixed_types();
     self.pool.fill_fixed_flags();
     
-    // Only needed if targetting AOT but its so cheap so who cares. 
-    if !opts.implicit_context_runtime {
-        // Reserve a global slot to store the context pointer. 
-        // The program can only access this with GetContext and SetContext. 
-        out: List(BakedEntry) = list(a);
-        out&.push((Num = (value = 0)));
-        id := self.bake_legacy((VoidPtrArray = out.as_raw()), .None);
-        env.static_context_var = (Some = id); 
-    };
-
     // :MultiDylibLibc HACK  TODO: need a first class way to talk about one logical library that's split into multiple files. 
     enumerate find_os_libc_dylib() { i, libc_path |
         if Dyn'open(libc_path[]) { libc |

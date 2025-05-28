@@ -81,11 +81,11 @@ fn format_into(writer: FatExpr, args: Slice(FatExpr), loc: Span) FatExpr = {
         });
     };
     
-    params := args.rest(1);  // TODO: fix bounds check when this is one long?
-    
+    params := args.rest(1);
     parts := fmt_string.split("%", temp());
     parts := parts&.items();
     if(parts.len != params.len + 1, => compile_error("Fmt specifier count mismatch", loc));
+    
     count := parts.len().add(params.len());
     actions: List(FatExpr) = list(count, ast_alloc());  // TODO: with_capacity_exact or shrink_to_fit at the end or have FatExpr.Tuple expose that its a Vec not a Slice 
     
@@ -97,13 +97,18 @@ fn format_into(writer: FatExpr, args: Slice(FatExpr), loc: Span) FatExpr = {
         action: FatExpr = @{ @[@literal fid](@[msg], @[writer]) };
         actions&.push(action);
     };
-    emit(@literal parts[0]);
+    
+    if parts[0].len > 0 {
+        emit(@literal parts[0]);
+    };
     
     // TODO: zip iterators
     enumerate params { i, param |
         emit(param[]);
         s := parts[i + 1].sym().str();  // deduplicate in the compiler's string pool
-        emit(compile_ast(@literal s));
+        if s.len > 0 {
+            emit(compile_ast(@literal s));
+        }
     };
     // need to compile so @println can use a macro that expands to a tuple but dont want to remember the type since it will change when our macro gets expanded. -- Apr 25
     e: FatExpr = (expr = (Tuple = actions.as_raw()), loc = loc, ty = UnknownType, done = false);
@@ -571,6 +576,7 @@ fn f_pad();
 fn FmtPad($T: Type) void = {
     FmtPad :: @struct(value: T, w: i64, side: PaddingSide);
     fn f_pad(value: T, w: i64, side: PaddingSide) FmtPad = (value = value, w = w, side = side);
+    fn display(self: *FmtPad, out: *List(u8)) void = display(self[], out);
     fn display(self: FmtPad, out: *List(u8)) void = {
         ::enum(PaddingSide);
         buf: List(u8) = list(temp());
@@ -587,6 +593,7 @@ FmtRep :: @struct(s: Str, count: i64);
 fn f_rep(s: Str, count: i64) FmtRep = 
     (s = s, count = count);
 
+fn display(self: *FmtRep, out: *List(u8)) void = display(self[], out);
 fn display(self: FmtRep, out: *List(u8)) void = 
     push_rep(out, self.s, self.count);
 

@@ -2,8 +2,6 @@
 
 TRACK_SCOPES :: false;
 
-EXPERIMENTAL :: false;
-
 /// Query interface /// 
 
 fn put_constant(self: *Scopes, name: Var, value: FatExpr, ty: LazyType) void = {
@@ -405,7 +403,6 @@ fn scan_const_decls(self: *ResolveScope, stmt: *FatStmt) CRes(bool) = {
             // Functions don't shadow, they just add to an overload group.
             if func.var_name.is_none() {
                 v := self.find_var(func.name) || {
-                    //@println("overload set not found for % in S%", self.compiler.pool.get(func.name), self.scope.id());
                     // defaulting to making all overload sets global and hoping you mostly add overloads for your own types. 
                     @try(self.compiler.decl_var(TOP_LEVEL_SCOPE, func.name, .Const, func.loc, .OverloadSet)) return
                 };
@@ -461,7 +458,6 @@ fn find_var_in_scope_inner(self: *SelfHosted, name: Symbol, s: ScopeId, for_use:
         ::ptr_utils(UseScopes);
         use := scope.nullable_use;
         if !use.is_null() {
-            //@println("check uses % S%", self.pool.get(name), s.id());
             prev := use.parents.len;
             found: ?Var = .None;
             each use.parents { the_use | 
@@ -548,7 +544,6 @@ fn decl_var(self: *SelfHosted, s: ScopeId, name: Symbol, kind: VarType, loc: Spa
     if prev.is_some() {
         return(@err("Cannot shadow constant in the same scope: %", self.pool.get(name)));
     };
-    //@println("Declare % in scope % block %", self.compiler.pool.get(name), self.scope.as_index(), self.block);
     
     var: Var = (kind = kind, name = name, id = scopes.types.len.trunc(), scope = s);
     if kind == .Const {
@@ -658,7 +653,7 @@ fn handle_expr(self: *ResolveScope, expr: *FatExpr) Result(DoMore, *CompileError
                     @default => ();
                 };
             };
-            if has_use_stmt || (!self.inside_quote && EXPERIMENTAL) {
+            if has_use_stmt {
                 // suspend and come back latter
                 self.pop_block();
                 return(Ok = .Break);
@@ -679,12 +674,6 @@ fn handle_expr(self: *ResolveScope, expr: *FatExpr) Result(DoMore, *CompileError
                 expr.expr = (UndeclaredVar = (name = name[], scope = self.scope));
             }
         }
-        fn Quote(inner) => if !self.inside_quote && EXPERIMENTAL {
-            self.inside_quote = true;
-            @try(self.walk_expr(inner[])) return;
-            self.inside_quote = false;
-            return(Ok = DoMore.Break);
-        };
         @default => ();
     };
     (Ok = DoMore.Continue)
@@ -747,8 +736,7 @@ fn handle_stmt(self: *ResolveScope, stmt: *FatStmt) Result(DoMore, *CompileError
 
 fn handle_func(self: *ResolveScope, func: *Func) Result(DoMore, *CompileError) #once = {
     @try(self.resolve_func(func)) return;
-    ////@if(!LAZY_SCOPE) {
-    @if(!LAZY_SCOPE) { // || (EXPERIMENTAL)) {
+    @if(!LAZY_SCOPE) {
         prev := self.inside_quote;
         self.inside_quote = true;
         @try(self.resolve_func_args(func)) return;

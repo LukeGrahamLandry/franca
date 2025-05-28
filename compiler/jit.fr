@@ -1,9 +1,6 @@
 //! - Call a function pointer with a dynamically known type on an array of bytes.
 //! - Create a shim around an uncompiled function that redirects into the compiler and then forwards to the real callee. 
 
-TRACE_SHIMS :: false;
-TRACE_CALLS :: false; 
-
 DynCallShim :: @tagged(Pending: u32, Ready: rawptr);
 
 fn call_dynamic_values(self: *SelfHosted, f_ptr: i64, f_ty: FnType, args_value: []u8) Values = {
@@ -29,35 +26,14 @@ fn call_dynamic_values(self: *SelfHosted, f_ptr: i64, f_ty: FnType, args_value: 
         }
     };
     callee := assume_types_fn(Arg = Ty(*u8, *u8, i64), Ret = void, ptr = callee);
-    
-    @if(TRACE_CALLS) {
-        self.call_depth += 1;
-        @println("(%) -----", self.call_depth);
-        @print("(%) Calling ", self.call_depth);
-        if self.baked.functions&.get(f_ptr) { fid |
-            @print("% ", self.log_name(fid));
-        };
-        @println("%: % -> %", f_ptr, self.log_type(f_ty.arg), self.log_type(f_ty.ret));
-    };
+   
     // TODO: canary?
     ret_size: i64 = self.get_info(f_ty.ret)[].stride_bytes.zext();
     ret_buf := temp().alloc_zeroed(u8, ret_size);  // TODO: alignment?
-    @if(TRACE_CALLS) {
-        @print("(%) input: ", self.call_depth);
-        input := self.from_bytes(args_value);
-        println(log(input&, self, f_ty.arg));
-    };
     zone := zone_begin(.CallDynamic);
     callee(args_value.ptr, ret_buf.ptr, f_ptr);
     zone_end(zone);
-    result := self.from_bytes(ret_buf);
-    @if(TRACE_CALLS) {
-        @print("(%) result: ", self.call_depth);
-        println(log(result&, self, f_ty.ret));
-        @println("(%) -----", self.call_depth);
-        self.call_depth -= 1;
-    }; 
-    result
+    self.from_bytes(ret_buf)
 }
 
 Futex :: import("@/lib/sys/sync/futex.fr");
@@ -105,7 +81,6 @@ fn create_dyncall_shim(self: *SelfHosted, f_ty: FnType) void = {
     shared := self.comptime_codegen;
     ins: QList(Qbe.Ins) = new(0);
     nins := 0;
-    @if(TRACE_SHIMS) @println("create dyncall % -> %", self.log_type(f_ty.arg), self.log_type(f_ty.ret));
     entry := bouba_acquire(shared, shared.bouba_idx&);
     id: u32 = 0; 
     push_dynamic_context {
@@ -202,10 +177,8 @@ fn create_dyncall_shim(self: *SelfHosted, f_ty: FnType) void = {
 //       - it loads from the got twice on the fast path because i don't deduplicate RCon across blocks.
 //       - redundant copies of aggregates. 
 fn create_jit_shim(self: CompCtx, shared: *CodegenShared, fid: FuncId, handler_callee_address: rawptr) void = {
-    // TODO: replace accesses to bc.jitted.dispatch_table[fid.as_index()]?
     func := self.get_function(fid);
     
-    @if(TRACE_SHIMS) @println("create shim %: %", fid, self.get_string(func.name));
     m := shared.m;
     entry := bouba_acquire(shared, shared.bouba_idx&);
     c := self.data.cast()[][];
@@ -322,7 +295,6 @@ fn create_jit_shim(self: CompCtx, shared: *CodegenShared, fid: FuncId, handler_c
 
 fn shallow_jit_func(self: *SelfHosted, fid: FuncId) void = {
     pending := FuncId.list(temp());
-    @if(TRACE_SHIMS) @println("shallow jit F%: %", fid.as_index(), self.log_name(fid));
     func := self.get_function(fid);  
     
     if func.body&.is(.DynamicImport) && func.body.DynamicImport.comptime == 0 {
@@ -364,7 +336,6 @@ fn shallow_jit_func(self: *SelfHosted, fid: FuncId) void = {
             func.mutual_callees&.add_unique(callee, self.get_alloc());
         };
     };
-    //func.generation = self.comptime_codegen.generation_pending;
 }
 
 fn bump_dirty_new(self: *SelfHosted) void = 
@@ -423,31 +394,17 @@ report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHo
         func := self.get_function(fid);
         @assert(!func.get_flag(.AvoidJitShim), "Called an #avoid_shim function through a jit_shim");
         is_target_split := false;
-        //@println("shim! % % %", SelfHosted.raw_from_ptr(self), context(DefaultContext)[].comptime, self.pool.get(func.name));
         if func.get_flag(.RealAsmDone) { 
-            @if(TRACE_SHIMS) @println("- ready");
             // TODO: this probably needs to be inside the push_context because it might hit an inner poll_in_place,
             //       but that's sad because most of the time its just an array lookup.  -- Nov 25
             if self.get_fn_callable(fid) { addr | 
                 save_in_got(self, fid, addr);
                 result = addr;
             };
-            @if(TRACE_SHIMS && result.is_null()) @println("- wrong!");
-        } else {
-            // TODO: maybe better to put smuggle_libc here too
-            if func.name == Flag.___this_function_is_not_real_im_just_testing_the_franca_compiler.ident() {
-                result = (fn(a: i64, b: i64, c: i64) i64 = {
-                    //@println("% + % + % = %", a, b, c, a + b + c);
-                    a + b + c
-                })
-            };
         };
         
         if result.is_null() {
             mark := mark_temporary_storage();
-            @if(TRACE_SHIMS) @println("- uncompiled");
-            //@println("uncompiled shim for % %", fid, self.log_name(fid));
-            
             @debug_assert(!self.comptime_codegen.no_more_functions, "no_more_functions is set so there is no worker waiting for us!");
             // :ugly
             first := true;
@@ -472,7 +429,6 @@ report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHo
                 r(Suspend = self.wait_for(Jit = fid))
             };
             result = self.unwrap_report_error(rawptr, addr);
-            //@println("made shim for % % %", fid, self.log_name(fid), result);
             save_in_got(self, fid, result);
             reset_temporary_storage(mark);
         };
@@ -493,7 +449,7 @@ fn get_fn_callable(self: *SelfHosted, fid: FuncId) ?rawptr = {
     self.update_pending_took_pointer();
     c := wait_for_symbol(self.comptime_codegen, id);
     if !c.is_null() {
-        if func.get_flag(.TookPointerValue) || ENABLE_TRACY || TRACE_CALLS {
+        if func.get_flag(.TookPointerValue) || ENABLE_TRACY {
             self.created_jit_fn_ptr_value(fid, c.int_from_rawptr());
         };
         result = (Some = c);

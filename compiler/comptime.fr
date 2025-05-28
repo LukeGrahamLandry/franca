@@ -25,10 +25,13 @@ fn init_driver_vtable() *ImportVTable = {
         self := c.cast()[][];
         vtable := the_vtable;
         if self.get_fn_callable(f) { ptr |
+            self.created_jit_fn_ptr_value(f, ptr.int_from_rawptr());
             return(Ok = ptr);
         };
         @try(self.create_jit_shim(f)) return; 
-        (Ok = self.get_fn_callable(f).unwrap())
+        ptr := self.get_fn_callable(f).unwrap();
+        self.created_jit_fn_ptr_value(f, ptr.int_from_rawptr());
+        (Ok = ptr)
     };
     
     vtable.init_compiler = fn(options: *BuildOptions) Compiler = {
@@ -81,11 +84,7 @@ fn init_driver_vtable() *ImportVTable = {
         c := c.cast()[][];
         c.get_build_options()
     };
-    vtable.get_default_driver_exports = fn() *ExportVTable = {
-        mem := todo_allocator.alloc(ExportVTable, 1);
-        mem.ptr[] = default_driver_exports();
-        mem.ptr
-    };
+
    
     vtable.get_baked = fn(c, id) = 
         BakedValue.raw_from_ptr(c.cast()[].baked.values&.nested_index(@as(i64) id.id.zext()));
@@ -633,7 +632,6 @@ fn fill_export_ffi(out: *List(u8)) void = {
         ty := self.unwrap_report_error(Type, ty);
         value := self.to_values(Type, ty); 
         e&.set(value, self.get_or_create_type(Type));
-        @log_event("we know the type! %", e&.log(self)) self;
         e
     };
     
@@ -706,7 +704,9 @@ fn fill_export_ffi(out: *List(u8)) void = {
     
     @fmt(out, "fn debug_log_func(expr: *Func) void #ct #comptime_addr(%);\n", debug_log_f);
     debug_log_f: rawptr : fn(e: *Func) void = {
-        @println("[debug_log_func] %", current_comptime().comp().log(e));
+        self := current_comptime();
+        self.codemap.show_error_line(e.loc, true /*TODO*/);
+        @println("[debug_log_func] %", self.comp().log(e));
     };
     
     @fmt(out, "fn intern_type_ref(info: *TypeInfo) Type #ct #comptime_addr(%);\n", intern_type_ref);
