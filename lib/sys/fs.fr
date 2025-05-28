@@ -53,13 +53,20 @@ fn walk_directory(path: CStr, $body: @Fn(entry: DirEntry) void) bool = {
     }
 }
 
+fn make_dirs_or_crash(path: Str) void = {
+    if !make_dirs(path) {
+        @panic("failed to make_dirs %", path);
+    };
+}
+
 // TODO: don't be allocations georg
+// TODO: don't redundant dir_exists
 fn make_dirs(const_path: Str) bool = {
     path := u8.list(temp());
     path&.push_all(const_path);
     path&.pop_path_segment();
     if path.len > 0 {
-        if !dir_exists(@fmt_cstr("%", path.items())) {
+        if !dir_exists(path.items()) {
             if !make_dirs(path.items()) {
                 return false;
             };
@@ -71,26 +78,40 @@ fn make_dirs(const_path: Str) bool = {
 fn make_dir(path: Str) bool #target_os = (fn($os) => {
     L :: LibcType(os);
     
-    path := as_cstr path;
     if dir_exists(path) {
         return true;
     };
     
     mode: i64 = (@as(u16) FileMode.OwnerAll).zext();
-    if mkdirat(L.AT_FDCWD, path, mode).is_ok() {
+    if mkdirat(L.AT_FDCWD, as_cstr path, mode).is_ok() {
         return true;
     };
     
     false
 });
 
-fn dir_exists(path: CStr) bool = {
-    dir := opendir(path); ::ptr_utils(Dir);
-    if !dir.is_null() {
-        closedir(dir);
-        return true;
-    };
-    false
+fn dir_exists(path: Str) bool #target_os = (fn($os) => {
+    L :: LibcType(os);
+    s := zeroed L.Stat;
+    ss := stat(as_cstr path, s&);
+    xxx := ss.is_ok();
+    e := xxx && s.mode.int().bit_and(S_IFMT) == S_IFDIR;
+    e
+});
+
+// TODO: ugh pastey
+fn file_exists(path: Str) bool #target_os = (fn($os) => {
+    L :: LibcType(os);
+    s := zeroed L.Stat;
+    ss := stat(as_cstr path, s&);
+    xxx := ss.is_ok();
+    e := xxx && s.mode.int().bit_and(S_IFMT) != S_IFDIR;
+    e
+});
+
+fn path_exists(path: Str) bool = {
+    c := as_cstr path;
+    access(c, @as(i64) AccessMode.Exists).is_ok()
 }
 
 fn is(e: DirEntry, kind: DirEntType) bool =
@@ -108,12 +129,6 @@ DirEntry :: @struct(
     name: Str,
     type: DirEntType,
 );
-
-
-fn file_exists(path: Str) bool = {
-    c := as_cstr path;
-    access(c, @as(i64) AccessMode.Exists).is_ok()
-}
 
 // TODO: i think if im passing Create i also have to pass mode as an extra argument!!!
 // TODO: @try for the libc result types. 

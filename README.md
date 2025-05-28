@@ -34,6 +34,7 @@ The compiler does not depend on libc (on linux, when built with -syscalls).
 
 A bootstrap binary is committed for macos-arm64 only. 
 Binaries for other platforms are available as [github actions artifacts](https://github.com/LukeGrahamLandry/franca/actions).
+(which requires being logged in which sucks. thinking about a better system... sorry.)  
 
 > There is vauge work towards targetting wasm and llvm, but it is not yet usable. 
 

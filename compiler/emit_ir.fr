@@ -22,6 +22,7 @@ EmitIr :: @struct(
     shared: *CodegenShared,
     pending: *List(FuncId), // TODO: you wouldn't need this if sema tracked callees correctly. 
     idx: *i64,
+    pending_set_lib: List(Ty(u32, Str)),  // TODO: don't be cringe
 );
 
 IrVar :: @tagged(Alloca: Qbe.Ref, Local: Qbe.Ref);
@@ -45,6 +46,7 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
     entry := bouba_acquire(shared, idx);
     m := shared.m;
     result: CRes(void) = .Ok;
+    outer_temp := temp();
     push_dynamic_context {
         context(DefaultContext)[].temporary_allocator = entry.arena&;
         ::tagged(Placement);
@@ -67,10 +69,11 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
             when = when,
             m = m,
             entry = entry,
-            new_constants = list(temp()),
+            new_constants = list(outer_temp),
             shared = shared,
             pending = pending,
             idx = idx,
+            pending_set_lib = list(outer_temp),
         );
         if self.dyn_context && when == .Aot {
             @debug_assert(self.static_context_var.is_none(), "ICE: dyn_context has static context??");
@@ -97,11 +100,11 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
                 func.set_flag(.NoContext);
             };
             
-            enqueue_task(shared, self.entry);
-            
-            if self.new_constants.len != 0 {
-                entry2 := bouba_acquire(shared, idx);
-                push_dynamic_context {
+            enqueue_task(shared, self.entry);         // ! careful, temp() is invalid here
+                                                      // !
+            if self.new_constants.len != 0 {          // !
+                entry2 := bouba_acquire(shared, idx); // !
+                push_dynamic_context {                // !
                     context(DefaultContext)[].temporary_allocator = entry2.arena&;
                     out := Dat2.list(self.new_constants.len, temp());
                     for self.new_constants { id |
@@ -110,6 +113,12 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
                     entry2.task = (AotVar2 = out.items());
                 };
                 enqueue_task(shared, entry2);
+            };                                        // !
+                                                      // !
+            for self.pending_set_lib { id, lib |      // !
+                entry2 := bouba_acquire(shared, idx); // !
+                entry2.task = (SetLibrary = (id = id, lib = lib));
+                enqueue_task(shared, entry2);         // !
             };
         };
     };
@@ -340,7 +349,7 @@ fn aot_import_body(self: *EmitIr, info: *DynamicImport) void = {
         // TODO: probably want to give the backend the path to put in the exe, not our symbolic name, 
         //       and also maybe preintern with the backend to get an ordinal that's just in lib space 
         //       instead of needing to check every time
-        set_library(self.m, target, self.program.get_string(info.lib));
+        push(self.pending_set_lib&, (target, self.program.get_string(info.lib)));
     };
     self.bounce_body(self.f.symcon(target), .call);
 }
@@ -773,7 +782,7 @@ fn compile_expr(self: *EmitIr, expr: *FatExpr, p: Placement) CRes(Qbe.Ref) = {
                     return(Ok = self.scalar_result(p, self.f.getcon(info.comptime), i64));   // :get_or_create_type
                 };
                 // TODO: if jitting and not ready yet, we could make this be a call to a shim that returns the symbol?
-                self.m.set_library(self.m.intern(name), self.program.get_string(info.lib));
+                push(self.pending_set_lib&, (self.m.intern(name), self.program.get_string(info.lib)));
             };
             self.scalar_result(p, self.f.symcon(name), i64)  // :get_or_create_type
         }
@@ -1105,7 +1114,7 @@ fn emit_constant(self: *EmitIr, value: *Values, p: Placement, expr_ty: Type, loc
     if(p&.is(.Discard), => return(Ok = QbeNull));  // TODO: bake_relocatable_value side effect? 
     info := self.program.get_info(expr_ty);
     
-    use_int_literal := value.is(.Small) && (!info.contains_pointers() || self.when == .Jit || value.Small._0 == 0) && store_by_size[value.Small._1.zext()] != .Oxxx;
+    use_int_literal := value.is(.Small) && (!info.contains_pointers || self.when == .Jit || value.Small._0 == 0) && store_by_size[value.Small._1.zext()] != .Oxxx;
     if use_int_literal {
         v := self.f.getcon(value.Small._0);
         return(Ok = self.scalar_result(p, v, expr_ty));

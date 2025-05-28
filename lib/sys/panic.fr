@@ -10,7 +10,7 @@ fn panic(msg: Str) Never = {
     hook_int := ptr_cast_unchecked(*@FnPtr(msg: Str) Never, i64, hook&);
     if hook_int[] == 0 {
         // we panicked before getting to set the handler. 
-        scary_log("a franca program panicked while panicking or before setting a panic hook.");
+        scary_log("panicked while panicking or before setting a panic hook.");
         scary_log(msg); 
     } else {
         handler := hook[];
@@ -38,16 +38,6 @@ fn print_and_exit1(msg: Str) Never = {
 }
 
 fn todo() Never = panic("Not Yet Implemented");
-
-// TODO: can't do this because of circular dependency. 
-//       in List it needs to call the other assert which means it needs the types of the whole overload set so it needs to compile List$i64
-fn assert(cond: bool, $msg: @Fn() List(u8)) void = {
-    if(cond.not()){
-        msg := msg();
-        msg: Str = msg&.items();
-        panic(msg);
-    }
-}
 
 // inlining this but not panic so you don't spill everything for a tiny check helps debug assertion builds quite a bit -- Nov 26.
 fn assert(cond: bool, msg: Str) void #inline = {
@@ -97,7 +87,7 @@ fn assert(arg: FatExpr) FatExpr #macro = {
         @{ assert(@[parts[0]], @[parts[1]]) }
     } {
         cond := parts[0];
-        @{ if(!@[cond]){
+        @{ if(!@[cond]) {
             out: List(u8) = list(temp());
             out&.push_all("Assertion Failed: ");
             @[format_into(@{ out& }, parts.rest(1), arg.loc)];
@@ -113,28 +103,65 @@ fn assert_ge(arg: FatExpr) FatExpr #macro = assert_cond(ge, ">=", arg);
 fn assert_lt(arg: FatExpr) FatExpr #macro = assert_cond(lt,  "<", arg);
 fn assert_gt(arg: FatExpr) FatExpr #macro = assert_cond(gt,  ">", arg);
 
+// TODO: stuff it in a pointer when it's small? 
+fn display(a: *i32, out: *List(u8)) void = a[].display(out);
+fn display(a: *rawptr, out: *List(u8)) void = a[].display(out);
+fn display(a: *u64, out: *List(u8)) void = a[].display(out);
+fn display(a: *Type, out: *List(u8)) void = a[].display(out);
+fn display(a: *u8, out: *List(u8)) void = a[].display(out);
+fn display(a: *Symbol, out: *List(u8)) void = a[].display(out);
+fn display(a: *f64, out: *List(u8)) void = a[].display(out);
+fn display(a: *f32, out: *List(u8)) void = a[].display(out);
+
 fn assert_cond($overload_set: OverloadSet, op: Str, arg: FatExpr) FatExpr = {
+    Show :: @FnPtr(rawptr, *List(u8)) void;
+    report_erased :: fn(a: rawptr, b: rawptr, $op: Str, msg: Str, show: Show) Never #noinline = {
+        out: List(u8) = list(temp());
+        out&.push_all(msg);
+        out&.push_all("\nAssertion Failed. Expected (");
+        show(a, out&);
+        out&.push_all(" ");
+        out&.push_all(op);
+        out&.push_all(" ");
+        show(b, out&);
+        panic(out.items())
+    };
+    
     assert(arg.expr&.is(.Tuple), "@assert___ expected multiple args");
     parts := arg.expr.Tuple.items();
     @{
         lhs := @[parts[0]];
-        rhs: @type lhs = @[parts[1]];
-        // TODO: pass #cold to the backend or out-line the function or something
-        // TODO: maually outline assertion_failed when not ASSERT_SHOW_SOURCE because its so easy and happens so much? 
+        T :: @type lhs;
+        rhs: T = @[parts[1]];
         if !@[@literal overload_set](lhs, rhs) {
-            out: List(u8) = list(temp());
-            out&.push_all("Assertion Failed. ");
-            
-            @[if(parts.len == 3, => @{
-                out&.push_all(@[parts[2]]);
-            }, => @{()} )];
-            @[if(parts.len > 3, => {
-                format_into(@{ out& }, parts.rest(2), arg.loc)
-            }, => @{()} )];
-            
-            @fmt(out&, "\n   Expected (% % %). ", lhs, @[@literal op], rhs);
-            
-            panic(out.items());
+            // :UpdateBoot
+            @[@if(::!IS_BOOTSTRAPPING, @{
+                msg := @[if(parts.len == 3, => parts[2], => 
+                    if(parts.len < 3, => @literal "", => @{
+                        out: List(u8) = list(temp());
+                        @[format_into(@{ out& }, parts.rest(2), arg.loc)];
+                        out&.items()
+                    })
+                )];
+                
+                display_t :: resolve_overload(display, Ty(*T, *List(u8)), void, @[@literal arg.loc]);
+                show := bit_cast_unchecked(@FnPtr(*T, *List(u8)) void, Show, display_t);
+                report_erased(T.raw_from_ptr(lhs&), T.raw_from_ptr(rhs&), @[@literal op], msg, show);
+            }, @{
+                out: List(u8) = list(temp());
+                out&.push_all("Assertion Failed. ");
+                
+                @[if(parts.len == 3, => @{
+                    out&.push_all(@[parts[2]]);
+                }, => @{()} )];
+                @[if(parts.len > 3, => {
+                    format_into(@{ out& }, parts.rest(2), arg.loc)
+                }, => @{()} )];
+                
+                @fmt(out&, "\n   Expected (% % %). ", lhs, @[@literal op], rhs);
+                
+                panic(out.items());
+            })];
         };
     }
 }

@@ -97,6 +97,10 @@ fn fix_stack_linux(argc: *i64, argv: **CStr, envp: **CStr) void #inline = {
     envp[] = argv[].offset(argc[] + 1);
 }
 
+// Don't try to do relocations when loaded from a .frc 
+// TODO: better would be to give you the real base address and just have a fake elf header with no relocations. 
+FRHOSTED_MAGIC :u64: 0x444554534F485246;
+
 // On linux, if we're not linking to libc, we need to handle relocating pointers in static memory ourselves. 
 // Since this runs before are done, you can't use anything with a pointer stored in @static memory in this function. 
 // But calls and referencing symbols is fine because they use relative addressing. 
@@ -104,6 +108,9 @@ fn fix_stack_linux(argc: *i64, argv: **CStr, envp: **CStr) void #inline = {
 do_relocations_static_linux :: fn() void = {
     Elf :: import("@/backend/elf/bits.fr");
     base   := @import_symbol "__franca_base_address";
+    if u64.ptr_from_raw(base)[] == FRHOSTED_MAGIC {
+        return();
+    }
     header := Elf.Header.ptr_from_raw(base);
     @debug_assert_eq(header.magic, Elf.MAGIC, "we're not in an elf file?");
     headers: []Elf.ProgramHeader = (

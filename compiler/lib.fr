@@ -254,8 +254,12 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         };
         
         if cache_it {
-            // TODO: seal_debug_info
-            make_dirs(cache_dir());
+            // TODO: seal_debug_info properly
+            //
+            // matters on linux because of do_relocations_static_linux()
+            seal_debug_info(m, empty(), false, empty());
+            
+            make_dirs_or_crash(cache_dir());
             write_cache(m, c, f, cachepath, path);
             // could do this but really should give a better error message when you get stuck in a loop and crash is probably fine for now
             //context(DefaultContext)[].comptime = rawptr_from_int(0); 
@@ -308,15 +312,22 @@ fn comptime_compute_self_hash() Array(u32, 8) = :: {
     fr   := current_compiler_context();
     self := fr.data.cast()[][];
     hash := zeroed Array(u32, 8);
+    @if(!IS_BOOTSTRAPPING) // :UpdateBoot
     each self.codemap.files { it |
         // uncomment to check that the compilation order hack with set_self_hash is working. 
         // println(it.name);  
-        @if(it.name != "compiler")  // repro!
-        range(0, 8) { i |
-            hash&[i] = bit_xor(hash&[i], it.hash&[i]);
-        };
+        if is_cachable(it.name) {
+            hash = bit_xor(hash, it.hash);
+        }
     };
     hash
+}
+
+fn bit_xor(a: Array(u32, 8), b: Array(u32, 8)) Array(u32, 8) = {
+    range(0, 8) { i |
+        a&[i] = bit_xor(a&[i], b&[i]);
+    };
+    a
 }
 
 fn files_unchanged(header: *Incremental.Header) bool = {
@@ -455,7 +466,9 @@ fn find_std_lib(a: Alloc) ?Str = {
     check :: fn(p: *List(u8)) bool = {
         p.push_path_segment("lib");
         p.push_path_segment("franca_stdlib_1.fr");
-        good := p.items().file_exists();
+        // :UpdateBoot
+        CRAZY_TOWN :: @if(IS_BOOTSTRAPPING, path_exists, file_exists);
+        good := p.items().CRAZY_TOWN();
         p.pop_path_segment();
         p.pop_path_segment();
         good

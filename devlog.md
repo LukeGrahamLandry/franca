@@ -1,9 +1,97 @@
+## (May 28)
+
+- also found another maybe race. emit_ir.new_constants was in temp()
+and iterated over after enqueue_task(), so i think i was just getting lucky 
+that when single threaded, the following bouba_acquire() resetting it didn't 
+stomp the memory in time? it just didn't matter because i only do single threaded 
+when jitting which doesn't need to bake constants. 
+yeah, SLOW_MEMORY_DEBUGGING=true, use_threads=false, can't `driver.dylib build examples/toy/hello.fr`
+- fix yesterdays discovery. call set_library on the codegen thread
+- that seems to have fixed the random failures and more cache files repro but still not all. 
+
+TODO: use IS_BOOTSTRAPPING to make run_tests -- boot work with latest compiler as well. 
+TODO: clear cache before tests just in case
+
 ## (May 27)
 
 - remove a couple clowns: mkdir, cp
 - stop using maybe_borrow_cstr
 - make write_chunks_or_crash atomic (by writing to a different file and renaming)
 - namespace the structs that used to be in bindings/sokol.fr
+- unfortunate that -syscalls doesn't actually enforce you don't link libc, it just does its best. 
+  - opendir isn't just a linux syscall i can do so use stat in dir_exists instead
+  - spend so fucking long on typing an octal number from a header file in as hex
+- seal_debug_info sets `__franca_base_address` which is read by do_relocations_static_linux 
+on linux so that's gonna be a problem if you use `-frc` and then try to run it jitted. 
+started with a dumb hack where you include `__franca_base_address` in the cache file 
+but as just a different magic bytes that you check for and don't do relocations. 
+but fix_stack_linux is also fucked. 
+- bounds check failing in amd64/emitins()
+hmm that sure isn't a program
+```
+function $main__720() {  # nblk=2
+@0
+	R8 =l addr 8589934608
+	R7 =l copy $println__549+137438953471
+	call 16, C33  # what no syscall for giacomo?
+	jmp @1
+@1
+	ret0
+}
+```
+only with -syscalls tho. linking glibc it's fine. and `-frc -syscalls` and then 
+run by the `syscalls` compiler is also fine. 
+TODO: still doesn't work
+- complexify backend/incremental.fr/check()   
+// Doing it this way instead of `X :: fn=>; X(self.dep&); ...etc;` saves 4kb (says bloat.fr).   
+// Would be nice if i could let you express that gain without it sucking so much.   
+// I still like it cause it would suck so much more in rust.   
+// But really the problem is just that my @assert is so much bloat.   
+- manually outline the printing for the panic codepath in `(debug_)assert_XX`.
+  - (arm) hyperfine --warmup=1 "./qq.out examples/default_driver.fr build compiler/main.fr"
+  ```
+  1642349 -> 1527437 (-7%)
+  1.309 s ±  0.008 s -> 1.272 s ±  0.003 s (-2.5%)
+  ```
+  - only saves 32kb with -unsafe but that's as expected (and that's still 2.5% which ain't bad). 
+  even just making debug builds cheaper would be very good for business, 
+  especially since run_franca_file() always has safety checks enabled so 
+  this de-bloats the cache files as well. 
+
+- c_string.fr: this super isn't a program
+```
+diff aa.txt bb.txt
+1c1
+< - (size = 43323, arch_os = 0)
+---
+> - (size = 43267, arch_os = 0)
+78c78
+< === 115 sym ===
+---
+> === 114 sym ===
+499a500
+> - 'getchar' is Import (lib = libc)
+583c584
+< - 'offset__2968' is Invalid !!
+---
+> - 'offset__2968' is Import (lib = libc)
+588,589d588
+< - 'getchar' is Import (lib = libc)
+< - 'putchar' is Import (lib = libc)
+1033c1032
+< 	call $putchar, C33
+---
+> 	call $offset__2968, C33
+```
+in fact, even when the tests pass the cache files don't repro?
+there's way more changes to the binary than to the text dump. 
+order of symbols is changing (which doesn't change the dump 
+as much since con references by name). 
+great success; set_library called directly in emit_ir so race 
+with the codegen thread for when map_sym gets called. 
+indeed, diffing `strings` of the binaries, the changes always 
+start at an import. previously it was fine because use_symbol has 
+lock_bucket so no corruption and the interned number never made it into the binary. 
 
 ## (May 26)
 

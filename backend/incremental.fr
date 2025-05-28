@@ -125,25 +125,24 @@ fn check(data: []u8) *Header = {
     @assert_eq(self.magic_v, MAGIC);
     @assert_le(self.filelen.zext(), data.len);
     
-    X :: fn(storage) => {
+    for storage_fields { off, size |
+        S :: @struct(off: u32, count: u32);
+        storage := S.ptr_from_raw(Header.raw_from_ptr(self).offset(off.zext()));
         @assert_le(storage.off, self.filelen);
-        s := size_of((@type storage[]).StorageElement);
-        @assert_le(storage.off + storage.count * s.trunc(), self.filelen);
+        @assert_le(storage.off + storage.count * size, self.filelen);
     };
-    
-    // TODO: generate this
-    X(self.dep&);
-    X(self.sym&);
-    X(self.blk&);
-    X(self.ins&);
-    X(self.con&);
-    X(self.mem&);
-    X(self.rel&);
-    X(self.str&);
-    X(self.lib&);
-    
     self
 }
+
+storage_fields :: {
+    out := Ty(u32, u32).list(ast_alloc());
+    for Header.get_fields() { f |
+        if get_constant(Type, Type.scope_of(f.ty), @symbol StorageElement) { T |
+            push(out&, (f.byte_offset.trunc(), T.size_of().trunc()));
+        }
+    };
+    out.items()
+};
 
 // TODO: bucketarray. comptime generate this from the Header. 
 Writer :: @struct {
@@ -195,7 +194,7 @@ fn push(self: *Writer, f: *Qbe.Fn) void = {
     self.sym[id].segment = .Code;
     
     // unfortunatly this includes constants that are no longer used. 
-    // so a function will all uses inlined will still have an Invalud Sym because of this map_sym
+    // so a function will all uses inlined will still have an Invalid Sym because of this map_sym
     self.sym[id].fnc.con = (off = self.con.len.trunc(), count = trunc(f.ncon.zext() - fixed_const_count));
     each f.con.slice(fixed_const_count, f.ncon.zext()) { c |
         self.con&.push(
@@ -442,7 +441,7 @@ pack_target :: fn(arch: Arch, os: Os) u32 =
 
 fn preintern_syms(header: *Header, m: *QbeModule) []u32 = {
     count: i64 = header.sym.count.zext();
-    syms := temp().alloc(u32, count);
+    syms := m.forever&.borrow().alloc(u32, count);
     range(0, count) { i |
         it: *Sym = header.get(i.trunc());
         syms[i] = m.intern(header.get(it.name));

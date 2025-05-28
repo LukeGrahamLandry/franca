@@ -191,6 +191,7 @@ fn add_ns(t: *TimeSpec, nanoseconds: i64) void = {
     t.seconds += s;
 }
 
+// careful: emit_ir calls this while temp is valid
 fn bouba_acquire(shared: *CodegenShared, idx: *i64) *CodegenEntry = {
     entry := acquire(shared, true, idx).unwrap();
     entry.arena&.reset_retaining_capacity();
@@ -302,6 +303,9 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
         fn AotVar2(it) => each it { d |
             m.emit_data(d[]);
         };
+        fn SetLibrary(it) => {
+            m.set_library(it.id, it.lib);
+        };
     };
     entry.task = .Dead; 
     @if(ENABLE_ENABLE_TRACY) zone_end(zone);
@@ -332,6 +336,7 @@ CodegenTask :: @tagged(
     Bounce: @struct(lnk: *Qbe.Lnk, target: u32),
     Shim: @struct(f: *Qbe.Fn, shim_for: u32),
     AotVar2: []Dat2,
+    SetLibrary: @struct(id: u32, lib: Str),
 );
 
 CodegenEntry :: @struct(
@@ -364,6 +369,7 @@ fn init(m: *QbeModule, arena: Alloc, worker: CodegenWorker, threaded: bool) *Cod
     s
 }
 
+// careful: emit_ir calls this while temp is valid
 fn acquire(shared: *CodegenShared, $i_am_bouba: bool, idx: *i64) ?*CodegenEntry = {
     queue := shared.queue;
     @if(!shared.threaded) return(Some = queue.index(0));
@@ -385,7 +391,7 @@ fn acquire(shared: *CodegenShared, $i_am_bouba: bool, idx: *i64) ?*CodegenEntry 
         // don't reset the arena here, the other guy might want it.
         return(Some = entry);
     };
-    @panic("failed acquire % % %", shared.waiting_for_bouba, i_am_bouba, entry.state)
+    @panic("failed acquire"); //  % % %", shared.waiting_for_bouba, i_am_bouba, entry.state)
 }
 
 fn release(shared: *CodegenShared, entry: *CodegenEntry, $i_am_bouba: bool) void = {
