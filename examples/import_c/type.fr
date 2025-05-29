@@ -22,7 +22,7 @@ CType :: @rec @struct(
     return_ty: *CType,
     params: []*CType,
     is_variadic: bool,
-    ir_index: i32,
+    ir_index: Qbe.Ref,
     franca: Type,
     // can contain a null pointer if it was a dclaration like `extern void f(int);` or similarly, a typedef
     param_names: []*import("@/examples/import_c/tokenize.fr").Token,
@@ -65,7 +65,6 @@ fn fixed_type(tag: TypeKind, size: i64, unsigned: bool) *CType = {
     t.size = size.intcast();
     t.align = size.intcast();
     t.is_unsigned = unsigned;
-    t.ir_index = -1;
     t
 }
 
@@ -88,7 +87,6 @@ fn new_type(c: *Ctx, kind: TypeKind, size: i64, align: i64) *CType = {
     ty.kind = kind;
     ty.size = size.intcast();
     ty.align = align.intcast();
-    ty.ir_index = -1;
     ty
 }
 
@@ -333,8 +331,8 @@ fn cls(ty: *CType) Qbe.Cls = {
     .Kw
 }
 
-fn ir_index(c: *Ctx, ty: *CType) i32 = {
-    if(ty.ir_index != -1 || !@is(ty.kind, .TY_STRUCT, .TY_UNION), => return(ty.ir_index));
+fn ir_index(c: *Ctx, ty: *CType) Qbe.Ref = {
+    if(ty.ir_index != QbeNull || !@is(ty.kind, .TY_STRUCT, .TY_UNION), => return(ty.ir_index));
     type_info := Qbe.Typ.zeroed();
     type_info.fields = new_long_life(c.m, 0);
     len := 0;
@@ -353,27 +351,28 @@ fn ir_index(c: *Ctx, ty: *CType) i32 = {
                 off += mem.ty.size.intcast();
             };
             add_padding(out, len&, off&, ty.size.intcast());
-            push(out, len&, (type = .FEnd, len = 0));
+            push(out, len&, pack(type = .FEnd, len = 0));
         }
         fn TY_UNION() => {
             mem := ty.members;
             type_info.is_union = true;
             for_linked mem { mem | 
                 c.push_as_fields(mem.ty, out, len&);
-                push(out, len&, (type = .FEnd, len = 0));
+                push(out, len&, pack(type = .FEnd, len = 0));
                 type_info.nunion += 1;
             };
         }
         @default => unreachable();
     };
+    @debug_assert_lt(len, MAX_u32);
     type_info.nfield = len.trunc();
     type_info.size = ty.size.intcast();
     type_info.align_log2 = (@as(i64) ty.align.zext()).trailing_zeros().intcast();
-    ty.ir_index = c.m.new_type(type_info).intcast();
+    ty.ir_index = TYPE c.m.new_type(type_info);
     ty.ir_index
 }
 
-fn push_as_fields(c: *Ctx, ty: *CType, out: *QList(Qbe.Field), len: *i64) void = {
+fn push_as_fields(c: *Ctx, ty: *CType, out: *QList(u32), len: *i64) void = {
     @debug_assert_ne(ty.kind, .TY_VLA, "cannot have vla in a struct");
     if ty.kind == .TY_ARRAY {
         if(ty.is_flexible, => return());
@@ -385,7 +384,7 @@ fn push_as_fields(c: *Ctx, ty: *CType, out: *QList(Qbe.Field), len: *i64) void =
         return();
     };
     if @is(ty.kind, .TY_STRUCT, .TY_UNION) {
-        push(out, len, (type = .FTyp, len = c.ir_index(ty).bitcast()));
+        push(out, len, pack(type = .FTyp, len = c.ir_index(ty).val().trunc()));
         return();
     };
     tag: Qbe.FieldType = @match(ty.kind) {
@@ -402,5 +401,5 @@ fn push_as_fields(c: *Ctx, ty: *CType, out: *QList(Qbe.Field), len: *i64) void =
             }
         };
     };
-    push(out, len, (type = tag, len = ty.size.bitcast()));
+    push(out, len, pack(type = tag, len = ty.size.bitcast()));
 }

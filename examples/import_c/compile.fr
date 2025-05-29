@@ -2010,7 +2010,7 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *T
         // it would be nice to give an error otherwise but it's non-trivial to decide if this codepath is reachable. 
         // TODO: also for main() falling off the end means returning 0
         c.b.jmp = @if(rty.is_void(), (type = .ret0, arg = QbeNull), (type = .retw, arg = QbeConZero));
-        if c.f.retty != -1 {  // sketchy
+        if c.f.retty != QbeNull {  // sketchy
             c.b.jmp.type = .retc;
         };
     };
@@ -2863,7 +2863,7 @@ return :: fn(c, rest, tok) #prefix(.return, .ND_STMT) = {
           
         k := ty.cls(); // TODO: retc
         j := @as(Qbe.J) @as(i32) Qbe.J.retw.raw() + k.raw(); // TODO: also sb,etc.
-        if c.f.retty != -1 {
+        if c.f.retty != QbeNull {
             j = .retc;
         };
         (r, j)
@@ -3505,13 +3505,13 @@ fn gen_par(c: *Ctx, ty: *CType) void = {
     for obj_params { loc |
         k := loc.ty.cls();
         loc.par_r = f.newtmp(loc.name.str(), k);
-        i := c.ir_index(loc.ty).intcast();
-        o: Qbe.O = @if(i == -1, .par, .parc);
-        emit(c, o, k, loc.par_r, @if(i == -1, QbeNull, TYPE(i)), QbeNull); 
+        i := c.ir_index(loc.ty);
+        o: Qbe.O = @if(i == QbeNull, .par, .parc);
+        emit(c, o, k, loc.par_r, i, QbeNull); 
     };
     // all the allocs have to be after all the pars
     for obj_params { loc |
-        if c.ir_index(loc.ty) == -1 {
+        if c.ir_index(loc.ty) == QbeNull {
             c.create_stack_slot(loc);
         } else {
             loc.stack_slot = loc.par_r;
@@ -3522,7 +3522,7 @@ fn gen_par(c: *Ctx, ty: *CType) void = {
     body := c.new_block();
     c.jmp_if_unterminated(body);
     for obj_params { loc |
-        if c.ir_index(loc.ty) == -1 {
+        if c.ir_index(loc.ty) == QbeNull {
             c.gen_store(loc.stack_slot, loc.par_r, loc.ty);
         };
     };
@@ -3796,21 +3796,21 @@ fn gen_call(c: *Ctx, callee: *Node, function_ty: *CType, arg: []*Node, tok: *Tok
     k := function_ty.return_ty.cls();
     is_void := function_ty.return_ty.kind == .TY_VOID;
     r := if(is_void, => QbeNull, => c.f.newtmp("c", k)); 
-    i := c.ir_index(function_ty.return_ty).intcast();
-    c.emit(.call, k, r, callee, @if(i == -1, QbeNull, TYPE(i)));
+    i := c.ir_index(function_ty.return_ty);
+    c.emit(.call, k, r, callee, i);
     // TODO: it seems like just returning QbeNull for void would work but fails wuffs/lzma.c :FUCKED
     r := if(is_void, => QbeConZero, => r); 
-    lvalue := if(i != -1, => r, => QbeNull); // for gen_addr so you can do `foo().field`
+    lvalue := if(i != QbeNull, => r, => QbeNull); // for gen_addr so you can do `foo().field`
     c.ir_node(function_ty.return_ty, r, lvalue, tok)
 }
 
 // TODO: move these to util and use them elsewhere
-fn arg_ins(r: Qbe.Ref, k: Qbe.Cls, type_index: i32) Qbe.Ins = {
+fn arg_ins(r: Qbe.Ref, k: Qbe.Cls, type_index: Qbe.Ref) Qbe.Ins = {
     ::if(Qbe.Ins);
-    if type_index < 0 {
+    if type_index == QbeNull {
         make_ins(.arg, k, QbeNull, r, QbeNull)
     } else {
-        make_ins(.argc, .Kl, QbeNull, TYPE(type_index.intcast()), r)
+        make_ins(.argc, .Kl, QbeNull, type_index, r)
     }
 }
 

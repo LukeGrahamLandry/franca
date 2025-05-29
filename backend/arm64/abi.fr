@@ -53,12 +53,12 @@ RCallArm :: @bit_fields(
 ::ptr_utils(Qbe.Typ);
 
 fn isfloatv(t: *Qbe.Typ, cls: *Qbe.Cls, count: *u8, globals: *QbeModule) bool = {
-    f := t.fields[0]&;  
+    i := 0;
     biggest := 0;
-    range(0, t.nunion.zext()) { n |
+    for_unions(t, i&) { 
         case: u8 = 0;
-        while => f.type != .FEnd { 
-            @match(f.type) {
+        for_fields(t, i&) { type, len |
+            @match(type) {
                 fn Fs() => {
                     if(cls[] == .Kd, => return(false));
                     cls[] = .Ks;
@@ -70,17 +70,15 @@ fn isfloatv(t: *Qbe.Typ, cls: *Qbe.Cls, count: *u8, globals: *QbeModule) bool = 
                     case += 1;
                 }
                 fn FTyp() => {
-                    type := globals.types[].index(f.len.zext());
+                    type := globals.get_type(len.zext());
                     if !isfloatv(type, cls, case&, globals) {
                         return(false);
                     }
                 }
                 @default => return(false);
             };
-            f = f.offset(1);
         };
         biggest = biggest.max(case.zext());
-        f = f.offset(1);
     };
     count[] += biggest.trunc();  // TODO: overflow
     count[] <= 4
@@ -186,9 +184,9 @@ fn selret(b: *Qbe.Blk, f: *Qbe.Fn) void = {
     
     ::if(Ty(i64, i64));
     gp, fp := if j == .retc {
-        @debug_assert_ge(f.retty, 0, "retc without type");
+        @debug_assert_ne(f.retty, QbeNull, "retc without type");
         m := f.globals;
-        type := f.globals.types[][f.retty.zext()]&;
+        type := f.get_type(f.retty);
         cr := Class.zeroed();
         typclass(cr&, type, gpreg, fpreg, f.globals);
         if cr.class.has(.Cptr) {
@@ -213,7 +211,7 @@ fn selret(b: *Qbe.Blk, f: *Qbe.Fn) void = {
     b.jmp.arg = CALL(cty);
 }
 
-fn argsclass(i0: *Qbe.Ins, i1: *Qbe.Ins, carg: *Class, globals: *QbeModule) RCallArm = {
+fn argsclass(i0: *Qbe.Ins, i1: *Qbe.Ins, carg: *Class, f: *Qbe.Fn) RCallArm = {
     va   := false;
     envc := 0;
     gp   := gpreg;
@@ -237,7 +235,7 @@ fn argsclass(i0: *Qbe.Ins, i1: *Qbe.Ins, carg: *Class, globals: *QbeModule) RCal
         };
         if is_argpar {
             c.size = 8;
-            if globals.target.apple && !is_wide(i.cls()) {
+            if f.globals.target.apple && !is_wide(i.cls()) {
                 c.size = 4;
             };
         };
@@ -266,7 +264,7 @@ fn argsclass(i0: *Qbe.Ins, i1: *Qbe.Ins, carg: *Class, globals: *QbeModule) RCal
             next();
         };
         if o == .parc || o == .argc {
-            typclass(c, globals.types.index(i.arg&[0].val()), gp, fp, globals);
+            typclass(c, f.get_type(i.arg&[0]), gp, fp, f.globals);
             if c.ngp.zext() <= ngp {
                 if c.nfp.zext() <= nfp {
                     ngp -= c.ngp.zext();
@@ -291,7 +289,7 @@ fn argsclass(i0: *Qbe.Ins, i1: *Qbe.Ins, carg: *Class, globals: *QbeModule) RCal
             next();
         };
         if o == .argv {
-            va = globals.target.apple;
+            va = f.globals.target.apple;
             next();
         };
         @panic("bad inst for argsclass")
@@ -379,7 +377,7 @@ fn selcall(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins, ilp: **Insl) void = {
     tmp := Array(Qbe.Ref, 4).zeroed();
     ca := temp().alloc_zeroed(Class, ptr_diff(i0, i1));
     m := f.globals;
-    cty := argsclass(i0, i1, ca.ptr, f.globals);
+    cty := argsclass(i0, i1, ca.ptr, f);
 
     stk: i32 = 0;
     c := ca.ptr;
@@ -406,7 +404,7 @@ fn selcall(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins, ilp: **Insl) void = {
     };
 
     if i1.arg&[1] != QbeNull {
-        type := f.globals.types[].index(i1.arg&[1].val());
+        type := f.get_type(i1.arg&[1]);
         cr := Class.zeroed();
         typclass(cr&, type, gpreg, fpreg, f.globals);
         @debug_assert(i1.to != QbeNull, "call returning aggregate must have a destination.");
@@ -503,7 +501,7 @@ fn selpar(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) Params = {
     ca := temp().alloc_zeroed(Class, ptr_diff(i0, i1));
     f.reset_scratch();
 
-    cty := argsclass(i0, i1, ca.as_ptr(), f.globals);
+    cty := argsclass(i0, i1, ca.as_ptr(), f);
     discard := Array(i32, 2).ptr_from_int(0);
     f.reg = arm64_argregs(CALL(cty), discard);
 
@@ -523,9 +521,9 @@ fn selpar(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) Params = {
         il = il.link;
     };
     
-    if f.retty >= 0 {
+    if f.retty != QbeNull {
         cr := Class.zeroed(); 
-        type := f.globals.types[].index(f.retty.zext());
+        type := f.get_type(f.retty);
         typclass(cr&, type, gpreg, fpreg, f.globals);
         if cr.class.has(.Cptr) {
             f.retr = f.newtmp("abi", .Kl);  // :SetRetr

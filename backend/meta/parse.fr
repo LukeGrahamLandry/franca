@@ -195,7 +195,7 @@ fn parse_header(self: *QParseCtx, export: bool) void = {
             return()
         };
         self.ret = .retc;
-        self.f.retty = type.intcast();
+        self.f.retty = TYPE(type);
     } else {
         if !self.check("$") {
             k := or cls_from_char(self.input[self.cursor]) {
@@ -207,7 +207,7 @@ fn parse_header(self: *QParseCtx, export: bool) void = {
         } else {
             self.ret = .ret0;
         };
-        self.f.retty = -1;
+        self.f.retty = QbeNull;
     };
     self.skip_blanks();
     if !self.eat("$") {
@@ -843,7 +843,7 @@ fn parse_type(self: *QParseCtx) Result(void, Str) = {
     t := m.number_of_types;
     m.number_of_types += 1;
     m.types.grow(m.number_of_types);  // :ThreadSafety
-    typ := m.types.index(t);
+    typ := m.get_type(t);
     typ[] = Qbe.Typ.zeroed();  // :nulltermminator
     
     typ.align_log2 = -1;
@@ -904,7 +904,7 @@ fn parse_type_fields(self: *QParseCtx, typ: *Qbe.Typ, field_count: *i64) Result(
                 value_to_put_in_len_field = (or self.find_type(n) {
                     return(Err = "type name must be declared before useas field type")
                 });
-                inner := m.types.index(value_to_put_in_len_field);
+                inner := m.get_type(value_to_put_in_len_field);
                 (.FTyp, inner.size, inner.align_log2.intcast())
             };
             @case("{".ascii()) => return(Err = "types cannot be nested inline. \nuse seperate declarations and refer to them by name. \nsorry that this is a waste of your time.");
@@ -919,7 +919,7 @@ fn parse_type_fields(self: *QParseCtx, typ: *Qbe.Typ, field_count: *i64) Result(
                 self.skip_blanks();
                 len := self.parse_number(); 
                 self.eat(",");
-                push(typ.fields&, field_count, (type = .FPad, len = len.trunc()));
+                push(typ.fields&, field_count, pack(type = .FPad, len = len.trunc()));
                 my_size += len;
                 continue()
             };
@@ -928,18 +928,16 @@ fn parse_type_fields(self: *QParseCtx, typ: *Qbe.Typ, field_count: *i64) Result(
         
         my_align = my_align.max(align);
         align = 1.shift_left(align) - 1;
-        align = bit_and(my_size + align, align.bit_not()) - my_size;
-        if align != 0 {
+        padding := bit_and(my_size + align, align.bit_not()) - my_size;
+        if padding != 0 {
             /* padding */
             field_count[] += 1;
             typ.fields&.grow(field_count[]);
-            f := typ.fields.index(field_count[] - 1);
-            f.type = .FPad;
-            f.len = align.trunc();
+            typ.fields[field_count[] - 1] = pack(type = .FPad, len = padding.trunc());
         };
         self.skip_blanks();
         count := if(self.input[self.cursor].is_ascii_digit(), => self.parse_number(), => 1);
-        my_size += align + count * size;
+        my_size += padding + count * size;
         ::enum(Qbe.FieldType);
         if tag == .FTyp {
             size = value_to_put_in_len_field;
@@ -949,8 +947,7 @@ fn parse_type_fields(self: *QParseCtx, typ: *Qbe.Typ, field_count: *i64) Result(
         range(0, count) { _ |
             f2 := typ.fields.index(field_count[]);
             field_count[] += 1;
-            f2.len = size.trunc();
-            f2.type = tag;
+            f2[] = pack(len = size.trunc(), type = tag);
         };
         self.eat(",");
     };
@@ -962,7 +959,7 @@ fn parse_type_fields(self: *QParseCtx, typ: *Qbe.Typ, field_count: *i64) Result(
     typ.size = bit_and(my_size + align - 1, -align);;
     typ.align_log2 = my_align.intcast();
     typ.fields&.grow(field_count[] + 1);
-    typ.fields[field_count[]].type = .FEnd;
+    typ.fields[field_count[]] = pack(type = .FEnd, len = 0);
     typ.nunion += 1;
     
     .Ok

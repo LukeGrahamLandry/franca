@@ -1,3 +1,7 @@
+- clear cache before tests just in case
+- prospero. min/max x64
+- make_dirs on apple x64
+
 ## Quest Lines
 
 - compiler: add a defer expression that lets you run cleanup from a closure even if you jump out past it

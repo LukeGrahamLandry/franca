@@ -1,7 +1,7 @@
 /// This defines the .frc file format used by the franca compiler. 
 /// See @/docs/caching.md
 
-MAGIC :: 0x0002_41434E415246;  // FRANCA__
+MAGIC :: 0x0003_41434E415246;  // FRANCA__
 Header :: @struct {
     meta: Meta #use;
     dep: Storage(Dep);
@@ -13,6 +13,8 @@ Header :: @struct {
     rel: Storage(Dat2.Reloc);
     str: Storage(u8);
     lib: Storage(Lib);
+    idx: Storage(u32);
+    //typ: Storage(Typ);
 };
 
 Meta :: @struct {
@@ -56,10 +58,11 @@ Fnc :: @struct {
     // When the instructions have Blk/Con indices, they're relative to these arrays, 
     // so they don't need to be remapped when saving. 
     blk: Ref(Blk);
-    con: Ref(Qbe.Con);
+    con: Ref(Qbe.Con);  // not including the first `fixed_const_count`
     mem: Ref(Qbe.Addr);
     slot: u32;
     flags: u32;
+    tmp: u32;  // idx[phi] = (chunks, [chunks](packed cls:u2))
 };
 
 Flags :: @bit_fields(
@@ -75,6 +78,7 @@ Blk :: @struct {
     s1: u32;
     s2: u32;
     jmp: Qbe.BlkJmp;
+    phi: u32; // idx[phi] = (nphi, [nphi](narg, to, k, [narg](blk, arg)))
 };
 
 Dat :: @struct {
@@ -155,6 +159,7 @@ Writer :: @struct {
     rel: List(Dat2.Reloc);
     str: List(u8);
     lib: List(Lib);
+    idx: List(u32);
     symbols: HashMap(u32, i64);
 };
 
@@ -170,6 +175,7 @@ fn init(a: Alloc) Writer = (
     rel = list(a),
     str = list(a),
     lib = list(a),
+    idx = list(a),
 );
 
 fn push(self: *Writer, it: []u8) Ref(u8) = {
@@ -188,7 +194,7 @@ fn map_sym(self: *Writer, m: *QbeModule, id: u32) i64 = {
     }
 }
 
-fn push(self: *Writer, f: *Qbe.Fn) void = {
+fn push(self: *Writer, f: *Qbe.Fn, did_regalloc: bool) void = {
     id := self.map_sym(f.globals, f.lnk.id);
     
     self.sym[id].segment = .Code;
@@ -212,11 +218,13 @@ fn push(self: *Writer, f: *Qbe.Fn) void = {
         };
     };
     for_blocks f { b |
+        phi := write_phi(self, b);
         self.blk&.push(
             ins = (off = self.ins.len.trunc(), count = b.nins),
             s1 = @if(b.s1.is_null(), Qbe.no_symbol, bitcast b.s1.id),
             s2 = @if(b.s2.is_null(), Qbe.no_symbol, bitcast b.s2.id),
             jmp = b.jmp,
+            phi = phi,
         );
         self.ins&.push_all(b.ins.slice(0, zext b.nins));
     };
@@ -235,6 +243,8 @@ fn push(self: *Writer, f: *Qbe.Fn) void = {
         _ = 0,
     );
     self.sym[id].fnc.flags = flags.repr;
+    
+    self.sym[id].fnc.tmp = @if(did_regalloc, Qbe.no_symbol, write_tmp(self, f));
 }
 
 fn push(self: *Writer, m: *QbeModule, d: *Dat2) void = {
@@ -311,6 +321,7 @@ fn to_bytes(self: *Writer, meta: Meta) [][]u8 = {
     X(header.rel&, self.rel&);
     X(header.str&, self.str&);
     X(header.lib&, self.lib&);
+    X(header.idx&, self.idx&);
     header.filelen = n.trunc();
     
     // Maybe limitting to 4GB is too small and I should make all the offsets be u64 instead. 
@@ -390,6 +401,8 @@ fn load(header: *Header, f: *Qbe.Fn, it: Ref(Sym), syms: []u32) void = {
         if i != blks.len - 1 {
             blks[i].link = blks.index(i + 1);
         }
+        
+        read_phi(header, blks, b, i);
     };
     f.start = blks.index(0);
     f.nblk = fnc.blk.count.bitcast();
@@ -406,6 +419,8 @@ fn load(header: *Header, f: *Qbe.Fn, it: Ref(Sym), syms: []u32) void = {
     f.vararg = flags.get(.vararg) != 0;
     f.salign = flags.get(.salign).intcast();
     f.dynalloc = flags.get(.dynalloc) != 0;
+    
+    read_tmp(header, f, fnc.tmp);
 }
 
 fn load(header: *Header, m: *QbeModule, i: Ref(Sym), syms: []u32) Dat2 = {
@@ -493,6 +508,78 @@ fn compile_all_symbols(header: *Header, m: *QbeModule) void = {
     //       which i guess doesn't get set_library called on it (should be fixed anyway). 
     //       + need to do a more complicated thing to allow non-libc libraries anyway. 
 }
+
+// 
+// Some fields (tmp, phi, typ) are only used when the function is pre-regalloc 
+// (which happens when it needs to be inlinable). 
+// 
+
+read_tmp :: fn(header: *Header, f: *Qbe.Fn, idx: u32) void #once = {
+    if(idx == Qbe.no_symbol, => return());
+    @debug_assert_eq(f.ntmp, Qbe.Tmp0);
+    chunks: u32 = header.get(idx)[]; idx += 1;
+    f.tmp&.grow(Qbe.Tmp0 + chunks.zext()*16);
+    range(0, chunks.zext()) { _ |
+        data: u32 = header.get(idx)[]; idx += 1;
+        range(0, 16) { i |
+            k := data.shift_right_logical(i*2).bit_and(0b11);
+            f.newtmp("", @as(Qbe.Cls) @as(i32) bitcast k);
+        };
+    };
+};
+
+write_tmp :: fn(self: *Writer, f: *Qbe.Fn) u32 #once = {
+    if(f.ntmp == Qbe.Tmp0, => return(Qbe.no_symbol));
+    tmp: u32 = self.idx.len.trunc();
+    chunks := align_to(f.ntmp.zext() - Qbe.Tmp0, 16) / 16;
+    self.idx&.push(chunks.trunc());
+    range(0, chunks) { c |
+        packed: u32 = 0;
+        range(0, 16) { i |
+            t := Qbe.Tmp0 + c*16+i;
+            if t < f.ntmp.zext() {
+                k := @as(u32) bitcast @as(i32) f.tmp[t].cls;
+                packed = bit_or(packed, k.shift_left(i*2));
+            }
+        };
+        self.idx&.push(packed);
+    };
+    tmp
+};
+
+read_phi :: fn(header: *Header, blks: []Qbe.Blk, b: *Blk, i: i64) void #once = {
+    if(b.phi == Qbe.no_symbol, => return());
+    idx: u32 = header.get(b.phi)[];
+    nphi: u32 = header.get(idx)[]; idx += 1;
+    range(0, nphi.zext()) { i_phi | 
+        narg: u32 = header.get(idx)[]; idx += 1;
+        to: u32 = header.get(idx)[]; idx += 1;
+        k: u32 = header.get(idx)[]; idx += 1;
+        p := new_phi(blks[i]&, @as(Qbe.Cls) @as(i32) bitcast k, narg.zext(), TMP(to.zext()));
+        range(0, narg.zext()) { _ |
+            blk_i: u32 = header.get(idx)[]; idx += 1;
+            arg_i: u32 = header.get(idx)[]; idx += 1;
+            p.push(blks[blk_i.zext()]&, TMP(arg_i.zext()));
+        };
+    };
+};
+
+write_phi :: fn(self: *Writer, b: *Qbe.Blk) u32 #once = {
+    if(b.phi.is_null(), => return(Qbe.no_symbol));
+    phi: u32 = self.idx.len.trunc();
+    self.idx&.push(0);
+    for_phi b { p |
+        self.idx[phi.zext()] += 1;
+        self.idx&.push(p.narg);
+        self.idx&.push(p.to.val().trunc());
+        self.idx&.push(bitcast @as(i32) p.cls);
+        range(0, p.narg.zext()) { n |
+            self.idx&.push(p.blk&[n].id.bitcast());
+            self.idx&.push(p.arg&[n].val().trunc());
+        };
+    };
+    phi
+};
 
 ENABLE_ENABLE_TRACY :: get_environment_variable("FRANCA_TRACY").is_some();
 Sha256 :: import("@/backend/macho/sha256.fr");

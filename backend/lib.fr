@@ -181,12 +181,17 @@ fn init_default_module(m: *QbeModule, goal: QbeTargetEnv, expecting_rwx: bool) v
 // The main take away is the franca compiler wants to use this so comptime franca code cannot set expecting_rwx to true on aarch64 macos. 
 //
 
+fn init(m: *QbeModule, segment_size: i64, gpa: Alloc, goal: QbeTargetEnv, expecting_rwx: bool, dis: DisassemblerFunc) void = {
+    init_common(m, segment_size, gpa, goal, expecting_rwx, dis);
+    m.set_target_vtable();
+}
+
 // - the allocators need to not be temp() because we reset temp()
 // - expecting_rwx only matters when jitting. if false, you have to call make_exec before trying to run the code. 
 //   Regardless, be careful of cache coherency on aarch64, see comment on lib/sys/process.fr/clear_instruction_cache().
 // - 'dis' is called for debug["D"]. the default one above just execs 'llvm-mc'. 
 //   But i need to be able to override it when targetting blink to not pull in those libc functions. 
-fn init(m: *QbeModule, segment_size: i64, gpa: Alloc, goal: QbeTargetEnv, expecting_rwx: bool, dis: DisassemblerFunc) void = {
+fn init_common(m: *QbeModule, segment_size: i64, gpa: Alloc, goal: QbeTargetEnv, expecting_rwx: bool, dis: DisassemblerFunc) void = {
     gpa = todo_allocator;
     m[] = QbeModule.zeroed();
     lock(m.intern_mutex&);  // surely this does nothing at this point but just for fun
@@ -301,11 +306,27 @@ fn init(m: *QbeModule, segment_size: i64, gpa: Alloc, goal: QbeTargetEnv, expect
     m.debug  = forever.box_zeroed(@type m.debug[]);
     m.target = forever.box(@type m.target[]);
     
-    EmitWasm :: import("@/backend/wasm/emit.fr");
     
+    m.types[] = m.new_long_life(0); // TODO: check the magic in QbeBuilder.init to make sure you remember to do this. 
+    m.curi[] = m.insb.index_unchecked(Qbe.MaxInstructions);
+    if m.goal.arch != .wasm32 {
+        m.symbol_memmove = m.intern("memmove");
+    };
+    
+    m.llvm_global_value_buf = list(general_allocator());
+    m.llvm_global_type_buf  = list(general_allocator());
+    m.llvm_global_code_buf  = list(general_allocator());
+    m.wasm_types_cache      = init(general_allocator());
+    m.libraries&.push("", general_allocator());
+    
+    unlock(m.intern_mutex&);
+}
+
+fn set_target_vtable(m: *QbeModule) void = {
+    EmitWasm :: import("@/backend/wasm/emit.fr");
     t := m.target;
     @match(m.goal.arch) {
-        fn aarch64() => import("@/backend/arm64/target.fr")'fill_target_arm(t, m.goal.os == .macos);
+        fn aarch64() => import("@/backend/arm64/target.fr")'fill_target_arm(t, m.goal.os == .macos, false);
         fn x86_64()  => import("@/backend/amd64/target.fr")'fill_target_amd(t, m.goal.os == .macos);
         fn wasm32()  => {
             t.finish_passes = finish_qbe_passes_wasm;
@@ -324,21 +345,7 @@ fn init(m: *QbeModule, segment_size: i64, gpa: Alloc, goal: QbeTargetEnv, expect
         @if(m.goal.os == .linux)     => import("@/backend/elf/emit.fr").output_elf;
         @else => panic("TODO: we don't support this target");
     };
-    
-    m.types[] = m.new_long_life(0); // TODO: check the magic in QbeBuilder.init to make sure you remember to do this. 
-    m.curi[] = m.insb.index_unchecked(Qbe.MaxInstructions);
-    if m.goal.arch != .wasm32 {
-        m.symbol_memmove = m.intern("memmove");
-    };
-    
-    m.llvm_global_value_buf = list(general_allocator());
-    m.llvm_global_type_buf  = list(general_allocator());
-    m.llvm_global_code_buf  = list(general_allocator());
-    m.wasm_types_cache      = init(general_allocator());
-    m.libraries&.push("", general_allocator());
-    
-    unlock(m.intern_mutex&);
-}
+} 
 
 fn init_empty_for_template_only(m: *QbeModule, gpa: Alloc) void = {
     m[] = QbeModule.zeroed();

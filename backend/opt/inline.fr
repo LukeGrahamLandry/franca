@@ -56,7 +56,7 @@ fn good4inl(f: *Qbe.Fn) bool = {
 // Note: this goes in the inlining cache so it can't use temp() memory.
 fn cloneblk(m: *QbeModule, b: *Qbe.Blk) *Qbe.Blk = {
     lock(m.intern_mutex&); 
-    inlb := m.forever&.borrow().box_zeroed(Qbe.Blk); // :HardcodeAlloc
+    inlb := m.forever&.borrow().box_zeroed(Qbe.Blk);
     unlock(m.intern_mutex&); 
     inlb.jmp = b.jmp;
     
@@ -190,7 +190,7 @@ fn display(f: *Qbe.Fn, out: *List(u8)) void = {
     printfn(f, out);    
 }
 
-fn inlargs(inlfn: *Qbe.Fn, f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins, c: *InlineCtx) void = {
+fn inlargs(inlfn: *Qbe.Fn, f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins /*dest*/, c: *InlineCtx) void = {
     /* replace args with copies to par tmps */
     @debug_assert(inlfn.nblk == 1);
     i1 := inlfn.start.ins.first;
@@ -351,16 +351,16 @@ fn inlcall(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) i64 = {
         // They called like it was a void function. 
         // We allow this for scalars because it would work if it wasn't inlined. 
         // But if an aggragate would have been returned by reference, this would fault at runtime if we hadn't tried to inline it. 
-        @assert(inlfn.retty == -1, "Tried to inline void call to function $% which returns an aggregate.", inlfn.name());
+        @assert(inlfn.retty == QbeNull, "Tried to inline void call to function $% which returns an aggregate.", inlfn.name());
         @debug_assert(inlfn.start.jmp.type != .retc);
     } else {
         new_ref := getinlref(inlfn, inlfn.start.jmp.arg, f, c&);
         /* aggregate type pass-by-value is implicit copy */
-        if inlfn.retty != -1 {
+        if inlfn.retty != QbeNull {
             @debug_assert(inlfn.start.jmp.type == .retc, "we save for inlining before lowering abi");
             // We have to do a copy because they might be returning something that wasn't on thier stack frame, 
             // TODO: we have aliasing info so should know if they're returning an alloca and don't need this copy. 
-            new_ref = insert_blit(f, TYPE(inlfn.retty.intcast()), i.arg&[1], new_ref, c&);
+            new_ref = insert_blit(f, i.arg&[1], inlfn.retty, new_ref, c&);
         } else {
             @debug_assert(i.arg&[1] == QbeNull);
             @debug_assert(inlfn.start.jmp.type != .retc);

@@ -140,7 +140,7 @@ fn printref(r: Qbe.Ref, f: *Qbe.Fn, out: *List(u8)) void = @match(rtype(r)) {
     };
     fn RSlot() => @fmt(out, "S%", rsval(r));
     fn RCall() => @fmt(out, "C%", r.val());
-    fn RType() => @fmt(out, ":%", f.globals.types[r.val()]&.name());
+    fn RType() => @fmt(out, ":%", f.get_type(r).name());
     fn RMem() => printmem(f.mem.index(r.val()), f, out);
     fn RInt() => @fmt(out, "I%", rsval(r));
     fn RNull() => write(out, "R");
@@ -200,9 +200,9 @@ fn printfn(f: *Qbe.Fn, out: *List(u8)) void = {
             @fmt(out, "export ");
         };
         @fmt(out, "function ");
-        if f.retty >= 0 {
-            type := f.globals.types[].index(f.retty.intcast());  // :ThreadSafety TODO
-            @fmt(out, ":% ", @if(TRACK_IR_NAMES, type.name(), f.retty));
+        if f.retty != QbeNull {
+            type := f.get_type(f.retty);  // :ThreadSafety TODO
+            @fmt(out, ":% ", @if(TRACK_IR_NAMES, type.name(), f.retty.val()));
         };
         @fmt(out, "$%() {  # nblk=%\n", s.name, f.nblk);
     };
@@ -262,7 +262,7 @@ fn printjmp(f: *Qbe.Fn, b: *Qbe.Blk, out: *List(u8)) void = {
             printref(b.jmp.arg, f, out);
         };
         if b.jmp.type == .retc {
-            @fmt(out, ", :%", f.globals.types.index(f.retty.zext()).name());
+            @fmt(out, ", :%", f.get_type(f.retty).name());
         };
         return();
     };
@@ -357,7 +357,7 @@ fn dumpts(bs: *Qbe.BSet, tmp: QList(Qbe.Tmp), f: *List(u8)) void = {
 }
 
 fn print_type(m: *QbeModule, ty_index: i64, out: *List(u8)) void = {  // :ThreadSafety
-    t := m.types.index(ty_index);
+    t := m.get_type(ty_index);
     @fmt(out, "type :% = ", @if(TRACK_IR_NAMES, t.name(), ty_index));
     if t.is_dark {
         @fmt(out, "% { % }", 1.shift_left(t.align_log2.zext()), t.size);
@@ -366,16 +366,16 @@ fn print_type(m: *QbeModule, ty_index: i64, out: *List(u8)) void = {  // :Thread
     if t.is_union {
         @fmt(out, "{ ");
     };
-    f := t.fields[0]&;  
-    ::enum(@type f.type);
-    if f.type == .FEnd {
-        @fmt(out, "EMPTY");
-    };
-    range(0, t.nunion.zext()) { n |
+    ::enum(Qbe.Field);
+    //if f.type == .FEnd {
+        //@fmt(out, "EMPTY");
+    //};
+    i := 0;
+    for_unions(t, i&) {
         @fmt(out, "{ ");
-        while => f.type != .FEnd { 
+        for_fields(t, i&) { type, idx |
             // TODO: would be more readable if this used array syntax
-            @match(f.type) {
+            @match(type) {
                 fn Fb() => @fmt(out, "b, ");
                 fn Fh() => @fmt(out, "h, ");
                 fn Fw() => @fmt(out, "w, ");
@@ -383,18 +383,16 @@ fn print_type(m: *QbeModule, ty_index: i64, out: *List(u8)) void = {  // :Thread
                 fn Fs() => @fmt(out, "s, ");
                 fn Fd() => @fmt(out, "d, ");
                 fn FTyp() => {
-                    type := m.types[].index(f.len.zext());
-                    @fmt(out, ":%, ", @if(TRACK_IR_NAMES, type.name(), f.len));
+                    type := m.get_type(idx.zext());
+                    @fmt(out, ":%, ", @if(TRACK_IR_NAMES, type.name(), idx));
                 }
                 fn FPad() => {
-                    @fmt(out, "p %, ", f.len);
+                    @fmt(out, "p %, ", idx);
                 }
                 fn FEnd() => unreachable();
             };
-            f = f.offset(1);
         };
         @fmt(out, "}");
-        f = f.offset(1);
     };
     if t.is_union {
         @fmt(out, " }");

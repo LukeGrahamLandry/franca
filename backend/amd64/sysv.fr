@@ -150,20 +150,20 @@ fn amd64_sysv_abi(f: *Qbe.Fn) void = {
 fn classify(a: *AClass, t: *Qbe.Typ, s: u32, m: *QbeModule) void = {
     @debug_assert(t.nunion > 0, "type '%' has no cases", t.name());
     s1 := s;
-    ff := t.fields.index(0);
-    range(0, t.nunion.zext()) { n |
+    i := 0;
+    for_unions(t, i&) {
         s  := s1;
-        while => ff.type != .FEnd {
+        for_fields(t, i&) { type, length |
             @debug_assert(s <= 16, "too big?");
-            @match(ff.type) {
+            @match(type) {
                 fn FEnd() => unreachable();
                 fn FPad() => {
                     /* don't change anything */
-                    s += ff.len;
+                    s += length;
                 }
                 fn FTyp() => {
-                    @debug_assert_ge(ff.len, 0, "FTyp");
-                    inner := m.get_type(ff.len.zext());
+                    @debug_assert_ge(length, 0, "FTyp");
+                    inner := m.get_type(length.zext());
                     classify(a, inner, s, m);
                     s += inner.size.trunc();
                 }
@@ -171,19 +171,17 @@ fn classify(a: *AClass, t: *Qbe.Typ, s: u32, m: *QbeModule) void = {
                     i: i64 = s.zext() / 8;
                     @debug_assert_lt(i, a.cls&.len(), "s oob %", t.name());
                     cls := a.cls&.index(i);
-                    if (@is(ff.type, .Fs, .Fd)) {
+                    if (@is(type, .Fs, .Fd)) {
                         if cls[] == .Kx {
                             cls[] = .Kd;
                         }
                     } else {
                         cls[] = .Kl;
                     };
-                    s += ff.len;
+                    s += length;
                 };
             };
-            ff = ff.offset(1);
         };
-        ff = ff.offset(1);
     };
 }
 
@@ -244,10 +242,9 @@ fn selret_amd64(b: *Qbe.Blk, f: *Qbe.Fn) void = {
 
     ca := RCallAmd.zeroed();
     if j == .retc {
-        @debug_assert_ge(f.retty, 0);
         aret := AClass.zeroed();
         m := f.globals;
-        typclass(aret&, f.globals.get_type(f.retty.intcast()), f.globals);
+        typclass(aret&, f.get_type(f.retty), f.globals);
         if aret.inmem != 0 {
             @debug_assert(rtype(f.retr) == .RTmp);
             f.emit(.copy, .Kl, TMP(Amd64Reg.RAX), f.retr, QbeNull);
@@ -274,7 +271,7 @@ fn selret_amd64(b: *Qbe.Blk, f: *Qbe.Fn) void = {
 }
 
 // TODO: pass ac as a slice so you get bounds checks
-fn argsclass(i0: *Qbe.Ins, i1: *Qbe.Ins, ac: []AClass, op_in: Qbe.O, aret: *AClass, env: *Qbe.Ref, m: *QbeModule) RCallAmd = {
+fn argsclass(i0: *Qbe.Ins, i1: *Qbe.Ins, ac: []AClass, op_in: Qbe.O, aret: *AClass, env: *Qbe.Ref, f: *Qbe.Fn) RCallAmd = {
     nint := if(!aret.is_null() && aret.inmem != 0, => 5 /* hidden argument */, => 6);
     nsse := 8;
     varc := false;
@@ -297,9 +294,7 @@ fn argsclass(i0: *Qbe.Ins, i1: *Qbe.Ins, ac: []AClass, op_in: Qbe.O, aret: *ACla
             }
             fn argc() => {
                 @debug_assert(rtype(i.arg&[0]) == .RType, ".argc expected arg0 .RType");
-                n := i.arg&[0].val();
-                @debug_assert_ge(n, 0);
-                typclass(a, m.get_type(n), m);
+                typclass(a, f.get_type(i.arg&[0]), f.globals);
                 if(a.inmem != 0, => continue());
                 ni, ns := (0, 0);
                 n := 0;
@@ -357,9 +352,9 @@ fn selcall(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins, rap: **RAlloc) void = {
     aret := AClass.zeroed();
     if aggregate {
         @debug_assert(rtype(a1) == .RType, "second argument to call must be a type");
-        typclass(aret&, m.get_type(a1.val()), m);
+        typclass(aret&, f.get_type(a1), m);
     };
-    ca := argsclass(i0, i1, ac, .arg, aret&, env&, m);
+    ca := argsclass(i0, i1, ac, .arg, aret&, env&, f);
     
     stk := 0;
     for_rev ac { a |
@@ -498,12 +493,12 @@ fn selpar_amd64(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) RCallAmd = {
     ni, ns := (0, 0);
 
     m := f.globals;
-    aggregate := f.retty >= 0;
+    aggregate := f.retty != QbeNull;
     aret := AClass.zeroed();
     if aggregate {
-        typclass(aret&, m.get_type(f.retty.intcast()), m);
+        typclass(aret&, f.get_type(f.retty), m);
     };
-    fa := argsclass(i0, i1, ac, .par, aret&, env&, m);
+    fa := argsclass(i0, i1, ac, .par, aret&, env&, f);
     
     discard := Array(i32, 2).ptr_from_int(0);
     f.reg = amd64_sysv_argregs(CALL(fa), discard);

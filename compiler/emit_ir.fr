@@ -497,13 +497,13 @@ fn emit_ret(self: *EmitIr, result: Qbe.Ref) void = {
         };
         @if(scalar) => {
             @debug_assert_ne(result, QbeNull, "missing return value");
-            self.f.retty = -1;
+            self.f.retty = QbeNull;
             // TODO: tell it about b/h so we can fully follow the c abi :FUCKED but the old one didn't do it either. 
             self.blk.jmp.type = ret_op(k);
         };
         @else => {
             @debug_assert_ne(result, QbeNull, "missing return value");
-            self.f.retty = self.get_aggregate(ret).val().trunc();
+            self.f.retty = TYPE(self.get_aggregate(ret).val());
             self.blk.jmp.type = .retc;
         };
     };
@@ -532,7 +532,7 @@ fn intrinsic_shim(self: *EmitIr, func: *Func) Ty(Qbe.Ref, Qbe.Ref, Type) = {
         a1 = self.f.newtmp("a", k1);
         self.emit(.par, k1, a1, QbeNull, QbeNull);
     };
-    self.f.retty = -1;
+    self.f.retty = QbeNull;
     _, kr := self.load_op(f_ty.ret);
     self.blk.jmp.type = ret_op(kr);
     (a0, a1, f_ty.ret)
@@ -1558,7 +1558,7 @@ fn get_aggregate(self: CompCtx, m: *CodegenShared, ty: Type) Qbe.Ref = {
         result := Qbe.Typ.zeroed();
         result.size = info.stride_bytes.zext();
         @debug_assert(result.size != 0, "ICE: treating zero size type % as an aggragate", self.log(ty));
-        result.align_log2 = (@as(i64) info.align_bytes.zext()).trailing_zeros().intcast(); // TODO: do this faster
+        result.align_log2 = (@as(i64) info.align_bytes.zext()).trailing_zeros().trunc(); // TODO: do this faster
         // TODO: track names
         i := @match(type) {
             fn Named(it)    => self.get_aggregate(m, it._0).val();
@@ -1579,8 +1579,8 @@ fn get_aggregate(self: CompCtx, m: *CodegenShared, ty: Type) Qbe.Ref = {
                         field_size := self.get_info(f.ty)[].stride_bytes;
                         if field_size != 0 {
                             @debug_assert(f.byte_offset == 0, "union field must have offset 0");
-                            push(result.fields&, n&, self.as_field(m, f.ty));
-                            push(result.fields&, n&, (type = .FEnd, len = 0));
+                            push(result.fields&, n&, pack self.as_field(m, f.ty));
+                            push(result.fields&, n&, pack (type = .FEnd, len = 0));
                         }; // else :NoRuntimeRepr
                     };
                 } else {
@@ -1589,13 +1589,14 @@ fn get_aggregate(self: CompCtx, m: *CodegenShared, ty: Type) Qbe.Ref = {
                         field_size := self.get_info(f.ty)[].stride_bytes;
                         if field_size != 0 {
                             add_padding(result.fields&, n&, off&, f.byte_offset);
-                            push(result.fields&, n&, self.as_field(m, f.ty));
+                            push(result.fields&, n&, pack self.as_field(m, f.ty));
                             off += field_size.zext();
                         }; // else :NoRuntimeRepr
                     };
                     add_padding(result.fields&, n&, off&, info.stride_bytes.zext());
-                    push(result.fields&, n&, (type = .FEnd, len = 0));
+                    push(result.fields&, n&, pack(type = .FEnd, len = 0));
                 };
+                @debug_assert_lt(n, MAX_u32);
                 result.nfield = n.trunc();
                 // TODO: name
                 m.m.new_type(result)
@@ -1609,11 +1610,12 @@ fn get_aggregate(self: CompCtx, m: *CodegenShared, ty: Type) Qbe.Ref = {
                 field_count := 1 + it.len.zext();
                 result.fields = m.m.new_long_life(field_count + 1);
                 result.nunion = 1;
-                field := self.as_field(m, it.inner);
+                field := pack self.as_field(m, it.inner);
                 range(0, it.len.zext()) { i |
                     result.fields[i] = field;
                 };
-                result.fields[it.len.zext()] = (type = .FEnd, len = 0);
+                result.fields[it.len.zext()] = pack(type = .FEnd, len = 0);
+                @debug_assert_lt(it.len, MAX_u32);
                 result.nfield = it.len;
                 // TODO: name
                 m.m.new_type(result)
@@ -1624,9 +1626,9 @@ fn get_aggregate(self: CompCtx, m: *CodegenShared, ty: Type) Qbe.Ref = {
                 result.nunion = it.cases.len.trunc();
                 each it.cases { case | 
                     if self.get_info(case._1)[].stride_bytes != 0 { 
-                        result.fields[n] = (type = .Fl, len = 8);      n += 1;
-                        result.fields[n] = self.as_field(m, case._1);  n += 1;
-                        result.fields[n] = (type = .FEnd, len = 0);    n += 1;
+                        result.fields[n] = pack(type = .Fl, len = 8);       n += 1;
+                        result.fields[n] = pack self.as_field(m, case._1);  n += 1;
+                        result.fields[n] = pack(type = .FEnd, len = 0);     n += 1;
                         // TODO: do i need to pad them to the same size?
                     } else {
                         result.nunion -= 1;
@@ -1636,9 +1638,10 @@ fn get_aggregate(self: CompCtx, m: *CodegenShared, ty: Type) Qbe.Ref = {
                 if result.nunion == 0 {
                     // all cases are zero sized. this is really just an enum. 
                     @debug_assert(false, "ICE: get_aggregate of scalar @tagged");
-                    result.fields[n] = (type = .Fl, len = 8);      n += 1;
-                    result.fields[n] = (type = .FEnd, len = 0);    n += 1;
+                    result.fields[n] = pack(type = .Fl, len = 8);      n += 1;
+                    result.fields[n] = pack(type = .FEnd, len = 0);    n += 1;
                 };
+                @debug_assert_lt(n, MAX_u32);
                 result.nfield = n.trunc();
                 // TODO: name
                 m.m.new_type(result)
@@ -1845,13 +1848,13 @@ fn move_from_module(self: *EmitIr, f0: *Qbe.Fn, data: []BakedVarId, funcs: []Fun
         for_insts_forward b { i |
             each i.arg& { a |
                 if rtype(a[]) == .RType {
-                    a[] = TYPE(remap(a[].val(), types&, f0.globals, m));
+                    a[] = TYPE remap(a[].val(), types&, f0.globals, m);
                 };
             };
         };
     };
-    if f.retty >= 0 {
-        f.retty = remap(f.retty.intcast(), types&, f0.globals, m).intcast();
+    if f.retty != QbeNull {
+        f.retty = TYPE remap(f.retty.val(), types&, f0.globals, m);
     };
     f.start = f.rpo[f.start.id.intcast()];
     
@@ -1897,23 +1900,22 @@ fn remap(t0: i64, types: *HashMap(i64, i64), m0: *QbeModule, m1: *QbeModule) i64
 
         t1 := m1.number_of_types; m1.number_of_types += 1;
         m1.types.grow(t1 + 1);
-        t := m1.types.index(t1);
-        t[] = m0.types[t0];
+        t := m1.get_type(t1);
+        t[] = m0.get_type(t0)[];
         t.fields = m1.new_copy_long_life(t.fields, t.nfield.bitcast());
         types.insert(t0, t1);
         
-        f := t.fields.index(0);
-        range(0, t.nunion.zext()) { _ |
+        i := 0;
+        for_unions(t, i&) {
             ::enum(Qbe.FieldType);
-            while => f.type != .FEnd {
-                if f.type == .FTyp {
+            for_fields(t, i&) { type, idx |
+                if type == .FTyp {
                     // i have reenterant mutexes so this is fine
-                    f.len = remap(f.len.zext(), types, m0, m1).trunc();
+                    idx := remap(idx.zext(), types, m0, m1);
+                    t.fields[i] = pack(type = type, len = trunc idx);
                     // careful, that might have reallocated m1.types
                 };
-                f = f.offset(1);
             };
-            f = f.offset(1);
         };
         
         unlock(m1.types_mutex&);

@@ -1,0 +1,59 @@
+#include_std("backend/lib.fr");
+#use("@/lib/sys/fs.fr");
+fn main() void = {
+    args := cli_args();
+    cli_args := CStr.list(temp());
+    input := "";
+    collect := false;
+    for args { a |
+        if collect {
+            cli_args&.push(a);
+        } else {
+            if a.str().ends_with(".frc") {
+                input = a.str();
+            };
+            if a.str() == "--" {
+                collect = true;
+            };
+        }
+    };
+    if input == "" {
+        @panic("expected input .frc file");
+    }
+    
+    bytes := read_entire_file_or_crash(temp(), input);
+    m := @uninitialized QbeModule; m := m&;
+    
+    expecting_rwx := false;
+    goal: QbeTargetEnv = (type = .JitOnly, os = query_current_os(), arch = query_current_arch());
+    dis: DisassemblerFunc =
+        fn(out: *List(u8), _: []u8, __: Arch) = out.push_all("no disassembler included\n");
+    init_common(m, 1.shift_left(25), general_allocator(), goal, expecting_rwx, dis);
+    
+    // TODO: other targets
+    t := m.target;
+    import("@/backend/arm64/target.fr")'fill_target_arm(t, m.goal.os == .macos, true);
+    
+    
+    m.new_library("libc");  // :DefaultToLibc
+    
+    magic8 := ptr_cast_unchecked(u8, u64, bytes.ptr)[];
+    @assert_eq(magic8, Incremental.MAGIC);
+    header: *Incremental.Header = check(bytes);
+    t := Incremental'pack_target(m.goal.arch, m.goal.os);
+    @assert_eq(header.arch_os, t, "% was compiled for different target", input);
+    compile_all_symbols(header, m);
+    
+    @if(is_linking_libc()) import("@/backend/meta/qbe_frontend.fr")'fill_from_libc(m);
+    m.make_exec();
+    f := or m.get_addr("main") {
+        panic("couldn't find main()")
+    };
+    f := assume_types_fn(Arg = Ty(i64, *CStr, *CStr), Ret = i64, ptr = f);
+    x: CStr = as_cstr "thisisjittedcodegoodluckwiththat.exe";
+    cli_args&.insert(0, x);
+    envp := context(DefaultContext)[].environment_variables;
+    status := f(cli_args.len, cli_args.maybe_uninit.ptr, envp);
+    exit(status);
+}
+

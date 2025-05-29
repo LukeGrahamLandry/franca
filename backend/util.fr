@@ -318,7 +318,6 @@ fn default_init(f: *Qbe.Fn, m: *QbeModule) void = {
     f.tmp = new(Qbe.Tmp0);
     f.con = new(fixed_const_count);
     f.mem = new(0);
-    f.retty = -1;
     ::assert_eq(Qbe.Ref);
     push_fixed_consts(f);
     // Add temporaries representing physical registers.
@@ -345,7 +344,13 @@ fn is_symbol(f: *Qbe.Fn, r: Qbe.Ref) bool =
 fn get_type(m: *QbeModule, i: i64) *Qbe.Typ = { // :ThreadSafety you have to be in the mutex. todo: make this less error prone
     @debug_assert_lt(i, m.number_of_types, "type index out of bounds");
     @debug_assert_ge(i, 0, "type index negative");
+    // TODO: assert we have types_mutex
     m.types.index(i)
+}
+
+fn get_type(f: *Qbe.Fn, r: Qbe.Ref) *Qbe.Typ = {
+    @debug_assert_eq(rtype(r), .RType);
+    f.globals.get_type(r.val())
 }
 
 fn alloc_op(align_log2: i32) Qbe.O #inline = {
@@ -897,11 +902,11 @@ fn push(phi: *Qbe.Phi, blk: *Qbe.Blk, arg: Qbe.Ref) void = {
     phi.blk[phi.narg.zext() - 1] = blk;
 }
 
-fn add_padding(fields: *QList(Qbe.Field), nfield: *i64, current_size: *i64, target_size: i64) void = {
+fn add_padding(fields: *QList(u32), nfield: *i64, current_size: *i64, target_size: i64) void = {
     pad := target_size - current_size[];
     @debug_assert(pad >= 0, "trying to pad struct to smaller size");
     if pad > 0 {
-        push(fields, nfield, (type = .FPad, len = pad.trunc()));
+        push(fields, nfield, pack(type = .FPad, len = pad.trunc()));
     };
 }
 
@@ -915,12 +920,15 @@ fn new_type(m: *QbeModule, type: Qbe.Typ) i64 = {
 }
 
 // TODO: call it from elsewhere
-fn new_phi(f: *Qbe.Fn, b: *Qbe.Blk, k: Qbe.Cls, reserve_args: i64) *Qbe.Phi = {
+fn new_phi(f: *Qbe.Fn, b: *Qbe.Blk, k: Qbe.Cls, reserve_args: i64) *Qbe.Phi = 
+    new_phi(b, k, reserve_args, f.newtmp("c", k));
+
+fn new_phi(b: *Qbe.Blk, k: Qbe.Cls, reserve_args: i64, to: Qbe.Ref) *Qbe.Phi = {
     prev := b.phi;
     b.phi = temp().box(Qbe.Phi); 
     b.phi[] = (
         cls = k, 
-        to = f.newtmp("c", k),
+        to = to,
         narg = 0,
         blk = new(reserve_args),
         arg = new(reserve_args),
@@ -1261,6 +1269,31 @@ fn track_ir_names(f: *Qbe.Fn) bool #inline =
 fn set_debug_types(m: *QbeModule, s: Str, value: bool) void = for s { c | 
     m.debug[@as(i64) c.zext()] = value;
 };
+
+fn for_unions(t: *Qbe.Typ, i: *i64, $body: @Fn() void) void = {
+    @debug_assert_eq(i[], 0);
+    range(0, t.nunion.zext()) { n |
+        body();
+    };
+    //@debug_assert_eq(t.nfield, i[].trunc());  // TODO: this is bad! emit_ir trusts it
+}
+
+fn for_fields(t: *Qbe.Typ, i: *i64, $body: @Fn(tag: *Qbe.FieldType, len: u32) void) void = {
+    f := unpack t.fields[i[]];  
+    while => f.type != .FEnd { 
+        body(f.type, f.len);  // `body` may read `i` here
+        i[] += 1;
+        f = unpack t.fields[i[]];
+    };
+    i[] += 1;
+}
+
+// TODO: check you don't overflow 16777216 types
+fn pack(f: Qbe.Field) u32 = 
+    bit_or(zext @as(u8) f.type, f.len.shift_left(8));
+    
+fn unpack(f: u32) Qbe.Field = 
+    (type = @as(Qbe.FieldType) @as(u8) trunc f.bit_and(0xFF), len = f.shift_right_logical(8));
 
 ///////////////////////////////////////////////////////////////////////////////
 

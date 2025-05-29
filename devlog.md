@@ -1,3 +1,47 @@
+## (May 29)
+
+- new bootstrap idea. minimal jit loader for .frc. 
+- crashes on the compiler and qbe_frontend(mandel) but can `-r` it.  
+problem was not passing envp which the compiler checks and so does debug_log_byte_size. 
+- and now i have statements dreamed up by the utterly deranged. 
+```
+# build
+franca examples/default_driver.fr build boot/loader.fr -o target/loader.out -unsafe
+franca examples/default_driver.fr build compiler/main.fr -o target/franca1.frc -frc -unsafe
+# boot
+./target/loader.out target/franca1.frc -- examples/default_driver.fr build compiler/main.fr -o target/franca2.out -unsafe
+./target/franca2.out examples/default_driver.fr build compiler/main.fr -o franca -unsafe
+# check
+./franca examples/default_driver.fr build compiler/main.fr -o target/check.out -unsafe
+diff ./franca target/check.out
+```
+- compressed it's not even that much bigger than the current boot exe. 
+tho ive improved binary size since then so it's probably more fair to compare to what it would be now if i updated it. 
+i feel like there's a path to saving that much space. 
+```
+old:     1330621 | 533058
+new:     1117037 | 418778
+franca1: 4965535 | 816851
+loader:   148205 |  34852
+```
+- so my idea was to compile for each target and then extract out the functions that changed between 
+them (which would only be #target_os and #asm) and then merge everything into one file and have 
+the loader pull out the arch it wants. 
+but that doesn't quite work because it's after abi/isel/regalloc which is already super arch specific. 
+- new plan, support saving the ir earlier (which i want anyway so i can compile modules seperatly and still inline across them),
+and then see how big that is and if it still makes sense for the bootstrapping thing. 
+- shrink Qbe.Typ.fields. kinda silly that im compelled to be more memory efficient now that im thinking 
+about writing out files but that should make the compiler (imperceptibly) faster just in general as well. 
+- in the spirit of making it easier to move across modules, 
+i think it's probably work an extra indirection for RType to have instructions 
+index into a function local array instead of the global one, i'd really 
+like to keep the property that you don't have to iterate every instruction and do stuff to load a module. 
+(tho rn i have to copy to a qlist which is dumb). that helps import_c too, can get rid of the 
+stupid remap thing. kinda dumb cause it doesn't even show up in the profiler once for stbtruetype 
+but it has slow vibes and i don't like it. but maybe that's dumb because it makes everything 
+take more screwing around just to improve loading inlinable functions (which will be small anyway), 
+so i guess that's not really the trade off you want
+
 ## (May 28)
 
 - also found another maybe race. emit_ir.new_constants was in temp()
@@ -28,9 +72,6 @@ nvm, it must be something that runs at comptime but not runtime, which is fine.
   - why have ExportVTable that i never use
   - why use a power of 2 in vnew, vgrow does the doubling anyway
   - test for trying to destructure `void`
- 
-TODO: use IS_BOOTSTRAPPING to make run_tests -- boot work with latest compiler as well. 
-TODO: clear cache before tests just in case
 
 ## (May 27)
 
