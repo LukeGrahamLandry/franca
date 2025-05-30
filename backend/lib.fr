@@ -644,9 +644,10 @@ fn replace_frontend_ops(f: *Qbe.Fn) void = {
         
         { // O.assert
             j := 0;
-            while => j < b.nins.zext() {
+            while => j < b.ins.len {
                 i := b.ins.index(j);
                 j += 1;
+                // TODO: explain more
                 if i.op() == .assert {
                     r := f.newtmp("front", .Kw);
                     i[] = make_ins(.cnew, .Kw, r, i.arg&[0], QbeConZero);  // TODO: only looking at low 32 bits rn so it could just be jnz directly. but should really look at all 64. 
@@ -658,12 +659,13 @@ fn replace_frontend_ops(f: *Qbe.Fn) void = {
                     };
                     b2 := add_block();
                     b2.s1 = b.s1; b2.s2 = b.s2; b2.jmp = b.jmp;
-                    b2.nins = b.nins - j.trunc();
-                    b2.ins = new(b2.nins.zext());
-                    b2.ins.slice(0, b2.nins.zext()).copy_from(b.ins.slice(j, b.nins.zext()));
+                    len := b.ins.len - j;
+                    b2.ins = init(temp(), len);
+                    b2.ins.len = len;
+                    b2.ins.items().copy_from(b.ins.slice(j, b.ins.len));
                     b.jmp = (type = .jnz, arg = r);
                     b.s1 = b2; b.s2 = fail;
-                    b.nins = j.trunc();
+                    b.ins.len = j;
                     // this matters if the frontend uses phis (or this is being called late because of slow_debug_threads)
                     for_jump_targets b2 { s |
                         for_phi s { p |  // paste from replacepreds
@@ -718,9 +720,9 @@ fn replace_frontend_ops(f: *Qbe.Fn) void = {
             next_block = add_block();
             
             matches := f.newtmp("switch", .Kw);
-            check.nins = 1;
-            check.ins = new(1);
-            check.ins.first[] = make_ins(.ceql, .Kw, matches, payload.inspect, f.getcon(value));
+            check.ins = init(temp(), 1);
+            check.ins.len = 1;
+            check.ins[0] = make_ins(.ceql, .Kw, matches, payload.inspect, f.getcon(value));
             
             set_s1(b, check, dest);
             check.jmp = (type = .jnz, arg = matches);

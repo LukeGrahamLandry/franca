@@ -130,7 +130,7 @@ ArgInfo :: @struct(r: Qbe.Ref, type: Type, name: ?Var, scalar: bool, void: bool,
 fn emit_par_instructions(program: CompCtx, shared: *CodegenShared, arguments: *Pattern, arg_ty: Type, f: *Qbe.Fn) []ArgInfo = {
     count := arguments.bindings.len;
     args := ArgInfo.list(count, temp());
-    grow(f.start.ins&, f.start.nins.zext() + count);
+    reserve(f.start.ins&, count, temp());
     
     // Need to emit all the `arg` instructions at the beginning of the start block before doing any allocas. 
     each arguments.bindings { binding |
@@ -561,9 +561,7 @@ fn emit_runtime_call(
     if dyn_context && self.context != QbeNull {
         self.emit(.arge, .Kl, QbeNull, self.context, QbeNull);
     };
-    cast: i64 = self.blk.nins.zext();  // TODO: ugh
-    append(self.blk.ins&, cast&, args.ptr, args.ptr.offset(args.len));
-    self.blk.nins = cast.trunc();
+    append(self.blk.ins&, args.ptr, args.ptr.offset(args.len));
     _, k := self.load_op(f_ty.ret);
     scalar := k != .Ke;
     type_r := QbeNull;
@@ -1795,7 +1793,6 @@ fn new_block(self: *EmitIr, debug: Str) *Qbe.Blk = {
         b.name = @tfmt("b%_%", self.next_block_name, debug);
         self.next_block_name += 1; // not the same as blocks.len because we remove for unused local returns. 
     };
-    b.ins = new(0);
     b.visit = -1;
     self.blocks&.push(b);
     b
@@ -1843,7 +1840,9 @@ fn move_from_module(self: *EmitIr, f0: *Qbe.Fn, data: []BakedVarId, funcs: []Fun
         b := temp().box(Qbe.Blk);
         b[] = b0[];
         f.rpo[b.id.intcast()] = b;
-        b.ins = b.ins.new_copy(b.nins.bitcast());
+        b.ins = init(temp(), b0.ins.len);
+        b.ins.len = b0.ins.len;
+        b.ins.items().copy_from(b0.ins.items());
         
         for_insts_forward b { i |
             each i.arg& { a |

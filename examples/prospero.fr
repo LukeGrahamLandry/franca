@@ -57,7 +57,7 @@ fn impl(v: *ImportVTable) void = {
     );
     each s.f { f |
         f.start = temp().box_zeroed(Qbe.Blk);
-        f.start.ins = new(n);
+        f.start.ins = init(temp(), n);
     };
     f := s.f.index(N+1);
     default_init(f, m&);
@@ -172,7 +172,7 @@ fn dead_code(s: *RecState, f: *Qbe.Fn) void = {
             f.emit(i[][]);
         };
     };
-    changed := f.len_scratch() != f.start.nins.zext();
+    changed := f.len_scratch() != f.start.ins.len;
     @if(changed) f.copy_instructions_from_scratch(f.start); 
 }
 
@@ -240,7 +240,8 @@ fn dup(dest: *Qbe.Fn, src: *Qbe.Fn) void = {
     dest.start = b;
     dest.start[] = src.start[];
     dest.start.ins = i;
-    dest.start.ins.slice(0, src.start.nins.zext()).copy_from(src.start.ins.slice(0, src.start.nins.zext()));
+    dest.start.ins.len = 0;
+    dest.start.ins&.push_all_assume_capacity(src.start.ins.items());  // reserved when making RecState
 }
 
 fn dup(f0: *Qbe.Fn) *Qbe.Fn = {
@@ -248,12 +249,13 @@ fn dup(f0: *Qbe.Fn) *Qbe.Fn = {
     f[] = f0[];
     f.start = temp().box(Qbe.Blk);
     f.start[] = f0.start[];
-    f.start.ins = new(f.start.nins.zext());
+    f.start.ins = init(temp(), f.start.ins.len);
     f.tmp = new(f.ntmp.zext());
     f.con = new(f.ncon.zext());
     f.tmp.slice(0, f.ntmp.zext()).copy_from(f0.tmp.slice(0, f.ntmp.zext()));
     f.con.slice(0, f.ncon.zext()).copy_from(f0.con.slice(0, f.ncon.zext()));
-    f.start.ins.slice(0, f.start.nins.zext()).copy_from(f0.start.ins.slice(0, f.start.nins.zext()));
+    f.start.ins.len = f0.start.ins.len;
+    f.start.ins.items().copy_from(f0.start.ins.items());
     f
 }
 
@@ -346,14 +348,14 @@ fn optimise_intervals(f: *Qbe.Fn, input: *Interval2, s: *RecState, $mut: bool) I
     @debug_assert_ne(r[].rtype(), .RCon);
 
     k := 0;
-    j := f.start.ins.first;
+    j := f.start.ins.ptr;
     s.ints[64+0] = input.x;
     s.ints[64+1] = input.y;
     while => j.op() == .par {
         j = j.offset(1);
     }
     
-    end := f.start.ins.first.offset(f.start.nins.zext());
+    end := f.start.ins.ptr.offset(f.start.ins.len);
     while => !identical(j, end) {
         continue :: local_return;
         i := j; j = i.offset(1);
@@ -458,7 +460,7 @@ fn compile_program(f: *Qbe.Fn, p: *Program) void = {
     vars := @slice(f.newtmp("x", .Kd), f.newtmp("y", .Kd), f.newtmp("z", .Kd));
     vals := temp().alloc_init(Qbe.Ref, p.o.len, fn(_) => f.newtmp("v", .Kd));
     f.start = temp().box_zeroed(Qbe.Blk);
-    f.start.ins = new(vals.len+3);
+    f.start.ins = init(temp(), vals.len+3);
     f.nblk = 1;
     f.lnk.id = f.globals.intern(p.name);
     f.lnk.export = true;

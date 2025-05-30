@@ -79,8 +79,7 @@ fn wait_for_symbol(shared: *CodegenShared, id: u32) rawptr = {
 // TODO: reuse functions when they have different nominal types but the same repr. 
 fn create_dyncall_shim(self: *SelfHosted, f_ty: FnType) void = {
     shared := self.comptime_codegen;
-    ins: QList(Qbe.Ins) = new(0);
-    nins := 0;
+    ins: RawList(Qbe.Ins) = empty();
     entry := bouba_acquire(shared, shared.bouba_idx&);
     id: u32 = 0; 
     push_dynamic_context {
@@ -99,10 +98,10 @@ fn create_dyncall_shim(self: *SelfHosted, f_ty: FnType) void = {
         ret_p  := f.newtmp("ret", .Kl);
         callee := f.newtmp("call", .Kl);
         env    := f.newtmp("context", .Kl);
-        addins(ins&, nins&, make_ins(.pare, .Kl, env, QbeNull, QbeNull));
-        addins(ins&, nins&, make_ins(.par, .Kl, arg_p, QbeNull, QbeNull));
-        addins(ins&, nins&, make_ins(.par, .Kl, ret_p, QbeNull, QbeNull));
-        addins(ins&, nins&, make_ins(.par, .Kl, callee, QbeNull, QbeNull));
+        addins(ins&, make_ins(.pare, .Kl, env, QbeNull, QbeNull));
+        addins(ins&, make_ins(.par, .Kl, arg_p, QbeNull, QbeNull));
+        addins(ins&, make_ins(.par, .Kl, ret_p, QbeNull, QbeNull));
+        addins(ins&, make_ins(.par, .Kl, callee, QbeNull, QbeNull));
         
         // :EmitIrCall
         // arg instructions that read from arg_p
@@ -110,12 +109,12 @@ fn create_dyncall_shim(self: *SelfHosted, f_ty: FnType) void = {
         push_arg :: fn(ty: Type, offset: i64) => {
             if self.get_info(ty)[].stride_bytes != 0 {
                 ref := f.newtmp("a", .Kl);
-                addins(ins&, nins&, make_ins(.add, .Kl, ref, arg_p, f.getcon(offset)));
+                addins(ins&, make_ins(.add, .Kl, ref, arg_p, f.getcon(offset)));
                 load, k := self.comp().load_op(ty);
                 ::if(Qbe.Ins);
                 ins := if k != .Ke {  // scalar
                     r := f.newtmp("a", k);
-                    addins(ins&, nins&, make_ins(load, k, r, ref, QbeNull));
+                    addins(ins&, make_ins(load, k, r, ref, QbeNull));
                     make_ins(.arg, k, QbeNull, r, QbeNull)
                 } else {  // aggregate
                     r_type := self.comp().get_aggregate(shared, ty);
@@ -133,8 +132,8 @@ fn create_dyncall_shim(self: *SelfHosted, f_ty: FnType) void = {
         } else {
             push_arg(f_ty.arg, 0);
         };
-        addins(ins&, nins&, make_ins(.arge, .Kl, QbeNull, env, QbeNull));
-        append(ins&, nins&, scratch.index_unchecked(0), scratch.index_unchecked(scratch.len));
+        addins(ins&, make_ins(.arge, .Kl, QbeNull, env, QbeNull));
+        append(ins&, scratch.index_unchecked(0), scratch.index_unchecked(scratch.len));
         scratch&.clear();
         
         // do the call and write the results to ret_p
@@ -158,14 +157,13 @@ fn create_dyncall_shim(self: *SelfHosted, f_ty: FnType) void = {
                 (r, Qbe.Cls.Kl, self.comp().get_aggregate(shared, f_ty.ret))
             };
         };
-        addins(ins&, nins&, make_ins(.call, k, result_r, callee, type_r));
-        append(ins&, nins&, scratch.index_unchecked(0), scratch.index_unchecked(scratch.len));
+        addins(ins&, make_ins(.call, k, result_r, callee, type_r));
+        append(ins&, scratch.index_unchecked(0), scratch.index_unchecked(scratch.len));
         scratch&.clear();
         
         f.start = newblk();
         f.nblk = 1;
         f.start.ins = ins;
-        f.start.nins = nins.trunc();
         f.start.jmp.type = .ret0;
     };
     enqueue_task(shared, entry);
@@ -194,9 +192,9 @@ fn create_jit_shim(self: CompCtx, shared: *CodegenShared, fid: FuncId, handler_c
         f.leaf = false;
         f.lnk.no_inline = true;
         f.lnk.id = id;
-        f.start = newblk(); f.start.ins = new(0); name_block(f.start, "start"); f.start.id = 0;
-        do_the_call := newblk(); do_the_call.ins = new(0); name_block(do_the_call, "do_the_call"); do_the_call.id = 1;
-        not_ready := newblk(); not_ready.ins = new(0); name_block(not_ready, "not_ready"); not_ready.id = 2;
+        f.start = newblk(); name_block(f.start, "start"); f.start.id = 0;
+        do_the_call := newblk(); name_block(do_the_call, "do_the_call"); do_the_call.id = 1;
+        not_ready := newblk(); name_block(not_ready, "not_ready"); not_ready.id = 2;
         
         f.nblk = 3;
         target_id := self.data.cast()[][].comptime_jit_symbol_id(fid);

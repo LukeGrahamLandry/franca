@@ -56,7 +56,7 @@ fn loadopt(f: *Qbe.Fn) void = {
         for_insts_forward b { i |
             if maybe_load(i) { size |
                 sl: MSlice = (ref = i.arg&[0], off = 0, size = size, cls = i.cls());
-                l: Loc = (type = .LRoot, index_in_block = ptr_diff(b.ins.first, i).trunc(), blk = b);
+                l: Loc = (type = .LRoot, index_in_block = ptr_diff(b.ins.ptr, i).trunc(), blk = b);
                 @debug_assert(i.arg&[1] == QbeNull, "load pass runs after isel so my arm thingy wont mess with it");
                 i.arg&[1] = c.def(sl, ones_mask_of_size(size), b, (Some = i), l&);
             }
@@ -88,7 +88,8 @@ fn emit_insertions(f: *Qbe.Fn, ilog: QList(Insert), nlog: i64) void = {
     ilog&.grow(nlog + 1);
     ilog[nlog].bid = f.nblk.bitcast(); /* add a sentinel */
     
-    ib: QList(Qbe.Ins) = new(0);
+    // TODO: explain more
+    ib: RawList(Qbe.Ins) = init(temp(), 0);
     next_insertion := ilog.first;
     range(0, f.nblk.zext()) { current_bid |
         move_to_next_block :: local_return; 
@@ -100,7 +101,7 @@ fn emit_insertions(f: *Qbe.Fn, ilog: QList(Insert), nlog: i64) void = {
             next_insertion = next_insertion.offset(1);
         };
         index_in_old_block := 0;
-        total := 0;
+        ib.len = 0;
         loop {
             ::if(*Qbe.Ins);
             next_goes_here := next_insertion.bid == current_bid.trunc() && next_insertion.index_in_block == index_in_old_block.trunc();
@@ -109,11 +110,11 @@ fn emit_insertions(f: *Qbe.Fn, ilog: QList(Insert), nlog: i64) void = {
                 next_insertion = next_insertion.offset(1);
                 i
             } else {
-                if b.nins == index_in_old_block.trunc() {
+                if b.ins.len == index_in_old_block {
                     if changed {
-                        idup(b, ib.first, total);
+                        idup(b, ib.ptr, ib.len);
                     } else {
-                        @debug_assert_eq(b.nins, total.trunc(), "load ins count");
+                        @debug_assert_eq(b.ins.len, ib.len, "load ins count");
                     };
                     move_to_next_block();
                 };
@@ -125,12 +126,9 @@ fn emit_insertions(f: *Qbe.Fn, ilog: QList(Insert), nlog: i64) void = {
                 };
                 i
             };
-            total += 1;
-            ib&.grow(total);
-            ib[total - 1] = i[];
+            push(ib&, i[], temp());
         };
     };
-    free(ib);
     free(ilog);
 }
 
@@ -176,13 +174,13 @@ fn def(c: *LoadCtx, sl: MSlice, requested_bits: u64, b: *Qbe.Blk, i: ?*Qbe.Ins, 
         if(il.type != .LLoad, => return(QbeNull));
         return(c.load_masked(sl, requested_bits, il))
     };
-    i    := i || b.ins.index_unchecked(b.nins.zext());
+    i    := i || b.ins.index_unchecked(b.ins.len);
     out_int_cls  := if(sl.size > 4, => Qbe.Cls.Kl, => .Kw);
     bits_of_slice := ones_mask_of_size(sl.size);
 
     // First scan through the instructions in the block before the load being replaced. 
     // 
-    while => ptr_diff(b.ins.first, i) > 0 {
+    while => ptr_diff(b.ins.ptr, i) > 0 {
         continue :: local_return;
         i = i.offset(-1);
         if c.killsl(i.to, sl) {
@@ -205,7 +203,7 @@ fn def(c: *LoadCtx, sl: MSlice, requested_bits: u64, b: *Qbe.Blk, i: ?*Qbe.Ins, 
             @if(i.op() == .blit1) => {
                 @debug_assert(rtype(i.arg&[0]) == .RInt, "blit needs const arg");
                 size := abs(rsval(i.arg&[0]));
-                @debug_assert(ptr_diff(b.ins.first, i) > 0, "malformed blit");
+                @debug_assert(ptr_diff(b.ins.ptr, i) > 0, "malformed blit");
                 i = i.offset(-1);
                 @debug_assert(i.op() == .blit0, "malformed blit");
                 (QbeNull, i.arg&[1], size)
@@ -356,7 +354,7 @@ fn def(c: *LoadCtx, sl: MSlice, requested_bits: u64, b: *Qbe.Blk, i: ?*Qbe.Ins, 
     range(0, b.npred.zext()) { np |
         bp    := b.pred[np];
         can_insert_load  := bp.s2.is_null() && il.type != .LNoLoad && bp.loop < il.blk.loop;
-        l: Loc = (type = @if(can_insert_load, .LLoad, .LNoLoad), blk  = bp, index_in_block = bp.nins);
+        l: Loc = (type = @if(can_insert_load, .LLoad, .LNoLoad), blk  = bp, index_in_block = trunc bp.ins.len);
         r1    := c.def(sl, bits_of_slice, bp, .None, l&);
         if(r1 == QbeNull, give_up_and_do_load);
         p.arg[np] = r1;

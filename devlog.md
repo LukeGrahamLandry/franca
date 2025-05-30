@@ -1,3 +1,16 @@
+
+## (May 30)
+
+- changed blk.ins to be a RawList instead of a QList so can be loaded from binary without an extra copy. 
+- embarrassing mistake to get confused by. rare L for memory unsafety. 
+```
+if n > b.ins.cap {
+    b.ins.len = 0;
+    b.ins&.reserve(n - b.ins.cap, temp());
+};
+```
+- rediscovered :CreepyNop
+
 ## (May 29)
 
 - new bootstrap idea. minimal jit loader for .frc. 

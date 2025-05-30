@@ -271,7 +271,7 @@ fn simplify_jump_chains(f: *Qbe.Fn) void = {
             b.jmp.type = .jmp;
             b.s1 = epilogue;
         };
-        if b.nins == 0 && b.jmp.type == .jmp {
+        if b.ins.len == 0 && b.jmp.type == .jmp {
             update_target(b.s1&, direct_jumps);
             if !b.s1.identical(b) { // avoids infinite loop while processing single block infinite loop
                 direct_jumps[b.id.zext()] = b.s1;
@@ -303,11 +303,8 @@ fn update_target(pb: **Qbe.Blk, uf: []*Qbe.Blk) void = {
     }
 }
 
-fn newblk() *Qbe.Blk = {
-    b := temp().box(Qbe.Blk);
-    b[] = Qbe.Blk.zeroed();
-    b
-}
+fn newblk() *Qbe.Blk = 
+    temp().box_zeroed(Qbe.Blk);
 
 fn replacepred(blks: QList(*Qbe.Blk), nblk: i64, to: *Qbe.Blk, from: *Qbe.Blk) void = {
     range(0, nblk) { n | 
@@ -345,27 +342,37 @@ fn killblks(f: *Qbe.Fn) void = {
 
 /* merge linear jmp chains */
 /* requires rpo pred, breaks cfg use */
+// [a -> b -> c -> (d or e)] becomes [abc -> (d or e)]
 fn blkmerge(f: *Qbe.Fn) void = {
     if f.globals.debug["B".char()] {
         write(f.globals.debug_out, "\n> Block merge:\n");
     };
     
-    vins: QList(Qbe.Ins) = new(0);
+    vins: RawList(Qbe.Ins) = empty();
     /* linear jmp chains will be consecutive in rpo */
     curb := ptr_from_int(Qbe.Blk, 0);
     bid := 0;
-    nins := 0;
     while => bid < f.nblk.zext() { 
         b := f.rpo[bid];
         if curb.is_null() {
             curb = b;
-            nins = 0;
+            @debug_assert_eq(vins.len, 0);
         } else {
+            // This block will be merged into the previous block so we don't need it anymore. 
             f.rpo[bid] = ptr_from_int(Qbe.Blk, 0);
         };
-        addbins(b, vins&, nins&);
+        
+        // :CreepyNop
+        // This seems wasteful, it does an extra copy for any block that isn't part of a jump chain.
+        // But if you change that, you still need to clear out the nop instructions or it doesn't work, 
+        // and it seems to end up being slower that way. TODO: so that's a bit off putting... 
+        // This was also why disabling inlining didn't work for a while (because i was also not calling blkmerge). 
+        addbins(b, vins&);
+        
         if b.jmp.type != .jmp || b.s1.npred != 1 || !b.s1.phi.is_null() {
-            idup(curb, vins.first, nins);
+            // b does not end in a linear jump so put all the collected instructions in curb. 
+            { t := curb.ins; curb.ins = vins; vins = t; };
+            vins.len = 0;
             curb.jmp = b.jmp;
             for_jump_targets_mut b { s |
                 replacepreds(s[], curb, b);
@@ -383,6 +390,21 @@ fn blkmerge(f: *Qbe.Fn) void = {
     };
     @debug_assert(curb.is_null(), "still have blocks??");
     killblks(f);
+}
+
+// unused. 
+// example that fixes :CreepyNop
+fn clear_nops(b: *Qbe.Blk) void = {
+    j := 0;
+    range(0, b.ins.len) { i |
+        if b.ins[i]&.op() != .nop {
+            if i != j {
+                b.ins[j] = b.ins[i];
+            };
+            j += 1;
+        }
+    };
+    b.ins.len = j;
 }
 
 fn set_link_from_rpo(f: *Qbe.Fn) void = {

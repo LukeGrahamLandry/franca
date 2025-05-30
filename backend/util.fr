@@ -58,13 +58,12 @@ fn copy_instructions_from_scratch(f: *Qbe.Fn, b: *Qbe.Blk) void = {
 fn copy_instructions_from_scratch_reversed_which_means_forwards(f: *Qbe.Fn, b: *Qbe.Blk) void = {
     n := f.len_scratch();
     @assert_ge(n, 0, "too many instructions");
-    b.nins = n.trunc();
-    if(n == 0, => return());
-    if b.ins.first.is_null() {
-        b.ins = new(n);  // caller better not be trying to put this in the inlining cache
-    } else {
-        b.ins&.grow(n);
+    if n > b.ins.cap {
+        // caller better not be trying to put this in the inlining cache
+        b.ins.len = 0;
+        b.ins&.reserve(n, temp());
     };
+    b.ins.len = n;
     i := 0;
     for(f.scratch_next(), f.scratch_start()) { ins |
         b.ins[n - i - 1] = ins[];
@@ -177,16 +176,13 @@ fn con(sym: u32, bits: i64) Qbe.Con =
 // TODO: use slices 
 
 fn idup(b: *Qbe.Blk, src: *Qbe.Ins, n: i64) void = {
-    b.nins = n.trunc();
-    //if n == 0, => return()); // TODO
-    if b.ins.first.is_null() {
-        b.ins = new(n);  // caller better not be trying to put this in the inlining cache
-    } else {
-        @debug_assert(!src.identical(b.ins.first));
-        b.ins&.grow(n);
+    if n > b.ins.cap {
+        // caller better not be trying to put this in the inlining cache
+        b.ins.len = 0;
+        b.ins&.reserve(n, temp());
     };
-    mem := b.ins.slice(0, n);
-    mem.copy_from(ptr = src, len = n);
+    b.ins.len = n;
+    b.ins.items().copy_from(ptr = src, len = n)
 }
 
 fn icpy(dest: *Qbe.Ins, src: *Qbe.Ins, n: i64) *Qbe.Ins = {
@@ -229,32 +225,33 @@ fn between(o: Qbe.O, $fst: Qbe.O, $lst: Qbe.O) bool #inline = {
     fst.raw() <= o.raw() && o.raw() <= lst.raw()
 }
 
-fn addins(pvins: *QList(Qbe.Ins), pnins: *i64, i: Qbe.Ins) void #inline = 
-    addins(pvins, pnins, i&);
+fn addins(pvins: *RawList(Qbe.Ins), i: Qbe.Ins) void #inline = 
+    addins(pvins, i&);
 
-fn addins(pvins: *QList(Qbe.Ins), pnins: *i64, i: *Qbe.Ins) void #inline = {
+fn addins(pvins: *RawList(Qbe.Ins), i: *Qbe.Ins) void #inline = {
     if i.op() != .nop {
-        push(pvins, pnins, i[]);
+        push(pvins, i[], temp());
     };
 }
 
 fn push(b: *Qbe.Blk, i: Qbe.Ins) void #inline = {
-    push(b.ins&, b.nins&, i);
+    push(b.ins&, i, temp());
 }
 
-fn append(dest: *QList(Qbe.Ins), dest_len: *i64, src_start: *Qbe.Ins, src_end: *Qbe.Ins) void = {
-    @debug_assert(!dest.first.identical(src_start));
+fn append(dest: *RawList(Qbe.Ins), src_start: *Qbe.Ins, src_end: *Qbe.Ins) void = {
+    @debug_assert(!dest.ptr.identical(src_start) || dest.ptr.is_null(), "append to self");
     count := src_start.ptr_diff(src_end);
-    dest.grow(dest_len[] + count);
+    dest.reserve(count, temp());
     for(src_start, src_end) { i |
         if i.op() != .nop {
-            dest_len[] += 1;
-            dest[][dest_len[] - 1] = i[];
+            dest.len += 1;
+            dest[dest.len - 1] = i[];
         };
     };
     
     // it feels like this would be better but no, clearing out the nops is faster. -- Nov 20
     // it also feels too fragile that the below only works if you remove the nop check from addins.
+    // same problem as :CreepyNop i suppose...
     //old_len := dest_len[];
     //dest_len[] += count;
     //dest.grow(dest_len[]);
@@ -263,8 +260,8 @@ fn append(dest: *QList(Qbe.Ins), dest_len: *i64, src_start: *Qbe.Ins, src_end: *
     //dest.copy_from(src);
 }
 
-fn addbins(b: *Qbe.Blk, pvins: *QList(Qbe.Ins), pnins: *i64) void = 
-    append(pvins, pnins, b.ins.first, b.ins.index_unchecked(b.nins.zext()));
+fn addbins(b: *Qbe.Blk, pvins: *RawList(Qbe.Ins)) void = 
+    append(pvins, b.ins.ptr, b.ins.index_unchecked(b.ins.len));
 
 // we try to line up the opcode numbers so you can branchlessly convert between categories (ie. load<->ext, par<->ext)
 fn rebase(value: Qbe.O, new_base: Qbe.O, old_base: Qbe.O) Qbe.O = 
@@ -806,8 +803,8 @@ fn for_blocks_rpo_forward(f: *Qbe.Fn, $body: @Fn(b: *Qbe.Blk) void) void = {
 // because the body is allowed to consume multiple instructions by offsetting the pointer. 
 // This is needed because the ir uses a vairable length encoding (for blit, call, args).
 fn for_insts_rev(b: *Qbe.Blk, $body: @Fn(i: **Qbe.Ins) void) void = {
-    i := b.ins.index_unchecked(b.nins.zext());
-    while => !i.identical(b.ins.first) {
+    i := b.ins.index_unchecked(b.ins.len);
+    while => !i.identical(b.ins.ptr) {
         i = i.offset(-1);
         body(i&);
         // TODO: @debug_assert() `i` is still in range
@@ -815,10 +812,8 @@ fn for_insts_rev(b: *Qbe.Blk, $body: @Fn(i: **Qbe.Ins) void) void = {
 }
 
 fn for_insts_forward(b: *Qbe.Blk, $body: @Fn(i: *Qbe.Ins) void) void = {
-    i := b.ins.first;
-    while => !i.identical(b.ins.index_unchecked(b.nins.zext())) {
+    each b.ins { i |
         body(i);
-        i = i.offset(1);
     };
 }
 
@@ -1109,8 +1104,7 @@ fn set_cls(i: *Qbe.Ins, k: Qbe.Cls) void #inline = {
 }
 
 fn set_nop(i: *Qbe.Ins) void #inline = {
-    i[] = Qbe.Ins.zeroed();
-    i.set_op(.nop);
+    i[] = ::make_ins(.nop, .Kw, QbeNull, QbeNull, QbeNull);
 }
 
 fn op(i: *Qbe.Ins) Qbe.O #inline = {

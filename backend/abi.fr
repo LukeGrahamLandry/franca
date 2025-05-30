@@ -105,17 +105,15 @@ fn chpred(b: *Qbe.Blk, bp: *Qbe.Blk, bp1: *Qbe.Blk) void = {
 
 fn realloc_for_params(f: *Qbe.Fn, i: *Qbe.Ins) void = {
     b := f.start;
-    param_count := ptr_diff(b.ins.first, i);
+    param_count := ptr_diff(b.ins.ptr, i);
     if f.len_scratch() == 0 && param_count == 0 {
         // avoid useless reallocation if we have no params  (and no big ret pointer)
         return();
     };
-    n: i64 = b.nins.zext() - param_count + f.len_scratch();
-    i0: QList(Qbe.Ins) = new(n);
-    ip := i0.first;
-    ip = icpy(ip, f.globals.curi[], f.len_scratch());
-    ip = icpy(ip, i, ptr_diff(i, b.ins.index_unchecked(b.nins.zext())));  
-    b.nins = n.trunc();
+    n: i64 = b.ins.len - param_count + f.len_scratch();
+    i0: RawList(Qbe.Ins) = init(temp(), n);
+    i0&.push_all_assume_capacity(f.globals.curi[].slice(f.len_scratch()));
+    i0&.push_all_assume_capacity(between(i, b.ins.index_unchecked(b.ins.len)));
     b.ins = i0;
 }
 
@@ -125,12 +123,12 @@ fn find_past_last_param(f: *Qbe.Fn) *Qbe.Ins = {
             return(i);
         }
     };
-    f.start.ins.first.offset(f.start.nins.zext())
+    f.start.ins.ptr.offset(f.start.ins.len)
 }
 
 fn find_first_arg(b: *Qbe.Blk, call: *Qbe.Ins) *Qbe.Ins = {
     i := call;
-    while => i.in_memory_after(b.ins.first) {
+    while => i.in_memory_after(b.ins.ptr) {
         if !is_arg(i.offset(-1).op()) {
             return(i);
         };
