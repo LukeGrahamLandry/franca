@@ -10,6 +10,22 @@ if n > b.ins.cap {
 };
 ```
 - rediscovered :CreepyNop
+- un-pointered m.(curi, target)
+- changed Qbe.Typ layout so it's closer to what i want to serialize
+- for RType in .frc, just start with the simple thing for now. always do every type in the module so no need to renumber. 
+- hmm, `abi1.ssa -frc` doesn't work if qbe_frontend.fr is running jitted but it does work when it's aot (like run_tests does). 
+that's very odd. the `,` in `int i6,` is changing to a random byte. two memory safety fails in one day? 
+that's starting to look bad. 
+problem was `import_c/tokenize.fr` somewhere isn't doing :BoundsPadding, 
+really i should just clean all that up and deal with doing bounds checks, 
+it's just a bit irritating to pass index+length or the end pointer around everywhere.
+- `36 of 71 tests failed.`
+  - finish_passes when loading instead of trying to redo the beginning. `4 of 71 tests failed.`
+  - calling default_init inside a mark_temporary
+  - wasn't counting the FEnd in nfield in backend/meta/parse.fr (also in compiler/emit_ir.fr/get_aggregate()/Array)
+  i'd noticed the symptom before when i tried to assert it in for_unions(), so now i can get rid of "this is bad! emit_ir trusts it". 
+  it worked because import_c didn't make that mistake and that's was the only place that emit_ir imports from which was previously 
+  the only time nfield was needed without iterating
 
 ## (May 29)
 
@@ -43,6 +59,7 @@ the loader pull out the arch it wants.
 but that doesn't quite work because it's after abi/isel/regalloc which is already super arch specific. 
 - new plan, support saving the ir earlier (which i want anyway so i can compile modules seperatly and still inline across them),
 and then see how big that is and if it still makes sense for the bootstrapping thing. 
+  - did phi+tmp (but untested)
 - shrink Qbe.Typ.fields. kinda silly that im compelled to be more memory efficient now that im thinking 
 about writing out files but that should make the compiler (imperceptibly) faster just in general as well. 
 - in the spirit of making it easier to move across modules, 

@@ -82,7 +82,7 @@ fn rref(c: *RegaCtx, m: *RMap, t: i64) Qbe.Ref = {
 }
 
 fn radd(c: *RegaCtx, m: *RMap, t: i64, r: i64) void = {
-    T := c.f.globals.target;
+    T := c.f.globals.target&;
     @debug_assert(t >= Qbe.Tmp0 || t == r, "invalid temporary");
     is_int   := T.gpr0.intcast() <= r && r.intcast() < T.gpr0 + T.ngpr;
     is_float := T.fpr0.intcast() <= r && r.intcast() < T.fpr0 + T.nfpr;
@@ -113,7 +113,7 @@ fn ralloctry(c: *RegaCtx, m: *RMap, t: i32, try: bool) Qbe.Ref = {
     if r_hinted == -1 || bshas(m.live&, r_hinted.intcast()) {
         r_hinted = c.hint(t)[];
     };
-    T := c.f.globals.target;
+    T := c.f.globals.target&;
     r_allocated := if r_hinted != -1 && !bshas(m.live&, r_hinted.zext()) {
         r_hinted.intcast()
     } else {
@@ -190,7 +190,7 @@ fn bit_is_set(s: u64, i: i64) bool #inline =
 
 // this changes the order in regs/tmps
 fn rfree(c: *RegaCtx, m: *RMap, t: i64) i64 = {
-    T := c.f.globals.target;
+    T := c.f.globals.target&;
     @debug_assert(t >= Qbe.Tmp0 || !T.rglob.bit_is_set(t), "reg non-global");
     if !bshas(m.live&, t) {
         return(-1);
@@ -204,7 +204,7 @@ fn rfree(c: *RegaCtx, m: *RMap, t: i64) i64 = {
 }
 
 fn rfree_at_index(c: *RegaCtx, m: *RMap, t: i64, i: i64) i64 = {
-    T := c.f.globals.target;
+    T := c.f.globals.target&;
     @debug_assert(i < m.len && m.tmps&[i].intcast() == t, "invalid rfree_at_index");
     r := m.regs&[i].intcast();
     bsclr(m.live&, t);
@@ -307,7 +307,7 @@ fn move(c: *RegaCtx, r: i64, to: Qbe.Ref, m: *RMap) void = {
 // you need to make sure none of the dest tmps are allocated to registers later used as a src.
 // it has to execute as though all the moves happened at the same time, without letting any stomp eachother. 
 fn do_parallel_moves(c: *RegaCtx, b: *Qbe.Blk, last_move: *Qbe.Ins, m: *RMap) *Qbe.Ins = {
-    T := c.f.globals.target;
+    T := c.f.globals.target&;
     m0 := m[]; /* okay since we don't use m0.b */
     m0.live.t = u64.ptr_from_int(0); // assert ^
     past_last_move := last_move.offset(1);
@@ -379,14 +379,14 @@ fn insert(c: *RegaCtx, r: *Qbe.Ref, rs: *Array(*Qbe.Ref, 4), p: i64) void = {
 }
 
 fn do_block_instructions(c: *RegaCtx, b: *Qbe.Blk, cur: *RMap) void = { // #log_ir("RIS") = {
-    T := c.f.globals.target;
+    T := c.f.globals.target&;
     reg_args := Array(*Qbe.Ref, 4).zeroed(); reg_args := reg_args&;
 
     if rtype(b.jmp.arg) == .RTmp {
         b.jmp.arg = c.ralloc(cur, b.jmp.arg.val().intcast());
     };
     c.f.reset_scratch();
-    curi := c.f.globals.curi; // :LookAtLastInst (but just to pop off dead code)
+    curi := c.f.globals.curi&; // :LookAtLastInst (but just to pop off dead code)
     for_insts_rev b { i1 |
         continue :: local_return;
         i := c.f.emit(i1[][]);
@@ -468,7 +468,7 @@ fn do_block_instructions(c: *RegaCtx, b: *Qbe.Blk, cur: *RMap) void = { // #log_
         };
         was_nop_copy := i.op() == .copy && i.to == i.arg&[0];
         if was_nop_copy { 
-            c.f.globals.curi[] = c.f.globals.curi[].offset(1); // pop off the emit() from this iteration
+            c.f.globals.curi = c.f.globals.curi.offset(1); // pop off the emit() from this iteration
         };
 
         /* try to change the register of a hinted
@@ -576,7 +576,7 @@ fn register_allocation(f: *Qbe.Fn) void = {
                 rl[j] = t.intcast();
             };
         };
-        T := f.globals.target;
+        T := f.globals.target&;
         @debug_assert(live_at_end_count.intcast() <= T.ngpr + T.nfpr, "too many live tmps");
         if true {
             break :: local_return; // TODO: this pattern is a language failing. 
@@ -678,7 +678,7 @@ fn register_allocation(f: *Qbe.Fn) void = {
         if moves_inserted != 0 {
             c.added_moves += moves_inserted.trunc();
             i: RawList(Qbe.Ins) = init(temp(), s.ins.len + moves_inserted);
-            i&.push_all_assume_capacity(f.globals.curi[].slice(moves_inserted));  // :LookAtLastInst
+            i&.push_all_assume_capacity(f.globals.curi.slice(moves_inserted));  // :LookAtLastInst
             i&.push_all_assume_capacity(s.ins.items());
             s.ins = i;
         };

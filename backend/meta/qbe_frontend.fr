@@ -20,6 +20,7 @@ Args :: @struct {
     h: bool #help("show this help text") = false;
     cc: bool #help("use my import_c to compile '>>> driver' comments") = false;
     frc: bool #help("output .frc binary ir") = false;
+    frc_inlinable: bool #help("output .frc binary ir (before regalloc)") = false;
     @"t?": bool #help("TODO: query the native target") = false;
     paths: []Str #rest = empty();
 }
@@ -64,6 +65,7 @@ fn main() void = {
             inpath = a;
         }
     };
+    args.frc = args.frc || args.frc_inlinable;
     goal: QbeOutputPurpose = @if_else {
         @if(args.r) => .JitOnly;
         @if(args.c) => .Relocatable;
@@ -101,13 +103,20 @@ fn main() void = {
         header: *Incremental.Header = check(src);
         t := Incremental'pack_target(m.goal.arch, m.goal.os);
         @assert_eq(header.arch_os, t, "% was compiled for different target", inpath);
+        @assert(!args.frc_inlinable, "TODO: this is ok if the input is also before regalloc but we can't go backwards");
         compile_all_symbols(header, m);
     } else {
         handle_data :: fn(d: Dat2) void = {
             global_module.emit_data(d);
         };
         parse :: import("@/backend/meta/parse.fr").parse_top_level;
-        res := parse(global_module, src, handle_data, run_qbe_passes, args.cc);
+        run_common_then_save :: fn(f: *Qbe.Fn) void = {
+            run_qbe_passes_common(f);
+            save := f.globals.save.unwrap();
+            save.push(f, false);
+        }
+        yield_func: (@FnPtr(*Qbe.Fn) void) = @if(args.frc_inlinable, run_common_then_save, run_qbe_passes);
+        res := parse(global_module, src, handle_data, yield_func, args.cc);
         if res&.is_err() {
             panic(res.Err);
         };
@@ -136,7 +145,7 @@ fn main() void = {
                     if obj.is_function {
                         f := obj.f;
                         fill_lnk(f.lnk&, obj, m);
-                        run_qbe_passes(f);
+                        yield_func(f);
                     } else {
                         for translate_data(m, obj) { dat |
                             m.emit_data(dat);
@@ -147,6 +156,9 @@ fn main() void = {
         };
         
         global_module.emit_suspended_inlinables();
+        if args.frc_inlinable {
+            Incremental'write_types(m.save.unwrap(), m);
+        }
     };
     
     chunks := {global_module[].target.finish_module}(global_module);

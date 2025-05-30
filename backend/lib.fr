@@ -59,14 +59,12 @@ fn emit_qbe_included_dyn(m: *QbeModule, comp: *CompCtx, fns: [] FuncId, entry: P
 // TODO: ir test that uses opaque types
 
 QbeModule :: @rec @struct(
-    // When we linked with qbe, these were pointers to it's externs so both sides could use them. TODO: some should be values now. 
-    types: *QList(Qbe.Typ), // typ
+    types: RawList(Qbe.Typ),
     insb: *Array(Qbe.Ins, 1.shift_left(20)), // MaxInstructions
-    curi: **Qbe.Ins,
-    target: *Qbe.Target,
+    curi: *Qbe.Ins,
+    target: Qbe.Target,
     debug: *Array(bool, "Z".char() + 1),
     
-    number_of_types := 0,
     debug_out: *List(u8),
     symbols: []SymbolBucket,
     
@@ -298,17 +296,12 @@ fn init_common(m: *QbeModule, segment_size: i64, gpa: Alloc, goal: QbeTargetEnv,
     
     m.debug_out_storage = list(forever);
     m.debug_out = m.debug_out_storage&;
-    m.types  = forever.box(@type m.types[]);
     
     m.insb   = forever.box(@type m.insb[]);
     
-    m.curi   = forever.box(@type m.curi[]); // TODO: megadumb if its the page allocaotr
     m.debug  = forever.box_zeroed(@type m.debug[]);
-    m.target = forever.box(@type m.target[]);
     
-    
-    m.types[] = m.new_long_life(0); // TODO: check the magic in QbeBuilder.init to make sure you remember to do this. 
-    m.curi[] = m.insb.index_unchecked(Qbe.MaxInstructions);
+    m.curi = m.insb.index_unchecked(Qbe.MaxInstructions);
     if m.goal.arch != .wasm32 {
         m.symbol_memmove = m.intern("memmove");
     };
@@ -324,7 +317,7 @@ fn init_common(m: *QbeModule, segment_size: i64, gpa: Alloc, goal: QbeTargetEnv,
 
 fn set_target_vtable(m: *QbeModule) void = {
     EmitWasm :: import("@/backend/wasm/emit.fr");
-    t := m.target;
+    t := m.target&;
     @match(m.goal.arch) {
         fn aarch64() => import("@/backend/arm64/target.fr")'fill_target_arm(t, m.goal.os == .macos, false);
         fn x86_64()  => import("@/backend/amd64/target.fr")'fill_target_amd(t, m.goal.os == .macos);
@@ -338,7 +331,7 @@ fn set_target_vtable(m: *QbeModule) void = {
         }
     };
     t.finish_module = @if_else {
-        @if(m.goal.type == .Cached) => @if(enable_incremental(), Incremental'finish_module, unreachable());
+        @if(m.goal.type == .Cached)  => @if(enable_incremental(), Incremental'finish_module, unreachable());
         @if(m.goal.arch == .wasm32)  => EmitWasm.output_wasm_module;
         @if(m.goal.type == .JitOnly) => (fn(m: *QbeModule) [][]u8 = empty());
         @if(m.goal.os == .macos)     => import("@/backend/macho/emit.fr").output_macho;
@@ -353,15 +346,11 @@ fn init_empty_for_template_only(m: *QbeModule, gpa: Alloc) void = {
     m.forever = init(gpa, size_of(Qbe.Ins) * 1.shift_left(20) + size_of(SymbolBucket) * IMask + 1.shift_left(10));
     forever := m.forever&.borrow();
     m.symbols = forever.alloc_zeroed(SymbolBucket, IMask + 1);
-    m.types  = forever.box(@type m.types[]);
     mem := forever.alloc(Qbe.Ins, Qbe.MaxInstructions);
     ::?*Array(Qbe.Ins, Qbe.MaxInstructions);
     m.insb = mem.as_array().unwrap();
-    m.curi   = forever.box(@type m.curi[]); // TODO: megadumb if its the page allocaotr
-    m.debug  = forever.box_zeroed(@type m.debug[]);
-    m.target = forever.box_zeroed(@type m.target[]);
-    m.types[] = m.new_long_life(0); // TODO: check the magic in QbeBuilder.init to make sure you remember to do this. 
-    m.curi[] = m.insb.index_unchecked(Qbe.MaxInstructions);
+    m.debug = forever.box_zeroed(@type m.debug[]);
+    m.curi = m.insb.index_unchecked(Qbe.MaxInstructions);
     m.debug_out_storage = list(forever);
     m.debug_out = m.debug_out_storage&;
 }
@@ -379,8 +368,8 @@ fn drop(m: *QbeModule) void = {
 
 ::ptr_utils(*Qbe.Blk);
 
-run_qbe_passes :: fn(f: *Qbe.Fn) void = {
-    mark := mark_temporary_storage();
+// returns false if suspended for inlining 
+run_qbe_passes_common :: fn(f: *Qbe.Fn) bool = {
     m := f.globals;
     ::ptr_utils(QbeModule);
     @debug_assert(!m.is_null(), "function module not set");
@@ -432,9 +421,16 @@ run_qbe_passes :: fn(f: *Qbe.Fn) void = {
         if m.debug["G".char()] {
             @fmt_write(m.debug_out, "\nSuspending inlinable function: %\n", f.name());
         };
-        return();
+        return(false);
     };
-    {m.target.finish_passes}(f);
+    true
+};
+
+run_qbe_passes :: fn(f: *Qbe.Fn) void = {
+    mark := mark_temporary_storage();
+    if run_qbe_passes_common(f) {
+        {f.globals.target.finish_passes}(f);
+    };
     reset_temporary_storage(mark);
 };
 ::[]u64;

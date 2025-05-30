@@ -782,7 +782,20 @@ fn new_file(c: *Ctx, name: Str, contents: Str) *File = {
     file := c.arena.box(File);
     file.name = name;
     file.display_name = name;
-    file.contents = contents;
+    
+    // :BoundsPadding
+    // we want it to be a c string, and if we add some extra zeros, the lexer doesn't 
+    // have to worry about bounds checks when it looks a few characters ahead to match 
+    // a specific one. 0 won't match anything. 
+    // TODO: i had the great idea of not checking the length of the string and just stopping lexing when you hit a 0
+    //       but since you also need to tokenize little slices sometimes it doesn't work with non-cstr
+    // :SLOW
+    file.contents = {
+        dest := c.arena.alloc(u8, contents.len + 10);
+        dest.slice(0, contents.len).copy_from(contents);
+        dest.rest(contents.len).set_zeroed();
+        dest
+    };
     file
 }
 
@@ -802,12 +815,6 @@ fn tokenize_file(c: *Ctx, path: Str) *Token = {
 
 // pushes some extra
 fn tokenize_string(c: *Ctx, path: Str, src: *List(u8)) *Token = {
-    // :BoundsPadding
-    // we want it to be a c string, and if we add some extra zeros, the lexer doesn't 
-    // have to worry about bounds checks when it looks a few characters ahead to match 
-    // a specific one. 0 won't match anything. 
-    src.push_all("\0\0\0\0\0\0\0\0\0\0");
-    
     // TODO: chibicc does some extra stuff here: 
     //       but we can't be doing like 17 passes over the file man, common. 
     //canonicalize_newline(p);

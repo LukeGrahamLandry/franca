@@ -1,7 +1,7 @@
 /// This defines the .frc file format used by the franca compiler. 
 /// See @/docs/caching.md
 
-MAGIC :: 0x0003_41434E415246;  // FRANCA__
+MAGIC :: 0x0004_41434E415246;  // FRANCA__
 Header :: @struct {
     meta: Meta #use;
     dep: Storage(Dep);
@@ -14,7 +14,7 @@ Header :: @struct {
     str: Storage(u8);
     lib: Storage(Lib);
     idx: Storage(u32);
-    //typ: Storage(Typ);
+    typ: Storage(Typ);
 };
 
 Meta :: @struct {
@@ -60,12 +60,14 @@ Fnc :: @struct {
     blk: Ref(Blk);
     con: Ref(Qbe.Con);  // not including the first `fixed_const_count`
     mem: Ref(Qbe.Addr);
-    slot: u32;
+    either: @union(slot: i32, retty: Qbe.Ref);
     flags: u32;
-    tmp: u32;  // idx[phi] = (chunks, [chunks](packed cls:u2))
+    // idx[tmp] = (chunks, [chunks](packed cls:u2))
+    tmp: u32 = Qbe.no_symbol;
 };
 
-Flags :: @bit_fields(
+// :BitFieldsCompileError
+FncFlags :: @bit_fields(
     leaf   := 1,
     vararg := 1,
     salign := 4,
@@ -92,6 +94,11 @@ Imp :: @struct {
 
 Lib :: @struct {
     name: Ref(u8);
+};
+
+Typ :: @struct {
+    header: Qbe.TypHeader;
+    fields: Ref(u32);
 };
 
 Storage :: fn($T: Type) Type = {
@@ -160,6 +167,7 @@ Writer :: @struct {
     str: List(u8);
     lib: List(Lib);
     idx: List(u32);
+    typ: List(Typ);
     symbols: HashMap(u32, i64);
 };
 
@@ -176,6 +184,7 @@ fn init(a: Alloc) Writer = (
     str = list(a),
     lib = list(a),
     idx = list(a),
+    typ = list(a),
 );
 
 fn push(self: *Writer, it: []u8) Ref(u8) = {
@@ -202,8 +211,9 @@ fn push(self: *Writer, f: *Qbe.Fn, did_regalloc: bool) void = {
     // unfortunatly this includes constants that are no longer used. 
     // so a function will all uses inlined will still have an Invalid Sym because of this map_sym
     self.sym[id].fnc.con = (off = self.con.len.trunc(), count = trunc(f.ncon.zext() - fixed_const_count));
+    self.con&.reserve(zext f.ncon);
     each f.con.slice(fixed_const_count, f.ncon.zext()) { c |
-        self.con&.push(
+        self.con&.push_assume_capacity(
             sym = @if(c.sym == Qbe.no_symbol, Qbe.no_symbol, trunc self.map_sym(f.globals, c.sym)), 
             bits = c.bits,
         );
@@ -217,9 +227,10 @@ fn push(self: *Writer, f: *Qbe.Fn, did_regalloc: bool) void = {
             i += 1;
         };
     };
+    self.blk&.reserve(zext f.nblk);
     for_blocks f { b |
         phi := write_phi(self, b);
-        self.blk&.push(
+        self.blk&.push_assume_capacity(
             ins = (off = self.ins.len.trunc(), count = b.ins.len.trunc()),
             s1 = @if(b.s1.is_null(), Qbe.no_symbol, bitcast b.s1.id),
             s2 = @if(b.s2.is_null(), Qbe.no_symbol, bitcast b.s2.id),
@@ -233,9 +244,13 @@ fn push(self: *Writer, f: *Qbe.Fn, did_regalloc: bool) void = {
     self.mem&.push_all(f.mem.slice(0, zext f.nmem));
     
     self.sym[id].fnc.reg = f.reg;
-    self.sym[id].fnc.slot = f.slot.bitcast();
+    if did_regalloc {
+        self.sym[id].fnc.either.slot = f.slot;
+    } else {
+        self.sym[id].fnc.either.retty = f.retty;
+    };
     
-    flags: Flags = construct(
+    flags: FncFlags = construct(
         leaf = int(f.leaf),
         vararg = int(f.vararg),
         salign = f.salign.intcast(),
@@ -262,8 +277,9 @@ fn push(self: *Writer, m: *QbeModule, d: *Dat2) void = {
     };
 
     self.sym[id].dat.rel = (off = self.rel.len.trunc(), count = d.relocations.len.trunc());
+    self.rel&.reserve(d.relocations.len);
     each d.relocations { it |
-        self.rel&.push(
+        self.rel&.push_assume_capacity(
             off = it.off,
             id = self.map_sym(m, it.id).trunc(),
             addend = it.addend,
@@ -295,7 +311,8 @@ find_storage_field :: fn(T: Type) *Field = {
     unreachable()
 };
 
-fn to_bytes(self: *Writer, meta: Meta) [][]u8 = {
+// You may want to call write_types(self, m); before this
+fn to_bytes(self: *Writer, meta: Meta, m: *QbeModule) [][]u8 = {
     bytes := list([]u8, temp());
     
     n := size_of(Header);
@@ -322,6 +339,7 @@ fn to_bytes(self: *Writer, meta: Meta) [][]u8 = {
     X(header.str&, self.str&);
     X(header.lib&, self.lib&);
     X(header.idx&, self.idx&);
+    X(header.typ&, self.typ&);
     header.filelen = n.trunc();
     
     // Maybe limitting to 4GB is too small and I should make all the offsets be u64 instead. 
@@ -363,15 +381,20 @@ finish_module :: fn(m: *QbeModule) [][]u8 = {
         // TODO: would be nice if you could set this without needing to paste this function
         entry_dep = Qbe.no_symbol,
     );
-    writer.to_bytes(meta)
+    writer.to_bytes(meta, m)
 };
 
-// note: this doesn't call default_init
-fn load(header: *Header, f: *Qbe.Fn, it: Ref(Sym), syms: []u32) void = {
+// note: this only calls default_init if !did_rega
+fn load(header: *Header, f: *Qbe.Fn, it: Ref(Sym), syms: []u32) bool /*did_rega lloc*/ = {
     m := f.globals;
     sym := header.get(it).index(0);
-    f.lnk.id = syms[it.off.zext()];
     fnc := sym.fnc&;
+    did_regalloc := fnc.tmp == Qbe.no_symbol;
+    if !did_regalloc {
+        default_init(f, m);
+    };
+    f.lnk.id = syms[it.off.zext()];
+    f.lnk.export = true;  // TODO: only for entry point?
     
     f.con = new(fnc.con.count.zext() + fixed_const_count);
     f.ncon = 0;
@@ -410,15 +433,20 @@ fn load(header: *Header, f: *Qbe.Fn, it: Ref(Sym), syms: []u32) void = {
     f.nmem = fnc.mem.count.bitcast();
     f.mem = new_copy(header.get(fnc.mem));
     
-    f.reg = fnc.reg;
-    f.slot = fnc.slot.bitcast();
-    flags: Flags = (repr = fnc.flags);
-    f.leaf = flags.get(.leaf) != 0 ;
-    f.vararg = flags.get(.vararg) != 0;
-    f.salign = flags.get(.salign).intcast();
+    flags: FncFlags = (repr = fnc.flags);
+    if !did_regalloc {
+        f.retty = fnc.either.retty;
+        read_tmp(header, f, fnc.tmp);
+    } else {
+        f.slot = fnc.either.slot;
+        f.reg = fnc.reg;
+        f.salign = flags.get(.salign).intcast();
+    };
+    f.leaf = flags.get(.leaf) != 0;
     f.dynalloc = flags.get(.dynalloc) != 0;
+    f.vararg = flags.get(.vararg) != 0;
     
-    read_tmp(header, f, fnc.tmp);
+    did_regalloc
 }
 
 fn load(header: *Header, m: *QbeModule, i: Ref(Sym), syms: []u32) Dat2 = {
@@ -468,6 +496,7 @@ fn compile_all_symbols(header: *Header, m: *QbeModule) void = {
     default_init(f&, m);
     
     syms := preintern_syms(header, m);
+    read_types(header, m);
     
     range(0, syms.len) { i |
         it: *Sym = header.get(i.trunc());
@@ -477,9 +506,19 @@ fn compile_all_symbols(header: *Header, m: *QbeModule) void = {
         @match(it.segment) {
             fn Code() => {
                 i: Ref(Incremental.Sym) = (off = i.trunc(), count = 1);
-                load(header, f&, i, syms);
+                did_regalloc := load(header, f&, i, syms);
                 zone := @if(ENABLE_ENABLE_TRACY, zone_begin(.Backend), ());
-                emit_fn(f&);
+                if f.globals.debug["P".char()] {
+                    out := f.globals.debug_out;
+                    write(out, "\n> After loading:\n");
+                    printfn(f&, out);
+                };
+                if did_regalloc {
+                    emit_fn(f&);
+                } else {
+                    // TODO: suspend for inlining (can be a bit in FncFlags)
+                    {f.globals.target.finish_passes}(f&);
+                };
                 @if(ENABLE_ENABLE_TRACY) zone_end(zone);
             }
             fn MachineCode() => {
@@ -527,7 +566,7 @@ read_tmp :: fn(header: *Header, f: *Qbe.Fn, idx: u32) void #once = {
 };
 
 write_tmp :: fn(self: *Writer, f: *Qbe.Fn) u32 #once = {
-    if(f.ntmp == Qbe.Tmp0, => return(Qbe.no_symbol));
+    //if(f.ntmp == Qbe.Tmp0, => return(Qbe.no_symbol));  // can't do this because i need to know if did_regalloc
     tmp: u32 = self.idx.len.trunc();
     chunks := align_to(f.ntmp.zext() - Qbe.Tmp0, 16) / 16;
     self.idx&.push(chunks.trunc());
@@ -547,7 +586,7 @@ write_tmp :: fn(self: *Writer, f: *Qbe.Fn) u32 #once = {
 
 read_phi :: fn(header: *Header, blks: []Qbe.Blk, b: *Blk, i: i64) void #once = {
     if(b.phi == Qbe.no_symbol, => return());
-    idx: u32 = header.get(b.phi)[];
+    idx: u32 = b.phi;
     nphi: u32 = header.get(idx)[]; idx += 1;
     range(0, nphi.zext()) { i_phi | 
         narg: u32 = header.get(idx)[]; idx += 1;
@@ -557,7 +596,7 @@ read_phi :: fn(header: *Header, blks: []Qbe.Blk, b: *Blk, i: i64) void #once = {
         range(0, narg.zext()) { _ |
             blk_i: u32 = header.get(idx)[]; idx += 1;
             arg_i: u32 = header.get(idx)[]; idx += 1;
-            p.push(blks[blk_i.zext()]&, TMP(arg_i.zext()));
+            p.push(blks[blk_i.zext()]&, (type3_val29 = arg_i));
         };
     };
 };
@@ -565,18 +604,52 @@ read_phi :: fn(header: *Header, blks: []Qbe.Blk, b: *Blk, i: i64) void #once = {
 write_phi :: fn(self: *Writer, b: *Qbe.Blk) u32 #once = {
     if(b.phi.is_null(), => return(Qbe.no_symbol));
     phi: u32 = self.idx.len.trunc();
-    self.idx&.push(0);
+    self.idx&.push(0);  // nphi
     for_phi b { p |
         self.idx[phi.zext()] += 1;
         self.idx&.push(p.narg);
         self.idx&.push(p.to.val().trunc());
-        self.idx&.push(bitcast @as(i32) p.cls);
+        self.idx&.push(bitcast @as(i32) p.cls);  // TODO: wasteful. should know from f.tmp, just have to do that first
         range(0, p.narg.zext()) { n |
             self.idx&.push(p.blk&[n].id.bitcast());
-            self.idx&.push(p.arg&[n].val().trunc());
+            self.idx&.push(p.arg&[n].type3_val29);
         };
     };
     phi
+};
+
+write_types :: fn(self: *Writer, m: *QbeModule) void = {
+    @debug_assert_eq(self.typ.len, 0, "can only write types once");
+    lock(m.types_mutex&);
+    self.typ&.reserve(m.types.len);
+    enumerate m.types { i, t |
+        m.flush_debug();
+        self.typ&.push(
+            header = t.header,
+            fields = (off = trunc self.idx.len, count = t.nfield),
+        );
+        self.idx&.push_all(t.fields.slice(0, zext t.nfield));
+    };
+    unlock(m.types_mutex&);
+};
+
+read_types :: fn(header: *Header, m: *QbeModule) void = {
+    lock(m.types_mutex&);
+    msg :: "can only read_types in a fresh module because RType is a global index and i don't remap instructions";
+    @debug_assert(m.types.len == 0 || header.typ.count == 0, msg);
+    
+    types: Ref(Typ) = (off = 0, count = header.typ.count);
+    each header.get(types) { t | 
+        fields := m.new_copy_long_life(header.get(t.fields));  // TODO: this copy is lame. make it a slice instead of a QList
+        i := m.new_type(
+            name = "",
+            header = t.header,
+            nfield = t.fields.count,
+            fields = fields,
+        );
+    };
+    
+    unlock(m.types_mutex&);
 };
 
 ENABLE_ENABLE_TRACY :: get_environment_variable("FRANCA_TRACY").is_some();

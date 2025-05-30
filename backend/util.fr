@@ -50,7 +50,7 @@ fn slice_pending_scratch(f: *Qbe.Fn) []Qbe.Ins = {
 fn copy_instructions_from_scratch(f: *Qbe.Fn, b: *Qbe.Blk) void = {
     @assert_ge(f.len_scratch(), 0, "too many instructions");
     idup(b, f.scratch_next(), f.len_scratch());
-    f.globals.curi[] = f.scratch_start(); 
+    f.globals.curi = f.scratch_start(); 
 }
 
 // TODO: i should really just use a different version of emit() so this part could just be a memcpy
@@ -70,17 +70,17 @@ fn copy_instructions_from_scratch_reversed_which_means_forwards(f: *Qbe.Fn, b: *
         i += 1;
     };
     
-	f.globals.curi[] = f.scratch_start();
+	f.globals.curi = f.scratch_start();
 }
 
 fn scratch_start(f: *Qbe.Fn) *Qbe.Ins #inline =
     f.globals.insb.index_unchecked(Qbe.MaxInstructions);
 
 fn scratch_next(f: *Qbe.Fn) *Qbe.Ins #inline =
-    f.globals.curi[];
+    f.globals.curi;
 
 fn reset_scratch(f: *Qbe.Fn) void #inline = {
-    f.globals.curi[] = f.scratch_start(); 
+    f.globals.curi = f.scratch_start(); 
 }
 
 fn len_scratch(f: *Qbe.Fn) i64 #inline = 
@@ -94,7 +94,7 @@ fn len_scratch(f: *Qbe.Fn) i64 #inline =
 //
 // TODO: we rely on globals.curi pointing to the last inst we emitted (in isel) :LookAtLastInst
 fn emit(f: *Qbe.Fn, op: Qbe.O, k: Qbe.Cls, to: Qbe.Ref, arg0: Qbe.Ref, arg1: Qbe.Ref) *Qbe.Ins = {
-    i := f.globals.curi;
+    i := f.globals.curi&;
     @debug_assert(!i[].identical(f.globals.insb.as_ptr()), "emit, too many instructions");
     i[] = i[].offset(-1);
     i[][] = make_ins(op, k, to, arg0, arg1);
@@ -319,7 +319,7 @@ fn default_init(f: *Qbe.Fn, m: *QbeModule) void = {
     push_fixed_consts(f);
     // Add temporaries representing physical registers.
     // For the comptime usecase, the is_float will be wrong for some targets but that's fine becuase register numbers will just be moved to the real function, 
-    t := f.globals.target;
+    t := f.globals.target&;
     range(0, Qbe.Tmp0) { i |
         is_float := t.fpr0 <= i.intcast() && i.intcast() < (t.fpr0 + t.nfpr);
    	    assert_eq(f.newtmp("r", if(is_float, => .Kd, => .Kl)), TMP(i));
@@ -339,8 +339,6 @@ fn is_symbol(f: *Qbe.Fn, r: Qbe.Ref) bool =
     rtype(r) == .RCon && f.get_constant(r).type() == .CAddr;
 
 fn get_type(m: *QbeModule, i: i64) *Qbe.Typ = { // :ThreadSafety you have to be in the mutex. todo: make this less error prone
-    @debug_assert_lt(i, m.number_of_types, "type index out of bounds");
-    @debug_assert_ge(i, 0, "type index negative");
     // TODO: assert we have types_mutex
     m.types.index(i)
 }
@@ -905,12 +903,15 @@ fn add_padding(fields: *QList(u32), nfield: *i64, current_size: *i64, target_siz
     };
 }
 
-// TODO: use this from qbe_frontend
 fn new_type(m: *QbeModule, type: Qbe.Typ) i64 = {
-    lock(m.types_mutex&);
-    i := m.number_of_types;
-    push(m.types, m.number_of_types&, type);
-    unlock(m.types_mutex&);
+    i := 0;
+    with m.types_mutex& {
+        @if(m.types.len >= m.types.cap) with m.intern_mutex& {
+            m.types&.reserve(1, m.forever&.borrow());
+        };
+        i = m.types.len;
+        push_assume_capacity(m.types&, type);
+    };
     i
 }
 
@@ -1266,14 +1267,15 @@ fn set_debug_types(m: *QbeModule, s: Str, value: bool) void = for s { c |
 
 fn for_unions(t: *Qbe.Typ, i: *i64, $body: @Fn() void) void = {
     @debug_assert_eq(i[], 0);
-    range(0, t.nunion.zext()) { n |
+    range(0, t.header.nunion.zext()) { n |
         body();
     };
-    //@debug_assert_eq(t.nfield, i[].trunc());  // TODO: this is bad! emit_ir trusts it
+    @debug_assert_eq(t.nfield, i[].trunc());
 }
 
 fn for_fields(t: *Qbe.Typ, i: *i64, $body: @Fn(tag: *Qbe.FieldType, len: u32) void) void = {
     f := unpack t.fields[i[]];  
+    ::enum(@type f.type);
     while => f.type != .FEnd { 
         body(f.type, f.len);  // `body` may read `i` here
         i[] += 1;
@@ -1306,3 +1308,29 @@ fn unpack(f: u32) Qbe.Field =
 
 fn ge(a: Qbe.Cls, b: Qbe.Cls) bool = a.raw().int() >= b.raw().int();
 fn gt(a: Qbe.Cls, b: Qbe.Cls) bool = a.raw().int() > b.raw().int();
+
+// 
+// TODO: These are garbage garbage garbage and go away when i fix :BitFieldsCompileError (and then :UpdateBoot i guess)
+//
+
+fn is_dark(self: *Qbe.Typ) bool = {
+    flags: TypFlags = (repr = self.header.flags);
+    flags.get(.is_dark) != 0
+}
+
+fn is_union(self: *Qbe.Typ) bool = {
+    flags: TypFlags = (repr = self.header.flags);
+    flags.get(.is_union) != 0
+}
+
+fn set_is_union(self: *Qbe.Typ, c: bool) void = {
+    flags: TypFlags = (repr = self.header.flags);
+    flags&.set(.is_union, int(c));
+    self.header.flags = flags.repr;
+}
+
+fn set_is_dark(self: *Qbe.Typ, c: bool) void = {
+    flags: TypFlags = (repr = self.header.flags);
+    flags&.set(.is_dark, int(c));
+    self.header.flags = flags.repr;
+}

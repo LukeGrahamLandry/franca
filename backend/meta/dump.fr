@@ -140,10 +140,15 @@ fn printref(r: Qbe.Ref, f: *Qbe.Fn, out: *List(u8)) void = @match(rtype(r)) {
     };
     fn RSlot() => @fmt(out, "S%", rsval(r));
     fn RCall() => @fmt(out, "C%", r.val());
-    fn RType() => if r.val() > f.globals.number_of_types {
+    fn RType() => if r.val() >= f.globals.types.len {
         @fmt(out, ":T%INVALID", r.val());
     } else {
-        @fmt(out, ":%", f.get_type(r).name());
+        n := f.get_type(r).name();
+        if n.len == 0 {
+            @fmt(out, ":T%", r.val());
+        } else {
+            @fmt(out, ":%", n);
+        }
     };
     fn RMem() => printmem(f.mem.index(r.val()), f, out);
     fn RInt() => @fmt(out, "I%", rsval(r));
@@ -364,12 +369,17 @@ fn dumpts(bs: *Qbe.BSet, tmp: QList(Qbe.Tmp), f: *List(u8)) void = {
 
 fn print_type(m: *QbeModule, ty_index: i64, out: *List(u8)) void = {  // :ThreadSafety
     t := m.get_type(ty_index);
-    @fmt(out, "type :% = ", @if(TRACK_IR_NAMES, t.name(), ty_index));
-    if t.is_dark {
-        @fmt(out, "% { % }", 1.shift_left(t.align_log2.zext()), t.size);
+    if TRACK_IR_NAMES && t.name.len > 0 {
+        @fmt(out, "type :% = ", t.name());
+    } else {
+        @fmt(out, "type :T% = ", ty_index);
+    };
+    
+    if t.is_dark() {
+        @fmt(out, "% { % }", 1.shift_left(t.header.align_log2.zext()), t.header.size);
         return();
     };
-    if t.is_union {
+    if t.is_union() {
         @fmt(out, "{ ");
     };
     ::enum(Qbe.Field);
@@ -400,7 +410,7 @@ fn print_type(m: *QbeModule, ty_index: i64, out: *List(u8)) void = {  // :Thread
         };
         @fmt(out, "}");
     };
-    if t.is_union {
+    if t.is_union() {
         @fmt(out, " }");
     };
     @fmt(out, "\n");

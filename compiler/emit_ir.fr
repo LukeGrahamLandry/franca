@@ -1554,9 +1554,9 @@ fn get_aggregate(self: CompCtx, m: *CodegenShared, ty: Type) Qbe.Ref = {
     ir_index := m.type_indices&.get(ty) || {
         type := self.get_type(ty);
         result := Qbe.Typ.zeroed();
-        result.size = info.stride_bytes.zext();
+        result.header.size = info.stride_bytes;
         @debug_assert(result.size != 0, "ICE: treating zero size type % as an aggragate", self.log(ty));
-        result.align_log2 = (@as(i64) info.align_bytes.zext()).trailing_zeros().trunc(); // TODO: do this faster
+        result.header.align_log2 = (@as(i64) info.align_bytes.zext()).trailing_zeros().trunc(); // TODO: do this faster
         // TODO: track names
         i := @match(type) {
             fn Named(it)    => self.get_aggregate(m, it._0).val();
@@ -1569,8 +1569,9 @@ fn get_aggregate(self: CompCtx, m: *CodegenShared, ty: Type) Qbe.Ref = {
                 n := 0;
                 rt_count: i64 = it.fields.len;
                 result.fields = m.m.new_long_life(rt_count * 2 + 1);
-                result.nunion = @if(it.is_union, rt_count.trunc(), 1);
-                result.is_union = it.is_union;
+                @assert(!it.is_union || it.fields.len <= 0xFFFF, "too many union fields");
+                result.header.nunion = @if(it.is_union, rt_count.trunc(), 1);
+                result&.set_is_union(it.is_union);
                 @assert(it.layout_done, "tried to get_aggregate before layout %", self.log(ty));
                 if it.is_union {
                     each it.fields { f | 
@@ -1594,7 +1595,7 @@ fn get_aggregate(self: CompCtx, m: *CodegenShared, ty: Type) Qbe.Ref = {
                     add_padding(result.fields&, n&, off&, info.stride_bytes.zext());
                     push(result.fields&, n&, pack(type = .FEnd, len = 0));
                 };
-                @debug_assert_lt(n, MAX_u32);
+                @debug_assert_lt(n, MAX_u32, "too many struct fields");
                 result.nfield = n.trunc();
                 // TODO: name
                 m.m.new_type(result)
@@ -1607,21 +1608,21 @@ fn get_aggregate(self: CompCtx, m: *CodegenShared, ty: Type) Qbe.Ref = {
                 outer_size: i64 = info.stride_bytes.zext();
                 field_count := 1 + it.len.zext();
                 result.fields = m.m.new_long_life(field_count + 1);
-                result.nunion = 1;
+                result.header.nunion = 1;
                 field := pack self.as_field(m, it.inner);
                 range(0, it.len.zext()) { i |
                     result.fields[i] = field;
                 };
                 result.fields[it.len.zext()] = pack(type = .FEnd, len = 0);
                 @debug_assert_lt(it.len, MAX_u32);
-                result.nfield = it.len;
+                result.nfield = it.len + 1;
                 // TODO: name
                 m.m.new_type(result)
             }
             fn Tagged(it) => {
                 n := 0;
                 result.fields = m.m.new_long_life(it.cases.len * 3 + 3);
-                result.nunion = it.cases.len.trunc();
+                result.header.nunion = it.cases.len.trunc();
                 each it.cases { case | 
                     if self.get_info(case._1)[].stride_bytes != 0 { 
                         result.fields[n] = pack(type = .Fl, len = 8);       n += 1;
@@ -1629,11 +1630,11 @@ fn get_aggregate(self: CompCtx, m: *CodegenShared, ty: Type) Qbe.Ref = {
                         result.fields[n] = pack(type = .FEnd, len = 0);     n += 1;
                         // TODO: do i need to pad them to the same size?
                     } else {
-                        result.nunion -= 1;
+                        result.header.nunion -= 1;
                     };
                 };
-                result.is_union = result.nunion > 1;
-                if result.nunion == 0 {
+                result&.set_is_union(result.header.nunion > 1);
+                if result.header.nunion == 0 {
                     // all cases are zero sized. this is really just an enum. 
                     @debug_assert(false, "ICE: get_aggregate of scalar @tagged");
                     result.fields[n] = pack(type = .Fl, len = 8);      n += 1;
@@ -1897,10 +1898,8 @@ fn remap(t0: i64, types: *HashMap(i64, i64), m0: *QbeModule, m1: *QbeModule) i64
         lock(m0.types_mutex&);
         lock(m1.types_mutex&);
 
-        t1 := m1.number_of_types; m1.number_of_types += 1;
-        m1.types.grow(t1 + 1);
+        t1 := m1.new_type(m0.get_type(t0)[]);
         t := m1.get_type(t1);
-        t[] = m0.get_type(t0)[];
         t.fields = m1.new_copy_long_life(t.fields, t.nfield.bitcast());
         types.insert(t0, t1);
         

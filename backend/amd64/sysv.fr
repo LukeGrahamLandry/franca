@@ -13,7 +13,7 @@ amd64_sysv_rclob :: @const_slice(
 );
 
 AClass :: @struct(
-    type: *Qbe.Typ,
+    type: Qbe.TypHeader,
     inmem: i32,
     align: i32,
     size: u32,
@@ -165,7 +165,7 @@ fn classify(a: *AClass, t: *Qbe.Typ, s: u32, m: *QbeModule) void = {
                     @debug_assert_ge(length, 0, "FTyp");
                     inner := m.get_type(length.zext());
                     classify(a, inner, s, m);
-                    s += inner.size.trunc();
+                    s += inner.header.size;
                 }
                 @default => {
                     i: i64 = s.zext() / 8;
@@ -186,8 +186,8 @@ fn classify(a: *AClass, t: *Qbe.Typ, s: u32, m: *QbeModule) void = {
 }
 
 fn typclass(a: *AClass, t: *Qbe.Typ, m: *QbeModule) void = {
-    sz := t.size;
-    al := 1.shift_left(t.align_log2.zext());
+    sz := zext t.header.size;
+    al := 1.shift_left(t.header.align_log2.zext());
 
     /* the ABI requires sizes to be rounded
      * up to the nearest multiple of 8, moreover
@@ -197,11 +197,11 @@ fn typclass(a: *AClass, t: *Qbe.Typ, m: *QbeModule) void = {
     al := al.max(8);
     sz := (sz + al-1).bit_and(-al);
 
-    a.type = t;
+    a.type = t.header;
     a.size = sz.trunc();
-    a.align = t.align_log2;
+    a.align = zext t.header.align_log2;
 
-    if t.is_dark || sz > 16 || sz == 0 {
+    if t.is_dark() || sz > 16 || sz == 0 {
         /* large or unaligned structures are
          * required to be passed in memory
          */
@@ -248,7 +248,7 @@ fn selret_amd64(b: *Qbe.Blk, f: *Qbe.Fn) void = {
         if aret.inmem != 0 {
             @debug_assert(rtype(f.retr) == .RTmp);
             f.emit(.copy, .Kl, TMP(Amd64Reg.RAX), f.retr, QbeNull);
-            f.emit(.blit1, .Kw, QbeNull, INT(aret.type.size), QbeNull);
+            f.emit(.blit1, .Kw, QbeNull, INT(zext aret.type.size), QbeNull);
             f.emit(.blit0, .Kw, QbeNull, r0, f.retr);
             set(ca&, .gp_ret, 1);
         } else {
@@ -462,7 +462,7 @@ fn selcall(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins, rap: **RAlloc) void = {
         if i.op() == .argc {
             off += int(a.align == 4) * off.bit_and(15);
             // note: we copy the original size of the struct not the rounded size of the stack slot. 
-            f.emit(.blit1, .Kw, QbeNull, INT(a.type.size), QbeNull);
+            f.emit(.blit1, .Kw, QbeNull, INT(zext a.type.size), QbeNull);
             f.emit(.blit0, .Kw, QbeNull, i.arg&[1], r1);
         } else {
             f.store8(i.arg&[0], i.cls(), r1);

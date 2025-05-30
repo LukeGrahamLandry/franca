@@ -840,13 +840,10 @@ fn parse_type(self: *QParseCtx) Result(void, Str) = {
     };
     
     m := self.m;
-    t := m.number_of_types;
-    m.number_of_types += 1;
-    m.types.grow(m.number_of_types);  // :ThreadSafety
+    t := m.new_type(Qbe.Typ.zeroed());
     typ := m.get_type(t);
-    typ[] = Qbe.Typ.zeroed();  // :nulltermminator
     
-    typ.align_log2 = -1;
+    typ.align_log2 = 255;
     if self.eat("align") {
         self.skip_blanks();
         i := self.parse_number().abs();
@@ -865,12 +862,13 @@ fn parse_type(self: *QParseCtx) Result(void, Str) = {
         if !self.eat("}") {
             return(Err = "expected '}' to end type declaration");
         };
-        typ.is_dark = true;
-        typ.size = size;
+        typ.set_is_dark(true);
+        @debug_assert_le(size, MAX_u32);
+        typ.size = size.trunc();
     } else {
         field_count := 0;
         if self.check("{") {
-            typ.is_union = true;
+            typ.set_is_union(true);
             while => !self.eat("}") { // TODO: bounds
                 self.eat("{");
                 @try(self.parse_type_fields(typ, field_count&)) return;
@@ -881,7 +879,7 @@ fn parse_type(self: *QParseCtx) Result(void, Str) = {
         };
         typ.nfield = field_count.trunc();
     };
-    @debug_assert_eq(t + 1, m.number_of_types, "array can't resize because types cannot be nested");
+    @debug_assert_eq(t + 1, m.types.len, "array can't resize because types cannot be nested");
     typ.name = name;  // write the name at the end so types can't refer to themselves
     self.types&.insert(name, t);
     .Ok
@@ -891,7 +889,7 @@ fn parse_type_fields(self: *QParseCtx, typ: *Qbe.Typ, field_count: *i64) Result(
     self.skip_blanks();
     
     m := self.f.globals;
-    my_align: i64 = typ.align_log2.intcast();
+    my_align: i64 = @if(typ.align_log2 == 255, -1, typ.align_log2.zext());
     my_size := 0;
     while => self.cursor < self.input.len && !self.check("}") {
         continue :: local_return;
@@ -905,7 +903,7 @@ fn parse_type_fields(self: *QParseCtx, typ: *Qbe.Typ, field_count: *i64) Result(
                     return(Err = "type name must be declared before useas field type")
                 });
                 inner := m.get_type(value_to_put_in_len_field);
-                (.FTyp, inner.size, inner.align_log2.intcast())
+                (.FTyp, inner.size.zext(), inner.align_log2.zext())
             };
             @case("{".ascii()) => return(Err = "types cannot be nested inline. \nuse seperate declarations and refer to them by name. \nsorry that this is a waste of your time.");
             @case("l".ascii()) => (.Fl, 8, 3);
@@ -955,11 +953,14 @@ fn parse_type_fields(self: *QParseCtx, typ: *Qbe.Typ, field_count: *i64) Result(
         return(Err = "expected '}' to end type declaration");
     };
     align := 1.shift_left(my_align);
-    my_size = my_size.max(typ.size);
-    typ.size = bit_and(my_size + align - 1, -align);;
-    typ.align_log2 = my_align.intcast();
+    my_size = my_size.max(zext typ.size);
+    my_size := bit_and(my_size + align - 1, -align);
+    @assert_le(my_size, MAX_u32);
+    typ.size = trunc my_size;
+    typ.align_log2 = my_align.trunc();
     typ.fields&.grow(field_count[] + 1);
-    typ.fields[field_count[]] = pack(type = .FEnd, len = 0);
+    typ.fields[field_count[]] = pack(type = .FEnd, len = 0); field_count[] += 1;
+    @assert(typ.nunion != 0xFFFF, "too many union fields");
     typ.nunion += 1;
     
     .Ok

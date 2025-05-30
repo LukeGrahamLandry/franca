@@ -1,6 +1,7 @@
 - clear cache before tests just in case
 - prospero. min/max x64
 - make_dirs on apple x64
+- @bit_fields in incremental.fr don't work inline in the structs
 
 ## Quest Lines
 
@@ -139,6 +140,15 @@ with -keep-names: `ld: invalid use of rip-relative addressing in '_junk' to '__N
 - literal for a 64 bit integer with the high bit set shouldn't need a bit cast 
 - `fn vec2(x, y) = (v = (x, y));` miscompiles if inlined but i can't reproduce it in a simple test. 
 - :UseDoesntWork
+- :BitFieldsCompileError there's places in Qbe and Incremental where it won't let you have 
+a field of type @bit_fields or you get:
+```
+panic! compiler/main.fr:2:1
+#include_std("lib/core.fr");
+Compile Error: 54 matching options for index
+
+TODO: end of loop. still too many options for 'index'
+```
 
 ## cross compiling
 
