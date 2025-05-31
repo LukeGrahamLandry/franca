@@ -1,7 +1,7 @@
 - clear cache before tests just in case
-- prospero. min/max x64
 - make_dirs on apple x64
 - @bit_fields in incremental.fr don't work inline in the structs
+- import_c, get rid of :BoundsPadding
 
 ## Quest Lines
 

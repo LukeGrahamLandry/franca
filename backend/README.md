@@ -9,10 +9,12 @@ You can still print out the ir as human readable text between passes and modify 
 ## Example Frontends
 
 - Franca (../compiler/emit_ir.fr)
-- Qbe IR (./meta/parse.fr)
 - C11    (../examples/import_c/compile.fr)
+- Qbe IR (../backend/meta/parse.fr)
 - Wasm   (../examples/import_wasm/convert.fr)
   - WIP
+- Kaleidoscope (../examples/kaleidoscope.fr)
+- BrainFuck    (../examples/bf/bf2ir.fr)
 
 ## Changes from Qbe
 
@@ -46,6 +48,7 @@ You can still print out the ir as human readable text between passes and modify 
     - it handles calling convention differences but you must use the correct magic numbers for the target os/architecture/version.
     - WIP: you can't access carry flag (for error on macos)
   - walk the call-stack (ie. for printing crash backtraces)
+- Binary form of the ir that's faster to load than the text form (could be a building block for incremental compilation)
 - Insert raw asm bytes in function bodies with arbitrary input/output/clobber register lists.
   > currently very limited: you pick specific registers, do your own assembling, can't reference symbols.  
   > but it lets you access instructions that we don't know about without calling convention spilling overhead.  

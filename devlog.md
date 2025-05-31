@@ -26,6 +26,23 @@ it's just a bit irritating to pass index+length or the end pointer around everyw
   i'd noticed the symptom before when i tried to assert it in for_unions(), so now i can get rid of "this is bad! emit_ir trusts it". 
   it worked because import_c didn't make that mistake and that's was the only place that emit_ir imports from which was previously 
   the only time nfield was needed without iterating
+- amd64
+  - linux: `didn't find encoding for extub R imm32` for `R1 =w loadub 109942031`,
+  same as a `<4gb` problem i had before, need to smuggle it in an RMem. 
+  idk what code produced that tho, something in prospero.fr. 
+    - also took out my old fix for fault-na: `(.imm32, .imm32, (0xC7), 0),`, 
+    get the same code gen by just putting the constant in an RMem in isel 
+    and then don't have to deal with it in emit. previously i just got lucky 
+    that i never tried to store register `->` imm32, etc. and i don't want to 
+    add that many more table entries. added a test for that. 
+  - `expected -1 <= 1` problem with prospero was i wasn't encoding f32 xcmp properly. needs no prefix. 
+  - now x64 prospero fails a safety check but produces identical output to the arm one with -unsafe so that's progress. 
+  problem was x64 makes RMem and i was reusing the same Qbe.Fn without clearing that or default_init-ing so it was held across a reset_temp. 
+  - macos: dir_exists doesn't work. oh it's the fucking `$INODE64` like with read_dir. 
+  trivial fix tho which is nice. 
+  - `std/json        cc      FAIL test_wuffs_strconv_parse_number_f64_regular: "-0.000e0": have 0x0000000000000000, want 0x8000000000000000`
+    TODO
+- actually run prospero in run_tests, just on a lower width and assert that the right number of pixels were set.
 
 ## (May 29)
 

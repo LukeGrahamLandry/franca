@@ -30,15 +30,51 @@ fn driver(vtable: *ImportVTable) void =
     impl(vtable);
 
 fn impl(v: *ImportVTable) void = {
+    #use("@/lib/args.fr");
+    Args :: @struct {
+        hush: bool = false;
+        o: Str = "";
+        width: i64 = 1024;
+    }
+    args := parse_args(Args);
+    
     programs := :: collect_examples(ast_alloc());
-    //programs := collect_examples(temp());
-    m := zeroed QbeModule;
-    init_default_module_dyn(m&, v, (type = .JitOnly, os = query_current_os(), arch = query_current_arch()));
-    do_imports(m&);
-    s := "prospero";
+    s := "prospero";  // TODO: take this as input (or a file path) or as stdin
     p := programs.find(fn(it) => it.name == s)
         || @panic("missing model '%'", s);
     
+    //programs := collect_examples(temp());
+    pixels, yes, no := render(p, args.width, v);
+    
+    if args.hush || args.o != "" {
+        set := bscount(pixels&);
+        // don't do this in the other case because running with `orb` dumps out+err together
+        @eprintln("%/%:%", yes, no+yes, set); 
+        
+        if args.width == 64 {  // i do this in run_tests.fr
+            // hardcoding the numbers is lame but i'm can't just check the picture every time i run the tests so here we are
+            @assert(yes == 22 && no+yes == 253 && set == 3578, "something changed!");
+            eprintln("ok!");
+        }
+    }
+    
+    if !args.hush {
+        out := u8.list(temp());
+        draw(out&, pixels, args.width);
+        if args.o == "" {
+            print(out.items());
+        } else {
+            write_entire_file_or_crash(args.o, out.items())
+        };
+    }
+}
+
+render :: fn(p: *Program, width: i64, v: *ImportVTable) Ty(Qbe.BSet, i64, i64) = {
+    N := max(log(width, 2) - 3, 1); // (@if(I, 9, 8));
+
+    m := zeroed QbeModule;
+    init_default_module_dyn(m&, v, (type = .JitOnly, os = query_current_os(), arch = query_current_arch()));
+    do_imports(m&);
     f0 := temp().box(Qbe.Fn);
     if !M {
         default_init(f0, m&);
@@ -49,11 +85,12 @@ fn impl(v: *ImportVTable) void = {
         f = temp().alloc(Qbe.Fn, N+2),
         vals = temp().alloc(f32, n),
         ints = temp().alloc(Interval, n),
-        pixels = init_bitset(1024 * 1024),
+        pixels = init_bitset(width * width),
         top = @if(M, zeroed F, compile(dup(f0), p.name)),
         needed = init_bitset(n),
         copy = temp().alloc_zeroed(Qbe.Ref, n),
         jit_at = max(0, N - 2),
+        width = width, 
     );
     each s.f { f |
         f.start = temp().box_zeroed(Qbe.Blk);
@@ -65,11 +102,8 @@ fn impl(v: *ImportVTable) void = {
     
     i: Interval = (min = -1.0, max = 1.0);
     quad_rec(s&, (x = i, y = i), N);
-    @eprintln("%/%", s.yes, s.no+s.yes);
     
-    out := u8.list(temp());
-    draw(out&, s.pixels);
-    print(out.items());
+    (s.pixels, s.yes, s.no)
 }
 
 Interval2 :: @struct {
@@ -89,9 +123,9 @@ RecState :: @struct {
     copy: []Qbe.Ref;
     jit_at: i64;
     n := 0;
+    width: i64;
 }
 
-N :: @if(I, 9, 8);
 M :: true;
 I :: false;
 
@@ -114,7 +148,7 @@ fn quad_rec(s: *RecState, int: Interval2, depth: i64) void = {
     // then we already know the colour of all the pixels. 
     if !known.is_nan() {
         if known.min > 0.0  {
-            iter_intervals(int.x, int.y) { x, y, i |
+            iter_intervals(s.width, int.x, int.y) { x, y, i |
                 s.pixels&.bsset(i);
             }
         };
@@ -140,14 +174,14 @@ fn quad_rec(s: *RecState, int: Interval2, depth: i64) void = {
     if depth == 0 {
         s.no += 1;
         if I {
-            iter_intervals(int.x, int.y) { x, y, i |
+            iter_intervals(s.width, int.x, int.y) { x, y, i |
                 hit := interpret(f, s.vals, x, y) > 0.0;
                 if hit {
                     s.pixels&.bsset(i);
                 };
             };
         } else {
-            draw(s.pixels, s.top, int.x, int.y);
+            draw(s.width, s.pixels, s.top, int.x, int.y);
         }
         return();
     }
@@ -213,6 +247,8 @@ fn compile(f: *Qbe.Fn, name: Str) F = {
     m := f.globals;
     f.lnk.id = m.intern(name);
     run_qbe_passes(f);
+    f.mem.first = Qbe.Addr.ptr_from_int(0);
+    f.nmem = 0;
     emit_suspended_inlinables(m);
     make_exec(m);
     f := get_addr(m, name).unwrap();
@@ -282,20 +318,20 @@ fn interpret(f: *Qbe.Fn, vals: []f32, x: f64, y: f64) f32 = {
     vals[f.start.jmp.arg.val()]
 }
 
-fn iter_intervals(x_int: Interval, y_int: Interval, $body: @Fn(x: f64, y: f64, i: i64) void) void = {
-    back :: fn(n) => int((n.cast() + 1.0) / 2.0 * 1024.0);
+fn iter_intervals(width: i64, x_int: Interval, y_int: Interval, $body: @Fn(x: f64, y: f64, i: i64) void) void = {
+    back :: fn(n) => int((n.cast() + 1.0) / 2.0 * width.float());
     range_rev(back(y_int.min), back(y_int.max)) { y |
         range(back(x_int.min), back(x_int.max)) { x |
             continue :: local_return;
-            move :: fn(n) => n.float() / 1024.0 * 2.0 - 1.0;
-            i := y * 1024 + x;
+            move :: fn(n) => n.float() / width.float() * 2.0 - 1.0;
+            i := y * width + x;
             body(move(x), move(y), i);
         };
     };
 }
 
-fn draw(out: Qbe.BSet, f: @FnPtr(x: f64, y: f64, z: f64) f64, x_int: Interval, y_int: Interval) void = {
-    iter_intervals(x_int, y_int) { x, y, i |
+fn draw(width: i64, out: Qbe.BSet, f: @FnPtr(x: f64, y: f64, z: f64) f64, x_int: Interval, y_int: Interval) void = {
+    iter_intervals(width, x_int, y_int) { x, y, i |
         hit := f(x, y, 0.0) > 0.0;
         if hit {
             out&.bsset(i);
@@ -303,11 +339,11 @@ fn draw(out: Qbe.BSet, f: @FnPtr(x: f64, y: f64, z: f64) f64, x_int: Interval, y
     };
 }
 
-fn draw(out: *List(u8), pixels: Qbe.BSet) void = {
-    @fmt(out, "P3 1024 1024 255\n");
-    range_rev(0, 1024) { y |
-        range(0, 1024) { x |
-            i := y * 1024 + x;
+fn draw(out: *List(u8), pixels: Qbe.BSet, width: i64) void = {
+    @fmt(out, "P3 % % 255\n", width, width);
+    range_rev(0, width) { y |
+        range(0, width) { x |
+            i := y * width + x;
             hit := bshas(pixels&, i);
             c := @if(hit, 0, 255);
             @fmt(out, "% % % ", c, c, c);

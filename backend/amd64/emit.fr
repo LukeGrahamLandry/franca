@@ -838,23 +838,11 @@ fn encode(e: *AmdState, i: *Qbe.Ins, w: bool, immediate_size: i64) EncodedArgs =
         @debug_assert(t0 != .RMem, "cannot encode two memory arguments");
         m := e.f.get_memory(r1)[]; // copy!
         
-        if m.offset&.type() == .CAddr {
-            @debug_assert(m.base == QbeNull && m.index == QbeNull, "cannot encode const SIB");
-            c := m.offset&;
+        if m.base == QbeNull && m.index == QbeNull {
             @debug_assert(t0 != .RCon, "TODO: con + disp?");
-            // :copy_paste_con_addr
-            rr0 := r0.int_reg_d();
-            off := c.bits() - immediate_size;
-            return(
-                patch = (Some = (off, c.sym)), 
-                disp_size = .D32,
-                disp = off,
-                modrm = pack_modrm(.Indirect00, .rbp, rr0),  // disp is RIP relative
-                rex = pack_rex_si(w, rr0, DONT_CARE_REG, DONT_CARE_REG), 
-                sib = .None, 
-                force_rex = force_rex,
-            );
+            return encode_con(m.offset&, r0, force_rex, immediate_size, w);
         };
+        @debug_assert(m.offset&.type() != .CAddr, "TODO: con + reg?");
         
         valid_offset := fits_in_i32(m.offset&.bits());
         if !valid_offset {
@@ -884,7 +872,6 @@ fn encode(e: *AmdState, i: *Qbe.Ins, w: bool, immediate_size: i64) EncodedArgs =
         };
         
         if m.base == QbeNull {
-            @debug_assert(m.index != TMP(Amd64Reg.RSP), "no base and no index makes x64 a dull boy $%", e.f.name());
             m.base = TMP(Amd64Reg.RBP); // sentinal for just (index*s)+disp32
             mode = .Indirect00;
             disp_size = .D32;
@@ -903,44 +890,49 @@ fn encode(e: *AmdState, i: *Qbe.Ins, w: bool, immediate_size: i64) EncodedArgs =
     
     if t1 == .RCon {
         c := e.f.get_constant(i.arg&[1]);
-        if c.type() == .CAddr {
-            // :copy_paste_con_addr
-            rr0 := r0.int_reg_d();
-            // The distance is relative to the end of the instruction, 
-            // so if we have another immediate after the displacement, we have to account for its size. 
-            // becuase the linker doesn't give a shit about what instructions we're using, 
-            // its just gonna plonk in the distance from the patch to the symbol. 
-            // TODO: maybe it would be better if we also did the -4 for the displacement here but that requires removing it everywhere else. 
-            off := c.bits() - immediate_size;
-            return(
-                patch = (Some = (off, c.sym)), 
-                disp_size = .D32,
-                disp = off,
-                modrm = pack_modrm(.Indirect00, .rbp, rr0),  // disp is RIP relative
-                rex = pack_rex_si(w, rr0, DONT_CARE_REG, DONT_CARE_REG), 
-                sib = .None,
-                force_rex = force_rex,
-            );
-        };
-        
-        // TODO: this might be backwards because you might be ina situation where both args are constant. 
-        //       we're adding a source of confusion for zero benifit because i don't want to deal with changing the isel right now. 
-        if c.type() == .CBits && t0 == .RTmp {
-            rr0 := r0.int_reg_d();
-            disp := c.bits();
-            return(
-                disp_size = .D32, 
-                disp = disp, 
-                modrm = pack_modrm(.Indirect00, .rsp, rr0),  // absolute address in disp
-                rex = pack_rex_si(w, rr0, .rbp, .rsp),             // ^
-                sib = (Some = pack_sib(1.to_scale(), .rsp, .rbp)), // ^
-                force_rex = force_rex,
-            );
-        };
+        return encode_con(c, r0, force_rex, immediate_size, w);
     };
     
     @panic("TODO: we can't encode that yet")
 }
+
+encode_con :: fn(c: *Qbe.Con, r0: Qbe.Ref, force_rex: bool, immediate_size: i64, w: bool) EncodedArgs = {
+    rr0 := r0.int_reg_d();
+    
+    if c.type() == .CAddr {
+        // The distance is relative to the end of the instruction, 
+        // so if we have another immediate after the displacement, we have to account for its size. 
+        // becuase the linker doesn't give a shit about what instructions we're using, 
+        // its just gonna plonk in the distance from the patch to the symbol. 
+        // TODO: maybe it would be better if we also did the -4 for the displacement here but that requires removing it everywhere else. 
+        off := c.bits() - immediate_size;
+        return(
+            patch = (Some = (off, c.sym)), 
+            disp_size = .D32,
+            disp = off,
+            modrm = pack_modrm(.Indirect00, .rbp, rr0),  // disp is RIP relative
+            rex = pack_rex_si(w, rr0, DONT_CARE_REG, DONT_CARE_REG), 
+            sib = .None,
+            force_rex = force_rex,
+        );
+    };
+    
+    // If it's a situation where both args are constant, the other one gets added by push_imm later, 
+    // and r0 will still be an RTmp because it's used as an opcode extension (`ext` field in AmdEncodingEntry). 
+    if c.type() == .CBits {
+        disp := c.bits();
+        return(
+            disp_size = .D32, 
+            disp = disp, 
+            modrm = pack_modrm(.Indirect00, .rsp, rr0),  // absolute address in disp
+            rex = pack_rex_si(w, rr0, .rbp, .rsp),             // ^
+            sib = (Some = pack_sib(1.to_scale(), .rsp, .rbp)), // ^
+            force_rex = force_rex,
+        );
+    };
+    
+    @panic("TODO: we can't encode that yet")
+};
 
 fn to_scale(s: i32) SibScale = @switch(s) {
     @case(0) => .One; // hopefully you're using a mode that ignores this!
@@ -1010,7 +1002,7 @@ fn assemble(e: *AmdState, i: *Qbe.Ins) void = {
     dowhile {
         matches :: fn(w: AmdArgType, h: AmdArgType) bool =>
             w == h || (w == .imm32 && h == .imm8) || (w == .M && h == .R);
-        @debug_assert(entry.qbe_op == i.op().raw().intcast().trunc(), "didn't find encoding for % % % in %", i.op(), a0, a1, e.f.name());
+        @debug_assert(entry.qbe_op == i.op().raw().intcast().trunc(), "didn't find encoding for % % % in % %", i.op(), a0, a1, e.f.name(), e.f);
         bad := !matches(entry.a0, a0) || !matches(entry.a1, a1);
         if bad {
             idx += 1;
@@ -1053,6 +1045,9 @@ fn assemble(e: *AmdState, i: *Qbe.Ins) void = {
     prefix := entry.prefix;
     if prefix == 0xF2 && !w && !(@is(i.op(), .exts, .truncd, .dtosi)) {
         prefix = 0xF3; // this seems like the easiest way to do this to me
+    };
+    if i.op() == .xcmp && i.cls() == .Ks {
+        prefix = 0;
     };
     if (@is(i.op(), .swtof, .sltof)) {
         w = i.op() == .sltof;
@@ -1172,7 +1167,6 @@ fn amd64_encoding_table() Ty([]AmdEncodingEntry, []u16) = @amd64_encoding_data (
         (.M, .imm32, (0x81), 7),
         (.R, .M, (0x3B)),
         (.M, .R, (0x39)),
-        // TODO: f32?
         (.F, .F, (0x0F, 0x2E), (), (0x66)), // ucomisd
     ),
     (.shr, 
@@ -1207,10 +1201,6 @@ fn amd64_encoding_table() Ty([]AmdEncodingEntry, []u16) = @amd64_encoding_data (
     (.storel,
         (.imm32, .M, (0xC7), 0),
         (.R, .M, (0x89)),
-        // this looks dumb but comes up either:
-        // - when writting a test that stores to a constant and catches the segsev
-        // - in jitted code (= known addr) on linux (= low 4gb)
-        (.imm32, .imm32, (0xC7), 0),
     ),
     (.storeb, 
         (.R, .M, (0x88)),
