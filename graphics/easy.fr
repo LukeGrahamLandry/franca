@@ -5,23 +5,35 @@
 // TODO: more composable system for linking foreign libraries
 // TODO: it's very sad that this driver takes 120ms to compile
 build_for_graphics :: fn(vtable: *ImportVTable, input_path: Str) void = {
+    #use("@/lib/sys/process.fr");
     start := timestamp();
     opts := vtable.default_build_options();
     opts.retain_function_names = true;
     
-    want_jit := false;
-    use_a_linker := false;
-    for cli_args() { a |
-        if a == "-unsafe" {
-            s := opts.safety_checks&;
-            s.insert(.Bounds, false);
-            s.insert(.DebugAssertions, false);
-            s.insert(.InvalidTag, false);
-        };
-        if a == "-keep-names" {
-            use_a_linker = true;
-        };
-        want_jit = want_jit || a == "-jit";
+    #use("@/lib/args.fr");
+    Args :: @struct {
+        unsafe := false;
+        o := "a.out";
+        // TODO: maybe default to -jit if you don't pass -o, then need to change compiler/test.fr
+        jit := false;
+        @"keep-names" := false;
+        arch := "";
+        os := "";
+        c := false;
+        d := "";
+    };
+    arg := parse_args(Args);
+    
+    ::?Os;::?Arch;
+    os   := @if(arg.os == "" || arg.jit, query_current_os(), Os.from_name(arg.os) || @panic("invalid -os %", arg.os));
+    arch := @if(arg.arch == "" || arg.jit, query_current_arch(), Arch.from_name(arg.arch) || @panic("invalid -arch %", arg.arch));
+    
+    use_a_linker := arg.@"keep-names" || arg.c;
+    if arg.unsafe {
+        s := opts.safety_checks&;
+        s.insert(.Bounds, false);
+        s.insert(.DebugAssertions, false);
+        s.insert(.InvalidTag, false);
     };
     
     src := @tfmt("""#include_std("lib/core.fr");#include_std("%");""", input_path);
@@ -30,8 +42,7 @@ build_for_graphics :: fn(vtable: *ImportVTable, input_path: Str) void = {
     
     Dyn :: import("@/lib/dynamic_lib.fr");
     
-    os: Os = .macos;  // :HardcodeOs
-    if os == .macos && query_current_os() == .macos { // && want_jit { // remove this check so you can just put a '::' in main as a demo
+    if os == .macos && query_current_os() == .macos { // && arg.jit { // remove this check so you can just put a '::' in main as a demo
         libs :: @const_slice("objc", "CoreGraphics", "Metal", "QuartzCore", "AppKit", "MetalKit", "Cocoa", "CoreFoundation", "CoreVideo", "Foundation");
         
         for libs { name |
@@ -55,13 +66,14 @@ build_for_graphics :: fn(vtable: *ImportVTable, input_path: Str) void = {
     
     m := QbeModule.zeroed();
     init_default_module_dyn(m&, vtable, (
-        arch = query_current_arch(), 
+        arch = arch, 
         os = os, 
-        type = @if(want_jit, .JitOnly, @if(use_a_linker, .Relocatable, .Exe)),
+        type = @if(arg.jit, .JitOnly, @if(use_a_linker, .Relocatable, .Exe)),
     )); 
+    set_debug_types(m&, arg.d, true);
     bytes := emit_qbe_included_dyn(m&, ctx&, @slice(main_f), .WrapMain); 
     
-    if want_jit {
+    if arg.jit {
         @debug_assert(!use_a_linker);
         ptr := m&.get_addr(ctx.fmt_fn_name(main_f)).unwrap();
         end := timestamp();
@@ -74,21 +86,20 @@ build_for_graphics :: fn(vtable: *ImportVTable, input_path: Str) void = {
     
     #use("@/compiler/ast_external.fr", "@/lib/sys/subprocess.fr", "@/lib/sys/fs.fr");
     
-    out := open_trunc("a.out").unwrap();
-    for(bytes&){bucket|
-        out&.write(bucket);
-    };
-    out.close();
+    write_chunks_or_crash(arg.o, bytes&);
     
     end := timestamp();
-    @eprintln(">>> compiled in %ms", end - start);
+    @eprintln(">>> compiled in %ms to %", end - start, arg.o);
     
     if use_a_linker {
+        if arg.c { 
+            return();
+        };
         SOKOL_MACOS_LINK_ARGS :: @array("-framework", "Metal", "-framework", "MetalKit", "-framework", "Cocoa", "-framework", "QuartzCore");
         a := SOKOL_MACOS_LINK_ARGS;
         args := Str.list(temp());
         args&.push_all(a&.items());
-        args&.push_all(@slice ("a.out", "-o", "a.out"));    
+        args&.push_all(@slice (arg.o, "-o", arg.o));    
         args&.push_all(@slice ("-target", target_triple(m.goal.arch, m.goal.os)));   
         
         // TODO: this doesn't have the right symbols. how do i get a libwebgpu_dawn.o/a ?

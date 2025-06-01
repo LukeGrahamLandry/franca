@@ -9,6 +9,7 @@
 - default_driver: a driver program that can be used to build other franca programs 
 - 60fps: interactive ascii mandelbrot (recompiled every frame)
 - bf: include a brainfuck program in a franca program with various flavours of meta-programming. 
+  - interpreter, franca source, c source, ir, wasm
 - repl: a franca repl using the comptime jit.
 - hacky_incremental: call a function in a loop and hot load recompile it when the file changes
 - view_image: print a jpeg of the mona lisa to the terminal by importing a c library (lib:wuffs)
@@ -29,8 +30,10 @@
 - count: counts the number of code lines in a franca file.
 - aoc: first half of advent of code 2024
 - check_source: scan a directory for confusing unicode characters and long lines 
+- ascii_table: uses stb_truetype and stb_image_write to generate a simple image
 
-## broken / wip
+## unfinished 
 
-- compiler_gui
-- dearimgui_demo: calls ImGui::ShowDemoWindow (lib:sokol, lib:dearimgui)
+- depth_test
+- epicycles
+- lambda

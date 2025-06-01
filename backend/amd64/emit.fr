@@ -38,35 +38,40 @@ SysV :: import("@/backend/amd64/sysv.fr");
 fn fixup_amd64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_reloc: *?Fixup) void = {
     address := symbol.jit_addr;
     local  := symbol.kind == .Local;
-    @match(fixup.type) {
+    @match(fixup.type&) {
         fn DataAbsolute(it) => {
             rawptr.ptr_from_raw(fixup.patch_at)[] = address.offset(it.increment);
         }
         fn RipDisp32(it) => {
             distance := ptr_diff(fixup.patch_at, address); // :size_of_displacement
             if !local {
-                if (@is(self.goal.type, .Relocatable)) {
-                    return(); // that's not my department
-                };
-                
                 if !it.call {
                     if self.debug["T".char()] {
                         @fmt_write(self.debug_out, "# patch addr % refs %=%\n", fixup.patch_at, address, symbol.name);
                     };
                 };
                 
-                if !it.call {
+                if !it.call {                    
                     // In .addr we assumed we could LEA to create the address but since it's an import, 
                     // it needs to be converted into a load from the GOT.
                     // this is super hacky. i feel like we could guess wrong since we're not decoding from the beginning. 
                     opcode := u8.ptr_from_raw(fixup.patch_at).offset(-2); // [?rex:1, opcode:1, modrm:1, patch_at:offset:4]
-                    @assert(opcode[] == 0x8D || opcode[] == 0x8B, "only LEA can be converted to GOT load (for $%)", symbol.name);
+                    @assert_eq(opcode[], 0x8D, "only LEA can be converted to GOT load (for $%)", symbol.name);
                     opcode[] = 0x8B; // load
                     // TODO: need to make sure modrm is .Indirect00, .rbp
+                    
+                    @assert_eq(it.increment, 0, "cannot fold offset into GOT load");
+                    if self.goal.type == .Relocatable {
+                       it.got_load = true;
+                       return(); // that's not my department
+                    };
+                    
                     new_got_reloc[] = ensure_got_slot(self, symbol, address).or_else(=> new_got_reloc[]);
                     got_addr := self.segment_address(.ConstantData, symbol.got_lookup_offset);
                     distance = ptr_diff(fixup.patch_at, got_addr);
                 } else {
+                    if(self.goal.type == .Relocatable, => return());  // that's not my department
+                    
                     if self.debug["T".char()] {
                         @fmt_write(self.debug_out, "# patch call % calls %\n", fixup.patch_at, symbol.name);
                     };
@@ -146,6 +151,7 @@ fn emit_the_code(e: *AmdState) void = {
     need_frame := !f.leaf || f.vararg || f.dynalloc;
     if need_frame {
         e.fp = .RBP;
+        // TODO: this doesn't need modrm(w=1), it's always 64 bit
         e.a&.encode_op_reg(PrimaryOp.PushBase, X86Reg.rbp);
         e.a&.encode_bin(PrimaryOp.MovReg, X86Reg.rbp, X86Reg.rsp);
     } else {
@@ -154,6 +160,7 @@ fn emit_the_code(e: *AmdState) void = {
     framesz(e);
     if e.fsz != 0 {
         @debug_assert_lt(e.fsz, MAX_i32);
+        // TODO: using sub with a 1 byte immediate would save 3 bytes every function with a small frame
         e.a&.encode_imm(PrimaryOp.AddImm32, X86Reg.rsp, -e.fsz);
     };
     if f.vararg {
@@ -462,6 +469,7 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
                         }; // else fallthrough to assemble
                     }
                 };
+                @debug_assert_ne(c.type(), .CAddr, "copy dest must be reg");
             };
             if rtype(i.to) == .RSlot && (t0 == .RSlot || t0 == .RMem) {
                 // rega does this shit when there's a lot of register pressure i guess?
@@ -517,6 +525,7 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
                         e.a&.push(pack_modrm(.Indirect00, .rbp, dest));   // disp is RIP relative
                         e.a&.push_u32(distance.trunc());
                         done = true;
+                        // TODO: i feel like i need to add a RipDisp32(got_load=true) here if .Relocatable? 
                     };
                 }; 
                 if done {
@@ -834,6 +843,9 @@ fn encode(e: *AmdState, i: *Qbe.Ins, w: bool, immediate_size: i64) EncodedArgs =
         return(modrm = pack_modrm(ModrmMode.Direct, rr1, rr0), rex = pack_rex_si(w, rr0, rr1, DONT_CARE_REG), sib = .None, force_rex = force_rex);
     };
     
+    // TODO: im often wasting a byte. i think sib? example:
+    //       17: f3 44 0f 11 44 25 f0         	movss	dword ptr [rbp + riz - 0x10], xmm8
+    //       12: f3 44 0f 11 45 f0            	movss	dword ptr [rbp - 0x10], xmm8
     if t1 == .RMem {
         @debug_assert(t0 != .RMem, "cannot encode two memory arguments");
         m := e.f.get_memory(r1)[]; // copy!

@@ -330,6 +330,7 @@ fn aot_import_body(self: *EmitIr, info: *DynamicImport) void = {
     //       fmt_fn_name until they also don't try to make bounce functions.
     g := self.m.goal&;
     func := self.program.get_function(self.func);
+    @debug_assert_eq(info.name, func.name, "this isn't the output of linkrename on the comptime arch");
     real_name := self.program.check_link_rename(info.name, func, (arch = g.arch, os = g.os));
     target := self.m.intern(real_name);
     // TODO: silly that it's considered disrespectful to call your library "SYMBOL_ZERO"
@@ -911,6 +912,7 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
                     fn DynamicImport(info) => if self.when == .Aot {
                         g := self.m.goal&;
                         // TODO: should cache #link_rename because it's weird if i call the user's function a billion times. 
+                        @debug_assert_eq(info.name, func.name, "this isn't the output of linkrename on the comptime arch");
                         real_name := self.program.check_link_rename(info.name, func, (arch = g.arch, os = g.os));
                         callee_r = self.f.symcon(self.m.intern(real_name));
                     };
@@ -931,6 +933,15 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
             args := @try(self.compile_for_arg(arg)) return;
             self.emit_runtime_call(f_ty, args, p, callee_r, context, arg.loc)
         }
+        //
+        // :ADistinctionWithoutADifference  -- May 31, 2025 
+        // f: rawptr = fid;        // Expr.FnPtr
+        // f := :: @as(rawptr) fid; // Expr.Values
+        // do not try to represent this as an Expr.Values (even tho you almost could now that shims work well) 
+        // because objc_msgSend_stret needs to be #avoid_shim and also #linkrename-ed to the same address on arm but 
+        // not on amd. So if you have a comptime rawptr for that function, you can't tell which function it should bake to.
+        // (see also objective_c.fr/choose_objc_dispatcher())
+        //
         fn FnPtr(f_ty) => {
             caller.set_flag(.YesContext);
             callee := @try(self.compile_expr(f, .Scalar)) return;
@@ -1128,6 +1139,13 @@ fn reference_constant(self: *EmitIr, id: BakedVarId) void = {
                 fn FuncId(it) => self.pending.push(it);  // HACK
             };
         };
+        
+        m := self.m;
+        @if(m.goal.arch == .x86_64) use_symbol(m, m.intern(@tfmt("g%", id.id))) { s |
+            // :NotForCorrectness
+            s.pledge_local = true;
+        };
+        
         self.new_constants&.push(id);
     };
 }

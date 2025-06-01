@@ -22,8 +22,6 @@ fn is_nil(self: ObjCId) bool =
 // to the signeture you want. The abi is the same as if you were calling a normal c function
 // with the signeture of the target method (shifted by 2 for self, sel) NOT a varargs call. 
 // On the sysv abi they happen to be the same but apple's arm64 abi is different. 
-// TODO: do i actually have to call the _stret versions for it to know the args are shifted one extra? 
-//       it's very possible i've just gotten lucky so far. 
 // TODO: since we're lying about the arg types, it freaks out when it tries to inline the shim.
 //       so the #noinline (which should mean nothing to an #import) HACKs around that. :NoInlineImport
 //       like i guess this does fix the problem because most of the time you super want to inline that shim, 
@@ -33,6 +31,29 @@ fn is_nil(self: ObjCId) bool =
 //       work at all and thus creates the need for #avoid_shim. this is... unfortunate. 
 objc_msgSend :: fn(/* ObjCId, sel, ... good luck */) void #import("objc") #noinline #avoid_shim; 
 objc_msgSendSuper :: fn(/* *ObjCSuper, sel, ... good luck */) void #import("objc") #noinline #avoid_shim;  
+
+// These are only a thing on amd64 (arm64 just always uses the normal versions). 
+objc_msgSend_stret       :: fn() void #link_rename(only_stret_on_applex8664) #import("objc") #noinline #avoid_shim; 
+objc_msgSendSuper_stret  :: fn() void #link_rename(only_stret_on_applex8664) #import("objc") #noinline #avoid_shim;
+only_stret_on_applex8664 :: fn(req: *LinkRenameArg) void = {
+    req.out.push_all(req.old_name);
+    @debug_assert(req.old_name.ends_with("_stret"));
+    if !(req.target.arch == .x86_64 && req.target.os == .macos) { 
+        req.out.len -= 6;
+    };
+};
+
+// :ADistinctionWithoutADifference 
+// it is important that this returns a FuncId not a rawptr and the cast happens in the runtime expression 
+// TODO: think of a less hacy way to fix this
+choose_objc_dispatcher :: fn(super: bool, ret_ty: Type) FuncId = {
+    callee := @if(super, objc_msgSendSuper, objc_msgSend);
+    callee_stret := @if(super, objc_msgSendSuper_stret, objc_msgSend_stret);
+    if size_of(ret_ty) > 16 {  // TODO: are we sure this is the critera? abi says you can return in 2 registers
+        callee = callee_stret;
+    };
+    callee
+};
 
 fn objc_getClass(name: CStr) ObjCClass #import("objc");
 fn sel_getUid(name: CStr) ObjCSelector #import("objc");
@@ -58,12 +79,10 @@ fn objc_super(ret_reciever_arg_pattern: FatExpr) FatExpr #macro =
     objc_call_impl(ret_reciever_arg_pattern, true);
 
 fn objc_call_impl(a: FatExpr, super: bool) FatExpr = {
-    callee := @if(super, @as(rawptr) objc_msgSendSuper, @as(rawptr) objc_msgSend);
     args_type: List(Type) = list(temp());
     args: List(FatExpr) = list(ast_alloc());
     selector: List(u8) = list(ast_alloc());
     placeholder := @{ panic("this will be replaced with the selector uid") };
-    log := u8.list(temp());
     ret_ty := ObjCId; // default when you use call syntax. works for void as well because you can just ignore it.
     if true {
         break :: local_return;
@@ -72,7 +91,6 @@ fn objc_call_impl(a: FatExpr, super: bool) FatExpr = {
                 fn Call(it) => {
                     name := it.f.ident() || compile_error("@objc call f must be named", it.f.loc);
                     no_args := !@is(it.arg.expr&, .Tuple, .StructLiteralP);
-                    @fmt(log&, "% :: fn(self: ", name.str());
                     @match(it.arg.expr&) {
                         fn Tuple(it) => {
                             @ct_assert(it.len == 2, a.loc, "objc message send with multiple arguments needs names");
@@ -80,7 +98,6 @@ fn objc_call_impl(a: FatExpr, super: bool) FatExpr = {
                             if super {
                                 @ct_assert(it[0].ty == *ObjCSuper, a.loc, "@objc_super first arg needs to be an ObjCSuper");
                             };
-                            @fmt(log&, "%", it[0].ty.typename().str());
                             args_type&.push(it[0].ty);
                             args_type&.push(ObjCSelector);
                             args&.push(it[0]);
@@ -93,7 +110,6 @@ fn objc_call_impl(a: FatExpr, super: bool) FatExpr = {
                                 e := compile_ast(b[0].default);
                                 args_type&.push(e.ty);
                                 args&.push(e);
-                                @fmt(log&, ", _: %", e.ty.typename().str());
                                 
                                 range(1, b.len) { i |
                                     b := b.index(i);
@@ -103,7 +119,6 @@ fn objc_call_impl(a: FatExpr, super: bool) FatExpr = {
                                     value := b.default;
                                     @fmt(selector&, "%:", name.str());
                                     value := compile_ast(value);
-                                    @fmt(log&, ", %: %", name.str(), value.ty.typename().str());
                                     args&.push(value);
                                     args_type&.push(value.ty);
                                 };
@@ -119,7 +134,6 @@ fn objc_call_impl(a: FatExpr, super: bool) FatExpr = {
                         fn StructLiteralP(_) => compile_error("@objc reciever can't have name", it.arg.loc);
                         @default => {
                             reciever := compile_ast(it.arg[]);
-                            @fmt(log&, "%", reciever.ty.typename().str());
                             args_type&.push(reciever.ty);
                             args_type&.push(ObjCSelector);
                             args&.push(reciever);
@@ -143,17 +157,17 @@ fn objc_call_impl(a: FatExpr, super: bool) FatExpr = {
         };
     };
     
-    @fmt(log&, ") % #objc;", ret_ty.typename().str());
+    callee := choose_objc_dispatcher(super, ret_ty);
     arg_ty := Ty(args_type.items());
     selector := selector.items().sym().c_str();
     args[1] = @{ SEL(@[@literal selector]) };  
     arg_pattern: FatExpr = (expr = (Tuple = args.as_raw()), ty = UnknownType, done = false, loc = a.loc);
     xx := @{
-        f := @run assume_types_fn(@[@literal arg_ty], @[@literal ret_ty], @[@literal callee]);
+        f: rawptr = @[@literal callee];  // :ADistinctionWithoutADifference
+        f := assume_types_fn(@[@literal arg_ty], @[@literal ret_ty], f);
         f(@[arg_pattern])
     };
     xx.loc = a.loc;
-    //println(log.items());   // :bindings
     xx
 }
 
@@ -198,10 +212,12 @@ fn objc_set(self: FatExpr, pat: FatExpr) FatExpr #macro = as_var self { self |
         name := b.ident().unwrap();
         sel  := objc_property_name_to_selector(name).c_str();
         arg  := Ty(ObjCId, ObjCSelector, b.default.ty);
-        //@println("%: %;", name, b.default.ty.typename().str()); :bindings
         body = @{
             @[body];
-            f :: assume_types_fn(@[@literal arg], void, @as(rawptr) objc_msgSend);
+            // No need to choose_objc_dispatcher() here because setters always return void. 
+            // but you still need to be mindful of :ADistinctionWithoutADifference lest you call the wrong function. 
+            f: rawptr = objc_msgSend;
+            f := assume_types_fn(@[@literal arg], void, f);
             f(@[self], SEL(@[@literal sel]), @[b.default]);
         };
     };
@@ -229,6 +245,7 @@ fn new_global_block(a: Alloc, userdata: rawptr, callee: rawptr) *Block_literal_1
     b.invoke = callee;
     b.flags = 0b0_101000_0000000000000000000000;  // BLOCK_HAS_SIGNATURE|BLOCK_IS_GLOBAL
     // runtime for objective c blocks is in libsystem not libobjc
+    
     b.isa = @import_symbol("_NSConcreteGlobalBlock", "libc");
     d.signature = "@:@";
     b
@@ -582,10 +599,12 @@ fn objc_method_import_body(T: Type, fid: FuncId, is_static: bool) FatExpr = {
         arg_types&.push(pars[i].ty.Finished);
     };
     
+    callee := choose_objc_dispatcher(false, f_ty.ret);
     arg_ty := Ty(arg_types.items());
     arg_pattern: FatExpr = (expr = (Tuple = args.as_raw()), ty = UnknownType, done = false, loc = func.loc);
     xx := @{
-        f := @run assume_types_fn(@[@literal arg_ty], @[@literal f_ty.ret], @as(rawptr) objc_msgSend);
+        f: rawptr = @[@literal callee];  // :ADistinctionWithoutADifference
+        f := assume_types_fn(@[@literal arg_ty], @[@literal f_ty.ret], f);
         f(@[arg_pattern])
     };
     xx.loc = func.loc;

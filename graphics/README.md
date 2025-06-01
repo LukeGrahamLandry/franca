@@ -6,7 +6,7 @@ Various things useful for creating cross platform graphical applications.
 
 ## Adapted from https://github.com/floooh/sokol
 
-- gfx: 3D-API abstraction layer (platforms: Metal, WebGPU)
+- gfx: 3D-API abstraction layer (platforms: Metal, wip: WebGPU)
 - app: open a window, get a 3D-context, handle input events (platforms: MacOS)
 - gl: OpenGL 1.x style immediate-mode rendering API
 - debugtext: a simple ASCII text renderer using vintage home computer fonts

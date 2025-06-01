@@ -1,3 +1,95 @@
+## (May 31)
+
+- `graphics` programs segfault on macos-amd64. 
+with -keep-names: `ld: invalid use of rip-relative addressing in '_junk' to '__NSConcreteGlobalBlock'`
+```
+driver :: fn(vtable: *ImportVTable) void = 
+    Easy'build_for_graphics(vtable, "a.fr");
+    
+main :: fn() void = {
+    foo := @import_symbol("_NSConcreteGlobalBlock", "libc");    
+    @println("%", foo);
+}
+```
+need to do my trick converting LEA -> MOV even when .Relocatable and use a different magic number 
+to tell it the relocation references a GOT slot instead of the symbol directly. 
+now it crashes in the same way whether using the linker or not. 
+- it doesn't like `NSScreen::frame`, i bet it's because it returns a big thing and i need to use the sret version of objcmsgsend. 
+yeah now it gets farther and the numbers from frame() look reasonable. 
+  - but arm64 doesn't have the `_stret` versions and i don't really let you ask the target arch, 
+  so i have to do it with #link_rename which reveals some problems apparently 
+  - it not working when the annotations are in the wrong order is dumb. 
+  added an error for that which is better than silently being different if you try to do a direct comptime call. 
+  - i have check_link_rename and get_link_name which do the same thing. dumb. 
+  - it's not doing emit_ir again for the `_stret` ones at runtime? 
+  oh fuck it's because im cross compiling from arm and they have #avoid_shim 
+  so when both get mapped to the same address at comptime, it can't tell when 
+  the rawptr needs to be baked into the other funcid. 
+  thats... kind of impossible to get right actually... fuck. 
+  i can cheat with Expr.FnPtr, glad i left that in. 
+- now it crashes in realizeClassWithoutSwift (while calling arrayWithObject),
+if you comment out that part, same in setMagnificationFilter.
+  - then drawableSize, but that one's because threshold for `_stret` should be 16 bytes, 
+  which then matches what i thought the abi was so that's reassuring. 
+  - then nextEventMatchingMask
+  - then `[CAMetalLayer nextDrawable] returning nil because allocation failed`
+  - so what do (arrayWithObject, setMagnificationFilter, nextEventMatchingMask, nextDrawable) have in common? 
+  actually the first three all use an `@import_symbol`, that's a bit suspicious given that i was just fucking with that recently. 
+  i think im giving it the address of the GOT slot instead of loading from it, 
+  doing an extra `[]` makes kCFAllocatorDefault=0 like on arm which i have more faith in, so that fixes the first 3. 
+  ```
+  10000a3eb: 48 8b 05 26 2d 02 00        	mov	rax, qword ptr [rip + 0x22d26] ## 0x10002d118 <_write+0x10002d118>
+  10000a3f2: 48 8b 00                    	mov	rax, qword ptr [rax]
+  =
+  10000b590: b0000080    	adrp	x0, 0x10001c000 <_write+0x10001c000>
+  10000b594: f9408800    	ldr	x0, [x0, #0x110]
+  10000b598: f9400000    	ldr	x0, [x0]
+  ```
+  i don't understand why `_NSConcreteGlobalBlock` seems the same either way. 
+- in update_dimensions, macos.view.bounds() is always (0,0) which seems bad. 
+im passing something sane to initWithFrame but it's calling setBounds(0, 0), 
+maybe my (f64,f64,f64,f64) abi is wrong? 
+like no, i have abi6.ssa cause i noticed when qbe did that wrong on arm, and they pass with clang as the c side. 
+or they did before i fucked with lea for imports this morning...
+- 13 .ssa tests failing on `only LEA can be converted to GOT load` (when .Relocatable so not using my c compiler)
+  - now that i try to allow for dynamic imports in the object files i output, 
+  a nonlocal addr can't be folded into a load/store.
+  - fixing that in isel also fixed the need for an extra load in `@import_symbol` which is interesting. 
+  - now all work but abi8.ssa. tho while we're at it, added a test for folding an Increment into an import (which also fails). 
+  - abi8.ssa: only difference is leas -> movs and relocation type 1 -> 3.
+  but this whole thing doesn't make any sense. isn't the whole point of having a linker that 
+  you just tell it what symbols you need to import and it works it out? there's no way 
+  i need to tell it in my object file if a symbol is to be provided statically or dynamically. 
+> woah! mandelbrot_ui works jitted on amd64 at this point. not aot tho, so that points to this imports thing being the last problem. 
+
+```
+// a.c
+int printf(const char*, ...);
+extern int a;
+int main() {
+    printf("%d", a);
+    return 0;
+}
+// b.c
+int a = 5;
+```
+in a.o, clang is doing mov and type=X86_64_RELOC_GOT_LOAD 
+and then if you do `clang a.o b.o -target x86_64-apple-darwin`, 
+the linker converts it from mov to lea so it's a static offset (without an extra load) as you'd expect. 
+if you do `clang a.o -target x86_64-apple-darwin -Wl,-U,_a`, it stays mov and it makes a got thingy for it. 
+- it really looks like im doing the same thing and it's working, it just doesn't actually work. 
+```
+464: 48 8b 05 00 00 00 00         	mov	rax, qword ptr [rip]    ## 0x46b <_main+0xe1>
+46b: f2 48 0f 10 38               	movsd	xmm7, qword ptr [rax]   ## xmm7 = mem[0],zero
+becomes
+100001d34: 48 8d 05 dd 12 00 00        	lea	rax, [rip + 0x12dd]     ## 0x100003018 <_ss>
+100001d3b: f2 48 0f 10 38              	movsd	xmm7, qword ptr [rax]   ## xmm7 = mem[0],zero
+```
+have i just been losing my mind this whole time? 
+if i put `call $pbig(l $big)` at the beginning or end of main() that prints the right thing 
+so clearly it's getting the symbol just fine. i've just cursed the abi somehow even tho it's identical asm. 
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa. ok so problem is the trying to fold an offset into the load (which i knew 
+was a problem, i was just going to do that next, dumbass). 
 
 ## (May 30)
 
@@ -40,8 +132,6 @@ it's just a bit irritating to pass index+length or the end pointer around everyw
   problem was x64 makes RMem and i was reusing the same Qbe.Fn without clearing that or default_init-ing so it was held across a reset_temp. 
   - macos: dir_exists doesn't work. oh it's the fucking `$INODE64` like with read_dir. 
   trivial fix tho which is nice. 
-  - `std/json        cc      FAIL test_wuffs_strconv_parse_number_f64_regular: "-0.000e0": have 0x0000000000000000, want 0x8000000000000000`
-    TODO
 - actually run prospero in run_tests, just on a lower width and assert that the right number of pixels were set.
 
 ## (May 29)

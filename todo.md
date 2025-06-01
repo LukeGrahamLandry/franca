@@ -2,6 +2,10 @@
 - make_dirs on apple x64
 - @bit_fields in incremental.fr don't work inline in the structs
 - import_c, get rid of :BoundsPadding
+- linux fault-na.ssa need to do the signal struct
+- amd64: `std/json        cc      FAIL test_wuffs_strconv_parse_number_f64_regular: "-0.000e0": have 0x0000000000000000, want 0x8000000000000000`
+- whether the host compiler was built with`-syscalls` needs to go in the cache file
+- `graphics` programs don't work AOT on amd64 (JIT is fine somehow)
 
 ## Quest Lines
 
@@ -134,8 +138,6 @@ rn you're supposed to need a redundant `[]` in a call like that.
 - import_c: tests/todo/b.c
 - same string constant as Str and CStr :MiscompileCStr
 - :ConstInFuncOrLoseTemp
-- `graphics` programs don't work on amd64. 
-with -keep-names: `ld: invalid use of rip-relative addressing in '_junk' to '__NSConcreteGlobalBlock'`
 - tests/todo/(a.fr, c.fr, d.fr)
 - literal for a 64 bit integer with the high bit set shouldn't need a bit cast 
 - `fn vec2(x, y) = (v = (x, y));` miscompiles if inlined but i can't reproduce it in a simple test. 

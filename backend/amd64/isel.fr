@@ -125,7 +125,7 @@ fn fixarg(r: *Qbe.Ref, k: Qbe.Cls, i: *Qbe.Ins, f: *Qbe.Fn) void = {
         @if(!(is_store(o) && r.identical(i.arg&.index(1)))
         && !is_load(o) && o != .cas0 && o != .call && f.is_symbol(r0)) => {
             r1 = f.newtmp("isel", .Kl);
-            f.emit(.addr, .Kl, r1, r0, QbeNull);
+            f.lea(r1, r0);
         };
         // no immediate allowed for selCC
         @if(o.is_sel_flag() && rtype(r[]) == .RCon) => {
@@ -139,6 +139,27 @@ fn fixarg(r: *Qbe.Ref, k: Qbe.Cls, i: *Qbe.Ins, f: *Qbe.Fn) void = {
         @else => ();
     };
     r[] = r1;
+}
+
+fn lea(f: *Qbe.Fn, dest: Qbe.Ref, con_in: Qbe.Ref) void = {
+    const := f.get_constant(con_in);
+    if const.type() == .CBits {
+        f.emit(@if(f.is_symbol(con_in), .addr, .copy), .Kl, dest, con_in, QbeNull);
+        return();
+    };
+    
+    if could_be_import(f, const) {
+        bits := const.bits();
+        if bits != 0 {
+            @assert(fits_in_i32(bits), "TODO: >4gb offset??");
+            r := f.newtmp("isel", .Kl);
+            f.emit(.add, .Kl, dest, r, f.getcon(bits));
+            dest = r;
+            con_in = f.symcon(const.sym);
+        };
+    };
+
+    f.emit(@if(f.is_symbol(con_in), .addr, .copy), .Kl, dest, con_in, QbeNull);
 }
 
 NEW_ADDR_FOLDING :: false;
@@ -358,7 +379,7 @@ fn seladdr(r: *Qbe.Ref, f: *Qbe.Fn) void = {
         // - in jitted code (= known addr) on linux (= low 4gb)
         // But it still needs to go in an RMem so amd64_encoding_table can just have .M entries. 
         if f.get_int(r[]).is_none() {
-            return();  // arg_t(.CAddr) == .M
+            //return();  // arg_t(.CAddr) == .M, but we need to check "only LEA can be converted to GOT load [...]" all the way at the bottom TODO
         };
     };
     mem: Qbe.Addr = (base = r[], index = QbeNull, scale = 1, offset = con(Qbe.no_symbol, 0));
@@ -372,10 +393,10 @@ fn seladdr(r: *Qbe.Ref, f: *Qbe.Fn) void = {
                 chuse(mem.index, 1, f);
             };
         };
-        f.fix_amd_mem(mem&);
+        f.fix_amd_mem(mem&, false);
     } else {
         f.merge_amd_addr(mem&);
-        f.fix_amd_mem(mem&);
+        f.fix_amd_mem(mem&, false);
         when_debug(f, .InstSelect) { out |
             write(out, "\n");
         };
@@ -383,13 +404,13 @@ fn seladdr(r: *Qbe.Ref, f: *Qbe.Fn) void = {
     r[] = f.new_mem(mem);
 }
 
-fn fix_amd_mem(f: *Qbe.Fn, mem: *Qbe.Addr) void = {
+fn fix_amd_mem(f: *Qbe.Fn, mem: *Qbe.Addr, is_lea: bool) void = {
     @debug_assert(mem.offset&.type() != .CAddr || (mem.index == QbeNull && mem.base == QbeNull), "generated illegal addressing mode");
     
     for (@slice(mem.index&, mem.base&)) { a |
         if rtype(a[]) == .RCon {
             r0 := f.newtmp("isel", .Kl);
-            f.emit(@if(f.is_symbol(a[]), .addr, .copy), .Kl, r0, a[], QbeNull);
+            f.lea(r0, a[]);
             a[] = r0;
         };
         
@@ -414,6 +435,39 @@ fn fix_amd_mem(f: *Qbe.Fn, mem: *Qbe.Addr) void = {
         mem.offset&.set_bits(0);
         mem.base = r1;
     };
+
+    // "only LEA can be converted to GOT load [...]"
+    // if we don't know it's a local symbol, it might be an import that ends up being dynamic 
+    // and needing to become a GOT load, which can't be folded into a load/store/cas. 
+    // As a fun bonus, you can't fit an increment from the symbol in the same instruction so we have to split out the add. 
+    // Doing this generates worse code (?) tho so pledge_local is a hack to let the frontend forward 
+    // declare when it knows something is local data it's going to create later. 
+    // TODO: test that exercises this other than just supporting both @import_symbol for @/graphics and non-cc .ssa tests. 
+    if !is_lea && could_be_import(f, mem.offset&) {
+        if mem.base == QbeNull && mem.index != QbeNull && mem.scale == 1 {
+            mem.base = mem.index;
+            mem.index = QbeNull 
+        };
+        base := mem.base;
+        mem.base = QbeNull;
+        
+        @assert(mem.index == QbeNull, "TODO: fuck the got load needs to be alone");
+        r0 := f.newtmp("isel", .Kl);
+        bits := mem.offset&.bits();
+        mem.offset.bits = (0, 0);
+        
+        f.emit(.addr, .Kl, r0, f.new_mem(mem[]), QbeNull);
+        mem[] = (base = r0, index = base, offset = con(Qbe.no_symbol, bits), scale = 1);
+    };
+}
+
+fn could_be_import(f: *Qbe.Fn, constant: *Qbe.Con) bool = {
+    if(constant.type() == .CBits, => return(false)); 
+    result := false;
+    use_symbol(f.globals, constant.sym) { s |
+        result = s.kind != .Local && !s.pledge_local;
+    };
+    result
 }
 
 fn new_mem(f: *Qbe.Fn, mem: Qbe.Addr) Qbe.Ref #inline = {
@@ -422,7 +476,7 @@ fn new_mem(f: *Qbe.Fn, mem: Qbe.Addr) Qbe.Ref #inline = {
 }
 
 fn fits_in_i32(i: i64) bool = 
-    i >= MIN_i32 && i <= MAX_i32
+    i >= MIN_i32 && i <= MAX_i32;
 
 fn cmpswap(arg: *Array(Qbe.Ref, 2), cmp: i32) bool = {
     cmp := @as(Qbe.Cmp) cmp;
@@ -589,12 +643,8 @@ fn sel_inner(i: *Qbe.Ins, f: *Qbe.Fn) void = {
             @debug_assert(NEW_ADDR_FOLDING, "shouldn't have addr ops yet.");
             i := f.emit(i[]);
             m := f.get_memory(i.arg&[0]);
-            f.fix_amd_mem(m);
-            if m.base == QbeNull && m.index == QbeNull {
-                r := f.newcon(m.offset&);
-                i.arg&[0] = r;
-                i.set_op(.copy);
-            };
+            f.fix_amd_mem(m, true);
+            // TODO: bring back the thing where if it's just a CAddr, it's inline so opt/slots.fr can deduplicate it. 
         }
         fn trace_prev() => {
             sel(make_ins(.load, i.cls(), i.to, f.new_mem(i.arg&[0], QbeNull, 0, 1), QbeNull), f);

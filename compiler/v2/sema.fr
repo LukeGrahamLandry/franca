@@ -597,20 +597,21 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
         (Ok = self.pool.insert_owned(ir)) 
     }
     
-    // TODO: find_import/resolve_comptime_import/resolve_comptime_import all kinda do the same thing
+    did_import := false;
+    
     find_import :: fn(lib_name: Symbol) void => {
         ret :: local_return;
+        did_import = true;
         handle2 := self.comptime_libraries&.get(lib_name);
         is_libc := lib_name == Flag.libc.ident(); 
+        name := self.get_comptime_link_name(func);
         while => handle2 { handle |
-            name := self.get_link_name(func);
             if handle.get(name) { addr |
                 self.put_jitted_import(fid, addr);
                 
                 impl := find_or_create_impl(func.body&, self.get_alloc(), .DynamicImport);
+                // Note: storing func.name, not intern(name) because emit_ir will need to re-linkrename if we're cross compiling. 
                 impl[] = (name = func.name, lib = lib_name, comptime = addr.int_from_rawptr());
-                
-                //func.set_flag(.NoMangle);
                 ret();
             };
             handle2 = .None;
@@ -641,7 +642,6 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                 func.set_flag(.NoContext);
                 
                 find_import(Flag.libc.ident());
-                // TODO: else fall back to the driver with resolve_comptime_import?
             };
             @case(Flag.import.ident()) => {
                 // :io_driver
@@ -726,10 +726,13 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
             // TODO: remove all the different string based ones and have #asm("llvm") #asm("qbe") FuncImpl::AsmStr(Backend:Symbol, Source:Symbol)
             //       so you can have driver programs add new backends without modifying the core compiler. 
             //       then move backends/qbe.fr to be an external thing in examples.   :io_driver
+            //       ^the point remains but for architectures
             @case(Flag.asm.ident()) => {
-                // - tuple of string literals -> llvm-ir
-                // - tuple of 32-bit int literals -> aarch64 asm ops
-                // - anything else, comptime eval expecting Slice(u32) -> aarch64 asm ops
+                // aarch64
+                // - tuple of 32-bit int literals 
+                // - anything else, comptime eval expecting Slice(u32)
+                // x86_bytes
+                // - @Fn(out: *List(u8)) void
                 @debug_assert(func.body&.is(.Normal), "we already checked that #asm has body");
                 @debug_assert(!func.get_flag(.AnyConstArgs), "#asm const args should already have been bound");
                 check_body = false;
@@ -817,6 +820,9 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
             };
             // :link_rename
             @case(Flag.link_rename.ident()) => {
+                self.last_loc = func.loc;
+                @err_assert(!did_import, "#link_rename must come before #import/#libc, sorry") return;
+                
                 // TODO: for now we only support this for special body (like imports), you should be allowed to do it for exports too tho. 
                 // :SLOW
                 old := self.dispatch.enclosing_function;
@@ -866,24 +872,11 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
 
 // :link_rename
 // TODO: allow #libc before #link_rename
-// TODO: the backend needs to call this again if cross compiling. 
-//       maybe we should add jit vs aot to LinkRenameArg 
-fn get_link_name(self: *SelfHosted, func: *Func) Str = {
-    out: List(u8) = list(temp());
-    ::if(CStr);
-    if func.nullable_link_rename_func != 0 {
-        arg: LinkRenameArg = (
-            target = (arch = self.env.comptime_arch, os = self.env.comptime_os),
-            out = out&,
-            old_name = self.pool.get(func.name),
-        );
-        addr := rawptr_from_int(func.nullable_link_rename_func);
-        addr := assume_types_fn(*LinkRenameArg, void, addr);
-        addr(arg&);
-        out.items()
-    } else {
-        self.pool.get(func.name)
-    }
+fn get_comptime_link_name(self: *SelfHosted, func: *Func) Str = {
+    self.comp().check_link_rename(func.name, func, (
+        arch = self.env.comptime_arch, 
+        os = self.env.comptime_os,
+    ))
 }
 
 ::tagged(ResultType);
