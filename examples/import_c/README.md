@@ -14,6 +14,9 @@ A C11 compiler adapted from <https://github.com/rui314/chibicc>.
 - export to the franca compiler's type/function data structures so you don't need to manually write bindings to c libraries. 
 (WIP. for demos, see `examples/bf/c_source.fr` and `examples/view_image.fr`). 
 - optionally use the franca calling convention (passing a hidden environment pointer)
+- allow some function attributes
+  - ignored: `__format__`, `__const__`
+- show chain of macro declarations in error report
 
 ### Refactors 
 

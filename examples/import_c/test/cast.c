@@ -53,7 +53,21 @@ int main() {
   ASSERT(3, (double)3);
   ASSERT(3, (float)3L);
   ASSERT(3, (double)3L);
-
+  
+  ASSERT(0, ({
+      struct A { int a; };
+      struct B { float b; };
+      struct A c;
+      ((struct B*)&c)->b = 0;
+      c.a;
+  }));
+  
+  ASSERT(257, ({
+      short a = 256;
+      *((char*)&a) = 1;
+      a;
+  }));
+  
   printf("OK\n");
   return 0;
 }

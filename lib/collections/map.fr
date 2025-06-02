@@ -43,6 +43,12 @@ fn HashMap($K: Type, $V: Type) Type = {
     fn capacity(self: *Self) i64 = self.raw.capacity;
     fn clear(self: *Self) void = self.raw&.clear();
     
+    // This is the same as:
+    // self.get_ptr(key) || { self.insert(key, if_absent()); self.get_ptr(key) }
+    // but faster because it only needs to hash the key once 
+    fn get_or_insert(self: *Self, key: K, $if_absent: @Fn() V) void = 
+        get_or_insert(self.raw&, key, self.alloc, if_absent);
+    
     Self
 }
 
@@ -77,11 +83,8 @@ fn RawHashMap($K: Type, $V: Type) Type = {
     };
     
     fn insert(self: *Self, key: K, value: V, gpa: Alloc) ?V = {
-        full := self.len_including_tombstones >= self.capacity;
-        if(full, => self.resize(gpa)); // does it sooner than necessary (if replacing a slot) but thats fine. 
-        h    := key&.checked_hash();
-        slot := self.find_slot(key&, h);
-        if slot.hash != 0 && slot.hash != 1 {
+        valid, slot, h := expand_to_find_slot(self, key&, gpa);
+        if valid {
             old := slot.value;
             slot.value = value;
             return(Some = old);
@@ -89,6 +92,26 @@ fn RawHashMap($K: Type, $V: Type) Type = {
         self.len_including_tombstones += int(slot.hash == 0);
         slot[] = (hash = h, key = key, value = value);
         .None
+    }
+    
+    expand_to_find_slot :: fn(self: *Self, key: *K, gpa: Alloc) Ty(bool, *Entry, i64) = {
+        full := self.len_including_tombstones >= self.capacity;
+        if(full, => self.resize(gpa)); // does it sooner than necessary (if replacing a slot) but thats fine. 
+        h    := key.checked_hash();
+        slot := self.find_slot(key, h);
+        (slot.hash != 0 && slot.hash != 1, slot, h)
+    }
+    
+    fn get_or_insert(self: *Self, key: K, gpa: Alloc, $if_absent: @Fn() V) *V = {
+        valid, slot, h := expand_to_find_slot(self, key&, gpa);
+        if !valid {
+            value := if_absent();
+            // do this after `if_absent` so we don't increment if they early return.
+            self.len_including_tombstones += int(slot.hash == 0);
+            slot[] = (hash = h, key = key, value = value);
+        };
+        
+        slot.value&
     }
 
     fn get(self: *Self, key: K) ?V #inline = self.get(key&);

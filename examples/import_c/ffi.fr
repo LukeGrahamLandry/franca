@@ -55,49 +55,58 @@ fn enable_franca_ffi(c: *Ctx, fr: CompCtx, namespace: ScopeId) void = {
 
 // GARBAGE: for now all the import_c stuff is very experimental. the api will eventually get less painful. 
 fn include(fr: CompCtx, namespace: ScopeId, c_source: Str) void = {
+    c := init_for_include(fr, namespace);
+    do_include(fr, namespace, c_source, c);
+}
+
+fn init_for_include(fr: CompCtx, namespace: ScopeId) *C.Compile.Ctx = {
     m := fr.get_alloc().box(QbeModule);
-    c := C'Compile.Ctx.zeroed();
+    c := fr.get_alloc().box_zeroed(C'Compile.Ctx);
     // :HardcodeOs
     init_default_module_dyn(m, fr.vtable, (arch = .aarch64, os = .macos, type = .JitOnly));
-    C'init_ctx(c&, m);
-    c&.enable_franca_ffi(fr, namespace);
-    
+    C'init_ctx(c, m);
+    c.enable_franca_ffi(fr, namespace);
+    c
+}
+
+fn do_include(fr: CompCtx, namespace: ScopeId, c_source: Str, c: *C.Compile.Ctx) void = {
     push_dynamic_context { // TODO: why am i doing this. just mark temp, oh but it's confusing how long it needs to live because the fns go in temp
         a: ArenaAlloc = init(page_allocator, 10000);  // :Leak
         context(DefaultContext)[].temporary_allocator = a&;
-        objs := catch_call(c&, *C.Compile.Obj) {
+        result := catch_call(c, void) {
             src: List(u8) = assume_owned(c_source, temp());
-            tok := c&.tokenize_string("import_cTODO", src&);
-            tok  = c&.C'Preprocess'preprocess(tok);
-            c&.parse(tok)
+            tok := c.tokenize_string("import_cTODO", src&.items());
+            tok  = c.C'Preprocess'preprocess(tok);
+            objs := c.parse(tok);
+            
+            for_linked objs { obj |
+                if obj.is_function && obj.is_definition {
+                    _ := export_func(c, obj);
+                }
+            }
+            
+            // add all the typedefs to the scope
+            for_linked c.scope { sc |
+                each sc.vars& { name, value |
+                    if !value.type_def.is_null() {
+                        type := export_type(c, value.type_def, false);
+                        fr.add_to_scope(namespace, fr.intern_string(name), Type, type);
+                    }
+                    obj := value.var;
+                    // TODO: should make this work
+                    //if !obj.is_null() && !obj.is_function && obj.is_definition {
+                    //    id       := export_data(c&, obj);
+                    //    type     := export_type(c&, c&.pointer_to(obj.ty), false);
+                    //    jit_addr := fr'vtable'materialize_in_jit_address_space(fr.data, QbeModule.raw_from_ptr(m), id);
+                    //    fr.add_to_scope(namespace, fr.intern_string(name), type, jit_addr);
+                    //};
+                }
+            }
         }
-        objs := or objs { err | 
+        or result { err | 
             panic(err)
         }
         
-        for_linked objs { obj |
-            if obj.is_function && obj.is_definition {
-                _ := export_func(c&, obj);
-            }
-        }
-        
-        // add all the typedefs to the scope
-        for_linked c.scope { sc |
-            each sc.vars& { name, value |
-                if !value.type_def.is_null() {
-                    type := export_type(c&, value.type_def, false);
-                    fr.add_to_scope(namespace, fr.intern_string(name), Type, type);
-                }
-                obj := value.var;
-                // TODO: should make this work
-                //if !obj.is_null() && !obj.is_function && obj.is_definition {
-                //    id       := export_data(c&, obj);
-                //    type     := export_type(c&, c&.pointer_to(obj.ty), false);
-                //    jit_addr := fr'vtable'materialize_in_jit_address_space(fr.data, QbeModule.raw_from_ptr(m), id);
-                //    fr.add_to_scope(namespace, fr.intern_string(name), type, jit_addr);
-                //};
-            }
-        }
     }
 }
 
@@ -236,7 +245,7 @@ fn export_func(c: *Ctx, obj: *Obj) FuncId = {
     data  := temp().alloc_zeroed(BakedVarId, n);
     funcs := temp().alloc_zeroed(FuncId, n);
     
-    name := fr.intern_string(obj.name.str());
+    name := fr.intern_string(obj.name);
     loc := Span.zeroed();  // TODO: translate this too!
     func := empty_fn(fn_type, name, loc);
     
@@ -303,7 +312,11 @@ find_ref :: fn(obj: *Obj, id: u32) *Obj = {
 // TODO: need to return BakedVarId to support aot instead of specifically poking it into the backend module we have
 // TODO: want to have it work like callees where you only actually emit it to the module when you know it's reachable
 fn export_data(c: *Ctx, obj: *Obj) BakedVarId = {
-    @debug_assert(!obj.is_function && obj.is_definition, "want data def %", obj.name.str());
+    @debug_assert(!obj.is_function, "want data def %", obj.name);
+    if !obj.is_definition {
+        @error_tok(c, obj.tok, "cannot export forward declaration of '%' to franca", obj.name);
+    };
+    
     fr := c.franca.unwrap();
     ::AutoEq(BakedVarId); ::RefEq(BakedVarId);
     if(obj.franca_v != BakedVarId.zeroed(), => return(obj.franca_v));
@@ -328,7 +341,9 @@ fn export_data(c: *Ctx, obj: *Obj) BakedVarId = {
         relocations = ({
             relocs := BakedReloc.list(fr.get_alloc());
             for_linked obj.rel { rel |
-                @assert_eq(rel.addend, 0, "TODO: import_c: support addend");
+                if rel.addend != 0 {
+                    @error_tok(c, obj.tok, "TODO: import_c support addend");
+                }
                 relocs&.push(
                     off = rel.offset.bitcast(),
                     target = @if(rel.obj.is_function, (FuncId = c.export_func(rel.obj)), (BakedVarId = c.export_data(rel.obj))),

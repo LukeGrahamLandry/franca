@@ -1,3 +1,4 @@
+- implement _Atomic in import_c
 - clear cache before tests just in case
 - make_dirs on apple x64
 - @bit_fields in incremental.fr don't work inline in the structs
@@ -6,6 +7,11 @@
 - amd64: `std/json        cc      FAIL test_wuffs_strconv_parse_number_f64_regular: "-0.000e0": have 0x0000000000000000, want 0x8000000000000000`
 - whether the host compiler was built with`-syscalls` needs to go in the cache file
 - `graphics` programs don't work AOT on amd64 (JIT is fine somehow)
+- amd64: examples/import_c/test/test.fr
+- use HashMap.get_or_insert more
+
+// TODO: printf doesn't work on arm. also wont work with a shim should add an error for that. 
+eval_and_dump_defined_numbers :: fn(vtable: *ImportVTable) void = {
 
 ## Quest Lines
 

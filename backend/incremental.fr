@@ -1,7 +1,7 @@
 /// This defines the .frc file format used by the franca compiler. 
 /// See @/docs/caching.md
 
-MAGIC :: 0x0004_41434E415246;  // FRANCA__
+MAGIC :: 0x0005_41434E415246;  // FRANCA__
 Header :: @struct {
     meta: Meta #use;
     dep: Storage(Dep);
@@ -15,6 +15,8 @@ Header :: @struct {
     lib: Storage(Lib);
     idx: Storage(u32);
     typ: Storage(Typ);
+    fty: Storage(FTy);
+    fld: Storage(Fld);
 };
 
 Meta :: @struct {
@@ -77,8 +79,8 @@ FncFlags :: @bit_fields(
 
 Blk :: @struct {
     ins: Ref(Qbe.Ins);
-    s1: u32;
-    s2: u32;
+    s1: u32;  // local in Fnc.blks
+    s2: u32;  // loacl in Fnc.blks
     jmp: Qbe.BlkJmp;
     phi: u32; // idx[phi] = (nphi, [nphi](narg, to, k, [narg](blk, arg)))
 };
@@ -89,7 +91,7 @@ Dat :: @struct {
 };
 
 Imp :: @struct {
-    lib: Ref(Lib);
+    lib: One(Lib);
 };
 
 Lib :: @struct {
@@ -117,6 +119,20 @@ Storage :: fn($T: Type) Type = {
         self.get(i).index(0)
     }
 
+    fn get(self: *Header, i: One(T)) *T = {
+        i: Ref(T) = (off = i.off, count = 1);
+        self.get(i).index(0)
+    }
+    
+    fn for(self: *Header, i: Ref(T), $body: @Fn(it: One(T), itp: *T) void) void = {
+        f :: find_storage_field(T);
+        storage := Header.get_field_ptr(self, f);
+        range(0, storage.count.zext()) { i |
+            it: One(T) = (off = i.trunc());
+            body(it, self.get(it));
+        };
+    }
+    
     @struct(
         off: u32 /* bytes from start of header to first element */, 
         count: u32, 
@@ -124,11 +140,18 @@ Storage :: fn($T: Type) Type = {
     )
 };
 
-Ref :: fn($T: Type) Type = {
-    Self :: @struct(off: u32, count: u32, RefElement :: T);
+fn all(self: *Header, $T: Type) Ref(T) #generic = {
+    f :: find_storage_field(T);
+    storage := Header.get_field_ptr(self, f);
+    (off = 0, count = storage.count)
+}
     
-    Self
-};
+
+Ref :: fn($T: Type) Type = 
+    @struct(off: u32, count: u32, RefElement :: T);
+
+One :: fn($T: Type) Type = 
+    @struct(off: u32, OneElement :: T);
 
 fn check(data: []u8) *Header = {
     @assert_ge(data.len, size_of(Header));
@@ -168,6 +191,8 @@ Writer :: @struct {
     lib: List(Lib);
     idx: List(u32);
     typ: List(Typ);
+    fty: List(FTy);
+    fld: List(Fld);
     symbols: HashMap(u32, i64);
 };
 
@@ -185,6 +210,8 @@ fn init(a: Alloc) Writer = (
     lib = list(a),
     idx = list(a),
     typ = list(a),
+    fty = list(a),
+    fld = list(a),
 );
 
 fn push(self: *Writer, it: []u8) Ref(u8) = {
@@ -340,6 +367,8 @@ fn to_bytes(self: *Writer, meta: Meta, m: *QbeModule) [][]u8 = {
     X(header.lib&, self.lib&);
     X(header.idx&, self.idx&);
     X(header.typ&, self.typ&);
+    X(header.fty&, self.fty&);
+    X(header.fld&, self.fld&);
     header.filelen = n.trunc();
     
     // Maybe limitting to 4GB is too small and I should make all the offsets be u64 instead. 
@@ -385,9 +414,9 @@ finish_module :: fn(m: *QbeModule) [][]u8 = {
 };
 
 // note: this only calls default_init if !did_rega
-fn load(header: *Header, f: *Qbe.Fn, it: Ref(Sym), syms: []u32) bool /*did_rega lloc*/ = {
+fn load(header: *Header, f: *Qbe.Fn, it: One(Sym), syms: []u32) bool /*did_rega lloc*/ = {
     m := f.globals;
-    sym := header.get(it).index(0);
+    sym := header.get(it);
     fnc := sym.fnc&;
     did_regalloc := fnc.tmp == Qbe.no_symbol;
     if !did_regalloc {
@@ -449,8 +478,8 @@ fn load(header: *Header, f: *Qbe.Fn, it: Ref(Sym), syms: []u32) bool /*did_rega 
     did_regalloc
 }
 
-fn load(header: *Header, m: *QbeModule, i: Ref(Sym), syms: []u32) Dat2 = {
-    it := header.get(i).index(0);
+fn load(header: *Header, m: *QbeModule, i: One(Sym), syms: []u32) Dat2 = {
+    it := header.get(i);
     relocs := temp().alloc(Dat2.Reloc, it.dat.rel.count.zext());
     relocs.copy_from(header.get(it.dat.rel));
     each relocs { it |
@@ -483,9 +512,8 @@ pack_target :: fn(arch: Arch, os: Os) u32 =
 fn preintern_syms(header: *Header, m: *QbeModule) []u32 = {
     count: i64 = header.sym.count.zext();
     syms := m.forever&.borrow().alloc(u32, count);
-    range(0, count) { i |
-        it: *Sym = header.get(i.trunc());
-        syms[i] = m.intern(header.get(it.name));
+    for(header, header.all(Sym)) { i, it |
+        syms[i.off.zext()] = m.intern(header.get(it.name));
     };
     syms
 }
@@ -498,14 +526,11 @@ fn compile_all_symbols(header: *Header, m: *QbeModule) void = {
     syms := preintern_syms(header, m);
     read_types(header, m);
     
-    range(0, syms.len) { i |
-        it: *Sym = header.get(i.trunc());
-        
+    for(header, header.all(Sym)) { i, it |
         mark := mark_temporary_storage();
         ::enum(@type it.segment);
         @match(it.segment) {
             fn Code() => {
-                i: Ref(Incremental.Sym) = (off = i.trunc(), count = 1);
                 did_regalloc := load(header, f&, i, syms);
                 zone := @if(ENABLE_ENABLE_TRACY, zone_begin(.Backend), ());
                 if f.globals.debug["P".char()] {
@@ -522,16 +547,15 @@ fn compile_all_symbols(header: *Header, m: *QbeModule) void = {
                 @if(ENABLE_ENABLE_TRACY) zone_end(zone);
             }
             fn MachineCode() => {
-                m.add_code_bytes(syms[i], header.get(it.dat.bytes));
+                m.add_code_bytes(syms[i.off.zext()], header.get(it.dat.bytes));
             }
             fn Import() => {
                 lib := header.get(it.imp.lib);
-                lib := header.get(lib[0].name);
-                m.set_library(syms[i], lib);
+                lib := header.get(lib.name);
+                m.set_library(syms[i.off.zext()], lib);
             }
             fn Invalid() => ();
             @default => {
-                i: Ref(Incremental.Sym) = (off = i.trunc(), count = 1);
                 dat := load(header, m, i, syms);
                 m.emit_data(dat);
             };
@@ -650,6 +674,52 @@ read_types :: fn(header: *Header, m: *QbeModule) void = {
     };
     
     unlock(m.types_mutex&);
+};
+
+// 
+// Some fields are for frontend declaraction/type info. 
+//
+
+FTy :: @rec @struct {
+    Tag :: @enum(u8) (Void, Number, Array, Ptr, Function, Type, Enum, Scope, Struct, Union);
+    tag: Tag;
+    align_log2: u8;
+    // franca structs can have runtime fields and also an associated scope. TODO: might need more bits for this field. 
+    scope: u16 = 0xFFFF;
+    payload: @union(
+        array:  @struct(inner: One(FTy), count: u32),  // or ptr
+        fields: Ref(Fld),  // enum/scope/struct/union
+        func:   @struct(arg: One(FTy), ret: One(FTy)),
+        int:    @struct(bits: u32, signed: bool, float: bool),
+    );
+    
+    UNKNOWN  ::  0;
+    VOID     ::  1;
+    TYPE     ::  2;
+    I64      ::  3;
+    BOOL     ::  4;
+    _        ::  5;
+    NEVER    ::  6;
+    F64      ::  7;
+    OVERLOAD ::  8;
+    SCOPE    ::  9;
+    U32      :: 10;
+    RAWPTR   :: 11;
+    F32      :: 12;
+    FUNCID   :: 13;
+    LABELID  :: 14;
+    SYMBOL   :: 15;
+};
+
+Fld :: @rec @struct {
+    name: Ref(u8);
+    type: One(FTy);
+    payload: @union(
+        offset: u32,         // a runtime offset in bytes for struct/union
+        value: One(Qbe.Con), // a constant value for scope
+        type: One(FTy),
+    );
+    source_location: u32;
 };
 
 ENABLE_ENABLE_TRACY :: get_environment_variable("FRANCA_TRACY").is_some();

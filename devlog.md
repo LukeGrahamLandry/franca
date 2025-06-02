@@ -1,3 +1,175 @@
+## (Jun 2)
+
+The other thing is that my pre-main init stuff is not very formal. 
+Like .c/.ssa doesn't work statically on linux because the startup code 
+for doing relocations is in franca. So I have to redo that and add more 
+coupling between the languages anyway, regardless of what i do about libc. 
+
+I think my plan is:
+- get import_c to the point where it can actually compile cosmopolitan
+- rewrite their startup stuff and my startup stuff into something that works for both
+- replace the .S files for constants/syscalls
+- replace the build system with not a billion object files
+- and only after all that do i have to decide how much to fuse import_c with the franca compiler.
+ 
+one more counting operation
+- 206716 lines of libc/(.h/.c) =
+  -  34582 lines of license headers / ascii art / `/*-*- vi:`
+  -  14868 lines in the form `#define NAME TOKEN\n`
+  -  10823 lines in the form `#include TOKEN\n`
+  -  14778 lines blank
+  -  28184 lines comment
+  - 103481 lines the rest
+
+---
+
+- `libc/integral/normalize.inc` is what they stick on the front of every program. 
+define `__LP64__` and then it gives me some extra type defs.
+- need to accept more attributes
+- error message showing the macro's definition site instead of where 
+you called it from is going to drive me crazy. made it walk back the tok.origin chain 
+and show everything. 
+- added an option for import_c/tokenize.fr to be lossless so i can use it for counting (see above). 
+- playing with a script that uses my c compiler to take a file with `#define name number` 
+and generate a program like `printf("%s,%d\n", "name", name);` to output a csv
+  - something's super broken with sending a #c_variadic function from franca to a jitted QbeModule. 
+  i thought i was being clever giving it just one instead of fill_from_libc, but it behaves erratically.
+  works better on amd64 than arm64 but then decides to crash if i rearrange the program slightly. 
+  ```
+  printf :: fn(fmt: CStr) void #c_variadic #libc;
+  use_symbol(m, m.intern("printf")) { symbol |
+      it: rawptr = printf;
+      m.do_fixups(it, symbol);
+  };
+  ```
+  - i could see jit-shim not working (speaking of which, added an error message for that), 
+  but the driver gets fully compiled before being called so that's not the problem 
+  - prediction: my printf addr is different from the dlopen one. yep. 
+  ```
+  printf: 5805095980
+  printf: 6493874984
+  ```
+  emit_ir.fr/emit_call() has a special case for DynamicImport and if i take that out, 
+  printf calls from franca stop working as well. so that's the problem, import_c doesn't do 
+  that so when the franca program gives it the address, it gets the import-shim that doesn't know 
+  to pass on the right registers. and it works with ExecStyle.JIT even tho it doesn't have 
+  that special case because then it uses DynamicImport.comptime without going through the 
+  import-shim. 
+
+## (Jun 1)
+
+- use sib byte less often, save a bit of space: 1478189 -> 1445357 (30kb, 2%)
+- import_c: when compiling lua, 12/95 frontend samples were scan_globals calling slow_len.
+switch Obj.name from CStr to Str
+- extending .frc for storing frontend declarations/types
+- import_c: better error message when you try to typedef something that isn't a type
+
+---
+
+Research.  
+
+i can't keep copying random struct definitions for libc stuff. 
+it's not the thing im interested in and it's super unreliable.  
+maybe cosmopolitan libc is what i want but it's kinda large. 
+
+```
+14.323 total
+------
+ 1.825 str/unicodedata.txt
+ 1.705 2020 license header
+ 1.171 testlib/moby.txt
+ 0.707 2022 license header
+ 0.518 2021 license header
+ 0.377 2023 license header 
+ 0.323 the rest of testlib
+ 0.290 isystem (remapping thier files to normal includes)
+ 0.287 2014 musl license header
+ 0.171 libc/sysv/consts/*.S (gen consts.sh)
+ 0.116 2024 license header 
+ 0.087 arm license header
+ 0.056 2020 musl license header
+ 0.040 sysv/calls/*.S (gen syscalls.sh)
+ 0.050 sysv/(errfuns.h, errfuns/*.S) (gen errfuns.sh)
+ 0.050 vga/vga-font-default.c (1235 bytes of font data)
+------
+ 6.873 the rest
+```
+for reference, the franca repository is `5.611` currently.  
+
+so that's not bad actually, i double my amount of code and never have to 
+deal with copying out libc structs again and also get something that 
+actually works instead of my current situation that just kinda maybe works. 
+
+since they do one exe that supports multiple oses, they can't use `#ifdef os`, 
+they have to do a dynamic check. which is great for me, that restriction overlaps 
+with how my `#target_os` allows comptime execution with cross compilation. they 
+have one set of struct definitions that user code imports and when you call a 
+function they're translated to the native ones as needed. very good. ten stars. 
+
+- they still use `#ifdef arch`, including in structs which is unfortunate. 
+even public ones: sigcontext. so it doesn't completly free me of needing to 
+sema twice to get different field offsets but it's still an improvement
+- there's a bunch of special cases for their own stuff
+  - zipos (tho that's kinda cool, i probably want to keep that)
+  - an error message that suggests you try a different version of redbean
+  - sys_execve execs `/usr/bin/ape` if the bytes in the file start with thier initials
+- heavier runtime than i expected (tho the trace ones are optional)
+  - `--strace` is just they call ~fprintf when it's turned on 
+  - `__morph_begin` is pretty invasive
+    - `--ftrace` is the compiler leaves nops at the begining of functions 
+    and then the runtime reads its own elf headers to get find all the functions 
+    and rewrite them to call ~fprintf so it has to call pthread_jit_write_protect_np
+    - tls on amd64 starts at __executable_start and looks for the code sequence 
+    it knows the compiler generates for tls accesses and rewrites them. 
+  - they have to un-leb the syscall numbers before calling your main()
+- they still depend on a blessed xcode to compile ape-m1.c to fill a Syslib struct 
+with apple's blessed function pointers. 
+  - which i fine, im not as excited about the single exe thing as they are. 
+  i'd rather just keep doing mach-o like i do now. but that also means 
+  i have to replace any of thier runtime stuff that tries to read the elf headers. 
+- dlopen() isn't supported on x86-64 MacOS
+- they use inline assembly which my import_c doesn't support. 
+  - tho they stole chibicc just like i did and they have some `!defined(__chibicc__)` 
+  so maybe i could steal their changes to make that work. 
+  - most of it is just for doing syscall/svc
+- `tinymath` is musl and arm's stuff
+- they've got a bunch of extra stuff that isn't libc in the folder called libc. 
+i guess it's probably good stuff, so maybe that's what i want, but i'd rather it be 
+sorted differently. 
+- they've kinda already done the whole thing i want to do with this project. 
+like take a little self contained slice of interesting things in the universe
+that you can cross compile to all the sane targets. maybe that's a bit disheartening. 
+  - their "build from source" instructions starts with downloading a 1.3GB personal copy 
+  of clang so that makes me feel a bit better. 
+- they've aggressively bought into the tiny files compilation model.
+like one per libc function so it can build one .o file per libc function.]
+  - heh, i don't need cached compliation, i need cached concatenate the files so you don't have to reopen them all
+  - you have to scroll past reincluding things so many times. 
+  the lines in lib/(.h+.c) files are (1217+9380)/(46828+123927) = 6% `#include` 
+  (counted after collapsing most of the licence headers). 
+- they do `_weaken` and `__static_yoink` a lot which looks 
+kinda messy but is a good way to solve the bloat problem (like as 
+you add new runtime stuff, you need to add support code for it 
+elsewhere and then you're stuck doing that whether you use the runtime
+or not) which i've thought about didn't have a solution for. 
+- the math stuff has hella tables of magic numbers
+
+So if i wanted to do this and get rid of the libc bindings in franca, 
+that either means adding import_c to the core compiler or using it to 
+generate franca code from the c headers at comptime. 
+- calling (init_ctx, compile_file, emit_the_code) in the compiler 
+costs 1117037 -> 1281277 space and 1056 -> 1243 time, 
+which is well within the range that i could plausibly claw back. 
+tho that's not accounting for actually running it on the libc every compile. 
+- stand alone binary that calls Ffi'include costs 362ms to compile and 
+26ms to load from cache. so i could keep it an external program, have the compiler 
+export any parts of libc it needs (which is probably just an allocator) and have 
+that jitted as needed when you `import(libc)` or whatever. 
+- generating bindings at the compiler's comptime would probably be a similar amount of 
+code to embed in the binary as cosmo's libc/isystem which is 0.290MB which is more 
+space than just adding import_c to the compiler. plus i want you to be able to 
+edit the c headers trivially. 
+
 ## (May 31)
 
 - `graphics` programs segfault on macos-amd64. 
@@ -3316,6 +3488,9 @@ but it seems they have looser rules than real.
 - data segment. kinda nice that relocations are just you put the number in because you know your base address is zero.
   skip a page so we don't assign something to the null pointer because that sounds confusing.
   (TODO: should i have an option insert null checks since you won't auto-crash like you would on native?).
+
+# ^^ 2025 ^^ 
+# vv 2024 vv
 
 ##
 

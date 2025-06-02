@@ -29,7 +29,7 @@ There is no dependency on assemblers, linkers, llvm, or xcode-codesign.
 - elf (linux): executables only for now
 - jit: for comptime execution 
 
-All the tests pass on macos-arm64 and macos-amd64.  
+All the tests pass on macos-arm64 and most on macos-amd64.  
 On linux-amd64, the compiler can compile itself but not all tests pass.  
 (I haven't transcribed all the platform specific struct layouts/magic numbers yet). 
 On windows you can use WSL. 

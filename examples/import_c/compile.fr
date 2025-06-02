@@ -24,7 +24,7 @@
 // TODO: i find the is_* fields more confusing than just using @tagged
 Obj :: @rec @struct(
     next: *Obj,
-    name: CStr,
+    name: Str,
     ty: *CType,
     tok: *Token,
     is_local: bool,
@@ -217,6 +217,7 @@ Ctx :: @rec @struct {
     current_file: *File;
     at_bol: bool;  // True if the current position is at the beginning of a line
     has_space: bool;  // True if the current position follows a space character
+    track_blanks: bool; // config
     
     /// Preprocess
     macros: HashMap(Str, *Macro);
@@ -418,7 +419,7 @@ fn new_initializer(c: *Ctx, ty: *CType, is_flexible: bool) *Initializer = {
 
 fn new_var(c: *Ctx, name: Str, ty: *CType, a: Alloc) *Obj = {
     var := a.box_zeroed(Obj);
-    var.name = name.slow_convert_to_c_string();
+    var.name = name;  // TODO: this is bad if we reset temp!
     var.ty = ty;
     var.align = ty.align;
     var.global_symbol = .None;
@@ -452,7 +453,7 @@ fn create_stack_slot(c: *Ctx, var: *Obj) void = {
         @error_tok(c, var.tok, "tried to create stack slot for a variable with negative size (%)", var.ty.size);
     };
     if var.stack_slot == QbeNull {
-        var.stack_slot = c.f.newtmp(var.name.str(), .Kl);
+        var.stack_slot = c.f.newtmp(var.name, .Kl);
     };
     push(c.f.start, make_ins(.alloc8, .Kl, var.stack_slot, c.f.getcon(var.ty.size.intcast()), QbeNull));  // TODO: smaller align stack slots
 }
@@ -556,6 +557,12 @@ fn declspec(c: *Ctx, rest: **Token, tok: *Token, attr: ?*VarAttr) *CType = {
         while => c.is_type_name(tok) {
             continue :: local_return;
             
+            if equal(tok, "__attribute__") {
+                // TODO: some of these matter. __constructor__ marks a function that needs to be called before main(). 
+                ignore := zeroed CType; 
+                tok = c.attribute_list(tok, ignore&);
+            };
+            
             // Handle storage class specifiers.
             if @is(tok.kind, .typedef, .static, .extern, .inline, ._Thread_local, .__thread) {
                 attr := attr || @error_tok(c, tok, "storage class specifier is not allowed in this context");
@@ -610,6 +617,7 @@ fn declspec(c: *Ctx, rest: **Token, tok: *Token, attr: ?*VarAttr) *CType = {
                     equal(tok, "typeof") || ty2.is_some()) {
                 if(counter != 0, => break());
     
+                start := tok;
                 ty = @match(tok.kind) {
                     fn struct() => c.struct_decl(tok&, tok.next);
                     fn union()  => c.union_decl(tok&, tok.next);
@@ -684,9 +692,10 @@ fn declspec(c: *Ctx, rest: **Token, tok: *Token, attr: ?*VarAttr) *CType = {
     };
 
     if is_atomic {
-        panic("TODO :ParamTypeList");
-        ty = c.copy_type(ty);
-        ty.is_atomic = true;
+        // TODO!!!
+        //panic("TODO :ParamTypeList");
+        //ty = c.copy_type(ty);
+        //ty.is_atomic = true;
     };
 
     rest[] = tok;
@@ -834,6 +843,10 @@ fn declarator(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *CType = {
     };
 
     ty = c.type_suffix(rest, tok, ty);
+    // TODO: this makes everything confusing
+    //       we're stomping the name of the type with the name of the variable
+    //       it works out because we only look at one variable at a time, 
+    //       except for in func_params() where they need to be shuffled out into param_names
     ty.name = name;
     ty.name_pos = name_pos;
     ty
@@ -1488,7 +1501,7 @@ fn lvar_initializer(c: *Ctx, rest: **Token, tok: *Token, var: *Obj) *Node = {
     static_array_of_unknown_length := var.stack_slot == QbeNull;  // :StaticArrayOfUnknownLength
     if static_array_of_unknown_length {
         // This ref needs to exist because create_lvar_init will generate offsets from it to store the elements. 
-        var.stack_slot = c.f.newtmp(var.name.str(), .Kl);
+        var.stack_slot = c.f.newtmp(var.name, .Kl);
     };
     
     // If a partial initializer list is given, the standard requires
@@ -1639,12 +1652,9 @@ fn gvar_initializer(c: *Ctx, rest: **Token, tok: *Token, var: *Obj) void = {
 
 fn is_type_name(c: *Ctx, tok: *Token) bool #inline #use(Tokens) = {
     is_type_keyword := tok.kind.raw() >= TokenKind.short.raw() && tok.kind.raw() <= TokenKind.int.raw();
-    is_type_keyword || c.find_typedef(tok).is_some()
+    is_type_keyword || equal(tok, "__attribute__") || c.find_typedef(tok).is_some()
 }
 
-fn slow_convert_to_c_string(s: Str) CStr = // :SLOW
-    (ptr = @tfmt("%\0", s).as_ptr());
-    
 fn push_loop(c: *Ctx, $body: @Fn(brk: *Qbe.Blk, cnt: *Qbe.Blk) void) Ty(*Qbe.Blk, *Qbe.Blk) = {
     brk  := c.brk_label;
     cont := c.cont_label;
@@ -1782,13 +1792,33 @@ fn attribute_list(c: *Ctx, tok: *Token, ty: *CType) *Token = {
                 tok = c.skip(tok, ")");
                 continue();
             };
+            
+            // TODO: some of these matter: __constructor__
+            skips :: @const_slice("__format__", "__const__", "__constructor__");
+            if skips.contains(tok.str()) {
+                tok = c.skip_attribute(tok);
+                continue();
+            };
 
-            @error_tok(c, tok, "unknown attribute");
+            @error_tok(c, tok, "unknown attribute '%'", tok.str());
         };
 
         tok = c.skip(tok, ")");
     };
 
+    tok
+}
+
+fn skip_attribute(c: *Ctx, tok: *Token) *Token = {
+    tok = tok.next;
+    if(equal(tok, ")"), => return(tok));
+    n := 0;
+    dowhile {
+        n -= int equal(tok, ")");
+        n += int equal(tok, "(");
+        tok = tok.next;
+        n > 0 && tok.kind != .TK_EOF
+    };
     tok
 }
 
@@ -1808,6 +1838,7 @@ fn struct_union_decl(c: *Ctx, rest: **Token, tok: *Token) *CType = {
         if !equal(tok, "{") {
             rest[] = tok;
             if c.find_tag(tag) { ty2 |
+                // TODO: wastefully allocated `ty` every time you declare a struct variable
                 return(ty2);
             };
             ty.size = -1;
@@ -1909,6 +1940,9 @@ fn parse_typedef(c: *Ctx, tok: *Token, basety: *CType) *Token = {
     comma_sep(c, tok&, ";") {
         ty := c.declarator(tok&, tok, basety);
         if(ty.name.is_null(), => @error_tok(c, ty.name_pos, "typedef name omitted"));
+        if !equal(tok, ";") && !equal(tok, ",") {
+            @error_tok(c, ty.name_pos, "invalid type after 'typedef'");
+        };
         c.push_scope(c.get_ident(ty.name))[].type_def = ty;
     };
     c.refs = prev_refs;
@@ -1939,18 +1973,22 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *T
         if(!f.is_function,                     => @error_tok(c, tok, "redeclared as a different kind of symbol"));
         if(f.is_definition && equal(tok, "{"), => @error_tok(c, tok, "redefinition of %", name_str));
         if(!f.is_static && attr.is_static,     => @error_tok(c, tok, "static declaration follows a non-static declaration"));
-        f.is_definition = f.is_definition || equal(tok, "{");
         f
     } else {
         f := c.new_gvar(name_str, ty, tok);
         f.is_function = true;
-        f.is_definition = equal(tok, "{");
         f.is_static = attr.is_static || (attr.is_inline && !attr.is_extern);
         f.is_inline = attr.is_inline;
         f
     };
     
+    if equal(tok, "__attribute__") {
+        ignore := zeroed CType;
+        tok = c.attribute_list(tok, ignore&);
+    };
+    
     if consume(tok&, tok, ";") {
+        f.is_definition = false;
         // TODO: defer
         // TODO: since this was just a forward declaration, shouldn't need to track refs? 
         //       tho maybe we want to extend that for types so you know what bindings need to be generated. 
@@ -1959,11 +1997,20 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *T
         return(tok);
     };
 
-    @if(SPAM) println("start function body");
+    if equal(tok, ",") {
+        f.is_definition = false;
+        tok = c.skip(tok, ",");
+        ty := c.declarator(tok&, tok, basety);
+        return c.global_variable(tok, basety, attr, ty, true);
+    };
+    
+    f.is_definition = true;
     c.current_fn = (Some = f);
     
     c.f = c.arena.box(Qbe.Fn);
     c.f.default_init(c.m);
+    c.f.lnk.id = c.m.mangle(f);
+    f.global_symbol = (Some = c.f.lnk.id);
     //c.speculate = false;
     c.f.rpo = new(1);
     c.b = c.f.start;
@@ -1975,15 +2022,9 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *T
     rty := ty.return_ty;
     c.f.retty = c.ir_index(rty);
     
-    if equal(tok, ",") {
-        tok = c.skip(tok, ",");
-        ty := c.declarator(tok&, tok, basety);
-        return c.global_variable(tok, basety, attr, ty, true);
-    };
-    
     tok = c.skip(tok, "{");
 
-    f_name := f.name.str();
+    f_name := str(as_cstr f.name);  // TODO: SLOW LSOW SLOW :SLOW 
     f_name.len += 1;  // null terminator
     
     // TODO: this `ty` is not the same as `obj.ty` because it `obj.ty` might be from a forward declaration
@@ -2117,7 +2158,7 @@ fn scan_globals(c: *Ctx) void = {
 // Find another definition of the same identifier.
 fn find_matching_name(first: *Obj, goal: *Obj) ?*Obj #once = {
     for_linked first { var2 |
-        if !goal.identical(var2) && var2.is_definition && goal.name.str() == var2.name.str() {
+        if !goal.identical(var2) && var2.is_definition && goal.name == var2.name {
             return(Some = var2);
         };
     };
@@ -3503,7 +3544,7 @@ fn gen_par(c: *Ctx, ty: *CType) void = {
     
     for obj_params { loc |
         k := loc.ty.cls();
-        loc.par_r = f.newtmp(loc.name.str(), k);
+        loc.par_r = f.newtmp(loc.name, k);
         i := c.ir_index(loc.ty);
         o: Qbe.O = @if(i == QbeNull, .par, .parc);
         emit(c, o, k, loc.par_r, i, QbeNull); 
@@ -3749,7 +3790,7 @@ fn gen_cast(c: *Ctx, src: Qbe.Ref, from: *CType, to: *CType, tok: *Token) Qbe.Re
 fn gen_call(c: *Ctx, callee: *Node, function_ty: *CType, arg: []*Node, tok: *Token) *Node #once = {
     // TODO: don't just take random variable names!
     //       call this __builtin_alloca and provide alloca.h
-    if callee.kind == .ND_VAR && callee.var.name.str() == "alloca" {
+    if callee.kind == .ND_VAR && callee.var.name == "alloca" {
         @if(arg.len != 1) @error_tok(c, tok, "alloca arity error");
         size := c.gen_expr(arg[0]);
         r := c.f.newtmp("alloca", .Kl);

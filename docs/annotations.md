@@ -124,6 +124,7 @@ Limitations:
 - There is no type/arity safety so you have to pass that information another way (like printf's format string). 
 - Does not work well with function overloading
 - Can't pass the dynamic environment pointer on amd64
+- Cannot be called through a jit-shim (still works at comptime, just a bit less flexible)
 
 ### asm
 
@@ -342,6 +343,7 @@ But now the sane option is just to write out the body and hope it disappears any
 
 This is for functions where you have to lie about parameter types like objc_msgSend.  
 TODO: explain why
+This is implied by #c_variadic
 
 ### align
 

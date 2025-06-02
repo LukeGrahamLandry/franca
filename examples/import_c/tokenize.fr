@@ -119,6 +119,13 @@ fn fmt_error_prefix(tok: *Token, msg: *List(u8)) void = {
         return();
     };
     
+    if !tok.origin.is_null() {
+        // This token was expanded from a macro, show the invocation site as well
+        fmt_error_prefix(tok.origin, msg);
+        @fmt(msg, "while expanding '%'\n", tok.origin.str());
+        // Now fallthrough to show the macro definition
+    };
+    
     // Find a line containing `loc`.
     line := tok.str().as_ptr();
     while => ptr_diff(tok.file.contents.ptr, line) > 0 && line.offset(-1)[] != "\n".ascii() {  // TODO: make sure this is safe
@@ -129,11 +136,13 @@ fn fmt_error_prefix(tok: *Token, msg: *List(u8)) void = {
         end = end.offset(1);
     };
     
-    // Print out the line.
-    start := msg.len;
+    // Show the file location
     col_no := ptr_diff(line, tok.str().as_ptr());
     @fmt(msg, "%:%:%: ", tok.file.name, tok.line_no, col_no + 1);
-    pos := msg.len - start + col_no;  // TODO: handle unicode variable width stuff. for now just aligning by byte length. 
+    msg.push_all("\n");
+    
+    // Show the line's text
+    pos := col_no;  // TODO: handle unicode variable width stuff. for now just aligning by byte length. 
     line_str: Str = (ptr = line, len = ptr_diff(line, end));
     ::FmtPad(Str);
     @fmt(msg, "%\n%^ ", line_str, f_pad("", pos, .Before)); 
@@ -599,6 +608,9 @@ fn tokenize(c: *Ctx, file: *File) *Token = {
     c.has_space = false;
     line_no: i32 = 1;
     
+    // track_blanks :: false;
+    track_blanks := c.track_blanks;
+    
     // recall :BoundsPadding, it's fine to look ahead a few characters without checking for the null terminator. 
     while => p[] != 0 { 
         continue :: local_return;
@@ -609,7 +621,18 @@ fn tokenize(c: *Ctx, file: *File) *Token = {
             tok.line_no = line_no;
             continue();
         };
+        continue_blank :: fn(start) => {
+            @if(track_blanks) {
+                tok := c.new_token(.TK_BLANK, start, p);
+                cur.next = tok;
+                cur = cur.next;
+                tok.line_no = line_no;
+            };
+            continue();
+        };
         if p[] == "/".ascii() {
+            start := p;
+            
             // Skip line comments.
             if p.offset(1)[] == "/".ascii() {
                 while => p[] != "\n".ascii() && p[] != 0 {
@@ -621,7 +644,7 @@ fn tokenize(c: *Ctx, file: *File) *Token = {
                     p = p.offset(1);
                 };
                 c.has_space = true;
-                continue();
+                continue_blank(start);
             };
             
             // Skip block comments.
@@ -639,7 +662,7 @@ fn tokenize(c: *Ctx, file: *File) *Token = {
                 };
                 p = p.offset(2);
                 c.has_space = true;
-                continue();
+                continue_blank(start);
             };
             
             // fallthrough
@@ -648,15 +671,17 @@ fn tokenize(c: *Ctx, file: *File) *Token = {
         if p[] == "\\".ascii() && p.offset(1)[] == "\n".ascii() {
             p = p.offset(2);
             line_no += 1;
-            continue();
+            // pretend the next token is on the same line so don't set at_bol
+            continue_blank(p.offset(-2));
         };
         
         // Skip newline.
         if p[] == "\n".ascii() {
             p = p.offset(1);
-            c.at_bol = true;
             c.has_space = false;
             line_no += 1;
+            @if(track_blanks) @if(c.at_bol) continue_blank(p.offset(-1));
+            c.at_bol = true;
             continue();
         };
     
@@ -664,7 +689,7 @@ fn tokenize(c: *Ctx, file: *File) *Token = {
         if p[] == " ".ascii() || p[] == "\t".ascii() || p[] == form_feed || p[] == "\r".ascii() || p[] == vertical_tab {
             p = p.offset(1);
             c.has_space = true;
-            continue();
+            continue_blank(p.offset(-1));
         };
     
         // Numeric literal
@@ -758,6 +783,11 @@ fn tokenize(c: *Ctx, file: *File) *Token = {
     
         @error_at(c, p, "invalid token");
     };
+    @if(track_blanks) @if(c.at_bol) {
+        c.at_bol = false;
+        cur.next = c.new_token(.TK_BLANK, p.offset(-1), p);
+        cur = cur.next;
+    };
     
     cur.next = c.new_token(.TK_EOF, p, p);
     cur = cur.next;
@@ -810,18 +840,17 @@ fn tokenize_file(c: *Ctx, path: Str) *Token = {
             @error_at(c, path.ptr, "Failed to open file: %", path)
         };
     };
-    c.tokenize_string(path, src&)
+    c.tokenize_string(path, src&.items())
 }
 
-// pushes some extra
-fn tokenize_string(c: *Ctx, path: Str, src: *List(u8)) *Token = {
+fn tokenize_string(c: *Ctx, path: Str, src: Str) *Token = {
     // TODO: chibicc does some extra stuff here: 
     //       but we can't be doing like 17 passes over the file man, common. 
     //canonicalize_newline(p);
     
     //convert_universal_chars(p);
     
-    file := c.new_file(path, src.items()); 
+    file := c.new_file(path, src); 
     c.tokenize(file)
 }
 
@@ -834,6 +863,7 @@ TokenKind :: @enum(u8) (
     TK_PP_NUM,  // Preprocessing numbers
     TK_EOF,     // End-of-file markers
     TK_ERROR,   // Only used for calling @error_tok
+    TK_BLANK,
     // start update_kind
     
     // TK_KEYWORD and TK_PUNCT get converted to one of these:

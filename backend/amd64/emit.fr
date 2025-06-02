@@ -855,6 +855,7 @@ fn encode(e: *AmdState, i: *Qbe.Ins, w: bool, immediate_size: i64) EncodedArgs =
             return encode_con(m.offset&, r0, force_rex, immediate_size, w);
         };
         @debug_assert(m.offset&.type() != .CAddr, "TODO: con + reg?");
+        @debug_assert(!(m.base == QbeNull && m.index != QbeNull && m.scale == 1), "isel should fix this so we can encode better");
         
         valid_offset := fits_in_i32(m.offset&.bits());
         if !valid_offset {
@@ -891,15 +892,14 @@ fn encode(e: *AmdState, i: *Qbe.Ins, w: bool, immediate_size: i64) EncodedArgs =
         };
         
         ri, rb, rr0 := (m.index.int_reg_d(), m.base.int_reg_d(), r0.int_reg_d());
-        dont_need_sib := no_disp && m.index == TMP(Amd64Reg.RSP) && m.base != TMP(Amd64Reg.RSP) && m.base != TMP(Amd64Reg.R12);
+        dont_need_sib := (no_disp || (m.base != TMP(Amd64Reg.RBP) && m.base != TMP(Amd64Reg.R13))) && m.index == TMP(Amd64Reg.RSP) && m.base != TMP(Amd64Reg.RSP) && m.base != TMP(Amd64Reg.R12);
         if dont_need_sib {
-            // this is a lot of hassle to save one byte
-            return(modrm = pack_modrm(mode, rb, rr0), rex = pack_rex_si(w, rr0, rb, DONT_CARE_REG), sib = .None, force_rex = force_rex);
+            return(disp_size = disp_size, disp = disp, modrm = pack_modrm(mode, rb, rr0), rex = pack_rex_si(w, rr0, rb, DONT_CARE_REG), sib = .None, force_rex = force_rex);
         };
        
         return(disp_size = disp_size, disp = disp, modrm = pack_modrm(mode, .rsp, rr0), rex = pack_rex_si(w, rr0, rb, ri), sib = (Some = pack_sib(m.scale.to_scale(), ri, rb)), force_rex = force_rex);
     };
-    
+
     if t1 == .RCon {
         c := e.f.get_constant(i.arg&[1]);
         return encode_con(c, r0, force_rex, immediate_size, w);

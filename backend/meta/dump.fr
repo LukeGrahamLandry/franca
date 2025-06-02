@@ -141,7 +141,11 @@ fn printref(r: Qbe.Ref, f: *Qbe.Fn, out: *List(u8)) void = @match(rtype(r)) {
     fn RCon() => if r == QbeUndef {
         write(out, "UNDEF");
     } else {
-        f.globals.printcon(f.get_constant(r), out);
+        if r.val() >= f.ncon.zext() {
+            @fmt(out, "INVALID(%)", r);
+        } else {
+            f.globals.printcon(f.get_constant(r), out);
+        };
     };
     fn RSlot() => @fmt(out, "S%", rsval(r));
     fn RCall() => @fmt(out, "C%", r.val());
@@ -209,17 +213,16 @@ fn printins(f: *Qbe.Fn, i: *Qbe.Ins, out: *List(u8)) void = {
 
 fn printfn(f: *Qbe.Fn, out: *List(u8)) void = {
     mark := mark_temporary_storage();
-    use_symbol(f.globals, f.lnk.id) { s |
-        if f.lnk.export {
-            @fmt(out, "export ");
-        };
-        @fmt(out, "function ");
-        if f.retty != QbeNull {
-            type := f.get_type(f.retty);  // :ThreadSafety TODO
-            @fmt(out, ":% ", @if(TRACK_IR_NAMES, type.name(), f.retty.val()));
-        };
-        @fmt(out, "$%() {  # nblk=%\n", s.name, f.nblk);
+    @fmt(out, "%function ", @if(f.lnk.export, "export ", ""));
+    if f.retty != QbeNull {
+        type := f.get_type(f.retty);  // :ThreadSafety TODO
+        @fmt(out, ":% ", @if(TRACK_IR_NAMES, type.name(), f.retty.val()));
     };
+    use_symbol(f.globals, f.lnk.id) { s |
+        @fmt(out, "$%", s.name);
+    };
+    @fmt(out, "() {  # nblk=%\n", f.nblk);
+    
     for_blocks f { b | 
         continue :: local_return;
         @fmt(out, " @%", b.name());  // extra space because Zed only lets you collapse based on indentation
