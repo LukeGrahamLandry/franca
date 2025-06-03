@@ -521,8 +521,7 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
 }
 
 fn handle_target_split(self: *SelfHosted, func: *Func) Maybe(void) #once = {
-    ::AutoEq(?CallConv); ::RefEq(?CallConv);
-    @err_assert(func.cc != (Some = .Inline), "#target_os functions cannot be #inline.\nThis is a limitation of the way we handle comptime execution + cross compilation (which affects you even when not cross compiling).") return;
+    @err_assert(!func.get_flag(.Inline), "#target_os functions cannot be #inline.\nThis is a limitation of the way we handle comptime execution + cross compilation (which affects you even when not cross compiling).") return;
     
     os_ty := @unwrap(self.env.os_type, "#target_os before bootstrap") return;
     if func.body&.is(.Normal) {
@@ -637,7 +636,6 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
         @switch(tag.name) {
             @case(Flag.libc.ident()) => {
                 done :: local_return;
-                func.cc = (Some = .CCallReg);
                 good = true;
                 func.set_flag(.NoContext);
                 
@@ -719,7 +717,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                 payload := @check(self.immediate_eval_expr(value, payload)) return;
                 payload := RedirectType.assume_cast(payload&)[];
                 args := self.arg_types(payload.arg);
-                f_ty: FnType = (arg = payload.arg, ret = payload.ret, arity = args.len.trunc());
+                f_ty: FnType = (arg = payload.arg, ret = payload.ret, unary = args.len <= 1, variadic = false);
                 target := @check(self.resolve_by_type(payload.os, f_ty, func.loc)) return;
                 func.body = (Redirect = target);
             };
@@ -829,11 +827,13 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                 self.dispatch.enclosing_function = .None;
                 link_rename_arg := self.env.link_rename_arg.expect("no #link_rename during bootstrap");
                 link_rename_arg_ptr := self.ptr_ty(link_rename_arg);
-                renamer_func_ty := self.intern_type(FnPtr = (ty = (arg = link_rename_arg_ptr, ret = void, arity = 1), cc = .CCallReg));
+                f_ty: FnType = (arg = link_rename_arg_ptr, ret = void, unary = true, variadic = false);
+                renamer_func_ty := self.intern_type(FnPtr = (ty = f_ty));
                 value := @unwrap(tag.non_void_arg(), "#link_rename requires arg") return;
                 renamer_func_ptr := @check(self.immediate_eval_expr(value, renamer_func_ty)) return;
                 renamer_func_ptr := i64.assume_cast(renamer_func_ptr&)[];
-                func.nullable_link_rename_func = renamer_func_ptr;
+                func.set_flag(.LinkRename);
+                value.set(self.to_values(i64, renamer_func_ptr), renamer_func_ty);
                 self.dispatch.enclosing_function = old;
             };
             @case(Flag.syscall.ident()) => {
@@ -1433,8 +1433,7 @@ fn compile_fn_ptr(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
     // TODO: for now you just need to not make a mistake with calling convention
     // The backend still needs to do something with this, so just leave it
     ty := @unwrap(func.finished_ty(), "!fnptr expected known type") return;
-    cc := @unwrap(func.cc, "unknown calling convention") return;
-    ty := self.intern_type(FnPtr = (ty = ty, cc = cc));
+    ty := self.intern_type(FnPtr = (ty = ty));
     expr.ty = ty;
     .Ok
 }
@@ -1805,8 +1804,7 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
     };
     
     capturing   := func.get_flag(.AllowRtCapture).or(func.get_flag(.MayHaveAquiredCaptures));
-    cc          := @unwrap(func.cc, "known cc") return;
-    will_inline := capturing.or(cc == .Inline);
+    will_inline := capturing || func.get_flag(.Inline);
     deny_inline := func.get_flag(.NoInline);
     if(will_inline && deny_inline, => return(@err("must inline a function marked #noinline")));
     
@@ -1868,8 +1866,9 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
     expr.done = f_expr.done && arg_expr.done && !is_const_context;
     expr.ty = ret_ty;
     
-    if f_expr.ty == self.get_or_create_type(FuncId) {|
-        f_expr.ty = self.intern_type(Fn = (arg = arg_ty, ret = ret_ty, arity = func.arg.bindings.len.trunc()));
+    if f_expr.ty == self.get_or_create_type(FuncId) {
+        f_ty: FnType = (arg = arg_ty, ret = ret_ty, unary = func.arg.bindings.len <= 1, variadic = is_variadic);
+        f_expr.ty = self.intern_type(Fn = f_ty);
     };
     
     if !f_expr.expr&.is(.Value) {
@@ -2430,9 +2429,11 @@ fn bind_const_arg(self: *SelfHosted, o_f: FuncId, arg_name: Var, arg_value: Valu
             @err_assert(!func.get_flag(.NoInline), "functions with constant lambda arguments are always inlined") return;
             // :ChainedCaptures
             // TODO: HACK: captures aren't tracked properly.
-            func.set_flag(.MayHaveAquiredCaptures);
-            self[o_f].cc = (Some = .Inline); // just this is enough to fix chained_captures
-            self[arg_func].cc = (Some = .Inline); // but this is needed too for others (perhaps just when there's a longer chain than that simple example).
+            func.set_flag(.MayHaveAquiredCaptures);  // redundant now that i just mark inline?
+            //self[o_f].cc = (Some = .Inline); // just this is enough to fix chained_captures
+            //self[arg_func].cc = (Some = .Inline); // but this is needed too for others (perhaps just when there's a longer chain than that simple example).
+            arg_func_obj.set_flag(.Inline);
+            func.set_flag(.Inline);
             
             if arg_func_obj.get_flag(.YesContext) {
                 func.set_flag(.YesContext);
@@ -3119,7 +3120,8 @@ fn evaluate_where_clauses(self: *SelfHosted, fid: FuncId, generic_types: []Type,
         };
         self.tuple_of(slow)
     };
-    f_ty := self.intern_type(Fn = (arg = slow_arg_ty, ret = bool, arity = generic_types.len.trunc()));  // :get_or_create_type
+    // Type of the argument to #where, NOT the function itself
+    f_ty := self.intern_type(Fn = (arg = slow_arg_ty, ret = bool, unary = generic_types.len <= 1, variadic = false));  // :get_or_create_type
     
     types_arg_expr: FatExpr = (expr = (Value = (bytes = types_value, coerced = false)), done = false, ty = slow_arg_ty, loc = loc);
     each func.annotations& { ann |
@@ -3600,7 +3602,7 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
             };
             @case(Flag.inline.ident()) => {
                 // TODO: error on conflicting annotations. 
-                func.cc = (Some = .Inline);
+                func.set_flag(.Inline);
             };
             @case(Flag.ct.ident()) => {
                 func.set_flag(.ComptimeOnly);
@@ -3619,9 +3621,6 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
         };
     };
     
-    if func.cc.is_none() {
-        func.cc = (Some = .CCallReg);
-    };
     .Ok
 }
 
@@ -4321,7 +4320,6 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
     fake_func.finished_arg = (Some = void);
     fake_func.finished_ret = (Some = ret_ty);
    
-    fake_func.cc = (Some = .CCallReg);    
     fid := self.add_function(fake_func);
     f_expr := self.box(self.to_expr(FuncId, fid, expr.loc));
     expr.expr = (Call = (f = f_expr, arg = self.make_unit_expr(expr.loc)));  // so we try this task again, we get an easy function call.
@@ -4475,9 +4473,9 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
         os := @check(self.eval(invocation.handler, OverloadSet)) return; 
         ::if(FnType); 
         f_ty: FnType = if single {|  // TODO: wrong! what if they actually passed unit?
-            (arg = fat_expr_type, ret = fat_expr_type, arity = 1)
+            (arg = fat_expr_type, ret = fat_expr_type, unary = true, variadic = false)
         } else {
-            (arg = pair, ret = fat_expr_type, arity = 2)
+            (arg = pair, ret = fat_expr_type, unary = false, variadic = false)
         };
         fid := @check(self.resolve_by_type(os, f_ty, invocation.handler.loc)) return;
         self.set(invocation.handler, FuncId, fid);
@@ -4570,15 +4568,6 @@ fn builtin_macro(self: *SelfHosted, builtin_name: Symbol) Result(Ty(Values, Type
         @case(Flag.f64.ident())         => builtin_type(f64);
         @case(Flag.f32.ident())         => builtin_type(f32);
         @case(Flag.UnknownType.ident()) => builtin_type(UnknownType);
-        @case(Flag.compiler_debug_assert_eq_i64.ident()) => {
-            my_assert_eq: rawptr : fn(a: i64, b: i64) i64 = {
-                assert_eq(a, b);
-                a
-            };
-            ty := self.tuple_of(@slice(i64, i64));
-            ty := self.intern_type(FnPtr = (ty = (arg = ty, ret = i64, arity = 2), cc = .CCallReg));
-            return(Ok = ((Small = (my_assert_eq.int_from_rawptr(), 8)), ty));
-        };
         @default => {
             return(@err("unknown @builtin '%'.", self.pool.get(builtin_name)));
         };

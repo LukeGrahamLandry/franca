@@ -55,7 +55,12 @@ fn display(self: FuncId, out: *List(u8)) void = {
 fn finished_ty(self: *Func) ?FnType = {
     if self.finished_arg { arg |
         if self.finished_ret { ret |
-            return(Some = (arg = arg, ret = ret, arity = @as(u16) self.arg.bindings.len().max(1).trunc()));
+            return(Some = (
+                arg = arg, 
+                ret = ret, 
+                unary = self.arg.bindings.len <= 1,
+                variadic = self.get_flag(.CVariadic),
+            ));
         };
     };
     .None
@@ -383,10 +388,11 @@ add_compiler_hashers :: {
     
     #redirect(Ty(*H, *u32), void) fn hash(h: *H, s: *LabelId) void;    AutoHash(TypeInfo, H); AutoEq(TypeInfo);
     DerefHash(*TypeInfo); DerefEq(*TypeInfo);
-    enum(CallConv); DerefEq(CallConv);
     enum(VarType); DerefEq(VarType); DerefEq(ScopeId);
+    fn ne(a: ScopeId, b: ScopeId) bool = !(a == b);
+    fn display(a: *ScopeId, out: *List(u8)) void = 
+        @fmt(out, "S%", a[].as_index());
     
-    fn hash(h: *H, s: *CallConv) void #redirect(Ty(*H, *i64), void);
     fn hash(h: *H, s: *VarType) void #redirect(Ty(*H, *i64), void);
     
     fn hash(h: *H, s: *Var) void = {
@@ -491,15 +497,24 @@ fn unwrap_ty(self: *Binding) Type = {
 
 // :link_rename
 fn check_link_rename(comp: CompCtx, base_import_name: Symbol, func: *Func, target: TargetEnv) Str = {
-    if func.nullable_link_rename_func != 0 {
+    if func.get_flag(.LinkRename) {
         out: List(u8) = list(temp());
         arg: LinkRenameArg = (
             target = target,
             out = out&,
             old_name = comp.get_string(base_import_name),
         );
-        addr := rawptr_from_int(func.nullable_link_rename_func);
-        addr := assume_types_fn(*LinkRenameArg, void, addr);
+        addr := func.nullable_link_rename_func();
+        nullable_link_rename_func :: fn(func: *Func) i64 = {
+            each func.annotations { a |
+                if a.name == Flag.link_rename.ident() {
+                    return a.args.expr.Value.bytes.Small._0;
+                }
+            };
+            @panic("flag set but missing nullable_link_rename_func")
+        };
+        
+        addr := bit_cast_unchecked(i64, @FnPtr(*LinkRenameArg) void, addr);
         addr(arg&);
         out.items()
     } else {
@@ -583,7 +598,6 @@ Flag :: @enum(i64) (
     
     // These can be used with @builtin.
     OverloadSet, ScopeId, FuncId, LabelId, Symbol, i64, bool, true, false, void, Type, rawptr, Never, f64, f32, UnknownType,
-    compiler_debug_assert_eq_i64,  // this is maybe helpful for debugging the compiler when nothing works at all. 
     
     // These must be in order because tuple field names use them and compute by offsetting Flag._0.raw().
      _0,  _1,  _2,  _3,  _4,  _5,  _6,  _7,  _8,  _9, 
@@ -792,9 +806,7 @@ fn empty_fn(fn_type: FnType, name: Symbol, loc: Span) Func #inline = (
     var_name = .None,
     finished_arg = (Some = fn_type.arg),
     finished_ret = (Some = fn_type.ret),
-    cc = (Some = .CCallReg),
     return_var = .None,
-    scope = .None,
     body = .Empty,
     arg = (bindings = empty(), loc = loc),
     ret = (Finished = fn_type.ret),

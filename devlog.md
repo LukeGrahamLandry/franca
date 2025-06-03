@@ -1,3 +1,11 @@
+## (Jun 3)
+
+- replaced FnType.arity with (unary: bool, variadic: bool)
+- CallConv on Func and TypeInfo.Fn was only used for inline or not inline so replaced it with FnFlag.Inline
+- There are only 6 functions that use #link_rename and im spending 8 bytes in every Func to store it. 
+so made that a flag too and you just go look in the annotations as needed. 
+- sadly i can't actually shrink it unless i :UpdateBoot very carefully
+
 ## (Jun 2)
 
 The other thing is that my pre-main init stuff is not very formal. 

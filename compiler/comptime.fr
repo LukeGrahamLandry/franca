@@ -13,7 +13,7 @@ fn init_driver_vtable() *ImportVTable = {
     
     vtable.find_unique_func = fn(c: Compiler, name: Symbol) ?FuncId = { 
         c := c.cast()[][];
-        f_ty := c.intern_type(Fn = (arg = void, ret = void, arity = 0)); // :get_or_create_type
+        f_ty := c.intern_type(Fn = (arg = void, ret = void, unary = true, variadic = false)); // :get_or_create_type
         
         value := c.poll_in_place(?Values, => c.find_in_scope(TOP_LEVEL_SCOPE, name, f_ty));
         value := c.unwrap_report_error(?Values, value) || return(.None);
@@ -503,7 +503,7 @@ fn fill_export_ffi(out: *List(u8)) void = {
     @fmt(out, "fn Fn(Arg: Type, Ret: Type) Type #fold #ct #comptime_addr(%);\n", fn_type);
     fn_type: rawptr : fn(arg: Type, ret: Type) Type = {
         c := current_comptime();
-        c.intern_type(Fn = (arg = arg, ret = ret, arity = c.arg_types(arg).len().trunc()))
+        c.intern_type(Fn = (arg = arg, ret = ret, unary = c.arg_types(arg).len() <= 1, variadic = false))
     };
     
     @fmt(out, "fn IntType(bits: i64, signed: bool) Type #fold #ct #comptime_addr(%);\n", make_int_type);
@@ -573,7 +573,7 @@ fn fill_export_ffi(out: *List(u8)) void = {
             arg_ty := self.tuple_of(types);
             value := @check(self.immediate_eval_expr(ret&, self.get_or_create_type(Type))) return; 
             ret_ty := Type.assume_cast(value&)[];
-            (Ok = (arg = arg_ty, ret = ret_ty, arity = types.len.trunc()))
+            (Ok = (arg = arg_ty, ret = ret_ty, unary = types.len <= 1, variadic = false))
         };
         res := self.poll_in_place(FnType, => inner());
         self.unwrap_report_error(FnType, res)
@@ -593,7 +593,7 @@ fn fill_export_ffi(out: *List(u8)) void = {
     fn_ptr_type_macro :: fn(arg: FatExpr, ret: FatExpr) FatExpr = {
         c := current_comptime();
         f_ty := make_fn_type(c, arg, ret);
-        ty := c.intern_type(FnPtr = (ty = f_ty, cc = .CCallReg));
+        ty := c.intern_type(FnPtr = (ty = f_ty));
         value := c.to_values(Type, ty); 
         arg&.set(value, c.get_or_create_type(Type));
         arg
@@ -782,7 +782,8 @@ fn fill_export_ffi(out: *List(u8)) void = {
     fn_ptr: rawptr : fn(arg: Type, ret: Type) Type = {
         self := current_comptime();
         arity := self.arg_types(arg).len();
-        self.intern_type(FnPtr = (ty = (arg = arg, ret = ret, arity = arity.trunc()), cc = .CCallReg))
+        f_ty: FnType = (arg = arg, ret = ret, unary = arity <= 1, variadic = false);
+        self.intern_type(FnPtr = (ty = f_ty))
     };
     
     @fmt(out, "fn get_meta(s: Type) TypeMeta #fold #ct #comptime_addr(%);\n", get_m);
@@ -804,7 +805,7 @@ fn fill_export_ffi(out: *List(u8)) void = {
     @fmt(out, "fn resolve_overload(os: OverloadSet, arg: Type, ret: Type, loc: Span) FuncId #fold #ct #comptime_addr(%);\n", resolve_os);
     resolve_os: rawptr : fn(os: OverloadSet, arg: Type, ret: Type, loc: Span) FuncId = {
         self := current_comptime();
-        f_ty: FnType = (arg = arg, ret = ret, arity = self.len_arg_types(arg).trunc());
+        f_ty: FnType = (arg = arg, ret = ret, unary = self.len_arg_types(arg) <= 1, variadic = false);
         res := self.poll_in_place(FuncId, => self.resolve_by_type(os, f_ty, loc));
         self.unwrap_report_error(FuncId, res)
     };

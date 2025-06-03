@@ -46,7 +46,8 @@ fn resolve_root(compiler: *SelfHosted, func: *Func, scope: ScopeId) PRes #once =
 }
 
 fn resolve_sign(self: *SelfHosted, func: *Func) PRes #once = {
-    s := @unwrap(func.scope, "function to have scope! %", self.comp().log(func)) return;
+    s := func.resolve_scope;
+    @debug_assert_ne(s, NOSCOPE, "function must have scope %", self.comp().log(func));
     r: ResolveScope = new(self, s, func.loc);
     zone := zone_begin(.Scope); // TODO: defer
     res := r&.resolve_func_args(func);
@@ -55,7 +56,8 @@ fn resolve_sign(self: *SelfHosted, func: *Func) PRes #once = {
 }
 
 fn resolve_body(compiler: *SelfHosted, func: *Func) PRes #once = {
-    r: ResolveScope = new(compiler, func.scope.expect("function to have scope!!"), func.loc);
+    @debug_assert_ne(func.resolve_scope, NOSCOPE, "function must have scope");
+    r: ResolveScope = new(compiler, func.resolve_scope, func.loc);
     
     zone := zone_begin(.Scope); // TODO: defer
     res := r&.resolve_func_body(func);
@@ -180,7 +182,7 @@ fn resolve_func(self: *ResolveScope, func: *Func) PRes = {
     };
 
     self.push_scope(func.loc);
-    func.scope = (Some = self.scope);
+    func.resolve_scope = self.scope;
 
     if func.get_flag(.AllowRtCapture) {
         @try(self.resolve_func_args(func)) return;
@@ -194,7 +196,8 @@ fn resolve_func(self: *ResolveScope, func: *Func) PRes = {
 
 fn resolve_func_args(self: *ResolveScope, func: *Func) PRes = {
     if(func.get_flag(.ResolvedSign), => return(.Ok));
-    self.scope = func.scope.expect("function to have scope!!!");
+    @debug_assert_ne(func.resolve_scope, NOSCOPE, "function must have scope");
+    self.scope = func.resolve_scope;
     
     has_use := false;
     each func.annotations { a |
@@ -331,7 +334,8 @@ fn get_use(self: *SelfHosted, s: ScopeId) *UseScopes = {
 
 fn resolve_func_body(self: *ResolveScope, func: *Func) PRes = {
     if(func.get_flag(.ResolvedBody), => return(.Ok));
-    self.scope = func.scope.expect("function to have scope!!!!");
+    @debug_assert_ne(func.resolve_scope, NOSCOPE, "function must have scope");
+    self.scope = func.resolve_scope;
     generic := func.get_flag(.Generic); // args and ret are allowed to depend on previous args.
 
     self.push_scope(func.loc);
@@ -863,8 +867,8 @@ fn handle_stmt(self: *RenumberVars, stmt: *FatStmt) Result(DoMore, void) #once =
 }
 
 fn handle_func(self: *RenumberVars, func: *Func) Result(DoMore, void) #once = {
-    if func.scope& { s |
-        self.decl(s);
+    if !(func.resolve_scope == NOSCOPE) {
+        self.decl(func.resolve_scope&);
     };
     if func.var_name& { old |
         self.update(old);
