@@ -7,11 +7,14 @@
 - amd64: `std/json        cc      FAIL test_wuffs_strconv_parse_number_f64_regular: "-0.000e0": have 0x0000000000000000, want 0x8000000000000000`
 - whether the host compiler was built with`-syscalls` needs to go in the cache file
 - `graphics` programs don't work AOT on amd64 (JIT is fine somehow)
+  - get rid of log printing: setFrame, update_dimensions
 - amd64: examples/import_c/test/test.fr
 - use HashMap.get_or_insert more
+- #ir tries to ignore zero-sized params but not if they're first which is sad
 
 // TODO: printf doesn't work on arm. also wont work with a shim should add an error for that. 
 eval_and_dump_defined_numbers :: fn(vtable: *ImportVTable) void = {
+it's because of import-shims. should add a test for this. 
 
 ## Quest Lines
 
@@ -169,11 +172,8 @@ bodies on different targets which i don't deal with well.
 
 - :NoInlineImport
 - ._N and .len on Array
-- #c_variadic + conflicting overload (ie for open()) where you want the non-va version to also be #syscall. maybe that's not worth fixing. 
-- add a test for #c_variadic function pointers  
 - #use field in guess_type for #where
 - make auto deref always work (you shouldn't need to `[]` for constants or returned structs)
-- hello_va doesn't work on linux??
 - compiler/values.fr has a big comment
 - make namespacing nice enough that i can have less stuff loaded in every program by `core.fr`
 - allow #libc before #link_rename
@@ -331,6 +331,7 @@ or just default to jitting and force you to enable aot by specifying an output p
 (ie. did you probably typo the lib or the func).
 - integer overflow of a literal
 - contextual field not found should show the type's declaration location 
+- "arity mismatch" should check if last aparameter is CVariadic and suggest @va
 
 ## language decisions
 
@@ -564,4 +565,4 @@ StbTrueType :: include { C |
 - inline asm
 - reading from uninitialized memory
 - init from small union field then read from large.
-- #c_variadic
+- c style variadic functions

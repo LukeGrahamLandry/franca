@@ -44,7 +44,7 @@ template version of the struct (even if it's not implemented that way).
 
 ## Tuples
 
-A tuple is a special kind of struct made by just wrapping values in parens. 
+A tuple is a kind of struct made by just wrapping values in parens. 
 They can be destructured into multiple variables so they're useful when 
 a function wants to have multiple return values. You can access a tuple's fields 
 individually with the names `_0`, `_1`, etc. 
@@ -54,6 +54,12 @@ f :: fn() Ty(i64, i64) = (1, 2);
 
 one, two := f();
 ```
+
+There's actually nothing special about them, tuples are semantically equivilent to doing this for all the arities:
+```
+fn Ty($fst: Type, $snd: Type) Type = @struct(_0: fst, _1: snd);`
+```
+Except that the compiler knows about its own "tuples" and allows them to be constructed without field names. 
 
 - TODO: because I am bad at my job, the syntax for type annotations 
 on destructuring declarations looks stupid: `(a: A, b: B) := ab;`. 
@@ -125,15 +131,24 @@ One special tagged union type is `Option(T)`, which is only special because it h
 An array is a fixed (statically known) size group of elements of the same type stored inline. 
 The type is spelled `Array(T, i)` where `i` is the number of elements (like `[T; i]` in rust). 
 When you pass an Array to a function, it makes a copy of the array (the caller will not see 
-changes made by the callee). 
+changes made by the callee). Arrays can be created with a (homogeneous) tuple literal. 
 
 ```
-a: Array(i64, 3) = @array(0, 1, 2);
+a: Array(i64, 3) = (0, 1, 2);
 one := a&[1];
 ```
 
 Indexing past the end of an array is considered disrespectful 
 (and will trigger an assertion if you have bounds checks enabled). 
+
+There's a special operator `..` for spreading the last entry of a tuple 
+literal to fill a larger array. 
+TODO: only evaluate the expression once
+
+```
+b: Array(i64, 7) = (1, 2, ..15);
+@assert_eq(b&[5], 15);
+```
 
 ## Dynamic Collections
 

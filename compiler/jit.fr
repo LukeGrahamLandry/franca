@@ -89,7 +89,7 @@ fn create_dyncall_shim(self: *SelfHosted, f_ty: FnType) void = {
         f.default_init(m);
         f.leaf = false;
         f.lnk.no_inline = true;
-        id = shared.m.intern(@tfmt("dyncall%_%_%%", f_ty.arg.as_index(), f_ty.ret.as_index(), int(f_ty.unary), int(f_ty.variadic)));
+        id = shared.m.intern(@tfmt("dyncall%_%_%", f_ty.arg.as_index(), f_ty.ret.as_index(), int(f_ty.unary)));
         f.lnk.id = id;
         entry.task = (Func = f);
         
@@ -205,7 +205,7 @@ fn create_jit_shim(self: CompCtx, shared: *CodegenShared, fid: FuncId, handler_c
         push(f.start, make_ins(.pare, .Kl, env, QbeNull, QbeNull));
         arg_ty := func.finished_arg.expect("arg infered");
         ret_ty := func.finished_ret.expect("ret infered");
-        pars := emit_par_instructions(self, shared, func.arg&, arg_ty, f);
+        pars := emit_par_instructions(self, shared, func.arg&, arg_ty, f, .None);
         
         // If the entry in __got for the target symbol is not this shim, call it directly.
         // Otherwise, call into the compiler to ask for it to be compiled. 
@@ -256,7 +256,6 @@ fn create_jit_shim(self: CompCtx, shared: *CodegenShared, fid: FuncId, handler_c
         push(do_the_call, make_ins(.arge, .Kl, QbeNull, env, QbeNull));
         each pars { p |
             @if_else {
-                @if(p.void)   => ();
                 @if(p.scalar) => push(do_the_call, make_ins(.arg,  p.k, QbeNull, p.r, QbeNull));
                 @else         => push(do_the_call, make_ins(.argc, p.k, QbeNull, self.get_aggregate(shared, p.type), p.r));
             };
@@ -389,7 +388,6 @@ report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHo
         // important: have to be careful about which comptime is in the context if the driver program gets compiled lazily. 
         func := self.get_function(fid);
         if func.get_flag(.AvoidJitShim) {
-            @assert(!func.get_flag(.CVariadic), "Called a #c_variadic function through a jit_shim");
             @panic("Called an #avoid_shim function through a jit_shim");
         };
         is_target_split := false;

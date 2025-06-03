@@ -4,7 +4,7 @@ EmitIr :: @struct(
     f: *Qbe.Fn,
     program: CompCtx,
     last_loc: Span,
-    var_lookup: HashMap(Var, IrVar),  // TODO: just var id
+    var_lookup: HashMap(u32 /*Var.id*/, IrVar),
     inlined_return_addr: HashMap(LabelId, ReturnTarget),
     blk: *Qbe.Blk, 
     debug: bool,
@@ -122,27 +122,38 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
 // TODO: this is going to change the calling convention for small strange aggragates maybe (to match c). 
 //       hopefully i don't use any of those for something important. 
 
-ArgInfo :: @struct(r: Qbe.Ref, type: Type, name: ?Var, scalar: bool, void: bool, k: Qbe.Cls, type_index: Qbe.Ref);
+ArgInfo :: @struct(r: Qbe.Ref, type: Type, name: ?Var, scalar: bool, k: Qbe.Cls, type_index: Qbe.Ref);
 
 // :EmitIrCall
 // note: mirrors compile_for_arg
 // appends par/parc instructions to f.start
-fn emit_par_instructions(program: CompCtx, shared: *CodegenShared, arguments: *Pattern, arg_ty: Type, f: *Qbe.Fn) []ArgInfo = {
+// zero sized types do not generate a par instruction but are added to zero_sized_vars instead. 
+fn emit_par_instructions(program: CompCtx, shared: *CodegenShared, arguments: *Pattern, arg_ty: Type, f: *Qbe.Fn, zero_sized_vars: ?*HashMap(u32, IrVar)) []ArgInfo = {
     count := arguments.bindings.len;
     args := ArgInfo.list(count, temp());
     reserve(f.start.ins&, count, temp());
-    
+
     // Need to emit all the `arg` instructions at the beginning of the start block before doing any allocas. 
-    each arguments.bindings { binding |
+    enumerate arguments.bindings { i, binding |
         continue :: local_return;
         @debug_assert(binding.kind != .Const, "tried to emit function with $const parameter");
         ty := binding.unwrap_ty();
         info := program.get_info(ty);
         name := binding.var();
         if info.stride_bytes == 0 {  // :NoRuntimeRepr
-            args&.push(r = QbeConZero, type = ty, name = name, scalar = false, void = true, k = .Ke, type_index = QbeNull);
+            if zero_sized_vars { it |
+                if name { name |
+                    // special case here instead of in compile_expr::GetVar
+                    it.insert(name.id, (Alloca = QbeConZero));
+                };
+            };
+            if ty == CVariadicType {
+                @assert(!f.vararg, "cannot have multiple CVaradic parameters");  // TODO: this check should really be in sema
+                f.vararg = true;
+            };
             continue();
         };
+        @assert(!f.vararg, "CVariadic must be after all sized parameters");  // TODO: this check should really be in sema
         
         _, kk := load_op(program, ty);
         scalar := kk != .Ke;
@@ -153,15 +164,15 @@ fn emit_par_instructions(program: CompCtx, shared: *CodegenShared, arguments: *P
         );
         r := f.newtmp("a", k);
         push(f.start, make_ins(op, k, r, a0, QbeNull));
-        args&.push(r = r, type = ty, name = name, scalar = scalar, void = false, k = k, type_index = a0);
+        args&.push(r = r, type = ty, name = name, scalar = scalar, k = k, type_index = a0);
     };
     args.items()
 }
 
-fn bind_args(self: *EmitIr) CRes(void) #once = {
+fn bind_parameters(self: *EmitIr) CRes(void) #once = {
     func := self.program.get_function(self.func);
     arg_ty := func.finished_arg.unwrap();
-    args := emit_par_instructions(self.program, self.shared, func.arg&, arg_ty, self.f);
+    args := emit_par_instructions(self.program, self.shared, func.arg&, arg_ty, self.f, (Some = self.var_lookup&));
     
     // only arg instructions and allocas in the start block. 
     self.blk = self.new_block("body");
@@ -173,25 +184,18 @@ fn bind_args(self: *EmitIr) CRes(void) #once = {
                 self.emit(self.store_op(a.type), .Kw, QbeNull, a.r, mem);
                 mem
             };
-            if a.void {
-                self.var_lookup&.insert(name, (Alloca = QbeConZero));
+            if mut {
+                self.record_var_decl(name, (Local = mem));
             } else {
-                if mut {
-                    self.record_var_decl(name, (Local = mem));
-                } else {
-                    self.declare_var_mem(name, mem, a.type);
-                };
+                self.declare_var_mem(name, mem, a.type);
             };
         };
-    };
-    if func.get_flag(.CVariadic) {
-        self.f.vararg = true;
     };
     .Ok
 }
 
 // :EmitIrCall
-// note: mirrors bind_args
+// note: mirrors bind_parameters
 fn compile_for_arg(self: *EmitIr, arg: *FatExpr) CRes([]Qbe.Ins) = {
     parts := arg.items();
     out := Qbe.Ins.list(parts.len, temp());
@@ -206,13 +210,20 @@ fn compile_for_arg(self: *EmitIr, arg: *FatExpr) CRes([]Qbe.Ins) = {
     } else {
         @err_assert(parts.len == 1, "ICE: compile_for_arg arity mismatch!") return;
     };
-    
+    @try(compile_for_arg_impl(self, parts, out&)) return;
+    (Ok = out.items())
+}
+
+fn compile_for_arg_impl(self: *EmitIr, parts: []FatExpr, out: *List(Qbe.Ins)) CRes(void) = {
     enumerate parts { i, val |
         continue :: local_return;
-        if val.expr&.is(.CVariadicMarker) {
-            out&.push(make_ins(.argv, .Kw, QbeNull, QbeNull, QbeNull));
+        if val.expr&.is(.CVariadic) {
+            out.push(make_ins(.argv, .Kw, QbeNull, QbeNull, QbeNull));
+            @try(compile_for_arg_impl(self, val.expr.CVariadic, out)) return;
         } else {
             ty := val.ty; // TODO: is this ok or do you have to get it from the function's arg type?
+            msg :: "expression of type CVariadic must be an Expr::CVariadic created with @va as final parameter to a call";
+            @err_assert(ty != CVariadicType, msg) return;
             _, k := self.load_op(ty);
             ::if(Qbe.Ins);
             ins := if k != .Ke {  // scalar
@@ -238,11 +249,11 @@ fn compile_for_arg(self: *EmitIr, arg: *FatExpr) CRes([]Qbe.Ins) = {
                 r_type := self.get_aggregate(ty);
                 make_ins(.argc, .Kl, QbeNull, r_type, r)
             };
-            out&.push(ins);
+            out.push(ins);
         };
     };
-    (Ok = out.items())
-}
+    .Ok
+};
 
 fn context_par_e(self: *EmitIr) void #inline = {
     self.context = self.f.newtmp("context", .Kl);
@@ -294,12 +305,11 @@ fn bounce_body(self: *EmitIr, callee: Qbe.Ref, o: Qbe.O) void = {
         c = self.f.newtmp("f", .Kl);
         self.emit(.pare, .Kl, c, QbeNull, QbeNull);
     };
-    args := emit_par_instructions(self.program, self.shared, func.arg&, f_ty.arg, self.f);
+    args := emit_par_instructions(self.program, self.shared, func.arg&, f_ty.arg, self.f, .None);
     if c != QbeNull {
         self.emit(.arge, .Kl, QbeNull, c, QbeNull);
     };
     each args { a | 
-        @if(!a.void)
         if a.scalar {
             self.emit(.arg, a.k, QbeNull, a.r, QbeNull);
         } else {
@@ -455,7 +465,7 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = {
    
     self.context_par_e();
     // note: this rewrites self.blk
-    @try(self.bind_args()) return;
+    @try(self.bind_parameters()) return;
     
     // Note: this is different from the body expr type because of early returns.
     ret := self.program.get_function(f)[].finished_ret.unwrap();
@@ -644,7 +654,8 @@ fn compile_stmt(self: *EmitIr, stmt: *FatStmt) CRes(void) = {
             // we care about the type of the pointer, not the value because there might be a cast.
             dest := @match(f.place.expr&) {
                 fn GetVar(it) => {
-                    info := self.var_lookup&.get_ptr(it[]) || return(@err("missing runtime var %", self.program.get_string(it.name)));
+                    info := self.var_lookup&.get_ptr(it.id) 
+                        || return(@err("missing runtime var %", self.program.get_string(it.name)));
                     @if_let(info) fn Local(dest) => {
                         @try(self.compile_expr(f.value&, (Assign = dest[]))) return;
                         return(.Ok);
@@ -700,6 +711,7 @@ fn compile_stmt(self: *EmitIr, stmt: *FatStmt) CRes(void) = {
 
 fn compile_expr(self: *EmitIr, expr: *FatExpr, p: Placement) CRes(Qbe.Ref) = {
     @debug_assert(!expr.ty.is_unknown(), "Not typechecked: %", self.program.log(expr));
+    @debug_assert_ne(expr.ty, CVariadicType, "ICE: expression of type CVariadic must be an Expr::CVariadic as final parameter to a call");
     self.last_loc = expr.loc;
     if self.blk.jmp.type == .hlt {  // TODO: do we need this or do we trust sema to always get rid of things after a Never? 
         return(Ok = QbeNull);
@@ -740,7 +752,8 @@ fn compile_expr(self: *EmitIr, expr: *FatExpr, p: Placement) CRes(Qbe.Ref) = {
             dest
         };
         fn GetVar(it) => {
-            info := self.var_lookup&.get_ptr(it[]) || return(@err("missing runtime var %", self.program.get_string(it.name)));
+            info := self.var_lookup&.get_ptr(it.id) 
+                || return(@err("missing runtime var %", self.program.get_string(it.name)));
             @if_let(info) fn Local(dest) => {
                 if !p&.is(.ScalarTransient) {  // try to avoid a bunch of redundent copies. 
                     self.unify_placement(p&, expr_ty);
@@ -828,6 +841,7 @@ fn compile_expr(self: *EmitIr, expr: *FatExpr, p: Placement) CRes(Qbe.Ref) = {
             self.scalar_result(p, field, i64) // :get_or_create_type
         }
         fn Switch(f) => return(self.emit_switch(expr, p));
+        fn CVariadic() => return(@err("Expr::CVariadic can only be used as the last parameter to a call"));
         @default => @panic("ICE: didn't desugar: %", self.program.log(expr));
     })
 }
@@ -942,10 +956,17 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
         // (see also objective_c.fr/choose_objc_dispatcher())
         //
         fn FnPtr(f_ty) => {
-            caller.set_flag(.YesContext);
+            fn is_variadic(self: *SelfHosted, f_ty: FnType) bool = {
+                args := self.arg_types(f_ty.arg);
+                for(args, fn(a) => @if(a == CVariadicType) return(true));
+                false
+            }
+            context := !self.program.data.cast()[][].is_variadic(f_ty.ty);
+            
+            @if(context) caller.set_flag(.YesContext);
             callee := @try(self.compile_expr(f, .Scalar)) return;
             args   := @try(self.compile_for_arg(arg)) return;
-            self.emit_runtime_call(f_ty.ty, args, p, callee, true, arg.loc)
+            self.emit_runtime_call(f_ty.ty, args, p, callee, context, arg.loc)
         }
         fn Label(_) => {
             label := @unwrap(f.as_const(), "called label must be const") return;
@@ -1166,7 +1187,7 @@ fn addr_macro(self: *EmitIr, arg: *FatExpr, p: Placement) CRes(Qbe.Ref) #once = 
     @err_assert(arg.expr&.is(.GetVar), "took address of r-value") return;
     var := arg.expr.GetVar;
     @assert_ne(var.kind, .Const, "Cannot take address of constant % \n(use @static if you want to create a non-threadsafe mutable global)", var&.log(self.program));
-    ref := @unwrap(self.var_lookup&.get_ptr(var), "Missing var % (in !addr) \n(missing $ when used in const context or missing '=>'? TODO: better error message)", var&.log(self.program)) return;
+    ref := @unwrap(self.var_lookup&.get_ptr(var.id), "Missing var % (in !addr) \n(missing $ when used in const context or missing '=>'? TODO: better error message)", var&.log(self.program)) return;
     @err_assert(ref.is(.Alloca), "addr_macro of scalar local `%`", self.program.get_string(var.name)) return;
     (Ok = self.scalar_result(p, ref.Alloca, i64))
 }
@@ -1288,7 +1309,6 @@ fn emit_switch(self: *EmitIr, arg: *FatExpr, p: Placement) CRes(Qbe.Ref) #once =
    
     // This is where we rejoin with the value of the whole switch expression.
     end_blk   := self.new_block("joins"); 
-    out := self.program.get_info(arg.ty);
     rejoined := false;
     values := i64.list(parts.cases.len, temp());
     each parts.cases { f |
@@ -1412,7 +1432,7 @@ fn declare_var_mem(self: *EmitIr, name: Var, ptr: Qbe.Ref, type: Type) void #inl
         // It's nice to let macros/generics operate over types uniformly.
         // Some types have no runtime representation, so any attempt to use them should compile to nothing. 
         // TODO: maybe sema should try to strip these out so we don't have to keep checking here. 
-        self.var_lookup&.insert(name, (Alloca = QbeConZero));
+        self.var_lookup&.insert(name.id, (Alloca = QbeConZero));
         return()  
     };
 
@@ -1421,7 +1441,7 @@ fn declare_var_mem(self: *EmitIr, name: Var, ptr: Qbe.Ref, type: Type) void #inl
 }
 
 fn record_var_decl(self: *EmitIr, name: Var, value: IrVar) void #inline = {
-    prev := self.var_lookup&.insert(name, value);
+    prev := self.var_lookup&.insert(name.id, value);
     //@debug_assert(prev.is_none(), "shadow is still new var"); TODO farm_game gets here but clearly it's fine. idk man -- Jan 8
     
     if self.debug && name.name != Flag.SYMBOL_ZERO.ident() {

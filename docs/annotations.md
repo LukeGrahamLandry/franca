@@ -113,19 +113,6 @@ This is an incomplete feature, sometimes expressions will be too large to immedi
 know the type and it won't compile. It's also complicated enough that it deserves its own 
 documentation. 
 
-### c_variadic
-
-The function can be called with arbitrarily many extra arguments using the 
-same calling convention as varargs in c would on the target system. 
-This is mostly useful for calling into c libraries (like if you're porting c code that calls printf to franca). 
-If a body is provided, it can call va_start/va_arg to access these extra arguments. 
-
-Limitations:
-- There is no type/arity safety so you have to pass that information another way (like printf's format string). 
-- Does not work well with function overloading
-- Can't pass the dynamic environment pointer on amd64
-- Cannot be called through a jit-shim (still works at comptime, just a bit less flexible)
-
 ### asm
 
 Instead of treating the body as normal franca code, it is evaluated at comptime 
@@ -343,7 +330,7 @@ But now the sane option is just to write out the body and hope it disappears any
 
 This is for functions where you have to lie about parameter types like objc_msgSend.  
 TODO: explain why
-This is implied by #c_variadic
+This is implied by CVariadic
 
 ### align
 

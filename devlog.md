@@ -1,10 +1,17 @@
 ## (Jun 3)
 
+Some frontend cleanup stuff:
 - replaced FnType.arity with (unary: bool, variadic: bool)
 - CallConv on Func and TypeInfo.Fn was only used for inline or not inline so replaced it with FnFlag.Inline
 - There are only 6 functions that use #link_rename and im spending 8 bytes in every Func to store it. 
 so made that a flag too and you just go look in the annotations as needed. 
 - sadly i can't actually shrink it unless i :UpdateBoot very carefully
+- instead of variadic-ness being a seperate magic thing, 
+just have a special type for your last parameter to represent that idea. 
+if im ok with this: instead of `printf("%s%d", "a", 0)'` now you have to do `printf("%s%d", @va("a", 0));`, 
+then i can simplify sema which is a big win. then it works nicely with overload resolution 
+without extra work because the arity matches, you just emit_ir the last expression differently. 
+- got rid of some forward declarations of overload sets that i needed in the original scope system
 
 ## (Jun 2)
 

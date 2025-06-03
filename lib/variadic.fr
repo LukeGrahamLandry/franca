@@ -1,0 +1,67 @@
+// 
+// Overview of extern-c variadic functions: 
+//
+// Franca allows you to define functions that use the target platform's standard extern-c abi for variadic arguments. 
+// This is mostly useful for calling into c libraries (like if you're porting c code that calls printf to franca). 
+// The abi does not include type or arity information so you must simply not make a mistake. 
+// The expectation is that one of the named arguments is used to pass whatever you need to know (ie. printf's format string). 
+//
+// To use va_start, the function's last parameter must be of type CVariadic.
+// To use va_arg you must have already called va_start. 
+// `va` is an output parameter for va_start and an input parameter for va_arg. 
+// Each subsequent call to va_arg will get a new argument. 
+// It is safe to call va_start multiple times to reset the list to the beginning. 
+// va_arg may be called in child functions once the list is initialized, but only until the original function returns. 
+// You cannot take a function pointer to va_start. 
+//
+// To call a variadic function, the extra arguments must be wrapped in `@va`. 
+//
+// Some platforms (arm64-apple, risc-v, wasm) use different calling conventions for the named and variadic arguments, 
+// so you must know exactly how many named arguments the callee was declared with 
+// (but the compiler cannot check this when calling external functions). 
+// ie. `printf :: fn(_: CVariadic) void #libc;` would typecheck but is not portable.
+//
+// TODO:  
+// - on amd64 you can't pass the secret environement pointer in rax so a bunch of stuff won't work (temp(), panic()) 
+// - allow #inline a variadic call?
+// - allow passing single field scalar structs as the inner scalar instead of special casing CStr like an idiot. 
+//   does that matches what c compilers do? 
+// - compile error for trying to pass `phantom: CVariadic` to another function
+// - Cannot be called through a jit-shim 
+//
+
+CVariadic :: bit_cast_unchecked(u32, Type, 5); // :UpdateBoot @builtin CVariadic;
+CVariadicArgumentList :: @struct(_: Array(i64, 4));
+
+// This must only be used as the last argument to a function call expression. 
+fn va(args: FatExpr) FatExpr #macro #outputs(CVariadic) = {
+    it := ast_alloc().box(FatExpr);
+    it[] = args;
+    each it.items() { a |
+        a[] = compile_ast(a[]);
+        ok := a.ty == CStr || @is(get_type_info_ref(a.ty).tag(), .Ptr, .FnPtr, .VoidPtr, .Int, .F32, .F64);
+        @ct_assert(ok, a.loc, "invalid type in variadic arguments: %", a.ty.typename().str());
+    };
+    (expr = (CVariadic = it.items()), ty = CVariadic, done = false, loc = args.loc)
+}
+
+fn start(_phantom: *CVariadic) *CVariadicArgumentList #inline = {
+    it := @uninitialized CVariadicArgumentList;
+    va_start :: fn(va: *CVariadicArgumentList) void #ir(.vastart, .Kw);
+    va_start(it&);
+    it& // legal because of #inline
+}
+
+fn next(va: *CVariadicArgumentList, $T: Type) T #generic #inline = {
+    @if(:: (T == CStr || @is(get_type_info_ref(T).tag(), .Ptr, .FnPtr, .VoidPtr))) {
+        va_arg :: fn(va: *CVariadicArgumentList) T #ir(.vaarg, .Kl);
+        return va_arg(va);
+    };
+    
+    @as(T) va_arg(va)
+}
+
+fn va_arg(va: *CVariadicArgumentList) i32 #ir(.vaarg,   .Kw);
+fn va_arg(va: *CVariadicArgumentList) i64 #ir(.vaarg,   .Kl);
+fn va_arg(va: *CVariadicArgumentList) f32 #ir(.vaarg,   .Ks);
+fn va_arg(va: *CVariadicArgumentList) f64 #ir(.vaarg,   .Kd);

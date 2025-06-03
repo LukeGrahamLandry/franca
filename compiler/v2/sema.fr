@@ -5,6 +5,8 @@
 //       we have to keep the scope info around forever anyway, if it was done here, 
 //       we wouldn't traverse the tree twice. but then even more redundant work when cloning for generics? 
 
+CVariadicType :: import("@/lib/variadic.fr").CVariadic;
+
 ResultType :: @rec @tagged(
     Specific: Type,
     Returning: Type,
@@ -717,7 +719,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                 payload := @check(self.immediate_eval_expr(value, payload)) return;
                 payload := RedirectType.assume_cast(payload&)[];
                 args := self.arg_types(payload.arg);
-                f_ty: FnType = (arg = payload.arg, ret = payload.ret, unary = args.len <= 1, variadic = false);
+                f_ty: FnType = (arg = payload.arg, ret = payload.ret, unary = args.len <= 1);
                 target := @check(self.resolve_by_type(payload.os, f_ty, func.loc)) return;
                 func.body = (Redirect = target);
             };
@@ -827,7 +829,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                 self.dispatch.enclosing_function = .None;
                 link_rename_arg := self.env.link_rename_arg.expect("no #link_rename during bootstrap");
                 link_rename_arg_ptr := self.ptr_ty(link_rename_arg);
-                f_ty: FnType = (arg = link_rename_arg_ptr, ret = void, unary = true, variadic = false);
+                f_ty: FnType = (arg = link_rename_arg_ptr, ret = void, unary = true);
                 renamer_func_ty := self.intern_type(FnPtr = (ty = f_ty));
                 value := @unwrap(tag.non_void_arg(), "#link_rename requires arg") return;
                 renamer_func_ptr := @check(self.immediate_eval_expr(value, renamer_func_ty)) return;
@@ -1344,7 +1346,13 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
                 };
             };
         }
-        fn CVariadicMarker() => ();
+        fn CVariadic(args) => {
+            each args { it |
+                @check(self.compile_expr(it, .None)) return;
+            };
+            expr.done = true;
+            expr.ty = CVariadicType;
+        };
         @default => @panic("TODO: unhandled node type %: %", expr.expr&.tag(), expr.log(self));
     };
     self.last_loc = old_loc;
@@ -1756,8 +1764,6 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
         @debug_assert(!func.get_flag(.UnboundGenerics));
     };
     
-    is_variadic := func.get_flag(.CVariadic);
-    
     arg_ty := UnknownType;
     
     @try(self.adjust_named_arguments(fid, arg_expr)) return;
@@ -1768,7 +1774,6 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
             @check(self.compile_expr(arg_expr, (Specific = it.arg))) return;
         };
     
-        @err_assert(!is_variadic, "TODO: support #c_variadic with constant arguments") return;
         @check(self.ensure_resolved_sign(fid)) return;
         
         // This creates a new function with only runtime args, and updates the arg_expr accordingly. 
@@ -1814,8 +1819,6 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
     };
     
     if will_inline {
-        @err_assert(!is_variadic, "TODO: support #inline with varargs") return;
-        
         @if(arg_ty == UnknownType)
         @if_let(self.get_type(f_expr.ty)) fn Fn(it) => {
             arg_ty = it.arg;
@@ -1850,13 +1853,9 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
     };
     
     arg_ty = @check(self.infer_arguments(fid)) return;
-    if is_variadic {
-        @check(self.type_check_variadic_call(arg_ty, arg_expr)) return;
-    } else {
-        @check(self.compile_expr(arg_expr, (Specific = arg_ty))) return;
-        if arg_ty != arg_expr.ty {
-            @check(self.can_assign(arg_ty, arg_expr.ty)) return;
-        };
+    @check(self.compile_expr(arg_expr, (Specific = arg_ty))) return;
+    if arg_ty != arg_expr.ty {
+        @check(self.can_assign(arg_ty, arg_expr.ty)) return;
     };
     
     ret_ty := @check(self.infer_return(fid))    return;
@@ -1867,7 +1866,7 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
     expr.ty = ret_ty;
     
     if f_expr.ty == self.get_or_create_type(FuncId) {
-        f_ty: FnType = (arg = arg_ty, ret = ret_ty, unary = func.arg.bindings.len <= 1, variadic = is_variadic);
+        f_ty: FnType = (arg = arg_ty, ret = ret_ty, unary = func.arg.bindings.len <= 1);
         f_expr.ty = self.intern_type(Fn = f_ty);
     };
     
@@ -1917,29 +1916,6 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
         expr.done = arg_expr.done;
     };
     
-    .Ok
-}
-
-fn type_check_variadic_call(self: *SelfHosted, arg_ty: Type, arg_expr: *FatExpr) Maybe(void) = {
-    positional_types := self.arg_types(arg_ty);
-    args_passed := arg_expr.items();
-    @err_assert(args_passed.len >= positional_types.len, "Not enough positional arguments for #c_variadic call.") return;
-    types := Type.list(args_passed.len + 1, temp());
-    range(0, positional_types.len) { i |
-        e := args_passed.index(i);
-        @check(self.compile_expr(e, (Specific = positional_types[i]))) return;
-        types&.push(e.ty);
-    };
-    types&.push(void);  // :get_or_create_type
-    range(0, args_passed.len  - positional_types.len) { i |
-        e := args_passed.index(positional_types.len + i);
-        @check(self.compile_expr(e, .None)) return;
-        types&.push(e.ty);
-    };
-    @err_assert(arg_expr.expr&.is(.Tuple), "TODO: non-tuple passed to #c_variadic") return;
-    e: FatExpr = (expr = .CVariadicMarker, done = true, ty = void, loc = arg_expr.loc); // :get_or_create_type
-    arg_expr.expr.Tuple&.insert(positional_types.len, e, self.get_alloc());
-    arg_expr.ty = self.tuple_of(types.items());
     .Ok
 }
 
@@ -2533,6 +2509,13 @@ fn infer_arguments(self: *SelfHosted, fid: FuncId) Maybe(Type) = {
     @check(self.ensure_resolved_sign(fid)) return;
     
     types := @check(self.infer_type(func.arg&)) return;
+    if types.len > 0 && types[types.len - 1] == CVariadicType {
+        func.set_flag(.NoInline);
+        func.set_flag(.AvoidJitShim);
+        // on amd64 variadic functions need to use rax so we can't use it for the environment pointer
+        // so for consistancy, you can't use the environment stuff on any platform. 
+        func.set_flag(.NoContext);
+    };
     type := self.tuple_of(types);
     func.finished_arg = (Some = type);  // :const_args_are_not_const_in_tuple
     (Ok = type)
@@ -2788,7 +2771,6 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
         };
     };
     
-    variadic_count := 0;
     // TODO: should be able to move the infer_type into the next phase just before you need it but no -- Sep 2
     if attempt.state < 1 {
         SPAM_TRACE :: false;
@@ -2805,9 +2787,6 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
             fid := attempt.options[f_i];
             @if(SPAM_TRACE) start(1, @if(ENABLE_TRACY, @tfmt("%", fid), ""));
             func := self.get_function(fid);
-            if func.get_flag(.CVariadic) {
-                variadic_count += 1;
-            };
             
             if !func.get_flag(.Generic) && func.finished_arg.is_none() {
                 all_known := true;
@@ -2829,11 +2808,6 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
                 };
             };
             @if(SPAM_TRACE) end();
-        };
-        
-        if variadic_count > 0 {
-            @err_assert(variadic_count == 1, "TODO: support multiple #c_variadic functions in one overload set") return2;
-            @err_assert(false, "TODO: support #c_variadic in overload sets") return2;
         };
         
         attempt.state = 1;
@@ -3121,7 +3095,7 @@ fn evaluate_where_clauses(self: *SelfHosted, fid: FuncId, generic_types: []Type,
         self.tuple_of(slow)
     };
     // Type of the argument to #where, NOT the function itself
-    f_ty := self.intern_type(Fn = (arg = slow_arg_ty, ret = bool, unary = generic_types.len <= 1, variadic = false));  // :get_or_create_type
+    f_ty := self.intern_type(Fn = (arg = slow_arg_ty, ret = bool, unary = generic_types.len <= 1));  // :get_or_create_type
     
     types_arg_expr: FatExpr = (expr = (Value = (bytes = types_value, coerced = false)), done = false, ty = slow_arg_ty, loc = loc);
     each func.annotations& { ann |
@@ -3607,11 +3581,6 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
             @case(Flag.ct.ident()) => {
                 func.set_flag(.ComptimeOnly);
                 func.set_flag(.YesContext);
-            };
-            @case(Flag.c_variadic.ident()) => {
-                func.set_flag(.CVariadic);
-                func.set_flag(.NoInline);  // TODO
-                func.set_flag(.AvoidJitShim);
             };
             @case(Flag.syscall.ident()) => {
                 func.set_flag(.BodyIsSpecial);
@@ -4473,9 +4442,9 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
         os := @check(self.eval(invocation.handler, OverloadSet)) return; 
         ::if(FnType); 
         f_ty: FnType = if single {|  // TODO: wrong! what if they actually passed unit?
-            (arg = fat_expr_type, ret = fat_expr_type, unary = true, variadic = false)
+            (arg = fat_expr_type, ret = fat_expr_type, unary = true)
         } else {
-            (arg = pair, ret = fat_expr_type, unary = false, variadic = false)
+            (arg = pair, ret = fat_expr_type, unary = false)
         };
         fid := @check(self.resolve_by_type(os, f_ty, invocation.handler.loc)) return;
         self.set(invocation.handler, FuncId, fid);
@@ -4568,6 +4537,7 @@ fn builtin_macro(self: *SelfHosted, builtin_name: Symbol) Result(Ty(Values, Type
         @case(Flag.f64.ident())         => builtin_type(f64);
         @case(Flag.f32.ident())         => builtin_type(f32);
         @case(Flag.UnknownType.ident()) => builtin_type(UnknownType);
+        @case(Flag.CVariadic.ident())   => builtin_type(CVariadicType);
         @default => {
             return(@err("unknown @builtin '%'.", self.pool.get(builtin_name)));
         };
