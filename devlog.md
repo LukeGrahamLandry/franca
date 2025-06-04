@@ -12,6 +12,12 @@ if im ok with this: instead of `printf("%s%d", "a", 0)'` now you have to do `pri
 then i can simplify sema which is a big win. then it works nicely with overload resolution 
 without extra work because the arity matches, you just emit_ir the last expression differently. 
 - got rid of some forward declarations of overload sets that i needed in the original scope system
+- on feb24 i switched from task.bounce to bounce_body in a few places to better support wasm/llvm, 
+but that makes imported objc/variadic functions much sketchier on native targets as well. 
+but given i don't fully support those yet anyway, so perhaps reverting wouldn't be the worst idea. 
+  - on wasm objc doesn't matter and va abi is the sane just pass an extra pointer so bounce_body is fine
+  - on llvm, worst case i could do mixed stuff where some shims are still done with my asm, 
+  tho that would kill inlining so probably a bad idea. STOP THINKING. DO STUFF. PLEASE. 
 
 ## (Jun 2)
 

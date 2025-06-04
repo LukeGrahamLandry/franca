@@ -1,3 +1,26 @@
+// 
+// emit_ir runs after sema, on one function at a time, to convert the 
+// (monomorphized, type-checked) ast into 3-register-ir for the backend. 
+// - LabelId values are mapped to ReturnTarget: a basic block (Blk) and a result location (Placement)
+// - Variables are mapped to IrVar: a mutable Ref or stack slot
+// - Zero-sized types are discarded
+// - (AOT only) Values are mapped to Dat2, 
+//   recording relocations for any pointers in the data by running bake_relocatable_value overload
+// - Any functions that weren't properly tracked in `callees` are returned in `pending`
+// 
+// Some functions do not have a normal ast as a body:
+// - NewIntrinsic: maps to a single ir instruction
+// - DynamicImport: (AOT) Redirect to an imported symbol OR (JIT) bind directly to a function pointer
+// - Syscall: O.syscall with number based on target os
+// - TargetOsSplit: Redirect to different function depending on target os
+// - JittedAarch64/X86AsmBytes: some bytes inserted verbatim
+// - Redirect
+// 
+// Codegen may run on the same thread or not, so calling enqueue_task() might 
+// do the work immediately or put it on a work queue. To keep the order reproducible, 
+// be careful to always pair bouba_acquire with enqueue_task, one at a time. 
+//
+
 // TODO: always check for zero sized type instead of == void
 
 EmitIr :: @struct(
@@ -108,9 +131,9 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
                 enqueue_task(shared, entry2);
             };                                        // !
                                                       // !
-            for self.pending_set_lib { id, lib |      // !
+            if self.pending_set_lib.len > 0 {         // !
                 entry2 := bouba_acquire(shared, idx); // !
-                entry2.task = (SetLibrary = (id = id, lib = lib));
+                entry2.task = (SetLibrary = self.pending_set_lib.items());
                 enqueue_task(shared, entry2);         // !
             };
         };
@@ -350,7 +373,20 @@ fn aot_import_body(self: *EmitIr, info: *DynamicImport) void = {
         //       instead of needing to check every time
         push(self.pending_set_lib&, (target, self.program.get_string(info.lib)));
     };
-    self.bounce_body(self.f.symcon(target), .call);
+    
+    self.bounce_body_call(target);
+}
+
+fn bounce_body_call(self: *EmitIr, target: u32) void = {
+    // Option A
+    // - works on targets that care about function signatures (wasm)
+    // - same code path as if you'd manually written the useless shim
+    // self.bounce_body(self.f.symcon(target), .call);
+    
+    // Option B
+    // - compiles directly to a tail call without going through the backend passes
+    // - works even if we're wrong about the signeture (like objc_msgSend or amd64-variadic)
+    self.entry.task = (Bounce = (lnk = self.f.lnk&, target = target));
 }
 
 fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = {
@@ -425,7 +461,7 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = {
                     if !callee.get_flag(.NoContext) {
                         func.set_flag(.YesContext);
                     };
-                    self.bounce_body(self.func_ref(fid), .call);
+                    self.bounce_body_call(self.func_sym(fid));
                     self.pending.push(fid);
                     return(.Ok)
                 };
@@ -437,7 +473,7 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = {
             if !callee.get_flag(.NoContext) {
                 func.set_flag(.YesContext);
             };
-            self.bounce_body(self.func_ref(fid[]), .call);
+            self.bounce_body_call(self.func_sym(fid[]));
             self.pending.push(fid[]);
             return(.Ok)
         } 
@@ -1018,11 +1054,14 @@ fn emit_intrinsic_old(self: *EmitIr, op: *i64, p: Placement, arg: []Qbe.Ref, cal
     (Ok = self.scalar_result(p, r, expr_ty))
 }
 
-fn func_ref(self: *EmitIr, f_id: FuncId) Qbe.Ref #inline = {
+fn func_sym(self: *EmitIr, f_id: FuncId) u32 #inline = {
     f_id := self.program.follow_redirects(f_id);
     self.pending.push(f_id); // HACK
-    self.f.symcon(self.fmt_fn_name(f_id))
+    self.f.globals.intern(self.fmt_fn_name(f_id))
 }
+
+fn func_ref(self: *EmitIr, f_id: FuncId) Qbe.Ref #inline = 
+    self.f.symcon(self.func_sym(f_id));
 
 fn emit_block_expr(self: *EmitIr, expr: *FatExpr, p: Placement) CRes(Qbe.Ref) #once = {
     block   := expr.expr.Block&;

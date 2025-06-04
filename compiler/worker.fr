@@ -213,20 +213,17 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
     logging := entry.logging;
     entry.logging = "";
     context(DefaultContext)[].temporary_allocator = entry.arena&;
+    m.set_debug_types(logging, true);
     @match(entry.task) {
         fn Dead() => @panic("dead codegen task %", m.initialized);
         fn Func(f) => {
             @if(ENABLE_ENABLE_TRACY) @if(ENABLE_TRACY) ___tracy_emit_zone_name(zone, f.globals.str(f.lnk.id));
-            f.globals.set_debug_types(logging, true);
             run_qbe_passes(f);
-            f.globals.set_debug_types(logging, false);
         }
+        // TODO: this is more confusing than it needs to be
         fn Shim(it) => {
             m := it.f.globals;
-            
-            m.set_debug_types(logging, true);
             run_qbe_passes(it.f);
-            m.set_debug_types(logging, false);
             
             // The other guy's got slot points to us until it's ready. 
             jit_addr := rawptr.zeroed();
@@ -235,7 +232,7 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
             };
             @debug_assert(!jit_addr.is_null(), "we just compiled this");
             use_symbol(m, it.shim_for) { s | 
-                //@debug_assert(s.jit_addr.is_null(), "making a shim but it already has a jit_addr slot. %", s.name);
+                @debug_assert(s.jit_addr.is_null(), "making a shim but it already has a jit_addr slot. %", s.name);
                 s.jit_addr = jit_addr;
                 s.shim_addr = jit_addr;
                 if ensure_got_slot(m, s, jit_addr) { fix |
@@ -252,52 +249,42 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
         fn JitImport(it) => {
             m.put_jit_addr(it.lnk.id, it.addr);
         }
-        // TODO: is this still right if some args are passed on the stack? 
-        //       i feel like we'll be off by one to look over saved rbp + return address. :FUCKED
+        // Note: this does not work on wasm/llvm because they care about signatures
         fn Bounce(it) => {
-            // TODO: set SymbolInfo.inline if we've already compile the target. 
             f := temp().box_zeroed(Qbe.Fn);
-            f.leaf = false;  // need a bit of a stack frame to save lr. TODO: be able to tailret to use b/jmp instead of bl/call.
+            f.leaf = true;  // This is a lie but really we're asking for no stack frame
             f.nblk = 1;
             f.globals = m;
             f.con = new(fixed_const_count);
             f.getcon(0xdeaddead);
             f.getcon(0);
             f.lnk = it.lnk[];
-            f.retty = QbeNull;
             f.start = newblk();
             callee := f.symcon(it.target);
             f.reset_scratch();
+            // if it went through the frontend, a1 will be RCall so this is a hacky sentinal for CodegenWorker.Task.Bounce
+            // it makes the emit use `b` instead of `bl`
             f.emit(.call, .Kw, QbeNull, callee, QbeNull);
             f.copy_instructions_from_scratch_reversed_which_means_forwards(f.start);
-            f.start.jmp.type = .ret0;
+            f.start.jmp.type = .hlt;
            
-            //if m.goal.arch == .wasm32 {
-            //    type: i32 = -1;  // TODO
-            //    use_symbol(f.globals, it.target) { s | 
-            //        s.wasm_type_index = type;
-            //    };
-            //    use_symbol(f.globals, f.lnk.id) { s | 
-            //        s.wasm_type_index = type;
-            //    };
-            //};
-            
+            // emit asm directly; don't run the normal passes
             emit_fn(f);
+            
             use_symbol(f.globals, it.target) { s | 
                 mark_referenced(f.globals, it.target, s);
             };
-            
-            // TODO: interaction with shims is confusing
-            
         }
         fn AotVar2(it) => each it { d |
             m.emit_data(d[]);
         };
-        fn SetLibrary(it) => {
-            m.set_library(it.id, it.lib);
+        fn SetLibrary(it) => for it { id, lib |
+            // This is trivial but we want to do it without threads fighting. 
+            m.set_library(id, lib);
         };
     };
     entry.task = .Dead; 
+    m.set_debug_types(logging, false);
     @if(ENABLE_ENABLE_TRACY) zone_end(zone);
 }
 
@@ -326,7 +313,7 @@ CodegenTask :: @tagged(
     Bounce: @struct(lnk: *Qbe.Lnk, target: u32),
     Shim: @struct(f: *Qbe.Fn, shim_for: u32),
     AotVar2: []Dat2,
-    SetLibrary: @struct(id: u32, lib: Str),
+    SetLibrary: []Ty(u32, Str), // id, lib
 );
 
 CodegenEntry :: @struct(

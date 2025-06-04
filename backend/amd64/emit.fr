@@ -87,11 +87,7 @@ fn fixup_amd64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
                         distance := self.distance_between(.Code, symbol.offset + size_of_jmp_encoding, .ConstantData, symbol.got_lookup_offset);
                         trampoline := fixed_list(trampoline.items());
                         
-                        // jmp near [rip + distance]
-                        dyn_jmp_extension := @as(X86Reg) 0b0100; // not call!
-                        trampoline&.push(0xff);
-                        trampoline&.push(pack_modrm(.Indirect00, .rbp, dyn_jmp_extension));   // disp is RIP relative
-                        trampoline&.push_u32(distance.trunc());
+                        encode_indirect_call(trampoline&, distance.trunc(), false);
                     };
                     stub_trampoline := self.segment_address(.Code, symbol.offset);
                     distance = ptr_diff(fixup.patch_at, stub_trampoline); // :size_of_displacement
@@ -544,52 +540,9 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
                     c := e.f.get_constant(i.arg&[0]);
                     off := c.bits();
                     @debug_assert(c.type() == .CAddr, "cannot call a constant");
-                    use_symbol(e.m, c.sym) { symbol |
-                        @debug_assert_eq(off, 0, "call to offset from symbol $% seems like a mistake?", symbol.name);
-                        current_offset := e.start_of_function + e.a.len();
-                        @match(symbol.kind) {
-                            fn Local() => {
-                                encoded_size :: 5;  //  address is relatitive to the start of the next instruction
-                                off += distance_between(e.m, .Code, current_offset + encoded_size, symbol.segment, symbol.offset);
-                                if e.m.debug["T".char()] {
-                                    write(e.m.debug_out, @tfmt("# call offset % for '%' %[%]\n", off, symbol.name, symbol.segment, symbol.offset));
-                                };
-                                e.a&.push(@as(u8) PrimaryOp.CallImm32); 
-                                e.a&.push_u32(signed_truncate(off, 32));
-                            }
-                            @default => {
-                                call_through_got := e.m.got_indirection_instead_of_patches || (symbol.kind == .DynamicPatched && e.m.goal.type != .Relocatable);
-                                if !call_through_got && e.m.debug["T".char()] {
-                                    write(e.m.debug_out, @tfmt("# pending call to %\n", symbol.name));
-                                };
-                                if call_through_got {
-                                    // TODO: this is very copy-paste from where we do stuff for __stubs. 
-                                    
-                                    if ensure_got_slot(e.m, symbol, symbol.jit_addr) { it |
-                                        push_fixup(e.m, symbol, it);
-                                    };
-                                    encoded_size :: 6;
-                                    off += e.m.distance_between(.Code, current_offset + encoded_size, .ConstantData, symbol.got_lookup_offset);
-                                    
-                                    // call near [rip + distance]
-                                    dyn_call_extension := @as(X86Reg) 0b0010; 
-                                    e.a&.push(0xff);
-                                    e.a&.push(pack_modrm(.Indirect00, .rbp, dyn_call_extension));   // disp is RIP relative
-                                    e.a&.push_u32(off.trunc());
-                                } else {
-                                    // Otherwise this will get patched to a local or __stub call later. 
-                                    patch_at := u8.raw_from_ptr(e.a.maybe_uninit.ptr.offset(e.a.len + 1));
-                                    fix: Fixup = (
-                                        patch_at = patch_at, 
-                                        type = (RipDisp32 = (increment = c.bits().trunc(), call = true)),
-                                    );
-                                    push_fixup(e.m, symbol, fix);
-                                    e.a&.push(@as(u8) PrimaryOp.CallImm32); 
-                                    e.a&.push_u32(0);
-                                };
-                            };
-                        };
-                    };
+                    @debug_assert_eq(off, 0, "call to offset from symbol $% seems like a mistake?", e.m.str(c.sym));
+                    // if it went through the frontend, a1 will be RCall so this is a hacky sentinal for CodegenWorker.Task.Bounce
+                    call_symbol(e, c.sym, i.arg&[1] != QbeNull);
                 }
                 fn RTmp() => encode_call_reg(e.a&, ModrmMode.Direct, int_reg_d(i.arg&[0]));  
                 // TODO: we could allow memory argument? 
@@ -746,6 +699,49 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
             assemble(e, i&);
         };
     }; // early returns
+}
+
+fn call_symbol(e: *AmdState, sym: u32, set_link: bool) void #once = {
+    use_symbol(e.m, sym) { symbol |
+        off := 0;
+        current_offset := e.start_of_function + e.a.len();
+        @match(symbol.kind) {
+            fn Local() => {
+                encoded_size :: 5;  //  address is relatitive to the start of the next instruction
+                off += distance_between(e.m, .Code, current_offset + encoded_size, symbol.segment, symbol.offset);
+                if e.m.debug["T".char()] {
+                    write(e.m.debug_out, @tfmt("# call offset % for '%' %[%]\n", off, symbol.name, symbol.segment, symbol.offset));
+                };
+                encode_direct_call(e.a&, off.trunc(), set_link);
+                // TODO: on arm we do a patch if goal==Relocatable, should be same here? or remove there? 
+            }
+            @default => {
+                call_through_got := e.m.got_indirection_instead_of_patches || (symbol.kind == .DynamicPatched && e.m.goal.type != .Relocatable);
+                if !call_through_got && e.m.debug["T".char()] {
+                    write(e.m.debug_out, @tfmt("# pending call to %\n", symbol.name));
+                };
+                if call_through_got {
+                    // TODO: this is very copy-paste from where we do stuff for __stubs. 
+                    
+                    if ensure_got_slot(e.m, symbol, symbol.jit_addr) { it |
+                        push_fixup(e.m, symbol, it);
+                    };
+                    encoded_size :: 6;
+                    off += e.m.distance_between(.Code, current_offset + encoded_size, .ConstantData, symbol.got_lookup_offset);
+                    encode_indirect_call(e.a&, off.trunc(), set_link);
+                } else {
+                    // Otherwise this will get patched to a local or __stub call later. 
+                    patch_at := u8.raw_from_ptr(e.a.maybe_uninit.ptr.offset(e.a.len + 1));
+                    fix: Fixup = (
+                        patch_at = patch_at, 
+                        type = (RipDisp32 = (increment = 0, call = true)),
+                    );
+                    push_fixup(e.m, symbol, fix);
+                    encode_direct_call(e.a&, 0, set_link);
+                };
+            };
+        };
+    };
 }
 
 fn push_imm(e: *AmdState, value: i64, byte_count: i64) void = {

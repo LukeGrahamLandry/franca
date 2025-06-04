@@ -36,7 +36,7 @@ fn fixup_arm64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
     address := symbol.jit_addr;
     local  := symbol.kind == .Local;
     @match(fixup.type) {
-        fn Call() => {
+        fn Call(it) => {
             if self.debug["T".char()] {
                 @fmt_write(self.debug_out, "# patch call % calls %\n", fixup.patch_at, symbol.name);
             };
@@ -75,7 +75,7 @@ fn fixup_arm64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
             };
             @assert_lt(distance.abs(), 1.shift_left(26), "can't even jump to trampoline, thats bad.");
             inst := u32.ptr_from_raw(fixup.patch_at);
-            inst[] = b_jmp(s_trunc(distance, 26), 1);
+            inst[] = b_jmp(s_trunc(distance, 26), @if(it.set_link, 1, 0));
         }
         fn InReg(it) => {
             if self.debug["T".char()] {
@@ -669,54 +669,8 @@ fn emitins(self: *ArmState, i: *Qbe.Ins, b: *Qbe.Blk) void = {
             if rtype(callee) == .RCon {
                 c := self.f.get_constant(a0);
                 @assert(c.type() == .CAddr && c.bits() == 0, "invalid call argument");
-                
-                use_symbol(self.m, c.sym) { symbol |
-                    patch_at := u8.raw_from_ptr(self.m.segments&[.Code].next);
-                    kind := symbol.kind;
-                    if kind == .Local && ENABLE_INCREMENTAL && self.m.goal.type == .JitOnly && self.m.got_indirection_instead_of_patches {
-                        kind = .Pending;
-                    };
-                    @match(kind) {
-                        fn DynamicPatched() => {
-                            new_got_slot: ?Fixup = .None;
-                            patch: Fixup = (patch_at = patch_at, type = .Call);
-                            self.inst(brk(0x987));
-                            if self.m.goal.type != .JitOnly { 
-                                push_fixup(self.m, symbol, patch); 
-                            };
-                            fixup_arm64(self.m, symbol, patch&, new_got_slot&);
-                            if new_got_slot { it |
-                                push_fixup(self.m, symbol, it);
-                            };
-                        }
-                        fn Local() => {
-                            // already compiled it so branch there directly
-                            distance := self.m.distance_between(.Code, self.m.current_offset(.Code), symbol.segment, symbol.offset) / 4;
-                            assert(distance.abs() < 1.shift_left(26), "can't call that far but I don't let modules be that big yet.");
-                            self.inst(b_jmp(s_trunc(distance, 26), 1));
-                            // :canireallynothavecodeberelative
-                            // TODO: I don't have a test that requires this 
-                            //       but i think you do because you need the other ones?
-                            if self.m.goal.type == .Relocatable { 
-                                push_fixup(self.m, symbol, (patch_at = patch_at, type = .Call));
-                            }; 
-                        };
-                        fn Pending() => {
-                            if self.m.got_indirection_instead_of_patches {
-                                dest_reg := TMP(arm_scratch_int).int_reg();
-                                self.immediate_fixup_got(dest_reg, 0, symbol);
-                                self.inst(br(dest_reg, 1));
-                            } else {
-                                // haven't compiled it yet so will need a patch. 
-                                push_fixup(self.m, symbol, (patch_at = patch_at, type = .Call));
-                                self.inst(brk(0x789));
-                                if self.m.debug["T".char()] {
-                                    @fmt_write(self.m.debug_out, "# pending call % calls %\n", patch_at, symbol.name);
-                                };
-                            };
-                        }
-                    };
-                };
+                // if it went through the frontend, a1 will be RCall so this is a hacky sentinal for CodegenWorker.Task.Bounce
+                call_symbol(self, c.sym, a1 != QbeNull);
             } else {
                 self.inst(br(callee.int_reg(), 1));
             };
@@ -901,27 +855,79 @@ fn emitins(self: *ArmState, i: *Qbe.Ins, b: *Qbe.Blk) void = {
     } // early returns
 }
 
-// TODO: silly
-fn find_cas(i: *Qbe.Ins, b: *Qbe.Blk) Ty(*Qbe.Ins, *Qbe.Ins) = {
-    // might not be directly the next instruction if we had to fixarg
-    @match(i.op()) {
-        fn cas0() => {
-            icas1 := i;
-            while => icas1.op() != .cas1 {  
-                @debug_assert(!identical(icas1, b.ins.ptr.offset(b.ins.len)), "missing cas1");
-                icas1 = icas1.offset(1);
+fn call_symbol(self: *ArmState, sym: u32, set_link: bool) void #once = {
+    use_symbol(self.m, sym) { symbol |
+        kind := symbol.kind;
+        if kind == .Local && ENABLE_INCREMENTAL && self.m.goal.type == .JitOnly && self.m.got_indirection_instead_of_patches {
+            // :HACK for playing with examples/hacky_incremental.fr
+            kind = .Pending;
+        };
+        patch_at := u8.raw_from_ptr(self.m.segments&[.Code].next);
+        patch: Fixup = (patch_at = patch_at, type = (Call = (set_link = set_link)));
+        @match(kind) {
+            fn DynamicPatched() => {
+                new_got_slot: ?Fixup = .None;
+                self.inst(brk(0x987));
+                if self.m.goal.type != .JitOnly { 
+                    push_fixup(self.m, symbol, patch); 
+                };
+                // this will be jump to a trampoline (possibly creating one)
+                fixup_arm64(self.m, symbol, patch&, new_got_slot&);
+                if new_got_slot { it |
+                    push_fixup(self.m, symbol, it);
+                };
+            }
+            fn Local() => {
+                // already compiled it so branch there directly
+                distance := self.m.distance_between(.Code, self.m.current_offset(.Code), symbol.segment, symbol.offset) / 4;
+                assert(distance.abs() < 1.shift_left(26), "can't call that far but I don't let modules be that big yet.");
+                self.inst(b_jmp(s_trunc(distance, 26), @if(set_link, 1, 0)));
+                // :canireallynothavecodeberelative
+                // TODO: I don't have a test that requires this 
+                //       but i think you do because you need the other ones?
+                if self.m.goal.type == .Relocatable { 
+                    push_fixup(self.m, symbol, patch);
+                }; 
             };
-            (i, icas1)
+            fn Pending() => {
+                if self.m.got_indirection_instead_of_patches {
+                    dest_reg := TMP(arm_scratch_int).int_reg();
+                    self.immediate_fixup_got(dest_reg, 0, symbol);
+                    self.inst(br(dest_reg, @if(set_link, 1, 0)));
+                } else {
+                    // haven't compiled it yet so will need a patch. 
+                    push_fixup(self.m, symbol, patch);
+                    self.inst(brk(0x789));
+                    if self.m.debug["T".char()] {
+                        @fmt_write(self.m.debug_out, "# pending call % calls %\n", patch_at, symbol.name);
+                    };
+                };
+            }
+        };
+    };
+    
+    // TODO: silly
+    fn find_cas(i: *Qbe.Ins, b: *Qbe.Blk) Ty(*Qbe.Ins, *Qbe.Ins) = {
+        // might not be directly the next instruction if we had to fixarg
+        @match(i.op()) {
+            fn cas0() => {
+                icas1 := i;
+                while => icas1.op() != .cas1 {  
+                    @debug_assert(!identical(icas1, b.ins.ptr.offset(b.ins.len)), "missing cas1");
+                    icas1 = icas1.offset(1);
+                };
+                (i, icas1)
+            }
+            fn cas1() => {
+                icas0 := i;
+                while => icas0.op() != .cas0 {  
+                    @debug_assert(!identical(icas0, b.ins.ptr), "missing cas0");
+                    icas0 = icas0.offset(-1);
+                };
+                (icas0, i)
+            }
+            @default => panic("expected cas");
         }
-        fn cas1() => {
-            icas0 := i;
-            while => icas0.op() != .cas0 {  
-                @debug_assert(!identical(icas0, b.ins.ptr), "missing cas0");
-                icas0 = icas0.offset(-1);
-            };
-            (icas0, i)
-        }
-        @default => panic("expected cas");
     }
 }
 
