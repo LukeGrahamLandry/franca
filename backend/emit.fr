@@ -108,7 +108,7 @@ fn cap(s: *SegmentCursor) i64 =
 
 // TODO: this is stupid
 // only call this on the codegen thread!
-fn set_library(m: *QbeModule, sym_id: u32, name: Str) void = {
+fn set_library(m: *QbeModule, sym_id: Qbe.Sym, name: Str) void = {
     i := m.find_library(name) ||    
         m.new_library(name);
     
@@ -171,7 +171,7 @@ fn make_exec(self: *QbeModule) void = {
     self.start_of_writable_code = end[];
 }
 
-fn get_addr(self: *QbeModule, id: u32) ?Ty(rawptr, i64) = {
+fn get_addr(self: *QbeModule, id: Qbe.Sym) ?Ty(rawptr, i64) = {
     assert(!self.fixups_locked, "you can't get a jit pointer after emitting for aot becuase it stomps data with relocation info.");
     result: ?Ty(rawptr, i64) = .None;
     use_symbol(self, id) { symbol | 
@@ -198,7 +198,7 @@ fn get_addr(self: *QbeModule, symbol: *SymbolInfo) ?Ty(rawptr, i64) = {
     (Some = (u8.raw_from_ptr(addr), symbol.size.zext()))
 }
 
-fn maybe_add_export(self: *QbeModule, id: u32, export: bool) void = if export {
+fn maybe_add_export(self: *QbeModule, id: Qbe.Sym, export: bool) void = if export {
     if (self.goal.arch == .wasm32 || @is(self.goal.type, .Relocatable, .Dynamic)) {
         self.exports&.push(id);
     };
@@ -213,13 +213,13 @@ fn maybe_add_export(self: *QbeModule, id: u32, export: bool) void = if export {
 // TODO: be able to specify mutable or constant
 
 Dat2 :: @struct {
-    Reloc :: @struct(off: u32, id: u32, addend: i64 = 0);
+    Reloc :: @struct(off: u32, id: Qbe.Sym, addend: i64 = 0);
     Template :: @tagged(Bytes: []u8, Zeroes: i64);
     template: Template;
     relocations: []Reloc; 
     align: u32 = 1;
     seg := SegmentType.MutableData;
-    id: u32;
+    id: Qbe.Sym;
     export: bool = false;
 };
 
@@ -306,7 +306,7 @@ fn with_write_protect(m: *QbeModule, $body: @Fn() void) void = {
 }
 
 // :ThreadSafety we can't have both threads fucking with self.segments
-fn add_code_bytes(m: *QbeModule, name_id: u32, bytes: []u8) void = {
+fn add_code_bytes(m: *QbeModule, name_id: Qbe.Sym, bytes: []u8) void = {
     @if(enable_incremental())
     if m.save { save |
         save.push_asm(m, bytes, name_id);
@@ -329,7 +329,7 @@ fn add_code_bytes(m: *QbeModule, name_id: u32, bytes: []u8) void = {
     finish_function(m, dest, name_id);
 }
 
-fn finish_function(m: *QbeModule, dest: []u8, name_id: u32) void #inline = {
+fn finish_function(m: *QbeModule, dest: []u8, name_id: Qbe.Sym) void #inline = {
     // :SLOW
     lock(m.icache_mutex&);
     m.last_function_end = dest.ptr.offset(dest.len);
@@ -351,21 +351,21 @@ fn align_to(s: *SegmentCursor, align: i64) void = {
     };
 }
 
-fn put_jit_addr(self: *QbeModule, name: u32, addr: rawptr) void = {
+fn put_jit_addr(self: *QbeModule, name: Qbe.Sym, addr: rawptr) void = {
     use_symbol(self, name) { symbol |
-        @assert(symbol.kind == .Pending, "(put_jit_addr) redeclared symbol %: %", name, symbol.name);
+        @assert(symbol.kind == .Pending, "(put_jit_addr) redeclared symbol %: %", name.id, symbol.name);
         symbol.kind = .DynamicPatched;
         self.do_fixups(addr, symbol);
     };
 }
 
-fn for_symbols(m: *QbeModule, $body: @Fn(id: u32, s: *SymbolInfo) void) void = {
+fn for_symbols(m: *QbeModule, $body: @Fn(id: Qbe.Sym, s: *SymbolInfo) void) void = {
     enumerate m.symbols& { h, bucket | 
         n := m.lock_bucket(bucket);
         syms := bucket.data.slice(0, n.zext());
         enumerate syms { i, symbol | 
             id := h + i.shift_left(IBits);
-            body(trunc(id), symbol);
+            body((id = trunc id), symbol);
         };
         bucket.n = n; // unlock
     };
@@ -375,12 +375,12 @@ fn for_symbols(m: *QbeModule, $body: @Fn(id: u32, s: *SymbolInfo) void) void = {
 //       but for data constants with pointers we'll need to remember what relocations to ask the loader to do at runtime. 
 //       would be great if my language had nice relative pointers and then you wouldn't have to deal with that as much
 //
-fn do_jit_fixups(self: *QbeModule, id: u32, segment: SegmentType, final_offset: i64) void = {
+fn do_jit_fixups(self: *QbeModule, id: Qbe.Sym, segment: SegmentType, final_offset: i64) void = {
     inbounds := segment == .ZeroInitData || (final_offset >= 0 && final_offset < self.segments&[segment].mmapped.len);
     @assert(inbounds, "thats not in the segment");
     use_symbol(self, id) { symbol | 
         @debug_assert(int_from_ptr(@type symbol[], symbol) != 0, "fixups for a null symbol! (forgot to set Fn.lnk.id?)"); // only catches it if you haven't had something hash to 0 yet. 
-        @assert(symbol.kind != .Local, "(do_jit_fixups) redeclared symbol %: % %[%]", id, symbol.name, segment, final_offset);
+        @assert(symbol.kind != .Local, "(do_jit_fixups) redeclared symbol %: % %[%]", id.id, symbol.name, segment, final_offset);
         symbol.segment = segment;
         symbol.offset = final_offset;
         symbol.kind = .Local;

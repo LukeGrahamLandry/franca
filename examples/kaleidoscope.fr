@@ -43,7 +43,7 @@ Ctx :: @struct {
         b: *Qbe.Blk;
         link: **Qbe.Blk;
         vars: HashMap(Str, Qbe.Ref);
-        top_level: List(u32);
+        top_level: List(Qbe.Sym);
     } #use;
 }
 
@@ -51,13 +51,13 @@ KExpr :: @rec @tagged(
     Number: f64,
     Variable: Str,
     Assign: @struct(name: Str, value: *KExpr),
-    Call: @struct(callee: u32, args: []KExpr),
+    Call: @struct(callee: Qbe.Sym, args: []KExpr),
     If: @struct(cond: *KExpr, then: *KExpr, else: *KExpr),
     For: @struct(name: Str, start: *KExpr, end: *KExpr, step: *KExpr, body: *KExpr),
     VarIn: @struct(body: *KExpr, vars: []Ty(Str, *KExpr)),
 );
 
-Proto :: @struct(id: u32, args: []Str, operator: i64 = Token.identifier.raw(), prec := 0);
+Proto :: @struct(id: Qbe.Sym, args: []Str, operator: i64 = Token.identifier.raw(), prec := 0);
 
 R :: Result(*KExpr, Str);
 RR :: Result(Qbe.Ref, Str);
@@ -368,7 +368,7 @@ fn codegen(c: *Ctx, it: *Ast(.Assign)) RR = {
 }
 
 fn codegen(c: *Ctx, it: *Ast(.Call)) RR = {
-    arity := c.arity&.get(it.callee) 
+    arity := c.arity&.get(it.callee.id) 
         || return(E(@tfmt("tried to call undeclared function '%'", c.m.str(it.callee))));
     if arity != it.args.len {
         return E("incorrect arity");
@@ -477,7 +477,7 @@ fn codegen(c: *Ctx, it: *Ast(.VarIn)) RR = {
 }
 
 fn codegen(c: *Ctx, proto: Proto, body: *KExpr) Result(void, Str) = {
-    c.arity&.insert(proto.id, proto.args.len);
+    c.arity&.insert(proto.id.id, proto.args.len);
     if proto.operator != Token.identifier.raw() && proto.args.len == 2 {
         c.binary_precedence&.insert(proto.operator, proto.prec);
     }
@@ -512,7 +512,7 @@ fn compile_loop(c: *Ctx) Result(void, Str) = {
             fn extern() => {
                 @try(c.consume(.extern)) return;
                 proto := @try(c.parse_prototype()) return;
-                c.arity&.insert(proto.id, proto.args.len);
+                c.arity&.insert(proto.id.id, proto.args.len);
             }
             fn eof() => return(.Ok);  
             @default => {
@@ -601,7 +601,7 @@ fn init(a: Alloc, src: Str, m: *QbeModule) *Ctx = {
 fn add_builtin(c: *Ctx, $t: Str, prec: i64, $body: @Fn(f: *Qbe.Fn, r: Qbe.Ref, a0: Qbe.Ref, a1: Qbe.Ref) void) void = {
     c.start_fn(c.m.intern(operator_name(false, tok(t))));
     c.binary_precedence&.insert(tok(t), prec);
-    c.arity&.insert(c.f.lnk.id, 2);
+    c.arity&.insert(c.f.lnk.id.id, 2);
     a0, a1, r := (c.f.newtmp("a0", .Kd), c.f.newtmp("a0", .Kd), c.f.newtmp("result", .Kd));
     c.f.emit(.par, .Kd, a0, QbeNull, QbeNull);
     c.f.emit(.par, .Kd, a1, QbeNull, QbeNull);
@@ -611,7 +611,7 @@ fn add_builtin(c: *Ctx, $t: Str, prec: i64, $body: @Fn(f: *Qbe.Fn, r: Qbe.Ref, a
     c.end_fn();
 }
 
-fn start_fn(c: *Ctx, id: u32) void = {
+fn start_fn(c: *Ctx, id: Qbe.Sym) void = {
     default_init(c.f, c.m);
     c.f.lnk.id = id;
     c.link = c.f.start&;

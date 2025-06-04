@@ -220,14 +220,13 @@ fn push(self: *Writer, it: []u8) Ref(u8) = {
     r
 }
 
-fn map_sym(self: *Writer, m: *QbeModule, id: u32) i64 = {
-    self.symbols&.get(id) || {
+fn map_sym(self: *Writer, m: *QbeModule, id: Qbe.Sym) i64 = {
+    self.symbols&.get_or_insert(id.id) {
         i := self.sym.len;
         self.sym&.push(zeroed Sym);
         self.sym[i].name = self.push(m.str(id));
-        self.symbols&.insert(id, i);
         i
-    }
+    }[]
 }
 
 fn push(self: *Writer, f: *Qbe.Fn, did_regalloc: bool) void = {
@@ -241,7 +240,8 @@ fn push(self: *Writer, f: *Qbe.Fn, did_regalloc: bool) void = {
     self.con&.reserve(zext f.ncon);
     each f.con.slice(fixed_const_count, f.ncon.zext()) { c |
         self.con&.push_assume_capacity(
-            sym = @if(c.sym == Qbe.no_symbol, Qbe.no_symbol, trunc self.map_sym(f.globals, c.sym)), 
+            // bleh, really this should be One(Sym) instead of Qbe.Sym
+            sym = (id = @if(c.sym.id == Qbe.no_symbol, Qbe.no_symbol, trunc self.map_sym(f.globals, c.sym))), 
             bits = c.bits,
         );
     };
@@ -308,7 +308,8 @@ fn push(self: *Writer, m: *QbeModule, d: *Dat2) void = {
     each d.relocations { it |
         self.rel&.push_assume_capacity(
             off = it.off,
-            id = self.map_sym(m, it.id).trunc(),
+            // bleh, really this should be One(Sym) instead of Qbe.Sym
+            id = (id = self.map_sym(m, it.id).trunc()),
             addend = it.addend,
         );
     };
@@ -316,7 +317,7 @@ fn push(self: *Writer, m: *QbeModule, d: *Dat2) void = {
     self.sym[id].align_log2 = d.align.trailing_zeros().trunc();
 }
 
-fn push_asm(self: *Writer, m: *QbeModule, code: []u8, id: u32) void = {
+fn push_asm(self: *Writer, m: *QbeModule, code: []u8, id: Qbe.Sym) void = {
     id := self.map_sym(m, id);
     self.sym[id].segment = .MachineCode;
     self.sym[id].dat.bytes = (off = self.str.len.trunc(), count = code.len.trunc());
@@ -414,7 +415,7 @@ finish_module :: fn(m: *QbeModule) [][]u8 = {
 };
 
 // note: this only calls default_init if !did_rega
-fn load(header: *Header, f: *Qbe.Fn, it: One(Sym), syms: []u32) bool /*did_rega lloc*/ = {
+fn load(header: *Header, f: *Qbe.Fn, it: One(Sym), syms: []Qbe.Sym) bool /*did_rega lloc*/ = {
     m := f.globals;
     sym := header.get(it);
     fnc := sym.fnc&;
@@ -432,8 +433,8 @@ fn load(header: *Header, f: *Qbe.Fn, it: One(Sym), syms: []u32) bool /*did_rega 
     enumerate header.get(fnc.con) { i, src |
         dest := f.con[i + fixed_const_count]&;
         dest[] = src[];
-        if src.sym != Qbe.no_symbol {
-            dest.sym = syms[src.sym.zext()];
+        if src.sym != Qbe.no_symbol_S {
+            dest.sym = syms[src.sym.id.zext()];
         }
     };
     
@@ -478,13 +479,13 @@ fn load(header: *Header, f: *Qbe.Fn, it: One(Sym), syms: []u32) bool /*did_rega 
     did_regalloc
 }
 
-fn load(header: *Header, m: *QbeModule, i: One(Sym), syms: []u32) Dat2 = {
+fn load(header: *Header, m: *QbeModule, i: One(Sym), syms: []Qbe.Sym) Dat2 = {
     it := header.get(i);
     relocs := temp().alloc(Dat2.Reloc, it.dat.rel.count.zext());
     relocs.copy_from(header.get(it.dat.rel));
     each relocs { it |
-        if it.id != Qbe.no_symbol {
-            it.id = syms[it.id.zext()];
+        if it.id != Qbe.no_symbol_S {
+            it.id = syms[it.id.id.zext()];
         }
     };
     
@@ -509,9 +510,9 @@ pack_current_target :: fn() u32 = {
 pack_target :: fn(arch: Arch, os: Os) u32 = 
     bit_or(@as(i64) os, shift_left(@as(i64) arch, 8)).trunc();
 
-fn preintern_syms(header: *Header, m: *QbeModule) []u32 = {
+fn preintern_syms(header: *Header, m: *QbeModule) []Qbe.Sym = {
     count: i64 = header.sym.count.zext();
-    syms := m.forever&.borrow().alloc(u32, count);
+    syms := m.forever&.borrow().alloc(Qbe.Sym, count);
     for(header, header.all(Sym)) { i, it |
         syms[i.off.zext()] = m.intern(header.get(it.name));
     };

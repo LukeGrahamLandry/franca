@@ -125,7 +125,7 @@ fn newcon(f: *Qbe.Fn, c0: *Qbe.Con) Qbe.Ref = {
     // deduplicate
     range(1, f.ncon.zext()) { i |
         c1 := f.con.index(i);
-        if c0.sym == c1.sym && c0.bits._0 == c1.bits._0 && c0.bits._1 == c1.bits._1 {
+        if c0.sym.id == c1.sym.id && c0.bits._0 == c1.bits._0 && c0.bits._1 == c1.bits._1 {
             return(CON(i));
         };
     };
@@ -135,16 +135,16 @@ fn newcon(f: *Qbe.Fn, c0: *Qbe.Con) Qbe.Ref = {
 }
 
 fn getcon(f: *Qbe.Fn, val: i64) Qbe.Ref = 
-    f.symcon(Qbe.no_symbol, val);
+    f.symcon((id = Qbe.no_symbol), val);
 
 // TODO: call this from elsewhere
 fn symcon(f: *Qbe.Fn, name: Str) Qbe.Ref = 
     f.symcon(f.globals.intern(name));
 
-fn symcon(f: *Qbe.Fn, id: u32) Qbe.Ref = 
+fn symcon(f: *Qbe.Fn, id: Qbe.Sym) Qbe.Ref = 
     f.symcon(id, 0);
 
-fn symcon(f: *Qbe.Fn, id: u32, off: i64) Qbe.Ref = {
+fn symcon(f: *Qbe.Fn, id: Qbe.Sym, off: i64) Qbe.Ref = {
     con: Qbe.Con = con(id, off);
     f.newcon(con&)
 }
@@ -153,14 +153,14 @@ fn new_mem(f: *Qbe.Fn, base: Qbe.Ref, index: Qbe.Ref, offset: i64, scale: i32) Q
     push(f.mem&, f.nmem&, (
         base   = base,
         index  = index,
-        offset = con(Qbe.no_symbol, offset),
+        offset = con((id = Qbe.no_symbol), offset),
         scale  = scale,
     ));
     MEM(f.nmem.zext() - 1)
 }
 
 fn type(self: *Qbe.Con) Qbe.ConType = 
-    @if(self.sym == Qbe.no_symbol, .CBits, .CAddr);
+    @if(self.sym.id == Qbe.no_symbol, .CBits, .CAddr);
 
 fn bits(self: *Qbe.Con) i64 = 
     self.bits._1.zext().shift_left(32).bit_or(self.bits._0.zext());
@@ -170,7 +170,7 @@ fn set_bits(self: *Qbe.Con, i: i64) void = {
     self.bits._0 = i.trunc();
 }
 
-fn con(sym: u32, bits: i64) Qbe.Con = 
+fn con(sym: Qbe.Sym, bits: i64) Qbe.Con = 
     (sym = sym, bits = (bits.trunc(), bits.shift_right_logical(32).trunc()));
 
 // TODO: use slices 
@@ -646,14 +646,14 @@ IMask :: 1.shift_left(IBits) - 1;
 
 QLIST_DOUBLE_FREE :: 0x69696969;
 
-fn intern(m: *QbeModule, s: Str) u32 = {
+fn intern(m: *QbeModule, s: Str) Qbe.Sym = {
     h := hash(s).bit_and(IMask.trunc());
     b := m.symbols.index(h.zext());
     n := m.lock_bucket(b);
     range(0, n.zext()) { i |
         if s == b.data[i].name {
             b.n = n;  // unlock
-            return(h + i.trunc().shift_left(IBits));
+            return(id = h + i.trunc().shift_left(IBits));
         }
     };
     
@@ -681,22 +681,22 @@ fn intern(m: *QbeModule, s: Str) u32 = {
     
     b.n = n + 1;  // unlock
     id := h + n.shift_left(IBits);
-    id
+    (id = id)
 }
 
 LOCKED_BASE :: 0xF0000000;
     
 // TODO: this is garbage i need a way to defer something to run if body early exits. 
 // :ThreadSafety need to use cas or whatever
-fn use_symbol(m: *QbeModule, id: u32, $body: @Fn(s: *SymbolInfo) void) void = {
+fn use_symbol(m: *QbeModule, id: Qbe.Sym, $body: @Fn(s: *SymbolInfo) void) void = {
     fence();
     ::ptr_utils(QbeModule);
     @debug_assert(!m.is_null(), "null module???");
-    bid: i64 = id.bit_and(IMask).zext();
+    bid: i64 = (@as(i64) id.id.zext()).bit_and(IMask);  // :UpdateBoot
     bucket := m.symbols[bid]&;
     old := m.lock_bucket(bucket);
-    idx := id.shift_right_logical(IBits);
-    @debug_assert_lt(idx, old, "invalid symbol id=%", id);
+    idx := id.id.shift_right_logical(IBits);
+    @debug_assert_lt(idx, old, "invalid symbol id=%", id.id);
     symbol := bucket.data.index(idx.zext());
     body(symbol);
     bucket.n = old;  // unlock
@@ -720,20 +720,20 @@ fn lock_bucket(m: *QbeModule, bucket: *SymbolBucket) u32 = {
 }
 
 // :ThreadSafety you can't call this one
-fn get_symbol_info(m: *QbeModule, id: u32) *SymbolInfo = {
+fn get_symbol_info(m: *QbeModule, id: Qbe.Sym) *SymbolInfo = {
     @debug_assert(m.fixups_locked, "this is not threadsafe");
-    bid: i64 = id.bit_and(IMask).zext();
+    bid: i64 = (@as(i64) id.id.zext()).bit_and(IMask);
     bucket := m.symbols[bid]&;
-    idx := id.shift_right_logical(IBits);
+    idx: u32 = id.id.shift_right_logical(IBits);
     bucket.data.index(idx.zext())
 }
 
-fn str(m: *QbeModule, id: u32) Str = {
+fn str(m: *QbeModule, id: Qbe.Sym) Str = {
     name := "";
     use_symbol(m, id) { s |
         name = s.name;
     };
-    @debug_assert(!name.ptr.is_null(), "null name for symbol %", id);
+    @debug_assert(!name.ptr.is_null(), "null name for symbol %", id.id);
     name
 }
 
@@ -879,7 +879,7 @@ fn get_int(f: *Qbe.Fn, r: Qbe.Ref) ?i64 #inline = {
 }
 
 // (id, offset)
-fn get_sym(f: *Qbe.Fn, r: Qbe.Ref) ?Ty(u32, i64) #inline = {
+fn get_sym(f: *Qbe.Fn, r: Qbe.Ref) ?Ty(Qbe.Sym, i64) #inline = {
     if(rtype(r) != .RCon, => return(.None));
     c := f.get_constant(r);
     if(c.type() != .CAddr, => return(.None));
@@ -1334,3 +1334,6 @@ fn set_is_dark(self: *Qbe.Typ, c: bool) void = {
     flags&.set(.is_dark, int(c));
     self.header.flags = flags.repr;
 }
+
+fn eq(a: Qbe.Sym, b: Qbe.Sym) bool #redirect(Ty(u32, u32), bool);
+fn ne(a: Qbe.Sym, b: Qbe.Sym) bool #redirect(Ty(u32, u32), bool);
