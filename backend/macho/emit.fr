@@ -477,10 +477,12 @@ fn emit_exe_fixups(e: *EmitMacho, chained: *List(u8)) void #inline = {
 
 // :HACK. the user should provide these paths but for now it just needs to work so i can stop using the linker for graphics examples. 
 // -- May 1, 2025
-guess_path :: fn(name: Str) Str = @switch(name) {
-    @case("libc") => "/usr/lib/libSystem.dylib";
-    @case("objc") => "/usr/lib/libobjc.dylib";
-    @default => @tfmt("/System/Library/Frameworks/%.framework/%", name, name);
+guess_path :: fn(name: Str) Str = @if_else {
+    // :MultiDylibLibc if compiling from linux, libm will be libc*** or whatever, 
+    // so just ignore that part by not using == 
+    @if(name.starts_with("libc")) => "/usr/lib/libSystem.dylib";
+    @if(name == "objc") => "/usr/lib/libobjc.dylib";
+    @else => @tfmt("/System/Library/Frameworks/%.framework/%", name, name);
 };
 
 WipFixup :: @struct(
@@ -563,13 +565,16 @@ fn emplace_fixup(e: *EmitMacho, fix: *FixP, next_encoded: i64, import_count: i64
     is_bind := fix.symbol.kind != .Local;
     ::assert_eq(size_of(ChainedReloc), size_of(i64));
     r := ChainedReloc.ptr_from_raw(fix.fix.patch_at);
+    r[] = zeroed @type r[];
     set(r.bind&, .next, next_encoded);
     set(r.bind&, .is_bind, int(is_bind));
+    
     if is_bind {
         // got_lookup_offset has been converted to an ordinal already. 
         o := fix.symbol.got_lookup_offset;
         @debug_assert(o >= 0 && o < import_count, "bad ordinal %", o);
-        @assert_le(addend, 0, "TODO: does macho chained fixup allow negative addend to import?");
+        // TODO: test that gets here with non-zero
+        @assert_ge(addend, 0, "TODO: does macho chained fixup allow negative addend to import?");
         set(r.bind&, .addend, addend);
         set(r.bind&, .ordinal, o);
     } else {

@@ -1,3 +1,29 @@
+## (Jun 5)
+
+- just hacking out some stuff that won't work to see if i can get cosmo to compile far enough to get to the syscall shim
+- i was infinite looping on `#define FOO FOO`, i guess introduced by my attempt to simplify hideset tracking
+- found :BrokenCGeneric
+- fixed this problem with compiling from linux to macos:
+```
+dyld[54996]: Library not loaded: /System/Library/Frameworks/libc***.framework/libc***
+  Referenced from: <no uuid> /Users/luke/Documents/mods/infered/target/release/franca-macos-arm64
+  Reason: tried: '/System/Library/Frameworks/libc***.framework/libc***' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/System/Library/Frameworks/libc***.framework/libc***' (no such file), '/System/Library/Frameworks/libc***.framework/libc***' (no such file, not in dyld cache), '/Library/Frameworks/libc***.framework/libc***' (no such file)
+```
+now the program works but it doesn't repro (not the same bytes as if compiled on macos). 
+- cross compiling graphics programs from linux to macos was crashing. 
+difference in binary is (rebase = (resereved = 0 on macos or 7 on linux))
+wasn't zeroing fix.patch_at before starting in emplace_fixup. 
+
+## (Jun 4)
+
+- the rework of aot_import_body was very successful. fixed AOT amd64 graphics programs. 
+- stop being lazy with u32 for backend symbol index
+- BakedValue.Reloc.addend 
+- not having any type checking in the c compiler is kinda dumb. should probably try to do better, 
+but there's so much stuff you're supposed to allow anyway that it seems to quickly become
+`-Wno-whatever` hell. 
+- looking through cosmo's tls and `__constructor__`s
+
 ## (Jun 3)
 
 Some frontend cleanup stuff:
@@ -32,15 +58,6 @@ I think my plan is:
 - replace the .S files for constants/syscalls
 - replace the build system with not a billion object files
 - and only after all that do i have to decide how much to fuse import_c with the franca compiler.
- 
-one more counting operation
-- 206716 lines of libc/(.h/.c) =
-  -  34582 lines of license headers / ascii art / `/*-*- vi:`
-  -  14868 lines in the form `#define NAME TOKEN\n`
-  -  10823 lines in the form `#include TOKEN\n`
-  -  14778 lines blank
-  -  28184 lines comment
-  - 103481 lines the rest
 
 ---
 
@@ -93,28 +110,7 @@ i can't keep copying random struct definitions for libc stuff.
 it's not the thing im interested in and it's super unreliable.  
 maybe cosmopolitan libc is what i want but it's kinda large. 
 
-```
-14.323 total
-------
- 1.825 str/unicodedata.txt
- 1.705 2020 license header
- 1.171 testlib/moby.txt
- 0.707 2022 license header
- 0.518 2021 license header
- 0.377 2023 license header 
- 0.323 the rest of testlib
- 0.290 isystem (remapping thier files to normal includes)
- 0.287 2014 musl license header
- 0.171 libc/sysv/consts/*.S (gen consts.sh)
- 0.116 2024 license header 
- 0.087 arm license header
- 0.056 2020 musl license header
- 0.040 sysv/calls/*.S (gen syscalls.sh)
- 0.050 sysv/(errfuns.h, errfuns/*.S) (gen errfuns.sh)
- 0.050 vga/vga-font-default.c (1235 bytes of font data)
-------
- 6.873 the rest
-```
+size: 14.323 total, 6.873 interesting :CountingCosmo. 
 for reference, the franca repository is `5.611` currently.  
 
 so that's not bad actually, i double my amount of code and never have to 
@@ -126,54 +122,6 @@ they have to do a dynamic check. which is great for me, that restriction overlap
 with how my `#target_os` allows comptime execution with cross compilation. they 
 have one set of struct definitions that user code imports and when you call a 
 function they're translated to the native ones as needed. very good. ten stars. 
-
-- they still use `#ifdef arch`, including in structs which is unfortunate. 
-even public ones: sigcontext. so it doesn't completly free me of needing to 
-sema twice to get different field offsets but it's still an improvement
-- there's a bunch of special cases for their own stuff
-  - zipos (tho that's kinda cool, i probably want to keep that)
-  - an error message that suggests you try a different version of redbean
-  - sys_execve execs `/usr/bin/ape` if the bytes in the file start with thier initials
-- heavier runtime than i expected (tho the trace ones are optional)
-  - `--strace` is just they call ~fprintf when it's turned on 
-  - `__morph_begin` is pretty invasive
-    - `--ftrace` is the compiler leaves nops at the begining of functions 
-    and then the runtime reads its own elf headers to get find all the functions 
-    and rewrite them to call ~fprintf so it has to call pthread_jit_write_protect_np
-    - tls on amd64 starts at __executable_start and looks for the code sequence 
-    it knows the compiler generates for tls accesses and rewrites them. 
-  - they have to un-leb the syscall numbers before calling your main()
-- they still depend on a blessed xcode to compile ape-m1.c to fill a Syslib struct 
-with apple's blessed function pointers. 
-  - which i fine, im not as excited about the single exe thing as they are. 
-  i'd rather just keep doing mach-o like i do now. but that also means 
-  i have to replace any of thier runtime stuff that tries to read the elf headers. 
-- dlopen() isn't supported on x86-64 MacOS
-- they use inline assembly which my import_c doesn't support. 
-  - tho they stole chibicc just like i did and they have some `!defined(__chibicc__)` 
-  so maybe i could steal their changes to make that work. 
-  - most of it is just for doing syscall/svc
-- `tinymath` is musl and arm's stuff
-- they've got a bunch of extra stuff that isn't libc in the folder called libc. 
-i guess it's probably good stuff, so maybe that's what i want, but i'd rather it be 
-sorted differently. 
-- they've kinda already done the whole thing i want to do with this project. 
-like take a little self contained slice of interesting things in the universe
-that you can cross compile to all the sane targets. maybe that's a bit disheartening. 
-  - their "build from source" instructions starts with downloading a 1.3GB personal copy 
-  of clang so that makes me feel a bit better. 
-- they've aggressively bought into the tiny files compilation model.
-like one per libc function so it can build one .o file per libc function.]
-  - heh, i don't need cached compliation, i need cached concatenate the files so you don't have to reopen them all
-  - you have to scroll past reincluding things so many times. 
-  the lines in lib/(.h+.c) files are (1217+9380)/(46828+123927) = 6% `#include` 
-  (counted after collapsing most of the licence headers). 
-- they do `_weaken` and `__static_yoink` a lot which looks 
-kinda messy but is a good way to solve the bloat problem (like as 
-you add new runtime stuff, you need to add support code for it 
-elsewhere and then you're stuck doing that whether you use the runtime
-or not) which i've thought about didn't have a solution for. 
-- the math stuff has hella tables of magic numbers
 
 So if i wanted to do this and get rid of the libc bindings in franca, 
 that either means adding import_c to the core compiler or using it to 

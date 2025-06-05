@@ -1,5 +1,9 @@
 #include "test.h"
 
+// TODO: this is trying to test VLAs, and it does test that they work in the frontend, 
+//       but since all the sizes are actually constants, they get folded by the backend, 
+//       so it doesn't test that i generate correct code for dynamic stack allocations.   
+
 int main() {
   ASSERT(20, ({ int n=5; int x[n]; sizeof(x); }));
   ASSERT((5+1)*(8*2)*4, ({ int m=5, n=8; int x[m+1][n*2]; sizeof(x); }));

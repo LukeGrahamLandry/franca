@@ -354,6 +354,24 @@ fn new_var_node(c: *Ctx, var: *Obj, tok: *Token) *Node = {
 
 fn new_cast(c: *Ctx, expr: *Node, ty: *CType) *Node = {
     c.add_type(expr);
+    check_types(c, expr.tok, expr.ty, ty);
+    new_cast_force(c, expr, ty)
+}
+
+// TODO: get more serious about this. for now just catching some trivial mistakes. better than nothing. 
+fn check_types(c: *Ctx, tok: *Token, lhs: *CType, rhs: *CType) void = {
+    fail :: fn(cond) => @if(cond) @error_tok(c, tok, "incompatible");
+    allow :: fn(cond) => @if(cond) return();
+
+    allow(lhs.identical(rhs));
+    fail(int(lhs.kind == .TY_STRUCT) != int(rhs.kind == .TY_STRUCT));
+    fail(int(lhs.kind == .TY_UNION)  != int(rhs.kind == .TY_UNION));
+    fail(int(lhs.kind == .TY_VOID)   != int(rhs.kind == .TY_VOID));
+    fail((is_flonum(lhs) && !is_numeric(rhs)) || (is_flonum(rhs) && !is_numeric(lhs)));
+}
+
+fn new_cast_force(c: *Ctx, expr: *Node, ty: *CType) *Node = {
+    c.add_type(expr);
     if(expr.ty.identical(ty), => return(expr));
     
     node := temp().box_zeroed(Node);
@@ -933,7 +951,7 @@ fn typeof_specifier(c: *Ctx, rest: **Token, tok: *Token) *CType #once = {
     ty := if c.is_type_name(tok) {
         c.typename(tok&, tok)
     } else {
-        node := c.speculate(tok&, tok, .None);
+        node := c.speculate(tok&, tok, .None, false);
         c.add_type(node);
         node.ty
     };
@@ -1793,8 +1811,8 @@ fn attribute_list(c: *Ctx, tok: *Token, ty: *CType) *Token = {
                 continue();
             };
             
-            // TODO: some of these matter: __constructor__
-            skips :: @const_slice("__format__", "__const__", "__constructor__");
+            // TODO: some of these matter: __constructor__, __aligned__
+            skips :: @const_slice("__format__", "__const__", "__constructor__", "__aligned__");
             if skips.contains(tok.str()) {
                 tok = c.skip_attribute(tok);
                 continue();
@@ -2003,7 +2021,6 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *T
         ty := c.declarator(tok&, tok, basety);
         return c.global_variable(tok, basety, attr, ty, true);
     };
-    
     f.is_definition = true;
     c.current_fn = (Some = f);
     
@@ -2390,6 +2407,7 @@ fn parse_binary_inner(c: *Ctx, rest: **Token, tok: *Token, lhs: *Node) *Node = {
         if tok.kind == .@"=" {
             c.add_type(lhs);
             c.add_type(rhs);
+            check_types(c, tok, lhs.ty, rhs.ty);
             ty := c.add_type(.ND_ASSIGN, lhs&, rhs&);
             val := c.gen_expr(rhs);
             return(c.gen_assign(lhs, val, ty));
@@ -2543,7 +2561,7 @@ parse_bracketed :: fn(c, rest, tok) #prefix(.@"(") = {
             }
         } else {  // type cast
             node := parse_expr(c, rest, tok, .Unary);
-            node := c.new_cast(node, ty);
+            node := c.new_cast_force(node, ty);
             node.tok = start;
             node
         }
@@ -2552,8 +2570,8 @@ parse_bracketed :: fn(c, rest, tok) #prefix(.@"(") = {
             // This is a [GNU] statement expresssion.
             node := c.compound_stmt(tok&, tok.next.next);
             ::ptr_utils(@type node.ty[]);
-            @if(node.ty.is_null() || node.ty.kind == .TY_VOID)
-            @error_tok(c, node.tok, "statement expression returning void is not supported");
+            //@if(node.ty.is_null() || node.ty.kind == .TY_VOID)
+            //@error_tok(c, node.tok, "statement expression returning void is not supported");
             node
         } else {
             // just a braketed expression like in math
@@ -2708,7 +2726,7 @@ generic_selection :: fn(c, rest, tok) #prefix(._Generic) = {
     start := tok;
     tok = c.skip(tok.next, "(");
 
-    ctrl := c.speculate(tok&, tok, .Assign);
+    ctrl := c.speculate(tok&, tok, .Assign, false);
     c.add_type(ctrl);
 
     t1 := ctrl.ty;
@@ -2726,7 +2744,7 @@ generic_selection :: fn(c, rest, tok) #prefix(._Generic) = {
 
         if equal(tok, "default") {
             tok = c.skip(tok.next, ":");
-            node := c.speculate(tok&, tok, .Assign);
+            node := c.speculate(tok&, tok, .Assign, false);
             if ret.is_none() {
                 ret = (Some = node);
                 use_default = true;
@@ -2734,15 +2752,19 @@ generic_selection :: fn(c, rest, tok) #prefix(._Generic) = {
         } else {
             t2 := c.typename(tok&, tok);
             tok = c.skip(tok, ":");
-            if is_compatible(t1, t2) {
-                if ret.is_some() && !use_default {
-                    @error_tok(c, tok, "conflicting branches for generic association type");  
+            done := ret.is_some() && !use_default;
+            if is_compatible(t1, t2) && /* wrong */ !done {
+                if done {
+                    // :BrokenCGeneric
+                    // TODO: this should be an error but cosmo wants to do `signed long` and `signed long long` in stdchdint.h
+                    //       and i don't track those as seperate types currently. 
+                    // @error_tok(c, tok, "conflicting branches for generic association type");  
                 };
                 node := c.parse_expr(tok&, tok, .Assign);
                 ret = (Some = node);
                 use_default = false;
             } else {
-                _ := c.speculate(tok&, tok, .Assign);
+                _ := c.speculate(tok&, tok, .Assign, false);
             };
         };
     };
@@ -2763,7 +2785,7 @@ sizeof :: fn(c, rest, tok) #prefix(.sizeof) = {
         rest[] = c.skip(tok, ")");
         ty
     } else {  // | "sizeof" unary
-        node := c.speculate(rest, tok.next, .Unary);
+        node := c.speculate(rest, tok.next, .Unary, false);
         if(node.kind == .ND_MEMBER && node.member.is_bitfield, => @error_tok(c, tok, "sizeof(bitfield) is illegal"));
         node.ty
     };
@@ -2778,7 +2800,7 @@ alignof :: fn(c, rest, tok) #prefix(._Alignof) = {
         rest[] = c.skip(tok, ")");
         ty
     } else {
-        c.speculate(rest, tok.next, .Unary)[].ty
+        c.speculate(rest, tok.next, .Unary, false)[].ty
     };
     c.new_ulong(ty.align.intcast(), start)
 };
@@ -2917,28 +2939,64 @@ return :: fn(c, rest, tok) #prefix(.return, .ND_STMT) = {
     c.new_node(.ND_STMT, tok)
 };
 if_ :: fn(c, rest, tok) #prefix(.if, .ND_STMT) = {
-    then_block := c.new_block();
-    else_block := c.new_block();
-    join_block := c.new_block();
-
     tok = c.skip(tok.next, "(");
     cond := c.parse_expr(tok&, tok, .None);
     tok = c.skip(tok, ")");
     cond := c.gen_expr(cond);
     
-    c.jnz_if_unterminated(cond, then_block, else_block);
+    //
+    // TODO: 
+    // -- 
+    //       my idea was we could save some work by doing this earlier than the backend's 
+    //       constant propagation, by doing it with speculate now (save generating code that 
+    //       we know won't be used) but that doesn't work.  
+    // -- 
+    //       since cosmo uses this so heavily, and i want to be able to 
+    //       compile stuff that references the windows stuff before i can 
+    //       compile the windows stuff by just setting !SupportsWindows()
+    // -- 
+    // test/c/std/json.c:2740:58: 
+    //  if (102 <= WUFFS_JSON__DECODER_NUMBER_LENGTH_MAX_INCL) {
+    //                                                         ^ fold RCon:1 false
+    // panic! ND_LE should have known type
+    // -- 
+    //
     
-    c.b = then_block;
-    c.stmt(tok&, tok);
-    c.jmp_if_unterminated(join_block);
-    
-    c.b = else_block;
-    if equal(tok, "else") {
-        c.stmt(tok&, tok.next);
+    // not folding symbols as true because i want to support weak references (todo: need to do that in backend/fold as well)
+    can_fold := !c.speculate && rtype(cond) == .RCon && c.f.get_constant(cond).type() == .CBits;
+    if true || !can_fold {
+        then_block := c.new_block();
+        else_block := c.new_block();
+        join_block := c.new_block();
+
+        c.jnz_if_unterminated(cond, then_block, else_block);
+        
+        c.b = then_block;
+        c.stmt(tok&, tok);
+        c.jmp_if_unterminated(join_block);
+        
+        c.b = else_block;
+        if equal(tok, "else") {
+            c.stmt(tok&, tok.next);
+        };
+        c.jmp_if_unterminated(join_block);
+        
+        c.b = join_block;
+    } else {
+        fold_yes := c.f.get_constant(cond).bits() != 0;
+        if fold_yes {
+            c.stmt(tok&, tok);
+        } else {
+            c.speculate(tok&, tok, .None, true);
+        };
+        if equal(tok, "else") {
+            if !fold_yes {
+                c.stmt(tok&, tok.next);
+            } else {
+                c.speculate(tok&, tok.next, .None, true);
+            };
+        };
     };
-    c.jmp_if_unterminated(join_block);
-    
-    c.b = join_block;
     rest[] = tok;
     c.new_node(.ND_STMT, tok)
 };
@@ -3329,11 +3387,15 @@ fn new_inc_dec(c: *Ctx, node: *Node, tok: *Token, addend: i64) *Node = {
 
 // for expressions that don't get evaluated (like sizeof, alignof, typeof),
 // we just mask out all the emitted instructions/jumps. 
-fn speculate(c: *Ctx, rest: **Token, tok: *Token, prec: Prec) *Node = {
+fn speculate(c: *Ctx, rest: **Token, tok: *Token, prec: Prec, is_stmt: bool) *Node = {
     old_block := c.b;
     prev := c.speculate;
     c.speculate = true;
-    node := c.parse_expr(rest, tok, prec);
+    node := if is_stmt {
+        c.stmt(rest, tok)
+    } else {
+        c.parse_expr(rest, tok, prec)
+    };
     c.speculate = prev;
     new_block := c.b;
     if !old_block.identical(new_block) {
@@ -3519,6 +3581,7 @@ fn link_blocks_from_rpo(f: *Qbe.Fn) void = {
 
 fn emit(c: *Ctx, op: Qbe.O, k: Qbe.Cls, to: Qbe.Ref, arg0: Qbe.Ref, arg1: Qbe.Ref) void = {
     @if(SPAM) @println("O % =% % % %", to, k, op, arg0, arg1);
+    @if(c.speculate) return();
     push(c.b, make_ins(op, k, to, arg0, arg1));
 }
 
@@ -3741,7 +3804,7 @@ fn gen_cast(c: *Ctx, src: Qbe.Ref, from: *CType, to: *CType, tok: *Token) Qbe.Re
     p_from, p_to := (from.get_type_id(), to.get_type_id());
     ::enum(@type p_from);
     @if(SPAM) @println("cast % % % -> %", src, from.kind, p_from, p_to);
-    if !(c.speculate || src != QbeNull) {
+    if !c.speculate && src == QbeNull {
         @error_tok(c, tok, "ICE: tried to cast Null ref");
     };
     if(p_from == p_to, => return(src));
@@ -3814,6 +3877,8 @@ fn gen_call(c: *Ctx, callee: *Node, function_ty: *CType, arg: []*Node, tok: *Tok
         r := c.gen_expr(arg);
         arguments&.push(arg_ins(r, arg.ty.cls(), c.ir_index(arg.ty)));
     };
+    
+    @if(c.speculate) return c.ir_node(function_ty.return_ty, QbeNull, QbeNull, tok);
     
     // tell the backend that it's variadic even if we're not passing any va-args (needed for wasm). 
     // TODO: make sure the franca frontend does this too 
@@ -3902,7 +3967,7 @@ fn gen_load(c: *Ctx, addr: Qbe.Ref, type: *CType) Qbe.Ref = {
 }
 
 fn gen_addr(c: *Ctx, node: *Node) Qbe.Ref = {
-    if node.lvalue == QbeNull {
+    if node.lvalue == QbeNull && !c.speculate {
         @error_tok(c, node.tok, "expected lvalue");
     };
     node.lvalue

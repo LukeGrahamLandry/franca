@@ -1,6 +1,12 @@
 /// Here we translate the c compiler's representation to the franca compiler's representation. 
 /// This allows franca programs to use our types/functions/variables. 
 
+// 
+// include() translates all the c declarations into Func.Ir/BakedValue, but the Qbe.Fn 
+// lives in a seperate QbeModule which is lazily move_from_module()-ed in emit_ir.fr as 
+// needed so using something at comptime doesn't pull it into the runtime module, etc. 
+// 
+
 //
 // This mostly works: you can seamlessly use a library written in c without writing function/struct 
 // signetures and call that code at comptime or runtime just like it were written in franca. 
@@ -29,8 +35,6 @@
 //   just a normal program that we happen to run at comptime to generate some code sometimes". 
 // - put `static` functions in an inner namespace for each file so we can mimic seperate compilation units
 // - have a thing for removing prefixes since we have a higher level idea of scopes
-// - franca can't have a function pointer to a #c_variadic function so you can only have 
-//   (...) as a direct export or used internally. can't have a * to one in struct, param, etc.
 // - currently i only export typedefs. need to be able to use things without like `struct Foo` or whatever
 // - things from other header files are exported too too which might not be what you want. 
 //   like what if you want to use a library that typedef-ed u32 for themselves? now you can't #use it. that sucks. 
@@ -308,8 +312,6 @@ find_ref :: fn(obj: *Obj, id: Qbe.Sym) *Obj = {
     @panic("couldn't find ref for id=%", id.id)
 }
 
-// TODO: need to return BakedVarId to support aot instead of specifically poking it into the backend module we have
-// TODO: want to have it work like callees where you only actually emit it to the module when you know it's reachable
 fn export_data(c: *Ctx, obj: *Obj) BakedVarId = {
     @debug_assert(!obj.is_function, "want data def %", obj.name);
     if !obj.is_definition {
@@ -340,12 +342,10 @@ fn export_data(c: *Ctx, obj: *Obj) BakedVarId = {
         relocations = ({
             relocs := BakedReloc.list(fr.get_alloc());
             for_linked obj.rel { rel |
-                if rel.addend != 0 {
-                    @error_tok(c, obj.tok, "TODO: import_c support addend");
-                }
                 relocs&.push(
                     off = rel.offset.bitcast(),
                     target = @if(rel.obj.is_function, (FuncId = c.export_func(rel.obj)), (BakedVarId = c.export_data(rel.obj))),
+                    addend = rel.addend,
                 );
             };
             relocs.items()

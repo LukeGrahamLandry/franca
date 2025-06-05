@@ -1,20 +1,20 @@
 - implement _Atomic in import_c
 - clear cache before tests just in case
-- make_dirs on apple x64
 - @bit_fields in incremental.fr don't work inline in the structs
 - import_c, get rid of :BoundsPadding
 - linux fault-na.ssa need to do the signal struct
 - amd64: `std/json        cc      FAIL test_wuffs_strconv_parse_number_f64_regular: "-0.000e0": have 0x0000000000000000, want 0x8000000000000000`
 - whether the host compiler was built with`-syscalls` needs to go in the cache file
-- `graphics` programs don't work AOT on amd64 (JIT is fine somehow)
-  - get rid of log printing: setFrame, update_dimensions
 - amd64: examples/import_c/test/test.fr
 - use HashMap.get_or_insert more
 - #ir tries to ignore zero-sized params but not if they're first which is sad
-
-// TODO: printf doesn't work on arm. also wont work with a shim should add an error for that. 
-eval_and_dump_defined_numbers :: fn(vtable: *ImportVTable) void = {
-it's because of import-shims. should add a test for this. 
+- caching an invalid thing i think? if you Compile Error: we hit a dynamicimport ('puts_unlocked' from 'libc') with no comptimeaddr for jit
+(happening with import_c)
+- :BrokenCGeneric i think erroring on conflicting `_Generic` cases is correct but you're supposed to treat `long` and `long long`
+as different types even when they're the same size. 
+- repro doesn't work cross compiling from linux to macos,
+but dump_macho.fr and objdump -d say they're the same (for mandelbrot_ui.fr at least). 
+so something in the data i guess? 
 
 ## Quest Lines
 

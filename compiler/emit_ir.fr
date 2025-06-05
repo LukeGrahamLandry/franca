@@ -124,7 +124,7 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
                     context(DefaultContext)[].temporary_allocator = entry2.arena&;
                     out := Dat2.list(self.new_constants.len, temp());
                     for self.new_constants { id |
-                        out&.push(emit_constant(comp, m, id));
+                        out&.push(baked_var_to_dat(comp, m, id));
                     };
                     entry2.task = (AotVar2 = out.items());
                 };
@@ -140,6 +140,44 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
     };
     zone_end(z);
     result
+}
+
+// this puts a bunch of stuff in temp(), it's expected to be used in the context of a CodegenEntry. 
+// TODO: this is so annoying. the data structures are so similar because the two sides need to know the same information. 
+//       but i can't quite make them the same because you need to allow multiple modules on one frontend context. 
+fn baked_var_to_dat(comp: CompCtx, m: *QbeModule, id: BakedVarId) Dat2 = {
+    value := comp.get_baked(id);
+    (
+        id = m.intern(@tfmt("g%", id.id)),  
+        align = value.align,
+        export = false,  // TODO: allow exporting vars 
+        template = @match(value.template) {  // this is ass
+            fn Zeroes(it) => (Zeroes = it);
+            fn Bytes(it) => (Bytes = it);
+        },
+        relocations = {
+            dest := temp().alloc(Dat2.Reloc, value.relocations.len);
+            enumerate dest { i, dest |
+                src := value.relocations.index(i);
+                // TODO: you can't be doing string formatting in here common man
+                dest[] = (
+                    off = src.off,
+                    id = @match(src.target) {
+                        fn FuncId(f) => {
+                            func := comp.get_function(f);
+                            @if_let(func.body&) fn Redirect(inner) => {
+                                f = inner[];
+                            };
+                            m.intern(comp.fmt_fn_name(f))
+                        }
+                        fn BakedVarId(id) => m.intern(@tfmt("g%", id.id));
+                    },
+                    addend = src.addend,
+                );
+            };
+            dest
+        }
+    )
 }
 
 // TODO: this is going to change the calling convention for small strange aggragates maybe (to match c). 

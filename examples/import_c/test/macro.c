@@ -25,9 +25,16 @@ int ends_with(char* haystack, char* needle) {
     return strlen(haystack) >= strlen(needle) && strcmp(haystack + strlen(haystack) - strlen(needle), needle) == 0;
 }
 
+
+// sure hope you don't loop on this
+const int FOO = 0;
+#define FOO FOO 
+
 int main() {
     ASSERT(5, include1);
     ASSERT(7, include2);
+    
+    FOO;
 
 #if 0
 #include "/no/such/file"

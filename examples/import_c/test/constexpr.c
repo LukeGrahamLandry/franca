@@ -3,6 +3,10 @@
 float g40 = 1.5;
 double g41 = 0.0 ? 55 : (0, 1 + 1 * 5.0 / 2 * (double)2 * (int)2.0);
 
+// TODO: this is trying to test that we fold constants in the front end but 
+//       since most of it is in an array type, it just decays to VLA if it 
+//       doesn't get folded so it's not really testing anything. 
+
 int main() {
   ASSERT(10, ({ enum { ten=1+2+3+4 }; ten; }));
   ASSERT(1, ({ int i=0; switch(3) { case 5-2+0*3: i++; } i; }));
