@@ -71,7 +71,7 @@ fn output_macho(m: *QbeModule) [][]u8 = {
     segment_base := u8.ptr_from_raw(m.segment_address(.Code, 0));
     e: EmitMacho = (
         m = m, 
-        commands = fixed_list(ptr = segment_base, len = COMMANDS_SIZE_GUESS), // :cantreallocatebutgivegooderrormessage
+        commands = fixed_list(ptr = segment_base, len = m.goal.commands_size_guess), // :cantreallocatebutgivegooderrormessage
     );
 
     cpu_type, cpu_subtype := @if(m.goal.arch == .aarch64, (0x0100000C, 0x00000000), (0x01000007, 0x00000003));
@@ -115,13 +115,24 @@ fn output_macho(m: *QbeModule) [][]u8 = {
         segments&.insert(0, (prot = 0, name = "__PAGEZERO", virtual_size = zero_page_size)); 
         
         code_flag := ATTR_PURE_INSTRUCTIONS.bit_or(ATTR_SOME_INSTRUCTIONS);
-        xx: WipSection = (name = "__text", flag = code_flag, offset_in_segment = COMMANDS_SIZE_GUESS + SIZE_OF_STUBS, size = chunks[1].len - SIZE_OF_STUBS - COMMANDS_SIZE_GUESS);
+        xx: WipSection = (
+            name = "__text", 
+            flag = code_flag, 
+            offset_in_segment = e.m.goal.commands_size_guess + m.goal.size_of_stubs, 
+            size = chunks[1].len - m.goal.size_of_stubs - e.m.goal.commands_size_guess,
+        );
         // apparently you're supposed to do reserved2 = 12 is the size of each stub (adrp, ldr, br). 
         // the os doesn't care but you need it if you want to do `objdump --macho --indirect-symbols`
         // size_of_one_stub: u32 = @if(m.goal.arch, 12, 6); //TODO: this needs to be a compile error :FUCKED
         // ... but this still doesn't work. maybe i need to put shit in the other symbol table (that i only do for relocatable rn)? just the thing for imports is not enough.
         size_of_one_stub: u32 = @if(m.goal.arch == .aarch64, 12, 6); 
-        yy: WipSection = (name = "__stubs", size = SIZE_OF_STUBS, flag = code_flag.bit_or(S_SYMBOL_STUBS), offset_in_segment = COMMANDS_SIZE_GUESS, reserved2 = size_of_one_stub);
+        yy: WipSection = (
+            name = "__stubs", 
+            size = m.goal.size_of_stubs, 
+            flag = code_flag.bit_or(S_SYMBOL_STUBS), 
+            offset_in_segment = e.m.goal.commands_size_guess, 
+            reserved2 = size_of_one_stub,
+        );
         segments[1].sections = @slice(xx, yy);
         // TODO: do i need reserved1 set to something? maybe thats an offset into LC_SYMTAB? or maybe undefined_symbol_count, that seems more consistant in the binraries i checked. 
         xx: WipSection = (name = "__got", size = chunks[2].len, flag = S_NON_LAZY_SYMBOL_POINTERS, offset_in_segment = 0);
@@ -142,14 +153,14 @@ fn output_macho(m: *QbeModule) [][]u8 = {
             }
         };
 
-        @assert(ptr_diff(s.mmapped.ptr, s.next) == MAX_GOT_SIZE, "TODO: const data segment");
+        @assert(ptr_diff(s.mmapped.ptr, s.next) == m.goal.max_got_size, "TODO: const data segment");
         
         chunks&.push(live_segment_part(m, .Code));
-        segments&.push(prot = 7, name = "__TEXT", extra_file_offset = text_padding);
+        segments&.push(prot = 7, name = "__TEXT", extra_file_offset = m.text_padding());
         segments[0].virtual_size = m.segments&[.Code].mmapped.len;
-        segments[0].file_size = chunks[1].len - text_padding;
+        segments[0].file_size = chunks[1].len - m.text_padding();
         code_flag := ATTR_PURE_INSTRUCTIONS.bit_or(ATTR_SOME_INSTRUCTIONS);
-        xx: WipSection = (name = "__text", flag = code_flag, offset_in_segment = 0, size = chunks[1].len - text_padding);
+        xx: WipSection = (name = "__text", flag = code_flag, offset_in_segment = 0, size = chunks[1].len - m.text_padding());
         segments[0].sections = @slice(xx);
         
         // Even if some sections are empty, you need them to make the indexes in append_relocations/which_section work out. 
@@ -232,7 +243,7 @@ fn output_macho(m: *QbeModule) [][]u8 = {
         // LC_ID_DYLIB, it seems the name doesn't matter? 
         macho_load_dylib(e.commands&, e.command_count&, .LinkLibrarySelf, "foo");
     };
-    chained := u8.list(CHAINED_SIZE_GUESS, temp());
+    chained := u8.list(m.goal.chained_size_guess, temp());
     
     // layout is [commands, waste, sections, chained, relocations?]
     // only relinkable needs relocations and only loadable needs a signeture at the end of chained. 
@@ -322,8 +333,8 @@ fn output_macho(m: *QbeModule) [][]u8 = {
         };
     };
     
-    @assert_le(chained.len, CHAINED_SIZE_GUESS, "resized and now the header pointer is junk"); 
-    @debug_assert_eq(e.commands.len, COMMANDS_SIZE_GUESS);
+    @assert_le(chained.len, m.goal.chained_size_guess, "resized and now the header pointer is junk"); 
+    @debug_assert_eq(e.commands.len, e.m.goal.commands_size_guess);
     chunks.items()
 }
 
@@ -333,8 +344,8 @@ fn seal_load_commands(e: *EmitMacho, macho_header: *MachoHeader) void = {
     end := e.commands.len;
     // :cantreallocatebutgivegooderrormessage
     // now we want exact match because we put it on the front of the text section for some reason who knows idk man. 
-    @assert_le(end, COMMANDS_SIZE_GUESS, "we guessed wrong so the array resized and all the pointers are junk");
-    e.commands.len = COMMANDS_SIZE_GUESS;
+    @assert_le(end, e.m.goal.commands_size_guess, "we guessed wrong so the array resized and all the pointers are junk");
+    e.commands.len = e.m.goal.commands_size_guess;
     e.commands.items().rest(end).set_zeroed();
 }
 
@@ -440,7 +451,7 @@ fn emit_exe_fixups(e: *EmitMacho, chained: *List(u8)) void #inline = {
     @debug_assert(e.offset_to_csis[0] == 0 && e.offset_to_csis[e.offset_to_csis.len - 1] == 0, "__PAGEZERO and __LINKEDIT shouldn't have fixups.");
     
     chained.zero_pad_to_align(8);
-    @assert_le(chained.len, CHAINED_SIZE_GUESS, "resized and now the header pointer is junk");
+    @assert_le(chained.len, m.goal.chained_size_guess, "resized and now the header pointer is junk");
     chain_header[] = (
         imports_count = import_count.trunc(), 
         imports_format = 1, 
@@ -626,7 +637,7 @@ fn emit_reloc_symbols(e: *EmitMacho, chained: *List(u8)) void #inline = {
         entry.section_number = which_section(s.segment);
         entry.desc = 0; // i think exports don't use this.     for imports, 256 ordinal 1.
         entry.name_offset = trunc(chained.len - strings_start);
-        segment_padding := if(s.segment == .Code, => text_padding, => 0); // :HACK
+        segment_padding := if(s.segment == .Code, => m.text_padding(), => 0); // :HACK
         @debug_assert(s.offset >= segment_padding, "what are you smoking?");
         // note: symbol_address is the address in virtual memory. not the section offset. 
         // this math relies on there being one section per segment
@@ -647,7 +658,7 @@ fn emit_reloc_symbols(e: *EmitMacho, chained: *List(u8)) void #inline = {
         entry.desc = 0; // i think exports don't use this.     for imports, 256 ordinal 1.
         entry.name_offset = trunc(chained.len - strings_start);
         // copy-paste
-        segment_padding := if(s.segment == .Code, => text_padding, => 0); // :HACK
+        segment_padding := if(s.segment == .Code, => m.text_padding(), => 0); // :HACK
         @debug_assert(s.offset >= segment_padding, "what are you smoking?");
         start: i64 = bitcast(e.load_commands[entry.section_number.zext() - 1].address);
         entry.symbol_address = bitcast(s.offset - segment_padding + start);
@@ -696,7 +707,7 @@ fn append_relocations(symbol_table_index: i64, id: Qbe.Sym, m: *QbeModule, reloc
         };
         sec: i64 = which_section(patch_segment).zext();
         rs := relocations[sec - 1]&;
-        segment_padding := if(patch_segment == .Code, => text_padding, => 0); // :HACK
+        segment_padding := if(patch_segment == .Code, => m.text_padding(), => 0); // :HACK
         r := RelocationFields.zeroed();
         p := r.packed&;
         r.offset = trunc(patch_segment_offset - segment_padding);

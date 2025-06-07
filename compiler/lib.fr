@@ -219,7 +219,8 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
                 arch = query_current_arch(), 
                 os = query_current_os(), 
                 type = @if(cache_it, .Cached, .JitOnly),
-            ), true);
+                expecting_wx = true, // TODO: this can be false right?
+            ));
             self.other_module&.push(m, self.get_alloc());
             shared: *CodegenShared = init(m, self.get_alloc(), @as(CodegenWorker) codegen_thread_main, true);
             shared
@@ -245,7 +246,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         
         { // :TodoLinux
             frontend := clock_ms(MacosLibc.CLOCK_THREAD_CPUTIME_ID);
-            code_count := m.segments&[.Code]&.len() - COMMANDS_SIZE_GUESS - SIZE_OF_STUBS;
+            code_count := m.segments&[.Code]&.len() - m.goal.commands_size_guess - m.goal.size_of_stubs;
             @if(show_backend_stats() && !cache_it)
             @eprintln(">>> jitted % bytes of code.", code_count);
             @if(show_backend_stats())
@@ -354,7 +355,7 @@ fn compile_cached(header: *Incremental.Header) (@FnPtr(*ImportVTable) void) = {
         arch = query_current_arch(), 
         os = query_current_os(), 
         type = .JitOnly,
-    ), false);
+    ));
     
     z := zone_begin(.AotPump);
     compile_all_symbols(header, m);
@@ -558,8 +559,13 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
     opts.env = ComptimeEnvironment.raw_from_ptr(env);
     
     m := a.box(QbeModule);
-    init_default_module(m, (arch = arch, os = os, type = .JitOnly), true);
-    m.got_indirection_instead_of_patches = true;  // comptime needs to be more flexible with late bound references.
+    init_default_module(m, (
+        arch = arch, 
+        os = os, 
+        type = .JitOnly,
+        expecting_wx = true,
+        got_indirection_instead_of_patches = true,  // comptime needs to be more flexible with late bound references.
+    ));
     
     self := a.box(SelfHosted);
     self[] = (

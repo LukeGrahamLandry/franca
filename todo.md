@@ -21,6 +21,8 @@ so something in the data i guess?
 - examples/repl.fr: compiling it infinite loops on macos-amd64 and crashes on linux-amd64 
 (when passed directly to the compiler cli or compiler/test.fr/compile(), but works through default_driver)
 - frc_inlinable doesn't work on the compiler itself
+- :skip :TodoLinux
+- "need to be consistant about how to handle modules like this that don't actually compile anything"
 
 ## Quest Lines
 
@@ -298,7 +300,6 @@ and not need to serialize the arguments to a string.
 - repro doesn't work when you do `-repeat`
 - more calling convention tests between jitted code and c.
 - have one command that lets me run the tests on all targets
-- test slow_debug_threads (+ one that needs the phis in replace_frontend_ops)
 - tests for failing progeams. ie. panic backtrace
 - auto test repl. 
 - compiler/tests.fr stops when something doesn't compile but it should show which other tests passed like it does for runtime failures

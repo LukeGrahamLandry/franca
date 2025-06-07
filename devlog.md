@@ -6,6 +6,11 @@ let's cheat and make examples/terminal.fr(repl=true) not take 2 seconds to compi
 - compile_to_shader_source: 68 // shader compiler (for comptime)
 notably those are all things to aren't going to change if you're just working on the terminal program. 
 
+## (Jun 7)
+
+- seperate out the fields of QbeModule you're supposed to set to init it. 
+make the section size limits runtime configurable. 
+
 ## (Jun 6)
 
 - strange overload bug if you try to use this form of list constructor:

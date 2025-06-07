@@ -8,7 +8,7 @@ fn output_elf(m: *QbeModule) [][]u8 = {
     patch_pending_symbols(m);
      
     code := m.segments&[.Code]&;
-    code_size := code.len() - COMMANDS_SIZE_GUESS - SIZE_OF_STUBS;
+    code_size := code.len() - m.goal.commands_size_guess - m.goal.size_of_stubs;
     for_enum SegmentType { s | 
         m.align_to(s, 4096);
         // blink (https://github.com/jart/blink) wants 65k pages to let you turn on linear memory optimisation. 
@@ -34,7 +34,7 @@ fn output_elf(m: *QbeModule) [][]u8 = {
     
     chunks := list([]u8, 10, temp());
     segment_base := u8.ptr_from_raw(m.segment_address(.Code, 0));
-    commands: List(u8) = fixed_list(ptr = segment_base, len = COMMANDS_SIZE_GUESS);
+    commands: List(u8) = fixed_list(ptr = segment_base, len = m.goal.commands_size_guess);
     
     @assert_eq(m.goal.type, .Exe, "TODO: other types of elf");
     
@@ -151,7 +151,7 @@ fn output_elf(m: *QbeModule) [][]u8 = {
         it._2 = program_header();  // TODO: can this get moved up? or does it have to be after all load commands? 
     };
     
-    payload := u8.list(CHAINED_SIZE_GUESS, temp());
+    payload := u8.list(m.goal.chained_size_guess, temp());
     
     program_header()[] = (
         type = .Stack,
@@ -325,8 +325,8 @@ fn output_elf(m: *QbeModule) [][]u8 = {
             name = 0, // TODO
             type = .ProgramBits, 
             flags = 1.shift_left(@as(i64) Elf.SectionFlag.Exec),
-            addr = Elf.MYSTERY_SPICE + COMMANDS_SIZE_GUESS, 
-            offset = COMMANDS_SIZE_GUESS, 
+            addr = Elf.MYSTERY_SPICE + m.goal.commands_size_guess, 
+            offset = m.goal.commands_size_guess, 
             size = m.stubs&.len(),
             addr_align = 1,
         );
@@ -334,8 +334,8 @@ fn output_elf(m: *QbeModule) [][]u8 = {
             name = 0, // TODO
             type = .ProgramBits, 
             flags = 1.shift_left(@as(i64) Elf.SectionFlag.Exec),
-            addr = Elf.MYSTERY_SPICE + COMMANDS_SIZE_GUESS + SIZE_OF_STUBS,  
-            offset = COMMANDS_SIZE_GUESS + SIZE_OF_STUBS, 
+            addr = Elf.MYSTERY_SPICE + m.goal.commands_size_guess + m.goal.size_of_stubs,  
+            offset = m.goal.commands_size_guess + m.goal.size_of_stubs, 
             size = code_size,
             addr_align = 1,
         );
@@ -397,10 +397,10 @@ fn output_elf(m: *QbeModule) [][]u8 = {
     };
     
     end := commands.len;
-    @assert_le(end, COMMANDS_SIZE_GUESS, "we guessed wrong so the array resized and all the pointers are junk");
-    commands.len = COMMANDS_SIZE_GUESS;
+    @assert_le(end, m.goal.commands_size_guess, "we guessed wrong so the array resized and all the pointers are junk");
+    commands.len = m.goal.commands_size_guess;
     commands.items().rest(end).set_zeroed();
-    @assert_le(payload.len, CHAINED_SIZE_GUESS, "resized and now the pointers are junk");  // TODO: don't think i need this here, just mach-o did
+    @assert_le(payload.len, m.goal.chained_size_guess, "resized and now the pointers are junk");  // TODO: don't think i need this here, just mach-o did
     if payload.len != 0 {
         chunks&.push(payload.items());
     };

@@ -57,7 +57,7 @@ fn fixup_arm64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
                     
                     // create a new trampoline in the __stubs section. 
                     @if(insane_caches) lock(self.icache_mutex&);
-                    symbol.offset = self.stubs&.len() + COMMANDS_SIZE_GUESS;
+                    symbol.offset = self.stubs&.len() + self.goal.commands_size_guess;
                     trampoline := self.stubs&.reserve(Array(u32, 3));
                     @if(insane_caches) unlock(self.icache_mutex&);
                     // x16 is a caller saved register so it's fine to stomp it inside a call
@@ -83,7 +83,7 @@ fn fixup_arm64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
                 @fmt_write(self.debug_out, "# patch addr % refs %=%\n", fixup.patch_at, address, symbol.name);
             };
             inst: []u32 = (ptr = u32.ptr_from_raw(fixup.patch_at), len = 2);
-            if local && !(ENABLE_INCREMENTAL && self.goal.type == .JitOnly && self.got_indirection_instead_of_patches) {
+            if local && !(ENABLE_INCREMENTAL && self.goal.type == .JitOnly && self.goal.got_indirection_instead_of_patches) {
                 i_page, i_off := encode_adrp_add(address.offset(it.increment.zext()), fixup.patch_at, @as(u5) it.r);
                 inst[0] = i_page;
                 inst[1] = i_off;
@@ -95,7 +95,7 @@ fn fixup_arm64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
         fn DataAbsolute(it) => {
             rawptr.ptr_from_raw(fixup.patch_at)[] = address.offset(it.increment);
             m := self;
-            @debug_assert(!(m.got_indirection_instead_of_patches && m.goal.type == .JitOnly && address.is_null()), "you cant do that bro");
+            @debug_assert(!(m.goal.got_indirection_instead_of_patches && m.goal.type == .JitOnly && address.is_null()), "you cant do that bro");
         }
         @default => panic("arm64 unexpected fixup type");
     }
@@ -371,7 +371,7 @@ fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
                 };
             }
             fn Pending() => {
-                if self.m.got_indirection_instead_of_patches || self.m.goal.type == .Relocatable {
+                if self.m.goal.got_indirection_instead_of_patches || self.m.goal.type == .Relocatable {
                     self.immediate_fixup_got(dest_reg, inc, symbol);
                 } else {
                     push_fixup(self.m, symbol, patch);
@@ -859,7 +859,7 @@ fn emitins(self: *ArmState, i: *Qbe.Ins, b: *Qbe.Blk) void = {
 fn call_symbol(self: *ArmState, sym: Qbe.Sym, set_link: bool) void #once = {
     use_symbol(self.m, sym) { symbol |
         kind := symbol.kind;
-        if kind == .Local && ENABLE_INCREMENTAL && self.m.goal.type == .JitOnly && self.m.got_indirection_instead_of_patches {
+        if kind == .Local && ENABLE_INCREMENTAL && self.m.goal.type == .JitOnly && self.m.goal.got_indirection_instead_of_patches {
             // :HACK for playing with examples/hacky_incremental.fr
             kind = .Pending;
         };
@@ -891,7 +891,7 @@ fn call_symbol(self: *ArmState, sym: Qbe.Sym, set_link: bool) void #once = {
                 }; 
             };
             fn Pending() => {
-                if self.m.got_indirection_instead_of_patches {
+                if self.m.goal.got_indirection_instead_of_patches {
                     dest_reg := TMP(arm_scratch_int).int_reg();
                     self.immediate_fixup_got(dest_reg, 0, symbol);
                     self.inst(br(dest_reg, @if(set_link, 1, 0)));

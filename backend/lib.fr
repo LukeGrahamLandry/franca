@@ -92,13 +92,6 @@ QbeModule :: @rec @struct(
     
     initialized: bool,
     
-    // When this is set, forward references to symbols always emit an inline load from the global 
-    // offset table instead of using an instruction with a direct offset that must be patched later.
-    // this is useful for jitting without needing to go back and modify code. 
-    got_indirection_instead_of_patches: bool,
-    
-    convert_stores_to_atomic_for_debugging: bool,
-    
     forever: ArenaAlloc,
     symbol_memmove: Qbe.Sym,
     types_mutex: Mutex,
@@ -124,7 +117,6 @@ QbeModule :: @rec @struct(
     llvm_global_type_buf: List(u8),
     llvm_global_code_buf: List(u8),
     debug_out_storage: List(u8),
-    dis: DisassemblerFunc,
     need_write_protect: bool,
     use_map_jit_on_apple_silicon: bool,
     wasm_types_cache: HashMap([]u8, i32),
@@ -146,30 +138,53 @@ QbeTargetEnv :: @struct(
     // - should we emit Mach-O or ELF?
     os: Os,
     type: QbeOutputPurpose,
+    
+    // only matters when type=JitOnly. 
+    // does the code need to be writable and executable at the same time? 
+    // this lets you freely interweave running code in a module and adding more functions to it
+    // if false, you have to call make_exec before trying to run the code. 
+    // Regardless, be careful of cache coherency on aarch64, see comment on lib/sys/process.fr/clear_instruction_cache().
+    expecting_wx := false,
+    
+    // When this is set, forward references to symbols always emit an inline load from the global 
+    // offset table instead of using an instruction with a direct offset that must be patched later.
+    // this is useful for jitting without needing to go back and modify code. 
+    // false: faster runtime, true: faster comptime + more flexibility 
+    got_indirection_instead_of_patches := false,
+    
+    segment_size        := 1.shift_left(25),
+    max_got_size        := 1.shift_left(15),
+    size_of_stubs       := 1.shift_left(11),
+    commands_size_guess := 16384,
+    chained_size_guess  := 2000000,
+    
+    // called for debug["D"]. the default one above just execs 'llvm-mc'. 
+    // But i need to be able to override it when targetting blink to not pull in those libc functions. 
+    dis: DisassemblerFunc = @if(is_linking_libc(), llvm_mc_dis, 
+        fn(out: *List(u8), _: []u8, __: Arch) = out.push_all("no disassembler included\n"),
+    ),
 );
 
 QbeOutputPurpose :: @enum(i64) (Cached, JitOnly, Exe, Relocatable, Dynamic, CachedEarly);
 ::enum(QbeOutputPurpose);
 
-MAX_GOT_SIZE :: 1.shift_left(15);
-SIZE_OF_STUBS :: 1.shift_left(11); // TODO: not this :explain
-COMMANDS_SIZE_GUESS :: 16384; // :explain
+fn text_padding(m: *QbeModule) i64 = 
+    m.goal.size_of_stubs + m.goal.commands_size_guess;
 
-CHAINED_SIZE_GUESS :: 2000000;  // TODO: prescan to caluclate?
-text_padding :: SIZE_OF_STUBS + COMMANDS_SIZE_GUESS;
-
-fn init_default_module(m: *QbeModule, goal: QbeTargetEnv, expecting_rwx: bool) void = {
+fn init_default_module(m: *QbeModule, goal: QbeTargetEnv) void = {
     :: import("@/lib/sys/subprocess.fr");  // this includes it in comptime_compute_self_hash even when -syscalls
     
-    dis: DisassemblerFunc = @if(is_linking_libc(), llvm_mc_dis, 
-        fn(out: *List(u8), _: []u8, __: Arch) = out.push_all("no disassembler included\n"),
-    );
-    init(m, 1.shift_left(25), general_allocator(), goal, expecting_rwx, dis);
+    init(m, general_allocator(), goal);
     
     // :DefaultToLibc
     // just make it work with the new library tracking. 
     // assume any imports are from libc like before.
     m.new_library("libc");
+}
+
+fn init(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
+    init_common(m, gpa, goal);
+    m.set_target_vtable();
 }
 
 // 
@@ -186,21 +201,12 @@ fn init_default_module(m: *QbeModule, goal: QbeTargetEnv, expecting_rwx: bool) v
 // The main take away is the franca compiler wants to use this so comptime franca code cannot set expecting_rwx to true on aarch64 macos. 
 //
 
-fn init(m: *QbeModule, segment_size: i64, gpa: Alloc, goal: QbeTargetEnv, expecting_rwx: bool, dis: DisassemblerFunc) void = {
-    init_common(m, segment_size, gpa, goal, expecting_rwx, dis);
-    m.set_target_vtable();
-}
-
-// - the allocators need to not be temp() because we reset temp()
-// - expecting_rwx only matters when jitting. if false, you have to call make_exec before trying to run the code. 
-//   Regardless, be careful of cache coherency on aarch64, see comment on lib/sys/process.fr/clear_instruction_cache().
-// - 'dis' is called for debug["D"]. the default one above just execs 'llvm-mc'. 
-//   But i need to be able to override it when targetting blink to not pull in those libc functions. 
-fn init_common(m: *QbeModule, segment_size: i64, gpa: Alloc, goal: QbeTargetEnv, expecting_rwx: bool, dis: DisassemblerFunc) void = {
-    gpa = todo_allocator;
+fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
+    // gpa needs to not be temp() because we reset temp()
     m[] = QbeModule.zeroed();
     lock(m.intern_mutex&);  // surely this does nothing at this point but just for fun
-    m.dis = dis;
+    m.goal = goal;
+    segment_size := goal.segment_size;
     m.save = .None;
     m.forever = init(gpa, size_of(Qbe.Ins) * 1.shift_left(20) + size_of(SymbolBucket) * IMask + 1.shift_left(10));
     forever := m.forever&.borrow();
@@ -211,8 +217,14 @@ fn init_common(m: *QbeModule, segment_size: i64, gpa: Alloc, goal: QbeTargetEnv,
         m.save = (Some = writer);
     };
     m.segments = EnumMap(SegmentType, SegmentCursor).zeroed();
-    expecting_rwx = expecting_rwx && goal.type == .JitOnly;
+    expecting_rwx := goal.expecting_wx && goal.type == .JitOnly;
     m.use_map_jit_on_apple_silicon = expecting_rwx && goal.arch == .aarch64 && goal.os == .macos;
+    
+    if goal.type == .JitOnly {
+        @assert_eq(goal.arch, query_current_arch(), "trying to jit to the wrong architecture");
+        msg :: "trying to jit to the wrong os.\nthe abi will be wrong if you try to call external functions (like apple disagrees about how varargs should be passed).";
+        @if(goal.arch == .aarch64) @assert_eq(goal.os, query_current_os(), msg);
+    };
     
     mem := if !m.use_map_jit_on_apple_silicon {
         page_allocator.alloc(u8, segment_size * 3)
@@ -263,7 +275,6 @@ fn init_common(m: *QbeModule, segment_size: i64, gpa: Alloc, goal: QbeTargetEnv,
     };
     
     m.initialized = true;
-    m.goal = goal;
     m.exports = list(gpa);
     m.imports = list(gpa);
     m.local_needs_reloc = list(gpa);
@@ -274,11 +285,11 @@ fn init_common(m: *QbeModule, segment_size: i64, gpa: Alloc, goal: QbeTargetEnv,
     {   // TODO: this is kinda ass
         // :GotAtConstantDataBase
         next := m.segments&[.ConstantData].next&;
-        m.got = (mmapped = (ptr = next[], len = MAX_GOT_SIZE), next = next[]);
-        next[] = next[].offset(MAX_GOT_SIZE); 
+        m.got = (mmapped = (ptr = next[], len = goal.max_got_size), next = next[]);
+        next[] = next[].offset(goal.max_got_size); 
         
         if goal.type == .JitOnly {
-            range(0, MAX_GOT_SIZE / 8) { i |
+            range(0, goal.max_got_size / 8) { i |
                 tried_to_call_uncompiled :: fn() void = {
                     panic("ICE: jitted code tried to call an uncompiled function through __GOT");
                 };
@@ -287,11 +298,11 @@ fn init_common(m: *QbeModule, segment_size: i64, gpa: Alloc, goal: QbeTargetEnv,
         };
         
         next := m.segments&[.Code].next&;
-        m.commands = (mmapped = (ptr = next[], len = COMMANDS_SIZE_GUESS), next = next[]);
-        next[] = next[].offset(COMMANDS_SIZE_GUESS); 
-        m.stubs = (mmapped = (ptr = next[], len = SIZE_OF_STUBS), next = next[]);
+        m.commands = (mmapped = (ptr = next[], len = m.goal.commands_size_guess), next = next[]);
+        next[] = next[].offset(m.goal.commands_size_guess); 
+        m.stubs = (mmapped = (ptr = next[], len = m.goal.size_of_stubs), next = next[]);
         m.start_of_executable_stubs = next[];
-        next[] = next[].offset(SIZE_OF_STUBS); 
+        next[] = next[].offset(m.goal.size_of_stubs); 
         m.start_of_writable_code = next[];
         
         if m.goal.arch == .wasm32 {
@@ -420,11 +431,6 @@ run_qbe_passes_common :: fn(f: *Qbe.Fn) bool = {
     fill_use(f);
     fillalias(f); // for coalesce
     coalesce(f); // optional
-    @if(f.globals.convert_stores_to_atomic_for_debugging) {
-        fillalias(f);
-        fill_use(f);
-        slow_debug_threads(f);
-    };
     fill_use(f); 
     filldom(f);  // TODO: do we need this here? i dont think anything breaks it after convert_to_ssa does it
     ssacheck(f); // debug
@@ -660,6 +666,7 @@ fn replace_frontend_ops(f: *Qbe.Fn) void = {
                 i := b.ins.index(j);
                 j += 1;
                 // TODO: explain more
+                // TODO: nothing uses this instruction rn
                 if i.op() == .assert {
                     r := f.newtmp("front", .Kw);
                     i[] = make_ins(.cnew, .Kw, r, i.arg&[0], QbeConZero);  // TODO: only looking at low 32 bits rn so it could just be jnz directly. but should really look at all 64. 
@@ -678,7 +685,7 @@ fn replace_frontend_ops(f: *Qbe.Fn) void = {
                     b.jmp = (type = .jnz, arg = r);
                     b.s1 = b2; b.s2 = fail;
                     b.ins.len = j;
-                    // this matters if the frontend uses phis (or this is being called late because of slow_debug_threads)
+                    // this matters if the frontend uses phis 
                     for_jump_targets b2 { s |
                         for_phi s { p |  // paste from replacepreds
                             replacepred(p.blk, p.narg.zext(), b2, b);
@@ -749,38 +756,6 @@ fn replace_frontend_ops(f: *Qbe.Fn) void = {
     };
     @debug_assert(last_block.link.is_null());
     last_block.link = new_blocks_list;
-}
-
-// Convert every u32/u64 store to a cas that crashes the program if it fails. 
-fn slow_debug_threads(f: *Qbe.Fn) void = {
-    for_blocks f { b |
-        changed := false;
-        for_insts_rev b { i |
-            i := i[];
-            if i.op() == .storel && escapes(i.arg&[1], f) {
-                f.move_end_of_block_to_scratch(b, i, changed&);
-                @emit_instructions((f = f), (i.arg&[0], i.arg&[1]), """
-                @foo
-                    %old =l load %1
-                    cas0 %1
-                    %prev =l cas1 %old, %0
-                    %success =l ceql %old, %prev
-                    assert %success
-                """);
-                changed = true;
-            } else {
-                if changed {
-                    f.emit(i[]);
-                };
-            }
-        };
-        @if(changed) f.copy_instructions_from_scratch(b); 
-    };
-    
-    // for assert(). silly. just factor it out and do it directly? 
-    replace_frontend_ops(f);
-    fillpreds(f);
-    fillrpo(f);
 }
 
 #use("@/lib/collections/enum_map.fr");

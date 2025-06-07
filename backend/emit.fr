@@ -337,7 +337,7 @@ fn finish_function(m: *QbeModule, dest: []u8, name_id: Qbe.Sym) void #inline = {
         s.size = dest.len.trunc();
         end_debug_info(m, s);
     };
-    if m.got_indirection_instead_of_patches && m.goal.type == .JitOnly && m.goal.arch == .aarch64 {
+    if m.goal.got_indirection_instead_of_patches && m.goal.type == .JitOnly && m.goal.arch == .aarch64 {
         clear_instruction_cache(u8.raw_from_ptr(dest.ptr), dest.len);
     };
     unlock(m.icache_mutex&);
@@ -453,13 +453,13 @@ fn ensure_got_slot(self: *QbeModule, symbol: *SymbolInfo, jit_address: rawptr) ?
             @fmt_write(self.debug_out, "# reserve __got[%] = %\n", symbol.got_lookup_offset / 8, symbol.name);
         };
         new_got_reloc = (Some = (patch_at = rawptr.raw_from_ptr(got), type = (DataAbsolute = (increment = 0))));
-        if !(self.got_indirection_instead_of_patches && jit_address.is_null()) { // TODO: remove this condition
+        if !(self.goal.got_indirection_instead_of_patches && jit_address.is_null()) { // TODO: remove this condition
             got[] = jit_address; // because we don't loop again to handle `new_got_reloc`
         }
     };
     got := self.segment_address(.ConstantData, symbol.got_lookup_offset);  // :GotAtConstantDataBase 
     got := rawptr.ptr_from_raw(got);
-    if self.got_indirection_instead_of_patches {
+    if self.goal.got_indirection_instead_of_patches {
         if jit_address.is_null() {
             got[] = @as(rawptr) (fn() Never = panic("ICE: tried to call got null jit_address"));
         } else {
@@ -504,7 +504,7 @@ fn emit_fn(f: *Qbe.Fn) void = {
     
     if m.debug["D".char()] {
         @fmt(m.debug_out, "# disassembly of '%' (% bytes)\n", m.str(f.lnk.id), code_bytes.len);
-        dis := m.dis;
+        dis := m.goal.dis;
         dis(m.debug_out, code_bytes, m.goal.arch);
     };
 }
@@ -550,7 +550,7 @@ fn main_entry_point_vaddr(m: *QbeModule) i64 = {
     @debug_assert(m.fixups_locked, "this is not threadsafe");
     symbol := m.get_symbol_info(m.intern("main"));  // :HardcodeMain
     assert(symbol.kind == .Local, "no exported main function?");
-    @debug_assert_ge(symbol.offset, COMMANDS_SIZE_GUESS + SIZE_OF_STUBS);
+    @debug_assert_ge(symbol.offset, m.goal.commands_size_guess + m.goal.size_of_stubs);
     symbol.offset
 }
 
@@ -568,7 +568,7 @@ fn patch_pending_symbols(m: *QbeModule) void = {
 
 fn debug_log_byte_size(m: *QbeModule) void = {
     // TODO: remove
-    code_count := m.segments&[.Code]&.len() - COMMANDS_SIZE_GUESS - SIZE_OF_STUBS;
+    code_count := m.segments&[.Code]&.len() - m.goal.commands_size_guess - m.goal.size_of_stubs;
     data_count := m.segments&[.MutableData]&.len();
     @if(show_backend_stats())
     @eprintln(">>> % bytes of code, % bytes of data.", code_count, data_count); 
@@ -605,7 +605,7 @@ fn seal_debug_info(m: *QbeModule, debug_source_code: []u8, include: bool, files_
     code := m.segments&.index(.Code);
     data: AotDebugInfo = (
         version = 1,
-        code_segment = (ptr = zeroed(*u8), len = ptr_diff(code.mmapped.ptr, code.next) - text_padding),
+        code_segment = (ptr = zeroed(*u8), len = ptr_diff(code.mmapped.ptr, code.next) - m.text_padding()),
         headers = m.debug_headers.items(),
         payload = m.debug_data.items(),
         source = debug_source_code,
@@ -619,9 +619,9 @@ fn seal_debug_info(m: *QbeModule, debug_source_code: []u8, include: bool, files_
     start_id := m.intern("__franca_code_segment");
     use_symbol(m, start_id) { s |
         s.segment = .Code;
-        s.offset = text_padding;
+        s.offset = m.text_padding();
         s.kind = .Local;
-        s.jit_addr = u8.raw_from_ptr(code.mmapped.ptr.offset(text_padding));
+        s.jit_addr = u8.raw_from_ptr(code.mmapped.ptr.offset(m.text_padding()));
         mark_referenced(m, start_id, s);
     };
     
