@@ -1,80 +1,91 @@
-// unbuffered! :SLOW
 main :: fn() void = {
     input := read_file_from_last_arg();
     header: *Incremental.Header = check(input);
     m := @uninitialized QbeModule; m := m&;
     init_empty_for_template_only(m, general_allocator());
     
-    @println("- (size = %, arch_os = %)", input.len, header.arch_os);
+    out := u8.list(general_allocator());
+    @fmt(out&, "# (size = %, arch_os = %)\n", input.len, header.arch_os);
     {
-        @print("- entry: ");
+        @fmt(out&, "# entry: ");
         if header.entry_sym != Qbe.no_symbol {
             it: *Incremental.Sym = header.get(header.entry_sym);
-            print(header.get(it.name));
+            @fmt(out&, "%", header.get(it.name));
         }
         if header.entry_dep != Qbe.no_symbol {
             it: *Incremental.Dep = header.get(header.entry_dep);
-            @print(" in % ", header.get(it.filename));
+            @fmt(out&, " in % ", header.get(it.filename));
         }
-        @println("");
+        @fmt(out&, "\n");
     }
     
-    @println("=== arr ===");
+    @fmt(out&, "# === arr ===\n");
     inline_for Incremental.Header.get_fields() { $f | 
         ok :: get_type_info_ref(f[].ty).is(.Struct) && get_constant(Type, Type.scope_of(f[].ty), @symbol StorageElement).is_some();
         @if(ok) {
             it := Incremental.Header.get_field_ptr(header, f);
-            @println("- %: (off = %, count = %)", ::f[].name.str(), it.off, it.count);
+            @fmt(out&, "# %: (off = %, count = %)\n", ::f[].name.str(), it.off, it.count);
         }
     };
     
-    @if(header.dep.count != 0) @println("=== dep ===");
+    @if(header.dep.count != 0) @fmt(out&, "# === dep ===\n");
     for(header, header.all(Incremental.Dep)) { _, it |
-        @println("- % % %", header.get(it.filename), it.file_len, it.hashcode&);
+        @fmt(out&, "# % % %\n", header.get(it.filename), it.file_len, it.hashcode&);
     };
     
     Incremental'read_types(header, m);
-    @if(m.types.len > 0) @println("=== typ ===");
+    @if(m.types.len > 0) @fmt(out&, "# === typ ===\n");
     range(0, m.types.len) { t |
-        print_type(m, t, m.debug_out);
-        m.flush_debug();
+        print_type(m, t, out&);
     };
     
-    @println("=== sym ===");
+    print(out.items()); out&.clear();
+    
+    @fmt(out&, "# === sym ===\n");
     syms := preintern_syms(header, m);
     for(header, header.all(Incremental.Sym)) { i, it |
+        continue :: local_return;
         ::enum(@type it.segment);
-        @print("- '%' is % ", header.get(it.name), it.segment);
-        if @is(it.segment, .MutableData, .ConstantData, .ZeroInitData) {
-            @println("(align = %, size = %)",  
-                1.shift_left(it.align_log2.zext()), it.dat.bytes.count);
-            for header.get(it.dat.rel) { rel |
-                sym: *Incremental.Sym = header.get(rel.id.id);
-                @println("    - [%] %+%", rel.off, header.get(sym.name), rel.addend);
-            };
-        } else {
-            @match(it.segment) {
-                fn Invalid() => @println("");
-                fn Code() => {
-                    @println("(nblk = %, ncon = %, nmem = %)", 
-                        it.fnc.blk.count, it.fnc.con.count, it.fnc.mem.count);
-                    f := @uninitialized Qbe.Fn;
-                    f&.default_init(m);
-                    load(header, f&, i, syms);
-                    out := u8.list(temp());
-                    printfn(f&, out&);
-                    println(out.items());
-                }
-                fn MachineCode() => {
-                    @println("(size = %)", it.dat.bytes.count);
-                }
-                fn Import() => {
-                    lib := header.get(it.imp.lib);
-                    @println("(lib = %)", header.get(lib.name));
-                }
-                @default => ();
+        @fmt(out&, "# '%' is % ", header.get(it.name), it.segment);
+        @match(it.segment) {
+            fn Invalid() => @fmt(out&, "\n");
+            fn Code() => {
+                flags: Incremental.FncFlags = (repr = it.fnc.flags);
+                @fmt(out&, "(");
+                if(flags.get(.leaf)     != 0, => @fmt(out&, "leaf, "));
+                if(flags.get(.vararg)   != 0, => @fmt(out&, "vararg, "));
+                if(flags.get(.dynalloc) != 0, => @fmt(out&, "dynalloc, "));
+                if(flags.get(.salign)   != 0, => @fmt(out&, "salign=%, ", flags.get(.salign)));
+                if(it.fnc.tmp == Qbe.no_symbol && it.fnc.either.slot != 0, => @fmt(out&, "slot=%, ", it.fnc.either.slot));
+                if(it.fnc.reg != 0,           => @fmt(out&, "reg=%, ", it.fnc.reg));
+                out.len -= out.items().ends_with(", ").int() * 2;
+                @fmt(out&, ")\n");
+                
+                f := @uninitialized Qbe.Fn;
+                f&.default_init(m);
+                load(header, f&, i, syms);
+                printfn(f&, out&);
             }
-        }
+            // TODO: print this as something qbe_frontend.fr can parse so it can round trip
+            fn MachineCode() => {
+                @fmt(out&, "(size = %)\n# ", it.dat.bytes.count);
+                for(header.get(it.dat.bytes), fn(c) => @fmt(out&, "% ", c));
+                @fmt(out&, "\n");
+            }
+            fn Import() => {
+                lib := header.get(it.imp.lib);
+                @fmt(out&, "(lib = %)\n", header.get(lib.name));
+            }
+            @default => {
+                @fmt(out&, "(align = %, size = %)\n",  
+                    1.shift_left(it.align_log2.zext()), it.dat.bytes.count);
+                
+                dat := load(header, m, i, syms);
+                print_data(m, dat&, out&);
+            };
+        };
+        
+        print(out.items()); out&.clear();
     };
 }
 

@@ -5,18 +5,19 @@
 
 fn edgedel(source: *Qbe.Blk, dest_p: **Qbe.Blk) void = {
     dest := dest_p[];
+    same := identical(source.s1, source.s2);
     dest_p[] = Qbe.Blk.ptr_from_int(0);
-    if(dest.is_null() || identical(source.s1, source.s2), => return());
+    if(dest.is_null() || same, => return());
     
     // remove the phis along this edge.
     // this would happen for free if we used block arguments instead of phis, but phis are more convient in other passes. 
     // :MakeATestThatFails if you don't do this
     for_phi dest { p |
         a := index_in_phi(source, p);
-        // and remove that option from the array
+        // remove_unordered that option from the array
         p.narg -= 1;
-        p.blk.slice(0, p.narg.zext()+1).copy_overlapping(a, a + 1, p.narg.zext() - a); // TODO: makes sure these offsets are right
-        p.arg.slice(0, p.narg.zext()+1).copy_overlapping(a, a + 1, p.narg.zext() - a);
+        p.blk[a] = p.blk[p.narg.zext()];
+        p.arg[a] = p.arg[p.narg.zext()];
     };
     
     if dest.npred != 0 {
@@ -27,7 +28,7 @@ fn edgedel(source: *Qbe.Blk, dest_p: **Qbe.Blk) void = {
             a += 1;
         };
         dest.npred -= 1;
-        dest.pred.slice(0, dest.npred.zext()+1).copy_overlapping(a, a + 1, dest.npred.zext() - a); // TODO: makes sure these offsets are right
+        dest.pred[a] = dest.pred[dest.npred.zext()];  // remove_unordered
     };
 }
 
@@ -352,6 +353,7 @@ fn blkmerge(f: *Qbe.Fn) void = {
     /* linear jmp chains will be consecutive in rpo */
     curb := ptr_from_int(Qbe.Blk, 0);
     bid := 0;
+    changed := false;
     while => bid < f.nblk.zext() { 
         b := f.rpo[bid];
         if curb.is_null() {
@@ -384,12 +386,17 @@ fn blkmerge(f: *Qbe.Fn) void = {
             @debug_assert(b.s1.id.zext() == bid + 1, "rpo not in order");
             if f.globals.debug["B".char()] {
                 @fmt_write(f.globals.debug_out, "    merging blocks @% -> @%\n", b.name(), b.s1.name());
+                changed = true;
             };
         };
         bid += 1;
     };
     @debug_assert(curb.is_null(), "still have blocks??");
     killblks(f);
+    if changed {
+        printfn(f, f.globals.debug_out);  
+    };
+    flush_debug(f.globals);
 }
 
 // unused. 

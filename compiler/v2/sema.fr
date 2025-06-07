@@ -1601,7 +1601,6 @@ fn contextual_field(self: *SelfHosted, name: Symbol, expr_out: *FatExpr, type: T
                     return(.Ok);
                 };
             };
-            @err("contextual field % not found for %", self.pool.get(name), self.log_type(type))
         }
         fn Struct(f) => {
             if !(f.scope == NOSCOPE) {
@@ -1611,7 +1610,6 @@ fn contextual_field(self: *SelfHosted, name: Symbol, expr_out: *FatExpr, type: T
                     return(.Ok);
                 };
             };
-            @err("const field $% not found for %", self.pool.get(name), self.log_type(type))
         }
         fn Tagged(f) => {
             enumerate f.cases { i, f | 
@@ -1636,11 +1634,12 @@ fn contextual_field(self: *SelfHosted, name: Symbol, expr_out: *FatExpr, type: T
                     return(.Ok);
                 };
             };
-            @err("contextual field % not found for %", self.pool.get(name), self.log_type(type))
         }
-        fn Named(f) => self.contextual_field(name, expr_out, f._0);
-        @default => @err("no contextual fields for type % (wanted %)", self.log_type(type), self.pool.get(name));
-    }
+        fn Named(f) => return self.contextual_field(name, expr_out, f._0);
+        @default => ();
+    };
+    
+    (Err = self.error(MissingContextualField = (span = expr_out.loc, type = type, name = name)))
 }
 
 fn compile_call_overload_set(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(void) #once = {
@@ -2788,11 +2787,16 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
             @if(SPAM_TRACE) start(1, @if(ENABLE_TRACY, @tfmt("%", fid), ""));
             func := self.get_function(fid);
             
-            if !func.get_flag(.Generic) && func.finished_arg.is_none() {
+            if !func.get_flag(.UnboundGenerics) && func.finished_arg.is_none() {
+                break :: local_return;
+                generic := func.get_flag(.Generic);
                 all_known := true;
                 each func.arg.bindings& { b |
                     res := @check(self.infer_type(b.ty&)) return2;
                     all_known = all_known && res&.is_some();
+                    
+                    // parameters after the first $const can't be inferred without binding const args
+                    if(generic && b.kind == .Const, => break());
                 };
                 if all_known {
                     @check(self.infer_arguments(fid)) return2;
@@ -3282,7 +3286,7 @@ fn resolve_in_overload_set(self: *SelfHosted, f_ty: FnType, i: OverloadSet, loc:
     if interesting.len == 1 {
         return(Ok = interesting[0]);
     };
-    
+        
     ::if([]FatExpr);
     blocked: List(*Action) = list(temp());
     still_interesting: List(FuncId) = list(temp());
@@ -3322,20 +3326,9 @@ fn resolve_in_overload_set(self: *SelfHosted, f_ty: FnType, i: OverloadSet, loc:
     for interesting& { opt | 
         continue :: local_return;
         func := self.get_function(opt);    
-        // TODO: i dont want to check .Generic because i want to remove the need for the annotation eventually. 
-        if !func.get_flag(.Generic) && func.finished_ret&.is_none() {
-            @match(self.infer_return(opt)) {
-                fn Ok() => ();
-                fn Err(e) => return(Err = e);
-                fn Suspend(f) => {
-                    blocked&.push(f); 
-                    // TODO: write a test where this matters
-                    still_interesting&.push(opt);
-                    continue();
-                }
-            };
+        if func.finished_ret&.is_none() {
+            @check(self.infer_return(opt)) return;
         };
-        
         if func.finished_ret { found | 
             if !self.ask_can_assign(want, found) {
                 continue();
@@ -3733,7 +3726,7 @@ fn handle_declare_constant(self: *SelfHosted, name: Var, ty: *LazyType, value: *
         real_value_box := invocation.arg;
         hole := self.intern_type(.Placeholder);
         self.set(value, Type, hole);
-        self.save_guessed_name(hole, name.name);
+        self.save_guessed_name(hole, name.name, value.loc);
         // This can't just fallthrough and call update_placeholder at the end of this function like the old version did,
         // because we might suspend while compiling and then next time around we'll forget this value is special. 
         // (we'll just think its already done because we'll see the placeholder).
@@ -3761,7 +3754,7 @@ fn handle_declare_constant(self: *SelfHosted, name: Var, ty: *LazyType, value: *
         @debug_assert(value.expr&.is(.Value));
         type_value := Type.assume_cast(value.expr.Value.bytes&)[];
         // You're still gonna get a lot of T/Self/RAW which is unhelpful. 
-        self.save_guessed_name(type_value, name.name);
+        self.save_guessed_name(type_value, name.name, value.loc);
     };
     
     .Ok
@@ -4614,11 +4607,16 @@ fn make_runtime_field(self: *SelfHosted, b: *Binding) Maybe(Field) #inline = {
     ))
 }
 
+fn return_macro_type(self: *SelfHosted, expr: *FatExpr, type: Type) Maybe(FatExpr) = {
+    self.set(expr, Type, type);
+    self.type_extra&.nested_index(type.as_index())[].loc.low = expr.loc.low;
+    (Ok = expr[])
+}
+
 fn union_macro(self: *SelfHosted, fields: *FatExpr) Maybe(FatExpr) = {
     @err_assert(fields.expr&.is(.StructLiteralP), "expected map literal: (name: Type, ... ) for @union") return;
     ty := @check(self.struct_type(fields.expr.StructLiteralP&, true)) return;
-    self.set(fields, Type, ty);
-    (Ok = fields[])
+    self.return_macro_type(fields, ty)
 }
 
 fn struct_macro(self: *SelfHosted, expr: *FatExpr) Maybe(FatExpr) = {
@@ -4672,8 +4670,7 @@ fn struct_macro(self: *SelfHosted, expr: *FatExpr) Maybe(FatExpr) = {
         @default => return(@err(msg));
     };
     
-    self.set(expr, Type, ty);
-    (Ok = expr[])
+    self.return_macro_type(expr, ty)
 }
 
 fn enum_macro(self: *SelfHosted, arg: *FatExpr, target: *FatExpr) Maybe(FatExpr) = {
@@ -4723,8 +4720,7 @@ fn enum_macro(self: *SelfHosted, arg: *FatExpr, target: *FatExpr) Maybe(FatExpr)
         @default => return(@err("@enum expected struct literal or tuple of names"));
     };
     unique_ty := self.intern_type(Enum = (raw = type, fields = fields.as_raw(), sequential = sequential));
-    self.set(arg, Type, unique_ty);
-    (Ok = arg[])
+    self.return_macro_type(arg, unique_ty)
 }
 
 fn tagged_macro(self: *SelfHosted, cases_expr: *FatExpr) Maybe(FatExpr) = {
@@ -4754,8 +4750,7 @@ fn tagged_macro(self: *SelfHosted, cases_expr: *FatExpr) Maybe(FatExpr) = {
     @try(self.require_unique_fields(pattern)) return;  // doing this at the end, after all suspends
     tag_type := self.intern_type(Enum = (raw = self.get_or_create_type(i64), fields = tag_fields.as_raw(), sequential = true));
     tagged_type := self.intern_type(Tagged = (cases = cases.as_raw(), tag = tag_type));
-    self.set(cases_expr, Type, tagged_type);
-    (Ok = cases_expr[])
+    self.return_macro_type(cases_expr, tagged_type)
 }
 
 fn compile_body(self: *SelfHosted, fid: FuncId) Maybe(void) #inline = {

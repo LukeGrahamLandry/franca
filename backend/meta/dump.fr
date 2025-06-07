@@ -132,11 +132,7 @@ fn printref(r: Qbe.Ref, f: *Qbe.Fn, out: *List(u8)) void = @match(rtype(r)) {
         @fmt(out, "R%", r.val());
     } else {
         n := f.tmp[r.val()]&.name();
-        if n.len == 0 {
-            @fmt(out, "%.%", "%", r.val());
-        } else {
-            @fmt(out, "%%", "%", n);
-        };
+        @fmt(out, "%%.%", "%", n, r.val());
     };
     fn RCon() => if r == QbeUndef {
         write(out, "UNDEF");
@@ -212,16 +208,15 @@ fn printins(f: *Qbe.Fn, i: *Qbe.Ins, out: *List(u8)) void = {
 };
 
 fn printfn(f: *Qbe.Fn, out: *List(u8)) void = {
-    mark := mark_temporary_storage();
     @fmt(out, "%function ", @if(f.lnk.export, "export ", ""));
     if f.retty != QbeNull {
-        type := f.get_type(f.retty);  // :ThreadSafety TODO
-        @fmt(out, ":% ", @if(TRACK_IR_NAMES, type.name(), f.retty.val()));
+        printref(f.retty, f, out);
+        @fmt(out, " ");
     };
     use_symbol(f.globals, f.lnk.id) { s |
         @fmt(out, "$%", s.name);
     };
-    @fmt(out, "() {  # nblk=%\n", f.nblk);
+    @fmt(out, "() {\n");
     
     for_blocks f { b | 
         continue :: local_return;
@@ -250,7 +245,6 @@ fn printfn(f: *Qbe.Fn, out: *List(u8)) void = {
     };
     write(out, "}\n");
     f.globals.flush_debug(); // since i tend to call this right before panicking. 
-    reset_temporary_storage(mark);
 }
 
 fn printphi(f: *Qbe.Fn, p: *Qbe.Phi, out: *List(u8)) void = {
@@ -281,7 +275,8 @@ fn printjmp(f: *Qbe.Fn, b: *Qbe.Blk, out: *List(u8)) void = {
             printref(b.jmp.arg, f, out);
         };
         if b.jmp.type == .retc {
-            @fmt(out, ", :%", f.get_type(f.retty).name());
+            @fmt(out, ", ");
+            printref(f.retty, f, out);
         };
         return();
     };
@@ -408,7 +403,12 @@ fn print_type(m: *QbeModule, ty_index: i64, out: *List(u8)) void = {  // :Thread
                 fn Fd() => @fmt(out, "d, ");
                 fn FTyp() => {
                     type := m.get_type(idx.zext());
-                    @fmt(out, ":%, ", @if(TRACK_IR_NAMES, type.name(), idx));
+                    n := type.name();
+                    if TRACK_IR_NAMES && n.len > 0 {
+                        @fmt(out, ":%, ", n);
+                    } else {
+                        @fmt(out, ":T%, ", idx);
+                    }
                 }
                 fn FPad() => {
                     @fmt(out, "p %, ", idx);
@@ -422,6 +422,78 @@ fn print_type(m: *QbeModule, ty_index: i64, out: *List(u8)) void = {  // :Thread
         @fmt(out, " }");
     };
     @fmt(out, "\n");
+}
+
+fn print_data(m: *QbeModule, dat: *Dat2, out: *List(u8)) void = {
+    @fmt(out, "data $% = { ", m.str(dat.id));
+    if dat.relocations.len == 0 {
+        break :: local_return;
+        @match(dat.template) {
+            fn Zeroes(count) =>  {
+                @fmt(out, "z % }\n", count);
+                return();
+            };
+            fn Bytes(bytes) => {
+                for bytes { c |
+                    if(c < 32 || c > 126 , => break());
+                };
+                // it's printable ascii
+                @fmt(out, "b \"%\" }\n", bytes);
+                return();
+            }
+        };
+    };
+    
+    r := 0;
+    b := 0;
+    count := dat.len();
+    if count >= 8 {
+        @fmt(out, "l ");
+    }
+    while => b < count { 
+        continue :: local_return;
+        if r < dat.relocations.len {
+            rel := dat.relocations[r];
+            if rel.off.zext() == b {
+                @fmt(out, "$%+% ", m.str(rel.id), rel.addend);
+                r += 1;
+                b += 8;
+                continue();
+            }
+        }
+        
+        if count - b < 8 {
+            @fmt(out, "%b ", @if(b == 0, "", ","));
+            range(b, count) { i |
+                @fmt(out, "% ", dat.get_byte(i));
+            };
+            b = count;
+            continue();
+        }
+        
+        i := @match(dat.template) {
+            fn Zeroes() => 0;
+            // TODO: is alignment real?
+            fn Bytes(bytes) => ptr_cast_unchecked(u8, i64, bytes.ptr)[];
+        };
+        @fmt(out, "% ", i);
+        b += 8;
+    };
+    @fmt(out, "}\n");
+}
+
+fn len(dat: *Dat2) i64 = {
+    @match(dat.template) {
+        fn Zeroes(count) => count;
+        fn Bytes(bytes) => bytes.len;
+    }
+}
+
+fn get_byte(dat: *Dat2, i: i64) u8 = {
+    @match(dat.template) {
+        fn Zeroes(count) => 0;
+        fn Bytes(bytes) => bytes[i];
+    }
 }
 
 fn dump_folding(f: *Qbe.Fn, fold_vals: []i32, out: *List(u8), folded_sel: bool) void = {

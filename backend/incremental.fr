@@ -1,7 +1,7 @@
 /// This defines the .frc file format used by the franca compiler. 
 /// See @/docs/caching.md
 
-MAGIC :: 0x0005_41434E415246;  // FRANCA__
+MAGIC :: 0x0006_41434E415246;  // FRANCA__
 Header :: @struct {
     meta: Meta #use;
     dep: Storage(Dep);
@@ -82,7 +82,7 @@ Blk :: @struct {
     s1: u32;  // local in Fnc.blks
     s2: u32;  // loacl in Fnc.blks
     jmp: Qbe.BlkJmp;
-    phi: u32; // idx[phi] = (nphi, [nphi](narg, to, k, [narg](blk, arg)))
+    phi: u32; // idx[phi] = (nphi, [nphi](narg, to, [narg](blk, arg)))
 };
 
 Dat :: @struct {
@@ -145,7 +145,6 @@ fn all(self: *Header, $T: Type) Ref(T) #generic = {
     storage := Header.get_field_ptr(self, f);
     (off = 0, count = storage.count)
 }
-    
 
 Ref :: fn($T: Type) Type = 
     @struct(off: u32, count: u32, RefElement :: T);
@@ -156,8 +155,8 @@ One :: fn($T: Type) Type =
 fn check(data: []u8) *Header = {
     @assert_ge(data.len, size_of(Header));
     self := ptr_cast_unchecked(u8, Header, data.ptr);
-    @assert_eq(self.magic_v, MAGIC);
-    @assert_le(self.filelen.zext(), data.len);
+    @assert_eq(self.magic_v, MAGIC, "Tried to load .frc with invalid magic!");
+    @assert_le(self.filelen.zext(), data.len, "header.filelen corrupted");
     
     for storage_fields { off, size |
         S :: @struct(off: u32, count: u32);
@@ -253,10 +252,11 @@ fn push(self: *Writer, f: *Qbe.Fn, did_regalloc: bool) void = {
             b.id = i;
             i += 1;
         };
+        @debug_assert_eq(i, f.nblk, "% lied about nblk", f.name());
     };
     self.blk&.reserve(zext f.nblk);
     for_blocks f { b |
-        phi := write_phi(self, b);
+        phi := write_phi(self, b, f.nblk);
         self.blk&.push_assume_capacity(
             ins = (off = self.ins.len.trunc(), count = b.ins.len.trunc()),
             s1 = @if(b.s1.is_null(), Qbe.no_symbol, bitcast b.s1.id),
@@ -339,9 +339,12 @@ find_storage_field :: fn(T: Type) *Field = {
     unreachable()
 };
 
-// You may want to call write_types(self, m); before this
 fn to_bytes(self: *Writer, meta: Meta, m: *QbeModule) [][]u8 = {
-    bytes := list([]u8, temp());
+    if m.goal.type == .CachedEarly {
+        write_types(m.save.unwrap(), m);
+    };
+
+    bytes := list([]u8, 14, temp());
     
     n := size_of(Header);
     header := temp().box(Header);
@@ -438,6 +441,25 @@ fn load(header: *Header, f: *Qbe.Fn, it: One(Sym), syms: []Qbe.Sym) bool /*did_r
         }
     };
     
+    flags: FncFlags = (repr = fnc.flags);
+    if !did_regalloc {
+        f.retty = fnc.either.retty;
+        read_tmp(header, f, fnc.tmp);  // This must be before read_phi
+        @debug_assert_eq(fnc.mem.count, 0);
+    } else {
+        f.slot = fnc.either.slot;
+        f.reg = fnc.reg;
+        f.salign = flags.get(.salign).intcast();
+        
+        // TODO: these are pretty chunky. it would be nice to deduplicate them. 
+        //       need to be careful, there might be something in amd64/emit.fr that assumes they don't alias?
+        f.nmem = fnc.mem.count.bitcast();
+        f.mem = new_copy(header.get(fnc.mem));
+    };
+    f.leaf = flags.get(.leaf) != 0;
+    f.dynalloc = flags.get(.dynalloc) != 0;
+    f.vararg = flags.get(.vararg) != 0;
+    
     blks := temp().alloc_zeroed(Qbe.Blk, fnc.blk.count.zext());
     enumerate header.get(fnc.blk) { i, b |
         blks[i].id = i.trunc();
@@ -453,28 +475,10 @@ fn load(header: *Header, f: *Qbe.Fn, it: One(Sym), syms: []Qbe.Sym) bool /*did_r
             blks[i].link = blks.index(i + 1);
         }
         
-        read_phi(header, blks, b, i);
+        read_phi(header, blks, b, i, f.tmp.slice(0, f.ntmp.zext()));
     };
     f.start = blks.index(0);
     f.nblk = fnc.blk.count.bitcast();
-    
-    // TODO: these are pretty chunky. it would be nice to deduplicate them. 
-    //       need to be careful, there might be something in amd64/emit.fr that assumes they don't alias?
-    f.nmem = fnc.mem.count.bitcast();
-    f.mem = new_copy(header.get(fnc.mem));
-    
-    flags: FncFlags = (repr = fnc.flags);
-    if !did_regalloc {
-        f.retty = fnc.either.retty;
-        read_tmp(header, f, fnc.tmp);
-    } else {
-        f.slot = fnc.either.slot;
-        f.reg = fnc.reg;
-        f.salign = flags.get(.salign).intcast();
-    };
-    f.leaf = flags.get(.leaf) != 0;
-    f.dynalloc = flags.get(.dynalloc) != 0;
-    f.vararg = flags.get(.vararg) != 0;
     
     did_regalloc
 }
@@ -563,6 +567,7 @@ fn compile_all_symbols(header: *Header, m: *QbeModule) void = {
         };
         reset_temporary_storage(mark);
     };
+    m.emit_suspended_inlinables();  // only meaningful if !did_regalloc
     
     // TODO: it would kinda feel better to keep track of the imports
     //       instead of making the caller loop over all the symbols again 
@@ -609,15 +614,15 @@ write_tmp :: fn(self: *Writer, f: *Qbe.Fn) u32 #once = {
     tmp
 };
 
-read_phi :: fn(header: *Header, blks: []Qbe.Blk, b: *Blk, i: i64) void #once = {
+read_phi :: fn(header: *Header, blks: []Qbe.Blk, b: *Blk, i: i64, tmp: []Qbe.Tmp) void #once = {
     if(b.phi == Qbe.no_symbol, => return());
     idx: u32 = b.phi;
     nphi: u32 = header.get(idx)[]; idx += 1;
     range(0, nphi.zext()) { i_phi | 
         narg: u32 = header.get(idx)[]; idx += 1;
         to: u32 = header.get(idx)[]; idx += 1;
-        k: u32 = header.get(idx)[]; idx += 1;
-        p := new_phi(blks[i]&, @as(Qbe.Cls) @as(i32) bitcast k, narg.zext(), TMP(to.zext()));
+        k := tmp[to.zext()].cls;
+        p := new_phi(blks[i]&, k, narg.zext(), TMP(to.zext()));
         range(0, narg.zext()) { _ |
             blk_i: u32 = header.get(idx)[]; idx += 1;
             arg_i: u32 = header.get(idx)[]; idx += 1;
@@ -626,7 +631,7 @@ read_phi :: fn(header: *Header, blks: []Qbe.Blk, b: *Blk, i: i64) void #once = {
     };
 };
 
-write_phi :: fn(self: *Writer, b: *Qbe.Blk) u32 #once = {
+write_phi :: fn(self: *Writer, b: *Qbe.Blk, nblk: i32) u32 #once = {
     if(b.phi.is_null(), => return(Qbe.no_symbol));
     phi: u32 = self.idx.len.trunc();
     self.idx&.push(0);  // nphi
@@ -634,8 +639,8 @@ write_phi :: fn(self: *Writer, b: *Qbe.Blk) u32 #once = {
         self.idx[phi.zext()] += 1;
         self.idx&.push(p.narg);
         self.idx&.push(p.to.val().trunc());
-        self.idx&.push(bitcast @as(i32) p.cls);  // TODO: wasteful. should know from f.tmp, just have to do that first
         range(0, p.narg.zext()) { n |
+            @debug_assert_lt(p.blk&[n].id, nblk);
             self.idx&.push(p.blk&[n].id.bitcast());
             self.idx&.push(p.arg&[n].type3_val29);
         };
@@ -682,7 +687,11 @@ read_types :: fn(header: *Header, m: *QbeModule) void = {
 //
 
 FTy :: @rec @struct {
-    Tag :: @enum(u8) (Void, Number, Array, Ptr, Function, Type, Enum, Scope, Struct, Union);
+    Tag :: @enum(u8) (
+        Alias,
+        Number, Array, Ptr, Function, 
+        Enum, Scope, Struct, Union, 
+    );
     tag: Tag;
     align_log2: u8;
     // franca structs can have runtime fields and also an associated scope. TODO: might need more bits for this field. 
@@ -699,7 +708,7 @@ FTy :: @rec @struct {
     TYPE     ::  2;
     I64      ::  3;
     BOOL     ::  4;
-    _        ::  5;
+    VARIADIC ::  5;
     NEVER    ::  6;
     F64      ::  7;
     OVERLOAD ::  8;

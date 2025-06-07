@@ -1,3 +1,39 @@
+let's cheat and make examples/terminal.fr(repl=true) not take 2 seconds to compile. 
+- toplevel: 58 (embarrassing!)
+- run_qbe_passes: 231, init_default_module: 346  // franca compiler (for runtime)
+- do_include: 295  // c compiler for stb (for comptime)
+- gfx: 63 // for on_frame (for runtime)
+- compile_to_shader_source: 68 // shader compiler (for comptime)
+notably those are all things to aren't going to change if you're just working on the terminal program. 
+
+## (Jun 6)
+
+- strange overload bug if you try to use this form of list constructor:
+    b := 0;
+    x: List(T) = list(b+b, temp());
+  before this one:
+    T.list(temp());
+  in a compilation context. types don't even have to match. 
+  you just need to reference the #generic one first. that's what `::assert(1, 1)` in core.fr was doing. 
+  ok so that's because it wasn't evaluating the type annotation on `$T: Type` because the `#generic` 
+  scared it off. 
+- track type declaration site a bit and report that when you try to access a missing const field. 
+- default_driver.fr support -frc_inlinable
+- fixed edgedel not removing all phis because it checked 
+`identical(source.s1, source.s2);` after `dest_p[] = Qbe.Blk.ptr_from_int(0);`. 
+Leaving some dead options around is normally fine because they're compared 
+by pointer identity so it safely won't match even if the block is later removed 
+by blkmerge. But when writing out .frc files, references are done by `id` 
+so it can't be allowed to encounter invalid blocks. 
+  - fixes bounds check fail in read_phi. 
+- made dump_bin.fr show data bytes in the format qbe_frontend can read
+- set con.bits=no_symbol on anything thats dead after fold_constants so those symbols won't 
+show up the the .frc file as Invalid. moved mark_referenced from inlcalls and do it at the 
+same time after fold. 
+- compiler/test.fr 
+  - a bit more robust by checking the output more so it can't just call exit(0) by accident
+  - allow compiling tests through the cache format
+
 ## (Jun 5)
 
 - just hacking out some stuff that won't work to see if i can get cosmo to compile far enough to get to the syscall shim

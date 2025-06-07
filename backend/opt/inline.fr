@@ -143,8 +143,6 @@ fn inlfind(f: *Qbe.Fn, r: Qbe.Ref) ?*Qbe.Fn = {
     use_symbol(f.globals, c.sym) { symbol |
         if !symbol.inline.is_null() {
             result = (Some = symbol.inline);
-        } else {
-            mark_referenced(m, c.sym, symbol);
         };
     };
     result
@@ -389,15 +387,6 @@ fn inlcall(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) i64 = {
 }
 
 fn inlcalls(f: *Qbe.Fn) void = {
-    fn mark_referenced(f: *Qbe.Fn, r: Qbe.Ref) void #inline = {
-        if(rtype(r) != .RCon, => return());
-        c := f.get_constant(r);
-        if(c.type() != .CAddr, => return());
-        use_symbol(f.globals, c.sym) { s | 
-            mark_referenced(f.globals, c.sym, s);
-        };
-    }
-    
     if f.globals.debug["G".char()] {
         @fmt_write(f.globals.debug_out, "\nProcessing function $%:\n", f.name());
     };
@@ -414,26 +403,9 @@ fn inlcalls(f: *Qbe.Fn) void = {
             if i.op() == .call {
                 /* careful, this rewrites b.ins */
                 n = inlcall(f, b, i); 
-            } else {
-                // This is unfortunate extra work I need to do becuase I want to skip emitting functions when all uses are inlined.
-                // This doesn't see the instructions we've inlined into this function, 
-                // but it's fine because they'd have been checked when we processed the callee the first time.  
-                // note: need to add something to the case above if inlining heuristic gets complicated enough to make choices based on the caller not just the callee. 
-                for i.arg&.items() { r | 
-                    mark_referenced(f, r);
-                };
             };
             n += 1;
         };
-        
-        // phi on function pointers is legal!
-        for_phi b { p |
-            for p.arg.slice(0, p.narg.zext()) { r | 
-                mark_referenced(f, r);
-            };
-        };
-        // dito for jnz / ret
-        mark_referenced(f, b.jmp.arg);
     };
     
     /* some new allocs in fn->start for retc, parc etc. */
@@ -471,7 +443,8 @@ fn mark_referenced(m: *QbeModule, id: Qbe.Sym, symbol: *SymbolInfo) void #inline
 fn emit_suspended_inlinables(m: *QbeModule) void = {
     flush_debug(m);
     log := m.debug["G".char()];
-    for m.inlinable_but_referenced_later { id | 
+    
+    for m.inlinable_but_referenced_later& { id | 
         mark := mark_temporary_storage();
         f := @uninitialized Qbe.Fn;
         use_symbol(m, id) { s | 
@@ -482,6 +455,7 @@ fn emit_suspended_inlinables(m: *QbeModule) void = {
                 printfn(f&, f.globals.debug_out);
             };
         };
+        before := m.inlinable_but_referenced_later.len;
         
         // we don't bother storing these in the inlining cache so recompute them
         // for now, its single block functions only so this is trivial. 
@@ -492,6 +466,10 @@ fn emit_suspended_inlinables(m: *QbeModule) void = {
         {m.target.finish_passes}(f&);
         flush_debug(m);
         reset_temporary_storage(mark);
+        
+        // inlsave() is after symbols in the function are marked as referenced, 
+        // so don't have to worry about new ones being found in this loop. 
+        @debug_assert_eq(before, m.inlinable_but_referenced_later.len);
     };
     m.inlinable_but_referenced_later&.clear();
 }

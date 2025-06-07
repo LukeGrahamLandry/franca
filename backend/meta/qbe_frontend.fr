@@ -69,6 +69,7 @@ fn main() void = {
     goal: QbeOutputPurpose = @if_else {
         @if(args.r) => .JitOnly;
         @if(args.c) => .Relocatable;
+        @if(args.frc_inlinable) => .CachedEarly;
         @if(args.frc) => .Cached;
         @else => .Exe;
     };
@@ -106,17 +107,14 @@ fn main() void = {
         @assert(!args.frc_inlinable, "TODO: this is ok if the input is also before regalloc but we can't go backwards");
         compile_all_symbols(header, m);
     } else {
+        if args.frc_inlinable {
+            m.target.finish_passes = (fn(f: *Qbe.Fn) void = f.globals.save.unwrap().push(f, false));
+        }
         handle_data :: fn(d: Dat2) void = {
             global_module.emit_data(d);
         };
         parse :: import("@/backend/meta/parse.fr").parse_top_level;
-        run_common_then_save :: fn(f: *Qbe.Fn) void = {
-            run_qbe_passes_common(f);
-            save := f.globals.save.unwrap();
-            save.push(f, false);
-        }
-        yield_func: (@FnPtr(*Qbe.Fn) void) = @if(args.frc_inlinable, run_common_then_save, run_qbe_passes);
-        res := parse(global_module, src, handle_data, yield_func, args.cc);
+        res := parse(global_module, src, handle_data, run_qbe_passes, args.cc);
         if res&.is_err() {
             panic(res.Err);
         };
@@ -145,7 +143,7 @@ fn main() void = {
                     if obj.is_function {
                         f := obj.f;
                         fill_lnk(f.lnk&, obj, m);
-                        yield_func(f);
+                        run_qbe_passes(f);
                     } else {
                         for translate_data(m, obj) { dat |
                             m.emit_data(dat);
@@ -154,16 +152,12 @@ fn main() void = {
                 }
             }
         };
-        
-        global_module.emit_suspended_inlinables();
-        if args.frc_inlinable {
-            Incremental'write_types(m.save.unwrap(), m);
-        }
+        m.emit_suspended_inlinables();
     };
     
     chunks := {global_module[].target.finish_module}(global_module);
     for chunks { chunk | 
-        write(outfile&, chunk);
+        write(outfile&, chunk); 
     };
     @if(outpath != "-") { close(outfile); };
     if args.r {

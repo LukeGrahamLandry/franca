@@ -1,4 +1,5 @@
 - implement _Atomic in import_c
+- import_c: `__constructor__, __aligned__`
 - clear cache before tests just in case
 - @bit_fields in incremental.fr don't work inline in the structs
 - import_c, get rid of :BoundsPadding
@@ -15,6 +16,11 @@ as different types even when they're the same size.
 - repro doesn't work cross compiling from linux to macos,
 but dump_macho.fr and objdump -d say they're the same (for mandelbrot_ui.fr at least). 
 so something in the data i guess? 
+- dump_bin: print segment.MachineCode as something qbe_frontend.fr can parse so it can round trip
+- examples/repl.fr: `@println("%+%=%", 1, 2, 1+2);` fails safety check
+- examples/repl.fr: compiling it infinite loops on macos-amd64 and crashes on linux-amd64 
+(when passed directly to the compiler cli or compiler/test.fr/compile(), but works through default_driver)
+- frc_inlinable doesn't work on the compiler itself
 
 ## Quest Lines
 
@@ -423,6 +429,14 @@ usecase: examples/lox Obj header
 but that's really going towards crazy town (cough swift/c++ cough)
 - formalize something for running code at the end of compilation 
 (instead of using hacks like set_self_hash)
+- probably shouldn't let you access root scope through a namespace. 
+```
+a :: 123;
+A :: @struct {
+  b :: 456;
+};
+@assert_eq(A.a, 123);  // kinda weird
+```
 
 ## demos 
 

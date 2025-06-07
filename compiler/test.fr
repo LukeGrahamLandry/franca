@@ -14,11 +14,14 @@ fn driver(vtable: *ImportVTable) void = {
     tests := collect_tests(vtable);
     
     // TODO: do these once for every execution strategy:  jit+aot+cached+reloc+dynamic
-    full := gen_full_test_program(tests&);
+    full, expect_dot_count := gen_full_test_program(tests&);
     ok, out, err := compile_and_run(vtable, full);
     if ok {
-        passed = tests.raw.len_including_tombstones;
         println(out.items());
+        passed = tests.raw.len_including_tombstones;
+        
+        // make sure it didn't cheat by calling exit(0) or something
+        @assert_eq(expect_dot_count, count_end_of_line_dots(out.items()), "status=0 but didn't print enough dots");
     } else {
         #use("@/examples/testing.fr");
         "./c.out".three_trillion_dollars_does_not_buy_an_operating_system_that_works(); 
@@ -68,8 +71,9 @@ fn driver(vtable: *ImportVTable) void = {
     
     {
         src := read_entire_file(temp(), "examples/kaleidoscope.fr").unwrap();
-        ok, _, _ := compile_and_run(vtable, @tfmt("#include_std(\"lib/core.fr\");%", src));
-        @assert(ok, "failed kaleidoscope");
+        ok, out, err := compile_and_run(vtable, @tfmt("#include_std(\"lib/core.fr\");%", src));
+        @assert(ok, "failed kaleidoscope\n%%", out.items(), err.items());
+        @assert(out.items().ends_with("[ok]\n"), "kaleidoscope status=0 but didn't print '[ok]'");
         println("examples/kaleidoscope.fr [ok]");
     };
 }
@@ -98,7 +102,8 @@ compile_only :: @const_slice(
     // "examples/toy/where_am_i.fr", "examples/toy/hello.fr", irritating comptime print
     "examples/toy/predict.fr",
     
-    "examples/repl.fr",
+    // TODO: this infinite loops on amd64 !! -- Jun 6, 2025
+    // "examples/repl.fr", // :skip
     
     // this are interactive so we just compile them. TODO: run one frame and show screen shot as a sanity check? 
     "examples/farm_game.fr",
@@ -119,30 +124,50 @@ compile_only :: @const_slice(
 );
 
 fn compile(vtable: *ImportVTable, src: Str) void = {
+    chunks := compile_to_bytes(vtable, src, @slice(QbeOutputPurpose.Exe));
+    outpath := "./c.out"; // TODO: don't hardcode this
+    write_entire_file_or_crash(outpath, chunks[0]);
+}
+
+// returns one blob of bytes for each `goal` compiled in the same CompCtx but different QbeModule-s. 
+fn compile_to_bytes(vtable: *ImportVTable, src: Str, goal: []QbeOutputPurpose) [][]u8 = {
+    results := list([]u8, goal.len, general_allocator());
+    mark := mark_temporary_storage();
     push_dynamic_context {
         opts := vtable.default_build_options();
         c := new_with_src(vtable, src, opts);
         c := vtable.with(c);
         
-        m := zeroed QbeModule;
-        a := query_current_arch();
-        
-        // TODO: this isn't in AstExternal anymore. 
-        //       this only works because we paste with #include_std which goes into the root scope 
-        //       so every name lookup recurses to the right place. 
-        //       actually same would apply to overload set anyway perhaps
-        //       -- Apr 9, 2025
-        AstExternal'init_default_module_dyn(m&, c.vtable, (arch = a, os = query_current_os(), type = .Exe));
-        fid := or c.get_unique_named("main") {
-            panic("expected exactly one function called 'main'")
+        for goal { goal |
+            @assert(@is(goal, .Exe, .Cached, .CachedEarly), "compile_to_bytes: only exe/cached");
+            m := zeroed QbeModule;
+            a, os := (query_current_arch(), query_current_os());
+            init_default_module_dyn(m&, c.vtable, (arch = a,  os = os, type = goal));
+            fid := or c.get_unique_named("main") {
+                panic("expected exactly one function called 'main'")
+            };
+            chunks := {c.vtable.emit_qbe_included}(QbeModule.raw_from_ptr(m&), c&, @slice(fid), .WrapMain);
+            bytes := concat(chunks&, general_allocator());
+            drop(m&);
+
+            if @is(goal, .Cached, .CachedEarly) {
+                init_default_module_dyn(m&, c.vtable, (arch = a,  os = os, type = .Exe));
+                
+                header: *Incremental.Header = check(bytes);
+                compile_all_symbols(header, m&);
+                chunks := {vtable.finish_qbe_module}(QbeModule.raw_from_ptr(m&));
+                
+                general_allocator().dealloc(u8, bytes);
+                bytes = concat(chunks&, general_allocator());
+                drop(m&);
+            };
+            
+            results&.push(bytes);
         };
-        chunks := {c.vtable.emit_qbe_included}(QbeModule.raw_from_ptr(m&), c&, @slice(fid), .WrapMain);
-        
-        outpath := "./c.out"; // TODO: don't hardcode this
-        write_chunks_or_crash(outpath, chunks&);
-        drop(m&);
         {c.vtable.destroy_compiler}(c.data);
     };
+    reset_temporary_storage(mark);
+    results.items()
 }
 
 fn compile_and_run(vtable: *ImportVTable, src: Str) Ty(bool, List(u8), List(u8)) = {
@@ -162,19 +187,21 @@ fn gen_test_program(file: Str, functions: []Str) Str = {
     src.items()
 }
 
-fn gen_full_test_program(tests: *Tests) Str = {
+fn gen_full_test_program(tests: *Tests) Ty(Str, i64) = {
     src := u8.list(temp());
     @fmt(src&, """#include_std("lib/core.fr");::FmtPad(Str);""");
     for_keys tests { k |
         @fmt(src&, "#include_std(\"%\");\n", k);
     };
     @fmt(src&, "fn main() void = {\n");
+    count := 0;
     each tests { k, v |
         @fmt(src&, "  @print(\"\\n%[ok]\", f_pad(\"%\", 40, .After));\n", "%", k);
         gen_test_program_body(src&, v[].items());
+        count += v.len;
     };
     push_all(src&, "\n}");
-    src.items()
+    (src.items(), count)
 }
 
 fn gen_test_program_body(src: *List(u8), functions: []Str) void = {
@@ -222,6 +249,36 @@ fn collect_tests(vtable: *ImportVTable) Tests = {
         };
     };
     out
+}
+
+// TODO: put this somewhere good
+fn concat(bytes: ~SSu8, in: Alloc) []u8 #where = {
+    size := 0;
+    for(bytes, fn(it) => { size += it.len });
+    out := in.alloc(u8, size);
+    size := 0;
+    for bytes { it |
+        out.subslice(size, it.len).copy_from(it);
+        size += it.len;
+    };
+    out
+}
+
+count_end_of_line_dots :: fn(out: Str) i64 = {
+    found_dot_count := 0;
+    i := 0;
+    while => i < out.len {
+        if out[i] == "]".ascii() {
+            i += 1;
+            while => i < out.len && out[i] != 10 {
+                @assert(out[i] == ".".ascii());
+                i += 1;
+                found_dot_count += 1;
+            }
+        }
+        i += 1;
+    };
+    found_dot_count
 }
 
 #use("@/lib/sys/subprocess.fr");

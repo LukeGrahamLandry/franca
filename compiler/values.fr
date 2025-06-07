@@ -565,11 +565,13 @@ fn intern_type(self: *SelfHosted, info: TypeInfo) Type = {
     }
 }
 
-fn save_guessed_name(self: *SelfHosted, type: Type, name: Symbol) void = {
-    guessed := self.type_extra&.nested_index(type.as_index())[].inferred_name&;
+fn save_guessed_name(self: *SelfHosted, type: Type, name: Symbol, loc: Span) void = {
+    info := self.type_extra&.nested_index(type.as_index());
+    guessed := info.inferred_name&;
     if guessed[] == Flag.SYMBOL_ZERO.ident() { 
         // TODO: also check first_dumb_type_name - last_dumb_type_name range?
         guessed[] = name;
+        info.loc = (low = loc.low);
     };
 }
 
@@ -676,6 +678,7 @@ fn get_info(self: *SelfHosted, ty_original: Type) *TypeMeta = {
     new :: fn(size_slots: u16, align_bytes: u16, contains_pointers: bool, stride_bytes: u32) TypeMeta = {
         @debug_assert_eq(stride_bytes.mod(align_bytes.zext()), 0);
         (
+            loc = (low = 0),
             stride_bytes = stride_bytes,
             size_slots = size_slots,
             align_bytes = align_bytes,
@@ -783,14 +786,17 @@ fn get_info(self: *SelfHosted, ty_original: Type) *TypeMeta = {
         }
         @default => unreachable();
     };
-    name := old.inferred_name;  // save if we poked this in before.
+    
+    // save if we poked this in before.
     if ty != ty_original {
-        name := old_original.inferred_name;
+        info.loc = old_original.loc;
+        info.inferred_name = old_original.inferred_name;
         old_original[] = info;
-        old_original.inferred_name = name;
     };
+    info.loc = old.loc;
+    info.inferred_name = old.inferred_name;
+    
     old[] = info;
-    old.inferred_name = name;
     old_original
 }
 
@@ -828,7 +834,7 @@ fn finish_layout_deep(self: *SelfHosted, ty: Type) void = {
 
 // :SLOW see devlog/Apr9
 fn alignment(self: *SelfHosted, f: *Field, info: *TypeMeta) i64 = {
-    if f.nullable_tag.is_null() {  // redundant. 
+    if !f.nullable_tag.is_null() {  // redundant. 
         if f.get_tag(Flag.align.ident()) { a | 
             res := self.poll_in_place(i64, => self.eval(a.args&, i64));
             res := self.unwrap_report_error(i64, res);

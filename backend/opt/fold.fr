@@ -112,6 +112,8 @@ fn fold_constants(f: *Qbe.Fn) void = {
     /* 2. trim dead code, replace constants */
     any_dead_blocks := false;
     pb := f.f.start&;
+    seen   := init_bitset(f.f.ncon.zext());
+    refcon :: fn(r) => @if(rtype(r) == .RCon) bsset(seen&, r.val());
     while => !pb[].is_null() { 
         continue :: local_return;
         b := pb[];
@@ -132,6 +134,7 @@ fn fold_constants(f: *Qbe.Fn) void = {
                 range(0, p.narg.zext()) { a | 
                     if !f.deadedge(p.blk[a].id, b.id) {
                         f.renumber(p.arg.index(a));
+                        refcon(p.arg[a]);
                     }
                 };
                 pp = p.link&;
@@ -144,12 +147,13 @@ fn fold_constants(f: *Qbe.Fn) void = {
                 i.set_nop();
             } else {
                 range(0, 2) { n | 
-                    f.renumber(i.arg&.index(n))
+                    f.renumber(i.arg&.index(n));
                 };
                 if is_store(i.op()) && i.arg&[0] == QbeUndef {
                     i.set_nop();
                 };
             };
+            for(i.arg&.items(), fn(r) => refcon(r));
         };
         f.renumber(b.jmp.arg&);
         
@@ -165,11 +169,28 @@ fn fold_constants(f: *Qbe.Fn) void = {
             b.jmp.type = .jmp;
             b.jmp.arg = QbeNull;
         };
+        refcon(b.jmp.arg);
         pb = b.link&;
     };
     
     if f.f.globals.debug["F".char()] {
         dump_folding(f.f, f.val, f.f.globals.debug_out, f.folded_sel);
+    };
+    
+    f := f.f;
+    range(fixed_const_count, f.ncon.zext()) { i |
+        c := f.con[i]&;
+        @if(c.type() == .CAddr)
+        if bshas(seen&, i) { 
+            // record that we referenced the symbol so it will be emitted even if it was suspended for inlining. 
+            use_symbol(f.globals, c.sym) { s | 
+                mark_referenced(f.globals, c.sym, s);  // required!
+            };
+        } else {
+            // prevent unreferenced constants showing up in .frc files (as `$foo is Invalid` spam). 
+            // happens when all uses were (inlined) or (dead after folding). 
+            c.sym = Qbe.no_symbol_S;  // optional
+        }
     };
 }
 
