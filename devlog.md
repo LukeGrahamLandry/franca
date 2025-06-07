@@ -10,6 +10,19 @@ notably those are all things to aren't going to change if you're just working on
 
 - seperate out the fields of QbeModule you're supposed to set to init it. 
 make the section size limits runtime configurable. 
+- remove a few #include_std-s
+- wasn't remapping Addr.offset.sym when outputting cache file
+  - so idk how anything at all was working on amd64. oh because i was mostly loading one whole cache file 
+  into a new module so all the symbol hashes worked out to be the same (if intern order was the same per bucket)
+  so it didn't matter if you remapped something as long as it was symetrical in read/write. 
+  it just started being a problem when i started zeroing out unused symbols after `fold` and that changed the order. 
+  - that was fun to write a repro for. need symbols that collide where one is a non-exported function with all uses inlined,
+  and that one is interred first. 
+  - this fixed: 
+  ```
+  examples/repl.fr: compiling it infinite loops on macos-amd64 and crashes on linux-amd64 
+  (when passed directly to the compiler cli or compiler/test.fr/compile(), but works through default_driver)
+  ```
 
 ## (Jun 6)
 

@@ -245,6 +245,18 @@ fn push(self: *Writer, f: *Qbe.Fn, did_regalloc: bool) void = {
         );
     };
     
+    first_mem := self.mem.len;
+    self.sym[id].fnc.mem = (off = first_mem.trunc(), count = f.nmem.bitcast());
+    self.mem&.push_all(f.mem.slice(0, zext f.nmem));
+    
+    @if(f.globals.goal.arch == .x86_64)
+    range(first_mem, self.mem.len) { i |
+        it := self.mem.index(i);
+        if it.offset.sym != Qbe.no_symbol_S {
+            it.offset.sym.id = trunc self.map_sym(f.globals, it.offset.sym);
+        }
+    };
+    
     self.sym[id].fnc.blk = (off = self.blk.len.trunc(), count = f.nblk.bitcast());
     {
         i: i32 = 0;
@@ -266,9 +278,6 @@ fn push(self: *Writer, f: *Qbe.Fn, did_regalloc: bool) void = {
         );
         self.ins&.push_all(b.ins.items());
     };
-    
-    self.sym[id].fnc.mem = (off = self.mem.len.trunc(), count = f.nmem.bitcast());
-    self.mem&.push_all(f.mem.slice(0, zext f.nmem));
     
     self.sym[id].fnc.reg = f.reg;
     if did_regalloc {
@@ -455,6 +464,13 @@ fn load(header: *Header, f: *Qbe.Fn, it: One(Sym), syms: []Qbe.Sym) bool /*did_r
         //       need to be careful, there might be something in amd64/emit.fr that assumes they don't alias?
         f.nmem = fnc.mem.count.bitcast();
         f.mem = new_copy(header.get(fnc.mem));
+        
+        @if(f.globals.goal.arch == .x86_64)
+        each f.mem.slice(0, f.nmem.zext()) { it |
+            if it.offset.sym != Qbe.no_symbol_S {
+                it.offset.sym = syms[it.offset.sym.id.zext()];
+            }
+        };
     };
     f.leaf = flags.get(.leaf) != 0;
     f.dynalloc = flags.get(.dynalloc) != 0;

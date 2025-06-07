@@ -1,22 +1,16 @@
 #include_std("backend/ir.fr");
 #include_std("backend/opt/simplify.fr");
-#include_std("backend/opt/live.fr");
 #include_std("backend/util.fr");
-#include_std("backend/opt/copy.fr");
 #include_std("backend/emit.fr");
 #include_std("backend/opt/ssa.fr");
 #include_std("backend/opt/cfg.fr");
 #include_std("backend/opt/spill.fr");
 #include_std("backend/opt/rega.fr");
-#include_std("backend/meta/dump.fr");
-#include_std("backend/opt/load.fr");
+#use("@/backend/meta/dump.fr");
 #include_std("backend/opt/alias.fr");
 #include_std("backend/opt/inline.fr");
-#include_std("backend/opt/mem.fr");
-#include_std("backend/opt/fold.fr");
 #use("@/backend/abi.fr");
 #use("@/backend/meta/template.fr");
-#include_std("backend/opt/slots.fr");
 #use("@/lib/leb128.fr");
 #use("@/lib/bit_fields.fr");
 #use("@/lib/sys/sync/mutex.fr");
@@ -38,7 +32,7 @@ fn init_default_module_dyn(m: *QbeModule, vtable: *ImportVTable, goal: QbeTarget
     {vtable.init_default_qbe_module}(QbeModule.raw_from_ptr(m), QbeTargetEnv.raw_from_ptr(goal&));
 }
 
-fn emit_qbe_included_dyn(m: *QbeModule, comp: *CompCtx, fns: [] FuncId, entry: ProgramEntry) BucketArray(u8) = {  
+fn emit_qbe_included_dyn(m: *QbeModule, comp: *CompCtx, fns: [] FuncId, entry: ProgramEntry) [][]u8 = {  
     {comp.vtable.emit_qbe_included}(QbeModule.raw_from_ptr(m), comp, fns, entry)
 }
 
@@ -397,6 +391,10 @@ fn drop(m: *QbeModule) void = {
 
 // returns false if suspended for inlining 
 run_qbe_passes_common :: fn(f: *Qbe.Fn) bool = {
+    #use("@/backend/opt/mem.fr");
+    
+    ::if(Qbe.Ref);
+    ::enum_basic(Qbe.UseType);
     m := f.globals;
     ::ptr_utils(QbeModule);
     @debug_assert(!m.is_null(), "function module not set");
@@ -427,7 +425,7 @@ run_qbe_passes_common :: fn(f: *Qbe.Fn) bool = {
     fill_use(f);
     ssacheck(f); // debug
     fillalias(f); // !
-    loadopt(f); // optional
+    import("@/backend/opt/load.fr")'loadopt(f); // optional
     fill_use(f);
     fillalias(f); // for coalesce
     coalesce(f); // optional
@@ -435,9 +433,9 @@ run_qbe_passes_common :: fn(f: *Qbe.Fn) bool = {
     filldom(f);  // TODO: do we need this here? i dont think anything breaks it after convert_to_ssa does it
     ssacheck(f); // debug
     
-    copy_elimination(f); // optional
+    import("@/backend/opt/copy.fr")'copy_elimination(f); // optional
     fill_use(f);
-    fold_constants(f);
+    import("@/backend/opt/fold.fr")'fold_constants(f);
     if inlsave(f) {
         // all uses might be inlined so we suspend processing until we know you took a function pointer later. 
         if m.debug["G".char()] {
@@ -476,7 +474,7 @@ fn finish_qbe_passes_native(f: *Qbe.Fn) void = {
         
     // arm isel inserts RMem (with different meaning from x64) for mul/store and RInt for load.
     {m.target.isel}(f);
-    elide_abi_slots(f); 
+    import("@/backend/opt/slots.fr")'elide_abi_slots(f); 
     
     fillrpo(f);
     fill_liveness(f);

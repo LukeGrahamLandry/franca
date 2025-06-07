@@ -18,10 +18,8 @@ but dump_macho.fr and objdump -d say they're the same (for mandelbrot_ui.fr at l
 so something in the data i guess? 
 - dump_bin: print segment.MachineCode as something qbe_frontend.fr can parse so it can round trip
 - examples/repl.fr: `@println("%+%=%", 1, 2, 1+2);` fails safety check
-- examples/repl.fr: compiling it infinite loops on macos-amd64 and crashes on linux-amd64 
-(when passed directly to the compiler cli or compiler/test.fr/compile(), but works through default_driver)
 - frc_inlinable doesn't work on the compiler itself
-- :skip :TodoLinux
+- :TodoLinux
 - "need to be consistant about how to handle modules like this that don't actually compile anything"
 
 ## Quest Lines

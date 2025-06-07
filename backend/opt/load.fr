@@ -50,7 +50,7 @@ LoadCtx :: @struct(
 );
 
 /* require rpo ssa alias */
-fn loadopt(f: *Qbe.Fn) void = {
+loadopt :: fn(f: *Qbe.Fn) void = {
     c: LoadCtx = (f = f, ilog = new(0), nlog = 0, inum = 0); c := c&;
     for_blocks f { b |
         for_insts_forward b { i |
@@ -69,9 +69,9 @@ fn loadopt(f: *Qbe.Fn) void = {
         write(f.globals.debug_out, "\n> After load elimination:\n");
         printfn(f, f.globals.debug_out);
     };
-}
+};
 
-fn emit_insertions(f: *Qbe.Fn, ilog: QList(Insert), nlog: i64) void = {
+emit_insertions :: fn(f: *Qbe.Fn, ilog: QList(Insert), nlog: i64) void = {
     // Sort them so we can just scan through the blocks in order. 
     // All insertions for a block together, phis first, insts sequential. 
     sort :: quicksort(Insert, icmp);
@@ -130,9 +130,9 @@ fn emit_insertions(f: *Qbe.Fn, ilog: QList(Insert), nlog: i64) void = {
         };
     };
     free(ilog);
-}
+};
 
-fn convert_load_to_move(i: *Qbe.Ins) void = {
+convert_load_to_move :: fn(i: *Qbe.Ins) void = {
     ext := rebase(i.op(), .extsb, .loadsb);
     o := @if_else {
         @if(i.op() == .load) => Qbe.O.copy;
@@ -143,7 +143,7 @@ fn convert_load_to_move(i: *Qbe.Ins) void = {
     i.set_op(o);
     i.arg&[0] = i.arg&[1];
     i.arg&[1] = QbeNull;
-}
+};
 
 /* returns a ref containing the contents of the slice
  * passed as argument, all the bits set to 0 in the
@@ -152,7 +152,7 @@ fn convert_load_to_move(i: *Qbe.Ins) void = {
  * mask does not cover all the bits of the slice,
  * otherwise, it has class sl.cls
  * the procedure returns R when it fails */
-fn def(c: *LoadCtx, sl: MSlice, requested_bits: u64, b: *Qbe.Blk, i: ?*Qbe.Ins, il: *Loc) Qbe.Ref = {
+def :: fn(c: *LoadCtx, sl: MSlice, requested_bits: u64, b: *Qbe.Blk, i: ?*Qbe.Ins, il: *Loc) Qbe.Ref = {
     /* invariants:
      * -1- b dominates il.blk; so we can use
      *     temporaries of b in il.blk
@@ -364,15 +364,15 @@ fn def(c: *LoadCtx, sl: MSlice, requested_bits: u64, b: *Qbe.Blk, i: ?*Qbe.Ins, 
         c.mask(out_int_cls, final_value&, requested_bits, il);
     };
     final_value
-}
+};
 
-fn mask(c: *LoadCtx, cls: Qbe.Cls, r: *Qbe.Ref, msk: u64, l: *Loc) void ={
+mask :: fn(c: *LoadCtx, cls: Qbe.Cls, r: *Qbe.Ref, msk: u64, l: *Loc) void ={
     c.cast(r, cls, l);
     con := getcon(c.f, msk.bitcast());
     r[] = c.iins(cls, .and, r[], con, l);
-}
+};
 
-fn cast(c: *LoadCtx, r: *Qbe.Ref, cls: Qbe.Cls, l: *Loc) void = {
+cast :: fn(c: *LoadCtx, r: *Qbe.Ref, cls: Qbe.Cls, l: *Loc) void = {
     if(rtype(r[]) == .RCon, => return());
     @debug_assert(rtype(r[]) == .RTmp);
     cls0 := c.f.tmp[r[].val()].cls;
@@ -393,9 +393,9 @@ fn cast(c: *LoadCtx, r: *Qbe.Ref, cls: Qbe.Cls, l: *Loc) void = {
             r[] = c.iins(cls, .cast, r[], QbeNull, l);
         }
     }
-}
+};
 
-fn iins(c: *LoadCtx, cls: Qbe.Cls, op: Qbe.O, a0: Qbe.Ref, a1: Qbe.Ref, l: *Loc) Qbe.Ref = {
+iins :: fn(c: *LoadCtx, cls: Qbe.Cls, op: Qbe.O, a0: Qbe.Ref, a1: Qbe.Ref, l: *Loc) Qbe.Ref = {
     r := c.f.newtmp("ld", cls);
     push(c.ilog&, c.nlog&, (
         is_phi = false,
@@ -406,9 +406,9 @@ fn iins(c: *LoadCtx, cls: Qbe.Cls, op: Qbe.O, a0: Qbe.Ref, a1: Qbe.Ref, l: *Loc)
     ));
     c.inum += 1;
     r
-}
+};
 
-fn load_masked(c: *LoadCtx, sl: MSlice, requested_bits: u64, l: *Loc) Qbe.Ref = {
+load_masked :: fn(c: *LoadCtx, sl: MSlice, requested_bits: u64, l: *Loc) Qbe.Ref = {
     loads_by_size :: {
         m := ast_alloc().alloc_zeroed(Qbe.O, 9);
         m[1] = .loadub;
@@ -441,9 +441,9 @@ fn load_masked(c: *LoadCtx, sl: MSlice, requested_bits: u64, l: *Loc) Qbe.Ref = 
     address = c.iins(cls, ld, address, QbeNull, l);
     if(!all, => c.mask(cls, address&, requested_bits, l));
     address
-}
+};
 
-fn killsl(c: *LoadCtx, r: Qbe.Ref, sl: MSlice) bool #inline = {
+killsl :: fn(c: *LoadCtx, r: Qbe.Ref, sl: MSlice) bool #inline = {
     if(rtype(sl.ref) != .RTmp, => return(false));
     t := c.f.get_temporary(sl.ref);
     a := t.alias&;
@@ -453,40 +453,7 @@ fn killsl(c: *LoadCtx, r: Qbe.Ref, sl: MSlice) bool #inline = {
         @debug_assert(a.type != .ABot, "ICE: confused about alising of %%. trying to load from an undeclared variable?", "%", t.name());
         TMP(a.base) == r
     }
-}
+};
 
 // 1 -> 0xFF, 2 -> 0xFFFF, etc
-fn ones_mask_of_size(bytes: i32) u64 #inline = (BIT(8*(bytes.intcast())-1)*2-1); /* must work when bytes==8 */
-
-fn size_of_store(i: *Qbe.Ins) i32 = {
-    i.maybe_store().expect("valid op for size_of_store")
-}
-
-fn maybe_store(i: *Qbe.Ins) ?i32 = {
-    (Some = @match(i.op()) {
-        fn storeb() => 1;
-        fn storeh() => 2;
-        fn storew() => 4;
-        fn stores() => 4;
-        fn storel() => 8;
-        fn stored() => 8;
-        @default => return(.None);
-    })
-}
-
-fn maybe_load(i: *Qbe.Ins) ?i32 = {
-    (Some = @match(i.op()) {
-        fn loadsb() => 1;
-        fn loadub() => 1;
-        fn loadsh() => 2;
-        fn loaduh() => 2;
-        fn loadsw() => 4;
-        fn loaduw() => 4;
-        fn load() => if(i.cls().is_wide(), => 8, => 4);
-        @default => return(.None);
-    })
-}
-
-fn size_of_load(i: *Qbe.Ins) i32 = {
-    i.maybe_load().expect("valid op for size_of_load")
-}
+ones_mask_of_size :: fn(bytes: i32) u64 #inline = (BIT(8*(bytes.intcast())-1)*2-1); /* must work when bytes==8 */

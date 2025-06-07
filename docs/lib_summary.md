@@ -8,6 +8,7 @@ available to every program (you can access them with `import()` or `#use`).
   - bit_set
   - deque: dynamic array that tracks start/end so it's fast to push/pop from either end.
   - enum_map: an array with named indices
+  - bucket_array: dynamic array with pointer stability
 - alloc
   - fixed_block
 - bit_fields: pack values into an integer with less error prone bit shifting. 
