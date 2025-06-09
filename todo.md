@@ -21,6 +21,8 @@ so something in the data i guess?
 - frc_inlinable doesn't work on the compiler itself
 - :TodoLinux
 - "need to be consistant about how to handle modules like this that don't actually compile anything"
+- "this makes ffi take 180ms longer to compile because it doesn't go through a vtable"
+- count_array_init_elements is still spitting out junk symbols into the scope. need to just not parse it twice. 
 
 ## Quest Lines
 

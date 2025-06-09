@@ -1,0 +1,463 @@
+#use("@/backend/incremental.fr");
+
+fn read_cached(a: Alloc, path: Str) ?*Header = {
+    bytes := read_entire_file(a, path) || return(.None);
+    magic8 := ptr_cast_unchecked(u8, u64, bytes.ptr)[];
+    if(magic8 != MAGIC, => return(.None));
+    (Some = check(bytes))
+}
+
+// The first Dep in cached .frc files is the hash of the compiler itself. 
+self_filename :: "@self";
+// TODO: im just vaugly hoping this runs after all files have been loaded 
+//       (which it does not in fact. backend/__/emit.fr is through a vtable so happens late)
+self_hash :: @static(Array(u32, 8)) Array(u32, 8).zeroed();
+
+// TODO: THIS BEHAVIOUR IS CONSIDERED DISRESPECTFUL.
+//       this is a fragile compilation order HACK that user code really shouldn't do 
+//       but it's kinda cute that it works. This gets called from main() and the extra 
+//       indirection with a forced shim ensures that comptime_compute_self_hash() runs 
+//       after all files have been loaded (even the ones through a shim in Qbe.Target vtable). 
+//       this will definitly come back to haunt me because i only test it manually by uncommenting 
+//       a print and eyeballing the list of files.    -- May 26, 2025
+set_self_hash :: fn() void #inline = {
+    hack :: @as(@FnPtr() Array(u32, 8)) comptime_compute_self_hash;
+    self_hash[] = hack();
+};
+
+fn comptime_compute_self_hash() Array(u32, 8) = :: {
+    fr   := current_compiler_context();
+    self := fr.data.cast()[][];
+    hash := zeroed Array(u32, 8);
+    @if(!IS_BOOTSTRAPPING) // :UpdateBoot
+    each self.codemap.files { it |
+        // uncomment to check that the compilation order hack with set_self_hash is working. 
+        if is_cachable(it.name) {
+            // println(it.name);
+            hash = bit_xor(hash, it.hash);
+        }
+    };
+    hash
+}
+
+fn bit_xor(a: Array(u32, 8), b: Array(u32, 8)) Array(u32, 8) = {
+    range(0, 8) { i |
+        a&[i] = bit_xor(a&[i], b&[i]);
+    };
+    a
+}
+
+fn files_unchanged(header: *Header) bool = {
+    if(header.dep.count <= 1, => return(false));
+    
+    it: *Dep = header.get(0);
+    if(header.get(it.filename) != self_filename, => return(false));
+    if(self_hash.items() != it.hashcode&.items(), => return(false));
+    
+    // TODO: save this work of loading + hashing the files even if they changed
+    range(1, header.dep.count.zext()) { i |
+        continue :: local_return;
+        it: *Dep = header.get(@as(u32) i.trunc());
+        filename := header.get(it.filename);
+        src      := temp().get_include_std(filename) || return(false);
+        if(src.len != it.file_len.zext(), => return(false));
+        hashcode := Sha256'sha256(src);
+        if(hashcode&.items() != it.hashcode&.items(), => return(false));
+    };
+    true
+}
+
+fn compile_cached(header: *Header) (@FnPtr(*ImportVTable) void) = {
+    a := general_allocator();
+    m := a.box(QbeModule);
+    init_default_module(m, (
+        arch = query_current_arch(), 
+        os = query_current_os(), 
+        type = .JitOnly,
+    ));
+    
+    z := zone_begin(.AotPump);
+    compile_all_symbols(header, m);
+    zone_end(z);
+    
+    import("@/backend/meta/qbe_frontend.fr")'fill_from_libc(m);
+    
+    i := header.entry_sym;
+    name := header.get(header.get(i)[].name);
+    cc := m.get_addr(name) || @panic("ICE: lost %", name);
+    _ := push_resolver(QbeModule, m, find_ip_in_module);
+    m.make_exec();
+    assume_types_fn(Arg = *ImportVTable, Ret = void, ptr = cc)
+}
+
+fn write_cache(m: *QbeModule, c: CompCtx, fid: FuncId, outpath2: Str, start_path: Str) void = {
+    self := c.data.cast()[][];
+    
+    @if(enable_incremental()) {
+        writer := m.save.unwrap();
+        finish_imports(writer, m);
+        
+        writer.dep&.reserve(self.codemap.files.len+1);
+        writer.dep&.push(
+            file_len = 0,
+            filename = writer.push(self_filename),
+            hashcode = self_hash[],
+        );
+        
+        entry_dep := Qbe.no_symbol;
+        each self.codemap.files { it |
+            if is_cachable(it.name) {
+                if entry_dep == Qbe.no_symbol && it.name == start_path /*:SLOW*/ {
+                    entry_dep = writer.dep.len.trunc();
+                };
+            
+                writer.dep&.push(
+                    file_len = it.content.len.trunc(),
+                    filename = writer.push(it.name),
+                    hashcode = it.hash,
+                );
+            }
+        };
+        
+        name := c.fmt_fn_name(fid);
+        meta: Meta = (
+            arch_os = pack_current_target(),
+            entry_sym = (off = writer.map_sym(m, m.intern(name)).trunc()),
+            entry_dep = (off = entry_dep),
+        );
+        chunks := writer.to_bytes(meta, m);
+        write_chunks_or_crash(outpath2, chunks);
+        if(show_backend_stats(), => @eprintln(">>> save: %", outpath2));
+    };
+}
+
+fn is_cachable(name: Str) bool = !(false 
+    // the fill_export_ffi string that has virtual addresses in it.
+    // can't just ignore in files_unchanged() because this would break repro. 
+    || name == "compiler" 
+    // the generated src string in load_file_in_compiler. 
+    // redundant with entry_dep anyway. 
+    || name == "-"
+    // from an `import("{ foo };")`.
+    || name == import_literal_file_name 
+);
+
+// TODO: this is dumb: ./a.fr vs a.fr, also unreadable is sad
+// Also this is very collidable but it's fine beacuse the cache file contains the path of the entry_dep. 
+// I considered using hash of the path but it's annoying to need to dump_bin to see what's in your cache dir. 
+fn choose_cache_filename(path: Str) Str = {
+    out := u8.list(path.len+25, temp());
+    out&.push_all(cache_dir());
+    for path { c |
+        if c.is_ascii_alpha() || c.is_ascii_digit() {
+            out&.push(c);
+        } else {
+            out&.push("_".ascii());
+        }
+    };
+    out&.push_all(".frc");
+    out.items()
+}
+
+fn cache_dir() Str = 
+    @tfmt("%/cache/", get_environment_variable("FRANCA_TARGET_DIR") || "target/franca");
+
+// one per (CompCtx, Header) pair.
+FrcModule :: @struct {
+    header: *Header;
+    scope: ScopeId;
+    sym: []u32;  // [One(Sym)] = FuncId or BakedVarId
+    fty: []Type; // [One(FTy)] 
+};
+
+// one per (CodegenWorker, Header) pair. 
+// ie. comptime vs runtime has seperate QbeModule so needs some import state stored seperately. 
+// this is created lazily the first time you call move_from_module. 
+FrcModuleInstance :: @struct {
+    module: *FrcModule;
+    syms: []Qbe.Sym; // [One(Sym)]
+};
+
+// translate header.root_scope into FrcImport entries in a new ScopeId. 
+// TODO: this is what i want but is not the case now... (because instance.syms needs the mangled names so need to reserve FuncId-s upfront)
+// no work to actually translate into Func/BakedValue graph is done yet. 
+// thing are loaded lazily the first time they're referenced (just like normal franca code). 
+fn import_frc(self: *SelfHosted, bytes: []u8) CRes(ScopeId) = {
+    header := check(bytes);  // TODO: return error if the magic fails
+    scope := self.scopes.new_scope(TOP_LEVEL_SCOPE, self.get_alloc(), zeroed Span); // TODO: location info
+    
+    write_entire_file("target/a.frc", bytes);
+    
+    a := self.get_alloc();
+    module := a.box(FrcModule);
+    module[] = (
+        header = header, 
+        scope = scope,
+        sym = a.alloc_init(u32, zext header.sym.count, fn(_) => Qbe.no_symbol), 
+        fty = a.alloc_zeroed(Type, zext header.fty.count),
+    );
+    range(0, FTy.COUNT) { i |  // builtin types
+        module.fty[i] = bit_cast_unchecked(u32, Type, trunc i);
+    };
+    module := FrcModule.int_from_ptr(module);
+    
+    root_scope := header.get(header.root_scope);
+    for(header, root_scope.payload.fields) { i, it |
+        name := self.pool.insert_owned(header.get(it.name));
+        loc := zeroed Span;  // TODO
+        type: LazyType = (PendingEval = (
+            expr = (FrcImport = (module = module, index = it.type.off, table = FTY_TABLE)), 
+            ty = Type, done = false, loc = loc,
+        ));
+        expr: FatExpr = (ty = UnknownType, done = false, loc = loc, expr = (FrcImport = (
+            module = module, 
+            index = it.payload.offset, 
+            table = @if(it.type.off == FTy.TYPE || it.type.off == FTy.SCOPE, FTY_TABLE, SYM_TABLE),
+        )));
+        self.add_to_scope(scope, name, type, expr);
+    };
+    
+    (Ok = scope)
+}
+
+fn sema_frc_import(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
+    @debug_assert(expr.expr&.is(.FrcImport), "expected FrcImport");
+    import := expr.expr.FrcImport;
+    module := FrcModule.ptr_from_int(import.module); header := module.header;
+    @debug_assert_eq(header.magic_v, MAGIC);
+    loc := zeroed Span; // TODO
+    if import.table == FTY_TABLE {
+        type := self.import_type(module, @as(One(FTy)) (off = import.index));
+        @check(self.return_macro_type(expr, type)) return;
+        return(.Ok)
+    };
+    
+    if(import.table != SYM_TABLE, => panic("invalid FrcImport.table")); 
+    
+    slot := module.sym[zext import.index]&;
+    i := import&.get_sym();
+    it := header.get(i);
+    println(header.get(it.name));
+    println(self.log_type(expr.ty));
+    ::enum(@type it.segment);
+    caller_name := header.get(it.name);
+    name := self.pool.insert_owned(caller_name);
+    info := self.get_type(expr.ty);
+    
+    if it.segment == .Import && !info.is(.FnPtr) && expr.ty != FuncId {
+        @println("import data: %", caller_name);
+        lib := header.get(header.get(it.imp.lib)[].name);
+        expr.expr = (DataSymbol = (name = name, lib = self.pool.insert_owned(lib), comptime = 0));
+        return(.Ok);
+    }
+
+    if @is(it.segment, .MutableData, .ConstantData, .ZeroInitData) {
+        // let emit_ir.fr deal with it
+        @println("local data: %", caller_name);
+        expr.done = true;
+        return(.Ok);
+    }
+    
+    @debug_assert(@is(it.segment, .Import, .Code, .MachineCode), "TODO: import_frc %", it.segment);
+    
+    if slot[] != Qbe.no_symbol {
+        self.set(expr, FuncId, bit_cast_unchecked(u32, FuncId, slot[]));
+        return(.Ok);
+    };
+    
+    @debug_assert_ne(expr.ty, UnknownType, "must know signeture of imported function");
+    
+    @debug_assert(info.is(.FnPtr), "expected fnptr %", self.log_type(expr.ty));
+    fid := self.add_function(empty_fn(info.FnPtr.ty, name, loc));
+    self.took_pointer_value(fid);
+    func := self.get_function(fid);
+    slot[] = bit_cast_unchecked(FuncId, u32, fid);
+    self.set(expr, FuncId, fid);  // TODO: changing FnPtr->Fn here might be a bad plan
+    func.set_flag(.ResolvedBody);
+    func.set_flag(.ResolvedSign);
+    func.set_flag(.EnsuredCompiled);
+    func.set_flag(.BodyIsSpecial);
+    //func.set_flag(.AvoidJitShim);  // TODO: this is unfortunate
+    if it.segment != .Import {
+        @println("local function: %", caller_name);
+        func.body = (FrcImport = import);
+        @assert_ne(it.segment, .MachineCode, "TODO: machine code");
+        
+        // TODO: this won't work if did_regalloc on amd64 because it doesn't see RMem. maybe i should just store those differently. 
+        for(header, it.fnc.con) { _, con |
+            if con.sym != Qbe.no_symbol_S {
+                sym := header.get(@as(One(Sym)) (off = con.sym.id));
+                callee_name := header.get(sym.name);
+                name := self.pool.insert_owned(callee_name);
+                // TODO: shouldn't be relying on names like this
+                name := self.scopes[module.scope].const_lookup&.get(name) ||
+                    return(@err("callee '%' in caller '%' not found in top level scope", callee_name, caller_name));
+                @println("% -> %", caller_name, callee_name);
+                
+                var := self.scopes.get_constant(name).unwrap();
+                
+                // - can't suspend or we won't come back
+                // - can't find_const earlier because we don't want to force a local data to go through immediate_eval_const with a synthetic function.  
+                type := @try(self.poll_in_place(?Type, => self.infer_type(var._1&))) return;
+                if type.is_some() && self.get_type(type.Some).is(.FnPtr) {
+                    callee, type := @try(self.poll_in_place(Ty(Values, Type), => self.find_const(name, (Specific = FuncId)))) return;
+                    if type == FuncId {
+                        func.mutual_callees&.push(FuncId.assume_cast(callee&)[], self.get_alloc());
+                    }
+                }
+            }
+        }
+    } else {
+        @println("import function: %", caller_name);
+        lib := header.get(header.get(it.imp.lib)[].name);
+        func.body = (DynamicImport = (name = name, lib = self.pool.insert_owned(lib), comptime = 0));
+    }
+    fill_bindings(func, self.comp(), self.comp().arg_types(func.finished_arg.Some));
+    
+    println(self.comp().log(func));
+    return(.Ok);
+}
+
+// TODO: special alignment, #use
+fn import_type(self: *SelfHosted, module: *FrcModule, i: One(FTy)) Type = {
+    slot := module.fty[zext i.off]&; header := module.header;
+    if(slot[] != UnknownType, => return(slot[]));
+    it := header.get(i);
+    ::enum(@type it.tag);
+    nominal := @is(it.tag, .Struct, .Union, .Tagged, .Alias);
+    
+    if !nominal {
+        info := self.import_type_info(module, it);
+        id := self.intern_type(info);
+        slot[] = id;
+        id
+    } else {
+        id := self.intern_type(.Placeholder);  // avoid cycles
+        slot[] = id;
+        info := self.import_type_info(module, it);
+        self.get_type(id)[] = info;  // go directly to jail do not pass go do not collect two hundred dollars 
+        id
+    }
+}
+
+// TODO: enum, bitfields
+fn import_type_info(self: *SelfHosted, module: *FrcModule, it: *FTy) TypeInfo = {
+    if @is(it.tag, .Params, .Struct, .Union) {
+        is_tuple := it.tag == .Params;
+        fields := Field.list(it.payload.fields.count.zext(), self.get_alloc());
+        j := 0;
+        for(module.header, it.payload.fields) { i, it |
+            ::if(Symbol); ::enum(Flag);
+            fields&.push(
+                name = if is_tuple {
+                    get_tuple_field_name(self.comp(), j)
+                } else {
+                    self.pool.insert_owned(module.header.get(it.name))
+                },
+                ty = import_type(self, module, it.type),
+                nullable_tag = zeroed(*Annotations),
+                default = zeroed(Var),
+                // TODO: decide if this should go in Fld.payload or if i want to use that slot for default value
+                byte_offset = FIELD_LAYOUT_NOT_DONE,
+            );
+        };
+        j += 1;
+        
+        return(Struct = (
+            is_tuple = is_tuple,
+            is_union = it.tag == .Union,
+            fields = fields.as_raw(),
+            layout_done = false,
+            scope = NOSCOPE,
+        ));
+    };
+    
+    @match(it.tag) {
+        fn Ptr() => (Ptr = import_type(self, module, it.payload.array.inner));
+        fn Array() => (Array = (
+            inner = import_type(self, module, it.payload.array.inner), 
+            len = it.payload.array.count,
+        ));
+        fn Func() => (FnPtr = (ty = (
+            arg = import_type(self, module, it.payload.func.arg), 
+            ret = import_type(self, module, it.payload.func.ret), 
+            unary = module.header.get(it.payload.func.arg)[].tag != .Params,
+        )));
+        fn Number() => (Int = (bit_count = zext it.payload.int.bits, signed = it.payload.int.signed));
+        @default => @panic("todo: %", it.tag);
+    }
+}
+
+FTY_TABLE :: 0;
+SYM_TABLE :: 1;
+
+fn move_from_module(emit_ir: *EmitIr, import: *FrcImport) CRes(CodegenTask) = {
+    module       := FrcModule.ptr_from_int(import.module); 
+    header, m, f := (module.header, emit_ir.m, emit_ir.f);
+    instance := @try(find_module(emit_ir.program.data.cast()[][], emit_ir.shared, module)) return;
+    did_regalloc := load(header, f, import.get_sym(), instance.syms);
+    // TODO: instance.syms is wrong! need to match the mangled funcid/bakedvarid ones. 
+    // TODO: kinda need to remap types
+    // TODO: need to push mutual_callees to pending
+    // TODO: need to do something with Dat2 and new_constants
+    printfn(f, m.debug_out);
+    
+    (Ok = (FromCache = (f = f, did_regalloc = did_regalloc)))
+}
+
+fn find_module(self: *SelfHosted, shared: *CodegenShared, module: *FrcModule) CRes(*FrcModuleInstance) = {
+    a := self.get_alloc();
+    imp := shared.frc_imports&;
+    ::ptr_utils(@type module[]);
+    xx := imp.items().find(fn(it) => identical(it.module, module));
+    (Ok = xx || {
+        @assert_ne(shared.frc_imports.cap, shared.frc_imports.len, "ICE: too many imported modules. TODO: use something with pointer stability");
+        h := module.header;
+        syms := a.alloc(Qbe.Sym, zext h.sym.count);
+        imp.push_assume_capacity(
+            module = module,
+            syms = syms,
+        );
+
+        // TODO: i want to do this lazily but i need the mangled names before i can start compiling anything
+        for(h, h.all(Sym)) { i, it |
+            continue :: local_return;
+            name_s := h.get(it.name);
+            name := self.pool.insert_owned(name_s);
+            var  := self.scopes[module.scope].const_lookup&.get(name) || {
+                @println("missing from scope: %", name_s);
+                continue()
+            };
+            var  := self.scopes.get_constant(var).unwrap();
+            
+            type := @try(self.poll_in_place(?Type, => self.infer_type(var._1&))) return;
+            type := type.expect("known type for sym");
+            if self.get_type(type).is(.FnPtr) || type == FuncId {
+                if var._0.expr&.is(.FrcImport) {
+                    var._0.ty = type;
+                    @try(self.poll_in_place(void, => self.sema_frc_import(var._0&))) return;
+                }
+                value := var._0.expr.Value.bytes.Small._0;
+                @debug_assert(var._0.expr&.is(.Value), "expected func val");
+                ::if(FuncId);
+                fid := if var._0.ty == FuncId {
+                    FuncId.assume_cast(var._0.expr.Value.bytes&)[]
+                } else {
+                    @debug_assert(self.get_type(var._0.ty).is(.FnPtr), "expected func ptr");
+                    self.baked.functions&.get(value).expect("missing tookjitaddr")
+                };
+                name := self.comp().fmt_fn_name(fid);
+                syms[i.off.zext()] = shared.m.intern(name);
+            } else {
+                syms[i.off.zext()] = shared.m.intern(name_s);
+            }
+        };
+        
+        imp[imp.len - 1]&
+    })
+}
+
+fn get_sym(import: *FrcImport) One(Sym) = {
+    @debug_assert_eq(import.table, SYM_TABLE);
+    (off = import.index)
+}

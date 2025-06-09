@@ -3,6 +3,14 @@
 int g1, g2[4];
 static int g3 = 3;
 
+
+int g4;  // tentative
+int g4 = 123;
+int g5 = 456;
+int g5;  // tentative
+extern int g6;
+int g6 = 789;
+
 int main() {
   ASSERT(3, ({ int a; a=3; a; }));
   ASSERT(3, ({ int a=3; a; }));
@@ -63,6 +71,9 @@ int main() {
   { void *x; }
 
   ASSERT(3, g3);
+  ASSERT(123, g4);
+  ASSERT(456, g5);
+  ASSERT(789, g6);
 
   printf("OK\n");
   return 0;

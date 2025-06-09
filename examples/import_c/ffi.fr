@@ -42,317 +42,237 @@
 // - track no_return and export it as Never
 // - #use anon struct fields
 //
+// TODO: allow passing in a namespace to lookup external functions in (and don't auto recurse upward) 
+// so you can tell if you update a library and it starts calling weird shit suddenly or you can give it your
+// own versions that limit its access to the file system or whatever.  
+//
 
 // TODO: don't make src be comptime (need to be able make a new scope)  :FfiNamespaceHacks
 fn include($src: Str) ScopeId = {
-    namespace := scope_of(Type, @struct(___HACK :: 123));
     fr := current_compiler_context();
-    include(fr, namespace, src);
-    namespace
+    include(fr, src)
 }
 
-fn enable_franca_ffi(c: *Ctx, fr: CompCtx, namespace: ScopeId) void = {
+fn enable_franca_ffi(c: *Ctx, fr: CompCtx) void = {
     c.franca = (Some = fr);
     c.preserve_franca_env = true;
-    c.franca_namespace = namespace;
+    c.save_type_info = true;
 }
 
 // GARBAGE: for now all the import_c stuff is very experimental. the api will eventually get less painful. 
-fn include(fr: CompCtx, namespace: ScopeId, c_source: Str) void = {
-    c := init_for_include(fr, namespace);
-    do_include(fr, namespace, c_source, c);
+fn include(fr: CompCtx, c_source: Str) ScopeId = {
+    c := init_for_include(fr);
+    do_include(fr, c_source, c)
 }
 
-fn init_for_include(fr: CompCtx, namespace: ScopeId) *C.Compile.Ctx = {
+fn init_for_include(fr: CompCtx) *C.Compile.Ctx = {
     m := fr.get_alloc().box(QbeModule);
     c := fr.get_alloc().box_zeroed(C'Compile.Ctx);
     // TODO: "need to be consistant about how to handle modules like this that don't actually compile anything"
-    init_default_module_dyn(m, fr.vtable, (arch = query_current_arch(), os = query_current_os(), type = .JitOnly));
+    init_default_module_dyn(m, fr.vtable, (arch = query_current_arch(), os = query_current_os(), type = .CachedEarly));
+    ctx: *C.Compile.CodegenShared = init(m, libc_allocator, C.Compile.codegen_thread_main, false);
     C'init_ctx(c, m);
-    c.enable_franca_ffi(fr, namespace);
+    c.emitter = (Some = ctx);
+    c.enable_franca_ffi(fr);
+    range(0, FTy.COUNT) { _ |
+        m.save.unwrap()[].fty&.push(zeroed FTy);   // skip builtin types so offsets work out
+    };
     c
 }
 
-fn do_include(fr: CompCtx, namespace: ScopeId, c_source: Str, c: *C.Compile.Ctx) void = {
+fn do_include(fr: CompCtx, c_source: Str, c: *C.Compile.Ctx) ScopeId = {
+    bytes  := "";
     push_dynamic_context { // TODO: why am i doing this. just mark temp, oh but it's confusing how long it needs to live because the fns go in temp
         a: ArenaAlloc = init(page_allocator, 10000);  // :Leak
         context(DefaultContext)[].temporary_allocator = a&;
-        result := catch_call(c, void) {
+        writer := c.m.save.unwrap();
+        result := catch_call(c, One(FTy)) {
             src: List(u8) = assume_owned(c_source, temp());
             tok := c.tokenize_string("import_cTODO", src&.items());
             tok  = c.C'Preprocess'preprocess(tok);
-            objs := c.parse(tok);
+            _ := c.parse(tok);
             
-            for_linked objs { obj |
-                if obj.is_function && obj.is_definition {
-                    _ := export_func(c, obj);
+            // add all the functions/globals/typedefs to a scope
+            args := Fld.list(c.arena);
+            sc := c.scope;
+            each sc.vars& { name, value |
+                if !value.type_def.is_null() {
+                    type := export_type(c, value.type_def, false);
+                    args&.push(
+                        name = writer.push(name),
+                        type = (off = FTy.TYPE),
+                        payload = (type = type),
+                    );
                 }
-            }
-            
-            // add all the typedefs to the scope
-            for_linked c.scope { sc |
-                each sc.vars& { name, value |
-                    if !value.type_def.is_null() {
-                        type := export_type(c, value.type_def, false);
-                        fr.add_to_scope(namespace, fr.intern_string(name), Type, type);
+                obj := value.var;
+                if !obj.is_null() {
+                    sym := map_sym(writer, c.m, obj.global_symbol.unwrap());
+                    // TODO: can't just skip when !obj.is_definition because i still need to know the types of imports, 
+                    //       but i'd rather not have every c module re-export the libc types, so idk what to do about that. 
+                    args&.push(
+                        name = writer.push(obj.name),
+                        type = export_type(c, obj.ty, false),
+                        payload = (offset = trunc sym),
+                    );
+                    
+                    s := writer.sym[sym].segment&;
+                    ::enum(@type s[]);
+                    if !obj.is_definition && s[] == .Invalid {
+                        s[] = .Import;
+                        // rn this defaults to "libc" cause that's 0 but probably i want a different 
+                        // sentinal for "we don't know where it comes from, just give me a symbol with this name"
                     }
-                    obj := value.var;
-                    // TODO: should make this work
-                    //if !obj.is_null() && !obj.is_function && obj.is_definition {
-                    //    id       := export_data(c&, obj);
-                    //    type     := export_type(c&, c&.pointer_to(obj.ty), false);
-                    //    jit_addr := fr'vtable'materialize_in_jit_address_space(fr.data, QbeModule.raw_from_ptr(m), id);
-                    //    fr.add_to_scope(namespace, fr.intern_string(name), type, jit_addr);
-                    //};
-                }
+                };
             }
-        }
-        or result { err | 
+            
+            save_fields(writer, .Scope, args.items())
+        };
+        root_scope := or result { err | 
             panic(err)
-        }
+        };
         
+        meta: Meta = (arch_os = 0, root_scope = root_scope);
+        b := writer.to_bytes(meta, c.m);
+        bytes = concat(b, fr.get_alloc());
+    };
+    
+    result := fr'vtable'import_frc(fr.data, bytes);
+    or result { err |
+        fr.report_error(err)
     }
 }
 
-fn export_type(c: *Ctx, type: *CType, decay_arrays: bool) Type = {
-    fr := c.franca.unwrap();
+fn export(c: *Ctx, obj: *Obj) void = {
+    // TODO: this gets called as we parse. use it instead of waiting until the end. 
+    //       but maybe needs to be on the other thread or they'll fight over the writer. 
+}
+
+#use("@/backend/incremental.fr");
+
+fn export_type(c: *Ctx, type: *CType, decay_arrays: bool) One(FTy) = {
+    writer := c.m.save.unwrap();
     use_cache := !(decay_arrays && type.kind == .TY_ARRAY);
-    if(type.franca != UnknownType && use_cache, => return(type.franca));
+    if(type.franca != 0 && use_cache, => return(off = type.franca));
     nominal := @is(type.kind, .TY_STRUCT, .TY_UNION, .TY_ENUM);
     
-    ::if(Type);
-    id := if !nominal {
-        info := c.export_type_info(type, decay_arrays);
-        id := fr.intern_type(info);
-        if use_cache {
-            type.franca = id;
-        }
-        id
-    } else {
-        id := fr.intern_type(.Placeholder);  // avoid cycles
-        if use_cache {
-            type.franca = id;
-        }
-        info := c.export_type_info(type, decay_arrays);
-        fr.get_type(id)[] = info;  // go directly to jail do not pass go do not collect two hundred dollars 
-        id
-    }
+    @match(type.kind) {
+        fn TY_VOID()    => return(off = FTy.VOID);
+        fn TY_BOOL()    => return(off = FTy.BOOL);
+        fn TY_FLOAT()   => return(off = FTy.F32);
+        fn TY_DOUBLE()  => return(off = FTy.F64);
+        fn TY_LDOUBLE() => return(off = FTy.F64);
+        fn TY_PTR()     => @match(type.base.kind) {
+            fn TY_VOID() => return(off = FTy.RAWPTR);
+            fn TY_FUNC() => return(c.export_type(type.base, false));
+            @default     => ();
+        };
+        @default        => ();
+    };
     
-    // TODO: give it the name as well? 
-    // TODO: give it the TypeMeta
-    id
+    id := writer.fty.len;
+    writer.fty&.push(zeroed FTy);
+    if use_cache {
+        type.franca = trunc id;
+    }
+    writer.fty[id] = c.export_type_info(type, decay_arrays);
+    
+    (off = trunc id)
 }
 
-fn export_type_info(c: *Ctx, type: *CType, decay_arrays: bool) TypeInfo = {
+fn export_type_info(c: *Ctx, type: *CType, decay_arrays: bool) FTy = {
     fr := c.franca.unwrap();
     is_int := @is(type.kind, .TY_CHAR, .TY_SHORT, .TY_INT, .TY_LONG);
-    if(is_int, => return(Int = (bit_count = type.size.zext() * 8, signed = !type.is_unsigned)));
+    if(is_int, => return(
+        tag = .Number, 
+        payload = (int = (bits = type.size.bitcast() * 8, signed = !type.is_unsigned)),
+    ));
     
+    writer := c.m.save.unwrap();
     @match(type.kind) {
-        fn TY_VOID()    => .void;
-        fn TY_BOOL()    => .Bool;
-        fn TY_FLOAT()   => .F32;
-        fn TY_DOUBLE()  => .F64;
-        fn TY_LDOUBLE() => .F64;
         fn TY_ENUM() => {
-            seq := true;
-            fields := list(Ty(Symbol, Values), type.param_names.len, fr.get_alloc());
-            prev := -1;
+            args := Fld.list(type.param_names.len, fr.get_alloc());
             enumerate type.param_names { i, it |
                 // this wont work if it was declared in an inner scope, 
                 // but i guess then you wouldn't be able to export it anyway. 
                 var := c.find_var(it[]) || @panic("failed to find enum value %", it[].str());
                 @assert(identical(var.enum_ty, type), "expected '%' to be an enum", it[].str());
-                push(fields&, (fr.intern_string(it[].str()), (Small = (var.enum_val, 8))));
-                
-                seq = seq && var.enum_val == prev + 1;
-                prev = var.enum_val;
+                @debug_assert_eq(var.enum_val.bit_and(0xffffffff), var.enum_val, "TODO: export large enum to franca");
+                args&.push(
+                    name = writer.push(it[].str()),
+                    type = (off = FTy.U32),
+                    payload = (offset = trunc var.enum_val),
+                );
             };
-            
-            (Enum = (
-                raw = u32,  // :get_or_create_type
-                fields = fields.as_raw(),
-                sequential = seq,
-            ))
+            save_fields_fty(writer, .Enum, args.items())
         }
-        fn TY_PTR() => @match(type.base.kind) {
-            fn TY_VOID() => .VoidPtr;
-            fn TY_FUNC() => {
-                fn_type := c.export_type(type.base, false);
-                fn_type := fr.get_type(fn_type)[].Fn;
-                (FnPtr = (ty = fn_type))
-            }
-            @default => (Ptr = c.export_type(type.base, false));
-        };
+        fn TY_PTR() => (
+            tag = .Ptr, 
+            payload = (array = (
+                inner = c.export_type(type.base, false),
+            )),
+        );
         // C arrays decay to pointers when passed to functions, so this needs to be 
         // treated differently depending if it's inside a struct body. 
-        fn TY_ARRAY() => {
-            base := c.export_type(type.base, decay_arrays);
-            ::if(TypeInfo);
-            if(decay_arrays, => (Ptr = base)) {
-                (Array = (inner = base, len = type.array_len.bitcast()))
-            }
-        }
-        fn TY_VLA()    => (Ptr = c.export_type(type.base, false));
+        fn TY_ARRAY() => (
+            tag = @if(decay_arrays, .Ptr, .Array),
+            payload = (array = (
+                inner = c.export_type(type.base, decay_arrays), 
+                count = type.array_len.bitcast(),
+            )),
+        );
+        fn TY_VLA()    => panic("todo: export vla to franca"); // (Ptr = c.export_type(type.base, false));
         fn TY_STRUCT() => c.export_members(type, false);
         fn TY_UNION()  => c.export_members(type, true);
-        fn TY_FUNC() => {
-            args := Type.list(type.params.len, fr.get_alloc());
-            for type.params { par | 
-                args&.push(c.export_type(par, true));
-            };
-            if type.is_variadic {
-                args&.push(import("@/lib/variadic.fr").CVariadic); // :get_or_create_type
-            };
-            
-            (Fn = (
-                arg = fr.tuple_of(args.items()), 
+        fn TY_FUNC() => (
+            tag = .Func,
+            payload = (func = (
+                arg = @if_else {
+                    @if(type.params.len == 0) => (off = @if(type.is_variadic, FTy.VARIADIC, FTy.VOID));
+                    @if(type.params.len == 1 && !type.is_variadic) => c.export_type(type.params[0], true);
+                    @else => {
+                        args := Fld.list(type.params.len, fr.get_alloc());
+                        for type.params { par | 
+                            args&.push(type_field c.export_type(par, true));
+                        };
+                        if type.is_variadic {
+                            args&.push(type_field(off = FTy.VARIADIC));
+                        };
+                        save_fields(writer, .Params, args.items())
+                    };
+                }, 
                 ret = c.export_type(type.return_ty, false), 
-                unary = args.len <= 1,
-            ))
-        }
+            )),
+        );
         @default => panic("TODO: import_c export missing type");
     }
 }
 
-fn export_members(c: *Ctx, type: *CType, is_union: bool) TypeInfo = {
-    fr := c.franca.unwrap();
-    fields := Field.list(fr.get_alloc());  // TODO: cap
+fn save_fields_fty(writer: *Writer, tag: FTy.Tag, fields: []Fld) FTy = {
+    out: FTy = (tag = tag, payload = (fields = (off = trunc writer.fld.len, count = trunc fields.len)));
+    writer.fld&.push_all(fields);
+    out
+}
+
+fn save_fields(writer: *Writer, tag: FTy.Tag, fields: []Fld) One(FTy) = {
+    writer.fty&.push(save_fields_fty(writer, tag, fields));
+    (off = trunc(writer.fty.len - 1))
+}
+
+fn type_field(type: One(FTy)) Fld = 
+    (name = (off = 0, count = 0), type = type, payload = (offset = 0));
+
+fn export_members(c: *Ctx, type: *CType, is_union: bool) FTy = {
+    writer := c.m.save.unwrap();
+    args := Fld.list(c.arena);  // TODO: cap
     for_linked type.members { mem |
         @assert(!mem.is_bitfield, "TODO: export bit field to franca");
-        fields&.push(
-            name = fr.intern_string(mem.name.str()),
-            ty = c.export_type(mem.ty, false),
-            byte_offset = mem.offset.zext(), 
-            default = Var.zeroed(), 
-            nullable_tag = Annotations.ptr_from_int(0),
+        args&.push(
+            name = writer.push(mem.name.str()),
+            type = c.export_type(mem.ty, false),
+            payload = (offset = mem.offset.bitcast()), 
         );
     };
-    (Struct = (fields = fields.as_raw(), layout_done = true, is_tuple = false, is_union = is_union, scope = NOSCOPE))
-}
-
-// TODO: allow passing in a namespace to lookup external functions in (and don't auto recurse upward) 
-// so you can tell if you update a library and it starts calling weird shit suddenly or you can give it your
-// own versions that limit its access to the file system or whatever.  
-fn export_func(c: *Ctx, obj: *Obj) FuncId = {
-    @debug_assert(obj.is_function, "expected func");
-    if(obj.franca_f != FuncId.zeroed(), => return(obj.franca_f));
-    fr := c.franca.unwrap();
-    f_ty := c.export_type(obj.ty, false);
-    fn_type := fr.get_type(f_ty)[].Fn;
-    f := obj.f;
-    
-    id := obj.global_symbol.unwrap();
-    n := if obj.is_definition {
-        obj.f.lnk.id = id;
-        obj.f.ncon.intcast()
-    } else {
-        0
-    };
-    data  := temp().alloc_zeroed(BakedVarId, n);
-    funcs := temp().alloc_zeroed(FuncId, n);
-    
-    name := fr.intern_string(obj.name);
-    loc := Span.zeroed();  // TODO: translate this too!
-    func := empty_fn(fn_type, name, loc);
-    
-    // TODO: Later i think it would be nice to preserve the argument names. 
-    // For now i need this anyway for emit_par_instructions so you can inline through bounce_body when it's an import. 
-    args := fr.arg_types(fn_type.arg);
-    fill_bindings(func&, fr, args);
-    func&.set_flag(.ResolvedSign);
-    func&.set_flag(.ResolvedBody);
-    
-    // TODO: this is unfortunate
-    func&.set_flag(.AvoidJitShim);
-    
-    if obj.is_definition {
-        func.body = (Ir = (fn_internal = Qbe.Fn.int_from_ptr(obj.f), data = data, funcs = funcs));
-        func&.set_flag(.EnsuredCompiled);
-    } else {
-        func&.set_flag(.BodyIsSpecial);
-        a := list(Annotation, fr.get_alloc());
-        xxx: FatExpr = (expr = (Value = (bytes = (Small = (0, 0)), coerced = false)), loc = loc, done = true, ty = void);  // :get_or_create_type
-        a&.push(name = fr.intern_string("libc"), args = xxx);  // TODO: don't assume libc
-        func.annotations = a.as_raw();
-    };
-    fid := fr.intern_func(func&);
-    func := fr.get_function(fid);
-    if obj.is_definition && !(c.franca_namespace == NOSCOPE) {
-        fr.add_to_scope(c.franca_namespace, name, f_ty, fid);
-    }
-    obj.franca_f = fid;  // save this before translating the callgraph so we don't get stuck in cycles
-    
-    if obj.is_definition {
-        enumerate f.con.slice(0, f.ncon.intcast()) { i, con |
-            if con.type() == .CAddr {
-                ref := find_ref(obj, con.sym);
-                if ref.is_function {
-                    funcs[i] = c.export_func(ref);
-                    // TODO: decide callee vs mutual callee more intelligently? 
-                    func.callees&.push(funcs[i], fr.get_alloc());
-                } else {
-                    data[i] = c.export_data(ref);
-                }
-            }
-        };
-    }
-    fid
-}
-
-find_ref :: fn(obj: *Obj, id: Qbe.Sym) *Obj = {
-    for obj.refs { ref |
-        if !ref.is_local && ref.global_symbol.unwrap() == id {
-            while => !ref.def.is_null() {
-                ref = ref.def;
-            }
-            return ref;
-        }
-    }
-    @panic("couldn't find ref for id=%", id.id)
-}
-
-fn export_data(c: *Ctx, obj: *Obj) BakedVarId = {
-    @debug_assert(!obj.is_function, "want data def %", obj.name);
-    if !obj.is_definition {
-        @error_tok(c, obj.tok, "cannot export forward declaration of '%' to franca", obj.name);
-    };
-    
-    fr := c.franca.unwrap();
-    ::AutoEq(BakedVarId); ::RefEq(BakedVarId);
-    if(obj.franca_v != BakedVarId.zeroed(), => return(obj.franca_v));
-    obj.franca_v = fr'vtable'reserve_baked(fr.data, .None);
-    dest := fr.get_baked(obj.franca_v);
-    
-    ::ptr_utils(@type obj.rel[]);
-    no_init_data := obj.init_data.ptr.is_null();
-    // can't just be obj.ty.size because it might have a flexible array member
-    total_size   := if(no_init_data, => obj.ty.size.intcast(), => obj.init_data.len) + int(obj.init_data_needs_null_terminator);
-    is_zeroed    := no_init_data || is_all_zeroes(obj.init_data);
-    dest[] = (
-        template = @if(is_zeroed, (Zeroes = total_size), (Bytes = {
-            if obj.init_data_needs_null_terminator {
-                d := fr.get_alloc().alloc(u8, obj.init_data.len + 1);
-                d.slice(0, d.len - 1).copy_from(obj.init_data);
-                d
-            } else {
-                obj.init_data
-            }
-        })),
-        relocations = ({
-            relocs := BakedReloc.list(fr.get_alloc());
-            for_linked obj.rel { rel |
-                relocs&.push(
-                    off = rel.offset.bitcast(),
-                    target = @if(rel.obj.is_function, (FuncId = c.export_func(rel.obj)), (BakedVarId = c.export_data(rel.obj))),
-                    addend = rel.addend,
-                );
-            };
-            relocs.items()
-        }),
-        loc = zeroed Span, // TODO
-    );
-    obj.franca_v
+    save_fields_fty(writer, @if(is_union, .Union, .Struct), args.items())
 }
 
 #use("@/compiler/ast_external.fr");

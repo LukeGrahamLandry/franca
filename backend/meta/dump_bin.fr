@@ -1,6 +1,6 @@
 main :: fn() void = {
     input := read_file_from_last_arg();
-    header: *Incremental.Header = check(input);
+    header: *Header = check(input);
     m := @uninitialized QbeModule; m := m&;
     init_empty_for_template_only(m, general_allocator());
     
@@ -8,32 +8,34 @@ main :: fn() void = {
     @fmt(out&, "# (size = %, arch_os = %)\n", input.len, header.arch_os);
     {
         @fmt(out&, "# entry: ");
-        if header.entry_sym != Qbe.no_symbol {
-            it: *Incremental.Sym = header.get(header.entry_sym);
+        if header.entry_sym.off != Qbe.no_symbol {
+            it := header.get(header.entry_sym);
             @fmt(out&, "%", header.get(it.name));
         }
-        if header.entry_dep != Qbe.no_symbol {
-            it: *Incremental.Dep = header.get(header.entry_dep);
+        if header.entry_dep.off != Qbe.no_symbol {
+            it := header.get(header.entry_dep);
             @fmt(out&, " in % ", header.get(it.filename));
         }
         @fmt(out&, "\n");
+        @if(header.root_scope.off != Qbe.no_symbol) 
+            @fmt(out&, "# root scope: %\n", header.root_scope.off);
     }
     
     @fmt(out&, "# === arr ===\n");
-    inline_for Incremental.Header.get_fields() { $f | 
+    inline_for Header.get_fields() { $f | 
         ok :: get_type_info_ref(f[].ty).is(.Struct) && get_constant(Type, Type.scope_of(f[].ty), @symbol StorageElement).is_some();
         @if(ok) {
-            it := Incremental.Header.get_field_ptr(header, f);
+            it := Header.get_field_ptr(header, f);
             @fmt(out&, "# %: (off = %, count = %)\n", ::f[].name.str(), it.off, it.count);
         }
     };
     
     @if(header.dep.count != 0) @fmt(out&, "# === dep ===\n");
-    for(header, header.all(Incremental.Dep)) { _, it |
+    for(header, header.all(Dep)) { _, it |
         @fmt(out&, "# % % %\n", header.get(it.filename), it.file_len, it.hashcode&);
     };
     
-    Incremental'read_types(header, m);
+    read_types(header, m);
     @if(m.types.len > 0) @fmt(out&, "# === typ ===\n");
     range(0, m.types.len) { t |
         print_type(m, t, out&);
@@ -43,14 +45,14 @@ main :: fn() void = {
     
     @fmt(out&, "# === sym ===\n");
     syms := preintern_syms(header, m);
-    for(header, header.all(Incremental.Sym)) { i, it |
+    for(header, header.all(Sym)) { i, it |
         continue :: local_return;
         ::enum(@type it.segment);
         @fmt(out&, "# '%' is % ", header.get(it.name), it.segment);
         @match(it.segment) {
             fn Invalid() => @fmt(out&, "\n");
             fn Code() => {
-                flags: Incremental.FncFlags = (repr = it.fnc.flags);
+                flags: FncFlags = (repr = it.fnc.flags);
                 @fmt(out&, "(");
                 if(flags.get(.leaf)     != 0, => @fmt(out&, "leaf, "));
                 if(flags.get(.vararg)   != 0, => @fmt(out&, "vararg, "));
@@ -87,7 +89,43 @@ main :: fn() void = {
         
         print(out.items()); out&.clear();
     };
+    
+    @fmt(out&, "# === fty ===\n");
+    c: u32 = FTy.COUNT;
+    for(header, @as(Ref(FTy))(off = c, count = header.fty.count - c)) { i, it |
+        ::enum(@type it.tag);
+        continue :: local_return;
+        @fmt(out&, "# [%] %", i.off, it.tag);
+        if @is(it.tag, .Struct, .Union, .Scope, .Params, .Enum) {
+            empty := it.payload.fields.count == 0;
+            @fmt(out&, " { %", @if(empty, "", "\n"));
+            show_fields(out&, header, it.payload.fields, 1 + 4);
+            @fmt(out&, "% }\n", @if(empty, "", "#"));
+            continue();
+        }
+        if @is(it.tag, .Array, .Ptr, .Func) {
+            @fmt(out&, "(%, %);\n", it.payload.array.inner.off, it.payload.array.count);
+            continue();
+        }
+        if @is(it.tag, .Number) {
+            it := it.payload.int;
+            @fmt(out&, "(%, 0b%%%);\n", it.bits, int it.signed, int it.float, int it.bitfield);
+            continue();
+        }
+        @fmt(out&, "\n");
+    }
+    
+    print(out.items()); out&.clear();
+}
+
+fn show_fields(out: *List(u8), header: *Header, fields: Ref(Fld), depth: i64) void = {
+    for(header, fields) { i, it |
+        @fmt(out, "#");
+        out.push_repeated(depth, " ".ascii());
+        @fmt(out, "%: % = %;\n", header.get(it.name), it.type.off, it.payload.value.off);
+    }
 }
 
 #include_std("backend/lib.fr");
+#use("@/backend/incremental.fr");
 #use("@/lib/sys/fs.fr");

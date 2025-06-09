@@ -60,7 +60,7 @@ ImportVTable :: @rec @struct(
     get_alloc: @FnPtr(c: Compiler) Alloc,
     drop_qbe_module: @FnPtr(module: rawptr) void,
     codegen_thread_main: @FnPtr(codegenshared: rawptr) void,
-    _pad1 := 0,
+    import_frc: @FnPtr(c: Compiler, bytes: []u8) CRes(ScopeId),
     compile_ast: @FnPtr(c: Compiler, expr: *FatExpr, hint: Type) void,
     intern_type: @FnPtr(c: Compiler, info: *TypeInfo) Type,  // The compiler makes a copy of the argument
     intern_func: @FnPtr(c: Compiler, f: *Func) FuncId,  // The compiler makes a copy of the argument
@@ -101,9 +101,9 @@ CompileError :: @tagged(
     ExpectedCompileError: Span,
     TypeMismatch: @struct(span: Span, wanted: Type, found: Type),
     CoerceConst: @struct(span: Span, wanted: Type, found: Type, expr: *FatExpr),
-    InvalidField: @struct(span: Span, container: Type, name: Symbol),
-    MissingField: @struct(span: Span, container: Type, name: Symbol),
-    MissingContextualField: @struct(span: Span, type: Type, name: Symbol),
+    InvalidField: @struct(span: Span, container: Type, name: Symbol),  // tried to access `name` (directly or assigned in literal)
+    MissingField: @struct(span: Span, container: Type, name: Symbol),  // struct literal requires `name`
+    InvalidContextualField: @struct(span: Span, type: Type, name: Symbol),  // same as InvalidField
 );
 
 ComptimeEnvironment :: @struct(
@@ -225,7 +225,7 @@ Expr :: @tagged(
     Tuple: RawList(FatExpr),
     Closure: *Func,
     Spread: *FatExpr,
-    _SuffixMacro,
+    FrcImport: FrcImport,
     FieldAccess: @struct(container: *FatExpr, name: Symbol, no_dot_call: bool),  // :FirstFieldIsTheChild
     StructLiteralP: Pattern,
     PrefixMacro: @struct(handler: *FatExpr, arg: *FatExpr, target: *FatExpr),
@@ -255,7 +255,7 @@ Expr :: @tagged(
     // than named arguments so the backend needs to know where they start. 
     CVariadic: []FatExpr,
     UndeclaredVar: @struct(name: Symbol, scope: ScopeId),
-    DataSymbol: DynamicImport,
+    DataSymbol: DynamicImport, 
 );
 
 WaitingParse :: @struct(id: i64);
@@ -377,11 +377,13 @@ FuncImpl :: @rec @tagged(
     Intrinsic: i64,
     _3,
     X86AsmBytes: RawList(u8),
-    _4, 
+    FrcImport: FrcImport, 
     NewIntrinsic: NewIntrinsicPayload,
     Syscall: []i32,  // #syscall(linux-arm64, linux-amd64, macos)     -1 if not supported 
     Ir: PrecompiledIr,
 );
+
+FrcImport :: @struct(module: i64, index: u32, table: u8);
 
 // comptime=0 when you're cross compiling and it's something platform specific 
 // so you can't dlopen it at comptime. that's fine, you just can't call it. 

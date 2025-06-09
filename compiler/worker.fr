@@ -282,6 +282,18 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
             // This is trivial but we want to do it without threads fighting. 
             m.set_library(id, lib);
         };
+        fn FromCache(it) => {  
+            f := it.f;
+            @if(ENABLE_ENABLE_TRACY) @if(ENABLE_TRACY) ___tracy_emit_zone_name(zone, f.globals.str(f.lnk.id));
+            
+            // TODO: factor out this and from incremental.fr/compile_all_symbols() so i don't have to remember to keep them in sync
+            if it.did_regalloc {
+                emit_fn(f);
+            } else {
+                // TODO: still inlsave(), that's kinda the whole point of this operation
+                {f.globals.target.finish_passes}(f);
+            };
+        }
     };
     entry.task = .Dead; 
     m.set_debug_types(logging, false);
@@ -301,6 +313,7 @@ CodegenShared :: @struct(
     waiting_for_bouba: u32,
     waiting_for_symbol: u32,
     threaded: bool,
+    frc_imports: RawList(import("@/compiler/incremental.fr").FrcModuleInstance),
 );
 
 CodegenState :: @enum(i64) (WaitingForBouba, UsedByBouba, WaitingForKiki, UsedByKiki);
@@ -314,6 +327,7 @@ CodegenTask :: @tagged(
     Shim: @struct(f: *Qbe.Fn, shim_for: Qbe.Sym),
     AotVar2: []Dat2,
     SetLibrary: []Ty(Qbe.Sym, Str), // id, lib
+    FromCache: @struct(f: *Qbe.Fn, did_regalloc: bool),
 );
 
 CodegenEntry :: @struct(
@@ -341,6 +355,7 @@ fn init(m: *QbeModule, arena: Alloc, worker: CodegenWorker, threaded: bool) *Cod
         s.thread = start_thread(CodegenShared, worker, s);
     };
     s.type_indices = init(arena); 
+    s.frc_imports = init(arena, 64);  // TODO: don't have a fixed size. need to use BucketArray or something tho
     
     s
 }

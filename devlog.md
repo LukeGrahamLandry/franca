@@ -6,6 +6,15 @@ let's cheat and make examples/terminal.fr(repl=true) not take 2 seconds to compi
 - compile_to_shader_source: 68 // shader compiler (for comptime)
 notably those are all things to aren't going to change if you're just working on the terminal program. 
 
+## (Jun 8)
+
+- obj.init_data_needs_null_terminator was adding a redundant null terminator because tokenize makes 
+a copy out of the source anyway (to handle escapes) so it's easy to do then. doesn't matter but 
+confusion is bad for business. and i wasn't even zeroing the last byte, it just happened to be fresh memory all the time. 
+- string literals in array initializers were being emitted twice because of count_array_init_elements. 
+- strings for function names were emitted twice: `__func__` and `__FUNCTION__`
+- sema: show declaration line for InvalidField error reporting
+
 ## (Jun 7)
 
 - seperate out the fields of QbeModule you're supposed to set to init it. 
@@ -23,6 +32,30 @@ make the section size limits runtime configurable.
   examples/repl.fr: compiling it infinite loops on macos-amd64 and crashes on linux-amd64 
   (when passed directly to the compiler cli or compiler/test.fr/compile(), but works through default_driver)
   ```
+
+--- 
+
+for import_c of cosmo, i need to deal with data imports. it's such a hassle to keep doing that sort of thing.  
+
+thinking about going all in on the binary format instead of having import_c/ffi.fr build 
+compiler data structures, have it output a .frc blob of bytes. which still kinda feels wasteful to 
+me, like why add an extra serialize+deserialize step, there's no rule that your api has to be flat blob of bytes. 
+but it means there's a very narrow tube for sending information and you can always pause and look at what's 
+going through the tube. even if i had a debugger, it's really hard to beat command-f in a text file dump of the ir. 
+the downside is needing to compile the whole c program instead of doing it lazily like franca does, 
+but i already compile the whole thing because the idea of making a FuncImpl that's a callback into 
+comptime code feels like it would be a nightmare for being able to understand what's going on. 
+i guess it's fine if im just learning that the way other people tend to do things makes sense, 
+the learning is the whole point of this operation, i don't actually care as much about my thing being different. 
+i am a bit concerned about losing my sparkle. 
+i still can't reconcile how every interaction with linkers is negative but somehow moving my thing more 
+in that direction seems mostly positive so far, like im just inventing what we already have, why does it feel different? 
+
+- rework tentative definitions so they don't require scanning the whole linked list of globals each time. 
+  now just be careful to use the previous one so you don't get redeclarations and keep track of the set to be emitted at the end. 
+- eagerly send functions to the backend while parsing instead of waiting until the end. 
+  that means it emits functions that aren't called from main() too, which makes it worse as a standalone compiler,
+  but the franca frontend does that part anyway when it's used through ffi.fr which is the usecase i care about. 
 
 ## (Jun 6)
 

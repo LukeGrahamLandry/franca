@@ -161,6 +161,7 @@ fn log(self: *FatExpr, pool: *SelfHosted, out: *List(u8), depth: i64) void = {
             out.push_all("..");
             inner[].log(pool, out, depth + 1);  
         }
+        fn FrcImport(it) => @fmt(out, "FrcImport(%, %, %)", it.module, it.index, it.table); 
         @default => {
             @fmt(out, "TODO:print:%", self.expr&.tag());
         };
@@ -548,6 +549,7 @@ fn log_fn_type(self: *SelfHosted, safe_rec: *DynamicBitSet, out: *List(u8), f: *
     self.log_type_inner(safe_rec, out, f.arg);
     out.push_all(")");
     self.log_type_inner(safe_rec, out, f.ret);
+    out.push_all(")");
 }
 
 fn log_name(self: *SelfHosted, fid: FuncId) Str = {
@@ -677,11 +679,12 @@ fn fmt_error(self: *SelfHosted, err: *CompileError, out: *List(u8), color: bool)
         }
         fn InvalidField(it) => {
             self.codemap.fmt_error_line(it.span, out, color);
-            extra := if(self.has_fields(it.container), => "", => "\nbut only structs/enums support field access");
+            extra := if(self.has_fields(it.container), => "", => "\n(only @struct/@tagged/@union support field access)");
             @fmt(out, 
-                "Type Error: expected field % on type % %", 
+                "Type Error: field '%' does not exist on type % %\n", 
                 self.pool.get(it.name), self.log_type(it.container), extra,
             );
+            show_type_declaration(self, out, it.container, color);
         }
         fn MissingField(it) => {
             self.codemap.fmt_error_line(it.span, out, color);
@@ -704,15 +707,19 @@ fn fmt_error(self: *SelfHosted, err: *CompileError, out: *List(u8), color: bool)
                 @fmt(out, "ICE: this field doesn't even exist on the container type");
             };  
         }
-        fn MissingContextualField(it) => {
+        fn InvalidContextualField(it) => {
             self.codemap.fmt_error_line(it.span, out, color);
             @fmt(out, "contextual field % not found for %\n", self.pool.get(it.name), self.log_type(it.type));
-            info := self.get_info(it.type);
-            if info.loc.low != 0 {
-                @fmt(out, "declared here: ");
-                self.codemap.fmt_error_line((low = info.loc.low, high = info.loc.low + 1), out, color);
-            };
+            show_type_declaration(self, out, it.type, color);
         }
+    };
+}
+
+fn show_type_declaration(self: *SelfHosted, out: *List(u8), type: Type, color: bool) void = {
+    info := self.get_info(type);
+    if info.loc.low != 0 {
+        @fmt(out, "declared here: ");
+        self.codemap.fmt_error_line((low = info.loc.low, high = info.loc.low + 1), out, color);
     };
 }
 

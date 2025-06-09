@@ -41,7 +41,9 @@ EmitIr :: @struct(
     last_line := -1,
     new_constants: List(BakedVarId),
     shared: *CodegenShared,
-    pending: *List(FuncId), // TODO: you wouldn't need this if sema tracked callees correctly. 
+    // you wouldn't need this if sema tracked callees correctly,
+    // but it's much easier to just fudge it with shims. 
+    pending: *List(FuncId), 
     idx: *i64,
     pending_set_lib: List(Ty(Qbe.Sym, Str)),  // TODO: don't be cringe
 );
@@ -445,8 +447,8 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = {
     };
     
     T :: FuncImpl.Tag();
-    prio_amd :: @const_slice(T.NewIntrinsic, T.Normal, T.Intrinsic, T.TargetOsSplit, T.X86AsmBytes, T.Redirect, T.DynamicImport, T.Ir);
-    prio_arm :: @const_slice(T.NewIntrinsic, T.Normal, T.Intrinsic, T.TargetOsSplit, T.JittedAarch64, T.Redirect, T.DynamicImport, T.Ir);
+    prio_amd :: @const_slice(T.NewIntrinsic, T.Normal, T.Intrinsic, T.TargetOsSplit, T.X86AsmBytes, T.Redirect, T.DynamicImport, T.Ir, T.FrcImport);
+    prio_arm :: @const_slice(T.NewIntrinsic, T.Normal, T.Intrinsic, T.TargetOsSplit, T.JittedAarch64, T.Redirect, T.DynamicImport, T.Ir, T.FrcImport);
     impl := or choose_impl(func.body&, @if(self.m.goal.arch == .aarch64, prio_arm, prio_amd)) {
         if self.want_syscall(self.func, true) { syscall_number |
             self.bounce_body(self.f.getcon(syscall_number), .syscall);
@@ -532,6 +534,11 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = {
             msg :: "Don't compile into our module, use your own and we'll move it for you. TODO: this is wasteful";
             @err_assert(!identical(f.globals, self.m), msg) return;
             self.move_from_module(f, it.data, it.funcs);
+            return(.Ok);
+        }
+        fn FrcImport(it) => {
+            self.entry.task = @try(self.move_from_module(it)) return;
+            self.entry.logging = "DR";
             return(.Ok);
         }
         @default => panic("TODO: unhandled FuncImpl");
@@ -916,7 +923,7 @@ fn compile_expr(self: *EmitIr, expr: *FatExpr, p: Placement) CRes(Qbe.Ref) = {
         }
         fn Switch(f) => return(self.emit_switch(expr, p));
         fn CVariadic() => return(@err("Expr::CVariadic can only be used as the last parameter to a call"));
-        @default => @panic("ICE: didn't desugar: %", self.program.log(expr));
+        @default => return(@err("ICE: didn't desugar: %", self.program.log(expr)));
     })
 }
 

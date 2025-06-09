@@ -1,7 +1,6 @@
 C :: import("@/examples/import_c/lib.fr");
 
 #include_std("backend/lib.fr");
-#include_std("compiler/worker.fr");
 ENABLE_TRACY :: false;  // TODO: make worker something you can import nicely
 
 Args :: @struct {
@@ -132,10 +131,12 @@ fn compile(args: Args) Result(void, Str) = {
     };
     m.libraries&.push("libc", general_allocator());  // :DefaultToLibc
     
-    ctx: *CodegenShared = init(m&, libc_allocator, codegen_thread_main, false);
+    // TODO: this should work single threaded as well but i think it doesn't -- Jun 7, 2025
+    ctx: *C.Compile.CodegenShared = init(m&, libc_allocator, C.Compile.codegen_thread_main, true);
     
     c := C'Compile.Ctx.zeroed();
     C'init_ctx(c&, m&);
+    c.emitter = (Some = ctx);
     each args.defines { it |
         c&.define_macro(it._0, it._1);
     };
@@ -143,7 +144,6 @@ fn compile(args: Args) Result(void, Str) = {
     
     prog := @try(c&.compile_file(args.input_path)) return;
     emit_the_code(c&, ctx, prog);
-    //join_codegen_thread(ctx);
     
     if m.goal.type == .JitOnly {
         // TODO: :paste from qbe_frontend.fr

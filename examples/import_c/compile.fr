@@ -36,7 +36,6 @@ Obj :: @rec @struct(
     is_tentative: bool,
     is_tls: bool,
     init_data: []u8,
-    init_data_needs_null_terminator: bool,
     rel: *Relocation,
     is_inline: bool,
     body: *Node,
@@ -50,6 +49,7 @@ Obj :: @rec @struct(
     def: *Obj,
     franca_f: FuncId,
     franca_v: BakedVarId,
+    yielded: bool,
 );
 Relocation :: @rec @struct(
     next: *Relocation,
@@ -197,6 +197,8 @@ Ctx :: @rec @struct {
     arena: Alloc;
     next_var_id: i64;
     
+    tentative: HashMap(Str, *Obj);
+    
     // I'm probably going to regret this. 
     error_buf: List(u8);
     a_little_hidden_control_flow: import("@/lib/jump.fr").JumpBuf;
@@ -205,8 +207,10 @@ Ctx :: @rec @struct {
     
     preserve_franca_env: bool;
     franca_env: Qbe.Ref;
-    franca: ?CompCtx;
-    franca_namespace: ScopeId;
+    franca: ?CompCtx;  // TODO: remove
+    franca_namespace: ScopeId;  // TODO: remove
+    emitter: ?*CodegenShared;
+    save_type_info: bool;
     
     // should `void f()` be treated the same as `void f(...)` instead of `void f(void)`
     // c23 says no, before says yes. but mostly it doesn't matter because sane programs say the `...` anyway. 
@@ -276,7 +280,7 @@ fn find_tag(c: *Ctx, tok: *Token) ?*CType = {
 fn push_scope(c: *Ctx, name: Str) *VarScope = {
     ::ptr_utils(Scope);
     @debug_assert(!c.scope.is_null(), "uninit Ctx.scope");
-    sc := temp().box_zeroed(VarScope);
+    sc := c.arena.box_zeroed(VarScope);
     insert(c.scope.vars&, name, sc);
     sc
 }
@@ -500,7 +504,9 @@ fn new_anon_gvar(c: *Ctx, ty: *CType, tok: *Token) *Obj =
 fn new_string_literal(c: *Ctx, p: []u8, ty: *CType, tok: *Token) *Obj = {
     var := c.new_anon_gvar(ty, tok);
     var.init_data = p;
-    var.init_data_needs_null_terminator = true;
+    if !c.speculate {
+        c.yield(var);
+    }
     var
 }
 
@@ -1009,6 +1015,7 @@ fn declaration(c: *Ctx, tok: *Token, basety: *CType, attr: ?*VarAttr, first_decl
                 if equal(tok, "=") {
                     c.gvar_initializer(tok&, tok.next, var);
                 };
+                c.yield(var);
                 continue();
             }
         };
@@ -1202,6 +1209,8 @@ fn designation(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) void = {
 // (e.g. `int x[] = {1,2,3}`). If it's omitted, count the number
 // of initializer elements.
 fn count_array_init_elements(c: *Ctx, tok: *Token, ty: *CType) i64 = {
+    prev := c.speculate;
+    c.speculate = true;
     dummy := c.new_initializer(ty.base, true);
 
     i, hi := (0, 0);
@@ -1220,6 +1229,7 @@ fn count_array_init_elements(c: *Ctx, tok: *Token, ty: *CType) i64 = {
         i += 1;
         hi = max(hi, i);
     };
+    c.speculate = prev;
     hi
 }
 
@@ -1238,17 +1248,11 @@ fn comma_sep(c: *Ctx, tok: **Token, $end: Str, $body: @Fn() void) void = {
 fn array_initializer1(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) void = {
     tok = c.skip(tok, "{");
 
-    // TODO: surely i dont need two pastes of this
-    
     if init.is_flexible {
         len := c.count_array_init_elements(tok, init.ty);
         init[] = c.new_initializer(c.array_of(init.ty.base, len), false)[];
     };
 
-    if init.is_flexible {
-        len := c.count_array_init_elements(tok, init.ty);
-        init[] = c.new_initializer(c.array_of(init.ty.base, len), false)[];
-    };
     i := 0;
     comma_sep(c, tok&, "}") {
         continue :: local_return;
@@ -1395,6 +1399,7 @@ fn initializer2(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) void = 
         // Handle that case first.
         expr := c.parse_expr(rest, tok, .Assign);
         c.add_type(expr);
+        
         if expr.ty.kind == .TY_STRUCT {
             init.expr = expr;
         } else {
@@ -2055,12 +2060,11 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *T
     // [https://www.sigbus.info/n1570#6.4.2.2p1] "__func__" is
     // automatically defined as a local variable containing the
     // current function name.
-    c.push_scope("__func__")[].var =
-    c.new_string_literal(f_name, c.array_of(ty_char, f_name.len), tok);
+    name_var := c.new_string_literal(f_name, c.array_of(ty_char, f_name.len), tok);
+    c.push_scope("__func__")[].var = name_var;
     
     // [GNU] __FUNCTION__ is yet another name of __func__.
-    c.push_scope("__FUNCTION__")[].var =
-    c.new_string_literal(f_name, c.array_of(ty_char, f_name.len), tok);
+    c.push_scope("__FUNCTION__")[].var = name_var;
     
     _ := c.compound_stmt(tok&, tok);
     if c.b.jmp.type == .Jxxx {
@@ -2083,6 +2087,7 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *T
     c.labels&.clear();
     c.current_fn = .None;
     c.franca_env = QbeNull;
+    c.yield(f);
     tok
 }
 
@@ -2102,8 +2107,23 @@ fn global_variable(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, first_d
             @if(!expect_var) continue();
             @error_tok(c, ty.name_pos, "variable name omitted");
         };
-
-        var := c.new_gvar(c.get_ident(ty.name), ty, ty.name_pos);
+        
+        prev_is_tentative   := false;
+        prev_is_declaration := false;
+        prev := c.find_var(ty.name_pos);
+        prev_var := Obj.ptr_from_int(0);
+        if prev { prev |
+            if !prev.var.is_null() {
+                prev_var = prev.var;
+                prev_is_tentative = prev.var.is_tentative;
+                prev_is_declaration = !prev_is_tentative;
+            }
+        }
+        
+        var := prev_var;
+        if var.is_null() {
+            var = c.new_gvar(c.get_ident(ty.name), ty, ty.name_pos);
+        }
         var.is_definition = !attr.is_extern;
         var.is_static = attr.is_static;
         var.is_tls = attr.is_tls;
@@ -2114,72 +2134,29 @@ fn global_variable(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, first_d
         if equal(tok, "=") {
             if(attr.is_extern, => @error_tok(c, tok, "extern symbol with a value doesn't make any sense?"));
             c.gvar_initializer(tok&, tok.next, var);
+            
         } else {
             var.is_tentative = var.is_tentative || (!attr.is_extern && !attr.is_tls);
         };
+        
+        if var.is_tentative {
+            if prev_is_declaration || prev_is_tentative {
+                continue(); 
+            };
+            if !prev_is_tentative {  // might be filled later
+                c.tentative&.insert(var.name, var);  
+            };
+        } else {
+            if prev_is_tentative {  // the old definition refers to the new variable
+                c.tentative&.remove(var.name);
+            };
+            @if(!attr.is_extern) c.yield(var);
+        };
+        
         c.move_current_refs(var);
     };
     c.refs = prev_refs;
     tok
-}
-
-// Remove redundant tentative definitions.
-fn scan_globals(c: *Ctx) void = {
-    head := Obj.zeroed();
-    cur  := head&;
-
-    fn merge_refs(c: *Ctx, var: *Obj, def: *Obj) void = {
-        // Since there's another definition, the tentative definition is redundant 
-        // but we need to merge the refs to make sure it actually gets compiled. 
-        if var.refs.len != 0 {
-            if def.refs.len == 0 {
-                def.refs = var.refs;
-            } else {
-                out := list(@type var.refs[0], var.refs.len + def.refs.len, c.arena);
-                out&.push_all(var.refs);
-                out&.push_all(def.refs);
-                def.refs = out.items();
-            };
-        };
-        var.def = def;
-    }
-
-    for_linked c.globals { var |
-        continue :: local_return;
-        if !var.is_tentative {
-            if !var.is_definition { 
-                if find_matching_name(c.globals, var) { def |
-                    merge_refs(c, var, def);
-                    continue();
-                };
-            };
-            
-            cur.next = var;
-            cur = cur.next;
-            continue();
-        };
-        
-        if find_matching_name(c.globals, var) { def |
-            merge_refs(c, var, def);
-        } else {
-            cur.next = var;
-            cur = cur.next;
-        };
-    };
-
-    cur.next = Obj.ptr_from_int(0);
-    c.globals = head.next;
-}
-
-// :SLOW
-// Find another definition of the same identifier.
-fn find_matching_name(first: *Obj, goal: *Obj) ?*Obj #once = {
-    for_linked first { var2 |
-        if !goal.identical(var2) && var2.is_definition && goal.name == var2.name {
-            return(Some = var2);
-        };
-    };
-    .None
 }
 
 fn declare_builtin_functions(c: *Ctx) void = {
@@ -2217,7 +2194,11 @@ fn parse(c: *Ctx, tok: *Token) *Obj = {
         //       need to have them not in temp(), or copy them out at the end. 
     };
 
-    c.scan_globals();
+    each c.tentative& { name, var |
+        c.yield(var[]);
+    };
+    c.tentative&.clear();
+    
     c.globals
 }
 
@@ -2551,6 +2532,7 @@ parse_bracketed :: fn(c, rest, tok) #prefix(.@"(") = {
             if c.scope.next.is_null() {  // global
                 var := c.new_anon_gvar(ty, tok);
                 c.gvar_initializer(rest, tok, var);
+                c.yield(var);
                 c.new_var_node(var, start)
             } else {  // local
                 var := c.new_lvar("", ty);
@@ -3450,7 +3432,10 @@ fn is_const_expr(c: *Ctx, node: *Node) bool = {
 }
 
 fn const_expr(c: *Ctx, rest: **Token, tok: *Token) i64 = {
+    prev := c.speculate;
+    c.speculate = false;
     node := c.parse_expr(rest, tok, .Conditional);
+    c.speculate = prev;
     c.eval(node)
 }
 
@@ -3974,4 +3959,5 @@ fn gen_addr(c: *Ctx, node: *Node) Qbe.Ref = {
     node.lvalue
 }
 
+#include_std("compiler/worker.fr");
 #use("@/backend/opt/fold.fr");

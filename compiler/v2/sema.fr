@@ -1354,6 +1354,12 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
             expr.done = true;
             expr.ty = CVariadicType;
         };
+        fn FrcImport() => {
+            @if_let(requested) fn Specific(it) => if expr.ty == UnknownType {
+                expr.ty = it;
+            };
+            @check(self.sema_frc_import(expr)) return;
+        }
         @default => @panic("TODO: unhandled node type %: %", expr.expr&.tag(), expr.log(self));
     };
     self.last_loc = old_loc;
@@ -1478,7 +1484,7 @@ fn construct_struct_literal(self: *SelfHosted, expr: *FatExpr, requested: Result
                 // we didn't find the field but it might be a field of an inner #use struct
                 path := list(*Field, temp());
                 if !self.find_field_use(raw_container_type, name, path&) {
-                    return(@err("Tried to assign unknown field %", self.pool.get(name)))
+                    return(Err = self.error(InvalidField = (name = name, container = requested, span = expr.loc)))
                 };
                 top_field := path[0];
                 
@@ -1572,7 +1578,7 @@ fn construct_struct_literal(self: *SelfHosted, expr: *FatExpr, requested: Result
                     return(.Ok);
                 };
             };
-            @err("No field % exists in %", self.pool.get(name), self.log_type(requested))
+            (Err = self.error(InvalidField = (name = name, container = requested, span = expr.loc)))
         }
         @default => @err("found struct literal but expected % = %", requested, self.log_type(requested));
     }
@@ -1640,7 +1646,7 @@ fn contextual_field(self: *SelfHosted, name: Symbol, expr_out: *FatExpr, type: T
         @default => ();
     };
     
-    (Err = self.error(MissingContextualField = (span = expr_out.loc, type = type, name = name)))
+    (Err = self.error(InvalidContextualField = (span = expr_out.loc, type = type, name = name)))
 }
 
 fn compile_call_overload_set(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(void) #once = {

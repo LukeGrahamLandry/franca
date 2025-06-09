@@ -14,6 +14,7 @@ SPAM :: false;
 fn init_ctx(c: *Compile.Ctx, m: *QbeModule) void = {
     c.arena = temp();  // TODO
     c.current_fn = .None;
+    c.emitter = .None;
     c.brk_label = .None;
     c.cont_label = .None;
     c.scope = c.arena.box_zeroed(Compile.Scope);
@@ -27,6 +28,7 @@ fn init_ctx(c: *Compile.Ctx, m: *QbeModule) void = {
     c.filename_cache = init(c.arena);
     c.include_paths = list(c.arena);
     c.hide_stack = list(c.arena);
+    c.tentative = init(c.arena);
     c.m = m;
     c.franca = .None;
     c.franca_namespace = NOSCOPE;
@@ -68,61 +70,40 @@ fn compile_file(c: *Compile.Ctx, path: Str) Result(*Compile.Obj, Str) = {
     }
 }
 
-fn emit_the_code(c: *Compile.Ctx, ctx: *CodegenShared, obj: *Compile.Obj) void = {
-    for_defs(c, obj) { obj | 
-        entry := bouba_acquire(ctx, ctx.bouba_idx&);
-        push_dynamic_context {
-            context(DefaultContext)[].temporary_allocator = entry.arena&;
-            id := obj.global_symbol.unwrap();
-            if obj.is_function {
-                f := obj.f;
-                fill_lnk(f.lnk&, obj, ctx.m);
-                entry.task = (Func = f);
-            } else {
-                entry.task = (AotVar2 = translate_data(ctx.m, obj));
-            };
-        };
-        enqueue_task(ctx, entry);
+fn yield(c: *Compile.Ctx, obj: *Compile.Obj) void = {
+    @assert(!obj.yielded);
+    obj.yielded = true;
+    if c.save_type_info {
+        import("@/examples/import_c/ffi.fr")'export(c, obj);
+    };
+    if c.emitter { _ |
+        // TODO: "this makes ffi take 180ms longer to compile because it doesn't go through a vtable"
+        emit_one(c, obj);
     };
 }
 
-fn for_defs(c: *Compile.Ctx, obj: *Compile.Obj, $body: @Fn(obj: *Compile.Obj) void) void = {
-    :: ptr_utils(Compile.Obj);
-    work := list(*Compile.Obj, temp());
-    while => !obj.next.is_null() {
-        @assert(!obj.is_tls, "Thread Local Storage is not supported");
-        // TODO: support comiling to a lib
-        is_root := /*@match(c.m.goal.type) {
-            fn Exe() => */obj.name == "main";/*
-            @default => !obj.is_static;
-        };*/
-        if obj.is_definition && is_root && !obj.sent_to_backend {
-            obj.sent_to_backend = true;
-            work&.push(obj);
-            //@println("root %", obj.name);
-        };
-        obj = obj.next;
+fn emit_the_code(c: *Compile.Ctx, ctx: *Compile.CodegenShared, obj: *Compile.Obj) void = {
+    if c.emitter { it |
+        it.join_codegen_thread();
     };
-    // TODO: don't add __FUNC__ as ref 
-    // TODO: more depth first like franca does so you get better inlining
-    // TODO: almost all the time is wuffs_testlib__initialize_global_xxx_slices
-    while => work&.pop() { obj |
-        work&.reserve(obj.refs.len);
-        for obj.refs { ref |
-            // TODO: instead of this you could just say the forward refs the definition. 
-            while => !ref.def.is_null() {
-                ref = ref.def;
-            };
-            if ref.is_definition && !ref.sent_to_backend {
-                ref.sent_to_backend = true;
-                work&.push(ref);
-                //@println("add % (from %)", ref.name, obj.name);
-            } else {
-                //@println("skip % (from %)", ref.name, obj.name);
-            };
+}
+
+fn emit_one(c: *Compile.Ctx, obj: *Compile.Obj) void = {
+    ctx := c.emitter.unwrap();
+    @assert(obj.yielded);
+    entry := bouba_acquire(ctx, ctx.bouba_idx&);
+    push_dynamic_context {
+        context(DefaultContext)[].temporary_allocator = entry.arena&;
+        id := obj.global_symbol.unwrap();
+        if obj.is_function {
+            f := obj.f;
+            fill_lnk(f.lnk&, obj, ctx.m);
+            entry.task = (Func = f);
+        } else {
+            entry.task = (AotVar2 = translate_data(ctx.m, obj));
         };
-        body(obj);
     };
+    enqueue_task(ctx, entry);
 }
 
 // TODO: implement _Alignas
@@ -130,23 +111,14 @@ fn translate_data(m: *QbeModule, obj: *Compile.Obj) []Dat2 = {
     ::ptr_utils(@type obj.rel[]);
     no_init_data := obj.init_data.ptr.is_null();
     // can't just be obj.ty.size because it might have a flexible array member
-    total_size   := if(no_init_data, => obj.ty.size.intcast(), => obj.init_data.len) + int(obj.init_data_needs_null_terminator);
+    total_size   := if(no_init_data, => obj.ty.size.intcast(), => obj.init_data.len);
     is_zeroed    := no_init_data || is_all_zeroes(obj.init_data);
     
     out := Dat2.list(1, temp());
     out&.push(
         export = !obj.is_static,
         id = obj.global_symbol || m.mangle(obj),
-        template = @if(is_zeroed, (Zeroes = total_size), (Bytes = {
-            if obj.init_data_needs_null_terminator {
-                // TODO: doing an extra copy here is unfortunate
-                d := temp().alloc(u8, obj.init_data.len + 1);
-                d.slice(0, d.len - 1).copy_from(obj.init_data);
-                d
-            } else {
-                obj.init_data
-            }
-        })),
+        template = @if(is_zeroed, (Zeroes = total_size), (Bytes = obj.init_data)),
         relocations = ({
             relocs := Dat2.Reloc.list(temp());
             for_linked obj.rel { rel |
