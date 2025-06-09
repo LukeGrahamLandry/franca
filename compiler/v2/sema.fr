@@ -1355,9 +1355,7 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
             expr.ty = CVariadicType;
         };
         fn FrcImport() => {
-            @if_let(requested) fn Specific(it) => if expr.ty == UnknownType {
-                expr.ty = it;
-            };
+            @if(DISABLE_IMPORT_FRC) return(@err("TODO: DISABLE_IMPORT_FRC because scoping when you import the compiler is messed up"));
             @check(self.sema_frc_import(expr)) return;
         }
         @default => @panic("TODO: unhandled node type %: %", expr.expr&.tag(), expr.log(self));
@@ -3845,13 +3843,9 @@ fn ask_coerce_const_expr(self: *SelfHosted, expr: *FatExpr, want: Type, query: b
                 os := @check(self.eval(expr, OverloadSet)) return;
                 fid := @check(self.resolve_by_type(os, f.ty, expr.loc)) return;
                 if(query, => return(Ok = true));
-                self.set(expr, FuncId, fid);
-                expr.done = false;
-                self.took_pointer_value(fid);
-                e := self.box(expr[]);  // :fucked segfault if you inline this!!!!!! -- Aug 6
-                expr.expr = (FnPtr = e);
-                expr.ty = want;
-                expr.done = false;
+                
+                // no need to typecheck that `fid` matches `want`, we only got it by resolving in the overloadset. 
+                self.make_fn_ptr_expr(expr, fid, want);
                 @check(self.compile_fn_ptr(expr)) return;
                 return(Ok = true);
             }
@@ -3882,10 +3876,7 @@ fn ask_coerce_const_expr(self: *SelfHosted, expr: *FatExpr, want: Type, query: b
                 expr.done = false;
                 fid := @check(self.eval(expr, FuncId)) return;
                 @check(self.check_promote_id_to_func(fid, f_ty.ty)) return;
-                inner := self.box(expr[]);
-                expr.expr = (FnPtr = inner);
-                expr.done = false;
-                expr.ty = UnknownType;
+                self.make_fn_ptr_expr(expr, fid, UnknownType);  // TODO: why am i saying `want` directly in the overloadset case but not here
                 // TODO: typecheck
                 @check(self.compile_expr(expr, (Specific = want))) return;
                 return(Ok = true);
@@ -3893,11 +3884,7 @@ fn ask_coerce_const_expr(self: *SelfHosted, expr: *FatExpr, want: Type, query: b
             fn VoidPtr() => {
                 if(query, => return(Ok = true));
                 fid := @check(self.eval(expr, FuncId)) return;
-                inner := self.box(expr[]);
-                expr.expr = (FnPtr = inner);
-                expr.done = inner.done;
-                expr.ty = rawptr;
-                self.took_pointer_value(fid);
+                self.make_fn_ptr_expr(expr, fid, rawptr);  // :get_or_create_type
                 // TODO: could call compile_expr/compile_fn_expr instead of imm+took
                 return(Ok = true);
             }
@@ -4006,6 +3993,16 @@ fn ask_coerce_const_expr(self: *SelfHosted, expr: *FatExpr, want: Type, query: b
         @default => ();
     };
     (Ok = false)
+}
+
+fn make_fn_ptr_expr(self: *SelfHosted, expr: *FatExpr, fid: FuncId, want: Type) void = {
+    self.took_pointer_value(fid);
+    self.set(expr, FuncId, fid);
+    expr.done = false;
+    e := self.box(expr[]);  // :fucked segfault if you inline this!!!!!! -- Aug 6
+    expr.expr = (FnPtr = e);
+    expr.ty = want;
+    expr.done = false;
 }
 
 // TODO: you can never do this to a constant directly in case its aliased once i have const ptrs. 

@@ -1,7 +1,7 @@
 /// This defines the .frc file format used by the franca compiler. 
 /// See @/docs/caching.md
 
-MAGIC :: 0x0007_41434E415246;  // FRANCA__
+MAGIC :: 0x0008_41434E415246;  // FRANCA__
 Header :: @struct {
     meta: Meta #use;
     dep: Storage(Dep);
@@ -111,7 +111,7 @@ Storage :: fn($T: Type) Type = {
         f :: find_storage_field(T);
         storage := Header.get_field_ptr(self, f);
         first := T.ptr_from_raw(Header.raw_from_ptr(self).offset(storage.off.zext()));
-        @debug_assert_le(i.off + i.count, storage.count, "%", ::f[].name.str());
+        @debug_assert_le(@as(i64) i.off.zext() + i.count.zext(), storage.count.zext(), "%", ::f[].name.str());
         (ptr = first.offset(i.off.zext()), len = i.count.zext())
     }
     
@@ -545,7 +545,7 @@ fn compile_all_symbols(header: *Header, m: *QbeModule) void = {
     default_init(f&, m);
     
     syms := preintern_syms(header, m);
-    read_types(header, m);
+    type_offset := read_types(header, m);
     
     for(header, header.all(Sym)) { i, it |
         mark := mark_temporary_storage();
@@ -562,6 +562,8 @@ fn compile_all_symbols(header: *Header, m: *QbeModule) void = {
                 if did_regalloc {
                     emit_fn(f&);
                 } else {
+                    apply_type_offset(f&, type_offset);
+                
                     // TODO: suspend for inlining (can be a bit in FncFlags)
                     {f.globals.target.finish_passes}(f&);
                 };
@@ -679,23 +681,54 @@ write_types :: fn(self: *Writer, m: *QbeModule) void = {
     unlock(m.types_mutex&);
 };
 
-read_types :: fn(header: *Header, m: *QbeModule) void = {
+// This returns the offset into the new module of the first type in the old module. 
+// You need to pass it to apply_type_offset() whenever you load a (!did_regalloc) function. 
+read_types :: fn(header: *Header, m: *QbeModule) i64 = {
+    if(header.typ.count == 0, => return(0));  // if there are no types (like if did_regalloc) it doesn't matter
+    
     lock(m.types_mutex&);
-    msg :: "can only read_types in a fresh module because RType is a global index and i don't remap instructions";
-    @debug_assert(m.types.len == 0 || header.typ.count == 0, msg);
+    offset := m.types.len;
     
     types: Ref(Typ) = (off = 0, count = header.typ.count);
     each header.get(types) { t | 
-        fields := m.new_copy_long_life(header.get(t.fields));  // TODO: this copy is lame. make it a slice instead of a QList
-        i := m.new_type(
+        // TODO: this copy is lame. make it a slice instead of a QList
+        //       but that doesn't work now that i need to reuse the same Header so can't mutate and have type_offset. 
+        //       tho could save a copy when offset==0
+        fields := m.new_copy_long_life(header.get(t.fields));
+        m.new_type(
             name = "",
             header = t.header,
             nfield = t.fields.count,
             fields = fields,
         );
+        
+        @if(offset != 0)
+        each fields.slice(0, t.fields.count.zext()) { it |
+            f := unpack it[];
+            ::enum(@type f.type);
+            if f.type == .FTyp {
+                it[] = pack(type = .FTyp, len = f.len + offset.trunc());
+            }
+        };
     };
     
+    @debug_assert_lt(m.types.len, 1.shift_left(24), "types overflow");
     unlock(m.types_mutex&);
+    offset
+};
+
+apply_type_offset :: fn(f: *Qbe.Fn, type_offset: i64) void = {
+    if(type_offset == 0, => return());
+    fix :: fn(a: *Qbe.Ref) => if rtype(a[]) == .RType {
+        a[] = TYPE(a[].val() + type_offset);
+    };
+    
+    fix(f.retty&);
+    for_blocks f { b |
+        for_insts_forward b { i |
+            each(i.arg&.items(), fix);
+        };
+    };
 };
 
 // 
@@ -704,7 +737,7 @@ read_types :: fn(header: *Header, m: *QbeModule) void = {
 
 FTy :: @rec @struct {
     Tag :: @enum(u8) (
-        Alias,
+        Invalid, Alias,
         Number, Array, Ptr, Func, 
         Enum, Scope, Struct, Union, Tagged, Params,
     );

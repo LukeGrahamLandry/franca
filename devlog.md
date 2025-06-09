@@ -6,6 +6,19 @@ let's cheat and make examples/terminal.fr(repl=true) not take 2 seconds to compi
 - compile_to_shader_source: 68 // shader compiler (for comptime)
 notably those are all things to aren't going to change if you're just working on the terminal program. 
 
+## (Jun 9)
+
+- the module always has types as FnPtr because exposing Fn is kinda weird. 
+it's probably more useful to have expr.ty be FuncId if you want to iterate the scopes, 
+and that way it doesn't force a jit shim all the time. 
+- now that i think of it, data constants really should be pointer to thier type, because i don't have an operator 
+for address of a global, like `a :: @static(i64)` corresponds to `static int a;` but my `a` is already a `*i64`
+- don't quite know if i can make this work. i want data to be able to exist in the comptime 
+jitted module and then if you change it in comptime, the version that gets baked into your program 
+is the updated one (like how it works for franca code) but i think that would require exposing 
+bake_relocatable_value in the frc format. so maybe start with the basic version for now. 
+tho it's going to get super confusing if a pointer into that escapes into the comptime franca code. 
+
 ## (Jun 8)
 
 - obj.init_data_needs_null_terminator was adding a redundant null terminator because tokenize makes 
@@ -14,6 +27,27 @@ confusion is bad for business. and i wasn't even zeroing the last byte, it just 
 - string literals in array initializers were being emitted twice because of count_array_init_elements. 
 - strings for function names were emitted twice: `__func__` and `__FUNCTION__`
 - sema: show declaration line for InvalidField error reporting
+
+---
+
+- need to store an extra layer of mapping for each QbeModule that uses the FrcModule, because they'll have different symbol ids.  
+- i was trying to be clever about lazily loading stuff by treating them as normal expressions in a scope but that doesn't quite 
+  work because you need to pre-intern all the mangled names before you can load() a function.
+- the cache files kinda are a better api to expose because they treat all symbols uniform, 
+  so it isolates the hacks to deal with my historical (func vs dat vs import) separation in the frontend. 
+  i think that's most of what's making this seem painful. having an explicit translation step really makes 
+  the weirdness about how i handle symbol names stand out. maybe this will encourage me to redo that part 
+  of the frontend sooner. 
+- it's a bit hacky that i keep swaping between the expr storing funcid or ptr. 
+the module says the type is ptr because func only makes sense to the compiler, 
+and then we change it to funcid because that's more useful, but if coerce_const_expr 
+sees it in between it will switch back (and convert the value)
+...why am i even doing any of this shit. `module.sym[i]` has this info. lmao. 
+oh but you don't know the type unless you're going through the scope. 
+ok that's fine, just save the types in another array at the beginning. 
+that's much simplier than manually poking around in the scope to recreate info we already had. 
+- new way of doing type remapping is less painful than old emit_ir.fr/remap(). rely on doing 
+the source module being finished and then you just need to apply an offset to type indices to remap them. 
 
 ## (Jun 7)
 
