@@ -16,8 +16,22 @@ for address of a global, like `a :: @static(i64)` corresponds to `static int a;`
 - don't quite know if i can make this work. i want data to be able to exist in the comptime 
 jitted module and then if you change it in comptime, the version that gets baked into your program 
 is the updated one (like how it works for franca code) but i think that would require exposing 
-bake_relocatable_value in the frc format. so maybe start with the basic version for now. 
+bake_relocatable_value in the frc format. or since you already know where the relocations are, 
+maybe remember that shape when you need to bake and hope there are no unions? 
+that's hard to think about. so maybe start with the basic version for now. 
 tho it's going to get super confusing if a pointer into that escapes into the comptime franca code. 
+- classic mistake: not increment index while looping over relocations. should really have a nicer way of zipping iterators, 
+but i feel like you kinda need the external iterators to do that and they're so much more annoying boiler plate to write for each container. 
+- now that's the whole import_c/test/ffi.fr working except the comptime variadic call. 
+- added debug check for !threaded CodegenShared that you don't try to acquire the entry before releasing it (since the queue is only one long)
+- now add_many works if i call it either at comptime or runtime but not both. 
+- problem was "need load() to not alias since we might want to use in multiple modules", which i did have a comment for so at least i knew at some point. 
+- for view_image, needed to call emit_suspended_inlinables. 
+TODO: add a simpler thing that needs that in test/ffi.fr 
+TODO: fix ascii_table.fr
+
+- hmm, it sure got a lot slower (1032 -> 1113) at self compile since whenever my current release compiler was built (Jun  7 22:01), 
+(both compiling current code so it's just cause i added stuff).  
 
 ## (Jun 8)
 

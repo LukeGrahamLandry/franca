@@ -257,6 +257,7 @@ fn push(self: *Writer, f: *Qbe.Fn, did_regalloc: bool) void = {
         }
     };
     
+    @debug_assert_gt(f.nblk, 0, "tried to save empty function");
     self.sym[id].fnc.blk = (off = self.blk.len.trunc(), count = f.nblk.bitcast());
     {
         i: i32 = 0;
@@ -302,8 +303,10 @@ fn push(self: *Writer, m: *QbeModule, d: *Dat2) void = {
     id := self.map_sym(m, d.id);
     
     self.sym[id].segment = @as(Seg) @as(u8) trunc((@as(i64) d.seg) + 1);
+    data_start := -1;
     @match(d.template) {
         fn Bytes(it) => {
+            data_start = self.str.len;
             self.sym[id].dat.bytes = self.push(it);
         };
         fn Zeroes(it) => {
@@ -321,6 +324,10 @@ fn push(self: *Writer, m: *QbeModule, d: *Dat2) void = {
             id = (id = self.map_sym(m, it.id).trunc()),
             addend = it.addend,
         );
+        if data_start != -1 {
+            // just make it something recognisable if the relocation doesn't get applied somehow
+            ptr_cast_unchecked(u8, i64, self.str.index(data_start + zext it.off))[] = 0x0123456789ABCDEF;
+        }
     };
     
     self.sym[id].align_log2 = d.align.trailing_zeros().trunc();
@@ -427,7 +434,9 @@ finish_module :: fn(m: *QbeModule) [][]u8 = {
 // note: this only calls default_init if !did_rega
 fn load(header: *Header, f: *Qbe.Fn, it: One(Sym), syms: []Qbe.Sym) bool /*did_regalloc*/ = {
     m := f.globals;
+    @debug_assert(m.initialized, "tried to load() into uninit module");
     sym := header.get(it);
+    @debug_assert_eq(sym.segment, .Code, "tried to load() non-function: %", m.str(f.lnk.id));
     fnc := sym.fnc&;
     did_regalloc := fnc.tmp == Qbe.no_symbol;
     if !did_regalloc {
@@ -444,7 +453,9 @@ fn load(header: *Header, f: *Qbe.Fn, it: One(Sym), syms: []Qbe.Sym) bool /*did_r
         dest := f.con[i + fixed_const_count]&;
         dest[] = src[];
         if src.sym != Qbe.no_symbol_S {
-            dest.sym = syms[src.sym.id.zext()];
+            new := syms[src.sym.id.zext()];
+            @debug_assert_ne(new.id, Qbe.no_symbol);
+            dest.sym = new;
         }
     };
     
@@ -477,7 +488,9 @@ fn load(header: *Header, f: *Qbe.Fn, it: One(Sym), syms: []Qbe.Sym) bool /*did_r
     blks := temp().alloc_zeroed(Qbe.Blk, fnc.blk.count.zext());
     enumerate header.get(fnc.blk) { i, b |
         blks[i].id = i.trunc();
-        blks[i].ins = as_raw_list(header.get(b.ins));
+        // TODO: this extra copy of the instructions is only required when the module is going to be reused (ie. FrcImport comptime+runtime). 
+        //       (because the first pass makes some changes in place and it gets super confused if those were already done)
+        blks[i].ins = as_raw_list(header.get(b.ins).shallow_copy(temp()));
         blks[i].jmp = b.jmp;
         if b.s1 != Qbe.no_symbol {
             blks[i].s1 = blks.index(b.s1.zext());
@@ -499,8 +512,7 @@ fn load(header: *Header, f: *Qbe.Fn, it: One(Sym), syms: []Qbe.Sym) bool /*did_r
 
 fn load(header: *Header, m: *QbeModule, i: One(Sym), syms: []Qbe.Sym) Dat2 = {
     it := header.get(i);
-    relocs := temp().alloc(Dat2.Reloc, it.dat.rel.count.zext());
-    relocs.copy_from(header.get(it.dat.rel));
+    relocs := header.get(it.dat.rel).shallow_copy(temp());
     each relocs { it |
         if it.id != Qbe.no_symbol_S {
             it.id = syms[it.id.id.zext()];

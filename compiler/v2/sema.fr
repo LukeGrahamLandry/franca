@@ -599,38 +599,9 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
     }
     
     did_import := false;
-    
     find_import :: fn(lib_name: Symbol) void => {
-        ret :: local_return;
         did_import = true;
-        handle2 := self.comptime_libraries&.get(lib_name);
-        is_libc := lib_name == Flag.libc.ident(); 
-        name := self.get_comptime_link_name(func);
-        while => handle2 { handle |
-            if handle.get(name) { addr |
-                self.put_jitted_import(fid, addr);
-                
-                impl := find_or_create_impl(func.body&, self.get_alloc(), .DynamicImport);
-                // Note: storing func.name, not intern(name) because emit_ir will need to re-linkrename if we're cross compiling. 
-                impl[] = (name = func.name, lib = lib_name, comptime = addr.int_from_rawptr());
-                ret();
-            };
-            handle2 = .None;
-            // :MultiDylibLibc HACK
-            if is_libc && self.comptime_codegen.m.goal.os == .linux { 
-                next_name := @tfmt("%*", self.pool.get(lib_name));
-                if self.pool.lookup&.get(next_name) { s |
-                    lib_name = s;
-                    handle2 = self.comptime_libraries&.get(lib_name);
-                };
-            };
-        };
-        // :AssumeDones
-        // TODO: how to catch if it actually doesn't exist or they typo-ed the #import string.
-        impl := find_or_create_impl(func.body&, self.get_alloc(), .DynamicImport);
-        impl.name = func.name;
-        impl.lib = lib_name;
-        @try(self.create_jit_shim(fid)) return;
+        @try(self.create_import_body(func, fid, lib_name)) return;
     };
     
     check_body := true;
@@ -871,6 +842,39 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
     };
     @err_assert(good, "Function has no implementation %", func.log(self)) return;
     (Ok = check_body)
+}
+
+// adds DynamicImport to func.impl
+fn create_import_body(self: *SelfHosted, func: *Func, fid: FuncId, lib_name: Symbol) CRes(void) = {
+    handle2 := self.comptime_libraries&.get(lib_name);
+    is_libc := lib_name == Flag.libc.ident(); 
+    name := self.get_comptime_link_name(func);
+    while => handle2 { handle |
+        if handle.get(name) { addr |
+            self.put_jitted_import(fid, addr);
+            
+            impl := find_or_create_impl(func.body&, self.get_alloc(), .DynamicImport);
+            // Note: storing func.name, not intern(name) because emit_ir will need to re-linkrename if we're cross compiling. 
+            impl[] = (name = func.name, lib = lib_name, comptime = addr.int_from_rawptr());
+            return(.Ok);
+        };
+        handle2 = .None;
+        // :MultiDylibLibc HACK
+        if is_libc && self.comptime_codegen.m.goal.os == .linux { 
+            next_name := @tfmt("%*", self.pool.get(lib_name));
+            if self.pool.lookup&.get(next_name) { s |
+                lib_name = s;
+                handle2 = self.comptime_libraries&.get(lib_name);
+            };
+        };
+    };
+    // :AssumeDones
+    // TODO: how to catch if it actually doesn't exist or they typo-ed the #import string.
+    impl := find_or_create_impl(func.body&, self.get_alloc(), .DynamicImport);
+    impl.name = func.name;
+    impl.lib = lib_name;
+    @try(self.create_jit_shim(fid)) return;
+    .Ok
 }
 
 // :link_rename

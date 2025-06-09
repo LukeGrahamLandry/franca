@@ -64,6 +64,13 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
         // :bake_relocatable_value
         {comp.vtable.check_for_new_aot_bake_overloads}(comp.data); 
     };
+    func := comp.get_function(f); 
+    
+    // currently this needs to make funcids eagarly so it might involve making jitshims for imports which has to happen before we grab the codegenentry
+    @if(!DISABLE_IMPORT_FRC)
+    @if_let(func.body&) fn FrcImport(it) => {
+        _ := @try(find_module(comp.data.cast()[][], shared, Incr'FrcModule.ptr_from_int(it.module))) return;
+    };
     
     z := zone_begin(.EmitIr);
     entry := bouba_acquire(shared, idx);
@@ -73,7 +80,6 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
     push_dynamic_context {
         context(DefaultContext)[].temporary_allocator = entry.arena&;
         ::tagged(Placement);
-        func := comp.get_function(f); 
         opts := comp.get_build_options();
         
         env := comp.get_comptime_env();
@@ -97,7 +103,6 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
             pending_set_lib = list(outer_temp),
         );
         @debug_assert(func.get_flag(.EnsuredCompiled), "fn not compiled?");
-        m := self.shared.m;
         self.f.default_init(m);
         self.f.leaf = true;
         self.f.lnk.no_inline = func.get_flag(.NoInline);
@@ -735,7 +740,7 @@ fn compile_stmt(self: *EmitIr, stmt: *FatStmt) CRes(void) = {
         }
         fn Set(f) => {   // :PlaceExpr
             // we care about the type of the pointer, not the value because there might be a cast.
-            dest := @match(f.place.expr&) {
+            @match(f.place.expr&) {
                 fn GetVar(it) => {
                     info := self.var_lookup&.get_ptr(it.id) 
                         || return(@err("missing runtime var %", self.program.get_string(it.name)));
@@ -743,12 +748,22 @@ fn compile_stmt(self: *EmitIr, stmt: *FatStmt) CRes(void) = {
                         @try(self.compile_expr(f.value&, (Assign = dest[]))) return;
                         return(.Ok);
                     };
-                    @try(self.addr_macro(f.place&, .Scalar)) return
+                    dest := @try(self.addr_macro(f.place&, .Scalar)) return;
+                    @try(self.compile_expr(f.value&, (Blit = dest))) return;
                 }
-                fn Deref(arg) => @try(self.compile_expr(arg[], .Scalar)) return;
+                fn Deref(arg) => {
+                    if false {  // :FuckedLikeZig TODO
+                        size: i64 = self.program.get_info(f.place.ty)[].stride_bytes.zext();
+                        src := @try(self.compile_expr(f.value&, .NewMemory)) return;
+                        dest := @try(self.compile_expr(arg[], .Scalar)) return;
+                        self.blit(dest, src, size);
+                    } else {
+                        dest := @try(self.compile_expr(arg[], .Scalar)) return;
+                        @try(self.compile_expr(f.value&, (Blit = dest))) return;
+                    };
+                }
                 @default => return(@err("TODO: other `place=e;` :("));
             };
-            @try(self.compile_expr(f.value&, (Blit = dest))) return;
             .Ok
         }
         fn DeclVarPattern(f) => {

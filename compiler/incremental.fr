@@ -242,7 +242,7 @@ fn import_frc(self: *SelfHosted, bytes: []u8) CRes(ScopeId) = {
         
         self.add_to_scope(scope, name, type, expr);
     };
-    println("done filling scope!");
+    //println("done filling scope!");
     
     (Ok = scope)
 }
@@ -273,7 +273,7 @@ fn sema_frc_import(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
     is_function := header.get(type)[].tag == .Func;
     
     if it.segment == .Import && !is_function {
-        @println("import data: %", caller_name);
+        //@println("import data: %", caller_name);
         lib := header.get(header.get(it.imp.lib)[].name);
         name := self.pool.insert_owned(caller_name);
         expr.expr = (DataSymbol = (name = name, lib = self.pool.insert_owned(lib), comptime = 0));
@@ -282,7 +282,7 @@ fn sema_frc_import(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
 
     if @is(it.segment, .MutableData, .ConstantData, .ZeroInitData) {
         // let emit_ir.fr deal with it
-        @println("local data: %", caller_name);
+        //@println("local data: %", caller_name);
         expr.done = true;
         return(.Ok);
     }
@@ -321,7 +321,7 @@ fn sema_frc_import_fid(self: *SelfHosted, module: *FrcModule, i: One(Sym)) CRes(
     //func.set_flag(.AvoidJitShim);  // TODO: this is unfortunate
     ::enum(Seg);
     if it.segment != .Import {
-        @println("local function: %", caller_name);
+        //@println("local function: %", caller_name);
         func.body = (FrcImport = (module = FrcModule.int_from_ptr(module), index = i.off, table = SYM_TABLE));
         @assert_ne(it.segment, .MachineCode, "TODO: machine code");
 
@@ -341,10 +341,11 @@ fn sema_frc_import_fid(self: *SelfHosted, module: *FrcModule, i: One(Sym)) CRes(
             }
         }
     } else {
-        @println("import function: %", caller_name);
+        //@println("import function: %", caller_name);
         lib := h.get(h.get(it.imp.lib)[].name);
-        func.body = (DynamicImport = (name = name, lib = self.pool.insert_owned(lib), comptime = 0));
-    }
+        lib := self.pool.insert_owned(lib);
+        @try(self.create_import_body(func, fid, lib)) return;
+    };
     fill_bindings(func, self.comp(), self.comp().arg_types(func.finished_arg.Some));
     (Ok = fid)
 }
@@ -445,7 +446,8 @@ fn move_from_module(emit_ir: *EmitIr, import: *FrcImport) CRes(CodegenTask) = {
     header, m, f := (module.header, emit_ir.m, emit_ir.f);
     self := emit_ir.program.data.cast()[][];
     instance := @try(find_module(self, emit_ir.shared, module)) return;
-    
+    @debug_assert(identical(m, f.globals), "move_from_module bad f.m");
+
     i := import.get_sym();
     it := header.get(i);
     ::enum(@type it.segment);
@@ -453,35 +455,75 @@ fn move_from_module(emit_ir: *EmitIr, import: *FrcImport) CRes(CodegenTask) = {
     @if(it.segment == .Code) for(header, it.fnc.con) { _, con |
         if con.sym != Qbe.no_symbol_S {
             sym := @as(One(Sym)) (off = con.sym.id);
-            if @is(header.get(sym)[].segment, .MutableData, .ConstantData, .ZeroInitData) {
-                // TODO: make a bakedvar and push it to emit_ir.something? can't emit now because of codegentask ordering. 
-                todo()
+            it := header.get(sym);
+            if @is(it.segment, .MutableData, .ConstantData, .ZeroInitData) {
+                // this sets inst.syms[sym.off]
+                id := @try(import_baked_var(emit_ir, instance, sym)) return;
+                // this recurses through relocations
+                emit_ir.reference_constant(id);
             }
         }
-    }
+    };
     
     did_regalloc := load(header, f, i, instance.syms);
     if !did_regalloc {
         apply_type_offset(f, instance.type_offset);
     };
-    // TODO: need to do something with Dat2 and new_constants
-    // TODO: need to mark referenced since they don't go through fold.fr 
-    //       make sure there's a test that triggers this. 
-    // TODO: run inlining and if something changes redo the other early passes as well
-    // TODO: someone needs to detect undeclared symbols
-    // TODO: need load() to not alias since we might want to use in multiple modules 
-    // TODO: pre-regalloc is almost target independant but it doesn't quite work 
-    //        - because of apple_extsb
-    //        - also you kinda need a TargetOsSplit to do anything serious
-    // TODO: check arch in import_frc() if did_regalloc 
-    // TODO: now that import_c just outputs a blob of bytes, free its arena at the end
-    // TODO: need to merge deps if we're generating a cache file? 
-    //printfn(f, m.debug_out);
-    
     // rn not adding anything to `pending`, trusting that sema_frc_import() put them in callees for someone else to pickup
     
     (Ok = (FromCache = (f = f, did_regalloc = did_regalloc)))
 }
+
+// TODO: this doesn't interact with comptime in the way i want it to but neither did the old import_c/ffi.fr so it's a good starting point. 
+import_baked_var :: fn(emit_ir: *EmitIr, inst: *FrcModuleInstance, sym: One(Sym)) CRes(BakedVarId) = {
+    module := inst.module;
+    self, h := (emit_ir.program.data.cast()[][], module.header);
+    it := h.get(sym);
+    @debug_assert(@is(it.segment, .MutableData, .ConstantData, .ZeroInitData));
+    
+    slot := module.sym[zext sym.off]&;
+    if slot[] != Qbe.no_symbol {
+        id := bit_cast_unchecked(u32, BakedVarId, slot[]);
+        @debug_assert_lt(@as(i64) zext id.id, self.baked.values.len);
+
+        // :TheOtherWayDoesNotWorkOnExamplesTerminal
+        // TODO: don't do this every time but find_module puts junk in there
+        //if inst.syms[zext sym.off].id == Qbe.no_symbol {
+            inst.syms[zext sym.off] = emit_ir.m.intern(@tfmt("g%", id.id)); 
+        //}
+        //@println("reuse % = g%", h.get(it.name), id.id);
+        return(Ok = id);
+    };
+    
+    // reserve early to not get fucked by cycles
+    dest, id := reserve_baked(self, .None);
+    slot[] = bit_cast_unchecked(BakedVarId, u32, id);
+    inst.syms[zext sym.off] = emit_ir.m.intern(@tfmt("g%", id.id));
+    //@println("bake % = g%", h.get(it.name), id.id);
+    
+    Template :: @type dest.template;
+    template: Template = @if(it.dat.bytes.off == Qbe.no_symbol, 
+        (Zeroes = it.dat.bytes.count.zext()),
+        (Bytes = h.get(it.dat.bytes)),
+    );
+    relocs := self.get_alloc().alloc(BakedReloc, it.dat.rel.count.zext());
+    r := 0; 
+    for(h, it.dat.rel) { i, it |
+        target := zeroed(@type relocs[r].target);
+        xx := @as(One(Sym)) (off = it.id.id);
+        if @try(self.get_fid(module, xx)) return { fid | 
+            target = (FuncId = fid);
+        } else {
+            target = (BakedVarId = @try(import_baked_var(emit_ir, inst, xx)) return);
+        };
+        relocs[r] = (target = target, off = it.off, addend = it.addend);
+        r += 1;
+    };
+    loc := zeroed Span; // TODO
+    dest[] = (template = template, relocations = relocs, loc = loc);
+    
+    (Ok = id)
+};
 
 fn find_module(self: *SelfHosted, shared: *CodegenShared, module: *FrcModule) CRes(*FrcModuleInstance) = {
     a := self.get_alloc();
@@ -505,9 +547,17 @@ fn find_module(self: *SelfHosted, shared: *CodegenShared, module: *FrcModule) CR
             if @try(self.get_fid(module, i)) return { fid |
                 name := self.comp().fmt_fn_name(fid);
                 syms[i.off.zext()] = shared.m.intern(name);
+                //@println("prep fid for % sym=%", name, syms[i.off.zext()].id)
             } else {
                 name_s := h.get(it.name);
-                syms[i.off.zext()] = shared.m.intern(name_s);
+                ::enum(@type it.segment);
+                // :TheOtherWayDoesNotWorkOnExamplesTerminal
+                //if it.segment == .Import {
+                    syms[i.off.zext()] = shared.m.intern(name_s);
+                //} else { // TODO
+                    // it's local data. it will get baked to `g%` instead of this name. 
+                    //syms[i.off.zext()] = Qbe.no_symbol_S;
+                //}
             }
         };
         
@@ -529,7 +579,7 @@ fn get_fid(self: *SelfHosted, module: *FrcModule, i: One(Sym)) CRes(?FuncId) = {
     ::enum(FTy.Tag);
     if module.header.get(ty)[].tag != .Func {
         return(Ok = .None);
-    }
+    };
     
     fid := @try(sema_frc_import_fid(self, module, i)) return;
     (Ok = (Some = fid))

@@ -1,29 +1,21 @@
 - implement _Atomic in import_c
 - import_c: `__constructor__, __aligned__`
-- clear cache before tests just in case
 - @bit_fields in incremental.fr don't work inline in the structs
 - import_c, get rid of :BoundsPadding
 - linux fault-na.ssa need to do the signal struct
 - amd64: `std/json        cc      FAIL test_wuffs_strconv_parse_number_f64_regular: "-0.000e0": have 0x0000000000000000, want 0x8000000000000000`
-- whether the host compiler was built with`-syscalls` needs to go in the cache file
 - amd64: examples/import_c/test/test.fr
 - use HashMap.get_or_insert more
 - #ir tries to ignore zero-sized params but not if they're first which is sad
-- caching an invalid thing i think? if you Compile Error: we hit a dynamicimport ('puts_unlocked' from 'libc') with no comptimeaddr for jit
-(happening with import_c)
 - :BrokenCGeneric i think erroring on conflicting `_Generic` cases is correct but you're supposed to treat `long` and `long long`
 as different types even when they're the same size. 
 - repro doesn't work cross compiling from linux to macos,
 but dump_macho.fr and objdump -d say they're the same (for mandelbrot_ui.fr at least). 
 so something in the data i guess? 
-- dump_bin: print segment.MachineCode as something qbe_frontend.fr can parse so it can round trip
 - examples/repl.fr: `@println("%+%=%", 1, 2, 1+2);` fails safety check
-- frc_inlinable doesn't work on the compiler itself
 - :TodoLinux
 - "need to be consistant about how to handle modules like this that don't actually compile anything"
-- "this makes ffi take 180ms longer to compile because it doesn't go through a vtable"
 - count_array_init_elements is still spitting out junk symbols into the scope. need to just not parse it twice. 
-- DISABLE_IMPORT_FRC
 
 ## Quest Lines
 
@@ -52,6 +44,31 @@ but then need to deal with including build options in the cache (like -unsafe, -
 to allowing smaller compilation units. like not making you recompile the backend 
 when you work on the frontend. 
 - test that .frc files repro and that you can pass them directly
+- frc_inlinable doesn't work on the compiler itself
+- dump_bin: print segment.MachineCode as something qbe_frontend.fr can parse so it can round trip
+- clear cache before tests just in case
+- whether the host compiler was built with`-syscalls` needs to go in the cache file
+- caching an invalid thing i think? if you Compile Error: we hit a dynamicimport ('puts_unlocked' from 'libc') with no comptimeaddr for jit
+(happening with import_c)
+
+### FrcImport 
+
+- need to mark referenced since they don't go through fold.fr 
+  make sure there's a test that triggers this. 
+-  run inlining and if something changes redo the other early passes as well
+- someone needs to detect undeclared symbols
+- pre-regalloc is almost target independant but it doesn't quite work 
+  - because of apple_extsb
+  - also you kinda need a TargetOsSplit to do anything serious
+- make it work with did_regalloc if you know you only care about one architecture
+- check arch in import_frc() if did_regalloc 
+- now that import_c just outputs a blob of bytes, free its arena at the end
+- need to merge deps if we're generating a cache file? 
+- local declaration of import doesn't work because it doesn't get a name in root_scope
+- fix import_c/ffi.fr needing to compile the whole backend now and then time stuff to make sure this way isn't way slower than the old way. 
+- source locations
+- remove DISABLE_IMPORT_FRC. need to deal with scoping when you import(@/compiler)
+- import_c: "this makes ffi take 180ms longer to compile because it doesn't go through a vtable"
 
 ## Unfinished Examples
 
@@ -118,7 +135,6 @@ just a problem with how that program is doing directions not with the app lib)
 
 ## stuff i broke
 
-- add a print for Dat2
 - `fn emit_llvm(m: *QbeModule, dat: *Qbe.Dat) void = {` update to new Dat2
 - adding #align was a compile speed regression
 - formalize ENABLE_INCREMENTAL in backend/arm64/emit (+ support on amd64)
@@ -172,7 +188,6 @@ TODO: end of loop. still too many options for 'index'
 
 ## cross compiling
 
-- graphics: the build_for_graphics driver function dlopens a bunch of macos stuff
 - import_c: if you call something at both comptime and runtime it needs to redo the 
 c frontend work because of `#ifdef ARCH/OS`. C also lets you have different function/struct
 bodies on different targets which i don't deal with well. 
