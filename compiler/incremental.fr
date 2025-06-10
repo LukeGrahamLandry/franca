@@ -312,6 +312,13 @@ fn sema_frc_import_fid(self: *SelfHosted, module: *FrcModule, i: One(Sym)) CRes(
     loc := zeroed Span; // TODO
     name := self.pool.insert_owned(caller_name);
     
+    ::enum(Seg);
+    if it.segment == .Import && it.imp.temporary_funcid != 0 && it.imp.temporary_funcid != Qbe.no_symbol {
+        //@println("existing function: %", caller_name);
+        slot[] = it.imp.temporary_funcid;
+        return(Ok = bit_cast_unchecked(u32, FuncId, slot[]));
+    }
+
     fid := self.add_function(empty_fn(info.FnPtr.ty, name, loc));
     func := self.get_function(fid);
     slot[] = bit_cast_unchecked(FuncId, u32, fid);
@@ -321,7 +328,6 @@ fn sema_frc_import_fid(self: *SelfHosted, module: *FrcModule, i: One(Sym)) CRes(
     func.set_flag(.EnsuredCompiled);
     func.set_flag(.BodyIsSpecial);
     //func.set_flag(.AvoidJitShim);  // TODO: this is unfortunate
-    ::enum(Seg);
     if it.segment != .Import {
         //@println("local function: %", caller_name);
         func.body = (FrcImport = (module = FrcModule.int_from_ptr(module), index = i.off, table = SYM_TABLE));
@@ -465,7 +471,16 @@ fn move_from_module(emit_ir: *EmitIr, import: *FrcImport) CRes(CodegenTask) = {
                 id := @try(import_baked_var(self, emit_ir.shared, instance, sym)) return;
                 // this recurses through relocations
                 emit_ir.reference_constant(id);
-            }
+            };
+            
+            // Since we don't run fold.fr, symbols won't be marked so they won't be emitted 
+            // if they're an inlinable export from CompCtx to the FrcModule and only used there. 
+            // like bf/via_wasm.fr/env'putchar(). forgetting this manifiests as the function appearing 
+            // in the bytes passed to frc_import() but as .Invalid in the frontend's cache file. 
+            id := instance.syms[con.sym.id.zext()];
+            use_symbol(m, id) { s | 
+                mark_referenced(m, id, s);
+            };
         }
     };
     
@@ -484,7 +499,7 @@ import_baked_var :: fn(self: *SelfHosted, shared: *CodegenShared, inst: *FrcModu
     h := module.header;
     it := h.get(sym);
     ::enum(@type it.segment);
-    @debug_assert(@is(it.segment, .MutableData, .ConstantData, .ZeroInitData), "import_baked_var(%)", it.segment);
+    @debug_assert(@is(it.segment, .MutableData, .ConstantData, .ZeroInitData), "import_baked_var(%, %)", it.segment, h.get(it.name));
     ::enum(FTy.Tag);
     ty := module.sym_ty[zext sym.off];
     if ty.off != Qbe.no_symbol {
@@ -582,7 +597,7 @@ fn find_module(self: *SelfHosted, shared: *CodegenShared, module: *FrcModule) CR
                     // it's local data. it will get baked to `g%` instead of this name. 
                     //syms[i.off.zext()] = Qbe.no_symbol_S;
                 //}
-                if it.segment != .Import && it.segment != .Invalid {
+                if @is(it.segment, .MutableData, .ConstantData, .ZeroInitData) {
                     _ := @try(import_baked_var(self, shared, imp[imp.len - 1]&, i)) return;
                 }
             }

@@ -93,6 +93,12 @@ Dat :: @struct {
 
 Imp :: @struct {
     lib: One(Lib);
+    
+    // TODO: this is a temporary crutch i should get rid of eventually.  
+    //       it means you can't save the blob and load it in a different CompCtx. 
+    //       it's used for implementing import_wasm/ffi.fr's import_from: ScopeId. 
+    //       my idea of imports maps directly to wasm's so should just use that instead. 
+    temporary_funcid: u32 = Qbe.no_symbol;
 };
 
 Lib :: @struct {
@@ -771,7 +777,7 @@ FTy :: @rec @struct {
         Invalid, Alias,
         Number, Array, Ptr, Func, 
         Enum, Scope, Struct, Union, Tagged, Params,
-        AbiOnly,
+        AbiOnly,  // TODO: implement this in the compiler + make a test for it
     );
     tag: Tag;
     align_log2: u8 = 0;
@@ -812,6 +818,7 @@ Fld :: @rec @struct {
         offset: u32,         // a runtime offset in bytes for struct/union
         value: One(Qbe.Con), // a constant value for scope
         type: One(FTy),
+        sym: One(Sym),
     )) = (offset = 0);
     source_location: u32 = 0;
 };
@@ -852,14 +859,17 @@ fn abi_function_type(writer: *Writer, f: *Qbe.Fn) One(FTy) = {
         };
     };
     if(f.vararg, => par&.push(type = (off = FTy.VARIADIC)));
-    arg := @switch(par.len) {
-        @case(0)   => @as(One(FTy)) (off = FTy.VOID);
-        @case(1)   => par[0].type;
-        @default() => save_fields(writer, .Params, par.items());
-    };
-    
+    arg := writer.fld_to_par(par.items());
     writer.fty&.push(tag = .Func, payload = (func = (arg = arg, ret = ret)));
     (off = trunc(writer.fty.len - 1))
+}
+
+fn fld_to_par(writer: *Writer, par: []Fld) One(FTy) = {
+    @switch(par.len) {
+        @case(0)   => @as(One(FTy)) (off = FTy.VOID);
+        @case(1)   => par[0].type;
+        @default() => save_fields(writer, .Params, par);
+    }
 }
 
 fn save_fields_fty(writer: *Writer, tag: FTy.Tag, fields: []Fld) FTy = {

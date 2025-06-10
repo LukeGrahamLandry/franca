@@ -21,7 +21,20 @@ notably those are all things to aren't going to change if you're just working on
     dumb that the current system forces you to give it signatures of any internal functions twice. 
   - anyway now it works but not with FRANCA_NO_CACHE=true or at comptime. i think it's just the import that's fucking up. 
     yeah it doesn't like if your import doesn't have a Func type, cause it doesn't know to make a shim for it. 
-
+- via_wasm, import_wasm/ffi
+  - this one gets A LOT LESS fucking around with signetures+callees.  
+  - not ready to think about how imports should work so hack in temporary_funcid for now. 
+  // Since we don't run fold.fr, symbols won't be marked so they won't be emitted  
+  // if they're an inlinable export from CompCtx to the FrcModule and only used there.  
+  // like bf/via_wasm.fr/env'putchar(). forgetting this manifiests as the function appearing  
+  // in the bytes passed to import_frc() but as .Invalid in the frontend's cache file.  
+  TODO: need better error reporting for that sort of mistake
+- so now nothing uses FuncImpl.Ir so I can get rid of it
+- little improvements: 
+  - exit(0) considered harmful
+  - don't use arg_types() when you just need to know if the function is unary
+  - might was well let you import() frc bytes directly, just check the magic
+  
 ## (Jun 9)
 
 - the module always has types as FnPtr because exposing Fn is kinda weird. 

@@ -11,144 +11,110 @@
 //   the base memory so it's not such a massive pain to use. 
 
 // import_from :: @struct { module_name :: @struct { function_name : FuncId : fn(); }; };  
-fn include(wasm: []u8, fr: CompCtx, export_to: ScopeId, import_from: ScopeId) void = {
-    m := fr.get_alloc().box(QbeModule); 
+fn include(wasm: []u8, fr: CompCtx, import_from: ScopeId) ScopeId = {
+    mark := mark_temporary_storage();
+    m := @uninitialized QbeModule; m := m&;
     // TODO: "need to be consistant about how to handle modules like this that don't actually compile anything"
-    init_default_module_dyn(m, fr.vtable, (arch = query_current_arch(), os = query_current_os(), type = .JitOnly));
+    init_default_module_dyn(m, fr.vtable, (arch = query_current_arch(), os = query_current_os(), type = .CachedEarly));
+    writer := m.save.unwrap();
+    // TODO: making everyone remember to do this is kinda lame
+    range(0, FTy.COUNT) { _ |
+        writer.fty&.push(zeroed FTy);   // skip builtin types so offsets work out
+    };
+    decls := Fld.list(temp());
     
-    push_dynamic_context {
-        a: ArenaAlloc = init(fr.get_alloc(), 10000);  // TODO: nesting arenas like this is silly
-        context(DefaultContext)[].temporary_allocator = a&;
-        a := fr.get_alloc();
-        // TODO: also it means we're leaking any temp stuff so really need to be able to 
-        //       ask for our function stuff to be in a different allocator. 
-        //       but also it's annoying that im doing an extra copy out of the module anyway. 
-        //       maybe i want to give the compiler a callback to ask for the Fn to be filled out. 
-        //       It needs 3 pieces of information: exports, callgraph and bodies, but there's 
-        //       no need to supply those at the same time. we want to enable the different frontends 
-        //       so run in parallel whenever possible.   :RethinkTheFfiCompileApi
-        
-        w: WasmModule = empty(temp());  // :LEAK because we set temp() to something dumb
-        p: ParseWasm = (w = w&, src = wasm);
-        or parse_wasm(p&) { e |
-            @panic("% (at byte index %)", e, p.cursor);
-        };
-        
-        self: LoadWasm = init(m, w&, temp());
-        self&.load_module();
-        initializer := self&.create_init_func();
-        
-        n := self.w.imported_function_count;
-        fns := temp().alloc(FuncId, self.w.code.len + n);
-        i := 0;
-        each self.w.imports { it |
-            ::tagged(@type it.desc);
-            if it.desc&.is(.Function) {            
-                module, name := (fr.intern_string(it.module.items()), fr.intern_string(it.name.items()));
-                
-                // TODO: this is bad this is very very bad! you need to use `fr` :FUCKED
-                //       this means this needs to run in the same compilation context (not a precompiled driver). 
-                val, ty := get_constant(import_from, module) 
-                    || @panic("expected to import module '%'", it.module.items());
-                s := scope_from_value(ty, val) 
-                    || @panic("expected to import module '%'", it.module.items());
-                get_constant(s, name, FuncId, FuncId.raw_from_ptr(fns.index(i))) // :get_or_create_type
-                    || @panic("expected to import '%' from module '%'", it.name.items(), it.module.items());
-                use_symbol(m, self.functions[i]) { s |
-                    s.got_lookup_offset = i;
-                };
-                i += 1;
-                
-                // TODO: check that the signeture matches-ish
-            };
-        };
-        @debug_assert_eq(i, n);
-        
-        // Start by reserving all the ids so we can fill in the call graph
-        range(0, self.w.code.len) { i |
-            loc := Span.zeroed();  // TODO: translate this too! less interesting since it's a binary format. 
+    w: WasmModule = empty(temp());  // :LEAK because we set temp() to something dumb
+    p: ParseWasm = (w = w&, src = wasm);
+    or parse_wasm(p&) { e |
+        @panic("% (at byte index %)", e, p.cursor);
+    };
+    
+    self: LoadWasm = init(m, w&, temp());
+    self&.load_module();
+    initializer := self&.create_init_func();
+    
+    n := self.w.imported_function_count;
+    i := 0;
+    each self.w.imports { it |
+        ::tagged(@type it.desc);
+        if it.desc&.is(.Function) {            
+            module, name := (it.module.items(), it.name.items());
             
-            type_index := self.function_types[i+n];
-            signature  := self.w.types[type_index.id.zext()]&;
-            args := translate_types(fr, signature.arg.items(), true);
-            rets := translate_types(fr, signature.ret.items(), false);
-            fn_type: FnType = (
-                arg = fr.tuple_of(args), 
-                ret = fr.tuple_of(rets), 
-                unary = args.len <= 1, 
+            // TODO: this is bad this is very very bad! you need to use `fr` :FUCKED
+            //       this means this needs to run in the same compilation context (not a precompiled driver). 
+            val, ty := get_constant(import_from, fr.intern_string(module)) 
+                || @panic("expected to import module '%'", module);
+            s := scope_from_value(ty, val) 
+                || @panic("expected to import module '%'", module);
+            fid := zeroed FuncId;
+            get_constant(s, fr.intern_string(name), FuncId, FuncId.raw_from_ptr(fid&)) // :get_or_create_type
+                || @panic("expected to import '%' from module '%'", name, module);
+
+            sign := self.w.types[self.function_types[i].id.zext()]&;
+            type := function_type(writer, sign.arg.items(), sign.ret.items());
+            mangled := @tfmt("%$%", name, module);
+            id  := m.intern(mangled);
+            idx := writer.map_sym(m, id);
+            decls&.push(
+                name = writer.push(mangled),
+                type = type,
+                payload = (offset = trunc idx),
             );
             
-            id := self.functions[i+n];
-            name := fr.intern_string(m.str(id));
-            func := empty_fn(fn_type, name, loc);
-            fill_bindings(func&, fr, args);
-            func&.set_flag(.ResolvedSign);
-            func&.set_flag(.ResolvedBody);
-            func&.set_flag(.EnsuredCompiled);
+            m.set_library(id, "W");
+            writer.sym[idx].imp.temporary_funcid = bit_cast_unchecked(FuncId, u32, fid);
             
-            fid := fr.intern_func(func&); func := fr.get_function(fid);
-            fns[i+n] = fid;
-            fr.add_to_scope(export_to, func.name, fr.intern_type(Fn = fn_type), fid);
-            use_symbol(m, id) { s |
-                s.got_lookup_offset = i+n;
-            };
-        };
-        
-        range(0, self.w.code.len) { i |
-            f := temp().box(Qbe.Fn);
-            self&.translate_func(i, f);
-            {
-                i := 0;
-                f.rpo = new(f.nblk.intcast());
-                for_blocks f { b |
-                    b.id = i.intcast();
-                    f.rpo[i] = b;
-                    i += 1;
-                };
-            };
+            i += 1;
             
-            func    := fr.get_function(fns[i+n]);
-            funcs   := a.alloc_zeroed(FuncId, f.ncon.zext());
-            datas   := a.alloc_zeroed(BakedVarId, f.ncon.zext());
-            callees := FuncId.list(a);
-            
-            enumerate f.con.slice(0, f.ncon.zext()) { i, c |
-                if c.type() == .CAddr {
-                    name := m.str(c.sym);
-                    use_symbol(m, c.sym) { s |
-                        if s.got_lookup_offset < 0 {
-                            @panic("TODO: import_wasm data");
-                        } else {
-                            funcs[i] = fns[s.got_lookup_offset];
-                            callees&.push(funcs[i]);
-                        }
-                    };
-                };
-            };
-            
-            func.callees = callees.as_raw();
-            func.body = (Ir = (fn_internal = Qbe.Fn.int_from_ptr(f), data = datas, funcs = funcs));
+            // TODO: check that the signeture matches-ish
         };
     };
+    @debug_assert_eq(i, n);
+    
+    range(0, self.w.code.len) { i |
+        f := temp().box(Qbe.Fn);
+        self&.translate_func(i, f);
+        
+        sign := self.w.types[self.function_types[n+i].id.zext()]&;
+        type := function_type(writer, sign.arg.items(), sign.ret.items());
+        
+        fr'vtable'run_qbe_passes(Qbe.Fn.raw_from_ptr(f));
+        decls&.push(
+            name = writer.push(m.str(f.lnk.id)),
+            type = type,
+            payload = (offset = trunc writer.map_sym(m, f.lnk.id))
+        );
+    };
+    
+    meta: Meta = (arch_os = 0, root_scope = save_fields(writer, .Scope, decls.items()));
+    b := writer.to_bytes(meta, m);
+    bytes := concat(b, ast_alloc());
+    drop(m);
+    result := fr'vtable'import_frc(fr.data, bytes);
+    root_scope := result.or(fn(err) => fr.report_error(err));
+    reset_temporary_storage(mark);
+    
+    root_scope
 }
 
-fn translate_types(fr: CompCtx, w: []Wasm.ValType, prepend_pointer: bool) []Type = {
-    types := Type.list(w.len + int(prepend_pointer), temp());
-    if prepend_pointer {  // TODO: maybe this should be a rawptr instead
-        u8 := fr.intern_type(Int = (bit_count = 8, signed = false));  // :SLOW
-        types&.push(fr.intern_type(Ptr = u8));
+// TODO: deduplicate
+fn function_type(writer: *Writer, par: []Wasm.ValType, ret: []Wasm.ValType) One(FTy) = {
+    arg := writer.fld_to_par(writer.translate_types(par, true));
+    ret := writer.fld_to_par(writer.translate_types(ret, false));
+    writer.fty&.push(tag = .Func, payload = (func = (arg = arg, ret = ret)));
+    (off = trunc(writer.fty.len - 1))
+}
+
+fn translate_types(writer: *Writer, w: []Wasm.ValType, prepend_pointer: bool) []Fld = {
+    types := Fld.list(w.len + int(prepend_pointer), temp());
+    if prepend_pointer {
+        types&.push(type = (off = FTy.RAWPTR));
     }
-    
     for w { w | 
-        types&.push(@match(w) {  // :get_or_create_type
-            fn I32() => u32;
-            fn I64() => i64;  
-            fn F32() => f32;
-            fn F64() => f64;
-            @default => @panic("TODO: invalid wasm->franca type %", w);
-        });
+        types&.push(type = w.cls().cls_to_fty());
     }
     types.items()
 }
 
 #use("@/compiler/ast_external.fr");
+#use("@/backend/incremental.fr");

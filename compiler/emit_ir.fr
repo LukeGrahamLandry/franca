@@ -473,8 +473,8 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = {
     };
     
     T :: FuncImpl.Tag();
-    prio_amd :: @const_slice(T.NewIntrinsic, T.Normal, T.Intrinsic, T.TargetOsSplit, T.X86AsmBytes, T.Redirect, T.DynamicImport, T.Ir, T.FrcImport);
-    prio_arm :: @const_slice(T.NewIntrinsic, T.Normal, T.Intrinsic, T.TargetOsSplit, T.JittedAarch64, T.Redirect, T.DynamicImport, T.Ir, T.FrcImport);
+    prio_amd :: @const_slice(T.NewIntrinsic, T.Normal, T.Intrinsic, T.TargetOsSplit, T.X86AsmBytes, T.Redirect, T.DynamicImport, T.FrcImport);
+    prio_arm :: @const_slice(T.NewIntrinsic, T.Normal, T.Intrinsic, T.TargetOsSplit, T.JittedAarch64, T.Redirect, T.DynamicImport, T.FrcImport);
     impl := or choose_impl(func.body&, @if(self.m.goal.arch == .aarch64, prio_arm, prio_amd)) {
         if self.want_syscall(self.func, true) { syscall_number |
             self.bounce_body(self.f.getcon(syscall_number), .syscall);
@@ -554,15 +554,6 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = {
             @debug_assert(self.m.goal.arch == .x86_64);
             self.entry.task = (Asm = (lnk = self.f.lnk&, bytes = bytes.items()));
             return(.Ok)
-        }
-        // TODO: get rid of this once FrcImport works? feels bad because it's kinda nice to be able to do little things without making a 
-        //       whole new module but this doesn't enable that anyway because i need to have multiple modules floating around anyway. 
-        fn Ir(it) => {
-            f := Qbe.Fn.ptr_from_int(it.fn_internal);
-            msg :: "Don't compile into our module, use your own and we'll move it for you. TODO: this is wasteful";
-            @err_assert(!identical(f.globals, self.m), msg) return;
-            self.move_from_module(f, it.data, it.funcs);
-            return(.Ok);
         }
         fn FrcImport(it) => {
             @if(DISABLE_IMPORT_FRC) return(@err("TODO: DISABLE_IMPORT_FRC because scoping when you import the compiler is messed up"));
@@ -1971,119 +1962,4 @@ fn seal(self: *EmitIr, $body: @Fn(b: *Qbe.Blk) void) void = {
     if self.blk.jmp.type == .Jxxx { 
         body(self.blk);
     };
-}
-
-// TODO: don't allow BakedVarId=0 even when jitting because that's creepy. 
-// TODO: share some code with inlining? leads into extending inlining to multi-block functions. 
-// This is used by import_c/ffi
-fn move_from_module(self: *EmitIr, f0: *Qbe.Fn, data: []BakedVarId, funcs: []FuncId) void = {
-    f  := self.f; lnk := f.lnk; m := f.globals;
-    f[] = f0[];
-    f.globals = m; f.lnk = lnk;
-    f.rpo = f.rpo.new_copy(f.nblk);
-    f.tmp = f.tmp.new_copy(f.ntmp);
-    f.con = f.con.new_copy(f.ncon);
-    f.mem = f.mem.new_copy(f.nmem);
-    
-    enumerate f.con.slice(0, f.ncon.intcast()) { i, con |
-        if con.type() == .CAddr {
-            con.sym = m.intern(if funcs[i] == zeroed(FuncId) {
-                self.reference_constant(data[i]);
-                @tfmt("g%", data[i].id)
-            } else {
-                self.pending.push(funcs[i]);
-                self.fmt_fn_name(funcs[i]) 
-            });
-        };
-    };
-    
-    // TODO: don't recreate the types for every single function. this sucks. :SLOW
-    types: HashMap(i64, i64) = init(temp());
-    
-    // this is not the same as for_blocks. 
-    range(0, f.nblk.zext()) { j |
-        b0 := f.rpo[j];
-        @debug_assert_eq(j, b0.id.intcast());
-        b := temp().box(Qbe.Blk);
-        b[] = b0[];
-        f.rpo[b.id.intcast()] = b;
-        b.ins = init(temp(), b0.ins.len);
-        b.ins.len = b0.ins.len;
-        b.ins.items().copy_from(b0.ins.items());
-        
-        for_insts_forward b { i |
-            each i.arg& { a |
-                if rtype(a[]) == .RType {
-                    a[] = TYPE remap(a[].val(), types&, f0.globals, m);
-                };
-            };
-        };
-    };
-    if f.retty != QbeNull {
-        f.retty = TYPE remap(f.retty.val(), types&, f0.globals, m);
-    };
-    f.start = f.rpo[f.start.id.intcast()];
-    
-    if f.switch_count != 0 {
-        f.switches = m.new_copy_long_life(f.switches, f.switch_count.bitcast());
-        // TODO: this wouldn't suck as bad if i just used indices for everything
-        each f.switches.slice(0, f.switch_count.zext()) { it |
-            it.cases = new_copy(it.cases, it.case_count.intcast());
-            each it.cases.slice(0, it.case_count) { it |
-                it._0 = f.rpo[it._0.id.intcast()];
-            };
-            it.default = f.rpo[it.default.id.intcast()];
-            it.src = f.rpo[it.src.id.intcast()];
-        };
-    };
-    
-    range(0, f.nblk.zext()) { j |
-        b := f.rpo[j];
-        if !b.s1.is_null() {
-            b.s1 = f.rpo[b.s1.id.intcast()];
-        };
-        if !b.s2.is_null() {
-            b.s2 = f.rpo[b.s2.id.intcast()];
-        };
-        for_phi b { p |
-            // TODO: copy the phi instead of changing it!!
-            range(0, p.narg.zext()) { s |
-                p.blk[s] = f.rpo[p.blk[s].id.intcast()];
-            };
-        };
-        
-        if !b.link.is_null() {
-            b.link = f.rpo[b.link.id.intcast()];
-        };
-    };
-    //printfn(f, f.globals.debug_out);
-}
-
-fn remap(t0: i64, types: *HashMap(i64, i64), m0: *QbeModule, m1: *QbeModule) i64 = {
-    types.get(t0) || {
-        lock(m0.types_mutex&);
-        lock(m1.types_mutex&);
-
-        t1 := m1.new_type(m0.get_type(t0)[]);
-        t := m1.get_type(t1);
-        t.fields = m1.new_copy_long_life(t.fields, t.nfield.bitcast());
-        types.insert(t0, t1);
-        
-        i := 0;
-        for_unions(t, i&) {
-            ::enum(Qbe.FieldType);
-            for_fields(t, i&) { type, idx |
-                if type == .FTyp {
-                    // i have reenterant mutexes so this is fine
-                    idx := remap(idx.zext(), types, m0, m1);
-                    t.fields[i] = pack(type = type, len = trunc idx);
-                    // careful, that might have reallocated m1.types
-                };
-            };
-        };
-        
-        unlock(m1.types_mutex&);
-        unlock(m0.types_mutex&);
-        t1
-    }
 }

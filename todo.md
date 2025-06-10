@@ -89,6 +89,9 @@ i want them to go through sema exactly once if you compile the compiler and then
 - import_c/ffi.fr: make forward declaration of an import work in local scope (rn missing type info in root_scope so can't use it)
 - support symbol without type info as a rawptr that you have to cast to use
 - if im going to keep FTy.Tag.Abi, need to write a test that actually uses it with aggragate returns. 
+- It needs 3 pieces of information: exports, callgraph and bodies, but there's 
+  no need to supply those at the same time. we want to enable the different frontends 
+  so run in parallel whenever possible so maybe allow splitting the type info from the code?
 
 ## Unfinished Examples
 
@@ -288,7 +291,6 @@ the right/fast/safe/whatever thing to do is also the easy thing to do.
 - use import_c for the parts of sokol i haven't ported yet (can't for the mac stuff because thats objective c)
 - shouldn't have `alloc` be the nice name, it should be `alloc_uninit`
 - :ThisSureIsABigBlit
-- :RethinkTheFfiCompileApi
 - make import_wasm not crash on implicit return 
 - it would be nice if the backend did a bit of typechecking when you were 
 targetting wasm so it could give you the errors instead of producing a program 
