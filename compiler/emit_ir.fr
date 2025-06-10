@@ -76,6 +76,7 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
     entry := bouba_acquire(shared, idx);
     m := shared.m;
     result: CRes(void) = .Ok;
+    old_temporary_allocator := context(DefaultContext)[].temporary_allocator;
     outer_temp := temp();
     push_dynamic_context {
         context(DefaultContext)[].temporary_allocator = entry.arena&;
@@ -136,6 +137,26 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
                     entry2.task = (AotVar2 = out.items());
                 };
                 enqueue_task(shared, entry2);
+                
+                
+                // if it's from a FrcImport it won't already have a place in the comptime address space, 
+                // so we need to remember the jit_addr we made for it so it doesn't get rebaked (which 
+                // would be extra bad if the relocations haven't fired yet) 
+                if self.when == .Jit && !self.shared.threaded {
+                    context(DefaultContext)[].temporary_allocator = old_temporary_allocator;
+                    for self.new_constants { id |
+                        baked := comp.get_baked(id);
+                        if baked.need_reify {
+                            baked.need_reify = false;
+                            c := comp.data.cast()[][];
+                            sym := m.intern(@tfmt("g%", id.id));
+                            use_symbol(m, sym) { symbol |
+                                @debug_assert(!symbol.jit_addr.is_null());
+                                c.baked.lookup&.insert(int_from_rawptr symbol.jit_addr, id);
+                            };
+                        };
+                    };
+                }
             };                                        // !
                                                       // !
             if self.pending_set_lib.len > 0 {         // !
@@ -940,6 +961,10 @@ fn compile_expr(self: *EmitIr, expr: *FatExpr, p: Placement) CRes(Qbe.Ref) = {
         }
         fn Switch(f) => return(self.emit_switch(expr, p));
         fn CVariadic() => return(@err("Expr::CVariadic can only be used as the last parameter to a call"));
+        fn FrcImport(it) => {
+            @if(DISABLE_IMPORT_FRC) return(@err("TODO: DISABLE_IMPORT_FRC because scoping when you import the compiler is messed up"));
+            return(self.emit_import_ref(it, p));
+        }
         @default => return(@err("ICE: didn't desugar: %", self.program.log(expr)));
     })
 }
@@ -1278,7 +1303,8 @@ fn as_ref(self: *EmitIr, part: BakedEntry) Qbe.Ref = @match(part) {
     fn FnPtr(f) => self.func_ref(f);
     fn AddrOf(id) => {
         self.reference_constant(id);
-        self.f.symcon(@tfmt("g%", id.id))  // change intrinsic.context as well if you change this
+        name := @tfmt("g%", id.id);
+        self.f.symcon(name)  // change intrinsic.context as well if you change this
     }
 };
 

@@ -17,15 +17,25 @@ go :: fn() void #use(c_scope) = {
     // pass a pointer to variadic function defined in franca and call it from c
     @assert_eq(call_va(add_three, 5, 7), 15, "call_va");
     
-    @assert_eq(square(.NUMBER_TWO), 4); 
+    @assert_eq(square(.NUMBER_TWO), 4);  // enum names are preserved
     x := 123;  // pass a rawptr as *void
     @assert_eq(untyped(i64.raw_from_ptr(x&)), 123);
-    @assert(count() == 0 && count() == 1);
+    @assert(count() == 0 && count() == 1);  // has a static local variable
     
+    // this has a data relocation with addend (to reference a field in itself)
     s2 := get_s();
     @assert(s2.b == 123 && s2.ref_b[] == 123);
     s2.ref_b[] = 456;
     @assert_eq(s2.b, 456);
+    
+    // this type checking shows we agree about @FnPtr types
+    @assert_eq(call_it(mul_three, 4), 24);
+    
+    // access a data symbol directly + a call function only referenced through a data relocation
+    ::Array(rawptr, 4);
+    f := mul_vtable[2];
+    f := bit_cast_unchecked(rawptr, @FnPtr(i64, i64) i64, f);
+    @assert_eq(f(5, 10), 50);
 }
 
 add_three :: fn(va: CVariadic) i64 = {
@@ -33,6 +43,9 @@ add_three :: fn(va: CVariadic) i64 = {
     a, b, c := (va.next(i64), va.next(i64), va.next(i64));
     a + b + c
 }
+
+call_it :: fn(f: @FnPtr(a: i64, b: i64, c: i64) i64, n: i64) i64 = 
+    f(1, 2, 3) * n;
 
 C_SRC :: """
     int strlen(char*);  // this is an import from libc
@@ -95,10 +108,20 @@ C_SRC :: """
     }
     
     // self reference with addend
-    struct S { long *ref_b; long b; } s = { .b = 123, .ref_b = &s.b, };
+    struct S { long *ref_b; long b; } s = { .ref_b = &s.b, .b = 123, };
     struct S *get_s() {
         return &s;
     }
+    
+    long mul_three(long a, long b, long c) {
+        return a * b * c;
+    }
+    
+    // this one is trivial and only referenced by `mul_vtable` so rely on emit_suspended_inlinables being called
+    long mul_two(long a, long b) {
+        return a * b;
+    }
+    void *mul_vtable[] = { 0, 0, mul_two, mul_three };
 """;
 
 #include_std("backend/lib.fr");

@@ -277,12 +277,14 @@ fn sema_frc_import(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
         lib := header.get(header.get(it.imp.lib)[].name);
         name := self.pool.insert_owned(caller_name);
         expr.expr = (DataSymbol = (name = name, lib = self.pool.insert_owned(lib), comptime = 0));
+        expr.ty = self.import_type(module, type);
         return(.Ok);
     }
 
     if @is(it.segment, .MutableData, .ConstantData, .ZeroInitData) {
         // let emit_ir.fr deal with it
         //@println("local data: %", caller_name);
+        expr.ty = self.import_type(module, type);
         expr.done = true;
         return(.Ok);
     }
@@ -392,8 +394,8 @@ fn import_type_info(self: *SelfHosted, module: *FrcModule, it: *FTy) TypeInfo = 
                 // TODO: decide if this should go in Fld.payload or if i want to use that slot for default value
                 byte_offset = FIELD_LAYOUT_NOT_DONE,
             );
+            j += 1;
         };
-        j += 1;
         
         return(Struct = (
             is_tuple = is_tuple,
@@ -458,7 +460,7 @@ fn move_from_module(emit_ir: *EmitIr, import: *FrcImport) CRes(CodegenTask) = {
             it := header.get(sym);
             if @is(it.segment, .MutableData, .ConstantData, .ZeroInitData) {
                 // this sets inst.syms[sym.off]
-                id := @try(import_baked_var(emit_ir, instance, sym)) return;
+                id := @try(import_baked_var(self, emit_ir.shared, instance, sym)) return;
                 // this recurses through relocations
                 emit_ir.reference_constant(id);
             }
@@ -475,11 +477,17 @@ fn move_from_module(emit_ir: *EmitIr, import: *FrcImport) CRes(CodegenTask) = {
 }
 
 // TODO: this doesn't interact with comptime in the way i want it to but neither did the old import_c/ffi.fr so it's a good starting point. 
-import_baked_var :: fn(emit_ir: *EmitIr, inst: *FrcModuleInstance, sym: One(Sym)) CRes(BakedVarId) = {
+import_baked_var :: fn(self: *SelfHosted, shared: *CodegenShared, inst: *FrcModuleInstance, sym: One(Sym)) CRes(BakedVarId) = {
     module := inst.module;
-    self, h := (emit_ir.program.data.cast()[][], module.header);
+    h := module.header;
     it := h.get(sym);
-    @debug_assert(@is(it.segment, .MutableData, .ConstantData, .ZeroInitData));
+    ::enum(@type it.segment);
+    @debug_assert(@is(it.segment, .MutableData, .ConstantData, .ZeroInitData), "import_baked_var(%)", it.segment);
+    ::enum(FTy.Tag);
+    ty := module.sym_ty[zext sym.off];
+    if ty.off != Qbe.no_symbol {
+        @debug_assert_eq(h.get(ty)[].tag, .Ptr, "symbols are always pointers");
+    };  // else just means not referenced from root scope. kinda lame. 
     
     slot := module.sym[zext sym.off]&;
     if slot[] != Qbe.no_symbol {
@@ -489,7 +497,7 @@ import_baked_var :: fn(emit_ir: *EmitIr, inst: *FrcModuleInstance, sym: One(Sym)
         // :TheOtherWayDoesNotWorkOnExamplesTerminal
         // TODO: don't do this every time but find_module puts junk in there
         //if inst.syms[zext sym.off].id == Qbe.no_symbol {
-            inst.syms[zext sym.off] = emit_ir.m.intern(@tfmt("g%", id.id)); 
+            inst.syms[zext sym.off] = shared.m.intern(@tfmt("g%", id.id)); 
         //}
         //@println("reuse % = g%", h.get(it.name), id.id);
         return(Ok = id);
@@ -498,7 +506,7 @@ import_baked_var :: fn(emit_ir: *EmitIr, inst: *FrcModuleInstance, sym: One(Sym)
     // reserve early to not get fucked by cycles
     dest, id := reserve_baked(self, .None);
     slot[] = bit_cast_unchecked(BakedVarId, u32, id);
-    inst.syms[zext sym.off] = emit_ir.m.intern(@tfmt("g%", id.id));
+    inst.syms[zext sym.off] = shared.m.intern(@tfmt("g%", id.id));
     //@println("bake % = g%", h.get(it.name), id.id);
     
     Template :: @type dest.template;
@@ -514,16 +522,30 @@ import_baked_var :: fn(emit_ir: *EmitIr, inst: *FrcModuleInstance, sym: One(Sym)
         if @try(self.get_fid(module, xx)) return { fid | 
             target = (FuncId = fid);
         } else {
-            target = (BakedVarId = @try(import_baked_var(emit_ir, inst, xx)) return);
+            target = (BakedVarId = @try(import_baked_var(self, shared, inst, xx)) return);
         };
+        //@println("[%; %]%(%)+%", r, it.off, h.get(h.get(xx)[].name), target.BakedVarId.id, it.addend);
         relocs[r] = (target = target, off = it.off, addend = it.addend);
         r += 1;
     };
     loc := zeroed Span; // TODO
-    dest[] = (template = template, relocations = relocs, loc = loc);
+    // TODO: align
+    dest[] = (template = template, relocations = relocs, loc = loc, need_reify = true); 
     
     (Ok = id)
 };
+
+fn emit_import_ref(self: *EmitIr, it: *FrcImport, p: Placement) CRes(Qbe.Ref) = {
+    inst := @try(self.find_module(it)) return;
+    @debug_assert_eq(it.table, SYM_TABLE);
+    id := @try(import_baked_var(self.program.data.cast()[][], self.shared, inst, (off = it.index))) return;
+    ref := self.as_ref(AddrOf = id);
+    //@println("emit_import_ref g%", id.id);
+    (Ok = self.scalar_result(p, ref, i64))  // :get_or_create_type
+} 
+
+fn find_module(self: *EmitIr, it: *FrcImport) CRes(*FrcModuleInstance) = 
+    find_module(self.program.data.cast()[][], self.shared, Incr'FrcModule.ptr_from_int(it.module));
 
 fn find_module(self: *SelfHosted, shared: *CodegenShared, module: *FrcModule) CRes(*FrcModuleInstance) = {
     a := self.get_alloc();
@@ -558,6 +580,9 @@ fn find_module(self: *SelfHosted, shared: *CodegenShared, module: *FrcModule) CR
                     // it's local data. it will get baked to `g%` instead of this name. 
                     //syms[i.off.zext()] = Qbe.no_symbol_S;
                 //}
+                if it.segment != .Import && it.segment != .Invalid {
+                    _ := @try(import_baked_var(self, shared, imp[imp.len - 1]&, i)) return;
+                }
             }
         };
         

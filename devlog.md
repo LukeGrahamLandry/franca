@@ -27,11 +27,29 @@ but i feel like you kinda need the external iterators to do that and they're so 
 - now add_many works if i call it either at comptime or runtime but not both. 
 - problem was "need load() to not alias since we might want to use in multiple modules", which i did have a comment for so at least i knew at some point. 
 - for view_image, needed to call emit_suspended_inlinables. 
-TODO: add a simpler thing that needs that in test/ffi.fr 
-TODO: fix ascii_table.fr
-
+- ascii_table.fr was broken by trying to use speculate=true in count_array_init_elements()
+- ughhh, another bug with a `+=1` in a loop over something else :(, when translating Fld to make a Params, 
+so tuple field names were all `_0` and they didn't intern to the right thing so function didn't match a real declaration. 
+- i think i've now achived feature parity with what i had before
 - hmm, it sure got a lot slower (1032 -> 1113) at self compile since whenever my current release compiler was built (Jun  7 22:01), 
 (both compiling current code so it's just cause i added stuff).  
+
+---
+
+- very confusing times trying to get direct data symbols access to work:  
+ok so calling mul_two directly at comptime makes it work when nocache. (not for the original 
+reason i was trying to test about the inlining) because it means the function has a jit_addr before 
+the backend tries to emit the Dat for comptime_codegen's copy of mul_vtable, so the relocation 
+happens. since mul_vtable is a data symbol, it gets sema-ed to Expr::FrcImport and trying to read 
+it from the scope does an immediate_eval_expr to get a Values, can't be quick_eval-ed so it makes 
+a synthetic function and goes through emit_ir for the comptime module even if we're only going to 
+use it at runtime. for functions that's solved with shims (which can create a pointer to something 
+that doesn't exist), but this is the first time it's possible to make a chunk of constant data 
+without just mallocing some memory and filling it in. the thing i want to do is very similar to 
+:ADistinctionWithoutADifference, i just don't have a version of that for non-functions. the other 
+perspective is that the backend does know about the relocations even in the jit module, it's just not
+doing them in time before the thing gets rebaked by the frontend trying to move it from jit module 
+to aot module. so really the problem is that it's trying to rebake because it doesn't have a jit_addr. 
 
 ## (Jun 8)
 

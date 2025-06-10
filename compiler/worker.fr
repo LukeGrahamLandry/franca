@@ -241,6 +241,16 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
                     push_fixup(m, s, fix);
                 };
                 @debug_assert(s.got_lookup_offset != -1);
+                
+                // for normal franca code this doesn't matter because you can only create a data fixup by already having a jit shim, 
+                // but FrcImport changes that and this matters for symbols only referenced through a vtable. without this, the patch 
+                // will only be filled when the real function gets compiled and it will only get compiled the first time you try to 
+                // call through the shim. only matters for the comptime module or if FRANCA_NO_CACHE=true.   -- Jun 9, 2025
+                each s.fixups { fix |
+                    @if_let(fix.type) fn DataAbsolute(it) => {
+                        rawptr.ptr_from_raw(fix.patch_at)[] = jit_addr.offset(it.increment);
+                    };
+                };
             };
         }
         fn Asm(it) => {

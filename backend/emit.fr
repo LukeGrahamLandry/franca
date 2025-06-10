@@ -228,6 +228,10 @@ Dat2 :: @struct {
 fn emit_data(self: *QbeModule, dat: Dat2) void = {
     assert(!self.fixups_locked, "you cannot add more data after emitting for aot");
     ::tagged(@type dat.template);
+   
+    //@print("% ", self.goal.type);
+    //print_data(self, dat&, self.debug_out);
+    self.flush_debug();
     
     @if(enable_incremental())
     if self.save { save |
@@ -283,8 +287,18 @@ fn emit_data(self: *QbeModule, dat: Dat2) void = {
         ptr := ptr_cast_unchecked(u8, i64, dest.index(r.off.zext()));
         use_symbol(self, r.id) { symbol | 
             mark_referenced(self, r.id, symbol);
-            if self.get_addr(symbol) { value |
-                ptr[] = int_from_rawptr(value._0) + r.addend;
+            filled := false;
+            if self.goal.type == .JitOnly {
+                if !filled && !symbol.jit_addr.is_null() {
+                    ptr[] = int_from_rawptr(symbol.jit_addr) + r.addend;
+                    filled = true;
+                };
+                if !filled && !symbol.shim_addr.is_null() {
+                    ptr[] = int_from_rawptr(symbol.shim_addr) + r.addend;
+                    filled = true;
+                }
+            } else {
+                ptr[] = 0;
             };
             // Since we need the absolute address in memory, even local symbols need a relocation. 
             push_fixup(self, symbol, (patch_at = i64.raw_from_ptr(ptr), type = (DataAbsolute = (increment = r.addend))));

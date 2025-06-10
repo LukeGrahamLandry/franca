@@ -16,6 +16,10 @@ so something in the data i guess?
 - :TodoLinux
 - "need to be consistant about how to handle modules like this that don't actually compile anything"
 - count_array_init_elements is still spitting out junk symbols into the scope. need to just not parse it twice. 
+- import_c can't compile lua targetting amd64 (makes an exe but it crashes immediately)
+- add something that needs ffi.fr/include() to call emit_suspended_inlinables in examples/import_c/test/ffi.fr, 
+and not doing that makes an array of strings have the strings show up in the output module twice. 
+- "really really want this but it breaks examples/ascii_table.fr"
 
 ## Quest Lines
 
