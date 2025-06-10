@@ -212,6 +212,24 @@ fn init(a: Alloc) Writer = (
     fld = list(a),
 );
 
+fn drop(self: *Writer) void = {
+    self.symbols&.drop();
+    // TODO: generate this
+    self.dep&.drop();
+    self.sym&.drop();
+    self.blk&.drop();
+    self.ins&.drop();
+    self.con&.drop();
+    self.mem&.drop();
+    self.rel&.drop();
+    self.str&.drop();
+    self.lib&.drop();
+    self.idx&.drop();
+    self.typ&.drop();
+    self.fty&.drop();
+    self.fld&.drop();
+};
+
 fn push(self: *Writer, it: []u8) Ref(u8) = {
     r: Ref(u8) = (off = self.str.len.trunc(), count = it.len.trunc());
     self.str&.push_all(it);
@@ -357,8 +375,10 @@ find_storage_field :: fn(T: Type) *Field = {
 };
 
 fn to_bytes(self: *Writer, meta: Meta, m: *QbeModule) [][]u8 = {
+    ::enum(@type m.goal.type);
     if m.goal.type == .CachedEarly {
-        write_types(m.save.unwrap(), m);
+        @debug_assert_eq(self.typ.len, 0, "cannot to_bytes(Writer) twice");
+        write_types(self, m);
     };
 
     bytes := list([]u8, 14, temp());
@@ -402,8 +422,6 @@ fn to_bytes(self: *Writer, meta: Meta, m: *QbeModule) [][]u8 = {
 }
 
 fn finish_imports(writer: *Writer, m: *QbeModule) void = {
-    writer := m.save.unwrap();
-        
     // :SLOW
     _, symbols := collect_aot_fixups(m);
     for symbols { s |
@@ -753,6 +771,7 @@ FTy :: @rec @struct {
         Invalid, Alias,
         Number, Array, Ptr, Func, 
         Enum, Scope, Struct, Union, Tagged, Params,
+        AbiOnly,
     );
     tag: Tag;
     align_log2: u8 = 0;
@@ -763,6 +782,7 @@ FTy :: @rec @struct {
         fields: Ref(Fld),  // enum/scope/struct/union/tagged/params
         func:   @struct(arg: One(FTy), ret: One(FTy)),
         int:    @struct(bits: u32, signed: bool = false, float: bool = false, bitfield: bool = false),
+        abi:    One(Typ),
     );
     
     UNKNOWN  ::  0;
@@ -785,16 +805,86 @@ FTy :: @rec @struct {
 };
 
 Fld :: @rec @struct {
-    name: Ref(u8);
+    name: Ref(u8) = (off = 0, count = 0);
     type: One(FTy);
-    payload: @union(
+    payload: (@union(
         // TODO: maybe just calculate `offset` and then don't need an extra slot for default value?
         offset: u32,         // a runtime offset in bytes for struct/union
         value: One(Qbe.Con), // a constant value for scope
         type: One(FTy),
-    );
+    )) = (offset = 0);
     source_location: u32 = 0;
 };
+
+////////////////////////////
+
+// If a frontend doesn't want to deal with giving real type info, 
+// this translates the abi info the backend requires anyway into 
+// the frontend type format so the franca compiler can use that for jit-shims.
+fn abi_function_type(writer: *Writer, f: *Qbe.Fn) One(FTy) = {
+    @debug_assert_eq(f.reg, 0, "abi_function_type() after regalloc");
+    
+    abi_type :: fn(r: Qbe.Ref) One(FTy) => {
+        writer.fty&.push(tag = .AbiOnly, payload = (abi = (off = trunc r.val())));
+        (off = trunc(writer.fty.len - 1))
+    }
+    ::if(One(FTy));
+    ret := if f.retty == QbeNull {
+        k := Qbe.Cls.Ke;
+        for_blocks f { b |
+            ::enum(Qbe.J);
+            if @is(b.jmp.type, .retw, .retl, .rets, .retd) {
+                k = @as(Qbe.Cls) @as(i32) b.jmp.type.raw() - Qbe.J.retw.raw();
+            }
+        };
+        cls_to_fty(k)
+    } else {
+        abi_type(f.retty)
+    };
+    
+    par := Fld.list(temp());
+    for_pars f { i |
+        @match(i.op()) {
+            fn pare() => ();
+            fn parc() => par&.push(type = abi_type i.arg&[0]);
+            fn par()  => par&.push(type = cls_to_fty i.cls());
+            @default  => ();
+        };
+    };
+    if(f.vararg, => par&.push(type = (off = FTy.VARIADIC)));
+    arg := @switch(par.len) {
+        @case(0)   => @as(One(FTy)) (off = FTy.VOID);
+        @case(1)   => par[0].type;
+        @default() => save_fields(writer, .Params, par.items());
+    };
+    
+    writer.fty&.push(tag = .Func, payload = (func = (arg = arg, ret = ret)));
+    (off = trunc(writer.fty.len - 1))
+}
+
+fn save_fields_fty(writer: *Writer, tag: FTy.Tag, fields: []Fld) FTy = {
+    out: FTy = (tag = tag, payload = (fields = (off = trunc writer.fld.len, count = trunc fields.len)));
+    writer.fld&.push_all(fields);
+    out
+}
+
+fn save_fields(writer: *Writer, tag: FTy.Tag, fields: []Fld) One(FTy) = {
+    writer.fty&.push(save_fields_fty(writer, tag, fields));
+    (off = trunc(writer.fty.len - 1))
+}
+
+fn cls_to_fty(k: Qbe.Cls) One(FTy) = {
+    ::enum(Qbe.Cls);
+    @match(k) {
+        fn Kw()  => (off = FTy.U32);
+        fn Kl()  => (off = FTy.I64);
+        fn Ks()  => (off = FTy.F32);
+        fn Kd()  => (off = FTy.F64);
+        @default => (off = FTy.VOID);
+    }
+}
+
+////////////////////////////
 
 ENABLE_ENABLE_TRACY :: get_environment_variable("FRANCA_TRACY").is_some();
 Sha256 :: import("@/backend/macho/sha256.fr");

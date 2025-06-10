@@ -36,7 +36,7 @@ Obj :: @rec @struct(
     is_tentative: bool,
     is_tls: bool,
     init_data: []u8,
-    rel: *Relocation,
+    rel: []Dat2.Reloc,
     is_inline: bool,
     body: *Node,
     locals: *Obj,
@@ -45,17 +45,10 @@ Obj :: @rec @struct(
     par_r: Qbe.Ref,
     global_symbol: ?Qbe.Sym,  // TODO: use this more
     sent_to_backend: bool,
-    refs: []*Obj,
     def: *Obj,
     franca_f: FuncId,
     franca_v: BakedVarId,
     yielded: bool,
-);
-Relocation :: @rec @struct(
-    next: *Relocation,
-    offset: i32,
-    obj: *Obj,
-    addend: i64,
 );
 Node :: @rec @struct(
     kind: NodeKind,
@@ -182,7 +175,6 @@ Ctx :: @rec @struct {
     m: *QbeModule;
     f: *Qbe.Fn;
     b: *Qbe.Blk;
-    refs: List(*Obj);
     
     labels: HashMap(Str, *Qbe.Blk);
     brk_label: ?*Qbe.Blk;
@@ -210,7 +202,7 @@ Ctx :: @rec @struct {
     franca: ?CompCtx;  // TODO: remove
     franca_namespace: ScopeId;  // TODO: remove
     emitter: ?*CodegenShared;
-    save_type_info: bool;
+    enqueue_task: @FnPtr(*CodegenShared, *CodegenEntry) void;
     
     // should `void f()` be treated the same as `void f(...)` instead of `void f(void)`
     // c23 says no, before says yes. but mostly it doesn't matter because sane programs say the `...` anyway. 
@@ -488,7 +480,6 @@ fn new_gvar(c: *Ctx, name: Str, ty: *CType, tok: *Token) *Obj = {
     var.global_symbol = (Some = c.m.mangle(var));
     var.tok = tok;
     c.globals = var;
-    c.refs&.push(var);
     var
 }
 
@@ -1569,15 +1560,15 @@ fn write_buf(buf: *u8, val: i64, sz: i64) void = {
     };
 }
 
-fn write_gvar_data(c: *Ctx, cur: *Relocation, init: *Initializer, ty: *CType, buf: []u8, off: i64) *Relocation = {
+fn write_gvar_data(c: *Ctx, cur: *List(Dat2.Reloc), init: *Initializer, ty: *CType, buf: []u8, off: i64) void = {
     ::enum(TypeKind);
     if ty.kind == .TY_ARRAY {
         sz := ty.base.size.intcast();
-        if(init.all_zeros, => return(cur));
+        if(init.all_zeros, => return());
         range(0, ty.array_len.intcast()) { i |
-            cur = c.write_gvar_data(cur, init.children[i], ty.base, buf, off + sz * i);
+            c.write_gvar_data(cur, init.children[i], ty.base, buf, off + sz * i);
         };
-        return(cur);
+        return();
     };
     if ty.kind == .TY_STRUCT {
         if true {
@@ -1595,58 +1586,48 @@ fn write_gvar_data(c: *Ctx, cur: *Relocation, init: *Initializer, ty: *CType, bu
                     write_buf(loc, combined, mem.ty.size.intcast());
                     @debug_assert_eq(combined, read_buf(loc, mem.ty.size.intcast()), "failed write_buf");
                 } else {
-                    cur = c.write_gvar_data(cur, init.children[mem.idx.intcast()], mem.ty, buf, off + mem.offset.intcast());
+                    c.write_gvar_data(cur, init.children[mem.idx.intcast()], mem.ty, buf, off + mem.offset.intcast());
                 };
             };
         };
         if ty.has_flex() {
             child := init.children[init.children.len - 1];
-            cur = c.write_gvar_data(cur, child, child.ty, buf, off + ty.size.intcast());
+            c.write_gvar_data(cur, child, child.ty, buf, off + ty.size.intcast());
         };
         
-        return(cur);
+        return();
     };
 
     if ty.kind == .TY_UNION {
-        if(init.mem.is_null(), => return(cur));
+        if(init.mem.is_null(), => return());
         return(c.write_gvar_data(cur, init.children[init.mem.idx.intcast()], init.mem.ty, buf, off));
     };
 
-    if(init.expr.is_null(), => return(cur));
+    if(init.expr.is_null(), => return());
 
     if ty.kind == .TY_FLOAT {
         ptr_cast_unchecked(u8, f32, buf.ptr.offset(off))[] = c.eval_double(init.expr).cast();
-        return(cur);
+        return();
     };
 
     if ty.kind == .TY_DOUBLE {
         ptr_cast_unchecked(u8, f64, buf.ptr.offset(off))[] = c.eval_double(init.expr);
-        return(cur);
+        return();
     };
 
     val, label := c.eval2(init.expr);
 
     label := label || {
         write_buf(buf.ptr.offset(off), val, ty.size.intcast());
-        return(cur)
+        return()
     };
 
-    rel := c.arena.box_zeroed(Relocation);
-    rel.offset = off.intcast();
-    rel.obj = c.find_pending_dep(label, init.expr.tok);
-    rel.addend = val;
-    cur.next = rel;
-    cur.next
-}
-
-fn find_pending_dep(c: *Ctx, label: Qbe.Sym, tok: *Token) *Obj = {
-    for c.refs { ref |
-        id := ref.global_symbol.expect("known symbol");
-        if id == label {
-            return ref;
-        }
-    }
-    @error_tok(c, tok, "import_c: ICE: failed to find obj dependency on %", c.m.str(label))
+    @debug_assert_lt(off, MAX_u32);
+    cur.push(
+        off = off.trunc(),
+        id = label,
+        addend = val,
+    );
 }
 
 fn has_flex(ty: *CType) bool = 
@@ -1666,12 +1647,12 @@ fn gvar_initializer(c: *Ctx, rest: **Token, tok: *Token, var: *Obj) void = {
     if init.all_zeros {
         return();
     };
-    head := Relocation.zeroed();
     
     buf := c.arena.alloc_zeroed(u8, init.size());
-    c.write_gvar_data(head&, init, var.ty, buf, 0);
+    rel := Dat2.Reloc.list(c.arena);
+    c.write_gvar_data(rel&, init, var.ty, buf, 0);
     var.init_data = buf;
-    var.rel = head.next;
+    var.rel = rel.items();
 }
 
 fn is_type_name(c: *Ctx, tok: *Token) bool #inline #use(Tokens) = {
@@ -1958,9 +1939,6 @@ fn next_is_paren_typename(c: *Ctx, tok: *Token) bool =
     equal(tok.next, "(") && c.is_type_name(tok.next.next);
 
 fn parse_typedef(c: *Ctx, tok: *Token, basety: *CType) *Token = {
-    // TODO: is this wrong if it was a vla that used a global as the length? need to actually track refs
-    prev_refs := c.refs;
-    c.refs = list(c.arena);
     comma_sep(c, tok&, ";") {
         ty := c.declarator(tok&, tok, basety);
         if(ty.name.is_null(), => @error_tok(c, ty.name_pos, "typedef name omitted"));
@@ -1969,7 +1947,6 @@ fn parse_typedef(c: *Ctx, tok: *Token, basety: *CType) *Token = {
         };
         c.push_scope(c.get_ident(ty.name))[].type_def = ty;
     };
-    c.refs = prev_refs;
     tok
 }
 
@@ -1988,8 +1965,6 @@ fn find_func(c: *Ctx, name: Str) ?*Obj = {
 
 // TODO: this clears a bunch of state that won't work if nested function decls are allowed
 fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *Token = {
-    prev_refs := c.refs;
-    c.refs = list(c.arena);
     if(ty.name.is_null(), => @error_tok(c, ty.name_pos, "function name omitted"));
     name_str := c.get_ident(ty.name);
 
@@ -2013,11 +1988,6 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *T
     
     if consume(tok&, tok, ";") {
         f.is_definition = false;
-        // TODO: defer
-        // TODO: since this was just a forward declaration, shouldn't need to track refs? 
-        //       tho maybe we want to extend that for types so you know what bindings need to be generated. 
-        c.move_current_refs(f);
-        c.refs = prev_refs;
         return(tok);
     };
 
@@ -2082,8 +2052,6 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *T
     f.f = c.f;
     
     f.locals = c.locals;
-    c.move_current_refs(f);
-    c.refs = prev_refs;
     c.leave_scope();
     c.labels&.clear();
     c.current_fn = .None;
@@ -2092,16 +2060,7 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *T
     tok
 }
 
-fn move_current_refs(c: *Ctx, dest: *Obj) void = {
-    c.refs&.push_all(dest.refs);
-    dest.refs = c.refs.items().shallow_copy(c.arena);
-    c.refs&.clear();
-}
-
 fn global_variable(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, first_declarator: *CType, expect_var: bool) *Token = {
-    prev_refs := c.refs;
-    c.refs = list(c.arena);
-    
     declarators(c, tok&, basety, first_declarator) { ty |
         continue :: local_return;
         if ty.name.is_null() {
@@ -2153,10 +2112,7 @@ fn global_variable(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, first_d
             };
             @if(!attr.is_extern) c.yield(var);
         };
-        
-        c.move_current_refs(var);
     };
-    c.refs = prev_refs;
     tok
 }
 
@@ -2169,7 +2125,6 @@ fn declare_builtin_functions(c: *Ctx) void = {
 
 // program = (typedef | function-definition | global-variable)*
 fn parse(c: *Ctx, tok: *Token) *Obj = {
-    c.refs = list(c.arena);
     c.declare_builtin_functions();
     //c.speculate = true;
     while => tok.kind != .TK_EOF {
@@ -2588,8 +2543,6 @@ parse_ident :: fn(c, rest, tok) #prefix(.TK_IDENT) = {
     if sc { sc |
         if !sc.var.is_null() {
             var := sc.var;
-            c.refs&.push(var);
-            //c.refs&.add_unique(var);  // TODO: identity
             node := c.new_var_node(var, tok);
             node.ty = var.ty;
             return(node);
@@ -3960,5 +3913,5 @@ fn gen_addr(c: *Ctx, node: *Node) Qbe.Ref = {
     node.lvalue
 }
 
-#include_std("compiler/worker.fr");
+#use("@/compiler/worker.fr");
 #use("@/backend/opt/fold.fr");

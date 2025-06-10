@@ -12,7 +12,7 @@ SPAM :: false;
 :: Compile'comptime_init_rules_table();
 
 fn init_ctx(c: *Compile.Ctx, m: *QbeModule) void = {
-    c.arena = temp();  // TODO
+    c.arena = temp();  // when you change this don't forget to free it in ffi.fr/include()
     c.current_fn = .None;
     c.emitter = .None;
     c.brk_label = .None;
@@ -32,6 +32,7 @@ fn init_ctx(c: *Compile.Ctx, m: *QbeModule) void = {
     c.m = m;
     c.franca = .None;
     c.franca_namespace = NOSCOPE;
+    c.enqueue_task = fn(_, __) = @panic("you need to set Ctx.enqueue_task = ImportVTable.enqueue_task");
     
     // you need this before calling parse() in compile because the preprocessor calls into const_expr
     {
@@ -73,11 +74,9 @@ fn compile_file(c: *Compile.Ctx, path: Str) Result(*Compile.Obj, Str) = {
 fn yield(c: *Compile.Ctx, obj: *Compile.Obj) void = {
     @assert(!obj.yielded);
     obj.yielded = true;
-    if c.save_type_info {
-        import("@/examples/import_c/ffi.fr")'export(c, obj);
-    };
+    // TODO: maybe export types etc for ffi here instead of waiting until the end?
+    //       but need to be careful of fighting with the other thread over the writer if we allow threaded at the same time
     if c.emitter { _ |
-        // TODO: "this makes ffi take 180ms longer to compile because it doesn't go through a vtable"
         emit_one(c, obj);
     };
 }
@@ -103,12 +102,11 @@ fn emit_one(c: *Compile.Ctx, obj: *Compile.Obj) void = {
             entry.task = (AotVar2 = translate_data(ctx.m, obj));
         };
     };
-    enqueue_task(ctx, entry);
+    c'enqueue_task(ctx, entry);
 }
 
 // TODO: implement _Alignas
 fn translate_data(m: *QbeModule, obj: *Compile.Obj) []Dat2 = {
-    ::ptr_utils(@type obj.rel[]);
     no_init_data := obj.init_data.ptr.is_null();
     // can't just be obj.ty.size because it might have a flexible array member
     total_size   := if(no_init_data, => obj.ty.size.intcast(), => obj.init_data.len);
@@ -119,17 +117,7 @@ fn translate_data(m: *QbeModule, obj: *Compile.Obj) []Dat2 = {
         export = !obj.is_static,
         id = obj.global_symbol || m.mangle(obj),
         template = @if(is_zeroed, (Zeroes = total_size), (Bytes = obj.init_data)),
-        relocations = ({
-            relocs := Dat2.Reloc.list(temp());
-            for_linked obj.rel { rel |
-                relocs&.push(
-                    off = rel.offset.bitcast(),
-                    id = rel.obj.global_symbol.unwrap(),
-                    addend = rel.addend,
-                );
-            };
-            relocs.items()
-        }),
+        relocations = obj.rel,
     );    
     out.items()
 }

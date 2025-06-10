@@ -3,8 +3,6 @@
 - @bit_fields in incremental.fr don't work inline in the structs
 - import_c, get rid of :BoundsPadding
 - linux fault-na.ssa need to do the signal struct
-- amd64: `std/json        cc      FAIL test_wuffs_strconv_parse_number_f64_regular: "-0.000e0": have 0x0000000000000000, want 0x8000000000000000`
-- amd64: examples/import_c/test/test.fr
 - use HashMap.get_or_insert more
 - #ir tries to ignore zero-sized params but not if they're first which is sad
 - :BrokenCGeneric i think erroring on conflicting `_Generic` cases is correct but you're supposed to treat `long` and `long long`
@@ -16,11 +14,22 @@ so something in the data i guess?
 - :TodoLinux
 - "need to be consistant about how to handle modules like this that don't actually compile anything"
 - count_array_init_elements is still spitting out junk symbols into the scope. need to just not parse it twice. 
-- import_c can't compile lua targetting amd64 (makes an exe but it crashes immediately)
-- add something that needs ffi.fr/include() to call emit_suspended_inlinables in examples/import_c/test/ffi.fr, 
 and not doing that makes an array of strings have the strings show up in the output module twice. 
 - "really really want this but it breaks examples/ascii_table.fr"
+- fix examples/terminal.fr -jit so it doesn't freak out about nested compiler contexts because of the repl
 
+## amd64
+
+- amd64: `std/json        cc      FAIL test_wuffs_strconv_parse_number_f64_regular: "-0.000e0": have 0x0000000000000000, want 0x8000000000000000`
+- amd64: examples/import_c/test/test.fr
+- import_c can't compile lua targetting amd64 (makes an exe but it crashes immediately)
+- import_c/test/ffi.fr: panic! sysv abi does not support variadic env calls
+- finish amd64/isel/NEW_ADDR_FOLDING
+- formalize ENABLE_INCREMENTAL in backend/arm64/emit (+ support on amd64)
+  - or maybe get rid of it? it's not super interesting without a lot more infrastructure. 
+- be less strict about amd64 address folding when there's a large constant pointer (which is valid when jitting)
+  - idk, i might have done this already? 
+  
 ## Quest Lines
 
 - compiler: add a defer expression that lets you run cleanup from a closure even if you jump out past it
@@ -44,9 +53,8 @@ rn it just assumes it's generated from your input files so can be safely ignored
 - have examples/default_driver and graphics/easy do it for main(). 
 but then need to deal with including build options in the cache (like -unsafe, -wgpu, ENABLE_TRACY) 
 - do automatic caching for big comptime things (like import_c'include)
-- could do it for the output of import_c as well. i guess that's equivalent 
-to allowing smaller compilation units. like not making you recompile the backend 
-when you work on the frontend. 
+- now that import_c is always serialized, just need to add `dep`s and then it can be cached separately from the rest of your program. 
+- allow smaller compilation units. like not making you recompile the backend when you work on the frontend. 
 - test that .frc files repro and that you can pass them directly
 - frc_inlinable doesn't work on the compiler itself
 - dump_bin: print segment.MachineCode as something qbe_frontend.fr can parse so it can round trip
@@ -54,6 +62,11 @@ when you work on the frontend.
 - whether the host compiler was built with`-syscalls` needs to go in the cache file
 - caching an invalid thing i think? if you Compile Error: we hit a dynamicimport ('puts_unlocked' from 'libc') with no comptimeaddr for jit
 (happening with import_c)
+
+next impressive advancement: 
+make this work well enough that i don't need to re-export the backend functions in the driver vtable. 
+`enqueue_task, codegen_thread_main, drop_qbe_module, finish_qbe_module, run_qbe_passes, init_default_qbe_module, emit_qbe_included`
+i want them to go through sema exactly once if you compile the compiler and then use it to run a driver that compiles a program that uses the backend. 
 
 ### FrcImport 
 
@@ -66,13 +79,16 @@ when you work on the frontend.
   - also you kinda need a TargetOsSplit to do anything serious
 - make it work with did_regalloc if you know you only care about one architecture
 - check arch in import_frc() if did_regalloc 
-- now that import_c just outputs a blob of bytes, free its arena at the end
 - need to merge deps if we're generating a cache file? 
 - local declaration of import doesn't work because it doesn't get a name in root_scope
 - fix import_c/ffi.fr needing to compile the whole backend now and then time stuff to make sure this way isn't way slower than the old way. 
 - source locations
 - remove DISABLE_IMPORT_FRC. need to deal with scoping when you import(@/compiler)
 - import_c: "this makes ffi take 180ms longer to compile because it doesn't go through a vtable"
+- update import_wasm: annoying because of import_from: ScopeId
+- import_c/ffi.fr: make forward declaration of an import work in local scope (rn missing type info in root_scope so can't use it)
+- support symbol without type info as a rawptr that you have to cast to use
+- if im going to keep FTy.Tag.Abi, need to write a test that actually uses it with aggragate returns. 
 
 ## Unfinished Examples
 
@@ -141,7 +157,6 @@ just a problem with how that program is doing directions not with the app lib)
 
 - `fn emit_llvm(m: *QbeModule, dat: *Qbe.Dat) void = {` update to new Dat2
 - adding #align was a compile speed regression
-- formalize ENABLE_INCREMENTAL in backend/arm64/emit (+ support on amd64)
 - `./q.out -t wasm32 -o target/out/q.wasm -cc backend/test/abi8.ssa -d AI`
 %�%.104 =w pop
 - fast memcpy (need to deal with fallback when not linking a libc)
@@ -263,7 +278,6 @@ the right/fast/safe/whatever thing to do is also the easy thing to do.
 - `[CPU Time]` on macos-x64 is wrong. (different libc magic numbers? clang libc_constants says no). // :WrongClockTime
 - maybe have a `push_compiler_error_context` and `pop_compiler_error_context` for macros so @fmt could easily add a message like `while evaluating format string`?
 - is :jnz_is_Kw really what i want the semantic to be?
-- be less strict about amd64 address folding when there's a large constant pointer (which is valid when jitting)
 - RSlot overflow
 - for import_c, decide when to reset temp() and audit all the allocations in tok/pre
 - default arg values (any const expr and inject at callsite? or based on other args so generate shims or multiple entry points to the function)
@@ -300,7 +314,6 @@ also stop pasting around code for handling the multi-part ops
   - boot but i really don't want to write the compiler again... so idk what to do about that
   - some of the qbe ssa tests are generated: vararg2, strspn, strcmp, queen, mem3, cprime, abi8
 - extend hacky_incremental into something that can be used seriously 
-- finish amd64/isel/NEW_ADDR_FOLDING
 - as an extension of argparse it would be cool if all the demo programs could be both 
 and exe and a dylib so if you want to run from cli it parses to a struct and calls the impl,
 but if you're calling from a program you can import the struct, dlopen the thing, 

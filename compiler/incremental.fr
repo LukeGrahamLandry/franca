@@ -195,7 +195,7 @@ fn import_frc(self: *SelfHosted, bytes: []u8) CRes(ScopeId) = {
     header := check(bytes);  // TODO: return error if the magic fails
     scope := self.scopes.new_scope(TOP_LEVEL_SCOPE, self.get_alloc(), zeroed Span); // TODO: location info
     
-    write_entire_file("target/a.frc", bytes);
+    //write_entire_file("target/a.frc", bytes);
     
     a := self.get_alloc();
     module := a.box(FrcModule);
@@ -305,11 +305,11 @@ fn sema_frc_import_fid(self: *SelfHosted, module: *FrcModule, i: One(Sym)) CRes(
     
     type := self.import_type(module, module.sym_ty[zext i.off]);
     info := self.get_type(type);
-    @debug_assert_ne(type, UnknownType, "must know signeture of imported function");
-    @debug_assert(info.is(.FnPtr), "expected fnptr %", self.log_type(type));
     it := h.get(i);
-    loc := zeroed Span; // TODO
     caller_name := h.get(it.name);
+    @debug_assert_ne(type, UnknownType, "must know signeture of imported function");
+    @err_assert(info.is(.FnPtr), "expected function type for '%' but found %", caller_name, self.log_type(type)) return;
+    loc := zeroed Span; // TODO
     name := self.pool.insert_owned(caller_name);
     
     fid := self.add_function(empty_fn(info.FnPtr.ty, name, loc));
@@ -333,6 +333,7 @@ fn sema_frc_import_fid(self: *SelfHosted, module: *FrcModule, i: One(Sym)) CRes(
             if con.sym != Qbe.no_symbol_S {
                 sym := @as(One(Sym)) (off = con.sym.id);
                 
+                //@println("- callee %", h.get(h.get(sym)[].name));
                 // TODO: i think this doesn't super matter until i start handing out func-ids lazily
                 // TODO: need to track the Dat dependencies too somehow. maybe give up and just use 
                 //       emitir.pending for this as well like old FuncImpl.Ir did. 
@@ -430,6 +431,7 @@ fn import_type_info(self: *SelfHosted, module: *FrcModule, it: *FTy) TypeInfo = 
                 val: i64 = it.payload.offset.zext();
                 sequential = sequential && val == last + 1;
                 last = val;
+                @debug_assert_eq(it.type.off, FTy.U32);
                 push(args&, (name, self.to_values(u32, trunc val)));
             };
             
@@ -592,6 +594,7 @@ fn find_module(self: *SelfHosted, shared: *CodegenShared, module: *FrcModule) CR
 
 // Ok(None) means it's data 
 fn get_fid(self: *SelfHosted, module: *FrcModule, i: One(Sym)) CRes(?FuncId) = {
+    h := module.header;
     ty := module.sym_ty[zext i.off];
     if ty.off == Qbe.no_symbol {
         // this symbol wasn't named in the root scope. 
@@ -602,7 +605,9 @@ fn get_fid(self: *SelfHosted, module: *FrcModule, i: One(Sym)) CRes(?FuncId) = {
     };
     
     ::enum(FTy.Tag);
-    if module.header.get(ty)[].tag != .Func {
+    if h.get(ty)[].tag != .Func {
+        it := h.get(i);
+        @err_assert(!@is(it.segment, .Code, .MachineCode), "function value '%' must have function type", h.get(it.name)) return;
         return(Ok = .None);
     };
     

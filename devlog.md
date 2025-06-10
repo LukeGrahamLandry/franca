@@ -6,6 +6,22 @@ let's cheat and make examples/terminal.fr(repl=true) not take 2 seconds to compi
 - compile_to_shader_source: 68 // shader compiler (for comptime)
 notably those are all things to aren't going to change if you're just working on the terminal program. 
 
+## (Jun 10)
+
+- for now, add enqueue_task to vtable so ffi/include() doesn't need to recompile the backend: 674->479 (safe)
+- bf2ir
+  - looks messier because it wants to replace functions in an existing scope. 
+    but it gets rid of an "order matters" which was a bit of a time bomb so that's nice at least. 
+  - it's kinda annoying if you have to translate the types to FTy yourself when they're already on the function 
+    signetures, so my current thing is have a helper to call that does it based on the abi type info on the Qbe.Fn already. 
+    which maybe is dumb, could just have a thing to do it based on franca TypeInfo in ast_external since i'll need 
+    that eventually anyway, but that would only help this specific case, not like import_wasm for example. 
+    or make it so you don't need to give it type info, could just say the symbol is a rawptr and cast it at the usage site, 
+    but that doesn't help for jit-shims (which is why the frontend really cares about the types of things). but it's 
+    dumb that the current system forces you to give it signatures of any internal functions twice. 
+  - anyway now it works but not with FRANCA_NO_CACHE=true or at comptime. i think it's just the import that's fucking up. 
+    yeah it doesn't like if your import doesn't have a Func type, cause it doesn't know to make a shim for it. 
+
 ## (Jun 9)
 
 - the module always has types as FnPtr because exposing Fn is kinda weird. 
@@ -50,6 +66,20 @@ without just mallocing some memory and filling it in. the thing i want to do is 
 perspective is that the backend does know about the relocations even in the jit module, it's just not
 doing them in time before the thing gets rebaked by the frontend trying to move it from jit module 
 to aot module. so really the problem is that it's trying to rebake because it doesn't have a jit_addr. 
+
+--- 
+
+- import_c: now that i've committed to relying on the franca frontend more, can get rid of special Relocation type and ref tracking
+- now that import_c just outputs a blob of bytes, free its arena at the end
+- something along the line of making FrcImport work, fixed -frc_inlinable for kaleidoscope.fr (still not the compiler tho)
+- in compiler/test.fr, run three versions: Exe, Cached, CachedEarly
+- grow after free for bf2ir.fr, but only when run in the multi-module CompCtx, any alone works. 
+reassuringly same problem if (exe, exe) so it's not about the frc format, it's just the first time ive reused a compctx like that. 
+meh, that was just a mistake in old move_from_module(FuncImpl.Ir) not replacing the old f.mem, even tho there was nothing in it, 
+growing it records that it was freed and affects the template function because an QList still has an allocation. 
+but that's what im replacing with with FrcImport anyway, which puts a bit more thought into reusing with multiple modules. 
+
+- something crazy going on with default_driver crashing when trying to reset temp() 
 
 ## (Jun 8)
 

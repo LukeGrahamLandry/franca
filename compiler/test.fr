@@ -50,14 +50,6 @@ fn driver(vtable: *ImportVTable) void = {
     
     ::import("@/examples/testing.fr");
     
-    run_tests_main(Str, compile_only, fn(a) => a[]) { file | 
-        src := general_allocator().read_to_string_or_crash(file[]);
-        src&.slowly_prepend_all("\n#include_std(\"lib/core.fr\");\n");
-        compile(vtable, src.items());
-        (true, list(u8, temp()), list(u8, temp()), "")
-    };
-    println("");
-
     // TODO: it fails an assertion if you dont put this above the compile_only tests 
     //       if run_tests_main calls exit() which was infact a mistake but it's still a crippling compiler bug 
     //       -- Mar 24, 2025.  :FUCKED asdklasjd;ljas;ldja
@@ -65,17 +57,25 @@ fn driver(vtable: *ImportVTable) void = {
     files := collect_with_extension(hello, ".fr").unwrap();
     files&.unordered_retain(fn(it) => it[] != "README.fr");
     run_tests_main(Str, files.items(), fn(a) => a[]) { file | 
-        ok, out, err := exec_and_catch(franca_path, @slice(@tfmt("%/%", hello, file[])), todo_allocator);
+        ok, out, err := compile_and_run(vtable, @tfmt("#include_std(\"lib/core.fr\");#include_std(\"%/%\");", hello, file[]));
         (ok && out.items() == "Hello World!\n", out, err, "")
     };
+    println("");
     
     {
-        src := read_entire_file(temp(), "examples/kaleidoscope.fr").unwrap();
-        ok, out, err := compile_and_run(vtable, @tfmt("#include_std(\"lib/core.fr\");%", src));
+        ok, out, err := compile_and_run(vtable, "#include_std(\"lib/core.fr\");#include_std(\"examples/kaleidoscope.fr\");");
         @assert(ok, "failed kaleidoscope\n%%", out.items(), err.items());
         @assert(out.items().ends_with("[ok]\n"), "kaleidoscope status=0 but didn't print '[ok]'");
         println("examples/kaleidoscope.fr [ok]");
     };
+    
+    run_tests_main(Str, compile_only, fn(a) => a[]) { file | 
+        src := general_allocator().read_to_string_or_crash(file[]);
+        src&.slowly_prepend_all("\n#include_std(\"lib/core.fr\");\n");
+        compile(vtable, src.items());
+        (true, list(u8, temp()), list(u8, temp()), "")
+    };
+    println("");
 }
 
 compile_only :: @const_slice(
@@ -119,8 +119,7 @@ compile_only :: @const_slice(
     // running jitted is clearly a bit fragile so this should be tested but it's really annoying spam. 
     "examples/view_image.fr",  // dep:wuffs
     
-    // TODO: panic! ND_SHR should have known type
-    //"examples/ascii_table.fr",  // dep:stb
+    "examples/ascii_table.fr",  // dep:stb
 );
 
 fn compile(vtable: *ImportVTable, src: Str) void = {
@@ -142,7 +141,7 @@ fn compile_to_bytes(vtable: *ImportVTable, src: Str, goal: []QbeOutputPurpose) [
             @assert(@is(goal, .Exe, .Cached, .CachedEarly), "compile_to_bytes: only exe/cached");
             m := zeroed QbeModule;
             a, os := (query_current_arch(), query_current_os());
-            init_default_module_dyn(m&, c.vtable, (arch = a,  os = os, type = goal));
+            init_default_module_dyn(m&, c.vtable, (arch = a, os = os, type = goal));
             fid := or c.get_unique_named("main") {
                 panic("expected exactly one function called 'main'")
             };
@@ -151,7 +150,7 @@ fn compile_to_bytes(vtable: *ImportVTable, src: Str, goal: []QbeOutputPurpose) [
             drop(m&);
 
             if @is(goal, .Cached, .CachedEarly) {
-                init_default_module_dyn(m&, c.vtable, (arch = a,  os = os, type = .Exe));
+                init_default_module_dyn(m&, c.vtable, (arch = a, os = os, type = .Exe));
                 
                 header: *Incremental.Header = check(bytes);
                 compile_all_symbols(header, m&);
@@ -170,9 +169,26 @@ fn compile_to_bytes(vtable: *ImportVTable, src: Str, goal: []QbeOutputPurpose) [
     results.items()
 }
 
+// runs it multiple times with different compilation strategies and returns the result of the first fail or different output. 
 fn compile_and_run(vtable: *ImportVTable, src: Str) Ty(bool, List(u8), List(u8)) = {
-    compile(vtable, src);
-    exec_and_catch("./c.out", empty(), todo_allocator)
+    cases := @slice(QbeOutputPurpose.Exe, .Cached, .CachedEarly);
+    chunks := compile_to_bytes(vtable, src, cases);
+    
+    write_entire_file_or_crash("./c.out", chunks[0]);
+    ok0, out0, err0 := exec_and_catch("./c.out", empty(), todo_allocator);
+    if ok0 {
+        enumerate chunks.rest(1) { i, exe | 
+            write_entire_file_or_crash("./c.out", exe[]);
+            ok1, out1, err1 := exec_and_catch("./c.out", empty(), todo_allocator);
+            
+            ok1 = ok1 && out0.items() == out1.items();
+            ok1 = ok1 && err0.items() == err1.items();
+            @fmt(err1&, "\n>>> [compiler/test.fr] failed %", cases[i]);
+            if(!ok1, => return(ok1, out1, err1));
+        };
+    };
+    
+    (ok0, out0, err0)
 }
 
 fn gen_test_program(file: Str, functions: []Str) Str = {

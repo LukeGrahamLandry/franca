@@ -32,17 +32,20 @@ fn main() void = {
 }
 
 :: {
-    m := ast_alloc().box(QbeModule);
+    #use("@/backend/incremental.fr");
     fr := current_compiler_context();
+    mark := mark_temporary_storage();
+    m := @uninitialized QbeModule; m := m&;
     // TODO: "need to be consistant about how to handle modules like this that don't actually compile anything"
-    init_default_module_dyn(m, fr.vtable, (arch = query_current_arch(), os = query_current_os(), type = .JitOnly));
-    
-    // TODO: it's dumb that some of the important QLists always use temp()
-    t := ast_alloc().box(ArenaAlloc);
-    t[] = init(ast_alloc(), 1000);
-    context(DefaultContext)[].temporary_allocator = t;
+    init_default_module_dyn(m, fr.vtable, (arch = query_current_arch(), os = query_current_os(), type = .CachedEarly));
+    writer := m.save.unwrap();
+    // TODO: making everyone remember to do this is kinda lame
+    range(0, FTy.COUNT) { _ |
+        writer.fty&.push(zeroed FTy);   // skip builtin types so offsets work out
+    };
     
     s := Type.scope_of(ToBf);
+    decls := Fld.list(temp());
     for get_constants(s) { name |
         fid := get_constant(FuncId, s, name).unwrap();
         func := get_function_ast(fid, true, true, false, false);
@@ -50,29 +53,51 @@ fn main() void = {
         @debug_assert(func.body&.is(.Normal));
         code := const_eval(Str)(func.body.Normal);
         
-        f := ast_alloc().box(Qbe.Fn);
+        f := temp().box(Qbe.Fn);
         default_init(f, m);
         f.lnk.id = m.intern(func.name.str());
         convert(f, code);
-        f.rpo = new(f.nblk.zext());
-        i := 0;
-        for_blocks f { b |
-            b.id = trunc i;
-            f.rpo[i] = b;
-            i += 1;
-        };
+        fr'vtable'run_qbe_passes(Qbe.Fn.raw_from_ptr(f));
         
-        data := ast_alloc().alloc_zeroed(BakedVarId, f.ncon.zext());
-        funcs := ast_alloc().alloc_zeroed(FuncId, f.ncon.zext());
-        funcs[2] = getchar;  // order matters
-        funcs[3] = putchar;
-        func.body = (Ir = (
-            fn_internal = Qbe.Fn.int_from_ptr(f),
-            data = data,
-            funcs = funcs,
-        ));
-        func.set_flag(.EnsuredCompiled);
+        decls&.push(
+            name = writer.push(func.name.str()),
+            type = abi_function_type(writer, f),
+            payload = (offset = trunc writer.map_sym(m, f.lnk.id))
+        );
     };
+    
+    int_to_int_func: One(FTy) = (off = trunc writer.fty.len);
+    writer.fty&.push(tag = .Func, payload = (func = (arg = (off = FTy.U32), ret = (off = FTy.U32))));
+    
+    for @slice("putchar", "getchar") { name |
+        id := m.intern(name);
+        set_library(m, id, "libc");
+        decls&.push(
+            name = writer.push(name),
+            type = int_to_int_func,
+            payload = (offset = trunc writer.map_sym(m, id))
+        );
+    };
+    
+    meta: Meta = (arch_os = 0, root_scope = save_fields(writer, .Scope, decls.items()));
+    b := writer.to_bytes(meta, m);
+    bytes := concat(b, ast_alloc());
+    drop(m);
+    result := fr'vtable'import_frc(fr.data, bytes);
+    root_scope := or result { err | 
+        fr.report_error(err)
+    };
+    
+    // time to do some sketchy shit do da do da hope i get away with it
+    for get_constants(s) { name | 
+        dest := get_constant(FuncId, s, name).unwrap();
+        dest := get_function_ast(dest, true, true, false, false);
+        src  := get_constant(FuncId, root_scope, name).unwrap();
+        dest.body = (Redirect = src);
+        dest.set_flag(.BodyIsSpecial);
+        dest.set_flag(.EnsuredCompiled);
+    };
+    reset_temporary_storage(mark);
 };
 
 fn convert(f: *Qbe.Fn, code: []u8) void = {
@@ -103,7 +128,6 @@ fn convert(f: *Qbe.Fn, code: []u8) void = {
         """);
     };
     
-    // order matters because of FuncImpl.Ir
     getchar := f.symcon(f.globals.intern("getchar"));
     putchar := f.symcon(f.globals.intern("putchar"));
     
