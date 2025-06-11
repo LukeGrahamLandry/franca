@@ -56,7 +56,7 @@ Some does exist, see the `docs/README.md`.
 - A C11 compiler (using that backend^) good enough to compile the lua interpreter [@/examples/import_c](./examples/import_c) (based on Chibicc)
   - can run at comptime so franca programs can import c libraries directly without depending on another compiler
 - Windowing/3d graphics library [@/graphics](./graphics) (based on Sokol)
-  - macos-arm64-metal only currently
+  - very unfinished! macos-arm64-metal only currently
 
 ## Goals
 

@@ -4,18 +4,44 @@ AstExternal :: import("@/compiler/ast_external.fr");
 #use("@/lib/sys/process.fr");
 #use("@/lib/sys/fs.fr");
 
+// These all run a few times (.Exe + .Cached + .CachedEarly) and assert the output is the same
+run_and_check :: @S(@as(Case)
+    ("examples/sudoku.fr",         @S(sudoku[0])              , fn(out, _) = out.contains(sudoku[1])),
+    ("examples/bf/interpreter.fr", empty()                    , EqHelloWorld),
+    ("examples/bf/code_string.fr", empty()                    , EqHelloWorld),
+    ("examples/bf/bf2ir.fr",       empty()                    , EqHelloWorld),
+    ("examples/bf/c_string.fr",    empty()                    , EqHelloWorld),
+    ("examples/bf/via_wasm.fr",    empty()                    , EqHelloWorld),
+    ("examples/prospero.fr",       @S("-width", "64", "-hush"), fn(_, err) = err.contains("22/253:3578")),
+    ("examples/kaleidoscope.fr",   empty()                    , fn(out, _) = out.ends_with("[ok]\n") && chars(out, "*") == 2055),
+    ("backend/meta/qbe_frontend.fr", @S("backend/test/mandel.ssa", "-r"), fn(out, _) = chars(out, "*") == 1483),
+    // This doesn't work on CachedEarly
+    // With caching you need to take out "Hello Compiler"
+    // But also you need to run it with FRANCA_NO_CACHE=true or it's not testing anything
+    // ("compiler/main.fr",           @S("examples/toy/hello.fr"), fn(out, _) = out.contains("Hello World")),
+);
+
+S :: const_slice;
+EqHelloWorld :: fn(out, _) = out == "Hello World!\n";
+sudoku :: @S("003020600900305001001806400008102900700000008006708200002609500800203009005010300", 
+    "483921657967345821251876493548132976729564138136798245372689514814253769695417382");
+Case :: Ty(Str, []Str, @FnPtr(o: Str, e: Str) bool);
+
+hashes :: @static(List(u8));
+
 // TODO: exec every time so you can run tests after the first compile error
 fn driver(vtable: *ImportVTable) void = {
     // :FUCKED you can't move this variable declaration down
     franca_path := get_executable_path(temp());  // TODO: cli arg to set this 
+    hashes[] = list(general_allocator());
     passed := 0;
     failed := 0;
     ::FmtPad(Str);
     tests := collect_tests(vtable);
+    ::import("@/examples/testing.fr");
     
-    // TODO: do these once for every execution strategy:  jit+aot+cached+reloc+dynamic
     full, expect_dot_count := gen_full_test_program(tests&);
-    ok, out, err := compile_and_run(vtable, full);
+    ok, out, err := compile_and_run(vtable, full, empty());
     if ok {
         println(out.items());
         passed = tests.raw.len_including_tombstones;
@@ -29,7 +55,7 @@ fn driver(vtable: *ImportVTable) void = {
         each tests& { file, functions | 
             @print("%", f_pad(file, 40, .After));
             src := gen_test_program(file, functions[].items());
-            ok, out, err := compile_and_run(vtable, src);
+            ok, out, err := compile_and_run(vtable, src, empty());
             (@if(ok, passed&, failed&))[] += 1;
             @print("[%]", if(ok, => "ok", => "failed run"));
             print(out.items());
@@ -48,38 +74,26 @@ fn driver(vtable: *ImportVTable) void = {
         exit(1);
     };
     
-    ::import("@/examples/testing.fr");
-    
-    // TODO: it fails an assertion if you dont put this above the compile_only tests 
-    //       if run_tests_main calls exit() which was infact a mistake but it's still a crippling compiler bug 
-    //       -- Mar 24, 2025.  :FUCKED asdklasjd;ljas;ldja
-    hello :: "examples/bf";
-    files := collect_with_extension(hello, ".fr").unwrap();
-    files&.unordered_retain(fn(it) => it[] != "README.fr");
-    run_tests_main(Str, files.items(), fn(a) => a[]) { file | 
-        ok, out, err := compile_and_run(vtable, @tfmt("#include_std(\"lib/core.fr\");#include_std(\"%/%\");", hello, file[]));
-        (ok && out.items() == "Hello World!\n", out, err, "")
-    };
-    println("");
-    
-    {
-        ok, out, err := compile_and_run(vtable, "#include_std(\"lib/core.fr\");#include_std(\"examples/kaleidoscope.fr\");");
-        @assert(ok, "failed kaleidoscope\n%%", out.items(), err.items());
-        @assert(out.items().ends_with("[ok]\n"), "kaleidoscope status=0 but didn't print '[ok]'");
-        println("examples/kaleidoscope.fr [ok]");
+    run_tests_main(Case, run_and_check, fn(a) => a._0) { it | 
+        filename, args, check := it[];
+        hashes.push_all(filename);
+        ok, out, err := compile_and_run(vtable, @tfmt("#include_std(\"lib/core.fr\");#include_std(\"%\");", filename), args);
+        (ok && check(out.items(), err.items()), out, err, "")
     };
     
+    println("\nCOMPILE ONLY:");
     run_tests_main(Str, compile_only, fn(a) => a[]) { file | 
+        hashes.push_all(file[]);
         src := general_allocator().read_to_string_or_crash(file[]);
         src&.slowly_prepend_all("\n#include_std(\"lib/core.fr\");\n");
         compile(vtable, src.items());
         (true, list(u8, temp()), list(u8, temp()), "")
     };
     println("");
+    println(hashes.items());
 }
 
-compile_only :: @const_slice(
-    "examples/sudoku.fr",  // runs tests at comptime 
+compile_only :: @S(
     "examples/raw_terminal.fr",  // interactive
     "examples/turing_art.fr", 
     // TODO: test it
@@ -162,29 +176,41 @@ fn compile_to_bytes(vtable: *ImportVTable, src: Str, goal: []QbeOutputPurpose) [
             };
             
             results&.push(bytes);
+            @fmt(hashes, " %", sha256_hex bytes);
         };
         {c.vtable.destroy_compiler}(c.data);
     };
+    @fmt(hashes, "\n");
     reset_temporary_storage(mark);
     results.items()
 }
 
 // runs it multiple times with different compilation strategies and returns the result of the first fail or different output. 
-fn compile_and_run(vtable: *ImportVTable, src: Str) Ty(bool, List(u8), List(u8)) = {
+// TODO: JitOnly and Relocatable as well?
+fn compile_and_run(vtable: *ImportVTable, src: Str, args: []Str) Ty(bool, List(u8), List(u8)) = {
     cases := @slice(QbeOutputPurpose.Exe, .Cached, .CachedEarly);
     chunks := compile_to_bytes(vtable, src, cases);
     
     write_entire_file_or_crash("./c.out", chunks[0]);
-    ok0, out0, err0 := exec_and_catch("./c.out", empty(), todo_allocator);
+    ok0, out0, err0 := exec_and_catch("./c.out", args, todo_allocator);
     if ok0 {
         enumerate chunks.rest(1) { i, exe | 
             write_entire_file_or_crash("./c.out", exe[]);
-            ok1, out1, err1 := exec_and_catch("./c.out", empty(), todo_allocator);
+            ok1, out1, err1 := exec_and_catch("./c.out", args, todo_allocator);
             
-            ok1 = ok1 && out0.items() == out1.items();
-            ok1 = ok1 && err0.items() == err1.items();
-            @fmt(err1&, "\n>>> [compiler/test.fr] failed %", cases[i]);
-            if(!ok1, => return(ok1, out1, err1));
+            out_ok, err_ok := (out0.items() == out1.items(), err0.items() == err1.items());
+            pass := ok1 && out_ok && err_ok;
+            if !pass {
+                @fmt(err1&, "\n>>> [compiler/test.fr] failed %; % % %", cases[i+1], ok1, out_ok, err_ok);
+                if !out_ok {
+                    @fmt(err1&, "\n>>>Expected STDOUT:\n%", out0.items());
+                };
+                if !err_ok {
+                    @fmt(err1&, "\n>>>Expected STDERR:\n%", err0.items());
+                };
+                
+                return(pass, out1, err1);
+            }
         };
     };
     
@@ -284,4 +310,13 @@ count_end_of_line_dots :: fn(out: Str) i64 = {
     found_dot_count
 }
 
+fn chars(haystack: Str, $needle: Str) i64 = {
+    n := 0;
+    for haystack { c |
+        n += int(c == needle.ascii());
+    };
+    n
+}
+
 #use("@/lib/sys/subprocess.fr");
+#use("@/backend/macho/sha256.fr");

@@ -31,7 +31,17 @@ fn main() void = {
     
     #use("@/lib/args.fr");
     HELP :: collect_help(Args, "qbe_frontend [OPTIONS] {file.ssa, -}");
-    args := parse_args(Args);
+    full_args := cli_args();
+  
+    fn eq(a: *CStr, b: *CStr) bool = a[] == b[].str();
+    end := full_args.len;
+    if full_args.index_of(@as(CStr) "--") { i |
+        end = i;
+    };
+    cli_args: List(CStr) = full_args.rest(min(full_args.len, end+1)).clone(temp());
+    
+    args: Args = ();
+    parse_args(Args, args&, full_args.slice(1, end));
     
     ::enum(TargetId);
     arch, os := args.t.splat_env();
@@ -47,17 +57,7 @@ fn main() void = {
     inpath := "-";
     debug := args.d != "";
     is_args := false;
-    cli_args := (*u8).list(temp());
     for args.paths { a |
-        continue :: local_return;
-        if is_args {
-            cli_args&.push(a.ptr);  // happen to know that these are c strings so this is fine
-            continue();
-        };
-        if a == "--" {
-            is_args = true;
-            continue();
-        };
         if !a.ends_with(".fr") {// TODO: ugh don't care about the file extension 
             if a.starts_with("-") && a != "-" {
                 @panic("Unknown option %", a);
@@ -107,9 +107,6 @@ fn main() void = {
         @assert(!args.frc_inlinable, "TODO: this is ok if the input is also before regalloc but we can't go backwards");
         compile_all_symbols(header, m);
     } else {
-        if args.frc_inlinable {
-            m.target.finish_passes = (fn(f: *Qbe.Fn) void = f.globals.save.unwrap().push(f, false));
-        }
         handle_data :: fn(d: Dat2) void = {
             global_module.emit_data(d);
         };
@@ -166,9 +163,11 @@ fn main() void = {
         f := or global_module.get_addr("main") {
             panic("couldn't find main()")
         };
-        f := assume_types_fn(Arg = Ty(i64, **u8), Ret = i64, ptr = f);
-        cli_args&.insert(0, "thisisjittedcodegoodluckwiththat.exe\0".as_ptr());
-        status := f(cli_args.len, cli_args.maybe_uninit.ptr);
+        f := assume_types_fn(Arg = Ty(i64, *CStr, *CStr), Ret = i64, ptr = f);
+        cli_args&.insert(0, "thisisjittedcodegoodluckwiththat.exe");
+        cli_args&.push(zeroed(CStr));
+        envp := context(DefaultContext)[].environment_variables;
+        status := f(cli_args.len - 1, cli_args.maybe_uninit.ptr, envp);
         @if(status != 0) exit(status);
         return();
     };

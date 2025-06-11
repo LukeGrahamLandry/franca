@@ -1,3 +1,6 @@
+# THIS IS NOT DONE
+# MACOS-ARM64-METAL ONLY (for now)
+
 Various things useful for creating cross platform graphical applications. 
 
 - The cross platform part is still very much WIP

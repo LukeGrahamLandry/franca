@@ -1,3 +1,11 @@
+
+speed regression !!
+
+> hmm, it sure got a lot slower (1032 -> 1113) at self compile since whenever my current release compiler was built (Jun  7 22:01), 
+(both compiling current code so it's just cause i added stuff).  
+
+## 
+
 - implement _Atomic in import_c
 - import_c: `__constructor__, __aligned__`
 - @bit_fields in incremental.fr don't work inline in the structs
@@ -30,6 +38,29 @@ and not doing that makes an array of strings have the strings show up in the out
 - be less strict about amd64 address folding when there's a large constant pointer (which is valid when jitting)
   - idk, i might have done this already? 
   
+- examples/terminal.fr: does rosetta2 land's version of MSL have different rules??? fuck!
+```
+METAL_SHADER_COMPILATION_OUTPUT: program_source:15:14: error: 'texture' attribute only applies to parameters, global constant variables, and non-static data members
+    T4 tex [[texture(0)]];
+             ^
+program_source:16:14: error: 'sampler' attribute only applies to parameters, global constant variables, and non-static data members
+    T5 smp [[sampler(0)]];
+             ^
+program_source:22:39: error: invalid type 'T6' for input declaration in a fragment function
+fragment T7 main0(T3 v1 [[stage_in]], T6 v2) {
+                                      ^~~~~
+program_source:25:8: error: call to deleted constructor of 'T4' (aka 'texture2d<float>')
+    T4 v3;
+       ^
+/System/Library/PrivateFrameworks/GPUCompiler.framework/Versions/32023/Libraries/lib/clang/32023.619/include/metal/__bits/metal_texture2d:2346:3: note: 'texture2d' has been explicitly marked deleted here
+  texture2d() thread = delete;
+  ^
+program_source:26:5: error: constant sampler must be declared constexpr
+    T5 v4;
+    ^
+    constexpr 
+```
+
 ## Quest Lines
 
 - compiler: add a defer expression that lets you run cleanup from a closure even if you jump out past it
@@ -63,6 +94,9 @@ but then need to deal with including build options in the cache (like -unsafe, -
 - caching an invalid thing i think? if you Compile Error: we hit a dynamicimport ('puts_unlocked' from 'libc') with no comptimeaddr for jit
 (happening with import_c)
 
+- the compiler itself still doesn't work as frc_inlinable:
+> franca examples/default_driver.fr build compiler/main.fr -frc_inlinable && FRANCA_NO_CACHE=true franca backend/meta/qbe_frontend.fr a.out -r -- examples/toy/hello.fr
+
 next impressive advancement: 
 make this work well enough that i don't need to re-export the backend functions in the driver vtable. 
 `enqueue_task, codegen_thread_main, drop_qbe_module, finish_qbe_module, run_qbe_passes, init_default_qbe_module, emit_qbe_included`
@@ -80,18 +114,19 @@ i want them to go through sema exactly once if you compile the compiler and then
 - make it work with did_regalloc if you know you only care about one architecture
 - check arch in import_frc() if did_regalloc 
 - need to merge deps if we're generating a cache file? 
-- local declaration of import doesn't work because it doesn't get a name in root_scope
+- import_c: local declaration of import doesn't work because it doesn't get a name in root_scope
 - fix import_c/ffi.fr needing to compile the whole backend now and then time stuff to make sure this way isn't way slower than the old way. 
 - source locations
 - remove DISABLE_IMPORT_FRC. need to deal with scoping when you import(@/compiler)
 - import_c: "this makes ffi take 180ms longer to compile because it doesn't go through a vtable"
-- update import_wasm: annoying because of import_from: ScopeId
 - import_c/ffi.fr: make forward declaration of an import work in local scope (rn missing type info in root_scope so can't use it)
 - support symbol without type info as a rawptr that you have to cast to use
-- if im going to keep FTy.Tag.Abi, need to write a test that actually uses it with aggragate returns. 
+- if im going to keep FTy.Tag.AbiOnly, need to write a test that actually uses it with aggragate returns. 
 - It needs 3 pieces of information: exports, callgraph and bodies, but there's 
   no need to supply those at the same time. we want to enable the different frontends 
   so run in parallel whenever possible so maybe allow splitting the type info from the code?
+- type/symbol alignment
+- replace sym.imp.temporary_funcid with a sane import system so modules can be reused between CompCtx-s
 
 ## Unfinished Examples
 

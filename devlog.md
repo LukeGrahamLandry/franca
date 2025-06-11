@@ -34,7 +34,16 @@ notably those are all things to aren't going to change if you're just working on
   - exit(0) considered harmful
   - don't use arg_types() when you just need to know if the function is unary
   - might was well let you import() frc bytes directly, just check the magic
-  
+- im seeing types with padding that doesn't make any sense `type :T146 = { b, p 7, l, p 7, l, p 7, }`,
+  - because add_padding() wasn't changing current_size[], and qbe_frontend.fr doesn't use that so 
+    the .ssa tests that compare abi to clang didn't catch it. 
+  - tho even changing that (cause it makes the code less bit-shifty to call the function),
+    i don't even have a test that cares if you do padding at all. added a case in abi5.ssa. 
+  - wasted some time on wasm being the only platform where %d vs %ld matters immediately. 
+- dumb mistake; getting confused by parse_args trying to collect from `rest` after `--` but anything that matches an argument doesn't go in `rest`,
+  so running nested qbe_frontend.fr to test -frc compiles was behaving strangely: the second run wouldn't see a `-r`. 
+- move more tests to running as exe+frc+inlinable and check output
+
 ## (Jun 9)
 
 - the module always has types as FnPtr because exposing Fn is kinda weird. 
