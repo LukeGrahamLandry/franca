@@ -93,6 +93,8 @@ fn output_macho(m: *QbeModule) [][]u8 = {
         macho_header.flags = 0;  // dont claim no_undefs
     };
     
+    // There's also MH_BINDS_TO_WEAK :: 0x10000, to bit_or into macho_header.flags, but it doesn't seem to do anything. 
+    
     ::enum_basic(LoadCommand);
     
     segments := WipSegment.list(6, temp());
@@ -408,7 +410,11 @@ fn emit_exe_fixups(e: *EmitMacho, chained: *List(u8)) void #inline = {
                     @panic("import % from unknown library", s.name)
                 };
             };
-            imports_bytes[s.got_lookup_offset] = construct(lib_ordinal = s.library.zext(), weak = 0, name_offset = n);
+            imports_bytes[s.got_lookup_offset] = construct(
+                lib_ordinal = s.library.zext(), 
+                weak = int(!s.strong), 
+                name_offset = n,
+            );
             
             append_sym_name(chained, s.name);
         };
@@ -672,6 +678,11 @@ fn emit_reloc_symbols(e: *EmitMacho, chained: *List(u8)) void #inline = {
         entry.symbol_type = 1; // undef ext
         entry.section_number = symbol_no_section; 
         entry.desc = 0; // TODO: for dynamic imports, 256 is ordinal 1.
+        
+        // if s.weak, you might want to bit_or N_WEAK_REF :: 0x0040 into entry.desc, but it doesn't do anything. 
+        // Either way you have to pass `-Wl,-undefined,dynamic_lookup` to clang or it errors. 
+        // Same behaviour using clang to compile a program with `__attribute__((weak))` so it's not just me. 
+
         entry.name_offset = trunc(chained.len - strings_start);
         append_sym_name(chained, s.name);
         append_relocations(i + base, id[], e.m, e.relocations, e.load_commands);

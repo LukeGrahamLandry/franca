@@ -15,6 +15,7 @@ run_and_check :: @S(@as(Case)
     ("examples/prospero.fr",       @S("-width", "64", "-hush"), fn(_, err) = err.contains("22/253:3578")),
     ("examples/kaleidoscope.fr",   empty()                    , fn(out, _) = out.ends_with("[ok]\n") && chars(out, "*") == 2055),
     ("backend/meta/qbe_frontend.fr", @S("backend/test/mandel.ssa", "-r"), fn(out, _) = chars(out, "*") == 1483),
+    ("examples/import_c/cc.fr", @S("examples/import_c/test/hello.c", "-r"), fn(out, _) = out == "Hello World!\nOK\n"),
     // This doesn't work on CachedEarly
     // With caching you need to take out "Hello Compiler"
     // But also you need to run it with FRANCA_NO_CACHE=true or it's not testing anything
@@ -27,13 +28,10 @@ sudoku :: @S("003020600900305001001806400008102900700000008006708200002609500800
     "483921657967345821251876493548132976729564138136798245372689514814253769695417382");
 Case :: Ty(Str, []Str, @FnPtr(o: Str, e: Str) bool);
 
-hashes :: @static(List(u8));
-
 // TODO: exec every time so you can run tests after the first compile error
 fn driver(vtable: *ImportVTable) void = {
     // :FUCKED you can't move this variable declaration down
     franca_path := get_executable_path(temp());  // TODO: cli arg to set this 
-    hashes[] = list(general_allocator());
     passed := 0;
     failed := 0;
     ::FmtPad(Str);
@@ -76,21 +74,17 @@ fn driver(vtable: *ImportVTable) void = {
     
     run_tests_main(Case, run_and_check, fn(a) => a._0) { it | 
         filename, args, check := it[];
-        hashes.push_all(filename);
         ok, out, err := compile_and_run(vtable, @tfmt("#include_std(\"lib/core.fr\");#include_std(\"%\");", filename), args);
         (ok && check(out.items(), err.items()), out, err, "")
     };
     
     println("\nCOMPILE ONLY:");
     run_tests_main(Str, compile_only, fn(a) => a[]) { file | 
-        hashes.push_all(file[]);
         src := general_allocator().read_to_string_or_crash(file[]);
         src&.slowly_prepend_all("\n#include_std(\"lib/core.fr\");\n");
         compile(vtable, src.items());
         (true, list(u8, temp()), list(u8, temp()), "")
     };
-    println("");
-    println(hashes.items());
 }
 
 compile_only :: @S(
@@ -176,11 +170,9 @@ fn compile_to_bytes(vtable: *ImportVTable, src: Str, goal: []QbeOutputPurpose) [
             };
             
             results&.push(bytes);
-            @fmt(hashes, " %", sha256_hex bytes);
         };
         {c.vtable.destroy_compiler}(c.data);
     };
-    @fmt(hashes, "\n");
     reset_temporary_storage(mark);
     results.items()
 }

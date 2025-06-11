@@ -10,21 +10,27 @@ speed regression !!
 - import_c: `__constructor__, __aligned__`
 - @bit_fields in incremental.fr don't work inline in the structs
 - import_c, get rid of :BoundsPadding
-- linux fault-na.ssa need to do the signal struct
 - use HashMap.get_or_insert more
 - #ir tries to ignore zero-sized params but not if they're first which is sad
 - :BrokenCGeneric i think erroring on conflicting `_Generic` cases is correct but you're supposed to treat `long` and `long long`
 as different types even when they're the same size. 
-- repro doesn't work cross compiling from linux to macos,
-but dump_macho.fr and objdump -d say they're the same (for mandelbrot_ui.fr at least). 
-so something in the data i guess? 
 - examples/repl.fr: `@println("%+%=%", 1, 2, 1+2);` fails safety check
-- :TodoLinux
 - "need to be consistant about how to handle modules like this that don't actually compile anything"
 - count_array_init_elements is still spitting out junk symbols into the scope. need to just not parse it twice. 
 and not doing that makes an array of strings have the strings show up in the output module twice. 
 - "really really want this but it breaks examples/ascii_table.fr"
 - fix examples/terminal.fr -jit so it doesn't freak out about nested compiler contexts because of the repl
+
+
+## linux 
+
+- linux fault-na.ssa need to do the signal struct (rn it's skipped in backend/meta/test.fr)
+- :TodoLinux
+- repro doesn't work cross compiling from linux to macos,
+but dump_macho.fr and objdump -d say they're the same (for mandelbrot_ui.fr at least). 
+so something in the data i guess? 
+- elf Relocatable so i can run the abi tests against clang
+- elf Dynamic
 
 ## amd64
 

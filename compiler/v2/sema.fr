@@ -599,9 +599,10 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
     }
     
     did_import := false;
+    is_weak_import := false;
     find_import :: fn(lib_name: Symbol) void => {
         did_import = true;
-        @try(self.create_import_body(func, fid, lib_name)) return;
+        @try(self.create_import_body(func, fid, lib_name, is_weak_import)) return;
     };
     
     check_body := true;
@@ -789,6 +790,10 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                 };
                 @err_assert(good, "!asm require arch tag") return;
             };
+            @case(Flag.weak.ident()) => {
+                @err_assert(!did_import, "#weak must come before #import/#libc, sorry") return;
+                is_weak_import = true;
+            };
             // :link_rename
             @case(Flag.link_rename.ident()) => {
                 self.last_loc = func.loc;
@@ -844,7 +849,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
 }
 
 // adds DynamicImport to func.impl
-fn create_import_body(self: *SelfHosted, func: *Func, fid: FuncId, lib_name: Symbol) CRes(void) = {
+fn create_import_body(self: *SelfHosted, func: *Func, fid: FuncId, lib_name: Symbol, weak: bool) CRes(void) = {
     handle2 := self.comptime_libraries&.get(lib_name);
     is_libc := lib_name == Flag.libc.ident(); 
     name := self.get_comptime_link_name(func);
@@ -854,7 +859,7 @@ fn create_import_body(self: *SelfHosted, func: *Func, fid: FuncId, lib_name: Sym
             
             impl := find_or_create_impl(func.body&, self.get_alloc(), .DynamicImport);
             // Note: storing func.name, not intern(name) because emit_ir will need to re-linkrename if we're cross compiling. 
-            impl[] = (name = func.name, lib = lib_name, comptime = addr.int_from_rawptr());
+            impl[] = (name = func.name, lib = lib_name, comptime = addr.int_from_rawptr(), weak = weak);
             return(.Ok);
         };
         handle2 = .None;
@@ -872,6 +877,7 @@ fn create_import_body(self: *SelfHosted, func: *Func, fid: FuncId, lib_name: Sym
     impl := find_or_create_impl(func.body&, self.get_alloc(), .DynamicImport);
     impl.name = func.name;
     impl.lib = lib_name;
+    impl.weak = weak;
     @try(self.create_jit_shim(fid)) return;
     .Ok
 }

@@ -157,8 +157,8 @@ fn fold_constants(f: *Qbe.Fn) void = {
         };
         f.renumber(b.jmp.arg&);
         
-        if b.jmp.type == .jnz && rtype(b.jmp.arg) == .RCon {
-            cond_is_false := iscon(f.f.get_constant(b.jmp.arg), false, 0);  // :jnz_is_Kw
+        @if(b.jmp.type == .jnz) if strong_const(f.f, b.jmp.arg) { c |
+            cond_is_false := iscon(c, false, 0);  // :jnz_is_Kw
             if cond_is_false {
                 edgedel(b, b.s1&);
                 b.s1 = b.s2;
@@ -203,13 +203,25 @@ fn fold_sel_part2(f: *FoldCtx, isel1: *Qbe.Ins) void = {
     
     // If the args are the same, the condition doesn't matter so pretend it's constant.  
     cond := if(isel1.arg&[0] == isel1.arg&[1], => QbeConZero, => isel0.arg&[0]);
-    if rtype(cond) == .RCon {
-        cond_is_false := iscon(f.f.get_constant(cond), false, 0);  // :jnz_is_Kw
+    if strong_const(f.f, cond) { c |
+        cond_is_false := iscon(c, false, 0);  // :jnz_is_Kw
         a := isel1.arg&[int(cond_is_false)];
         isel1[] = make_ins(.copy, isel1.cls(), isel1.to, a, QbeNull);
         isel0.set_nop();
         f.folded_sel = true;  // for logging (dump_folding)
     };
+}
+
+fn strong_const(f: *Qbe.Fn, r: Qbe.Ref) ?*Qbe.Con #inline = {
+    if(rtype(r) != .RCon, => return(.None));
+    c := f.get_constant(r);
+    if(c.type() == .CBits, => return(Some = c));
+    // TODO: write a test that gets here
+    strong := false;
+    use_symbol(f.globals, c.sym) { s |
+        strong = s.kind == .Local || s.pledge_local || s.strong;
+    };
+    @if(strong, (Some = c), .None)
 }
 
 fn iscon(c: *Qbe.Con, w: bool, k: u64) bool = {
