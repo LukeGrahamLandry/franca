@@ -225,21 +225,23 @@ fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
     } else {
         F :: LibcType(.macos).MapFlag; // only apple makes us the MAP_JIT shenanigans. 
         fd: Fd = (fd = -1);
-        flag := bit_or(@as(i64) F.Private, @as(i64) F.Anonymous); 
+        flag :i64= bit_or(Posix'MAP'PRIVATE, Posix'MAP'ANON); 
         
         // Reserve the whole contiguous area we want.  
         // It seems that MAP_JIT and then MAP_FIXED over it is fine, but the reverse is not. 
-        prot_WX := bit_or(@as(i64) MapProt.Exec, @as(i64) MapProt.Write);
-        flag_WX := bit_or(flag, @as(i64) F.Jit);  // :JitMemProtect .Jit means one thread will be able to write and one will be able to execute. 
-        ptr := mmap(zeroed(rawptr), segment_size * 3, prot_WX, flag_WX, fd, 0);
-        @assert_gt(ptr.int_from_rawptr(), 0, "mmap Jit failed");
+        prot_WX :i64= bit_or(Posix'PROT'WRITE, Posix'PROT'EXEC);
+        flag_WX :i64= bit_or(flag, Posix'MAP'JIT);  // :JitMemProtect .Jit means one thread will be able to write and one will be able to execute. 
+        ptr := Posix'mmap(zeroed(rawptr), segment_size * 3, prot_WX, flag_WX, fd, 0) || {
+            @panic("mmap Jit failed")
+        };
         
         // Now remap over the data sections so they're not executable and both threads can write to them. 
-        prot_RW := bit_or(@as(i64) MapProt.Read, @as(i64) MapProt.Write);
-        flag_RW := bit_or(flag, @as(i64) F.Fixed); // .Fixed means the address hint will not be ignored. 
+        prot_RW :i64= bit_or(Posix'PROT'READ, Posix'PROT'WRITE);
+        flag_RW := bit_or(flag, Posix'MAP'FIXED); // .Fixed means the address hint will not be ignored. 
         ptr_rw := ptr.offset(segment_size);
-        res := mmap(ptr_rw, segment_size * 2, prot_RW, flag_RW, fd, 0);
-        @assert_eq(ptr_rw, res, "mmap Fixed failed");
+        res := or Posix'mmap(ptr_rw, segment_size * 2, prot_RW, flag_RW, fd, 0) {
+            @panic("mmap Fixed failed")
+        };
         
         // So now we have a contigous chunk where the first third is MAP_JIT and the rest is normal.
         mem: []u8 = (ptr = u8.ptr_from_raw(ptr), len = segment_size * 3);

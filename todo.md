@@ -1,8 +1,19 @@
 
 speed regression !!
 
+---
+
 > hmm, it sure got a lot slower (1032 -> 1113) at self compile since whenever my current release compiler was built (Jun  7 22:01), 
-(both compiling current code so it's just cause i added stuff).  
+(both compiling current code so it's NOT just cause i added stuff).  
+
+---
+
+`hyperfine --warmup=1 "franca examples/default_driver.fr build compiler/main.fr -unsafe"` (same compiler, different source)  
+commit "weak symbols": 1.122 s ±  0.003 s  
+commit "posix: open+mmap":  1.141 s ±  0.003 s  
+
+but this one's less scary because the slow is attached to the code.  
+`fix_flags` does some comptime stuff, can it really be that much? 
 
 ## 
 
@@ -31,6 +42,8 @@ so something in the data i guess?
 - elf Relocatable so i can run the abi tests against clang
 - elf Dynamic
 - weak symbols should always be null with `-syscalls`. rn i fear they mean no static binaries
+- should have a test that makes sure my static binaries are actually static
+- how are you supposed to ask for page size? blink wants 64k instead of 4k. 
 
 ## amd64
 

@@ -1,15 +1,68 @@
 
-// a sentinal file descriptor that represents the current-working-directory
-AT_FDCWD :: fn() Fd = @match(current_os()) {
-    fn macos() => Macos.AT_FDCWD;
-    fn linux() => Linux.AT_FDCWD;
-    @default   => unreachable();
+//
+// <sys/fcntl.h>
+// https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/fcntl.h.html
+// TODO: (creat, fcntl)
+//
+
+AT :: @struct {
+    // a sentinal file descriptor that represents the current-working-directory
+    FDCWD :: fn() Fd = @match(current_os()) {
+        fn macos() => Macos.AT_FDCWD;
+        fn linux() => Linux.AT_FDCWD;
+        @default   => unreachable();
+    };
 };
+
+O :: @struct {
+    // [i chose arbitrary values and they get remapped at runtime]
+    CLOEXEC   :: 0x008;  // close() after calling exec(), so the child process doesn't inherit it
+    CREAT     :: 0x010;  // create the file if it does not exist (uses the `mode` parameter)
+    DIRECTORY :: 0x020;  // assert that the target is a directory (precludes CREAT)
+    EXCL      :: 0x040;  // assert the file did not already exist (for CREAT)
+    NOCTTY    :: 0x080;  
+    NOFOLLOW  :: 0x100;
+    TRUNC     :: 0x200;  // set size to zero if (already exists + is a file + opening for writing)
+    APPEND    :: 0x400;  // seek to the end of the file instead of the start
+    
+    // access modes, choose one. [same on macos+linux]
+    ACCMODE   :: 0b11; // bit mask of all access modes
+    RDONLY    :: 0b00;
+    WRONLY    :: 0b01;
+    RDWR      :: 0b10;
+};
+
+fn open(path: CStr, flags: i64) SysResult(Fd) = {
+    @debug_assert_eq(bit_and(flags, O.CREAT), 0, "open(CREAT); call an overload that lets you pass mode");
+    openat(AT'FDCWD(), path, flags, 0)
+}
+
+// the high bits of `flags` are platform specific. they'll be shifted down and passed directly. 
+// the low bits are remapped to the correct platform values. 
+fn openat(parent: Fd, path: CStr, flags: i64, mode: i64) SysResult(Fd) = {
+    // not #libc because that's variadic, which we can do but is a bit annoying
+    // TODO: maybe that's the wrong choice for apple
+    openat :: fn(dirfd: Fd, pathname: CStr, flags: i64, mode: i64) i32 #syscall(56, 257, 463);
+    
+    d := bit_and(flags, O.ACCMODE).bit_or(flags.shift_right_logical(32));
+    flags := @match(current_os()) {
+        fn macos() => fix_flags(Macos.O, O, d, flags);
+        fn linux() => fix_flags(Linux.O, O, d, flags);
+        @default => unreachable();
+    };
+    
+    err := openat(parent, path, flags, mode);
+    if err < 0 {
+        return Fd.fix_errno(intcast err);
+    };
+    
+    (Ok = (fd = err))
+}
 
 //
 // <sys/stat.h>
-// https://pubs.opengroup.org/onlinepubs/9799919799/
-// TODO: (chmod, fchmod, fchmodat, fstat, futimens, lstat, mkdir, mkdirat, mkfifo, mkfifoat, mknod, mknodat, umask, utimensat) go here as well
+// https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/sys_stat.h.html
+// TODO: (chmod, fchmod, fchmodat, fstat, futimens, lstat, mkfifo, mkfifoat, mknod, mknodat, umask, utimensat) go here as well
 //
 
 // metadata about a file
@@ -30,23 +83,24 @@ Stat :: @struct {
 };
 
 fn stat(path: CStr, out: *Stat) SysResult(void) = 
-    fstatat(AT_FDCWD(), path, out, 0);
+    fstatat(AT'FDCWD(), path, out, 0);
 
-fn fstatat(dirfd: Fd, path: CStr, out: *Stat, flags: i64) SysResult(void) = {
+fn fstatat(parent: Fd, path: CStr, out: *Stat, flags: i64) SysResult(void) = {
     SysStat :: @union(l: Linux.Stat, m: Macos.Stat);
-    fstatat :: fn(dirfd: Fd, path: CStr, out: *SysStat, flags: i64) i64 #syscall(79, 262, 470) #libc;
-    @"fstatat$INODE64" :: fn(dirfd: Fd, path: CStr, out: *SysStat, flags: i64) i64 #syscall(_, _, 470) #weak #libc;
+    fstatat :: fn(parent: Fd, path: CStr, out: *SysStat, flags: i64) i64 #syscall(79, 262, 470) #libc;
+    @"fstatat$INODE64" :: fn(parent: Fd, path: CStr, out: *SysStat, flags: i64) i64 #syscall(_, _, 470) #weak #libc;
     
     r := @uninitialized SysStat;
     
     @"🤡" := current_os() == .macos && current_arch() == .x86_64;
-    f := @if(!FEATURE_WEAK_SYMBOLS,  // :UpdateBoot
+    f := @if(::(IS_BOOTSTRAPPING || (!FEATURE_WEAK_SYMBOLS && current_os() == .linux)),  // :UpdateBoot
         @as(AsFnPtr(fstatat)) fstatat,
         if_func(@"🤡", @"fstatat$INODE64", fstatat),
     );
+    //f := if_func(@"🤡", @"fstatat$INODE64", fstatat);
     
     // TODO: flags might need to be remapped
-    err := f(dirfd, path, r&, flags);
+    err := f(parent, path, r&, flags);
     if err != 0 {
         return void.fix_errno(err);
     };
@@ -63,7 +117,7 @@ fn fstatat(dirfd: Fd, path: CStr, out: *Stat, flags: i64) SysResult(void) = {
 // bit masks for Stat.st_mode
 S :: @struct {
     // file permissions: ___, RWX(user), RWX(group), RWX(other)
-    // (posix specifies the numbers for these)
+    // [posix specifies the numbers for these]
     IRWXU :: octal "00700";
     IRUSR :: octal "00400";
     IWUSR :: octal "00200";
@@ -81,7 +135,7 @@ S :: @struct {
     ISVTX :: octal "01000";
 
     // file kinds
-    // (posix just specifies names but macos+linux agree on the numbers?)
+    // [posix just specifies names but macos+linux agree on the numbers?]
     IFMT   :: octal "0170000";  // all the formats or-ed together
     IFIFO  :: octal "0010000";
     IFCHR  :: octal "0020000";
@@ -100,6 +154,59 @@ S :: @struct {
     ISLNK  :: fn(m: u32) bool = m.bit_and(IFMT) == IFLNK ;
     ISSOCK :: fn(m: u32) bool = m.bit_and(IFMT) == IFSOCK;
 }; 
+
+fn mkdir(path: CStr, mode: i64) SysResult(void) = 
+    mkdirat(AT'FDCWD(), path, mode);
+
+// create a new directory. 
+fn mkdirat(parent: Fd, path: CStr, mode: i64) SysResult(void) = {
+    mkdirat :: fn(parent: Fd, path: CStr, mode: i64) i64 #libc #syscall(34, 258, 475);
+    @debug_assert_eq(mode.bit_and(octal "0777"), mode, "mkdirat(mode)");
+    err := mkdirat(parent, path, mode);
+    if(err != 0, => return(void.fix_errno(err)));
+    (Ok = ())
+}
+
+//
+// <sys/mman.h>
+// https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/sys_mman.h.html
+//
+
+PROT :: @struct {
+    NONE  :: 0b000;
+    READ  :: 0b001;
+    WRITE :: 0b010;
+    EXEC  :: 0b100;
+};
+
+MAP :: @struct {
+    SHARED  :: 0b00001;
+    PRIVATE :: 0b00010;
+    ANON    :: 0b00100;  // not backed by a file
+    JIT     :: 0b01000;  // (macos only) allow EXEC on one thread while WRITE from another
+    FIXED   :: 0b10000;  // don't treat `addr` as a hint, put the memory exactly there (may stomp previous mappings!)
+};
+
+// the high bits of `flags` are platform specific. they'll be shifted down and passed directly. 
+// the low bits are remapped to the correct platform values. 
+mmap :: fn(addr: rawptr, len: i64, prot: i64, flags: i64, fd: Fd, offset: i64) SysResult(rawptr) = {
+    agree :: bit_or(MAP'SHARED, MAP'PRIVATE).bit_or(MAP'FIXED);
+    d := bit_and(flags, agree).bit_or(flags.shift_right_logical(32));
+    flags := @match(current_os()) {
+        fn macos() => fix_flags(Macos.MAP, MAP, d, flags);
+        fn linux() => fix_flags(Linux.MAP, MAP, d, flags);
+        @default => unreachable();
+    };
+    
+    mmap :: fn(addr: rawptr, len: i64, prot: i64, flags: i64, fd: Fd, offset: i64) i64 #libc #syscall(222, 9, 197);
+    err := mmap(addr, len, prot, flags, fd, offset);
+    
+    if err < 4096 {  // TODO: does the syscall return negative or positive of the errno? neither could be a sane pointer. 
+        return rawptr.fix_errno(err);
+    };
+    
+    (Ok = rawptr_from_int err)
+};
 
 ///////////////////////////////////////////////////////////////////////
 
@@ -126,6 +233,7 @@ fn fix_errno(err: i64) SysError #noinline = {
     if is_linking_libc() {
         err = zext errno()[];
     };
+    err = abs err;
     // TODO
     
     (_ = err)
@@ -178,3 +286,19 @@ Linux :: import("@/lib/sys/linux.fr");
 current_arch :: query_current_arch;
 current_os :: query_current_os;
 FEATURE_WEAK_SYMBOLS :: !IS_BOOTSTRAPPING && { c := current_compiler_context(); c'vtable'driver_abi_version != 1016 };
+
+fix_flags :: fn($Dest: Type, $Src: Type, d: i64, s: i64) i64 = {
+    D :: Type.scope_of(Dest); S :: Type.scope_of(Src);
+    
+    inline_for get_constants(S) { $name |
+        d_flag :: get_constant(i64, D, name[]);
+        if d_flag { d_flag |
+            s_flag :: get_constant(i64, S, name[]).unwrap();
+            if d_flag != 0 && s.bit_and(s_flag) == s_flag {
+                d = bit_or(d, d_flag);
+            }
+        };
+    };
+    
+    d
+};

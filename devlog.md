@@ -6,6 +6,18 @@ let's cheat and make examples/terminal.fr(repl=true) not take 2 seconds to compi
 - compile_to_shader_source: 68 // shader compiler (for comptime)
 notably those are all things to aren't going to change if you're just working on the terminal program. 
 
+## (Jun 12)
+
+probably a good idea to consistantly let you pass os specific flags if you want to do something non-portable, 
+instead of special casing MAP_JIT which i need. seems like they tend to be 32 bits so i can just make mine 
+64 bits and `or` the top part back in at the end? i guess MAP_JIT maybe kinda is supported on linux, it 
+just happens to have a value of 0 and be the default state (and no toggling). so thats probably nicer the old way. 
+tho the high bits thing is error prone because you have to remember to transcribe the platform numbers and shift them, 
+so if i write bindings to i write them preshifted? so maybe i should put mine in the high bits but then i can't compile 
+c programs that want to use int for those. choices, choices :(
+
+--- 
+
 ## (Jun 11)
 
 I think I've changed my mind about using cosmo. They have grander goals than I do and trying to reduce it 
@@ -22,6 +34,10 @@ write it down.
     but fileStat is different on unix vs windows, so kinda in between
   - rust's fs::Metadata changes with the target, but you always call the same getters, 
     so they're doing kinda what i was trying to. 
+- for the numbers, cosmo has them be variables instead of constants and fills them in with the right 
+  thing for the current system at startup. but if the premise is that being slow is fine, maybe i'll 
+  start with just declaring arbitrary numbers as constants and remapping them when you call into a function. 
+  see if that's feasible or if i have to get more serious.  
 
 ---
 
@@ -45,6 +61,13 @@ lets try with my favourite syscall to pick on: stat.
   - old boot compiler doesn't like if an `#inline` function has a const FuncId parameter and then you try to take a pointer to it, 
   but ive encountered that before cause the line that reports that error is commented out in the new compiler. 
   - `zeroed void` doesn't work. the return's jmp.arg was QbeConZero instead of QbeNull. 
+
+- convert open+mkdir+mmap
+  - takes more fucking around when there's bit flags to remap between systems and it looks much clunkier 
+    but it's so much nice to not have a viral `#target_os` escaping into user code. 
+  - very error prone doing the conversion if you mix stuff using the old system flags and the new fixed flags
+
+---
 
 in unrelated news i think warp's calculation of where to put the highlight drifts more and more the longer 
 your scroll back buffer is cause it sure is not remotely correct anymore. 
