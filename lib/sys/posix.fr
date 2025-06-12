@@ -1,0 +1,180 @@
+
+// a sentinal file descriptor that represents the current-working-directory
+AT_FDCWD :: fn() Fd = @match(current_os()) {
+    fn macos() => Macos.AT_FDCWD;
+    fn linux() => Linux.AT_FDCWD;
+    @default   => unreachable();
+};
+
+//
+// <sys/stat.h>
+// https://pubs.opengroup.org/onlinepubs/9799919799/
+// TODO: (chmod, fchmod, fchmodat, fstat, futimens, lstat, mkdir, mkdirat, mkfifo, mkfifoat, mknod, mknodat, umask, utimensat) go here as well
+//
+
+// metadata about a file
+Stat :: @struct {
+    st_dev:        i64;
+    st_ino:        i64;
+    st_nlink:      i64;  // number of hard links
+    st_mode:       u32;  // see `S` bit masks below
+    st_uid:        u32;  // user
+    st_gid:        u32;  // group
+    st_rdev:       i64;  // garbage for normal stuff
+    st_size:       i64;  // bytes
+    st_atime: TimeSpec;  // accessed date
+    st_mtime: TimeSpec;  // modified date
+    st_ctime: TimeSpec;
+    st_blksize:    i64;
+    st_blocks:     i64;
+};
+
+fn stat(path: CStr, out: *Stat) SysResult(void) = 
+    fstatat(AT_FDCWD(), path, out, 0);
+
+fn fstatat(dirfd: Fd, path: CStr, out: *Stat, flags: i64) SysResult(void) = {
+    SysStat :: @union(l: Linux.Stat, m: Macos.Stat);
+    fstatat :: fn(dirfd: Fd, path: CStr, out: *SysStat, flags: i64) i64 #syscall(79, 262, 470) #libc;
+    @"fstatat$INODE64" :: fn(dirfd: Fd, path: CStr, out: *SysStat, flags: i64) i64 #syscall(_, _, 470) #weak #libc;
+    
+    r := @uninitialized SysStat;
+    
+    @"🤡" := current_os() == .macos && current_arch() == .x86_64;
+    f := @if(!FEATURE_WEAK_SYMBOLS,  // :UpdateBoot
+        @as(AsFnPtr(fstatat)) fstatat,
+        if_func(@"🤡", @"fstatat$INODE64", fstatat),
+    );
+    
+    // TODO: flags might need to be remapped
+    err := f(dirfd, path, r&, flags);
+    if err != 0 {
+        return void.fix_errno(err);
+    };
+    
+    @match(current_os()) {
+        fn macos() => fix(out, r.m&);
+        fn linux() => fix(out, r.l&);
+        @default => unreachable();
+    };
+    
+    (Ok = ())
+}
+
+// bit masks for Stat.st_mode
+S :: @struct {
+    // file permissions: ___, RWX(user), RWX(group), RWX(other)
+    // (posix specifies the numbers for these)
+    IRWXU :: octal "00700";
+    IRUSR :: octal "00400";
+    IWUSR :: octal "00200";
+    IXUSR :: octal "00100";
+    IRWXG :: octal "00070";
+    IRGRP :: octal "00040";
+    IWGRP :: octal "00020";
+    IXGRP :: octal "00010";
+    IRWXO :: octal "00007";
+    IROTH :: octal "00004";
+    IWOTH :: octal "00002";
+    IXOTH :: octal "00001";
+    ISUID :: octal "04000";  // set-user-id (ex. the sudo binary will have this set)
+    ISGID :: octal "02000";  // 〃group
+    ISVTX :: octal "01000";
+
+    // file kinds
+    // (posix just specifies names but macos+linux agree on the numbers?)
+    IFMT   :: octal "0170000";  // all the formats or-ed together
+    IFIFO  :: octal "0010000";
+    IFCHR  :: octal "0020000";
+    IFDIR  :: octal "0040000";  // directory
+    IFBLK  :: octal "0060000";
+    IFREG  :: octal "0100000";  // regular file
+    IFLNK  :: octal "0120000";  // symbolic link
+    IFSOCK :: octal "0140000";
+    IFWHT  :: octal "0160000";
+    
+    ISBLK  :: fn(m: u32) bool = m.bit_and(IFMT) == IFBLK ;
+    ISCHR  :: fn(m: u32) bool = m.bit_and(IFMT) == IFCHR ;
+    ISDIR  :: fn(m: u32) bool = m.bit_and(IFMT) == IFDIR ;
+    ISFIFO :: fn(m: u32) bool = m.bit_and(IFMT) == IFIFO ;
+    ISREG  :: fn(m: u32) bool = m.bit_and(IFMT) == IFREG ;
+    ISLNK  :: fn(m: u32) bool = m.bit_and(IFMT) == IFLNK ;
+    ISSOCK :: fn(m: u32) bool = m.bit_and(IFMT) == IFSOCK;
+}; 
+
+///////////////////////////////////////////////////////////////////////
+
+errno :: fn() *i32 = {
+    @if(!is_linking_libc()) return(@static(i32));
+    @if(IS_BOOTSTRAPPING) return(__error());          // :UpdateBoot
+    @if(!FEATURE_WEAK_SYMBOLS) return(@static(i32));  // :UpdateBoot
+
+    // This has different names on different libc-s.
+    // https://github.com/ziglang/zig/blob/master/lib/std/c.zig#L9876
+    __error :: fn() *i32 #weak #libc;
+    __errno_location :: fn() *i32 #weak #libc;
+    @match(current_os()) {
+        fn macos() => __error();
+        fn linux() => __errno_location();
+        @default   => unreachable();
+    }
+};
+
+fn fix_errno($T: Type, err: i64) SysResult(T) #generic = 
+    (Ok = zeroed T, Err = fix_errno(err));
+
+fn fix_errno(err: i64) SysError #noinline = {
+    if is_linking_libc() {
+        err = zext errno()[];
+    };
+    // TODO
+    
+    (_ = err)
+}
+
+SysError :: @struct(_: i64);
+
+fn SysResult($T: Type) Type = {
+    Self :: @struct {
+        Err: SysError = (_ = 0);
+        Ok: T;
+    };
+    
+    fn if(self: Self, $body: @Fn(t: T) void) void = {
+        if(self.is_ok(), => body(self.Ok));
+    }
+    
+    fn or(self: Self, $body: @Fn() T) T = {
+        if(self.is_ok(), => return(self.Ok));
+        body()
+    }
+    
+    fn is_ok(self: Self) bool  = self.Err._ == 0;
+    fn is_err(self: Self) bool = self.Err._ != 0;
+    
+    Self
+}
+
+// this is kinda lame. 
+// you can't `f := @if(c, FuncId, FuncId)` because they'll unify to type FuncId 
+// but it will be runtime known so you can't call it, where as you could if the 
+// inputs had both coerced to function pointers first. 
+fn if_func(cond: bool, $t: FuncId, $f: FuncId) AsFnPtr(t) #generic = // :UpdateBoot #inline = 
+    @if(cond, t, f);
+
+// Get type of a function pointer to `fid`
+fn AsFnPtr(fid: FuncId) Type = {
+    func := get_function_ast(fid, true, true, true, false);
+    arg, ret := (func.finished_arg.unwrap(), func.finished_ret.unwrap());
+    //info: TypeInfo = (FnPtr = (ty = (arg = arg, ret = ret, unary = func.arg.bindings.len <= 1)));
+    //intern_type_ref(info&)
+    FnPtr(arg, ret)
+}
+
+Macos :: import("@/lib/sys/macos.fr");
+Linux :: import("@/lib/sys/linux.fr");
+
+#use("@/lib/sys/process.fr");
+
+current_arch :: query_current_arch;
+current_os :: query_current_os;
+FEATURE_WEAK_SYMBOLS :: !IS_BOOTSTRAPPING && { c := current_compiler_context(); c'vtable'driver_abi_version != 1016 };

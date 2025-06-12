@@ -84,24 +84,20 @@ fn make_dir(path: Str) bool #target_os = (fn($os) => {
     false
 });
 
-fn dir_exists(path: Str) bool #target_os = (fn($os) => {
-    L :: LibcType(os);
-    s := zeroed L.Stat;
-    ss := stat(as_cstr path, s&);
-    xxx := ss.is_ok();
-    e := xxx && s.mode.int().bit_and(S_IFMT) == S_IFDIR;
-    e
-});
+fn dir_exists(path: Str) bool = 
+    stat_exists(path, Posix.S.IFDIR);
 
-// TODO: ugh pastey
-fn file_exists(path: Str) bool #target_os = (fn($os) => {
-    L :: LibcType(os);
-    s := zeroed L.Stat;
+fn file_exists(path: Str) bool = 
+    stat_exists(path, Posix.S.IFREG);
+
+fn stat_exists(path: Str, mode: i64) bool = {
+    s := zeroed Posix.Stat;
     ss := stat(as_cstr path, s&);
+    _ := ss&; // :updateBoot
     xxx := ss.is_ok();
-    e := xxx && s.mode.int().bit_and(S_IFMT) != S_IFDIR;
+    e := xxx && s.st_mode.int().bit_and(Posix.S.IFMT) == mode;
     e
-});
+};
 
 fn path_exists(path: Str) bool = {
     c := as_cstr path;
@@ -124,10 +120,10 @@ DirEntry :: @struct(
     type: DirEntType,
 );
 
-// TODO: i think if im passing Create i also have to pass mode as an extra argument!!!
 // TODO: @try for the libc result types. 
 fn write_entire_file(path: Str, content: Str) bool = {
-    tmp_path := @fmt_cstr("%.atomic", path);
+    n := timestamp();
+    tmp_path := @fmt_cstr("%.%.atomic", path, n);
     fd := open_trunc(tmp_path) || return(false);
     written := write(fd, content.ptr, content.len) || return(false);
     // TODO: loop if we couldn't write the whole thing at once. 
@@ -138,7 +134,8 @@ fn write_entire_file(path: Str, content: Str) bool = {
 }
 
 fn write_chunks_or_crash(outpath: Str, chunks /*: [][]u8*/) void #where = {
-    tmp_path := @fmt_cstr("%.atomic", outpath);
+    n := timestamp();
+    tmp_path := @fmt_cstr("%.%.atomic", outpath, n);
     file := open_trunc(tmp_path) 
         || @panic("failed to open %", tmp_path);
     for chunks { chunk | 
@@ -294,3 +291,5 @@ fn read_to_string_or_crash(alloc: Alloc, path: Str) List(u8) #inline = {
     bytes&.read_and_push_or_crash(path);
     bytes
 }
+
+Posix :: import("@/lib/sys/posix.fr");

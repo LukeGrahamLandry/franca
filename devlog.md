@@ -31,7 +31,23 @@ write it down.
     you still have to pass `-Wl,-undefined,dynamic_lookup` to the linker or it errors. 
     same behaviour using clang to compile a program with `__attribute__((weak))` so it's not just me. 
   - made sure not to fold an RCon as non-zero
-  - the hard part is how it should interact with jit-shims. 
+  - the hard part is how it should interact with jit-shims.
+    you can't just check if the symbol is null. but it doesn't really matter for now if im just using it for platform 
+    support stuff where i actually know what symbols will be available at runtime without checking. 
+  - did it for elf too 
+
+lets try with my favourite syscall to pick on: stat. 
+- tried a new shape of type for a result which had lots of exciting bugs. 
+  - can't call a function returning a struct like `@sturct(v: void, i: i64)` unless you take the result variables 
+  address later because it tried to not give it a stack slot and then freaks out that there's no stack slot. 
+  so have repr_transparent look at other fields. then constructing a struct like that freaks out, have it 
+  just do the one scalar field too. 
+  - old boot compiler doesn't like if an `#inline` function has a const FuncId parameter and then you try to take a pointer to it, 
+  but ive encountered that before cause the line that reports that error is commented out in the new compiler. 
+  - `zeroed void` doesn't work. the return's jmp.arg was QbeConZero instead of QbeNull. 
+
+in unrelated news i think warp's calculation of where to put the highlight drifts more and more the longer 
+your scroll back buffer is cause it sure is not remotely correct anymore. 
 
 ## (Jun 10)
 

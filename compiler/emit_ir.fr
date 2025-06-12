@@ -512,7 +512,7 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = {
             @match(self.when) {
                 fn Aot() => self.aot_import_body(info);
                 fn Jit() => {
-                    @err_assert(info.comptime != 0, "we hit a dynamicimport ('%' from '%') with no comptimeaddr for jit\nthe frontend should make sure this doesn't happen. \nTODO: this happens when compiling targetting libc from a compiler built without libc on linux", self.program.get_string(info.name), self.program.get_string(info.lib)) return;
+                    @err_assert(info.comptime != 0 || info.weak, "we hit a dynamicimport ('%' from '%') with no comptimeaddr for jit\nthe frontend should make sure this doesn't happen. \nTODO: this happens when compiling targetting libc from a compiler built without libc on linux", self.program.get_string(info.name), self.program.get_string(info.lib)) return;
                     self.entry.task = (JitImport = (lnk = self.f.lnk&, addr = rawptr_from_int(info.comptime)));
                 }
             };
@@ -604,7 +604,7 @@ fn emit_ret(self: *EmitIr, result: Qbe.Ref) void = {
             self.blk.jmp = (type = .hlt, arg = QbeNull);
         };
         @if(self.program.get_info(ret)[].stride_bytes == 0) => {
-            self.blk.jmp.type = .ret0;
+            self.blk.jmp = (type = .ret0, arg = QbeNull);
         };
         @if(scalar) => {
             @debug_assert_ne(result, QbeNull, "missing return value");
@@ -1506,6 +1506,24 @@ fn construct_aggregate(self: *EmitIr, pattern: *Pattern, requested: Type, p: Pla
             if expected == 1 {
                 return(self.compile_expr(pattern.bindings.index(0).get_default().unwrap(), p));
             };
+            
+            // This is perhaps more hassle than it's worth. 
+            if @is(p&.tag(), .ScalarTransient, .Assign, .Scalar) {
+                _, k := self.program.load_op(raw_container_ty);
+                @err_assert(k != .Ke, "trying to construct non-trivial struct into a scalar") return;
+                result := QbeNull;
+                enumerate pattern.bindings& { i, b | 
+                    expr := b.get_default().unwrap();
+                    if self.program.get_info(expr.ty)[].stride_bytes == 0 {
+                        _ := @try(self.compile_expr(expr, .Discard)) return;
+                    } else {
+                        @debug_assert_eq(result, QbeNull);
+                        result = @try(self.compile_expr(expr, p)) return;
+                    };
+                };
+                return(Ok = result);
+            };
+            
             base := self.get_memory(p, raw_container_ty);
             enumerate pattern.bindings& { i, b | 
                 name := @unwrap(b.ident(), "map literal entry needs name (while initilizing %)", self.program.log(requested)) return;
@@ -1524,7 +1542,7 @@ fn construct_aggregate(self: *EmitIr, pattern: *Pattern, requested: Type, p: Pla
             value := pattern.bindings.index(0).get_default().unwrap();
             name := pattern.bindings[0].name.unwrap();
             i    := f.cases.position(fn(f) => f._0 == name).expect("case name to exist in type");
-            if value.ty == void {  // :get_or_create_type
+            if self.program.get_info(value.ty)[].stride_bytes == 0 {  // :get_or_create_type
                 _ := @try(self.compile_expr(value, .Discard)) return;
                 return(Ok = self.scalar_result(p, self.f.getcon(i), i64));
             };
@@ -1719,7 +1737,7 @@ fn get_aggregate(self: CompCtx, m: *CodegenShared, ty: Type) Qbe.Ref = {
             fn Enum(it)     => self.get_aggregate(m, it.raw).val();
             fn Struct(it) => {
                 yield :: local_return;
-                if repr_transparent(it) { repr |
+                if self.repr_transparent(it) { repr |
                     yield(self.get_aggregate(m, repr).val());
                 };
                 n := 0;
@@ -1840,7 +1858,7 @@ fn as_field(self: CompCtx, m: *CodegenShared, ty: Type) Qbe.Field = {
             (type = .FTyp, len = self.get_aggregate(m, ty).val().trunc())
         }
         fn Struct(it) => {
-            if repr_transparent(it) { inner |
+            if self.repr_transparent(it) { inner |
                 return(self.as_field(m, inner))
             };
             (type = .FTyp, len = self.get_aggregate(m, ty).val().trunc())
@@ -1863,11 +1881,22 @@ fn is_tag_only(self: CompCtx, t: *TypeInfo.get_variant_type(.Tagged)) bool = {
     true
 }
 
-fn repr_transparent(it: *TypeInfo.get_variant_type(.Struct)) ?Type = {
+fn repr_transparent(self: CompCtx, it: *TypeInfo.get_variant_type(.Struct)) ?Type = {
     @switch(it.fields.len) {
         @case(0) => (Some = void); // :get_or_create_type
         @case(1) => return(Some = it.fields[0].ty);
-        @default => .None;
+        @default => { 
+            sized_field := void;
+            if(it.is_union, => return(.None));
+            each it.fields { f | 
+                field_size := self.get_info(f.ty)[].stride_bytes;
+                if field_size != 0 {
+                    if(sized_field != void, => return(.None));
+                    sized_field = f.ty;
+                }; // else :NoRuntimeRepr
+            }; 
+            (Some = sized_field)
+        };
     }
 }
 
@@ -1906,7 +1935,7 @@ fn load_op(self: CompCtx, ty: Type) Ty(Qbe.O, Qbe.Cls) = @match(self.get_type(ty
         };
         (.nop, .Ke)
     }
-    fn Struct(it) => self.load_op(or repr_transparent(it) {
+    fn Struct(it) => self.load_op(or self.repr_transparent(it) {
         return(.nop, .Ke)
     });
     fn Array(it) => @if(it.len == 1, self.load_op(it.inner), (.nop, .Ke));
@@ -1939,7 +1968,7 @@ fn store_op(self: CompCtx, ty: Type) Qbe.O = @match(self.get_type(ty)) {
         };
         .storel
     }
-    fn Struct(it) => self.store_op(repr_transparent(it) || return(.Oxxx));
+    fn Struct(it) => self.store_op(self.repr_transparent(it) || return(.Oxxx));
     fn Array(it) => @if(it.len == 1, self.store_op(it.inner), .Oxxx);
     @default     => .Oxxx;
 };

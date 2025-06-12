@@ -21,7 +21,6 @@ and not doing that makes an array of strings have the strings show up in the out
 - "really really want this but it breaks examples/ascii_table.fr"
 - fix examples/terminal.fr -jit so it doesn't freak out about nested compiler contexts because of the repl
 
-
 ## linux 
 
 - linux fault-na.ssa need to do the signal struct (rn it's skipped in backend/meta/test.fr)
@@ -31,6 +30,7 @@ but dump_macho.fr and objdump -d say they're the same (for mandelbrot_ui.fr at l
 so something in the data i guess? 
 - elf Relocatable so i can run the abi tests against clang
 - elf Dynamic
+- weak symbols should always be null with `-syscalls`. rn i fear they mean no static binaries
 
 ## amd64
 
