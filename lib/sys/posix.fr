@@ -1,3 +1,11 @@
+// 
+// Inconveniences: 
+// - Most systems don't expose a stable syscall interface. 
+// - Real syscalls return errors in-band, libc wrappers return errors in errno. 
+// - Posix standardises a source level API, not an ABI. Different systems have 
+//   different flag values / struct layouts / link names. 
+// - Null terminated strings do not spark joy. 
+// 
 
 //
 // <sys/fcntl.h>
@@ -32,14 +40,14 @@ O :: @struct {
     RDWR      :: 0b10;
 };
 
-fn open(path: CStr, flags: i64) SysResult(Fd) = {
+fn open(path: CStr, flags: Mask(O)) SysResult(Fd) = {
     @debug_assert_eq(bit_and(flags, O.CREAT), 0, "open(CREAT); call an overload that lets you pass mode");
     openat(AT'FDCWD(), path, flags, 0)
 }
 
 // the high bits of `flags` are platform specific. they'll be shifted down and passed directly. 
 // the low bits are remapped to the correct platform values. 
-fn openat(parent: Fd, path: CStr, flags: i64, mode: i64) SysResult(Fd) = {
+fn openat(parent: Fd, path: CStr, flags: Mask(O), mode: Mask(S)) SysResult(Fd) = {
     // not #libc because that's variadic, which we can do but is a bit annoying
     // TODO: maybe that's the wrong choice for apple
     openat :: fn(dirfd: Fd, pathname: CStr, flags: i64, mode: i64) i32 #syscall(56, 257, 463);
@@ -97,9 +105,8 @@ fn fstatat(parent: Fd, path: CStr, out: *Stat, flags: i64) SysResult(void) = {
         @as(AsFnPtr(fstatat)) fstatat,
         if_func(@"🤡", @"fstatat$INODE64", fstatat),
     );
-    //f := if_func(@"🤡", @"fstatat$INODE64", fstatat);
     
-    // TODO: flags might need to be remapped
+    @debug_assert_eq(flags, 0, "TODO: remap AT_SYMLINK_NOFOLLOW");
     err := f(parent, path, r&, flags);
     if err != 0 {
         return void.fix_errno(err);
@@ -159,7 +166,7 @@ fn mkdir(path: CStr, mode: i64) SysResult(void) =
     mkdirat(AT'FDCWD(), path, mode);
 
 // create a new directory. 
-fn mkdirat(parent: Fd, path: CStr, mode: i64) SysResult(void) = {
+fn mkdirat(parent: Fd, path: CStr, mode: Mask(S)) SysResult(void) = {
     mkdirat :: fn(parent: Fd, path: CStr, mode: i64) i64 #libc #syscall(34, 258, 475);
     @debug_assert_eq(mode.bit_and(octal "0777"), mode, "mkdirat(mode)");
     err := mkdirat(parent, path, mode);
@@ -189,7 +196,7 @@ MAP :: @struct {
 
 // the high bits of `flags` are platform specific. they'll be shifted down and passed directly. 
 // the low bits are remapped to the correct platform values. 
-mmap :: fn(addr: rawptr, len: i64, prot: i64, flags: i64, fd: Fd, offset: i64) SysResult(rawptr) = {
+mmap :: fn(addr: rawptr, len: i64, prot: Mask(PROT), flags: Mask(MAP), fd: Fd, offset: i64) SysResult(rawptr) = {
     agree :: bit_or(MAP'SHARED, MAP'PRIVATE).bit_or(MAP'FIXED);
     d := bit_and(flags, agree).bit_or(flags.shift_right_logical(32));
     flags := @match(current_os()) {
@@ -206,6 +213,105 @@ mmap :: fn(addr: rawptr, len: i64, prot: i64, flags: i64, fd: Fd, offset: i64) S
     };
     
     (Ok = rawptr_from_int err)
+};
+
+// 
+// <dirent.h>
+// TODO: (alphasort, dirfd, fdopendir, readdir_r, rewinddir, scandir, seekdir, telldir)
+// TODO: linux syscall version of readdir, et al.
+// 
+
+DIR :: @struct(
+    system: rawptr,
+    entry: dirent,
+);
+
+dirent :: @struct {
+    d_ino: u64;
+    d_seekoff: u64;
+    d_type: u8;
+    // TODO: since im making a copy anyway i could tell you the length
+    d_name: Array(u8, 256);
+};
+
+opendir :: fn(path: CStr) SysResult(*DIR) = {
+    opendir :: fn(path: CStr) i64 #libc;
+    @"opendir$INODE64" :: fn(path: CStr) i64 #weak #libc;
+    @"🤡" := current_os() == .macos && current_arch() == .x86_64;
+    f := @if(::(IS_BOOTSTRAPPING || (!FEATURE_WEAK_SYMBOLS && current_os() == .linux)),  // :UpdateBoot
+        @as(AsFnPtr(opendir)) opendir,
+        if_func(@"🤡", @"opendir$INODE64", opendir),
+    );
+    
+    r := f(path);
+    if r == 0 {
+        return fix_errno(*DIR, r);
+    };
+    
+    dir := general_allocator().box_zeroed(DIR);
+    dir.system = rawptr_from_int r;
+    (Ok = dir)
+};
+
+readdir :: fn(dir: *DIR) SysResult(*dirent) = {
+    SysDirEnt :: @union(m: Macos.DirEnt, l: Linux.DirEnt);
+    // TODO: this can be #where when i :UpdateBoot
+    fix :: fn($T: Type, d: *Posix.dirent, s: *T) void #generic = {
+        d.d_ino = s.d_ino;
+        d.d_seekoff = s.d_seekoff;
+        d.d_type = @as(u8) s.d_type;
+        strncpy :: fn(d: *u8, s: *u8, n: i64) void #libc;  // TODO
+        strncpy(d.d_name&.as_ptr(), s.d_name&.as_ptr(), 255);
+    };
+
+    readdir :: fn(dir: rawptr) i64 #libc;
+    @"readdir$INODE64" :: fn(dir: rawptr) i64 #weak #libc;
+    @"🤡" := current_os() == .macos && current_arch() == .x86_64;
+    f := @if(::(IS_BOOTSTRAPPING || (!FEATURE_WEAK_SYMBOLS && current_os() == .linux)),  // :UpdateBoot
+        @as(AsFnPtr(readdir)) readdir,
+        if_func(@"🤡", @"readdir$INODE64", readdir),
+    );
+    
+    // TODO: if we're trying to be a libc, the caller is supposed to do this, not us. 
+    if is_linking_libc() {
+        errno()[] = 0;
+    };
+    
+    r := f(dir.system);
+    if r == 0 { 
+        return fix_errno(*dirent, r);
+    };
+    r := SysDirEnt.ptr_from_int(r);
+    
+    @match(current_os()) {
+        fn macos() => fix(Macos.DirEnt, dir.entry&, r.m&);
+        fn linux() => fix(Linux.DirEnt, dir.entry&, r.l&);
+        @default => unreachable();
+    };
+    
+    (Ok = dir.entry&)
+};
+
+closedir :: fn(dir: *DIR) SysResult(void) = {
+    closedir :: fn(dir: rawptr) i64 #libc;
+    err := closedir(dir.system);
+    if err != 0 { 
+        return void.fix_errno(err);
+    };
+    general_allocator().dealloc(DIR, dir.slice(1));
+    (Ok = ())
+};
+
+// [macos+linux agree]
+DT :: @struct {
+    FIFO ::  S.IFIFO.shift_right_logical(12);
+    CHR  ::  S.IFCHR.shift_right_logical(12);
+    DIR  ::  S.IFDIR.shift_right_logical(12);
+    BLK  ::  S.IFBLK.shift_right_logical(12);
+    REG  ::  S.IFREG.shift_right_logical(12);
+    LNK  ::  S.IFLNK.shift_right_logical(12);
+    SOCK :: S.IFSOCK.shift_right_logical(12);
+    WHT  ::  S.IFWHT.shift_right_logical(12);
 };
 
 ///////////////////////////////////////////////////////////////////////
@@ -302,3 +408,6 @@ fix_flags :: fn($Dest: Type, $Src: Type, d: i64, s: i64) i64 = {
     
     d
 };
+
+// TODO: be more strictly typed about bit flags and make or-ing them together less painful
+fn Mask($T: Type) Type = i64;

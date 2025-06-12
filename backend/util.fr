@@ -935,161 +935,18 @@ fn new_phi(b: *Qbe.Blk, k: Qbe.Cls, reserve_args: i64, to: Qbe.Ref) *Qbe.Phi = {
     b.phi
 }
 
-//////////////////
-/// Ugly Table ///
-//////////////////
-
 fn argcls(i: *Qbe.Ins, argument_index: i64) Qbe.Cls = 
     argcls(i.op(), i.cls(), argument_index);
 
 fn argcls(o: Qbe.O, k: Qbe.Cls, argument_index: i64) Qbe.Cls = {
-    argcls_index :: fn(o: Qbe.O, k: Qbe.Cls, i: i64) i64 => 
-        o.raw().int() * 8 + k.raw().int() * 2 + i;
-
-    // TODO: can store 2 per byte instead of 1 per byte. 
-    // argcls_eval looks super branchy so we generate a table of all the options at comptime. 
-    argcls_table :: @static(Array(u8, Qbe.O.enum_count() * 4 * 2));
-    :: {
-        for_enum Qbe.O { o | 
-            K :: @const_slice(Qbe.Cls.Kw, .Kl, .Ks, .Kd);
-            for K { k | 
-                range(0, 2) { i | 
-                    v := @as(i32) @as(Qbe.Cls) argcls_eval(o, k, i);
-                    argcls_table[argcls_index(o, k, i)] = v.intcast().trunc();
-                };
-            };
-        };
-    };
-    
-    // at runtime its just a lookup
-    v: i64 = argcls_table[argcls_index(o, k, argument_index)].zext();
-    @as(Qbe.Cls) @as(i32) v.intcast()
-}
-
-// TODO: fix @is so it can be used here. 
-// I'm not totally sure this is a better way to represet this information than just pasting the table. but i really hate pasting tables. so here we are. 
-fn argcls_eval(o: Qbe.O, k: Qbe.Cls, argument_index: i64) Qbe.Cls = {
-    n := argument_index;
-    int := k.is_int();
-    
-    if(o.between(.ceqw, .cultw), => return(if(int, => .Kw, => .Ke)));
-    if(o.between(.ceql, .cultl), => return(if(int, => .Kl, => .Ke)));
-    if(o.between(.ceqs, .cuos),  => return(if(int, => .Ks, => .Ke)));
-    if(o.between(.ceqd, .cuod),  => return(if(int, => .Kd, => .Ke)));
-    
-    if int && @is(o, .min, .max, .sqrt) {
-        return(.Ke);
-    };
-    
-    if(o.between(.flagieq, .flagfuo), => return(if(int, => .Kx, => .Ke)));
-    if (@is(o, .neg, .copy, .arg, .push, .sqrt)) {
-        return(if(n == 0, => k, => .Kx));
-    };
-    
-    if (@is(o, .add, .sub, .div, .mul, .xcmp, .swap, .min, .max)) {
-        return(k);
-    };
-    if (@is(o, .sar, .shr, .shl, .rotr, .rotl)) {
-        if(!int, => return(.Ke));  
-        return(if(n == 0, => k, => .Kw));
-    };
-    if (@is(o, .xtest, .acmp, .acmn, .udiv, .urem, .or, .and, .xor, .rem, .cas1)) {
-        return(if(int, => k, => .Ke));  
-    };
-    if o.between(.par, .paruh) || (@is(o, .nop, .argv, .pop, .global_get)) {
-        return(.Kx);
-    };
-    if o == .trace_start {
-        return(if(int, => .Kx, => .Ke));
-    };
-    
-    if (@is(o, .load, .vaarg, .call, .truncl, .cas0)) {
-        return(if(n == 0, => .Kl, => .Kx));
-    };
-    if o.between(.alloc4, .alloc16) {
-        if(k != .Kl, => return(.Ke));
-        return(if(n == 0, => .Kl, => .Kx));
-    };
-    if (@is(o, .sign, .xidiv, .xdiv, .reqz, .rnez, .byteswap, .bitswap, .ones, .ctz, .clz)) {
-        if(!int, => return(.Ke));
-        return(if(n == 0, => k, => .Kx));
-    };
-    if o.between(.argsb, .arguh) {
-        if(n == 1, => return(.Kx));
-        return(if(k == .Kw, => k, => .Ke));
-    };
-    
-    if o.between(.loadsb, .loaduw) || o == .addr || o == .trace_prev || o == .trace_return {
-        if(!int, => return(.Ke));
-        return(if(n == 0, => .Kl, => .Kx));
-    };
-    if o.between(.extsb, .extuh) {
-        if(!int, => return(.Ke));
-        return(if(n == 0, => .Kw, => .Kx));
-    };
-   
-    int_c :: fn(kk: Qbe.Cls) => return(if(int, => if(n == 0, => kk, => .Kx), => .Ke));
-    if(o == .stosi || o == .stoui, => int_c(.Ks));
-    if(o == .dtosi || o == .dtoui, => int_c(.Kd));
-    float_c :: fn(kk: Qbe.Cls) => return(if(!int, => if(n == 0, => kk, => .Kx), => .Ke));
-    if(o == .swtof || o == .uwtof, => float_c(.Kw));
-   
-    if(o == .sltof || o == .ultof, => float_c(.Kl));
-    if o.between(.storeb, .stored) {
-        //if(k != .Kw, => return(.Ke)); // TODO: why do we care?
-        if(n == 1, => return(.Kl));
-        w: i64 = Qbe.O.storew.raw().zext();
-        k := o.raw().zext().max(w) - w; // :StoreOrder
-        return(@as(Qbe.Cls) @as(i32) k.intcast());
-    };
-    
-    want_w :: fn(fst: Qbe.Cls, snd: Qbe.Cls) => return(if(k == .Kw, => if(n == 0, => fst, => snd), => .Ke));
-    if(o == .vastart, => want_w(.Kl, .Kx));
-    if(o == .dbgloc,  => want_w(.Kw, .Kw));
-    if(o == .blit0,   => want_w(.Kl, .Kl));
-    if(o == .blit1,   => want_w(.Kw, .Kx));
-    want_l :: fn(fst: Qbe.Cls, snd: Qbe.Cls) => return(if(k == .Kl, => if(n == 0, => fst, => snd), => .Ke));
-    if(o == .extsw || o == .extuw, => want_l(.Kw, .Kx));
-    if(o == .parc || o == .pare, => want_l(.Kx, .Kx));
-    if(o == .argc, => want_l(.Kx, .Kl));
-    if(o == .arge || o == .salloc, => want_l(.Kl, .Kx));
-    if(o == .exts, => return(if(k == .Kd, => if(n == 0, => .Ks, => .Kx), => .Ke)));
-    if(o == .truncd, => return(if(k == .Ks, => if(n == 0, => .Kd, => .Kx), => .Ke)));
-    if(o == .afcmp, => return(if(!int, => k, => .Ke)));
-    if o == .cast {
-        if(n == 1, => return(.Kx));
-        k: i64 = k.raw().zext().bit_xor(2);
-        return(@as(Qbe.Cls) @as(i32) k.intcast());
-    };
-    if o == .Oxxx {
-        return(.Ke); // unreachable. this is just so it can go in the table. 
-    };
-    if (@is(o, .asm , .syscall, .assert)) {
-        return(if(n == 0, => .Kw, => .Kx));
-    };
-    if (@is(o, .call_indirect)) {
-        return(if(n == 0, => .Kw, => .Ke));
-    };
-    if (@is(o, .global_set)) {
-        return(if(n == 0, => .Kl, => k));
-    };
-    
-    if is_sel_flag(o) {
-        return(k);
-    };
-    
-    if o == .sel0 {
-        return(if(n == 0 && k == .Kw, => .Kw, => .Kx));
-    };
-    
-    if o == .sel1 {  // for now, no floats
-        return(if(k.is_int(), => k, => .Ke));
-    };
-    if(@is(o, .llcast, .flow), => return(.Ke));
-    
-    ::enum(Qbe.O);
-    @panic("invalid op number for argcls %", o)
-}
+    argcls := import("@/backend/meta/ops.fr").tables;
+    it  := argcls[intcast @as(i32) o];
+    off := ((intcast @as(i32) k) * 3) + argument_index*12;
+    it  := it.shift_right_logical(off).bit_and(0b111);
+    it  := @as(i32) it.bitcast();
+    it  := @as(Qbe.Cls) it;
+    return it;
+};
 
 ///////////////////////////////////////////////////////////////////////////////
 

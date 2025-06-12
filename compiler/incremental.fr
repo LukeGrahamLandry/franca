@@ -97,45 +97,48 @@ fn compile_cached(header: *Header) (@FnPtr(*ImportVTable) void) = {
     assume_types_fn(Arg = *ImportVTable, Ret = void, ptr = cc)
 }
 
-fn write_cache(m: *QbeModule, c: CompCtx, fid: FuncId, outpath2: Str, start_path: Str) void = {
+fn write_cache(m: *QbeModule, c: CompCtx, fid: FuncId, outpath2: Str, start_path: Str) *Header = {
     self := c.data.cast()[][];
     
-    @if(enable_incremental()) {
-        writer := m.save.unwrap();
-        finish_imports(writer, m);
+    @if(!enable_incremental()) @panic("write_cache");
+    writer := m.save.unwrap();
+    finish_imports(writer, m);
+    
+    writer.dep&.reserve(self.codemap.files.len+1);
+    writer.dep&.push(
+        file_len = 0,
+        filename = writer.push(self_filename),
+        hashcode = self_hash[],
+    );
+    
+    entry_dep := Qbe.no_symbol;
+    each self.codemap.files { it |
+        if is_cachable(it.name) {
+            if entry_dep == Qbe.no_symbol && it.name == start_path /*:SLOW*/ {
+                entry_dep = writer.dep.len.trunc();
+            };
         
-        writer.dep&.reserve(self.codemap.files.len+1);
-        writer.dep&.push(
-            file_len = 0,
-            filename = writer.push(self_filename),
-            hashcode = self_hash[],
-        );
-        
-        entry_dep := Qbe.no_symbol;
-        each self.codemap.files { it |
-            if is_cachable(it.name) {
-                if entry_dep == Qbe.no_symbol && it.name == start_path /*:SLOW*/ {
-                    entry_dep = writer.dep.len.trunc();
-                };
-            
-                writer.dep&.push(
-                    file_len = it.content.len.trunc(),
-                    filename = writer.push(it.name),
-                    hashcode = it.hash,
-                );
-            }
-        };
-        
-        name := c.fmt_fn_name(fid);
-        meta: Meta = (
-            arch_os = pack_current_target(),
-            entry_sym = (off = writer.map_sym(m, m.intern(name)).trunc()),
-            entry_dep = (off = entry_dep),
-        );
-        chunks := writer.to_bytes(meta, m);
-        write_chunks_or_crash(outpath2, chunks);
-        if(show_backend_stats(), => @eprintln(">>> save: %", outpath2));
+            writer.dep&.push(
+                file_len = it.content.len.trunc(),
+                filename = writer.push(it.name),
+                hashcode = it.hash,
+            );
+        }
     };
+    
+    name := c.fmt_fn_name(fid);
+    meta: Meta = (
+        arch_os = pack_current_target(),
+        entry_sym = (off = writer.map_sym(m, m.intern(name)).trunc()),
+        entry_dep = (off = entry_dep),
+    );
+    chunks := writer.to_bytes(meta, m);
+    bytes := concat(chunks, general_allocator());
+    
+    write_entire_file_or_crash(outpath2, bytes);
+    if(show_backend_stats(), => @eprintln(">>> save: %", outpath2));
+    
+    check(bytes)
 }
 
 fn is_cachable(name: Str) bool = !(false 

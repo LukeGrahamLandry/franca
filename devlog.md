@@ -18,6 +18,14 @@ c programs that want to use int for those. choices, choices :(
 
 --- 
 
+- dynamic dispatch: readdir, clear_cache
+- random spewing of executables is getting on my nerves. limit it to the `target` directory. 
+- yikes did cloudflare die? makes it more obvious that my `./boot/temporary/*.sh` is not an acceptable solution! 
+  tho that's part of why i want to get rid of `#target_os`, then i can just have one program instead of one per os, 
+  just need a system loader specific loader.
+- type out the argcls table like qbe does. compiles in 4ms instead of 12ms and is less unintelligible, 
+  250 lines of table instead of my 150 lines of boolean expressions. that's probably better, 
+
 ## (Jun 11)
 
 I think I've changed my mind about using cosmo. They have grander goals than I do and trying to reduce it 

@@ -15,7 +15,6 @@ fn query_cli_args() []CStr #target_os = (fn($os) => @match(os){
     fn wasip1() => ::panic("TODO: query_cli_args wasi");
 });
 
-// TODO: add 'fn int_to_float' so i can return answer in seconds like other lang versions
 fn timestamp() i64 = // :TodoLinux 
     clock_ms(MacosLibc.CLOCK_REALTIME);
 
@@ -127,16 +126,16 @@ fn query_current_arch() Arch = (fn(out) = @asm_x64(
 // - https://github.com/apple/darwin-libplatform/blob/main/src/cachecontrol/arm64/cache.s
 // - https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/sys_icache_invalidate.3.htmls
 //
-// :ClearCacheHack
-// Libcs for x86 might not have __clear_cache if you try to get it from dlopen/dlsym,
-// TODO: implement #target_arch and use that here
+// TODO: do the magic machine code myself
 //
-fn clear_instruction_cache(beg: rawptr, end: rawptr) void #target_os = (fn($os) => @match(os) {
-    // apple's x64 libc gives you this too so it's fine
-    fn macos()  => __clear_cache(beg, end);  // I think this is the same as sys_icache_invalidate for apple?
-    fn linux()  => ();  // for now i only do x64 linux and glibc won't give me a fake __clear_cache TODO: arm
-    fn wasip1() => ();  // should compile error? makes no sense here.
-});
+fn clear_instruction_cache(beg: rawptr, end: rawptr) void = {
+    @if(::(!Posix'FEATURE_WEAK_SYMBOLS && query_current_os() == .linux)) return(); // :UpdateBoot
+    
+    if query_current_arch() == .aarch64 {
+        __clear_cache :: fn(beg: rawptr, end: rawptr) void #weak #libc;
+        __clear_cache(beg, end);
+    }
+};
 
 fn clear_instruction_cache(beg: rawptr, len: i64) void = 
     clear_instruction_cache(beg, beg.offset(len));

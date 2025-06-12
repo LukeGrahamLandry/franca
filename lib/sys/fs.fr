@@ -23,21 +23,19 @@ fn open_or_create(path: CStr, $truncate: bool) FdResult = {
     to_fdresult openat(Posix'AT'FDCWD(), path, int flag, Posix'S'IRWXU)
 }
 
+// TODO: this is a garbage api because i assme there will be no errors once you've opened the directory. 
 // TODO: it wont close the directory if you use an early return from the body!!
-// TODO: is readdir_r deprecated everywhere or is that just a linux thing.
-//       but with readdir_r its a pain becuase you have to be extra careful about agreeing on the length of the buffer. 
-//       but macos adds a d_namlen field so you need to account for that in the offset of the buffer anyway. 
 // NOTE: don't nest these opening the same directory at the same time. 
 fn walk_directory(path: CStr, $body: @Fn(entry: DirEntry) void) bool = {
-    dir := opendir(path); ::ptr_utils(Dir);
-    if(dir.is_null(), => return(false));
+    dir := Posix'opendir(path);
+    if(dir.is_err(), => return(false));
     
     loop {
-        @match(dir.iter_directory()) {
+        @match(dir.Ok.iter_directory()) {
             fn Some(data) => body(data);
             fn None() => {
                 // TODO: have expr!defer that runs even if the `body` does an early return so you can use this like a normal loop without collecting the items. 
-                closedir(dir); // TODO: error handling
+                //_ := Posix'closedir(dir.Ok); // TODO: error handling
                 return(true);
             }
         };
@@ -94,13 +92,21 @@ fn path_exists(path: Str) bool = {
 fn is(e: DirEntry, kind: DirEntType) bool =
     (@as(u8) e.type) == (@as(u8) kind);
 
-fn iter_directory(dirp: *Dir) ?DirEntry #target_os = (fn($os) => {
-    Entry :: LibcType(os).DirEnt; ::ptr_utils(Entry);
-    e: *Entry = readdir(dirp);
-    if(e.is_null(), => return(.None));
-    name: CStr = (ptr = e.d_name&.as_ptr());
-    (Some = (name = name.str(), type = e.d_type))
-});
+fn iter_directory(dirp: *Posix'DIR) ?DirEntry = {
+    e := Posix'readdir(dirp);
+    ::ptr_utils(@type e.Ok[]);
+    if !e.Ok.is_null() {
+        name :: fn(e: *Posix'dirent) Str = {
+            s := (@as(CStr) (ptr = e.d_name&.as_ptr()));
+            s.str()
+        };
+        return(Some = (name = e.Ok.name(), type = @as(DirEntType) e.Ok.d_type));
+    };
+    
+    // got to the end or got an error. 
+    // TOOD: not returning an error here makes walk_directory() useless !
+    .None
+};
 
 DirEntry :: @struct(
     name: Str,
@@ -242,21 +248,20 @@ fn read_file_from_last_arg() Str = {
 }
 
 // it sounds like this would be a good idea but it seems to actually be super slow the first time 
-fn mmap_read(path: CStr) Result([]u8, void) #target_os = (fn($os) => {
-    O :: LibcType(os);
+fn mmap_read(path: CStr) Result([]u8, void) = {
     f := open(path, Posix'O'RDONLY) || return(.Err);
     len := f.lseek(0, .End) || {
         close(f); // TODO: defer
         return(.Err)
     };
     f.lseek(0, .Set);
-    m := mmap(zeroed rawptr, len, @as(i64) MapProt.Read, @as(i64) O.MapFlag.Private, f, 0);
+    m := Posix'mmap(zeroed rawptr, len, Posix'PROT'READ, Posix'MAP'PRIVATE, f, 0);
     close(f);
-    if m.int_from_rawptr() <= 0 {
+    if m.is_err() {
         return(.Err);
     };
-    (Ok = (ptr = u8.ptr_from_raw(m), len = len))
-});
+    (Ok = (ptr = u8.ptr_from_raw(m.Ok), len = len))
+};
 
 TmpFile :: @struct(name: Array(u8, 16), fd: Fd);
 fn remove(self: TmpFile) voidResult = remove(self&.c_name());

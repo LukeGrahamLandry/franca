@@ -31,6 +31,28 @@ as different types even when they're the same size.
 and not doing that makes an array of strings have the strings show up in the output module twice. 
 - "really really want this but it breaks examples/ascii_table.fr"
 - fix examples/terminal.fr -jit so it doesn't freak out about nested compiler contexts because of the repl
+- reduce disk usage bloat. rn fetch_or_crash stores the unzipped thing and the zip file so you have everything twice. 
+many of the things i use i don't need everything from so it could make you tell it which files are important and 
+delete the rest. thing to think about is that you want to union those between different projects that depend on 
+different subsets of the same resources. 
+- run tests in landlock so it's less scary to miscompile something that's doing random syscalls
+
+## don't rely on libc
+
+- (arm) clear_instruction_cache, figure out the instruction for it 
+- readdir, figure out the syscall for it 
+- import_c/tokenize: strtoul, strncasecmp, strtod
+- import_wasm/run.fr: 
+  - snprintf
+  - (because .ssa test calls it): getchar, strcmp, memcmp, memcpy, strncmp
+- prospero: atof
+- kaleidoscope: strtod
+- fetch_or_crash: stop exec-ing random shit! that's even worse than depending on libc!
+- examples/bf: putchar, getchar
+- (epicyles, geo): fmod
+- (farm_game, pi, predict, turingart): rand
+- (graphics): cosf, sinf
+- dlsym, dlopen, dlclose
 
 ## linux 
 
@@ -44,6 +66,7 @@ so something in the data i guess?
 - weak symbols should always be null with `-syscalls`. rn i fear they mean no static binaries
 - should have a test that makes sure my static binaries are actually static
 - how are you supposed to ask for page size? blink wants 64k instead of 4k. 
+- standalone import_c/cc.fr and meta/qbe_backend.fr can't make statically linked binaries because the `_init` is written in franca
 
 ## amd64
 

@@ -189,6 +189,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
     };
     
     if callee.is_none() {
+        break :: local_return;
         safe :: safety_check_enabled(.DebugAssertions);
         start := timestamp();
         opts := vtable.default_build_options(); 
@@ -255,6 +256,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
             @eprintln(">>> compiled % in %ms", name, frontend);  // :WrongClockTime
         };
         
+        @if(enable_incremental())
         if cache_it {
             // TODO: seal_debug_info properly
             //
@@ -262,12 +264,16 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
             seal_debug_info(m, empty(), false, empty());
             
             make_dirs_or_crash(cache_dir());
-            write_cache(m, c, f, cachepath, path);
+            header := write_cache(m, c, f, cachepath, path);
             // could do this but really should give a better error message when you get stuck in a loop and crash is probably fine for now
             //context(DefaultContext)[].comptime = rawptr_from_int(0); 
-            // :SLOW 
-            // TODO: dumb that this will read all the files back again to check if they changed
-            return run_franca_file(vtable, path);
+            
+            
+            // this doesn't re-read the files to check if they changed since you started compiling, that would feel a bit creepy. 
+            z := zone_begin(.CheckCache);
+            callee = (Some = compile_cached(header));
+            zone_end(z);
+            break();
         };
         
         cc := m.get_addr(name) || @panic("ICE: lost %", name);
