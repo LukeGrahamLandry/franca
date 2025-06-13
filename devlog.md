@@ -26,6 +26,21 @@ c programs that want to use int for those. choices, choices :(
 - type out the argcls table like qbe does. compiles in 4ms instead of 12ms and is less unintelligible, 
   250 lines of table instead of my 150 lines of boolean expressions. that's probably better, 
 
+- trying to generate do_fold() as a FrcModule instead of with inline_for. see if that compiles faster. 
+  - certainly more verbose, 50 lines -> 130 lines. but qbe is ~136 (and more error prone but less magic). 
+  - it's too easy to mess up SwitchPayload.case_count. TODO: make it RawList
+  - TODO: something's broken with using temp(), iff you try to printfn after runqbepasses in gen_do_fold. 
+    maybe it's the thing where it gets reset inside a shim? 
+  - in tracy: (do_fold_old = 53ms, do_fold_new = 1ms), so that's... quite a bit better. 
+      - ah, but i was cheating by not counting the time to compile gen_do_fold because i was calling it 
+      an extra time as a comptime thing that was reached first so it was already compiled at the point 
+      i started looking in the profiler. so extra 20ms, but a lot of that is stuff that would have to 
+      be compiled anyway (like that's the first place ops table, default_init, etc is reached), so it's 
+      cheaper than it looks. i don't love seeing a 20ms pipeline stall but it's better than a 50ms one. 
+    - it would be great if i a had way to mark a function as a well behaved edge in the callgraph and compile 
+      it in a threaded module instead of comptime_codegen, so you wouldn't have the stall. (emit_instructions 
+      has the same problem and the worse case situation is import_c). 
+
 ## (Jun 11)
 
 I think I've changed my mind about using cosmo. They have grander goals than I do and trying to reduce it 

@@ -34,7 +34,9 @@ FoldCtx :: @struct(
 
 // not memory and not special inserted later by abi/isel :OrderMatters
 fn can_fold(o: Qbe.O) bool = {
-    o.between(.add, .cuod) || o.between(.extsb, .cast) || o == .sel1 || o.between(.byteswap, .max)
+    argcls := import("@/backend/meta/ops.fr").tables;
+    flags := argcls[intcast @as(i32) o];
+    ops_table_canfold(flags)
 }
 
 /* require rpo, use, pred */
@@ -392,7 +394,8 @@ fn try_fold(op: Qbe.O, cls: Qbe.Cls, cl: *Qbe.Con, cr: *Qbe.Con) ?Qbe.Con = {
 
 // For each valid combintion of op + output type, just generate the code to do the thing. 
 // This is more magic but also less verbose and less error prone. 
-fn do_fold(rt_o: Qbe.O, rt_k: Qbe.Cls, out: rawptr, a0: i64, a1: i64) void = {
+// TODO: remove this (in favour of do_fold_new) but keep it as a test 
+fn do_fold_old(rt_o: Qbe.O, rt_k: Qbe.Cls, out: rawptr, a0: i64, a1: i64) void = {
     ops :: Qbe.O.get_cases();
     cls :: @const_slice(Qbe.Cls.Kw, .Kl, .Ks, .Kd);
     get_type :: fn(k: Qbe.Cls) Type = @match(k) {
@@ -453,3 +456,141 @@ fn do_fold(rt_o: Qbe.O, rt_k: Qbe.Cls, out: rawptr, a0: i64, a1: i64) void = {
         };
     };
 }
+
+// :UpdateBoot
+ENABLE_NEW_FOLD :: !IS_BOOTSTRAPPING && { c := current_compiler_context(); c'vtable'driver_abi_version >= 1131 };
+
+do_fold :: @if(ENABLE_NEW_FOLD, do_fold_new, do_fold_old);
+
+fn do_fold_new(rt_o: Qbe.O, rt_k: Qbe.Cls, out: rawptr, a0: i64, a1: i64) void = {
+    impl :: gen_do_fold_impl();
+    rt_o := intcast @as(i32) rt_o;  // waste. should allow J.switch on Cls.Kw
+    i := @match(rt_k) {
+        fn Kw() => impl'Kw(rt_o, a0, a1).zext();
+        fn Kl() => impl'Kl(rt_o, a0, a1);
+        fn Ks() => impl'Ks(rt_o, a0, a1).bitcast().zext();
+        fn Kd() => impl'Kd(rt_o, a0, a1).bitcast();
+        @default => unreachable();
+    };
+    i64.ptr_from_raw(out)[] = i;
+}
+
+// TODO: this way of splitting by return type is a bit dumb because cmp returning Kw or Kl doesn't matter. 
+fn gen_do_fold_impl() ScopeId = {
+    a := temp();
+    fr := current_compiler_context();
+    m := a.box(QbeModule);
+    // TODO: "need to be consistant about how to handle modules like this that don't actually compile anything"
+    init_default_module_dyn(m, fr.vtable, (arch = query_current_arch(), os = query_current_os(), type = .CachedEarly));
+    
+    argcls := import("@/backend/meta/ops.fr").tables;
+    
+    SwitchPayload :: @struct(
+        cases: QList(Ty(*Qbe.Blk, i64)),
+        case_count: i64,
+        default: *Qbe.Blk,
+        src: *Qbe.Blk,
+        inspect: Qbe.Ref,
+    );
+    
+    decls := Incremental'Fld.list(temp());
+    writer := m.save.unwrap();
+    // TODO: making everyone remember to do this is kinda lame
+    range(0, Incremental.FTy.COUNT) { _ |
+        writer.fty&.push(zeroed Incremental.FTy);   // skip builtin types so offsets work out
+    };
+    
+    cls :: @const_slice(Qbe.Cls.Kw, .Kl, .Ks, .Kd);
+    for cls { k |
+        f := a.box(Qbe.Fn);
+        default_init(f, m);
+        ::enum(Qbe.Cls);
+        f.lnk = (id = m.intern(@tfmt("%", k)), export = true);
+        
+        next := f.start&;
+        b := a.box_zeroed(Qbe.Blk); next[] = b; next = b.link&; f.nblk += 1;
+        f.start = b;
+       
+        r_o, r_a0, r_a1 := (f.newtmp("", .Kl), f.newtmp("", .Kl), f.newtmp("", .Kl));
+        push(b, make_ins(.par, .Kl, r_o, QbeNull, QbeNull));
+        push(b, make_ins(.par, .Kl, r_a0, QbeNull, QbeNull));
+        push(b, make_ins(.par, .Kl, r_a1, QbeNull, QbeNull));
+        
+        fail := a.box_zeroed(Qbe.Blk); next[] = fail; next = fail.link&; f.nblk += 1;
+        fail.jmp.type = .hlt;
+        end := a.box_zeroed(Qbe.Blk); next[] = end; next = end.link&; f.nblk += 1;
+        
+        s: Qbe.SwitchPayload = (
+            cases = new(20),
+            case_count = 0,
+            default = fail,
+            inspect = r_o,
+            src = b,
+        );
+        b.jmp = (type = .switch, arg = INT(0));
+        phi := f.new_phi(end, k, 20);
+        end.jmp = (type = @as(Qbe.J) @as(i32) Qbe.J.retw.raw() + k.raw(), arg = phi.to);
+        
+        r_a0s, r_a0d, r_a1s, r_a1d := (f.newtmp("", .Ks), f.newtmp("", .Kd), f.newtmp("", .Ks), f.newtmp("", .Kd));
+        push(b, make_ins(.cast, .Ks, r_a0s, r_a0, QbeNull));
+        push(b, make_ins(.cast, .Kd, r_a0d, r_a0, QbeNull));
+        push(b, make_ins(.cast, .Ks, r_a1s, r_a1, QbeNull));
+        push(b, make_ins(.cast, .Kd, r_a1d, r_a1, QbeNull));
+        a0 := @slice(r_a0, r_a0, r_a0s, r_a0d, QbeNull, QbeNull);
+        a1 := @slice(r_a1, r_a1, r_a1s, r_a1d, QbeNull, QbeNull);
+
+        range(0, Qbe.O.enum_count()) { i |
+            continue :: local_return;
+            o     := @as(Qbe.O) @as(i32) intcast i;
+            flags := argcls[i];
+            k0    := ops_table_argscls(flags, k, 0);
+            k1    := ops_table_argscls(flags, k, 1);
+            allow := ops_table_canfold(flags) && k0 != .Ke && o != .sel1;
+            if(!allow, => continue());
+            
+            // cast pars to the right types for this instruction (compiles to int vs float registers)
+            a0 := a0[intcast @as(i32) k0];
+            a1 := a1[intcast @as(i32) k1];
+            
+            b  := a.box_zeroed(Qbe.Blk); next[] = b; next = b.link&; f.nblk += 1;
+            r  := f.newtmp("", k);
+            push(b, make_ins(o, k, r, a0, a1));
+            push(s.cases&, s.case_count&, (b, i));
+            push(phi, b, r);
+            
+            b.jmp.type = .jmp;
+            b.s1 = end;
+        };
+        
+        f.switches = new(1);
+        f.switch_count = 1;
+        f.switches[0] = s;
+        
+        // making people remember to do this is also a bit annoying
+        i := 0;
+        for_blocks f { b |
+            b.id = intcast i; i += 1;
+        };
+        
+        // and this is kinda lame, the frontend could just do this itself if you don't provide a root_scope
+        // (it's just annoying because i don't want to mutate the module bytes so can't just abi_function_type in the compiler)
+        decls&.push(
+            name = writer.push(m.str(f.lnk.id)),
+            type = abi_function_type(writer, f),
+            payload = (offset = trunc writer.map_sym(m, f.lnk.id))
+        );
+        
+        fr'vtable'run_qbe_passes(Qbe.Fn.raw_from_ptr(f));
+    };
+    
+    meta: Incremental'Meta = (arch_os = 0, root_scope = save_fields(writer, .Scope, decls.items()));
+    b := writer.to_bytes(meta, m);
+    bytes := concat(b, ast_alloc());
+    fr'vtable'drop_qbe_module(QbeModule.raw_from_ptr(m));
+    result := fr'vtable'import_frc(fr.data, bytes);
+    result.or(fn(err) => fr.report_error(err))
+}
+
+// TODO: use this for stuff
+//fn source_location(arg: FatExpr) FatExpr #macro = 
+    //@literal arg.loc;

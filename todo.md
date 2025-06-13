@@ -15,6 +15,11 @@ commit "posix: open+mmap":  1.141 s ±  0.003 s
 but this one's less scary because the slow is attached to the code.  
 `fix_flags` does some comptime stuff, can it really be that much? 
 
+---
+
+(i cheated by simplifying do_fold so should force it to use do_fold_old when trying to debug the above,
+older compilers, based on vtable.abi_version will always do the slow one so it's unfair). 
+
 ## 
 
 - implement _Atomic in import_c
@@ -36,6 +41,8 @@ many of the things i use i don't need everything from so it could make you tell 
 delete the rest. thing to think about is that you want to union those between different projects that depend on 
 different subsets of the same resources. 
 - run tests in landlock so it's less scary to miscompile something that's doing random syscalls
+- `franca backend/meta/dump.fr target/a.frc` (running dump instead of dump bin)
+you don't get the "expected a function called main or driver" message?? it just crashes after `panic!`.
 
 ## don't rely on libc
 
@@ -79,7 +86,24 @@ so something in the data i guess?
   - or maybe get rid of it? it's not super interesting without a lot more infrastructure. 
 - be less strict about amd64 address folding when there's a large constant pointer (which is valid when jitting)
   - idk, i might have done this already? 
-  
+
+---
+
+- doesn't compile without fold_constants:
+```
+./target/f.out examples/default_driver.fr build examples/import_c/cc.fr -o target/cc.out 
+panic! Assertion Failed: didn't find encoding for extub R imm8 in Anon__7403 export function $Anon__7403() {
+ @0
+    R1 =w extub 0
+    xcmpw 0, R1
+    R1 =w flagieq
+    jmp C1, @1
+ @1
+    ret0
+}
+```
+--- 
+
 - examples/terminal.fr: does rosetta2 land's version of MSL have different rules??? fuck!
 ```
 METAL_SHADER_COMPILATION_OUTPUT: program_source:15:14: error: 'texture' attribute only applies to parameters, global constant variables, and non-static data members
@@ -169,6 +193,7 @@ i want them to go through sema exactly once if you compile the compiler and then
   so run in parallel whenever possible so maybe allow splitting the type info from the code?
 - type/symbol alignment
 - replace sym.imp.temporary_funcid with a sane import system so modules can be reused between CompCtx-s
+- "making everyone remember to do this is kinda lame"
 
 ## Unfinished Examples
 
