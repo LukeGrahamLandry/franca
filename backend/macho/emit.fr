@@ -585,7 +585,7 @@ fn emplace_fixup(e: *EmitMacho, fix: *FixP, next_encoded: i64, import_count: i64
     r[] = zeroed @type r[];
     set(r.bind&, .next, next_encoded);
     set(r.bind&, .is_bind, int(is_bind));
-    
+        
     if is_bind {
         // got_lookup_offset has been converted to an ordinal already. 
         o := fix.symbol.got_lookup_offset;
@@ -595,9 +595,11 @@ fn emplace_fixup(e: *EmitMacho, fix: *FixP, next_encoded: i64, import_count: i64
         set(r.bind&, .addend, addend);
         set(r.bind&, .ordinal, o);
     } else {
+        // need a pointer in memory to a local thing, so we just tell it the offset from the memory location to the target.
+        // local stuff doesn't need the same strictness about which part is the "symbol" so addend just gets lumped in to the one offset. 
         dest_segment := fix.symbol.segment.raw() + 1; // :MySegmentsStartAt1
         target := e.virtual_segment_offset[dest_segment] - zero_page_size + fix.symbol.offset + addend;
-        @assert_lt(target, 1.shift_left(36), "rebase > 36 bits");
+        @assert_lt(target, 1.shift_left(36), "[macho/emit.fr] can't encode rebase > 36 bits to %+%", fix.symbol.name, addend);
         set(r.rebase&, .target, target);
     };
 };
@@ -728,7 +730,7 @@ fn append_relocations(symbol_table_index: i64, id: Qbe.Sym, m: *QbeModule, reloc
         
         @match(fix.type) {
             fn InReg(it) #use(Arm) => {
-                @debug_assert(it.increment == 0, "TODO: offset symbols"); // :ArmAddendReloc
+                @assert(it.increment == 0, "TODO: offset symbols"); // :ArmAddendReloc
                 it.got_load = it.got_load && s.kind != .Local;
                 
                 // in the instruction we tell it: which register to use

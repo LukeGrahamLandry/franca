@@ -84,10 +84,11 @@ fn fixup_arm64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
             };
             inst: []u32 = (ptr = u32.ptr_from_raw(fixup.patch_at), len = 2);
             if local && !(ENABLE_INCREMENTAL && self.goal.type == .JitOnly && self.goal.got_indirection_instead_of_patches) {
-                i_page, i_off := encode_adrp_add(address.offset(it.increment.zext()), fixup.patch_at, @as(u5) it.r);
+                i_page, i_off := encode_adrp_add(address.offset(it.increment), fixup.patch_at, @as(u5) it.r);
                 inst[0] = i_page;
                 inst[1] = i_off;
             } else {
+                @assert_eq(it.increment, 0, "TODO: [arm64/emit.fr/fixup_arm64] offset from dynamic import %", symbol.name);
                 new_got_reloc[] = load_from_got(self, symbol, it.r, inst, address).or_else(=> new_got_reloc[]);
                 it.got_load = true;
             };
@@ -342,13 +343,12 @@ fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
     use_symbol(self.m, c.sym) { symbol |
         patch_addr := self.m.segment_address(.Code, self.m.current_offset(.Code));
         
-        @debug_assert(c.bits() >= 0 && c.bits() < MAX_i32);
         // :ArmAddendReloc 
         // I'm too lazy to add a new relocation type right now (its a whole seperate one for the addend i think? theres no slot on pageoff for it)
         // So for now i just generate a few extra instructions when making a relinkable object
         //
         inc := if(self.m.goal.type == .Relocatable, => 0, => c.bits());
-        patch: Fixup = (patch_at = patch_addr, type = (InReg = (r = dest_reg, increment = inc.trunc())));
+        patch: Fixup = (patch_at = patch_addr, type = (InReg = (r = dest_reg, increment = inc)));
         @match(symbol.kind) {
             fn DynamicPatched() => self.immediate_fixup_got(dest_reg, inc, symbol);
             fn Local() => {
@@ -394,7 +394,7 @@ fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
 
 fn immediate_fixup_got(self: *ArmState, dest_reg: i64, inc: i64, symbol: *SymbolInfo) void = {
     patch_addr := self.m.segment_address(.Code, self.m.current_offset(.Code));
-    patch: Fixup = (patch_at = patch_addr, type = (InReg = (r = dest_reg, increment = inc.trunc(), got_load = true)));
+    patch: Fixup = (patch_at = patch_addr, type = (InReg = (r = dest_reg, increment = inc, got_load = true)));
     if self.m.goal.type != .JitOnly { 
         push_fixup(self.m, symbol, patch); 
     };
@@ -958,10 +958,11 @@ fn encode_cmp(self: *ArmState, i: *Qbe.Ins, $no_negate: u1) void = {
         self.inst(@bits(si, no_negate, 0b101011, Shift.LSL, 0b0, b, 0b000000, a, 0b11111)); 
     } else {
         c := self.f.get_constant(a1);
-        @debug_assert(c.type() == .CBits, "cmp to addr");
-        no_shift := c.bits().bit_and(1.shift_left(12) - 1) == c.bits();
-        encoded  := if(no_shift, => c.bits(), => c.bits().shift_right_logical(12));
-        @debug_assert_eq(encoded.bit_and(1.shift_left(12) - 1).shift_left(int(!no_shift) * 12), c.bits(), "failed encode cmp");
+        @debug_assert(c.type() == .CBits, "cmp to addr (unreachable: isel.fr/imm())");
+        n := sign_extend_low32(c.bits());
+        no_shift := n.bit_and(1.shift_left(12) - 1) == n;
+        encoded  := if(no_shift, => n, => n.shift_right_logical(12));
+        @debug_assert_eq(encoded.bit_and(1.shift_left(12) - 1).shift_left(int(!no_shift) * 12), n, "failed encode cmp");
         self.inst(@bits(si, no_negate, 0b1100010, @if(no_shift, 0b0, 0b1), @as(u12) encoded, a0.int_reg(), 0b11111));
     }
 }

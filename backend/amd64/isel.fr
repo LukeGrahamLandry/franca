@@ -17,6 +17,13 @@
  *            dce should be moved out...
  */
 
+//
+// I want to make constant_folding() an optional pass which requires some unfortunate extra logic here 
+// to make sure not to let all operands to an instruction be immediates (since that can't be encoded). 
+// Those cases are unreachable normally because the folding will have removed them before you get here, 
+// so they're in @if(!ENABLE_CONST_FOLDING). 
+//
+
 /* instruction selection requires use counts */
 fn amd64_isel(f: *Qbe.Fn) void = {
     f.assign_alloc_slots();
@@ -37,7 +44,7 @@ fn amd64_isel(f: *Qbe.Fn) void = {
                 fixarg(p.arg.index(a), p.cls, Qbe.Ins.ptr_from_int(0), f);
             };
         };
-        seljmp(b, f);
+        sel_terminator(b, f);
         for_insts_rev b { i |
             @match(i[].op()) {
                 fn sel1() => selsel_amd64(f, b, i[]);
@@ -506,13 +513,18 @@ fn selcmp(arg: []Qbe.Ref, k: Qbe.Cls, need_swap: bool, f: *Qbe.Fn) void = {
 }
 
 // Adapted from a qbe patch: https://lists.sr.ht/~mpu/qbe/patches/55968
-// TODO: this is so similar to seljmp. but im afraid trying to factor them together would just make it more confusing. 
+// TODO: this is so similar to seljnz. but im afraid trying to factor them together would just make it more confusing. 
 fn selsel_amd64(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) *Qbe.Ins = {
     isel0 := i.offset(-1);
     @debug_assert_eq(isel0.op(), .sel0);
     
-    r  := isel0.arg&[0];
-    t  := f.get_temporary(r); 
+    r := isel0.arg&[0];
+    old_r := r;
+    @if(!ENABLE_CONST_FOLD) if rtype(r) != .RTmp {
+        r = f.newtmp("", .Kw);  // :jnz_is_Kw
+    };
+    t := f.get_temporary(r); 
+    nuse := t.nuse;
     fi := flagi(b.ins.ptr, isel0);
     cr0, cr1 := (QbeNull, QbeNull);
     gencmp, gencpy, need_swap := (false, false, false);
@@ -529,14 +541,14 @@ fn selsel_amd64(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) *Qbe.Ins = {
             if need_swap {
                 c = cmp_swap(c);
             };
-            if t.nuse == 1 {
+            if nuse == 1 {
                 gencmp = true;
                 cr0 = fi.arg&[0];
                 cr1 = fi.arg&[1];
                 fi.set_nop();
             };
         };
-        @if(fi.op() == .and && t.nuse == 1
+        @if(fi.op() == .and && nuse == 1
             && (rtype(fi.arg&[0]) == .RTmp ||
                 rtype(fi.arg&[1]) == .RTmp)) => {
             fi.set_op(.xtest);
@@ -550,7 +562,7 @@ fn selsel_amd64(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) *Qbe.Ins = {
          * the result of the flag-setting instruction
          * has to be marked as live */
         @else => {
-            gencpy = t.nuse == 1;
+            gencpy = nuse == 1;
         };
     };
     
@@ -562,6 +574,10 @@ fn selsel_amd64(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) *Qbe.Ins = {
     @debug_assert(nand(gencpy, gencmp));
     @if(gencmp) selcmp(@slice(cr0, cr1), k, need_swap, f);
     @if(gencpy) {f.emit(.copy, .Kw, QbeNull, r, QbeNull);};
+    
+    @if(!ENABLE_CONST_FOLD) if r != old_r {
+        f.emit(.copy, .Kw, r, old_r, QbeNull);  // :jnz_is_Kw
+    };
     isel0.set_nop();
     isel0
 }
@@ -734,8 +750,22 @@ fn sel_emit(f: *Qbe.Fn, i: *Qbe.Ins) void = {
 
 fn fixargs(f: *Qbe.Fn, i1: *Qbe.Ins) void = {
     k0, k1 := (argcls(i1, 0), argcls(i1, 1));
-    fixarg(i1.arg&.index(0), k0, i1, f);
-    fixarg(i1.arg&.index(1), k1, i1, f);
+    a0, a1 := (i1.arg&.index(0), i1.arg&.index(1));
+    
+    r, r1 := (QbeNull, QbeNull);
+    @if(!ENABLE_CONST_FOLD) if rtype(a0[]) == .RCon && (rtype(a1[]) == .RCon || k1 == .Kx) {
+        r = f.newtmp("isel", k0);
+        r1 = a0[];
+        a0[] = r;
+    };
+    
+    fixarg(a0, k0, i1, f);
+    fixarg(a1, k1, i1, f);
+    
+    @if(!ENABLE_CONST_FOLD) if r != QbeNull {
+        i := f.emit(.copy, k0, r, r1, QbeNull);
+        fixarg(i.arg&.index(0), k0, i, f);
+    };
 }
 
 fn sel_div(f: *Qbe.Fn, i: *Qbe.Ins) void = {
@@ -854,10 +884,24 @@ fn sel_ftoi(f: *Qbe.Fn, i: *Qbe.Ins, kc: Qbe.Cls, o: Qbe.O, t4: u64) void = {
     fixarg(ins.arg&.index(0), .Kl, ins, f);
 }
 
-fn seljmp(b: *Qbe.Blk, f: *Qbe.Fn) void = {
+fn sel_terminator(b: *Qbe.Blk, f: *Qbe.Fn) void = {
     if(@is(b.jmp.type, .ret0, .jmp, .hlt), => return()); // these already have a trivial single instruction implementation
     @debug_assert_ne(b.jmp.type, .switch);
     
+    old_r, r := (b.jmp.arg, QbeNull);
+    @if(!ENABLE_CONST_FOLD) if rtype(old_r) != .RTmp {
+        r = f.newtmp("", .Kw);  // :jnz_is_Kw
+        b.jmp.arg = r;
+    };
+    
+    seljnz(b, f);
+    
+    @if(!ENABLE_CONST_FOLD) if r != QbeNull {
+        f.emit(.copy, .Kw, r, old_r, QbeNull);  // :jnz_is_Kw
+    };
+}
+
+fn seljnz(b: *Qbe.Blk, f: *Qbe.Fn) void = {
     @debug_assert(b.jmp.type == .jnz);
     r := b.jmp.arg;
     @debug_assert(rtype(r) == .RTmp, "we shouldn't be jumping on a constant");

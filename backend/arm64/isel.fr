@@ -290,6 +290,16 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32) void = {
             };
             k0 := argcls(i&, 0);
             k1 := argcls(i&, 1);
+            
+            if o == .ctz {  // 0b101101011000000000110 is ctz... but it doesn't exist? I guess i don't have FEAT_CSSC?
+                new_ins.set_op(.clz);
+                r := f.newtmp("isel", k0);
+                i := f.emit(.bitswap, k0, r, iarg[0], QbeNull);  // new emit must be before fixarg (because emit is backwards)
+                f.fixarg(i.arg&.index(0), k0, false, blk);
+                iarg[0] = r;
+                return();
+            };
+
             copy_from_con := i&.op() == .copy && rtype(iarg[0]) == .RCon && !isreg(i.to);
             if !copy_from_con {
                 f.fixarg(iarg[0]&, k0, false, blk);
@@ -348,12 +358,6 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32) void = {
                 if f.get_int(iarg[1]) { _ |
                     return();
                 };
-            };
-            if o == .ctz {  // 0b101101011000000000110 is ctz... but it doesn't exist? I guess i don't have FEAT_CSSC?
-                new_ins.set_op(.clz);
-                r := f.newtmp("isel", k0);
-                f.emit(.bitswap, k0, r, iarg[0], QbeNull);
-                iarg[0] = r;
             };
             
             f.fixarg(iarg[1]&, k1, false, blk);
@@ -468,6 +472,7 @@ fn selcmp(f: *Qbe.Fn, arg: Array(Qbe.Ref, 2), k: Qbe.Cls, blk: i32) bool = {
         n := 0; // TODO: just use multiple return values.
         // TODO: annoying that i don't have fallthrough for @match
         imm := imm(c, k, n&);
+        //c.set_bits(n);
         cant_fit_immediate = @is(imm, .PosLow24, .NegLow24, .Iother);
         if (@is(imm, .NegLow12, .NegHigh12)) {
             // if we're comparing to a negative number, there's a different instruction for that. 

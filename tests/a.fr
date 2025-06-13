@@ -178,3 +178,49 @@ fn not_keywords() void #test = {
     assert_eq(do_it(.local_return), 2);
     assert_eq(do_it(.a), 3);
 }
+
+fn another_cmp_encoding() #test = {
+    N :: 0x200000001;  // can't be encoded as sign extend from 32 bits
+    
+    // boring; care about all the bits
+    f :: fn(x: i64) bool #noinline = x == N;
+    @assert(!f(1) && f(0x200000001) && !f(123));
+    
+    // interesting; copy-elim to `%unify.66 =l ceqw %x.65.65, 8589934593`
+    // but you only care about the bottom bit so it still fits in an immediate. 
+    g :: fn(x: u32) bool #noinline = {
+        a := N; 
+        x == trunc a
+    };  
+    @assert(g(1) && !g(123));
+}
+
+// interesting because ctz needs to insert an extra instruction on arm so need to be careful if there's also an isel.fr/fixarg()
+fn ctz_stack_slot() #test = {
+    f :: fn() Ty(i64, i64) = {
+        ctz :: fn(p: *i64) i64 #inline = i64.int_from_ptr(p).trailing_zeros();
+        freeze :: fn(p: *i64) i64 #noinline = p.ctz();
+        
+        buf := @uninitialized Array(i64, 64); 
+        p := buf&.as_ptr();
+        a := freeze(p);
+        b := p.ctz();  // address folded to RSlot
+        (a, b)
+    };
+
+    a, b := f();
+    @assert(a == b && a >= 3);  // _ && aligned to 8 bytes
+}
+
+fn negative_symbol() #test = {
+    f :: fn(rt_false: bool) i64 #noinline = {
+        a :: @static(i64) 123;
+        if rt_false {
+            a.offset(-1)[]
+        } else {
+            a[]
+        }
+    };
+    
+    assert_eq(f(false), 123);
+}

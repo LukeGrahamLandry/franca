@@ -43,6 +43,26 @@ different subsets of the same resources.
 - run tests in landlock so it's less scary to miscompile something that's doing random syscalls
 - `franca backend/meta/dump.fr target/a.frc` (running dump instead of dump bin)
 you don't get the "expected a function called main or driver" message?? it just crashes after `panic!`.
+- remove #target_os from the language. 
+  - query_current_os
+  - signal handling (compiler/main.fr/do_signals())
+  - docs/annotations.md
+  - query_cli_args
+  - find_os_libc_dylib
+  - get_executable_path
+  - apple_thread_jit_write_protect
+  - futex: wake, wait
+  - raw_create_thread
+  - tests: dynamic_scope.fr, errors.fr
+- probably want to prove you can reimplement #target_os in userspace, 
+but it's uglier than just doing runtime dispatch if that's allowed (which it is now)
+
+## backend 
+
+- macho/emit.fr/emplace_fixup() allow negative offset for DataAbsolute of dynamic import in .Exe
+- arm64/emit.fr/loadaddr_bits() allow large offset in .Relocatable
+- rm64/emit.fr/fixup_arm64(): offset from dynamic import
+- isel5.ssa -w: fails with inlining disabled
 
 ## don't rely on libc
 
@@ -88,21 +108,6 @@ so something in the data i guess?
   - idk, i might have done this already? 
 
 ---
-
-- doesn't compile without fold_constants:
-```
-./target/f.out examples/default_driver.fr build examples/import_c/cc.fr -o target/cc.out 
-panic! Assertion Failed: didn't find encoding for extub R imm8 in Anon__7403 export function $Anon__7403() {
- @0
-    R1 =w extub 0
-    xcmpw 0, R1
-    R1 =w flagieq
-    jmp C1, @1
- @1
-    ret0
-}
-```
---- 
 
 - examples/terminal.fr: does rosetta2 land's version of MSL have different rules??? fuck!
 ```
@@ -156,9 +161,10 @@ but then need to deal with including build options in the cache (like -unsafe, -
 - frc_inlinable doesn't work on the compiler itself
 - dump_bin: print segment.MachineCode as something qbe_frontend.fr can parse so it can round trip
 - clear cache before tests just in case
-- whether the host compiler was built with`-syscalls` needs to go in the cache file
+- whether the host compiler was built with`-syscalls` needs to go in the cache file :CacheKeySyscalls
 - caching an invalid thing i think? if you Compile Error: we hit a dynamicimport ('puts_unlocked' from 'libc') with no comptimeaddr for jit
 (happening with import_c)
+- persist #noinline
 
 - the compiler itself still doesn't work as frc_inlinable:
 > franca examples/default_driver.fr build compiler/main.fr -frc_inlinable && FRANCA_NO_CACHE=true franca backend/meta/qbe_frontend.fr a.out -r -- examples/toy/hello.fr
@@ -194,6 +200,9 @@ i want them to go through sema exactly once if you compile the compiler and then
 - type/symbol alignment
 - replace sym.imp.temporary_funcid with a sane import system so modules can be reused between CompCtx-s
 - "making everyone remember to do this is kinda lame"
+- env var for saving out all the files so you can inspect them, 
+like what i do with a.frc but without recompiling the compiler. 
+similarly allow #log_ir that persists on a module so you can debug. 
 
 ## Unfinished Examples
 
@@ -309,6 +318,8 @@ Compile Error: 54 matching options for index
 
 TODO: end of loop. still too many options for 'index'
 ```
+- // TODO: only the first element of the @slice in unquote_placeholders is getting typechecked that it wants FatExpr not *FatExpr? 
+- tests/todo/i.fr is super important :FuckedLikeZig
 
 ## cross compiling
 

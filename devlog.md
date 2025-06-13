@@ -6,6 +6,39 @@ let's cheat and make examples/terminal.fr(repl=true) not take 2 seconds to compi
 - compile_to_shader_source: 68 // shader compiler (for comptime)
 notably those are all things to aren't going to change if you're just working on the terminal program. 
 
+## (Jun 13)
+
+- need to make fold_constants optional if it's going to be using the module binary format, 
+cause otherwise there's some parts i can never change since the source needs to match the old compiler. 
+  - it's awkward because of amd64/isel trying to pull constant arguments into the instruction, so for unary 
+    things like extub, i don't want to bother encoding them for a const arg because that's stupid, it would just 
+    be folded. so if i want to allow disabling folding, i would need to add something that doesn't allow const 
+    arg for unary, and then maybe you only turn that on when folding is disabled but that produces a codepath that's 
+    only tested when you rebuild the compiler after changing module api which is not great.
+  - before even getting that far, can't forget to mark_referenced which now happens at the end of folding. 
+  - selsel_amd64, seljmp, fixargs: insert a copy when everything's constant, makes all .ssa tests pass. 
+  - tests/macros.fr/if_chains() fails amd: just messed up b.jmp.arg being mutated
+  - test/return_small_pair_const arm: `panic! failed encode cmp Expected (0 == 8589934593)`,
+    problem is 0x200000001, which when sign_extend_low32() is 1, but imm() doesn't save that change. 
+    happens because a store of `(1, 2)` gets promoted to copying as one constant and shifting it around. 
+    that's a real bug tho, would happen if you compared a tmp to that constant too. 
+    so suddenly this whole operation isn't a waste of time if it uncovers actual problems. 
+  - test/intrins arm: ctz needs to insert an extra instruction and was relying on there being no fixarg for ordering.
+    actually i think that was a real bug you could hit with constant folding: if you try to ctz of a stack slot pointer. 
+    which is probably not something you'd ever do? oh! unless you wanted to check alignment. 
+    should really have a debug check for regalloc use-before-def 
+  - isel5.ssa -cc arm: loadaddr_bits can't do a negative offset from a symbol. 
+    - which generally is fair cause it's considered disrespectful to go underflow your static allocation. 
+      but you could imagine someone exposing a symbol that points to an offset into a data structure. and anyway, 
+      you should be allowed to compute the invalid pointer, it's only a problem if you try to use it, like what 
+      happens in isel5.ssa, it knows the callee is going to offset it forwards before dereferencing it. 
+    - i think that assertion is actually junk. like if it ends up being a local it's fine, i just shouldn't be storing 
+      `increment` as a u32. and then i have to deal with how to encode the macho relocation if it's an import or relocatable, 
+      but they're already a bit sketchy, my previous way can't do the u32 bits either. 
+  - qbe_frontend.fr amd: TODO
+  - (mem3.ssa, isel5.ssa) -w: TODO
+  - 3 of those were real bugs that i hadn't found yet, that's pretty good. 
+
 ## (Jun 12)
 
 probably a good idea to consistantly let you pass os specific flags if you want to do something non-portable, 
