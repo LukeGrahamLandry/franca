@@ -1,19 +1,19 @@
 // this one does something os specific that doesn't rely on the program starting through franca_runtime_init
-fn query_cli_args() []CStr #target_os = (fn($os) => @match(os){
-    fn macos() => {
-        argc := _NSGetArgc()[];
-        argv := _NSGetArgv()[];
-        // Safety: the os wouldn't lie to us... hopefully.
-        slice(argv, argc)
+fn query_cli_args() []CStr = {
+    @match(query_current_os()) {
+        fn macos() => {
+            argc := MacosLibc'_NSGetArgc()[];
+            argv := MacosLibc'_NSGetArgv()[];
+            // Safety: the os wouldn't lie to us... hopefully.
+            slice(argv, argc)
+        }
+        // TODO: uhg, its not ok to allocate here! :slow
+        //       if we're gonna be slow we might as well be super slow
+        //       but if im committed to doing it this way caller should pass in allocator or i should cache it, or something, idk. 
+        fn linux() => slowly_get_cli_args_from_proc_self(page_allocator)  // :Leak
+        @default => unreachable();
     }
-    // TODO: uhg, its not ok to allocate here! :slow
-    //       if we're gonna be slow we might as well be super slow
-    //       but if im committed to doing it this way caller should pass in allocator or i should cache it, or something, idk. 
-    fn linux() => {
-        slowly_get_cli_args_from_proc_self(page_allocator)  // :Leak
-    }
-    fn wasip1() => ::panic("TODO: query_cli_args wasi");
-});
+}
 
 fn timestamp() i64 = // :TodoLinux 
     clock_ms(MacosLibc.CLOCK_REALTIME);
@@ -32,29 +32,16 @@ fn timestamp_s() f64 = { // :TodoLinux
 }
 
 // Calling this is probably not super useful because you don't know if you're running JIT or AOT. 
-fn get_executable_path(a: Alloc) Str #target_os = (fn($os) => @match(os) {
-    fn macos() => {
-        size := 0;
-        // use this to check the length so we allocate the right amount. 
-        _NSGetExecutablePath(u8.ptr_from_int(0), size&);
-        buf := a.alloc(u8, size);
-        _NSGetExecutablePath(buf.ptr, size&).unwrap();
-        // un-cstr it
-        @debug_assert(buf[buf.len - 1] == 0);
-        buf.len -= 1;  // :LEAK kinda. you can't just free the slice because it has the wrong size. TODO: return list?
-        buf
+fn get_executable_path(a: Alloc) Str = {
+    // :UpdateBoot
+    @if(::(!FEATURE_WEAK_SYMBOLS && query_current_os() == .linux)) return(LinuxLibc'get_executable_path(a));
+
+    @match(query_current_os()) {
+        fn macos() => MacosLibc'get_executable_path(a);
+        fn linux() => LinuxLibc'get_executable_path(a);
+        @default => unreachable();
     }
-    fn linux() => {
-        path :: @as(CStr) "/proc/self/exe";
-        out: List(u8) = list(128, a);
-        if !read_link(path, out&) {
-            // TODO: return error!!
-            panic("error readlink /proc/self/exe I really hope you're using a broken emulator")
-        };
-        return(out.items());
-    }
-    fn wasip1() => panic("TODO: get_executable_path on wasi");
-});
+}
 
 fn read_link(path: CStr, out: *List(u8)) bool = {
     start := out.len;
@@ -129,7 +116,7 @@ fn query_current_arch() Arch = (fn(out) = @asm_x64(
 // TODO: do the magic machine code myself
 //
 fn clear_instruction_cache(beg: rawptr, end: rawptr) void = {
-    @if(::(!Posix'FEATURE_WEAK_SYMBOLS && query_current_os() == .linux)) return(); // :UpdateBoot
+    @if(::(!FEATURE_WEAK_SYMBOLS && query_current_os() == .linux)) return(); // :UpdateBoot
     
     if query_current_arch() == .aarch64 {
         __clear_cache :: fn(beg: rawptr, end: rawptr) void #weak #libc;
@@ -141,7 +128,8 @@ fn clear_instruction_cache(beg: rawptr, len: i64) void =
     clear_instruction_cache(beg, beg.offset(len));
 
 // :JitMemProtect
-fn apple_thread_jit_write_protect(executable_on_current_thread: bool) void #target_os = (fn($os) => @if(os == .macos) {
+fn apple_thread_jit_write_protect(executable_on_current_thread: bool) void = {
+    @if(query_current_os() != .macos) return();
     I_AM_THE_MPROTECT_NOW :: true; 
     @if(!I_AM_THE_MPROTECT_NOW) {
         pthread_jit_write_protect_np(executable_on_current_thread);
@@ -165,4 +153,4 @@ fn apple_thread_jit_write_protect(executable_on_current_thread: bool) void #targ
         fn xxx(x: i64) void #x86_bytes #c_call #asm = (fn(out) = out.push_all(@slice(0xc3, 0xc3))); // unreachable
         xxx(x)
     };
-});
+};

@@ -16,6 +16,9 @@ DefaultContext :: @struct(
     extra := 0,
 );
 
+// :UpdateBoot
+FEATURE_WEAK_SYMBOLS :: !IS_BOOTSTRAPPING && { c := current_compiler_context(); c'vtable'driver_abi_version != 1016 };
+
 // For AOT builds, the compiler generates a call to this as your program's main entry point. 
 // note: whatever you had in the context at comptime is NOT baked into your program (unlike all other reachable memory).
 // For jitted code, you inherit the compiler's context. (TODO: maybe that should only be for comptime/drivers)
@@ -57,13 +60,14 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
             exit(0);
         };
     };
-    impl1 :: fn(argc: i64, argv: *CStr, envp: *CStr) void #target_os =
-        (fn($os) => @if(::(os == .linux && is_linking_libc())) {
-            __libc_start_main :: fn(user: @FnPtr(argc: i64, argv: *CStr, envp: *CStr) void, argc: i64, argv: *CStr, i: i64, f: i64, l: i64) i64 #libc;
-            __libc_start_main(impl2, argc, argv, 0, 0, 0);
-        }); 
+
+    @if(FEATURE_WEAK_SYMBOLS)
+    if os == .linux && is_linking_libc() {
+        __libc_start_main :: fn(user: @FnPtr(argc: i64, argv: *CStr, envp: *CStr) void, argc: i64, argv: *CStr, i: i64, f: i64, l: i64) i64 #weak #libc;
+        __libc_start_main(impl2, argc, argv, 0, 0, 0);
+        unreachable();
+    };
     
-    impl1(argc, argv, envp);
     impl2(argc, argv, envp);
 };
 
@@ -72,7 +76,6 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
 // Also on linux glib expects the stack to be 16 byte aligned but the kernel doesn't do that for you. 
 //
 // The forced #inline is important! We need this call to not fuck with the stack. 
-// TODO: that's why this can't be #target_os
 fn fix_stack_linux(argc: *i64, argv: **CStr, envp: **CStr) void #inline = {
     // TODO: start_trace
     #use("@/backend/amd64/bits.fr");

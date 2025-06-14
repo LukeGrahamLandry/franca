@@ -45,17 +45,13 @@ different subsets of the same resources.
 you don't get the "expected a function called main or driver" message?? it just crashes after `panic!`.
 - remove #target_os from the language. 
   - query_current_os
-  - signal handling (compiler/main.fr/do_signals())
-  - docs/annotations.md
-  - query_cli_args
-  - find_os_libc_dylib
-  - get_executable_path
-  - apple_thread_jit_write_protect
-  - futex: wake, wait
-  - raw_create_thread
-  - tests: dynamic_scope.fr, errors.fr
+  - #link_rename kinda does the same thing 
+  - #asm needs to include both versions and dispatch at runtime
 - probably want to prove you can reimplement #target_os in userspace, 
 but it's uglier than just doing runtime dispatch if that's allowed (which it is now)
+- remove #syscall from the frontend (i still think it's fine to do the calling convention part in the backend for now)
+- document #weak: docs/(annotations.md, imports.md)
+- deal with `NOSYS`
 
 ## backend 
 
@@ -86,6 +82,7 @@ but it's uglier than just doing runtime dispatch if that's allowed (which it is 
 ## linux 
 
 - linux fault-na.ssa need to do the signal struct (rn it's skipped in backend/meta/test.fr)
+- compiler/main.fr/do_signals()
 - :TodoLinux
 - repro doesn't work cross compiling from linux to macos,
 but dump_macho.fr and objdump -d say they're the same (for mandelbrot_ui.fr at least). 

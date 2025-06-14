@@ -13,6 +13,8 @@ notably those are all things to aren't going to change if you're just working on
   which is super not the same, just didn't matter because const folding happens earlier so you 
   adding a symbol and a number doesn't show up. 
 - made Target.caller_saved a bit mask instead of an array
+- un-#target_os: find_os_libc_dylib, query_cli_args, get_executable_path, apple_thread_jit_write_protect, do_signals
+  raw_create_thread, wake, wait
 
 ## (Jun 13)
 

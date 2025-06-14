@@ -144,35 +144,6 @@ Requires `#asm` and targets amd64. The body is a function `fn(out: *List(u8)) vo
 Whatever bytes you append to that list will be inserted into your program as machine code. 
 You can import `@/backend/amd64/bits.fr` for definitions of some useful constants. 
 
-### target_os
-
-Allows the function to have different implimentations on different target 
-operating systems. The body is a function that takes an `Os` as a constant argument 
-and it's instantiated for each target operating system (so generally the comptime host 
-and the runtime target). Often you'll need this when calling libc functions that have different 
-values for magic flags on different targets. 
-
-Since I need to support full compile time execution and also cross compilation, 
-having a very structured system for target splits like this is very important. 
-
-```
-fn do_async_io() void #target_os = (fn($os) => @match(os) {
-  fn macos() => {
-    // some code that uses kqueue
-  }
-  fn linux() => {
-    // some code that uses io_uring
-  }
-  @default => panic("no idea. good luck with that.");
-});
-```
-
-This doesn't work well when the function has constant arguments. 
-Sometimes you need to wrap a `#target_os` function inside another function 
-that has the constant arguments. This is a stupid compiler limitation, 
-but I'm resistant to fixing it because i want to replace all the target 
-split stuff with something more consistant so it might not matter soon. 
-
 ### link_rename
 
 Sometimes an imported function will have random name mangling applied on different platforms. 

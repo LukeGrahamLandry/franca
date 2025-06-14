@@ -108,6 +108,55 @@ fn slowly_get_cli_args_from_proc_self(alloc: Alloc) []CStr = { // :Leak
     }
 }
 
+get_executable_path :: fn(a: Alloc) Str = {
+    path :: @as(CStr) "/proc/self/exe";
+    out: List(u8) = list(128, a);
+    if !read_link(path, out&) {
+        // TODO: return error!!
+        panic("error readlink /proc/self/exe I really hope you're using a broken emulator")
+    };
+    return(out.items());
+};
+
+sys_clone :: fn(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) i32 = {
+    // CLONE_PTRACE is 0x2000 and i feel like i want it? but blink doesn't like it. 
+    clone_flags :: 0x80050F00; // CLONE_FILES | CLONE_FS | CLONE_IO | CLONE_THREAD | CLONE_VM | CLONE_SIGHAND | CLONE_SYSVSEM
+    use_clone3 :: false;  // I'd rather do this but blink doesn't do clone3()
+    ::if(i32);
+    result := if use_clone3 {
+        Clone :: @struct {
+            flags: i64;
+            pidfd: *i32;
+            child_tid: *pid_t;
+            parent_tid: *pid_t;
+            exit_signal: i64;
+            stack: []u8;
+            tls: i64;
+            set_tid: []pid_t;
+            cgroup: i64;
+        };
+        arg: Clone = zeroed Clone;
+        arg.flags = clone_flags;
+        arg.stack = stack;
+        
+        clone3 :: fn(arg: *Clone, size: i64) pid_t #syscall(435, 435, NOSYS);
+        clone3(arg&, size_of(Clone))
+    } else {
+        clone :: fn(flags: i64, stack: *u8, p: i64, c: i64, t: i64) pid_t #syscall(220, 56, NOSYS);
+        clone(clone_flags, stack.ptr.offset(stack.len), 0, 0, 0)
+    };
+    if result < 0 {
+        @panic("failed to clone thread %.", result);
+    };
+    if result == 0 {  // Child
+        callee(userdata);
+        exit_thread :: fn(status: i64) Never #syscall(93, 60, NOSYS);
+        exit_thread(0);
+    };
+    // else, Parent
+    result
+};
+
 LandLock :: @struct {
     // TODO: have a nice BitFlags type like @bit_fields (then remove #flags below. it doesn't do anything)
     Fs :: @enum(i64) (

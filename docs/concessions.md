@@ -32,10 +32,6 @@ so i'd need to do my own thing for jitting anyway
   - if you let them be different at runtime/comptime then field offsets can't be const anymore.
   they'd be delayed to emit_ir and you'd have to be careful not to write code that looks at them too closely. 
 
-## #target_os
-
-- need to have a more formal system for parameters that the driver can set and cause an rt/ct specialization when you try to read them
-
 ## bake_relocatable_value
 
 - it's super nice to be able to generate your data at comptime and not worry about how to serialize it into array literals

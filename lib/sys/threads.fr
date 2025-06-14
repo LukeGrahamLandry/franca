@@ -44,56 +44,17 @@ fn raw_create_thread(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdat
         out
     };
     
-    @if(is_linking_libc(), use_pthread(stack, callee, userdata), {
-        impl :: fn(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) Thread #target_os = 
-        (fn($os) => @match(os) {
-            fn linux() => {
-                // CLONE_PTRACE is 0x2000 and i feel like i want it? but blink doesn't like it. 
-                clone_flags :: 0x80050F00; // CLONE_FILES | CLONE_FS | CLONE_IO | CLONE_THREAD | CLONE_VM | CLONE_SIGHAND | CLONE_SYSVSEM
-                use_clone3 :: false;  // I'd rather do this but blink doesn't do clone3()
-                result := if use_clone3 {
-                    Clone :: @struct {
-                        flags: i64;
-                        pidfd: *i32;
-                        child_tid: *pid_t;
-                        parent_tid: *pid_t;
-                        exit_signal: i64;
-                        stack: []u8;
-                        tls: i64;
-                        set_tid: []pid_t;
-                        cgroup: i64;
-                    };
-                    arg: Clone = zeroed Clone;
-                    arg.flags = clone_flags;
-                    arg.stack = stack;
-                    
-                    clone3 :: fn(arg: *Clone, size: i64) pid_t #syscall(435, 435, _);
-                    clone3(arg&, size_of(Clone))
-                } else {
-                    clone :: fn(flags: i64, stack: *u8, p: i64, c: i64, t: i64) pid_t #syscall(220, 56, _);
-                    clone(clone_flags, stack.ptr.offset(stack.len), 0, 0, 0)
-                };
-                if result < 0 {
-                    @panic("failed to clone thread %.", result);
-                };
-                if result == 0 {  // Child
-                    callee(userdata);
-                    exit_thread :: fn(status: i64) Never #syscall(93, 60, _);
-                    exit_thread(0);
-                };
-                // else, Parent
-                // TODO: do pthread_t stuff so we can join, etc
-                bit_cast_unchecked(pid_t, Thread, result)
-            }
-            // I don't care enough to figure out how to use bsdthread_create right now. 
-            // There's something with pointer authentication in the sig field. idk man.
-            // https://github.com/apple/darwin-libpthread/blob/main/src/pthread.c
-            // https://github.com/apple/darwin-libpthread/blob/main/src/types_internal.h#L348 
-            fn macos()  => use_pthread(stack, callee, userdata);
-            fn wasip1() => panic("TODO: wasi threads");
-        });
-        impl(stack, callee, userdata)
-    })
+    // I don't care enough to figure out how to use bsdthread_create right now. 
+    // There's something with pointer authentication in the sig field. idk man.
+    // https://github.com/apple/darwin-libpthread/blob/main/src/pthread.c
+    // https://github.com/apple/darwin-libpthread/blob/main/src/types_internal.h#L348 
+    if is_linking_libc() || query_current_os() != .linux {
+        return use_pthread(stack, callee, userdata);
+    };
+    
+    result := LinuxLibc'sys_clone(stack, callee, userdata);
+    // TODO: do pthread_t stuff so we can join, etc
+    bit_cast_unchecked(pid_t, Thread, result)
 }
 
 franca_runtime_init_thread :: fn(franca_userdata: rawptr) void = {

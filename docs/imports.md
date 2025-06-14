@@ -4,7 +4,6 @@ See `../annotations.md` for info about builtin tags you can put on functions.
 ```
 #asm #x86_bytes #aarch64
 #linkrename
-#target_os
 #libc
 #import
 #syscall
