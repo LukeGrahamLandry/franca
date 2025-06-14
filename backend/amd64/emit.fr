@@ -115,14 +115,10 @@ fn fixup_amd64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
 
 fn framesz(e: *AmdState) void = {
     /* specific to NAlign == 3 */
-    // I think this is just doing e.nclob.mod(16) != 0 but befire we counted eclob. 
     o := 0;
     if !e.f.leaf {
-        for SysV'amd64_sysv_rclob { r |
-            xx := e.f.reg.shift_right_logical(r.raw().zext());
-            o = o.bit_xor(xx.bitcast());
-        };
-        o = o.bit_and(1);
+        // checking if clobber save area is aligned to 16 bytes
+        o = e.f.reg.bit_and(SysV'amd64_sysv_rclob_mask).count_ones().zext().mod(2);
     };
     
     f := e.f.slot / 4;
@@ -176,11 +172,12 @@ fn emit_the_code(e: *AmdState) void = {
             o += 16;
         };
     };
-    for SysV'amd64_sysv_rclob { r | 
-        if f.reg.bit_and(BIT(r)) != 0 {
-            e.a&.encode_op_reg(PrimaryOp.PushBase, r.int_id());
-            e.nclob += 1;
-        };
+    to_save := f.reg.bit_and(SysV'amd64_sysv_rclob_mask);
+    for_bits to_save { r |
+        // sysv has no callee saved floats
+        r := @as(Amd64Reg) @as(u8) r.trunc();
+        e.a&.encode_op_reg(PrimaryOp.PushBase, r.int_id());
+        e.nclob += 1;
     };
 
     local_labels := temp().alloc_zeroed(i64, e.f.nblk.zext());
@@ -197,6 +194,7 @@ fn emit_the_code(e: *AmdState) void = {
                     e.a&.encode_bin(PrimaryOp.MovReg, X86Reg.rsp, X86Reg.rbp);
                     e.a&.encode_imm(PrimaryOp.AddImm32, X86Reg.rsp, -(e.fsz + e.nclob * 8));
                 };
+                // TODO: for_bits reversed
                 for_rev SysV'amd64_sysv_rclob { r | 
                     if f.reg.bit_and(BIT(r)) != 0 {
                         e.a&.encode_op_reg(PrimaryOp.PopBase, r.int_id());
@@ -288,7 +286,7 @@ fn emitcopy(dest: Qbe.Ref, src: Qbe.Ref, k: Qbe.Cls, e: *AmdState) void = {
     emitins(i, e);
 }
 
-amd64_xmm_scratch :: TMP(Amd64Reg.XMM0.raw() + 15);
+amd64_xmm_scratch :: TMP(@as(i64) Amd64Reg.XMM0.raw().zext() + 15);
 
 fn convert_to_2address(e: *AmdState, i: *Qbe.Ins) void = {
     if(i.to == QbeNull, => return());
@@ -959,7 +957,7 @@ fn bits(d: Displacement) i64 = @match(d) {
 
 fn int_reg_d(r: Qbe.Ref) X86Reg = {
     @debug_assert_eq(rtype(r), .RTmp, "int_reg_d");
-    int_id(@as(Amd64Reg) @as(i32) r.val().trunc())
+    int_id(@as(Amd64Reg) @as(u8) r.val().trunc())
 }
 
 // TODO: convert my instruction encoding to use Amd64Reg instead of X64Reg. 
@@ -975,7 +973,7 @@ fn int_id(r: Amd64Reg) X86Reg #inline = {
 }
 
 fn reg_for_extension(v: u8) Amd64Reg = 
-    @as(Amd64Reg) @as(i32) v.zext() + 1;
+    @as(Amd64Reg) @as(u8) v + 1;
 
 AmdArgType :: @enum(u8) (M, R, imm32, imm8, none, F);    
     

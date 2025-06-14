@@ -1,0 +1,91 @@
+#include_std("backend/lib.fr");
+#use("@/backend/opt/fold.fr");
+
+main :: fn() void = {
+    srand(0);  // i don't want it to change every time. i just want a bunch of arbitrary data. 
+    
+    N :: 256;
+    n := temp().alloc_init(i64, N, fn(i) => rand().bit_or(rand().shift_left(33  /* extra bit to make them not all positive */)));
+    
+    for q_cls { k |
+        for q_ops { o |
+            continue :: local_return;
+            if(!allow(o, k), => continue());
+            
+            range(0, N - 1) { i |
+                a0, a1 := (n[i], n[i + 1]);
+                
+                r0, r1 := (0, 0);
+                do_fold_old(o, k, i64.raw_from_ptr(r0&), a0, a1);
+                do_fold(o, k, i64.raw_from_ptr(r1&), a0, a1);
+                
+                ::enum(Qbe.Cls); ::enum(Qbe.O);
+                @assert_eq(r0, r1, "% % a0=% a1=%", o, k, a0, a1);
+            };
+        }
+    };
+};
+
+q_cls :: @const_slice(Qbe.Cls.Kw, .Kl, .Ks, .Kd);
+q_ops :: Qbe.O.get_cases();
+
+do_fold_old :: fn(rt_o: Qbe.O, rt_k: Qbe.Cls, out: rawptr, a0: i64, a1: i64) void = {
+    get_type :: fn(k: Qbe.Cls) Type = @match(k) {
+        fn Kw() => u32;
+        fn Kl() => u64;
+        fn Ks() => f32;
+        fn Kd() => f64;
+        @default => void;  // :DoFoldInvalidArity
+    };
+    
+    :: enable_franca_ir_types(Ty(Qbe.O, Qbe.Cls));
+    hack :: fn($R: Type, $A0: Type, $A1: Type, $o: Qbe.O, $k: Qbe.Cls) FuncId = {
+        // HACK: arg of #ir needs to be one expression or it will try to just look at the identifiers and try to find them in the enum.
+        cast :: fn(a0: A0, a1: A1) R #ir({ (o, k) });  
+        cast
+    };
+
+    // This is an interesting test for the overhead of immediate_eval_expr. 
+    // The total overhead of do_fold using comptime vs just return(false) at the top of this function
+    // is ~200ms (1150 -> 1350, tho not too long ago i was getting 1s so maybe i broke something else too), 
+    // which is clearly too much. compiler needs to get better!
+    // Factoring allow() out into a function that gets compiled once brings out back under 1200ms. 
+    // (easy to experiment with: just move the definition of `allow` down to its callsite and see it get slower). 
+    // tracy says it's 80ms (like this) vs 200 ms (with allow() manually inlined into its callsite). 
+    // based on the same idea, it's better to calculate k0 twice than to hoist it out of the if and
+    // do a seperate constant evaluation for it even when the op isn't foldable which is unintuitive.  
+    // -- Feb 3, 2025
+
+    inline_for q_cls { $k |
+        ct_k :: k[];
+        R    :: get_type(ct_k);
+        @if(rt_k == ct_k) {
+            inline_for q_ops { $o |
+                ct_o :: o[];
+                @if(::allow(ct_o, ct_k)) {
+                    k0    :: argcls(ct_o, ct_k, 0);
+                    k1    :: argcls(ct_o, ct_k, 1);
+                    A0    :: get_type(k0);
+                    A1    :: get_type(k1);
+                    @if(rt_o == ct_o) {
+                        // TODO: this should work without this extra indirection 
+                        // cast :: fn(a0: A0, a1: A1) R #ir({ (ct_o, ct_k) });
+                        cast :: hack(R, A0, A1, ct_o, ct_k);
+                        
+                        // we need to put the args in the right type of register for the instruction (float vs int). 
+                        // passing these in as values and then just using a load to do a bitcast down here,
+                        // avoids actually generating code for the loads on every branch. 
+                        // for 32 bit (Kw, Ks) this relies on union putting all fields starting at the beginning and numbers being little endian. 
+                        a0 := ptr_cast_unchecked(i64, A0, a0&)[];
+                        a1 := ptr_cast_unchecked(i64, A1, a1&)[];
+                        R.ptr_from_raw(out)[] = cast(a0, a1);
+                        return();
+                    };
+                };
+            };
+        };
+    };
+};
+
+allow :: fn(ct_o: Qbe.O, ct_k: Qbe.Cls) bool = 
+    can_fold(ct_o) && ct_o != .sel1 && !@is(argcls(ct_o, ct_k, 0), .Kx, .Ke);

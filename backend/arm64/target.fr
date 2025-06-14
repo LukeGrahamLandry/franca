@@ -19,34 +19,24 @@ fn fill_target_arm(t: *Qbe.Target, apple: bool, $emit_only: bool) void = {
     t.apple = apple;
     t.emit_fn = Emit.emit_func_arm64;
     
-    t.gpr0 = Arm64Reg.R0.raw().intcast();
-    t.ngpr = (Arm64Reg.SP.raw() - Arm64Reg.R0.raw() + 1).intcast();
-    t.fpr0 = Arm64Reg.V0.raw().intcast();
-    t.nfpr = (Arm64Reg.V30.raw() - Arm64Reg.V0.raw() + 1).intcast();
+    t.gpr0 = Arm64Reg.R0.raw().zext();
+    t.ngpr = (Arm64Reg.SP.raw() - Arm64Reg.R0.raw() + 1).zext();
+    t.fpr0 = Arm64Reg.V0.raw().zext();
+    t.nfpr = (Arm64Reg.V30.raw() - Arm64Reg.V0.raw() + 1).zext();
     t.rglob = BIT(Arm64Reg.FP.raw()).bit_or(BIT(Arm64Reg.SP.raw())).bit_or(BIT(Arm64Reg.PLA.raw())).bit_or(BIT(Arm64Reg.IP1.raw()));
     
     // can't use x18 and reserve x17 for scratch in emit (swap, etc.)
-    NGPS: i32 : intcast(Arm64Reg.IP0.raw() - Arm64Reg.R0.raw() + 1 /* LR */ + 1);
-    NFPS: i32 : intcast((Arm64Reg.V7.raw() - Arm64Reg.V0.raw() + 1) + (Arm64Reg.V30.raw() - Arm64Reg.V16.raw() + 1));
+    NGPS: i32 : zext(Arm64Reg.IP0.raw() - Arm64Reg.R0.raw() + 1 /* LR */ + 1);
+    NFPS: i32 : zext((Arm64Reg.V7.raw() - Arm64Reg.V0.raw() + 1) + (Arm64Reg.V30.raw() - Arm64Reg.V16.raw() + 1));
     t.nrsave = init(@slice(NGPS, NFPS));
     assert_eq(intcast(NGPS + NFPS), arm64_rsave.len());
-    t.caller_saved = convert_to_i32_and_append_minus_1(Arm64Reg, arm64_rsave).as_ptr();
-}
-
-// can't give []Arm64Reg to the c code becuase they're i64 instead of i32.
-fn convert_to_i32_and_append_minus_1($T: Type, r: []T) []i32 #fold #generic = {
-    mem: List(i32) = list(r.len + 1, ast_alloc());
-    for r { r |
-        mem&.push(r.raw().int().intcast()); 
-    };
-    mem&.push(-1);
-    mem.items()
+    t.caller_saved = arm64_rsave.interpret_as_bytes().bytes_to_bit_mask();
+    @debug_assert_eq(t.caller_saved.count_ones(), NGPS + NFPS);
 }
 
 ::List(Arm64Reg);
 
-// TODO: why do i even have these as arrays instead of bit sets? does the order matter? 
-
+// Caller Saved
 arm64_rsave :: @const_slice(
     Arm64Reg.R0,  .R1,  .R2,  .R3,  .R4,  .R5,  .R6,  .R7,
             .R8,  .R9,  .R10, .R11, .R12, .R13, .R14, .R15,
@@ -56,45 +46,40 @@ arm64_rsave :: @const_slice(
             .V24, .V25, .V26, .V27, .V28, .V29, .V30,
 );
 
+// Callee Saved
 arm64_rclob :: @const_slice(
           Arm64Reg.R19, .R20, .R21, .R22, .R23, .R24, .R25, .R26, .R27, .R28,
              .V8,  .V9, .V10, .V11, .V12, .V13, .V14, .V15,
 );
 
-arm64_clob_mask :: {  // TODO: same thing as caller_saved_bits
-    m: u64 = 0;
-    for arm64_rclob { r |
-        m = m.bit_or(BIT(r.raw()));
-    };
-    m
-};
+arm64_clob_mask :: arm64_rclob.interpret_as_bytes().bytes_to_bit_mask();
 
 fn is_float(r: Arm64Reg) bool #inline = 
     r.raw() >= Arm64Reg.V0.raw();
 
 fn int_id(r: Arm64Reg) u5 #fold = {
-    x := @as(i64) r.raw() - Arm64Reg.R0.raw();
+    x := @as(u8) r.raw() - Arm64Reg.R0.raw();
     @debug_assert_lt(x, 32, "not an int reg");
-    x
+    @as(i64) x.zext()
 } 
 
 fn float_id(r: Arm64Reg) u5 #inline = 
-    @as(i64) r.raw() - Arm64Reg.V0.raw();
+    @as(i64) zext(@as(u8) r.raw() - Arm64Reg.V0.raw());
 
 // TODO: debug_assert tmp and in range
 // TODO: you lose the type hint for @bits if you inline this
 fn int_reg(r: Qbe.Ref) u5 = {
     @debug_assert(r.rtype() == .RTmp, "int_reg of non-tmp %", r.rtype());
-    @as(i64) int_id(@as(Arm64Reg) r.val())
+    @as(i64) int_id(@as(Arm64Reg) @as(u8) trunc r.val())
 }
     
 fn float_reg(r: Qbe.Ref) u5 = 
-    @as(i64) float_id(@as(Arm64Reg) r.val());
+    @as(i64) float_id(@as(Arm64Reg) @as(u8) trunc r.val());
 
 // Note: these numbers are NOT the ones you encode in the instructions. ints are of by 1, floats are off by 1+32
 //        it's nice to be able to zero init stuff and have that as a sentinal value. (tmp.phi, arrays in rega)
 //        TMP(0) is QbeNull
-Arm64Reg :: @enum(i64) (
+Arm64Reg :: @enum(u8) (
     RXX,
      R0,  R1,  R2,  R3,  R4,  R5,  R6,  R7,  
      R8,  R9, R10, R11, R12, R13, R14, R15, 

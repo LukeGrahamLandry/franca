@@ -400,81 +400,12 @@ fn try_fold(op: Qbe.O, cls: Qbe.Cls, cl: *Qbe.Con, cr: *Qbe.Con) ?Qbe.Con = {
     (Some = c)
 }
 
-// For each valid combintion of op + output type, just generate the code to do the thing. 
-// This is more magic but also less verbose and less error prone. 
-// TODO: remove this (in favour of do_fold_new) but keep it as a test 
-fn do_fold_old(rt_o: Qbe.O, rt_k: Qbe.Cls, out: rawptr, a0: i64, a1: i64) void = {
-    ops :: Qbe.O.get_cases();
-    cls :: @const_slice(Qbe.Cls.Kw, .Kl, .Ks, .Kd);
-    get_type :: fn(k: Qbe.Cls) Type = @match(k) {
-        fn Kw() => u32;
-        fn Kl() => u64;
-        fn Ks() => f32;
-        fn Kd() => f64;
-        @default => void;  // :DoFoldInvalidArity
-    };
-    
-    :: enable_franca_ir_types(Ty(Qbe.O, Qbe.Cls));
-    hack :: fn($R: Type, $A0: Type, $A1: Type, $o: Qbe.O, $k: Qbe.Cls) FuncId = {
-        // HACK: arg of #ir needs to be one expression or it will try to just look at the identifiers and try to find them in the enum.
-        cast :: fn(a0: A0, a1: A1) R #ir({ (o, k) });  
-        cast
-    };
-    
-    // This is an interesting test for the overhead of immediate_eval_expr. 
-    // The total overhead of do_fold using comptime vs just return(false) at the top of this function
-    // is ~200ms (1150 -> 1350, tho not too long ago i was getting 1s so maybe i broke something else too), 
-    // which is clearly too much. compiler needs to get better!
-    // Factoring this expression out into a function that gets compiled once brings out back under 1200ms. 
-    // (easy to experiment with: just move the definition of `allow` down to its callsite and see it get slower). 
-    // tracy says it's 80ms (like this) vs 200 ms (with allow() manually inlined into its callsite). 
-    // based on the same idea, it's better to calculate k0 twice than to hoist it out of the if and
-    // do a seperate constant evaluation for it even when the op isn't foldable which is unintuitive.  
-    // -- Feb 3, 2025
-    allow :: fn(ct_o: Qbe.O, ct_k: Qbe.Cls) bool = 
-        can_fold(ct_o) && ct_o != .sel1 && !@is(argcls(ct_o, ct_k, 0), .Kx, .Ke);
-
-    inline_for cls { $k |
-        ct_k :: k[];
-        R    :: get_type(ct_k);
-        @if(rt_k == ct_k) {
-            inline_for ops { $o |
-                ct_o :: o[];
-                @if(::allow(ct_o, ct_k)) {
-                    k0    :: argcls(ct_o, ct_k, 0);
-                    k1    :: argcls(ct_o, ct_k, 1);
-                    A0    :: get_type(k0);
-                    A1    :: get_type(k1);
-                    @if(rt_o == ct_o) {
-                        // TODO: this should work without this extra indirection 
-                        // cast :: fn(a0: A0, a1: A1) R #ir({ (ct_o, ct_k) });
-                        cast :: hack(R, A0, A1, ct_o, ct_k);
-                        
-                        // we need to put the args in the right type of register for the instruction (float vs int). 
-                        // passing these in as values and then just using a load to do a bitcast down here,
-                        // avoids actually generating code for the loads on every branch. 
-                        // for 32 bit (Kw, Ks) this relies on union putting all fields starting at the beginning and numbers being little endian. 
-                        a0 := ptr_cast_unchecked(i64, A0, a0&)[];
-                        a1 := ptr_cast_unchecked(i64, A1, a1&)[];
-                        R.ptr_from_raw(out)[] = cast(a0, a1);
-                        return();
-                    };
-                };
-            };
-        };
-    };
-}
-
-// :UpdateBoot
-ENABLE_NEW_FOLD :: !IS_BOOTSTRAPPING && { c := current_compiler_context(); c'vtable'driver_abi_version >= 1131 };
-
-do_fold :: @if(ENABLE_NEW_FOLD, do_fold_new, do_fold_old);
-
 //
+// For each valid combintion of op + output type, just generate the code to do the thing. 
+// This is more magic but also less verbose and less error prone than just typing out a massive switch statement.
 // This is more verbose than using `inline_for` and `#ir` on individual functions but it compiles much faster (saves ~40ms, Jun 2025). 
 //
-
-fn do_fold_new(rt_o: Qbe.O, rt_k: Qbe.Cls, out: rawptr, a0: i64, a1: i64) void = {
+fn do_fold(rt_o: Qbe.O, rt_k: Qbe.Cls, out: rawptr, a0: i64, a1: i64) void = {
     impl :: gen_do_fold_impl();
     rt_o := intcast @as(i32) rt_o;  // waste. should allow J.switch on Cls.Kw
     i := @match(rt_k) {
@@ -488,6 +419,8 @@ fn do_fold_new(rt_o: Qbe.O, rt_k: Qbe.Cls, out: rawptr, a0: i64, a1: i64) void =
 }
 
 // TODO: this way of splitting by return type is a bit dumb because cmp returning Kw or Kl doesn't matter. 
+// TODO: make the frcmodule api less painful for small useages like this
+// TODO: automatically disable this when the frcmodule abi changes
 fn gen_do_fold_impl() ScopeId = {
     a := temp();
     fr := current_compiler_context();

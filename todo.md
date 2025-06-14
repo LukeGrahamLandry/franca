@@ -63,6 +63,8 @@ but it's uglier than just doing runtime dispatch if that's allowed (which it is 
 - arm64/emit.fr/loadaddr_bits() allow large offset in .Relocatable
 - rm64/emit.fr/fixup_arm64(): offset from dynamic import
 - isel5.ssa -w: fails with inlining disabled
+- (mem3.ssa, isel5.ssa) -w: fails when constant folding is disabled. 
+  `IR failed typecheck: invalid type for first operand RTmp:144 of add in block @4`
 
 ## don't rely on libc
 

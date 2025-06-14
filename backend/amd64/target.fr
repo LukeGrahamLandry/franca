@@ -20,16 +20,18 @@ fn fill_target_amd(t: *Qbe.Target, apple: bool) void = {
     ::List(X86cc);
     
     t.apple = apple;
-    t.gpr0 = Amd64Reg.RAX.raw();
+    t.gpr0 = zext Amd64Reg.RAX.raw();
     t.ngpr = 16; 
-    t.fpr0 = Amd64Reg.XMM0.raw();
-    t.nfpr = Amd64Reg.XMM14.raw() - Amd64Reg.XMM0.raw() + 1 /* reserve XMM15 */;
+    t.fpr0 = zext Amd64Reg.XMM0.raw();
+    t.nfpr = zext Amd64Reg.XMM14.raw() - Amd64Reg.XMM0.raw() + 1 /* reserve XMM15 */;
     t.rglob = BIT(Amd64Reg.RBP).bit_or(BIT(Amd64Reg.RSP));
-    t.caller_saved = convert_to_i32_and_append_minus_1(Amd64Reg, amd64_sysv_rsave).as_ptr();
+    t.caller_saved = amd64_sysv_rsave.interpret_as_bytes().bytes_to_bit_mask();
     t.nrsave&[0] = len(@slice(Amd64Reg.RAX, .RCX, .RDX, .RSI, .RDI, .R8, .R9, .R10, .R11)).trunc();
     t.nrsave&[1] = t.nfpr;
     t.memargs = amd64_memargs;
-    @assert_eq(amd64_sysv_rsave.len(), intcast(t.nrsave&[0] + t.nrsave&[1]), "nrsave");
+    nsave := intcast(t.nrsave&[0] + t.nrsave&[1]);
+    @assert_eq(amd64_sysv_rsave.len(), nsave, "nrsave");
+    @debug_assert_eq(t.caller_saved.count_ones(), trunc nsave);
 }
 
 // 
@@ -55,7 +57,8 @@ fn amd64_memargs(o: Qbe.O) i32 = {
     @panic("unknown op for amd64_memargs")
 }
 
-Amd64Reg :: @enum(i32) (
+// Note: these numbers are NOT the ones you encode in the instructions. ints are of by 1, floats are off by 1+16
+Amd64Reg :: @enum(u8) (
     RXX, // reserve zero for QbeNull
     
     // ints (ordered by encoding, NOT by usage in calling convention). 
@@ -74,6 +77,6 @@ amd_condition_codes :: @const_slice( // :CmpOrder
          .e, .ae, .a, .be, .b,  .ne, .np, .p
 );
 
-fn TMP(r: Amd64Reg) Qbe.Ref = TMP(r.raw().zext());
-fn BIT(r: Amd64Reg) u64 = BIT(r.raw().zext());
+fn TMP(r: Amd64Reg) Qbe.Ref = TMP(@as(i64) r.raw().zext());
+fn BIT(r: Amd64Reg) u64 = BIT(@as(i64) r.raw().zext());
 fn CALL(r: RCallAmd) Qbe.Ref = CALL(@as(i64) r.repr.zext());

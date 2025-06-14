@@ -3,6 +3,7 @@
 // note: for now the c code still calls its own version of many of these so you can't change the layout of BSet/QList!
 
 fn BIT(n: i64) u64 #inline = 1.shift_left(n);
+fn BIT(n: u8) u64 #inline = 1.shift_left(n.zext());
 fn SLOT(i: i64) Qbe.Ref #inline = ref(.RSlot, i.bit_and(0x1fffffff));
 fn TMP(i: i64)  Qbe.Ref #inline = ref(.RTmp, i);
 fn CALL(i: i64) Qbe.Ref #inline = ref(.RCall, i);
@@ -822,12 +823,19 @@ fn for(bs: *Qbe.BSet, $body: @Fn(i: i64) void) void = {
 fn for(bs: *Qbe.BSet, start: i64, $body: @Fn(i: i64) void) void = {
     t := start.shift_right_logical(6);
     range(t, bs.nt.zext()) { k |
-        b := bs.t.offset(k)[].bitcast();
-        while => b != 0 {
-            body(k * 64 + trailing_zeros(b));
-            bit := b.bit_and(-b);  // pick out the least significant bit
-            b = b.bit_xor(bit);    // unset that bit
-        };
+        b := bs.t.offset(k)[];
+        off := k * 64;
+        for_bits(b, fn(i) => body(off + i));
+    };
+}
+
+// iteration order is least significant first
+fn for_bits(b: u64, $body: @Fn(i: i64) void) void = {
+    b := bitcast b;
+    while => b != 0 {
+        body(trailing_zeros(b));
+        bit := b.bit_and(-b);  // pick out the least significant bit
+        b = b.bit_xor(bit);    // unset that bit
     };
 }
 
@@ -1178,6 +1186,30 @@ fn maybe_load(i: *Qbe.Ins) ?i32 = {
 
 fn size_of_load(i: *Qbe.Ins) i32 = {
     i.maybe_load().expect("valid op for size_of_load")
+}
+
+// TODO: silly
+fn find_cas(i: *Qbe.Ins, b: *Qbe.Blk) Ty(*Qbe.Ins, *Qbe.Ins) = {
+    // might not be directly the next instruction if we had to fixarg
+    @match(i.op()) {
+        fn cas0() => {
+            icas1 := i;
+            while => icas1.op() != .cas1 {  
+                @debug_assert(!identical(icas1, b.ins.ptr.offset(b.ins.len)), "missing cas1");
+                icas1 = icas1.offset(1);
+            };
+            (i, icas1)
+        }
+        fn cas1() => {
+            icas0 := i;
+            while => icas0.op() != .cas0 {  
+                @debug_assert(!identical(icas0, b.ins.ptr), "missing cas0");
+                icas0 = icas0.offset(-1);
+            };
+            (icas0, i)
+        }
+        @default => panic("expected cas");
+    }
 }
 
 ///////////////////////////////////////////////////////////////////////////////

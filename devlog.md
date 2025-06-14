@@ -6,6 +6,14 @@ let's cheat and make examples/terminal.fr(repl=true) not take 2 seconds to compi
 - compile_to_shader_source: 68 // shader compiler (for comptime)
 notably those are all things to aren't going to change if you're just working on the terminal program. 
 
+## (Jun 14)
+
+- continuing: t.finish_module not getting set on amd if the module is on the stack.
+  when i changed con repr, i changed `c0.bits.i += c1.bits.i * m;` to `c0.set_bits(c1.bits() * m);`, 
+  which is super not the same, just didn't matter because const folding happens earlier so you 
+  adding a symbol and a number doesn't show up. 
+- made Target.caller_saved a bit mask instead of an array
+
 ## (Jun 13)
 
 - need to make fold_constants optional if it's going to be using the module binary format, 
@@ -35,9 +43,13 @@ cause otherwise there's some parts i can never change since the source needs to 
     - i think that assertion is actually junk. like if it ends up being a local it's fine, i just shouldn't be storing 
       `increment` as a u32. and then i have to deal with how to encode the macho relocation if it's an import or relocatable, 
       but they're already a bit sketchy, my previous way can't do the u32 bits either. 
-  - qbe_frontend.fr amd: TODO
-  - (mem3.ssa, isel5.ssa) -w: TODO
-  - 3 of those were real bugs that i hadn't found yet, that's pretty good. 
+  - (mem3.ssa, isel5.ssa) -w: i think that's just because my handling of 32 bit target is unfinished and was getting lucky 
+    because of folding. so that should be fixed eventually but maybe it will happen for free when i get more serious about wasm. 
+  - qbe_frontend.fr amd
+    - but also #weak doesn't work with .Relocatable on amd? `-Wl,-undefined,dynamic_lookup` isn't doing the thing. 
+      needs REF_TO_WEAK flag that doesn't do anything on arm i guess, wild. 
+    - t.finish_module is 0x100000001 when you try to call it. set to the right thing at the start so so it's getting lost somehow? 
+      doesn't like that it's in a static somehow? that seems insane. but yeah it works if it's on the stack... for tomorrow
 
 ## (Jun 12)
 

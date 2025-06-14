@@ -35,6 +35,8 @@ Insl   :: @rec @struct(i: Qbe.Ins, link: *Insl);
 Params :: @struct(ngp: i32, nfp: i32, stk: i32);
 
 ::List(Qbe.O);
+
+// Parameters
 gpreg     :: @const_slice(Arm64Reg.R0, .R1, .R2, .R3, .R4, .R5, .R6, .R7);
 fpreg     :: @const_slice(Arm64Reg.V0, .V1, .V2, .V3, .V4, .V5, .V6, .V7);
 
@@ -165,10 +167,10 @@ fn ldregs(reg: *Arm64Reg, cls: *Qbe.Cls, n: u8, mem: Qbe.Ref, f: *Qbe.Fn) void =
     off := 0;
     range(0, n.zext()) { i |
         if off == 0 { 
-            f.emit(.load, cls.offset(i)[], TMP(reg.offset(i)[].raw()), mem, QbeNull);
+            f.emit(.load, cls.offset(i)[], TMP(reg.offset(i)[]), mem, QbeNull);
         } else {
             r := f.newtmp("abi", .Kl);
-            f.emit(.load, cls.offset(i)[], TMP(reg.offset(i)[].raw()), r, QbeNull);
+            f.emit(.load, cls.offset(i)[], TMP(reg.offset(i)[]), r, QbeNull);
             f.emit(.add, .Kl, r, mem, f.getcon(off));
         };
         off += if(is_wide(cls.offset(i)[]), => 8, => 4);
@@ -317,8 +319,8 @@ fn arm64_retregs(r: Qbe.Ref, p: *Array(i32, 2)) u64 = {
         p[0] = ngp.intcast();
         p[1] = nfp.intcast();
     };
-    ngp_mask := (1.shift_left(ngp) - 1).shift_left(Arm64Reg.R0.raw());
-    nfp_mask := (1.shift_left(nfp) - 1).shift_left(Arm64Reg.V0.raw());
+    ngp_mask := (1.shift_left(ngp) - 1).shift_left(zext Arm64Reg.R0.raw());
+    nfp_mask := (1.shift_left(nfp) - 1).shift_left(zext Arm64Reg.V0.raw());
     bit_or(ngp_mask, nfp_mask).bitcast()
 }
 
@@ -333,11 +335,11 @@ fn arm64_argregs(r: Qbe.Ref, p: *Array(i32, 2)) u64 = {
         p[0] = intcast(ngp + x8 + x9);
         p[1] = nfp.intcast();
     };
-    ngp_mask := (1.shift_left(ngp) - 1).shift_left(Arm64Reg.R0.raw());
-    nfp_mask := (1.shift_left(nfp) - 1).shift_left(Arm64Reg.V0.raw());
+    ngp_mask := (1.shift_left(ngp) - 1).shift_left(zext Arm64Reg.R0.raw());
+    nfp_mask := (1.shift_left(nfp) - 1).shift_left(zext Arm64Reg.V0.raw());
     b := bit_or(ngp_mask, nfp_mask);
-    b  = b.bit_or(x8.shift_left(Arm64Reg.R8.raw()));
-    b  = b.bit_or(x9.shift_left(Arm64Reg.R9.raw()));
+    b  = b.bit_or(x8.shift_left(zext Arm64Reg.R8.raw()));
+    b  = b.bit_or(x9.shift_left(zext Arm64Reg.R9.raw()));
     b.bitcast()
 }
 
@@ -421,7 +423,7 @@ fn selcall(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins, ilp: **Insl) void = {
         } else {
             sttmps(tmp&.as_ptr(), cr.cls&.items(), cr.nreg.zext(), i1.to, f);
             range(0, cr.nreg.zext()) { n |
-                r := TMP(cr.reg&[n].raw());
+                r := TMP(cr.reg&[n]);
                 f.emit(.copy, cr.cls&[n], tmp&[n], r, QbeNull);
             };
         };
@@ -527,7 +529,7 @@ fn selpar(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) Params = {
         typclass(cr&, type, gpreg, fpreg, f.globals);
         if cr.class.has(.Cptr) {
             f.retr = f.newtmp("abi", .Kl);  // :SetRetr
-            r8 := Arm64Reg.R8.raw();
+            r8: i64 = zext Arm64Reg.R8.raw();
             f.emit(.copy, .Kl, f.retr, TMP(r8), QbeNull);
             f.reg = f.reg.bit_or(BIT(r8));
         };
@@ -557,7 +559,7 @@ fn selpar(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) Params = {
                 f.emit(o, c.cls&[0], i.to, SLOT(-(off+2)), QbeNull);
                 off += c.size;
             } else {
-                f.emit(.copy, c.cls&[0], i.to, TMP(c.reg&[0].raw()), QbeNull);
+                f.emit(.copy, c.cls&[0], i.to, TMP(c.reg&[0]), QbeNull);
             }
         };
         c = c.offset(1);
@@ -720,7 +722,7 @@ fn with(a: *ArgClass, b: ArgClass) void #inline = {
     a[] = @as(ArgClass) @as(u8) (@as(i64) a[].raw().zext()).bit_or(b.raw().zext()).trunc();
 }
 
-fn TMP(r: Arm64Reg) Qbe.Ref #redirect(i64, Qbe.Ref);
+fn TMP(r: Arm64Reg) Qbe.Ref = TMP(@as(i64) r.raw().zext());
 
 fn sel_syscall_arm64(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) void = {
     count := ptr_diff(i0, i1);
