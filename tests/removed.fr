@@ -1,0 +1,38 @@
+// #target_os used to be part of the compiler but it's been removed in favour of just using runtime dispatch. 
+// this example is just a sanity check that it's possible to implement an api that works like the old one without help from the compiler. 
+// the only difference here is that all the branches will be compiled (unlike #target_os which checked BuildOptions.target_os_bitset). 
+// TODO: tho i suppose i could do that here too to prove the point more
+// this doesn't work with #const parameters but neither did the builtin version. 
+fn userspace_target_os() void #test = { 
+    TargetOs :: fn(fid: FuncId) FuncId = {
+        func := get_function_ast(fid, true, true, false, false);
+        ::tagged(@type func.body);
+        @ct_assert(func.body&.is(.Normal), func.loc, "invalid body");
+        template := const_eval(FuncId)(func.body.Normal);
+        
+        func.body.Normal = @{ 
+            @if(query_current_os() == .macos,
+                @[@literal template](Os.macos),
+                @[@literal template](Os.linux),
+            )
+        };
+        fid
+    };
+    
+    new_query_current_os :: TargetOs(fn(a: i64) Ty(Os, i64) = (fn($os) => {
+        it :: os;  // make sure it's a constant
+        (it, a * 2)
+    }));
+    
+    os, value := new_query_current_os(7);
+    @assert_eq(os, query_current_os());
+    assert_eq(value, 14);
+}
+
+// TODO: prove you can do #link_rename in userspace too. 
+//       (generate seperate #weak for each import)
+
+// TODO: other things on the chopping block:
+// - #syscall
+// - #redirect
+// - #asm #aarch64 #x86_bytes

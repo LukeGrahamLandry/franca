@@ -64,7 +64,7 @@ FRANCA_CACHE_PATH :: "target/franca/deps";
 // TODO: this is stupid. we can't just be execing random shit. 
 // TODO: don't directly dump stuff into the cache directory. 
 //       check hash at the beginning, do the work, check hash again, then rename it, 
-//       so you don't clobber another process that has the same dependency. 
+//       so you don't clobber another process that has the same dependency. t
 fn fetch_or_crash(url: Str, zip_size_bytes: i64, sha256_hash: Str, HACK_name: Str) Str = {
     make_dirs_or_crash(FRANCA_CACHE_PATH);
     
@@ -87,14 +87,16 @@ fn fetch_or_crash(url: Str, zip_size_bytes: i64, sha256_hash: Str, HACK_name: St
         @eprintln(">>> downloading [%]...", url);
         ok, out, err := exec_and_catch("curl", @slice(url, "-s", "-L"), temp());
         @assert(ok, "failed curl %\n%", url, err.items());
+        
+        @eprintln(">>> verifying [%]...", zip_file_path);
         @assert_eq(zip_size_bytes, out.len, "bad size: %", url);
-        // TODO: mkdir
+        digest := Sha256'hex(out.items());
+        @assert_eq(digest, sha256_hash, "bad hash %", url);
+        
         write_entire_file_or_crash(zip_file_path, out.items());
     };
     @eprintln(">>> unpacking [%]...", zip_file_path);
-    // TODO: i have my own backend/macho/sha256.fr; use it
-    ok, out, err := exec_and_catch("shasum", @slice("-a", "256", zip_file_path), temp());
-    @assert(out.items().contains(sha256_hash), "bad hash %", url);
+    
     if extension == "zip" {
         ok, out, err := exec_and_catch("unzip", @slice("-oq", "-d", FRANCA_CACHE_PATH, zip_file_path), temp());
     } else {

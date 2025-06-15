@@ -9,6 +9,10 @@ notably those are all things to aren't going to change if you're just working on
 ## (Jun 15)
 
 - stop using libc rand(). found a short one from the internet that seems to produce numbers. what more can i ask for. 
+- fetch_or_crash: don't exec `shasum`, just use my own Sha256 implementation
+- it's nontrivial to find a c program that can open a zip file and is not distributed in the form of a zip file. 
+- did userspace_target_os() as a tiny test just to make sure it's not a big expressiveness loss
+- removed #link_rename, same rational as #target_os, but easier, last usage was just for objc_msgSend. 
 
 ## (Jun 14)
 

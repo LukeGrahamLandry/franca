@@ -740,26 +740,6 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                 @err_assert(!did_import, "#weak must come before #import/#libc, sorry") return;
                 is_weak_import = true;
             };
-            // :link_rename
-            @case(Flag.link_rename.ident()) => {
-                self.last_loc = func.loc;
-                @err_assert(!did_import, "#link_rename must come before #import/#libc, sorry") return;
-                
-                // TODO: for now we only support this for special body (like imports), you should be allowed to do it for exports too tho. 
-                // :SLOW
-                old := self.dispatch.enclosing_function;
-                self.dispatch.enclosing_function = .None;
-                link_rename_arg := self.env.link_rename_arg.expect("no #link_rename during bootstrap");
-                link_rename_arg_ptr := self.ptr_ty(link_rename_arg);
-                f_ty: FnType = (arg = link_rename_arg_ptr, ret = void, unary = true);
-                renamer_func_ty := self.intern_type(FnPtr = (ty = f_ty));
-                value := @unwrap(tag.non_void_arg(), "#link_rename requires arg") return;
-                renamer_func_ptr := @check(self.immediate_eval_expr(value, renamer_func_ty)) return;
-                renamer_func_ptr := i64.assume_cast(renamer_func_ptr&)[];
-                func.set_flag(.LinkRename);
-                value.set(self.to_values(i64, renamer_func_ptr), renamer_func_ty);
-                self.dispatch.enclosing_function = old;
-            };
             @case(Flag.syscall.ident()) => {
                 good = true;
                 NUM_TARGETS :: 3;
@@ -798,7 +778,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
 fn create_import_body(self: *SelfHosted, func: *Func, fid: FuncId, lib_name: Symbol, weak: bool) CRes(void) = {
     handle2 := self.comptime_libraries&.get(lib_name);
     is_libc := lib_name == Flag.libc.ident(); 
-    name := self.get_comptime_link_name(func);
+    name := self.pool.get(func.name);
     while => handle2 { handle |
         if handle.get(name) { addr |
             self.put_jitted_import(fid, addr);
@@ -826,15 +806,6 @@ fn create_import_body(self: *SelfHosted, func: *Func, fid: FuncId, lib_name: Sym
     impl.weak = weak;
     @try(self.create_jit_shim(fid)) return;
     .Ok
-}
-
-// :link_rename
-// TODO: allow #libc before #link_rename
-fn get_comptime_link_name(self: *SelfHosted, func: *Func) Str = {
-    self.comp().check_link_rename(func.name, func, (
-        arch = self.env.comptime_arch, 
-        os = self.env.comptime_os,
-    ))
 }
 
 ::tagged(ResultType);
@@ -3323,7 +3294,7 @@ fn resolve_in_overload_set(self: *SelfHosted, f_ty: FnType, i: OverloadSet, loc:
 }
 
 // TODO: you want something more powerful than this so you can have a function thats inline asm on some arch/os but normal code on others. 
-// TODO: this discards link_renamer and any other tags that have special meaning. 
+// TODO: this discards any tags that have special meaning. 
 // TODO: simplier tests that use this. right now its just the compiler. 
 fn do_merges(self: *SelfHosted, options: *List(FuncId), os: OverloadSet) Maybe(void) = {
     overloads := self.dispatch.overloads&.nested_index(os.as_index());
@@ -4258,6 +4229,7 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
                 if res { f |
                     // TODO: this is wrong, you need to const coerce before doing it and not lose information if there's a type error. 
                     //       but without this you get an infinite loop on #link_rename
+                    //       TODO: revisit this, #link_rename doesn't exist anymore but whatever the problem it revealed probably does -- Jun 15, 2025
                     // TODO: make a test that fails if you just do this now!
                     expr.expr = (Value = (bytes = f._0&.clone(self.get_alloc()), coerced = false));
                     expr.ty = f._1;

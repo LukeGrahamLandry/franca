@@ -42,7 +42,7 @@ Sym :: @struct {
     align_log2: u8;
     name: Ref(u8);  // TODO: having names is kinda dumb
     // TODO: this should parse when inlined but then need to :UpdateBoot :Compiler
-    P :: @union(fnc: Fnc, dat: Dat, imp: Imp);  
+    P :: @union(fnc: Fnc, dat: Dat, imp: Imp, asm: Asm);  
     payload: P #use;  // active variant depends on segment
 };
 
@@ -51,8 +51,13 @@ Seg :: @enum(u8) (
     Code,  // payload: Fnc;
     ConstantData, MutableData, ZeroInitData,  // payload: Dat;
     Import,  // payload: Imp;
-    MachineCode,  // payload: Dat; but goes in Segment.Code
+    MachineCode,  // payload: Asm; goes in Segment.Code
 );
+
+Asm :: @struct {
+    code: Ref(u8);
+    arch: Arch;
+};
 
 // Currently i only save right before emitting machine code, 
 // so no need for phi/typ/switch. Those can be added later when i want to do 
@@ -351,8 +356,10 @@ fn push(self: *Writer, m: *QbeModule, d: *Dat2) void = {
 fn push_asm(self: *Writer, m: *QbeModule, code: []u8, id: Qbe.Sym) void = {
     id := self.map_sym(m, id);
     self.sym[id].segment = .MachineCode;
-    self.sym[id].dat.bytes = (off = self.str.len.trunc(), count = code.len.trunc());
-    self.str&.push_all(code);
+    self.sym[id].asm = (
+        code = self.push(code),
+        arch = m.goal.arch,
+    );
 }
 
 // TODO: this shouldn't suck this bad

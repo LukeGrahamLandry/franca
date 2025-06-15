@@ -29,28 +29,17 @@ fn is_nil(self: ObjCId) bool =
 //       note: that "shim" is the bounce_body thing which compiles to nothing so doesn't fuck with the arguments, 
 //       distinct from the jit_shim which needs to save the arguments while it calls into the compiler so doesn't 
 //       work at all and thus creates the need for #avoid_shim. this is... unfortunate. 
-objc_msgSend :: fn(/* ObjCId, sel, ... good luck */) void #import("objc") #noinline #avoid_shim; 
-objc_msgSendSuper :: fn(/* *ObjCSuper, sel, ... good luck */) void #import("objc") #noinline #avoid_shim;  
+objc_msgSend :: fn(/* ObjCId, sel, ... good luck */) void #weak #import("objc") #noinline #avoid_shim; 
+objc_msgSendSuper :: fn(/* *ObjCSuper, sel, ... good luck */) void #weak #import("objc") #noinline #avoid_shim;  
 
 // These are only a thing on amd64 (arm64 just always uses the normal versions). 
-objc_msgSend_stret       :: fn() void #link_rename(only_stret_on_applex8664) #import("objc") #noinline #avoid_shim; 
-objc_msgSendSuper_stret  :: fn() void #link_rename(only_stret_on_applex8664) #import("objc") #noinline #avoid_shim;
-only_stret_on_applex8664 :: fn(req: *LinkRenameArg) void = {
-    req.out.push_all(req.old_name);
-    @debug_assert(req.old_name.ends_with("_stret"));
-    if !(req.target.arch == .x86_64 && req.target.os == .macos) { 
-        req.out.len -= 6;
-    };
-};
+objc_msgSend_stret       :: fn() void #weak #import("objc") #noinline #avoid_shim; 
+objc_msgSendSuper_stret  :: fn() void #weak #import("objc") #noinline #avoid_shim;
 
-// :ADistinctionWithoutADifference 
-// it is important that this returns a FuncId not a rawptr and the cast happens in the runtime expression 
-// TODO: think of a less hacy way to fix this
-choose_objc_dispatcher :: fn(super: bool, ret_ty: Type) FuncId = {
-    callee := @if(super, objc_msgSendSuper, objc_msgSend);
-    callee_stret := @if(super, objc_msgSendSuper_stret, objc_msgSend_stret);
-    if size_of(ret_ty) > 16 {  // TODO: are we sure this is the critera? abi says you can return in 2 registers
-        callee = callee_stret;
+choose_objc_dispatcher :: fn($super: bool, $ret_ty: Type) rawptr = {
+    callee := @as(rawptr) @if(super, objc_msgSendSuper, objc_msgSend);
+    @if(size_of(ret_ty) > 16) if query_current_arch() == .x86_64 {
+        callee = @as(rawptr) @if(super, objc_msgSendSuper_stret, objc_msgSend_stret);
     };
     callee
 };
@@ -157,13 +146,12 @@ fn objc_call_impl(a: FatExpr, super: bool) FatExpr = {
         };
     };
     
-    callee := choose_objc_dispatcher(super, ret_ty);
     arg_ty := Ty(args_type.items());
     selector := selector.items().sym().c_str();
     args[1] = @{ SEL(@[@literal selector]) };  
     arg_pattern: FatExpr = (expr = (Tuple = args.as_raw()), ty = UnknownType, done = false, loc = a.loc);
     xx := @{
-        f: rawptr = @[@literal callee];  // :ADistinctionWithoutADifference
+        f: rawptr = choose_objc_dispatcher(@[@literal super], @[@literal ret_ty]);
         f := assume_types_fn(@[@literal arg_ty], @[@literal ret_ty], f);
         f(@[arg_pattern])
     };
@@ -215,7 +203,6 @@ fn objc_set(self: FatExpr, pat: FatExpr) FatExpr #macro = as_var self { self |
         body = @{
             @[body];
             // No need to choose_objc_dispatcher() here because setters always return void. 
-            // but you still need to be mindful of :ADistinctionWithoutADifference lest you call the wrong function. 
             f: rawptr = objc_msgSend;
             f := assume_types_fn(@[@literal arg], void, f);
             f(@[self], SEL(@[@literal sel]), @[b.default]);
@@ -596,11 +583,10 @@ fn objc_method_import_body(T: Type, fid: FuncId, is_static: bool) FatExpr = {
         arg_types&.push(pars[i].ty.Finished);
     };
     
-    callee := choose_objc_dispatcher(false, f_ty.ret);
     arg_ty := Ty(arg_types.items());
     arg_pattern: FatExpr = (expr = (Tuple = args.as_raw()), ty = UnknownType, done = false, loc = func.loc);
     xx := @{
-        f: rawptr = @[@literal callee];  // :ADistinctionWithoutADifference
+        f: rawptr = choose_objc_dispatcher(false, @[@literal f_ty.ret]);
         f := assume_types_fn(@[@literal arg_ty], @[@literal f_ty.ret], f);
         f(@[arg_pattern])
     };

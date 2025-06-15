@@ -42,17 +42,25 @@ delete the rest. thing to think about is that you want to union those between di
 different subsets of the same resources. 
 - run tests in landlock so it's less scary to miscompile something that's doing random syscalls
 - remove from the language:
-  - #link_rename kinda does the same thing (only used for objc_msgSend). remove that too!
   - #asm needs to include both versions and dispatch at runtime
   - remove #syscall from the frontend (i still think it's fine to do the calling convention part in the backend for now)
     but i want user code to choose the numbers so you don't have to recompile. 
-- probably want to prove you can reimplement #target_os in userspace, 
-but it's uglier than just doing runtime dispatch if that's allowed (which it is now)
 - document #weak: docs/(annotations.md, imports.md)
 - deal with `NOSYS`
 - apple has different c variadic abi. that's pretty unfortunate for my grand plans. 
   it feels pretty invasive to have the backend compile two versions of anything variadic. 
 - i think it's fine to just do apple_extsb always. the other one just drops 8/16 args and i don't use them anyway. 
+- #asm
+  - examples/toy/cpuid
+  - startup: get_fp, fix_stack
+  - jump: try/throw 
+  - query_current_arch
+  - apple_thread_jit_write_protect: MSR
+  - atomics: fence
+  - tests/inline_asm_jit
+  - tests/intrins
+  - test/multiple_stacks
+  - #syscall kinda
 
 ## backend 
 

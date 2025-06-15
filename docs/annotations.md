@@ -144,14 +144,6 @@ Requires `#asm` and targets amd64. The body is a function `fn(out: *List(u8)) vo
 Whatever bytes you append to that list will be inserted into your program as machine code. 
 You can import `@/backend/amd64/bits.fr` for definitions of some useful constants. 
 
-### link_rename
-
-Sometimes an imported function will have random name mangling applied on different platforms. 
-For example: <https://github.com/rust-lang/libc/issues/414>. 
-The argument is a function that takes a `LinkRenameArg` which gives you some 
-information about the target environment and the opportunity to transform the name 
-of the function. 
-
 ### import
 
 This function is implemented in an external library. The argument is a string (the name of the library to import from). 
@@ -322,7 +314,7 @@ just taking out the slow code.
 
 ## Planned Changes
 
-(`asm`, `aarch64`, `x86_bytes`, `import`, `target_os`, `link_rename`, `syscall`, `redirect`), 
+(`asm`, `aarch64`, `x86_bytes`, `import`, `syscall`, `redirect`), 
 are all kinda the same. you want to have some comptime code run to make a desision about 
 what to replace the implementation of the function with and it needs to access some 
 configuration/target information. there should be some more unified system for these. 
