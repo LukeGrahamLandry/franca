@@ -19,14 +19,15 @@
 Move :: @enum(u8) (Left, Right, Up, Down);
 Rule :: @struct(symbol: u8, state: u8, move: Move);
 
-fn randomize(rules: []Rule, n_symbols: i64, n_states: i64) void = {
-    rand :: fn() i64 #libc;  // TODO: don't use libc for this. bleh. 
-    @debug_assert_eq(rules.len, n_symbols * n_states);
+fn randomize(rules: []Rule, n_symbols: i64, n_states: i64, rng: *Random.Rng) void = {
+    @debug_assert(rules.len == n_symbols * n_states && n_symbols < 256 && n_states < 256);
+    rand :: fn(max: i64) u8 => rng.next().bitcast().abs().mod(max).trunc();
+    
     each rules { it |
         it[] = (
-            symbol = rand().abs().mod(n_symbols).trunc(),
-            state = rand().abs().mod(n_states).trunc(),
-            move = @as(Move) @as(u8) rand().mod(Move.enum_count()).trunc(),
+            symbol = rand(n_symbols),
+            state = rand(n_states),
+            move = @as(Move) @as(u8) rand(Move.enum_count()),
         );
         @debug_assert_lt(it.symbol, n_symbols.trunc());
     };
@@ -57,14 +58,14 @@ fn tick(canvas: []u8, state: *u8, i: *i64, rules: []Rule, n_symbols: i64, w: i64
 }
 
 main :: fn() void = {
-    srand :: fn(seed: u32) void #libc;
-    srand(12345678);
+    ::Random;
+    rng := Random.xoshiro256SS.new(12345678);
     
     a := temp();
     w, n_symbols, n_states, ticks_per_frame, delay := (40, 3, 4, 1000, 10);
     canvas := a.alloc_zeroed(u8, w*w);
     rules  := a.alloc(Rule, n_symbols * n_states);
-    randomize(rules, n_symbols, n_states);
+    randomize(rules, n_symbols, n_states, rng&);
     
     state: u8 = 0;
     pos := 0;
@@ -111,7 +112,7 @@ main :: fn() void = {
                     return();
                 };
                 @case(" ".ascii()) => {
-                    randomize(rules, n_symbols, n_states);
+                    randomize(rules, n_symbols, n_states, rng&);
                     pos = 0;
                     state = 0;
                     canvas.set_zeroed();

@@ -30,6 +30,9 @@ available to every program (you can access them with `import()` or `#use`).
 - jump: dynamic nonlocal returns (setjmp/longjmp)
 - sort
 - args: very simple/limited cli argument parsing by reflecting on struct fields 
+- mix
+  - sha256
+  - random: `xoshiro256**`
 
 ## backend
 

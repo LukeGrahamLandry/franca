@@ -1,0 +1,59 @@
+Rng :: @struct {
+    next: Next;
+    s: Array(u64, 4);
+    Next :: @FnPtr(state: *Array(u64, 4)) u64;
+};
+
+fn next(self: *Rng) u64 = 
+    self'next(self.s&); 
+
+fn new_seeded(next: Rng.Next) Rng = 
+    next.new(import("@/lib/sys/process.fr")'timestamp().bitcast());
+
+// if you pass the same seed to the same algorithm, you will get the same sequence of numbers. 
+fn new(next: Rng.Next, seed: u64) Rng = {
+    // use a fancy hash function to spread a small seed out into more bytes for good luck. 
+    // probably overkill but it's important that the resultant seed never be 0. 
+    seed := seed&.slice(1).interpret_as_bytes();
+    seed := Sha256'hash(seed);
+    seed := bit_cast_unchecked(Array(u32, 8), Array(u64, 4), seed);
+    (next = next, s = seed)
+}
+
+// fill `buf` with random bytes. 
+fn bytes(self: *Rng, buf: []u8) void = {
+    big := buf.len.shift_right_logical(3);
+    big: []u64 = (ptr = ptr_cast_unchecked(u8, u64, buf.ptr), len = big);
+    // TODO: is alignment real? 
+    
+    each big { b |
+        b[] = self.next();
+    };
+    
+    if buf.len.bit_and(7) != 0 {
+        small: []u8 = buf.rest(big.len * 8);
+        value := self.next();
+        each small { b |
+            b[] = value.trunc();
+            value = value.shift_right_logical(8);
+        };
+    };
+}
+
+// this is what came up when i googled "best psudorandom numbers" ¯\_(ツ)_/¯
+// https://prng.di.unimi.it/
+
+xoshiro256SS :: fn(s: *Array(u64, 4)) u64 = {
+    result := s[1].mul(5).rotate_left(7).mul(9);
+    t := s[1].shift_left(17);
+    
+    s[2] = s[2].bit_xor(s[0]);
+    s[3] = s[3].bit_xor(s[1]);
+    s[1] = s[1].bit_xor(s[2]);
+    s[0] = s[0].bit_xor(s[3]);
+    
+    s[2] = s[2].bit_xor(t);
+    s[3] = s[3].rotate_left(45);
+
+    result
+}

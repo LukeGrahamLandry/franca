@@ -6,6 +6,10 @@ let's cheat and make examples/terminal.fr(repl=true) not take 2 seconds to compi
 - compile_to_shader_source: 68 // shader compiler (for comptime)
 notably those are all things to aren't going to change if you're just working on the terminal program. 
 
+## (Jun 15)
+
+- stop using libc rand(). found a short one from the internet that seems to produce numbers. what more can i ask for. 
+
 ## (Jun 14)
 
 - continuing: t.finish_module not getting set on amd if the module is on the stack.

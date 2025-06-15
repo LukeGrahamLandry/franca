@@ -76,7 +76,6 @@ but it's uglier than just doing runtime dispatch if that's allowed (which it is 
 - fetch_or_crash: stop exec-ing random shit! that's even worse than depending on libc!
 - examples/bf: putchar, getchar
 - (epicyles, geo): fmod
-- (farm_game, pi, predict, turingart): rand
 - (graphics): cosf, sinf
 - dlsym, dlopen, dlclose
 

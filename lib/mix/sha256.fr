@@ -1,12 +1,12 @@
 // Adapted from https://en.wikipedia.org/wiki/SHA-2
 // Creative Commons Attribution-ShareAlike 4.0 License.
 
-fn sha256_hex(message: []u8) []u8 = {
-    digest := sha256(message);
+hex :: fn(message: []u8) []u8 = {
+    digest := hash(message);
     s := u8.list(temp());
     @fmt(s&, "%", digest&);
     s.items()
-}
+};
 
 // TODO: if we're doing this then it should be a unique type
 fn display(digest: *Digest, out: *List(u8)) void = {
@@ -20,7 +20,7 @@ fn display(digest: *Digest, out: *List(u8)) void = {
 Digest :: Array(u32, 8);
 
 // TODO: there's special instructions for the round loop in both amd64 and arm64
-fn sha256(message: []u8) Digest = {
+hash :: fn(message: []u8) Digest = {
     h: Array(u32, 8) = :: u32.map_in_place(eratosthenes(20), 
         fn(x) => x.float().sqrt().fraction32())
         .init();
@@ -29,7 +29,7 @@ fn sha256(message: []u8) Digest = {
     chunk_count := message.len / 64;
     range(0, chunk_count) { _ | 
         chunk := ptr_cast_unchecked(u8, Array(u8, 64), message.ptr);
-        sha256_update(h&, chunk);
+        update(h&, chunk);
         message.ptr = message.ptr.offset(64);
     };
     message.len -= chunk_count * 64;
@@ -43,24 +43,25 @@ fn sha256(message: []u8) Digest = {
         // We have space for just one chunk of padding. 
     } else {
         extra.rest(message.len).set_zeroed();
-        sha256_update(h&, chunk&);
+        update(h&, chunk&);
         message.len = 0;
     };
     extra.rest(message.len).set_zeroed();
-    // TODO: is the alignment thing real?
+    // TODO: is alignment real?
     ptr_cast_unchecked(u8, i64, extra.ptr.offset(64-8))[] = byte_swap(length_in_bits);
-    sha256_update(h&, chunk&);
+    update(h&, chunk&);
     
     u32.map_in_place(h&.items(), fn(x) => byte_swap(x));
     h
-}
+};
 
-fn sha256_update(h: *Array(u32, 8), chunk: *Array(u8, 64)) void = {
+update :: fn(h: *Array(u32, 8), chunk: *Array(u8, 64)) void = {
     round_constants :: u32.map_in_place(eratosthenes(312), 
         fn(x) => x.float().cbrt().fraction32());
     
     w := @uninitialized Array(u32, 64); w := w&;
     operator_index :: index_unchecked;
+    rotr :: rotate_right;
     
     // TODO: is alignment real? 
     chunk := ptr_cast_unchecked(@type chunk[], Array(u32, 16), chunk);
@@ -96,38 +97,35 @@ fn sha256_update(h: *Array(u32, 8), chunk: *Array(u8, 64)) void = {
     range(0, 8) { i |
         h[i] += v[i];
     };
-}
+};
 
 // TODO: something broken with ::assert_eq(a, b) outside a block at top level :fucked
 
-fn sha256_examples() #test = {
-    ::assert_eq(u32);
-    assert_eq(0x78563412, byte_swap(0x12345678));
-    assert_eq(0x78123456, rotr(0x12345678, 8));
+examples :: fn() void = {  // called from @/tests/examples.fr
     // python3 -c "import hashlib; m = hashlib.sha256(); m.update(bytearray(64)); print(m.hexdigest());"
-    assert_eq("f5a5fd42d16a20302798ef6ed309979b43003d2320d9f0e8ea9831a92759fb4b", sha256_hex(temp().alloc_zeroed(u8, 64)));
-    assert_eq("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", sha256_hex(""));
+    assert_eq("f5a5fd42d16a20302798ef6ed309979b43003d2320d9f0e8ea9831a92759fb4b", Sha256'hex(temp().alloc_zeroed(u8, 64)));
+    assert_eq("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", Sha256'hex(""));
     MSG :: "SHA-2 (Secure Hash Algorithm 2) is a set of cryptographic hash functions designed by the United States National Security Agency (NSA) and first published in 2001.[3][4] They are built using the Merkle–Damgård construction, from a one-way compression function itself built using the Davies–Meyer structure from a specialized block cipher.";
-    assert_eq("b15875a8710ab7ac96fb5b5623041fa46a3acd015ddf05c71b6b98f847f944b8", sha256_hex(MSG));
+    assert_eq("b15875a8710ab7ac96fb5b5623041fa46a3acd015ddf05c71b6b98f847f944b8", Sha256'hex(MSG));
 };
 
 // Stuff for computing the constants because I hate just pasting tables. 
 
-fn map_in_place($T: Type, arr: []T, $f: @Fn(x: T) T) []T #generic = {
+map_in_place :: fn($T: Type, arr: []T, $f: @Fn(x: T) T) []T #generic = {
     each(arr, fn(x) => { x[] = f(x[]); });
     arr
-}
+};
 
 // First 32 bits of the fractional component of x. 
 // Used for generating magic numbers for some hashing algorithms. 
-fn fraction32(x: f64) u32 = {
+fraction32 :: fn(x: f64) u32 = {
     x := x - floor(x);
     x := int(x * float(1.shift_left(32)));
     x.trunc()
-}
+};
 
 // calculate the prime numbers below n
-fn eratosthenes($n: i64) []u32 #fold = {
+eratosthenes :: fn($n: i64) []u32 #fold = {
     Bits :: import("@/lib/collections/bit_set.fr").StaticBitSet;
     unprime: Bits(n) = empty();
     out := u32.list(ast_alloc());
@@ -149,9 +147,4 @@ fn eratosthenes($n: i64) []u32 #fold = {
     };
     
     out.items()
-}
-
-fn rotr(x: u32, amount: i64) u32 #ir(.rotr, .Kw); 
-
-fn float(x: u32) f64 = 
-    float(@as(i64) x.zext()); 
+};
