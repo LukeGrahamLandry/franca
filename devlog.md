@@ -13,6 +13,13 @@ notably those are all things to aren't going to change if you're just working on
 - it's nontrivial to find a c program that can open a zip file and is not distributed in the form of a zip file. 
 - did userspace_target_os() as a tiny test just to make sure it's not a big expressiveness loss
 - removed #link_rename, same rational as #target_os, but easier, last usage was just for objc_msgSend. 
+- trying to sequester all the syscall definitions as a chance to make it more clear which places use them, 
+  now they have to explicitly reference that scope. 
+  - call exit() less often. seems rude to not call the panic hook. 
+  - something of those changes made `examples/import_c/cc.fr -frc_inlinable` fail a bounds check. 
+    changing compilation order made one of the CodegenEntry.Bounce end up in there and not doing 
+    default_init() when !did_regalloc is fine when the loader is expecting it but this was unequipped to deal somehow i guess. 
+    tho also, ow that i notice it, using QbeNull as sentinal for Bounce is bad if it can be mixed in with inlinable stuff. 
 
 ## (Jun 14)
 

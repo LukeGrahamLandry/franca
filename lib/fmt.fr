@@ -11,41 +11,38 @@ fn tfmt(arg: FatExpr) FatExpr #macro =
     @{ items(@format(@[arg]) temp()) };
 
 fn println(msg: Str) void = {
-    print(msg);
-    
-    // TODO: extra syscall is sad
-    new_line: u8 = 10.trunc();
-    print(@as(Str) (ptr = new_line&, len=1));
+    print_impl(STD_OUT, msg, true);
 }
 
 fn print(msg: Str) void = {
-    written := write(STD_OUT, msg.ptr, @as(usize) msg.len);
-    // TODO: confusing dependency
-    //assert_eq(msg.len, written.unwrap());
-    // TODO: check errno. loop if not all written. 
+    print_impl(STD_OUT, msg, false);
 }
 
 fn eprintln(msg: Str) void = {
-    eprint(msg);
-    
-    // TODO: extra syscall is sad
-    new_line: u8 = 10.trunc();
-    eprint(@as(Str) (ptr = new_line&, len=1));
+    print_impl(STD_ERR, msg, true);
 }
 
 fn eprint(msg: Str) void = {
-    written := write(STD_ERR, msg.ptr, msg.len);
-    // TODO: confusing dependency
-    //assert_eq(msg.len, written.unwrap());
-    // TODO: check errno. loop if not all written. 
+    print_impl(STD_ERR, msg, false);
 }
 
 // REMEMBER, you can't just open with flags .Write and then call this, it wont truncate the file!
 fn write(fd: *Fd, bytes: Slice(u8)) bool = {
-    written := write(fd[], bytes.ptr, bytes.len) || return(false);
+    print_impl(fd[], bytes, false)
+}
+
+fn print_impl(fd: Fd, msg: Str, $new_line: bool) bool = {
+    written := Syscall'write(fd, msg.ptr, msg.len) || return(false);
+    @if(new_line) {
+        // TODO: extra syscall is sad
+        new_line: u8 = 10.trunc();
+        new_line := @as(Str) (ptr = new_line&, len=1);
+        print_impl(fd, new_line, false);
+    };
+    // TODO: SysResult
     // TOOD: loop if not all written
     true
-}
+};
 
 fn write(self: *List(u8), bytes: Str) void = self.push_all(bytes);
 fn display(self: Str, writer: *List(u8)) void = writer.write(self);

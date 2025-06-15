@@ -49,10 +49,6 @@ fn open(path: CStr, flags: Mask(O)) SysResult(Fd) = {
 // the high bits of `flags` are platform specific. they'll be shifted down and passed directly. 
 // the low bits are remapped to the correct platform values. 
 fn openat(parent: Fd, path: CStr, flags: Mask(O), mode: Mask(S)) SysResult(Fd) = {
-    // not #libc because that's variadic, which we can do but is a bit annoying
-    // TODO: maybe that's the wrong choice for apple
-    openat :: fn(dirfd: Fd, pathname: CStr, flags: i64, mode: i64) i32 #syscall(56, 257, 463);
-    
     d := bit_and(flags, O.ACCMODE).bit_or(flags.shift_right_logical(32));
     flags := @match(current_os()) {
         fn macos() => fix_flags(Macos.O, O, d, flags);
@@ -61,7 +57,7 @@ fn openat(parent: Fd, path: CStr, flags: Mask(O), mode: Mask(S)) SysResult(Fd) =
     };
     
     errno()[] = 0/*HACK*/;
-    err := openat(parent, path, flags, mode);
+    err := Syscall'openat(parent, path, flags, mode);
     if err < 0 {
         return Fd.fix_errno(intcast err);
     };
@@ -96,17 +92,8 @@ fn stat(path: CStr, out: *Stat) SysResult(void) =
     fstatat(AT'FDCWD(), path, out, 0);
 
 fn fstatat(parent: Fd, path: CStr, out: *Stat, flags: i64) SysResult(void) = {
-    SysStat :: @union(l: Linux.Stat, m: Macos.Stat);
-    fstatat :: fn(parent: Fd, path: CStr, out: *SysStat, flags: i64) i64 #syscall(79, 262, 470) #libc;
-    @"fstatat$INODE64" :: fn(parent: Fd, path: CStr, out: *SysStat, flags: i64) i64 #syscall(_, _, 470) #weak #libc;
-    
-    r := @uninitialized SysStat;
-    
-    @"🤡" := current_os() == .macos && current_arch() == .x86_64;
-    f := @if(::(IS_BOOTSTRAPPING || (!FEATURE_WEAK_SYMBOLS && current_os() == .linux)),  // :UpdateBoot
-        @as(AsFnPtr(fstatat)) fstatat,
-        if_func(@"🤡", @"fstatat$INODE64", fstatat),
-    );
+    r := @uninitialized Syscall'SysStat;
+    f := choose_inode64_on_applex8664(Syscall'fstatat, Syscall'@"fstatat$INODE64");
     
     @debug_assert_eq(flags, 0, "TODO: remap AT_SYMLINK_NOFOLLOW");
     err := f(parent, path, r&, flags);
@@ -169,9 +156,8 @@ fn mkdir(path: CStr, mode: i64) SysResult(void) =
 
 // create a new directory. 
 fn mkdirat(parent: Fd, path: CStr, mode: Mask(S)) SysResult(void) = {
-    mkdirat :: fn(parent: Fd, path: CStr, mode: i64) i64 #libc #syscall(34, 258, 475);
     @debug_assert_eq(mode.bit_and(octal "0777"), mode, "mkdirat(mode)");
-    err := mkdirat(parent, path, mode);
+    err := Syscall'mkdirat(parent, path, mode);
     if(err != 0, => return(void.fix_errno(err)));
     (Ok = ())
 }
@@ -206,9 +192,7 @@ mmap :: fn(addr: rawptr, len: i64, prot: Mask(PROT), flags: Mask(MAP), fd: Fd, o
         fn linux() => fix_flags(Linux.MAP, MAP, d, flags);
         @default => unreachable();
     };
-    
-    mmap :: fn(addr: rawptr, len: i64, prot: i64, flags: i64, fd: Fd, offset: i64) i64 #libc #syscall(222, 9, 197);
-    err := mmap(addr, len, prot, flags, fd, offset);
+    err := Syscall'mmap(addr, len, prot, flags, fd, offset);
     
     if err < 4096 {  // TODO: does the syscall return negative or positive of the errno? neither could be a sane pointer. 
         return rawptr.fix_errno(err);
@@ -237,14 +221,7 @@ dirent :: @struct {
 };
 
 opendir :: fn(path: CStr) SysResult(*DIR) = {
-    opendir :: fn(path: CStr) i64 #libc;
-    @"opendir$INODE64" :: fn(path: CStr) i64 #weak #libc;
-    @"🤡" := current_os() == .macos && current_arch() == .x86_64;
-    f := @if(::(IS_BOOTSTRAPPING || (!FEATURE_WEAK_SYMBOLS && current_os() == .linux)),  // :UpdateBoot
-        @as(AsFnPtr(opendir)) opendir,
-        if_func(@"🤡", @"opendir$INODE64", opendir),
-    );
-    
+    f := choose_inode64_on_applex8664(Syscall'opendir, Syscall'@"opendir$INODE64");
     r := f(path);
     if r == 0 {
         return fix_errno(*DIR, r);
@@ -266,13 +243,7 @@ readdir :: fn(dir: *DIR) SysResult(*dirent) = {
         strncpy(d.d_name&.as_ptr(), s.d_name&.as_ptr(), 255);
     };
 
-    readdir :: fn(dir: rawptr) i64 #libc;
-    @"readdir$INODE64" :: fn(dir: rawptr) i64 #weak #libc;
-    @"🤡" := current_os() == .macos && current_arch() == .x86_64;
-    f := @if(::(IS_BOOTSTRAPPING || (!FEATURE_WEAK_SYMBOLS && current_os() == .linux)),  // :UpdateBoot
-        @as(AsFnPtr(readdir)) readdir,
-        if_func(@"🤡", @"readdir$INODE64", readdir),
-    );
+    f := choose_inode64_on_applex8664(Syscall'readdir, Syscall'@"readdir$INODE64");
     
     // TODO: if we're trying to be a libc, the caller is supposed to do this, not us. 
     if is_linking_libc() {
@@ -317,6 +288,14 @@ DT :: @struct {
 };
 
 ///////////////////////////////////////////////////////////////////////
+
+choose_inode64_on_applex8664 :: fn($normal: FuncId, $mangled: FuncId) AsFnPtr(normal) #generic = {
+    @"🤡" := current_os() == .macos && current_arch() == .x86_64;
+    @if(::(IS_BOOTSTRAPPING || (!FEATURE_WEAK_SYMBOLS && current_os() == .linux)),  // :UpdateBoot
+        @as(AsFnPtr(normal)) @as(FuncId) normal,
+        if_func(@"🤡", mangled, normal),
+    )
+};
 
 errno :: fn() *i32 = {
     @if(!is_linking_libc()) return(@static(i32));

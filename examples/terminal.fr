@@ -207,7 +207,8 @@ fn append_string(buffer: *TextBuffer, new: Str) void = {
     i := 0;
     while => i < new.len {  
         continue :: local_return;
-        
+       
+        // :TodoShareAnsiSkipLogic
         // I don't handle ansi escape codes yet but they have a fixed pattern 
         // so skip them so you don't clutter the terminal with junk. 
         //
@@ -276,7 +277,7 @@ fn echo(s: Str) void = {
 }
 
 fn cd(s: Str) void = {
-    chdir(@fmt_cstr("%", s)) 
+    Syscall'chdir(@fmt_cstr("%", s)) 
         || echo(@tfmt("failed to set working directory to '%'\n", s));
 }
 
@@ -1012,19 +1013,19 @@ sys_exec :: fn(args: []CStr) Result(RunningProcess, Str) = {
     t := timestamp();
     pid := fork();
     if pid == 0 { // Child
-        dup2(pipes&[0]&[0], STD_IN);
-        dup2(pipes&[1]&[1], STD_OUT);
-        dup2(pipes&[2]&[1], STD_ERR);
+        Syscall'dup2(pipes&[0]&[0], STD_IN);
+        Syscall'dup2(pipes&[1]&[1], STD_OUT);
+        Syscall'dup2(pipes&[2]&[1], STD_ERR);
         
         execvp(args[0], args.ptr);
         eprintln("libc::execvp() failed!");
-        exit(1);
+        Syscall'exit(1);
     };
     // else: Parent
 
-    close(pipes&[0]&[0]);  // close the read end
-    close(pipes&[1]&[1]);  // close the write end
-    close(pipes&[2]&[1]);  // "
+    Syscall'close(pipes&[0]&[0]);  // close the read end
+    Syscall'close(pipes&[1]&[1]);  // close the write end
+    Syscall'close(pipes&[2]&[1]);  // "
     
     (Ok = (pid = pid, pipes = (pipes&[0]&[1], pipes&[1]&[0], pipes&[2]&[0]), start = t))
 }
@@ -1048,7 +1049,7 @@ fn poll(self: *RunningProcess, buf: *List(u8)) Result(?i32, Str) = {
         if have_data {
             dowhile {
                 space := buf.maybe_uninit.len - buf.len;
-                len := read(p.fd, buf.maybe_uninit.ptr.offset(buf.len), space)
+                len := Syscall'read(p.fd, buf.maybe_uninit.ptr.offset(buf.len), space)
                     || return(Err = "libc::read() failed");
                 buf.len += len;
                 full = full || buf.maybe_uninit.len == buf.len;
@@ -1063,9 +1064,9 @@ fn poll(self: *RunningProcess, buf: *List(u8)) Result(?i32, Str) = {
     // the hope is that you're alllowed to waitpid again after the caller clears the buffer and get the status then
     // TODO: is that true?
     if done != 0 && !full {
-        close(self.pipes&[0]);
-        close(self.pipes&[1]);
-        close(self.pipes&[2]);
+        Syscall'close(self.pipes&[0]);
+        Syscall'close(self.pipes&[1]);
+        Syscall'close(self.pipes&[2]);
         
         return(Ok = (Some = status));
     };

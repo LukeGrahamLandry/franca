@@ -15,6 +15,8 @@
 // TODO: deal with #syscall not setting errno. but really you want the reverse. returning the error as a value is more sane.
 // TODO: pipe function declarations through the driver program and have a demo where you diy ptrace.  
 
+
+Syscall   :: import("@/lib/sys/syscall.fr");
 MacosLibc :: import("@/lib/sys/macos.fr");
 LinuxLibc :: import("@/lib/sys/linux.fr");
 
@@ -32,21 +34,10 @@ fn calloc(num: i64, size: i64) rawptr #libc;
 fn puts(ptr: CStr) void #libc; // nice for testing when everythings broken
 
 Fd :: @struct(fd: i32); // fd is non-negative (except for when it's not)
-fn read(fd: Fd, buf: *u8, size: i64) i64Result #libc #syscall(63, 0, 3);
-fn write(fd: Fd, buf: *u8, size: i64) i64Result #libc #syscall(64, 1, 4);
-fn close(fd: Fd) voidResult #libc #syscall(57, 3, 6);
-fn lseek(fd: Fd, offset: i64, whence: Whence) i64Result #libc #syscall(62, 8, 199);
-fn remove(filepath: CStr) voidResult #libc;
-// TODO: mode is a bit flag of AccessMode
-fn access(pathname: CStr, mode: i64) voidResult #libc #syscall(_, 21, 33); // TODO: bit flags
-// TODO: on linux the syscall version might be prefixed by "(unreachable)" which should be an error or something
-fn getcwd(ptr: *u8, len: i64) CStrResult #libc #syscall(17, 79, _);
-fn readlink(pathname: CStr, ptr: *u8, len: i64) i64Result #libc #syscall(_, 89, 58); 
 // Last 6 chars of template must be XXXXXX and they will be mutated to the temp filename. 
 fn mkstemp(template: CStr) FdResult #libc;
 
 fn remove(path: CStr) voidResult #libc;
-fn fchmod(fd: Fd, mode: FileMode) voidResult #libc #syscall(52, 91, 124);
 fn chmod(pathname: CStr, mode: FileMode) voidResult #libc;
 
 fn mmap_anon(addr: rawptr, len: i64, prot: i64, offset: i64) rawptr = {
@@ -62,19 +53,12 @@ fn mmap_jit(addr: rawptr, len: i64, prot: i64, offset: i64) rawptr = {
     Posix'mmap(addr, len, prot, flag, fd, offset)
 };
 
-fn munmap(addr: rawptr, len: i64) voidResult #libc #syscall(215, 11, 73);
-fn mprotect(addr: rawptr, len: i64, prot: i64) voidResult #libc #syscall(226, 10, 74);
-
-// linux: exit_group, not exit. exit just ends the calling thread. 
-fn exit(status: i64) Never #libc #cold #syscall(94, 231, 1);
-
 fn usleep(micro_seconds: u32) voidResult = {
     s, us := div_mod(@as(i64) micro_seconds.zext(), US_PER_S);
     t: TimeSpec = (seconds = s, nanoseconds = us * NS_PER_US);
-    nanosleep(t&, TimeSpec.ptr_from_int(0))
+    Syscall'nanosleep(t&, TimeSpec.ptr_from_int(0))
 }
 
-fn nanosleep(duration: *TimeSpec, nullable_remainder_out: *TimeSpec) voidResult #libc #syscall(101, 35, _);
 fn execv(pathname: CStr, null_terminated_argv: *CStr) i32 #libc;
 fn execvp(pathname: CStr, null_terminated_argv: *CStr) i32 #libc;
 
@@ -83,20 +67,14 @@ fn fork() i32 #libc;
 fn wait(status: *i32) i32 #libc;
 fn waitpid(pid: i32, status: *i32, options: i64) i32 #libc; // TODO: i32 
 fn pipe(pipefd: *Array(Fd, 2)) voidResult #libc;
-fn dup2(oldfd: Fd, newfd: Fd) voidResult #libc #syscall(_, 33, 90);
-fn dup3(oldfd: Fd, newfd: Fd, flags: i32) voidResult #libc #syscall(24, 292, _);
-fn chdir(path: CStr) voidResult #libc #syscall(49, 80, 12);
 fn poll(fds: []PollFds, timeout: i32) i32Result #libc; // :slice_abi
 
 fn rename(oldpath: CStr, newpath: CStr) voidResult = {
     d := Posix'AT'FDCWD();
-    renameat(d, oldpath, d, newpath)
+    Syscall'renameat(d, oldpath, d, newpath)
 }
 
-fn renameat(old_dir: Fd, old: CStr, new_dir: Fd, new: CStr) voidResult #libc #syscall(38, 264, 465);
-
 TimeSpec :: @struct(seconds: i64, nanoseconds: i64);
-fn clock_gettime(clock_id: i64, time_spec: *TimeSpec) void #libc #syscall(113, 228, _); // TODO: macos syscall
 
 fn display(self: TimeSpec, out: *List(u8)) void = {
     @fmt(out, "(%s + %ns)", self.seconds, self.nanoseconds)

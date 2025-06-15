@@ -86,7 +86,7 @@ fn stat_exists(path: Str, mode: i64) bool = {
 
 fn path_exists(path: Str) bool = {
     c := as_cstr path;
-    access(c, @as(i64) AccessMode.Exists).is_ok()
+    Syscall'access(c, @as(i64) AccessMode.Exists).is_ok()
 }
 
 fn is(e: DirEntry, kind: DirEntType) bool =
@@ -118,10 +118,10 @@ fn write_entire_file(path: Str, content: Str) bool = {
     n := timestamp();
     tmp_path := @fmt_cstr("%.%.atomic", path, n);
     fd := open_trunc(tmp_path) || return(false);
-    written := write(fd, content.ptr, content.len) || return(false);
+    written := Syscall'write(fd, content.ptr, content.len) || return(false);
     // TODO: loop if we couldn't write the whole thing at once. 
     if(written != content.len, => return(false));
-    fd.close() || return(false);
+    fd.Syscall'close() || return(false);
     rename(tmp_path, as_cstr path) || return(false);
     true
 }
@@ -135,7 +135,7 @@ fn write_chunks_or_crash(outpath: Str, chunks /*: [][]u8*/) void #where = {
         write(file&, chunk)
         || @panic("failed to write %", tmp_path);
     };
-    close(file)
+    Syscall'close(file)
         || @panic("failed to close %", tmp_path);
     
     rename(tmp_path, @fmt_cstr("%", outpath))
@@ -215,18 +215,18 @@ fn read_entire_file_or_crash(a: Alloc, path: Str) Str = {
 fn read_and_push(out: *List(u8), path: Str) bool = {
     path := as_cstr path;
     f := open_read(path) || return(false);
-    len := f.lseek(0, .End) || {
-        close(f); // TODO: defer
+    len := f.Syscall'lseek(0, .End) || {
+        Syscall'close(f); // TODO: defer
         return(false)
     };
-    f.lseek(0, .Set);
+    f.Syscall'lseek(0, .Set);
     out.reserve(len);
     ptr := out.maybe_uninit.ptr.offset(out.len);
-    read_len := read(f, ptr, out.maybe_uninit.len - out.len) || {
-        close(f); // TODO: defer
+    read_len := Syscall'read(f, ptr, out.maybe_uninit.len - out.len) || {
+        Syscall'close(f); // TODO: defer
         return(false)
     };
-    close(f); // TODO: defer
+    Syscall'close(f); // TODO: defer
     if read_len != len {
         eprintln("TODO: need to loop for read(), it's fine if it gets interrupted? 🤡");
         return(false);
@@ -250,13 +250,13 @@ fn read_file_from_last_arg() Str = {
 // it sounds like this would be a good idea but it seems to actually be super slow the first time 
 fn mmap_read(path: CStr) Result([]u8, void) = {
     f := open(path, Posix'O'RDONLY) || return(.Err);
-    len := f.lseek(0, .End) || {
-        close(f); // TODO: defer
+    len := f.Syscall'lseek(0, .End) || {
+        Syscall'close(f); // TODO: defer
         return(.Err)
     };
-    f.lseek(0, .Set);
+    f.Syscall'lseek(0, .Set);
     m := Posix'mmap(zeroed rawptr, len, Posix'PROT'READ, Posix'MAP'PRIVATE, f, 0);
-    close(f);
+    Syscall'close(f);
     if m.is_err() {
         return(.Err);
     };

@@ -455,17 +455,19 @@ finish_module :: fn(m: *QbeModule) [][]u8 = {
     writer.to_bytes(meta, m)
 };
 
-// note: this only calls default_init if !did_rega
-fn load(header: *Header, f: *Qbe.Fn, it: One(Sym), syms: []Qbe.Sym) bool /*did_regalloc*/ = {
+// TODO: not true anymore: this only calls default_init if !did_rega
+fn load(h: *Header, f: *Qbe.Fn, it: One(Sym), syms: []Qbe.Sym) bool /*did_regalloc*/ = {
     m := f.globals;
     @debug_assert(m.initialized, "tried to load() into uninit module");
-    sym := header.get(it);
+    sym := h.get(it);
     @debug_assert_eq(sym.segment, .Code, "tried to load() non-function: %", m.str(f.lnk.id));
     fnc := sym.fnc&;
     did_regalloc := fnc.tmp == Qbe.no_symbol;
-    if !did_regalloc {
+    // TODO: it's nice not to waste time recreating the tmps every time when loading a postregalloc cache file 
+    //       but it's very shetchy to silently do that if they could be mixed
+    //if !did_regalloc {
         default_init(f, m);
-    };
+    //};
     f.lnk.id = syms[it.off.zext()];
     f.lnk.export = true;  // TODO: only for entry point?
     
@@ -473,7 +475,7 @@ fn load(header: *Header, f: *Qbe.Fn, it: One(Sym), syms: []Qbe.Sym) bool /*did_r
     f.ncon = 0;
     push_fixed_consts(f);
     f.ncon = fixed_const_count.trunc() + fnc.con.count.bitcast();
-    enumerate header.get(fnc.con) { i, src |
+    enumerate h.get(fnc.con) { i, src |
         dest := f.con[i + fixed_const_count]&;
         dest[] = src[];
         if src.sym != Qbe.no_symbol_S {
@@ -486,7 +488,7 @@ fn load(header: *Header, f: *Qbe.Fn, it: One(Sym), syms: []Qbe.Sym) bool /*did_r
     flags: FncFlags = (repr = fnc.flags);
     if !did_regalloc {
         f.retty = fnc.either.retty;
-        read_tmp(header, f, fnc.tmp);  // This must be before read_phi
+        read_tmp(h, f, fnc.tmp);  // This must be before read_phi
         @debug_assert_eq(fnc.mem.count, 0);
     } else {
         f.slot = fnc.either.slot;
@@ -496,7 +498,7 @@ fn load(header: *Header, f: *Qbe.Fn, it: One(Sym), syms: []Qbe.Sym) bool /*did_r
         // TODO: these are pretty chunky. it would be nice to deduplicate them. 
         //       need to be careful, there might be something in amd64/emit.fr that assumes they don't alias?
         f.nmem = fnc.mem.count.bitcast();
-        f.mem = new_copy(header.get(fnc.mem));
+        f.mem = new_copy(h.get(fnc.mem));
         
         @if(f.globals.goal.arch == .x86_64)
         each f.mem.slice(0, f.nmem.zext()) { it |
@@ -510,11 +512,11 @@ fn load(header: *Header, f: *Qbe.Fn, it: One(Sym), syms: []Qbe.Sym) bool /*did_r
     f.vararg = flags.get(.vararg) != 0;
     
     blks := temp().alloc_zeroed(Qbe.Blk, fnc.blk.count.zext());
-    enumerate header.get(fnc.blk) { i, b |
+    enumerate h.get(fnc.blk) { i, b |
         blks[i].id = i.trunc();
         // TODO: this extra copy of the instructions is only required when the module is going to be reused (ie. FrcImport comptime+runtime). 
         //       (because the first pass makes some changes in place and it gets super confused if those were already done)
-        blks[i].ins = as_raw_list(header.get(b.ins).shallow_copy(temp()));
+        blks[i].ins = as_raw_list(h.get(b.ins).shallow_copy(temp()));
         blks[i].jmp = b.jmp;
         if b.s1 != Qbe.no_symbol {
             blks[i].s1 = blks.index(b.s1.zext());
@@ -526,7 +528,7 @@ fn load(header: *Header, f: *Qbe.Fn, it: One(Sym), syms: []Qbe.Sym) bool /*did_r
             blks[i].link = blks.index(i + 1);
         }
         
-        read_phi(header, blks, b, i, f.tmp.slice(0, f.ntmp.zext()));
+        read_phi(h, blks, b, i, f.tmp.slice(0, f.ntmp.zext()));
     };
     f.start = blks.index(0);
     f.nblk = fnc.blk.count.bitcast();
@@ -588,6 +590,7 @@ fn compile_all_symbols(header: *Header, m: *QbeModule) void = {
         ::enum(@type it.segment);
         @match(it.segment) {
             fn Code() => {
+                //@println("%", header.get(it.name));
                 did_regalloc := load(header, f&, i, syms);
                 zone := @if(ENABLE_ENABLE_TRACY, zone_begin(.Backend), ());
                 if f.globals.debug["P".char()] {
