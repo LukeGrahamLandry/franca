@@ -12,7 +12,6 @@
 // - NewIntrinsic: maps to a single ir instruction
 // - DynamicImport: (AOT) Redirect to an imported symbol OR (JIT) bind directly to a function pointer
 // - Syscall: O.syscall with number based on target os
-// - TargetOsSplit: Redirect to different function depending on target os
 // - JittedAarch64/X86AsmBytes: some bytes inserted verbatim
 // - Redirect
 // 
@@ -473,8 +472,8 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = {
     };
     
     T :: FuncImpl.Tag();
-    prio_amd :: @const_slice(T.NewIntrinsic, T.Normal, T.Intrinsic, T.TargetOsSplit, T.X86AsmBytes, T.Redirect, T.DynamicImport, T.FrcImport);
-    prio_arm :: @const_slice(T.NewIntrinsic, T.Normal, T.Intrinsic, T.TargetOsSplit, T.JittedAarch64, T.Redirect, T.DynamicImport, T.FrcImport);
+    prio_amd :: @const_slice(T.NewIntrinsic, T.Normal, T.Intrinsic, T.X86AsmBytes, T.Redirect, T.DynamicImport, T.FrcImport);
+    prio_arm :: @const_slice(T.NewIntrinsic, T.Normal, T.Intrinsic, T.JittedAarch64, T.Redirect, T.DynamicImport, T.FrcImport);
     impl := or choose_impl(func.body&, @if(self.m.goal.arch == .aarch64, prio_arm, prio_amd)) {
         if self.want_syscall(self.func, true) { syscall_number |
             self.bounce_body(self.f.getcon(syscall_number), .syscall);
@@ -523,22 +522,6 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = {
             };
             return(.Ok)
         };
-        fn TargetOsSplit(_) => {
-            @debug_assert(func.body&.is(.Merged), "ICE: #target_os split expected multiple");
-            each func.body.Merged& { it |
-                if it.is(.TargetOsSplit) && it.TargetOsSplit.os == self.m.goal.os {
-                    fid := it.TargetOsSplit.fid;
-                    callee := self.program.get_function(fid);
-                    if !callee.get_flag(.NoContext) {
-                        func.set_flag(.YesContext);
-                    };
-                    self.bounce_body_call(self.func_sym(fid));
-                    self.pending.push(fid);
-                    return(.Ok)
-                };
-            };
-            return(@err("#target_os missing implementation"))
-        }
         fn Redirect(fid) => {
             callee := self.program.get_function(fid[]);
             if !callee.get_flag(.NoContext) {

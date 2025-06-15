@@ -43,7 +43,7 @@ different subsets of the same resources.
 - run tests in landlock so it's less scary to miscompile something that's doing random syscalls
 - `franca backend/meta/dump.fr target/a.frc` (running dump instead of dump bin)
 you don't get the "expected a function called main or driver" message?? it just crashes after `panic!`.
-- remove #target_os from the language. 
+- remove from the language:
   - #link_rename kinda does the same thing (only used for objc_msgSend). remove that too!
   - #asm needs to include both versions and dispatch at runtime
 - probably want to prove you can reimplement #target_os in userspace, 
@@ -178,7 +178,6 @@ i want them to go through sema exactly once if you compile the compiler and then
 - someone needs to detect undeclared symbols
 - pre-regalloc is almost target independant but it doesn't quite work 
   - because of apple_extsb
-  - also you kinda need a TargetOsSplit to do anything serious
 - make it work with did_regalloc if you know you only care about one architecture
 - check arch in import_frc() if did_regalloc 
 - need to merge deps if we're generating a cache file? 

@@ -430,10 +430,6 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
     assert(!func.get_flag(.MayHaveAquiredCaptures), "closures need to be specialized");
     assert(!func.get_flag(.AnyConstArgs), "const args need to be specialized");
     
-    if func.get_flag(.TargetSplit) {
-        return(self.handle_target_split(func));
-    };
-    
     @debug_assert(self.dispatch.function_in_progress&.get(fid.as_index()), "expected to do work on in progress function %", fid);
     @try(self.ensure_resolved_body(fid)) return;
     
@@ -522,58 +518,8 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
     .Ok
 }
 
-fn handle_target_split(self: *SelfHosted, func: *Func) Maybe(void) #once = {
-    @err_assert(!func.get_flag(.Inline), "#target_os functions cannot be #inline.\nThis is a limitation of the way we handle comptime execution + cross compilation (which affects you even when not cross compiling).") return;
-    
-    os_ty := @unwrap(self.env.os_type, "#target_os before bootstrap") return;
-    if func.body&.is(.Normal) {
-        //@debug_assert(func.return_var.is_none(), "should be before resolve");
-        // TODO: typecheck now? 
-        merged: List(FuncImpl) = list(self.get_alloc());
-        for_enum(Os) { os |
-            new_func := func.deep_clone(self.get_alloc()); // :SLOW redundantly clones dead code if you immediatly @match on the arg
-            @if(!LAZY_SCOPE) {
-                mapping: RenumberResults = init();
-                renumber: RenumberVars = (scope = self.scopes, mapping = mapping&, compiler = self);
-                renumber&.walk_func(new_func&);
-            };
-            new_func&.unset_flag(.TargetSplit); // very important to not loop!
-            factory := self.box(new_func.body.Normal);
-            os_value := self.to_values(Os, os);
-            os_value := synthetic_ty((Value = (bytes = os_value, coerced = false)), factory.loc, os_ty);
-            os_value := self.box(os_value);
-            body_expr := synthetic((Call = (f = factory, arg = os_value)), factory.loc);
-            body_expr := self.box(body_expr);
-            // TODO: garbage HACK about how i represent return labels
-            //       you need a block for the outer function's `return` to bind to,
-            //       otherwise you don't get a return_var and the error message is useless 
-            //       `Compile Error: Poison expression Label`
-            body_expr := synthetic(new_block(empty(), body_expr), factory.loc);
-            new_func.body.Normal = body_expr;
-            new_fid := self.add_function(new_func);
-            merged&.push(TargetOsSplit = (os = os, fid = new_fid));
-        };
-        func.body = (Merged = merged.as_raw());
-    };
-    @debug_assert(func.body&.is(.Merged), "ICE: lost #target_os impls???");
-    each func.body.Merged { impl |
-        @err_assert(impl.is(.TargetOsSplit), "TODO: support do_merges + .TargetOsSplit?") return;
-        fid := impl.TargetOsSplit.fid;
-        if self.comp().want_target_os(impl.TargetOsSplit.os) {
-            @check(self.compile_body(fid)) return;
-        };
-    };
-    func.set_flag(.EnsuredCompiled);
-    .Ok
-}
-
 fn want_target_arch(c: CompCtx, it: Arch) bool = {
     flag := c.get_build_options()[].target_arch_bitset;
-    flag.bit_and(1.shift_left(it.raw())) != 0
-}
-
-fn want_target_os(c: CompCtx, it: Os) bool = {
-    flag := c.get_build_options()[].target_os_bitset;
     flag.bit_and(1.shift_left(it.raw())) != 0
 }
 
@@ -2227,7 +2173,6 @@ MemoKey :: Ty(FuncId, Values);
 //       it would avoid redundant work to do that on the original func for params that don't depend on constants. 
 //       that would jsut require compile_expr to be able to yield on a Poison.Argument, and we catch that here and just ignore. 
 fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg_expr: *FatExpr, zone: TraceCtx) Maybe(FuncId) #once = {
-    // TODO: no #target_os
     value, type := @check(self.const_args_key(original_f, arg_expr)) return;
     key: MemoKey = (original_f, value);
     @if(ENABLE_TRACY) ___tracy_emit_zone_name(zone, self.comp().log(arg_expr));
@@ -2258,7 +2203,6 @@ fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg
     };
 
     func := self.get_function(original_f);
-    @err_assert(!func.get_flag(.TargetSplit), "Functions with const arguments cannot be #target_os.\nThis could be made to work for non-capturing args but i'm not ready to deal with it yet.") return;
     @debug_assert(func.get_flag(.AnyConstArgs), "baking const args but none are there");
     
     if LAZY_SCOPE {
@@ -3542,7 +3486,6 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
                 func.set_flag(.UnsafeNoopCast);
                 func.set_flag(.BodyIsSpecial);
             };
-            @case(Flag.target_os.ident())  => func.set_flag(.TargetSplit);
             @case(Flag.duplicated.ident()) => func.set_flag(.AllowDuplicated);
             @case(Flag.import.ident())   => {
                 func.set_flag(.BodyIsSpecial);
