@@ -44,8 +44,7 @@ different subsets of the same resources.
 - `franca backend/meta/dump.fr target/a.frc` (running dump instead of dump bin)
 you don't get the "expected a function called main or driver" message?? it just crashes after `panic!`.
 - remove #target_os from the language. 
-  - query_current_os
-  - #link_rename kinda does the same thing 
+  - #link_rename kinda does the same thing (only used for objc_msgSend). remove that too!
   - #asm needs to include both versions and dispatch at runtime
 - probably want to prove you can reimplement #target_os in userspace, 
 but it's uglier than just doing runtime dispatch if that's allowed (which it is now)
@@ -175,8 +174,6 @@ i want them to go through sema exactly once if you compile the compiler and then
 
 ### FrcImport 
 
-- need to mark referenced since they don't go through fold.fr 
-  make sure there's a test that triggers this. 
 -  run inlining and if something changes redo the other early passes as well
 - someone needs to detect undeclared symbols
 - pre-regalloc is almost target independant but it doesn't quite work 
@@ -189,7 +186,6 @@ i want them to go through sema exactly once if you compile the compiler and then
 - fix import_c/ffi.fr needing to compile the whole backend now and then time stuff to make sure this way isn't way slower than the old way. 
 - source locations
 - remove DISABLE_IMPORT_FRC. need to deal with scoping when you import(@/compiler)
-- import_c: "this makes ffi take 180ms longer to compile because it doesn't go through a vtable"
 - import_c/ffi.fr: make forward declaration of an import work in local scope (rn missing type info in root_scope so can't use it)
 - support symbol without type info as a rawptr that you have to cast to use
 - if im going to keep FTy.Tag.AbiOnly, need to write a test that actually uses it with aggragate returns. 
@@ -202,6 +198,9 @@ i want them to go through sema exactly once if you compile the compiler and then
 - env var for saving out all the files so you can inspect them, 
 like what i do with a.frc but without recompiling the compiler. 
 similarly allow #log_ir that persists on a module so you can debug. 
+- make mutating imported data at comptime get baked into the program like normal (instead of just the initial version)? 
+tho rn it's a bit order specific so the way import_frc works is probably a valid ordering you could get with normal franca code as well. 
+so maybe that whole system needs a bit of a rework. like maybe waiting and do all baking at the end would be less creepy. 
 
 ## Unfinished Examples
 
@@ -334,7 +333,6 @@ bodies on different targets which i don't deal with well.
 - make auto deref always work (you shouldn't need to `[]` for constants or returned structs)
 - compiler/values.fr has a big comment
 - make namespacing nice enough that i can have less stuff loaded in every program by `core.fr`
-- allow #libc before #link_rename
 - if constant folding can get rid of all the branchs that use an import, the binary shouldn't need that import
 - auto #fold functions returning StructLiteralP (same as already do for Value).
 ie. `fn init() Self = (arr = @as(Slice(Entry)) empty(), len_including_tombstones = 0, capacity = 0);`

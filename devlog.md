@@ -15,6 +15,26 @@ notably those are all things to aren't going to change if you're just working on
 - made Target.caller_saved a bit mask instead of an array
 - un-#target_os: find_os_libc_dylib, query_cli_args, get_executable_path, apple_thread_jit_write_protect, do_signals
   raw_create_thread, wake, wait
+- so without #target_os, i need a new way of implementing query_current_os. 
+  - i don't want to have the backend just have an op for it. eventually i might want it to not only target one at once 
+    (tho that's hard because they have diferetnt ABIs as well)
+  - first idea was try to find a syscall number that does different things everywhere so you could do it 
+    and look at the error number you get back or something but didn't find a good one before i got bored. 
+  - macos passes `char **apple` extra env vars as fourth parameter to main. maybe could do something with that. 
+  - for now doing something super hacky with which arguments are passed to the entry point, 
+    cause on macos the blessed interface is a c-like main(argc, argv, envp) but on linux-amd64, 
+    the kernel passes those on the stack so the regisers values don't have the same pattern of pointer-ness. 
+    seems to work? probably going to suck so bad to debug later when something breaks that assumption. 
+  - the other problem is where to store it after startup. putting in the dynamic environment seems like what you want 
+    but it sucks if you can't produce it out of the void in callbacks. putting it in a static doesn't really work because 
+    you need to set it to the host in comptime but if that ends up in your binary it breaks repro. well maybe it's 
+    fine, just have a bake_relocatable_value that zeroes it and then the first thing the entry point does is set it back again. 
+    but then you need to be super careful not to do anything in comptime code before its initializer can be compiled. 
+    and linking different modules together won't work because only one guy will set their own static in the entry point. 
+    could do both, get it from dynenv but keep a static around to referesh it in case of emergencies? 
+    it feels kinda gross for push_zeroed_dynamic_context() to set it for you but otherwise it's super annoying to remember. 
+  - was afraid that thing with the arguments would mess up running a .frc of a main() program but it's fine because entry_sym 
+    is the user main() not the wrapped main that goes in a real exe (even tho it's still in there). 
 
 ## (Jun 13)
 

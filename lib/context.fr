@@ -8,29 +8,54 @@ DefaultContext :: @struct(
     reserved2 := 0,
     thread_index: i64,
     general_allocator: Alloc,  // this must be thread safe!
-    reserved: Array(i64, 3),
+    current_os: u8,
+    reserved: Array(i64, 2),
     environment_variables: *CStr,  // a null terminated array of null terminated strings
     cli_arguments: []CStr,
     temporary_allocator: *ArenaAlloc,  // each thread has its own
     panic_hook: @FnPtr(msg: Str) Never,
     extra := 0,
+    reserved3: Array(i64, 10),
 );
 
 // :UpdateBoot
 FEATURE_WEAK_SYMBOLS :: !IS_BOOTSTRAPPING && { c := current_compiler_context(); c'vtable'driver_abi_version != 1016 };
 
+// this is set in franca_runtime_init and read in push_zeroed_dynamic_context
+OS :: @static(ClearOnAotBake(Os)) (it = ComptimeEnvironment.ptr_from_raw(get_build_options()[].env)[].comptime_os);
+
 // For AOT builds, the compiler generates a call to this as your program's main entry point. 
 // note: whatever you had in the context at comptime is NOT baked into your program (unlike all other reachable memory).
 // For jitted code, you inherit the compiler's context. (TODO: maybe that should only be for comptime/drivers)
-franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CStr) void = {
-    os := import("@/lib/sys/process.fr")'query_current_os();
-    if(os == .linux, => fix_stack_linux(argc&, argv&, envp&));
-
+// This also is not called for cached .frc programs run by the compiler (even though they're technically AOT too). 
+franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CStr, four: *CStr) void = {
+    is_sane_pointer :: fn(p: ~T) bool #where = {
+        p := bit_cast_unchecked(@type p, i64, p);
+        p > 4096 && p.shift_right_logical(48) == 0
+    };
+    ::ptr_utils(CStr);
+    
+    fp := align_stack();
+    
+    // TODO: this is probably a stupid idea. for now it feels clever that i can guess the os by apple passing the 
+    //       normal c args to the entry point in registers and linux passing them on the stack. 
+    //       super fragile to rely on nobody leaving junk in the registers for this. 
+    is_linux := is_sane_pointer(argc) || !is_sane_pointer(envp) || !is_sane_pointer(argv);
+    @if(!FEATURE_WEAK_SYMBOLS) {
+        is_linux = query_current_os() == .linux;
+    };
+    OS[].it = @if(is_linux, .linux, .macos);
+    
+    if is_linux {
+        entry_args_from_stack_linux(argc&, argv&, envp&, fp);
+        @assert(!(is_sane_pointer(argc) || !is_sane_pointer(envp) || !is_sane_pointer(argv)));
+    };
+    
     CAPTURE :: @static(@FnPtr() void);
     CAPTURE[] = user;
     
     impl2 :: fn(argc: i64, argv: *CStr, envp: *CStr) void = {
-        push_zeroed_dynamic_context { 
+        push_zeroed_dynamic_context {   // for now this sets c.current_os=OS[]
             c := context(DefaultContext);
             temporary_allocator: ArenaAlloc = init(page_allocator, 1.shift_left(20));
             c.temporary_allocator = temporary_allocator&;
@@ -62,8 +87,10 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
     };
 
     @if(FEATURE_WEAK_SYMBOLS)
-    if os == .linux && is_linking_libc() {
-        __libc_start_main :: fn(user: @FnPtr(argc: i64, argv: *CStr, envp: *CStr) void, argc: i64, argv: *CStr, i: i64, f: i64, l: i64) i64 #weak #libc;
+    if is_linux && is_linking_libc() {
+        // TODO: the NOSYS is a HACK to make -syscalls make a real static binary
+        //       alternative is to keep is_linking_libc() foldable but the point of my current project is to make everything more dynamic so you don't have to recompile. 
+        __libc_start_main :: fn(user: @FnPtr(argc: i64, argv: *CStr, envp: *CStr) void, argc: i64, argv: *CStr, i: i64, f: i64, l: i64) i64 #weak #libc #syscall(NOSYS, NOSYS, NOSYS);
         __libc_start_main(impl2, argc, argv, 0, 0, 0);
         unreachable();
     };
@@ -71,12 +98,20 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
     impl2(argc, argv, envp);
 };
 
+// surely we don't need to call uname... right... right...?
+fn query_current_os() Os = {
+    @if(!FEATURE_WEAK_SYMBOLS) {
+        return((fn() Os #target_os = (fn($os) => os))());
+    };
+    @as(Os) @as(i64) context(DefaultContext)[].current_os.zext()
+}
+
 // On macos (argc, argv) are passed to the entry point in registers so we're good to go. 
 // But on linux, they're passed on the stack, so we have to grab them from our caller's frame. 
 // Also on linux glib expects the stack to be 16 byte aligned but the kernel doesn't do that for you. 
 //
 // The forced #inline is important! We need this call to not fuck with the stack. 
-fn fix_stack_linux(argc: *i64, argv: **CStr, envp: **CStr) void #inline = {
+fn align_stack() i64 #inline = {
     // TODO: start_trace
     #use("@/backend/amd64/bits.fr");
     #use("@/backend/arm64/bits.fr");
@@ -92,13 +127,18 @@ fn fix_stack_linux(argc: *i64, argv: **CStr, envp: **CStr) void #inline = {
         encode_op_reg(PrimaryOp.PushBase, X86Reg.rax), 
         PrimaryOp.Ret,
     ) out;
-    caller_frame := ptr_from_int(*Ty(i64, i64, CStr), get_fp())[];
-    argv[] = caller_frame._2&;
-    argc[] = caller_frame._1;
-    @debug_assert_eq(get_fp().mod(8), 0);
-    if get_fp().mod(16) != 0 {
+    s := get_fp();
+    @debug_assert_eq(s.mod(8), 0);
+    if s.mod(16) != 0 {
         fix_stack();
     };
+    s
+}
+
+fn entry_args_from_stack_linux(argc: *i64, argv: **CStr, envp: **CStr, fp: i64) void #inline = {
+    caller_frame := ptr_from_int(*Ty(i64, i64, CStr), fp)[];
+    argv[] = caller_frame._2&;
+    argc[] = caller_frame._1;
     envp[] = argv[].offset(argc[] + 1);
 }
 
@@ -203,6 +243,7 @@ fn push_zeroed_dynamic_context($body: @Fn() void) void = {
     new_context := raw_from_ptr(@type new_context, new_context&);
     old_context := get_dynamic_context();
     set_dynamic_context(new_context);
+    context(DefaultContext)[].current_os = (@as(i64) @as(Os) OS[].it).trunc();  // unfortunate we're not doing what the name of the function would imply
     body();
     set_dynamic_context(old_context);
 }
