@@ -5,10 +5,14 @@
 //! These corrispond to Zig's build.zig vs comptime and Rust's build.rs vs proc-macros/const-fns. 
 
 fn init_driver_vtable() *ImportVTable = {
-    the_vtable :: @static(ImportVTable);
-    vtable := the_vtable;
-    vtable[] = ImportVTable.zeroed();
-    
+    @static(ImportVTable) {
+        storage := ImportVTable.zeroed();
+        fill_driver_vtable(storage&);
+        storage
+    }
+}
+
+fn fill_driver_vtable(vtable: *ImportVTable) void = {
     vtable.driver_abi_version = @if(IS_BOOTSTRAPPING, 1119, 1131);
     
     vtable.find_unique_func = fn(c: Compiler, name: Symbol) ?FuncId = { 
@@ -23,7 +27,6 @@ fn init_driver_vtable() *ImportVTable = {
     
     vtable.get_jitted_ptr = fn(c: Compiler, f: FuncId) CRes(rawptr) = {
         self := c.cast()[][];
-        vtable := the_vtable;
         if self.get_fn_callable(f) { ptr |
             self.created_jit_fn_ptr_value(f, ptr.int_from_rawptr());
             return(Ok = ptr);
@@ -35,12 +38,13 @@ fn init_driver_vtable() *ImportVTable = {
     };
     
     vtable.init_compiler = fn(options: *BuildOptions) Compiler = {
-        vtable := the_vtable;
         mem := init_self_hosted(options);
         mem.legacy_indirection
     };
     
-    vtable.compile_func = fn(c: Compiler, f: FuncId, when: ExecStyle) CRes(void) = {
+    vtable.compile_func = compile_func;
+    
+    compile_func :: fn(c: Compiler, f: FuncId, when: ExecStyle) CRes(void) = {
         self := c.cast()[][];
         self.poll_in_place(void, => self.compile_body(f))
     };
@@ -49,7 +53,7 @@ fn init_driver_vtable() *ImportVTable = {
         c := cc.cast()[][];
         f := c.make_top_level(body);
         f := f.unwrap();
-        @try({the_vtable[].compile_func}(cc, f, .Jit)) return;
+        @try(compile_func(cc, f, .Jit)) return;
         .Ok
     };
     
@@ -156,8 +160,8 @@ fn init_driver_vtable() *ImportVTable = {
     };
     
     // :UpdateBoot get rid of this
-    vtable.emit_qbe_included_old = @as(rawptr) fn(mm: rawptr, comp: *CompCtx, fns: [] FuncId, entry: ProgramEntry) BucketArray(u8) = {
-        chunks := the_vtable[]'emit_qbe_included(mm, comp, fns, entry);
+    vtable.emit_qbe_included_old = ::@as(rawptr) fn(mm: rawptr, comp: *CompCtx, fns: [] FuncId, entry: ProgramEntry) BucketArray(u8) = {
+        chunks := emit_qbe_included(mm, comp, fns, entry);
         aaa: BucketArray(u8) = init(0, temp());
         for chunks { c |
             aaa&.push_bucket(assume_owned(c, temp()));
@@ -165,7 +169,9 @@ fn init_driver_vtable() *ImportVTable = {
         aaa
     };
     
-    vtable.emit_qbe_included = fn(mm: rawptr, comp: *CompCtx, fns: [] FuncId, entry: ProgramEntry) [][]u8 = {    
+    vtable.emit_qbe_included = emit_qbe_included;
+    
+    emit_qbe_included :: fn(mm: rawptr, comp: *CompCtx, fns: [] FuncId, entry: ProgramEntry) [][]u8 = {    
         m := QbeModule.ptr_from_raw(mm);
         shared := init(m, comp[].get_alloc(), @as(CodegenWorker) codegen_thread_main, true);
         main_thread_pump(comp[], shared, fns);
@@ -289,8 +295,6 @@ fn init_driver_vtable() *ImportVTable = {
         @if(DISABLE_IMPORT_FRC) return(@err("TODO: DISABLE_IMPORT_FRC because scoping when you import the compiler is messed up"));
         self.import_frc(bytes)
     };
-    
-    the_vtable
 }
 
 CompilerRs :: ***SelfHosted;  // TODO: really this should be a new type so you can't accidently implement call functions by just adding extra indirection. hopefully the number of pointers makes it clear something's weird. 

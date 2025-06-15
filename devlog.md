@@ -35,6 +35,28 @@ notably those are all things to aren't going to change if you're just working on
     it feels kinda gross for push_zeroed_dynamic_context() to set it for you but otherwise it's super annoying to remember. 
   - was afraid that thing with the arguments would mess up running a .frc of a main() program but it's fine because entry_sym 
     is the user main() not the wrapped main that goes in a real exe (even tho it's still in there). 
+  - how can #target_os have only been 89 lines of code in the compiler? it felt so vaugly threatening to think about. bit anticlimactic. 
+- looking through examples/bloat.fr on the compiler to see if any stupid stuff stands out
+  - get_or_create_type: missing brackets so the fast path wasn't folded
+  - init_driver_vtable: just fill in the pointers at comptime
+  - there's really a lot of dumb monomorphisations, should do something about that. i used to have deduplication. maybe should bring that back. 
+    something's going on with the ordering. like how are we not inlining all uses of ptr_from_int. 
+    maybe the first usage where it gets instantiated, the caller gets emitted before the callee. 
+  - 1021288 -> 1014176
+- the thing where you don't get a panic message seems to be only the run where you created the cache file. 
+  - it doesn't like make_dirs_or_crash()? but it's succeeding, it just curses you if you happen to panic later.  
+  - eprintln() specifically doesn't work somehow?? it's fine if you make it println in print_and_exit1(), 
+    why can i print to stdout but not stderr?? it's fine on linux. `ENOSTR: Not a STREAM`, im losing my mine apparently. 
+  - oh it's fucking line buffered? what the fuck? it works if i put a \n in there. ok i can reproduce it in a stand alone aot program, 
+    if you call read_entire_file on a file that doesn't exist, it fucks your stderr somehow?? 
+  - so problem is definitely my SysResult thinks open() is succeeding when it's not and then somehow 
+    trying to call lseek on a bad file descriptor cascades into making your stderr be line buffered,
+    which sounds like im making shit up but that's what i see happening? 
+  - ok so when i was redoing posix.fr, i switched to always doing openat as a syscall because varargs for `mode` is annoying, 
+    but on macos it just returns the errno as a positive number and sets the carry flag which i don't bother to check for because i 
+    mostly use the libc ones anyway, and ENOENT is 2 so if you're stupid like me and treat that as a file descriptor,
+    you start calling lseek on stderr which fucks all your shit up apparently. fair enough i suppose. 
+    agh which also means fix_errno just checking if is_linking_libc isn't good enough, it needs to know if that specific call was a syscall. 
 
 ## (Jun 13)
 
