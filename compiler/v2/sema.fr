@@ -518,11 +518,6 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
     .Ok
 }
 
-fn want_target_arch(c: CompCtx, it: Arch) bool = {
-    flag := c.get_build_options()[].target_arch_bitset;
-    flag.bit_and(1.shift_left(it.raw())) != 0
-}
-
 fn get_runtime_string_type(self: *SelfHosted) Type = {
     inner_u8  := self.get_or_create_type(u8);
     inner_str := self.poll_in_place(Type, => self.create_slice_type(inner_u8, Span.zeroed()));
@@ -595,7 +590,6 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                 func.set_flag(.Intrinsic);
                 impl := find_or_create_impl(func.body&, self.get_alloc(), .Intrinsic);
                 impl[] = op;
-                // TODO: redundant with emit_bc
                 if op != INTRINSIC_GET_ENV {
                     func.set_flag(.NoContext);
                 } else { 
@@ -640,101 +634,6 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                 f_ty: FnType = (arg = payload.arg, ret = payload.ret, unary = self.comp().is_unary(payload.arg));
                 target := @check(self.resolve_by_type(payload.os, f_ty, func.loc)) return;
                 func.body = (Redirect = target);
-            };
-            // TODO: remove all the different string based ones and have #asm("llvm") #asm("qbe") FuncImpl::AsmStr(Backend:Symbol, Source:Symbol)
-            //       so you can have driver programs add new backends without modifying the core compiler. 
-            //       then move backends/qbe.fr to be an external thing in examples.   :io_driver
-            //       ^the point remains but for architectures
-            @case(Flag.asm.ident()) => {
-                // aarch64
-                // - tuple of 32-bit int literals 
-                // - anything else, comptime eval expecting Slice(u32)
-                // x86_bytes
-                // - @Fn(out: *List(u8)) void
-                @debug_assert(func.body&.is(.Normal), "we already checked that #asm has body");
-                @debug_assert(!func.get_flag(.AnyConstArgs), "#asm const args should already have been bound");
-                check_body = false;
-                
-                asm := func.body.Normal&;
-                
-                each func.annotations { tag | 
-                    continue :: local_return;
-                    @switch(tag.name) {
-                        @case(Flag.aarch64.ident()) => {
-                            @err_assert(!good, "found multiple arches for #asm") return;
-                            if !self.comp().want_target_arch(.aarch64) {
-                                func.body = .Empty;
-                                good = true; 
-                                continue();
-                            };
-                            // TODO: :PushConstFnCtx
-                            // TODO: you can't just compile here because then trying to imm_eval hits a not read asm func i think because of ^ callees.
-                            //       it recurses and has to emit other asm first but they don't get put in dispatch,
-                            //       becuase they don't have a thing in the result stack to do callees first.
-                            ::if(RawList(u32));
-                            ops: RawList(u32) = if asm.expr&.is(.Tuple) {
-                                parts := asm.expr.Tuple&;
-                                ops: List(u32) = list(parts.len, self.get_alloc());
-                                u32_ty := self.intern_type(Int = (bit_count = 32, signed = false));
-                                each parts { int |
-                                    i := @check(self.immediate_eval_expr(int, u32_ty)) return;
-                                    i := u32.assume_cast(i&)[];
-                                    ops&.push(i);
-                                };
-                                ops.as_raw()
-                            } else {
-                                return(@err("TODO: untested #asm case."))
-                            };
-                        
-                            func.body = (JittedAarch64 = ops);
-                            good = true; 
-                            
-                            // note: you want to do this before do_merges because flags aren't preserved. 
-                            if func.get_flag(.LogAsm) {
-                                self.codemap.show_error_line(func.loc, true /*TODO*/);
-                                // TODO: go through driver program? :driver_io
-                                //@if(USE_LLVM_DIS) print_llvm_mc_dis(ops.items());
-                            }; 
-                        };
-                        // TODO: an erorr message here gets swollowed because you're probably in the type_of shit. this is really confusing. need to do beter
-                        // TODO: if its a string literal just take it
-                        // TODO: check if they tried to give you something from the stack
-                        @case(Flag.x86_bytes.ident()) => {
-                            @err_assert(!good, "found multiple arches for #asm") return;
-                            if !self.comp().want_target_arch(.x86_64) {
-                                func.body = .Empty;
-                                good = true; 
-                                continue();
-                            };
-                            // TODO: typecheck
-                            type := @unwrap(self.env.push_x86_func, "cannot use #asm before bootstrap") return;
-                            fid := @check(self.immediate_eval_expr(asm, type)) return;
-                            fid := FuncId.assume_cast(fid&)[];
-                            fn_ptr := or self.get_fn_callable(fid) {| 
-                                return(Suspend = self.wait_for(Jit = fid))
-                            };
-    
-                            ir: List(u8) = list(self.get_alloc());
-                            callee := assume_types_fn(Arg = *List(u8), Ret = void, ptr = fn_ptr);
-                            zone := zone_begin(.CallDynamic);
-                            callee(ir&);  // :call_dynamic_values
-                            zone_end(zone);
-                            
-                            func.body = (X86AsmBytes = ir.as_raw());
-                            good = true;
-                            
-                            // note: you want to do this before do_merges because flags aren't preserved. 
-                            if func.get_flag(.LogAsm) {
-                                self.codemap.show_error_line(func.loc, true /*TODO*/);
-                                show_hex_bytes(ir.items());
-                                // TODO: go through driver program? :driver_io
-                                //@if(USE_LLVM_DIS) print_llvm_mc_dis(ir.items());
-                            }; 
-                        };
-                        @default => ();
-                    };
-                };
-                @err_assert(good, "!asm require arch tag") return;
             };
             @case(Flag.weak.ident()) => {
                 @err_assert(!did_import, "#weak must come before #import/#libc, sorry") return;
@@ -2916,14 +2815,6 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
         end();
     };
     
-    if attempt.state < 6 {
-        start(6, "");
-        @check(self.do_merges(attempt.options&, attempt.os)) return2;
-        attempt.state = 6;
-        end();
-    };
-    are_we_done_yet();
-    
     // this is garbage
     {
         start(7, "");
@@ -3272,9 +3163,6 @@ fn resolve_in_overload_set(self: *SelfHosted, f_ty: FnType, i: OverloadSet, loc:
         return(Suspend = blocked[0]);  // TODO: return all? don't just pick one. 
     };
     
-    if interesting.len > 1 {
-        @check(self.do_merges(interesting&, i)) return;
-    };
     if interesting.len == 1 {
         return(Ok = interesting[0]);
     };
@@ -3291,66 +3179,6 @@ fn resolve_in_overload_set(self: *SelfHosted, f_ty: FnType, i: OverloadSet, loc:
     };
     overloads := self.dispatch.overloads&.nested_index(i.as_index());
     @err("TODO: resolve_in_overload_set % %", self.pool.get(overloads.name), interesting.len)
-}
-
-// TODO: you want something more powerful than this so you can have a function thats inline asm on some arch/os but normal code on others. 
-// TODO: this discards any tags that have special meaning. 
-// TODO: simplier tests that use this. right now its just the compiler. 
-fn do_merges(self: *SelfHosted, options: *List(FuncId), os: OverloadSet) Maybe(void) = {
-    overloads := self.dispatch.overloads&.nested_index(os.as_index());
-    
-    for options { opt | 
-        func := self.get_function(opt);
-        if !func.get_flag(.BodyIsSpecial) {
-            // since we know we do this at the end, we aren't going to be able to help you if you have multiple overloads and not all are special. 
-            return(.Ok);
-        };
-        @check(self.infer_arguments(opt)) return;
-        @check(self.infer_return(opt)) return;
-        @try(self.ensure_resolved_body(opt)) return;
-        @check(self.emit_special_body(opt)) return;
-        func.set_flag(.EnsuredCompiled);
-    };
-    
-    f_i := options.len;
-    while => f_i > 0 {
-        continue :: local_return;
-        f_i -= 1;
-        fid := options[f_i];
-        func := self.get_function(fid);
-        f_ty := func.finished_ty().expect("types to be infered");
-        
-        merged := func.body;
-        func.body = .Empty; // this will get reset after the loop. 
-        
-        f_j := f_i;
-        while => f_j > 0 {
-            continue :: local_return; 
-            f_j -= 1;
-            other_fid := options[f_j];
-            @debug_assert(other_fid != fid, "function appeared twice in overload set");
-            other_func := self.get_function(other_fid);
-            
-            other_f_ty := other_func.finished_ty().expect("types to be infered");
-            if f_ty.arg == other_f_ty.arg && f_ty.ret == other_f_ty.ret {
-                if !other_func.body&.is(.Redirect) {  // TODO: i'd rather not get here a billion times
-                    append_impl(merged&, self.get_alloc(), other_func.body);
-                    other_func.body = (Redirect = fid);
-                    options.unordered_remove_discard(f_j);
-                    if f_j < f_i {
-                        f_i -= 1;
-                    };
-                    overloads.ready&.unordered_retain() { (f: *FuncId) bool | 
-                        f[] != other_fid
-                    };
-                };
-            };
-        };
-        func.body = merged;
-    };
-    // TODO: test getting here multiple times
-    
-    .Ok
 }
 
 fn log_type(self: *SelfHosted, ty: ?Type) Str = {
@@ -3489,10 +3317,6 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
                 func.set_flag(.BodyIsSpecial);
             };
             @case(Flag.ir.ident()) => {
-                func.set_flag(.BodyIsSpecial);
-            };
-            @case(Flag.asm.ident()) => {
-                @err_assert(!func.body&.is(.Empty), "#asm requires body expression") return;
                 func.set_flag(.BodyIsSpecial);
             };
             @case(Flag.inline.ident()) => {
