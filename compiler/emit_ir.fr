@@ -472,9 +472,8 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = {
     };
     
     T :: FuncImpl.Tag();
-    prio_amd :: @const_slice(T.NewIntrinsic, T.Normal, T.Intrinsic, T.X86AsmBytes, T.Redirect, T.DynamicImport, T.FrcImport);
-    prio_arm :: @const_slice(T.NewIntrinsic, T.Normal, T.Intrinsic, T.JittedAarch64, T.Redirect, T.DynamicImport, T.FrcImport);
-    impl := or choose_impl(func.body&, @if(self.m.goal.arch == .aarch64, prio_arm, prio_amd)) {
+    prio :: @const_slice(T.NewIntrinsic, T.Normal, T.Intrinsic, T.JittedAarch64, T.Redirect, T.DynamicImport, T.FrcImport);
+    impl := or choose_impl(func.body&, prio) {
         if self.want_syscall(self.func, true) { syscall_number |
             self.bounce_body(self.f.getcon(syscall_number), .syscall);
             return(.Ok);
@@ -531,16 +530,21 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = {
             self.pending.push(fid[]);
             return(.Ok)
         } 
+        // TODO: rename these / make them one? idk be less confusing
+        // i want to put both arm+amd in frc_inlinable modules regardless of the target so you don't have to recompile. 
+        
         // TODO: use :ExprLevelAsm so you don't have to spill everything, 
         //       but that requires letting people annotate register usage.  -- Dec 3
         fn JittedAarch64(code) => { // TODO: just store this as bytes
-            @debug_assert(self.m.goal.arch == .aarch64);
-            self.entry.task = (Asm = (lnk = self.f.lnk&, bytes = code.items().interpret_as_bytes()));
-            return(.Ok)
-        }
-        fn X86AsmBytes(bytes) => {
-            @debug_assert(self.m.goal.arch == .x86_64);
-            self.entry.task = (Asm = (lnk = self.f.lnk&, bytes = bytes.items()));
+            amd64 := "";
+            if choose_impl(func.body&, @const_slice(FuncImpl.Tag().X86AsmBytes)) { impl | 
+                amd64 = impl.X86AsmBytes.items();
+            };
+            self.entry.task = (Asm = (
+                lnk = self.f.lnk&, 
+                arm64 = code.items().interpret_as_bytes(),
+                amd64 = amd64,
+            ));
             return(.Ok)
         }
         fn FrcImport(it) => {

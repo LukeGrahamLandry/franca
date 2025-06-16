@@ -327,12 +327,14 @@ fn with_write_protect(m: *QbeModule, $body: @Fn() void) void = {
 }
 
 // :ThreadSafety we can't have both threads fucking with self.segments
-fn add_code_bytes(m: *QbeModule, name_id: Qbe.Sym, bytes: []u8) void = {
+fn add_code_bytes(m: *QbeModule, name_id: Qbe.Sym, arm64: []u8, amd64: []u8) void = {
     @if(enable_incremental())
     if m.save { save |
-        save.push_asm(m, bytes, name_id);
+        save.push_asm(m, arm64, amd64, name_id);
         return();
     };
+    
+    bytes := @if(m.goal.arch == .aarch64, arm64, amd64);
     
     use_symbol(m, name_id) { s |
         start_debug_info(m, s);
@@ -626,10 +628,9 @@ fn seal_debug_info(m: *QbeModule, debug_source_code: []u8, include: bool, files_
     
     code := m.segments&.index(.Code);
     data: AotDebugInfo = (
-        version = 1,
         code_segment = (ptr = zeroed(*u8), len = ptr_diff(code.mmapped.ptr, code.next) - m.text_padding()),
-        headers = m.debug_headers.items(),
-        payload = m.debug_data.items(),
+        headers = m.debug_info.headers.items(),
+        payload = m.debug_info.data.items(),
         source = debug_source_code,
         files = files_bytes,
         nullable_cached_codemap = zeroed rawptr,
@@ -679,27 +680,33 @@ fn encode_debug_files(files: []File) Ty([]u8, []u8) = {
 }
 
 fn start_debug_info(m: *QbeModule, s: *SymbolInfo) void = {
-    leb128_unsigned(m.debug_headers&, m.debug_data.len);
-    leb128_unsigned(m.debug_data&, s.name.len);
-    push_all(m.debug_data&, s.name);
-    m.debug_last_off_func = 0;
-    m.debug_last_off_source = 0;
+    d := m.debug_info&;
+    @if(!d.enabled) return();
+    leb128_unsigned(d.headers&, d.data.len);
+    leb128_unsigned(d.data&, s.name.len);
+    push_all(d.data&, s.name);
+    d.last_off_func = 0;
+    d.last_off_source = 0;
 }
 
 fn end_debug_info(m: *QbeModule, s: *SymbolInfo) void = {
-    leb128_unsigned(m.debug_headers&, s.size.zext());
+    d := m.debug_info&;
+    @if(!d.enabled) return();
+    leb128_unsigned(d.headers&, s.size.zext());
     // TODO: length prefix but that's annoying
-    leb128_unsigned(m.debug_data&, 0);
-    leb128_unsigned(m.debug_data&, 0);
+    leb128_unsigned(d.data&, 0);
+    leb128_unsigned(d.data&, 0);
 }
 
 fn add_debug_info(m: *QbeModule, i: *Qbe.Ins, off_in_func: i64) void = {
+    d := m.debug_info&;
+    @if(!d.enabled) return();
     hi, lo := (rsval(i.arg&[0]).intcast(), rsval(i.arg&[1]).intcast());
     offset_in_source := hi.shift_left(16).bit_or(lo);
-    leb128_unsigned(m.debug_data&, off_in_func - m.debug_last_off_func);
-    m.debug_last_off_func = off_in_func;
-    leb128_signed(m.debug_data&, offset_in_source - m.debug_last_off_source);
-    m.debug_last_off_source = offset_in_source;
+    leb128_unsigned(d.data&, off_in_func - d.last_off_func);
+    d.last_off_func = off_in_func;
+    leb128_signed(d.data&, offset_in_source - d.last_off_source);
+    d.last_off_source = offset_in_source;
 }
 
 // TODO: collect_aot_fixups compiles if you typo to *Symbol, :FUCKED

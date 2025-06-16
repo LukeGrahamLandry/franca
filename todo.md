@@ -42,9 +42,9 @@ delete the rest. thing to think about is that you want to union those between di
 different subsets of the same resources. 
 - run tests in landlock so it's less scary to miscompile something that's doing random syscalls
 - remove from the language:
-  - #asm needs to include both versions and dispatch at runtime
   - remove #syscall from the frontend (i still think it's fine to do the calling convention part in the backend for now)
     but i want user code to choose the numbers so you don't have to recompile. 
+  - make is_linking_libc() not foldable
 - document #weak: docs/(annotations.md, imports.md)
 - deal with `NOSYS`
 - apple has different c variadic abi. that's pretty unfortunate for my grand plans. 
@@ -61,6 +61,7 @@ different subsets of the same resources.
 - isel5.ssa -w: fails with inlining disabled
 - (mem3.ssa, isel5.ssa) -w: fails when constant folding is disabled. 
   `IR failed typecheck: invalid type for first operand RTmp:144 of add in block @4`
+- "you really want to lock the module in case there's another thread trying to compile into it"
 
 ## don't rely on libc
 
@@ -199,7 +200,8 @@ like what i do with a.frc but without recompiling the compiler.
 similarly allow #log_ir that persists on a module so you can debug. 
 - make mutating imported data at comptime get baked into the program like normal (instead of just the initial version)? 
 tho rn it's a bit order specific so the way import_frc works is probably a valid ordering you could get with normal franca code as well. 
-so maybe that whole system needs a bit of a rework. like maybe waiting and do all baking at the end would be less creepy. 
+so maybe that whole system needs a bit of a rework. like maybe waiting and do all baking at the end would be less creepy.
+- if you compile with -debug-info, dbgloc instructions have offsets into the source codemap which will be wrong if moved to another module. 
 
 ## Unfinished Examples
 

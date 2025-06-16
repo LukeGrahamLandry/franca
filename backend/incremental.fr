@@ -353,13 +353,12 @@ fn push(self: *Writer, m: *QbeModule, d: *Dat2) void = {
     self.sym[id].align_log2 = d.align.trailing_zeros().trunc();
 }
 
-fn push_asm(self: *Writer, m: *QbeModule, code: []u8, id: Qbe.Sym) void = {
+fn push_asm(self: *Writer, m: *QbeModule, arm64: []u8, amd64: []u8, id: Qbe.Sym) void = {
     id := self.map_sym(m, id);
     self.sym[id].segment = .MachineCode;
-    code := self.push(code);
     self.sym[id].asm = (  // TODO: let it give us both
-        arm64 = code,
-        amd64 = code,
+        arm64 = self.push(arm64),
+        amd64 = self.push(amd64),
     );
 }
 
@@ -449,8 +448,9 @@ fn finish_imports(writer: *Writer, m: *QbeModule) void = {
 finish_module :: fn(m: *QbeModule) [][]u8 = {
     writer := m.save.unwrap();
     finish_imports(writer, m);
+    t := Incremental'pack_target(m.goal.arch, m.goal.os);
     meta: Incremental.Meta = (
-        arch_os = Incremental'pack_target(m.goal.arch, m.goal.os),
+        arch_os = @if(m.goal.type == .CachedEarly, 0x0F0F, t),
         entry_sym = (off = writer.map_sym(m, m.intern("main")).trunc()), // :HardcodeMain
     );
     writer.to_bytes(meta, m)
@@ -564,8 +564,10 @@ pack_current_target :: fn() u32 = {
     pack_target(arch, os)
 };
 
-pack_target :: fn(arch: Arch, os: Os) u32 = 
-    bit_or(@as(i64) os, shift_left(@as(i64) arch, 8)).trunc();
+pack_target :: fn(arch: Arch, os: Os) u32 = {
+    ::@assert(Arch.enum_count() < 8 && Os.enum_count() < 8);
+    bit_or(1.shift_left(@as(i64) os), 1.shift_left(8 + @as(i64) arch)).trunc()
+};
 
 fn preintern_syms(header: *Header, m: *QbeModule) []Qbe.Sym = {
     count: i64 = header.sym.count.zext();
@@ -611,8 +613,7 @@ fn compile_all_symbols(header: *Header, m: *QbeModule) void = {
                 @if(ENABLE_ENABLE_TRACY) zone_end(zone);
             }
             fn MachineCode() => {
-                code := @if(m.goal.arch == .aarch64, it.asm.arm64, it.asm.amd64);
-                m.add_code_bytes(syms[i.off.zext()], header.get(code));
+                m.add_code_bytes(syms[i.off.zext()], header.get(it.asm.arm64), header.get(it.asm.amd64));
             }
             fn Import() => {
                 lib := header.get(it.imp.lib);

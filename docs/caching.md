@@ -56,3 +56,16 @@ The IR is a bit wasteful (of disk space). On macos-arm64 `@/compiler/main.fr` (w
 produces a 1.1M executable or a 4.9M cache file. However, they are a very direct binary 
 dump of the backend's internal ir format so they are quite fast to load (slower than loading 
 a .dylib but faster than linking a .o). 
+
+## frc_inlinable
+
+Instead of saving just the minimal ir right before machine code generation, it can be more useful 
+to save before any target specific passes are run (so it's still in ssa form, abi agnostic, etc). 
+The format can also include more detailed type information for a compiler frontend to use: field 
+names, enum constants, pointer types, symbol aliases, etc. The sort of information that would be 
+in a c header file. The `import_frc()` function can load these higher level modules as a `ScopeId` 
+you can access like normal franca code. The best example usage is `examples/import_c/ffi.fr`, it 
+compiles a c program into a single binary .frc blob to be loaded by the compiler. This form takes 
+more disk space and is slower to load than the post-regalloc-ir, but it colocates interface and 
+implementation so you don't have to write seperate bindings and it maintains the ability to be 
+cross compiled (and thus used transparently at comptime). 

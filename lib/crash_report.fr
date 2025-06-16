@@ -52,6 +52,7 @@ backtracing_panic_handler :: fn(msg: Str) Never = {
         report_backtrace_safe(trace_start(), 0.rawptr_from_int());
         Syscall'exit(1)
     };
+    scary_log("\n");
     report_backtrace(trace_start(), 0.rawptr_from_int());
 
     Syscall'exit(1);
@@ -187,7 +188,6 @@ fn report_backtrace(fp: rawptr, ip: rawptr) void = {
     shown := 0;
     last_ip := 0.rawptr_from_int();
     while => !fp.is_null() && i < MAX_LOOPS {
-        ip := trace_return(fp);
         if !identical(ip, last_ip) && shown < MAX_SHOWN {
             if report_frame(ip) { s | 
                 @println("  %: %", i, s);
@@ -195,6 +195,7 @@ fn report_backtrace(fp: rawptr, ip: rawptr) void = {
             };
         };
         last_ip = ip;
+        ip = trace_return(fp);
         fp = trace_prev(fp);
         i += 1;
     };
@@ -241,21 +242,23 @@ fn report_backtrace_safe(frame: rawptr, ip_hint: rawptr) void = {
 
 // The backend generates one of these for an executable based on dbgloc instructions. 
 // The numbers are variable width U/S LEB128.  
-AotDebugInfo :: @struct(
-    version: i64,
-    code_segment: []u8,  // order matters!
-    headers: []u8,  // [U off payload, U size code]
-    payload: []u8,  // [U name len, name bytes, [U off in func, S off source]]
-    source:  []u8,  // all the source files in the program concatenated together 
-    files:   []u8,  // (U file count, [U size source, U name len, name bytes])
-    nullable_cached_codemap: rawptr,
-);
+AotDebugInfo :: @struct {
+    VERSION :: 1;
+    version := VERSION;
+    // order matters!
+    code_segment: []u8;   // not including text_padding
+    headers: []u8;        // [U off payload, U size code]
+    payload: []u8;        // [U name len, name bytes, [U off in func, S off source]]
+    source:  []u8;        // all the source files in the program concatenated together 
+    files:   []u8;        // (U file count, [U size source, U name len, name bytes])
+    nullable_cached_codemap: rawptr;  // 🤡
+};
 
 fn find_in_debug_info(userdata: rawptr, ip: rawptr) ?Str = {
     #use("@/lib/leb128.fr");
     addr := int_from_rawptr(ip);
     debug_info := AotDebugInfo.ptr_from_raw(userdata);
-    if(debug_info.version != 1, => return(.None));
+    if(debug_info.version != AotDebugInfo.VERSION, => return(.None));
     code_start := u8.int_from_ptr(debug_info.code_segment.ptr);
     not_mine := addr < code_start || addr >= code_start + debug_info.code_segment.len;
     if(not_mine, => return(.None));
@@ -298,6 +301,10 @@ fn find_in_debug_info(userdata: rawptr, ip: rawptr) ?Str = {
             off_in_func := 0;
             offset_in_source := 0;
             
+            // at this point we know addr is in this function. 
+            // try to find the closest dbgloc instruction to give a more precise source location. 
+            // (emit_ir inserts them before each function call when compiled with -debug-info). 
+            @if(debug_info.source.len != 0)
             dowhile {
                 delta_off_in_func, r, ok := read_leb128(data, false);
                 data = r;
@@ -314,6 +321,7 @@ fn find_in_debug_info(userdata: rawptr, ip: rawptr) ?Str = {
             };
             
             loc: Span = (low = best_byte.trunc(), high = best_byte.trunc() + 1);
+            // TODO: this "AOT" is misleading now
             return(Some = fmt_for_trace(codemap, loc, name, "AOT"));
         };
         

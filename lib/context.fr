@@ -9,6 +9,7 @@ DefaultContext :: @struct(
     thread_index: i64,
     general_allocator: Alloc,  // this must be thread safe!
     current_os: u8,
+    prefer_syscalls: bool,
     reserved: Array(i64, 2),
     environment_variables: *CStr,  // a null terminated array of null terminated strings
     cli_arguments: []CStr,
@@ -29,6 +30,7 @@ OS :: @static(ClearOnAotBake(Os)) (it = ComptimeEnvironment.ptr_from_raw(get_bui
 // For jitted code, you inherit the compiler's context. (TODO: maybe that should only be for comptime/drivers)
 // This also is not called for cached .frc programs run by the compiler (even though they're technically AOT too). 
 franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CStr, four: *CStr) void = {
+    // TODO: this will be wrong if you pass >4096 cli arguments
     is_sane_pointer :: fn(p: ~T) bool #where = {
         p := bit_cast_unchecked(@type p, i64, p);
         p > 4096 && p.shift_right_logical(48) == 0
@@ -37,6 +39,19 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
     
     fp := align_stack();
     
+    // If you pass a .frc file to the compiler directly, it assumes it's a driver so the first argument 
+    // will be a *ImportVTable, and we can skip the runtime setup stuff and just inherit its panic handler, etc. 
+    if is_sane_pointer(argc) {
+        driver_vtable_magic_offset :: offset_of(ImportVTable, Fields(ImportVTable).magic);
+        p := i64.ptr_from_int(argc + driver_vtable_magic_offset)[];
+        if p == DRIVER_VTABLE_MAGIC {
+            c := context(DefaultContext);
+            OS[].it = @as(Os) @as(i64) c.current_os.zext();
+            user();
+            return();
+        };
+    };
+    
     // TODO: this is probably a stupid idea. for now it feels clever that i can guess the os by apple passing the 
     //       normal c args to the entry point in registers and linux passing them on the stack. 
     //       super fragile to rely on nobody leaving junk in the registers for this. 
@@ -44,11 +59,12 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
     @if(!FEATURE_WEAK_SYMBOLS) {
         is_linux = query_current_os() == .linux;
     };
+    
     OS[].it = @if(is_linux, .linux, .macos);
     
     if is_linux {
         entry_args_from_stack_linux(argc&, argv&, envp&, fp);
-        @assert(!(is_sane_pointer(argc) || !is_sane_pointer(envp) || !is_sane_pointer(argv)));
+        @assert(!(is_sane_pointer(argc) || !is_sane_pointer(envp) || !is_sane_pointer(argv)), "failed to guess os");
     };
     
     CAPTURE :: @static(@FnPtr() void);
@@ -248,7 +264,9 @@ fn push_zeroed_dynamic_context($body: @Fn() void) void = {
     new_context := raw_from_ptr(@type new_context, new_context&);
     old_context := get_dynamic_context();
     set_dynamic_context(new_context);
-    context(DefaultContext)[].current_os = (@as(i64) @as(Os) OS[].it).trunc();  // unfortunate we're not doing what the name of the function would imply
+    c := context(DefaultContext);
+    c.current_os = (@as(i64) @as(Os) OS[].it).trunc();  // unfortunate we're not doing what the name of the function would imply
+    c.prefer_syscalls = !is_linking_libc();
     body();
     set_dynamic_context(old_context);
 }

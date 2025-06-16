@@ -110,11 +110,13 @@ QbeModule :: @rec @struct(
     
     start_of_executable_stubs: *u8,
     
-    debug_headers: List(u8),
-    debug_data: List(u8),
-    debug_source: []u8,
-    debug_last_off_func: i64,
-    debug_last_off_source: i64,
+    debug_info: @struct {
+        headers: List(u8);  // crash_report.AotDebugInfo.headers
+        data: List(u8);     // crash_report.AotDebugInfo.payload
+        last_off_func := 0;
+        last_off_source := 0;
+        enabled: bool;
+    },
     
     llvm_global_value_buf: List(u8),
     llvm_global_type_buf: List(u8),
@@ -285,8 +287,12 @@ fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
     m.local_needs_reloc = list(gpa);
     m.inlinable_but_referenced_later = list(gpa);
     m.symbols = forever.alloc_zeroed(SymbolBucket, IMask + 1);
-    m.debug_headers = list(gpa);
-    m.debug_data = list(gpa);
+    m.debug_info = (
+        headers = list(gpa), 
+        data = list(gpa),
+        // the debug format is based on machine code offsets so it only matters if we're actually generating machine code
+        enabled = !@is(goal.type, .Cached, .CachedEarly),
+    );
     {   // TODO: this is kinda ass
         // :GotAtConstantDataBase
         next := m.segments&[.ConstantData].next&;

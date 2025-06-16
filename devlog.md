@@ -6,6 +6,19 @@ let's cheat and make examples/terminal.fr(repl=true) not take 2 seconds to compi
 - compile_to_shader_source: 68 // shader compiler (for comptime)
 notably those are all things to aren't going to change if you're just working on the terminal program. 
 
+## (Jun 16)
+
+- find_ip_in_module: use debug_headers instead of for_symbols, so it's not completely screwed if you crash in the body of a use_symbol. 
+  - as a test, reintroduce yesterdays problem with load(inlinable), 
+    and now i get a full stack trace instead of getting stuck. fantastic. 
+  - still sketchy if there's another thread trying to output debug info while you're reading it but baby steps. 
+- report the first ip as well. originally i skipped one because it would always be the panic() which is useless 
+  but now i do it for segfaults, etc. as well which have a meaningful starting ip. 
+- did the last step of storing both arches MachineCode so frc_inlinable can be used on either target. 
+- kinda dumb that you have to use qbe_frontend instead of the compiler to run a non-driver cache file. 
+  can have runtime_init detect that situation and do the right thing. 
+- experimenting with @syscall as a macro instead of compiler magic. 
+
 ## (Jun 15)
 
 - stop using libc rand(). found a short one from the internet that seems to produce numbers. what more can i ask for. 
@@ -37,7 +50,8 @@ notably those are all things to aren't going to change if you're just working on
   - for small things, the new way shoves everything together such that it's impossible to read somehow. 
     maybe im just not used to it. but the old one was kinda ugly too. so making it more in userspace instead 
     of a blessed compiler thing makes it more clear that it would be reasonable to replace it with a real 
-    assembler in comptime code. 
+    assembler in comptime code.
+- i kinda want something like #inline but instead of doing anything, it just asserts that it was automatically inlined.  
 
 ## (Jun 14)
 

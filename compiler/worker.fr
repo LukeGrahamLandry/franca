@@ -257,7 +257,7 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
         fn Asm(it) => {
             // This is trivial but we want to do it without threads fighting. 
             // TODO: support it being exported, etc. 
-            m.add_code_bytes(it.lnk.id, it.bytes);  
+            m.add_code_bytes(it.lnk.id, it.arm64, it.amd64);  
         }
         fn JitImport(it) => {
             m.put_jit_addr(it.lnk.id, it.addr);
@@ -275,9 +275,7 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
             f.start = newblk();
             callee := f.symcon(it.target);
             f.reset_scratch();
-            // if it went through the frontend, a1 will be RCall so this is a hacky sentinal for CodegenWorker.Task.Bounce
-            // it makes the emit use `b` instead of `bl`
-            f.emit(.call, .Kw, QbeNull, callee, INT(0));
+            f.emit(.call, .Kw, QbeNull, callee, RCALL_TAIL_SENTINAL);
             f.copy_instructions_from_scratch_reversed_which_means_forwards(f.start);
             f.start.jmp.type = .hlt;
            
@@ -335,7 +333,7 @@ CodegenState :: @enum(i64) (WaitingForBouba, UsedByBouba, WaitingForKiki, UsedBy
 CodegenTask :: @tagged(
     Dead: void,
     Func: *Qbe.Fn,
-    Asm: @struct(lnk: *Qbe.Lnk, bytes: []u8),
+    Asm: @struct(lnk: *Qbe.Lnk, arm64: []u8, amd64: []u8),
     JitImport: @struct(lnk: *Qbe.Lnk, addr: rawptr),
     Bounce: @struct(lnk: *Qbe.Lnk, target: Qbe.Sym),
     Shim: @struct(f: *Qbe.Fn, shim_for: Qbe.Sym),
