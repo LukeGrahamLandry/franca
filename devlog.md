@@ -20,6 +20,24 @@ notably those are all things to aren't going to change if you're just working on
     changing compilation order made one of the CodegenEntry.Bounce end up in there and not doing 
     default_init() when !did_regalloc is fine when the loader is expecting it but this was unequipped to deal somehow i guess. 
     tho also, ow that i notice it, using QbeNull as sentinal for Bounce is bad if it can be mixed in with inlinable stuff. 
+- a userspace version of #asm that makes the FuncImpl directly (so replacing the sema part, not the emit_ir part), is super easy, that's pleasing.
+  - im not even sure why i did it the other way before. i think because i was trying to not have an intrinsics so even stuff like 
+    `add(i64, i64)` was done with #asm so you couldn't compile any comptime stuff at all before needing to call an #asm function. 
+    but the more formal ir has been very successful so i don't care about retaining the ability to do asm before bootstrap_compiler_environment.
+  - you lose the ease of having them be independent function declarations but i think that's fine, 
+    i really want to get rid of `sema.fr/do_merges()` because there's a bunch of situations i don't trust that it works. 
+    i have a lot of trouble with the columns vs rows organisation choice. this might be a step in the wrong direction there. 
+    but the old way wasn't setup to let you add an architecture without the frontend explicitly supporting it either so 
+    the sane thing has got to be to provide the current features as simply as possible, not let more complexity sit 
+    in sema just in case it maybe becomes useful later. 
+  - tho also now that i think of it i can just let you pass two funcid's and read the body in the old format. 
+  - a bit dumb that i have to manually write wrappers to put a FuncId in an overload set tho. 
+  - this whole thing  freezes the layout of Func even more which maybe isn't the best plan. 
+    maybe before next updateboot i should provide compiler apis for setting useful combinations of FnFlags. 
+  - for small things, the new way shoves everything together such that it's impossible to read somehow. 
+    maybe im just not used to it. but the old one was kinda ugly too. so making it more in userspace instead 
+    of a blessed compiler thing makes it more clear that it would be reasonable to replace it with a real 
+    assembler in comptime code. 
 
 ## (Jun 14)
 

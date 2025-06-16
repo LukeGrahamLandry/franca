@@ -3,8 +3,7 @@
 JumpBuf :: @struct(registers: Array(i64, 13));
 WhichJump :: @enum(i64) (Try = 0, Catch = 1);
 
-#aarch64 #c_call #asm
-fn try(buf: *JumpBuf) WhichJump = (
+try_impl :: AsmFunction(fn(_: *JumpBuf) WhichJump = (), @const_slice(
     stp_so(.X64, x19, x20, x0, @as(i7) 0),
     stp_so(.X64, x21, x22, x0, @as(i7) 2),
     stp_so(.X64, x23, x24, x0, @as(i7) 4),
@@ -15,28 +14,7 @@ fn try(buf: *JumpBuf) WhichJump = (
     str_uo(.X64, x1, x0, @as(u12) 12), // idk if st___ can encode sp
     movz(.X64, x0, 0x0000, .Left0), // set return value to WhichJump.Try
     ret(), 
-);
-:: assert_eq(@as(i64) WhichJump.Try, 0);
-
-#aarch64 #c_call #asm
-fn throw(buf: *JumpBuf) Never = (
-    ldp_so(.X64, x19, x20, x0, @as(i7) 0),
-    ldp_so(.X64, x21, x22, x0, @as(i7) 2),
-    ldp_so(.X64, x23, x24, x0, @as(i7) 4),
-    ldp_so(.X64, x25, x26, x0, @as(i7) 6),
-    ldp_so(.X64, x27, x28, x0, @as(i7) 8),
-    ldp_so(.X64, fp, lr, x0, @as(i7) 10),
-    ldr_uo(.X64, x1, x0, @as(u12) 12), // idk if l___ can encode sp
-    add_im(.X64, sp, x1, @as(u12) 0, 0b0), 
-    movz(.X64, x0, 0x0001, .Left0), // set return value to WhichJump.Catch
-    ret(), // we set lr from the jumpbuf so we'll go back to the caller of catch. 
-);
-:: assert_eq(@as(i64) WhichJump.Catch, 1);
-
-#redirect(Ty(i64, i64), bool) fn eq(lhs: WhichJump, rhs: WhichJump) bool;
-
-#x86_bytes #c_call #asm
-fn try(buf: *JumpBuf) WhichJump = (fn(out) = @asm_x64(
+)) { (out: *List(u8)) | @asm_x64(
     // Save integer registers
     encode_base_plus_offset(PrimaryOp.MovReg, X86Reg.rbp, X86Reg.rdi, 0),
     encode_base_plus_offset(PrimaryOp.MovReg, X86Reg.rsp, X86Reg.rdi, 8),
@@ -54,10 +32,20 @@ fn try(buf: *JumpBuf) WhichJump = (fn(out) = @asm_x64(
     // return WhichJump.Try
     encode_imm(PrimaryOp.MovImm32, X86Reg.rax, 0), 
     PrimaryOp.Ret
-) out);
+) out;};
 
-#x86_bytes #c_call #asm
-fn throw(buf: *JumpBuf) Never = (fn(out) = @asm_x64(
+throw_impl :: AsmFunction(fn(_: *JumpBuf) Never = (), @const_slice(
+    ldp_so(.X64, x19, x20, x0, @as(i7) 0),
+    ldp_so(.X64, x21, x22, x0, @as(i7) 2),
+    ldp_so(.X64, x23, x24, x0, @as(i7) 4),
+    ldp_so(.X64, x25, x26, x0, @as(i7) 6),
+    ldp_so(.X64, x27, x28, x0, @as(i7) 8),
+    ldp_so(.X64, fp, lr, x0, @as(i7) 10),
+    ldr_uo(.X64, x1, x0, @as(u12) 12), // idk if l___ can encode sp
+    add_im(.X64, sp, x1, @as(u12) 0, 0b0), 
+    movz(.X64, x0, 0x0001, .Left0), // set return value to WhichJump.Catch
+    ret(), // we set lr from the jumpbuf so we'll go back to the caller of try. 
+)) { (out: *List(u8)) | @asm_x64(
     // Restore integer registers
     encode_base_plus_offset(PrimaryOp.MovRegLoad, X86Reg.rbp, X86Reg.rdi, 0),
     encode_base_plus_offset(PrimaryOp.MovRegLoad, X86Reg.rsp, X86Reg.rdi, 8),
@@ -75,7 +63,19 @@ fn throw(buf: *JumpBuf) Never = (fn(out) = @asm_x64(
     // return WhichJump.Catch  
     encode_imm(PrimaryOp.MovImm32, X86Reg.rax, 1), 
     PrimaryOp.Ret,
-) out);
+) out;};
+
+fn try(buf: *JumpBuf) WhichJump = {
+    @run assert_eq(@as(i64) WhichJump.Try, 0);
+    try_impl(buf)
+}
+
+fn throw(buf: *JumpBuf) Never = {
+    @run assert_eq(@as(i64) WhichJump.Catch, 1);
+    throw_impl(buf)
+}
+
+#redirect(Ty(i64, i64), bool) fn eq(lhs: WhichJump, rhs: WhichJump) bool;
 
 #use("@/backend/amd64/bits.fr");
 #use("@/backend/arm64/bits.fr");

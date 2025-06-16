@@ -42,9 +42,10 @@ SoftIntrin :: @struct {
 AsmIntrin :: @struct {
     #use("@/backend/amd64/bits.fr");
     #use("@/backend/arm64/bits.fr");
+    #use("@/tests/removed.fr");
     
-    fn trailing_zeros();
-    fn trailing_zeros(b: i64) i64 #asm #aarch64 = (
+    trailing_zeros :: AsmFunctionOld(trailing_zeros0, trailing_zeros1);
+    trailing_zeros0 :: fn(b: i64) i64 = (
         // 0b101101011000000000110 is ctz... but it doesn't exist? I guess i don't have FEAT_CSSC?
         @bits(Bits.X64, 0b101101011000000000000, @as(u5) x0, @as(u5) x0),  // rbit
         @bits(Bits.X64, 0b101101011000000000100, @as(u5) x0, @as(u5) x0),  // clz
@@ -53,15 +54,16 @@ AsmIntrin :: @struct {
     
     // this returns 0 if b is 0 which is unfortunate but i never call it that way yet.
     // I cheated with `int trailing_zeroes(long x) { return __builtin_ctzl(x); }`, needs -msse4.2
-    fn trailing_zeros(b: i64) i64 #asm #x86_bytes = (fn(out) = {
+    trailing_zeros1 :: fn(b: i64) i64 = (fn(out) = {
         out.push_all(@slice(0x48, 0x0f, 0xbc, 0xc7)); // bsfq	%rdi, %rax
         out.push(@as(u8) PrimaryOp.Ret);
     });
-    fn count_ones();
+    
+    count_ones2 :: AsmFunctionOld(count_ones0, count_ones1);
     // i cheated with `int count_ones(long *x) { return __builtin_popcountll(*x); }`
     // the software one below was 30/560 samples, this one is 6. 
     // too bad it has to spill everything for it. would be better if i had real inline asm. 
-    fn count_ones(b: *u64) u32 #asm #aarch64 = (
+    count_ones0 :: fn(b: *u64) u32 = (
         0xfd400000, // ldr d0, [x0]
         0x0e205800, // cnt.8b v0, v0
         0x2e303800, // uaddlv.8b h0, v0
@@ -69,11 +71,14 @@ AsmIntrin :: @struct {
         ret()
     );
     
-    fn count_ones(b: *u64) u32 #asm #x86_bytes = (fn(out) = {
+    count_ones1 :: fn(b: *u64) u32 = (fn(out) = {
         out.push_all(@slice(0xf3, 0x48, 0x0f, 0xb8, 0x07)); // popcntq	(%rdi), %rax
         out.push(@as(u8) PrimaryOp.Ret);
     });
     
+    fn count_ones();
+    fn count_ones(b: *u64) u32 = 
+        count_ones2(b);
     fn count_ones(b: u64) u32 = 
         count_ones(b&);
     
@@ -84,14 +89,12 @@ AsmIntrin :: @struct {
     //       add this as a test even if you make this an intrinsic!
     
     rotr :: fn(x: u32, $amount: u5) u32 = {
-        fn impl();
-        
-        fn impl(x: u32) u32 #asm #aarch64 = (
+        impl0 :: fn(x: u32) u32 = (
             @bits(Bits.W32, 0b00100111, Bits.W32, 0b0, @as(u5) x0, 0b0, amount, @as(u5) x0, @as(u5) x0),
             ret(),
         );
     
-        fn impl(x: u32) u32 #asm #x86_bytes = (fn(out) = @asm_x64(
+        impl1 :: fn(x: u32) u32 = (fn(out) = @asm_x64(
             0xC1, // ROR
             @as(u8) pack_modrm(ModrmMode.Direct, X86Reg.rdi, @as(X86Reg) 0b0001),
             @as(u8) amount,
@@ -99,27 +102,35 @@ AsmIntrin :: @struct {
             PrimaryOp.Ret
         ) out);
         
+        // TODO: this doesn't work if you call it inline
+        impl :: AsmFunctionOld(impl0, impl1);
         impl(x)
     }
     
-    fn byte_swap(x: u32) u32 #asm #aarch64 = (
+    fn byte_swap(x: u32) u32 = 
+        AsmFunctionOld(byte_swap32_0, byte_swap32_1)(x);
+    
+    byte_swap32_0 :: fn(x: u32) u32 = (
         rev(Bits.W32, x0, x0),
         ret(),  
     );
-        
-    fn byte_swap(x: i64) i64 #asm #aarch64 = (
-        rev(Bits.X64, x0, x0),
-        ret(),  
-    );
     
-    fn byte_swap(x: u32) u32 #asm #x86_bytes = (fn(out) = @asm_x64(
+    byte_swap32_1 :: fn(x: u32) u32 = (fn(out) = @asm_x64(
         0x0F, // prefix
         @as(u8) 0xC8 + trunc(@as(i64) @as(u4) X86Reg.rdi.raw()),  // BSWAP
         encode_bin(PrimaryOp.MovReg, X86Reg.rax, X86Reg.rdi),
         PrimaryOp.Ret
     ) out);
     
-    fn byte_swap(x: i64) i64 #asm #x86_bytes = (fn(out) = @asm_x64(
+    fn byte_swap(x: i64) i64 = 
+        AsmFunctionOld(byte_swap64_0, byte_swap64_1)(x);
+        
+    byte_swap64_0 :: fn(x: i64) i64 = (
+        rev(Bits.X64, x0, x0),
+        ret(),  
+    );
+    
+    byte_swap64_1 :: fn(x: i64) i64 = (fn(out) = @asm_x64(
         0b01001000, // w = true
         0x0F, // prefix
         @as(u8) 0xC8 + trunc(@as(i64) @as(u4) X86Reg.rdi.raw()),  // BSWAP

@@ -50,17 +50,6 @@ different subsets of the same resources.
 - apple has different c variadic abi. that's pretty unfortunate for my grand plans. 
   it feels pretty invasive to have the backend compile two versions of anything variadic. 
 - i think it's fine to just do apple_extsb always. the other one just drops 8/16 args and i don't use them anyway. 
-- #asm
-  - examples/toy/cpuid
-  - startup: get_fp, fix_stack
-  - jump: try/throw 
-  - query_current_arch
-  - apple_thread_jit_write_protect: MSR
-  - atomics: fence
-  - tests/inline_asm_jit
-  - tests/intrins
-  - test/multiple_stacks
-  - #syscall kinda
 - get rid of query_context_is_implicit 
 
 ## backend 

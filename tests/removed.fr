@@ -1,3 +1,8 @@
+// TODO: why is userspace_target_os getting picked up twice by gen_full_test_program? 
+//       it's imported by another file but that shouldn't make a difference? 
+//       (it did when using #include_std because that doesn't do-dedup with import() 
+//       but then it was conflicting overload which made sense)
+
 // #target_os used to be part of the compiler but it's been removed in favour of just using runtime dispatch. 
 // this example is just a sanity check that it's possible to implement an api that works like the old one without help from the compiler. 
 // the only difference here is that all the branches will be compiled (unlike #target_os which checked BuildOptions.target_os_bitset). 
@@ -35,4 +40,20 @@ fn userspace_target_os() void #test = {
 // TODO: other things on the chopping block:
 // - #syscall
 // - #redirect
-// - #asm #aarch64 #x86_bytes
+
+
+// this is used in tests/(inline_asm_jit, multiple_stacks, intrins).fr
+AsmFunctionOld :: fn(arm64: FuncId, amd64: FuncId) FuncId = {
+    arm64_func := get_function_ast(arm64, true, true, false, false);
+    amd64_func := get_function_ast(amd64, true, true, false, false);
+    ::tagged(FuncImpl);
+    @assert(arm64_func.body&.is(.Normal) && amd64_func.body&.is(.Normal), "AsmFunctionOld invalid body");
+    
+    arm64_ops := u32.list(ast_alloc());
+    for arm64_func.body.Normal&.items() { e |
+        arm64_ops&.push(const_eval(u32)(e));
+    };
+    amd64_callee := const_eval(@FnPtr(out: *List(u8)) void)(amd64_func.body.Normal);
+    
+    AsmFunction(arm64, arm64_ops.items(), amd64_callee)
+}

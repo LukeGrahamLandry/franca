@@ -1,7 +1,7 @@
 /// This defines the .frc file format used by the franca compiler. 
 /// See @/docs/caching.md
 
-MAGIC :: 0x0009_41434E415246;  // FRANCA__
+MAGIC :: 0x000A_41434E415246;  // FRANCA__
 Header :: @struct {
     meta: Meta #use;
     dep: Storage(Dep);
@@ -55,8 +55,8 @@ Seg :: @enum(u8) (
 );
 
 Asm :: @struct {
-    code: Ref(u8);
-    arch: Arch;
+    arm64: Ref(u8);
+    amd64: Ref(u8);
 };
 
 // Currently i only save right before emitting machine code, 
@@ -356,9 +356,10 @@ fn push(self: *Writer, m: *QbeModule, d: *Dat2) void = {
 fn push_asm(self: *Writer, m: *QbeModule, code: []u8, id: Qbe.Sym) void = {
     id := self.map_sym(m, id);
     self.sym[id].segment = .MachineCode;
-    self.sym[id].asm = (
-        code = self.push(code),
-        arch = m.goal.arch,
+    code := self.push(code);
+    self.sym[id].asm = (  // TODO: let it give us both
+        arm64 = code,
+        amd64 = code,
     );
 }
 
@@ -610,7 +611,8 @@ fn compile_all_symbols(header: *Header, m: *QbeModule) void = {
                 @if(ENABLE_ENABLE_TRACY) zone_end(zone);
             }
             fn MachineCode() => {
-                m.add_code_bytes(syms[i.off.zext()], header.get(it.dat.bytes));
+                code := @if(m.goal.arch == .aarch64, it.asm.arm64, it.asm.amd64);
+                m.add_code_bytes(syms[i.off.zext()], header.get(code));
             }
             fn Import() => {
                 lib := header.get(it.imp.lib);

@@ -76,20 +76,23 @@ fn get_working_directory(a: Alloc) List(u8) = {
 // Calling `query_current_{arch, os}` at comptime is probably wrong because 
 // you'll observe the host environment not the target. 
 
-current_arch :: query_current_arch;
 current_os :: query_current_os;
 
-#aarch64 #asm #c_call #use("@/backend/arm64/bits.fr")
-fn query_current_arch() Arch  = (
-    movz(.X64, x0, 0x0000, .Left0), 
-    ret(), 
-);
+current_arch :: AsmFunction(fn() Arch = (), {
+    #use("@/backend/arm64/bits.fr");
+    @const_slice(
+        movz(.X64, x0, 0x0000, .Left0), 
+        ret(), 
+    )
+}) { (out: *List(u8)) |
+    #use("@/backend/amd64/bits.fr");
+    @asm_x64(
+        encode_imm(PrimaryOp.MovImm32, X86Reg.rax, 1), 
+        PrimaryOp.Ret
+    ) out;
+};
 
-#x86_bytes #c_call #asm #use("@/backend/amd64/bits.fr") 
-fn query_current_arch() Arch = (fn(out) = @asm_x64(
-    encode_imm(PrimaryOp.MovImm32, X86Reg.rax, 1), 
-    PrimaryOp.Ret
-) out);
+fn query_current_arch() Arch = current_arch();
 
 //
 // You must call this function when writting machine code into memory and then trying to execute it (simply mprotect-ing it to Exec is not enough)!
@@ -113,7 +116,8 @@ fn clear_instruction_cache(beg: rawptr, end: rawptr) void = {
     @if(::(!FEATURE_WEAK_SYMBOLS && query_current_os() == .linux)) return(); // :UpdateBoot
     
     if query_current_arch() == .aarch64 {
-        __clear_cache :: fn(beg: rawptr, end: rawptr) void #weak #libc;
+        // TODO: the NOSYS is a HACK to make -syscalls make a real static binary
+        __clear_cache :: fn(beg: rawptr, end: rawptr) void #weak #libc #syscall(NOSYS, NOSYS, NOSYS);
         __clear_cache(beg, end);
     }
 };
@@ -142,9 +146,11 @@ fn apple_thread_jit_write_protect(executable_on_current_thread: bool) void = {
     
     magic :: fn(i: i64) => i64.ptr_from_int(0xFFFFF0000.bit_or(i))[];
     MSR :: fn(x: i64, $msr: u32) void = {
-        fn xxx();
-        fn xxx(x: i64) void #asm #aarch64 #c_call = (msr, 0xd5033fdf, 0xD65F03C0); // msr, isb, ret
-        fn xxx(x: i64) void #x86_bytes #c_call #asm = (fn(out) = out.push_all(@slice(0xc3, 0xc3))); // unreachable
+        xxx :: AsmFunction(fn(x: i64) void = (), {
+            @const_slice(msr, 0xd5033fdf, 0xD65F03C0) // msr, isb, ret
+        }) { (out: *List(u8)) | 
+            out.push_all(@slice(0xc3, 0xc3)); // unreachable
+        };
         xxx(x)
     };
 };
