@@ -1,7 +1,6 @@
 
 read :: @S("read") fn(fd: Fd, buf: *u8, size: i64) i64Result #weak #libc #syscall(63, 0, 3);
-//write :: @S("write") fn(fd: Fd, buf: *u8, size: i64) i64Result #weak #libc #syscall(64, 1, 4);
-write :: fn(fd: Fd, buf: *u8, size: i64) i64Result /* #libc */ #syscall(64, 1, 4);
+write :: @S("write") fn(fd: Fd, buf: *u8, size: i64) i64Result #weak #libc #syscall(64, 1, 4);
 close :: @S("close") fn(fd: Fd) voidResult #libc #syscall(57, 3, 6);
 lseek :: @S("lseek") fn(fd: Fd, offset: i64, whence: Whence) i64Result #libc #syscall(62, 8, 199);
 remove :: fn(filepath: CStr) voidResult #libc;
@@ -16,11 +15,8 @@ mmap :: @S("mmap") fn(addr: rawptr, len: i64, prot: i64, flags: i64, fd: Fd, off
 munmap :: @S("munmap") fn(addr: rawptr, len: i64) voidResult #libc #syscall(215, 11, 73);
 mprotect :: @S("mprotect") fn(addr: rawptr, len: i64, prot: i64) voidResult #libc #syscall(226, 10, 74);
 
-// TODO: `./boot/temporary/macos-amd64.sh` doesn't like this being #libc anymore ...... thats unfortunate,
-//        but it's fine on the latest compiler so not a big deal as long as it doesn't rot?? :UpdateBoot
 // linux: exit_group, not exit. exit just ends the calling thread. 
-exit :: fn(status: i64) Never /* #libc */ #syscall(94, 231, 1);
-//exit :: @S("exit") fn(status: i64) Never /* #libc */ #syscall(94, 231, 1);
+exit :: @S("exit") fn(status: i64) Never #libc #syscall(94, 231, 1);
 
 nanosleep :: @S("nanosleep") fn(duration: *TimeSpec, nullable_remainder_out: *TimeSpec) voidResult #libc #syscall(101, 35, NOSYS);
 
@@ -80,18 +76,13 @@ Clone3 :: @struct {
 Macos :: import("@/lib/sys/macos.fr");
 Linux :: import("@/lib/sys/linux.fr");
 
-// TODO: some things (write, mmap, munmap, exit) need to be used before bootstrap_compiler_environment
 S :: fn(name: FatExpr, fid: FatExpr) FatExpr #macro = {
     name := const_eval(Str)(name);
     fid := const_eval(FuncId)(fid);
     func := get_function_ast(fid, true, true, true, false);
     func.name = name.sym();
 
-    driver_abi_version :: { c := current_compiler_context();  c'vtable'driver_abi_version };
-    
-    // :UpdateBoot
-    ok :: !IS_BOOTSTRAPPING && driver_abi_version >= 1131;
-    @if(!ok) {
+    @if(IS_BOOTSTRAPPING) {
         func.body = .Empty; // undo clone hack on old compilers where the syscall shim will be small enough to inline on its own
         return(@literal fid);
     };

@@ -19,9 +19,6 @@ DefaultContext :: @struct(
     reserved3: Array(i64, 10),
 );
 
-// :UpdateBoot
-FEATURE_WEAK_SYMBOLS :: !IS_BOOTSTRAPPING && { c := current_compiler_context(); c'vtable'driver_abi_version != 1016 };
-
 // this is set in franca_runtime_init and read in push_zeroed_dynamic_context
 OS :: @static(ClearOnAotBake(Os)) (it = ComptimeEnvironment.ptr_from_raw(get_build_options()[].env)[].comptime_os);
 
@@ -56,9 +53,6 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
     //       normal c args to the entry point in registers and linux passing them on the stack. 
     //       super fragile to rely on nobody leaving junk in the registers for this. 
     is_linux := is_sane_pointer(argc) || !is_sane_pointer(envp) || !is_sane_pointer(argv);
-    @if(!FEATURE_WEAK_SYMBOLS) {
-        is_linux = query_current_os() == .linux;
-    };
     
     OS[].it = @if(is_linux, .linux, .macos);
     
@@ -102,7 +96,7 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
         };
     };
 
-    @if(FEATURE_WEAK_SYMBOLS)
+    @if(!IS_BOOTSTRAPPING)
     if is_linux && is_linking_libc() {
         // TODO: the NOSYS is a HACK to make -syscalls make a real static binary
         //       alternative is to keep is_linking_libc() foldable but the point of my current project is to make everything more dynamic so you don't have to recompile. 
@@ -116,9 +110,7 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
 
 // surely we don't need to call uname... right... right...?
 fn query_current_os() Os = {
-    @if(!FEATURE_WEAK_SYMBOLS) {
-        return((fn() Os #target_os = (fn($os) => os))());
-    };
+    @if(IS_BOOTSTRAPPING) return(Os.macos);
     @as(Os) @as(i64) context(DefaultContext)[].current_os.zext()
 }
 
@@ -305,6 +297,8 @@ fn context($T: Type) *T #generic = {
 
 ::if(rawptr);
 fn scary_log(s: Str) void = {
+
+    // force a jit-shim because write() has a weird dependency on @syscall
     //_ := Syscall'write(@as(Fd) (fd = 1), s.ptr, s.len);
     impl :: fn(s: Str) void = {
         _ := Syscall'write(@as(Fd) (fd = 1), s.ptr, s.len);

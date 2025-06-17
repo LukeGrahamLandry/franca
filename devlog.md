@@ -6,6 +6,15 @@ let's cheat and make examples/terminal.fr(repl=true) not take 2 seconds to compi
 - compile_to_shader_source: 68 // shader compiler (for comptime)
 notably those are all things to aren't going to change if you're just working on the terminal program. 
 
+## (Jun 17)
+
+- fix bf2ir and kalidescope to pass environement pointer now that i need it to print characters.
+  - extra confusion because bf2ir uses import_frc which wasn't setting FnFlag.YesContext, so emit_ir 
+    was trying to helpfully guess that you didn't need the evironment pointer because it used to 
+    be more expensive to pass before i made regalloc do fewer redundant copies. 
+    tho this means varargs on amd64 will be even more a problem because both want rax. 
+    maybe could use a high float register? is it slow to move between int and float? 
+
 ## (Jun 16)
 
 - find_ip_in_module: use debug_headers instead of for_symbols, so it's not completely screwed if you crash in the body of a use_symbol. 

@@ -72,7 +72,6 @@ different subsets of the same resources.
   - snprintf
   - (because .ssa test calls it): getchar, strcmp, memcmp, memcpy, strncmp
 - prospero: atof
-- kaleidoscope: strtod
 - fetch_or_crash: stop exec-ing random shit! that's even worse than depending on libc!
 - examples/bf: putchar, getchar
 - (epicyles, geo): fmod
@@ -319,6 +318,7 @@ TODO: end of loop. still too many options for 'index'
 ```
 - // TODO: only the first element of the @slice in unquote_placeholders is getting typechecked that it wants FatExpr not *FatExpr? 
 - tests/todo/i.fr is super important :FuckedLikeZig
+- #inline returning Never doesn't remember that it returns Never
 
 ## cross compiling
 

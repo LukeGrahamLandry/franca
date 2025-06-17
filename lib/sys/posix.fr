@@ -291,7 +291,7 @@ DT :: @struct {
 
 choose_inode64_on_applex8664 :: fn($normal: FuncId, $mangled: FuncId) AsFnPtr(normal) #generic = {
     @"🤡" := current_os() == .macos && current_arch() == .x86_64;
-    @if(::(IS_BOOTSTRAPPING || (!FEATURE_WEAK_SYMBOLS && current_os() == .linux)),  // :UpdateBoot
+    @if(IS_BOOTSTRAPPING,  // :UpdateBoot
         @as(AsFnPtr(normal)) @as(FuncId) normal,
         if_func(@"🤡", mangled, normal),
     )
@@ -300,7 +300,6 @@ choose_inode64_on_applex8664 :: fn($normal: FuncId, $mangled: FuncId) AsFnPtr(no
 errno :: fn() *i32 = {
     @if(!is_linking_libc()) return(@static(i32));
     @if(IS_BOOTSTRAPPING) return(__error());          // :UpdateBoot
-    @if(!FEATURE_WEAK_SYMBOLS) return(@static(i32));  // :UpdateBoot
 
     // This has different names on different libc-s.
     // https://github.com/ziglang/zig/blob/master/lib/std/c.zig#L9876
@@ -432,7 +431,6 @@ fn syscall(arg: FatExpr) FatExpr #macro = {
     fid := const_eval(FuncId)(fid);
     func := get_function_ast(fid, true, true, true, false);
 
-    //weak := false;
     libc := false;
     can_syscall := false;
     sys := zeroed Array(i64, 3);
@@ -441,9 +439,6 @@ fn syscall(arg: FatExpr) FatExpr #macro = {
         if it.name == (@symbol libc) {
             libc = true;
         };
-        //if it.name == (@symbol weak) {
-        //    weak = true;
-        //};
         if it.name == (@symbol inode64_on_applex8664) {
             inode64_on_applex8664 = true;
         };
@@ -455,11 +450,8 @@ fn syscall(arg: FatExpr) FatExpr #macro = {
             }
         };
     };
-    //if libc && !weak {
-    //    compile_error("symbol used with @syscall should be marked #weak", func.loc);
-    //};
     
-    other_fid := fid;
+    //other_fid := fid;
     //if inode64_on_applex8664 {
     //    println("TODO: this doesn't work because this way of duplication the function is illegal");
     // /// also tfmt calls exit()
@@ -504,7 +496,7 @@ fn syscall(arg: FatExpr) FatExpr #macro = {
     );
     
     @{
-        want_syscall := context(DefaultContext)[].prefer_syscalls || @[@literal !libc] || !is_linking_libc();
+        want_syscall := prefer_syscalls() || @[@literal !libc];
         @if(want_syscall, {
             @if(@[@literal !can_syscall]) panic(msg);
             numbers := @[@literal sys];
@@ -524,4 +516,10 @@ fn syscall(arg: FatExpr) FatExpr #macro = {
             //)
         })
     }
+}
+
+// TODO: something very strange is going on
+fn prefer_syscalls() bool = {
+    c := context(DefaultContext);
+    !is_linking_libc() || c.prefer_syscalls 
 }
