@@ -18,6 +18,27 @@ notably those are all things to aren't going to change if you're just working on
 - kinda dumb that you have to use qbe_frontend instead of the compiler to run a non-driver cache file. 
   can have runtime_init detect that situation and do the right thing. 
 - experimenting with @syscall as a macro instead of compiler magic. 
+  - the only problematic dependency is that scary_log calls write and panic calls exit.   
+  - now that weak symbols are referenced even when -syscalls, need to handle that properly in elf/emit.fr, 
+    so you have to tell the backend if you're expecting a static binary instead of telling the frontend. 
+  - hmmm, i think trying to complicate the runtime dispatch of syscalls causes you to have callee saved registers 
+    in the function that calls clone() which manifests as pushing them to the old stack and then trying to pop them off 
+    the new stack (which wouldn't have them anyway) and underflowing and then returning to whatever the next junk happens to be. 
+    same experience as when i did it the first time and wasn't setting a new stack and the threads were racing to return. 
+    need to inline everything up to calling the new thread's entry point. some weirdness about needing a body to have a return label, 
+    but it works.
+  - trying to deal with cycles for exit(), write(). 
+    - for panic() calling exit(), hack to experiment is just put a loop{}, but actually just forcing a jit shim should achieve also solve the problem?  
+    - `panic! Unfinished type 208` when trying to call current_compiler_context(), but i don't understand whose calling exit. 
+      ahhhhh, get_offset_to_dynamic_context_field() isn't a builtin. 
+    - "Type Error: found tuple but requested non-tuple i64", only one ive tried that has a single argument to Expr::Tuple complains. 
+    - current_arch() does @bits which does a @ct_assert so it needs to compile format_into, i was annoyed by that before in the profiler.
+    - somehow i've cursed ./target/boot-macos-amd64.out to get stuck forever, the linux one is fine tho. 
+      it doesn't like exit causing a jit-shim maybe (directly or with #libc). 
+    - egghh and just doing exit syscall breaks the tests that try to call libc putchar because it tries to buffer it. 
+      as good a time as any to get rid of one more libc thing i guess. 
+      but the whole point of sticking to the libc interface is that i want to be able to work and play well with others. 
+      if i dont know why it doesn't work in the old compiler, seem like theres a risk of the problem resurfacing in new compilers. 
 
 ## (Jun 15)
 
