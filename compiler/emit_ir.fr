@@ -11,8 +11,7 @@
 // Some functions do not have a normal ast as a body:
 // - NewIntrinsic: maps to a single ir instruction
 // - DynamicImport: (AOT) Redirect to an imported symbol OR (JIT) bind directly to a function pointer
-// - Syscall: O.syscall with number based on target os
-// - JittedAarch64/X86AsmBytes: some bytes inserted verbatim
+// - Asm: some bytes inserted verbatim
 // - Redirect
 // 
 // Codegen may run on the same thread or not, so calling enqueue_task() might 
@@ -363,65 +362,6 @@ fn finalize_blocks(self: *EmitIr) void = {
     @debug_assert(ok, "ICE: unterminated block");
 }
 
-fn want_syscall(self: *EmitIr, fid: FuncId, force: bool) ?i64 = {
-    fn current_target_syscall_index(self: *EmitIr) i64 = {
-        if(self.m.goal.os   == .macos,   => return(2));
-        if(self.m.goal.os   != .linux,   => return(-1));
-        if(self.m.goal.arch == .aarch64, => return(0));
-        if(self.m.goal.arch == .x86_64,  => return(1));
-        -1
-    }
-    
-    func := self.program.get_function(fid);
-    opts := self.program.get_build_options();
-    sys  := force || opts.use_raw_syscalls || (self.when == .Jit && :: !is_linking_libc());
-    @if(sys) if choose_impl(func.body&, @const_slice(FuncImpl.Tag().Syscall)) { impl | 
-        impl := impl.Syscall;
-        i := self.current_target_syscall_index();
-        if i >= 0 && impl[i] != (@as(i32)-1) {
-            return(Some = impl[i].intcast());
-        };
-    };
-    .None
-}
-
-fn bounce_body(self: *EmitIr, callee: Qbe.Ref, o: Qbe.O) void = { 
-    func := self.program.get_function(self.func);
-    f_ty := func.finished_ty().unwrap();
-    c := QbeNull;
-    if !func.get_flag(.NoContext) && o != .syscall {
-        c = self.f.newtmp("f", .Kl);
-        self.emit(.pare, .Kl, c, QbeNull, QbeNull);
-    };
-    args := emit_par_instructions(self.program, self.shared, func.arg&, f_ty.arg, self.f, .None);
-    if c != QbeNull {
-        self.emit(.arge, .Kl, QbeNull, c, QbeNull);
-    };
-    each args { a | 
-        if a.scalar {
-            self.emit(.arg, a.k, QbeNull, a.r, QbeNull);
-        } else {
-            self.emit(.argc, a.k, QbeNull, a.type_index, a.r);
-        };
-    };
-    
-    _, k := self.load_op(f_ty.ret); 
-    type_index := QbeNull;
-    if k == .Ke && self.program.get_info(f_ty.ret)[].stride_bytes != 0 {
-        k = .Kl;
-        type_index = self.get_aggregate(f_ty.ret);
-    };
-    r := QbeNull;
-    if k != .Ke {
-        r = self.f.newtmp("f", k);
-    } else {
-        k = .Kw;
-    };
-    self.emit(o, k, r, callee, type_index);
-    self.emit_ret(r);
-    self.finalize_blocks();
-}
-
 fn aot_import_body(self: *EmitIr, info: *DynamicImport) void = {
     // :DumbNameAlias
     // TODO: use FnFlag.NoMangle instead but that doesn't work with the old backends calling the same 
@@ -446,7 +386,7 @@ fn bounce_body_call(self: *EmitIr, target: Qbe.Sym) void = {
     // Option A
     // - works on targets that care about function signatures (wasm)
     // - same code path as if you'd manually written the useless shim
-    // self.bounce_body(self.f.symcon(target), .call);
+    // [generate a body that explicitly forwards to the target (par..., arg..., call)]
     
     // Option B
     // - compiles directly to a tail call without going through the backend passes
@@ -466,23 +406,7 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = {
     self.f.start = self.new_block("start");
     self.blk = self.f.start;
 
-    if self.want_syscall(self.func, false) { syscall_number |
-        self.bounce_body(self.f.getcon(syscall_number), .syscall);
-        return(.Ok);
-    };
-    
-    T :: FuncImpl.Tag();
-    prio :: @const_slice(T.NewIntrinsic, T.Normal, T.Intrinsic, T.JittedAarch64, T.Redirect, T.DynamicImport, T.FrcImport);
-    impl := or choose_impl(func.body&, prio) {
-        if self.want_syscall(self.func, true) { syscall_number |
-            self.bounce_body(self.f.getcon(syscall_number), .syscall);
-            return(.Ok);
-        };
-        
-        return(@err("no acceptable impl %", self.program.log(func)))
-    };
-    
-    body: *FatExpr = @match(impl) {
+    body: *FatExpr = @match(func.body&) {
         fn Normal(body) => body;
         fn Intrinsic(op) => {
             // Direct calls will be inlined but someone might be trying to call through a function pointer. 
@@ -530,20 +454,13 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = {
             self.pending.push(fid[]);
             return(.Ok)
         } 
-        // TODO: rename these / make them one? idk be less confusing
-        // i want to put both arm+amd in frc_inlinable modules regardless of the target so you don't have to recompile. 
-        
         // TODO: use :ExprLevelAsm so you don't have to spill everything, 
         //       but that requires letting people annotate register usage.  -- Dec 3
-        fn JittedAarch64(code) => { // TODO: just store this as bytes
-            amd64 := "";
-            if choose_impl(func.body&, @const_slice(FuncImpl.Tag().X86AsmBytes)) { impl | 
-                amd64 = impl.X86AsmBytes.items();
-            };
+        fn Asm(it) => {
             self.entry.task = (Asm = (
                 lnk = self.f.lnk&, 
-                arm64 = code.items().interpret_as_bytes(),
-                amd64 = amd64,
+                arm64 = it.arm64,
+                amd64 = it.amd64,
             ));
             return(.Ok)
         }
@@ -552,7 +469,7 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = {
             self.entry.task = @try(self.move_from_module(it)) return;
             return(.Ok);
         }
-        @default => panic("TODO: unhandled FuncImpl");
+        @default => return(@err("no acceptable impl %", self.program.log(func)));
     };
    
     self.context_par_e();
@@ -1004,38 +921,32 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
            
             callee_r := self.func_ref(f_id);
             
-            T :: FuncImpl.Tag();
-            prio :: @const_slice(T.NewIntrinsic, T.Intrinsic, T.DynamicImport);
-            
-            @if(self.want_syscall(f_id, false).is_none())
-            if choose_impl(func.body&, prio) { impl | 
-                @match(impl) {
-                    fn NewIntrinsic(op) => {
-                        arg := arg.items();
-                        a0 := if arg[0].ty == void {
-                            QbeNull
-                        } else {
-                            p1: Placement = @if(arg.len != 1 && guess_can_assign(arg[1]&), .Scalar, .ScalarTransient);
-                            @try(self.compile_expr(arg[0]&, p1)) return
-                        };
-                        // the || void is for :DoFoldInvalidArity
-                        a1 := if(arg.len == 1 || arg[1].ty == void, => QbeNull, => @try(self.compile_expr(arg[1]&, .ScalarTransient)) return);
-                        return(self.emit_intrinsic_new(op, p, @slice(a0, a1), caller, f_ty.ret));
-                    }
-                    fn Intrinsic(op) => {
-                        arg := arg.items();
-                        a0 := @try(self.compile_expr(arg[0]&, .Scalar)) return;
-                        a1 := if(arg.len == 1, => QbeNull, => @try(self.compile_expr(arg[1]&, .ScalarTransient)) return);
-                        return(self.emit_intrinsic_old(op, p, @slice(a0, a1), caller, f_ty.ret));
-                    }
-                    fn DynamicImport(info) => if self.when == .Aot {
-                        g := self.m.goal&;
-                        @err_assert(info.name == func.name, "this isn't the output of linkrename on the comptime arch") return;
-                        real_name := self.program.get_string(info.name);
-                        callee_r = self.f.symcon(self.m.intern(real_name));
+            @match(func.body&) {
+                fn NewIntrinsic(op) => {
+                    arg := arg.items();
+                    a0 := if arg[0].ty == void {
+                        QbeNull
+                    } else {
+                        p1: Placement = @if(arg.len != 1 && guess_can_assign(arg[1]&), .Scalar, .ScalarTransient);
+                        @try(self.compile_expr(arg[0]&, p1)) return
                     };
-                    @default => unreachable();
+                    // the || void is for :DoFoldInvalidArity
+                    a1 := if(arg.len == 1 || arg[1].ty == void, => QbeNull, => @try(self.compile_expr(arg[1]&, .ScalarTransient)) return);
+                    return(self.emit_intrinsic_new(op, p, @slice(a0, a1), caller, f_ty.ret));
+                }
+                fn Intrinsic(op) => {
+                    arg := arg.items();
+                    a0 := @try(self.compile_expr(arg[0]&, .Scalar)) return;
+                    a1 := if(arg.len == 1, => QbeNull, => @try(self.compile_expr(arg[1]&, .ScalarTransient)) return);
+                    return(self.emit_intrinsic_old(op, p, @slice(a0, a1), caller, f_ty.ret));
+                }
+                fn DynamicImport(info) => if self.when == .Aot {
+                    g := self.m.goal&;
+                    @err_assert(info.name == func.name, "this isn't the output of linkrename on the comptime arch") return;
+                    real_name := self.program.get_string(info.name);
+                    callee_r = self.f.symcon(self.m.intern(real_name));
                 };
+                @default => ();
             };
             
             if !caller.get_flag(.ComptimeOnly) && original_f_id == f_id {

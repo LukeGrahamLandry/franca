@@ -14,6 +14,7 @@ notably those are all things to aren't going to change if you're just working on
     be more expensive to pass before i made regalloc do fewer redundant copies. 
     tho this means varargs on amd64 will be even more a problem because both want rax. 
     maybe could use a high float register? is it slow to move between int and float? 
+- now that i can get rid of #syscall, i can also get rid of FuncBody.Merged. 
 
 ## (Jun 16)
 
