@@ -27,6 +27,7 @@ fn main_thread_pump(comp: CompCtx, shared: *CodegenShared, fns: []FuncId) void =
     
     #use("@/lib/collections/bit_set.fr");
     funcs_done: BitSet = empty();
+    funcs_seen: BitSet = empty();
     work_stack := FuncId.list(a);
     dynamiclib := shared.m.goal.type == .Dynamic;
     if when == .Aot && !dynamiclib {
@@ -43,6 +44,8 @@ fn main_thread_pump(comp: CompCtx, shared: *CodegenShared, fns: []FuncId) void =
             continue();
         }; // might have been added multiple times
         
+        first_time := !funcs_seen&.get(fid.to_index().zext());
+        funcs_seen&.set(fid.to_index().zext(), a);
         {comp.vtable.report_aot_progress}(comp.data, fid, true, 1 /*AotPump*/);
         func := comp.get_function(fid);
         // Note: compile before checking callees! // TODO: return error instead
@@ -55,9 +58,20 @@ fn main_thread_pump(comp: CompCtx, shared: *CodegenShared, fns: []FuncId) void =
         // sort the functions to make sure we can inline calls to intrinsics
         not_done_count := 0;
         for func.callees { f |  
-            if !funcs_done&.get(f.to_index().zext()) && !work_stack.items().contains(f&) {
-                not_done_count += 1;
-                work_stack&.push(f);
+            if !funcs_done&.get(f.to_index().zext()) {
+                if work_stack.items().index_of(f&) { i |
+                    if first_time {
+                        // another function has had the same callee before, still pull it forward, we want to let both inline it. 
+                        // only do this the first time processing the caller to avoid cycles. 
+                        work_stack&.unordered_remove(i);
+                        work_stack&.push(f);
+                        not_done_count += 1;
+                    }
+                } else {
+                    // fresh callee, always do it before the caller 
+                    work_stack&.push(f);
+                    not_done_count += 1;
+                };
             };
         };
         if not_done_count > 0 {
@@ -75,24 +89,16 @@ fn main_thread_pump(comp: CompCtx, shared: *CodegenShared, fns: []FuncId) void =
         current := work_stack&.pop().unwrap();
         @assert_eq(current, fid, "order messed up");
         for pending { c |  // HACK
-            if !funcs_done&.get(c.to_index().zext()) && !work_stack.items().contains(c&) {  // :SLOW
+            if !funcs_done&.get(c.to_index().zext()) {
                 work_stack&.push(c);
             };
         };
         pending&.clear();
         funcs_done&.set(fid.to_index().zext(), a);
         for func.mutual_callees { c |
-            if !funcs_done&.get(c.to_index().zext()) && !work_stack.items().contains(c&)  {
+            if !funcs_done&.get(c.to_index().zext()) {
                 work_stack&.push(c);
             };
-        };
-        if pending.len != 0 {
-            for pending& { c | 
-                if !funcs_done&.get(c.to_index().zext()) && !work_stack.items().contains(c&) {
-                    work_stack&.push(c);
-                };
-            };
-            pending&.clear();
         };
     };
     
@@ -282,8 +288,19 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
             // emit asm directly; don't run the normal passes
             emit_fn(f);
             
+            // if the target thing is inlinable, this function can inline to the same thing. 
+            // TODO: make sure i don't emit twice in emit_suspended_inlinables
+            target_inline := Qbe.Fn.ptr_from_int(0);
             use_symbol(f.globals, it.target) { s | 
                 mark_referenced(f.globals, it.target, s);
+                target_inline = s.inline;
+            };
+            
+            // :UpdateBoot
+            was_bootstrapping :: { fr := current_compiler_context(); IS_BOOTSTRAPPING || fr.vtable.driver_abi_version == 1119 };
+            @if(!was_bootstrapping) 
+            use_symbol(f.globals, it.lnk.id) { s | 
+                s.inline = target_inline;
             };
         }
         fn AotVar2(it) => each it { d |

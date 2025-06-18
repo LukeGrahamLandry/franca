@@ -4,7 +4,6 @@ See `../annotations.md` for info about builtin tags you can put on functions.
 ```
 #libc
 #import
-#syscall
 #ir
 #intrinsic
 #comptime_addr
@@ -17,6 +16,7 @@ talk about replacements for:
 #target_os
 #asm #x86_bytes #aarch64
 #linkrename
+#syscall
 ```
 
 - import() and #use
@@ -24,6 +24,7 @@ talk about replacements for:
 - @import_symbol
 - lib/dynamic_lib.fr open()/get() -- same as dlopen/dlsym
 - import_c/ffi.fr/include()
+- import_frc
 - add_to_scope, intern_type, intern_func
 - using the backend library to insert ir directly
 - fetch_or_crash

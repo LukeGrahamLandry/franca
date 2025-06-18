@@ -20,8 +20,13 @@ but this one's less scary because the slow is attached to the code.
 (i cheated by simplifying do_fold so should force it to use do_fold_old when trying to debug the above,
 older compilers, based on vtable.abi_version will always do the slow one so it's unfair). 
 
+and by fixing callgraph sorting for inlining. 
+
 ## 
 
+- get compilation order dependence under control!!
+- fix callgraph sorting to improve inlining. like make sure the ge/le in lex_int/is_ascii_digit are inlined 
+- make AsmFunction get an inferred name
 - implement _Atomic in import_c
 - import_c: `__constructor__, __aligned__`
 - @bit_fields in incremental.fr don't work inline in the structs
@@ -501,16 +506,6 @@ by patching them out without updaing the whole ./boot binary.
 ie. add a rotr instruction and instead of needing to keep a has_feature() uglying up the code forever,
 could put that fallback implementation in the driver program and it could fix things from the outside. 
 the thing that's painful is then you have programs that can only be compiled by a specific driver and they don't compose well. 
-- try to move some of #asm #libc #ir #import #import_os #link_rename #syscall #log_ast 
-to a more powerful thing where you can give a function to transform the body. 
-so like maybe `#with(asm, "aarch64")` would call `asm(fid, "aarch64")`. 
-if i had that i could rename #x86_bytes without updating ./boot. 
-maybe this could just be done with the driver program. 
-you also want like a first class thing for choosing implementations. 
-so instead of #import_os being a hardcoded painful thing, and emit_ir 
-also having super ugly stuff with FuncImpl, it would be nice if we just 
-called some comptime function and passed everything we know about the target and it 
-could choose. 
 - make #where type inference more powerful.
 this is super important for making ResolveOverload faster. 
 and for being more out of order because you wouldn't need to `::Foo(T)` all over the place. 

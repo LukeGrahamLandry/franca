@@ -58,11 +58,19 @@ ReturnTarget :: @struct(
 Placement :: @tagged(Assign: Qbe.Ref, Scalar, Blit: Qbe.Ref, NewMemory, Discard, ScalarTransient);
 
 fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, idx: *i64, pending: *List(FuncId), export: bool) CRes(void) = {
+    func := comp.get_function(f); 
+
     if when == .Aot {
+        // TODO: really you want the callgraph of why we think this is reachable 
+        // TODO: this will need to change again when i want to be able to cache #macro, etc. 
+        //       really #comptime_addr should be expressed as a strong import and someone needs to check 
+        //       that all imports are fulfilled. But for now, it's better to give an error message than have the dynamic loader do it. 
+        //       -- Jun 17, 2025 
+        @err_assert(!func.get_flag(.ComptimeOnly), "cannot .Aot .ComptimeOnly % %", f, comp.log(func)) return;
+        
         // :bake_relocatable_value
         {comp.vtable.check_for_new_aot_bake_overloads}(comp.data); 
     };
-    func := comp.get_function(f); 
     
     // currently this needs to make funcids eagarly so it might involve making jitshims for imports which has to happen before we grab the codegenentry
     @if(!DISABLE_IMPORT_FRC)
@@ -191,9 +199,6 @@ fn baked_var_to_dat(comp: CompCtx, m: *QbeModule, id: BakedVarId) Dat2 = {
                     id = @match(src.target) {
                         fn FuncId(f) => {
                             func := comp.get_function(f);
-                            @if_let(func.body&) fn Redirect(inner) => {
-                                f = inner[];
-                            };
                             m.intern(comp.fmt_fn_name(f))
                         }
                         fn BakedVarId(id) => m.intern(@tfmt("g%", id.id));
@@ -564,7 +569,7 @@ fn ret_op(k: Qbe.Cls) Qbe.J =
 // :EmitIrCall TODO: it would be nice if i didn't need to repeat so many variations of the par/arg/call/ret logic. 
 fn emit_runtime_call(
     self: *EmitIr,
-    f_ty: FnType,
+    f_ty_ret: Type,
     args: []Qbe.Ins,
     p: Placement,
     callee: Qbe.Ref,
@@ -582,17 +587,17 @@ fn emit_runtime_call(
         self.emit(.arge, .Kl, QbeNull, self.context, QbeNull);
     };
     append(self.blk.ins&, args.ptr, args.ptr.offset(args.len));
-    _, k := self.load_op(f_ty.ret);
+    _, k := self.load_op(f_ty_ret);
     scalar := k != .Ke;
     type_r := QbeNull;
-    info := self.program.get_info(f_ty.ret);
+    info := self.program.get_info(f_ty_ret);
     result_r := if info.stride_bytes == 0 || (scalar && p&.is(.Discard)) {  // :get_or_create_type
         k = .Kw;
         QbeNull
     } else {
         if !scalar {
             k = .Kl;
-            type_r = self.get_aggregate(f_ty.ret);
+            type_r = self.get_aggregate(f_ty_ret);
             if p&.is(.Discard) {
                 p = .NewMemory;
             };
@@ -600,11 +605,11 @@ fn emit_runtime_call(
         self.scalar_dest(p, k)
     };
     self.emit(.call, k, result_r, callee, type_r);
-    self.hlt_if_never(f_ty.ret);
+    self.hlt_if_never(f_ty_ret);
     
     if(result_r == QbeNull, => return(Ok = QbeNull));
     if scalar { 
-        return(Ok = self.scalar_result(p, result_r, f_ty.ret));
+        return(Ok = self.scalar_result(p, result_r, f_ty_ret));
     };
     (Ok = @match(p) {
         fn NewMemory() => result_r;
@@ -912,12 +917,9 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
             @debug_assert(!func.get_flag(.MayHaveAquiredCaptures), "tried to emit call to unlowered maybe '=>'");
             @assert(!func.get_flag(.Inline), "ICE: tried to call inlined %", self.program.get_string(func.name));
 
-            // TODO: ideally the redirect should just be stored in the overloadset so you don't have to have the big Func thing every time.
             // TODO: audit: is this f_ty different from the one we just got from the expression type? -- Jul 8
             f_ty := func.finished_ty().unwrap(); // kinda HACK to fix unaligned store? 
-            original_f_id := f_id;
-            f_id = self.program.follow_redirects(f_id);
-            callee := self.program.get_function(f_id);  // fid might have changed. 
+            callee := func;
            
             callee_r := self.func_ref(f_id);
             
@@ -948,19 +950,13 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
                 };
                 @default => ();
             };
-            
-            if !caller.get_flag(.ComptimeOnly) && original_f_id == f_id {
-                // TODO: it would be nice if this was at the beginning and you never tried to emit anything that was comptimeonly
-                //       that requires never adding them to callees and then later realizing you can inline them, which would make sense. -- Aug 29
-                @debug_assert(!(self.when == .Aot && callee.get_flag(.ComptimeOnly)), "cannot .Aot .ComptimeOnly % %", f_id, self.program.log(callee));
-            };
             context := !callee.get_flag(.NoContext);
             if context {
                 caller.set_flag(.YesContext);
             };
             
             args := @try(self.compile_for_arg(arg)) return;
-            self.emit_runtime_call(f_ty, args, p, callee_r, context, arg.loc)
+            self.emit_runtime_call(f_ty.ret, args, p, callee_r, context, arg.loc)
         }
         //
         // :ADistinctionWithoutADifference  -- May 31, 2025 
@@ -982,7 +978,7 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
             @if(context) caller.set_flag(.YesContext);
             callee := @try(self.compile_expr(f, .Scalar)) return;
             args   := @try(self.compile_for_arg(arg)) return;
-            self.emit_runtime_call(f_ty.ty, args, p, callee, context, arg.loc)
+            self.emit_runtime_call(f_ty.ty.ret, args, p, callee, context, arg.loc)
         }
         fn Label(_) => {
             label := @unwrap(f.as_const(), "called label must be const") return;
@@ -1035,7 +1031,6 @@ fn emit_intrinsic_old(self: *EmitIr, op: *i64, p: Placement, arg: []Qbe.Ref, cal
 }
 
 fn func_sym(self: *EmitIr, f_id: FuncId) Qbe.Sym #inline = {
-    f_id := self.program.follow_redirects(f_id);
     self.pending.push(f_id); // HACK
     self.f.globals.intern(self.fmt_fn_name(f_id))
 }

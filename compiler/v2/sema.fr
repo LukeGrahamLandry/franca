@@ -463,7 +463,7 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
     };
     
     @if(check_body)
-    if find_impl(func.body&, .Normal) { expr |
+    @if_let(func.body&) fn Normal(expr) => {
         ok = true;
         old_func := self.dispatch.enclosing_function;
         self.dispatch.enclosing_function = (Some = fid);
@@ -575,21 +575,23 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                 ::as_ref(FatExpr);
                 value := @unwrap(tag.non_void_arg(), "#comptime_addr requires arg") return;
                 ptr := @check(self.eval(value, i64)) return;
-                impl := find_or_create_impl(func.body&, self.get_alloc(), .DynamicImport);
-                impl.comptime = ptr;
+                @err_assert(func.body&.is(.Empty), "#comptime_addr function must not have a body") return;
+                // only the comptime field matters here. emit_ir checks that aot code never tries to call something marked .ComptimeOnly
+                func.body = (DynamicImport = (comptime = ptr, name = func.name, lib = Flag.comptime_addr.ident(), weak = false));
                 ptr := ptr.rawptr_from_int();
                 self.put_jitted_import(fid, ptr);
                 func.set_flag(.YesContext);
+                func.set_flag(.ComptimeOnly);
             };
             @case(Flag.intrinsic.ident()) => {
                 good = true;
                 value := @unwrap(tag.non_void_arg(), "#intrinsic requires arg") return;
                 intrinsic_ty := @unwrap(self.env.intrinsic_type, "used #intrinsic during boot") return;
+                @err_assert(func.body&.is(.Empty), "#intrinsic function must not have a body") return;
                 op := @check(self.immediate_eval_expr(value, intrinsic_ty)) return;
                 op := i64.assume_cast(op&)[];
                 func.set_flag(.Intrinsic);
-                impl := find_or_create_impl(func.body&, self.get_alloc(), .Intrinsic);
-                impl[] = op;
+                func.body = (Intrinsic = op);
                 if op != INTRINSIC_GET_ENV {
                     func.set_flag(.NoContext);
                 } else { 
@@ -620,9 +622,8 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                 if import("@/backend/opt/fold.fr")'can_fold(o) {
                     func.set_flag(.TryConstantFold);
                 };
-                i := find_or_create_impl(func.body&, self.get_alloc(), .NewIntrinsic);
-                i.ir_op  = @as(i32) o;
-                i.ir_cls = @as(i32) k;
+                @err_assert(func.body&.is(.Empty), "#ir function must not have a body") return;
+                func.body = (NewIntrinsic = (ir_op  = @as(i32) o, ir_cls = @as(i32) k));
             };
             @case(Flag.redirect.ident()) => {
                 good = true;
@@ -634,6 +635,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                 f_ty: FnType = (arg = payload.arg, ret = payload.ret, unary = self.comp().is_unary(payload.arg));
                 target := @check(self.resolve_by_type(payload.os, f_ty, func.loc)) return;
                 func.body = (Redirect = target);
+                func.callees&.push(target, self.get_alloc());
             };
             @case(Flag.weak.ident()) => {
                 @err_assert(!did_import, "#weak must come before #import/#libc, sorry") return;
@@ -648,16 +650,16 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
 
 // adds DynamicImport to func.impl
 fn create_import_body(self: *SelfHosted, func: *Func, fid: FuncId, lib_name: Symbol, weak: bool) CRes(void) = {
+    @err_assert(func.body&.is(.Empty), "#import function must not have a body") return;
     handle2 := self.comptime_libraries&.get(lib_name);
     is_libc := lib_name == Flag.libc.ident(); 
     name := self.pool.get(func.name);
+    {
+    lib_name := lib_name;
     while => handle2 { handle |
         if handle.get(name) { addr |
             self.put_jitted_import(fid, addr);
-            
-            impl := find_or_create_impl(func.body&, self.get_alloc(), .DynamicImport);
-            // Note: storing func.name, not intern(name) because emit_ir will need to re-linkrename if we're cross compiling. 
-            impl[] = (name = func.name, lib = lib_name, comptime = addr.int_from_rawptr(), weak = weak);
+            func.body = (DynamicImport = (name = func.name, lib = lib_name, comptime = addr.int_from_rawptr(), weak = weak));
             return(.Ok);
         };
         handle2 = .None;
@@ -670,12 +672,10 @@ fn create_import_body(self: *SelfHosted, func: *Func, fid: FuncId, lib_name: Sym
             };
         };
     };
+    };
     // :AssumeDones
     // TODO: how to catch if it actually doesn't exist or they typo-ed the #import string.
-    impl := find_or_create_impl(func.body&, self.get_alloc(), .DynamicImport);
-    impl.name = func.name;
-    impl.lib = lib_name;
-    impl.weak = weak;
+    func.body = (DynamicImport = (name = func.name, lib = lib_name, comptime = 0, weak = weak));
     @try(self.create_jit_shim(fid)) return;
     .Ok
 }
@@ -1682,7 +1682,7 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
     } else {
         // this fixes functions with all const args the reduce to just a value emitting useless calls to like get the number 65 or whatever if you do ascii("A"). 
         if !deny_inline && arg_expr.is_raw_unit() {
-            if find_impl(func.body&, .Normal) { value |
+            @if_let(func.body&) fn Normal(value) => {
                 if value.expr&.is(.Value) {
                     bytes := value.expr.Value.bytes&;
                     expr.set(bytes.deep_clone(self.get_alloc()), ret_ty);
@@ -1771,8 +1771,8 @@ fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, request
     };
     
     // TODO: scary to hold this reference accross doing so much shit. 
-    aliased_body := find_impl(func.body&, .Normal) 
-        || return(@err("emit_capturing_call: '=>' function '%' must have body expression.", self.pool.get(func.name)));
+    @err_assert(func.body&.is(.Normal), "emit_capturing_call: '=>' function '%' must have body expression.", self.pool.get(func.name)) return;
+    aliased_body := func.body.Normal&;
     
     // This is complicated to allow `fn() => .a` to stay polymorphic and have different inferred types at different callsites. 
     // Maybe a more robust version of this would be treating the result type like a const arg and duplicating the function? -- Aug 2
@@ -3284,7 +3284,6 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
             @case(Flag.comptime_addr.ident()) => {
                 @err_assert(func.body&.is(.Empty), "#comptime_addr conflicts with body expression") return;
                 func.set_flag(.BodyIsSpecial);
-                //func.set_flag(.ComptimeOnly);
             };
             @case(Flag.intrinsic.ident()) => {
                 func.set_flag(.BodyIsSpecial);

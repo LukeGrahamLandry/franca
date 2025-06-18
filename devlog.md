@@ -6,6 +6,27 @@ let's cheat and make examples/terminal.fr(repl=true) not take 2 seconds to compi
 - compile_to_shader_source: 68 // shader compiler (for comptime)
 notably those are all things to aren't going to change if you're just working on the terminal program. 
 
+## (Jun 18)
+
+- i want to stop doing follow_redirects in emit ir because i think i barely use #redirect and it's kinda weird, 
+  but that makes it ~20ms slower which seems unreasonable for how tiny the things i use it on are. 
+  probably just that i can't inline through it. fixed by copying SymbolInfo.inline in worker/CodegenEntry.Bounce, 
+  now they're the same speed. 
+- i still feel like there's a bunch of small things that should be inlined but aren't. 
+  - there's only 8 functions where that inline forwarding made a difference, so if that's 20ms, 
+    maybe whatever the ordering problem is will be even more. 
+  - i was looking at the ir for lex_int yesterday and le in is_ascii_digit isn't getting inlined, and that's not even a #redirect. 
+  - calling through function pointers won't go in callees and gets picked up later by EmitIr.pending, 
+    but that's not what's happening for the tiny things that offend me. 
+  - i guess the problem is if they go in the list early and then other callees that get emitted first 
+    also call them, they don't get pulled forward in the list. so instead of just pushing new callees
+    to work_stack, callees that were already there should get pulled forward as well, so tiny things that many people 
+    call are emitted first. just have to be careful you don't get stuck in cycles, so like only let a function pull 
+    its callees forward the first time you see it in that loop, but you let a callee get pulled forward as many times as possible. 
+  - ha! (time: 1106 -> 1014, bloat.fr: 982152 -> 971472)
+  - not bothing to check if things from `pending` are already on `work_stack` also helps a bit. 999
+  - (still din't fix the lex_int thing i was complaining about)
+
 ## (Jun 17)
 
 - fix bf2ir and kalidescope to pass environement pointer now that i need it to print characters.
@@ -15,6 +36,9 @@ notably those are all things to aren't going to change if you're just working on
     tho this means varargs on amd64 will be even more a problem because both want rax. 
     maybe could use a high float register? is it slow to move between int and float? 
 - now that i can get rid of #syscall, i can also get rid of FuncBody.Merged. 
+- now that find_or_create_impl doesn't do anything interesting. inline it everywhere and give better error messages. 
+- make trying to AOT a comptimeonly function a hard error. will have to go back when i do more caching but for now this is the sane option. 
+- 
 
 ## (Jun 16)
 
