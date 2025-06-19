@@ -220,7 +220,7 @@ fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
     @if(enable_incremental())
     if @is(goal.type, .Cached, .CachedEarly) {
         writer := forever.box(Incremental.Writer);
-        writer[] = init(general_allocator());
+        writer[] = init(gpa);
         m.save = (Some = writer);
     };
     m.segments = EnumMap(SegmentType, SegmentCursor).zeroed();
@@ -338,10 +338,11 @@ fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
         m.symbol_memmove = m.intern("memmove");
     };
     
-    m.llvm_global_value_buf = list(general_allocator());
-    m.llvm_global_type_buf  = list(general_allocator());
-    m.llvm_global_code_buf  = list(general_allocator());
-    m.wasm_types_cache      = init(general_allocator());
+    // :leak
+    m.llvm_global_value_buf = list(gpa);
+    m.llvm_global_type_buf  = list(gpa);
+    m.llvm_global_code_buf  = list(gpa);
+    m.wasm_types_cache      = init(gpa);
     m.libraries&.push("", general_allocator());
     
     unlock(m.intern_mutex&);
@@ -407,6 +408,12 @@ fn drop(m: *QbeModule) void = {
     @if(enable_incremental()) if m.save { save |
         save.drop();
     };
+    drop(m.exports&);
+    drop(m.imports&);
+    drop(m.local_needs_reloc&);
+    drop(m.inlinable_but_referenced_later&);
+    drop(m.debug_info.headers&);
+    drop(m.debug_info.data&);
     m.forever&.deinit();
     m[] = zeroed(@type m[]);  // just to make sure you crash if you try to use it again. 
 }

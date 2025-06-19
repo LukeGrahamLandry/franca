@@ -127,13 +127,6 @@ It's just hard to think about because you can't really do anything until you can
 So if you want to implement `import` as normal comptime code, you really need to already have access
 to basic OS stuff that you'd generally get from libc. 
 
-### syscall
-
-The arguments are syscall numbers in the order `(linux-arm64, linux-amd64, macos)`. 
-If the syscall is not supported on that platform use `_` instead of a number. 
-This can be present on the same function as `#libc` and which implementation 
-is used depends on the `BuildOptions` set by the driver program. 
-
 ### ir
 
 Used internally to implement functions that should map to some cpu instruction 
@@ -280,11 +273,3 @@ and submit it to the compiler. However, implementing `#align` as a compiler buil
 inexplicably made the compiler noticably slower (30ms on self-compile), 
 so I want to understand what's going on with that before fix the problem accidently by 
 just taking out the slow code. 
-
-## Planned Changes
-
-(`asm`, `aarch64`, `x86_bytes`, `import`, `syscall`, `redirect`), 
-are all kinda the same. you want to have some comptime code run to make a desision about 
-what to replace the implementation of the function with and it needs to access some 
-configuration/target information. there should be some more unified system for these. 
-currently they all work slightly differently because they were added at different times.  

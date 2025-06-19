@@ -6,6 +6,11 @@ let's cheat and make examples/terminal.fr(repl=true) not take 2 seconds to compi
 - compile_to_shader_source: 68 // shader compiler (for comptime)
 notably those are all things to aren't going to change if you're just working on the terminal program. 
 
+## (Jun 19)
+
+- get a bit more serious about not leaking memory. it doesn't matter when you just run the compiler once 
+per process but compiler/tests.fr uses a bunch of compiler instances and was growing up to 4gb which offended me. 
+
 ## (Jun 18)
 
 - i want to stop doing follow_redirects in emit ir because i think i barely use #redirect and it's kinda weird, 

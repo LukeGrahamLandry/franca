@@ -26,6 +26,7 @@ fn init(m: *QbeModule, w: *WasmModule, a: Alloc) LoadWasm = (
     locals = empty(),
     blocks = list(temp()),
     preserve_franca_env = true,
+    alloc = a,
 );
 
 fn fill_imports(self: *LoadWasm, imports: *RawHashMap(Str, rawptr)) void = {
@@ -117,6 +118,7 @@ LoadWasm :: @struct(
     return_types: []Wasm.ValType = empty(),
     link := zeroed(**Qbe.Blk),
     franca_env := QbeNull,
+    alloc: Alloc,
 );
 
 fn create_init_func(self: *LoadWasm) Qbe.Sym = {
@@ -218,9 +220,10 @@ fn translate_func(self: *LoadWasm, local_func_i: i64, f: *Qbe.Fn) void = {
 
 // choose names for functions, globals, tables
 fn create_globals(self: *LoadWasm) void = {
+    a := self.alloc;
     count := self.w.functions.len + self.w.imported_function_count;
-    self.functions = libc_allocator.alloc(Qbe.Sym, count); // :Leak
-    self.function_types = libc_allocator.alloc(Wasm.TypeIdx, count);
+    self.functions = a.alloc(Qbe.Sym, count); // :Leak
+    self.function_types = a.alloc(Wasm.TypeIdx, count);
     f_i := 0;
     each self.w.imports& { import |
         @if_let(import.desc&) fn Function(id) => {
@@ -244,8 +247,8 @@ fn create_globals(self: *LoadWasm) void = {
         };
     };
     
-    self.global_names = libc_allocator.alloc(Qbe.Sym, self.w.globals.len); // :Leak
-    self.global_cls = libc_allocator.alloc(Qbe.Cls, self.w.globals.len); // :Leak
+    self.global_names = a.alloc(Qbe.Sym, self.w.globals.len); // :Leak
+    self.global_cls = a.alloc(Qbe.Cls, self.w.globals.len); // :Leak
     enumerate self.w.globals& { local_global_i, global | 
         // TODO: offset the index by number of imported globals
         id := self.m.intern(@tfmt("G%$%", local_global_i, self.module_name));
@@ -260,7 +263,7 @@ fn create_globals(self: *LoadWasm) void = {
         );
     };
     
-    self.tables = libc_allocator.alloc(Qbe.Sym, self.w.tables.len); // :Leak
+    self.tables = a.alloc(Qbe.Sym, self.w.tables.len); // :Leak
     enumerate self.w.tables { table_i, table | 
         name := @tfmt("T%$%", table_i, self.module_name);
         table_pointer := self.m.intern(name);

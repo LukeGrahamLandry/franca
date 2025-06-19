@@ -4,8 +4,15 @@
 Thread :: @struct(opaque: rawptr);
 ThreadAttr :: @struct(sig: i64, opaque: Array(u8, 56));
 
+// TODO: should i do reusing of stacks here instead of making the caller do it if they care? 
+// TODO: should provide something for setting up guard pages to catch stack overflows. 
+
 fn start_thread($T: Type, callee: @FnPtr(userdata: *T) void, userdata: *T) Thread #generic = {
-    stack := page_allocator.alloc(u8, 1.shift_left(25));
+    stack := page_allocator.alloc(u8, 1.shift_left(25));  // :leak
+    start_thread(stack, T, callee, userdata)
+}
+
+fn start_thread(stack: []u8, $T: Type, callee: @FnPtr(userdata: *T) void, userdata: *T) Thread #generic = {
     callee := ptr_cast_unchecked(@type callee, @FnPtr(rawptr) void, callee&)[]; // TODO: make this less painful
     start_thread(stack, callee, T.raw_from_ptr(userdata))
 }
@@ -67,7 +74,7 @@ franca_runtime_init_thread :: fn(franca_userdata: rawptr) void = {
     c.temporary_allocator = t&;
     callee(userdata);
     t&.deinit();
-    // TODO: should we have them pass us the allocator so we can free our stack? 
+    // not freeing the stack here, i think the sane thing is to free it on the joining side. 
 };
 
 // TODO: the NOSYS is a HACK to make -syscalls make a real static binary

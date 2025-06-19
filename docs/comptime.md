@@ -13,6 +13,22 @@ There are exactly two limitations:
   - you can't call fork (starting new threads is fine).
     (because the child process won't have the compiler's thread 
     so if you try to call a function that hasn't been compiled yet, it never will be).
+    
+## Alternative Frontends
+
+The best example by far is `examples/import_c/ffi.fr`, which is a C11 compiler that outputs binary ir + type info 
+that the franca frontend can import. You run the c compiler in comptime and that letes you use c libraries directly 
+without needing to write tedious bindings. Since it compiles to the same ir as franca code, you can use c libraries 
+at comptime as well, and cross compile them, and introspect on thier types. 
+
+> See the comment at the top of that file for limitations. Most of the language works but not everything yet
+> You can't export macros to franca but they can be used internally by the c program. No thread_local, no atomics, no complex numbers, no inline assembly. 
+> Not all stdlib only standard headers are usable yet because i want to make cross compiling easy and not depend on system files. 
+
+but some examples of libraries that do work:
+- wuffs
+- stbimage, stbtruetype
+- lua (PUC Rio -- not jit)
 
 ## DSLs in Strings
 
@@ -71,6 +87,7 @@ if you ever want to edit it you still have to go scounge around for some program
 
 human readable / editable 
 
+```
 ...@@... .....@@. @@@..... ..@@@...
 ........ ........ .@@..... ...@@...
 ..@@@... ....@@@. .@@..@@. ...@@...
@@ -79,6 +96,7 @@ human readable / editable
 ...@@... .@@..@@. .@@.@@.. ...@@...
 ..@@@@.. .@@..@@. @@@..@@. ..@@@@..
 ........ ..@@@@.. ........ ........
+```
 
 ## Generating Switches
 
@@ -200,6 +218,9 @@ fn eval(rt_o: Op, rt_k: Cls, a0: Bits, a1: Bits) Bits = {
 }
 ```
 
-The full code for this is at the bottom of `backend/opt/fold.fr` (the do_fold function). 
+The full code for this is in `backend/test/folding.fr` (the do_fold_old function). 
 It's more code than I'd like and it's less obvious than the giant switch but it does the job 
-and I'm sure the language can be refined farther to make it less painful. 
+and I'm sure the language can be refined farther to make it less painful. The version actually 
+used by the backend (the do_fold function in `backend/opt/fold.fr`), takes it a step further 
+and generates a binary ir module directly and passes it to the frontend without going through 
+the intermediate step of generating asts. 

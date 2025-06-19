@@ -79,9 +79,8 @@ fn driver(vtable: *ImportVTable) void = {
     
     println("\nCOMPILE ONLY:");
     run_tests_main(Str, compile_only, fn(a) => a[]) { file | 
-        src := general_allocator().read_to_string_or_crash(file[]);
-        src&.slowly_prepend_all("\n#include_std(\"lib/core.fr\");\n");
-        compile(vtable, src.items());
+        src := @tfmt("""#include_std("lib/core.fr");#include_std("%");""", file[]);
+        compile(vtable, src);
         (true, list(u8, temp()), list(u8, temp()), "")
     };
 }
@@ -133,6 +132,7 @@ fn compile(vtable: *ImportVTable, src: Str) void = {
     chunks := compile_to_bytes(vtable, src, @slice(QbeOutputPurpose.Exe));
     outpath := "./target/c.out"; // TODO: don't hardcode this
     write_entire_file_or_crash(outpath, chunks[0]);
+    general_allocator().dealloc(u8, chunks[0]);
 }
 
 // returns one blob of bytes for each `goal` compiled in the same CompCtx but different QbeModule-s. 
@@ -186,11 +186,13 @@ fn compile_and_run(vtable: *ImportVTable, src: Str, args: []Str) Ty(bool, List(u
     chunks := compile_to_bytes(vtable, src, cases);
     
     write_entire_file_or_crash("./target/c.out", chunks[0]);
-    ok0, out0, err0 := exec_and_catch("./target/c.out", args, todo_allocator);
+    ok0, out0, err0 := exec_and_catch("./target/c.out", args, temp());
+    general_allocator().dealloc(u8, chunks[0]);
     if ok0 {
         enumerate chunks.rest(1) { i, exe | 
             write_entire_file_or_crash("./target/c.out", exe[]);
-            ok1, out1, err1 := exec_and_catch("./target/c.out", args, todo_allocator);
+            general_allocator().dealloc(u8, exe[]);
+            ok1, out1, err1 := exec_and_catch("./target/c.out", args, temp());
             
             out_ok, err_ok := (out0.items() == out1.items(), err0.items() == err1.items());
             pass := ok1 && out_ok && err_ok;

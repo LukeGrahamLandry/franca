@@ -24,6 +24,9 @@ and by fixing callgraph sorting for inlining.
 
 ## 
 
+- not everything works if you force general_allocator to be BlockAlloc
+- 60fps.fr crashes
+- event handlers in graphics programs crash. but each program seems to have a different one cursed. 
 - get compilation order dependence under control!!
 - fix callgraph sorting to improve inlining. like make sure the ge/le in lex_int/is_ascii_digit are inlined 
 - make AsmFunction get an inferred name
@@ -35,7 +38,7 @@ and by fixing callgraph sorting for inlining.
 - #ir tries to ignore zero-sized params but not if they're first which is sad
 - :BrokenCGeneric i think erroring on conflicting `_Generic` cases is correct but you're supposed to treat `long` and `long long`
 as different types even when they're the same size. 
-- examples/repl.fr: `@println("%+%=%", 1, 2, 1+2);` fails safety check
+- automatically test examples/repl.fr
 - "need to be consistant about how to handle modules like this that don't actually compile anything"
 - count_array_init_elements is still spitting out junk symbols into the scope. need to just not parse it twice. 
 and not doing that makes an array of strings have the strings show up in the output module twice. 

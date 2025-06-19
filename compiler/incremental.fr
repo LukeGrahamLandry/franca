@@ -9,8 +9,12 @@
 
 fn read_cached(a: Alloc, path: Str) ?*Header = {
     bytes := read_entire_file(a, path) || return(.None);
+    if(bytes.len < 8, => return(.None));
     magic8 := ptr_cast_unchecked(u8, u64, bytes.ptr)[];
-    if(magic8 != MAGIC, => return(.None));
+    if magic8 != MAGIC {
+        a.dealloc(u8, bytes);
+        return(.None);
+    };
     (Some = check(bytes))
 }
 
@@ -74,9 +78,10 @@ fn files_unchanged(header: *Header) bool = {
     true
 }
 
-fn compile_cached(header: *Header) (@FnPtr(*ImportVTable) void) = {
+fn compile_cached(header: *Header, to_free: *?*QbeModule) (@FnPtr(*ImportVTable) void) = {
     a := general_allocator();
     m := a.box(QbeModule);
+    to_free[] = (Some = m);
     init_default_module(m, (
         arch = query_current_arch(), 
         os = query_current_os(), 
@@ -137,7 +142,7 @@ fn write_cache(m: *QbeModule, c: CompCtx, fid: FuncId, outpath2: Str, start_path
         entry_dep = (off = entry_dep),
     );
     chunks := writer.to_bytes(meta, m);
-    bytes := concat(chunks, general_allocator());
+    bytes := concat(chunks, general_allocator());  // not c.get_alloc because we're going to drop the compiler at the end
     
     write_entire_file_or_crash(outpath2, bytes);
     if(show_backend_stats(), => @eprintln(">>> save: %", outpath2));
@@ -715,6 +720,9 @@ fn get_sym(import: *FrcImport) One(Sym) = {
     (off = import.index)
 }
 
+fn as_bytes(header: *Header) []u8 = 
+    (ptr = bit_cast_unchecked(*Header, *u8, header), len = header.meta.filelen.zext());
+
 // TODO: return and error instead of crashing but need to pre-fmt it because the caller doesn't have our compiler instance. 
 cached_compile_module :: fn(path: Str, opts: *BuildOptions, out_alloc: Alloc) CRes([]u8) = {
     @assert(path.starts_with("@/"), "cached_compile_module path must start with @");
@@ -723,14 +731,18 @@ cached_compile_module :: fn(path: Str, opts: *BuildOptions, out_alloc: Alloc) CR
     cachepath := choose_cache_filename(path);
     @if(enable_incremental())
     if read_cached(out_alloc, cachepath) { header |
-        break :: local_return;
+        B :: local_return;
+        break :: fn() => {
+            out_alloc.dealloc(u8, header.as_bytes());
+            B();
+        };
         t := Incremental'pack_current_target();
         if(header.arch_os.bit_and(t) != t, => break());
         entry_dep := header.get(header.entry_dep);
         if(header.get(entry_dep.filename) != path, => break());
         if(!files_unchanged(header), => break());
         if(show_backend_stats(), => @eprintln(">>> hit: %", cachepath));
-        return(Ok = (ptr = bit_cast_unchecked(*Header, *u8, header), len = header.filelen.zext()));
+        return(Ok = header.as_bytes());
     };
     
     // It's convient to just pass in the one from the parent compiler instance, 
@@ -804,9 +816,6 @@ fn build_the_exports_scope(c: *ExportCtx, start_path: Str) CRes([][]u8) = {
     shared := init(c.m, fr.get_alloc(), @as(CodegenWorker) codegen_thread_main, true);
     funcs_done := main_thread_pump(fr, shared, fns);
     @debug_assert(shared.no_more_functions && c.m.inlinable_but_referenced_later.len == 0);
-    each shared.queue { q |
-        q.arena&.deinit();
-    };
     
     finish_imports(c.writer, c.m);
     root_scope := export_root_scope(c, fns, funcs_done&, names);

@@ -44,6 +44,7 @@ fn HashMap($K: Type, $V: Type) Type = {
     // This is the same as:
     // self.get_ptr(key) || { self.insert(key, if_absent()); self.get_ptr(key) }
     // but faster because it only needs to hash the key once 
+    // but it holds the pointer to the slot while calling your handler so don't add anything else to the hashmap 
     fn get_or_insert(self: *Self, key: K, $if_absent: @Fn() V) void = 
         get_or_insert(self.raw&, key, self.alloc, if_absent);
     
@@ -102,7 +103,9 @@ fn RawHashMap($K: Type, $V: Type) Type = {
     fn get_or_insert(self: *Self, key: K, gpa: Alloc, $if_absent: @Fn() V) *V = {
         valid, slot, h := expand_to_find_slot(self, key&, gpa);
         if !valid {
+            cap, p := (self.capacity, slot.hash);
             value := if_absent();
+            @debug_assert(cap == self.capacity && slot.hash == p, "mutated during get_or_insert.if_absent");
             // do this after `if_absent` so we don't increment if they early return.
             self.len_including_tombstones += int(slot.hash == 0);
             slot[] = (hash = h, key = key, value = value);

@@ -339,19 +339,20 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
 
 CodegenShared :: @struct(
     queue: []CodegenEntry,
-    no_more_functions := false,
+    no_more_functions: bool,
     no_more_codegen: u32,
     m: *QbeModule,
-    codegen_time := 0,
+    codegen_time: i64,
     thread: Thread,
     constants_used: import("@/lib/collections/bit_set.fr").DynamicBitSet,
     type_indices: HashMap(Type, i64),
-    bouba_idx := 0,
+    bouba_idx: i64,
     waiting_for_bouba: u32,
     waiting_for_symbol: u32,
     threaded: bool,
     frc_imports: RawList(import("@/compiler/incremental.fr").FrcModuleInstance),
     debug_unthreaded_entry_is_taken: bool,
+    thread_stack: []u8,
 );
 
 CodegenState :: @enum(i64) (WaitingForBouba, UsedByBouba, WaitingForKiki, UsedByKiki);
@@ -385,13 +386,13 @@ fn init(m: *QbeModule, arena: Alloc, worker: CodegenWorker, threaded: bool) *Cod
     s.m = m;
     s.constants_used = empty(arena);
     // TODO: one allocation for all the initial slices.
-    other_thread_a := general_allocator(); // :leak
     enumerate s.queue { i, entry |
-        entry.arena = init(other_thread_a, 16000);
+        entry.arena = init(general_allocator(), 16000);  // these are freed in join_codegen_thread
     };
     s.waiting_for_bouba = s.queue.len.trunc();
     @if(s.threaded) {
-        s.thread = start_thread(CodegenShared, worker, s);
+        s.thread_stack = page_allocator.alloc(u8, 1.shift_left(25));
+        s.thread = start_thread(s.thread_stack, CodegenShared, worker, s);
     };
     s.type_indices = init(arena); 
     s.frc_imports = init(arena, 64);  // TODO: don't have a fixed size. need to use BucketArray or something tho
@@ -465,19 +466,27 @@ fn get_log_types(comp: CompCtx, fid: FuncId) Str = {
         };
     };
     panic("ICE: #log_ir was set but did not find tag on the function")
-    //"P"  // HACK for @if(TRACE_SHIMS)
 }
 
 fn join_codegen_thread(shared: *CodegenShared) void = {
-    @if(!shared.threaded || shared.no_more_codegen == 1) return();
+    @if(shared.no_more_functions) return();
     shared.no_more_functions = true;
-    while => shared.no_more_codegen == 0 {
-        Futex'wake(shared.waiting_for_bouba&, 1);
-        Futex'wait(shared.no_more_codegen&, 0);
+    if shared.threaded {
+        while => shared.no_more_codegen == 0 {
+            Futex'wake(shared.waiting_for_bouba&, 1);
+            Futex'wait(shared.no_more_codegen&, 0);
+        };
+        
+        result := rawptr.zeroed();
+        @if(is_linking_libc()) {
+            pthread_join(shared.thread, result&);
+        };
+        
+        page_allocator.dealloc(u8, shared.thread_stack);
+        shared.thread_stack = empty();
+        shared.thread = zeroed(@type shared.thread);
     };
-    
-    result := rawptr.zeroed();
-    @if(is_linking_libc()) {
-        pthread_join(shared.thread, result&);
+    each shared.queue { q |
+        q.arena&.deinit();
     };
 }

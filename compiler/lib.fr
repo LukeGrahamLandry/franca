@@ -26,6 +26,7 @@ Incr :: import("@/compiler/incremental.fr");
 #use("@/lib/sys/fs.fr");
 #use("@/lib/collections/bucket_array.fr");
 #include_std("backend/lib.fr");
+HACK_PARSER_ALLOC :: false;
 
 Crash :: import("@/lib/crash_report.fr");
 
@@ -65,6 +66,7 @@ SelfHosted :: @rec @struct(
     stack_trace_last_callee: ?FuncId, // bleh
     backtrace_node: *Crash.LocationResolverNode,
     recycle_funcid: List([]FuncId),
+    shim_callback_general_alloc: Alloc,
 );
 
 OverloadKey :: @struct(arg: Type, req: Type);
@@ -138,6 +140,7 @@ fn load_file_in_compiler(vtable: *ImportVTable, path: Str, opts: *BuildOptions) 
 Dyn :: import("@/lib/dynamic_lib.fr");
 
 fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
+    mark := mark_temporary_storage();
     F :: @FnPtr(*ImportVTable) void;
     callee: ?F = .None;
     cachepath := choose_cache_filename(path);
@@ -147,6 +150,8 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
     no_cache := get_environment_variable("FRANCA_NO_CACHE").is_some() || !is_linking_libc();
     
     a := general_allocator();
+    to_free: ?*QbeModule = .None;
+    to_free_h: ?*Incremental.Header = .None;
     
     if !path.ends_with(".fr") {
         if Dyn'open(path) { handle |
@@ -164,7 +169,8 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
             if read_cached(a, path) { header |
                 t := Incremental'pack_current_target();
                 @assert_eq(header.arch_os.bit_and(t), t, ".frc was compiled for a different target");
-                callee = (Some = compile_cached(header));
+                callee = (Some = compile_cached(header, to_free&));
+                to_free_h = (Some = header);
                 @eprintln("Loaded precompiled driver: %", path);
             };
         }
@@ -175,6 +181,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
             break :: local_return;
             start := timestamp();
             t := Incremental'pack_current_target();
+            to_free_h = (Some = header);
             if(header.arch_os.bit_and(t) != t, => break());
 
             // This is extra important since im using a very collidable file name in choose_cache_filename 
@@ -186,9 +193,12 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
             
             if(!files_unchanged(header), => break());
             middle := timestamp();
-            callee = (Some = compile_cached(header));
+            callee = (Some = compile_cached(header, to_free&));
             end := timestamp();
             if(show_backend_stats(), => @eprintln(">>> hit: %\n>>> check: %ms, compile: %ms", cachepath, middle-start, end-middle));
+        };
+        @if(callee.is_none()) if to_free_h { it |
+            a.dealloc(u8, it.as_bytes());
         };
         zone_end(z);
     };
@@ -248,7 +258,6 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
             _ := c.get_jitted(f);
         }, {
             main_thread_pump(self.comp(), shared, @slice(f));
-            shared.join_codegen_thread();
         });
         
         
@@ -270,12 +279,14 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
             
             make_dirs_or_crash(cache_dir());
             header := write_cache(m, c, f, cachepath, path);
+            to_free_h = (Some = header);
+            drop(m);
             c'vtable'destroy_compiler(c.data);
             context(DefaultContext)[].comptime = rawptr_from_int(0); 
 
             // this doesn't re-read the files to check if they changed since you started compiling, that would feel a bit creepy. 
             z := zone_begin(.CheckCache);
-            callee = (Some = compile_cached(header));
+            callee = (Some = compile_cached(header, to_free&));
             zone_end(z);
             break();
         };
@@ -290,6 +301,14 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         context(DefaultContext)[].comptime = rawptr_from_int(0);
         callee(vtable);
     };
+    
+    if to_free { m |
+        drop(m);  // waste of time
+    };
+    if to_free_h { it |
+        a.dealloc(u8, it.as_bytes());
+    };
+    reset_temporary_storage(mark);
     .Ok
 }
 
@@ -445,6 +464,7 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
         stack_trace_last_callee = .None,
         backtrace_node = push_resolver(SelfHosted, self, find_function_aa),
         recycle_funcid = list(a),
+        shim_callback_general_alloc = general_allocator(),
     );
     self.add_function(zeroed Func);
     self.other_module&.push(self.comptime_codegen.m, self.get_alloc());
