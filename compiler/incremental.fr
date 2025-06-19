@@ -733,6 +733,10 @@ cached_compile_module :: fn(path: Str, opts: *BuildOptions, out_alloc: Alloc) CR
         return(Ok = (ptr = bit_cast_unchecked(*Header, *u8, header), len = header.filelen.zext()));
     };
     
+    // It's convient to just pass in the one from the parent compiler instance, 
+    // so we have to not mutate BuildOptions.env with indices into this new compiler we're going to throw away.  
+    opts := opts[]; 
+    
     out := "";
     push_dynamic_context {
         context(DefaultContext)[].comptime = zeroed rawptr;
@@ -740,7 +744,7 @@ cached_compile_module :: fn(path: Str, opts: *BuildOptions, out_alloc: Alloc) CR
         start := timestamp();
         vtable := init_driver_vtable();
         src := @tfmt("""#include_std("lib/core.fr"); #include_std("%");""", path);
-        compiler := new_with_src(vtable, src, opts);
+        compiler := new_with_src(vtable, src, opts&);
         self := compiler.cast()[][];
         
         m := self.get_alloc().box(QbeModule);
@@ -769,21 +773,18 @@ cached_compile_module :: fn(path: Str, opts: *BuildOptions, out_alloc: Alloc) CR
         bytes := bytes.concat(out_alloc);
         end := timestamp();
         
-        // TODO
-        //drop(m);
-        //vtable'destroy_compiler(compiler);
-        //context(DefaultContext)[].comptime = zeroed rawptr;
-        //reset_temporary_storage(mark);
+        drop(m);
+        vtable'destroy_compiler(compiler);
+        context(DefaultContext)[].comptime = zeroed rawptr;
+        reset_temporary_storage(mark);
         
         // TODO: actually it's fine if you fail to write the cache, it's just slower next time
-        make_dirs_or_crash(cache_dir());
-        write_entire_file_or_crash(cachepath, bytes);
-        if(show_backend_stats(), => @eprintln(">>> save: % in %ms", cachepath, end-start));
+        if make_dirs(cache_dir()) && write_entire_file(cachepath, bytes) {
+            if(show_backend_stats(), => @eprintln(">>> save: % in %ms", cachepath, end - start));
+        }
         
-        //return(Ok = bytes.concat(out_alloc)); // WTF
         out = bytes;
     };
-    //panic("unreachable didn't return from cached_compile_module"); // WTF
     (Ok = out)
 };
 

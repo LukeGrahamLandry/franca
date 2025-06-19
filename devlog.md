@@ -48,7 +48,16 @@ notably those are all things to aren't going to change if you're just working on
     CompCtx and do redundant work on stuff like @match and @syscall, but it opens the door to doing something better. 
     i do kinda hate it because im just reinventing linkers, but it was getting a bit dumb that the tests take a whole minute 
     to run because they recompile the backend 23 times, etc. etc.
-  - something's very broken with examples/bf/c_string.fr, but the more complicated tests seem to work (other than amd64), so thats a bit crazy town. 
+- something's very broken with examples/bf/c_string.fr, but the more complicated tests seem to work (other than amd64), so thats a bit crazy town. 
+  problem was that i was starting a new compiler instance sharing the BuiltOptions which includes ComptimeEnvironment which has some 
+  local indices to blessed types set in bootstrap_compiler_environment, so since compiler/tests.fr also calls main_thread_pump multiple times, 
+  the later ones get the wrong franca_runtime_init FuncId. 
+- insane early return bug: when you fall through you don't get a new block so if you have the right level of nesting 
+  theres a brief window where new code gets inserted before the terminator. but @if gives you a new block, 
+  so it was only a problem if you unconditionally early return from inside an inlined closure to the outer function
+  so the frontend doesn't notice the code after that is unreachable. 
+- take out the junk blocks for unused return labels earlier. doesn't matter, just makes the debug output easier to read. 
+- not sure if i should bother caring about got_indirection_instead_of_patches on amd64
 
 ## (Jun 17)
 

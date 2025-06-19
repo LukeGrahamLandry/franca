@@ -44,6 +44,7 @@ EmitIr :: @struct(
     pending: *List(FuncId), 
     idx: *i64,
     pending_set_lib: List(Ty(Qbe.Sym, Str, bool)),  // TODO: don't be cringe
+    unreachable_block: *Qbe.Blk,
 );
 
 IrVar :: @tagged(Alloca: Qbe.Ref, Local: Qbe.Ref);
@@ -108,6 +109,7 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
             pending = pending,
             idx = idx,
             pending_set_lib = list(outer_temp),
+            unreachable_block = zeroed(*Qbe.Blk),
         );
         @debug_assert(func.get_flag(.EnsuredCompiled), "fn not compiled?");
         self.f.default_init(m);
@@ -353,12 +355,15 @@ fn context_par_e(self: *EmitIr) void #inline = {
 }
 
 fn finalize_blocks(self: *EmitIr) void = {
-    self.f.nblk = self.blocks.len.trunc();
     prev := Qbe.Blk.ptr_from_int(0);
     ok := true;
+    self.f.nblk = 0;
     for_rev self.blocks& { b | 
-        b.link = prev;
-        prev = b;
+        if b.visit == -1 {
+            b.link = prev;
+            prev = b;
+            self.f.nblk += 1;
+        };
         ok = ok && b.jmp.type != .Jxxx;
     };
     if !ok {
@@ -492,6 +497,9 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = {
     if self.program.get_info(ret)[].stride_bytes == 0 {  // :NoRuntimeRepr
         p1 = .Discard;
     };
+    self.unreachable_block = self.new_block("unreachable");
+    self.unreachable_block.jmp.type = .hlt;
+    self.unreachable_block.visit = 0;
     result := @try(self.compile_expr(body, p1)) return;
     
     self.emit_ret(result);
@@ -992,6 +1000,7 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
             seal self { b |
                 b.jmp.type = .jmp;
                 b.s1 = ret.blk;
+                self.blk = self.unreachable_block;
             };
             (Ok = QbeNull)
         }
@@ -1082,10 +1091,8 @@ fn emit_block_expr(self: *EmitIr, expr: *FatExpr, p: Placement) CRes(Qbe.Ref) #o
         self.blk = ret.blk;
     } else {
         // They didn't actually use a local_return so we can discard this useless block. 
-        // TODO: this is wrong when nested
-        //junk := self.blocks&.unordered_remove(return_block_index); 
-        //@debug_assert(ret.blk.identical(junk.unwrap()));
         ret.blk.jmp = (type = .hlt, arg = QbeNull);
+        ret.blk.visit = 0;
         // We did generate slightly more noisy code by `unify_placement` earlier than necessary. 
     };
     (Ok = dest)
