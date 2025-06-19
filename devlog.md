@@ -26,6 +26,29 @@ notably those are all things to aren't going to change if you're just working on
   - ha! (time: 1106 -> 1014, bloat.fr: 982152 -> 971472)
   - not bothing to check if things from `pending` are already on `work_stack` also helps a bit. 999
   - (still din't fix the lex_int thing i was complaining about)
+  - unfortunate that the reordering messes up tracy 
+- fix error_reporting.fr/find_function() to not call for_symbols (reuse my nicly fixed find_ip_in_module)
+- start working on smaller compilation units. main usecase is i don't want to recompile the c compiler from source every time you import a c program.
+  - yikes noticed `<<12` vs `<<16` typo for offset from a symbol. should add a test for that. 
+  - when outputting function types into root_scope, imports need an extra entry, like if funcimpl=DynamicImport, 
+    theres a mangled name and an unmangled name that both need to have typeinfo so we know its a function when loading and it's allowed to have a shim. 
+    but now the thing im doing in @syscall is really annoying because it directly makes a callable Expr::DataSymbol, 
+    so there's no Func that shows up. so i could just have it note that it's callable and give you the function type, 
+    but really it should be legal to import an untyped symbol and cast it to a function pointer. 
+    which kinda should just work, i just have to put something in the root_scope so the importer knows it exists. 
+    // holy shit this is annoying. 
+    // the problem is when it's not a function, i can't just make a shim for it,  
+    // and since it's an import it won't have a bakedvarid to track.  
+    // maybe the sane thing is to do this in move_from_module, but you can't make an new entry there  
+    // because they need to be ordered or you'll have repro be a race between threads.  
+    // the specific problem im having now would be easier to fix by just making @syscall make a Func body  
+    // for it but you'll have the same problem if you actually try to import data.  
+    // i should just do a massive refactor of how the frontend represents symbols but that's such a pain  
+  - so that works as a proof of concept. not impressive the first time, it's not parallel so it's even slower because you need to start a new 
+    CompCtx and do redundant work on stuff like @match and @syscall, but it opens the door to doing something better. 
+    i do kinda hate it because im just reinventing linkers, but it was getting a bit dumb that the tests take a whole minute 
+    to run because they recompile the backend 23 times, etc. etc.
+  - something's very broken with examples/bf/c_string.fr, but the more complicated tests seem to work (other than amd64), so thats a bit crazy town. 
 
 ## (Jun 17)
 
@@ -38,7 +61,6 @@ notably those are all things to aren't going to change if you're just working on
 - now that i can get rid of #syscall, i can also get rid of FuncBody.Merged. 
 - now that find_or_create_impl doesn't do anything interesting. inline it everywhere and give better error messages. 
 - make trying to AOT a comptimeonly function a hard error. will have to go back when i do more caching but for now this is the sane option. 
-- 
 
 ## (Jun 16)
 

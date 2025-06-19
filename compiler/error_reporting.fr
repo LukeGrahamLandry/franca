@@ -773,17 +773,25 @@ fn find_function(self: *SelfHosted, addr: i64, callee: *?FuncId, m: *QbeModule) 
         return(Some = "GOT stub");
     };
     
-    out := "";
-    for_symbols m { id, s |
-        continue :: local_return;   // TODO: break. would be easier if i had a defer like thing. or like optional named params that get ignored
-        jit_addr := s.jit_addr.int_from_rawptr();
-        dist := addr - jit_addr;
-        if dist >= 0 && dist < s.size.zext() { //(s.size == 0 || dist < s.size) {
-            parsed_name, i := split_suffix(s.name, "__");
+    // Don't use for_symbols because what if we panicked in a use_symbol block 
+    if find_ip_in_module(m, rawptr_from_int addr) { name |
+        break :: local_return;
+            // TODO: dumb HACK! factor out to something that doesn't return a string!
+            if name.ends_with(" AOT") {
+                i0, _ := split_suffix(name, " AOT"); 
+                name = i0;
+            } else {
+                if name.ends_with(" JIT") {
+                    i0, _ := split_suffix(name, " JIT"); 
+                    name = i0;
+                }
+            };
+ 
+            parsed_name, i := split_suffix(name, "__");
             
-            is_shim := s.name.ends_with("__shim") && s.name.starts_with("F");
+            is_shim := name.ends_with("__shim") && name.starts_with("F");
             if is_shim {
-                i = s.name.slice(1, s.name.len - 6);  
+                i = name.slice(1, name.len - 6);  
             };
             
             if parsed_name == "" && i.starts_with("F") {
@@ -791,8 +799,7 @@ fn find_function(self: *SelfHosted, addr: i64, callee: *?FuncId, m: *QbeModule) 
             };
             for i { c | 
                 if !c.is_ascii_digit() {
-                    out = s.name;
-                    continue();
+                    return(Some = name);
                 };
             };
             
@@ -802,6 +809,7 @@ fn find_function(self: *SelfHosted, addr: i64, callee: *?FuncId, m: *QbeModule) 
             name := self.pool.get(func.name);
             // TODO: check name
             ::WalkAst(FindCallee, void);
+            out := "";
             if callee[] { callee | 
                 walk: FindCallee = (found = list(Span, temp()), callee = callee, compiler = self);
                 @if_let(func.body&) fn Normal(e) => {
@@ -847,9 +855,8 @@ fn find_function(self: *SelfHosted, addr: i64, callee: *?FuncId, m: *QbeModule) 
             fn handle_pattern(self: *FindCallee, pattern: *Pattern) Result(DoMore, void) = (Ok = .Continue);
             
             callee[] = (Some = fid);
-        };
+            return(Some = out);
     };
-    if(out.len > 0, => return(Some = out));
     .None
 }
 

@@ -97,14 +97,8 @@ fn compile_cached(header: *Header) (@FnPtr(*ImportVTable) void) = {
     assume_types_fn(Arg = *ImportVTable, Ret = void, ptr = cc)
 }
 
-fn write_cache(m: *QbeModule, c: CompCtx, fid: FuncId, outpath2: Str, start_path: Str) *Header = {
-    self := c.data.cast()[][];
-    
-    @if(!enable_incremental()) @panic("write_cache");
-    writer := m.save.unwrap();
-    finish_imports(writer, m);
-    
-    writer.dep&.reserve(self.codemap.files.len+1);
+fn write_deps(writer: *Writer, codemap: *CodeMap, start_path: Str) u32 = {
+    writer.dep&.reserve(codemap.files.len+1);
     writer.dep&.push(
         file_len = 0,
         filename = writer.push(self_filename),
@@ -112,7 +106,7 @@ fn write_cache(m: *QbeModule, c: CompCtx, fid: FuncId, outpath2: Str, start_path
     );
     
     entry_dep := Qbe.no_symbol;
-    each self.codemap.files { it |
+    each codemap.files { it |
         if is_cachable(it.name) {
             if entry_dep == Qbe.no_symbol && it.name == start_path /*:SLOW*/ {
                 entry_dep = writer.dep.len.trunc();
@@ -125,7 +119,17 @@ fn write_cache(m: *QbeModule, c: CompCtx, fid: FuncId, outpath2: Str, start_path
             );
         }
     };
+    entry_dep
+}
+
+fn write_cache(m: *QbeModule, c: CompCtx, fid: FuncId, outpath2: Str, start_path: Str) *Header = {
+    self := c.data.cast()[][];
     
+    @if(!enable_incremental()) @panic("write_cache");
+    writer := m.save.unwrap();
+    finish_imports(writer, m);
+    
+    entry_dep := write_deps(writer, self.codemap, start_path);
     name := c.fmt_fn_name(fid);
     meta: Meta = (
         arch_os = @if(m.goal.type == .CachedEarly, 0x0F0F, pack_current_target()),
@@ -179,6 +183,7 @@ FrcModule :: @struct {
     sym: []u32;  // [One(Sym)] = FuncId or BakedVarId
     sym_ty: []One(FTy); // [One(Sym)]
     fty: []Type; // [One(FTy)] 
+    data_symbols: []Ty(One(Sym), DynamicImport);
 };
 
 // one per (CodegenWorker, Header) pair. 
@@ -211,6 +216,7 @@ fn import_frc(self: *SelfHosted, bytes: []u8) CRes(ScopeId) = {
         sym = a.alloc_init(u32, zext header.sym.count, fn(_) => Qbe.no_symbol), 
         sym_ty = a.alloc_init(One(FTy), zext header.sym.count, fn(_) => (off = Qbe.no_symbol)), 
         fty = a.alloc_zeroed(Type, zext header.fty.count),
+        data_symbols = empty(),
     );
     @err_assert(header.fty.count != 0, "tried to import_frc without frontend type info (fty)") return;
     
@@ -218,22 +224,24 @@ fn import_frc(self: *SelfHosted, bytes: []u8) CRes(ScopeId) = {
     range(0, FTy.COUNT) { i |  // builtin types
         module.fty[i] = bit_cast_unchecked(u32, Type, trunc i);
     };
-    module := FrcModule.int_from_ptr(module);
+    module_handle := FrcModule.int_from_ptr(module);
     
     root_scope := header.get(header.root_scope);
+    data_symbols := Ty(One(Sym), DynamicImport).list(self.get_alloc());
     for(header, root_scope.payload.fields) { i, it |
         name := self.pool.insert_owned(header.get(it.name));
         loc := zeroed Span;  // TODO
         type: LazyType = (PendingEval = (
-            expr = (FrcImport = (module = module, index = it.type.off, table = FTY_TABLE)), 
+            expr = (FrcImport = (module = module_handle, index = it.type.off, table = FTY_TABLE)), 
             ty = Type, done = false, loc = loc,
         ));
         is_type := it.type.off == FTy.TYPE || it.type.off == FTy.SCOPE;
         expr: FatExpr = (ty = UnknownType, done = false, loc = loc, expr = (FrcImport = (
-            module = module, 
+            module = module_handle, 
             index = it.payload.offset, 
             table = @if(is_type, FTY_TABLE, SYM_TABLE),
         )));
+        is_function := header.get(it.type)[].tag == .Func;
         if !is_type {
             // sema_frc_import_fid() needs this information and it's a lot less painful 
             // to just store it now than to look it up through the scope later. 
@@ -241,16 +249,37 @@ fn import_frc(self: *SelfHosted, bytes: []u8) CRes(ScopeId) = {
             sym_ty[zext it.payload.offset] = it.type;
         };
         
-        if header.get(it.type)[].tag == .Func {
+        // TODO: I don't like this. 
+        //       for data imports, we can't make a shim and we don't have a FuncId or BakedVarId to track a dependency on, 
+        //       so have to do extra work up front before we even know if it will be reachable. 
+        if it.type.off == FTy.RAWPTR {
+            i := it.payload.sym;
+            sym := header.get(it.payload.sym);
+            if sym.segment == .Import {
+                data := as_data_import(self, header, i);
+                expr.expr = (DataSymbol = data);
+                push(data_symbols&, (it.payload.sym, data));
+            };
+        };
+        
+        if is_function {
             // better not to say FnPtr because that forces a jit shim to immediate_eval_constant
             type = (Finished = FuncId);
         };
         
         self.add_to_scope(scope, name, type, expr);
     };
+    module.data_symbols = data_symbols.items();
     //println("done filling scope!");
     
     (Ok = scope)
+}
+
+fn as_data_import(self: *SelfHosted, h: *Header, i: One(Sym)) DynamicImport = {
+    it := h.get(i);
+    lib := h.get(h.get(it.imp.lib)[].name);
+    name := self.pool.insert_owned(h.get(it.name));
+    self.dyn_import(name, self.pool.insert_owned(lib), it.imp.weak)
 }
 
 fn sema_frc_import(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
@@ -280,9 +309,8 @@ fn sema_frc_import(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
     
     if it.segment == .Import && !is_function {
         //@println("import data: %", caller_name);
-        lib := header.get(header.get(it.imp.lib)[].name);
-        name := self.pool.insert_owned(caller_name);
-        expr.expr = (DataSymbol = (name = name, lib = self.pool.insert_owned(lib), comptime = 0, weak = it.imp.weak));
+        // TODO: do this at the beginning since we have to anyway and otherwise it's redundant
+        expr.expr = (DataSymbol = as_data_import(self, header, i));
         expr.ty = self.import_type(module, type);
         return(.Ok);
     }
@@ -336,25 +364,30 @@ fn sema_frc_import_fid(self: *SelfHosted, module: *FrcModule, i: One(Sym)) CRes(
     func.set_flag(.YesContext);
     if it.segment != .Import {
         //@println("local function: %", caller_name);
-        func.body = (FrcImport = (module = FrcModule.int_from_ptr(module), index = i.off, table = SYM_TABLE));
-        @assert_ne(it.segment, .MachineCode, "TODO: machine code");
-
-        msg :: "TODO: this won't work if did_regalloc on amd64 because it doesn't see RMem. maybe i should just store those differently";
-        @err_assert(it.fnc.tmp != Qbe.no_symbol, msg) return;
-        for(h, it.fnc.con) { _, con |
-            if con.sym != Qbe.no_symbol_S {
-                sym := @as(One(Sym)) (off = con.sym.id);
-                
-                //@println("- callee %", h.get(h.get(sym)[].name));
-                // TODO: i think this doesn't super matter until i start handing out func-ids lazily
-                // TODO: need to track the Dat dependencies too somehow. maybe give up and just use 
-                //       emitir.pending for this as well like old FuncImpl.Ir did. 
-                if @try(self.get_fid(module, sym)) return { fid |
-                    // TODO: mutual_ cycles?
-                    func.callees&.push(fid, self.get_alloc());
-                };
-            }
-        }
+        if it.segment == .MachineCode {
+            func.body = (Asm = (
+                arm64 = h.get(it.asm.arm64),
+                amd64 = h.get(it.asm.amd64),
+            ));
+        } else {
+            func.body = (FrcImport = (module = FrcModule.int_from_ptr(module), index = i.off, table = SYM_TABLE));
+            msg :: "TODO: this won't work if did_regalloc on amd64 because it doesn't see RMem. maybe i should just store those differently\n%";
+            //@err_assert(it.fnc.tmp != Qbe.no_symbol, msg, caller_name) return; // TODO
+            for(h, it.fnc.con) { _, con |
+                if con.sym != Qbe.no_symbol_S {
+                    sym := @as(One(Sym)) (off = con.sym.id);
+                    
+                    //@println("- callee %", h.get(h.get(sym)[].name));
+                    // TODO: i think this doesn't super matter until i start handing out func-ids lazily
+                    // TODO: need to track the Dat dependencies too somehow. maybe give up and just use 
+                    //       emitir.pending for this as well like old FuncImpl.Ir did. 
+                    if @try(self.get_fid(module, sym)) return { fid |
+                        // TODO: mutual_ cycles?
+                        func.callees&.push(fid, self.get_alloc());
+                    };
+                }
+            };
+        };
     } else {
         //@println("import function: %", caller_name);
         lib := h.get(h.get(it.imp.lib)[].name);
@@ -443,12 +476,23 @@ fn import_type_info(self: *SelfHosted, module: *FrcModule, it: *FTy) TypeInfo = 
                 val: i64 = it.payload.offset.zext();
                 sequential = sequential && val == last + 1;
                 last = val;
-                @debug_assert_eq(it.type.off, FTy.U32);
+                // TODO
+                //@debug_assert_eq(it.type.off, FTy.U32, "expected enum value u32");
                 push(args&, (name, self.to_values(u32, trunc val)));
             };
             
             raw := u32;  // TODO: non-u32 // :get_or_create_type 
             (Enum = (raw = raw, fields = args.as_raw(), sequential = sequential))
+        }
+        fn Alias() => (Named = (import_type(self, module, it.payload.alias), Flag.SYMBOL_ZERO.ident()));
+        fn Tagged() => {
+            cases := Ty(Symbol, Type).list(self.get_alloc());
+            for(module.header, it.payload.fields) { i, it |
+                name := self.pool.insert_owned(module.header.get(it.name));
+                type := import_type(self, module, it.type);
+                push(cases&, (name, type));
+            };
+            (Tagged = (tag = i64, cases = cases.as_raw()))
         }
         @default => @panic("todo: %", it.tag);
     }
@@ -461,7 +505,7 @@ fn move_from_module(emit_ir: *EmitIr, import: *FrcImport) CRes(CodegenTask) = {
     module       := FrcModule.ptr_from_int(import.module); 
     header, m, f := (module.header, emit_ir.m, emit_ir.f);
     self := emit_ir.program.data.cast()[][];
-    instance := @try(find_module(self, emit_ir.shared, module)) return;
+    instance := @try(find_module(self, emit_ir.shared, module, .None)) return;
     @debug_assert(identical(m, f.globals), "move_from_module bad f.m");
 
     i := import.get_sym();
@@ -494,6 +538,7 @@ fn move_from_module(emit_ir: *EmitIr, import: *FrcImport) CRes(CodegenTask) = {
     if !did_regalloc {
         apply_type_offset(f, instance.type_offset);
     };
+    
     // rn not adding anything to `pending`, trusting that sema_frc_import() put them in callees for someone else to pickup
     
     (Ok = (FromCache = (f = f, did_regalloc = did_regalloc)))
@@ -509,7 +554,7 @@ import_baked_var :: fn(self: *SelfHosted, shared: *CodegenShared, inst: *FrcModu
     ::enum(FTy.Tag);
     ty := module.sym_ty[zext sym.off];
     if ty.off != Qbe.no_symbol {
-        @debug_assert_eq(h.get(ty)[].tag, .Ptr, "symbols are always pointers");
+        @debug_assert(h.get(ty)[].tag == .Ptr || ty.off == FTy.RAWPTR, "symbols are always pointers");
     };  // else just means not referenced from root scope. kinda lame. 
     
     slot := module.sym[zext sym.off]&;
@@ -530,6 +575,13 @@ import_baked_var :: fn(self: *SelfHosted, shared: *CodegenShared, inst: *FrcModu
     dest, id := reserve_baked(self, .None);
     slot[] = bit_cast_unchecked(BakedVarId, u32, id);
     inst.syms[zext sym.off] = shared.m.intern(@tfmt("g%", id.id));
+    
+    // TODO: should be able to do this but i guess cycles
+    //       actually i think its because of use_got_instead_of_patches
+    //       but i should change how that works because i don't like fixup_arm64 getting called with kind=Pending
+    //use_symbol(shared.m, inst.syms[zext sym.off]) { s |
+    //    s.pledge_local = true;
+    //};
     //@println("bake % = g%", h.get(it.name), id.id);
     
     Template :: @type dest.template;
@@ -568,15 +620,16 @@ fn emit_import_ref(self: *EmitIr, it: *FrcImport, p: Placement) CRes(Qbe.Ref) = 
 } 
 
 fn find_module(self: *EmitIr, it: *FrcImport) CRes(*FrcModuleInstance) = 
-    find_module(self.program.data.cast()[][], self.shared, Incr'FrcModule.ptr_from_int(it.module));
+    find_module(self.program.data.cast()[][], self.shared, Incr'FrcModule.ptr_from_int(it.module), .None);
 
-fn find_module(self: *SelfHosted, shared: *CodegenShared, module: *FrcModule) CRes(*FrcModuleInstance) = {
+fn find_module(self: *SelfHosted, shared: *CodegenShared, module: *FrcModule, idx: ?*i64) CRes(*FrcModuleInstance) = {
     a := self.get_alloc();
     imp := shared.frc_imports&;
     ::ptr_utils(@type module[]);
     xx := imp.items().find(fn(it) => identical(it.module, module));
     (Ok = xx || {
         @assert_ne(shared.frc_imports.cap, shared.frc_imports.len, "ICE: too many imported modules. TODO: use something with pointer stability");
+        idx := @unwrap(idx, "ICE: find_module(idx=.None) on first time") return;
         h := module.header;
         syms := a.alloc(Qbe.Sym, zext h.sym.count);
         imp.push_assume_capacity(
@@ -607,6 +660,27 @@ fn find_module(self: *SelfHosted, shared: *CodegenShared, module: *FrcModule) CR
                     _ := @try(import_baked_var(self, shared, imp[imp.len - 1]&, i)) return;
                 }
             }
+        };
+        
+        // HACK to make data imports work
+        for module.data_symbols { it |
+            sym, info := it;
+            //@println("do data: % %", self.pool.get(info.name), info.comptime);
+            entry := bouba_acquire(shared, idx);
+            push_dynamic_context {
+                context(DefaultContext)[].temporary_allocator = entry.arena&;
+                id := shared.m.intern(self.pool.get(info.name));
+                if shared.m.goal.type == .JitOnly && info.comptime != 0 {
+                    lnk := temp().box(Qbe.Lnk);
+                    lnk.id = id;
+                    entry.task = (JitImport = (lnk = lnk, addr = rawptr_from_int(info.comptime)));
+                } else {
+                    arg := temp().alloc(Ty(@slice(Qbe.Sym, Str, bool)), 1);
+                    arg[0] = (id, self.pool.get(info.lib), info.weak);
+                    entry.task = (SetLibrary = arg);
+                }
+            };
+            enqueue_task(shared, entry);
         };
         
         imp[imp.len - 1]&
@@ -640,3 +714,295 @@ fn get_sym(import: *FrcImport) One(Sym) = {
     @debug_assert_eq(import.table, SYM_TABLE);
     (off = import.index)
 }
+
+// TODO: return and error instead of crashing but need to pre-fmt it because the caller doesn't have our compiler instance. 
+cached_compile_module :: fn(path: Str, opts: *BuildOptions, out_alloc: Alloc) CRes([]u8) = {
+    @assert(path.starts_with("@/"), "cached_compile_module path must start with @");
+    path := path.rest(2);
+    
+    cachepath := choose_cache_filename(path);
+    @if(enable_incremental())
+    if read_cached(out_alloc, cachepath) { header |
+        break :: local_return;
+        t := Incremental'pack_current_target();
+        if(header.arch_os.bit_and(t) != t, => break());
+        entry_dep := header.get(header.entry_dep);
+        if(header.get(entry_dep.filename) != path, => break());
+        if(!files_unchanged(header), => break());
+        if(show_backend_stats(), => @eprintln(">>> hit: %", cachepath));
+        return(Ok = (ptr = bit_cast_unchecked(*Header, *u8, header), len = header.filelen.zext()));
+    };
+    
+    out := "";
+    push_dynamic_context {
+        context(DefaultContext)[].comptime = zeroed rawptr;
+        mark := mark_temporary_storage();
+        start := timestamp();
+        vtable := init_driver_vtable();
+        src := @tfmt("""#include_std("lib/core.fr"); #include_std("%");""", path);
+        compiler := new_with_src(vtable, src, opts);
+        self := compiler.cast()[][];
+        
+        m := self.get_alloc().box(QbeModule);
+        // TODO: "need to be consistant about how to handle modules like this that don't actually compile anything"
+        init_default_module_dyn(m, vtable, (
+            os = .macos, 
+            arch = .aarch64, 
+            type = .CachedEarly,
+        ));
+        
+        c: ExportCtx = (
+            self = self, 
+            m = m,
+            writer = m.save.unwrap(),
+            types = init(self.get_alloc()),
+        );
+        
+        // TODO: making everyone remember to do this is kinda lame
+        range(0, FTy.COUNT) { i |
+            c.types&.insert(bit_cast_unchecked(u32, Type, i.trunc()), (off = i.trunc()));
+            c.writer.fty&.push(zeroed Incremental.FTy);   // skip builtin types so offsets work out
+        };
+        
+        bytes := build_the_exports_scope(c&, path);
+        bytes := self.unwrap_report_error([][]u8, bytes);
+        bytes := bytes.concat(out_alloc);
+        end := timestamp();
+        
+        // TODO
+        //drop(m);
+        //vtable'destroy_compiler(compiler);
+        //context(DefaultContext)[].comptime = zeroed rawptr;
+        //reset_temporary_storage(mark);
+        
+        // TODO: actually it's fine if you fail to write the cache, it's just slower next time
+        make_dirs_or_crash(cache_dir());
+        write_entire_file_or_crash(cachepath, bytes);
+        if(show_backend_stats(), => @eprintln(">>> save: % in %ms", cachepath, end-start));
+        
+        //return(Ok = bytes.concat(out_alloc)); // WTF
+        out = bytes;
+    };
+    //panic("unreachable didn't return from cached_compile_module"); // WTF
+    (Ok = out)
+};
+
+ExportCtx :: @struct {
+    self: *SelfHosted;
+    m: *QbeModule;
+    writer: *Writer;
+    types: HashMap(Type, One(FTy));
+};
+
+// TODO: need to include deps 
+fn build_the_exports_scope(c: *ExportCtx, start_path: Str) CRes([][]u8) = {
+    fns, names := @try(collect_fns_from_exports(c)) return;
+    // This is kinda copy-paste fusion adventure of emit_qbe_included and finish_qbe_module. 
+    
+    fr := c.self.comp();
+    shared := init(c.m, fr.get_alloc(), @as(CodegenWorker) codegen_thread_main, true);
+    funcs_done := main_thread_pump(fr, shared, fns);
+    @debug_assert(shared.no_more_functions && c.m.inlinable_but_referenced_later.len == 0);
+    each shared.queue { q |
+        q.arena&.deinit();
+    };
+    
+    finish_imports(c.writer, c.m);
+    root_scope := export_root_scope(c, fns, funcs_done&, names);
+    entry_dep := write_deps(c.writer, c.self.codemap, start_path);
+    
+    meta: Incremental.Meta = (
+        arch_os = 0x0F0F,
+        entry_dep = (off = entry_dep),
+        root_scope = root_scope,
+    );
+    bytes := c.writer.to_bytes(meta, c.m);
+    (Ok = bytes)
+}
+
+// TODO: this is kinda dumb, i shouldn't need to export everything just to give it type info it needs for shims.  
+//       should use FTy.Abi for everything that isn't explicitly exported. 
+export_root_scope :: fn(c: *ExportCtx, fns: []FuncId, funcs_done: *BitSet, names: []Str) One(FTy) = {
+    decls := Fld.list(temp());
+
+    range(0, fns.len) { i | 
+        fid, export_name := (fns[i], names[i]);
+        name := c.self.comp().fmt_fn_name(fid);
+        id := c.m.intern(name);
+        idx := c.writer.map_sym(c.m, id);
+        
+        
+        func := c.self.get_function(fid);
+        // TODO: copy paste
+        f_ty := func.finished_ty() || @panic("unfinished type for %", c.self.comp().log(func));
+        f_ty := c.self.intern_type(FnPtr = (ty = f_ty));
+        f_ty := export_type(c, f_ty);
+        
+        decls&.push(
+            name = c.writer.push(export_name),
+            type = f_ty,
+            payload = (offset = trunc idx)
+        );
+    };
+
+    symbols_exported: DynamicBitSet = (bits = list(c.writer.sym.len, temp()));
+    i := 0;
+    each c.self.functions& { func |
+        continue :: local_return;
+        fid: FuncId = i.from_index();
+        i += 1;
+        if(!funcs_done.get(i-1), => continue());
+        i := ();
+
+        name := c.self.comp().fmt_fn_name(fid);
+        id := c.m.intern(name);
+        idx := c.writer.map_sym(c.m, id);
+        symbols_exported&.set(idx);
+        
+        f_ty := func.finished_ty() || @panic("unfinished type for %", c.self.comp().log(func));
+        f_ty := c.self.intern_type(FnPtr = (ty = f_ty));
+        f_ty := export_type(c, f_ty);
+        
+        decls&.push(
+            name = c.writer.sym[idx].name,
+            type = f_ty,
+            payload = (offset = trunc idx)
+        );
+        
+        @if_let(func.body&) fn DynamicImport(it) => {
+            id := c.m.intern(c.self.comp().get_string(it.name));
+            idx := c.writer.map_sym(c.m, id);
+            symbols_exported&.set(idx);
+            decls&.push(
+                name = c.writer.sym[idx].name,
+                type = f_ty,
+                payload = (offset = trunc idx)
+            );
+        };
+    };
+    
+    range(0, c.writer.sym.len) { idx |
+        if !symbols_exported&.get(idx) {
+            decls&.push(
+                name = c.writer.sym[idx].name,
+                type = (off = FTy.RAWPTR),
+                payload = (offset = trunc idx)
+            );
+        }
+    };
+    
+    save_fields(c.writer, .Scope, decls.items())
+};
+
+// TODO: why's it think SelfHosted is undeclared if these are overload sets
+
+export_type :: fn(c: *ExportCtx, type: Type) One(FTy) = {
+    // TODO: use get_or_insert but be careful not to hold the pointer. 
+    if c.types&.get(type) { it |
+        return(it);
+    };
+    id := c.writer.fty.len;
+    out: One(FTy) = (off = trunc id);
+    c.writer.fty&.push(zeroed FTy);
+    c.types&.insert(type, out);
+    info := c.export_type_info(type);
+    c.writer.fty[id] = info;  // :FuckedLikeZig
+    out
+};
+
+export_type_info :: fn(c: *ExportCtx, type: Type) FTy = {
+    writer := c.m.save.unwrap();
+    @match(c.self.get_type(type)) {
+        fn Int(it) => (
+            tag = .Number, 
+            payload = (int = (bits = it.bit_count.trunc(), signed = it.signed)),
+        );
+        // TODO: wrong if the backing type is not a small integer
+        fn Enum(it) => {
+            args := Fld.list(it.fields.len, temp());
+            inner := export_type(c, it.raw);
+            for it.fields { it |
+                name, value := it;
+                args&.push(
+                    name = writer.push(c.self.pool.get(name)),
+                    type = inner,
+                    payload = (offset = trunc value.Small._0),
+                );
+            };
+            save_fields_fty(writer, .Enum, args.items())
+        }
+        fn Ptr(it) => (
+            tag = .Ptr, 
+            payload = (array = (
+                inner = c.export_type(it[]),
+            )),
+        );
+        fn Array(it) => (
+            tag = .Array,
+            payload = (array = (
+                inner = c.export_type(it.inner), 
+                count = it.len,
+            )),
+        );
+        fn Struct(it) => {
+            args := Fld.list(it.fields.len, temp());
+            each it.fields { it |
+                args&.push(
+                    name = writer.push(c.self.pool.get(it.name)),
+                    type = c.export_type(it.ty),
+                    payload = (offset = it.byte_offset.trunc()), 
+                );
+            };
+            tag: FTy.Tag = @if(it.is_union, .Union, @if(it.is_tuple, .Params, .Struct));
+            save_fields_fty(c.writer, tag, args.items())
+        }
+        fn Tagged(it) => {
+            args := Fld.list(it.cases.len, temp());
+            for it.cases { it |
+                name, type := it;
+                args&.push(
+                    name = writer.push(c.self.pool.get(name)),
+                    type = c.export_type(type),
+                    payload = (offset = 0), 
+                );
+            };
+            save_fields_fty(c.writer, .Tagged, args.items())
+        }
+        fn FnPtr(it) => (
+            tag = .Func,
+            payload = (func = (
+                arg = c.export_type(it.ty.arg), 
+                ret = c.export_type(it.ty.ret), 
+            )),
+        );
+        fn Named(it) => (
+            tag = .Alias,
+            payload = (alias = c.export_type(it._0)),
+        )
+        @default => @panic("TODO: export confusing type %", c.self.log_type(type));
+    }
+};
+
+// for now it's just always the toplevel identifier `exports` but eventually i should expose a more powerful api
+collect_fns_from_exports :: fn(c: *ExportCtx) CRes(Ty([]FuncId, []Str)) = {
+    value := c.self.poll_in_place(?Values, => c.self.find_in_scope(TOP_LEVEL_SCOPE, c.self.pool.insert_owned("exports"), ScopeId));
+    value := @try(value) return;
+    value := value || @panic("missing exports");
+    s := ScopeId.assume_cast(value&)[];
+    
+    scope := c.self.scopes[s].const_lookup&;
+    fns := FuncId.list(c.self.get_alloc());
+    names := Str.list(c.self.get_alloc());
+    each c.self.scopes[s].const_lookup& { name, _ | 
+        value := c.self.poll_in_place(?Values, => c.self.find_in_scope(s, name, FuncId));
+        value := @try(value) return;
+        value := value.unwrap();
+        fid := FuncId.assume_cast(value&)[];
+        
+        push(fns&, fid);
+        push(names&, c.self.pool.get(name));
+    };
+    (Ok = (fns.items(), names.items()))
+};
+
+#use("@/lib/collections/bit_set.fr");

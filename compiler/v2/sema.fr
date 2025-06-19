@@ -651,16 +651,26 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
 // adds DynamicImport to func.impl
 fn create_import_body(self: *SelfHosted, func: *Func, fid: FuncId, lib_name: Symbol, weak: bool) CRes(void) = {
     @err_assert(func.body&.is(.Empty), "#import function must not have a body") return;
+    func.set_flag(.BodyIsSpecial);
+    info := self.dyn_import(func.name, lib_name, weak);
+    if info.comptime != 0 {
+        self.put_jitted_import(fid, rawptr_from_int info.comptime);
+    } else {
+        @try(self.create_jit_shim(fid)) return;
+    };
+    func.body = (DynamicImport = info);
+    .Ok
+}
+
+fn dyn_import(self: *SelfHosted, name: Symbol, lib_name: Symbol, weak: bool) DynamicImport = {
     handle2 := self.comptime_libraries&.get(lib_name);
     is_libc := lib_name == Flag.libc.ident(); 
-    name := self.pool.get(func.name);
+    name_s := self.pool.get(name);
     {
     lib_name := lib_name;
     while => handle2 { handle |
-        if handle.get(name) { addr |
-            self.put_jitted_import(fid, addr);
-            func.body = (DynamicImport = (name = func.name, lib = lib_name, comptime = addr.int_from_rawptr(), weak = weak));
-            return(.Ok);
+        if handle.get(name_s) { addr |
+            return(name = name, lib = lib_name, comptime = addr.int_from_rawptr(), weak = weak);
         };
         handle2 = .None;
         // :MultiDylibLibc HACK
@@ -675,9 +685,7 @@ fn create_import_body(self: *SelfHosted, func: *Func, fid: FuncId, lib_name: Sym
     };
     // :AssumeDones
     // TODO: how to catch if it actually doesn't exist or they typo-ed the #import string.
-    func.body = (DynamicImport = (name = func.name, lib = lib_name, comptime = 0, weak = weak));
-    @try(self.create_jit_shim(fid)) return;
-    .Ok
+    (name = name, lib = lib_name, comptime = 0, weak = weak)
 }
 
 ::tagged(ResultType);

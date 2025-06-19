@@ -2,12 +2,13 @@
 
 Futex :: import("@/lib/sys/sync/futex.fr");
 ENABLE_ENABLE_TRACY :: get_environment_variable("FRANCA_TRACY").is_some();
+#use("@/lib/collections/bit_set.fr");
 
 // this will always emit everything callees reachable from `fns` (so no jit-shims will remain at the end). 
 // so it's suitable for AOT compilation, but you can still use it for JIT if you want. 
 // since there will be no shims, it's safe to use this when you want to set comptime=null 
 // before calling the function (like for drivers in `run_franca_file`). 
-fn main_thread_pump(comp: CompCtx, shared: *CodegenShared, fns: []FuncId) void = {
+fn main_thread_pump(comp: CompCtx, shared: *CodegenShared, fns: []FuncId) BitSet = {
     a      := comp.get_alloc();
     env    := comp.get_comptime_env();
     opts   := comp.get_build_options();
@@ -25,7 +26,6 @@ fn main_thread_pump(comp: CompCtx, shared: *CodegenShared, fns: []FuncId) void =
         //comp.get_function(f).set_flag(.Export);
     };
     
-    #use("@/lib/collections/bit_set.fr");
     funcs_done: BitSet = empty();
     funcs_seen: BitSet = empty();
     work_stack := FuncId.list(a);
@@ -35,6 +35,7 @@ fn main_thread_pump(comp: CompCtx, shared: *CodegenShared, fns: []FuncId) void =
     };
     work_stack&.push_all(fns);
     pending := FuncId.list(a);
+    enable_tracy :: @if(ENABLE_ENABLE_TRACY, ENABLE_TRACY, false);
     
     while => work_stack.len != 0 {
         continue :: local_return;
@@ -60,7 +61,7 @@ fn main_thread_pump(comp: CompCtx, shared: *CodegenShared, fns: []FuncId) void =
         for func.callees { f |  
             if !funcs_done&.get(f.to_index().zext()) {
                 if work_stack.items().index_of(f&) { i |
-                    if first_time {
+                    if first_time && !enable_tracy {
                         // another function has had the same callee before, still pull it forward, we want to let both inline it. 
                         // only do this the first time processing the caller to avoid cycles. 
                         work_stack&.unordered_remove(i);
@@ -89,14 +90,14 @@ fn main_thread_pump(comp: CompCtx, shared: *CodegenShared, fns: []FuncId) void =
         current := work_stack&.pop().unwrap();
         @assert_eq(current, fid, "order messed up");
         for pending { c |  // HACK
-            if !funcs_done&.get(c.to_index().zext()) {
+            if !funcs_done&.get(c.to_index().zext()) && (!enable_tracy || !work_stack.items().contains(c&)) {
                 work_stack&.push(c);
             };
         };
         pending&.clear();
         funcs_done&.set(fid.to_index().zext(), a);
         for func.mutual_callees { c |
-            if !funcs_done&.get(c.to_index().zext()) {
+            if !funcs_done&.get(c.to_index().zext()) && (!enable_tracy || !work_stack.items().contains(c&)) {
                 work_stack&.push(c);
             };
         };
@@ -120,6 +121,14 @@ fn main_thread_pump(comp: CompCtx, shared: *CodegenShared, fns: []FuncId) void =
     };
     
     shared.join_codegen_thread();
+    
+    if !shared.threaded {
+        shared.m.emit_suspended_inlinables();
+    } else {
+        @debug_assert_eq(shared.m.inlinable_but_referenced_later.len, 0, "this happens on the other thread so it works with apple's MAP_JIT");
+    };
+    
+    funcs_done
 }
 
 // TODO: factor out this so the other one can call it.  
@@ -460,7 +469,7 @@ fn get_log_types(comp: CompCtx, fid: FuncId) Str = {
 }
 
 fn join_codegen_thread(shared: *CodegenShared) void = {
-    @if(!shared.threaded) return();
+    @if(!shared.threaded || shared.no_more_codegen == 1) return();
     shared.no_more_functions = true;
     while => shared.no_more_codegen == 0 {
         Futex'wake(shared.waiting_for_bouba&, 1);

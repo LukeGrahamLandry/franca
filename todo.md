@@ -207,6 +207,27 @@ tho rn it's a bit order specific so the way import_frc works is probably a valid
 so maybe that whole system needs a bit of a rework. like maybe waiting and do all baking at the end would be less creepy.
 - if you compile with -debug-info, dbgloc instructions have offsets into the source codemap which will be wrong if moved to another module. 
 
+- non-u32 enums
+- don't output frontend type info for internal functions
+- type names
+- unify imported types
+- unmangled function names
+- non-i64 @tagged. doesn't really matter because i don't allow it anyway but should assert on it just in case. 
+- import_module 
+  - don't hardcode `exports` as a magic symbol
+  - actually cache the file 
+  - include deps and chech thier hashes
+  - include build options somehow
+  - add back !did_regalloc check
+  - the things where i just assume something is a One(Sym) feels kinda bad. should have a special tag somewhere maybe? 
+  - be able to save both before and after regalloc. need before so it can cross compile (works) and inline (eventuall). 
+    but regalloc is the slow part of the backend so it's sad to do that everytime. 
+  - be able to compile modules in parallel. right now it's much slower the first time but helps if you're compiling many programs that use the same thing. 
+  - needing to explicitly declare which functions you're exporting is really annoying
+  - now that you'll be having more modules, you really want to cache the normal comptime stuff automatically. 
+    like you can't have every compilation unit eat 15ms on @syscall, @match, etc
+  - use the multiple scopes thing
+
 ## Unfinished Examples
 
 - epicycles: make it actually trace the correct path

@@ -43,16 +43,28 @@ fn include(src: Str) ScopeId #fold = {
     include(fr, src)
 }
 
-fn enable_franca_ffi(c: *Ctx, fr: CompCtx) void = {
-    c.franca = (Some = fr);
-    c.preserve_franca_env = true;
-}
-
 // GARBAGE: for now all the import_c stuff is very experimental. the api will eventually get less painful. 
 fn include(fr: CompCtx, c_source: Str) ScopeId = {
-    c := init_for_include(fr);
-    do_include(fr, c_source, c)
+    //c := import_c'init(fr);
+    //bytes := import_c'compile(fr.get_alloc(), c_source, c);
+    
+    // TODO: need to think about how to unify types
+    init := bit_cast_unchecked(rawptr, @FnPtr(fr: CompCtx) *C.Compile.Ctx, ::@as(rawptr) ::import_c'init);
+    compile := bit_cast_unchecked(rawptr, @FnPtr(out_alloc: Alloc, c_source: Str, c: *C.Compile.Ctx) []u8, ::@as(rawptr) ::import_c'compile);
+    c := init(fr);
+    bytes := compile(fr.get_alloc(), c_source, c);
+    result := fr'vtable'import_frc(fr.data, bytes);
+    or result { err |
+        fr.report_error(err)
+    }
 }
+
+import_c :: import_module("@/examples/import_c/ffi.fr");
+
+exports :: Type.scope_of(@struct {
+    init: (@Fn(fr: CompCtx) *C.Compile.Ctx) : init_for_include;
+    compile: (@Fn(out_alloc: Alloc, c_source: Str, c: *C.Compile.Ctx) []u8) : compile_to_module;
+});
 
 fn init_for_include(fr: CompCtx) *C.Compile.Ctx = {
     m := fr.get_alloc().box(QbeModule);
@@ -60,18 +72,18 @@ fn init_for_include(fr: CompCtx) *C.Compile.Ctx = {
     // TODO: "need to be consistant about how to handle modules like this that don't actually compile anything"
     init_default_module_dyn(m, fr.vtable, (arch = query_current_arch(), os = query_current_os(), type = .CachedEarly));
     // "todo: make this work threaded"
-    ctx: *C.Compile.CodegenShared = init(m, general_allocator(), C.Compile.codegen_thread_main, false);
+    ctx: *C.Compile.CodegenShared = init(m, general_allocator(), zeroed C.Compile.CodegenWorker /*C.Compile.codegen_thread_main */, false);
     C'init_ctx(c, m);
     c.emitter = (Some = ctx);
     c.enqueue_task = bit_cast_unchecked(@type fr.vtable.enqueue_task, @type c.enqueue_task, fr.vtable.enqueue_task);
-    c.enable_franca_ffi(fr);
+    c.preserve_franca_env = true;
     range(0, FTy.COUNT) { _ |
         m.save.unwrap()[].fty&.push(zeroed FTy);   // skip builtin types so offsets work out
     };
     c
 }
 
-fn do_include(fr: CompCtx, c_source: Str, c: *C.Compile.Ctx) ScopeId = {
+fn compile_to_module(out_alloc: Alloc, c_source: Str, c: *C.Compile.Ctx) []u8 = {
     writer := c.m.save.unwrap();
     mark := mark_temporary_storage();
     result := catch_call(c, One(FTy)) {
@@ -91,6 +103,7 @@ fn do_include(fr: CompCtx, c_source: Str, c: *C.Compile.Ctx) ScopeId = {
         args := Fld.list(c.arena);
         sc := c.scope;
         each sc.vars& { name, value |
+            ::ptr_utils(@type value.type_def[]);
             if !value.type_def.is_null() {
                 type := export_type(c, value.type_def, false);
                 args&.push(
@@ -100,6 +113,8 @@ fn do_include(fr: CompCtx, c_source: Str, c: *C.Compile.Ctx) ScopeId = {
                 );
             }
             obj := value.var;
+            ::ptr_utils(@type obj[]);
+            // TODO: don't export the fake alloca()
             if !obj.is_null() {
                 sym := map_sym(writer, c.m, obj.global_symbol.unwrap());
                 // TODO: can't just skip when !obj.is_definition because i still need to know the types of imports, 
@@ -131,20 +146,18 @@ fn do_include(fr: CompCtx, c_source: Str, c: *C.Compile.Ctx) ScopeId = {
     b := writer.to_bytes(meta, c.m);
     
     // We're done with all the c compiler state. Copy out the compiled module and then free everything. 
-    bytes := concat(b, fr.get_alloc());
+    bytes := concat(b, out_alloc);
+    write_entire_file_or_crash("target/a.frc", bytes);
     drop(c.m);
     reset_temporary_storage(mark);
-    
-    result := fr'vtable'import_frc(fr.data, bytes);
-    or result { err |
-        fr.report_error(err)
-    }
+    bytes
 }
 
 #use("@/backend/incremental.fr");
 
 fn export_type(c: *Ctx, type: *CType, decay_arrays: bool) One(FTy) = {
     writer := c.m.save.unwrap();
+    ::enum(C.Types.TypeKind);
     use_cache := !(decay_arrays && type.kind == .TY_ARRAY);
     if(type.franca != 0 && use_cache, => return(off = type.franca));
     nominal := @is(type.kind, .TY_STRUCT, .TY_UNION, .TY_ENUM);
@@ -176,7 +189,6 @@ fn export_type(c: *Ctx, type: *CType, decay_arrays: bool) One(FTy) = {
 }
 
 fn export_type_info(c: *Ctx, type: *CType, decay_arrays: bool) FTy = {
-    fr := c.franca.unwrap();
     is_int := @is(type.kind, .TY_CHAR, .TY_SHORT, .TY_INT, .TY_LONG);
     if(is_int, => return(
         tag = .Number, 
@@ -186,7 +198,7 @@ fn export_type_info(c: *Ctx, type: *CType, decay_arrays: bool) FTy = {
     writer := c.m.save.unwrap();
     @match(type.kind) {
         fn TY_ENUM() => {
-            args := Fld.list(type.param_names.len, fr.get_alloc());
+            args := Fld.list(type.param_names.len, c.arena);
             enumerate type.param_names { i, it |
                 // this wont work if it was declared in an inner scope, 
                 // but i guess then you wouldn't be able to export it anyway. 
@@ -226,7 +238,7 @@ fn export_type_info(c: *Ctx, type: *CType, decay_arrays: bool) FTy = {
                     @if(type.params.len == 0) => (off = @if(type.is_variadic, FTy.VARIADIC, FTy.VOID));
                     @if(type.params.len == 1 && !type.is_variadic) => c.export_type(type.params[0], true);
                     @else => {
-                        args := Fld.list(type.params.len, fr.get_alloc());
+                        args := Fld.list(type.params.len, c.arena);
                         for type.params { par | 
                             args&.push(type = c.export_type(par, true));
                         };
@@ -262,3 +274,5 @@ C :: import("@/examples/import_c/lib.fr");
 Ctx :: C.Compile.Ctx;
 Obj :: C.Compile.Obj;
 CType :: C.Types.CType;
+
+#include_std("backend/lib.fr");

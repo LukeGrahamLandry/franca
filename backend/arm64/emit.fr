@@ -35,6 +35,11 @@ fn emit_func_arm64(f: *Qbe.Fn) void = {
 fn fixup_arm64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_reloc: *?Fixup) void = {
     address := symbol.jit_addr;
     local  := symbol.kind == .Local;
+    if !local {
+        ::enum(@type symbol.kind);
+        @debug_assert(!symbol.pledge_local, "trying to fixup an import (%, %) but pledge_local=true", symbol.kind, symbol.name);
+    };
+    
     @match(fixup.type) {
         fn Call(it) => {
             if self.debug["T".char()] {
@@ -88,7 +93,7 @@ fn fixup_arm64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
                 inst[0] = i_page;
                 inst[1] = i_off;
             } else {
-                @assert_eq(it.increment, 0, "TODO: [arm64/emit.fr/fixup_arm64] offset from dynamic import %", symbol.name);
+                @assert_eq(it.increment, 0, "TODO: [arm64/emit.fr/fixup_arm64] offset from dynamic import %+%", symbol.name, it.increment);
                 new_got_reloc[] = load_from_got(self, symbol, it.r, inst, address).or_else(=> new_got_reloc[]);
                 it.got_load = true;
             };
@@ -367,20 +372,14 @@ fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
             }
         };
     };
-    if self.m.goal.type == .Relocatable && c.bits() != 0 { // :ArmAddendReloc
-        check :: fn(cond) => @assert(cond, "TODO: loadaddr of % with offset %", self.m.str(c.sym), c.bits());
-        check(c.bits() > 0);
-        self.inst(add_im(Bits.X64, @as(u5) dest_reg, @as(u5) dest_reg, @as(u12) @as(i64) c.bits(), 0));
-        if c.bits() >= 4096 {
-            check(c.bits() < 4096.shift_left(12));
-            self.inst(add_im(Bits.X64, @as(u5) dest_reg, @as(u5) dest_reg, @as(u12) @as(i64) c.bits().shift_right_logical(16), 1));
-        }
+    if self.m.goal.type == .Relocatable { // :ArmAddendReloc
+        apply_inc(self, dest_reg, c.bits(), self.m.str(c.sym));
     };
 }
 
 fn immediate_fixup_got(self: *ArmState, dest_reg: i64, inc: i64, symbol: *SymbolInfo) void = {
     patch_addr := self.m.segment_address(.Code, self.m.current_offset(.Code));
-    patch: Fixup = (patch_at = patch_addr, type = (InReg = (r = dest_reg, increment = inc, got_load = true)));
+    patch: Fixup = (patch_at = patch_addr, type = (InReg = (r = dest_reg, increment = 0, got_load = true)));
     if self.m.goal.type != .JitOnly { 
         push_fixup(self.m, symbol, patch); 
     };
@@ -391,6 +390,18 @@ fn immediate_fixup_got(self: *ArmState, dest_reg: i64, inc: i64, symbol: *Symbol
     fixup_arm64(self.m, symbol, patch&, new_got_slot&);
     if new_got_slot { it |
         push_fixup(self.m, symbol, it);
+    };
+    apply_inc(self, dest_reg, inc, symbol.name);
+}
+
+fn apply_inc(self: *ArmState,  dest_reg: i64, inc: i64, debug_name: Str) void = {
+    check :: fn(cond) => @assert(cond, "TODO: loadaddr of % with offset %", debug_name, inc);
+    if(inc == 0, => return());
+    check(inc >= 0);
+    self.inst(add_im(Bits.X64, @as(u5) dest_reg, @as(u5) dest_reg, @as(u12) @as(i64) inc.bit_and(1.shift_left(12)-1), 0));
+    if inc >= 4096 {
+        check(inc < 4096.shift_left(12));
+        self.inst(add_im(Bits.X64, @as(u5) dest_reg, @as(u5) dest_reg, @as(u12) @as(i64) inc.shift_right_logical(12), 1));
     };
 }
 

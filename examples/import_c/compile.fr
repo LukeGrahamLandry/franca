@@ -199,8 +199,6 @@ Ctx :: @rec @struct {
     
     preserve_franca_env: bool;
     franca_env: Qbe.Ref;
-    franca: ?CompCtx;  // TODO: remove
-    franca_namespace: ScopeId;  // TODO: remove
     emitter: ?*CodegenShared;
     enqueue_task: @FnPtr(*CodegenShared, *CodegenEntry) void;
     
@@ -795,6 +793,7 @@ fn array_dimensions(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *CType #onc
     tok   = c.skip(tok, "]");
     ty    = c.type_suffix(rest, tok, ty);
 
+    ::if(*CType);
     if ty.kind == .TY_VLA || !c.is_const_expr(expr) {
         c.vla_of(ty, expr)
     } else {
@@ -2073,6 +2072,7 @@ fn global_variable(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, first_d
         prev := c.find_var(ty.name_pos);
         prev_var := Obj.ptr_from_int(0);
         if prev { prev |
+            ::ptr_utils(@type prev.var[]);
             if !prev.var.is_null() {
                 prev_var = prev.var;
                 prev_is_tentative = prev.var.is_tentative;
@@ -2127,6 +2127,7 @@ fn declare_builtin_functions(c: *Ctx) void = {
 fn parse(c: *Ctx, tok: *Token) *Obj = {
     c.declare_builtin_functions();
     //c.speculate = true;
+    ::if(*Token);
     while => tok.kind != .TK_EOF {
         attr := VarAttr.zeroed();
         basety := c.declspec(tok&, tok, (Some = attr&));
@@ -2135,6 +2136,7 @@ fn parse(c: *Ctx, tok: *Token) *Obj = {
         } else {
             expect_var := !equal(tok, ";");
             ty := c.declarator(tok&, tok, basety);
+            ::enum(@type ty.kind);
             if ty.kind == .TY_FUNC {
                 prev := c.f;   // :TopLevelFunction
                 tok := c.function(tok, basety, attr&, ty);
@@ -2182,7 +2184,8 @@ ParseFn1   :: @FnPtr(c: *Ctx, rest: **Token, tok: *Token) *Node;
 ParseFn2   :: @FnPtr(c: *Ctx, rest: **Token, tok: *Token, node: *Node) *Node;
 ParseRule :: @struct(prefix: ParseFn1 = N1, infix: ParseFn2 = N2, prec := Prec.Invalid, op := NodeKind.ND_INVALID);
 
-rules :: @static import("@/lib/collections/enum_map.fr")'EnumMap(Tokens.TokenKind, ParseRule);
+RulesTable :: import("@/lib/collections/enum_map.fr")'EnumMap(Tokens.TokenKind, ParseRule);
+rules :: @static RulesTable;
 
 // not just a '::' here because it needs to happen after the dylib is initilized or we think there are missing functions. 
 fn comptime_init_rules_table() void #use(Tokens) = {
@@ -2272,6 +2275,7 @@ fn comptime_init_rules_table() void #use(Tokens) = {
 fn parse_expr(c: *Ctx, rest: **Token, tok: *Token, prec: Prec) *Node = {
     @if(SPAM) @println("Prefix: % %", tok.str(), tok.kind);
 
+    ::comptime_init_rules_table();
     rules := rules;  // TODO: shouldn't need to do this but otherwise if can't call the function ?? 
     rule := rules.index(tok.kind);
     node := (rule.prefix)(c, rest, tok);

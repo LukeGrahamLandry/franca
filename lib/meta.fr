@@ -274,6 +274,7 @@ fn ClearOnAotBake($T: Type) Type = {
         it: T;
         // this forces TypeMeta.contains_pointers so the bake overload get called even if T is a value type
         _hack := @static(u8);  
+
     };
     
     fn bake_relocatable_value(self: *Self) Slice(BakedEntry) = {
@@ -310,4 +311,23 @@ fn create_asm_func(template: FuncId, arm64: RawList(u32), amd64: RawList(u8)) Fu
     func.set_flag(.EnsuredCompiled);
     
     template
+}
+
+fn import_module(path: Str) ScopeId = {
+    fr := current_compiler_context();
+    opts := get_build_options();
+    no_cache := opts.no_cache || IS_BOOTSTRAPPING;
+    if no_cache {
+        // The reference implementation just loads the new module in the same CompCtx. 
+        s := import(path);
+        s := const_eval(ScopeId)(@{ @[@literal s].exports });
+        return s;
+    };
+    // else, start a new CompCtx, compile the imported module there, export it as frc_inlinable and import that back into the original CompCtx. 
+    
+    s := fr'vtable'cached_compile_module(path, opts, ast_alloc());
+    s := s.or(fn(err) => fr.report_error(err));
+    s := fr'vtable'import_frc(fr.data, s);
+    s := s.or(fn(err) => fr.report_error(err));
+    s
 }
