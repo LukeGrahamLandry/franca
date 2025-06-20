@@ -31,6 +31,10 @@ per process but compiler/tests.fr uses a bunch of compiler instances and was gro
     also tried always skipping a few from the bottom and not tracking those in min because like at least the bottom u64 is 
     always used because it's for physical registers. but also not helpful. can't decide if i care enough to try a real sparse bit set. 
     is there anything better than just hashset of numbers? 
+- the problem of how to unify identity of types for import_module was shockingly easy to dodge. 
+  only care about the signetures of the exported functions so just evaluate them on both sides and stomp over the imported types. 
+  the frontend typeinfo in the .frc file is only useful when it's like import_c generated from another language so 
+  there's no existing source of truth for it. 
     
 ## (Jun 18)
 

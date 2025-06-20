@@ -313,22 +313,54 @@ fn create_asm_func(template: FuncId, arm64: RawList(u32), amd64: RawList(u8)) Fu
     template
 }
 
+// 
+// `path` is a string like you would pass to import(), the scope it resolves to must have a variable called `exports` 
+// of type ScopeId containing FuncId constants. The scope you get back from `import_module("@/foo.fr")` is equivalent to 
+// what you'd get from `import("@/foo.fr").exports`, except that you're explictly declaring that you don't care about 
+// any side effects from running the comptime code required to compile the imported functions. So instead of the new 
+// code loading in the same CompCtx as calls this import_module(), it can be done in a new CompCtx and saved in a .frc 
+// file to be reused without recompiling (if none of the contributing files have changed). 
+//
 // TODO: reuse if the same path is used from multiple places in the same compiler instance
 fn import_module(path: Str) ScopeId = {
     fr := current_compiler_context();
     opts := get_build_options();
     no_cache := opts.no_cache || IS_BOOTSTRAPPING;
+    exports0 := const_eval(ScopeId)(@{ @[@literal path].import().exports });
     if no_cache {
         // The reference implementation just loads the new module in the same CompCtx. 
-        s := import(path);
-        s := const_eval(ScopeId)(@{ @[@literal s].exports });
-        return s;
+        return exports0;
     };
     // else, start a new CompCtx, compile the imported module there, export it as frc_inlinable and import that back into the original CompCtx. 
     
-    s := fr'vtable'cached_compile_module(path, opts, ast_alloc());
-    s := s.or(fn(err) => fr.report_error(err));
-    s := fr'vtable'import_frc(fr.data, s);
-    s := s.or(fn(err) => fr.report_error(err));
-    s
+    exports1 := {
+        s := fr'vtable'cached_compile_module(path, opts, ast_alloc());
+        s := s.or(fn(err) => fr.report_error(err));
+        s := fr'vtable'import_frc(fr.data, s);
+        s := s.or(fn(err) => fr.report_error(err));
+        s
+    };
+    
+    // The FrcModule includes type information but i don't have a way to link them to the corresponding types in our CompCtx. 
+    // So the hacky solution for now is to load only the signetures from our version of the exports scope and just stomp 
+    // it over the signetures of the imported functions. This avoids any complicated nominal-ness of types and still lets 
+    // you call the imported functions without casting through a rawptr every time. 
+    for get_constants(exports0) { name |
+        fid0  := get_constant(FuncId, exports0, name).unwrap();
+        fid1  := get_constant(FuncId, exports1, name).unwrap();
+        func0 := get_function_ast(fid0, true, true, true, false);
+        func1 := get_function_ast(fid1, true, true, true, false);
+        
+        func1.finished_arg = func0.finished_arg;
+        func1.finished_ret = func0.finished_ret;
+        func1.ret = func0.ret;
+        @debug_assert_eq(func0.arg.bindings.len, func1.arg.bindings.len);
+        range(0, func0.arg.bindings.len) { i |
+            func1.arg.bindings[i].ty = func0.arg.bindings[i].ty;
+        };
+        
+        func0.body = (Redirect = fid1);  // for good luck
+    };
+    
+    exports1
 }
