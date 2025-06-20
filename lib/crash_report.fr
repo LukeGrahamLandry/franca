@@ -74,6 +74,7 @@ catch_signals :: fn(handle: SignalHandler) void = {
     };
 };
 
+LOOPING :: @static(i64) 0;
 show_trace_and_exit :: fn(s: i64, info: *SigInfo, ctx: *UContext) void = {
     ::enum(SignalNum);
     ::@assert_eq(0, offset_of(Arm64MachineContext, Fields(Arm64MachineContext).neon).mod(16), "fp unaligned");
@@ -82,7 +83,6 @@ show_trace_and_exit :: fn(s: i64, info: *SigInfo, ctx: *UContext) void = {
     if STASH_ENVIRONMENT {
         set_dynamic_context(ENV_STASH[]);
     };
-    LOOPING :: @static(i64) 0;
     if LOOPING[] == 2 {
         scary_log("... give up\n");
         Syscall'exit(1);
@@ -115,19 +115,27 @@ show_trace_and_exit :: fn(s: i64, info: *SigInfo, ctx: *UContext) void = {
     ctx := context(DefaultContext);
     @eprintln("(signal = %, addr = %, value = %, code = %, ip = %)", info.signal_number, info.addr, info.value, info.code, ip);
     
-    push_zeroed_dynamic_context {
-        a: ArenaAlloc = init(page_allocator, 16000);
-        context(DefaultContext)[].temporary_allocator = a&;
-        context(DefaultContext)[].general_allocator = temp();
-        context(DefaultContext)[].panic_hook = fn(msg) = {
-            scary_log("panicked while handling a signal\n");
-            scary_log(msg);
-            report_backtrace_safe(trace_start(), 0.rawptr_from_int());
-            Syscall'exit(1)
-        };
+    push_emergency_dynamic_environment {
         report_backtrace(fp, ip);
     };
     Syscall'exit(1);
+};
+
+fn push_emergency_dynamic_environment($body: @Fn() void) void = {
+    push_zeroed_dynamic_context { // restores .os from a static 
+        a: ArenaAlloc = init(page_allocator, 16000);  // :leak
+        context(DefaultContext)[].temporary_allocator = a&;
+        context(DefaultContext)[].general_allocator = temp();
+        context(DefaultContext)[].panic_hook = panicked_while_handling_a_signal;
+        body();
+    };
+}
+
+panicked_while_handling_a_signal :: fn(msg: Str) Never = {
+    scary_log("panicked while handling a signal\n");
+    scary_log(msg);
+    report_backtrace_safe(trace_start(), 0.rawptr_from_int());
+    Syscall'exit(1)
 };
 
 LocationResolver :: @FnPtr(userdata: rawptr, ip: rawptr) ?Str; 

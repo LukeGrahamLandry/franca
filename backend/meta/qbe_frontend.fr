@@ -74,7 +74,7 @@ fn main() void = {
     };
     @assert(!args.cc || INCLUDE_MY_C_COMPILER, "didn't INCLUDE_MY_C_COMPILER can't -cc");
     @assert_le(int(args.c) + int(args.r) + int(args.frc), 1, "conflicting output type");
-    init_default_module(global_module, (type = goal, os = os, arch = arch));
+    Qbe'backend'init_module(global_module, (type = goal, os = os, arch = arch));
     set_debug_types(global_module, args.d, true);
     if args.l {
         @panic("TODO: update for Dat2");
@@ -103,13 +103,13 @@ fn main() void = {
         header: *Qbe.Incremental.Header = check(src);
         t := Qbe'Incremental'pack_target(m.goal.arch, m.goal.os);
         @assert_eq(header.arch_os.bit_and(t), t, "% was compiled for different target", inpath);
-        compile_all_symbols(header, m);
+        Qbe'backend'load_all(header, m);
     } else {
         handle_data :: fn(d: Qbe.Dat2) void = {
-            global_module.emit_data(d);
+            global_module.Qbe'backend'compile_dat(d);
         };
         parse :: import("@/backend/meta/parse.fr").parse_top_level;
-        res := parse(global_module, src, handle_data, Qbe.run_qbe_passes, args.cc);
+        res := parse(global_module, src, handle_data, Qbe.backend.compile_fn, args.cc);
         if res&.is_err() {
             panic(res.Err);
         };
@@ -121,6 +121,7 @@ fn main() void = {
         if args.cc {
             c := Compile.Ctx.zeroed();
             init_ctx(c&, m);
+            c.enqueue_task = Qbe.backend.enqueue;
             objs := catch_call(c&, *Compile.Obj) {
                 // TODO: this way of doing it means you lose location information which sucks
                 tok := c&.tokenize_string(">>>driver", res.Ok&.items());
@@ -138,16 +139,16 @@ fn main() void = {
                     if obj.is_function {
                         f := obj.f;
                         fill_lnk(f.lnk&, obj, m);
-                        Qbe'run_qbe_passes(f);
+                        Qbe'backend'compile_fn(f);
                     } else {
                         for translate_data(m, obj) { dat |
-                            m.emit_data(dat);
+                            m.Qbe'backend'compile_dat(dat);
                         }
                     }
                 }
             }
         };
-        m.emit_suspended_inlinables();
+        m.Qbe'backend'compile_suspended();
     };
     
     chunks := {global_module[].target.finish_module}(global_module);

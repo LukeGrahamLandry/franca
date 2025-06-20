@@ -15,6 +15,28 @@ notably those are all things to aren't going to change if you're just working on
     i just don't have a unique syntax for it. 
   - once again reminded that i really really need to replace the order dependent explicit generic instantiations thing. 
     it's so tedious any time you change anything. sucks so much. 
+- trying to use some backend functions through import_module and some normally, super doesn't work. 
+  it thinks there are conflicting overloads or multiple versions of the same type. 
+  i think @rec is a problem, the new CompCtx is doing QbeModule twice with different values, in different scopes.
+  one in the import scope and one in TOP_LEVEL_SCOPE. ohhhh fuck, it's because i #include_std in cached_compile_module, 
+  but other files in the backend #use backend/lib.fr and i don't deduplicate between those. worked for import_c/ffi.fr 
+  because the rest of import_c never imports that file. but that's fine, the only reason i was doing #include_std instead of 
+  import() was because import_c depends on the backend and the backend expected itself to be at top level but now it will work in a scope. 
+  not going to bother with a sane error message because the whole point of this is to get rid of #include_std 
+- maybe i want a thing that means #use+#reexport+(make the target #use myself as well), that would make it less 
+  painful to replace all the #include_std, cause it would mean a similar thing: go load this file such that we can 
+  see each other's names. but doing that through a ScopeId indirection would mean you could still access it with import(), 
+  which include_std doesn't let you do (which is why i can only deduplicate within #include_std OR #use but not between them). 
+- brief interlude; The thing where i ctrl-c my make file and it leaves a garbage process spending 100% of a core in "system" 
+  is so annoying. the only thing i can think of is maybe i fucked up my signal handler when i tried to make 
+  stack tracing use debug info instead of for_symbols, but it happens even without FRANCA_BACKTRACE,
+  oh it's definitly my shitty message reminding you the envvar exists but now doing any syscalls needs a dynenv. yep.
+- (back to import_module of backend). it's trying to emit the quicksort wrapper that returns a funcid, that's odd. 
+  it gets past that if marked #fold but it really shouldn't have been on the work_stack because it could only have been called at comptime. 
+- ok works for calling try_fold through the import_module, comically takes 60% longer the first time and 10ms longer even when cached. 
+  but that makes sense, doing it for just that tiny function is a waste. 
+
+TODO: crash: `FRANCA_NO_CACHE=true ./q.out examples/import_c/cc.fr examples/import_c/test/hello.c`
 
 ## (Jun 19)
 

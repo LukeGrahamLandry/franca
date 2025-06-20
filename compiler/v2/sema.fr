@@ -484,7 +484,7 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
                         label_ty = self.intern_type(Label = ret_ty);
                     };
                     val := self.to_values(LabelId, ret);
-                    @check(self.save_const_values(return_var, val, label_ty, func.loc)) return;
+                    @try(self.save_const_values(return_var, val, label_ty, func.loc)) return;
                     f.ret_label = (Some = ret);
                 };
             };
@@ -1869,7 +1869,7 @@ fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, request
         // Note: not renumbering on the function. didn't need to clone it.
         self.renumber_expr(expr_out, (Some = (old_ret_var, new_ret_var)));
         value := self.to_values(LabelId, ret_label);
-        @check(self.save_const_values(new_ret_var, value, label_ty, loc)) return;
+        @try(self.save_const_values(new_ret_var, value, label_ty, loc)) return;
     };
     
     @check(self.compile_expr(expr_out, requested)) return;
@@ -2256,7 +2256,7 @@ fn bind_const_arg(self: *SelfHosted, o_f: FuncId, arg_name: Var, arg_value: Valu
             };
         };
     };
-    @check(self.save_const_values(arg_name, arg_value, arg_ty, loc)) return;
+    @try(self.save_const_values(arg_name, arg_value, arg_ty, loc)) return;
     func.arg&.remove_named(arg_name, self.get_alloc());
 
     // If it was fully resolved before, we can't leave the wrong answer there.
@@ -3182,7 +3182,12 @@ fn hoist_constants(self: *SelfHosted, body: []FatStmt) Maybe(void) #once = {
             fn DeclFunc(func) => {
                 // TODO: aren't the `@check`s below a problem because if they suspend you're totally fucked cause the function's gone but you might not know its overload set or whatever? 
                 fid := self.add_function(func[][]);
+                
+                // just incase someone aliased the pointer
+                @debug_assert(!func[].get_flag(.OnceConsumed));
+                func[].set_flag(.OnceConsumed);
                 stmt.stmt = .Noop;
+                
                 func := self.get_function(fid);
                 overload_out: ?OverloadSet = .None;
                 
@@ -3228,7 +3233,7 @@ fn get_or_create_overloads(self: *SelfHosted, name: Symbol, scope: ScopeId, loc:
             inline_cache = Ty(OverloadKey, FuncId).zeroed(),
         );
         os_value := self.to_values(OverloadSet, i);
-        @check(self.save_const_values(var, os_value, self.get_or_create_type(OverloadSet), loc)) return;
+        @try(self.save_const_values(var, os_value, self.get_or_create_type(OverloadSet), loc)) return;
         i
     } else {
         overloads := @check(self.find_const(var, self.get_or_create_type(OverloadSet).want())) return;
@@ -3502,17 +3507,26 @@ fn set(self: *SelfHosted, expr: *FatExpr, $T: Type, value: T) void #generic = {
 }
 
 fn handle_finish_rec_type(self: *SelfHosted, hole: Type, name: Var, value: *FatExpr) Maybe(void) = {
+    if false {
+        @println("handle_finish_rec_type % % %", name.scope.as_index(), self.pool.get(name.name), hole);
+        if self.pool.get(name.name) == "QbeModule" {
+            each self.imports { name, value |
+                @println("- %: %", self.pool.get(name), value[].as_index());
+            };
+            println("---");
+        };
+    };
     result_type := @check(self.eval(value, Type)) return;
     assert(result_type != hole, "ICE: @rec resolved to itself");
     self.update_placeholder(hole, result_type, name.name);
     .Ok
 }
 
-fn save_const_values(self: *SelfHosted, name: Var, value: Values, final_ty: Type, loc: Span) Maybe(void) = {
+fn save_const_values(self: *SelfHosted, name: Var, value: Values, final_ty: Type, loc: Span) CRes(void) = {
     self.save_const(name, (Value = (bytes = value, coerced = false)), final_ty, loc)
 }
 
-fn save_const(self: *SelfHosted, name: Var, val_expr: Expr, final_ty: Type, loc: Span) Maybe(void) #once = {
+fn save_const(self: *SelfHosted, name: Var, val_expr: Expr, final_ty: Type, loc: Span) CRes(void) #once = {
     @debug_assert(name.kind == .Const, "tried to save non-constant");
     // TODO: do i have to check if someone is already working on this constant? -- Jul 30
     val := self.scopes.get_constant(name);

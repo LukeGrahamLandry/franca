@@ -1,7 +1,6 @@
 C :: import("@/examples/import_c/lib.fr");
 
 #use("@/backend/lib.fr");
-ENABLE_TRACY :: false;  // TODO: make worker something you can import nicely
 
 Args :: @struct {
     target: QbeTargetEnv;
@@ -125,26 +124,25 @@ fn main() void = {
 fn compile(args: Args) Result(void, Str) = {
     m := @uninitialized QbeModule;
     
-    init(m&, general_allocator(), args.target);
+    backend'init_module(m&, args.target);
     for args.debug { c |
         m.debug[c.zext()] = true;
     };
-    m.libraries&.push("libc", general_allocator());  // :DefaultToLibc
     
     // TODO: this should work single threaded as well but i think it doesn't -- Jun 7, 2025
-    ctx: *C.Compile.CodegenShared = init(m&, general_allocator(), C.Compile.codegen_thread_main, true);
+    ctx: *C.Compile.CodegenShared = init(m&, general_allocator(), backend.worker_thread, true);
     
     c := C'Compile.Ctx.zeroed();
     C'init_ctx(c&, m&);
     c.emitter = (Some = ctx);
-    c.enqueue_task = enqueue_task;
+    c.enqueue_task = backend.enqueue; 
     each args.defines { it |
         c&.define_macro(it._0, it._1);
     };
     c.include_paths&.push_all(args.includes);
     
     prog := @try(c&.compile_file(args.input_path)) return;
-    ctx.join_codegen_thread();
+    ctx.backend'worker_join();
 
     ::enum(@type m.goal.type);
     if m.goal.type == .JitOnly {

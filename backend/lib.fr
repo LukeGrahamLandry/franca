@@ -1,38 +1,41 @@
 Qbe :: import("@/backend/ir.fr");
 
-#include_std("backend/opt/simplify.fr");
+Simplify :: import("@/backend/opt/simplify.fr");
 #include_std("backend/util.fr");
 #include_std("backend/emit.fr");
-#include_std("backend/opt/ssa.fr");
-#include_std("backend/opt/cfg.fr");
-#include_std("backend/opt/spill.fr");
+#use("@/backend/opt/ssa.fr");
+#use("@/backend/opt/cfg.fr");
+#use("@/backend/opt/spill.fr");
 #include_std("backend/opt/rega.fr");
 #use("@/backend/meta/dump.fr");
 #include_std("backend/opt/alias.fr");
-#include_std("backend/opt/inline.fr");
+#use("@/backend/opt/inline.fr");
 #use("@/backend/abi.fr");
 #use("@/backend/meta/template.fr");
 #use("@/lib/leb128.fr");
 #use("@/lib/bit_fields.fr");
 #use("@/lib/sys/sync/mutex.fr");
 #use("@/lib/sys/process.fr");
+Fold :: import("@/backend/opt/fold.fr");
 
-/* // TODO
+Worker :: import("@/compiler/worker.fr");
+backend :: import_module("@/backend/lib.fr");
 exports :: Type.scope_of(@struct {
     init_module: (@Fn(m: *QbeModule, goal: QbeTargetEnv) void) :init_default_module;
     compile_fn: (@Fn(f: *Qbe.Fn) void) :run_qbe_passes;
     compile_dat: (@Fn(m: *QbeModule, d: *Dat2) void) :emit_data;
     compile_suspended: (@Fn(m: *QbeModule) void) :emit_suspended_inlinables;
-    finish_writer: (@Fn(self: *Writer, meta: Incremental.Meta, m: *QbeModule) [][]u8) :to_bytes;
+    finish_writer: (@Fn(self: *Incremental.Writer, meta: Incremental.Meta, m: *QbeModule) [][]u8) :to_bytes;
     load_one: (@Fn(h: *Incremental.Header, f: *Qbe.Fn, it: Incremental'One(Incremental.Sym), syms: []Qbe.Sym) bool) :load;
     load_all: (@Fn(header: *Incremental.Header, m: *QbeModule) void) :compile_all_symbols;
     drop_module: (@Fn(m: *QbeModule) void) :drop;
-    fold_op: (@Fn(rt_o: Qbe.O, rt_k: Qbe.Cls, out: rawptr, a0: i64, a1: i64) void) :do_fold;
+    fold_op: (@Fn(rt_o: Qbe.O, rt_k: Qbe.Cls, out: rawptr, a0: i64, a1: i64) void) :Fold.do_fold;
+    try_fold_op: (@Fn(op: Qbe.O, cls: Qbe.Cls, cl: *Qbe.Con, cr: *Qbe.Con) ?Qbe.Con) :Fold.try_fold;
     // TODO: separate worker.fr from the frontend
-    // codegen_thread_main
-    // enqueue_task
+    worker_thread: (@Fn(s: *Worker.CodegenShared) void) : Worker.codegen_thread_main;
+    enqueue: (@Fn(*Worker.CodegenShared, *Worker.CodegenEntry) void) : Worker.enqueue_task;
+    worker_join: (@Fn(s: *Worker.CodegenShared) void) :join_codegen_thread;
 });
-*/
 
 // It can be interesting to disable optional optimisation passes to see how much they help. 
 //                           June 2025 (arm self compile)
@@ -142,7 +145,7 @@ QbeModule :: @rec @struct(
 );
 
 // :UpdateBoot
-fn enable_incremental() bool #fold = !IS_BOOTSTRAPPING;
+enable_incremental :: fn() bool #fold = !IS_BOOTSTRAPPING;
 
 Incremental :: import("@/backend/incremental.fr");
 #use("@/lib/collections/map.fr");
@@ -478,7 +481,7 @@ run_qbe_passes_common :: fn(f: *Qbe.Fn) bool = {
     
     import("@/backend/opt/copy.fr")'copy_elimination(f); // optional
     fill_use(f);
-    import("@/backend/opt/fold.fr")'fold_constants(f);
+    Fold'fold_constants(f);
     if inlsave(f) {
         // all uses might be inlined so we suspend processing until we know you took a function pointer later. 
         if m.debug["G".char()] {

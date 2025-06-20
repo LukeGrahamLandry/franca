@@ -508,6 +508,7 @@ FTY_TABLE :: 0;
 SYM_TABLE :: 1;
 
 fn move_from_module(emit_ir: *EmitIr, import: *FrcImport) CRes(CodegenTask) = {
+    zone := zone_begin(.ImportCache);
     module       := FrcModule.ptr_from_int(import.module); 
     header, m, f := (module.header, emit_ir.m, emit_ir.f);
     self := emit_ir.program.data.cast()[][];
@@ -544,6 +545,7 @@ fn move_from_module(emit_ir: *EmitIr, import: *FrcImport) CRes(CodegenTask) = {
     if !did_regalloc {
         apply_type_offset(f, instance.type_offset);
     };
+    zone_end(zone);
     
     // rn not adding anything to `pending`, trusting that sema_frc_import() put them in callees for someone else to pickup
     
@@ -756,7 +758,7 @@ cached_compile_module :: fn(path: Str, opts: *BuildOptions, out_alloc: Alloc) CR
         mark := mark_temporary_storage();
         start := timestamp();
         vtable := init_driver_vtable();
-        src := @tfmt("""#include_std("lib/core.fr"); #include_std("%");""", path);
+        src := @tfmt("""#include_std("lib/core.fr"); MODULE_EXPORTS :: import("@/%").exports;""", path);
         compiler := new_with_src(vtable, src, opts&);
         self := compiler.cast()[][];
         
@@ -782,6 +784,7 @@ cached_compile_module :: fn(path: Str, opts: *BuildOptions, out_alloc: Alloc) CR
         };
         
         bytes := build_the_exports_scope(c&, path);
+        // TODO: pre-format this error and return it
         bytes := self.unwrap_report_error([][]u8, bytes);
         bytes := bytes.concat(out_alloc);
         end := timestamp();
@@ -865,6 +868,7 @@ export_root_scope :: fn(c: *ExportCtx, fns: []FuncId, funcs_done: *BitSet, names
         if(!funcs_done.get(i-1), => continue());
         i := ();
 
+        c.self.last_loc = func.loc;
         name := c.self.comp().fmt_fn_name(fid);
         id := c.m.intern(name);
         idx := c.writer.map_sym(c.m, id);
@@ -990,15 +994,22 @@ export_type_info :: fn(c: *ExportCtx, type: Type) FTy = {
             tag = .Alias,
             payload = (alias = c.export_type(it._0)),
         )
-        @default => @panic("TODO: export confusing type %", c.self.log_type(type));
+        @default => {
+            info := c.self.get_info(type);
+            if info.loc.low != 0 {
+                c.self.last_loc = (low = info.loc.low, high = info.loc.low + 1);
+            };
+            e: CRes(void) = @err("TODO: export confusing type %", c.self.log_type(type));
+            c.self.report_error(e.Err, true)
+        };
     }
 };
 
 // for now it's just always the toplevel identifier `exports` but eventually i should expose a more powerful api
 collect_fns_from_exports :: fn(c: *ExportCtx) CRes(Ty([]FuncId, []Str)) = {
-    value := c.self.poll_in_place(?Values, => c.self.find_in_scope(TOP_LEVEL_SCOPE, c.self.pool.insert_owned("exports"), ScopeId));
+    value := c.self.poll_in_place(?Values, => c.self.find_in_scope(TOP_LEVEL_SCOPE, c.self.pool.insert_owned("MODULE_EXPORTS"), ScopeId));
     value := @try(value) return;
-    value := value || @panic("missing exports");
+    value := @unwrap(value, "ICE: import_module() didn't find exports variable") return;
     s := ScopeId.assume_cast(value&)[];
     
     scope := c.self.scopes[s].const_lookup&;

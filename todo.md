@@ -47,6 +47,8 @@ TODO: end of loop. still too many options for 'index'
 
 ## 
 
+- shouldn't be able to typo a name as easily. like S :: import_module{enqueue :: enqueue_task}); then S.enqueue_task will get you the wrong one and be slow. 
+- why was the quicksort wrapper trying to be emitted for import_module (when not marked #fold)
 - fix my blink patch so it applies and i don't have to remember to type `/Users/luke/Downloads/franca_target2025_jun12/blink/o/blink/blink` 
   every time i want it to not be super slow. 
 - get compilation order dependence under control!!
@@ -231,6 +233,8 @@ similarly allow #log_ir that persists on a module so you can debug.
 tho rn it's a bit order specific so the way import_frc works is probably a valid ordering you could get with normal franca code as well. 
 so maybe that whole system needs a bit of a rework. like maybe waiting and do all baking at the end would be less creepy.
 - if you compile with -debug-info, dbgloc instructions have offsets into the source codemap which will be wrong if moved to another module. 
+- store multiple things for the same file path. (frc_inlineable) + (frc for each target) and choose the best one. idk if it's better to have 
+  them all in one file or with different extensions. 
 
 - non-u32 enums
 - don't output frontend type info for internal functions
@@ -255,6 +259,8 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
 
 - i want the apis for importing .frc files to be as convenient as dlopen. 
   i like the idea of importing things as source and transparently using the cached thing if the hash hasn't changed.  
+- make sure transitive dep tracking works out. 
+track envvars you observe (ie. ENABLE_TRACY). 
 
 ## speed regression ?
 

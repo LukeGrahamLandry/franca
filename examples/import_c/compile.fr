@@ -2378,6 +2378,7 @@ parse_logical :: fn(c, rest, tok, cond) = {
     join_block := c.new_block();
     
     prev_block := c.b;
+    ::enum(Qbe.J);
     need_jump := prev_block.jmp.type == .Jxxx && !c.speculate;
     if need_jump {
         r := c.gen_expr(cond);
@@ -2865,6 +2866,7 @@ return :: fn(c, rest, tok) #prefix(.return, .ND_STMT) = {
         };
         r := c.assert_gen_expr(exp);
           
+        ::enum(Qbe.J);
         k := ty.cls(); // TODO: retc
         j := @as(Qbe.J) @as(i32) Qbe.J.retw.raw() + k.raw(); // TODO: also sb,etc.
         if c.f.retty != QbeNull {
@@ -2959,6 +2961,7 @@ switch_ :: fn(c, rest, tok) #prefix(.switch, .ND_STMT) = {
     payload.src = c.b;
     payload.cases = new(0);
     
+    ::enum(Qbe.J);
     if payload.src.jmp.type == .Jxxx && !c.speculate {
         payload.src.jmp.type = .switch;
     };
@@ -2975,6 +2978,7 @@ switch_ :: fn(c, rest, tok) #prefix(.switch, .ND_STMT) = {
     c.current_switch = sw;
     c.brk_label = brk;
     c.b = brk_label;
+    ::ptr_utils(@type payload.default[]);
     if payload.default.is_null() {
         payload.default = brk_label;
     };
@@ -3585,6 +3589,7 @@ fn assert_gen_expr(c: *Ctx, node: *Node) Qbe.Ref = {
 fn gen_expr(c: *Ctx, node: *Node) Qbe.Ref = {
     if(node.r != QbeNull, => return(node.r));
     c.add_type(node);
+    ::ptr_utils(@type c.f[]);
     if(c.f.is_null() || c.speculate, => return(node.r));
     node.r = c.gen_expr_inner(node);
     node.r
@@ -3642,7 +3647,7 @@ fn gen_zero_var(c: *Ctx, var: *Obj, tok: *Token) void = {
     };
     size: i64 = var.ty.size.intcast();
     off := 0;
-    each blit_op_table { o |
+    each Qbe.Simplify.blit_op_table { o |
         while => size >= o.size {
             d := c.f.newtmp("c", .Kl);
             c.emit(.add, .Kl, d, dest, c.f.getcon(off));
@@ -3728,7 +3733,9 @@ fn emit(c: *Ctx, o: Qbe.O, k: Qbe.Cls, a0: Qbe.Ref, a1: Qbe.Ref) Qbe.Ref = {
         ::if(Qbe.Ref);
         a1 := if(a1 == QbeNull, => QbeConZero, => a1);
         lhs_c, rhs_c := (c.f.get_constant(a0), c.f.get_constant(a1));
-        if try_fold(o, k, lhs_c, rhs_c) { result |
+        f :: Qbe.backend.try_fold_op;
+        //f :: try_fold;
+        if f(o, k, lhs_c, rhs_c) { result |
             return(c.f.newcon(result&));
         };
     };
@@ -3756,7 +3763,7 @@ fn gen_cast(c: *Ctx, src: Qbe.Ref, from: *CType, to: *CType, tok: *Token) Qbe.Re
     if(p_from == p_to, => return(src));
     if p_to == .B {  
         // TODO: do i need to zero extend byte/short? 
-        return(c.emit(cmp_ne(k_from), k_to, src, QbeConZero))
+        return(c.emit(Simplify'cmp_ne(k_from), k_to, src, QbeConZero))
     };
     ::if(Qbe.O);
     o: Qbe.O = if !k_to.is_int() {
