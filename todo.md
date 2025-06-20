@@ -1,32 +1,53 @@
 
-speed regression !!
+## PROGRAMS THAT CRASH
 
----
+- 60fps.fr crashes
+- not everything works if you force general_allocator to be BlockAlloc
+- event handlers in graphics programs crash. but each program seems to have a different one cursed. 
+- there have been very rare failures in my lua tests for a while
 
-> hmm, it sure got a lot slower (1032 -> 1113) at self compile since whenever my current release compiler was built (Jun  7 22:01), 
-(both compiling current code so it's NOT just cause i added stuff).  
+## COMPILER BUG 
 
----
+- tests/todo
+  - a.fr: first_ref_os, const_field_unordered
+  - b.fr: multiple prefix calls `float intcast 123`
+          (might even be a parser bug? always a surprise when that's the problem)
+  - c.fr: first use of constant is fieldaccess?
+  - d.fr: OverloadingConfusedCoerce
+  - e.fr: #use inside a block prevents lookups that escape to the outer scope
+  - f.fr: missing ; should be disallowed
+  - g.fr: bad performace of linked list of `body = @{ @[body]; @[next]; }`
+  - i.fr: lhs of index assignment is evaluated first so if a list is aliased in the rhs and resizes, you're screwed.
+          this is just a semantic change not really a bug, but i have programs that rely on the old behaviour. 
+- repro doesn't work accross linux <-> macos
+- `@debug_assert(macos.common().valid, "not valid");` compiles 
+and gives you junk (that's not 0 or 1) when `common()` uses `#unsafe_noop_cast`. 
+rn you're supposed to need a redundant `[]` in a call like that. 
+- fix the infinite loop when a constant references itself
+- `@struct(a: A #use = (),);`
+- // TODO: don't segfault if you get a compile error inside a jit_shim. 
+- import_c: tests/todo/b.c
+- same string constant as Str and CStr :MiscompileCStr
+- :ConstInFuncOrLoseTemp
+- literal for a 64 bit integer with the high bit set shouldn't need a bit cast 
+- `fn vec2(x, y) = (v = (x, y));` miscompiles if inlined but i can't reproduce it in a simple test. 
+- :UseDoesntWork
+- :BitFieldsCompileError there's places in Qbe and Incremental where it won't let you have 
+a field of type @bit_fields or you get:
+```
+panic! compiler/main.fr:2:1
+#include_std("lib/core.fr");
+Compile Error: 54 matching options for index
 
-`hyperfine --warmup=1 "franca examples/default_driver.fr build compiler/main.fr -unsafe"` (same compiler, different source)  
-commit "weak symbols": 1.122 s ±  0.003 s  
-commit "posix: open+mmap":  1.141 s ±  0.003 s  
-
-but this one's less scary because the slow is attached to the code.  
-`fix_flags` does some comptime stuff, can it really be that much? 
-
----
-
-(i cheated by simplifying do_fold so should force it to use do_fold_old when trying to debug the above,
-older compilers, based on vtable.abi_version will always do the slow one so it's unfair). 
-
-and by fixing callgraph sorting for inlining. 
+TODO: end of loop. still too many options for 'index'
+```
+- // TODO: only the first element of the @slice in unquote_placeholders is getting typechecked that it wants FatExpr not *FatExpr? 
+- #inline returning Never doesn't remember that it returns Never
 
 ## 
 
-- not everything works if you force general_allocator to be BlockAlloc
-- 60fps.fr crashes
-- event handlers in graphics programs crash. but each program seems to have a different one cursed. 
+- fix my blink patch so it applies and i don't have to remember to type `/Users/luke/Downloads/franca_target2025_jun12/blink/o/blink/blink` 
+  every time i want it to not be super slow. 
 - get compilation order dependence under control!!
 - fix callgraph sorting to improve inlining. like make sure the ge/le in lex_int/is_ascii_digit are inlined 
 - make AsmFunction get an inferred name
@@ -57,9 +78,9 @@ different subsets of the same resources.
 - deal with `NOSYS`
 - apple has different c variadic abi. that's pretty unfortunate for my grand plans. 
   it feels pretty invasive to have the backend compile two versions of anything variadic. 
-- i think it's fine to just do apple_extsb always. the other one just drops 8/16 args and i don't use them anyway. 
 - get rid of query_context_is_implicit
 - make #log_asm work for the #asm replacement 
+- experiment with outputting even more info in .frc and an lsp that reads it back. 
 
 ## backend 
 
@@ -96,7 +117,6 @@ but dump_macho.fr and objdump -d say they're the same (for mandelbrot_ui.fr at l
 so something in the data i guess? 
 - elf Relocatable so i can run the abi tests against clang
 - elf Dynamic
-- weak symbols should always be null with `-syscalls`. rn i fear they mean no static binaries
 - should have a test that makes sure my static binaries are actually static
 - how are you supposed to ask for page size? blink wants 64k instead of 4k. 
 - standalone import_c/cc.fr and meta/qbe_backend.fr can't make statically linked binaries because the `_init` is written in franca
@@ -112,6 +132,7 @@ so something in the data i guess?
   - or maybe get rid of it? it's not super interesting without a lot more infrastructure. 
 - be less strict about amd64 address folding when there's a large constant pointer (which is valid when jitting)
   - idk, i might have done this already? 
+- CLOCK_REALTIME
 
 ---
 
@@ -231,6 +252,34 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
     like you can't have every compilation unit eat 15ms on @syscall, @match, etc
   - use the multiple scopes thing
 
+- i want the apis for importing .frc files to be as convenient as dlopen. 
+  i like the idea of importing things as source and transparently using the cached thing if the hash hasn't changed.  
+
+## speed regression ?
+
+> hmm, it sure got a lot slower (1032 -> 1113) at self compile since whenever my current release compiler was built (Jun  7 22:01), 
+(both compiling current code so it's NOT just cause i added stuff).  
+
+---
+
+`hyperfine --warmup=1 "franca examples/default_driver.fr build compiler/main.fr -unsafe"` (same compiler, different source)  
+commit "weak symbols": 1.122 s ±  0.003 s  
+commit "posix: open+mmap":  1.141 s ±  0.003 s  
+
+but this one's less scary because the slow is attached to the code.  
+`fix_flags` does some comptime stuff, can it really be that much? 
+
+---
+
+(i cheated by simplifying do_fold so should force it to use do_fold_old when trying to debug the above,
+older compilers, based on vtable.abi_version will always do the slow one so it's unfair). 
+
+and by fixing callgraph sorting for inlining. 
+
+so ive reclaimed the performance in different ways but i kinda want to go back and figure out what i broke 
+between jun7 and jun11 because maybe that's another 10% i can have. 
+or maybe it was just a compilation order change that broke inlining before i fixed it
+
 ## Unfinished Examples
 
 - epicycles: make it actually trace the correct path
@@ -319,35 +368,6 @@ The alternative school of thought is that i could go full linker and be able to
 give types a stable identity accross compiles and patch out the type constants 
 so you could cache code that runs at comptime without it needing to do everything 
 through the ImportVTable explicitly. but that feels a bit too wishy washy to me? idk. 
-
-## compiler bug
-
-- `@debug_assert(macos.common().valid, "not valid");` compiles 
-and gives you junk (that's not 0 or 1) when `common()` uses `#unsafe_noop_cast`. 
-rn you're supposed to need a redundant `[]` in a call like that. 
-- fix the infinite loop when a constant references itself
-- `@struct(a: A #use = (),);`
-- tests/todo/b.fr (might even be a parser bug? always a surprise when that's the problem)
-- // TODO: don't segfault if you get a compile error inside a jit_shim. 
-- import_c: tests/todo/b.c
-- same string constant as Str and CStr :MiscompileCStr
-- :ConstInFuncOrLoseTemp
-- tests/todo/(a.fr, c.fr, d.fr)
-- literal for a 64 bit integer with the high bit set shouldn't need a bit cast 
-- `fn vec2(x, y) = (v = (x, y));` miscompiles if inlined but i can't reproduce it in a simple test. 
-- :UseDoesntWork
-- :BitFieldsCompileError there's places in Qbe and Incremental where it won't let you have 
-a field of type @bit_fields or you get:
-```
-panic! compiler/main.fr:2:1
-#include_std("lib/core.fr");
-Compile Error: 54 matching options for index
-
-TODO: end of loop. still too many options for 'index'
-```
-- // TODO: only the first element of the @slice in unquote_placeholders is getting typechecked that it wants FatExpr not *FatExpr? 
-- tests/todo/i.fr is super important :FuckedLikeZig
-- #inline returning Never doesn't remember that it returns Never
 
 ## cross compiling
 
@@ -603,6 +623,7 @@ A :: @struct {
 };
 @assert_eq(A.a, 123);  // kinda weird
 ```
+- tail calls
 
 ## demos 
 

@@ -13,7 +13,6 @@
 #include_std("compiler/v2/dispatch.fr"); 
 #include_std("compiler/v2/sema.fr"); 
 #include_std("compiler/v2/ast_boring.fr");
-#include_std("compiler/driver_io.fr");  
 #use("@/compiler/ast_external.fr");  
 #include_std("compiler/emit_ir.fr");  
 #use("@/compiler/worker.fr");
@@ -40,7 +39,6 @@ SelfHosted :: @rec @struct(
     scopes: *Scopes,
     baked: *Baked,
     last_loc: Span,
-    index: ProgramIndex,
     functions: BucketArray(Func),  // TODO: have a version of this type that doesn't add gaps if you push_all because that will break the indexing
     types: BucketArray(TypeInfo),
     // TODO: decide if these are generally accessed at the same time so should be stored together.
@@ -95,22 +93,6 @@ fn make_function_scope(c: *SelfHosted, body: Slice(FatStmt), name: Symbol, scope
     f := c.add_function(func);
     (Ok = f)
 }
-
-fn update_global_stdlib_path() void = {
-    :: ?Str; 
-    if STDLIB_PATH.is_none() {
-        // :io_driver
-        a := find_std_lib(general_allocator());
-        if a& { (lst: *Str) |  // TODO: why the fuck does this need the type annotation1!!@##@!
-            STDLIB_PATH[] = (Some = lst[]);
-        } else {
-            panic("Could not find franca standard library."); // TODO: return error
-        };
-    };
-}
-
-// TODO: store this in SelfHosted instead of in a global -- Jul 5
-STDLIB_PATH :: @static(?Str) (.None);
 
 fn load_file_in_compiler(vtable: *ImportVTable, path: Str, opts: *BuildOptions) CRes(CompCtx) = {
     // :io_driver
@@ -312,61 +294,6 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
     .Ok
 }
 
-// I'd rather include it in the binary but I do this so I don't have to wait for the compiler to recompile every time I change the lib
-// (maybe include_bytes in a seperate crate would make it better)
-// I also like that users can put the lib somewhere an edit it for thier program. I dont want the compiler to just force its blessed version.
-// But I also don't want it to be like c where you just get whatever the system happens to have.
-fn find_std_lib(a: Alloc) ?Str = {
-    // :io_driver
-    check :: fn(p: *List(u8)) bool = {
-        p.push_path_segment("lib");
-        p.push_path_segment("franca_stdlib_1.fr");
-        // :UpdateBoot
-        CRAZY_TOWN :: @if(IS_BOOTSTRAPPING, path_exists, file_exists);
-        good := p.items().CRAZY_TOWN();
-        p.pop_path_segment();
-        p.pop_path_segment();
-        good
-    };
-
-    // if a project wants to supply its own version, that should take priority.
-    p := u8.list(a); p&.push_all("."); // get_working_directory(a);
-    p := p&;
-    if(check(p), => return(Some = p.items()));
-    
-    // TODO: this doesn't work if we're just using '.' ^
-    // TODO: also check like ./vendor/franca
-    range(0, 3) { _ |
-        p.pop_path_segment();
-        if(check(p), => return(Some = p.items()));
-    };
-
-    @if(is_linking_libc()) {
-        // TODO: this doesn't work if its a symlink to the exe. need to follow that? 
-        p := get_executable_path(a).assume_owned(a);
-        p := p&;
-        assert(p.pop_until_endswith("/"), "path should have slashes"); // we want our folder, not our exe. 
-        
-        p.push_path_segment("franca");
-        if(check(p), => return(Some = p.items()));
-        // exe might be in franca/target/release/franca or franca/target/debug/deps/compiler-21be1aa281dbe5d6, so go up
-        range(0, 5) { _ |
-            p.pop_path_segment();
-            if(check(p), => return(Some = p.items()));
-        };
-        
-        p.clear();
-        if read_link("/usr/local/bin/franca", p) {
-            range(0, 5) { _ |
-                p.pop_path_segment();
-                if(check(p), => return(Some = p.items()));
-            };
-        };
-    };
-    
-    .None
-}
-
 // TODO: pass requested type through generic args so this isn't so clunky. -- Jun 23
 fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
     stack_base := 0;
@@ -444,7 +371,6 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
         baked = b,
         last_loc = (low = 0, high = 0),
         env = env,
-        index = init(a),
         functions = init(10, a),
         types = init(10, a),
         type_extra = init(10, a), 
@@ -466,7 +392,7 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
         recycle_funcid = list(a),
         shim_callback_general_alloc = general_allocator(),
     );
-    self.add_function(zeroed Func);
+    self.add_function(zeroed Func);  // just for good luck. life is better when FuncId=0 is invalid. 
     self.other_module&.push(self.comptime_codegen.m, self.get_alloc());
     
     if get_dynamic_context().is_null() {
@@ -495,10 +421,11 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
     c[] = SelfHosted.raw_from_ptr(self);
     
     stable_compiler_context :: fn(self: *SelfHosted) Compiler = {
-        mem1 := general_allocator().alloc(*SelfHosted, 1);
+        a := self.get_alloc();
+        mem1 := a.alloc(*SelfHosted, 1);
         mem1.ptr[] = self;
         erased := (*SelfHosted).raw_from_ptr(mem1.ptr);
-        compiler := general_allocator().alloc(CompilerValue, 1);
+        compiler := a.alloc(CompilerValue, 1);
         compiler.ptr[] = (pointer_to_pointer_to_selfhosted = erased);
         compiler.ptr
     };
@@ -535,20 +462,3 @@ fn clone(self: *SelfHosted, e: *LazyType) LazyType = {
 ::DeriveFmt(BakedEntry);
 ::DeriveFmt(BakedVarId);
 ::display_slice(BakedEntry);
-
-VariableInfo :: @struct(
-    declaration: Span,
-    usages: RawList(Span),
-    var: Var,
-);
-
-// TODO: really you want to be storing things as file+line because that's what the lsp gives you. 
-ProgramIndex :: @struct(
-    a: Alloc,
-    variables: BucketArray(?VariableInfo),
-    callers: BucketArray(RawList(FuncId)), // [FuncId]
-);
-
-fn init(a: Alloc) ProgramIndex = {
-    (a = a, variables = init(10, a), callers = init(10, a))
-}

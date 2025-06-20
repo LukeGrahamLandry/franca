@@ -209,11 +209,17 @@ fn bake_relocatable_slice_erased(addr: rawptr, length: i64, T: Type) []BakedEntr
     @{
         T :: @[@literal e[0].ty];
         mem := @[allocator].alloc(T, @[@literal e.len]);
-        indexer :: resolve_overload(index, Ty([]T, i64), *T, @[@literal elements.loc]);
+        // SAFETY: allocated an array of the correct size so there's no need to bounds check for each element. 
+        p := mem.ptr;
+        step := size_of(T);
+        cheat :: fn(p: *T, bytes: i64) *T #ir(.add, .Kl);
         @[{
             stmts := FatStmt.list(e.len, ast_alloc());
             enumerate e { i, e |
-                stmts&.push(loc = e.loc, stmt = (Set = (place = @{ indexer(mem, @[@literal i])[] }, value = e[])));
+                stmts&.push(loc = e.loc, stmt = (Eval = @{
+                    p[] = @[e[]];
+                    p = p.cheat(step);
+                }));
             };
             make_block(stmts, @{mem})
         }]

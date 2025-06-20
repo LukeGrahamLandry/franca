@@ -21,9 +21,10 @@ that the franca frontend can import. You run the c compiler in comptime and that
 without needing to write tedious bindings. Since it compiles to the same ir as franca code, you can use c libraries 
 at comptime as well, and cross compile them, and introspect on thier types. 
 
-> See the comment at the top of that file for limitations. Most of the language works but not everything yet
-> You can't export macros to franca but they can be used internally by the c program. No thread_local, no atomics, no complex numbers, no inline assembly. 
-> Not all stdlib only standard headers are usable yet because i want to make cross compiling easy and not depend on system files. 
+> See the comment at the top of that file for limitations. Most of the language works but not everything yet. 
+> You can't export macros to franca but they can be used internally by the c program. 
+> No thread_local, no atomics, no complex numbers, no inline assembly. 
+> Not all stdlib standard headers are usable yet because i want to make cross compiling easy and not depend on system files. 
 
 but some examples of libraries that do work:
 - wuffs

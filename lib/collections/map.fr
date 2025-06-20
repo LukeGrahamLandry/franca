@@ -10,11 +10,14 @@ fn hash(s: *Str) i64 = {
     h
 }
 
-/// This is the kind where you get bumped to the next slot if you collide, not the kind where you spill out into a linked list.
-/// TODO: reuse the first tombstone slot when inserting after a remove. currently im being dumb and just wasting search time until a resize. 
-/// (K: eq + hash + move, V: move)
-/// TODO: take hasher as param once i have default args? 
-/// TODO: api for getting the real len (not including tombstones)
+// - (K: eq + hash + move, V: move)
+// - if eq(a, b) then eq(hash(a), hash(b)); (but the other way around is not required). 
+//   ex. hash(foo)=1 is a valid (but slow) hash function, but hash(foo)=rand() is invalid (you won't be able to find your things in the list). 
+// - the table stores the hash of inserted items, so the hash function will not be called again while searching the table (but eq will be). 
+// - pointers into the table are not stable (it will be reallocated to grow when out of space like List). 
+// - This is the kind where you get bumped to the next slot if you collide, not the kind where you spill out into a linked list.
+// TODO: take hasher as param once i have default args? 
+// TODO: api for getting the real len (not including tombstones)
 fn HashMap($K: Type, $V: Type) Type = {
     R :: RawHashMap(K, V);
     Self :: @struct(raw: R, alloc: Alloc, $Raw := R);
@@ -151,10 +154,15 @@ fn RawHashMap($K: Type, $V: Type) Type = {
     
     fn clear(self: *Self) void = {
         each self.arr { e | 
+            self.len_including_tombstones -= int(e.hash != 0);
             e.hash = 0;
+            if(self.len_including_tombstones == 0, => return());
         };
+        @debug_assert_eq(self.len_including_tombstones, 0, "lied about len_including_tombstones");
     }
     
+    // this never returns a tombstone (which is correct for get() but TODO: insert would be more efficient 
+    // if it went back and returned the first toubstone once it decides the item is not in the map). 
     fn find_slot(self: *Self, key: *K, h: i64) *Entry = {
         @debug_assert(self.arr.len != 0);
         i := h.mod(self.arr.len);
@@ -188,7 +196,7 @@ fn RawHashMap($K: Type, $V: Type) Type = {
     
     fn each(self: *Self, $body: @Fn(key: K, value: *V) void) void = {
         each self.arr {slot|
-            if slot.hash.ne(0).and(slot.hash.ne(1)) {
+            if slot.hash != 0 && slot.hash != 1 {
                 body(slot.key, slot.value&);
             };
         };
@@ -242,11 +250,13 @@ hashmap_expand_erased :: fn(self: *RawHashMapErased, entry_size: i64, entry_alig
     self.entries = new_mem;
 };
 
+// Unused slots may contain uninitialized memory, so explicitly zeroing is nice before baking an AOT binary to make sure it repros.
 // :Polymorphise
 hashmap_erased_zero_unused_slots :: fn(self: *RawHashMapErased, entry_size: i64) void #noinline = {
     range(0, self.entry_count) { i |
         h := i64.ptr_from_raw(self.entries.offset(i * entry_size))[];
         if h == 0 || h == 1 {
+            // not setting the hash to zero! need to remember if it's a tombstone incase there was a collision so we can find the next guy that got bumped
             slot := u8.ptr_from_raw(self.entries.offset(i * entry_size + 8)).slice(entry_size - 8);
             slot.set_zeroed();
         }

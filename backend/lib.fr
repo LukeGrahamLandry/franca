@@ -29,8 +29,9 @@ ENABLE_INLINING    :: true;   // 480ms r
 ENABLE_ELIDE_SLOTS :: true;   // 240ms l
 ENABLE_PROMOTE     :: true;   // 230ms q
 ENABLE_CONST_FOLD  :: true && //  40ms q
-    // :UpdateBoot but also want to keep this and automatically turn it off when the FrcModule abi changes
-    !IS_BOOTSTRAPPING && { c := current_compiler_context(); c'vtable'driver_abi_version >= 1131 };
+    { c := current_compiler_context(); c'vtable'frc_module_magic_v == Incremental.MAGIC };
+    // opt/fold.fr generates a module at comptime and includes that at comptime, 
+    // so it can only be enabled when the host compiler has the same ir abi as the source code being compiled. 
 
 Arm  :: import("@/backend/arm64/bits.fr");
 Amd  :: import("@/backend/amd64/bits.fr");
@@ -357,7 +358,6 @@ fn set_target_vtable(m: *QbeModule) void = {
         fn wasm32()  => {
             @assert(!@is(m.goal.type, .Cached), "TODO: cached wasm. need to save types more?");  // CachedEarly is fine tho
             t.finish_passes = finish_qbe_passes_wasm;
-            t.abi0 = apple_extsb; // "Signed 8 and 16-bit scalars are sign-extended, and unsigned 8 and 16-bit scalars are zero-extended before passing or returning." 
             t.emit_fn = EmitWasm.emit_func_wasm32;
             t.fixup = EmitWasm.fixup_wasm32;
             m.wasm_symbol_stackbase = m.intern("__stack_base");
@@ -444,7 +444,7 @@ run_qbe_passes_common :: fn(f: *Qbe.Fn) bool = {
         @panic("IR failed typecheck: %", err);
     };
     
-    {m.target.abi0}(f);
+    extsb_parargret(f);
     
     inlcalls(f);
     fillrpo(f);

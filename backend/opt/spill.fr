@@ -107,6 +107,10 @@ SpillPass :: @struct(
     slot8: i32,                /* ditto, 8 bytes */
     class_mask: Array(Qbe.BSet, 2), 
     limit_buf: []i32 = empty(),
+    // these are used in Limit_In_Reg and Do_Parallel_Moves respectively. 
+    // nothing persists between calls, i just want to reuse the memory (and save rezeroing in bsinit)
+    scratch_lir: Qbe.BSet,
+    scratch_dpm: Qbe.BSet,
 );
 
 // Get the stack slot assigned for spilling t. 
@@ -218,7 +222,7 @@ fn limit_in_reg(pass: *SpillPass, in_reg: *Qbe.BSet, is_for_call: bool, prioriti
         allowed_ints -= T.nrsave&[0];
         allowed_floats -= T.nrsave&[1];
     };
-    floats := init_bitset(pass.f.ntmp.zext()); /* todo, free those */
+    floats := pass.scratch_lir;
     bscopy(floats&, in_reg);
     bsinter(in_reg, pass.class_mask&.index(0)); // now in_reg is just ints
     bsinter(floats&, pass.class_mask&.index(1));
@@ -287,17 +291,17 @@ fn do_parallel_moves(pass: *SpillPass, b: *Qbe.Blk, last_copy: *Qbe.Ins, in_reg:
         i
     };
     
-    final_in_reg := init_bitset(f.ntmp.zext()); /* todo, free those */
+    final_in_reg := pass.scratch_dpm;
     bscopy(final_in_reg&, in_reg);
     is_after_call := !first_copy.identical(b.ins.ptr) && @is(first_copy.offset(-1).op(), .call, .syscall);
     avoid_registers := if is_after_call { 
         discard := Array(i32, 2).ptr_from_int(0);
         retreg := ({T.retregs}(first_copy.offset(-1)[].arg&[1], discard));
         @debug_assert(in_reg.t[].bit_and(retreg) == retreg, "we should already know returns are live");
-        in_reg.t[] = in_reg.t[].bit_and(bit_not(retreg)); // retregs arn't live before the call becuase we're making them now
+        bs_clrlow(in_reg, retreg); // retregs arn't live before the call becuase we're making them now
         pass.limit_in_reg(in_reg, true, .None);
         arg_reg := {T.argregs}(first_copy.offset(-1)[].arg&[1], discard);
-        in_reg.t[] = in_reg.t[].bit_or(arg_reg); // the arguments are live before because we need them at the call
+        bs_setlow(in_reg, arg_reg); // the arguments are live before because we need them at the call
         T.caller_saved
     } else {
         pass.limit_in_reg(in_reg, false, .None);
@@ -348,7 +352,12 @@ fn spill(f: *Qbe.Fn) void = {
     // TODO: are we copying these because we might resize the array or can i inline them?
     tmp := f.tmp;
     ntmp: i64 = f.ntmp.zext();
-    pass: SpillPass = (f = f, locs = f.slot, slot4 = 0, slot8 = 0, class_mask = init(@slice(init_bitset(ntmp), init_bitset(ntmp))));
+    pass: SpillPass = (
+        f = f, locs = f.slot, slot4 = 0, slot8 = 0, 
+        class_mask = init(@slice(init_bitset(ntmp), init_bitset(ntmp))), 
+        scratch_lir = init_bitset(ntmp),
+        scratch_dpm = init_bitset(ntmp),
+    );
     range(0, ntmp) { t | 
         f.tmp[t].slot = -1; // TODO: remove. should be fine. just making sure.
         
@@ -385,7 +394,7 @@ fn spill(f: *Qbe.Fn) void = {
         if backwards { (backwards:*Qbe.Blk) |  // TODO: why does this need a type annotation after adding meta/parse.fr? -- Nov 12
             /* back-edge */
             bszero(in_reg&);
-            backwards.gen.t[] = backwards.gen.t[].bit_or(T.rglob); /* don't spill registers */
+            bs_setlow(backwards.gen&, T.rglob); /* don't spill registers */
             range(0, 2) { k |
                 n := if(k == 0, => T.ngpr, => T.nfpr);
                 bscopy(all_needed_later&, b.out&);
@@ -429,7 +438,7 @@ fn spill(f: *Qbe.Fn) void = {
                 if rtype(b.jmp.arg) == .RCall {
                     @debug_assert(b.jmp.type == .ret0, "expected return");
                     return_registers := {T.retregs}(b.jmp.arg, Array(i32, 2).ptr_from_int(0));
-                    in_reg.t[] = in_reg.t[].bit_or(return_registers);
+                    bs_setlow(in_reg&, return_registers);
                 };
             };
         };

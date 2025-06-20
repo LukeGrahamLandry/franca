@@ -10,7 +10,28 @@ notably those are all things to aren't going to change if you're just working on
 
 - get a bit more serious about not leaking memory. it doesn't matter when you just run the compiler once 
 per process but compiler/tests.fr uses a bunch of compiler instances and was growing up to 4gb which offended me. 
-
+  - only interesting thing was ArenaAlloc.deinit, i wasn't going forward all the way in the linked list so you'd lose 
+    things if you reset_retaining_capacity before deinit. 
+  - i didn't know you could `/usr/bin/time -l` instead of the boring builtin time that just gives you... the time. 
+    last commit: 3,279,257,600 -> 1,544,503,296 maximum resident set size for compiler/test.fr.
+- going to get rid of my hacky ProgramIndex that i was using for my lsp attempt a long time ago. 
+  new idea is to add a section of frc with whatever info is needed so you can record a compile and then have the lsp load that. 
+- i want all early passes to be target independent so abi0 is a problem (in theory; i don't actually use it so it doesn't even matter). 
+  i think it's fine to just do apple_extsb always. the other one just drops 8/16 args. 
+- cleaning up some of the old broken tests
+- trying to make parsing_large_things test less embarrassing.
+  it makes a 200k array of sequential floats. so 200k unique constants and 200k store instructions in that function.
+  - inlined the one ir instruction for index_unchecked
+  - hashmap in backend/util.fr/newcon instead of scanning them all to add one (can't be doing n^2 when n=200k). 
+    (also this fails some of the franca tests? but not the ssa tests... should look into that).
+  - reuse bitsets in backend/opt/spill.fr, especially good because you immediatly copy to them so the zeroing in bsinit is waste.
+    now it finishes in 40 seconds but "we don't allow a function larger than one arm64 instruction can jump". (whatever, i still want to make it faster). 
+    has 800144 tmps by the time it gets to spill(). really what we're learning here is my bit sets are terrible at sparse data.
+  - i was hoping i could just track max and min but that doesn't really help, it's not chunked like that. 
+    also tried always skipping a few from the bottom and not tracking those in min because like at least the bottom u64 is 
+    always used because it's for physical registers. but also not helpful. can't decide if i care enough to try a real sparse bit set. 
+    is there anything better than just hashset of numbers? 
+    
 ## (Jun 18)
 
 - i want to stop doing follow_redirects in emit ir because i think i barely use #redirect and it's kinda weird, 

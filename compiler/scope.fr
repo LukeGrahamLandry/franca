@@ -560,7 +560,6 @@ fn decl_var(self: *SelfHosted, s: ScopeId, name: Symbol, kind: VarType, loc: Spa
     
     scope.vars&.push(var, self.get_alloc()); // includes constants!
     scopes.types&.push(type = UnknownType, took_address = false, debug_name = name);
-    self.record_var_declare(var, loc);
     (Ok = var)
 }
 
@@ -672,7 +671,6 @@ fn handle_expr(self: *ResolveScope, expr: *FatExpr) Result(DoMore, *CompileError
         fn GetNamed(name) => {
             v := self.find_var(name[]);
             if v& { var |
-                self.compiler.record_var_usage(var[], expr.loc);
                 expr.expr = (GetVar = var[]);
             } else {
                 expr.expr = (UndeclaredVar = (name = name[], scope = self.scope));
@@ -913,6 +911,7 @@ fn slow_body(self: *ResolveScope, body: *List(FatStmt)) PRes #once = {
             continue :: local_return;
             @if_let(stmt.stmt&) fn Annotations(annotations) => {
                 if annotations.len == 1 && annotations.items()[0].name == Flag.include_std.ident() {
+                    self.compiler.last_loc = stmt.loc;
                     msg :: "#include_std requires string argument";
                     arg_expr := annotations.items().index(0).non_void_arg().or() {
                         return(@err(msg))
@@ -1013,4 +1012,103 @@ fn add_to_scope(c: *SelfHosted, s: ScopeId, name: Symbol, type: LazyType, expr: 
     };
     c.scopes.put_constant(var, expr, type);
     var
+}
+
+fn get_include_std(c: *SelfHosted, name: Str) ?WaitingParse = {
+    zone := zone_begin(.LoadFile); // TODO: defer
+    src := get_include_std(c.get_alloc(), name) || return(.None);
+    file := c.codemap.add_file(name, src);
+    id := push_parse(c.parser, src, file);
+    zone_end(zone);
+    (Some = id)
+}
+
+// TODO: store this in SelfHosted instead of in a global -- Jul 5
+STDLIB_PATH :: @static(?Str) (.None);
+
+fn get_include_std(a: Alloc, name: Str) ?Str = {
+    ::if(?Str);
+    if name == "compiler" {
+        code: List(u8) = list(a);
+        fill_export_ffi(code&);
+        (Some = code.items())
+    } else {
+        lib := STDLIB_PATH[].unwrap();
+        check := @tfmt("%/%", lib, name);
+        out := u8.list(a);
+        if read_and_push(out&, check) {
+            (Some = out.items())
+        } else {
+            if read_and_push(out&, name) {
+                (Some = out.items())
+            } else {
+                .None
+            }
+        }
+    }
+}
+
+// I like that users can put the lib somewhere and edit it for thier program. I dont want the compiler to just force its blessed version.
+fn find_std_lib(a: Alloc) ?Str = {
+    // :io_driver
+    check :: fn(p: *List(u8)) bool = {
+        p.push_path_segment("lib");
+        p.push_path_segment("franca_stdlib_1.fr");
+        // :UpdateBoot
+        CRAZY_TOWN :: @if(IS_BOOTSTRAPPING, path_exists, file_exists);
+        good := p.items().CRAZY_TOWN();
+        p.pop_path_segment();
+        p.pop_path_segment();
+        good
+    };
+
+    // if a project wants to supply its own version, that should take priority.
+    p := u8.list(a); p&.push_all("."); // get_working_directory(a);
+    p := p&;
+    if(check(p), => return(Some = p.items()));
+    
+    // TODO: this doesn't work if we're just using '.' ^
+    // TODO: also check like ./vendor/franca
+    range(0, 3) { _ |
+        p.pop_path_segment();
+        if(check(p), => return(Some = p.items()));
+    };
+
+    @if(is_linking_libc()) {
+        // TODO: this doesn't work if its a symlink to the exe. need to follow that? 
+        p := get_executable_path(a).assume_owned(a);
+        p := p&;
+        assert(p.pop_until_endswith("/"), "path should have slashes"); // we want our folder, not our exe. 
+        
+        p.push_path_segment("franca");
+        if(check(p), => return(Some = p.items()));
+        // exe might be in franca/target/release/franca or franca/target/debug/deps/compiler-21be1aa281dbe5d6, so go up
+        range(0, 5) { _ |
+            p.pop_path_segment();
+            if(check(p), => return(Some = p.items()));
+        };
+        
+        p.clear();
+        if read_link("/usr/local/bin/franca", p) {
+            range(0, 5) { _ |
+                p.pop_path_segment();
+                if(check(p), => return(Some = p.items()));
+            };
+        };
+    };
+    
+    .None
+}
+
+fn update_global_stdlib_path() void = {
+    :: ?Str; 
+    if STDLIB_PATH.is_none() {
+        // :io_driver
+        a := find_std_lib(general_allocator());
+        if a& { lst |
+            STDLIB_PATH[] = (Some = lst[]);
+        } else {
+            panic("Could not find franca standard library."); // TODO: return error
+        };
+    };
 }

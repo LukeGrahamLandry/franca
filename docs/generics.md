@@ -224,3 +224,9 @@ you could try generating code. Franca gives you ways to write macros that
 work on AST nodes, generate source code as strings that can be imported, 
 or generate IR that skips the frontend all together. These will have thier 
 own documentation eventually. Just keep in mind it's a very big hammer. 
+
+## :Polymorphise
+
+TODO: explain better. 
+sometimes i manually outline stuff that only depends on the type's size so you get less code bloat. 
+see lib/collections/(list.fr, map.fr) for examples. 

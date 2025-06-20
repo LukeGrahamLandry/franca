@@ -123,15 +123,34 @@ fn newtmp(f: *Qbe.Fn, debug_hint: Str, k: Qbe.Cls) Qbe.Ref = {
     TMP(t)
 }
 
+CONMAP :: false;  // TODO: =true fails tests!
 fn newcon(f: *Qbe.Fn, c0: *Qbe.Con) Qbe.Ref = {
-    // deduplicate
-    range(1, f.ncon.zext()) { i |
-        c1 := f.con.index(i);
-        if c0.sym.id == c1.sym.id && c0.bits._0 == c1.bits._0 && c0.bits._1 == c1.bits._1 {
-            return(CON(i));
+    ::ptr_utils(@type f.consts[]);
+    if CONMAP && !f.consts.is_null() {
+        ::AutoHash(Qbe.Con, TrivialHasher);
+        ::AutoHash(Qbe.Sym, TrivialHasher);
+        ::AutoHash(Ty(u32, u32), TrivialHasher);
+        ::AutoEq(Qbe.Con);
+        ::AutoEq(Qbe.Sym);
+        ::AutoEq(Ty(u32, u32));
+        
+        return f.consts.get_or_insert(c0[], => {
+            f.newcon_unchecked(c0)
+        })[];
+    } else {
+        // deduplicate
+        range(1, f.ncon.zext()) { i |
+            c1 := f.con.index(i);
+            if c0.sym.id == c1.sym.id && c0.bits._0 == c1.bits._0 && c0.bits._1 == c1.bits._1 {
+                return(CON(i));
+            };
         };
+        return f.newcon_unchecked(c0);
     };
-    
+    unreachable()
+}
+
+fn newcon_unchecked(f: *Qbe.Fn, c0: *Qbe.Con) Qbe.Ref = {
     push(f.con&, f.ncon&, c0[]);
     CON(f.ncon.zext() - 1)
 }
@@ -321,6 +340,8 @@ fn default_init(f: *Qbe.Fn, m: *QbeModule) void = {
     f.con = new(fixed_const_count);
     f.mem = new(0);
     ::assert_eq(Qbe.Ref);
+    f.consts = temp().box(@type f.consts[]);
+    f.consts[] = init(temp());
     push_fixed_consts(f);
     // Add temporaries representing physical registers.
     // For the comptime usecase, the is_float will be wrong for some targets but that's fine becuase register numbers will just be moved to the real function, 
@@ -460,8 +481,9 @@ fn init_bitset(size: i64) Qbe.BSet #inline = {
     s
 }
 
-fn bscopy(a: *Qbe.BSet, b: *Qbe.BSet) void = 
-    copy_no_alias(u64.raw_from_ptr(a.t), u64.raw_from_ptr(b.t), a.nt.zext() * 8);
+fn bscopy(dest: *Qbe.BSet, src: *Qbe.BSet) void = {
+    copy_no_alias(u64.raw_from_ptr(dest.t), u64.raw_from_ptr(src.t), dest.nt.zext() * 8);
+}
 
 fn bsunion(a: *Qbe.BSet, b: *Qbe.BSet) void = BSOP(a, b, fn(a, b) => a.bit_or(b));
 fn bsinter(a: *Qbe.BSet, b: *Qbe.BSet) void = BSOP(a, b, fn(a, b) => a.bit_and(b));
@@ -473,6 +495,14 @@ fn BSOP(a: *Qbe.BSet, b: *Qbe.BSet, $fuse: @Fn(a: u64, b: u64) u64) void #inline
         a := a.t.offset(i);
         a[] = fuse(a[], b.t.offset(i)[]);
     };
+}
+
+fn bs_setlow(bs: *Qbe.BSet, bits: u64) void = {
+    bs.t[] = bs.t[].bit_or(bits);
+}
+
+fn bs_clrlow(bs: *Qbe.BSet, bits: u64) void = {
+    bs.t[] = bs.t[].bit_and(bit_not(bits));
 }
 
 /////////////
