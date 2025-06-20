@@ -299,18 +299,20 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
             emit_fn(f);
             
             // if the target thing is inlinable, this function can inline to the same thing. 
-            // TODO: make sure i don't emit twice in emit_suspended_inlinables
             target_inline := Qbe.Fn.ptr_from_int(0);
             use_symbol(f.globals, it.target) { s | 
                 mark_referenced(f.globals, it.target, s);
                 target_inline = s.inline;
             };
             
-            // :UpdateBoot
-            was_bootstrapping :: { fr := current_compiler_context(); IS_BOOTSTRAPPING || fr.vtable.driver_abi_version == 1119 };
-            @if(!was_bootstrapping) 
             use_symbol(f.globals, it.lnk.id) { s | 
                 s.inline = target_inline;
+                // make sure it never gets added to inlinable_but_referenced_later (inline being non-null normally means it wasn't emitted). 
+                // other than being wasteful, redefining something that already exists is bad for business, and since the other one aliases 
+                // the Qbe.Fn, it would be emitted twice and double free arrays, or something bad i guess. the problem only exhibits when 
+                // constant folding is disabled (which has to happen to re-bootstrap whenever the .frc version number changes). 
+                // TODO: simpler repro than the whole compiler!
+                s.referenced = s.referenced || !target_inline.is_null();  
             };
         }
         fn AotVar2(it) => each it { d |

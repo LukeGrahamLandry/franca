@@ -132,22 +132,12 @@ fn do_it(vtable: *ImportVTable, cmd: *Command) void = {
         out.items()
     };
     
-    write_to_output :: fn() => {
-        path := as_cstr cmd.output_file;
-        //remove(path);
-        out := open_trunc(path).unwrap(); 
-        for bytes& { bucket |
-            out&.write(bucket) || @panic("write to % failed", cmd.output_file);
-        };
-        Syscall'close(out);
-    };
-    
     if cmd.output_file == "" {
         cmd.output_file = "a.out";
     };
     
     // we output object files directly so we just have to write the bytes
-    write_to_output();
+    write_chunks_or_crash(cmd.output_file, bytes);
     @eprintln(">>> Wrote % to %", cmd.goal, cmd.output_file);
     if cmd.goal == .Relocatable && cmd.os == .macos {
         @eprintln(">>> don't forget to pass -Wl,-undefined,dynamic_lookup to your linker");
@@ -165,7 +155,8 @@ fn do_it(vtable: *ImportVTable, cmd: *Command) void = {
         end := timestamp();
         @println("[link time: %ms]", end - start);
     };
-    m&.drop();  // for -repeat, leak less memory 
+    
+    c'vtable'drop_qbe_module(QbeModule.raw_from_ptr(m&));  // for -repeat, leak less memory 
 
     {c.vtable.destroy_compiler}(c.data);  // for -repeat, leak less memory 
     if cmd.action == .build {

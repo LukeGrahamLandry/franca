@@ -221,13 +221,14 @@ fn limit_in_reg(pass: *SpillPass, in_reg: *Qbe.BSet, is_for_call: bool, prioriti
         allowed_ints -= T.nrsave&[0];
         allowed_floats -= T.nrsave&[1];
     };
-    floats := pass.scratch_lir;
+    floats := pass.scratch_lir; pass.scratch_lir = zeroed(Qbe.BSet) /*for good luck*/;
     bscopy(floats&, in_reg);
     bsinter(in_reg, pass.class_mask&.index(0)); // now in_reg is just ints
     bsinter(floats&, pass.class_mask&.index(1));
     pass.limit(in_reg, allowed_ints, prioritize);
     pass.limit(floats&, allowed_floats, prioritize);
     bsunion(in_reg, floats&); // return both to the caller
+    pass.scratch_lir = floats;
 }
 
 fn hint_to_avoid(f: *Qbe.Fn, u: *Qbe.BSet, r: u64) void = {
@@ -290,7 +291,7 @@ fn do_parallel_moves(pass: *SpillPass, b: *Qbe.Blk, last_copy: *Qbe.Ins, in_reg:
         i
     };
     
-    final_in_reg := pass.scratch_dpm;
+    final_in_reg := pass.scratch_dpm; pass.scratch_dpm = zeroed(Qbe.BSet) /*for good luck*/;
     bscopy(final_in_reg&, in_reg);
     is_after_call := !first_copy.identical(b.ins.ptr) && @is(first_copy.offset(-1).op(), .call, .syscall);
     avoid_registers := if is_after_call { 
@@ -308,6 +309,7 @@ fn do_parallel_moves(pass: *SpillPass, b: *Qbe.Blk, last_copy: *Qbe.Ins, in_reg:
     };
     f.hint_to_avoid(in_reg, avoid_registers);
     pass.reload_spilled(final_in_reg&, in_reg);
+    pass.scratch_dpm = final_in_reg;
     
     // Now emit all those copies
     i1 := last_copy.offset(1);
