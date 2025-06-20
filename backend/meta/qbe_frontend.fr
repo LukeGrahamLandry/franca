@@ -5,8 +5,7 @@
 // TODO: Should try to get Hare to compile with this instead of Qbe as a source of more tests. 
 //       I'm a bit worried that there might be some shapes of programs that Franca never generates but I can't articulate an example.        
 
-#include_std("backend/lib.fr");
-//#include_std("backend/llvm/target.fr");  // TODO: update for Dat2
+Qbe :: import("@/backend/lib.fr");
 
 INCLUDE_MY_C_COMPILER :: true;
 
@@ -27,7 +26,7 @@ Args :: @struct {
 
 fn main() void = { 
     // Have to smuggle this through qbe's parser callback that doesn't let you pass a data pointer.
-    global_module :: @static(QbeModule);
+    global_module :: @static(Qbe.Module);
     
     #use("@/lib/args.fr");
     HELP :: collect_help(Args, "qbe_frontend [OPTIONS] {file.ssa, -}");
@@ -66,7 +65,7 @@ fn main() void = {
         }
     };
     args.frc = args.frc || args.frc_inlinable;
-    goal: QbeOutputPurpose = @if_else {
+    goal: Qbe.OutputPurpose = @if_else {
         @if(args.r) => .JitOnly;
         @if(args.c) => .Relocatable;
         @if(args.frc_inlinable) => .CachedEarly;
@@ -100,17 +99,17 @@ fn main() void = {
     
     m := global_module;
     magic8 := ptr_cast_unchecked(u8, u64, src.ptr)[];
-    if magic8 == Incremental.MAGIC {
-        header: *Incremental.Header = check(src);
-        t := Incremental'pack_target(m.goal.arch, m.goal.os);
+    if magic8 == Qbe.Incremental.MAGIC {
+        header: *Qbe.Incremental.Header = check(src);
+        t := Qbe'Incremental'pack_target(m.goal.arch, m.goal.os);
         @assert_eq(header.arch_os.bit_and(t), t, "% was compiled for different target", inpath);
         compile_all_symbols(header, m);
     } else {
-        handle_data :: fn(d: Dat2) void = {
+        handle_data :: fn(d: Qbe.Dat2) void = {
             global_module.emit_data(d);
         };
         parse :: import("@/backend/meta/parse.fr").parse_top_level;
-        res := parse(global_module, src, handle_data, run_qbe_passes, args.cc);
+        res := parse(global_module, src, handle_data, Qbe.run_qbe_passes, args.cc);
         if res&.is_err() {
             panic(res.Err);
         };
@@ -139,7 +138,7 @@ fn main() void = {
                     if obj.is_function {
                         f := obj.f;
                         fill_lnk(f.lnk&, obj, m);
-                        run_qbe_passes(f);
+                        Qbe'run_qbe_passes(f);
                     } else {
                         for translate_data(m, obj) { dat |
                             m.emit_data(dat);
@@ -192,13 +191,13 @@ fn parse_from_args(args: []CStr, i: *i64) TargetId = {
 }
 
 // This is not what you want if you care about cross compiling!
-fill_from_libc :: fn(self: *QbeModule) void = {
+fill_from_libc :: fn(self: *Qbe.Module) void = {
     Dyn :: import("@/lib/dynamic_lib.fr");
 
     // :SLOW insanely inefficient way of doing this. especially when someone tries to add multiple libs. 
     // TODO: store a list of the pending ones so don't have to iterate them all. 
     // This is not what you want if you care about cross compiling!
-    fill_pending_dynamic_imports :: fn(self: *QbeModule, lib: Dyn.Handle) void = {
+    fill_pending_dynamic_imports :: fn(self: *Qbe.Module, lib: Dyn.Handle) void = {
         for_symbols self { id, symbol |  // :SLOW  just keep list of pending symbols instead
             if symbol.kind == .Pending && symbol.fixups.len != 0 {
                 self.imports&.push(id); 

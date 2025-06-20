@@ -8,6 +8,7 @@
 
 ## COMPILER BUG 
 
+- #use is ordered
 - tests/todo
   - a.fr: first_ref_os, const_field_unordered
   - b.fr: multiple prefix calls `float intcast 123`

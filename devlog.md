@@ -6,6 +6,16 @@ let's cheat and make examples/terminal.fr(repl=true) not take 2 seconds to compi
 - compile_to_shader_source: 68 // shader compiler (for comptime)
 notably those are all things to aren't going to change if you're just working on the terminal program. 
 
+## (Jun 20)
+
+- converting backend/lib.fr to something you can #use instead of #import_std. 
+  - not needing to import it at top level scope for every graphics program is a big win
+  - i don't love that now every file in the library has to import the library into itself, 
+    but it's not any worse than when most languages do where you put what module a file is a part of at the top, 
+    i just don't have a unique syntax for it. 
+  - once again reminded that i really really need to replace the order dependent explicit generic instantiations thing. 
+    it's so tedious any time you change anything. sucks so much. 
+
 ## (Jun 19)
 
 - get a bit more serious about not leaking memory. it doesn't matter when you just run the compiler once 

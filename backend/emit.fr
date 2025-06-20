@@ -41,8 +41,6 @@ SymbolInfo :: @struct(
     //wasm_space: Wasm.ImportType, // TODO: chunky
 );
 
-::enum_basic(SymbolKind);
-
 // TODO: deal with matching on an @enum(u8) on llvm
 SymbolKind :: @enum(u8) (
     // We haven't compiled this yet so we've emitted references as lookups into a table in the data section. 
@@ -155,6 +153,7 @@ fn find_library(m: *QbeModule, name: Str) ?u32 = {
 // TODO: what about import stubs? 
 // but also you only need to do this if you don't want WX memory so like meh. 
 fn make_exec(self: *QbeModule) void = {
+    ::enum(Arch); ::enum(@type self.goal.type);
     @debug_assert_eq(self.goal.arch, query_current_arch());
     @debug_assert_eq(self.goal.type, .JitOnly);
     
@@ -186,6 +185,7 @@ fn get_addr(self: *QbeModule, id: Qbe.Sym) ?Ty(rawptr, i64) = {
         result = get_addr(self, symbol);
         if result.is_none() {
             msg :: "Tried to get_addr for uncompiled '%' because it was suspended for inlining. it should be marked as exported.";
+            ::ptr_utils(Qbe.Fn);
             @debug_assert(symbol.inline.is_null(), msg, symbol.name);
         };
     };
@@ -200,6 +200,7 @@ fn get_addr(self: *QbeModule, name: Str) ?rawptr = {
 }
 
 fn get_addr(self: *QbeModule, symbol: *SymbolInfo) ?Ty(rawptr, i64) = {
+    ::enum(SymbolKind);
     if(symbol.kind != .Local, => return(.None));
     segment := self.segments&[symbol.segment];
     addr    := segment.mmapped.ptr.offset(symbol.offset);
@@ -360,6 +361,7 @@ fn finish_function(m: *QbeModule, dest: []u8, name_id: Qbe.Sym) void #inline = {
         s.size = dest.len.trunc();
         end_debug_info(m, s);
     };
+    ::enum(@type m.goal.type);
     if m.goal.got_indirection_instead_of_patches && m.goal.type == .JitOnly && m.goal.arch == .aarch64 {
         clear_instruction_cache(u8.raw_from_ptr(dest.ptr), dest.len);
     };
@@ -415,6 +417,7 @@ fn do_jit_fixups(self: *QbeModule, id: Qbe.Sym, segment: SegmentType, final_offs
                 // Since it's a local symbol, we don't care about the relocations anymore. The linker never needs to know. 
                 // TODO: actually thats also true for imports becuase calls go through __got. 
                 // TODO: for jitonly you do need to keep __got for weak. 
+                ::tagged(@type fixups[0].type);
                 unordered_retain(fixups, fn(it) => it.type&.is(.DataAbsolute));
                 //if(fixups.len == 0, => fixups.drop(self.gpa));
             } else {
@@ -429,9 +432,9 @@ fn do_jit_fixups(self: *QbeModule, id: Qbe.Sym, segment: SegmentType, final_offs
         };
     };
 }
-::tagged(FixupType);
 
 fn do_fixups(self: *QbeModule, address: rawptr, symbol: *SymbolInfo) void = {
+    ::tagged(FixupType);
     with_write_protect self { 
         do_fixups_impl(self, address, symbol);
     };
@@ -615,6 +618,7 @@ fn seal_debug_info(m: *QbeModule, debug_source_code: []u8, include: bool, files_
         m.do_jit_fixups(base_p, .Code, 0);
     };
     
+    ::[]u64;
     if @is(m.goal.type, .Cached, .CachedEarly, .Relocatable) {
         b := FRHOSTED_MAGIC;
         m.emit_data(id = base_p, template = (Bytes = b&.slice(1).interpret_as_bytes()), align = 8, relocations = empty());
@@ -723,6 +727,7 @@ fn collect_aot_fixups(m: *QbeModule) Ty([]FixP, []*SymbolInfo) = {
     for_symbols m { _, s | 
         first := true;
         each s.fixups& { f | 
+            ::tagged(@type f.type);
             if f.type&.is(.DataAbsolute) { 
                 fixups&.push(symbol = s, fix = f);
                 if first {

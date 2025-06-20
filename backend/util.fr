@@ -351,7 +351,7 @@ fn default_init(f: *Qbe.Fn, m: *QbeModule) void = {
    	    assert_eq(f.newtmp("r", if(is_float, => .Kd, => .Kl)), TMP(i));
     };
     assert_eq(f.ntmp.zext(), Qbe.Tmp0);
-    f.track_ir_names = TRACK_IR_NAMES;
+    f.track_ir_names = Qbe.TRACK_IR_NAMES;
 }
 
 fn push_fixed_consts(f: *Qbe.Fn) void = {
@@ -384,8 +384,6 @@ fn alloc_op(align_log2: i32) Qbe.O #inline = {
 //       don't forget to change the order of jmps/flags/ops, iscmp ranges. :CmpOrder
 //       but have to wait until i'm not calling into qbe anymore.  -- Oct 8 
 
-::List(Qbe.Cmp);
-::enum_basic(Qbe.Cmp);
 
 // !cc
 fn cmpneg(cc: i32) i32 = {
@@ -396,6 +394,7 @@ fn cmpneg(cc: i32) i32 = {
           .Cfne, .Cflt, .Cfle, .Cfgt, .Cfge, .Cfeq, .Cfuo, .Cfo
     );
 
+    ::enum(Qbe.Cmp);
     @debug_assert(cc >= 0 && cc < Qbe.Cmp.enum_count().intcast(), "bad cc");
     negate_cc[cc.zext()].raw()
 }
@@ -420,6 +419,7 @@ fn cmp_swap(cc: i32) i32 = {
 fn bsinit(bs: *Qbe.BSet, n: i64) void #inline = {
     n := (n + Qbe.NBit - 1) / Qbe.NBit;
     bs.nt = n.trunc();
+    ::[]u64;
     bs.t = temp().alloc_zeroed(u64, n).as_ptr(); 
 }
 
@@ -449,6 +449,7 @@ fn bscount(bs: *Qbe.BSet) u32 = {
 
 // TODO: make elt unsigned to the division is free
 fn bshas(bs: *Qbe.BSet, elt: i64) bool #inline = {
+    ::ptr_utils(u64);
     @debug_assert(elt < bs.nt.zext() * Qbe.NBit, "bs oob");
     i, j := elt.div_mod(Qbe.NBit);
     slot := bs.t.offset(i);
@@ -513,10 +514,10 @@ fn bs_clrlow(bs: *Qbe.BSet, bits: u64) void = {
 VMagLong :: 0xcabba9e;  // random number chosen by fair die roll
 VMagTemp :: 0xca88abe;
 
-::ptr_utils(QListHeader);
-::ptr_utils(*QListHeader);
-
 fn vnew(len: i64, esz: i64, where: i64, m: *QbeModule) rawptr = {
+    ::ptr_utils(QListHeader);
+    ::ptr_utils(*QListHeader);
+
     words := (len * esz + QListHeader.size_of() + 7) / 8;
     ::if([]i64);
     v := if where == VMagTemp {
@@ -534,6 +535,7 @@ fn vnew(len: i64, esz: i64, where: i64, m: *QbeModule) rawptr = {
 
 fn vgrow(vpr: rawptr, len: i64) void = {
     vp := ptr_from_raw(*QListHeader, vpr);
+    ::ptr_utils(@type vp[][]);
     v := vp[].offset(-1);
     @debug_assert(!v.offset(1).is_null() && !v.is_null(), "vgrow on null QList");
     @debug_assert_ne(v.where, QLIST_DOUBLE_FREE, "QList grow after free ptr=% to len=% esz=%", vpr, len, v.esz);
@@ -808,8 +810,8 @@ fn for_pred(b: *Qbe.Blk, $body: @Fn(p: *Qbe.Blk) void) void = {
     };
 }
 
-::ptr_utils(*Qbe.Blk);
 fn for_blocks_rpo_rev(f: *Qbe.Fn, $body: @Fn(b: *Qbe.Blk) void) void = {
+    ::ptr_utils(*Qbe.Blk);
     i: i64 = f.nblk.zext() - 1;
     while => i >= 0 {
         b := f.rpo[i];
@@ -840,6 +842,7 @@ fn for_insts_rev(b: *Qbe.Blk, $body: @Fn(i: **Qbe.Ins) void) void = {
 }
 
 fn for_insts_forward(b: *Qbe.Blk, $body: @Fn(i: *Qbe.Ins) void) void = {
+    ::enum(Qbe.O); ::enum(Qbe.Cls); ::enum(Qbe.J); ::if(Qbe.Ref); ::if(Qbe.Cls); ::enum(SymbolKind); ::if(*i64);
     each b.ins { i |
         body(i);
     };
@@ -868,7 +871,6 @@ fn for_bits(b: u64, $body: @Fn(i: i64) void) void = {
     };
 }
 
-::ptr_utils(Qbe.Phi);
 fn for_phi(b: *Qbe.Blk, $body: @Fn(p: *Qbe.Phi) void) void = {
     p := b.phi;
     ::ptr_utils(Qbe.Phi);
@@ -1127,8 +1129,10 @@ fn is_argbh(j: Qbe.O) bool #inline =
     @is(j, .argsb, .argub, .argsh, .arguh);
 
 // TODO: is it a mistake when amd64/isel calls this with .Kx? nowhere else does that. 
-fn is_int(k: Qbe.Cls) bool #inline =
-    k != .Kx && KBASE(k) == 0;
+fn is_int(k: Qbe.Cls) bool #inline = {
+    ::enum(Qbe.Cls);
+    k != .Kx && KBASE(k) == 0
+}
 
 fn is_wide(k: Qbe.Cls) bool #inline =
     (@as(i64) k.raw().zext()).bit_and(1) != 0;
@@ -1152,7 +1156,7 @@ fn display(self: Qbe.Ref, out: *List(u8)) void = {
 }
 
 fn track_ir_names(f: *Qbe.Fn) bool #inline =
-    @if(TRACK_IR_NAMES, f.track_ir_names, false);
+    @if(Qbe.TRACK_IR_NAMES, f.track_ir_names, false);
 
 fn set_debug_types(m: *QbeModule, s: Str, value: bool) void = for s { c | 
     m.debug[@as(i64) c.zext()] = value;
@@ -1201,6 +1205,7 @@ fn maybe_store(i: *Qbe.Ins) ?i32 = {
 }
 
 fn maybe_load(i: *Qbe.Ins) ?i32 = {
+    ::if(i32);
     (Some = @match(i.op()) {
         fn loadsb() => 1;
         fn loadub() => 1;
@@ -1243,19 +1248,6 @@ fn find_cas(i: *Qbe.Ins, b: *Qbe.Blk) Ty(*Qbe.Ins, *Qbe.Ins) = {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-::enum_basic(Qbe.ConType);
-
-::enum_basic(Qbe.Cls);
-::enum_basic(Qbe.J);
-::enum_basic(Qbe.RegKind);
-::if(Qbe.Cls);
-::if(Qbe.O);
-::enum_basic(Qbe.O);
-::ptr_utils(Qbe.Blk);
-
-::if(i32);
-
-
 fn ge(a: Qbe.Cls, b: Qbe.Cls) bool = a.raw().int() >= b.raw().int();
 fn gt(a: Qbe.Cls, b: Qbe.Cls) bool = a.raw().int() > b.raw().int();
 
@@ -1264,27 +1256,26 @@ fn gt(a: Qbe.Cls, b: Qbe.Cls) bool = a.raw().int() > b.raw().int();
 //
 
 fn is_dark(self: *Qbe.Typ) bool = {
-    flags: TypFlags = (repr = self.header.flags);
+    flags: Qbe.TypFlags = (repr = self.header.flags);
     flags.get(.is_dark) != 0
 }
 
 fn is_union(self: *Qbe.Typ) bool = {
-    flags: TypFlags = (repr = self.header.flags);
+    flags: Qbe.TypFlags = (repr = self.header.flags);
     flags.get(.is_union) != 0
 }
 
 fn set_is_union(self: *Qbe.Typ, c: bool) void = {
-    flags: TypFlags = (repr = self.header.flags);
+    flags: Qbe.TypFlags = (repr = self.header.flags);
     flags&.set(.is_union, int(c));
     self.header.flags = flags.repr;
 }
 
 fn set_is_dark(self: *Qbe.Typ, c: bool) void = {
-    flags: TypFlags = (repr = self.header.flags);
+    flags: Qbe.TypFlags = (repr = self.header.flags);
     flags&.set(.is_dark, int(c));
     self.header.flags = flags.repr;
 }
 
 fn eq(a: Qbe.Sym, b: Qbe.Sym) bool #redirect(Ty(u32, u32), bool);
 fn ne(a: Qbe.Sym, b: Qbe.Sym) bool #redirect(Ty(u32, u32), bool);
-::if(Qbe.Ref);

@@ -1,4 +1,5 @@
-#include_std("backend/ir.fr");
+Qbe :: import("@/backend/ir.fr");
+
 #include_std("backend/opt/simplify.fr");
 #include_std("backend/util.fr");
 #include_std("backend/emit.fr");
@@ -16,12 +17,22 @@
 #use("@/lib/sys/sync/mutex.fr");
 #use("@/lib/sys/process.fr");
 
-// TODO
-//exports :: @const_slice(
-//    @as(@Fn(m: *QbeModule) void) set_target_vtable,
-//    @as(@Fn(f: *Qbe.Fn) void) run_qbe_passes,
-//    @as(@Fn(m: *QbeModule, d: *Dat2) void) emit_data,
-//);
+/* // TODO
+exports :: Type.scope_of(@struct {
+    init_module: (@Fn(m: *QbeModule, goal: QbeTargetEnv) void) :init_default_module;
+    compile_fn: (@Fn(f: *Qbe.Fn) void) :run_qbe_passes;
+    compile_dat: (@Fn(m: *QbeModule, d: *Dat2) void) :emit_data;
+    compile_suspended: (@Fn(m: *QbeModule) void) :emit_suspended_inlinables;
+    finish_writer: (@Fn(self: *Writer, meta: Incremental.Meta, m: *QbeModule) [][]u8) :to_bytes;
+    load_one: (@Fn(h: *Incremental.Header, f: *Qbe.Fn, it: Incremental'One(Incremental.Sym), syms: []Qbe.Sym) bool) :load;
+    load_all: (@Fn(header: *Incremental.Header, m: *QbeModule) void) :compile_all_symbols;
+    drop_module: (@Fn(m: *QbeModule) void) :drop;
+    fold_op: (@Fn(rt_o: Qbe.O, rt_k: Qbe.Cls, out: rawptr, a0: i64, a1: i64) void) :do_fold;
+    // TODO: separate worker.fr from the frontend
+    // codegen_thread_main
+    // enqueue_task
+});
+*/
 
 // It can be interesting to disable optional optimisation passes to see how much they help. 
 //                           June 2025 (arm self compile)
@@ -174,13 +185,13 @@ QbeTargetEnv :: @struct(
 );
 
 QbeOutputPurpose :: @enum(i64) (Cached, JitOnly, Exe, Relocatable, Dynamic, CachedEarly);
-::enum(QbeOutputPurpose);
 
 fn text_padding(m: *QbeModule) i64 = 
     m.goal.size_of_stubs + m.goal.commands_size_guess;
 
 fn init_default_module(m: *QbeModule, goal: QbeTargetEnv) void = {
     :: import("@/lib/sys/subprocess.fr");  // this includes it in comptime_compute_self_hash even when -syscalls
+    ::enum(QbeOutputPurpose);
     
     init(m, general_allocator(), goal);
     
@@ -418,10 +429,11 @@ fn drop(m: *QbeModule) void = {
     m[] = zeroed(@type m[]);  // just to make sure you crash if you try to use it again. 
 }
 
-::ptr_utils(*Qbe.Blk);
 
 // returns false if suspended for inlining 
 run_qbe_passes_common :: fn(f: *Qbe.Fn) bool = {
+    ::ptr_utils(*Qbe.Blk);
+
     #use("@/backend/opt/mem.fr");
     
     ::if(Qbe.Ref);
@@ -484,9 +496,9 @@ run_qbe_passes :: fn(f: *Qbe.Fn) void = {
     };
     reset_temporary_storage(mark);
 };
-::[]u64;
 
 fn finish_qbe_passes_native(f: *Qbe.Fn) void = {
+    ::[]u64;
     if f.mem.first.is_null() {
         f.mem = new(0);
     };
@@ -797,3 +809,9 @@ fn replace_frontend_ops(f: *Qbe.Fn) void = {
 wasm_page_size :: 65536;
 
 // all computers know these days is fill memory and branch
+
+QbeNull :: Qbe.Null;
+QbeUndef :: Qbe.Undef;
+QbeConZero :: Qbe.ConZero;
+Module :: QbeModule;
+OutputPurpose :: QbeOutputPurpose;
