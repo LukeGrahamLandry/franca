@@ -1,3 +1,5 @@
+- "this works here but not in it's original place under f()."
+- :ThisIsNotOkBecauseMemoryWillBeReused
 
 ## PROGRAMS THAT CRASH
 
@@ -204,6 +206,13 @@ make this work well enough that i don't need to re-export the backend functions 
 `enqueue_task, codegen_thread_main, drop_qbe_module, finish_qbe_module, run_qbe_passes, init_default_qbe_module, emit_qbe_included`
 i want them to go through sema exactly once if you compile the compiler and then use it to run a driver that compiles a program that uses the backend. 
 
+the current state of import_module() is that if you change anything it's faster to just use FRANCA_NO_CACHE=true,
+but now it's spilt into pieces that it's clear how to parallelize. 
+even when cached, need to store post-regalloc as well or it's kinda pointless. 
+gets to the point where it's just blocked waiting for the backend thread.
+should allow more backend threads but need to be careful about order because i want repro. 
+also it's cripplingly broken because it doesn't track buildoptions so it's disabled in meta.fr for now. 
+
 ### FrcImport 
 
 -  run inlining and if something changes redo the other early passes as well
@@ -244,7 +253,6 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
 - non-i64 @tagged. doesn't really matter because i don't allow it anyway but should assert on it just in case. 
 - import_module 
   - don't hardcode `exports` as a magic symbol
-  - actually cache the file 
   - include deps and chech thier hashes
   - include build options somehow
   - add back !did_regalloc check
@@ -256,11 +264,15 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
   - now that you'll be having more modules, you really want to cache the normal comptime stuff automatically. 
     like you can't have every compilation unit eat 15ms on @syscall, @match, etc
   - use the multiple scopes thing
+  - every module has it's own copy of lib/runtime/etc stuff which is terrible, especially for statics, they really need to share 
+    or everything's confusing, like OS, RESOLVERS, really need to only have one. 
+    the functions being duplicated is also very sad but not as fundamentally crippling. 
+  - when a module depends on another it shouldn't pull all the code into itself and then cache that, it should just reference 
+    the other module. like (qbe_frontend->(import_c, backend), import_c->(backend)), you'll have 3 copies of the backend code on disk. 
 
 - i want the apis for importing .frc files to be as convenient as dlopen. 
   i like the idea of importing things as source and transparently using the cached thing if the hash hasn't changed.  
-- make sure transitive dep tracking works out. 
-track envvars you observe (ie. ENABLE_TRACY). 
+- track envvars you observe (ie. ENABLE_TRACY). 
 
 ## speed regression ?
 

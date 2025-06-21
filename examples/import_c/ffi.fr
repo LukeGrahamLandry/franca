@@ -44,8 +44,8 @@ fn include(src: Str) ScopeId #fold = {
 }
 
 fn include(fr: CompCtx, c_source: Str) ScopeId = {
-    c := import_c'init(fr);
-    bytes := import_c'compile(fr.get_alloc(), c_source, c);
+    c := import_c'init_fr(fr);
+    bytes := import_c'compile_fr(fr.get_alloc(), c_source, c);
     result := fr'vtable'import_frc(fr.data, bytes);
     or result { err |
         fr.report_error(err)
@@ -55,10 +55,20 @@ fn include(fr: CompCtx, c_source: Str) ScopeId = {
 import_c :: import_module("@/examples/import_c/ffi.fr");
 
 exports :: Type.scope_of(@struct {
-    init: (@Fn(fr: CompCtx) *C.Compile.Ctx) : init_for_include;
-    compile: (@Fn(out_alloc: Alloc, c_source: Str, c: *C.Compile.Ctx) []u8) : compile_to_module;
+    init_fr: (@Fn(fr: CompCtx) *C.Compile.Ctx) : init_for_include;
+    compile_fr: (@Fn(out_alloc: Alloc, c_source: Str, c: *C.Compile.Ctx) []u8) : compile_to_module;
+    init_c: (@Fn(c: *C.Compile.Ctx, m: *QbeModule) void) : init_ctx;
+    compile_c: (@Fn(c: *C.Compile.Ctx, filename: Str, contents: Str) Result(void, Str)) : fn(c, filename, contents) = {
+        catch_call(c, void) {
+            tok := c.tokenize_string(filename, contents);
+            tok  = c.C'Preprocess'preprocess(tok);
+            c.C'Compile'parse(tok);
+        }
+    };
 });
 
+// for now this uses compiler's exported backend functions instead of import_module(backend/lib.fr) 
+// so abi is more likely to work out. this might change eventually, it feels kinda hacky to expose backend stuff. 
 fn init_for_include(fr: CompCtx) *C.Compile.Ctx = {
     m := fr.get_alloc().box(QbeModule);
     c := fr.get_alloc().box_zeroed(C'Compile.Ctx);

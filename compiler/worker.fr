@@ -1,4 +1,4 @@
-#include_std("compiler/profile.fr");
+#use("@/compiler/profile.fr");
 
 Futex :: import("@/lib/sys/sync/futex.fr");
 ENABLE_ENABLE_TRACY :: get_environment_variable("FRANCA_TRACY").is_some();
@@ -122,13 +122,6 @@ fn main_thread_pump(comp: CompCtx, shared: *CodegenShared, fns: []FuncId) BitSet
     };
     
     shared.join_codegen_thread();
-    
-    if !shared.threaded {
-        shared.m.emit_suspended_inlinables();
-    } else {
-        @debug_assert_eq(shared.m.inlinable_but_referenced_later.len, 0, "this happens on the other thread so it works with apple's MAP_JIT");
-    };
-    
     funcs_done
 }
 
@@ -177,7 +170,7 @@ codegen_queue_size :: if(use_threads, => 128, => 1);  // (this is not the number
 
 codegen_thread_main :: fn(shared: *CodegenShared) void = {
     @debug_assert(use_threads && shared.threaded && !shared.m.need_write_protect);
-    @if(shared.m.goal.type == .JitOnly) apple_thread_jit_write_protect(false);  // :JitMemProtect this thread wants to write
+    @if(shared.m.use_map_jit_on_apple_silicon) apple_thread_jit_write_protect(false);  // :JitMemProtect this thread wants to write
     
     idx := 0;
     loop {
@@ -495,5 +488,11 @@ fn join_codegen_thread(shared: *CodegenShared) void = {
     };
     each shared.queue { q |
         q.arena&.deinit();
+    };
+    
+    if !shared.threaded {
+        shared.m.emit_suspended_inlinables();
+    } else {
+        @debug_assert_eq(shared.m.inlinable_but_referenced_later.len, 0, "this happens on the other thread so it works with apple's MAP_JIT");
     };
 }

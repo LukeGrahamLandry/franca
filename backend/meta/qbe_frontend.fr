@@ -100,7 +100,11 @@ fn main() void = {
     m := global_module;
     magic8 := ptr_cast_unchecked(u8, u64, src.ptr)[];
     if magic8 == Qbe.Incremental.MAGIC {
-        header: *Qbe.Incremental.Header = check(src);
+        H :: *Qbe.Incremental.Header;
+        ::Result(H, Str);
+        header: H = or check(src) { e |
+            @panic("invalid frc file: %", e)
+        };
         t := Qbe'Incremental'pack_target(m.goal.arch, m.goal.os);
         @assert_eq(header.arch_os.bit_and(t), t, "% was compiled for different target", inpath);
         Qbe'backend'load_all(header, m);
@@ -117,38 +121,21 @@ fn main() void = {
         // TODO: scoping super doesn't work :FUCKED :Compiler repro at tests/todo/e.fr -- May 24 2025
         //       if the #use is in the `if` block, it can't find the `res` variable
         #use("@/examples/import_c/lib.fr");
+        #use("@/examples/import_c/ffi.fr");
         @if(INCLUDE_MY_C_COMPILER) 
         if args.cc {
             c := Compile.Ctx.zeroed();
-            init_ctx(c&, m);
-            c.enqueue_task = Qbe.backend.enqueue;
-            objs := catch_call(c&, *Compile.Obj) {
-                // TODO: this way of doing it means you lose location information which sucks
-                tok := c&.tokenize_string(">>>driver", res.Ok&.items());
-                tok  = c&.Preprocess'preprocess(tok);
-                c&.Compile'parse(tok)
-            };
-            objs := objs.or(panic);
-            
-            // not using for_defs because that assumes the wrong root (it doesn't know about our .ssa functions)
-            // if you want to use this for serious programs (instead of the tiny tests), 
-            // should change that so you get the optimisation formerly known as LTO
-            for_linked objs { obj |
-                if obj.is_definition {
-                    id := obj.global_symbol.unwrap();
-                    if obj.is_function {
-                        f := obj.f;
-                        fill_lnk(f.lnk&, obj, m);
-                        Qbe'backend'compile_fn(f);
-                    } else {
-                        for translate_data(m, obj) { dat |
-                            m.Qbe'backend'compile_dat(dat);
-                        }
-                    }
-                }
-            }
+            import_c'init_c(c&, m);
+            c.enqueue_task = Qbe.backend.worker_enqueue;
+            ctx: *Compile.CodegenShared = init(m, general_allocator(), zeroed Compile.CodegenWorker, false);
+            c.emitter = (Some = ctx);
+            // TODO: this way of doing it means you lose location information which sucks
+            result := import_c'compile_c(c&, ">>>driver", res.Ok&.items());
+            result.or(fn(e) => panic(e));
+            Qbe'backend'worker_join(ctx);
+        } else {
+            m.Qbe'backend'compile_suspended();
         };
-        m.Qbe'backend'compile_suspended();
     };
     
     chunks := {global_module[].target.finish_module}(global_module);

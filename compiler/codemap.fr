@@ -10,6 +10,10 @@ fn init(gpa: Alloc) CodeMap =
 
 // The caller is responsible for ensuring name/src outlive the codemap. 
 fn add_file(self: *CodeMap, name: Str, content: Str) Span = {
+    add_file(self, name, content, Sha256'hash(content))
+}
+
+fn add_file(self: *CodeMap, name: Str, content: Str, hash: Sha256'Digest) Span = {
     @assert_lt(@as(i64) self.total_len.zext() + content.len, 0xFFFFFFFF, "add_file total > 4gb. old len = %, content len = %, content ptr = %", self.total_len, content.len, u8.raw_from_ptr(content.ptr));
     span: Span = (low = self.total_len, high = self.total_len.add(content.len.trunc()));
     self.total_len += content.len.trunc();
@@ -17,7 +21,7 @@ fn add_file(self: *CodeMap, name: Str, content: Str) Span = {
         name = name, 
         content = content, 
         start = span.low,
-        hash = Sha256'hash(content),
+        hash = hash,
     );
     @assert_eq(span.len(), content.len, "Miscompiled????");
     span
@@ -78,6 +82,11 @@ fn get_whole_line(self: *CodeMap, span: Span) FrancaCodeLine = {
     (filename = file.name, line = line, col = col, line_text = line_text)
 }
 
+fn nice_filename(self: *FrancaCodeLine) Str = {
+    @if(self.filename.starts_with("@/")) return(self.filename.rest(2));
+    self.filename
+}
+
 // recall: it is an error to call source_slice on one that spans multiple files. 
 fn merge(a: Span, b: Span) Span = (
     low = a.low.min(b.low),
@@ -92,14 +101,14 @@ Terminal :: import("@/lib/sys/terminal.fr");
 fn fmt_error_loc(self: *CodeMap, span: Span, out: *List(u8), color: bool) void = {
     line := self.get_whole_line(span);
     @if(color) @fmt(out, Terminal.set_colour, 250, 0, 0);
-    @fmt(out, "%:%:%", line.filename, line.line, line.col);
+    @fmt(out, "%:%:%", line&.nice_filename(), line.line, line.col);
     @if(color) @fmt(out, Terminal.unset_colour);
 }
 
 fn fmt_error_line(self: *CodeMap, span: Span, out: *List(u8), color: bool) void = {
     line := self.get_whole_line(span);
     @if(color) @fmt(out, Terminal.set_colour, 250, 0, 0);
-    @fmt(out, "%:%:%", line.filename, line.line, line.col);
+    @fmt(out, "%:%:%", line&.nice_filename(), line.line, line.col);
     @if(color) @fmt(out, Terminal.unset_colour);
     out.push_all("\n");
     out.push_all(self.source_slice(line.line_text));

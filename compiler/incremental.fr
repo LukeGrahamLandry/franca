@@ -15,11 +15,11 @@ fn read_cached(a: Alloc, path: Str) ?*Header = {
         a.dealloc(u8, bytes);
         return(.None);
     };
-    (Some = check(bytes))
+    (Some = check(bytes).or(fn(_) => return(.None)))
 }
 
 // The first Dep in cached .frc files is the hash of the compiler itself. 
-self_filename :: "@self";
+self_filename :: "$franca/compiler";
 // TODO: im just vaugly hoping this runs after all files have been loaded 
 //       (which it does not in fact. backend/__/emit.fr is through a vtable so happens late)
 self_hash :: @static(Array(u32, 8)) Array(u32, 8).zeroed();
@@ -58,22 +58,43 @@ fn bit_xor(a: Array(u32, 8), b: Array(u32, 8)) Array(u32, 8) = {
     a
 }
 
+// TODO: hella redundant work. should only load+hash each file once (including across multiple CompCtx in the same process). 
 fn files_unchanged(header: *Header) bool = {
     if(header.dep.count <= 1, => return(false));
     
     it: *Dep = header.get(0);
     if(header.get(it.filename) != self_filename, => return(false));
     if(self_hash.items() != it.hashcode&.items(), => return(false));
+    cache_dir := cache_dir();
     
     // TODO: save this work of loading + hashing the files even if they changed
     range(1, header.dep.count.zext()) { i |
         continue :: local_return;
         it: *Dep = header.get(@as(u32) i.trunc());
         filename := header.get(it.filename);
-        src      := temp().get_include_std(filename) || return(false);
-        if(src.len != it.file_len.zext(), => return(false));
-        hashcode := Sha256'hash(src);
-        if(hashcode&.items() != it.hashcode&.items(), => return(false));
+        
+        break :: fn() Never => {
+            if false {
+                @println("A"); // TODO
+            };
+            return(false);
+        };
+        
+        if filename.starts_with("!/") {
+            // this dep is another frc file added by import_frc. check transitive dependencies. 
+            path := @tfmt("%%", cache_dir, filename.rest(2));
+            src := temp().get_include_std(path) || break();
+            result := check(src);
+            result := result.or(fn(_) => break());  // invalid frc
+            (it.hashcode == result.all_deps) || break();  // we disagree about what's supposed to be in the file
+            files_unchanged(result) || break();  // out of date
+        } else {
+            filename := filename.rest(2);
+            src := temp().get_include_std(filename) || break();
+            if(src.len != it.file_len.zext(), => break());
+            hashcode := Sha256'hash(src);
+            if(hashcode&.items() != it.hashcode&.items(), => break());
+        };
     };
     true
 }
@@ -111,9 +132,10 @@ fn write_deps(writer: *Writer, codemap: *CodeMap, start_path: Str) u32 = {
     );
     
     entry_dep := Qbe.no_symbol;
+    goal_start_path := @tfmt("@/%", start_path);
     each codemap.files { it |
         if is_cachable(it.name) {
-            if entry_dep == Qbe.no_symbol && it.name == start_path /*:SLOW*/ {
+            if entry_dep == Qbe.no_symbol && it.name == goal_start_path /*:SLOW*/ {
                 entry_dep = writer.dep.len.trunc();
             };
         
@@ -148,7 +170,8 @@ fn write_cache(m: *QbeModule, c: CompCtx, fid: FuncId, outpath2: Str, start_path
     write_entire_file_or_crash(outpath2, bytes);
     if(show_backend_stats(), => @eprintln(">>> save: %", outpath2));
     
-    check(bytes)
+    ::Result(*Header, Str);
+    check(bytes).or(fn(e) => @panic("ICE: generated an invalid frc file: %", e))
 }
 
 fn is_cachable(name: Str) bool = !(false 
@@ -168,6 +191,12 @@ fn is_cachable(name: Str) bool = !(false
 fn choose_cache_filename(path: Str) Str = {
     out := u8.list(path.len+25, temp());
     out&.push_all(cache_dir());
+    out&.push_all(mangle_name_for_cache(path));
+    out.items()
+}
+
+fn mangle_name_for_cache(path: Str) Str = {
+    out := u8.list(path.len, temp());
     for path { c |
         if c.is_ascii_alpha() || c.is_ascii_digit() {
             out&.push(c);
@@ -206,7 +235,17 @@ FrcModuleInstance :: @struct {
 // no work to actually translate into Func/BakedValue graph is done yet. 
 // thing are loaded lazily the first time they're referenced (just like normal franca code). 
 fn import_frc(self: *SelfHosted, bytes: []u8) CRes(ScopeId) = {
-    header := check(bytes);  // TODO: return error if the magic fails
+    zone := zone_begin(.ImportCache);
+    header := or check(bytes) { e |
+        zone_end(zone);
+        return(@err("import_frc failed: %", e))
+    };
+    
+    if header.dep.count > 0 {
+        fake_path := (@tfmt("!/%", header.get(header.debug_name))).shallow_copy(self.get_alloc());
+        self.codemap.add_file(fake_path, bytes, header.all_deps);  // TODO: rehashing every time is sad
+    };
+    
     scope := self.scopes.new_scope(TOP_LEVEL_SCOPE, self.get_alloc(), zeroed Span); // TODO: location info
     
     // TODO: some configuration to make it save these somewhere you can look at them. 
@@ -276,8 +315,7 @@ fn import_frc(self: *SelfHosted, bytes: []u8) CRes(ScopeId) = {
         self.add_to_scope(scope, name, type, expr);
     };
     module.data_symbols = data_symbols.items();
-    //println("done filling scope!");
-    
+    zone_end(zone);
     (Ok = scope)
 }
 
@@ -634,7 +672,7 @@ fn find_module(self: *SelfHosted, shared: *CodegenShared, module: *FrcModule, id
     a := self.get_alloc();
     imp := shared.frc_imports&;
     ::ptr_utils(@type module[]);
-    xx := imp.items().find(fn(it) => identical(it.module, module));
+    xx := imp.items().find(fn(it) => identical(it.module, module));  // :ThisIsNotOkBecauseMemoryWillBeReused
     (Ok = xx || {
         @assert_ne(shared.frc_imports.cap, shared.frc_imports.len, "ICE: too many imported modules. TODO: use something with pointer stability");
         idx := @unwrap(idx, "ICE: find_module(idx=.None) on first time") return;
@@ -728,10 +766,11 @@ fn as_bytes(header: *Header) []u8 =
 
 // TODO: return and error instead of crashing but need to pre-fmt it because the caller doesn't have our compiler instance. 
 cached_compile_module :: fn(path: Str, opts: *BuildOptions, out_alloc: Alloc) CRes([]u8) = {
+    zone := zone_begin(.CheckCache);
     @assert(path.starts_with("@/"), "cached_compile_module path must start with @");
-    path := path.rest(2);
+    path_unprefixed := path.rest(2);
     
-    cachepath := choose_cache_filename(path);
+    cachepath := choose_cache_filename(path_unprefixed);
     @if(enable_incremental())
     if read_cached(out_alloc, cachepath) { header |
         B :: local_return;
@@ -739,26 +778,33 @@ cached_compile_module :: fn(path: Str, opts: *BuildOptions, out_alloc: Alloc) CR
             out_alloc.dealloc(u8, header.as_bytes());
             B();
         };
+        
         t := Incremental'pack_current_target();
         if(header.arch_os.bit_and(t) != t, => break());
+        if(header.entry_dep.off == Qbe.no_symbol, => break());
         entry_dep := header.get(header.entry_dep);
         if(header.get(entry_dep.filename) != path, => break());
+        
         if(!files_unchanged(header), => break());
         if(show_backend_stats(), => @eprintln(">>> hit: %", cachepath));
+        zone_end(zone);
         return(Ok = header.as_bytes());
     };
+    zone_end(zone);
+    
     
     // It's convient to just pass in the one from the parent compiler instance, 
     // so we have to not mutate BuildOptions.env with indices into this new compiler we're going to throw away.  
     opts := opts[]; 
     
+    zone := zone_begin(.ImportCache);
     out := "";
     push_dynamic_context {
         context(DefaultContext)[].comptime = zeroed rawptr;
         mark := mark_temporary_storage();
         start := timestamp();
         vtable := init_driver_vtable();
-        src := @tfmt("""#include_std("lib/core.fr"); MODULE_EXPORTS :: import("@/%").exports;""", path);
+        src := @tfmt("""#include_std("lib/core.fr"); MODULE_EXPORTS :: import("%").exports;""", path);
         compiler := new_with_src(vtable, src, opts&);
         self := compiler.cast()[][];
         
@@ -783,7 +829,7 @@ cached_compile_module :: fn(path: Str, opts: *BuildOptions, out_alloc: Alloc) CR
             c.writer.fty&.push(zeroed Incremental.FTy);   // skip builtin types so offsets work out
         };
         
-        bytes := build_the_exports_scope(c&, path);
+        bytes := build_the_exports_scope(c&, path_unprefixed);
         // TODO: pre-format this error and return it
         bytes := self.unwrap_report_error([][]u8, bytes);
         bytes := bytes.concat(out_alloc);
@@ -801,6 +847,7 @@ cached_compile_module :: fn(path: Str, opts: *BuildOptions, out_alloc: Alloc) CR
         
         out = bytes;
     };
+    zone_end(zone);
     (Ok = out)
 };
 
@@ -829,6 +876,8 @@ fn build_the_exports_scope(c: *ExportCtx, start_path: Str) CRes([][]u8) = {
         arch_os = 0x0F0F,
         entry_dep = (off = entry_dep),
         root_scope = root_scope,
+        // TODO: don't call this debug_name if im going to use it for stuff
+        debug_name = c.writer.push(mangle_name_for_cache(start_path)),
     );
     bytes := c.writer.to_bytes(meta, c.m);
     (Ok = bytes)

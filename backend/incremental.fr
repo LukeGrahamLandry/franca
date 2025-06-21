@@ -1,7 +1,7 @@
 /// This defines the .frc file format used by the franca compiler. 
 /// See @/docs/caching.md
 
-MAGIC :: 0x000A_41434E415246;  // FRANCA__
+MAGIC :: 0x000B_41434E415246;  // FRANCA__
 Header :: @struct {
     meta: Meta #use;
     dep: Storage(Dep);
@@ -28,6 +28,7 @@ Meta :: @struct {
     entry_dep:  One(Dep) = (off = Qbe.no_symbol);
     root_scope: One(FTy) = (off = Qbe.no_symbol);
     debug_name: Ref(u8)  = (off = 0, count = 0);
+    all_deps := zeroed Sha256.Digest;  // patched by to_bytes()
 };
 
 // Hashes of all the input files that contributed to this module. 
@@ -164,19 +165,19 @@ Ref :: fn($T: Type) Type =
 One :: fn($T: Type) Type = 
     @struct(off: u32, OneElement :: T);
 
-fn check(data: []u8) *Header = {
-    @assert_ge(data.len, size_of(Header));
+fn check(data: []u8) Result(*Header, Str) = {
+    @if(data.len < size_of(Header)) return(Err = "too small");
     self := ptr_cast_unchecked(u8, Header, data.ptr);
-    @assert_eq(self.magic_v, MAGIC, "Tried to load .frc with invalid magic!");
-    @assert_le(self.filelen.zext(), data.len, "header.filelen corrupted");
+    @if(self.magic_v != MAGIC) return(Err = "invalid magic");
+    @if(self.filelen.zext() > data.len) return(Err = "filelen corrupted");
     
     for storage_fields { off, size |
         S :: @struct(off: u32, count: u32);
         storage := S.ptr_from_raw(Header.raw_from_ptr(self).offset(off.zext()));
-        @assert_le(storage.off, self.filelen);
-        @assert_le(storage.off + storage.count * size, self.filelen);
+        @if(storage.off > self.filelen) return(Err = "storage.off OOB");
+        @if(storage.off + storage.count * size > self.filelen) return(Err = "storage.count OOB");
     };
-    self
+    (Ok = self)
 }
 
 storage_fields :: {
@@ -383,6 +384,11 @@ fn to_bytes(self: *Writer, meta: Meta, m: *QbeModule) [][]u8 = {
         @debug_assert_eq(self.typ.len, 0, "cannot to_bytes(Writer) twice");
         write_types(self, m);
     };
+    
+    if self.dep.len > 0 {
+        // TODO: maybe i don't want it to be order dependent
+        meta.all_deps = Sha256'hash(self.dep.items().interpret_as_bytes());
+    };
 
     bytes := list([]u8, 14, temp());
     
@@ -581,6 +587,8 @@ fn preintern_syms(header: *Header, m: *QbeModule) []Qbe.Sym = {
     };
     syms
 }
+
+#use("@/compiler/profile.fr");
 
 fn compile_all_symbols(header: *Header, m: *QbeModule) void = {
     // TODO: maybe entry_sym should be export=true

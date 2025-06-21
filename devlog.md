@@ -6,6 +6,14 @@ let's cheat and make examples/terminal.fr(repl=true) not take 2 seconds to compi
 - compile_to_shader_source: 68 // shader compiler (for comptime)
 notably those are all things to aren't going to change if you're just working on the terminal program. 
 
+## (Jun 21)
+
+- more playing around with the byte-prefixed-paths in deps, so `@/` means a source file and `!/` means a cache file. 
+  should really have types tho. it's error prone to pass around strings. 
+- figured out why `NOCACHE franca ../cc.fr a.c -r` was crashing: codegen_thread_main was calling write_protect for any jit, 
+  not just if expecting_wx=true, and run_franca_file was setting expecting_wx when it didn't need to. 
+- fixed tracy zones in report_aot_progress to include the compiler identity so it works when you have nested modules
+
 ## (Jun 20)
 
 - converting backend/lib.fr to something you can #use instead of #import_std. 
@@ -35,8 +43,7 @@ notably those are all things to aren't going to change if you're just working on
   it gets past that if marked #fold but it really shouldn't have been on the work_stack because it could only have been called at comptime. 
 - ok works for calling try_fold through the import_module, comically takes 60% longer the first time and 10ms longer even when cached. 
   but that makes sense, doing it for just that tiny function is a waste. 
-
-TODO: crash: `FRANCA_NO_CACHE=true ./q.out examples/import_c/cc.fr examples/import_c/test/hello.c`
+- import_frc stick the hash of all deps of the imported module in the target module as a new dep so you rebuild when transitive dependencies change. 
 
 ## (Jun 19)
 

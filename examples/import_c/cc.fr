@@ -12,9 +12,6 @@ Args :: @struct {
 };
 
 fn main() void = {
-    // TODO: don't do this if we're running in the compiler
-    import("@/lib/crash_report.fr")'hook_backtrace();
-    
     ::?Arch;
     cfg: Args = (
         target = (arch = query_current_arch(), os = query_current_os(), type = .Exe), 
@@ -133,15 +130,26 @@ fn compile(args: Args) Result(void, Str) = {
     ctx: *C.Compile.CodegenShared = init(m&, general_allocator(), backend.worker_thread, true);
     
     c := C'Compile.Ctx.zeroed();
-    C'init_ctx(c&, m&);
+    import_c'init_c(c&, m&);
     c.emitter = (Some = ctx);
-    c.enqueue_task = backend.enqueue; 
-    each args.defines { it |
-        c&.define_macro(it._0, it._1);
-    };
-    c.include_paths&.push_all(args.includes);
+    c.enqueue_task = backend.worker_enqueue; 
     
-    prog := @try(c&.compile_file(args.input_path)) return;
+    
+    // Instead of calling using c.define_macro, push(c.include_paths) directly, 
+    // it's nicer to just generate a string and pass it in, so it can just be treated as an opaque blob in FrcModule.dep 
+    // when deciding if a cache file can be reused. 
+    
+    src := u8.list(temp());
+    each args.defines { it |
+        @fmt(src&, "#define % %\n", it._0, it._1);
+    };
+    each args.includes { it |
+        @fmt(src&, "#add_include_path \"%\"\n", it);  // TODO: implement this. TODO: have a test that uses this
+    };
+    @fmt(src&, "#define __BASE_FILE__ \"%\"\n", args.input_path);
+    @fmt(src&, "#include \"%\"\n", args.input_path);
+    
+    prog := @try(c&.import_c'compile_c("-", src&.items())) return;
     ctx.backend'worker_join();
 
     ::enum(@type m.goal.type);
@@ -165,3 +173,5 @@ fn compile(args: Args) Result(void, Str) = {
     drop(m&);
     .Ok
 }
+
+#use("@/examples/import_c/ffi.fr");

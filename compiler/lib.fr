@@ -9,7 +9,7 @@
 #include_std("compiler/walk_ast.fr");
 #include_std("compiler/comptime.fr");
 #include_std("compiler/values.fr");
-#include_std("compiler/profile.fr");
+#use("@/compiler/profile.fr");
 #include_std("compiler/v2/dispatch.fr"); 
 #include_std("compiler/v2/sema.fr"); 
 #include_std("compiler/v2/ast_boring.fr");
@@ -170,8 +170,9 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
             // (just chopping out non _azAZ09 chars. i.e. `a b` and `a.b` become the same). 
             // TODO: it's unfortunate to have `a.out` not match `./a.out`,
             //       but that was a problem with the old way too (hash of file name). 
+            if(header.entry_dep.off == Qbe.no_symbol, => break());
             entry_dep := header.get(header.entry_dep);
-            if(header.get(entry_dep.filename) != path, => break());
+            if(header.get(entry_dep.filename) != @tfmt("@/%", path), => break());
             
             if(!files_unchanged(header), => break());
             middle := timestamp();
@@ -214,13 +215,19 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         
         cache_it := !no_cache && enable_incremental() && !USE_SAME_MODULE;
         
+        
+        was_bootstrapping :: { fr := current_compiler_context(); IS_BOOTSTRAPPING || fr.vtable.driver_abi_version == 1119 };
+
         shared := @if(USE_SAME_MODULE, self.comptime_codegen, {
             m := self.get_alloc().box(QbeModule);
             init_default_module(m, (
                 arch = query_current_arch(), 
                 os = query_current_os(), 
                 type = @if(cache_it, .Cached, .JitOnly),
-                expecting_wx = true, // TODO: this can be false right?
+                expecting_wx = was_bootstrapping,  // :UpdateBoot
+                // note: not expecting_wx=true even when JitOnly, 
+                // still compile everything up front and then make_exec() instead of using MAP_JIT. 
+                // this means the callee program can use apple_thread_jit_write_protect if it wants. 
             ));
             self.other_module&.push(m, self.get_alloc());
             shared: *CodegenShared = init(m, self.get_alloc(), @as(CodegenWorker) codegen_thread_main, true);
@@ -240,6 +247,9 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
             _ := c.get_jitted(f);
         }, {
             main_thread_pump(self.comp(), shared, @slice(f));
+            if no_cache {
+                m.make_exec();
+            }
         });
         
         
