@@ -13,6 +13,23 @@ notably those are all things to aren't going to change if you're just working on
 - figured out why `NOCACHE franca ../cc.fr a.c -r` was crashing: codegen_thread_main was calling write_protect for any jit, 
   not just if expecting_wx=true, and run_franca_file was setting expecting_wx when it didn't need to. 
 - fixed tracy zones in report_aot_progress to include the compiler identity so it works when you have nested modules
+- taking a break from module stuff. stealing to steal riscV abi/isel from qbe. 
+  (i wonder if this will be the arch that makes me get strict about unaligned loads)
+- bit of cleanups found for other arches
+  - abi: use List(temp()) instead of linked list for stkblb insertions
+  - abi: top level loop is the same for arm,amd,rv
+  - isel: ^same
+  - i don't like that my fuse_addr for arm looks a defining block and only does it for local things but the amd one doesn't. 
+    notably qbe's amd one (with the hella generated code matching language) does `anumber` on one block at a time which i 
+    think has a similar effect of only looking at local ones. both of mine look at Tmp.def which is probably not ok if it's 
+    an already processed block that got reallocated, and the arm one is careful not to do that but the amd one isn't. 
+    and the arm one breaks if you take out that check, so how does amd work?
+    i guess it's actually fine if it reallocates because it's in an arena and you just see the old one, 
+    the problem is if it doesn't reallocate but new instructions caused it to shift and now def points 
+    to the wrong thing and the amd one does detect that, it checks `get_temporary(r).def.to == r`. 
+    so clearly i knew this before i just didn't write it down. doing the check against def.to seems to generate the same code so that's good i guess. 
+    wrote it down in the code this time. in arm, the thing it's doing is just checking if the tmp is an offset from another,
+    so could make sure that's up to date in Tmp.alias and then have a better chance of actually triggering it across blocks.
 
 ## (Jun 20)
 

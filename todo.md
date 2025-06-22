@@ -49,6 +49,7 @@ TODO: end of loop. still too many options for 'index'
 
 ## 
 
+- #log_ir should fire multiple times for functions with $const parameters (ie. native_isel)
 - shouldn't be able to typo a name as easily. like S :: import_module{enqueue :: enqueue_task}); then S.enqueue_task will get you the wrong one and be slow. 
 - why was the quicksort wrapper trying to be emitted for import_module (when not marked #fold)
 - fix my blink patch so it applies and i don't have to remember to type `/Users/luke/Downloads/franca_target2025_jun12/blink/o/blink/blink` 
@@ -87,6 +88,10 @@ different subsets of the same resources.
 - make #log_asm work for the #asm replacement 
 - experiment with outputting even more info in .frc and an lsp that reads it back. 
 
+// TODO: use this for stuff
+//fn source_location(arg: FatExpr) FatExpr #macro = 
+    //@literal arg.loc;
+
 ## backend 
 
 - macho/emit.fr/emplace_fixup() allow negative offset for DataAbsolute of dynamic import in .Exe
@@ -96,6 +101,12 @@ different subsets of the same resources.
 - (mem3.ssa, isel5.ssa) -w: fails when constant folding is disabled. 
   `IR failed typecheck: invalid type for first operand RTmp:144 of add in block @4`
 - "you really want to lock the module in case there's another thread trying to compile into it"
+- rv64/isel: fuse cmp+jnz
+- error prone that the other isels have overloads called fixarg,fixargs etc and i rely on the types being different. 
+hould just make them local constants in each file like they are here in riscv
+- factor out the top level ARCH_isel(), they're all the same shape
+- test for phi of stack slot? 
+- rv64 address+offset folding like i did for arm. they can probably share? 
 
 ## don't rely on libc
 
@@ -273,6 +284,8 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
 - i want the apis for importing .frc files to be as convenient as dlopen. 
   i like the idea of importing things as source and transparently using the cached thing if the hash hasn't changed.  
 - track envvars you observe (ie. ENABLE_TRACY). 
+- `foo :: 0; bar :: @struct { foo :: foo + 1; };` should be legal. 
+  it's so garbage that you have to think of synonyms when declaring exports for import_module()
 
 ## speed regression ?
 

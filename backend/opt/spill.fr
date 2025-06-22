@@ -454,12 +454,11 @@ fn spill(f: *Qbe.Fn) void = {
         f.globals.curi = f.scratch_start();
             
         /* 2. process the block instructions */
-        // TODO: this gets confused when you panic() sometimes (emit_ir should be fixed)
         if rtype(b.jmp.arg) == .RTmp && b.jmp.type != .hlt {
-            printfn(pass.f, pass.f.globals.debug_out);
-            @assert(false, "// only (riscV jnz but we don't do that yet) get here."); 
+            // abi removes ret with value and non-rv-isel replaces jnz with cmp+jmpCC
+            @debug_assert(f.globals.goal.arch == .rv64);  // on other arches 
             t := b.jmp.arg.val();
-            @debug_assert(tmp[t].cls.is_int() && @is(b.jmp.type, .switch), "can only jump on int (previous pass removed ret with value)");
+            @debug_assert(tmp[t].cls.is_int(), "can only jump on int");
             bsset(in_reg&, t);
             bscopy(all_needed_later&, in_reg&);
             bszero(prioritize&); 
@@ -509,6 +508,8 @@ fn spill(f: *Qbe.Fn) void = {
                         };
                         
                         // invariant: instructions that have outputs do not have side effects. (not salloc tho) 
+                        //   amd64/isel tries to reuse flags a little (like {c := a+b; jnz c;} becomes {c := a+b; jmpCC;} not {c := a+b; cmp c; jmpCC;}), 
+                        //   but it's careful to emit a fake copy if that's the last use so it won't get here. 
                         @debug_assert(!is_store(i[].op()) && i[].op() != .call && i[].op() != .syscall, "sideeffect");
                         // don't emit() this instruction 
                         continue();
@@ -632,11 +633,12 @@ fn spill(f: *Qbe.Fn) void = {
     };
 }
 
-fn bytes_to_bit_mask(bytes: []u8) u64 #fold = {
+fn bytes_to_bit_mask(bytes: []u8) u64 = {
     r: u64 = 0; 
     for bytes { b | 
         r = r.bit_or(BIT(b));
     };
+    @debug_assert_eq(bytes.len, r.count_ones().zext(), "bytes_to_bit_mask expected unique entries");
     r
 }
 

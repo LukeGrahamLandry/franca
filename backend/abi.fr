@@ -221,3 +221,115 @@ fn to_rcall(r: Qbe.Ref, $RCall: Type) RCall #generic = {
     r: RCall = (repr = r.val().trunc());
     r
 }
+
+native_abi :: fn(
+    f: *Qbe.Fn,
+    $Params: Type, 
+    $selpar: @Fn(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) Params,
+    $selcall: @Fn(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins, allocs_out: *List(Qbe.Ins)) void,
+    $sel_syscall: @Fn(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) void,
+    $selvastart: @Fn(f: *Qbe.Fn, fa: Params, ap: Qbe.Ref) void,
+    $selvaarg: @Fn(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) void, 
+    $selret: @Fn(b: *Qbe.Blk, f: *Qbe.Fn) void,
+) void #generic = {
+    T := f.globals.target&;
+    for_blocks f { b | 
+        b.visit = 0;
+    };
+    
+    /* lower parameters */
+    i := f.find_past_last_param();
+    m := f.globals;
+    p := selpar(f, f.start.ins.ptr, i);
+    f.realloc_for_params(i);
+
+    /* lower calls, returns, and vararg instructions */
+    il := Qbe.Ins.list(temp());
+    b := f.start;
+    dowhile {
+        continue :: local_return;
+        b = b.link;
+        if b.is_null() {
+            b = f.start; /* do it last */
+        };
+        if(b.visit != 0, => continue(!b.identical(f.start)));
+        f.reset_scratch();
+        selret(b, f);
+
+        for_insts_rev b { i |
+            @match(i[].op()) {
+                fn call() => {
+                    i0 := b.find_first_arg(i[]);
+                    selcall(f, i0, i[], il&);
+                    i[] = i0;
+                }
+                fn vastart() => selvastart(f, p, i.arg&[0]);
+                fn vaarg() => selvaarg(f, b, i[]);
+                // TODO: check this in fails_typecheck
+                fn arg() => @panic("loose arg instruction (missing call)");
+                fn argc() => @panic("loose argc instruction (missing call)");
+                fn syscall() => {
+                    i0 := b.find_first_arg(i[]);
+                    sel_syscall(f, i0, i[]);
+                    i[] = i0;
+                }
+                @default => {
+                    f.emit(i[][]);
+                };
+            };
+        };
+        if b.identical(f.start) {
+            // stkblob wants to insert allocs in the beginning of the start block so they isel-ed to fast-allocs. 
+            // since emit() is backwards so these get emitted after processing the start block. 
+            for_rev il { it |
+                f.emit(it);
+            };
+        };
+        f.copy_instructions_from_scratch(b);
+        !b.identical(f.start)
+    };
+
+    if f.globals.debug["A".char()] {
+        out := f.globals.debug_out;
+        write(out, "\n> After ABI lowering:\n");
+        printfn(f, out);
+    };
+};
+
+native_isel :: fn(
+    f: *Qbe.Fn,
+    $enable_collapse: bool,
+    $collapse_op: @Fn(f: *Qbe.Fn, i: *Qbe.Ins, bid: i32) void,
+    $fixarg: @Fn(a: *Qbe.Ref, k: Qbe.Cls, nullable_i: *Qbe.Ins, f: *Qbe.Fn) void #duplicated,
+    $sel_terminator: @Fn(b: *Qbe.Blk, f: *Qbe.Fn) void,
+    $sel_inst: @Fn(i: **Qbe.Ins, b: *Qbe.Blk, f: *Qbe.Fn) void,
+) void #generic = {
+    f.assign_alloc_slots();
+    // In this pass, if `t.slot != -1` then `TMP(t) == addr SLOT(t.slot)`
+    
+    @if(enable_collapse) for_blocks f { b | 
+        for_insts_forward b { i |
+            collapse_op(f, i, b);
+        };
+    }; 
+    
+    for_blocks f { b | 
+        f.reset_scratch();
+        for_jump_targets b { sb | 
+            for_phi sb { p |
+                a := index_in_phi(b, p);
+                fixarg(p.arg.index(a), p.cls, Qbe.Ins.ptr_from_int(0), f);
+            };
+        };
+        sel_terminator(b, f);
+        for_insts_rev b { i |
+            sel_inst(i, b, f);
+        };
+        f.copy_instructions_from_scratch(b);
+    };
+
+    when_debug(f, .InstSelect) { out | 
+        write(out, "\n> After instruction selection:\n");
+        printfn(f, out);
+    };
+};

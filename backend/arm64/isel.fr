@@ -9,55 +9,30 @@
 
 // TODO: reuse flag setting instructions like amd64/isel
 
-fn arm64_isel(f: *Qbe.Fn) void = {
-    f.assign_alloc_slots();
-    // In this pass, if `t.slot != -1` then `TMP(t) == addr SLOT(t.slot)`
-    for_blocks f { b |
-        for_insts_forward b { i |
-            collapse_op_arm64(f, i, b.id);
-        };
-    };
-    
-    for_blocks f { b |
-        f.globals.curi = f.scratch_start(); // TODO: remove this once we always reset it at the end of a pass. 
-        
-        for_jump_targets b { sb |
-            for_phi sb { p |
-                n := index_in_phi(b, p);
-                f.fixarg(p.arg&.index(n), p.cls, true, b.id);
-            };
-        };
-        f.seljmp(b);
-        
-        for_insts_rev b { i | 
-            if i[].op() == .sel1 {
-                selsel_arm64(f, b, i[]);
-            } else {
-                if i[].op() == .cas1 {
-                    k := i[].cls();
-                    cas0, cas1 := find_cas(i[], b);
-                    // TODO: should really make the frontend ensure this but i don't want to deal with it right now
-                    //@debug_assert_eq(ptr_diff(cas0, cas1), 1, "non-adjacent cas");
-                    cas1 := f.emit(cas1[]);
-                    f.fixarg(cas0.arg&.index(0), k, false, b.id);
-                    f.fixarg(cas1.arg&.index(0), k, false, b.id);
-                    f.fixarg(cas1.arg&.index(1), k, false, b.id);
-                    cas1.arg&[0] = f.new_mem(cas1.arg&[0], cas1.arg&[1], 0, 0);
-                    cas1.arg&[1] = cas0.arg&[0];
-                    cas0.set_nop();
-                } else {
-                    f.sel(i[][], b.id);
-                }
-            };
-        };
+fn arm64_isel(f: *Qbe.Fn) void = 
+    native_isel(f, true, fn(f, i, b) => collapse_op_arm64(f, i, b.id), fn(r, k, i, f) => fixarg(f, r, k, !i.is_null()), seljmp, sel_inst);
 
-        f.copy_instructions_from_scratch(b);
+sel_inst :: fn(i: **Qbe.Ins, b: *Qbe.Blk, f: *Qbe.Fn) void = {
+    if i[].op() == .sel1 {
+        selsel_arm64(f, b, i[]);
+    } else {
+        if i[].op() == .cas1 {
+            k := i[].cls();
+            cas0, cas1 := find_cas(i[], b);
+            // TODO: should really make the frontend ensure this but i don't want to deal with it right now
+            //@debug_assert_eq(ptr_diff(cas0, cas1), 1, "non-adjacent cas");
+            cas1 := f.emit(cas1[]);
+            f.fixarg(cas0.arg&.index(0), k);
+            f.fixarg(cas1.arg&.index(0), k);
+            f.fixarg(cas1.arg&.index(1), k);
+            cas1.arg&[0] = f.new_mem(cas1.arg&[0], cas1.arg&[1], 0, 0);
+            cas1.arg&[1] = cas0.arg&[0];
+            cas0.set_nop();
+        } else {
+            f.sel(i[][], b.id);
+        };
     };
-    if f.globals.debug["I".char()] {
-        write(f.globals.debug_out, "\n> After instruction selection:\n");
-        printfn(f, f.globals.debug_out);
-    };
-}
+};
 
 fn collapse_op_arm64(f: *Qbe.Fn, i: *Qbe.Ins, bid: i32) void = {
     @if(is_int(i.cls()))
@@ -137,14 +112,14 @@ fn get_slot(f: *Qbe.Fn, r: Qbe.Ref) ?i64 = {
 // This will compress a sequence like `add x1, x29, #24; add x1, x1, #8; ldr x1, [x1]` into `ldr x1, [x29, #32]`
 // (doesn't need to recurse because of the prepass of collapse_op_arm64)
 
-fn fix_memarg(f: *Qbe.Fn, i: *Qbe.Ins, bid: i32) *Qbe.Ref = {
+fn fix_memarg(f: *Qbe.Fn, i: *Qbe.Ins) *Qbe.Ref = {
     iarg := i.arg&;
     store := is_store(i.op());
     @debug_assert(store || is_load(i.op()), "bad mem op");
     @debug_assert(store || iarg[1] == QbeNull, "load already has second arg");
     size: i64 = if(store, => size_of_store(i).zext(), => size_of_load(i).zext());
     r := iarg[store.int()]&;
-    new_addr, off := fuse_addr(f, r[], bid, size);
+    new_addr, off := fuse_addr(f, r[], size);
     
     max_off := size * 4096;
     if(off < 0 || off >= max_off || off.mod(size) != 0, => return(r));
@@ -175,13 +150,14 @@ fn fix_memarg(f: *Qbe.Fn, i: *Qbe.Ins, bid: i32) *Qbe.Ref = {
     r
 }
 
-fn fuse_addr(f: *Qbe.Fn, a: Qbe.Ref, bid: i32, size: i64) Ty(Qbe.Ref, i64) = {
+fn fuse_addr(f: *Qbe.Fn, a: Qbe.Ref, size: i64) Ty(Qbe.Ref, i64) = {
     max_off := size * 4096;
     if f.get_slot(a) { slot |
         return(QbeNull, slot);
     };
     addr := f.get_temporary(a);
-    if(addr.def.is_null() || addr.defining_block != bid, => return(a, 0));
+    // :ReferencingOldBlock
+    if(addr.def.is_null() || addr.def.to != a, => return(a, 0));
     def_a := addr.def.arg&;
     @debug_assert(addr.nuse > 0);
     @match(addr.def.op()) {
@@ -206,9 +182,9 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32) void = {
         // note: i0 is what we're about to emit not what we just emitted
         i0 := f.globals.curi.offset(-1); // :LookAtLastInst
         is_dyn := salloc(i.to, i.arg&[0], f);
-        f.fixarg(i0.arg&.index(0), .Kl, false, blk);  // .salloc
+        f.fixarg(i0.arg&.index(0), .Kl);  // .salloc
         if is_dyn {
-            f.fixarg(i0.offset(-1)[].arg&.index(1), .Kl, false, blk);  // .and
+            f.fixarg(i0.offset(-1)[].arg&.index(1), .Kl);  // .and
         };
         return();
     };
@@ -244,7 +220,7 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32) void = {
             f.emit(.cast, ki, i.to, f_out, QbeNull);
             f.emit(.ones, kf, f_out, f_in, QbeNull);
             icast := f.emit(.cast, kf, f_in, i.arg&[0], QbeNull);
-            f.fixarg(icast.arg&.index(0), ki, false, blk);
+            f.fixarg(icast.arg&.index(0), ki);
         };
         fn rotl() => {
             new_ins := f.emit(i);
@@ -259,10 +235,10 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32) void = {
             r0 := f.newtmp("isel", k0);
             r1 := f.newtmp("isel", k0);
             ii := f.emit(.sub, k0, r0, f.getcon(width), r1);
-            f.fixarg(ii.arg&.index(0), k0, false, blk);
+            f.fixarg(ii.arg&.index(0), k0);
             ii := f.emit(.and, k0, r1, iarg[1], f.getcon(width - 1));
-            f.fixarg(ii.arg&.index(1), k0, false, blk);
-            f.fixarg(ii.arg&.index(0), k0, false, blk);
+            f.fixarg(ii.arg&.index(1), k0);
+            f.fixarg(ii.arg&.index(0), k0);
             iarg[1] = r0;
         };
         fn trace_prev() => {
@@ -282,9 +258,9 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32) void = {
                 t.def = new_ins;
             };
             if is_load(o) && rtype(iarg[0]) == .RTmp {
-                r := fix_memarg(f, new_ins, blk);
+                r := fix_memarg(f, new_ins);
                 if rtype(r[]) != .RSlot {
-                    f.fixarg(r, .Kl, false, blk);
+                    f.fixarg(r, .Kl);
                 };
                 return();
             };
@@ -295,19 +271,19 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32) void = {
                 new_ins.set_op(.clz);
                 r := f.newtmp("isel", k0);
                 i := f.emit(.bitswap, k0, r, iarg[0], QbeNull);  // new emit must be before fixarg (because emit is backwards)
-                f.fixarg(i.arg&.index(0), k0, false, blk);
+                f.fixarg(i.arg&.index(0), k0);
                 iarg[0] = r;
                 return();
             };
 
             copy_from_con := i&.op() == .copy && rtype(iarg[0]) == .RCon && !isreg(i.to);
             if !copy_from_con {
-                f.fixarg(iarg[0]&, k0, false, blk);
+                f.fixarg(iarg[0]&, k0);
             };
             if is_store(o) && rtype(iarg[1]) == .RTmp {
-                r := fix_memarg(f, new_ins, blk);
+                r := fix_memarg(f, new_ins);
                 if rtype(r[]) != .RSlot {
-                    f.fixarg(r, .Kl, false, blk);
+                    f.fixarg(r, .Kl);
                 };
                 return();
             };
@@ -329,11 +305,13 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32) void = {
                 // ~10KB, meh
                 arg1 := iarg[1];
                 if rtype(arg1) == .RTmp {
+                    a1 := arg1;
                     arg1 := f.get_temporary(arg1);
                     def := arg1.def;
-                    if arg1.nuse == 1 && !def.is_null() && def.op() == .mul && arg1.defining_block == blk {
-                        f.fixarg(def.arg&.index(0), .Kl, false, blk);
-                        f.fixarg(def.arg&.index(1), .Kl, false, blk);
+                    // :ReferencingOldBlock
+                    if arg1.nuse == 1 && !def.is_null() && def.op() == .mul && def.to == a1 {
+                        f.fixarg(def.arg&.index(0), .Kl);
+                        f.fixarg(def.arg&.index(1), .Kl);
                         iarg[1] = f.new_mem(def.arg&[0], def.arg&[1], 0, 255);
                         def.set_nop();
                         return();
@@ -360,13 +338,13 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32) void = {
                 };
             };
             
-            f.fixarg(iarg[1]&, k1, false, blk);
+            f.fixarg(iarg[1]&, k1);
         };
     };
 }
 
 // This is where we combine cmp+jnz.
-fn seljmp(f: *Qbe.Fn, b: *Qbe.Blk) void = {
+fn seljmp(b: *Qbe.Blk, f: *Qbe.Fn) void = {
     @debug_assert_ne(b.jmp.type, .switch);
     
     // TODO: could flip this exit and assert condition so its just one !=jnz in release mode. 
@@ -451,8 +429,8 @@ fn selcmp(f: *Qbe.Fn, arg: Array(Qbe.Ref, 2), k: Qbe.Cls, blk: i32) bool = {
     if !is_int(k) {
         // fcmp can't take an immdiate, so make sure both args are registers. (TODO: it can compare to 0 tho)
         iarg := f.emit(.afcmp, k, QbeNull, arg&[0], arg&[1])[].arg&;
-        f.fixarg(iarg[0]&, k, false, blk);
-        f.fixarg(iarg[1]&, k, false, blk);
+        f.fixarg(iarg[0]&, k);
+        f.fixarg(iarg[1]&, k);
         return(false);
     };
     
@@ -483,15 +461,19 @@ fn selcmp(f: *Qbe.Fn, arg: Array(Qbe.Ref, 2), k: Qbe.Cls, blk: i32) bool = {
     };
     
     iarg := f.emit(cmp, k, QbeNull, arg&[0], r_right)[].arg&;
-    f.fixarg(iarg[0]&, k, false, blk); // it could be the address of a stack slot or thread local, i guess?
+    f.fixarg(iarg[0]&, k); // it could be the address of a stack slot or thread local, i guess?
     if cant_fit_immediate {
-        f.fixarg(iarg[1]&, k, false, blk);
+        f.fixarg(iarg[1]&, k);
     };
     needed_swap
 }
 
+fn fixarg();
+fn fixarg(f: *Qbe.Fn, pr: *Qbe.Ref, k: Qbe.Cls) void = 
+    fixarg(f, pr, k, false);
+
 // Force the value to be in a register (if its a constant, produce it in a different reg and then move).
-fn fixarg(f: *Qbe.Fn, pr: *Qbe.Ref, k: Qbe.Cls, phi: bool, blk: i32) void = {
+fn fixarg(f: *Qbe.Fn, pr: *Qbe.Ref, k: Qbe.Cls, phi: bool) void = {
     ::enum_basic(Qbe.RegKind);
 
     r_original := pr[];
@@ -532,7 +514,6 @@ fn fixarg(f: *Qbe.Fn, pr: *Qbe.Ref, k: Qbe.Cls, phi: bool, blk: i32) void = {
                 t.def = def;
                 t.nuse = 1;
                 t.ndef = 1;
-                t.defining_block = blk;
                 pr[] = r_slot;
             }; // otherwise its already in a register
         }
@@ -613,3 +594,4 @@ fn find_source_instruction(b: *Qbe.Blk, search: Qbe.Ref) ?*Qbe.Ins #inline = {
 
 #use("@/backend/arm64/target.fr");
 #use("@/backend/lib.fr");
+#use("@/backend/abi.fr");

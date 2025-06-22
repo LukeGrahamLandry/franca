@@ -21,45 +21,22 @@
 // I want to make constant_folding() an optional pass which requires some unfortunate extra logic here 
 // to make sure not to let all operands to an instruction be immediates (since that can't be encoded). 
 // Those cases are unreachable normally because the folding will have removed them before you get here, 
-// so they're in @if(!ENABLE_CONST_FOLDING). 
+// so they're in @if(!ENABLE_CONST_FOLD). 
 //
 
-/* instruction selection requires use counts */
-fn amd64_isel(f: *Qbe.Fn) void = {
-    f.assign_alloc_slots();
-    // In this pass, if `t.slot != -1` then `TMP(t) == addr SLOT(t.slot)`
-    
-    @if(NEW_ADDR_FOLDING)
-    for_blocks f { b | 
-        for_insts_forward b { i |
-            collapse_op_amd64(f, i, b.id);
-        };
-    }; 
-    
-    for_blocks f { b | 
-        f.reset_scratch();
-        for_jump_targets b { sb | 
-            for_phi sb { p |
-                a := index_in_phi(b, p);
-                fixarg(p.arg.index(a), p.cls, Qbe.Ins.ptr_from_int(0), f);
-            };
-        };
-        sel_terminator(b, f);
-        for_insts_rev b { i |
-            @match(i[].op()) {
-                fn sel1() => selsel_amd64(f, b, i[]);
-                fn cas1() => sel_cas_amd64(f, b, i[]);
-                @default  => sel(i[][], f);
-            };
-        };
-        f.copy_instructions_from_scratch(b);
-    };
+NEW_ADDR_FOLDING :: false; // TODO: finish this
 
-    when_debug(f, .InstSelect) { out | 
-        write(out, "\n> After instruction selection:\n");
-        printfn(f, out);
+/* instruction selection requires use counts */
+fn amd64_isel(f: *Qbe.Fn) void = 
+    native_isel(f, NEW_ADDR_FOLDING, collapse_op_amd64, fixarg, sel_terminator, sel_inst);
+
+sel_inst :: fn(i: **Qbe.Ins, b: *Qbe.Blk, f: *Qbe.Fn) void = {
+    @match(i[].op()) {
+        fn sel1() => selsel_amd64(f, b, i[]);
+        fn cas1() => sel_cas_amd64(f, b, i[]);
+        @default  => sel(i[][], f);
     };
-}
+};
 
 fn noimm(r: Qbe.Ref, f: *Qbe.Fn, o: Qbe.O) bool = {
     if(rtype(r) != .RCon, => return(false));
@@ -169,9 +146,7 @@ fn lea(f: *Qbe.Fn, dest: Qbe.Ref, con_in: Qbe.Ref) void = {
     f.emit(@if(f.is_symbol(con_in), .addr, .copy), .Kl, dest, con_in, QbeNull);
 }
 
-NEW_ADDR_FOLDING :: false;
-
-fn collapse_op_amd64(f: *Qbe.Fn, i: *Qbe.Ins, bid: i32) void = {
+fn collapse_op_amd64(f: *Qbe.Fn, i: *Qbe.Ins, _bid: i32) void = {
     if(!i.cls().is_int(), => return());
     if(!@is(i.op(), .add, .mul), => return());
     r := i.to;
@@ -213,6 +188,12 @@ fn merge_amd_addr(f: *Qbe.Fn, mem: *Qbe.Addr) void = {
             };
             a0 := t.def.arg&[0];
             a1 := t.def.arg&[1];
+            // :ReferencingOldBlock
+            // t.def will be wrong if it's in an already processed block and new instructions caused it to shift, 
+            // so check that it's still pointing to the instruction that made our value. 
+            // if it did reallocate and we get the old pre-isel copy, i think it's still fine
+            // because this just cares about things that don't have interesting isel handling>? 
+            //         talking about this check -> |                   |
             if a0 == mem.base || a1 == mem.base || t.def.to != mem.base {
                 goto_index();
             };
@@ -322,6 +303,7 @@ fn merge_amd_addr(f: *Qbe.Fn, mem: *Qbe.Addr) void = {
             };
             a0 := index_t.def.arg&[0];
             a1 := index_t.def.arg&[1];
+            // :ReferencingOldBlock
             if a0 == mem.index || a1 == mem.index || index_t.def.to != mem.index {
                 goto_done();
             };
@@ -904,6 +886,8 @@ fn sel_terminator(b: *Qbe.Blk, f: *Qbe.Fn) void = {
     };
 }
 
+// this avoids inserting a cmp to zero if the last flag setting op produced the value being jumped on. 
+// but it doesn't try super hard: doesn't reorder instructions and won't remove a cmp, just doesn't insert an extra. 
 fn seljnz(b: *Qbe.Blk, f: *Qbe.Fn) void = {
     @debug_assert(b.jmp.type == .jnz);
     r := b.jmp.arg;
@@ -977,3 +961,4 @@ fn addcon(c0: *Qbe.Con, c1: *Qbe.Con, m: i64) bool = {
 
 #use("@/backend/amd64/target.fr");
 #use("@/backend/lib.fr");
+#use("@/backend/abi.fr");
