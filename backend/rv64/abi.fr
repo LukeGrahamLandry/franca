@@ -1,0 +1,557 @@
+// Adapted from Qbe. MIT License. © 2015-2024 Quentin Carbonneaux <quentin@c9x.me>. 
+// Contributed to Qbe by Michael Forney
+/* the risc-v lp64d abi */
+
+ArgClass :: @enum(u8) (
+    Cptr  = 1, /* replaced by a pointer */
+    Cstk1 = 2, /* pass first XLEN on the stack */
+    Cstk2 = 4, /* pass second XLEN on the stack */
+    Cstk = bit_or(2,4),  // Cstk1 | Cstk2
+    Cfpint = 8, /* float passed like integer */
+);
+
+Class :: @struct{
+    type: *Qbe.Typ;
+    reg: Array(Qbe.Ref, 2);
+    cls: Array(Qbe.Cls, 2);
+    off: Array(i32, 2);
+    class: ArgClass;  // set
+    ngp: i64; /* only valid after typclass() */
+    nfp: i64; /* ditto */
+    nreg: i64;
+};
+
+Insl :: @rec @struct {
+    i: Qbe.Ins;
+    link: *Insl;
+};
+
+Params :: @struct {
+    ngp: i64;
+    nfp: i64;
+    stk: i64;  /* stack offset for varargs */
+};
+
+// TODO: qbe had these arrays over sized to padded with zeroes. do we overshoot? 
+gpreg :: @const_slice( RvReg.A0,  .A1,  .A2,  .A3,  .A4,  .A5,  .A6,  .A7);
+fpreg :: @const_slice(RvReg.FA0, .FA1, .FA2, .FA3, .FA4, .FA5, .FA6, .FA7);
+
+rv64_rsave :: @const_slice(
+RvReg.T0,  .T1,  .T2,  .T3,  .T4,  .T5,
+     .A0,  .A1,  .A2,  .A3,  .A4,  .A5,  .A6,  .A7,
+    .FA0, .FA1, .FA2, .FA3, .FA4, .FA5, .FA6, .FA7,
+    .FT0, .FT1, .FT2, .FT3, .FT4, .FT5, .FT6, .FT7,
+    .FT8, .FT9, .FT10,
+);
+rv64_rclob :: @const_slice(
+      RvReg.S1,  .S2,   .S3,   .S4,  .S5,  .S6,  .S7,
+     .S8,  .S9,  .S10,  .S11,
+    .FS0, .FS1, .FS2,  .FS3,  .FS4, .FS5, .FS6, .FS7,
+    .FS8, .FS9, .FS10, .FS11,
+);
+
+RCallRv :: @bit_fields(
+    gp_ret   := 2,
+    fp_ret   := 2,
+    gp_arg   := 4,
+    fp_arg   := 4,
+    env      := 1,  // env pointer passed in t5
+    _        := 16,
+    tag      := 3,
+);
+
+// TODO: set parameter_stack_bytes
+
+rv64_retregs :: fn(r: Qbe.Ref, p: *Array(i32, 2)) u64 = {
+    r := to_rcall(r, RCallRv);
+    ngp := get(r, .gp_ret);
+    nfp := get(r, .fp_ret);
+    ::ptr_utils(@type p[]);
+    if !p.is_null() {
+        p[0] = ngp.intcast();
+        p[1] = nfp.intcast();
+    };
+    ngp_mask := (1.shift_left(ngp) - 1).shift_left(zext RvReg.A0.raw());
+    nfp_mask := (1.shift_left(nfp) - 1).shift_left(zext RvReg.FA0.raw());
+    bit_or(ngp_mask, nfp_mask).bitcast()
+}
+
+rv64_argregs :: fn(r: Qbe.Ref, p: *Array(i32, 2)) u64 = {
+    ::ptr_utils(Array(i32, 2));
+    r := to_rcall(r, RCallRv);
+    ngp := get(r, .gp_arg);
+    nfp := get(r, .fp_arg);
+    t5  := get(r, .env);
+    if !p.is_null() {
+        p[0] = intcast(ngp + t5);
+        p[1] = nfp.intcast();
+    };
+    ngp_mask := (1.shift_left(ngp) - 1).shift_left(zext RvReg.A0.raw());
+    nfp_mask := (1.shift_left(nfp) - 1).shift_left(zext RvReg.FA0.raw());
+    b := bit_or(ngp_mask, nfp_mask);
+    b  = b.bit_or(t5.shift_left(zext RvReg.T5.raw()));
+    b.bitcast()
+}
+
+// note: returning -1 stops the recursion but 0 doesn't
+fpstruct :: fn(f: *Qbe.Fn, t: *Qbe.Typ, off: i64, c: *Class) i64 = {
+    if(t.is_union(), => return(-1));
+
+    i := 0;
+    for_fields(t, i&) { type, len |
+        k := type.cls();
+        if k == .Ke {
+            if type == .FPad {
+                off += len.zext();
+            } else {
+                @debug_assert_eq(type, .FTyp);
+                if f.fpstruct(f.get_type(TYPE(len.zext())), off, c) == -1 {
+                    return(-1);
+                }
+            }
+        } else {
+            n := c.nfp + c.ngp;
+            if(n == 2, => return(-1));
+            c.cls&[n] = k;
+            c.ngp += k.is_int().int();
+            c.nfp += k.is_float().int();
+            c.off&[n] = off.trunc();
+            off += len.zext();
+        }
+    }
+
+    c.nfp
+}
+
+typclass :: fn(f: *Qbe.Fn, c: *Class, t: *Qbe.Typ, fpabi: bool, gp: []RvReg, fp: []RvReg) void = {
+    c.type = t;
+    c.class = zeroed(@type c.class);
+    c.ngp = 0;
+    c.nfp = 0;
+
+    @assert_le(t.align_log2, 4, "alignments larger than 16 are not supported");
+
+    if t.is_dark() || t.size > 16 || t.size == 0 {
+        /* large structs are replaced by a
+         * pointer to some caller-allocated
+         * memory */
+        c.class&.with(.Cptr);
+        c.cls&[0] = .Kl;
+        c.off&[0] = 0;
+        c.ngp = 1;
+    } else {
+        if (!fpabi || f.fpstruct(t, 0, c) <= 0) {
+            n := t.size.zext().add(7)/8;
+            range(0, n) { i |
+                c.cls&[i] = .Kl;
+                c.off&[i] = 8*i.intcast();
+            }
+            c.nfp = 0;
+            c.ngp = n;
+        }
+    }
+
+    c.nreg = c.nfp + c.ngp;
+    range(0, c.nreg) { i |
+        if is_int(c.cls&[i]) {
+            c.reg&[i] = TMP gp[0];
+            gp = gp.rest(1);
+        } else {
+            c.reg&[i] = TMP fp[0];
+            fp = fp.rest(1);
+        }
+    }
+}
+
+sttmps :: fn(out: []Qbe.Ref, ntmp: i64, c: *Class, mem: Qbe.Ref, f: *Qbe.Fn) void = {
+    @debug_assert(ntmp > 0 && ntmp <= 2);
+    range(0, ntmp) { i |
+        out[i] = f.newtmp("abi", c.cls&[i]);
+        r := f.newtmp("abi", .Kl);
+        f.emit(c.cls&[i].store_op(), .Kw, Qbe.Null, out[i], r);
+        f.emit(.add, .Kl, r, mem, f.getcon(c.off&[i].zext()));
+    }
+}
+
+ldregs :: fn(c: *Class, mem: Qbe.Ref, f: *Qbe.Fn) void = {
+    range(0, c.nreg) { i |
+        r := f.newtmp("abi", .Kl);
+        f.emit(.load, c.cls&[i], c.reg&[i], r, Qbe.Null);
+        f.emit(.add, .Kl, r, mem, f.getcon(c.off&[i].zext()));
+    }
+}
+
+selret :: fn(b: *Qbe.Blk, f: *Qbe.Fn) void = {
+    j := b.jmp.type;
+    if(!is_ret(j) || j == .ret0, => return());
+
+    r := b.jmp.arg;
+    b.jmp.type = .ret0;
+
+    cty := zeroed RCallRv;
+    if j == .retc {
+        cr := zeroed Class;
+        f.typclass(cr&, f.get_type(f.retty), true, gpreg, fpreg);
+        if cr.class.has(.Cptr) {
+            @debug_assert(rtype(f.retr) == .RTmp);
+            f.emit(.blit1, .Kw, Qbe.Null, INT(cr.type.size.zext()), Qbe.Null);
+            f.emit(.blit0, .Kw, Qbe.Null, r, f.retr);
+        } else {
+            ldregs(cr&, r, f);
+            cty&.set(.fp_ret, cr.nfp);
+            cty&.set(.gp_ret, cr.ngp);
+        }
+    } else {
+        k := j.cls();
+        if is_int(k) {
+            f.emit(.copy, k, TMP(RvReg.A0), r, Qbe.Null);
+            cty&.set(.gp_ret, 1);
+        } else {
+            f.emit(.copy, k, TMP(RvReg.FA0), r, Qbe.Null);
+            cty&.set(.fp_ret, 1);
+        }
+    }
+
+    b.jmp.arg = CALL(cty);
+}
+
+argsclass :: fn(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins, carg: []Class, retptr: bool) RCallRv = {
+    gp, fp := (0, 0);
+    nreg :: 8;
+    vararg, envc := (0, 0);
+    if retptr {
+        gp += 1;
+    }
+    zip_args(i0, i1, carg) { i, c, $continue |
+        if @is(i.op(), .par, .arg) {
+            c.cls&[0] = i.cls();
+            if vararg == 0 && is_float(i.cls()) && fp < nreg {
+                c.reg&[0] = TMP fpreg[fp];
+                fp += 1;
+            } else {
+                if gp < nreg {
+                    if is_float(i.cls()) {
+                        c.class&.with(.Cfpint);
+                    }
+                    
+                    c.reg&[0] = TMP gpreg[gp];
+                    gp += 1;
+                } else {
+                    c.class&.with(.Cstk1);
+                }
+            }
+            continue();
+        }
+        if i.op() == .argv {
+            vararg = 1;
+            continue();
+        }
+        if @is(i.op(), .parc, .argc) {
+            t := f.get_type(i.arg&[0]);
+            f.typclass(c, t, true, gpreg.rest(gp), fpreg.rest(fp));
+            if c.nfp > 0 && (c.nfp >= nreg - fp || c.ngp >= nreg - gp) {
+                f.typclass(c, t, false, gpreg.rest(gp), fpreg.rest(fp));
+            }
+            @debug_assert(c.nfp <= nreg - fp);
+            if c.ngp <= nreg - gp {
+                gp += c.ngp;
+                fp += c.nfp;
+            } else {
+                if gp < nreg {
+                    @debug_assert(c.ngp == 2 && c.class.raw() == 0);
+                    c.class&.with(.Cstk2);
+                    c.nreg = 1;
+                    gp += 1;
+                } else {
+                    c.class&.with(.Cstk1);
+                    if c.nreg > 1 {
+                        c.class&.with(.Cstk2);
+                    }
+                    c.nreg = 0;
+                }
+            }
+            continue();
+        }
+        if @is(i.op(), .pare, .arge) {
+            c.reg&[0] = TMP(RvReg.T5);
+            c.cls&[0] = .Kl;
+            envc = 1;
+            continue();
+        }
+    }
+    @debug_assert(gp < nreg && gp < nreg);
+    out := zeroed RCallRv;
+    out&.set(.env, envc);
+    out&.set(.gp_arg, gp);
+    out&.set(.fp_arg, fp);
+    out
+}
+
+stkblob :: fn(r: Qbe.Ref, t: *Qbe.Typ, f: *Qbe.Fn, ilp: *List(Qbe.Ins)) void ={
+    al := (@as(i32) t.align_log2.zext()) - 2; /* NAlign == 3 */
+    if al < 0 {
+        al = 0;
+    };
+    sz := t.size.align_to(8);
+    ilp.push(make_ins(@as(Qbe.O) @as(i32) Qbe.O.alloc4.raw() + al, .Kl, r, f.getcon(zext sz), Qbe.Null));
+}
+
+selcall :: fn(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins, ilp: *List(Qbe.Ins)) void = {
+    ca := temp().alloc_zeroed(Class, ptr_diff(i0, i1));
+    cr := zeroed Class;
+
+    if i1.arg&[1] != Qbe.Null {
+        f.typclass(cr&, f.get_type(i1.arg&[1]), true, gpreg, fpreg);
+    }
+
+    cty := f.argsclass(i0, i1, ca, cr.class.has(.Cptr));
+    stk := 0;
+    zip_args(i0, i1, ca) { i, c, $continue |
+        if(i.op() == .argv, => continue());
+        if c.class.has(.Cptr) {
+            i.arg&[0] = f.newtmp("abi", .Kl);
+            stkblob(i.arg&[0], c.type, f, ilp);
+            i.set_op(.arg);
+        }
+        stk += 8 * c.class.has(.Cstk1).int();
+        stk += 8 * c.class.has(.Cstk2).int();
+    }
+    stk += stk.bit_and(15);
+    if stk != 0 {
+        f.emit(.salloc, .Kl, Qbe.Null, f.getcon(-stk), Qbe.Null);
+    }
+
+    if i1.arg&[1] != Qbe.Null {
+        stkblob(i1.to, cr.type, f, ilp);
+        cty&.set(.fp_ret, cr.nfp);
+        cty&.set(.gp_ret, cr.ngp);
+        if cr.class.has(.Cptr) {
+            /* spill & rega expect calls to be
+             * followed by copies from regs,
+             * so we emit a dummy */
+            f.emit(.copy, .Kw, Qbe.Null, TMP(RvReg.A0), Qbe.Null);
+        } else {
+            tmp := zeroed Array(Qbe.Ref, 2);
+            sttmps(tmp&.items(), cr.nreg, cr&, i1.to, f);
+            range(0, cr.nreg) { j |
+                r := cr.reg&[j];
+                f.emit(.copy, cr.cls&[j], tmp&[j], r, Qbe.Null);
+            }
+        }
+    } else {
+        if is_int(i1.cls()) {
+            f.emit(.copy, i1.cls(), i1.to, TMP(RvReg.A0), Qbe.Null);
+            cty&.set(.gp_ret, 1);
+        } else {
+            f.emit(.copy, i1.cls(), i1.to, TMP(RvReg.FA0), Qbe.Null);
+            cty&.set(.fp_ret, 1);
+        }
+    }
+
+    f.emit(.call, .Kw, Qbe.Null, i1.arg&[0], CALL(cty));
+
+    if cr.class.has(.Cptr) {
+        /* struct return argument */
+        f.emit(.copy, .Kl, TMP(RvReg.A0), i1.to, Qbe.Null);
+    }
+
+    /* move arguments into registers */
+    c := ca.index(0);
+    zip_args(i0, i1, ca) { i, c, $continue |
+        if i.op() == .argv || c.class.has(.Cstk1) {
+            continue();
+        }
+        if i.op() == .argc {
+            ldregs(c, i.arg&[1], f);
+        } else {
+            if c.class.has(.Cfpint) {
+                k := @if(is_wide(c.cls&[0]), Qbe.Cls.Kl, .Kw);
+                r := f.newtmp("abi", k);
+                f.emit(.copy, k, c.reg&[0], r, Qbe.Null);
+                c.reg&[0] = r;
+            } else {
+                f.emit(.copy, c.cls&[0], c.reg&[0], i.arg&[0], Qbe.Null);
+            };
+        }
+    }
+
+    zip_args(i0, i1, ca) { i, c, $_ |
+        if c.class.has(.Cfpint) {
+            k := @if(is_wide(c.cls&[0]), Qbe.Cls.Kl, .Kw);
+            f.emit(.cast, k, c.reg&[0], i.arg&[0], Qbe.Null);
+        }
+        if c.class.has(.Cptr) {
+            f.emit(.blit1, .Kw, Qbe.Null, INT(c.type.size.zext()), Qbe.Null);
+            f.emit(.blit0, .Kw, Qbe.Null, i.arg&[1], i.arg&[0]);
+        }
+    }
+
+    if stk == 0 {
+        return();
+    }
+
+    /* populate the stack */
+    off := 0;
+    r := f.newtmp("abi", .Kl);
+    zip_args(i0, i1, ca) { i, c, $continue |
+        if i.op() == .argv || !c.class.has(.Cstk) {
+            continue();
+        }
+        if i.op() == .arg {
+            r1 := f.newtmp("abi", .Kl);
+            prev := f.emit(i.cls().store_op(), .Kw, Qbe.Null, i.arg&[0], r1);
+            if i.cls() == .Kw {
+                /* TODO: we only need this sign
+                 * extension for l temps passed
+                 * as w arguments
+                 * (see rv64/isel.c:fixarg)
+                 */
+                prev.set_op(.storel);
+                prev.arg&[0] = f.newtmp("abi", .Kl);
+                f.emit(.extsw, .Kl, prev.arg&[0], i.arg&[0], Qbe.Null);
+            }
+            f.emit(.add, .Kl, r1, r, f.getcon(off));
+            off += 8;
+        }
+        if i.op() == .argc {
+            if c.class.has(.Cstk1) {
+                r1 := f.newtmp("abi", .Kl);
+                r2 := f.newtmp("abi", .Kl);
+                f.emit(.storel, .Kw, Qbe.Null, r2, r1);
+                f.emit(.add, .Kl, r1, r, f.getcon(off));
+                f.emit(.load, .Kl, r2, i.arg&[1], Qbe.Null);
+                off += 8;
+            }
+            if c.class.has(.Cstk2) {
+                r1 := f.newtmp("abi", .Kl);
+                r2 := f.newtmp("abi", .Kl);
+                f.emit(.storel, .Kw, Qbe.Null, r2, r1);
+                f.emit(.add, .Kl, r1, r, f.getcon(off));
+                r1 := f.newtmp("abi", .Kl);
+                f.emit(.load, .Kl, r2, r1, Qbe.Null);
+                f.emit(.add, .Kl, r1, i.arg&[1], f.getcon(8));
+                off += 8;
+            }
+        }
+    }
+    f.emit(.salloc, .Kl, r, f.getcon(stk), Qbe.Null);
+}
+
+selpar :: fn(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) Params = {
+    ca := temp().alloc_zeroed(Class, ptr_diff(i0, i1));
+    cr := zeroed Class;
+    f.reset_scratch();
+
+    if f.retty != Qbe.Null {
+        f.typclass(cr&, f.get_type(f.retty), true, gpreg, fpreg);
+        if cr.class.has(.Cptr) {
+            f.retr = f.newtmp("abi", .Kl);
+            f.emit(.copy, .Kl, f.retr, TMP(RvReg.A0), Qbe.Null);
+        }
+    }
+
+    cty := f.argsclass(i0, i1, ca, cr.class.has(.Cptr));
+    discard := Array(i32, 2).ptr_from_int(0);
+    f.reg = rv64_argregs(CALL(cty), discard);
+
+    il := Qbe.Ins.list(temp());
+    tmp := zeroed Array(Qbe.Ref, 17); tmp := tmp&;
+    t := 0;
+    zip_args(i0, i1, ca) { i, c, $_ |
+        if c.class.has(.Cfpint) {
+            r := i.to;
+            k := c.cls&[0];
+            c.cls&[0] = @if(is_wide(k), .Kl, .Kw);
+            i.to = f.newtmp("abi", k);
+            f.emit(.cast, k, r, i.to, Qbe.Null);
+        }
+        if i.op() == .parc
+        && !c.class.has(.Cptr)
+        && c.nreg != 0 {
+            nt := c.nreg;
+            if c.class.has(.Cstk2) {
+                c.cls&[1] = .Kl;
+                c.off&[1] = 8;
+                @debug_assert_eq(nt, 1);
+                nt = 2;
+            }
+            sttmps(tmp.items().rest(t), nt, c, i.to, f);
+            stkblob(i.to, c.type, f, il&);
+            t += nt;
+        }
+    }
+    for_rev il { it |
+        f.emit(it);
+    }
+
+    t := 0;
+    s := 2 + 8*f.vararg.int();
+    zip_args(i0, i1, ca) { i, c, $continue |
+        if i.op() == .parc && !c.class.has(.Cptr) {
+            if c.nreg == 0 {
+                f.get_temporary(i.to)[].slot = -s.intcast();
+                s += 1 + c.class.has(.Cstk2).int();
+                continue();
+            }
+            range(0, c.nreg) { j |
+                r := c.reg&[j];
+                f.emit(.copy, c.cls&[j], tmp[t], r, Qbe.Null);
+                t += 1;
+            }
+            if c.class.has(.Cstk2) {
+                f.emit(.load, .Kl, tmp[t], SLOT(-s), Qbe.Null);
+                t += 1;
+                s += 1;
+            }
+        } else {
+            if c.class.has(.Cstk1) {
+                f.emit(.load, c.cls&[0], i.to, SLOT(-s), Qbe.Null);
+                s += 1;
+            } else {
+                f.emit(.copy, c.cls&[0], i.to, c.reg&[0], Qbe.Null);
+            }
+        }
+    };
+    
+    (
+        stk = s,
+        ngp = cty.get(.gp_arg),
+        nfp = cty.get(.fp_arg),
+    )
+}
+
+selvaarg :: fn(f: *Qbe.Fn, _: *Qbe.Blk, i: *Qbe.Ins) void = {
+    loc := f.newtmp("abi", .Kl);
+    newloc := f.newtmp("abi", .Kl);
+    f.emit(.storel, .Kw, Qbe.Null, newloc, i.arg&[0]);
+    f.emit(.add, .Kl, newloc, loc, f.getcon(8));
+    f.emit(.load, i.cls(), i.to, loc, Qbe.Null);
+    f.emit(.load, .Kl, loc, i.arg&[0], Qbe.Null);
+}
+
+selvastart :: fn(f: *Qbe.Fn, p: Params, ap: Qbe.Ref) void = {
+    rsave := f.newtmp("abi", .Kl);
+    f.emit(.storel, .Kw, Qbe.Null, rsave, ap);
+    s := @if(p.stk > 2 + 8 * f.vararg.int(), p.stk, 2 + p.ngp);
+    f.emit(.addr, .Kl, rsave, SLOT(-s), Qbe.Null);
+}
+
+#use("@/backend/abi.fr");
+rv64_abi :: fn(f: *Qbe.Fn) void = 
+    f.native_abi(Params, selpar, selcall, fn(_, __, ___) => panic("selsyscall not implemented for riscv"), selvastart, selvaarg, selret);
+
+#use("@/backend/lib.fr");
+#use("@/backend/rv64/target.fr");
+#use("@/backend/abi.fr");
+zip_args :: zip_args_g(Class);
+
+fn has(a: ArgClass, b: ArgClass) bool #inline = {
+    ::enum_basic(ArgClass);
+    (@as(i64) a.raw().zext()).bit_and(b.raw().zext()) != 0
+}
+
+fn with(a: *ArgClass, b: ArgClass) void #inline = {
+    a[] = @as(ArgClass) @as(u8) (@as(i64) a[].raw().zext()).bit_or(b.raw().zext()).trunc();
+}
+
+fn CALL(r: RCallRv) Qbe.Ref = CALL(@as(i64) r.repr.zext());

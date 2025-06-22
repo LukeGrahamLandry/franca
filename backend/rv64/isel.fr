@@ -1,0 +1,195 @@
+// Adapted from Qbe. MIT License. © 2015-2024 Quentin Carbonneaux <quentin@c9x.me>
+// Contributed to Qbe by Michael Forney
+
+// TODO
+// - sel, cas, rotr, rotl, byteswap, ctz, clz, ones, min, max, sqrt, trace
+// - address folding like arm (can they share?)
+// - replace cmp+jnz (they don't have a flags register)
+
+rv64_isel :: fn(f: *Qbe.Fn) void = {
+    assign_alloc_slots(f);
+    
+    for_blocks f { b |
+        f.reset_scratch();
+        
+        for_jump_targets b { sb |
+            for_phi sb { p |
+                n := index_in_phi(b, p);
+                fixarg(p.arg&.index(n), p.cls, Qbe.Ins.ptr_from_int(0), f);
+            };
+        };
+        
+        seljmp(b, f);
+        for_insts_rev b { i |
+            sel(i[], f);
+        };
+        f.copy_instructions_from_scratch(b);
+    }
+
+    when_debug(f, .InstSelect) { out |
+        @fmt(out, "\n> After instruction selection:\n");
+        printfn(f, out);
+    }
+}
+
+fixarg :: fn(r: *Qbe.Ref, k: Qbe.Cls, i: *Qbe.Ins, f: *Qbe.Fn) void = {
+    r0, r1 := (r[], r[]);
+    o := @if(!i.is_null(), i.op(), .copy);  // i=null means it's a phi which will be converted to copy in rega 
+    @match(rtype(r0)) {
+    fn RCon() => {
+        break :: local_return;
+        c := f.get_constant(r0);
+        if c.type() == .CAddr && memarg(r, o, i) {
+            break();
+        };
+        if c.type() == .CBits && immarg(r, o, i)
+        && -2048 <= c.bits() && c.bits() < 2048 {
+            break();
+        }
+        r1 = f.newtmp("isel", k);
+        if is_float(k) {
+            // TODO: see arm64/isel comment about this
+            r_int := f.newtmp("isel", .Kl);
+            f.emit(.cast, k, r1, r_int, QbeNull);
+            f.emit(.copy, .Kl, r_int, r0, QbeNull);
+        } else {
+            f.emit(.copy, k, r1, r0, Qbe.Null);
+        }
+    }
+    fn RTmp() => {
+        break :: local_return;
+        if isreg(r0) {
+            break();
+        };
+        s := f.get_temporary(r0)[].slot;
+        if (s != -1) {
+            /* aggregate passed by value on
+             * stack, or fast local address,
+             * replace with slot if we can */
+            if memarg(r, o, i) {
+                r1 = SLOT(s);
+                break();
+            }
+            r1 = f.newtmp("isel", k);
+            f.emit(.addr, k, r1, SLOT(s), Qbe.Null);
+            break();
+        }
+        t := f.get_temporary(r0);
+        if k == .Kw && t.cls == .Kl {
+            /* TODO: this sign extension isn't needed
+             * for 32-bit arithmetic instructions */
+            r1 = f.newtmp("isel", k);
+            f.emit(.extsw, .Kl, r1, r0, Qbe.Null);
+        } else {
+            @debug_assert(k == t.cls);
+        }
+    }
+    @default => ();
+    };
+    r[] = r1;
+}
+
+negate :: fn(pr: *Qbe.Ref, f: *Qbe.Fn) void = {
+    r := f.newtmp("isel", .Kw);
+    f.emit(.xor, .Kw, pr[], r, f.getcon(1));
+    pr[] = r;
+}
+
+selcmp :: fn(i: Qbe.Ins, k: Qbe.Cls, op: Qbe.Cmp, f: *Qbe.Fn) void = {
+    @match(op) {
+        fn Cieq() => return cmp_int_zero(i, k, true, f);
+        fn Cine() => return cmp_int_zero(i, k, false, f);
+        fn Cfuo() => return cmp_float_order(i, k, true, f);
+        fn Cfo()  => return cmp_float_order(i, k, false, f);
+        fn Cfne() => {
+            i&.set_op(@if(is_wide(k), .ceqd, .ceqs));
+        }
+        @default => ();
+    };
+    sign := @is(op, .Cisge, .Cisgt, .Cisle, .Cislt);
+    swap := @is(op, .Cisgt, .Cisle, .Ciugt, .Ciule);
+    neg  := @is(op, .Cisge, .Cisle, .Ciuge, .Ciule, .Cfne);
+    
+    if op.raw() < Qbe.CmpICount {
+        i&.set_op(@if(sign, .csltl, .cultl));
+    }
+    if swap {
+        r := i.arg&[0];
+        i.arg&[0] = i.arg&[1];
+        i.arg&[1] = r;
+    }
+    if neg {
+        negate(i.to&, f);
+    }
+    icmp := f.emit(i);
+    fixargs(k, icmp, f)
+}
+
+// (a=a) = false iff a is NaN
+cmp_float_order :: fn(i: Qbe.Ins, k: Qbe.Cls, uo: bool, f: *Qbe.Fn) void = {
+    if uo {
+        negate(i.to&, f);
+    }
+    r0 := f.newtmp("isel", i&.cls());
+    r1 := f.newtmp("isel", i&.cls());
+    f.emit(.and, i&.cls(), i.to, r0, r1);
+    o: Qbe.O = @if(is_wide(k), .ceqd, .ceqs);
+    icmp := f.emit(o, i&.cls(), r0, i.arg&[0], i.arg&[0]);
+    fixargs(k, icmp, f);
+    icmp := f.emit(o, i&.cls(), r1, i.arg&[1], i.arg&[1]);
+    fixargs(k, icmp, f);
+}
+
+// (a xor b) = 0 iff a=b
+cmp_int_zero :: fn(i: Qbe.Ins, k: Qbe.Cls, equals: bool, f: *Qbe.Fn) void = {
+    o: Qbe.O = @if(equals, .reqz, .rnez);
+    r := f.newtmp("isel", k);
+    f.emit(o, i&.cls(), i.to, r, Qbe.Null);
+    icmp := f.emit(.xor, k, r, i.arg&[0], i.arg&[1]);
+    fixargs(k, icmp, f);
+}
+
+fixargs :: fn(k: Qbe.Cls, icmp: *Qbe.Ins, f: *Qbe.Fn) void = {
+    fixarg(icmp.arg&[0]&, k, icmp, f);
+    fixarg(icmp.arg&[1]&, k, icmp, f);
+}
+
+sel :: fn(i: *Qbe.Ins, f: *Qbe.Fn) void = {
+    if is_alloc(i.op()) {
+        i0 := f.globals.curi.offset(1);  // :LookAtLastInst
+        salloc(i.to, i.arg&[0], f);
+        fixarg(i0.arg&[0]&, .Kl, i0, f);
+        return();
+    }
+    ck, cc := (Qbe.Cls.Kw, @as(i32) -1);
+    if (iscmp(i.op(), ck&, cc&)) {
+        selcmp(i[], ck, @as(Qbe.Cmp) cc, f);
+        return();
+    }
+    if (i.op() != .nop) {
+        i0 := f.emit(i[]);
+        fixarg(i0.arg&[0]&, argcls(i, 0), i0, f);
+        fixarg(i0.arg&[1]&, argcls(i, 1), i0, f);
+    }
+}
+
+seljmp :: fn(b: *Qbe.Blk, f: *Qbe.Fn) void = {
+    /* TODO: replace cmp+jnz with beq/bne/blt[u]/bge[u] */
+    if b.jmp.type == .jnz {
+        fixarg(b.jmp.arg&, .Kw, Qbe.Ins.ptr_from_int(0), f);
+    }
+}
+
+memarg :: fn(r: *Qbe.Ref, op: Qbe.O, i: *Qbe.Ins) bool = {
+    @if(is_load(op) || op == .call) return(r.identical(i.arg&[0]&));
+    @if(is_store(op)) return(r.identical(i.arg&[1]&));
+    false
+}
+
+immarg :: fn(r: *Qbe.Ref, o: Qbe.O, i: *Qbe.Ins) bool = {
+    info := import("@/backend/meta/ops.fr").tables;
+    info[intcast @as(i32) o].ops_table_rv_imm() && r.identical(i.arg&[1]&)
+}
+
+
+#use("@/backend/lib.fr");
