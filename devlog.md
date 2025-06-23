@@ -6,6 +6,14 @@ let's cheat and make examples/terminal.fr(repl=true) not take 2 seconds to compi
 - compile_to_shader_source: 68 // shader compiler (for comptime)
 notably those are all things to aren't going to change if you're just working on the terminal program. 
 
+## (Jun 23)
+
+- plumbing for FuncImpl.Asm.rv64
+- split elf/emit into smaller functions to refamiliarize with it before i try to support relocatable. 
+  - had to do it eventually anyway and i think using zig to statically link and run the .ssa tests is an easier starting point 
+    than either a) dealing with an emulator with a dynamic libc or b) trying to make everything work at once and use the 
+    franca lib/sys/ impls. 
+
 ## (Jun 22)
 
 - the risc64 syscall numbers are the same as the arm64 ones. that's nice. 

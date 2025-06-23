@@ -58,6 +58,8 @@ Seg :: @enum(u8) (
 Asm :: @struct {
     arm64: Ref(u8);
     amd64: Ref(u8);
+    rv64:  Ref(u8);
+    // when adding a field make sure this doesn't become the biggest variant (rn it's Fnc) or have a less dumb repr for arches. 
 };
 
 // Currently i only save right before emitting machine code, 
@@ -354,12 +356,13 @@ fn push(self: *Writer, m: *QbeModule, d: *Dat2) void = {
     self.sym[id].align_log2 = d.align.trailing_zeros().trunc();
 }
 
-fn push_asm(self: *Writer, m: *QbeModule, arm64: []u8, amd64: []u8, id: Qbe.Sym) void = {
+fn push_asm(self: *Writer, m: *QbeModule, code: *MultiArchAsm, id: Qbe.Sym) void = {
     id := self.map_sym(m, id);
     self.sym[id].segment = .MachineCode;
-    self.sym[id].asm = (  // TODO: let it give us both
-        arm64 = self.push(arm64),
-        amd64 = self.push(amd64),
+    self.sym[id].asm = (
+        arm64 = self.push(code[.aarch64]),
+        amd64 = self.push(code[.x86_64]),
+        rv64  = self.push(code[.rv64]),
     );
 }
 
@@ -623,7 +626,14 @@ fn compile_all_symbols(header: *Header, m: *QbeModule) void = {
                 @if(ENABLE_ENABLE_TRACY) zone_end(zone);
             }
             fn MachineCode() => {
-                m.add_code_bytes(syms[i.off.zext()], header.get(it.asm.arm64), header.get(it.asm.amd64));
+                // todo: nice macro so it's not order dependent
+                code: MultiArchAsm = (data = (
+                    header.get(it.asm.arm64),
+                    header.get(it.asm.amd64),
+                    empty(),
+                    header.get(it.asm.rv64),
+                ));
+                m.add_code_bytes(syms[i.off.zext()], code&);
             }
             fn Import() => {
                 lib := header.get(it.imp.lib);

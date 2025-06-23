@@ -1,10 +1,34 @@
 // UNFINISHED: this only supports Exe not Relocatable or Dynamic. 
 
-// results are in temp()
-fn output_elf(m: *QbeModule) [][]u8 = {
-    debug_log_byte_size(m);
+EmitElf :: @struct {
+    m: *Qbe.Module;
+    header: *Elf.Header;
+    program_headers: []Elf.ProgramHeader;
+    commands: List(u8); // only contains (elf, program, section) headers
+    payload: List(u8);  // everything else
+    // these are the final bytes that will be emitted
+    // (commands, payload, segments)
+    chunks: List([]u8);  
+    // These don't do anything i think? but you always at least an empty one. 
+    section_names: List(Str);
+    section_index := zeroed EnumMap(SegmentType, u16);
+};
+
+
+SymbolTableInfo :: @struct {  
+    fixups: []FixP = empty();
+    symbols: []*SymbolInfo = empty();
+    local_count := 0;
+    code_size := 0;
+};
+
+max_program_headers :: 9;
+prot_read_write :: 6;
+prot_read :: 4;
+
+finalize_segments :: fn(m: *Qbe.Module) SymbolTableInfo = {
     patch_pending_symbols(m);
-     
+    
     code := m.segments&[.Code]&;
     code_size := code.len() - m.goal.commands_size_guess - m.goal.size_of_stubs;
     for_enum SegmentType { s | 
@@ -15,8 +39,7 @@ fn output_elf(m: *QbeModule) [][]u8 = {
         m.align_to(s, 1.shift_left(16));
     };
     m.fixups_locked = true; // we're going to stomp the data section with relocation info so you can run it jitted anymore after this. 
-    
-    // TODO: don't import libc just because we have local fixups (use m.imports.len)
+
     fixups, symbols := collect_aot_fixups(m);
     
     // local symbols are kept seperate from imports. 
@@ -37,6 +60,7 @@ fn output_elf(m: *QbeModule) [][]u8 = {
             if it.symbol.kind == .Local {
                 local_fix&.push(it);
             } else {
+                @assert(!it.symbol.strong, "importing non-weak symbol '%' in static binary", it.symbol.name);
                 if it.fix.type&.is(.DataAbsolute) {
                     i64.ptr_from_raw(it.fix.patch_at)[] = 0;
                 }
@@ -44,74 +68,63 @@ fn output_elf(m: *QbeModule) [][]u8 = {
         };
         fixups = local_fix.items();
     };
-    
-    have_any_imports := local_count != symbols.len;
-    PRETEND_TO_HAVE_SYMBOLS_BECAUSE_LIBRISCV_HATES_US := m.goal.arch == .rv64;
-    
-    chunks := list([]u8, 10, temp());
-    segment_base := u8.ptr_from_raw(m.segment_address(.Code, 0));
-    commands: List(u8) = fixed_list(ptr = segment_base, len = m.goal.commands_size_guess);
-    
-    @assert_eq(m.goal.type, .Exe, "TODO: other types of elf");
-    
-    e_header := commands&.reserve_type(Elf.Header);
-    e_header[] = (
-        type = @match(m.goal.type) {
-            fn Exe() => .Executable;
-            fn Relocatable() => .Relocatable;
-            fn Dynamic() => .Dynamic;
-            @default => unreachable();
-        },
-        machine = @match(m.goal.arch) {
-            fn aarch64() => .arm64;
-            fn x86_64()  => .amd64;
-            fn rv64()    => .rv64;
-            @default     => unreachable();
-        },
-        entry = main_entry_point_vaddr(m) + Elf.MYSTERY_SPICE,
-        program_header_off = size_of(Elf.Header),
-        section_header_off = 0, 
-        flags = 0, // todo
-        ehsize = 0, //64, // TODO?
-        program_header_num = 0, // patched
-        section_header_num = 0,
-        section_header_names_index = 0, 
-    );
-    
-    start_program_headers := commands.len;
-    total_prog_headers := @if(symbols.len > 0, 9, 8);
-    program_headers_size := total_prog_headers * size_of(Elf.ProgramHeader);
+    (fixups = fixups, symbols = symbols, local_count = local_count, code_size = code_size)
+};
+
+start_elf :: fn(m: *Qbe.Module) EmitElf #inline = {
+    commands: List(u8) = fixed_list(ptr = u8.ptr_from_raw(m.segment_address(.Code, 0)), len = m.goal.commands_size_guess);
+    h := commands&.reserve_type(Elf.Header); h[] = zeroed(Elf.Header);
+    program_headers_size := max_program_headers * size_of(Elf.ProgramHeader);
     @debug_assert_gt(commands.maybe_uninit.len, program_headers_size);
-    program_headers: []Elf.ProgramHeader = (ptr = ptr_cast_unchecked(u8, Elf.ProgramHeader, commands.maybe_uninit.index_unchecked(commands.len)), len = total_prog_headers);
+    ph: []Elf.ProgramHeader = (
+        ptr = ptr_cast_unchecked(u8, Elf.ProgramHeader, commands.maybe_uninit.index_unchecked(commands.len)), 
+        len = max_program_headers,
+    );
+    h.program_header_off = commands.len;
     commands.len += program_headers_size;
+    h.section_header_off = commands.len;
     
-    program_header :: fn() => {
-        e_header.program_header_num += 1;
-        program_headers.index(e_header.program_header_num.zext() - 1)
+    h.magic = Elf.MAGIC;
+    h.class = 2; // 64-bit
+    h.data = 1; // little endian
+    h.header_version = 1;  // "current version"... as of 1997 (?)
+    h.version = 1;
+    h.program_header_entsize = size_of(Elf.ProgramHeader);
+    h.section_header_entsize = size_of(Elf.SectionHeader);
+    h.type = @match(m.goal.type) {
+        fn Exe() => .Executable;
+        fn Relocatable() => .Relocatable;
+        fn Dynamic() => .Dynamic;
+        @default => unreachable();
     };
-    
-    // TODO: it seems you still need one empty one even tho they don't do anything? wtf?
-    section_names := Str.list(10, temp());
-    e_header.section_header_off = commands.len;
-    section_header :: fn(name: Str) => {
-        section_names&.push(name);
-        h := commands&.reserve_type(Elf.SectionHeader);
-        e_header.section_header_num += 1;
-        h
+    h.machine = @match(m.goal.arch) {
+        fn aarch64() => .arm64;
+        fn x86_64()  => .amd64;
+        fn rv64()    => .rv64;
+        @default     => unreachable();
     };
-    section_header("")[] = Elf.SectionHeader.zeroed();
-    
-    p_header := program_header();
-    
-    dynamic_header: ?Ty(*Elf.ProgramHeader, *Elf.ProgramHeader, *Elf.ProgramHeader) = .None;
-    
+    h.entry = main_entry_point_vaddr(m) + Elf.MYSTERY_SPICE;
+    (
+        m = m,
+        chunks = list([]u8, 10, temp()),
+        commands = commands,
+        header = h,
+        program_headers = ph,
+        payload = u8.list(m.goal.chained_size_guess, temp()),
+        section_names = Str.list(10, temp()),
+    )
+};
+
+PayloadBase :: @struct(virtual: i64, file: i64);
+
+create_the_segments :: fn(e: *EmitElf) PayloadBase = {
     virtual_offset := Elf.MYSTERY_SPICE; 
     file_offset    := 0;
-    make_segment :: fn(seg: SegmentType, prot: u32) => {
-        segment := m.segments&[seg]&;
-        chunks&.push(live_segment_part(m, seg)); // :waste :commandsispartofcodenow
+    make_segment :: fn(e: *EmitElf, seg: SegmentType, prot: u32) => {
+        segment := e.m.segments&[seg]&;
+        e.chunks&.push(live_segment_part(e.m, seg)); // :waste :commandsispartofcodenow
     
-        program_header()[] = (
+        e.program_header()[] = (
             type = .Load,
             prot = prot,
             offset = file_offset,
@@ -123,35 +136,37 @@ fn output_elf(m: *QbeModule) [][]u8 = {
         );
         
         // for static linking, local symbols are defined relative to a section so we need them even for Exe
-        //section_header("")[] = (
-        //    name = 0, // TODO
-        //    type = .ProgramBits, 
-        //    flags = 0, 
-        //    //flags = 1.shift_left(@as(i64) Elf.SectionFlag.Exec),
-        //    addr = virtual_offset,  
-        //    offset = file_offset, 
-        //    size = segment.len(),
-        //    addr_align = 4096,
-        //);
+        e.section_index&[seg] = e.header.section_header_num;
+        e.section_header("")[] = (
+            name = 0, // TODO
+            type = .ProgramBits, 
+            flags = 0, 
+            //flags = 1.shift_left(@as(i64) Elf.SectionFlag.Exec),
+            addr = virtual_offset,  
+            offset = file_offset, 
+            size = segment.len(),
+            addr_align = 4096,
+        );
         
         virtual_offset += segment.mmapped.len;
         file_offset += segment.len();
-        header
     };
     
     // TODO: we're asking it to map the elf info like you need to for mach-o but probably shouldn't do that here. 
     
     // the LOAD headers are required to be in order. 
     
-    make_segment(.Code, RX); RX :: 5;// :waste :commandsispartofcodenow
-    make_segment(.ConstantData, RW); R :: 4; // :waste  // TODO: how the fuck do i do relocations in a non-writable segment?
-    make_segment(.MutableData, RW); RW :: 6;
+    RW :: prot_read_write;
+    e.make_segment(.Code, RX); RX :: 5;// :waste :commandsispartofcodenow
+    e.make_segment(.ConstantData, RW);  // TODO: how the fuck do i do relocations in a non-writable segment?
+    e.make_segment(.MutableData, RW);
     
-    have_bss := m.segments&[.ZeroInitData]&.len() > 0;
+    have_bss := e.m.segments&[.ZeroInitData]&.len() > 0;
     // BSS
     if have_bss {
-        segment := m.segments&[.ZeroInitData]&;
-        program_header()[] = (
+        segment := e.m.segments&[.ZeroInitData]&;
+        e.section_index&[.ZeroInitData] = e.header.section_header_num;
+        e.program_header()[] = (
             type = .Load,
             prot = RW,
             offset = file_offset,
@@ -163,21 +178,36 @@ fn output_elf(m: *QbeModule) [][]u8 = {
         );
         virtual_offset += segment.len();
     };
+    (virtual = virtual_offset, file = file_offset)
+}
+
+// results are in temp()
+fn output_elf(m: *QbeModule) [][]u8 = {
+    debug_log_byte_size(m);
+    T := finalize_segments(m);
+    have_any_imports := T.local_count != T.symbols.len;
+    PRETEND_TO_HAVE_SYMBOLS_BECAUSE_LIBRISCV_HATES_US := m.goal.arch == .rv64;
     
-    if symbols.len > 0 || PRETEND_TO_HAVE_SYMBOLS_BECAUSE_LIBRISCV_HATES_US {
-        interp := @if(have_any_imports, program_header(), Elf.ProgramHeader.ptr_from_int(0));
-        dynamic_header = (Some = (interp, program_header(), Elf.ProgramHeader.ptr_from_int(0)));
+    e: EmitElf = start_elf(m); e := e&;
+    
+    if m.goal.type != .Exe { 
+        eprintln("TODO: other types of elf");
+    }
+    
+    e.section_header("")[] = Elf.SectionHeader.zeroed();
+    p_header := e.program_header();
+
+    base := create_the_segments(e);
+    
+    dynamic_header: ?Ty(*Elf.ProgramHeader, *Elf.ProgramHeader, *Elf.ProgramHeader) = .None;
+    if T.symbols.len > 0 || PRETEND_TO_HAVE_SYMBOLS_BECAUSE_LIBRISCV_HATES_US {
+        interp := @if(have_any_imports, e.program_header(), Elf.ProgramHeader.ptr_from_int(0));
+        dynamic_header = (Some = (interp, e.program_header(), e.program_header()));
     };
-    
-    if dynamic_header& { it |
-        it._2 = program_header();  // TODO: can this get moved up? or does it have to be after all load commands? 
-    };
-    
-    payload := u8.list(m.goal.chained_size_guess, temp());
-    
-    program_header()[] = (
+        
+    e.program_header()[] = (
         type = .Stack,
-        prot = RW,
+        prot = prot_read_write,
         offset = 0,
         vaddr = 0, 
         paddr = 0,
@@ -186,11 +216,10 @@ fn output_elf(m: *QbeModule) [][]u8 = {
         align = 0,
     );
     
-    dynamics := Elf.Dyn.list(10, temp());
-    
+    program_headers_size := e.program_headers.len * Elf.ProgramHeader.size_of();
     p_header[] = (
         type = .Phdr,
-        prot = 4,
+        prot = prot_read,
         offset = size_of(Elf.Header),
         vaddr = size_of(Elf.Header) + Elf.MYSTERY_SPICE, 
         paddr = size_of(Elf.Header) + Elf.MYSTERY_SPICE,
@@ -200,241 +229,281 @@ fn output_elf(m: *QbeModule) [][]u8 = {
     );
     
     if dynamic_header { it |
-        interp_header, load_payload_header, dynamic_header := it;
         if have_any_imports {
-            loader_path := @match(m.goal.arch) {
-                fn x86_64() => "/lib64/ld-linux-x86-64.so.2\0";
-                fn rv64()   => "/usr/riscv64-linux-gnu/lib/ld-linux-riscv64-lp64d.so.1\0";
-                @default    => @panic("TODO: dynamic loader path for %", m.goal.arch);
-            };
-            size := loader_path.len;
-            addr := virtual_offset + payload.len;
-            interp_header[] = (
-                type = .Interp,
-                prot = R,
-                offset = file_offset + payload.len,
-                vaddr = addr, 
-                paddr = addr,
-                file_size = size,
-                mem_size = size,
-                align = 1,
-            );
-            payload&.push_all(loader_path);
-            payload&.zero_pad_to_align(8);
+            e.request_interp(it._0, base);
         };
         
-        // SectionHeader.link: Relocations -> DynSymbolTable -> StringTable
-        // This is conceptually the same, it's just that the section headers don't do anything (?)
+        e.for_dynamic_loader(it._1, it._2, base, T);
+    };
+    // program headers are only for the os loader, not a static linker, 
+    // but it's easier to just always output them and pretend we didn't instead of checking in the above code. 
+    if m.goal.type == .Relocatable {
+        e.header.program_header_num = 0;
+        e.header.program_header_off = 0;
+        e.header.program_header_entsize = 0;
+    };
+    
+    end := e.commands.len;
+    @assert_le(end, m.goal.commands_size_guess, "we guessed wrong so the array resized and all the pointers are junk");
+    e.commands.len = m.goal.commands_size_guess;
+    e.commands.items().rest(end).set_zeroed();
+    @assert_le(e.payload.len, m.goal.chained_size_guess, "resized and now the pointers are junk");  // TODO: don't think i need this here, just mach-o did
+    if e.payload.len != 0 {
+        e.chunks&.push(e.payload.items());
+    };
+    
+    e.chunks.items()
+}
+
+request_interp :: fn(e: *EmitElf, interp_header: *Elf.ProgramHeader, base: PayloadBase) void = {
+    loader_path := @match(e.m.goal.arch) {
+        fn x86_64() => "/lib64/ld-linux-x86-64.so.2\0";
+        fn rv64()   => "/usr/riscv64-linux-gnu/lib/ld-linux-riscv64-lp64d.so.1\0";
+        @default    => @panic("TODO: dynamic loader path for %", e.m.goal.arch);
+    };
+    size := loader_path.len;
+    addr := base.virtual + e.payload.len;
+    interp_header[] = (
+        type = .Interp,
+        prot = prot_read,
+        offset = base.file + e.payload.len,
+        vaddr = addr, 
+        paddr = addr,
+        file_size = size,
+        mem_size = size,
+        align = 1,
+    );
+    e.payload&.push_all(loader_path);
+    e.payload&.zero_pad_to_align(8);
+};
+
+for_dynamic_loader :: fn(
+    e: *EmitElf, 
+    load_payload_header: *Elf.ProgramHeader, 
+    dynamic_header: *Elf.ProgramHeader, 
+    base: PayloadBase, 
+    T: SymbolTableInfo,
+) void = {
+    m := e.m;
+    // SectionHeader.link: Relocations -> DynSymbolTable -> StringTable
+    // This is conceptually the same, it's just that the section headers don't do anything (?)
+    dynamics := Elf.Dyn.list(10, temp());
+    
+    string_table_start := e.payload.len;
+    imported_symbol_name_offsets := u32.list(T.symbols.len, temp());
+    e.payload&.push(0);  // null
+    
+    for glibc_dylib_paths { name |
+        off := e.payload.len - string_table_start;
+        e.payload&.push_all(name);
+        e.payload&.push(0);
+        dynamics&.push(tag = .Needed, val = off);
+    };
+    
+    dynamics&.push(tag = .Flags, val = 8);  // DF_BIND_NOW // TODO: does this do anything?
+    dynamics&.push(tag = .Flags_1, val = 1);  // ?     // TODO: does this do anything?
+    dynamics&.push(tag = .Debug, val = 0);  // ?     // TODO: does this do anything?
+    
+    //dynamics&.push(tag = .BindNow, val = 0);  // TODO: does this do anything? 
+    
+    for T.symbols { info |
+        @debug_assert_eq(info.got_lookup_offset, imported_symbol_name_offsets.len);
+        imported_symbol_name_offsets&.push(trunc(e.payload.len - string_table_start));
+        @debug_assert(info.name.len > 0 && info.name[info.name.len - 1] != 0, "empty symbol name or extra null terminator will not go well");
+        e.payload&.push_all(info.name);
+        e.payload&.push(0);
+    };
+    
+    // ugh
+    string_table_index := e.header.section_header_num;
+    e.section_header(".dynstr")[] = (
+        name = 0,
+        type = .StringTable, 
+        flags = 1.shift_left(@as(i64) Elf.SectionFlag.Strings),
+        addr = 0,
+        offset = base.file + string_table_start, 
+        size = e.payload.len - string_table_start,
+        addr_align = 1,
+    );
+    
+    dynamics&.push(tag = .StrTab, val = base.virtual + string_table_start);
+    dynamics&.push(tag = .StrSz, val = e.payload.len - string_table_start);
+    e.payload&.zero_pad_to_align(8);
+    symbol_table_start := e.payload.len;
+    e.payload&.reserve_type(Elf.Symbol)[] = Elf.Symbol.zeroed();  // null
+    for T.symbols { symbol |
+        STT_FUNC :: 2;
+        xx := e.payload&.reserve_type(Elf.Symbol);
+        local := symbol.kind == .Local;
+        // TODO: for static linking don't add segment_base?
+        segment_base := Elf.MYSTERY_SPICE + ptr_diff(m.segments&[.Code].mmapped.ptr, m.segments&[symbol.segment].mmapped.ptr);
         
-        string_table_start := payload.len;
-        imported_symbol_name_offsets := u32.list(symbols.len, temp());
-        payload&.push(0);  // null
+        type := @if(local, Elf.STB_LOCAL, @if(symbol.strong, Elf.STB_GLOBAL, Elf.STB_WEAK));
+        xx[] = (
+            name = imported_symbol_name_offsets[symbol.got_lookup_offset],
+            info = type.shift_left(4).bit_or(2).trunc(), // _ FUNC
+            value = @if(local, segment_base + symbol.offset, 0),
+            // this only matters for linker
+            section_header_index = 0, // TODO: for static linking? trunc(@if(local, @as(i64) symbol.segment.raw() + 1, 0)),  // :SegmentOrderMatters
+        );
+    };
+    
+    // ugh
+    symbol_table_index := e.header.section_header_num;
+    e.section_header(".dynsym")[] = (
+        name = 0, // TODO
+        type = .DynSymbolTable, 
+        flags = 2, // TODO: what does this mean? 
+        addr = 0,  // TODO: clang has some virtual place here
+        offset = base.file + symbol_table_start, 
+        size = e.payload.len - symbol_table_start,
+        addr_align = 8,
+        ent_size = size_of(Elf.Symbol),
+        link = string_table_index.zext(),
+        info = T.local_count.trunc() + 1, 
+    );
+    
+    dynamics&.push(tag = .SymTab, val = base.virtual + symbol_table_start);
+    dynamics&.push(tag = .SymEnt, val = size_of(Elf.Symbol));
+    
+    // For os loader, relocations targets are relative to the base address of the executable. 
+    // TODO:
+    // For linker, they're relative to a section, and the index of that section goes in the `info` field of the RELA header. 
+    // so each section that contains relocations needs a seperate section to describe them.
+    
+    relocation_table_start := e.payload.len;
+    // TODO: do they have to be ordered by memory location like mach-o?
+    each T.fixups { fix |
+        it := fix.fix.type.DataAbsolute;
+        i64.ptr_from_raw(fix.fix.patch_at)[] = 0;
+        e.payload&.reserve_type(Elf.RelA)[] = (
+            sym = trunc(fix.symbol.got_lookup_offset + 1),
+            offset = ptr_diff(m.segments&[.Code].mmapped.ptr, fix.fix.patch_at) + Elf.MYSTERY_SPICE, // TODO: or is it offset in a specific segment?
+            addend = it.increment,
+            type = Elf.R_AMD64_GLOB_DAT, // 8 R_AMD64_RELATIVE // R_AMD64_64 1 // R_AMD64_GLOB_DAT 6  // R_AMD64_JUMP_SLOT 7,  // TODO: what does this mean?
+        );
+    };
+    
+    loadable := m.goal.type != .Relocatable;
+    // ugh
+    e.section_header(".rela.dyn")[] = (
+        name = 0,
+        type = .RelocAddend, 
+        flags = 1.shift_left(@if(loadable, @as(i64) Elf.SectionFlag.Alloc, @as(i64) Elf.SectionFlag.InfoLink)),
+        addr = 0,  // TODO: clang has some virtual place here
+        offset = base.file + relocation_table_start, 
+        size = e.payload.len - relocation_table_start,
+        addr_align = 8,
+        ent_size = size_of(Elf.RelA),
+        link = symbol_table_index.zext(),
+        info = @if(loadable, 0, 0 /*todo*/),  // index of the section the relocation applies to
+    );
+    dynamics&.push(tag = .RelA, val = base.virtual + relocation_table_start);
+    dynamics&.push(tag = .RelASz, val = e.payload.len - relocation_table_start);
+    dynamics&.push(tag = .RelAEnt, val = size_of(Elf.RelA));
+    
+    dynamics&.push(tag = .Null, val = 0);
+    
+    dynamics := dynamics.items().interpret_as_bytes();
+    addr := base.virtual + e.payload.len;
+    
+    // ugh
+    e.section_header(".dynamic")[] = (
+        name = 0,
+        type = .Dynamic, 
+        flags = 2,
+        addr = addr, 
+        offset = base.file + e.payload.len, 
+        size = dynamics.len,
+        ent_size = size_of(Elf.Dyn),
+        addr_align = 8,
+    );
+    
+    code := m.segments&[.Code]&;
+    e.section_header(".plt")[] = (
+        name = 0, // TODO
+        type = .ProgramBits, 
+        flags = 1.shift_left(@as(i64) Elf.SectionFlag.Exec),
+        addr = Elf.MYSTERY_SPICE + m.goal.commands_size_guess, 
+        offset = m.goal.commands_size_guess, 
+        size = m.stubs&.len(),
+        addr_align = 1,
+    );
+    e.section_header(".text")[] = (
+        name = 0, // TODO
+        type = .ProgramBits, 
+        flags = 1.shift_left(@as(i64) Elf.SectionFlag.Exec),
+        addr = Elf.MYSTERY_SPICE + m.goal.commands_size_guess + m.goal.size_of_stubs,  
+        offset = m.goal.commands_size_guess + m.goal.size_of_stubs, 
+        size = T.code_size,
+        addr_align = 1,
+    );
+    
+    RW :: prot_read_write;
+    dynamic_header[] = (
+        type = .Dynamic,
+        prot = RW,
+        offset = base.file + e.payload.len,
+        vaddr = addr, 
+        paddr = addr,
+        file_size = dynamics.len,
+        mem_size = dynamics.len,
+        align = 8,
+    );
+    e.payload&.push_all(dynamics);
+    size := e.payload.len();
+    load_payload_header[] = (
+        type = .Load,
+        prot = RW,
+        offset = base.file,
+        vaddr = base.virtual, 
+        paddr = base.virtual,
+        file_size = size,
+        mem_size = size,
+        align = 4096,
+    );
+    
+    // TODO: I think it really doesn't need the names so maybe i can take this out. 
+    {
+        e.header.section_header_names_index = e.header.section_header_num;
+        header := e.section_header(".shstrtab");
         
-        for glibc_dylib_paths { name |
-            off := payload.len - string_table_start;
-            payload&.push_all(name);
-            payload&.push(0);
-            dynamics&.push(tag = .Needed, val = off);
+        offsets := u32.list(temp());
+        string_table_start := e.payload.len;
+        for e.section_names { n |
+            offsets&.push(trunc(e.payload.len - string_table_start));
+            e.payload&.push_all(n);
+            e.payload&.push(0);
         };
-        
-        dynamics&.push(tag = .Flags, val = 8);  // DF_BIND_NOW // TODO: does this do anything?
-        dynamics&.push(tag = .Flags_1, val = 1);  // ?     // TODO: does this do anything?
-        dynamics&.push(tag = .Debug, val = 0);  // ?     // TODO: does this do anything?
-        
-        //dynamics&.push(tag = .BindNow, val = 0);  // TODO: does this do anything? 
-        
-        for symbols { info |
-            @debug_assert_eq(info.got_lookup_offset, imported_symbol_name_offsets.len);
-            imported_symbol_name_offsets&.push(trunc(payload.len - string_table_start));
-            @debug_assert(info.name.len > 0 && info.name[info.name.len - 1] != 0, "empty symbol name or extra null terminator will not go well");
-            payload&.push_all(info.name);
-            payload&.push(0);
-        };
-        
-        // ugh
-        string_table_index := e_header.section_header_num;
-        section_header(".dynstr")[] = (
+        header[] = (
             name = 0,
             type = .StringTable, 
-            flags = 1.shift_left(@as(i64) Elf.SectionFlag.Strings),
+            flags = 0,
             addr = 0,
-            offset = file_offset + string_table_start, 
-            size = payload.len - string_table_start,
+            offset = base.file + string_table_start, 
+            size = e.payload.len - string_table_start,
             addr_align = 1,
         );
         
-        dynamics&.push(tag = .StrTab, val = virtual_offset + string_table_start);
-        dynamics&.push(tag = .StrSz, val = payload.len - string_table_start);
-        payload&.zero_pad_to_align(8);
-        symbol_table_start := payload.len;
-        payload&.reserve_type(Elf.Symbol)[] = Elf.Symbol.zeroed();  // null
-        for symbols { symbol |
-            STT_FUNC :: 2;
-            xx := payload&.reserve_type(Elf.Symbol);
-            local := symbol.kind == .Local;
-            // TODO: for static linking don't add segment_base?
-            segment_base := Elf.MYSTERY_SPICE + ptr_diff(m.segments&[.Code].mmapped.ptr, m.segments&[symbol.segment].mmapped.ptr);
-            
-            type := @if(local, Elf.STB_LOCAL, @if(symbol.strong, Elf.STB_GLOBAL, Elf.STB_WEAK));
-            xx[] = (
-                name = imported_symbol_name_offsets[symbol.got_lookup_offset],
-                info = type.shift_left(4).bit_or(2).trunc(), // _ FUNC
-                value = @if(local, segment_base + symbol.offset, 0),
-                section_header_index = 0, // TODO: for static linking? trunc(@if(local, @as(i64) symbol.segment.raw() + 1, 0)),  // :SegmentOrderMatters
-            );
+        ptr := ptr_cast_unchecked(u8, Elf.SectionHeader, e.commands.maybe_uninit.ptr.offset(e.header.section_header_off));
+        s_headers: []Elf.SectionHeader = (ptr = ptr, len = e.header.section_header_num.zext());
+        enumerate s_headers { i, h |
+            h.name = offsets[i];
         };
-        
-        // ugh
-        symbol_table_index := e_header.section_header_num;
-        section_header(".dynsym")[] = (
-            name = 0, // TODO
-            type = .DynSymbolTable, 
-            flags = 2, // TODO: what does this mean? 
-            addr = 0,  // TODO: clang has some virtual place here
-            offset = file_offset + symbol_table_start, 
-            size = payload.len - symbol_table_start,
-            addr_align = 8,
-            ent_size = size_of(Elf.Symbol),
-            link = string_table_index.zext(),
-            info = local_count.trunc() + 1, 
-        );
-        
-        dynamics&.push(tag = .SymTab, val = virtual_offset + symbol_table_start);
-        dynamics&.push(tag = .SymEnt, val = size_of(Elf.Symbol));
-        
-        relocation_table_start := payload.len;
-        // TODO: do they have to be ordered by memory location like mach-o?
-        each fixups { fix |
-            it := fix.fix.type.DataAbsolute;
-            i64.ptr_from_raw(fix.fix.patch_at)[] = 0;
-            payload&.reserve_type(Elf.RelA)[] = (
-                sym = trunc(fix.symbol.got_lookup_offset + 1),
-                offset = ptr_diff(m.segments&[.Code].mmapped.ptr, fix.fix.patch_at) + Elf.MYSTERY_SPICE, // TODO: or is it offset in a specific segment?
-                addend = it.increment,
-                type = Elf.R_AMD64_GLOB_DAT, // 8 R_AMD64_RELATIVE // R_AMD64_64 1 // R_AMD64_GLOB_DAT 6  // R_AMD64_JUMP_SLOT 7,  // TODO: what does this mean?
-            );
-        };
-        
-        // ugh
-        section_header(".rela.dyn")[] = (
-            name = 0,
-            type = .RelocAddend, 
-            flags = 2, // TODO: what does this mean? 
-            addr = 0,  // TODO: clang has some virtual place here
-            offset = file_offset + relocation_table_start, 
-            size = payload.len - relocation_table_start,
-            addr_align = 8,
-            ent_size = size_of(Elf.RelA),
-            link = symbol_table_index.zext(),
-        );
-        dynamics&.push(tag = .RelA, val = virtual_offset + relocation_table_start);
-        dynamics&.push(tag = .RelASz, val = payload.len - relocation_table_start);
-        dynamics&.push(tag = .RelAEnt, val = size_of(Elf.RelA));
-        
-        dynamics&.push(tag = .Null, val = 0);
-        
-        dynamics := dynamics.items().interpret_as_bytes();
-        addr := virtual_offset + payload.len;
-        
-        // ugh
-        section_header(".dynamic")[] = (
-            name = 0,
-            type = .Dynamic, 
-            flags = 2,
-            addr = addr, 
-            offset = file_offset + payload.len, 
-            size = dynamics.len,
-            ent_size = size_of(Elf.Dyn),
-            addr_align = 8,
-        );
-        
-        code := m.segments&[.Code]&;
-        section_header(".plt")[] = (
-            name = 0, // TODO
-            type = .ProgramBits, 
-            flags = 1.shift_left(@as(i64) Elf.SectionFlag.Exec),
-            addr = Elf.MYSTERY_SPICE + m.goal.commands_size_guess, 
-            offset = m.goal.commands_size_guess, 
-            size = m.stubs&.len(),
-            addr_align = 1,
-        );
-        section_header(".text")[] = (
-            name = 0, // TODO
-            type = .ProgramBits, 
-            flags = 1.shift_left(@as(i64) Elf.SectionFlag.Exec),
-            addr = Elf.MYSTERY_SPICE + m.goal.commands_size_guess + m.goal.size_of_stubs,  
-            offset = m.goal.commands_size_guess + m.goal.size_of_stubs, 
-            size = code_size,
-            addr_align = 1,
-        );
-        
-        dynamic_header[] = (
-            type = .Dynamic,
-            prot = RW,
-            offset = file_offset + payload.len,
-            vaddr = addr, 
-            paddr = addr,
-            file_size = dynamics.len,
-            mem_size = dynamics.len,
-            align = 8,
-        );
-        payload&.push_all(dynamics);
-        size := payload.len();
-        load_payload_header[] = (
-            type = .Load,
-            prot = RW,
-            offset = file_offset,
-            vaddr = virtual_offset, 
-            paddr = virtual_offset,
-            file_size = size,
-            mem_size = size,
-            align = 4096,
-        );
-        
-        // TODO: I think it really doesn't need the names so maybe i can take this out. 
-        {
-            e_header.section_header_names_index = e_header.section_header_num;
-            header := section_header(".shstrtab");
-            
-            offsets := u32.list(temp());
-            string_table_start := payload.len;
-            for section_names { n |
-                offsets&.push(trunc(payload.len - string_table_start));
-                payload&.push_all(n);
-                payload&.push(0);
-            };
-            header[] = (
-                name = 0,
-                type = .StringTable, 
-                flags = 0,
-                addr = 0,
-                offset = file_offset + string_table_start, 
-                size = payload.len - string_table_start,
-                addr_align = 1,
-            );
-            
-            ptr := ptr_cast_unchecked(u8, Elf.SectionHeader, commands.maybe_uninit.ptr.offset(e_header.section_header_off));
-            s_headers: []Elf.SectionHeader = (ptr = ptr, len = e_header.section_header_num.zext());
-            enumerate s_headers { i, h |
-                h.name = offsets[i];
-            };
-        };
-        
-        file_offset += size;
-        virtual_offset += size;
     };
-    
-    end := commands.len;
-    @assert_le(end, m.goal.commands_size_guess, "we guessed wrong so the array resized and all the pointers are junk");
-    commands.len = m.goal.commands_size_guess;
-    commands.items().rest(end).set_zeroed();
-    @assert_le(payload.len, m.goal.chained_size_guess, "resized and now the pointers are junk");  // TODO: don't think i need this here, just mach-o did
-    if payload.len != 0 {
-        chunks&.push(payload.items());
-    };
-    
-    chunks.items()
-}
+};
+
+program_header :: fn(e: *EmitElf) *Elf.ProgramHeader = {
+    e.header.program_header_num += 1;
+    e.program_headers&.index(e.header.program_header_num.zext() - 1)
+};
+
+section_header :: fn(e: *EmitElf, name: Str) *Elf.SectionHeader = {
+    e.section_names&.push(name);
+    h := e.commands&.reserve_type(Elf.SectionHeader);
+    e.header.section_header_num += 1;
+    h
+};
 
 Elf :: import("@/backend/elf/bits.fr");
 #use("@/backend/lib.fr");

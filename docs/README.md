@@ -16,3 +16,4 @@ and some things are dumb enough that I should defend myself.
 - builtins: list of magic functions provided by the franca compiler 
 - graphics: notes about the franca `graphics` library (gpu rendering)
 - backend: notes about the franca `backend` library (codegen NOT website) 
+- adding_a_target: what needs to change to support a new architecture/operating system
