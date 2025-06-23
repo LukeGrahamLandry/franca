@@ -2,6 +2,35 @@
 // Contributed to Qbe by Michael Forney
 /* the risc-v lp64d abi */
 
+fill_target_rv64 :: fn(t: *Qbe.Target) void = {
+    ::enum(RvReg);
+    t.gpr0 = RvReg.RA.raw().zext();
+    t.ngpr = 31;
+    t.fpr0 = RvReg.FT0.raw().zext();
+    t.nfpr = 32;
+    // ._XXN: one int and one float are reserved for emit()
+    rglob :: @const_slice(RvReg.FP, .SP, .GP, .TP, .RA, ._T6, ._FT11);
+    t.rglob = @run rglob.interpret_as_bytes().bytes_to_bit_mask();
+    
+    t.caller_saved = rv64_rsave;
+
+    t.retregs = rv64_retregs;
+    t.argregs = rv64_argregs;
+    t.memargs = fn(o: Qbe.O) i32 = 0;    
+    t.abi1 = rv64_abi;    
+    
+    t.isel = Isel.rv64_isel;
+    t.finish_passes = finish_qbe_passes_native;
+    t.fixup = Emit.fixup_rv64;
+    t.emit_fn = Emit.rv64_emitfn;  // todo: compiler faults if `rv64_emitfn` is an undefined variable
+    
+    @run @assert_le(RvReg.enum_count(), Qbe.Tmp0);
+    @run @assert_eq(size_of(RvReg), size_of(u8));
+    
+    Isel :: import("@/backend/rv64/isel.fr");
+    Emit :: import("@/backend/rv64/emit.fr");
+};
+
 ArgClass :: @enum(u8) (
     Cptr  = 1, /* replaced by a pointer */
     Cstk1 = 2, /* pass first XLEN on the stack */
@@ -33,22 +62,26 @@ Params :: @struct {
 };
 
 // TODO: qbe had these arrays over sized to padded with zeroes. do we overshoot? 
+// Parameters
 gpreg :: @const_slice( RvReg.A0,  .A1,  .A2,  .A3,  .A4,  .A5,  .A6,  .A7);
 fpreg :: @const_slice(RvReg.FA0, .FA1, .FA2, .FA3, .FA4, .FA5, .FA6, .FA7);
 
-rv64_rsave :: @const_slice(
+// Caller Saved
+rv64_rsave :: (@const_slice(
 RvReg.T0,  .T1,  .T2,  .T3,  .T4,  .T5,
      .A0,  .A1,  .A2,  .A3,  .A4,  .A5,  .A6,  .A7,
     .FA0, .FA1, .FA2, .FA3, .FA4, .FA5, .FA6, .FA7,
     .FT0, .FT1, .FT2, .FT3, .FT4, .FT5, .FT6, .FT7,
     .FT8, .FT9, .FT10,
-);
-rv64_rclob :: @const_slice(
+)).interpret_as_bytes().bytes_to_bit_mask();
+
+// Callee Saved
+rv64_rclob :: (@const_slice(
       RvReg.S1,  .S2,   .S3,   .S4,  .S5,  .S6,  .S7,
      .S8,  .S9,  .S10,  .S11,
     .FS0, .FS1, .FS2,  .FS3,  .FS4, .FS5, .FS6, .FS7,
     .FS8, .FS9, .FS10, .FS11,
-);
+)).interpret_as_bytes().bytes_to_bit_mask();
 
 RCallRv :: @bit_fields(
     gp_ret   := 2,
@@ -56,7 +89,8 @@ RCallRv :: @bit_fields(
     gp_arg   := 4,
     fp_arg   := 4,
     env      := 1,  // env pointer passed in t5
-    _        := 16,
+    sys      := 1,  // syscall number passed in a7
+    _        := 15,
     tag      := 3,
 );
 
@@ -82,14 +116,17 @@ rv64_argregs :: fn(r: Qbe.Ref, p: *Array(i32, 2)) u64 = {
     ngp := get(r, .gp_arg);
     nfp := get(r, .fp_arg);
     t5  := get(r, .env);
+    a7  := get(r, .sys);
+    // syscall number is the same register as eighth argument, tracked separately to represent a gap in the consecutive registers. 
+    @debug_assert(a7 == 0 || ngp < 8);  
     if !p.is_null() {
-        p[0] = intcast(ngp + t5);
+        p[0] = intcast(ngp + t5 + a7);
         p[1] = nfp.intcast();
     };
     ngp_mask := (1.shift_left(ngp) - 1).shift_left(zext RvReg.A0.raw());
     nfp_mask := (1.shift_left(nfp) - 1).shift_left(zext RvReg.FA0.raw());
     b := bit_or(ngp_mask, nfp_mask);
-    b  = b.bit_or(t5.shift_left(zext RvReg.T5.raw()));
+    b  = b.bit_or(t5.shift_left(zext RvReg.T5.raw())).bit_or(a7.shift_left(zext RvReg.A7.raw()));
     b.bitcast()
 }
 
@@ -536,12 +573,29 @@ selvastart :: fn(f: *Qbe.Fn, p: Params, ap: Qbe.Ref) void = {
     f.emit(.addr, .Kl, rsave, SLOT(-s), Qbe.Null);
 }
 
-#use("@/backend/abi.fr");
+sel_syscall :: fn(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) void = {
+    count := ptr_diff(i0, i1);
+    ca := RCallRv.zeroed();
+    set(ca&, .sys, 1);
+    set(ca&, .gp_arg, count);
+    set(ca&, .gp_ret, 1);
+    
+    f.emit(.copy, i1.cls(), i1.to, TMP(RvReg.A0), QbeNull);  // result returned in a0 as normal. 
+    f.emit(.syscall, i1.cls(), QbeNull, QbeNull, CALL(ca)); 
+    f.emit(.copy, .Kl, TMP(RvReg.A7), i1.arg&[0], QbeNull);  // syscall number 
+    
+    ni := 0;
+    for(i0, i1) { i |
+        f.emit(.copy, i.cls(), TMP(gpreg[ni]), i.arg&[0], QbeNull);
+        ni += 1;
+    };
+}
+
 rv64_abi :: fn(f: *Qbe.Fn) void = 
-    f.native_abi(Params, selpar, selcall, fn(_, __, ___) => panic("selsyscall not implemented for riscv"), selvastart, selvaarg, selret);
+    f.native_abi(Params, selpar, selcall, sel_syscall, selvastart, selvaarg, selret);
 
 #use("@/backend/lib.fr");
-#use("@/backend/rv64/target.fr");
+#use("@/backend/rv64/bits.fr");
 #use("@/backend/abi.fr");
 zip_args :: zip_args_g(Class);
 
@@ -555,3 +609,4 @@ fn with(a: *ArgClass, b: ArgClass) void #inline = {
 }
 
 fn CALL(r: RCallRv) Qbe.Ref = CALL(@as(i64) r.repr.zext());
+fn TMP(r: RvReg) Qbe.Ref = TMP(@as(i64) r.raw().zext());

@@ -61,7 +61,12 @@ fn output_elf(m: *QbeModule) [][]u8 = {
             fn Dynamic() => .Dynamic;
             @default => unreachable();
         },
-        machine = @if(m.goal.arch == .aarch64, .arm64, .amd64),
+        machine = @match(m.goal.arch) {
+            fn aarch64() => .arm64;
+            fn x86_64()  => .amd64;
+            fn rv64()    => .rv64;
+            @default     => unreachable();
+        },
         entry = main_entry_point_vaddr(m) + Elf.MYSTERY_SPICE,
         program_header_off = size_of(Elf.Header),
         section_header_off = 0, 
@@ -141,8 +146,9 @@ fn output_elf(m: *QbeModule) [][]u8 = {
     make_segment(.ConstantData, RW); R :: 4; // :waste  // TODO: how the fuck do i do relocations in a non-writable segment?
     make_segment(.MutableData, RW); RW :: 6;
     
+    have_bss := m.segments&[.ZeroInitData]&.len() > 0;
     // BSS
-    {
+    if have_bss {
         segment := m.segments&[.ZeroInitData]&;
         program_header()[] = (
             type = .Load,
@@ -195,7 +201,11 @@ fn output_elf(m: *QbeModule) [][]u8 = {
     if dynamic_header { it |
         interp_header, load_payload_header, dynamic_header := it;
         if have_any_imports {
-            loader_path := "/lib64/ld-linux-x86-64.so.2\0";
+            loader_path := @match(m.goal.arch) {
+                fn x86_64() => "/lib64/ld-linux-x86-64.so.2\0";
+                fn rv64()   => "/usr/riscv64-linux-gnu/lib/ld-linux-riscv64-lp64d.so.1\0";
+                @default    => @panic("TODO: dynamic loader path for %", m.goal.arch);
+            };
             size := loader_path.len;
             addr := virtual_offset + payload.len;
             interp_header[] = (

@@ -1,5 +1,281 @@
-fn rv64_emitfn(f: *Qbe.Fn) void = {
-    // TODO: draw the rest of the fucking owl
+
+EmitRv :: @struct {
+    f: *Qbe.Fn;
+    m: *Qbe.Module;
+    start_of_function: i64;
+};
+
+rv64_emitfn :: fn(f: *Qbe.Fn) void = {
+    e: EmitRv = (
+        f = f,
+        m = f.globals,
+        start_of_function = f.globals.segments&.index(.Code).len(),
+    );
+    emit_the_code(e&);
+}
+
+rv_scratch_int :: TMP(RvReg._T6);
+
+emit_the_code :: fn(e: *EmitRv) void = {
+    f := e.f;
+    if f.vararg {
+        e.emit(make_ins(.add, .Kl, TMP(RvReg.SP), TMP(RvReg.SP), f.getcon(-64)));
+        range(0, 8) { i |
+            e.emit_store_off(TMP(@as(i64) RvReg.A0.raw().zext() + i), TMP(RvReg.SP), 8*i);
+        }
+    }
+    
+    e.emit_store_off(TMP(RvReg.FP), TMP(RvReg.SP), -16);
+    e.emit_store_off(TMP(RvReg.RA), TMP(RvReg.SP), -8);
+    e.emit(make_ins(.add, .Kl, TMP(RvReg.FP), TMP(RvReg.SP), f.getcon(-16)));
+
+    to_save   := f.reg.bit_and(Abi.rv64_rclob);
+    save_area := to_save.count_ones().zext() * 8;
+    frame := f.slot.zext().add(16).align_to(16).add(save_area).align_to(16);
+
+    if frame <= 2048 {  // '<=' is not a mistake; there are more negative numbers than positive ones 
+        e.emit(make_ins(.add, .Kl, TMP(RvReg.SP), TMP(RvReg.SP), f.getcon(-frame)));
+    } else {
+        e.emit(make_ins(.copy, .Kl, rv_scratch_int, f.getcon(frame), Qbe.Null));
+        e.emit(make_ins(.sub, .Kl, TMP(RvReg.SP), TMP(RvReg.SP), rv_scratch_int));
+    }
+
+    off := 0;
+    for_bits to_save { i |
+        r := @as(RvReg) @as(u8) i.trunc();
+        e.emit_store_off(TMP(r), TMP(RvReg.SP), off);
+        off += 8;
+    };
+    
+    local_labels := temp().alloc_zeroed(i64, e.f.nblk.zext());
+    patches := Patch.list(temp());
+    for_blocks f { b | 
+        local_labels[b.id.zext()] = e.next_inst_offset();
+        for_insts_forward b { i |
+            e.emit(i[]);
+        };
+        
+        @match(b.jmp.type) {
+            fn hlt() => e.inst(ebreak);
+            fn ret0() => {
+                if f.dynalloc {
+                    if frame - 16 <= 2048 {
+                        e.emit(make_ins(.add, .Kl, TMP(RvReg.SP), TMP(RvReg.FP), f.getcon(-(frame - 16))));
+                    } else {
+                        e.emit(make_ins(.copy, .Kl, rv_scratch_int, f.getcon(frame - 16), Qbe.Null));
+                        e.emit(make_ins(.sub, .Kl, TMP(RvReg.SP), TMP(RvReg.FP), rv_scratch_int));
+                    }
+                };
+                
+                off := 0;
+                for_bits to_save { i |
+                    r := @as(RvReg) @as(u8) i.trunc();
+                    e.emit_load_off(TMP(r), TMP(RvReg.SP), off);
+                    off += 8;
+                };
+                
+                e.emit_add_off(TMP(RvReg.SP), TMP(RvReg.FP), 16 + f.vararg.int() * 64);
+                e.emit_load_off(TMP(RvReg.RA), TMP(RvReg.FP), 8);
+                e.emit_load_off(TMP(RvReg.FP), TMP(RvReg.FP), 0);
+                e.inst(jalr(.RA, 0, .Zero)); // ret
+            }
+            fn jmp() => if !b.s1.identical(b.link) {
+                patches&.push(target_bid = b.s1.id, offset_from_start = e.next_inst_offset(), cond = -1);
+                e.inst(ebreak);
+            };
+            fn jnz() => {
+                swap := b.link.identical(b.s2);
+                if swap {
+                    s := b.s1;
+                    b.s1 = b.s2;
+                    b.s2 = s;
+                };
+                @debug_assert(isreg(b.jmp.arg));
+                cond := @if(swap, Qbe.Cmp.Cine, .Cieq);
+                patches&.push(target_bid = b.s2.id, offset_from_start = e.next_inst_offset(), cond = cond.raw());
+                e.inst(ebreak);
+                if !b.s1.identical(b.link) {
+                    patches&.push(target_bid = b.s1.id, offset_from_start = e.next_inst_offset(), cond = -1);
+                    e.inst(ebreak);
+                };
+            };
+            @default => unreachable();
+        }
+    };
+    
+    each patches& { p |
+        target := local_labels[p.target_bid.zext()];
+        @debug_assert(target != 0);  
+        distance := (target - p.offset_from_start) / 2;
+        code  := e.m.segments&[.Code]&;
+        patch := code.mmapped.ptr.offset(e.start_of_function + p.offset_from_start);
+        patch := ptr_cast_unchecked(u8, u32, patch);
+        @debug_assert_eq(ebreak, patch[], "not expecting patch");
+        if p.cond >= 0 {
+            // Opcode.bcmp, j, b.jmp.type, zero register, b.s2
+            //_ := _[p.cond.zext()];
+            patch[] = todo(); 
+            // TODO: assert in range
+        } else {
+            // Opcode.jal, zero register
+            patch[] = todo(); 
+            // TODO: assert in range
+        };
+    };
+}
+
+fixmem :: fn(e: *EmitRv, pr: *Qbe.Ref) void = {
+    r := pr[];
+    if rtype(r) == .RSlot {
+        s := e.f.slot(r);
+        if s < -2048 || s > 2047 {
+            e.emit(make_ins(.copy, .Kl, rv_scratch_int, e.f.getcon(s), Qbe.Null));
+            e.emit(make_ins(.add, .Kl, rv_scratch_int, TMP(RvReg.FP), rv_scratch_int));
+            pr[] = rv_scratch_int;
+        }
+    }
+}
+
+fn emit(e: *EmitRv, i: Qbe.Ins) void = 
+    emit(e, i&);
+    
+fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
+    if is_load(i.op()) {
+        e.fixmem(i.arg&[0]&);
+    }
+    if is_store(i.op()) {
+        e.fixmem(i.arg&[1]&);
+    }
+    
+    f := e.f;
+    a0 := i.arg&[0];
+    @match(i.op()) {
+        fn nop() => ();
+        fn dbgloc() => e.m.add_debug_info(i, e.next_inst_offset());
+        fn syscall() => e.inst(ecall);
+        fn copy() => {
+            if(i.to == a0, => return());
+            if rtype(i.to) == .RSlot {
+                @debug_assert(isreg(i.arg&[0]));
+                i.arg&[1] = i.to;
+                i.to = Qbe.Null;
+                i.set_op(i.cls().store_op());
+                e.emit(i);
+                return();
+            }
+            @debug_assert(i.to.isreg());
+            @match(rtype(a0)) {
+                fn RCon() => {
+                    c := f.get_constant(a0);
+                    todo()
+                }
+                fn RSlot() => {
+                    i.set_op(.load);
+                    e.emit(i);
+                }
+                fn RTmp() => {
+                    @debug_assert(a0.isreg());
+                    todo()
+                }
+                @default => unreachable();
+            }
+        }
+        fn addr() => {
+            @debug_assert(rtype(a0) == .RSlot);
+            s := f.slot(a0);
+            // TODO: very unfortunate precedence :compiler
+            if (-s < 2048) {
+                e.emit_add_off(i.to, TMP(RvReg.FP), s);
+            } else {
+                e.emit(make_ins(.copy, .Kl, i.to, f.getcon(s), Qbe.Null));
+                e.emit(make_ins(.add, .Kl, i.to, TMP(RvReg.FP), i.to));
+            }
+        }
+        fn call() => {
+            @match(rtype(i.arg&[0])) {
+                fn RCon() => {
+                    c := f.get_constant(i.arg&[0]);
+                    @debug_assert(c.type() == .CAddr && c.bits() == 0, "invalid call");
+                    todo()
+                }
+                fn RTmp() => {
+                    link := i.arg&[1] != Qbe.RCALL_TAIL_SENTINAL;
+                    e.inst(jalr(a0.rv(), 0, @if(link, .RA, .Zero)));
+                }
+                @default => unreachable();
+            }
+        }
+        fn salloc() => {
+            e.emit(make_ins(.sub, .Kl, TMP(RvReg.SP), TMP(RvReg.SP), i.arg&[0]));
+            if i.to != Qbe.Null {
+                e.emit(make_ins(.copy, .Kl, i.to, TMP(RvReg.SP), Qbe.Null));
+            }
+        }
+        @default => {
+            todo()
+        };
+    }
+}
+
+fn rv(r: Qbe.Ref) RvReg = {
+    @debug_assert(isreg(r));
+    @as(RvReg) @as(u8) r.val().trunc()
+}
+
+slot :: fn(f: *Qbe.Fn, r: Qbe.Ref) i64 = {
+    s := rsval(r);
+    -intcast @if(s < 0, 2 * s, f.slot - s)
+}
+
+fn inst(e: *EmitRv, i: u32) void = {
+    todo()
+}
+
+fn emit_store_off(e: *EmitRv, value: Qbe.Ref, addr: Qbe.Ref, off: i64) void = {
+    todo()
+}
+
+fn emit_load_off(e: *EmitRv, dest: Qbe.Ref, addr: Qbe.Ref, off: i64) void = {
+    todo()
+}
+
+fn emit_add_off(e: *EmitRv, dest: Qbe.Ref, a: Qbe.Ref, off: i64) void = {
+    todo()
+}
+
+fixup_rv64 :: fn(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_reloc: *?Fixup) void = {
+    todo()
+}
+
+fn next_inst_offset(self: *EmitRv) i64 = {
+    code := self.m.segments&[.Code]&;
+    ptr_diff(code.mmapped.ptr, code.next) - self.start_of_function
 }
 
 #use("@/backend/lib.fr");
+#use("@/backend/rv64/bits.fr");
+Abi :: import("@/backend/rv64/abi.fr");
+
+// same as qbe
+/*
++=============+
+| varargs     |
+|  save area  |
++-------------+
+|  saved ra   |
+|  saved fp   |
++-------------+ <- fp
+|    ...      |
+| spill slots |
+|    ...      |
++-------------+
+|    ...      |
+|   locals    |
+|    ...      |
++-------------+
+|   padding   |
++-------------+
+| callee-save |
+|  registers  |
++=============+
+*/

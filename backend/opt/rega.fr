@@ -84,8 +84,8 @@ fn rref(c: *RegaCtx, m: *RMap, t: i64) Qbe.Ref = {
 fn radd(c: *RegaCtx, m: *RMap, t: i64, r: i64) void = {
     T := c.f.globals.target&;
     @debug_assert(t >= Qbe.Tmp0 || t == r, "invalid temporary");
-    is_int   := T.gpr0.intcast() <= r && r.intcast() < T.gpr0 + T.ngpr;
-    is_float := T.fpr0.intcast() <= r && r.intcast() < T.fpr0 + T.nfpr;
+    is_int   := T.gpr.bit_is_set(r);
+    is_float := T.fpr.bit_is_set(r);
     @debug_assert(is_int || is_float, "invalid register %", r);
     @debug_assert(!bshas(m.live&, t), "temporary has mapping");
     @debug_assert(!bshas(m.live&, r), "register already allocated");
@@ -122,19 +122,19 @@ fn ralloctry(c: *RegaCtx, m: *RMap, t: i32, try: bool) Qbe.Ref = {
             return(QbeNull);
         };
         to_avoid := c.f.tmp[phi_dest(t, c.f)].hint.avoid;
-        to_avoid  = to_avoid.bit_or(m.live.t[]); // include those already allocated
         
         ::if(Ty(i32, i32));
-        r0, count   := if(KBASE(c.f.tmp[t].cls) == 0, => (T.gpr0, T.ngpr), => (T.fpr0, T.nfpr));
-        first, last := (r0.intcast(), intcast(r0 + count));
+        of_kind := @if(c.f.tmp[t].cls.is_int(), T.gpr, T.fpr);
+        allow := of_kind.bit_and(bit_not m.live.t[]);
         
         // at least try not to get a bad place
-        range(first, last) { r |
-            if(!to_avoid.bit_is_set(r), => found(r));
+        prefer := allow.bit_and(bit_not to_avoid);
+        for_bits prefer { r |
+            found(r);
         };
         // ok fine, anything will do
-        range(first, last) { r |
-            if(!bshas(m.live&, r), => found(r));
+        for_bits allow { r |
+            found(r);
         };
         c.f.debug_dump(m);
         printfn(c.f, c.f.globals.debug_out);
@@ -578,12 +578,8 @@ fn register_allocation(f: *Qbe.Fn) void = {
         };
         T := f.globals.target&;
         @debug_assert(live_at_end_count.intcast() <= T.ngpr + T.nfpr, "too many live tmps");
-        if true {
-            break :: local_return; // TODO: this pattern is a language failing. 
-            for b.out& { r | 
-                if(r >= Qbe.Tmp0, => break());
-                c.radd(cur, r, r);
-            };
+        for_bits b.out.t[] { r |
+            c.radd(cur, r, r);
         };
         // First give everyone a chance to get thier hinted register
         range(0, live_at_end_count) { j |

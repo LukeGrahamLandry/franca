@@ -6,6 +6,14 @@ let's cheat and make examples/terminal.fr(repl=true) not take 2 seconds to compi
 - compile_to_shader_source: 68 // shader compiler (for comptime)
 notably those are all things to aren't going to change if you're just working on the terminal program. 
 
+## (Jun 22)
+
+- the risc64 syscall numbers are the same as the arm64 ones. that's nice. 
+- finally fixed `rosetta error: bss_size overflow`, it just doesn't like an empty bss segment
+- random cleanup: use a bit mask instead of `Target.(n(g,f)pr, (g,f)pr0)`, 
+  makes it more clear that being consecutive doesn't matter, since rglob can mask things out anyway. 
+- started riscv emit, instruction encoding, etc
+
 ## (Jun 21)
 
 - more playing around with the byte-prefixed-paths in deps, so `@/` means a source file and `!/` means a cache file. 

@@ -357,12 +357,15 @@ fn default_init(f: *Qbe.Fn, m: *QbeModule) void = {
     // Add temporaries representing physical registers.
     // For the comptime usecase, the is_float will be wrong for some targets but that's fine becuase register numbers will just be moved to the real function, 
     t := f.globals.target&;
+    f.ntmp = Qbe.Tmp0;
+    f.tmp&.grow(Qbe.Tmp0);
     range(0, Qbe.Tmp0) { i |
-        is_float := t.fpr0 <= i.intcast() && i.intcast() < (t.fpr0 + t.nfpr);
-        ::if(Qbe.Cls);
-   	    assert_eq(f.newtmp("r", if(is_float, => .Kd, => .Kl)), TMP(i));
+        tmp := f.tmp.index(i);
+        tmp.slice(1).set_zeroed();
+   	    tmp.cls = if(t.fpr.bit_is_set(i), => .Kd, => .Kl);  // spill() cares about this
+        tmp.slot = -1;
+        tmp.defining_block = -1;
     };
-    assert_eq(f.ntmp.zext(), Qbe.Tmp0);
     f.track_ir_names = Qbe.TRACK_IR_NAMES;
 }
 
@@ -880,6 +883,16 @@ fn for_bits(b: u64, $body: @Fn(i: i64) void) void = {
         body(trailing_zeros(b));
         bit := b.bit_and(-b);  // pick out the least significant bit
         b = b.bit_xor(bit);    // unset that bit
+    };
+}
+
+// iteration order is MOST significant first
+fn for_bits_rev(b: u64, $body: @Fn(i: i64) void) void = {
+    b := bitcast b;
+    while => b != 0 {
+        i := 63 - leading_zeros(b);  // index of first set bit
+        b = b.bit_xor(1.shift_left(i));  // unset that bit
+        body(i);
     };
 }
 
