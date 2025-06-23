@@ -1,37 +1,5 @@
-
-R :: @bit_fields(funct7 := 8, rs2 := 4, rs1 := 5, funct3 := 3, rd := 5, opcode := 7);  // SB splits imm between funct7 and rd
-I :: @bit_fields(imm := 12,             rs1 := 5, funct3 := 3, rd := 5, opcode := 7);
-U :: @bit_fields(imm := 20,                                    rd := 5, opcode := 7);  // J
-
-Opcode :: @enum(
-    lui   = 0b0110111, // load upper immidiate
-    auipc = 0b0010111, // add upper immidiate to pc; same as arm's adrp
-    // "and link" means write next pc to a register, so dest=zero register for just normal jump
-    jal   = 0b1101111, // jump and link
-    jalr  = 0b1100111, // jump to register and link
-    // they don't have a flags register. compare 2 registers and jump based on the result is one instruction. 
-    bcmp  = 0b1100011, // branch if cmp
-);
-
-Bcmp :: @enum(i64) (
-    beq  = 0b000,
-    bne  = 0b001,
-    blt  = 0b100,
-    bge  = 0b101,
-    bltu = 0b110,
-    bgeu = 0b111,
-);
-
-ecall  :: 0b000000000000_0000000000000_1110011;
-ebreak :: 0b000000000001_0000000000000_1110011;
-
-fn jalr(target: RvReg, off: u32, link: RvReg) u32 = {
-    todo()
-}
-
-// when jal has 20 bit offset; the bits are not in order :(
-// distance multiplied by 2 bytes
-// x1 normal link register
+// The RISC-V Instruction Set Manual Volume I:
+// > https://riscv.org/specifications/ratified/ -> https://drive.google.com/file/d/1uviu1nH-tScFfgrovvFCrj7Omv8tFtkp/view
 
 // (ordered by encoding, named by usage in calling convention)
 RvReg :: @enum(u8) (
@@ -49,3 +17,120 @@ RvReg :: @enum(u8) (
     FS2, FS3, FS4, FS5, FS6, FS7, FS8, FS9, FS10, FS11,
     FT8, FT9, FT10, _FT11,
 );
+
+Opcode :: @enum(u7) (
+    lui   = 0b0110111, // load upper immidiate
+    auipc = 0b0010111, // add upper immidiate to pc
+    // "and link" means write next pc to a register, so dest=zero register for just normal jump
+    jal   = 0b1101111, // jump and link
+    jalr  = 0b1100111, // jump to register and link
+    // they don't have a flags register. compare 2 registers and jump based on the result is one instruction. 
+    bcmp  = 0b1100011, // branch if cmp
+    load  = 0b0000011,  // I
+    loadf = 0b0000111,  // I
+   store  = 0b0100011,  // S
+   storef = 0b0100111,  // S
+   op_imm = 0b0010011,  // I
+   op     = 0b0110011,  // R
+);
+
+// with .op or .op_imm
+OpI :: @enum(u3) (
+    add  = 0b000,
+    slt  = 0b010,
+    sltu = 0b011,
+    xor  = 0b100,
+     or  = 0b110,
+    and  = 0b111,
+    sll  = 0b001, // imm prefix = 0
+    srl  = 0b101, // imm prefix = 0 for logical or 0100000 for arithmetic
+);
+
+Bcmp :: @enum(i64) (
+    beq  = 0b000,
+    bne  = 0b001,
+    blt  = 0b100,
+    bge  = 0b101,
+    bltu = 0b110,
+    bgeu = 0b111,
+);
+
+ecall  :: 0b000000000000_0000000000000_1110011;
+ebreak :: 0b000000000001_0000000000000_1110011;
+
+// off is measured in bytes
+// link = pc + 4; pc = (target + off) &~1;
+fn jalr(target: RvReg, off: i12, link: RvReg) u32 = {
+    I(off, target.bits(), 0, link.bits(), .jalr)
+}
+
+// note: `off` is always a multiple of 2 so the low bit is ignored
+// link = pc + 4; pc += off;
+fn jal(off: i21, link: RvReg) u32 = 
+    J(off, link.bits(), .jalr);
+
+fn load(dest: RvReg, addr: RvReg, off: i12, size_bytes: i64, zero_extend: bool, float: bool) u32 #inline = 
+    I(off, addr.bits(), mem_width(size_bytes, zero_extend), dest.bits(), @if(float, .loadf, .load));
+
+fn store(value: RvReg, addr: RvReg, off: i12, size_bytes: i64, float: bool) u32 #inline = 
+    S(off, value.bits(), addr.bits(), mem_width(size_bytes, false), @if(float, .storef, .store));
+
+// width for funct3 of load/store
+mem_width :: fn(size_bytes: i64, zero_extend_load: bool) u3 = {
+    @debug_assert(size_bytes == 1 || size_bytes == 2 || size_bytes == 4 || size_bytes == 8);
+    @as(u3) @as(i64) size_bytes.trailing_zeros().bit_or(zero_extend_load.int().shift_left(2))
+}
+
+fn rel_off(dest: rawptr, src: rawptr, reg: RvReg) Ty(u32, u32) = {
+    dest := int_from_rawptr(dest);
+    src := int_from_rawptr(src);
+    distance := dest - src;
+    @debug_assert(distance.fits_sext(32), "rel_off too far: %", distance);
+    hi := @as(i20) @as(i64) (distance.shift_right_logical(12));
+    lo := @as(i12) @as(i64) distance.bit_and(1.shift_left(12) - 1);
+    (U(hi, reg.bits(), .auipc), I(lo, reg.bits(), @as(u3) OpI.add, reg.bits(), .op_imm))
+}
+
+fn fits_sext(n: i64, $bits: i64) bool = {
+    n <= 1.shift_left(bits) - 1 && n >= -(1.shift_left(bits))
+}
+
+I :: fn(i: i12, rs1: u5, funct3: u3, rd: u5, opcode: Opcode) u32 = 
+    @bits(i, rs1, funct3, rd, opcode);
+
+R :: fn(funct7: u7, rs2: u5, rs1: u5, funct3: u3, rd: u5, opcode: Opcode) u32 = 
+    @bits(funct7, rs2, rs1, funct3, rd, opcode);
+
+U :: fn(i: i20, rd: u5, opcode: Opcode) u32 = 
+    @bits(i, rd, opcode);
+
+S :: fn(i: i12, rs2: u5, rs1: u5, funct3: u3, opcode: Opcode) u32 = 
+    @bits(i.imm(11, 5), rs2, rs1, funct3, i.imm(4, 0), opcode);
+
+// note: `i` is always a multiple of 2 so the low bit is ignored
+B :: fn(i: i13, rs2: u5, rs1: u5, funct3: u3, opcode: Opcode) u32 = 
+    @bits(i.imm(12), i.imm(10, 5), rs2, rs1, func3, i.imm(4, 1), i.imm(11), opcode);
+
+// note: `i` is always a multiple of 2 so the low bit is ignored
+J :: fn(i: i21, rd: u5, opcode: Opcode) u32 = 
+    @bits(i.imm(20), i.imm(10, 1), i.imm(11), i.imm(19, 12), rd, opcode);
+
+fn imm(n: ~T, $bit: i64) u1 #where = 
+    imm(n, bit, bit);
+
+fn imm(n: ~T, $left: i64, $right: i64) UInt(left-right+1) #where = {
+    n := @as(i64) int n;
+    count :: left - right + 1;
+    mask := 1.shift_left(count) - 1;
+    result := n.shift_right_logical(right).bit_and(mask);
+    @if(count == 8) return(@as(u8) trunc result); // TODO: this is stupid
+    @as(UInt(count)) result
+};
+
+fn bits(r: RvReg) u5 = {
+    r := bit_and(@as(u8) r, 0b11111);
+    @as(u5) @as(i64) r.zext()
+}
+
+// TODO: annoying. for @bits
+#use("@/backend/arm64/bits.fr");

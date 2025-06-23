@@ -70,13 +70,13 @@ fn impl(v: *ImportVTable) void = {
 }
 
 render :: fn(p: *Program, width: i64, v: *ImportVTable) Ty(Qbe.BSet, i64, i64) = {
-    N := max(log(width, 2) - 3, 1); // (@if(I, 9, 8));
+    N := max(log(width, 2) - 3, 1); // (@if(INTERPRET, 9, 8));
 
     m := zeroed QbeModule;
     init_default_module_dyn(m&, v, (type = .JitOnly, os = query_current_os(), arch = query_current_arch()));
     do_imports(m&);
     f0 := temp().box(Qbe.Fn);
-    if !M {
+    if !MUTATE {
         default_init(f0, m&);
         f0.consts = zeroed(@type f0.consts);
         compile_program(f0, p);
@@ -87,7 +87,7 @@ render :: fn(p: *Program, width: i64, v: *ImportVTable) Ty(Qbe.BSet, i64, i64) =
         vals = temp().alloc(f32, n),
         ints = temp().alloc(Interval, n),
         pixels = init_bitset(width * width),
-        top = @if(M, zeroed F, compile(dup(f0), p.name)),
+        top = @if(MUTATE, zeroed F, compile(dup(f0), p.name)),
         needed = init_bitset(n),
         copy = temp().alloc_zeroed(Qbe.Ref, n),
         jit_at = max(0, N - 2),
@@ -104,7 +104,6 @@ render :: fn(p: *Program, width: i64, v: *ImportVTable) Ty(Qbe.BSet, i64, i64) =
     
     i: Interval = (min = -1.0, max = 1.0);
     quad_rec(s&, (x = i, y = i), N);
-    
     (s.pixels, s.yes, s.no)
 }
 
@@ -128,13 +127,13 @@ RecState :: @struct {
     width: i64;
 }
 
-M :: true;
-I :: false;
+MUTATE :: true;
+INTERPRET :: false;
 
 fn quad_rec(s: *RecState, int: Interval2, depth: i64) void = {
     f := s.f.index(depth);
     f0 := s.f.index(depth+1);
-    if M {
+    if MUTATE {
         dup(f, f0);
     } else {
         f = f0;
@@ -142,7 +141,7 @@ fn quad_rec(s: *RecState, int: Interval2, depth: i64) void = {
 
     n: Interval = (min = NaN, max = NaN);
     
-    known := optimise_intervals(f, int&, s, M);
+    known := optimise_intervals(f, int&, s, MUTATE);
     f0.ncon = f.ncon;
     f0.con = f.con;
     
@@ -160,12 +159,12 @@ fn quad_rec(s: *RecState, int: Interval2, depth: i64) void = {
         };
     }
     
-    @if(M) {
+    @if(MUTATE) {
         dead_code(s, f);
         renumber(f);
     };
 
-    if M && !I && depth == s.jit_at {
+    if MUTATE && !INTERPRET && depth == s.jit_at {
         mark := mark_temporary_storage();
         f := dup(f);
         s.top = compile(f, @tfmt("%", s.n));
@@ -175,7 +174,7 @@ fn quad_rec(s: *RecState, int: Interval2, depth: i64) void = {
     
     if depth == 0 {
         s.no += 1;
-        if I {
+        if (INTERPRET) {
             iter_intervals(s.width, int.x, int.y) { x, y, i |
                 hit := interpret(f, s.vals, x, y) > 0.0;
                 if hit {

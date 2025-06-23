@@ -13,6 +13,11 @@ notably those are all things to aren't going to change if you're just working on
 - random cleanup: use a bit mask instead of `Target.(n(g,f)pr, (g,f)pr0)`, 
   makes it more clear that being consecutive doesn't matter, since rglob can mask things out anyway. 
 - started riscv emit, instruction encoding, etc
+- trying to do hello world with write+exit syscall and run it in https://github.com/libriscv/libriscv
+  - libriscv says "Exception: Invalid ELF section header string table index" if you don't give it at Elf.Header.section_header_names_index,
+    because it wants to look for a `.interp` entry. real linux kernal doesn't care for static binaries but sure whatever. 
+  - yay! hello world works. 
+    - interesting that write syscall to stdIN shows it to you on orb and blink but not on libriscv
 
 ## (Jun 21)
 

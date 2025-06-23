@@ -16,6 +16,7 @@ rv64_emitfn :: fn(f: *Qbe.Fn) void = {
 
 rv_scratch_int :: TMP(RvReg._T6);
 
+// TODO: stop calling getcon here, it might reallocate when loading a cache file which seems sad  
 emit_the_code :: fn(e: *EmitRv) void = {
     f := e.f;
     if f.vararg {
@@ -48,7 +49,7 @@ emit_the_code :: fn(e: *EmitRv) void = {
     };
     
     local_labels := temp().alloc_zeroed(i64, e.f.nblk.zext());
-    patches := Patch.list(temp());
+    patches := Patch.list(e.f.nblk.zext(), temp());
     for_blocks f { b | 
         local_labels[b.id.zext()] = e.next_inst_offset();
         for_insts_forward b { i |
@@ -106,7 +107,7 @@ emit_the_code :: fn(e: *EmitRv) void = {
     each patches& { p |
         target := local_labels[p.target_bid.zext()];
         @debug_assert(target != 0);  
-        distance := (target - p.offset_from_start) / 2;
+        distance := (target - p.offset_from_start);
         code  := e.m.segments&[.Code]&;
         patch := code.mmapped.ptr.offset(e.start_of_function + p.offset_from_start);
         patch := ptr_cast_unchecked(u8, u32, patch);
@@ -117,8 +118,7 @@ emit_the_code :: fn(e: *EmitRv) void = {
             patch[] = todo(); 
             // TODO: assert in range
         } else {
-            // Opcode.jal, zero register
-            patch[] = todo(); 
+            patch[] = jal(0, .Zero); 
             // TODO: assert in range
         };
     };
@@ -167,7 +167,15 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
             @match(rtype(a0)) {
                 fn RCon() => {
                     c := f.get_constant(a0);
-                    todo()
+                    off := c.bits();
+                    @match(c.type()) {
+                        fn CBits() => if off <= 2047 && off >= -2048 {
+                            e.emit(make_ins(.add, .Kl, i.to, TMP(RvReg.Zero), a0));
+                        } else {
+                            panic("todo: riscv copy big");
+                        };
+                        fn CAddr() => e.load_symbol(c, i.to.rv());
+                    }
                 }
                 fn RSlot() => {
                     i.set_op(.load);
@@ -175,7 +183,9 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
                 }
                 fn RTmp() => {
                     @debug_assert(a0.isreg());
-                    todo()
+                    @debug_assert(i.cls().is_int());
+                    // op_imm not zero register so it disassembles to `mv` (more readable)
+                    e.emit(make_ins(.add, .Kl, i.to, a0, Qbe.ConZero));
                 }
                 @default => unreachable();
             }
@@ -196,7 +206,7 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
                 fn RCon() => {
                     c := f.get_constant(i.arg&[0]);
                     @debug_assert(c.type() == .CAddr && c.bits() == 0, "invalid call");
-                    todo()
+                    panic("todo: riscv call symbol");
                 }
                 fn RTmp() => {
                     link := i.arg&[1] != Qbe.RCALL_TAIL_SENTINAL;
@@ -211,14 +221,60 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
                 e.emit(make_ins(.copy, .Kl, i.to, TMP(RvReg.SP), Qbe.Null));
             }
         }
+        fn add() => e.simple_op(i, .add);
         @default => {
+            @println("%", i.op());
             todo()
         };
     }
 }
 
+// TODO: factor together with arm/loadaddr_bits>
+fn load_symbol(e: *EmitRv, c: *Qbe.Con, dest_reg: RvReg) void = {
+    use_symbol(e.m, c.sym) { symbol |
+        @assert(symbol.kind == .Local, "TODO: riscv relocations");
+        patch_addr := e.m.segment_address(.Code, e.m.current_offset(.Code));
+        inc := c.bits();
+        @match(symbol.kind) {
+            fn DynamicPatched() => todo();
+            fn Local() => {
+                distance := e.m.distance_between(.Code, e.m.current_offset(.Code), symbol.segment, symbol.offset + inc);
+                @debug_assert(symbol.segment != .Code || distance < 0, "we must be jumping backwards");
+                dest := e.m.segment_address(symbol.segment, symbol.offset + inc);
+                i_page, i_off := rel_off(dest, patch_addr, dest_reg);
+                e.inst(i_page);
+                e.inst(i_off);
+                
+                if e.m.goal.type == .Relocatable {
+                    todo()
+                };
+            }
+            fn Pending() => todo();
+        };
+    };
+    if e.m.goal.type == .Relocatable { // :ArmAddendReloc
+        todo()
+    };
+}
+
+fn simple_op(e: *EmitRv, i: *Qbe.Ins, o: OpI) void = {
+    @debug_assert(i.cls().is_int(), "TODO: riscv float instruction encoding");
+    a0, a1 := (i.arg&[0], i.arg&[1]);
+    @debug_assert(isreg(i.to) && a0.val() < 64);
+    @debug_assert(i.op() != .sar, "TODO: arithmetic");
+    i := if rtype(a1) == .RCon {
+        c := e.f.get_constant(a1);
+        off := c.bits();
+        @debug_assert(c.type() == .CBits && off <= 2047 && off >= -2048);
+        I(@as(i12) off, a0.rv().bits(), @as(u3) o, i.to.rv().bits(), .op_imm)
+    } else {
+        R(0, a1.rv().bits(), a0.rv().bits(), @as(u3) o, i.to.rv().bits(), .op)
+    };
+    e.inst(i);
+}
+
 fn rv(r: Qbe.Ref) RvReg = {
-    @debug_assert(isreg(r));
+    @debug_assert(r.val() < 64);
     @as(RvReg) @as(u8) r.val().trunc()
 }
 
@@ -227,20 +283,24 @@ slot :: fn(f: *Qbe.Fn, r: Qbe.Ref) i64 = {
     -intcast @if(s < 0, 2 * s, f.slot - s)
 }
 
-fn inst(e: *EmitRv, i: u32) void = {
-    todo()
+fn inst(e: *EmitRv, opcode: u32) void = {
+    code := e.m.segments&[.Code]&;
+    ptr_cast_unchecked(u8, u32, code.next)[] = opcode;  // SAFETY: aligned becuase i don't do compressed instructions yet
+    code.next = code.next.offset(4);
 }
 
 fn emit_store_off(e: *EmitRv, value: Qbe.Ref, addr: Qbe.Ref, off: i64) void = {
-    todo()
+    @debug_assert(off <= 2047 && off >= -2048);
+    e.inst(store(value.rv(), addr.rv(), @as(i12) off, 8, value.val() >= 32));
 }
 
 fn emit_load_off(e: *EmitRv, dest: Qbe.Ref, addr: Qbe.Ref, off: i64) void = {
-    todo()
+    @debug_assert(off <= 2047 && off >= -2048);
+    e.inst(load(dest.rv(), addr.rv(), @as(i12) off, 8, false, dest.val() >= 32));
 }
 
 fn emit_add_off(e: *EmitRv, dest: Qbe.Ref, a: Qbe.Ref, off: i64) void = {
-    todo()
+    e.emit(make_ins(.add, .Kl, dest, a, e.f.getcon(off)));
 }
 
 fixup_rv64 :: fn(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_reloc: *?Fixup) void = {

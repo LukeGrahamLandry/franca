@@ -60,7 +60,6 @@ KExpr :: @rec @tagged(
 
 Proto :: @struct(id: Qbe.Sym, args: []Str, operator: i64 = Token.identifier.raw(), prec := 0);
 
-R :: Result(*KExpr, Str);
 RR :: Result(Qbe.Ref, Str);
 E :: fn(s: Str) => (Err = s);
 
@@ -140,7 +139,7 @@ fn pop_token(c: *Ctx) i64 = {
     c.token
 }
 
-fn parse_paren(c: *Ctx) R = {
+fn parse_paren(c: *Ctx) Result(*KExpr, Str) = {
     @try(c.consumes("(")) return;
     e := @try(c.parse_expression()) return;
     @try(c.consumes(")")) return;
@@ -148,7 +147,7 @@ fn parse_paren(c: *Ctx) R = {
 }
 
 // an identifier could be a variable reference or the start of a function call
-fn parse_identifier(c: *Ctx) R = {
+fn parse_identifier(c: *Ctx) Result(*KExpr, Str) = {
     name := c.ident;
     c.pop_token();  // ident
     if c.token != tok("(") {
@@ -174,7 +173,7 @@ fn parse_identifier(c: *Ctx) R = {
 }
 
 // `if c then t else f`
-fn parse_if(c: *Ctx) R = {
+fn parse_if(c: *Ctx) Result(*KExpr, Str) = {
     @try(c.consume(.if)) return;
     cond := @try(c.parse_expression()) return;
     @try(c.consume(.then)) return;
@@ -185,7 +184,7 @@ fn parse_if(c: *Ctx) R = {
 }
 
 // `for name = start, end, step in body`
-fn parse_for(c: *Ctx) R = {
+fn parse_for(c: *Ctx) Result(*KExpr, Str) = {
     @try(c.consume(.for)) return;
     name := c.ident;
     @try(c.consume(.identifier)) return;
@@ -211,7 +210,7 @@ fn parse_for(c: *Ctx) R = {
 }
 
 // `var name = init in body`
-fn parse_var(c: *Ctx) R = {
+fn parse_var(c: *Ctx) Result(*KExpr, Str) = {
     @try(c.consume(.var)) return;
     vars := list(Ty(Str, *KExpr), temp());
     if c.token != Token.identifier.raw() {
@@ -246,7 +245,7 @@ fn parse_var(c: *Ctx) R = {
     node(VarIn = (vars = vars.items(), body = body))
 }
 
-fn parse_primary(c: *Ctx) R = {
+fn parse_primary(c: *Ctx) Result(*KExpr, Str) = {
     @match(@as(Token) c.token) {
         fn number() => {
             n := c.num;
@@ -266,7 +265,7 @@ fn parse_primary(c: *Ctx) R = {
     }
 }
 
-fn parse_unary(c: *Ctx) R = {
+fn parse_unary(c: *Ctx) Result(*KExpr, Str) = {
     if c.token < Token.enum_count() || c.token == tok("(") || c.token == tok("(") {
         // this token is not a valid unary operator
         return c.parse_primary();
@@ -281,7 +280,7 @@ fn parse_unary(c: *Ctx) R = {
     ))
 }
 
-fn parse_bin_right(c: *Ctx, start_prec: i64, lhs: *KExpr) R = {
+fn parse_bin_right(c: *Ctx, start_prec: i64, lhs: *KExpr) Result(*KExpr, Str) = {
     loop {
         tok_prec := c.binary_precedence&.get(c.token) || return(Ok = lhs);
         if(tok_prec < start_prec, => return(Ok = lhs));
@@ -310,7 +309,7 @@ fn parse_bin_right(c: *Ctx, start_prec: i64, lhs: *KExpr) R = {
     }
 }
 
-fn parse_expression(c: *Ctx) R = {
+fn parse_expression(c: *Ctx) Result(*KExpr, Str) = {
     lhs := @try(c.parse_unary()) return;
     c.parse_bin_right(0, lhs)
 }
@@ -670,7 +669,7 @@ fn consume(c: *Ctx, expect: Token) Result(void, Str) = {
     .Ok
 }
 
-fn node(it: KExpr) R = {
+fn node(it: KExpr) Result(*KExpr, Str) = {
     e := temp().box(KExpr);
     e[] = it;
     (Ok = e)

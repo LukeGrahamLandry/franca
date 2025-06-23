@@ -10,6 +10,7 @@
 
 ## COMPILER BUG 
 
+- lots of crashes if you have an overload set somewhere with the same name as a constant and then try to use the constant. 
 - #use is ordered
 - tests/todo
   - a.fr: first_ref_os, const_field_unordered
@@ -107,6 +108,8 @@ hould just make them local constants in each file like they are here in riscv
 - factor out the top level ARCH_isel(), they're all the same shape
 - test for phi of stack slot? 
 - rv64 address+offset folding like i did for arm. they can probably share? 
+- remove redundant extension for `b := a & 31; c := extub b;`
+- arm immediate for bitwise and,or
 
 ## don't rely on libc
 
