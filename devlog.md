@@ -6,6 +6,31 @@ let's cheat and make examples/terminal.fr(repl=true) not take 2 seconds to compi
 - compile_to_shader_source: 68 // shader compiler (for comptime)
 notably those are all things to aren't going to change if you're just working on the terminal program. 
 
+## (Jun 24)
+
+- give up on my failed experiment insane way of doing llvm abi 
+  (it kinda worked at one point but it didn't spark enough joy to finish and has rotted since then). 
+  i'll probably change my mind again, who knows. but 20k lines of backend is getting to be too much 
+  and riscv is more interesting to me than llvm. 
+- something is fucked with specifically orb-dyn hello world, static works and dyn mandelbrot works, 
+  and in fact all the tests work, just that one program is cursed somehow. if i convert bit by bit 
+  from mandelbrot to hello world, it seems you are required to call `temp()` or the program doesn't work. 
+  and temp(), context(), borrow() inline and disappear so it's actually the same code in main(), even creepier. 
+  weird that a bunch of stuff changed in the binary then. 
+  my theory is that the first call to each intrinsic doesn't get inlined 
+  (if the caller is emitted before the callee is sema-ed) 
+  and if that happens to be the set_dynamic_context in impl2(), you're totally fucked 
+  because to get the current os from that to choose syscall numbers. 
+  indeed an extra push_zeroed_dynamic_context{} fixes it, as does just calling set_dynamic_context at comptime
+  which has exactly no effect other than to force it to go through sema sooner. 
+
+> i love when i let zed update itself and they find new and exciting ways to turn on shitty auto complete
+> it's not show_inline_completions=false anymore and show_edit_predictions=false also doesn't work. 
+> ah of course show_completions_on_input=false, totally unrelated to edit_prediction_provider=none;
+> losing my mind. oh boy and now they have a debugger so i have to turn off the giant circle every time 
+> you mouse over the side of the screen. i really really hope they fixed the burning a core when 
+> another program writes to a file. 
+  
 ## (Jun 23)
 
 - plumbing for FuncImpl.Asm.rv64
@@ -17,6 +42,8 @@ notably those are all things to aren't going to change if you're just working on
   the indices are positive. so finally fixed that. my original bootstrap bytecode only had signed comparisons,
   but that's been gone for many months now. should have done this so long ago. 
 - started examples/elf_loader so i have at least some reference for what's going on like i do for mach-o. 
+- little thing to dispatch to the right program to dump an executable / compile a program because it's just a little 
+  bit too much brain tax to type a different word every time
 
 ## (Jun 22)
 
