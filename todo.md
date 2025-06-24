@@ -5,6 +5,7 @@
 
 - not everything works if you force general_allocator to be BlockAlloc
 - event handlers in graphics programs crash. but each program seems to have a different one cursed. 
+  (still happens even with `STASH` in macos/app.fr? but maybe less?)
 - there have been very rare failures in my lua tests for a while
 
 ## COMPILER BUG 
@@ -187,6 +188,7 @@ program_source:26:5: error: constant sampler must be declared constexpr
 
 ## Caching
 
+- caching only happens if the file path ends with .fr
 - crash backtrace with source location
 - keep caches for multiple targets at once?
 - need to be careful if start caching both main+driver from one source file

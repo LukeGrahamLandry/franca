@@ -1,3 +1,16 @@
+// 
+// Execute an ELF binary just like the linux kernel would. 
+// - load segments into memory with the right memory protection
+// - push parameters to the stack and call the entry point
+//  
+// TODO:
+// - auxiliary vector
+// - actually pass argc, argv, envp
+// - do relocations for dynamic binaries
+//
+// Note: there is no syscall translation so this can only run linux programs on linux, etc.
+//
+
 main :: fn() void = {
     bytes := read_file_from_last_arg();  // TODO: dumb. just mmap the file?
     h := bytes.peek_type(Elf.Header);
@@ -21,11 +34,13 @@ main :: fn() void = {
     
     // reserve memory that fits all the segments with the correct spacing (all inaccesable for now)
     total_virtual := hi - lo;
-    @eprintln("reserving % virtual bytes", total_virtual);
+    @eprintln(">>> reserving % virtual bytes", total_virtual);
     virtual := my_mmap(total_virtual, 0);
     
     executable := list([]u8, temp());
     stack: []u8 = empty();
+    dyn: []Elf.Dyn = empty();
+    interp := false;
     each ph { it |
         if it.type == .Load {
             dest := virtual.subslice(it.vaddr - lo, it.mem_size);
@@ -50,8 +65,22 @@ main :: fn() void = {
             prot := prot_elf_to_posix(it.prot);
             stack = my_mmap(it.mem_size, prot);
         }
+        // TODO: am i supposed to mutate .vaddr if this is a static binary? do_relocations_static_linux() reads it
+        // TODO: im reading the program header and do_relocations_static_linux is reading the section header. 
+        //       (i think my decision was you're required to have both for a dynamic binary and they have redundant info). 
+        if it.type == .Dynamic {
+            p := virtual.index(it.vaddr - lo);
+            dyn = (ptr = ptr_cast_unchecked(u8, Elf.Dyn, p), len = it.mem_size / size_of(Elf.Dyn));
+        }
+        if it.type == .Interp { 
+            interp = true;
+        }
     };
     @assert(stack.len > 0, "missing STACK program header");
+    
+    if interp {
+        
+    };
     
     entry := virtual.index(h.entry - lo);
     {
@@ -61,8 +90,15 @@ main :: fn() void = {
         };
         @assert(ok, "entry point is not in executable memory");
     };
-    sp := stack.index_unchecked(stack.len);
-    @println("calling entry point: %", entry);
+    
+    z: u8 = 0;
+    z: CStr = (ptr = z&);
+    par := stack.index_unchecked(stack.len - 24);
+    argc_argv_envp := bit_cast_unchecked(*u8, *Ty(i64, *CStr, *CStr), par);
+    argc_argv_envp[] = (0, z&, z&);
+    sp := par.offset(-8);
+    
+    @eprintln(">>> calling entry point: %", entry);
     call_in_stack(sp, entry);
     unreachable();
 }
@@ -93,12 +129,16 @@ Elf :: import("@/backend/elf/bits.fr");
 #use("@/lib/sys/fs.fr");
 
 call_in_stack :: AsmFunction(fn(sp: *u8, callee: *u8) void = (), @const_slice(
+    // TODO: THIS ARM IS UNTESTED
     add_im(.X64, sp, x0, @as(u12) 0, 0b0),  // setup new stack 
-    br(x1, 0b1),  // call a user function
+    br(x1, 0b0),  // call a user function (no link)
     brk(0x1234),  // crash
 ), (fn(out) = @asm_x64(
     encode_bin(PrimaryOp.MovReg, X86Reg.rsp, X86Reg.rdi),  // setup new stack
-    encode_call_reg(ModrmMode.Direct, X86Reg.rsi),  // call a user function
+    // call a user function. 
+    // don't push a return address, sp needs to point to the parameters being passed to the program. 
+    // you can see the other side of this calling convention in franca_runtime_init()
+    encode_jmp_reg(ModrmMode.Direct, X86Reg.rsi),  
     PrimaryOp.Int3,  // crash
 ) out));
 

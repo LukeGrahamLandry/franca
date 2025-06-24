@@ -1,0 +1,52 @@
+main :: fn() void = {
+    src := @if(query_current_os() == .macos, SRC.macos, 
+        @if(query_current_arch() == .x86_64, SRC.linux_amd, SRC.linux_arm));
+    
+    franca := get_executable_path(temp());
+    ssa := open_temp_file();
+    exe := open_temp_file();
+    ssa.fd&.write(src);
+    b := sh(@slice(franca, "backend/meta/qbe_frontend.fr", ssa&.s_name(), "-r"));
+    sh(@slice(franca, "backend/meta/qbe_frontend.fr", ssa&.s_name(), "-o", exe&.s_name()));
+    loader := @if(query_current_os() == .macos, "examples/macho_loader.fr", "examples/elf_loader.fr");
+    c := sh(@slice(franca, loader, exe&.s_name()));
+    //chmod(exe&.c_name(), .OwnerAll);  // probably not a good idea anyway; but doesn't work on orb??
+    //a := sh(@slice(exe&.s_name()));
+    //@assert_eq(a, b);
+    @assert_eq(b, c);
+    @assert_eq(b, "Hello World!\n");
+}
+
+sh :: fn(a: []Str) Str = {
+    ok, out, err := exec_and_catch(a[0], a.rest(1), temp());
+    if !ok {
+        print(out.items());
+        print(err.items());
+        @panic("failed %", a);
+    };
+    out.items()
+}
+
+SRC :: @struct {
+    linux_amd :: fill(1, 231);
+    linux_arm :: fill(64, 94);  // riscv is same
+    macos :: fill(0x2000004, 0x2000001);
+    
+    fill :: fn(write: i64, exit: i64) Str = 
+        (@tfmt("%%%%%", a, write, b, exit, c)).sym().str();
+    
+    a :: """
+    data $msg = { b "Hello World!\n" }
+    export function $main() {
+    @start
+        %write =l copy """; b :: """
+        %exit =l copy """; c :: """
+        syscall %write(l 1, l $msg, l 13)
+        syscall %exit(l 0)
+        ret
+    }
+    """;
+};
+
+#use("@/lib/sys/fs.fr");
+#use("@/lib/sys/subprocess.fr");

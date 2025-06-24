@@ -16,6 +16,7 @@ notably those are all things to aren't going to change if you're just working on
 - wasted so much time on something that could have been caught by the slice functions bounds checking that 
   the indices are positive. so finally fixed that. my original bootstrap bytecode only had signed comparisons,
   but that's been gone for many months now. should have done this so long ago. 
+- started examples/elf_loader so i have at least some reference for what's going on like i do for mach-o. 
 
 ## (Jun 22)
 
@@ -26,7 +27,7 @@ notably those are all things to aren't going to change if you're just working on
 - started riscv emit, instruction encoding, etc
 - trying to do hello world with write+exit syscall and run it in https://github.com/libriscv/libriscv
   - libriscv says "Exception: Invalid ELF section header string table index" if you don't give it at Elf.Header.section_header_names_index,
-    because it wants to look for a `.interp` entry. real linux kernal doesn't care for static binaries but sure whatever. 
+    because it wants to look for a `.interp` entry. real linux kernel doesn't care for static binaries but sure whatever. 
   - yay! hello world works. 
     - interesting that write syscall to stdIN shows it to you on orb and blink but not on libriscv
 

@@ -1,5 +1,10 @@
 main :: fn() void = {
     input := read_file_from_last_arg();
+    out := u8.list(general_allocator());
+    dump(out&, input);
+};
+
+dump :: fn(out: *List(u8), input: []u8) void = {
     ::Result(*Header, Str);
     header: *Header = or check(input) { e | 
         @panic("invalid frc file: %")
@@ -7,105 +12,105 @@ main :: fn() void = {
     m := @uninitialized QbeModule; m := m&;
     init_empty_for_template_only(m, general_allocator());
     
-    out := u8.list(general_allocator());
-    @fmt(out&, "# (size = %, arch_os = %)\n", input.len, header.arch_os);
+    @fmt(out, "# (size = %, arch_os = %)\n", input.len, header.arch_os);
     flush();
     {
-        @fmt(out&, "# entry: ");
+        @fmt(out, "# entry: ");
         if header.entry_sym.off != Qbe.no_symbol {
             it := header.get(header.entry_sym);
-            @fmt(out&, "%", header.get(it.name));
+            @fmt(out, "%", header.get(it.name));
         }
         if header.entry_dep.off != Qbe.no_symbol {
             it := header.get(header.entry_dep);
-            @fmt(out&, " in % ", header.get(it.filename));
+            @fmt(out, " in % ", header.get(it.filename));
         }
-        @fmt(out&, "\n");
+        @fmt(out, "\n");
         @if(header.root_scope.off != Qbe.no_symbol) 
-            @fmt(out&, "# root scope: %\n", header.root_scope.off);
+            @fmt(out, "# root scope: %\n", header.root_scope.off);
         name := header.get(header.debug_name);
         if name.len != 0 {
-            @fmt(out&, "# debug name: %\n", name);
+            @fmt(out, "# debug name: %\n", name);
         };
     }
     flush();
     
-    @fmt(out&, "# === arr ===\n");
+    @fmt(out, "# === arr ===\n");
     inline_for Header.get_fields() { $f | 
         ok :: get_type_info_ref(f[].ty).is(.Struct) && get_constant(Type, Type.scope_of(f[].ty), @symbol StorageElement).is_some();
         @if(ok) {
             it := Header.get_field_ptr(header, f);
-            @fmt(out&, "# %: (off = %, count = %)\n", ::f[].name.str(), it.off, it.count);
+            @fmt(out, "# %: (off = %, count = %)\n", ::f[].name.str(), it.off, it.count);
         }
     };
     
     if header.dep.count != 0 {
-        @fmt(out&, "# === dep ===\n");
-        @fmt(out&, "# (ALL - %)\n", header.all_deps&);
+        @fmt(out, "# === dep ===\n");
+        @fmt(out, "# (ALL - %)\n", header.all_deps&);
     }
     for(header, header.all(Dep)) { _, it |
-        @fmt(out&, "# % % %\n", header.get(it.filename), it.file_len, it.hashcode&);
+        @fmt(out, "# % % %\n", header.get(it.filename), it.file_len, it.hashcode&);
     };
     
     read_types(header, m);
-    @if(m.types.len > 0) @fmt(out&, "# === typ ===\n");
+    @if(m.types.len > 0) @fmt(out, "# === typ ===\n");
     range(0, m.types.len) { t |
-        print_type(m, t, out&);
+        print_type(m, t, out);
     };
     flush();
     
-    flush :: fn() => if true || out.len > 8000 {
-        print(out.items()); out&.clear();
+    // TODO: think about how i want to handle this
+    flush :: fn() => if false && out.len > 8000 {
+        print(out.items()); out.clear();
     };
     
-    @fmt(out&, "# === sym ===\n");
+    @fmt(out, "# === sym ===\n");
     syms := preintern_syms(header, m);
     for(header, header.all(Sym)) { i, it |
         continue :: local_return;
         ::enum(@type it.segment);
-        @fmt(out&, "# '%' is % ", header.get(it.name), it.segment);
+        @fmt(out, "# '%' is % ", header.get(it.name), it.segment);
         @match(it.segment) {
-            fn Invalid() => @fmt(out&, "\n");
+            fn Invalid() => @fmt(out, "\n");
             fn Code() => {
                 flags: FncFlags = (repr = it.fnc.flags);
-                @fmt(out&, "(");
-                if(flags.get(.leaf)     != 0, => @fmt(out&, "leaf, "));
-                if(flags.get(.vararg)   != 0, => @fmt(out&, "vararg, "));
-                if(flags.get(.dynalloc) != 0, => @fmt(out&, "dynalloc, "));
-                if(flags.get(.salign)   != 0, => @fmt(out&, "salign=%, ", flags.get(.salign)));
-                if(it.fnc.tmp == Qbe.no_symbol && it.fnc.either.slot != 0, => @fmt(out&, "slot=%, ", it.fnc.either.slot));
-                if(it.fnc.reg != 0,           => @fmt(out&, "reg=%, ", it.fnc.reg));
+                @fmt(out, "(");
+                if(flags.get(.leaf)     != 0, => @fmt(out, "leaf, "));
+                if(flags.get(.vararg)   != 0, => @fmt(out, "vararg, "));
+                if(flags.get(.dynalloc) != 0, => @fmt(out, "dynalloc, "));
+                if(flags.get(.salign)   != 0, => @fmt(out, "salign=%, ", flags.get(.salign)));
+                if(it.fnc.tmp == Qbe.no_symbol && it.fnc.either.slot != 0, => @fmt(out, "slot=%, ", it.fnc.either.slot));
+                if(it.fnc.reg != 0,           => @fmt(out, "reg=%, ", it.fnc.reg));
                 out.len -= out.items().ends_with(", ").int() * 2;
-                @fmt(out&, ")\n");
+                @fmt(out, ")\n");
                 
                 f := @uninitialized Qbe.Fn;
                 f&.default_init(m);
                 load(header, f&, i, syms);
-                printfn(f&, out&);
+                printfn(f&, out);
             }
             // TODO: print this as something qbe_frontend.fr can parse so it can round trip
             fn MachineCode() => {
-                @fmt(out&, "\n# arm64 { b ");
-                for(header.get(it.asm.arm64), fn(c) => @fmt(out&, "% ", c));
-                @fmt(out&, "}\n# amd64 { b ");
-                for(header.get(it.asm.amd64), fn(c) => @fmt(out&, "% ", c));
-                @fmt(out&, "}\n");
+                @fmt(out, "\n# arm64 { b ");
+                for(header.get(it.asm.arm64), fn(c) => @fmt(out, "% ", c));
+                @fmt(out, "}\n# amd64 { b ");
+                for(header.get(it.asm.amd64), fn(c) => @fmt(out, "% ", c));
+                @fmt(out, "}\n");
             }
             fn Import() => {
                 lib := header.get(it.imp.lib);
-                @fmt(out&, "(lib = %", header.get(lib.name));
+                @fmt(out, "(lib = %", header.get(lib.name));
                 if it.imp.temporary_funcid != Qbe.no_symbol && it.imp.temporary_funcid != 0 {
-                    @fmt(out&, ", fid = %", it.imp.temporary_funcid);
+                    @fmt(out, ", fid = %", it.imp.temporary_funcid);
                 }
-                @if(it.imp.weak) @fmt(out&, ", weak");
-                @fmt(out&, ")\n");
+                @if(it.imp.weak) @fmt(out, ", weak");
+                @fmt(out, ")\n");
             }
             @default => {
-                @fmt(out&, "(align = %, size = %, rel = %)\n",  
+                @fmt(out, "(align = %, size = %, rel = %)\n",  
                     1.shift_left(it.align_log2.zext()), it.dat.bytes.count, it.dat.rel.count);
                 
                 dat := load(header, m, i, syms);
-                print_data(m, dat&, out&);
+                print_data(m, dat&, out);
             };
         };
         
@@ -116,33 +121,33 @@ main :: fn() void = {
         return()
     };
     
-    @fmt(out&, "# === fty ===\n");
+    @fmt(out, "# === fty ===\n");
     c: u32 = FTy.COUNT;
     for(header, @as(Ref(FTy))(off = c, count = header.fty.count - c)) { i, it |
         ::enum(@type it.tag);
         continue :: local_return;
-        @fmt(out&, "# [%] %", i.off, it.tag);
+        @fmt(out, "# [%] %", i.off, it.tag);
         if @is(it.tag, .Struct, .Union, .Scope, .Params, .Enum) {
             empty := it.payload.fields.count == 0;
-            @fmt(out&, " { %", @if(empty, "", "\n"));
-            show_fields(out&, header, it.payload.fields, 1 + 4);
-            @fmt(out&, "% }\n", @if(empty, "", "#"));
+            @fmt(out, " { %", @if(empty, "", "\n"));
+            show_fields(out, header, it.payload.fields, 1 + 4);
+            @fmt(out, "% }\n", @if(empty, "", "#"));
             continue();
         }
         if @is(it.tag, .Array, .Ptr, .Func) {
-            @fmt(out&, "(%, %);\n", it.payload.array.inner.off, it.payload.array.count);
+            @fmt(out, "(%, %);\n", it.payload.array.inner.off, it.payload.array.count);
             continue();
         }
         if @is(it.tag, .Number) {
             it := it.payload.int;
-            @fmt(out&, "(%, 0b%%%);\n", it.bits, int it.signed, int it.float, int it.bitfield);
+            @fmt(out, "(%, 0b%%%);\n", it.bits, int it.signed, int it.float, int it.bitfield);
             continue();
         }
-        @fmt(out&, "\n");
+        @fmt(out, "\n");
         flush();
     }
     
-    print(out.items()); out&.clear();
+    print(out.items()); out.clear();
 }
 
 fn show_fields(out: *List(u8), header: *Header, fields: Ref(Fld), depth: i64) void = {

@@ -48,6 +48,10 @@ ColourTheme :: @struct {
 state :: @static(*State);
 
 on_init :: fn(userdata: rawptr) void = {
+    // TODO: don't get in a crash loop if dynenv gets messed up
+    // TODO: make request_backtrace_on_panic also push the resolver if it's not already there so it works without doing signals too
+    //import("@/lib/crash_report.fr")'hook_backtrace();  
+    
     state := state[];
     sapp := state.app&;
     allocator := general_allocator();
@@ -131,9 +135,13 @@ fn load_font_pixels(scale: f64, a: Alloc) []u8 #use(StbTrueType) = {
         x, y := (chars[i].xoff.cast().int(), chars[i].yoff.cast().int());
         range(y0, y1) { j |
             char_w := x1 - x0;
-            src  := bitmap.subslice(j*tex_width + x0, char_w);
-            dest := pixels.subslice((j-y0+(y+baseline))*W.int()*256 + x + (i+32+1)*W.int(), char_w);
-            dest.copy_from(src);
+            // TODO: clearly im doing this wrong?
+            dest_start := (j-y0+(y+baseline))*W.int()*256 + x + (i+32+1)*W.int();
+            if dest_start > 0 {
+                src  := bitmap.subslice(j*tex_width + x0, char_w);
+                dest := pixels.subslice(dest_start, char_w);
+                dest.copy_from(src);
+            }
         };
     };
     // make non ascii bytes show as filled in cells
@@ -248,7 +256,7 @@ fn append_string(buffer: *TextBuffer, new: Str) void = {
                 // If you're already near the bottom of the document, scroll down as new text
                 // is added so you can see it stream in, but if you carefully scrolled up to 
                 // look at something, don't rip you away from your place. 
-                buffer.render.y = float(buffer.lines.len - buffer.num_lines_fit_on_screen + 1);
+                buffer.render.y = float(buffer.lines.len - buffer.num_lines_fit_on_screen + 2);
             }
         };
         i += 1;
@@ -594,16 +602,18 @@ find_link_at :: fn(b: *TextBuffer, line: i64, col: i64) ?Ty(i64, i64, i64) = {
     text := b.lines[line]&.str();
     if(col >= text.len || col < 0, => return(.None));
     
+    stop :: fn(c: u8) => c.is_ascii_whitespace() || "[],".contains(c);
+    
     // spread along the text in both directions
     start := col;
-    while => start > 0 && !text[start].is_ascii_whitespace() {
+    while => start > 0 && !text[start].stop() {
         start -= 1;
     }
-    if start < text.len - 1 && text[start].is_ascii_whitespace() {
+    if start < text.len - 1 && text[start].stop() {
         start += 1;
     }
     end := col;
-    while => end < text.len && !text[end].is_ascii_whitespace() {
+    while => end < text.len && !text[end].stop() {
         end += 1;
     };
     
@@ -733,7 +743,7 @@ fn draw_text(self: *TextBuffer) void = {
     line_count := int(h / (state.scale * 2)) + 1;
     self.num_lines_fit_on_screen = line_count;
     start := min(max(0, self.render.y.int()), self.lines.len);
-    end   := min(start + line_count, self.lines.len);
+    end   := min(start + line_count + 1, self.lines.len);
     chars_that_fit := int(w / state.scale) + 2;
     col := self.render.x.int();
     
@@ -855,7 +865,7 @@ fn push_all(self: *Line, s: []u8, a: Alloc) void = if self.repr.len < 0 {
     } else {
         self.set_len(l + s.len);  // TODO: why does this need to be first
         b.subslice(l, s.len).copy_from(s);
-        @debug_assert_ule(self.repr.len, 0);
+        @debug_assert_le(self.repr.len, 0);
     }
 } else {
     self.repr&.push_all(s, a);

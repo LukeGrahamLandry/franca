@@ -166,6 +166,8 @@ FRHOSTED_MAGIC :u64: 0x444554534F485246;
 // Just no vtables. Alloc is fine because that's just a function pointer, not a pointer to a function pointer. 
 do_relocations_static_linux :: fn() void = {
     Elf :: import("@/backend/elf/bits.fr");
+    // TODO: use (maybe backwards offset from) AT_PHDR instead of this symbol, 
+    //       then it should work when going through a relocatable object as well
     base   := @import_symbol "__franca_base_address";
     if u64.ptr_from_raw(base)[] == FRHOSTED_MAGIC {
         return();
@@ -178,38 +180,13 @@ do_relocations_static_linux :: fn() void = {
     );
     ::enum(Elf.SegmentType);
     ::enum(Elf.DynTag);
-    
-    ElfDynUnpacked :: @struct {
-        strings: []u8;
-        symbols: *Elf.Symbol;
-        relocations: []Elf.RelA;
-    };
-    
-    unpacked := ElfDynUnpacked.zeroed();
+        
+    unpacked := Elf.DynUnpacked.zeroed();
     each headers { h |
         if h.type == .Dynamic {
             // TODO: i don't super understand why i don't need to add `base` here. i guess it fixed it for me? 
             dynamic: []Elf.Dyn = (ptr = Elf.Dyn.ptr_from_int(h.vaddr), len = h.mem_size / 16);
-            for dynamic { it |
-                @match(it.tag) {
-                    fn StrTab() => {
-                        unpacked.strings.ptr = u8.ptr_from_int(it.val);
-                    }
-                    fn StrSz() => {
-                        unpacked.strings.len = it.val;
-                    }
-                    fn SymTab() => {
-                        unpacked.symbols = Elf.Symbol.ptr_from_int(it.val);
-                    }
-                    fn RelA() => {
-                        unpacked.relocations.ptr = Elf.RelA.ptr_from_int(it.val);
-                    }
-                    fn RelASz() => {
-                        unpacked.relocations.len = it.val / size_of(Elf.RelA);
-                    }
-                    @default => ();
-                };
-            };
+            unpacked = Elf'load_from_dynamic_header(dynamic);
         };
     };
     
