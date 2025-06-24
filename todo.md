@@ -3,7 +3,6 @@
 
 ## PROGRAMS THAT CRASH
 
-- 60fps.fr crashes
 - not everything works if you force general_allocator to be BlockAlloc
 - event handlers in graphics programs crash. but each program seems to have a different one cursed. 
 - there have been very rare failures in my lua tests for a while
@@ -523,10 +522,10 @@ and not need to serialize the arguments to a string.
 - pending repros: uninit_stack_slot, typchk_unquote
 - have a test where you force inline everything that's not recursive to stress test the backend dealing with large functions.
 - compiler/test.fr run for jit as well
-- automated test that builds are still reproducible
+- automated test that builds are still reproducible (including with -debug-info which doesn't repro currently)
 - fix the test programs to not all write to `./a.out` or whatever so they can run in parallel.  
 - test compile error for conflicting #use
-- compile all the examples in run_tests: aoc, toy
+- compile all the examples in run_tests: toy
 - repro doesn't work when you do `-repeat`
 - more calling convention tests between jitted code and c.
 - have one command that lets me run the tests on all targets
@@ -538,18 +537,18 @@ it doesn't like that you stomp a.out, default_driver:run should pick a unique pa
 or just default to jitting and force you to enable aot by specifying an output path. 
 - sort the array of test files so you can always diff the output without hoping the file system iterates in a consistant order 
 - think about how to test the gui programs more convincingly than just that they produce a binary
-- run the deps tests in github actions
 - test using import_(c, wasm)/ffi from a precompiled driver to make sure they're not relying on being in their own compilation context 
 - test crash stack traces
 - make the crash examples work without needing to set the env variable / run jitted
 - TODO: i should probably be making tests for error locations
-- auto test repro (including with -debug-info which doesn't repro currently)
+- macho_loader.fr run hello world or something
 
 ## linux
 
 - signal handlers (the compiler does it and tests/basic_libc.fr)
 - relocatable and shared libraries (backend/elf/emit.fr)
 - shader translation for the gui examples
+- non-amd64 support
 
 ## error messages
 

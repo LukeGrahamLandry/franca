@@ -13,6 +13,9 @@ notably those are all things to aren't going to change if you're just working on
   - had to do it eventually anyway and i think using zig to statically link and run the .ssa tests is an easier starting point 
     than either a) dealing with an emulator with a dynamic libc or b) trying to make everything work at once and use the 
     franca lib/sys/ impls. 
+- wasted so much time on something that could have been caught by the slice functions bounds checking that 
+  the indices are positive. so finally fixed that. my original bootstrap bytecode only had signed comparisons,
+  but that's been gone for many months now. should have done this so long ago. 
 
 ## (Jun 22)
 

@@ -14,7 +14,6 @@ EmitElf :: @struct {
     section_index := zeroed EnumMap(SegmentType, u16);
 };
 
-
 SymbolTableInfo :: @struct {  
     fixups: []FixP = empty();
     symbols: []*SymbolInfo = empty();
@@ -23,8 +22,8 @@ SymbolTableInfo :: @struct {
 };
 
 max_program_headers :: 9;
-prot_read_write :: 6;
-prot_read :: 4;
+prot_read_write :: bit_or(Elf.PF_R, Elf.PF_W);
+prot_read :: Elf.PF_R;
 
 finalize_segments :: fn(m: *Qbe.Module) SymbolTableInfo = {
     patch_pending_symbols(m);
@@ -91,6 +90,7 @@ start_elf :: fn(m: *Qbe.Module) EmitElf #inline = {
     h.version = 1;
     h.program_header_entsize = size_of(Elf.ProgramHeader);
     h.section_header_entsize = size_of(Elf.SectionHeader);
+    // TODO: does ehsize matter?
     h.type = @match(m.goal.type) {
         fn Exe() => .Executable;
         fn Relocatable() => .Relocatable;
@@ -157,7 +157,7 @@ create_the_segments :: fn(e: *EmitElf) PayloadBase = {
     // the LOAD headers are required to be in order. 
     
     RW :: prot_read_write;
-    e.make_segment(.Code, RX); RX :: 5;// :waste :commandsispartofcodenow
+    e.make_segment(.Code, RX); RX :: bit_or(Elf.PF_R, Elf.PF_X);// :waste :commandsispartofcodenow
     e.make_segment(.ConstantData, RW);  // TODO: how the fuck do i do relocations in a non-writable segment?
     e.make_segment(.MutableData, RW);
     
@@ -179,7 +179,7 @@ create_the_segments :: fn(e: *EmitElf) PayloadBase = {
         virtual_offset += segment.len();
     };
     (virtual = virtual_offset, file = file_offset)
-}
+};
 
 // results are in temp()
 fn output_elf(m: *QbeModule) [][]u8 = {
@@ -192,7 +192,7 @@ fn output_elf(m: *QbeModule) [][]u8 = {
     
     if m.goal.type != .Exe { 
         eprintln("TODO: other types of elf");
-    }
+    };
     
     e.section_header("")[] = Elf.SectionHeader.zeroed();
     p_header := e.program_header();
@@ -277,6 +277,7 @@ request_interp :: fn(e: *EmitElf, interp_header: *Elf.ProgramHeader, base: Paylo
     e.payload&.zero_pad_to_align(8);
 };
 
+// This is needed even for static executables: data relocations of local symbols are applied in franca_runtime_init. 
 for_dynamic_loader :: fn(
     e: *EmitElf, 
     load_payload_header: *Elf.ProgramHeader, 

@@ -17,12 +17,15 @@
 // TODO: support x64
 // TODO: check ad-hoc codesign
 
+OUTPUT :: @static(List(u8));
+
 fn main() void = {
+    OUTPUT[] = list(temp());
     args := cli_args();
     assert(args.len > 1, "Last argument is path to macho file");
     path_c := args[args.len - 1];
     path := path_c.str(); 
-    @eprintln(">>> loading: %", path);
+    @fmt(OUTPUT, ">>> loading: %\n", path);
     // TODO: this is silly? just mmap the file. 
     bytes := general_allocator().read_to_string_or_crash(path).items(); // :panic
     full_bytes := bytes;
@@ -39,14 +42,16 @@ fn main() void = {
     main := virtual.ptr.offset(main_header.entry_offset.to_signed() + first_interesting); 
     
     main := u8.raw_from_ptr(main);
-    main := assume_types_fn(Ty(i64, *CStr), i64, main);
-    // TODO: franca programs use the _NS functions instead of args to main. 
+    main := assume_types_fn(Ty(i64, *CStr, *CStr, *CStr), i64, main);
     args := @slice(path_c, "examples/toy/hello.fr", CStr.zeroed());
     ::display_slice(CStr);
     fn display(s: *CStr, o: *List(*u8)) void = display(s[], o);
-    @eprintln(">>> calling main with %", args);
+    @fmt(OUTPUT, ">>> calling main with %\n", args);
+    eprint(OUTPUT.items());
     
-    status := main(args.len - 1, args.ptr);
+    envp := context(DefaultContext)[].environment_variables;
+    fake_apple_strings: CStr = "";
+    status := main(args.len - 1, args.ptr, envp, fake_apple_strings&);
     @eprintln(">>> main returned %", status);
     Syscall'exit(status);
 }
@@ -87,7 +92,7 @@ fn load_sections(macho_bytes: []u8, virtual: []u8) void = {
 
 fn apply_fixups(full_bytes: []u8, virtual: []u8, first_interesting: i64) void = {
     fixups_header_data := or find_unique_load_command(full_bytes, .ChainedFixups) {
-        eprintln("Didn't find the chained fixups command. That's probably not a good sign. \n(maybe you're using LC_DYLD_INFO_ONLY which we don't support)");
+        @fmt(OUTPUT, "Didn't find the chained fixups command. That's probably not a good sign. \n(maybe you're using LC_DYLD_INFO_ONLY which we don't support)\n");
         return();
     };
     import_pointers := collect_imports(full_bytes, fixups_header_data);
@@ -132,7 +137,7 @@ fn apply_fixups(full_bytes: []u8, virtual: []u8, first_interesting: i64) void = 
                         reloc_ref[] = if get(reloc.bind, .is_bind) == 1 {
                             target := import_pointers[get(reloc.bind, .ordinal)];
                             off := starts.segment_offset.to_signed() + (starts.page_size.zext() * i) + offset_to_fixup.zext();
-                            @println(">>> bind at % to %", off, target);
+                            @fmt(OUTPUT, ">>> bind at % to %\n", off, target);
                             bind_count += 1;
                             target
                         } else {
@@ -146,7 +151,7 @@ fn apply_fixups(full_bytes: []u8, virtual: []u8, first_interesting: i64) void = 
                         next_offset != 0
                     };
                 };
-                @eprintln(">>> applied % rebase and % bind fixups to segment %", rebase_count, bind_count, segment_index);
+                @fmt(OUTPUT, ">>> applied % rebase and % bind fixups to segment %\n", rebase_count, bind_count, segment_index);
             };
         };
     };
@@ -179,7 +184,8 @@ fn collect_imports(full_bytes: []u8, fixups_header_data: []u8) []rawptr #use("@/
             n.ptr = n.ptr.offset(1);
         };
         addr := libc.dlsym(n);
-        @assert(!addr.is_null(), "Couldn't find % in libc (TODO: allow non-libc imports).");
+        @fmt(OUTPUT, ">>> import '%' from libc: %\n", n, addr);
+        @assert(import.get(.weak) != 0 || !addr.is_null(), "Couldn't find % in libc (TODO: allow non-libc imports).", n);
         list_of_function_pointers[i] = addr;
     };
     list_of_function_pointers
