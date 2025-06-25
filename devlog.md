@@ -23,13 +23,18 @@ notably those are all things to aren't going to change if you're just working on
   because to get the current os from that to choose syscall numbers. 
   indeed an extra push_zeroed_dynamic_context{} fixes it, as does just calling set_dynamic_context at comptime
   which has exactly no effect other than to force it to go through sema sooner. 
+    - that must be the problem i was having with the graphics programs as well. 
+      being very compilation order dependent fits the symptoms. 
+- avoid an extra clone of all function bodies (at top level + no const args + no #where): 1294 functions, <10ms
+- elf_loader: implement dynamic imports
+- added a test that runs dump_elf and makes sure my static binaries are actually static
 
 > i love when i let zed update itself and they find new and exciting ways to turn on shitty auto complete
 > it's not show_inline_completions=false anymore and show_edit_predictions=false also doesn't work. 
 > ah of course show_completions_on_input=false, totally unrelated to edit_prediction_provider=none;
 > losing my mind. oh boy and now they have a debugger so i have to turn off the giant circle every time 
 > you mouse over the side of the screen. i really really hope they fixed the burning a core when 
-> another program writes to a file. 
+> another program writes to a file. signs point to yes!
   
 ## (Jun 23)
 

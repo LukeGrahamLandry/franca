@@ -156,14 +156,13 @@ ResolveScope :: @struct(
     captures: List(Var),
     compiler: *SelfHosted,
     scope: ScopeId,
-    inside_quote: bool
+    top_level := false,
 );
 
 fn new(compiler: *SelfHosted, scope: ScopeId, last_loc: Span) ResolveScope = (
     captures = list(temp()),
     compiler = compiler,
     scope = scope,
-    inside_quote = false,
 );
 
 fn resolve_func(self: *ResolveScope, func: *Func) PRes = {
@@ -337,7 +336,10 @@ fn resolve_func_body(self: *ResolveScope, func: *Func) PRes = {
     @debug_assert_ne(func.resolve_scope, NOSCOPE, "function must have scope");
     self.scope = func.resolve_scope;
     generic := func.get_flag(.Generic); // args and ret are allowed to depend on previous args.
-
+    top_level := func.get_flag(.TopLevel) && !func.get_flag(.AnyConstArgs) && !generic;
+    prev := self.top_level;
+    self.top_level = top_level;
+    
     self.push_scope(func.loc);
 
     if generic {
@@ -360,6 +362,7 @@ fn resolve_func_body(self: *ResolveScope, func: *Func) PRes = {
             func.use_scope = b.scope;
         };
     };
+    self.top_level = prev;
     
     self.pop_block();
     self.pop_block();
@@ -614,11 +617,19 @@ fn handle_expr(self: *ResolveScope, expr: *FatExpr) Result(DoMore, *CompileError
 
     @match(expr.expr&) {
         fn GetParsed(index) => {
-            e := @try(self.compiler.parser.finish_pending(index[])) return;
-            z := zone_begin(.CloneExpr);
-            @if(ENABLE_TRACY) ___tracy_emit_zone_name(z, @tfmt("%", index.id));
-            expr[] = self.compiler.clone(e&); // clone is important! you end up with multiple copies of the same pending parse. 
-            zone_end(z);
+            index := index[];
+            e := @try(self.compiler.parser.finish_pending(index)) return;
+            if !self.top_level {
+                z := zone_begin(.CloneExpr);
+                @if(ENABLE_TRACY) ___tracy_emit_zone_name(z, @tfmt("%", index.id));
+                expr[] = self.compiler.clone(e&); // clone is important! you end up with multiple copies of the same pending parse. 
+                zone_end(z);
+            } else {
+                expr[] = e;
+                //@println("%", self.compiler.comp().log(e&));
+                //self.compiler.codemap.show_error_line(e.loc, true);
+                self.compiler.parser.tasks[index.id].Expr.Ok.expr = (Poison = .TopLevelUsed);
+            };
             @try(self.walk_expr(expr)) return;
             return(Ok = DoMore.Break);
         }
@@ -738,14 +749,6 @@ fn handle_stmt(self: *ResolveScope, stmt: *FatStmt) Result(DoMore, *CompileError
 
 fn handle_func(self: *ResolveScope, func: *Func) Result(DoMore, *CompileError) #once = {
     @try(self.resolve_func(func)) return;
-    @if(!LAZY_SCOPE) {
-        prev := self.inside_quote;
-        self.inside_quote = true;
-        @try(self.resolve_func_args(func)) return;
-        @try(self.resolve_func_body(func)) return;
-        self.inside_quote = prev;
-    };
-    //};
     (Ok = .Break)
 }
 
@@ -835,6 +838,10 @@ fn handle_expr(self: *RenumberVars, expr: *FatExpr) Result(DoMore, void) #once =
     @match(expr.expr&) {
         fn GetVar(name) => self.update(name);
         fn Block(f) => {
+            // f.block_resolved=false does not mean there will be no GetVar because of unquote. 
+            // the quoted template is unresolved when you fill in placeholders with expressions that may already be resolved. 
+            // because sema/compile_quote does not recurse until after filling placeholders.  
+        
             if !(f.scope == NOSCOPE) {
                 self.decl(f.scope&);
             };

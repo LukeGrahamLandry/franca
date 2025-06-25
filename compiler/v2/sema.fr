@@ -2060,23 +2060,11 @@ fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg
     func := self.get_function(original_f);
     @debug_assert(func.get_flag(.AnyConstArgs), "baking const args but none are there");
     
-    if LAZY_SCOPE {
-        //@debug_assert_eq(func.get_flag(.AllowRtCapture), func.get_flag(.ResolvedBody));  // TODO: do we want to bring this back? -- Jan 8
-    } else {
-        @check(self.ensure_resolved_sign(original_f)) return;
-        @try(self.ensure_resolved_body(original_f)) return;
-    };
-    
     // Some part of the argument must be known at comptime.
     new_func := func.deep_clone(self.get_alloc());
     new_func&.set_flag(.DisallowInOverloadSet);
     mapping: RenumberResults = init();
-    if LAZY_SCOPE {
-        self.maybe_renumber_and_dup_scope(new_func&, mapping&);
-    } else {
-        renumber: RenumberVars = (scope = self.scopes, mapping = mapping&, compiler = self);
-        renumber&.walk_func(new_func&);
-    };
+    self.renumber_func(new_func&, mapping&);
     new_fid := self.add_function(new_func);
     // TODO: mark func as in progress somehow so nobody can yield on it. 
     //       tho really i feel like you want to make this whole operation yield-able,
@@ -2092,8 +2080,7 @@ fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg
     self.curry_const_args_inner(original_f, new_fid, f_expr, arg_expr, 0)
 }
 
-LAZY_SCOPE :: true;
-fn maybe_renumber_and_dup_scope(self: *SelfHosted, new_func: *Func, mapping: *RenumberResults) void #once = {
+fn renumber_func(self: *SelfHosted, new_func: *Func, mapping: *RenumberResults) void #once = {
     renumber: RenumberVars = (scope = self.scopes, mapping = mapping, compiler = self);
     renumber&.walk_func(new_func);
 }
@@ -2666,7 +2653,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
                         // TODO: this makes it slower and means you can't cache it but also is going to be confusingly wrong in some cases
                         //       because you might make changes based on a type hint from an overload that didn't end up getting selected. 
                         //       but also it's very convenient to have this so here we are for now.   -- Dec 23
-                        if arg_expr.is_const() { // this helps with :type_through_field
+                        if self.const_coercable(type) && arg_expr.is_const() { // this helps with :type_through_field
                             res := self.ask_coerce_const_expr(arg_expr, param, true);
                             if res&.is(.Ok) && res.Ok {
                                 continue();
@@ -2940,7 +2927,7 @@ fn instantiate_where_generic(self: *SelfHosted, template: FuncId, generic_types:
     new_func.annotations&.unordered_retain(fn(it) => it.name != Flag.where.ident()); // TODO: don't clone it in the first place
 
     mapping: RenumberResults = init();
-    maybe_renumber_and_dup_scope(self, new_func&, mapping&);
+    renumber_func(self, new_func&, mapping&);
     
     n := 0;
     each new_func.arg.bindings& { b |
@@ -4012,7 +3999,7 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
     // so we don't try to call something that isn't compiled yet. 
     walk: MarkNotDone = ();
     walk&.walk_expr(expr);
-    fake_func := make_func(def, (Some = expr[]), false);
+    fake_func := make_func(def, (Some = expr[]), false, false);
     // We didn't bother setting a scope because we don't need one, the expression will already have been resolved. 
     fake_func&.set_flag(.ResolvedBody);
     fake_func&.set_flag(.ResolvedSign);

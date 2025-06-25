@@ -2,14 +2,17 @@
 // Execute an ELF binary just like the linux kernel would. 
 // - load segments into memory with the right memory protection
 // - push parameters to the stack and call the entry point
+// - if dynamic, dlopen imports and apply relocations (instead of calling program interpreter)
 //  
 // TODO:
 // - auxiliary vector
 // - actually pass argc, argv, envp
-// - do relocations for dynamic binaries
 //
 // Note: there is no syscall translation so this can only run linux programs on linux, etc.
 //
+// the purpose of this is just understanding how the format works well enough to produce it. 
+// it's not meant to be useful for running real programs!
+// 
 
 main :: fn() void = {
     bytes := read_file_from_last_arg();  // TODO: dumb. just mmap the file?
@@ -40,7 +43,7 @@ main :: fn() void = {
     executable := list([]u8, temp());
     stack: []u8 = empty();
     dyn: []Elf.Dyn = empty();
-    interp := false;
+    need_dynamic_loader := false;
     each ph { it |
         if it.type == .Load {
             dest := virtual.subslice(it.vaddr - lo, it.mem_size);
@@ -73,13 +76,46 @@ main :: fn() void = {
             dyn = (ptr = ptr_cast_unchecked(u8, Elf.Dyn, p), len = it.mem_size / size_of(Elf.Dyn));
         }
         if it.type == .Interp { 
-            interp = true;
+            need_dynamic_loader = true;
+            // note: im ignoring the requested path
         }
     };
     @assert(stack.len > 0, "missing STACK program header");
     
-    if interp {
+    // This is the part where the kernel would call the interpreter you asked for, 
+    // but instead of that im just going to start doing relocations and hope for the best.
+    if need_dynamic_loader {
+        base := u8.raw_from_ptr(virtual.ptr);
+        ::ptr_utils(Elf.Symbol);
+        unpacked := Elf'load_from_dynamic_header(dyn);
+        fix :: fn(p) => bit_cast_unchecked(*u8, @type p, virtual.index(bit_cast_unchecked(@type p, i64, p) - lo));
+        unpacked.strings.ptr = unpacked.strings.ptr.fix(); 
+        unpacked.symbols = unpacked.symbols.fix(); 
+        unpacked.relocations.ptr = unpacked.relocations.ptr.fix(); 
         
+        libs := open_needed_dylibs(dyn, unpacked.strings);
+        
+        each unpacked.relocations { it |
+            @debug_assert_eq(it.type, Elf.R_AMD64_GLOB_DAT, "TODO: unknown relocation type %", it.type);
+            sym := unpacked.symbols.offset(it.sym.zext());
+            type := sym.info.shift_right_logical(4);
+            dest := rawptr.ptr_from_raw(base.offset(it.offset - lo));
+            if type == Elf.STB_LOCAL {
+                dest[] = base.offset(sym.value).offset(it.addend);
+            } else {
+                break :: local_return;
+                @debug_assert(type == Elf.STB_GLOBAL || type == Elf.STB_WEAK, "unknown symbol type");
+                name: CStr = (ptr = unpacked.strings.index(sym.name.zext()));
+                for libs { lib |
+                    if lib.get(name.str()) { value |
+                        dest[] = value.offset(it.addend);
+                        @eprintln(">>> import '%'", name.str());
+                        break();
+                    };
+                };
+                @assert(type == Elf.STB_WEAK, "missing non-weak import: %", name);
+            }
+        };
     };
     
     entry := virtual.index(h.entry - lo);
@@ -91,6 +127,7 @@ main :: fn() void = {
         @assert(ok, "entry point is not in executable memory");
     };
     
+    // Push the arguments to the new stack. 
     z: u8 = 0;
     z: CStr = (ptr = z&);
     par := stack.index_unchecked(stack.len - 24);
@@ -101,6 +138,19 @@ main :: fn() void = {
     @eprintln(">>> calling entry point: %", entry);
     call_in_stack(sp, entry);
     unreachable();
+}
+
+open_needed_dylibs :: fn(dyn: []Elf.Dyn, strings: []u8) []Dyn.Handle = {
+    libs := Dyn.Handle.list(temp());
+    for dyn { dyn |
+        if dyn.tag == .Needed {
+            name: CStr = (ptr = strings.index(dyn.val));
+            if Dyn'open(name.str()) { it |
+                libs&.push(it);
+            };
+        }
+    };
+    libs.items()
 }
 
 my_mmap :: fn(size: i64, prot: i64) []u8 = {
@@ -144,3 +194,4 @@ call_in_stack :: AsmFunction(fn(sp: *u8, callee: *u8) void = (), @const_slice(
 
 #use("@/backend/amd64/bits.fr");
 #use("@/backend/arm64/bits.fr");
+Dyn :: import("@/lib/dynamic_lib.fr");

@@ -30,7 +30,7 @@ ParseTask :: @tagged(
     Pending: @struct(src: Str, span: Span),
     Expr: Result(FatExpr, *CompileError),
 );
-Parser :: @struct(pool: *StringPool, lex: Lexer, tasks: *List(ParseTask), alloc: Alloc, last: Token);
+Parser :: @struct(pool: *StringPool, lex: Lexer, tasks: *List(ParseTask), alloc: Alloc, last: Token, top_level: bool);
 Prec :: @struct(prec: PrecLevel, allow_trailing: bool = true);
 
 Prec_None: Prec : (prec = .None);
@@ -57,7 +57,11 @@ fn finish_pending(self: *Parser, id: WaitingParse) ParseRes = {
             self.lex = init(self.pool, src_span.span, src_span.src);
             
             zone := zone_begin(.Parse); // TODO: defer
+            
+            prev := self.top_level;
+            self.top_level = false;
             e := self.parse_expr(Prec_None);
+            self.top_level = prev;
             zone_end(zone);
     
             // TODO: clone here instead of needing to remember later.
@@ -439,7 +443,7 @@ fn quick_lambda(self: *Parser, prec: Prec) ParseRes = {
     body := @try(self.parse_expr(prec)) return;
     // TODO: this is kinda dumb (would be better not to force unit being an arg) but makes it consistant with elsewhere
     fn_def: FnDef = (name = .None, arg = self.alloc.empty_pattern(loc), ret = (Infer = ()), tags = list(self.alloc), loc = loc);
-    func := make_func(fn_def, (Some = body), true);
+    func := make_func(fn_def, (Some = body), true, self.top_level);
     (Ok = self.expr((Closure = self.box(func)), loc))
 }
 
@@ -456,7 +460,7 @@ fn parse_func(self: *Parser) Result(Func, *CompileError) = {
     may_capture := @match(self.peek()) {
         fn Equals()         => false;
         fn FatRightArrow()  => true;
-        fn Semicolon() => return(Ok = make_func(fn_def, .None, false))
+        fn Semicolon() => return(Ok = make_func(fn_def, .None, false, self.top_level))
         @default => @report_error("expected '=' or '=>' or ';' after function decl ") (return, self.last.span);
     };
     self.pop();
@@ -470,12 +474,15 @@ fn parse_func(self: *Parser) Result(Func, *CompileError) = {
             id := self.push_parse(src, span);
             body := self.expr((GetParsed = id), loc);
             self.last.type = .RightSquiggle; // :HackFakeSquiggle
-            return((Ok = make_func(fn_def, (Some = body), may_capture)));
+            return((Ok = make_func(fn_def, (Some = body), may_capture, self.top_level)));
         };
     };
     
+    prev := self.top_level;
+    self.top_level = false;
     body := @try(self.parse_expr(Prec_None)) return;
-    (Ok = make_func(fn_def, (Some = body), may_capture))
+    self.top_level = prev;
+    (Ok = make_func(fn_def, (Some = body), may_capture, self.top_level))
 }
 
 fn named_call(self: *Parser, prec: Prec, name: Flag) ParseRes = {
@@ -676,7 +683,7 @@ fn parse_squiggle(self: *Parser, prev: FatExpr, prec: Prec) ParseRes #once = {
     };
     
     body := @try(self.parse_block_until_squiggle(false)) return;
-    func := make_func(fn_def, (Some = body), true);
+    func := make_func(fn_def, (Some = body), true, self.top_level);
     func&.set_flag(.WasLambdaLiteral);
     callback := self.expr((Closure = self.box(func)), loc);
     self.push_arg(prev&, callback);
@@ -809,7 +816,7 @@ fn push_arg(self: *Parser, call: *FatExpr, callback: FatExpr) void = {
 }
 
 :: ?FatExpr;
-fn make_func(def: FnDef, body: ?FatExpr, may_capture: bool) Func = {
+fn make_func(def: FnDef, body: ?FatExpr, may_capture: bool, top_level: bool) Func = {
     // TODO: derive fn default with allocator
     ::if_opt(FatExpr, FuncImpl);
     f: Func = (
@@ -830,6 +837,7 @@ fn make_func(def: FnDef, body: ?FatExpr, may_capture: bool) Func = {
     );
     
     if(may_capture, => f&.set_flag(.AllowRtCapture));
+    if(top_level, => f&.set_flag(.TopLevel));
     f
 }
 

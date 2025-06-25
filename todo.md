@@ -4,8 +4,6 @@
 ## PROGRAMS THAT CRASH
 
 - not everything works if you force general_allocator to be BlockAlloc
-- event handlers in graphics programs crash. but each program seems to have a different one cursed. 
-  (still happens even with `STASH` in macos/app.fr? but maybe less?)
 - there have been very rare failures in my lua tests for a while
 
 ## COMPILER BUG 
@@ -110,6 +108,8 @@ hould just make them local constants in each file like they are here in riscv
 - rv64 address+offset folding like i did for arm. they can probably share? 
 - remove redundant extension for `b := a & 31; c := extub b;`
 - arm immediate for bitwise and,or
+- i don't like that direct to exe vs to frc_inlinable then to exe give different binaries. 
+- be able to output frc/frc_inlinable in the same module as compiling normally so you don't have to do two passes over things to cache it
 
 ## don't rely on libc
 
@@ -136,7 +136,6 @@ but dump_macho.fr and objdump -d say they're the same (for mandelbrot_ui.fr at l
 so something in the data i guess? 
 - elf Relocatable so i can run the abi tests against clang
 - elf Dynamic
-- should have a test that makes sure my static binaries are actually static
 - how are you supposed to ask for page size? blink wants 64k instead of 4k. 
 - standalone import_c/cc.fr and meta/qbe_backend.fr can't make statically linked binaries because the `_init` is written in franca
 
