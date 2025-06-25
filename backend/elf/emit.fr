@@ -228,12 +228,17 @@ fn output_elf(m: *QbeModule) [][]u8 = {
         align = 8,
     );
     
+    if e.m.goal.exe_debug_symbol_table {
+        e.mark_code_sections(T.code_size);
+    };
+    
     if dynamic_header { it |
         if have_any_imports {
             e.request_interp(it._0, base);
         };
         
-        e.for_dynamic_loader(it._1, it._2, base, T);
+        dynamics := e.for_dynamic_loader(base, T);
+        e.seal_dynamic(it._1, it._2, base, dynamics);
     };
     // program headers are only for the os loader, not a static linker, 
     // but it's easier to just always output them and pretend we didn't instead of checking in the above code. 
@@ -280,11 +285,9 @@ request_interp :: fn(e: *EmitElf, interp_header: *Elf.ProgramHeader, base: Paylo
 // This is needed even for static executables: data relocations of local symbols are applied in franca_runtime_init. 
 for_dynamic_loader :: fn(
     e: *EmitElf, 
-    load_payload_header: *Elf.ProgramHeader, 
-    dynamic_header: *Elf.ProgramHeader, 
     base: PayloadBase, 
     T: SymbolTableInfo,
-) void = {
+) List(Elf.Dyn) = {
     m := e.m;
     // SectionHeader.link: Relocations -> DynSymbolTable -> StringTable
     // This is conceptually the same, it's just that the section headers don't do anything (?)
@@ -294,6 +297,7 @@ for_dynamic_loader :: fn(
     imported_symbol_name_offsets := u32.list(T.symbols.len, temp());
     e.payload&.push(0);  // null
     
+    @if(m.goal.link_libc)
     for glibc_dylib_paths { name |
         off := e.payload.len - string_table_start;
         e.payload&.push_all(name);
@@ -403,6 +407,17 @@ for_dynamic_loader :: fn(
     dynamics&.push(tag = .RelASz, val = e.payload.len - relocation_table_start);
     dynamics&.push(tag = .RelAEnt, val = size_of(Elf.RelA));
     
+    dynamics
+};
+
+seal_dynamic :: fn(
+    e: *EmitElf, 
+    load_payload_header: *Elf.ProgramHeader, 
+    dynamic_header: *Elf.ProgramHeader, 
+    base: PayloadBase, 
+    dynamics: List(Elf.Dyn), 
+) void = {
+    m := e.m;
     dynamics&.push(tag = .Null, val = 0);
     
     dynamics := dynamics.items().interpret_as_bytes();
@@ -420,26 +435,6 @@ for_dynamic_loader :: fn(
         addr_align = 8,
     );
     
-    code := m.segments&[.Code]&;
-    e.section_header(".plt")[] = (
-        name = 0, // TODO
-        type = .ProgramBits, 
-        flags = 1.shift_left(@as(i64) Elf.SectionFlag.Exec),
-        addr = Elf.MYSTERY_SPICE + m.goal.commands_size_guess, 
-        offset = m.goal.commands_size_guess, 
-        size = m.stubs&.len(),
-        addr_align = 1,
-    );
-    e.section_header(".text")[] = (
-        name = 0, // TODO
-        type = .ProgramBits, 
-        flags = 1.shift_left(@as(i64) Elf.SectionFlag.Exec),
-        addr = Elf.MYSTERY_SPICE + m.goal.commands_size_guess + m.goal.size_of_stubs,  
-        offset = m.goal.commands_size_guess + m.goal.size_of_stubs, 
-        size = T.code_size,
-        addr_align = 1,
-    );
-    
     RW :: prot_read_write;
     dynamic_header[] = (
         type = .Dynamic,
@@ -452,17 +447,6 @@ for_dynamic_loader :: fn(
         align = 8,
     );
     e.payload&.push_all(dynamics);
-    size := e.payload.len();
-    load_payload_header[] = (
-        type = .Load,
-        prot = RW,
-        offset = base.file,
-        vaddr = base.virtual, 
-        paddr = base.virtual,
-        file_size = size,
-        mem_size = size,
-        align = 4096,
-    );
     
     // TODO: I think it really doesn't need the names so maybe i can take this out. 
     {
@@ -492,6 +476,43 @@ for_dynamic_loader :: fn(
             h.name = offsets[i];
         };
     };
+    
+    size := e.payload.len();
+    load_payload_header[] = (
+        type = .Load,
+        prot = RW,
+        offset = base.file,
+        vaddr = base.virtual, 
+        paddr = base.virtual,
+        file_size = size,
+        mem_size = size,
+        align = 4096,
+    );
+};
+
+// These let objdump know the right place to disassemble when you pass `-d`
+mark_code_sections :: fn(e: *EmitElf, code_size: i64) void = {
+    m := e.m;
+    
+    e.section_header(".text")[] = (
+        name = 0, // TODO
+        type = .ProgramBits, 
+        flags = 1.shift_left(@as(i64) Elf.SectionFlag.Exec),
+        addr = Elf.MYSTERY_SPICE + m.goal.commands_size_guess + m.goal.size_of_stubs,  
+        offset = m.goal.commands_size_guess + m.goal.size_of_stubs, 
+        size = code_size,
+        addr_align = 1,
+    );
+    
+    e.section_header(".plt")[] = (
+        name = 0, // TODO
+        type = .ProgramBits, 
+        flags = 1.shift_left(@as(i64) Elf.SectionFlag.Exec),
+        addr = Elf.MYSTERY_SPICE + m.goal.commands_size_guess, 
+        offset = m.goal.commands_size_guess, 
+        size = m.stubs&.len(),
+        addr_align = 1,
+    );
 };
 
 program_header :: fn(e: *EmitElf) *Elf.ProgramHeader = {

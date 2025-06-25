@@ -1,5 +1,6 @@
 - "this works here but not in it's original place under f()."
 - :ThisIsNotOkBecauseMemoryWillBeReused
+- give data symbols readable names now that they show up in symbol table
 
 ## import_symbol / weak
 

@@ -6,6 +6,15 @@ let's cheat and make examples/terminal.fr(repl=true) not take 2 seconds to compi
 - compile_to_shader_source: 68 // shader compiler (for comptime)
 notably those are all things to aren't going to change if you're just working on the terminal program. 
 
+## (Jun 25)
+
+- machO: when direct exe, make symbol names for import stubs so when you look at the disassembly it 
+  shows as a call to a sane name instead of treating all the stubs as one thing so you can't tell whats going on
+  - pleasingly, i do this better than clang which seems to always say any call to a stub 
+    is a call to the first import + the stub's offset. maybe there's some magic flag you 
+    have to pass it? idk. tho i guess that's an argument that i shouldn't make people say -keep-names,
+    because if someone tried my thing they'd probably think i did it wrong too because they wouldn't know to ask for it. 
+  
 ## (Jun 24)
 
 - give up on my failed experiment insane way of doing llvm abi 

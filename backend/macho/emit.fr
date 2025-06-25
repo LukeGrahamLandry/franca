@@ -127,7 +127,7 @@ fn output_macho(m: *QbeModule) [][]u8 = {
         // size_of_one_stub: u32 = @if(m.goal.arch, 12, 6); //TODO: this needs to be a compile error :FUCKED
         // ... but this still doesn't work. maybe i need to put shit in the other symbol table (that i only do for relocatable rn)? just the thing for imports is not enough.
         size_of_one_stub: u32 = @if(m.goal.arch == .aarch64, 12, 6); 
-        yy: WipSection = (
+        yy: WipSection = (  // :ShowSymbolNamesForStubs
             name = "__stubs", 
             size = m.goal.size_of_stubs, 
             flag = code_flag.bit_or(S_SYMBOL_STUBS), 
@@ -669,9 +669,26 @@ fn emit_reloc_symbols(e: *EmitMacho, chained: *List(u8)) void #inline = {
         entry.desc = 0; // i think exports don't use this.     for imports, 256 ordinal 1.
         entry.name_offset = trunc(chained.len - strings_start);
         segment_padding := if(s.segment == .Code, => m.text_padding(), => 0); // :HACK
+ 
+        // :ShowSymbolNamesForStubs
+        // when not relocatable, we're doing this for debug_exe_symbol_table, 
+        // there's extra section poked in for __stubs (whose memory is before the normal code). 
+        // calls to imports go through a stub in that section so i want them to have the right name instead 
+        // of seeing things like `bl <_write+0x102000000>` for every import (even when it's not `write`, 
+        // that just happened to be the first one) which is confusing to look at. 
+        if m.goal.type != .Relocatable {
+            if s.segment == .Code {
+                if s.kind == .DynamicPatched {
+                    entry.section_number += 1;
+                    segment_padding -= m.goal.size_of_stubs;
+                };
+            } else {
+                entry.section_number += 1;
+            }
+        };
+        
         @debug_assert(s.offset >= segment_padding, "what are you smoking?");
         // note: symbol_address is the address in virtual memory. not the section offset. 
-        // this math relies on there being one section per segment
         start: i64 = bitcast(e.load_commands[entry.section_number.zext() - 1].address);
         entry.symbol_address = bitcast(s.offset - segment_padding + start);
         append_sym_name(chained, s.name);

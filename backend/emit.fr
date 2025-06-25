@@ -38,7 +38,10 @@ SymbolInfo :: @struct(
     size: u32,  // only set for functions currently. 
     library: u32,  // for imports. index into m.libraries. 0 is reserved for locals
     wasm_type_index: i32,
-    //wasm_space: Wasm.ImportType, // TODO: chunky
+    // this is a bit dumb because it's redundant with `name` but it means you can get
+    // it from just a *SymbolInfo without calling intern() if you want to add it to a 
+    // list from inside a use_symbol so the bucket is already locked. 
+    id: Qbe.Sym,
 );
 
 SymbolKind :: @enum(u8) (
@@ -289,6 +292,9 @@ fn emit_data(self: *QbeModule, dat: Dat2) void = {
     next[] = next[].offset(dest.len);
     if self.goal.arch != .wasm32 {
         maybe_add_export(self, dat.id, dat.export);
+        if self.goal.exe_debug_symbol_table {
+            self.local_needs_reloc&.push(dat.id);
+        };
     };
     self.do_jit_fixups(dat.id, dat.seg, start_off);
     
@@ -367,7 +373,6 @@ fn finish_function(m: *QbeModule, dest: []u8, name_id: Qbe.Sym) void #inline = {
     };
     
     if m.goal.exe_debug_symbol_table {
-        // TODO: do this for data symbols as well but i don't give them readable names yet anyway
         m.local_needs_reloc&.push(name_id);
     };
     
