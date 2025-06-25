@@ -654,6 +654,33 @@ fn sel_inner(i: *Qbe.Ins, f: *Qbe.Fn) void = {
         fn trace_return() => {
             sel(make_ins(.load, i.cls(), i.to, f.new_mem(i.arg&[0], QbeNull, 8, 1), QbeNull), f);
         }
+        fn clz() => {
+            // TODO: maybe i should just declare i don't care about cpus that don't have LZCNT and then this can be one instruction
+            // :EmitClzAsBsr
+            // r = bsr a0            # sets ZF if a0=0
+            // r1 = ZF ? 1_1111 : r  # if input was 0 just want the high bit so need something for the xor to clear
+            // to = xor r1, 0_1111   # if nonzero, subtract from bit count converts index to number of zeros
+            r := f.newtmp("isel", k);
+            r1 := f.newtmp("isel", k);
+            mask := f.getcon(@if(k == .Kw, 31, 63));
+            alt := f.getcon(@if(k == .Kw, 63, 127));
+            sel(make_ins(.xor, k, i.to, r1, mask), f);
+            sel(make_ins(.selieq, k, r1, alt, r), f);
+            i.to = r;
+            i1 := f.emit(i[]);
+            f.fixargs(i1); 
+        }
+        fn ctz() => {
+            // this relies on emit NOT using tzcnt because it sets flags differently
+            // r = bsr a0            # sets ZF if a0=0
+            // to = ZF ? 1_000 : r   # if input was 0 just want the high bit for operand size
+            r := f.newtmp("isel", k);
+            alt := f.getcon(@if(k == .Kw, 32, 64));
+            sel(make_ins(.selieq, k, i.to, alt, r), f);
+            i.to = r;
+            i1 := f.emit(i[]);
+            f.fixargs(i1); 
+        }
         @default => {
             if is_alloc(i.op()) {
                 salloc(i.to, i.arg&[0], f);

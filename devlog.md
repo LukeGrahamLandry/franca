@@ -29,6 +29,60 @@ notably those are all things to aren't going to change if you're just working on
 - elf_loader: implement dynamic imports
 - added a test that runs dump_elf and makes sure my static binaries are actually static
 
+--- 
+
+- fuck; all kinds of stuff going wrong at once: 
+  - load_elf doesn't work on real linux but works on orb
+  - static linux "Tried to allocate 67071058 bytes with panicking_allocator" in amd64/emit, but it works on orb. 
+    - on my ancient linux and blink
+    - self compile on blink takes 3 minutes before getting to that point,
+      precompiled kaleidoscope.fr repros the problem fast. 
+  - dynamic doesn't work on my ancient linux new one segfaults, 
+    the old one that boot/temporary downloads says `symbol lookup error: ./target/boot-linux-amd64-dyn.out: undefined symbol: fstatat`
+    which would make sense that the new one would try to call null because i don't handle a missing weak import gracefully,
+    but `ldd --version` says `Ubuntu GLIBC 2.31-0ubuntu9.18) 2.31` and the internet says fstatat "was added to glibc in version 2.4",
+    so mines from 2020 which is old but sure after 2006 and indeed a c program can have fstatat, just not me.
+    tho.... `3: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND __fxstatat@GLIBC_2.4 (3)`, 
+    that's sure not what i would have tried to call. another `$INODE64` moment i guess? 
+    but it does also say `59: 0000000000001220    25 FUNC    GLOBAL HIDDEN    16 fstatat`,
+    `zig cc f.c -target x86_64-linux-gnu -Oz` just wants `2: 00000000002015cd    37 FUNC    LOCAL  DEFAULT   14 __fstatat64`. 
+    confusing because there's a syscall called "fstatat64" which doesn't exist on amd64, but i guess 
+    glibc exposes the syscall called "newfstatat" as a function called "fstatat64" and not as a function called "fstatat"? 
+    wait no that's LOCAL, disassemble it and it's doing the syscall itself even tho it's supposed to be dynamically linked. 
+    so maybe fstatat is just a magical thing you can't trust libc for somehow? 
+    ok whatever, just always do the syscall, now dyn and sta both have the panicking_allocator problem
+  - panicking_allocator problem is because it gets suck the for_bits_rev loop when handling ret0,
+    simpler repro is backend/test/folding.fr/unit(). 
+    clz doesn't work on some versions of linux?? that seems untrue and impossible. 
+    like theres the thing where my LZCNT will be BSR on old cpus, but that's only wrong for 0 which i carefully 
+    don't call it with.  
+    see ok this sentance is not the way i would phrase this information at all: 
+    "LZCNT differs from BSR. For example, LZCNT will produce the operand size when the input operand is zero. 
+    It should be noted that on processors that do not support LZCNT, the instruction byte encoding is executed as BSR."
+    because when i read i decided that meant "for inputs other than zero, LZCNT is the same as BSR" but what it really means 
+    is "for all inputs BSR and LZCNT are totally different and for inputs other than zero 64-BSR = LZCNT", 
+    which like ok that is my fault for not thinking about the sentance hard enough to notice that
+    index of highest set bit is the opposite thing as number of leading zeroes because 
+    index counts from the right. but like it's phrased so similarly to the one 
+    for tzcnt which is in fact the same other than for zero. 
+      - it's confusing to me that blink has a function called AluLzcnt when it seems they don't support that instruction, 
+        but also clearly i don't understand what's going on because it uses a macro called bsf() which is sounds wrong 
+        for supporting it or not supporting it but the numbers it gives back are right for BSR as though LZCNT were not supported. 
+        so maybe im still totally wrong about what the instructions are supposed to do? who knows man, i give up. 
+    - blink does the right thing for tzcnt(0) it seems but ancient computer gives me junk so did similar thing with checking the flags
+  - so all that and now im at the point that i can discover that my elf loader works on fake linux 
+    and my real linux but not on github's real linux
+
+TODO: my @import_symbol always does a weak symbol even though it in the macro body i say weak=false.
+TODO: test that makes weak and non weak of symbols i know don't exist and makes sure the dynamic loader crashes correctly. 
+TODO: tests that @import_symbol give you null for a missing weak symbol (instead of address of a stub like when you #import a function), 
+      it works right now but is fragile. 
+TODO: fallback to the syscall version automatically if a weak symbol is unavailable
+TODO: @import_symbol of non-existant throws TraceTrap at comptime
+TODO: be consistant about spelling: zeros or zeroes
+
+--- 
+
 > i love when i let zed update itself and they find new and exciting ways to turn on shitty auto complete
 > it's not show_inline_completions=false anymore and show_edit_predictions=false also doesn't work. 
 > ah of course show_completions_on_input=false, totally unrelated to edit_prediction_provider=none;
