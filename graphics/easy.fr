@@ -8,7 +8,6 @@ build_for_graphics :: fn(vtable: *ImportVTable, input_path: Str) void = {
     #use("@/lib/sys/process.fr");
     start := timestamp();
     opts := vtable.default_build_options();
-    opts.retain_function_names = true;
     
     #use("@/lib/args.fr");
     Args :: @struct {
@@ -24,13 +23,14 @@ build_for_graphics :: fn(vtable: *ImportVTable, input_path: Str) void = {
         @"debug-info" := false;
     };
     arg := parse_args(Args);
+    arg.@"keep-names" = arg.@"debug-info" || arg.@"keep-names";
     opts.debug_info = arg.@"debug-info";
+    opts.retain_function_names = arg.@"keep-names";
     
     ::?Os;::?Arch;
     os   := @if(arg.os == "" || arg.jit, query_current_os(), Os.from_name(arg.os) || @panic("invalid -os %", arg.os));
     arch := @if(arg.arch == "" || arg.jit, query_current_arch(), Arch.from_name(arg.arch) || @panic("invalid -arch %", arg.arch));
     
-    use_a_linker := arg.@"keep-names" || arg.c;
     if arg.unsafe {
         s := opts.safety_checks&;
         s.insert(.Bounds, false);
@@ -70,13 +70,14 @@ build_for_graphics :: fn(vtable: *ImportVTable, input_path: Str) void = {
     init_default_module_dyn(m&, vtable, (
         arch = arch, 
         os = os, 
-        type = @if(arg.jit, .JitOnly, @if(use_a_linker, .Relocatable, .Exe)),
-    )); 
+        type = @if(arg.jit, .JitOnly, @if(arg.c, .Relocatable, .Exe)),
+        exe_debug_symbol_table = opts.retain_function_names,
+    ));
     set_debug_types(m&, arg.d, true);
     bytes := emit_qbe_included_dyn(m&, ctx&, @slice(main_f), .WrapMain); 
     
     if arg.jit {
-        @debug_assert(!use_a_linker);
+        @debug_assert(!arg.c);
         ptr := m&.get_addr(ctx.fmt_fn_name(main_f)).unwrap();
         end := timestamp();
         m&.make_exec();
@@ -92,29 +93,6 @@ build_for_graphics :: fn(vtable: *ImportVTable, input_path: Str) void = {
     
     end := timestamp();
     @eprintln(">>> compiled in %ms to %", end - start, arg.o);
-    
-    if use_a_linker {
-        if arg.c { 
-            return();
-        };
-        SOKOL_MACOS_LINK_ARGS :: @array("-framework", "Metal", "-framework", "MetalKit", "-framework", "Cocoa", "-framework", "QuartzCore");
-        a := SOKOL_MACOS_LINK_ARGS;
-        args := Str.list(temp());
-        args&.push_all(a&.items());
-        args&.push_all(@slice (arg.o, "-o", arg.o));    
-        args&.push_all(@slice ("-target", target_triple(m.goal.arch, m.goal.os)));   
-        args&.push("-Wl,-undefined,dynamic_lookup");
-        
-        // TODO: this doesn't have the right symbols. how do i get a libwebgpu_dawn.o/a ?
-        //if SOKOL_BACKEND == .WGPU {
-        //    args&.push(@tfmt("%/libdawn_native.a", dawn_folder));
-        //}
-        
-        @println("building aot exe: %", args.items());
-        success := run_cmd_blocking("clang", args.items());
-        assert(success, "clang failed");
-    };
-    
 }
 
 //

@@ -133,6 +133,7 @@ QbeModule :: @rec @struct(
         last_off_func := 0;
         last_off_source := 0;
         enabled: bool;
+        macho_function_starts: List(u8);
     },
     
     debug_out_storage: List(u8),
@@ -172,6 +173,12 @@ QbeTargetEnv :: @struct(
     got_indirection_instead_of_patches := false,
     
     link_libc := true,
+
+    // (currently mach-o only)
+    // When outputting an exe directly, local symbol names are not included in the symbol table (because the os 
+    // doesn't care about them and they make your binary larger). However, if you want to see readable names in 
+    // a debugger, disassemble correct ranges of functions, etc., you can force symbol tables to be emitted. 
+    exe_debug_symbol_table := false,
     
     segment_size        := 1.shift_left(25),
     max_got_size        := 1.shift_left(15),
@@ -309,6 +316,7 @@ fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
         // the debug format is based on machine code offsets so it only matters if we're actually generating machine code. 
         // you still want it when jitting tho because the stack trace report thingy uses it
         enabled = !@is(goal.type, .Cached, .CachedEarly),
+        macho_function_starts = list(gpa),  // :leak
     );
     {   // TODO: this is kinda ass
         // :GotAtConstantDataBase
@@ -356,6 +364,12 @@ fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
     m.wasm_types_cache      = init(gpa);
     m.libraries&.push("", general_allocator());
     
+    if !@is(m.goal.type, .Exe, .Dynamic) {
+        m.goal.exe_debug_symbol_table = false;
+    };
+    if m.goal.exe_debug_symbol_table {
+        leb128_unsigned(m.debug_info.macho_function_starts&, m.text_padding());
+    };
     unlock(m.intern_mutex&);
 }
 

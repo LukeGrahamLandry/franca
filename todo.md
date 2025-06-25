@@ -1,6 +1,16 @@
 - "this works here but not in it's original place under f()."
 - :ThisIsNotOkBecauseMemoryWillBeReused
 
+## import_symbol / weak
+
+TODO: my @import_symbol always does a weak symbol even though it in the macro body i say weak=false.
+TODO: test that makes weak and non weak of symbols i know don't exist and makes sure the dynamic loader crashes correctly. 
+TODO: tests that @import_symbol give you null for a missing weak symbol (instead of address of a stub like when you #import a function), 
+      it works right now but is fragile. 
+TODO: fallback to the syscall version automatically if a weak symbol is unavailable
+TODO: @import_symbol of non-existant throws TraceTrap at comptime
+TODO: be consistant about spelling: zeros or zeroes
+
 ## PROGRAMS THAT CRASH
 
 - not everything works if you force general_allocator to be BlockAlloc
@@ -110,6 +120,11 @@ hould just make them local constants in each file like they are here in riscv
 - arm immediate for bitwise and,or
 - i don't like that direct to exe vs to frc_inlinable then to exe give different binaries. 
 - be able to output frc/frc_inlinable in the same module as compiling normally so you don't have to do two passes over things to cache it
+- fix those two ^ and then compiler/test.fr can create all at once and assert that they make the same exe instead of running them all
+- elf: don't include names for local symbol with DataAbsolute relocations when exe_debug_symbol_table=false,
+  and do include all symbol names when exe_debug_symbol_table=true. 
+- test that function names don't appear in the binary when exe_debug_symbol_table=false and do when true.
+
 
 ## don't rely on libc
 
@@ -138,6 +153,8 @@ so something in the data i guess?
 - elf Dynamic
 - how are you supposed to ask for page size? blink wants 64k instead of 4k. 
 - standalone import_c/cc.fr and meta/qbe_backend.fr can't make statically linked binaries because the `_init` is written in franca
+- if macos {  // todo: "why does this work on my linux but not github's linux"
+  (tests/sys.fr using elf_loader.fr on a dynamic executable)
 
 ## amd64
 
@@ -204,16 +221,12 @@ but then need to deal with including build options in the cache (like -unsafe, -
 - now that import_c is always serialized, just need to add `dep`s and then it can be cached separately from the rest of your program. 
 - allow smaller compilation units. like not making you recompile the backend when you work on the frontend. 
 - test that .frc files repro and that you can pass them directly
-- frc_inlinable doesn't work on the compiler itself
 - dump_bin: print segment.MachineCode as something qbe_frontend.fr can parse so it can round trip
 - clear cache before tests just in case
 - whether the host compiler was built with`-syscalls` needs to go in the cache file :CacheKeySyscalls
 - caching an invalid thing i think? if you Compile Error: we hit a dynamicimport ('puts_unlocked' from 'libc') with no comptimeaddr for jit
 (happening with import_c)
 - persist #noinline
-
-- the compiler itself still doesn't work as frc_inlinable:
-> franca examples/default_driver.fr build compiler/main.fr -frc_inlinable && FRANCA_NO_CACHE=true franca backend/meta/qbe_frontend.fr a.out -r -- examples/toy/hello.fr
 
 next impressive advancement: 
 make this work well enough that i don't need to re-export the backend functions in the driver vtable. 

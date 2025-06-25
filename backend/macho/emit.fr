@@ -262,6 +262,27 @@ fn output_macho(m: *QbeModule) [][]u8 = {
         emit_exe_fixups(e&, chained&);
         zero_pad_len_to_align(chained&, 16);
         
+        if m.goal.exe_debug_symbol_table {
+            // This won't include any relocation entries, but the symbol table format for a static linker 
+            // is the same as what lldb will read for setting break points, showing backtrace, etc.
+            emit_reloc_symbols(e&, chained&);
+            zero_pad_len_to_align(chained&, 16);
+            
+            // This tells lldb where to stop when you `dis` (so it just disassembles the one function you're in). 
+            // - if you have a symbol table but not a function-starts, 
+            //   it barrels past the end of the function and keeps disassembling garbage
+            // - if you have neither, it just stops after a few instructions
+            cmd := load_command(e&, LoadCommand.FunctionStarts, LinkEditBlob);
+            data := m.debug_info.macho_function_starts.items();
+            //cmd[] = (offset = e.file_offset.trunc(), size = data.len.trunc());
+            //e.file_offset += data.len;
+            //chunks&.push(data);
+            // TODO: can't do the easy thing ^ because my codesign doesn't like that it's not page aligned 
+            // and it's wasteful to do an extra align_to just for this
+            cmd[] = (offset = (e.file_offset+chained.len).trunc(), size = data.len.trunc());
+            chained&.push_all(data);
+        };
+        
         // this is a bit painful because the thing you're signing includes the offset + size of the signeture itself. 
         // so we need to reserve this space up front and fill it in later. 
         
@@ -613,7 +634,6 @@ fn emit_reloc_symbols(e: *EmitMacho, chained: *List(u8)) void #inline = {
     cmd.external_symbol_count = e.m.exports.len.trunc();
     cmd.undefined_symbol_index = cmd.external_symbol_index + cmd.external_symbol_count; // must be set even if count is zero or lld complains 
     cmd.undefined_symbol_count = e.m.imports.len.trunc();
-    // TODO: we are going to need undefined symbols for imports but haven't got that far yet. 
     
     syms_cmd := load_command(e, .LinkEditSymbolTable, LinkEditSymbolTable);
     syms_cmd[] = LinkEditSymbolTable.zeroed();
@@ -624,7 +644,10 @@ fn emit_reloc_symbols(e: *EmitMacho, chained: *List(u8)) void #inline = {
     size_of_symbols: i64 = syms_cmd.symbol_count.zext() * size_of(SymbolEntry);
     syms_cmd.strings_offset = syms_cmd.symbols_offset + trunc(size_of_symbols);
     
-    symbols_bytes: []SymbolEntry = (ptr = ptr_cast_unchecked(u8, SymbolEntry, chained.maybe_uninit.ptr.offset(chained.len)), len = syms_cmd.symbol_count.zext());
+    symbols_bytes: []SymbolEntry = (
+        ptr = ptr_cast_unchecked(u8, SymbolEntry, chained.maybe_uninit.ptr.offset(chained.len)), 
+        len = syms_cmd.symbol_count.zext(),
+    );
     chained.len += size_of_symbols; @debug_assert(chained.len <= chained.maybe_uninit.len);
     strings_start := chained.len;
     symbols_bytes.set_zeroed();
@@ -633,7 +656,8 @@ fn emit_reloc_symbols(e: *EmitMacho, chained: *List(u8)) void #inline = {
     symbols_bytes[0].name_offset = trunc(chained.len - strings_start);
     append_padded_cstr(chained, "_junk", 1);
     
-    // TODO: deal with things being both local_needs_reloc and export
+    // when something is both local_needs_reloc and export it will have two entries in the symbol table, 
+    // which is stupid but seems to work (test/fixup4.ssa)
     
     base := 1;
     enumerate e.m.local_needs_reloc { i, id | 
@@ -651,7 +675,7 @@ fn emit_reloc_symbols(e: *EmitMacho, chained: *List(u8)) void #inline = {
         start: i64 = bitcast(e.load_commands[entry.section_number.zext() - 1].address);
         entry.symbol_address = bitcast(s.offset - segment_padding + start);
         append_sym_name(chained, s.name);
-        append_relocations(i + base, id[], m, e.relocations, e.load_commands);
+        append_relocations(i + base, id[], m, e.relocations);
         // TODO: assert they're all DataAbsolute becuse functions are in the same segment and you could just call them. 
     };
     base += e.m.local_needs_reloc.len;
@@ -691,7 +715,7 @@ fn emit_reloc_symbols(e: *EmitMacho, chained: *List(u8)) void #inline = {
         
         entry.name_offset = trunc(chained.len - strings_start);
         append_sym_name(chained, s.name);
-        append_relocations(i + base, id[], e.m, e.relocations, e.load_commands);
+        append_relocations(i + base, id[], e.m, e.relocations);
     };
     base += e.m.imports.len;
     syms_cmd.strings_size = trunc(chained.len - strings_start);
@@ -704,7 +728,10 @@ fn which_section(s: SegmentType) u8 = @match(s) {
     fn ZeroInitData() => 3;
 };
 
-fn append_relocations(symbol_table_index: i64, id: Qbe.Sym, m: *QbeModule, relocations: []List(u8), load_commands: []*SegmentSection) void = {
+fn append_relocations(symbol_table_index: i64, id: Qbe.Sym, m: *QbeModule, relocations: []List(u8)) void = {
+    // this gets called when making a symbol table for an exe but don't want to stomp the existing local offsets in that case. 
+    if(m.goal.type != .Relocatable, => return());
+    
     s := m.get_symbol_info(id);
     each s.fixups { fix | 
         continue :: local_return;

@@ -73,15 +73,16 @@ notably those are all things to aren't going to change if you're just working on
   - so all that and now im at the point that i can discover that my elf loader works on fake linux 
     and my real linux but not on github's real linux
 
-TODO: my @import_symbol always does a weak symbol even though it in the macro body i say weak=false.
-TODO: test that makes weak and non weak of symbols i know don't exist and makes sure the dynamic loader crashes correctly. 
-TODO: tests that @import_symbol give you null for a missing weak symbol (instead of address of a stub like when you #import a function), 
-      it works right now but is fragile. 
-TODO: fallback to the syscall version automatically if a weak symbol is unavailable
-TODO: @import_symbol of non-existant throws TraceTrap at comptime
-TODO: be consistant about spelling: zeros or zeroes
-
 --- 
+
+- tiny test just to make sure my silly double emitting a symbol as export+local in machO works.
+  - fix import_c to let you cast a function name as though it were a pointer
+- when doing mach-o exe directly, include symbol table of local symbols and functionstarts even tho they're 
+  not required because they let you see them in debugger and disassemble the right parts. 
+  so now i don't have to go through relocatable object and linker just to use lldb, which is good 
+  because it's kinda a last resort so if im at the point of needing lldb im not in the mood to running thier linker too. 
+
+---
 
 > i love when i let zed update itself and they find new and exciting ways to turn on shitty auto complete
 > it's not show_inline_completions=false anymore and show_edit_predictions=false also doesn't work. 

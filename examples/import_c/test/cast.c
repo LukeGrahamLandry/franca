@@ -68,6 +68,8 @@ int main() {
       a;
   }));
   
+  ASSERT(0, ((long) main) == 0);
+  
   printf("OK\n");
   return 0;
 }

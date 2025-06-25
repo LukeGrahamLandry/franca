@@ -365,6 +365,12 @@ fn finish_function(m: *QbeModule, dest: []u8, name_id: Qbe.Sym) void #inline = {
         s.size = dest.len.trunc();
         end_debug_info(m, s);
     };
+    
+    if m.goal.exe_debug_symbol_table {
+        // TODO: do this for data symbols as well but i don't give them readable names yet anyway
+        m.local_needs_reloc&.push(name_id);
+    };
+    
     ::enum(@type m.goal.type);
     if m.goal.got_indirection_instead_of_patches && m.goal.type == .JitOnly && m.goal.arch == .aarch64 {
         clear_instruction_cache(u8.raw_from_ptr(dest.ptr), dest.len);
@@ -703,6 +709,9 @@ fn start_debug_info(m: *QbeModule, s: *SymbolInfo) void = {
 
 fn end_debug_info(m: *QbeModule, s: *SymbolInfo) void = {
     d := m.debug_info&;
+    if m.goal.exe_debug_symbol_table {
+        leb128_unsigned(d.macho_function_starts&, s.size.zext());
+    };
     @if(!d.enabled) return();
     leb128_unsigned(d.headers&, s.size.zext());
     // TODO: length prefix but that's annoying
@@ -729,7 +738,7 @@ fn collect_aot_fixups(m: *QbeModule) Ty([]FixP, []*SymbolInfo) = {
     symbols := list(*SymbolInfo, temp());
     
     symbol_count := 0;
-    for_symbols m { _, s | 
+    for_symbols m { id, s | 
         first := true;
         each s.fixups& { f | 
             ::tagged(@type f.type);
