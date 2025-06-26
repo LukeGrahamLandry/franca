@@ -29,6 +29,8 @@ align_segments :: fn(m: *Qbe.Module) i64 = {
     
     code := m.segments&[.Code]&;
     code_size := code.len() - m.goal.commands_size_guess - m.goal.size_of_stubs;
+
+    @if(m.goal.type != .Relocatable)
     for_enum SegmentType { s | 
         m.align_to(s, 4096);
         // blink (https://github.com/jart/blink) wants 65k pages to let you turn on linear memory optimisation. 
@@ -45,7 +47,7 @@ finalize_symbols :: fn(m: *Qbe.Module) SymbolTableInfo = {
     
     // local symbols are kept seperate from imports. 
     // dynsym.sh_info is the index of the first global symbol. 
-    partition_unordered(*SymbolInfo, symbols, fn(it) => it.kind == .Local && !it.export);
+    partition_unordered(*SymbolInfo, symbols, fn(it) => it.kind == .Local);
     
     local_count := 0;
     enumerate symbols { i, s |
@@ -121,7 +123,7 @@ PayloadBase :: @struct(virtual: i64, file: i64);
 create_the_segments :: fn(e: *EmitElf) PayloadBase = {
     virtual_offset := Elf.MYSTERY_SPICE; 
     file_offset    := 0;
-    make_segment :: fn(e: *EmitElf, seg: SegmentType, prot: u32) => {
+    make_segment :: fn(e: *EmitElf, seg: SegmentType, prot: u32, name: Str) => {
         segment := e.m.segments&[seg]&;
         e.chunks&.push(live_segment_part(e.m, seg)); // :waste :commandsispartofcodenow
     
@@ -145,14 +147,14 @@ create_the_segments :: fn(e: *EmitElf) PayloadBase = {
                 .bit_or(int(prot.bit_and(Elf.PF_W) != 0).shift_left(@as(i64) Elf.SectionFlag.Write))
                 .bit_or(1.shift_left(@as(i64) Elf.SectionFlag.Alloc));
             
-            e.section_header("")[] = (
+            e.section_header(name)[] = (
                 name = 0, // TODO
                 type = .ProgramBits, 
                 flags = flag,
                 addr = 0, // virtual_offset,  
                 offset = file_offset, 
                 size = segment.len(),
-                addr_align = 4096,
+                addr_align = 0,
             );
         };
         
@@ -165,9 +167,9 @@ create_the_segments :: fn(e: *EmitElf) PayloadBase = {
     // the LOAD headers are required to be in order. 
     
     RW :: prot_read_write;
-    e.make_segment(.Code, RX); RX :: bit_or(Elf.PF_R, Elf.PF_X);// :waste :commandsispartofcodenow
-    e.make_segment(.ConstantData, RW);  // TODO: how the fuck do i do relocations in a non-writable segment?
-    e.make_segment(.MutableData, RW);
+    e.make_segment(.Code, RX, ".text"); RX :: bit_or(Elf.PF_R, Elf.PF_X);// :waste :commandsispartofcodenow
+    e.make_segment(.ConstantData, RW, ".rodata");  // TODO: how the fuck do i do relocations in a non-writable segment?
+    e.make_segment(.MutableData, RW, ".data");
     
     have_bss := e.m.segments&[.ZeroInitData]&.len() > 0;
     // BSS
@@ -185,7 +187,7 @@ create_the_segments :: fn(e: *EmitElf) PayloadBase = {
         );
         // for linker
         e.section_index&[.ZeroInitData] = e.header.section_header_num;
-        e.section_header("")[] = (
+        e.section_header(".bss")[] = (
             name = 0, // TODO
             type = .Bss, 
             flags = 0, 
@@ -345,12 +347,7 @@ for_dynamic_loader :: fn(
     dynamics&.push(tag = .Flags, val = 8);  // DF_BIND_NOW // TODO: does this do anything?
     dynamics&.push(tag = .Flags_1, val = 1);  // ?     // TODO: does this do anything?
     dynamics&.push(tag = .Debug, val = 0);  // ?     // TODO: does this do anything?
-    
-    // For os loader, relocations targets are relative to the base address of the executable. 
-    // TODO:
-    // For linker, they're relative to a section, and the index of that section goes in the `info` field of the RELA header. 
-    // so each section that contains relocations needs a seperate section to describe them.
-    
+   
     extra_strings := @if(m.goal.link_libc, glibc_dylib_paths, empty());
     table := e.create_symbol_table(T.symbols, .DynSymbolTable, extra_strings, base);
     for table.extra_strings { off |
@@ -362,7 +359,7 @@ for_dynamic_loader :: fn(
     dynamics&.push(tag = .SymTab, val = table.symtab);
     dynamics&.push(tag = .SymEnt, val = size_of(Elf.Symbol));
     
-    table := e.create_rela_table(T.fixups, base, table.symbol_table_index, 0);
+    table := e.create_rela_table(T.fixups, base, table.symbol_table_index, 0, u8.ptr_from_int(0));
     dynamics&.push(tag = .RelA, val = table.rela);
     dynamics&.push(tag = .RelASz, val = table.relasz);
     dynamics&.push(tag = .RelAEnt, val = size_of(Elf.RelA));
@@ -403,13 +400,15 @@ create_symbol_table :: fn(
     out.extra_strings = extra_strings_out.items();
     
     imported_symbol_name_offsets := u32.list(symbols.len, temp());
+    is_local :: fn(info) => info.kind == .Local && (!info.export || e.m.goal.type != .Relocatable);
+    
     local_count := 0;
     for symbols { info |
         imported_symbol_name_offsets&.push(trunc(e.payload.len - string_table_start));
         @debug_assert(info.name.len > 0 && info.name[info.name.len - 1] != 0, "empty symbol name or extra null terminator will not go well");
         e.payload&.push_all(info.name);
         e.payload&.push(0);
-        local_count += int(info.kind == .Local && !info.export);
+        local_count += int(info.is_local());
     };
 
     // ugh
@@ -446,10 +445,14 @@ create_symbol_table :: fn(
             };
         };
         
-        type := @if(local && !symbol.export, Elf.STB_LOCAL, @if(symbol.strong || symbol.export, Elf.STB_GLOBAL, Elf.STB_WEAK));
+        type := @if(is_local(symbol), 
+            Elf.STB_LOCAL, 
+                @if(symbol.strong || (symbol.export && e.m.goal.type == .Relocatable), 
+                    Elf.STB_GLOBAL, 
+                    Elf.STB_WEAK));
         xx[] = (
             name = imported_symbol_name_offsets[symbol_index],
-            info = type.shift_left(4).bit_or(2).trunc(), // _ FUNC
+            info = type.shift_left(4).bit_or(0).trunc(), // _ FUNC
             value = @if(local, segment_base + symbol.offset, 0),
             section_header_index = section,
             size = symbol.size.zext(),  // TODO: does anyone care about this? maybe debugger disassemble? 
@@ -483,37 +486,59 @@ RelaResults :: @struct {
     relasz: i64;
 };
 
-create_rela_table :: fn(e: *EmitElf, fixups: []FixP, base: PayloadBase, symbol_table_index: u16, target_section_index: u16) RelaResults = {
+create_rela_table :: fn(
+    e: *EmitElf, 
+    fixups: []FixP, 
+    base: PayloadBase, 
+    symbol_table_index: u16, 
+    target_section_index: u16,
+    section_base_address: *u8,
+) RelaResults = {
     m := e.m;
     relocation_table_start := e.payload.len;
     // TODO: do they have to be ordered by memory location like mach-o?
     // TODO: store increment in consistant place instead of on each guy
+    
+    // why are the numbers different? because we hate ourselves. 
+    data_reloc_type := @if(m.goal.type == .Relocatable, Elf.R_AMD64_64, Elf.R_AMD64_GLOB_DAT);
+    
     each fixups { fix |
         type, increment := @match(fix.fix.type&) {
             fn DataAbsolute(it) => {
                 i64.ptr_from_raw(fix.fix.patch_at)[] = 0;
-                (Elf.R_AMD64_GLOB_DAT, it.increment)
+                (data_reloc_type, it.increment)
             }
             fn RipDisp32(it) => {
+                @debug_assert(m.goal.type == .Relocatable);
                 u32.ptr_from_raw(fix.fix.patch_at)[] = 0;
                 (@if_else {
                     @if(fix.symbol.kind == .DynamicPatched) => Elf.R_AMD64_PLT32;
                     @else            => Elf.R_AMD64_PC32;
-                }, it.increment.zext() - 4)
+                }, it.increment.zext() - 4 /* who fucking knows anymore */)
             };
             @default => @panic("TODO: elf fixup: %", fix.fix.type&.tag());
         };
+        
+        // the target offset is relative to 
+        // - exe: the virtual base address of the executable
+        // - linker: the start of the segment
+        off := @if(m.goal.type == .Relocatable, 
+            ptr_diff(section_base_address, fix.fix.patch_at),
+            ptr_diff(m.segments&[.Code].mmapped.ptr, fix.fix.patch_at) + Elf.MYSTERY_SPICE, 
+        );
+        
         e.payload&.reserve_type(Elf.RelA)[] = (
             sym = trunc(fix.symbol.got_lookup_offset + 1),  // got_lookup_offset is set by create_symbol_table()
-            offset = ptr_diff(m.segments&[.Code].mmapped.ptr, fix.fix.patch_at) + Elf.MYSTERY_SPICE, // TODO: or is it offset in a specific segment?
+            offset = off,
             addend = increment,
             type = type.trunc(),
         );
     };
     
     loadable := m.goal.type != .Relocatable;
+    name := @if(loadable, ".rela.dyn", @tfmt(".rela%", e.section_names[target_section_index.zext()]));
     // ugh
-    e.section_header(".rela.dyn")[] = (
+    e.section_header(name)[] = (
         name = 0,
         type = .RelocAddend, 
         flags = 1.shift_left(@if(loadable, @as(i64) Elf.SectionFlag.Alloc, @as(i64) Elf.SectionFlag.InfoLink)),
@@ -606,6 +631,9 @@ mark_code_sections :: fn(e: *EmitElf, code_size: i64) void = {
     );
 };
 
+
+// For linker, targets are relative to a section, and the index of that section goes in the `info` field of the RELA header. 
+// so each section that contains relocations needs a seperate section to describe them.
 emit_linker_relocations :: fn(e: *EmitElf, base: PayloadBase) void = {
     m := e.m;
     cases: EnumMap(SegmentType, List(FixP)) = init(list(temp()));
@@ -630,7 +658,7 @@ emit_linker_relocations :: fn(e: *EmitElf, base: PayloadBase) void = {
     table := e.create_symbol_table(symbols, .SymbolTable, empty(), base);
     each cases& { seg, fixups | 
         if fixups.len > 0 {
-            _ := e.create_rela_table(fixups.items(), base, table.symbol_table_index, e.section_index&[seg]);
+            _ := e.create_rela_table(fixups.items(), base, table.symbol_table_index, e.section_index&[seg], m.segments&[seg].mmapped.ptr);
         }
     };
 };

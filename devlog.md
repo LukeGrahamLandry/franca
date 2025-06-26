@@ -44,8 +44,47 @@ notably those are all things to aren't going to change if you're just working on
     else because saying displacement of zero is useless. 
     readelf seems to see my relocations, maybe i just guessed the type wrong. 
     on apple which works it says that instruction is supposed to be `100006acc: 48 89 0d 1d 97 ff 03        	movq	%rcx, 0x3ff971d(%rip)   ## 0x1040001f0 <_g67+0x1f0>`
-  - clany says `addend = -4` a lot which is creepy to me but doing that doesn't help
-    
+  - clang says `addend = -4` a lot which is creepy to me but doing that doesn't help
+  - another fun bonus is that old-real-gcc still thinks `undefined reference to main` even tho clang
+    accepts it and successfully gets to main, so that's interesting. 
+  - and zig's clang 20.1.2 seems to have regressed compared to zig's 16.0.6,
+    now you can't give it a file with the extension `.out` instead of `.o`,
+    now it says 
+    ```
+    ld: warning: -m is obsolete
+    ld: unknown option: --hash-style=gnu
+    zig: error: linker command failed with exit code 1 (use -v to see invocation)
+    ```
+    which is not how i would personally spell we care about the file extension now but hey who am i to judge. 
+    but if i call my thing `.o` instead, it accepts it and just drops the relocation like before, 
+    so no insight about my gcc woes. 
+  - maybe i have to do something to ask for a got slot (my macho/emit has a big comment about track_got_reloc),
+    but it seems to be dropping local function calls too, if i switch the order of functions in hello.ssa
+    so it doesn't get inlined, but no it's getting to franca_runtime_init and calling is_sane_pointer__6380 just fine,
+    so what the hell? 
+  - call1.ssa is `unknown relocation (6) against symbol add_one`,
+    it doesn't like R_AMD64_GLOB_DAT? but that works for exes. 
+    ```
+    0000000000d9  000300000001 R_X86_64_64       0000000000000000 .text + 20
+    2: 0000000000000020    12 FUNC    LOCAL  DEFAULT    1 add_one
+    ```
+    it seems it's doing 1 instead of 6 ok sure i can do that, now clang aborts. fantastic. 
+    gcc says `reloc against 'v': error 4`, fucking useless, somehow still more helpful than clang. 
+  - YAYYYYYYYYYYY i was still doing virtual offset from start of code instead of file offset from start of segment,
+    hello.ssa works now! and so does franca hello world. i typed a comment that i had to change that
+    offset math early on but i didn't actually do it, very sad day. 
+    - and now after fixing that clang no longer crashes if i try to not align_to the segments
+    - and of course you can't say exports are global when making exe, that freaks it out too, 
+      or maybe i just fucked up and didn't change everything on that codepath, but anyway broke the tests
+      fixed the tests all is fine. 
+  - linker doesn't work on the compiler itself tho, that would be too good to be true.
+    ```
+    LLD Link... ld.lld: error: a.out:(.text+0x1cffd4): relocation R_X86_64_PC32 out of range: 4295075980 is not in [-2147483648, 2147483647]; references g4766
+    >>> defined in a.out
+    ```
+  - and .ssa auto tests still don't work (i would expect the non-driver ones to fail 
+    because they don't have franca_runtime_init to fix the stack before calling into libc)
+
 ## (Jun 24)
 
 - give up on my failed experiment insane way of doing llvm abi 
