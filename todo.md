@@ -125,7 +125,7 @@ hould just make them local constants in each file like they are here in riscv
 - elf: don't include names for local symbol with DataAbsolute relocations when exe_debug_symbol_table=false,
   and do include all symbol names when exe_debug_symbol_table=true. 
 - test that function names don't appear in the binary when exe_debug_symbol_table=false and do when true.
-
+- test that makes a dylib
 
 ## don't rely on libc
 

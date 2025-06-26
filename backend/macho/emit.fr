@@ -283,28 +283,30 @@ fn output_macho(m: *QbeModule) [][]u8 = {
             chained&.push_all(data);
         };
         
-        // this is a bit painful because the thing you're signing includes the offset + size of the signeture itself. 
-        // so we need to reserve this space up front and fill it in later. 
-        
-        // We want this to be the last thing in the file so the signeture can go at the end? is this the rules? 
-        
-        load_codesign := load_command(e&, .CodeSigneture, LinkEditBlob);
-        
-        codesign_ident := "";  // It seems this can be whatever you want since we're not doing a real signeture. I've tried "foo"
         //
         // WARNING WARNING WARNING
         // if you forget to align_to here so you're missing the last hash, it fully crashes the operating system (macos 14.6.1)
         //
+        codesign_ident := "";  // It seems this can be whatever you want since we're not doing a real signeture. I've tried "foo"
         page_count := ((e.file_offset + chained.len).align_to(codesign_page_size) / codesign_page_size);
         signeture_size := SuperBlob.size_of() + CodeDirectory.size_of() + (32 * page_count) + codesign_ident.len + 1;
         chained&.reserve(signeture_size);
         codesign_output_bytes := chained.maybe_uninit.slice(chained.len, chained.len + signeture_size);
-        load_codesign.offset = trunc(e.file_offset + chained.len);
-        load_codesign.size = codesign_output_bytes.len.trunc();
+        chunks&.push(chained.items());  // doesn't include codesign_output_bytes yet, that's added later
         
-        chunks&.push(chained.items());
+        // arm: the os won't run unsigned programs. 
+        // amd: it doesn't care so don't waste time computing the hash. 
+        need_signature := m.goal.arch == .aarch64;
         
-        chained.len += codesign_output_bytes.len;
+        // this is a bit painful because the thing you're signing includes the offset + size of the signeture itself. 
+        // so we need to reserve this space up front and fill it in later. 
+        if need_signature {
+            load_codesign := load_command(e&, .CodeSigneture, LinkEditBlob);
+            load_codesign.offset = trunc(e.file_offset + chained.len);
+            load_codesign.size = codesign_output_bytes.len.trunc();
+        
+            chained.len += codesign_output_bytes.len;
+        };
         
         // You are required to tell it to load __LINKEDIT even tho we don't use it for anything directly. 
         load_command(e&, .SegmentLoad, SegmentLoad)[] = (
@@ -322,20 +324,25 @@ fn output_macho(m: *QbeModule) [][]u8 = {
         e.file_offset += chained.len;
         seal_load_commands(e&, macho_header);
         
-        write_adhoc_signature(
-            exec_seg_base = base_file_offset[1],
-            exec_seg_limit = segments[0].file_size,
-            file_size = e.file_offset - signeture_size, 
-            input_chunks = chunks.items(),
-            dylib = m.goal.type == .Dynamic,
-            ident = codesign_ident,
-            output_buf = codesign_output_bytes,
-        );
-        
-        @if(show_backend_stats())
-        @eprintln(">>> repro: %", Sha256'hex(codesign_output_bytes)); 
-        
-        chunks&.push(codesign_output_bytes);
+        if need_signature {
+            // This has to be the very last thing you do, 
+            // after all the load commands are done, 
+            // because the hash includes them as well. 
+            write_adhoc_signature(
+                exec_seg_base = base_file_offset[1],
+                exec_seg_limit = segments[0].file_size,
+                file_size = e.file_offset - signeture_size, 
+                input_chunks = chunks.items(),
+                dylib = m.goal.type == .Dynamic,
+                ident = codesign_ident,
+                output_buf = codesign_output_bytes,
+            );
+            
+            @if(show_backend_stats())
+            @eprintln(">>> repro: %", Sha256'hex(codesign_output_bytes)); 
+            
+            chunks&.push(codesign_output_bytes);
+        };
     } else {
         @debug_assert(e.m.goal.type == .Relocatable);
         emit_reloc_symbols(e&, chained&);
@@ -496,10 +503,9 @@ fn emit_exe_fixups(e: *EmitMacho, chained: *List(u8)) void #inline = {
 
     if e.m.goal.type == .Dynamic {
         new_file_offset := e.file_offset + chained_size;
-        // Now we need to tell it about our exports
-        // TODO: do i need to give it linkeditsymboltable? rn i only do that for relocatable objects. 
         
-        trie: ExportsTrie.T = init();
+        T :: import("@/backend/macho/exports.fr").ExportsTrie;
+        trie: T = init();
         for e.m.exports { export_id | 
             s := e.m.get_symbol_info(export_id);
             @debug_assert(s.kind == .Local, "can only export local symbols");
@@ -826,7 +832,8 @@ fn append_relocations(symbol_table_index: i64, id: Qbe.Sym, m: *QbeModule, reloc
                     @if(it.got_load) => X86_64_RELOC_GOT_LOAD;
                     @else            => X86_64_RELOC_SIGNED;
                 });
-                u32.ptr_from_raw(fix.patch_at)[] = it.increment;
+                // mach-o does :IncOffByFour for us without asking for it explicitly. 
+                i32.ptr_from_raw(fix.patch_at)[] = it.increment.intcast();
             }
             @default => panic("invalid fixup type for mach-o");
         };
@@ -904,6 +911,8 @@ codesign_page_size :: macos_page_size;
 
 //
 // Loosly based on ziglang/zig/src/link/MachO/CodeSignature.zig. MIT License. Copyright (c) Zig contributors.
+// (but somehow mine is 75 lines instead of 400 so clearly not that similar)
+// 
 // This replaces running `codesign -s - a.out` so you can cross compile targetting macos. 
 // If you don't do this (on recent-ish versions of macos) your program will just be `killed` immediately. 
 //
@@ -912,7 +921,6 @@ codesign_page_size :: macos_page_size;
 // Caller must precalulate the correct size of everything
 // because we need to hash all the load commands as well so you can't change them later. 
 //
-// TODO: do we need this on x64? if so is page size is 4k instead of 16k?
 fn write_adhoc_signature(
     exec_seg_base: i64,
     exec_seg_limit: i64,

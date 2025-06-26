@@ -6,6 +6,32 @@ let's cheat and make examples/terminal.fr(repl=true) not take 2 seconds to compi
 - compile_to_shader_source: 68 // shader compiler (for comptime)
 notably those are all things to aren't going to change if you're just working on the terminal program. 
 
+## (Jun 26)
+
+- problem with the compiler itself is that im not handling negative addends correctly, 
+  but i feel like it shouldn't be negative, you're not going to offset backwards from 
+  a symbol unless something fishy is going on. ah, it's when the instruction has another 
+  immediate after the displacement, distance is always from the end of the instruction. 
+  oh and the displacement is where clang's floating -4s were coming from, i guess 
+  mach-o gives you that implicitly because you always want it. 
+- now the linker accepts it but the resultant exe crashes. 
+  even sudoku.fr crashes so it's something pretty fundamental. 
+  - not getting `__errno_location`? but with -syscalls crashing in new_arena_chunk, 
+    allocator's giving back null? but it should be the page allocator which shouldn't be returning null ever. 
+  - mmm, i think that's a different problem, i think -syscalls doesn't work at all with -c, 
+    maybe something about the universe shifts and my shitty os detection doesn't work anymore? 
+    yeah if i assume linux and don't check issanepointer more programs work. 
+    so the errno thing was it using the apple name instead of the linux name. 
+  - ok so it's wrapping me in `_start` which does some random shit first and confuses franca_runtime_init,
+    everything works if i say `-Wl,--entry=main`, so that's nice. 
+  - can't just call my main `_start`, then it says duplicate symbol. 
+  - ok that's fine, if it looks like the args to my main are from a hosted libc,
+    instead of just assuming macos, check past the end of the environment variables, 
+    and if it looks like a pointer, it's apples extra info and if it's a low number, 
+    it's a key in auxval so we must be on linux. that seems to work everywhere. 
+- TODO: elf_loader.fr doesn't work on linker output: `panic! not divisible by page size`
+- don't bother with mach-o code signeture on amd, it only cares for arm
+
 ## (Jun 25)
 
 - machO: when direct exe, make symbol names for import stubs so when you look at the disassembly it 

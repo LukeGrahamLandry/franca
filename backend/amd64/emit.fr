@@ -104,10 +104,14 @@ fn fixup_amd64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
                 };
             };// early returns
             
+            // :IncOffByFour
+            // I computed the distance from the start of the displacement slot 
+            // but the cpu wants it from the end of the instruction. 
             size_of_displacement :: 4;
             distance -= size_of_displacement;
-            @assert_lt(distance.abs(), MAX_i32, "can't reference that far");
-            u32.ptr_from_raw(fixup.patch_at)[] = distance.trunc() + it.increment;
+            
+            @debug_assert(fits_in_i32(distance), "can't reference that far");
+            u32.ptr_from_raw(fixup.patch_at)[] = trunc(distance + it.increment);
         }
         @default => panic("amd64 unexpected fixup type");
     }
@@ -795,7 +799,7 @@ fn push_instruction(e: *AmdState, b: EncodedArgs, ops: []u8) void = {
                 };
                 patch_at := u8.raw_from_ptr(e.a.maybe_uninit.ptr.offset(e.a.len));
                 if symbol.kind != .Local || e.m.goal.type == .Relocatable {
-                    push_fixup(e.m, symbol, (patch_at = patch_at, type = (RipDisp32 = (increment = off.trunc(), call = false))));
+                    push_fixup(e.m, symbol, (patch_at = patch_at, type = (RipDisp32 = (increment = off, call = false))));
                 };
             };
         };
@@ -921,7 +925,8 @@ encode_con :: fn(c: *Qbe.Con, r0: Qbe.Ref, force_rex: bool, immediate_size: i64,
         // so if we have another immediate after the displacement, we have to account for its size. 
         // becuase the linker doesn't give a shit about what instructions we're using, 
         // its just gonna plonk in the distance from the patch to the symbol. 
-        // TODO: maybe it would be better if we also did the -4 for the displacement here but that requires removing it everywhere else. 
+        // (it's tempting to do the -4 for the displacement here but that requires removing :IncOffByFour everywhere else, 
+        // and mach-o gives it to you for free so we'd have to add 4 there which feels even more confusing)
         off := c.bits() - immediate_size;
         return(
             patch = (Some = (off, c.sym)), 

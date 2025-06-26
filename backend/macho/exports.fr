@@ -1,36 +1,34 @@
 // Adapted from Zig. The MIT License (Expat). Copyright (c) Zig contributors.
 // - https://github.com/ziglang/zig/blob/3ce6de87657e67da358e9c7869a87c61cc9f1305/src/link/MachO/dyld_info/Trie.zig
 
-ExportsTrie :: @rec @struct(
-    Node :: @struct(
-        is_terminal := false,
-        vmaddr_offset := 0,  // from start of section
-        trie_offset := 0,    // index in nodes after being reordered?
-        edges := RawList(i64).zeroed(),   // outgoing
-    ),
-    Edge :: @struct(
-        node: i64,
-        label: []u8,
-    ),
-    // TODO: prescan for constant fields so this is less garbage. 
-    T :: @rec @struct(
-        root: i64,
-        // always uses temp()
-        nodes: RawList(ExportsTrie.Node),
-        edges: RawList(ExportsTrie.Edge),
-    ),
-);
+ExportsTrie :: @struct {
+    root: i64;
+    // always uses temp()
+    nodes: RawList(Node);
+    edges: RawList(Edge);
+};
+
+Node :: @struct {
+    is_terminal := false;
+    vmaddr_offset := 0;  // from start of section
+    trie_offset := 0;    // measured in bytes
+    edges := RawList(i64).zeroed();   // outgoing
+};
+
+Edge :: @struct {
+    node: i64;
+    label: []u8;
+};
 
 /// Insert a symbol into the trie, updating the prefixes in the process.
-/// This operation may change the layout of the trie by splicing edges in
-/// certain circumstances.
-fn put(self: *ExportsTrie.T, name: []u8, vmaddr_offset: i64) void = {
-    node_index := self.putNode(self.root, name);
+/// This operation may change the layout of the trie by splicing edges.
+fn put(self: *ExportsTrie, name: []u8, vmaddr_offset: i64) void = {
+    node_index := self.put_node(self.root, name);
     self.nodes[node_index] = (is_terminal = true, vmaddr_offset = vmaddr_offset);
 }
 
 /// Inserts a new node starting at `node_index`.
-fn putNode(self: *ExportsTrie.T, node_index: i64, label: []u8) i64 = { // returns node index
+fn put_node(self: *ExportsTrie, node_index: i64, label: []u8) i64 = { // returns node index
     // Check for match with edges from this node.
     for self.nodes[node_index].edges { edge_index |
         continue :: local_return;
@@ -39,7 +37,7 @@ fn putNode(self: *ExportsTrie.T, node_index: i64, label: []u8) i64 = { // return
             return(edge.node)
         };
         if(match == 0, => continue());
-        if(match == edge.label.len, => return(self.putNode(edge.node, label.rest(match))));
+        if(match == edge.label.len, => return(self.put_node(edge.node, label.rest(match))));
 
         // Found a match, need to splice up nodes.
         // From: A -> B
@@ -55,7 +53,7 @@ fn putNode(self: *ExportsTrie.T, node_index: i64, label: []u8) i64 = { // return
         new_edge.node  = to_node;
         new_edge.label = to_label;
         self.nodes[mid_index].edges&.push(new_edge_index, temp());
-        return(if(match == label.len, => mid_index, => self.putNode(mid_index, label.rest(match))));
+        return(if(match == label.len, => mid_index, => self.put_node(mid_index, label.rest(match))));
     };
 
     new_node_index := self.add_node();
@@ -69,7 +67,7 @@ fn putNode(self: *ExportsTrie.T, node_index: i64, label: []u8) i64 = { // return
 
 /// This step performs multiple passes through the trie ensuring
 /// there are no gaps after every `Node` is ULEB128 encoded.
-fn write(self: *ExportsTrie.T, out: *List(u8)) void = {
+fn write(self: *ExportsTrie, out: *List(u8)) void = {
     ordered_nodes := i64.list(self.nodes.len, temp());
     
     Q :: import("@/lib/collections/deque.fr").RawDeque;
@@ -104,7 +102,7 @@ fn write(self: *ExportsTrie.T, out: *List(u8)) void = {
     };
 }
 
-fn update_node_position(self: *ExportsTrie.T, node_index: i64, offset_in_trie: i64) Ty(i64, bool) = {
+fn update_node_position(self: *ExportsTrie, node_index: i64, offset_in_trie: i64) Ty(i64, bool) = {
     node := self.nodes[node_index]&;
     
     /// Current size of this node in bytes.
@@ -132,13 +130,13 @@ fn update_node_position(self: *ExportsTrie.T, node_index: i64, offset_in_trie: i
     (node_size, updated)
 }
 
-fn init() ExportsTrie.T = {
-    self := ExportsTrie.T.zeroed();
+fn init() ExportsTrie = {
+    self := ExportsTrie.zeroed();
     self.root = self&.add_node();
     self
 }
 
-fn write_single_node(self: *ExportsTrie.T, node_index: i64, buf: *List(u8)) void = {
+fn write_single_node(self: *ExportsTrie, node_index: i64, buf: *List(u8)) void = {
     node := self.nodes[node_index]&;
     if node.is_terminal {
         export_flags :: 0;  // for now we don't care
@@ -161,15 +159,15 @@ fn write_single_node(self: *ExportsTrie.T, node_index: i64, buf: *List(u8)) void
     };
 }
 
-fn add_node(self: *ExportsTrie.T) i64 = {
+fn add_node(self: *ExportsTrie) i64 = {
     index := self.nodes.len;
-    self.nodes&.push(ExportsTrie.Node.zeroed(), temp());
+    self.nodes&.push(Node.zeroed(), temp());
     index
 }
 
-fn add_edge(self: *ExportsTrie.T) i64 = {
+fn add_edge(self: *ExportsTrie) i64 = {
     index := self.edges.len;
-    self.edges&.push(ExportsTrie.Edge.zeroed(), temp());
+    self.edges&.push(Edge.zeroed(), temp());
     index
 }
 

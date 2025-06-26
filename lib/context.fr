@@ -54,12 +54,25 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
     //       super fragile to rely on nobody leaving junk in the registers for this. 
     is_linux := is_sane_pointer(argc) || !is_sane_pointer(envp) || !is_sane_pointer(argv);
     
-    OS[].it = @if(is_linux, .linux, .macos);
-    
     if is_linux {
         entry_args_from_stack_linux(argc&, argv&, envp&, fp);
-        @assert(!(is_sane_pointer(argc) || !is_sane_pointer(envp) || !is_sane_pointer(argv)), "failed to guess os");
+    } else {
+        // if the args to main looked reasonable, assume we're in a hosted libc. 
+        // which is always true on macos, and true on linux if we didn't make the exe ourself 
+        // so the linker inserted an extra _start wrapper before calling our wrapper before calling this function. 
+        // past the end of envp, linux has the auxiliary vector which is (key, value) pairs with the 
+        // key seeming to be mostly low numbers. macos has more string pointers. 
+        p := envp;
+        while => !p.ptr.is_null() {
+            p = p.offset(1);
+        };
+        p = p.offset(1);
+        is_linux = !is_sane_pointer(p[]);
     };
+    
+    OS[].it = @if(is_linux, .linux, .macos);
+    @assert(!(is_sane_pointer(argc) || !is_sane_pointer(envp) || !is_sane_pointer(argv)), "failed to guess os");
+    
     
     CAPTURE :: @static(@FnPtr() void);
     CAPTURE[] = user;

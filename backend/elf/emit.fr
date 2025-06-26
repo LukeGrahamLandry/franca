@@ -1,4 +1,4 @@
-// UNFINISHED: this only supports Exe not Relocatable or Dynamic. 
+// UNFINISHED: this only supports Exe and Relocatable not Dynamic. 
 
 EmitElf :: @struct {
     m: *Qbe.Module;
@@ -209,9 +209,7 @@ fn output_elf(m: *QbeModule) [][]u8 = {
     
     e: EmitElf = start_elf(m); e := e&;
     
-    if m.goal.type != .Exe { 
-        eprintln("TODO: other types of elf");
-    };
+    @assert(m.goal.type != .Dynamic, "TODO: other types of elf");
     
     e.section_header("")[] = Elf.SectionHeader.zeroed();
     p_header := e.program_header();
@@ -510,11 +508,16 @@ create_rela_table :: fn(
             }
             fn RipDisp32(it) => {
                 @debug_assert(m.goal.type == .Relocatable);
+                @debug_assert(m.goal.arch == .x86_64);
+                
+                // TODO: probably don't need this and it shouldn't be at risc of having aslr 
+                //       bytes like the DataAbsolute case so don't bother. 
                 u32.ptr_from_raw(fix.fix.patch_at)[] = 0;
+                
                 (@if_else {
                     @if(fix.symbol.kind == .DynamicPatched) => Elf.R_AMD64_PLT32;
                     @else            => Elf.R_AMD64_PC32;
-                }, it.increment.zext() - 4 /* who fucking knows anymore */)
+                }, it.increment - 4 /* :IncOffByFour */)
             };
             @default => @panic("TODO: elf fixup: %", fix.fix.type&.tag());
         };
