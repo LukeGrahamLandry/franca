@@ -14,7 +14,38 @@ notably those are all things to aren't going to change if you're just working on
     is a call to the first import + the stub's offset. maybe there's some magic flag you 
     have to pass it? idk. tho i guess that's an argument that i shouldn't make people say -keep-names,
     because if someone tried my thing they'd probably think i did it wrong too because they wouldn't know to ask for it. 
-  
+- trying to make relocatable elf file. did some refactoring to make elf/emit.fr make more sense. 
+  - lots of `ld.lld: error: undefined symbol: main`, i can mark it GLOBAL instead of LOCAL, 
+    and then i need to reorder it to be at the end or it complains like `non-local symbol (2) found at index < .symtab's sh_info (3)`
+    and then also have to decrement local_count to account for that and then it links successfully. 
+    so i guess elf doesn't have a specfific thing for exports vs imports, you just put the global 
+    symbols at the end and if its section index is non-zero that means it's defined and thus an export instead of an import. 
+  - program still doesn't actually run but hey you can't win 'em all. 
+  - looking in lldb, it is getting to what the exe says the address of main is, but that's unmapped and way lower than `_start`,
+    oh maybe i need MYSTERY_SPICE somewhere? but clang's .o files have low addesses so i feel like it's fine
+    ```
+    * thread #1, name = 'a.out', stop reason = signal SIGSEGV: invalid address (fault address: 0x6c7a)
+      * frame #0: 0x0000000000006c7a
+        frame #1: 0x00007ffff7df0083 libc.so.6`__libc_start_main + 243
+        frame #2: 0x00000000002014aa a.out`_start at start-2.33.S:120
+    ```
+  - tried adding Write,Alloc, flags to the section, still crashes but now it gets to franca_runtime_init. 
+  ```
+  * thread #1, name = 'a.out', stop reason = signal SIGSEGV: invalid address (fault address: 0x0)
+    * frame #0: 0x0000000000209aab a.out`franca_runtime_init__2175 + 355
+      frame #1: 0x00007fffffffe400
+      frame #2: 0x0000000000209c95 a.out`main + 27
+      frame #3: 0x00007ffff7df0083 libc.so.6`__libc_start_main + 243
+      frame #4: 0x00000000002016da a.out`_start at start-2.33.S:120
+    ```
+    the instruciton is 4 of ` add    byte ptr [rax], al` which is definitly what 0 is,
+    because i was zeroing fix.patch_at for RipDisp32, which should just be the offset which the linker pokes in. 
+    i bet the relocation isn't happening and trying to do ` mov    qword ptr [rip + 0x00000000], rcx` decodes to something 
+    else because saying displacement of zero is useless. 
+    readelf seems to see my relocations, maybe i just guessed the type wrong. 
+    on apple which works it says that instruction is supposed to be `100006acc: 48 89 0d 1d 97 ff 03        	movq	%rcx, 0x3ff971d(%rip)   ## 0x1040001f0 <_g67+0x1f0>`
+  - clany says `addend = -4` a lot which is creepy to me but doing that doesn't help
+    
 ## (Jun 24)
 
 - give up on my failed experiment insane way of doing llvm abi 
