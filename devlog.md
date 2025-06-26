@@ -30,7 +30,30 @@ notably those are all things to aren't going to change if you're just working on
     and if it looks like a pointer, it's apples extra info and if it's a low number, 
     it's a key in auxval so we must be on linux. that seems to work everywhere. 
 - TODO: elf_loader.fr doesn't work on linker output: `panic! not divisible by page size`
+  is it ok to just align backwards the vaddr to make them page aligned? 
+  that seems sketchy but idk what else you'd do since they have different memory protection
 - don't bother with mach-o code signeture on amd, it only cares for arm
+- zig 0.14.1 fixed `/zig_install/lib/libc/glibc/sysdeps/riscv/start-2.33.S:48:2: error: unknown directive`,
+  so it can target riscv now which is nice 
+- i want exe_debug_symbol_table to work for elf.
+  - seems you can just stick another symbol table in there. 
+    gnu's objdump puts names on call targets but not at the start of each function and llvm's objdump does neither.
+    oh it just didn't like that i was giving it two .text sections that overlap i guess? 
+    previously i was doing mark_code_sections just to make the disassembler work. 
+  - painful offsetting to get import stubs to disassemble correctly.
+  - now it works in objdump but not lldb (you can't set break points, etc).
+    a zig binary that works has `.debug_info, .debug_abbrev, .debug_aranges, .debug_line, .debug_ranges, .debug_loc, .debug_str`,
+    that allegedly have dwarf stuff, maybe lldb only looks at those and not at symbol table, that would be sad.
+    ah! gdb works with what im doing now... that's annoying. maybe i just give up on lldb for now. 
+- seems like a good time to do arm linux as well. 
+  compared to mach-o, there seem to be more relocation types so it doesn't have to look in the 
+  instruction slot, like `b` and `bl` are seperate instead of putting that bit in the code. 
+  well exe only needs glob_dat
+- without -syscalls it segfaults in prefer_syscalls, with -syscalls i can helloworld. 
+- added `-force_linker` option to backend/meta/test.fr so you can make an exe via relocatable 
+  for all tests, not just the ones that have a c driver. which i think is the only thing 
+  that tests the output of my c compiler with relocatable but more importantly, lets 
+  me run the .ssa tests on linux before i have a wrapper to fix the stack. 
 
 ## (Jun 25)
 

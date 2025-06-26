@@ -150,12 +150,15 @@ hould just make them local constants in each file like they are here in riscv
 - repro doesn't work cross compiling from linux to macos,
 but dump_macho.fr and objdump -d say they're the same (for mandelbrot_ui.fr at least). 
 so something in the data i guess? 
-- elf Relocatable so i can run the abi tests against clang
 - elf Dynamic
 - how are you supposed to ask for page size? blink wants 64k instead of 4k. 
 - standalone import_c/cc.fr and meta/qbe_backend.fr can't make statically linked binaries because the `_init` is written in franca
 - if macos {  // todo: "why does this work on my linux but not github's linux"
   (tests/sys.fr using elf_loader.fr on a dynamic executable)
+- run the .ssa tests that require relocatable object (abi tests vs clang)
+- elf_loader.fr doesn't work on linker output: `panic! not divisible by page size`
+- lldb doesn't have symbol names or let you set break points. do i need to do dwarf stuff?
+  (it kinda works in gdb!)
 
 ## amd64
 

@@ -12,6 +12,7 @@ EmitElf :: @struct {
     // These don't do anything i think? but you always at least an empty one. 
     section_names: List(Str);
     section_index := zeroed EnumMap(SegmentType, u16);
+    stub_section_index_for_debug: u16 = 0;
 };
 
 SymbolTableInfo :: @struct {  
@@ -106,7 +107,9 @@ start_elf :: fn(m: *Qbe.Module) EmitElf #inline = {
         fn rv64()    => .rv64;
         @default     => unreachable();
     };
-    h.entry = main_entry_point_vaddr(m) + Elf.MYSTERY_SPICE;
+    if m.goal.type == .Exe {
+        h.entry = main_entry_point_vaddr(m) + Elf.MYSTERY_SPICE;
+    };
     (
         m = m,
         chunks = list([]u8, 10, temp()),
@@ -124,7 +127,13 @@ create_the_segments :: fn(e: *EmitElf) PayloadBase = {
     virtual_offset := Elf.MYSTERY_SPICE; 
     file_offset    := 0;
     make_segment :: fn(e: *EmitElf, seg: SegmentType, prot: u32, name: Str) => {
+        break :: local_return;
         segment := e.m.segments&[seg]&;
+
+        // without this skip you get `rosetta error: bss_size overflow`
+        // yes, even tho this isn't for the bss segment; i don't make the rules; i just work here.
+        @if(segment.len() == 0) break();  
+        
         e.chunks&.push(live_segment_part(e.m, seg)); // :waste :commandsispartofcodenow
     
         e.program_header()[] = (
@@ -140,22 +149,33 @@ create_the_segments :: fn(e: *EmitElf) PayloadBase = {
         
         // TODO: this comment doesn't make any sense. exe stills works without this
         // for static linking, local symbols are defined relative to a section so we need them even for Exe
-        if e.m.goal.type == .Relocatable {
+        if e.m.goal.type == .Relocatable || e.m.goal.exe_debug_symbol_table {
             // TODO: including the waste between _stubs and real code is annoying because it shows in objdump. 
             e.section_index&[seg] = e.header.section_header_num;
             flag := int(prot.bit_and(Elf.PF_X) != 0).shift_left(@as(i64) Elf.SectionFlag.Exec)
                 .bit_or(int(prot.bit_and(Elf.PF_W) != 0).shift_left(@as(i64) Elf.SectionFlag.Write))
                 .bit_or(1.shift_left(@as(i64) Elf.SectionFlag.Alloc));
             
-            e.section_header(name)[] = (
+            h := e.section_header(name);
+            h[] = (
                 name = 0, // TODO
                 type = .ProgramBits, 
                 flags = flag,
-                addr = 0, // virtual_offset,  
+                addr = virtual_offset,  // this is required for exe_debug_symbol_table, nothing else cares
                 offset = file_offset, 
                 size = segment.len(),
                 addr_align = 0,
             );
+            
+            if e.m.goal.type != .Relocatable {
+                // help disassembler not show junk
+                if seg == .Code {
+                    pad := e.m.text_padding();
+                    h.offset += pad;
+                    h.addr += pad;
+                    h.size -= pad;
+                }
+            }
         };
         
         virtual_offset += segment.mmapped.len;
@@ -171,10 +191,8 @@ create_the_segments :: fn(e: *EmitElf) PayloadBase = {
     e.make_segment(.ConstantData, RW, ".rodata");  // TODO: how the fuck do i do relocations in a non-writable segment?
     e.make_segment(.MutableData, RW, ".data");
     
-    have_bss := e.m.segments&[.ZeroInitData]&.len() > 0;
-    // BSS
-    if have_bss {
-        segment := e.m.segments&[.ZeroInitData]&;
+    bss := e.m.segments&[.ZeroInitData]&;
+    if bss.len() > 0 {
         e.program_header()[] = (
             type = .Load,
             prot = RW,
@@ -182,7 +200,7 @@ create_the_segments :: fn(e: *EmitElf) PayloadBase = {
             vaddr = virtual_offset, 
             paddr = virtual_offset,
             file_size = 0,
-            mem_size = segment.len(),
+            mem_size = bss.len(),
             align = 4096,
         );
         // for linker
@@ -193,11 +211,11 @@ create_the_segments :: fn(e: *EmitElf) PayloadBase = {
             flags = 0, 
             addr = virtual_offset,  
             offset = file_offset, 
-            size = segment.len(),
+            size = bss.len(),
             addr_align = 4096,
         );
         
-        virtual_offset += segment.len();
+        virtual_offset += bss.len();
     };
     (virtual = virtual_offset, file = file_offset)
 };
@@ -217,6 +235,20 @@ fn output_elf(m: *QbeModule) [][]u8 = {
     base := create_the_segments(e);
     
     if m.goal.type != .Relocatable {
+        if e.m.goal.exe_debug_symbol_table {
+            // help disassembler not show junk
+            e.stub_section_index_for_debug = e.header.section_header_num;
+            e.section_header(".plt")[] = (
+                name = 0,
+                type = .ProgramBits, 
+                flags = 1.shift_left(@as(i64) Elf.SectionFlag.Exec),
+                addr = Elf.MYSTERY_SPICE + m.goal.commands_size_guess, 
+                offset = m.goal.commands_size_guess, 
+                size = m.stubs&.len(),
+                addr_align = 1,
+            );
+        };
+    
         T := finalize_symbols(m);
         have_any_imports := T.local_count != T.symbols.len;
         PRETEND_TO_HAVE_SYMBOLS_BECAUSE_LIBRISCV_HATES_US := m.goal.arch == .rv64;
@@ -251,10 +283,6 @@ fn output_elf(m: *QbeModule) [][]u8 = {
             mem_size = program_headers_size,
             align = 8,
         );
-        
-        if e.m.goal.exe_debug_symbol_table {
-            e.mark_code_sections(code_size);
-        };
     } else {
         e.emit_linker_relocations(base);
         section_names(e, base);
@@ -312,8 +340,9 @@ section_names :: fn(e: *EmitElf, base: PayloadBase) void = {
 request_interp :: fn(e: *EmitElf, interp_header: *Elf.ProgramHeader, base: PayloadBase) void = {
     loader_path := @match(e.m.goal.arch) {
         fn x86_64() => "/lib64/ld-linux-x86-64.so.2\0";
+        fn aarch64() => "/lib/ld-linux-aarch64.so.1\0";
         fn rv64()   => "/usr/riscv64-linux-gnu/lib/ld-linux-riscv64-lp64d.so.1\0";
-        @default    => @panic("TODO: dynamic loader path for %", e.m.goal.arch);
+        @default    => @panic("unknown arch");
     };
     size := loader_path.len;
     addr := base.virtual + e.payload.len;
@@ -347,7 +376,7 @@ for_dynamic_loader :: fn(
     dynamics&.push(tag = .Debug, val = 0);  // ?     // TODO: does this do anything?
    
     extra_strings := @if(m.goal.link_libc, glibc_dylib_paths, empty());
-    table := e.create_symbol_table(T.symbols, .DynSymbolTable, extra_strings, base);
+    table := e.create_symbol_table(T.symbols, .DynSymbolTable, extra_strings, base, false);
     for table.extra_strings { off |
         dynamics&.push(tag = .Needed, val = off);
     };
@@ -361,6 +390,16 @@ for_dynamic_loader :: fn(
     dynamics&.push(tag = .RelA, val = table.rela);
     dynamics&.push(tag = .RelASz, val = table.relasz);
     dynamics&.push(tag = .RelAEnt, val = size_of(Elf.RelA));
+    
+    if m.goal.exe_debug_symbol_table {
+        symbols := temp().alloc(*SymbolInfo, m.local_needs_reloc.len);
+        i := 0;
+        for m.local_needs_reloc& { id |
+            s := m.get_symbol_info(id);
+            symbols[i] = s; i += 1;
+        };
+        table := e.create_symbol_table(symbols, .SymbolTable, empty(), base, true);
+    };
     
     dynamics
 };
@@ -381,6 +420,7 @@ create_symbol_table :: fn(
     table_type: Elf.SectionType, 
     extra_strings: []Str,
     base: PayloadBase, 
+    for_debug: bool,
 ) SymbolTableResults = {
     out := zeroed SymbolTableResults;
     
@@ -438,9 +478,11 @@ create_symbol_table :: fn(
         if e.m.goal.type == .Relocatable {
             // for linker, it's relative to start of the section instead of virtual base address. 
             segment_base = 0;
-            if local {
-                section = e.section_index&[symbol.segment];
-            };
+        };
+        // section index is required for linker, and for exe_debug_symbol_table 
+        // (even tho the latter still does addresses relative to base address not section). 
+        if local {
+            section = e.section_index&[symbol.segment];
         };
         
         type := @if(is_local(symbol), 
@@ -448,9 +490,18 @@ create_symbol_table :: fn(
                 @if(symbol.strong || (symbol.export && e.m.goal.type == .Relocatable), 
                     Elf.STB_GLOBAL, 
                     Elf.STB_WEAK));
+                    
+        if for_debug && symbol.segment == .Code && symbol.offset < e.m.text_padding() {
+            @debug_assert(e.m.goal.exe_debug_symbol_table);
+            section = e.stub_section_index_for_debug;
+            local = true;  // the import **stub** is actually local
+            type = Elf.STB_LOCAL;
+            local_count += 1;
+        };
+        
         xx[] = (
             name = imported_symbol_name_offsets[symbol_index],
-            info = type.shift_left(4).bit_or(0).trunc(), // _ FUNC
+            info = type.shift_left(4).trunc(),
             value = @if(local, segment_base + symbol.offset, 0),
             section_header_index = section,
             size = symbol.size.zext(),  // TODO: does anyone care about this? maybe debugger disassemble? 
@@ -497,8 +548,14 @@ create_rela_table :: fn(
     // TODO: do they have to be ordered by memory location like mach-o?
     // TODO: store increment in consistant place instead of on each guy
     
+    reloc := m.goal.type == .Relocatable;
     // why are the numbers different? because we hate ourselves. 
-    data_reloc_type := @if(m.goal.type == .Relocatable, Elf.R_AMD64_64, Elf.R_AMD64_GLOB_DAT);
+    data_reloc_type := @match(m.goal.arch) {
+        fn x86_64()  => @if(reloc, Elf.R_AMD64_64, Elf.R_AMD64_GLOB_DAT);
+        fn aarch64() =>  @if(reloc, Elf.R_AARCH64_ABS64, Elf.R_AARCH64_GLOB_DAT);
+        fn rv64()    => todo();
+        @default     => unreachable();
+    };
     
     each fixups { fix |
         type, increment := @match(fix.fix.type&) {
@@ -507,7 +564,7 @@ create_rela_table :: fn(
                 (data_reloc_type, it.increment)
             }
             fn RipDisp32(it) => {
-                @debug_assert(m.goal.type == .Relocatable);
+                @debug_assert(reloc);
                 @debug_assert(m.goal.arch == .x86_64);
                 
                 // TODO: probably don't need this and it shouldn't be at risc of having aslr 
@@ -525,7 +582,7 @@ create_rela_table :: fn(
         // the target offset is relative to 
         // - exe: the virtual base address of the executable
         // - linker: the start of the segment
-        off := @if(m.goal.type == .Relocatable, 
+        off := @if(reloc, 
             ptr_diff(section_base_address, fix.fix.patch_at),
             ptr_diff(m.segments&[.Code].mmapped.ptr, fix.fix.patch_at) + Elf.MYSTERY_SPICE, 
         );
@@ -538,13 +595,12 @@ create_rela_table :: fn(
         );
     };
     
-    loadable := m.goal.type != .Relocatable;
-    name := @if(loadable, ".rela.dyn", @tfmt(".rela%", e.section_names[target_section_index.zext()]));
+    name := @if(!reloc, ".rela.dyn", @tfmt(".rela%", e.section_names[target_section_index.zext()]));
     // ugh
     e.section_header(name)[] = (
         name = 0,
         type = .RelocAddend, 
-        flags = 1.shift_left(@if(loadable, @as(i64) Elf.SectionFlag.Alloc, @as(i64) Elf.SectionFlag.InfoLink)),
+        flags = 1.shift_left(@if(!reloc, @as(i64) Elf.SectionFlag.Alloc, @as(i64) Elf.SectionFlag.InfoLink)),
         addr = 0,  // TODO: clang has some virtual place here
         offset = base.file + relocation_table_start, 
         size = e.payload.len - relocation_table_start,
@@ -609,32 +665,6 @@ seal_dynamic :: fn(
     );
 };
 
-// These let objdump know the right place to disassemble when you pass `-d`
-mark_code_sections :: fn(e: *EmitElf, code_size: i64) void = {
-    m := e.m;
-    
-    e.section_header(".text")[] = (
-        name = 0, // TODO
-        type = .ProgramBits, 
-        flags = 1.shift_left(@as(i64) Elf.SectionFlag.Exec),
-        addr = Elf.MYSTERY_SPICE + m.goal.commands_size_guess + m.goal.size_of_stubs,  
-        offset = m.goal.commands_size_guess + m.goal.size_of_stubs, 
-        size = code_size,
-        addr_align = 1,
-    );
-    
-    e.section_header(".plt")[] = (
-        name = 0, // TODO
-        type = .ProgramBits, 
-        flags = 1.shift_left(@as(i64) Elf.SectionFlag.Exec),
-        addr = Elf.MYSTERY_SPICE + m.goal.commands_size_guess, 
-        offset = m.goal.commands_size_guess, 
-        size = m.stubs&.len(),
-        addr_align = 1,
-    );
-};
-
-
 // For linker, targets are relative to a section, and the index of that section goes in the `info` field of the RELA header. 
 // so each section that contains relocations needs a seperate section to describe them.
 emit_linker_relocations :: fn(e: *EmitElf, base: PayloadBase) void = {
@@ -658,7 +688,7 @@ emit_linker_relocations :: fn(e: *EmitElf, base: PayloadBase) void = {
     partition_unordered(*SymbolInfo, symbols.slice(0, i), fn(it) => !it.export);  // :SLOW
     collect(m.imports&);
    
-    table := e.create_symbol_table(symbols, .SymbolTable, empty(), base);
+    table := e.create_symbol_table(symbols, .SymbolTable, empty(), base, false);
     each cases& { seg, fixups | 
         if fixups.len > 0 {
             _ := e.create_rela_table(fixups.items(), base, table.symbol_table_index, e.section_index&[seg], m.segments&[seg].mmapped.ptr);
