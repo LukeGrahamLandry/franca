@@ -49,11 +49,25 @@ notably those are all things to aren't going to change if you're just working on
   compared to mach-o, there seem to be more relocation types so it doesn't have to look in the 
   instruction slot, like `b` and `bl` are seperate instead of putting that bit in the code. 
   well exe only needs glob_dat
-- without -syscalls it segfaults in prefer_syscalls, with -syscalls i can helloworld. 
+  - without -syscalls it segfaults in prefer_syscalls, with -syscalls i can helloworld. 
 - added `-force_linker` option to backend/meta/test.fr so you can make an exe via relocatable 
   for all tests, not just the ones that have a c driver. which i think is the only thing 
   that tests the output of my c compiler with relocatable but more importantly, lets 
   me run the .ssa tests on linux before i have a wrapper to fix the stack. 
+- deciding i have to evaluate the left of an assignment before the right,
+  (because otherwise you have a horrible aliasing problem like zig does with RLS). 
+  the unfortunate side effect of this is for tagged unions, the old way it would just 
+  poke in the new varient and leave the old padding bytes and the new way 
+  initializes the whole new thing on its own and then copies the whole size of the 
+  largest varient into place, which is wasteful but also there's places 
+  where i was relying on holding a pointer into the active varient
+  while stomping over it with a smaller varient, and then reading from a 
+  later field of the old varient, which really only worked by luck and is too fragile 
+  to let slide now that i noticed it even if i change my mind about evaluation order, 
+  but it's tedious to untangle. 
+  costs 20ms on self compile which is almost 2% which seems really high, very sad, 
+  cause like such a large amount of code doesn't care, but the old way was such a footgun,
+  it being a rare footgun just means it's that much more confusing when it goes off. 
 
 ## (Jun 25)
 

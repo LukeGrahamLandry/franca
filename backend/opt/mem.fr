@@ -65,23 +65,26 @@ fn is_uniform_access(f: *Qbe.Fn, l: *Qbe.Ins, k: *?Qbe.Cls, s: *?i32, address: Q
     };
     
     if l.op() == .blit0 {
+        break :: local_return;
         blit1 := l.offset(1);
         @debug_assert(blit1.op() == .blit1);
         size := blit1.arg&[0].rsval().abs();
-        if(size > 8, => return(false));
+        if(size > 8, => break());
         src, dest := (l.arg&[0], l.arg&[1]);
-        interesting := address == src || address == dest;
-        if interesting
-        && src != dest // TODO: just kill it
-        && none_or(s[], fn(s) => s == size) {
-            s[] = (Some = size);
-            if k.is_none() {
-                // we don't care about the class but if you only access with blits we don't want to crash so assume int, 
-                // but that maens that if something could have been promoted as a float but first use was a blit we won't see it.
-                k[] = (Some = @if(size == 8, .Kl, .Kw));
-            };
-            return(true);
+        @if(address != src && address != dest) break();
+        @if(src == dest) break(); // TODO: just kill it
+        legal_size := @match(s[]) {
+            fn Some(s) => s == size;
+            fn None() => ispow2(size.intcast());
+        }; 
+        @if(!legal_size) break();
+        s[] = (Some = size);
+        if k.is_none() {
+            // we don't care about the class but if you only access with blits we don't want to crash so assume int, 
+            // but that maens that if something could have been promoted as a float but first use was a blit we won't see it.
+            k[] = (Some = @if(size == 8, .Kl, .Kw));
         };
+        return(true);
     };
     
     false

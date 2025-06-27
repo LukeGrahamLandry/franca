@@ -30,8 +30,6 @@ TODO: be consistant about spelling: zeros or zeroes
   - e.fr: #use inside a block prevents lookups that escape to the outer scope
   - f.fr: missing ; should be disallowed
   - g.fr: bad performace of linked list of `body = @{ @[body]; @[next]; }`
-  - i.fr: lhs of index assignment is evaluated first so if a list is aliased in the rhs and resizes, you're screwed.
-          this is just a semantic change not really a bug, but i have programs that rely on the old behaviour. 
 - repro doesn't work accross linux <-> macos
 - `@debug_assert(macos.common().valid, "not valid");` compiles 
 and gives you junk (that's not 0 or 1) when `common()` uses `#unsafe_noop_cast`. 

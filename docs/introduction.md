@@ -410,3 +410,10 @@ one argument `@f a` but can also have an extra expression after the closing pare
 If you come across `@{ foo }` and `@[foo]` it's probably good to know that those 
 mean quote and unquote but that's not important yet. They're useful when writing macros 
 not when using macros. 
+
+## Evaluation Order
+
+- fields of struct initializers are evaluated left to right (regardless of field order in the declaration)
+- function arguments are evaluated left to right (this includes binary operators)
+- assignment statement are evaluated right to left (the value before the destination)
+- macros can rearrange their operands to evaluate in whatever order they want

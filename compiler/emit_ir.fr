@@ -678,7 +678,9 @@ fn compile_stmt(self: *EmitIr, stmt: *FatStmt) CRes(void) = {
             .Ok
         }
         fn Set(f) => {   // :PlaceExpr
-            // we care about the type of the pointer, not the value because there might be a cast.
+            // it feels a bit sketchy to be looking at the value's type not the dest type,
+            // but there's always a Cast node that changes the type if needed. 
+            size: i64 = self.program.get_info(f.value.ty)[].stride_bytes.zext();
             @match(f.place.expr&) {
                 fn GetVar(it) => {
                     info := self.var_lookup&.get_ptr(it.id) 
@@ -687,19 +689,15 @@ fn compile_stmt(self: *EmitIr, stmt: *FatStmt) CRes(void) = {
                         @try(self.compile_expr(f.value&, (Assign = dest[]))) return;
                         return(.Ok);
                     };
+                    src := @try(self.compile_expr(f.value&, .NewMemory)) return;
                     dest := @try(self.addr_macro(f.place&, .Scalar)) return;
-                    @try(self.compile_expr(f.value&, (Blit = dest))) return;
+                    self.blit(dest, src, size);
                 }
                 fn Deref(arg) => {
-                    if false {  // :FuckedLikeZig TODO
-                        size: i64 = self.program.get_info(f.place.ty)[].stride_bytes.zext();
-                        src := @try(self.compile_expr(f.value&, .NewMemory)) return;
-                        dest := @try(self.compile_expr(arg[], .Scalar)) return;
-                        self.blit(dest, src, size);
-                    } else {
-                        dest := @try(self.compile_expr(arg[], .Scalar)) return;
-                        @try(self.compile_expr(f.value&, (Blit = dest))) return;
-                    };
+                    src := @try(self.compile_expr(f.value&, .NewMemory)) return;
+                    dest := @try(self.compile_expr(arg[], .Scalar)) return;
+                    @debug_assert(size == self.program.get_info(f.place.ty)[].stride_bytes.zext() || { size == 0 && self.blk.jmp.type == .hlt });
+                    self.blit(dest, src, size);
                 }
                 @default => return(@err("TODO: other `place=e;` :("));
             };
@@ -1514,6 +1512,7 @@ fn emit(self: *EmitIr, o: Qbe.O, k: Qbe.Cls, dest: Qbe.Ref, a0: Qbe.Ref, a1: Qbe
 
 // TODO: types larger than 2^16 bytes but you probably don't want to copy those anyway
 fn blit(self: *EmitIr, dest: Qbe.Ref, src: Qbe.Ref, bytes: i64) void #inline = {
+    if(bytes == 0, => return());
     // mem.fr/promote knows about 1/2/4/8 byte blits. 
     if bytes == 16 {    
         // TODO: maybe we can't do this cause alignment but we're kinda bad at eliminating blits. :UGLY

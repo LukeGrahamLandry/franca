@@ -1,0 +1,80 @@
+// tricky result slot aliasing.
+// the motto of this file is "just because zig does it doesn't make it a good idea"
+
+fn place_eval_order() #test = {
+    foo := i64.list(temp());
+    
+    foo&.push(1);
+    old := foo.items();
+    // since this call aliases foo and causes it to reallocate,
+    // you need to evaluate the rhs into a temporary, then evaluate the lhs and copy, 
+    // otherwise it will write to the stale pointer. 
+    foo[0] = f(foo&);  
+    @assert_eq(foo[0], 3);
+    @assert_ne(old[0], 3);  // safe because temp() does not free memory
+    
+    f :: fn(foo: *List(i64)) i64 = {
+        range(0, 50) { _ |
+            foo.push(2);
+        };
+        3
+    }
+}
+
+fn var_place_rls() #test = {
+    S :: @struct(a: i64, b: i64);
+    foo: S = (a = 1, b = 1);
+    foo = (a = foo.a + foo.b, b = foo.a + foo.b);
+    @assert(foo.a == 2 && foo.b == 2);  // not 2, 3
+}
+
+fn local_rls_aliasing() #test = {
+    A :: @struct(a: i64, b: i64);
+    
+    // This needs to swap the struct fields, 
+    // so you can't start writting to `s` until done computing the new value.
+    s: A = (a = 1, b = 2);
+    assert_eq(s.a, 1); assert_eq(s.b, 2);
+    s = (a = s.b, b = s.a);
+    assert_eq(s.a, 2);
+    assert_eq(s.b, 1);  // not 2
+    
+    s: A = (a = 1, b = 2);
+    s = {
+        a := 5;
+        b := s.a.add(s.b);
+        (a = a, b = b)
+    };
+    assert_eq(s.a, 5); 
+    assert_eq(s.b, 3);  // 'b' would be 7 if it forwarded to the final output location.   
+    
+    s: A = (a = 1, b = 2);
+    s = {
+        (a = 5, b = s.a.add(s.b))
+    };
+    assert_eq(s.a, 5); 
+    assert_eq(s.b, 3);  // not 7
+    
+    // This is what would happen if we didn't insert a temporary
+    s: A = (a = 1, b = 2);
+    s.a = 5;
+    s.b = s.a.add(s.b);
+    assert_eq(s.a, 5); assert_eq(s.b, 7);
+}
+
+fn call_rls_aliasing() #test = {
+    A :: @struct(a: i64, b: i64);
+    
+    s: A = (a = 1, b = 2);
+    s = swap0(s);
+    @assert(s.a == 2 && s.b == 1);
+    s = swap1(s&);
+    @assert(s.a == 1 && s.b == 2);
+    
+    swap0 :: fn(s: A) A = {
+        (a = s.b, b = s.a)
+    };
+    swap1 :: fn(s: *A) A = {
+        (a = s.b, b = s.a)
+    };
+}
