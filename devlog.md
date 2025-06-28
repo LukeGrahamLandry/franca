@@ -1,10 +1,26 @@
-let's cheat and make examples/terminal.fr(repl=true) not take 2 seconds to compile. 
-- toplevel: 58 (embarrassing!)
-- run_qbe_passes: 231, init_default_module: 346  // franca compiler (for runtime)
-- do_include: 295  // c compiler for stb (for comptime)
-- gfx: 63 // for on_frame (for runtime)
-- compile_to_shader_source: 68 // shader compiler (for comptime)
-notably those are all things to aren't going to change if you're just working on the terminal program. 
+
+## (Jun 27)
+
+- Experiments with the stupid skiping one the first symbol in macho symbol table
+  - no skip: the first function when you `objdump -d` (on the .o file) is always called `__text` instead of it's real name,
+    but it's correct after it goes through the linker. 
+  - skip: `objdump -d` (on the .o file) shows the correct name of the first symbol, but 
+    after it goes through the linker it's called `_junk` in objdump 
+    and the empty string in clion's profiler (dtrace?) 
+  - either way, lldb can set a breakpoint. 
+  - clang always skips one called called ltmp0
+  - when you skip, if you look at the symbol table in the exe after the linker, you can 
+    see that it helpfully swapped the order of them so the nice named one gets skipped. 
+  - somehow it can tell if you just do `symbols[0] = symbols[1]`, it wants a fresh name 
+    as an offering? what is going on man? oh maybe it's like elf and it just wants a null
+    value for missing name? yeahhh, if you just put a 0 byte before you start doing strings, 
+    and then everything works. so why isn't that what clang does?? clang just wants to eat your first name. 
+    - there's also the confusion of my objdump is `Apple LLVM version 16.0.0` and my 
+      clang is `Homebrew clang version 19.1.7` so maybe they changed thier mind between there? 
+      but that seems unlikely to me. zig's clang version 19.1.7 has the same eating a symbol behaviour. 
+  - profiler still can't see the symbol names if i make the exe myself instead of through linker,
+    but it couldn't the old way either so not any worse off. 
+- opt/slots.fr handled overlaps wrong
 
 ## (Jun 26)
 
@@ -68,6 +84,9 @@ notably those are all things to aren't going to change if you're just working on
   costs 20ms on self compile which is almost 2% which seems really high, very sad, 
   cause like such a large amount of code doesn't care, but the old way was such a footgun,
   it being a rare footgun just means it's that much more confusing when it goes off. 
+- i feel that revealed a bug in late slot promotion perhaps or im just losing my mind,
+  elf/emit/seal_dynamic() only works if you force it to spill everying and i don't see how 
+  the difference could be caused by evaluation order change. 
 
 ## (Jun 25)
 

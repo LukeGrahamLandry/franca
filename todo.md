@@ -1,3 +1,13 @@
+let's cheat and make examples/terminal.fr(repl=true) not take 2 seconds to compile. 
+- toplevel: 58 (embarrassing!)
+- run_qbe_passes: 231, init_default_module: 346  // franca compiler (for runtime)
+- do_include: 295  // c compiler for stb (for comptime)
+- gfx: 63 // for on_frame (for runtime)
+- compile_to_shader_source: 68 // shader compiler (for comptime)
+notably those are all things to aren't going to change if you're just working on the terminal program. 
+
+---
+
 - "this works here but not in it's original place under f()."
 - :ThisIsNotOkBecauseMemoryWillBeReused
 - give data symbols readable names now that they show up in symbol table
@@ -124,6 +134,7 @@ hould just make them local constants in each file like they are here in riscv
   and do include all symbol names when exe_debug_symbol_table=true. 
 - test that function names don't appear in the binary when exe_debug_symbol_table=false and do when true.
 - test that makes a dylib
+- macho exe_debug_symbol_table doesn't work i clion profiler (dtrace?)
 
 ## don't rely on libc
 

@@ -634,8 +634,7 @@ fn emit_reloc_symbols(e: *EmitMacho, chained: *List(u8)) void #inline = {
     m := e.m;
     cmd := load_command(e, .LinkEditSymbolInfo, LinkEditSymbolInfo);
     cmd[] = LinkEditSymbolInfo.zeroed();
-    // TODO: output local symbols for debugging (in exes as well). 
-    cmd.local_symbol_count = trunc(1 + e.m.local_needs_reloc.len); // I think you always need index 0 to be junk.
+    cmd.local_symbol_count = trunc(e.m.local_needs_reloc.len);
     cmd.external_symbol_index = cmd.local_symbol_index + cmd.local_symbol_count;  // for consistancy
     cmd.external_symbol_count = e.m.exports.len.trunc();
     cmd.undefined_symbol_index = cmd.external_symbol_index + cmd.external_symbol_count; // must be set even if count is zero or lld complains 
@@ -657,15 +656,15 @@ fn emit_reloc_symbols(e: *EmitMacho, chained: *List(u8)) void #inline = {
     chained.len += size_of_symbols; @debug_assert(chained.len <= chained.maybe_uninit.len);
     strings_start := chained.len;
     symbols_bytes.set_zeroed();
-    symbols_bytes[0].section_number = 1; // junk
-    symbols_bytes[0].symbol_type    = 14; // junk
-    symbols_bytes[0].name_offset = trunc(chained.len - strings_start);
-    append_padded_cstr(chained, "_junk", 1);
+    
+    // see devlog.md/Jun27,2025;
+    // clang always names your first symbol <ltmp>, but you just need to waste a byte of string, 
+    // or objdump won't show the first symbol name. 
+    chained.push(0);
     
     // when something is both local_needs_reloc and export it will have two entries in the symbol table, 
     // which is stupid but seems to work (test/fixup4.ssa)
-    
-    base := 1;
+    base := 0;
     enumerate e.m.local_needs_reloc { i, id | 
         s := e.m.get_symbol_info(id[]);
         entry := symbols_bytes.index(i + base);
