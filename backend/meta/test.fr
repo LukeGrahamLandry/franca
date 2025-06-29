@@ -23,6 +23,7 @@ Args :: @struct {
     d: Str #help("log intermediate representation") = "";
     keep := false;
     force_linker := false;
+    skip_non_driver := false;
 }
 
 fn main() void = {
@@ -98,9 +99,12 @@ fn main() void = {
         || ((arch == .wasm32 || os == .linux) && file.ends_with("-na.ssa"))
         ;
         if !skip {
-            pass := run_one(args&, file, arch, wasm_runner);
-            (@if(pass, passed&, failed&))[] += 1;
-        } else {
+            pass := run_one(args&, file, arch, wasm_runner, skip&);
+            if !skip {
+                (@if(pass, passed&, failed&))[] += 1;
+            }
+        };
+        if skip {
             @println("%[skip]", f_pad(file, 40, .After));
         };
     };
@@ -114,7 +118,7 @@ fn main() void = {
     };
 }
 
-fn run_one(arg: *Args, file_path: Str, arch: Arch, wasm_runner: ?Str) bool #inline = {
+fn run_one(arg: *Args, file_path: Str, arch: Arch, wasm_runner: ?Str, skip: *bool) bool #inline = {
     ::FmtPad(Str);
     qbe_path, verbose, flags, iamthecompilernow := (arg.bin, arg.v, arg.d, arg.cc);
     mark := mark_temporary_storage();
@@ -127,6 +131,11 @@ fn run_one(arg: *Args, file_path: Str, arch: Arch, wasm_runner: ?Str) bool #inli
     @print("%", f_pad(file_path, 40, .After));
     
     driver := extract_section(src, "driver");
+    if arg.skip_non_driver && driver.is_none() {
+        skip[] = true;
+        println("[skip]");
+        return false;
+    };
     if iamthecompilernow {
         driver = .None;
     }

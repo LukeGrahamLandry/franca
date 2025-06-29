@@ -1,4 +1,54 @@
 
+## (Jun 28)
+
+- removed unreachable code that handled b/h arg/par in arm abi.
+  those are always converted to normal arg/par in abi0. 
+  qbe does the same thing: apple makes them be sign extended, non-apple 
+  makes high bits arbitrary, but nobody actually treats small things 
+  differently later in abi. even if you run out of registers and have 
+  to pass on the stack, the size is rounded up to 8 bytes. 
+- go back to doing opt/slots.fr in 4 byte granularity. 
+  the abi slots i care about are never 1/2 bytes anyway.  
+  and it means less defensive removing things from `slot_contains`
+- failing some .ssa tests with linker on amd64_sysv. it's always ones using 
+  a c driver (and they work with my cc), a few are abi ones, but they work on 
+  apple so i don't believe that it's actually an abi problem. 
+  oh i think it's always ones that import a variable from the c. 
+  - it's making a MOV instead of an LEA, 
+    because fixup_amd64/RipDisp32 converts to got load because that's what it would 
+    be for an exe, and machO's X86_64_RELOC_GOT_LOAD will change it back to normal 
+    LEA if it ends up being local after linking. 
+    so it works for both if i just don't convert to load myself if it's .Relocatable. 
+  - but im afraid that means it won't work if it does end up being a dynamic import for elf. 
+    is there a different reloc type for just do the right thing once you know where the symbol is? 
+    maybe i need R_AMD64_REX_GOTPCRELX? 
+    it seems like clang does the same thing as me if i feed it qbe's assembly. 
+    oh, but qbe is folding the store so 
+    ```
+    201537: 89 05 2b 22 00 00            	mov	dword ptr [rip + 0x222b], eax # 0x203768 <a>
+    ```
+    instead of my:
+    ```
+    5992: 48 8d 0d 83 a6 00 00         	lea	rcx, [rip + 0xa683]     # 0x1001c <a>
+    5999: 89 01                        	mov	dword ptr [rcx], eax
+    ```
+    which is tighter code but won't work if it ends up being a dynamic import. 
+    so maybe ive just been doing extra work this whole time and im supposed 
+    to just only bother with static data? 
+  - reassured that clang doesn't fold the store if you give it this:
+    ```
+    extern int a;
+    void foo() {
+        a = 42;
+    }
+    ```
+    so i think im more right than qbe here. and it does use R_AMD64_REX_GOTPCRELX, so that's compelling. 
+  - so i can use that reloc and go back to converting to load which works as well, 
+    and linker converts back to lea when it discovers it's local. 
+    i feel like that's better
+- also i was always using R_AMD64_PLT32 for any import which works for all my tests but must be wrong? 
+  plt = procedure linkage table = the stubs thing, which isn't ok if it's data rather than a call. 
+
 ## (Jun 27)
 
 - Experiments with the stupid skiping one the first symbol in macho symbol table

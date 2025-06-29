@@ -223,22 +223,14 @@ fn argsclass(i0: *Qbe.Ins, i1: *Qbe.Ins, carg: *Class, f: *Qbe.Fn) RCallArm = {
         c = c.offset(1);
         
         o := i.op();
-        is_byte   := @is(o, .argsb, .argub, .parsb, .parub);
-        is_half   := @is(o, .argsh, .arguh, .parsh, .paruh); 
+        @debug_assert(!is_parbh(o) && !is_argbh(o), "abi0");
         is_argpar := @is(o, .par, .arg);
-        if is_byte { 
-            c.size = 1;
-        };
-        if is_half { 
-            c.size = 2;
-        };
         if is_argpar {
             c.size = 8;
             if f.globals.target.apple && !is_wide(i.cls()) {
                 c.size = 4;
             };
-        };
-        if is_byte || is_half || is_argpar { 
+            
             c.align = c.size;
             c.cls&[0] = i.cls();
             if va {
@@ -458,10 +450,8 @@ selcall :: fn(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins, ilp: *List(Qbe.Ins)) void 
         if c.class.has(.Cstk) {
             off = align(off, c.align);
             r := f.newtmp("abi", .Kl);
-            if i.op() == .arg || is_argbh(i.op()) {
+            if i.op() == .arg {
                 o := @switch(c.size) {
-                    @case(1) => Qbe.O.storeb;
-                    @case(2) => Qbe.O.storeh;
                     @case(4) => c.cls&[0].store_op();
                     @case(8) => c.cls&[0].store_op();
                     @default => panic("unreachable stack size");
@@ -548,8 +538,8 @@ fn selpar(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) Params = {
             if c.class.has(.Cstk) {
                 // convert to a load from the stack slot
                 off = align(off, c.align);
-                o := if(is_parbh(i.op()), => rebase(i.op(), .loadsb, .parsb), => Qbe.O.load);
-                f.emit(o, c.cls&[0], i.to, SLOT(-(off+2)), QbeNull);
+                @debug_assert(!is_parbh(i.op()), "abi0");
+                f.emit(.load, c.cls&[0], i.to, SLOT(-(off+2)), QbeNull);
                 off += c.size;
             } else {
                 f.emit(.copy, c.cls&[0], i.to, TMP(c.reg&[0]), QbeNull);
