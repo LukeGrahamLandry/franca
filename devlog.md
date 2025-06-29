@@ -48,6 +48,29 @@
     i feel like that's better
 - also i was always using R_AMD64_PLT32 for any import which works for all my tests but must be wrong? 
   plt = procedure linkage table = the stubs thing, which isn't ok if it's data rather than a call. 
+- arm64 elf relocations for Call and InReg.
+- changes to support linux on arm
+  - make entry point just pass sp directly
+  - linux stat struct
+  - clear_instruction_cache
+    - glibc won't give me a `__clear_cache`, maybe there's a secret syscall for it (the table i use has one for riscv)?
+      but that seems bad for business and it's not what gcc does for a c program that calls `__builtin___clear_cache`, 
+      so i feel like its not a crime to just do whatever the magic instructions are youself. 
+    - ah consider, if you make `__clear_cache` not #weak and use a linker, i do get one (and it works, i can jit helloworld),
+      so like it only exists in magic builtin land so if you try to dynamically link to it you don't get one? 
+      but im not using the c compiler part so it's not builtin to the frontend.. it's like a linker builtin? 
+      that's very strange. even so, it seems weird that weak symbol means you can't get one statically. 
+    - but on the plus side, since it will only give it to me by pasting it into my binary, 
+      it's very easy to see what it's doing. now get to play my favourite game and pick out 
+      the instructions that have interesting looking mnemonics and look them up in the pdf 
+      - `mrs CTR_EL0`: Move System Register; Cache Type Register. D19.2.34
+        - like i did for pthreadjitwriteprotectnp but a different one
+      - `dc cvau`: Data Cache operation; Clean data cache by address to Point of Unification. C5.3.23 
+      - `dsb ish`: Data Synchronization Barrier
+      - `ic ivau`: Instruction Cache operation; Invalidate instruction cache by address to Point of Unification. C5.3.35 
+      - `isb`: Instruction Synchronization Barrier
+    - seems to work! very pleasing. 
+  - now i just need to catch illegal instruction signals for when i mess it up. 
 
 ## (Jun 27)
 

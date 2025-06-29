@@ -107,14 +107,61 @@ fn query_current_arch() Arch = current_arch();
 // - https://github.com/apple/darwin-libplatform/blob/main/src/cachecontrol/arm64/cache.s
 // - https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/sys_icache_invalidate.3.htmls
 //
-// TODO: do the magic machine code myself
-//
 fn clear_instruction_cache(beg: rawptr, end: rawptr) void = {
     if query_current_arch() == .aarch64 {
         // TODO: the NOSYS is a HACK to make -syscalls make a real static binary
         __clear_cache :: fn(beg: rawptr, end: rawptr) void #weak #libc #syscall(NOSYS, NOSYS, NOSYS);
-        __clear_cache(beg, end);
-    }
+        if query_current_os() == .macos {
+            __clear_cache(beg, end);
+        } else {
+            // glibc won't give me a dynamically linked __clear_cache() (but you get one if you make it 
+            // not #weak and link statically), so do it myself (these instructions don't work on apple). June 2025. 
+            impl :: AsmFunction(fn(beg: rawptr, end: rawptr) void = (), {
+                aarch64_clear_instruction_cache
+            }) { (out: *List(u8)) | 
+                out.push(0xc3); // unreachable
+            };
+            impl(beg, end);
+        };
+    };
+    @assert(query_current_arch() != .rv64);
+};
+
+// TODO: should probably align_back beg and align_to end, 
+//       surely if i have to flush one line at a time i can't do parts of a line 
+//       and i feel like trusting it to overestimate is worse than doing it myself. 
+aarch64_clear_instruction_cache :: { 
+    #use("@/backend/arm64/bits.fr"); 
+    start :: x0; end :: x1; p :: x2; step :: x3; info :: x4;
+@const_slice(
+    // get size of a cache line (can be different for data and instructions)
+    SYS(0b1, 0b11, 0b011, 0b0000, 0b0000, 0b001, info),  // msr CTR_EL0
+    // DminLine = info[19..=16]; IminLine = info[3..=0]
+    
+    // loop over the range and flush one d-cache line at a time
+    add_sr(.X64, step, xzr, info, .LSL, @as(u6) @as(i64) 63-19),
+    add_sr(.X64, step, xzr, step, .LSR, @as(u6) @as(i64) 63-(19-16+1)),
+    mov(.X64, p, start),
+    // a:
+    SYS(0b0, 0b01, 0b011, 0b0111, 0b1011, 0b001, p), // dc cvau
+    add_im(.X64, p, step, 0, 0), 
+    cmp(.X64, end, p),
+    b_cond(-3, .LO), // :a
+    SYS(0b0, 0b00, 0b011, 0b0011, 0b1011, 0b100, 0b11111), // dsb ish
+    
+    // loop over the range and flush one i-cache line at a time
+    add_sr(.X64, step, xzr, info, .LSL, @as(u6) @as(i64) 63-3),
+    add_sr(.X64, step, xzr, step, .LSR, @as(u6) @as(i64) 63-(3-0+1)),
+    mov(.X64, p, start),
+    // b:
+    SYS(0b0, 0b01, 0b011, 0b0111, 0b0101, 0b001, p), // ic ivau
+    add_im(.X64, p, step, 0, 0), 
+    cmp(.X64, end, p),
+    b_cond(-3, .LO), // :b
+    SYS(0b0, 0b00, 0b011, 0b0011, 0b1111, 0b110, 0b11111), // isb
+    
+    ret(),
+)
 };
 
 fn clear_instruction_cache(beg: rawptr, len: i64) void = 

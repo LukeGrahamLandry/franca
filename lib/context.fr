@@ -26,7 +26,7 @@ OS :: @static(ClearOnAotBake(Os)) (it = ComptimeEnvironment.ptr_from_raw(get_bui
 // note: whatever you had in the context at comptime is NOT baked into your program (unlike all other reachable memory).
 // For jitted code, you inherit the compiler's context. (TODO: maybe that should only be for comptime/drivers)
 // This also is not called for cached .frc programs run by the compiler (even though they're technically AOT too). 
-franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CStr, four: *CStr) void = {
+franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CStr, sp: i64) void = {
     // TODO: this will be wrong if you pass >4096 cli arguments
     is_sane_pointer :: fn(p: ~T) bool #where = {
         p := bit_cast_unchecked(@type p, i64, p);
@@ -34,7 +34,10 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
     };
     ::ptr_utils(CStr);
     
-    fp := align_stack();
+    align_stack(sp);
+    #use("@/lib/sys/process.fr");
+    // This is very fragile. relies on compiler/worker.fr/wrap_with_runtime_init and backend/<arch>/emit.fr
+    sp += @if(query_current_arch() == .aarch64, 0x40, 0x48);
     
     // If you pass a .frc file to the compiler directly, it assumes it's a driver so the first argument 
     // will be a *ImportVTable, and we can skip the runtime setup stuff and just inherit its panic handler, etc. 
@@ -55,7 +58,7 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
     is_linux := is_sane_pointer(argc) || !is_sane_pointer(envp) || !is_sane_pointer(argv);
     
     if is_linux {
-        entry_args_from_stack_linux(argc&, argv&, envp&, fp);
+        entry_args_from_stack_linux(argc&, argv&, envp&, sp);
     } else {
         // if the args to main looked reasonable, assume we're in a hosted libc. 
         // which is always true on macos, and true on linux if we didn't make the exe ourself 
@@ -72,7 +75,6 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
     
     OS[].it = @if(is_linux, .linux, .macos);
     @assert(!(is_sane_pointer(argc) || !is_sane_pointer(envp) || !is_sane_pointer(argv)), "failed to guess os");
-    
     
     CAPTURE :: @static(@FnPtr() void);
     CAPTURE[] = user;
@@ -133,17 +135,9 @@ fn query_current_os() Os = {
 // Also on linux glib expects the stack to be 16 byte aligned but the kernel doesn't do that for you. 
 //
 // The forced #inline is important! We need this call to not fuck with the stack. 
-fn align_stack() i64 #inline = {
-    // TODO: start_trace
+fn align_stack(s: i64) void #inline = {
     #use("@/backend/amd64/bits.fr");
     #use("@/backend/arm64/bits.fr");
-    
-    get_fp :: AsmFunction(fn() i64 = (), {
-        // TODO: i think this is wrong. i want callers starting sp but frame layout isn't the same as for amd
-        @const_slice(mov(Bits.X64, x0, fp), ret())
-    }) { (out: *List(u8)) |
-        @asm_x64(encode_bin(PrimaryOp.MovReg, X86Reg.rax, X86Reg.rbp), PrimaryOp.Ret) out;
-    };
     
     fix_stack :: AsmFunction(fn() void = (), {
         @const_slice(ret(),ret())  // hopefully unreachable. i think the stack alignment hting is much more strict on arm. 
@@ -155,18 +149,39 @@ fn align_stack() i64 #inline = {
         PrimaryOp.Ret,
     ) out;};
     
-    s := get_fp();
     @debug_assert_eq(s.mod(8), 0);
     if s.mod(16) != 0 {
         fix_stack();
     };
-    s
 }
 
-fn entry_args_from_stack_linux(argc: *i64, argv: **CStr, envp: **CStr, fp: i64) void #inline = {
-    caller_frame := ptr_from_int(*Ty(i64, i64, CStr), fp)[];
-    argv[] = caller_frame._2&;
-    argc[] = caller_frame._1;
+//
+// <low addresses>
+// 
+// (^^^ stack grows this way ^^^)
+// [stack frame of user_main()]
+// [stack frame of franca_runtime_init()]
+// [stack frame of builtin_main()]
+// argc  <- initial sp set by the kernel points here
+// argv[0]
+// ...
+// argv[argc] = 0
+// envp[0]
+// ...
+// envp[N] = 0
+// aux key [0]
+// aux val [0]
+// ...
+// aux key [M] = 0
+// aux val [M] = 0
+// 
+// <high addresses>
+//
+
+fn entry_args_from_stack_linux(argc: *i64, argv: **CStr, envp: **CStr, sp: i64) void #inline = {
+    caller_frame := ptr_from_int(Ty(i64, CStr), sp);
+    argv[] = caller_frame._1&;
+    argc[] = caller_frame._0;
     envp[] = argv[].offset(argc[] + 1);
 }
 

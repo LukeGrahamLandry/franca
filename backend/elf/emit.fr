@@ -558,6 +558,17 @@ create_rela_table :: fn(
     };
     
     each fixups { fix |
+        // got_lookup_offset is set by create_symbol_table()
+        sym: u32 = trunc(fix.symbol.got_lookup_offset + 1);
+        
+        // the target offset is relative to 
+        // - exe: the virtual base address of the executable
+        // - linker: the start of the segment
+        off := @if(reloc, 
+            ptr_diff(section_base_address, fix.fix.patch_at),
+            ptr_diff(m.segments&[.Code].mmapped.ptr, fix.fix.patch_at) + Elf.MYSTERY_SPICE, 
+        );
+        
         type, increment := @match(fix.fix.type&) {
             fn DataAbsolute(it) => {
                 i64.ptr_from_raw(fix.fix.patch_at)[] = 0;
@@ -578,19 +589,44 @@ create_rela_table :: fn(
                     @else            => Elf.R_AMD64_PC32;
                 }, it.increment - 4 /* :IncOffByFour */)
             };
+            fn Call(it) => {
+                @debug_assert(m.goal.arch != .x86_64);
+                b, bl := @match(m.goal.arch) {
+                    fn aarch64() => (Elf.R_AARCH64_JUMP26, Elf.R_AARCH64_CALL26);
+                    @default => todo();
+                };
+                (@if(it.set_link, bl, b), 0)
+            }
+            fn InReg(it) => {
+                @debug_assert(m.goal.arch != .x86_64);
+                it.got_load = it.got_load && fix.symbol.kind != .Local;
+                
+                adrp_local, add_local, adrp_got, ldr_got := @match(m.goal.arch) {
+                    fn aarch64() => (
+                        Elf.R_AARCH64_ADR_PREL_PG_HI21, Elf.R_AARCH64_ADD_ABS_LO12_NC,
+                        Elf.R_AARCH64_ADR_GOT_PAGE, Elf.R_AARCH64_LD64_GOT_LO12_NC,
+                    );
+                    @default => todo();
+                };
+                
+                fst, snd := @if(it.got_load, 
+                    (adrp_got, ldr_got),
+                    (adrp_local, add_local));
+                
+                inc := it.increment;
+                e.payload&.reserve_type(Elf.RelA)[] = (
+                    sym = sym,  
+                    offset = off,
+                    addend = inc,
+                    type = fst.trunc(),
+                );
+                off += 4;
+                (snd, inc)
+            }
             @default => @panic("TODO: elf fixup: %", fix.fix.type&.tag());
         };
-        
-        // the target offset is relative to 
-        // - exe: the virtual base address of the executable
-        // - linker: the start of the segment
-        off := @if(reloc, 
-            ptr_diff(section_base_address, fix.fix.patch_at),
-            ptr_diff(m.segments&[.Code].mmapped.ptr, fix.fix.patch_at) + Elf.MYSTERY_SPICE, 
-        );
-        
         e.payload&.reserve_type(Elf.RelA)[] = (
-            sym = trunc(fix.symbol.got_lookup_offset + 1),  // got_lookup_offset is set by create_symbol_table()
+            sym = sym,  
             offset = off,
             addend = increment,
             type = type.trunc(),
