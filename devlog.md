@@ -12,6 +12,9 @@
   the stupid cOdER puzzles. so just need to count how many times you change 
   from doing one bits to doing zero bits, and can do that without a loop which is nice. 
   and then figuring how much to rotate is a bit hard to think about but much easier. 
+- actually use it in isel+emit.
+  before: 1199181b, after: 1182765b, same time 1075ms. 
+  kinda not worth the effort. 
 
 ## (Jun 28)
 

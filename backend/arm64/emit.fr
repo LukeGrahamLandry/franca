@@ -266,23 +266,7 @@ fn prelude_grow_stack(self: *ArmState) void = {
         return();
     };
     r := arm_scratch_int.int_id();
-    
-    if self.frame <= 65535 {
-        self.inst(movz(Bits.X64, r, self.frame.trunc(), .Left0));
-        self.inst(sub_er(Bits.X64, sp, sp, r));
-        self.inst(stp_pre(Bits.X64, fp, lr, sp, negative_16)); 
-        return();
-    };
-    
-    // :StackSizeLimit
-    // could remove this limit and just add another case with more movks.
-    // but whatever allocated your stack for you isn't gonna give you this much either
-    @assert_lt(self.frame, 1.shift_left(32), "we don't allow >4GB stack frame"); 
-    
-    top := self.frame.shift_right_logical(16);
-    bottom := self.frame.bit_and(0xFFFF);    
-    self.inst(movz(Bits.X64, r, bottom.trunc(), .Left0));
-    self.inst(movk(Bits.X64, r, top.trunc(), .Left16));
+    loadcon_bits(self, self.frame, r, true);
     self.inst(sub_er(Bits.X64, sp, sp, r));
     self.inst(stp_pre(Bits.X64, fp, lr, sp, negative_16)); 
 }
@@ -304,20 +288,8 @@ fn epilogue_shrink_stack(self: *ArmState) void = {
         return();
     };
     r := arm_scratch_int.int_id();
-    
-    if o - 16 <= 65535 {
-        self.inst(ldp_post(Bits.X64, fp, lr, sp, @as(i7) 2)); // 16 encoded as imm7/8
-        self.inst(movz(Bits.X64, r, o.trunc() - 16, .Left0));
-        self.inst(add_er(Bits.X64, sp, sp, r));
-        return();
-    };
-    
-    // :StackSizeLimit
-    top:    u16 = (o - 16).shift_right_logical(16).trunc();
-    bottom: u16 = (o - 16).bit_and(0xFFFF).trunc();
     self.inst(ldp_post(Bits.X64, fp, lr, sp, @as(i7) 2)); // 16 encoded as imm7/8
-    self.inst(movz(Bits.X64, r, bottom, .Left0));
-    self.inst(movk(Bits.X64, r, top, .Left16));
+    loadcon_bits(self, o - 16, r, true);
     self.inst(add_er(Bits.X64, sp, sp, r));
 }
 
@@ -425,6 +397,10 @@ fn loadcon(self: *ArmState, c: *Qbe.Con, r: i64, k: Qbe.Cls) void #once = {
         return();
     };
     @debug_assert(c.type() == .CBits, "bad constant");
+    loadcon_bits(self, n, r, w);
+}
+    
+fn loadcon_bits(self: *ArmState, n: i64, r: i64, w: bool) void = {
     s := Bits.X64;
     if !w {
         s = .W32;
@@ -441,15 +417,21 @@ fn loadcon(self: *ArmState, c: *Qbe.Con, r: i64, k: Qbe.Cls) void #once = {
         self.inst(movn(s, r, n.bit_not().trunc(), .Left0));
         return();
     };
-    // TODO: qbe uses arm64_logimm to get more cases (but we need more instruction encoding logic for that).
-    // TODO: choose best instruction to start with movz/movn instead of assuming movz
 
+    if encode_bitmask(n, w) { imm |
+        // MOV (bitmask immediate) = ORR (immediate) 
+        self.inst(@bits(s, 0b01, 0b100100, @as(u13) imm, 0b11111, @as(u5) r));
+        return();
+    };
+    
+    // TODO: choose best instruction to start with movz/movn instead of assuming movz
     // this uses movz for the first chunk and then movk for the rest. 
     first := true;
     for_enum Hw { shift_encode | 
         part: u16 = n.bit_and(0xffff).trunc();
         n = n.shift_right_logical(16);
         if part != 0 {
+            ::if(u32);
             op := if first {
                 first = false;
                 movz(s, r, part, shift_encode)
@@ -716,9 +698,9 @@ fn emitins(self: *ArmState, i: *Qbe.Ins, b: *Qbe.Blk) void = {
         fn sar()  => encode_shift(self, i, 0b0, 0b10, fn(imm, mask) => (imm, mask));
         fn shr()  => encode_shift(self, i, 0b1, 0b01, fn(imm, mask) => (imm, mask));
         fn shl()  => encode_shift(self, i, 0b1, 0b00, fn(imm, mask) => (mask + 1 - imm, mask - imm));
-        fn or()   => int_bin(fn(s, d, a, b) => orr(s, d, a, b, .LSL, 0));
-        fn xor()  => int_bin(fn(s, d, a, b) => eor(s, d, a, b, .LSL, 0));
-        fn and()  => int_bin(fn(s, d, a, b) => and_sr(s, d, a, b, .LSL, 0));
+        fn or()   => encode_logical(self, i, 0b01);
+        fn xor()  => encode_logical(self, i, 0b10); 
+        fn and()  => encode_logical(self, i, 0b00);
         fn rem()  => encode_rem(self, i, 0b1);
         fn urem() => encode_rem(self, i, 0b0);
         fn extsb()  => int_un(fn(s, d, a) => bfm(s, 0b0, 0b000000, 0b000111, d, a)); // sxtb
@@ -976,6 +958,18 @@ fn encode_rem(self: *ArmState, i: *Qbe.Ins, $signed: u1) void = {
     dest, dividend, divisor, scratch := (i.to.int_reg(), i.arg&[0].int_reg(), i.arg&[1].int_reg(), arm_scratch_int.int_id());
     self.inst(@bits(si, 0b0011010110, divisor, 0b00001, signed, dividend, scratch));  // scratch = dividend / divisor;
     self.inst(msub(si, dest, scratch, divisor, dividend));                            // dest = dividend - scratch * divisor;
+}
+
+fn encode_logical(self: *ArmState, i: *Qbe.Ins, hi: u2) void = {
+    si := @if(i.cls().is_wide(), Bits.X64, Bits.W32);
+    d, a0 := (i.to.int_reg(), i.arg&[0].int_reg());
+    self.inst(if rtype(i.arg&[1]) == .RTmp {
+        a1 := i.arg&[1].int_reg();
+        @bits(si, hi, 0b01010, Shift.LSL, 0b0, a1, 0b000000, a0, d)
+    } else {
+        imm := i.arg&[1].val();
+        @bits(si, hi, 0b100100, @as(u13) imm, a0, d)
+    });
 }
 
 // same as qbe

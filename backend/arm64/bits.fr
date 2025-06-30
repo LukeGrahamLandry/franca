@@ -376,3 +376,95 @@ arm_nop :: 0b11010101000000110010000000011111;
 
 // hint #34; something about control flow integrity. you seem to need this to make function pointers work. 
 branch_target_marker :: 0xd503245f;
+
+//
+// bit mask immediate for bits[22..=10] of an and/orr/eor instruction.
+// 
+// a pattern of `size` bits repeated for the whole value. 
+// the pattern has `length` consecutive ones, and the rest zeroes. 
+// start with all the ones on the right, then rotate right by `immr`. 
+//
+// so the number will have an island of ones for each time the pattern is repeated. 
+// rotate by 1 and xor counts how many times you hit the edge of an island.  
+// (the parts where consecutive digits are the same get cancel out in the xor 
+// and you're left with only the places the digit changed). 
+// 1101110111011101 value
+// 1011101110111011 value.rotl(1)
+// 0110011001100110 xor
+// 8 ones -> (16 / (8 / 2)) = 4
+//
+// all the ones in the pattern must be together so count_ones(pattern) = `length`
+//
+// the initial computed pattern will have all the ones at the end, 
+// `immr` is the right rotation applied to get our pattern. 
+// but it's easier to think about as what left rotation needs 
+// to be applied to our pattern to make all the ones be at the end. 
+// - ends in 0s: rotate them out to the right (= opposite amount left)
+// - ends in 1s: rotate all the high ones left to the bottom
+// 
+encode_bitmask :: fn(value: i64, w: bool) ?i64 = {
+    if !w {
+        value = value.bit_and(1.shift_left(32) - 1);
+        value = value.bit_or(value.shift_left(32));
+    };
+    island_edges: i64 = value.rotate_left(1).bit_xor(value).count_ones().zext();
+    island_count := island_edges / 2;
+    size: i64 = 64 / island_count;
+    
+    pattern := value.bit_and(1.shift_left(size) - 1);
+    if size == 64 {
+        pattern = value;
+    };
+    length: i64 = pattern.count_ones().zext() - 1;
+    imms := encode_imms(size, length);
+    n := int(size == 64);
+    
+    immr := if pattern.mod(2) == 0 {
+        size - pattern.trailing_zeros()
+    } else {
+        total_ones := length + 1;
+        low_ones := pattern.trailing_ones();
+        total_ones - low_ones
+    };
+    
+    if immr < 0 || imms < 0 {
+        return(.None);
+    };
+    if value.rotate_left(size) != value {
+        return(.None);
+    };
+    @debug_assert_eq(decode_bitmask(n, immr, imms), value);
+    @debug_assert(size > 0 && size <= 64);
+
+    // !w: pattern can't be >32 bits because they were replicated at the beginning
+    @debug_assert(w || n == 0);  
+    
+    inst := concat_bitmask(n, immr, imms);
+    @debug_assert_eq(inst.bit_and(1.shift_left(13) - 1), inst);
+    (Some = inst)
+};
+
+concat_bitmask :: fn(n: i64, immr: i64, imms: i64) i64 = 
+    n.shift_left(12).bit_or(immr.shift_left(6)).bit_or(imms);
+
+encode_imms :: fn(size: i64, length: i64) i64 = {
+    i := size.min(32).trailing_zeros();
+    j := (1.shift_left(5-i) - 1);
+    j.shift_left(i + 1).bit_and(0b111111).bit_or(length)
+};
+
+decode_bitmask :: fn(n: i64, immr: i64, imms: i64) i64 = {
+    imms := imms.bit_or((1 - n).shift_left(6)).bit_or(1.shift_left(7));
+    i := imms.shift_left(64-8).leading_ones();
+    
+    size := 1.shift_left(7 - i);
+    length := imms.bit_and(1.shift_left(size.trailing_zeros()) - 1);
+    
+    mask := 1.shift_left(length + 1) - 1;
+    value := 0;
+    range(0, 64 / size) { _ |
+        value = value.shift_left(size).bit_or(mask);
+    };
+    value = value.rotate_right(immr);
+    value
+};

@@ -66,6 +66,7 @@ You can still print out the ir as human readable text between passes and modify 
 - added peephole optimisations for arm isel: ~40% code size reduction vs Qbe on the franca compiler.
   - use of u12 immediate for add, ldr, and store instructions.
   - use immediates for shifts.
+  - use immediates for and/or/xor.
   - fuse mul followed by add into 3 arg madd.
 - Inline small (single block) functions.
 - Elide some redundant memory operations introduced when the abi passes aggregates in registers.
@@ -74,7 +75,6 @@ You can still print out the ir as human readable text between passes and modify 
 - Strength reduction for signed div/rem by power of two (using a conditional move to get the right rounding for negative numbers). 
 - Removed several codegen optimisations until we have a solid foundation (but I want to bring them back eventually).
   - all: load float constants from memory (instead of using int immediate + fmov)
-  - arm: bit field immediate to load int more constants in a single instruction
   - amd: negating floats by xoring from memory
   - amd: use spilled floats directly from memory
 

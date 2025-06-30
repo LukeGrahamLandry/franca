@@ -123,7 +123,6 @@ fn fix_memarg(f: *Qbe.Fn, i: *Qbe.Ins) *Qbe.Ref = {
     
     max_off := size * 4096;
     if(off < 0 || off >= max_off || off.mod(size) != 0, => return(r));
-    if(new_addr == QbeNull && off.mod(4) != 0, => return(r));
     
     chuse(new_addr, 1, f);
     chuse(r[], -1, f);
@@ -165,7 +164,6 @@ fn fuse_addr(f: *Qbe.Fn, a: Qbe.Ref, size: i64) Ty(Qbe.Ref, i64) = {
             @debug_assert(def_a[0] != QbeNull, "add missing arg");
             return(def_a[0], off);
         };
-        // TODO: stop representing RSlot as divided by 4 so you don't have to skip doing this for access of a single byte 3/4 of the time. -- Nov 3
         fn addr() => {
             slot := f.get_slot(def_a[0]).expect("can only addr stack slot");
             return(QbeNull, slot);
@@ -267,6 +265,11 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32) void = {
             k0 := argcls(i&, 0);
             k1 := argcls(i&, 1);
             
+            commutes := (@is(o, .and, .or, .xor, .add));
+            if commutes && rtype(iarg[0]) == .RCon {
+                i.arg&.items().swap(0, 1);
+            };
+            
             if o == .ctz {  // 0b101101011000000000110 is ctz... but it doesn't exist? I guess i don't have FEAT_CSSC?
                 new_ins.set_op(.clz);
                 r := f.newtmp("isel", k0);
@@ -335,6 +338,15 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32) void = {
                 // Since these are done modulo data size, we can fit any constant in the immediate. 
                 if f.get_int(iarg[1]) { _ |
                     return();
+                };
+            };
+            if (@is(o, .and, .or, .xor)) {
+                if f.get_int(iarg[1]) { value |
+                    enc :: import("@/backend/arm64/bits.fr").encode_bitmask;
+                    if enc(value, k1.is_wide()) { inst |
+                        iarg[1] = INT(inst);
+                        return();
+                    };
                 };
             };
             
