@@ -1,4 +1,18 @@
 
+## (Jun 29)
+
+- i don't like seeing `mov x, 4; and a, b, x` in the disassembly, 
+  so i want to do bit mask immediates but it's such an infinite nightmare somehow. 
+  the spec gives you psudocode for decoding but not for encoding. 
+  once you can visualize the unintelligable paragraph it almost feels like it should 
+  be easy, like count the number of bits of the end type and then shift those off 
+  and count the number of the opposite type, but you don't know how big the pattern 
+  is so they might bleed into each other. surely you don't have to just try all the options. 
+  i think the insight is to think of it as counting islands of ones like 
+  the stupid cOdER puzzles. so just need to count how many times you change 
+  from doing one bits to doing zero bits, and can do that without a loop which is nice. 
+  and then figuring how much to rotate is a bit hard to think about but much easier. 
+
 ## (Jun 28)
 
 - removed unreachable code that handled b/h arg/par in arm abi.

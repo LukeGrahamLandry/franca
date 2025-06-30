@@ -1,0 +1,155 @@
+main :: fn() void = {
+    out := u8.list(temp());
+    
+    iter_bitmasks { a |
+        display(a&, out&);
+        
+        n, immr, imms := encode_bitmask(a.value).unwrap();
+        @assert(a.n == n && a.immr == immr && a.imms == imms);
+    };
+
+    out.len -= 1;
+    print(out&.items());
+};
+
+fn decode_bitmask(n: i64, immr: i64, imms: i64) i64 = {
+    imms := imms.bit_or((1 - n).shift_left(6)).bit_or(1.shift_left(7));
+    i := imms.shift_left(64-8).leading_ones();
+    
+    size := 1.shift_left(7 - i);
+    length := imms.bit_and(1.shift_left(size.trailing_zeros()) - 1);
+    
+    mask := 1.shift_left(length + 1) - 1;
+    value := 0;
+    range(0, 64 / size) { _ |
+        value = value.shift_left(size).bit_or(mask);
+    };
+    value = value.rotate_right(immr);
+    value
+}
+
+// 
+// a pattern of `size` bits repeated for the whole value. 
+// the pattern has `length` consecutive ones, and the rest zeroes. 
+// start with all the ones on the right, then rotate right by `immr`. 
+//
+// so the number will have an island of ones for each time the pattern is repeated. 
+// rotate by 1 and xor counts how many times you hit the edge of an island.  
+// (the parts where consecutive digits are the same get cancel out in the xor 
+// and you're left with only the places the digit changed). 
+// 1101110111011101 value
+// 1011101110111011 value.rotl(1)
+// 0110011001100110 xor
+// 8 ones -> (16 / (8 / 2)) = 4
+//
+// all the ones in the pattern must be together so count_ones(pattern) = `length`
+//
+// the initial computed pattern will have all the ones at the end, 
+// `immr` is the right rotation applied to get our pattern. 
+// but it's easier to think about as what left rotation needs 
+// to be applied to our pattern to make all the ones be at the end. 
+// - ends in 0s: rotate them out to the right (= opposite amount left)
+// - ends in 1s: rotate all the high ones left to the bottom
+// 
+fn encode_bitmask(value: i64) ?Ty(i64, i64, i64) = {
+    island_edges: i64 = value.rotate_left(1).bit_xor(value).count_ones().zext();
+    island_count := island_edges / 2;
+    size: i64 = 64 / island_count;
+    
+    pattern := value.bit_and(1.shift_left(size) - 1);
+    if size == 64 {
+        pattern = value;
+    }
+    length: i64 = pattern.count_ones().zext() - 1;
+    imms := encode_imms(size, length);
+    n := int(size == 64);
+    
+    immr := if pattern.mod(2) == 0 {
+        size - pattern.trailing_zeros()
+    } else {
+        total_ones := length + 1;
+        low_ones := pattern.trailing_ones();
+        total_ones - low_ones
+    };
+    
+    if decode_bitmask(n, immr, imms) != value {
+        return(.None);
+    };
+    
+    (Some = (n, immr, imms))
+}
+
+fn encode_imms(size: i64, length: i64) i64 = {
+    i := size.min(32).trailing_zeros();
+    j := (1.shift_left(5-i) - 1);
+    j.shift_left(i + 1).bit_and(0b111111).bit_or(length)
+}
+
+fn iter_bitmasks($body: @Fn(it: BitMask) void) void = {
+    range(1, 7) { size |
+        size = 1.shift_left(size);
+        range(0, size-1) { length |
+            range(0, size) { immr |
+                n := int(size == 64);
+                imms := encode_imms(size, length);
+                value := decode_bitmask(n, immr, imms);
+                body(n = n, immr = immr, imms = imms, value = value, length = length, size = size);
+            };
+        };
+    };
+}
+
+// Output format matches https://gist.github.com/dinfuehr/51a01ac58c0b23e4de9aac313ed6a06a 
+// so they can be diff-ed to make sure i encode everything right. 
+fn display(it: *BitMask, out: *List(u8)) void = {
+    @fmt(out, "% % size=% length=% rotation=% N=% immr=% imms=%\n",
+        BITS(it.value, HEX, 16),
+        BITS(it.value, BIN, 64),
+        BITS(it.size, DEC, 2),
+        BITS(it.length, DEC, 2),
+        BITS(it.immr, DEC, 2),
+        BITS(it.n, BIN, 1),
+        BITS(it.immr, BIN, 6),
+        BITS(it.imms, BIN, 6),
+    );
+}
+
+fn FmtBits($pad: i64, $chars: Str) Type = {
+    Self :: @struct(value: i64);
+    fn display(self: Self, out: *List(u8)) void = {
+        print_base(out, self.value, chars, pad);
+    }
+    Self
+}
+
+BITS :: fn(value: i64, $chars: Str, $pad: i64) FmtBits(pad, chars) #generic = 
+    (value = value);
+
+BitMask :: @struct {
+    value: i64;
+    size: i64;
+    length: i64;
+    n: i64;
+    immr: i64;  // rotation
+    imms: i64;
+}
+
+HEX :: "0123456789abcdef";
+BIN :: "01";
+DEC :: "0123456789";
+
+fn print_base(out: *List(u8), n: i64, chars: Str, $pad: i64) void = {
+    n: u64 = n.bitcast();
+    buf := zeroed Array(u8, pad);
+    
+    i := pad - 1;
+    while => n != 0 && i >= 0 {
+        buf&[i] = chars[n.mod(chars.len.bitcast()).bitcast()];
+        i -= 1;
+        n /= chars.len.bitcast();
+    };
+    range(0, i+1) { i |
+        buf&[i] = "0".ascii();
+    };
+    out.push_all(buf&.items());
+}
