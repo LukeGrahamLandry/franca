@@ -8,9 +8,22 @@ notably those are all things to aren't going to change if you're just working on
 
 ---
 
+repro is broken! 
+my guess is the emit_ir eval order change for Stmt.Set means it copies 
+uninitialized stack into your program now
+
+---
+
 - "this works here but not in it's original place under f()."
 - :ThisIsNotOkBecauseMemoryWillBeReused
 - give data symbols readable names now that they show up in symbol table
+- there's still a compilation order problem with inlining intrinsics. look at copy_bytes(). 
+- dynamiclib is kinda broken because i rely on OS being set by runtime_init
+- can't cross compile from (macos) to (linux -syscalls) if you call 
+  write_entire_file at comptime because it wants gettime (for atomic file name, bleh)
+  which i havn't transcribed syscall for on macos. will be fixed when i make prefer_syscall
+  not a constant which i want to do anyway for reusing frc_inlinable when cross compiling. 
+  (same for linux-sta -> linux-dyn)
 
 ## import_symbol / weak
 
@@ -135,6 +148,9 @@ hould just make them local constants in each file like they are here in riscv
 - test that function names don't appear in the binary when exe_debug_symbol_table=false and do when true.
 - test that makes a dylib
 - macho exe_debug_symbol_table doesn't work i clion profiler (dtrace?)
+- make sure the string "franca" doesn't show up in binaries. ie `__franca_aot_debug_info` symbol offends me
+- i want the module made for static_memmove in opt/simplify.fr to not include 
+`__franca_base_address` and `__franca_aot_debug_info`
 
 ## don't rely on libc
 
@@ -181,6 +197,7 @@ so something in the data i guess?
 - be less strict about amd64 address folding when there's a large constant pointer (which is valid when jitting)
   - idk, i might have done this already? 
 - CLOCK_REALTIME
+- integer division by zero traps. so cross compiling isn't totally transparent. 
 
 ---
 
@@ -213,7 +230,6 @@ program_source:26:5: error: constant sampler must be declared constexpr
 - wasm:     get all the ssa tests passing verifier
 - linux:    finish transcribing structs so FRANCA_BACKTRACE=true works. make all the tests pass with -syscalls
 - external: make it not a 100 line copy-paste to setup a driver that links an object file
-- llvm:     get all the ssa tests working
 
 ## Caching
 
@@ -406,12 +422,10 @@ just a problem with how that program is doing directions not with the app lib)
 
 ## stuff i broke
 
-- `fn emit_llvm(m: *QbeModule, dat: *Qbe.Dat) void = {` update to new Dat2
 - adding #align was a compile speed regression
 - `./q.out -t wasm32 -o target/out/q.wasm -cc backend/test/abi8.ssa -d AI`
 %�%.104 =w pop
 - fast memcpy (need to deal with fallback when not linking a libc)
-- to build on linux from -syscalls to linking libc you need to turn off ENABLE_COMMANDS in default_driver.fr
 
 ## Introspection 
 

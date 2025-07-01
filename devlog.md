@@ -1,4 +1,9 @@
 
+## (Jun 30)
+
+- something fishy going on with staticmemmove needing an extra step in runtests bootstrapping. 
+  need to make sure repro works otherwise before i can debug that sanely tho. 
+
 ## (Jun 29)
 
 - i don't like seeing `mov x, 4; and a, b, x` in the disassembly, 
@@ -15,6 +20,38 @@
 - actually use it in isel+emit.
   before: 1199181b, after: 1182765b, same time 1075ms. 
   kinda not worth the effort. 
+- (when linking libc) convert large blit to memmove call on all arches 
+  instead of hardcoding arm abi in a dumb place.
+  franca-macos-amd64: 1540752 -> 1409696 (8.5%). 
+- so that's enough that i really should do it when -syscalls too. 
+  - the sane option would just have the symbol to use as memmove passed in when you
+    create the module, but the more interesting thing would be to just 
+    compile the `copy_bytes()` alone into a .frc at comptime and load 
+    that as needed. which is pretty painful but i think i have to do it 
+    that way because it's the kind of thing that's supposed to be easy 
+    in this language so using that power gives a chance to improve the experience. 
+    then you could do that for other compiler-rt-ish things like wasm needs byteswap
+    or whatever and it would be easier to write that once in franca instead of with @emit_instructions. 
+  - problems with not inlining all the intrinsics reliably or if it happens in the backend 
+    somehow instead of emit_ir you still get them emitted in the module even if not called? 
+    and if there's other functions in there, it's hard to find the function you care about 
+    because the name gets mangled. need to be able to ask for the name. tho fmt_fn_name 
+    is in ast_external so i could call it but it's probably better to put that in the vtable 
+    so it's easier to change. 
+
+--- 
+
+- i need signal handlers on linux to make the compiler work reliably on linux arm. 
+seems like i might have to do extra stuff for that? 
+```
+SA_RESTORER
+Not intended for application use.  This flag is used by C
+libraries to indicate that the sa_restorer field contains
+the address of a "signal trampoline".  See sigreturn(2) for
+more details.
+```
+so im probably a libc not an application so i guess i need to do sigreturn syscall at the end, 
+that makes sense to me. 
 
 ## (Jun 28)
 

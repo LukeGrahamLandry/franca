@@ -45,9 +45,16 @@ ENABLE_INLINING    :: true;   // 480ms r
 ENABLE_ELIDE_SLOTS :: true;   // 240ms l
 ENABLE_PROMOTE     :: true;   // 230ms q
 ENABLE_CONST_FOLD  :: true && //  40ms q
-    { c := current_compiler_context(); c'vtable'frc_module_magic_v == Incremental.MAGIC };
+    matching_comptime_incremental_abi;
     // opt/fold.fr generates a module at comptime and includes that at comptime, 
     // so it can only be enabled when the host compiler has the same ir abi as the source code being compiled. 
+
+matching_comptime_incremental_abi :: { 
+    c := current_compiler_context(); 
+    c'vtable'frc_module_magic_v == Incremental.MAGIC 
+};
+
+prefer_libc_memmove :: true;
 
 Arm  :: import("@/backend/arm64/bits.fr");
 Amd  :: import("@/backend/amd64/bits.fr");
@@ -86,6 +93,7 @@ fn emit_qbe_included_dyn(m: *QbeModule, comp: *CompCtx, fns: [] FuncId, entry: P
 // TODO: ir test that uses opaque types
 
 QbeModule :: @rec @struct(
+    save: ?@if(enable_incremental(), *Incremental.Writer, i64),
     types: RawList(Qbe.Typ),
     insb: *Array(Qbe.Ins, 1.shift_left(20)), // MaxInstructions
     curi: *Qbe.Ins,
@@ -125,6 +133,9 @@ QbeModule :: @rec @struct(
     wasm_has_any_indirect_calls: bool,
     wasm_any_pare: bool,
     
+    need_static_memmove: bool,
+    have_static_memmove: bool,
+    
     start_of_executable_stubs: *u8,
     
     debug_info: @struct {
@@ -141,7 +152,6 @@ QbeModule :: @rec @struct(
     use_map_jit_on_apple_silicon: bool,
     wasm_types_cache: HashMap([]u8, i32),
     libraries: RawList(Str),  // :SLOW but n=4 so like it's probably fine 
-    save: ?@if(enable_incremental(), *Incremental.Writer, i64),
 );
 
 // :UpdateBoot
@@ -355,8 +365,10 @@ fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
     m.debug  = forever.box_zeroed(@type m.debug[]);
     
     m.curi = m.insb.index_unchecked(Qbe.MaxInstructions);
-    if m.goal.arch != .wasm32 {
+    if m.goal.link_libc && prefer_libc_memmove {
         m.symbol_memmove = m.intern("memmove");
+    } else {
+        m.symbol_memmove = m.intern("__franca_builtin_static_memmove");
     };
     
     // :leak
