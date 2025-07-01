@@ -1189,7 +1189,7 @@ fn expand_spread(self: *SelfHosted, parts: *RawList(FatExpr), requested_types: [
     a := self.get_alloc();
     parts.reserve(extra, a);
     range(0, extra) { _ |
-        parts.push(spread_value.deep_clone(a), a);
+        parts.push(self.clone(spread_value), a);
     };
     .Ok
 }
@@ -1407,7 +1407,7 @@ fn contextual_field(self: *SelfHosted, name: Symbol, expr_out: *FatExpr, type: T
             each f.fields { f |
                 if f._0 == name {
                     ff := f._1&;
-                    value := ff.deep_clone(self.get_alloc());
+                    value := ff.clone(self.get_alloc());
                     expr_out.set(value, type);
                     return(.Ok);
                 };
@@ -1693,7 +1693,7 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
             @if_let(func.body&) fn Normal(value) => {
                 if value.expr&.is(.Value) {
                     bytes := value.expr.Value.bytes&;
-                    expr.set(bytes.deep_clone(self.get_alloc()), ret_ty);
+                    expr.set(bytes.clone(self.get_alloc()), ret_ty);
                 };
             };
         };
@@ -1830,7 +1830,7 @@ fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, request
     };
     may_have_early_return := !aliased_body.expr&.is(.Value);
     arg := func.arg&;
-    pattern := arg.deep_clone(self.get_alloc());
+    pattern := self.clone(arg);
     
     // TODO: you want to be able to share work (across all the call-sites) compiling parts of the body that don't depend on the captured variables
     old_ret_var := func.return_var.expect("return var");
@@ -1847,7 +1847,7 @@ fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, request
         temp
     } else {
         z := zone_begin(.CloneExpr);
-        e := aliased_body.deep_clone(self.get_alloc());
+        e := self.clone(aliased_body);
         zone_end(z);
         e
     };
@@ -2062,7 +2062,7 @@ fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg
     @debug_assert(func.get_flag(.AnyConstArgs), "baking const args but none are there");
     
     // Some part of the argument must be known at comptime.
-    new_func := func.deep_clone(self.get_alloc());
+    new_func := self.clone(func);
     new_func&.set_flag(.DisallowInOverloadSet);
     mapping: RenumberResults = init();
     self.renumber_func(new_func&, mapping&);
@@ -2922,7 +2922,7 @@ fn evaluate_where_clauses(self: *SelfHosted, fid: FuncId, generic_types: []Type,
 fn instantiate_where_generic(self: *SelfHosted, template: FuncId, generic_types: []Type) Maybe(FuncId) = {
     template_func := self.get_function(template);
     
-    new_func := template_func.deep_clone(self.get_alloc());
+    new_func := self.clone(template_func);
     new_func&.unset_flag(.UnboundGenerics);
     new_func&.set_flag(.DisallowInOverloadSet);
     new_func.annotations&.unordered_retain(fn(it) => it.name != Flag.where.ident()); // TODO: don't clone it in the first place
@@ -3383,11 +3383,6 @@ fn is_empty_constant(self: *SelfHosted, name: Var) bool #once = {
 
 // Passing in the requested type here feels a bit weird, but I think it will make anon-functions less painful. 
 fn find_const(self: *SelfHosted, name: Var, requested: ResultType) Maybe(Ty(Values, Type)) = {
-    // If someone else is already trying to compile this, we don't want to fight over it. 
-    if self.dispatch.const_var_in_progress&.get(name.id.zext()) {
-        return(Suspend = self.wait_for(EvalConstant = (name = name, requested = requested)));
-    };
-    
     var := self.scopes.get_constant(name);
     if var& { var | 
         // If we've compiled this before, great.
@@ -3398,22 +3393,10 @@ fn find_const(self: *SelfHosted, name: Var, requested: ResultType) Maybe(Ty(Valu
         };
     };
     
-    self.dispatch.const_var_in_progress&.set(name.id.zext());
-    
-    // TODO: -- Jul 21
-    // its sad to always yield here because _most_ of the time you could just do it now and it would be fine.
-    // so an easy optimisation might be just trying now, if it wasn't already const_var_in_progress so we know nobody else is working on it. 
-    // but since any _could_ yield, its a bug if we can't compile with _everything_ yielding,
-    // so at least keep a flag to toggle this behaviour? 
-    
     (Suspend = self.wait_for(EvalConstant = (name = name, requested = requested)))
 }
 
 fn find_const_non_blocking(self: *SelfHosted, name: Var) ?Ty(Values, Type) #once = {
-    // If someone else is already trying to compile this, we don't want to fight over it. 
-    if self.dispatch.const_var_in_progress&.get(name.id.zext()) {
-        return(.None);
-    };
     var := self.scopes.get_constant(name);
     var := or(var, => return(.None));
     @if_let(var._0.expr&) fn Value(f) => {
@@ -3541,7 +3524,7 @@ fn save_const(self: *SelfHosted, name: Var, val_expr: Expr, final_ty: Type, loc:
     val := or val {
         // dup_var of return label in emit_capturing_call gets here.
         // eventually should remove the ? so its smaller and just do this there instead. 
-        ptr := self.scopes.constants&.nested_index(name.id.zext());
+        ptr := self.scopes.constants&.nested_index(name.id.id.zext());
         ptr[] = ((expr = (Poison = .Unknown), loc = loc, ty = UnknownType, done = false), .Infer);
         ptr
     };
@@ -4530,10 +4513,10 @@ fn handle_expr(self: *Unquote, expr: *FatExpr) Result(DoMore, *CompileError) #on
         }
         fn Placeholder(idx) => {
             @err_assert(idx < self.placeholders.len, "ICE: invalid unquote placeholder index %", idx) return;
-            value := self.placeholders.index(idx); // TODO: make it more obvious that its only one use and the slot is empty.
+            value := self.placeholders.index(idx);
             @err_assert(!value.expr&.is(.Poison), "ICE: missing placeholder for unquote") return;
             // This clone fixes a renumbering problem. :double_use_quote
-            expr[] = value.deep_clone(self.compiler.get_alloc());
+            expr[] = self.compiler.clone(value);
             value.expr = (Poison = .PlaceholderUsed);
             value.done = false;
         }

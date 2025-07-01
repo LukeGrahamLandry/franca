@@ -168,31 +168,34 @@ fn WalkInts($do: @Fn(t: Type) void) void = {
 
 // Note: we only recursivly call deep_clone if the type contains_pointers, otherwise its just a memcpy. 
 fn AutoClone($T: Type) void = {
-    fn deep_clone(self: *T, a: Alloc) T = {
-        @if(!T.has_pointers(), { self[] }, {
+    fn deep_clone(result: *T, self: *T, a: Alloc) void = {
+        @if(!T.has_pointers(), { result[] = self[]; }, {
             @inline_match(T.get_type_info_ref()) {
                 fn Struct($f) => {
                     ::assert(!f[].is_union, "TODO: clone union");
-                    result := @uninitialized T;
                     inline_for T.get_fields() { $f | 
                         in := T.get_field_ptr(self, f);
-                        out := T.get_field_ptr(result&, f);
-                        out[] = @if(@run f[].ty.has_pointers(), in.deep_clone(a), in[]);
+                        out := T.get_field_ptr(result, f);
+                        @if(@run f[].ty.has_pointers(), 
+                            deep_clone(out, in, a), 
+                            { out[] = in[] }, 
+                        );
                     };
-                    result
                 }
                 fn Tagged($_) => {
                     ::tagged(T);
                     i := 0; // TODO : inline_enumerate
                     tag_value := self.tag().raw();
-                    result := @uninitialized T;
-                    result&.tag_ptr()[] = @as(T.Tag()) tag_value; 
+                    result.tag_ptr()[] = @as(T.Tag()) tag_value; 
                     inline_for T.get_variants() { $f | 
                         if i == tag_value {
                             in := T.get_variant_ptr_for(self, f);
-                            out := T.get_variant_ptr_for(result&, f);
-                            out[] = @if(@run f[]._1.has_pointers(), in.deep_clone(a), in[]);
-                            return(result);
+                            out := T.get_variant_ptr_for(result, f);
+                            @if(@run f[]._1.has_pointers(), 
+                                deep_clone(out, in, a), 
+                                { out[] = in[] }, 
+                            );
+                            return();
                         };
                         i += 1;
                     };
@@ -200,9 +203,8 @@ fn AutoClone($T: Type) void = {
                     @panic("Tried to clone @tagged with invalid tag value %. Uninitilized memory?", tag_value)
                 }
                 fn Ptr($inner) => {
-                    mem := a.box(inner[]);
-                    mem[] = self[].deep_clone(a);
-                    mem
+                    result[] = a.box(inner[]);
+                    deep_clone(result[], self[], a);
                 }
                 @default => :: {
                     debug_log_type(T);

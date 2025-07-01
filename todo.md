@@ -339,31 +339,6 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
   but that applies to lots of lib stuff too. like shouldn't have many copies of 
   syscall wrappers, arena_alloc, etc. 
 
-## speed regression ?
-
-> hmm, it sure got a lot slower (1032 -> 1113) at self compile since whenever my current release compiler was built (Jun  7 22:01), 
-(both compiling current code so it's NOT just cause i added stuff).  
-
----
-
-`hyperfine --warmup=1 "franca examples/default_driver.fr build compiler/main.fr -unsafe"` (same compiler, different source)  
-commit "weak symbols": 1.122 s ±  0.003 s  
-commit "posix: open+mmap":  1.141 s ±  0.003 s  
-
-but this one's less scary because the slow is attached to the code.  
-`fix_flags` does some comptime stuff, can it really be that much? 
-
----
-
-(i cheated by simplifying do_fold so should force it to use do_fold_old when trying to debug the above,
-older compilers, based on vtable.abi_version will always do the slow one so it's unfair). 
-
-and by fixing callgraph sorting for inlining. 
-
-so ive reclaimed the performance in different ways but i kinda want to go back and figure out what i broke 
-between jun7 and jun11 because maybe that's another 10% i can have. 
-or maybe it was just a compilation order change that broke inlining before i fixed it
-
 ## Unfinished Examples
 
 - epicycles: make it actually trace the correct path

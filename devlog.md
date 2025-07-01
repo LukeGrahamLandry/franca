@@ -28,7 +28,15 @@
   to measure the new compiler built by the new compiler. so yeah copying read_only when
   saving the function so you don't add extra blits for the arguments is very good. 
   very sad that i forgot that when i stole the inlining stuff. 
-  
+- VarId for a bit more type safety 
+- fix 10 samples of memmove for push(zeroed(FatExpr, LazyType)) in scope.fr
+- "placement new" for deep_clone. samples: 90->64. time down to 965ms. 
+  - kinda sad that my passing things by value is that shitty. 
+    hard to decide between keeping it because it's easy to think about and you 
+    can just fix the few hot places that show up in the profile, OR changing 
+    the whole calling convention situation because my job is to make the code 
+    you want to write also perform well. 
+
 ## (Jun 29)
 
 - i don't like seeing `mov x, 4; and a, b, x` in the disassembly, 

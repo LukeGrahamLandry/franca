@@ -6,12 +6,12 @@ TRACK_SCOPES :: false;
 
 fn put_constant(self: *Scopes, name: Var, value: FatExpr, ty: LazyType) void = {
     // TODO: this cant be the whole expression because then it looks for an overload returning unit. -- Jun 28
-    ptr := self.constants&.nested_index(name.id.zext());
+    ptr := self.constants&.nested_index(name.id.id.zext());
     ptr[] = (value, ty);
 }
 
 fn get_var_type(self: *Scopes, v: Var) ?*VarInfo = {
-    t := self.types&.nested_index(v.id.zext());
+    t := self.types&.nested_index(v.id.id.zext());
     if t.type == UnknownType {
         return(.None)
     };
@@ -19,7 +19,7 @@ fn get_var_type(self: *Scopes, v: Var) ?*VarInfo = {
 }
 
 fn put_var_type(self: *Scopes, v: Var, ty: Type) bool = {
-    slot := self.types&.nested_index(@as(i64) v.id.zext());
+    slot := self.types&.nested_index(@as(i64) v.id.id.zext());
     is_new := slot.type == UnknownType;
     slot.type = ty;
     is_new
@@ -27,7 +27,7 @@ fn put_var_type(self: *Scopes, v: Var, ty: Type) bool = {
 
 fn get_constant(self: *Scopes, name: Var) ?*Ty(FatExpr, LazyType) #inline = {
     ::as_ref(Ty(FatExpr, LazyType));
-    c := self.constants&.nested_index(name.id.zext());
+    c := self.constants&.nested_index(name.id.id.zext());
     if c._1&.is(.EvilUninit) {
         return(.None)
     };
@@ -69,10 +69,10 @@ fn resolve_body(compiler: *SelfHosted, func: *Func) PRes #once = {
 
 fn dup_var(self: *Scopes, old: Var) Var = {
     new := old;
-    new.id = self.types.len.trunc();
-    self.types&.push(type = UnknownType, took_address = self.types&.nested_index(old.id.zext())[].took_address, debug_name = old.name);
+    new.id.id = self.types.len.trunc();
+    self.types&.push(type = UnknownType, took_address = self.types&.nested_index(old.id.id.zext())[].took_address, debug_name = old.name);
     // EvilUninit
-    self.constants&.push(Ty(FatExpr, LazyType).zeroed());  // TODO: bit odd that i dont have to clone if the old thing had a constant expr. 
+    self.constants&.push_uninit().slice(1).set_zeroed();  // TODO: bit odd that i dont have to clone if the old thing had a constant expr. 
     new
 }
 
@@ -552,13 +552,13 @@ fn decl_var(self: *SelfHosted, s: ScopeId, name: Symbol, kind: VarType, loc: Spa
         return(@err("Cannot shadow constant in the same scope: %", self.pool.get(name)));
     };
     
-    var: Var = (kind = kind, name = name, id = scopes.types.len.trunc(), scope = s);
+    var: Var = (kind = kind, name = name, id = (id = scopes.types.len.trunc()), scope = s);
     if kind == .Const {
         empty: Ty(FatExpr, LazyType) = ((expr = (Poison = placeholder), loc = loc, ty = UnknownType, done = false), .Infer);
         scopes.constants&.push(empty);
         scope.const_lookup&.insert(name, var, self.get_alloc());
     } else {
-        scopes.constants&.push(Ty(FatExpr, LazyType).zeroed());  // EvilUninit
+        scopes.constants&.push_uninit().slice(1).set_zeroed();  // EvilUninit
     };
     
     scope.vars&.push(var, self.get_alloc()); // includes constants!

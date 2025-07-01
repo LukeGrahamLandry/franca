@@ -41,12 +41,6 @@ fn List($T: Type) Type = {
     
     fn clone(from: Self) Self #inline = from&.clone();
     
-    fn deep_clone(self: *Self, a: Alloc) Self = {
-        in  := self.items();
-        out := in&.deep_clone(a);
-        assume_owned(out, a)
-    }
-    
     fn items(self: *Self) Slice(T) #inline = {
         self.maybe_uninit.slice(0, self.len)
     }
@@ -86,11 +80,16 @@ fn List($T: Type) Type = {
         self.len += 1;
     }
     
-    fn push(self: *Self, v: T) void = {
+    fn push(self: *Self, v: T) void #inline = {
+        dest := self.push_uninit();
+        dest[] = v;
+    }
+    
+    fn push_uninit(self: *Self) *T = {
         reserve(self, 1);
         last := self.maybe_uninit.index_unchecked(self.len); 
-        last[] = v;
         self.len += 1;
+        last
     }
     
     fn index_unchecked(self: Self, i: i64) *T = 
@@ -398,10 +397,20 @@ fn RawList($T: Type) Type = {
     Self
 }
 
-#where(PointerTo(IsCollection(RawList)))
-fn deep_clone(self: ~S, a: Alloc) Deref(S) = {
+#where(PointerTo(IsCollection(List)))
+fn deep_clone(out: ~S, self: S, a: Alloc) void = {
     s := self.items();
-    s&.deep_clone(a).as_raw_list()
+    tmp := @uninitialized(@type s);
+    deep_clone(tmp&, s&, a);
+    out[] = tmp.assume_owned(a);
+}
+
+#where(PointerTo(IsCollection(RawList)))
+fn deep_clone(out: ~S, self: S, a: Alloc) void = {
+    s := self.items();
+    tmp := @uninitialized(@type s);
+    deep_clone(tmp&, s&, a);
+    out[] = tmp.as_raw_list();
 }
 
 fn split(haystack: Str, needle: Str, gpa: Alloc) List(Str) = {
