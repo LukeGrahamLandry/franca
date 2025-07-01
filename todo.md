@@ -24,6 +24,7 @@ uninitialized stack into your program now
   which i havn't transcribed syscall for on macos. will be fixed when i make prefer_syscall
   not a constant which i want to do anyway for reusing frc_inlinable when cross compiling. 
   (same for linux-sta -> linux-dyn)
+- turn off Qbe.Fn.track_ir_names in import_c
 
 ## import_symbol / weak
 
@@ -180,10 +181,13 @@ so something in the data i guess?
 - standalone import_c/cc.fr and meta/qbe_backend.fr can't make statically linked binaries because the `_init` is written in franca
 - if macos {  // todo: "why does this work on my linux but not github's linux"
   (tests/sys.fr using elf_loader.fr on a dynamic executable)
-- run the .ssa tests that require relocatable object (abi tests vs clang)
 - elf_loader.fr doesn't work on linker output: `panic! not divisible by page size`
 - lldb doesn't have symbol names or let you set break points. do i need to do dwarf stuff?
   (it kinda works in gdb!)
+- decide what to do about entry point without linker (need to align stack always + 
+  static relocations or call `__libc_start_main`), but franca_runtime_init is 
+  written in franca (same problem for cc.fr). could do like staticmemmove and compile 
+  to module embedded in the compiler and spit that out on demand. 
 
 ## amd64
 
@@ -331,6 +335,9 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
 - track envvars you observe (ie. ENABLE_TRACY). 
 - `foo :: 0; bar :: @struct { foo :: foo + 1; };` should be legal. 
   it's so garbage that you have to think of synonyms when declaring exports for import_module()
+- probbably don't want each module to have it's own copy of builtin_memove_symbol, 
+  but that applies to lots of lib stuff too. like shouldn't have many copies of 
+  syscall wrappers, arena_alloc, etc. 
 
 ## speed regression ?
 

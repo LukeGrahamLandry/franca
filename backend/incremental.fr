@@ -1,7 +1,7 @@
 /// This defines the .frc file format used by the franca compiler. 
 /// See @/docs/caching.md
 
-MAGIC :: 0x000C_41434E415246;  // FRANCA__
+MAGIC :: 0x000D_41434E415246;  // FRANCA__
 Header :: @struct {
     meta: Meta #use;
     dep: Storage(Dep);
@@ -74,8 +74,7 @@ Fnc :: @struct {
     mem: Ref(Qbe.Addr);
     either: @union(slot: i32, retty: Qbe.Ref);
     flags: u32;
-    // idx[tmp] = (chunks, [chunks](packed cls:u2))
-    tmp: u32 = Qbe.no_symbol;
+    ntmp: u32 = Qbe.no_symbol;
 };
 
 // :BitFieldsCompileError
@@ -92,6 +91,7 @@ Blk :: @struct {
     s1: u32;  // local in Fnc.blks
     s2: u32;  // loacl in Fnc.blks
     jmp: Qbe.BlkJmp;
+    // the high two bits of narg are the Qbe.Cls
     phi: u32; // idx[phi] = (nphi, [nphi](narg, to, [narg](blk, arg)))
 };
 
@@ -318,7 +318,7 @@ fn push(self: *Writer, f: *Qbe.Fn, did_regalloc: bool) void = {
     );
     self.sym[id].fnc.flags = flags.repr;
     
-    self.sym[id].fnc.tmp = @if(did_regalloc, Qbe.no_symbol, write_tmp(self, f));
+    self.sym[id].fnc.ntmp = @if(did_regalloc, Qbe.no_symbol, f.ntmp.bitcast());
 }
 
 fn push(self: *Writer, m: *QbeModule, d: *Dat2) void = {
@@ -473,7 +473,7 @@ fn load(h: *Header, f: *Qbe.Fn, it: One(Sym), syms: []Qbe.Sym) bool /*did_regall
     ::enum(@type sym.segment);
     @debug_assert_eq(sym.segment, .Code, "tried to load() non-function: %", m.str(f.lnk.id));
     fnc := sym.fnc&;
-    did_regalloc := fnc.tmp == Qbe.no_symbol;
+    did_regalloc := fnc.ntmp == Qbe.no_symbol;
     // TODO: it's nice not to waste time recreating the tmps every time when loading a postregalloc cache file 
     //       but it's very shetchy to silently do that if they could be mixed
     //if !did_regalloc {
@@ -500,7 +500,7 @@ fn load(h: *Header, f: *Qbe.Fn, it: One(Sym), syms: []Qbe.Sym) bool /*did_regall
     flags: FncFlags = (repr = fnc.flags);
     if !did_regalloc {
         f.retty = fnc.either.retty;
-        read_tmp(h, f, fnc.tmp);  // This must be before read_phi
+        read_tmp(h, f, fnc.ntmp);
         @debug_assert_eq(fnc.mem.count, 0);
     } else {
         f.slot = fnc.either.slot;
@@ -662,37 +662,13 @@ fn compile_all_symbols(header: *Header, m: *QbeModule) void = {
 // (which happens when it needs to be inlinable). 
 // 
 
-read_tmp :: fn(header: *Header, f: *Qbe.Fn, idx: u32) void #once = {
-    if(idx == Qbe.no_symbol, => return());
+read_tmp :: fn(header: *Header, f: *Qbe.Fn, ntmp: u32) void #once = {
+    if(ntmp == Qbe.no_symbol, => return());
     @debug_assert_eq(f.ntmp, Qbe.Tmp0);
-    chunks: u32 = header.get(idx)[]; idx += 1;
-    f.tmp&.grow(Qbe.Tmp0 + chunks.zext()*16);
-    range(0, chunks.zext()) { _ |
-        data: u32 = header.get(idx)[]; idx += 1;
-        range(0, 16) { i |
-            k := data.shift_right_logical(i*2).bit_and(0b11);
-            f.newtmp("", @as(Qbe.Cls) @as(i32) bitcast k);
-        };
+    f.tmp&.grow(ntmp.zext());
+    range(0, ntmp.zext() - Qbe.Tmp0) { _ |
+        _ := f.newtmp("", .Kw);  // cls doesn't matter because it's reset by fill_use
     };
-};
-
-write_tmp :: fn(self: *Writer, f: *Qbe.Fn) u32 #once = {
-    //if(f.ntmp == Qbe.Tmp0, => return(Qbe.no_symbol));  // can't do this because i need to know if did_regalloc
-    tmp: u32 = self.idx.len.trunc();
-    chunks := align_to(f.ntmp.zext() - Qbe.Tmp0, 16) / 16;
-    self.idx&.push(chunks.trunc());
-    range(0, chunks) { c |
-        packed: u32 = 0;
-        range(0, 16) { i |
-            t := Qbe.Tmp0 + c*16+i;
-            if t < f.ntmp.zext() {
-                k := @as(u32) bitcast @as(i32) f.tmp[t].cls;
-                packed = bit_or(packed, k.shift_left(i*2));
-            }
-        };
-        self.idx&.push(packed);
-    };
-    tmp
 };
 
 read_phi :: fn(header: *Header, blks: []Qbe.Blk, b: *Blk, i: i64, tmp: []Qbe.Tmp) void #once = {
@@ -702,7 +678,8 @@ read_phi :: fn(header: *Header, blks: []Qbe.Blk, b: *Blk, i: i64, tmp: []Qbe.Tmp
     range(0, nphi.zext()) { i_phi | 
         narg: u32 = header.get(idx)[]; idx += 1;
         to: u32 = header.get(idx)[]; idx += 1;
-        k := tmp[to.zext()].cls;
+        k := @as(Qbe.Cls) @as(u32) narg.shift_right_logical(30);
+        narg = narg.bit_and(1.shift_left(30) - 1);
         p := new_phi(blks[i]&, k, narg.zext(), TMP(to.zext()));
         range(0, narg.zext()) { _ |
             blk_i: u32 = header.get(idx)[]; idx += 1;
@@ -719,7 +696,8 @@ write_phi :: fn(self: *Writer, b: *Qbe.Blk, nblk: i32) u32 #once = {
     self.idx&.push(0);  // nphi
     for_phi b { p |
         self.idx[phi.zext()] += 1;
-        self.idx&.push(p.narg);
+        k := @as(u32) bitcast @as(i32) p.cls;
+        self.idx&.push(p.narg.bit_or(k.shift_left(30)));
         self.idx&.push(p.to.val().trunc());
         range(0, p.narg.zext()) { n |
             @debug_assert_ult(p.blk&[n].id, nblk);

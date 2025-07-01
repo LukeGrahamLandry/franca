@@ -3,7 +3,32 @@
 
 - something fishy going on with staticmemmove needing an extra step in runtests bootstrapping. 
   need to make sure repro works otherwise before i can debug that sanely tho. 
-
+- so for repro, it doesn't repro between the -unsafe compiler and the normal compiler 
+  (both building -unsafe), so the one in `target/release` after runtests is different 
+  than if it compiles itself, but after that it repros. 
+- the frc_inlinable has only one difference: whatever g423 is. 
+  so this is probably a good time to try to give data good names. 
+- the names is a bit better tho needs more work to apply to more stuff. 
+  current version is pretty much just `name :: @static` which is kinda rare. 
+  but anyway, this was all pointless for my actual problem because g423 is 
+  the frc module for staticmemmove. last 87 bytes are different (all in idx part),
+  but printed as text it's the same. 
+  ohhh im stupid, it's because fails_typecheck sets tmp.cls but i only run it in debug mode.
+  but actually it only needs to be stored for phis because fill_use resets it. 
+  as a bonus frc_inlinable files get ~2% smaller by not storing them. 
+//       this cls doesn't matter because it's set again in fill_use,   
+//       so don't actually have to store Qbe.Fn.tmp when saving for inlining,  
+//       can just have a sepereate array for the mapping that's currently in .visit.   
+//       emit_suspended_inlinables immediately does fill_use anyway which would recreate it  
+- before inline changes it was 1080, and then the first time after runtests it was 
+  1070 and then i did it again and now it's 1002. what the fuck did i change between those?
+  i could swear it was just setting read_only and i would understand if fixing that made it 
+  way faster but changing it back doesn't make it slow again. ah ok, i just got confused 
+  because it takes two compiles after toggling it to see the change since you want 
+  to measure the new compiler built by the new compiler. so yeah copying read_only when
+  saving the function so you don't add extra blits for the arguments is very good. 
+  very sad that i forgot that when i stole the inlining stuff. 
+  
 ## (Jun 29)
 
 - i don't like seeing `mov x, 4; and a, b, x` in the disassembly, 

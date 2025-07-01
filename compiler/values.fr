@@ -55,7 +55,10 @@ fn bake_relocatable_constant(c: *SelfHosted, value: []u8, type: Type, loc: Span,
     finish :: fn(v: BakedValue) Never => {
         v.align = info.align_bytes.zext();
         if forced_id { id |
-            c.baked.values&.nested_index(id.id.zext())[] = v;
+            dest := c.baked.values&.nested_index(id.id.zext());
+            n := dest.name;
+            dest[] = v;
+            dest.name = n;
             return(Ok = id)
         } else {
             return(Ok = c.put_baked(v, (Some = jit_ptr)))
@@ -265,11 +268,16 @@ fn created_jit_fn_ptr_value(self: *SelfHosted, f: FuncId, ptr: i64) void = {
 fn reserve_baked(c: *SelfHosted, jit_ptr: ?i64) Ty(*BakedValue, BakedVarId) #inline = {
     v := c.baked.values&;
     id: BakedVarId = (id = v.len.trunc());
-    if jit_ptr { ptr | 
-        c.baked.lookup&.insert(ptr, id); // TODO: check unique? 
-    };
     v.push(zeroed BakedValue);
     dest := v.nested_index(id.id.zext());
+    if jit_ptr { ptr | 
+        prev := c.baked.lookup&.insert(ptr, id);
+        // TODO: this should be true but it's not
+        //@debug_assert(prev.is_none(), "reserved_baked stomped an address");
+        if c.baked.data_names&.get(ptr) { name | 
+            dest.name = name;
+        };
+    };
     (dest, id)
 }
 
@@ -278,7 +286,9 @@ fn put_baked(c: *SelfHosted, v: BakedValue, jit_ptr: ?i64) BakedVarId #inline = 
     if jit_ptr { ptr | 
         v.jit_addr = ptr;
     };
+    n := dest.name;
     dest[] = v;
+    dest.name = n;
     id
 }
 
@@ -292,6 +302,11 @@ fn emit_relocatable_constant_body(c: *SelfHosted, bytes: Slice(u8), ty: Type, fo
     (Ok = bake_collect_legacy(value&, c.get_alloc()))
 }
 
+// TODO: maybe i want one data structure that maps virtual addreses to wahtever i know about 
+//       them instead of seperate lookup/functions/data_names. 
+//       also surely there's a better data structure than just hashmap of ints. 
+//       like maybe do it by pages? that would make it easier to nagvigate around 
+//       for supporting internal pointers. 
 Baked :: @struct(
     values: BucketArray(BakedValue),
     // TODO: defend against the same memory being aliased as different types that would want to emit the constant differently? -- Jun 30
@@ -302,6 +317,7 @@ Baked :: @struct(
     functions: HashMap(i64, FuncId),
     // Some types need special handling (Slice, CStr, etc). This are called at comptime and might call back into the auto dynamic versions to handle thier fields. 
     custom_bake_constant: HashMap(Type, FuncId),
+    data_names: HashMap(i64, Symbol),
 );
 
 BakeHandler :: @FnPtr(self: rawptr) Slice(BakedEntry);

@@ -72,30 +72,28 @@ fn cloneblk(m: *QbeModule, b: *Qbe.Blk) *Qbe.Blk = {
     inlb
 }
 
-// Note: this goes in the inlining cache so it can't use temp() memory.  // TODODODOTODODODODODO 🤡
-fn clone(f: *Qbe.Fn) *Qbe.Fn = {
+// Note: this goes in the inlining cache so it can't use temp() memory.
+fn clone(f: *Qbe.Fn) *Qbe.InlineFn = {
     m := f.globals;
     lock(m.intern_mutex&); 
-    inlfn := m.forever&.borrow().box_zeroed(Qbe.Fn);
+    inlfn := m.forever&.borrow().box_zeroed(Qbe.InlineFn);
     unlock(m.intern_mutex&); 
     inlfn.retty = f.retty;
     inlfn.nblk = f.nblk;
     inlfn.leaf = f.leaf;
-    inlfn.globals = m;
-    inlfn.lnk.id = f.lnk.id;
-    inlfn.consts = zeroed(@type inlfn.consts);
+    inlfn.read_only = f.read_only;
+    inlfn.lnk = f.lnk;
+    inlfn.past_last_param_idx = ptr_diff(f.start.ins.ptr, f.find_past_last_param()).intcast();
     
     n: i64 = f.ntmp.zext();
     inlfn.ntmp = f.ntmp;
-    inlfn.tmp = m.new_long_life(n);
-    // can't just start at Qbe.Tmp0 because it might not be suspended and later passes need that stuff
-    // TODO: could reconstruct it later as needed (like default_init does)
-    inlfn.tmp.slice(0, n).copy_from(f.tmp.slice(0, n));
-    // TODO: now the names aren't stored by value so they can point into temp() // TODODODOTODODODODODO 🤡
-    range(Qbe.Tmp0, n) { i |
-        t := inlfn.tmp.index(i);
-        t.visit = -1; // used when remapping 
-        t.use.first = Qbe.Use.ptr_from_int(0);  // don't try to reuse memory in clear_usage_info if this function is suspended. 
+    @if(f.track_ir_names) with m.intern_mutex& {
+        inlfn.tmp_names = m.forever&.borrow().alloc(Str, f.ntmp.zext() - Qbe.Tmp0);
+        range(Qbe.Tmp0, n) { i |
+            t := f.tmp.index(i);
+            n := t.name.shallow_copy(m.forever&.borrow());
+            inlfn.tmp_names[i - Qbe.Tmp0] = n;
+        };
     };
     
     inlfn.ncon = f.ncon;
@@ -117,7 +115,7 @@ fn inlsave(f: *Qbe.Fn) bool = {
     inlfn  := clone(f);
     if f.globals.debug["G".char()] {
         @fmt_write(f.globals.debug_out, "\nSave for inlining:\n");
-        printfn(inlfn, f.globals.debug_out);
+        printfn(f, f.globals.debug_out);
     };
     m := f.globals;
     
@@ -126,21 +124,24 @@ fn inlsave(f: *Qbe.Fn) bool = {
         if f.lnk.export {
             symbol.referenced = true;
         };
+        ::ptr_utils(@type symbol.inline[]);
         //@debug_assert(symbol.name.len > 0, "function with empty string as name. was that a mistake?");
-        @debug_assert(symbol.inline.is_null(), "'%' already has an entry in the inline cache. these should both look like pointers: % %", symbol.name, Qbe.Fn.raw_from_ptr(f), Qbe.Fn.raw_from_ptr(symbol.inline));
+        @debug_assert(symbol.inline.is_null(), "'%' already has an entry in the inline cache. these should both look like pointers: % %", symbol.name, Qbe.Fn.raw_from_ptr(f), Qbe.InlineFn.raw_from_ptr(symbol.inline));
         symbol.inline = inlfn;
         result = !symbol.referenced;
     };
+    
     result
 }
 
 // TODO: if you want to have multiple threads compiling together can't use the visit field of the cached tmps. 
-fn inlfind(f: *Qbe.Fn, r: Qbe.Ref) ?*Qbe.Fn = {
+fn inlfind(f: *Qbe.Fn, r: Qbe.Ref) ?*Qbe.InlineFn = {
     if(rtype(r) != .RCon, => return(.None));
     c := f.get_constant(r);
     if(c.type() != .CAddr, => return(.None));
     m := f.globals;
-    result: ?*Qbe.Fn = .None;
+    ::ptr_utils(Qbe.InlineFn);
+    result: ?*Qbe.InlineFn = .None;
     use_symbol(f.globals, c.sym) { symbol |
         if !symbol.inline.is_null() {
             result = (Some = symbol.inline);
@@ -149,7 +150,7 @@ fn inlfind(f: *Qbe.Fn, r: Qbe.Ref) ?*Qbe.Fn = {
     result
 }
 
-fn getinlref(inlfn: *Qbe.Fn, inlr: Qbe.Ref, f: *Qbe.Fn, c: *InlineCtx) Qbe.Ref = {
+fn getinlref(inlfn: *Qbe.InlineFn, inlr: Qbe.Ref, f: *Qbe.Fn, c: *InlineCtx) Qbe.Ref = {
     if inlr == QbeNull || rtype(inlr) == .RInt || rtype(inlr) == .RType {
         // some ref types are global
         return(inlr);
@@ -159,16 +160,17 @@ fn getinlref(inlfn: *Qbe.Fn, inlr: Qbe.Ref, f: *Qbe.Fn, c: *InlineCtx) Qbe.Ref =
     
     @match(rtype(inlr)) {
         fn RTmp() => {
-            if inlr.val() < Qbe.Tmp0 {
+            i := inlr.val();
+            if i < Qbe.Tmp0 {
                 return(inlr);
             };
-            t := inlfn.tmp[inlr.val()]&;
-            if t.visit == -1 {
-                // first time seeing this ref: need to create an equivalent in the caller.  
-                t.visit = f.newtmp(t.name(), t.cls).val().intcast();
-                c.to_clear&.push(t);  // after inlining this call, reset visit to -1 for next time we inline this function. 
+            t := c.remapped_tmp[i]&;
+            if t[] == QbeNull {
+                // first time seeing this ref: need to create an equivalent in the caller. 
+                name := @if(inlfn.tmp_names.len == 0, "", inlfn.tmp_names[i - Qbe.Tmp0]);
+                t[] = f.newtmp(name, .Kw);
             };
-            TMP(t.visit)
+            t[]
         }
         fn RCon() => {
             if inlr.val() < fixed_const_count {
@@ -178,7 +180,7 @@ fn getinlref(inlfn: *Qbe.Fn, inlr: Qbe.Ref, f: *Qbe.Fn, c: *InlineCtx) Qbe.Ref =
             r := c.remapped_consts[i];
             if r == QbeNull {
                 // first time seeing this ref: need to create an equivalent in the caller.  
-                r = f.newcon(inlfn.get_constant(inlr));
+                r = f.newcon(inlfn.con.index(inlr.val()));
                 c.remapped_consts[i] = r;
             };
             r
@@ -191,7 +193,7 @@ fn display(f: *Qbe.Fn, out: *List(u8)) void = {
     printfn(f, out);    
 }
 
-fn inlargs(inlfn: *Qbe.Fn, f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins /*dest*/, c: *InlineCtx) void = {
+fn inlargs(inlfn: *Qbe.InlineFn, f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins /*dest*/, c: *InlineCtx) void = {
     /* replace args with copies to par tmps */
     @debug_assert(inlfn.nblk == 1);
     i1 := inlfn.start.ins.ptr;
@@ -211,11 +213,12 @@ fn inlargs(inlfn: *Qbe.Fn, f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins /*dest*/, c: *In
             i1 = i1.offset(1);
         };
     };
+    callee_name := f.globals.str(inlfn.lnk.id);
     while => i.op() != .call {
         @debug_assert(is_arg(i.op()), "expected 'argX' instructions before call. did we start in the wrong place somehow? called with wrong signeture?");
         @debug_assert(i.op() != .argv, "trying to inline a va-call (which means the def was not va)");
-        @debug_assert(is_par(i1.op()), "expected 'parX' instructions at beginning of function. did we start in the wrong place somehow? caller=%, callee=%", f.name(), inlfn);
-        @assert(i.cls() == i1.cls() || (i1.cls() == .Kw && i.cls() == .Kl), "cant inline call with wrong argument type. (callee = %, caller = %)", inlfn.name(), f.name());
+        @debug_assert(is_par(i1.op()), "expected 'parX' instructions at beginning of function. did we start in the wrong place somehow? caller=%, callee=%", f.name(), callee_name);
+        @assert(i.cls() == i1.cls() || (i1.cls() == .Kw && i.cls() == .Kl), "cant inline call with wrong argument type. (callee = %, caller = %)", callee_name, f.name());
         @debug_assert(rtype(i1.to) == .RTmp, "par target must be tmp");
         
         r := i.arg&[int(i.op() == .argc)];
@@ -228,7 +231,7 @@ fn inlargs(inlfn: *Qbe.Fn, f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins /*dest*/, c: *In
 			// TODO: this could take advantage of the more sophisticated alias analysis stuff we do in other passes.
 			if !inlfn.read_only {
 				r = insert_blit(f, i.arg&[0], i1.arg&[0], r, c);
-			}
+			};
 		};
 
 		ins := make_ins(.copy, i.cls(), rto, r, QbeNull);
@@ -269,10 +272,10 @@ fn insert_blit(f: *Qbe.Fn, rty: Qbe.Ref, rty1: Qbe.Ref, r: Qbe.Ref, c: *InlineCt
     ral
 }
 
-fn inlbins(inlfn: *Qbe.Fn, f: *Qbe.Fn, c: *InlineCtx) void = {
+fn inlbins(inlfn: *Qbe.InlineFn, f: *Qbe.Fn, c: *InlineCtx) void = {
     inlb := inlfn.start;
     /* skip par instructions */
-    i := inlfn.find_past_last_param();
+    i := inlb.ins.index_unchecked(inlfn.past_last_param_idx.zext());
     last := inlb.ins.index_unchecked(inlb.ins.len);
     /* copy remaining instructions, translating refs to current fn */
     for(i, last) { i |
@@ -299,10 +302,10 @@ fn inlbins(inlfn: *Qbe.Fn, f: *Qbe.Fn, c: *InlineCtx) void = {
 
 InlineCtx :: @struct(
     // for RCon this stores: [val() in callee] -> ref in caller. (QbeNull means not remapped yet).
-    // for RTmp the mapping is in Tmp.visit field of the callee.      (-1 means not remapped yet).
     remapped_consts: []Qbe.Ref,
+    // for RTmp this stores: [val() in callee] -> ref in caller. (QbeNull means not remapped yet).
+    remapped_tmp: []Qbe.Ref,
     vins: RawList(Qbe.Ins), 
-    to_clear: List(*Qbe.Tmp),
 );
 
 
@@ -318,13 +321,13 @@ fn inlcall(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) i64 = {
     f.leaf = f.leaf && inlfn.leaf;
     
     if f.globals.debug["G".char()] {
-        @fmt_write(f.globals.debug_out, "    inlining call at @% ins % to simple function $%\n", b.name(), ptr_diff(b.ins.ptr, i), inlfn.name());
+        @fmt_write(f.globals.debug_out, "    inlining call at @% ins % to simple function $%\n", b.name(), ptr_diff(b.ins.ptr, i), f.globals.str(inlfn.lnk.id));
     };
     
     c: InlineCtx = (
         remapped_consts = temp().alloc_zeroed(Qbe.Ref, inlfn.ncon.zext()),
+        remapped_tmp = temp().alloc_zeroed(Qbe.Ref, inlfn.ntmp.zext()),
         vins  = init(temp(), b.ins.len + inlfn.start.ins.len),
-        to_clear = list(inlfn.ntmp.zext().shift_right_logical(4), temp()),
     );
     
     /* go back to start of args */
@@ -349,7 +352,7 @@ fn inlcall(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) i64 = {
         // They called like it was a void function. 
         // We allow this for scalars because it would work if it wasn't inlined. 
         // But if an aggragate would have been returned by reference, this would fault at runtime if we hadn't tried to inline it. 
-        @assert(inlfn.retty == QbeNull, "Tried to inline void call to function $% which returns an aggregate.", inlfn.name());
+        @assert(inlfn.retty == QbeNull, "Tried to inline void call to function $% which returns an aggregate.", f.globals.str(inlfn.lnk.id));
         @debug_assert(inlfn.start.jmp.type != .retc);
     } else {
         new_ref := getinlref(inlfn, inlfn.start.jmp.arg, f, c&);
@@ -377,12 +380,6 @@ fn inlcall(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) i64 = {
     // TODO: copy chunks as we go so you don't recopy the end of the block for every inlined call :SLOW
     append(c.vins&, i.offset(1), b.ins.index_unchecked(b.ins.len));
     idup(b, c.vins.ptr, c.vins.len);
-    
-    // tmps are sparse after being eliminated by other passes (61346/1150101 = 5% average for the compiler -- Nov 20). 
-    // so only reset the ones that we actually messed with. 
-    for c.to_clear& { t | 
-        t.visit = -1;
-    };
     
     nret
 }
@@ -450,8 +447,8 @@ fn emit_suspended_inlinables(m: *QbeModule) void = {
         mark := mark_temporary_storage();
         f := @uninitialized Qbe.Fn;
         use_symbol(m, id) { s | 
-            f = s.inline[]; // we stomp arrays to point at temp, but it would probably be fine because everyone's already gone through inlining. 
-            s.inline = Qbe.Fn.ptr_from_int(0); // for good luck
+            load_inline_fn(m, f&, s.inline); // we stomp arrays to point at temp, but it would probably be fine because everyone's already gone through inlining. 
+            s.inline = Qbe.InlineFn.ptr_from_int(0); // for good luck
             f.globals = m;
             if log {
                 @fmt(m.debug_out, "\nFinishing suspended function: %\n", s.name);
@@ -480,6 +477,22 @@ fn emit_suspended_inlinables(m: *QbeModule) void = {
     
     if m.need_static_memmove {
         import("@/backend/opt/simplify.fr")'emit_static_memmove(m);
+    };
+}
+
+fn load_inline_fn(m: *Qbe.Module, f: *Qbe.Fn, src: *Qbe.InlineFn) void = {
+    default_init(f, m);
+    f.start = src.start;
+    f.nblk = src.nblk;
+    f.con = src.con;
+    f.ncon = src.ncon;
+    f.retty = src.retty;
+    f.lnk = src.lnk;
+    f.leaf = src.leaf;
+    f.read_only = src.read_only;
+    range(Qbe.Tmp0, src.ntmp.zext()) { i |
+        name := @if(src.tmp_names.len == 0, "", src.tmp_names[i - Qbe.Tmp0]);
+        _ := f.newtmp(name, .Kw);
     };
 }
 
