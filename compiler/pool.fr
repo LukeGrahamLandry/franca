@@ -38,24 +38,20 @@ fn get_c_str(self: *StringPool, i: Symbol) CStr = {
     
 // SAFETY: 's' must not be deallocated during the lifetime of 'self' 
 fn insert_owned(self: *StringPool, s: Str) Symbol = {
-    ::if_opt(Symbol, Symbol);
-    // TODO: better closure type inference
-    if(self[].lookup&.get(s)) {i|
-        i
-    }{
+    (self[].lookup&.get_or_insert(s) {
         i: Symbol = symbol_from_id(self[].values.len.trunc());
-        self[].lookup&.insert(s, i);
         self[].values&.push(s);
         i
-    }
+    })[]
 }
 
 fn insert_borrowed(self: *StringPool, s: Str, a: Alloc) Symbol = {
-    if self.lookup&.get(s) { i |
-        return i;
-    };
-    s2 := s.shallow_copy(a);
-    self.insert_owned(s2)
+    (self.lookup.raw&.get_or_insert_pinky_swear_not_to_mutate_the_key(s, self.lookup.alloc) { key |
+        i: Symbol = symbol_from_id(self[].values.len.trunc());
+        key[] = s.shallow_copy(a);  // this is legal because it won't change the hash
+        self[].values&.push(key[]);
+        i
+    })[]
 }
 
 // TODO: derive drop impls
@@ -71,4 +67,11 @@ fn fill_fixed_flags(pool: *StringPool) void = {
         s := pool.insert_owned(name);
         assert_eq(i, @as(i64) s.id().zext());
     };
+    
+    // I use Flag.SYMBOL_ZERO as a niche but "SYMBOL_ZERO" 
+    // is still a legal identifier so make it intern to something else. 
+    zero := Flag.SYMBOL_ZERO;
+    zero := zero.name_str();
+    pool.lookup&.remove(zero);
+    s := pool.insert_owned(zero);
 }

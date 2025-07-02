@@ -225,12 +225,7 @@ fn fill_driver_vtable(vtable: *ImportVTable) void = {
     vtable.add_expr_to_scope = fn(c, s, name, expr) = {
         c     := c.cast()[][];
         scope := c.scopes.index(s);
-        var   := scope.const_lookup&.get(name) || {
-            res := c.decl_var(s, name, .Const, expr.loc, .Unknown);
-            @assert(res&.is(.Ok));
-            res.Ok
-        };
-        c.scopes.put_constant(var, expr, .Infer);
+        add_to_scope(c, s, name, .Infer, expr);
     };
     vtable.reserve_baked = fn(c, jit_addr) = {
         _, id := c.cast()[][].reserve_baked(jit_addr);
@@ -868,10 +863,12 @@ fn fill_export_ffi(out: *List(u8)) void = {
     get_names: rawptr : fn(s: ScopeId) []Symbol = {
         self := current_comptime();
         if(s == NOSCOPE, => return(empty()));
-        scope := self.scopes[s].const_lookup&;
+        scope := self.scopes[s].lookup&;
         names := Symbol.list(scope.len_including_tombstones, self.get_alloc()); 
-        for_keys scope { k | 
-            names&.push(k);
+        each scope { k, v | 
+            if v.kind == .Const {
+                names&.push(k);
+            };
         };
         names.items()
     };
@@ -900,7 +897,8 @@ fn fill_export_ffi(out: *List(u8)) void = {
     get_field: rawptr : fn(s: ScopeId, name: Symbol) ?Ty(rawptr, Type) = {
         self := current_comptime();
         if(s == NOSCOPE, => return(.None));
-        var := self.scopes[s].const_lookup&.get(name) || return(.None);
+        var := self.scopes[s].lookup&.get(name) || return(.None);
+        if(var.kind != .Const, => return(.None));
         res := self.poll_in_place(Ty(Values, Type), => self.find_const(var, .None));
         value, type := self.unwrap_report_error(Ty(Values, Type), res);
         value := @if(value&.is(.Big), value&, {

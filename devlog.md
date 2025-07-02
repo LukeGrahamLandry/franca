@@ -19,6 +19,25 @@ each c.scopes.constants& { it |
 ```
 - thats pretty funny. all that messing around with LazyType and i only actually use it 224 times
 - 945ms
+- the siuation with RenumberVars is confusing. it feels like it's redundantly 
+  copying the whole scope but then has to look at each declaration as well.
+  - theres a few declarations that seem to not really live in a real scope. 
+    - parameters of functions without a `{}` around the body. that makes sense, 
+      you push_scope a few times in resolve_func_body without putting the ScopeId somewhere 
+      it can be found. 
+    - emit_capturing_call moves the parameters into a DeclVarPattern in a new block 
+      and then renumbers that, never going through the Func. 
+    - field const/default value
+  - thats hard to think about so putting a pin in it for now
+- always use hashtable when looking up a name instead of only for constants. 
+- 938ms
+- 39 samples of ask_can_assign_inner, thats... a bit much... the whole parsing is only 68. 
+  represent the builtin id types (FuncId etc) with as an empty Enum instead of a Named
+  so it doesn't need a special case to make them not transparent. now it's 20 samples. 
+- outlining some of the hashmap stuff. RawHashMap is instantiated for 36 different (key, value) 
+  pairs but only 18 key types and almost everything only cares about the key type, 
+  so value can just be treated as an opaque blob of bytes. 
+- 926ms
 
 ## (Jun 30)
 

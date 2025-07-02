@@ -1,14 +1,5 @@
 // TODO: use a real hashing thing. wyhash is pretty small: https://github.com/wangyi-fudan/wyhash
 // TODO: explicit wrapping_op functions. 
-fn hash(i: *i64) i64 = i[].mul(345671).add(9765431);
-fn hash(s: *Str) i64 = {
-    h := 0;
-    for(s[]) {c|
-        c: i64 = c.zext();
-        h += c&.hash().mul(4256465971);
-    };
-    h
-}
 
 // - (K: eq + hash + move, V: move)
 // - if eq(a, b) then eq(hash(a), hash(b)); (but the other way around is not required). 
@@ -48,8 +39,8 @@ fn HashMap($K: Type, $V: Type) Type = {
     // self.get_ptr(key) || { self.insert(key, if_absent()); self.get_ptr(key) }
     // but faster because it only needs to hash the key once 
     // but it holds the pointer to the slot while calling your handler so don't add anything else to the hashmap 
-    fn get_or_insert(self: *Self, key: K, $if_absent: @Fn() V) void = 
-        get_or_insert(self.raw&, key, self.alloc, if_absent);
+    fn get_or_insert(self: *Self, key: K, $if_absent: @Fn() V) *V = 
+        get_or_insert_pinky_swear_not_to_mutate_the_key(self.raw&, key, self.alloc, fn(_) => if_absent());
     
     Self
 }
@@ -67,22 +58,6 @@ fn RawHashMap($K: Type, $V: Type) Type = {
     ::if(?*V);
     ::if(u64);
     
-    // Note: this can't be an overload set becuase you want to instantiate the template multiple times with the same key (and different values).
-    checked_hash :: fn(key: *K) i64 = {
-        hasher: Hasher = init();
-        hasher&.hash(key);
-        h: u64 = hasher&.end();
-        h: i64 = h.bitcast();
-        h := h.abs();  // since i use mod to map to a slot, hash can't be negative. 
-        
-        // I use 0 to indicate an empty slot and 1 as a tombstone to mark removals. 
-        if h == 0 || h == 1 {
-            h = 2;
-        };
-        
-        h
-    };
-    
     fn insert(self: *Self, key: K, value: V, gpa: Alloc) ?V = {
         valid, slot, h := expand_to_find_slot(self, key&, gpa);
         if valid {
@@ -95,19 +70,16 @@ fn RawHashMap($K: Type, $V: Type) Type = {
         .None
     }
     
-    expand_to_find_slot :: fn(self: *Self, key: *K, gpa: Alloc) Ty(bool, *Entry, i64) = {
-        full := self.len_including_tombstones >= self.capacity;
-        if(full, => self.resize(gpa)); // does it sooner than necessary (if replacing a slot) but thats fine. 
-        h    := key.checked_hash();
-        slot := self.find_slot(key, h);
-        (slot.hash != 0 && slot.hash != 1, slot, h)
+    expand_to_find_slot :: fn(self: *Self, key: *K, gpa: Alloc) Ty(bool, *Entry, i64) #inline = {
+        result := expand_to_find_slot_erased(self.e(), key, gpa, size_of(Entry), align_of(Entry), load_percent);
+        (result._0, Entry.ptr_from_raw(result._1), result._2)
     };
     
-    fn get_or_insert(self: *Self, key: K, gpa: Alloc, $if_absent: @Fn() V) *V = {
+    fn get_or_insert_pinky_swear_not_to_mutate_the_key(self: *Self, key: K, gpa: Alloc, $if_absent: @Fn(key: *K) V) *V = {
         valid, slot, h := expand_to_find_slot(self, key&, gpa);
         if !valid {
             cap, p := (self.capacity, slot.hash);
-            value := if_absent();
+            value := if_absent(key&);
             @debug_assert(cap == self.capacity && slot.hash == p, "mutated during get_or_insert.if_absent");
             // do this after `if_absent` so we don't increment if they early return.
             self.len_including_tombstones += int(slot.hash == 0);
@@ -135,11 +107,8 @@ fn RawHashMap($K: Type, $V: Type) Type = {
     }
     
     // this lets you do weird stuff where key matching doesn't mean really exactly the same. 
-    fn get_key(self: *Self, key: *K) ?K = {
-        if(self.len_including_tombstones == 0, => return(.None));
-        slot := self.find_slot(key, key.checked_hash());
-        if(slot.hash == 0, => .None, => (Some = slot.key))
-    }
+    fn get_key(self: *Self, key: *K) ?K #inline = 
+        self.e().get_key(key, size_of(Entry));
     
     fn remove(self: *Self, key: K) ?V #inline = self.remove(key&);
     
@@ -161,24 +130,15 @@ fn RawHashMap($K: Type, $V: Type) Type = {
         @debug_assert_eq(self.len_including_tombstones, 0, "lied about len_including_tombstones");
     }
     
+    ::RawHashMapKeyErased(K, Hasher);
+    e :: fn(self: *Self) *RawHashMapKeyErased(K, Hasher) = 
+        ptr_cast_unchecked(Self, RawHashMapKeyErased(K, Hasher), self);
+    
     // this never returns a tombstone (which is correct for get() but TODO: insert would be more efficient 
     // if it went back and returned the first toubstone once it decides the item is not in the map). 
-    fn find_slot(self: *Self, key: *K, h: i64) *Entry = {
-        @debug_assert(self.arr.len != 0);
-        i := h.mod(self.arr.len);
-        
-        range(0, self.arr.len) { _ |
-            check := self.arr[i]&;
-            // 0 means empty, not in map
-            if check.hash == 0 || (check.hash == h && check.key& == key) {
-                return(check);
-            };
-            // 1 => placeholder for a removed value
-            // othewise, continue, might have been bumped
-            i = mod(i + 1, self.arr.len);
-        };
-        
-        panic("Unreachable unless you set the load factor to 100%")
+    fn find_slot(self: *Self, key: *K, h: i64) *Entry #inline = {
+        p := self.e().find_slot(key, h, size_of(Entry));
+        Entry.ptr_from_raw(p)
     }
     
     fn resize(self: *Self, gpa: Alloc) void #inline = 
@@ -217,7 +177,7 @@ fn RawHashMap($K: Type, $V: Type) Type = {
 
 // :Polymorphise
 RawHashMapErased :: @struct(entries: rawptr, entry_count: i64, len_including_tombstones: i64, capacity: i64);
-hashmap_expand_erased :: fn(self: *RawHashMapErased, entry_size: i64, entry_align: i64, gpa: Alloc, load_percent: i64) void #noinline = {
+hashmap_expand_erased :: fn(self: *RawHashMapErased, entry_size: i64, entry_align: i64, gpa: Alloc, $load_percent: i64) void #noinline = {
     old_mem, old_count := (self.entries, self.entry_count);
     new_count := max(old_count * 2, 4);
     new_mem   := u8.raw_from_ptr(gpa.alloc_raw(new_count * entry_size, entry_align).as_ptr());
@@ -262,6 +222,66 @@ hashmap_erased_zero_unused_slots :: fn(self: *RawHashMapErased, entry_size: i64)
         }
     };
 };
+
+fn RawHashMapKeyErased($K: Type, $Hasher: Type) Type = {
+    // :UpdateBoot #use the field
+    Self :: @struct(_: RawHashMapErased);
+    SlotHeader :: @struct(hash: i64, key: K);
+    
+    fn checked_hash(key: *K) i64 = {
+        hasher: Hasher = init();
+        hasher&.hash(key);
+        h: u64 = hasher&.end();
+        h: i64 = h.bitcast();
+        h := h.abs();  // since i use mod to map to a slot, hash can't be negative. 
+        
+        // I use 0 to indicate an empty slot and 1 as a tombstone to mark removals. 
+        if h == 0 || h == 1 {
+            h = 2;
+        };
+        
+        h
+    };
+    
+    fn find_slot(self: *Self, key: *K, h: i64, size_of: i64) rawptr = {
+        @debug_assert(self._.entry_count != 0);
+        i := h.mod(self._.entry_count);
+        
+        range(0, self._.entry_count) { _ |
+            check := SlotHeader.ptr_from_raw(self._.entries.offset(i * size_of));
+            // 0 means empty, not in map
+            if check.hash == 0 || (check.hash == h && check.key& == key) {
+                return(SlotHeader.raw_from_ptr(check));
+            };
+            // 1 => placeholder for a removed value
+            // othewise, continue, might have been bumped
+            i = mod(i + 1, self._.entry_count);
+        };
+        
+        panic("Unreachable unless you set the load factor to 100%")
+    }
+    
+    fn expand_to_find_slot_erased(self: *Self, key: *K, gpa: Alloc, size_of: i64, align_of: i64, $load_percent: i64) Ty(bool, rawptr, i64) = {
+        full := self._.len_including_tombstones >= self._.capacity;
+        if full {
+            // does it sooner than necessary (if replacing a slot) but thats fine. 
+            hashmap_expand_erased(self._&, size_of, align_of, gpa, load_percent);
+        };
+        h    := key.checked_hash();
+        slot := self.find_slot(key, h, size_of);
+        s := SlotHeader.ptr_from_raw(slot);
+        (s.hash != 0 && s.hash != 1, slot, h)
+    };
+    
+    fn get_key(self: *Self, key: *K, size_of: i64) ?K = {
+        if(self._.len_including_tombstones == 0, => return(.None));
+        slot := self.find_slot(key, key.checked_hash(), size_of);
+        slot := SlotHeader.ptr_from_raw(slot);
+        if(slot.hash == 0, => .None, => (Some = slot.key))
+    }
+
+    Self
+}
 
 fn HashSet($V: Type) Type = {
     // TODO: fixed. change this to void -- Feb 8, 2025

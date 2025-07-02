@@ -103,7 +103,9 @@ fn dup_var(self: *Scopes, old: Var) Var = {
     // EvilUninit
     dest := self.variables&.push_uninit();
     dest.slice(1).set_zeroed();  // TODO: bit odd that i dont have to clone if the old thing had a constant expr. 
-    dest.took_address = self.variables&.nested_index(old.id.id.zext())[].took_address;
+    old_data := self.variables&.nested_index(old.id.id.zext());
+    dest.took_address = old_data.took_address;
+    dest.expr.loc = old_data.expr.loc;
     new
 }
 
@@ -164,7 +166,7 @@ VarData :: @struct {
 Scope :: @struct(
     parent: ScopeId,
     vars: RawList(Var),
-    const_lookup := zeroed RawHashMap(Symbol, Var),
+    lookup := zeroed RawHashMap(Symbol, Var),
     nullable_use: *UseScopes,
     visit := 0,
     loc: Span,
@@ -507,10 +509,8 @@ fn find_var_in_scope_inner(self: *SelfHosted, name: Symbol, s: ScopeId, for_use:
             scope.visit = self.scopes_generation;
         };
         
-        found := find(scope, name);
-        if found& { v | // TODO: it gets the arity wrong if not by pointer. 
-            // TODO: derive ne from eq so you can use != more often. 
-            // TODO: better error message for *T vs **T, should say dereference not unsafe cast. 
+        found := scope.lookup&.get_ptr(name);
+        if found { v | // TODO: it gets the arity wrong if not by pointer. 
             return(Some = v[]);
         };
         ::ptr_utils(UseScopes);
@@ -566,22 +566,6 @@ fn find_var_in_scope_inner(self: *SelfHosted, name: Symbol, s: ScopeId, for_use:
         s = scope.parent;
     };
     
-    find :: fn(scope: *Scope, name: Symbol) ?Var = {
-        const := scope.const_lookup&.get(name);
-        if const& { v |  // TODO: needs to be by reference because arity is broken
-            return(Some = v[]);
-        };
-    
-        // Reverse so you get the shadowing first.
-        s := scope.vars&; // :UpdateBoot
-        // 1.8M
-        each_rev s { v | 
-            // 7.0M
-            if(v.name == name, => return(Some = v[]));
-        };
-        .None
-    };
-
     unreachable()
 }
 
@@ -598,19 +582,21 @@ fn decl_var(self: *SelfHosted, s: ScopeId, name: Symbol, kind: VarType, loc: Spa
     scopes := self.scopes;
     scope := scopes[s]&;
     
-    prev := scope.const_lookup&.get(name);
-    if prev.is_some() {
-        return(@err("Cannot shadow constant in the same scope: %", self.pool.get(name)));
+    var: Var = (kind = kind, name = name, id = (id = scopes.variables.len.trunc()), scope = s);
+    prev := scope.lookup&.insert(name, var, self.get_alloc());
+    if prev { prev |
+        if prev.kind == .Const {
+            scope.lookup&.insert(name, prev, self.get_alloc());
+            return(@err("Cannot shadow constant in the same scope: %", self.pool.get(name)));
+        };
     };
     
-    var: Var = (kind = kind, name = name, id = (id = scopes.variables.len.trunc()), scope = s);
     dest := scopes.variables&.push_uninit();
     dest.slice(1).set_zeroed();  // EvilUninit
     dest.expr.loc = loc;
     if kind == .Const {
         dest.expr.expr = (Poison = placeholder);
         dest.set_type(.Infer);
-        scope.const_lookup&.insert(name, var, self.get_alloc());
     };
     
     scope.vars&.push(var, self.get_alloc()); // includes constants!
@@ -836,6 +822,7 @@ fn decl(self: *RenumberVars, name: *Var) void = {
         name[] = new[];
         return();
     };
+    log_it(name, "decl was new");
     // TODO: it kinda seems like this shouldn't happen because we have scopes now but clearly it does
     self.decl_new(name);
 }
@@ -846,7 +833,17 @@ fn update(self: *RenumberVars, name: *Var) void #inline = {
     };
 }
 
-fn decl(self: *RenumberVars, name: *ScopeId) void = {
+SPAM_SCOPES :: false;
+
+fn log_it(old: *Var, why: Str) void = {
+    @if(!SPAM_SCOPES) return();
+    self := current_comptime();
+    it := self.scopes.get_var_data(old[]);
+    @println("(%) %", why, self.log(old[]));
+    self.codemap.show_error_line(it.expr.loc, false);
+}
+
+fn decl_scope(self: *RenumberVars, name: *ScopeId) void = {
     a := self.compiler.get_alloc();
     prev := name[];
     old_scope := self.scope[prev]&;
@@ -855,26 +852,37 @@ fn decl(self: *RenumberVars, name: *ScopeId) void = {
     id := self.scope.new_scope(parent, a, old_scope.loc);
     self.mapping.scopes&.insert(name[], id);
     old_scope := self.scope[prev]&;
-    
     new_vars: List(Var) = old_scope.vars&.items().clone(a);
-    each new_vars { old | 
-        self.decl_new(old);
+    
+    if SPAM_SCOPES {
+        @println("decl_scope SCOPE");
+        each new_vars { old | 
+            @println("- % %", self.compiler.log(old[]), old.kind);
+        };
+        self.compiler.codemap.show_error_line(old_scope.loc, false);
     };
+    
     new_constants := zeroed RawHashMap(Symbol, Var);
-    each old_scope.const_lookup& { (k, v) |
+    each new_vars { old | 
+        v := old;
         new := v[];
         self.decl_new(new&);
-        v := self.scope.get_constant(v[]);
-        v := v.expect("known const"); // TODO: destructure through a pointer? 
-        expr := self.compiler.clone(v.expr&);
-        ty := v.maybe_stack_allocated_type();
-        ty := self.compiler.clone(ty);
-        self.scope.put_constant(new, expr, ty);
+        if old.kind == .Var {
+            log_it(old, "decl_scope");
+        } else {
+            v := self.scope.get_constant(v[]);
+            v := v.expect("known const");
+            expr := self.compiler.clone(v.expr&);
+            ty := v.maybe_stack_allocated_type();
+            ty := self.compiler.clone(ty);
+            self.scope.put_constant(new, expr, ty);
+        };
+        old[] = new;
         new_constants&.insert(new.name, new, self.compiler.get_alloc());
     };
     new_scope := self.scope[id]&;
     new_scope.vars = new_vars.as_raw();
-    new_scope.const_lookup = new_constants;
+    new_scope.lookup = new_constants;
     name[] = id;
 }
 
@@ -895,7 +903,7 @@ fn handle_expr(self: *RenumberVars, expr: *FatExpr) Result(DoMore, void) #once =
             // because sema/compile_quote does not recurse until after filling placeholders.  
         
             if !(f.scope == NOSCOPE) {
-                self.decl(f.scope&);
+                self.decl_scope(f.scope&);
             };
             each f.body { stmt |
                 @match(stmt.stmt) {
@@ -915,7 +923,10 @@ fn handle_expr(self: *RenumberVars, expr: *FatExpr) Result(DoMore, void) #once =
 fn handle_stmt(self: *RenumberVars, stmt: *FatStmt) Result(DoMore, void) #once = {
     @match(stmt.stmt) {
         fn Decl(f) => if f.kind != .Const {
-            @if_let(f.name&) fn Var(v) => self.decl(v);
+            @if_let(f.name&) fn Var(v) => {
+                log_it(v, "handle_stmt");
+                self.decl(v);
+            };
         };
         @default => ();
     };
@@ -925,7 +936,7 @@ fn handle_stmt(self: *RenumberVars, stmt: *FatStmt) Result(DoMore, void) #once =
 
 fn handle_func(self: *RenumberVars, func: *Func) Result(DoMore, void) #once = {
     if !(func.resolve_scope == NOSCOPE) {
-        self.decl(func.resolve_scope&);
+        self.decl_scope(func.resolve_scope&);
     };
     if func.var_name& { old |
         self.update(old);
@@ -936,6 +947,7 @@ fn handle_func(self: *RenumberVars, func: *Func) Result(DoMore, void) #once = {
     if func.return_var& { old |
         self.update(old);
     };
+    
     (Ok = .Continue)
 }
 
@@ -1054,7 +1066,8 @@ fn import_as_scope(self: *SelfHosted, name: Symbol, _loc: Span) Res(ScopeId) = {
 
 fn find_in_scope(self: *SelfHosted, s: ScopeId, name: Symbol, type: Type) Maybe(?Values) = {
     // TODO: this mapping doesn't use #use which seems bad 
-    var := self.scopes[s].const_lookup&.get(name) || return(Ok = .None);
+    var := self.scopes[s].lookup&.get(name) || return(Ok = .None);
+    @if(var.kind != .Const) return(Ok = .None);
     value, type_found := @check(self.find_const(var, (Specific = type))) return;
     if type != type_found {
         expr := synthetic_ty((Value = (bytes = value, coerced = false)), self.last_loc, type_found);
@@ -1066,11 +1079,13 @@ fn find_in_scope(self: *SelfHosted, s: ScopeId, name: Symbol, type: Type) Maybe(
 
 fn add_to_scope(c: *SelfHosted, s: ScopeId, name: Symbol, type: LazyType, expr: FatExpr) Var = {
     scope := c.scopes.index(s);
-    var   := scope.const_lookup&.get(name) || {
+    var   := scope.lookup&.get(name) || {
         res := c.decl_var(s, name, .Const, expr.loc, .Unknown);
         @assert(res&.is(.Ok));
         res.Ok
     };
+    // TODO: if i keep this rule it needs to be a normal error not an assert. user code can get here. 
+    @debug_assert(var.kind == .Const, "stomped var with const");
     c.scopes.put_constant(var, expr, type);
     var
 }

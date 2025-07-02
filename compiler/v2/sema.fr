@@ -3211,7 +3211,7 @@ fn hoist_constants(self: *SelfHosted, body: []FatStmt) Maybe(void) #once = {
 
 fn get_or_create_overloads(self: *SelfHosted, name: Symbol, scope: ScopeId, loc: Span) Maybe(OverloadSet) = {
     // TODO: this mapping doesn't use #use which seems bad 
-    var := self.scopes[scope].const_lookup&.get(name) || 
+    var := self.scopes[scope].lookup&.get(name) || 
         @try(self.decl_var(scope, name, .Const, loc, .Unknown)) return;
     ::if(OverloadSet);
     (Ok = if self.is_empty_constant(var) {
@@ -3758,14 +3758,8 @@ fn ask_can_assign_inner(self: *SelfHosted, want: Type, found: Type) bool = {
     want_info  := self.get_type(want);
     found_info := self.get_type(found);
     @match(found_info) {
-        fn Named(f) => {
-            // TODO: hack because normally Named means @rec which should be transparent but the special id types also use it. 
-            //       they should be changed to unique types
-            // found != OverloadSet && found != FuncId && found != Type && found != Symbol && found != LabelId && found != ScopeId
-            if found.as_index() > 16 {
-                return(self.ask_can_assign(want, f._0));
-            };
-        }
+        // Named means @rec which should be transparent
+        fn Named(f) => return(self.ask_can_assign(want, f._0));
         fn Fn(f) => {
             if want == FuncId {
                 return(true);
@@ -3804,14 +3798,8 @@ fn ask_can_assign_inner(self: *SelfHosted, want: Type, found: Type) bool = {
         @default => ();
     };
     @match(want_info) {
-        fn Named(f) => {
-            // TODO: hack because normally Named means @rec which should be transparent but the special id types also use it. 
-            //       they should be changed to unique types
-            // want != OverloadSet && want != FuncId && want != Type && want != Symbol && want != LabelId && want != ScopeId 
-            if want.as_index() > 16 {
-                return(self.ask_can_assign(f._0, found));
-            };
-        }
+        // Named means @rec which should be transparent 
+        fn Named(f) => return(self.ask_can_assign(f._0, found));
         fn Fn(f) => {
             if found == FuncId {
                 // TODO: typecheck!!
@@ -4276,7 +4264,7 @@ fn struct_type(self: *SelfHosted, pattern: *Pattern, is_union: bool) Maybe(Type)
             expr := @unwrap(b.get_default(), "constant field % must have a value.", self.pool.get(name)) return;
             v := self.unique_const(name);
             self.scopes.put_constant(v, expr[], b.ty);
-            self.scopes[scope].const_lookup&.insert(name, v, self.get_alloc());
+            self.scopes[scope].lookup&.insert(name, v, self.get_alloc());
             expr.expr = (GetVar = v);  // Save our work because we might yield on a later field. 
         };
     };

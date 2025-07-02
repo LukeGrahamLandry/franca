@@ -513,8 +513,6 @@ the right/fast/safe/whatever thing to do is also the easy thing to do.
   probably always to stderr. 
   - don't be using relative file paths. i feel like having a cwd is dumb.
   - errno stuff
-- remove clowns (places where we exec things instead of using libc)
-  - makedir
 - make sure all the allocators respect required alignment 
 - catch multiple branches with the same switch value.
 - (cap, alloc) args are swaped between list:List and init:RsVec
@@ -543,7 +541,6 @@ that fails the wasm verifier
 - ImportVTable: implement add_to_scope with add_expr_to_scope
 - make comptime.fr exporting stuff less painful 
 - sema needs to get simplified. 
-- clean up import_c ref tracking
 - fix the hack that requires `#ir({ (o, k) })`. it should allow just a tuple and still evaluate it as an expression instead of just grabbing the identifiers. 
 - backend fails_typecheck make sure sel0:sel1 and blit0:blit1 and cas0:cas1. 
 also stop pasting around code for handling the multi-part ops
@@ -587,12 +584,11 @@ or just default to jitting and force you to enable aot by specifying an output p
 - test crash stack traces
 - make the crash examples work without needing to set the env variable / run jitted
 - TODO: i should probably be making tests for error locations
-- macho_loader.fr run hello world or something
 
 ## linux
 
 - signal handlers (the compiler does it and tests/basic_libc.fr)
-- relocatable and shared libraries (backend/elf/emit.fr)
+- shared libraries (backend/elf/emit.fr)
 - shader translation for the gui examples
 - non-amd64 support
 
@@ -704,6 +700,7 @@ A :: @struct {
 @assert_eq(A.a, 123);  // kinda weird
 ```
 - tail calls
+// TODO: destructure through a pointer? 
 
 ## demos 
 
@@ -749,22 +746,15 @@ StbTrueType :: include { C |
 
 ##
 
-- fix compiler_gui so it sees all functions from a full compile
-- output_elf: relocatable object, dynamic library
 - Wasip1Libc
 - things that should be cleaned up next time i :UpdateBoot
   - :DumbNameAlias NoMangle
   - AbiHackSpan
   - `@rec` in backend/ir.fr and wasm/instructions:Wasm
   - use sqrt/min/max
-- αcτµαlly pδrταblε εxεcµταblε
-- probably want to port the build stuff. https://github.com/jart/cosmopolitan/blob/master/tool/build/apelink.c
-  i assume i can make it less complicated since i'm the one generating the thing in the first place?
-  and i only care about linux and xnu. windows can just use wsl.
 - fix overflow when lexing large float literals
 - show const fields better in log_type
 - less verbose if let/let else? think about how to express with a macro.
-- #target_arch
 - i still think wasi's kinda dumb but running the compiler in a browser would be very pleasing.
   tho i could just use blink https://trungnt2910.com/blink/blink.html
 - be nicer about warning invalid arguments in examples/default_driver and compiler/first
@@ -773,6 +763,9 @@ StbTrueType :: include { C |
   http, hashing, random, zip, magic numbers for wasm/elf/dwarf/macho
 - should make it easy to build rust/zig projects from your driver program since they can generally cross compile well and have libraries you might want.
 - do i want to expose the idea of different libcs? musl vs glibc vs cosmo
+
+// TODO: derive ne from eq so you can use != more often. 
+// TODO: better error message for *T vs **T, should say dereference not unsafe cast. 
 
 ## data structure changes
 
