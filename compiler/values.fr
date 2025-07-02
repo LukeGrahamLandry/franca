@@ -961,7 +961,7 @@ fn get(self: *OldPageMap, addr: rawptr) ?Ty(SymIdx, i64) #inline = {
 }
 
 PageMap :: @struct {
-    Tag :: @enum(u8) (Unknown, FuncId, BakedVarId, Previous);
+    Tag :: @enum(u8) (Unknown, FuncId, BakedVarId);
     Entry :: @struct {
         idx: @union(
             fid: FuncId, 
@@ -970,22 +970,23 @@ PageMap :: @struct {
         off: u16;  // how far from the start of the page does this object start
         len: u16;
         tag: Tag;
-        continued_on_next_page: bool;
+        forward: bool;
+        backward: bool;
     };
     Page :: @struct {
         entries: RawList(Entry);
         high_bits: i64;
     };
+    // must be <= 15 because im using u16-s,
+    // can make it smaller to test that spanning multiple pages works properly
     page_bits :: 14;
     
-    pages: RawList(*Page);
-    lookup: RawHashMap(i64, i64);
+    lookup: RawHashMap(i64, *Page);
     gpa: Alloc;
 };
 
 fn init(a: Alloc) PageMap = (
     gpa = a,
-    pages = empty(),
     lookup = init(),
 );
 
@@ -996,15 +997,11 @@ fn insert(self: *PageMap, addr: rawptr, value: SymIdx) void = {
 fn insert(self: *PageMap, vbytes: []u8, value: SymIdx) void = {
     hi, lo := self.split(u8.raw_from_ptr(vbytes.ptr));
     p := self.get_page(hi);
-    e := self.find_entry(p, lo, true).unwrap();
-    // TODO: do stuff if it spans pages
-    // TODO: pass in the span of bytes
-    if e.len == 0 {
-        e.len = vbytes.len.trunc();
-        //@println("insert new len=% at:%:%", vbytes.len, hi, e.off);
-    } else {
-        //@println("reuse old.len=% new.len=% at:%:%", e.len, vbytes.len, hi, e.off);
-    };
+    e, off := self.find_entry(p, lo, true, vbytes.len).unwrap();
+
+    // TODO: assert not stomping something exactly either
+    @debug_assert_eq(off, 0, "TODO: baked the same address multiple times");
+
     @match(value) {
         fn FuncId(it) => {
             e.idx.fid = it;
@@ -1023,24 +1020,12 @@ fn insert(self: *PageMap, vbytes: []u8, value: SymIdx) void = {
 fn get(self: *PageMap, addr: rawptr) ?Ty(SymIdx, i64) = {
     hi, lo := self.split(addr);
     p := self.get_page(hi);
-    if self.find_entry(p, lo, false) { e | 
+    if self.find_entry(p, lo, false, 0) { e, off | 
         ::enum(PageMap.Tag);
-        {
-            base := hi.shift_left(PageMap.page_bits) + e.off.zext();
-            bound := base + e.len.zext();
-            p := addr.int_from_rawptr();
-            @debug_assert(p >= base && p < bound, "entry does not contain address");
-        };
-        off := lo - e.off.zext(); // TODO: spanning pages. etc.
-        if off != 0 {
-            //@println("addend: %", off);
-        };
-        //@println("get at:%:% addend=%", hi, e.off, off);
         return(Some = (@match(e.tag) {
-            fn Unknown() => return(.None); // TODO
+            fn Unknown() => panic("PageMap.get on valid address but uninit tag");
             fn FuncId() => (FuncId = e.idx.fid);
             fn BakedVarId() => (BakedVarId = e.idx.baked);
-            fn Previous() => panic("TODO: do stuff if it spans pages");
         }, off));
     };
     .None
@@ -1054,30 +1039,26 @@ fn split(self: *PageMap, addr: rawptr) Ty(i64, i64) = {
 }
 
 fn get_page(self: *PageMap, hi: i64) *PageMap.Page = {
-    i := (self.lookup&.get_or_insert(hi, self.gpa) {
+    p := (self.lookup&.get_or_insert(hi, self.gpa) {
         p := self.gpa.box(PageMap.Page);
         p[] = (entries = empty(), high_bits = hi);
-        self.pages&.push(p, self.gpa);
-        self.pages.len - 1
+        p
     })[];
-    p := self.pages[i];
-    @debug_assert(p.high_bits == hi);
+    @debug_assert_eq(p.high_bits, hi, "get_page wrong");
     p
 }
 
-fn find_entry(self: *PageMap, p: *PageMap.Page, lo: i64, create: bool) ?*PageMap.Entry = {
+fn find_entry(self: *PageMap, p: *PageMap.Page, lo: i64, create: bool, length: i64) ?Ty(*PageMap.Entry, i64) = {
     maybe_append :: fn() Never => {
         @if(!create) return(.None);
-        p.entries&.push(zeroed PageMap.Entry, self.gpa);
-        e := p.entries.index(p.entries.len - 1);
-        e.off = lo.trunc();
-        e.len = 0; // TODO
-        return(Some = e)
+        return(Some = (self.create_entry(p, p.entries.len, lo, length), 0))
     };
     
     if(p.entries.len == 0, maybe_append);
     end := p.entries.index(p.entries.len - 1);
-    if(lo > zext(end.off + end.len), maybe_append);
+    // TODO: this doesn't work :CompilerBug
+    // if(lo > zext(end.off + end.len), maybe_append);
+    @if(lo > zext(end.off + end.len)) maybe_append();
 
     search := p.entries.items();
     i := loop i64 { $break |
@@ -1087,8 +1068,20 @@ fn find_entry(self: *PageMap, p: *PageMap.Page, lo: i64, create: bool) ?*PageMap
         i := search.len / 2;
         e := search.index(i);
         if lo >= e.off.zext() {
+            //@println("e = %:%..+%", p.high_bits, e.off, e.len);
             if lo < zext(e.off + e.len) {
-                return(Some = e);
+                offset_in_allocation := lo - e.off.zext();
+                if e.backward {
+                    // Walk backwards to find the start of the allocation. 
+                    prev_page := self.get_page(p.high_bits - 1);
+                    end_of_page :: 1.shift_left(PageMap.page_bits) - 1;
+                    prev_e, off2 := self.find_entry(prev_page, end_of_page, false, 0)
+                        || @panic("find_entry: missing before hi=%; for lo=%", p.high_bits, lo);
+                    e = prev_e;
+                    offset_in_allocation += off2 + 1;
+                };
+                @debug_assert(!e.backward);
+                return(Some = (e, offset_in_allocation));
             };
             search = search.rest(i + 1);
         } else {
@@ -1096,11 +1089,28 @@ fn find_entry(self: *PageMap, p: *PageMap.Page, lo: i64, create: bool) ?*PageMap
         };
     };
     if(!create, => return(.None));
+    (Some = (self.create_entry(p, i, lo, length), 0))
+}
+
+fn create_entry(self: *PageMap, p: *PageMap.Page, i: i64, lo: i64, length: i64) *PageMap.Entry = {
+    //@println("create_entry at %:%..+%", p.high_bits, lo, length);
     p.entries&.insert(i, zeroed PageMap.Entry, self.gpa);
     e := p.entries.index(i);
     e.off = lo.trunc();
-    e.len = 0; // TODO
-    
+    page_size :: 1.shift_left(PageMap.page_bits);
+    space_left := page_size - lo;
+    if space_left < length {
+        // This allocation extends past the end of this page. 
+        // Walk forwards and add new pages. 
+        e.forward = true;
+        next_page := self.get_page(p.high_bits + 1);
+        // TODO: check if stomping something
+        next_entry := self.create_entry(next_page, 0, 0, length - space_left);
+        e = p.entries.index(i);  // create_entry() reallocates
+        next_entry.backward = true;
+        length = space_left;
+    };
+    e.len = length.trunc();
     if i != 0 {
         it := p.entries[i - 1]&;
         @debug_assert(e.off >= it.off + it.len, "bad backwards");
@@ -1110,8 +1120,7 @@ fn find_entry(self: *PageMap, p: *PageMap.Page, lo: i64, create: bool) ?*PageMap
         // TODO: this should be strictly <
         @debug_assert(e.off + e.len <= it.off, "bad forwards");
     };
-    
-    (Some = e)
+    e
 }
 
 fn loop($T: Type, $body: @Fn(break: @Fn(result: T) Never) void) T #generic = {
