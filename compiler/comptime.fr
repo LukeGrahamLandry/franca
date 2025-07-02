@@ -28,13 +28,13 @@ fn fill_driver_vtable(vtable: *ImportVTable) void = {
     
     vtable.get_jitted_ptr = fn(c: Compiler, f: FuncId) CRes(rawptr) = {
         self := c.cast()[][];
+        self.get_function(f).set_flag(.TookPointerValue);
         if self.get_fn_callable(f) { ptr |
-            self.created_jit_fn_ptr_value(f, ptr.int_from_rawptr());
             return(Ok = ptr);
         };
+        // TODO: why don't i need to call infer(arg/ret) here?
         @try(self.create_jit_shim(f)) return; 
         ptr := self.get_fn_callable(f).unwrap();
-        self.created_jit_fn_ptr_value(f, ptr.int_from_rawptr());
         (Ok = ptr)
     };
     
@@ -134,7 +134,9 @@ fn fill_driver_vtable(vtable: *ImportVTable) void = {
     };
     
     vtable.emit_relocatable_constant = fn(c: Compiler, ty: Type, value: []u8, loc: Span) Res(BakedVarId) = {
-        c.cast()[][].bake_relocatable_constant(value, ty, loc, .None)
+        id, off := @try(c.cast()[][].bake_relocatable_constant(value, ty, loc, .None)) return;
+        @assert_eq(off, 0, "TODO: internal pointers in vtable.emit_relocatable_constant");
+        (Ok = id)
     };
     vtable.log_expr = fn(c: Compiler, e: *FatExpr) Str = {
         log(e, c.cast()[][])
@@ -227,6 +229,7 @@ fn fill_driver_vtable(vtable: *ImportVTable) void = {
         scope := c.scopes.index(s);
         add_to_scope(c, s, name, .Infer, expr);
     };
+    // TODO: return addend like lookup_baked so you don't have to call both?
     vtable.reserve_baked = fn(c, jit_addr) = {
         _, id := c.cast()[][].reserve_baked(jit_addr);
         id
@@ -300,6 +303,14 @@ fn fill_driver_vtable(vtable: *ImportVTable) void = {
         self := c.cast()[][];
         self.comp().fmt_fn_name(fid)
     };
+    
+    vtable.put_baked_var = fn(c, id, v) = {
+        self := c.cast()[][];
+        dest := self.baked.values&.nested_index(id.id.zext());
+        n := dest.name;
+        dest[] = self.from_legacy(v);
+        dest.name = n;
+    };
 }
 
 CompilerRs :: ***SelfHosted;  // TODO: really this should be a new type so you can't accidently implement call functions by just adding extra indirection. hopefully the number of pointers makes it clear something's weird. 
@@ -363,11 +374,34 @@ fn current_comptime() *SelfHosted = {
 fn fill_export_ffi(out: *List(u8)) void = {
     // TODO: fix error message if you forget a semi-colon in the string. 
     @fmt(out, "fn lookup_baked(addr: i64) ?BakedVarId #ct #comptime_addr(%);\n", lookup_baked);
-    lookup_baked: rawptr : fn(addr: i64) ?BakedVarId = current_comptime()[].baked.lookup&.get(addr);
+    lookup_baked: rawptr : fn(addr: i64) ?BakedVarId = {
+        if current_comptime()[].baked.vmem&.get(rawptr_from_int addr) { it, addend |
+            @assert_eq(addend, 0, "TODO: internal pointers in lookup_baked()");
+            @if_let(it) fn BakedVarId(it) => return(Some = it);
+        };
+        .None
+    };
     
-    @fmt(out, "fn cache_baked(addr: i64, id: BakedVarId) ?BakedVarId #ct #comptime_addr(%);\n", cache_baked);
+    // TODO: do something if the bytes are too big for the allocation. 
+    @fmt(out, "fn lookup_baked_vbytes(vbytes: []u8) ?Ty(BakedVarId, i32) #ct #comptime_addr(%);\n", lookup_baked_vbytes);
+    lookup_baked_vbytes: rawptr : fn(vbytes: []u8) ?Ty(BakedVarId, i32) = {
+        addr := u8.raw_from_ptr(vbytes.ptr);
+        if current_comptime()[].baked.vmem&.get(addr) { it, addend |
+            //@println("lookup_baked_vbytes vbytes.len=% addend=%", vbytes.len, addend);
+            @if_let(it) fn BakedVarId(it) => return(Some = (it, addend.intcast()));
+        };
+        .None
+    };
+    
+    // TODO: these need to return a different BakedVarId if you had to deduplicate. 
+    //       (instead of error if collide... tho rn it's just nothing)
+    @fmt(out, "fn cache_baked(addr: i64, id: BakedVarId) void #ct #comptime_addr(%);\n", cache_baked);
     cache_baked: rawptr : fn(addr: i64, id: BakedVarId) void = {
-        current_comptime()[].baked.lookup&.insert(addr, id); // TODO: error if collide? 
+        current_comptime()[].baked.vmem&.insert(rawptr_from_int addr, (BakedVarId = id)); // TODO: error if collide? 
+    };
+    @fmt(out, "fn cache_baked_vbytes(addr: []u8, id: BakedVarId) void #ct #comptime_addr(%);\n", cache_baked_vbytes);
+    cache_baked_vbytes: rawptr : fn(addr: []u8, id: BakedVarId) void = {
+        current_comptime()[].baked.vmem&.insert(addr, (BakedVarId = id)); // TODO: error if collide? 
     };
     
     @fmt(out, "fn dyn_bake_relocatable_value(raw_bytes: Slice(u8), ty: Type, force_default_handling: bool) Slice(BakedEntry) #ct #comptime_addr(%);\n", dyn_bake_value);
@@ -448,7 +482,7 @@ fn fill_export_ffi(out: *List(u8)) void = {
         panic("Comptime reported error.")
     };
   
-    // TODO: version of this that allows caching? but have to think more about when you're allowed to deduplicate.
+    // TODO: remove this. it's always better to use meta.fr/emplace_bake()
     @fmt(out, "fn bake_value(v: BakedVar) BakedVarId #ct #comptime_addr(%);\n", bake_var);
     bake_var: rawptr : fn(v: BakedVar) BakedVarId = {
         current_comptime().bake_legacy(v, .None)
@@ -832,6 +866,7 @@ fn fill_export_ffi(out: *List(u8)) void = {
         if(s == "@franca/alloc_slice", => return(true)); 
         if(s == "@franca/fewer_builtins", => return(true)); 
         if(s == "@franca/no_merged_funcimpl", => return(true)); 
+        if(s == "@franca/internal_pointers", => return(true)); 
         false
     };
     

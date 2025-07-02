@@ -163,17 +163,20 @@ fn bake_relocatable_slice_erased(addr: rawptr, length: i64, T: Type) []BakedEntr
             @println("(ptr = %, len = %) is a really weird slice. are you sure you don't have the components flipped?", addr, length); 
         };
         :: ?BakedVarId;
+        info := get_meta(T);
+        size_of: i64 = info.stride_bytes.zext();
+        // TODO: assert alignment
+        // TODO: assert len isnt big enough to be a pointer?
+        // TODO: need to check against c.baked.lookup (the first ptr not each individual element) :BLOAT
+        bytes: []u8 = (ptr = u8.ptr_from_int(addr), len = length * size_of); // TODO: decide if i need to clone. 
+        
         // TODO: this is wrong because what if someone previously baked a smaller new into the same memory.   :FUCKED -- Jul 16
         //       we need to still emit and compare to make sure we would have baked the same thing? 
         //       should that be a compile error or just have two? what if someone was relying on them being aliased? 
-        id := or lookup_baked(addr) { () BakedVarId |
-            info := get_meta(T);
-            size_of: i64 = info.stride_bytes.zext();
-            // TODO: assert alignment
-            // TODO: assert len isnt big enough to be a pointer?
-            // TODO: need to check against c.baked.lookup (the first ptr not each individual element) :BLOAT
-            bytes: []u8 = (ptr = u8.ptr_from_int(addr), len = length * size_of); // TODO: decide if i need to clone. 
-            v: BakedVarId = if info.contains_pointers {
+        id, addend := emplace_bake(bytes) {
+            //@println("baking a new slice %*%=%", length, size_of, bytes.len);
+            ::if(BakedVar);
+            if info.contains_pointers {
                 parts: List(BakedEntry) = list(ast_alloc());
                 off := 0;
                 range(0, length) { _ | 
@@ -183,17 +186,15 @@ fn bake_relocatable_slice_erased(addr: rawptr, length: i64, T: Type) []BakedEntr
                     parts&.push_all(entries);
                     off += size_of;
                 };
-                // TODO: without cast
-                bake_value(@as(BakedVar) (VoidPtrArray = parts.as_raw()))
+                (VoidPtrArray = parts.as_raw())
             } else {
-                bake_value(@as(BakedVar) (Bytes = bytes.as_raw_list())) // TODO: this should take jit_ptr param? even tho its sad if you had to do work just for me to throw away. and then would want to warn if conflicting handlers or it could be super confusing.  -- Jun 30
-            };
-            
-            cache_baked(addr, v);
-            v
+                (Bytes = bytes.as_raw_list())
+            }
         };
-
-        (AddrOf = id)
+        
+        @if(has_feature("@franca/internal_pointers"), 
+            (AddrOfA = (base = id, addend = addend)),
+            (AddrOf = id))
     };
     
     @slice(ptr, len) ast_alloc()
@@ -280,8 +281,9 @@ fn bake_relocatable_value(self: *CStr) Slice(BakedEntry) = {
         bytes&.push(b);
     };
     bytes&.push(@as(u8) 0.trunc());
+    vbytes := self.ptr.slice(bytes.len);
     value := bake_value(@as(BakedVar) (Bytes = bytes.as_raw()));
-    cache_baked(addr, value);
+    cache_baked(vbytes, value);
     ptr: BakedEntry = (AddrOf = value);
     ptr.repeated(1, temp()).items()
 }

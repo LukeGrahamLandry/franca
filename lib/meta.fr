@@ -369,3 +369,37 @@ fn import_module(path: Str) ScopeId = {
     
     exports1
 }
+
+fn cache_baked(vbytes: []u8, v: BakedVarId) void = {
+    @if(has_feature("@franca/internal_pointers"), {
+        cache_baked_vbytes(vbytes, v);
+    }, {
+        cache_baked(u8.int_from_ptr(vbytes.ptr), v);
+    })
+}
+
+fn lookup_baked(vbytes: []u8) ?Ty(BakedVarId, i32) = {
+    @if(has_feature("@franca/internal_pointers"), {
+        return(lookup_baked_vbytes(vbytes));
+    }, {
+        id := lookup_baked(u8.int_from_ptr(vbytes.ptr)) || return(.None);
+        return(Some = (id, 0));
+    })
+}
+
+fn emplace_bake(vbytes: []u8, $body: @Fn() BakedVar) Ty(BakedVarId, i32) = {
+    xx := lookup_baked(vbytes);
+    or xx {
+        id := @if(has_feature("@franca/internal_pointers"), {
+            fr := current_compiler_context();
+            id := fr'vtable'reserve_baked(fr.data, (Some = vbytes));
+            var := body();
+            fr'vtable'put_baked_var(fr.data, id, var);
+            id
+        }, {
+            var := body();
+            bake_value(var)
+        });
+        (id, @as(i32) 0)
+    }
+}

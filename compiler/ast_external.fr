@@ -671,12 +671,13 @@ BakedValue :: @struct {
     export: bool = false;
     need_reify := false;
     loc: Span;
-    jit_addr := 0;
+    //jit_addr := 0;
     name: Symbol = Flag.SYMBOL_ZERO.ident();
 };
 
+SymIdx :: @tagged(FuncId: FuncId, BakedVarId: BakedVarId, Var: VarId);
 BakedReloc :: @struct {
-    target: @tagged(FuncId: FuncId, BakedVarId: BakedVarId);
+    target: SymIdx;
     off: u32;
     // TODO: franca code can't use this yet but import_c can so we just pass it through to the backend
     addend: i64;
@@ -698,11 +699,16 @@ fn bake_translate_legacy(legacy: []BakedEntry, bytes: *List(u8), relocs: *List(B
         @if_let(it) fn Num(int) => {
             dest[] = int.value;
         };
+        addend := 0;
         relocs.push(off = off - 8 + base, target = @match(it) {
             fn Num(_) => continue();
             fn FnPtr(it) => (FuncId = it);
             fn AddrOf(it) => (BakedVarId = it);
-        }, addend = 0);
+            fn AddrOfA(it) => {
+                addend = it.addend.intcast();
+                (BakedVarId = it.base)
+            };
+        }, addend = addend);
     };
 }
 
@@ -725,11 +731,11 @@ fn bake_iter_legacy(value: *BakedValue, $body: @Fn(legacy: BakedEntry) void) voi
         if value.relocations.len > next {
             r := value.relocations.index(next);
             if r.off == off.trunc() {
-                @assert_eq(r.addend, 0, "TODO: stop using bake_iter_legacy because it can't do addend-s");
                 next += 1;
                 legacy = @match(r.target) {
                     fn FuncId(it) => (FnPtr = it);
-                    fn BakedVarId(it) => (AddrOf = it);
+                    fn BakedVarId(it) => (AddrOfA = (base = it, addend = r.addend.intcast()));
+                    fn Var() => unreachable();
                 };
             };
         };

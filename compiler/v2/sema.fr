@@ -1198,6 +1198,7 @@ fn compile_quote(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe
 
     unquote_placeholders := @unwrap(self.env.unquote_placeholders, "quote during boot") return;
     
+    // TODO: make env.unquote_placeholders a @FnPtr instead and then this goes away (becomes an automatic jit-shim)
     if self.get_fn_callable(unquote_placeholders).is_none() {
         // note: do this before fucking with the expr because it will yield the first time!
         @check(self.infer_arguments(unquote_placeholders)) return;
@@ -3366,9 +3367,6 @@ fn took_pointer_value(self: *SelfHosted, fid: FuncId) void = {
         };
         // Note: else is not `Suspend = self.wait_for(Jit = fid)` because of cycles, we defer to the backend to deal with finializing it. 
         //       a better system would be to generate a shim right now so we'd always have an address? 
-        if !done && self.comptime_codegen.threaded { // looks silly to cache the `id` but time it before removing!
-            self.pending_took_pointer&.push(@as(Ty(FuncId, Qbe.Sym)) (fid, id));
-        };
     };
     func.set_flag(.TookPointerValue);
 }
@@ -3470,12 +3468,13 @@ fn handle_declare_constant(self: *SelfHosted, name: Var, ty: *LazyType, value: *
     
     // TODO: do this if it is a slice as well. 
     //       and really should do it for locals as well if the rhs happens to be constant. 
+    @if(false)  // :BringBackDataNames
     if self.get_type(value.ty).is(.Ptr) {
         @debug_assert(value.expr&.is(.Value));
         opts := self.get_build_options();
         if opts.retain_function_names {
             addr := value.expr.Value.bytes.Small._0;
-            self.baked.data_names&.insert(addr, name.name);
+            self.baked.vmem.data_names&.insert(addr, name.name);
         };
     };
     

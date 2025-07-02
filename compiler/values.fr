@@ -35,7 +35,7 @@ TODO:
 */
 
 // since pointers might have cycles, forced_id is used so you can add a cache entry for and address before it's been emitted. 
-fn bake_relocatable_constant(c: *SelfHosted, value: []u8, type: Type, loc: Span, forced_id: ?BakedVarId) Result(BakedVarId, *CompileError) = {
+fn bake_relocatable_constant(c: *SelfHosted, value: []u8, type: Type, loc: Span, forced_id: ?BakedVarId) Result(Ty(BakedVarId, i64), *CompileError) = {
     to_zero: ReadBytes = (bytes = value, i = 0);
     c.comp().zero_padding(type, to_zero&);  // Needed for reproducible builds!
     
@@ -45,9 +45,9 @@ fn bake_relocatable_constant(c: *SelfHosted, value: []u8, type: Type, loc: Span,
     if value.len() > 8 && forced_id.is_none() {
         // TODO: this barely does anything! cause like cstr and slice don't go through this function. they call dyn_bake_relocatable_value. -- Jun 30
         //       this is the right idea, they just need to check thier pointers against the cache first. 
-        if c.baked.lookup&.get(jit_ptr) { v | 
-            // TODO: be careful about aliasing as different types with different custom_bake_constant? -- Jun 30 
-            return(Ok = v);
+        // TODO: be careful about aliasing as different types with different custom_bake_constant? -- Jun 30 
+        if c.baked.vmem&.get(rawptr_from_int jit_ptr) { it, addend |
+            @if_let(it) fn BakedVarId(it) => return(Ok = (it, addend));
         };
     };
     
@@ -59,9 +59,9 @@ fn bake_relocatable_constant(c: *SelfHosted, value: []u8, type: Type, loc: Span,
             n := dest.name;
             dest[] = v;
             dest.name = n;
-            return(Ok = id)
+            return(Ok = (id, 0))
         } else {
-            return(Ok = c.put_baked(v, (Some = jit_ptr)))
+            return(Ok = (c.put_baked(v, (Some = value)), 0))
         };
         unreachable()  // TODO: this shouldn't be needed
     };
@@ -119,15 +119,18 @@ fn bake_relocatable_body(c: *SelfHosted, value: []u8, type: Type, out: *List(Bak
     // :ScaryIfAliasWrongType
     // If we've already seen this pointer, don't emit it again, just alias the old one. 
     if only_one_word {
-        if c.baked.lookup&.get(first_word) { v | 
-            out.push(off = reloc_off, target = (BakedVarId = v), addend = 0);
-            return(.Ok);
-        };
-    
-        c.update_pending_took_pointer();  // :SLOW to do this every time 
-        if c.baked.functions&.get(first_word) { fid |
-            out.push(off = reloc_off, target = (FuncId = fid), addend = 0);
-            return(.Ok);
+        if c.baked.vmem&.get(rawptr_from_int first_word) { it, addend |
+            @match(it) {
+                fn FuncId(fid) => {
+                    out.push(off = reloc_off, target = (FuncId = fid), addend = addend);
+                    return(.Ok);
+                }
+                fn BakedVarId(v) => {
+                    out.push(off = reloc_off, target = (BakedVarId = v), addend = addend);
+                    return(.Ok);
+                }
+                fn Var() => todo();
+            };
         };
         
         // TODO: have this slow fallback for ICE reporting
@@ -181,9 +184,9 @@ fn bake_relocatable_body(c: *SelfHosted, value: []u8, type: Type, out: *List(Bak
             inner_info := c.get_info(inner[]);
             ptr := u8.ptr_from_int(first_word);
             data := slice(ptr, inner_info.stride_bytes.zext());
-            _, id := c.reserve_baked(Some = first_word);  // avoid cycles
-            id2 := @try(c.bake_relocatable_constant(data, inner[], Span.zeroed(), (Some = id))) return;
-            @debug_assert_eq(id.id, id2.id);
+            _, id := c.reserve_baked(Some = data);  // avoid cycles
+            id2, addend := @try(c.bake_relocatable_constant(data, inner[], Span.zeroed(), (Some = id))) return;
+            @debug_assert(id.id == id2.id && addend == 0, "thought this was a fresh pointer but it wasn't!");
             out.push(off = reloc_off, target = (BakedVarId = id), addend = 0);
         }
         fn Struct(f) => {
@@ -227,8 +230,8 @@ fn bake_relocatable_body(c: *SelfHosted, value: []u8, type: Type, out: *List(Bak
     .Ok
 }
 
-fn bake_legacy(self: *SelfHosted, legacy: BakedVar, jit_addr: ?i64) BakedVarId = {
-    value: BakedValue = @match(legacy) {
+fn from_legacy(self: *SelfHosted, legacy: BakedVar) BakedValue = {
+    @match(legacy) {
         fn VoidPtrArray(legacy) => {
             bytes := u8.list(self.get_alloc());
             relocs := BakedReloc.list(self.get_alloc());
@@ -237,7 +240,11 @@ fn bake_legacy(self: *SelfHosted, legacy: BakedVar, jit_addr: ?i64) BakedVarId =
         };
         fn Bytes(bytes) => (template = (Bytes = bytes.items()), loc = Span.zeroed());
         fn Zeros(len) => (template = (Zeroes = len), loc = Span.zeroed());
-    };
+    }
+}
+
+fn bake_legacy(self: *SelfHosted, legacy: BakedVar, jit_addr: ?[]u8) BakedVarId = {
+    value: BakedValue = self.from_legacy(legacy);
     self.put_baked(value, jit_addr)
 }
 
@@ -262,29 +269,36 @@ fn created_jit_fn_ptr_value(self: *SelfHosted, f: FuncId, ptr: i64) void = {
         }
     };
     
-    self.baked.functions&.insert(ptr, f);
+    // TODO: make vbytes from SymbolInfo.size and that can be used for faster backtraces. 
+    self.baked.vmem&.insert(rawptr_from_int ptr, (FuncId = f));
 }
 
-fn reserve_baked(c: *SelfHosted, jit_ptr: ?i64) Ty(*BakedValue, BakedVarId) #inline = {
+fn reserve_baked(c: *SelfHosted, jit_ptr: ?[]u8) Ty(*BakedValue, BakedVarId) #inline = {
     v := c.baked.values&;
     id: BakedVarId = (id = v.len.trunc());
     v.push(zeroed BakedValue);
     dest := v.nested_index(id.id.zext());
     if jit_ptr { ptr | 
-        prev := c.baked.lookup&.insert(ptr, id);
+        prev := c.baked.vmem&.insert(ptr, (BakedVarId = id));
         // TODO: this should be true but it's not
         //@debug_assert(prev.is_none(), "reserved_baked stomped an address");
-        if c.baked.data_names&.get(ptr) { name | 
+        
+        // :BringBackDataNames 
+        // but have to get more serious about it
+        // because the old version only got like 20 of them which wasn't super useful. 
+        // was going to use SymIdx.Var for that, but if not, don't forget to get rid of it. 
+        @if(false)
+        if c.baked.vmem.data_names&.get(ptr) { name | 
             dest.name = name;
         };
     };
     (dest, id)
 }
 
-fn put_baked(c: *SelfHosted, v: BakedValue, jit_ptr: ?i64) BakedVarId #inline = {
+fn put_baked(c: *SelfHosted, v: BakedValue, jit_ptr: ?[]u8) BakedVarId #inline = {
     dest, id := c.reserve_baked(jit_ptr);
     if jit_ptr { ptr | 
-        v.jit_addr = ptr;
+        //v.jit_addr = ptr;
     };
     n := dest.name;
     dest[] = v;
@@ -309,55 +323,18 @@ fn emit_relocatable_constant_body(c: *SelfHosted, bytes: Slice(u8), ty: Type, fo
 //       for supporting internal pointers. 
 Baked :: @struct(
     values: BucketArray(BakedValue),
-    // TODO: defend against the same memory being aliased as different types that would want to emit the constant differently? -- Jun 30
-    // TODO: this doesn't help for small strings because they're stored inline in the Values. 
-    // deduplicate values by thier jit address. 
-    lookup: HashMap(i64, BakedVarId),
-    // avoid iterating all function pointers when you try to have one as a constant. 
-    functions: HashMap(i64, FuncId),
+    vmem: ThePageMap,
     // Some types need special handling (Slice, CStr, etc). This are called at comptime and might call back into the auto dynamic versions to handle thier fields. 
     custom_bake_constant: HashMap(Type, FuncId),
-    data_names: HashMap(i64, Symbol),
 );
 
 BakeHandler :: @FnPtr(self: rawptr) Slice(BakedEntry);
 
-fn update_pending_took_pointer(c: *SelfHosted) void = {
-    @debug_assert(!c.comptime_codegen.threaded || c.pending_took_pointer.len == 0, "when comptime codegen is on the main thread there's no need to track jit pointers lazily");
-    // TODO: have it tell us when pointers are ready. :SLOW
-    found := false;
-    m := c.comptime_codegen.m;
-    unordered_retain c.pending_took_pointer& { it |
-        fid, id := it[];
-        need_more := true;
-        use_symbol(m, id) { s | 
-            p := s.jit_addr.int_from_rawptr();
-            if p != 0 {
-                c.baked.functions&.insert(p, fid);
-            };
-            p2 := s.shim_addr.int_from_rawptr();
-            if p != p2 && p2 != 0 {
-                c.baked.functions&.insert(p2, fid);
-            };
-            need_more = p == 0 || p == p2;
-        };
-        need_more
-    };
-}
-
 // :bake_relocatable_value
 fn get_custom_bake_handler(c: *SelfHosted, ty: Type) Res(?BakeHandler) = {
     if c.baked.custom_bake_constant&.get(ty) { fid |
-        if c.get_fn_callable(fid) { fptr |
-            fptr := assume_types_fn(rawptr, Slice(BakedEntry), fptr);
-            return(Ok = (Some = fptr));
-        };
-        res := c.poll_in_place(rawptr) { () Maybe(rawptr) |
-            @match(c.get_fn_callable(fid)) {
-                fn Some(ptr) => (Ok = ptr);
-                fn None() => (Suspend = c.wait_for(Jit = fid));
-            }
-        };
+        c := c.comp();
+        res := c'vtable'get_jitted_ptr(c.data, fid);
         fptr := @try(res) return;
         fptr := assume_types_fn(rawptr, Slice(BakedEntry), fptr);
         return(Ok = (Some = fptr));
@@ -935,3 +912,209 @@ fn finish_layout(self: *SelfHosted, ty: Type) void = {
         (a.is_tuple& == b.is_tuple&) && (a.fields& == b.fields&)
     }
 };
+
+//ThePageMap :: OldPageMap;
+ThePageMap :: PageMap;
+
+OldPageMap :: @struct {
+    // TODO: defend against the same memory being aliased as different types that would want to emit the constant differently? -- Jun 30
+    // TODO: this doesn't help for small strings because they're stored inline in the Values. 
+    // deduplicate values by thier jit address. 
+    lookup: HashMap(i64, BakedVarId);
+    // avoid iterating all function pointers when you try to have one as a constant. 
+    functions: HashMap(i64, FuncId);
+    //data_names: HashMap(i64, Symbol);  :BringBackDataNames
+};
+
+fn init(a: Alloc) OldPageMap = (
+    lookup = init(a),
+    functions = init(a),
+    //data_names = init(a), :BringBackDataNames
+);
+
+fn insert(self: *OldPageMap, addr: rawptr, value: SymIdx) void #inline = {
+    @debug_assert(!addr.is_null());
+    @match(value) {
+        fn FuncId(id) => {
+            self.functions&.insert(int_from_rawptr addr, id);
+        }
+        fn BakedVarId(id) => {
+            self.lookup&.insert(int_from_rawptr addr, id);
+        }
+        fn Var() => todo();
+    };
+}
+
+fn insert(self: *OldPageMap, bytes: []u8, value: SymIdx) void = {
+    self.insert(u8.raw_from_ptr(bytes.ptr), value);
+}
+
+fn get(self: *OldPageMap, addr: rawptr) ?Ty(SymIdx, i64) #inline = {
+    addr := int_from_rawptr addr;
+    if self.lookup&.get(addr) { it |
+        return(Some = ((BakedVarId = it), 0));
+    };
+    if self.functions&.get(addr) { it |
+        return(Some = ((FuncId = it), 0));
+    };
+    .None
+}
+
+PageMap :: @struct {
+    Tag :: @enum(u8) (Unknown, FuncId, BakedVarId, Previous);
+    Entry :: @struct {
+        idx: @union(
+            fid: FuncId, 
+            baked: BakedVarId,
+        );
+        off: u16;  // how far from the start of the page does this object start
+        len: u16;
+        tag: Tag;
+        continued_on_next_page: bool;
+    };
+    Page :: @struct {
+        entries: RawList(Entry);
+        high_bits: i64;
+    };
+    page_bits :: 14;
+    
+    pages: RawList(*Page);
+    lookup: RawHashMap(i64, i64);
+    gpa: Alloc;
+};
+
+fn init(a: Alloc) PageMap = (
+    gpa = a,
+    pages = empty(),
+    lookup = init(),
+);
+
+fn insert(self: *PageMap, addr: rawptr, value: SymIdx) void = {
+    self.insert(u8.ptr_from_raw(addr).slice(1), value);
+}
+
+fn insert(self: *PageMap, vbytes: []u8, value: SymIdx) void = {
+    hi, lo := self.split(u8.raw_from_ptr(vbytes.ptr));
+    p := self.get_page(hi);
+    e := self.find_entry(p, lo, true).unwrap();
+    // TODO: do stuff if it spans pages
+    // TODO: pass in the span of bytes
+    if e.len == 0 {
+        e.len = vbytes.len.trunc();
+        //@println("insert new len=% at:%:%", vbytes.len, hi, e.off);
+    } else {
+        //@println("reuse old.len=% new.len=% at:%:%", e.len, vbytes.len, hi, e.off);
+    };
+    @match(value) {
+        fn FuncId(it) => {
+            e.idx.fid = it;
+            e.tag = .FuncId;
+        }
+        fn BakedVarId(it) => {
+            e.idx.baked = it;
+            e.tag = .BakedVarId;
+        }
+        fn Var() => todo();
+    }
+}
+
+// TODO: replace addr with vbytes and assert if it's too big for an existing bake 
+//       (eventually handle that properly somehow)
+fn get(self: *PageMap, addr: rawptr) ?Ty(SymIdx, i64) = {
+    hi, lo := self.split(addr);
+    p := self.get_page(hi);
+    if self.find_entry(p, lo, false) { e | 
+        ::enum(PageMap.Tag);
+        {
+            base := hi.shift_left(PageMap.page_bits) + e.off.zext();
+            bound := base + e.len.zext();
+            p := addr.int_from_rawptr();
+            @debug_assert(p >= base && p < bound, "entry does not contain address");
+        };
+        off := lo - e.off.zext(); // TODO: spanning pages. etc.
+        if off != 0 {
+            //@println("addend: %", off);
+        };
+        //@println("get at:%:% addend=%", hi, e.off, off);
+        return(Some = (@match(e.tag) {
+            fn Unknown() => return(.None); // TODO
+            fn FuncId() => (FuncId = e.idx.fid);
+            fn BakedVarId() => (BakedVarId = e.idx.baked);
+            fn Previous() => panic("TODO: do stuff if it spans pages");
+        }, off));
+    };
+    .None
+}
+
+fn split(self: *PageMap, addr: rawptr) Ty(i64, i64) = {
+    addr := int_from_rawptr addr;
+    hi := addr.shift_right_logical(PageMap.page_bits);
+    lo := addr.bit_and(1.shift_left(PageMap.page_bits) - 1);
+    (hi, lo)
+}
+
+fn get_page(self: *PageMap, hi: i64) *PageMap.Page = {
+    i := (self.lookup&.get_or_insert(hi, self.gpa) {
+        p := self.gpa.box(PageMap.Page);
+        p[] = (entries = empty(), high_bits = hi);
+        self.pages&.push(p, self.gpa);
+        self.pages.len - 1
+    })[];
+    p := self.pages[i];
+    @debug_assert(p.high_bits == hi);
+    p
+}
+
+fn find_entry(self: *PageMap, p: *PageMap.Page, lo: i64, create: bool) ?*PageMap.Entry = {
+    maybe_append :: fn() Never => {
+        @if(!create) return(.None);
+        p.entries&.push(zeroed PageMap.Entry, self.gpa);
+        e := p.entries.index(p.entries.len - 1);
+        e.off = lo.trunc();
+        e.len = 0; // TODO
+        return(Some = e)
+    };
+    
+    if(p.entries.len == 0, maybe_append);
+    end := p.entries.index(p.entries.len - 1);
+    if(lo > zext(end.off + end.len), maybe_append);
+
+    search := p.entries.items();
+    i := loop i64 { $break |
+        if search.len == 0 {
+            break(p.entries.ptr.ptr_diff(search.ptr));
+        };
+        i := search.len / 2;
+        e := search.index(i);
+        if lo >= e.off.zext() {
+            if lo < zext(e.off + e.len) {
+                return(Some = e);
+            };
+            search = search.rest(i + 1);
+        } else {
+            search = search.slice(0, i)
+        };
+    };
+    if(!create, => return(.None));
+    p.entries&.insert(i, zeroed PageMap.Entry, self.gpa);
+    e := p.entries.index(i);
+    e.off = lo.trunc();
+    e.len = 0; // TODO
+    
+    if i != 0 {
+        it := p.entries[i - 1]&;
+        @debug_assert(e.off >= it.off + it.len, "bad backwards");
+    };
+    if i != p.entries.len - 1 {
+        it := p.entries[i + 1]&;
+        // TODO: this should be strictly <
+        @debug_assert(e.off + e.len <= it.off, "bad forwards");
+    };
+    
+    (Some = e)
+}
+
+fn loop($T: Type, $body: @Fn(break: @Fn(result: T) Never) void) T #generic = {
+    break :: fn(result: T) Never => return(result);
+    loop(=> body(break))
+}
