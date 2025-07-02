@@ -5,33 +5,63 @@ TRACK_SCOPES :: false;
 /// Query interface /// 
 
 fn put_constant(self: *Scopes, name: Var, value: FatExpr, ty: LazyType) void = {
-    // TODO: this cant be the whole expression because then it looks for an overload returning unit. -- Jun 28
-    ptr := self.constants&.nested_index(name.id.id.zext());
-    ptr[] = (value, ty);
+    @debug_assert(name.kind == .Const);
+    ptr := self.get_var_data(name);
+    ptr.expr = value;
+    ptr.set_type(ty);
+    ptr.ready = true;
 }
 
-fn get_var_type(self: *Scopes, v: Var) ?*VarInfo = {
-    t := self.types&.nested_index(v.id.id.zext());
-    if t.type == UnknownType {
-        return(.None)
+fn set_type(ptr: *VarData, ty: LazyType) void #inline = {
+    ::ptr_utils(LazyType);
+    if !@is(ty&, .Infer, .Finished) {
+        if ptr.nullable_type.is_null() {
+            ptr.nullable_type = current_comptime().get_alloc().box(LazyType);
+        };
+        ptr.nullable_type[] = ty;
     };
-    (Some = t)
+    @if_let(ty&) fn Finished(it) => {
+        ptr.inferred = it[];
+    };
+    ptr.ready = true;
+} 
+
+fn get_var_data(self: *Scopes, name: Var) *VarData #inline = 
+    self.variables&.nested_index(name.id.id.zext());
+
+fn get_type(c: *VarData) Type = {
+    c.inferred
+}
+    
+fn get_var_type(self: *Scopes, v: Var) ?*VarData #inline = {
+    c := self.get_var_data(v);
+    @if(c.inferred == UnknownType, .None, (Some = c))
 }
 
 fn put_var_type(self: *Scopes, v: Var, ty: Type) bool = {
-    slot := self.types&.nested_index(@as(i64) v.id.id.zext());
-    is_new := slot.type == UnknownType;
-    slot.type = ty;
+    slot := self.get_var_data(v);
+    is_new := slot.inferred == UnknownType;
+    slot.inferred = ty;
     is_new
 }
 
-fn get_constant(self: *Scopes, name: Var) ?*Ty(FatExpr, LazyType) #inline = {
-    ::as_ref(Ty(FatExpr, LazyType));
-    c := self.constants&.nested_index(name.id.id.zext());
-    if c._1&.is(.EvilUninit) {
-        return(.None)
+fn get_constant(self: *Scopes, name: Var) ?*VarData #inline = {
+    ::as_ref(VarData);
+    @debug_assert(name.kind == .Const);
+    c := self.get_var_data(name);
+    @if(c.ready, (Some = c), .None)
+}
+
+// The #inline is important
+fn maybe_stack_allocated_type(var: *VarData) *LazyType #inline = {
+    type := var.nullable_type;
+    ::ptr_utils(LazyType);
+    if type.is_null() {
+        storage: LazyType = @if(var.inferred == UnknownType, 
+            .Infer, (Finished = var.inferred));
+        type = storage&; 
     };
-    (Some = c)
+    type
 }
 
 /// Resolver Interface. Called lazily by the compiler when it first works on a new function. /// 
@@ -69,10 +99,11 @@ fn resolve_body(compiler: *SelfHosted, func: *Func) PRes #once = {
 
 fn dup_var(self: *Scopes, old: Var) Var = {
     new := old;
-    new.id.id = self.types.len.trunc();
-    self.types&.push(type = UnknownType, took_address = self.types&.nested_index(old.id.id.zext())[].took_address, debug_name = old.name);
+    new.id.id = self.variables.len.trunc();
     // EvilUninit
-    self.constants&.push_uninit().slice(1).set_zeroed();  // TODO: bit odd that i dont have to clone if the old thing had a constant expr. 
+    dest := self.variables&.push_uninit();
+    dest.slice(1).set_zeroed();  // TODO: bit odd that i dont have to clone if the old thing had a constant expr. 
+    dest.took_address = self.variables&.nested_index(old.id.id.zext())[].took_address;
     new
 }
 
@@ -95,8 +126,7 @@ Scopes :: @rec @struct(
     // Invarient: all but last bucket are full. Never push_all since that might allocate a non full bucket and then indexes will be wrong. 
     // :push_type_when_create_new_var when i start creating new vars elsewhere, need to remember to push a none here! didn't have to in the old version because it was a hashmap.
     // now its hard to forget cause i use that len instead of self.next_var too.
-    types: BucketArray(VarInfo), // TODO: remove? and use constants._1 = (Finished = type)
-    constants: BucketArray(Ty(FatExpr, LazyType)),
+    variables: BucketArray(VarData),
     // Used for not redundantly #include_std-ing. 
     // TODO: This will become a HashMap(Symbol, ScopeId) when I want to allow @import-ing a namespace. 
     //       so currently Lib :: @namespace { #include_std("name"); }; doesn't work unless its the only time which is kinda dumb. 
@@ -104,11 +134,32 @@ Scopes :: @rec @struct(
     already_loaded: HashSet(Symbol),
 );
 
-VarInfo :: @struct(
-    type: Type,
-    took_address: bool,
-    debug_name: Symbol, // TODO: redundant with ProgramIndex
-);
+// 
+// Sources of constants that will have a value in the expr field:
+// - constant declarations (`name :: value`)
+// - function return/local_return labels
+// - overload sets
+// - $const function parameter
+// - default field value / constant field
+// 
+// VarIds are assigned early in scope.fr and expressions are hoisted later  
+// by calling put_constant in sema.fr, so there's a window of time 
+// where expr.is(Poison) and get_constant() will return None. 
+// 
+// Runtime variables (`name := value`), but not fields, have an entry that 
+// stores their type (after it's infered) and declaration location but no 
+// value and no LazyType (since they go through sema sequentially). 
+// 
+
+VarData :: @struct {
+    // `expr.loc` is valid even when Poison
+    expr: FatExpr;
+    // `nullable_type` is null for Infer/Finished. use `inferred` instead.
+    nullable_type: *LazyType;
+    inferred: Type; // TODO: remove this. it should be the same as type.Finished
+    took_address: bool;
+    ready: bool;
+};
 
 Scope :: @struct(
     parent: ScopeId,
@@ -552,17 +603,17 @@ fn decl_var(self: *SelfHosted, s: ScopeId, name: Symbol, kind: VarType, loc: Spa
         return(@err("Cannot shadow constant in the same scope: %", self.pool.get(name)));
     };
     
-    var: Var = (kind = kind, name = name, id = (id = scopes.types.len.trunc()), scope = s);
+    var: Var = (kind = kind, name = name, id = (id = scopes.variables.len.trunc()), scope = s);
+    dest := scopes.variables&.push_uninit();
+    dest.slice(1).set_zeroed();  // EvilUninit
+    dest.expr.loc = loc;
     if kind == .Const {
-        empty: Ty(FatExpr, LazyType) = ((expr = (Poison = placeholder), loc = loc, ty = UnknownType, done = false), .Infer);
-        scopes.constants&.push(empty);
+        dest.expr.expr = (Poison = placeholder);
+        dest.set_type(.Infer);
         scope.const_lookup&.insert(name, var, self.get_alloc());
-    } else {
-        scopes.constants&.push_uninit().slice(1).set_zeroed();  // EvilUninit
     };
     
     scope.vars&.push(var, self.get_alloc()); // includes constants!
-    scopes.types&.push(type = UnknownType, took_address = false, debug_name = name);
     (Ok = var)
 }
 
@@ -815,8 +866,9 @@ fn decl(self: *RenumberVars, name: *ScopeId) void = {
         self.decl_new(new&);
         v := self.scope.get_constant(v[]);
         v := v.expect("known const"); // TODO: destructure through a pointer? 
-        expr := self.compiler.clone(v._0&);
-        ty := self.compiler.clone(v._1&);
+        expr := self.compiler.clone(v.expr&);
+        ty := v.maybe_stack_allocated_type();
+        ty := self.compiler.clone(ty);
         self.scope.put_constant(new, expr, ty);
         new_constants&.insert(new.name, new, self.compiler.get_alloc());
     };

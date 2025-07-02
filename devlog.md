@@ -1,4 +1,25 @@
 
+## (Jul 1)
+
+- 958ms
+- consolidate scopes.types and scopes.constants
+- the lazytype is only needed for constants so store it indirectly
+```
+a, b := (0, 0);
+each c.scopes.constants& { it |
+    ::ptr_utils(LazyType);
+    a += int(it.nullable_type.is_null());
+    b += 1;
+};
+@println("%/% empty. saved % bytes", a, b, a*size_of(LazyType) - b*8);
+// -unsafe self compile:
+// 149352/243854 empty. saved 11192144 bytes
+// after not allocating for Finished/Infer
+// 243734/243958 empty. saved 19496928 bytes
+```
+- thats pretty funny. all that messing around with LazyType and i only actually use it 224 times
+- 945ms
+
 ## (Jun 30)
 
 - something fishy going on with staticmemmove needing an extra step in runtests bootstrapping. 

@@ -7,6 +7,29 @@ let's cheat and make examples/terminal.fr(repl=true) not take 2 seconds to compi
 notably those are all things to aren't going to change if you're just working on the terminal program. 
 
 ---
+TODO: fix this and add a test
+```
+LazyType :: @rec @tagged(
+    EvilUninit: void,
+    Infer,
+    PendingEval: FatExpr, 
+    Finished: Type, 
+    Returning: Type,
+    UnboundGeneric: Symbol,
+    Generic: Var,
+);
+
+type := var.nullable_type;
+::ptr_utils(LazyType);
+if type.is_null() {
+// Type Error: expected *LazyType but found *@tagged(EvilUninit: void,Infer: void,PendingEval: FatExpr,Finished: Type,Returning: Type,UnboundGeneric: u32,Generic: @struct(kind: i64,name: u32,id: @struct(id: u32,),scope: u32,),)
+// unless you get rid of the @rec
+    storage: LazyType = @if(var.temporary == UnknownType, 
+        .Infer, (Finished = var.temporary));
+    type = storage&; 
+};
+```
+---
 
 repro is broken! 
 my guess is the emit_ir eval order change for Stmt.Set means it copies 

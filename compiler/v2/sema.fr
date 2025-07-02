@@ -124,7 +124,7 @@ fn decl_var_pattern(self: *SelfHosted, stmt: *FatStmt) Maybe(Ty(bool, bool)) #on
             prev := self.scopes.get_var_type(name); 
             self.scopes.put_var_type(name, types[i]);
             self.scopes.get_var_type(name).unwrap()[].took_address = true; // TODO: don't do this
-            @debug_assert(prev.is_none() || { t := prev.unwrap(); t.type == types[i] });
+            @debug_assert(prev.is_none() || { t := prev.unwrap(); t.get_type() == types[i] });
         };
         // An inlined closure might have had a polymorphic parameter, but emit_bc expects known types.
         if b.ty&.is(.Infer) {
@@ -155,12 +155,11 @@ fn compile_place_expr(self: *SelfHosted, place: *FatExpr, requested: ResultType,
             return(self.compile_place_expr(arg[], requested, want_deref));
         }
         fn GetVar(var) => {
-            info := self.scopes.get_var_type(var[]);
-            info := or info {| 
+            info := self.scopes.get_var_type(var[]) || { 
                 return(@err("var must be declared: %", var.log(self)))
             };
             info.took_address = true;
-            ptr_ty := self.ptr_type(info.type);
+            ptr_ty := self.ptr_type(info.get_type());
 
             place.done = true;
             place[] = synthetic_ty((Addr = self.box(place[])), loc, ptr_ty);
@@ -335,7 +334,7 @@ fn deref_one(self: *SelfHosted, ptr: *FatExpr) Maybe(void) = {
             // this allows auto deref to work on let ptr vars.
             if arg.expr&.is(.GetVar) {
                 if self.scopes.get_var_type(arg.expr.GetVar) { it |
-                    @debug_assert(it.took_address, "deref but not took_address");
+                    @debug_assert(self.scopes.get_var_data(arg.expr.GetVar)[].took_address, "deref but not took_address");
                 } else {
                     @debug_assert(false, "deref_one missing variable?");
                 };
@@ -389,7 +388,7 @@ fn decl_var(self: *SelfHosted, name: Var, ty: *LazyType, value: *FatExpr) Maybe(
     self.scopes.put_var_type(name, final_ty); // TODO: this returns is_new, i want to just assert that. we shouldn't be compiling more than once -- Jul 25
     // TODO: prev should always be none?? but its not a constant and seems to always be the same so its probablby not a super huge deal? -- Apr 23
     //       maybe its just cause im not zeroing the stmt and end up compiling multiple times. -- Apr 25
-    @debug_assert(prev.is_none() || { t := prev.unwrap(); t.type == final_ty });
+    @debug_assert(prev.is_none() || { t := prev.unwrap(); t.get_type() == final_ty });
     @err_assert(name.name != Flag.return.ident(), "naming a variable 'return' is not the best idea") return;
     @err_assert(name.name != Flag.local_return.ident(), "naming a variable 'local_return' is not the best idea") return;
     // TODO: :mark_stmt_done
@@ -2390,9 +2389,8 @@ fn type_of(self: *SelfHosted, expr: *FatExpr) Maybe(Type) = {
             (Ok = type)
         }
         fn GetVar(name) => {
-            ::if_opt(VarInfo, void);
             if self.scopes.get_var_type(name[]) { info |
-                return(Ok = info.type);
+                return(Ok = info.get_type());
             };
             ::if(Type);
             if name.kind == .Const {
@@ -3327,17 +3325,18 @@ fn compile_get_var(self: *SelfHosted, expr: *FatExpr, requested: ResultType, old
         .Ok
     } else {
         if self.scopes.get_var_type(var) { info | 
-            expr.ty = info.type;
+            type := info.get_type();
+            expr.ty = type;
             expr.done = true;
             // Reading a variable. Convert it to `var&[]`. 
-            ptr_ty := self.ptr_type(info.type);
+            ptr_ty := self.ptr_type(type);
             // :?
             if old {
                 info.took_address = true;
                 expr[] = synthetic_ty((Addr = self.box(expr[])), expr.loc, ptr_ty);
                 expr.done = true;
                 // Note: not using deref_one, because don't want to just remove the ref, we want raw variable expressions to not exist. kinda HACK
-                expr[] = synthetic_ty((Deref = self.box(expr[])), expr.loc, info.type);
+                expr[] = synthetic_ty((Deref = self.box(expr[])), expr.loc, type);
                 expr.done = true;
             };
             return(.Ok);
@@ -3378,7 +3377,7 @@ fn took_pointer_value(self: *SelfHosted, fid: FuncId) void = {
 fn is_empty_constant(self: *SelfHosted, name: Var) bool #once = {
     var := self.scopes.get_constant(name);
     var := or(var, => return(true));
-    var._0.expr&.is(.Poison)
+    var.expr.expr&.is(.Poison)
 }
 
 // Passing in the requested type here feels a bit weird, but I think it will make anon-functions less painful. 
@@ -3388,8 +3387,8 @@ fn find_const(self: *SelfHosted, name: Var, requested: ResultType) Maybe(Ty(Valu
         // If we've compiled this before, great.
         //     We can't coerce_constant here because we don't have a unique expression node to stick changes into if needed. 
         //     (need to change the expression to create function pointers because they might not be compiled yet)
-        @if_let(var._0.expr&) fn Value(f) => {
-            return(Ok = (f.bytes&.clone(self.get_alloc()), var._0.ty));
+        @if_let(var.expr.expr&) fn Value(f) => {
+            return(Ok = (f.bytes&.clone(self.get_alloc()), var.expr.ty));
         };
     };
     
@@ -3399,8 +3398,8 @@ fn find_const(self: *SelfHosted, name: Var, requested: ResultType) Maybe(Ty(Valu
 fn find_const_non_blocking(self: *SelfHosted, name: Var) ?Ty(Values, Type) #once = {
     var := self.scopes.get_constant(name);
     var := or(var, => return(.None));
-    @if_let(var._0.expr&) fn Value(f) => {
-        return(Some = (f.bytes&.clone(self.get_alloc()), var._0.ty));
+    @if_let(var.expr.expr&) fn Value(f) => {
+        return(Some = (f.bytes&.clone(self.get_alloc()), var.expr.ty));
     };
     .None
 }
@@ -3520,15 +3519,7 @@ fn save_const_values(self: *SelfHosted, name: Var, value: Values, final_ty: Type
 fn save_const(self: *SelfHosted, name: Var, val_expr: Expr, final_ty: Type, loc: Span) CRes(void) #once = {
     @debug_assert(name.kind == .Const, "tried to save non-constant");
     // TODO: do i have to check if someone is already working on this constant? -- Jul 30
-    val := self.scopes.get_constant(name);
-    val := or val {
-        // dup_var of return label in emit_capturing_call gets here.
-        // eventually should remove the ? so its smaller and just do this there instead. 
-        ptr := self.scopes.constants&.nested_index(name.id.id.zext());
-        ptr[] = ((expr = (Poison = .Unknown), loc = loc, ty = UnknownType, done = false), .Infer);
-        ptr
-    };
-    
+    val := self.scopes.get_var_data(name);
     // TODO: this used to work before new overloading rework. -- Aug 27
     //if val._1&.is(.Finished) {
     //    return(@err("tried to re-save constant %", name&.log(self)));
@@ -3537,10 +3528,11 @@ fn save_const(self: *SelfHosted, name: Var, val_expr: Expr, final_ty: Type, loc:
     //    return(@err("tried to stomp constant %", name&.log(self)));
     //};
     
-    val._0.expr = val_expr;
-    val._0.ty = final_ty;
-    val._1 = (Finished = final_ty);
-    self.scopes.put_var_type(name, final_ty);
+    val.expr.expr = val_expr;
+    val.expr.ty = final_ty;
+    // TODO: don't allocate for this. just use .temporary
+    val.set_type(Finished = final_ty);
+    //self.scopes.put_var_type(name, final_ty);
     .Ok
 }
 
