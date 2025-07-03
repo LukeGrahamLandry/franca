@@ -104,6 +104,12 @@ TODO: end of loop. still too many options for 'index'
 
 ## 
 
+- something where you can mark some memory as an artifact with a name and a type,
+  like when you generate code (like compiler/test.fr/gen_full_test_program) or a module 
+  (like backend/opt/simplify.fr/static_memmove), and set an envvar to have 
+  the compiler dump it all for debugging. so you can look at all the extra stuff 
+  that when into your program that doesn't have a real home and error messages could 
+  point to that as a source location. 
 - #log_ir should fire multiple times for functions with $const parameters (ie. native_isel)
 - shouldn't be able to typo a name as easily. like S :: import_module{enqueue :: enqueue_task}); then S.enqueue_task will get you the wrong one and be slow. 
 - why was the quicksort wrapper trying to be emitted for import_module (when not marked #fold)

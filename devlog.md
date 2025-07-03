@@ -1,4 +1,14 @@
 
+## (Jul 2)
+
+- new internal pointer test doesn't work on linux but only when actually making an exe,
+  not if just running through cache file (which also does bake) so maybe it's just 
+  elf addends problem? yeah it works if i go through relocatable or if i use -syscalls
+  so use my own do_relocations_static_linux. it's ignoring the addend. i guess the GLOB_DAT
+  relocations are just never what i want. huh, i guess i never used elf addends because 
+  previously they were only in the import_c tests which i haven't got running on linux yet. 
+  welp, progress!
+
 ## (Jul 1)
 
 - 958ms
@@ -38,6 +48,27 @@ each c.scopes.constants& { it |
   pairs but only 18 key types and almost everything only cares about the key type, 
   so value can just be treated as an opaque blob of bytes. 
 - 926ms
+
+---
+
+currently baked values deduplicate when you reach the same address from multiple 
+places so you can have cycles, but only when you only point to the start of an object. 
+i need to allow internal pointers so you could have a slice of things that have 
+pointers to other elements of the slice and have them retain thier relationship
+in memory through the bake so you can still access the slice as a whole. so i 
+need to be able to look up any address inside an object and get the outer object 
+so that reference can become a relocation with an addend. so the current hashmap 
+of pointers doesn't work. instead track pages of memory and range of allocations 
+in each page so the keys are `[]u8` instead of `*u8` and you can nagivage spatially efficently. 
+- bit of extra hassle when an allocation spans multiple pages but that won't happen too often. 
+- still not handling the case where you see an internal pointer before the larger allocation 
+  and have to like go back and unbake it. not sure what to do about that. maybe pre-register 
+  all the memory i create in comptime code so you know the types? but that sounds slow. 
+  anyway the old system couldn't do that either so what i have now is already much better.
+- 935ms, but i kept the old version with the hashmaps too so i can toggle between 
+  PageMap and OldPageMap and that doesn't make it fast again. so maybe my old measurement 
+  just got super lucky somehow. idk, but im satisfied the page tracking isn't meaningfully 
+  slower. 
 
 ## (Jun 30)
 

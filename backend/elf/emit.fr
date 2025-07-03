@@ -549,14 +549,6 @@ create_rela_table :: fn(
     // TODO: store increment in consistant place instead of on each guy
     
     reloc := m.goal.type == .Relocatable;
-    // why are the numbers different? because we hate ourselves. 
-    data_reloc_type := @match(m.goal.arch) {
-        fn x86_64()  => @if(reloc, Elf.R_AMD64_64, Elf.R_AMD64_GLOB_DAT);
-        fn aarch64() =>  @if(reloc, Elf.R_AARCH64_ABS64, Elf.R_AARCH64_GLOB_DAT);
-        fn rv64()    => todo();
-        @default     => unreachable();
-    };
-    
     each fixups { fix |
         // got_lookup_offset is set by create_symbol_table()
         sym: u32 = trunc(fix.symbol.got_lookup_offset + 1);
@@ -572,7 +564,11 @@ create_rela_table :: fn(
         type, increment := @match(fix.fix.type&) {
             fn DataAbsolute(it) => {
                 i64.ptr_from_raw(fix.fix.patch_at)[] = 0;
-                (data_reloc_type, it.increment)
+                (@match(m.goal.arch) {
+                    fn x86_64()  => Elf.R_AMD64_64;
+                    fn aarch64() => Elf.R_AARCH64_ABS64;
+                    @default     => todo();
+                }, it.increment)
             }
             fn RipDisp32(it) => {
                 @debug_assert(reloc);
