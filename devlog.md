@@ -19,6 +19,14 @@
     the floats 16 aligned but that doesn't give the inner struct itself 16 byte 
     alignment in the outer struct. just use `#align` on the field since i have that now. 
   - now crash2.fr works everywhere
+- self compile on linux arm now works if i don't check for bti when handling 
+  the icache fault. so i think my clear_instruction_cache doesn't work. but it definitly 
+  helps because i couldn't compile anything at all without it. 
+  - tried aligning beg back and end forward to 128 bytes, didn't help. 
+  - i feel like i have the comparison direction wrong but crashes immediatly the other way. 
+    for one thing i was doing p=step instead of p=p+step. 
+    ah and then now when i make the comparison look right it works and never hits the bad 
+    case, same as macos, success!
 
 ## (Jul 1)
 

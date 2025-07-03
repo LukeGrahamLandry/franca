@@ -109,11 +109,19 @@ fn query_current_arch() Arch = current_arch();
 //
 fn clear_instruction_cache(beg: rawptr, end: rawptr) void = {
     if query_current_arch() == .aarch64 {
+        @debug_assert(ptr_diff(beg, end) >= 0);
+        @if(identical(beg, end)) return();
+        
         // TODO: the NOSYS is a HACK to make -syscalls make a real static binary
         __clear_cache :: fn(beg: rawptr, end: rawptr) void #weak #libc #syscall(NOSYS, NOSYS, NOSYS);
         if query_current_os() == .macos {
             __clear_cache(beg, end);
         } else {
+            // TODO: do this in asm and use largest of the two cache line sizes instead of just picking a number
+            // it seems to work without this but i think its the right thing to do
+            beg := beg.align_back(128);
+            end := end.align_to(128);
+            
             // glibc won't give me a dynamically linked __clear_cache() (but you get one if you make it 
             // not #weak and link statically), so do it myself (these instructions don't work on apple). June 2025. 
             impl :: AsmFunction(fn(beg: rawptr, end: rawptr) void = (), {
@@ -127,9 +135,6 @@ fn clear_instruction_cache(beg: rawptr, end: rawptr) void = {
     @assert(query_current_arch() != .rv64);
 };
 
-// TODO: should probably align_back beg and align_to end, 
-//       surely if i have to flush one line at a time i can't do parts of a line 
-//       and i feel like trusting it to overestimate is worse than doing it myself. 
 aarch64_clear_instruction_cache :: { 
     #use("@/backend/arm64/bits.fr"); 
     start :: x0; end :: x1; p :: x2; step :: x3; info :: x4;
@@ -144,8 +149,8 @@ aarch64_clear_instruction_cache :: {
     mov(.X64, p, start),
     // a:
     SYS(0b0, 0b01, 0b011, 0b0111, 0b1011, 0b001, p), // dc cvau
-    add_im(.X64, p, step, 0, 0), 
-    cmp(.X64, end, p),
+    add_sr(.X64, p, p, step, .LSL, 0), 
+    cmp(.X64, p, end),
     b_cond(-3, .LO), // :a
     SYS(0b0, 0b00, 0b011, 0b0011, 0b1011, 0b100, 0b11111), // dsb ish
     
@@ -155,8 +160,8 @@ aarch64_clear_instruction_cache :: {
     mov(.X64, p, start),
     // b:
     SYS(0b0, 0b01, 0b011, 0b0111, 0b0101, 0b001, p), // ic ivau
-    add_im(.X64, p, step, 0, 0), 
-    cmp(.X64, end, p),
+    add_sr(.X64, p, p, step, .LSL, 0), 
+    cmp(.X64, p, end),
     b_cond(-3, .LO), // :b
     SYS(0b0, 0b00, 0b011, 0b0011, 0b1111, 0b110, 0b11111), // isb
     
