@@ -192,9 +192,7 @@ fn bake_relocatable_slice_erased(addr: rawptr, length: i64, T: Type) []BakedEntr
             }
         };
         
-        @if(has_feature("@franca/internal_pointers"), 
-            (AddrOfA = (base = id, addend = addend)),
-            (AddrOf = id))
+        entry_with_addend(id, addend)
     };
     
     @slice(ptr, len) ast_alloc()
@@ -260,31 +258,20 @@ fn display_slice($T: Type) void = {
 
 /// A null terminated sequence of bytes.
 CStr :: @struct(ptr: *u8);
+
 fn as_ptr(s: CStr) *u8 = s.ptr;
+
 /// When emitting an aot constant, include all the way until a zero, not just a single byte like it would for a normal *u8. 
 fn bake_relocatable_value(self: *CStr) Slice(BakedEntry) = {
-    ::List(BakedEntry); // :sema_regression but might just be order. 
-    if self.ptr.is_null() {
-        ptr: BakedEntry = (Num = (value = 0));
-        return(ptr.repeated(1, temp()).items());
+    ::List(BakedEntry); ::if(BakedEntry);
+    ptr: BakedEntry = if self.ptr.is_null() {
+        (Num = (value = 0))
+    } else {
+        vbytes := self[].str();
+        vbytes.len += 1;  // null terminator
+        id, off := emplace_bake(vbytes, => (Bytes = vbytes.as_raw_list()));
+        entry_with_addend(id, off)
     };
-    addr := u8.int_from_ptr(self.ptr);
-    // TODO: this is a bit scary because what if someone emitted the same string as a slice before so didn't include the zero terminator
-    //if lookup_baked(addr) { v | 
-    //    ptr: BakedEntry = (AddrOf = v);
-    //    return(ptr.repeated(1, temp()).items());
-    //};
-    
-    // TODO: need to check against  c.baked.lookup :BLOAT
-    bytes: List(u8) = list(ast_alloc());
-    for self[] { b|
-        bytes&.push(b);
-    };
-    bytes&.push(@as(u8) 0.trunc());
-    vbytes := self.ptr.slice(bytes.len);
-    value := bake_value(@as(BakedVar) (Bytes = bytes.as_raw()));
-    cache_baked(vbytes, value);
-    ptr: BakedEntry = (AddrOf = value);
     ptr.repeated(1, temp()).items()
 }
 

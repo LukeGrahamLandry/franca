@@ -58,26 +58,26 @@ backtracing_panic_handler :: fn(msg: Str) Never = {
     Syscall'exit(1);
 };
 
-#use(MacosLibc); // :TodoLinux
-
 request_backtrace_on_signal :: fn() void = 
-    catch_signals(show_trace_and_exit);
+    catch_signals(fn(s, info, ctx) = { 
+        signal_handler_body(info, ctx) { info, ctx |
+            show_trace_and_exit(s, info, ctx);
+        };
+    });
 
-catch_signals :: fn(handle: SignalHandler) void = {
-    if(query_current_os() != .macos, => return()); // TODO
+#use(Posix);
     
-    useful_signals :: @const_slice(SignalNum.IllegalInstruction, .TraceTrap, .Bus, .Segfault, .Float, .Interupt);
+catch_signals :: fn(handle: SignalHandler) void = {
+    S :: SIG;
+    useful_signals :: @const_slice(S.ILL, S.TRAP, S.BUS, S.SEGV, S.FPE, S.INT);
     for useful_signals { s |
-        old := SigAction.zeroed();
-        new: SigAction = (sigaction = handle, mask = 0, flags = @as(i32) SignalFlag.Info);
-        sigaction(s, new&, old&);
+        new: SigAction = (sa_handler = handle);
+        sigaction(s, new&, zeroed(*SysSigAction)).unwrap();
     };
 };
 
 LOOPING :: @static(i64) 0;
 show_trace_and_exit :: fn(s: i64, info: *SigInfo, ctx: *UContext) void = {
-    ::enum(SignalNum);
-    ::@assert_eq(0, offset_of(Arm64MachineContext, Fields(Arm64MachineContext).neon).mod(16), "fp unaligned");
     scary_log("A franca program received a fatal signal.\n");
     
     if STASH_ENVIRONMENT {
@@ -90,20 +90,7 @@ show_trace_and_exit :: fn(s: i64, info: *SigInfo, ctx: *UContext) void = {
     
     prev := LOOPING[]; 
     LOOPING[] = 2;  // incase we crash in this switch somehow
-    ip, fp := @switch(ctx.mc_size) {
-        @case(size_of(Arm64MachineContext)) => {
-            a := ctx.mc.arm64.thread&;
-            (a.pc, a.fp)
-        };
-        @case(size_of(Amd64MachineContext)) => {
-            a := ctx.mc.amd64.thread&;
-            (a.rip, a.rbp)
-        };
-        @default => {
-            scary_log("TODO: unknown format of machine_context");
-            Syscall'exit(1);
-        };
-    };
+    ip, fp := (ctx.ip, ctx.fp);
     LOOPING[] = prev;
     if LOOPING[] == 1 {
         LOOPING[] = 2;
@@ -112,30 +99,10 @@ show_trace_and_exit :: fn(s: i64, info: *SigInfo, ctx: *UContext) void = {
         Syscall'exit(1);
     };
     LOOPING[] = 1;
-    ctx := context(DefaultContext);
-    @eprintln("(signal = %, addr = %, value = %, code = %, ip = %)", info.signal_number, info.addr, info.value, info.code, ip);
     
-    push_emergency_dynamic_environment {
-        report_backtrace(fp, ip);
-    };
+    @eprintln("(signal = %, addr = %, value = %, code = %, ip = %)", info.si_signo, info.si_addr, info.si_value, info.si_code, ip);
+    report_backtrace(fp, ip);
     Syscall'exit(1);
-};
-
-fn push_emergency_dynamic_environment($body: @Fn() void) void = {
-    push_zeroed_dynamic_context { // restores .os from a static 
-        a: ArenaAlloc = init(page_allocator, 16000);  // :leak
-        context(DefaultContext)[].temporary_allocator = a&;
-        context(DefaultContext)[].general_allocator = temp();
-        context(DefaultContext)[].panic_hook = panicked_while_handling_a_signal;
-        body();
-    };
-}
-
-panicked_while_handling_a_signal :: fn(msg: Str) Never = {
-    scary_log("panicked while handling a signal\n");
-    scary_log(msg);
-    report_backtrace_safe(trace_start(), 0.rawptr_from_int());
-    Syscall'exit(1)
 };
 
 LocationResolver :: @FnPtr(userdata: rawptr, ip: rawptr) ?Str; 

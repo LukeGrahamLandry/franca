@@ -8,6 +8,17 @@
   relocations are just never what i want. huh, i guess i never used elf addends because 
   previously they were only in the import_c tests which i haven't got running on linux yet. 
   welp, progress!
+- finishing signal handling on linux. 
+  - painful slog of translating the structs for each arch to common represention 
+  - amd64 they really scramble the register order. 
+  - now works on amd but not arm. 
+    dumbass, i typoed sa_flags as sa_mask so i was always saying sa_flags=0 instead of SIGINFO, 
+    apparently only arm doesn't give it to you when you don't ask for it
+  - now i catch sucessfully but die before printing the stack trace. 
+    problem was i just did padding in the inner struct to make 
+    the floats 16 aligned but that doesn't give the inner struct itself 16 byte 
+    alignment in the outer struct. just use `#align` on the field since i have that now. 
+  - now crash2.fr works everywhere
 
 ## (Jul 1)
 

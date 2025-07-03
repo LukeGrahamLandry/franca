@@ -104,6 +104,7 @@ TODO: end of loop. still too many options for 'index'
 
 ## 
 
+- cleanup the old non-slice versions of lookup_baked etc. exports in comptime.fr
 - something where you can mark some memory as an artifact with a name and a type,
   like when you generate code (like compiler/test.fr/gen_full_test_program) or a module 
   (like backend/opt/simplify.fr/static_memmove), and set an envvar to have 

@@ -72,32 +72,26 @@
     assert(found, "didn't find run_tests.fr in cwd");
 }
 
-// TODO: port struct layout and magic numbers for linux
 // This is similar to what we'd do to print a nice message when you overflow the call-stack. 
 //
 // mmap a page, remember the address, and then try to access it. 
 // we know that will cause a segmentation fault that will be caught by the signal handler. 
 // then re-mmap that same page by passing the saved address as a hint. 
 // so then when we resume after the signal, the operation will succeed 
-fn catch_signal() void #test #use(MacosLibc) = {  // :TodoLinux
-    // :TodoLinux
-    if import("@/lib/sys/process.fr")'query_current_os() != .macos {
-        return()
-    }
-
+fn catch_signal() void #test = {
     the_address :: @static(rawptr);
     handled_a_signal :: @static(bool) false;
-    handle_it :: fn(s: i64, info: *SigInfo, ctx: *UContext) void = {
-        push_zeroed_dynamic_context {
-            @assert_eq(info.addr.int_from_rawptr(), the_address[].int_from_rawptr(), "faulted on wrong address");
+    handle_it :: fn(s: i64, info: *Posix.SysSigInfo, ctx: *Posix.SysUContext) void = {
+        signal_handler_body(info, ctx) { info, ctx |
+            @assert_eq(info.si_addr.int_from_rawptr(), the_address[].int_from_rawptr(), "faulted on wrong address");
             the_address[] = call_mmap(the_address[]);
             handled_a_signal[] = true;
         };
     };
-    old := SigAction.zeroed();
-    new: SigAction = (sigaction = handle_it, mask = 0, flags = @as(i32) SignalFlag.Info);
+    old := Posix.SysSigAction.zeroed();
+    new: Posix.SigAction = (sa_handler = handle_it);
     
-    sigaction(SignalNum.Segfault, new&, old&);
+    Posix'sigaction(Posix.SIG.SEGV, new&, old&).unwrap();
     
     the_address[] = call_mmap(0.rawptr_from_int());
     Syscall'munmap(the_address[], SIZE);
@@ -108,7 +102,7 @@ fn catch_signal() void #test #use(MacosLibc) = {  // :TodoLinux
     assert_eq(ptr[], value);
     assert(handled_a_signal[], "did you not unmap the memory my guy?");
     
-    sigaction(SignalNum.Segfault, old&, SigAction.ptr_from_int(0));
+    Posix'sigaction_raw(Posix.SIG.SEGV, old&, Posix.SysSigAction.ptr_from_int(0)).unwrap();
     
     SIZE :: 1;
     call_mmap :: fn(hint: rawptr) rawptr = {

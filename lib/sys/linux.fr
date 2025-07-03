@@ -212,3 +212,96 @@ LandLock :: @struct {
     add_rule       :: fn(ruleset: Fd, rule_type: RuleType, rule_attr: *RuleAttr, flags: u32) voidResult #syscall(445, 445, _);
     restrict_self  :: fn(ruleset: Fd, flags: u32 #flags(Restrict)) voidResult #syscall(446, 446, _);
 };
+
+//
+// Structs for signal handlers
+//
+
+SIG :: @struct {
+     BUS :: 7;
+    USR1 :: 10;
+    USR2 :: 12;
+     SYS :: 31;
+};
+
+SA :: @struct {
+      ONSTACK :: 0x08000000;
+      RESTART :: 0x10000000;
+    RESETHAND :: 0x80000000;
+    NOCLDSTOP :: 1;
+      NODEFER :: 0x40000000;
+    NOCLDWAIT :: 2;
+      SIGINFO :: 4;
+    
+     RESTORER :: 0x04000000;
+};
+
+SigInfo :: @struct {
+    si_signo: i32;
+    si_errno: i32;
+    si_code: i32;
+    _: i32 = 0;
+    // TODO: actually expose the information but it's in crazy union town so starting slow
+    // clang says (sizeof(siginfo_t) == 128) on amd64 and arm64
+    payload: Array(rawptr, 14);
+};
+
+KSigAction :: @struct {
+    sa_handler: rawptr;
+    sa_flags: i64;
+    sa_restorer: rawptr;
+    sa_mask: i64;
+};
+
+CSigAction :: @struct {
+    sa_handler: rawptr;
+    sa_mask: Array(i64, 16);
+    sa_flags: i64;
+    sa_restorer: rawptr;
+};
+
+stack_t :: @struct {
+    sp: rawptr;
+    flags: i64;
+    size: i64;
+};
+
+CUContextArm64 :: @rec @struct {
+    flags: i64;
+    link: *CUContextArm64;
+    stack: stack_t;
+    sigmask: Array(i64, 16);
+    mcontext: CMContextArm64;
+};
+
+CMContextArm64 :: @struct {
+    addr: rawptr;
+    gpr: Array(rawptr, 32);
+    pc: rawptr;
+    pstate: rawptr;
+    fpr: Array(i64, 512) #align(16);
+};
+
+CUContextAmd64 :: @rec @struct {
+    flags: i64;
+    link: *CUContextAmd64;
+    stack: stack_t;
+    mcontext: CMContextAmd64;
+    sigmask: Array(i64, 16);
+    fpregs_mem: Array(i64, 64);
+};
+
+CMContextAmd64 :: @struct {
+    gpr: Array(rawptr, 23);
+    fpr: rawptr; // pointer to some struct i don't want to deal with yet
+    _: Array(i64, 8);
+};
+
+// 
+// I looked at Zig's (lib/std/os/(linux.zig, linux/(x86_64.zig, aarch64.zig)) for 
+// these flag numbers and struct layouts, so I feel I should include this string: 
+// [The MIT License (Expat) Copyright (c) Zig contributors 
+// https://github.com/ziglang/zig/commit/31bc6d5a9ddaf09511d8e5dc6017957adec0564b]. 
+// But surely the linux kernel owns them, so idk what the rules are. 
+// Zig doesn't say it's GPL-ed and I'm sure they know more about this than I do so it's probably fine. 
+// 
