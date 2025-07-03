@@ -339,7 +339,11 @@ UContext :: @struct {
 SignalHandler :: @FnPtr(s: i64, info: *SysSigInfo, ctx: *SysUContext) void;
 SysSigAction :: @union(m: Macos.SigAction, lk: Linux.KSigAction, lc: Linux.CSigAction);
 SysSigInfo :: @union(m: Macos.SigInfo, l: Linux.SigInfo);
-SysUContext :: @union(m: Macos.UContext, lcd: Linux.CUContextAmd64, lcr: Linux.CUContextArm64);
+SysUContext :: @union(
+    m: Macos.UContext, 
+    ld: Linux.UContextAmd64, 
+    lr: Linux.UContextArm64, 
+);
 
 sigaction :: fn(signum: i64, opt_new: *SigAction, sys_old: *SysSigAction) SysResult(void) = {
     sys_new := SysSigAction.ptr_from_int(0);
@@ -360,7 +364,7 @@ sigaction_raw :: fn(signum: i64, sys_new: *SysSigAction, sys_old: *SysSigAction)
     err := @match(current_os()) {
         fn macos() => sigaction(signum, sys_new, sys_old);
         fn linux() => if prefer_syscalls() {
-            Syscall'rt_sigaction(signum, sys_new.lk&, sys_old.lk&, 64)
+            Syscall'rt_sigaction(signum, sys_new.lk&, sys_old.lk&, 8)
         } else {
             sigaction(signum, sys_new, sys_old)
         };
@@ -384,7 +388,14 @@ fn fix(d: *SysSigAction, s: *SigAction) void = {
         }
         fn linux() => {
             if prefer_syscalls() {
-                panic("TODO: fix linux syssigaction -syscalls");
+                d.lk.sa_mask = sa_mask;
+                d.lk.sa_flags = sa_flags.bit_or(Linux.SA.RESTORER);
+                d.lk.sa_handler = bit_cast_unchecked(@type s.sa_handler, @type d.lk.sa_handler, s.sa_handler);
+                d.lk.sa_restorer = @as(rawptr) fn() void = {
+                    scary_log("sigreturn\n");
+                    Syscall'rt_sigreturn(0);
+                    scary_log("unreachable");
+                };
             } else {
                 d.lc.sa_mask&.items().rest(1).set_zeroed();
                 d.lc.sa_mask&[0] = sa_mask;
@@ -434,12 +445,9 @@ fn signal_handler_body(info_s: *SysSigInfo, ctx_s: *SysUContext, $body: @Fn(info
                 info_d.si_addr = info_s.m.addr;
             }
             fn linux() => {
-                if prefer_syscalls() {
-                    @panic("TODO: linux signal_handler_body syscall layout");
-                };
                 @match(current_arch()) {
                     fn x86_64() => {
-                        s := ctx_s.lcd.mcontext.gpr&.items();
+                        s := ctx_s.ld.mcontext.gpr&.items();
                         d := ctx_d.gpr&.items();
                         d.slice(8, 16).copy_from(s.slice(0, 8));
                         // i want them in encoding order but they give them in...  
@@ -455,8 +463,8 @@ fn signal_handler_body(info_s: *SysSigInfo, ctx_s: *SysUContext, $body: @Fn(info
                         ctx_d.ip = s[16];
                     }
                     fn aarch64() => {
-                        ctx_d.gpr = ctx_s.lcr.mcontext.gpr;
-                        ctx_d.ip = ctx_s.lcr.mcontext.pc;
+                        ctx_d.gpr = ctx_s.lr.mcontext.gpr;
+                        ctx_d.ip = ctx_s.lr.mcontext.pc;
                     }
                     @default => panic("TODO: linux signal_handler_body new arch");
                 };

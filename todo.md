@@ -149,6 +149,7 @@ different subsets of the same resources.
 - get rid of query_context_is_implicit
 - make #log_asm work for the #asm replacement 
 - experiment with outputting even more info in .frc and an lsp that reads it back. 
+- zero parameter syscall
 
 // TODO: use this for stuff
 //fn source_location(arg: FatExpr) FatExpr #macro = 
@@ -182,6 +183,8 @@ hould just make them local constants in each file like they are here in riscv
 - make sure the string "franca" doesn't show up in binaries. ie `__franca_aot_debug_info` symbol offends me
 - i want the module made for static_memmove in opt/simplify.fr to not include 
 `__franca_base_address` and `__franca_aot_debug_info`
+- debug assert that all tmps have a definition in rega. 
+  (especially because @emit_instructions doesn't catch it)
 
 ## don't rely on libc
 
@@ -201,7 +204,6 @@ hould just make them local constants in each file like they are here in riscv
 ## linux 
 
 - linux fault-na.ssa need to do the signal struct (rn it's skipped in backend/meta/test.fr)
-- compiler/main.fr/do_signals()
 - :TodoLinux
 - repro doesn't work cross compiling from linux to macos,
 but dump_macho.fr and objdump -d say they're the same (for mandelbrot_ui.fr at least). 
@@ -218,6 +220,17 @@ so something in the data i guess?
   static relocations or call `__libc_start_main`), but franca_runtime_init is 
   written in franca (same problem for cc.fr). could do like staticmemmove and compile 
   to module embedded in the compiler and spit that out on demand. 
+- once is_linking_libc isn't #fold, if you have a static compiler and want to link a libc thing
+  and notice that the path to dynamic loader is valid, 
+  it would be cool to try to do something where you morph by poking in the Dynamic header
+  and reexecing the compiler to get it. 
+
+```
+* thread #1, name = 'q.out', stop reason = signal SIGBUS: illegal alignment
+    frame #0: 0x0000000001016b78 q.out`impl2__7041 + 224
+q.out`impl2__7041:
+->  0x1016b78 <+224>: cas    x17, x0, [x2]
+```
 
 ## amd64
 

@@ -27,6 +27,37 @@
     for one thing i was doing p=step instead of p=p+step. 
     ah and then now when i make the comparison look right it works and never hits the bad 
     case, same as macos, success!
+- is_wrongly_illegal_instruction being branch_target_marker won't be true for stubs, 
+  and that happens occasionally now on arm-linux. but also that seems a bit sketchy 
+  because you're relying on the thing you put in a vtable being the real symbol not 
+  the local stub, which should always be true but will be a nasty surprise some day. 
+  so just saying whatever stick a bti in the stub might be better than allowing 
+  adrp as the faulting instruction. maybe im defeating the point of the security thing
+  cause now you can indirect branch to the stub and get a libc function or something 
+  but you could indirect branch to the libc function anyway? 
+- noticed i messed up for producing small negative i32 in one instruction. 
+  it's fine that the high bits are zero. 
+- .ssa tests pass except for varargs. 
+  - fixed the non-apple-varargs assert in arm/emit but it still doesn't work. 
+  - compiler/test.fr
+    - "tried to get tmp of non-tmp RCon:0 in va_arg()". 
+      typoed a place holder @emit_instructions. should really let them have names. 
+    - this seems bad for business: trying to write to a function pointer ??
+    ```
+    stop reason = signal SIGSEGV: invalid permissions for mapped object (fault address=0x1016c44)
+    ->  0xffffdc63b964: str    x4, [x5]
+            x4 = 0x0000ffffffffa720
+            x5 = 0x0000000001016c44  q.out`arena_allocator_fn__18694
+    ```
+    - oops, broke crash2.fr backtrace when linking libc. 
+      hmmm, i was typoing lkr vs lcr in a few places, much confusion now. 
+      ok they actually are laid out in a sane way between libc and the kernel,
+      maybe i just bamboozled myself by reading something about x86_32 or im just dumb who knows. 
+    - ok so now it dies in comptime call to add_ints_and_floats (which is variadic). 
+    - bleh, using an undeclared name in @emit_instructions just gives you a garbage register. 
+      so trivial typos waste a lot of time. 
+- now all the tests that run on linux-amd pass on linux-arm too
+- TODO: something going on with unalign cas ?
 
 ## (Jul 1)
 
