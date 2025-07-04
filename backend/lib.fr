@@ -111,7 +111,7 @@ QbeModule :: @rec @struct(
     // these are special sections that live inside the main segments. 
     got: SegmentCursor,
     commands: SegmentCursor,
-    stubs: SegmentCursor,
+    wasm_types: SegmentCursor,
     
     exports: List(Qbe.Sym),
     imports: List(Qbe.Sym),
@@ -119,6 +119,7 @@ QbeModule :: @rec @struct(
     inlinable_but_referenced_later: List(Qbe.Sym),
     
     initialized: bool,
+    currently_emitting_function: bool,
     
     forever: ArenaAlloc,
     symbol_memmove: Qbe.Sym,
@@ -136,7 +137,7 @@ QbeModule :: @rec @struct(
     need_static_memmove: bool,
     have_static_memmove: bool,
     
-    start_of_executable_stubs: *u8,
+    _: *u8,
     
     debug_info: @struct {
         headers: List(u8);  // crash_report.AotDebugInfo.headers
@@ -191,7 +192,7 @@ QbeTargetEnv :: @struct(
     
     segment_size        := 1.shift_left(25),
     max_got_size        := 1.shift_left(15),
-    size_of_stubs       := 1.shift_left(11),
+    _       := 1.shift_left(11),  // :UpdateBoot
     commands_size_guess := 16384,
     chained_size_guess  := 2000000,
     
@@ -205,7 +206,7 @@ QbeTargetEnv :: @struct(
 QbeOutputPurpose :: @enum(i64) (Cached, JitOnly, Exe, Relocatable, Dynamic, CachedEarly);
 
 fn text_padding(m: *QbeModule) i64 = 
-    m.goal.size_of_stubs + m.goal.commands_size_guess;
+    m.goal.commands_size_guess;
 
 fn init_default_module(m: *QbeModule, goal: QbeTargetEnv) void = {
     :: import("@/lib/sys/subprocess.fr");  // this includes it in comptime_compute_self_hash even when -syscalls
@@ -345,15 +346,14 @@ fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
         next := m.segments&[.Code].next&;
         m.commands = (mmapped = (ptr = next[], len = m.goal.commands_size_guess), next = next[]);
         next[] = next[].offset(m.goal.commands_size_guess); 
-        m.stubs = (mmapped = (ptr = next[], len = m.goal.size_of_stubs), next = next[]);
-        m.start_of_executable_stubs = next[];
-        next[] = next[].offset(m.goal.size_of_stubs); 
         m.start_of_writable_code = next[];
         
         if m.goal.arch == .wasm32 {
             // :WasmZeroPage Skip the low page so we don't live in crazy town where the null pointer is valid. 
             next := m.segments&[.MutableData].next&;
             next[] = next[].offset(wasm_page_size); 
+            mem := general_allocator().alloc(u8, 1.shift_left(11));  // :leak
+            m.wasm_types = (mmapped = mem, next = mem.ptr);
         };
     };
     

@@ -16,7 +16,7 @@ EmitWasmFn :: @struct(
 
 WASM_INDEX_PADDING :: 4;
 
-fn emit_func_wasm32(f: *Qbe.Fn) void = {
+fn emit_func_wasm32(f: *Qbe.Fn) []Ty(Fixup, Qbe.Sym) = {
     code := f.globals.segments&[.Code]&;
     e: EmitWasmFn = (
         f = f,
@@ -47,17 +47,20 @@ fn emit_func_wasm32(f: *Qbe.Fn) void = {
     e.a.len = 0;
     leb128_unsigned(e.a&, size_of_func - WASM_INDEX_PADDING, WASM_INDEX_PADDING); 
     // TODO: fix -d D llvm-mc dis needs to not include the locals part
+    
+    empty()
 }
 
 // im so impressed that this works
 fn pack_wasm_result_type(m: *QbeModule, $iter_args: @Fn(yield: @Fn(k: Qbe.Cls) void) void, $iter_ret: @Fn(yield: @Fn(k: Qbe.Cls) void) void) i32 = {
-    prev_len := m.stubs&.len();    
-    m.stubs&.reserve(Wasm.ValType)[] = .ResultStart;
+    s := m.wasm_types&;
+    prev_len := s.len();    
+    s.reserve(Wasm.ValType)[] = .ResultStart;
     body :: fn($iter) => {
-        count := m.stubs&.reserve(u8);
+        count := s.reserve(u8);
         n := 0;
         iter { k |
-            m.stubs&.reserve(Wasm.ValType)[] = to_wasm_type(k);
+            s.reserve(Wasm.ValType)[] = to_wasm_type(k);
             n += 1;
         };
         @debug_assert_ult(n, 128, "TODO: so so many types"); 
@@ -68,9 +71,9 @@ fn pack_wasm_result_type(m: *QbeModule, $iter_args: @Fn(yield: @Fn(k: Qbe.Cls) v
     c := m.wasm_function_type_count&;
     
     // deduplicate them. there are likely a small set of block types repeated a lot. 
-    bytes := m.stubs.mmapped.slice(prev_len, m.stubs&.len());
+    bytes := s.mmapped.slice(prev_len, s.len());
     if m.wasm_types_cache&.get(bytes) { i |
-        m.stubs.next = m.stubs.next.offset(-bytes.len());  // take it back now yall
+        s.next = s.next.offset(-bytes.len());  // take it back now yall
         return i;
     };
     m.wasm_types_cache&.insert(bytes, c[]);
@@ -391,7 +394,7 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     memory_reserved += data_size;
     
     // TODO: remove
-    code_count := m.segments&[.Code]&.len() - m.goal.commands_size_guess - m.goal.size_of_stubs;
+    code_count := m.segments&[.Code]&.len() - m.goal.commands_size_guess;
     @if(show_backend_stats())
     @eprintln(">>> % bytes of code, % bytes of data.", code_count, data_size);
     
@@ -437,10 +440,10 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     {
         push_buf { buf |
             buf.push(@as(u8) Wasm.Section.Type);
-            leb128_unsigned(buf, m.stubs&.len() + uleb_size(m.wasm_function_type_count.intcast()));
+            leb128_unsigned(buf, m.wasm_types&.len() + uleb_size(m.wasm_function_type_count.intcast()));
             leb128_unsigned(buf, m.wasm_function_type_count.intcast());
         };
-        chunks&.push(m.stubs.mmapped.slice(0, m.stubs&.len()));
+        chunks&.push(m.wasm_types.mmapped.slice(0, m.wasm_types&.len()));
     }; 
     
     push_buf { buf |
@@ -591,7 +594,7 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     };
     
     {
-        padding := m.goal.commands_size_guess + m.goal.size_of_stubs;
+        padding := m.goal.commands_size_guess;
         total_code_bytes := code_segment.len() - padding;
         push_buf { buf |
             buf.push(@as(u8) Wasm.Section.Code);

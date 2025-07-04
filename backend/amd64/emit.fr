@@ -17,7 +17,7 @@ AmdState :: @struct(
     patches: List(Patch),
 );
 
-fn emit_func_amd64(f: *Qbe.Fn) void = {
+fn emit_func_amd64(f: *Qbe.Fn) []Ty(Fixup, Qbe.Sym) = {
     m := f.globals;
     @debug_assert_eq(m.goal.arch, .x86_64, "how did we get here?");
     code := m.segments&[.Code]&;
@@ -33,6 +33,8 @@ fn emit_func_amd64(f: *Qbe.Fn) void = {
     emit_the_code(e&);
     @debug_assert(identical(prev, code.next), "can't have multiple threads emitting code");
     code.next = code.next.offset(e.a.len());
+    
+    empty()
 }
 SysV :: import("@/backend/amd64/sysv.fr");
 
@@ -77,12 +79,14 @@ fn fixup_amd64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
                         @fmt_write(self.debug_out, "# patch call % calls %\n", fixup.patch_at, symbol.name);
                     };
                     if symbol.offset == -1 {
-                        // create a new trampoline in the __stubs section. 
+                        // create a new trampoline
                         code := self.segments&.index(.Code);
                         lock(self.icache_mutex&);
-                        symbol.offset = self.stubs&.len() + self.goal.commands_size_guess;
+                        @debug_assert(!self.currently_emitting_function);
+                        symbol.offset = code.len();
+                        @assert_eq(symbol.segment, .Code, "zero value");
                         size_of_jmp_encoding :: 6;
-                        trampoline := self.stubs&.reserve(Array(u8, size_of_jmp_encoding));
+                        trampoline := code.reserve(Array(u8, size_of_jmp_encoding));
                         unlock(self.icache_mutex&);
                         new_got_reloc[] = ensure_got_slot(self, symbol, address).or_else(=> new_got_reloc[]);
                         distance := self.distance_between(.Code, symbol.offset + size_of_jmp_encoding, .ConstantData, symbol.got_lookup_offset);

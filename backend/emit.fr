@@ -66,7 +66,7 @@ FixupType :: @tagged(
     InReg: @struct(r: i64, increment: i64, got_load := false),
     // arm64
     //  local: b(l) to the address
-    // import: b(l) to a trampoline in __stubs which adrp,ldr,br from __got
+    // import: b(l) to a trampoline which adrp,ldr,br from __got
     //         but currently its adrp,add,br to the address directly
     Call: @struct(set_link: bool = true),
     // all 
@@ -95,7 +95,7 @@ Fixup :: @struct(
 
 fn reserve(s: *SegmentCursor, $T: Type) *T #generic = {
     space_left := s.mmapped.len - s.len(); 
-    @assert_ge(space_left, T.size_of(), "not enough space in segment for reserve");
+    @assert_ge(space_left, T.size_of(), "not enough space in segment for reserve total=%", s.mmapped.len);
     ptr := s.next;
     @debug_assert(u8.int_from_ptr(ptr).mod(T.align_of()) == 0, "unaligned reserve");
     s.next = s.next.offset(T.size_of());
@@ -153,8 +153,6 @@ fn find_library(m: *QbeModule, name: Str) ?u32 = {
     .None
 }
 
-// TODO: what about import stubs? 
-// but also you only need to do this if you don't want WX memory so like meh. 
 fn make_exec(self: *QbeModule) void = {
     ::enum(Arch); ::enum(@type self.goal.type);
     @debug_assert_eq(self.goal.arch, query_current_arch());
@@ -163,7 +161,6 @@ fn make_exec(self: *QbeModule) void = {
         return();  // already executable so this is a nop
     };
     
-    // TODO: this doesn't work with the new way i want to do stubs. shit. -- Oct 24
     segment := SegmentType.Code;
     prot := bit_or(@as(i64) MapProt.Exec, @as(i64) MapProt.Read);
     segment := self.segments&.index(segment);
@@ -348,6 +345,9 @@ fn add_code_bytes(m: *QbeModule, name_id: Qbe.Sym, code: *MultiArchAsm) void = {
         return();
     };
     
+    @debug_assert(!m.currently_emitting_function);
+    m.currently_emitting_function = true;
+    
     bytes := code[m.goal.arch];
     
     use_symbol(m, name_id) { s |
@@ -383,6 +383,9 @@ fn finish_function(m: *QbeModule, dest: []u8, name_id: Qbe.Sym) void #inline = {
     if m.goal.got_indirection_instead_of_patches && m.goal.type == .JitOnly && m.goal.arch == .aarch64 {
         clear_instruction_cache(u8.raw_from_ptr(dest.ptr), dest.len);
     };
+    
+    @debug_assert(m.currently_emitting_function);
+    m.currently_emitting_function = false;
     unlock(m.icache_mutex&);
 }
 
@@ -527,6 +530,9 @@ fn emit_fn(f: *Qbe.Fn) void = {
     };
     
     m := f.globals;
+    @debug_assert(!m.currently_emitting_function);
+    m.currently_emitting_function = true;
+    
     code := m.segments&[.Code]&;
     start_offset := code.len();
     name_id := f.lnk.id;
@@ -538,7 +544,7 @@ fn emit_fn(f: *Qbe.Fn) void = {
     use_symbol(m, name_id) { s |
         start_debug_info(m, s);
     };
-    {m.target.emit_fn}(f);
+    pending_immediate_fixup_got := {m.target.emit_fn}(f);
     size := code.len() - start_offset;
     @assert_lt(code.len(), code.mmapped.len, "too much code");
     
@@ -554,6 +560,19 @@ fn emit_fn(f: *Qbe.Fn) void = {
         @fmt(m.debug_out, "# disassembly of '%' (% bytes)\n", m.str(f.lnk.id), code_bytes.len);
         dis := m.goal.dis;
         dis(m.debug_out, code_bytes, m.goal.arch);
+    };
+    
+    with_write_protect m {
+        fixup := m.target.fixup;
+        for pending_immediate_fixup_got& { patch, id |
+            use_symbol(m, id) { symbol |
+                new_got_slot: ?Fixup = .None;
+                fixup(m, symbol, patch&, new_got_slot&);
+                if new_got_slot { it |
+                    push_fixup(m, symbol, it);
+                };
+            };
+        };
     };
 }
 
@@ -599,7 +618,7 @@ fn main_entry_point_vaddr(m: *QbeModule) i64 = {
     @debug_assert(m.fixups_locked, "this is not threadsafe");
     symbol := m.get_symbol_info(m.intern("main"));  // :HardcodeMain
     assert(symbol.kind == .Local, "no exported main function?");
-    @debug_assert_ge(symbol.offset, m.goal.commands_size_guess + m.goal.size_of_stubs);
+    @debug_assert_ge(symbol.offset, m.goal.commands_size_guess);
     symbol.offset
 }
 
@@ -617,7 +636,7 @@ fn patch_pending_symbols(m: *QbeModule) void = {
 
 fn debug_log_byte_size(m: *QbeModule) void = {
     // TODO: remove
-    code_count := m.segments&[.Code]&.len() - m.goal.commands_size_guess - m.goal.size_of_stubs;
+    code_count := m.segments&[.Code]&.len() - m.goal.commands_size_guess;
     data_count := m.segments&[.MutableData]&.len();
     @if(show_backend_stats())
     @eprintln(">>> % bytes of code, % bytes of data.", code_count, data_count); 

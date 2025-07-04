@@ -98,7 +98,6 @@ fn output_macho(m: *QbeModule) [][]u8 = {
     
     segments := WipSegment.list(6, temp());
     if m.goal.type == .Exe || m.goal.type == .Dynamic {
-        // TODO: waste. dead zone Code[stubs_cursor..SIZE_OF_STUBS]
         chunks&.push(live_segment_part(m, .Code));  // :MySegmentsStartAt1 :CodeIsFirst
         chunks&.push(live_segment_part(m, .ConstantData));  // TODO: waste. dead zone ConstantData[got_cursor..MAX_GOT_SIZE]
         chunks&.push(live_segment_part(m, .MutableData));
@@ -119,32 +118,19 @@ fn output_macho(m: *QbeModule) [][]u8 = {
         xx: WipSection = (
             name = "__text", 
             flag = code_flag, 
-            offset_in_segment = e.m.goal.commands_size_guess + m.goal.size_of_stubs, 
-            size = chunks[1].len - m.goal.size_of_stubs - e.m.goal.commands_size_guess,
-        );
-        // apparently you're supposed to do reserved2 = 12 is the size of each stub (bti, adrp, ldr, br). 
-        // the os doesn't care but you need it if you want to do `objdump --macho --indirect-symbols`
-        // size_of_one_stub: u32 = @if(m.goal.arch, 12, 6); //TODO: this needs to be a compile error :FUCKED
-        // ... but this still doesn't work. maybe i need to put shit in the other symbol table (that i only do for relocatable rn)? just the thing for imports is not enough.
-        size_of_one_stub: u32 = @if(m.goal.arch == .aarch64, 16, 6); 
-        yy: WipSection = (  // :ShowSymbolNamesForStubs
-            name = "__stubs", 
-            size = m.goal.size_of_stubs, 
-            flag = code_flag.bit_or(S_SYMBOL_STUBS), 
             offset_in_segment = e.m.goal.commands_size_guess, 
-            reserved2 = size_of_one_stub,
+            size = chunks[1].len - e.m.goal.commands_size_guess,
         );
-        segments[1].sections = @slice(xx, yy);
+        segments[1].sections = @slice(xx);
         // TODO: do i need reserved1 set to something? maybe thats an offset into LC_SYMTAB? or maybe undefined_symbol_count, that seems more consistant in the binraries i checked. 
-        xx: WipSection = (name = "__got", size = chunks[2].len, flag = S_NON_LAZY_SYMBOL_POINTERS, offset_in_segment = 0);
+        xx: WipSection = (name = "__got", size = chunks[2].len, flag = 0, offset_in_segment = 0);
         segments[2].sections = @slice(xx);
         xx: WipSection = (name = "__data", size = chunks[3].len, flag = 0, offset_in_segment = 0);
         segments[3].sections = @slice(xx);
-
-        // TODO: S_THREAD_LOCAL_VARIABLES
+        xx: WipSection = (name = "__bss", size = 0, flag = 0, offset_in_segment = 0);
+        segments[4].sections = @slice(xx);
     };
     if m.goal.type == .Relocatable {
-        s := m.segments&[.ConstantData]&;
         align_to :: fn(offset: i64, align: i64) i64 = {
             extra := offset.mod(align);
             if extra == 0 {
@@ -153,8 +139,6 @@ fn output_macho(m: *QbeModule) [][]u8 = {
                 offset + align - extra
             }
         };
-
-        @assert(ptr_diff(s.mmapped.ptr, s.next) == m.goal.max_got_size, "TODO: const data segment");
         
         chunks&.push(live_segment_part(m, .Code));
         segments&.push(prot = 7, name = "__TEXT", extra_file_offset = m.text_padding());
@@ -166,19 +150,25 @@ fn output_macho(m: *QbeModule) [][]u8 = {
         
         // Even if some sections are empty, you need them to make the indexes in append_relocations/which_section work out. 
         
-        s := m.segments&[.MutableData]&;
+        chunks&.push(live_segment_part(m, .ConstantData));
+        segments&.push(prot = 7, name = "__DATA_CONST");
+        segments[1].virtual_size = m.segments&[.ConstantData].mmapped.len;
+        segments[1].file_size = chunks[2].len;
+        xx: WipSection = (name = "__data_const", flag = 0, offset_in_segment = 0, size = chunks[2].len);
+        segments[1].sections = @slice(xx);
+        
         chunks&.push(live_segment_part(m, .MutableData));
         segments&.push(prot = 7, name = "__DATA");
-        segments[1].virtual_size = m.segments&[.MutableData].mmapped.len;
-        segments[1].file_size = chunks[2].len;
-        xx: WipSection = (name = "__data", flag = 0, offset_in_segment = 0, size = chunks[2].len);
-        segments[1].sections = @slice(xx);
+        segments[2].virtual_size = m.segments&[.MutableData].mmapped.len;
+        segments[2].file_size = chunks[3].len;
+        xx: WipSection = (name = "__data", flag = 0, offset_in_segment = 0, size = chunks[3].len);
+        segments[2].sections = @slice(xx);
         
         s    := m.segments&.index(.ZeroInitData);
         size := ptr_diff(s.mmapped.ptr, s.next);
         segments&.push(prot = 3, name = "__BSS", virtual_size = size);
         xx: WipSection = (name = "__bss", flag = S_ZEROFILL, offset_in_segment = 0, size = size);
-        segments[2].sections = @slice(xx);
+        segments[3].sections = @slice(xx);
     };
     
     base_file_offset := @slice(0, 0, 0, 0, 0); 
@@ -195,8 +185,9 @@ fn output_macho(m: *QbeModule) [][]u8 = {
             cmd := e.commands&.reserve_type(SegmentLoad);
             cmd[] = SegmentLoad.zeroed();
             // you do need this tho or you crash in dyld`dyld4::fixupPage64(void*, mwl_info_hdr const*, dyld_chained_starts_in_segment const*, unsigned int, bool) 
+            // "This segment is made read-only after relocations are applied if needed."
             if s.name == "__DATA_CONST" {
-                cmd.flag = 16; // TODO: why :HACK
+                cmd.flag = 16;
             };
             cmd.max_prot = s.prot;
             cmd.init_prot = s.prot;
@@ -230,7 +221,6 @@ fn output_macho(m: *QbeModule) [][]u8 = {
             e.file_offset += s.file_size;
         };
     };
-    
     if e.m.goal.type == .Exe {
         macho_load_dylinker(e.commands&, e.command_count&, "/usr/lib/dyld");
         
@@ -675,23 +665,6 @@ fn emit_reloc_symbols(e: *EmitMacho, chained: *List(u8)) void #inline = {
         entry.name_offset = trunc(chained.len - strings_start);
         segment_padding := if(s.segment == .Code, => m.text_padding(), => 0); // :HACK
  
-        // :ShowSymbolNamesForStubs
-        // when not relocatable, we're doing this for debug_exe_symbol_table, 
-        // there's extra section poked in for __stubs (whose memory is before the normal code). 
-        // calls to imports go through a stub in that section so i want them to have the right name instead 
-        // of seeing things like `bl <_write+0x102000000>` for every import (even when it's not `write`, 
-        // that just happened to be the first one) which is confusing to look at. 
-        if m.goal.type != .Relocatable {
-            if s.segment == .Code {
-                if s.kind == .DynamicPatched {
-                    entry.section_number += 1;
-                    segment_padding -= m.goal.size_of_stubs;
-                };
-            } else {
-                entry.section_number += 1;
-            }
-        };
-        
         @debug_assert(s.offset >= segment_padding, "what are you smoking?");
         // note: symbol_address is the address in virtual memory. not the section offset. 
         start: i64 = bitcast(e.load_commands[entry.section_number.zext() - 1].address);
@@ -743,17 +716,11 @@ fn emit_reloc_symbols(e: *EmitMacho, chained: *List(u8)) void #inline = {
     syms_cmd.strings_size = trunc(chained.len - strings_start);
 }
 
-fn which_section(s: SegmentType) u8 = @match(s) {
-    fn Code() => 1;
-    fn MutableData() => 2;
-    fn ConstantData() => panic("TODO: we don't use constant data yet");
-    fn ZeroInitData() => 3;
-};
+fn which_section(s: SegmentType) u8 = 1 + trunc @as(i64) s;
 
 fn append_relocations(symbol_table_index: i64, id: Qbe.Sym, m: *QbeModule, relocations: []List(u8)) void = {
     // this gets called when making a symbol table for an exe but don't want to stomp the existing local offsets in that case. 
     if(m.goal.type != .Relocatable, => return());
-    
     s := m.get_symbol_info(id);
     each s.fixups { fix | 
         continue :: local_return;

@@ -12,7 +12,6 @@ EmitElf :: @struct {
     // These don't do anything i think? but you always at least an empty one. 
     section_names: List(Str);
     section_index := zeroed EnumMap(SegmentType, u16);
-    stub_section_index_for_debug: u16 = 0;
 };
 
 SymbolTableInfo :: @struct {  
@@ -29,7 +28,7 @@ align_segments :: fn(m: *Qbe.Module) i64 = {
     patch_pending_symbols(m);
     
     code := m.segments&[.Code]&;
-    code_size := code.len() - m.goal.commands_size_guess - m.goal.size_of_stubs;
+    code_size := code.len() - m.goal.commands_size_guess;
 
     @if(m.goal.type != .Relocatable)
     for_enum SegmentType { s | 
@@ -150,7 +149,6 @@ create_the_segments :: fn(e: *EmitElf) PayloadBase = {
         // TODO: this comment doesn't make any sense. exe stills works without this
         // for static linking, local symbols are defined relative to a section so we need them even for Exe
         if e.m.goal.type == .Relocatable || e.m.goal.exe_debug_symbol_table {
-            // TODO: including the waste between _stubs and real code is annoying because it shows in objdump. 
             e.section_index&[seg] = e.header.section_header_num;
             flag := int(prot.bit_and(Elf.PF_X) != 0).shift_left(@as(i64) Elf.SectionFlag.Exec)
                 .bit_or(int(prot.bit_and(Elf.PF_W) != 0).shift_left(@as(i64) Elf.SectionFlag.Write))
@@ -235,20 +233,6 @@ fn output_elf(m: *QbeModule) [][]u8 = {
     base := create_the_segments(e);
     
     if m.goal.type != .Relocatable {
-        if e.m.goal.exe_debug_symbol_table {
-            // help disassembler not show junk
-            e.stub_section_index_for_debug = e.header.section_header_num;
-            e.section_header(".plt")[] = (
-                name = 0,
-                type = .ProgramBits, 
-                flags = 1.shift_left(@as(i64) Elf.SectionFlag.Exec),
-                addr = Elf.MYSTERY_SPICE + m.goal.commands_size_guess, 
-                offset = m.goal.commands_size_guess, 
-                size = m.stubs&.len(),
-                addr_align = 1,
-            );
-        };
-    
         T := finalize_symbols(m);
         have_any_imports := T.local_count != T.symbols.len;
         PRETEND_TO_HAVE_SYMBOLS_BECAUSE_LIBRISCV_HATES_US := m.goal.arch == .rv64;
@@ -491,9 +475,9 @@ create_symbol_table :: fn(
                     Elf.STB_GLOBAL, 
                     Elf.STB_WEAK));
                     
-        if for_debug && symbol.segment == .Code && symbol.offset < e.m.text_padding() {
+        if for_debug && symbol.segment == .Code && !local {
+            section = e.section_index&[symbol.segment];
             @debug_assert(e.m.goal.exe_debug_symbol_table);
-            section = e.stub_section_index_for_debug;
             local = true;  // the import **stub** is actually local
             type = Elf.STB_LOCAL;
             local_count += 1;
