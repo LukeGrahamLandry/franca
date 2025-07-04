@@ -1,4 +1,88 @@
 
+## (Jul 4)
+
+- arm: re-clearcache after doing pending_immediate_fixup_got
+
+---
+
+more playing with blink.  
+
+(passing -Z to blink to get stats. note: that makes it much slower so have to time seperately).
+
+instead of writing directly into wx memory, write into a buffer and then copy it back. 
+```
+before: 0m20.058s, smc_checks = 599828
+ after: 0m18.273s, smc_checks = 88181
+```
+only reduced by a factor of 6.8, looks suspisiously like im still faulting every 
+iteration of copy_bytes and that's just the difference from writing 8 bytes at a time instead of 1. 
+yeah if i copy one byte at a time it's back up to `smc_checks = 584418`. 
+so need a copy_bytes that doesn't use a jmp instruction in the loop. 
+i feel that ive aranged it so it doesn't use jmp for the backwards branch 
+of the loop but it barely helped. 85272. and it still goes back to 600k
+if i stop going by 8 bytes, so clearly im wrong about the jmp thing? 
+im looking at the disassembly and the only jmps in that function are before 
+the writes or to the return.
+there should only be 6981 functions and 74 fixups so that's way more than 1 fault per time. 
+hmmm, you know, i think their readme is lying, if i run thier `smc2_test.c` example, 
+i get `smc_checks = 320` which sure sounds like "300+ independent write operations to RWX memory."
+and not the `smc_checks = 22` they report (same in a fresh copy without my changes so it wasn't me that broke it). 
+if i go back to the commit that added that to the readme (0ecf9fa73a549982f0ee3a20caa3109f8d412dec)
+i get `smc_checks = 66` on thier test (... if the test is compiled with -O2, or the reported 21 if -O0)
+and `smc_checks = 13226` for my program. now the downside is that old version takes 0m32.446s 
+so that's worse than the new one that gave up on fancy smc.
+the commit that makes smc_checks be high is cd66fe49ea2c946cc30f820866d45e42bd18791a "Remove some old code". 
+
+ok so if they're lying about the jmp instruction thing, 
+what if i just use rep movsb so they do the copy themselves? 
+ha, yeah, smc_checks = 7044. still 18s tho so not as big a win as i was hoping. 
+
+but it now it gets that speed even in normal blink so i don't need my patches that speed up signal handling:
+for posterity they were:
+```
+- 1:27.62: upstream blink (https://github.com/jart/blink/commit/98f95e8383d1032eb4d2dc6aae937b23539e915e)
+- 1:03.60: pass pte/vaddr out from FixXnuSignal to IsSelfModifyingCodeSegfault 
+           instead of doing page lookup twice
+- 0:19.14: assume every segfault IsSelfModifyingCodeSegfault 
+           so don't need to FindGuestAddr at all
+```
+
+## (Jul 3)
+
+- why am i doing special stuff for `__stubs`, they can just be the next thing in the code segment. 
+
+---
+
+playing with blink. it would be cool to un-sandbox and let my thing jit directly for the real architecture. 
+
+- kStaticAslr: 
+  make kSkew=0 even on apple so guest and host share an address space. 
+  (ChooseAslr non-zero even for static binaries to avoid base address in low 4gb). 
+    - changed context.fr to notice the aslr skew when applying relocations
+- LoadArgv: `PUSH_AUXV(0x41434E415246, (i64) franca_escape_sandbox);`
+- GetJitHook: `if (virt == (i64) franca_escape_sandbox) return (i64) franca_escape_sandbox;`
+```
+void franca_escape_sandbox(P) {
+  // get the arguments
+  i64 a = *((i64*)&m->di);
+  i64 b = *((i64*)&m->si);
+
+  // compute something
+  i64 result = a + b;
+
+  // return the result
+  *((i64*)&m->ax) = result;
+
+  // pop return address and jump there
+  i64 ret = *(*((i64**)&m->sp));
+  *((i64*)&m->sp) += 8;
+  m->ip = ret;
+}
+```
+
+that does work but it's probably not worth the trouble since the only platform 
+(of the 4 i care about rn) that can't run amd binaries easily is linux-arm. 
+
 ## (Jul 2)
 
 - new internal pointer test doesn't work on linux but only when actually making an exe,

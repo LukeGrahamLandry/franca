@@ -331,6 +331,7 @@ fn slot(self: *ArmState, r: Qbe.Ref) i64 = {
 
 // TODO: rename this. 
 fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
+    deny_addend := self.m.goal.type == .Relocatable && self.m.goal.os == .macos;
     use_symbol(self.m, c.sym) { symbol |
         patch_addr := self.m.segment_address(.Code, self.m.current_offset(.Code));
         
@@ -338,7 +339,7 @@ fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
         // I'm too lazy to add a new relocation type right now (its a whole seperate one for the addend i think? theres no slot on pageoff for it)
         // So for now i just generate a few extra instructions when making a relinkable object
         //
-        inc := if(self.m.goal.type == .Relocatable, => 0, => c.bits());
+        inc := if(deny_addend, => 0, => c.bits());
         patch: Fixup = (patch_at = patch_addr, type = (InReg = (r = dest_reg, increment = inc)));
         @match(symbol.kind) {
             fn DynamicPatched() => self.immediate_fixup_got(dest_reg, inc, symbol);
@@ -372,7 +373,7 @@ fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
             }
         };
     };
-    if self.m.goal.type == .Relocatable { // :ArmAddendReloc
+    if deny_addend { // :ArmAddendReloc
         apply_inc(self, dest_reg, c.bits(), self.m.str(c.sym));
     };
 }
@@ -390,14 +391,15 @@ fn immediate_fixup_got(self: *ArmState, dest_reg: i64, inc: i64, symbol: *Symbol
     apply_inc(self, dest_reg, inc, symbol.name);
 }
 
-fn apply_inc(self: *ArmState,  dest_reg: i64, inc: i64, debug_name: Str) void = {
-    check :: fn(cond) => @assert(cond, "TODO: loadaddr of % with offset %", debug_name, inc);
+fn apply_inc(self: *ArmState, dest_reg: i64, inc: i64, debug_name: Str) void = {
     if(inc == 0, => return());
-    check(inc >= 0);
-    self.inst(add_im(Bits.X64, @as(u5) dest_reg, @as(u5) dest_reg, @as(u12) @as(i64) inc.bit_and(1.shift_left(12)-1), 0));
-    if inc >= 4096 {
-        check(inc < 4096.shift_left(12));
-        self.inst(add_im(Bits.X64, @as(u5) dest_reg, @as(u5) dest_reg, @as(u12) @as(i64) inc.shift_right_logical(12), 1));
+    if inc > 0 && inc < 4096 {
+        self.inst(add_im(Bits.X64, @as(u5) dest_reg, @as(u5) dest_reg, @as(u12) @as(i64) inc.bit_and(1.shift_left(12)-1), 0));
+    } else {
+        r := arm_scratch_int.int_id();
+        @assert_ne(dest_reg, @as(i64) r, "TODO: apply_inc to scratch register");
+        self.loadcon_bits(inc, r, true);
+        self.inst(add_er(.X64, @as(u5) dest_reg, @as(u5) dest_reg, r));
     };
 }
 

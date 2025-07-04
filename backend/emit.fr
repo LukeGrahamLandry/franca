@@ -553,6 +553,7 @@ fn emit_fn(f: *Qbe.Fn) void = {
     // you can remove this limit on the function but then have to add the check when emitting each branch. 
     @assert_lt(size, 1.shift_left(20), "we don't allow a function larger than one arm64 instruction can jump");
     
+    lock(m.icache_mutex&);
     code_bytes := code.mmapped.subslice(start_offset, size);
     finish_function(m, code_bytes, name_id);
     
@@ -562,8 +563,13 @@ fn emit_fn(f: *Qbe.Fn) void = {
         dis(m.debug_out, code_bytes, m.goal.arch);
     };
     
+    // TODO: don't clear_instruction_cache in finish_function if i have to redo it here
+    @if(pending_immediate_fixup_got.len != 0)
     with_write_protect m {
+        lock(m.icache_mutex&);
         fixup := m.target.fixup;
+        start := code_bytes.ptr;
+        //start := m.segments&[.Code].next;
         for pending_immediate_fixup_got& { patch, id |
             use_symbol(m, id) { symbol |
                 new_got_slot: ?Fixup = .None;
@@ -573,7 +579,13 @@ fn emit_fn(f: *Qbe.Fn) void = {
                 };
             };
         };
+        
+        m.last_function_end = m.segments&[.Code].next;
+        @if(m.goal.type == .JitOnly && m.goal.arch == .aarch64)
+        clear_instruction_cache(u8.raw_from_ptr(start), u8.raw_from_ptr(m.last_function_end));
+        unlock(m.icache_mutex&);
     };
+    unlock(m.icache_mutex&);
 }
 
 fn llvm_mc_dis(out: *List(u8), code: []u8, arch: Arch) void = {

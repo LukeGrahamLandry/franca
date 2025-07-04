@@ -25,17 +25,38 @@ fn emit_func_amd64(f: *Qbe.Fn) []Ty(Fixup, Qbe.Sym) = {
     e: AmdState = (
         f = f,
         m = m,
-        a = (maybe_uninit = (ptr = code.next, len = code.cap() - code.len()), len = 0, gpa = panicking_allocator),
+        a = @if(m.goal.blink_smc,
+            m.scratch_for_blink_smc,
+            (maybe_uninit = (ptr = code.next, len = code.cap() - code.len()), len = 0, gpa = panicking_allocator),
+        ),
         start_of_function = code.len(),
         patches = list(f.nblk.zext(), temp()),
     );
     
     emit_the_code(e&);
     @debug_assert(identical(prev, code.next), "can't have multiple threads emitting code");
+
+    // TODO: explain 
+    if m.goal.blink_smc {
+        if query_current_arch() == .x86_64 {
+            repmovs :: AsmFunction(fn(dest: *u8, src: *u8, count: i64) void = (), @const_slice(
+                brk(0),  // unreachable
+            ), (fn(out) = @asm_x64( // (rdi, rsi, rdx)
+                encode_bin(PrimaryOp.MovReg, X86Reg.rcx, X86Reg.rdx),
+                0xF3, 0b01001000, 0xA4, // REP MOVS
+                PrimaryOp.Ret,
+            ) out));
+            repmovs(code.next, e.a.maybe_uninit.ptr, e.a.len);
+        } else {
+            code.next.slice(e.a.len).copy_from(e.a.items());
+        }
+    };
     code.next = code.next.offset(e.a.len());
     
     empty()
 }
+
+#use("@/lib/sys/process.fr");
 SysV :: import("@/backend/amd64/sysv.fr");
 
 fn fixup_amd64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_reloc: *?Fixup) void = {
@@ -234,6 +255,16 @@ fn emit_the_code(e: *AmdState) void = {
                 } else {
                     c = cmpneg(c);
                 };
+                
+                // TODO: explain
+                // :PreferBackwardsJmpCC
+                if local_labels[b.s1.id.zext()] != 0 && local_labels[b.s2.id.zext()] == 0 {
+                    c = cmpneg(c);
+                    s := b.s1;
+                    b.s1 = b.s2;
+                    b.s2 = s;
+                };
+                
                 e.jmp(b.s2, c);
                 if !b.s1.identical(b.link) {
                     e.jmp(b.s1, -1);
@@ -261,7 +292,8 @@ fn apply_patch(e: *AmdState, labels: []i64, patch: *Patch) void = {
 
 fn write_jump_patch(e: *AmdState, dest: i64, src: i64, cond: i32) void = {
     // TODO: this is a dump nounification. 
-    patch_at := e.m.segments&[.Code].mmapped.ptr.offset(e.start_of_function + src);
+    //patch_at := e.m.segments&[.Code].mmapped.ptr.offset(e.start_of_function + src);
+    patch_at := e.a.maybe_uninit.ptr.offset(src);
     patch_size := @if(cond == -1, 5, 6);
     patch_bytes: List(u8) = fixed_list(ptr = patch_at, len = patch_size);
     // The offset is from **the end** of the jump instruction
@@ -747,7 +779,7 @@ fn call_symbol(e: *AmdState, sym: Qbe.Sym, set_link: bool) void #once = {
                     encode_indirect_call(e.a&, off.trunc(), set_link);
                 } else {
                     // Otherwise this will get patched to a local or __stub call later. 
-                    patch_at := u8.raw_from_ptr(e.a.maybe_uninit.ptr.offset(e.a.len + 1));
+                    patch_at := e.next_no_write().offset(1);
                     fix: Fixup = (
                         patch_at = patch_at, 
                         type = (RipDisp32 = (increment = 0, call = true)),
@@ -759,6 +791,10 @@ fn call_symbol(e: *AmdState, sym: Qbe.Sym, set_link: bool) void #once = {
         };
     };
 }
+
+// different from e.a.last() when blink_smc
+fn next_no_write(e: *AmdState) rawptr = 
+    u8.raw_from_ptr(e.m.segments&[.Code].mmapped.ptr.offset(e.start_of_function + e.a.len));
 
 fn push_imm(e: *AmdState, value: i64, byte_count: i64) void = {
     bytes: []u8 = (ptr = ptr_cast_unchecked(i64, u8, value&), len = byte_count); // little endian
@@ -801,7 +837,7 @@ fn push_instruction(e: *AmdState, b: EncodedArgs, ops: []u8) void = {
                         write(e.m.debug_out, @tfmt("# pending ref to '%'\n", symbol.name));
                     };
                 };
-                patch_at := u8.raw_from_ptr(e.a.maybe_uninit.ptr.offset(e.a.len));
+                patch_at := e.next_no_write();
                 if symbol.kind != .Local || e.m.goal.type == .Relocatable {
                     push_fixup(e.m, symbol, (patch_at = patch_at, type = (RipDisp32 = (increment = off, call = false))));
                 };

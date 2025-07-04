@@ -153,6 +153,7 @@ QbeModule :: @rec @struct(
     use_map_jit_on_apple_silicon: bool,
     wasm_types_cache: HashMap([]u8, i32),
     libraries: RawList(Str),  // :SLOW but n=4 so like it's probably fine 
+    scratch_for_blink_smc: List(u8),
 );
 
 // :UpdateBoot
@@ -189,6 +190,8 @@ QbeTargetEnv :: @struct(
     // doesn't care about them and they make your binary larger). However, if you want to see readable names in 
     // a debugger, disassemble correct ranges of functions, etc., you can force symbol tables to be emitted. 
     exe_debug_symbol_table := false,
+    
+    blink_smc := true,  // TODO
     
     segment_size        := 1.shift_left(25),
     max_got_size        := 1.shift_left(15),
@@ -243,7 +246,7 @@ fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
     // gpa needs to not be temp() because we reset temp()
     m[] = QbeModule.zeroed();
     lock(m.intern_mutex&);  // surely this does nothing at this point but just for fun
-    m.goal = goal;
+    m.goal = goal; goal := m.goal&;
     segment_size := goal.segment_size;
     m.save = .None;
     m.forever = init(gpa, size_of(Qbe.Ins) * 1.shift_left(20) + size_of(SymbolBucket) * IMask + 1.shift_left(10));
@@ -255,8 +258,8 @@ fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
         m.save = (Some = writer);
     };
     m.segments = EnumMap(SegmentType, SegmentCursor).zeroed();
-    expecting_rwx := goal.expecting_wx && goal.type == .JitOnly;
-    m.use_map_jit_on_apple_silicon = expecting_rwx && goal.arch == .aarch64 && goal.os == .macos;
+    goal.expecting_wx = goal.expecting_wx && goal.type == .JitOnly;
+    m.use_map_jit_on_apple_silicon = goal.expecting_wx && goal.arch == .aarch64 && goal.os == .macos;
     
     if goal.type == .JitOnly {
         @assert_eq(goal.arch, query_current_arch(), "trying to jit to the wrong architecture");
@@ -293,7 +296,7 @@ fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
         mem
     };
     
-    if !m.use_map_jit_on_apple_silicon && expecting_rwx {
+    if !m.use_map_jit_on_apple_silicon && goal.expecting_wx {
         // Only the code segment needs to be executable. 
         prot := bit_or(@as(i64) MapProt.Exec, bit_or(@as(i64) MapProt.Read, @as(i64) MapProt.Write));
         Syscall'mprotect(u8.raw_from_ptr(mem.ptr), segment_size, prot) 
@@ -355,6 +358,11 @@ fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
             mem := general_allocator().alloc(u8, 1.shift_left(11));  // :leak
             m.wasm_types = (mmapped = mem, next = mem.ptr);
         };
+    };
+    
+    m.goal.blink_smc = m.goal.blink_smc && goal.expecting_wx;
+    if m.goal.blink_smc {
+        m.scratch_for_blink_smc = list(segment_size, general_allocator()); // :leak
     };
     
     m.debug_out_storage = list(forever);

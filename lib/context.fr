@@ -211,18 +211,19 @@ do_relocations_static_linux :: fn() void = {
     ::enum(Elf.DynTag);
         
     unpacked := Elf.DynUnpacked.zeroed();
+    skew := 0;//base.int_from_rawptr() - Elf.MYSTERY_SPICE;  // this will always be zero except for my hacked blink
     each headers { h |
         if h.type == .Dynamic {
-            // TODO: i don't super understand why i don't need to add `base` here. i guess it fixed it for me? 
-            dynamic: []Elf.Dyn = (ptr = Elf.Dyn.ptr_from_int(h.vaddr), len = h.mem_size / 16);
+            dynamic: []Elf.Dyn = (ptr = Elf.Dyn.ptr_from_int(h.vaddr + skew), len = h.mem_size / 16);
             unpacked = Elf'load_from_dynamic_header(dynamic);
         };
     };
     
     ::ptr_utils(Elf.Symbol);
+    unpacked.relocations.ptr = unpacked.relocations.ptr.offset_bytes(skew);
     each unpacked.relocations { it |
         @debug_assert(it.type == Elf.R_AMD64_64 || it.type == Elf.R_AARCH64_ABS64, "TODO: unknown relocation type %", it.type);
-        sym := unpacked.symbols.offset(it.sym.zext());
+        sym := unpacked.symbols.offset(it.sym.zext()).offset_bytes(skew);
         dest := rawptr.ptr_from_raw(base.offset(it.offset - Elf.MYSTERY_SPICE));
         dest[] = base.offset(sym.value).offset(it.addend - Elf.MYSTERY_SPICE);
     };
