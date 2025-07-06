@@ -443,6 +443,7 @@ fn quick_lambda(self: *Parser, prec: Prec) ParseRes = {
     body := @try(self.parse_expr(prec)) return;
     // TODO: this is kinda dumb (would be better not to force unit being an arg) but makes it consistant with elsewhere
     fn_def: FnDef = (name = .None, arg = self.alloc.empty_pattern(loc), ret = (Infer = ()), tags = list(self.alloc), loc = loc);
+    //fn_def.line = self.pool.insert_borrowed(@tfmt("AnonL%", self.lex.line), general_allocator());
     func := make_func(fn_def, (Some = body), true, self.top_level);
     (Ok = self.expr((Closure = self.box(func)), loc))
 }
@@ -455,6 +456,7 @@ fn func_expr(self: *Parser) ParseRes = {
 fn parse_func(self: *Parser) Result(Func, *CompileError) = {
     loc := self.last.span;
     fn_def := @try(self.fn_def_signeture(loc, true)) return;
+    //fn_def.line = self.pool.insert_borrowed(@tfmt("AnonL%", self.lex.line), general_allocator());
     
     // TODO: do i want to allow without body in expression context?
     may_capture := @match(self.peek()) {
@@ -681,6 +683,7 @@ fn parse_squiggle(self: *Parser, prev: FatExpr, prec: Prec) ParseRes #once = {
         // this lets you do ifs that look normal, like `if foo {` instead of `if foo {|`
         (name = .None, arg = self.alloc.empty_pattern(loc), ret = (Infer = ()), tags = list(self.alloc), loc = loc)
     };
+    //fn_def.line = self.pool.insert_borrowed(@tfmt("AnonL%", self.lex.line), general_allocator());
     
     body := @try(self.parse_block_until_squiggle(false)) return;
     func := make_func(fn_def, (Some = body), true, self.top_level);
@@ -832,12 +835,13 @@ fn make_func(def: FnDef, body: ?FatExpr, may_capture: bool, top_level: bool) Fun
         arg = def.arg,
         ret = def.ret,
         // TODO: use the body text based on compiler flag. also should an option use file+line? 
-        name = def.name || Flag.Anon.ident(),  // :AnonSentinal
+        name = def.name || def.line,
         loc = def.loc,
     );
     
     if(may_capture, => f&.set_flag(.AllowRtCapture));
     if(top_level, => f&.set_flag(.TopLevel));
+    if(def.name.is_none(), => f&.set_flag(.NoName));
     f
 }
 
@@ -1077,7 +1081,7 @@ fn pop_name(self: *Parser, msg: Str) Result(Symbol, *CompileError) = {
     })
 }
 
-FnDef :: @struct(name: ?Symbol, arg: Pattern, ret: LazyType, tags: List(Annotation), loc: Span);
+FnDef :: @struct(name: ?Symbol, arg: Pattern, ret: LazyType, tags: List(Annotation), loc: Span, line := Flag.Anon.ident());
 fn fn_def_signeture(self: *Parser, loc: Span, allow_name: bool) Result(FnDef, *CompileError) = {
     name: ?Symbol = .None;
     @if(allow_name) @if_let(self.peek()) fn Symbol(n) => {

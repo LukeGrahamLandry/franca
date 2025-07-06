@@ -37,6 +37,7 @@ uninitialized stack into your program now
 
 ---
 
+- non-apple-arm vaargs abi has extra space so need to account for that when checking range for fold_addr
 - "this works here but not in it's original place under f()."
 - :ThisIsNotOkBecauseMemoryWillBeReused
 - give data symbols readable names now that they show up in symbol table

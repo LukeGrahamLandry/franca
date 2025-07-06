@@ -161,7 +161,8 @@ iscopy :: fn(f: *Qbe.Fn, i: *Qbe.Ins, arg0: Qbe.Ref) bool = {
         return(!copy_with_reg)
     };
     
-    has_identity, identity_value := arithmetic_identity_table(i.op());
+    // Some operations behave like a copy from the first argument when the second argument is a specific constant. 
+    has_identity, identity_value := import("@/backend/meta/ops.fr")'arithmetic_identity_table(i.op());
     if has_identity && KBASE(i.cls()) == 0 && rtype(i.arg&[1]) == .RCon {
         c := f.get_constant(i.arg&[1]);
         return(iscon(c, i.cls().is_wide(), identity_value));
@@ -217,18 +218,6 @@ iscopy :: fn(f: *Qbe.Fn, i: *Qbe.Ins, arg0: Qbe.Ref) bool = {
         t[T.Wuw.r()] = BIT(T.Wuw.r());
         t
     };
-};
-
-// TODO: measure if this being branchy is slower and if so, generate the table from this at comptime. 
-//       i don't want to paste the giant thing, it makes me sad. 
-// 
-// Some operations behave like a copy from the first argument when the second argument is a specific constant. 
-arithmetic_identity_table :: fn(op: Qbe.O) Ty(bool, u64) = {
-    op.raw() <= Qbe.O.shl.raw() || return(false, 0);  // everything past the Arithmetic and Bits section we skip
-    op.raw() <= Qbe.O.and.raw() || return(true, 0);   // x (or,xor,sar,shr,shl) 0 = x
-    op.raw() >= Qbe.O.neg.raw() || return(true, 0);   // x (add,sub) 0 = x
-    x := op.raw().zext().mod(2) == 0; // x (div,udiv,mul) 1 = x    (but we skip neg,rem,urem)
-    (x, x.int().bitcast())
 };
 
 subst :: fn(pr: *Qbe.Ref, copy_of: []Qbe.Ref) void = {

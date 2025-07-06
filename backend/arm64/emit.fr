@@ -7,7 +7,6 @@
 // TODO: don't setup stack frame for leaf like amd64?
 // TODO: make sure i have .ssa tests for every instruction. rn there are some that just fail the franca tests. 
 //       addr slot >4095, sltof, loadaddr with offset,
-// TODO: use ldp/stp for callee saved registers
 // TODO: relocation to fold symbol offsets into the adrp+add instead of wasting an extra instruction :SLOW
 // TODO: when jitting, check if constant ints are close enough to load with adr instead of several movk
 
@@ -125,6 +124,11 @@ fn load_from_got(self: *QbeModule, symbol: *SymbolInfo, reg_encoding: i64, insts
 fn emit_the_code(self: *ArmState) void #once = {
     self.inst(branch_target_marker);
     self.needs_frame = bit_and(self.f.reg, arm64_clob_mask) != 0 || !self.f.leaf || self.f.vararg || self.f.slot > 0 || self.f.dynalloc;
+    
+    SAVED_PAIRS :: false;
+    b_ldr := zeroed Qbe.Blk;
+    b_str := zeroed Qbe.Blk;
+    
     if self.needs_frame {
         self.framelayout();
         
@@ -146,13 +150,30 @@ fn emit_the_code(self: *ArmState) void #once = {
         
         offset_to_callee_saved := (self.frame - self.padding);
         to_save := self.f.reg.bit_and(arm64_clob_mask);
+        
+        if SAVED_PAIRS {
+            n := to_save.count_ones().zext();
+            b_str.ins&.reserve(n, temp());
+            b_ldr.ins&.reserve(n, temp());
+        };
+        
         for_bits to_save { i |
             r := @as(Arm64Reg) @as(u8) i.trunc();
             offset_to_callee_saved -= 2 * 4;
             ::if(Qbe.O);
             op := if(r.is_float(), => Qbe.O.stored, => Qbe.O.storel);
             i := make_ins(op, .Kw, QbeNull, TMP(r), SLOT(offset_to_callee_saved));
-            self.emitins(i&, zeroed(*Qbe.Blk));
+            if SAVED_PAIRS {
+                b_str&.push(i);
+                cls := if(r.is_float(), => Qbe.Cls.Kd, => Qbe.Cls.Kl);
+                i := make_ins(.load, cls, TMP(r), SLOT(offset_to_callee_saved), QbeNull);
+                b_ldr&.push(i);
+            } else {
+                self.emitins(i&, zeroed(*Qbe.Blk));
+            }
+        };
+        @if(SAVED_PAIRS) for_insts_forward b_str& { i |
+            self.emitins(i, b_str&);
         };
     } else {
         // This matters because we might have args passed on the stack (negative RSlot),
@@ -178,12 +199,16 @@ fn emit_the_code(self: *ArmState) void #once = {
                     // if you run the simplify_jump_chains pass, you'll only need to emit this epilogue once. 
                     offset_to_callee_saved := (self.frame - self.padding);
                     to_restore := self.f.reg.bit_and(arm64_clob_mask);
+                    @if(!SAVED_PAIRS) 
                     for_bits to_restore { i |
                         r := @as(Arm64Reg) @as(u8) i.trunc();
                         offset_to_callee_saved -= 2 * 4;
                         cls := if(r.is_float(), => Qbe.Cls.Kd, => Qbe.Cls.Kl);
                         i := make_ins(.load, cls, TMP(r), SLOT(offset_to_callee_saved), QbeNull);
-                        self.emitins(i&, b);
+                        self.emitins(i&, zeroed(*Qbe.Blk));
+                    };
+                    @if(SAVED_PAIRS) for_insts_forward b_ldr& { i |
+                        self.emitins(i, b_ldr&);
                     };
                     if self.f.dynalloc {
                         // someone did an alloca so we don't statically know the size of our stack frame. 
@@ -322,15 +347,17 @@ fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
             fn DynamicPatched() => self.immediate_fixup_got(dest_reg, inc, symbol);
             fn Local() => {
                 // we've already compiled it so just compute its address directly.
-                distance := self.m.distance_between(.Code, self.m.current_offset(.Code), symbol.segment, symbol.offset + inc);
                 if self.f.globals.debug["T".char()] {
+                    distance := self.m.distance_between(.Code, self.m.current_offset(.Code), symbol.segment, symbol.offset + inc);
                     @fmt(self.m.debug_out, "# direct offset % for '%' %[%]\n", distance, symbol.name, symbol.segment, symbol.offset);
+                    @debug_assert(symbol.segment != .Code || distance < 0, "we must be jumping backwards");
                 };
-                @debug_assert(symbol.segment != .Code || distance < 0, "we must be jumping backwards");
                 dest := self.m.segment_address(symbol.segment, symbol.offset + inc);
                 i_page, i_off := encode_adrp_add(dest, patch_addr, @as(u5) dest_reg);
                 self.inst(i_page);
-                self.inst(i_off);
+                if self.m.goal.type == .Relocatable || i_off != arm_nop {
+                    self.inst(i_off);
+                };
                 
                 // :canireallynothavecodeberelative
                 // TODO: is there some way to have it not move around my functions so i can use relative calls within this one segment?
@@ -481,7 +508,8 @@ fn check_args(i: *Qbe.Ins) void = {
 //
 arm_scratch_int :: Arm64Reg.IP1;
 
-fn emitins(self: *ArmState, i: *Qbe.Ins, b: *Qbe.Blk) void = {
+fn emitins(self: *ArmState, i: *Qbe.Ins, block: *Qbe.Blk) void = {
+    @debug_assert(block.is_null() || block.ins.items().contains_address(i));
     ::if(u32);
     F :: @Fn(s: FType, dest: u5, a: u5, b: u5) u32;
     I :: @Fn(s: Bits, dest: u5, a: u5, b: u5) u32;
@@ -512,61 +540,68 @@ fn emitins(self: *ArmState, i: *Qbe.Ins, b: *Qbe.Blk) void = {
     };
 
     if maybe_load(i) { size |
-        self.fixarg(a0&, size.intcast());
-        offset := 0;
-        addr := if rtype(a0) == .RSlot {
-            offset += self.slot(a0);
-            @debug_assert(a1 == QbeNull, "i dont think i mix offset and slot in ldr");
-            // !needs_frame can have RSlot for arguments
-            @if(self.needs_frame, fp, sp)
-        } else {
-            if rtype(a1) == .RInt {   // TODO: could easily get rid of this branch. is that worth always setting it to RInt(0)?
-                offset += zext(rsval(a1));
+        addr, off := decode_mem(self, a0, a1, size.intcast());
+        
+        if i.op() == .load && i.cls() == .Kl {
+            break :: local_return;
+            @if(block.is_null() || identical(i, block.ins.index(block.ins.len - 1))) break();
+            j := i.offset(1);
+            @if(!(j.op() == i.op() && j.cls() == i.cls() && i.to != i.arg&[0])) break();
+            addr2, off2 := decode_mem(self, j.arg&[0], j.arg&[1], size.intcast());
+            @if(addr != addr2) break();
+            r0, r1 := (i.to.int_reg(), j.to.int_reg());
+            off := off;
+            if off2 + 1 == off {
+                t := off; off = off2; off2 = t;
+                t := r0; r0 = r1; r1 = t;
             };
-            a0.int_reg()
+            @if(off + 1 != off2) break();
+            @if(off > 63) break();
+            self.inst(ldp_so(.X64, r0, r1, addr, @as(i7) off));
+            j.set_nop();
+            return();
         };
-        @debug_assert_eq(offset.mod(size.zext()), 0, "load offset % not multiple of size % for %", offset, size, i.op());
-        offset /= size.zext();
-        @debug_assert_eq(offset.bit_and(1.shift_left(12) - 1), offset, "can't encode offset in $%", self.f.name());
-        // TODO: u/s h/b
-        if i.cls().is_int() { // TODO: is this wrong?
+        
+        if i.cls().is_int() {
             s := trailing_zeros(size.zext());
-            o := encode_int_load(i.cls().is_wide(), i.op(), s, i.to.int_reg(), @as(u12) offset, @as(u5) addr);
+            o := encode_int_load(i.cls().is_wide(), i.op(), s, i.to.int_reg(), off, addr);
             self.inst(o);
         } else {
-            self.inst(f_ldr_uo(si /* not sf*/, i.to.float_reg(), addr, @as(u12) offset));
+            self.inst(f_ldr_uo(si /* not sf*/, i.to.float_reg(), addr, off));
         };
         return();
     };
+    
     if maybe_store(i) { size |
-        self.fixarg(a1&, size.intcast());
-        offset := 0;
-        addr := @match(rtype(a1)) {
-            fn RSlot() => {
-                offset = self.slot(a1) / size.zext();
-                // !needs_frame can have RSlot for arguments
-                @if(self.needs_frame, fp, sp)
-            }
-            fn RTmp() => a1.int_reg();
-            fn RMem() => {
-                m := self.f.get_memory(a1);
-                offset = m.offset&.bits() / size.zext();
-                @debug_assert_eq(offset * size.zext(), m.offset&.bits(), "store offset not a multiple of size");
-                m.base.int_reg()
-            }
-            @default => panic("bad address type for store");
-        };
-        @debug_assert_eq(offset.bit_and(1.shift_left(12) - 1), offset, "can't encode offset in $%", self.f.name());
-        if i.op() == .stores {
-            self.inst(f_str_uo(Bits.W32, @as(u5) a0.float_reg(), addr, @as(u12) offset));
+        addr, off := decode_mem(self, a1, Qbe.Null, size.intcast());
+        
+        if i.op() == .storel {
+            break :: local_return;
+            @if(block.is_null() || identical(i, block.ins.index(block.ins.len - 1))) break();
+            j := i.offset(1);
+            @if(j.op() != i.op()) break();
+            addr2, off2 := decode_mem(self, j.arg&[1], Qbe.Null, size.intcast());
+            @if(addr != addr2) break();
+            r0, r1 := (i.arg&[0].int_reg(), j.arg&[0].int_reg());
+            off := off;
+            if off2 + 1 == off {
+                t := off; off = off2; off2 = t;
+                t := r0; r0 = r1; r1 = t;
+            };
+            @if(off + 1 != off2) break();
+            @if(off > 63) break();
+            self.inst(stp_so(.X64, r0, r1, addr, @as(i7) off));
+            j.set_nop();
             return();
         };
-        if i.op() == .stored {
-            self.inst(f_str_uo(Bits.X64, @as(u5) a0.float_reg(), addr, @as(u12) offset));
-            return();
+        
+        if !@is(i.op(), .stores, .stored) {
+            s := trailing_zeros(size.zext());
+            self.inst(@bits(@as(u2) s, 0b11100100, off, addr, @as(u5) a0.int_reg()));
+        } else {
+            si := @if(i.op() == .stores, Bits.W32, .X64);
+            self.inst(f_str_uo(si, a0.float_reg(), addr, off));
         };
-        s := trailing_zeros(size.zext());
-        self.inst(@bits(@as(u2) s, 0b11100100, @as(u12) offset, @as(u5) addr, @as(u5) a0.int_reg()));
         return();
     };
     if is_flag(i.op()) {
@@ -601,12 +636,12 @@ fn emitins(self: *ArmState, i: *Qbe.Ins, b: *Qbe.Blk) void = {
                 r := i.to;
                 if !isreg(a0) {
                     i.to = TMP(arm_scratch_int);
-                    self.emitins(i, b);
+                    self.emitins(i, block);
                     a0 = i.to;
                 };
                 op := @as(Qbe.O) @as(i32) Qbe.O.storew.raw() + i.cls().raw();
                 i[] = make_ins(op, .Kw, i.to, a0, r);
-                self.emitins(i, b);
+                self.emitins(i, block);
                 return();
             };
             @debug_assert(isreg(i.to), "can only copy to a register");
@@ -617,7 +652,7 @@ fn emitins(self: *ArmState, i: *Qbe.Ins, b: *Qbe.Blk) void = {
                 }
                 fn RSlot() => {
                     i.set_op(.load);
-                    self.emitins(i, b);
+                    self.emitins(i, block);
                 }
                 @default => {
                     @debug_assert(i.to.val() != zext Arm64Reg.PLA.raw(), "please do not the platform register. thank you.");
@@ -636,18 +671,11 @@ fn emitins(self: *ArmState, i: *Qbe.Ins, b: *Qbe.Blk) void = {
             @debug_assert(s >= 0, "slot must be positive");
             // !needs_frame can have RSlot for arguments
             base := @if(self.needs_frame, fp, sp);
-            if (s <= 4095) {
+            if s <= 4095 {
                 self.inst(add_im(Bits.X64, reg, base, @as(u12) s, 0));
             } else {
-                if (s <= 65535) {
-                    self.inst(movz(Bits.X64, reg, s.trunc(), .Left0));
-                    self.inst(add_er(Bits.X64, reg, base, reg));
-                } else {
-                    // :StackSizeLimit
-                    self.inst(movz(Bits.X64, reg, s.trunc(), .Left0));
-                    self.inst(movk(Bits.X64, reg, s.shift_right_logical(16).trunc(), .Left16));
-                    self.inst(add_er(Bits.X64, reg, base, reg));
-                };
+                loadcon_bits(self, s, reg, true);
+                self.inst(add_er(Bits.X64, reg, base, reg));
             };
         }
         fn call() => {
@@ -769,7 +797,7 @@ fn emitins(self: *ArmState, i: *Qbe.Ins, b: *Qbe.Blk) void = {
         fn syscall()  => {
             // HACK TODO: do this in abi but its super painful
             if self.f.globals.target.apple {
-                i[] = make_ins(.copy, .Kl, TMP(Arm64Reg.IP0), TMP(Arm64Reg.R8), QbeNull); self.emitins(i, b); 
+                i[] = make_ins(.copy, .Kl, TMP(Arm64Reg.IP0), TMP(Arm64Reg.R8), QbeNull); self.emitins(i, block); 
             };
             self.inst(@bits(0b11010100, 0b000, @as(u16) 0, 0b000, 0b01));  // SVC
             
@@ -814,17 +842,17 @@ fn emitins(self: *ArmState, i: *Qbe.Ins, b: *Qbe.Blk) void = {
                 if res == new || res == p {
                     res = r17;
                 };
-                i[] = make_ins(.copy, k, res, old_in, QbeNull); self.emitins(i, b); 
+                i[] = make_ins(.copy, k, res, old_in, QbeNull); self.emitins(i, block); 
             };
             rs, rt, rn := (@as(u5) res.int_reg(), @as(u5) new.int_reg(), @as(u5) p.int_reg());
             self.inst(@bits(0b1, si, 0b0010001, 0b0, 0b1, rs, 0b0, 0b11111, rn, rt)); 
             if res != real_res {
-                i[] = make_ins(.copy, k, real_res, res, QbeNull); self.emitins(i, b); 
+                i[] = make_ins(.copy, k, real_res, res, QbeNull); self.emitins(i, block); 
             };
         }
         fn trace_start() => {
             i[] = make_ins(.copy, .Kl, i.to, TMP(Arm64Reg.FP), QbeNull);
-            self.emitins(i, b);
+            self.emitins(i, block);
         }
         fn sqrt() => {
             a, r := (a0.float_reg(), i.to.float_reg());
@@ -843,6 +871,33 @@ fn emitins(self: *ArmState, i: *Qbe.Ins, b: *Qbe.Blk) void = {
             @panic("TODO: op encoding %", inst_name);
         };
     } // early returns
+}
+
+fn decode_mem(self: *ArmState, a: Qbe.Ref, other: Qbe.Ref, size: i64) Ty(u5, u12) #inline = {
+    self.fixarg(a&, size);
+    offset := 0;
+    addr := @match(rtype(a)) {
+        fn RSlot() => {
+            offset = self.slot(a);
+            // !needs_frame can have RSlot for arguments
+            @if(self.needs_frame, fp, sp)
+        }
+        fn RTmp() => a.int_reg();
+        fn RMem() => {
+            m := self.f.get_memory(a);
+            offset = m.offset&.bits();
+            m.base.int_reg()
+        }
+        @default => panic("bad address type for store");
+    };
+    if rtype(other) == .RInt {
+        offset += other.rsval().zext();
+    };
+
+    scaled := offset / size;
+    @debug_assert_eq(scaled * size, offset, "offset % not multiple of size % in $%", offset, size, self.f.name());
+    @debug_assert_eq(scaled.bit_and(1.shift_left(12) - 1), scaled, "can't encode offset in $%", self.f.name());
+    (addr, @as(u12) scaled)
 }
 
 fn call_symbol(self: *ArmState, sym: Qbe.Sym, set_link: bool) void #once = {
@@ -1013,8 +1068,8 @@ fn encode_adrp_add(dest: rawptr, src: rawptr, reg: u5) Ty(u32, u32) = {
     src := int_from_rawptr(src);
     
     distance := dest - src;
-    adr_range :: 1.shift_left(21);
-    if dest.abs() < adr_range {  // TODO: untested because i have such big segments
+    adr_range :: 1.shift_left(20);
+    if distance.abs() < adr_range {
         // if its an import, you need the extra nop so you take up the right amount of space for the relocation when doing AOT. 
         return(encode_adr(distance, reg), arm_nop); 
     };

@@ -136,6 +136,34 @@ fn expand_blit(f: *Qbe.Fn, dest: Qbe.Ref, src: Qbe.Ref, blit_size: i64) void #on
     forward  := blit_size >= 0;
     blit_size = blit_size.abs();
     off := if(forward, => blit_size, => 0);
+    
+    // Try to take advantage of arm's load/store pair instructions. 
+    // When emit sees a sequential pair, it will fuse them into a single instruction. 
+    // Representing it this way means they can still get optimised by slots.fr. 
+    while => blit_size >= 16 {
+        blit_size -= 16;
+        if forward {
+            off -= 16;
+        };
+        
+        r_offset2 := f.getcon(off + @if(forward, 8, -8));
+        @emit_instructions((f = f), (src, dest, f.getcon(off), r_offset2), """
+        @start
+            %s0 =l add %0, %2
+            %d0 =l add %1, %2
+            %s1 =l add %0, %3
+            %d1 =l add %1, %3
+            %r0 =l load %s0
+            %r1 =l load %s1
+            storel %r0, %d0
+            storel %r1, %d1
+        """);
+        
+        if !forward {
+            off += 16;
+        };
+    };
+    
     each blit_op_table { p |
         while => blit_size >= p.size {
             blit_size -= p.size;

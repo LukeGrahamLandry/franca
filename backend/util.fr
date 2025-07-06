@@ -1,7 +1,5 @@
 // Adapted from Qbe. MIT License. © 2015-2024 Quentin Carbonneaux <quentin@c9x.me>
 
-// note: for now the c code still calls its own version of many of these so you can't change the layout of BSet/QList!
-
 fn BIT(n: i64) u64 #inline = 1.shift_left(n);
 fn BIT(n: u8) u64 #inline = 1.shift_left(n.zext());
 fn SLOT(i: i64) Qbe.Ref #inline = ref(.RSlot, i.bit_and(0x1fffffff));
@@ -50,7 +48,7 @@ fn slice_pending_scratch(f: *Qbe.Fn) []Qbe.Ins = {
 
 fn copy_instructions_from_scratch(f: *Qbe.Fn, b: *Qbe.Blk) void = {
     @assert_ge(f.len_scratch(), 0, "too many instructions");
-    idup(b, f.scratch_next(), f.len_scratch());
+    idup(b, f.scratch_next().slice(f.len_scratch()));
     f.globals.curi = f.scratch_start(); 
 }
 
@@ -206,14 +204,14 @@ fn con(sym: Qbe.Sym, bits: i64) Qbe.Con =
 
 // TODO: use slices 
 
-fn idup(b: *Qbe.Blk, src: *Qbe.Ins, n: i64) void = {
-    if n > b.ins.cap {
+fn idup(b: *Qbe.Blk, src: []Qbe.Ins) void = {
+    if src.len > b.ins.cap {
         // caller better not be trying to put this in the inlining cache
         b.ins.len = 0;
-        b.ins&.reserve(n, temp());
+        b.ins&.reserve(src.len, temp());
     };
-    b.ins.len = n;
-    b.ins.items().copy_from(ptr = src, len = n)
+    b.ins.len = src.len;
+    b.ins.items().copy_from(src)
 }
 
 fn icpy(dest: *Qbe.Ins, src: *Qbe.Ins, n: i64) *Qbe.Ins = {
@@ -847,7 +845,7 @@ fn for_blocks_rpo_forward(f: *Qbe.Fn, $body: @Fn(b: *Qbe.Blk) void) void = {
 
 // Not the same as just `for_rev(b.ins.slice(0, b.nins)`
 // because the body is allowed to consume multiple instructions by offsetting the pointer. 
-// This is needed because the ir uses a vairable length encoding (for blit, call, args).
+// This is needed because the ir uses a variable length encoding (for blit, call, args).
 fn for_insts_rev(b: *Qbe.Blk, $body: @Fn(i: **Qbe.Ins) void) void = {
     i := b.ins.index_unchecked(b.ins.len);
     while => !i.identical(b.ins.ptr) {
@@ -921,25 +919,17 @@ fn for_phi(b: *Qbe.Blk, $body: @Fn(p: *Qbe.Phi) void) void = {
     };
 }
 
-fn for_jump_targets(b: *Qbe.Blk, $body: @Fn(s: *Qbe.Blk) void #duplicated) void = 
+fn for_jump_targets(b: *Qbe.Blk, $body: @Fn(s: *Qbe.Blk) void) void = 
     for_jump_targets_mut(b, fn(b) => body(b[]));
 
-fn for_jump_targets_mut(b: *Qbe.Blk, $body: @Fn(s: **Qbe.Blk) void #duplicated) void = {
-    ::enum(Qbe.J);
-    //targets := get_jump_targets(b);
-    //enumerate targets { i, s |
-    //    continue :: local_return;
-    //    // :SketchyIterTargets i use this some places that qbe doesn't have the !identical check (sometimes they do have it) so might need to split into two functions. 
-    //    for targets.slice(0, i) { s2 | // :SLOW 
-    //        if(s[].identical(s2), => continue());
-    //    };
-        
-    //    body(s);
-    //};
+fn for_jump_targets_mut(b: *Qbe.Blk, $body: @Fn(s: **Qbe.Blk) void) void = {
     if(b.s1.is_null(), => return());
-    body(b.s1&);
-    if(b.s2.is_null() || identical(b.s1, b.s2), => return());
-    body(b.s2&);
+    s := b.s1&;
+    range(0, 2) { _ |
+        body(s);
+        if(b.s2.is_null() || identical(b.s1, b.s2), => return());
+        s = b.s2&;
+    };
 }
 
 fn for_pars(f: *Qbe.Fn, $body: @Fn(i: *Qbe.Ins) void) void = 
@@ -1076,22 +1066,19 @@ fn rtype(r: Qbe.Ref) Qbe.RegKind #inline = {
 fn get_constant(f: *Qbe.Fn, r: Qbe.Ref) *Qbe.Con #inline = {
     @debug_assert(rtype(r) == .RCon, "tried to get constant of non constant");
     i := r.val();
-    //@safety(.Bounds) i < f.ncon.zext();
-    @debug_assert(i < f.ncon.zext(), "con oob");
+    @safety(.Bounds) i < f.ncon.zext();
     f.con.index(i)
 }
 
 fn get_memory(f: *Qbe.Fn, r: Qbe.Ref) *Qbe.Addr #inline = {
     @debug_assert(rtype(r) == .RMem, "tried to get memory of non memory");
     i := r.val();
-    //@safety(.Bounds) i < f.nmem.zext();
-    @debug_assert(i < f.nmem.zext(), "mem oob");
+    @safety(.Bounds) i < f.nmem.zext();
     f.mem.index(i)
 }
 
 fn get_temporary(f: *Qbe.Fn, i: i64) *Qbe.Tmp #inline = {
-    //@safety(.Bounds) i < f.ntmp.zext();
-    @debug_assert(i < f.ntmp.zext(), "tmp oob");
+    @safety(.Bounds) i < f.ntmp.zext();
     f.tmp.index(i)
 }
 
@@ -1105,13 +1092,16 @@ fn get_temporary(f: *Qbe.Fn, r: Qbe.Ref) *Qbe.Tmp #inline = {
 fn trunc(x: u32) i16 #redirect(u32, u16); // TODO
 fn shift_right_logical(v: i16, shift_amount: i64) i16 = v.int().shift_right_logical(shift_amount).intcast().trunc();
 
+MAX_REF_VAL: u32 : 1.shift_left(29) - 1;
+
 fn ref(cls: Qbe.RegKind, id: i64) Qbe.Ref #inline = {
     ::enum(Qbe.RegKind);
+    @debug_assert_ule(id, MAX_REF_VAL);
     (type3_val29 = cls.raw().bitcast().bit_or(id.shift_left(3).trunc()))
 }
 
 fn val(r: Qbe.Ref) i64 #inline = {
-   x := @as(u32) r.type3_val29.shift_right_logical(3).bit_and(1.shift_left(29) - 1);
+   x := @as(u32) r.type3_val29.shift_right_logical(3).bit_and(MAX_REF_VAL);
    x.zext()
 }
 
@@ -1119,8 +1109,6 @@ fn rsval(r: Qbe.Ref) i32 #inline = {
    intcast(r.val().bit_xor(0x10000000) - 0x10000000)
 }
 
-// TODO: can we use this instead of making a constant for small integer literals? 
-//       qbe only uses this for blit but CBits for all constants.
 fn small_int_for_blit(x: i64) Qbe.Ref #inline = {
     ref(.RInt, x.bit_and(0x1fffffff))
 }
@@ -1137,7 +1125,7 @@ fn get_jump_targets(b: *Qbe.Blk) []*Qbe.Blk = {
 // so ie. `@is(j, .alloc4, .alloc8, .alloc16)` is the same as manually writing `j.raw() >= Qbe.O.alloc4.raw() && j.raw() <= Qbe.O.alloc16.raw()`,
 // I just think its easier to read when i can see all the values spelled out. 
 
-fn is_ret(j: Qbe.J) bool =  // TODO: tried to call uncompiled if #inline :FUCKED
+fn is_ret(j: Qbe.J) bool #inline =
     j.raw() >= Qbe.J.retw.raw() && j.raw() <= Qbe.J.ret0.raw();
 
 fn is_alloc(j: Qbe.O) bool #inline = {
@@ -1229,15 +1217,9 @@ fn for_fields(t: *Qbe.Typ, i: *i64, $body: @Fn(tag: *Qbe.FieldType, len: u32) vo
 }
 
 fn cls(self: Qbe.FieldType) Qbe.Cls = {
-    @match(self) {
-        fn Fb() => .Kw;
-        fn Fh() => .Kw;
-        fn Fw() => .Kw;
-        fn Fl() => .Kl;
-        fn Fs() => .Ks;
-        fn Fd() => .Kd;
-        @default => .Ke;
-    }
+    types :: @const_slice(Qbe.Cls.Ke, .Kw, .Kw, .Kw, .Kl, .Ks, .Kd, .Ke, .Ke);
+    ::@assert_eq(types.len(), Qbe.FieldType.enum_count());
+    types[zext self.raw()]
 }
 
 fn cls(self: Qbe.J) Qbe.Cls = 

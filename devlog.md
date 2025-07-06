@@ -1,4 +1,8 @@
 
+
+- rearanging expand_blit() so you have ldr,ldr,str,str instead of ldr,str,ldr,str and then 
+  having emit notice pairs and use ldp/stp saves space: 1018716 -> 953880 (64k, 6%)
+
 ## (Jul 5)
 
 - experimenting with perf_event_open syscall. got the point of getting ip samples out of it, 
@@ -12,6 +16,17 @@
   not absolute locations so forgetting one messes up everything down the line as well.
 - tried to use stp for storing callee saved registers but that made it 15ms slower which is strange. 
   maybe it's branchier cause it has to deal with the odd case? only saves 8k bytes.
+- found embarasing mistake with address instead of distance for `adr`, so that's why it never thought it was in range 
+
+---
+
+> zed is so fucking garbage somehow im so mad.
+> oh i restarted the program of course i wanted you to delete the settings file
+> so i have to painfully reconstruct it from everything ive complained about before. 
+> how can it be this bad and somehow everything else feels worse to type into. 
+> whats going on man. as a fun bonus it forgot how to auto indent after a opening `{`
+> in my language. also im pretty sure my comments are a different colour now? 
+> that seems unlikely. i must have just picked the wrong theme but you can never be sure. 
 
 ## (Jul 4)
 
