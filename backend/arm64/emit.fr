@@ -68,16 +68,7 @@ fn fixup_arm64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
                 // > that checked the return address and patched it to not need the extra indirection after the first call, 
                 // > but i we care too much about security to do that any more. 
                 if symbol.offset == -1 {
-                    // TODO: only need to do this if we're in W+E mode? 
-                    insane_caches := use_threads && self.goal.type == .JitOnly && self.goal.os == .macos;
-                    
-                    // create a new trampoline in the
-                    @if(insane_caches) lock(self.icache_mutex&);
-                    @debug_assert(!self.currently_emitting_function);
-                    segment := self.segments&.index(.Code);
-                    symbol.offset = segment.len();
-                    trampoline := segment.reserve(Array(u32, 4));
-                    @if(insane_caches) unlock(self.icache_mutex&);
+                    trampoline := reserve_stub(self, symbol, Array(u32, 4));
                     // x16 is a caller saved register so it's fine to stomp it inside a call
                     reg: i64 = Arm64Reg.IP0.raw().zext() - 1; // x16
                     trampoline[0] = branch_target_marker;  // See compiler/main.fr/is_wrongly_illegal_instruction()
@@ -85,13 +76,6 @@ fn fixup_arm64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
                     trampoline[3] = br(reg, 0);
                     if self.goal.exe_debug_symbol_table {  // :ShowSymbolNamesForStubs
                         self.local_needs_reloc&.push(symbol.id);
-                    };
-                    
-                    // TODO: combine this with the call for previous function if we're in emit_fn
-                    if insane_caches {
-                        code := self.segments&.index(.Code);
-                        // sys_dcache_flush
-                        clear_instruction_cache(u8.raw_from_ptr(code.mmapped.ptr).offset(symbol.offset), size_of(@type trampoline[]));
                     };
                 };
                 stub_trampoline := self.segment_address(.Code, symbol.offset);
@@ -145,14 +129,10 @@ fn emit_the_code(self: *ArmState) void #once = {
         self.framelayout();
         
         if self.f.vararg && !self.f.globals.target.apple {
-            //range_rev(0, 4) { i |
-            //    negative_32 := s_trunc(-2, 7);
-            //    r0, r1 := (i*2, i*2+1);
-            //    self.inst(f_stp_pre(FType.Q128, @as(u5) r0, @as(u5) r1, sp, negative_32)); 
-            //};
-            range_rev(0, 8) { i |
-                negative_16 := s_trunc(-16, 9);
-                self.inst(f_str_pre(FType.Q128, @as(u5) i, sp, negative_16)); 
+            range_rev(0, 4) { i |
+                negative_32 := s_trunc(-2, 7);
+                r0, r1 := (i*2, i*2+1);
+                self.inst(f_stp_pre(FType.Q128, @as(u5) r0, @as(u5) r1, sp, negative_32)); 
             };
             range_rev(0, 4) { i |
                 negative_16 := s_trunc(-2, 7);
@@ -263,10 +243,7 @@ fn jmp(self: *ArmState, s: *Qbe.Blk, cond: i32) void #inline = {
 }
 
 fn framelayout(self: *ArmState) void = {
-    o := 0;
-    for arm64_rclob { r |
-        o += 1.bit_and(self.f.reg.bitcast().shift_right_logical(zext r.raw()));
-    };
+    o: i64 = arm64_clob_mask.bit_and(self.f.reg).count_ones().zext();
     f := self.f.slot.intcast() / 4;
     f = (f + 3).bit_and(-4);
     o += o.bit_and(1);

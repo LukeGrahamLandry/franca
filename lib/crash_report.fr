@@ -47,11 +47,11 @@ backtracing_panic_handler :: fn(msg: Str) Never = {
     context(DefaultContext)[].panic_hook = fn(msg) = {
         scary_log("\nPanicked while logging a backtrace.");
         scary_log(msg);
-        report_backtrace_safe(trace_start(), 0.rawptr_from_int());
+        report_backtrace_safe(fp = trace_start(), ip = 0.rawptr_from_int());
         Syscall'exit(1)
     };
     scary_log("\n");
-    report_backtrace(trace_start(), 0.rawptr_from_int());
+    report_backtrace(fp = trace_start(), ip = 0.rawptr_from_int());
 
     Syscall'exit(1);
 };
@@ -93,13 +93,13 @@ show_trace_and_exit :: fn(s: i64, info: *SigInfo, ctx: *UContext) void = {
     if LOOPING[] == 1 {
         LOOPING[] = 2;
         scary_log("... while handling a previous signal.\n");
-        report_backtrace_safe(fp, ip);
+        report_backtrace_safe(fp = fp, ip = ip);
         Syscall'exit(1);
     };
     LOOPING[] = 1;
     
     @eprintln("(signal = %, addr = %, value = %, code = %, ip = %)", info.si_signo, info.si_addr, info.si_value, info.si_code, ip);
-    report_backtrace(fp, ip);
+    report_backtrace(fp = fp, ip = ip);
     Syscall'exit(1);
 };
 
@@ -143,74 +143,69 @@ fn pop_resolver(it: *LocationResolverNode) void = {
 MAX_SHOWN :: 40;
 MAX_LOOPS :: 2000;
 
-// the expectation is that you crash after calling this (otherwise need to fix cached_codemap)
-fn report_backtrace(fp: rawptr, ip: rawptr) void = {
-    ::ptr_utils(LocationResolverNode);
-    report_frame :: fn(ip: rawptr) ?Str = {
-        node := RESOLVERS[];
-        while => !node.is_null() {
-            if node'func(node.data, ip) { s |
-                return(Some = s);
-            };
-            node = node.next;
-        };
-        .None
-    };
-    
-    i := 0;
+
+FpIp :: @struct(fp: rawptr, ip: rawptr);
+
+fn report_backtrace(start: FpIp) void = {
     shown := 0;
     last_ip := 0.rawptr_from_int();
-    while => !fp.is_null() && i < MAX_LOOPS {
-        if !identical(ip, last_ip) && shown < MAX_SHOWN {
-            if report_frame(ip) { s | 
+    walk_stack_trace(start, MAX_LOOPS) { i, ip, _ |
+        if shown >= MAX_SHOWN {
+            scary_log("\n...hidden frames\n");
+            return();
+        };
+        if !identical(ip, last_ip) {
+            if name_from_ip(RESOLVERS[], ip) { s | 
                 @println("  %: %", i, s);
                 shown += 1;
             };
         };
         last_ip = ip;
+    };
+}
+
+walk_stack_trace :: fn(_: FpIp, max_loops: i64, $body: @Fn(i: i64, ip: rawptr, fp: rawptr) void) void = {
+    fp, ip := (_.fp, _.ip);  // it's too easy to swap these and call it wrong otherwise
+    i := 0;
+    while => !fp.is_null() && i < max_loops {
+        body(i, ip, fp);
         ip = trace_return(fp);
         fp = trace_prev(fp);
         i += 1;
     };
-}
+};
+
+name_from_ip :: fn(node: *LocationResolverNode, ip: rawptr) ?Str = {
+    ::ptr_utils(LocationResolverNode);
+    while => !node.is_null() {
+        if node'func(node.data, ip) { s |
+            return(Some = s);
+        };
+        node = node.next;
+    };
+    .None
+};
 
 // This doesn't attempt to call resolvers, it just prints raw addresses. 
-fn report_backtrace_safe(frame: rawptr, ip_hint: rawptr) void = {
-    i := 0;
-    old := 0.rawptr_from_int();
+fn report_backtrace_safe(start: FpIp) void = {
     shown := 0;
-    hide := 0;
-    scary_log("        ip       fp");
-    while => !frame.is_null() && i < MAX_LOOPS {
-        addr := trace_return(frame);
-        if addr == old {
-            hide += 1;
-        } else {
-            if hide > 0 {
-                scary_log(" ... x");
-                scary_log(hide);
-            };
-            hide = 0;
-            if shown < MAX_SHOWN && !identical(addr, old) {
-                scary_log("\n");
-                scary_log(i);
-                scary_log(": ");
-                scary_log(addr);
-                scary_log(" ");
-                scary_log(frame);
-                shown += 1;
-            };
+    last_ip := 0.rawptr_from_int();
+    walk_stack_trace(start, MAX_LOOPS) { i, ip, fp |
+        if shown >= MAX_SHOWN {
+            scary_log("\n...hidden frames\n");
+            return();
         };
-        old = addr;
-        frame = trace_prev(frame);
-        i += 1;
+        if !identical(ip, last_ip) {
+            scary_log("\n");
+            scary_log(i);
+            scary_log(": ");
+            scary_log(ip);
+            scary_log(" ");
+            scary_log(fp);
+            shown += 1;
+        };
+        last_ip = ip;
     };
-    scary_log("\n");
-    if shown > MAX_SHOWN {
-        scary_log(shown - MAX_SHOWN);
-        scary_log(" hidden frames");
-    };
-    scary_log("\n");
 } 
 
 // The backend generates one of these for an executable based on dbgloc instructions. 
@@ -224,7 +219,7 @@ AotDebugInfo :: @struct {
     payload: []u8;        // [U name len, name bytes, [U off in func, S off source]]
     source:  []u8;        // all the source files in the program concatenated together 
     files:   []u8;        // (U file count, [U size source, U name len, name bytes])
-    nullable_cached_codemap: rawptr;  // 🤡
+    nullable_cached_codemap: rawptr;  // this is kinda dumb
 };
 
 fn find_in_debug_info(userdata: rawptr, ip: rawptr) ?Str = {
@@ -239,10 +234,8 @@ fn find_in_debug_info(userdata: rawptr, ip: rawptr) ?Str = {
     cm := ptr_cast_unchecked(rawptr, *CodeMap, debug_info.nullable_cached_codemap&);
     ::ptr_utils(CodeMap);
     if cm[].is_null() {
-        // We're storing a temp() pointer in a global.
-        // This is generally not ok but this function is only used inside unrecoverable error reporting. 
-        cm[] = temp().box(CodeMap);
-        cm[][] = decode_codemap(debug_info, temp());
+        cm[] = general_allocator().box(CodeMap);
+        cm[][] = decode_codemap(debug_info, general_allocator());
     };
     codemap := cm[];
     

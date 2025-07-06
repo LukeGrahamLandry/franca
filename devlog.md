@@ -1,4 +1,18 @@
 
+## (Jul 5)
+
+- experimenting with perf_event_open syscall. got the point of getting ip samples out of it, 
+  but it being linux specific magic is kinda lame and the fancy hardware counters don't 
+  work on orb anyway. so i want to see if just having a timer send a SIG_PROF is fast enough to be reasonable. 
+- theres definitly some memory bug happening where the program text gets corrupted and
+  it decides theres an UnterminatedStr error (and prints out the line that it's helpfully deleted part of),
+  so that's something to deal with systemically. it happend 4 times today which 
+  is enough that it's real and unacceptable but not enough that it's easy to fix. 
+- fixed: putting stubs in normal code section broken backtraces because AotDebugInfo is sizes 
+  not absolute locations so forgetting one messes up everything down the line as well.
+- tried to use stp for storing callee saved registers but that made it 15ms slower which is strange. 
+  maybe it's branchier cause it has to deal with the odd case? only saves 8k bytes.
+
 ## (Jul 4)
 
 - arm: re-clearcache after doing pending_immediate_fixup_got

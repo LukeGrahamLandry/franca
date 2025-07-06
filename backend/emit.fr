@@ -522,6 +522,8 @@ fn ensure_got_slot(self: *QbeModule, symbol: *SymbolInfo, jit_address: rawptr) ?
     new_got_reloc
 }
 
+func_size_limit_bytes :: 1.shift_left(20);
+
 fn emit_fn(f: *Qbe.Fn) void = {
     @if(enable_incremental())
     if f.globals.save { save | 
@@ -551,7 +553,7 @@ fn emit_fn(f: *Qbe.Fn) void = {
     // :FuncSizeLimit 
     // b.cond gives you 19 bits, but encoded/4, but signed so that's 20 bits.  
     // you can remove this limit on the function but then have to add the check when emitting each branch. 
-    @assert_lt(size, 1.shift_left(20), "we don't allow a function larger than one arm64 instruction can jump");
+    @assert_lt(size, func_size_limit_bytes, "we don't allow a function larger than one arm64 instruction can jump");
     
     lock(m.icache_mutex&);
     code_bytes := code.mmapped.subslice(start_offset, size);
@@ -586,6 +588,21 @@ fn emit_fn(f: *Qbe.Fn) void = {
         unlock(m.icache_mutex&);
     };
     unlock(m.icache_mutex&);
+}
+
+fn reserve_stub(m: *Qbe.Module, symbol: *SymbolInfo, $T: Type) *T #generic = {
+    start_debug_info(m, symbol);
+    code := m.segments&.index(.Code);
+    lock(m.icache_mutex&);
+    @debug_assert(!m.currently_emitting_function);
+    symbol.offset = code.len();
+    symbol.size = size_of(T);
+    @debug_assert_eq(symbol.segment, .Code, "zero value");
+    trampoline := code.reserve(T);
+    m.last_function_end = code.next;
+    unlock(m.icache_mutex&);
+    end_debug_info(m, symbol);
+    trampoline
 }
 
 fn llvm_mc_dis(out: *List(u8), code: []u8, arch: Arch) void = {
@@ -748,7 +765,7 @@ fn start_debug_info(m: *QbeModule, s: *SymbolInfo) void = {
 
 fn end_debug_info(m: *QbeModule, s: *SymbolInfo) void = {
     d := m.debug_info&;
-    if m.goal.exe_debug_symbol_table {
+    if m.goal.exe_debug_symbol_table && m.goal.os == .macos {
         leb128_unsigned(d.macho_function_starts&, s.size.zext());
     };
     @if(!d.enabled) return();

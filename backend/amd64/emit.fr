@@ -36,7 +36,21 @@ fn emit_func_amd64(f: *Qbe.Fn) []Ty(Fixup, Qbe.Sym) = {
     emit_the_code(e&);
     @debug_assert(identical(prev, code.next), "can't have multiple threads emitting code");
 
-    // TODO: explain 
+    // 
+    // blink_smc; July 4, 2025.
+    // blink (a linux emulator) handles W+X memory by mapping it as R+X and catching the 
+    // fault every time you write to it (which is slow since i want to jit code byte by byte). 
+    // so instead of weaving the writes to that memory in with other work, emit code into scratch 
+    // space and copy a whole function at once. blink's readme claims that a loop with jmpCC 
+    // instead of normal jmp instructions will only eat one fault... that appears to have regressed.  
+    // (with some changes to jnz handling below i can produce a copy_bytes() that doesn't use jmp, 
+    // and it still faults for each i64 copied. easier to repro by trying blink's smc2_test.c and 
+    // observing that there are 300+ faults instead of the advertised 20). anyway, the rep+movsb 
+    // instruction implements memcpy() and blink handles that with ~1 fault per call, so 
+    // that's what I use here. it's only necessary for JitOnly+linux+x86_64 (and you can 
+    // even detect running under blink with the CPUID instruction) but my compiler's so 
+    // slow that this copy is negligable so behaving consistantly on all platforms seems nicer for now. 
+    //
     if m.goal.blink_smc {
         if query_current_arch() == .x86_64 {
             repmovs :: AsmFunction(fn(dest: *u8, src: *u8, count: i64) void = (), @const_slice(
@@ -100,15 +114,8 @@ fn fixup_amd64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
                         @fmt_write(self.debug_out, "# patch call % calls %\n", fixup.patch_at, symbol.name);
                     };
                     if symbol.offset == -1 {
-                        // create a new trampoline
-                        code := self.segments&.index(.Code);
-                        lock(self.icache_mutex&);
-                        @debug_assert(!self.currently_emitting_function);
-                        symbol.offset = code.len();
-                        @assert_eq(symbol.segment, .Code, "zero value");
                         size_of_jmp_encoding :: 6;
-                        trampoline := code.reserve(Array(u8, size_of_jmp_encoding));
-                        unlock(self.icache_mutex&);
+                        trampoline := reserve_stub(self, symbol, Array(u8, size_of_jmp_encoding));
                         new_got_reloc[] = ensure_got_slot(self, symbol, address).or_else(=> new_got_reloc[]);
                         distance := self.distance_between(.Code, symbol.offset + size_of_jmp_encoding, .ConstantData, symbol.got_lookup_offset);
                         trampoline := fixed_list(trampoline.items());
@@ -254,15 +261,6 @@ fn emit_the_code(e: *AmdState) void = {
                     b.s2 = s;
                 } else {
                     c = cmpneg(c);
-                };
-                
-                // TODO: explain
-                // :PreferBackwardsJmpCC
-                if local_labels[b.s1.id.zext()] != 0 && local_labels[b.s2.id.zext()] == 0 {
-                    c = cmpneg(c);
-                    s := b.s1;
-                    b.s1 = b.s2;
-                    b.s2 = s;
                 };
                 
                 e.jmp(b.s2, c);

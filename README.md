@@ -7,7 +7,7 @@ A self sufficient programming language.
 The main gimmick is full compile-time code execution: anything you can do at runtime, you can do at comptime.  
 Comptime code doesn't run in an interpreter. It's JITted to machine code by the same backend as the rest of your program.  
 Supporting that while also allowing cross compilation and reproducible builds is... nontrivial, but it mostly works.  
-Comptime code can dynamically allocate memory (and generate code). Any (ish) data structures that are reachable from 
+Comptime code can dynamically allocate memory (and generate code). Any data structures that are reachable from 
 runtime code will automatically be included in the final binary. 
 
 - macros are functions that run at compile time, call compiler apis, and return ast nodes
@@ -18,7 +18,7 @@ runtime code will automatically be included in the final binary.
 - nonlocal returns from (non-escaping) inline lambdas so you can define your own control structures
 - manual memory management with explicit allocators 
 - no seperate build system language. write a program that builds your program
-- full c abi support so you can use extern-c code written in other languages
+- full c abi support so you can call extern-c code written in other languages
 
 ## Supported Targets
 
@@ -26,11 +26,11 @@ The self-hosted backend generates machine code for arm64 (aarch64) and amd64 (x8
 There is no dependency on assemblers, linkers, llvm, or xcode-codesign. 
 
 - mach-o (macos): executables, dynamic libraries, relocatable object files
-- elf (linux): executables only for now
+- elf (linux): executables, relocatable object files (no dynamic libraries yet)
 - jit: for comptime execution 
 
 All the tests pass on macos-arm64 and most on macos-amd64.  
-On linux-amd64, the compiler can compile itself but not all tests pass.  
+On linux-amd64 and linux-arm64, the compiler can compile itself but not all tests pass.  
 (I haven't transcribed all the platform specific struct layouts/magic numbers yet). 
 On windows you can use WSL. 
 
