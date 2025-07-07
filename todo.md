@@ -7,37 +7,7 @@ let's cheat and make examples/terminal.fr(repl=true) not take 2 seconds to compi
 notably those are all things to aren't going to change if you're just working on the terminal program. 
 
 ---
-TODO: fix this and add a test
-```
-LazyType :: @rec @tagged(
-    EvilUninit: void,
-    Infer,
-    PendingEval: FatExpr, 
-    Finished: Type, 
-    Returning: Type,
-    UnboundGeneric: Symbol,
-    Generic: Var,
-);
 
-type := var.nullable_type;
-::ptr_utils(LazyType);
-if type.is_null() {
-// Type Error: expected *LazyType but found *@tagged(EvilUninit: void,Infer: void,PendingEval: FatExpr,Finished: Type,Returning: Type,UnboundGeneric: u32,Generic: @struct(kind: i64,name: u32,id: @struct(id: u32,),scope: u32,),)
-// unless you get rid of the @rec
-    storage: LazyType = @if(var.temporary == UnknownType, 
-        .Infer, (Finished = var.temporary));
-    type = storage&; 
-};
-```
----
-
-repro is broken! 
-my guess is the emit_ir eval order change for Stmt.Set means it copies 
-uninitialized stack into your program now
-
----
-
-- non-apple-arm vaargs abi has extra space so need to account for that when checking range for fold_addr
 - "this works here but not in it's original place under f()."
 - :ThisIsNotOkBecauseMemoryWillBeReused
 - give data symbols readable names now that they show up in symbol table
@@ -634,6 +604,11 @@ or just default to jitting and force you to enable aot by specifying an output p
 
 ## language decisions
 
+- decide what the policy on not having a bti instruction on AsmFunction should be. 
+  need to tell the frontend that it can't be shimmed without a patch. 
+  should i just insert them for you? that's probably bad if you did it on purpose or 
+  are counting instructions to tail call into it or something interesting like that. 
+  should detect trying to create a function pointer to it then. 
 - make #macro less of a special case? it would be nice if it could participate in overloading on some arguments. 
 so you could say `fn fmt(out: *List(u8), template: Str, arg: FatExpr #macro) FatExpr`. 
 then you need a new way to express that you need `template` to be constant in the program but 

@@ -1,7 +1,27 @@
 
+## (Jul 7)
+
+- terminal.fr: basic argument quoting
+
+## (Jul 6)
 
 - rearanging expand_blit() so you have ldr,ldr,str,str instead of ldr,str,ldr,str and then 
   having emit notice pairs and use ldp/stp saves space: 1018716 -> 953880 (64k, 6%)
+- write syscall wrapper with AsmFunction instead of using the backend's special O.syscall. 
+  (required for my cross-incremental plans). 
+  - dealing with clone syscall is a bit more painful. before i relied on the wrapper being 
+    inlined but AsmFunction can't be so for amd64 where return address is on the stack,
+    it has to pop it early and tail call back instead of ret. ended up using a float register 
+    because spilling anything to the stack has the same problem that it won't be there in the 
+    child thread. which seems like i must be over complicating it. maybe the sane thing 
+    is to have the parent layout the new stack such that the new callee is the first thing you'd pop off? 
+    you do have enough callee saved registers to make it work without that, 
+    but if i want to keep doing that i kinda have to write that whole codepath 
+    in assembly so it's not relying on the backend making lucky spilling decisions. 
+- give riscv O.asm and do tests/exe/sys.fr without syscall instruction
+- fix riscv auipc+add encoding. both immediates are signed which makes it confusing
+- it's less code to just pass args to syscall wrapper in registers. 
+- now that i think about it, xor is a dumb way to merge hashes. it's very possible to have the same file content twice. 
 
 ## (Jul 5)
 
@@ -811,6 +831,14 @@ per process but compiler/tests.fr uses a bunch of compiler instances and was gro
   so the frontend doesn't notice the code after that is unreachable. 
 - take out the junk blocks for unused return labels earlier. doesn't matter, just makes the debug output easier to read. 
 - not sure if i should bother caring about got_indirection_instead_of_patches on amd64
+
+```
+//       i think a better system might be to just do the syscall instruction with AsmFunction instead of doing it in the backend. 
+//       my original thought was you want to expose that so you could write a frontend for another language without depending 
+//       on the franca library at runtime and still be able to do syscalls without caring about the arch calling convention. 
+//       but since you need different numbers/struct layoyt anyway, it's such a pain in the ass to do it right that the extra 
+//       help the backend gives you is kinda just a drop in the bucket, why bother. 
+```
 
 ## (Jun 17)
 

@@ -274,6 +274,7 @@ fn do_parallel_moves(pass: *SpillPass, b: *Qbe.Blk, last_copy: *Qbe.Ins, in_reg:
      * might not be true if previous
      * passes change
      */
+     // :RequireCopyAfterCall
      
     // Scan backwards to find the first in the group of consecutive copies.
     first_copy := {
@@ -296,11 +297,12 @@ fn do_parallel_moves(pass: *SpillPass, b: *Qbe.Blk, last_copy: *Qbe.Ins, in_reg:
     is_after_call := !first_copy.identical(b.ins.ptr) && @is(first_copy.offset(-1).op(), .call, .syscall);
     avoid_registers := if is_after_call { 
         discard := Array(i32, 2).ptr_from_int(0);
-        retreg := ({T.retregs}(first_copy.offset(-1)[].arg&[1], discard));
+        rcall := first_copy.offset(-1)[].arg&[1];
+        retreg := ({T.retregs}(rcall, discard));
         @debug_assert(in_reg.t[].bit_and(retreg) == retreg, "we should already know returns are live");
         bs_clrlow(in_reg, retreg); // retregs arn't live before the call becuase we're making them now
         pass.limit_in_reg(in_reg, true, .None);
-        arg_reg := {T.argregs}(first_copy.offset(-1)[].arg&[1], discard);
+        arg_reg := {T.argregs}(rcall, discard);
         bs_setlow(in_reg, arg_reg); // the arguments are live before because we need them at the call
         T.caller_saved
     } else {

@@ -145,25 +145,12 @@ S :: fn(name: FatExpr, fid: FatExpr) FatExpr #macro = {
 // 
 // TODO: this is very hacky for now. still deciding how i want it to work. 
 // 
-//       i think a better system might be to just do the syscall instruction with AsmFunction instead of doing it in the backend. 
-//       my original thought was you want to expose that so you could write a frontend for another language without depending 
-//       on the franca library at runtime and still be able to do syscalls without caring about the arch calling convention. 
-//       but since you need different numbers/struct layoyt anyway, it's such a pain in the ass to do it right that the extra 
-//       help the backend gives you is kinda just a drop in the bucket, why bother. 
-//       
 //       im not sure if it's better to treat this call as a macro which references the function declaration just 
 //       as a data structure to let you type in name+numbers+signeture in one place, or commit all the way and 
 //       have it generate the wrapper implementation like AsmFunction() does. or commit more and have the syscall numbers 
 //       entirely as data and generate the whole scope. but it can't be exactly like AsmFunction because the inferred name 
 //       won't be set yet. can make you write it redundantly in the overload set slot tho. 
 //       
-//       special casing inode64_on_applex8664 here is kinda dumb. maybe go back to #link_rename, just implemented here instead of in sema? 
-//       because those DIR functions aren't even direct syscall wrappers so pretending they're syscalls that i just happen to 
-//       always make through libc is kinda dumb. 
-//       
-//       since the premise is syscalls are slow anyway, it probably makes more sense to just have syscall8 and pass in all the arguments 
-//       and numbers and have it dispatch. maybe i don't want to be handing out arbitrary syscall gadgets. 
-//
 fn syscall(arg: FatExpr) FatExpr #macro = {
     loc := arg.loc;
     arg := arg&.items();
@@ -175,13 +162,9 @@ fn syscall(arg: FatExpr) FatExpr #macro = {
     libc := false;
     can_syscall := false;
     sys := zeroed Array(i64, 3);
-    inode64_on_applex8664 := false;
     each func.annotations { it |
         if it.name == (@symbol libc) {
             libc = true;
-        };
-        if it.name == (@symbol inode64_on_applex8664) {
-            inode64_on_applex8664 = true;
         };
         if it.name == (@symbol syscall) {
             can_syscall = true;
@@ -193,27 +176,9 @@ fn syscall(arg: FatExpr) FatExpr #macro = {
         };
     };
     
-    //other_fid := fid;
-    //if inode64_on_applex8664 {
-    //    println("TODO: this doesn't work because this way of duplication the function is illegal");
-    // /// also tfmt calls exit()
-    //    fr := current_compiler_context();
-    //    // this is sketchy relies on DyanamicImport.name not being set yet 
-    //    func2 := func[];
-    //    func2.name = sym(@tfmt("%$INODE64", func.name.str()));
-    //    other_fid = fr'vtable'intern_func(fr.data, func2&);
-    //};
-    
-    // TODO: this is super sketchy it relies on no instructions ending up between each `O.arg`
     inst := FatExpr.list(arg.len + 1, ast_alloc());
     each arg { e |
         e[] = compile_ast(e[]);
-        //op_l :: fn(a: ~T) void #ir(.arg, .Kl) #where;
-        //op_w :: fn(a: ~T) void #ir(.arg, .Kw) #where;
-        //op := @if(e.ty.size_of() == 8, op_l, op_w);
-        //inst&.push(@{
-        //    @[@literal op](@[e[]]);
-        //});
         inst&.push(@{
             T :: @[@literal e.ty];
             @if(size_of(T) == 8,
@@ -232,7 +197,7 @@ fn syscall(arg: FatExpr) FatExpr #macro = {
     };
     
     ::import("@/lib/sys/process.fr");
-    msg :: "unimplemented syscall";
+    crash :: fn() Never = panic("unimplemented syscall");
     
     if IS_BOOTSTRAPPING {
         can_syscall = false;
@@ -251,28 +216,27 @@ fn syscall(arg: FatExpr) FatExpr #macro = {
         loc = loc, ty = FnPtr(arg, ret), done = false,
     );
     
+    // TODO: outline this part as well 
     @{
         want_syscall := prefer_syscalls() || @[@literal !libc];
         @if(want_syscall, {
-            @if(@[@literal !can_syscall]) panic(msg);
+            @if(@[@literal !can_syscall]) crash();
             numbers := @[@literal sys];
             sys_index := @if(query_current_os() == .macos, 2, @if(query_current_arch() == .aarch64, 0, 1));
             n := numbers&[sys_index];
-            @if(n == NOSYS) panic(msg);
+            @if(n == NOSYS) crash();
             @[{
                 inst&.push(@{ n });
                 @{}
             }];
-            //@[@as(FatExpr) (expr = (Tuple = inst.as_raw()), ty = UnknownType, done = false, loc = loc)];
-            //result := op(n);
-            args: Array(i64, 7) = @[{
-                e := @as(FatExpr) (expr = (Tuple = inst.as_raw()), ty = UnknownType, done = false, loc = loc);
-                //debug_log_ast(e);
-                e
-            }];
-            //result := op(n);
             OS[].it = query_current_os();  // I hope this is just an :UpdateBoot
-            result, flag := perform_syscall(args&);
+            // :CloneOffBy16
+            // the 7th argument is passed on the stack so when this returns we will 
+            // add 16 to sp so the sp passed to the kernel needs to be off by 16 as well. 
+            result, flag := perform_syscall(@[{
+                e := @as(FatExpr) (expr = (Tuple = inst.as_raw()), ty = UnknownType, done = false, loc = loc);
+                e
+            }]);
             // I think you really shouldn't hold `sys_index` or even the environment pointer 
             // across the syscall because of :CloneReturnsTwice, it's a race if they get spilled 
             // to the stack. so using the global instead. There's only r(12, 13, 14, 15)
@@ -282,52 +246,34 @@ fn syscall(arg: FatExpr) FatExpr #macro = {
             };
             bit_cast_unchecked(i64, @[@literal ret], result)
         }, {
-            @if(@[@literal !libc]) panic(msg);
-        
-            //apple_x8664 := query_current_os() == .macos && query_current_arch() == .x86_64;
-            //@if(@if(@[@literal inode64_on_applex8664], apple_x8664, false),
-                //@[@literal other_fid](@[arg_expr]),
-                @[callee](@[arg_expr])
-            //)
+            @if(@[@literal !libc]) crash();
+            @[callee](@[arg_expr])
         })
     }
 }
 
-// (args[0..<6], syscall number)
-perform_syscall :: AsmFunction(fn(args: *Array(i64, 7)) Ty(i64, u8) = (), {
+perform_syscall :: AsmFunction(fn(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, N: i64) Ty(i64, u8) = (), {
     #use("@/backend/arm64/bits.fr");
     @const_slice(
-        ldr_uo(.X64, x8, x0, @as(i7) 6),  // linux syscall number
-        mov(.X64, x16, x8),  // macos syscall number
-        ldp_so(.X64, x4, x5, x0, @as(i7) 4),
-        ldp_so(.X64, x2, x3, x0, @as(i7) 2),
-        ldp_so(.X64, x0, x1, x0, @as(i7) 0),
-        
+        mov(.X64, x8, x6), // linux syscall number
+        mov(.X64, x16, x6), // macos syscall number
         svc,
-    
         cset(.X64, x1, .LO), // macos sets carry flag on error
-        
         ret(),
     )
 }) { (out: *List(u8)) | 
     #use("@/backend/amd64/bits.fr");
-    ldr :: fn(o: *List(u8), d: X86Reg, s: X86Reg, off: i64) void = 
-        encode_base_plus_offset(o, PrimaryOp.MovRegLoad, d, s, off);
-    
     @asm_x64(
+        // arg[3] (syscall instruction stomps rcx as lr for kernel so calling convention is different)
+        encode_bin(PrimaryOp.MovReg, X86Reg.r10, X86Reg.rcx),
+        // syscall number (7th arg doesn't fit in a register)
+        encode_base_plus_offset(PrimaryOp.MovRegLoad, X86Reg.rax, X86Reg.rsp, 8),
+        
         // :CloneReturnsTwice pop the return address early and use xmm0 as link register
         // This is necessary because the clone syscall returns twice and one of them is in a new stack, 
         // which won't have the return address on it.  
         encode_op_reg(PrimaryOp.PopBase, X86Reg.rcx),
         0x66, 0b01001000, 0x0F, 0x6E, @as(u8) pack_modrm(ModrmMode.Direct, /*src*/X86Reg.rcx, /*dest*/X86Reg.rax/*xmm0*/),
-        
-        ldr(X86Reg.rax, X86Reg.rdi, 48),  // syscall number
-        ldr(X86Reg.r9, X86Reg.rdi, 40),
-        ldr(X86Reg.r8, X86Reg.rdi, 32),
-        ldr(X86Reg.r10, X86Reg.rdi, 24),
-        ldr(X86Reg.rdx, X86Reg.rdi, 16),
-        ldr(X86Reg.rsi, X86Reg.rdi, 8),
-        ldr(X86Reg.rdi, X86Reg.rdi, 0),
         
         0x0F, 0x05,  // syscall
         

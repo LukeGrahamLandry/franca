@@ -12,7 +12,15 @@
 #include_std("graphics/lib.fr");
 Repl :: import("@/examples/repl.fr");
 
-ENABLE_FRANCA_REPL :: true;
+// TODO: THIS IS UNACCEPTABLE FIXME FIXME FIXME
+//       what happened to anything you can do at runtime you can do at comptime bro...? 
+//       you can run the fancy gpu stuff just fine but you can't start a new compiler somehow? 
+ENABLE_FRANCA_REPL :: !{
+    is_declared :: fn(target: FatExpr) FatExpr #macro = 
+        @literal @is(target.expr&, .GetVar);
+    @if(@is_declared EASY_GRAPHICS_IS_JITTING_HACK, EASY_GRAPHICS_IS_JITTING_HACK, true)
+};
+
 Replay :: import("@/graphics/replay.fr");
 
 State :: @struct(
@@ -974,31 +982,72 @@ exec_franca :: fn(buffer: *TextBuffer, raw_command: Str) void = {
     buffer.append_string("\n");
 }
 
-exec_program :: fn(buffer: *TextBuffer, raw_command: Str) void = {
-    state := state[];
+// TODO: a"b" should be treated as ab
+// TODO: \escapes
+// bleh, clearly this is getting to the point where i need to split out the shell part and the terminal part.
+split_program_args :: fn(raw_command: Str) ?[]CStr = {
     cmd := CStr.list(temp());
     start := 0;
-    range(0, raw_command.len) { i |
-        if raw_command[i] == " ".ascii() {
-            cmd&.push(@fmt_cstr("%", raw_command.slice(start, i)));
-            start = i + 1;
+    in_quote := false;
+    i := 0;
+    while => i < raw_command.len {
+        c := raw_command[i];
+        if in_quote {
+            if c == "\"".ascii() {
+                in_quote = false;
+                cmd&.push(@fmt_cstr("%", raw_command.slice(start, i)));
+                i += 1;
+                while => i < raw_command.len && raw_command[i].is_ascii_whitespace() {
+                    i += 1;
+                };
+                start = i;
+                i -= 1;
+            };
+        } else {
+            if c == "\"".ascii() {
+                in_quote = true;
+                start = i + 1;
+            };
+            if c == " ".ascii() {
+                cmd&.push(@fmt_cstr("%", raw_command.slice(start, i)));
+                while => i < raw_command.len && raw_command[i].is_ascii_whitespace() {
+                    i += 1;
+                };
+                start = i;
+                i -= int(i < raw_command.len);
+            };
         };
+        i += 1;
     };
-    cmd&.push(@fmt_cstr("%", raw_command.rest(start)));
+    if start < raw_command.len {
+        cmd&.push(@fmt_cstr("%", raw_command.rest(start)));
+    };
+    
+    if in_quote {
+        echo "\n";
+        range(0, start-1, fn(_) => echo(" "));
+        echo "^\n[terminal.fr] unterminated quote\n";
+        return(.None);
+    };
+    
     cmd&.push(zeroed CStr);
     if cmd[0].str().ends_with(".fr") {
         cmd&.insert(0, @as(CStr) "franca");
     };
     if cmd[0].str() == "cd" {
-        buffer.append_string("\nassuming you meant to call the shell builtin 'cd'\n");
+        echo "\nassuming you meant to call the shell builtin 'cd'\n";
         if cmd.len > 1 {
             cd(cmd[1].str());
         };
-        return();
-    }
-    
+        return(.None);
+    };
+    (Some = cmd.items())
+}
+
+exec_program :: fn(buffer: *TextBuffer, raw_command: Str) void = {
+    state := state[];
+    cmd := split_program_args(raw_command) || return();
     buffer.append_string("\n");
-    cmd := cmd.items();
     if state.process.is_none() {
         @match(sys_exec(cmd)) {
             fn Ok(it) => {

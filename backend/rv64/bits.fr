@@ -81,14 +81,31 @@ mem_width :: fn(size_bytes: i64, zero_extend_load: bool) u3 = {
     @as(u3) @as(i64) size_bytes.trailing_zeros().bit_or(zero_extend_load.int().shift_left(2))
 }
 
+//
+// produce an address via an i32 relative offset from the current instruction. 
+// auipc => tmp = (20 bits immediate).shift_left(12).sign_extend(32 -> 64).add(pc);
+//  add  => out = (12 bit immediate).sign_extend(12 -> 64).add(tmp);
+//
+// Note that both immediates are sign extended. This is NOT the same as 
+// sign extending [hi:lo] and adding that to pc. If the high bit of the lo immediate 
+// is set, it will act as a subtraction. So to compensate, add one to the hi immediate. 
+//
+// In contrast to arm where you compute the address of the previous page (always <= the target)
+// and then add the low u12 bits. Here you compute the address of the nearest page boundary (in 
+// either direction) and then adjust by i12 bits. 
+//
 fn rel_off(dest: rawptr, src: rawptr, reg: RvReg) Ty(u32, u32) = {
     dest := int_from_rawptr(dest);
     src := int_from_rawptr(src);
     distance := dest - src;
     @debug_assert(distance.fits_sext(32), "rel_off too far: %", distance);
-    hi := @as(i20) @as(i64) (distance.shift_right_logical(12));
-    lo := @as(i12) @as(i64) distance.bit_and(1.shift_left(12) - 1);
-    (U(hi, reg.bits(), .auipc), I(lo, reg.bits(), @as(u3) OpI.add, reg.bits(), .op_imm))
+    
+    d := distance + int(distance.bit_and(1.shift_left(11)) != 0).shift_left(12);
+    lo := @as(i64) d.imm(11, 0);
+    hi := @as(i64) d.imm(31, 12);
+    @debug_assert_eq(distance, hi.shift_left(12).sign_extend(31) + lo.sign_extend(11));
+    
+    (U(@as(i20) hi, reg.bits(), .auipc), I(@as(i12) lo, reg.bits(), @as(u3) OpI.add, reg.bits(), .op_imm))
 }
 
 fn fits_sext(n: i64, $bits: i64) bool = {
