@@ -2,6 +2,16 @@
 ## (Jul 7)
 
 - terminal.fr: basic argument quoting
+- attacking some functions that show up in bloat:
+  - start; 953860
+  - parser; pass around by ref instead of copying all the time: 932772
+  - @try; access .Ok/.Err directly instead of calling unwrap(),unwrap_err(),
+    because just checked is_err() so it's fine. 907828. yikes!
+    - with these changes, the ldp/stp blit changes only save 25k but it's not slower so still worth it. 
+  - fill_export_ffi; generate array of fn pointers at comptime instead of having 
+    a @fmt call for each function. 903664.
+    - not impressive but making it more reflection shaped is the first step to 
+      not typing the function signetures twice which will be less error prone. 
 
 ## (Jul 6)
 

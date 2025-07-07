@@ -28,7 +28,7 @@
 
 ParseTask :: @tagged(
     Pending: @struct(src: Str, span: Span),
-    Expr: Result(FatExpr, *CompileError),
+    Expr: Result(*FatExpr, *CompileError),
 );
 Parser :: @struct(pool: *StringPool, lex: Lexer, tasks: *List(ParseTask), alloc: Alloc, last: Token, top_level: bool);
 Prec :: @struct(prec: PrecLevel, allow_trailing: bool = true);
@@ -48,7 +48,7 @@ PrecLevel :: @enum(i64) (
     Neg,
     Suffix,
 );
-ParseRes :: Result(FatExpr, *CompileError);
+ParseRes :: Result(*FatExpr, *CompileError);
 
 // TODO: do the clone here instead of (on rust side + scope) so you don't have to remmeber.
 fn finish_pending(self: *Parser, id: WaitingParse) ParseRes = {
@@ -168,7 +168,7 @@ fn parse_decl_or_start_expr(self: *Parser, name: Symbol) Result(FatStmt, *Compil
     if (@is(tok, .DoubleColon, .Colon)) {
         loc := self.last.span;
         b := self.alloc.box(Binding);
-        b[] = @try(self.parse_binding_after_name(name, .Var)) return;
+        @try(self.parse_binding_after_name(name, .Var, b)) return;
         s: Stmt = (Decl = b);
         // :HackFakeSquiggle
         if !self.maybe(.Semicolon) && !self.last.type&.is(.RightSquiggle) {
@@ -190,7 +190,7 @@ fn parse_decl_or_start_expr(self: *Parser, name: Symbol) Result(FatStmt, *Compil
             if !self.maybe(.Semicolon) {
                 @report_error("expected semicolon after declaration") (return, self.last.span);
             };
-            return(Ok = self.stmt((DeclVarPattern = (binding = pattern, value = value)), loc))
+            return(Ok = self.stmt((DeclVarPattern = (binding = pattern, value = value[])), loc))
         }
         @default => {
             e := @try(self.ident_expr_and_maybe_trailing(name, Prec_None, self.last.span)) return;
@@ -202,12 +202,12 @@ fn parse_decl_or_start_expr(self: *Parser, name: Symbol) Result(FatStmt, *Compil
 fn list_of_names_decl(self: *Parser, name: Symbol) Result(RawList(FatExpr), *CompileError) = {
     first := self.expr((GetNamed = name), self.last.span);
     exprs: List(FatExpr) = list(2, self.alloc);
-    exprs&.push(first);
+    exprs&.push(first[]);
     loop {
         @match(self.pop()) {
             fn Symbol(name) => {
                 e := self.expr((GetNamed = name), self.last.span);
-                exprs&.push(e);
+                exprs&.push(e[]);
                 if self.peek_tag() != .Colon {
                     @try(self.eat(.Comma, "destructuring statment expected ':=' or ',' (TODO: allow type annotation)")) return; 
                 };
@@ -221,7 +221,7 @@ fn list_of_names_decl(self: *Parser, name: Symbol) Result(RawList(FatExpr), *Com
     }
 }
 
-fn after_expr_stmt_prefix(self: *Parser, e: FatExpr) Result(FatStmt, *CompileError) = {
+fn after_expr_stmt_prefix(self: *Parser, e: *FatExpr) Result(FatStmt, *CompileError) = {
     loc  := e.loc;
     // TOOD: allow_trailing?
     e    := @try(self.parse_infix(e, Prec_None)) return;
@@ -231,7 +231,7 @@ fn after_expr_stmt_prefix(self: *Parser, e: FatExpr) Result(FatStmt, *CompileErr
             loc := self.last.span;
             value := @try(self.parse_expr(Prec_None)) return;
             // TODO: check if the left is a tuple/struct and warn because they maybe meant :=. 
-            self.stmt((Set = (place = e, value = value)), loc)
+            self.stmt((Set = (place = e[], value = value[])), loc)
         }
         fn Op(op) => {
             f: Flag = @match(op) {
@@ -245,7 +245,7 @@ fn after_expr_stmt_prefix(self: *Parser, e: FatExpr) Result(FatStmt, *CompileErr
             self.pop();
             delta := @try(self.parse_expr(Prec_None)) return;
             e := self.bin_named_macro(f, e, delta, loc);
-            self.stmt((Eval = e), loc)
+            self.stmt((Eval = e[]), loc)
         }
         fn Colon() => { // TODO: double colon?
             self.pop();
@@ -257,9 +257,9 @@ fn after_expr_stmt_prefix(self: *Parser, e: FatExpr) Result(FatStmt, *CompileErr
             loc := self.last.span;
             @try(self.eat(.Equals, "destructuring statment expected ':=' (put type annotations on each name)")) return; // TODO: (a, b): (c, d) = <>;
             value := @try(self.parse_expr(Prec_None)) return;
-            self.stmt((DeclVarPattern = (binding = pattern, value = value)), loc)
+            self.stmt((DeclVarPattern = (binding = pattern, value = value[])), loc)
         }
-        @default => self.stmt((Eval = e), loc);
+        @default => self.stmt((Eval = e[]), loc);
     };
     
     if !(@is(self.peek_tag(), .Semicolon, .RightSquiggle, .Eof)) && self.last.type&.tag() != .RightSquiggle {
@@ -358,7 +358,7 @@ fn parse_prefix(self: *Parser, prec: Prec) ParseRes = {
             self.pop();
             loc := self.last.span;
             arg := @try(self.parse_expr(prec.with(.Neg))) return;
-            e   := self.expr((ConstEval = self.box(arg)), loc);
+            e   := self.expr((ConstEval = arg), loc);
             (Ok = e)
         }
         fn Amp() => @report_error("'&' is not a prefix operator. if you meant to take the address of a variable, use it as a suffix.") (return, self.last.span)
@@ -400,8 +400,8 @@ fn parse_prefix(self: *Parser, prec: Prec) ParseRes = {
             loc := self.last.span;
             e := self.expr((String = s.s), loc);
             if s.escapes {
-                f := self.box(self.get_named(.__string_escapes, loc));
-                e = self.expr((Call = (f = f, arg = self.box(e))), loc);
+                f := self.get_named(.__string_escapes, loc);
+                e = self.expr((Call = (f = f, arg = e)), loc);
             };
             (Ok = e)
         }
@@ -414,11 +414,11 @@ fn parse_prefix(self: *Parser, prec: Prec) ParseRes = {
             self.pop();
             loc := self.last.span;
             if(prec.prec != .None, => @report_error("..spread operator cannot be used inside an infix expression") (return, loc));
-            arg := self.box(if self.peek_tag() == .LeftParen || can_start_quick_expr(self.peek()) {
+            arg := if self.peek_tag() == .LeftParen || can_start_quick_expr(self.peek()) {
                @try(self.parse_expr(Prec_None)) return
             } else {
                 self.raw_unit(loc)
-            });
+            };
             (Ok = self.expr((Spread = arg), loc))
         }
         @default => {
@@ -490,8 +490,8 @@ fn parse_func(self: *Parser) Result(Func, *CompileError) = {
 fn named_call(self: *Parser, prec: Prec, name: Flag) ParseRes = {
     self.pop();
     loc := self.last.span;
-    arg := self.box(@try(self.parse_expr(prec.with(.Neg))) return);
-    f   := self.box(self.get_named(name, loc));
+    arg := @try(self.parse_expr(prec.with(.Neg))) return;
+    f   := self.get_named(name, loc);
     (Ok  = self.expr((Call = (f = f, arg = arg)), loc))
 }
 
@@ -504,7 +504,7 @@ fn parse_at(self: *Parser, prec: Prec) ParseRes = {
             loc = self.last.span;
             e := @try(self.parse_expr(Prec_None)) return;
             @try(self.eat(.RightSquare, "close unquote")) return;
-            return(Ok = self.expr((Unquote = self.box(e)), self.last.span))
+            return(Ok = self.expr((Unquote = e), self.last.span))
         }
         fn LeftParen() => {
             self.pop();
@@ -522,7 +522,7 @@ fn parse_at(self: *Parser, prec: Prec) ParseRes = {
             self.pop();
             loc := self.last.span;
             e := @try(self.parse_block_until_squiggle(false)) return;
-            return(Ok = self.expr((Quote = self.box(e)), loc))
+            return(Ok = self.expr((Quote = e), loc))
         }
         @default => {
             self.pop(); // TODO: have lex.next:span
@@ -535,9 +535,9 @@ fn parse_at(self: *Parser, prec: Prec) ParseRes = {
     was_trailing := false;
     have_arg := self.maybe(.LeftParen);
     arg := if have_arg {
-        self.box(@try(self.parse_tuple(.RightParen)) return)
+        @try(self.parse_tuple(.RightParen)) return
     } else {
-        unit := self.box(self.raw_unit(loc));
+        unit := self.raw_unit(loc);
         //if prec.allow_trailing && can_start_quick_expr(self.peek()) {
         //    //@println("%", self.lex.line);
         //    a := self.box(@try(self.parse_expr(prec = .None, allow_trailing = false)) return);
@@ -566,10 +566,10 @@ fn parse_at(self: *Parser, prec: Prec) ParseRes = {
         p := @if(have_arg, prec.reset(), (prec = .Suffix, allow_trailing = false));
         @try(self.parse_expr(p)) return
     };
-    (Ok = self.expr((PrefixMacro = (handler = self.box(handler), arg = arg, target = self.box(target))), loc))
+    (Ok = self.expr((PrefixMacro = (handler = handler, arg = arg, target = target)), loc))
 }
 
-fn parse_infix(self: *Parser, prev: FatExpr, prec: Prec) ParseRes = {
+fn parse_infix(self: *Parser, prev: *FatExpr, prec: Prec) ParseRes = {
     loop {
         loc := self.last.span;
         parsed: ParseRes = @match(self.peek()) {
@@ -608,7 +608,7 @@ fn parse_infix(self: *Parser, prev: FatExpr, prec: Prec) ParseRes = {
                 };
                 self.pop();
                 arg := @try(self.parse_tuple(.RightParen)) return;
-                arg&.items().each(fn(it) => @if_let(it.expr&) fn Closure(it) => it[].set_flag(.WasLambdaLiteral));
+                arg.items().each(fn(it) => @if_let(it.expr&) fn Closure(it) => it[].set_flag(.WasLambdaLiteral));
                 call := self.expr_call(prev, arg);
                 self.parse_infix(call, prec.with(.Suffix))
             }
@@ -622,14 +622,14 @@ fn parse_infix(self: *Parser, prev: FatExpr, prec: Prec) ParseRes = {
                     @report_error("expr.field cannot span multiple lines. it just feels like an easy typo to mean something else.") (return, self.last.span);
                 };
                 loc := self.last.span;
-                e := self.expr((FieldAccess = (container = self.box(prev), name = name, no_dot_call = false)), loc);
+                e := self.expr((FieldAccess = (container = prev, name = name, no_dot_call = false)), loc);
                 self.parse_infix(e, prec.with(.Suffix))
             }
             fn Tick() => {
                 self.pop();
                 name := @try(self.pop_name("e.<NAME>")) return;
                 loc := self.last.span;
-                e := self.expr((FieldAccess = (container = self.box(prev), name = name, no_dot_call = true)), loc);
+                e := self.expr((FieldAccess = (container = prev, name = name, no_dot_call = true)), loc);
                 self.parse_infix(e, prec.with(.Suffix))
             }
             fn LeftSquiggle() => {
@@ -638,12 +638,12 @@ fn parse_infix(self: *Parser, prev: FatExpr, prec: Prec) ParseRes = {
             }
             fn DoubleSquare() => {
                 self.pop();
-                e := self.expr((Deref = self.box(prev)), self.last.span);
+                e := self.expr((Deref = prev), self.last.span);
                 self.parse_infix(e, prec.with(.Suffix))
             }
             fn Amp() => {
                 self.pop();
-                e := self.expr((Addr = self.box(prev)), self.last.span);
+                e := self.expr((Addr = prev), self.last.span);
                 self.parse_infix(e, prec.with(.Suffix))
             }
             fn LeftSquare() => {
@@ -655,7 +655,7 @@ fn parse_infix(self: *Parser, prev: FatExpr, prec: Prec) ParseRes = {
                 // e := self.bin_named_macro(Flag.operator_index, prev, index, loc);
                 
                 e := self.bin_call(Flag.operator_index, self.last.span, prev, index);
-                e := self.expr((Deref = self.box(e)), self.last.span);
+                e := self.expr((Deref = e), self.last.span);
                 self.parse_infix(e, prec.with(.Suffix))
             }
             @default => return(Ok = prev);
@@ -668,7 +668,7 @@ fn parse_infix(self: *Parser, prev: FatExpr, prec: Prec) ParseRes = {
     };
 }
 
-fn parse_squiggle(self: *Parser, prev: FatExpr, prec: Prec) ParseRes #once = {  
+fn parse_squiggle(self: *Parser, prev: *FatExpr, prec: Prec) ParseRes #once = {  
     old_line := self.lex.line;
     self.pop();
     new_line := self.lex.line;
@@ -689,7 +689,7 @@ fn parse_squiggle(self: *Parser, prev: FatExpr, prec: Prec) ParseRes #once = {
     func := make_func(fn_def, (Some = body), true, self.top_level);
     func&.set_flag(.WasLambdaLiteral);
     callback := self.expr((Closure = self.box(func)), loc);
-    self.push_arg(prev&, callback);
+    self.push_arg(prev, callback);
     
     if self.lex.line != self.lex.old_line { 
         return(Ok = prev);
@@ -714,7 +714,7 @@ fn parse_squiggle(self: *Parser, prev: FatExpr, prec: Prec) ParseRes #once = {
 
 ::if(ParseRes);
 
-fn logical_operator(self: *Parser, prev: FatExpr, prec: Prec, name: Flag, this: PrecLevel, other: PrecLevel) ParseRes #inline = {
+fn logical_operator(self: *Parser, prev: *FatExpr, prec: Prec, name: Flag, this: PrecLevel, other: PrecLevel) ParseRes #inline = {
     if prec.prec < .Logical {
         self.pop();
         if prec.prec == other {
@@ -722,8 +722,8 @@ fn logical_operator(self: *Parser, prev: FatExpr, prec: Prec, name: Flag, this: 
         };
         loc := self.last.span;
         rhs := @try(self.quick_lambda(prec.with(this))) return;
-        f := self.box(self.get_named(name, loc));
-        arg := self.box(self.pair(prev, rhs, loc));
+        f := self.get_named(name, loc);
+        arg := self.pair(prev, rhs, loc);
         call := self.expr((Call = (f = f, arg = arg)), loc);
         return(self.parse_infix(call, prec.with(this))) // TODO: tail
     } else {
@@ -731,20 +731,20 @@ fn logical_operator(self: *Parser, prev: FatExpr, prec: Prec, name: Flag, this: 
     }
 }
 
-fn bin_call(self: *Parser, func_name: Flag, loc: Span, lhs: FatExpr, rhs: FatExpr) FatExpr #inline = {
-    f := self.box(self.get_named(func_name, loc));
-    arg := self.box(self.pair(lhs, rhs, loc));
+fn bin_call(self: *Parser, func_name: Flag, loc: Span, lhs: *FatExpr, rhs: *FatExpr) *FatExpr #inline = {
+    f := self.get_named(func_name, loc);
+    arg := self.pair(lhs, rhs, loc);
     self.expr((Call = (f = f, arg = arg)), loc)
 }
 
-fn expr_call(self: *Parser, f: FatExpr, arg: FatExpr) FatExpr = {
+fn expr_call(self: *Parser, f: *FatExpr, arg: *FatExpr) *FatExpr = {
     // TODO: let else would be nice.
     @if_let(f.expr&)
         fn FieldAccess(ff) => {
             break :: local_return;
             // Dot call syntax sugar.
             
-            root_f  := f&;
+            root_f  := f;
             ff_expr := root_f;
             was_no_dot_call := ff.no_dot_call;
             if was_no_dot_call {
@@ -758,7 +758,7 @@ fn expr_call(self: *Parser, f: FatExpr, arg: FatExpr) FatExpr = {
                 };
             };
             first_arg := ff.container;
-            ff_expr[] = self.expr((GetNamed = ff.name), f.loc);
+            ff_expr[] = self.expr((GetNamed = ff.name), f.loc)[];
             ff := 0;
             f := root_f[];
             
@@ -772,7 +772,7 @@ fn expr_call(self: *Parser, f: FatExpr, arg: FatExpr) FatExpr = {
                 // TODO: have it work with named arguments. Need to support mixing named and positional.
                 fn Tuple(parts) => {
                     parts.insert(0, first_arg[], self.alloc);
-                    return(self.expr((Call = (f = self.box(f), arg = self.box(arg))), f.loc));
+                    return(self.expr((Call = (f =  self.box(f), arg =arg)), f.loc));
                 }
                 // Parser flattened empty tuples.
                 fn Value(v) => {
@@ -786,42 +786,42 @@ fn expr_call(self: *Parser, f: FatExpr, arg: FatExpr) FatExpr = {
                 @default => (); // fallthrough
             };
             
-            arg := self.expr((Tuple = (@list(first_arg[], arg) self.alloc).as_raw()), f.loc);
-            return(self.expr((Call = (f = self.box(f), arg = self.box(arg))), f.loc));
+            arg := self.pair(first_arg, arg, f.loc);
+            return(self.expr((Call = (f = self.box(f), arg = arg)), f.loc));
         };
-    (self.expr((Call = (f = self.box(f), arg = self.box(arg))), f.loc))
+    (self.expr((Call = (f = f, arg = arg)), f.loc))
 }
 
-fn push_arg(self: *Parser, call: *FatExpr, callback: FatExpr) void = {
+fn push_arg(self: *Parser, call: *FatExpr, callback: *FatExpr) void = {
     if !call.expr&.is(.Call) {
         // It might just be a function access. like 'while {| _ } {| _ }' should be valid.
-        call[] = self.expr((Call = (f = self.box(call[]), arg = self.box(callback))), call.loc);
+        call[] = self.expr((Call = (f = self.box(call[]), arg = callback)), call.loc)[];
         return();
     };
     f := call.expr.Call&;
     @match(f.arg.expr&) {
         // TODO: have it work with named arguments. Need to support mixing named and positional.
         fn Tuple(parts) => {
-            parts.push(callback, self.alloc);
+            parts.push(callback[], self.alloc);
         }
         // Parser flattened empty tuples.
         fn Value(v) => {
             if v.bytes.is_unit() {
-                f.arg[] = callback;
+                f.arg = callback;
             } else {  
-                f.arg[] = self.pair(f.arg[], callback, call.loc);
+                f.arg = self.pair(f.arg, callback, call.loc);
             };
         }
         @default => {
-            f.arg = self.box(self.pair(f.arg[], callback, call.loc));
+            f.arg = self.pair(f.arg, callback, call.loc);
         };
     };
 }
 
 :: ?FatExpr;
-fn make_func(def: FnDef, body: ?FatExpr, may_capture: bool, top_level: bool) Func = {
+fn make_func(def: FnDef, body: ?*FatExpr, may_capture: bool, top_level: bool) Func = {
     // TODO: derive fn default with allocator
-    ::if_opt(FatExpr, FuncImpl);
+    ::if_opt(*FatExpr, FuncImpl);
     f: Func = (
         annotations = def.tags.as_raw(),
         callees = empty(),
@@ -831,7 +831,7 @@ fn make_func(def: FnDef, body: ?FatExpr, may_capture: bool, top_level: bool) Fun
         finished_arg = .None,
         finished_ret = .None,
         return_var = .None,
-        body = if(body, fn(body) => (Normal = body), => (Empty = ())),
+        body = if(body, fn(body) => (Normal = body[]), => (Empty = ())),
         arg = def.arg,
         ret = def.ret,
         // TODO: use the body text based on compiler flag. also should an option use file+line? 
@@ -863,7 +863,8 @@ fn parse_tuple(self: *Parser, terminator: TokenType.Tag()) ParseRes = {
     (=> {
         break :: local_return;
         loop {
-            parts&.push(@try(self.parse_expr(Prec_None)) return);
+            e := @try(self.parse_expr(Prec_None)) return;
+            parts&.push(e[]);
             t := self.peek();
             @match(t) {
                 fn Comma() => {
@@ -876,7 +877,7 @@ fn parse_tuple(self: *Parser, terminator: TokenType.Tag()) ParseRes = {
                         fn Equals() => .Infer;
                         @default => {
                             e := @try(self.parse_expr(Prec_None)) return;
-                            (PendingEval = e)
+                            (PendingEval = e[])
                         };
                     };
                     return(self.switch_to_parsing_named(parts, ty, loc, terminator));
@@ -897,10 +898,11 @@ fn parse_tuple(self: *Parser, terminator: TokenType.Tag()) ParseRes = {
     res := @switch(parts.len) {
         @case(0) => self.raw_unit(loc);
         @case(1) => {
+            ::if(*FatExpr);
             if self.peek_tag() == .LeftParen && parts[0].expr&.is(.FieldAccess) {
                 self.expr(new_block(empty(), parts.index(0)), loc)  // prevent dot call
             } else {
-                parts[0]
+                parts.index(0)
             }
         };
         @default => self.expr((Tuple = parts.as_raw()), loc);
@@ -922,15 +924,16 @@ fn switch_to_parsing_named(self: *Parser, parts: List(FatExpr), ty: LazyType, lo
     };
     
     ::if(FatExpr);
+    ::if(*FatExpr);
     kind := VarType.Var;
-    default: FatExpr = if self.maybe(.Equals) {
+    default: *FatExpr = if self.maybe(.Equals) {
         @try(self.parse_expr(Prec_None)) return
     } else {
         if self.maybe(.DoubleColon) {
             kind = .Const;
             @try(self.parse_expr(Prec_None)) return
         } else {
-            binding_missing_default(ident_expr.loc)
+            @ref binding_missing_default(ident_expr.loc)
         }
     };
     
@@ -942,7 +945,7 @@ fn switch_to_parsing_named(self: *Parser, parts: List(FatExpr), ty: LazyType, lo
     };
     
     ann := @try(self.parse_nullable_annotations()) return;
-    first_named: Binding = (name = (Ident = name), ty = ty, nullable_tag = ann, default = default, kind = kind);
+    first_named: Binding = (name = (Ident = name), ty = ty, nullable_tag = ann, default = default[], kind = kind);
     bindings&.push(first_named);
     
     self.maybe(.Comma);
@@ -1007,17 +1010,16 @@ fn parse_pattern(self: *Parser, out: *List(Binding), terminator: TokenType.Tag()
             };
         };
         
-        b := @try(self.parse_binding_after_name(name, kind)) return;
-        out.push(b);
+        @try(self.parse_binding_after_name(name, kind, out.push_uninit())) return;
         if !self.maybe(.Comma) {
             return(.Ok);
         };
     }
 }
 
-fn parse_binding_after_name(self: *Parser, name: Symbol, kind: VarType) CRes(Binding) #inline = {
+fn parse_binding_after_name(self: *Parser, name: Symbol, kind: VarType, out: *Binding) CRes(void) = {
     ::if(?FatExpr); ::if(LazyType);
-    default_: FatExpr = binding_missing_default(self.last.span); // TODO: "shadows" the magic @default
+    default_: ?*FatExpr = .None;
     ty := LazyType.Infer;
     ann := zeroed(*Annotations);
     @match(self.peek()) {
@@ -1030,17 +1032,17 @@ fn parse_binding_after_name(self: *Parser, name: Symbol, kind: VarType) CRes(Bin
             } else {
                 if self.peek_tag() != .Equals {
                     e := @try(self.parse_expr(Prec_None)) return;
-                    ty = (PendingEval = e);
+                    ty = (PendingEval = e[]);
                     ann = @try(self.parse_nullable_annotations()) return;
                 };
                 
                 if self.maybe(.Equals) {
                     e := @try(self.parse_expr(Prec_None)) return;
-                    default_ = e;
+                    default_ = (Some = e);
                 } else {
                     if self.maybe(.Colon) {
                         e := @try(self.parse_expr(Prec_None)) return;
-                        default_ = e;
+                        default_ = (Some = e);
                         kind = .Const;
                     };
                 };
@@ -1050,18 +1052,21 @@ fn parse_binding_after_name(self: *Parser, name: Symbol, kind: VarType) CRes(Bin
             self.pop();
             kind = .Const;
             e := @try(self.parse_expr(Prec_None)) return;
-            default_ = e;
+            default_ = (Some = e);
         }
         fn Equals() => {    
             self.pop();
             e := @try(self.parse_expr(Prec_None)) return;
-            default_ = e;
+            default_ = (Some = e);
         }
         @default => {   // ie: `callee { arg #ann | body }`
             ann = @try(self.parse_nullable_annotations()) return;
         };
     };
-    (Ok = (name = (Ident = name), ty = ty, nullable_tag = ann, default = default_, kind = kind))
+    
+    default_ := default_ || @ref binding_missing_default(self.last.span); // TODO: "shadows" the magic @default
+    out[] = (name = (Ident = name), ty = ty, nullable_tag = ann, default = default_[], kind = kind);
+    .Ok
 }
 
 fn parse_nullable_annotations(self: *Parser) Result(*Annotations, *CompileError) #inline = {
@@ -1117,7 +1122,8 @@ fn fn_def_signeture(self: *Parser, loc: Span, allow_name: bool) Result(FnDef, *C
     ::if(LazyType);
     ret: LazyType = if !cant_start_return_expression(self.peek()) {
         // Note: no trailing means you can use '=>' as a quick expression so `while => e {| b}` and the trailing binds to the while not the e. 
-        (PendingEval = @try(self.parse_expr((prec = .None, allow_trailing = false))) return)
+        e := @try(self.parse_expr((prec = .None, allow_trailing = false))) return;
+        (PendingEval = e[])
     } else {
         .Infer
     };
@@ -1139,10 +1145,10 @@ fn parse_block_until_squiggle(self: *Parser, allow_eof: bool) ParseRes = {
         stmts&.push(s);
     };
     
-    ::if_opt(FatStmt, FatExpr);
-    result: FatExpr = if stmts&.pop() { stmt |
+    ::if_opt(FatStmt, *FatExpr);
+    result: *FatExpr = if stmts&.pop() { stmt |
         @match(stmt.stmt) {
-            fn Eval(e) => e;
+            fn Eval(e) => self.box(e);
             @default => {
                 // block might end with a func decl with no semicolon.
                 stmts&.push(stmt);
@@ -1153,7 +1159,7 @@ fn parse_block_until_squiggle(self: *Parser, allow_eof: bool) ParseRes = {
         self.raw_unit(self.last.span)
     };
     
-    e := self.expr(new_block(stmts.as_raw(), self.box(result)), loc);
+    e := self.expr(new_block(stmts.as_raw(), result), loc);
     (Ok = e)
 }
 
@@ -1171,12 +1177,13 @@ fn parse_annotations(self: *Parser) Result(List(Annotation), *CompileError) = {
     tags: List(Annotation) = list(self.alloc);
     while => self.maybe(.Hash) {
         name := @try(self.pop_name("after '#'")) return;
-        arg: FatExpr = if self.maybe(.LeftParen) {
+        ::if(*FatExpr);
+        arg: *FatExpr = if self.maybe(.LeftParen) {
             @try(self.parse_tuple(.RightParen)) return
         } else {
             self.raw_unit(self.last.span)
         };
-        tags&.push(name = name, args = arg);
+        tags&.push(name = name, args = arg[]);
     };
     (Ok = tags)
 }
@@ -1198,22 +1205,22 @@ fn eat(self: *Parser, type: TokenType.Tag(), msg: Str) Result(void, *CompileErro
 }
 
 unit_value: Values : (Small = (0, 0));
-fn raw_unit(self: *Parser, loc: Span) FatExpr = {
+fn raw_unit(self: *Parser, loc: Span) *FatExpr = {
     e := self.expr((Value = (bytes = unit_value, coerced = false)), loc);
     e.ty = void; // :get_or_create_type
     e
 }
 
-fn get_named(self: *Parser, name: Flag, loc: Span) FatExpr = 
+fn get_named(self: *Parser, name: Flag, loc: Span) *FatExpr = 
     self.expr((GetNamed = name.ident()), loc);
 
-fn bin_named_macro(self: *Parser, name: Flag, arg: FatExpr, target: FatExpr, loc: Span) FatExpr #inline = {
-    handler := self.box(self.get_named(name, loc));
-    self.expr((PrefixMacro = (handler = handler, arg = self.box(arg), target = self.box(target))), loc)
+fn bin_named_macro(self: *Parser, name: Flag, arg: *FatExpr, target: *FatExpr, loc: Span) *FatExpr #inline = {
+    handler := self.get_named(name, loc);
+    self.expr((PrefixMacro = (handler = handler, arg = arg, target = target)), loc)
 }
 
-fn expr(self: *Parser, e: Expr, loc: Span) FatExpr #inline = 
-    (expr = e, loc = loc, ty = UnknownType, done = false);
+fn expr(self: *Parser, e: Expr, loc: Span) *FatExpr #inline = 
+    self.box(expr = e, loc = loc, ty = UnknownType, done = false);
 
 fn stmt(self: *Parser, e: Stmt, loc: Span) FatStmt #inline = 
     (stmt = e, loc = loc);
@@ -1227,10 +1234,10 @@ fn PBox($T: Type) void = {
 }
 ::PBox(FatExpr); ::PBox(Func);
 
-fn pair(self: *Parser, lhs: FatExpr, rhs: FatExpr, loc: Span) FatExpr = {
+fn pair(self: *Parser, lhs: *FatExpr, rhs: *FatExpr, loc: Span) *FatExpr = {
     out := self.alloc.alloc(FatExpr, 2);
-    out[0] = lhs;
-    out[1] = rhs;
+    out[0] = lhs[];
+    out[1] = rhs[];
     self.expr((Tuple = (cap = 2, ptr = out.ptr, len = 2)), loc)
 }
 

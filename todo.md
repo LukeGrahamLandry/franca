@@ -75,6 +75,7 @@ TODO: end of loop. still too many options for 'index'
 
 ## 
 
+- sampling profiler with setitimer
 - cleanup the old non-slice versions of lookup_baked etc. exports in comptime.fr
 - something where you can mark some memory as an artifact with a name and a type,
   like when you generate code (like compiler/test.fr/gen_full_test_program) or a module 
@@ -110,8 +111,6 @@ delete the rest. thing to think about is that you want to union those between di
 different subsets of the same resources. 
 - run tests in landlock so it's less scary to miscompile something that's doing random syscalls
 - remove from the language:
-  - remove #syscall from the frontend (i still think it's fine to do the calling convention part in the backend for now)
-    but i want user code to choose the numbers so you don't have to recompile. 
   - make is_linking_libc() not foldable
 - document #weak: docs/(annotations.md, imports.md)
 - deal with `NOSYS`
@@ -575,6 +574,8 @@ or just default to jitting and force you to enable aot by specifying an output p
 - test crash stack traces
 - make the crash examples work without needing to set the env variable / run jitted
 - TODO: i should probably be making tests for error locations
+- arm-linux github actions
+- run rv-hello-world in libriscv (and x86_64 in blink too maybe)
 
 ## linux
 
