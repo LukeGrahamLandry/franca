@@ -44,8 +44,6 @@ You can still print out the ir as human readable text between passes and modify 
   - floats: sqrt, min, max
   - atomic compare-and-swap 
   - conditional select (ie. `a ? b : c`)
-  - syscall
-    - it handles calling convention differences but you must use the correct magic numbers for the target os/architecture/version.
   - walk the call-stack (ie. for printing crash backtraces)
 - Binary form of the ir that's faster to load than the text form (could be a building block for incremental compilation)
 - Insert raw asm bytes in function bodies with arbitrary input/output/clobber register lists.

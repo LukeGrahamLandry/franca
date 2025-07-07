@@ -30,8 +30,7 @@ RCallAmd :: @bit_fields(
     gp_arg := 4,
     fp_arg := 4, // see
     rax    := 1, // rax is used to pass data? (variadic or env)
-    sys    := 1, // syscall? (redundant with op but easier to pass around)
-    stack  := 15,  // TODO: check in bounds when doing va call or better just use the field on Fn because i need that for llvm anyway
+    stack  := 16,  // TODO: check in bounds when doing va call or better just use the field on Fn because i need that for llvm anyway
     tag    := 3,
 );
 
@@ -50,14 +49,8 @@ fn amd64_sysv_retregs(r: Qbe.Ref, p: *Array(i32, 2)) u64 = {
         p[0] = ni.intcast();
         p[1] = nf.intcast();
     };
-    // if syscall, we just return in rax, don't need a special case. 
     b
 }
-
-// The normal abi passes an argument in RXC, 
-// but the cpu uses RCX as LR when you do a syscall, 
-// so that argument is passed in R10 instead. 
-INDEX_OF_AMD64_SYSCALL_ARG_DIFF :: 3;
 
 fn amd64_sysv_argregs(r: Qbe.Ref, p: *Array(i32, 2)) u64 = {
     r := to_rcall(r, RCallAmd);
@@ -67,11 +60,6 @@ fn amd64_sysv_argregs(r: Qbe.Ref, p: *Array(i32, 2)) u64 = {
     ra := get(r, .rax);
     range(0, ni) { j | 
         b = b.bit_or(BIT(amd64_sysv_rsave[j]));
-    };
-    
-    syscall := get(r, .sys) == 1;
-    if syscall && ni > INDEX_OF_AMD64_SYSCALL_ARG_DIFF {
-        b = b.bit_and(bit_not(BIT(Amd64Reg.RCX))).bit_or(BIT(Amd64Reg.R10));
     };
     
     nfp_mask := (1.shift_left(nf) - 1).shift_left(Amd64Reg.XMM0.raw().zext());
@@ -85,7 +73,7 @@ fn amd64_sysv_argregs(r: Qbe.Ref, p: *Array(i32, 2)) u64 = {
 
 #use("@/backend/abi.fr");
 fn amd64_sysv_abi(f: *Qbe.Fn) void = 
-    f.native_abi(RCallAmd, selpar_amd64, selcall, sel_syscall_amd64, selvastart, selvaarg, selret_amd64);
+    f.native_abi(RCallAmd, selpar_amd64, selcall, selvastart, selvaarg, selret_amd64);
 
 fn classify(a: *AClass, t: *Qbe.Typ, s: u32, m: *QbeModule) void = {
     @debug_assert(t.nunion > 0, "type '%' has no cases", t.name());
@@ -553,29 +541,6 @@ fn selvastart(f: *Qbe.Fn, fa: RCallAmd, ap: Qbe.Ref) void = {
         %rbp_n176 =l add %4, -176
         storel %rbp_n176, %ap16
     """);
-}
-
-// Converts parX to copies to registers. Later passes rely on RCall to know which are live at the call. 
-// Simpler than normal calls: nothing on the stack, no floats, no aggregates, INDEX_OF_AMD64_SYSCALL_ARG_DIFF.
-fn sel_syscall_amd64(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) void = {
-    count := ptr_diff(i0, i1);
-    ca := RCallAmd.zeroed();
-    set(ca&, .rax, 1);
-    set(ca&, .sys, 1);
-    set(ca&, .gp_arg, count);
-    set(ca&, .gp_ret, 1);
-    
-    rax := TMP(Amd64Reg.RAX);
-    f.emit(.copy, i1.cls(), i1.to, rax, QbeNull);  // result returned in RAX as normal. 
-    f.emit(.syscall, i1.cls(), QbeNull, QbeNull, CALL(ca)); 
-    f.emit(.copy, .Kl, rax, i1.arg&[0], QbeNull);  // syscall number passed in RAX
-    
-    ni := 0;
-    for(i0, i1) { i |
-        r1 := TMP(@if(ni == INDEX_OF_AMD64_SYSCALL_ARG_DIFF, Amd64Reg.R10, amd64_sysv_rsave[ni]));
-        f.emit(.copy, i.cls(), r1, i.arg&[0], QbeNull);
-        ni += 1;
-    };
 }
 
 zip_args :: zip_args_g(AClass);
