@@ -4,8 +4,11 @@
 
 main :: fn() void = {
     macos := query_current_os() == .macos;
-    src := @if(macos, SRC.macos, 
-        @if(query_current_arch() == .x86_64, SRC.linux_amd, SRC.linux_arm));
+    src := @if(macos, 
+        @if(query_current_arch() == .x86_64, SYS.macos_amd, SYS.macos_arm), 
+        @if(query_current_arch() == .x86_64, SYS.linux_amd, SYS.linux_arm));
+    src := emit_hello_world(src);
+
     loader := @if(macos, "examples/macho_loader.fr", "examples/elf_loader.fr");
     dump := @if(macos, "examples/dump_macho.fr", "examples/dump_elf.fr");
     franca := get_executable_path(temp());
@@ -69,26 +72,94 @@ sh :: fn(a: []Str) Str = {
     out.items()
 }
 
-SRC :: @struct {
-    linux_amd :: fill(1, 231);
-    linux_arm :: fill(64, 94);  // riscv is same
-    macos :: fill(0x2000004, 0x2000001);
+fn emit_hello_world(sys: SYS.Sys) Str = {    
+    m := zeroed Qbe.Module; m := m&;
+    init_empty_for_template_only(m, temp());
     
-    fill :: fn(write: i64, exit: i64) Str = 
-        (@tfmt("%%%%%", a, write, b, exit, c)).sym().str();
+    s := "Hello World!\n";
+    msg := m.intern("msg");
+    dat: Dat2 = (template = (Bytes = s), id = msg, relocations = empty());
     
-    a :: """
-    data $msg = { b "Hello World!\n" }
-    export function $main() {
-    @start
-        %write =l copy """; b :: """
-        %exit =l copy """; c :: """
-        syscall %write(l 1, l $msg, l 13)
-        syscall %exit(l 0)
-        ret
-    }
-    """;
-};
+    f := zeroed Qbe.Fn; f := f&;
+    default_init(f, m);
+    f.lnk.export = true;;
+    f.lnk.id = m.intern("main");
+    b := temp().box_zeroed(Qbe.Blk);
+    f.start = b;
+    f.nblk = 1;
+    b.jmp = (type = .retw, arg = Qbe.ConZero);
+    
+    b.push(.copy, .Kl, sys.aN, f.getcon(sys.write), Qbe.Null);
+    b.push(.copy, .Kl, sys.a0, f.getcon(1), Qbe.Null);
+    b.push(.copy, .Kl, sys.a1, f.symcon(msg, 0), Qbe.Null);
+    b.push(.copy, .Kl, sys.a2, f.getcon(s.len), Qbe.Null);
+    b.push(.asm, .Kw, Qbe.Null, f.getcon(sys.asm.zext()), Qbe.Null);
+    clobbers();
+    b.push(.copy, .Kl, sys.aN, f.getcon(sys.exit), Qbe.Null);
+    b.push(.copy, .Kl, sys.a0, f.getcon(0), Qbe.Null);
+    b.push(.asm, .Kw, Qbe.Null, f.getcon(sys.asm.zext()), Qbe.Null);
+    clobbers();
+    
+    clobbers :: => {
+        b.push(.copy, .Kl, Qbe.Null, sys.aN, Qbe.Null);
+        b.push(.copy, .Kl, Qbe.Null, sys.ret, Qbe.Null);
+        b.push(.copy, .Kl, Qbe.Null, sys.a0, Qbe.Null);
+        b.push(.copy, .Kl, Qbe.Null, sys.a1, Qbe.Null);
+        b.push(.copy, .Kl, Qbe.Null, sys.a2, Qbe.Null);
+    };
+    
+    out := u8.list(temp());
+    print_data(m, dat&, out&);
+    printfn(f, out&);
+    out.items()
+}
 
-#use("@/lib/sys/fs.fr");
-#use("@/lib/sys/subprocess.fr");
+SYS :: @struct {
+    macos_arm: Sys : (
+        aN = TMP(Arm64Reg.IP0), a0 = TMP(Arm64Reg.R0), a1 = TMP(Arm64Reg.R1), a2 = TMP(Arm64Reg.R2), 
+        ret = TMP(Arm64Reg.R0),
+        write = 0x2000004, exit = 0x2000001,
+        asm = svc,
+    );
+    
+    linux_arm :: {
+        it := macos_arm;
+        it.aN = TMP(Arm64Reg.R8);
+        it.write = 64;
+        it.exit = 94;
+        it
+    };
+    
+    macos_amd: Sys : (
+        aN = TMP(Amd64Reg.RAX), a0 = TMP(Amd64Reg.RDI), a1 = TMP(Amd64Reg.RSI), a2 = TMP(Amd64Reg.RDX), 
+        ret = TMP(Amd64Reg.RAX),
+        write = 0x2000004, exit = 0x2000001,
+        asm = 0x9090050F,
+    );
+    
+    linux_amd :: {
+        it := macos_amd;
+        it.write = 1;
+        it.exit = 231;
+        it
+    };
+    
+    Sys :: @struct {
+        exit: i64;
+        write: i64;
+        aN: Qbe.Ref;
+        a0: Qbe.Ref;
+        a1: Qbe.Ref;
+        a2: Qbe.Ref;
+        ret: Qbe.Ref;
+        asm: u32;
+    };
+    
+    #use("@/backend/arm64/bits.fr");
+    #use("@/backend/amd64/bits.fr");
+    #use("@/backend/arm64/target.fr");
+    #use("@/backend/amd64/target.fr");
+    #use("@/lib/sys/fs.fr");
+    #use("@/lib/sys/subprocess.fr");
+};
+#use("@/backend/lib.fr");

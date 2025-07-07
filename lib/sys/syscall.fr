@@ -68,10 +68,10 @@ sys_futex :: @S("sys_futex") fn(addr: *u32, futex_op: u32, val: u32, timeout: *T
 
 exit_thread :: @S("exit_thread") fn(status: i64) Never #syscall(93, 60, NOSYS);
 clone :: @S("clone") fn(flags: i64, stack: *u8, p: i64, c: i64, t: i64) pid_t #syscall(220, 56, NOSYS) = {
-    // HACK: this needs a body so it gets a return label so it can be inlined because the new thread can't return on its fresh stack
+    // :CloneReturnsTwice this needs a body so it gets a return label so it can be inlined because the new thread can't return on its fresh stack
 };
 clone3 :: @S("clone3") fn(arg: *Clone3, size: i64) pid_t #syscall(435, 435, NOSYS) = {
-    // HACK: this needs a body so it gets a return label so it can be inlined because the new thread can't return on its fresh stack
+    // :CloneReturnsTwice this needs a body so it gets a return label so it can be inlined because the new thread can't return on its fresh stack
 };
 Clone3 :: @struct {
     flags: i64;
@@ -208,15 +208,29 @@ fn syscall(arg: FatExpr) FatExpr #macro = {
     inst := FatExpr.list(arg.len + 1, ast_alloc());
     each arg { e |
         e[] = compile_ast(e[]);
-        op_l :: fn(a: ~T) void #ir(.arg, .Kl) #where;
-        op_w :: fn(a: ~T) void #ir(.arg, .Kw) #where;
-        op := @if(e.ty.size_of() == 8, op_l, op_w);
+        //op_l :: fn(a: ~T) void #ir(.arg, .Kl) #where;
+        //op_w :: fn(a: ~T) void #ir(.arg, .Kw) #where;
+        //op := @if(e.ty.size_of() == 8, op_l, op_w);
+        //inst&.push(@{
+        //    @[@literal op](@[e[]]);
+        //});
         inst&.push(@{
-            @[@literal op](@[e[]]);
+            T :: @[@literal e.ty];
+            @if(size_of(T) == 8,
+                bit_cast_unchecked(T, i64, @[e[]]),
+                bit_cast_unchecked(T, u32, @[e[]]).zext(),
+            )
         });
     };
     
-    op :: fn(a: i64) i64 #ir(.syscall, .Kl);
+    if arg.len > 6 {
+        compile_error("syscall has too many arguments", loc);
+    };
+    
+    while => inst.len < 6 {
+        inst&.push(@literal 0);
+    };
+    
     ::import("@/lib/sys/process.fr");
     msg :: "unimplemented syscall";
     
@@ -245,8 +259,27 @@ fn syscall(arg: FatExpr) FatExpr #macro = {
             sys_index := @if(query_current_os() == .macos, 2, @if(query_current_arch() == .aarch64, 0, 1));
             n := numbers&[sys_index];
             @if(n == NOSYS) panic(msg);
-            @[@as(FatExpr) (expr = (Tuple = inst.as_raw()), ty = UnknownType, done = false, loc = loc)];
-            result := op(n);
+            @[{
+                inst&.push(@{ n });
+                @{}
+            }];
+            //@[@as(FatExpr) (expr = (Tuple = inst.as_raw()), ty = UnknownType, done = false, loc = loc)];
+            //result := op(n);
+            args: Array(i64, 7) = @[{
+                e := @as(FatExpr) (expr = (Tuple = inst.as_raw()), ty = UnknownType, done = false, loc = loc);
+                //debug_log_ast(e);
+                e
+            }];
+            //result := op(n);
+            OS[].it = query_current_os();  // I hope this is just an :UpdateBoot
+            result, flag := perform_syscall(args&);
+            // I think you really shouldn't hold `sys_index` or even the environment pointer 
+            // across the syscall because of :CloneReturnsTwice, it's a race if they get spilled 
+            // to the stack. so using the global instead. There's only r(12, 13, 14, 15)
+            // which fits (callee, userdata, sys_index, unused env) so it works either way but feels fragile. 
+            if flag.bit_and(1) == 1 && OS[].it == .macos {
+                result = -result;
+            };
             bit_cast_unchecked(i64, @[@literal ret], result)
         }, {
             @if(@[@literal !libc]) panic(msg);
@@ -259,6 +292,55 @@ fn syscall(arg: FatExpr) FatExpr #macro = {
         })
     }
 }
+
+// (args[0..<6], syscall number)
+perform_syscall :: AsmFunction(fn(args: *Array(i64, 7)) Ty(i64, u8) = (), {
+    #use("@/backend/arm64/bits.fr");
+    @const_slice(
+        ldr_uo(.X64, x8, x0, @as(i7) 6),  // linux syscall number
+        mov(.X64, x16, x8),  // macos syscall number
+        ldp_so(.X64, x4, x5, x0, @as(i7) 4),
+        ldp_so(.X64, x2, x3, x0, @as(i7) 2),
+        ldp_so(.X64, x0, x1, x0, @as(i7) 0),
+        
+        svc,
+    
+        cset(.X64, x1, .LO), // macos sets carry flag on error
+        
+        ret(),
+    )
+}) { (out: *List(u8)) | 
+    #use("@/backend/amd64/bits.fr");
+    ldr :: fn(o: *List(u8), d: X86Reg, s: X86Reg, off: i64) void = 
+        encode_base_plus_offset(o, PrimaryOp.MovRegLoad, d, s, off);
+    
+    @asm_x64(
+        // :CloneReturnsTwice pop the return address early and use xmm0 as link register
+        // This is necessary because the clone syscall returns twice and one of them is in a new stack, 
+        // which won't have the return address on it.  
+        encode_op_reg(PrimaryOp.PopBase, X86Reg.rcx),
+        0x66, 0b01001000, 0x0F, 0x6E, @as(u8) pack_modrm(ModrmMode.Direct, /*src*/X86Reg.rcx, /*dest*/X86Reg.rax/*xmm0*/),
+        
+        ldr(X86Reg.rax, X86Reg.rdi, 48),  // syscall number
+        ldr(X86Reg.r9, X86Reg.rdi, 40),
+        ldr(X86Reg.r8, X86Reg.rdi, 32),
+        ldr(X86Reg.r10, X86Reg.rdi, 24),
+        ldr(X86Reg.rdx, X86Reg.rdi, 16),
+        ldr(X86Reg.rsi, X86Reg.rdi, 8),
+        ldr(X86Reg.rdi, X86Reg.rdi, 0),
+        
+        0x0F, 0x05,  // syscall
+        
+        // macos sets carry flag on error
+        @as(u8) pack_rex_si(false, X86Reg.rdx, X86Reg.rdx, X86Reg.rdx),  // Don't elide. See EncodedArgs.force_rex
+        encode_2cc(TwoByteOp.SetCC, X86cc.b),
+        @as(u8) pack_modrm(ModrmMode.Direct, X86Reg.rdx, X86Reg.rdx),
+        
+        // :CloneReturnsTwice tail call to the return address in xmm0
+        0x66, 0b01001000, 0x0F, 0x7E, @as(u8) pack_modrm(ModrmMode.Direct, /*dest*/X86Reg.rcx, /*src*/X86Reg.rax/*xmm0*/),
+        encode_jmp_reg(ModrmMode.Direct, X86Reg.rcx), 
+    ) out;
+};
 
 fn prefer_syscalls() bool = {
     c := context(DefaultContext);

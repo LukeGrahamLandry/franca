@@ -167,9 +167,17 @@ sys_clone :: fn(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdata: ra
     } else {
         Syscall'clone(clone_flags, stack.ptr.offset(stack.len), 0, 0, 0)
     };  
+    
+    // :CloneReturnsTwice
     // beware! that syscall returns twice: once in the original thread and once in a newly created thread. 
     // the child thread's sp points at (the end of) stack, so you can't RET after SYSCALL, 
-    // so any wrappers must be inlined and this function must terminate the thread after the callee returns.  
+    // so any wrappers must execute the return instruction (i.e. be inlined or tail calls) 
+    // and this function must terminate the thread after the callee returns.  
+    //
+    // TODO: i think this is still a race because it relies on the child being able to retrive
+    //       spilled callee/userdata before the parent returns and calls something else that 
+    //       stomps that part of the old stack. so it relies on callee,userdata getting registers. 
+    //       which they always should but it's super fragile. 
 
     if result < 0 {
         @panic("failed to clone thread %.", result);
