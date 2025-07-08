@@ -429,7 +429,6 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
     assert(!func.get_flag(.MayHaveAquiredCaptures), "closures need to be specialized");
     assert(!func.get_flag(.AnyConstArgs), "const args need to be specialized");
     
-    @debug_assert(self.dispatch.function_in_progress&.get(fid.as_index()), "expected to do work on in progress function %", fid);
     @try(self.ensure_resolved_body(fid)) return;
     
     // Before we can do the body, we really need to know the argument types, 
@@ -1624,8 +1623,8 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
     if(will_inline && deny_inline, => return(@err("must inline a function marked #noinline")));
     
     allow_fold := self.dispatch.enclosing_function.is_some() && {
-        func := self.get_function(self.dispatch.enclosing_function.unwrap());
-        !func.get_flag(.SyntheticImmEval)
+        caller := self.get_function(self.dispatch.enclosing_function.unwrap());
+        !caller.get_flag(.SyntheticImmEval)
     };
     
     if will_inline {
@@ -2364,8 +2363,6 @@ fn infer_return(self: *SelfHosted, fid: FuncId) Maybe(Type) = {
     
     ty := or @check(self.infer_type(func.ret&)) return {
         // Infer is a valid return type. To deal with that, we just compile the body, and that will set the finished_ret for us. 
-        @assert(!self.dispatch.function_in_progress&.get(fid.as_index()), "unhanlded mutual recursion. %", self.log_name(fid));
-        self.dispatch.function_in_progress&.set(fid.as_index());
         return(Suspend = self.wait_for(CompileBody = fid))
     };
     func.finished_ret = (Some = ty);
@@ -3837,8 +3834,11 @@ fn resolve_by_type(self: *SelfHosted, os: OverloadSet, f_ty: FnType, loc: Span) 
     data.inline_cache = (key, fid);
     (Ok = fid)
 }
-
-::?FnType;
+ 
+// I specifically don't want this to be a shitty tree walking interpreter. 
+// As soon as the expression looks complicated at all it bails out, wraps it in a function,
+// jits that as normal, and calls it at comptime. But that's really slow for trivial things
+// that naturally become a Value in compile_expr() so there's a few that are special cased here. 
 fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Values) = {
     self.last_loc = expr.loc;
     @debug_assert(!ret_ty.is_unknown(), "immediate_eval_expr unknown");
@@ -3852,24 +3852,21 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
             // this might fold so it should go before a check_quick_eval. 
             @check(self.compile_call(expr, (Specific = ret_ty))) return;
         }
-        fn ContextualField(name) => {
-            // saves 500
-            @check(self.contextual_field(name[], expr, ret_ty)) return;
+        fn FieldAccess(f) => {
+            if self.check_quick_eval(f.container, ScopeId) { val |
+                scope := @check(self.eval(f.container, ScopeId)) return; 
+                var := @unwrap(find_var_in_scope(self, f.name, scope), "'%' not found in scope", self.pool.get(f.name)) return;
+                value, ty := @check(self.find_const(var, (Specific = ret_ty))) return;
+                expr.set(value, ty);
+                self.dispatch.enclosing_function = old_func;
+                return(Ok = value);
+            };
         }
-        fn String(ident) => {
-            @check(self.compile_expr(expr, (Specific = ret_ty))) return;
-        }
-        fn Closure() => {
-            // saves 500
-            @check(self.compile_expr(expr, (Specific = ret_ty))) return;
-        }
-        fn FromBitLiteral() => {
-            @check(self.compile_expr(expr, (Specific = ret_ty))) return;
-        }
-        fn PrefixMacro() => {
-            @check(self.compile_expr(expr, (Specific = ret_ty))) return;
-        }
-        @default => ();
+        @default => {
+            if @is(expr.expr&, .ContextualField, .String, .Closure, .FromBitLiteral, .PrefixMacro) {
+                @check(self.compile_expr(expr, (Specific = ret_ty))) return;
+            };
+        };
     };
     
     // HACK
@@ -3908,7 +3905,6 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
                         return(Ok = val);
                     };
                 } else {
-                    self.dispatch.function_in_progress&.set(fid.as_index());
                     self.dispatch.enclosing_function = old_func;
                     return(Suspend = self.wait_for(CompileBody = fid));
                 };
@@ -3959,6 +3955,9 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
         };
     };
     
+    //println(self.comp().log(expr));
+    //self.codemap.show_error_line(expr.loc, true);
+    
     // The expression is too complex to deal with here. 
     // So box it into a function, compile that normally, and then just call into it with no arguments when we come around again.
     // This operation is make_lit_function from the old compiler. 
@@ -3979,18 +3978,24 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
     // We didn't bother setting a scope because we don't need one, the expression will already have been resolved. 
     fake_func&.set_flag(.ResolvedBody);
     fake_func&.set_flag(.ResolvedSign);
-    fake_func&.set_flag(.SyntheticImmEval);
     self.dispatch.lit_fn_count += 1;
+    
+    // SyntheticImmEval prevents call_direct() from handling any #fold in the body expression. 
+    // If you have a complicated constant expression that calls a bunch of #fold functions, there's no 
+    // need to kick off a new evaulation for each inner call since the whole thing is happening at comptime anyway.  
+    // Without this you get stuck in a loop when the initial immediate_eval_expr happened because of a #fold with complex 
+    // arguments because you'd immediatly recurse on the body expression of the fake function. 
+    fake_func&.set_flag(.SyntheticImmEval);
+    // ComptimeOnly is unnessisary but asserts the TryConstantFold below works correctly 
+    // and we don't forget this expression was supposed to be constant evaluated. 
     fake_func&.set_flag(.ComptimeOnly);
-    // Since we know this function has no args, we'll always fold it. 
-    // This makes sure that if we start analyzing the expression without noticing that its actually in const-context,
+    // Since we know this function has no args, we'll always get back to immediate_eval_expr(expr), 
+    // but next time, the expression will be a trivial call and don't need to create a wrapper function. 
+    // This also makes sure that if we start analyzing the expression without noticing that its actually in const-context,
     // we won't add a callee that becomes unnecessary when the function call gets reduced to an inlined value eventually. 
-    // This fixes a bunch of .ComptimeOnly callees that the AOT backends choke on.  -- Aug 21
-    // The SyntheticImmEval is used to prevent a loop where we try to fold by calling imm_eval on inner nested expressions? maybe?
-    // TODO: i cant quite understand why, but you need something like that even if you don't add this extra TryConstFold. 
-    // TODO: this introduces a ICE: Tried to call un-compiled function. for the test `floats`
-    //       happens at `assert_eq(5.neg(), 5.7.neg().int());` and only if neg is #fold
-    fake_func&.set_flag(.TryConstantFold);
+    // (same effect as wrapping the body expression in Expr::ConstEval but saves an allocation and doesn't need a ConstEval case above to break recursion). 
+    fake_func&.set_flag(.TryConstantFold); 
+    
     fake_func.finished_arg = (Some = void);
     fake_func.finished_ret = (Some = ret_ty);
    
@@ -3999,7 +4004,6 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
     expr.expr = (Call = (f = f_expr, arg = self.make_unit_expr(expr.loc)));  // so we try this task again, we get an easy function call.
     expr.done = false;
     self.dispatch.enclosing_function = old_func;
-    self.dispatch.function_in_progress&.set(fid.as_index());
     (Suspend = self.wait_for(CompileBody = fid))
 }
 
@@ -4471,8 +4475,6 @@ fn compile_body(self: *SelfHosted, fid: FuncId) Maybe(void) #inline = {
     if self.get_function(fid).get_flag(.EnsuredCompiled) {
         .Ok
     } else {
-        @assert(!self.dispatch.function_in_progress&.get(fid.as_index()), "unhanlded mutual recursion %", self.log_name(fid));
-        self.dispatch.function_in_progress&.set(fid.as_index());
         (Suspend = self.wait_for(CompileBody = fid))
     }
 }

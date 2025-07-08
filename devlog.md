@@ -1,4 +1,28 @@
 
+## (Jul 8)
+
+- changed some assert to debug_assert. 
+- added a case in immediate_eval_expr for scope access so don't need a SyntheticImmEval for every Qbe.Ref
+  lit_fn: 4780 -> 3973
+- made `fn not` not explicitly #inline. lit_fn: 3973 -> 3888 and the backend still inlines it anyway
+- yesterdays changes to fill_export_ffi broke repro 
+  - even if i force CodegenWorker.threaded=false. 
+  - because the order returned by get_constants is not consistant.
+    sorting by Span in get_constants fixes it, so seems that's the only problem.
+  - var.id is stable but Symbol value is not. so since i have scope.vars which is in insertion order, i can just 
+    use that instead of scope.lookup and it's faster to iterate that than a hash table anyway so it's just better. 
+      - .lookup used to be better because it only had constants, tho that doesn't matter much anyway because 
+      you're normally doing get_constants on a namespace-like scope that has no runtime vars anyway, but vars are hosted 
+      so they're actually first anyway and it doesn't matter)
+  - but also after that change, the symbol values are stable. so intern order only changes if get_constants isn't sorted 
+    but also the only thing that causes it to be unsorted is if intern order changes.
+    so that doesn't make sense to me. the first place the order of calling `pool.insert_*` changes 
+    is before the first call to get_constants. 
+    OHHHH, ok, it's because the order you get from get_constants determines not just the order that you try to compile the functions
+    but the order they appear in the generated string in fill_export_ffi which is embedded in the new compiler so when it goes to 
+    compile something the first thing it parses is that generated string so it sees symbols in a different order so the interned values change.   
+- random cleanups: remove some redundant #fold on #ir, use `@Fn()` instead of `Fn()`, i don't use function_in_progress, log(DeclVarPattern)
+
 ## (Jul 7)
 
 - terminal.fr: basic argument quoting

@@ -1,5 +1,4 @@
 CompilerDispatch :: @struct(    
-    function_in_progress: DynamicBitSet, // TODO: just store this with the expression?
     overloads: BucketArray(OverloadSetData),
     enclosing_function: ?FuncId,  // for adding runtime callees. 
     const_bound_memo: HashMap(MemoKey, FuncId),
@@ -8,6 +7,7 @@ CompilerDispatch :: @struct(
     next_task_id: i64 = 0,
     root_tasks: List(*Task),
     lit_fn_count: i64 = 0,
+    ir_op_count := 0,
 );
 
 Task :: @rec @struct(
@@ -51,7 +51,6 @@ fn init(a: Alloc) CompilerDispatch = {
     temp := a.alloc(List(ExprAttempt), 1);
     temp.ptr[] = list(a);
     (
-        function_in_progress = empty(a), 
         overloads = init(10, a),
         enclosing_function = .None,
         const_bound_memo = init(a),
@@ -204,16 +203,12 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                 zone_end(zone);
                 @check(res) return;
             };
-            self.dispatch.function_in_progress&.unset(fid.as_index());
         }
         fn Jit(fid) => {
             fid := fid[];
             func := self.get_function(fid);
             
             if !func.get_flag(.EnsuredCompiled) {
-                frontend_mutual := self.dispatch.function_in_progress&.get(fid.as_index());
-                //@err_assert(!frontend_mutual, "ICE: unhandled mutual recursion!") return;
-                self.dispatch.function_in_progress&.set(fid.as_index());
                 return(Suspend = self.wait_for(CompileBody = fid));
             };
             

@@ -74,6 +74,9 @@ fn fill_driver_vtable(vtable: *ImportVTable) void = {
         c.comptime_codegen.join_codegen_thread();
         c.comptime_codegen.m.drop(); 
         c.shim_callback_alloc&.deinit();
+        if show_backend_stats() {
+            @println("(lit_fn = %, ir_ops = %)", c.dispatch.lit_fn_count, c.dispatch.ir_op_count);
+        };
         arena := c.ast_alloc[];  // copy because the areana is inside itself!
         c[] = SelfHosted.zeroed();  // BEFORE releasing ast_arena;
         arena&.deinit();
@@ -941,11 +944,17 @@ compiler_exports :: @struct {
     get_names :: fn(s: ScopeId) []Symbol = {
         self := current_comptime();
         if(s == NOSCOPE, => return(empty()));
-        scope := self.scopes[s].lookup&;
-        names := Symbol.list(scope.len_including_tombstones, self.get_alloc()); 
-        each scope { k, v | 
-            if v.kind == .Const {
-                names&.push(k);
+        scope := self.scopes[s].vars&;
+        names := Symbol.list(scope.len, self.get_alloc()); 
+        // TODO: it's actually more useful for the callee if i return a []Var here and then 
+        //       this could just be a slice without reallocating. that locks the Var abi
+        //       which is bad but it's already locked elsewhere anyway so that's a bit of a lost cause at this point. 
+        if true {
+            break :: local_return;
+            // scope.vars is in insertion order and constants are hoisted so they're always first. 
+            each scope { v |
+                v.kind == .Const || break();
+                names&.push(v.name);
             };
         };
         names.items()

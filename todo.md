@@ -8,6 +8,10 @@ notably those are all things to aren't going to change if you're just working on
 
 ---
 
+- bake for list/hashmap need to get rid of uninit memory
+- i need to be able to easily identify the Anon generated functions. 
+  try to be smarter about giving them a name. like for const eval of a `::` var it should just be the name on the left. 
+  use FnDef.line and make it more elegant somehow, idk 
 - "this works here but not in it's original place under f()."
 - :ThisIsNotOkBecauseMemoryWillBeReused
 - give data symbols readable names now that they show up in symbol table
