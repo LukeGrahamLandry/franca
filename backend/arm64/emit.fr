@@ -4,13 +4,8 @@
 
 #use("@/backend/lib.fr");
 #use(Arm);
-// TODO: don't setup stack frame for leaf like amd64?
 // TODO: make sure i have .ssa tests for every instruction. rn there are some that just fail the franca tests. 
 //       addr slot >4095, sltof, loadaddr with offset,
-// TODO: relocation to fold symbol offsets into the adrp+add instead of wasting an extra instruction :SLOW
-// TODO: when jitting, check if constant ints are close enough to load with adr instead of several movk
-
-// TODO: need to replace all the .goal checks when we want to support ELF
 
 ENABLE_INCREMENTAL :: true;  // TODO: make this a build option or do something less slow
 
@@ -452,6 +447,22 @@ fn loadcon_bits(self: *ArmState, n: i64, r: i64, w: bool) void = {
         // MOV (bitmask immediate) = ORR (immediate) 
         self.inst(@bits(s, 0b01, 0b100100, @as(u13) imm, 0b11111, @as(u5) r));
         return();
+    };
+   
+    if self.m.goal.type == .JitOnly {
+        // when jitting the absolute address of the function is constant 
+        // so numbers can be formed relative to the instruction pointer. 
+        // adrp+add vs mov+movk+movk
+        src := u8.raw_from_ptr(self.m.segments&[.Code].next);
+        dest := n.rawptr_from_int();
+        if ptr_diff(src, dest).abs().ult(MAX_i32) {
+            i_page, i_off := encode_adrp_add(dest, src, @as(u5) r);
+            self.inst(i_page);
+            if i_off != arm_nop {
+                self.inst(i_off);
+            };
+            return();
+        };
     };
     
     // TODO: choose best instruction to start with movz/movn instead of assuming movz

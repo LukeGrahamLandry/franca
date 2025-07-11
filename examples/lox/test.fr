@@ -2,6 +2,8 @@
 //! Currently checks exact output for programs that are not supposed to error but otherwise just expects 
 //! runtime vs compile error to be correct (my error messages don't match). 
 
+// note: since i don't check exact error messages it will look like i pass tests that are supposed to error just because they use features i don't support yet
+
 #use("@/examples/testing.fr");
 fn main() void = {
     args := cli_args();
@@ -18,38 +20,74 @@ fn main() void = {
             if s == "--" {
                 go = true;
             };
+            if s == "-pass" {
+                do_skips[] = true;
+            };
+            if s == "-hush" {
+                HUSH[] = true;
+            }
             continue();
         };
+        @assert(!do_skips[], "only skip failing tests when running all");
         mark := mark_temporary_storage();
-        yes, no := run_test_at_path(s);
+        yes, no := run_test_at_path("", @tfmt("%/test/%", root, s));
         reset_temporary_storage(mark);
         total += yes + no;
         pass += yes;
     };
     if total == 0 {
-        // TODO: limit the default run ones to what i pass so far and then add this to the auto test
-        yes, no := run_test_at_path(@tfmt("%/test", root));
+        yes, no := run_test_at_path("", @tfmt("%/test", root));
         total += yes + no;
         pass += yes;
     };
     
-    @println("Passed %/% tests.", pass, total);
+    @println("\npassed %/% tests.", pass, total);
     if pass != total {
         panic("tests failed");
     }
     Syscall'exit(if(pass == total, => 0, => 1));
 }
 
+do_skips :: @static(bool) false;
+HUSH :: @static(bool) false;
+
+skip :: @const_slice(
+    "string/multiline.lox",   // TODO: my test runner is dumb about multiline prints
+    "number/literals.lox",  // i don't print -0
+    "operator/multiply.lox",  // i don't print decimals
+    "operator/not.lox", // requires `fun`
+    "regression", 
+    "variable/early_bound.lox", 
+    "variable/duplicate_local.lox", 
+    "variable/local_from_method.lox", 
+    "variable/use_local_in_initializer.lox", 
+    "closure", 
+    "function", 
+    "call", 
+    "return", 
+    "while/closure_in_body.lox", "while/return_closure.lox", "while/return_inside.lox",
+    "for/return_inside.lox", "for/return_closure.lox", "for/closure_in_body.lox", 
+    "for/syntax.lox", // needs fun
+    "assignment/to_this.lox", "operator/not_class.lox", "operator/equals_class.lox", "operator/equals_method.lox", 
+    "constructor", "field", "class", "inheritance", "method", "super", "this",
+    "benchmark", "limit/stack_overflow.lox", "limit/too_many_upvalues.lox",
+    
+    // these are for chapters before the vm
+    "expressions", "expressions", "scanning",
+);
+
 ::if(Ty(i64, i64));
-fn run_test_at_path(s: Str) Ty(i64, i64) = {
+fn run_test_at_path(prefix: Str, s: Str) Ty(i64, i64) = {
+    if do_skips[] && skip.contains(fn(check) => s.ends_with(@tfmt("/%", check[]))) {
+        return(0, 0);
+    };
     if s.ends_with(".lox") {
         src := temp().read_to_string_or_crash(s);
-        @println("Run %", s);
-        if run_test(src) {
-            (1, 0)
-        } else {
-            (0, 1)
-        }
+        ::FmtPad(Str);
+        @if(!HUSH[]) @print("%", f_pad(s.rest(prefix.len), 40, .After));
+        ok := run_test(src);
+        @if(!HUSH[]) @println("[%]", @if(ok, "ok", "fail"));
+        (int(ok), int(!ok))
     } else {
         children := Str.list(temp());
         (walk_directory(as_cstr s) { e |
@@ -62,11 +100,14 @@ fn run_test_at_path(s: Str) Ty(i64, i64) = {
         sort :: import("@/lib/sort.fr")'quicksort(Str, order_strings);
         sort(children.items());
         
+        
+        @if(!HUSH[]) @println("=== % ===", s.rest(prefix.len));
         a, b := (0, 0);
         for children { it |
-            c, d := run_test_at_path(it);
+            c, d := run_test_at_path(s, it);
             a += c; b += d;
         };
+        @if(!HUSH[]) @println("===");
         (a, b)
     }
 }
@@ -77,14 +118,14 @@ fn run_test(src: List(u8)) bool = {
         
     found: List(Str) = list(temp());
     vm: Vm = init_vm();
-    result := vm&.interpret(src.items()) { value | 
+    result := vm&.interpret(src.items(), true) { value | 
         found&.push(@tfmt("%", value));
     };
-    vm&.drop();  // test a forced full collection
     
-    @match(want) {
+    pass := @match(want) {
         fn Ok(want) => {
-            if(result != .Ok, => return(false));
+            print(vm.errors.items());
+            if(result != .Ok || vm.errors.len != 0, => return(false));
             if want.len != found.len {
                 @println("Expected % outputs but found %", want.len, found.len);
                 return(false);
@@ -96,13 +137,29 @@ fn run_test(src: List(u8)) bool = {
                     return(false);
                 };
             };
+            
+            vm&.drop();  // test a forced full collection
+            
             true
         }
         fn RuntimeError() => result == .RuntimeError;
         fn CompileError() => result == .CompileError;
+    };
+    if pass {
+        s := want&.tag();
+        s := s.name_str();
+        @print("%", s.slice(0, 1));
     }
+
+    if !want&.is(.Ok) && !pass {
+        print(vm.errors.items());
+        print("(expected an error)");
+    };
+    
+    pass
 }
 
+// TODO: do any of the tests require some prints and then an error later? rn i only return one or the other. 
 TestResult :: @tagged(Ok: List(Str), CompileError, RuntimeError);
 fn expected_output(src: Str) TestResult = {
     want: List(Str) = list(temp());
@@ -110,6 +167,7 @@ fn expected_output(src: Str) TestResult = {
     tag := "// expect: ";
     runtime_tag := "expect runtime error: ";
     comptime_tag := "[line ";
+    other_comptime_tag := "// Error at ";
     while => cursor < src.len - tag.len {
         if cursor < src.len - runtime_tag.len {
             if src.subslice(cursor, runtime_tag.len) == runtime_tag {
@@ -117,6 +175,9 @@ fn expected_output(src: Str) TestResult = {
             };
         };
         if src.subslice(cursor, comptime_tag.len) == comptime_tag {
+            return(.CompileError)
+        };
+        if src.subslice(cursor, other_comptime_tag.len) == other_comptime_tag {
             return(.CompileError)
         };
         if src.subslice(cursor, tag.len) == tag {

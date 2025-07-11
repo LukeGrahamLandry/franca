@@ -36,7 +36,9 @@ align_segments :: fn(m: *Qbe.Module) i64 = {
         // blink (https://github.com/jart/blink) wants 65k pages to let you turn on linear memory optimisation. 
         // which makes it a lot faster (they claim 400%, i get 20%, but still). 
         // (this is what `-Wl,-z,common-page-size=65536,-z,max-page-size=65536` i guess)
-        m.align_to(s, 1.shift_left(16));
+        if m.goal.arch == .x86_64 {
+            m.align_to(s, 1.shift_left(16));
+        };
     };
     m.fixups_locked = true; // we're going to stomp the data section with relocation info so you can run it jitted anymore after this. 
     code_size
@@ -580,6 +582,14 @@ create_rela_table :: fn(
             fn InReg(it) => {
                 @debug_assert(m.goal.arch != .x86_64);
                 it.got_load = it.got_load && fix.symbol.kind != .Local;
+                
+                if m.goal.arch == .aarch64 {
+                    // i use adr when in range but i don't want to deal with another relocation type rn
+                    reg := @as(u5) it.r;
+                    inst: []u32 = (ptr = u32.ptr_from_raw(fix.fix.patch_at), len = 2);
+                    inst[0] = adrp(0, 0, reg);
+                    inst[1] = if(it.got_load, => ldr_uo(.X64, reg, reg, 0), => add_im(.X64, reg, reg, 0, 0));
+                };
                 
                 adrp_local, add_local, adrp_got, ldr_got := @match(m.goal.arch) {
                     fn aarch64() => (

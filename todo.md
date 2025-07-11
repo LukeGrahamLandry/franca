@@ -159,6 +159,9 @@ hould just make them local constants in each file like they are here in riscv
 `__franca_base_address` and `__franca_aot_debug_info`
 - debug assert that all tmps have a definition in rega. 
   (especially because @emit_instructions doesn't catch it)
+- turn off ASSUME_NO_ALIAS_ARGS in arm/abi. it doesn't help much and it would be better to do the hard thing 
+  and figure out how to make UNSOUND_SKIP_EXTRA_BLIT in emit_ir work. 
+- arm relocatable import: relocation to fold symbol offsets into the adrp+add instead of wasting an extra instruction :SLOW
 
 ## don't rely on libc
 

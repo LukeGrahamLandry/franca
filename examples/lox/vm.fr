@@ -13,6 +13,7 @@ Vm :: @struct(
     strings: Table,
     globals: Table,
     compiler_locals: List(Local), // Only used during parse but we reuse the memory. 
+    errors: List(u8),
 );
 
 Table :: RawHashMap(*ObjString, Value);
@@ -26,6 +27,7 @@ fn init_vm() Vm = {
     self.globals = init(); 
     self.compiler_locals = list(128, self.gc);
     self&.reset_stack();
+    self.errors = list(self.gc);
     self
 }
 
@@ -34,30 +36,34 @@ fn drop(self: *Vm) void = {
     self.compiler_locals&.drop();
     self.globals&.drop(self.gc);
     self.strings&.drop(self.gc);
+    self.errors&.drop();
     self.free_objects();
 }
 
 InterpretResult :: @enum(i64) (Ok, CompileError, RuntimeError, SuspendPrint); ::enum(InterpretResult);
 
-fn interpret(self: *Vm, source: Str, $print: Fn(Value, void)) InterpretResult = {
+fn interpret(self: *Vm, source: Str, collect_errors: bool, $print: Fn(Value, void) #duplicated) InterpretResult = {
     chunk: Chunk = init();    
     ::if(InterpretResult);
     self.compiler_locals&.clear();
     result := if(compile(self, source, chunk&)) {
-       self.interpret(chunk&, print)
+       self.interpret(chunk&, collect_errors, print)
     } {| InterpretResult.CompileError };
     
+    if !collect_errors && self.errors.len > 0 {
+        print(self.errors.items());
+    }
     chunk&.drop();
     result
 }
 
 fn interpret(self: *Vm, source: Str) InterpretResult = {
-    self.interpret(source) { value |
+    self.interpret(source, false) { value |
         @println("%", value);
     }
 }
 
-fn interpret(self: *Vm, chunk: *Chunk, $print: Fn(Value, void)) InterpretResult = {
+fn interpret(self: *Vm, chunk: *Chunk, collect_errors: bool, $print: Fn(Value, void) #duplicated) InterpretResult = {
     self.chunk = chunk;
     self.ip = chunk.code&.as_ptr();
     loop {
@@ -79,6 +85,8 @@ fn run(self: *Vm) InterpretResult = {
     
     loop {
         continue :: local_return;
+        @debug_assert(ptr_diff(self.chunk.code.maybe_uninit.ptr, self.ip) < self.chunk.code.len, "fell of the end of function");
+        
         @if(debug_trace_execution) {
             
             debug&.clear();
@@ -169,7 +177,8 @@ fn run(self: *Vm) InterpretResult = {
             @case(OpCode.Equal) => {
                 rhs := self.pop();
                 lhs := self.pop();
-                self.push(lhs.eq(rhs).to_value());  // Don't care about NaN != NaN for now. 
+                result := @if(rhs.is_number() && lhs.is_number(), rhs.to_number() == lhs.to_number(), lhs == rhs);
+                self.push(result.to_value());
             };
             @case(OpCode.Print) => {
                 value := self.pop();
@@ -219,7 +228,7 @@ fn run(self: *Vm) InterpretResult = {
             };
             @case(OpCode.JumpIfFalse) => {
                 distance := self.read_u16();
-                if self.pop().is_falsy() {
+                if self.peek().is_falsy() {
                     self.ip = self.ip.offset(distance);
                 };
             };
@@ -298,7 +307,7 @@ fn runtime_error(self: *Vm, msg: Str) void = {
     p := self.chunk.code&.as_ptr();
     i := p.ptr_diff(self.ip);
     line := self.chunk.lines[i];
-    @println("Runtime Error: %", msg);
+    @fmt(self.errors&, "Runtime Error: %", msg);
 }
 
 ::ptr_utils(u8);

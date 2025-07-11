@@ -1,4 +1,37 @@
 
+## (Jul 10)
+
+- fixed arm-elf adr reloc
+- when jitting, check if constant ints are close enough to load with adr instead of several movk
+- lox: 
+  - some mistakes: nan eq, prec of token after parse, scan pop dot before fraction
+  - while, for
+
+## (Jul 9)
+
+- have to make sure #ir gets a body before any calls get compiled so we check if it's foldable
+- lox: and/or, run passing tests
+
+---
+
+- thinking about giving cranelift another chance. 
+  - maybe now that i do my own inlining it would be better. 
+  - could use it for boot and then only need to commit the frontend. 
+  - it doesn't do c abi for you so it's a massive pain. 
+  - for env parameter, could use their pinned register. 
+    - they don't support it on riscv for some reason
+    - did some experimenting with changing my env abi to that. it's easy to pin a register 
+      but it's annoying to try to use that for passing env because also i need to support both 
+      for the one compile where you transition between them because the comptime code needs to agree with the compiler. 
+      - tho actually now that i typed that maybe i was making it more complicated than it needs to be because 
+        comptime and runtime are in different modules now so they can easily ask for different abis, 
+        i don't actually need to allow both at once.  
+      - it might be better than using a register you always have to fight over (on arm anyway cause there's lots of registers), 
+        so even if i decide against cranelift that's an interesting experiment. 
+  - maybe i just like the idea of a distraction. but like depending on several hundred thousand lines of rust 
+    is just a worse situation to be in, even if its an optional backend, it's just more time to waste. i kinda 
+    don't want the escape hatch, i want to be forced to make my backend good enough to be usable for everything. 
+
 ## (Jul 8)
 
 - changed some assert to debug_assert. 

@@ -55,6 +55,8 @@ null_rule : ParseFn : fn(self: *Parser, can_assign: bool) void = {
     T(.GreaterEqual,  null_rule,       binary,     .Comparison);
     T(.String,        parse_string,    null_rule,  .None);
     T(.Ident,         parse_ident,     null_rule,  .None);
+    T(.And,           null_rule,       parse_and,  .And);
+    T(.Or,            null_rule,       parse_or,   .Or);
     
     T :: fn(t: TokenType, prefix: ParseFn, infix: ParseFn, prec: Prec) => 
         table.set(@as(i64) t, (prefix = prefix, infix = infix, prec = prec));
@@ -116,44 +118,130 @@ fn statement(self: *Parser, may_declare: bool) void = {
             self.consume(.LeftParen, "Expected '(' before condition");
             self.expression();
             self.consume(.RightParen, "Expected ')' after condition");
-            self.emit(OpCode.JumpIfFalse);
-            self.emit(0, 0); // patch
-            start := self.chunk.code.len;
-            self.statement(false);
-            end_then := self.chunk.code.len;
-            distance := end_then - start;
+            skip_then := self.emit_jump(.JumpIfFalse);
+            self.emit(OpCode.Pop);  // then
+            self.statement(false);  // then
             
             if self.current.type == .Else {
-                distance += 3; // the jump from if start has to skip this landing pad. 
                 self.advance();
-                self.emit(OpCode.Jump);
-                self.emit(0, 0); // patch
-                start_else := self.chunk.code.len;
-                
-                self.statement(false);
-                
-                end_else := self.chunk.code.len;
-                distance := end_else - start_else;
-                if distance > 0xFFFF {
-                    self.error_at(self.current, "statement too large: cannot jump more than 0xFFFF");
-                };
-                self.chunk.code[start_else - 2] = distance.bit_and(0xFF).trunc();
-                self.chunk.code[start_else - 1] = distance.shift_right_logical(8).bit_and(0xFF).trunc();
-            };
-            if distance > 0xFFFF {
-                self.error_at(self.current, "statement too large: cannot jump more than 0xFFFF");
-            };
-            self.chunk.code[start - 2] = distance.bit_and(0xFF).trunc();
-            self.chunk.code[start - 1] = distance.shift_right_logical(8).bit_and(0xFF).trunc();
+                // the jump from if start has to skip this landing pad. 
+                skip_else := self.emit_jump(.Jump);  // then
+                self.patch_jump(skip_then);
+                self.emit(OpCode.Pop);  // else
+                self.statement(false);  // else
+                self.patch_jump(skip_else);
+            } else {
+                self.patch_jump(skip_then); 
+            }
             
             return(); // no need for extra ; after if
         };
+        // TODO: EXTRA: break + continue
+        fn While() => {
+            self.advance();
+            to_cond := self.chunk.code.len;
+            
+            self.consume(.LeftParen, "Expected '(' before condition");
+            self.expression();
+            self.consume(.RightParen, "Expected ')' after condition");
+            
+            skip_body := self.emit_jump(.JumpIfFalse);
+            
+            self.emit(OpCode.Pop);
+            self.statement(false);
+            self.patch_jump(self.emit_jump(.Loop), to_cond);
+            
+            self.patch_jump(skip_body);
+            self.emit(OpCode.Pop);
+            
+            return(); // no need for extra ; 
+        }
+        fn For() => {  // for(init;cond;inc)body; 
+            self.advance();
+            self.consume(.LeftParen, "Expected '(' before condition");
+            self.scope_depth += 1;
+            
+            @match(self.current.type) {  // init
+                fn Semicolon() => ();
+                fn Var() => self.declare_var();
+                @default => {
+                    self.expression();
+                    self.emit(OpCode.Pop);
+                };
+            };
+            self.consume(.Semicolon, "Expected ';' after for::init");
+            
+            to_cond := self.chunk.code.len;
+            if self.current.type != .Semicolon { // cond
+                self.expression();
+            } else {
+                self.emit(OpCode.True);
+            };
+            self.consume(.Semicolon, "Expected ';' after for::cond");
+            skip_loop := self.emit_jump(.JumpIfFalse);
+            self.emit(OpCode.Pop);
+            
+            skip_inc := self.emit_jump(.Jump);
+            to_inc := self.chunk.code.len;
+            if self.current.type != .RightParen { // inc
+                self.expression();
+                self.emit(OpCode.Pop);
+            };
+            self.patch_jump(self.emit_jump(.Loop), to_cond);
+            self.patch_jump(skip_inc);
+            
+            self.consume(.RightParen, "Expected ')' after for::inc");
+            self.statement(false);  // body
+            self.patch_jump(self.emit_jump(.Loop), to_inc);
+            
+            self.patch_jump(skip_loop);
+            self.emit(OpCode.Pop);
+            self.end_scope();
+            return();
+        }
         @default => {
             self.expression();
             self.emit(OpCode.Pop);
         };
     };
     self.consume(.Semicolon, "Expected ';' after statement");
+}
+
+fn emit_jump(self: *Parser, op: OpCode) i64 = {
+    self.emit(op);
+    self.emit(0, 0); // patch
+    self.chunk.code.len
+}
+
+fn patch_jump(self: *Parser, start: i64) void = 
+    self.patch_jump(start, self.chunk.code.len);
+
+fn patch_jump(self: *Parser, start: i64, end: i64) void = {
+    distance := abs(end - start);
+    if !distance.ule(0xFFFF) {
+        self.error_at(self.current, "statement too large: cannot jump more than 0xFFFF");
+    };
+    self.chunk.code[start - 2] = distance.bit_and(0xFF).trunc();
+    self.chunk.code[start - 1] = distance.shift_right_logical(8).bit_and(0xFF).trunc();
+}
+
+parse_and :: fn(self: *Parser, _can_assign: bool) void = {
+    skip_rhs := self.emit_jump(OpCode.JumpIfFalse);
+    // if lhs=true, discard it and use rhs as the result
+    self.emit(OpCode.Pop);
+    self.parse(.And);
+    // if lhs=false, it stays on the stack and becomes the result
+    self.patch_jump(skip_rhs);
+}
+
+parse_or :: fn(self: *Parser, _can_assign: bool) void = {
+    // not the same as OpCode.Not on the condition because the output of `or` should not be coerced to a bool
+    take_rhs := self.emit_jump(OpCode.JumpIfFalse);
+    skip_rhs := self.emit_jump(OpCode.Jump);
+    self.patch_jump(take_rhs);
+    self.emit(OpCode.Pop);
+    self.parse(.Or);
+    self.patch_jump(skip_rhs);
 }
 
 fn end_scope(self: *Parser) void = {
@@ -185,6 +273,7 @@ fn parse(self: *Parser, prec: Prec) void = {
         infix := r.infix;
         r = get_rule(self.current.type);
         infix(self, can_assign);
+        r = get_rule(self.current.type);
     };
     
     if can_assign && self.current.type == .Equal {
@@ -355,7 +444,7 @@ fn error_at(self: *Parser, token: Token, msg: Str) void = {
         self.panic_mode = true;
         self.had_error = true;
         // TODO: render lex err vs eof vs normal token differently
-        @println("[line %] Error: % at %", token.line, msg, token.lexeme);
+        @fmt(self.vm.errors&, "[line %] Error: % at %", token.line, msg, token.lexeme);
     }
 }
 
