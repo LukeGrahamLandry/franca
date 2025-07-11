@@ -8,6 +8,7 @@ notably those are all things to aren't going to change if you're just working on
 
 ---
 
+- :ReWalkTokens
 - bake for list/hashmap need to get rid of uninit memory
 - i need to be able to easily identify the Anon generated functions. 
   try to be smarter about giving them a name. like for const eval of a `::` var it should just be the name on the left. 
@@ -105,10 +106,8 @@ TODO: end of loop. still too many options for 'index'
 as different types even when they're the same size. 
 - automatically test examples/repl.fr
 - "need to be consistant about how to handle modules like this that don't actually compile anything"
-- count_array_init_elements is still spitting out junk symbols into the scope. need to just not parse it twice. 
-and not doing that makes an array of strings have the strings show up in the output module twice. 
-- "really really want this but it breaks examples/ascii_table.fr"
 - fix examples/terminal.fr -jit so it doesn't freak out about nested compiler contexts because of the repl
+  (get rid of EASY_GRAPHICS_IS_JITTING_HACK)
 - reduce disk usage bloat. rn fetch_or_crash stores the unzipped thing and the zip file so you have everything twice. 
 many of the things i use i don't need everything from so it could make you tell it which files are important and 
 delete the rest. thing to think about is that you want to union those between different projects that depend on 

@@ -388,19 +388,22 @@ fn new_cast_force(c: *Ctx, expr: *Node, ty: *CType) *Node = {
     node
 }
 
-fn new_initializer(c: *Ctx, ty: *CType, is_flexible: bool) *Initializer = {
+fn new_initializer(c: *Ctx, ty: *CType, is_flexible: bool) *Initializer =   
+    new_initializer(ty, is_flexible);
+    
+fn new_initializer(ty: *CType, is_flexible: bool) *Initializer = {
     init := temp().box_zeroed(Initializer);
     init.ty = ty;
 
     if ty.kind == .TY_ARRAY {
-        if is_flexible && ty.size < 0 {
+        if is_flexible && ty.size <= 0 {
             init.is_flexible = true;
             return(init);
         };
 
         init.children = temp().alloc(*Initializer, ty.array_len.intcast());
         each init.children { it |
-            it[] = c.new_initializer(ty.base, false);
+            it[] = new_initializer(ty.base, false);
         };
     };
 
@@ -414,14 +417,14 @@ fn new_initializer(c: *Ctx, ty: *CType, is_flexible: bool) *Initializer = {
 
         for_linked ty.members { mem |
             ::if(*Initializer);
-            init.children[mem.idx.intcast()] = 
+            init[mem.idx.intcast()] = 
                 if is_flexible && ty.is_flexible && mem.next.is_null() {
                     child := temp().box_zeroed(Initializer);
                     child.ty = mem.ty;
                     child.is_flexible = true;
                     child
                 } else {
-                    c.new_initializer(mem.ty, false)
+                    new_initializer(mem.ty, false)
                 };
         };
     };
@@ -1077,7 +1080,7 @@ fn string_initializer(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) v
         ::ptr_utils(T);
         str := ptr_cast_unchecked(u8, T, tok.val.str_buf);
         range(0, len.intcast()) { i |
-            init.children[i].expr = c.new_num(str.offset(i)[].int(), tok);
+            init[i].expr = c.new_num(str.offset(i)[].int(), tok);
         };
     };
     @switch(init.ty.base.size) {
@@ -1115,14 +1118,14 @@ fn string_initializer(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) v
 //     struct { int a, b, c; } x = { .c=5 };
 //
 // The above initializer sets x.c to 5.
-fn array_designator(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) Ty(i64, i64) = {  // (begin, end)
+fn array_designator(c: *Ctx, rest: **Token, tok: *Token, ty: *CType, is_flexible: bool) Ty(i64, i64) = {  // (begin, end)
     begin := c.const_expr(tok&, tok.next);
-    if(begin >= ty.array_len.intcast(), => @error_tok(c, tok, "array designator index (%) exceeds array bounds (%)", begin, ty.array_len));
+    if(begin >= ty.array_len.intcast() && !is_flexible, => @error_tok(c, tok, "array designator index (%) exceeds array bounds (%)", begin, ty.array_len));
     
     end := begin;
     if equal(tok, "...") {
         end = c.const_expr(tok&, tok.next);
-        if(end >= ty.array_len.intcast(), => @error_tok(c, tok, "array designator index exceeds array bounds"));
+        if(end >= ty.array_len.intcast() && !is_flexible, => @error_tok(c, tok, "array designator index exceeds array bounds"));
         if(end < begin, => @error_tok(c, tok, "array designator range [%d, %d] is empty", begin, end));
     };
 
@@ -1162,12 +1165,13 @@ fn designation(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) void = {
     if equal(tok, "[") {
         if(init.ty.kind != .TY_ARRAY, => @error_tok(c, tok, "array index in non-array initializer"));
 
-        begin, end := c.array_designator(tok&, tok, init.ty);
+        begin, end := c.array_designator(tok&, tok, init.ty, init.is_flexible);
 
         //tok2: *Token;  // TODO: sane error message for this!
         tok2 := Token.ptr_from_int(0);
         range(begin, end + 1) { i |
-            c.designation(tok2&, tok, init.children[i]);
+            // :ReWalkTokens
+            c.designation(tok2&, tok, init[i]);
         };
         c.array_initializer2(rest, tok2, init, begin + 1);
         return();
@@ -1195,36 +1199,6 @@ fn designation(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) void = {
     c.initializer2(rest, tok, init);
 }
 
-// TODO: parsing everything twice is gross
-// An array length can be omitted if an array has an initializer
-// (e.g. `int x[] = {1,2,3}`). If it's omitted, count the number
-// of initializer elements.
-fn count_array_init_elements(c: *Ctx, tok: *Token, ty: *CType) i64 = {
-    prev := c.speculate;
-    // TODO: "really really want this but it breaks examples/ascii_table.fr"
-    //c.speculate = true;
-    dummy := c.new_initializer(ty.base, true);
-
-    i, hi := (0, 0);
-    
-    comma_sep(c, tok&, "}") {
-        if equal(tok, "[") {
-            i = c.const_expr(tok&, tok.next);
-            if equal(tok, "...") {
-                i = c.const_expr(tok&, tok.next);
-            };
-            tok = c.skip(tok, "]");
-            c.designation(tok&, tok, dummy);
-        } else {
-            c.initializer2(tok&, tok, dummy);
-        };
-        i += 1;
-        hi = max(hi, i);
-    };
-    //c.speculate = prev;
-    hi
-}
-
 fn comma_sep(c: *Ctx, tok: **Token, $end: Str, $body: @Fn() void) void = {
     first := true;
     while => !consume_end(tok, end) {
@@ -1240,56 +1214,98 @@ fn comma_sep(c: *Ctx, tok: **Token, $end: Str, $body: @Fn() void) void = {
 fn array_initializer1(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) void = {
     tok = c.skip(tok, "{");
 
+    first := tok;
+    
+    // An array length can be omitted if an array has an initializer
+    // (e.g. `int x[] = {1,2,3}`). If it's omitted, count the number
+    // of initializer elements as we go. 
     if init.is_flexible {
-        len := c.count_array_init_elements(tok, init.ty);
-        init[] = c.new_initializer(c.array_of(init.ty.base, len), false)[];
+        // not to be confused with :StaticArrayOfUnknownLength... this is a different thing, kinda
+        init[] = c.new_initializer(c.array_of(init.ty.base, 0), true)[];   
     };
 
     i := 0;
     comma_sep(c, tok&, "}") {
         continue :: local_return;
         if equal(tok, "[") {
-            begin, end := c.array_designator(tok&, tok, init.ty);
+            begin, end := c.array_designator(tok&, tok, init.ty, init.is_flexible);
 
             tok2 := Token.ptr_from_int(0);
             range(begin, end + 1) { j |
-                c.designation(tok2&, tok, init.children[j]);
+                // :ReWalkTokens
+                c.designation(tok2&, tok, init[j]);
             };
             tok = tok2;
             i = end + 1;
+            if init.is_flexible {
+                init.ty.array_len = max(init.ty.array_len, i.intcast());
+            };
             continue();
         };
 
-        if i < init.ty.array_len.intcast() {
-            c.initializer2(tok&, tok, init.children[i]);
+        if i < init.ty.array_len.intcast() || init.is_flexible {        
+            c.initializer2(tok&, tok, init[i]);
         } else {
             tok = c.skip_excess_element(tok);
         };
         i += 1;
+        if init.is_flexible {
+            init.ty.array_len = max(init.ty.array_len, i.intcast());
+        };
     };
+    
     rest[] = tok;
+}
+
+fn index(self: *Initializer, i: i64) **Initializer = {
+    if self.children.len > i {
+        @debug_assert(i >= 0);
+        return(self.children.index(i));
+    };
+    
+    // TODO: use RawList :SLOW
+    @debug_assert(self.ty.kind == .TY_ARRAY && self.is_flexible, "expected flex array");
+    new := temp().alloc(*Initializer, i + 1);
+    new.slice(0, self.children.len).copy_from(self.children);
+    each new.rest(self.children.len) { it |
+        it[] = new_initializer(self.ty.base, false);
+    };
+    self.children = new;
+    new.index(i)
 }
 
 // array-initializer2 = initializer ("," initializer)*
 fn array_initializer2(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer, i: i64) void = {
+    first := tok;
     if init.is_flexible {
-        len := c.count_array_init_elements(tok, init.ty);
-        init[] = c.new_initializer(c.array_of(init.ty.base, len), false)[];
+        // not to be confused with :StaticArrayOfUnknownLength... this is a different thing, kinda
+        init[] = c.new_initializer(c.array_of(init.ty.base, 0), true)[];
     };
 
-    while => i < init.ty.array_len.intcast() && !is_end(tok) {
+    while => { i < init.ty.array_len.intcast() || init.is_flexible } && !is_end(tok) {
         start := tok;
         if i > 0 {
             tok = c.skip(tok, ",");
         };
         if equal(tok, "[") || equal(tok, ".") {
             rest[] = start;
+            if init.is_flexible {
+                @debug_assert_eq(init.ty.kind, .TY_ARRAY);
+                init.ty.size = init.ty.base.size * init.ty.array_len;
+            }
             return();
         };
 
-        c.initializer2(tok&, tok, init.children[i]);
+        c.initializer2(tok&, tok, init[i]);
         i += 1;
+        if init.is_flexible {
+            init.ty.array_len = max(init.ty.array_len, i.intcast());
+        };
     };
+    if init.is_flexible {
+        @debug_assert_eq(init.ty.kind, .TY_ARRAY);
+        init.ty.size = init.ty.base.size * init.ty.array_len;
+    }
     rest[] = tok;
 }
 
@@ -1308,13 +1324,13 @@ fn struct_initializer1(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) 
         continue :: local_return;
         if equal(tok, ".") {
             mem = c.struct_designator(tok&, tok, init.ty);
-            c.designation(tok&, tok, init.children[mem.idx.intcast()]);
+            c.designation(tok&, tok, init[mem.idx.intcast()]);
             mem = mem.next;
             continue();
         };
 
         if !mem.is_null() {
-            c.initializer2(tok&, tok, init.children[mem.idx.intcast()]);
+            c.initializer2(tok&, tok, init[mem.idx.intcast()]);
             mem = mem.next;
         } else {
             tok = c.skip_excess_element(tok);
@@ -1338,7 +1354,7 @@ fn struct_initializer2(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer, 
             return();
         };
 
-        c.initializer2(tok&, tok, init.children[mem.idx.intcast()]);
+        c.initializer2(tok&, tok, init[mem.idx.intcast()]);
         mem = mem.next;
     };
     rest[] = tok;
@@ -1351,7 +1367,7 @@ fn union_initializer(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) vo
     if equal(tok, "{") && equal(tok.next, ".") {
         mem := c.struct_designator(tok&, tok.next, init.ty);
         init.mem = mem;
-        c.designation(tok&, tok, init.children[mem.idx.intcast()]);
+        c.designation(tok&, tok, init[mem.idx.intcast()]);
         rest[] = c.skip(tok, "}");
         return();
     };
@@ -1359,11 +1375,11 @@ fn union_initializer(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) vo
     init.mem = init.ty.members;
 
     if equal(tok, "{") {
-        c.initializer2(tok&, tok.next, init.children[0]);
+        c.initializer2(tok&, tok.next, init[0]);
         consume(tok&, tok, ",");
         rest[] = c.skip(tok, "}");
     } else {
-        c.initializer2(rest, tok, init.children[0]);
+        c.initializer2(rest, tok, init[0]);
     };
 }
 
@@ -1420,6 +1436,9 @@ fn initializer(c: *Ctx, rest: **Token, tok: *Token, ty: *CType, new_ty: **CType)
     };
     init := c.new_initializer(ty, true);
     c.initializer2(rest, tok, init);
+    if init.ty.kind == .TY_ARRAY && init.is_flexible {
+        init.ty.size = init.ty.base.size * init.ty.array_len;
+    };
     // if there was a flexible array member chibicc makes a new type to track the exact size of this instantiation. 
     // but [https://www.sigbus.info/n1570#6.7.2.1p18] "In particular, the size of the structure is as if the flexible 
     // array member were omitted except that it may have more trailing padding than the omission would imply"
@@ -1464,7 +1483,7 @@ fn create_lvar_init(c: *Ctx, init: *Initializer, ty: *CType, desg: *InitDesg, to
         node := c.new_node(.ND_NULL_EXPR, tok);
         range(0, ty.array_len.intcast()) { i |
             desg2: InitDesg = (next = desg, idx = i, member = Member.ptr_from_int(0), var = Obj.ptr_from_int(0));
-            rhs := c.create_lvar_init(init.children[i], ty.base, desg2&, tok);
+            rhs := c.create_lvar_init(init[i], ty.base, desg2&, tok);
             c.gen_expr(node);
             node = rhs;
         };
@@ -1476,7 +1495,7 @@ fn create_lvar_init(c: *Ctx, init: *Initializer, ty: *CType, desg: *InitDesg, to
 
         for_linked ty.members { mem |
             desg2: InitDesg = (next = desg, idx = 0, member = mem, var = Obj.ptr_from_int(0));
-            rhs := c.create_lvar_init(init.children[mem.idx.intcast()], mem.ty, desg2&, tok);
+            rhs := c.create_lvar_init(init[mem.idx.intcast()], mem.ty, desg2&, tok);
             c.gen_expr(node);
             node = rhs;
         };
@@ -1487,7 +1506,7 @@ fn create_lvar_init(c: *Ctx, init: *Initializer, ty: *CType, desg: *InitDesg, to
         ::if(@type init.mem);
         mem := if(!init.mem.is_null(), => init.mem, => ty.members);
         desg2: InitDesg = (next = desg, idx = 0, member = mem, var = Obj.ptr_from_int(0));
-        return(c.create_lvar_init(init.children[mem.idx.intcast()], mem.ty, desg2&, tok));
+        return(c.create_lvar_init(init[mem.idx.intcast()], mem.ty, desg2&, tok));
     };
 
     if(init.expr.is_null(), => return(c.new_node(.ND_NULL_EXPR, tok)));
@@ -1564,9 +1583,10 @@ fn write_gvar_data(c: *Ctx, cur: *List(Dat2.Reloc), init: *Initializer, ty: *CTy
     ::enum(TypeKind);
     if ty.kind == .TY_ARRAY {
         sz := ty.base.size.intcast();
+        @debug_assert_ge(sz, 0, "negative array in write_gvar_data");
         if(init.all_zeros, => return());
         range(0, ty.array_len.intcast()) { i |
-            c.write_gvar_data(cur, init.children[i], ty.base, buf, off + sz * i);
+            c.write_gvar_data(cur, init[i], ty.base, buf, off + sz * i);
         };
         return();
     };
@@ -1575,7 +1595,7 @@ fn write_gvar_data(c: *Ctx, cur: *List(Dat2.Reloc), init: *Initializer, ty: *CTy
             break :: local_return;
             for_linked ty.members { mem | 
                 if mem.is_bitfield {
-                    expr := init.children[mem.idx.intcast()].expr;
+                    expr := init[mem.idx.intcast()].expr;
                     ::ptr_utils(Node);
                     if(expr.is_null(), => break());
                     loc      := buf.ptr.offset(off + mem.offset.intcast());
@@ -1583,15 +1603,16 @@ fn write_gvar_data(c: *Ctx, cur: *List(Dat2.Reloc), init: *Initializer, ty: *CTy
                     newval   := c.eval(expr);
                     mask     := 1.shift_left(mem.bit_width.intcast()) - 1;
                     combined := oldval.bit_or(newval.bit_and(mask).shift_left(mem.bit_offset.intcast()));
+                    @debug_assert_ge(mem.ty.size, 0, "negative size in write_gvar_data");
                     write_buf(loc, combined, mem.ty.size.intcast());
                     @debug_assert_eq(combined, read_buf(loc, mem.ty.size.intcast()), "failed write_buf");
                 } else {
-                    c.write_gvar_data(cur, init.children[mem.idx.intcast()], mem.ty, buf, off + mem.offset.intcast());
+                    c.write_gvar_data(cur, init[mem.idx.intcast()], mem.ty, buf, off + mem.offset.intcast());
                 };
             };
         };
         if ty.has_flex() {
-            child := init.children[init.children.len - 1];
+            child := init[init.children.len - 1];
             c.write_gvar_data(cur, child, child.ty, buf, off + ty.size.intcast());
         };
         
@@ -1600,7 +1621,7 @@ fn write_gvar_data(c: *Ctx, cur: *List(Dat2.Reloc), init: *Initializer, ty: *CTy
 
     if ty.kind == .TY_UNION {
         if(init.mem.is_null(), => return());
-        return(c.write_gvar_data(cur, init.children[init.mem.idx.intcast()], init.mem.ty, buf, off));
+        return(c.write_gvar_data(cur, init[init.mem.idx.intcast()], init.mem.ty, buf, off));
     };
 
     if(init.expr.is_null(), => return());
@@ -1618,6 +1639,7 @@ fn write_gvar_data(c: *Ctx, cur: *List(Dat2.Reloc), init: *Initializer, ty: *CTy
     val, label := c.eval2(init.expr);
 
     label := label || {
+        @debug_assert_ge(ty.size, 0, "negative size scalar in write_gvar_data");
         write_buf(buf.ptr.offset(off), val, ty.size.intcast());
         return()
     };
@@ -1636,7 +1658,7 @@ fn has_flex(ty: *CType) bool =
 // ty.size doesn't count the flexible array member because sizeof is not supposed to include it, 
 // but we need to include it when allocating storage for static variables. 
 fn size(init: *Initializer) i64 = 
-    init.ty.size.intcast() + if(init.ty.has_flex(), => init.children[init.children.len - 1].size(), => 0);
+    init.ty.size.intcast() + if(init.ty.has_flex(), => init[init.children.len - 1].size(), => 0);
 
 // Initializers for global variables are evaluated at compile-time and
 // embedded to .data section. This function serializes Initializer
@@ -1799,7 +1821,7 @@ fn attribute_list(c: *Ctx, tok: *Token, ty: *CType) *Token = {
             };
             
             // TODO: some of these matter: __constructor__, __aligned__
-            skips :: @const_slice("__format__", "__const__", "__constructor__", "__aligned__");
+            skips :: @const_slice("__format__", "__const__"); // , "__constructor__", "__aligned__");
             if skips.contains(tok.str()) {
                 tok = c.skip_attribute(tok);
                 continue();

@@ -6,7 +6,12 @@
 - lox: 
   - some mistakes: nan eq, prec of token after parse, scan pop dot before fraction
   - while, for
-
+- import_c: stop calling count_array_init_elements
+  - grow init.children as needed
+  - compute array_len as max index as you go
+  - set size to base.size*array_len at the end 
+  - very confusing when array_len gets set to 0 or -1, one is `static struct { T a[] } = { ... }` and one is `static T a[] = { ... }` ?
+  
 ## (Jul 9)
 
 - have to make sure #ir gets a body before any calls get compiled so we check if it's foldable
