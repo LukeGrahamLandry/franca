@@ -39,6 +39,7 @@ SelfHosted :: @rec @struct(
     scopes: *Scopes,
     baked: *Baked,
     last_loc: Span,
+    library_scope: ScopeId,
     functions: BucketArray(Func),  // TODO: have a version of this type that doesn't add gaps if you push_all because that will break the indexing
     types: BucketArray(TypeInfo),
     // TODO: decide if these are generally accessed at the same time so should be stored together.
@@ -75,23 +76,6 @@ WhereKey :: @struct(template: FuncId, arg: Values);
 :: AutoHash(WhereKey, TrivialHasher);
 
 PRes :: Result(void, *CompileError);
-
-make_top_level :: fn(c: *SelfHosted, body: Slice(FatStmt)) Res(FuncId) = {
-    @assert(body.len != 0, "tried to make_top_level with no statements");
-    name := c.pool.insert_owned("@toplevel@");
-    make_function_scope(c, body, name, scope_from_index(0))
-};
-
-fn make_function_scope(c: *SelfHosted, body: Slice(FatStmt), name: Symbol, scope: ScopeId) Res(FuncId) = {
-    loc := body[0].loc;
-    result := c.box(synthetic_ty((Value = (bytes = unit_value, coerced = false)), loc, void));
-    result := synthetic_ty(new_block(body.as_raw_list(), result), loc, void);
-    def: FnDef = (name = (Some = name), arg = empty_pattern(c.get_alloc(), loc), ret = (Finished = void), tags = list(temp()), loc = loc);
-    func := make_func(def, (Some = result&), false, true);
-    r := @try(c.resolve_root(func&, scope)) return;  
-    f := c.add_function(func);
-    (Ok = f)
-}
 
 fn load_file_in_compiler(vtable: *ImportVTable, path: Str, opts: *BuildOptions) CRes(CompCtx) = {
     // :io_driver
@@ -397,6 +381,7 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
         backtrace_node = push_resolver(SelfHosted, self, find_function_aa),
         recycle_funcid = list(a),
         shim_callback_general_alloc = general_allocator(),
+        library_scope = NOSCOPE, // patched in make_top_level
     );
     self.add_function(zeroed Func);  // just for good luck. life is better when FuncId=0 is invalid. 
     self.other_module&.push(self.comptime_codegen.m, self.get_alloc());

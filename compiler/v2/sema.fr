@@ -930,12 +930,8 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
             // TODO: this is unfortunate. it means you prewalk instead of letting placeexpr do the recursion
             //       but need to check if its a value that has special fields first.
             @check(self.compile_expr(f.container, .None)) return;
-           
             if f.container.ty == ScopeId { // :get_or_create_type 
-                scope := @check(self.eval(f.container, ScopeId)) return; 
-                var := @unwrap(find_var_in_scope(self, f.name, scope), "'%' not found in scope", self.pool.get(f.name)) return;
-                value, ty := @check(self.find_const(var, requested)) return;
-                expr.set(value, ty);
+                @check(self.scope_access(expr, requested)) return;
             } else {
                 if f.container.ty == self.get_or_create_type(Type) {
                     type := @check(self.eval(f.container, Type)) return; 
@@ -1168,6 +1164,17 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
     self.last_loc = old_loc;
     self.dispatch.enclosing_function = todo_dont_lose;
     @debug_assert(!expr.ty.is_unknown(), "[compile_expr] Unknown type for %", expr.log(self));
+    .Ok
+}
+
+fn scope_access(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(void) = {
+    @debug_assert(expr.expr&.is(.FieldAccess));
+    f := expr.expr.FieldAccess&;
+    scope := @check(self.eval(f.container, ScopeId)) return; 
+    @try(self.fill_directory_scope(scope)) return;
+    var := @unwrap(find_var_in_scope(self, f.name, scope), "'%' not found in scope", self.pool.get(f.name)) return;
+    value, ty := @check(self.find_const(var, requested)) return;
+    expr.set(value, ty);
     .Ok
 }
 
@@ -3869,13 +3876,11 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
             @check(self.compile_call(expr, (Specific = ret_ty))) return;
         }
         fn FieldAccess(f) => {
-            if self.check_quick_eval(f.container, ScopeId) { val |
-                scope := @check(self.eval(f.container, ScopeId)) return; 
-                var := @unwrap(find_var_in_scope(self, f.name, scope), "'%' not found in scope", self.pool.get(f.name)) return;
-                value, ty := @check(self.find_const(var, (Specific = ret_ty))) return;
-                expr.set(value, ty);
+            if self.check_quick_eval(f.container, ScopeId) { _ |
+                @check(self.scope_access(expr, (Specific = ret_ty))) return;
+                @debug_assert(expr.expr&.is(.Value));
                 self.dispatch.enclosing_function = old_func;
-                return(Ok = value);
+                return(Ok = expr.expr.Value.bytes);
             };
         }
         @default => {

@@ -66,13 +66,99 @@ fn maybe_stack_allocated_type(var: *VarData) *LazyType #inline = {
 
 /// Resolver Interface. Called lazily by the compiler when it first works on a new function. /// 
 
-fn resolve_root(compiler: *SelfHosted, func: *Func, scope: ScopeId) PRes #once = {
-    r: ResolveScope = new(compiler, scope, func.loc);
+make_top_level :: fn(self: *SelfHosted, body: []FatStmt) Res(void) #once = {
+    @assert(body.len != 0, "tried to make_top_level with no statements");
+    name := self.pool.insert_owned("@toplevel@");
+    fid := @try(make_function_scope(self, body, name, scope_from_index(0))) return;
+    @try(self.ensure_resolved_body(fid)) return;
+    @debug_assert_eq(self.get_function(fid)[].use_scope, TOP_LEVEL_SCOPE);
     
+    self.library_scope = self.scopes.new_scope(TOP_LEVEL_SCOPE, self.get_alloc(), zeroed Span /*TODO*/);
+    self.scopes[self.library_scope].optional_path = self.pool.insert_owned(STDLIB_PATH[].unwrap());
+    @try(self.fill_directory_scope(self.library_scope)) return;
+    
+    self.poll_in_place(void, => self.compile_body(fid))
+};
+
+fn fill_directory_scope(self: *SelfHosted, s: ScopeId) Res(void) = {
+    scope := self.scopes[s]&;
+    if scope.optional_path == Flag.SYMBOL_ZERO.ident() {
+        return(.Ok);
+    };
+    root := self.pool.get(scope.optional_path);
+    prefix := root.rest(STDLIB_PATH[].unwrap().len());
+    
+    // want stable intern order regardless of what order the os gives back
+    filenames := Str.list(temp());
+    ok := walk_directory(root.as_cstr()) { entry |
+        if !entry.name.starts_with(".") {
+            filenames&.push(entry.name.shallow_copy(self.get_alloc()));
+        };  
+    };
+    // TODO: deal with error while iterating dir seperatly from err while opening. 
+    if !ok {
+        // TODO: if it's a file do something else but you kinda have to do it before
+        desc := self.pool.insert_borrowed(@tfmt("@/%", prefix), self.get_alloc());
+        scope.optional_path = Flag.SYMBOL_ZERO.ident();
+        @try(import_as_scope(self, desc, self.last_loc /*TODO*/, (Some = s))) return;
+        return(.Ok);
+        //return(@err("failed to open directory for scope: %", root));
+    };
+    Sort :: import("@/lib/sort.fr");
+    sort :: Sort'quicksort(Str, Sort.order_strings);
+    sort(filenames.items());
+    
+    for filenames { filename |
+        name := self.pool.insert_owned(filename);
+        key := self.pool.insert_borrowed(@tfmt("@%/%", prefix, filename), self.get_alloc());
+        new_s := self.imports.get_or_insert(key) {
+            new_s := self.scopes.new_scope(TOP_LEVEL_SCOPE, self.get_alloc(), zeroed Span /*TODO*/);
+            self.scopes[new_s].optional_path = self.pool.insert_borrowed(@tfmt("%/%", root, filename), self.get_alloc());
+
+            var := @try(self.decl_var(s, name, .Const, zeroed Span /*TODO*/, .Unknown)) return;
+            dest := self.scopes.get_var_data(var);
+            dest.set_type(Finished = ScopeId);
+            dest.expr&.set(self.to_values(ScopeId, new_s), ScopeId);
+            new_s
+        }[];
+        
+        // "foo/bar/baz.fr" aliases as foo.bar.baz instead of foo.bar.@"baz.fr"
+        // TODO: i hate that this blesses a file extension
+        // TODO: it's sad that this disallows `foo/bar.fr` and `foo/bar/`
+        //       so it forces a convention foo/bar/lib.fr as the entry point. 
+        //       (which is what i like personally but it's lame to force it)
+        if filename.ends_with(".fr") {
+            name := self.pool.insert_owned(filename.slice(0, filename.len - 3));
+            var := @try(self.decl_var(s, name, .Const, zeroed Span /*TODO*/, .Unknown)) return;
+            dest := self.scopes.get_var_data(var);
+            dest.set_type(Finished = ScopeId);
+            dest.expr&.set(self.to_values(ScopeId, new_s), ScopeId);
+        };
+        
+    };
+    
+    scope.optional_path = Flag.SYMBOL_ZERO.ident();
+    
+    .Ok
+}
+
+
+// This is a bit of a hack to avoid special representation for a block of declarations that can be imported but don't exist in a parent 
+// that act as a root for the resolving process. so the top level scope and #use/import() but not @struct because that's reached as a normal expression. 
+// TODO: this provides an obvious extension point for being able to pass arguments when importing a library (replace the arg=empty_pattern).  
+fn make_function_scope(c: *SelfHosted, body: []FatStmt, name: Symbol, scope: ScopeId) Res(FuncId) = {
+    loc := body[0].loc;
+    result := c.box(synthetic_ty((Value = (bytes = unit_value, coerced = false)), loc, void));
+    result := synthetic_ty(new_block(body.as_raw_list(), result), loc, void);
+    def: FnDef = (name = (Some = name), arg = empty_pattern(c.get_alloc(), loc), ret = (Finished = void), tags = list(temp()), loc = loc);
+    func := make_func(def, (Some = result&), false, true);
+    r: ResolveScope = new(c, scope, func.loc);
     zone := zone_begin(.Scope); // TODO: defer
-    res := r&.resolve_func(func);
+    res := r&.resolve_func(func&);
     zone_end(zone);
-    res
+    @try(res) return;
+    f := c.add_function(func);
+    (Ok = f)
 }
 
 fn resolve_sign(self: *SelfHosted, func: *Func) PRes #once = {
@@ -158,13 +244,14 @@ VarData :: @struct {
     expr: FatExpr;
     // `nullable_type` is null for Infer/Finished. use `inferred` instead.
     nullable_type: *LazyType;
-    inferred: Type; // TODO: remove this. it should be the same as type.Finished
+    inferred: Type; 
     took_address: bool;
     ready: bool;
 };
 
 Scope :: @struct(
     parent: ScopeId,
+    optional_path: Symbol = Flag.SYMBOL_ZERO.ident(),
     vars: RawList(Var),
     lookup := zeroed RawHashMap(Symbol, Var),
     nullable_use: *UseScopes,
@@ -348,7 +435,7 @@ fn add_use(self: *ResolveScope, a: *Annotation, reexport: bool) PRes = {
             // implicitly wrap the string in import(), this is a hack so you can do it at top level 
             // more easily without it being super confusing about where you look to resolve the identifier for `import`
             fn String(it) => {
-                scope := @try(self.compiler.import_as_scope(it[], arg.loc)) return;
+                scope := @try(self.compiler.import_as_scope(it[], arg.loc, .None)) return;
                 add_use(self.compiler, scope_with_use, scope, reexport);
             };
             @default => return(@err("#use is temporarily limited to GetVar or String expressions"));
@@ -1024,14 +1111,20 @@ fn slow_body(self: *ResolveScope, body: *List(FatStmt)) PRes #once = {
 
 import_literal_file_name :: "(import literal)";
 
-fn import_as_scope(self: *SelfHosted, name: Symbol, _loc: Span) Res(ScopeId) = {
+fn import_as_scope(self: *SelfHosted, name: Symbol, _loc: Span, force_scope: ?ScopeId) Res(ScopeId) = {
     name_s := self.pool.get(name);
+    @if(force_scope.is_none())
     if self.imports.get(name) { s | 
         @err_assert(s != NOSCOPE, "unhandled recursive import: %", name_s) return;
+        @try(self.fill_directory_scope(s)) return;
         return(Ok = s);
     };
+    if name_s == "@" {
+        return(Ok = self.library_scope);
+    };
+    
     self.imports.insert(name, NOSCOPE);
-    @err_assert(name_s.len > 1, "empty import descriptor") return;
+    @err_assert(name_s.len > 1, "empty import descriptor: %", name_s) return;
     selector := name_s[0];
     file := @switch(selector) {
         @case("@".ascii()) => {
@@ -1059,6 +1152,11 @@ fn import_as_scope(self: *SelfHosted, name: Symbol, _loc: Span) Res(ScopeId) = {
     };
     // TODO: think about what the parent scope should be here. 
     fake_fid := @try(make_function_scope(self, stmts.items(), name, TOP_LEVEL_SCOPE)) return;
+    if force_scope { s |
+        it := self.get_function(fake_fid)[].body&;
+        @debug_assert(it.is(.Normal) && it.Normal.expr&.is(.Block));
+        it.Normal.expr.Block.scope = s;
+    };
     val := self.to_values(FuncId, fake_fid);
     scope := @try(value_to_scope(self, val, FuncId, (Some = name))) return;
     self.imports.insert(name, scope);  // redundant with save_scope_as since we know we just made the function

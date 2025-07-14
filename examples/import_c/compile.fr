@@ -20,14 +20,11 @@
 #use("@/examples/import_c/lib.fr");
 #use(Tokens);
 
-// TODO: unlinkedlistify this
 // TODO: i find the is_* fields more confusing than just using @tagged
-Obj :: @rec @struct(
-    next: *Obj,
+Obj :: @struct(
     name: Str,
     ty: *CType,
     tok: *Token,
-    is_local: bool,
     align: i32,
     stack_slot: Qbe.Ref, 
     is_function: bool,
@@ -35,20 +32,14 @@ Obj :: @rec @struct(
     is_static: bool,
     is_tentative: bool,
     is_tls: bool,
+    is_local: bool,
+    is_inline: bool,
+    yielded: bool,
     init_data: []u8,
     rel: []Dat2.Reloc,
-    is_inline: bool,
-    body: *Node,
-    locals: *Obj,
-    stack_size: i32,
     f: *Qbe.Fn,
     par_r: Qbe.Ref,
     global_symbol: ?Qbe.Sym,  // TODO: use this more
-    sent_to_backend: bool,
-    def: *Obj,
-    franca_f: FuncId,
-    franca_v: BakedVarId,
-    yielded: bool,
 );
 Node :: @rec @struct(
     kind: NodeKind,
@@ -446,7 +437,6 @@ fn new_var(c: *Ctx, name: Str, ty: *CType, a: Alloc) *Obj = {
 fn new_lvar(c: *Ctx, name: Str, ty: *CType) *Obj = {
     var := c.new_var(name, ty, temp());
     var.is_local = true;
-    var.next = c.locals;
     c.locals = var;
 
     if c.current_fn { current_fn |
@@ -475,7 +465,6 @@ fn create_stack_slot(c: *Ctx, var: *Obj) void = {
 
 fn new_gvar(c: *Ctx, name: Str, ty: *CType, tok: *Token) *Obj = {
     var := c.new_var(name, ty, c.arena);
-    var.next = c.globals;
     var.is_static = true;
     var.is_definition = true;
     var.global_symbol = (Some = c.m.mangle(var));
@@ -2073,7 +2062,6 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *T
     c.f.link_blocks_from_rpo();
     f.f = c.f;
     
-    f.locals = c.locals;
     c.leave_scope();
     c.labels&.clear();
     c.current_fn = .None;

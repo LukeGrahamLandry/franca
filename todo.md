@@ -8,6 +8,7 @@ notably those are all things to aren't going to change if you're just working on
 
 ---
 
+- "arg type mismatch after removing const args" error message needs to tell you the types
 - :ReWalkTokens
 - bake for list/hashmap need to get rid of uninit memory
 - i need to be able to easily identify the Anon generated functions. 

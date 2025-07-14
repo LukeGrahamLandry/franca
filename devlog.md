@@ -1,4 +1,17 @@
 
+## (Jul 13)
+
+- finish directory import 
+  - `dir.@"file.fr"` sucks so need some sugar for that. 
+    for now just alias whenever there's a `.fr`, but what if you have a directory called that too, sad. 
+  - i still want to let you get_constants() and iterate over it so need to readdir so need to find the syscall for that. 
+
+## (Jul 11)
+
+- start allowing import() of a directory
+  - i want to make it easier to move files around without making all the importers change paths. 
+    so this way you can get rid of a directory and replace it with a file that points to the new stuff to give people time to update. 
+
 ## (Jul 10)
 
 - fixed arm-elf adr reloc
@@ -11,7 +24,8 @@
   - compute array_len as max index as you go
   - set size to base.size*array_len at the end 
   - very confusing when array_len gets set to 0 or -1, one is `static struct { T a[] } = { ... }` and one is `static T a[] = { ... }` ?
-  
+- import_c.Obj.size_of: old=192, new=112. just got rid of some fields unused since i made it rely on backend more a while ago. 
+
 ## (Jul 9)
 
 - have to make sure #ir gets a body before any calls get compiled so we check if it's foldable
