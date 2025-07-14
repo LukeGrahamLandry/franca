@@ -1,4 +1,8 @@
 
+## (Jul 14)
+
+- arm linux has some of the open() flag values shifted
+
 ## (Jul 13)
 
 - finish directory import 

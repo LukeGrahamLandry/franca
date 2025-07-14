@@ -41,15 +41,25 @@ O :: @struct {
     RDWR      :: 0b10;
 };
 
-fn open(path: CStr, flags: Mask(O)) SysResult(Fd) = {
+open :: fn(path: CStr, flags: Mask(O)) SysResult(Fd) = {
     @debug_assert_eq(bit_and(flags, O.CREAT), 0, "open(CREAT); call an overload that lets you pass mode");
     openat(AT'FDCWD(), path, flags, 0)
-}
+};
 
 // the high bits of `flags` are platform specific. they'll be shifted down and passed directly. 
 // the low bits are remapped to the correct platform values. 
-fn openat(parent: Fd, path: CStr, flags: Mask(O), mode: Mask(S)) SysResult(Fd) = {
-    flags := fix_flags(Macos.O, Linux.O, O, O.ACCMODE, true, flags);
+openat :: fn(parent: Fd, path: CStr, flags: Mask(O), mode: Mask(S)) SysResult(Fd) = {
+    d := bit_and(flags, O.ACCMODE).bit_or(flags.shift_right_logical(32));
+    flags := @match(current_os()) {
+        fn macos() => fix_flags(Macos.O, O, d, flags);
+        fn linux() => if current_arch() == .aarch64 {
+            fix_flags(Linux.O_arm, O, d, flags)
+        } else {  // same for rv ones i care about
+            fix_flags(Linux.O_amd, O, d, flags)
+        };
+        @default => unreachable();
+    };
+    
     errno()[] = 0/*HACK*/;
     err := Syscall'openat(parent, path, flags, mode);
     if err < 0 {
@@ -57,7 +67,7 @@ fn openat(parent: Fd, path: CStr, flags: Mask(O), mode: Mask(S)) SysResult(Fd) =
     };
     
     (Ok = (fd = err))
-}
+};
 
 //
 // <sys/stat.h>
@@ -203,10 +213,17 @@ mmap :: fn(addr: rawptr, len: i64, prot: Mask(PROT), flags: Mask(MAP), fd: Fd, o
 // TODO: linux syscall version of readdir, et al.
 // 
 
-DIR :: @struct(
-    system: rawptr,
-    entry: dirent,
-);
+DIR :: @struct {
+    system: rawptr;
+    entry: dirent;
+    impl: @struct {  // used when not linking libc
+        fd: Fd;
+        done: bool;
+        cur: i64;
+        end: i64;
+        buf: []u8;
+    };
+};
 
 dirent :: @struct {
     d_ino: u64;
@@ -217,40 +234,80 @@ dirent :: @struct {
 };
 
 opendir :: fn(path: CStr) SysResult(*DIR) = {
-    f := choose_inode64_on_applex8664(Syscall'opendir, Syscall'@"opendir$INODE64");
-    r := f(path);
-    if r == 0 {
-        return fix_errno(*DIR, r);
+    a := general_allocator();
+    dir := a.box_zeroed(DIR);
+    if prefer_syscalls() {
+        dir.impl.fd = @try(open(path, @or(O.RDONLY, O.DIRECTORY))) return;
+        dir.impl.buf = a.alloc(u8, 4096);
+    } else {
+        f := choose_inode64_on_applex8664(Syscall'opendir, Syscall'@"opendir$INODE64");
+        r := f(path);
+        if r == 0 {
+            a.dealloc_one(DIR, dir);
+            return fix_errno(*DIR, r);
+        };
+        dir.system = rawptr_from_int r;
     };
     
-    dir := general_allocator().box_zeroed(DIR);
-    dir.system = rawptr_from_int r;
     (Ok = dir)
 };
 
 readdir :: fn(dir: *DIR) SysResult(*dirent) = {
+    r := @if(prefer_syscalls(), {
+        self, entry := (dir.impl&, dir.entry&);
+        @if(self.done) return(Ok = zeroed(*dirent), Err = (_ = 0));
+        if self.cur >= self.end {
+            self.cur = 0;
+            self.end = Syscall'getdents(self.fd, self.buf.ptr, self.buf.len, @ref 0/*macos*/);
+            
+            if self.end == 0 {
+                self.done = true;
+                return(Ok = zeroed(*dirent), Err = (_ = 0));
+            };
+            if self.end < 0 {
+                self.done = true;
+                return(Posix'fix_errno(*dirent, self.end));
+            };        
+        };
+        
+        r := ptr_cast_unchecked(u8, SysDirEnt, self.buf.index(self.cur));
+        self.cur += @match(current_os()) {
+            fn macos() => r.m.d_reclen.zext();
+            fn linux() => r.l.d_reclen.zext();
+            @default => unreachable();
+        };
+        r
+    }, {
+        f := choose_inode64_on_applex8664(Syscall'readdir, Syscall'@"readdir$INODE64");
+        
+        // TODO: if we're trying to be a libc, the caller is supposed to do this, not us. 
+        errno()[] = 0;
+        
+        r := f(dir.system);
+        if r == 0 { 
+            return fix_errno(*dirent, r);
+        };
+        SysDirEnt.ptr_from_int(r)
+    });
+
     SysDirEnt :: @union(m: Macos.DirEnt, l: Linux.DirEnt);
     // TODO: this can be #where when i :UpdateBoot
     fix :: fn($T: Type, d: *Posix.dirent, s: *T) void #generic = {
         d.d_ino = s.d_ino;
         d.d_seekoff = s.d_seekoff;
         d.d_type = @as(u8) s.d_type;
-        strncpy :: fn(d: *u8, s: *u8, n: i64) void #libc;  // TODO
+        strncpy :: fn(d: *u8, s: *u8, n: i64) void = {
+            while => s[] != 0 && n > 0 {
+                d[] = s[];
+                d = d.offset(1);
+                s = s.offset(1);
+                n -= 1;
+            };
+            d.slice(n).set_zeroed();
+        };
         strncpy(d.d_name&.as_ptr(), s.d_name&.as_ptr(), 255);
     };
 
-    f := choose_inode64_on_applex8664(Syscall'readdir, Syscall'@"readdir$INODE64");
-    
-    // TODO: if we're trying to be a libc, the caller is supposed to do this, not us. 
-    if is_linking_libc() {
-        errno()[] = 0;
-    };
-    
-    r := f(dir.system);
-    if r == 0 { 
-        return fix_errno(*dirent, r);
-    };
-    r := SysDirEnt.ptr_from_int(r);
     
     @match(current_os()) {
         fn macos() => fix(Macos.DirEnt, dir.entry&, r.m&);
@@ -262,12 +319,19 @@ readdir :: fn(dir: *DIR) SysResult(*dirent) = {
 };
 
 closedir :: fn(dir: *DIR) SysResult(void) = {
-    closedir :: fn(dir: rawptr) i64 #libc;
-    err := closedir(dir.system);
-    if err != 0 { 
-        return void.fix_errno(err);
+    a := general_allocator();
+    d := dir[];
+    a.dealloc_one(DIR, dir);
+    if prefer_syscalls() {
+        a.dealloc(d.impl.buf);
+        close(d.impl.fd);
+    } else {
+        closedir :: fn(dir: rawptr) i64 #libc;
+        err := closedir(d.system);
+        if err != 0 { 
+            return void.fix_errno(err);
+        };
     };
-    general_allocator().dealloc(DIR, dir.slice(1));
     (Ok = ())
 };
 
@@ -547,7 +611,7 @@ SysError :: @struct(_: i64);
 fn SysResult($T: Type) Type = {
     Self :: @struct {
         Err: SysError = (_ = 0);
-        Ok: T;
+        Ok: T = zeroed T;
     };
     
     fn if(self: Self, $body: @Fn(t: T) void) void = {
@@ -561,6 +625,7 @@ fn SysResult($T: Type) Type = {
     
     fn is_ok(self: Self) bool  = self.Err._ == 0;
     fn is_err(self: Self) bool = self.Err._ != 0;
+    fn is_err(self: *Self) bool = self.Err._ != 0;
     
     fn unwrap(self: Self) T = 
         self || @panic("syscall failed. system errno = %", self.Err._);
