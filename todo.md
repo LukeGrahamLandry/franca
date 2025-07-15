@@ -165,8 +165,6 @@ hould just make them local constants in each file like they are here in riscv
 
 ## don't rely on libc
 
-- (arm) clear_instruction_cache, figure out the instruction for it 
-- readdir, figure out the syscall for it 
 - import_c/tokenize: strtoul, strncasecmp, strtod
 - import_wasm/run.fr: 
   - snprintf
@@ -216,8 +214,6 @@ q.out`impl2__7041:
 - import_c can't compile lua targetting amd64 (makes an exe but it crashes immediately)
 - import_c/test/ffi.fr: panic! sysv abi does not support variadic env calls
 - finish amd64/isel/NEW_ADDR_FOLDING
-- formalize ENABLE_INCREMENTAL in backend/arm64/emit (+ support on amd64)
-  - or maybe get rid of it? it's not super interesting without a lot more infrastructure. 
 - be less strict about amd64 address folding when there's a large constant pointer (which is valid when jitting)
   - idk, i might have done this already? 
 - CLOCK_REALTIME
@@ -267,7 +263,6 @@ the one zip file for the resource but i think being able to printf debug by just
 editing your local copy of the c files is important. 
 - api for import() of a string that you want to involve in the cache file. 
 rn it just assumes it's generated from your input files so can be safely ignored. 
-- unrelated: fetch_or_crash use my sha256 instead of exec(shasum). will need to parse the hex back to bytes.
 - have examples/default_driver and graphics/easy do it for main(). 
 but then need to deal with including build options in the cache (like -unsafe, -wgpu, ENABLE_TRACY) 
 - do automatic caching for big comptime things (like import_c'include)

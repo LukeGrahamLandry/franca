@@ -2,6 +2,7 @@
 ## (Jul 14)
 
 - arm linux has some of the open() flag values shifted
+- cleanup: get rid of replace_body_source, pre-vbytes bake builtins, comptime_arch, target_(arch/os)_bitset
 
 ## (Jul 13)
 

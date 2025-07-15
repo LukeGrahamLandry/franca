@@ -232,63 +232,14 @@ fn fill_driver_vtable(vtable: *ImportVTable) void = {
         _, id := c.cast()[][].reserve_baked(jit_addr);
         id
     };
-  
-    vtable.replace_body_source = fn(c: Compiler, fid: FuncId, new_source: Str) CRes(void) = {
-        self := c.cast()[][];
-        func := self.get_function(fid);
-        @err_assert(func.get_flag(.NoInline), "replace_body_source on inlinable function will be very confusing") return;
-        has_shim := func.get_flag(.AlreadyHasShim);
-        asm_done := func.get_flag(.RealAsmDone);
-        
-        span := self.codemap.add_file("replace_body_source", new_source);
-        parsed := self.parser.push_parse(new_source, span);
-        new_body: FuncImpl = (Normal = (expr = (GetParsed = parsed), ty = UnknownType, done = false, loc = span));
-        
-        func.body = new_body;
-        // TODO: should be able to inline this
-        flags := @slice(FnFlag.ResolvedBody, .EnsuredCompiled, .RealAsmDone);
-        for flags { it |
-            func.unset_flag(it);
-        };
-        
-        if !asm_done {
-            return(.Ok);
-        };
-        
-        shared := self.comptime_codegen;
-        @debug_assert(!shared.threaded, "TODO");
-        @debug_assert(!shared.m.fixups_locked);
-        id := self.comptime_jit_symbol_id(fid);
-        
-        // if it was already compiled, need to clear this before making the shim, 
-        // so the shim's inner is_ready check doesn't always call the old function without 
-        // checking with the compiler to see if there's a new one. 
-        use_symbol(shared.m, id) { s |
-            s.jit_addr = 0.rawptr_from_int();
-            s.kind = .Pending;
-        };
-        
-        if !has_shim {
-            self.create_jit_shim(fid); 
-        };
-        
-        use_symbol(shared.m, id) { s |
-            if s.got_lookup_offset != -1 {
-                got_addr := shared.m.segment_address(.ConstantData, s.got_lookup_offset);
-                rawptr.ptr_from_raw(got_addr)[] = s.shim_addr;
-            }
-        };
-        
-        .Ok
-    };
-    
+ 
     vtable.import_frc = fn(c: Compiler, bytes: []u8) CRes(ScopeId) = {
         self := c.cast()[][];
         @if(DISABLE_IMPORT_FRC) return(@err("TODO: DISABLE_IMPORT_FRC because scoping when you import the compiler is messed up"));
         self.import_frc(bytes)
     };
     
-    vtable.cached_compile_module =  fn(path: Str, opts: *BuildOptions, out_alloc: Alloc) CRes([]u8) = {
+    vtable.cached_compile_module = fn(path: Str, opts: *BuildOptions, out_alloc: Alloc) CRes([]u8) = {
         @if(DISABLE_IMPORT_FRC) return(@err("TODO: DISABLE_IMPORT_FRC because scoping when you import the compiler is messed up"));
         Incr'cached_compile_module(path, opts, out_alloc)
     };
@@ -423,14 +374,6 @@ fn fill_export_ffi(out: *List(u8)) void = {
 
 compiler_exports :: @struct {
     // TODO: fix error message if you forget a semi-colon in the string. 
-    #export("fn lookup_baked(addr: i64) ?BakedVarId #ct #comptime_addr(%);\n")
-    lookup_baked :: fn(addr: i64) ?BakedVarId = {
-        if current_comptime()[].baked.vmem&.get(rawptr_from_int addr) { it, addend |
-            @assert_eq(addend, 0, "TODO: internal pointers in lookup_baked()");
-            @if_let(it) fn BakedVarId(it) => return(Some = it);
-        };
-        .None
-    };
     
     // TODO: do something if the bytes are too big for the allocation. 
     #export("fn lookup_baked_vbytes(vbytes: []u8) ?Ty(BakedVarId, i32) #ct #comptime_addr(%);\n")
@@ -444,10 +387,6 @@ compiler_exports :: @struct {
     
     // TODO: these need to return a different BakedVarId if you had to deduplicate. 
     //       (instead of error if collide... tho rn it's just nothing)
-    #export("fn cache_baked(addr: i64, id: BakedVarId) void #ct #comptime_addr(%);\n")
-    cache_baked :: fn(addr: i64, id: BakedVarId) void = {
-        current_comptime()[].baked.vmem&.insert(rawptr_from_int addr, (BakedVarId = id)); // TODO: error if collide? 
-    };
     #export("fn cache_baked_vbytes(addr: []u8, id: BakedVarId) void #ct #comptime_addr(%);\n")
     cache_baked_vbytes :: fn(addr: []u8, id: BakedVarId) void = {
         current_comptime()[].baked.vmem&.insert(addr, (BakedVarId = id)); // TODO: error if collide? 
@@ -536,12 +475,6 @@ compiler_exports :: @struct {
         panic("Comptime reported error.")
     };
   
-    // TODO: remove this. it's always better to use meta.fr/emplace_bake()
-    #export("fn bake_value(v: BakedVar) BakedVarId #ct #comptime_addr(%);\n")
-    bake_var :: fn(v: BakedVar) BakedVarId = {
-        current_comptime().bake_legacy(v, .None)
-    };
-    
     #export("fn safety_check_enabled(check: SafetyCheck) bool #ct #comptime_addr(%);\n")
     safe :: fn(check: SafetyCheck) bool = {
         build_options := current_comptime().get_build_options();
@@ -614,8 +547,6 @@ compiler_exports :: @struct {
         self.unwrap_report_error(void, res);
         each(walk.placeholders, fn(e) => @assert(e.expr&.is(.Poison), "ice: unquote_placeholders didn't use all arguments\n%", template&.log(self)));
         self.renumber_expr(template&, .None); // :SLOW
-        //walk: MarkNotDone = ();
-        //walk&.walk_expr(template&); // TODO: might not need this :SLOW
         template
     };
     
@@ -795,7 +726,6 @@ compiler_exports :: @struct {
         self := current_comptime();
         old := self.dispatch.enclosing_function;
         self.dispatch.enclosing_function = .None;
-        //expr = self.clone(expr&); // TODO: do i need to do this? :SLOW
         res := self.poll_in_place(void, => self.compile_expr(expr&, .None));
         self.dispatch.enclosing_function = old;
         self.unwrap_report_error(void, res);

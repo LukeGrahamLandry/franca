@@ -17,14 +17,13 @@
 
 ### bake
 
-- `fn lookup_baked(addr: i64) ?BakedVarId`
+- `fn lookup_baked_vbytes(addr: []u8]) ?Ty(BakedVarId, i32)`
   - check if a pointer in the comptime address space already has already been baked as a relocatable value for AOT compilation
-- `fn cache_baked(addr: i64, id: BakedVarId) ?BakedVarId`
+- `fn cache_baked_vbytes(addr: []u8], id: BakedVarId) void`
   - like lookup_baked but creates the mapping if one didn't exist already
 - `fn dyn_bake_relocatable_value(raw_bytes: Slice(u8), ty: Type, force_default_handling: bool) Slice(BakedEntry)`
   - dynamically invoke the right version of bake_relocatable_value (without a $Type)
   - this is useful (to call on your fields) when writting your own bake_relocatable_value implementation
-- `fn bake_value(v: BakedVar) BakedVarId`
 
 ### for writing macros
 
