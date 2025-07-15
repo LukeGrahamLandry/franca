@@ -338,14 +338,7 @@ fn resolve_func_args(self: *ResolveScope, func: *Func) PRes = {
     @debug_assert_ne(func.resolve_scope, NOSCOPE, "function must have scope");
     self.scope = func.resolve_scope;
     
-    has_use := false;
-    each func.annotations { a |
-        @switch(a.name) {
-            @case(Flag.use.ident()) => @try(add_use(self, a, false)) return;
-            @case(Flag.reexport.ident()) => @try(add_use(self, a, true)) return;
-            @default => ();
-        };
-    };
+    @try(self.apply_annotations(func.annotations.items())) return;
     
     generic := func.get_flag(.Generic); // ret is allowed to depend on previous args.
     func.set_flag(.ResolvedSign);
@@ -419,6 +412,17 @@ fn value_to_scope(self: *SelfHosted, value: Values, type: Type, save_scope_as: ?
     @err("invalid type for value_to_scope")
 }
 
+fn apply_annotations(self: *ResolveScope, a: []Annotation) PRes = {
+    each a { a |
+        @switch(a.name) {
+            @case(Flag.use.ident()) => @try(add_use(self, a, false)) return;
+            @case(Flag.reexport.ident()) => @try(add_use(self, a, true)) return;
+            @default => ();
+        };
+    };
+    .Ok
+}
+
 fn add_use(self: *ResolveScope, a: *Annotation, reexport: bool) PRes = {
     scope_with_use := self.scope;
     arg := @unwrap(a.non_void_arg(), "#use requires an argument") return;
@@ -458,7 +462,7 @@ fn add_use(self: *SelfHosted, scope_with_use: ScopeId, scope_being_used: ScopeId
 
 fn add_use_pending(self: *SelfHosted, scope_with_use: ScopeId, v: Var, reexport: bool) void = {
     use := get_use(self, scope_with_use);
-    @if(TRACK_SCOPES) @println("[S] % save #use(%%%)", scope_with_use.id(), self.pool.get(v.name), "%", v.id);
+    @if(TRACK_SCOPES) @println("[S] % save #use(%%%)", scope_with_use.id(), self.pool.get(v.name), "%", v.id.id);
     use.parents&.push((who = (PendingEval = v), reexport = reexport), self.get_alloc());
 }
 
@@ -559,16 +563,8 @@ fn scan_const_decls(self: *ResolveScope, stmt: *FatStmt) CRes(bool) = {
             return(Ok = true);
         });
         (fn Annotations(annotations) => {
-            if annotations.len == 1 {
-                a := annotations.index(0);
-                if a.name == Flag.use.ident() {
-                    @try(add_use(self, a, false)) return;
-                };
-                if a.name == Flag.reexport.ident() {
-                    @try(add_use(self, a, true)) return;
-                };
-                stmt.stmt = .Noop;
-            };
+            @try(self.apply_annotations(annotations.items())) return;
+            stmt.stmt = .Noop;
         });
         @default => ();
     };
@@ -629,7 +625,7 @@ fn find_var_in_scope_inner(self: *SelfHosted, name: Symbol, s: ScopeId, for_use:
                         fn PendingEval(it) => {
                             // TODO: get this on the main event loop i guess?
                             T :: Ty(Values, Type);
-                            @if(TRACK_SCOPES) @println("[S] % eval #use(%%%)", s.id(), self.pool.get(it.name), "%", it.id);
+                            @if(TRACK_SCOPES) @println("[S] % eval #use(%%%)", s.id(), self.pool.get(it.name), "%", it.id.id);
                             hack := self.poll_in_place(T, => self.find_const(it[], .None));
                             value, type := self.unwrap_report_error(T, hack);
                             @if(TRACK_SCOPES) @println("[S] #use(%)", log(value&, self, type));

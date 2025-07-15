@@ -105,7 +105,6 @@ TODO: end of loop. still too many options for 'index'
 - #ir tries to ignore zero-sized params but not if they're first which is sad
 - :BrokenCGeneric i think erroring on conflicting `_Generic` cases is correct but you're supposed to treat `long` and `long long`
 as different types even when they're the same size. 
-- automatically test examples/repl.fr
 - "need to be consistant about how to handle modules like this that don't actually compile anything"
 - fix examples/terminal.fr -jit so it doesn't freak out about nested compiler contexts because of the repl
   (get rid of EASY_GRAPHICS_IS_JITTING_HACK)

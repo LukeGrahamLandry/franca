@@ -39,6 +39,7 @@ fn get_c_str(self: *StringPool, i: Symbol) CStr = {
 // SAFETY: 's' must not be deallocated during the lifetime of 'self' 
 fn insert_owned(self: *StringPool, s: Str) Symbol = {
     (self[].lookup&.get_or_insert(s) {
+        self.slow_integrity_check();
         i: Symbol = symbol_from_id(self[].values.len.trunc());
         self[].values&.push(s);
         i
@@ -47,11 +48,21 @@ fn insert_owned(self: *StringPool, s: Str) Symbol = {
 
 fn insert_borrowed(self: *StringPool, s: Str, a: Alloc) Symbol = {
     (self.lookup.raw&.get_or_insert_pinky_swear_not_to_mutate_the_key(s, self.lookup.alloc) { key |
+        self.slow_integrity_check();
         i: Symbol = symbol_from_id(self[].values.len.trunc());
         key[] = s.shallow_copy(a);  // this is legal because it won't change the hash
         self[].values&.push(key[]);
         i
     })[]
+}
+
+fn slow_integrity_check(self: *StringPool) void = {
+    @if(!SLOW_MEMORY_DEBUGGING) return();
+    @if(self.values.len > 1)  // skip SYMBOL_ZERO
+    enumerate self.values&.items().rest(1) { i, s |
+        j := self.lookup&.get(s[]) || @panic("slow_integrity_check: % %", i, s);
+        @assert_eq(i+1, j.id().zext(), "slow_integrity_check: % %", i, s);
+    };
 }
 
 // TODO: derive drop impls

@@ -4,12 +4,22 @@
 DEBUG_SPAM_LOG :: false;
 DISABLE_IMPORT_FRC :: true;  // TODO: need to fix this because terminal.fr imports this in a namespace
 
+prelude :: """
+    #include_std("lib/core.fr");
+    // cute trick so you can exit by just typing `q`. works because constants are lazily evaluated on first reference. 
+    q :: {
+        println("Goodbye!"); 
+        Syscall'exit(0); 
+    }; 
+""";
+
 fn main() void = {
-    prelude := "#include_std(\"lib/core.fr\");\n";
+    for(cli_args(), fn(it) => if(it == "-testrepl", test_repl));
+    
     state := init_repl(general_allocator(), prelude);
+    text := u8.list(state.allocator);
     loop {
         mark := mark_temporary_storage();
-        text := "".clone(state.allocator);
         (import("@/lib/sys/terminal.fr").interactive_read_line)(text&);
         text&.push_all(";");
         println("");
@@ -17,13 +27,12 @@ fn main() void = {
         @match(state&.run_chunk(text.items())) {
             fn Ok() => ();
             fn Err(e) => {
-                out: List(u8) = list(state.allocator);
+                out: List(u8) = list(temp());
                 state.program.fmt_error(e, out&, true);
                 println(out.items());
-                out&.drop();
             }
         };
-        text&.drop();
+        text&.clear();
         reset_temporary_storage(mark);
     };
 }
@@ -47,7 +56,6 @@ init_repl :: fn(a: Alloc, prelude: Str) ReplState = {
     stmts := self.unwrap_report_error(RawList(FatStmt), stmts); // TODO: don't return RawList -- Jun 29
     stmts := stmts.items();
     {c.vtable.make_and_resolve_and_compile_top_level}(c.data, stmts).unwrap();
-    
     // TODO: these numbers are experimentally where it happens to put the prelude constants right now. should do something more robust where you can ask it. 
     scope_id := self.scopes.new_scope(TOP_LEVEL_SCOPE, self.get_alloc(), file);
     scope := self.scopes[scope_id]&;
@@ -65,22 +73,20 @@ fn run_chunk(state: *ReplState, src: Str) Res(void) = {
     
     self := state.program;
     // need to leak the source text because you could always get an error message with a span that reference back to something you stuck in a variable.  
-    file := self.codemap.add_file("repl!", src.shallow_copy(state.program.get_alloc()));
+    src := src.shallow_copy(self.get_alloc());
+    file := self.codemap.add_file("repl!", src);
     id := self.parser.push_parse(src, file);
     stmts := @try(self.parser.finish_pending_stmts(id)) return;
     
     r: ResolveScope = new(self, state.top_scope, file);
     each stmts { stmt | 
-        //println(stmt.log(self));
         @try(r&.walk_stmt(stmt)) return;
-        //println(stmt.log(self));
-        state.walk_stmt(stmt);
-        //println(stmt.log(self));
+        _ := state.walk_stmt(stmt);
         
         @match(stmt.stmt&) {
             fn Noop() => ();
-            fn Annotations(a) => each a { a |
-                @println("TODO: #%", self.pool.get(a.name));
+            fn Annotations(it) => {
+                @try(r&.apply_annotations(it.items())) return;
             };
             fn Eval(e) => {
                 value := @try(self.repl_eval(e, .None)) return;
@@ -146,3 +152,28 @@ fn handle_stmt(self: *ReplState, stmt: *FatStmt) Result(DoMore, void) #once = (O
 fn handle_func(self: *ReplState, func: *Func) Result(DoMore, void) #once = (Ok = .Continue);
 fn handle_type(self: *ReplState, ty: *LazyType) Result(DoMore, void) #once = (Ok = .Continue);
 fn handle_pattern(self: *ReplState, p: *Pattern) Result(DoMore, void) #once = (Ok = .Continue);
+
+test_repl :: fn() void = {
+    repl := init_repl(general_allocator(), prelude);
+    lines := @const_slice(  
+        ("read_to_string_or_crash", false),
+        ("""#use("@/lib/sys/fs.fr")""", true),
+        ("read_to_string_or_crash", true),
+        
+        ("this_is_my_variable = 1", false),
+        ("this_is_my_variable := 123", true),
+        ("assert_eq(this_is_my_variable + 0, 123)", true),
+        ("this_is_my_variable = 246", true),
+        ("assert_eq(this_is_my_variable, 123*2)", true),
+        
+        ("q", true /*unreachable*/)
+    );
+    range(0, lines.len) { i |
+        src, expect := lines[i];
+        src := @tfmt("%;", src);
+        result := repl&.run_chunk(src);
+        @assert_eq(result&.is_ok(), expect, "%. %", i, src);
+        src.set_zeroed();  // stomp it to make sure a copy was made before interning anything 
+    };
+    unreachable(); // last command was to quit
+};

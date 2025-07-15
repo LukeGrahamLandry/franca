@@ -1,8 +1,18 @@
 
+## (Jul 15)
+
+- repl
+    - allow #use
+    - spent much too long on copying the input for add_file but passing the old one 
+      to push_parse which messed up the intern pool. 
+        - added a slow_memory_debugging check that catches if you misuse StringPool.insert_owned
+    - autotest
+
 ## (Jul 14)
 
 - arm linux has some of the open() flag values shifted
 - cleanup: get rid of replace_body_source, pre-vbytes bake builtins, comptime_arch, target_(arch/os)_bitset
+- made PageMap generic. planning on making a debugger and having a pagemap of symbols for breakpoints, etc. 
 
 ## (Jul 13)
 
