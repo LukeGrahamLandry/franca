@@ -1,7 +1,5 @@
 ::import("@/examples/testing.fr");
 
-// TODO: make -run work
-
 fn main() void = {
     compare_to_clang := false;
     for(cli_args(), fn(it) => if(it == "-ddc", => { compare_to_clang = true; }));
@@ -12,34 +10,70 @@ fn main() void = {
     root := fetch_or_crash("https://github.com/TinyCC/tinycc/archive/28d7fb85b25ad3667d1d2ca352173e214759d9e8.zip", 1151036, "b66f0513b730d62b6ccc46decc038217cad830f28bdb6ae21a6e1a786a085d02", "tinycc-28d7fb85b25ad3667d1d2ca352173e214759d9e8");
     root := @fmt_cstr("%/%", start, root);
     Syscall'chdir(root) || @panic("failed to set cwd to %", root);
+    println(root);
     
     write_entire_file_or_crash("config.h", config_h);
+    write_entire_file_or_crash("tccdefs.h", read_entire_file_or_crash(temp(), "include/tccdefs.h"));
     
-    sh(@slice(cc_path, "tcc.c", "-o", "tcc_fr.out", "-DONE_SOURCE=1", "-DTCC_IS_NATIVE", "-Denviron=0" /*hack*/));
-    sh(@slice("./tcc_fr.out", "tcc.c", "-Iinclude", "-o", "tcc_a.out", "-DONE_SOURCE=1"));
-    remove(@as(CStr) "./tcc_fr.out").unwrap();
-    bytes := read_entire_file_or_crash(temp(), "./tcc_a.out");
-    digest_a := Sha256'hex(bytes);
-    remove(@as(CStr) "./tcc_a.out").unwrap();
+    dest_path := "./tcc.out";
+    boot_compiler(cc_path, dest_path, true);
+    digest_a := show_hash(dest_path, "franca");
+    sh(@slice(dest_path, "-L.", "-I.", "-run", @tfmt("%/examples/import_c/test/hello.c", start)));
+    remove(dest_path.as_cstr()).unwrap();
     
     if compare_to_clang {
-        sh(@slice("clang", "tcc.c", "-o", "tcc_cl.out", "-DONE_SOURCE=1"));
-        sh(@slice("./tcc_cl.out", "tcc.c", "-Iinclude", "-o", "tcc_b.out", "-DONE_SOURCE=1"));
-        remove(@as(CStr) "./tcc_cl.out").unwrap();
-        digest_b := Sha256'hex(read_entire_file_or_crash(temp(), "./tcc_b.out"));
-        remove(@as(CStr) "./tcc_b.out").unwrap();
+        boot_compiler("clang", dest_path, false);
+        bytes := read_entire_file_or_crash(temp(), dest_path);
+        digest_b := show_hash(dest_path, "clang");
+        remove(dest_path.as_cstr()).unwrap();
         @assert_eq(digest_a, digest_b);
         @println("match!");
     };
-    @println("bootstrapped tcc sha256 is % size is %", digest_a, bytes.len);
 }
 
+fn show_hash(dest_path: Str, tag: Str) Str = {
+     bytes := read_entire_file_or_crash(temp(), dest_path);
+    digest := Sha256'hex(bytes);
+    @println("[%] bootstrapped tcc sha256 is % size is %", tag, digest, bytes.len);
+    digest
+}
+
+fn boot_rt_libs(tcc: Str) void = {
+    Syscall'chdir("lib") || @panic("chdir");
+
+    sh(@slice(tcc, "-c", "lib-arm64.c", "-o", "lib-arm64.o", "-I.."));
+    sh(@slice(tcc, "-c", "stdatomic.c", "-o", "stdatomic.o", "-I.."));
+    sh(@slice(tcc, "-c", "atomic.S", "-o", "atomic.o", "-I.."));
+    sh(@slice(tcc, "-c", "builtin.c", "-o", "builtin.o", "-I.."));
+    sh(@slice(tcc, "-c", "tcov.c", "-o", "tcov.o", "-I.."));
+    sh(@slice(tcc, "-ar", "rcs", "../libtcc1.a", "lib-arm64.o", "stdatomic.o", "atomic.o", "builtin.o", "tcov.o"));
+    sh(@slice(tcc, "-c", "runmain.c", "-o", "../runmain.o", "-I.."));
+    
+    Syscall'chdir("..") || @panic("chdir");
+}
+
+fn boot_compiler(host_cc: Str, dest: Str, need_rt_libs: bool) void = {
+    tmp_cc := "./tcc_boot.out";
+    sh(@slice(host_cc, "tcc.c", "-I.", "-o", tmp_cc, "-DTCC_IS_NATIVE=1", "-Denviron=0" /*hack*/));
+    if need_rt_libs {
+        boot_rt_libs(@tfmt("../%", tmp_cc));
+    };
+    sh(@slice(tmp_cc, "tcc.c", "-I.", "-L.", "-Iinclude", "-o", dest));
+    remove(tmp_cc.as_cstr()).unwrap();
+}
+
+// TODO: non-macos-arm
 config_h :: """
-#define TCC_VERSION "xxxx"
+#define TCC_VERSION "frfrfrfrfr"
+
 #define TCC_TARGET_ARM64 1
 #define TCC_TARGET_MACHO 1
+#define CONFIG_DWARF_VERSION 4
 #define CONFIG_CODESIGN 1
 #define CONFIG_USR_INCLUDE "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include"
+
+#define CONFIG_TCC_PREDEFS 0
+#define ONE_SOURCE 1
 """;
 
 // TODO: i need a better policy than just pasting this around

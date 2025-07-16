@@ -9,6 +9,24 @@
     does the `*&` just turn off a warning for adding a number to a string literal? 
   - last problem: it needs to tcc_add_macos_sdkpath to fine libc which needs -DTCC_IS_NATIVE which needs some more imports. 
     (if i hack around that it can compile hello world)
+  - need to compile libtcc1.a and runmain.o before it can compile any executables 
+    but it can compile those itself without a bootstrapping step so that's not a big deal. 
+  - i want to compile it starting with my compiler and with clang and have it compile itself and make sure 
+    they converge on identical binaries but they're two bytes different, very sad. 
+    objdump and dump_macho are the same, so it's in data or padding somewhere. 
+    ```
+    diff a.txt b.txt
+    33708c33708
+    < 008ecc0 0000 0100 6374 5f63 2d61 3762 3363 3738
+    ---
+    > 008ecc0 0000 0100 6374 5f63 2d62 3762 3363 3738
+    33898c33898
+    < 008f8a0 5806 0088 0000 0000 0000 7401 6363 615f
+    ---
+    > 008f8a0 5806 0088 0000 0000 0000 7401 6363 625f
+    ```
+    ah, fuckers. they put the file path in there. im compiling to tcc_a.out and tcc_b.out 
+    and the bytes that change are 0x61 vs 0x62
     
 ## (Jul 15)
 
