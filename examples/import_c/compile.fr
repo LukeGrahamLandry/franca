@@ -1810,7 +1810,7 @@ fn attribute_list(c: *Ctx, tok: *Token, ty: *CType) *Token = {
             };
             
             // TODO: some of these matter: __constructor__, __aligned__
-            skips :: @const_slice("__format__", "__const__"); // , "__constructor__", "__aligned__");
+            skips :: @const_slice("__format__", "__const__", "format", "noreturn"); // , "__constructor__", "__aligned__");
             if skips.contains(tok.str()) {
                 tok = c.skip_attribute(tok);
                 continue();
@@ -2476,6 +2476,12 @@ conditional :: fn(c, rest, tok, cond) #infix(.@"?", .Conditional) = {
         // :FrontendConstantFolding (only matters if the values are RCon too)
         // TODO: need to use Ref instead of creating a new var for [GNU] :?
         is_false := iscon(c.f.get_constant(cond_r), false, 0);
+        if cond_block.jmp.type == .jnz {
+            cond_block.jmp.type = .jmp;
+            if is_false {
+                cond_block.s1 = cond_block.s2;
+            };
+        };
         if(is_false, => else_r, => then_r)
     } else {
         if !c.speculate {
@@ -2610,6 +2616,12 @@ unary_amp :: fn(c, rest, tok) #prefix(.@"&") = {
 };
 
 unary_star :: fn(c, rest, tok) #prefix(.@"*") = {
+    // TODO: im not totally convinced this is right. 
+    //       but it makes `*&""` work (which is something TCC does)
+    if equal(tok.next, "&") {
+        return(c.parse_expr(rest, tok.next.next, .Unary));
+    };
+    
     // [https://www.sigbus.info/n1570#6.5.3.2p4] This is an oddity
     // in the C spec, but dereferencing a function shouldn't do
     // anything. If foo is a function, `*foo`, `**foo` or `*****foo`

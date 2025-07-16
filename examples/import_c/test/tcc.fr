@@ -1,0 +1,69 @@
+::import("@/examples/testing.fr");
+
+// TODO: make -run work
+
+fn main() void = {
+    compare_to_clang := false;
+    for(cli_args(), fn(it) => if(it == "-ddc", => { compare_to_clang = true; }));
+
+    // TODO: compile the c compiler
+    start := get_working_directory(temp()).items();
+    cc_path := @tfmt("%/target/cc.out", start);
+    root := fetch_or_crash("https://github.com/TinyCC/tinycc/archive/28d7fb85b25ad3667d1d2ca352173e214759d9e8.zip", 1151036, "b66f0513b730d62b6ccc46decc038217cad830f28bdb6ae21a6e1a786a085d02", "tinycc-28d7fb85b25ad3667d1d2ca352173e214759d9e8");
+    root := @fmt_cstr("%/%", start, root);
+    Syscall'chdir(root) || @panic("failed to set cwd to %", root);
+    
+    write_entire_file_or_crash("config.h", config_h);
+    
+    sh(@slice(cc_path, "tcc.c", "-o", "tcc_fr.out", "-DONE_SOURCE=1", "-DTCC_IS_NATIVE", "-Denviron=0" /*hack*/));
+    sh(@slice("./tcc_fr.out", "tcc.c", "-Iinclude", "-o", "tcc_a.out", "-DONE_SOURCE=1"));
+    remove(@as(CStr) "./tcc_fr.out").unwrap();
+    bytes := read_entire_file_or_crash(temp(), "./tcc_a.out");
+    digest_a := Sha256'hex(bytes);
+    remove(@as(CStr) "./tcc_a.out").unwrap();
+    
+    if compare_to_clang {
+        sh(@slice("clang", "tcc.c", "-o", "tcc_cl.out", "-DONE_SOURCE=1"));
+        sh(@slice("./tcc_cl.out", "tcc.c", "-Iinclude", "-o", "tcc_b.out", "-DONE_SOURCE=1"));
+        remove(@as(CStr) "./tcc_cl.out").unwrap();
+        digest_b := Sha256'hex(read_entire_file_or_crash(temp(), "./tcc_b.out"));
+        remove(@as(CStr) "./tcc_b.out").unwrap();
+        @assert_eq(digest_a, digest_b);
+        @println("match!");
+    };
+    @println("bootstrapped tcc sha256 is % size is %", digest_a, bytes.len);
+}
+
+config_h :: """
+#define TCC_VERSION "xxxx"
+#define TCC_TARGET_ARM64 1
+#define TCC_TARGET_MACHO 1
+#define CONFIG_CODESIGN 1
+#define CONFIG_USR_INCLUDE "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include"
+""";
+
+// TODO: i need a better policy than just pasting this around
+sh :: fn(a: []Str) void = {
+    show :: fn() => {
+        for a { a |
+            @print("% ", a);
+        };
+        println("");
+    };
+    show();
+    ok := if false {
+        ok, out, err := exec_and_catch(a[0], a.rest(1), temp());
+        if !ok {
+            print(out.items());
+            print(err.items());
+        };
+        ok
+    } else {
+        run_cmd_blocking(a[0], a.slice(1, a.len))
+    };
+    if !ok {
+        print("Failed to run: ");
+        show();
+        panic("sh failed");
+    };
+}

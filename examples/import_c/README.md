@@ -7,6 +7,8 @@ A C11 compiler adapted from <https://github.com/rui314/chibicc>.
 - fixed sizeof to ignore flexible array member 
 - allow `type function(), variable;` (which means `function :: fn() type; variable: type;`)
 - don't segfault when accessing anonymous union fields
+- don't assume that a file starting with an `#ifdef` and ending with an `#endif` can be treated like `#pragma once` 
+  (there may be multiple top level `#ifdef` blocks in a file so the last `#endif` isn't closing the first `#ifdef`). 
 
 ### Features
 
@@ -15,7 +17,7 @@ A C11 compiler adapted from <https://github.com/rui314/chibicc>.
 (WIP. for demos, see `examples/bf/c_source.fr` and `examples/view_image.fr`). 
 - optionally use the franca calling convention (passing a hidden environment pointer)
 - allow some function attributes
-  - ignored: `__format__`, `__const__`
+  - ignored: `__format__`, `__const__`, `format`, `noreturn`
 - show chain of macro declarations in error report
 
 ### Refactors 

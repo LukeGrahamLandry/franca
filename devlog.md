@@ -1,4 +1,15 @@
+## (Jul 16)
 
+- tcc
+  - it compiles but doesn't work
+  - they include tcc.h with different values for USING_GLOBALS and my detect_include_guard is going off incorrectly. 
+    can't assume that a file starting with an `#ifdef` and ending with an `#endif` can be treated like `#pragma once`.
+    need to bail from detect_include_guard when the first #if ends, not just go to the end and assume if there's an endif there it matches the start. 
+  - i don't super understand what this expression is supposed to do `*& TCC_VERSION + 4`,
+    does the `*&` just turn off a warning for adding a number to a string literal? 
+  - last problem: it needs to tcc_add_macos_sdkpath to fine libc which needs -DTCC_IS_NATIVE which needs some more imports. 
+    (if i hack around that it can compile hello world)
+    
 ## (Jul 15)
 
 - repl
@@ -7,6 +18,14 @@
       to push_parse which messed up the intern pool. 
         - added a slow_memory_debugging check that catches if you misuse StringPool.insert_owned
     - autotest
+- started playing with making a debugger but lost momentum when everythings broken forever and ever and ever
+- trying to get tcc to compile with import_c
+  - more attributes to ignore: format, noreturn
+  - `ssa temporary %c.129 is used undefined in @14 of @is_null_pointer (non-dom ins)`
+     don't emit a jnz on a constant because it doesn't like that a value isn't defined on the unreachable path. 
+     caught a bug!
+  - bleh they exec xcode's codesign
+  - more stuff for include.fr, reaching the point that i want to share with lib/sys/posix.fr
 
 ## (Jul 14)
 

@@ -26,6 +26,28 @@ notably those are all things to aren't going to change if you're just working on
   (same for linux-sta -> linux-dyn)
 - turn off Qbe.Fn.track_ir_names in import_c
 
+### !! BROKEN !!
+
+- readdir -os linux -arch aarch64 -syscalls doesn't work
+- spurious failure of import_c/tests/wuffs.fr on macos-x86_64 
+  (failed in github actions and then worked when rerun with no change)
+- static linux is broken randomly. 
+  - seems to only be when it's a `main` program, default_driver is fine. 
+  - works in blink but not orb. 
+  - maybe this is related to when tests/exe/sys.fr was failing in github actions? 
+  - turning off (forcing no_cache when !is_linking_libc) doesn't fix it. 
+    but you have to be careful to rm target/franca/cache when testing because the problem only 
+    doesn't happen when it's a cache hit so it pretends to work if you get lucky the first time. 
+  - doesn't happen when using linker i think
+
+```
+franca examples/default_driver.fr build compiler/main.fr -o q.out -os linux -arch x86_64 -syscalls && for i in $(seq 1 100);
+do
+    echo $i
+    orb ./q.out examples/toy/hello.fr || { echo "fail"; break; };
+done
+```
+
 ## import_symbol / weak
 
 TODO: my @import_symbol always does a weak symbol even though it in the macro body i say weak=false.

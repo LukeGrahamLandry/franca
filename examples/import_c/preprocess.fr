@@ -732,7 +732,7 @@ fn read_include_filename(c: *Ctx, rest: **Token, tok: *Token) Ty(Str, bool) = @i
 //     #define FOO_H
 //     ...
 //     #endif
-fn detect_include_guard(tok: *Token) ?Str = {
+fn detect_include_guard(c: *Ctx, tok: *Token) ?Str = {
     // Detect the first two lines.
     if(!is_hash(tok) || !equal(tok.next, "ifndef"), => return(.None));
     tok = tok.next.next;
@@ -751,12 +751,19 @@ fn detect_include_guard(tok: *Token) ?Str = {
             continue();
         };
 
-        if equal(tok.next, "endif") && tok.next.next.kind == .TK_EOF {
-            return(Some = macro);
+        if equal(tok.next, "endif") {
+            if tok.next.next.kind == .TK_EOF {
+                return(Some = macro);
+            };
         };
 
-        tok = if equal(tok, "if") || equal(tok, "ifdef") || equal(tok, "ifndef") {
-            skip_cond_incl(tok.next)
+        tok = if equal(tok.next, "if") || equal(tok.next, "ifdef") || equal(tok.next, "ifndef") {
+            t := skip_cond_incl(tok.next);
+            while => equal(t, "#") && (equal(t.next, "elif") || equal(t.next, "else")) {
+                t = skip_cond_incl(t.next);
+            } 
+            t := t.next;
+            t
         } else {
             tok.next
         };
@@ -777,7 +784,7 @@ fn include_file(c: *Ctx, tok: *Token, path: Str, filename_tok: *Token) *Token = 
 
     tok2 := c.tokenize_file(path);
 
-    if detect_include_guard(tok2) { guard_name | 
+    if detect_include_guard(c, tok2) { guard_name | 
         // detect_include_guard returns a borrow of the token but we need it to live past this file. 
         guard_name := guard_name.shallow_copy(c.arena);  
         c.include_guards&.insert(path, guard_name);
@@ -969,6 +976,20 @@ fn preprocess2(c: *Ctx, tok: *Token) *Token = {
         if equal(tok, "warning") {
             @warn_tok(c, tok, "warning");
             tok = skip_line(tok.next.next);
+            continue();
+        };
+        
+        // TODO: see if there's some common extension i should use for this instead. 
+        // for convenience in caching i want to represent -Ifoo as something in source text 
+        // so i don't have to add a new thing to .frc files. 
+        if equal(tok, "add_include_path") {
+            t := tok.next;
+            if t.kind != .TK_STR {
+                @error_tok(c, t, "expected string");
+            };
+            tok = skip_line(t.next);
+            s := t.str().slice(1, t.len.intcast() - 1);
+            c.include_paths&.push(s);
             continue();
         };
 
