@@ -1,112 +1,200 @@
-// TODO: let caller set cwd
-
 // TODO: better error handling. 
 // TODO: use posix_spawnp instead? that makes it easier to return an error to the caller. using fork is a pain. 
 // TODO: it doesn't look up the command like a shell does.
 fn run_cmd_blocking(path: Str, args: Slice(Str)) bool = {
     pid := fork();
-    if(pid.eq(0.intcast())) {
-       exec_cmd(path, args);
+    if pid == 0 {
+        exec_cmd(path, args);
     };
     
     status: i32 = 0.intcast();
-    res := waitpid(pid, status&, 0); 
+    res := Posix'waitpid(pid, status&, 0); 
     :: assert_eq(i32);
     assert_eq(res, pid); // TODO: error handling, check errno
     status.eq(0.intcast())
 }
 
-fn exec_and_catch(path: Str, args: Slice(Str), alloc: Alloc) Ty(bool, List(u8), List(u8)) = {
-    fork_and_catch(alloc) {
-        exec_cmd(path, args);
-    }
+fn exec_and_catch(path: Str, args: Slice(Str), alloc: Alloc) Ty(bool, List(u8), List(u8)) = 
+    exec_and_catch(path, args, alloc, "");
+
+fn exec_and_catch(path: Str, args: Slice(Str), alloc: Alloc, input: []u8) Ty(bool, List(u8), List(u8)) = {
+    cargs := make_args_for_exec(path, args, temp());
+    out := u8.list(alloc);
+    err := u8.list(alloc);
+    ok := @match(sys_capture_exec(cargs)) {
+        fn Err(msg) => {
+            // TODO: kill the child? 
+            err&.push_all(msg);
+            report_exec_error(err&, cargs);
+            false
+        }
+        fn Ok(p) => {
+            buf := @slice(out&, err&);
+            bool.loop() { $break |
+                @match(poll(p&, buf, true, input&, true)) {
+                    fn Ok(status) => {
+                        if status { status |
+                            break(status == 0);
+                        };
+                    }
+                    fn Err(msg) => {
+                        @fmt(err&, "%", msg);
+                        break(false);
+                    };
+                };
+                usleep(1000);  // TODO: this is stupid but i don't want to just spin. blocking poll instead?
+            }
+        }
+    };
+    (ok, out, err)
 }
 
 fn exec_cmd(path: Str, args: Slice(Str)) Never = {
-    path := as_cstr path;
-    cargs: List(CStr) = list(args.len.add(2), temp());
-    cargs&.push(path);
-    for(args) {s|
-        cargs&.push(as_cstr s);
-    };
-    cargs&.push((ptr = u8.ptr_from_int(0))); // libc wants a null terminated array.
-    execvp(path, cargs.maybe_uninit.ptr);
-    
+    cargs := make_args_for_exec(path, args, temp());
+    execvp(cargs[0], cargs.ptr);
     // ERROR
-    @println("Failed to exec path=%", path);
-    cargs.len -= 1; // don't try to print the null terminator
-    for(cargs) {s|
-        @println("- %", s);
-    };
+    err := u8.list(temp());
+    report_exec_error(err&, cargs);
+    eprintln(err.items());
     panic("failed to exec!")
 }
 
-// Be very very careful using this to do anything other than exec a new process. 
-// If you're running at comptime, you might not be done compiling and the child 
-// will hang forever because fork() doesn't take threads with you (codegen runs 
-// in a different thread). 
-fn fork_and_catch(alloc: Alloc, $f: @Fn() void) Ty(bool, List(u8), List(u8)) = {
-    out := Array(Fd, 2).zeroed();
-    err := Array(Fd, 2).zeroed();
-    pipe(out&);
-    pipe(err&);
+RunningProcess :: @struct {
+    pipes: Array(Fd, 3);  // in, out, err
+    pid: i32;
+};
+
+// TODO: let caller set cwd
+// TODO: handle sending input to the child process
+// TODO: deal with being sent signals while waiting
+// TODO: deal with waiting on multiple processes at once
+sys_capture_exec :: fn(args: []CStr) Result(RunningProcess, Str) = {
+    pipes := zeroed Array(Array(Fd, 2), 3);
+    each pipes& { p |
+        pipe(p) || return(Err = "libc::pipe() failed");
+    };
+    @debug_assert(args[args.len - 1].ptr.is_null());
     
     pid := fork();
-    if(pid.eq(0.intcast())){
-        // Child
-        Syscall'dup2(out&[1], STD_OUT);
-        Syscall'dup2(err&[1], STD_ERR);
+    if pid == 0 { // Child
+        // The important thing is that the child closes it's copy of the write end of its standard-input
+        // so when the parent closes its copy too, the child will read it as EOF so a program 
+        // that does "while(stdin)" will know it's reached the end and terminate. 
+        Syscall'close(pipes&[0]&[1]).unwrap();  // close write end
+        Syscall'close(pipes&[1]&[0]).unwrap();  // close read end
+        Syscall'close(pipes&[2]&[0]).unwrap();  // "
         
-        f();
-        Syscall'exit(0);
+        Syscall'dup2(pipes&[0]&[0], STD_IN)
+            || panic("failed to dup2(in)");
+        Syscall'dup2(pipes&[1]&[1], STD_OUT)
+            || panic("failed to dup2(out)");
+        Syscall'dup2(pipes&[2]&[1], STD_ERR)
+            || panic("failed to dup2(err)");
+        
+        execvp(args[0], args.ptr);
+        eprintln("libc::execvp() failed!");
+        Syscall'exit(1);
     };
-    // We don't need this end of the pipe in the parent. 
-    Syscall'close(out&[1]);
-    Syscall'close(err&[1]);
+    // else: Parent
+
+    Syscall'close(pipes&[0]&[0]).unwrap();  // close the read end
+    Syscall'close(pipes&[1]&[1]).unwrap();  // close the write end
+    Syscall'close(pipes&[2]&[1]).unwrap();  // "
     
-    // TODO: manual outlining like people do in rust is kinda annoying.
-    //       but also mine is extra dumb because i still copy and recompile this for every const argument of the outer function,
-    //       and rely on deduplicating to fix it.
-    collect_output :: fn(alloc: Alloc, out: Fd, err: Fd, pid: i32) Ty(bool, List(u8), List(u8)) = {
-        base_buffer_size := 65536;
-        // TODO: make base buffer size a default argument
-        outs: List(u8) = list(base_buffer_size, alloc);
-        errs: List(u8) = list(base_buffer_size, alloc);
-        
-        flag: u16 = (@as(i64) PollEvents.In).trunc();
-        o: PollFds = (fd = out, events = flag, revents = 0);
-        e: PollFds = (fd = err, events = flag, revents = 0);
-        poll_data: Array(PollFds, 2) = init(@slice(o, e));
-        poll_data := poll_data&.items();
-        
-        // If the output of the forked thing were small it would be good enough to just allocate a big buffer and read it all into it after waiting with hang.
-        // but i think if it fills the pipe it hangs forever cause you cant read to clear the pipe because you're blocking until the process ends,
-        // and its blocking until theres room to write more in the pipe. 
-        status := 0.intcast();
-        dowhile() {()bool|
-            fn read_some();
-            fn read_some(buf: *List(u8), f: PollFds) void = {
-                c := (@as(i64) f.revents.zext()).bit_and(@as(i64) PollEvents.In) != 0;
-                if c {
-                    len := Syscall'read(f.fd, buf.maybe_uninit.ptr.offset(buf.len), buf.maybe_uninit.len - buf.len).unwrap();
-                    buf.len += len;
-                    if buf.len == buf.maybe_uninit.len {
-                        buf.reserve(buf.len);
-                        read_some(buf, f);
-                    };
-                };
-            }
+    (Ok = (pid = pid, pipes = @array(pipes&[0]&[1], pipes&[1]&[0], pipes&[2]&[0])))
+};
+
+// TODO: allow using a hanging poll for when you're just calling this in a loop to collect everything
+//       but need to do the right thing if the process dies while you're polling it so it never writes anything else. 
+// This function should be called in a loop! 
+// (which exec_and_catch will do for you if you want it to block until all done). 
+// 
+// buf = (out, err); it's legal for all to be the same list
+fn poll(self: *RunningProcess, buf: []*List(u8), realloc: bool, input: *[]u8, last_input: bool) Result(?i32, Str) #use("@/lib/sys/posix.fr") = {
+    @debug_assert_eq(buf.len, 2);  // TODO: pass *Array.
+    poll_data := @array(@as(pollfd)
+        (fd = self.pipes&[0], events = POLL.OUT, revents = 0),
+        (fd = self.pipes&[1], events = POLL.IN, revents = 0),
+        (fd = self.pipes&[2], events = POLL.IN, revents = 0)
+    );
+    poll_data := poll_data&.items();
+    if input.len == 0 {
+        poll_data = poll_data.rest(1);
+    };
+
+    status: i32 = 0;
+    n := poll(poll_data, 0) || return(Err = "libc::poll() failed");
+    done := waitpid(self.pid, status&, W.NOHANG);
+    if done == 0 && n == 0 {
+        return(Ok = .None);
+    };
     
-            usleep(1000);
-            was_done := waitpid(pid, status&, @as(i64) WaitPidOptions.NoHang);
-            _ := poll(poll_data, 0).unwrap();
-            read_some(outs&, poll_data[0]);
-            read_some(errs&, poll_data[1]);
-            was_done == 0
+    if input.len > 0 {
+        p := poll_data.index(0);
+        if p.revents.bit_and(POLL.OUT) != 0 {
+            written := Syscall'write(p.fd, input.ptr, input.len) 
+                || return(Err = "libc::write failed");
+            input[] = input[].rest(written);
+            if input.len == 0 && last_input {  // make it read EOF
+                Syscall'write(p.fd, zeroed(*u8), 0); 
+                Syscall'close(p.fd)
+                    || return(Err = "failed to close input pipe");
+                self.pipes&[0].fd = -1;
+            };
         };
-        Syscall'close(out);
-        Syscall'close(err);
-        (status.eq(0), outs, errs)
+        poll_data = poll_data.rest(1);
     };
-    collect_output(alloc, out&[0], err&[0], pid)
-}
+    
+    full := false;
+    enumerate poll_data { i, p |
+        buf := buf[i];
+        @debug_assert(realloc || buf.maybe_uninit.len > buf.len, "poll:nospace");
+        have_data := p.revents.bit_and(POLL.IN) != 0;
+        @if(have_data) dowhile {
+            space := buf.maybe_uninit.len - buf.len;
+            if realloc && space == 0 {
+                buf.reserve(1);
+                space = buf.maybe_uninit.len - buf.len;
+            };
+            len := Syscall'read(p.fd, buf.maybe_uninit.ptr.offset(buf.len), space)
+                || return(Err = "libc::read() failed");
+            buf.len += len;
+            full = full || buf.maybe_uninit.len == buf.len;
+            
+            // :BigOutputBuffer (see devlog May 9, 2025)
+            system_pipe_buffer_capacity :: 65536;
+            len == system_pipe_buffer_capacity && len < space
+        };
+    };
+    
+    // the hope is that you're alllowed to waitpid again after the caller clears the buffer and get the status then
+    // TODO: is that true?
+    if done != 0 && !full {
+        Syscall'close(self.pipes&[0]);
+        Syscall'close(self.pipes&[1]);
+        Syscall'close(self.pipes&[2]);
+        
+        return(Ok = (Some = status));
+    };
+    
+    (Ok = .None)
+};
+
+make_args_for_exec :: fn(path: Str, args: []Str, a: Alloc) []CStr = {
+    cargs := a.alloc(CStr, args.len + 2);
+    i := 0;
+    cargs[i] = path.as_cstr(); i += 1;
+    for args { it |
+        cargs[i] = it.as_cstr(); i += 1;
+    };
+    cargs[i] = zeroed CStr; i += 1;
+    cargs
+};
+
+report_exec_error :: fn(err: *List(u8), cargs: []CStr) void = {
+    @fmt(err, "Failed to exec:\n");
+    // don't try to print the null terminator
+    for cargs.slice(0, cargs.len - 1) { it |
+        @fmt(err, "% ", it);
+    };
+};

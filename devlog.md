@@ -1,3 +1,24 @@
+## (Jul 17)
+
+- started a better version of bloat.fr that doesn't depend on objdump
+- qbe's minicc with import_c
+  - `Assertion Failed: (do_jit_fixups) redeclared symbol 1677: yyerror ZeroInitData[20592]`
+    for forward declarations like `int yylex(void), yyerror(char *);` im not treating the second one as a function? 
+- trying to reproduce qbe's generated .ssa tests
+  - queen.ssa
+    - tweak qbe's committed minic/test/queen.c to return status instead of printing
+    - need to use an old minic from before it put varargs at the end of everything 
+    - but then it works, nice! so the path is import_c compiles qbe's yacc which converts minic to c source,
+      then import_c compiles that which then compiles queen.c into ir. 
+  - vararg2.ssa
+    - when i run their python program i get different random numbers. 
+      they do set the seed tho (which is nice) but i guess the algorithm python uses changed since 2022? or changed based on os? 
+- lib/sys/subprocess.fr 
+  - rewrote to be based on the same logic as examples/terminal.fr so there's less duplication.
+  - allow sending input bytes to the child. spend a long tine discovering the child needs to close its copy of the write end 
+    of the input pipe to ever read EOF from it. 
+- backend/test/generate.fr: autotest that queen.ssa can be regenerated
+
 ## (Jul 16)
 
 - tcc

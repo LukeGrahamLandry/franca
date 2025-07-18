@@ -1,0 +1,70 @@
+// TODO: finish this
+
+main :: fn() void = {
+    args := cli_args();
+    assert(args.len > 1, "Last argument is path to executable");
+    path := args[args.len - 1].str(); 
+    bytes := temp().read_to_string_or_crash(path).items(); // :panic
+    
+    // TODO: elf
+    results := load_symbols_macho(bytes);
+    
+    sort :: import("@/lib/sort.fr")'quicksort(FuncEntry, fn(a, b) => a.size <= b.size);
+    results.sort();
+    
+    for results { func |
+        @println("%: %", func.size, func.name);
+    };
+}
+
+#use("@/backend/macho/bits.fr")
+load_symbols_macho :: fn(full_bytes: []u8) []FuncEntry = {
+    results := FuncEntry.list(temp());
+    bytes := full_bytes;
+    
+    header := bytes&.pop_type(MachoHeader);
+    
+    @assert_ne(header.magic, Elf.MAGIC, "expected a Mach-O file but that is an ELF file");
+    @assert_eq(header.magic, macho_magic, "macho bad magic");
+    
+    total := 0;
+    start := bytes.ptr;
+    unknown := 0;
+    range(0, header.commands_count.zext()) { i |
+        header := bytes&.pop_type(LoadCommandHeader);
+        ::enum(LoadCommand);
+        @switch(header.type) {
+            @case(LoadCommand.LinkEditSymbolTable.raw()) => {
+                command := bytes&.pop_type(LinkEditSymbolTable);
+                @assert_eq(24, @as(i64) header.size.zext());
+                symbols_bytes := full_bytes.slice(command.symbols_offset.zext(), full_bytes.len);
+                strings_bytes := full_bytes.slice(command.strings_offset.zext(), full_bytes.len);
+                
+                range(0, command.symbol_count.zext()) { i |
+                    symbol := symbols_bytes&.pop_type(SymbolEntry);
+                    name: CStr = (ptr = strings_bytes.ptr.offset(symbol.name_offset.zext()));
+                    // TODO: this doesn't work!
+                    //       you're not allowed to assume they'll be in order. 
+                    //       should use functionstarts to get the size of everything instead? 
+                    next_symbol := symbols_bytes.peek_type(SymbolEntry);
+                    size := next_symbol.symbol_address - symbol.symbol_address;
+                    size: i64 = bitcast size;
+                    results&.push(name = name.str(), size = size);
+                };
+            };
+            @default => {
+                unknown += 1;
+                // -8 because we already ate the header
+                bytes.ptr = bytes.ptr.offset(header.size.zext() - 8);
+                bytes.len -= header.size.zext() - 8;
+            };
+        };
+    };
+    
+    results.items()
+}
+
+FuncEntry :: @struct(name: Str, size: i64);
+
+#use("@/lib/sys/fs.fr");
+Elf :: import("@/backend/elf/bits.fr");

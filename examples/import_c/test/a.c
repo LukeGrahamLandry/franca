@@ -9,6 +9,10 @@ int inp(int p) {
     return (1 == 4 ? 1 : p == 0);
 }
 
+// These both need to get treated as function forward declarations. 
+// TODO: run these tests aot as well because this bug (backend getting redeclaration) didn't matter when jitting. 
+int foo(void), bar(char *);
+
 int main() {
     make_empty_struct2(); make_empty_struct();
     
@@ -33,7 +37,11 @@ int main() {
         char *a = *& "abcdefg" + 4;
         strcmp(a, "efg");
     }));
+    ASSERT(2, foo() + bar(""));
     
     printf("OK\n");
     return 0;
 }
+
+int foo(void) { return 1; }
+int bar(char* a) { return 1; }

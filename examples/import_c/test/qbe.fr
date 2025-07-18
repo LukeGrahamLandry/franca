@@ -1,0 +1,55 @@
+#use("@/examples/testing.fr");
+
+// TODO: test that i can compile qbe itself as well, not just minic
+main :: fn() void = {
+    //qbe_commit := "120f316162879b6165deba77815cd4193fb2fb59";  // 2025
+    qbe_commit := "d9f1121763c126316ab338ca8b1b9d51967a33b1"; // 2017, before minic put "..." after every call, for reproducing cprime.ssa
+    root := fetch_qbe_source_or_crash(qbe_commit);
+    build_qbe_minic(root);
+}
+
+// TODO: maybe dont stomp a fixed path so could call this concurrently with different `qbe_commit`s
+// This is called to generate backend/test/queen.ssa
+compile_with_minic :: fn($qbe_commit: Str, c_source: Str) Str = {
+    root := fetch_qbe_source_or_crash(qbe_commit);
+    build_qbe_minic(root);
+    ok, out, err := exec_and_catch("target/qbe_minic.out", empty(), temp(), c_source);
+    @assert(ok, "minic failed! output:\n%%", out.items(), err.items());
+    if err.len != 0 {
+        println(err.items());
+    };
+    out.items()
+}
+
+// note: (recent) minic always puts the varargs marker at the end of a call so it doesn't work on apple-arm or riscv
+//       (and doesn't reproduce the committed queen.ssa)
+build_qbe_minic :: fn(root: Str) void = {
+    // TODO: why doesn't this work:
+    //sh(@slice("target/cc.out", "-r", @tfmt("%/minic/yacc.c", root), "--", @tfmt("%/minic/minic.y", root)));
+    sh(@slice("target/cc.out", @tfmt("%/minic/yacc.c", root), "-o", "target/qbe_miniyacc.out"));
+    sh(@slice("./target/qbe_miniyacc.out", @tfmt("%/minic/minic.y", root)));
+    rename("y.tab.c", "target/y.tab.c").unwrap();
+    sh(@slice("target/cc.out", "target/y.tab.c", "-o", "target/qbe_minic.out"));
+}
+ 
+fetch_qbe_source_or_crash :: fn(qbe_commit: Str) Str = {
+    root := @tfmt("target/franca/deps/qbe-%", qbe_commit);
+    println(root);
+    if root.dir_exists() {
+        return(root);
+    };
+    root.make_dir().assert("failed to makedir for qbe");
+    Syscall'chdir(root.as_cstr()) || @panic("failed to set cwd to %", root);
+    // TODO: this is annoying. it doesn't fit with my general pattern of just give me a url to a .tar.gz file. 
+    //       but i can't really blame them for not wanting to use the microsoft thing. 
+    //       i don't really want to use some random persons mirror of it but maybe that would be a better option.
+    //       there's a hash so it doesn't really matter what the url is. 
+    //       also my program should be hashing some bytes itself. trusting whatever we exec does not spark joy. 
+    // TODO: since the making the directory isn't atmoic with cloning into it you can get into a broken state if you 
+    //       kill the program while this is happening. 
+    sh(@slice("git", "clone", "--depth=1", "git://c9x.me/qbe.git", "."));
+    sh(@slice("git", "fetch", "--depth=1", "origin", qbe_commit));
+    sh(@slice("git", "checkout", qbe_commit));
+    Syscall'chdir(".") || @panic("failed to set cwd");
+    root
+} 

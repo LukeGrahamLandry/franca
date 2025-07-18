@@ -25,9 +25,17 @@ notably those are all things to aren't going to change if you're just working on
   not a constant which i want to do anyway for reusing frc_inlinable when cross compiling. 
   (same for linux-sta -> linux-dyn)
 - turn off Qbe.Fn.track_ir_names in import_c
+- instead of hardcoding `clang`, use env var CC or something more sane.
+  could try clang and fall back to a self-compiled tcc if it's not available. 
+- make it easy to skip any tests that have external dependencies
+- what is the deal with load_opt::def taking so long for import_c
+- List.shrink_to_fit for places that i push and then return a slice so you can free it on allocators that don't track size
+- import_c add a test for the incorrect include guard thing i fixed on jul16
+- import_c faults on function without parameter name: `int aaa(char*) { return 1; }`
 
 ### !! BROKEN !!
 
+- soft_draw.fr crashes when you quit the program
 - readdir -os linux -arch aarch64 -syscalls doesn't work
 - spurious failure of import_c/tests/wuffs.fr on macos-x86_64 
   (failed in github actions and then worked when rerun with no change)
@@ -104,7 +112,6 @@ TODO: end of loop. still too many options for 'index'
 ## 
 
 - sampling profiler with setitimer
-- cleanup the old non-slice versions of lookup_baked etc. exports in comptime.fr
 - something where you can mark some memory as an artifact with a name and a type,
   like when you generate code (like compiler/test.fr/gen_full_test_program) or a module 
   (like backend/opt/simplify.fr/static_memmove), and set an envvar to have 
@@ -166,7 +173,6 @@ hould just make them local constants in each file like they are here in riscv
 - test for phi of stack slot? 
 - rv64 address+offset folding like i did for arm. they can probably share? 
 - remove redundant extension for `b := a & 31; c := extub b;`
-- arm immediate for bitwise and,or
 - i don't like that direct to exe vs to frc_inlinable then to exe give different binaries. 
 - be able to output frc/frc_inlinable in the same module as compiling normally so you don't have to do two passes over things to cache it
 - fix those two ^ and then compiler/test.fr can create all at once and assert that they make the same exe instead of running them all
@@ -183,7 +189,9 @@ hould just make them local constants in each file like they are here in riscv
 - turn off ASSUME_NO_ALIAS_ARGS in arm/abi. it doesn't help much and it would be better to do the hard thing 
   and figure out how to make UNSOUND_SKIP_EXTRA_BLIT in emit_ir work. 
 - arm relocatable import: relocation to fold symbol offsets into the adrp+add instead of wasting an extra instruction :SLOW
-
+- fixup2.ssa: "this should work without the indirection, i just don't handle folding the offset into the constant correctly."
+  i think that's fixed now. add a little test of that too
+  
 ## don't rely on libc
 
 - import_c/tokenize: strtoul, strncasecmp, strtod
@@ -269,7 +277,7 @@ program_source:26:5: error: constant sampler must be declared constexpr
 
 - compiler: add a defer expression that lets you run cleanup from a closure even if you jump out past it
 - wasm:     get all the ssa tests passing verifier
-- linux:    finish transcribing structs so FRANCA_BACKTRACE=true works. make all the tests pass with -syscalls
+- linux:    make all the tests pass with -syscalls
 - external: make it not a 100 line copy-paste to setup a driver that links an object file
 
 ## Caching
@@ -539,6 +547,7 @@ the right/fast/safe/whatever thing to do is also the easy thing to do.
 - make fetching dependencies (ie. lua for testing import_c) not embarrassing
 - import_c/ffi has a big comment
 - implement examples/testing.fr/fetch_or_crash() with import_c (wuffs and libcurl) instead of exec-ing shit
+- fetch_or_crash hashes are of the compressed file which is garbage. will break if github changes compression level or whatever. 
 - use import_c for the parts of sokol i haven't ported yet (can't for the mac stuff because thats objective c)
 - shouldn't have `alloc` be the nice name, it should be `alloc_uninit`
 - :ThisSureIsABigBlit
@@ -565,6 +574,8 @@ also stop pasting around code for handling the multi-part ops
   - x64/arm/wasm/macho/elf but there's no winning there
   - boot but i really don't want to write the compiler again... so idk what to do about that
   - some of the qbe ssa tests are generated: vararg2, strspn, strcmp, queen, mem3, cprime, abi8
+  - graphics/web/webgpu.fr which is extra bad because the abi isn't stable so it's useless
+  - if i ever get serious about using tcc for anything, we can't be having thier lib/atomic.S
 - extend hacky_incremental into something that can be used seriously 
 - as an extension of argparse it would be cool if all the demo programs could be both 
 and exe and a dylib so if you want to run from cli it parses to a struct and calls the impl,
@@ -575,6 +586,7 @@ and not need to serialize the arguments to a string.
 
 ## tests
 
+- dylibs
 - pending repros: uninit_stack_slot, typchk_unquote
 - have a test where you force inline everything that's not recursive to stress test the backend dealing with large functions.
 - compiler/test.fr run for jit as well
@@ -602,7 +614,6 @@ or just default to jitting and force you to enable aot by specifying an output p
 
 ## linux
 
-- signal handlers (the compiler does it and tests/basic_libc.fr)
 - shared libraries (backend/elf/emit.fr)
 - shader translation for the gui examples
 - non-amd64 support
@@ -735,6 +746,7 @@ A :: @struct {
 - profiler gui. it's silly that i have to open CLion just for it to run DTrace and draw a graph
 - something that generates point clouds / LAZ files so you can use the geo demo without 
 needing to go find some data in the right format (and without me including a blob for it)   
+- tcc at comptime. use their assembler for AsmFunction
 
 ## make it not suck
 

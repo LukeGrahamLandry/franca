@@ -30,7 +30,7 @@ State :: @struct(
     selected_buffer: i64,
     app: Sapp.Self,
     sg: Sg.Self,
-    process: ?RunningProcess,
+    process: ?ProcessInfo,
     scratch: List(u8),
     lock_to_bottom: bool,
     history: RawList(Str),
@@ -43,6 +43,11 @@ State :: @struct(
     scale: f64,  // height = 2 * scale
     recording: ?Replay'Recorder,
 );
+
+ProcessInfo :: @struct {
+    process: RunningProcess #use;
+    start_time: i64;
+};
 
 ColourTheme :: @struct {
     background: Sg.Color = (r = 0.156, g = 0.156, b = 0.156, a = 1);
@@ -169,12 +174,13 @@ on_frame :: fn(userdata: rawptr) void = {
     state := state[];
     if state.process& { p |
         buffer := state.buffers&[0]&;
-        status := poll(p, state.scratch&);
+        input := "";  // TODO: send it key presses
+        status := poll(p.process&, @slice(state.scratch&, state.scratch&), false, input&, true);
         buffer.append_string(state.scratch.items());
         state.scratch&.clear();
         @match(status) {
             fn Ok(status) => if status { status |
-                ms := timestamp() - p.start;
+                ms := timestamp() - p.start_time;
                 state.process = .None;
                 buffer.append_string(@tfmt("\nExited with status %", status));
                 if ms > 32 {
@@ -598,7 +604,7 @@ open_link_at :: fn(b: *TextBuffer, line: i64, col: i64) void = {
     //cmd := @tfmt("open %", link);
     //b.append_string(cmd);
     //exec(b, cmd);  // TODO: this is kinda spammy to dump this in your terminal
-    sys_exec(@slice(
+    sys_capture_exec(@slice(
         @fmt_cstr("zed"), // TODO: is there an env var im supposed to look at to know your default editor? 
         @fmt_cstr("%", link),
         zeroed CStr,
@@ -931,12 +937,6 @@ fn contains(r: Rect, p: Pos) bool =
 
 #use("@/lib/sys/fs.fr");
 
-RunningProcess :: @struct {
-    pipes: Array(Fd, 3);  // in, out, err
-    pid: i32;
-    start: i64;
-};
-
 fn exec(buffer: *TextBuffer, raw_command: Str) void = {
     if(raw_command == "", => return());
     
@@ -1044,15 +1044,18 @@ split_program_args :: fn(raw_command: Str) ?[]CStr = {
     (Some = cmd.items())
 }
 
+#use("@/lib/sys/subprocess.fr");
+
 exec_program :: fn(buffer: *TextBuffer, raw_command: Str) void = {
     state := state[];
     cmd := split_program_args(raw_command) || return();
     buffer.append_string("\n");
     if state.process.is_none() {
-        @match(sys_exec(cmd)) {
+        start_time := timestamp();
+        @match(sys_capture_exec(cmd)) {
             fn Ok(it) => {
-                state.process = (Some = it);
-                buffer.append_string(@tfmt("pid = %, time = %|\n", it.pid, it.start));
+                state.process = (Some = (process = it, start_time = start_time));
+                buffer.append_string(@tfmt("(pid = %, time = %)\n", it.pid, start_time));
             }
             fn Err(msg) => buffer.append_string(msg);
         };
@@ -1061,77 +1064,6 @@ exec_program :: fn(buffer: *TextBuffer, raw_command: Str) void = {
         buffer.append_string("something is already running.\npress control + c to interrupt it (+ shift to kill it)\n");
     };
 }
-
-sys_exec :: fn(args: []CStr) Result(RunningProcess, Str) = {
-    pipes := zeroed Array(Array(Fd, 2), 3);
-    each pipes& { p |
-        pipe(p) || return(Err = "libc::pipe() failed");
-    };
-    @debug_assert(args[args.len - 1].ptr.is_null());
-    
-    t := timestamp();
-    pid := fork();
-    if pid == 0 { // Child
-        Syscall'dup2(pipes&[0]&[0], STD_IN);
-        Syscall'dup2(pipes&[1]&[1], STD_OUT);
-        Syscall'dup2(pipes&[2]&[1], STD_ERR);
-        
-        execvp(args[0], args.ptr);
-        eprintln("libc::execvp() failed!");
-        Syscall'exit(1);
-    };
-    // else: Parent
-
-    Syscall'close(pipes&[0]&[0]);  // close the read end
-    Syscall'close(pipes&[1]&[1]);  // close the write end
-    Syscall'close(pipes&[2]&[1]);  // "
-    
-    (Ok = (pid = pid, pipes = (pipes&[0]&[1], pipes&[1]&[0], pipes&[2]&[0]), start = t))
-}
-
-fn poll(self: *RunningProcess, buf: *List(u8)) Result(?i32, Str) = {
-    @debug_assert(buf.maybe_uninit.len > buf.len);
-    flag: u16 = (@as(i64) PollEvents.In).trunc();
-    poll_data: Array(PollFds, 2) = (
-        (fd = self.pipes&[1], events = flag, revents = 0),
-        (fd = self.pipes&[2], events = flag, revents = 0)
-    );
-    poll_data := poll_data&.items();
-
-    status: i32 = 0;
-    _ := poll(poll_data, 0) || return(Err = "libc::poll() failed");
-    done := waitpid(self.pid, status&, @as(i64) WaitPidOptions.NoHang);
-    
-    full := false;
-    each poll_data { p |
-        have_data := (@as(i64) p.revents.zext()).bit_and(@as(i64) PollEvents.In) != 0;
-        if have_data {
-            dowhile {
-                space := buf.maybe_uninit.len - buf.len;
-                len := Syscall'read(p.fd, buf.maybe_uninit.ptr.offset(buf.len), space)
-                    || return(Err = "libc::read() failed");
-                buf.len += len;
-                full = full || buf.maybe_uninit.len == buf.len;
-                
-                // :BigOutputBuffer (see devlog May 9, 2025)
-                system_pipe_buffer_capacity :: 65536;
-                len == system_pipe_buffer_capacity && len < space
-            };
-        }
-    };
-    
-    // the hope is that you're alllowed to waitpid again after the caller clears the buffer and get the status then
-    // TODO: is that true?
-    if done != 0 && !full {
-        Syscall'close(self.pipes&[0]);
-        Syscall'close(self.pipes&[1]);
-        Syscall'close(self.pipes&[2]);
-        
-        return(Ok = (Some = status));
-    };
-    
-    (Ok = .None)
-};
 
 StbTrueType :: {
     get  :: import("@/examples/testing.fr").fetch_or_crash;

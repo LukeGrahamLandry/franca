@@ -120,6 +120,75 @@ fn call_fork() #test = {
     ok, out, err := fork_and_catch(temp(), => inner());
     assert_eq(ok, true);
     assert_eq(out.items(), "A\n");
+    
+    // Be very very careful using this to do anything other than exec a new process. 
+    // If you're running at comptime, you might not be done compiling and the child 
+    // will hang forever because fork() doesn't take threads with you (codegen runs 
+    // in a different thread). 
+    fork_and_catch :: fn(alloc: Alloc, $f: @Fn() void) Ty(bool, List(u8), List(u8)) = {
+        out := Array(Fd, 2).zeroed();
+        err := Array(Fd, 2).zeroed();
+        pipe(out&);
+        pipe(err&);
+        
+        pid := fork();
+        if(pid.eq(0.intcast())){
+            // Child
+            Syscall'dup2(out&[1], STD_OUT);
+            Syscall'dup2(err&[1], STD_ERR);
+            
+            f();
+            Syscall'exit(0);
+        };
+        // We don't need this end of the pipe in the parent. 
+        Syscall'close(out&[1]);
+        Syscall'close(err&[1]);
+        
+        // TODO: manual outlining like people do in rust is kinda annoying.
+        //       but also mine is extra dumb because i still copy and recompile this for every const argument of the outer function,
+        //       and rely on deduplicating to fix it.
+        collect_output :: fn(alloc: Alloc, out: Fd, err: Fd, pid: i32) Ty(bool, List(u8), List(u8)) #use("@/lib/sys/posix.fr") = {
+            base_buffer_size := 65536;
+            // TODO: make base buffer size a default argument
+            outs: List(u8) = list(base_buffer_size, alloc);
+            errs: List(u8) = list(base_buffer_size, alloc);
+            
+            o: pollfd = (fd = out, events = POLL.IN, revents = 0);
+            e: pollfd = (fd = err, events = POLL.IN, revents = 0);
+            poll_data: Array(pollfd, 2) = init(@slice(o, e));
+            poll_data := poll_data&.items();
+            
+            // If the output of the forked thing were small it would be good enough to just allocate a big buffer and read it all into it after waiting with hang.
+            // but i think if it fills the pipe it hangs forever cause you cant read to clear the pipe because you're blocking until the process ends,
+            // and its blocking until theres room to write more in the pipe. 
+            status := 0.intcast();
+            dowhile() {()bool|
+                fn read_some();
+                fn read_some(buf: *List(u8), f: pollfd) void = {
+                    c := f.revents.bit_and(POLL.IN) != 0;
+                    if c {
+                        len := Syscall'read(f.fd, buf.maybe_uninit.ptr.offset(buf.len), buf.maybe_uninit.len - buf.len).unwrap();
+                        buf.len += len;
+                        if buf.len == buf.maybe_uninit.len {
+                            buf.reserve(buf.len);
+                            read_some(buf, f);
+                        };
+                    };
+                }
+        
+                usleep(1000);
+                was_done := waitpid(pid, status&, W.NOHANG);
+                _ := poll(poll_data, 0).unwrap();
+                read_some(outs&, poll_data[0]);
+                read_some(errs&, poll_data[1]);
+                was_done == 0
+            };
+            Syscall'close(out);
+            Syscall'close(err);
+            (status.eq(0), outs, errs)
+        };
+        collect_output(alloc, out&[0], err&[0], pid)
+    };
 }
 
 fn pronto() #test = {

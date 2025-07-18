@@ -13,7 +13,6 @@ Args :: @struct {
     arm: bool #help("target arm64 instead of your native arch") = false;
     h:   bool #help("show this help text") = false;
     cc:  bool #help("use my c compiler (for test harnesses) instead of a system wide one") = false;
-    l:   bool #help("FIXME") = false;
     w:   bool #help("target wasm32 and run with examples/import_wasm") = false;
     jit: bool #help("don't generate binaries, just run jitted code in memory.") = false;
     frc: bool #help("write out .frc binary ir and then read it back to compile") = false;
@@ -26,7 +25,7 @@ Args :: @struct {
     skip_non_driver := false;
 }
 
-fn main() void = {
+main :: fn() void = {
     #use("@/lib/args.fr");
     tests_folder := "backend/test";   // TODO: cli args for this too
     args := parse_args(Args);
@@ -118,7 +117,7 @@ fn main() void = {
     };
 }
 
-fn run_one(arg: *Args, file_path: Str, arch: Arch, wasm_runner: ?Str, skip: *bool) bool #inline = {
+run_one :: fn(arg: *Args, file_path: Str, arch: Arch, wasm_runner: ?Str, skip: *bool) bool #inline = {
     ::FmtPad(Str);
     qbe_path, verbose, flags, iamthecompilernow := (arg.bin, arg.v, arg.d, arg.cc);
     mark := mark_temporary_storage();
@@ -129,8 +128,8 @@ fn run_one(arg: *Args, file_path: Str, arch: Arch, wasm_runner: ?Str, skip: *boo
     exe_path := "target/out/q.exe";
     ll_path := "target/out/q.ll";
     @print("%", f_pad(file_path, 40, .After));
-    
-    driver := extract_section(src, "driver");
+    sections := extract_sections(src);
+    driver := sections&.get("driver");
     if arg.skip_non_driver && driver.is_none() {
         skip[] = true;
         println("[skip]");
@@ -139,7 +138,7 @@ fn run_one(arg: *Args, file_path: Str, arch: Arch, wasm_runner: ?Str, skip: *boo
     if iamthecompilernow {
         driver = .None;
     }
-    expected := extract_section(src, "output");
+    expected := sections&.get("output");
     
     my_path := if(driver.is_some() || arg.force_linker, => obj_path_mine, => exe_path);
     args := Str.list(temp());
@@ -238,7 +237,7 @@ fn run_one(arg: *Args, file_path: Str, arch: Arch, wasm_runner: ?Str, skip: *boo
         args&.push("--");
         exe_path = qbe_path;
     };
-    args&.push_all(@slice("a", "b", "c"));
+    args&.push_all(@slice("a", "b", "c"));  // for echo.ssa
     show(exe_path, "run");
     ok, out, err := exec_and_catch(exe_path, args.items(), temp());
     if !ok {
@@ -280,37 +279,55 @@ fn run_one(arg: *Args, file_path: Str, arch: Arch, wasm_runner: ?Str, skip: *boo
     true
 }
 
-fn extract_section(src: Str, name: Str) ?Str = {
-    out: List(u8) = list(temp());
-    want := @tfmt("# >>> %", name);
+#use("@/lib/collections/map.fr");
+extract_sections :: fn(src: Str) HashMap(Str, Str) = {
+    results: HashMap(Str, Str) = init(temp());
+    start_section := "# >>> ";
     while => src.len != 0 {
         while => src[0] != "#".ascii() {
             src = src.skip_line();
-            if(src.len == 0, => return(.None));
+            if(src.len == 0, => return(results));
         };
-        if src.starts_with(want) {
+        if src.starts_with(start_section) {
+            name := {
+                i := start_section.len;
+                while => !src[i].is_ascii_whitespace() {
+                    i += 1;
+                };
+                src.slice(start_section.len, i)
+            };
             src = src.skip_line();
+            start_of_this_section := src.ptr;
+            out: List(u8) = list(temp());
+            strip_hashes := src.starts_with("#");
             while => !src.starts_with("# <<<") {
                 chunk := src;
-                // TODO: push a chunk to out
                 src = src.skip_line();
-                chunk = chunk.slice(0, chunk.len - src.len);
-                @assert(chunk.starts_with("# "), "bad format for section: %\nline: |%|\n", name, chunk);
-                if chunk.ends_with("#\n") {
-                    out&.push_all(chunk.slice(2, chunk.len - 2));
-                    out&.push_all("\n");
-                } else {
-                    out&.push_all(chunk.slice(2, chunk.len));
+                if strip_hashes {
+                    chunk = chunk.slice(0, chunk.len - src.len);
+                    @assert(chunk.starts_with("# "), "bad format for section: %\nline: |%|\nmust start with <hash><space>", name, chunk);
+                    if chunk.ends_with("#\n") {
+                        out&.push_all(chunk.slice(2, chunk.len - 2));
+                        out&.push_all("\n");
+                    } else {
+                        out&.push_all(chunk.slice(2, chunk.len));
+                    };
                 };
             };
-            return(Some = out.items());
+            out := if strip_hashes {
+                out.items()
+            } else {
+                between(start_of_this_section, src.ptr)
+            };
+            prev := results&.insert(name, out);
+            @assert(prev.is_none(), "section >>> % is defined twice", name);
         };
         src = src.skip_line();
     };
-    .None
+    results
 }
 
-fn skip_line(s: Str) Str = {
+skip_line :: fn(s: Str) Str = {
     loop {
         if(s.len <= 0, => return(s));
         if s[0] == "\n".ascii() {
@@ -323,3 +340,24 @@ fn skip_line(s: Str) Str = {
 #use("@/lib/sys/subprocess.fr");
 #use("@/lib/sys/fs.fr");
 #use("@/examples/testing.fr");
+
+/*
+each file has a program in the qbe ir text format. 
+line comments start with a `#` but some special sections are given extra meaning. 
+sections start with `# >>> NAME` and end with `# <<<`. 
+lines in most sections must with a `#` to be ignored by the ir parser. 
+NAME can be one of the following: 
+- driver
+  a c program to be compiled and linked with the ir functions. 
+  (used for teseting abi against other c compilers)
+- output
+  the expected stdout after running the test program. 
+  (so you don't have to trust the test program to self report success accurately)
+- generate
+  a franca program that exports `main :: fn(source: Str) Str;`
+- source
+  this is passed as input to the `generate` program ^
+- generated
+  mark which part of the file is generated by the generate/source sections. 
+  (so reproducibility can be validated by @/backend/test/generate.fr)
+*/
