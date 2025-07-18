@@ -1,4 +1,4 @@
-## (Jul 17)
+## (Jul 18)
 
 - collection of arm-macos random failures in github. 
   so i have problems on all platforms. is there any pattern here? maybe it's speed dependent? 
@@ -17,6 +17,10 @@
       `int main() { return __LINE__; }` crashes because there hasn't been a `#line` directive, 
       line_delta is uninitialized by new_file and new_num_token doesn't work with negative numbers apparently. 
   - set_bytes(junk) the extra capacity in List.reserve_expand_erased
+  - now `backend/meta/test.fr -w` often fails something in github but it's always a different one: abi8, abi6, puts10, abi5,
+    but i can't seem to reproduce it locally. 
+  - failing at the end on compiling minic was just because i wasn't chdir-ing out to the right place 
+    after cloning the git repo so it didn't work the first time. 
 
 ## (Jul 17)
 
