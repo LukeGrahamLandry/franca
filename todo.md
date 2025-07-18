@@ -32,6 +32,7 @@ notably those are all things to aren't going to change if you're just working on
 - List.shrink_to_fit for places that i push and then return a slice so you can free it on allocators that don't track size
 - import_c add a test for the incorrect include guard thing i fixed on jul16
 - import_c faults on function without parameter name: `int aaa(char*) { return 1; }`
+- import_c/cc.fr searches include path for the starting file before your current working directory which is super confusing
 
 ### !! BROKEN !!
 

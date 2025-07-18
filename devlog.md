@@ -1,5 +1,25 @@
 ## (Jul 17)
 
+- collection of arm-macos random failures in github. 
+  so i have problems on all platforms. is there any pattern here? maybe it's speed dependent? 
+  - failed to exec `target/cc.out <...>/minic/yacc.c`
+  - `use_symbol but already locked by current thread` for import_c/test/test.fr a.c
+  - fail output hello.ssa -w
+  - import_c/test/lua.fr sort.lua
+  - fail output abi6.ssa -w
+- lets see if SLOW_MEMORY_DEBUGGING reveals any of my problems.
+  - import_wasm dies on output from bf/via_wasm. 
+    `IR failed typecheck: temporary %getL0.512 is assigned with multiple types (Kw vs Kd)`
+    wasm-validate thinks the wasm file is fine.
+    in local_inst() was holding a pointer into f.tmp across a newtmp() and then using t.cls 
+  - add some set_bytes(junk): alloc() and box(). the latter breaks import_c. 
+    - test.fr line.c: `unexpected (prefix) token ,` and test.fr arith.c: `panic! thats not in the segment`
+      `int main() { return __LINE__; }` crashes because there hasn't been a `#line` directive, 
+      line_delta is uninitialized by new_file and new_num_token doesn't work with negative numbers apparently. 
+  - set_bytes(junk) the extra capacity in List.reserve_expand_erased
+
+## (Jul 17)
+
 - started a better version of bloat.fr that doesn't depend on objdump
 - qbe's minicc with import_c
   - `Assertion Failed: (do_jit_fixups) redeclared symbol 1677: yyerror ZeroInitData[20592]`
