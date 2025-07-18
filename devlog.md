@@ -17,7 +17,22 @@
   - rewrote to be based on the same logic as examples/terminal.fr so there's less duplication.
   - allow sending input bytes to the child. spend a long tine discovering the child needs to close its copy of the write end 
     of the input pipe to ever read EOF from it. 
-- backend/test/generate.fr: autotest that queen.ssa can be regenerated
+- continuing with generated .ssa tests
+  - backend/test/generate.fr: autotest that queen.ssa can be regenerated
+  - some of the tests aren't compiler output but are ~50 lines of paste-y stuff where the pattern can be generated in ~10 ugly lines. 
+    i think that's still worth giving a generator program so you can easily see there isn't a trivial copy-paste error. 
+    spill1.ssa, isel3.ssa
+  - some of the tests want to think about bits and are much more readable if you can say constants as hex. 
+    (to the point of having the hex version in a comment), so just have the ir parser allow hex number literals. 
+    load2.ssa, ops.ssa, mem1.ssa
+  - i wonder why i had the number "0x1e6a2c48" in a comment in ops.ssa... no idea. 
+  - euclc.ssa is minic as well
+  - vararg2.ssa
+      - ha! the numbers problem is python2 vs python3. everyone's favourite. 2.7 produces the right random numbers. that's reassuring. 
+  - mem2.ssa and mem3.ssa are inconvenient. they seem to be from a hare patch that didn't end up getting merged 
+    and then further reduced (which is great for debugging but less great for my ability to regenerate them). 
+    https://lists.sr.ht/~sircmpwn/hare-dev/patches/38947
+- this_is_dumb_but_im_actually_going_to_lose_my_mind: make it easier to include `%` characters when making strings with `@fmt`
 
 ## (Jul 16)
 

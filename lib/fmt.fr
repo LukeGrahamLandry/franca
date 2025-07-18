@@ -73,8 +73,9 @@ fn format_into(writer: FatExpr, args: Slice(FatExpr), loc: Span) FatExpr = {
             compile_error("Found place holders in fmt string but no args.", loc);
         };
         
+        s := fmt_string.hack_percent_escapes();
         return(@{
-            display(@[@literal fmt_string], @[writer]);
+            display(@[@literal s], @[writer]);
         });
     };
     
@@ -96,13 +97,29 @@ fn format_into(writer: FatExpr, args: Slice(FatExpr), loc: Span) FatExpr = {
     };
     
     if parts[0].len > 0 {
-        emit(@literal parts[0]);
+        s := parts[0].hack_percent_escapes();
+        emit(@literal s);
+    };
+    
+    hack_percent_escapes :: fn(s: Str) Str = {
+        copied := false;
+        range(0, s.len) { i |
+            if s[i] == this_is_dumb_but_im_actually_going_to_lose_my_mind.trunc() {
+                if !copied {
+                    copied = true;
+                    s = s.shallow_copy(temp());
+                };
+                s[i] = "%".ascii();
+            }
+        };
+        s.sym().str()  // deduplicate in the compiler's string pool
     };
     
     // TODO: zip iterators
     enumerate params { i, param |
         emit(param[]);
-        s := parts[i + 1].sym().str();  // deduplicate in the compiler's string pool
+        
+        s := parts[i + 1].hack_percent_escapes();
         if s.len > 0 {
             emit(compile_ast(@literal s));
         }
