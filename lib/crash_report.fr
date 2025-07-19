@@ -31,10 +31,14 @@ hook_backtrace :: fn() void = {
             ENV_STASH[] = get_dynamic_context();
         };
     
-        push_resolver(@import_symbol "__franca_aot_debug_info", find_in_debug_info);
+        push_aot_debug_resolver();
         request_backtrace_on_panic();
         request_backtrace_on_signal();
     };
+};
+
+push_aot_debug_resolver :: fn() void = {
+    push_resolver(@import_symbol "__franca_aot_debug_info", find_in_debug_info);
 };
 
 request_backtrace_on_panic :: fn() void = {
@@ -114,10 +118,13 @@ fn push_resolver($T: Type, data: *T, func: @FnPtr(userdata: *T, ip: rawptr) ?Str
     push_resolver(T.raw_from_ptr(data), func)
 }
 
+// TODO: don't add things twice
 fn push_resolver(data: rawptr, func: LocationResolver) *LocationResolverNode = {
     ::ptr_utils(LocationResolverNode);
     #use("@/lib/sys/sync/atomics.fr");
-    node := general_allocator().box_zeroed(LocationResolverNode);  // This needs to leak!
+    a := general_allocator();
+    node := a.box_zeroed(LocationResolverNode);  // This needs to leak!
+    a.ignore_leak(LocationResolverNode, node.slice(1));
     node.data = data; 
     node.func = func;
     // There's a moment here where the node is in the slot but with next=0, 
@@ -234,8 +241,11 @@ fn find_in_debug_info(userdata: rawptr, ip: rawptr) ?Str = {
     cm := ptr_cast_unchecked(rawptr, *CodeMap, debug_info.nullable_cached_codemap&);
     ::ptr_utils(CodeMap);
     if cm[].is_null() {
-        cm[] = general_allocator().box(CodeMap);
-        cm[][] = decode_codemap(debug_info, general_allocator());
+        a := general_allocator();
+        cm[] = a.box(CodeMap);
+        a.ignore_leak(CodeMap, cm[].slice(1));
+        cm[][] = decode_codemap(debug_info, a);
+        a.ignore_leak(File, cm.files.items());
     };
     codemap := cm[];
     

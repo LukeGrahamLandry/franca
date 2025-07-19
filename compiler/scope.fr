@@ -74,7 +74,7 @@ make_top_level :: fn(self: *SelfHosted, body: []FatStmt) Res(void) #once = {
     @debug_assert_eq(self.get_function(fid)[].use_scope, TOP_LEVEL_SCOPE);
     
     self.library_scope = self.scopes.new_scope(TOP_LEVEL_SCOPE, self.get_alloc(), zeroed Span /*TODO*/);
-    self.scopes[self.library_scope].optional_path = self.pool.insert_owned(STDLIB_PATH[].unwrap());
+    self.scopes[self.library_scope].optional_path = self.pool.insert_owned(STDLIB_PATH[].unwrap().items());
     @try(self.fill_directory_scope(self.library_scope)) return;
     
     self.poll_in_place(void, => self.compile_body(fid))
@@ -1196,7 +1196,7 @@ fn get_include_std(c: *SelfHosted, name: Str) ?WaitingParse = {
 }
 
 // TODO: store this in SelfHosted instead of in a global -- Jul 5
-STDLIB_PATH :: @static(?Str) (.None);
+STDLIB_PATH :: @static(?RawList(u8)) (.None);
 
 fn get_include_std(a: Alloc, name: Str) ?Str = {
     ::if(?Str);
@@ -1205,7 +1205,7 @@ fn get_include_std(a: Alloc, name: Str) ?Str = {
         fill_export_ffi(code&);
         (Some = code.items())
     } else {
-        lib := STDLIB_PATH[].unwrap();
+        lib := STDLIB_PATH[].unwrap().items();
         check := @tfmt("%/%", lib, name);
         out := u8.list(a);
         if read_and_push(out&, check) {
@@ -1221,7 +1221,7 @@ fn get_include_std(a: Alloc, name: Str) ?Str = {
 }
 
 // I like that users can put the lib somewhere and edit it for thier program. I dont want the compiler to just force its blessed version.
-fn find_std_lib(a: Alloc) ?Str = {
+fn find_std_lib(a: Alloc) ?RawList(u8) = {
     // :io_driver
     check :: fn(p: *List(u8)) bool = {
         p.push_path_segment("lib");
@@ -1237,13 +1237,13 @@ fn find_std_lib(a: Alloc) ?Str = {
     // if a project wants to supply its own version, that should take priority.
     p := u8.list(a); p&.push_all("."); // get_working_directory(a);
     p := p&;
-    if(check(p), => return(Some = p.items()));
+    if(check(p), => return(Some = p.as_raw()));
     
     // TODO: this doesn't work if we're just using '.' ^
     // TODO: also check like ./vendor/franca
     range(0, 3) { _ |
         p.pop_path_segment();
-        if(check(p), => return(Some = p.items()));
+        if(check(p), => return(Some = p.as_raw()));
     };
 
     @if(is_linking_libc()) {
@@ -1253,18 +1253,18 @@ fn find_std_lib(a: Alloc) ?Str = {
         assert(p.pop_until_endswith("/"), "path should have slashes"); // we want our folder, not our exe. 
         
         p.push_path_segment("franca");
-        if(check(p), => return(Some = p.items()));
+        if(check(p), => return(Some = p.as_raw()));
         // exe might be in franca/target/release/franca or franca/target/debug/deps/compiler-21be1aa281dbe5d6, so go up
         range(0, 5) { _ |
             p.pop_path_segment();
-            if(check(p), => return(Some = p.items()));
+            if(check(p), => return(Some = p.as_raw()));
         };
         
         p.clear();
         if read_link("/usr/local/bin/franca", p) {
             range(0, 5) { _ |
                 p.pop_path_segment();
-                if(check(p), => return(Some = p.items()));
+                if(check(p), => return(Some = p.as_raw()));
             };
         };
     };

@@ -23,13 +23,23 @@ Alloc :: @struct(data: rawptr, vptr: AllocatorFn);
 AllocatorFn :: @FnPtr(self: rawptr, action: AllocatorAction, ptr: rawptr, count: i64, align: i64) []u8;
 
 AllocatorAction :: @enum(i64) (
+    // Request new memory from the allocator. 
+    // Returns []u8 (which may be more than the amount requested for allocators with fixed size blocks). 
+    // Via alloc(), box(), alloc_zeroed(), box_zeroed(), alloc_raw()
     Allocate = 0,
+    // You must pass the same alignment as passed to Allocate, either the requested or returned size. 
+    // and the pointer must be exactly the one returned by Allocate. 
+    // This will be a no-op for arena allocators. 
+    // Via dealloc(), dealloc_one(), dealloc_raw()
     Deallocate = 1,
-    //DoYouOwnThisPointer = 2,  // not implemented by my allocators. maybe it should be
+    // Some allocations are required to have 'static lifetime and should not be reported as leaks by debugging allocators. 
+    // This is a no-op on allocators that do not support leak checking. 
+    // Via ignore_leak(). 
+    IgnoreLeak = 2,
 );
 ::enum(AllocatorAction);
 
-fn alloc(allocator: Alloc, $T: Type, count: i64) Slice(T) #generic #inline = {
+fn alloc(allocator: Alloc, $T: Type, count: i64) Slice(T) #generic = { // #inline = {
     mem := alloc_raw(allocator, count * T.size_of(), T.align_of());
     @if(SLOW_MEMORY_DEBUGGING) if mem.len < 16384 {
         mem.len = count * T.size_of();
@@ -38,7 +48,7 @@ fn alloc(allocator: Alloc, $T: Type, count: i64) Slice(T) #generic #inline = {
     (ptr = ptr_cast_unchecked(u8, T, mem.ptr), len = count)
 }
 
-fn alloc_raw(allocator: Alloc, bytes: i64, align: i64) []u8 #inline = {
+fn alloc_raw(allocator: Alloc, bytes: i64, align: i64) []u8 = { // #inline = {
     if(bytes == 0, => return(empty()));
     {allocator.vptr}(allocator.data, .Allocate, rawptr_from_int(0), bytes, align)
 }
@@ -75,6 +85,10 @@ fn dealloc(allocator: Alloc, $T: Type, mem: Slice(T)) void #generic = {
 fn dealloc_one(allocator: Alloc, $T: Type, mem: *T) void #generic = 
     allocator.dealloc(T, mem.slice(1));
 
+fn ignore_leak(allocator: Alloc, $T: Type, mem: []T) void #generic = {
+    allocator'vptr(allocator.data, .IgnoreLeak, T.raw_from_ptr(mem.ptr), mem.len * T.size_of(), T.align_of());
+}
+
 libc_allocator: Alloc : (data = 0.rawptr_from_int(), vptr = libc_allocator_fn);
 
 libc_allocator_fn :: fn(_: rawptr, action: AllocatorAction, ptr: rawptr, count: i64, align: i64) []u8 = {
@@ -87,6 +101,7 @@ libc_allocator_fn :: fn(_: rawptr, action: AllocatorAction, ptr: rawptr, count: 
             free(ptr);
             empty()
         }
+        @default => empty();
     }
 };
 

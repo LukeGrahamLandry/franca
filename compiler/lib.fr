@@ -79,8 +79,6 @@ PRes :: Result(void, *CompileError);
 
 fn load_file_in_compiler(vtable: *ImportVTable, path: Str, opts: *BuildOptions) CRes(CompCtx) = {
     // :io_driver
-    s := u8.list(general_allocator());
-    @fmt(s&, """#include_std("lib/core.fr");#include_std("%");""", path);  // :LEAK
     // TODO: put this somewhere else? 
     //if source.len > prelude.len + 4 {
     //    maybe_magic := source.items().subslice(prelude.len, 4);
@@ -92,6 +90,8 @@ fn load_file_in_compiler(vtable: *ImportVTable, path: Str, opts: *BuildOptions) 
     
     comp := {vtable.init_compiler}(opts);
     c := vtable.with(comp);
+    s := u8.list(c.get_alloc());
+    @fmt(s&, """#include_std("lib/core.fr");#include_std("%");""", path);
     file := c.add_file("-", s.items());
     self := c.data.cast();
     stmts := c.data.parse_stmts(file&);
@@ -115,7 +115,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
     no_cache := get_environment_variable("FRANCA_NO_CACHE").is_some() || !is_linking_libc();
     
     a := general_allocator();
-    to_free: ?*QbeModule = .None;
+    to_free: ?Ty(*QbeModule, *Crash'LocationResolverNode) = .None;
     to_free_h: ?*Incremental.Header = .None;
     
     if !path.ends_with(".fr") {
@@ -275,8 +275,10 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         callee(vtable);
     };
     
-    if to_free { m |
+    if to_free { m, r |
+        Crash'pop_resolver(r);
         drop(m);  // waste of time
+        general_allocator().dealloc_one(QbeModule, m);
     };
     if to_free_h { it |
         a.dealloc(u8, it.as_bytes());
@@ -291,6 +293,7 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
     a: ArenaAlloc = init(page_allocator, 1.shift_left(23));
     arena := a&.borrow().boxed(ArenaAlloc, a);
     a := arena.borrow();
+    opts = { it := a.box(BuildOptions); it[] = opts[]; it };
     pool: StringPool = init(a);
     pool := a.boxed(StringPool, pool);
     codemap: CodeMap = init(a);

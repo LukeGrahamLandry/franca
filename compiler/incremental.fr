@@ -99,10 +99,9 @@ fn files_unchanged(header: *Header) bool = {
     true
 }
 
-fn compile_cached(header: *Header, to_free: *?*QbeModule) (@FnPtr(*ImportVTable) void) = {
+fn compile_cached(header: *Header, to_free: *?Ty(*QbeModule, *Crash'LocationResolverNode)) (@FnPtr(*ImportVTable) void) = {
     a := general_allocator();
     m := a.box(QbeModule);
-    to_free[] = (Some = m);
     init_default_module(m, (
         arch = query_current_arch(), 
         os = query_current_os(), 
@@ -118,7 +117,8 @@ fn compile_cached(header: *Header, to_free: *?*QbeModule) (@FnPtr(*ImportVTable)
     i := header.entry_sym;
     name := header.get(header.get(i)[].name);
     cc := m.get_addr(name) || @panic("ICE: lost %", name);
-    _ := push_resolver(QbeModule, m, find_ip_in_module);
+    r := push_resolver(QbeModule, m, find_ip_in_module);
+    to_free[] = (Some = (m, r));
     m.make_exec();
     assume_types_fn(Arg = *ImportVTable, Ret = void, ptr = cc)
 }
@@ -767,6 +767,7 @@ fn as_bytes(header: *Header) []u8 =
     (ptr = bit_cast_unchecked(*Header, *u8, header), len = header.meta.filelen.zext());
 
 // TODO: return and error instead of crashing but need to pre-fmt it because the caller doesn't have our compiler instance. 
+// It's fine to just pass in the *BuildOptions from the parent compiler instance, init_compiler makes a copy. 
 cached_compile_module :: fn(path: Str, opts: *BuildOptions, out_alloc: Alloc) CRes([]u8) = {
     zone := zone_begin(.CheckCache);
     @assert(path.starts_with("@/"), "cached_compile_module path must start with @");
@@ -794,11 +795,6 @@ cached_compile_module :: fn(path: Str, opts: *BuildOptions, out_alloc: Alloc) CR
     };
     zone_end(zone);
     
-    
-    // It's convient to just pass in the one from the parent compiler instance, 
-    // so we have to not mutate BuildOptions.env with indices into this new compiler we're going to throw away.  
-    opts := opts[]; 
-    
     zone := zone_begin(.ImportCache);
     out := "";
     push_dynamic_context {
@@ -807,7 +803,7 @@ cached_compile_module :: fn(path: Str, opts: *BuildOptions, out_alloc: Alloc) CR
         start := timestamp();
         vtable := init_driver_vtable();
         src := @tfmt("""#include_std("lib/core.fr"); MODULE_EXPORTS :: import("%").exports;""", path);
-        compiler := new_with_src(vtable, src, opts&);
+        compiler := new_with_src(vtable, src, opts);
         self := compiler.cast()[][];
         
         m := self.get_alloc().box(QbeModule);

@@ -21,6 +21,28 @@
     but i can't seem to reproduce it locally. 
   - failing at the end on compiling minic was just because i wasn't chdir-ing out to the right place 
     after cloning the git repo so it didn't work the first time. 
+- another dependency on universe state is when i use libc_allocator. need to make sure everything passes with BlockAlloc. 
+  - bf/c_string.fr fails but only when reusing CompCtx in compiler/test.fr. 
+    safety check in move_from_module for fold.fr/Kw() when compiling import_c for comptime. 
+    its not about reusing CompCtx, it's about dropping a QbeModule? maybe that just double frees into the general_allocator. 
+    i think it must be a BlockAlloc bug because it works with DebugAlloc which is much more aggressive about catching misuse. 
+    (still not fixed; and more things don't work with DebugAlloc tho: import_c/wuffs/gif.c, compiler/test.fr/kaleidoscope) 
+- finding some leaks with DebugAlloc
+  - default_build_options. make a copy in init_self_hosted so it doesn't have to stay live. 
+  - QbeModule.(libraries, macho_function_starts)
+  - walk_directory wasn't calling closedir out of fear you'd early return?
+  - relatedly the LocationResolverNode in compile_cached should get popped but still needs to leak
+  - STDLIB_PATH
+- implemented DebugAlloc 
+  - i should have done this a long time ago. only one of those leaks (closedir) was interesting 
+    (the rest were finite and round to zero) but having it just dump a stack trace of exactly where 
+    the problem is makes it a fun little game to make sure all the memory gets cleaned up instead of an infinite slog. 
+    - still needs a lot of work to be generally useful but it's a very good first step. 
+    - it's a nice validation of the idea that debugging tools can just be a library that gets bundled into your 
+      program instead of an external tool. 
+    - and like i didn't quite realize how good for morale any tiny thing i can do to get rid of confusion. 
+      in hindsight it's obvious and ive had similar moments before, but i should really be putting more effort 
+      into tooling that lets you tell what the fuck the program is actually doing. 
 
 ## (Jul 17)
 

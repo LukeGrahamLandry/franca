@@ -1,0 +1,138 @@
+// THIS IS THE MOST :SLOW THING YOU COULD POSSIBLY DO
+// but in return it will catch many memory safety mistakes. 
+// - it calls mmap for each allocation and never returns the memory 
+// - when you free something it just gets mapped as not readable/writable so access attempts will fault 
+// - records all allocated addresses to detect double free attempts
+// - reports leaked memory when you call deinit()
+
+// TODO: is there an madvise for "i promise to never need the data here so it can be discarded but you can't hand out that pointer again"? 
+//       maybe just always increasing the address hint to mmap does that? idx. 
+
+fn init() DebugAlloc = {
+    it := zeroed DebugAlloc;
+    it.meta_data_alloc = page_allocator;
+    it
+}
+
+fn borrow(self: *DebugAlloc) Alloc = 
+    (data = DebugAlloc.raw_from_ptr(self), vptr = allocator_fn);
+
+fn deinit(self: *DebugAlloc) void = {
+    self.locked = true;
+    push_dynamic_context {
+        context(DefaultContext)[].general_allocator = page_allocator; // TODO: nullable_cached_codemap goes here
+        
+        // TODO: the spam of allocation functions is annoying like yeah i know you called raw_alloc that doesnt help.
+        //       need to be able to mark known roots that should be skipped. 
+        // TODO: problem when this frees first in this loop. plus the spam is annoying. mark things that are expected to leak? 
+        //    node := general_allocator().box_zeroed(LocationResolverNode);  // This needs to leak!",
+        
+        traces: []*StackTrace = empty();
+        each self.pointers& { k, v |
+            if v.freed_at == Allocation.sentinal_not_free {
+                if traces.len != self.next_trace.zext() {
+                    // :SLOW so do it lazily the first time there's actually a leak. 
+                    traces = general_allocator().alloc(*StackTrace, self.next_trace.zext());
+                    each_ref self.trace_lookup& { trace, id | 
+                        traces[id[].zext()] = trace;
+                    };
+                };
+                
+                @eprintln("(leak = (ptr = %, len = %, alloc = (", k, v.size);
+                trace := traces[v.alloc_at.zext()];
+                for trace.ip& { ip |
+                    @if(ip != 0)
+                    if Crash'name_from_ip(Crash'RESOLVERS[], ip.rawptr_from_int()) { s | 
+                        @eprintln("  \"%\",", s);
+                    } else {
+                        @eprintln("  %,", ip);
+                    };
+                };
+                @eprintln(")),");
+            };
+            if v.freed_at != Allocation.sentinal_leak {
+                Syscall'munmap(k.rawptr_from_int(), v.size);
+            };
+        };
+    };
+    self.pointers&.drop(self.meta_data_alloc);
+    self.trace_lookup&.drop(self.meta_data_alloc);
+    self.locked = false;
+}
+
+DebugAlloc :: @struct {
+    pointers: RawHashMap(i64, Allocation);
+    mutex: import("@/lib/sys/sync/mutex.fr").Mutex;
+    trace_lookup: RawHashMap(StackTrace, u32);
+    next_trace: u32;
+    meta_data_alloc: Alloc;
+    locked: bool;
+};
+
+trace_length :: 15;
+
+Allocation :: @struct {
+    size: i64;
+    alloc_at: u32;
+    freed_at: u32;
+    
+    sentinal_not_free :: MAX_u32;
+    sentinal_leak :: MAX_u32 - 1;
+};
+
+Crash :: import("@/lib/crash_report.fr");
+
+StackTrace :: @struct(ip: Array(i64, trace_length));
+capture :: fn(self: *DebugAlloc) u32 = {
+    it := zeroed StackTrace;
+    i := 0;
+    Crash'walk_stack_trace((fp = Crash'trace_start(), ip = 0.rawptr_from_int()), trace_length) { _, ip, _ |
+        it.ip&[i] = ip.int_from_rawptr();
+        i += 1;
+    };
+    ::AutoHash(StackTrace, TrivialHasher); ::AutoEq(StackTrace);   
+    ::AutoHash(Array(i64, trace_length), TrivialHasher);
+    ::HashEach([]i64, TrivialHasher);
+    (self.trace_lookup&.get_or_insert(it, self.meta_data_alloc) {
+        self.next_trace += 1;
+        self.next_trace - 1
+    })[]
+};
+
+allocator_fn :: fn(self: rawptr, action: AllocatorAction, ptr: rawptr, count: i64, align: i64) []u8 = {
+    self := DebugAlloc.ptr_from_raw(self);
+    @assert(!self.locked, "tried to use DebugAlloc while reporting leaks");
+    if action == .Allocate {
+        result := page_allocator_fn(zeroed rawptr, action, ptr, count, align);
+        with self.mutex& {
+            insert(self.pointers&, u8.int_from_ptr(result.ptr), (
+                size = count,
+                freed_at = Allocation.sentinal_not_free, 
+                alloc_at = self.capture(),
+            ), self.meta_data_alloc);
+        };
+        return(result);
+    };
+    if action == .Deallocate {
+        with self.mutex& {
+            prev := get_ptr(self.pointers&, int_from_rawptr(ptr)) 
+                || @panic("DebugAlloc: free(%) was not allocated", ptr);
+            // TODO: show trace for allocation site and first free
+            @assert_eq(prev.freed_at, Allocation.sentinal_not_free, "DebugAlloc: double free(%)", ptr);
+            prev.freed_at = self.capture();
+        };
+        Syscall'mprotect(ptr, count.align_to(page_size()), 0).unwrap();
+    };
+    if action == .IgnoreLeak {
+        with self.mutex& {
+            prev := get_ptr(self.pointers&, int_from_rawptr(ptr)) 
+                || @panic("DebugAlloc: leak(%) was not allocated", ptr);
+            @assert_eq(prev.freed_at, Allocation.sentinal_not_free, "DebugAlloc: leak already free(%)", ptr);
+            prev.freed_at = Allocation.sentinal_leak;
+        };
+    };
+    
+    empty()
+};
+
+#use("@/lib/collections/map.fr");
