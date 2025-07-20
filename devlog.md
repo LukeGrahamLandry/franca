@@ -1,6 +1,7 @@
-## (Jul 19)
+## (Jul 19/20)
 
 - plug more harmless leaks because it's fun now: kaleidoscope, qbe_frontend, prospero. 
+- put more stuff in the Alloc interface: arena mark/reset, free all
 
 ## (Jul 18)
 

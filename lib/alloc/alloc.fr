@@ -13,31 +13,53 @@
 //       so this would return a slice. but rust's GlobalAlloc and zig's allocator interface don't do that so maybe there's a reason. 
 //       tho rust's new Allocator does return a slice. 
 // TODO: add resize function that tries to extend an allocation in place if possible. 
-Alloc :: @struct(data: rawptr, vptr: AllocatorFn);
+Alloc :: @struct {
+    data: rawptr;
+    vptr: Handler;
+    
+    // Allocators provide one function that changes behaviour based on the `action` argument. 
+    // I can't decide if this is worse than the vtable, I figure this means you can add a bunch of optional actions easily. 
+    // It's not how zig does it tho so maybe there's a reason this is worse... odin does it this way tho so it's probably fine. 
+    // You save a load of the vtable and add a branch.
+    // There are nice wrapper functions that deal with martialing the arguments to this.  
+    Handler :: @FnPtr(self: rawptr, action: Action, ptr: rawptr, count: i64, align: i64) []u8;
+    
+    // Only .Allocate is mandatory. 
+    Action :: @enum(i64) (
+        // Request new memory from the allocator. 
+        // Returns []u8 (which may be more than the amount requested for allocators with fixed size blocks). 
+        // Via alloc(), box(), alloc_zeroed(), box_zeroed(), alloc_raw()
+        Allocate,
+        // You must pass the same alignment as passed to Allocate, either the requested or returned size. 
+        // and the pointer must be exactly the one returned by Allocate. 
+        // This will be a no-op for arena allocators. 
+        // Via dealloc(), dealloc_one(), dealloc_raw()
+        Deallocate,
+        ResizeInPlace,  // TODO
+        // Some allocations are required to have 'static lifetime and should not be reported as leaks by debugging allocators. 
+        // This is a no-op on allocators that do not support leak checking. 
+        // Via ignore_leak(). 
+        IgnoreLeak,
+        // Equivalent to sending .Deallocate for all existing allocations. 
+        FreeAll,
+        // Destroy the allocator instance, releasing all memory to the backing allocator. 
+        Deinit,
+        // Record the current state of the allocator to be passed to .ArenaReset (returns Alloc.Mark). 
+        // (note: if this message is supported the return value can't be (0, 0)). 
+        ArenaMark,
+        // Rewind the allocator to a previous mark, freeing everything since then. 
+        // (Alloc.Mark passed as (ptr, count))
+        ArenaReset,
+    );
+    
+    // Messages that don't have a result value should return this when supported. 
+    // (Deallocate, IgnoreLeak, FreeAll, Deinit, ArenaReset)
+    void_result :: "foo";
+    
+    Mark :: @struct(opaque: []u8);
+};
 
-// Allocators provide one function that changes behaviour based on the `action` argument. 
-// I can't decide if this is worse than the vtable, I figure this means you can add a bunch of optional actions easily. 
-// It's not how zig does it tho so maybe there's a reason this is worse... odin does it this way tho so it's probably fine. 
-// You save a load of the vtable and add a branch.
-// There are nice wrapper functions that deal with martialing the arguments to this.  
-AllocatorFn :: @FnPtr(self: rawptr, action: AllocatorAction, ptr: rawptr, count: i64, align: i64) []u8;
-
-AllocatorAction :: @enum(i64) (
-    // Request new memory from the allocator. 
-    // Returns []u8 (which may be more than the amount requested for allocators with fixed size blocks). 
-    // Via alloc(), box(), alloc_zeroed(), box_zeroed(), alloc_raw()
-    Allocate = 0,
-    // You must pass the same alignment as passed to Allocate, either the requested or returned size. 
-    // and the pointer must be exactly the one returned by Allocate. 
-    // This will be a no-op for arena allocators. 
-    // Via dealloc(), dealloc_one(), dealloc_raw()
-    Deallocate = 1,
-    // Some allocations are required to have 'static lifetime and should not be reported as leaks by debugging allocators. 
-    // This is a no-op on allocators that do not support leak checking. 
-    // Via ignore_leak(). 
-    IgnoreLeak = 2,
-);
-::enum(AllocatorAction);
+::enum(Alloc.Action);
 
 fn alloc(allocator: Alloc, $T: Type, count: i64) Slice(T) #generic = { // #inline = {
     mem := alloc_raw(allocator, count * T.size_of(), T.align_of());
@@ -89,9 +111,27 @@ fn ignore_leak(allocator: Alloc, $T: Type, mem: []T) void #generic = {
     allocator'vptr(allocator.data, .IgnoreLeak, T.raw_from_ptr(mem.ptr), mem.len * T.size_of(), T.align_of());
 }
 
+fn deinit(allocator: Alloc) void = {
+    allocator'vptr(allocator.data, .Deinit, zeroed(rawptr), 0, 0);
+}
+
+fn mark(allocator: Alloc) Alloc.Mark = {
+    result := allocator'vptr(allocator.data, .ArenaMark, zeroed(rawptr), 0, 0);
+    @debug_assert(!(result.ptr.is_null() && result.len == 0), "tried to mark() an unsupported allocator");
+    (opaque = result)
+}
+
+fn reset(allocator: Alloc, mark: Alloc.Mark) void = {
+    result := allocator'vptr(allocator.data, .ArenaReset, u8.raw_from_ptr(mark.opaque.ptr), mark.opaque.len, 0);
+    @debug_assert_eq(result, Alloc.void_result, "tried to reset() an unsupported allocator");
+}
+
+fn mark_from_raw(ptr: rawptr, count: i64) Alloc.Mark = 
+    (opaque = (ptr = u8.ptr_from_raw(ptr), len = count));
+
 libc_allocator: Alloc : (data = 0.rawptr_from_int(), vptr = libc_allocator_fn);
 
-libc_allocator_fn :: fn(_: rawptr, action: AllocatorAction, ptr: rawptr, count: i64, align: i64) []u8 = {
+libc_allocator_fn :: fn(_: rawptr, action: Alloc.Action, ptr: rawptr, count: i64, align: i64) []u8 = {
     @match(action) {
         // TODO: respect alignment. but im pretty sure malloc always gives you 16 bytes and mostly good enough. 
         //       should do what zig does tho https://github.com/ziglang/zig/blob/master/lib/std/heap.zig#L57
@@ -99,7 +139,7 @@ libc_allocator_fn :: fn(_: rawptr, action: AllocatorAction, ptr: rawptr, count: 
         fn Deallocate() => {
             @if(SLOW_MEMORY_DEBUGGING) u8.ptr_from_raw(ptr).slice(count).set_bytes(SLOW_MEMORY_JUNK);
             free(ptr);
-            empty()
+            Alloc.void_result
         }
         @default => empty();
     }
@@ -107,7 +147,7 @@ libc_allocator_fn :: fn(_: rawptr, action: AllocatorAction, ptr: rawptr, count: 
 
 // TODO: :sema_regression switch to match when i fix v2 `early return before ret type infered (could try more aggressivly in handle_compile_body)`
 // TODO: respect alignment. but im pretty sure malloc always gives you 16 bytes and that's almost always good enough. 
-page_allocator_fn :: fn(_: rawptr, action: AllocatorAction, ptr: rawptr, size: i64, align: i64) []u8 = {
+page_allocator_fn :: fn(_: rawptr, action: Alloc.Action, ptr: rawptr, size: i64, align: i64) []u8 = {
     action := @as(i64) action;
     ::if(rawptr);
     if action == 0 {
@@ -128,7 +168,7 @@ page_allocator_fn :: fn(_: rawptr, action: AllocatorAction, ptr: rawptr, size: i
         ///         HARD: If you're careful, its fine to split an allocation from 'os_alloc' and release seperate pages at different times. 
         res := Syscall'munmap(ptr, size);
         assert(res.value.eq(0), "munmap failed");
-        return(empty())
+        return Alloc.void_result;
     };
     empty()
 };
@@ -187,7 +227,7 @@ boxed :: fn(a: Alloc, $T: Type, t: T) *T #generic = {
 //
 // Can use this when you know a List won't need to grow. 
 panicking_allocator: Alloc : (data = 0.rawptr_from_int(), vptr = panicking_allocator_fn);
-panicking_allocator_fn :: fn(_: rawptr, action: AllocatorAction, ptr: rawptr, count: i64, align: i64) []u8 = {
+panicking_allocator_fn :: fn(_: rawptr, action: Alloc.Action, ptr: rawptr, count: i64, align: i64) []u8 = {
     @match(action) {
         fn Allocate()   => @panic("Tried to allocate % bytes with panicking_allocator", count);
         @default => empty();

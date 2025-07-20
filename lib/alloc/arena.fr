@@ -31,10 +31,27 @@ fn new_arena_chunk(allocator: Alloc, size: i64, prev: ?*ArenaHeader, making_new_
     chunk
 }
 
-arena_allocator_fn :: fn(self: rawptr, action: AllocatorAction, ptr: rawptr, count: i64, align: i64) []u8 = {
+arena_allocator_fn :: fn(self: rawptr, action: Alloc.Action, ptr: rawptr, count: i64, align: i64) []u8 = {
     // note: we can't use @match yet... (because of printing i guess?) // TODO: check again now that ast_alloc is in the compiler
-    if action == AllocatorAction.Allocate {
+    if action == Alloc.Action.Allocate {
         return(ptr = u8.ptr_from_raw(arena_alloc(self, count, align)), len = count);
+    };
+    self := ArenaAlloc.ptr_from_raw(self);
+    if action == .FreeAll {
+        self.reset_retaining_capacity();
+        return Alloc.void_result;
+    };
+    if action == .Deinit {
+        self.deinit();
+        return Alloc.void_result;
+    };
+    if action == .ArenaMark {
+        it := self.mark().erase();
+        return(it.opaque)
+    };
+    if action == .ArenaReset {
+        self.reset_retaining_capacity(mark_from_raw(ptr, count).unerase());
+        return Alloc.void_result;
     };
     
     // Free is Noop
@@ -87,8 +104,15 @@ arena_alloc :: fn(raw_self: rawptr, size: i64, align: i64) rawptr = {
     }
 };
 
+// note: Alloc.Mark.zeroed() means unsupported so that's why the +1 for start
+// :ugly
+fn erase(self: ArenaMarker) Alloc.Mark = 
+    (opaque = (ptr = u8.ptr_from_int(@if(self.chunk.is_some(), ArenaHeader.int_from_ptr(self.chunk.Some), 0)), len = self.start + 1));
+// :ugly
+fn unerase(self: Alloc.Mark) ArenaMarker = 
+    (chunk = @if(self.opaque.ptr.is_null(), .None, (Some = bit_cast_unchecked(*u8, *ArenaHeader, self.opaque.ptr))), start = self.opaque.len - 1);
+
 ArenaMarker :: @struct(chunk: ?*ArenaHeader, start: i64);
-// TODO: allow taking a mark when chunk is None (before first allocation), even tho thats dumb.  :panic
 fn mark(self: *ArenaAlloc) ArenaMarker #inline = (chunk = self.chunk, start = self.start);
 
 // remember, you can't do this if you acceppted an output allocator as a parameter because they might have passed you the temp allocator. 
@@ -197,16 +221,13 @@ fn deinit(self: *ArenaAlloc) void = {
             addr := u8.int_from_ptr(ptr);
             self.parent.dealloc(u8, buf);
             
-            @match(prev) {
-                fn Some(prev) => {
-                    chunk = prev;
-                }
-                fn None() => {
-                    self.chunk = .None;
-                    self.start = 0;
-                    self.end = 0;
-                    return();
-                }
+            if prev { prev |
+                chunk = prev;
+            } else {
+                self.chunk = .None;
+                self.start = 0;
+                self.end = 0;
+                return();
             };
         };
     };
@@ -259,7 +280,7 @@ fn bake_relocatable_value(self: *ArenaAlloc) Slice(BakedEntry) = {
 todo_allocator: Alloc : (data = 0.rawptr_from_int(), vptr = todo_allocator_fn);
 
 // TODO: respect alignment. but im pretty sure malloc always gives you 16 bits and mostly good enough. 
-todo_allocator_fn :: fn(_: rawptr, action: AllocatorAction, ptr: rawptr, count: i64, align: i64) []u8 = { 
+todo_allocator_fn :: fn(_: rawptr, action: Alloc.Action, ptr: rawptr, count: i64, align: i64) []u8 = { 
     act := @as(i64) action;
     // Note: we can't use @match yet! because this is comptime ast_alloc rn
     if(act != 0, => return(empty()));

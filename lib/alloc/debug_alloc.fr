@@ -102,11 +102,12 @@ capture :: fn(self: *DebugAlloc) u32 = {
     })[]
 };
 
-allocator_fn :: fn(self: rawptr, action: AllocatorAction, ptr: rawptr, count: i64, align: i64) []u8 = {
+allocator_fn :: fn(self: rawptr, action: Alloc.Action, ptr: rawptr, count: i64, align: i64) []u8 = {
     self := DebugAlloc.ptr_from_raw(self);
     @assert(!self.locked, "tried to use DebugAlloc while reporting leaks");
     self.event_counter += 1;
-    if action == .Allocate {
+    @match(action) {
+    fn Allocate() => {
         result := page_allocator_fn(zeroed rawptr, action, ptr, count, align);
         with self.mutex& {
             insert(self.pointers&, u8.int_from_ptr(result.ptr), (
@@ -116,9 +117,9 @@ allocator_fn :: fn(self: rawptr, action: AllocatorAction, ptr: rawptr, count: i6
                 alloc_when = self.event_counter,
             ), self.meta_data_alloc);
         };
-        return(result);
+        result
     };
-    if action == .Deallocate {
+    fn Deallocate() => {
         with self.mutex& {
             prev := get_ptr(self.pointers&, int_from_rawptr(ptr)) 
                 || @panic("DebugAlloc: free(%) was not allocated", ptr);
@@ -127,17 +128,23 @@ allocator_fn :: fn(self: rawptr, action: AllocatorAction, ptr: rawptr, count: i6
             prev.freed_at = self.capture();
         };
         Syscall'mprotect(ptr, count.align_to(page_size()), 0).unwrap();
+        Alloc.void_result
     };
-    if action == .IgnoreLeak {
+    fn IgnoreLeak() => {
         with self.mutex& {
             prev := get_ptr(self.pointers&, int_from_rawptr(ptr)) 
                 || @panic("DebugAlloc: leak(%) was not allocated", ptr);
             @assert_eq(prev.freed_at, Allocation.sentinal_not_free, "DebugAlloc: leak already free(%)", ptr);
             prev.freed_at = Allocation.sentinal_leak;
         };
+        Alloc.void_result
     };
-    
-    empty()
+    fn Deinit() => {
+        self.deinit();
+        Alloc.void_result
+    }
+    @default => empty();
+    }
 };
 
 #use("@/lib/collections/map.fr");

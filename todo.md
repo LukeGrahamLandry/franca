@@ -16,6 +16,7 @@
 - DebugAlloc
   - do something about the name resolver for a jit module needing to live all the way to DebugAlloc.deinit to give nice stack traces. 
     you can't just leak the whole module because then you get junk leak reports. 
+    instead of pop_resolver of the module, have an option to finalize the debug info into the same flat structure as for aot and keep that. 
     it would be nice if drop() were generic over the message sent to the allocator so you could mark the whole tree of memory as 
     ignore_leak without rewriting the thing. like getting a billion leak reports because you forgot to drop(QbeModule) is much 
     less useful than if it just showed one. 
@@ -73,6 +74,18 @@ do
 done
 ```
 
+- random failures in import_c
+  - `panic! tried to unlock someone else's mutex`
+  - `16000panic! recursing in new_arena_chunkmemory order problem`
+  - `panic! use_symbol but already locked by this thread=1`
+this eventually reproduces with the slow memory debugging stuff turned on. 
+```
+for i in $(seq 1 1000);
+do
+    echo $i
+    ./target/f.out examples/import_c/test/test.fr || { echo "fail"; break; };
+done
+```
 ## import_symbol / weak
 
 TODO: my @import_symbol always does a weak symbol even though it in the macro body i say weak=false.
