@@ -117,6 +117,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
     a := general_allocator();
     to_free: ?Ty(*QbeModule, *Crash'LocationResolverNode) = .None;
     to_free_h: ?*Incremental.Header = .None;
+    to_free_c: ?CompCtx = .None;
     
     if !path.ends_with(".fr") {
         if Dyn'open(path) { handle |
@@ -201,7 +202,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         was_bootstrapping :: { fr := current_compiler_context(); IS_BOOTSTRAPPING || fr.vtable.driver_abi_version == 1119 };
 
         shared := @if(USE_SAME_MODULE, self.comptime_codegen, {
-            m := self.get_alloc().box(QbeModule);
+            m := general_allocator().box(QbeModule);
             init_default_module(m, (
                 arch = query_current_arch(), 
                 os = query_current_os(), 
@@ -254,6 +255,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
             header := write_cache(m, c, f, cachepath, path);
             to_free_h = (Some = header);
             drop(m);
+            general_allocator().dealloc_one(QbeModule, m);
             c'vtable'destroy_compiler(c.data);
             context(DefaultContext)[].comptime = rawptr_from_int(0); 
 
@@ -262,6 +264,10 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
             callee = (Some = compile_cached(header, to_free&));
             zone_end(z);
             break();
+        };
+        to_free_c = (Some = c);
+        if !USE_SAME_MODULE {
+            to_free = (Some = (m, zeroed(*Crash'LocationResolverNode)));
         };
         
         cc := m.get_addr(name) || @panic("ICE: lost %", name);
@@ -282,6 +288,9 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
     };
     if to_free_h { it |
         a.dealloc(u8, it.as_bytes());
+    };
+    if to_free_c { it |
+        it'vtable'destroy_compiler(it.data);
     };
     reset_temporary_storage(mark);
     .Ok

@@ -1,3 +1,7 @@
+## (Jul 19)
+
+- plug more harmless leaks because it's fun now: kaleidoscope, qbe_frontend, prospero. 
+
 ## (Jul 18)
 
 - collection of arm-macos random failures in github. 
@@ -43,6 +47,7 @@
     - and like i didn't quite realize how good for morale any tiny thing i can do to get rid of confusion. 
       in hindsight it's obvious and ive had similar moments before, but i should really be putting more effort 
       into tooling that lets you tell what the fuck the program is actually doing. 
+- that last commit went 910ms -> 920ms ?? :(, and i was so recently below 900ms. 
 
 ## (Jul 17)
 

@@ -28,6 +28,7 @@ EqHelloWorld :: fn(out, _) = out == "Hello World!\n";
 sudoku :: @S("003020600900305001001806400008102900700000008006708200002609500800203009005010300", 
     "483921657967345821251876493548132976729564138136798245372689514814253769695417382");
 Case :: Ty(Str, []Str, @FnPtr(o: Str, e: Str) bool);
+#use("@/examples/testing.fr");
 
 // TODO: exec every time so you can run tests after the first compile error
 fn driver(vtable: *ImportVTable) void = {
@@ -38,7 +39,6 @@ fn driver(vtable: *ImportVTable) void = {
     ::FmtPad(Str);
     tests := collect_tests(vtable);
     ::import("@/examples/testing.fr");
-    
     full, expect_dot_count := gen_full_test_program(tests&);
     ok, out, err := compile_and_run(vtable, full, empty());
     if ok {
@@ -49,7 +49,6 @@ fn driver(vtable: *ImportVTable) void = {
         // make sure it didn't cheat by calling exit(0) or something
         @assert_eq(expect_dot_count, count_end_of_line_dots(out.items()), "status=0 but didn't print enough dots");
     } else {
-        #use("@/examples/testing.fr");
         "./target/c.out".three_trillion_dollars_does_not_buy_an_operating_system_that_works(); 
         
         print(out.items());
@@ -138,6 +137,7 @@ compile_only :: @S(
     "examples/bloat2.fr",
     "examples/check_source.fr",
     "examples/amalgamate.fr",
+    "examples/toy/curse_macho.fr",
 );
 
 fn compile(vtable: *ImportVTable, src: Str) void = {
@@ -150,7 +150,7 @@ fn compile(vtable: *ImportVTable, src: Str) void = {
 // returns one blob of bytes for each `goal` compiled in the same CompCtx but different QbeModule-s. 
 // the bytes are always .Exe, just direct or via frc.
 fn compile_to_bytes(vtable: *ImportVTable, src: Str, goal: []QbeOutputPurpose) [][]u8 = {
-    results := list([]u8, goal.len, general_allocator());
+    results := list([]u8, goal.len, temp());
     mark := mark_temporary_storage();
     push_dynamic_context {
         opts := vtable.default_build_options();
@@ -171,7 +171,7 @@ fn compile_to_bytes(vtable: *ImportVTable, src: Str, goal: []QbeOutputPurpose) [
             };
             chunks := {c.vtable.emit_qbe_included}(QbeModule.raw_from_ptr(m), c&, @slice(fid), .WrapMain);
             bytes := concat(chunks&, general_allocator());
-            drop(m);
+            c'vtable'drop_qbe_module(QbeModule.raw_from_ptr(m));
 
             if @is(goal, .Cached, .CachedEarly) {
                 init_default_module_dyn(m, c.vtable, (arch = a, os = os, type = .Exe));
@@ -185,10 +185,10 @@ fn compile_to_bytes(vtable: *ImportVTable, src: Str, goal: []QbeOutputPurpose) [
                 
                 general_allocator().dealloc(u8, bytes);
                 bytes = concat(chunks&, general_allocator());
-                drop(m);
+                c'vtable'drop_qbe_module(QbeModule.raw_from_ptr(m));
             };
             
-            results&.push(bytes);
+            results&.push_assume_capacity(bytes);
         };
         
         // TODO: i would like this to be true but it's not
@@ -300,16 +300,18 @@ fn collect_tests(vtable: *ImportVTable) Tests = {
         
         for tests { f | 
             func  := c.get_function(f);
-            name  := c.get_string(func.name);
+            // carefully copying these names into temp() so they don't go away when destroy_compiler
+            name  := c.get_string(func.name).shallow_copy(temp());
             loc   := c.AstExternal'get_whole_line(func.loc);
             files := out&.get(loc&.nice_filename()) || {
                 l := temp().box(List(Str));
                 l[] = list(temp());
-                out&.insert(loc&.nice_filename(), l);
+                out&.insert(loc&.nice_filename().shallow_copy(temp()), l);
                 l
             };
             files.push(name);
         };
+        c'vtable'destroy_compiler(c.data);
     };
     out
 }

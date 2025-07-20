@@ -1,41 +1,57 @@
-let's cheat and make examples/terminal.fr(repl=true) not take 2 seconds to compile. 
-- toplevel: 58 (embarrassing!)
-- run_qbe_passes: 231, init_default_module: 346  // franca compiler (for runtime)
-- do_include: 295  // c compiler for stb (for comptime)
-- gfx: 63 // for on_frame (for runtime)
-- compile_to_shader_source: 68 // shader compiler (for comptime)
-notably those are all things to aren't going to change if you're just working on the terminal program. 
 
----
+- crack down on smurf naming conventions (ie import("@/lib/alloc/debug_alloc.fr").DebugAlloc is kinda dumb). 
+- real error handling for lib/sys/posix.fr. need to be able to remap the errno values to something consistant. 
+- i've lost 20ms of speed. i should really make something that automatically times it every commit. 
 
-- "arg type mismatch after removing const args" error message needs to tell you the types
-- :ReWalkTokens
-- bake for list/hashmap need to get rid of uninit memory
-- i need to be able to easily identify the Anon generated functions. 
-  try to be smarter about giving them a name. like for const eval of a `::` var it should just be the name on the left. 
-  use FnDef.line and make it more elegant somehow, idk 
-- "this works here but not in it's original place under f()."
-- :ThisIsNotOkBecauseMemoryWillBeReused
-- give data symbols readable names now that they show up in symbol table
-- there's still a compilation order problem with inlining intrinsics. look at copy_bytes(). 
-- dynamiclib is kinda broken because i rely on OS being set by runtime_init
-- can't cross compile from (macos) to (linux -syscalls) if you call 
-  write_entire_file at comptime because it wants gettime (for atomic file name, bleh)
-  which i havn't transcribed syscall for on macos. will be fixed when i make prefer_syscall
-  not a constant which i want to do anyway for reusing frc_inlinable when cross compiling. 
-  (same for linux-sta -> linux-dyn)
-- turn off Qbe.Fn.track_ir_names in import_c
-- instead of hardcoding `clang`, use env var CC or something more sane.
-  could try clang and fall back to a self-compiled tcc if it's not available. 
-- make it easy to skip any tests that have external dependencies
-- what is the deal with load_opt::def taking so long for import_c
-- List.shrink_to_fit for places that i push and then return a slice so you can free it on allocators that don't track size
+## tooling for debugging
+
+- sampling profiler with setitimer
+- something where you can mark some memory as an artifact with a name and a type,
+  like when you generate code (like compiler/test.fr/gen_full_test_program) or a module 
+  (like backend/opt/simplify.fr/static_memmove), and set an envvar to have 
+  the compiler dump it all for debugging. so you can look at all the extra stuff 
+  that when into your program that doesn't have a real home and error messages could 
+  point to that as a source location. 
+- strace from my syscall wrappers
+- DebugAlloc
+  - do something about the name resolver for a jit module needing to live all the way to DebugAlloc.deinit to give nice stack traces. 
+    you can't just leak the whole module because then you get junk leak reports. 
+    it would be nice if drop() were generic over the message sent to the allocator so you could mark the whole tree of memory as 
+    ignore_leak without rewriting the thing. like getting a billion leak reports because you forgot to drop(QbeModule) is much 
+    less useful than if it just showed one. 
+  - make it easier to toggle on and off. should have a consistant system for all the configs like this. 
+  - memory isn't the only resource. i should have something similar for file descriptors and lambdas that you're not supposed to return
+    from like walk_directory. maybe just allocate some junk memory, pass it around, and deallocate at the end and then it doesn't need any extra work. 
+    (extra dumb to waste a whole page for that tho if i keep it coupled to the unmapping in debugalloc)
+  - extend the crash_report on fault to lookup the address you crashed on (the memory access not just the ip)
+    and report where it was allocated if possible. 
+  - make it more tunable in case it's too unbarably slow. like maybe you don't want to give each allocation its own page, 
+    just protect the page when all allocations on it have been freed. 
+  - seperate event_counter per thread as well. 
+  - sort the leak report by event counter so it's easier to diff. rn it's in hash order of aslr address which is unhelpful.
+- nicer interface for bloat.fr, make you a pie chart of function size by file or something idk but the list is kinda unreadable. 
+    
+## import_c
+
 - import_c add a test for the incorrect include guard thing i fixed on jul16
 - import_c faults on function without parameter name: `int aaa(char*) { return 1; }`
 - import_c/cc.fr searches include path for the starting file before your current working directory which is super confusing
+- turn off Qbe.Fn.track_ir_names in import_c
+- :ReWalkTokens
+- what is the deal with load_opt::def taking so long for import_c
+- implement _Atomic in import_c
+- import_c: `__constructor__, __aligned__`
+- import_c, get rid of :BoundsPadding
+- import_c: if you call something at both comptime and runtime it needs to redo the 
+c frontend work because of `#ifdef ARCH/OS`. C also lets you have different function/struct
+bodies on different targets which i don't deal with well. 
+- for import_c, decide when to reset temp() and audit all the allocations in tok/pre
+- import_c/ffi has a big comment
 
 ### !! BROKEN !!
 
+- not everything works if you force general_allocator to be BlockAlloc
+- there have been very rare failures in my lua tests for a while
 - soft_draw.fr crashes when you quit the program
 - readdir -os linux -arch aarch64 -syscalls doesn't work
 - spurious failure of import_c/tests/wuffs.fr on macos-x86_64 
@@ -66,11 +82,6 @@ TODO: tests that @import_symbol give you null for a missing weak symbol (instead
 TODO: fallback to the syscall version automatically if a weak symbol is unavailable
 TODO: @import_symbol of non-existant throws TraceTrap at comptime
 TODO: be consistant about spelling: zeros or zeroes
-
-## PROGRAMS THAT CRASH
-
-- not everything works if you force general_allocator to be BlockAlloc
-- there have been very rare failures in my lua tests for a while
 
 ## COMPILER BUG 
 
@@ -109,16 +120,11 @@ TODO: end of loop. still too many options for 'index'
 ```
 - // TODO: only the first element of the @slice in unquote_placeholders is getting typechecked that it wants FatExpr not *FatExpr? 
 - #inline returning Never doesn't remember that it returns Never
+- there's still a compilation order problem with inlining intrinsics. look at copy_bytes(). 
+- :ThisIsNotOkBecauseMemoryWillBeReused
 
 ## 
 
-- sampling profiler with setitimer
-- something where you can mark some memory as an artifact with a name and a type,
-  like when you generate code (like compiler/test.fr/gen_full_test_program) or a module 
-  (like backend/opt/simplify.fr/static_memmove), and set an envvar to have 
-  the compiler dump it all for debugging. so you can look at all the extra stuff 
-  that when into your program that doesn't have a real home and error messages could 
-  point to that as a source location. 
 - #log_ir should fire multiple times for functions with $const parameters (ie. native_isel)
 - shouldn't be able to typo a name as easily. like S :: import_module{enqueue :: enqueue_task}); then S.enqueue_task will get you the wrong one and be slow. 
 - why was the quicksort wrapper trying to be emitted for import_module (when not marked #fold)
@@ -127,10 +133,7 @@ TODO: end of loop. still too many options for 'index'
 - get compilation order dependence under control!!
 - fix callgraph sorting to improve inlining. like make sure the ge/le in lex_int/is_ascii_digit are inlined 
 - make AsmFunction get an inferred name
-- implement _Atomic in import_c
-- import_c: `__constructor__, __aligned__`
 - @bit_fields in incremental.fr don't work inline in the structs
-- import_c, get rid of :BoundsPadding
 - use HashMap.get_or_insert more
 - #ir tries to ignore zero-sized params but not if they're first which is sad
 - :BrokenCGeneric i think erroring on conflicting `_Generic` cases is correct but you're supposed to treat `long` and `long long`
@@ -192,7 +195,8 @@ hould just make them local constants in each file like they are here in riscv
 - arm relocatable import: relocation to fold symbol offsets into the adrp+add instead of wasting an extra instruction :SLOW
 - fixup2.ssa: "this should work without the indirection, i just don't handle folding the offset into the constant correctly."
   i think that's fixed now. add a little test of that too
-  
+- "this works here but not in it's original place under f()."
+
 ## don't rely on libc
 
 - import_c/tokenize: strtoul, strncasecmp, strtod
@@ -209,10 +213,15 @@ hould just make them local constants in each file like they are here in riscv
 ## linux 
 
 - linux fault-na.ssa need to do the signal struct (rn it's skipped in backend/meta/test.fr)
-- :TodoLinux
+- :TodoLinux CLOCK_REALTIME
 - repro doesn't work cross compiling from linux to macos,
 but dump_macho.fr and objdump -d say they're the same (for mandelbrot_ui.fr at least). 
 so something in the data i guess? 
+- can't cross compile from (macos) to (linux -syscalls) if you call 
+  write_entire_file at comptime because it wants gettime (for atomic file name, bleh)
+  which i havn't transcribed syscall for on macos. will be fixed when i make prefer_syscall
+  not a constant which i want to do anyway for reusing frc_inlinable when cross compiling. 
+  (same for linux-sta -> linux-dyn)
 - elf Dynamic
 - how are you supposed to ask for page size? blink wants 64k instead of 4k. 
 - standalone import_c/cc.fr and meta/qbe_backend.fr can't make statically linked binaries because the `_init` is written in franca
@@ -236,7 +245,10 @@ so something in the data i guess?
 q.out`impl2__7041:
 ->  0x1016b78 <+224>: cas    x17, x0, [x2]
 ```
-
+- shared libraries (backend/elf/emit.fr)
+- shader translation for the gui examples
+- non-amd64 support
+  
 ## amd64
 
 - amd64: `std/json        cc      FAIL test_wuffs_strconv_parse_number_f64_regular: "-0.000e0": have 0x0000000000000000, want 0x8000000000000000`
@@ -400,7 +412,6 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
 - catch faults/panics from the repl
 - option to reset the repl since it leaks memory indefinitely 
 - unicode characters
-- handle quotes in cmd parsing. strip spaces
 - && to run two commands
 - make it compile faster when ENABLE_FRANCA_REPL
 - multiline franca commands
@@ -446,10 +457,10 @@ just a problem with how that program is doing directions not with the app lib)
 - :LazyMagicNumbers
 - :DEPTH (which is also for msaa)
 - bindgroups_cache 
+- comptime thing to generate SgShaderDesc
 
 ## stuff i broke
 
-- adding #align was a compile speed regression
 - `./q.out -t wasm32 -o target/out/q.wasm -cc backend/test/abi8.ssa -d AI`
 %�%.104 =w pop
 - fast memcpy (need to deal with fallback when not linking a libc)
@@ -470,12 +481,6 @@ The alternative school of thought is that i could go full linker and be able to
 give types a stable identity accross compiles and patch out the type constants 
 so you could cache code that runs at comptime without it needing to do everything 
 through the ImportVTable explicitly. but that feels a bit too wishy washy to me? idk. 
-
-## cross compiling
-
-- import_c: if you call something at both comptime and runtime it needs to redo the 
-c frontend work because of `#ifdef ARCH/OS`. C also lets you have different function/struct
-bodies on different targets which i don't deal with well. 
 
 ## language consistancy
 
@@ -519,6 +524,7 @@ the frontend is single threaded but maybe it's not a great idea in the long term
 
 ## library robustness
 
+- dynamiclib is kinda broken because i rely on OS being set by runtime_init
 - ask the os for the correct page size
 - :TodoLinux :HardcodeOs
 - cure remaining stds
@@ -542,11 +548,9 @@ the right/fast/safe/whatever thing to do is also the easy thing to do.
 - maybe have a `push_compiler_error_context` and `pop_compiler_error_context` for macros so @fmt could easily add a message like `while evaluating format string`?
 - is :jnz_is_Kw really what i want the semantic to be?
 - RSlot overflow
-- for import_c, decide when to reset temp() and audit all the allocations in tok/pre
 - default arg values (any const expr and inject at callsite? or based on other args so generate shims or multiple entry points to the function)
 - clean up what goes in lib/build.fr vs lib/sys/fs.fr
 - make fetching dependencies (ie. lua for testing import_c) not embarrassing
-- import_c/ffi has a big comment
 - implement examples/testing.fr/fetch_or_crash() with import_c (wuffs and libcurl) instead of exec-ing shit
 - fetch_or_crash hashes are of the compressed file which is garbage. will break if github changes compression level or whatever. 
 - use import_c for the parts of sokol i haven't ported yet (can't for the mac stuff because thats objective c)
@@ -556,7 +560,8 @@ the right/fast/safe/whatever thing to do is also the easy thing to do.
 - it would be nice if the backend did a bit of typechecking when you were 
 targetting wasm so it could give you the errors instead of producing a program 
 that fails the wasm verifier
-- comptime thing to generate SgShaderDesc
+- bake for list/hashmap need to get rid of uninit memory
+- List.shrink_to_fit for places that i push and then return a slice so you can free it on allocators that don't track size
 
 ## cleanup 
 
@@ -612,12 +617,9 @@ or just default to jitting and force you to enable aot by specifying an output p
 - TODO: i should probably be making tests for error locations
 - arm-linux github actions
 - run rv-hello-world in libriscv (and x86_64 in blink too maybe)
-
-## linux
-
-- shared libraries (backend/elf/emit.fr)
-- shader translation for the gui examples
-- non-amd64 support
+- instead of hardcoding `clang`, use env var CC or something more sane.
+  could try clang and fall back to a self-compiled tcc if it's not available. 
+- make it easy to skip any tests that have external dependencies
 
 ## error messages
 
@@ -637,6 +639,11 @@ or just default to jitting and force you to enable aot by specifying an output p
 - integer overflow of a literal
 - contextual field not found should show the type's declaration location 
 - "arity mismatch" should check if last aparameter is CVariadic and suggest @va
+- "arg type mismatch after removing const args" error message needs to tell you the types
+- i need to be able to easily identify the Anon generated functions. 
+  try to be smarter about giving them a name. like for const eval of a `::` var it should just be the name on the left. 
+  use FnDef.line and make it more elegant somehow, idk 
+- give data symbols readable names now that they show up in symbol table
 
 ## language decisions
 

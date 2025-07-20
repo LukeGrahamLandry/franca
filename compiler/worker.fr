@@ -475,7 +475,7 @@ fn get_log_types(comp: CompCtx, fid: FuncId) Str = {
 }
 
 fn join_codegen_thread(shared: *CodegenShared) void = {
-    @if(shared.no_more_functions) return();
+    @assert(!shared.no_more_functions);
     shared.no_more_functions = true;
     if shared.threaded {
         while => shared.no_more_codegen == 0 {
@@ -495,10 +495,15 @@ fn join_codegen_thread(shared: *CodegenShared) void = {
     each shared.queue { q |
         q.arena&.deinit();
     };
+    arena := shared.type_indices.alloc;
+    arena.dealloc(@type shared.queue[0], shared.queue);
+    shared.frc_imports&.drop(arena);
+    shared.type_indices&.drop();
     
     if !shared.threaded {
         shared.m.emit_suspended_inlinables();
     } else {
         @debug_assert_eq(shared.m.inlinable_but_referenced_later.len, 0, "this happens on the other thread so it works with apple's MAP_JIT");
     };
+    arena.dealloc_one(@type shared[], shared);
 }

@@ -24,8 +24,6 @@ fn deinit(self: *DebugAlloc) void = {
         
         // TODO: the spam of allocation functions is annoying like yeah i know you called raw_alloc that doesnt help.
         //       need to be able to mark known roots that should be skipped. 
-        // TODO: problem when this frees first in this loop. plus the spam is annoying. mark things that are expected to leak? 
-        //    node := general_allocator().box_zeroed(LocationResolverNode);  // This needs to leak!",
         
         traces: []*StackTrace = empty();
         each self.pointers& { k, v |
@@ -38,7 +36,7 @@ fn deinit(self: *DebugAlloc) void = {
                     };
                 };
                 
-                @eprintln("(leak = (ptr = %, len = %, alloc = (", k, v.size);
+                @eprintln("(leak = (ptr = %, len = %, when = %, where = (", k, v.size, v.alloc_when);
                 trace := traces[v.alloc_at.zext()];
                 for trace.ip& { ip |
                     @if(ip != 0)
@@ -50,6 +48,7 @@ fn deinit(self: *DebugAlloc) void = {
                 };
                 @eprintln(")),");
             };
+            // don't free if it was ignore_leak()-ed. extra important because name resolvers might be allocated by this allocator. 
             if v.freed_at != Allocation.sentinal_leak {
                 Syscall'munmap(k.rawptr_from_int(), v.size);
             };
@@ -64,17 +63,20 @@ DebugAlloc :: @struct {
     pointers: RawHashMap(i64, Allocation);
     mutex: import("@/lib/sys/sync/mutex.fr").Mutex;
     trace_lookup: RawHashMap(StackTrace, u32);
+    // this counts unique callstacks (not allocations), so u32 is plenty. 
     next_trace: u32;
     meta_data_alloc: Alloc;
     locked: bool;
+    event_counter: i64;
 };
 
-trace_length :: 15;
+trace_length :: 25;
 
 Allocation :: @struct {
     size: i64;
     alloc_at: u32;
     freed_at: u32;
+    alloc_when: i64;
     
     sentinal_not_free :: MAX_u32;
     sentinal_leak :: MAX_u32 - 1;
@@ -95,6 +97,7 @@ capture :: fn(self: *DebugAlloc) u32 = {
     ::HashEach([]i64, TrivialHasher);
     (self.trace_lookup&.get_or_insert(it, self.meta_data_alloc) {
         self.next_trace += 1;
+        @debug_assert_ne(self.next_trace, 0, "overflow");
         self.next_trace - 1
     })[]
 };
@@ -102,6 +105,7 @@ capture :: fn(self: *DebugAlloc) u32 = {
 allocator_fn :: fn(self: rawptr, action: AllocatorAction, ptr: rawptr, count: i64, align: i64) []u8 = {
     self := DebugAlloc.ptr_from_raw(self);
     @assert(!self.locked, "tried to use DebugAlloc while reporting leaks");
+    self.event_counter += 1;
     if action == .Allocate {
         result := page_allocator_fn(zeroed rawptr, action, ptr, count, align);
         with self.mutex& {
@@ -109,6 +113,7 @@ allocator_fn :: fn(self: rawptr, action: AllocatorAction, ptr: rawptr, count: i6
                 size = count,
                 freed_at = Allocation.sentinal_not_free, 
                 alloc_at = self.capture(),
+                alloc_when = self.event_counter,
             ), self.meta_data_alloc);
         };
         return(result);
