@@ -1,7 +1,15 @@
-## (Jul 19/20)
+## (Jul 19/20/21)
 
 - plug more harmless leaks because it's fun now: kaleidoscope, qbe_frontend, prospero. 
 - put more stuff in the Alloc interface: arena mark/reset, free all
+- new debug mode: protect memory on arena reset. 
+  - caught ascii_table baking temp memory
+- on the plus side i can get rid of an ugly thing in copy_bytes that i fixed a while ago
+- linux-syscalls crash is just about my thread spawning stuff. 
+  join_codegen_thread frees the stack without joining the thread when not linking libpthread. 
+  easily fixed by wait() syscall on the pid from clone. 
+- idk what i was smoking with BlockAlloc. i was trying to lazily split a page into blocks but 
+  wasn't keeping track if it was the first time or a re-free-ed one. 
 
 ## (Jul 18)
 

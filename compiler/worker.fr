@@ -483,10 +483,17 @@ fn join_codegen_thread(shared: *CodegenShared) void = {
             Futex'wait(shared.no_more_codegen&, 0);
         };
         
-        result := rawptr.zeroed();
-        @if(is_linking_libc()) {
+        // TODO: factor this out into something usable
+        @if(is_linking_libc(), {
+            result := rawptr.zeroed();
             pthread_join(shared.thread, result&);
-        };
+        }, {
+            status: i32 = -1;
+            pid: i32 = shared.thread.opaque.int_from_rawptr().intcast();
+            // if it errors because the child won the race to exit, that's fine. 
+            // TODO: is that what ECHILD means? that seems a bit unreasonable to me?
+            _ := Posix'waitpid(pid, status&, 0);
+        });
         
         page_allocator.dealloc(u8, shared.thread_stack);
         shared.thread_stack = empty();

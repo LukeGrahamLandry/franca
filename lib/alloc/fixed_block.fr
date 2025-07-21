@@ -46,24 +46,21 @@ fn BlockAllocImpl($block_sizes: []i64) Type = {
             first = slot[];
             if first.is_null() {
                 // The list is empty so we need to ask for more memory. 
-                page := self.parent.alloc(u8, page_size());
+                page_size := page_size();
+                page := self.parent.alloc(u8, page_size);
                 first = u8.raw_from_ptr(page.ptr);
-                slot[] = first.offset(size);
-            } else {
-                // Pop this off the free list. 
-                // If this is the last entry in the free list but it's not at the end of it's page, 
-                // we need to make a new block immediatly after it and add that to the list so we don't lose the memory. 
-                next := rawptr.ptr_from_raw(first)[];
-                next_candidate := first.offset(block_sizes[size_index]);
-                is_last := next.is_null() && next_candidate.int_from_rawptr().mod(page_size()) != 0;
-                if is_last {
-                    next = next_candidate;
-                    // Don't assume that the parent allocator zeroed the memory. 
-                    // So record that this is the new end of the list so we get back to this case next time. 
-                    rawptr.ptr_from_raw(next)[] = 0.rawptr_from_int();
+                slot[] = first;
+                n := page_size / size - 1;
+                range(0, n) { i |
+                    rawptr.ptr_from_raw(first.offset(i * size))[] = first.offset((i+1) * size);
                 };
-                slot[] = next;
+                rawptr.ptr_from_raw(first.offset(n * size))[] = 0.rawptr_from_int();
             };
+
+            // Pop this off the free list. 
+            next := rawptr.ptr_from_raw(first)[];
+            next_candidate := first.offset(block_sizes[size_index]);
+            slot[] = next;
         };
         (ptr = u8.ptr_from_raw(first), len = size)
     }

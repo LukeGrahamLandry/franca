@@ -125,6 +125,24 @@ fn reset_retaining_capacity(self: *ArenaAlloc, mark: ArenaMarker) void = {
         return();  
     };
     chunk := mark.chunk.unwrap();
+    @if(SLOW_PROTECT_ARENA) {
+        c := chunk.next;
+        chunk.next = .None;
+        // TODO: and this doesn't work with leak detection because you can't free this now (and if you keep a list, 
+        // keep chunk.size outsize because it can't be read once protected, and also will change if i do something for partially reset chunks)
+        while => c { it |
+            c = it.next;
+            size := it.size.align_back(page_size());
+            start := ArenaHeader.raw_from_ptr(it);
+            next_page := start.align_to(page_size());
+            if size > 0 && ptr_diff(start, next_page) < size {
+                Syscall'mprotect(next_page, size, 0).unwrap();
+            };
+        };
+        
+        // TODO: do something for the partially reset chunk
+    };
+    
     self.start = mark.start;
     self.end = chunk.size;
     self.chunk = (Some = chunk);
@@ -180,28 +198,6 @@ fn reset_retaining_capacity(self: *ArenaAlloc) void = {
         self.chunk = (Some = chunk);
         chunk.used = self.start;
     }
-}
-
-// Some memory is returned to the backing allocator. 
-// The original capacity is retained and the arena can be reused. 
-// # Safety
-//     - This invalidates all allocations in self!
-fn reset_retaining_original(self: *ArenaAlloc) void = {
-    if self.chunk { chunk |
-        while => chunk.next { it |
-            chunk = it;
-        };
-        while(=> chunk.prev.is_some()) {
-            prev := chunk.prev.unwrap();
-            ptr  := ptr_cast_unchecked(From = ArenaHeader, To = u8, ptr = chunk);
-            buf  := slice(ptr, chunk.size);
-            self.parent.dealloc(u8, buf);
-            chunk = prev;
-        };
-        self.chunk = (Some = chunk);
-        self.start = ArenaHeader.size_of();
-        self.end = chunk.size;
-    };
 }
 
 // Memory is returned to the backing allocator. 

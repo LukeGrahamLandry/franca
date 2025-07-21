@@ -30,6 +30,11 @@
     just protect the page when all allocations on it have been freed. 
   - seperate event_counter per thread as well. 
   - sort the leak report by event counter so it's easier to diff. rn it's in hash order of aslr address which is unhelpful.
+- should log when the slow things are turned on so i can't forget to turn them off. 
+- need to give better source location for #inline and @macro. each ip can have a stack of locations. 
+- SLOW_PROTECT_ARENA doesn't work with SLOW_DEBUG_ALLOC because the protect forces it to be leaked. 
+- tests for all this somehow. need to make configuring it more programatic. so choosing a different allocator at top level
+  (like how DebugAlloc works) is more convient than just checking the constant in the implementation (like how ArenaAlloc works). 
 - nicer interface for bloat.fr, make you a pie chart of function size by file or something idk but the list is kinda unreadable. 
     
 ## import_c
@@ -51,29 +56,11 @@ bodies on different targets which i don't deal with well.
 
 ### !! BROKEN !!
 
-- not everything works if you force general_allocator to be BlockAlloc
+- wuffs/gif.c fails at random
 - there have been very rare failures in my lua tests for a while
 - soft_draw.fr crashes when you quit the program
-- readdir -os linux -arch aarch64 -syscalls doesn't work
 - spurious failure of import_c/tests/wuffs.fr on macos-x86_64 
   (failed in github actions and then worked when rerun with no change)
-- static linux is broken randomly. 
-  - seems to only be when it's a `main` program, default_driver is fine. 
-  - works in blink but not orb. 
-  - maybe this is related to when tests/exe/sys.fr was failing in github actions? 
-  - turning off (forcing no_cache when !is_linking_libc) doesn't fix it. 
-    but you have to be careful to rm target/franca/cache when testing because the problem only 
-    doesn't happen when it's a cache hit so it pretends to work if you get lucky the first time. 
-  - doesn't happen when using linker i think
-
-```
-franca examples/default_driver.fr build compiler/main.fr -o q.out -os linux -arch x86_64 -syscalls && for i in $(seq 1 100);
-do
-    echo $i
-    orb ./q.out examples/toy/hello.fr || { echo "fail"; break; };
-done
-```
-
 - random failures in import_c
   - `panic! tried to unlock someone else's mutex`
   - `16000panic! recursing in new_arena_chunkmemory order problem`
@@ -86,6 +73,7 @@ do
     ./target/f.out examples/import_c/test/test.fr || { echo "fail"; break; };
 done
 ```
+
 ## import_symbol / weak
 
 TODO: my @import_symbol always does a weak symbol even though it in the macro body i say weak=false.

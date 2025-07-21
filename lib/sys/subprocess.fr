@@ -7,11 +7,10 @@ fn run_cmd_blocking(path: Str, args: Slice(Str)) bool = {
         exec_cmd(path, args);
     };
     
-    status: i32 = 0.intcast();
-    res := Posix'waitpid(pid, status&, 0); 
-    :: assert_eq(i32);
-    assert_eq(res, pid); // TODO: error handling, check errno
-    status.eq(0.intcast())
+    status: i32 = 0;
+    res := Posix'waitpid(pid, status&, 0) 
+        || return(false);
+    status == 0
 }
 
 fn exec_and_catch(path: Str, args: Slice(Str), alloc: Alloc) Ty(bool, List(u8), List(u8)) = 
@@ -62,6 +61,7 @@ fn exec_cmd(path: Str, args: Slice(Str)) Never = {
 RunningProcess :: @struct {
     pipes: Array(Fd, 3);  // in, out, err
     pid: i32;
+    status: i32;
 };
 
 // TODO: let caller set cwd
@@ -101,7 +101,7 @@ sys_capture_exec :: fn(args: []CStr) Result(RunningProcess, Str) = {
     Syscall'close(pipes&[1]&[1]).unwrap();  // close the write end
     Syscall'close(pipes&[2]&[1]).unwrap();  // "
     
-    (Ok = (pid = pid, pipes = @array(pipes&[0]&[1], pipes&[1]&[0], pipes&[2]&[0])))
+    (Ok = (pid = pid, pipes = @array(pipes&[0]&[1], pipes&[1]&[0], pipes&[2]&[0]), status = -1))
 };
 
 // TODO: allow using a hanging poll for when you're just calling this in a loop to collect everything
@@ -124,10 +124,21 @@ fn poll(self: *RunningProcess, buf: []*List(u8), realloc: bool, input: *[]u8, la
 
     status: i32 = 0;
     n := poll(poll_data, 0) || return(Err = "libc::poll() failed");
-    done := waitpid(self.pid, status&, W.NOHANG);
-    if done == 0 && n == 0 {
-        return(Ok = .None);
-    };
+    
+    done := @if(self.status == -1, {
+        done := waitpid(self.pid, status&, W.NOHANG)
+            || return(Err = "libc::wait4 failed");
+        if done == 0 && n == 0 {
+            return(Ok = .None);
+        };
+        if done > 0 {
+            self.status = status;
+        };
+        done
+    }, {
+        status = self.status;
+        self.pid
+    });
     
     if input.len > 0 {
         p := poll_data.index(0);
@@ -167,8 +178,6 @@ fn poll(self: *RunningProcess, buf: []*List(u8), realloc: bool, input: *[]u8, la
         };
     };
     
-    // the hope is that you're alllowed to waitpid again after the caller clears the buffer and get the status then
-    // TODO: is that true?
     if done != 0 && !full {
         Syscall'close(self.pipes&[0]);
         Syscall'close(self.pipes&[1]);
