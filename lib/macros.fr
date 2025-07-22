@@ -569,6 +569,9 @@ fn enum($T: Type) void = {
         display(self&, out);
     
     fn display(self: *T, out: *List(u8)) void = {
+        @if(:: T.get_type_info_ref()[].Enum.sequential) 
+            return(enum_display_from_ordinal(self[].raw().int(), packed_enum_names(T), out));
+        
         // TODO: without the extra force comptime eval, it wrongly thinks calling this function needs compctx.  -- Jul 1
         i := or self.try_ordinal() {
             @fmt(out, "<invalid enum value: %>", self[].raw().int());  // TODO: don't assume it's an int
@@ -577,6 +580,15 @@ fn enum($T: Type) void = {
         out.push_all(self[].name_str());
     }
 }
+
+enum_display_from_ordinal :: fn(i: i64, names: *PackedStrings, out: *List(u8)) void = {
+    packed, offs := names[];
+    if i.ult(offs.len) {
+        out.push_all(packed.subslice(offs[i*2].zext(), offs[i*2+1].zext()));
+    } else {
+        @fmt(out, "<invalid enum value: %>", i);  // TODO: don't assume it's an int
+    }
+};
 
 IsEnum :: fn(T: Type) bool = T.get_type_info_ref().is(.Enum);
 
@@ -589,11 +601,15 @@ fn name_str(self: ~T) Str #where(IsEnum) = {
 // But instead of (16 bytes + 1 relocation) per name, this is (4 bytes + 0 relocations) per name. 
 // TODO: However, from_name() has another copy of the strings now because i don't handle internal pointers in constants well. -- Mar 12, 2025
 fn enum_name_from_ordinal($E: Type, i: i64) Str #inline = {
-    packed, offs := :: pack_strings(get_enum_names(E));
+    packed, offs := packed_enum_names(E)[];
     packed.subslice(offs[i*2].zext(), offs[i*2+1].zext())
 }
 
-pack_strings :: fn(names: []Str) Ty(Str, []u16) = {
+packed_enum_names :: fn($E: Type) *PackedStrings #fold = 
+    @static(PackedStrings) pack_strings(get_enum_names(E));
+
+PackedStrings :: Ty(Str, []u16);
+pack_strings :: fn(names: []Str) PackedStrings = {
     offs  := ast_alloc().alloc(u16, names.len * 2);
     total := 0;
     enumerate names { i, n |
@@ -610,7 +626,7 @@ pack_strings :: fn(names: []Str) Ty(Str, []u16) = {
     (bytes, offs)
 };
 
-fn try_ordinal(self: ~RefT) ?i64 #where(PointerTo(IsEnum)) = {
+fn try_ordinal(self: ~RefT) ?i64 #where(PointerTo(IsEnum)) #inline = {
     T :: Deref(RefT);
     @if(:: T.get_type_info_ref()[].Enum.sequential, {
         i := self[].raw().int();

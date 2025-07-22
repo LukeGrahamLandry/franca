@@ -73,6 +73,8 @@ do
     ./target/f.out examples/import_c/test/test.fr || { echo "fail"; break; };
 done
 ```
+- collection of arm-macos random failures in github. 
+  - abi5.ssa -frc fail output
 
 ## import_symbol / weak
 

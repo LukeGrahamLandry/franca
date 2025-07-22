@@ -10,6 +10,14 @@
   easily fixed by wait() syscall on the pid from clone. 
 - idk what i was smoking with BlockAlloc. i was trying to lazily split a page into blocks but 
   wasn't keeping track if it was the first time or a re-free-ed one. 
+- little bit of shrinking
+  - 917280
+  - poly-outline sema.fr/eval()
+  - poly-outline display() on sequential enum
+  - 910080
+  - still have problems with first call can't be inlined so tiny generic things like 
+    get_variant_ptr_for, get_field_ptr suffer if not marked explicitly #inline
+  - 907520
 
 ## (Jul 18)
 
