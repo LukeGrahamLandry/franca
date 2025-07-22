@@ -12,6 +12,7 @@ SegmentType :: @enum(i64) (
 
 SymbolBucket :: @struct(
     n: u32,
+    mutex: Mutex,
     data: QList(SymbolInfo),
 );
 
@@ -365,6 +366,74 @@ fn add_code_bytes(m: *QbeModule, name_id: Qbe.Sym, code: *MultiArchAsm) void = {
     finish_function(m, dest, name_id);
 }
 
+fn declare_alias(m: *Qbe.Module, target: Qbe.Sym, alias: *Qbe.Lnk) void = {
+    // if the target thing is inlinable, this function can inline to the same thing. 
+    target_kind := SymbolKind.Pending;
+    target_inline := Qbe.InlineFn.ptr_from_int(0);
+    use_symbol(m, target) { s | 
+        mark_referenced(m, target, s);
+        target_inline = s.inline;
+        target_kind = s.kind;
+    };
+    
+    use_symbol(m, alias.id) { s | 
+        s.inline = target_inline;
+        // make sure it never gets added to inlinable_but_referenced_later (inline being non-null normally means it wasn't emitted). 
+        // other than being wasteful, redefining something that already exists is bad for business, and since the other one aliases 
+        // the Qbe.Fn, it would be emitted twice and double free arrays, or something bad i guess. the problem only exhibits when 
+        // constant folding is disabled (which has to happen to re-bootstrap whenever the .frc version number changes). 
+        // TODO: simpler repro than the whole compiler!
+        s.referenced = s.referenced || !target_inline.is_null();  
+    };
+
+    // TODO: it would be nice if it i could use the real aliasing thing for everything 
+    //       but it's a pain for things that aren't ready yet. i don't want to make you check 
+    //       for aliases every time you use a symbol. main problem is when it's an import 
+    //       that doesn't have a got_lookup_offset yet i think. might not be worth dealing with.  -- Jul 22, 2025
+    // TODO: inlinable should work like local. but that needs emit_suspended_inlinables to be aware of it which i don't want to deal with yet. 
+    if target_kind == .Local { // || !target_inline.is_null() {
+        m.finish_alias(target, alias.id);
+    } else {
+        alias_via_bounce(m, target, alias);
+    }
+}
+
+fn alias_via_bounce(m: *Qbe.Module, target: Qbe.Sym, alias: *Qbe.Lnk) void = {
+    f := temp().box_zeroed(Qbe.Fn);
+    f.leaf = true;  // This is a lie but really we're asking for no stack frame
+    f.nblk = 1;
+    f.globals = m;
+    f.con = new(fixed_const_count);
+    f.getcon(0xdeaddead);
+    f.getcon(0);
+    f.lnk = alias[];
+    f.start = newblk();
+    callee := f.symcon(target);
+    f.reset_scratch();
+    f.emit(.call, .Kw, QbeNull, callee, Qbe.RCALL_TAIL_SENTINAL);
+    f.copy_instructions_from_scratch_reversed_which_means_forwards(f.start);
+    f.start.jmp.type = .hlt;
+
+    // emit asm directly; don't run the normal passes
+    emit_fn(f);
+}
+
+// TODO: maybe_add_export(alias)
+fn finish_alias(m: *Qbe.Module, target: Qbe.Sym, alias: Qbe.Sym) void = {
+    use_symbol(m, target) { t | 
+        @debug_assert(t.got_lookup_offset == -1);
+        use_symbol(m, alias) { a | 
+            a.kind = t.kind;
+            a.segment = t.segment;
+            a.offset = t.offset;
+            a.jit_addr = t.jit_addr;
+            a.shim_addr = t.shim_addr;
+            a.wasm_type_index = t.wasm_type_index;
+            m.do_fixups(a.jit_addr, a);
+        };
+    };
+}
+
 fn finish_function(m: *QbeModule, dest: []u8, name_id: Qbe.Sym) void #inline = {
     // :SLOW
     lock(m.icache_mutex&);
@@ -412,7 +481,8 @@ fn for_symbols(m: *QbeModule, $body: @Fn(id: Qbe.Sym, s: *SymbolInfo) void) void
             id := h + i.shift_left(IBits);
             body((id = trunc id), symbol);
         };
-        bucket.n = n; // unlock
+        @debug_assert_eq(bucket.n, n);
+        bucket.mutex&.unlock();
     };
 }
 

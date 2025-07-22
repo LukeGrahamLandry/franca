@@ -1,3 +1,20 @@
+## (Jun 22)
+
+- i want to do real symbol aliases instead of CodegenTask.Bounce's weird tail call thing. 
+  - use reenterant mutex for symbol bucket lock so it's less painful to do things with multiple symbols. 
+    it's fine to read another symbol in the same bucket, you just can't let it resize. 
+    - i tested the "compiler bug!! tracetrap if you make this #inline" above the old lock_bucket()
+      before removing it. was fixed at some point. 
+  - im afraid this is going to end up not working because of objc_msgSend_stret and objc_msgSend 
+    mapping to the same thing but needing to tell apart for cross compiling from arm to amd. 
+    but that might have been resolved differently, we'll see what happens. 
+  - self compile works if i track which symbols are aliases and redirect push_fixup to the target
+    but thats order dependent and fails on a bunch of stuff. and really i don't want to add more stuff 
+    where you have to check if it's an alias every time you want to use a symbol like i used to do for 
+    follow_redirects. 
+  - but also maybe i only care about doing it for local things which have already been compiled, because 
+    thats the situation that shows up with the deduplication thing im planning to do, which is the easy case anyway. 
+
 ## (Jul 19/20/21)
 
 - plug more harmless leaks because it's fun now: kaleidoscope, qbe_frontend, prospero. 

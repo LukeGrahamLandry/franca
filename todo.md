@@ -2,6 +2,7 @@
 - crack down on smurf naming conventions (ie import("@/lib/alloc/debug_alloc.fr").DebugAlloc is kinda dumb). 
 - real error handling for lib/sys/posix.fr. need to be able to remap the errno values to something consistant. 
 - i've lost 20ms of speed. i should really make something that automatically times it every commit. 
+- error instead of hang on recursive inline
 
 ## tooling for debugging
 
@@ -75,6 +76,7 @@ done
 ```
 - collection of arm-macos random failures in github. 
   - abi5.ssa -frc fail output
+  - echo.ssa -w fail output
 
 ## import_symbol / weak
 

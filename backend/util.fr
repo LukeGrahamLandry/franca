@@ -695,9 +695,13 @@ fn intern(m: *QbeModule, s: Str) Qbe.Sym = {
     n := m.lock_bucket(b);
     range(0, n.zext()) { i |
         if s == b.data[i].name {
-            b.n = n;  // unlock
+            b.mutex&.unlock();
             return(id = h + i.trunc().shift_left(IBits));
         }
+    };
+    if b.mutex.count > 1 {
+        // they call me refcell because im always refing cells
+        @panic("can't intern new string '%' while bucket is locked elsewhere by this thread", s);
     };
     
     if n == 1.shift_left(32 - IBits) { 
@@ -724,7 +728,8 @@ fn intern(m: *QbeModule, s: Str) Qbe.Sym = {
     id := h + n.shift_left(IBits);
     data.id = (id = id);
     
-    b.n = n + 1;  // unlock
+    b.n += 1;
+    b.mutex&.unlock();
     data.id
 }
 
@@ -745,24 +750,13 @@ fn use_symbol(m: *QbeModule, id: Qbe.Sym, $body: @Fn(s: *SymbolInfo) void) void 
     @debug_assert_lt(idx, old, "invalid symbol id=%", id.id);
     symbol := bucket.data.index(idx.zext());
     body(symbol);
-    bucket.n = old;  // unlock
+    @debug_assert_eq(bucket.n, old);
+    bucket.mutex&.unlock();
 }
 
-// TODO: compiler bug!! tracetrap if you make this #inline  -- Mar 14
 fn lock_bucket(m: *QbeModule, bucket: *SymbolBucket) u32 = {
-    @if(use_threads, {
-        thread := context(DefaultContext)[].thread_index;
-        locked_by_me := LOCKED_BASE.bit_or(thread.trunc());
-        @debug_assert_ne(bucket.n, locked_by_me, "use_symbol but already locked by this thread=%", thread);
-        loop {
-            n := bucket.n;
-            locked := n.bit_and(LOCKED_BASE) != 0;
-            if !locked && u32.cas(bucket.n&, n, locked_by_me) == n {
-                return(n);
-            };
-            usleep(1);
-        }
-    }, bucket.n)
+    bucket.mutex&.lock();
+    bucket.n
 }
 
 // :ThreadSafety you can't call this one

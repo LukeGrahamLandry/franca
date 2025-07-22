@@ -279,40 +279,7 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
         }
         // Note: this does not work on wasm because they care about signatures
         fn Bounce(it) => {
-            f := temp().box_zeroed(Qbe.Fn);
-            f.leaf = true;  // This is a lie but really we're asking for no stack frame
-            f.nblk = 1;
-            f.globals = m;
-            f.con = new(fixed_const_count);
-            f.getcon(0xdeaddead);
-            f.getcon(0);
-            f.lnk = it.lnk[];
-            f.start = newblk();
-            callee := f.symcon(it.target);
-            f.reset_scratch();
-            f.emit(.call, .Kw, QbeNull, callee, Qbe.RCALL_TAIL_SENTINAL);
-            f.copy_instructions_from_scratch_reversed_which_means_forwards(f.start);
-            f.start.jmp.type = .hlt;
-           
-            // emit asm directly; don't run the normal passes
-            emit_fn(f);
-            
-            // if the target thing is inlinable, this function can inline to the same thing. 
-            target_inline := Qbe.InlineFn.ptr_from_int(0);
-            use_symbol(f.globals, it.target) { s | 
-                mark_referenced(f.globals, it.target, s);
-                target_inline = s.inline;
-            };
-            
-            use_symbol(f.globals, it.lnk.id) { s | 
-                s.inline = target_inline;
-                // make sure it never gets added to inlinable_but_referenced_later (inline being non-null normally means it wasn't emitted). 
-                // other than being wasteful, redefining something that already exists is bad for business, and since the other one aliases 
-                // the Qbe.Fn, it would be emitted twice and double free arrays, or something bad i guess. the problem only exhibits when 
-                // constant folding is disabled (which has to happen to re-bootstrap whenever the .frc version number changes). 
-                // TODO: simpler repro than the whole compiler!
-                s.referenced = s.referenced || !target_inline.is_null();  
-            };
+            declare_alias(m = m, target = it.target, alias = it.lnk);
         }
         fn AotVar2(it) => each it { d |
             m.emit_data(d[]);
