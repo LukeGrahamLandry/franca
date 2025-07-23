@@ -1,49 +1,75 @@
 
+Thread :: @struct {
+    // These are only used when starting the thread. 
+    userdata: rawptr;
+    callee: @FnPtr(userdata: rawptr) void;
+    
+    // handles for joining the thread
+    opaque: pthread_t;  // when using libc
+    tid_futex: u32;  // when linux-syscalls
+    tid: i32;
+    
+    stack_reserved_size: i64;
+    stack: []u8;  // free-ed on join
+    first_temporary_allocator: ArenaAlloc;  // free-ed on join
+    first_environment: DefaultContext;
+    extra: Array(u8, size_of_dynamic_context - size_of(DefaultContext));
+};
+
 // size_of(Thread) is the same on macos and glibc.
 // the others are always done by reference so just have to be the larger of the two sizes. 
-Thread :: @struct(opaque: rawptr);
+pthread_t :: @struct(opaque: rawptr);
 ThreadAttr :: @struct(sig: i64, opaque: Array(u8, 56));
 
-// TODO: should i do reusing of stacks here instead of making the caller do it if they care? 
+// TODO: should i do reusing of stacks here?
 // TODO: should provide something for setting up guard pages to catch stack overflows. 
 
-fn start_thread($T: Type, callee: @FnPtr(userdata: *T) void, userdata: *T) Thread #generic = {
+fn start_thread($T: Type, callee: @FnPtr(userdata: *T) void, userdata: *T) *Thread #generic = {
     stack := page_allocator.alloc(u8, 1.shift_left(25));  // :leak
     start_thread(stack, T, callee, userdata)
 }
 
-fn start_thread(stack: []u8, $T: Type, callee: @FnPtr(userdata: *T) void, userdata: *T) Thread #generic = {
+// stack gets free-ed into the page_allocator on join
+fn start_thread(stack: []u8, $T: Type, callee: @FnPtr(userdata: *T) void, userdata: *T) *Thread #generic = {
     callee := ptr_cast_unchecked(@type callee, @FnPtr(rawptr) void, callee&)[]; // TODO: make this less painful
     start_thread(stack, callee, T.raw_from_ptr(userdata))
 }
 
 // this uses the first page of `stack` for the dynamic context. 
-fn start_thread(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) Thread = {
+fn start_thread(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) *Thread = {
     @assert(query_context_is_implicit(), "tried to start thread but compiled using static context which is not thread safe.");
-    macos_page_size :: 16384;
+    macos_page_size :: 16384;  // TODO: don't assume this is the highest possible page size
+    thread := bit_cast_unchecked(*u8, *Thread, stack.ptr);
+    @debug_assert_ult(size_of(Thread), macos_page_size);
+    
     // TODO: put it at the end and offset forward to give the thread less memory so the stack grows left away from the context. instead of left towards the context. 
     // TODO: do we trust it to not stomp in my stuff in between? 
-    context_src: []u8 = (ptr = u8.ptr_from_raw(get_dynamic_context()), len = size_of_dynamic_context);
-    context_dest := stack.slice(16, 16 + size_of_dynamic_context);
-    context_dest.copy_from(context_src);
-    ptr_cast_unchecked(u8, rawptr, stack.ptr)[] = userdata;
-    ptr_cast_unchecked(u8, @type callee, stack.ptr.offset(8))[] = callee;
-    reserved := 16 + size_of_dynamic_context;
-    stack_low := stack.ptr.offset(macos_page_size);
-    @debug_assert_ult(reserved, macos_page_size);
-    @assert_eq(u8.int_from_ptr(stack_low).mod(16), 0, "start_thread unaligned stack");  // TODO: return error
+    copy_bytes(DefaultContext.raw_from_ptr(thread.first_environment&), get_dynamic_context(), size_of_dynamic_context);
+    set_new_thread_id(thread.first_environment&);
     
-    new_context := u8.raw_from_ptr(stack.ptr.offset(16));
-    set_new_thread_id(DefaultContext.ptr_from_raw(new_context));
-    raw_create_thread(stack_low.slice(stack.len - macos_page_size), franca_runtime_init_thread, new_context)
+    thread.userdata = userdata;
+    thread.callee = callee;
+    thread.tid_futex = MAX_u32;
+    thread.stack = stack;
+    thread.first_temporary_allocator = init(page_allocator, 1.shift_left(20));
+    thread.first_environment.temporary_allocator = thread.first_temporary_allocator&;
+    thread.stack_reserved_size = macos_page_size;
+    
+    raw_create_thread(thread);
+    thread
 }
 
 /// This assumes you've already done stuff to setup the context (and that the callee knows how to cope with that)
-fn raw_create_thread(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) Thread = {
-    use_pthread :: fn(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) Thread = {
+fn raw_create_thread(t: *Thread) void = {
+    callee :: franca_runtime_init_thread;
+    stack := t.stack.rest(t.stack_reserved_size);
+    @assert_eq(u8.int_from_ptr(stack.ptr).mod(16), 0, "start_thread unaligned stack");  // TODO: return error
+    userdata := Thread.raw_from_ptr(t);
+    
+    use_pthread :: fn(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) pthread_t = {
         // TODO: check PTHREAD_STACK_MIN
         attr := @uninitialized ThreadAttr;
-        out := Thread.zeroed();
+        out := pthread_t.zeroed();
         pthread_attr_init(attr&).unwrap();
         pthread_attr_setstack(attr&, stack.ptr, stack.len).unwrap(); 
         ok := pthread_create(out&, attr&, callee, userdata);
@@ -55,31 +81,48 @@ fn raw_create_thread(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdat
     // There's something with pointer authentication in the sig field. idk man.
     // https://github.com/apple/darwin-libpthread/blob/main/src/pthread.c
     // https://github.com/apple/darwin-libpthread/blob/main/src/types_internal.h#L348 
-    if is_linking_libc() || query_current_os() != .linux {
-        return use_pthread(stack, callee, userdata);
+    if prefer_pthread() {
+        t.opaque = use_pthread(stack, callee, userdata);
+    } else {
+        t.tid = LinuxLibc'sys_clone(stack, callee, userdata, t.tid_futex&);
     };
-    
-    result := LinuxLibc'sys_clone(stack, callee, userdata);
-    // TODO: do pthread_t stuff so we can join, etc
-    (opaque = rawptr_from_int(result.intcast()))
 }
+
+fn prefer_pthread() bool = 
+    !prefer_syscalls() || query_current_os() != .linux;
 
 franca_runtime_init_thread :: fn(franca_userdata: rawptr) void = {
     if(!query_context_is_implicit(), => Syscall'exit(1));
-    userdata := ptr_cast_unchecked(u8, rawptr, franca_userdata.offset(-16))[];
-    callee := ptr_cast_unchecked(u8, @FnPtr(userdata: rawptr) void, franca_userdata.offset(-8))[];
-    set_dynamic_context(franca_userdata);
-    t: ArenaAlloc = init(page_allocator, 1.shift_left(20));
-    c := context(DefaultContext);
-    c.temporary_allocator = t&;
-    callee(userdata);
-    t&.deinit();
-    // not freeing the stack here, i think the sane thing is to free it on the joining side. 
+    thread := Thread.ptr_from_raw(franca_userdata);
+    set_dynamic_context(DefaultContext.raw_from_ptr(thread.first_environment&));
+    thread'callee(thread.userdata);
+    // not freeing the stack here, the sane thing is to free it on the joining side (since on amd64 you return by popping something off it). 
 };
+
+fn join(t: *Thread) void = {
+    if prefer_pthread() {
+        result := rawptr.zeroed();
+        pthread_join(t.opaque, result&);
+    } else {
+        @debug_assert(query_current_os() == .linux);
+        { tid := t.tid_futex; @debug_assert(tid == MAX_u32 || tid == t.tid.bitcast() || tid == 0); };
+        expect: u32 = 0;
+        // the kernel will zero this address because of CLONE_CHILD_CLEARTID
+        while => t.tid_futex != expect {
+            FUTEX_WAIT :: 0;
+            _ := Syscall'sys_futex(t.tid_futex&, FUTEX_WAIT, expect, TimeSpec.ptr_from_int(0));
+        };
+    };
+    
+    // TODO: reuse these
+    t.first_temporary_allocator&.deinit();
+    page_allocator.dealloc(u8, t.stack);
+}
+
 
 // TODO: the NOSYS is a HACK to make -syscalls make a real static binary
 fn pthread_attr_init(out: *ThreadAttr) voidResult #weak #libc #syscall(NOSYS, NOSYS, NOSYS);
-fn pthread_create(out: *Thread, attr: *ThreadAttr, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) voidResult #weak #libc #syscall(NOSYS, NOSYS, NOSYS);
+fn pthread_create(out: *pthread_t, attr: *ThreadAttr, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) voidResult #weak #libc #syscall(NOSYS, NOSYS, NOSYS);
 fn pthread_attr_setstack(attr: *ThreadAttr, ptr: *u8, len: i64) voidResult #weak #libc #syscall(NOSYS, NOSYS, NOSYS);
-fn pthread_getcpuclockid(thread: Thread, clock_id_out: *i32) voidResult #libc;
-fn pthread_join(thread: Thread, value_ptr: *rawptr) voidResult #libc;
+fn pthread_getcpuclockid(thread: pthread_t, clock_id_out: *i32) voidResult #weak #libc;
+fn pthread_join(thread: pthread_t, value_ptr: *rawptr) voidResult #weak #libc;

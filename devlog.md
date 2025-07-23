@@ -8,6 +8,15 @@
   - ... but that makes it hang compiling farm_game.fr
     i think making `fn SEL($name: CStr) ObjCSelector` be quadratic in number of objc selectors is bad for business. 
     just setting an arbitrary cap of 32 entries in a group before you give up trying to deduplicate fixes the hang. 
+- my attempt to fix join_codegen_worker was very wrong. 
+  - CLONE_THREAD says `nor can the status of such a thread be obtained using wait(2).
+    (The thread is said to be detached.)` which i was hoping meant you could still wait for it to finish 
+    it just wouldn't give you the status but i think you can't wait for it at all, hence my getting ECHILD. 
+    - i guess the extra syscall just slowed it down enough that it seemed to work more often... idk, 
+      demonstrates that i should really be auto-testing -syscalls as well. 
+      shame i can't get a github actions that doesn't have a libc at all to make sure i can't cheat. 
+  - new theory is you have to use CLONE_CHILD_CLEARTID and futex wait on the tid address. 
+  - that seems to work.. but that's what i thought about the old thing too so who knows
 
 ## (Jul 22)
 
@@ -50,6 +59,7 @@
 - linux-syscalls crash is just about my thread spawning stuff. 
   join_codegen_thread frees the stack without joining the thread when not linking libpthread. 
   easily fixed by wait() syscall on the pid from clone. 
+  update: THAT'S WRONG
 - idk what i was smoking with BlockAlloc. i was trying to lazily split a page into blocks but 
   wasn't keeping track if it was the first time or a re-free-ed one. 
 - little bit of shrinking

@@ -164,9 +164,9 @@ get_executable_path :: fn(a: Alloc) Str = {
     return(out.items());
 };
 
-sys_clone :: fn(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) i32 = {
+sys_clone :: fn(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr, child_tid: *u32) i32 = {
     // CLONE_PTRACE is 0x2000 and i feel like i want it? but blink doesn't like it. 
-    clone_flags :: 0x80050F00; // CLONE_FILES | CLONE_FS | CLONE_IO | CLONE_THREAD | CLONE_VM | CLONE_SIGHAND | CLONE_SYSVSEM
+    clone_flags :: 0x81250F00; // CLONE_FILES | CLONE_FS | CLONE_IO | CLONE_THREAD | CLONE_VM | CLONE_SIGHAND | CLONE_SYSVSEM | CLONE_CHILD_CLEARTID | CLONE_CHILD_SETTID
     use_clone3 :: false;  // I'd rather do this but blink doesn't do clone3()
     ::if(i32);
     stack.len -= 16; // :CloneOffBy16
@@ -174,10 +174,17 @@ sys_clone :: fn(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdata: ra
         arg := zeroed Syscall'Clone3;
         arg.flags = clone_flags;
         arg.stack = stack;
+        arg.child_tid = child_tid;
         
         Syscall'clone3(arg&, size_of(@type arg))
     } else {
-        Syscall'clone(clone_flags, stack.ptr.offset(stack.len), 0, 0, 0)
+        null := u32.ptr_from_int(0);
+        a, b, c := @match(query_current_arch()) {
+            fn x86_64() => (null, child_tid, null);
+            fn aarch64() => (null, null, child_tid);
+            @default => todo();
+        };
+        Syscall'clone(clone_flags, stack.ptr.offset(stack.len), a, b, c)
     };  
     
     // :CloneReturnsTwice

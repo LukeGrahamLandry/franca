@@ -313,7 +313,7 @@ CodegenShared :: @struct(
     no_more_codegen: u32,
     m: *QbeModule,
     codegen_time: i64,
-    thread: Thread,
+    thread: *Thread,
     constants_used: import("@/lib/collections/bit_set.fr").DynamicBitSet,
     type_indices: HashMap(Type, i64),
     bouba_idx: i64,
@@ -322,7 +322,6 @@ CodegenShared :: @struct(
     threaded: bool,
     frc_imports: RawList(import("@/compiler/incremental.fr").FrcModuleInstance),
     debug_unthreaded_entry_is_taken: bool,
-    thread_stack: []u8,
 );
 
 CodegenState :: @enum(i64) (WaitingForBouba, UsedByBouba, WaitingForKiki, UsedByKiki);
@@ -362,8 +361,8 @@ fn init(m: *QbeModule, arena: Alloc, worker: CodegenWorker, threaded: bool) *Cod
     };
     s.waiting_for_bouba = s.queue.len.trunc();
     @if(s.threaded) {
-        s.thread_stack = page_allocator.alloc(u8, 1.shift_left(25));
-        s.thread = start_thread(s.thread_stack, CodegenShared, worker, s);
+        thread_stack := page_allocator.alloc(u8, 1.shift_left(25));
+        s.thread = start_thread(thread_stack, CodegenShared, worker, s);
     };
     s.type_indices = init(arena); 
     s.frc_imports = init(arena, 64);  // TODO: don't have a fixed size. need to use BucketArray or something tho
@@ -450,20 +449,7 @@ fn join_codegen_thread(shared: *CodegenShared) void = {
             Futex'wait(shared.no_more_codegen&, 0);
         };
         
-        // TODO: factor this out into something usable
-        @if(is_linking_libc(), {
-            result := rawptr.zeroed();
-            pthread_join(shared.thread, result&);
-        }, {
-            status: i32 = -1;
-            pid: i32 = shared.thread.opaque.int_from_rawptr().intcast();
-            // if it errors because the child won the race to exit, that's fine. 
-            // TODO: is that what ECHILD means? that seems a bit unreasonable to me?
-            _ := Posix'waitpid(pid, status&, 0);
-        });
-        
-        page_allocator.dealloc(u8, shared.thread_stack);
-        shared.thread_stack = empty();
+        shared.thread.join();
         shared.thread = zeroed(@type shared.thread);
     };
     each shared.queue { q |
