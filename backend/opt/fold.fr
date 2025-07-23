@@ -118,6 +118,7 @@ fn fold_constants(f: *Qbe.Fn) void = {
     pb := f.f.start&;
     seen   := init_bitset(f.f.ncon.zext());
     refcon :: fn(r) => @if(rtype(r) == .RCon) bsset(seen&, r.val());
+    h := 1234567;
     while => !pb[].is_null() { 
         continue :: local_return;
         b := pb[];
@@ -139,6 +140,7 @@ fn fold_constants(f: *Qbe.Fn) void = {
                     if !f.deadedge(p.blk[a].id, b.id) {
                         f.renumber(p.arg.index(a));
                         refcon(p.arg[a]);
+                        h += p.arg[a].type3_val29.zext() + p.blk[a].id.intcast();
                     }
                 };
                 pp = p.link&;
@@ -158,6 +160,10 @@ fn fold_constants(f: *Qbe.Fn) void = {
                 };
             };
             for(i.arg&.items(), fn(r) => refcon(r));
+            
+            h += bit_cast_unchecked(Array(Qbe.Ref, 2), i64, i.arg);
+            h *= 13;
+            h += i.op30_cls2.zext() + i.to.type3_val29.zext();
         };
         f.renumber(b.jmp.arg&);
         
@@ -174,8 +180,10 @@ fn fold_constants(f: *Qbe.Fn) void = {
             b.jmp.arg = QbeNull;
         };
         refcon(b.jmp.arg);
+        h += b.jmp.arg.type3_val29.zext();
         pb = b.link&;
     };
+    f.f.hash = h;
     
     if f.f.globals.debug["F".char()] {
         dump_folding(f.f, f.val, f.f.globals.debug_out, f.folded_sel);
@@ -512,10 +520,7 @@ fn gen_do_fold_impl() ScopeId = {
         f.switches[0] = s;
         
         // making people remember to do this is also a bit annoying
-        i := 0;
-        for_blocks f { b |
-            b.id = intcast i; i += 1;
-        };
+        f.set_block_id();
         
         // and this is kinda lame, the frontend could just do this itself if you don't provide a root_scope
         // (it's just annoying because i don't want to mutate the module bytes so can't just abi_function_type in the compiler)

@@ -4,6 +4,13 @@
 - i've lost 20ms of speed. i should really make something that automatically times it every commit. 
 - error instead of hang on recursive inline
 
+## deduplication
+
+- make finish_alias() work for -frc so deduplication can too
+- deduplication is assuming there are no hash collissions
+- dynamic lifting for deduplication when only a few constants are different
+- follow aliases in fold() so you can deduplicate through chains 
+  
 ## tooling for debugging
 
 - sampling profiler with setitimer

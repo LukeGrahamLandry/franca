@@ -154,6 +154,11 @@ QbeModule :: @rec @struct(
     wasm_types_cache: HashMap([]u8, i32),
     libraries: RawList(Str),  // :SLOW but n=4 so like it's probably fine 
     scratch_for_blink_smc: List(u8),
+    
+    // only added when f.lnk.shrink=true, 
+    // not relying on frontend telling you which group it's in 
+    // because (im lazy but also) it would be neat to have multiple versions of a library with small changes and deduplicate across them. 
+    deduplicate: RawHashMap(i64 /*Fn.hash*/, RawList(Qbe.Sym)),
 );
 
 // :UpdateBoot
@@ -365,8 +370,9 @@ fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
         m.scratch_for_blink_smc = list(func_size_limit_bytes, forever);
     };
     
-    m.debug_out_storage = list(forever);
+    m.debug_out_storage = list(gpa);
     m.debug_out = m.debug_out_storage&;
+    m.deduplicate = init();
     
     m.insb   = forever.box(@type m.insb[]);
     
@@ -458,6 +464,13 @@ fn show_backend_stats() bool =
     get_environment_variable("FRANCA_LOG_STATS").is_some();
 
 fn drop(m: *QbeModule) void = {
+    //each m.deduplicate& { k, v |
+    //    @print("[");
+    //    for v { s |
+    //        @print("%, ", m.str(s));
+    //    };
+    //    @println("]%", k);
+    //};
     fst := m.segments.data&[0].mmapped;
     page_allocator.dealloc(u8, (ptr = fst.ptr, len = fst.len * 3)); // ZeroInitData has no allocation
     @if(enable_incremental()) if m.save { save |
@@ -474,6 +487,7 @@ fn drop(m: *QbeModule) void = {
     drop(m.debug_info.headers&);
     drop(m.debug_info.data&);
     drop(m.debug_info.macho_function_starts&);
+    drop(m.debug_out_storage&);
     m.forever&.deinit();
     m[] = zeroed(@type m[]);  // just to make sure you crash if you try to use it again. 
 }
@@ -528,10 +542,11 @@ run_qbe_passes_common :: fn(f: *Qbe.Fn) bool = {
     import("@/backend/opt/copy.fr")'copy_elimination(f); // optional
     fill_use(f);
     Fold'fold_constants(f);
-    if inlsave(f) {
+    if save_for_inlining(f) {
         // all uses might be inlined so we suspend processing until we know you took a function pointer later. 
+        // also happens if got deduplicated
         if m.debug["G".char()] {
-            @fmt_write(m.debug_out, "\nSuspending inlinable function: %\n", f.name());
+            @fmt_write(m.debug_out, "\nSuspending: %\n", f.name());
         };
         return(false);
     };

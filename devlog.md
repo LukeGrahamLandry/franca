@@ -14,6 +14,13 @@
     follow_redirects. 
   - but also maybe i only care about doing it for local things which have already been compiled, because 
     thats the situation that shows up with the deduplication thing im planning to do, which is the easy case anyway. 
+- `>>> 903208 bytes of code, 70554 bytes of data. >>> [CPU Time] frontend: 917ms, codegen: 442ms`
+- first attempt at bringing back deduplication of generic functions. 
+  - same idea as when i did it in the legacy-comptime-jit. 
+    rolling hash of instructions and then if everything matches, redirect to the old one. 
+  - currently relying on no hash collisions which is a bad idea. 
+  - much much less impressive result than when i did it the first time. 
+- `>>> 896376 bytes of code, 70554 bytes of data. >>> [CPU Time] frontend: 918ms, codegen: 442ms`
 
 ## (Jul 19/20/21)
 

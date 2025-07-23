@@ -54,22 +54,49 @@ fn good4inl(f: *Qbe.Fn) bool = {
 }
 
 // Note: this goes in the inlining cache so it can't use temp() memory.
-fn cloneblk(m: *QbeModule, b: *Qbe.Blk) *Qbe.Blk = {
+fn cloneblk(m: *QbeModule, dest: []Qbe.Blk, b: *Qbe.Blk) void = {
+    inlb := dest.index(b.id.intcast());
     lock(m.intern_mutex&); 
-    inlb := m.forever&.borrow().box_zeroed(Qbe.Blk);
-    inlb.ins = init(m.forever&.borrow(), b.ins.len);
-    unlock(m.intern_mutex&); 
+    a := m.forever&.borrow();
+    inlb.ins = init(a, b.ins.len);
     inlb.jmp = b.jmp;
-    
-    ::ptr_utils(@type inlb.phi[]);
-    @if(::safety_check_enabled(.DebugAssertions))
-    if !(inlb.phi.is_null() && inlb.s1.is_null() && inlb.s2.is_null() && inlb.link.is_null()) {
-        @panic("unreachable: can only inline functions with one block.");
-    };
-    
     inlb.ins.len = b.ins.len;
     inlb.ins.items().copy_from(b.ins.items());
-    inlb
+    
+    ::ptr_utils(@type inlb.phi[]);
+    if dest.len == 1 {
+        unlock(m.intern_mutex&); 
+        return();
+    };
+
+    if !b.phi.is_null() {
+        phis := list(*Qbe.Phi, temp());
+        for_phi b { p |
+            d := a.box(Qbe.Phi);
+            d[] = p[];
+            d.blk = m.new_long_life(p.narg.zext());
+            enumerate p.blk.slice(0, p.narg.zext()) { i, b |
+                d.blk[i] = dest.index(b.id.intcast());
+            };
+            d.arg = m.new_copy_long_life(p.arg.slice(0, p.narg.zext()));
+            phis&.push(d);
+        };
+        range(0, phis.len - 1) { i |
+            phis[i].link = phis[i + 1].link;
+        };
+        inlb.phi = phis[0];
+    };
+    unlock(m.intern_mutex&); 
+    
+    if !b.s1.is_null() {
+        inlb.s1 = dest.index(b.s1.id.intcast());
+    };
+    if !b.s2.is_null() {
+        inlb.s2 = dest.index(b.s2.id.intcast());
+    };
+    if !b.link.is_null() {
+        inlb.link = dest.index(b.link.id.intcast());
+    };
 }
 
 // Note: this goes in the inlining cache so it can't use temp() memory.
@@ -101,26 +128,69 @@ fn clone(f: *Qbe.Fn) *Qbe.InlineFn = {
     inlfn.con.slice(0, f.ncon.zext()).copy_from(f.con.slice(0, f.ncon.zext()));
     
     @debug_assert(f.nmem == 0, "shouldn't need to inline clone f.mem");
-    @debug_assert(f.nblk == 1, "don't know how to inline that");
-    inlfn.start = cloneblk(m, f.start);
+    with m.intern_mutex& {
+        inlfn.blocks = m.forever&.borrow().alloc_zeroed(Qbe.Blk, f.nblk.zext());
+    };
+    
+    f.set_block_id();
+    for_blocks f { b |
+        cloneblk(m, inlfn.blocks, b);
+    };
+    
     inlfn
 }
 
 // return true if we should stop processing because it's possible for all uses to be inlined. 
-fn inlsave(f: *Qbe.Fn) bool = {
+fn save_for_inlining(f: *Qbe.Fn) bool = {
     // good4inl mutates to try to reduce block count so it seems creepy to skip that when marked no_inline (especially :CreepyNop)
-    if(!good4inl(f) || f.lnk.no_inline, => return(false));
+    no_inline := !good4inl(f) || f.lnk.no_inline;
+    // TODO: make finish_alias() work for -frc
+    no_dedup := !f.lnk.shrink || !ENABLE_CONST_FOLD || @is(f.globals.goal.type, .Cached, .CachedEarly);
+    if no_inline && no_dedup {
+        return false;
+    };
+    
+    if no_inline {
+        m := f.globals;
+        m.intern_mutex&.lock();
+        a := m.forever&.borrow();
+        entries := m.deduplicate&.get_or_insert(f.hash, a, => empty());
+        for entries { it |
+            done := false;
+            use_symbol(m, it) { s |
+                check := s.inline;
+                @debug_assert(!s.inlinable);
+                // TODO: THIS IS ASSUMING THERE ARE NO HASH COLLISSIONS
+                if f.con.slice(0, f.ncon.intcast()) == check.con.slice(0, check.ncon.intcast()) {
+                    done = true;
+                };
+            };
+            if done {
+                m.intern_mutex&.unlock();
+                if m.debug["G".char()] {
+                    @fmt_write(m.debug_out, "\nDeduplicated: % -> %\n", f.name(), m.str(it));
+                };
+                
+                m.finish_alias(it, f.lnk.id);
+                return true;
+            };
+        };
+        entries.push(f.lnk.id, a);
+        m.intern_mutex&.unlock();
+    };
+    
     ::ptr_utils(Qbe.Fn);
     
-    inlfn  := clone(f);
+    inlfn := clone(f);
     if f.globals.debug["G".char()] {
-        @fmt_write(f.globals.debug_out, "\nSave for inlining:\n");
+        @fmt_write(f.globals.debug_out, "\nSave for %:\n", @if(no_inline, "deduplication", "inlining"));
         printfn(f, f.globals.debug_out);
     };
     m := f.globals;
     
     result := false;
     use_symbol(f.globals, f.lnk.id) { symbol |
+        symbol.inlinable = !no_inline;
         if f.lnk.export {
             symbol.referenced = true;
         };
@@ -131,10 +201,9 @@ fn inlsave(f: *Qbe.Fn) bool = {
         result = !symbol.referenced;
     };
     
-    result
+    result && !no_inline
 }
 
-// TODO: if you want to have multiple threads compiling together can't use the visit field of the cached tmps. 
 fn inlfind(f: *Qbe.Fn, r: Qbe.Ref) ?*Qbe.InlineFn = {
     if(rtype(r) != .RCon, => return(.None));
     c := f.get_constant(r);
@@ -143,49 +212,39 @@ fn inlfind(f: *Qbe.Fn, r: Qbe.Ref) ?*Qbe.InlineFn = {
     ::ptr_utils(Qbe.InlineFn);
     result: ?*Qbe.InlineFn = .None;
     use_symbol(f.globals, c.sym) { symbol |
-        if !symbol.inline.is_null() {
+        if symbol.inlinable {
+            @debug_assert(!symbol.inline.is_null());
             result = (Some = symbol.inline);
         };
     };
     result
 }
 
-fn getinlref(inlfn: *Qbe.InlineFn, inlr: Qbe.Ref, f: *Qbe.Fn, c: *InlineCtx) Qbe.Ref = {
-    if inlr == QbeNull || rtype(inlr) == .RInt || rtype(inlr) == .RType {
-        // some ref types are global
-        return(inlr);
+fn getinlref(inlfn: *Qbe.InlineFn, inlr: Qbe.Ref, f: *Qbe.Fn, c: *InlineCtx) Qbe.Ref = { 
+    find :: fn(map: []Qbe.Ref, max: i64, $remap: @Fn(i: i64) Qbe.Ref) Qbe.Ref => {
+        i := inlr.val();
+        if(i < max, => return(inlr));
+        t := map[i]&;
+        if t[] == QbeNull {
+            // first time seeing this ref: need to create an equivalent in the caller. 
+            t[] = remap(i);
+        };
+        t[]
     };
     
-    // it's a Tmp/Con, have we seen it before? 
-    
     @match(rtype(inlr)) {
-        fn RTmp() => {
-            i := inlr.val();
-            if i < Qbe.Tmp0 {
-                return(inlr);
-            };
-            t := c.remapped_tmp[i]&;
-            if t[] == QbeNull {
-                // first time seeing this ref: need to create an equivalent in the caller. 
-                name := @if(inlfn.tmp_names.len == 0, "", inlfn.tmp_names[i - Qbe.Tmp0]);
-                t[] = f.newtmp(name, .Kw);
-            };
-            t[]
-        }
-        fn RCon() => {
-            if inlr.val() < fixed_const_count {
-                return(inlr);
-            };
-            i := inlr.val();
-            r := c.remapped_consts[i];
-            if r == QbeNull {
-                // first time seeing this ref: need to create an equivalent in the caller.  
-                r = f.newcon(inlfn.con.index(inlr.val()));
-                c.remapped_consts[i] = r;
-            };
-            r
-        }
-        @default => panic("bad inline ref kind. RSlot/RMem are created by later passes.");
+        fn RTmp() => find(c.remapped_tmp, Qbe.Tmp0) { i |
+            name := @if(inlfn.tmp_names.len == 0, "", inlfn.tmp_names[i - Qbe.Tmp0]);
+            f.newtmp(name, .Kw)
+        };
+        fn RCon() => find(c.remapped_consts, fixed_const_count) { i |
+            f.newcon(inlfn.con.index(i))
+        };
+        // some ref types are global
+        @default => {
+            @debug_assert(@is(rtype(inlr), .RNull, .RInt, .RType), "bad inline ref kind. RSlot/RMem are created by later passes.");
+            inlr
+        };
     }
 }
 
@@ -196,15 +255,16 @@ fn display(f: *Qbe.Fn, out: *List(u8)) void = {
 fn inlargs(inlfn: *Qbe.InlineFn, f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins /*dest*/, c: *InlineCtx) void = {
     /* replace args with copies to par tmps */
     @debug_assert(inlfn.nblk == 1);
-    i1 := inlfn.start.ins.ptr;
+    src_ins := inlfn.start()[].ins&;
+    i1 := src_ins.ptr;
     if i.op() == .arge {
-        if inlfn.start.ins.len == 0 || i1.op() != .pare {
+        if src_ins.len == 0 || i1.op() != .pare {
             /* drop env arg because the callee does not take one */
             i.set_nop();
             i = i.offset(1);
         };
     } else {
-        if inlfn.start.ins.len > 0 && i1.op() == .pare {
+        if src_ins.len > 0 && i1.op() == .pare {
             @debug_assert(rtype(i1.to) == .RTmp, "pare target must be tmp");
             // callee wants an env arg but caller does not provide one. they get 0.
             rto := getinlref(inlfn, i1.to, f, c);
@@ -240,7 +300,7 @@ fn inlargs(inlfn: *Qbe.InlineFn, f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins /*dest*/, 
         i  = i.offset(1);
         i1 = i1.offset(1);
         @debug_assert(b.ins.index_unchecked(b.ins.len).in_memory_after(i), "inlined oob");
-        last_inl := inlfn.start.ins.index_unchecked(inlfn.start.ins.len);
+        last_inl := src_ins[].index_unchecked(src_ins.len);
         @debug_assert(last_inl.in_memory_after(i1) || i.op() == .call, "inlined oob");
     };
 }
@@ -273,7 +333,7 @@ fn insert_blit(f: *Qbe.Fn, rty: Qbe.Ref, rty1: Qbe.Ref, r: Qbe.Ref, c: *InlineCt
 }
 
 fn inlbins(inlfn: *Qbe.InlineFn, f: *Qbe.Fn, c: *InlineCtx) void = {
-    inlb := inlfn.start;
+    inlb := inlfn.start();
     /* skip par instructions */
     i := inlb.ins.index_unchecked(inlfn.past_last_param_idx.zext());
     last := inlb.ins.index_unchecked(inlb.ins.len);
@@ -309,7 +369,6 @@ InlineCtx :: @struct(
 );
 
 
-// :ThreadSafety this mutates inlfn.tmp.visit
 /* return index of last inlined ins */
 fn inlcall(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) i64 = {
     @debug_assert(ptr_diff(b.ins.ptr, i) >= 0 && ptr_diff(i, b.ins.index_unchecked(b.ins.len)) >= 0, "bad size for inlining");
@@ -324,10 +383,11 @@ fn inlcall(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) i64 = {
         @fmt_write(f.globals.debug_out, "    inlining call at @% ins % to simple function $%\n", b.name(), ptr_diff(b.ins.ptr, i), f.globals.str(inlfn.lnk.id));
     };
     
+    @debug_assert_eq(inlfn.blocks.len, 1);
     c: InlineCtx = (
         remapped_consts = temp().alloc_zeroed(Qbe.Ref, inlfn.ncon.zext()),
         remapped_tmp = temp().alloc_zeroed(Qbe.Ref, inlfn.ntmp.zext()),
-        vins  = init(temp(), b.ins.len + inlfn.start.ins.len),
+        vins  = init(temp(), b.ins.len + inlfn.start()[].ins.len),
     );
     
     /* go back to start of args */
@@ -342,7 +402,8 @@ fn inlcall(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) i64 = {
     inlargs(inlfn, f, b, i1, c&);
     
     @debug_assert(inlfn.nblk == 1, "don't know how to inline that");
-    @debug_assert(is_ret(inlfn.start.jmp.type));
+    jmp := inlfn.start()[].jmp&;
+    @debug_assert(is_ret(jmp.type));
     
     /* splice inlined fn instructions */
     inlbins(inlfn, f, c&);
@@ -353,18 +414,18 @@ fn inlcall(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) i64 = {
         // We allow this for scalars because it would work if it wasn't inlined. 
         // But if an aggragate would have been returned by reference, this would fault at runtime if we hadn't tried to inline it. 
         @assert(inlfn.retty == QbeNull, "Tried to inline void call to function $% which returns an aggregate.", f.globals.str(inlfn.lnk.id));
-        @debug_assert(inlfn.start.jmp.type != .retc);
+        @debug_assert(jmp.type != .retc);
     } else {
-        new_ref := getinlref(inlfn, inlfn.start.jmp.arg, f, c&);
+        new_ref := getinlref(inlfn, jmp.arg, f, c&);
         /* aggregate type pass-by-value is implicit copy */
         if inlfn.retty != QbeNull {
-            @debug_assert(inlfn.start.jmp.type == .retc, "we save for inlining before lowering abi");
+            @debug_assert(jmp.type == .retc, "we save for inlining before lowering abi");
             // We have to do a copy because they might be returning something that wasn't on thier stack frame, 
             // TODO: we have aliasing info so should know if they're returning an alloca and don't need this copy. 
             new_ref = insert_blit(f, i.arg&[1], inlfn.retty, new_ref, c&);
         } else {
             @debug_assert(i.arg&[1] == QbeNull);
-            @debug_assert(inlfn.start.jmp.type != .retc);
+            @debug_assert(jmp.type != .retc);
             if new_ref == QbeNull {
                 // it was a void function but they called it like it returned a scalar. 
                 // again, this is probably a frontend bug but it work would if i didn't 
@@ -426,7 +487,7 @@ fn inlcalls(f: *Qbe.Fn) void = {
 
 fn mark_referenced(m: *QbeModule, id: Qbe.Sym, symbol: *SymbolInfo) void #inline = {
     ::ptr_utils(@type symbol.inline[]);
-    if !symbol.inline.is_null() && !symbol.referenced {
+    if symbol.inlinable && !symbol.referenced {
         m.inlinable_but_referenced_later&.push(id);
     };
     symbol.referenced = true;
@@ -469,7 +530,7 @@ fn emit_suspended_inlinables(m: *QbeModule) void = {
         flush_debug(m);
         reset_temporary_storage(mark);
         
-        // inlsave() is after symbols in the function are marked as referenced, 
+        // save_for_inlining() is after symbols in the function are marked as referenced, 
         // so don't have to worry about new ones being found in this loop. 
         @debug_assert_eq(before, m.inlinable_but_referenced_later.len);
     };
@@ -482,7 +543,7 @@ fn emit_suspended_inlinables(m: *QbeModule) void = {
 
 fn load_inline_fn(m: *Qbe.Module, f: *Qbe.Fn, src: *Qbe.InlineFn) void = {
     default_init(f, m);
-    f.start = src.start;
+    f.start = src.start();
     f.nblk = src.nblk;
     f.con = src.con;
     f.ncon = src.ncon;
@@ -495,5 +556,8 @@ fn load_inline_fn(m: *Qbe.Module, f: *Qbe.Fn, src: *Qbe.InlineFn) void = {
         _ := f.newtmp(name, .Kw);
     };
 }
+
+fn start(f: *Qbe.InlineFn) *Qbe.Blk = 
+    f.blocks.index(0);
 
 #use("@/backend/lib.fr");
