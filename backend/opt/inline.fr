@@ -155,27 +155,33 @@ fn save_for_inlining(f: *Qbe.Fn) bool = {
         m.intern_mutex&.lock();
         a := m.forever&.borrow();
         entries := m.deduplicate&.get_or_insert(f.hash, a, => empty());
-        for entries { it |
-            done := false;
-            use_symbol(m, it) { s |
-                check := s.inline;
-                @debug_assert(!s.inlinable);
-                // TODO: THIS IS ASSUMING THERE ARE NO HASH COLLISSIONS
-                if f.con.slice(0, f.ncon.intcast()) == check.con.slice(0, check.ncon.intcast()) {
-                    done = true;
+        // TODO: putting a constant here is garbage. it kinda needs to be tuned on the size of your program. 
+        //       but it does seem good to give up if you keep missing. example being (graphics/fn SEL) never hits. 
+        //       could do entries.len - (hits on this group) and compare that to a constant maybe? 
+        if entries.len < 32 {
+            con_new := f.con.slice(0, f.ncon.intcast());
+            for entries { it |
+                done := false;
+                use_symbol(m, it) { s |
+                    check := s.inline;
+                    con_old := check.con.slice(0, check.ncon.intcast());
+                    @debug_assert(!s.inlinable);
+                    // TODO: THIS IS ASSUMING THERE ARE NO HASH COLLISSIONS
+                    if con_new == con_old {
+                        done = true;
+                        if m.debug["G".char()] {
+                            @fmt_write(m.debug_out, "\nDeduplicated: % -> % (% bytes)\n", f.name(), s.name, s.size);
+                        };
+                    };
+                };
+                if done {
+                    m.intern_mutex&.unlock();
+                    m.finish_alias(it, f.lnk.id);
+                    return true;
                 };
             };
-            if done {
-                m.intern_mutex&.unlock();
-                if m.debug["G".char()] {
-                    @fmt_write(m.debug_out, "\nDeduplicated: % -> %\n", f.name(), m.str(it));
-                };
-                
-                m.finish_alias(it, f.lnk.id);
-                return true;
-            };
+            entries.push(f.lnk.id, a);
         };
-        entries.push(f.lnk.id, a);
         m.intern_mutex&.unlock();
     };
     

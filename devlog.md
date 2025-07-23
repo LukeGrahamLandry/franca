@@ -1,4 +1,15 @@
-## (Jun 22)
+
+## (Jul 23)
+
+- tried a test with two types of PageMap and get_page() doesn't get deduped which seems wrong.
+  also set lnk.shrink when DisallowInOverloadSet and then it gets anything with const args (including box() which fixes get_page). 
+  - new hits: alloc_zeroed, assume_cast, to_values, reserve_type, load_command
+  - `>>> 889504 bytes of code, 70570 bytes of data. >>> [CPU Time] frontend: 915ms, codegen: 444ms`
+  - ... but that makes it hang compiling farm_game.fr
+    i think making `fn SEL($name: CStr) ObjCSelector` be quadratic in number of objc selectors is bad for business. 
+    just setting an arbitrary cap of 32 entries in a group before you give up trying to deduplicate fixes the hang. 
+
+## (Jul 22)
 
 - i want to do real symbol aliases instead of CodegenTask.Bounce's weird tail call thing. 
   - use reenterant mutex for symbol bucket lock so it's less painful to do things with multiple symbols. 
@@ -20,7 +31,14 @@
     rolling hash of instructions and then if everything matches, redirect to the old one. 
   - currently relying on no hash collisions which is a bad idea. 
   - much much less impressive result than when i did it the first time. 
+  - some hits: push_uninit, checked_hash, strncpy, init, eq, find_slots, is_sane_pointer
+- QbeModule.debug_out shouldn't use QbeModule.forever since you're supposed to take a mutex before using that.  
 - `>>> 896376 bytes of code, 70554 bytes of data. >>> [CPU Time] frontend: 918ms, codegen: 442ms`
+  (901216 by the bloat.fr measurement i was using yesterday)
+- replaces aliases in f.con so you can have chains and notice they're the same. like if a1 and a2 are the 
+  same except for calling different functions b1 and b2 but b1 and b2 are the same, then a1 and a2 are the same. 
+    - new hits: expand_to_find_slot_erased, insert, get_ptr, deep_clone
+- `>>> 893432 bytes of code, 70554 bytes of data. >>> [CPU Time] frontend: 910ms, codegen: 441ms`
 
 ## (Jul 19/20/21)
 

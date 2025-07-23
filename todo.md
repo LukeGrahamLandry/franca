@@ -2,14 +2,16 @@
 - crack down on smurf naming conventions (ie import("@/lib/alloc/debug_alloc.fr").DebugAlloc is kinda dumb). 
 - real error handling for lib/sys/posix.fr. need to be able to remap the errno values to something consistant. 
 - i've lost 20ms of speed. i should really make something that automatically times it every commit. 
-- error instead of hang on recursive inline
 
 ## deduplication
 
 - make finish_alias() work for -frc so deduplication can too
 - deduplication is assuming there are no hash collissions
 - dynamic lifting for deduplication when only a few constants are different
-- follow aliases in fold() so you can deduplicate through chains 
+- reevaluate whether it should be enabled for emit_ir(when=.Aot)
+- another problem is something like PageMap.find_entry which returns `?Ty(*PageMap.Entry, i64)`,
+  which will get a different type index even if they have the same representation. 
+  so emit_ir should deduplicate those i guess. 
   
 ## tooling for debugging
 
@@ -84,6 +86,12 @@ done
 - collection of arm-macos random failures in github. 
   - abi5.ssa -frc fail output
   - echo.ssa -w fail output
+  - compiler/tests.fr: compiler/main.fr helloworld x2
+  - tests/exe/sys.fr 
+  - compiler/tests.fr: backend/meta/qbe_frontend.fr mandel
+  - wuffs zlib.c failed run  
+- collection of amd-macos random failures in github. 
+  - hang for >4 minutes on `./target/f.out examples/default_driver.fr build compiler/main.fr -aot self -unsafe -o target/release/franca-linux-amd64 -arch x86_64 -os linux`
 
 ## import_symbol / weak
 
@@ -175,6 +183,7 @@ different subsets of the same resources.
 
 ## backend 
 
+- instead of QbeModule.intern_mutex, make it easy to wrap an allocator to make it thread safe. 
 - macho/emit.fr/emplace_fixup() allow negative offset for DataAbsolute of dynamic import in .Exe
 - arm64/emit.fr/loadaddr_bits() allow large offset in .Relocatable
 - rm64/emit.fr/fixup_arm64(): offset from dynamic import
@@ -221,6 +230,33 @@ hould just make them local constants in each file like they are here in riscv
 - (epicyles, geo): fmod
 - (graphics): cosf, sinf
 - dlsym, dlopen, dlclose
+
+## longevity
+
+> i want to be confident i could abandon it for 20 years and still be able to run my little examples
+
+- vendor the things i care about: stb(truetype, image, image_write), jetbrains mono font
+  - get sdf data out of that and generate my own test data for prospero.fr
+- the graphics stuff is a bit of a dumpster fire
+  - give up on native webgpu? 
+  - slow software rendering implementation as documentation of what it's supposed to do
+- make sure everything works just using posix libc stuff as a fallback (syscalls and private apis need to be optional)
+  - (openat, ioctl) use varargs
+  - glibc fstatat somehow sucks 
+  - macos: now sure if (ulock_wait, ulock_wake) are supposed to be public. have an option to use something from pthread
+- make the platform detection in franca_runtime_init less hacky
+- demonstrate that i can support more platforms 
+  - finish riscv backend
+  - finish wasm backend
+    - maybe even an interpreter option for comptime so the compiler would work in an environment 
+      where you can't give yourself an import to jit new modules? yuck. 
+  - support (free, net, open)bsd
+- the bootstrapping system can't be committing a macos-arm binary. linux-amd seems more old / emulator enthused, could use blink, etc. 
+- seperate out the tests that download things and run them as an extra thing at the end. so if they disappear it's not a bit deal. 
+  like it's nice to test import_c on lua,tcc, etc. but it doesn't matter for the main franca stuff if you can't run those tests. 
+- fix the non-deterministic test failures
+- report all test failures instead of stopping on the first one
+- be more serious about testing reproducible builds
 
 ## linux 
 
@@ -473,8 +509,6 @@ just a problem with how that program is doing directions not with the app lib)
 
 ## stuff i broke
 
-- `./q.out -t wasm32 -o target/out/q.wasm -cc backend/test/abi8.ssa -d AI`
-%�%.104 =w pop
 - fast memcpy (need to deal with fallback when not linking a libc)
 
 ## Introspection 
@@ -594,7 +628,6 @@ also stop pasting around code for handling the multi-part ops
   - some of the qbe ssa tests are generated: vararg2, strspn, strcmp, queen, mem3, cprime, abi8
   - graphics/web/webgpu.fr which is extra bad because the abi isn't stable so it's useless
   - if i ever get serious about using tcc for anything, we can't be having thier lib/atomic.S
-- extend hacky_incremental into something that can be used seriously 
 - as an extension of argparse it would be cool if all the demo programs could be both 
 and exe and a dylib so if you want to run from cli it parses to a struct and calls the impl,
 but if you're calling from a program you can import the struct, dlopen the thing, 
@@ -616,7 +649,6 @@ and not need to serialize the arguments to a string.
 - more calling convention tests between jitted code and c.
 - have one command that lets me run the tests on all targets
 - tests for failing progeams. ie. panic backtrace
-- auto test repl. 
 - compiler/tests.fr stops when something doesn't compile but it should show which other tests passed like it does for runtime failures
 - make it clear that you can't do this: `franca self.fr && ./a.out driver.dylib run b.fr`. 
 it doesn't like that you stomp a.out, default_driver:run should pick a unique path probably. 
@@ -656,6 +688,7 @@ or just default to jitting and force you to enable aot by specifying an output p
   try to be smarter about giving them a name. like for const eval of a `::` var it should just be the name on the left. 
   use FnDef.line and make it more elegant somehow, idk 
 - give data symbols readable names now that they show up in symbol table
+- error instead of hang on recursive inline
 
 ## language decisions
 
