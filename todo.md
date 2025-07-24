@@ -95,6 +95,10 @@ done
 - collection of amd-macos random failures in github. 
   - hang for >4 minutes on `./target/f.out examples/default_driver.fr build compiler/main.fr -aot self -unsafe -o target/release/franca-linux-amd64 -arch x86_64 -os linux`
   - wuffs bzip2.c failed run  
+  - hang between compiling predict.fr and farm_game.fr 
+  - prospero.fr
+  - hang between compiling app_events.fr and geo/main.fr 
+
 
 ## import_symbol / weak
 

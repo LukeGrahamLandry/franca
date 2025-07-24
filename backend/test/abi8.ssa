@@ -1,5 +1,37 @@
 # riscv64 ABI stress
-# see https://c9x.me/git/qbe.git/tree/tools/abi8.py
+
+# >>> driver
+# #include <stdio.h>
+# typedef struct { short h; float s; } Sfi1;
+# typedef struct { float s; int w; } Sfi2;
+# typedef struct { float s; union { int w; } u; } Sfi3;
+# typedef struct { float s0, s1; } Sss;
+# typedef struct { float s; double d; } Ssd;
+# typedef struct { int w0, w1; } Sww;
+# typedef struct { long l; char b; } Slb;
+# typedef struct { char b[17]; } Sbig;
+# Sfi1 zfi1, fi1 = { -123, 4.56 };
+# Sfi2 zfi2, fi2 = { 1.23, 456 };
+# Sfi3 zfi3, fi3 = { 3.45, 567 };
+# Sss zss, ss = { 1.23, 45.6 };
+# Ssd zsd, sd = { 2.34, 5.67 };
+# Sww zww, ww = { -123, -456 };
+# Slb zlb, lb = { 123, 'z' };
+# Sbig zbig, big = { "abcdefhijklmnopqr" };
+# void pfi1(Sfi1 *s) { printf(" { %d, %g }", s->h, s->s); }
+# void pfi2(Sfi2 *s) { printf(" { %g, %d }", s->s, s->w); }
+# void pfi3(Sfi3 *s) { printf(" { %g, %d }", s->s, s->u.w); }
+# void pss(Sss *s) { printf(" { %g, %g }", s->s0, s->s1); }
+# void psd(Ssd *s) { printf(" { %g, %g }", s->s, s->d); }
+# void pww(Sww *s) { printf(" { %d, %d }", s->w0, s->w1); }
+# void plb(Slb *s) { printf(" { %ld, '%c' }", s->l, s->b); }
+# void pbig(Sbig *s) { printf(" \"%.17s\"", s->b); }
+# void pw(int w) { printf(" %d", w); }
+# void pl(long l) { printf(" %ld", l); }
+# void ps(float s) { printf(" %g", s); }
+# void pd(double d) { printf(" %g", d); }
+# <<<
+# ...driver continues below
 
 type :fi1 = { h, s }   # in a gp & fp pair
 type :fi2 = { s, w }   # ditto
@@ -14,6 +46,7 @@ type :big = { b 17 }   # by reference
 data $ctoqbestr = { b "c->qbe(%d)", b 0 }
 data $emptystr = { b 0 }
 
+# >>> generated
 export
 function $qfn0(s %p0, s %p1, s %p2, s %p3, s %p4, s %p5, s %p6, s %p7, s %p8) {
 @start
@@ -133,36 +166,6 @@ function w $main() {
 }
 
 # >>> driver
-# #include <stdio.h>
-# typedef struct { short h; float s; } Sfi1;
-# typedef struct { float s; int w; } Sfi2;
-# typedef struct { float s; union { int w; } u; } Sfi3;
-# typedef struct { float s0, s1; } Sss;
-# typedef struct { float s; double d; } Ssd;
-# typedef struct { int w0, w1; } Sww;
-# typedef struct { long l; char b; } Slb;
-# typedef struct { char b[17]; } Sbig;
-# Sfi1 zfi1, fi1 = { -123, 4.56 };
-# Sfi2 zfi2, fi2 = { 1.23, 456 };
-# Sfi3 zfi3, fi3 = { 3.45, 567 };
-# Sss zss, ss = { 1.23, 45.6 };
-# Ssd zsd, sd = { 2.34, 5.67 };
-# Sww zww, ww = { -123, -456 };
-# Slb zlb, lb = { 123, 'z' };
-# Sbig zbig, big = { "abcdefhijklmnopqr" };
-# void pfi1(Sfi1 *s) { printf(" { %d, %g }", s->h, s->s); }
-# void pfi2(Sfi2 *s) { printf(" { %g, %d }", s->s, s->w); }
-# void pfi3(Sfi3 *s) { printf(" { %g, %d }", s->s, s->u.w); }
-# void pss(Sss *s) { printf(" { %g, %g }", s->s0, s->s1); }
-# void psd(Ssd *s) { printf(" { %g, %g }", s->s, s->d); }
-# void pww(Sww *s) { printf(" { %d, %d }", s->w0, s->w1); }
-# void plb(Slb *s) { printf(" { %ld, '%c' }", s->l, s->b); }
-# void pbig(Sbig *s) { printf(" \"%.17s\"", s->b); }
-# void pw(int w) { printf(" %d", w); }
-# void pl(long l) { printf(" %ld", l); }
-# void ps(float s) { printf(" %g", s); }
-# void pd(double d) { printf(" %g", d); }
-# /* --------------------------- */
 # extern void qfn0(float, float, float, float, float, float, float, float, float);
 # void cfn0(float p0, float p1, float p2, float p3, float p4, float p5, float p6, float p7, float p8) {
 # 	printf("qbe->c(%d)", 0);
@@ -230,6 +233,7 @@ function w $main() {
 # 	qfn10(p0, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10);
 # }
 # <<<
+# <<<
 
 # >>> output
 # qbe->c(0) 9.9
@@ -254,4 +258,134 @@ function w $main() {
 # c->qbe(9) "abcdefhijklmnopqr"
 # qbe->c(10) "abcdefhijklmnopqr" 10.1 11
 # c->qbe(10) "abcdefhijklmnopqr" 10.1 11
+# <<<
+
+# >>> generate
+# // Adapted from https://c9x.me/git/qbe.git/tree/tools/abi8.py?id=7f7e34cd1fba56fa7e4adddc8646fa47dcf02a6d
+# ctype :: fn(o: *List(u8), _: i64, arg: Str) void = @if_else {
+#     @if(arg.starts_with("p")) => ctype(o, _, arg.rest(1));
+#     @if(arg.starts_with(":")) => @fmt(o, "S%", arg.rest(1));
+#     @else => @fmt(o, "%", @switch(arg) {
+#         @case("w") => "int";
+#         @case("l") => "long";
+#         @case("s") => "float";
+#         @case("d") => "double";
+#         @default => @panic("ctype: %", arg);
+#     });
+# };
+# 
+# cparam :: fn(o: *List(u8), i: i64, arg: Str) void = {
+#     ctype(o, i, arg);
+#     @fmt(o, " p%", i);
+# }
+# 
+# gencfn :: fn(o: *List(u8), id: i64, args: []Str) void = {
+#     @fmt(o, "# extern void qfn%(", id);
+#     joined(o, args, ctype);
+#     @fmt(o, ");\n# void cfn%(", id);
+#     joined(o, args, cparam);
+#     @fmt(o, ") {\n# \tprintf(\"qbe->c(\%d)\", %);\n# \t", id);
+#     enumerate args { i, arg |
+#         continue :: local_return;
+#         @if(!arg[].starts_with("p")) continue();
+#         ty := arg[].rest(1);
+#         if ty.starts_with(":") {
+#             @fmt(o, "p%(&", ty.rest(1));
+#         } else {
+#             @fmt(o, "p%(", ty);
+#         }
+#         @fmt(o, "p%); ", i);
+#     };
+#     @fmt(o, "puts(\"\");\n# \tqfn%(", id);
+#     range(0, args.len) { i |
+#         @fmt(o, "p%, ", i);
+#     };
+#     o.len -= int(args.len != 0) * 2;
+#     @fmt(o, ");\n# }\n");
+# }
+# 
+# qparam :: fn(o: *List(u8), i: i64, arg: Str) void = {
+#     ty := @if(arg.starts_with("p"), arg.rest(1), arg);
+#     @fmt(o, "% \%p%", ty, i);
+# }
+# 
+# genqfn :: fn(o: *List(u8), id: i64, args: []Str) void = {
+#     @fmt(o, "export\nfunction $qfn%(", id);
+#     joined(o, args, qparam);
+#     @fmt(o, ") {\n@start\n\t\%r0 =w call $printf(l $ctoqbestr, ..., w %)\n", id);
+#     enumerate args { i, arg |
+#         continue :: local_return;
+#         @if(!arg[].starts_with("p")) continue();
+#         ty := arg[].rest(1);
+#         if ty.starts_with(":") {
+#             @fmt(o, "\tcall $p%(l \%p%)\n", ty.rest(1), i);
+#         } else {
+#             @fmt(o, "\tcall $p%(% \%p%)\n", ty, ty, i);
+#         }
+#     }
+#     push_all(o, "\t%r1 =w call $puts(l $emptystr)\n\tret\n}\n");
+# }
+# 
+# carg :: fn(o: *List(u8), i: i64, arg: Str) void = {
+#     print := arg.starts_with("p");
+#     ty := @if(!print, arg, arg.rest(1));
+#     @if_else {
+#         @if(ty.starts_with(":")) => @fmt(o, "% $%%", ty, @if(print, "", "z"), ty.rest(1));;
+#         @if(!print) => @fmt(o, "% 0", ty);
+#         @if(ty == "w" || ty == "l") => @fmt(o, "% %", ty, i+1);
+#         @if(ty == "s" || ty == "d") => @fmt(o, "% %_%.%", ty, ty, i+1, i+1);
+#         @else => ();
+#     };
+# }
+# 
+# genmaincall :: fn(o: *List(u8), id: i64, args: []Str) void = {
+#     @fmt(o, "\tcall $cfn%(", id);
+#     joined(o, args, carg);
+#     @fmt(o, ")\n");
+# }
+# 
+# fn joined(o: *List(u8), args: []Str, $body: @Fn(o: *List(u8), i: i64, arg: Str) void) void = {
+#     enumerate args { i, t | 
+#         body(o, i, t[]);
+#         o.push_all(", ");
+#     };
+#     o.len -= int(args.len != 0) * 2;
+# }
+# 
+# gen :: fn(tvec: [][]Str) Str = {
+#     o := u8.list(temp()); o := o&;
+#     enumerate(tvec, fn(i, t) => genqfn(o, i, t[]));
+#     o.push_all("\nexport\nfunction w $main() {\n@start\n\n");
+#     enumerate(tvec, fn(i, t) => genmaincall(o, i, t[]));
+#     o.push_all("\n\tret 0\n}\n\n# >>> driver\n");
+#     enumerate(tvec, fn(i, t) => gencfn(o, i, t[]));
+#     o.push_all("# <<<\n");
+#     o.items()
+# }
+# 
+# rep :: fn(e: Str, n: i64, other: []Str) []Str = {
+#     o := ast_alloc().alloc(Str, n + other.len);
+#     range(0, n) { i |
+#         o[i] = e;
+#     };
+#     o.rest(n).copy_from(other);
+#     o
+# } 
+# 
+# S :: const_slice;
+# TVEC :: @S(
+#     rep("s", 8, @S("ps")),
+#     @S("pw", "ps", "p:fi1"),
+#     @S("pw", "p:fi2", "ps"),
+#     @S("pw", "ps", "p:fi3"),
+#     @S("p:ss"),
+#     rep("d", 7, @S("p:ss", "ps", "pl")),
+#     @S("p:lb"),
+#     rep("w", 7, @S("p:lb")),
+#     rep("w", 8, @S("p:lb")),
+#     @S("p:big"),
+#     rep("w", 8, @S("p:big", "ps", "pl")),
+# );
+# 
+# main :: fn(_: Str) Str = gen(TVEC);
 # <<<
