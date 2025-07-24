@@ -41,6 +41,7 @@
     just protect the page when all allocations on it have been freed. 
   - seperate event_counter per thread as well. 
   - sort the leak report by event counter so it's easier to diff. rn it's in hash order of aslr address which is unhelpful.
+  - leak checking for page_allocator
 - should log when the slow things are turned on so i can't forget to turn them off. 
 - need to give better source location for #inline and @macro. each ip can have a stack of locations. 
 - SLOW_PROTECT_ARENA doesn't work with SLOW_DEBUG_ALLOC because the protect forces it to be leaked. 
@@ -93,6 +94,7 @@ done
   - wuffs zlib.c failed run  
 - collection of amd-macos random failures in github. 
   - hang for >4 minutes on `./target/f.out examples/default_driver.fr build compiler/main.fr -aot self -unsafe -o target/release/franca-linux-amd64 -arch x86_64 -os linux`
+  - wuffs bzip2.c failed run  
 
 ## import_symbol / weak
 
@@ -258,6 +260,9 @@ hould just make them local constants in each file like they are here in riscv
 - fix the non-deterministic test failures
 - report all test failures instead of stopping on the first one
 - be more serious about testing reproducible builds
+- i want the transcribed magic numbers for syscalls, sys struct layouts, instruction encoding, object formats, etc. to be more auditable. 
+  maybe make it structured consistantly enough that i can generate a c program that asserts everything matches
+  for a certain target when compiled by a normal c installation. for instruction encoding, maybe do more like tests/exe/x64_encoding.fr. 
 
 ## linux 
 
@@ -626,7 +631,7 @@ also stop pasting around code for handling the multi-part ops
   - BlockAlloc powers of 2
   - x64/arm/wasm/macho/elf but there's no winning there
   - boot but i really don't want to write the compiler again... so idk what to do about that
-  - some of the qbe ssa tests are generated: vararg2, strspn, strcmp, queen, mem3, cprime, abi8
+  - some of the qbe ssa tests are generated: strspn, strcmp, mem3, cprime, abi8
   - graphics/web/webgpu.fr which is extra bad because the abi isn't stable so it's useless
   - if i ever get serious about using tcc for anything, we can't be having thier lib/atomic.S
 - as an extension of argparse it would be cool if all the demo programs could be both 

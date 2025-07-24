@@ -283,6 +283,7 @@ run_one :: fn(arg: *Args, file_path: Str, arch: Arch, wasm_runner: ?Str, skip: *
 extract_sections :: fn(src: Str) HashMap(Str, Str) = {
     results: HashMap(Str, Str) = init(temp());
     start_section := "# >>> ";
+    stack := Str.list(temp());
     while => src.len != 0 {
         while => src[0] != "#".ascii() {
             src = src.skip_line();
@@ -297,34 +298,51 @@ extract_sections :: fn(src: Str) HashMap(Str, Str) = {
                 src.slice(start_section.len, i)
             };
             src = src.skip_line();
-            start_of_this_section := src.ptr;
-            out: List(u8) = list(temp());
-            strip_hashes := src.starts_with("#");
-            while => !src.starts_with("# <<<") {
-                chunk := src;
-                src = src.skip_line();
-                if strip_hashes {
-                    chunk = chunk.slice(0, chunk.len - src.len);
-                    @assert(chunk.starts_with("# "), "bad format for section: %\nline: |%|\nmust start with <hash><space>", name, chunk);
-                    if chunk.ends_with("#\n") {
-                        out&.push_all(chunk.slice(2, chunk.len - 2));
-                        out&.push_all("\n");
-                    } else {
-                        out&.push_all(chunk.slice(2, chunk.len));
-                    };
-                };
-            };
-            out := if strip_hashes {
-                out.items()
-            } else {
-                between(start_of_this_section, src.ptr)
-            };
+            out, new_src, nested := consume_section(src, name);
             prev := results&.insert(name, out);
             @assert(prev.is_none(), "section >>> % is defined twice", name);
+            if !nested {
+                src = new_src;
+            };
         };
         src = src.skip_line();
     };
     results
+}
+
+consume_section :: fn(src: Str, name: Str) Ty(Str, Str, bool) = {
+    start_of_this_section := src.ptr;
+    out: List(u8) = list(temp());
+    strip_hashes := src.starts_with("#");
+    depth := 1;
+    nested := false;
+    while => depth > 0 {
+        chunk := src;
+        src = src.skip_line();
+        if strip_hashes {
+            chunk = chunk.slice(0, chunk.len - src.len);
+            @assert(chunk.starts_with("# "), "bad format for section: %\nline: |%|\nmust start with <hash><space>", name, chunk);
+            if chunk.ends_with("#\n") {
+                out&.push_all(chunk.slice(2, chunk.len - 2));
+                out&.push_all("\n");
+            } else {
+                out&.push_all(chunk.slice(2, chunk.len));
+            };
+        };
+        
+        if src.starts_with("# >>>") {
+            depth += 1;
+            nested = true;
+        };
+        depth -= src.starts_with("# <<<").int();
+    };
+    out := if strip_hashes {
+        out.items()
+    } else {
+        between(start_of_this_section, src.ptr)
+    };
+    
+    (out, src, nested)
 }
 
 skip_line :: fn(s: Str) Str = {

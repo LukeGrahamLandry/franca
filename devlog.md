@@ -17,6 +17,10 @@
       shame i can't get a github actions that doesn't have a libc at all to make sure i can't cheat. 
   - new theory is you have to use CLONE_CHILD_CLEARTID and futex wait on the tid address. 
   - that seems to work.. but that's what i thought about the old thing too so who knows
+- continuing curation of .ssa tests 
+  - it's tempting to try to figure out what rng python2 uses so i can port the generator script for vararg2.ssa 
+    exactly and have a smaller diff. i did some poking around and it turns out cpython has lots of code and 
+    i don't care that much. just use my existing rng to produce the arbitrary data.  
 
 ## (Jul 22)
 
