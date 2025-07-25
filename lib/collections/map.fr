@@ -152,22 +152,14 @@ fn RawHashMap($K: Type, $V: Type) Type = {
     fn zero_unused_slots(self: *Self) void = 
         hashmap_erased_zero_unused_slots(ptr_cast_unchecked(Self, RawHashMapErased, self), size_of(Entry));
     
-    fn for_keys(self: *Self, $body: @Fn(key: K) void) void = {
-        each self { (k, _) |
-            body(k);
-        };
-    }
+    fn for_keys(self: *Self, $body: @Fn(key: K) void) void = 
+        each_entry(self, fn(it) => body(it.key));
     
     fn each(self: *Self, $body: @Fn(key: K, value: *V) void) void = 
-        each_ref(self, fn(k, v) => body(k[], v));
+        each_entry(self, fn(it) => body(it.key, it.value&));
 
-    fn each_ref(self: *Self, $body: @Fn(key: *K, value: *V) void) void = {
-        each self.arr {slot|
-            if slot.hash != 0 && slot.hash != 1 {
-                body(slot.key&, slot.value&);
-            };
-        };
-    }
+    fn each_ref(self: *Self, $body: @Fn(key: *K, value: *V) void) void = 
+        each_entry(self, fn(it) => body(it.key&, it.value&));
     
     // TODO: drop entries? 
     fn drop(self: *Self, alloc: Alloc) void = {
@@ -175,6 +167,22 @@ fn RawHashMap($K: Type, $V: Type) Type = {
         self.arr = empty();
         self.len_including_tombstones = 0;
         self.capacity = 0;
+    }
+    
+    fn retain(self: *Self, $keep_if: @Fn(key: *K, value: *V) bool) void = {
+        each_entry self { slot |
+            if !keep_if(slot.key&, slot.value&) {
+                slot.hash = 1;  // tombstone
+            }
+        };
+    }
+    
+    fn each_entry(self: *Self, $body: @Fn(slot: *Entry) void) void = {
+        each self.arr { slot |
+            if slot.hash != 0 && slot.hash != 1 {
+                body(slot);
+            };
+        };
     }
     
     Self

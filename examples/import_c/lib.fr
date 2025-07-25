@@ -60,14 +60,18 @@ fn catch_call(c: *Compile.Ctx, $T: Type, $body: @Fn() T) Result(T, Str) #generic
 fn compile_file(c: *Compile.Ctx, path: Str) Result(*Compile.Obj, Str) = {
     catch_call(c, *Compile.Obj) {
         c.macro_base_file = path;
-        tok := c.tokenize_file(path);
+        src := read_entire_file(temp(), path) ||
+            @error_at(c, path.ptr, "Failed to open file: %", path);
+        tok := c.tokenize_string(path, src);
         tok  = c.Preprocess'preprocess(tok);
         c.parse(tok)
     }
 }
 
 fn yield(c: *Compile.Ctx, obj: *Compile.Obj) void = {
-    @assert(!obj.yielded);
+    if obj.yielded {
+        @error_tok(c, obj.tok, "double yield '%'", obj.name);
+    };
     obj.yielded = true;
     // TODO: maybe export types etc for ffi here instead of waiting until the end?
     //       but need to be careful of fighting with the other thread over the writer if we allow threaded at the same time
@@ -82,10 +86,8 @@ fn emit_one(c: *Compile.Ctx, obj: *Compile.Obj) void = {
     entry := bouba_acquire(ctx, ctx.bouba_idx&);
     push_dynamic_context {
         context(DefaultContext)[].temporary_allocator = entry.arena&;
-        id := obj.global_symbol.unwrap();
         if obj.is_function {
             f := obj.f;
-            fill_lnk(f.lnk&, obj, ctx.m);
             entry.task = (Func = f);
         } else {
             entry.task = (AotVar2 = translate_data(ctx.m, obj));
@@ -104,7 +106,7 @@ fn translate_data(m: *QbeModule, obj: *Compile.Obj) []Dat2 = {
     out := Dat2.list(1, temp());
     out&.push(
         export = !obj.is_static,
-        id = obj.global_symbol || m.mangle(obj),
+        id = obj.global_symbol.expect("mangle"),
         template = @if(is_zeroed, (Zeroes = total_size), (Bytes = obj.init_data)),
         relocations = obj.rel,
     );    
@@ -120,19 +122,15 @@ fn for_linked(head: ~T, $body: @Fn(it: T) void) void = {
     };
 }
 
-fn fill_lnk(lnk: *Qbe.Lnk, obj: *Compile.Obj, m: *QbeModule) void = {
-    lnk.export = !obj.is_static;
-    lnk.id = obj.global_symbol || m.mangle(obj);
-}
-
 fn mangle(m: *QbeModule, obj: *Compile.Obj) Qbe.Sym = {
     ::ptr_utils(@type obj.tok[]);
     name := obj.name;
-    if obj.is_static && !obj.tok.is_null() {
-        // also doesn't work because we call before deciding if it's static sometimes
-        //name = @tfmt("%@%", name, obj.tok.file.name); // not very rigorous
+    if obj.is_static {
+        name = @tfmt("%@%", name, obj.tok.file.name); // not very rigorous
     };
-    m.intern(name)
+    s := m.intern(name);
+    obj.global_symbol = (Some = s);
+    s
 }
 
 ::enum(Compile.NodeKind);

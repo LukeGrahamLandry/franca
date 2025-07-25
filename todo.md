@@ -85,6 +85,11 @@ do
     ./target/f.out examples/import_c/test/test.fr || { echo "fail"; break; };
 done
 ```
+
+---
+
+without EXPERIMENT_LESS_DIRECT_CALLS: 
+```
 - collection of arm-macos random failures in github. 
   - abi5.ssa -frc fail output
   - echo.ssa -w fail output
@@ -98,7 +103,14 @@ done
   - hang between compiling predict.fr and farm_game.fr 
   - prospero.fr
   - hang between compiling app_events.fr and geo/main.fr 
+```
 
+with EXPERIMENT_LESS_DIRECT_CALLS:
+```
+- amd 
+  - wuffs bzip2.c
+  - mandel.ssa -jit
+```
 
 ## import_symbol / weak
 
@@ -112,7 +124,6 @@ TODO: be consistant about spelling: zeros or zeroes
 
 ## COMPILER BUG 
 
-- lots of crashes if you have an overload set somewhere with the same name as a constant and then try to use the constant. 
 - #use is ordered
 - tests/todo
   - a.fr: first_ref_os, const_field_unordered
@@ -152,6 +163,8 @@ TODO: end of loop. still too many options for 'index'
 
 ## 
 
+- put more stuff in read only data. 
+  - maybe have @static and @mut_static. same for @const_slice. track that in PageMap? 
 - #log_ir should fire multiple times for functions with $const parameters (ie. native_isel)
 - shouldn't be able to typo a name as easily. like S :: import_module{enqueue :: enqueue_task}); then S.enqueue_task will get you the wrong one and be slow. 
 - why was the quicksort wrapper trying to be emitted for import_module (when not marked #fold)
@@ -306,6 +319,7 @@ q.out`impl2__7041:
 - shared libraries (backend/elf/emit.fr)
 - shader translation for the gui examples
 - non-amd64 support
+- mprotect .ConstantData segment after applying relocations
   
 ## amd64
 

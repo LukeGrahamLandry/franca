@@ -326,7 +326,7 @@ fn new_var_node(c: *Ctx, var: *Obj, tok: *Token) *Node = {
     node.lvalue = if node.var.is_local {
         node.var.stack_slot
     } else {
-        c.f.symcon(c.m.mangle(node.var))
+        c.f.symcon(node.var.global_symbol.expect("mangle"))
     };
     if node.var.is_function || var.ty.kind == .TY_ARRAY {
         // arrays decay to pointers: `array` === `&array` === `&array[0]`
@@ -463,12 +463,12 @@ fn create_stack_slot(c: *Ctx, var: *Obj) void = {
     push(c.f.start, make_ins(.alloc8, .Kl, var.stack_slot, c.f.getcon(var.ty.size.intcast()), QbeNull));  // TODO: smaller align stack slots
 }
 
-fn new_gvar(c: *Ctx, name: Str, ty: *CType, tok: *Token) *Obj = {
+fn new_gvar(c: *Ctx, name: Str, ty: *CType, tok: *Token, is_static: bool) *Obj = {
     var := c.new_var(name, ty, c.arena);
-    var.is_static = true;
     var.is_definition = true;
-    var.global_symbol = (Some = c.m.mangle(var));
+    var.is_static = is_static;
     var.tok = tok;
+    var.global_symbol = (Some = c.m.mangle(var));
     c.globals = var;
     var
 }
@@ -480,7 +480,7 @@ fn new_unique_name(c: *Ctx) Str = {
 }
 
 fn new_anon_gvar(c: *Ctx, ty: *CType, tok: *Token) *Obj = 
-    c.new_gvar(c.new_unique_name(), ty, tok);
+    c.new_gvar(c.new_unique_name(), ty, tok, true);
 
 fn new_string_literal(c: *Ctx, p: []u8, ty: *CType, tok: *Token) *Obj = {
     var := c.new_anon_gvar(ty, tok);
@@ -1975,18 +1975,20 @@ fn find_func(c: *Ctx, name: Str) ?*Obj = {
 }
 
 fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *Token = {
-    if(ty.name.is_null(), => @error_tok(c, ty.name_pos, "function name omitted"));
+    t := ty.name_pos;
+    if(ty.name.is_null(), => @error_tok(c, tok, "function name omitted"));
     name_str := c.get_ident(ty.name);
-
+    
     f := if c.find_func(name_str) { f |
-        if(!f.is_function,                     => @error_tok(c, tok, "redeclared as a different kind of symbol"));
-        if(f.is_definition && equal(tok, "{"), => @error_tok(c, tok, "redefinition of %", name_str));
-        if(!f.is_static && attr.is_static,     => @error_tok(c, tok, "static declaration follows a non-static declaration"));
+        if(!f.is_function,                     => @error_tok(c, t, "redeclared as a different kind of symbol"));
+        if(f.is_definition && equal(tok, "{"), => @error_tok(c, t, "redefinition of function '%'", name_str));
+        // note: the other way around is legal. forward declare as static and then define without saying static again will be treated as static. 
+        if(!f.is_static && attr.is_static,     => @error_tok(c, t, "static declaration follows a non-static declaration"));
         f
     } else {
-        f := c.new_gvar(name_str, ty, tok);
+        is_static := attr.is_static || (attr.is_inline && !attr.is_extern);
+        f := c.new_gvar(name_str, ty, t, is_static);
         f.is_function = true;
-        f.is_static = attr.is_static || (attr.is_inline && !attr.is_extern);
         f.is_inline = attr.is_inline;
         f
     };
@@ -2012,8 +2014,8 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *T
     
     c.f = c.arena.box(Qbe.Fn);
     c.f.default_init(c.m);
-    c.f.lnk.id = c.m.mangle(f);
-    f.global_symbol = (Some = c.f.lnk.id);
+    c.f.lnk.id = f.global_symbol.expect("mangle");
+    c.f.lnk.export = !f.is_static;
     //c.speculate = false;
     c.f.rpo = new(1);
     c.b = c.f.start;
@@ -2092,10 +2094,14 @@ fn global_variable(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, first_d
         
         var := prev_var;
         if var.is_null() {
-            var = c.new_gvar(c.get_ident(ty.name), ty, ty.name_pos);
-        }
+            var = c.new_gvar(c.get_ident(ty.name), ty, ty.name_pos, attr.is_static);
+        } else {
+            if var.is_static != attr.is_static {
+                @warn_tok(c, var.tok, "forward declared here");
+                @error_tok(c, ty.name_pos, "static-ness must match forward declaration");
+            };
+        };
         var.is_definition = !attr.is_extern;
-        var.is_static = attr.is_static;
         var.is_tls = attr.is_tls;
         if attr.align > 0 {
             var.align = attr.align;
@@ -2134,8 +2140,16 @@ fn global_variable(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, first_d
 fn declare_builtin_functions(c: *Ctx) void = {
     ty := c.func_type(c.pointer_to(ty_void));
     ty.params = @const_slice(ty_int);
-    c.builtin_alloca = c.new_gvar("alloca", ty, zeroed(*Token));
+    c.builtin_alloca = c.new_gvar("alloca", ty, zeroed(*Token), false); // TODO: this is trash
     c.builtin_alloca.is_definition = false;
+}
+
+discard_static_scope :: fn(c: *Ctx) void = {
+    hack := c.scope;
+    sc := hack.end_linked();
+    retain sc.vars.raw& { k, v |
+        v.var.is_null() || !v.var.is_static
+    };
 }
 
 // program = (typedef | function-definition | global-variable)*
@@ -2144,6 +2158,13 @@ fn parse(c: *Ctx, tok: *Token) *Obj = {
     //c.speculate = true;
     ::if(*Token);
     while => tok.kind != .TK_EOF {
+        continue :: local_return;
+        if tok.kind == .TK_discard_static_scope {
+            c.discard_static_scope();
+            tok = tok.next;
+            continue();
+        };
+        
         attr := VarAttr.zeroed();
         basety := c.declspec(tok&, tok, (Some = attr&));
         tok = if attr.is_typedef {

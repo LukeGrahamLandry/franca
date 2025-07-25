@@ -4,22 +4,19 @@ C :: import("@/examples/import_c/lib.fr");
 
 Args :: @struct {
     target: QbeTargetEnv;
-    input_path: Str;
+    input_path: []Str;
     output_path: Str;
-    defines: []Ty(Str, Str);
-    includes: []Str;
-    debug: Str;
+    defines: []Ty(Str, Str) = empty();
+    includes: []Str = empty();
+    debug: Str = "";
 };
 
-fn main() void = {
+main :: fn() void = {
     ::?Arch;
     cfg: Args = (
         target = (arch = query_current_arch(), os = query_current_os(), type = .Exe, exe_debug_symbol_table = true), 
-        input_path = "", 
         output_path = "./a.out",
-        defines = empty(),
-        debug = "",
-        includes = empty(),
+        input_path = empty(),
     );
     defines := list(@type cfg.defines[0], temp());
     includes := list(Str, temp());
@@ -72,8 +69,8 @@ fn main() void = {
         };
         
         if arg.ends_with(".c") || arg.ends_with(".h") {
-            @assert_eq(cfg.input_path, "", "multiple inputs are not supported");
-            cfg.input_path = arg;
+            @assert_eq(cfg.input_path.len, 0, "multiple inputs are not supported");
+            cfg.input_path = @slice(arg);
             continue();
         };
         if arg.ends_with(".o") {
@@ -115,7 +112,7 @@ fn main() void = {
         
         @panic("unknown argument '%'", arg);
     };
-    if cfg.input_path == "" {
+    if cfg.input_path.len == 0 {
         panic("no input specified");
     };
     cfg.defines = defines.items();
@@ -126,10 +123,18 @@ fn main() void = {
 }
 
 fn compile(args: Args) Result(void, Str) = {
+    // Instead of calling using c.define_macro, push(c.include_paths) directly, 
+    // it's nicer to just generate a string and pass it in, so it can just be treated as an opaque blob in FrcModule.dep 
+    // when deciding if a cache file can be reused. 
+    src := create_single_source(args&);
+    compile(src, args.target, args.debug, args.output_path)
+}
+
+fn compile(src: Str, target: QbeTargetEnv, debug: Str, output_path: Str) Result(void, Str) = {
     m := @uninitialized QbeModule;
     
-    backend'init_module(m&, args.target);
-    for args.debug { c |
+    backend'init_module(m&, target);
+    for debug { c |
         m.debug[c.zext()] = true;
     };
     
@@ -141,22 +146,7 @@ fn compile(args: Args) Result(void, Str) = {
     c.emitter = (Some = ctx);
     c.enqueue_task = backend.worker_enqueue; 
     
-    
-    // Instead of calling using c.define_macro, push(c.include_paths) directly, 
-    // it's nicer to just generate a string and pass it in, so it can just be treated as an opaque blob in FrcModule.dep 
-    // when deciding if a cache file can be reused. 
-    
-    src := u8.list(temp());
-    each args.defines { it |
-        @fmt(src&, "#define % %\n", it._0, it._1);
-    };
-    each args.includes { it |
-        @fmt(src&, "#add_include_path \"%\"\n", it);  // TODO: implement this. TODO: have a test that uses this
-    };
-    @fmt(src&, "#define __BASE_FILE__ \"%\"\n", args.input_path);
-    @fmt(src&, "#include \"%\"\n", args.input_path);
-    
-    prog := @try(c&.import_c'compile_c("-", src&.items())) return;
+    prog := @try(c&.import_c'compile_c("-", src)) return;
     ctx.backend'worker_join();
 
     ::enum(@type m.goal.type);
@@ -174,11 +164,26 @@ fn compile(args: Args) Result(void, Str) = {
         @if(status != 0) @panic("Returned status %", status);
     } else {
         chunks := {m.target.finish_module}(m&);
-        write_chunks_or_crash(args.output_path, chunks);
+        write_chunks_or_crash(output_path, chunks);
     }
 
     drop(m&);
     .Ok
+}
+
+create_single_source :: fn(args: *Args) Str = {
+    src := u8.list(temp());
+    each args.defines { it |
+        @fmt(src&, "#define % %\n", it._0, it._1);
+    };
+    each args.includes { it |
+        @fmt(src&, "#add_include_path \"%\"\n", it);
+    };
+    @fmt(src&, "#define __BASE_FILE__ \"%\"\n", args.input_path[0]);
+    each args.input_path { it |
+        @fmt(src&, "#include \"%\"\n", it);
+    };
+    src&.items()
 }
 
 #use("@/examples/import_c/ffi.fr");

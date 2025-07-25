@@ -783,7 +783,7 @@ fn include_file(c: *Ctx, tok: *Token, path: Str, filename_tok: *Token) *Token = 
         if(c.macros&.get(guard_name).is_some(), => return(tok));
     };
 
-    tok2 := c.tokenize_file(path);
+    tok2 := c.tokenize_file(path, filename_tok);
 
     if detect_include_guard(c, tok2) { guard_name | 
         // detect_include_guard returns a borrow of the token but we need it to live past this file. 
@@ -956,20 +956,20 @@ fn preprocess2(c: *Ctx, tok: *Token) *Token = {
             continue();
         };
 
-        if equal(tok, "pragma") && equal(tok.next, "once") {
-            c.pragma_once&.insert(tok.file.name, ());
-            tok = skip_line(tok.next.next);
-            continue();
-        };
-
         if equal(tok, "pragma") {
+            if equal(tok.next, "once") {
+                c.pragma_once&.insert(tok.file.name, ());
+                tok = skip_line(tok.next.next);
+                continue();
+            };
+
             // same as skip_line but no warning for extra tokens
             dowhile {
                 tok = tok.next;
                 !tok.at_bol
             };
             continue();
-        };
+        }
 
         if equal(tok, "error") {
             @error_tok(c, tok, "error");
@@ -980,6 +980,7 @@ fn preprocess2(c: *Ctx, tok: *Token) *Token = {
             continue();
         };
         
+        // TODO: maybe add_include_path and discard_static_scope should be `#pragma franca FOO` instead of `#FOO`
         // TODO: see if there's some common extension i should use for this instead. 
         // for convenience in caching i want to represent -Ifoo as something in source text 
         // so i don't have to add a new thing to .frc files. 
@@ -991,6 +992,13 @@ fn preprocess2(c: *Ctx, tok: *Token) *Token = {
             tok = skip_line(t.next);
             s := t.str().slice(1, t.len.intcast() - 1);
             c.include_paths&.push(s);
+            continue();
+        };
+        
+        if equal(tok, "discard_static_scope") {
+            tok.kind = .TK_discard_static_scope;
+            c.append_one(cur&, tok, false);
+            tok = tok.next;
             continue();
         };
 

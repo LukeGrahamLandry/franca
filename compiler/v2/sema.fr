@@ -3195,7 +3195,6 @@ fn hoist_constants(self: *SelfHosted, body: []FatStmt) Maybe(void) #once = {
                 func := self.get_function(fid);
                 @debug_assert(!func.get_flag(.DisallowInOverloadSet));
                 overload_out: ?OverloadSet = .None;
-                
                 // I thought i dont have to add to constants here because we'll find it on the first call when resolving overloads.
                 // But it does need to have an empty entry in the overload pool because that allows it to be closed over so later stuff can find it and share if they compile it.
                 if func.var_name& { var |
@@ -3227,6 +3226,7 @@ fn get_or_create_overloads(self: *SelfHosted, name: Symbol, scope: ScopeId, loc:
     var := self.scopes[scope].lookup&.get(name) || 
         @try(self.decl_var(scope, name, .Const, loc, .Unknown)) return;
     ::if(OverloadSet);
+    os_ty := self.get_or_create_type(OverloadSet);
     (Ok = if self.is_empty_constant(var) {
         // We're the first to reference this overload set so create it. 
         i: OverloadSet = from_index(self.dispatch.overloads.len);
@@ -3238,11 +3238,13 @@ fn get_or_create_overloads(self: *SelfHosted, name: Symbol, scope: ScopeId, loc:
             inline_cache = Ty(OverloadKey, FuncId).zeroed(),
         );
         os_value := self.to_values(OverloadSet, i);
-        @try(self.save_const_values(var, os_value, self.get_or_create_type(OverloadSet), loc)) return;
+        @try(self.save_const_values(var, os_value, os_ty, loc)) return;
         i
     } else {
-        overloads := @check(self.find_const(var, self.get_or_create_type(OverloadSet).want())) return;
-        OverloadSet.assume_cast(overloads._0&)[]
+        overloads, ty := @check(self.find_const(var, os_ty.want())) return;
+        self.last_loc = loc;
+        @err_assert(ty == os_ty, "redeclared constant % as overloadset", self.pool.get(name)) return;
+        OverloadSet.assume_cast(overloads&)[]
     })
 }
 

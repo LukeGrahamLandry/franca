@@ -1,4 +1,11 @@
 
+## (Jul 25)
+
+- start getting scc to build with import_c
+- import_c: mangle names of static variables
+- import_c: new magic word: `#discard_static_scope` because i want to so everything in one compilation unit but 
+  some programs rely on being able to declare static functions with the same name in different files. 
+
 ## (Jul 24)
 
 - fun with archaeology. 
@@ -8,6 +15,15 @@
 - convert abi8.ssa generation script
   - use `...` in printf calls (qbe updated the generated file but not the script).
   - test.fr needs to allow split sections because only part of the driver is generated. 
+- easy wrapper for collect_directory_ordered when you want it sorted so results are consistant accross os (which is always what i want)
+- the lastest scc doesn't build but also i don't need that i need the one from 2017-02-23. 
+  - 4a695da3a6e31f002608accb745d4369fe7f0eaa reproduces strcmp.ssa but not strspn.ssa
+  - 7599d1a808bd0b604b7e5cde5a84342cf868509e has something real fucked up where `cd $pwd` is becoming `cd wd`,
+    if i randomly change it until it builds, same result as other commit. 
+  - but the structure is the same, just the id numbers change which i don't really care about. 
+- EXPERIMENT_LESS_DIRECT_CALLS im suspicious that most of my random failures started when i got rid of that. 
+  i would believe that im still messing up the clearcache somewhere. doesn't explain everything because i have problems on amd64 too. 
+- give correct error instead of crash when you have an overload set somewhere with the same name as a constant. 
 
 ## (Jul 23)
 
@@ -118,7 +134,7 @@
 - finding some leaks with DebugAlloc
   - default_build_options. make a copy in init_self_hosted so it doesn't have to stay live. 
   - QbeModule.(libraries, macho_function_starts)
-  - walk_directory wasn't calling closedir out of fear you'd early return?
+  - collect_directory_ordered wasn't calling closedir out of fear you'd early return?
   - relatedly the LocationResolverNode in compile_cached should get popped but still needs to leak
   - STDLIB_PATH
 - implemented DebugAlloc 
