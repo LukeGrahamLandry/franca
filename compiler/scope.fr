@@ -89,26 +89,16 @@ fn fill_directory_scope(self: *SelfHosted, s: ScopeId) Res(void) = {
     prefix := root.rest(STDLIB_PATH[].unwrap().len());
     
     // want stable intern order regardless of what order the os gives back
-    filenames := Str.list(temp());
-    ok := walk_directory(root.as_cstr()) { entry |
-        if !entry.name.starts_with(".") {
-            filenames&.push(entry.name.shallow_copy(self.get_alloc()));
-        };  
-    };
-    // TODO: deal with error while iterating dir seperatly from err while opening. 
-    if !ok {
-        // TODO: if it's a file do something else but you kinda have to do it before
+    files := collect_directory_ordered(root, temp(), self.get_alloc()) || {
         desc := self.pool.insert_borrowed(@tfmt("@%", prefix), self.get_alloc());
         scope.optional_path = Flag.SYMBOL_ZERO.ident();
         @try(import_as_scope(self, desc, self.last_loc /*TODO*/, (Some = s))) return;
-        return(.Ok);
+        return(.Ok)
         //return(@err("failed to open directory for scope: %", root));
     };
-    Sort :: import("@/lib/sort.fr");
-    sort :: Sort'quicksort(Str, Sort.order_strings);
-    sort(filenames.items());
     
-    for filenames { filename |
+    for files { it |
+        filename := it.name;
         name := self.pool.insert_owned(filename);
         key := self.pool.insert_borrowed(@tfmt("@%/%", prefix, filename), self.get_alloc());
         new_s := self.imports.get_or_insert(key) {

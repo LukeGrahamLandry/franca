@@ -26,7 +26,7 @@ fn open_or_create(path: CStr, $truncate: bool) FdResult = {
 // TODO: this is a garbage api because i assme there will be no errors once you've opened the directory. 
 // TODO: it wont close the directory if you use an early return from the body!!
 // NOTE: don't nest these opening the same directory at the same time. 
-fn walk_directory(path: CStr, $body: @Fn(entry: DirEntry) void) bool = {
+fn walk_directory_unordered(path: CStr, $body: @Fn(entry: DirEntry) void) bool = {
     dir := Posix'opendir(path);
     if(dir.is_err(), => return(false));
     
@@ -41,6 +41,25 @@ fn walk_directory(path: CStr, $body: @Fn(entry: DirEntry) void) bool = {
             }
         };
     }
+}
+
+// TODO: let the caller pass in a filter function? 
+// TODO: could call scandir when linking libc
+fn collect_directory_ordered(path: Str, list_a: Alloc, name_a: Alloc) Result(List(DirEntry), void) = {
+    entries := DirEntry.list(list_a);
+    ok := walk_directory_unordered(path.as_cstr()) { entry |
+        if entry.name != "." && entry.name != ".." {
+            entries&.push(name = entry.name.shallow_copy(name_a), type = entry.type);
+        };  
+    };
+    // TODO: deal with error while iterating dir seperatly from err while opening. 
+    if !ok {
+        return(.Err);
+    };
+    Sort :: import("@/lib/sort.fr");
+    sort :: Sort'quicksort(DirEntry, fn(a, b) => Sort'order_strings(a.name&, b.name&));
+    sort(entries.items());
+    (Ok = entries)
 }
 
 fn make_dirs_or_crash(path: Str) void = {
@@ -105,7 +124,7 @@ fn iter_directory(dirp: *Posix'DIR) ?DirEntry = {
     };
     
     // got to the end or got an error. 
-    // TOOD: not returning an error here makes walk_directory() useless !
+    // TOOD: not returning an error here makes walk_directory_unordered() useless !
     .None
 };
 
