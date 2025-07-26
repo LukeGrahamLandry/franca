@@ -45,8 +45,8 @@ fn fixup_arm64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
     
     @match(fixup.type) {
         fn Call(it) => {
-            if self.debug["T".char()] {
-                @fmt_write(self.debug_out, "# patch call % calls %\n", fixup.patch_at, symbol.name);
+            when_debug(self, .Patch) { out |
+                @fmt(out, "# patch call % calls %\n", fixup.patch_at, symbol.name);
             };
             distance := ptr_diff(fixup.patch_at, address) / 4;
             in_range := distance.abs() < 1.shift_left(26);
@@ -78,8 +78,8 @@ fn fixup_arm64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
             inst[] = b_jmp(s_trunc(distance, 26), @if(it.set_link, 1, 0));
         }
         fn InReg(it) => {
-            if self.debug["T".char()] {
-                @fmt_write(self.debug_out, "# patch addr % refs %=%\n", fixup.patch_at, address, symbol.name);
+            when_debug(self, .Patch) { out |
+                @fmt(out, "# patch addr % refs %=%\n", fixup.patch_at, address, symbol.name);
             };
             inst: []u32 = (ptr = u32.ptr_from_raw(fixup.patch_at), len = 2);
             if local && !(EXPERIMENT_LESS_DIRECT_CALLS && self.goal.type == .JitOnly && self.goal.got_indirection_instead_of_patches) {
@@ -343,9 +343,9 @@ fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
             fn DynamicPatched() => self.immediate_fixup_got(dest_reg, inc, symbol);
             fn Local() => {
                 // we've already compiled it so just compute its address directly.
-                if self.f.globals.debug["T".char()] {
+                when_debug(self.f, .Patch) { out |
                     distance := self.m.distance_between(.Code, self.m.current_offset(.Code), symbol.segment, symbol.offset + inc);
-                    @fmt(self.m.debug_out, "# direct offset % for '%' %[%]\n", distance, symbol.name, symbol.segment, symbol.offset);
+                    @fmt(out, "# direct offset % for '%' %[%]\n", distance, symbol.name, symbol.segment, symbol.offset);
                     @debug_assert(symbol.segment != .Code || distance < 0, "we must be jumping backwards");
                 };
                 dest := self.m.segment_address(symbol.segment, symbol.offset + inc);
@@ -941,8 +941,8 @@ fn call_symbol(self: *ArmState, sym: Qbe.Sym, set_link: bool) void #once = {
                     // haven't compiled it yet so will need a patch. 
                     push_fixup(self.m, symbol, patch);
                     self.inst(brk(0x789));
-                    if self.m.debug["T".char()] {
-                        @fmt_write(self.m.debug_out, "# pending call % calls %\n", patch_at, symbol.name);
+                    when_debug(self.f, .Patch) { out |
+                        @fmt(out, "# pending call % calls %\n", patch_at, symbol.name);
                     };
                 };
             }

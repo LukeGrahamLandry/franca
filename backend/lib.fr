@@ -98,7 +98,7 @@ QbeModule :: @rec @struct(
     insb: *Array(Qbe.Ins, 1.shift_left(20)), // MaxInstructions
     curi: *Qbe.Ins,
     target: Qbe.Target,
-    debug: *Array(bool, "Z".char() + 1),
+    debug: i64,  // bitset of 1.shift_left(Qbe.DebugKey - "A".char())
     
     debug_out: *List(u8),
     symbols: []SymbolBucket,
@@ -375,8 +375,8 @@ fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
     m.deduplicate = init();
     
     m.insb   = forever.box(@type m.insb[]);
-    
-    m.debug  = forever.box_zeroed(@type m.debug[]);
+    // coconut.jpg
+    //forever.box_zeroed(Qbe.Ins);
     
     m.curi = m.insb.index_unchecked(Qbe.MaxInstructions);
     if m.goal.link_libc && prefer_libc_memmove {
@@ -453,7 +453,6 @@ fn init_empty_for_template_only(m: *QbeModule, gpa: Alloc) void = {
     mem := forever.alloc(Qbe.Ins, Qbe.MaxInstructions);
     ::?*Array(Qbe.Ins, Qbe.MaxInstructions);
     m.insb = mem.as_array().unwrap();
-    m.debug = forever.box_zeroed(@type m.debug[]);
     m.curi = m.insb.index_unchecked(Qbe.MaxInstructions);
     m.debug_out_storage = list(forever);
     m.debug_out = m.debug_out_storage&;
@@ -506,11 +505,7 @@ run_qbe_passes_common :: fn(f: *Qbe.Fn) bool = {
     @debug_assert(!m.is_null(), "function module not set");
     
     flush_debug(f.globals);
-    if f.globals.debug["P".char()] {
-        out := f.globals.debug_out;
-        write(out, "\n> After parsing:\n");
-        printfn(f, out);
-    };
+    when_debug_printfn(f, .Parsing, "\n## After parsing:\n");
      
     replace_frontend_ops(f);
     
@@ -545,9 +540,7 @@ run_qbe_passes_common :: fn(f: *Qbe.Fn) bool = {
     if save_for_inlining(f) {
         // all uses might be inlined so we suspend processing until we know you took a function pointer later. 
         // also happens if got deduplicated
-        if m.debug["G".char()] {
-            @fmt_write(m.debug_out, "\nSuspending: %\n", f.name());
-        };
+        when_debug(f, .Inlining, fn(out) => @fmt(out, "\n# Suspending: %\n", f.name()));
         return(false);
     };
     true

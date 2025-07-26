@@ -84,9 +84,8 @@ fn fixup_amd64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
             distance := ptr_diff(fixup.patch_at, address); // :size_of_displacement
             if !local {
                 if !it.call {
-                    if self.debug["T".char()] {
-                        @fmt_write(self.debug_out, "# patch addr % refs %=%\n", fixup.patch_at, address, symbol.name);
-                    };
+                    when_debug(self, .Patch, fn(out) => @fmt(out, "# patch addr % refs %=%\n", fixup.patch_at, address, symbol.name));
+
                 };
                 
                 if !it.call {                    
@@ -110,9 +109,7 @@ fn fixup_amd64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
                 } else {
                     if(self.goal.type == .Relocatable, => return());  // that's not my department
                     
-                    if self.debug["T".char()] {
-                        @fmt_write(self.debug_out, "# patch call % calls %\n", fixup.patch_at, symbol.name);
-                    };
+                    when_debug(self, .Patch, fn(out) => @fmt(out, "# patch call % calls %\n", fixup.patch_at, symbol.name));
                     if symbol.offset == -1 {
                         size_of_jmp_encoding :: 6;
                         trampoline := reserve_stub(self, symbol, Array(u8, size_of_jmp_encoding));
@@ -130,8 +127,8 @@ fn fixup_amd64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
                 };
             } else {
                 if !it.call {
-                    if self.debug["T".char()] {
-                        @fmt_write(self.debug_out, "# patch addr % refs '%' = %[%]\n", fixup.patch_at, symbol.name, symbol.segment, symbol.offset);
+                    when_debug(self, .Patch) { out |
+                        @fmt(out, "# patch addr % refs '%' = %[%]\n", fixup.patch_at, symbol.name, symbol.segment, symbol.offset);
                     };
                 };
             };// early returns
@@ -742,16 +739,16 @@ fn call_symbol(e: *AmdState, sym: Qbe.Sym, set_link: bool) void #once = {
             fn Local() => {
                 encoded_size :: 5;  //  address is relatitive to the start of the next instruction
                 off += distance_between(e.m, .Code, current_offset + encoded_size, symbol.segment, symbol.offset);
-                if e.m.debug["T".char()] {
-                    write(e.m.debug_out, @tfmt("# call offset % for '%' %[%]\n", off, symbol.name, symbol.segment, symbol.offset));
+                when_debug(e.f, .Patch) { out |
+                    @fmt(out, "# call offset % for '%' %[%]\n", off, symbol.name, symbol.segment, symbol.offset);
                 };
                 encode_direct_call(e.a&, off.trunc(), set_link);
                 // TODO: on arm we do a patch if goal==Relocatable, should be same here? or remove there? 
             }
             @default => {
                 call_through_got := e.m.goal.got_indirection_instead_of_patches || (symbol.kind == .DynamicPatched && e.m.goal.type != .Relocatable);
-                if !call_through_got && e.m.debug["T".char()] {
-                    write(e.m.debug_out, @tfmt("# pending call to %\n", symbol.name));
+                @if(!call_through_got) when_debug(e.f, .Patch) { out |
+                    @fmt(out, "# pending call to %\n", symbol.name);
                 };
                 if call_through_got {
                     // TODO: this is very copy-paste from where we do stuff for __stubs. 
@@ -811,15 +808,15 @@ fn push_instruction(e: *AmdState, b: EncodedArgs, ops: []u8) void = {
                     // +4 for the size of the encoded displacement. address is relatitive to the start of the next instruction
                     b.disp += distance_between(e.m, .Code, e.start_of_function + e.a.len + 4, symbol.segment, symbol.offset);
                     @debug_assert(b.disp.abs() < 1.shift_left(b.disp_size.bits()));
-                    if e.m.debug["T".char()] {
-                        write(e.m.debug_out, @tfmt("# direct offset % for '%' %[%]\n", b.disp, symbol.name, symbol.segment, symbol.offset));
+                    when_debug(e.f, .Patch) { out |
+                        @fmt(out, "# direct offset % for '%' %[%]\n", b.disp, symbol.name, symbol.segment, symbol.offset);
                     };
                 } else {
                     @debug_assert(symbol.kind != .DynamicPatched, "TODO: somehow have to convert this to a got load? $% % %", symbol.name, symbol.jit_addr, ops[0]);
                     // TODO: should probably respect this but the main point was for arm which is less forgiving about cache coherency
                     //@debug_assert(!e.m.goal.got_indirection_instead_of_patches, "TODO: somehow have to convert this to a got load");
-                    if e.m.debug["T".char()] {
-                        write(e.m.debug_out, @tfmt("# pending ref to '%'\n", symbol.name));
+                    when_debug(e.f, .Patch) { out |
+                        @fmt(out, "# pending ref to '%'\n", symbol.name);
                     };
                 };
                 patch_at := e.next_no_write();

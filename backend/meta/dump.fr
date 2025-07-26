@@ -1,34 +1,32 @@
 // Adapted from Qbe. MIT License. © 2015-2024 Quentin Carbonneaux <quentin@c9x.me>
 
-fn debug_dump_copy(f: *Qbe.Fn, copy_of: []Qbe.Ref) void = {
-    out := f.globals.debug_out;
-    write(out, "\n> Copy information:");
+fn debug_dump_copy(f: *Qbe.Fn, copy_of: []Qbe.Ref, out: *List(u8)) void = {
+    @fmt(out, "\n## Copy information:");
     range(Qbe.Tmp0, f.ntmp.zext()) { t |
         ::FmtPad(Str);
         if copy_of[t] == QbeNull {
-            @fmt(out, "\n% not seen!", f_pad(f.tmp[t]&.name(), 10, .Before));
+            @fmt(out, "\n#% not seen!", f_pad(f.tmp[t]&.name(), 10, .Before));
         } else {
             if copy_of[t] != TMP(t) {
-                @fmt(out, "\n% copy of ", f_pad(f.tmp[t]&.name(), 10, .Before));
+                @fmt(out, "\n#% copy of ", f_pad(f.tmp[t]&.name(), 10, .Before));
                 printref(copy_of[t], f, out);
             }
         }
     };
-    write(out, "\n\n> After copy elimination:\n");
+    @fmt(out, "\n\n## After copy elimination:\n");
     printfn(f, out);
 }
 
-fn debug_dump_liveness(f: *Qbe.Fn) void = {
-    out := f.globals.debug_out;
-    write(out, "\n> Liveness analysis:\n");
+fn debug_dump_liveness(f: *Qbe.Fn, out: *List(u8)) void = {
+    @fmt(out, "\n## Liveness analysis:\n");
     for_blocks f { b |
-        @fmt(out, "\t%in:   ", f_pad(b.name(), 10, .After));
+        @fmt(out, "#\t%in:   ", f_pad(b.name(), 10, .After));
         dumpts(b.in&, f.tmp, out);
-        write(out, "\t          out:  ");
+        @fmt(out, "#\t          out:  ");
         dumpts(b.out&, f.tmp, out);
-        write(out, "\t          gen:  ");
+        @fmt(out, "#\t          gen:  ");
         dumpts(b.gen&, f.tmp, out);
-        write(out, "\t          live: ");
+        @fmt(out, "#\t          live: ");
         @fmt(out, "% %\n", b.nlive&[0], b.nlive&[1]);
     };
 }
@@ -42,44 +40,38 @@ fn slow_is_empty(m: *RMap) bool = {
     true
 }
 
-fn debug_dump(f: *Qbe.Fn, m: *RMap) void = {
+fn debug_dump(f: *Qbe.Fn, m: *RMap, out: *List(u8)) void = {
     range(0, m.len) { i |
         if m.tmps&[i] >= Qbe.Tmp0 {
-            out := f.globals.debug_out;
             @fmt(out, " (");
             printref(TMP(m.tmps&[i].intcast()), f, out);
             @fmt(out, ", R%)", m.regs&[i]);
         }
     };
-    write(f.globals.debug_out, "\n");
+    @fmt(out, "\n");
 }
 
-fn debug_dump(f: *Qbe.Fn, beg: []RMap, end: []RMap) void = {
-    out := f.globals.debug_out;
+fn debug_dump(f: *Qbe.Fn, beg: []RMap, end: []RMap, out: *List(u8)) void = {
     any := false;
     range(0, f.nblk.zext()) { n |
         b := f.rpo[n];
         empty := beg.index(n).slow_is_empty() && end.index(n).slow_is_empty();
         if !empty {
             if !any {
-                write(out, "\n> Register mappings:\n");
+                @fmt(out, "\n## Register mappings:\n");
             };
             any = true;
             ::FmtPad(Str);
-            @fmt(out, "\t% beg", f_pad(b.name(), 10, .After));
-            f.debug_dump(beg.index(n));
-            write(out, "\t           end");
-            f.debug_dump(end.index(n));
+            @fmt(out, "#\t% beg", f_pad(b.name(), 10, .After));
+            f.debug_dump(beg.index(n), out);
+            @fmt(out, "#\t           end");
+            f.debug_dump(end.index(n), out);
         };
     };
     if any {
-        write(out, "\n");
+        @fmt(out, "\n");
     };
 }
-
-//fn display(k: Qbe.Cls, out: *List(u8)) void = {
-    //@fmt(out, "%", k.kname());
-//}
 
 fn printcon(m: *QbeModule, c: *Qbe.Con, out: *List(u8)) void = {
     @debug_assert(!c.is_null(), "null con");
@@ -131,8 +123,12 @@ fn printref(r: Qbe.Ref, f: *Qbe.Fn, out: *List(u8)) void = @match(rtype(r)) {
     fn RTmp() => if r.val() < Qbe.Tmp0 {
         @fmt(out, "R%", r.val());
     } else {
-        n := f.tmp[r.val()]&.name();
-        @fmt(out, "%%.%", "%", n, r.val());
+        if r.val() >= f.ntmp.zext() {
+            @fmt(out, "INVALID(%)", r);
+        } else {
+            n := f.tmp[r.val()]&.name();
+            @fmt(out, "%%.%", "%", n, r.val());
+        }
     };
     fn RCon() => if r == QbeUndef {
         write(out, "UNDEF");
@@ -324,13 +320,12 @@ fn printjmp(f: *Qbe.Fn, b: *Qbe.Blk, out: *List(u8)) void = {
     };
 }
 
-fn debug_dump_fused_slots(f: *Qbe.Fn, sl: []import("@/backend/opt/mem.fr")'Slot, ip: i64) void = {
-    out := f.globals.debug_out;
+fn debug_dump_fused_slots(f: *Qbe.Fn, sl: []import("@/backend/opt/mem.fr")'Slot, ip: i64, out: *List(u8)) void = {
     ::FmtPad(i32);
     each sl { s0 |
         continue :: local_return;
         if(!s0.replacement.identical(s0), => continue());
-        @fmt(out, "\tfuse (%b) [", f_pad(s0.sz, 3, .Before));
+        @fmt(out, "#\tfuse (%b) [", f_pad(s0.sz, 3, .Before));
         for(s0, sl.index_unchecked(sl.len)) { s |
             continue :: local_return;
             if(!s.replacement.identical(s0), => continue());
@@ -338,29 +333,49 @@ fn debug_dump_fused_slots(f: *Qbe.Fn, sl: []import("@/backend/opt/mem.fr")'Slot,
             if s.live_range.b != 0 {
                 @fmt(out, "[%,%)", s.live_range.a - ip.intcast(), s.live_range.b - ip.intcast());
             } else {
-                write(out, "{}");
+                @fmt(out, "{}");
             };
         };
-        write(out, " ]\n");
+        @fmt(out, " ]\n");
     };
 }
 
-fn debug_dump_dead_slots(f: *Qbe.Fn, dead_slots: []i32) void = {
-    out := f.globals.debug_out;
-    write(out, "\n> Slot coalescing:\n");
+fn debug_dump_dead_slots(f: *Qbe.Fn, dead_slots: []i32, out: *List(u8)) void = {
+    @fmt(out, "\n## Slot coalescing:\n");
     if dead_slots.len != 0 {
-        write(out, "\tkill [");
+        @fmt(out, "#\tkill [");
         for dead_slots { m |
             @fmt(out, " %%", "%", f.tmp.index(m.zext()).name());
         };
-        write(out, " ]\n");
+        @fmt(out, " ]\n");
     };
 }
 
-fn when_debug(f: *Qbe.Fn, category: Qbe.DebugKey, $body: @Fn(out: *List(u8)) void) void = {  
+fn set_debug_types(m: *QbeModule, s: Str, $value: bool) void = {
+    ::@assert(value);
+    for s { c | 
+        m.debug = m.debug.bit_or(1.shift_left(c.zext() - "A".ascii()));
+    };
+}
+
+fn when_debug_printfn(f: *Qbe.Fn, category: Qbe.DebugKey, msg: Str) void = {
+    when_debug(f, category) { out |
+        @fmt(out, "%", msg);
+        printfn(f, out);
+    };
+}
+
+fn when_debug(f: *Qbe.Fn, category: Qbe.DebugKey, $body: @Fn(out: *List(u8)) void) void = 
+    when_debug(f.globals, category, body);
+
+fn when_debug(m: *Qbe.Module, category: Qbe.DebugKey, $body: @Fn(out: *List(u8)) void) void = {  
     ::enum(Qbe.DebugKey);
-    if f.globals.debug[category.raw()] {
-        body(f.globals.debug_out);
+    if m.debug.bit_and(1.shift_left(category.raw() - "A".ascii())) != 0 {
+        // TODO: still can't go back to debug_out_storage being forever because there are places that use .debug_out but aren't in this mutex
+        // note: add_type gets called on the frontend thread
+        with m.intern_mutex& {
+            body(m.debug_out);
+        };
     };
 }
 
@@ -516,30 +531,43 @@ fn get_byte(dat: *Dat2, i: i64) u8 = {
     }
 }
 
+fn print_multi_asm(asm: *MultiArchAsm, name: Str, out: *List(u8)) void = {
+    @fmt(out, "# asm $% = {", name);
+    for_enum Arch { it |
+        bytes := asm[it];
+        if bytes.len != 0 {
+            @fmt(out, "\n#     $% = { b ", it);
+            for(bytes, fn(c) => @fmt(out, "% ", c));
+            @fmt(out, "}");
+        }
+    };
+    @fmt(out, "\n# }\n");
+}
+
 fn dump_folding(f: *Qbe.Fn, fold_vals: []i32, out: *List(u8), folded_sel: bool) void = {
     #use("@/backend/opt/fold.fr");
     any_folded := folded_sel;
-    write(out, "\n> SCCP findings:");  // "sparse conditional constant propagation"
+    @fmt(out, "\n## SCCP findings:");  // "sparse conditional constant propagation"
     ::FmtPad(Str);
     range(Qbe.Tmp0, f.ntmp.zext()) { t |
         if fold_vals[t] > 0 {
             any_folded = true;
-            @fmt(out, "\n%: ", f_pad(f.tmp[t]&.name(), 10, .Before));
+            @fmt(out, "\n# %: ", f_pad(f.tmp[t]&.name(), 10, .Before));
             printref(CON(fold_vals[t].zext()), f, out);
         };
     };
     if any_folded {
-        write(out, "\n> Top: ("); 
+        @fmt(out, "\n# > Top: ("); 
         range(Qbe.Tmp0, f.ntmp.zext()) { t |
             if fold_vals[t].intcast() == fold_status_pending {
                 @fmt(out, "%, ", f.tmp[t]&.name());
             } 
         };
-        write(out, ")"); 
+        @fmt(out, ")"); 
     } else {
-        write(out, "\n no foldable constants");
+        @fmt(out, "\n# no foldable constants");
     };
-    write(out, "\n dead code: ");
+    @fmt(out, "\n# dead code: ");
     any_dead_blocks := false;
     for_blocks f { b |
         if b.visit == 0 {
@@ -548,10 +576,10 @@ fn dump_folding(f: *Qbe.Fn, fold_vals: []i32, out: *List(u8), folded_sel: bool) 
         };
     };
     if !any_dead_blocks {
-        write(out, "(none)");
+        @fmt(out, "(none)\n");
     };
     if any_folded {
-        write(out, "\n\n> After constant folding:\n");
+        @fmt(out, "\n\n## After constant folding:\n");
         printfn(f, out);
     };
 }

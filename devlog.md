@@ -5,6 +5,18 @@
 - import_c: mangle names of static variables
 - import_c: new magic word: `#discard_static_scope` because i want to so everything in one compilation unit but 
   some programs rely on being able to declare static functions with the same name in different files. 
+- cleaning up the debug printing in backend
+  - always use the enum via when_debug() instead of `debug["A".char()]`
+  - make debug a bitset instead of an array. 
+  - caught a mistake. emit() subtracts from curi first, so it always points to the last thing you emitted. 
+    so when amd64/isel.fr/sel() is debug_assert(rslot == 1) on everything emitted, it needs to not do it on 
+    the starting value of curi because that will be off the end of the array. it only worked before because 
+    the thing after the array was `debug = forever.box(Array(u8, 91))` and it always started with a bunch of 
+    zeroes so it was fine to read that as an instruction (allocations linear because it's an arena). 
+    (indeed qbe decrements at the beginning of that loop instead of at the end as i was doing)
+  - make meta/parse.fr and incremental.fr not mutate the Typ after calling Module.new_type so i can add a dump option for when you make a type
+  - flag to dump data and add_code_bytes as well
+  - put more `#` in print output so meta/parse.fr can handle the output more often
 
 ## (Jul 24)
 

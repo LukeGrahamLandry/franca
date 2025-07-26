@@ -602,11 +602,7 @@ fn compile_all_symbols(header: *Header, m: *QbeModule) void = {
                 //@println("%", header.get(it.name));
                 did_regalloc := load(header, f&, i, syms);
                 zone := @if(ENABLE_ENABLE_TRACY, zone_begin(.Backend), ());
-                if f.globals.debug["P".char()] {
-                    out := f.globals.debug_out;
-                    write(out, "\n> After loading:\n");
-                    printfn(f&, out);
-                };
+                when_debug_printfn(f&, .Parsing, "\n## After loading:\n");
                 if did_regalloc {
                     @debug_assert_ne(m.goal.type, .CachedEarly, "can't go backwards");
                     emit_fn(f&);
@@ -619,13 +615,7 @@ fn compile_all_symbols(header: *Header, m: *QbeModule) void = {
                 @if(ENABLE_ENABLE_TRACY) zone_end(zone);
             }
             fn MachineCode() => {
-                // todo: nice macro so it's not order dependent
-                code: MultiArchAsm = (data = (
-                    header.get(it.asm.arm64),
-                    header.get(it.asm.amd64),
-                    empty(),
-                    header.get(it.asm.rv64),
-                ));
+                code := it.as_asm(header);
                 m.add_code_bytes(syms[i.off.zext()], code&);
             }
             fn Import() => {
@@ -649,6 +639,14 @@ fn compile_all_symbols(header: *Header, m: *QbeModule) void = {
     //       which i guess doesn't get set_library called on it (should be fixed anyway). 
     //       + need to do a more complicated thing to allow non-libc libraries anyway. 
 }
+
+// todo: nice macro so it's not order dependent
+fn as_asm(it: *Sym, header: *Header) MultiArchAsm = (data = (
+    header.get(it.asm.arm64),
+    header.get(it.asm.amd64),
+    empty(),
+    header.get(it.asm.rv64),
+));
 
 // 
 // Some fields (tmp, phi, typ) are only used when the function is pre-regalloc 
@@ -730,13 +728,8 @@ read_types :: fn(header: *Header, m: *QbeModule) i64 = {
         //       but that doesn't work now that i need to reuse the same Header so can't mutate and have type_offset. 
         //       tho could save a copy when offset==0
         fields := m.new_copy_long_life(header.get(t.fields));
-        m.new_type(
-            name = "",
-            header = t.header,
-            nfield = t.fields.count,
-            fields = fields,
-        );
         
+        // remap the type indices to the target module
         @if(offset != 0)
         each fields.slice(0, t.fields.count.zext()) { it |
             f := unpack it[];
@@ -745,6 +738,14 @@ read_types :: fn(header: *Header, m: *QbeModule) i64 = {
                 it[] = pack(type = .FTyp, len = f.len + offset.trunc());
             }
         };
+
+        // TODO: allow including names of types for debugging 
+        m.new_type(
+            name = "",
+            header = t.header,
+            nfield = t.fields.count,
+            fields = fields,
+        );
     };
     
     @debug_assert_ult(m.types.len, 1.shift_left(24), "types overflow");

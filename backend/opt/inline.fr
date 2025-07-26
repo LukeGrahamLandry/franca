@@ -169,8 +169,8 @@ fn save_for_inlining(f: *Qbe.Fn) bool = {
                     // TODO: THIS IS ASSUMING THERE ARE NO HASH COLLISSIONS
                     if con_new == con_old {
                         done = true;
-                        if m.debug["G".char()] {
-                            @fmt_write(m.debug_out, "\nDeduplicated: % -> % (% bytes)\n", f.name(), s.name, s.size);
+                        when_debug(m, .Inlining) { out |
+                            @fmt(out, "\n# Deduplicated: % -> % (% bytes)\n", f.name(), s.name, s.size);
                         };
                     };
                 };
@@ -188,9 +188,9 @@ fn save_for_inlining(f: *Qbe.Fn) bool = {
     ::ptr_utils(Qbe.Fn);
     
     inlfn := clone(f);
-    if f.globals.debug["G".char()] {
-        @fmt_write(f.globals.debug_out, "\nSave for %:\n", @if(no_inline, "deduplication", "inlining"));
-        printfn(f, f.globals.debug_out);
+    when_debug(f, .Inlining) { out |
+        @fmt(out, "\n## Save for %:\n", @if(no_inline, "deduplication", "inlining"));
+        printfn(f, out);
     };
     m := f.globals;
     
@@ -385,8 +385,8 @@ fn inlcall(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) i64 = {
     };
     f.leaf = f.leaf && inlfn.leaf;
     
-    if f.globals.debug["G".char()] {
-        @fmt_write(f.globals.debug_out, "    inlining call at @% ins % to simple function $%\n", b.name(), ptr_diff(b.ins.ptr, i), f.globals.str(inlfn.lnk.id));
+    when_debug(f, .Inlining) { out |
+        @fmt(out, "#    inlining call at @% ins % to simple function $%\n", b.name(), ptr_diff(b.ins.ptr, i), f.globals.str(inlfn.lnk.id));
     };
     
     @debug_assert_eq(inlfn.blocks.len, 1);
@@ -452,9 +452,7 @@ fn inlcall(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) i64 = {
 }
 
 fn inlcalls(f: *Qbe.Fn) void = {
-    if f.globals.debug["G".char()] {
-        @fmt_write(f.globals.debug_out, "\nProcessing function $%:\n", f.name());
-    };
+    when_debug(f, .Inlining, fn(out) => @fmt(out, "\n## Processing function $%:\n", f.name()));
     
     // during this pass we collect allocas for inlined arg/ret in the scratch buffer 
     // and splice them into f.start at the end. 
@@ -485,10 +483,7 @@ fn inlcalls(f: *Qbe.Fn) void = {
         f.start.ins = vins;
     };
     
-    if f.globals.debug["G".char()] {
-        write(f.globals.debug_out, "\nAfter inlining calls:\n\n");
-        printfn(f, f.globals.debug_out);
-    };
+    when_debug_printfn(f, .Inlining, "\n## After inlining calls:\n");
 }
 
 fn mark_referenced(m: *QbeModule, id: Qbe.Sym, symbol: *SymbolInfo) void #inline = {
@@ -508,7 +503,6 @@ fn mark_referenced(m: *QbeModule, id: Qbe.Sym, symbol: *SymbolInfo) void #inline
 //
 fn emit_suspended_inlinables(m: *QbeModule) void = {
     flush_debug(m);
-    log := m.debug["G".char()];
     
     for m.inlinable_but_referenced_later& { id | 
         mark := mark_temporary_storage();
@@ -517,12 +511,10 @@ fn emit_suspended_inlinables(m: *QbeModule) void = {
             load_inline_fn(m, f&, s.inline); // we stomp arrays to point at temp, but it would probably be fine because everyone's already gone through inlining. 
             s.inline = Qbe.InlineFn.ptr_from_int(0); // for good luck
             f.globals = m;
-            if log {
-                @fmt(m.debug_out, "\nFinishing suspended function: %\n", s.name);
+            when_debug(m, .Inlining) { out |
+                @fmt(out, "\n# Finishing suspended function: %\n", s.name);
+                printfn(f&, out);
             };
-        };
-        if log {
-            printfn(f&, f.globals.debug_out);
         };
         before := m.inlinable_but_referenced_later.len;
         

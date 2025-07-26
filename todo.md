@@ -105,11 +105,15 @@ without EXPERIMENT_LESS_DIRECT_CALLS:
   - hang between compiling app_events.fr and geo/main.fr 
 ```
 
-with EXPERIMENT_LESS_DIRECT_CALLS:
+with EXPERIMENT_LESS_DIRECT_CALLS(arm):
 ```
 - amd 
   - wuffs bzip2.c
-  - mandel.ssa -jit
+  - mandel.ssa -jit x3
+  - abi5.ssa -frc_inlinable
+  - gif.c
+- linux amd
+  - hang after hello_triangle
 ```
 
 ## import_symbol / weak
@@ -691,6 +695,7 @@ or just default to jitting and force you to enable aot by specifying an output p
 
 ## error messages
 
+- `contextual field % not found for % message` for enums shows the `declared here:` location for the raw type instead of the enum tpye
 - errors don't show multiple locations (like conflicting overloads should show the problem)
 - `Type Error` should tell you where the difference is! and use the right names for enums, etc.
 - `place expression expected pointer dereference` when you forget a `[]` after a call and field access should tell you that.

@@ -9,20 +9,18 @@ fn convert_to_ssa(f: *Qbe.Fn) void = {
     ::ptr_utils(QbeName);
     nt: i64 = f.ntmp.zext();
     stk := temp().alloc_zeroed(*QbeName, nt);
-    dbg := f.globals.debug;
-    d := dbg["L".char()];
-    dbg["L".char()] = false;
+    prev_debug := f.globals.debug;
+    f.globals.debug = prev_debug.bit_and(bit_not(1.shift_left(Qbe.DebugKey.Liveness.raw() - "A".char())));
     filldom(f);
-    out := f.globals.debug_out;
-    if dbg["N".char()] {
-        write(out, "\n> Dominators:\n");
+    when_debug(f, .Ssa) { out |
+        @fmt(out, "\n## Dominators:\n");
         for_blocks f { b1 |
             if !b1.dom.is_null() {
-                @fmt_write(out, "%:", f_pad(b1.name(), 10, .Before));
+                @fmt(out, "# %:", f_pad(b1.name(), 10, .Before));
                 for_dom b1 { b |
-                    @fmt_write(out, " %", b.name());
+                    @fmt(out, " %", b.name());
                 };
-                write(out, "\n");
+                @fmt(out, "\n");
             };
         };
     };
@@ -30,11 +28,8 @@ fn convert_to_ssa(f: *Qbe.Fn) void = {
     fill_liveness(f);
     insert_phis(f);
     renumber_block(f.start, stk, f);
-    dbg["L".char()] = d;
-    if dbg["N".char()] {
-        write(out, "\n> After SSA construction:\n");
-        printfn(f, out);
-    };
+    f.globals.debug = prev_debug;
+    when_debug_printfn(f, .Ssa, "\n## After SSA construction:\n");
 }
 
 // :Explain
@@ -490,8 +485,8 @@ fn fill_liveness(f: *Qbe.Fn) void = {
         };
     };
 
-    if f.globals.debug["L".char()] {
-        f.debug_dump_liveness();
+    when_debug(f, .Liveness) { out |
+        f.debug_dump_liveness(out);
     };
 }
 
