@@ -83,8 +83,10 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, pe
     
     m := shared.m;
     result: CRes(void) = .Ok;
-    new_constants := BakedVarId.list(temp());
-    pending_set_lib := Ty(Qbe.Sym, Str, bool).list(temp());
+
+    // ugh. can't be temp() because threaded=false wants to reset it.     
+    new_constants := BakedVarId.list(general_allocator());
+    pending_set_lib := Ty(Qbe.Sym, Str, bool).list(general_allocator());
     
     enter_task shared { entry |
         ::tagged(Placement);
@@ -162,10 +164,13 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, pe
                 }
             };
             
+            new_constants&.drop();
             @if(pending_set_lib.len > 0) enter_task shared { entry |
-                entry.task = (SetLibrary = pending_set_lib.items());
+                entry.task = (SetLibrary = pending_set_lib.items().shallow_copy(temp()));
+                pending_set_lib&.drop();
             };
     };
+    
     zone_end(z);
     result
 }

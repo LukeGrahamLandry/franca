@@ -20,6 +20,9 @@
     i thought were helped by EXPERIMENT_LESS_DIRECT_CALLS. i wonder if they're the same problem or just both a crazy 
     memory fuckup so same symptoms. if they're the same problem by some miracle that would be great. 
     ugh i should just give up and make a garbage (collected) language. 
+- emit_ir.(pending, new_constants, pending_set_lib) really can't be in temp() anymore. 
+    - tho actually pending_set_lib was technically a race before because it just gets passed through to the codegenentry 
+      but outer_temp would be reset eventually in poll_until_finished. 
 
 ## (Jul 25)
 

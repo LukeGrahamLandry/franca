@@ -6,6 +6,9 @@
 - language: add `@no_nonlocal_return f(a)` before im willing to commit to adding `defer`
   for inline lambdas where it's not ok if you bail out before running the stuff after the body. 
   i also want to have `@inline` at the callsite so maybe should just put some flags on Expr.Call
+- need an option to make `@safety` assertions give you more information. it's hard without a runtime bootstrapping 
+  step because ie. `fn index([]T)` needs to get compiled really early before you can do anything. 
+- split compiler/worker.fr into the franca part and the backend part
 
 ## deduplication
 
