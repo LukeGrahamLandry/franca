@@ -65,6 +65,7 @@ SelfHosted :: @rec @struct(
     backtrace_node: *Crash.LocationResolverNode,
     recycle_funcid: List([]FuncId),
     shim_callback_general_alloc: Alloc,
+    debug_deny_jit_shim_calls := false,
 );
 
 OverloadKey :: @struct(arg: Type, req: Type);
@@ -194,7 +195,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         // and we end up compiling many things an extra time. 
         // ie. if you put #log_ir on libc_allocator_fn, you'll see it 3 times. 
         // when true, the driver can have jit shims (so it might not be fully compiled before you call into it). 
-        USE_SAME_MODULE := false;
+        USE_SAME_MODULE := false;  // note: this doesn't work anymore anyway
         
         cache_it := !no_cache && enable_incremental() && !USE_SAME_MODULE;
         
@@ -213,7 +214,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
                 // this means the callee program can use apple_thread_jit_write_protect if it wants. 
             ));
             self.other_module&.push(m, self.get_alloc());
-            shared: *CodegenShared = init(m, self.get_alloc(), @as(CodegenWorker) codegen_thread_main, true);
+            shared: *CodegenShared = init_codegen_worker(m, self.get_alloc(), @as(CodegenWorker) codegen_thread_main, true);
             shared
         });
         m := shared.m;
@@ -225,11 +226,13 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
             || panic("expected a function called main or driver.");
         
         name := c.fmt_fn_name(f);
+        cc := zeroed rawptr;
         @if(USE_SAME_MODULE, {
             // treat it the same as any other comptime call
-            _ := c.get_jitted(f);
+            cc = c.get_jitted(f);
         }, {
             main_thread_pump(self.comp(), shared, @slice(f), true);
+            self.debug_deny_jit_shim_calls = true;
             if no_cache {
                 m.make_exec();
             }
@@ -268,9 +271,8 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         to_free_c = (Some = c);
         if !USE_SAME_MODULE {
             to_free = (Some = (m, zeroed(*Crash'LocationResolverNode)));
+            cc = m.get_addr(name) || @panic("ICE: lost %", name);
         };
-        
-        cc := m.get_addr(name) || @panic("ICE: lost %", name);
         
         callee = (Some = assume_types_fn(Arg = *ImportVTable, Ret = void, ptr = cc));
     };
@@ -379,7 +381,7 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
         stack_base = i64.int_from_ptr(stack_base&),
         comptime_libraries = init(a),
         vtable = init_driver_vtable(),
-        comptime_codegen = init(m, a, @as(CodegenWorker) codegen_thread_main, false),
+        comptime_codegen = init_codegen_worker(m, a, @as(CodegenWorker) codegen_thread_main, false),
         dyncalls = init(a),
         shim_callback_alloc = init(page_allocator, 1.shift_left(14)),
         where_memo = init(a),

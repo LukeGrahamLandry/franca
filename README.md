@@ -114,3 +114,6 @@ there must be proportional terrible things or I'm probably just lying.
   (because I care about cross compiling working seamlessly). 
 - It has only been used by (approximately) one person so I'm sure there are hella compiler bugs that I haven't stumbled upon yet. 
   Every time i write a new program the todo.md file gets longer. 
+- spawning new operating system threads from comptime code is a bit fragile. 
+  it does work but you're exposed to some unfortunate compiler implementation details. 
+  (re. jit-shims and MAP_JIT). hopefully this will be fixed eventually. 

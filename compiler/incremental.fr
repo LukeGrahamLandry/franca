@@ -551,7 +551,7 @@ fn move_from_module(emit_ir: *EmitIr, import: *FrcImport) CRes(CodegenTask) = {
     module       := FrcModule.ptr_from_int(import.module); 
     header, m, f := (module.header, emit_ir.m, emit_ir.f);
     self := emit_ir.program.data.cast()[][];
-    instance := @try(find_module(self, emit_ir.shared, module, .None)) return;
+    instance := @try(find_module(self, emit_ir.shared, module)) return;
     @debug_assert(identical(m, f.globals), "move_from_module bad f.m");
 
     i := import.get_sym();
@@ -668,16 +668,15 @@ fn emit_import_ref(self: *EmitIr, it: *FrcImport, p: Placement) CRes(Qbe.Ref) = 
 } 
 
 fn find_module(self: *EmitIr, it: *FrcImport) CRes(*FrcModuleInstance) = 
-    find_module(self.program.data.cast()[][], self.shared, Incr'FrcModule.ptr_from_int(it.module), .None);
+    find_module(self.program.data.cast()[][], self.shared, Incr'FrcModule.ptr_from_int(it.module));
 
-fn find_module(self: *SelfHosted, shared: *CodegenShared, module: *FrcModule, idx: ?*i64) CRes(*FrcModuleInstance) = {
+fn find_module(self: *SelfHosted, shared: *CodegenShared, module: *FrcModule) CRes(*FrcModuleInstance) = {
     a := self.get_alloc();
     imp := shared.frc_imports&;
     ::ptr_utils(@type module[]);
     xx := imp.items().find(fn(it) => identical(it.module, module));  // :ThisIsNotOkBecauseMemoryWillBeReused
     (Ok = xx || {
         @assert_ne(shared.frc_imports.cap, shared.frc_imports.len, "ICE: too many imported modules. TODO: use something with pointer stability");
-        idx := @unwrap(idx, "ICE: find_module(idx=.None) on first time") return;
         h := module.header;
         syms := a.alloc(Qbe.Sym, zext h.sym.count);
         imp.push_assume_capacity(
@@ -713,10 +712,7 @@ fn find_module(self: *SelfHosted, shared: *CodegenShared, module: *FrcModule, id
         // HACK to make data imports work
         for module.data_symbols { it |
             sym, info := it;
-            //@println("do data: % %", self.pool.get(info.name), info.comptime);
-            entry := bouba_acquire(shared, idx);
-            push_dynamic_context {
-                context(DefaultContext)[].temporary_allocator = entry.arena&;
+            enter_task shared { entry |
                 id := shared.m.intern(self.pool.get(info.name));
                 if shared.m.goal.type == .JitOnly && info.comptime != 0 {
                     lnk := temp().box(Qbe.Lnk);
@@ -728,7 +724,6 @@ fn find_module(self: *SelfHosted, shared: *CodegenShared, module: *FrcModule, id
                     entry.task = (SetLibrary = arg);
                 }
             };
-            enqueue_task(shared, entry);
         };
         
         imp[imp.len - 1]&
@@ -862,7 +857,7 @@ fn build_the_exports_scope(c: *ExportCtx, start_path: Str) CRes([][]u8) = {
     // This is kinda copy-paste fusion adventure of emit_qbe_included and finish_qbe_module. 
     
     fr := c.self.comp();
-    shared := init(c.m, fr.get_alloc(), @as(CodegenWorker) codegen_thread_main, true);
+    shared := init_codegen_worker(c.m, fr.get_alloc(), @as(CodegenWorker) codegen_thread_main, true);
     funcs_done := main_thread_pump(fr, shared, fns, true);
     @debug_assert(c.m.inlinable_but_referenced_later.len == 0);
     

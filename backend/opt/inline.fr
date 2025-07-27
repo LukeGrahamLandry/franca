@@ -56,7 +56,6 @@ fn good4inl(f: *Qbe.Fn) bool = {
 // Note: this goes in the inlining cache so it can't use temp() memory.
 fn cloneblk(m: *QbeModule, dest: []Qbe.Blk, b: *Qbe.Blk) void = {
     inlb := dest.index(b.id.intcast());
-    lock(m.intern_mutex&); 
     a := m.forever&.borrow();
     inlb.ins = init(a, b.ins.len);
     inlb.jmp = b.jmp;
@@ -65,7 +64,6 @@ fn cloneblk(m: *QbeModule, dest: []Qbe.Blk, b: *Qbe.Blk) void = {
     
     ::ptr_utils(@type inlb.phi[]);
     if dest.len == 1 {
-        unlock(m.intern_mutex&); 
         return();
     };
 
@@ -86,7 +84,6 @@ fn cloneblk(m: *QbeModule, dest: []Qbe.Blk, b: *Qbe.Blk) void = {
         };
         inlb.phi = phis[0];
     };
-    unlock(m.intern_mutex&); 
     
     if !b.s1.is_null() {
         inlb.s1 = dest.index(b.s1.id.intcast());
@@ -102,9 +99,8 @@ fn cloneblk(m: *QbeModule, dest: []Qbe.Blk, b: *Qbe.Blk) void = {
 // Note: this goes in the inlining cache so it can't use temp() memory.
 fn clone(f: *Qbe.Fn) *Qbe.InlineFn = {
     m := f.globals;
-    lock(m.intern_mutex&); 
+    @debug_assert(m.intern_mutex&.locked_by_me());
     inlfn := m.forever&.borrow().box_zeroed(Qbe.InlineFn);
-    unlock(m.intern_mutex&); 
     inlfn.retty = f.retty;
     inlfn.nblk = f.nblk;
     inlfn.leaf = f.leaf;
@@ -114,7 +110,7 @@ fn clone(f: *Qbe.Fn) *Qbe.InlineFn = {
     
     n: i64 = f.ntmp.zext();
     inlfn.ntmp = f.ntmp;
-    @if(f.track_ir_names) with m.intern_mutex& {
+    @if(f.track_ir_names) {
         inlfn.tmp_names = m.forever&.borrow().alloc(Str, f.ntmp.zext() - Qbe.Tmp0);
         range(Qbe.Tmp0, n) { i |
             t := f.tmp.index(i);
@@ -128,15 +124,12 @@ fn clone(f: *Qbe.Fn) *Qbe.InlineFn = {
     inlfn.con.slice(0, f.ncon.zext()).copy_from(f.con.slice(0, f.ncon.zext()));
     
     @debug_assert(f.nmem == 0, "shouldn't need to inline clone f.mem");
-    with m.intern_mutex& {
-        inlfn.blocks = m.forever&.borrow().alloc_zeroed(Qbe.Blk, f.nblk.zext());
-    };
+    inlfn.blocks = m.forever&.borrow().alloc_zeroed(Qbe.Blk, f.nblk.zext());
     
     f.set_block_id();
     for_blocks f { b |
         cloneblk(m, inlfn.blocks, b);
     };
-    
     inlfn
 }
 
@@ -145,14 +138,15 @@ fn save_for_inlining(f: *Qbe.Fn) bool = {
     // good4inl mutates to try to reduce block count so it seems creepy to skip that when marked no_inline (especially :CreepyNop)
     no_inline := !good4inl(f) || f.lnk.no_inline;
     // TODO: make finish_alias() work for -frc
+    ::enum(@type f.globals.goal.type);
     no_dedup := !f.lnk.shrink || !ENABLE_CONST_FOLD || @is(f.globals.goal.type, .Cached, .CachedEarly);
     if no_inline && no_dedup {
         return false;
     };
     
+    m := f.globals;
+    m.intern_mutex&.lock();
     if no_inline {
-        m := f.globals;
-        m.intern_mutex&.lock();
         a := m.forever&.borrow();
         entries := m.deduplicate&.get_or_insert(f.hash, a, => empty());
         // TODO: putting a constant here is garbage. it kinda needs to be tuned on the size of your program. 
@@ -162,6 +156,9 @@ fn save_for_inlining(f: *Qbe.Fn) bool = {
             con_new := f.con.slice(0, f.ncon.intcast());
             for entries { it |
                 done := false;
+                ::AutoEq(Qbe.Con);
+                ::AutoEq(Qbe.Sym);
+                ::AutoEq(Ty(u32, u32));
                 use_symbol(m, it) { s |
                     check := s.inline;
                     con_old := check.con.slice(0, check.ncon.intcast());
@@ -182,12 +179,12 @@ fn save_for_inlining(f: *Qbe.Fn) bool = {
             };
             entries.push(f.lnk.id, a);
         };
-        m.intern_mutex&.unlock();
     };
     
     ::ptr_utils(Qbe.Fn);
     
     inlfn := clone(f);
+    m.intern_mutex&.unlock();
     when_debug(f, .Inlining) { out |
         @fmt(out, "\n## Save for %:\n", @if(no_inline, "deduplication", "inlining"));
         printfn(f, out);

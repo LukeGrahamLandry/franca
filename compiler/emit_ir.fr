@@ -37,13 +37,12 @@ EmitIr :: @struct(
     entry: *CodegenEntry,
     next_block_name := 0,
     last_line := -1,
-    new_constants: List(BakedVarId),
+    new_constants: *List(BakedVarId),
     shared: *CodegenShared,
     // you wouldn't need this if sema tracked callees correctly,
     // but it's much easier to just fudge it with shims. 
     pending: *List(FuncId), 
-    idx: *i64,
-    pending_set_lib: List(Ty(Qbe.Sym, Str, bool)),  // TODO: don't be cringe
+    pending_set_lib: *List(Ty(Qbe.Sym, Str, bool)),  // TODO: don't be cringe
     unreachable_block: *Qbe.Blk,
 );
 
@@ -58,7 +57,7 @@ ReturnTarget :: @struct(
 
 Placement :: @tagged(Assign: Qbe.Ref, Scalar, Blit: Qbe.Ref, NewMemory, Discard, ScalarTransient);
 
-fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, idx: *i64, pending: *List(FuncId), export: bool) CRes(void) = {
+fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, pending: *List(FuncId), export: bool) CRes(void) = {
     func := comp.get_function(f); 
 
     if when == .Aot {
@@ -78,17 +77,16 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
     // currently this needs to make funcids eagarly so it might involve making jitshims for imports which has to happen before we grab the codegenentry
     @if(!DISABLE_IMPORT_FRC)
     @if_let(func.body&) fn FrcImport(it) => {
-        _ := @try(find_module(comp.data.cast()[][], shared, Incr'FrcModule.ptr_from_int(it.module), (Some = idx))) return;
+        _ := @try(find_module(comp.data.cast()[][], shared, Incr'FrcModule.ptr_from_int(it.module))) return;
         @if(ENABLE_TRACY) ___tracy_emit_zone_color(z, import_cache_colour);
     };
     
-    entry := bouba_acquire(shared, idx);
     m := shared.m;
     result: CRes(void) = .Ok;
-    old_temporary_allocator := context(DefaultContext)[].temporary_allocator;
-    outer_temp := temp();
-    push_dynamic_context {
-        context(DefaultContext)[].temporary_allocator = entry.arena&;
+    new_constants := BakedVarId.list(temp());
+    pending_set_lib := Ty(Qbe.Sym, Str, bool).list(temp());
+    
+    enter_task shared { entry |
         ::tagged(Placement);
         opts := comp.get_build_options();
         
@@ -106,11 +104,10 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
             when = when,
             m = m,
             entry = entry,
-            new_constants = list(outer_temp),
+            new_constants = new_constants&,
             shared = shared,
             pending = pending,
-            idx = idx,
-            pending_set_lib = list(outer_temp),
+            pending_set_lib = pending_set_lib&,
             unreachable_block = zeroed(*Qbe.Blk),
         );
         @debug_assert(func.get_flag(.EnsuredCompiled), "fn not compiled?");
@@ -128,34 +125,30 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
         
         if res&.is_err() {
             res.Err.update_main_span(self.last_loc);
-            result = (Err = res.Err)
-        } else {
+            result = (Err = res.Err);
+            entry.task = (AotVar2 = empty());  // do nothing
+        };
+    };
+    
+    if !result&.is_err() {
             has_context := func.get_flag(.YesContext) && !func.get_flag(.NoContext);  // :copy-pastrae
             if !has_context {
                 func.set_flag(.NoContext);
             };
-            
-            enqueue_task(shared, self.entry);         // ! careful, temp() is invalid here
-                                                      // !
-            if self.new_constants.len != 0 {          // !
-                entry2 := bouba_acquire(shared, idx); // !
-                push_dynamic_context {                // !
-                    context(DefaultContext)[].temporary_allocator = entry2.arena&;
-                    out := Dat2.list(self.new_constants.len, temp());
-                    for self.new_constants { id |
+            if new_constants.len != 0 {
+                enter_task shared { entry |
+                    out := Dat2.list(new_constants.len, temp());
+                    for new_constants { id |
                         out&.push(baked_var_to_dat(comp, m, id));
                     };
-                    entry2.task = (AotVar2 = out.items());
+                    entry.task = (AotVar2 = out.items());
                 };
-                enqueue_task(shared, entry2);
-                
                 
                 // if it's from a FrcImport it won't already have a place in the comptime address space, 
                 // so we need to remember the jit_addr we made for it so it doesn't get rebaked (which 
                 // would be extra bad if the relocations haven't fired yet) 
-                if self.when == .Jit && !self.shared.threaded {
-                    context(DefaultContext)[].temporary_allocator = old_temporary_allocator;
-                    for self.new_constants { id |
+                if when == .Jit && !shared.threaded {
+                    for new_constants { id |
                         baked := comp.get_baked(id);
                         if baked.need_reify {
                             baked.need_reify = false;
@@ -167,14 +160,11 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
                         };
                     };
                 }
-            };                                        // !
-                                                      // !
-            if self.pending_set_lib.len > 0 {         // !
-                entry2 := bouba_acquire(shared, idx); // !
-                entry2.task = (SetLibrary = self.pending_set_lib.items());
-                enqueue_task(shared, entry2);         // !
             };
-        };
+            
+            @if(pending_set_lib.len > 0) enter_task shared { entry |
+                entry.task = (SetLibrary = pending_set_lib.items());
+            };
     };
     zone_end(z);
     result
@@ -388,7 +378,7 @@ fn aot_import_body(self: *EmitIr, info: *DynamicImport) void = {
         // TODO: probably want to give the backend the path to put in the exe, not our symbolic name, 
         //       and also maybe preintern with the backend to get an ordinal that's just in lib space 
         //       instead of needing to check every time
-        push(self.pending_set_lib&, (target, self.program.get_string(info.lib), info.weak));
+        push(self.pending_set_lib, (target, self.program.get_string(info.lib), info.weak));
     };
     
     self.bounce_body_call(target);
@@ -810,7 +800,7 @@ fn compile_expr(self: *EmitIr, expr: *FatExpr, p: Placement) CRes(Qbe.Ref) = {
                     return(Ok = self.scalar_result(p, self.f.getcon(info.comptime), i64));   // :get_or_create_type
                 };
                 // TODO: if jitting and not ready yet, we could make this be a call to a shim that returns the symbol?
-                push(self.pending_set_lib&, (self.m.intern(name), self.program.get_string(info.lib), info.weak));
+                push(self.pending_set_lib, (self.m.intern(name), self.program.get_string(info.lib), info.weak));
             };
             self.scalar_result(p, self.f.symcon(name), i64)  // :get_or_create_type
         }
@@ -1201,7 +1191,7 @@ fn reference_constant(self: *EmitIr, id: BakedVarId) void = {
             s.pledge_local = true;
         };
         
-        self.new_constants&.push(id);
+        self.new_constants.push(id);
     };
 }
 

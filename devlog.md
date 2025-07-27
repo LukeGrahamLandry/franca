@@ -1,3 +1,25 @@
+## (Jul 26)
+
+- trying to get CodegenWorker to let you build multiple tasks at once
+  - because import_c needs that cause it tries to not keep the whole data structure of a program 
+    so it hits constants inside a function and i want to be able to reset temp(). 
+  - ended up being an infinite nightmare of mistakes. 
+  - since you can now have multiple entries being used by bouba, the old way of just decrementing the futex
+    value on release() is wrong i think because when waiting it's compared to the queue_size. 
+    that feels true but i can't quite make it make sense so im a bit afraid i just had that cause hangs 
+    when i was accidently leaking entries in import_c/function() and it was actually fine. hard to say. 
+  - can't have threaded=true for comptime import_c ffi (i assume because it fights with jit shims) 
+    so can't have codegen_queue_size=1 when threaded=false but somehow that made self compile ~20ms slower. 
+    mostly fixed by not using multiple temp() allocators when not threaded so i think the problem was just 
+    heating them all up took time. (was still cycling the entries in the queue even if only one is used). 
+    which should be fine but resetting that temp() doesn't quite work. 
+  - the end result is kinda simpler? and i hope i'll be able to make emit_ir suck less this way too. 
+    but it's a bit slower and i think it's introduced hangs so that's pretty fucking worthless then isn't it. 
+    i hope the hang problem is just the sketchy removal of the loop when waiting for no_more_codegen=0. 
+  - interestingly i seem to have produced random failures similar to the ones i was having in CI that 
+    i thought were helped by EXPERIMENT_LESS_DIRECT_CALLS. i wonder if they're the same problem or just both a crazy 
+    memory fuckup so same symptoms. if they're the same problem by some miracle that would be great. 
+    ugh i should just give up and make a garbage (collected) language. 
 
 ## (Jul 25)
 
@@ -17,6 +39,7 @@
   - make meta/parse.fr and incremental.fr not mutate the Typ after calling Module.new_type so i can add a dump option for when you make a type
   - flag to dump data and add_code_bytes as well
   - put more `#` in print output so meta/parse.fr can handle the output more often
+- start trying to make import_c use temp() in a sane way where you can reset it per function
 
 ## (Jul 24)
 

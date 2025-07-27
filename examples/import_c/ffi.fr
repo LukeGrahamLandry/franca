@@ -47,6 +47,7 @@ fn include(fr: CompCtx, c_source: Str) ScopeId = {
     c := import_c'init_fr(fr);
     bytes := import_c'compile_fr(fr.get_alloc(), c_source, c);
     fr'vtable'drop_qbe_module(QbeModule.raw_from_ptr(c.m));
+    c.arena_storage&.deinit();
     result := fr'vtable'import_frc(fr.data, bytes);
     or result { err |
         fr.report_error(err)
@@ -75,8 +76,10 @@ fn init_for_include(fr: CompCtx) *C.Compile.Ctx = {
     c := fr.get_alloc().box_zeroed(C'Compile.Ctx);
     // TODO: "need to be consistant about how to handle modules like this that don't actually compile anything"
     init_default_module_dyn(m, fr.vtable, (arch = query_current_arch(), os = query_current_os(), type = .CachedEarly));
+    // TODO: this should work when not through the vtable but this is better anyway
+    codegen_thread_main := ptr_cast_unchecked(@type fr.vtable.codegen_thread_main, C'Compile'CodegenWorker, fr.vtable.codegen_thread_main&)[];
     // "todo: make this work threaded"
-    ctx: *C.Compile.CodegenShared = init(m, general_allocator(), zeroed C.Compile.CodegenWorker /*C.Compile.codegen_thread_main */, false);
+    ctx: *C.Compile.CodegenShared = init_codegen_worker(m, general_allocator(), codegen_thread_main, false);
     C'init_ctx(c, m);
     c.emitter = (Some = ctx);
     c.enqueue_task = bit_cast_unchecked(@type fr.vtable.enqueue_task, @type c.enqueue_task, fr.vtable.enqueue_task);
@@ -96,8 +99,6 @@ fn compile_to_module(out_alloc: Alloc, c_source: Str, c: *C.Compile.Ctx) []u8 = 
         tok  = c.C'Preprocess'preprocess(tok);
         _ := c.parse(tok);
         
-        @debug_assert(c.emitter.is_none() || !c.emitter.Some.threaded);
-        // "todo: make this work threaded"
         c.emitter.unwrap().join_codegen_thread();
         
         // add all the functions/globals/typedefs to a scope

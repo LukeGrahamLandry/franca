@@ -9,7 +9,9 @@ Compile :: import("@/examples/import_c/compile.fr");
 SPAM :: false;
 
 fn init_ctx(c: *Compile.Ctx, m: *QbeModule) void = {
-    c.arena = temp();  // when you change this don't forget to free it in ffi.fr/include()
+    c.function_entry = .None;
+    c.arena_storage = init(general_allocator(), 1.shift_left(15));
+    c.arena = c.arena_storage&.borrow(); // TODO: free it in ffi.fr/include()
     c.current_fn = .None;
     c.emitter = .None;
     c.brk_label = .None;
@@ -17,7 +19,7 @@ fn init_ctx(c: *Compile.Ctx, m: *QbeModule) void = {
     c.scope = c.arena.box_zeroed(Compile.Scope);
     c.scope.vars = init(c.arena);
     c.scope.tags = init(c.arena);
-    c.error_buf = list(temp());
+    c.error_buf = list(c.arena);
     c.cond_incl = .None;
     c.macros = init(c.arena);
     c.pragma_once = init(c.arena);
@@ -60,7 +62,7 @@ fn catch_call(c: *Compile.Ctx, $T: Type, $body: @Fn() T) Result(T, Str) #generic
 fn compile_file(c: *Compile.Ctx, path: Str) Result(*Compile.Obj, Str) = {
     catch_call(c, *Compile.Obj) {
         c.macro_base_file = path;
-        src := read_entire_file(temp(), path) ||
+        src := read_entire_file(c.arena, path) ||
             @error_at(c, path.ptr, "Failed to open file: %", path);
         tok := c.tokenize_string(path, src);
         tok  = c.Preprocess'preprocess(tok);
@@ -80,20 +82,24 @@ fn yield(c: *Compile.Ctx, obj: *Compile.Obj) void = {
     };
 }
 
+// TODO: hoist this so temp() is in the arena of the entry
 fn emit_one(c: *Compile.Ctx, obj: *Compile.Obj) void = {
     ctx := c.emitter.unwrap();
     @assert(obj.yielded);
-    entry := bouba_acquire(ctx, ctx.bouba_idx&);
-    push_dynamic_context {
-        context(DefaultContext)[].temporary_allocator = entry.arena&;
+    // TODO: not using the vtable thing (c'enqueue_task) makes this compile slower. need to make my incremental thing work better
+    enter_task ctx { entry | 
         if obj.is_function {
+            //entry := c.function_entry&.take().unwrap();
+            //entry := bouba_acquire(ctx);
             f := obj.f;
             entry.task = (Func = f);
+            //c'enqueue_task(ctx, entry);
         } else {
+            //entry := bouba_acquire(ctx);
             entry.task = (AotVar2 = translate_data(ctx.m, obj));
+            //c'enqueue_task(ctx, entry);
         };
     };
-    c'enqueue_task(ctx, entry);
 }
 
 // TODO: implement _Alignas

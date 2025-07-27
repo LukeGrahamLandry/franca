@@ -25,10 +25,7 @@ fn lock(self: *Mutex) void = {
             self.wait();
         };
         fence();
-        my_thread: u32 = context(DefaultContext)[].thread_index.trunc();
-        @debug_assert(self.thread == 0 && self.count == 0, "memory ordering problem?");
-        self.thread = my_thread;
-        self.count = 1;
+        self.PRIVATE_force_lock();        
     };
 }
 
@@ -60,12 +57,20 @@ fn try_lock(self: *Mutex) bool = {
     
     if MutexState.cas(self.u.state&, .unlocked, .locked) == .unlocked {
         fence();
-        @debug_assert(self.thread == 0 && self.count == 0, "memory order problem");
-        self.thread = my_thread;
-        self.count = 1;
+        self.PRIVATE_force_lock();
         return(true);
     };
     false
+}
+
+fn locked_by_me(self: *Mutex) bool = 
+    self.thread == context(DefaultContext)[].thread_index.trunc();
+
+fn PRIVATE_force_lock(self: *Mutex) void = {
+    my_thread: u32 = context(DefaultContext)[].thread_index.trunc();
+    @debug_assert(self.thread == 0 && self.count == 0, "memory order problem");
+    self.thread = my_thread;
+    self.count = 1;
 }
 
 fn unlock(self: *Mutex) void = {

@@ -48,15 +48,16 @@ fn wait_for_symbol(shared: *CodegenShared, id: Qbe.Sym) rawptr = {
         r
     };
     
+    // TODO: it would be nice if this was unreachable now that comptime_codegen is always single threaded?
     @if(shared.threaded)
     if !symbol_is_ready(shared, id) {
         zone := zone_begin(.Wait);
         
         u32.atomic_set(shared.waiting_for_symbol&, 1);
-        prev := shared.waiting_for_bouba;
-        while => prev != codegen_queue_size && !symbol_is_ready(shared, id) {
-            Futex'wait(shared.waiting_for_bouba&, prev);
-            prev = shared.waiting_for_bouba;
+        prev := shared.waiting_for_kiki_futex;
+        while => prev != 0 && !symbol_is_ready(shared, id) {
+            Futex'wait(shared.waiting_for_kiki_futex&, prev);
+            prev = shared.waiting_for_kiki_futex;
         };
         u32.atomic_set(shared.waiting_for_symbol&, 0);
     
@@ -81,10 +82,8 @@ fn wait_for_symbol(shared: *CodegenShared, id: Qbe.Sym) rawptr = {
 fn create_dyncall_shim(self: *SelfHosted, f_ty: FnType) void = {
     shared := self.comptime_codegen;
     ins: RawList(Qbe.Ins) = empty();
-    entry := bouba_acquire(shared, shared.bouba_idx&);
     id := Qbe.no_symbol_S; 
-    push_dynamic_context {
-        context(DefaultContext)[].temporary_allocator = entry.arena&;
+    enter_task shared { entry |
         f := temp().box(Qbe.Fn);
         m := shared.m;
         f.default_init(m);
@@ -167,7 +166,6 @@ fn create_dyncall_shim(self: *SelfHosted, f_ty: FnType) void = {
         f.start.ins = ins;
         f.start.jmp.type = .ret0;
     };
-    enqueue_task(shared, entry);
     self.dyncalls&.insert(f_ty, (Pending = id));
 }
 
@@ -179,12 +177,9 @@ fn create_jit_shim(self: CompCtx, shared: *CodegenShared, fid: FuncId, handler_c
     func := self.get_function(fid);
     
     m := shared.m;
-    entry := bouba_acquire(shared, shared.bouba_idx&);
     c := self.data.cast()[][];
     id := Qbe.no_symbol_S;
-    push_dynamic_context {
-        context(DefaultContext)[].temporary_allocator = entry.arena&;
-        
+    enter_task shared { entry |
         id = m.intern(@tfmt("%__shim", fid));
         
         // create a new function
@@ -280,7 +275,6 @@ fn create_jit_shim(self: CompCtx, shared: *CodegenShared, fid: FuncId, handler_c
         f.start.link = do_the_call;
         do_the_call.link = not_ready;
     };
-    enqueue_task(shared, entry);
     
     if !shared.threaded && func.get_flag(.TookPointerValue) {
         self.data.cast()[][].created_jit_fn_ptr_value(fid, shared.wait_for_symbol(id).int_from_rawptr());
@@ -306,7 +300,7 @@ fn shallow_jit_func(self: *SelfHosted, fid: FuncId) void = {
         };
     };
     
-    _ := self.unwrap_report_error(void, emit_ir(self.comp(), self.comptime_codegen, fid, .Jit, self.comptime_codegen.bouba_idx&, pending&, true));
+    _ := self.unwrap_report_error(void, emit_ir(self.comp(), self.comptime_codegen, fid, .Jit, pending&, true));
     
     shared := self.comptime_codegen;
     if !shared.threaded && func.get_flag(.TookPointerValue) {
@@ -367,6 +361,7 @@ report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHo
             Crash'backtracing_panic_handler(msg);
         };
         c.thread_index = 1; // HACK this is not ok if the comptime code has multiple threads
+        @debug_assert(!self.debug_deny_jit_shim_calls);
         
         m := self.comptime_codegen.m;
         // important: have to be careful about which comptime is in the context if the driver program gets compiled lazily. 

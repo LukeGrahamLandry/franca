@@ -3,6 +3,9 @@
 - real error handling for lib/sys/posix.fr. need to be able to remap the errno values to something consistant. 
 - i've lost 20ms of speed. i should really make something that automatically times it every commit. 
 - i hate the vscode/zed extension build junk being in here. each are 300 lines of dependencies. 
+- language: add `@no_nonlocal_return f(a)` before im willing to commit to adding `defer`
+  for inline lambdas where it's not ok if you bail out before running the stuff after the body. 
+  i also want to have `@inline` at the callsite so maybe should just put some flags on Expr.Call
 
 ## deduplication
 
@@ -65,6 +68,14 @@ c frontend work because of `#ifdef ARCH/OS`. C also lets you have different func
 bodies on different targets which i don't deal with well. 
 - for import_c, decide when to reset temp() and audit all the allocations in tok/pre
 - import_c/ffi has a big comment
+- i want import_c/ffi.fr to be able to use threaded=true but compiler flaw: 
+  interaction between spawning threads at comptime and jit-shims is super broken 
+- hoist the enter_task call so temp() can be reset more often
+- either do tokens lazily or try doing it on another thread
+- now using enter_task instead of c'enqueue_task but that means it will compile slower. 
+- why does threaded=true not work when running jitted sometimes (random mutex failures)? 
+  there shouldn't be jit-shims if it's not at comptime so that theory doesn't explain it 
+  although it seemed to have similar symptoms. 
 
 ### !! BROKEN !!
 
@@ -107,14 +118,25 @@ without EXPERIMENT_LESS_DIRECT_CALLS:
 
 with EXPERIMENT_LESS_DIRECT_CALLS(arm):
 ```
+- arm-macos 
+  - abi5.ssa -w
 - amd 
   - wuffs bzip2.c
   - mandel.ssa -jit x3
   - abi5.ssa -frc_inlinable
-  - gif.c
+  - wuffs gif.c x3
+  - switch.ssa -jit
+  - wuffs targa.c
 - linux amd
   - hang after hello_triangle
 ```
+
+with EXPERIMENT_LESS_DIRECT_CALLS(arm+amd1):
+```
+- amd
+  - gif.c
+```
+
 
 ## import_symbol / weak
 

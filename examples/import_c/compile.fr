@@ -178,7 +178,9 @@ Ctx :: @rec @struct {
     builtin_alloca: *Obj;
     
     arena: Alloc;
+    arena_storage: ArenaAlloc;
     next_var_id: i64;
+    scope_depth: i64;
     
     tentative: HashMap(Str, *Obj);
     
@@ -191,6 +193,7 @@ Ctx :: @rec @struct {
     preserve_franca_env: bool;
     franca_env: Qbe.Ref;
     emitter: ?*CodegenShared;
+    function_entry: ?*CodegenEntry;
     enqueue_task: @FnPtr(*CodegenShared, *CodegenEntry) void;
     
     // should `void f()` be treated the same as `void f(...)` instead of `void f(void)`
@@ -230,13 +233,15 @@ fn align_down(n: i64, align: i64) i64 =
 fn enter_scope(c: *Ctx) void = {
     sc := temp().box_zeroed(Scope);
     sc.next = c.scope;
-    sc.vars = init(c.arena);
-    sc.tags = init(c.arena);
+    sc.vars = init(temp());
+    sc.tags = init(temp());
     c.scope = sc;
+    c.scope_depth += 1;
 }
 
 fn leave_scope(c: *Ctx) void = {
     c.scope = c.scope.next;
+    c.scope_depth -= 1;
 }
 
 // Find a variable by name.
@@ -261,7 +266,7 @@ fn find_tag(c: *Ctx, tok: *Token) ?*CType = {
 fn push_scope(c: *Ctx, name: Str) *VarScope = {
     ::ptr_utils(Scope);
     @debug_assert(!c.scope.is_null(), "uninit Ctx.scope");
-    sc := c.arena.box_zeroed(VarScope);
+    sc := temp().box_zeroed(VarScope);
     insert(c.scope.vars&, name, sc);
     sc
 }
@@ -474,9 +479,10 @@ fn new_gvar(c: *Ctx, name: Str, ty: *CType, tok: *Token, is_static: bool) *Obj =
 }
 
 fn new_unique_name(c: *Ctx) Str = {
-    s := @tfmt(".L..%", c.next_var_id);  // TODO: c.arena?
+    s := u8.list(c.arena);
+    @fmt(s&, ".L..%", c.next_var_id);
     c.next_var_id += 1;
-    s
+    s.items()
 }
 
 fn new_anon_gvar(c: *Ctx, ty: *CType, tok: *Token) *Obj = 
@@ -1659,8 +1665,8 @@ fn gvar_initializer(c: *Ctx, rest: **Token, tok: *Token, var: *Obj) void = {
         return();
     };
     
-    buf := c.arena.alloc_zeroed(u8, init.size());
-    rel := Dat2.Reloc.list(c.arena);
+    buf := temp().alloc_zeroed(u8, init.size());
+    rel := Dat2.Reloc.list(temp());
     c.write_gvar_data(rel&, init, var.ty, buf, 0);
     var.init_data = buf;
     var.rel = rel.items();
@@ -2009,10 +2015,17 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *T
         ty := c.declarator(tok&, tok, basety);
         return c.global_variable(tok, basety, attr, ty, true);
     };
+    depth := c.scope_depth;
+    // TODO: hoist this from emit_one()
+//    ctx := c.emitter.unwrap();
+//    entry := bouba_acquire(ctx);
+//    c.function_entry = (Some = entry);
+//push_dynamic_context {
+//        context(DefaultContext)[].temporary_allocator = entry.arena&;
     f.is_definition = true;
     c.current_fn = (Some = f);
     
-    c.f = c.arena.box(Qbe.Fn);
+    c.f = temp().box(Qbe.Fn);
     c.f.default_init(c.m);
     c.f.lnk.id = f.global_symbol.expect("mangle");
     c.f.lnk.export = !f.is_static;
@@ -2064,10 +2077,12 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *T
     f.f = c.f;
     
     c.leave_scope();
-    c.labels&.clear();
     c.current_fn = .None;
     c.franca_env = QbeNull;
+    c.f = Qbe.Fn.ptr_from_int(0);
     c.yield(f);
+//};
+    @debug_assert_eq(depth, c.scope_depth);
     tok
 }
 

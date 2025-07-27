@@ -1,51 +1,58 @@
 // Items may not be continuous in self.buf! don't try to iterate it directly. 
 fn RawDeque($T: Type) Type = {
-    Self :: @struct(head := 0, tail := 0, buf: []T = empty());
+    Self :: @struct(head := 0, tail := 0, buf: []T = empty(), len: i64 = 0);
+    
+    fn init(a: Alloc, cap: i64) Self = {
+        @debug_assert_eq(cap.count_ones(), 1, "capacity must be power of 2");
+        (head = 0, tail = 0, buf = a.alloc(T, cap))
+    }
     
     fn fix(self: *Self, i: i64) i64 = 
         bit_and(i + self.buf.len, self.buf.len - 1);  // capacity is a power of two
     
     fn push_front(self: *Self, t: T, a: Alloc) void = {
-        if(self.tail == self.head, => self.resize(a));
+        if(self.len == self.buf.len, => self.resize(a));
         self.head = self.fix(self.head - 1);
         self.buf[self.head] = t;
+        self.len += 1;
     }
     
     fn pop_front(self: *Self) ?T = {
-        if(self.tail == self.head, => return(.None));
+        if(self.len == 0, => return(.None));
         i := self.head;
         self.head = self.fix(self.head + 1);
+        self.len -= 1;
         (Some = self.buf[i])
     }
     
     fn push_back(self: *Self, t: T, a: Alloc) void = {
-        if(self.buf.len == 0 || self.fix(self.tail + 1) == self.head, => self.resize(a));
+        if(self.len == self.buf.len, => self.resize(a));
         self.buf[self.tail] = t;
         self.tail = self.fix(self.tail + 1);
+        self.len += 1;
     }
     
     fn pop_back(self: *Self) ?T = {
-        if(self.tail == self.head, => return(.None));
+        if(self.len == 0, => return(.None));
         self.tail = self.fix(self.tail - 1);
+        self.len -= 1;
         (Some = self.buf[self.tail])
     }
     
     fn len(self: *Self) i64 = {
-        if(self.tail == self.head, => return(0));
-        if self.tail > self.head {  //  _ b c _ 
-            self.tail - self.head
-        } else {  // c _ _ b
-            self.buf.len - self.head + self.tail
-        }
+        @debug_assert(self.tail <= self.head || self.len == self.tail - self.head);
+        self.len
     }
     
     // I'd manually polymophize this if i used this data structure more. 
     fn resize(self: *Self, a: Alloc) void = {
         mem := a.alloc(T, max(self.buf.len * 2, 4));
         if self.tail > self.head {
+            @debug_assert_eq(self.tail - self.head, self.len);
             mem.slice(0, self.tail - self.head).copy_from(self.buf.slice(self.head, self.tail));
         } else {
             mid := self.buf.len - self.head;
+            @debug_assert_eq(mid + self.tail, self.len);
             mem.slice(0, mid).copy_from(self.buf.rest(self.head));
             mem.slice(mid, mid + self.tail).copy_from(self.buf.slice(0, self.tail));
         };
@@ -55,23 +62,10 @@ fn RawDeque($T: Type) Type = {
         self.buf = mem;
     }
     
-    //fn ordered_remove(self: *Self, i: i64) ?i64 = {
-    //    if(i >= self.len(), => return(.None));
-    //    todo()
-    //}
-    
-    //fn insert(self: *Self, i: i64, t: T, a: Alloc) void = {
-    //    @safety(.Bounds) i <= self.len();
-    //    if i == self.len { 
-    //        self.push_back(t, a);
-    //        return()
-    //    };
-    //    if i == 0 { 
-    //        self.push_front(t, a);
-    //        return()
-    //    };
-    //    todo()
-    //}
+    fn drop(self: *Self, a: Alloc) void = {
+        a.dealloc(T, self.buf);
+        self[] = zeroed Self;
+    }
     
     Self
 }
