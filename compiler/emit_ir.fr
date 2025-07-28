@@ -27,6 +27,7 @@ EmitIr :: @struct(
     last_loc: Span,
     var_lookup: HashMap(VarId, IrVar),
     inlined_return_addr: HashMap(LabelId, ReturnTarget),
+    label_depth: u32,
     blk: *Qbe.Blk, 
     debug: bool,
     context := QbeNull,
@@ -51,6 +52,7 @@ IrVar :: @tagged(Alloca: Qbe.Ref, Local: Qbe.Ref);
 ReturnTarget :: @struct(
     blk: *Qbe.Blk,
     p: Placement,
+    depth: u32,
     used: bool,
 );
 
@@ -98,6 +100,7 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, pe
             last_loc = func.loc,
             var_lookup = init(temp()),
             inlined_return_addr = init(temp()),
+            label_depth = 0,
             blk = zeroed(*Qbe.Blk),
             blocks = list(temp()),
             debug = opts.debug_info || func.get_flag(.LogIr),
@@ -1007,6 +1010,8 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
             ret := @unwrap(ret, "missing return label. forgot '=>' on function?") return;
             ret.used = true;  // note: updating the one in the map! not a copy
             
+            // TODO: show the location of the @must_return call as well. 
+            @err_assert(ret.depth == self.label_depth, "tried to local_return past a call marked @must_return") return;
             result := @try(self.compile_expr(arg, ret.p)) return;
             seal self { b |
                 b.jmp.type = .jmp;
@@ -1067,6 +1072,8 @@ fn emit_block_expr(self: *EmitIr, expr: *FatExpr, p: Placement) CRes(Qbe.Ref) #o
         };
         return(self.compile_expr(block.result, p))
     };
+    must_return: u32 = int(block.flags.bit_and(1.shift_left(@as(i64) BlockFlags.MustReturn)) != 0).trunc();
+    self.label_depth += must_return;
     
     // :block_never_unify_early_return_type
     // Note: block_ty can be different from value.ty if the fall through is a Never but there's an early return to the block. 
@@ -1081,6 +1088,7 @@ fn emit_block_expr(self: *EmitIr, expr: *FatExpr, p: Placement) CRes(Qbe.Ref) #o
         blk = self.new_block("local"),
         p = p,
         used = false,
+        depth = self.label_depth,
     );
     prev := self.inlined_return_addr&.insert(ret_var, ret);
     @debug_assert(prev.is_none(), "stomped ret var");
@@ -1106,6 +1114,7 @@ fn emit_block_expr(self: *EmitIr, expr: *FatExpr, p: Placement) CRes(Qbe.Ref) #o
         ret.blk.visit = 0;
         // We did generate slightly more noisy code by `unify_placement` earlier than necessary. 
     };
+    self.label_depth -= must_return;
     (Ok = dest)
 }
 

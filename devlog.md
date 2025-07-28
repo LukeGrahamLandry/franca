@@ -34,6 +34,7 @@ yes threads, no slow debug: 7 minuntes: 7th run failed.
   make an allocator that wraps on in a mutex without needing to be super verbose about remembering 
   to lock it every time you call a function that uses the allocator directly.  
   (still broken). 
+- did @must_return just to make sure im not making a silly mistake somehow 
 
 ## (Jul 26)
 

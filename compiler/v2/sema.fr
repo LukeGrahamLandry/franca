@@ -736,9 +736,9 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
         }
         fn Block(f) => {
             @check(self.ensure_resolved(f)) return;  // i think this obviously has to go before hoist_constants
-            if !f.hoisted_constants {
+            if f.flags.bit_and(1.shift_left(@as(i64) BlockFlags.HoistedConstants)) == 0 {
                 @check(self.hoist_constants(f.body.items())) return;
-                f.hoisted_constants = true;
+                f.flags = f.flags.bit_or(1.shift_left(@as(i64) BlockFlags.HoistedConstants));
             };
             done := true;
             dead := false;
@@ -1779,7 +1779,8 @@ fn quick_guess_type(self: *SelfHosted, expr: *FatExpr) ?Type = {
 fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, requested: ResultType) Maybe(bool) #once = {
     @try(self.ensure_resolved_body(f)) return; // it might not be a closure. it might be an inlined thing.
     @debug_assert(expr_out.expr&.is(.Call));
-    arg_expr := expr_out.expr.Call.arg;
+    // TODO: have a macro for this sort of destructuring
+    arg_expr, flags := { it := expr_out.expr.Call&; (it.arg, it.flags) };
     
     // TODO
     //assert!(!self.currently_inlining.contains(&f), "Tried to inline recursive function.");
@@ -1877,9 +1878,12 @@ fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, request
         stmts&.push(stmt = arg_stmt, loc = loc);
         expr_out.expr = new_block(stmts.as_raw(), self.box(owned_body));
     };
+    if flags.bit_and(1.shift_left(@as(i64) CallFlags.MustReturn)) != 0 {
+        expr_out.expr.Block.flags = expr_out.expr.Block.flags.bit_or(1.shift_left(@as(i64) BlockFlags.MustReturn));
+    };
     b := expr_out.expr.Block&;
     b.ret_label = (Some = ret_label);
-    b.block_resolved = true;
+    b.flags = b.flags.bit_or(1.shift_left(@as(i64) BlockFlags.Resolved));
     // TODO: self.currently_inlining.retain(|check| *check != f);
     if ret_ty { ret_ty | 
         expr_out.ty = ret_ty;
@@ -4057,7 +4061,7 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
             .None
         }
         fn Block(it) => {
-            if it.block_resolved && it.body.is_empty() {
+            if it.flags.bit_and(1.shift_left(@as(i64) BlockFlags.Resolved)) != 0 && it.body.is_empty() {
                 return(self.check_quick_eval(it.result, ret_ty));
             };
             .None
@@ -4391,7 +4395,7 @@ fn struct_macro(self: *SelfHosted, expr: *FatExpr) Maybe(FatExpr) = {
             fields := Field.list(self.get_alloc());
             
             // TODO: don't iterate twice 
-            if !it.hoisted_constants {
+            if it.flags.bit_and(1.shift_left(@as(i64) BlockFlags.HoistedConstants)) == 0 {
                 @check(self.hoist_constants(it.body.items())) return;
             };
             
@@ -4548,7 +4552,7 @@ fn handle_type(self: *Unquote, ty: *LazyType)  Result(DoMore, *CompileError) #on
 fn handle_pattern(self: *Unquote, p: *Pattern) Result(DoMore, *CompileError) #once = (Ok = .Continue);
 
 fn ensure_resolved(self: *SelfHosted, block: *get_variant_type(Expr, .Block)) Maybe(void) = {
-    if(block.block_resolved, => return(.Ok));
+    if(block.flags.bit_and(1.shift_left(@as(i64) BlockFlags.Resolved)) != 0, => return(.Ok));
     
     r: ResolveScope = new(self, block.scope, self.last_loc);
     zone := zone_begin(.Scope); // TODO: defer

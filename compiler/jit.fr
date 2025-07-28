@@ -281,7 +281,7 @@ fn create_jit_shim(self: CompCtx, shared: *CodegenShared, fid: FuncId, handler_c
     };
 }
 
-fn shallow_jit_func(self: *SelfHosted, fid: FuncId) void = {
+fn shallow_jit_func(self: *SelfHosted, fid: FuncId) Res(void) = {
     func := self.get_function(fid);  
     
     if func.body&.is(.DynamicImport) && func.body.DynamicImport.comptime == 0 {
@@ -289,20 +289,19 @@ fn shallow_jit_func(self: *SelfHosted, fid: FuncId) void = {
         // So there's nothing we can do. Just make a jit shim so trying to call it 
         // will safely error with "tried to call uncompiled". 
         // Also, it needs a unique address so it can be baked. 
-        self.create_jit_shim(fid); 
-        return();
+        return(self.create_jit_shim(fid)); 
     };
     
     for func.mutual_callees& { fid |
         if !self.get_function(fid).get_flag(.AsmDone) {
-            self.create_jit_shim(fid); 
+            @try(self.create_jit_shim(fid)) return; 
         };
     };
     
     // ugh. can't be temp() because threaded=false wants to reset it. 
     pending := FuncId.list(general_allocator()); 
     
-    _ := self.unwrap_report_error(void, emit_ir(self.comp(), self.comptime_codegen, fid, .Jit, pending&, true));
+    @try(emit_ir(self.comp(), self.comptime_codegen, fid, .Jit, pending&, true)) return;
     
     shared := self.comptime_codegen;
     if !shared.threaded && func.get_flag(.TookPointerValue) {
@@ -314,11 +313,12 @@ fn shallow_jit_func(self: *SelfHosted, fid: FuncId) void = {
     func.set_flag(.AsmDone);
     for pending& { callee |
         if !self.get_function(callee).get_flag(.AsmDone) {
-            self.create_jit_shim(callee); 
+            @try(self.create_jit_shim(callee)) return; 
             func.mutual_callees&.push(callee, self.get_alloc());  // TODO: shouldn't need this its just for import_c
         };
     };
     pending&.drop();
+    .Ok
 }
 
 fn bump_dirty_new(self: *SelfHosted) void = 

@@ -5,12 +5,11 @@
 - real error handling for lib/sys/posix.fr. need to be able to remap the errno values to something consistant. 
 - i've lost 20ms of speed. i should really make something that automatically times it every commit. 
 - i hate the vscode/zed extension build junk being in here. each are 300 lines of dependencies. 
-- language: add `@no_nonlocal_return f(a)` before im willing to commit to adding `defer`
-  for inline lambdas where it's not ok if you bail out before running the stuff after the body. 
-  i also want to have `@inline` at the callsite so maybe should just put some flags on Expr.Call
+- `@inline` at the callsite 
 - need an option to make `@safety` assertions give you more information. it's hard without a runtime bootstrapping 
   step because ie. `fn index([]T)` needs to get compiled really early before you can do anything. 
 - split compiler/worker.fr into the franca part and the backend part
+- do something for detecting if you discard a Result without unwrapping it
 
 ## deduplication
 
