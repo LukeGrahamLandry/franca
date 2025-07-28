@@ -1,3 +1,40 @@
+## (Jul 27)
+
+- taking a break from my problems. want to port my old chess program to my language 
+  and compare speed against zig's self hosted backend. so i want to update the chess to new zig 
+  version that has the aarch64 backend. their error messages make me feel a lot better about mine... 
+  whenever it says "root source file struct 'std' has no member named 'foo'", it says 
+  "note: struct declared here" pointing at std.ArrayHashMap. 
+  updated everything to 0.14.1, fixed perft.zig enough to make it work with 0.15.0-dev.1222+5fb36d260. 
+  meh, the aarch64 still crashes on my program, kinda reduces my enthusiasm. don't really care enough 
+  to fix the rest to work with the new writers. could still compare x86_64 tho, not not inspired anymore.
+- semi-unrelated; this is fascinating to me. https://github.com/ziglang/zig/blob/771523c67534fc47800608eb720886e9f53da7b4/src/codegen/aarch64/Select.zig#L7172-L7369 
+  like that can't be a better way to express that information than mine https://github.com/LukeGrahamLandry/franca/blob/main/backend/arm64/abi.fr#L555-L593 
+  i'm very curious to see how much faster theirs is than mine once it works. 
+  because i recall llvm release was only 2x-3x of qbe so like... there's not a lot of room. 
+  my backend/arm64 is 2274 lines and their src/codegen/aarch64 is 24340 lines (not counting the assembler/disassembler) .
+  i feel like i must be missing something. maybe the `@Vector` stuff is really hard? 
+
+--- 
+
+new plan, my problem isn't that i have a bug. bugs happen and then you fix them, thats normal. 
+my problem is that it's nondeterministic so i can't rapidly narrow down the mistake. 
+the only sources of nondeterminism should be aslr and thread scheduling. 
+- something with forcefully killing aslr even on macos my MAP_FIXED-ing a giant thing 
+  and using only that is interesting to think about at some point but i doubt that's the problem here. 
+- CodegenWorker can run single threaded and it seems that makes the problem go away (but it's hard to be sure which is why this sucks)
+```
+no threads, no slow debug: 15 minutes: 13 runs passed.
+yes threads, no slow debug: 7 minuntes: 7th run failed.
+```
+- so then is it a concurrency flavoured mistake or a parallelism flavoured mistake? 
+  if it's just a concurrency problem, i can do a userspace green threads thing where i fully control
+  who gets to run and randomize the order until i find a seed that reproduces it every time. 
+- first an easier thing to check, Qbe.Module.intern_mutex has been sketchy for a long time. 
+  make an allocator that wraps on in a mutex without needing to be super verbose about remembering 
+  to lock it every time you call a function that uses the allocator directly.  
+  (still broken). 
+
 ## (Jul 26)
 
 - trying to get CodegenWorker to let you build multiple tasks at once

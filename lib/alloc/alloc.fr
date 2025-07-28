@@ -242,3 +242,21 @@ fn alloc_init(a: Alloc, $T: Type, n: i64, $body: @Fn(i: i64) T) []T #generic = {
     };
     mem
 }
+
+// TODO: use this instead of having a mutex in BlockAlloc
+LockedAlloc :: @struct {
+    mutex := zeroed import("@/lib/sys/sync/mutex.fr").Mutex;
+    parent: Alloc;
+    
+    impl :: fn(self: rawptr, action: Alloc.Action, ptr: rawptr, count: i64, align: i64) []u8 = {
+        self := LockedAlloc.ptr_from_raw(self);
+        self.mutex&.lock();
+        result := self'parent'vptr(self.parent.data, action, ptr, count, align);
+        self.mutex&.unlock();
+        result
+    };
+    
+    fn borrow(self: *LockedAlloc) Alloc = {
+        (data = LockedAlloc.raw_from_ptr(self), vptr = impl)
+    }
+};

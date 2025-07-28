@@ -42,7 +42,6 @@ EmitIr :: @struct(
     // you wouldn't need this if sema tracked callees correctly,
     // but it's much easier to just fudge it with shims. 
     pending: *List(FuncId), 
-    pending_set_lib: *List(Ty(Qbe.Sym, Str, bool)),  // TODO: don't be cringe
     unreachable_block: *Qbe.Blk,
 );
 
@@ -86,7 +85,6 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, pe
 
     // ugh. can't be temp() because threaded=false wants to reset it.     
     new_constants := BakedVarId.list(general_allocator());
-    pending_set_lib := Ty(Qbe.Sym, Str, bool).list(general_allocator());
     
     enter_task shared { entry |
         ::tagged(Placement);
@@ -109,7 +107,6 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, pe
             new_constants = new_constants&,
             shared = shared,
             pending = pending,
-            pending_set_lib = pending_set_lib&,
             unreachable_block = zeroed(*Qbe.Blk),
         );
         @debug_assert(func.get_flag(.EnsuredCompiled), "fn not compiled?");
@@ -137,6 +134,10 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, pe
             if !has_context {
                 func.set_flag(.NoContext);
             };
+            
+            // you could do this with nested enter_task instead of collecting them in reference_constant(). 
+            // but thats a tiny tiny bit slower. i guess most are trivial so it's better to send them in a batch 
+            // and let the worker just crank on it instead of dealing with the queues more often.   -- Jul 26, 2025
             if new_constants.len != 0 {
                 enter_task shared { entry |
                     out := Dat2.list(new_constants.len, temp());
@@ -165,14 +166,18 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, pe
             };
             
             new_constants&.drop();
-            @if(pending_set_lib.len > 0) enter_task shared { entry |
-                entry.task = (SetLibrary = pending_set_lib.items().shallow_copy(temp()));
-                pending_set_lib&.drop();
-            };
     };
     
     zone_end(z);
     result
+}
+
+fn set_lib(self: *EmitIr, it: Ty(Qbe.Sym, Str, bool)) void = {
+    enter_task self.shared { entry |
+        p := temp().alloc(@type it, 1);
+        p[0] = it;
+        entry.task = (SetLibrary = p);
+    };
 }
 
 // this puts a bunch of stuff in temp(), it's expected to be used in the context of a CodegenEntry. 
@@ -383,7 +388,7 @@ fn aot_import_body(self: *EmitIr, info: *DynamicImport) void = {
         // TODO: probably want to give the backend the path to put in the exe, not our symbolic name, 
         //       and also maybe preintern with the backend to get an ordinal that's just in lib space 
         //       instead of needing to check every time
-        push(self.pending_set_lib, (target, self.program.get_string(info.lib), info.weak));
+        set_lib(self, (target, self.program.get_string(info.lib), info.weak));
     };
     
     self.bounce_body_call(target);
@@ -805,7 +810,7 @@ fn compile_expr(self: *EmitIr, expr: *FatExpr, p: Placement) CRes(Qbe.Ref) = {
                     return(Ok = self.scalar_result(p, self.f.getcon(info.comptime), i64));   // :get_or_create_type
                 };
                 // TODO: if jitting and not ready yet, we could make this be a call to a shim that returns the symbol?
-                push(self.pending_set_lib, (self.m.intern(name), self.program.get_string(info.lib), info.weak));
+                set_lib(self, (self.m.intern(name), self.program.get_string(info.lib), info.weak));
             };
             self.scalar_result(p, self.f.symcon(name), i64)  // :get_or_create_type
         }

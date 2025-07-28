@@ -127,17 +127,22 @@ fn get_enum_names_symbols(E: Type) Slice(Symbol) = {
 }
 
 #use("@/lib/collections/map.fr") 
-fn create_enum_name_table_outlined(E: Type) HashMap(Str, *u8).Raw = {
+fn create_enum_name_table_outlined(E: Type, names: *PackedStrings) HashMap(Str, *u8).Raw = {
+    // These are passed in so the binary doesn't include two copies of the name bytes if you also call E.name_str(). 
+    packed, offs := names[];
+
     t: HashMap(Str, *u8) = init(ast_alloc());
     info := get_type_info_ref(E); 
     assert(info.is(.Enum), "Expected @enum type for from_name");
-    for info.Enum.fields.items() { f |
-        ptr := f._1&.rawptr_from_value();
+    enumerate info.Enum.fields.items() { i, f |
+        ptr := f[]._1&.rawptr_from_value();
         // TODO: reboxing the copy is a dumb hack :SLOW -- Nov 14
         bytes2 := ast_alloc().alloc(u8, size_of(E)); // TODO: is alignment real
         bytes1: []u8 = (ptr = u8.ptr_from_raw(ptr), len = size_of(E));
         bytes2.copy_from(bytes1);
-        t&.insert(f._0.str(), bytes2.ptr);
+        
+        name := packed.subslice(offs[i*2].zext(), offs[i*2+1].zext());
+        t&.insert(name, bytes2.ptr);
     };
     t.raw&.zero_unused_slots();
     t.raw
@@ -159,7 +164,7 @@ fn from_name($E: Type, name: Str) ?E #generic = {
     // TODO: we can't always store a hash table with E by value in a constant because we don't support field sizes that are not a multiple of 8 bytes -- Nov 14
     M :: HashMap(Str, *E);
     table :: @static(M.Raw) {
-        t := create_enum_name_table_outlined(E);
+        t := create_enum_name_table_outlined(E, packed_enum_names(E));
         t2 := ptr_cast_unchecked(@type t, M.Raw, t&)[];  // IMPORTANT TO CAST BACK so the compiler knows to include the constants as the right type
         t2
     };

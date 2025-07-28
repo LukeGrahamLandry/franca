@@ -122,12 +122,12 @@ QbeModule :: @rec @struct(
     initialized: bool,
     currently_emitting_function: bool,
     
-    forever: ArenaAlloc,
+    forever_storage: ArenaAlloc,
+    forever: LockedAlloc,
     symbol_memmove: Qbe.Sym,
     types_mutex: Mutex,
     last_function_end: *u8,
     icache_mutex: Mutex,
-    intern_mutex: Mutex,
     
     wasm_function_type_count: i32,
     wasm_symbol_stackbase: Qbe.Sym,
@@ -251,11 +251,11 @@ fn init(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
 fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
     // gpa needs to not be temp() because we reset temp()
     m[] = QbeModule.zeroed();
-    lock(m.intern_mutex&);  // surely this does nothing at this point but just for fun
     m.goal = goal; goal := m.goal&;
     segment_size := goal.segment_size;
     m.save = .None;
-    m.forever = init(gpa, size_of(Qbe.Ins) * 1.shift_left(20) + size_of(SymbolBucket) * IMask + 1.shift_left(10));
+    m.forever_storage = init(gpa, size_of(Qbe.Ins) * 1.shift_left(20) + size_of(SymbolBucket) * IMask + 1.shift_left(10));
+    m.forever = (parent = m.forever_storage&.borrow());
     forever := m.forever&.borrow();
     @if(enable_incremental())
     if @is(goal.type, .Cached, .CachedEarly) {
@@ -396,7 +396,6 @@ fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
     if m.goal.exe_debug_symbol_table && m.goal.os == .macos {
         leb128_unsigned(m.debug_info.macho_function_starts&, m.text_padding());
     };
-    unlock(m.intern_mutex&);
 }
 
 fn set_target_vtable(m: *QbeModule) void = {
@@ -448,7 +447,8 @@ fn set_target_vtable(m: *QbeModule) void = {
 fn init_empty_for_template_only(m: *QbeModule, gpa: Alloc) void = {
     m[] = QbeModule.zeroed();
     m.initialized = true;
-    m.forever = init(gpa, size_of(Qbe.Ins) * 1.shift_left(20) + size_of(SymbolBucket) * IMask + 1.shift_left(10));
+    m.forever_storage = init(gpa, size_of(Qbe.Ins) * 1.shift_left(20) + size_of(SymbolBucket) * IMask + 1.shift_left(10));
+    m.forever = (parent = m.forever_storage&.borrow());
     forever := m.forever&.borrow();
     m.symbols = forever.alloc_zeroed(SymbolBucket, IMask + 1);
     mem := forever.alloc(Qbe.Ins, Qbe.MaxInstructions);
@@ -488,7 +488,7 @@ fn drop(m: *QbeModule) void = {
     drop(m.debug_info.data&);
     drop(m.debug_info.macho_function_starts&);
     drop(m.debug_out_storage&);
-    m.forever&.deinit();
+    m.forever_storage&.deinit();
     m[] = zeroed(@type m[]);  // just to make sure you crash if you try to use it again. 
 }
 
