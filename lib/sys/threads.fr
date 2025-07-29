@@ -25,7 +25,7 @@ ThreadAttr :: @struct(sig: i64, opaque: Array(u8, 56));
 // TODO: should provide something for setting up guard pages to catch stack overflows. 
 
 fn start_thread($T: Type, callee: @FnPtr(userdata: *T) void, userdata: *T) *Thread #generic = {
-    stack := page_allocator.alloc(u8, 1.shift_left(25));  // :leak
+    stack := page_allocator.alloc(u8, 1.shift_left(25));
     start_thread(stack, T, callee, userdata)
 }
 
@@ -35,8 +35,14 @@ fn start_thread(stack: []u8, $T: Type, callee: @FnPtr(userdata: *T) void, userda
     start_thread(stack, callee, T.raw_from_ptr(userdata))
 }
 
-// this uses the first page of `stack` for the dynamic context. 
 fn start_thread(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) *Thread = {
+    thread := init_thread_data(stack, callee, userdata);
+    raw_create_thread(thread);
+    thread
+}
+
+// this uses the first page of `stack` for the dynamic context. 
+fn init_thread_data(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) *Thread = {
     @assert(query_context_is_implicit(), "tried to start thread but compiled using static context which is not thread safe.");
     macos_page_size :: 16384;  // TODO: don't assume this is the highest possible page size
     thread := bit_cast_unchecked(*u8, *Thread, stack.ptr);
@@ -54,8 +60,6 @@ fn start_thread(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdata: ra
     thread.first_temporary_allocator = init(page_allocator, 1.shift_left(20));
     thread.first_environment.temporary_allocator = thread.first_temporary_allocator&;
     thread.stack_reserved_size = macos_page_size;
-    
-    raw_create_thread(thread);
     thread
 }
 
@@ -94,7 +98,6 @@ fn prefer_pthread() bool =
     !prefer_syscalls() || query_current_os() != .linux;
 
 franca_runtime_init_thread :: fn(franca_userdata: rawptr) void = {
-    if(!query_context_is_implicit(), => Syscall'exit(1));
     thread := Thread.ptr_from_raw(franca_userdata);
     set_dynamic_context(DefaultContext.raw_from_ptr(thread.first_environment&));
     thread'callee(thread.userdata);

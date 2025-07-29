@@ -1,79 +1,123 @@
-// x19-x28, fp, lr, sp, 
-// TODO: float registers!
-JumpBuf :: @struct(registers: Array(i64, 13));
+// 
+// See tests/exceptional.fr for a basic usage example 
+// and lib/sys/sync/green.fr for something more complex.
+// 
+
+JumpBuf :: @struct {
+    fp: rawptr;
+    // lr is the address that will be returned to when you throw(). 
+    // On amd64 it's the value from the top of the stack, not a register. 
+    lr: rawptr;
+    sp: rawptr;
+    // userdata is passed as the first **argument** 
+    // if you manually poke a function pointer in as lr
+    userdata: rawptr;
+    // [x19..=x28] or [rbx, r12..=r15]
+    registers: Array(i64, 10);
+    // arm64: low 64 bits of [v8..=v15] (amd64 has no callee saved floats)
+    floats: Array(f64, 8);
+};
+
+// The asm hardcodes these values 
 WhichJump :: @enum(i64) (Try = 0, Catch = 1);
 
-try_impl :: AsmFunction(fn(_: *JumpBuf) WhichJump = (), @const_slice(
-    stp_so(.X64, x19, x20, x0, @as(i7) 0),
-    stp_so(.X64, x21, x22, x0, @as(i7) 2),
-    stp_so(.X64, x23, x24, x0, @as(i7) 4),
-    stp_so(.X64, x25, x26, x0, @as(i7) 6),
-    stp_so(.X64, x27, x28, x0, @as(i7) 8),
-    stp_so(.X64, fp, lr, x0, @as(i7) 10),
+// TODO: version of these that let you pass userdata to throw and retrive it from try(which=Catch)
+fn try(buf: *JumpBuf) WhichJump = {  // aka setjmp
+    @run assert_eq(@as(i64) WhichJump.Try, 0);
+    _userdata, which := try_impl(buf);
+    which
+}
+
+// TODO: this won't get inlined by the backend because it ends in hlt. doesn't matter but makes be sad.
+fn throw(buf: *JumpBuf) Never = {  // aka longjmp
+    throw_impl(buf)
+}
+
+try_impl :: AsmFunction(fn(_: *JumpBuf) Ty(rawptr, WhichJump) = (), @const_slice(
+    stp_so(.X64, fp, lr, x0, @as(i7) 0),
+    // <skip>
+    stp_so(.X64, x19, x20, x0, @as(i7) 4),
+    stp_so(.X64, x21, x22, x0, @as(i7) 6),
+    stp_so(.X64, x23, x24, x0, @as(i7) 8),
+    stp_so(.X64, x25, x26, x0, @as(i7) 10),
+    stp_so(.X64, x27, x28, x0, @as(i7) 12),
+    
     add_im(.X64, x1, sp, @as(u12) 0, 0b0), 
-    str_uo(.X64, x1, x0, @as(u12) 12), // idk if st___ can encode sp
-    movz(.X64, x0, 0x0000, .Left0), // set return value to WhichJump.Try
+    str_uo(.X64, x1, x0, @as(u12) 2), // idk if st___ can encode sp
+    
+    f_stp_so(.D64, x8,  x9,  x0, @as(i7) 14),
+    f_stp_so(.D64, x10, x11, x0, @as(i7) 16),
+    f_stp_so(.D64, x12, x13, x0, @as(i7) 18),
+    f_stp_so(.D64, x14, x15, x0, @as(i7) 14),
+
+    // return (_, WhichJump.Try)
+    movz(.X64, x1, 0x0000, .Left0), 
     ret(), 
 )) { (out: *List(u8)) | @asm_x64(
     // Save integer registers
-    encode_base_plus_offset(PrimaryOp.MovReg, X86Reg.rbp, X86Reg.rdi, 0),
-    encode_base_plus_offset(PrimaryOp.MovReg, X86Reg.rsp, X86Reg.rdi, 8),
-    encode_base_plus_offset(PrimaryOp.MovReg, X86Reg.rbp, X86Reg.rdi, 16),
-    encode_base_plus_offset(PrimaryOp.MovReg, X86Reg.r12, X86Reg.rdi, 24),
-    encode_base_plus_offset(PrimaryOp.MovReg, X86Reg.r13, X86Reg.rdi, 32),
-    encode_base_plus_offset(PrimaryOp.MovReg, X86Reg.r14, X86Reg.rdi, 40),
-    encode_base_plus_offset(PrimaryOp.MovReg, X86Reg.r15, X86Reg.rdi, 48),
+    encode_base_plus_offset(PrimaryOp.MovReg, X86Reg.rbp, X86Reg.rdi, 0*8),
+    // <skip>
+    encode_base_plus_offset(PrimaryOp.MovReg, X86Reg.rsp, X86Reg.rdi, 2*8),
+    // <skip>
+    encode_base_plus_offset(PrimaryOp.MovReg, X86Reg.rbx, X86Reg.rdi, 4*8),
+    encode_base_plus_offset(PrimaryOp.MovReg, X86Reg.r12, X86Reg.rdi, 5*8),
+    encode_base_plus_offset(PrimaryOp.MovReg, X86Reg.r13, X86Reg.rdi, 6*8),
+    encode_base_plus_offset(PrimaryOp.MovReg, X86Reg.r14, X86Reg.rdi, 7*8),
+    encode_base_plus_offset(PrimaryOp.MovReg, X86Reg.r15, X86Reg.rdi, 8*8),
     
     // Save the return address 
     encode_op_reg(PrimaryOp.PopBase, X86Reg.rax),
     encode_op_reg(PrimaryOp.PushBase, X86Reg.rax),
-    encode_base_plus_offset(PrimaryOp.MovReg, X86Reg.rax, X86Reg.rdi, 56),
+    encode_base_plus_offset(PrimaryOp.MovReg, X86Reg.rax, X86Reg.rdi, 1*8),
     
-    // return WhichJump.Try
-    encode_imm(PrimaryOp.MovImm32, X86Reg.rax, 0), 
+    // return (_, WhichJump.Try)
+    encode_imm(PrimaryOp.MovImm32, X86Reg.rdx, 0), 
     PrimaryOp.Ret
 ) out;};
 
 throw_impl :: AsmFunction(fn(_: *JumpBuf) Never = (), @const_slice(
-    ldp_so(.X64, x19, x20, x0, @as(i7) 0),
-    ldp_so(.X64, x21, x22, x0, @as(i7) 2),
-    ldp_so(.X64, x23, x24, x0, @as(i7) 4),
-    ldp_so(.X64, x25, x26, x0, @as(i7) 6),
-    ldp_so(.X64, x27, x28, x0, @as(i7) 8),
-    ldp_so(.X64, fp, lr, x0, @as(i7) 10),
-    ldr_uo(.X64, x1, x0, @as(u12) 12), // idk if l___ can encode sp
+    ldp_so(.X64, fp, lr, x0, @as(i7) 0),
+    ldr_uo(.X64, x1, x0, @as(u12) 2), // idk if l___ can encode sp
     add_im(.X64, sp, x1, @as(u12) 0, 0b0), 
-    movz(.X64, x0, 0x0001, .Left0), // set return value to WhichJump.Catch
+
+    ldp_so(.X64, x19, x20, x0, @as(i7) 4),
+    ldp_so(.X64, x21, x22, x0, @as(i7) 6),
+    ldp_so(.X64, x23, x24, x0, @as(i7) 8),
+    ldp_so(.X64, x25, x26, x0, @as(i7) 10),
+    ldp_so(.X64, x27, x28, x0, @as(i7) 12),
+    
+    f_ldp_so(.D64, x8,  x9,  x0, @as(i7) 14),
+    f_ldp_so(.D64, x10, x11, x0, @as(i7) 16),
+    f_ldp_so(.D64, x12, x13, x0, @as(i7) 18),
+    f_ldp_so(.D64, x14, x15, x0, @as(i7) 14),
+    
+    // return (userdata, WhichJump.Catch)
+    ldr_uo(.X64, x0, x0, @as(u12) 3),
+    movz(.X64, x1, 0x0001, .Left0),
     ret(), // we set lr from the jumpbuf so we'll go back to the caller of try. 
 )) { (out: *List(u8)) | @asm_x64(
     // Restore integer registers
-    encode_base_plus_offset(PrimaryOp.MovRegLoad, X86Reg.rbp, X86Reg.rdi, 0),
-    encode_base_plus_offset(PrimaryOp.MovRegLoad, X86Reg.rsp, X86Reg.rdi, 8),
-    encode_base_plus_offset(PrimaryOp.MovRegLoad, X86Reg.rbp, X86Reg.rdi, 16),
-    encode_base_plus_offset(PrimaryOp.MovRegLoad, X86Reg.r12, X86Reg.rdi, 24),
-    encode_base_plus_offset(PrimaryOp.MovRegLoad, X86Reg.r13, X86Reg.rdi, 32),
-    encode_base_plus_offset(PrimaryOp.MovRegLoad, X86Reg.r14, X86Reg.rdi, 40),
-    encode_base_plus_offset(PrimaryOp.MovRegLoad, X86Reg.r15, X86Reg.rdi, 48),
+    encode_base_plus_offset(PrimaryOp.MovRegLoad, X86Reg.rbp, X86Reg.rdi, 0*8),
+    // <skip>
+    encode_base_plus_offset(PrimaryOp.MovRegLoad, X86Reg.rsp, X86Reg.rdi, 2*8),
+    // <skip>
+    encode_base_plus_offset(PrimaryOp.MovRegLoad, X86Reg.rbx, X86Reg.rdi, 4*8),
+    encode_base_plus_offset(PrimaryOp.MovRegLoad, X86Reg.r12, X86Reg.rdi, 5*8),
+    encode_base_plus_offset(PrimaryOp.MovRegLoad, X86Reg.r13, X86Reg.rdi, 6*8),
+    encode_base_plus_offset(PrimaryOp.MovRegLoad, X86Reg.r14, X86Reg.rdi, 7*8),
+    encode_base_plus_offset(PrimaryOp.MovRegLoad, X86Reg.r15, X86Reg.rdi, 8*8),
     
     // Restore the return address
-    encode_op_reg(PrimaryOp.PopBase, X86Reg.rax),
-    encode_base_plus_offset(PrimaryOp.MovRegLoad, X86Reg.rax, X86Reg.rdi, 56),
-    encode_op_reg(PrimaryOp.PushBase, X86Reg.rax),
+    encode_op_reg(PrimaryOp.PopBase, X86Reg.rax),  // discard the current return address
+    encode_base_plus_offset(PrimaryOp.MovRegLoad, X86Reg.rax, X86Reg.rdi, 1*8),
+    encode_op_reg(PrimaryOp.PushBase, X86Reg.rax),  // replace with the saved one 
     
-    // return WhichJump.Catch  
-    encode_imm(PrimaryOp.MovImm32, X86Reg.rax, 1), 
+    // return (userdata, WhichJump.Catch) 
+    encode_base_plus_offset(PrimaryOp.MovRegLoad, X86Reg.rax, X86Reg.rdi, 3*8),  // first return value
+    encode_base_plus_offset(PrimaryOp.MovRegLoad, X86Reg.rdi, X86Reg.rdi, 3*8),  // first **argument**
+    encode_imm(PrimaryOp.MovImm32, X86Reg.rdx, 1),  // second return value
     PrimaryOp.Ret,
 ) out;};
-
-fn try(buf: *JumpBuf) WhichJump = {
-    @run assert_eq(@as(i64) WhichJump.Try, 0);
-    try_impl(buf)
-}
-
-fn throw(buf: *JumpBuf) Never = {
-    @run assert_eq(@as(i64) WhichJump.Catch, 1);
-    throw_impl(buf)
-}
 
 ::enum(WhichJump);
 

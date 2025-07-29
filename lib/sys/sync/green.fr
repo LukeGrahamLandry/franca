@@ -4,7 +4,8 @@
 //
 // TODO: randomize scheduling with a seed so you can narrow down concurrency bugs. 
 // TODO: be closer to preemptive. have the compiler poke in lots of yields. 
-// TODO: support all targets.  
+// TODO: make this more composable. allow having some real threads and some green threads. 
+//       so still need to be able to call the real os thread functions. 
 //
 
 Runtime :: @struct {
@@ -19,7 +20,7 @@ Runtime :: @struct {
 Task :: @struct {
     fake_thread: *Thread;
     resume := zeroed JumpBuf;  // valid while this task is waiting. points back into the implementation (returns from yield()). 
-    state := ThreadState.New;
+    state := ThreadState.Runnable;
 };
 
 // TODO: waitpid() should probably yield and become non-blocking in the dispatch loop
@@ -28,7 +29,6 @@ ThreadState :: @tagged(
     Futex: @struct(addr: *u32, expect: u32),
     Sleep: @struct(until: TimeSpec),
     Join: @struct(task_index: i64),
-    New,
     Runnable,
     Done,
 );
@@ -43,27 +43,13 @@ start_main_thread :: fn(user_main: @FnPtr() void) void = {
     context(DefaultContext)[].threads_runtime = Runtime.raw_from_ptr(self);
     self.alloc = general_allocator();
     self.next_thread_id = context(DefaultContext)[].thread_index + 1;
+    self.spawn_first_thread(user_main);
     ::tagged(ThreadState);
-    
-    @switch(try(self.yield&)) {
-        @case(.Try) => {
-            _ := start_thread(i64, bit_cast_unchecked(@type user_main, @FnPtr(userdata: *i64) void, user_main), zeroed(*i64));
-            unreachable();
-        }
-        @case(.Catch) => ();
-    };
     
     // program is done when the main thread terminates. 
     while => !self.tasks[0].state&.is(.Done) {
         task := self.tasks.index(self.current_task);
         @match(task.state&) {
-            fn New() => {
-                @switch(try(self.yield&)) {
-                    @case(.Try) => self.start_thread_outer(task);
-                    @case(.Catch) => ();
-                };
-                task.state = .Runnable;
-            }
             fn Done() => ();
             fn Runnable() => {
                 @switch(try(self.yield&)) {
@@ -90,10 +76,16 @@ start_main_thread :: fn(user_main: @FnPtr() void) void = {
     };
 };
 
+fn spawn_first_thread(self: *Runtime, user_main: @FnPtr() void) void = {
+    stack := page_allocator.alloc(u8, 1.shift_left(25));  // :leak
+    callee := bit_cast_unchecked(@type user_main, @FnPtr(userdata: rawptr) void, user_main);
+    main_thread := init_thread_data(stack, callee, zeroed(rawptr));
+    self.new_task(main_thread);
+}
+
 fn is_runnable(self: *Runtime, state: *ThreadState) bool = {
     ::tagged(ThreadState);
     @match(state) {
-        fn New() => true;
         fn Done() => false;
         fn Runnable() => true;
         fn Sleep(it) => {
@@ -129,28 +121,23 @@ join :: fn(t: *Thread) void = {
 };
 
 raw_create_thread :: fn(t: *Thread) void = {
-    self := runtime();
-    t.first_environment.thread_index = self.next_thread_id;
-    self.next_thread_id += 1;
-    push(self.tasks&, (fake_thread = t), self.alloc);
+    runtime().new_task(t);
     yield();
 };
 
-start_thread_outer :: fn(self: *Runtime, task: *Task) void = {
-    @assert(current_arch() == .aarch64, "TODO: green thread x86_64");
-    r := task.resume.registers&;
-    r[10] = 0;  // fp
-    r[11] = int_from_rawptr(::@as(rawptr) start_thread_inner);  // lr
-    r[12] = u8.int_from_ptr(task.fake_thread.stack.ptr.offset(task.fake_thread.stack.len));  // sp
-    throw(self.yield&);
-};
+new_task :: fn(self: *Runtime, thread: *Thread) void = {
+    thread.first_environment.thread_index = self.next_thread_id;
+    self.next_thread_id += 1;
+    push(self.tasks&, (fake_thread = thread), self.alloc);
+    task := self.tasks.index(self.tasks.len - 1);
 
-start_thread_inner :: fn() void = {
-    // TODO: this is sketchy. relies on the old environment pointer staying in the right register
-    //       should have the jumpbuf let you thread any argument through. 
-    self := runtime();  
-    t := self.tasks[self.current_task].fake_thread;
-    franca_runtime_init_thread(Thread.raw_from_ptr(t));
+    // Bootstrap a jumpbuf that will call the thread's entry point. 
+    r := task.resume&;
+    r.fp = zeroed(rawptr);
+    r.lr = ::@as(rawptr) franca_runtime_init_thread;
+    // amd64 needs the -16 because throw() expects to be able to pop something off. 
+    r.sp = u8.raw_from_ptr(task.fake_thread.stack.ptr.offset(task.fake_thread.stack.len - int(current_arch() == .x86_64)*16));
+    r.userdata = Thread.raw_from_ptr(task.fake_thread);  // becomes the first argument to lr=franca_runtime_init_thread
 };
 
 yield :: fn() void = {
@@ -187,8 +174,8 @@ sleep :: fn(duration: *TimeSpec) voidResult = {
 };
 
 now :: fn() TimeSpec = {
-    @assert(current_arch() == .aarch64 && current_os() == .macos);
-    clock_id := MacosLibc.CLOCK_REALTIME;  // TODO
+    // TODO: this should be CLOCK_MONOTONIC but that has a different number on linux, make a wrapper for clock_gettime
+    clock_id := MacosLibc.CLOCK_REALTIME;  
     t: TimeSpec = (seconds = 0, nanoseconds = 0);
     Syscall'clock_gettime(clock_id, t&);
     t

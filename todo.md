@@ -146,7 +146,15 @@ with EXPERIMENT_LESS_DIRECT_CALLS(arm+amd1):
 - amd
   - gif.c
 ```
+---
 
+./boot/temporary/macos-amd64.sh with SLOW_USERSPACE_THREADS=true
+```
+pragma-once.c                           [ok] 
+
+All is fine! (passed 35 tests)
+1.fr                                    note: run with `FRANCA_BACKTRACE=1` environment variable to display a backtrace%     
+```
 
 ## import_symbol / weak
 

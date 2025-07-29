@@ -1,4 +1,13 @@
 
+## (Jul 29)
+
+- jump.fr
+  - fixed dumb mistake saving rbp twice instead of rbp+rbx. 
+  - make layout consistant between different arches and let you pass through an argument 
+    for my hack with starting a new thread. 
+  - save floats
+- simplify green.fr starting the main thread so it's not a whole back and forth yield dance
+
 ## (Jul 28)
 
 first version of userspace thread scheduling. 
