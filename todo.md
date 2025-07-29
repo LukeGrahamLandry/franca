@@ -11,6 +11,12 @@
 - split compiler/worker.fr into the franca part and the backend part
 - do something for detecting if you discard a Result without unwrapping it
 
+## remaining nondeterminism
+
+- exec has the same schedualing problem as threads but is harder to fake 
+- aslr for where the executable is loaded and what addresses mmap gives back
+- clock_gettime
+
 ## deduplication
 
 - make finish_alias() work for -frc so deduplication can too

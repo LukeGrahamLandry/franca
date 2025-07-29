@@ -4,7 +4,9 @@
 /// 
 
 /// wake up `count` threads who are wait()-ing on `addr` 
-wake :: fn(addr: *u32, count: u32) void = @match(query_current_os()) {
+wake :: fn(addr: *u32, count: u32) void = {
+@if(SLOW_USERSPACE_THREADS) return(import("@/lib/sys/sync/green.fr")'wake(addr, count));
+@match(query_current_os()) {
     fn macos() => {
         op := Syscall'ULockFlags.zeroed();
         op&.set(.op, 1); // UL_COMPARE_AND_WAIT
@@ -21,9 +23,12 @@ wake :: fn(addr: *u32, count: u32) void = @match(query_current_os()) {
     }
     @default => unreachable();
 };
+};
 
 /// If addr==expect, sleep the thread until wake() is called on the same addr. 
-wait :: fn(addr: *u32, expect: u32) void = @match(query_current_os()) {
+wait :: fn(addr: *u32, expect: u32) void = {
+@if(SLOW_USERSPACE_THREADS) return(import("@/lib/sys/sync/green.fr")'wait(addr, expect));
+@match(query_current_os()) {
     // Return values just tell you stuff about timeouts and spurious wake ups 
     // which we don't care about since we're calling it in a loop. 
     fn macos() => {
@@ -37,4 +42,5 @@ wait :: fn(addr: *u32, expect: u32) void = @match(query_current_os()) {
         _ := Syscall'sys_futex(addr, FUTEX_WAIT, expect, TimeSpec.ptr_from_int(0));
     }
     @default => unreachable();
+};
 };

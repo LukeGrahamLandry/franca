@@ -1,3 +1,11 @@
+
+## (Jul 28)
+
+first version of userspace thread scheduling. 
+each thread just runs until it cooperatively yields and longjmps back to a dispatch loop where we choose the next thread. 
+replace the thread related calls (start_thread, futex wait/wake, sleep, join) 
+with something that yields back to that top level loop. 
+
 ## (Jul 27)
 
 - taking a break from my problems. want to port my old chess program to my language 

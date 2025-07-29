@@ -16,7 +16,8 @@ DefaultContext :: @struct(
     temporary_allocator: *ArenaAlloc,  // each thread has its own
     panic_hook: @FnPtr(msg: Str) Never,
     extra := 0,
-    reserved3: Array(i64, 10),
+    threads_runtime: rawptr,  // lib/sys/sync/green.fr/Runtime
+    reserved3: Array(i64, 9),
 );
 
 // this is set in franca_runtime_init and read in push_zeroed_dynamic_context
@@ -115,7 +116,9 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
                 C'request_backtrace_on_panic();
             };
             @if(SLOW_DEBUG_ALLOC) import("@/lib/crash_report.fr")'push_aot_debug_resolver();
-            CAPTURE[]();
+            @if(SLOW_USERSPACE_THREADS, 
+                import("@/lib/sys/sync/green.fr")'start_main_thread(CAPTURE[]),
+                CAPTURE[]());
             temporary_allocator&.deinit(); // bleh, waste of time
             @if(SLOW_DEBUG_ALLOC) general_allocator().deinit();
             Syscall'exit(0);
@@ -361,6 +364,7 @@ fn mark_temporary_storage() Alloc.Mark =
 fn reset_temporary_storage(mark: Alloc.Mark) void = 
     context(DefaultContext)[].temporary_allocator.borrow().reset(mark);
     
+// note: this gets changed by sync/green.fr
 #inline #use("@/lib/sys/sync/atomics.fr") 
 fn set_new_thread_id(ctx: *DefaultContext) void= {
     NEXT_THREAD_ID :: @static(i64) 1;  // :ThreadIdStartsAtOne

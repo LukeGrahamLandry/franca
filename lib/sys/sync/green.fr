@@ -1,0 +1,199 @@
+//
+// Cooperative userspace threads. 
+// This is only used when SLOW_USERSPACE_THREADS=true and it replaces the real thread operations. 
+//
+// TODO: randomize scheduling with a seed so you can narrow down concurrency bugs. 
+// TODO: be closer to preemptive. have the compiler poke in lots of yields. 
+// TODO: support all targets.  
+//
+
+Runtime :: @struct {
+    tasks: RawList(Task);  // TODO: reuse slots when done
+    current_task: i64;
+    yield: JumpBuf;  // valid while any task is running. points back into the dispatch loop. 
+    alloc: Alloc;
+    // NEXT_THREAD_ID is wrong because it won't be shared when running directly in the compiler. 
+    next_thread_id: i64;
+};
+
+Task :: @struct {
+    fake_thread: *Thread;
+    resume := zeroed JumpBuf;  // valid while this task is waiting. points back into the implementation (returns from yield()). 
+    state := ThreadState.New;
+};
+
+// TODO: waitpid() should probably yield and become non-blocking in the dispatch loop
+// TODO: if every thread is state=.Sleep, do a real os sleep. 
+ThreadState :: @tagged(
+    Futex: @struct(addr: *u32, expect: u32),
+    Sleep: @struct(until: TimeSpec),
+    Join: @struct(task_index: i64),
+    New,
+    Runnable,
+    Done,
+);
+
+// This can't just be a static because when running directly through the compiler 
+// you want to inherit it, plus it won't go through start_main_thread so it can't get setup. 
+fn runtime() *Runtime = 
+    Runtime.ptr_from_raw(context(DefaultContext)[].threads_runtime);
+
+start_main_thread :: fn(user_main: @FnPtr() void) void = {
+    self := zeroed Runtime; self := self&;
+    context(DefaultContext)[].threads_runtime = Runtime.raw_from_ptr(self);
+    self.alloc = general_allocator();
+    self.next_thread_id = context(DefaultContext)[].thread_index + 1;
+    ::tagged(ThreadState);
+    
+    @switch(try(self.yield&)) {
+        @case(.Try) => {
+            _ := start_thread(i64, bit_cast_unchecked(@type user_main, @FnPtr(userdata: *i64) void, user_main), zeroed(*i64));
+            unreachable();
+        }
+        @case(.Catch) => ();
+    };
+    
+    // program is done when the main thread terminates. 
+    while => !self.tasks[0].state&.is(.Done) {
+        task := self.tasks.index(self.current_task);
+        @match(task.state&) {
+            fn New() => {
+                @switch(try(self.yield&)) {
+                    @case(.Try) => self.start_thread_outer(task);
+                    @case(.Catch) => ();
+                };
+                task.state = .Runnable;
+            }
+            fn Done() => ();
+            fn Runnable() => {
+                @switch(try(self.yield&)) {
+                    @case(.Try) => throw(task.resume&);
+                    @case(.Catch) => ();
+                };
+                task = self.tasks.index(self.current_task);
+            }
+            @default => {
+                if self.is_runnable(task.state&) {
+                    task.state = .Runnable;
+                };
+            };
+        };
+        
+        self.current_task = self.current_task.add(1).mod(self.tasks.len);
+    };
+    
+    // TODO: should this catch if it happened to get to the end but you didn't explicitly call join() as well? 
+    enumerate self.tasks& { i, it |
+        if !it.state&.is(.Done) {
+            @eprintln("[green.fr] main thread finished with unjoined thread %", i);
+        }
+    };
+};
+
+fn is_runnable(self: *Runtime, state: *ThreadState) bool = {
+    ::tagged(ThreadState);
+    @match(state) {
+        fn New() => true;
+        fn Done() => false;
+        fn Runnable() => true;
+        fn Sleep(it) => {
+            // TODO: think about how to check the time less often. 
+            //       also need to make it deterministic when it happens relative to your program running. 
+            now := now();
+            now.seconds > it.until.seconds || { now.seconds == it.until.seconds && now.nanoseconds > it.until.nanoseconds }
+        }
+        fn Futex(it) => it.addr[] != it.expect;
+        fn Join(it) => self.tasks[it.task_index].state&.is(.Done);
+    }
+};
+
+maybe_yield :: fn(new_state: ThreadState) void = {
+    self := runtime();
+    if is_runnable(self, new_state&) {
+        return();
+    };
+    self.tasks[self.current_task].state = new_state;
+    yield();
+};
+
+join :: fn(t: *Thread) void = {
+    self := runtime();
+    
+    ::ptr_utils(Thread);
+    // TODO: this is dumb use (an offset from) environment.thread_index. need to make sure im not lying about that in report_call_uncompiled_or_just_fix_the_problem
+    task_index := self.tasks&.items().index_of(fn(it) => identical(it.fake_thread, t)) 
+        || @panic("tried to join invalid thread");
+    
+    @debug_assert_ne(self.current_task, task_index, "a thread cannot join itself");
+    maybe_yield(Join = (task_index = task_index));
+};
+
+raw_create_thread :: fn(t: *Thread) void = {
+    self := runtime();
+    t.first_environment.thread_index = self.next_thread_id;
+    self.next_thread_id += 1;
+    push(self.tasks&, (fake_thread = t), self.alloc);
+    yield();
+};
+
+start_thread_outer :: fn(self: *Runtime, task: *Task) void = {
+    @assert(current_arch() == .aarch64, "TODO: green thread x86_64");
+    r := task.resume.registers&;
+    r[10] = 0;  // fp
+    r[11] = int_from_rawptr(::@as(rawptr) start_thread_inner);  // lr
+    r[12] = u8.int_from_ptr(task.fake_thread.stack.ptr.offset(task.fake_thread.stack.len));  // sp
+    throw(self.yield&);
+};
+
+start_thread_inner :: fn() void = {
+    // TODO: this is sketchy. relies on the old environment pointer staying in the right register
+    //       should have the jumpbuf let you thread any argument through. 
+    self := runtime();  
+    t := self.tasks[self.current_task].fake_thread;
+    franca_runtime_init_thread(Thread.raw_from_ptr(t));
+};
+
+yield :: fn() void = {
+    self := runtime();
+    task := self.tasks.index(self.current_task);
+    ::tagged(ThreadState);
+    @switch(try(task.resume&)) {
+        @case(.Try) => throw(self.yield&);
+        @case(.Catch) => ();
+    };
+};
+
+end_current_task :: fn() Never = {
+    self := runtime();
+    maybe_yield(.Done);
+    unreachable();
+};
+
+// TODO: check which tasks have this `wait_addr` and wake the right person 
+//       (another thing to randomize is who gets woken when there are multiple people waiting). 
+wake :: fn(addr: *u32, count: u32) void = {
+    @debug_assert_eq(count, 1);
+    yield();
+};
+
+wait :: fn(addr: *u32, expect: u32) void = {
+    maybe_yield(Futex = (addr = addr, expect = expect));
+};
+
+sleep :: fn(duration: *TimeSpec) voidResult = {
+    self := runtime();
+    maybe_yield(Sleep = (until = now() + duration[]));
+    (value = 0)
+};
+
+now :: fn() TimeSpec = {
+    @assert(current_arch() == .aarch64 && current_os() == .macos);
+    clock_id := MacosLibc.CLOCK_REALTIME;  // TODO
+    t: TimeSpec = (seconds = 0, nanoseconds = 0);
+    Syscall'clock_gettime(clock_id, t&);
+    t
+};
+
+#use("@/lib/sys/threads.fr");
+#use("@/lib/jump.fr");
+#use("@/lib/sys/process.fr");
