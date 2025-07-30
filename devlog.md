@@ -10,6 +10,19 @@
 - tried to take advantage of that in call_dynamic_values to use a Typ index as a key but it got 
   more complicated than seemed reasonable (have to include FnType.unary somehow) and didn't work so gave up. 
 - lock more to make `-d t` work better but still not actually fixed? 
+- added a bake() for Mutex to make sure you don't get stuck with a locked on in your exe if you had threads at comptime. 
+- can reproduce mutex problem pretty quickly running `franca examples/import_c/test/test.fr` in a loop.
+  - symptoms:
+    - "tried to unlock someone else's mutex" in acquire()
+    - "tried to lock an already locked mutex" in release()
+  - with FRANCA_NO_CACHE you crash in init_codegen_worker all the time. 
+    so i think that's a different problem. 
+  - does NOT happen if you compile to an exe or if you compile to .frc explicitly and compile that to an exe. 
+    and it's not just the first time that fails when running a franca file so it DOES happen without the frontend running at all. 
+  - so problem happens when the compiler calls main() without franca_runtime_init. 
+    that makes sense, env.thread_index will be 1 but the callee's NEXT_THREAD_ID will still be 1 
+    so when it spawns a thread, they're not unique and everything dies. 
+  - seems fixed. used to crash in under 10 seconds, now i can run the loop for 6 minutes and it's fine. 
 
 ## (Jul 29)
 

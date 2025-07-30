@@ -16,9 +16,24 @@ DefaultContext :: @struct(
     temporary_allocator: *ArenaAlloc,  // each thread has its own
     panic_hook: @FnPtr(msg: Str) Never,
     extra := 0,
-    threads_runtime: rawptr,  // lib/sys/sync/green.fr/Runtime
+    global: *GlobalFrancaRuntime,
     reserved3: Array(i64, 9),
 );
+
+// These are things that need to be inherited between compliation units. 
+// ie. if comptime code starts a thread, its next_thread_id needs to continue 
+//     from the compiler's, not reset at 1 or mutexes don't work. 
+// note: this means you can't start threads from inside push_emergency_dynamic_environment()
+// note: since this is in the environment, it doesn't get baked (unlike @static), 
+//       instead franca_runtime_init sets up a new one if it thinks it can't inherit one from the host. 
+GlobalFrancaRuntime :: @struct {
+    next_thread_id: i64;
+    green_threads: rawptr;  // lib/sys/sync/green.fr/Runtime (when SLOW_USERSPACE_THREADS=true)
+    // TODO: crash_report RESOLVERS should be here too, 
+    //       but the main place you want that is push_emergency_dynamic_environment. 
+    //       maybe should have a static for saving the last globals pointer. 
+    //       same idea as STASH_ENV but more official. 
+};
 
 // this is set in franca_runtime_init and read in push_zeroed_dynamic_context
 OS :: @static(ClearOnAotBake(Os)) (it = ComptimeEnvironment.ptr_from_raw(get_build_options()[].env)[].comptime_os);
@@ -86,6 +101,8 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
             temporary_allocator: ArenaAlloc = init(page_allocator, 1.shift_left(20));
             c.temporary_allocator = temporary_allocator&;
             c.panic_hook = print_and_exit1;
+            c.global = @static(GlobalFrancaRuntime);
+            c.global.next_thread_id = 1;  // :ThreadIdStartsAtOne
             
             @if(SLOW_DEBUG_ALLOC, {
                 general_allocator: import("@/lib/alloc/debug_alloc.fr").DebugAlloc = init();
@@ -364,11 +381,9 @@ fn mark_temporary_storage() Alloc.Mark =
 fn reset_temporary_storage(mark: Alloc.Mark) void = 
     context(DefaultContext)[].temporary_allocator.borrow().reset(mark);
     
-// note: this gets changed by sync/green.fr
 #inline #use("@/lib/sys/sync/atomics.fr") 
-fn set_new_thread_id(ctx: *DefaultContext) void= {
-    NEXT_THREAD_ID :: @static(i64) 1;  // :ThreadIdStartsAtOne
-    ctx.thread_index = i64.atomic_inc(NEXT_THREAD_ID);
+fn set_new_thread_id(ctx: *DefaultContext) void = {
+    ctx.thread_index = i64.atomic_inc(ctx.global.next_thread_id&);
 }
 
 // - We saved (argc, argv) from the entry point (but someone might have changed it in the context).  

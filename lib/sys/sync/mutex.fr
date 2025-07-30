@@ -68,7 +68,8 @@ fn locked_by_me(self: *Mutex) bool =
 
 fn PRIVATE_force_lock(self: *Mutex) void = {
     my_thread: u32 = context(DefaultContext)[].thread_index.trunc();
-    @debug_assert(self.thread == 0 && self.count == 0, "memory order problem");
+    @debug_assert_eq(self.thread, 0, "tried to lock someone's mutex");
+    @debug_assert_eq(self.count, 0, "tried to lock an already locked mutex");
     self.thread = my_thread;
     self.count = 1;
 }
@@ -110,6 +111,17 @@ fn with(self: *Mutex, $body: @Fn() void) void = {
     self.lock();
     @must_return body();
     self.unlock();  // TODO: defer
+}
+
+// for sanity reasons, don't allow baking a locked mutex. 
+// because it doesn't make any sense to bake the owner as the thread_index from when you were running at comptime. 
+fn bake_relocatable_value(self: *Mutex) Slice(BakedEntry) = {
+    self.lock();
+    @assert(self.count == 1, "trying to bake a mutex that was already locked");
+    bytes := Mutex.cast_to_bytes(@ref(Mutex.zeroed()));
+    entries := dyn_bake_relocatable_value(bytes, Mutex, true);
+    self.unlock();
+    entries
 }
 
 PMutex :: @struct(sig: i64, opaque: Array(u8, 56));

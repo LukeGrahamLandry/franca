@@ -13,8 +13,6 @@ Runtime :: @struct {
     current_task: i64;
     yield: JumpBuf;  // valid while any task is running. points back into the dispatch loop. 
     alloc: Alloc;
-    // NEXT_THREAD_ID is wrong because it won't be shared when running directly in the compiler. 
-    next_thread_id: i64;
 };
 
 Task :: @struct {
@@ -36,13 +34,12 @@ ThreadState :: @tagged(
 // This can't just be a static because when running directly through the compiler 
 // you want to inherit it, plus it won't go through start_main_thread so it can't get setup. 
 fn runtime() *Runtime = 
-    Runtime.ptr_from_raw(context(DefaultContext)[].threads_runtime);
+    Runtime.ptr_from_raw(context(DefaultContext)[].global.green_threads);
 
 start_main_thread :: fn(user_main: @FnPtr() void) void = {
     self := zeroed Runtime; self := self&;
-    context(DefaultContext)[].threads_runtime = Runtime.raw_from_ptr(self);
+    context(DefaultContext)[].global.green_threads = Runtime.raw_from_ptr(self);
     self.alloc = general_allocator();
-    self.next_thread_id = context(DefaultContext)[].thread_index + 1;
     self.spawn_first_thread(user_main);
     ::tagged(ThreadState);
     
@@ -126,8 +123,6 @@ raw_create_thread :: fn(t: *Thread) void = {
 };
 
 new_task :: fn(self: *Runtime, thread: *Thread) void = {
-    thread.first_environment.thread_index = self.next_thread_id;
-    self.next_thread_id += 1;
     push(self.tasks&, (fake_thread = thread), self.alloc);
     task := self.tasks.index(self.tasks.len - 1);
 
