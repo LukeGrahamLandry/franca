@@ -4,7 +4,7 @@
 DynCallShim :: @tagged(Pending: Qbe.Sym, Ready: rawptr);
 
 fn call_dynamic_values(self: *SelfHosted, f_ptr: i64, f_ty: FnType, args_value: []u8) Values = {
-    callee := self.dyncalls&.get_ptr(f_ty&) || {
+    callee := self.dyncalls&.get_or_insert(f_ty) {
         // 
         // This is super stupid. we should reuse the shim when the types have the same repr. 
         // ie. currently, if you call some `fn(foo: *T) void` we'd make a new shim for every T, 
@@ -14,8 +14,7 @@ fn call_dynamic_values(self: *SelfHosted, f_ptr: i64, f_ty: FnType, args_value: 
         // (so any comptime code other than #macro and #x86_bytes). 
         // -- Mar 12, 2025
         //
-        self.create_dyncall_shim(f_ty);
-        self.dyncalls&.get_ptr(f_ty&).unwrap()
+        self.create_dyncall_shim(f_ty)
     };
     callee := @match(callee) {
         fn Ready(it)   => it[];
@@ -79,7 +78,7 @@ fn wait_for_symbol(shared: *CodegenShared, id: Qbe.Sym) rawptr = {
 // Creates a function with the signeture (arg_array: *u8, ret_array: *u8, callee: fnptr) -> void.
 // It starts compiling on self.comptime_codegen and you have to get the result out of self.dyncalls when it's ready. 
 // TODO: reuse functions when they have different nominal types but the same repr. 
-fn create_dyncall_shim(self: *SelfHosted, f_ty: FnType) void = {
+fn create_dyncall_shim(self: *SelfHosted, f_ty: FnType) DynCallShim = {
     shared := self.comptime_codegen;
     ins: RawList(Qbe.Ins) = empty();
     id := Qbe.no_symbol_S; 
@@ -166,7 +165,7 @@ fn create_dyncall_shim(self: *SelfHosted, f_ty: FnType) void = {
         f.start.ins = ins;
         f.start.jmp.type = .ret0;
     };
-    self.dyncalls&.insert(f_ty, (Pending = id));
+    (Pending = id)
 }
 
 // TODO: this generates shitty code. 

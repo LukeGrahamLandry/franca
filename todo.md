@@ -10,6 +10,8 @@
   step because ie. `fn index([]T)` needs to get compiled really early before you can do anything. 
 - split compiler/worker.fr into the franca part and the backend part
 - do something for detecting if you discard a Result without unwrapping it
+- the pattern of interning things with a List(V)+HashMap(V, index) is common. 
+  should make the map give you a way to not store the keys twice. 
 
 ## remaining nondeterminism
 
@@ -23,9 +25,7 @@
 - deduplication is assuming there are no hash collissions
 - dynamic lifting for deduplication when only a few constants are different
 - reevaluate whether it should be enabled for emit_ir(when=.Aot)
-- another problem is something like PageMap.find_entry which returns `?Ty(*PageMap.Entry, i64)`,
-  which will get a different type index even if they have the same representation. 
-  so emit_ir should deduplicate those i guess. 
+- if the only difference in constants is a reference to itself because it's recursive, that's fine to deduplicate. 
   
 ## tooling for debugging
 
@@ -155,6 +155,8 @@ pragma-once.c                           [ok]
 All is fine! (passed 35 tests)
 1.fr                                    note: run with `FRANCA_BACKTRACE=1` environment variable to display a backtrace%     
 ```
+
+- `./q.out examples/default_driver.fr build compiler/main.fr -o q.out -d t` very rarely prints junk
 
 ## import_symbol / weak
 

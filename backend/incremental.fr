@@ -702,7 +702,6 @@ write_types :: fn(self: *Writer, m: *QbeModule) void = {
     lock(m.types_mutex&);
     self.typ&.reserve(m.types.len);
     enumerate m.types { i, t |
-        m.flush_debug();
         self.typ&.push(
             header = t.header,
             fields = (off = trunc self.idx.len, count = t.fields.len.trunc()),
@@ -738,13 +737,17 @@ read_types :: fn(header: *Header, m: *QbeModule) i64 = {
         };
 
         // TODO: allow including names of types for debugging 
-        m.new_type(
+        // since apply_type_offset assumes type indices can be remapped linearly, 
+        // you can't have it deduplicating against types that were in the destination 
+        // module before we started loading this new module.  
+        m.new_type_unchecked(
             name = "",
             header = t.header,
             fields = fields,
         );
     };
     
+    @debug_assert_eq(m.types.len - offset, header.typ.count.zext(), "read_types lost some");
     @debug_assert_ult(m.types.len, 1.shift_left(24), "types overflow");
     unlock(m.types_mutex&);
     offset

@@ -142,14 +142,16 @@ fn printref(r: Qbe.Ref, f: *Qbe.Fn, out: *List(u8)) void = @match(rtype(r)) {
     fn RSlot() => @fmt(out, "S%", rsval(r));
     fn RCall() => @fmt(out, "C%", r.val());
     fn RType() => if r.val() >= f.globals.types.len {
-        @fmt(out, ":T%INVALID", r.val());
+        @fmt(out, ":INVALID(%)", r.val());
     } else {
+        f.globals.types_mutex&.lock();
         n := f.get_type(r).name();
         if n.len == 0 {
             @fmt(out, ":T%", r.val());
         } else {
             @fmt(out, ":%", n);
-        }
+        };
+        f.globals.types_mutex&.unlock();
     };
     fn RMem() => printmem(f.mem.index(r.val()), f, out);
     fn RInt() => @fmt(out, "I%", rsval(r));
@@ -353,9 +355,11 @@ fn debug_dump_dead_slots(f: *Qbe.Fn, dead_slots: []i32, out: *List(u8)) void = {
 
 fn set_debug_types(m: *QbeModule, s: Str, $value: bool) void = {
     ::@assert(value);
+    d := 0;
     for s { c | 
-        m.debug = m.debug.bit_or(1.shift_left(c.zext() - "A".ascii()));
+        d = d.bit_or(1.shift_left(c.zext() - "A".ascii()));
     };
+    m.debug = m.debug.bit_or(d);
 }
 
 fn when_debug_printfn(f: *Qbe.Fn, category: Qbe.DebugKey, msg: Str) void = {
@@ -371,7 +375,13 @@ fn when_debug(f: *Qbe.Fn, category: Qbe.DebugKey, $body: @Fn(out: *List(u8)) voi
 fn when_debug(m: *Qbe.Module, category: Qbe.DebugKey, $body: @Fn(out: *List(u8)) void) void = {  
     ::enum(Qbe.DebugKey);
     if m.debug.bit_and(1.shift_left(category.raw() - "A".ascii())) != 0 {
-        body(m.debug_out);
+        // you need to have some mutex around printing to debug_out because new_type 
+        // is called on the frontend thread unlike everything else. (the allocation is guarded 
+        // by this mutex already but that's not the same because they can still fight once it has capactity). 
+        // TODO: i still get junk from `-d t` occasionally!
+        with m.forever.mutex& {
+            body(m.debug_out);
+        };
     };
 }
 
@@ -415,6 +425,11 @@ fn print_type(m: *QbeModule, ty_index: i64, out: *List(u8)) void = {  // :Thread
                 fn Fs() => @fmt(out, "s, ");
                 fn Fd() => @fmt(out, "d, ");
                 fn FTyp() => {
+                    break :: local_return;
+                    if m.types.len < idx.zext() {
+                        @fmt(out, ":INVALID(%), ", idx);
+                        break();
+                    };
                     type := m.get_type(idx.zext());
                     n := type.name();
                     if n.len > 0 {

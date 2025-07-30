@@ -1,4 +1,16 @@
 
+## (Jul 30)
+
+- deduplicate in new_type so you can deduplicate generics with same repr RType. 
+  893488->890616, meh. just to make sure, it did reduce the number of types: before: T619, after: T183. 
+  - PageMap.find_entry still doesn't get deduplicated because of PageMap.create_entry and ptr_diff. 
+    - ptr_diff is wrong because it's processed too late
+    - create_entry is wrong because it is recursive so it's constants don't match because both 
+      are calling a different themself but if they deduplicated so self was the same, it would match. 
+- tried to take advantage of that in call_dynamic_values to use a Typ index as a key but it got 
+  more complicated than seemed reasonable (have to include FnType.unary somehow) and didn't work so gave up. 
+- lock more to make `-d t` work better but still not actually fixed? 
+
 ## (Jul 29)
 
 - jump.fr

@@ -378,7 +378,7 @@ fn is_symbol(f: *Qbe.Fn, r: Qbe.Ref) bool =
     rtype(r) == .RCon && f.get_constant(r).type() == .CAddr;
 
 fn get_type(m: *QbeModule, i: i64) *Qbe.Typ = {
-    @debug_assert(m.types_mutex&.locked_by_me());
+    @debug_assert(m.types_mutex&.locked_by_me(), "tried to get_type while not holding types_mutex");
     m.types.index(i)
 }
 
@@ -974,11 +974,27 @@ fn add_padding(fields: *List(u32), current_size: *i64, target_size: i64) void #i
 fn new_type(m: *QbeModule, type: Qbe.Typ) i64 = {
     i := 0;
     with m.types_mutex& {
-        i = m.types.len;
-        push(m.types&, type, m.forever&.borrow());
-        when_debug(m, .Types) { out |
-            print_type(m, i, out);
-        };
+        a := m.forever&.borrow();
+        ::AutoEq(Qbe.Typ); ::AutoHash(Qbe.Typ, TrivialHasher);
+        ::AutoEq(Qbe.TypHeader); ::AutoHash(Qbe.TypHeader, TrivialHasher);
+        ::HashEach([]u32, TrivialHasher);
+        
+        // TODO: this hashes the name as well!! which it shouldn't if the point is to help deduplication. 
+        //       but it doesn't matter because emit_ir doesn't set the name to anything yet. 
+        type.name = "";
+        i = (m.type_lookup&.get_or_insert(type, a) {
+            m.new_type_unchecked(type)
+        })[]
+    };
+    i
+}
+
+fn new_type_unchecked(m: *QbeModule, type: Qbe.Typ) i64 = {
+    @debug_assert(m.types_mutex&.locked_by_me());
+    i := m.types.len;
+    push(m.types&, type, m.forever&.borrow());
+    when_debug(m, .Types) { out |
+        print_type(m, i, out);
     };
     i
 }
