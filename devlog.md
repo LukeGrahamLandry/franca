@@ -7,6 +7,29 @@
     for my hack with starting a new thread. 
   - save floats
 - simplify green.fr starting the main thread so it's not a whole back and forth yield dance
+- more data points
+  - you can turn on low power mode (in Setting > Battery) which makes everything take 50% longer 
+    and still get the problem. tried on an M4 where things take 60% of the time here. still 
+    got the problem. tho i had an attempt go for 27 minutes before the problem. 
+  - i can eventually produce the problem by just running ` ./target/r.out all -bin ./target/q.out -jit` 
+    in a loop (without recompiling). 2012 runs, 19.5 minutes. 
+  - and with `./target/r.out all -bin ./target/q.out -cc`. ~77 runs, 1-1.5 minutes, twice. 
+  - and with `./target/r.out mandel.ssa -bin ./target/q.out`. 1062 runs, 38 seconds. twice. 
+  - so that's interesting. mandel.ssa doesn't have a c driver so the problem isn't in CodegenWorker. 
+    so apparently when i turned off threads i just got bored before producing the problem. 
+    the ./target/out/q.exe after failing there does produce the mandelbrot set correctly. 
+    so that makes me feel like the test program that diffs the outputs is what's breaking there. 
+    ha ok, yeah changed the test to not recompile, still fails. 3298 runs 96 seconds. 
+  - maybe i broke it when i rewrote subprocess.fr. 
+    that was in commit:037cd25b6cb473d7b5af11928aa3e0b7cda077ef, and the only actions failure 
+    between that and commit:22ddd3dc54429e4d5e62d53ebb0234ed16768676 was in gif.c which 
+    i know suspect has other problems because ive reproed that one with the slow debug checks at times.
+  - made it save the output and give you the diff command. when it fails it just things the output is  
+  - consider;;;; you have to waitpid the status before polling the file descriptors. im an idiot apparently. 
+    cause maybe the other guy fully runs between when i poll the output and when i check if it's done. 
+  - seems to work, can run mandel.ssa loop 32508 runs, 18 minutes without dying. 
+  - so i think there's still an import_c mutex shaped bug but this polling thing 
+    was the creepy one because it moved around a lot. 
 
 ## (Jul 28)
 
