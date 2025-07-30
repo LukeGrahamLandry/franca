@@ -1678,35 +1678,36 @@ fn get_aggregate(self: CompCtx, m: *CodegenShared, ty: Type) Qbe.Ref = {
                 };
                 n := 0;
                 rt_count: i64 = it.fields.len;
-                result.fields = m.m.new_long_life(rt_count * 2 + 1);
+                f := u32.list(rt_count * 2 + 1, m.m.forever&.borrow()); f := f&;
                 @assert(!it.is_union || it.fields.len <= 0xFFFF, "too many union fields");
                 result.header.nunion = @if(it.is_union, rt_count.trunc(), 1);
                 result&.set_is_union(it.is_union);
                 @assert(it.layout_done, "tried to get_aggregate before layout %", self.log(ty));
                 if it.is_union {
-                    each it.fields { f | 
-                        field_size := self.get_info(f.ty)[].stride_bytes;
+                    each it.fields { it | 
+                        field_size := self.get_info(it.ty)[].stride_bytes;
                         if field_size != 0 {
-                            @debug_assert(f.byte_offset == 0, "union field must have offset 0");
-                            push(result.fields&, n&, pack self.as_field(m, f.ty));
-                            push(result.fields&, n&, pack (type = .FEnd, len = 0));
-                        }; // else :NoRuntimeRepr
+                            @debug_assert(it.byte_offset == 0, "union field must have offset 0");
+                            push(f, pack self.as_field(m, it.ty));
+                            push(f, pack (type = .FEnd, len = 0)); // TODO: a test that hits this!
+                        } else {
+                            result.header.nunion -= 1; // :NoRuntimeRepr
+                        };
                     };
                 } else {
                     off := 0;
-                    each it.fields { f | 
-                        field_size := self.get_info(f.ty)[].stride_bytes;
+                    each it.fields { it | 
+                        field_size := self.get_info(it.ty)[].stride_bytes;
                         if field_size != 0 {
-                            add_padding(result.fields&, n&, off&, f.byte_offset);
-                            push(result.fields&, n&, pack self.as_field(m, f.ty));
+                            add_padding(f, off&, it.byte_offset);
+                            push(f, pack self.as_field(m, it.ty));
                             off += field_size.zext();
                         }; // else :NoRuntimeRepr
                     };
-                    add_padding(result.fields&, n&, off&, info.stride_bytes.zext());
-                    push(result.fields&, n&, pack(type = .FEnd, len = 0));
+                    add_padding(f, off&, info.stride_bytes.zext());
+                    f.push(pack(type = .FEnd, len = 0));
                 };
-                @debug_assert_ult(n, MAX_u32, "too many struct fields");
-                result.nfield = n.trunc();
+                result.fields = f.items();
                 // TODO: name
                 m.m.new_type(result)
             }
@@ -1716,28 +1717,23 @@ fn get_aggregate(self: CompCtx, m: *CodegenShared, ty: Type) Qbe.Ref = {
                 inner_size: i64 = self.get_info(it.inner)[].stride_bytes.zext();
                 @debug_assert_eq(inner_size * it.len.zext(), info.stride_bytes.zext(), "size calc wrong!");
                 outer_size: i64 = info.stride_bytes.zext();
-                field_count := 1 + it.len.zext();
-                result.fields = m.m.new_long_life(field_count + 1);
+                f := u32.list(1 + it.len.zext() + 1, m.m.forever&.borrow()); f := f&;
                 result.header.nunion = 1;
-                field := pack self.as_field(m, it.inner);
-                range(0, it.len.zext()) { i |
-                    result.fields[i] = field;
-                };
-                result.fields[it.len.zext()] = pack(type = .FEnd, len = 0);
-                @debug_assert_lt(it.len, MAX_u32);
-                result.nfield = it.len + 1;
+                f.push_repeated(it.len.zext(), self.as_field(m, it.inner).pack());
+                f.push(pack(type = .FEnd, len = 0));
+                result.fields = f.items();
                 // TODO: name
                 m.m.new_type(result)
             }
             fn Tagged(it) => {
                 n := 0;
-                result.fields = m.m.new_long_life(it.cases.len * 3 + 3);
+                f := u32.list(it.cases.len * 3 + 3, m.m.forever&.borrow()); f := f&;
                 result.header.nunion = it.cases.len.trunc();
                 each it.cases { case | 
                     if self.get_info(case._1)[].stride_bytes != 0 { 
-                        result.fields[n] = pack(type = .Fl, len = 8);       n += 1;
-                        result.fields[n] = pack self.as_field(m, case._1);  n += 1;
-                        result.fields[n] = pack(type = .FEnd, len = 0);     n += 1;
+                        f.push(pack(type = .Fl, len = 8));
+                        f.push(pack self.as_field(m, case._1));
+                        f.push(pack(type = .FEnd, len = 0));
                         // TODO: do i need to pad them to the same size?
                     } else {
                         result.header.nunion -= 1;
@@ -1747,11 +1743,10 @@ fn get_aggregate(self: CompCtx, m: *CodegenShared, ty: Type) Qbe.Ref = {
                 if result.header.nunion == 0 {
                     // all cases are zero sized. this is really just an enum. 
                     @debug_assert(false, "ICE: get_aggregate of scalar @tagged");
-                    result.fields[n] = pack(type = .Fl, len = 8);      n += 1;
-                    result.fields[n] = pack(type = .FEnd, len = 0);    n += 1;
+                    f.push(pack(type = .Fl, len = 8));
+                    f.push(pack(type = .FEnd, len = 0));
                 };
-                @debug_assert_ult(n, MAX_u32);
-                result.nfield = n.trunc();
+                result.fields = f.items();
                 // TODO: name
                 m.m.new_type(result)
             }

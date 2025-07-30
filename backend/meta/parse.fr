@@ -867,7 +867,6 @@ fn parse_type(self: *QParseCtx) Result(void, Str) = {
             typ.align_log2 += 1;
         };
     };
-    typ.fields = m.new_long_life(0);
     if !self.eat("{") {
         return(Err = "expected '{' to begin type declaration");
     };
@@ -881,18 +880,18 @@ fn parse_type(self: *QParseCtx) Result(void, Str) = {
         @debug_assert_ule(size, MAX_u32);
         typ.size = size.trunc();
     } else {
-        field_count := 0;
+        fields := u32.list(m.forever&.borrow());
         if self.check("{") {
             typ.set_is_union(true);
             while => !self.eat("}") { // TODO: bounds
                 self.eat("{");
-                @try(self.parse_type_fields(typ, field_count&)) return;
+                @try(self.parse_type_fields(typ, fields&)) return;
                 self.eat(",");
             };
         } else {
-            @try(self.parse_type_fields(typ, field_count&)) return;
+            @try(self.parse_type_fields(typ, fields&)) return;
         };
-        typ.nfield = field_count.trunc();
+        typ.fields = fields.items();
     };
     typ.name = name;
     
@@ -902,7 +901,7 @@ fn parse_type(self: *QParseCtx) Result(void, Str) = {
     .Ok
 }
 
-fn parse_type_fields(self: *QParseCtx, typ: *Qbe.Typ, field_count: *i64) Result(void, Str) = {
+fn parse_type_fields(self: *QParseCtx, typ: *Qbe.Typ, fields: *List(u32)) Result(void, Str) = {
     self.skip_blanks();
     
     m := self.f.globals;
@@ -934,7 +933,7 @@ fn parse_type_fields(self: *QParseCtx, typ: *Qbe.Typ, field_count: *i64) Result(
                 self.skip_blanks();
                 len := self.parse_number(); 
                 self.eat(",");
-                push(typ.fields&, field_count, pack(type = .FPad, len = len.trunc()));
+                push(fields, pack(type = .FPad, len = len.trunc()));
                 my_size += len;
                 continue()
             };
@@ -943,7 +942,7 @@ fn parse_type_fields(self: *QParseCtx, typ: *Qbe.Typ, field_count: *i64) Result(
         
         my_align = my_align.max(align);
         target_size := align_to(my_size, 1.shift_left(align));
-        add_padding(typ.fields&, field_count, my_size&, target_size);
+        add_padding(fields, my_size&, target_size);
         
         self.skip_blanks();
         count := if(self.input[self.cursor].is_ascii_digit(), => self.parse_number(), => 1);
@@ -953,12 +952,9 @@ fn parse_type_fields(self: *QParseCtx, typ: *Qbe.Typ, field_count: *i64) Result(
             size = value_to_put_in_len_field;
         };
         // TODO: its kinda sad how much memory i use to represent Array(u8, 80), etc.
-        typ.fields&.grow(field_count[] + count);
-        range(0, count) { _ |
-            f2 := typ.fields.index(field_count[]);
-            field_count[] += 1;
-            f2[] = pack(len = size.trunc(), type = tag);
-        };
+        //       but also the abi only looks at the first few anyway so this could be improved. 
+        //       (careful, can't just truncate in add_type because of how i represent unions)
+        fields.push_repeated(count, pack(len = size.trunc(), type = tag));
         self.eat(",");
     };
     if !self.eat("}") {
@@ -970,8 +966,7 @@ fn parse_type_fields(self: *QParseCtx, typ: *Qbe.Typ, field_count: *i64) Result(
     @assert_le(my_size, MAX_u32);
     typ.size = trunc my_size;
     typ.align_log2 = my_align.trunc();
-    typ.fields&.grow(field_count[] + 1);
-    typ.fields[field_count[]] = pack(type = .FEnd, len = 0); field_count[] += 1;
+    fields.push(pack(type = .FEnd, len = 0));
     @assert(typ.nunion != 0xFFFF, "too many union fields");
     typ.nunion += 1;
     

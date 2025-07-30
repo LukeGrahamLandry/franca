@@ -705,9 +705,9 @@ write_types :: fn(self: *Writer, m: *QbeModule) void = {
         m.flush_debug();
         self.typ&.push(
             header = t.header,
-            fields = (off = trunc self.idx.len, count = t.nfield),
+            fields = (off = trunc self.idx.len, count = t.fields.len.trunc()),
         );
-        self.idx&.push_all(t.fields.slice(0, zext t.nfield));
+        self.idx&.push_all(t.fields);
     };
     unlock(m.types_mutex&);
 };
@@ -722,26 +722,25 @@ read_types :: fn(header: *Header, m: *QbeModule) i64 = {
     
     types: Ref(Typ) = (off = 0, count = header.typ.count);
     each header.get(types) { t | 
-        // TODO: this copy is lame. make it a slice instead of a QList
-        //       but that doesn't work now that i need to reuse the same Header so can't mutate and have type_offset. 
-        //       tho could save a copy when offset==0
-        fields := m.new_copy_long_life(header.get(t.fields));
+        fields := header.get(t.fields);
         
-        // remap the type indices to the target module
-        @if(offset != 0)
-        each fields.slice(0, t.fields.count.zext()) { it |
-            f := unpack it[];
-            ::enum(@type f.type);
-            if f.type == .FTyp {
-                it[] = pack(type = .FTyp, len = f.len + offset.trunc());
-            }
+        if offset != 0 {
+            // remap the type indices to the target module. 
+            // the header might be reused in another module so don't mutate it. 
+            fields = fields.shallow_copy(m.forever&.borrow());  
+            each fields { it |
+                f := unpack it[];
+                ::enum(@type f.type);
+                if f.type == .FTyp {
+                    it[] = pack(type = .FTyp, len = f.len + offset.trunc());
+                }
+            };
         };
 
         // TODO: allow including names of types for debugging 
         m.new_type(
             name = "",
             header = t.header,
-            nfield = t.fields.count,
             fields = fields,
         );
     };
