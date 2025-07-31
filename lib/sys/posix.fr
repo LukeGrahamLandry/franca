@@ -555,25 +555,21 @@ fn signal_handler_body(info_s: *SysSigInfo, ctx_s: *SysUContext, $body: @Fn(info
             @default => unreachable();
         };
         
-        @match(current_arch()) {
-            fn aarch64() => {
-                ctx_d.fp = ctx_d.gpr&[29];
-            }
-            fn x86_64() => {
-                ctx_d.fp = ctx_d.gpr&[5];
-            }
+        fp_index := @match(current_arch()) {
+            fn aarch64() => 29;
+            fn x86_64() => 5;
             @default => todo();
         };
+        ctx_d.fp = ctx_d.gpr&[fp_index];
         
         body(info_d&, ctx_d&);
         // be careful about doing stuff here. i early return from body. 
     };
 }
 
-
 kill :: fn(pid: i32, signum: i64) SysResult(void) = {
     signum := fix_number(Macos.SIG, Linux.SIG, SIG, signum);
-    void.sys_ret(Syscall'kill(pid, signum));
+    void.sys_ret(Syscall'kill(pid, signum))  // TODO: this shouldn't compile if you put a semicolon here!
 };
 
 ///////////////////////////////////////////////////////////////////////
@@ -700,9 +696,8 @@ fn fix_flags($Dest: Type, $Src: Type, d: i64, s: i64) i64 = {
 
 fn fix_flags(d: i64, s: i64, data: []FlagInfo) i64 = {
     for data { it |
-        if s.bit_and(1.shift_left(it.src.zext())) != 0 {
-            d = d.bit_or(1.shift_left(it.dest.zext()));
-        }
+        bit := int(s.bit_and(1.shift_left(it.src.zext())) != 0);
+        d = d.bit_or(bit.shift_left(it.dest.zext()));
     };
     d
 }

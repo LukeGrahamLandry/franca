@@ -1,4 +1,18 @@
 
+## (Jul 31)
+
+- profiling
+  - i tried someones macos version of zig's profiler thingy https://github.com/verte-zerg/poop/tree/kperf-macos
+    i don't know if i believe it. the branch_misses is way too low. but if i tweak examples/toy/predict.fr 
+    to only run one case at a time, the slow one does have twice the number of branch_misses, 
+    so i guess it's just sampled. that's fair. 
+  - xcode's hardware counters thing is actually much more interesting than i gave it credit for 
+    because it gives you the profile graph by symbol when you ask it for counters the same as 
+    when you ask for time but the percentages are wildly different. 
+      - there's this that tells you what the names mean: https://github.com/jiegec/apple-pmu/blob/master/a8.md
+      - resolve_in_overload_set_new is 25% of the time but 60% of the 
+        BRANCH_COND_MISPRED_NONSPEC, L1D_CACHE_MISS_ST_NONSPEC, L1D_CACHE_MISS_LD_NONSPEC 
+  
 ## (Jul 30)
 
 - deduplicate in new_type so you can deduplicate generics with same repr RType. 
@@ -51,7 +65,11 @@
   static linux dies in push_uninit but only when `-unsafe`. 
   git bisect says ec1cd8573db965d71aeaf5f998efa59029374e0d is the first bad commit, 
   there it works on arm but not amd but currently neither work. that's odd. 
-  TODO
+  passing in memory does seem to fix it on amd, maybe i got the calling convention for the last arg wrong? but not arm. 
+  im a bit concerned that there's a race and i just changed the timing. 
+- prettify
+  - import_c/tokenize/read_punct: use `@expand` instead of a macro that's only called once
+  - backend/meta/parse: less verbose handling of `argK`
 
 ## (Jul 29)
 
