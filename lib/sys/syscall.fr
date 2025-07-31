@@ -226,7 +226,26 @@ fn syscall(arg: FatExpr) FatExpr #macro = {
         loc = loc, ty = FnPtr(arg, ret), done = false,
     );
     
-    // TODO: outline this part as well 
+    if !func.name.str().starts_with("clone") {
+        if !libc {
+            callee = @{ zeroed(rawptr) };
+        };
+        arg_expr := @as(FatExpr) (expr = (Tuple = inst.as_raw()), ty = UnknownType, done = false, loc = loc);
+        return @{
+            // TODO: you really really want these to be read only
+            // TODO: "You can't have a void pointer 6518175468 as a constant" :CompilerBug
+            //        when doing a DataSymbol it doesn't have a FuncId to put in the pagemap. 
+            //vtable := @static(SyscallVTable) (n = @[@literal sys], libc = ::@as(rawptr) @[callee]);
+            vtable := @static(SyscallVTable) (n = @[@literal sys], libc = (it = zeroed rawptr));
+            f := @as(rawptr) @[callee];
+            vtable.libc.it = f;
+            args := @array(@[arg_expr]);
+            result := perform_syscall_erased(args&, vtable);
+            bit_cast_unchecked(i64, @[@literal ret], result)
+        };
+    };
+    // TODO: move the special case for clone elsewhere
+    
     @{
         want_syscall := prefer_syscalls() || @[@literal !libc];
         @if(want_syscall, {
@@ -261,6 +280,31 @@ fn syscall(arg: FatExpr) FatExpr #macro = {
         })
     }
 }
+
+SyscallVTable :: @struct {
+    n: Array(i64, 3);
+    libc: ClearOnAotBake(rawptr);  // HACK: shouldn't need the ClearOnAotBake
+};
+
+perform_syscall_erased :: fn(a: *Array(i64, 6), info: *SyscallVTable) i64 = {
+    want_syscall := prefer_syscalls() || info.libc.it.is_null();
+    if want_syscall {
+        sys_index := @if(query_current_os() == .macos, 2, @if(query_current_arch() == .aarch64, 0, 1));
+        n := info.n&[sys_index];
+        if n == NOSYS {
+            panic("unimplemented syscall")
+        };
+        result, flag := perform_syscall(a[0], a[1], a[2], a[3], a[4], a[5], n);
+        if flag.bit_and(1) == 1 && sys_index == 2 {
+            result = -result;
+        };
+        result
+    } else {
+        F :: @FnPtr(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) i64;
+        f := bit_cast_unchecked(rawptr, F, info.libc.it);
+        f(a[0], a[1], a[2], a[3], a[4], a[5])
+    }
+};
 
 perform_syscall :: AsmFunction(fn(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, N: i64) Ty(i64, u8) = (), {
     #use("@/backend/arm64/bits.fr");

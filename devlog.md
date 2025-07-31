@@ -7,6 +7,8 @@
     - ptr_diff is wrong because it's processed too late
     - create_entry is wrong because it is recursive so it's constants don't match because both 
       are calling a different themself but if they deduplicated so self was the same, it would match. 
+  - wasted a lot of time on examples/view_image.fr failing because backend/incremental/read_types() 
+    would deduplicate against the pre-existing types in the destination module. 
 - tried to take advantage of that in call_dynamic_values to use a Typ index as a key but it got 
   more complicated than seemed reasonable (have to include FnType.unary somehow) and didn't work so gave up. 
 - lock more to make `-d t` work better but still not actually fixed? 
@@ -23,6 +25,33 @@
     that makes sense, env.thread_index will be 1 but the callee's NEXT_THREAD_ID will still be 1 
     so when it spawns a thread, they're not unique and everything dies. 
   - seems fixed. used to crash in under 10 seconds, now i can run the loop for 6 minutes and it's fine. 
+    so that one worked in SLOW_USERSPACE_THREADS because that was correctly inherited. 
+- problems remain! import_c/tests/wuffs.fr fails run sometimes in actions (maybe only on amd?). 
+  - didn't reproduce on arm in 84 runs, 8 minutes or on rosetta 84 runs, 17 minutes. 
+    so that's not super actionable... 
+- trying to debloat syscall stuff. 
+  - less `if err != nill` junk
+  - don't generate a fix_flags for each. just iterate an array of the flags to remap. 
+  - outline more of the syscall wrapper logic instead of generating it for each. 
+    instead of 91 instructions per syscall wrapper it's 24 (which is still too many). 
+    (and not doing clone() yet cause it sucks). 
+  - old: `891880 bytes of code, 69282 bytes of data.`  
+    new: `883920 bytes of code, 70162 bytes of data.`
+  - when doing a DataSymbol it doesn't have a FuncId to put in the pagemap 
+    and you get a "can't have a void pointer as a constant" 
+      - you can hack around that with adistinctionwithoutadifference 
+        but then specifically examples/bf/bf2ir.fr doesn't work?? 
+        what? there's no syscall it makes that others don't. 
+      - it doesn't like that it calls munmap at comptime. 
+        ok i can reduce it to something simple that uses DataSymbol 
+        and works if you call it at runtime but not comptime. 
+        so that's reassuring, not a scary thing with the syscalls specifically. 
+        problem is just that if it runs at comptime, the static has the pointer saved and it tries to bake it. 
+- (this was broken before sys debloating as well): 
+  static linux dies in push_uninit but only when `-unsafe`. 
+  git bisect says ec1cd8573db965d71aeaf5f998efa59029374e0d is the first bad commit, 
+  there it works on arm but not amd but currently neither work. that's odd. 
+  TODO
 
 ## (Jul 29)
 

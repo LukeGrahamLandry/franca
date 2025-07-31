@@ -12,12 +12,18 @@
 - do something for detecting if you discard a Result without unwrapping it
 - the pattern of interning things with a List(V)+HashMap(V, index) is common. 
   should make the map give you a way to not store the keys twice. 
+- i need a way of testing the global debug settings in core.fr. 
+  maybe -DFOO=true passed to default_driver could replace a declaration like `FOO :: false`
+- need to auto-test static linux. i wonder if you can landlock away `libc.so` to make sure you can't cheat 
 
 ## remaining nondeterminism
 
 - exec has the same schedualing problem as threads but is harder to fake 
 - aslr for where the executable is loaded and what addresses mmap gives back
 - clock_gettime
+
+> (note) solutions for others: SLOW_USERSPACE_THREADS, NEVER_USE_LIBC_ALLOC
+> TODO: should make docs/debugging.md and document strategies for narrowing down bugs. 
 
 ## deduplication
 
@@ -94,69 +100,16 @@ bodies on different targets which i don't deal with well.
 - soft_draw.fr crashes when you quit the program
 - spurious failure of import_c/tests/wuffs.fr on macos-x86_64 
   (failed in github actions and then worked when rerun with no change)
-- random failures in import_c
-  - `panic! tried to unlock someone else's mutex`
-  - `16000panic! recursing in new_arena_chunkmemory order problem`
-  - `panic! use_symbol but already locked by this thread=1`
-this eventually reproduces with the slow memory debugging stuff turned on. 
-```
-for i in $(seq 1 1000);
-do
-    echo $i
-    ./target/f.out examples/import_c/test/test.fr || { echo "fail"; break; };
-done
-```
-
----
-
-without EXPERIMENT_LESS_DIRECT_CALLS: 
-```
-- collection of arm-macos random failures in github. 
-  - abi5.ssa -frc fail output
-  - echo.ssa -w fail output
-  - compiler/tests.fr: compiler/main.fr helloworld x2
-  - tests/exe/sys.fr 
-  - compiler/tests.fr: backend/meta/qbe_frontend.fr mandel
-  - wuffs zlib.c failed run  
-- collection of amd-macos random failures in github. 
-  - hang for >4 minutes on `./target/f.out examples/default_driver.fr build compiler/main.fr -aot self -unsafe -o target/release/franca-linux-amd64 -arch x86_64 -os linux`
-  - wuffs bzip2.c failed run  
-  - hang between compiling predict.fr and farm_game.fr 
-  - prospero.fr
-  - hang between compiling app_events.fr and geo/main.fr 
-```
-
-with EXPERIMENT_LESS_DIRECT_CALLS(arm):
-```
-- arm-macos 
-  - abi5.ssa -w
-- amd 
-  - wuffs bzip2.c
-  - mandel.ssa -jit x3
-  - abi5.ssa -frc_inlinable
-  - wuffs gif.c x3
-  - switch.ssa -jit
-  - wuffs targa.c
-- linux amd
-  - hang after hello_triangle
-```
-
-with EXPERIMENT_LESS_DIRECT_CALLS(arm+amd1):
-```
-- amd
-  - gif.c
-```
----
-
-./boot/temporary/macos-amd64.sh with SLOW_USERSPACE_THREADS=true
+- ./boot/temporary/macos-amd64.sh with SLOW_USERSPACE_THREADS=true
 ```
 pragma-once.c                           [ok] 
 
 All is fine! (passed 35 tests)
 1.fr                                    note: run with `FRANCA_BACKTRACE=1` environment variable to display a backtrace%     
 ```
-
 - `./q.out examples/default_driver.fr build compiler/main.fr -o q.out -d t` very rarely prints junk
+- `FRANCA_NO_CACHE=1 franca examples/import_c/test/test.fr` 
+  dies in init_codegen_worker. spawning threads from a shim doesn't work? 
 
 ## import_symbol / weak
 

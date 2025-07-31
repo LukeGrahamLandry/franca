@@ -61,12 +61,7 @@ openat :: fn(parent: Fd, path: CStr, flags: Mask(O), mode: Mask(S)) SysResult(Fd
     };
     
     errno()[] = 0/*HACK*/;
-    err := Syscall'openat(parent, path, flags, mode);
-    if err < 0 {
-        return Fd.fix_errno(intcast err);
-    };
-    
-    (Ok = (fd = err))
+    Fd.sys_ret(Syscall'openat(parent, path, flags, mode).intcast())
 };
 
 //
@@ -100,25 +95,21 @@ fn fstatat(parent: Fd, path: CStr, out: *Stat, flags: i64) SysResult(void) = {
     f := choose_inode64_on_applex8664(Syscall'fstatat, Syscall'@"fstatat$INODE64");
     
     @debug_assert_eq(flags, 0, "TODO: remap AT_SYMLINK_NOFOLLOW");
-    err := if current_os() == .linux {
+    result := if current_os() == .linux {
         // old glibc won't give you fstatat with a sane name and i don't want to deal with it
         errno()[] = 0/*HACK*/;
         Syscall'fstatat_nolibc(parent, path, r&, flags)
     } else {
         f(parent, path, r&, flags)
     };
-    if err != 0 {
-        return void.fix_errno(err);
-    };
-    
+    @if(result == 0)
     @match(current_os()) {
         fn macos() => fix(out, r.m&);
         fn linux() => @if(query_current_arch() == .x86_64, 
             fix(out, r.l&), fix(out, r.la&));
         @default => unreachable();
     };
-    
-    (Ok = ())
+    void.sys_ret(result)
 }
 
 // bit masks for Stat.st_mode
@@ -168,9 +159,7 @@ fn mkdir(path: CStr, mode: i64) SysResult(void) =
 // create a new directory. 
 fn mkdirat(parent: Fd, path: CStr, mode: Mask(S)) SysResult(void) = {
     @debug_assert_eq(mode.bit_and(octal "0777"), mode, "mkdirat(mode)");
-    err := Syscall'mkdirat(parent, path, mode);
-    if(err != 0, => return(void.fix_errno(err)));
-    (Ok = ())
+    void.sys_ret(Syscall'mkdirat(parent, path, mode))
 }
 
 //
@@ -198,13 +187,7 @@ MAP :: @struct {
 mmap :: fn(addr: rawptr, len: i64, prot: Mask(PROT), flags: Mask(MAP), fd: Fd, offset: i64) SysResult(rawptr) = {
     agree :: @or(MAP.SHARED, MAP.PRIVATE, MAP.FIXED);
     flags := fix_flags(Macos.MAP, Linux.MAP, MAP, agree, true, flags);
-    err := Syscall'mmap(addr, len, prot, flags, fd, offset);
-    
-    if err < 4096 {  // TODO: does the syscall return negative or positive of the errno? neither could be a sane pointer. 
-        return rawptr.fix_errno(err);
-    };
-    
-    (Ok = rawptr_from_int err)
+    rawptr.sys_ret(Syscall'mmap(addr, len, prot, flags, fd, offset))
 };
 
 // <poll.h>
@@ -222,11 +205,7 @@ pollfd :: @struct {
 
 poll :: fn(fds: []pollfd, timeout: i32) SysResult(i64) = {
     poll :: fn(fds: []pollfd, timeout: i32) i64 #libc; // :slice_abi
-    r := poll(fds, timeout);
-    if r < 0 {
-        return i64.fix_errno(r);
-    };
-    (Ok = r)
+    i64.sys_ret(poll(fds, timeout))
 };
 
 // <wait.h>
@@ -248,11 +227,7 @@ waitpid :: fn(pid: pid_t, status: *i32, options: Mask(W)) SysResult(i32) = {
 };
 
 wait4 :: fn(pid: pid_t, status: *i32, options: Mask(W), usage: *rusage) SysResult(i32) = {
-    r := Syscall'wait4(pid, status, options, usage);
-    if r < 0 {
-        return i32.fix_errno(r.intcast());
-    };
-    (Ok = r)
+    i32.sys_ret(Syscall'wait4(pid, status, options, usage).intcast())
 };
 
 // 
@@ -307,15 +282,10 @@ readdir :: fn(dir: *DIR) SysResult(*dirent) = {
         if self.cur >= self.end {
             self.cur = 0;
             self.end = Syscall'getdents(self.fd, self.buf.ptr, self.buf.len, @ref 0/*macos*/);
-            
-            if self.end == 0 {
-                self.done = true;
-                return(Ok = zeroed(*dirent), Err = (_ = 0));
+            self.done = self.end <= 0;
+            if self.done {
+                return(sys_ret(*dirent, self.end))
             };
-            if self.end < 0 {
-                self.done = true;
-                return(Posix'fix_errno(*dirent, self.end));
-            };        
         };
         
         r := ptr_cast_unchecked(u8, SysDirEnt, self.buf.index(self.cur));
@@ -373,14 +343,10 @@ closedir :: fn(dir: *DIR) SysResult(void) = {
     if prefer_syscalls() {
         a.dealloc(u8, d.impl.buf);
         _ := Syscall'close(d.impl.fd);  // TODO: wrap and return error i guess
-    } else {
-        closedir :: fn(dir: rawptr) i64 #weak #libc;
-        err := closedir(d.system);
-        if err != 0 { 
-            return void.fix_errno(err);
-        };
+        return(Ok = ());
     };
-    (Ok = ())
+    closedir :: fn(dir: rawptr) i64 #weak #libc;
+    void.sys_ret(closedir(d.system))
 };
 
 // [macos+linux agree]
@@ -483,16 +449,13 @@ sigaction_raw :: fn(signum: i64, sys_new: *SysSigAction, sys_old: *SysSigAction)
         };
         @default => unreachable();
     };
-    if err != 0 { 
-        return fix_errno(void, err);
-    };
-    (Ok = ())
+    void.sys_ret(err)
 };
 
 fn fix(d: *SysSigAction, s: *SigAction) void = {
     agree :: @or(SIG.INT, SIG.QUIT, SIG.ILL, SIG.TRAP, SIG.ABRT, SIG.FPE, SIG.KILL, SIG.SEGV, SIG.PIPE);
     @debug_assert_eq(s.sa_mask, 0); // TODO: fix_number each bit. this is not the same thing!
-    sa_mask := fix_flags(Macos.SIG, Linux.SIG, SIG, agree, false, s.sa_mask);
+    sa_mask := 0; // fix_flags(Macos.SIG, Linux.SIG, SIG, agree, false, s.sa_mask);
     sa_flags := fix_flags(Macos.SA, Linux.SA, SA, 0, false, s.sa_flags);
     @match(current_os()) {
         fn macos() => {
@@ -610,11 +573,7 @@ fn signal_handler_body(info_s: *SysSigInfo, ctx_s: *SysUContext, $body: @Fn(info
 
 kill :: fn(pid: i32, signum: i64) SysResult(void) = {
     signum := fix_number(Macos.SIG, Linux.SIG, SIG, signum);
-    err := Syscall'kill(pid, signum);
-    if err != 0 { 
-        return fix_errno(void, err);
-    };
-    (Ok = ())
+    void.sys_ret(Syscall'kill(pid, signum));
 };
 
 ///////////////////////////////////////////////////////////////////////
@@ -642,7 +601,15 @@ errno :: fn() *i32 = {
     }
 };
 
-fn fix_errno($T: Type, err: i64) SysResult(T) #generic = 
+sys_ret :: fn($T: Type, result: i64) SysResult(T) #generic = 
+    bit_cast_unchecked(SysResult(i64), SysResult(T), sys_ret_erased(result));
+
+sys_ret_erased :: fn(result: i64) SysResult(i64) #noinline = {
+    @if(result < 0) return(Ok = 0, Err = fix_errno(result));
+    (Ok = result)
+};
+
+fn fix_errno($T: Type, err: i64) SysResult(T) #generic #inline = 
     (Ok = zeroed T, Err = fix_errno(err));
 
 fn fix_errno(err: i64) SysError #noinline = {
@@ -707,33 +674,55 @@ current_arch :: query_current_arch;
 current_os :: query_current_os;
 
 fn fix_flags();
-fn fix_flags($macos: Type, $linux: Type, $public: Type, $agree: i64, $preserve_high_bits: bool, flags: i64) i64 = {
+fn fix_flags($macos: Type, $linux: Type, $public: Type, agree: i64, preserve_high_bits: bool, flags: i64) i64 = {
+    m :: create_flags_data(Type.scope_of(macos), Type.scope_of(public));
+    l :: create_flags_data(Type.scope_of(linux), Type.scope_of(public));
+    fix_flags(m, l, agree, preserve_high_bits, flags)
+} 
+
+fn fix_flags(macos: []FlagInfo, linux: []FlagInfo, agree: i64, preserve_high_bits: bool, flags: i64) i64 = {
     d := bit_and(flags, agree);
-    @if(preserve_high_bits) {
+    if preserve_high_bits {
         d = d.bit_or(flags.shift_right_logical(32));
     };
-    flags := @match(current_os()) {
-        fn macos() => fix_flags(macos, public, d, flags);
-        fn linux() => fix_flags(linux, public, d, flags);
+    data := @match(current_os()) {
+        fn macos() => macos;
+        fn linux() => linux;
         @default => unreachable();
     };
-    flags
-} 
+    fix_flags(d, flags, data)
+}
 
 fn fix_flags($Dest: Type, $Src: Type, d: i64, s: i64) i64 = {
     D :: Type.scope_of(Dest); S :: Type.scope_of(Src);
-    
-    inline_for get_constants(S) { $name |
-        d_flag :: get_constant(i64, D, name[]);
+    fix_flags(d, s, ::create_flags_data(D, S))
+};
+
+fn fix_flags(d: i64, s: i64, data: []FlagInfo) i64 = {
+    for data { it |
+        if s.bit_and(1.shift_left(it.src.zext())) != 0 {
+            d = d.bit_or(1.shift_left(it.dest.zext()));
+        }
+    };
+    d
+}
+
+FlagInfo :: @struct(dest: u8, src: u8);
+create_flags_data :: fn(D: ScopeId, S: ScopeId) []FlagInfo = {
+    out := FlagInfo.list(ast_alloc());
+    for get_constants(S) { name |
+        d_flag := get_constant(i64, D, name);
         if d_flag { d_flag |
-            s_flag :: get_constant(i64, S, name[]).unwrap();
-            if d_flag != 0 && s.bit_and(s_flag) == s_flag {
-                d = bit_or(d, d_flag);
+            s_flag := get_constant(i64, S, name).unwrap();
+            d_bit := d_flag.trailing_zeros();
+            s_bit := s_flag.trailing_zeros();
+            if d_flag != 0 {
+                @assert(1.shift_left(d_bit) == d_flag && 1.shift_left(s_bit) == s_flag, "multiple bits in %", name.str());
+                out&.push(dest = d_bit.trunc(), src = s_bit.trunc());
             }
         };
     };
-    
-    d
+    out.items()
 };
 
 fn fix_number();
