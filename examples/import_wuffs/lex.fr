@@ -1,0 +1,275 @@
+
+TokenType :: @enum(i64) (
+    _keyword0,
+    "pub", "pri", "func", "struct", "implements", "var", "choose", "const", 
+    "iterate", "while", "if", "else", "return", "yield", "break", "continue", 
+    "not", "or", "and", 
+    "sat", "mod", "as", 
+    "assert", "via", "inv", "pre", "post", 
+    "true", "false", "slice", "roslice", "array", "roarray", "ptr", "nptr", 
+    _keyword1,
+    
+    _punct0,
+    "~", "?", "=", "=?", "!", ":", ".", "..", "..=", ",", 
+     "{", "}", "{{", "}}", "(", ")", "[", "]", 
+    "<", ">", "<=", ">=", "==", "<>", 
+    "+", "-", "*", "/", "<<", ">>", "%", "^", "&", "|", 
+    _punct1,
+    
+    Ident,
+    Number,
+    Quoted,
+    Error,
+    EndOfFile, 
+);
+
+Lexer :: @struct {
+    src: Str;
+    current := 0;
+    n := 0;
+    string := "";
+    start := 0;
+};
+
+fn pop(self: *Lexer) TokenType = { loop {
+    continue :: local_return; // loop for skipping whitespace
+    self.start = self.current;
+    return(@switch(self.peek_c()) {
+        @inclusive("a".ascii(), "z".ascii()) => self.lex_ident();
+        @inclusive("A".ascii(), "Z".ascii()) => self.lex_ident();
+        @case("_".ascii()) => self.lex_ident();
+        @case("/".ascii()) => {
+            @switch(self.peek_c(1)) {
+                @case("/".ascii()) => {
+                    while => self.peek_c() != "\n".ascii() {
+                        self.current += 1;
+                    };
+                    continue()
+                }
+                @default => self.one(.@"/");
+            }
+        };
+        @case("0".ascii()) => {
+            msg := "leading zero is not allowed (because you might think it means c octal).";
+            @switch(self.peek_c(1)) {
+                @case("x".ascii()) => self.lex_hex();
+                @case("b".ascii()) => self.lex_bin();
+                @case(".".ascii()) => self.lex_num();
+                @inclusive("0".ascii(), "9".ascii()) => self.error(msg);
+                @default => {
+                    self.current += 1;
+                    self.number(0)
+                };
+            }
+        };
+        @inclusive("1".ascii(), "9".ascii()) => self.lex_num();
+        @case("$".ascii()) => {
+            panic("TODO: franca escape. just collect a string between {}");
+        };
+        @case("\"".ascii()) => {
+            self.current += 1;
+            while => self.peek_c() != "\"".ascii() {
+                self.current += 1;
+            };
+            self.string = self.src.slice(self.start - 1, self.current);
+            self.current += 1;
+            .Quoted
+        };
+
+        // TODO: handle \escapes here
+        @case("\'".ascii()) => {
+            self.current += 1;
+            while => self.peek_c() != "\'".ascii() {
+                self.current += 1;
+            };
+            self.string = self.src.slice(self.start - 1, self.current);
+            self.current += 1;
+            .Quoted
+        };
+        @case(0) => .EndOfFile;
+        @inclusive("!".ascii(), ".".ascii()) => self.lex_punct();
+        @inclusive(":".ascii(), "@".ascii()) => self.lex_punct();
+        @inclusive("[".ascii(), "`".ascii()) => self.lex_punct();
+        @inclusive("{".ascii(), "~".ascii()) => self.lex_punct();
+        @default fn(c) => {
+            if " \n\t\n".contains(c) {
+                self.current += 1;
+                continue();
+            };
+            self.error(@tfmt("invalid character %", c))
+        };
+    });
+}}
+
+fn error(self: *Lexer, msg: Str) TokenType = {
+    @eprintln("import_wuffs/lex.fr: %", msg);
+    self.string = msg;
+    .Error
+}
+
+// TODO: factor these into something reuseable because stuff seems pretty much standardized on number syntax. 
+// START copy-paste from compiler/lex.fr
+
+fn lex_num(self: *Lexer) TokenType = {
+    whole := self.lex_int();
+    if self.peek_c() == ".".ascii() && self.peek_c(1).is_ascii_digit() {
+        // Actually, that's a float.
+        self.current += 1;
+        start := self.current;
+        fraction := self.lex_int();
+        end := self.current;
+        digits := end.sub(start);
+        scale := 10.pow(digits);
+        n := whole.float().add(fraction.float().div(scale.float()));
+        return self.number(n.bitcast());
+    } else {
+        return self.number(whole);
+    };
+    unreachable()
+}
+
+// TODO: error on overflow
+fn lex_int(self: *Lexer) i64 = {
+    total := 0;
+    dowhile {
+        total *= 10;
+        total += self.peek_c().dec_digit().unwrap();
+        self.current += 1;
+        while => self.peek_c() == "_".ascii() {
+            self.current += 1;
+        };
+        self.peek_c().is_ascii_digit()
+    };
+    total
+}
+
+fn lex_hex(self: *Lexer) TokenType #once = {
+    self.current += 2;
+    total := 0;
+    
+    if !self.peek_c().is_hex_digit() {
+        return self.error("invalid hex character");
+    };
+    
+    bits := 0;
+    dowhile {
+        total *= 16;
+        bits += 4;
+        if bits > 64 {
+            return self.error("hex literal overflows 64 bits");
+        };
+        total += self.peek_c().hex_digit().unwrap(); // TODO: dumb that i do an extra switch here when i just did one at the end of the loop, but nothing matters. 
+        self.current += 1;
+        while => self.peek_c() == "_".ascii() {
+            self.current += 1;
+        };
+        self.peek_c().is_hex_digit()
+    };
+    self.number(bits)
+}
+
+is_hex_digit :: fn(c: u8) bool = {
+     @switch(c) {
+        @inclusive("0".ascii(), "9".ascii()) => true;
+        @inclusive("a".ascii(), "f".ascii()) => true;
+        @inclusive("A".ascii(), "F".ascii()) => true;
+        @default => false;
+    }
+}
+
+fn lex_bin(self: *Lexer) TokenType #once = {
+    self.current += 2;
+    total := 0;
+    
+    c := self.peek_c();
+    if !"01".contains(c) {
+        return self.error("invalid binary character");
+    };
+    
+    bits := 0;
+    dowhile {
+        more := @switch(self.peek_c()){
+            @case("0".ascii()) => {
+                total *= 2;
+                bits += 1;
+                self.current += 1;
+                true
+            };
+            @case("1".ascii()) => {
+                total *= 2;
+                bits += 1;
+                self.current += 1;
+                total += 1;
+                true
+            };
+            @case("_".ascii()) => {
+                self.current += 1;
+                true
+            };
+            @default => false;
+        };
+        more
+    };
+    if bits > 64 {
+        return self.error("binary literal overflows 64 bits");
+    };
+    self.number(bits)
+}
+
+fn lex_ident(self: *Lexer) TokenType = {
+    dowhile {
+        self.current += 1;
+        c := self.peek_c();
+        c.is_ascii_alpha() || c.is_ascii_digit() || c == "_".ascii()
+    };
+    name := self.src.slice(self.start, self.current);
+    self.string = name;
+    .Ident
+}
+
+fn lex_punct(self: *Lexer) TokenType = {
+    self.keywords(._punct0, ._punct1)
+}
+
+fn keywords(self: *Lexer, $start: TokenType, $end: TokenType) TokenType = {
+    
+    // TODO: !! :COMPILERBUG HACK :FUCKED !!
+    //       without this: 
+    //       fn is(tok: *Token, $names: []Str) bool = {
+    //       Compile Error: (Undeclared Variable 'Token'[Symbol=2458] in S15774)
+    ::import("@/examples/import_c/lib.fr");
+    
+    self.string = "";
+    kw :: {
+        ::enum(TokenType);
+        // TODO: why does this need .raw() ?? shouldn't @as be enough? :CompilerBug
+        start := 1 + @as(i64) start.raw(); end := @as(i64) end.raw();
+        out := ast_alloc().alloc(Str, end - start);
+        range(start, end) { i |
+            xx := @as(TokenType) i;
+            out[i - start] = name_str(xx);
+        };
+        out
+    };
+    // TODO: bounds check
+    f :: import("@/examples/import_c/tokenize.fr")'read_punct;
+    len, type := f(self.src.index(self.current), kw, TokenType, TokenType.Error);
+    self.current += len;
+    type
+}
+
+fn one(self: *Lexer, type: TokenType) TokenType = {
+    self.current += 1;
+    type
+}
+
+fn peek_c(self: *Lexer) u8 = self.peek_c(0);
+fn peek_c(self: *Lexer, n: i64) u8 = 
+    if(self.current + n < self.src.len, => self.src[self.current.add(n)], => 0);
+
+// END copy-paste from compiler/lex.fr
+
+fn number(self: *Lexer, n: i64) TokenType = {
+    self.n = n;
+    .Number
+}
