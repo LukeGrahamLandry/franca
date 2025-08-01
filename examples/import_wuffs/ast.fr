@@ -1,0 +1,211 @@
+Program :: @struct {
+    modules := zeroed RawList(Module);
+    names: StringPool;
+    literals := zeroed RawList(LiteralValue);
+    arena: Alloc;
+};
+
+Module :: @struct {
+    name: Symbol;
+    body := zeroed RawList(TopLevelStmt);
+    // TODO: if i start transforming (adding new nodes) while doing infer, 
+    //       turn this into a BucketArray for pointer stability. 
+    nodes := zeroed RawList(Node);
+    arena: Alloc;
+};
+
+TopLevelStmt :: @tagged(
+    DeclareFunc: @struct {
+        body: []Node;
+        vars: []Field;
+        params: []Field;
+        return_type: Node;
+        self_type: Symbol;
+        name: Symbol;
+    },
+    DeclareStruct: @struct {
+        fields: []Field;
+        init_field_count: i64;
+        implements: Node;
+    },
+    Constant: @struct {
+        var: Field;
+        value: Node;
+    },
+    Use: Symbol,
+);
+
+Field :: @struct(name: Symbol, type: Node);
+Node :: @struct(id: u32);
+
+Call :: @struct {
+    tag := NodeType.Call;
+    effect: Effect;
+    callee: Node;
+    arg_count: u32;
+};
+
+Effect :: @enum(u8) (Pure, Impure, Yielding);
+
+GetVar :: @struct {
+    tag := NodeType.GetVar;
+    name: Symbol;
+};
+
+GetField :: @struct {
+    tag := NodeType.GetField;
+    name: Symbol;
+    place: Node;
+};
+
+Op :: @struct {
+    tag := NodeType.Op;
+    op: TokenType;
+    style: Style;
+    assign: bool;
+    lhs: Node;
+    rhs: Node;
+    
+    Style :: @enum(u8) (Safe, Mod, Sat);
+};
+
+Assign :: @struct {
+    tag := NodeType.Assign;
+    is_choose := false;
+    effect: Effect;
+    place: Node;
+    value: Node;
+};
+
+If :: @struct {
+    tag := NodeType.If;
+    cond: Node;
+    then_count: u32;
+    else_count: u32;
+    // [Node] [Node]
+};
+
+While :: @struct {
+    tag := NodeType.While;
+    cond: Node;
+    body_count: u32;
+    // invarients are at the beginning 
+    // [Node]
+};
+
+Jump :: @struct {
+    tag := NodeType.Jump;
+    style: Style;
+    value: Node;  // Break/Continue has a label (points to the loop node). Yield/Return have a status. 
+    Style :: @enum(u8) (Break, Continue, Yield, Return);
+};
+
+Literal :: @struct {
+    tag := NodeType.Literal;
+    index: u32;  // into literal pool
+};
+
+LiteralValue :: @tagged(
+    Number: i64,
+    Status: Symbol,
+    Bool: bool,
+);
+
+Generic :: @struct {
+    tag := NodeType.Generic;
+    op: TokenType;
+    inner: Node;
+    length: Node;
+};
+
+Builtin :: @struct {
+    tag := NodeType.Builtin;
+    op: TokenType;
+    call: Node;
+    body_count: u32;
+    // [Node]
+};
+
+Invarient :: @struct {
+    tag := NodeType.Invarient;
+    style: TokenType;  // pre, post, inv
+    cond: Node;
+}
+
+Assert :: @struct {
+    tag := NodeType.Assert;
+    cond: Node;
+    proof: Node;  // this is a call node like `"axiom"(c: value)`
+}
+
+Array :: @struct {
+    tag := NodeType.Array;
+    count: u32;
+    // [Node]
+}
+
+Index :: @struct {
+    tag := NodeType.Index;
+    op: TokenType;
+    self: Node;
+    lo: Node;
+    hi: Node;
+}
+
+NodeType :: @enum(u8) (
+    Call,
+    GetVar,
+    GetField,
+    Op,
+    Assign,
+    If,
+    While,
+    Jump,
+    Literal,
+    Generic,
+    Builtin,
+    Invarient,
+    Assert,
+    Array,
+    Index,
+);
+
+// This is not actually stored. It's just for reading the node conveniently. 
+NodeFull :: @tagged(
+    Call: *Call,
+    GetVar: *GetVar,
+    GetField: *GetField,
+    Op: *Op,
+    Assign: *Assign,
+    If: *If,
+    While: *While,
+    Jump: *Jump,
+    Literal: *Literal,
+    Generic: *Generic,
+    Builtin: *Builtin,
+    Invarient: *Invarient,
+    Assert: *Assert,
+    Array: *Array,
+    Index: *Index,
+);
+
+fn new_node(self: *Module, $T: Type, node: T) Node #generic = {
+    result: Node = (id = self.nodes.len.trunc());
+    count :: size_of(T).align_to(size_of(Node)) / size_of(Node);
+    values: []Node = bit_cast_unchecked(*T, *Node, node&).slice(count);
+    self.nodes&.push_all(values, self.arena);
+    result
+}
+
+fn new_node(self: *Module, $T: Type, node: T, extra: []Node) Node #generic = {
+    node := self.new_node(T, node);
+    self.nodes&.push_all(extra, self.arena);
+    node
+}
+
+fn new_literal(self: *Program, it: LiteralValue) u32 = {
+    self.literals&.push(it, self.arena);
+    self.literals.len.trunc()
+}
+
+#use("@/compiler/pool.fr");

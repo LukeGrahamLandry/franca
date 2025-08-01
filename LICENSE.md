@@ -25,3 +25,5 @@ the original license text.
 | backend  |   qbe   |     MIT     | © 2015-2024 Quentin Carbonneaux <quentin@c9x.me> | https://c9x.me/compile |
 | import_c | chibicc |     MIT     | Copyright (c) 2019 Rui Ueyama | https://github.com/rui314/chibicc |
 | graphics |  sokol  | zlib/libpng | Copyright (c) 2018 Andre Weissflog | https://github.com/floooh/sokol |
+
+- backend/macho/exports.fr: Zig. The MIT License (Expat). Copyright (c) Zig contributors.

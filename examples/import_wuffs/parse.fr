@@ -1,0 +1,536 @@
+
+Parser :: @struct {
+    lex: Lexer;
+    module: *Module;
+    program: *Program;
+    previous := zeroed FullToken;
+    current := zeroed FullToken;
+    status_type := zeroed Node; // TODO
+    void_type := zeroed Node; // TODO
+    builtin_callee := zeroed Node;  // TODO
+};
+
+fn parse_top_level(source: Str, program: *Program, module: *Module) void = {
+    self: Parser = (
+        lex = (src = source), 
+        program = program, 
+        module = module,
+    );
+    self := self&;
+
+    ::enum(TokenType);
+    self.pop();
+    loop {
+        stmt := @match(self.pop()) {
+            fn use() => {
+                name := self.next_name();
+                @println("use %", self.program.names&.get(name));
+                (Use = name)
+            }
+            fn pub() => self.top_level_declare(true);
+            fn pri() => self.top_level_declare(false);
+            fn EndOfFile() => return();
+            @default => @panic("expected top level statment found %", self.previous.type); 
+        };
+        self.module.body&.push(stmt, self.module.arena);
+    };
+}
+
+fn top_level_declare(self: *Parser, public: bool) TopLevelStmt = {
+    @match(self.pop()) {
+        fn Ident() => {
+            name := self.prev_name();
+            // :SLOW, can't be a keyword because it's contextual
+            if name == self.program.names&.insert_owned("status") {
+                name := self.next_name();
+                value := 
+                @println("status %", self.program.names&.get(name));
+                return(Constant = (
+                    var = (name = name, type = self.status_type), 
+                    value = self.new_node(GetVar, (name = name)),
+                ));
+            };
+            println("after ident declare");
+            todo()
+        }
+        fn const() => {
+            name := self.next_name();
+            self.eat(.@":");
+            type := self.type();
+            self.eat(.@"=");
+            value := self.expr();
+            (Constant = (var = (name = name, type = type), value = value))
+        }
+        fn struct() => {
+            name := self.next_name();
+            self.eat(.@"?");
+            self.eat(.implements);
+            interface := self.type();
+            self.eat(.@"(");
+            vars := Field.list(self.module.arena);
+            self.var_list(vars&, false);
+            self.eat(.@")");
+            init := vars.len;
+            if self.maybe(.@"+") {
+                self.eat(.@"(");
+                self.var_list(vars&, false);
+                self.eat(.@")");
+            };
+            (DeclareStruct = (fields = vars.items(), init_field_count = init, implements = interface))
+        }
+        fn func() => {
+            reciever := self.next_name();
+            self.eat(.@".");
+            name := self.next_name();
+            impure := self.maybe(.@"!");  // TOOD
+            yielding := self.maybe(.@"?");  // TODO
+            @assert(!(impure && yielding));
+            self.eat(.@"(");
+            params := Field.list(self.module.arena);
+            self.var_list(params&, false);
+            self.eat(.@")");
+            ret := self.void_type;
+            if !@is(self.current.type, .@"{", .@",") {
+                ret = self.type();
+            }
+            if self.maybe(.@",") {
+                if self.maybe(.choosy) {
+                    self.eat(.@",");
+                    // TODO: do something with that information
+                    // this is the default one
+                }
+                if self.maybe(.choose) {
+                    cond := self.expr();
+                    self.eat(.@",");
+                    // TODO: do something with that information
+                    // the expression is like which archetecture for simd. 
+                }
+            }
+            self.eat(.@"{");
+            vars := Field.list(self.module.arena);
+            self.var_list(vars&, true);
+            @println("START func %.% vars=%", 
+                self.program.names&.get(reciever), self.program.names&.get(name), vars.len);
+            body := Node.list(self.module.arena);
+            self.block(body&);
+            (DeclareFunc = (
+                name = name,
+                body = body.items(),
+                vars = vars.items(),
+                params = params.items(),
+                return_type = ret,
+                self_type = reciever,
+            ))
+        }
+        @default => panic("TODO: declare");
+    }
+}
+
+fn var_list(self: *Parser, out: *List(Field), is_locals: bool) void = {
+    loop {
+        done := @if(is_locals, !self.maybe(.var), self.current.type != .Ident);
+        @if(done) return();
+        
+        name := self.next_name();
+        self.eat(.@":");
+        type := self.type();
+        out.push(name = name, type = type);
+        if !is_locals && !self.maybe(.@",") {
+           return();
+        };
+    }
+}
+
+// consumes the closing }
+fn block(self: *Parser, nodes: *List(Node)) void = {
+    while => !self.maybe(.@"}") {
+        nodes.push(self.stmt());
+    };
+}
+
+fn stmt(self: *Parser) Node = {
+    @match(self.current.type) {
+        fn if() => {
+            self.pop();
+            cond := self.expr();
+            body := Node.list(temp());
+            self.eat(.@"{");
+            self.block(body&);
+            then: u32 = body.len.trunc();
+            if self.maybe(.else) {
+                if self.current.type == .if {
+                    body&.push(self.stmt());
+                } else {
+                    self.eat(.@"{");
+                    self.block(body&);
+                };
+            };
+            self.new_node(If, (
+                cond = cond, 
+                then_count = then, 
+                else_count = body.len.trunc() - then,
+            ), body.items())
+        }
+        fn return() => {
+            self.pop();
+            value := self.expr();
+            self.new_node(Jump, (style = .Return, value = value))
+        }
+        fn yield() => {
+            self.pop();
+            self.eat(.@"?");
+            value := self.expr();
+            self.new_node(Jump, (style = .Yield, value = value))
+        }
+        fn continue() => self.loop_flow(.Continue);
+        fn break() => self.loop_flow(.Break);
+        fn while() => {
+            self.pop();
+            start_label := zeroed Symbol;
+            if self.maybe(.@".") {
+                start_label = self.next_name();
+                // TODO: use this!
+            };
+            cond := self.expr();
+            body := Node.list(temp());
+            if self.maybe(.@",") {
+                dowhile {
+                    style := self.pop();
+                    cond := self.expr();
+                    body&.push(self.new_node(Invarient, (cond = cond, style = style)));
+                    self.maybe(.@",");
+                    self.current.type != .@"{"
+                };
+            }
+            self.eat(.@"{");
+            self.block(body&);
+            if self.maybe(.@".") {
+                end_label := self.next_name();
+                @assert_eq(start_label, end_label, "while loop labels must match");
+            };
+            self.new_node(While, (
+                cond = cond, 
+                body_count = body.len.trunc(),
+            ), body.items())
+        }
+        fn io_forget_history() => self.builtin_call();
+        fn io_bind() => self.builtin_call();
+        fn io_limit() => self.builtin_call();
+        fn assert() => {
+            self.pop();
+            cond := self.expr();
+            proof := zeroed Node; // TODO
+            if self.maybe(.via) {
+                proof = self.expr();
+            }
+            self.new_node(Assert, (cond = cond, proof = proof))
+        }
+        fn choose() => {
+            self.pop();
+            place := self.expr();
+            self.eat(.@"=");
+            // TODO: assert that it's an array
+            value := self.expr();
+            self.new_node(Assign, (effect = .Pure, is_choose = true, place = place, value = value))
+        }
+        @default => {
+            node := self.expr();
+            @match(self.current.type) {
+                fn @"="() => self.assign(node, .Pure);
+                fn @"=?"() => self.assign(node, .Yielding);
+                @default => node;
+            }
+        };
+    }
+}
+
+fn builtin_call(self: *Parser) Node = {
+    op := self.pop();
+    call := self.call(self.builtin_callee, .Impure);
+    body := Node.list(temp());
+    self.eat(.@"{");
+    self.block(body&);
+    self.new_node(Builtin, (
+        op = op,
+        call = call, 
+        body_count = body.len.trunc(),
+    ), body.items())
+}
+
+fn loop_flow(self: *Parser, style: Jump.Style) Node = {
+    self.pop();
+    label := zeroed Node;  // TODO: keep a stack of active loops and resolve this now
+    if self.maybe(.@".") {
+        label := self.next_name();
+    }
+    self.new_node(Jump, (style = .Yield, value = label))
+}
+
+fn assign(self: *Parser, place: Node, effect: Effect) Node = {
+    self.pop();
+    value := self.expr();
+    self.new_node(Assign, (
+        effect = effect, place = place, value = value,
+    ))
+}
+
+fn type(self: *Parser) Node = {
+    @match(self.pop()) {
+        fn Ident() => {  
+            // TODO: really this case should be shared with expr()
+            name := self.prev_name();
+            @println("type %", self.program.names&.get(name));
+            node := self.new_node(GetVar, (name = name));
+            while => self.maybe(.@".") {
+                name := self.next_name();
+                @println("type^ .%", self.program.names&.get(name));
+                node = self.new_node(GetField, (place = node, name = name));
+            };
+            
+            if self.maybe(.@"[") {
+                self.eat(.@"..=");
+                high := self.expr();
+                self.eat(.@"]");
+                node = self.new_node(Generic, (inner = node, length = high, op = .@"..="))
+            };
+            
+            node
+        }
+        fn array()   => self.array_type(.array);
+        fn roarray() => self.array_type(.roarray);
+        fn slice()   => self.unary_generic(.slice);
+        fn roslice()   => self.unary_generic(.roslice);
+        fn ptr()     => self.unary_generic(.ptr);
+        fn nptr()    => self.unary_generic(.ptr);
+        fn table()   => self.unary_generic(.table);
+        @default => @panic("TODO: type %", self.previous.type);
+    }
+}
+
+fn array_type(self: *Parser, op: TokenType) Node = {
+    self.eat(.@"[");
+    length := self.expr();
+    self.eat(.@"]");
+    inner := self.type();
+    @println("array!");
+    self.new_node(Generic, (inner = inner, length = length, op = op))
+}
+
+fn unary_generic(self: *Parser, op: TokenType) Node = 
+    self.new_node(Generic, (inner = self.type(), length = (id = MAX_u32), op = op));
+
+fn expr(self: *Parser) Node = {
+    lhs := self.prefix_expr();
+    effect := Effect.Pure;
+    style := Op.Style.Safe;
+    loop {
+        lhs = @match(self.current.type) {
+            fn @"."() => {
+                self.pop();
+                name := self.next_name();
+                @println("dot %", self.program.names&.get(name));
+                self.new_node(GetField, (place = lhs, name = name))
+            }
+            fn @"~"() => {
+                self.pop();
+                style = @match(self.pop()) {
+                    fn mod() => .Mod;
+                    fn sat() => .Sat;
+                    @default => @panic("Expected ~mod or ~sat");
+                };
+                @assert(self.current.type.is_op(), "expected an operator after ~mod/~sat");
+                lhs
+            }
+            fn @"?"() => {
+                self.pop();
+                @assert_eq(self.current.type, .@"(", "expected call after '?'");
+                effect = .Yielding;
+                lhs
+            }
+            fn @"!"() => {
+                self.pop();
+                @assert_eq(self.current.type, .@"(", "expected call after '!'");
+                effect = .Impure;
+                lhs
+            }
+            fn @"("() => self.call(lhs, effect);
+            fn as() => {
+                self.pop();
+                type := self.type();
+                self.new_node(Op, (op = .as, assign = false, style = .Safe, lhs = lhs, rhs = type))
+            }
+            fn @"["() => {
+                op := self.pop();
+                lo := zeroed Node;  // TODO
+                @match(self.current.type) {
+                    fn @".."() => {
+                        op = self.current.type;
+                        self.pop();
+                    }
+                    fn @"..="() => {
+                        op = self.current.type;
+                        self.pop();
+                    }
+                    @default => {
+                        lo = self.expr();
+                    };
+                };
+                hi := zeroed Node;
+                @match(self.current.type) {
+                    fn @".."() => {
+                        @assert(op == .@"[");
+                        op = self.current.type;
+                        self.pop();
+                    }
+                    fn @"..="() => {
+                        @assert(op == .@"[");
+                        op = self.current.type;
+                        self.pop();
+                    }
+                    @default => ();
+                };
+                if self.current.type != .@"]" {
+                    hi = self.expr();
+                };
+                self.eat(.@"]");
+                self.new_node(Index, (
+                    op = op,
+                    self = lhs,
+                    lo = lo,
+                    hi = hi,
+                ))
+            }
+            @default => {
+                if !self.current.type.is_op() {
+                    return lhs;
+                };
+                self.operator(lhs, style)
+            };
+        };
+    };
+}
+
+fn is_op(t: TokenType) bool = @is(t, 
+    .@"+", .@"-", .@"*", .@"/", .@"%", 
+    .@"==", .@"<>", .@"<", .@">", .@"<=", .@">=",
+    .and, .or, 
+    .@"&", .@"|", .@"<<", .@">>", .@"^", 
+);
+
+fn prefix_expr(self: *Parser) Node = {
+    @match(self.pop()) {
+        fn Ident() => {
+            name := self.prev_name();
+            @println("var %", self.program.names&.get(name));
+            self.new_node(GetVar, (name = name))
+        }
+        fn Number() => self.literal_node(Number = self.current.payload.len);
+        fn true() => self.literal_node(Bool = true);
+        fn false() => self.literal_node(Bool = false);
+        fn @"("() => {
+            node := self.expr();
+            self.eat(.@")");
+            node
+        }
+        fn not() => {
+            it := self.expr();
+            self.new_node(Op, (op = .not, style = .Safe, assign = false, lhs = it, rhs = zeroed Node))
+        }
+        fn @"["() => {
+            nodes := Node.list(temp());
+            dowhile {
+                self.expr();
+                self.maybe(.@",");
+                !self.maybe(.@"]")
+            };
+            self.new_node(Array, (count = nodes.len.trunc()), nodes.items())
+        }
+        @default => @panic("TODO: expr %", self.previous.type);
+    }
+}
+
+fn literal_node(self: *Parser, it: LiteralValue) Node = {
+    value := self.program.new_literal(it);
+    self.new_node(Literal, (index = value))
+}
+
+// If callee is a field access, this is a method call 
+fn call(self: *Parser, callee: Node, effect: Effect) Node = {
+    self.eat(.@"(");
+    labels := Symbol.list(temp());
+    args := Node.list(temp());
+    while => !self.maybe(.@")") {
+        labels&.push(self.next_name());
+        self.eat(.@":");
+        args&.push(self.expr());
+        self.maybe(.@",");
+    };
+    self.new_node(Call, (
+        callee = callee, 
+        arg_count = args.len.trunc(), 
+        effect = effect,
+    ), args.items())
+}
+
+fn operator(self: *Parser, lhs: Node, style: Op.Style) Node = {
+    op := self.current.type;
+    self.pop();
+    assign := self.maybe(.@"=");  // TODO: maybe rewrite the tree now?
+    rhs := self.expr();
+    self.new_node(Op, (op = op, style = style, assign = assign, lhs = lhs, rhs = rhs))
+}
+
+fn new_node(self: *Parser, $T: Type, node: T) Node #generic = 
+    self.module.new_node(T, node);
+
+fn new_node(self: *Parser, $T: Type, node: T, extra: []Node) Node #generic = 
+    self.module.new_node(T, node, extra);
+
+fn eat(self: *Parser, t: TokenType) void = {
+    if !self.maybe(t) {
+        @panic("expected % but found % (%)", 
+            t, self.current.type, self.lex.src.slice(self.lex.start, self.lex.current));
+    }
+}
+
+fn maybe(self: *Parser, t: TokenType) bool = {
+    if self.current.type == t {
+        self.pop();
+        return(true);
+    };
+    false
+}
+
+fn next_name(self: *Parser) Symbol = {
+    t := self.pop();
+    @assert_eq(t, .Ident);
+    self.prev_name()
+}
+
+fn prev_name(self: *Parser) Symbol = {
+    self.program.names&.insert_owned(self.previous.payload)
+}
+
+fn pop(self: *Parser) TokenType = {
+    self.previous = self.current;
+    self.current = (
+        type = self.lex&.pop(), 
+        loc = self.lex.start.trunc(),
+        payload = self.lex.payload, 
+    );
+    
+    if self.current.type == .@"{{" {
+        self.current.type = .@"{"
+    };
+    if self.current.type == .@"}}" {
+        self.current.type = .@"}"
+    };
+    
+    @println("LEX: %", self.current.type);
+    self.previous.type
+}
+
+FullToken :: @struct(type: TokenType, loc: u32, payload: Str);
+
+#use("@/examples/import_wuffs/lex.fr");
+#use("@/examples/import_wuffs/ast.fr");

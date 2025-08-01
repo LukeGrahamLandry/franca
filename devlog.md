@@ -1,4 +1,26 @@
 
+## (Aug 1)
+
+bunch of work on wuffs parser. slowly working through decode_lzw.wuffs. 
+top level declarations, calls, ops, flow stmts, etc. until i got bored and 
+had to start keeping track to feel a sense of progress. 
+
+- 259. sad to have to special case io_forget_history for one usage. 
+- 385. ending label after while loop. 
+- 456. invarients in while expression. 
+- 503. assert
+- 582. choose. i don't super understand what this is for but im sure i'll find out. 
+- 641. %
+- 805. roarray
+- xz/decode_filter. 12. choosy. 
+- 82. more indexing.
+- 237. double braced blocks. what do those mean? just for the formatter to ignore it? 
+- gif/decode_lzw. 89. nptr
+- decode_gif. 987. io_bind
+- decode_nie. 358. assert doesn't always need a `via`
+- decode_png. 204. 'literals don't always need be/le
+- io_limit
+
 ## (Jul 31)
 
 - profiling
@@ -12,7 +34,10 @@
       - there's this that tells you what the names mean: https://github.com/jiegec/apple-pmu/blob/master/a8.md
       - resolve_in_overload_set_new is 25% of the time but 60% of the 
         BRANCH_COND_MISPRED_NONSPEC, L1D_CACHE_MISS_ST_NONSPEC, L1D_CACHE_MISS_LD_NONSPEC 
-  
+- don't want to deal with fixing bugs. taking a break and trying to write a wuffs compiler 
+  because i feel like thier thing is a good idea. experimenting with doing an ast more 
+  like the zig people do because they're so excited about it, maybe they're right. 
+
 ## (Jul 30)
 
 - deduplicate in new_type so you can deduplicate generics with same repr RType. 

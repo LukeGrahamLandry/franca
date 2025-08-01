@@ -1,12 +1,15 @@
 
-TokenType :: @enum(i64) (
+TokenType :: @enum(u8) (
     _keyword0,
+    "use",
     "pub", "pri", "func", "struct", "implements", "var", "choose", "const", 
     "iterate", "while", "if", "else", "return", "yield", "break", "continue", 
     "not", "or", "and", 
     "sat", "mod", "as", 
     "assert", "via", "inv", "pre", "post", 
-    "true", "false", "slice", "roslice", "array", "roarray", "ptr", "nptr", 
+    "true", "false", "slice", "roslice", "array", "roarray", "ptr", "nptr",
+    "io_forget_history", "io_bind", "io_limit", // builtin function with a trailing block 
+    "choosy", "table", 
     _keyword1,
     
     _punct0,
@@ -18,7 +21,6 @@ TokenType :: @enum(i64) (
     
     Ident,
     Number,
-    Quoted,
     Error,
     EndOfFile, 
 );
@@ -26,9 +28,9 @@ TokenType :: @enum(i64) (
 Lexer :: @struct {
     src: Str;
     current := 0;
-    n := 0;
-    string := "";
+    payload := "";
     start := 0;
+    line_start := 0;
 };
 
 fn pop(self: *Lexer) TokenType = { loop {
@@ -71,9 +73,9 @@ fn pop(self: *Lexer) TokenType = { loop {
             while => self.peek_c() != "\"".ascii() {
                 self.current += 1;
             };
-            self.string = self.src.slice(self.start - 1, self.current);
+            self.payload = self.src.slice(self.start + 1, self.current);
             self.current += 1;
-            .Quoted
+            .Ident
         };
 
         // TODO: handle \escapes here
@@ -82,9 +84,9 @@ fn pop(self: *Lexer) TokenType = { loop {
             while => self.peek_c() != "\'".ascii() {
                 self.current += 1;
             };
-            self.string = self.src.slice(self.start - 1, self.current);
+            self.payload = self.src.slice(self.start + 1, self.current);
             self.current += 1;
-            .Quoted
+            self.consume_endian_marker()
         };
         @case(0) => .EndOfFile;
         @inclusive("!".ascii(), ".".ascii()) => self.lex_punct();
@@ -93,6 +95,10 @@ fn pop(self: *Lexer) TokenType = { loop {
         @inclusive("{".ascii(), "~".ascii()) => self.lex_punct();
         @default fn(c) => {
             if " \n\t\n".contains(c) {
+                if c == "\n".ascii() {
+                    @println("LINE: %", self.src.slice(self.line_start, self.start));
+                    self.line_start = self.current + 1;
+                }
                 self.current += 1;
                 continue();
             };
@@ -101,9 +107,22 @@ fn pop(self: *Lexer) TokenType = { loop {
     });
 }}
 
+// TODO: do something with this information
+fn consume_endian_marker(self: *Lexer) TokenType = {
+    @switch(self.peek_c()) {
+        @case("b".ascii()) => ();
+        @case("l".ascii()) => ();
+        @default => return(.Ident);  // TODO: assert that it's one character long somewhere
+    };
+    if self.peek_c(1) != "e".ascii() {
+        return self.error("expected be or le marker after ' literal");
+    };
+    self.current += 2;
+    .Ident
+}
+
 fn error(self: *Lexer, msg: Str) TokenType = {
-    @eprintln("import_wuffs/lex.fr: %", msg);
-    self.string = msg;
+    self.payload = msg;
     .Error
 }
 
@@ -165,7 +184,7 @@ fn lex_hex(self: *Lexer) TokenType #once = {
         };
         self.peek_c().is_hex_digit()
     };
-    self.number(bits)
+    self.number(total)
 }
 
 is_hex_digit :: fn(c: u8) bool = {
@@ -217,43 +236,49 @@ fn lex_bin(self: *Lexer) TokenType #once = {
 }
 
 fn lex_ident(self: *Lexer) TokenType = {
-    dowhile {
+    type := self.keywords(._keyword0, ._keyword1, .Ident);
+    if type != .Ident && !self.is_ident() {
+        return type;
+    };
+    while => self.is_ident() {
         self.current += 1;
-        c := self.peek_c();
-        c.is_ascii_alpha() || c.is_ascii_digit() || c == "_".ascii()
     };
     name := self.src.slice(self.start, self.current);
-    self.string = name;
+    self.payload = name;
     .Ident
 }
 
-fn lex_punct(self: *Lexer) TokenType = {
-    self.keywords(._punct0, ._punct1)
+fn is_ident(self: *Lexer) bool = {
+    c := self.peek_c(); 
+    c.is_ascii_alpha() || c.is_ascii_digit() || c == "_".ascii()
 }
 
-fn keywords(self: *Lexer, $start: TokenType, $end: TokenType) TokenType = {
-    
+fn lex_punct(self: *Lexer) TokenType = {
+    self.keywords(._punct0, ._punct1, .Error)
+}
+
+fn keywords(self: *Lexer, $start: TokenType, $end: TokenType, $default: TokenType) TokenType = {
     // TODO: !! :COMPILERBUG HACK :FUCKED !!
     //       without this: 
     //       fn is(tok: *Token, $names: []Str) bool = {
     //       Compile Error: (Undeclared Variable 'Token'[Symbol=2458] in S15774)
     ::import("@/examples/import_c/lib.fr");
     
-    self.string = "";
+    self.payload = "";
     kw :: {
         ::enum(TokenType);
         // TODO: why does this need .raw() ?? shouldn't @as be enough? :CompilerBug
-        start := 1 + @as(i64) start.raw(); end := @as(i64) end.raw();
+        start: i64 = 1 + zext(@as(u8) start.raw()); end: i64 = zext(@as(u8) end.raw());
         out := ast_alloc().alloc(Str, end - start);
         range(start, end) { i |
-            xx := @as(TokenType) i;
+            xx := @as(TokenType) @as(u8) i.trunc();
             out[i - start] = name_str(xx);
         };
         out
     };
     // TODO: bounds check
     f :: import("@/examples/import_c/tokenize.fr")'read_punct;
-    len, type := f(self.src.index(self.current), kw, TokenType, TokenType.Error);
+    len, type := f(self.src.index(self.current), kw, TokenType, default);
     self.current += len;
     type
 }
@@ -270,6 +295,7 @@ fn peek_c(self: *Lexer, n: i64) u8 =
 // END copy-paste from compiler/lex.fr
 
 fn number(self: *Lexer, n: i64) TokenType = {
-    self.n = n;
+    self.payload.ptr = zeroed(*u8);
+    self.payload.len = n;
     .Number
 }
