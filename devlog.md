@@ -5,12 +5,17 @@
    iterate is kinda complicated. it's mostly used for the simd stuff but not only so i can't just skip it. 
    can have multiple loop variables and an else clause.  
 - yay! now it gets through everything 
+- start printing out the ast. makes sure this way of storing it doesn't suck too much to traverse 
+
+---
 
 > did i really not turn off auto update after i bitched about it so much last time ??   
 > no did, i see it in the fucking settings... i feel that does nothing....  
 > now i need to ask for `"git": { "git_gutter": "tracked_files"`  
 > i also feel like they changed when the horizontal scroll bar shows but im not entirely sure.  
 > i really think it used to be only when something went off the screen. 
+> you can tell it's a bug because import_wuffs/parse.fr has the bar but if i paste it into a new file it doesn't. 
+> https://youtu.be/fE2bqOM8DsU
 
 ## (Aug 1)
 

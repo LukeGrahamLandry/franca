@@ -1,0 +1,140 @@
+// TODO: it would be nice if this printed everything well enough to parse it back again 
+
+Print :: @struct {
+    module: *Module;
+    out: *List(u8);
+};
+
+// TODO: show pub/pri
+fn show(self: *Print, it: *TopLevelStmt) void = {
+    @match(it) {
+        fn Use(it) => @fmt(self.out, "use \"%\"\n", self.module.program.names&.get(it[]));
+        fn Constant(it) => {
+            // TODO: show status declarations correctly 
+            @fmt(self.out, "const %: ", self.module.program.names&.get(it.var.name));
+            self.show(it.var.type);
+            @fmt(self.out, " = ");
+            self.show(it.value);
+            @fmt(self.out, "\n");
+        }
+        fn DeclareStruct() => {
+            // TODO
+            
+        }
+        fn DeclareFunc(it) => {
+            @fmt(self.out, "func %.%(",
+                self.module.program.names&.get(it.self_type),
+                self.module.program.names&.get(it.name));
+            // TODO: params
+            @fmt(self.out, ") ");
+            self.show(it.return_type);
+            // TODO: choose
+            @fmt(self.out, " {\n");
+            for it.body { it |
+                self.show(it);
+            }
+            @fmt(self.out, "\n}\n");
+        }
+    };
+}
+
+fn show(self: *Print, node: Node) void = {
+    @match(self.module.get(node)) {
+        fn Call(it) => {
+            self.show(it.callee);
+            @fmt(self.out, "(");
+            // TODO: args
+            @fmt(self.out, ")");
+            // TODO: effect
+        }
+        fn GetVar(it) => {
+            @fmt(self.out, "%", self.module.program.names&.get(it.name));
+        }
+        fn GetField(it) => {
+            @fmt(self.out, "%.%", => self.show(it.place), self.module.program.names&.get(it.name));
+        }
+        fn Op(it) => {
+            @fmt(self.out, "(% % %)", => self.show(it.lhs), it.op, => self.show(it.rhs));
+            // TODO: ~mod ~sat =
+        }
+        fn Assign(it) => {
+            @fmt(self.out, "% = %\n", => self.show(it.place), => self.show(it.value));
+            // TODO: effect
+        }
+        fn If(it) => {
+            @fmt(self.out, "if % {\n", => self.show(it.cond));
+            body := self.module.get_body(node);
+            range(0, it.then_count.zext()) { i |
+                self.show(body[i]);
+            };
+            if it.else_count != 0 {
+                @fmt(self.out, "\n} else ");
+                first_else := self.module.get(body[it.then_count.zext()]);
+                if !first_else&.is(.If) {
+                    @fmt(self.out, "{\n");
+                }
+                for body.rest(it.then_count.zext()) { it |
+                    self.show(it);
+                };
+            }
+            @fmt(self.out, "\n}\n");
+        }
+        fn While(it) => {
+            @fmt(self.out, "while ");
+            self.show(it.cond);
+            @fmt(self.out, " {\n");
+            // TODO: show invarients with correct syntax
+            for self.module.get_body(node) { it |
+                ::tagged(NodeFull);
+                self.show(it);
+            };
+            @fmt(self.out, "\n}\n");
+        }
+        fn Jump(it) => {
+            ::enum(@type it.style);
+            @fmt(self.out, "% %\n", it.style, => self.show(it.value));
+        }
+        fn Literal(it) => {
+            it := self.module.program.literals.index(it.index.zext());
+            @match(it) {
+                fn Number(it) => @fmt(self.out, "%", it[]);
+                fn Status(it) => @fmt(self.out, "\"%\"", self.module.program.names&.get(it[]));
+                fn Bool(it)   => @fmt(self.out, "%", it[]);
+            };
+        }
+        fn Generic() => {
+            // TODO
+        }
+        fn Builtin() => {
+            // TODO
+        }
+        fn Invarient() => {
+            // TODO
+        }
+        fn Assert(it) => {
+            @fmt(self.out, "assert % via %\n", => self.show(it.cond), => self.show(it.proof));
+        }
+        fn Array(it) => {
+            @fmt(self.out, "[");
+            for self.module.get_body(node) { it |
+                @fmt(self.out, "%,", => self.show(it));
+            };
+            @fmt(self.out, "]");
+        }
+        fn Index(it) => {
+            @fmt(self.out, "%[%", => self.show(it.self), => self.show(it.lo));
+            ::enum(TokenType);
+            if it.op != .@"[" {
+                @fmt(self.out, " % ", it.op);
+                self.show(it.hi);
+            };
+            @fmt(self.out, "]");
+        }
+        fn Iterate() => {
+            // TODO
+        }
+        fn Empty() => @fmt(self.out, "_");
+    };
+}
+
+#use("@/examples/import_wuffs/ast.fr");

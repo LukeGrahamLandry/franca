@@ -5,13 +5,15 @@ Program :: @struct {
     arena: Alloc;
 };
 
-Module :: @struct {
+Module :: @rec @struct {
     name: Symbol;
     body := zeroed RawList(TopLevelStmt);
     // TODO: if i start transforming (adding new nodes) while doing infer, 
     //       turn this into a BucketArray for pointer stability. 
+    //       careful to deal with splits across buckets correctly because need contiguous slices. 
     nodes := zeroed RawList(Node);
     arena: Alloc;
+    program: *Program;
 };
 
 TopLevelStmt :: @tagged(
@@ -42,7 +44,8 @@ Call :: @struct {
     tag := NodeType.Call;
     effect: Effect;
     callee: Node;
-    arg_count: u32;
+    count: u32;
+    // [Node]
 };
 
 Effect :: @enum(u8) (Pure, Impure, Yielding);
@@ -88,7 +91,7 @@ If :: @struct {
 While :: @struct {
     tag := NodeType.While;
     cond: Node;
-    body_count: u32;
+    count: u32;
     // invarients are at the beginning 
     // [Node]
 };
@@ -122,7 +125,7 @@ Builtin :: @struct {
     tag := NodeType.Builtin;
     op: TokenType;
     call: Node;
-    body_count: u32;
+    count: u32;
     // [Node]
 };
 
@@ -158,9 +161,11 @@ Iterate :: @struct {
     then: Node;
     else: Node;
     // These are Assign nodes for the initial values of the loop variables
-    assign_count: u32;
+    count: u32;
     // [Node]
 }
+
+Empty :: @struct(tag := NodeType.Empty);
 
 NodeType :: @enum(u8) (
     Call,
@@ -179,6 +184,7 @@ NodeType :: @enum(u8) (
     Array,
     Index,
     Iterate,
+    Empty,
 );
 
 // This is not actually stored. It's just for reading the node conveniently. 
@@ -199,11 +205,14 @@ NodeFull :: @tagged(
     Array: *Array,
     Index: *Index,
     Iterate: *Iterate, 
+    Empty: *Empty,
 );
 
 fn new_node(self: *Module, $T: Type, node: T) Node #generic = {
     result: Node = (id = self.nodes.len.trunc());
     count :: size_of(T).align_to(size_of(Node)) / size_of(Node);
+    // TODO: this puts uninit stack memory in if T is not 4 byte aligned. 
+    //       but it shouldn't matter because you don't read it
     values: []Node = bit_cast_unchecked(*T, *Node, node&).slice(count);
     self.nodes&.push_all(values, self.arena);
     result
@@ -217,7 +226,35 @@ fn new_node(self: *Module, $T: Type, node: T, extra: []Node) Node #generic = {
 
 fn new_literal(self: *Program, it: LiteralValue) u32 = {
     self.literals&.push(it, self.arena);
-    self.literals.len.trunc()
+    self.literals.len.trunc() - 1
+}
+
+fn get(self: *Module, node: Node) NodeFull = {
+    p := self.nodes.index(node.id.zext());
+    tag := bit_cast_unchecked(*Node, *NodeType, p)[];
+    tag := @as(i64) zext(@as(u8) tag);
+    it := (tag, p);
+    bit_cast_unchecked(Ty(i64, *Node), NodeFull, it)
+}
+
+fn get_body(self: *Module, node: Node) []Node = {
+    data := self.get(node);
+    count := @match(data) {
+        fn If(it) => it.then_count + it.else_count;
+        fn While(it)   => it.count;
+        fn Builtin(it) => it.count;
+        fn Array(it)   => it.count;
+        fn Iterate(it) => it.count;
+        fn Call(it)    => it.count;
+        @default => return(empty());
+    };
+    
+    // TODO: this is stupid HACK. it needs to be less painful to get an array of the sizes of Deref(payload)
+    //       [size_of(Deref(T)).align_to(size_of(Node)) / size_of(Node) for T in cases(NodeFull)]
+    // keep in sync with new_node
+    static_count := @generic_match(data&, fn(it) => size_of(@type it[][]).align_to(size_of(Node)) / size_of(Node));
+    
+    self.nodes.items().subslice(node.id.zext() + static_count, count.zext())
 }
 
 #use("@/compiler/pool.fr");

@@ -1,4 +1,7 @@
 // TODO: don't panic on errors
+// TODO: keep stack of loops and resolve break/continue targets
+// TODO: keeps stack of location information and pop from it in Parser.new_node
+//       just have backwards from a Node be the global offset in the source code. 
 
 Parser :: @struct {
     lex: Lexer;
@@ -26,7 +29,6 @@ fn parse_top_level(source: Str, program: *Program, module: *Module) void = {
         stmt := @match(self.pop()) {
             fn use() => {
                 name := self.next_name();
-                @println("use %", self.program.names&.get(name));
                 (Use = name)
             }
             fn pub() => self.top_level_declare(true);
@@ -45,15 +47,12 @@ fn top_level_declare(self: *Parser, public: bool) TopLevelStmt = {
             // :SLOW, can't be a keyword because it's contextual
             if name == self.program.names&.insert_owned("status") {
                 name := self.next_name();
-                value := 
-                @println("status %", self.program.names&.get(name));
                 return(Constant = (
                     var = (name = name, type = self.status_type), 
                     value = self.new_node(GetVar, (name = name)),
                 ));
             };
-            println("after ident declare");
-            todo()
+            panic("expected top level expression found Ident")
         }
         fn const() => {
             name := self.next_name();
@@ -111,8 +110,6 @@ fn top_level_declare(self: *Parser, public: bool) TopLevelStmt = {
             self.eat(.@"{");
             vars := Field.list(self.module.arena);
             self.var_list(vars&, true);
-            @println("START func %.% vars=%", 
-                self.program.names&.get(reciever), self.program.names&.get(name), vars.len);
             body := Node.list(self.module.arena);
             self.block(body&);
             (DeclareFunc = (
@@ -212,7 +209,7 @@ fn stmt(self: *Parser) Node = {
             };
             self.new_node(While, (
                 cond = cond, 
-                body_count = body.len.trunc(),
+                count = body.len.trunc(),
             ), body.items())
         }
         fn assert() => {
@@ -248,7 +245,7 @@ fn stmt(self: *Parser) Node = {
             self.new_node(Iterate, (
                 then = then,
                 else = else,
-                assign_count = vars.len.trunc(), 
+                count = vars.len.trunc(), 
             ), vars.items())
         }
         @default => {
@@ -273,7 +270,7 @@ fn builtin_call(self: *Parser, op: TokenType) Node = {
     self.new_node(Builtin, (
         op = op,
         call = call, 
-        body_count = body.len.trunc(),
+        count = body.len.trunc(),
     ), body.items())
 }
 
@@ -299,11 +296,9 @@ fn type(self: *Parser) Node = {
         fn Ident() => {  
             // TODO: really this case should be shared with expr()
             name := self.prev_name();
-            @println("type %", self.program.names&.get(name));
             node := self.new_node(GetVar, (name = name));
             while => self.maybe(.@".") {
                 name := self.next_name();
-                @println("type^ .%", self.program.names&.get(name));
                 node = self.new_node(GetField, (place = node, name = name));
             };
             
@@ -333,12 +328,11 @@ fn array_type(self: *Parser, op: TokenType) Node = {
     length := self.expr();
     self.eat(.@"]");
     inner := self.type();
-    @println("array!");
     self.new_node(Generic, (inner = inner, length = length, op = op))
 }
 
 fn unary_generic(self: *Parser, op: TokenType) Node = 
-    self.new_node(Generic, (inner = self.type(), length = (id = MAX_u32), op = op));
+    self.new_node(Generic, (inner = self.type(), length = self.empty_node, op = op));
 
 fn expr(self: *Parser) Node = {
     lhs := self.prefix_expr();
@@ -349,7 +343,6 @@ fn expr(self: *Parser) Node = {
             fn @"."() => {
                 self.pop();
                 name := self.next_name();
-                @println("dot %", self.program.names&.get(name));
                 self.new_node(GetField, (place = lhs, name = name))
             }
             fn @"~"() => {
@@ -425,12 +418,11 @@ fn prefix_expr(self: *Parser) Node = {
     @match(self.pop()) {
         fn Ident() => {
             name := self.prev_name();
-            @println("var %", self.program.names&.get(name));
             self.new_node(GetVar, (name = name))
         }
-        fn Number() => self.literal_node(Number = self.current.payload.len);
-        fn true() => self.literal_node(Bool = true);
-        fn false() => self.literal_node(Bool = false);
+        fn Number() => self.literal_node(Number = self.previous.payload.len);
+        fn true()   => self.literal_node(Bool = true);
+        fn false()  => self.literal_node(Bool = false);
         fn @"("() => {
             node := self.expr();
             self.eat(.@")");
@@ -445,10 +437,9 @@ fn prefix_expr(self: *Parser) Node = {
         }
         fn @"["() => {
             nodes := Node.list(temp());
-            dowhile {
-                self.expr();
+            while => !self.maybe(.@"]") {
+                nodes&.push(self.expr());
                 self.maybe(.@",");
-                !self.maybe(.@"]")
             };
             self.new_node(Array, (count = nodes.len.trunc()), nodes.items())
         }
@@ -474,7 +465,7 @@ fn call(self: *Parser, callee: Node, effect: Effect) Node = {
     };
     self.new_node(Call, (
         callee = callee, 
-        arg_count = args.len.trunc(), 
+        count = args.len.trunc(), 
         effect = effect,
     ), args.items())
 }
@@ -533,7 +524,6 @@ fn pop(self: *Parser) TokenType = {
         self.current.type = .@"}"
     };
     
-    @println("LEX: %", self.current.type);
     self.previous.type
 }
 
