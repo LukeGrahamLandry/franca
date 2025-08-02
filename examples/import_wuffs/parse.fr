@@ -1,3 +1,4 @@
+// TODO: don't panic on errors
 
 Parser :: @struct {
     lex: Lexer;
@@ -8,6 +9,7 @@ Parser :: @struct {
     status_type := zeroed Node; // TODO
     void_type := zeroed Node; // TODO
     builtin_callee := zeroed Node;  // TODO
+    empty_node := zeroed Node; // TODO
 };
 
 fn parse_top_level(source: Str, program: *Program, module: *Module) void = {
@@ -213,13 +215,10 @@ fn stmt(self: *Parser) Node = {
                 body_count = body.len.trunc(),
             ), body.items())
         }
-        fn io_forget_history() => self.builtin_call();
-        fn io_bind() => self.builtin_call();
-        fn io_limit() => self.builtin_call();
         fn assert() => {
             self.pop();
             cond := self.expr();
-            proof := zeroed Node; // TODO
+            proof := self.empty_node;
             if self.maybe(.via) {
                 proof = self.expr();
             }
@@ -233,7 +232,29 @@ fn stmt(self: *Parser) Node = {
             value := self.expr();
             self.new_node(Assign, (effect = .Pure, is_choose = true, place = place, value = value))
         }
+        fn iterate() => {
+            self.pop();
+            self.eat(.@"(");
+            vars := Node.list(temp());
+            while => !self.maybe(.@")") {
+                vars&.push(self.stmt());  // TODO: assert it's an Assign
+                self.maybe(.@",");
+            };
+            then := self.builtin_call(.iterate);
+            else := self.empty_node;
+            if self.maybe(.else) {
+                else = self.builtin_call(.iterate);
+            };
+            self.new_node(Iterate, (
+                then = then,
+                else = else,
+                assign_count = vars.len.trunc(), 
+            ), vars.items())
+        }
         @default => {
+            if @is(self.current.type, .io_forget_history, .io_bind, .io_limit) {
+                return self.builtin_call(self.pop());
+            }
             node := self.expr();
             @match(self.current.type) {
                 fn @"="() => self.assign(node, .Pure);
@@ -244,8 +265,7 @@ fn stmt(self: *Parser) Node = {
     }
 }
 
-fn builtin_call(self: *Parser) Node = {
-    op := self.pop();
+fn builtin_call(self: *Parser, op: TokenType) Node = {
     call := self.call(self.builtin_callee, .Impure);
     body := Node.list(temp());
     self.eat(.@"{");
@@ -259,7 +279,7 @@ fn builtin_call(self: *Parser) Node = {
 
 fn loop_flow(self: *Parser, style: Jump.Style) Node = {
     self.pop();
-    label := zeroed Node;  // TODO: keep a stack of active loops and resolve this now
+    label := self.empty_node;  // TODO: keep a stack of active loops and resolve this now
     if self.maybe(.@".") {
         label := self.next_name();
     }
@@ -296,14 +316,15 @@ fn type(self: *Parser) Node = {
             
             node
         }
-        fn array()   => self.array_type(.array);
+        fn array() => self.array_type(.array);
         fn roarray() => self.array_type(.roarray);
-        fn slice()   => self.unary_generic(.slice);
-        fn roslice()   => self.unary_generic(.roslice);
-        fn ptr()     => self.unary_generic(.ptr);
-        fn nptr()    => self.unary_generic(.ptr);
-        fn table()   => self.unary_generic(.table);
-        @default => @panic("TODO: type %", self.previous.type);
+        @default => {
+            // TODO: is there rotable?
+            if @is(self.previous.type, .slice, .roslice, .ptr, .nptr, .table) {
+                return self.unary_generic(self.previous.type);
+            } 
+            @panic("TODO: type %", self.previous.type);
+        };
     }
 }
 
@@ -359,36 +380,19 @@ fn expr(self: *Parser) Node = {
                 type := self.type();
                 self.new_node(Op, (op = .as, assign = false, style = .Safe, lhs = lhs, rhs = type))
             }
-            fn @"["() => {
+            fn @"["() => {  // TODO: type refinements could use this instead of Generic
                 op := self.pop();
-                lo := zeroed Node;  // TODO
-                @match(self.current.type) {
-                    fn @".."() => {
-                        op = self.current.type;
-                        self.pop();
-                    }
-                    fn @"..="() => {
-                        op = self.current.type;
-                        self.pop();
-                    }
-                    @default => {
-                        lo = self.expr();
-                    };
-                };
-                hi := zeroed Node;
-                @match(self.current.type) {
-                    fn @".."() => {
-                        @assert(op == .@"[");
-                        op = self.current.type;
-                        self.pop();
-                    }
-                    fn @"..="() => {
-                        @assert(op == .@"[");
-                        op = self.current.type;
-                        self.pop();
-                    }
-                    @default => ();
-                };
+                lo := self.empty_node;
+                if @is(self.current.type, .@"..", .@"..=") {
+                    op = self.pop();
+                } else {
+                    lo = self.expr();
+                }
+                if @is(self.current.type, .@"..", .@"..=") {
+                    @assert(op == .@"[");
+                    op = self.pop();
+                }
+                hi := self.empty_node;
                 if self.current.type != .@"]" {
                     hi = self.expr();
                 };
@@ -434,7 +438,10 @@ fn prefix_expr(self: *Parser) Node = {
         }
         fn not() => {
             it := self.expr();
-            self.new_node(Op, (op = .not, style = .Safe, assign = false, lhs = it, rhs = zeroed Node))
+            self.new_node(Op, (
+                op = .not, style = .Safe, assign = false, 
+                lhs = it, rhs = self.empty_node,
+            ))
         }
         fn @"["() => {
             nodes := Node.list(temp());

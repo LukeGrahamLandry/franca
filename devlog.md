@@ -1,4 +1,17 @@
 
+## (Aug 2)
+
+- std/png/decode_filter_arm_neon.wuffs. 36.
+   iterate is kinda complicated. it's mostly used for the simd stuff but not only so i can't just skip it. 
+   can have multiple loop variables and an else clause.  
+- yay! now it gets through everything 
+
+> did i really not turn off auto update after i bitched about it so much last time ??   
+> no did, i see it in the fucking settings... i feel that does nothing....  
+> now i need to ask for `"git": { "git_gutter": "tracked_files"`  
+> i also feel like they changed when the horizontal scroll bar shows but im not entirely sure.  
+> i really think it used to be only when something went off the screen. 
+
 ## (Aug 1)
 
 bunch of work on wuffs parser. slowly working through decode_lzw.wuffs. 
