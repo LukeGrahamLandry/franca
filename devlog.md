@@ -1,11 +1,14 @@
 
 ## (Aug 2)
 
+more wuffs
+
 - std/png/decode_filter_arm_neon.wuffs. 36.
    iterate is kinda complicated. it's mostly used for the simd stuff but not only so i can't just skip it. 
    can have multiple loop variables and an else clause.  
 - yay! now it gets through everything 
 - start printing out the ast. makes sure this way of storing it doesn't suck too much to traverse 
+- show error location
 
 ---
 

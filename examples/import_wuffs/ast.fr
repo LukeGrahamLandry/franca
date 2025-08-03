@@ -1,5 +1,9 @@
+base_module_source :: 
+    import("@/lib/sys/fs.fr")'read_entire_file_or_crash(ast_alloc(), "examples/import_wuffs/base.wuffs");
+
 Program :: @struct {
     modules := zeroed RawList(Module);
+    codemap: CodeMap;
     names: StringPool;
     literals := zeroed RawList(LiteralValue);
     arena: Alloc;
@@ -14,17 +18,11 @@ Module :: @rec @struct {
     nodes := zeroed RawList(Node);
     arena: Alloc;
     program: *Program;
+    index: i64;
 };
 
 TopLevelStmt :: @tagged(
-    DeclareFunc: @struct {
-        body: []Node;
-        vars: []Field;
-        params: []Field;
-        return_type: Node;
-        self_type: Symbol;
-        name: Symbol;
-    },
+    DeclareFunc: Function,
     DeclareStruct: @struct {
         fields: []Field;
         init_field_count: i64;
@@ -33,9 +31,26 @@ TopLevelStmt :: @tagged(
     Constant: @struct {
         var: Field;
         value: Node;
+        vis: Visibility;
     },
     Use: Symbol,
+    DeclareType: @struct {
+        name: Symbol;
+        value: Node;
+    },
 );
+
+Function :: @struct {
+    body: []Node;
+    vars: []Field;
+    params: []Field;
+    return_type: Node;
+    self_type: Symbol;
+    name: Symbol;
+    has_body: bool;
+};
+
+Visibility :: @enum(u8) (Public, Private);
 
 Field :: @struct(name: Symbol, type: Node);
 Node :: @struct(id: u32);
@@ -257,4 +272,23 @@ fn get_body(self: *Module, node: Node) []Node = {
     self.nodes.items().subslice(node.id.zext() + static_count, count.zext())
 }
 
+fn init(a: Alloc) Program = 
+    (names = init(a), arena = a, codemap = init(a));
+
+fn new_module(program: *Program, name: Str) i64 = {
+    module: Module = (
+        name = program.names&.insert_owned(name), 
+        arena = program.arena, program = program,
+        index = program.modules.len,
+    );
+    module&.new_node(Empty, ());
+    program.modules&.push(module, program.arena);
+    program.modules.len - 1
+}
+
+fn get(self: *Module, it: Symbol) Str =
+    self.program.names&.get(it);
+
+// TODO: put these in @/lib
 #use("@/compiler/pool.fr");
+#use("@/compiler/codemap.fr");

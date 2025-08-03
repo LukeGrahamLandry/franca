@@ -7,19 +7,22 @@ Parser :: @struct {
     lex: Lexer;
     module: *Module;
     program: *Program;
+    span: Span;
     previous := zeroed FullToken;
     current := zeroed FullToken;
+    
     status_type := zeroed Node; // TODO
     void_type := zeroed Node; // TODO
     builtin_callee := zeroed Node;  // TODO
     empty_node := zeroed Node; // TODO
 };
 
-fn parse_top_level(source: Str, program: *Program, module: *Module) void = {
+fn parse_top_level(file_name: Str, source: Str, module: *Module) void = {
     self: Parser = (
         lex = (src = source), 
-        program = program, 
+        program = module.program, 
         module = module,
+        span = module.program.codemap&.add_file(file_name, source),
     );
     self := self&;
 
@@ -31,16 +34,19 @@ fn parse_top_level(source: Str, program: *Program, module: *Module) void = {
                 name := self.next_name();
                 (Use = name)
             }
-            fn pub() => self.top_level_declare(true);
-            fn pri() => self.top_level_declare(false);
+            fn pub()  => self.top_level_declare(.Public);
+            fn pri()  => self.top_level_declare(.Private);
             fn EndOfFile() => return();
-            @default => @panic("expected top level statment found %", self.previous.type); 
+            @default => {
+                self.error(@tfmt("expected top level statment found %", self.previous.type));
+                unreachable()
+            };
         };
         self.module.body&.push(stmt, self.module.arena);
     };
 }
 
-fn top_level_declare(self: *Parser, public: bool) TopLevelStmt = {
+fn top_level_declare(self: *Parser, vis: Visibility) TopLevelStmt = {
     @match(self.pop()) {
         fn Ident() => {
             name := self.prev_name();
@@ -50,6 +56,7 @@ fn top_level_declare(self: *Parser, public: bool) TopLevelStmt = {
                 return(Constant = (
                     var = (name = name, type = self.status_type), 
                     value = self.new_node(GetVar, (name = name)),
+                    vis = vis,
                 ));
             };
             panic("expected top level expression found Ident")
@@ -60,13 +67,15 @@ fn top_level_declare(self: *Parser, public: bool) TopLevelStmt = {
             type := self.type();
             self.eat(.@"=");
             value := self.expr();
-            (Constant = (var = (name = name, type = type), value = value))
+            (Constant = (var = (name = name, type = type), value = value, vis = vis))
         }
         fn struct() => {
             name := self.next_name();
             self.eat(.@"?");
-            self.eat(.implements);
-            interface := self.type();
+            interface := self.empty_node;
+            if self.maybe(.implements) {
+                interface = self.type();
+            };
             self.eat(.@"(");
             vars := Field.list(self.module.arena);
             self.var_list(vars&, false);
@@ -85,7 +94,7 @@ fn top_level_declare(self: *Parser, public: bool) TopLevelStmt = {
             name := self.next_name();
             impure := self.maybe(.@"!");  // TOOD
             yielding := self.maybe(.@"?");  // TODO
-            @assert(!(impure && yielding));
+            @if(impure && yielding) self.error("function is marked '?' and '~'");
             self.eat(.@"(");
             params := Field.list(self.module.arena);
             self.var_list(params&, false);
@@ -107,11 +116,13 @@ fn top_level_declare(self: *Parser, public: bool) TopLevelStmt = {
                     // the expression is like which archetecture for simd. 
                 }
             }
-            self.eat(.@"{");
             vars := Field.list(self.module.arena);
-            self.var_list(vars&, true);
             body := Node.list(self.module.arena);
-            self.block(body&);
+            has_body := self.maybe(.@"{");
+            if has_body {
+                self.var_list(vars&, true);
+                self.block(body&);
+            };
             (DeclareFunc = (
                 name = name,
                 body = body.items(),
@@ -119,8 +130,19 @@ fn top_level_declare(self: *Parser, public: bool) TopLevelStmt = {
                 params = params.items(),
                 return_type = ret,
                 self_type = reciever,
+                has_body = has_body,  // :extension
             ))
         }
+        fn @"$"() => {  // :extension
+            self.eat(.Ident);
+            @if(self.previous.payload != "type") self.error("expected $type");
+            name := self.next_name();
+            value := self.empty_node;
+            if self.maybe(.@"=") {
+                value = self.type();
+            };
+            (DeclareType = (name = name, value = value))
+        };
         @default => panic("TODO: declare");
     }
 }
@@ -478,6 +500,15 @@ fn operator(self: *Parser, lhs: Node, style: Op.Style) Node = {
     self.new_node(Op, (op = op, style = style, assign = assign, lhs = lhs, rhs = rhs))
 }
 
+fn error(self: *Parser, msg: Str) void = {
+    c: u32 = self.lex.start.trunc();
+    span := self.span.subspan(c, c); 
+    out := u8.list(temp());
+    @fmt(out&, "[import_wuffs] %\n", msg);
+    self.program.codemap&.fmt_error_line(span, out&, true);
+    panic(out.items());
+}
+
 fn new_node(self: *Parser, $T: Type, node: T) Node #generic = 
     self.module.new_node(T, node);
 
@@ -486,8 +517,9 @@ fn new_node(self: *Parser, $T: Type, node: T, extra: []Node) Node #generic =
 
 fn eat(self: *Parser, t: TokenType) void = {
     if !self.maybe(t) {
-        @panic("expected % but found % (%)", 
+        msg := @tfmt("expected % but found % (%)", 
             t, self.current.type, self.lex.src.slice(self.lex.start, self.lex.current));
+        self.error(msg);
     }
 }
 
@@ -517,11 +549,15 @@ fn pop(self: *Parser) TokenType = {
         payload = self.lex.payload, 
     );
     
-    if self.current.type == .@"{{" {
-        self.current.type = .@"{"
-    };
-    if self.current.type == .@"}}" {
-        self.current.type = .@"}"
+    @match(self.current.type) {  // :SLOW
+        fn @"{{"() => {
+            self.current.type = .@"{";
+        }
+        fn @"}}"() => {
+            self.current.type = .@"}";
+        }
+        fn Error() => self.error(@tfmt("lex error: %", self.current.payload));
+        @default => ();
     };
     
     self.previous.type

@@ -1,0 +1,153 @@
+
+emit_full_program :: fn(program: *Program, out_alloc: Alloc, vtable: *ImportVTable) []u8 = {
+    m := zeroed Qbe.Module;
+    init_default_module_dyn(m&, vtable, (
+        arch = query_current_arch(), 
+        os = query_current_os(), 
+        type = .CachedEarly,
+    ));
+    m&.set_debug_types("P", true);
+    
+    each program.modules { module |
+        emit(module, m&, vtable);
+    };
+    
+    // TODO
+    ""
+}
+
+fn emit(module: *Module, m: *Qbe.Module, vtable: *ImportVTable) void = {
+    each module.body { stmt |
+        @match(stmt) {
+            fn DeclareFunc(it) => if it.has_body {
+                f := emit(module, m, it);
+                // TODO
+                //vtable'run_qbe_passes(Qbe.Fn.raw_from_ptr(f));
+            };
+            @default => ();
+        }
+    };
+}
+
+Emit :: @struct {
+    m: *Qbe.Module;
+    module: *Module;
+    f: *Qbe.Fn;
+    b: *Qbe.Blk;
+}
+
+fn emit(module: *Module, m: *Qbe.Module, func: *Function) *Qbe.Fn = {
+    e: Emit = (
+        m = m, module = module,
+        f = temp().box(Qbe.Fn),
+        b = temp().box_zeroed(Qbe.Blk),
+    );
+    default_init(e.f, m);
+    e.f.start = e.b;
+    mangled := @tfmt("%__%__%", module.get(module.name), module.get(func.self_type), module.get(func.name));
+    e.f.lnk.id = m.intern(mangled);
+    e.f.nblk = 1;
+    
+    // TODO: parameters and vars
+    for func.body { it |
+        e&.emit(it);
+    };
+    e.b.jmp.type = .hlt;  // TODO
+    
+    e.f
+}
+
+fn emit(e: *Emit, node: Node) Qbe.Ref = {
+@match(e.module.get(node)) {
+    fn Call(it) => {
+        // TODO
+        Qbe.Null
+    }
+    fn GetVar(it) => {
+        // TODO
+        Qbe.Null
+    }
+    fn GetField(it) => {
+        // TODO
+        Qbe.Null
+    }
+    fn Op(it) => {
+        // TODO
+        Qbe.Null
+    }
+    fn Assign(it) => {
+        // TODO
+        Qbe.Null
+    }
+    fn If(it) => {
+        // TODO
+        Qbe.Null
+    }
+    fn While(it) => {
+        old := e.b;
+        start_cond := e.new_block();
+        old.jmp.type = .jmp; old.s1 = start_cond;
+
+        cond := e.emit(it.cond);
+        ::enum(Qbe.J);
+        @assert_eq(e.b.jmp.type, .Jxxx);
+        end_cond := e.b;
+        
+        start_body := e.new_block();
+        for e.module.get_body(node) { it |
+            e.emit(it);
+        };
+        @assert_eq(e.b.jmp.type, .Jxxx);
+        e.b.jmp.type = .jmp; e.b.s1 = start_cond;
+        
+        after := e.new_block();
+        end_cond.s1 = start_body;
+        end_cond.s2 = after;
+        end_cond.jmp = (type = .jnz, arg = cond);
+        
+        Qbe.Null
+    }
+    fn Jump(it) => {
+        // TODO
+        Qbe.Null
+    }
+    fn Literal(it) => {
+        it := e.module.program.literals.index(it.index.zext());
+        @match(it) {
+            fn Number(it) => e.f.getcon(it[]);
+            fn Bool(it) => e.f.getcon(it[].int());
+            fn Status(it) => @panic("TODO: status const");
+        }
+    }
+    fn Builtin() => {
+        // TODO
+        Qbe.Null
+    }
+    fn Index(it) => {
+        // TODO
+        Qbe.Null
+    }
+    fn Iterate() => {
+        // TODO
+        Qbe.Null
+    }
+    fn Array(it)   => @panic("TODO: are you allowed a local array literal or is that just for constants?");
+    fn Generic()   => @panic("Shouldn't have a type in an expression");
+    // assert and invarient are for checking but are a nop at runtime. 
+    fn Invarient() => Qbe.Null;
+    fn Assert(it)  => Qbe.Null;
+    fn Empty()     => Qbe.Null;
+}
+};
+
+fn new_block(e: *Emit) *Qbe.Blk = {
+    prev := e.b;
+    e.b = temp().box_zeroed(Qbe.Blk);
+    prev.link = e.b;
+    e.b.id = e.f.nblk;
+    e.f.nblk += 1;
+    e.b
+}
+
+Qbe :: import("@/backend/lib.fr").Qbe;
+#use("@/examples/import_wuffs/ast.fr");

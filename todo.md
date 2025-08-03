@@ -16,6 +16,7 @@
   maybe -DFOO=true passed to default_driver could replace a declaration like `FOO :: false`
 - need to auto-test static linux. i wonder if you can landlock away `libc.so` to make sure you can't cheat 
 - linux arm -syscalls doesn't work
+- create a guard page when allocating a new stack to spawn a thread
 
 ## remaining nondeterminism
 

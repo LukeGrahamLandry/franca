@@ -1,34 +1,154 @@
-main :: fn() void = {
-    parse_test();
+driver :: fn(vtable: *ImportVTable) void = {
+    //parse_test();
+    hello_test(vtable);
 }
 
 parse_test :: fn() void = {
     root := import("@/examples/import_c/test/wuffs.fr")'root();
     dirs := collect_directory_ordered(@tfmt("%/std", root), temp(), temp()).unwrap();
-    program: Program = (names = init(temp()), arena = temp());
+    program: Program = init(temp());
     
     for dirs { it |
-        module: Module = (name = program.names&.insert_owned(it.name), arena = temp(), program = program&);
-        module&.new_node(Empty, ());
-        files := collect_directory_ordered(@tfmt("%/std/%", root, it.name), temp(), temp()).unwrap();
+        continue :: local_return;
+        module := program.modules&.index(program&.new_module(it.name));
+        path := @tfmt("%/std/%", root, it.name);
+        
+        // TODO: this would suck a lot less if `collect_directory_ordered` 
+        //       would just tell you "hey error because that's not a directory"
+        //       because just blindly ignoring errors sounds like a bad plan 
+        //       but crashing because there's a file in there (like .DS_Store if you 
+        //       happened to open it in apple's shitty finder) is also bad. 
+        //       clearly i should reevaluate fuck-it-we-ball-oriented-error-handling
+        @if(!dir_exists(path)) continue();
+        files := collect_directory_ordered(path, temp(), temp())
+            || @panic("failed to walk_dir %", path);
+        
         for files { jt |
             if jt.name.ends_with(".wuffs") {
-                src := read_entire_file_or_crash(temp(), @tfmt("%/std/%/%", root, it.name, jt.name));
-                @println("=== % ===", jt.name);
-                parse_top_level(src, program&, module&);
+                path := @tfmt("%/std/%/%", root, it.name, jt.name);
+                src := read_entire_file_or_crash(temp(), path);
+                parse_top_level(path, src, module);
             }
         };
         
-        out := u8.list(temp());
-        p: Print = (module = module&, out = out&);
-        each module.body& { it |
-            show(p&, it);
-        };
-        print(out.items());
+        print_module(module);
     };
 };
+
+fn print_module(module: *Module) void = {
+    out := u8.list(temp());
+    p: Print = (module = module, out = out&);
+    each module.body& { it |
+        show(p&, it);
+    };
+    print(out.items());
+}
+
+hello_test :: fn(vtable: *ImportVTable) void = {
+    a: ArenaAlloc = init(page_allocator, 10000); 
+    program: Program = init(a&.borrow());
+    {
+        module := program.modules&.index(program&.new_module("base"));
+        parse_top_level("base", base_module_source, module);
+        print_module(module);
+    };
+    module := program.modules&.index(program&.new_module("demo"));
+    parse_top_level("hello_wuffs", hello_w, module);
+    print_module(module);
+    bytes := import("@/examples/import_wuffs/emit.fr")'emit_full_program(program&, a&.borrow(), vtable);
+}
 
 #use("@/examples/import_wuffs/lex.fr");
 #use("@/examples/import_wuffs/ast.fr");
 #use("@/examples/import_wuffs/parse.fr");
 #use("@/examples/import_wuffs/print.fr");
+
+// https://github.com/google/wuffs/tree/1e2e58cea012ea4c7553f327b63fafe196b0f9e2/hello-wuffs-c
+hello_w :: """
+// Copyright 2019 The Wuffs Authors.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+pri status "#not a digit"
+pri status "#too large"
+
+pub struct parser?(
+        val : base.u32,
+)
+
+pub func parser.parse?(src: base.io_reader) {
+    var c : base.u8
+    while true {
+        c = args.src.read_u8?()
+        if c == 0 {
+            return ok
+        }
+        if (c < 0x30) or (0x39 < c) {  // '0' and '9' are ASCII 0x30 and 0x39.
+            return "#not a digit"
+        }
+        // Rebase from ASCII (0x30 ..= 0x39) to the value (0 ..= 9).
+        c -= 0x30
+
+        if this.val < 429_496729 {
+            this.val = (10 * this.val) + (c as base.u32)
+            continue
+        } else if (this.val > 429_496729) or (c > 5) {
+            return "#too large"
+        }
+        this.val = (10 * this.val) + (c as base.u32)
+    }
+}
+
+pub func parser.value() base.u32 {
+    return this.val
+}
+""";
+
+hello_c :: """
+// Copyright 2019 The Wuffs Authors.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+#include <inttypes.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdio.h>
+
+uint32_t parse(char* p, size_t n) {
+  wuffs_base__status status;
+
+  wuffs_demo__parser parser;
+
+  status = wuffs_demo__parser__initialize(&parser, sizeof__wuffs_demo__parser(),
+                                          WUFFS_VERSION, 0);
+  if (!wuffs_base__status__is_ok(&status)) {
+    printf("initialize: %s\n", wuffs_base__status__message(&status));
+    return 0;
+  }
+
+  wuffs_base__io_buffer iobuf =
+      wuffs_base__ptr_u8__reader((uint8_t*)p, n, true);
+
+  status = wuffs_demo__parser__parse(&parser, &iobuf);
+  if (!wuffs_base__status__is_ok(&status)) {
+    printf("parse: %s\n", wuffs_base__status__message(&status));
+    return 0;
+  }
+
+  return wuffs_demo__parser__value(&parser);
+}
+
+void run(char* p) {
+  size_t n = strlen(p) + 1;  // +1 for the trailing NUL that ends a C string.
+  uint32_t i = parse(p, n);
+  printf("%" PRIu32 "\n", i);
+}
+
+int main(int argc, char** argv) {
+  run("0");
+  run("12");
+  run("56789");
+  run("4294967295");
+  run("4294967296");
+  run("123456789012");
+  return 0;
+}
+""";
