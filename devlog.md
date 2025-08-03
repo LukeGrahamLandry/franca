@@ -5,6 +5,13 @@ generating ir from wuffs.
 - most is the same as any other language, if/while, operators. 
 - parameters to a function are accessed with `args.name`
 - starting to think about how to lower yielding 
+- yikes found a compiler bug where it doesn't type check something. 
+- while reducing that, found a big win for debug builds (ie without -unsafe). 
+  was recompiling a @print for each match to report the value when you had a corrupted tag. 
+  (both numbers are release compiler building the debug compiler, after warmup run): 
+  - before: `1272764 bytes of code, 85434 bytes of data. [CPU Time] frontend: 1102ms, codegen: 721ms. ir_ops = 614960`
+  - after:  `1139680 bytes of code, 85434 bytes of data. [CPU Time] frontend: 1062ms, codegen: 631ms. ir_ops = 564633`
+  not super exciting because it doesn't affect release builds but all comptime code is debug so that's nice. 
 
 ## (Aug 2)
 

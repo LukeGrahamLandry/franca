@@ -73,6 +73,13 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
     
     cases: List(Ty(i64, FatExpr)) = list(ast_alloc());
     ::if(FatExpr);
+    crash :: fn(tag: i64, max: i64) Never = {
+        @if(::safety_check_enabled(.InvalidTag), { 
+            // TODO: make this a build option / safety check. all could have None/Abort/Panic/Verbose
+            @println("tag=%, expected 0..<%", tag, max);
+            panic("matched on invalid tag! Uninitialized memory?") 
+        }, unreachable())
+    }
     @{
         arg_val := @[if(want_pointer, => @{}, => arg)];
         arg_ptr := @[if(want_pointer, =>arg, => @{ arg_val& })];
@@ -81,13 +88,10 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
         // TODO: when safety checks are on don't do the default branch even for garbage tag.
         //       in fast mode tho make that UB.  -- Jul 9
         @[{
+            
             // If there's no @default, this is hit by invalid tags. 
             // TODO: when enabled just used @safety? so the message isn't different when you have a @default branch. 
-            default: FatExpr = if(safety_check_enabled(.InvalidTag), => @{ 
-                // TODO: make this a build option / safety check. all could have None/Abort/Panic/Verbose
-                @println("tag=%, expected 0..<%", tag_val, @[@literal varients.len]);
-                panic("matched on invalid tag! Uninitialized memory?") 
-            }, => @{ unreachable() });
+            default: FatExpr = @{ crash(tag_val, @[@literal varients.len]) };
             count := 0;
             i := stmts.len.sub(1);
             first := true;
@@ -234,9 +238,10 @@ fn match_on_enum(arg: FatExpr, info: *TypeInfo, stmts: [] FatStmt) FatExpr = {
     // TODO: why can't i call 'as'? ffi unique? 
     
     ::if(FatExpr);
+    crash :: fn() Never #noinline = panic("@match invalid tag");
     @{
         @[{
-            default: FatExpr = @{ @panic("@match invalid tag") }; 
+            default: FatExpr = @{ crash() }; 
             count := 0;
             i := stmts.len.sub(1);
             first := true;

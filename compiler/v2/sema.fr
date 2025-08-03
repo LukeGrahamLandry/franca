@@ -2126,6 +2126,7 @@ fn curry_const_args_inner(self: *SelfHosted, original_f: FuncId, new_fid: FuncId
         };
         value := @check(self.immediate_eval_expr(arg_expr, arg_type)) return;
         @check(self.bind_const_arg(new_fid, name, value, arg_expr.ty, arg_expr.loc, binding)) return;
+        self.stats.spec_const_fn += 1;
 
         func.finished_arg = .None;  // TODO: we know its void because we removed the only argument.
         self.set(f_expr, FuncId, new_fid);
@@ -2191,6 +2192,7 @@ fn curry_const_args_inner(self: *SelfHosted, original_f: FuncId, new_fid: FuncId
         self.set(f_expr, FuncId, new_fid);
         func.unset_flag(.AnyConstArgs);
         func.unset_flag(.Generic);
+        self.stats.spec_const_fn += 1;
         @check(self.remove_const_args(original_f, arg_expr)) return;
         // Don't need to explicitly force capturing because bind_const_arg added them if any args were closures.
         (Ok = new_fid)
@@ -4013,7 +4015,7 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
     // We didn't bother setting a scope because we don't need one, the expression will already have been resolved. 
     fake_func&.set_flag(.ResolvedBody);
     fake_func&.set_flag(.ResolvedSign);
-    self.dispatch.lit_fn_count += 1;
+    self.stats.lit_fn += 1;
     
     // SyntheticImmEval prevents call_direct() from handling any #fold in the body expression. 
     // If you have a complicated constant expression that calls a bunch of #fold functions, there's no 
@@ -4214,6 +4216,7 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
     callee := assume_types_fn(Arg = Ty(FatExpr, FatExpr), Ret = FatExpr, ptr = fn_ptr);
     self.bump_dirty_new();
     zone := zone_begin(.CallDynamic);
+    self.stats.macro_calls += 1;
     expr[] = callee(invocation.arg[], invocation.target[]);  // :call_dynamic_values
     zone_end(zone);
     .Ok
