@@ -1,4 +1,11 @@
 
+## (Aug 3)
+
+generating ir from wuffs. 
+- most is the same as any other language, if/while, operators. 
+- parameters to a function are accessed with `args.name`
+- starting to think about how to lower yielding 
+
 ## (Aug 2)
 
 more wuffs

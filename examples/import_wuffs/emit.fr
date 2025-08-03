@@ -21,8 +21,7 @@ fn emit(module: *Module, m: *Qbe.Module, vtable: *ImportVTable) void = {
         @match(stmt) {
             fn DeclareFunc(it) => if it.has_body {
                 f := emit(module, m, it);
-                // TODO
-                //vtable'run_qbe_passes(Qbe.Fn.raw_from_ptr(f));
+                vtable'run_qbe_passes(Qbe.Fn.raw_from_ptr(f));
             };
             @default => ();
         }
@@ -34,13 +33,24 @@ Emit :: @struct {
     module: *Module;
     f: *Qbe.Fn;
     b: *Qbe.Blk;
+    vars: HashMap(Symbol, Qbe.Ref);
+    args: HashMap(Symbol, Qbe.Ref);
+    self_type: *Struct;
+    this := Qbe.Null;
+    yield_state := Qbe.Null;
+    yield_points: List(*Qbe.Blk);
 }
 
 fn emit(module: *Module, m: *Qbe.Module, func: *Function) *Qbe.Fn = {
+    self_type := module.find_type(func.self_type);
     e: Emit = (
         m = m, module = module,
         f = temp().box(Qbe.Fn),
         b = temp().box_zeroed(Qbe.Blk),
+        vars = init(temp()),
+        args = init(temp()),
+        self_type = self_type.expect("func to have receiver in current module"),
+        yield_points = list(temp()),
     );
     default_init(e.f, m);
     e.f.start = e.b;
@@ -48,11 +58,71 @@ fn emit(module: *Module, m: *Qbe.Module, func: *Function) *Qbe.Fn = {
     e.f.lnk.id = m.intern(mangled);
     e.f.nblk = 1;
     
-    // TODO: parameters and vars
+    e.this = e.f.newtmp("this", .Kl);
+    e.vars&.insert(module.program.names&.insert_owned("this"), e.this);
+    push(e.b, .par, .Kl, e.this, Qbe.Null, Qbe.Null);
+    
+    for func.params { it |
+        r := e.f.newtmp(module.get(it.name), .Kl);
+        e.args&.insert(it.name, r);
+        // TODO: parc when it's a struct
+        push(e.b, .par, .Kl, r, Qbe.Null, Qbe.Null);
+    };
+    
+    // This is lazy. make stack slots for small arguments (since they're mutable)
+    // so Assign and fn deref below don't have to handle small values specially. 
+    for func.params { it |  
+        size := 8;  // TODO: need to know types
+        if size <= 8 {
+            addr := e.f.newtmp("", .Kl);
+            value := e.args&.insert(it.name, addr).unwrap();
+            // TODO: have all allocs at the start before any stores to make sure they get fast-allocs 
+            //       (i don't remember if the backend reorders for you. it probably should). 
+            push(e.b, .alloc8, .Kl, addr, e.f.getcon(size), Qbe.Null);
+            push(e.b, .storel, .Kw, Qbe.Null, value, addr);
+        }
+    };
+    
+    off := e.self_type.field_offset_bytes&;
+    // For now, locals are always just a field of the reciever struct (so the coroutine can yield). 
+    // TODO: simple improvement would be to only save things that are actually held across a yield point. 
+    for func.vars { it |
+        r := e.f.newtmp(module.get(it.name), .Kl);
+        e.vars&.insert(it.name, r);
+        push(e.b, .add, .Kl, r, e.this, e.f.getcon(off[]));
+        off[] += 8; // TODO: need to know types for size
+    };
+    
+    e.yield_state = e.f.newtmp("yield_state", .Kl);
+    push(e.b, .add, .Kl, e.yield_state, e.this, e.f.getcon(off[]));
+    off[] += 4;
+    entry_state := e.f.newtmp("entry_state", .Kl);
+    push(e.b, .loaduw, .Kl, entry_state, e.yield_state, Qbe.Null);
+    push(e.yield_points&, e&.new_block());
+    
     for func.body { it |
         e&.emit(it);
     };
-    e.b.jmp.type = .hlt;  // TODO
+    // TODO: fallthrough in void functions should just be a normal return (and reset state)
+    e.b.jmp.type = .hlt;  
+    
+    s: Qbe.SwitchPayload = (
+        cases = new(e.yield_points.len),
+        case_count = 0,
+        default = e&.new_block(),
+        inspect = entry_state,
+        src = e.f.start,
+    );
+    e.b.jmp.type = .hlt;  // invalid yield_state. TODO: return an error status?
+    
+    for e.yield_points& { it |
+        s.cases&.push(s.case_count&, (it, it.id.intcast() - 1));
+        // TODO: start block needs to dispatch based on entry_state
+    };
+    e.f.start.jmp = (type = .switch, arg = INT(0));
+    e.f.switches = new(1);
+    e.f.switch_count = 1;
+    e.f.switches[0] = s;
     
     e.f
 }
@@ -60,27 +130,72 @@ fn emit(module: *Module, m: *Qbe.Module, func: *Function) *Qbe.Fn = {
 fn emit(e: *Emit, node: Node) Qbe.Ref = {
 @match(e.module.get(node)) {
     fn Call(it) => {
-        // TODO
-        Qbe.Null
-    }
-    fn GetVar(it) => {
-        // TODO
-        Qbe.Null
-    }
-    fn GetField(it) => {
-        // TODO
-        Qbe.Null
+        // TODO: make sure these are in order by label
+        args := Qbe.Ref.list(temp());
+        for e.module.get_body(node) { it |
+            args&.push(e.emit(it));
+        };
+        for args { it |
+            // TODO: need to know types for argc
+            push(e.b, .arg, .Kl, Qbe.Null, it, Qbe.Null);
+        };
+        
+        r := e.f.newtmp("", .Kl);
+        callee := e.f.symcon(e.module.get(it.callee));  // TODO: mangle name based on reciever type
+        push(e.b, .call, .Kl, r, callee, Qbe.Null);
+        
+        // TODO: if it's yielding, yield if the result status is nonnull. 
+        //       i guess i need to special case things that return multiple things like readers. 
+        //       store a state variable when you yield and wrap the whole function in a switch on that state. 
+        r
     }
     fn Op(it) => {
-        // TODO
-        Qbe.Null
+        lhs := e.emit(it.lhs);
+        ::enum(@type it.op);
+        if it.op == .as {
+            return lhs;  // TODO: cast
+        }
+        // TODO: are and/or short-circuiting? i think subexpressions can't be effectful so it doesn't matter. 
+        rhs := e.emit(it.rhs);
+        
+        op: Qbe.O = @match(it.op) {
+            fn @"+"() => .add;
+            fn @"-"() => .sub;
+            fn @"*"() => .mul;
+            fn @"=="() => .ceql;
+            fn @"<"() => .cultl;
+            fn @">"() => .cugtl;
+            fn or() => .or;
+            @default => @panic("TODO: op %", it.op);
+        };
+        
+        r := e.f.newtmp("", .Kl);
+        push(e.b, op, .Kl, r, lhs, rhs);
+        r
     }
     fn Assign(it) => {
-        // TODO
+        value := e.emit(it.value);
+        place := e.emit_addr(it.place);
+        op := Qbe.O.storel; // TODO: need to know the types to use the right size
+        push(e.b, op, .Kw, Qbe.Null, value, place);
         Qbe.Null
     }
     fn If(it) => {
-        // TODO
+        cond := e.emit(it.cond);
+        cond_block := e.b;
+        
+        body := e.module.get_body(node);
+        cond_block.s1 = e.emit_body(body.slice(0, it.then_count.zext()));
+        end_then_block := e.b;
+        
+        cond_block.s2 = e.emit_body(body.rest(it.then_count.zext()));
+        end_else_block := e.b;
+        
+        cond_block.jmp = (type = .jnz, arg = cond);
+        after := e.new_block();
+        end_else_block.jmp.type = .jmp; end_else_block.s1 = after;
+        end_then_block.jmp.type = .jmp; end_then_block.s1 = after;
+        
         Qbe.Null
     }
     fn While(it) => {
@@ -93,11 +208,7 @@ fn emit(e: *Emit, node: Node) Qbe.Ref = {
         @assert_eq(e.b.jmp.type, .Jxxx);
         end_cond := e.b;
         
-        start_body := e.new_block();
-        for e.module.get_body(node) { it |
-            e.emit(it);
-        };
-        @assert_eq(e.b.jmp.type, .Jxxx);
+        start_body := e.emit_body(e.module.get_body(node));
         e.b.jmp.type = .jmp; e.b.s1 = start_cond;
         
         after := e.new_block();
@@ -108,7 +219,33 @@ fn emit(e: *Emit, node: Node) Qbe.Ref = {
         Qbe.Null
     }
     fn Jump(it) => {
-        // TODO
+        ::enum(@type it.style);
+        @match(it.style) {
+            fn Return() => {
+                // TODO: need to know types. and it might be big like a slice
+                value := e.emit(it.value);
+                // reset yield_state to the entry block
+                push(e.b, .storew, .Kw, Qbe.Null, e.f.getcon(0), e.yield_state);
+                e.b.jmp = (type = .retl, arg = value);
+                e.new_block();
+            }
+            fn Yield() => {
+                status := e.emit(it.value);
+                
+                // save where the start block should dispatch to next
+                state: i64 = e.f.nblk.intcast() - 1;
+                push(e.b, .storew, .Kw, Qbe.Null, e.f.getcon(state), e.yield_state);
+                
+                e.b.jmp = (type = .retl, arg = status);
+                push(e.yield_points&, e.new_block());
+            }
+            fn Continue() => {
+                // TODO
+            }
+            fn Break() => {
+                // TODO
+            }
+        };
         Qbe.Null
     }
     fn Literal(it) => {
@@ -123,22 +260,90 @@ fn emit(e: *Emit, node: Node) Qbe.Ref = {
         // TODO
         Qbe.Null
     }
-    fn Index(it) => {
-        // TODO
-        Qbe.Null
-    }
     fn Iterate() => {
         // TODO
         Qbe.Null
     }
-    fn Array(it)   => @panic("TODO: are you allowed a local array literal or is that just for constants?");
-    fn Generic()   => @panic("Shouldn't have a type in an expression");
+    fn GetVar()   => e.deref(node);
+    fn GetField() => e.deref(node);
+    fn Index()    => e.deref(node);
+    fn Array(it) => @panic("TODO: are you allowed a local array literal or is that just for constants?");
+    fn Generic() => @panic("Shouldn't have a type in an expression");
     // assert and invarient are for checking but are a nop at runtime. 
     fn Invarient() => Qbe.Null;
     fn Assert(it)  => Qbe.Null;
     fn Empty()     => Qbe.Null;
+}}
+
+fn deref(e: *Emit, node: Node) Qbe.Ref = {
+    place := e.emit_addr(node);
+    if place == Qbe.Null {
+        @match(e.module.get(node)) {
+            fn GetVar(it) => {
+                each e.module.body& { check |
+                    @if_let(check) fn Constant(check) => {
+                        if it.name == check.var.name {
+                            // return the value without dereferencing. 
+                            // TODO: need to know types. if it's an int just return the value not an address 
+                            // TODO: return a symcon. need to emit in the top level loop. 
+                            // statuses are just the address of a string (matching wuffs-c abi)
+                            // (i think even wasm abi treats single field struct the same as it's one type)
+                            return Qbe.Undef;
+                        }
+                    }
+                };
+                @panic("Undeclared var: %", e.module.get(it.name))
+            }
+            @default => @panic("failed to emit_addr");
+        };
+    }
+    
+    // TODO: when passing large thing to a call, just pass the pointer. so don't always load here. 
+    // TODO: need to know the types to use the right size
+    op := Qbe.O.load; 
+    r := e.f.newtmp("", .Kl);
+    push(e.b, op, .Kl, r, place, Qbe.Null);
+    r
 }
-};
+
+fn emit_addr(e: *Emit, node: Node) Qbe.Ref = {
+@match(e.module.get(node)) {
+    fn GetVar(it) => {
+        if it.is_arg {
+            return e.args&.get(it.name) || @panic("Undeclared arg: %", e.module.get(it.name));
+        };
+        e.vars&.get(it.name) || Qbe.Null
+    }
+    fn GetField(it) => {
+        lhs := e.emit_addr(it.place);
+        
+        // TODO: need to know types to add the field offset
+        field_offset := 0;
+        r := e.f.newtmp("", .Kl);
+        push(e.b, .add, .Kl, r, lhs, Qbe.Undef); // e.f.getcon(field_offset));
+        r
+    }
+    fn Index(it) => {
+        lhs := e.emit_addr(it.self);
+        idx := e.emit(it.lo);
+        
+        // TODO: need to know types to multiply by the element size
+        r := e.f.newtmp("", .Kl);
+        push(e.b, .mul, .Kl, r, idx, Qbe.Undef); // e.f.getcon(element_size));
+        push(e.b, .add, .Kl, r, lhs, r);
+        r
+    }
+    @default => @panic("invalid place expression");
+}}
+
+fn emit_body(e: *Emit, body: []Node) *Qbe.Blk = {
+    b := e.new_block();
+    for body { it |
+        e.emit(it);
+    };
+    @assert_eq(e.b.jmp.type, .Jxxx);
+    b
+}
 
 fn new_block(e: *Emit) *Qbe.Blk = {
     prev := e.b;

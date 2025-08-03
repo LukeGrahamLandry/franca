@@ -412,8 +412,16 @@ fn acquire(shared: *CodegenShared, $i_am_bouba: bool) ?*CodegenEntry = {
 fn release(shared: *CodegenShared, entry: *CodegenEntry, $i_am_bouba: bool) void = {
     @debug_assert(shared.threaded);
     shared.mutex&.lock();
-    dest := @if(i_am_bouba, shared.waiting_for_kiki&, shared.waiting_for_bouba&);
-    dest.push_back(entry, panicking_allocator);
+    if i_am_bouba {
+        // when the frontend is done, that entry goes on the end of the queue 
+        // to make sure compilation order is deterministic (required for repro)
+        shared.waiting_for_kiki&.push_back(entry, panicking_allocator);
+    } else {
+        // when the backend is done, have that entry be reused as soon as possible. 
+        // this avoids needing to warm up as many arenas (and reduces memory usage). 
+        // Aug 3, 2025: this saves ~10ms on self compile (1.08%)
+        shared.waiting_for_bouba&.push_front(entry, panicking_allocator);
+    };
     futex := @if(!i_am_bouba, shared.waiting_for_bouba_futex&, shared.waiting_for_kiki_futex&);
     
     prev := u32.atomic_add(futex, 1);

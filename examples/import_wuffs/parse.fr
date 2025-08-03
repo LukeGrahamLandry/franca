@@ -55,7 +55,7 @@ fn top_level_declare(self: *Parser, vis: Visibility) TopLevelStmt = {
                 name := self.next_name();
                 return(Constant = (
                     var = (name = name, type = self.status_type), 
-                    value = self.new_node(GetVar, (name = name)),
+                    value = self.new_node(GetVar, (name = name, is_arg = false)),
                     vis = vis,
                 ));
             };
@@ -86,7 +86,12 @@ fn top_level_declare(self: *Parser, vis: Visibility) TopLevelStmt = {
                 self.var_list(vars&, false);
                 self.eat(.@")");
             };
-            (DeclareStruct = (fields = vars.items(), init_field_count = init, implements = interface))
+            (DeclareStruct = (
+                fields = vars.items(), 
+                init_field_count = init, 
+                implements = interface,
+                name = name,
+            ))
         }
         fn func() => {
             reciever := self.next_name();
@@ -302,7 +307,7 @@ fn loop_flow(self: *Parser, style: Jump.Style) Node = {
     if self.maybe(.@".") {
         label := self.next_name();
     }
-    self.new_node(Jump, (style = .Yield, value = label))
+    self.new_node(Jump, (style = style, value = label))
 }
 
 fn assign(self: *Parser, place: Node, effect: Effect) Node = {
@@ -318,7 +323,7 @@ fn type(self: *Parser) Node = {
         fn Ident() => {  
             // TODO: really this case should be shared with expr()
             name := self.prev_name();
-            node := self.new_node(GetVar, (name = name));
+            node := self.new_node(GetVar, (name = name, is_arg = false));
             while => self.maybe(.@".") {
                 name := self.next_name();
                 node = self.new_node(GetField, (place = node, name = name));
@@ -440,11 +445,18 @@ fn prefix_expr(self: *Parser) Node = {
     @match(self.pop()) {
         fn Ident() => {
             name := self.prev_name();
-            self.new_node(GetVar, (name = name))
+            self.new_node(GetVar, (name = name, is_arg = false))
+        }
+        fn args() => {
+            self.eat(.@".");
+            name := self.next_name();
+            self.new_node(GetVar, (name = name, is_arg = true))
         }
         fn Number() => self.literal_node(Number = self.previous.payload.len);
         fn true()   => self.literal_node(Bool = true);
         fn false()  => self.literal_node(Bool = false);
+        // ok status is a null pointer
+        fn ok()  => self.literal_node(Number = 0);
         fn @"("() => {
             node := self.expr();
             self.eat(.@")");
@@ -477,8 +489,22 @@ fn literal_node(self: *Parser, it: LiteralValue) Node = {
 // If callee is a field access, this is a method call 
 fn call(self: *Parser, callee: Node, effect: Effect) Node = {
     self.eat(.@"(");
+    // TODO: check the labels. might have to reorder !!
     labels := Symbol.list(temp());
     args := Node.list(temp());
+    
+    method_name := @match(self.module.get(callee)) {
+        fn GetField(it) => {  // normal method call
+            args&.push(it.place);
+            it.name
+        };
+        fn GetVar(it) => it.name; // assert via
+        fn Empty() => self.module.program.names&.insert_owned("?"); // builtin :SLOW
+        @default => {
+            self.error("invalid callee");
+            unreachable()
+        };
+    }
     while => !self.maybe(.@")") {
         labels&.push(self.next_name());
         self.eat(.@":");
@@ -486,7 +512,7 @@ fn call(self: *Parser, callee: Node, effect: Effect) Node = {
         self.maybe(.@",");
     };
     self.new_node(Call, (
-        callee = callee, 
+        callee = method_name, 
         count = args.len.trunc(), 
         effect = effect,
     ), args.items())

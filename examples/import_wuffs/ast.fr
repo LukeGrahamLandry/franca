@@ -19,15 +19,13 @@ Module :: @rec @struct {
     arena: Alloc;
     program: *Program;
     index: i64;
+    // TODO: use this as a futex
+    public_ready: u32 = 0;
 };
 
 TopLevelStmt :: @tagged(
     DeclareFunc: Function,
-    DeclareStruct: @struct {
-        fields: []Field;
-        init_field_count: i64;
-        implements: Node;
-    },
+    DeclareStruct: Struct,
     Constant: @struct {
         var: Field;
         value: Node;
@@ -50,6 +48,16 @@ Function :: @struct {
     has_body: bool;
 };
 
+Struct :: @struct {
+    fields: []Field;
+    init_field_count: i64;
+    implements: Node;
+    // first all the declared fields. 
+    // then the locals of member functions (so they can be held accross a yield). 
+    field_offset_bytes: i64 = 8;
+    name: Symbol;
+};
+
 Visibility :: @enum(u8) (Public, Private);
 
 Field :: @struct(name: Symbol, type: Node);
@@ -58,7 +66,7 @@ Node :: @struct(id: u32);
 Call :: @struct {
     tag := NodeType.Call;
     effect: Effect;
-    callee: Node;
+    callee: Symbol;
     count: u32;
     // [Node]
 };
@@ -67,6 +75,7 @@ Effect :: @enum(u8) (Pure, Impure, Yielding);
 
 GetVar :: @struct {
     tag := NodeType.GetVar;
+    is_arg: bool;
     name: Symbol;
 };
 
@@ -288,6 +297,15 @@ fn new_module(program: *Program, name: Str) i64 = {
 
 fn get(self: *Module, it: Symbol) Str =
     self.program.names&.get(it);
+
+fn find_type(module: *Module, name: Symbol) ?*Struct = {
+    each module.body& { it |
+        @if_let(it) fn DeclareStruct(it) => if it.name == name {
+            return(Some = it);
+        };
+    };
+    .None
+}
 
 // TODO: put these in @/lib
 #use("@/compiler/pool.fr");
