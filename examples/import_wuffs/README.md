@@ -4,8 +4,8 @@ This is a compiler for wuffs-the-language (<https://github.com/google/wuffs>).
 > Example file formats include images, audio, video, fonts and compressed archives. 
 > Wuffs is not a general purpose programming language. It is for writing libraries, not programs.
 
-This is a reimplementation from scratch. It implements the same language as, 
-but is not derived from, the original compiler (the one written in go). 
+This program implements the same language as, 
+but does not use any code from, the original compiler (the one written in go). 
 Currently it uses the same runtime code (the base library written in c) 
 as the original (Copyright 2023 The Wuffs Authors. License: Apache-2.0 OR MIT). 
 

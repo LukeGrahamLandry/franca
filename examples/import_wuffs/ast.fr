@@ -24,12 +24,13 @@ Module :: @rec @struct {
 };
 
 TopLevelStmt :: @tagged(
-    DeclareFunc: Function,
+    Function: Function,
     DeclareStruct: Struct,
     Constant: @struct {
         var: Field;
         value: Node;
         vis: Visibility;
+        mangled: Qbe.Sym = Qbe.no_symbol_S;
     },
     Use: Symbol,
     DeclareType: @struct {
@@ -46,7 +47,10 @@ Function :: @struct {
     self_type: Symbol;
     name: Symbol;
     has_body: bool;
+    mangled: Qbe.Sym = Qbe.no_symbol_S;
 };
+
+Qbe :: import("@/backend/lib.fr").Qbe;
 
 Struct :: @struct {
     fields: []Field;
@@ -54,8 +58,9 @@ Struct :: @struct {
     implements: Node;
     // first all the declared fields. 
     // then the locals of member functions (so they can be held accross a yield). 
-    field_offset_bytes: i64 = 8;
+    field_offset_bytes: i64 = 0;
     name: Symbol;
+    module: *Module;
 };
 
 Visibility :: @enum(u8) (Public, Private);
@@ -136,6 +141,7 @@ LiteralValue :: @tagged(
     Number: i64,
     Status: Symbol,
     Bool: bool,
+    Type: Typ,
 );
 
 Generic :: @struct {
@@ -232,6 +238,19 @@ NodeFull :: @tagged(
     Empty: *Empty,
 );
 
+Typ :: *TypeData;
+
+TypeData :: @rec @tagged(
+    Int: @struct(bits: u8),
+    Ptr: @struct(child: Typ, nullable: bool),
+    Array: @struct(child: Typ, len: i64, mut: bool),
+    Slice: @struct(child: Typ, mut: bool),
+    Table: @struct(child: Typ, mut: bool),
+    Struct: *Struct,
+    Status,
+    Void,
+);
+
 fn new_node(self: *Module, $T: Type, node: T) Node #generic = {
     result: Node = (id = self.nodes.len.trunc());
     count :: size_of(T).align_to(size_of(Node)) / size_of(Node);
@@ -298,6 +317,8 @@ fn new_module(program: *Program, name: Str) i64 = {
 fn get(self: *Module, it: Symbol) Str =
     self.program.names&.get(it);
 
+// TODO: just have hash tables for stuff instead of all these shitty find functions
+
 fn find_type(module: *Module, name: Symbol) ?*Struct = {
     each module.body& { it |
         @if_let(it) fn DeclareStruct(it) => if it.name == name {
@@ -306,6 +327,51 @@ fn find_type(module: *Module, name: Symbol) ?*Struct = {
     };
     .None
 }
+
+fn find_method(receiver: Typ, name: Symbol) ?*Function = {
+    @assert(receiver.is(.Struct));
+    each receiver.Struct.module.body& { it |
+        @if_let(it) fn Function(it) => if it.self_type == receiver.Struct.name && it.name == name {
+            return(Some = it);
+        };
+    };
+    .None
+}
+
+fn new_type(self: *Module, it: TypeData) Typ = {
+    self.arena.boxed(TypeData, it)
+}
+
+fn new_type_node(self: *Module, it: TypeData) Node = {
+    ty := self.new_type(it);
+    lit := self.program.new_literal(Type = ty);
+    self.new_node(Literal, (index = lit))
+}
+
+fn find_field(module: *Module, struct: *Struct, name: Symbol) ?Ty(Typ, i64) = {
+    field_offset := 0;
+    each struct.fields { it |
+        type := module.eval_type(it.type);
+        if it.name == it.name {
+            return(Some = (type, field_offset))
+        };
+        field_offset += module.size_of(type).align_to(8);
+        @debug_assert_le(field_offset, struct.field_offset_bytes);
+    };
+    .None
+}
+
+fn size_of(module: *Module, ty: Typ) i64 = {
+    @match(ty) {
+        fn Int(it) => it.bits / 8;
+        fn Status() => 8;
+        fn Struct(it) => it.field_offset_bytes;
+        fn Ptr() => 8;
+        fn Slice() => 16;
+        fn Void() => 0;
+        @default => todo();
+    }
+} 
 
 // TODO: put these in @/lib
 #use("@/compiler/pool.fr");
