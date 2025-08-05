@@ -102,14 +102,14 @@ fn files_unchanged(header: *Header) bool = {
 fn compile_cached(header: *Header, to_free: *?Ty(*QbeModule, *Crash'LocationResolverNode)) (@FnPtr(*ImportVTable) void) = {
     a := general_allocator();
     m := a.box(QbeModule);
-    init_default_module(m, (
+    backend'init_module(m, (
         arch = query_current_arch(), 
         os = query_current_os(), 
         type = .JitOnly,
     ));
     
     z := zone_begin(.AotPump);
-    compile_all_symbols(header, m);
+    backend'load_all(header, m);
     zone_end(z);
     
     import("@/backend/meta/qbe_frontend.fr")'fill_from_libc(m);
@@ -154,7 +154,7 @@ fn write_cache(m: *QbeModule, c: CompCtx, fid: FuncId, outpath2: Str, start_path
     
     @if(!enable_incremental()) @panic("write_cache");
     writer := m.save.unwrap();
-    finish_imports(writer, m);
+    backend'writer_finish_imports(writer, m);
     
     entry_dep := write_deps(writer, self.codemap, start_path);
     name := c.fmt_fn_name(fid);
@@ -857,11 +857,11 @@ fn build_the_exports_scope(c: *ExportCtx, start_path: Str) CRes([][]u8) = {
     // This is kinda copy-paste fusion adventure of emit_qbe_included and finish_qbe_module. 
     
     fr := c.self.comp();
-    shared := init_codegen_worker(c.m, fr.get_alloc(), @as(CodegenWorker) codegen_thread_main, true);
+    shared := backend'worker_start(c.m, fr.get_alloc(), @as(CodegenWorker) codegen_thread_main, true);
     funcs_done := main_thread_pump(fr, shared, fns, false);
     @debug_assert(c.m.inlinable_but_referenced_later.len == 0);
     
-    finish_imports(c.writer, c.m);
+    backend'writer_finish_imports(c.writer, c.m);
     root_scope := export_root_scope(c, fns, funcs_done&, names);
     entry_dep := write_deps(c.writer, c.self.codemap, start_path);
     

@@ -17,6 +17,10 @@
 - need to auto-test static linux. i wonder if you can landlock away `libc.so` to make sure you can't cheat 
 - linux arm -syscalls doesn't work
 - create a guard page when allocating a new stack to spawn a thread
+- since do_codegen tries to do tracy stuff, FRANCA_TRACY=1 doesn't work if you try to run something 
+  that uses import_c not through default_driver. ie. `FRANCA_TRACY=true ./trace.out examples/terminal.fr` 
+  crashes but `FRANCA_TRACY=true ./trace.out examples/default_driver.fr build examples/terminal.fr` is fine. 
+  relatedly, since that's not included in cache invalidation, it's broken if you turn on import_module caching. 
 
 ## remaining nondeterminism
 
