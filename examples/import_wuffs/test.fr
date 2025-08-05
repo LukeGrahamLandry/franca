@@ -1,6 +1,31 @@
 driver :: fn(vtable: *ImportVTable) void = {
-    //parse_test();
-    hello_test(vtable);
+    parse_test();
+    w :: {
+        fr := current_compiler_context();
+        bytes := hello_test(fr.vtable, general_allocator());
+        result := fr'vtable'import_frc(fr.data, bytes);
+        or result { err |
+            fr.report_error(err)
+        }
+    };
+    w;
+    
+    c :: import("@/examples/import_c/ffi.fr")'include(hello_c);
+    c;
+    
+    i := c.imports;
+    x: rawptr = w.demo__parser__parse;
+    i.wuffs_demo__parser__parse = bit_cast_unchecked(rawptr, @type i.wuffs_demo__parser__parse, x);
+    x = w.demo__parser__value;
+    i.wuffs_demo__parser__value = bit_cast_unchecked(rawptr, @type i.wuffs_demo__parser__value, x);
+
+    c'main();
+}
+
+main :: fn() void = {
+    vtable := ImportVTable.zeroed();
+    import("@/compiler/ast_external.fr")'fill_backend_vtable(vtable&);
+    driver(vtable&);
 }
 
 parse_test :: fn() void = {
@@ -30,31 +55,34 @@ parse_test :: fn() void = {
                 parse_top_level(path, src, module);
             }
         };
-        print_module(module);
+        _ := print_module(module);
     };
 };
 
-fn print_module(module: *Module) void = {
+fn print_module(module: *Module) Str = {
     out := u8.list(temp());
     p: Print = (module = module, out = out&);
     each module.body& { it |
         show(p&, it);
     };
-    print(out.items());
+    out.items()
 }
 
-hello_test :: fn(vtable: *ImportVTable) void = {
+hello_test :: fn(vtable: *ImportVTable, out_alloc: Alloc) Str = {
     a: ArenaAlloc = init(page_allocator, 10000); 
     program: Program = init(a&.borrow());
     {
         module := program.modules&.index(program&.new_module("base"));
         parse_top_level("base", base_module_source, module);
-        print_module(module);
+        _ := print_module(module);
     };
     module := program.modules&.index(program&.new_module("demo"));
     parse_top_level("hello_wuffs", hello_w, module);
-    print_module(module);
-    bytes := import("@/examples/import_wuffs/emit.fr")'emit_full_program(program&, a&.borrow(), vtable);
+    _ := print_module(module);
+    bytes := import("@/examples/import_wuffs/emit.fr")'emit_full_program(program&, out_alloc, vtable);
+    write_entire_file_or_crash("target/a.frc", bytes);
+    a&.deinit();
+    bytes
 }
 
 #use("@/examples/import_wuffs/lex.fr");
@@ -111,28 +139,63 @@ hello_c :: """
 #include <string.h>
 #include <stdio.h>
 
+// TODO: just include the wuffs header file to get the base module
+// ---
+typedef struct wuffs_base__slice_u8__struct {
+    char *ptr;
+    size_t len;
+} wuffs_base__slice_u8;
+
+typedef struct wuffs_base__io_buffer_meta__struct {
+  size_t wi;
+  size_t ri;
+  uint64_t pos;
+  long closed;
+} wuffs_base__io_buffer_meta;
+
+typedef struct wuffs_base__io_buffer__struct {
+  wuffs_base__slice_u8 data;
+  wuffs_base__io_buffer_meta meta;
+  int extra[10];
+} wuffs_base__io_buffer;
+  
+static inline wuffs_base__io_buffer
+wuffs_base__ptr_u8__reader(uint8_t* ptr, size_t len, char closed) {
+  wuffs_base__io_buffer ret = { 0 };
+  ret.data.ptr = ptr;
+  ret.data.len = len;
+  ret.meta.wi = len;
+  ret.meta.ri = 0;
+  ret.meta.pos = 0;
+  ret.meta.closed = closed;
+  return ret;
+}
+// ---
+
+typedef struct {
+    int val;
+    int a[10];
+} wuffs_demo__parser;
+
+typedef struct {
+    char *(*wuffs_demo__parser__parse)(wuffs_demo__parser *this, wuffs_base__io_buffer *buf);
+    int (*wuffs_demo__parser__value)(wuffs_demo__parser *this);
+} Imports;
+
+Imports imports = { 0 };  // HACK
+
 uint32_t parse(char* p, size_t n) {
-  wuffs_base__status status;
-
-  wuffs_demo__parser parser;
-
-  status = wuffs_demo__parser__initialize(&parser, sizeof__wuffs_demo__parser(),
-                                          WUFFS_VERSION, 0);
-  if (!wuffs_base__status__is_ok(&status)) {
-    printf("initialize: %s\n", wuffs_base__status__message(&status));
-    return 0;
-  }
-
+  wuffs_demo__parser parser = { 0 };
   wuffs_base__io_buffer iobuf =
-      wuffs_base__ptr_u8__reader((uint8_t*)p, n, true);
+      wuffs_base__ptr_u8__reader((uint8_t*)p, n, 1);
 
-  status = wuffs_demo__parser__parse(&parser, &iobuf);
-  if (!wuffs_base__status__is_ok(&status)) {
-    printf("parse: %s\n", wuffs_base__status__message(&status));
+  char *status = imports.wuffs_demo__parser__parse(&parser, &iobuf);
+  if (status != 0) {
+    printf("parse: %s\n", status);
     return 0;
   }
 
-  return wuffs_demo__parser__value(&parser);
+  return imports.wuffs_demo__parser__value(&parser);
 }
 
 void run(char* p) {
@@ -141,7 +204,7 @@ void run(char* p) {
   printf("%" PRIu32 "\n", i);
 }
 
-int main(int argc, char** argv) {
+int main() {
   run("0");
   run("12");
   run("56789");

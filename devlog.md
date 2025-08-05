@@ -1,4 +1,22 @@
 
+## (Aug 5)
+
+- last thing i needed to get the hello-wuffs-c example to work was just update assignment (like a += 1). 
+  so now that program works which is progress. just need to un-stupid emit so it makes sense again. 
+  the main problem is confusion about when things are a pointer vs a value. 
+
+## (Aug 4)
+
+just hacking enough stuff together that i can run an example program. 
+- a dumb definition for read_u8 and an intrinsic for slice.length()
+- simple frc signetures so it can be imported
+- even more hacking to get it to run together with some c code
+  - pain with casting between the function pointer types. 
+    to cheat need to go throug ha rawptr to make sure not to get the funcid type by mistake. 
+    (won't be a problem once i make dependencies between import_frc work)
+  - make sure padding in the struct for yield state 
+    (won't be a problem once it's genrated by import_wuffs)
+
 ## (Aug 3)
 
 generating ir from wuffs. 
@@ -12,6 +30,7 @@ generating ir from wuffs.
   - before: `1272764 bytes of code, 85434 bytes of data. [CPU Time] frontend: 1102ms, codegen: 721ms. ir_ops = 614960`
   - after:  `1139680 bytes of code, 85434 bytes of data. [CPU Time] frontend: 1062ms, codegen: 631ms. ir_ops = 564633`
   not super exciting because it doesn't affect release builds but all comptime code is debug so that's nice. 
+- track types, calculate field offsets, loop targets
 
 ## (Aug 2)
 

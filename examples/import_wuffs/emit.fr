@@ -6,18 +6,29 @@ emit_full_program :: fn(program: *Program, out_alloc: Alloc, vtable: *ImportVTab
         os = query_current_os(), 
         type = .CachedEarly,
     ));
-    m&.set_debug_types("P", true);
+    //m&.set_debug_types("Pd", true);
     
     each program.modules { module |
         emit_early(module, m&, vtable);
     };
     
-    each program.modules { module |
-        emit_late(module, m&, vtable);
+    writer := m.save.unwrap();
+    // TODO: making everyone remember to do this is kinda lame
+    range(0, Qbe.Incremental.FTy.COUNT) { _ |
+        writer.fty&.push(zeroed Qbe.Incremental.FTy);   // skip builtin types so offsets work out
     };
     
-    // TODO
-    ""
+    decls := Qbe.Incremental.Fld.list(temp());
+    each program.modules { module |
+        emit_late(module, m&, vtable, decls&);
+    };
+    
+    s := save_fields(writer, .Scope, decls.items());
+    meta: Qbe.Incremental.Meta = (arch_os = 0x0F0F, root_scope = s);
+    b := writer.to_bytes(meta, m&);
+    b := concat(b, out_alloc);
+    vtable'drop_qbe_module(Qbe.QbeModule.raw_from_ptr(m&));
+    b
 }
 
 fn emit_early(module: *Module, m: *Qbe.Module, vtable: *ImportVTable) void = {
@@ -42,17 +53,40 @@ fn emit_early(module: *Module, m: *Qbe.Module, vtable: *ImportVTable) void = {
     module.public_ready = 1;
 }
 
-fn emit_late(module: *Module, m: *Qbe.Module, vtable: *ImportVTable) void = {
+fn emit_late(module: *Module, m: *Qbe.Module, vtable: *ImportVTable, decls: *List(Qbe.Incremental.Fld)) void = {
     @debug_assert_eq(module.public_ready, 1);
+    writer := m.save.unwrap();
     each module.body { stmt |
         @match(stmt) {
             fn Function(it) => if it.has_body {
                 f := emit(module, m, it);
+                
+                decls.push(
+                    name = writer.push(m.str(f.lnk.id)),
+                    type = abi_function_type(writer, f),
+                    payload = (offset = trunc writer.map_sym(m, f.lnk.id))
+                );
+                
                 vtable'run_qbe_passes(Qbe.Fn.raw_from_ptr(f));
             };
+            fn Constant(it) => {
+                ty := module.eval_type(it.var.type);
+                ::tagged(@type ty[]);
+                @assert(ty.is(.Status), "TODO: non-status constant");
+                // status is just a string
+                data := module.get(it.var.name);  // TODO: get from the literal instead
+                m.emit_data(
+                    export = true,
+                    id = it.mangled,
+                    template = (Bytes = data),
+                    relocations = empty(),
+                );
+            }
             @default => ();
         }
     };
+    // TODO: emit frc types for structs but they have to be after all functions are done so you know the size
+    //       or could do that layout in emit_early instead
 }
 
 Emit :: @struct {
@@ -68,10 +102,13 @@ Emit :: @struct {
     yield_points: List(*Qbe.Blk);
     todo_type: Typ;
     void_value: Value;
+    loops: List(Loop);
 }
 
 Value :: Ty(Qbe.Ref, Typ);
 fn is_a(r: Qbe.Ref, type: Typ) Value = (r, type);
+
+Loop :: @struct(node: Node, break: *Qbe.Blk, continue: *Qbe.Blk);
 
 fn emit(module: *Module, m: *Qbe.Module, func: *Function) *Qbe.Fn = {
     self_type := module.find_type(func.self_type);
@@ -85,6 +122,7 @@ fn emit(module: *Module, m: *Qbe.Module, func: *Function) *Qbe.Fn = {
         yield_points = list(temp()),
         todo_type = zeroed Typ,
         void_value = zeroed Value,
+        loops = list(temp()),
     );
     default_init(e.f, m);
     e.f.start = e.b;
@@ -103,20 +141,20 @@ fn emit(module: *Module, m: *Qbe.Module, func: *Function) *Qbe.Fn = {
         push(e.b, .par, .Kl, r, Qbe.Null, Qbe.Null);
     };
     
-    // This is lazy. make stack slots for small arguments (since they're mutable)
-    // so Assign and fn deref below don't have to handle small values specially. 
-    // (which would also be an option because i do have mutable vars in the ir)
-    for func.params { it |  
-        size := 8;  // TODO: need to know types
-        if size <= 8 {
-            addr := e.f.newtmp("", .Kl);
-            value, _ := e.args&.insert(it.name, addr.is_a(e&.eval(it.type))).unwrap();
-            // TODO: have all allocs at the start before any stores to make sure they get fast-allocs 
-            //       (i don't remember if the backend reorders for you. it probably should). 
-            push(e.b, .alloc8, .Kl, addr, e.f.getcon(size), Qbe.Null);
-            push(e.b, .storel, .Kw, Qbe.Null, value, addr);
-        }
-    };
+    //// This is lazy. make stack slots for small arguments (since they're mutable)
+    //// so Assign and fn deref below don't have to handle small values specially. 
+    //// (which would also be an option because i do have mutable vars in the ir)
+    //for func.params { it |  
+    //    size := 8;  // TODO: need to know types
+    //    if size <= 8 {
+    //        addr := e.f.newtmp("", .Kl);
+    //        value, _ := e.args&.insert(it.name, addr.is_a(e&.eval(it.type))).unwrap();
+    //        // TODO: have all allocs at the start before any stores to make sure they get fast-allocs 
+    //        //       (i don't remember if the backend reorders for you. it probably should). 
+    //        push(e.b, .alloc8, .Kl, addr, e.f.getcon(size), Qbe.Null);
+    //        push(e.b, .storel, .Kw, Qbe.Null, value, addr);
+    //    }
+    //};
     
     off := e.self_type.field_offset_bytes&;
     // For now, locals are always just a field of the reciever struct (so the coroutine can yield). 
@@ -178,6 +216,14 @@ fn emit(e: *Emit, node: Node) Value = {
         
         receiver := receiver.expect("call have parameters");
         ::tagged(TypeData);
+        
+        if receiver.is(.Slice) && it.callee == e.module.program.names&.insert_owned("length")/*:SLOW*/ {
+            r := e.f.newtmp("length", .Kl);
+            push(e.b, .add, .Kl, r, args[0], e.f.getcon(8));
+            push(e.b, .load, .Kl, r, r, Qbe.Null);
+            return r.is_a(e.todo_type);
+        }
+        
         callee := find_method(receiver, it.callee)
             .expect("method to exist");
         
@@ -245,6 +291,7 @@ fn emit(e: *Emit, node: Node) Value = {
         e.void_value
     }
     fn While(it) => {
+        // TODO: keep the loop's label and use it in the ir for debugging
         old := e.b;
         start_cond := e.new_block();
         old.jmp.type = .jmp; old.s1 = start_cond;
@@ -253,14 +300,18 @@ fn emit(e: *Emit, node: Node) Value = {
         ::enum(Qbe.J);
         @assert_eq(e.b.jmp.type, .Jxxx);
         end_cond := e.b;
+        break := e.new_block();
+        e.b = end_cond;  // bleh. just to make the link chain work out. should just be a normal list
         
+        push(e.loops&, (node = node, break = break, continue = start_cond));
         start_body := e.emit_body(e.module.get_body(node));
         e.b.jmp.type = .jmp; e.b.s1 = start_cond;
         
-        after := e.new_block();
         end_cond.s1 = start_body;
-        end_cond.s2 = after;
+        end_cond.s2 = break;
         end_cond.jmp = (type = .jnz, arg = cond);
+        e.b.link = break;  // bleh
+        e.b = break;
         
         e.void_value
     }
@@ -285,14 +336,18 @@ fn emit(e: *Emit, node: Node) Value = {
                 e.b.jmp = (type = .retl, arg = status);
                 push(e.yield_points&, e.new_block());
             }
-            fn Continue() => {
-                @println("XXX");
-                // TODO
-            }
-            fn Break() => {
-                @println("XXX");
-                // TODO
-            }
+            @default => {
+                ::@assert_eq(Jump.Style.enum_count(), 4, "TODO: added new jump");
+                each_rev e.loops { check |
+                    if check.node.id == it.value.id {
+                        e.b.jmp.type = .jmp;
+                        e.b.s1 = @if(it.style == .Break, check.break, check.continue);
+                        e.new_block();
+                        return e.void_value;
+                    }
+                };
+                @panic("missing jump target")
+            };
         };
         e.void_value
     }
@@ -350,9 +405,17 @@ fn deref(e: *Emit, node: Node) Value = {
         };
     }
     
+    if !ty.is_null() && e.module.size_of(ty) > 8 {
+        return(place.is_a(ty)); // TODO: HACK
+    }
+    
     // TODO: when passing large thing to a call, just pass the pointer. so don't always load here. 
     // TODO: need to know the types to use the right size
     op := Qbe.O.load; 
+    
+    if !ty.is_null() && e.module.size_of(ty) == 1 {
+        op = .loadub;
+    }
     r := e.f.newtmp("", .Kl);
     push(e.b, op, .Kl, r, place, Qbe.Null);
     r.is_a(ty)
@@ -376,22 +439,33 @@ fn emit_addr(e: *Emit, node: Node) Value = {
         field_type, field_offset := e.module.find_field(ty.Struct, it.name) 
             || @panic("invalid field %", e.module.get(it.name));
         
-        r := e.f.newtmp("", .Kl);
+        r := e.f.newtmp(e.module.get(it.name), .Kl);
         push(e.b, .add, .Kl, r, lhs, e.f.getcon(field_offset));
         r.is_a(field_type)
     }
     fn Index(it) => {
-        lhs, l_ty := e.emit_addr(it.self);
+        lhs, l_ty := e.emit(it.self);  // TODO: _addr
         idx, i_ty := e.emit(it.lo);
         
-        // TODO: assert l_ty is slice or array and get it's element type
+        {  // HACK
+            op := Qbe.O.load; 
+            r := e.f.newtmp("", .Kl);
+            push(e.b, op, .Kl, r, lhs, Qbe.Null);
+            lhs = r;
+        };
+        child := @match(l_ty) {
+            fn Slice(it) => it.child;
+            fn Array(it) => it.child;
+            @default => @panic("invalid type for index expression");
+        };
+        step := e.module.size_of(child);
+        
         // TODO: asserty i_ty is an integer
         
-        // TODO: need to know types to multiply by the element size
         r := e.f.newtmp("", .Kl);
-        push(e.b, .mul, .Kl, r, idx, Qbe.Undef); // e.f.getcon(element_size));
+        push(e.b, .mul, .Kl, r, idx, e.f.getcon(step));
         push(e.b, .add, .Kl, r, lhs, r);
-        r.is_a(e.todo_type)
+        r.is_a(child)
     }
     @default => @panic("invalid place expression");
 }}
@@ -428,6 +502,7 @@ fn eval_type(module: *Module, node: Node) Typ = {
     }
     fn GetVar(it)   => {
         // TODO: look it up in the current module
+        println("A");
         zeroed Typ
     }
     fn GetField(it) => {
@@ -441,18 +516,24 @@ fn eval_type(module: *Module, node: Node) Typ = {
         parent := module.program.modules.items().find(fn(it) => it.name == module_name)
             .expect("module to exist");
         
+        ::?*Struct;
         // TODO: don't be dumb as rocks
         // TODO: don't allocate a new thing every time you reference a type!
         @switch(module.get(name)) {
             @case("u8") => module.new_type(Int = (bits = 8));
             @case("u32") => module.new_type(Int = (bits = 32));
+            @case("u64") => module.new_type(Int = (bits = 64));
+            @case("bool") => module.new_type(Int = (bits = 8));
             @case("io_reader") => module.new_type(Struct = parent.find_type(name).unwrap());
-            @default => @panic("TODO: support more type names: %.%", module_name, name);
+            @default => @panic("TODO: support more type names: %.%", module.get(module_name), module.get(name));
         }
     }
     fn Generic(it) => {
-        // TODO
-        zeroed Typ
+        ::enum(@type it.op);
+        @match(it.op) {
+            fn slice() => module.new_type(Slice = (child = module.eval_type(it.inner), mut = true));
+            @default => @panic("TODO: eval generic %", it.op);
+        }
     }
     fn Empty() => {
         // TODO

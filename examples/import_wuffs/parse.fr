@@ -1,5 +1,4 @@
 // TODO: don't panic on errors
-// TODO: keep stack of loops and resolve break/continue targets
 
 Parser :: @struct {
     lex: Lexer;
@@ -8,12 +7,16 @@ Parser :: @struct {
     span: Span;
     previous := zeroed FullToken;
     current := zeroed FullToken;
+    loops := zeroed RawList(Loop);
+    unnamed_loop: Symbol;
     
     status_type: Node;
     void_type := zeroed Node; // TODO
     builtin_callee := zeroed Node;  // TODO
     empty_node := zeroed Node; // TODO
 };
+
+Loop :: @struct(label: Symbol, jump: Node);
 
 fn parse_top_level(file_name: Str, source: Str, module: *Module) void = {
     self: Parser = (
@@ -22,6 +25,7 @@ fn parse_top_level(file_name: Str, source: Str, module: *Module) void = {
         module = module,
         span = module.program.codemap&.add_file(file_name, source),
         status_type = module.new_type_node(.Status),
+        unnamed_loop = module.program.names&.insert_owned("?"), // :SLOW
     );
     self := self&;
 
@@ -212,10 +216,9 @@ fn stmt(self: *Parser) Node = {
         fn break() => self.loop_flow(.Break);
         fn while() => {
             self.pop();
-            start_label := zeroed Symbol;
+            start_label := self.unnamed_loop;
             if self.maybe(.@".") {
                 start_label = self.next_name();
-                // TODO: use this!
             };
             cond := self.expr();
             body := Node.list(temp());
@@ -234,10 +237,26 @@ fn stmt(self: *Parser) Node = {
                 end_label := self.next_name();
                 @assert_eq(start_label, end_label, "while loop labels must match");
             };
-            self.new_node(While, (
+            
+            node := self.new_node(While, (
                 cond = cond, 
                 count = body.len.trunc(),
-            ), body.items())
+            ), body.items());
+            
+            // TODO: im not super happy with needing to track these and patch. feels :SLOW
+            //       but the way i represent the ast i can't have the while node until im done parsing the body. 
+            //       maybe it would be better to have a Block node that has the trailing stuff 
+            //       and use that for if/else/builtin as well? 
+            unordered_retain(self.loops&) { it |
+                if it.label == start_label {
+                    it := self.module.get(it.jump);
+                    @assert(it&.is(.Jump));
+                    it.Jump.value = node;
+                };
+                !(it.label == start_label)
+            };
+
+            node
         }
         fn assert() => {
             self.pop();
@@ -303,11 +322,14 @@ fn builtin_call(self: *Parser, op: TokenType) Node = {
 
 fn loop_flow(self: *Parser, style: Jump.Style) Node = {
     self.pop();
-    label := self.empty_node;  // TODO: keep a stack of active loops and resolve this now
+    label := self.unnamed_loop;
     if self.maybe(.@".") {
-        label := self.next_name();
+        label = self.next_name();
     }
-    self.new_node(Jump, (style = style, value = label))
+    
+    node := self.new_node(Jump, (style = style, value = self.empty_node));
+    push(self.loops&, (label = label, jump = node), temp());
+    node
 }
 
 fn assign(self: *Parser, place: Node, effect: Effect) Node = {
@@ -398,7 +420,7 @@ fn expr(self: *Parser) Node = {
             fn as() => {
                 self.pop();
                 type := self.type();
-                self.new_node(Op, (op = .as, assign = false, style = .Safe, lhs = lhs, rhs = type))
+                self.new_node(Op, (op = .as, style = .Safe, lhs = lhs, rhs = type))
             }
             fn @"["() => {  // TODO: type refinements could use this instead of Generic
                 op := self.pop();
@@ -465,7 +487,7 @@ fn prefix_expr(self: *Parser) Node = {
         fn not() => {
             it := self.expr();
             self.new_node(Op, (
-                op = .not, style = .Safe, assign = false, 
+                op = .not, style = .Safe,
                 lhs = it, rhs = self.empty_node,
             ))
         }
@@ -521,9 +543,13 @@ fn call(self: *Parser, callee: Node, effect: Effect) Node = {
 fn operator(self: *Parser, lhs: Node, style: Op.Style) Node = {
     op := self.current.type;
     self.pop();
-    assign := self.maybe(.@"=");  // TODO: maybe rewrite the tree now?
+    assign := self.maybe(.@"=");
     rhs := self.expr();
-    self.new_node(Op, (op = op, style = style, assign = assign, lhs = lhs, rhs = rhs))
+    node := self.new_node(Op, (op = op, style = style, lhs = lhs, rhs = rhs));
+    if assign {
+        node = self.new_node(Assign, (effect = .Pure, place = lhs, value = node));
+    }
+    node
 }
 
 fn error(self: *Parser, msg: Str) void = {

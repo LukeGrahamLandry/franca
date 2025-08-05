@@ -385,6 +385,7 @@ but then need to deal with including build options in the cache (like -unsafe, -
 - allow smaller compilation units. like not making you recompile the backend when you work on the frontend. 
 - test that .frc files repro and that you can pass them directly
 - dump_bin: print segment.MachineCode as something qbe_frontend.fr can parse so it can round trip
+  - dump_bin: won't be able to parse back if symbol names have spaces in them
 - clear cache before tests just in case
 - whether the host compiler was built with`-syscalls` needs to go in the cache file :CacheKeySyscalls
 - caching an invalid thing i think? if you Compile Error: we hit a dynamicimport ('puts_unlocked' from 'libc') with no comptimeaddr for jit
@@ -473,8 +474,7 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
 
 - less hacky handling of types (emit_type.Field should not special case the base module)
 - implement the rest of the language
-  - break, continue
-  - output constants: arrays, status
+  - output constants: arrays
   - suspend when a callee suspends
   - correct abi for large values (parc/argc) and handle assigning them to fields correctly with a blit
   - choose (function pointer typed fields and methods that dispatch to them)
@@ -482,6 +482,7 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
   - Generic: slice, array, table
   - io_buffer methods don't exist in the c code (they're intrinsics in original wuffs)
 - output .frc with frontend types
+- sizeof/initialize methods
 - compile their programs and pass thier c tests (ie. provide same abi as original wuffs)
 - less verbose wrappers for calling from franca
 - better error messages in emit.fr (like for type errors, etc). 
