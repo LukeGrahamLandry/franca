@@ -35,11 +35,11 @@ fn emit_early(module: *Module, m: *Qbe.Module, vtable: *ImportVTable) void = {
     each module.body { stmt |
         @match(stmt) {
             fn Function(it) => {
-                name := @tfmt("%__%__%", module.get(module.name), module.get(it.self_type), module.get(it.name));
+                name := @tfmt("wuffs_%__%__%", module.get(module.name), module.get(it.self_type), module.get(it.name));
                 it.mangled = m.intern(name);
             };
             fn Constant(it) => {
-                name := @tfmt("%__%", module.get(module.name), module.get(it.var.name));
+                name := @tfmt("wuffs_%__%", module.get(module.name), module.get(it.var.name));
                 it.mangled = m.intern(name);
             }
             fn DeclareStruct(it) => {
@@ -137,24 +137,9 @@ fn emit(module: *Module, m: *Qbe.Module, func: *Function) *Qbe.Fn = {
     for func.params { it |
         r := e.f.newtmp(module.get(it.name), .Kl);
         e.args&.insert(it.name, r.is_a(e&.eval(it.type)));
-        // TODO: parc when it's a struct
+        // TODO: parc for slices
         push(e.b, .par, .Kl, r, Qbe.Null, Qbe.Null);
     };
-    
-    //// This is lazy. make stack slots for small arguments (since they're mutable)
-    //// so Assign and fn deref below don't have to handle small values specially. 
-    //// (which would also be an option because i do have mutable vars in the ir)
-    //for func.params { it |  
-    //    size := 8;  // TODO: need to know types
-    //    if size <= 8 {
-    //        addr := e.f.newtmp("", .Kl);
-    //        value, _ := e.args&.insert(it.name, addr.is_a(e&.eval(it.type))).unwrap();
-    //        // TODO: have all allocs at the start before any stores to make sure they get fast-allocs 
-    //        //       (i don't remember if the backend reorders for you. it probably should). 
-    //        push(e.b, .alloc8, .Kl, addr, e.f.getcon(size), Qbe.Null);
-    //        push(e.b, .storel, .Kw, Qbe.Null, value, addr);
-    //    }
-    //};
     
     off := e.self_type.field_offset_bytes&;
     // For now, locals are always just a field of the reciever struct (so the coroutine can yield). 
@@ -266,8 +251,15 @@ fn emit(e: *Emit, node: Node) Value = {
         r.is_a(e.todo_type)
     }
     fn Assign(it) => {
+        // TODO: if the place is in args., need to use .copy, it's just a value. 
+        //       but if it's big (like a slice) it needs to be a blit instead. 
         value, v_ty := e.emit(it.value);
         place, p_ty := e.emit_addr(it.place);
+        
+        // TODO: need to produce types all the time
+        //size := e.module.size_of(v_ty);
+        //@assert(size <= 8, "TODO: large assign as blit");
+        
         op := Qbe.O.storel; // TODO: need to know the types to use the right size
         push(e.b, op, .Kw, Qbe.Null, value, place);
         e.void_value
@@ -404,17 +396,15 @@ fn deref(e: *Emit, node: Node) Value = {
             @default => @panic("failed to emit_addr");
         };
     }
-    
-    if !ty.is_null() && e.module.size_of(ty) > 8 {
-        return(place.is_a(ty)); // TODO: HACK
-    }
-    
-    // TODO: when passing large thing to a call, just pass the pointer. so don't always load here. 
-    // TODO: need to know the types to use the right size
-    op := Qbe.O.load; 
-    
-    if !ty.is_null() && e.module.size_of(ty) == 1 {
-        op = .loadub;
+
+    size := e.module.size_of(ty);
+    op: Qbe.O = @switch(size) {
+        @case(1) => .loadub;
+        @case(2) => .loaduh;
+        @case(4) => .loaduw;
+        @case(8) => .load;
+        // large things are just represented as a pointer. 
+        @default => return(place.is_a(ty));
     }
     r := e.f.newtmp("", .Kl);
     push(e.b, op, .Kl, r, place, Qbe.Null);
@@ -444,17 +434,18 @@ fn emit_addr(e: *Emit, node: Node) Value = {
         r.is_a(field_type)
     }
     fn Index(it) => {
-        lhs, l_ty := e.emit(it.self);  // TODO: _addr
+        lhs, l_ty := e.emit(it.self);
         idx, i_ty := e.emit(it.lo);
         
-        {  // HACK
-            op := Qbe.O.load; 
-            r := e.f.newtmp("", .Kl);
-            push(e.b, op, .Kl, r, lhs, Qbe.Null);
-            lhs = r;
-        };
         child := @match(l_ty) {
-            fn Slice(it) => it.child;
+            fn Slice(it) => {
+                // .ptr is the first field, load it. 
+                r := e.f.newtmp("", .Kl);
+                push(e.b, .load, .Kl, r, lhs, Qbe.Null);
+                lhs = r;
+                
+                it.child
+            }
             fn Array(it) => it.child;
             @default => @panic("invalid type for index expression");
         };

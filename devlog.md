@@ -4,6 +4,10 @@
 - last thing i needed to get the hello-wuffs-c example to work was just update assignment (like a += 1). 
   so now that program works which is progress. just need to un-stupid emit so it makes sense again. 
   the main problem is confusion about when things are a pointer vs a value. 
+- let import_c #include a .frc file so i don't have to type out a vtable to import the wuffs functions. 
+  does feel a bit like waste of time factory but it didn't suck as mush as i thought it would. 
+  started with just function types and some builtins which works because import_c doesn't type check pointers. 
+  so the current state is pretty error prone but at least it checks arity which is better than my previous hack. 
 
 ## (Aug 4)
 

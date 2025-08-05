@@ -98,6 +98,8 @@ bodies on different targets which i don't deal with well.
 - why does threaded=true not work when running jitted sometimes (random mutex failures)? 
   there shouldn't be jit-shims if it's not at comptime so that theory doesn't explain it 
   although it seemed to have similar symptoms. 
+- extend test/ffi.fr to have simpler usage of #include a .frc file 
+  (currently only used by import_wuffs which has a lot going on)
 
 ### !! BROKEN !!
 
