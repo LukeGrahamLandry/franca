@@ -3,6 +3,9 @@ driver :: fn(vtable: *ImportVTable) void = {
     w :: {
         fr := current_compiler_context();
         bytes := hello_test(fr.vtable, general_allocator());
+        
+        import("@/lib/sys/fs.fr")'
+            write_entire_file_or_crash("target/hello_w.frc", bytes);  // TODO: don't hardcode this path!
         result := fr'vtable'import_frc(fr.data, bytes);
         or result { err |
             fr.report_error(err)
@@ -14,6 +17,25 @@ driver :: fn(vtable: *ImportVTable) void = {
     c;
     
     c'main();
+    
+    number: CStr = "123";
+    
+    p := ptr_cast_unchecked(u8, i8, number.ptr);
+    @assert_eq(c'parse(p, 4), 123);
+    
+    parser := zeroed w.wuffs_demo__parser;
+    buf := c'wuffs_base__ptr_u8__reader(number.ptr, 4, 1);
+    
+    // TODO: need to export real function signetures not just abi ones. 
+    status := w'wuffs_demo__parser__parse(
+        bit_cast_unchecked(@type parser&, i64, parser&),
+        bit_cast_unchecked(@type buf&, i64, buf&),
+    );
+    @assert(status == 0);
+    value := w'wuffs_demo__parser__value(
+        bit_cast_unchecked(@type parser&, i64, parser&),
+    );
+    @assert_eq(value, 123);
 }
 
 main :: fn() void = {
@@ -74,7 +96,6 @@ hello_test :: fn(vtable: *ImportVTable, out_alloc: Alloc) Str = {
     parse_top_level("hello_wuffs", hello_w, module);
     _ := print_module(module);
     bytes := import("@/examples/import_wuffs/emit.fr")'emit_full_program(program&, out_alloc, vtable);
-    write_entire_file_or_crash("target/hello_w.frc", bytes);  // TODO: don't hardcode this path!
     a&.deinit();
     bytes
 }
@@ -136,6 +157,8 @@ hello_c :: """
 #include <target/hello_w.frc>
 
 // TODO: just include the wuffs header file to get the base module
+//       but if i want to call some of those functions from franca, 
+//       i need an option to make `static` not mangle the names. 
 // ---
 typedef struct wuffs_base__slice_u8__struct {
     char *ptr;
@@ -155,7 +178,7 @@ typedef struct wuffs_base__io_buffer__struct {
   int extra[10];
 } wuffs_base__io_buffer;
   
-static inline wuffs_base__io_buffer
+wuffs_base__io_buffer
 wuffs_base__ptr_u8__reader(uint8_t* ptr, size_t len, char closed) {
   wuffs_base__io_buffer ret = { 0 };
   ret.data.ptr = ptr;
@@ -168,17 +191,17 @@ wuffs_base__ptr_u8__reader(uint8_t* ptr, size_t len, char closed) {
 }
 // ---
 
-typedef struct {
-    int val;
-    int a[10];
-} wuffs_demo__parser;
-
 uint32_t parse(char* p, size_t n) {
-  wuffs_demo__parser parser = { 0 };
+  char *status;
+  wuffs_demo__parser parser;
   wuffs_base__io_buffer iobuf =
       wuffs_base__ptr_u8__reader((uint8_t*)p, n, 1);
 
-  char *status = wuffs_demo__parser__parse(&parser, &iobuf);
+  status = wuffs_demo__parser__initialize(&parser, sizeof__wuffs_demo__parser(), 0, 0);
+  
+  if (status == 0) {
+    status = wuffs_demo__parser__parse(&parser, &iobuf);
+  }
   if (status != 0) {
     printf("parse: %s\n", status);
     return 0;

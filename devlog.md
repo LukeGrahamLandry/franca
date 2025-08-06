@@ -8,6 +8,16 @@
   does feel a bit like waste of time factory but it didn't suck as mush as i thought it would. 
   started with just function types and some builtins which works because import_c doesn't type check pointers. 
   so the current state is pretty error prone but at least it checks arity which is better than my previous hack. 
+- generate FTy of the right size for wuffs structs so you can have them as a local easily 
+  and let import_c import that. 
+- emit sizeof_foo and foo_initializer functions
+- YIKES. in view_image.fr:
+  `doing it by value doesn't work. you get ptr=0, len=6090728512; im pretty sure i checked it's using the version of to_values that makes a copy. -- Jun 9, 2025`
+  turns out the to_values that takes an allocator and carefully copies into new memory does not in fact return that memory. 
+  - i guess that's the only place i tried to call vtable.add_to_scope with something bigger than a pointer. 
+    and in the compiler itself i mostly use to_values (with an s) which did the right thing already. 
+    one wonders why i have both. both are from the early days of porting the compiler from rust 
+    so maybe one of them is what it was called in the old codebase and i re-ported it without noticing that i had one already? 
 
 ## (Aug 4)
 
@@ -16,7 +26,7 @@ just hacking enough stuff together that i can run an example program.
 - simple frc signetures so it can be imported
 - even more hacking to get it to run together with some c code
   - pain with casting between the function pointer types. 
-    to cheat need to go throug ha rawptr to make sure not to get the funcid type by mistake. 
+    to cheat need to go through a rawptr to make sure not to get the funcid type by mistake. 
     (won't be a problem once i make dependencies between import_frc work)
   - make sure padding in the struct for yield state 
     (won't be a problem once it's genrated by import_wuffs)

@@ -98,8 +98,13 @@ bodies on different targets which i don't deal with well.
 - why does threaded=true not work when running jitted sometimes (random mutex failures)? 
   there shouldn't be jit-shims if it's not at comptime so that theory doesn't explain it 
   although it seemed to have similar symptoms. 
+- need more control over exports. currently any frc file has all the libc stuff you included reexported. 
+  which will be confusing if you try to #use it in franca
+- implement the rest of import_cache_file: variadic, union/enum/pointer
 - extend test/ffi.fr to have simpler usage of #include a .frc file 
   (currently only used by import_wuffs which has a lot going on)
+- when including a .frc but also outputting a .frc, don't copy everything into the new file, 
+  just have it as imported symbols that reference the old one. 
 
 ### !! BROKEN !!
 
@@ -487,8 +492,7 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
   - Builtin: iterate, io_bind, io_limit, io_forget_history
   - Generic: slice, array, table
   - io_buffer methods don't exist in the c code (they're intrinsics in original wuffs)
-- output .frc with frontend types
-- sizeof/initialize methods
+- output .frc with frontend types for function signetures
 - compile their programs and pass thier c tests (ie. provide same abi as original wuffs)
 - less verbose wrappers for calling from franca
 - better error messages in emit.fr (like for type errors, etc). 

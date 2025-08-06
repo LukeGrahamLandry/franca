@@ -22,9 +22,26 @@ emit_full_program :: fn(program: *Program, out_alloc: Alloc, vtable: *ImportVTab
     each program.modules { module |
         emit_late(module, m&, vtable, decls&);
     };
+    root_scope := save_fields(writer, .Scope, decls.items());
     
-    s := save_fields(writer, .Scope, decls.items());
-    meta: Qbe.Incremental.Meta = (arch_os = 0x0F0F, root_scope = s);
+    // TODO: i'd rather not have any imports. could do the same trick for memset as for builtin_memmove. 
+    //       alternativly make managing imports less painful so you could easily replace with your own memset, 
+    //       or go all the way to providing my libc implementations as a .frc
+    {
+        // Qbe'backend'writer_finish_imports(writer, m&);  // TODO: why doesn't this do the same thing? 
+        set_library(m&, m&.intern("memset"), "libc", false);
+        
+        // sanity check that invalid code didn't trick me into importing something from libc somehow. 
+        // TODO: this will have to change when i want to use stuff written in c from the base module 
+        count := 0;
+        each writer.sym { it |
+            ::enum(@type it.segment);
+            count += int(@is(it.segment, .Import, .MachineCode));
+        };
+        @assert_eq(count, 1); // memset
+    };
+    
+    meta: Qbe.Incremental.Meta = (arch_os = 0x0F0F, root_scope = root_scope);
     b := writer.to_bytes(meta, m&);
     b := concat(b, out_alloc);
     vtable'drop_qbe_module(Qbe.QbeModule.raw_from_ptr(m&));
@@ -55,19 +72,11 @@ fn emit_early(module: *Module, m: *Qbe.Module, vtable: *ImportVTable) void = {
 
 fn emit_late(module: *Module, m: *Qbe.Module, vtable: *ImportVTable, decls: *List(Qbe.Incremental.Fld)) void = {
     @debug_assert_eq(module.public_ready, 1);
-    writer := m.save.unwrap();
     each module.body { stmt |
         @match(stmt) {
             fn Function(it) => if it.has_body {
                 f := emit(module, m, it);
-                
-                decls.push(
-                    name = writer.push(m.str(f.lnk.id)),
-                    type = abi_function_type(writer, f),
-                    payload = (offset = trunc writer.map_sym(m, f.lnk.id))
-                );
-                
-                vtable'run_qbe_passes(Qbe.Fn.raw_from_ptr(f));
+                finish_func(f, vtable, decls);
             };
             fn Constant(it) => {
                 ty := module.eval_type(it.var.type);
@@ -85,8 +94,95 @@ fn emit_late(module: *Module, m: *Qbe.Module, vtable: *ImportVTable, decls: *Lis
             @default => ();
         }
     };
-    // TODO: emit frc types for structs but they have to be after all functions are done so you know the size
-    //       or could do that layout in emit_early instead
+    // seperate loop so we know layout for var fields is done. 
+    each module.body { stmt |
+        @match(stmt) {
+            fn DeclareStruct(it) => {
+                it.field_offset_bytes = it.field_offset_bytes.align_to(8);  // for good luck
+                // TODO: don't do these for things in the base module. probably just want to import those from c. 
+                decls.push(export_struct(m, it));
+                emit_sizeof_func(m, it).finish_func(vtable, decls);
+                emit_init_func(m, it).finish_func(vtable, decls);
+            }
+            @default => ();
+        }
+    };
+}
+
+fn export_struct(m: *Qbe.Module, s: *Struct) Qbe.Incremental.Fld = {
+    writer := m.save.unwrap();
+    module := s.module;
+    name := @tfmt("wuffs_%__%", module.get(module.name), module.get(s.name));
+
+    // TODO: field names (but it's meh because they're private anyway)
+    //       for now, just make it an array of the right size
+    writer.fty&.push(
+        tag = .Array,
+        payload = (array = (
+            inner = (off = Qbe.Incremental.FTy.I64), 
+            count = trunc(s.field_offset_bytes / 8),
+        )),
+    );
+    id := writer.fty.len - 1;
+    
+    id := save_fields(writer, .Struct, @slice(
+        @as(Qbe.Incremental.Fld) (
+            name = writer.push("repr"),
+            type = (off = id.trunc()),
+        ),
+    ));
+    
+    (
+        name = writer.push(name),
+        type = (off = Qbe.Incremental.FTy.TYPE),
+        payload = (type = id),
+    )
+}
+
+fn emit_sizeof_func(m: *Qbe.Module, s: *Struct) *Qbe.Fn = {
+    f := temp().box(Qbe.Fn);
+    b := temp().box_zeroed(Qbe.Blk);
+    default_init(f, m);
+    f.lnk.id = m.intern(@tfmt("sizeof__wuffs_%__%", s.module.get(s.module.name), s.module.get(s.name)));
+    f.lnk.export = true;
+    f.start = b;
+    f.nblk = 1;
+    b.jmp = (type = .retl, arg = f.getcon(s.field_offset_bytes));
+    f
+}
+
+fn emit_init_func(m: *Qbe.Module, s: *Struct) *Qbe.Fn = {
+    f := temp().box(Qbe.Fn);
+    b := temp().box_zeroed(Qbe.Blk);
+    default_init(f, m);
+    f.lnk.id = m.intern(@tfmt("wuffs_%__%__initialize", s.module.get(s.module.name), s.module.get(s.name)));
+    f.lnk.export = true;
+    f.start = b;
+    f.nblk = 1;
+    r, size, version, options := (f.newtmp("this", .Kl), f.newtmp("", .Kl), f.newtmp("", .Kl), f.newtmp("", .Kw));
+    push(b, .par, .Kl, r, Qbe.Null, Qbe.Null);
+    push(b, .par, .Kl, size, Qbe.Null, Qbe.Null);
+    push(b, .par, .Kl, version, Qbe.Null, Qbe.Null);
+    push(b, .par, .Kl, options, Qbe.Null, Qbe.Null);
+    // TODO: check size+version and return error
+    push(b, .arg, .Kl, Qbe.Null, r, Qbe.Null);
+    push(b, .arg, .Kl, Qbe.Null, f.getcon(0), Qbe.Null);
+    push(b, .arg, .Kl, Qbe.Null, f.getcon(s.field_offset_bytes), Qbe.Null);
+    push(b, .call, .Kl, Qbe.Null, f.symcon(m.intern("memset")), Qbe.Null);
+    b.jmp = (type = .retl, arg = f.getcon(0));  // return ok status
+    f
+}
+
+fn finish_func(f: *Qbe.Fn, vtable: *ImportVTable, decls: *List(Qbe.Incremental.Fld)) void = {
+    m := f.globals;
+    writer := m.save.unwrap();
+    decls.push(
+        name = writer.push(m.str(f.lnk.id)),
+        type = abi_function_type(writer, f),
+        payload = (offset = trunc writer.map_sym(m, f.lnk.id))
+    );
+    
+    vtable'run_qbe_passes(Qbe.Fn.raw_from_ptr(f));
 }
 
 Emit :: @struct {
@@ -127,6 +223,13 @@ fn emit(module: *Module, m: *Qbe.Module, func: *Function) *Qbe.Fn = {
     default_init(e.f, m);
     e.f.start = e.b;
     e.f.lnk.id = func.mangled;
+    ::enum(@type func.vis);
+    // TODO: this doesn't do much but it probably should. 
+    //       like it could prevent it going in root_scope but then i need 
+    //       to put type info for symbols elsewhere because franca frontend needs it for shims. 
+    //       it would make sense to replace root_scope with symbols_scope (which has all, but 
+    //       maybe just enough types for shim abi) and exports_scope (which is a subset, but with full type info). 
+    e.f.lnk.export = func.vis == .Public;  
     e.f.nblk = 1;
     
     e.this = e.f.newtmp("this", .Kl);

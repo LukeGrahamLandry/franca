@@ -276,14 +276,21 @@ fn export_members(c: *Ctx, type: *CType, is_union: bool) FTy = {
 // 
 
 fn import_cache_file(c: *Ctx, tok: *C.Tokens.Token) void = {
-    h: *Qbe.Incremental.Header = or check(tok.file.contents) { e |
+    h: *Header = or check(tok.file.contents) { e |
         @error_tok(c, tok, "include frc: %", e)
     };
     
     root_scope := h.get(h.root_scope);
     for(h, root_scope.payload.fields) { i, it |
+        continue :: local_return;
         name_str := h.get(it.name);
-        ty := c.import_c_type(h, it.type);
+        if it.type.off == FTy.TYPE {
+            ty := c.import_c_type(h, it.payload.type, false);
+            c.push_scope(name_str)[].type_def = ty;
+            continue();
+        };
+        
+        ty := c.import_c_type(h, it.type, false);
         
         // TODO: should find_func in case it was forward declared 
         obj := c.new_gvar(name_str, ty, tok, false);
@@ -298,7 +305,8 @@ fn import_cache_file(c: *Ctx, tok: *C.Tokens.Token) void = {
     compile_all_symbols(h, c.m);
 }
 
-fn import_c_type(c: *Ctx, h: *Qbe.Incremental.Header, ty_i: One(Qbe.Incremental.FTy)) *CType = {
+// TODO: cache these so it's not allocating a new type every time it's referenced. 
+fn import_c_type(c: *Ctx, h: *Qbe.Incremental.Header, ty_i: One(Qbe.Incremental.FTy), array_would_decay: bool) *CType = {
     @switch(ty_i.off) {
         @case(1) => return(C.Types.ty_void);
         @case(3) => return(C.Types.ty_long);
@@ -312,7 +320,7 @@ fn import_c_type(c: *Ctx, h: *Qbe.Incremental.Header, ty_i: One(Qbe.Incremental.
     ::enum(@type ty.tag);
     @match(ty.tag) {
         fn Func() => {
-            ret := c.import_c_type(h, ty.payload.func.ret);
+            ret := c.import_c_type(h, ty.payload.func.ret, true);
             f_ty := c.func_type(ret);
             
             params := list(*CType, c.arena);
@@ -320,17 +328,53 @@ fn import_c_type(c: *Ctx, h: *Qbe.Incremental.Header, ty_i: One(Qbe.Incremental.
             @match(arg.tag) {
                 fn Params() => {
                     for(h, arg.payload.fields) { i, it |
-                        params&.push(c.import_c_type(h, it.type));
+                        params&.push(c.import_c_type(h, it.type, true));
                     };
                 }
-                @default => {
-                    params&.push(c.import_c_type(h, ty.payload.func.arg));
-                };
+                // TODO: why does this need extra {}?
+                @default => {if ty.payload.func.arg.off != 1 {
+                    params&.push(c.import_c_type(h, ty.payload.func.arg, true));
+                }};
             }
             
             f_ty.is_variadic = false; // TODO
             f_ty.params = params.items();
             f_ty
+        }
+        fn Array() => {
+            inner := c.import_c_type(h, ty.payload.array.inner, false);
+            if !array_would_decay {
+                return c.array_of(inner, ty.payload.array.count.zext());
+            };
+            // TODO: this sucks. i can't represent value type of an array when passing to a function 
+            panic("TODO: import_c_type wrap array in struct to prevent it from decaying")
+        }
+        // TODO: proably want to have the imported module say field offsets so you can pack in different ways. 
+        fn Struct() => {
+            result := c.new_type(.TY_STRUCT, 0, 0);
+            
+            // TODO: make this not a linked list :(
+            head := C.Types.Member.zeroed();
+            cur  := head&;
+            idx  := 0;
+            for(h, ty.payload.fields) { i, it |
+                mem := c.arena.box_zeroed(C.Types.Member);
+                mem.ty = c.import_c_type(h, it.type, false);
+                name := h.get(it.name);
+                if name.len == 0 {
+                    name = "-";
+                };
+                mem.name = c.new_token(.TK_IDENT, name.index(0), name.index_unchecked(name.len));
+                mem.idx = idx.intcast();
+                idx += 1;
+                mem.align = mem.ty.align;
+                cur.next = mem;
+                cur = cur.next;
+            };
+            result.members = head.next;
+            
+            c.struct_layout(result);
+            result
         }
         @default => @panic("TODO: import_c import frc type % %", ty.tag, ty_i.off);
     }
