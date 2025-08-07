@@ -21,6 +21,9 @@
   that uses import_c not through default_driver. ie. `FRANCA_TRACY=true ./trace.out examples/terminal.fr` 
   crashes but `FRANCA_TRACY=true ./trace.out examples/default_driver.fr build examples/terminal.fr` is fine. 
   relatedly, since that's not included in cache invalidation, it's broken if you turn on import_module caching. 
+- make the mangled name of copy_bytes in simplify.fr/static_memmove not change so the generated module 
+  is identical regardless of which compilation context you're in 
+  (not a repro problem, just an extra source of confusion that doesn't need to exist). 
 
 ## remaining nondeterminism
 

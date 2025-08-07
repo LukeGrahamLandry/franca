@@ -1,4 +1,28 @@
 
+## (Aug 7)
+  
+- continuing how'd i break linux
+  - seems it's yet another problem with this:
+    ````
+    if o == .copy && !p&.is(.Scalar) {
+        return(Ok = self.scalar_result(p, arg[0], expr_ty));
+        // if it's .Scalar that might be used as an assignable var so can't skip making a new ref for it. (happened with write_leb() test)
+    };
+    ```
+    skipping that instruction saves 4k ir ops but not even convincingly faster so not worth it if it's this error prone. 
+  - nope, without that, same rawfromptr problem with `COMPILE ONLY: examples/turing_art.fr`,
+    but only if i run compiler/test directly after recompiling, (`franca examples/default_driver.fr build compiler/main.fr -o q.out -unsafe -keep-names -os linux -arch x86_64 && orb ./q.out compiler/test.fr`), 
+    it works if i run through `./boot/temporary/linux-amd64.sh`,
+    so maybe it's a multi-generational fuckup because the base compiler im using was compiled the old way. 
+  - mmmm caching problem. direct run works if i `rm -rf target/franca/cache/` and then fails the next run.  
+    works with FRANCA_NO_CACHE=1.
+    works if i `rm target/franca/cache/compiler_test_fr.frc` and then fails the second run. 
+    works if i directly run that cache file but not if i point it at the source file and it chooses to use cache. 
+  - also the symbol it's crashing in is called copy_bytes but it's not `__franca_builtin_static_memmove`
+    because i am actually linking libc. either i was wrong before or ive confirmed this is a different problem with identical symptoms. 
+  - so like no idea whats going on at this point but clearly ive just uncovered a problem that already existed. 
+    i think the strat is just commit to getting rit of unsafenoopcast cause it's weird and just say hey now i have some bugs and slowness to fix. 
+
 ## (Aug 6)
 
 - compiler doesn't use float min/max so i don't need to support those before i had the intrinsic. 
@@ -47,6 +71,11 @@
       but together i've lost a lot of speed.  
 - that seems to have broke compiler/test.fr/run_and_check() on linux somehow. 
   but if i try it on the last commit that worked in actions it also seems broken so who even knows anymore. 
+  - ok so as a seperate problem unpacking a dep for examples/prospero.fr is fucked on orb so i bamboozled myself when i tried to check an old commit. 
+  - builtin_static_memmove only works if raw_from_ptr is #unsafe_noop_cast,
+    but the static_memmove constant has the same bytes either way so the actual problem is elsewhere? 
+      - tho as a seperate thing, i don't like that those bytes change depending on the rest of your compilation context. 
+        (it's just the mangled name changes because it has a funcid in it so it's not a repro problem, it's just dumb). 
 
 ## (Aug 5)
 

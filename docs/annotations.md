@@ -244,13 +244,6 @@ The argument is of type `Type`.
 Put this on a macro when the type of the resulting expression is statically known without expanding the macro. 
 In the bootstrap compiler this was used to simplify type inference but it is currently unused. 
 
-### unsafe_noop_cast
-
-Make the function compile to nothing (just a bit cast). 
-It is considered disrespectful if the argument and return types have different memory representations (size/alignment). 
-This should probably be removed. It just felt cute before i had an optimiser at all (to avoid a load/store through a pointer cast). 
-But now the sane option is just to write out the body and hope it disappears anyway. 
-
 ### avoid_shim
 
 This is for functions where you have to lie about parameter types like objc_msgSend.  
