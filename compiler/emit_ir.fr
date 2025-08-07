@@ -703,6 +703,15 @@ fn compile_stmt(self: *EmitIr, stmt: *FatStmt) CRes(void) = {
                     self.blit(dest, src, size);
                 }
                 fn Deref(arg) => {
+                    o := self.store_op(f.value.ty);
+                    if o != .Oxxx { 
+                        // This special case reduces ir_ops by 1.6% and makes mostly the same code. -- Aug 6, 2025
+                        src := @try(self.compile_expr(f.value&, .Scalar)) return;
+                        dest := @try(self.compile_expr(arg[], .Scalar)) return;
+                        self.emit(o, .Kw, Qbe.Null, src, dest);
+                        return(.Ok)
+                    };
+                    
                     src := @try(self.compile_expr(f.value&, .NewMemory)) return;
                     dest := @try(self.compile_expr(arg[], .Scalar)) return;
                     @debug_assert(size == self.program.get_info(f.place.ty)[].stride_bytes.zext() || { size == 0 && self.blk.jmp.type == .hlt });
@@ -1029,6 +1038,10 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
 fn emit_intrinsic_new(self: *EmitIr, op: *NewIntrinsicPayload, p: Placement, arg: []Qbe.Ref, caller: *Func, expr_ty: Type) CRes(Qbe.Ref) = {
     @debug_assert(op.ir_op != 0, "no ir op");
     o := @as(Qbe.O) op.ir_op;
+    if o == .copy && !p&.is(.Scalar) {
+        return(Ok = self.scalar_result(p, arg[0], expr_ty));
+        // if it's .Scalar that might be used as an assignable var so can't skip making a new ref for it. 
+    };
     k := @as(Qbe.Cls) op.ir_cls;
     r := self.scalar_dest(p, k); 
     if r == QbeNull && !no_result(o) {

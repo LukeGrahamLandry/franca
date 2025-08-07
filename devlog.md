@@ -1,4 +1,53 @@
 
+## (Aug 6)
+
+- compiler doesn't use float min/max so i don't need to support those before i had the intrinsic. 
+- some fn int() can just be #ir instead of having an awkward body
+- would be nice to get rid of #unsafe_noop_cast. going through an replacing it with #ir(.copy, k). 
+  - turns out it wasn't even type checking it's arguments all the way so all the more reason it has to go. 
+    always surprising when there's something like that and i only made a mistake with it 4 times and they were all fine anyway. 
+  - creepily it generates less code but takes longer
+```
+  before: 885156 bytes of code, ir_ops = 422723, 930.2 ms ±   3.6 ms
+  after: 878076 bytes of code, ir_ops = 426789, 946.0 ms ±   2.8 ms
+```
+    before building after is 941.4 ms ±   2.5 ms so most of the regression is that the new code takes longer 
+    to compiler not that it runs slower. maybe it's just cause it's doing more typechecking now? 
+    eh, if i fix typechecking of #unsafe_noop_cast in the old version it's still fast so that's not it. 
+  - the new one is more ir_ops (and even more, 430k, if i don't add a thing in emit_ir/emit_intrinsic_new to skip easy copies). 
+    i guess i can understand why it's more ops because #unsafe_noop_cast just becomes a Cast node 
+    in sema and emit_ir just recurses on it and generates no code, 
+    so then how can the new thing possibly generate less bytes of code?
+    - the difference is NOT just a missing `func.set_flag(.Intrinsic);` changing compliation order. 
+      can add that for #unsafe_noop_cast in the old one and it's still big. 
+    - RawHashMap.insert is one that changes. 
+      difference is whether assigning the second element of `(result._0, Entry.ptr_from_raw(result._1), result._2)`
+      becomes load+store (new) or blit (old). 
+    - really the backend shouldn't care if it's a blit or a small load+store. 
+      maybe i should just expand blits earlier. 
+    - special case for scalars in emit_ir/Set/Deref to make it produce the value instead of doing it via .NewMem. 
+      gets it to `879060 bytes of code, ir_ops = 420028, 943.0 ms ±   2.8 ms`
+      - (tried the same thing for emit_ir/Set/GetVar but not impressive, 
+        that only happens 305 times compared to 4166 for the Deref case). 
+      - i saw it being `936.8 ms ±   2.5 ms` with just ptr_from_raw changed back to unsafenoopcast so that's interesting. 
+    - enum.raw() is the last one to change. doing it with bit_cast_unchecked makes it much much worse
+      and doing it with @as(RAW) is a bit better but not much 
+      ```
+      fn raw(e: T) RAW #unsafe_noop_cast; // A 949 ms
+      fn raw(e: T) RAW = bit_cast_unchecked(T, RAW, e);  // B 966 ms
+      fn raw(e: T) RAW #inline = @as(RAW) e; // C 957 ms
+      fn raw(e: T) RAW #inline = @as(RAW) e; // 953 ms
+      ```
+      so i feel like that must be a compliation order thing preventing an important inline. 
+      that would explain B being worse but i feel like C should be the same as A. 
+      but a simple test that uses both shows both are inlined on the first call even without the #inline. 
+      and B/C generate the same shape of code. so maybe the improvement there is just that @as is faster to 
+      compile than a call to something with const args. that's compelling. 
+    - it's really hard to pin down because the difference from any one thing is to little to measure reliably 
+      but together i've lost a lot of speed.  
+- that seems to have broke compiler/test.fr/run_and_check() on linux somehow. 
+  but if i try it on the last commit that worked in actions it also seems broken so who even knows anymore. 
+
 ## (Aug 5)
 
 - last thing i needed to get the hello-wuffs-c example to work was just update assignment (like a += 1). 
