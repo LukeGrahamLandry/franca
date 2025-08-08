@@ -1,4 +1,10 @@
 
+## (Aug 8)
+
+- allow zero parameter syscall wrappers
+- made the list retain functions work on slices so it's easier for rawlist to call 
+- parallel backend/meta/test. after: 43 seconds. 
+
 ## (Aug 7)
   
 - continuing how'd i break linux
@@ -68,7 +74,7 @@
       fn raw(e: T) RAW #unsafe_noop_cast; // A 949 ms
       fn raw(e: T) RAW = bit_cast_unchecked(T, RAW, e);  // B 966 ms
       fn raw(e: T) RAW #inline = @as(RAW) e; // C 957 ms
-      fn raw(e: T) RAW #inline = @as(RAW) e; // 953 ms
+      fn raw(e: T) RAW = @as(RAW) e; // 953 ms
       ```
       so i feel like that must be a compliation order thing preventing an important inline. 
       that would explain B being worse but i feel like C should be the same as A. 

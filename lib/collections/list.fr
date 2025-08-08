@@ -133,10 +133,8 @@ fn List($T: Type) Type = {
     }
     
     fn unordered_remove_discard(self: *Self, i: i64) void #inline = {
-        @debug_assert(i < self.len);
-        if i != self.len - 1 {
-            self[i] = self[self.len - 1];
-        };
+        s := self.items();
+        s&.unordered_remove_discard(i);
         self.len -= 1;
     }
     
@@ -184,36 +182,16 @@ fn List($T: Type) Type = {
         true
     }
     
-    // SAFETY: dont early return!
-    // TODO: have a defer or something that fixes it if you try to early return
-    /// This is better than calling ordered_remove a bunch of times.
     fn ordered_retain(self: *Self, $should_keep: @Fn(t: *T) bool) void = {
-        slot := 0;
-        range(0, self.len) { i |
-            if @must_return should_keep(self.index(i)) {
-                // Only start doing moves once we've created a gap.
-                if slot != i {
-                    self[slot] = self[i];
-                };
-                slot += 1;
-            } else {
-                // Don't increment slot, we will put the next good one here.
-            };
-        };
-        self.len = slot;
+        s := self.items();
+        ordered_retain(s&, should_keep);
+        self.len = s.len;
     }
     
-    /// Does not visit in order and does not maintain the order of the list.
     fn unordered_retain(self: *Self, $should_keep: @Fn(t: *T) bool) void = {
-        i := 0;
-        while => i < self.len {
-            if should_keep(self.index(i)) {
-                i += 1;
-            } else {
-                self.unordered_remove_discard(i);
-                // don't increment i, check this slot again. 
-            };
-        };
+        s := self.items();
+        unordered_retain(s&, should_keep);
+        self.len = s.len;
     }
     
     fn slowly_prepend_all(self: *Self, s: []T) void = {
@@ -353,9 +331,9 @@ fn RawList($T: Type) Type = {
     }
     
     fn ordered_retain(self: *Self, $should_keep: @Fn(t: *T) bool) void = {
-        s := self[].assume_owned(panicking_allocator);
-        s&.ordered_retain(should_keep);
-        self[] = s.as_raw();
+        s := self.items();
+        ordered_retain(s&, should_keep);
+        self.len = s.len;
     }
     
     fn pop(self: *Self) ?T = {
@@ -372,9 +350,9 @@ fn RawList($T: Type) Type = {
     }
     
     fn unordered_retain(self: *Self, $should_keep: @Fn(t: *T) bool) void = {
-        s := self[].assume_owned(panicking_allocator);
-        s&.unordered_retain(should_keep);
-        self[] = s.as_raw();
+        s := self.items();
+        unordered_retain(s&, should_keep);
+        self.len = s.len;
     }
     
     fn next_uninit(self: *Self) ?*T #inline = {

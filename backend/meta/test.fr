@@ -82,58 +82,49 @@ main :: fn() void = {
         eprintln(HELP);
         panic("nothing to run. pass filepaths or 'all'");
     };
-    passed := 0;
-    failed := 0;
     @eprintln("Testing '%'", args.bin);
     if args.bin.ends_with(".fr") {
         eprintln("note: this is slow because it recompiles the backend for each test.");
     };
     make_dirs_or_crash("target/out");  // TODO: don't just shit files places perhaps
     os := query_current_os();
-    for to_run { file |
+    
+    Ctx :: @struct(args: *Args, arch: Arch, wasm_runner: ?Str);
+    ctx: Ctx = (args = args&, arch = arch, wasm_runner = wasm_runner);
+    
+    @print("SKIP:[");
+    ordered_retain to_run& { file |
+        file := file[];
         skip := false
         || (arch != .aarch64 && file.ends_with("-arm.ssa"))
         || (arch != .x86_64 && file.ends_with("-amd.ssa"))
         // TODO: c header for signals on linux
         || ((arch == .wasm32 || os == .linux) && file.ends_with("-na.ssa"))
         ;
-        if !skip {
-            pass := run_one(args&, file, arch, wasm_runner, skip&);
-            if !skip {
-                (@if(pass, passed&, failed&))[] += 1;
-            }
-        };
-        if skip {
-            @println("%[skip]", f_pad(file, 40, .After));
-        };
+        @if(skip) @print("%, ", file);
+        !skip
     };
-    if failed == 0 {
-        @println("\nAll is fine! (passed % tests)", passed);
-    } else {
-        if !args.v {
-            eprintln("(run with -v to see output)");
-        };
-        @panic("% of % tests failed.", failed, failed + passed);
-    };
+    @println("]");
+    
+    run_tests_main_threaded(Ctx, Str, ctx, to_run.items(), fn(_, it) = it[], fn(ctx, file) = {
+        run_one(ctx.args, file[], ctx.arch, ctx.wasm_runner)
+    });
 }
 
-run_one :: fn(arg: *Args, file_path: Str, arch: Arch, wasm_runner: ?Str, skip: *bool) bool #inline = {
+run_one :: fn(arg: *Args, file_path: Str, arch: Arch, wasm_runner: ?Str) Ty(bool, List(u8), List(u8), Str) #inline = {
     ::FmtPad(Str);
     qbe_path, verbose, flags, iamthecompilernow := (arg.bin, arg.v, arg.d, arg.cc);
-    mark := mark_temporary_storage();
     src := temp().read_to_string_or_crash(file_path).items(); // :panic
-    driver_path := "target/out/driver.c";
-    obj_path_mine := "target/out/q.o";
-    obj_path_driver := "target/out/d.o";
-    exe_path := "target/out/q.exe";
-    ll_path := "target/out/q.ll";
-    @print("%", f_pad(file_path, 40, .After));
+    name := chop_file_name(file_path);
+    mangle :: fn(s) => @tfmt("target/out/%_%", name, s);
+    driver_path := "driver.c".mangle();
+    obj_path_mine := "q.o".mangle();
+    obj_path_driver := "d.o".mangle();
+    exe_path := "q.exe".mangle();
     sections := extract_sections(src);
     driver := sections&.get("driver");
     if arg.skip_non_driver && driver.is_none() {
-        skip[] = true;
-        println("[skip]");
-        return false;
+        return(false, zeroed List(u8), zeroed List(u8), "SKIP");
     };
     if iamthecompilernow {
         driver = .None;
@@ -144,16 +135,13 @@ run_one :: fn(arg: *Args, file_path: Str, arch: Arch, wasm_runner: ?Str, skip: *
     args := Str.list(temp());
     if driver.is_some() || arg.force_linker {
         args&.push("-c");
-        if wasm_runner.is_some() {
-            println("todo: c+wasm");
-            return false;
-        }
+        @assert(wasm_runner.is_none(), "todo: c+wasm");
     };
 
     args&.push("-t");
     if wasm_runner.is_some() {
         // TODO: import_wasm shouldn't care about the file extension
-        exe_path = "target/out/q.wasm";
+        exe_path = "q.wasm".mangle();
         my_path = exe_path;
         args&.push("wasm32");
     } else {
@@ -199,13 +187,12 @@ run_one :: fn(arg: *Args, file_path: Str, arch: Arch, wasm_runner: ?Str, skip: *
     run :: fn(exe: Str, what: Str) => {
         show(exe, what);
         ok, out, err := exec_and_catch(exe, args.items(), temp());
+        if verbose {
+            println(err.items());
+            println(out.items());
+        };
         if !ok {
-            @println("[fail %]", what);
-            if verbose {
-                println(err.items());
-                println(out.items());
-            };
-            return(false);
+            return(false, err, out, what);
         };
     };
     
@@ -240,16 +227,15 @@ run_one :: fn(arg: *Args, file_path: Str, arch: Arch, wasm_runner: ?Str, skip: *
     args&.push_all(@slice("a", "b", "c"));  // for echo.ssa
     show(exe_path, "run");
     ok, out, err := exec_and_catch(exe_path, args.items(), temp());
+    if verbose {
+        println(err.items());
+        println(out.items());
+    };
     if !ok {
-        @println("[fail run]");
-        if verbose {
-            println(err.items());
-            println(out.items());
-        };
         if wasm_runner.is_none() && !arg.jit && !arg.frc && !arg.keep {
             exe_path.three_trillion_dollars_does_not_buy_an_operating_system_that_works();
         };
-        return(false);
+        return(false, out, err, "run");
     };
     
     if expected { expected | 
@@ -261,12 +247,7 @@ run_one :: fn(arg: *Args, file_path: Str, arch: Arch, wasm_runner: ?Str, skip: *
             write_entire_file_or_crash(old, expected);
             write_entire_file_or_crash(new, out.items());
             
-            @println("[fail output] diff % %", old, new);
-            if verbose {
-                println(err.items());
-                println(out.items());
-            };
-            return(false);
+            return(false, out, err,  @tfmt("[fail output] diff % %", old, new));
         };
     }; 
     d := timestamp();
@@ -275,15 +256,10 @@ run_one :: fn(arg: *Args, file_path: Str, arch: Arch, wasm_runner: ?Str, skip: *
         args&.clear();
         args&.push(old_exe_path);
         run("wasm2wat", "verify");
-    }
-    if arg.jit {
-        @println("[ok] %ms", d - a);
-    } else {
-        @println("[ok] %ms, %ms", b - a, d - b);
-    }
+    };
     
-    reset_temporary_storage(mark);
-    true
+    extra := @if(arg.jit, "", @tfmt("%ms", b - a));
+    (true, out, err, extra)
 }
 
 #use("@/lib/collections/map.fr");
