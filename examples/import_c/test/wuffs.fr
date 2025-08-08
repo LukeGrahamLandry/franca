@@ -6,13 +6,16 @@ main :: fn() void = {
     cc_path := @tfmt("%/target/cc.out", start);
     root := root();
     root := @fmt_cstr("%/%", start, root);
+    Ctx :: @struct(root: CStr, cc_path: Str);
+    ctx: Ctx = (root = root, cc_path = cc_path);
+    
     Syscall'chdir(root) || @panic("failed to set cwd to %", root);
     make_dirs_or_crash("bin");
     // TODO: preload the wuffs lib file
     files := collect_with_extension("test/c/std", ".c") 
             || panic("didn't find tests. run from franca root dir and clone wuffs to target/wuffs");
-    run_tests_main(Str, files.items(), fn(a) => a[]) { file | 
-        yield :: local_return;
+    run_tests_main_threaded(Ctx, Str, ctx, files.items(), fn(_, a) = a[], fn(ctx, file) = {
+        yield :: return;
         
         // TODO: std/json        cc      FAIL test_wuffs_strconv_parse_number_f64_regular: "-0.000e0": have 0x0000000000000000, want 0x8000000000000000
         if query_current_arch() == .x86_64 && file[] == "json.c" {
@@ -25,18 +28,17 @@ main :: fn() void = {
         dest := @tfmt("bin/%.out", s);
         a := timestamp();
         {
-            ok, out, err := exec_and_catch(cc_path, @slice(path, "-o", dest), temp());
+            ok, out, err := exec_and_catch(ctx.cc_path, @slice(path, "-o", dest), temp());
             if !ok {
-                @fmt(err&, "\n\n>>> cd \"%\" && \"%\" \"%\" -o \"%\"", root, cc_path, path, dest);
+                @fmt(err&, "\n\n>>> cd \"%\" && \"%\" \"%\" -o \"%\"", ctx.root, ctx.cc_path, path, dest);
                 yield(ok, out, err, "");
             };
         };
         b := timestamp();
         ok, out, err := exec_and_catch(dest, empty(), temp());
-        c := timestamp();
         ok := ok && out.items().contains("cc      PASS (");
-        (ok, out, err, @tfmt("%ms, %ms", b - a, c - b))
-    };
+        (ok, out, err, @tfmt("%ms", b - a))
+    });
 }
 
 root :: fn() Str = 

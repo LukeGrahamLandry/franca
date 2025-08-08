@@ -22,6 +22,14 @@
     because i am actually linking libc. either i was wrong before or ive confirmed this is a different problem with identical symptoms. 
   - so like no idea whats going on at this point but clearly ive just uncovered a problem that already existed. 
     i think the strat is just commit to getting rit of unsafenoopcast cause it's weird and just say hey now i have some bugs and slowness to fix. 
+- give up for now, just make the tests run faster. 
+  - multithreading the test runner seems to have induced that problem on macos-amd64 but without the relationship to caching. 
+    which i guess is progress to reproducing it sanely. 
+  - sadly i think the lua tests can't run in parallel. 
+  - sad that it makes the code uglier (since i don't have real closures 
+    so you have to pass around a state struct to run it in another thread)
+  - run import_c tests in import_wasm/run.fr as well
+  - before: 68 seconds, after: 50 seconds. 
 
 ## (Aug 6)
 

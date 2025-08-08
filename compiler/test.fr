@@ -40,7 +40,7 @@ fn driver(vtable: *ImportVTable) void = {
     tests := collect_tests(vtable);
     ::import("@/examples/testing.fr");
     full, expect_dot_count := gen_full_test_program(tests&);
-    ok, out, err := compile_and_run(vtable, full, empty());
+    ok, out, err := compile_and_run(vtable, full, empty(), "./target/c.out");
     if ok {
         println(out.items());
         print(err.items());
@@ -57,7 +57,7 @@ fn driver(vtable: *ImportVTable) void = {
         each tests& { file, functions | 
             @print("%", f_pad(file, 40, .After));
             src := gen_test_program(file, functions[].items());
-            ok, out, err := compile_and_run(vtable, src, empty());
+            ok, out, err := compile_and_run(vtable, src, empty(), "./target/c.out");
             (@if(ok, passed&, failed&))[] += 1;
             @print("[%]", if(ok, => "ok", => "failed run"));
             print(out.items());
@@ -75,18 +75,20 @@ fn driver(vtable: *ImportVTable) void = {
         @panic("% of % tests failed.", failed, failed + passed);
     };
     
-    run_tests_main(Case, run_and_check, fn(a) => a._0) { it | 
+    run_tests_main_threaded(*ImportVTable, Case, vtable, run_and_check, fn(_, a) = a._0, fn(vtable, it) = { 
         filename, args, check := it[];
-        ok, out, err := compile_and_run(vtable, @tfmt("#include_std(\"lib/core.fr\");#include_std(\"%\");", filename), args);
+        exe_name := @tfmt("./target/test_%.out", chop_file_name(filename));  // these happen to be unique currently 
+        ok, out, err := compile_and_run(vtable, @tfmt("#include_std(\"lib/core.fr\");#include_std(\"%\");", filename), args, exe_name);
         (ok && check(out.items(), err.items()), out, err, "")
-    };
+    });
     
     println("\nCOMPILE ONLY:");
-    run_tests_main(Str, compile_only, fn(a) => a[]) { file | 
+    run_tests_main_threaded(*ImportVTable, Str, vtable, compile_only, fn(_, a) = a[], fn(vtable, file) = {
+        start := timestamp();
         src := @tfmt("""#include_std("lib/core.fr");#include_std("%");""", file[]);
-        compile(vtable, src);
+        compile_and_discard(vtable, src);
         (true, list(u8, temp()), list(u8, temp()), "")
-    };
+    });
 }
 
 compile_only :: @S(
@@ -140,10 +142,9 @@ compile_only :: @S(
     "examples/toy/curse_macho.fr",
 );
 
-fn compile(vtable: *ImportVTable, src: Str) void = {
+fn compile_and_discard(vtable: *ImportVTable, src: Str) void = {
     chunks := compile_to_bytes(vtable, src, @slice(QbeOutputPurpose.Exe));
-    outpath := "./target/c.out"; // TODO: don't hardcode this
-    write_entire_file_or_crash(outpath, chunks[0]);
+    @assert(chunks[0].len != 0);
     general_allocator().dealloc(u8, chunks[0]);
 }
 
@@ -204,18 +205,18 @@ fn compile_to_bytes(vtable: *ImportVTable, src: Str, goal: []QbeOutputPurpose) [
 
 // runs it multiple times with different compilation strategies and returns the result of the first fail or different output. 
 // TODO: JitOnly and Relocatable as well?
-fn compile_and_run(vtable: *ImportVTable, src: Str, args: []Str) Ty(bool, List(u8), List(u8)) = {
+fn compile_and_run(vtable: *ImportVTable, src: Str, args: []Str, exe_name: Str) Ty(bool, List(u8), List(u8)) = {
     cases := @slice(QbeOutputPurpose.Exe, .Cached, .CachedEarly);
     chunks := compile_to_bytes(vtable, src, cases);
     
-    write_entire_file_or_crash("./target/c.out", chunks[0]);
-    ok0, out0, err0 := exec_and_catch("./target/c.out", args, temp());
+    write_entire_file_or_crash(exe_name, chunks[0]);
+    ok0, out0, err0 := exec_and_catch(exe_name, args, temp());
     general_allocator().dealloc(u8, chunks[0]);
     if ok0 {
         enumerate chunks.rest(1) { i, exe | 
-            write_entire_file_or_crash("./target/c.out", exe[]);
+            write_entire_file_or_crash(exe_name, exe[]);
             general_allocator().dealloc(u8, exe[]);
-            ok1, out1, err1 := exec_and_catch("./target/c.out", args, temp());
+            ok1, out1, err1 := exec_and_catch(exe_name, args, temp());
             
             out_ok, err_ok := (out0.items() == out1.items(), err0.items() == err1.items());
             pass := ok1 && out_ok && err_ok;
@@ -232,6 +233,7 @@ fn compile_and_run(vtable: *ImportVTable, src: Str, args: []Str) Ty(bool, List(u
                 return(pass, out1, err1);
             }
         };
+        remove(exe_name.as_cstr());
     } else {
         @fmt(err0&, "\n>>> [compiler/test.fr] failed %;", cases[0]);
     };

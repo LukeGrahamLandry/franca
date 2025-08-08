@@ -24,8 +24,7 @@ fn driver(vtable: *ImportVTable) void = {
 // "builtin.c" __builtin_types_compatible_p (easy)
 // extern.c
 fn run_tests(vtable: *ImportVTable) void = {
-    ::import("@/examples/testing.fr");
-    tests_folder := "examples/import_c/test";
+    tests_folder :: "examples/import_c/test";
     
     // me when we live at the ugly factory
     // TODO: the obvious clean up here is i want a higher level thing that 
@@ -33,33 +32,41 @@ fn run_tests(vtable: *ImportVTable) void = {
     //       tests in that context. cause there's lots of ways to run things:  
     //       normal, rosetta, orb, blink, import_wasm, wasmtime 
     a := query_current_arch();
-    outpath := "./target/c.out";
-    exe_path := outpath;
     i := 0;
     args := cli_args();
-    child_args: []Str = empty();
+    Ctx :: @struct(vtable: *ImportVTable, a: Arch, runner := "");
+    ctx: Ctx = (vtable = vtable, a = query_current_arch());
     while => i < args.len {
         if args[i] == "-w" {
             i += 1;
-            a = .wasm32;
-            exe_path = args[i].str();
-            outpath = "./c.wasm";
-            child_args = @slice("./c.wasm");
+            ctx.a = .wasm32;
+            ctx.runner = args[i].str();
         }
         i += 1
     }
     
     files := collect_with_extension(tests_folder, ".c") || panic("didn't find tests. run from franca root dir");
-    run_tests_main(Str, files.items(), fn(a) => a[]) { file | 
-        yield :: local_return;
+    run_tests_main_threaded(Ctx, Str, ctx, files.items(), fn(_, a) = a[], fn(ctx, file) = {
+        yield :: return;
         path := @tfmt("%/%", tests_folder, file);
-        or compile_one_file(vtable, path, a, outpath) { err |
+        child_args: []Str = empty();
+        w := ctx.a == .wasm32;
+        outpath := @tfmt("./target/ctest_%.%", chop_file_name(file[]), @if(!w, "out", "wasm"));
+        exe_path := outpath;
+        if w {
+            exe_path = ctx.runner;
+            child_args = @slice(outpath);
+        };
+        or compile_one_file(ctx.vtable, path, ctx.a, outpath) { err |
             yield(false, fixed_list(empty()), err.assume_owned(temp()), "");
         };
         ok, out, err := exec_and_catch(exe_path, child_args, temp());
         ok := ok && out.items().ends_with("OK\n");
+        if ok {
+            remove(outpath.as_cstr());
+        };
         (ok, out, err, "")
-    };
+    });
 }
 
 fn compile_one_file(vtable: *ImportVTable, path: Str, a: Arch, outpath: Str) Result(void, Str) = {
@@ -88,3 +95,4 @@ fn compile_one_file(vtable: *ImportVTable, path: Str, a: Arch, outpath: Str) Res
 }
 
 #use("@/lib/sys/subprocess.fr");
+#use("@/examples/testing.fr");

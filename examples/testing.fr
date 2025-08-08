@@ -7,29 +7,110 @@ fn run_tests_main($Task: Type, tasks: []Task, $get_name: @Fn(t: *Task) Str, $run
     ::FmtPad(Str);
     passed := 0;
     failed := 0;
+    start := timestamp();
     each tasks { task |
         mark := mark_temporary_storage();
+        start := timestamp();
         name := get_name(task);
         @print("%", f_pad(name, 40, .After));
         ok, out, err, stats := run(task);
         (@if(ok, passed&, failed&))[] += 1;
-        @println("[%] %", if(ok, => "ok", => "failed run"), stats);
+        @println("[%] % [%ms]", if(ok, => "ok", => "failed run"), stats, timestamp() - start);
         if !ok {
             print(out.items());
             println(err.items());
         };
         reset_temporary_storage(mark);
     };
+    report_test_count(start, passed, failed);
+}
+
+report_test_count :: fn(start: i64, passed: i64, failed: i64) void = {
     if failed == 0 {
-        @println("\nAll is fine! (passed % tests)", passed);
+        @println("\nAll is fine! (passed % tests in %ms)", passed, timestamp() - start);
     } else {
         @println("\n% of % tests failed.", failed, failed + passed);
     };
     if failed != 0 {
         panic("failed tests");
     };
-    //exit((failed != 0).int());
+};
+
+#use("@/lib/sys/threads.fr");
+
+#generic 
+fn run_tests_main_threaded($Ctx: Type, $Task: Type, ctx: Ctx, tasks: []Task, get_name: @FnPtr(ctx: Ctx, t: *Task) Str, run: @FnPtr(ctx: Ctx, t: *Task) Ty(bool, List(u8), List(u8), Str)) void = {
+    ::FmtPad(Str);
+    nthreads := 3;  // TODO: pick this in a good way
+    
+    State :: @struct {
+        passed: i64 = 0;
+        failed: i64 = 0;
+        ctx: Ctx;
+        tasks: []Task;
+        next_task: i64 = 0;
+        get_name: @FnPtr(ctx: Ctx, t: *Task) Str;
+        run: @FnPtr(ctx: Ctx, t: *Task) Ty(bool, List(u8), List(u8), Str);
+        results: []RawList(u8); 
+    };
+    start := timestamp();
+    out := temp().alloc_zeroed(RawList(u8), tasks.len);
+    state: State = (ctx = ctx, tasks = tasks, results = out, get_name = get_name, run = run);
+    threads := temp().alloc_init(*Thread, nthreads, fn(_) => start_thread(State, worker, state&));
+    
+    worker :: fn(self: *State) void = {
+        a := general_allocator();
+        loop {
+            i := i64.atomic_inc(self.next_task&);
+            if i >= self.tasks.len {
+                return();
+            };
+            task := self.tasks.index(i);
+            start := timestamp();
+            mark := temp().mark();
+            name := self'get_name(self.ctx, task);
+            ok, out, err, stats := self'run(self.ctx, task);
+            i64.atomic_inc(@if(ok, self.passed&, self.failed&));
+            
+            result := u8.list(a);
+            @fmt(result&, "%", f_pad(name, 40, .After));
+            @fmt(result&, "[%] % [%ms]", if(ok, => "ok", => "failed run"), stats, timestamp() - start);
+            if !ok {
+                @fmt(result&, "\n%\n%", out.items(), err.items());
+            };
+            @fmt(result&, "\n");
+            self.results[i] = result.as_raw();
+            temp().reset(mark);
+            print("-");
+        }
+    };
+    
+    for threads { it |
+        it.join();
+    };
+    print("\n");
+    for out { it |
+        print(it.items());
+        it&.drop(general_allocator());
+    };
+    
+    report_test_count(start, state.passed, state.failed);
 }
+
+chop_file_name :: fn(s: Str) Str = {
+    while => s.len > 0 && !s.ends_with(".") {
+        s.len -= 1;
+    };
+    s.len -= s.ends_with(".").int();
+    i := s.len - 1;
+    while => s[i] != "/".ascii() && i > 0 {
+        i -= 1;
+    };
+    i += int(s[i] == "/".ascii());
+    s := s.rest(i);
+    @debug_assert(s.len > 0, "chop_file_name expected XXX/YYY.ZZZ -> YYY");
+    s
+};
 
 fn collect_with_extension(path: Str, extension: Str) Result(List(Str), void) = {
     @debug_assert(extension.starts_with("."));

@@ -1,4 +1,5 @@
 
+- !! BROKEN: amd64 !!
 - crack down on smurf naming conventions (ie import("@/lib/alloc/debug_alloc.fr").DebugAlloc is kinda dumb). 
   could steal what zig does where a file is a struct. but that always annoys me because it makes you 
   pick one blessed struct to have the top level fields when the rest of your file is a namespace which looks odd. 
@@ -24,6 +25,7 @@
 - make the mangled name of copy_bytes in simplify.fr/static_memmove not change so the generated module 
   is identical regardless of which compilation context you're in 
   (not a repro problem, just an extra source of confusion that doesn't need to exist). 
+- allow trailing lambda to be passed as a function pointer but still infer types of arguments. (ie. when calling run_tests_main_threaded)
 
 ## remaining nondeterminism
 
@@ -126,6 +128,16 @@ All is fine! (passed 35 tests)
 - `./q.out examples/default_driver.fr build compiler/main.fr -o q.out -d t` very rarely prints junk
 - `FRANCA_NO_CACHE=1 franca examples/import_c/test/test.fr` 
   dies in init_codegen_worker. spawning threads from a shim doesn't work? 
+- this occasionally fails (note: just loading the cache file, not recompiling the test program)
+  - panic! emit, too many instructions
+  - panic! Assertion Failed: uninit module 4669633232
+```
+for i in $(seq 1 1000);
+do
+    echo $i
+./target/f.out examples/import_c/test/test.fr || { echo "fail"; break; }
+done
+```
 
 ## import_symbol / weak
 
