@@ -19,6 +19,7 @@ fn borrow(self: *DebugAlloc) Alloc =
 
 fn deinit(self: *DebugAlloc) void = {
     self.locked = true;
+    leaks := false;
     push_dynamic_context {
         context(DefaultContext)[].general_allocator = page_allocator; // TODO: nullable_cached_codemap goes here
         
@@ -28,6 +29,7 @@ fn deinit(self: *DebugAlloc) void = {
         traces: []*StackTrace = empty();
         each self.pointers& { k, v |
             if v.freed_at == Allocation.sentinal_not_free {
+                leaks = true;
                 if traces.len != self.next_trace.zext() {
                     // :SLOW so do it lazily the first time there's actually a leak. 
                     traces = general_allocator().alloc(*StackTrace, self.next_trace.zext());
@@ -57,6 +59,7 @@ fn deinit(self: *DebugAlloc) void = {
     self.pointers&.drop(self.meta_data_alloc);
     self.trace_lookup&.drop(self.meta_data_alloc);
     self.locked = false;
+    @debug_assert(!leaks, "DebugAlloc detected leaks!");
 }
 
 DebugAlloc :: @struct {

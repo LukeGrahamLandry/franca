@@ -4,6 +4,7 @@
 - allow zero parameter syscall wrappers
 - made the list retain functions work on slices so it's easier for rawlist to call 
 - parallel backend/meta/test. after: 43 seconds. 
+- leak police
 
 ## (Aug 7)
   

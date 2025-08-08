@@ -39,7 +39,9 @@ fn main() void = {
 fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str, args: []CStr) void = {
     module := QbeModule.zeroed(); m := module&;
     init_default_module(m, (type = .JitOnly, os = query_current_os(), arch = query_current_arch()));
-    a := general_allocator();
+    
+    arena: ArenaAlloc = init(page_allocator, 1.shift_left(12));
+    a := arena&.borrow();
     m.set_debug_types(logging, true);
     
     w: WasmModule = empty(a);
@@ -72,7 +74,7 @@ fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str, args: []CStr) void 
         (arg_offsets.len - 1, heap_base[])
     };
     
-    self: LoadWasm = init(m, w&, general_allocator());
+    self: LoadWasm = init(m, w&, a);
     self&.load_module();
     exports := comptime_exports(Exports);
     fill_imports(self&, exports);
@@ -98,7 +100,10 @@ fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str, args: []CStr) void 
     if result != 0 {
         @eprintln(">>> returned %", result);
     };
+    
+    drop(m);
     page_allocator.dealloc(u8, buf);
+    arena&.deinit();
 }
 
 heap_base :: @static(u32) 0;  // TODO: BAD!
