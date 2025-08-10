@@ -27,6 +27,7 @@
   (not a repro problem, just an extra source of confusion that doesn't need to exist). 
 - allow trailing lambda to be passed as a function pointer but still infer types of arguments. (ie. when calling run_tests_main_threaded)
 - set a good example; don't have tests that rely on layout of codegenentry. use the functions on the vtable. i think import_c/test/test.fr does this wrong
+- always zero struct padding when baking constants (even when behind a pointer and even when the struct contains no pointers). 
 
 ## remaining nondeterminism
 

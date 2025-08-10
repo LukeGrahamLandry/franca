@@ -18,6 +18,17 @@
   and then this problem goes away. and i think then you could use the @print functions in arena_alloc() 
   because it avoids the comptime bootstrapping problem (tho actually no, it will still just recurse forever when you try to run it). 
   did that and for compiler/worker/codegenentry for good luck
+- concerning that i seem to have made my problems go away...? neither of the amd64 ones segfault in the tests any more. 
+  im a bit afraid that ./boot/temporary/linux-amd64.sh might hang forever at the end when building the releases if you don't rm franca/cache before. 
+  maybe that's the same just displaying differently... im really not very good at this apparently. 
+- repro between macos and linux 
+  - one problem was the line `r[i] = (id = m.intern(names[i]), off = f[].byte_offset.trunc());`,
+    the `off` computation wasn't happening at comptime and there was some other junk in the `Field` (struct padding perhaps). 
+  - now the only difference is the bytes of the static_memmove module. 
+    the last 4 bytes of Meta.all_deps are not 0 on linux, it's a default struct field: `all_deps := zeroed Sha256.Digest;`,
+    if i force zero it in to_bytes, seems to fix it. 
+    TODO: whats going on with that. that's suspisously in the same part of the compiler that i know to be broken (since it hangs if not rm cache). 
+  - struct padding in blit_op_table
 
 ## (Aug 8)
 
