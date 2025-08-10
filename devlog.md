@@ -1,4 +1,24 @@
 
+## (Aug 9)
+
+- it's gotta be a problem with sharing temp() between threads by accident. 
+  if i just compile itself macos-amd64 3 times it crashes but works if -keep-names 
+  and works if i @tfmt the long name in fmt_fn_name and discard it. 
+  (that doesn't fix the actual tests of course but it demonstraits that it's a safety problem). 
+- new lore: back trace locations are broken for amd64. 
+  because i was doing an align_to(4) in add_code_bytes but on amd64 instructions aren't always 4 bytes
+  and i wasn't including the added padding in the offset for finish_debug. 
+- new debug mode that leaves a linked list of canaries between all the allocations in an arena 
+  and then walks back when you reset it. so detects if you try to reset twice 
+  or if you wrote directly past the end of an allocation before resetting. 
+- The driver program inherits a env.temporary_allocator that was initialized by the compiler 
+  but uses it's one copy of the functions for the vtable. so you need to skip the checks until 
+  you've compiled a version of the compiler that can set up the canaries. 
+  just make env.temporary_allocator an Alloc instead of an ArenaAlloc so it has the vtable 
+  and then this problem goes away. and i think then you could use the @print functions in arena_alloc() 
+  because it avoids the comptime bootstrapping problem (tho actually no, it will still just recurse forever when you try to run it). 
+  did that and for compiler/worker/codegenentry for good luck
+
 ## (Aug 8)
 
 - allow zero parameter syscall wrappers

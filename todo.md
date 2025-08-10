@@ -26,6 +26,7 @@
   is identical regardless of which compilation context you're in 
   (not a repro problem, just an extra source of confusion that doesn't need to exist). 
 - allow trailing lambda to be passed as a function pointer but still infer types of arguments. (ie. when calling run_tests_main_threaded)
+- set a good example; don't have tests that rely on layout of codegenentry. use the functions on the vtable. i think import_c/test/test.fr does this wrong
 
 ## remaining nondeterminism
 
@@ -783,6 +784,7 @@ or just default to jitting and force you to enable aot by specifying an output p
   should i just insert them for you? that's probably bad if you did it on purpose or 
   are counting instructions to tail call into it or something interesting like that. 
   should detect trying to create a function pointer to it then. 
+  - for now i do add the instruction so i can use it in check_debug_info
 - make #macro less of a special case? it would be nice if it could participate in overloading on some arguments. 
 so you could say `fn fmt(out: *List(u8), template: Str, arg: FatExpr #macro) FatExpr`. 
 then you need a new way to express that you need `template` to be constant in the program but 

@@ -17,7 +17,8 @@ DefaultContext :: @struct(
     panic_hook: @FnPtr(msg: Str) Never,
     extra := 0,
     global: *GlobalFrancaRuntime,
-    reserved3: Array(i64, 9),
+    temporary_allocator_i: Alloc,
+    reserved3: Array(i64, 7),
 );
 
 // These are things that need to be inherited between compliation units. 
@@ -99,7 +100,7 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
         push_zeroed_dynamic_context {   // for now this sets c.current_os=OS[]
             c := context(DefaultContext);
             temporary_allocator: ArenaAlloc = init(page_allocator, 1.shift_left(20));
-            c.temporary_allocator = temporary_allocator&;
+            set_temporary_allocator(temporary_allocator&);
             c.panic_hook = print_and_exit1;
             c.global = @static(GlobalFrancaRuntime);
             c.global.next_thread_id = 1;  // :ThreadIdStartsAtOne
@@ -326,7 +327,7 @@ fn push_dynamic_context($body: @Fn() void) void = {
 fn push_emergency_dynamic_environment($body: @Fn() void) void = {
     push_zeroed_dynamic_context { // restores .os from a static 
         a: ArenaAlloc = init(page_allocator, 16000);  // :leak
-        context(DefaultContext)[].temporary_allocator = a&;
+        set_temporary_allocator(a&);
         context(DefaultContext)[].general_allocator = temp();
         context(DefaultContext)[].panic_hook = emergancy_panic;
         body();
@@ -369,17 +370,29 @@ fn scary_log(s: Str) void = {
     f(s)
 }
 
-fn temp() Alloc #inline = 
-    context(DefaultContext)[].temporary_allocator.borrow();
+fn temp() Alloc #inline = {
+    c := context(DefaultContext);
+    if IS_BOOTSTRAPPING || c.temporary_allocator_i.data.is_null() {  // :UpdateBoot
+        return c.temporary_allocator.borrow();
+    };
+    c.temporary_allocator_i
+}
 
+// TODO: make this take an Alloc instead and get rid of the old ArenaAlloc field. need to kinda keep it around for isbootstrapping i think. 
+fn set_temporary_allocator(a: *ArenaAlloc) void = {
+    c := context(DefaultContext);
+    c.temporary_allocator = a;
+    c.temporary_allocator_i = a.borrow();
+}
+    
 fn general_allocator() Alloc #inline = 
     context(DefaultContext)[].general_allocator;
 
 fn mark_temporary_storage() Alloc.Mark = 
-    context(DefaultContext)[].temporary_allocator.borrow().mark();
+    temp().mark();
 
 fn reset_temporary_storage(mark: Alloc.Mark) void = 
-    context(DefaultContext)[].temporary_allocator.borrow().reset(mark);
+    temp().reset(mark);
     
 #inline #use("@/lib/sys/sync/atomics.fr") 
 fn set_new_thread_id(ctx: *DefaultContext) void = {

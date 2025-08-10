@@ -176,15 +176,15 @@ fn enter_task(shared: *CodegenShared, $body: @Fn(it: *CodegenEntry) void) void =
     marker := zeroed Alloc.Mark;
     entry := acquire(shared, true).unwrap();
     if shared.threaded {
-        context(DefaultContext)[].temporary_allocator = entry.arena&;
-        entry.arena&.reset_retaining_capacity();
+        set_temporary_allocator(entry.arena_storage&);
+        entry.arena.reset_retaining_capacity();
     } else {
         marker = temp().mark();
     };
     @must_return body(entry);
     enqueue_task(shared, entry);
     if shared.threaded {
-        context(DefaultContext)[].temporary_allocator = old;
+        set_temporary_allocator(old);
     } else {
         temp().reset(marker);
     };
@@ -212,7 +212,7 @@ codegen_thread_main :: fn(shared: *CodegenShared) void = {
     loop {
         @debug_assert(shared.m.initialized, "destroyed module before joining codegen thread.");
         if acquire(shared, false) { entry |
-            context(DefaultContext)[].temporary_allocator = entry.arena&;
+            set_temporary_allocator(entry.arena_storage&);
             do_codegen(shared.m, entry);
             release(shared, entry, false);
         } else {
@@ -346,7 +346,8 @@ CodegenTask :: @tagged(
 );
 
 CodegenEntry :: @struct(
-    arena: ArenaAlloc, 
+    arena_storage: ArenaAlloc, 
+    arena: Alloc,
     task: CodegenTask,
     logging := "",
 );
@@ -365,14 +366,14 @@ fn init_codegen_worker(m: *QbeModule, arena: Alloc, worker: CodegenWorker, threa
     s.waiting_for_kiki = init(arena, n);
     each s.entries { it |
         if s.threaded {
-            it.arena = init(general_allocator(), 16000);  // these are freed in join_codegen_thread
+            it.arena_storage = init(general_allocator(), 16000);  // these are freed in join_codegen_thread
+            it.arena = it.arena_storage&.borrow();
         };
         s.waiting_for_bouba&.push_back(it, arena);
     };
     s.waiting_for_bouba_futex = n.trunc();
     @if(s.threaded) {
-        thread_stack := page_allocator.alloc(u8, 1.shift_left(25));
-        s.thread = start_thread(thread_stack, CodegenShared, worker, s);
+        s.thread = start_thread(CodegenShared, worker, s);
     };
     s.type_indices = init(arena); 
     s.frc_imports = init(arena, 64);  // TODO: don't have a fixed size. need to use BucketArray or something tho
@@ -471,7 +472,7 @@ fn join_codegen_thread(shared: *CodegenShared) void = {
     @debug_assert_eq(shared.waiting_for_bouba_futex, shared.entries.len.trunc());
     @debug_assert_eq(shared.waiting_for_kiki&.len(), 0);
     @if(shared.threaded) each shared.entries { q |
-        q.arena&.deinit();
+        q.arena.deinit();
     };
     arena := shared.type_indices.alloc;
     arena.dealloc(@type shared.entries[0], shared.entries);

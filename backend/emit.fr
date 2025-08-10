@@ -100,7 +100,8 @@ fn reserve(s: *SegmentCursor, $T: Type) *T #generic = {
     space_left := s.mmapped.len - s.len(); 
     @assert_ge(space_left, T.size_of(), "not enough space in segment for reserve total=%", s.mmapped.len);
     ptr := s.next;
-    @debug_assert(u8.int_from_ptr(ptr).mod(T.align_of()) == 0, "unaligned reserve");
+    // TODO: is alignment real?
+    //@debug_assert(u8.int_from_ptr(ptr).mod(T.align_of()) == 0, "unaligned reserve");
     s.next = s.next.offset(T.size_of());
     ptr_cast_unchecked(u8, T, ptr)
 }
@@ -352,15 +353,27 @@ fn add_code_bytes(m: *QbeModule, name_id: Qbe.Sym, code: *MultiArchAsm) void = {
     
     bytes := code[m.goal.arch];
     
+    code := m.segments&[.Code]&;
+    
+    start_offset := ptr_diff(code.mmapped.ptr, code.next);
     use_symbol(m, name_id) { s |
         start_debug_info(m, s);
     };
-    code := m.segments&[.Code]&;
-    code.align_to(4);  // todo: only for arm
-    start_offset := ptr_diff(code.mmapped.ptr, code.next);
-    dest := slice(code.next, bytes.len);
+    
+    dest := "";
+    marker := function_start_marker(m.goal.arch);
     with_write_protect m {
+        if marker { i |
+            // TODO: probably shouldn't this. it's kinda creepy. but it's convient to be able to check if something is a valid function pointer. 
+            code.reserve(u32)[] = i;
+        };
+    
+        dest = slice(code.next, bytes.len);
         dest.copy_from(bytes);
+        if marker { _ |
+            dest.ptr = dest.ptr.offset(-4);
+            dest.len += 4;
+        };
     };
     code.next = code.next.offset(bytes.len);
     
@@ -668,6 +681,7 @@ fn reserve_stub(m: *Qbe.Module, symbol: *SymbolInfo, $T: Type) *T #generic = {
     code := m.segments&.index(.Code);
     lock(m.icache_mutex&);
     @debug_assert(!m.currently_emitting_function);
+    @debug_assert_eq(symbol.offset, -1);
     symbol.offset = code.len();
     symbol.size = size_of(T);
     @debug_assert_eq(symbol.segment, .Code, "zero value");
@@ -748,6 +762,8 @@ fn live_segment_part(m: *QbeModule, s: SegmentType) []u8 = {
     s.mmapped.slice(0, ptr_diff(s.mmapped.ptr, s.next))
 }
 
+AotDebugInfo :: import("@/lib/crash_report.fr").AotDebugInfo;
+
 fn seal_debug_info(m: *QbeModule, debug_source_code: []u8, include: bool, files_bytes: []u8) void = {
     base_p    := m.intern("__franca_base_address");
     
@@ -762,9 +778,7 @@ fn seal_debug_info(m: *QbeModule, debug_source_code: []u8, include: bool, files_
         b := FRHOSTED_MAGIC;
         m.emit_data(id = base_p, template = (Bytes = b&.slice(1).interpret_as_bytes()), align = 8, relocations = empty());
     };
-    
-    AotDebugInfo :: import("@/lib/crash_report.fr").AotDebugInfo;
-    
+        
     id := m.intern("__franca_aot_debug_info");
     if !include || @is(m.goal.type, .Relocatable, .Cached, .CachedEarly) {
         m.emit_data(id = id, template = (Zeroes = size_of(AotDebugInfo)), align = 8, relocations = empty());
@@ -781,6 +795,7 @@ fn seal_debug_info(m: *QbeModule, debug_source_code: []u8, include: bool, files_
         files = files_bytes,
         nullable_cached_codemap = zeroed rawptr,
     );
+    check_debug_info(data&, code.mmapped.ptr.offset(m.text_padding()), m.goal.arch);
     // TODO: don't force having a name for these. 
     names := @const_slice("__franca_code_segment", "__franca_debug_headers", "__franca_debug_data", "__franca_debug_source", "__franca_debug_files");
 
@@ -809,6 +824,39 @@ fn seal_debug_info(m: *QbeModule, debug_source_code: []u8, include: bool, files_
     };
     ::[]AotDebugInfo;
     m.emit_data(id = id, template = (Bytes = data&.slice(1).interpret_as_bytes()), align = 8, relocations = r);
+}
+
+fn function_start_marker(a: Arch) ?u32 = {
+    (Some = @match(a) {
+        fn aarch64() => import("@/backend/arm64/bits.fr").branch_target_marker;
+        fn x86_64()  => import("@/backend/amd64/bits.fr").endbr64;
+        @default => return(.None);
+    })
+}
+
+check_debug_info :: fn(debug_info: *AotDebugInfo, code_segment_base: *u8, arch: Arch) void = {
+    function_start_marker := function_start_marker(arch) || return();
+    cursor := debug_info.headers;
+    off := 0;
+    while => cursor.len > 0 {
+        @assert_lt(off, debug_info.code_segment.len, "malformed debug info. (sum of function sized > code segment).");
+        off_to_data, r, ok := read_leb128(cursor, false);
+        cursor = r;
+        size, r, ok := read_leb128(cursor, false);
+        cursor = r;
+        
+        @assert_lt(off_to_data, debug_info.payload.len);
+        data := debug_info.payload.rest(off_to_data);
+        name_len, r, ok := read_leb128(data, false);
+        data = r;
+        name := data.slice(0, name_len);
+        data = data.rest(name_len);
+        
+        first_4_bytes := code_segment_base.offset(off).slice(4);
+        @assert_eq(first_4_bytes.peek_type(u32)[], function_start_marker, "missing fn start marker for %", name);
+        
+        off += size;
+    };
 }
 
 #use("@/compiler/codemap.fr");

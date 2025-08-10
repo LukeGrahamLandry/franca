@@ -5,6 +5,7 @@ ArenaAlloc :: @struct(
     end: i64,
     base_size: i64,
     making_new_chunk: bool,
+    canary: bool = SLOW_ARENA_CANARY,
 );
 
 ArenaHeader :: @rec @struct(
@@ -58,6 +59,14 @@ arena_allocator_fn :: fn(self: rawptr, action: Alloc.Action, ptr: rawptr, count:
     empty()
 };
 
+ArenaCanary :: @struct {
+    secret: i64 = GOOD;
+    start: *u8;
+    size: i64;
+    GOOD :: 12345678;
+    BAD :: 87654321;
+};
+
 // Don't try to printf debug in here...
 // TODO: make this less derranged. 
 arena_alloc :: fn(raw_self: rawptr, size: i64, align: i64) rawptr = {
@@ -70,7 +79,11 @@ arena_alloc :: fn(raw_self: rawptr, size: i64, align: i64) rawptr = {
         self.chunk = (Some = next);
         next
     };
-    
+    if SLOW_ARENA_CANARY {
+        // TODO: support largert alignments
+        align = 8;
+        size = (size + size_of(ArenaCanary)).align_to(8);
+    };
     loop {
         self.start = align_to(self.start, align);
         end  := self.start + size;
@@ -79,6 +92,11 @@ arena_alloc :: fn(raw_self: rawptr, size: i64, align: i64) rawptr = {
             ptr := ptr_cast_unchecked(From = ArenaHeader, To = u8, ptr = chunk);
             mem := ptr.offset(self.start);
             self.start = end;
+            if SLOW_ARENA_CANARY {
+                // TODO: doesn't work if some was skipped in the align_to at the start but that won't happen because align is fixed now
+                dest := bit_cast_unchecked(*u8, *ArenaCanary, ptr.offset(self.start - size_of(ArenaCanary)));
+                dest[] = (start = mem, size = size);
+            };
             return(u8.raw_from_ptr(mem));
         };
         
@@ -89,6 +107,7 @@ arena_alloc :: fn(raw_self: rawptr, size: i64, align: i64) rawptr = {
             self.end = next.size;
             chunk = next;
         } else {
+            chunk.used = self.start;
             if size >= MAX_ARENA_BUCKET {
                 panic("allocating so many bytes bro");
             };
@@ -100,7 +119,8 @@ arena_alloc :: fn(raw_self: rawptr, size: i64, align: i64) rawptr = {
             self.start = ArenaHeader.size_of();
             self.end = new.size;
             chunk = new;
-        }
+        };
+        chunk.used = ArenaHeader.size_of();
     }
 };
 
@@ -120,11 +140,26 @@ fn mark(self: *ArenaAlloc) ArenaMarker #inline = (chunk = self.chunk, start = se
 // Memory is NOT returned to the backing allocator. 
 fn reset_retaining_capacity(self: *ArenaAlloc, mark: ArenaMarker) void = {
     if mark.chunk.is_none() {
-        @if(SLOW_MEMORY_DEBUGGING) self.debug_stomp_after(mark);
         self.reset_retaining_capacity();
         return();  
     };
     chunk := mark.chunk.unwrap();
+    
+    @if(SLOW_ARENA_CANARY) if self.canary {
+        c := self.chunk.unwrap();
+        c.used = self.start;
+        ::ptr_utils(ArenaHeader);
+        while => !identical(c, chunk) {
+            consume_canaries(c, c.used);
+            if !SLOW_MEMORY_DEBUGGING {
+                c.used = ArenaHeader.size_of();
+            };
+            c = c.prev.unwrap();
+        };
+        // TODO: the debug stuff isn't done to the last chunk
+        //scary_log("---");
+    };
+    
     @if(SLOW_PROTECT_ARENA) {
         c := chunk.next;
         chunk.next = .None;
@@ -149,6 +184,29 @@ fn reset_retaining_capacity(self: *ArenaAlloc, mark: ArenaMarker) void = {
     self.end = chunk.size;
     self.chunk = (Some = chunk);
     chunk.used = self.start;
+}
+
+fn consume_canaries(c: *ArenaHeader, used: i64) void = {
+    base := ArenaHeader.raw_from_ptr(c);
+    it := base.offset(used);
+    @assert(used.ule(c.size), "chunk.used oob");
+    //scary_log(used); scary_log(" "); scary_log(base); scary_log(" XXX ");
+    
+    while => !(identical(it, base) || identical(it, base.offset(ArenaHeader.size_of()))){
+        @assert(base.int_from_rawptr().ult(it.int_from_rawptr()));
+        canary := ArenaCanary.ptr_from_raw(it.offset(-size_of(ArenaCanary)));
+        start := u8.raw_from_ptr(canary.start);
+        //scary_log("size="); scary_log(canary.size); scary_log(" start="); scary_log(start); scary_log(" "); scary_log(" secret="); scary_log(canary.secret); scary_log(" ");
+        saved := it.offset(-canary.size);
+        //scary_log(start); scary_log("_"); scary_log(saved); scary_log(" | ");
+        if canary.secret != ArenaCanary.GOOD {
+            scary_log(" secret="); scary_log(canary.secret);
+        };
+        @assert(canary.secret == ArenaCanary.GOOD, "bad canary.secret");
+        @assert(identical(start, saved));
+        canary.secret = ArenaCanary.BAD;
+        it = start;
+    };
 }
 
 // set all the memory after a mark to 0xABABABA in the hopes of crashing you if you try to use it accidentally.
@@ -186,14 +244,22 @@ fn debug_stomp_after(self: *ArenaAlloc, mark: ArenaMarker) void = {
 // Memory is NOT returned to the backing allocator. 
 fn reset_retaining_capacity(self: *ArenaAlloc) void = {
     if self.chunk { chunk |
+        chunk.used = self.start;
         while => chunk.prev { c | 
+            @if(SLOW_ARENA_CANARY) if self.canary {
+                consume_canaries(chunk, chunk.used);
+            };
             @if(SLOW_MEMORY_DEBUGGING) {
+                // TODO: this doesn't happen to the last chunk
                 S :: ArenaHeader.size_of();
                 mem: []u8 = (ptr = ptr_cast_unchecked(ArenaHeader, u8, chunk).offset(S), len = max(chunk.used - S, 0));
                 mem.set_bytes(SLOW_MEMORY_JUNK);
             };
-            chunk = c;
             chunk.used = ArenaHeader.size_of();
+            chunk = c;
+        };
+        @if(SLOW_ARENA_CANARY) if self.canary {
+            consume_canaries(chunk, chunk.used);
         };
         self.start = ArenaHeader.size_of();
         self.end = chunk.size;
@@ -208,10 +274,15 @@ fn reset_retaining_capacity(self: *ArenaAlloc) void = {
 fn deinit(self: *ArenaAlloc) void = {
     ::if_opt(*ArenaHeader, bool);
     if self.chunk { chunk |
+        chunk.used = self.start;
         while => chunk.next { it |
             chunk = it;
         };
         loop {
+            @if(SLOW_ARENA_CANARY) if self.canary {
+                consume_canaries(chunk, chunk.used);
+            };
+            
             prev := chunk.prev;
             
             ptr := ptr_cast_unchecked(From = ArenaHeader, To = u8, ptr = chunk);
