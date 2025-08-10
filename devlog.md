@@ -29,6 +29,7 @@
     if i force zero it in to_bytes, seems to fix it. 
     TODO: whats going on with that. that's suspisously in the same part of the compiler that i know to be broken (since it hangs if not rm cache). 
   - struct padding in blit_op_table
+- get rid of the extra extension instruction for `f :: fn(a: *u8) i64 = { b := a[]; b.int() };`
 
 ## (Aug 8)
 

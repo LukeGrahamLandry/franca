@@ -3,7 +3,6 @@
 /* requires use and dom, breaks use */
 copy_elimination :: fn(f: *Qbe.Fn) void = {
     // These are just used inside simplify_phi (and cleared every time), we just want to reuse thier memory. 
-    // TODO: could even retain them between functions and have no allocation once warmed up?
     t_s := init_bitset(f.ntmp.zext());          //
     a_s := init_bitset(f.ntmp.zext());          //
     stk: QList(*Qbe.Use) = new(10); //
@@ -184,12 +183,15 @@ iscopy :: fn(f: *Qbe.Fn, i: *Qbe.Ins, arg0: Qbe.Ref) bool = {
         //       :MakeATestThatFails if you return(i.op() == .extuw); (the compiler fails tho so we know its not right)
         //       oh because you can do `x = long; x = extuw x;` which is not a copy, its just sad when it was created by a loaduw
         if !t.def.is_null() {
-            if i.op() == .extuw && t.def.op() == .loaduw {
+            i_o, t_o := (i.op(), t.def.op());
+            @debug_assert(i_o.is_ext());
+            want_load := rebase(i_o, .loadsb, .extsb);
+            if want_load == t_o {
                 t.def.set_cls(.Kl);
                 return(true);
             };
             // TODO: i think this is wrong because we break use
-            if i.op() == .extsw && t.def.op() == .loaduw && t.nuse == 1 {
+            if i_o == .extsw && t_o == .loaduw && t.nuse == 1 {
                 t.def.set_cls(.Kl);
                 t.def.set_op(.loadsw);
                 return(true);

@@ -77,7 +77,7 @@ fn move_end_of_block_to_scratch(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins, changed: *
         f.globals.curi = f.scratch_start();
         ni := ptr_diff(i.offset(1), b.ins.index_unchecked(b.ins.len));
         f.globals.curi = f.globals.curi.offset(-ni);
-        icpy(f.globals.curi, i.offset(1), ni);
+        icpy(f.globals.curi, i.offset(1).slice(ni));
         changed[] = true;
     }
 }
@@ -204,22 +204,14 @@ fn set_bits(self: *Qbe.Con, i: i64) void = {
 fn con(sym: Qbe.Sym, bits: i64) Qbe.Con = 
     (sym = sym, bits = (bits.trunc(), bits.shift_right_logical(32).trunc()));
 
-// TODO: use slices 
-
+// caller better not be trying to put this in the inlining cache
 fn idup(b: *Qbe.Blk, src: []Qbe.Ins) void = {
-    if src.len > b.ins.cap {
-        // caller better not be trying to put this in the inlining cache
-        b.ins.len = 0;
-        b.ins&.reserve(src.len, temp());
-    };
-    b.ins.len = src.len;
-    b.ins.items().copy_from(src)
+    b.ins.len = 0;
+    b.ins&.push_all(src, temp());
 }
 
-fn icpy(dest: *Qbe.Ins, src: *Qbe.Ins, n: i64) *Qbe.Ins = {
-    if(n == 0, => return(dest));
-    (@as([]Qbe.Ins)(ptr = dest, len = n)).copy_from(ptr = src, len = n); // TODO: ugly
-    dest.offset(n)
+fn icpy(dest: *Qbe.Ins, src: []Qbe.Ins) void = {
+    (@as([]Qbe.Ins)(ptr = dest, len = src.len)).copy_from(src);
 }
 
 fn salloc(rt: Qbe.Ref, rs: Qbe.Ref, f: *Qbe.Fn) bool = {
@@ -314,34 +306,19 @@ fn iscmp(op: Qbe.O) bool =  // :CmpOrder
 // TODO: use multiple returns
 // TODO: pc: *Qbe.Cmp
 fn iscmp(op: Qbe.O, pk: *Qbe.Cls, pc: *i32) bool = { // :CmpOrder
-    if !op.iscmp() {
-        return(false);
-    };
+    X :: fn($lo: Qbe.O, $hi: Qbe.O, $k: Qbe.Cls) => 
+        if op.between(lo, hi) {
+            pc[] = op.raw() - lo.raw() + @if(k.is_float(), Qbe.CmpICount.intcast(), 0);
+            pk[] = k;
+            return(true);
+        };
     
-    if op.between(.ceqw, .cultw) {
-        pc[] = op.raw() - Qbe.O.ceqw.raw();
-        pk[] = .Kw;
-        return(true);
-    };
-    if op.between(.ceql, .cultl) {
-        pc[] = op.raw() - Qbe.O.ceql.raw();
-        pk[] = .Kl;
-        return(true);
-    };
-    
-    ::@assert_eq(Qbe.Cmp.enum_count(), Qbe.CmpICount + Qbe.CmpFCount, "cmp counts don't add up");
-    if op.between(.ceqs, .cuos) {
-        pc[] = Qbe.CmpICount.intcast() + op.raw() - Qbe.O.ceqs.raw();
-        pk[] = .Ks;
-        return(true);
-    }; 
-    if op.between(.ceqd, .cuod) {
-        pc[] = Qbe.CmpICount.intcast() + op.raw() - Qbe.O.ceqd.raw();
-        pk[] = .Kd;
-        return(true);
-    };
-    
-    false
+    @if(!op.iscmp()) return(false);
+    X(.ceqw, .cultw, .Kw);
+    X(.ceql, .cultl, .Kl);
+    X(.ceqs, .cuos, .Ks);
+    X(.ceqd, .cuod, .Kd);
+    unreachable()
 }
 
 fn default_init(f: *Qbe.Fn, m: *QbeModule) void = {
@@ -358,7 +335,6 @@ fn default_init(f: *Qbe.Fn, m: *QbeModule) void = {
     // For the comptime usecase, the is_float will be wrong for some targets but that's fine becuase register numbers will just be moved to the real function, 
     t := f.globals.target&;
     f.ntmp = Qbe.Tmp0;
-    f.tmp&.grow(Qbe.Tmp0);
     range(0, Qbe.Tmp0) { i |
         tmp := f.tmp.index(i);
         ::[]Qbe.Tmp;
@@ -890,21 +866,6 @@ fn for_bits_rev(b: u64, $body: @Fn(i: i64) void) void = {
         b = b.bit_xor(1.shift_left(i));  // unset that bit
         body(i);
     };
-}
-
-fn for_bits_pair(b: u64, $body: @Fn(i: i64, j: i64) void) i64 = {
-    b := bitcast b;
-    while => b != 0 {
-        i := trailing_zeros(b);
-        bit := b.bit_and(-b);
-        b = b.bit_xor(bit);
-        if(b == 0, => return(i));
-        j := trailing_zeros(b);
-        bit := b.bit_and(-b);
-        b = b.bit_xor(bit);
-        body(i, j);
-    };
-    -1
 }
 
 fn for_phi(b: *Qbe.Blk, $body: @Fn(p: *Qbe.Phi) void) void = {
