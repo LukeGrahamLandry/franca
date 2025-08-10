@@ -221,7 +221,6 @@ different subsets of the same resources.
 - deal with `NOSYS`
 - apple has different c variadic abi. that's pretty unfortunate for my grand plans. 
   it feels pretty invasive to have the backend compile two versions of anything variadic. 
-- get rid of query_context_is_implicit
 - make #log_asm work for the #asm replacement 
 - experiment with outputting even more info in .frc and an lsp that reads it back. 
 - zero parameter syscall

@@ -59,3 +59,94 @@ the function pointers to the backend.
 - arm64 and aarch64 are the same thing. the latter is what arm calls it but that's such an annoying word.
 - If you use llvm you don't get full c-abi compatibility for free.
 For example, here's where rustc does it in the frontend https://github.com/rust-lang/rust/blob/master/compiler/rustc_target/src/abi/call/mod.rs
+
+## Instructions
+
+A block contains a flat sequence of instructions. 
+Each instruction is stored as (operation: O, class: Cls, destination: Ref, arg0: Ref, arg1: Ref).
+The class is what data type will be output by the instruction: i32 (Kw), i64 (Kl), f32 (Ks), or f64 (Kd). 
+Many instructions are valid for multiple classes. When instructions do not have an output (ie. store), use Kw. 
+Some operations require multi-instruction sequences to supply extra arguments. 
+
+- integer overflow is wrapping
+- signed integers are two's compliment so there are no seperate instrucitons for signed vs unsigned add/sub/mul. 
+  div/mod have udiv/umod varients that act on unsigned values. 
+- add/sub/mul/div/neg act on integers or floats (depending on class)
+- integer division can trap on x86_64 
+- floats are IEEE 754 
+- shifts (shl, shr, sar, rotr, rotl) are done modulo the data size. so `(.shl, .Kw, dest, x, 33) == (.shl, .Kw, dest, x, 1)`
+  - shl/shr (logical-shift left/right): new bits are 0
+  - shl (arithmetic-shift right): sign extension. new bits are the same as the original sign bit
+  - rotr/rotl (rotate right/left)
+- neg is a unary instruciton equivilent to subtracting its argument from zero
+- there is no instruction for bitwise not. instead use xor with -1. 
+- min/max/sqrt are only implemented for floats
+- unary bit manipulation: byteswap, ctz (count trailing zeros), clz (count leading zeros), ones (count ones / popcnt)
+- some instructions are on thin ice: asm, assert, trace_start, trace_prev, trace_return. 
+- store b/h/w/l/s/d. 
+  - a0 is the value, a1 is the destination address (note: BACKWARDS). no result. 
+- load works for any class. for smaller loads, there's an instruction corresponding to each extension instruction.
+- alloc reserves space on the call stack. it goes away when the function returns. 
+  - there are different instructions for different byte alignments (4/8/16). 
+  - the argument is the size in bytes. 
+  - (note: since temporaries are mutable, frontends are not required to alloc for variables if their address is not taken), 
+- dbgloc
+
+### Comparison 
+
+Note that the class is the output type which will always be an integer (boolean 0 or 1). 
+There is are seperate instructions for each class of operand. 
+Integers have signed and unsigned varients. 
+Float comparisons return false when either argument is NaN, except for uo which returns true if either argument is nan. 
+
+- integer: eq, ne, sge, sgt, sle, slt, uge, utl, ult, ult. 
+- float: eq, ge, gt, le, lt, ne, o, uo
+
+### Casts
+
+- extension: signed/unsigned b(8)/h(16)/w(32). 
+  - the unsigned varient zeroes the high bits. the signed varient duplicates the sign bit. 
+- exts/truncd convert between float sizes. f32->f64, f64->f32
+- float<->integer have signed/unsigned varients. 
+  - stosi/stoui/dtosi/dtoui/swtof/uwtof/sltof/ultof
+- cast preserves bits (NOT value) and changes between int<->float (in/out must be the same size)
+- copy must be int<->int or float<->float
+
+### Three argument instructions 
+
+- blit: implements memcpy (of constant size)
+  - blit0: a0 is source, a1 is destination (note: BACKWARDS from memcpy). blit1: a0 is size in bytes.
+- atomic compare and swap. 
+  - integers only, 4/8 bytes depending on class. 
+  - TODO: you have to do your own fences which makes it kinda useless 
+  - cas0: a0 is pointer. cas1: a0 is old, a1 is new, result is the previous value at the memory location
+- conditional select (like the ternary operator in c: `cond ? a0 : a1`)
+  - sel0: a0 is the condition. sel1: result is a0 if true, a1 if false 
+
+### Call
+
+The call sequence is the only place in the ir that needs more detailed type information. 
+What's required is just enough to implement the abi correctly. 
+The backend does not do any type checking between calls and a function's declaration. 
+
+- arg/par 
+- arg/par have sb/ub/sh/uh variants for smaller integers
+- argc/parc agragate (struct/union) parameter
+- arge/pare secret environment parameter
+- argv
+- vastart
+- vaarg
+
+return value from call:
+- void
+- scalar
+- aggregate
+
+- frontends are NOT required to insert extra copies for arguments/returns. 
+  the backend will add them as needed to conform to the target system abi. 
+  if you pass a pointer as argc and the callee mutates its parameter, the caller will not see the change. 
+
+## Phi
+
+stored seperatly from instructions. 
+optional: frontends can use mutable temporaries instead and the backend will handle converting them to phis. 

@@ -1,3 +1,4 @@
+todo: can almost enable cacching when -syscalls 
 
 ## (Aug 9)
 
@@ -30,6 +31,10 @@
     TODO: whats going on with that. that's suspisously in the same part of the compiler that i know to be broken (since it hangs if not rm cache). 
   - struct padding in blit_op_table
 - get rid of the extra extension instruction for `f :: fn(a: *u8) i64 = { b := a[]; b.int() };`
+- made is_linking_libc not #fold (stores the comptime value in a static)
+  so now the only difference in -frc_inlinable with -syscalls is one byte. 
+  had to mark more things as #weak. 
+- got rid of query_context_is_implicit()
 
 ## (Aug 8)
 

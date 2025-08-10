@@ -109,14 +109,13 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
                 general_allocator: import("@/lib/alloc/debug_alloc.fr").DebugAlloc = init();
                 c.general_allocator = general_allocator&.borrow();
             }, {
-                // TODO: is_linking_libc needs to be non-foldable eventually
-                @if(::(is_linking_libc() && !NEVER_USE_LIBC_ALLOC), {
+                if is_linking_libc() && !NEVER_USE_LIBC_ALLOC {
                     c.general_allocator = libc_allocator;
-                }, {
+                } else {
                     A :: import("@/lib/alloc/fixed_block.fr").BlockAlloc;
                     general_allocator: A = init(page_allocator);
                     c.general_allocator = general_allocator&.borrow();
-                })
+                };
             });
             
             c.cli_arguments = (ptr = argv, len = argc);
@@ -259,24 +258,6 @@ do_relocations_static_linux :: fn() void = {
         dest[] = base.offset(sym.value).offset(it.addend - Elf.MYSTERY_SPICE);
     };
 };
-
-// HACK. if context is passed in a global it will leak out from the callee. 
-fn query_context_is_implicit() bool = {
-    callee :: fn() void #noinline = {
-        if get_dynamic_context() != rawptr_from_int(123) {
-            scary_log("lost the context");
-            Syscall'exit(1);
-        };
-        set_dynamic_context(rawptr_from_int(456));  // leaks context!
-    };
-    old_context := get_dynamic_context();
-    outer := rawptr_from_int(123);
-    set_dynamic_context(outer);
-    callee();
-    implicit := get_dynamic_context() == outer;
-    set_dynamic_context(old_context);
-    implicit
-}
 
 size_of_dynamic_context :: DefaultContext.size_of(); // @builtin size_of_dynamic_context;
 
