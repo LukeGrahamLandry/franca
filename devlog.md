@@ -1,4 +1,13 @@
 
+## (Aug 11)
+
+- removing outdated todos in old tests. 
+  - found a few that weren't running because of forgotten #test. oops. they all pass tho. 
+  - it's very cute to see comments with `assert _eq` with a space 
+    because i used to count that the builtin was called the same number of times 
+    it appeared lexically in the source string. 
+  - one was commented out that used to be a sema restruction but is now an emit_ir bug
+
 ## (Aug 10)
 
 mystery garbage waste of time. 

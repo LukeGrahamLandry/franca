@@ -129,7 +129,7 @@
     
     @assert_compile_error { a: u5 = 0b10101010101010; };
     @assert_compile_error((fn(a: u1) u1 = 0x1)(0b11));
-    // @assert_compile_error add_sr(Bits.X64, x0, x1, x0, Shift.LSL, 0b000000);  // TODO: why does this one work but not the above? 
+    (fn(a: u1) u1 = 0x1)(0b1);
 }
 
 #test fn enum_constants() = {    
@@ -156,10 +156,12 @@
     assert_eq(to_bool(MyBool.False), false);
     
     // The values of the enum are really just constants of its backing type.
-    // This upcast binding is required because there's no overload for assert _eq(MyBool.T[], i64)
-    // TODO: not sure if this is good. 
-    //x: i64 = MyBool.False;
-    //assert_eq(x, 999);
+    // This upcast binding is required because there's no overload for assert_eq(MyBool, i64)
+    // TODO: it's a bit dumb that this is the only situation where `a: T = b;` is not the same as `a := @as(T) b;`, 
+    //       but just making it coerce for any infered type makes enums totally useless. 
+    //       really the direction it should go is more strict and make you explicitly call raw() instead of using @as. 
+    x := @as(i64) MyBool.False;
+    assert_eq(x, 999);
     
     // These take the other overload because integer literals are of type i64 not MyBool.
     assert_eq(to_bool(999), true);  // Even when the actual value collides.
@@ -210,10 +212,8 @@
     
     i := 1234;
     v := MyBool.True;
-    // v = i;  // TODO: this needs to be a compile error. 
     
     // You can also match through a pointer. 
-    // TODO: if you try to :: run at comptime this block in macros.fr it segfault! -- May 4
     E :: @tagged(aaa: i64, bbb: Str);
     e : E = (aaa = 123);
     u := @match(e&) {
@@ -345,7 +345,6 @@ fn const_eval_init_rt() #test = {
             join_list: List(u8) = list(@[rt_alloc]);
             @[{
                 enumerate args { i, param | 
-                    // TODO: having () in the cast instead of lit(void) stopped working when I changed some things to use the infallible imm_eval_known which is weird -- Apr 21 
                     action := @{ @as(void) push_all(join_list&, @as(Str) @[param[]]) };
                     actions&.push(action);
                 };
@@ -382,6 +381,8 @@ fn const_eval_init_rt() #test = {
 // TODO: not good enough to declare functions tho. 
 #test fn const_in_macro() = {
     fn manual_force_constant(e: FatExpr) FatExpr #macro = @{
+        //f :: fn() void = { @[e]; }; f();  // TODO: this should work (and force no runtime captures but not force constant eval)
+        
         value :: @[e];
         value
     };
@@ -400,16 +401,12 @@ fn const_eval_init_rt() #test = {
         }
     }
     
-    //println("Hello!");
     e: E = (A = 123);
     assert_eq(e.unpack(), 123);
-    //println("a!");
     e: E = (B = 4);
     assert_eq(e.unpack(), 8);
-    //println("b!");
     e: E = (C = 1);
     assert_eq(e.unpack(), 999);
-    //println("c!");
     e: E = (D = 1);
     assert_eq(e.unpack(), 999);
 }
