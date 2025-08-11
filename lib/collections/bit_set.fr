@@ -2,35 +2,29 @@ fn StaticBitSet($bit_capacity: i64) Type = {
     count :: bit_capacity.add(63).div(64);
     Self  :: @struct(bits: Array(i64, count));
     
-    fn empty() Self = Self.zeroed();
+    fn empty() Self #fold = Self.zeroed();
     fn set_all(self: *Self) void = {
         self.bits&.items().interpret_as_bytes().set_bytes(255);
     }
     
     fn get(self: *Self, i: i64) bool = {
         // really ge should assert but then BitSet would have to allocate sooner which seems sad. 
-        if(i.ge(bit_capacity), => false) {
-            index := i.div(64);
-            bit   := i.mod(64);
-            self.bits&[index].bit_and(1.shift_left(bit)).ne(0)
-        }
+        @if(i >= bit_capacity) return(false);
+        index, bit := i.div_mod(64);
+        self.bits&[index].bit_and(1.shift_left(bit)).ne(0)
     }
     
     fn contains(self: *Self, i: *i64) bool = self.get(i[]); // match api of List
     
     fn set(self: *Self, i: i64) void = {
         @safety(.Bounds) i.ult(bit_capacity);
-        index := i.div(64);
-        bit   := i.mod(64);
+        index, bit := i.div_mod(64);
         self.bits&[index] = self.bits&[index].bit_or(1.shift_left(bit));
     }
     
     fn unset(self: *Self, i: i64) void = {
-        if i >= bit_capacity {
-            return();
-        };
-        index := i.div(64);
-        bit   := i.mod(64);
+        @safety(.Bounds) i.ult(bit_capacity);
+        index, bit := i.div_mod(64);
         self.bits&[index] = self.bits&[index].bit_and(1.shift_left(bit).bit_not());
     }
     
@@ -43,25 +37,24 @@ fn StaticBitSet($bit_capacity: i64) Type = {
     Self
 }
 
-fn set_all();
-
+// TODO: unmanaged version where you store the allocator yourself
 DynamicBitSet :: @struct(bits: List(i64));
 
 fn empty(a: Alloc) DynamicBitSet = (bits = list(a));
 
 fn get(self: *DynamicBitSet, i: i64) bool = {
-    if(i.ge(self.bits.len.mul(64)), => false) {
-        index := i.div(64);
-        bit   := i.mod(64);
-        self.bits&[index].bit_and(1.shift_left(bit)).ne(0)
-    }
+    //@println("i=% len=% cap=% % self=%", 
+    //    i, self.bits.len, self.bits.maybe_uninit.len, 
+    //    i64.raw_from_ptr(self.bits.maybe_uninit.ptr), DynamicBitSet.raw_from_ptr(self));
+    @if(i >= self.bits.len*64) return(false);
+    index, bit := i.div_mod(64);
+    self.bits&[index].bit_and(1.shift_left(bit)) != 0
 }
 
 fn set(self: *DynamicBitSet, i: i64) void = {
     cap := self.bits.len.mul(64);
-    if(i.ge(cap), => self.reserve(i.sub(cap).add(1)));
-    index := i.div(64);
-    bit   := i.mod(64);
+    if(i >= cap, => self.reserve(i.sub(cap).add(1)));
+    index, bit := i.div_mod(64);
     self.bits&[index] = self.bits&[index].bit_or(1.shift_left(bit));
 }
 
@@ -78,11 +71,8 @@ fn get_set(self: *DynamicBitSet, i: i64) bool = {
 }
 
 fn unset(self: *DynamicBitSet, i: i64) void = {
-    if i >= self.bits.len.mul(64) {
-        return();
-    };
-    index := i.div(64);
-    bit   := i.mod(64);
+    @safety(.Bounds) i.ult(self.bits.len * 64);
+    index, bit := i.div_mod(64);
     self.bits&[index] = self.bits&[index].bit_and(1.shift_left(bit).bit_not());
 }
 
@@ -108,49 +98,4 @@ fn set_all_from(self: *DynamicBitSet, other: *DynamicBitSet) void = {
     range(0, other.bits.len) { i |
         self.bits[i] = self.bits[i].bit_or(other.bits[i]);
     };
-}
-
-// TODO: if you used an unmanaged list, you wouldn't need to store the allocaotr since you pass it in every time anyway.
-BitSet :: @tagged(
-    Small: StaticBitSet(DynamicBitSet.size_of().mul(8)),
-    Big: DynamicBitSet,
-);
-//:: assert_eq(BitSet.size_of(), DynamicBitSet.size_of().add(i64.size_of()));
-
-fn empty() BitSet = (Small = empty());
-
-fn get(self: *BitSet, i: i64) bool = @match(self) {
-    (fn Small(s) bool => s.get(i));
-    (fn Big(s) bool => s.get(i));
-};
-
-fn set(self: *BitSet, i: i64, a: Alloc) void = @match(self) {
-    (fn Small(s) void => {
-        cap := s.bits&.len().mul(64);
-        if(i.lt(cap), => s.set(i)) {
-            self[] = (Big = (bits = s.bits&.items().clone(a)));
-            self.Big&.set(i);
-        };
-    });
-    (fn Big(s) void => s.set(i));
-};
-
-fn unset(self: *BitSet, i: i64) void = @match(self) {
-    (fn Small(s) void => s.unset(i));
-    (fn Big(s) void   => s.unset(i));
-};
-
-fn clear(self: *BitSet) void = @match(self) {
-    (fn Small(s) void => s.clear());
-    (fn Big(s) void => s.clear());
-};
-
-fn capacity(self: *BitSet) i64 = @match(self) {
-    (fn Small(s) i64 => s.capacity());
-    (fn Big(s) i64 => s.capacity());
-};
-
-fn drop(self: *BitSet) void = {
-    @if_let(self) fn Big(s) => s.bits&.drop();
-    self[] = empty();
 }

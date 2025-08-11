@@ -28,6 +28,11 @@
 - allow trailing lambda to be passed as a function pointer but still infer types of arguments. (ie. when calling run_tests_main_threaded)
 - set a good example; don't have tests that rely on layout of codegenentry. use the functions on the vtable. i think import_c/test/test.fr does this wrong
 - always zero struct padding when baking constants (even when behind a pointer and even when the struct contains no pointers). 
+- why don't lldb/gdb like my linux binaries?
+- not all the tests pass with FRANCA_NO_CACHE=1
+- have github actions check repro after all targets finish running
+- can almost enable cacching when -syscalls 
+- document `store v, [Sxxx]` vs `store v, Sxxx` on amd64
 
 ## remaining nondeterminism
 

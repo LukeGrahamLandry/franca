@@ -857,6 +857,7 @@ fn build_the_exports_scope(c: *ExportCtx, start_path: Str) CRes([][]u8) = {
     // This is kinda copy-paste fusion adventure of emit_qbe_included and finish_qbe_module. 
     
     fr := c.self.comp();
+    // TODO: backend'worker_thread
     shared := backend'worker_start(c.m, fr.get_alloc(), @as(CodegenWorker) codegen_thread_main, true);
     funcs_done := main_thread_pump(fr, shared, fns, false);
     @debug_assert(c.m.inlinable_but_referenced_later.len == 0);
@@ -878,7 +879,7 @@ fn build_the_exports_scope(c: *ExportCtx, start_path: Str) CRes([][]u8) = {
 
 // TODO: this is kinda dumb, i shouldn't need to export everything just to give it type info it needs for shims.  
 //       should use FTy.Abi for everything that isn't explicitly exported. 
-export_root_scope :: fn(c: *ExportCtx, fns: []FuncId, funcs_done: *BitSet, names: []Str) One(FTy) = {
+export_root_scope :: fn(c: *ExportCtx, fns: []FuncId, funcs_done: *DynamicBitSet, names: []Str) One(FTy) = {
     decls := Fld.list(temp());
 
     range(0, fns.len) { i | 
@@ -900,8 +901,7 @@ export_root_scope :: fn(c: *ExportCtx, fns: []FuncId, funcs_done: *BitSet, names
             payload = (offset = trunc idx)
         );
     };
-
-    symbols_exported: DynamicBitSet = (bits = list(c.writer.sym.len, temp()));
+    symbols_exported: Qbe.BSet = init_bitset(c.writer.sym.len);
     i := 0;
     each c.self.functions& { func |
         continue :: local_return;
@@ -914,7 +914,7 @@ export_root_scope :: fn(c: *ExportCtx, fns: []FuncId, funcs_done: *BitSet, names
         name := c.self.comp().fmt_fn_name(fid);
         id := c.m.intern(name);
         idx := c.writer.map_sym(c.m, id);
-        symbols_exported&.set(idx);
+        symbols_exported&.bsset(idx);
         
         f_ty := func.finished_ty() || @panic("unfinished type for %", c.self.comp().log(func));
         f_ty := c.self.intern_type(FnPtr = (ty = f_ty));
@@ -929,7 +929,7 @@ export_root_scope :: fn(c: *ExportCtx, fns: []FuncId, funcs_done: *BitSet, names
         @if_let(func.body&) fn DynamicImport(it) => {
             id := c.m.intern(c.self.comp().get_string(it.name));
             idx := c.writer.map_sym(c.m, id);
-            symbols_exported&.set(idx);
+            symbols_exported&.bsset(idx);
             decls&.push(
                 name = c.writer.sym[idx].name,
                 type = f_ty,
@@ -939,7 +939,7 @@ export_root_scope :: fn(c: *ExportCtx, fns: []FuncId, funcs_done: *BitSet, names
     };
     
     range(0, c.writer.sym.len) { idx |
-        if !symbols_exported&.get(idx) {
+        if !symbols_exported&.bshas(idx) {
             decls&.push(
                 name = c.writer.sym[idx].name,
                 type = (off = FTy.RAWPTR),

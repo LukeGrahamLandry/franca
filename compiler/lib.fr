@@ -193,8 +193,8 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         c := @try(vtable.load_file_in_compiler(path, opts)) return;
         env := c.get_comptime_env();
         @if(show_backend_stats())
-        @eprintln(">>> compiler configuration: threads=%, debug_assertions=%, host = (%, %), nocache=%", 
-            use_threads, safe, current_arch(), current_os(), no_cache);
+        @eprintln(">>> compiler configuration: threads=%, debug_assertions=%, host = (%, %), nocache=%, syscalls=%", 
+            use_threads, safe, current_arch(), current_os(), no_cache, prefer_syscalls());
         
         self := c.data.cast()[][];
         
@@ -240,7 +240,12 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
             cc = c.get_jitted(f);
         }, {
             main_thread_pump(self.comp(), shared, @slice(f), true);
-            self.debug_deny_jit_shim_calls = true;
+            // if nocache, the module is jitonly so things aren't baked so function pointers in memory can still be jit-shims. 
+            // TODO: maybe the driver should always use ExecStyle.AOT so you get the baking 
+            //       because it changes semantics which seems like an unnessisary confusion. 
+            //       should seperate the semantic split where you're program has a part that runs without 
+            //       access to the compiler's address space from the reality of whether it actually got output to an exe. 
+            self.debug_deny_jit_shim_calls = !no_cache;
             if no_cache {
                 m.make_exec();
             }
@@ -456,7 +461,10 @@ fn add_function(self: *SelfHosted, f: Func) FuncId = {
 // For now you can't change this to an allocator that actually frees, 
 // because user code is allowed to just copy Ast nodes around and give us back aliased trees.
 // This might be something to address when i rework the macro system.  
-fn get_alloc(self: *SelfHosted) Alloc = self.ast_alloc.borrow();
+fn get_alloc(self: *SelfHosted) Alloc = {
+    @debug_assert(self.main_thread_index == context(DefaultContext)[].thread_index);
+    self.ast_alloc.borrow()
+}
 
 // TODO: these are garbage. make #where work better
 

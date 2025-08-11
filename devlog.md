@@ -1,4 +1,28 @@
-todo: can almost enable cacching when -syscalls 
+
+## (Aug 10)
+
+mystery garbage waste of time. 
+- new claim, main_thread_pump is miscompiled and small changes to it's stack frame size make it work. 
+  - like -unsafe or #inline on BitSet.set or adding `big := @uninitialized Array(i64, 10);spill :: fn(s: []i64) void #noinline = ();spill(big&.items());`
+  - `franca examples/default_driver.fr build compiler/main.fr -o q.out && ./q.out examples/default_driver.fr build compiler/main.fr -os linux -arch x86_64 -o qq.out -keep-names -syscalls && orb FRANCA_BACKTRACE=1 ./qq.out examples/default_driver.fr build compiler/main.fr`
+  - BitSet.Big.maybe_uninit.ptr is getting garbage at some point there. 
+  - disabling elide slots or promote or coalesce makes it work but does that mean they're wrong 
+    or that they just change the stack size enough to confuse the universe somehow? 
+  - it happens in the call to mainthreadpump done by the static_memmove constant at comptime so turning that off fixes it but that's just hiding the problem presumably. 
+  - emit_ir.alloca always using .alloc8 instead of choosing based on info.align_bytes fixes it
+    but so does always using .alloc4 because alignment isn't real and it just fucks with the stack a bit i guess. ugh. 
+  - not using -syscalls fixes it which is creepy because that can't change the stack size of that function, it's not a constant. 
+    it just changes what happens in the syscall wrappers. 
+    i would accept that if it's just oh too much stack use makes me stack overflow 
+    the amount of space the kernel gives the main thread 
+    but things that fix it include causing it to use even more stack so that can't be it? 
+    and indeed, wrapping the compiler's main in a start_thread(...).join() where i get to allocate my own giant stack doesn't fix it. 
+  - but using slowuserspacethreads does fix it. 
+  - having the worker not use a seperate thread in emit_qbe_included when `fns[0]` name.startswith("copy_bytes") makes it work, 
+    but the inverse does not make it work. 
+  - maybe im doing sysv abi wrong? that would make sense with pervious odd behaviour of to_bytes(Incremental.Meta). 
+  - you know what, fuck it, im just going to get rid of BitSet and use DynamicBitSet instead 
+    and if the universe wants the real problem to be fixed it will resurface on its own. 
 
 ## (Aug 9)
 
