@@ -1,3 +1,46 @@
+## (Aug 12)
+
+- meta/qbe_frontend.fr support replacing qbe for hare
+  - meta/parse.fr 
+    - ignore section and dbgfile statements
+    - harec likes to output opaque types that it never uses and have junk sizes? 
+      so allow size of opaque type to be -1 and just hope you don't try to use it i guess.
+    - handle ub/sb/uh/sh ret/arg/par
+      - abi.fr/extsb_parargret: actually replace the op with normal arg since i changed the abi impls to disallow small ones
+    - allow s/d in data definitions. it's still just bits so it means the same thing as w/l. 
+    - similar to the opaque thing. it wants to make a type for an array of 500000000000000 bytes and never use it. 
+  - annoying. can't just skip the line when you see `section` keyword, 
+    harec wants the word `export` on that line and i need that or i don't find your main function 
+    and you get `ld: warning: cannot find entry symbol _start; defaulting to 0000000008000000`. 
+    and `undefined reference to main` if i try to just link them myself with clang. 
+    fair enough qbe docs do say the new line is optional. 
+  - progress, now if i link manually it runs and gets to main(). 
+    if i change config.mk to ask for clang as linker instead of ld it stops complaining about `_start` and just gives me one,
+    but it dies in call_weak_fn (which i think it gave me), that seems like a dead end perhaps. 
+  - oh ok my hacky way of just not calling the assembler in their makefile (because i output machine code not text, 
+    i just compile` rt.ssa -> .cache/rt.s` but it's actually an object file and then say my assembler command is `cp .cache/rt.s .cache/rt.o`) 
+    means im ignoring their things that are actually written in assembly like `rt/+linux/start+aarch64` which has `_init`. 
+  - ah fuck now that im looking at the code, some of the sections do matter `init_array, fini_array, test_array` because that's what their linker script knows about. 
+    im really not a big fan of the (house of cards / everybody's just a small piece of a bigger tool chain) compilation model. 
+    maybe what i want is to write my own version of their base runtime stuff: https://harelang.org/documentation/usage/freestanding.html  
+    lucky for me the tests in the harec repo don't use @test and 09-funcs.ha is the only one that uses @init/@fini, so it's mostly fine. 
+  - this seems to work: `clang rt/+linux/start+aarch64.s rt/+linux/syscall+aarch64.s  .cache/rt.o .cache/tests_00_literals.o -nostartfiles`. 
+    yeah, shoving that im config.mk i get `38 tests:	34 passed	4 failed`. 
+    ```
+    08-slices            ...Abort: tests/08-slices.ha:312:15: assertion failed
+    09-funcs             ...Segmentation fault
+    11-globals           ...Abort: tests/11-globals.ha:84:15: assertion failed    
+    12-loops             ...Segmentation fault
+    ```
+    - oof, i was relying on my emit_ir always using RInt so if you use the text format, 
+      they'd be RCon and isel was diligently loading the line numbers into registers for you. 
+      (unrelated to the fails, just made the asm fucking impossible to read) 
+    - i wasn't skipping spaces when parsing constant offest so `data $sl = { l $sldata.969 + 0, l 3, l 3 }` 
+      was being parsed as `data $sl = { l $sldata.969+0 0 3 3 }`. that fixes 08 and 11. 
+    - the problem with 12-loops is im trying to call memmove for the blit of a large return. it works if i set prefer_libc_memmove=false. 
+      probably the -nostartfiles kills it? yeah `file` says it's `statically linked` so the import won't work. 
+      maybe this is my sign that should be the default because adding imports is creepy. costs 10ms on self compile to do that tho. 
+    - last one: 09-funcs. which isn't going to work because of initfini but it should be an assertion fail instead of a segfault. 
 
 ## (Aug 11)
 

@@ -1,5 +1,6 @@
 
 - !! BROKEN: amd64 !!
+- self compile in blink arm-linux on github actions seems to hang forever sometimes? 
 - crack down on smurf naming conventions (ie import("@/lib/alloc/debug_alloc.fr").DebugAlloc is kinda dumb). 
   could steal what zig does where a file is a struct. but that always annoys me because it makes you 
   pick one blessed struct to have the top level fields when the rest of your file is a namespace which looks odd. 
@@ -22,9 +23,6 @@
   that uses import_c not through default_driver. ie. `FRANCA_TRACY=true ./trace.out examples/terminal.fr` 
   crashes but `FRANCA_TRACY=true ./trace.out examples/default_driver.fr build examples/terminal.fr` is fine. 
   relatedly, since that's not included in cache invalidation, it's broken if you turn on import_module caching. 
-- make the mangled name of copy_bytes in simplify.fr/static_memmove not change so the generated module 
-  is identical regardless of which compilation context you're in 
-  (not a repro problem, just an extra source of confusion that doesn't need to exist). 
 - allow trailing lambda to be passed as a function pointer but still infer types of arguments. (ie. when calling run_tests_main_threaded)
 - set a good example; don't have tests that rely on layout of codegenentry. use the functions on the vtable. i think import_c/test/test.fr does this wrong
 - always zero struct padding when baking constants (even when behind a pointer and even when the struct contains no pointers). 
@@ -41,6 +39,7 @@
 - add a test for #discard_static_scope now that i gave up on scc. 
 - backend needs signeture type checking when targetting wasm. it's better i give you the error and show you the mistake in your ir
   instead of getting something unintelligible from the verifier. 
+- extend the cross repro tests to all the example programs. not just the compiler. maybe just add a file with hashes of binaries to the released artifact. 
 
 ## remaining nondeterminism
 
@@ -264,12 +263,8 @@ hould just make them local constants in each file like they are here in riscv
 - fix those two ^ and then compiler/test.fr can create all at once and assert that they make the same exe instead of running them all
 - elf: don't include names for local symbol with DataAbsolute relocations when exe_debug_symbol_table=false,
   and do include all symbol names when exe_debug_symbol_table=true. 
-- test that function names don't appear in the binary when exe_debug_symbol_table=false and do when true.
 - test that makes a dylib
 - macho exe_debug_symbol_table doesn't work i clion profiler (dtrace?)
-- make sure the string "franca" doesn't show up in binaries. ie `__franca_aot_debug_info` symbol offends me
-- i want the module made for static_memmove in opt/simplify.fr to not include 
-`__franca_base_address` and `__franca_aot_debug_info`
 - debug assert that all tmps have a definition in rega. 
   (especially because @emit_instructions doesn't catch it)
 - turn off ASSUME_NO_ALIAS_ARGS in arm/abi. it doesn't help much and it would be better to do the hard thing 
@@ -278,6 +273,54 @@ hould just make them local constants in each file like they are here in riscv
 - fixup2.ssa: "this should work without the indirection, i just don't handle folding the offset into the constant correctly."
   i think that's fixed now. add a little test of that too
 - "this works here but not in it's original place under f()."
+
+## backend symbols rework
+
+- prefer_libc_memmove being seperate from `link_libc` is kind of a hack to make harec static binaries work. 
+  but really link_libc is conflating two things, are you allowed to import thing 
+  (or should any weak symbols be treated as missing) vs is the compiler allowed 
+  to assume a memmove implementation exists with that name and can be imported. 
+  those are obviously different: harec wants seperate compilation units with imports 
+  between them but does not link a libc that exports a memmove symbol. 
+  hopefully this can get cleaned up as part of a symbols rework.  
+  tho it's also pretty dumb for every compilation unit to have its own copy of builtin_static_memmove, 
+  but if anybody doesn't have it, you're suddenly in linker hell where you need to find a compiler_rt 
+  or some shit every time you try to do anything and the errors are always inscrutable. 
+- make sure lnk.export is being respected (and implement it for data as well). 
+- you don't necessarily want to inherit export-ness of symbols when including a frc module. 
+  that's something wasm got right i feel. each module has some imports and some exports but the 
+  names are arbitrary and it's possible to specify your own mapping on how they get filled when loading a module. 
+  so you don't have to do the flat-namespace-prefix-all-your-symbols junk that usable c libraries have to do. 
+  you need at least two layers of namespaces so you can import two different libraries that export a symbol with the same name. 
+  but you also need to allow choosing the unmangled real symbol name for working and playing well with others. 
+- unify SymbolInfo.library with the old name$module i was using for wasm .ssa tests
+- be consistant about how weak symbols work. it would be nice guarentee the address is 0 if it's not available, 
+  but that prevents you from handing out the address of a jit-shim or got-shim before you know if the import will get filled. 
+  so im not sure what to do about that. 
+- make the mangled name of copy_bytes in simplify.fr/static_memmove not change so the generated module 
+  is identical regardless of which compilation context you're in 
+  (not a repro problem, just an extra source of confusion that doesn't need to exist). 
+- make sure the string "franca" doesn't show up in binaries. ie `__franca_aot_debug_info` symbol offends me
+- i want the module made for static_memmove in opt/simplify.fr to not include 
+  `__franca_base_address` and `__franca_aot_debug_info`
+- test that function names don't appear in the binary when exe_debug_symbol_table=false and do when true.
+- be consistant about keeping a list of symbols that might be interesting instead of doing for_symbols multiple times at the end of a module. 
+- try to deduplicate filling patches. currently there's a lot of places in emit where you look at symbol.kind 
+  and maybe patch immediately if it's ready and maybe save a fixup for later depending on m.goal. 
+  it would be much more sane if every action was described by a patch 
+  and you just had one function to apply it now or save it for later as needed. 
+  the hard thing about that is sometimes the immediate version is more efficient but doesn't make sense 
+  as a delayed patch so you want to only fall back to the slower thing if needed. 
+- make sure im not redundantly calling clear_instruction_cache. 
+  for pending_immediate_fixup_got, i think i might be doing it after the function, 
+  then doing patches, then doing it again. so you flush the whole function twice whenever it calls anything. 
+- make symbol aliases work when compiling a .frc and make them work for non-local symbols
+- need to be consistant about a place to do stuff at the very end of emitting a module. 
+  it's probably emit_suspended_inlinables but it's confusing what Target.finish_module is supposed to do for you. 
+  and it's confusing whether make_exec should do something or just assert that you're in a mode that doesn't need it. 
+- at the end you should make always sure there are no strong imports that haven't been patched. 
+- sane type errors for signetures when targetting wasm. it might even be easy now that i deduplicate them. 
+  also let frontends directly provide one for imports since they probably know instead of only trying to infer from callsites. 
 
 ## don't rely on libc
 
@@ -710,7 +753,6 @@ that fails the wasm verifier
 
 ## cleanup 
 
-- backend: unify SymbolInfo.library with the old name$module i was using for wasm .ssa tests
 - ImportVTable: implement add_to_scope with add_expr_to_scope
 - make comptime.fr exporting stuff less painful 
 - sema needs to get simplified. 
@@ -758,8 +800,6 @@ or just default to jitting and force you to enable aot by specifying an output p
 - test crash stack traces
 - make the crash examples work without needing to set the env variable / run jitted
 - TODO: i should probably be making tests for error locations
-- arm-linux github actions
-- run rv-hello-world in libriscv (and x86_64 in blink too maybe)
 - instead of hardcoding `clang`, use env var CC or something more sane.
   could try clang and fall back to a self-compiled tcc if it's not available. 
 - make it easy to skip any tests that have external dependencies

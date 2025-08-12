@@ -54,8 +54,6 @@ matching_comptime_incremental_abi :: {
     c'vtable'frc_module_magic_v == Incremental.MAGIC 
 };
 
-prefer_libc_memmove :: true;
-
 Arm  :: import("@/backend/arm64/bits.fr");
 Amd  :: import("@/backend/amd64/bits.fr");
 Wasm :: import("@/backend/wasm/bits.fr");
@@ -200,6 +198,11 @@ QbeTargetEnv :: @struct(
     exe_debug_symbol_table := false,
     
     blink_smc := true,
+    
+    // TODO: kinda a hack but its not the same thing as link_libc 
+    // it's slower to emit very large blits inline so we generate a call to a function to do the copy. 
+    // when this is false, builtin_static_memmove will be emitted and called instead of trying to import lib's memmove. 
+    prefer_libc_memmove := true,
     
     segment_size        := 1.shift_left(25),
     max_got_size        := 1.shift_left(15),
@@ -384,7 +387,11 @@ fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
     //forever.box_zeroed(Qbe.Ins);
     
     m.curi = m.insb.index_unchecked(Qbe.MaxInstructions);
-    if m.goal.link_libc && prefer_libc_memmove {
+    if !m.goal.link_libc {
+        // TODO: should allow user to specify a symbol to use instead of importing from libc or including a new one? 
+        m.goal.prefer_libc_memmove = false;
+    };
+    if m.goal.prefer_libc_memmove {
         m.symbol_memmove = m.intern("memmove");
     } else {
         m.symbol_memmove = m.intern("__franca_builtin_static_memmove");

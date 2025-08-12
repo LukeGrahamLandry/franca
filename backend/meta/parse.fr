@@ -117,8 +117,13 @@ fn parse_top_level(m: *QbeModule, src: Str, yield_data: @FnPtr(Dat2) void, yield
             };
             continue();
         };
-        if self.eat("section") {
-            return(Err = "I don't support the 'section` keyword. use real qbe instead. sorry");
+        if self.eat("section") {  // not implemented! 
+            @try(self.skip_section_directive()) return;
+            continue();
+        };
+        if self.eat("dbgfile") {  // not implemented!
+            self.eat_line();
+            continue();
         };
         
         if self.cursor >= self.input.len {
@@ -129,6 +134,22 @@ fn parse_top_level(m: *QbeModule, src: Str, yield_data: @FnPtr(Dat2) void, yield
         };
     };
     unreachable()
+}
+
+fn skip_section_directive(self: *QParseCtx) Result(void, Str) = {
+    // I don't support the 'section` keyword but i want to be able to compile hare programs. 
+    // they use the sections but it's just for --gc-sections which i don't care about. 
+    // so just ignore them for now. 
+    self.skip_blanks();
+    if self.input[self.cursor] == "\"".ascii() {
+        _ := @try(self.consume_string()) return;
+    };
+    self.skip_blanks();
+    if self.input[self.cursor] == "\"".ascii() {
+        _ := @try(self.consume_string()) return;
+    };
+    self.skip_lines();
+    .Ok
 }
 
 fn skip_lines(self: *QParseCtx) i64 = {
@@ -202,12 +223,23 @@ fn parse_header(self: *QParseCtx, export: bool) void = {
         self.f.retty = TYPE(type);
     } else {
         if !self.check("$") {
-            k := or cls_from_char(self.input[self.cursor]) {
-                @fmt(self.error&, "invalid cls char");
-                return()
-            };
+            break :: local_return;
+            kk := self.input[self.cursor];
             self.cursor += 1;
-            self.ret = k.retk(); // TODO: also sb,etc.
+            if cls_from_char(kk) { k |
+                self.ret = k.retk();
+                break();
+            };
+            o := Qbe.O.par;
+            @if_else {
+                @if(kk == "u".ascii()) => self.eat_b_or_h(true, o&, .None);
+                @if(kk == "s".ascii()) => self.eat_b_or_h(false, o&, .None);
+                @else => {
+                    @fmt(self.error&, "invalid cls char");
+                    return()
+                };
+            };
+            self.ret = @as(Qbe.J) @as(i32) Qbe.J.retsb.raw() + o.raw() - Qbe.O.par.raw();
         } else {
             self.ret = .ret0;
         };
@@ -253,8 +285,13 @@ fn parse_args(self: *QParseCtx, is_par: bool) void = {
             self.cursor += 1;
             variable = self.parse_ref();
             o := base_op;
-            k = or cls_from_char(kk) {
-                if kk == ".".ascii() && self.eat("..") {
+            k = or cls_from_char(kk) {  
+                @if_else {
+                @if(kk == ".".ascii()) => {
+                    if !self.eat("..") {
+                        @fmt(self.error&, "expected '...' in arg");
+                        return();
+                    };
                     @debug_assert(variable == QbeNull);
                     if is_par {
                         self.f.vararg = true;
@@ -264,19 +301,27 @@ fn parse_args(self: *QParseCtx, is_par: bool) void = {
                     self.eat(",");
                     continue();
                 };
-                ::if(Qbe.Cls);
-                if kk == "e".ascii() && self.eat("nv") {
+                @if(kk == "e".ascii()) => {
+                    if !self.eat("nv") {
+                        @fmt(self.error&, "expected 'env' in arg");
+                        return();
+                    };
                     @debug_assert(variable == QbeNull, "should have tried to parse_ref('nv')");
                     variable = self.parse_ref();
                     o = if(is_par, => .pare, => .arge);
                     .Kl
-                } else {
-                    if !kk.is_ascii_digit() {
-                        @fmt(self.error&, "invalid ref cls char=%", kk);
-                        return();
-                    };
+                };
+                @if(kk.is_ascii_digit()) => {
+                    // placeholder for @emit_instructions
                     self.replacements&.push(key = kk.zext() - "0".char(), r = variable);
                     .Kw
+                };
+                @if(kk == "u".ascii()) => self.eat_b_or_h(true, o&, (Some = variable&));
+                @if(kk == "s".ascii()) => self.eat_b_or_h(false, o&, (Some = variable&));
+                @else => {
+                    @fmt(self.error&, "invalid ref cls char=%", kk);
+                    return() 
+                };
                 }
             };
             o
@@ -302,6 +347,21 @@ fn parse_args(self: *QParseCtx, is_par: bool) void = {
         @fmt(self.error&, "expected ')' after function args");
         return()
     };
+}
+
+fn eat_b_or_h(self: *QParseCtx, u: bool, o: *Qbe.O, variable: ?*Qbe.Ref) Qbe.Cls = {
+    b := self.eat("b");
+    h := !b && self.eat("h");
+    if !b && !h {
+        @fmt(self.error&, "expected ub/uh/sb/sh in arg");
+        return(.Ke);
+    };
+    
+    o[] = @as(Qbe.O) @as(i32) ((@as(i32) o[]) + u.int().intcast() + @if(b, 1, 3));
+    if variable { variable |
+        variable[] = self.parse_ref();
+    };
+    .Kw
 }
 
 fn parse_line(self: *QParseCtx) bool = {
@@ -601,7 +661,9 @@ fn parse_ref(self: *QParseCtx) Qbe.Ref = {
             name = /* SLOW */ @tfmt("%$%", name, module); // TODO: do something more formal (store this in Qbe.Sym?)
         };
         off := 0;
+        self.skip_blanks();
         if self.eat("+") {
+            self.skip_blanks();
             off = self.parse_number();
         };
         return self.f.symcon(self.f.globals.intern(name), off);
@@ -769,6 +831,9 @@ fn parse_data(self: *QParseCtx, export: bool) Result(Dat2, Str) = {
                 @case("z".ascii()) => -1;
                 @case("h".ascii()) => 2;
                 @case("w".ascii()) => 4;
+                // These don't mean anything different from w/l but harec wants to use them 
+                @case("s".ascii()) => 4;
+                @case("d".ascii()) => 8;
                 @default => return(Err = @tfmt("expected b/h/w/l/z prefix for data entry in %", name));
             };
             self.cursor += 1;
@@ -776,18 +841,7 @@ fn parse_data(self: *QParseCtx, export: bool) Result(Dat2, Str) = {
         self.skip_blanks();
         if self.input[self.cursor] == "\"".ascii() {
             if(dat_type != 1, => return(Err = @tfmt("expected 'b' prefix for string literal in %", name)));
-            self.cursor += 1;
-            start := self.cursor;
-            // going over the list twice is silly but i only use this for tests so i don't care. 
-            while => self.input[self.cursor] != "\"".ascii() {
-                if self.input[self.cursor] == "\\".ascii() {
-                    self.cursor += 1;
-                };
-                self.cursor += 1;
-                if(self.cursor >= self.input.len, => return(Err = "unterminated string literal"));
-            };
-            s := self.input.slice(start, self.cursor);
-            self.cursor += 1;
+            s := @try(self.consume_string()) return;
             move_zeroes();
             expand_string_escapes(s, bytes&);
         } else {
@@ -837,6 +891,24 @@ fn parse_data(self: *QParseCtx, export: bool) Result(Dat2, Str) = {
     ))
 }
 
+// note: caller must do escapes
+fn consume_string(self: *QParseCtx) Result(Str, Str) = {
+    @debug_assert(self.input[self.cursor] == "\"".ascii());
+    self.cursor += 1;
+    start := self.cursor;
+    // going over the list twice is silly but i only use this for tests so i don't care. 
+    while => self.input[self.cursor] != "\"".ascii() {
+        if self.input[self.cursor] == "\\".ascii() {
+            self.cursor += 1;
+        };
+        self.cursor += 1;
+        if(self.cursor >= self.input.len, => return(Err = "unterminated string literal"));
+    };
+    s := self.input.slice(start, self.cursor);
+    self.cursor += 1;
+    (Ok = s)
+}
+
 fn parse_type(self: *QParseCtx) Result(void, Str) = {
     if !self.eat(":") {
         return(Err = "expected ':' before type name");
@@ -868,7 +940,7 @@ fn parse_type(self: *QParseCtx) Result(void, Str) = {
             return(Err = "expected '}' to end type declaration");
         };
         typ.set_is_dark(true);
-        @debug_assert_ule(size, MAX_u32);
+        @debug_assert(size.ult(MAX_u32) || size == -1, "opaque type too large");
         typ.size = size.trunc();
     } else {
         fields := u32.list(m.forever&.borrow());
@@ -942,6 +1014,11 @@ fn parse_type_fields(self: *QParseCtx, typ: *Qbe.Typ, fields: *List(u32)) Result
         if tag == .FTyp {
             size = value_to_put_in_len_field;
         };
+        
+        // harec wants to make giant array types and not use them. 
+        // TODO: this :HACK goes away when i truncate in a more structured way (see next comment)
+        count = count.min(512);  // note: this doesn't change my_size calculation 
+        
         // TODO: its kinda sad how much memory i use to represent Array(u8, 80), etc.
         //       but also the abi only looks at the first few anyway so this could be improved. 
         //       (careful, can't just truncate in add_type because of how i represent unions)
@@ -954,6 +1031,9 @@ fn parse_type_fields(self: *QParseCtx, typ: *Qbe.Typ, fields: *List(u32)) Result
     align := 1.shift_left(my_align);
     my_size = my_size.max(zext typ.size);
     my_size := bit_and(my_size + align - 1, -align);
+    if my_size > MAX_u32 {
+        my_size = MAX_u32; // TODO: error if you try to use it
+    };
     @assert_le(my_size, MAX_u32);
     typ.size = trunc my_size;
     typ.align_log2 = my_align.trunc();
