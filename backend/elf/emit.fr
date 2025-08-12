@@ -65,9 +65,23 @@ finalize_symbols :: fn(m: *Qbe.Module) SymbolTableInfo = {
                 local_fix&.push(it);
             } else {
                 @assert(!it.symbol.strong, "importing non-weak symbol '%' in static binary", it.symbol.name);
-                if it.fix.type&.is(.DataAbsolute) {
-                    i64.ptr_from_raw(it.fix.patch_at)[] = 0;
-                }
+                @match(it.fix.type&) {
+                    fn DataAbsolute() => {
+                        i64.ptr_from_raw(it.fix.patch_at)[] = 0;
+                    };
+                    fn InReg(info) => @match(m.goal.arch) {
+                        fn aarch64() => {
+                            // i use adr when in range but i don't want to deal with another relocation type rn
+                            reg := @as(u5) info.r;
+                            inst: []u32 = (ptr = u32.ptr_from_raw(it.fix.patch_at), len = 2);
+                            inst[0] = movz(.X64, reg, 0, .Left0);
+                            inst[1] = Arm.arm_nop;
+                        };
+                        fn rv64() => todo();
+                        @default => unreachable();
+                    };
+                    @default => ();
+                };
             }
         };
         fixups = local_fix.items();

@@ -1,12 +1,62 @@
-
+// This relies on target/release/franca-* already being compiled. 
 main :: fn() void = {
-    if current_os() == .macos && current_arch() == .x86_64 {
-        // i've tried it on rosetta2 macos15.4 on an M1 and in github actions macos-13. no luck. 
-        @eprintln("SKIP tests/exe/cross.fr/blink(): jart/blink does not appear to work on macos-amd64...?");
-        return();
+    summary := u8.list(temp());
+    X :: fn(s: Str) => {
+        println(s);
+        @fmt(summary&, "%\n", s);
+    };
+    if current_os() == .linux && is_linking_libc() {
+        linux_native_no_libc();
+        X("OK: linux_native_no_libc");
+    } else {
+        X("SKIP: linux_native_no_libc(): native target is not linux+libc");
     };
     
-    blink();
+    libriscv_ssa_tests();
+    X("OK: libriscv_ssa_tests");
+    
+    if current_os() == .macos && current_arch() == .x86_64 {
+        // i've tried it on (rosetta2 macos15.4 on an M1) and (github actions macos-13). no luck. 
+        // i can certainly imagine it being my fault because my programs are clearly fragile 
+        // but im running identical binaries on the two platforms (cross arch repro of franca-linux-amd64-sta works on github actions) 
+        // so if the emulator behaves differently depending on the host platform, i don't see how that could be my bug. 
+        // it works fine on macos-arm64 and linux-amd64 (but not in orbstack/rosetta).
+        // -- Aug 11, 2025
+        X("SKIP: blink(): jart/blink does not appear to work on macos-amd64...?");
+    } else {
+        blink();
+        X("OK: blink");
+    };
+    
+    @print("\n=== tests/exe/cross.fr summary ===\n%", summary.items());
+};
+
+// If running linux with libc, can still run the compiler built without libc and make sure it repros. 
+linux_native_no_libc :: fn() void = {
+    franca := @if(query_current_arch() == .x86_64, "target/release/franca-linux-amd64-sta", "target/release/franca-linux-arm64-sta");
+    _ := Syscall'remove("a.out");
+    sh(@slice(franca, "examples/default_driver.fr", "build", "compiler/main.fr", "-unsafe", "-syscalls"));
+    sh(@slice("diff", franca, "a.out"));
+};
+
+// This builds a linux-riscv64 emulator and then uses it to run a hello world .ssa program. 
+libriscv_ssa_tests :: fn() void = {
+    root := fetch_or_crash(
+        "https://github.com/libriscv/libriscv/archive/352ab7829e69e50867d970e8839c80c7dd58b33b.zip",
+        2747863, "506110dcf0e2afaa14a689d0feb863e5fa13e9d4eb03c80d594a320b77996dfd",
+        "libriscv-352ab7829e69e50867d970e8839c80c7dd58b33b",
+    );
+    start := get_working_directory(temp()).items();
+    Syscall'chdir(@fmt_cstr("%/emulator", root)) || @panic("failed to set cwd to %", root);
+    sh(@slice("./build.sh"));
+    Syscall'chdir(start.as_cstr());
+    
+    _ := Syscall'remove("a.out");
+    sh(@slice("./target/q.out", "-t", "rv64", "-o", "./a.out", "a.ssa"));
+    rvlinux := @tfmt("%/emulator/rvlinux", root);
+    ok, o, e := exec_and_catch(rvlinux, @slice("-s", "./a.out"), temp());
+    ok = ok && o.items() == "Hello World!\n";
+    @assert(ok, "libriscv hello world failed\n%\n%", o.items(), e.items());
 };
 
 // This builds a linux-amd64 emulator and then uses it to rebuild the compiler (without libc!). 

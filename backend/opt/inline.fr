@@ -530,6 +530,48 @@ fn emit_suspended_inlinables(m: *QbeModule) void = {
     if m.need_static_memmove {
         import("@/backend/opt/simplify.fr")'emit_static_memmove(m);
     };
+    
+    // TODO: it would be a good idea to always do a debug check for unfilled non-weak symbols. 
+    //       only matters when jitting until i stop defaulting to libc as import source. 
+    //       the whole treatment of finalizing symbols in this compiler could use a refactor. 
+    //       i just keep adding shit until it kinda works. 
+    // TODO: this is a dumb place to put this. it just needs to be at the end before you try to call anything. 
+    ::enum(@type m.goal.type); 
+    ::enum(@type m.goal.arch);
+    if !m.goal.link_libc && !m.goal.got_indirection_instead_of_patches && m.goal.type == .JitOnly && m.goal.arch != .x86_64 {
+        // TODO: keep a list of unfilled brks in loadaddr_bits :SLOW 
+        for_symbols m { _, s |
+            ::ptr_utils(@type s.inline[]);
+            ::enum(@type s.kind);
+            if s.inline.is_null() && @is(s.kind, .Pending) {
+                @assert(!s.strong, "importing non-weak symbol '%' in static binary", s.name);
+                for s.fixups { it |
+                    ::tagged(@type it.type);
+                    @match(it.type&) {
+                        fn DataAbsolute() => {
+                            // TODO: decide if this is the policy. 
+                            //       the world is a better place if weak symbol pointers are null when not available 
+                            //       but im inconsistant about doing that. 
+                            i64.ptr_from_raw(it.patch_at)[] = 0;
+                        };
+                        fn InReg(info) => @match(m.goal.arch) {
+                            fn aarch64() => {
+                                // filling this patch matters because emit leaves it as brk. 
+                                // it's legal to produce the address of a missing weak symbol, you just can't try to use it. 
+                                reg := @as(u5) info.r;
+                                inst: []u32 = (ptr = u32.ptr_from_raw(it.patch_at), len = 2);
+                                inst[0] = movz(.X64, reg, 0, .Left0);
+                                inst[1] = Arm.arm_nop;
+                            };
+                            fn rv64() => todo();
+                            @default => unreachable();
+                        };
+                        @default => ();
+                    };
+                };
+            }
+        };
+    };
 }
 
 fn load_inline_fn(m: *Qbe.Module, f: *Qbe.Fn, src: *Qbe.InlineFn) void = {

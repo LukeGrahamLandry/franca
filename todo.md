@@ -33,6 +33,12 @@
 - have github actions check repro after all targets finish running
 - can almost enable cacching when -syscalls 
 - document `store v, [Sxxx]` vs `store v, Sxxx` on amd64
+- it would be cool to provide the same abi as tcc 
+  and see if i could get libriscv to use me as it's c compiler for binary translation. 
+  looking at the .c it generates for hello world, 
+  i need to add support for: `__attribute__ (visibility, constructor, used)` and 
+  `__builtin_(expectbswap32, bswap32, clz, clzl, popcount, popcountl, fminf, fmin, fmaxf, fmax)`
+- add a test for #discard_static_scope now that i gave up on scc. 
 
 ## remaining nondeterminism
 

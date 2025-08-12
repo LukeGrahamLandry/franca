@@ -7,6 +7,18 @@
     because i used to count that the builtin was called the same number of times 
     it appeared lexically in the source string. 
   - one was commented out that used to be a sema restruction but is now an emit_ir bug
+- added an auto test that checks repro between native and blink. 
+  also one that runs the a.ssa hello world in libriscv. 
+- change the values in arm64/emit.fr `brk(0x____)` to be 4 digits instead of 3
+  so you can always grep for the disassembly you see in lldb (which doesn't add a leading zero). 
+- franca-linux-arm64-sta examples/toy/hello.fr (jit) crashes in the write syscall wrapper. 
+  - works if you always use the unerased version in @S (but i want to only do that for clone-like ones). 
+  - also works if you always take the got_indirection_instead_of_patches case in loadaddr_bits
+  - works if you don't set `vtable.libc.it = f;`, but not if you just delete the case that actually reads from it. 
+  - oh im dumb. the problem is since it's static, the weak symbol is never filled so the patch there is ignored. 
+    but even tho there's no value for the symbol, the brk instructions need to be replaced with loading zero in the register. 
+    it works on amd because there i just output an lea and patch the offset instead of patching the whole instruction. 
+    also force link_libc=false when jitting and we're built with -syscalls. 
 
 ## (Aug 10)
 
