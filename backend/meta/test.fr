@@ -17,7 +17,7 @@ Args :: @struct {
     jit: bool #help("don't generate binaries, just run jitted code in memory.") = false;
     frc: bool #help("write out .frc binary ir and then read it back to compile") = false;
     frc_inlinable: bool #help("write out .frc binary ir (before regalloc) and then read it back to compile") = false;
-    verify: bool #help("run wasm2wat to make sure it typechecks") = false;
+    verify: bool #help("run wasm-validate to make sure it typechecks (requires installing WebAssembly/wabt)") = false;
     paths: []Str #rest = empty();
     d: Str #help("log intermediate representation") = "";
     keep := false;
@@ -61,22 +61,21 @@ main :: fn() void = {
     arch: Arch = @if_else {
         @if(args.x64) => .x86_64;
         @if(args.arm) => .aarch64;
+        @if(args.w) => {
+            wasm_runner = (Some = "./target/w.out");
+            .wasm32
+        };
         @else => query_current_arch();
     }
     if args.h {
         print(HELP);
         return();
     };
-    if args.w {
-        wasm_runner = (Some = "./target/w.out");
-        arch = .wasm32;
-        @assert(!args.x64 && !args.arm, "conflicting arch");
-    };
     args.frc = args.frc || args.frc_inlinable;
     args.cc = args.cc || args.jit || args.frc
         || args.w;  // assume this until i can output linkable wasm
     
-    @assert(!args.x64 || !args.arm, "conflicting arch");
+    @assert(args.x64.int() + args.arm.int() + args.w.int() <= 1, "conflicting arch");
    
     if to_run.is_empty() {
         eprintln(HELP);
@@ -255,7 +254,7 @@ run_one :: fn(arg: *Args, file_path: Str, arch: Arch, wasm_runner: ?Str) Ty(bool
     if arg.verify && wasm_runner.is_some() {
         args&.clear();
         args&.push(old_exe_path);
-        run("wasm2wat", "verify");
+        run("wasm-validate", "verify");
     };
     
     extra := @if(arg.jit, "", @tfmt("%ms", b - a));

@@ -39,6 +39,8 @@
   i need to add support for: `__attribute__ (visibility, constructor, used)` and 
   `__builtin_(expectbswap32, bswap32, clz, clzl, popcount, popcountl, fminf, fmin, fmaxf, fmax)`
 - add a test for #discard_static_scope now that i gave up on scc. 
+- backend needs signeture type checking when targetting wasm. it's better i give you the error and show you the mistake in your ir
+  instead of getting something unintelligible from the verifier. 
 
 ## remaining nondeterminism
 

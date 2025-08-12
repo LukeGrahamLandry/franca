@@ -19,6 +19,18 @@
     but even tho there's no value for the symbol, the brk instructions need to be replaced with loading zero in the register. 
     it works on amd because there i just output an lea and patch the offset instead of patching the whole instruction. 
     also force link_libc=false when jitting and we're built with -syscalls. 
+- wasted some time trying to play with callgrind. the strategy of run it on orb and view the result in qchachegrind on macos
+  can't even show the assembly (--dump-instr=yes) because it tries to exec apple's objdump on the elf file. 
+  with --collect-jumps=yes it just crashes before even telling you objdump doesn't work. sad day. 
+- after running actions on all platforms, join, download the artifacts and diff them to make sure repro wasn't broken. 
+  run linux-arm tests in actions as well. 
+- make all .ssa tests pass wasm type checker
+  - just moving the need_trunc into wasm_push makes -verify fails on .ssa tests go from 11 to 3
+  - call2.ssa was just wrong cls at callsite. `=w` -> `=l`
+  - for good luck, don't try_kill_inst sel0
+  - abi9.ssa is specifically about lying about signatures so don't run it on wasm
+  - lol just did an oops when i changed wasm_push rn and didn't return so pushed twice and mucked up the stack
+  - for test.fr -verify, exec wasm-validate instead of wasm2wat. both are part of wabt and have the same effect here. might as well use the smaller one. 
 
 ## (Aug 10)
 

@@ -59,7 +59,7 @@ fn wasm_isel(f: *Qbe.Fn) void = {
             }
             fn jnz() => {
                 @debug_assert(b.s1.phi.is_null() && b.s2.phi.is_null());
-                f.emit(.push, .Kw, QbeNull, b.jmp.arg, QbeNull);
+                f.wasm_push(.Kw, b.jmp.arg);
                 b.jmp.arg = QbeNull;
             }
             @default => @panic("invalid jump type in $% @%", f.name(), b.name());
@@ -139,7 +139,7 @@ fn wasm_type_preleb(t: Wasm.ValType) i32 = {
 fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
     k := i.cls();
     o := i.op();
-    if o != .par && try_kill_inst(f, i) {
+    if o != .par && o != .sel1 && try_kill_inst(f, i) {
         if o == .pop {
             // inserted after a call by abi. even tho we don't use the value, 
             // we need to do some stack book-keeping to satisfy the verifier. 
@@ -236,11 +236,6 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
     // copy is just push+pop, no actual op
     if o != .copy {
         f.emit(o, i.cls(), QbeNull, QbeNull, QbeNull);
-    } else {
-        // TODO: need to do this for every op
-        if need_trunc(f, i.cls(), i.arg&[0]) {
-            f.emit(.truncl, .Kw, QbeNull, QbeNull, QbeNull);
-        };
     };
     
     if is_store(o) {
@@ -275,9 +270,15 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
 fn wasm_push(f: *Qbe.Fn, k: Qbe.Cls, r: Qbe.Ref) void = {
     @match(rtype(r)) {
         fn RTmp() => {
-            slot_offset := f.get_temporary(r)[].slot;
+            t := f.get_temporary(r);
+            slot_offset := t.slot;
             if slot_offset != -1 {
                 return(push_slot_addr(f, k, slot_offset));
+            };
+            if k == .Kw && t.cls == .Kl {
+                f.emit(.truncl, .Kw, QbeNull, QbeNull, QbeNull);
+                f.emit(.push, .Kl, QbeNull, r, QbeNull);
+                return();
             };
         }
         fn RSlot() => return(push_slot_addr(f, k, r.rsval()));
