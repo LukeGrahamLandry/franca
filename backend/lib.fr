@@ -18,7 +18,6 @@ Simplify :: import("@/backend/opt/simplify.fr");
 #use("@/lib/sys/process.fr");
 Fold :: import("@/backend/opt/fold.fr");
 
-Worker :: import("@/compiler/worker.fr");
 backend :: import_module("@/backend/lib.fr");
 exports :: Type.scope_of(@struct {
     init_module: (@Fn(m: *QbeModule, goal: QbeTargetEnv) void) :init_default_module;
@@ -31,11 +30,10 @@ exports :: Type.scope_of(@struct {
     drop_module: (@Fn(m: *QbeModule) void) :drop;
     fold_op: (@Fn(rt_o: Qbe.O, rt_k: Qbe.Cls, out: rawptr, a0: i64, a1: i64) void) :Fold.do_fold;
     try_fold_op: (@Fn(op: Qbe.O, cls: Qbe.Cls, cl: *Qbe.Con, cr: *Qbe.Con) ?Qbe.Con) :Fold.try_fold;
-    // TODO: separate worker.fr from the frontend
-    worker_thread: (@Fn(s: *Worker.CodegenShared) void) : Worker.codegen_thread_main;
-    worker_start: (@Fn(m: *QbeModule, arena: Alloc, worker: Worker.CodegenWorker, threaded: bool) *Worker.CodegenShared) : Worker.init_codegen_worker;
-    worker_enqueue: (@Fn(*Worker.CodegenShared, *Worker.CodegenEntry) void) : Worker.enqueue_task;
-    worker_join: (@Fn(s: *Worker.CodegenShared) void) :join_codegen_thread;
+    worker_thread: (@Fn(s: *CodegenShared) void) : codegen_thread_main;
+    worker_start: (@Fn(m: *QbeModule, arena: Alloc, worker: CodegenWorker, threaded: bool) *CodegenShared) : init_codegen_worker;
+    worker_enqueue: (@Fn(*CodegenShared, *CodegenEntry) void) : enqueue_task;
+    worker_join: (@Fn(s: *CodegenShared) void) :join_codegen_thread;
     writer_finish_imports: (@Fn(writer: *Incremental.Writer, m: *QbeModule) void) : finish_imports;
 });
 
@@ -863,17 +861,318 @@ fn replace_frontend_ops(f: *Qbe.Fn) void = {
     last_block.link = new_blocks_list;
 }
 
-#use("@/lib/collections/enum_map.fr");
-#use("@/lib/sort.fr");
-#use("@/lib/sys/threads.fr");
-#use("@/lib/sys/sync/atomics.fr");
-
 wasm_page_size :: 65536;
 
-// all computers know these days is fill memory and branch
+// 
+// This api makes it easy to have your frontend and the backend run on seperate threads. 
+// 
+// Call enter_task, generate some code, and return a CodegenTask which will be sent to the backend thread. 
+// Inside enter_task, temp() is tied to the task so the generated code can be in temp memory but you can't let any of your own temp allocations escape. 
+// Most backend functions are not thread safe, so you can't mix this threaded api with the direct calls it replaces.  
+// Sym intern()/str() on either thread is safe. When generating code, make sure to use emit(*Blk) instead of emit(*Fn). 
+// Call join_codegen_thread() at the end to finalize everything. 
+// 
+
+CodegenShared :: @struct(
+    entries: []CodegenEntry,
+    waiting_for_bouba: RawDeque(*CodegenEntry),
+    // It's important that these are processed in the order they're created so it's not a race to get a reproducible build. 
+    waiting_for_kiki: RawDeque(*CodegenEntry),
+    mutex: import("@/lib/sys/sync/mutex.fr").Mutex,
+    waiting_for_bouba_futex: u32,
+    waiting_for_kiki_futex: u32,
+
+    no_more_functions: bool,
+    no_more_codegen: u32,
+    m: *QbeModule,
+    codegen_time: i64,
+    // TODO: allow multiple backend threads. 
+    thread: *Thread,
+    threaded: bool,
+    alloc: Alloc,
+);
+
+CodegenTask :: @tagged(
+    Dead: void,
+    Func: *Qbe.Fn,
+    Asm: @struct(lnk: *Qbe.Lnk, code: *MultiArchAsm),
+    JitImport: @struct(lnk: *Qbe.Lnk, addr: rawptr),
+    Bounce: @struct(lnk: *Qbe.Lnk, target: Qbe.Sym),
+    Shim: @struct(f: *Qbe.Fn, shim_for: Qbe.Sym),
+    AotVar2: []Dat2,
+    // :UpdateBoot
+    SetLibrary: []Ty(@slice(Qbe.Sym, Str, bool)), // id, lib, weak
+    FromCache: @struct(f: *Qbe.Fn, did_regalloc: bool),
+);
+
+CodegenEntry :: @struct(
+    arena_storage: ArenaAlloc, 
+    arena: Alloc,
+    task: CodegenTask,
+    logging := "",
+);
+
+CodegenWorker :: @FnPtr(s: *CodegenShared) void;
+fn init_codegen_worker(m: *QbeModule, arena: Alloc, worker: CodegenWorker, threaded: bool) *CodegenShared = {
+    s := arena.box_zeroed(CodegenShared); 
+    s.mutex&.lock();
+    s.threaded = threaded && use_threads;
+    m.need_write_protect = !threaded && m.use_map_jit_on_apple_silicon;
+    s.m = m;
+    n := codegen_queue_size;
+    s.entries = arena.alloc_zeroed(CodegenEntry, n);
+    s.waiting_for_bouba = init(arena, n);
+    s.waiting_for_kiki = init(arena, n);
+    each s.entries { it |
+        if s.threaded {
+            it.arena_storage = init(general_allocator(), 16000);  // these are freed in join_codegen_thread
+            it.arena = it.arena_storage&.borrow();
+        };
+        s.waiting_for_bouba&.push_back(it, arena);
+    };
+    s.alloc = arena;
+    s.waiting_for_bouba_futex = n.trunc();
+    @if(s.threaded) {
+        s.thread = start_thread(CodegenShared, worker, s);
+    };
+    s.mutex&.unlock();
+    s
+}
+
+// don't reset the arena here, the other guy might want it.
+fn acquire(shared: *CodegenShared, $i_am_bouba: bool) ?*CodegenEntry = {
+    futex := @if(i_am_bouba, shared.waiting_for_bouba_futex&, shared.waiting_for_kiki_futex&);
+    if shared.threaded {
+        zone := @if(ENABLE_ENABLE_TRACY, zone_begin(.Wait), ());
+        fence();
+        while => futex[] == 0 {
+            fence();
+            if shared.no_more_functions {
+                @debug_assert(!i_am_bouba);
+                return(.None);
+            };
+            Futex'wait(futex, 0);
+        };
+        zone_end(zone);
+        fence();
+    };
+    
+    shared.mutex&.lock();
+    source := @if(i_am_bouba, shared.waiting_for_bouba&, shared.waiting_for_kiki&);
+    it := source.pop_front().expect("acquire CodegenEntry");
+    if shared.threaded {
+        futex[] -= 1;
+    };
+    shared.mutex&.unlock();
+    (Some = it)
+}
+
+// don't reset the arena here, the other guy might want it.
+fn release(shared: *CodegenShared, entry: *CodegenEntry, $i_am_bouba: bool) void = {
+    @debug_assert(shared.threaded);
+    shared.mutex&.lock();
+    if i_am_bouba {
+        // when the frontend is done, that entry goes on the end of the queue 
+        // to make sure compilation order is deterministic (required for repro)
+        shared.waiting_for_kiki&.push_back(entry, panicking_allocator);
+    } else {
+        // when the backend is done, have that entry be reused as soon as possible. 
+        // this avoids needing to warm up as many arenas (and reduces memory usage). 
+        // Aug 3, 2025: this saves ~10ms on self compile (1.08%)
+        shared.waiting_for_bouba&.push_front(entry, panicking_allocator);
+    };
+    futex := @if(!i_am_bouba, shared.waiting_for_bouba_futex&, shared.waiting_for_kiki_futex&);
+    
+    prev := u32.atomic_add(futex, 1);
+    need_wake := prev == 0 || shared.no_more_functions;
+    @if(need_wake) Futex'wake(futex, 1);
+    shared.mutex&.unlock();
+}
+
+fn join_codegen_thread(shared: *CodegenShared) void = {
+    @assert(!shared.no_more_functions);
+    shared.no_more_functions = true;
+    fence();
+    if shared.threaded {
+        while => shared.no_more_codegen == 0 {
+            Futex'wake(shared.waiting_for_bouba_futex&, 1);
+            Futex'wake(shared.waiting_for_kiki_futex&, 1);
+            Futex'wait(shared.no_more_codegen&, 0);
+        };
+        shared.thread.join();
+        shared.thread = zeroed(@type shared.thread);
+    };
+    shared.mutex&.lock();
+    
+    @debug_assert_eq(shared.waiting_for_bouba&.len(), shared.entries.len);
+    @debug_assert_eq(shared.waiting_for_bouba_futex, shared.entries.len.trunc());
+    @debug_assert_eq(shared.waiting_for_kiki&.len(), 0);
+    @if(shared.threaded) each shared.entries { q |
+        q.arena.deinit();
+    };
+    arena := shared.alloc;
+    arena.dealloc(@type shared.entries[0], shared.entries);
+    shared.waiting_for_bouba&.drop(arena);
+    shared.waiting_for_kiki&.drop(arena);
+    
+    if !shared.threaded {
+        shared.m.emit_suspended_inlinables();
+    } else {
+        @debug_assert_eq(shared.m.inlinable_but_referenced_later.len, 0, "this happens on the other thread so it works with apple's MAP_JIT");
+    };
+    arena.dealloc_one(@type shared[], shared);
+}
+
+fn enter_task(shared: *CodegenShared, $body: @Fn(it: *CodegenEntry) void) void = {
+    c := context(DefaultContext);
+    old, old_i := (c.temporary_allocator, c.temporary_allocator_i);
+    marker := zeroed Alloc.Mark;
+    entry := acquire(shared, true).unwrap();
+    if shared.threaded {
+        set_temporary_allocator(entry.arena_storage&);
+        entry.arena.reset_retaining_capacity();
+    } else {
+        marker = temp().mark();
+    };
+    @must_return body(entry);
+    enqueue_task(shared, entry);
+    if shared.threaded {
+        c.temporary_allocator = old;
+        c.temporary_allocator_i = old_i;
+        //set_temporary_allocator(old);
+    } else {
+        temp().reset(marker);
+    };
+}
+
+fn enqueue_task(shared: *CodegenShared, old_entry: *CodegenEntry) void = {
+    ::tagged(@type old_entry.task);
+    @debug_assert(!old_entry.task&.is(.Dead), "tried to enqueue dead task");
+    if !shared.threaded {
+        do_codegen(shared.m, old_entry);
+        shared.waiting_for_bouba&.push_back(old_entry, panicking_allocator);
+    } else {
+        release(shared, old_entry, true);
+    };
+}
+
+// (this is not the number of threads! just the amount of backlog we allow). 
+codegen_queue_size :: 128;
+
+codegen_thread_main :: fn(shared: *CodegenShared) void = {
+    @debug_assert(use_threads && shared.threaded && !shared.m.need_write_protect);
+    @if(shared.m.use_map_jit_on_apple_silicon) apple_thread_jit_write_protect(false);  // :JitMemProtect this thread wants to write
+    
+    idx := 0;
+    loop {
+        @debug_assert(shared.m.initialized, "destroyed module before joining codegen thread.");
+        if acquire(shared, false) { entry |
+            set_temporary_allocator(entry.arena_storage&);
+            do_codegen(shared.m, entry);
+            release(shared, entry, false);
+        } else {
+            @assert(shared.no_more_functions, "expected no_more_functions");
+            emit_suspended_inlinables(shared.m); // needs to happen on codegen thread for apple's jit shit.
+        
+            // pthread_getcpuclockid doesn't exist? so we have to do this here
+            shared.codegen_time = clock_ms(MacosLibc.CLOCK_THREAD_CPUTIME_ID);  // // :TodoLinux
+            shared.no_more_codegen = 1;
+            Futex'wake(shared.no_more_codegen&, 1);
+            return();
+        };
+    };
+};
+
+ENABLE_ENABLE_TRACY :: get_environment_variable("FRANCA_TRACY").is_some();
+
+fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
+    zone := @if(ENABLE_ENABLE_TRACY, zone_begin(.Backend), ());
+    logging := entry.logging;
+    entry.logging = "";
+    prev_debug := m.debug;
+    m.set_debug_types(logging, true);
+    @match(entry.task) {
+        fn Dead() => @panic("dead codegen task %", m.initialized);
+        fn Func(f) => {
+            @if(ENABLE_ENABLE_TRACY) @if(ENABLE_TRACY) ___tracy_emit_zone_name(zone, f.globals.str(f.lnk.id));
+            run_qbe_passes(f);
+        }
+        // TODO: this is more confusing than it needs to be
+        fn Shim(it) => {
+            m := it.f.globals;
+            run_qbe_passes(it.f);
+            
+            // The other guy's got slot points to us until it's ready. 
+            jit_addr := rawptr.zeroed();
+            use_symbol(m, it.f.lnk.id) { s | 
+                jit_addr = s.jit_addr;
+            };
+            @debug_assert(!jit_addr.is_null(), "we just compiled this");
+            use_symbol(m, it.shim_for) { s | 
+                @debug_assert(s.jit_addr.is_null(), "making a shim but it already has a jit_addr slot. %", s.name);
+                s.jit_addr = jit_addr;
+                s.shim_addr = jit_addr;
+                if ensure_got_slot(m, s, jit_addr) { fix |
+                    push_fixup(m, s, fix);
+                };
+                @debug_assert(s.got_lookup_offset != -1);
+                
+                // for normal franca code this doesn't matter because you can only create a data fixup by already having a jit shim, 
+                // but FrcImport changes that and this matters for symbols only referenced through a vtable. without this, the patch 
+                // will only be filled when the real function gets compiled and it will only get compiled the first time you try to 
+                // call through the shim. only matters for the comptime module or if FRANCA_NO_CACHE=true.   -- Jun 9, 2025
+                each s.fixups { fix |
+                    @if_let(fix.type) fn DataAbsolute(it) => {
+                        rawptr.ptr_from_raw(fix.patch_at)[] = jit_addr.offset(it.increment);
+                    };
+                };
+            };
+        }
+        fn Asm(it) => {
+            // This is trivial but we want to do it without threads fighting. 
+            // TODO: support it being exported, etc. 
+            m.add_code_bytes(it.lnk.id, it.code);  
+        }
+        fn JitImport(it) => {
+            m.put_jit_addr(it.lnk.id, it.addr);
+        }
+        // Note: this does not work on wasm because they care about signatures
+        fn Bounce(it) => {
+            declare_alias(m = m, target = it.target, alias = it.lnk);
+        }
+        fn AotVar2(it) => each it { d |
+            m.emit_data(d[]);
+        };
+        fn SetLibrary(it) => for it { id, lib, weak |
+            // This is trivial but we want to do it without threads fighting. 
+            m.set_library(id, lib, weak);
+        };
+        fn FromCache(it) => {  
+            f := it.f;
+            @if(ENABLE_ENABLE_TRACY) @if(ENABLE_TRACY) ___tracy_emit_zone_name(zone, f.globals.str(f.lnk.id));
+            
+            // TODO: factor out this and from incremental.fr/compile_all_symbols() so i don't have to remember to keep them in sync
+            if it.did_regalloc {
+                emit_fn(f);
+            } else {
+                // TODO: still inlsave(), that's kinda the whole point of this operation
+                {f.globals.target.finish_passes}(f);
+            };
+        }
+    };
+    entry.task = .Dead; 
+    m.debug = prev_debug;
+    @if(ENABLE_ENABLE_TRACY) zone_end(zone);
+}
 
 QbeNull :: Qbe.Null;
 QbeUndef :: Qbe.Undef;
 QbeConZero :: Qbe.ConZero;
 Module :: QbeModule;
 OutputPurpose :: QbeOutputPurpose;
+
+#use("@/lib/collections/enum_map.fr");
+#use("@/lib/sort.fr");
+#use("@/lib/sys/threads.fr");
+#use("@/lib/sys/sync/atomics.fr");
+#use("@/lib/collections/deque.fr");

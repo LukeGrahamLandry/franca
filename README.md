@@ -117,3 +117,8 @@ there must be proportional terrible things or I'm probably just lying.
 - spawning new operating system threads from comptime code is a bit fragile. 
   it does work but you're exposed to some unfortunate compiler implementation details. 
   (re. jit-shims and MAP_JIT). hopefully this will be fixed eventually. 
+- I've neglected language design / frontend quality-of-life things 
+  because i find that less interesting than playing with code generation and ffi stuff. 
+  So there's some unpleasent stuff (order dependent overload set instantiations) 
+  that could be fixed by unfinished features (#where) that I haven't bothered to work on. 
+- Similarly, there are some known bugs (see tests/todo/) that I don't care enough to fix until they annoy me (or someone else) more. 

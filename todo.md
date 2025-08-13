@@ -1,6 +1,4 @@
 
-- !! BROKEN: amd64 !!
-- self compile in blink arm-linux on github actions seems to hang forever sometimes? 
 - crack down on smurf naming conventions (ie import("@/lib/alloc/debug_alloc.fr").DebugAlloc is kinda dumb). 
   could steal what zig does where a file is a struct. but that always annoys me because it makes you 
   pick one blessed struct to have the top level fields when the rest of your file is a namespace which looks odd. 
@@ -40,6 +38,14 @@
 - backend needs signeture type checking when targetting wasm. it's better i give you the error and show you the mistake in your ir
   instead of getting something unintelligible from the verifier. 
 - extend the cross repro tests to all the example programs. not just the compiler. maybe just add a file with hashes of binaries to the released artifact. 
+- import_bytes("@/examples/import_wuffs/base.wuffs") that works like import() in that it invalidates the cache if the file changes 
+  but instead of giving you a ScopeId just give you the bytes. 
+- I need to improve @enum for bit flags so i can use that in posix.fr so it doesn't suck as much to call mmap. 
+- i think bake_relocatable_value always gets a jit shim which is a bit wasteful. 
+  happens because get_custom_bake_handler just calls vtable.get_jitted_ptr which 
+  is the same thing handed out to user code for builting vtables so it delays compiling hoping 
+  you wont actually try to call it (which is often the right choice, like for objc bindings, etc.). 
+- everywhere i ENABLE_ENABLE_TRACY is garbage. i need a better pattern for that. 
 
 ## remaining nondeterminism
 
@@ -124,9 +130,13 @@ bodies on different targets which i don't deal with well.
   (currently only used by import_wuffs which has a lot going on)
 - when including a .frc but also outputting a .frc, don't copy everything into the new file, 
   just have it as imported symbols that reference the old one. 
+- :BrokenCGeneric i think erroring on conflicting `_Generic` cases is correct but you're supposed to treat `long` and `long long`
+as different types even when they're the same size. 
 
 ### !! BROKEN !!
 
+- self compile in blink arm-linux on github actions seems to hang forever sometimes? 
+- still a mystery bug in amd-linux
 - wuffs/gif.c fails at random
 - there have been very rare failures in my lua tests for a while
 - soft_draw.fr crashes when you quit the program
@@ -209,16 +219,12 @@ TODO: end of loop. still too many options for 'index'
 - #log_ir should fire multiple times for functions with $const parameters (ie. native_isel)
 - shouldn't be able to typo a name as easily. like S :: import_module{enqueue :: enqueue_task}); then S.enqueue_task will get you the wrong one and be slow. 
 - why was the quicksort wrapper trying to be emitted for import_module (when not marked #fold)
-- fix my blink patch so it applies and i don't have to remember to type `/Users/luke/Downloads/franca_target2025_jun12/blink/o/blink/blink` 
-  every time i want it to not be super slow. 
 - get compilation order dependence under control!!
 - fix callgraph sorting to improve inlining. like make sure the ge/le in lex_int/is_ascii_digit are inlined 
 - make AsmFunction get an inferred name
 - @bit_fields in incremental.fr don't work inline in the structs
 - use HashMap.get_or_insert more
 - #ir tries to ignore zero-sized params but not if they're first which is sad
-- :BrokenCGeneric i think erroring on conflicting `_Generic` cases is correct but you're supposed to treat `long` and `long long`
-as different types even when they're the same size. 
 - "need to be consistant about how to handle modules like this that don't actually compile anything"
 - fix examples/terminal.fr -jit so it doesn't freak out about nested compiler contexts because of the repl
   (get rid of EASY_GRAPHICS_IS_JITTING_HACK)
@@ -227,15 +233,10 @@ many of the things i use i don't need everything from so it could make you tell 
 delete the rest. thing to think about is that you want to union those between different projects that depend on 
 different subsets of the same resources. 
 - run tests in landlock so it's less scary to miscompile something that's doing random syscalls
-- remove from the language:
-  - make is_linking_libc() not foldable
 - document #weak: docs/(annotations.md, imports.md)
 - deal with `NOSYS`
-- apple has different c variadic abi. that's pretty unfortunate for my grand plans. 
-  it feels pretty invasive to have the backend compile two versions of anything variadic. 
 - make #log_asm work for the #asm replacement 
 - experiment with outputting even more info in .frc and an lsp that reads it back. 
-- zero parameter syscall
 
 // TODO: use this for stuff
 //fn source_location(arg: FatExpr) FatExpr #macro = 
@@ -273,6 +274,11 @@ hould just make them local constants in each file like they are here in riscv
 - fixup2.ssa: "this should work without the indirection, i just don't handle folding the offset into the constant correctly."
   i think that's fixed now. add a little test of that too
 - "this works here but not in it's original place under f()."
+- apple has different c variadic abi. that's pretty unfortunate for my grand plans. 
+  it feels pretty invasive to have the backend compile two versions of anything variadic. 
+  but most functions don't use varargs so those could be rega-ed once for linux+macos when compiling for all targets together. 
+- experiment with leb128 for indices in .frc modules. 
+need to be careful about the refs which have tags in the high bits so won't leb well directly. 
 
 ## backend symbols rework
 
@@ -334,6 +340,25 @@ hould just make them local constants in each file like they are here in riscv
 - (epicyles, geo): fmod
 - (graphics): cosf, sinf
 - dlsym, dlopen, dlclose
+
+## working and playing well with others
+
+- option to make import_c work with system headers instead of my builtin ones
+- output qbe text ir that it can parse so i can test my stuff without my backend implementation 
+  (doesn't help for comptime because qbe can't jit)
+- be a drop in replacement for qbe that harec can use. need to deal with the fact that i don't output text assembly. 
+  just provide a script that you can use as hare's assembler that dispatches to a real assembler if it's actually text? 
+  (needs to pass -force_static_builtin_memmove to qbe_frontend. tho maybe that should be the default). 
+- easy way to expose c api when it can't pass the environment pointer. 
+  sadly might have to reimplement thread locals. 
+- support fini/init sections in elf (and macho i think has a special load command for them)
+- generate c headers from .frc files
+- hare
+  - auto test
+  - fix 09-funcs so it gets as far as the assertion failing because i don't do init/fini.
+  - compile harec with import_c
+  - pass the library tests as well
+  - don't forget ASSUME_NO_ALIAS_ARGS might break things
 
 ## longevity
 
@@ -989,6 +1014,11 @@ StbTrueType :: include { C |
   http, hashing, random, zip, magic numbers for wasm/elf/dwarf/macho
 - should make it easy to build rust/zig projects from your driver program since they can generally cross compile well and have libraries you might want.
 - do i want to expose the idea of different libcs? musl vs glibc vs cosmo
+- eventually it would be nice to send codegen of large subgraphs to another thread, like when compiling 
+  import_c it would be better to do the whole thing at once instead of forcing each function to be jitted eagerly.
+  but even then you want the frontend thread to be able to progress on other functions while it waits. 
+  my previous attempt stalled on most functions (in wait_for_symbol)
+  so it was faster to move all codegen to the frontend thread so there was no context switching overhead. 
 
 // TODO: derive ne from eq so you can use != more often. 
 // TODO: better error message for *T vs **T, should say dereference not unsafe cast. 

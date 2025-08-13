@@ -39,7 +39,7 @@ EmitIr :: @struct(
     next_block_name := 0,
     last_line := -1,
     new_constants: *List(BakedVarId),
-    shared: *CodegenShared,
+    shared: *FrontendCodegen,
     // you wouldn't need this if sema tracked callees correctly,
     // but it's much easier to just fudge it with shims. 
     pending: *List(FuncId), 
@@ -58,7 +58,7 @@ ReturnTarget :: @struct(
 
 Placement :: @tagged(Assign: Qbe.Ref, Scalar, Blit: Qbe.Ref, NewMemory, Discard, ScalarTransient);
 
-fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, pending: *List(FuncId), export: bool) CRes(void) = {
+fn emit_ir(comp: CompCtx, shared: *FrontendCodegen, f: FuncId, when: ExecStyle, pending: *List(FuncId), export: bool) CRes(void) = {
     func := comp.get_function(f); 
 
     if when == .Aot {
@@ -153,10 +153,11 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, pe
                 // if it's from a FrcImport it won't already have a place in the comptime address space, 
                 // so we need to remember the jit_addr we made for it so it doesn't get rebaked (which 
                 // would be extra bad if the relocations haven't fired yet) 
-                if when == .Jit && !shared.threaded {
+                if when == .Jit {
                     for new_constants { id |
                         baked := comp.get_baked(id);
                         if baked.need_reify {
+                            @debug_assert(!shared.worker.threaded);
                             baked.need_reify = false;
                             c := comp.data.cast()[][];
                             sym := m.intern(comp.mangle_name(id));
@@ -228,7 +229,7 @@ ArgInfo :: @struct(r: Qbe.Ref, type: Type, name: ?Var, scalar: bool, k: Qbe.Cls,
 // note: mirrors compile_for_arg
 // appends par/parc instructions to f.start
 // zero sized types do not generate a par instruction but are added to zero_sized_vars instead. 
-fn emit_par_instructions(program: CompCtx, shared: *CodegenShared, arguments: *Pattern, arg_ty: Type, f: *Qbe.Fn, zero_sized_vars: ?*HashMap(VarId, IrVar)) []ArgInfo = {
+fn emit_par_instructions(program: CompCtx, shared: *FrontendCodegen, arguments: *Pattern, arg_ty: Type, f: *Qbe.Fn, zero_sized_vars: ?*HashMap(VarId, IrVar)) []ArgInfo = {
     count := arguments.bindings.len;
     args := ArgInfo.list(count, temp());
     reserve(f.start.ins&, count, temp());
@@ -1672,8 +1673,9 @@ fn get_aggregate(self: *EmitIr, ty: Type) Qbe.Ref #inline =
 
 // TODO: reuse types for different nominal types with the same repr?  -- new_type does this now. might not be worth it tho. 
 // if you fix this to set the name don't forget to update the hash in new_type
-fn get_aggregate(self: CompCtx, m: *CodegenShared, ty: Type) Qbe.Ref = {
+fn get_aggregate(self: CompCtx, m: *FrontendCodegen, ty: Type) Qbe.Ref = {
     info := self.get_info(ty);
+    // not get_or_insert because this is recursive
     ir_index := m.type_indices&.get(ty) || {
         type := self.get_type(ty);
         result := Qbe.Typ.zeroed();
@@ -1775,7 +1777,7 @@ fn get_aggregate(self: CompCtx, m: *CodegenShared, ty: Type) Qbe.Ref = {
 fn as_field(self: *EmitIr, ty: Type) Qbe.Field #inline = 
     as_field(self.program, self.shared, ty);
 
-fn as_field(self: CompCtx, m: *CodegenShared, ty: Type) Qbe.Field = {
+fn as_field(self: CompCtx, m: *FrontendCodegen, ty: Type) Qbe.Field = {
     ::if(Qbe.Field);
     type := self.get_type(ty);
     @match(type) {

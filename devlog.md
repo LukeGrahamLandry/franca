@@ -1,3 +1,51 @@
+
+## (Aug 13)
+
+trying to decide if i should steal qbe's gvn/gcm. 
+benchmark different backends on an old version of the compiler that could do llvm-ir and qbe-ir. 
+
+- commits used in tests: 
+  - old qbe: 9e36cbe4d8f8c9ff3d739ff9ead2a4a4988c0904
+  - new qbe: 120f316162879b6165deba77815cd4193fb2fb59
+  - old franca: 6ff69bc8de8226faeb8d2cd97619148cd664d25b
+- change QBE_PATH in default_driver, then build a compiler, then use that on first.fr because that prints more useful timing. 
+  - boot: `mkdir -p ./target/franca/aarch64-apple-darwin && ./boot/aarch64-apple-darwin/franca2 compiler/first.fr -replace-compiler -unsafe`
+  - `./target/franca/aarch64-apple-darwin/franca2 examples/default_driver.fr run compiler/other_main.fr -aot=qbe -unsafe`
+  - `./a.out compiler/first.fr -no-build -unsafe`
+- for using qbe_frontend.fr, the old build script doesn't deal with it outputting object files instead of text. so the hack is: 
+  - first do a compile with normal qbe 
+  - extra.s: snip out the #asm frunctions from the bottom of target/franca_qbe_temp.s, put them in a different file, add `.globl <name>` before each
+  - mine.o: `/Users/luke/Documents/mods/infered/target/q.out <tmp .ssa file path> -o mine.o -c`
+  - mine.out: `clang mine.o extra.s -o mine.out`
+- i added -O2 to CFLAGS of Makefile for all the qbes so for the codegen time measurements they get llvm's optimisation whereas mine doesn't. 
+- for llvm-O2, the build script doesn't give you an easy way so manually pass the temp ir file to clang. 
+
+| who | codegen time (ms) | binary size (bytes) | frontend time (ms) | 
+| ----------------|------|---------|------|
+| llvm -O2        | 6048 |  763304 |  694 |
+| llvm -Os        | 5000 |  664440 |  737 |
+| qbe_frontend.fr |  468 | 1057000 |  945 |
+| qbe new         |  932 | 2625736 | 2670 |
+| qbe old         |  905 | 2609256 | 2700 |
+| llvm -O0        | 1075 | 1561000 | 6853 |
+
+- in the table, codegen time is how long the backend took (to process the text file of ir). 
+  frontend time is how long the resulting binary took to generate ir for a new compiler as reported by first.fr. 
+- note also that real qbe outputs assembly text not machine code like mine and llvm, 
+  so you so you have to run an assembler at the end too. which is an extra 4588ms for the 9426735 byte .s file 
+  with `Homebrew clang version 19.1.7 Target: arm64-apple-darwin24.4.0`. 
+- i wonder if qbe is unfairly punished by not having inlining. 
+  i tried to use shared/2024-09-03-gcm9-ifconv-inlinev2 (c7dd98a51855e7d9c1d746dc2585134dec76ea3b) 
+  but it doesn't work (doesn't handle RType in newinlref, fixed that and then assertion failed file reassoc.c, line 89). 
+  don't care that much so we'll never know. 
+- so like idk that experiment sure makes mine look fucking amazing, im not entirely sure how i could be cheating. 
+  but doing all the steps manually like this is not super reproducible. 
+  so maybe i should automatically test them to make sure i don't regress / check if they add anything i should steal. 
+
+---
+
+- removed dead sync code in wait_for_symbol since comptime_codegen is single threaded
+
 ## (Aug 12)
 
 - meta/qbe_frontend.fr support replacing qbe for hare

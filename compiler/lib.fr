@@ -15,7 +15,6 @@
 #include_std("compiler/v2/ast_boring.fr");
 #use("@/compiler/ast_external.fr");  
 #include_std("compiler/emit_ir.fr");  
-#use("@/compiler/worker.fr");
 #include_std("compiler/jit.fr");
 Incr :: import("@/compiler/incremental.fr");
 
@@ -53,7 +52,7 @@ SelfHosted :: @rec @struct(
     vtable: *ImportVTable,
     stack_base: i64,
     comptime_libraries: HashMap(Symbol, Dyn.Handle),
-    comptime_codegen: *CodegenShared,
+    comptime_codegen: *FrontendCodegen,
     dyncalls: HashMap(FnType, DynCallShim),
     call_depth := 0,
     shim_callback_alloc: ArenaAlloc,
@@ -73,6 +72,7 @@ SelfHosted :: @rec @struct(
         macro_calls: i64;
         spec_const_fn: i64;
         dyn_call: i64;
+        shim_calls: i64;
     },
 );
 
@@ -222,7 +222,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
                 // this means the callee program can use apple_thread_jit_write_protect if it wants. 
             ));
             self.other_module&.push(m, self.get_alloc());
-            shared: *CodegenShared = backend'worker_start(m, self.get_alloc(), @as(CodegenWorker) codegen_thread_main, true);
+            shared := init_codegen(m, self.get_alloc(), true);
             shared
         });
         m := shared.m;
@@ -393,7 +393,7 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
         stack_base = i64.int_from_ptr(stack_base&),
         comptime_libraries = init(a),
         vtable = init_driver_vtable(),
-        comptime_codegen = backend'worker_start(m, a, @as(CodegenWorker) codegen_thread_main, false),
+        comptime_codegen = init_codegen(m, a, false),
         dyncalls = init(a),
         shim_callback_alloc = init(page_allocator, 1.shift_left(14)),
         where_memo = init(a),
@@ -448,6 +448,238 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
     self
 }
 
+FrontendCodegen :: @struct {
+    worker: *CodegenShared;
+    m: *QbeModule;
+    type_indices: HashMap(Type, i64);
+    // index is BakedVarId
+    constants_used: import("@/lib/collections/bit_set.fr").DynamicBitSet;
+    frc_imports: RawList(import("@/compiler/incremental.fr").FrcModuleInstance);
+};
+
+
+fn init_codegen(m: *Qbe.Module, a: Alloc, threaded: bool) *FrontendCodegen = {
+    // TODO: backend'worker_thread
+    worker := backend'worker_start(m, a, @as(CodegenWorker) codegen_thread_main, threaded);
+    self := a.box(FrontendCodegen);
+    self[] = (
+        worker = worker,
+        m = m,
+        constants_used = empty(a),
+        type_indices = init(a),
+        frc_imports = init(a, 64),  // TODO: don't have a fixed size. need to use BucketArray or something tho
+    );
+    self
+}
+
+MainThreadPump :: @struct {
+    comp: CompCtx;
+    funcs_done: DynamicBitSet;
+    funcs_seen: DynamicBitSet;
+    work_stack: List(FuncId);
+    pending: List(FuncId);
+    enable_tracy: bool = @if(ENABLE_ENABLE_TRACY, ENABLE_TRACY, false);
+};
+
+// this will always emit everything callees reachable from `fns` (so no jit-shims will remain at the end). 
+// so it's suitable for AOT compilation, but you can still use it for JIT if you want. 
+// since there will be no shims, it's safe to use this when you want to set comptime=null 
+// before calling the function (like for drivers in `run_franca_file`). 
+fn main_thread_pump(comp: CompCtx, shared: *FrontendCodegen, fns: []FuncId, wrap_main: bool) DynamicBitSet = {
+    a      := comp.get_alloc();
+    env    := comp.get_comptime_env();
+    opts   := comp.get_build_options();
+    
+    ::enum(@type shared.m.goal.type);
+    when := @if(shared.m.goal.type == .JitOnly, ExecStyle.Jit, .Aot);
+    // TODO: really you want to mark them export
+    for fns { f |
+        id := shared.m.intern(comp.fmt_fn_name(f));
+        use_symbol(shared.m, id) { s |
+            s.referenced = true;
+        };
+        // TODO
+        //comp.get_function(f).set_flag(.Export);
+    };
+    
+    self: MainThreadPump = (funcs_done = empty(a), funcs_seen = empty(a), work_stack = list(a), pending = list(a), comp = comp);
+    // TODO: dynamiclib is kinda broken because i rely on OS being set by runtime_init
+    dynamiclib := shared.m.goal.type == .Dynamic;
+    wrap_main := wrap_main && when == .Aot && !dynamiclib;
+    if wrap_main {
+        rt_init := env.runtime_init.expect("declaration of franca_runtime_init (forgot to include lib/core.fr?)");
+        self.work_stack&.push(rt_init);
+    };
+    self.work_stack&.push_all(fns);
+    
+    while => self.work_stack.len != 0 {
+        continue :: local_return;
+        fid := self.work_stack[self.work_stack.len - 1];
+        fid_i: i64 = fid.to_index().zext();
+        if self.funcs_done&.get(fid_i) {
+            // might have been added multiple times
+            self.work_stack&.pop();
+            continue();
+        };
+        
+        first_time := !self.funcs_seen&.get_set(fid_i);
+        comp'vtable'report_aot_progress(comp.data, fid, true, 1 /*AotPump*/);
+        func := comp.get_function(fid);
+        // Note: compile before checking callees!
+        xx := comp'vtable'compile_func(comp.data, fid, .Aot);
+        or xx { err | 
+            @println("failed compile %", comp.get_string(func.name));
+            comp.report_error(err)
+        };  // TODO: return error instead
+        if self&.push_callees(func.callees&.items(), first_time) {
+            // no pop
+            continue();
+        };
+        
+        xx := emit_ir(comp, shared, fid, when, self.pending&, false);
+        or xx { err | 
+            comp.report_error(err);
+        };
+        
+        comp'vtable'report_aot_progress(comp.data, fid, false, 1 /*AotPump*/);
+        current := self.work_stack&.pop().unwrap();
+        @debug_assert_eq(current, fid, "order messed up");
+        self&.add_work(self.pending&.items());  // HACK
+        self.pending&.clear();
+        self.funcs_done&.set(fid_i);
+        self&.add_work(func.mutual_callees&.items());
+    };
+    
+    @if(wrap_main) wrap_with_runtime_init(comp, shared.worker, fns[0]);
+    
+    @if(dynamiclib) for fns { f |
+        emit_export_wrapper(comp, shared.worker, f);
+    };
+    
+    shared.join_codegen_thread();
+    self.funcs_done
+};
+
+fn join_codegen_thread(it: *FrontendCodegen) void = 
+    it.worker.join_codegen_thread();
+
+fn enter_task(it: *FrontendCodegen, $body: @Fn(it: *CodegenEntry) void) void = 
+    it.worker.enter_task(body);
+
+// sort the functions to make sure we can inline calls to intrinsics
+fn push_callees(self: *MainThreadPump, callees: []FuncId, first_time: bool) bool #once = {
+    not_done_count := 0;
+    for callees { f |
+        continue :: local_return;
+        if self.funcs_done&.get(f.to_index().zext()) {
+            continue();
+        };
+        i := self.work_stack.items().index_of(f&) || {
+            // fresh callee, always do it before the caller (to give it a chance to be inlined)
+            self.work_stack&.push(f);
+            not_done_count += 1;
+            continue();
+        };
+        
+        if self.enable_tracy {
+            // TODO: it's super not ok to disable this when using tracy 
+            //       (it will cause miscompilation of small programs)
+            //       but otherwise the stack of zones gets messed up and you don't see anything
+            continue();
+        };
+        
+        // :CompileIntrinsicsFirst
+        if !first_time && !self.comp.get_function(f).get_flag(.Intrinsic) {
+            continue();
+        };
+        
+        // another function has had the same callee before, still pull it forward, we want to let both inline it. 
+        // only do this the first time processing the caller to avoid cycles (for mutual recursion). 
+        self.work_stack&.unordered_remove(i);
+        self.work_stack&.push(f);
+        not_done_count += 1;
+    };
+    not_done_count > 0 
+}
+
+fn add_work(self: *MainThreadPump, new: []FuncId) void = {
+    for new { c |
+        done := self.funcs_done&.get(c.to_index().zext());
+        // when using tracy, it's not ok to reorder the work stack because it messes up the profile zones. 
+        safe_order := !self.enable_tracy || !self.work_stack.items().contains(c&);
+        if !done && safe_order {
+            self.work_stack&.push(c);
+        };
+    };
+}
+
+fn emit_export_wrapper(comp: CompCtx, shared: *CodegenShared, f: FuncId) void = {
+    enter_task shared { entry |
+        func := comp.get_function(f);
+        real_name := comp.get_string(func.name);
+        lnk := temp().box(Qbe.Lnk);
+        lnk.id = shared.m.intern(real_name);
+        lnk.export = true;
+        entry.task = (Bounce = (lnk = lnk, target = shared.m.intern(comp.fmt_fn_name(f))));
+    };
+}
+
+// On macos, we want to save the arguments to the exe entry point. 
+// On linux, franca_runtime_init does some extra stuff to grab them from the stack. 
+fn wrap_with_runtime_init(comp: CompCtx, shared: *CodegenShared, user_main: FuncId) void = {
+    env := comp.get_comptime_env();
+    runtime_init := env.runtime_init.expect("declaration of franca_runtime_init (forgot to include lib/core.fr?)");
+    enter_task shared { entry |
+        f := temp().box(Qbe.Fn);
+        f.default_init(shared.m);
+        f.lnk.export = true;
+        f.lnk.id = shared.m.intern("main");  // macho/emit looks for this specifically
+        name := comp.fmt_fn_name(user_main);
+        f.start = newblk();
+        f.nblk = 1;
+        argc := f.newtmp("argc", .Kl);
+        argv := f.newtmp("argv", .Kl);
+        envp := f.newtmp("envp", .Kl);
+        sp := f.newtmp("sp", .Kl);
+        // IMPORTANT: you can't use f.emit because threads. 
+        b := f.start;
+        push(b, .par, .Kl, argc, QbeNull, QbeNull);
+        push(b, .par, .Kl, argv, QbeNull, QbeNull);
+        push(b, .par, .Kl, envp, QbeNull, QbeNull);
+        push(b, .alloc4, .Kl, sp, f.getcon(48), QbeNull);
+        runtime_init := f.symcon(comp.fmt_fn_name(runtime_init));
+        push(b, .arg, .Kl, QbeNull, argc, QbeNull);
+        push(b, .arg, .Kl, QbeNull, argv, QbeNull);
+        push(b, .arg, .Kl, QbeNull, f.symcon(name), QbeNull);
+        push(b, .arg, .Kl, QbeNull, envp, QbeNull);
+        push(b, .arg, .Kl, QbeNull, sp, QbeNull);
+        push(b, .call, .Kw, QbeNull, runtime_init, QbeNull);
+        f.start.jmp.type = .ret0;
+        entry.task = (Func = f);
+    };
+}
+
+fn get_log_types(comp: CompCtx, fid: FuncId) Str = {
+    #use("@/compiler/ast_external.fr");
+    func := comp.get_function(fid);
+    if(!func.get_flag(.LogIr), => return(""));
+    each func.annotations& { n | 
+        if n.name == Flag.log_ir.ident() {
+            if n.non_void_arg() { arg |
+                return(@match(arg.expr&) {
+                    fn String(arg) => comp.get_string(arg[]);
+                    @default => {
+                        @eprintln("TODO: non string literal #log_ir arg for %", comp.get_string(func.name));
+                        "P"
+                    };
+                });
+            };
+            return("P");
+        };
+    };
+    panic("ICE: #log_ir was set but did not find tag on the function")
+}
+
 fn get_function(self: *SelfHosted, fid: FuncId) *Func #inline = {
     self.functions&.nested_index(fid.to_index().zext())
 }
@@ -497,3 +729,4 @@ fn clone(self: *SelfHosted, e: *Pattern) Pattern = {
 ::DeriveFmt(BakedEntry);
 ::DeriveFmt(BakedVarId);
 ::display_slice(BakedEntry);
+

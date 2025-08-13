@@ -38,40 +38,14 @@ fn call_dynamic_values(self: *SelfHosted, f_ptr: i64, f_ty: FnType, args_value: 
 
 Futex :: import("@/lib/sys/sync/futex.fr");
 
-fn wait_for_symbol(shared: *CodegenShared, id: Qbe.Sym) rawptr = {
-    symbol_is_ready :: fn(shared: *CodegenShared, s: Qbe.Sym) bool #inline = {
-        r := false;
-        use_symbol(shared.m, s) { s |
-            ::enum(@type s.kind);
-            r = s.size != 0 || (s.kind != .Local && !s.jit_addr.is_null());
-        };
-        r
-    };
-    
-    // TODO: it would be nice if this was unreachable now that comptime_codegen is always single threaded?
-    @if(shared.threaded)
-    if !symbol_is_ready(shared, id) {
-        zone := zone_begin(.Wait);
-        
-        u32.atomic_set(shared.waiting_for_symbol&, 1);
-        prev := shared.waiting_for_kiki_futex;
-        while => prev != 0 && !symbol_is_ready(shared, id) {
-            Futex'wait(shared.waiting_for_kiki_futex&, prev);
-            prev = shared.waiting_for_kiki_futex;
-        };
-        u32.atomic_set(shared.waiting_for_symbol&, 0);
-    
-        zone_end(zone);
-        lock(shared.m.icache_mutex&);
-    };
-    
+// might be a jit-shim. returns null if neither is ready (only reachable in )
+fn wait_for_symbol(shared: *FrontendCodegen, id: Qbe.Sym) rawptr = {
+    // only used for comptime_codegen (which is single threaded currently) so never need to synchronize.
+    @debug_assert(!shared.worker.threaded);
     c := rawptr.zeroed();
+    // this is not the same thing as backend/emit.fr/get_addr() (it calculates from s.offset) TODO: they should probably be unified. 
     use_symbol(shared.m, id) { symbol | 
-        c = symbol.jit_addr;
-    };
-    @if(shared.threaded) {
-        shared.m.bump_dirty_new();
-        unlock(shared.m.icache_mutex&);
+        c = symbol.jit_addr;  
     };
     c
 }
@@ -173,7 +147,7 @@ fn create_dyncall_shim(self: *SelfHosted, f_ty: FnType) DynCallShim = {
 //       - i save the registers used only on the slow path at entry of the function. 
 //       - it loads from the got twice on the fast path because i don't deduplicate RCon across blocks.
 //       - redundant copies of aggregates. 
-fn create_jit_shim(self: CompCtx, shared: *CodegenShared, fid: FuncId, handler_callee_address: rawptr) void = {
+fn create_jit_shim(self: CompCtx, shared: *FrontendCodegen, fid: FuncId, handler_callee_address: rawptr) void = {
     func := self.get_function(fid);
     
     m := shared.m;
@@ -276,7 +250,8 @@ fn create_jit_shim(self: CompCtx, shared: *CodegenShared, fid: FuncId, handler_c
         do_the_call.link = not_ready;
     };
     
-    if !shared.threaded && func.get_flag(.TookPointerValue) {
+    @debug_assert(!shared.worker.threaded);
+    if func.get_flag(.TookPointerValue) {
         self.data.cast()[][].created_jit_fn_ptr_value(fid, shared.wait_for_symbol(id).int_from_rawptr());
     };
 }
@@ -304,7 +279,8 @@ fn shallow_jit_func(self: *SelfHosted, fid: FuncId) Res(void) = {
     @try(emit_ir(self.comp(), self.comptime_codegen, fid, .Jit, pending&, true)) return;
     
     shared := self.comptime_codegen;
-    if !shared.threaded && func.get_flag(.TookPointerValue) {
+    @debug_assert(!shared.worker.threaded);
+    if func.get_flag(.TookPointerValue) {
         id := self.comptime_jit_symbol_id(fid);
         self.created_jit_fn_ptr_value(fid, shared.wait_for_symbol(id).int_from_rawptr());
     };
@@ -365,6 +341,7 @@ report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHo
         };
         c.thread_index = self.main_thread_index; // HACK this is not ok if the comptime code has multiple threads
         @debug_assert(!self.debug_deny_jit_shim_calls);
+        self.stats.shim_calls += 1;
         
         m := self.comptime_codegen.m;
         // important: have to be careful about which comptime is in the context if the driver program gets compiled lazily. 
@@ -376,6 +353,8 @@ report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHo
             // TODO: this probably needs to be inside the push_context because it might hit an inner poll_in_place,
             //       but that's sad because most of the time its just an array lookup.  -- Nov 25
             if self.get_fn_callable(fid) { addr | 
+                // the shim itself checks that the address in GOT matches the shim address before calling into the compiler. 
+                // so replacing it with the real address now makes future calls faster (even if they go through the old function pointer). 
                 save_in_got(self, fid, addr);
                 result = addr;
             };
@@ -383,7 +362,7 @@ report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHo
         
         if result.is_null() {
             mark := mark_temporary_storage();
-            @debug_assert(!self.comptime_codegen.no_more_functions, "no_more_functions is set so there is no worker waiting for us!");
+            @debug_assert(!self.comptime_codegen.worker.no_more_functions);
             // :ugly
             first := true;
             addr := self.poll_in_place(rawptr) { () Maybe(rawptr) |
@@ -415,7 +394,7 @@ report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHo
     result
 };
 
-// If you're about to actually call the pointer, we need to mark the memory as executable.
+// currently i rely on W+X memory so this function doesn't need to change permissions. 
 fn get_fn_callable(self: *SelfHosted, fid: FuncId) ?rawptr = {
     m := self.comptime_codegen.m;
     func := self.get_function(fid);

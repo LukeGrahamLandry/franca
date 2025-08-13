@@ -8,6 +8,7 @@ and some things are dumb enough that I should defend myself.
 - aggregates: more complicated types like structs, enums, slices, etc. 
 - generics: how to write functions that work for arbitrary types
 - compilation: high level overview of the franca compilation model
+- aot_bake: how to make ahead-of-time executables and what data is included 
 - annotations: how to attach metadata to franca programs and query it from comptime code
 - comptime: example usecases for full compile time execution
 - caching: details about `.frc` files
