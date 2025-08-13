@@ -392,12 +392,8 @@ for_dynamic_loader :: fn(
     dynamics&.push(tag = .RelAEnt, val = size_of(Elf.RelA));
     
     if m.goal.exe_debug_symbol_table {
-        symbols := temp().alloc(*SymbolInfo, m.local_needs_reloc.len);
-        i := 0;
-        for m.local_needs_reloc& { id |
-            s := m.get_symbol_info(id);
-            symbols[i] = s; i += 1;
-        };
+        symbols := temp().alloc_init(*SymbolInfo, m.local_needs_reloc.len, 
+            fn(i) => m.get_symbol_info(m.local_needs_reloc[i]));
         table := e.create_symbol_table(symbols, .SymbolTable, empty(), base, true);
     };
     
@@ -713,7 +709,7 @@ emit_linker_relocations :: fn(e: *EmitElf, base: PayloadBase) void = {
     m := e.m;
     cases: EnumMap(SegmentType, List(FixP)) = init(list(temp()));
     // TODO: just pass around lists of Sym instead of *SymbolInfo, fix in collect_aot_fixups and machO as well
-    symbols := temp().alloc(*SymbolInfo, m.local_needs_reloc.len + m.imports.len);
+    symbols := temp().alloc_uninit(*SymbolInfo, m.local_needs_reloc.len + m.imports.len);
     
     i := 0;
     collect :: fn(ids) => for ids { id |
@@ -729,6 +725,7 @@ emit_linker_relocations :: fn(e: *EmitElf, base: PayloadBase) void = {
     collect(m.local_needs_reloc&);
     partition_unordered(*SymbolInfo, symbols.slice(0, i), fn(it) => !it.export);  // :SLOW
     collect(m.imports&);
+    @debug_assert_eq(symbols.len, i);
    
     table := e.create_symbol_table(symbols, .SymbolTable, empty(), base, false);
     each cases& { seg, fixups | 

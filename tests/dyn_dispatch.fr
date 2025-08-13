@@ -122,32 +122,30 @@ fn dyn_fmt_t() #test = {
         fr := current_compiler_context();
         // Need this extra fucking around because $const args are deduplicated shallowly
         types := import("@/compiler/ast_external.fr")'arg_types(fr, types);
-        shows := ast_alloc().alloc(Show, types.len);
-        
-        range(0, types.len) { i |
+        shows := ast_alloc().alloc_init(Show, types.len) { i |
             fid := resolve_overload(display, Ty(types[i], *List(u8)), void, zeroed Span);
             fptr := {fr.vtable.get_jitted_ptr}(fr.data, fid);
             if !fptr&.is_ok() {
                 fr.report_error(fptr.Err);
             }
             fptr := fptr.Ok;
-            shows[i] = bit_cast_unchecked(rawptr, Show, fptr);
+            bit_cast_unchecked(rawptr, Show, fptr)
         };
         shows
     };
     
     dyn_fmt_impl :: fn(writer: FatExpr, args: []FatExpr, s: Str, loc: Span) FatExpr = {
         ::[]Show;
-        types := ast_alloc().alloc(Type, args.len);  // should be temp()?
+        types := ast_alloc().alloc_uninit(Type, args.len);  // should be temp()?
         result := @{
             data: Array(rawptr, @[@literal args.len]) = @[{
-                actions := ast_alloc().alloc(FatExpr, args.len);
-                enumerate args { i, a |
+                actions := ast_alloc().alloc_init(FatExpr, args.len) { i |
+                    a := args.index(i);
                     e, ty := erase_type(a[]);
                     types[i] = ty;
                     // this is wasteful but means you get the error in the right place
                     _ := resolve_overload(display, Ty(ty, *List(u8)), void, a.loc);
-                    actions[i] = e;
+                    e
                 };
                 e: FatExpr = (expr = (Tuple = actions.as_raw_list()), loc = loc, ty = UnknownType, done = false);
                 e

@@ -636,7 +636,7 @@ import_baked_var :: fn(self: *SelfHosted, shared: *FrontendCodegen, inst: *FrcMo
         (Zeroes = it.dat.bytes.count.zext()),
         (Bytes = h.get(it.dat.bytes)),
     );
-    relocs := self.get_alloc().alloc(BakedReloc, it.dat.rel.count.zext());
+    relocs := self.get_alloc().alloc_uninit(BakedReloc, it.dat.rel.count.zext());
     r := 0; 
     for(h, it.dat.rel) { i, it |
         target := zeroed(@type relocs[r].target);
@@ -650,6 +650,7 @@ import_baked_var :: fn(self: *SelfHosted, shared: *FrontendCodegen, inst: *FrcMo
         relocs[r] = (target = target, off = it.off, addend = it.addend);
         r += 1;
     };
+    @debug_assert_eq(relocs.len, r);
     loc := zeroed Span; // TODO
     // TODO: align
     // TODO: transfer .name if it's not mangled
@@ -678,7 +679,7 @@ fn find_module(self: *SelfHosted, shared: *FrontendCodegen, module: *FrcModule) 
     (Ok = xx || {
         @assert_ne(shared.frc_imports.cap, shared.frc_imports.len, "ICE: too many imported modules. TODO: use something with pointer stability");
         h := module.header;
-        syms := a.alloc(Qbe.Sym, zext h.sym.count);
+        syms := a.alloc_uninit(Qbe.Sym, zext h.sym.count);
         imp.push_assume_capacity(
             module = module,
             syms = syms,
@@ -719,9 +720,9 @@ fn find_module(self: *SelfHosted, shared: *FrontendCodegen, module: *FrcModule) 
                     lnk.id = id;
                     entry.task = (JitImport = (lnk = lnk, addr = rawptr_from_int(info.comptime)));
                 } else {
-                    arg := temp().alloc(Ty(@slice(Qbe.Sym, Str, bool)), 1);
-                    arg[0] = (id, self.pool.get(info.lib), info.weak);
-                    entry.task = (SetLibrary = arg);
+                    arg := temp().boxed(Ty(@slice(Qbe.Sym, Str, bool)), 
+                        (id, self.pool.get(info.lib), info.weak));
+                    entry.task = (SetLibrary = arg.slice(1));
                 }
             };
         };

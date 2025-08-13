@@ -45,6 +45,9 @@ benchmark different backends on an old version of the compiler that could do llv
 ---
 
 - removed dead sync code in wait_for_symbol since comptime_codegen is single threaded
+- split worker.fr into the backend part and the frontend part so other programs using the backend don't have to awkwardly import something from the compiler. 
+- quest for the bug
+- rename alloc() to alloc_uninit so the more dangerous one doesn't have a nicer name. tedious! 
 
 ## (Aug 12)
 

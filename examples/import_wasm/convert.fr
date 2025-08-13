@@ -46,7 +46,7 @@ fn collect_exports(self: *LoadWasm, a: Alloc) []Qbe.Sym = {
         ::enum(@type it.type);
         count += int(it.type == .Func);
     };
-    e := a.alloc(Qbe.Sym, count);
+    e := a.alloc_uninit(Qbe.Sym, count);
     i := 0;
     each self.w.exports& { it |
         if it.type == .Func {
@@ -54,6 +54,7 @@ fn collect_exports(self: *LoadWasm, a: Alloc) []Qbe.Sym = {
             i += 1;
         };
     };
+    @debug_assert_eq(e.len, i);
     e
 }
 
@@ -176,7 +177,7 @@ fn translate_func(self: *LoadWasm, local_func_i: i64, f: *Qbe.Fn) void = {
     type_index := self.function_types[global_func_i];
     
     signature := self.w.types[type_index.id.zext()]&;
-    self.locals = temp().alloc(Qbe.Ref, code.total_local_count + signature.arg.len);
+    self.locals = temp().alloc_uninit(Qbe.Ref, code.total_local_count + signature.arg.len);
     self.blocks = list(temp());
     self.stack = list(temp());
     self.base_pointer = self.f.newtmp("wasm_globals", .Kl);
@@ -202,6 +203,7 @@ fn translate_func(self: *LoadWasm, local_func_i: i64, f: *Qbe.Fn) void = {
                 i += 1;
             };
         };
+        @debug_assert_eq(self.locals.len, i);
     };
     
     self.src = code.insts.items();
@@ -222,8 +224,8 @@ fn translate_func(self: *LoadWasm, local_func_i: i64, f: *Qbe.Fn) void = {
 fn create_globals(self: *LoadWasm) void = {
     a := self.alloc;
     count := self.w.functions.len + self.w.imported_function_count;
-    self.functions = a.alloc(Qbe.Sym, count); // :Leak
-    self.function_types = a.alloc(Wasm.TypeIdx, count);
+    self.functions = a.alloc_uninit(Qbe.Sym, count); // :Leak
+    self.function_types = a.alloc_uninit(Wasm.TypeIdx, count);
     f_i := 0;
     each self.w.imports& { import |
         @if_let(import.desc&) fn Function(id) => {
@@ -238,6 +240,7 @@ fn create_globals(self: *LoadWasm) void = {
         self.function_types[f_i] = self.w.functions[i];
         f_i += 1;
     };
+    @debug_assert_eq(count, f_i);    
     
     // actually, if it's an export it's nicer to use the real names. TODO: same thing for globals
     each self.w.exports& { it |
@@ -247,8 +250,8 @@ fn create_globals(self: *LoadWasm) void = {
         };
     };
     
-    self.global_names = a.alloc(Qbe.Sym, self.w.globals.len); // :Leak
-    self.global_cls = a.alloc(Qbe.Cls, self.w.globals.len); // :Leak
+    self.global_names = a.alloc_uninit(Qbe.Sym, self.w.globals.len); // :Leak
+    self.global_cls = a.alloc_uninit(Qbe.Cls, self.w.globals.len); // :Leak
     enumerate self.w.globals& { local_global_i, global | 
         // TODO: offset the index by number of imported globals
         id := self.m.intern(@tfmt("G%$%", local_global_i, self.module_name));
@@ -263,13 +266,13 @@ fn create_globals(self: *LoadWasm) void = {
         );
     };
     
-    self.tables = a.alloc(Qbe.Sym, self.w.tables.len); // :Leak
-    enumerate self.w.tables { table_i, table | 
+    // :Leak
+    self.tables = a.alloc_init(Qbe.Sym, self.w.tables.len) { table_i | 
+        table := self.w.tables.index(table_i);
         name := @tfmt("T%$%", table_i, self.module_name);
         table_pointer := self.m.intern(name);
         table_initial := self.m.intern(@tfmt("init__%", name));
         
-        self.tables[table_i] = table_pointer;
         ::enum(@type table.type);
         @assert(table.type == .FuncRef, "TODO: non-func tables");
         
@@ -282,9 +285,9 @@ fn create_globals(self: *LoadWasm) void = {
                 off, k := const_eval_wasm_expr(elem.active_offset_expr.items());
                 @assert_eq(off, 0, "TODO: init table offset non-zero");
                 @assert_ge(elem.funcs.len, table.limits.min.zext(), "TODO: init table < table.min");
-                r := temp().alloc(Dat2.Reloc, elem.funcs.len);
-                enumerate elem.funcs { i, f_id | 
-                    r[i] = (off = trunc(off + i * size_of(rawptr)), id = self.functions[f_id.id.zext()]);
+                r := temp().alloc_init(Dat2.Reloc, elem.funcs.len) { i |
+                    f_id := elem.funcs[i];
+                    (off = trunc(off + i * size_of(rawptr)), id = self.functions[f_id.id.zext()])
                 };
                 self.m.emit_data(
                     id = table_initial, 
@@ -301,7 +304,10 @@ fn create_globals(self: *LoadWasm) void = {
             template = (Zeroes = size_of(rawptr)), 
             relocations = @slice(@as(Dat2.Reloc) (off = 0, id = table_initial)),
         );
+        
+        table_pointer
     };
+    
 }   
 
 BlockEntry :: @struct(continue: *Qbe.Blk, break: *Qbe.Blk, current: *Qbe.Blk, loop: bool);

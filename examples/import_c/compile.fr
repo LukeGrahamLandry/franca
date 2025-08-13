@@ -397,10 +397,8 @@ fn new_initializer(ty: *CType, is_flexible: bool) *Initializer = {
             return(init);
         };
 
-        init.children = temp().alloc(*Initializer, ty.array_len.intcast());
-        each init.children { it |
-            it[] = new_initializer(ty.base, false);
-        };
+        init.children = temp().alloc_init(*Initializer, ty.array_len.intcast(), 
+            fn(_) => new_initializer(ty.base, false));
     };
 
     if ty.kind == .TY_STRUCT || ty.kind == .TY_UNION {
@@ -409,7 +407,7 @@ fn new_initializer(ty: *CType, is_flexible: bool) *Initializer = {
         for_linked ty.members { mem |
             len += 1;
         };
-        init.children = temp().alloc(*Initializer, len);
+        init.children = temp().alloc_uninit(*Initializer, len);
 
         for_linked ty.members { mem |
             ::if(*Initializer);
@@ -1260,7 +1258,7 @@ fn index(self: *Initializer, i: i64) **Initializer = {
     
     // TODO: use RawList :SLOW
     @debug_assert(self.ty.kind == .TY_ARRAY && self.is_flexible, "expected flex array");
-    new := temp().alloc(*Initializer, i + 1);
+    new := temp().alloc_uninit(*Initializer, i + 1);
     new.slice(0, self.children.len).copy_from(self.children);
     each new.rest(self.children.len) { it |
         it[] = new_initializer(self.ty.base, false);
@@ -3613,10 +3611,9 @@ fn gen_par(c: *Ctx, ty: *CType) void = {
         // TODO: this is probably at the wrong place now since we alias types?
         @error_tok(c, ty.params[ty.param_names.len].name_pos, "parameter name omitted")
     }
-    obj_params := temp().alloc(*Obj, ty.params.len);
-    range(0, ty.params.len) { i |
-        obj_params[i] = c.new_lvar(c.get_ident(ty.param_names[i]), ty.params[i]);
-    }
+    obj_params := temp().alloc_init(*Obj, ty.params.len) { i |
+        c.new_lvar(c.get_ident(ty.param_names[i]), ty.params[i])
+    };
     
     f := c.f; 
     f.start = c.new_block();

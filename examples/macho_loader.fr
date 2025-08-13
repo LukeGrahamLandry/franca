@@ -34,7 +34,7 @@ fn main() void = {
     header := bytes&.pop_type(MachoHeader);
     @assert_eq(header.magic, macho_magic, "bad magic! expected a 64-bit arm mach-o executable.");
     virtual_size := count_virtual_size(full_bytes);
-    virtual := page_allocator.alloc(u8, virtual_size.to_signed());
+    virtual := page_allocator.alloc_uninit(u8, virtual_size.to_signed());
     first_interesting := find_first_interesting(full_bytes);
     load_sections(full_bytes, virtual);
     apply_fixups(full_bytes, virtual, first_interesting);
@@ -169,14 +169,13 @@ fn collect_imports(full_bytes: []u8, fixups_header_data: []u8) []rawptr #use("@/
     @assert(header.imports_count == 0 || header.imports_format == 1, "TODO: handle compressed imports");
     @assert(header.symbols_format == 0, "TODO: handle compressed symbols");
     
-    list_of_function_pointers := general_allocator().alloc(rawptr, header.imports_count.zext());
     
     // TODO: don't just assume we want /usr/lib/libSystem.B.dylib
     libc_path := as_cstr macos_dylib_paths[0];
     libc := dlopen(libc_path, .Lazy);
     @assert(!libc.lib.is_null(), "failed to find libc. TODO: don't assume you want this but you normally do.");
     
-    range(0, header.imports_count.zext()) { i |
+    list_of_function_pointers := general_allocator().alloc_init(rawptr, header.imports_count.zext()) { i |
         import := imports_data&.pop_type(ChainedImport)[];
         n: CStr = (ptr = symbols_data.ptr.offset(get(import, .name_offset)));
         name := n.str();
@@ -188,7 +187,7 @@ fn collect_imports(full_bytes: []u8, fixups_header_data: []u8) []rawptr #use("@/
         addr := libc.dlsym(n);
         @fmt(OUTPUT, ">>> import '%' from libc: %\n", n, addr);
         @assert(import.get(.weak) != 0 || !addr.is_null(), "Couldn't find % in libc (TODO: allow non-libc imports).", n);
-        list_of_function_pointers[i] = addr;
+        addr
     };
     list_of_function_pointers
 }
