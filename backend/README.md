@@ -47,7 +47,6 @@ You can still print out the ir as human readable text between passes and modify 
   - atomic compare-and-swap 
     - a bit useless because you need to insert your own fences
   - conditional select (ie. `a ? b : c`)
-  - walk the call-stack (ie. for printing crash backtraces)
 - Binary form of the ir that's faster to load than the text form (could be a building block for incremental compilation)
 - Insert raw asm bytes in function bodies with arbitrary input/output/clobber register lists.
   > currently very limited: you pick specific registers, do your own assembling, can't reference symbols.  

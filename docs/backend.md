@@ -82,7 +82,6 @@ Some operations require multi-instruction sequences to supply extra arguments.
 - there is no instruction for bitwise not. instead use xor with -1. 
 - min/max/sqrt are only implemented for floats
 - unary bit manipulation: byteswap, ctz (count trailing zeros), clz (count leading zeros), ones (count ones / popcnt)
-- some instructions are on thin ice: asm, assert, trace_start, trace_prev, trace_return. 
 - store b/h/w/l/s/d. 
   - a0 is the value, a1 is the destination address (note: BACKWARDS). no result. 
 - load works for any class. for smaller loads, there's an instruction corresponding to each extension instruction.

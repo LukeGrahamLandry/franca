@@ -48,6 +48,12 @@ benchmark different backends on an old version of the compiler that could do llv
 - split worker.fr into the backend part and the frontend part so other programs using the backend don't have to awkwardly import something from the compiler. 
 - quest for the bug
 - rename alloc() to alloc_uninit so the more dangerous one doesn't have a nicer name. tedious! 
+- make sure the lambas in `a || b` and `while => a {` get flagged as WasLambdaLiteral
+- got rid of O.assert. easy to bring it back if i actually want to use it for something. 
+- move trace_(start, prev, return) out of the backend to just be asm in the library. 
+  similar reasoning to syscalls: the infrastructure required to use them to print useful stack traces is so much 
+  that there's no point in providing the instruction when you can just do it yourself with barely any extra work. 
+  and the speed hit of not inlining trace_start which is you use exactly once when you're already crashing super doesn't matter. 
 
 ## (Aug 12)
 

@@ -519,7 +519,7 @@ run_qbe_passes_common :: fn(f: *Qbe.Fn) bool = {
     flush_debug(f.globals);
     when_debug_printfn(f, .Parsing, "\n## After parsing:\n");
      
-    replace_frontend_ops(f);
+    replace_switches(f);
     
     if fails_typecheck(f) { err | 
         printfn(f, f.globals.debug_out);
@@ -743,123 +743,6 @@ fn usecheck(r: Qbe.Ref, k: Qbe.Cls, f: *Qbe.Fn) bool = {
     rtype(r) == .RTmp || return(true);
     t := f.get_temporary(r);
     t.cls == k || (t.cls == .Kl && k == .Kw)
-}
-
-// 
-// Some operations are provided for frontend convenience but don't actually have a target dependent implementation. 
-// - J.switch -> jnz chain
-// - O.assert -> jnz+hlt
-//
-fn replace_frontend_ops(f: *Qbe.Fn) void = {
-    new_blocks_list := Qbe.Blk.ptr_from_int(0);
-    last_block := f.start;
-    changed := false;
-    switches := f.switches.slice(0, f.switch_count.zext());
-    fail_assertion: ?*Qbe.Blk = .None;
-    
-    xxx := 0;
-    for_blocks f { b | 
-        continue :: local_return;
-        last_block = b;
-        
-        { // O.assert
-            j := 0;
-            while => j < b.ins.len {
-                i := b.ins.index(j);
-                j += 1;
-                // TODO: explain more
-                // TODO: nothing uses this instruction rn
-                if i.op() == .assert {
-                    r := f.newtmp("front", .Kw);
-                    i[] = make_ins(.cnew, .Kw, r, i.arg&[0], QbeConZero);  // TODO: only looking at low 32 bits rn so it could just be jnz directly. but should really look at all 64. 
-                    fail := or fail_assertion { 
-                        b3 := add_block();
-                        b3.jmp.type = .hlt;
-                        fail_assertion = (Some = b3);
-                        b3
-                    };
-                    b2 := add_block();
-                    b2.s1 = b.s1; b2.s2 = b.s2; b2.jmp = b.jmp;
-                    len := b.ins.len - j;
-                    b2.ins = init(temp(), len);
-                    b2.ins.len = len;
-                    b2.ins.items().copy_from(b.ins.slice(j, b.ins.len));
-                    b.jmp = (type = .jnz, arg = r);
-                    b.s1 = b2; b.s2 = fail;
-                    b.ins.len = j;
-                    // this matters if the frontend uses phis 
-                    for_jump_targets b2 { s |
-                        for_phi s { p |  // paste from replacepreds
-                            replacepred(p.blk, p.narg.zext(), b2, b);
-                        };
-                    };
-                    b = b2;
-                    j = 0;
-                };
-            };
-        };
-        
-        if b.jmp.type != .switch {
-            continue();
-        };
-        @debug_assert_eq(rtype(b.jmp.arg), .RInt, "J.switch expected RInt index into Fn.switches");
-        payload := switches.index(b.jmp.arg.val());
-        @debug_assert(@is(rtype(payload.inspect), .RCon, .RTmp), "invalid inspect value for switch");
-        
-        if payload.case_count == 0 {
-            b.jmp = (type = .jmp, arg = QbeNull);
-            b.s1 = payload.default;
-            continue();
-        };
-        
-        set_s1 :: fn(old_src: *Qbe.Blk, new_src: *Qbe.Blk, dest: *Qbe.Blk) void => {
-            new_src.s1 = dest;
-            for_phi dest { p | 
-                n := index_in_phi(old_src, p);
-                p.blk[n] = new_src;
-            };
-        };
-        
-        add_block :: fn() => {
-            blk := newblk(); 
-            f.nblk += 1;
-            // build up a chain to add at the end
-            blk.link = new_blocks_list;
-            new_blocks_list = blk;
-            blk
-        };
-        
-        next_block := add_block();
-        first_dispatch_block := next_block;
-        cases := payload.cases.slice(0, payload.case_count);
-        for cases { case |
-            continue :: local_return;
-            dest, value := case;
-            if(dest.identical(payload.default), => continue());
-            
-            check := next_block;  
-            next_block = add_block();
-            
-            matches := f.newtmp("switch", .Kw);
-            check.ins = init(temp(), 1);
-            check.ins.len = 1;
-            check.ins[0] = make_ins(.ceql, .Kw, matches, payload.inspect, f.getcon(value));
-            
-            set_s1(b, check, dest);
-            check.jmp = (type = .jnz, arg = matches);
-            check.s2 = next_block;
-        };
-        
-        set_s1(b, next_block, payload.default);
-        next_block.jmp = (type = .jmp, arg = QbeNull);
-        
-        b.jmp = (type = .jmp, arg = QbeNull);
-        b.s1 = first_dispatch_block;
-    };
-    
-    f.switch_count = 0;
-    @debug_assert(last_block.link.is_null());
-    last_block.link = new_blocks_list;
 }
 
 wasm_page_size :: 65536;

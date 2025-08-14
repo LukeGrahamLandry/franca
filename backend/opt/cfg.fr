@@ -435,4 +435,81 @@ fn index_in_phi(dest: *Qbe.Blk, p: *Qbe.Phi) i64 = {
     n
 }
 
+// 
+// J.switch is provided for frontend convenience but don't actually have 
+// a target dependent implementation. Just convert them to jnz chain. 
+// (I experimented with doing jump tables in emit for a while but it didn't make my program faster). 
+// 
+fn replace_switches(f: *Qbe.Fn) void = {
+    @if(f.switch_count == 0) return();
+    new_blocks_list := Qbe.Blk.ptr_from_int(0);
+    last_block := f.start;
+    switches := f.switches.slice(0, f.switch_count.zext());
+    
+    for_blocks f { b | 
+        continue :: local_return;
+        last_block = b;
+        if b.jmp.type != .switch {
+            continue();
+        };
+        @debug_assert_eq(rtype(b.jmp.arg), .RInt, "J.switch expected RInt index into Fn.switches");
+        payload := switches.index(b.jmp.arg.val());
+        @debug_assert(@is(rtype(payload.inspect), .RCon, .RTmp), "invalid inspect value for switch");
+        
+        if payload.case_count == 0 {
+            b.jmp = (type = .jmp, arg = QbeNull);
+            b.s1 = payload.default;
+            continue();
+        };
+        
+        set_s1 :: fn(old_src: *Qbe.Blk, new_src: *Qbe.Blk, dest: *Qbe.Blk) void => {
+            new_src.s1 = dest;
+            for_phi dest { p | 
+                n := index_in_phi(old_src, p);
+                p.blk[n] = new_src;
+            };
+        };
+        
+        add_block :: fn() => {
+            blk := newblk(); 
+            f.nblk += 1;
+            // build up a chain to add at the end
+            blk.link = new_blocks_list;
+            new_blocks_list = blk;
+            blk
+        };
+        
+        next_block := add_block();
+        first_dispatch_block := next_block;
+        cases := payload.cases.slice(0, payload.case_count);
+        for cases { case |
+            continue :: local_return;
+            dest, value := case;
+            if(dest.identical(payload.default), => continue());
+            
+            check := next_block;  
+            next_block = add_block();
+            
+            matches := f.newtmp("switch", .Kw);
+            check.ins = init(temp(), 1);
+            check.ins.len = 1;
+            check.ins[0] = make_ins(.ceql, .Kw, matches, payload.inspect, f.getcon(value));
+            
+            set_s1(b, check, dest);
+            check.jmp = (type = .jnz, arg = matches);
+            check.s2 = next_block;
+        };
+        
+        set_s1(b, next_block, payload.default);
+        next_block.jmp = (type = .jmp, arg = QbeNull);
+        
+        b.jmp = (type = .jmp, arg = QbeNull);
+        b.s1 = first_dispatch_block;
+    };
+    
+    f.switch_count = 0;
+    @debug_assert(last_block.link.is_null());
+    last_block.link = new_blocks_list;
+}
+
 #use("@/backend/lib.fr");
