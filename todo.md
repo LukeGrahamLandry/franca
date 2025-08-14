@@ -132,8 +132,9 @@ as different types even when they're the same size.
 
 ### !! BROKEN !!
 
-- self compile in blink arm-linux on github actions seems to hang forever sometimes? 
-- still a mystery bug in amd-linux
+- self compile in blink on (arm-macos and arm-linux) on github actions seems to hang forever sometimes? 
+- still a mystery bug in amd-linux. 
+  race? seems improved by sleeping for a millisecond after spawning a thread. 
 - wuffs/gif.c fails at random
 - there have been very rare failures in my lua tests for a while
 - soft_draw.fr crashes when you quit the program
@@ -152,6 +153,9 @@ All is fine! (passed 35 tests)
 - this occasionally fails (note: just loading the cache file, not recompiling the test program)
   - panic! emit, too many instructions
   - panic! Assertion Failed: uninit module 4669633232
+  - safety check failed in do_jit_fixup
+  - undefined variable: <many different places have happened>
+  - unlocked a mutex that was already unlocked
 ```
 for i in $(seq 1 1000);
 do
