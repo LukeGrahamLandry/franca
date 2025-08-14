@@ -53,7 +53,9 @@ benchmark different backends on an old version of the compiler that could do llv
 - move trace_(start, prev, return) out of the backend to just be asm in the library. 
   similar reasoning to syscalls: the infrastructure required to use them to print useful stack traces is so much 
   that there's no point in providing the instruction when you can just do it yourself with barely any extra work. 
-  and the speed hit of not inlining trace_start which is you use exactly once when you're already crashing super doesn't matter. 
+  and the speed hit of not inlining trace_start which you use exactly once when you're already crashing super doesn't matter. 
+- strace says the arm-syscalls crash is always shortly after calling clone(). 
+  i assume it's a race because it happens much less frequently when strace is spamming stuff. 
 
 ## (Aug 12)
 

@@ -8,14 +8,12 @@
 - `@inline` at the callsite 
 - need an option to make `@safety` assertions give you more information. it's hard without a runtime bootstrapping 
   step because ie. `fn index([]T)` needs to get compiled really early before you can do anything. 
-- split compiler/worker.fr into the franca part and the backend part
 - do something for detecting if you discard a Result without unwrapping it
 - the pattern of interning things with a List(V)+HashMap(V, index) is common. 
   should make the map give you a way to not store the keys twice. 
 - i need a way of testing the global debug settings in core.fr. 
   maybe -DFOO=true passed to default_driver could replace a declaration like `FOO :: false`
 - need to auto-test static linux. i wonder if you can landlock away `libc.so` to make sure you can't cheat 
-- linux arm -syscalls doesn't work
 - create a guard page when allocating a new stack to spawn a thread
 - since do_codegen tries to do tracy stuff, FRANCA_TRACY=1 doesn't work if you try to run something 
   that uses import_c not through default_driver. ie. `FRANCA_TRACY=true ./trace.out examples/terminal.fr` 
@@ -26,7 +24,6 @@
 - always zero struct padding when baking constants (even when behind a pointer and even when the struct contains no pointers). 
 - why don't lldb/gdb like my linux binaries?
 - not all the tests pass with FRANCA_NO_CACHE=1
-- have github actions check repro after all targets finish running
 - can almost enable cacching when -syscalls 
 - document `store v, [Sxxx]` vs `store v, Sxxx` on amd64
 - it would be cool to provide the same abi as tcc 

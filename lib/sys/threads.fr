@@ -87,11 +87,13 @@ fn raw_create_thread(t: *Thread) void = {
     // There's something with pointer authentication in the sig field. idk man.
     // https://github.com/apple/darwin-libpthread/blob/main/src/pthread.c
     // https://github.com/apple/darwin-libpthread/blob/main/src/types_internal.h#L348 
+    fence();
     if prefer_pthread() {
         t.opaque = use_pthread(stack, callee, userdata);
     } else {
         t.tid = LinuxLibc'sys_clone(stack, callee, userdata, t.tid_futex&);
     };
+    fence();
 }
 
 fn prefer_pthread() bool = 
@@ -99,6 +101,7 @@ fn prefer_pthread() bool =
 
 franca_runtime_init_thread :: fn(franca_userdata: rawptr) void = {
     thread := Thread.ptr_from_raw(franca_userdata);
+    fence();
     set_dynamic_context(DefaultContext.raw_from_ptr(thread.first_environment&));
     thread'callee(thread.userdata);
     @if(SLOW_USERSPACE_THREADS) import("@/lib/sys/sync/green.fr")'end_current_task();
@@ -113,6 +116,7 @@ fn join(t: *Thread) void = {
         pthread_join(t.opaque, result&);
     } else {
         @debug_assert(query_current_os() == .linux);
+        fence();
         { tid := t.tid_futex; @debug_assert(tid == MAX_u32 || tid == t.tid.bitcast() || tid == 0); };
         expect: u32 = 0;
         // the kernel will zero this address because of CLONE_CHILD_CLEARTID
@@ -134,3 +138,5 @@ fn pthread_create(out: *pthread_t, attr: *ThreadAttr, callee: @FnPtr(userdata: r
 fn pthread_attr_setstack(attr: *ThreadAttr, ptr: *u8, len: i64) voidResult #weak #libc #syscall(NOSYS, NOSYS, NOSYS);
 fn pthread_getcpuclockid(thread: pthread_t, clock_id_out: *i32) voidResult #weak #libc;
 fn pthread_join(thread: pthread_t, value_ptr: *rawptr) voidResult #weak #libc;
+
+#use("@/lib/sys/sync/atomics.fr");
