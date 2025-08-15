@@ -399,11 +399,57 @@ fn bounce_body_call(self: *EmitIr, target: Qbe.Sym) void = {
     // - works on targets that care about function signatures (wasm)
     // - same code path as if you'd manually written the useless shim
     // [generate a body that explicitly forwards to the target (par..., arg..., call)]
+    func := self.program.get_function(self.func);
+    
+    // TODO: this makes it work on wasm but breaks output of examples/import_wuffs/test.fr
+    @if(TODOWASM)
+    if !func.get_flag(.AvoidJitShim) {
+        // TODO: it would be nice to only do this for wasm but doing anything target specific this early breaks my cross-caching plans. 
+        self.verbose_bounce_body(self.f.symcon(target));
+        return();
+    };
     
     // Option B
     // - compiles directly to a tail call without going through the backend passes
     // - works even if we're wrong about the signeture (like objc_msgSend or amd64-variadic)
     self.entry.task = (Bounce = (lnk = self.f.lnk&, target = target));
+}
+
+fn verbose_bounce_body(self: *EmitIr, callee: Qbe.Ref) void = { 
+    func := self.program.get_function(self.func);
+    f_ty := func.finished_ty().unwrap();
+    c := QbeNull;
+    if !func.get_flag(.NoContext) {
+        c = self.f.newtmp("f", .Kl);
+        self.emit(.pare, .Kl, c, QbeNull, QbeNull);
+    };
+    args := emit_par_instructions(self.program, self.shared, func.arg&, f_ty.arg, self.f, .None);
+    if c != QbeNull {
+        self.emit(.arge, .Kl, QbeNull, c, QbeNull);
+    };
+    each args { a | 
+        if a.scalar {
+            self.emit(.arg, a.k, QbeNull, a.r, QbeNull);
+        } else {
+            self.emit(.argc, a.k, QbeNull, a.type_index, a.r);
+        };
+    };
+    
+    _, k := self.load_op(f_ty.ret); 
+    type_index := QbeNull;
+    if k == .Ke && self.program.get_info(f_ty.ret)[].stride_bytes != 0 {
+        k = .Kl;
+        type_index = self.get_aggregate(f_ty.ret);
+    };
+    r := QbeNull;
+    if k != .Ke {
+        r = self.f.newtmp("f", k);
+    } else {
+        k = .Kw;
+    };
+    self.emit(.call, k, r, callee, type_index);
+    self.emit_ret(r);
+    self.finalize_blocks();
 }
 
 fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = {
@@ -473,6 +519,7 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = {
             code[.aarch64] = it.arm64;
             code[.x86_64] = it.amd64;
             code[.rv64] = it.rv64;
+            code[.wasm32] = it.wasm32;
             self.entry.task = (Asm = (
                 lnk = self.f.lnk&, 
                 code = code,
@@ -503,7 +550,7 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = {
     
     self.f.start.jmp.type = .jmp;
     self.f.start.s1 = self.blk;
-    p1: Placement = @if(scalar, .Scalar, .NewMemory);
+    p1: Placement = @if(scalar, .ScalarTransient, .NewMemory);
     if self.program.get_info(ret)[].stride_bytes == 0 {  // :NoRuntimeRepr
         p1 = .Discard;
     };
@@ -610,7 +657,7 @@ fn emit_runtime_call(
     scalar := k != .Ke;
     type_r := QbeNull;
     info := self.program.get_info(f_ty_ret);
-    result_r := if info.stride_bytes == 0 || (scalar && p&.is(.Discard)) {  // :get_or_create_type
+    result_r := if info.stride_bytes == 0 {  // :get_or_create_type
         k = .Kw;
         QbeNull
     } else {
@@ -619,6 +666,12 @@ fn emit_runtime_call(
             type_r = self.get_aggregate(f_ty_ret);
             if p&.is(.Discard) {
                 p = .NewMemory;
+            };
+        } else {
+            if p&.is(.Discard) {
+                // on native targets it would be fine to use Qbe.Null here 
+                // but on wasm the signatures must match exactly. 
+                p = .ScalarTransient;
             };
         };
         self.scalar_dest(p, k)
@@ -805,6 +858,7 @@ fn compile_expr(self: *EmitIr, expr: *FatExpr, p: Placement) CRes(Qbe.Ref) = {
             info := self.var_lookup&.get_ptr(it.id) 
                 || return(@err("missing runtime var %", self.program.get_string(it.name)));
             @if_let(info) fn Local(dest) => {
+                // ScalarTransient means we promise the ref will not be held past a statement that could assign to a variable. 
                 if !p&.is(.ScalarTransient) {  // try to avoid a bunch of redundent copies. 
                     self.unify_placement(p&, expr_ty);
                 };
@@ -815,6 +869,25 @@ fn compile_expr(self: *EmitIr, expr: *FatExpr, p: Placement) CRes(Qbe.Ref) = {
         }
         fn DataSymbol(info) => {
             name := self.program.get_string(info.name);
+            
+            @if(TODOWASM)
+            @if_let(self.program.get_type(expr.ty)) fn FnPtr(type) => {
+                // TODO: it would be nice to only do this for wasm but doing anything target specific this early breaks my cross-caching plans. 
+                // TODO: this is a HACK so wasm backend knows the signeture even if it's only called indirectly. 
+                // TODO: only do this once, not every single time you call it. 
+                func := empty_fn(type.ty, info.name, expr.loc);
+                func.resolve_scope = TOP_LEVEL_SCOPE;
+                fill_bindings(func&, self.program, self.program.arg_types(func.finished_arg.Some));
+                func.body = (DynamicImport = info[]);
+                func&.set_flag(.ResolvedBody);
+                func&.set_flag(.ResolvedSign);
+                func&.set_flag(.EnsuredCompiled);
+                func&.set_flag(.BodyIsSpecial);
+                func&.set_flag(.NoInline);  // must go through the abi pass or we won't see the call to the import so won't learn its type. 
+                fid := self.program.intern_func(func&);
+                self.pending.push(fid);
+            };
+            
             if info.lib != Flag.SYMBOL_ZERO.ident() {
                 if self.when == .Jit && info.comptime != 0 {
                     return(Ok = self.scalar_result(p, self.f.getcon(info.comptime), i64));   // :get_or_create_type
@@ -973,7 +1046,6 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
                     return(self.emit_intrinsic_old(op, p, @slice(a0, a1), caller, f_ty.ret));
                 }
                 fn DynamicImport(info) => if self.when == .Aot {
-                    g := self.m.goal&;
                     @err_assert(info.name == func.name, "this isn't the output of linkrename on the comptime arch") return;
                     real_name := self.program.get_string(info.name);
                     callee_r = self.f.symcon(self.m.intern(real_name));
@@ -1280,7 +1352,7 @@ fn emit_call_if(self: *EmitIr, arg: *FatExpr, p: Placement) CRes(Qbe.Ref) #once 
             // This is not required for correctness, it's just a way to give the backend less work to do. 
             
             t_val := @try(self.compile_expr(t_expr, .Scalar)) return;
-            f_val := @try(self.compile_expr(f_expr, .Scalar)) return;
+            f_val := @try(self.compile_expr(f_expr, .ScalarTransient)) return;
             
             if(p&.tag() == .Discard, => return(Ok = QbeNull));
             r := self.scalar_dest(p, k);

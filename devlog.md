@@ -1,4 +1,33 @@
 
+## (Aug 15)
+
+wasm improvements
+- `__franca_base_address` can't work because the code isn't in linear memory
+- alias_via_bounce doesn't work. either need to generate a body that does the fake call 
+  or do real aliasing where before referencing the symbol you check if it should be replaced by something else. 
+- relatedly, if it's an import and all the calls are indirect (like they will be for the libc syscall imports),
+  it won't be able to infer the type index. 
+- both of those are improved by bringing back the version of bounce_body that emits all the pars and a real call. 
+  - but that doesn't help when it only goes through DataSymbol without ever getting a FuncId (which the syscall wrappers do). 
+    that's a recurring design flaw. 
+  - for now just make yet another fake Func when emitting a Expr::DataSymbol (same as aot_bounce but never actually called). 
+  - eventually that needs to be cleaned up. either make the frontend treat symbols more consistantly 
+    or convert DataSymbol with function type to FuncId in sema, but that wouldn't work for objc/varargs. 
+- add_code_bytes needs to add it to the function table
+  (nevermind that it won't actually work yet because AsmFunction always passes it an empty slice for wasm). 
+- replace that empty slice with a valid function body that just crashes. 
+- sel_call needs to save the signeture in case it's from add_code_bytes which won't have pars to get it from. 
+- more type errors
+  - shift amount is same as argument type but i always allow .Kw. -5
+  - push(k) for ext(ub,uh). -2. and don't do an extra extuw if it's already a Kl. -5
+  - wasm_push deal with Kl->Kw as well. -8. and then the small ext doesn't need a special case extuw. 
+  - confusion about if indirect return parameter is Kl or Kw based on where we learned the signeture. -3
+    - `[T11]: (I32,I64,I64,I64,I64,I64,) -> ()`  -- dealloc_raw__339 indirect calls this
+    - `[T23]: (I64,I64,I64,I64,I64,I64,) -> ()`  -- panicking_allocator_fn__2867 is this
+- sadly the type erased syscall wrappers aren't going to work. 
+  they assume you can just always pass 6x i64 and fill the extras with zeros.
+- assert all inferred signetures for a symbol match in wasm/abi.fr and fix a few tests
+
 ## (Aug 14)
 
 wasm improvements

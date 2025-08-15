@@ -1,4 +1,5 @@
 
+- TODOWASM
 - crack down on smurf naming conventions (ie import("@/lib/alloc/debug_alloc.fr").DebugAlloc is kinda dumb). 
   could steal what zig does where a file is a struct. but that always annoys me because it makes you 
   pick one blessed struct to have the top level fields when the rest of your file is a namespace which looks odd. 

@@ -82,7 +82,7 @@ int add_all(int n, ...);
 int sprintf(char *buf, char *fmt, ...);
 int vsprintf(char *buf, char *fmt, va_list ap);
 
-char *fmt(char *buf, char *fmt, ...) {
+void fmt(char *buf, char *fmt, ...) {
   va_list ap;
   va_start(ap);
   vsprintf(buf, fmt, ap);

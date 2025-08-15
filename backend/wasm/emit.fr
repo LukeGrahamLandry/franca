@@ -1,7 +1,5 @@
-// UNFINISHED: some .ssa tests fail verifier
 //! - Wasm is a bit annoying because it's designed to be compact and fast to load, not to be output in one pass. 
 //!   For example, you can't know the index of any functions until you know how many imports there are. 
-//! - It requires structured control flow. 
 
 EmitWasmFn :: @struct(
     m: *QbeModule,
@@ -15,6 +13,17 @@ EmitWasmFn :: @struct(
 
 WASM_INDEX_PADDING :: 4;
 
+fn record_wasm_function_index(m: *Qbe.Module, id: Qbe.Sym) void = {
+    use_symbol(m, id) { s |
+        s.got_lookup_offset = m.local_needs_reloc.len;
+        s.referenced = true;
+    };
+    m.local_needs_reloc&.push(id);
+    
+    // TODO: rn franca only works if you add this because -freestanding doesn't export main()
+    @if(TODOWASM) m.exports&.push(id);
+}
+
 fn emit_func_wasm32(f: *Qbe.Fn) []Ty(Fixup, Qbe.Sym) = {
     code := f.globals.segments&[.Code]&;
     e: EmitWasmFn = (
@@ -24,12 +33,7 @@ fn emit_func_wasm32(f: *Qbe.Fn) []Ty(Fixup, Qbe.Sym) = {
         block_stack = list(temp()), 
     ); e := e&;
    
-    use_symbol(e.m, f.lnk.id) { s |
-        s.got_lookup_offset = e.m.local_needs_reloc.len;
-        s.referenced = true;
-    };
-    e.m.local_needs_reloc&.push(f.lnk.id);
-    
+    record_wasm_function_index(e.m, f.lnk.id);
     e.pad(WASM_INDEX_PADDING); // reserve space for length of code. 
     
     pack_locals(e);
@@ -60,14 +64,20 @@ fn pack_wasm_result_type(m: *QbeModule, $iter_args: @Fn(yield: @Fn(k: Qbe.Cls) v
         iter { k |
             s.reserve(Wasm.ValType)[] = to_wasm_type(k);
             n += 1;
+            //@print("%,", k);
         };
         @debug_assert_ult(n, 128, "wasm_result_type too large (todo: handle multi-byte leb here)"); 
         count[] = n.trunc();
     };
+    //print("type (");
     body(iter_args);
+    //print(") -> (");
     body(iter_ret);
     
-    pack_wasm_result_type_outlined(m, prev_len)
+    i := pack_wasm_result_type_outlined(m, prev_len);
+    //@println(") = %", i);
+    
+    i
 }
 
 pack_wasm_result_type_outlined :: fn(m: *Qbe.Module, prev_len: i64) i32 = {
@@ -430,7 +440,7 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     for_symbols m { id, symbol |
         if symbol.referenced || symbol.fixups.len != 0 {
             if symbol.kind == .Local && symbol.segment == .Code {
-                @debug_assert(symbol.got_lookup_offset != -1, "missing local function $%", symbol.name);
+                @assert(symbol.got_lookup_offset != -1, "missing local function $%", symbol.name);
                 symbol.got_lookup_offset += m.imports.len;
             };
             m.do_fixups(rawptr_from_int(0), symbol);
@@ -494,7 +504,7 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
             leb128_unsigned(buf, f_count);
             for m.local_needs_reloc& { id |
                 use_symbol(m, id) { s |
-                    @debug_assert_ge(s.wasm_type_index, 0, "unknown type for function $%", s.name);
+                    @debug_assert_ge(s.wasm_type_index, 0, "unknown type for local function $%", s.name);
                     leb128_unsigned(buf, s.wasm_type_index.intcast()); 
                 };
             };

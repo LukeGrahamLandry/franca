@@ -359,6 +359,10 @@ fn add_code_bytes(m: *QbeModule, name_id: Qbe.Sym, code: *MultiArchAsm) void = {
     
     code := m.segments&[.Code]&;
     
+    if m.goal.arch == .wasm32 {
+        import("@/backend/wasm/emit.fr")'record_wasm_function_index(m, name_id);
+    };
+    
     start_offset := ptr_diff(code.mmapped.ptr, code.next);
     use_symbol(m, name_id) { s |
         start_debug_info(m, s);
@@ -416,6 +420,7 @@ fn declare_alias(m: *Qbe.Module, target: Qbe.Sym, alias: *Qbe.Lnk) void = {
     if target_kind == .Local { // || !target_inline.is_null() {
         m.finish_alias(target, alias.id);
     } else {
+        @debug_assert(m.goal.arch != .wasm32, "TODO: alias_via_bounce doesn't work on wasm");
         alias_via_bounce(m, target, alias);
     }
 }
@@ -774,13 +779,15 @@ fn live_segment_part(m: *QbeModule, s: SegmentType) []u8 = {
 
 AotDebugInfo :: import("@/lib/crash_report.fr").AotDebugInfo;
 
+// on wasm the code isn't in accessible memory, so this way of doing stack traces doesn't work at all. 
 fn seal_debug_info(m: *QbeModule, debug_source_code: []u8, include: bool, files_bytes: []u8) void = {
     base_p    := m.intern("__franca_base_address");
+    harvard := m.goal.arch == .wasm32;
     
     if m.goal.type == .Exe {
         // TODO: figure out how to make this work for .Relocatable
         //       it is needed for relocations without libc on linux (in franca_runtime_init). 
-        m.do_jit_fixups(base_p, .Code, 0);
+        m.do_jit_fixups(base_p, @if(harvard, .ConstantData, .Code), 0);
     };
     
     ::[]u64;
@@ -790,7 +797,7 @@ fn seal_debug_info(m: *QbeModule, debug_source_code: []u8, include: bool, files_
     };
         
     id := m.intern("__franca_aot_debug_info");
-    if !include || @is(m.goal.type, .Relocatable, .Cached, .CachedEarly) {
+    if harvard || !include || @is(m.goal.type, .Relocatable, .Cached, .CachedEarly) {
         m.emit_data(id = id, template = (Zeroes = size_of(AotDebugInfo)), align = 8, relocations = empty());
         return();
     };

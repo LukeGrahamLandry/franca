@@ -124,15 +124,14 @@ fn wasm_abi(f: *Qbe.Fn) void = {
     
     f.slot = f.slot.align_to(4);
     
-    use_symbol(m, f.lnk.id) { s |
-        s.wasm_type_index = pack_wasm_result_type m { $yield_arg #duplicated |
-            for_pars f { i |
-                yield_arg(i.cls());
-            };
-        } and { $yield_ret |
-            if(ret_cls != .Ke, => yield_ret(ret_cls));
+    type := pack_wasm_result_type m { $yield_arg #duplicated |
+        for_pars f { i |
+            yield_arg(i.cls());
         };
-    }; 
+    } and { $yield_ret |
+        if(ret_cls != .Ke, => yield_ret(ret_cls));
+    };
+    save_signature(m, f.lnk.id, type);
     
     when_debug_printfn(f, .Abi, "\n## After ABI lowering:\n");
 }
@@ -143,15 +142,11 @@ sel_call :: fn(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) *Qbe.Ins = {
     
     type := type_index_for_call(f, b, i, arg0);
     if f.get_sym(i.arg&[0]) { id, off | 
-        use_symbol(m, id) { s |
-            @debug_assert_eq(off, 0, "tried to call offset from symbol ($% + %)\nwhich is probably a mistake for any target but certainly not possible on wasm.", s.name, off);
-            if s.kind != .Local {
-                // We allow imports without type declarations, but wasm's import table does not. 
-                // So if we haven't seen this symbol yet, it might be an import, so we need to save the type info from this call. 
-                s.wasm_type_index = type;
-                // TODO: if we deduplicated types we could do a typecheck here to make sure we don't generate an invalid module. 
-            };
-        }; 
+        msg :: "tried to call offset from symbol ($% + %)\nwhich is probably a mistake for any target but certainly not possible on wasm.";
+        @debug_assert_eq(off, 0, msg, m.str(id), off);
+        // We allow imports without type declarations, but wasm's import table does not. 
+        // So if we haven't seen this symbol yet, it might be an import, so we need to save the type info from this call. 
+        save_signature(m, id, type);
     };
     
     // TODO: check if they said its a type but really there's only one scalar and it should be converted to a load. 
@@ -225,12 +220,23 @@ sel_call :: fn(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) *Qbe.Ins = {
     arg0
 };
 
+fn save_signature(m: *Qbe.Module, id: Qbe.Sym, type: i32) void = {
+    use_symbol(m, id) { s |
+        if s.wasm_type_index != -1 {
+            @debug_assert_eq(s.wasm_type_index, type, "wasm signature mismatch $%", s.name);
+        };
+        s.wasm_type_index = type;
+        //@println("% is type %", s.name, s.wasm_type_index);
+    }; 
+};
+
 fn type_index_for_call(f: *Qbe.Fn, b: *Qbe.Blk, call: *Qbe.Ins, arg0: *Qbe.Ins) i32 = {
     void := call.to == QbeNull;
     scalar := !void && is_scalar(f, call.arg&[1]);
     pack_wasm_result_type f.globals { $yield_arg #duplicated |
         if !void && !scalar {
-            yield_arg(.Kw);
+            // TODO: really this pointer should be Kw but then i have to change the par added above. 
+            yield_arg(.Kl);
         };
         va := false;
         for(arg0, call) { i |

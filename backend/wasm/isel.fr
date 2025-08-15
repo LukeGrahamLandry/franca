@@ -2,6 +2,7 @@
 //! - instructions act on a stack instead of referencing values directly
 //! - addresses are 32 bit (but we allow frontends to use Cls.l for consistancy and just truncate here)
 //! - phi nodes are converted into block arguments (and we need to remember the types)
+//! - convert cfg to structured blocks/loops
 //! - can't implicitly use the low bits of an i64 as an i32
 //! - stack pointer is stored in a global
 //! - cmp always produces an i32 (which we may need to extend)
@@ -13,6 +14,7 @@
 // TODO: if a local is used again but also by the next instruction, use local.tee
 // TODO: address offset folding 
 // TODO: more tests for dynalloc
+// TODO: make it work with elide_abi_slots and simplify_jump_chains
 
 fn wasm_isel(f: *Qbe.Fn) void = {
     assign_alloc_slots(f);
@@ -128,7 +130,7 @@ fn wasm_type_preleb(t: Wasm.ValType) i32 = {
     ::enum(@type t);
     mask :: bit_and(-1, bit_not(1.shift_left(6) - 1));
     x :i64= bit_or(t.raw().zext(), mask);
-    { // :SLOW. TODO: can be removed when i trust. 
+    @if(::safety_check_enabled(.DebugAssertions)) {
         buf := u8.list(temp());
         leb128_signed(buf&, x);
         @debug_assert_eq(t.raw(), buf[0]);
@@ -200,13 +202,9 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
     // wasm doesn't have zero extend from 8/16 so it becomes a mask
     if @is(o, .extub, .extuh) {
         mask: i64 = @if(o == .extub, 0x00FF, 0xFFFF);
-        if i.cls() == .Kl {
-            // TODO: this isn't right. we don't know if the argument was W or L
-            f.emit(.extuw, .Kl, QbeNull, QbeNull, QbeNull);
-        };
         f.emit(.and, k, QbeNull, QbeNull, QbeNull);
         f.emit(.push, k, QbeNull, f.getcon(mask), QbeNull);
-        f.wasm_push(argcls(i, 0), i.arg&[0]);
+        f.wasm_push(k, i.arg&[0]);
         return()
     };
     
@@ -267,8 +265,11 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
     
     enumerate_rev i.arg&.items() { idx, a |
         if a[] != QbeNull {
-            k := argcls(i, idx);
-            f.wasm_push(k, a[]);
+            kk := argcls(i, idx);
+            if idx == 1 && { (@is(o, .shl, .shr, .sar, .rotl, .rotr)) }  {
+                kk = k;
+            };
+            f.wasm_push(kk, a[]);
         };
     };
 }
@@ -284,6 +285,11 @@ fn wasm_push(f: *Qbe.Fn, k: Qbe.Cls, r: Qbe.Ref) void = {
             if k == .Kw && t.cls == .Kl {
                 f.emit(.truncl, .Kw, QbeNull, QbeNull, QbeNull);
                 f.emit(.push, .Kl, QbeNull, r, QbeNull);
+                return();
+            };
+            if k == .Kl && t.cls == .Kw {
+                f.emit(.extuw, .Kl, QbeNull, QbeNull, QbeNull);
+                f.emit(.push, .Kw, QbeNull, r, QbeNull);
                 return();
             };
         }
