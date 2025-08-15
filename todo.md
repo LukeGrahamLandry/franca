@@ -280,6 +280,9 @@ hould just make them local constants in each file like they are here in riscv
   but most functions don't use varargs so those could be rega-ed once for linux+macos when compiling for all targets together. 
 - experiment with leb128 for indices in .frc modules. 
 need to be careful about the refs which have tags in the high bits so won't leb well directly. 
+- why does llvm-mc disassembler arm think my cas is invalid instruction encoding? (check with cas.ssa -d D). 
+  objdump thinks it's fine and it clearly runs correctly. 
+- wasm fence instruction
 
 ## backend symbols rework
 

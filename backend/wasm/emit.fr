@@ -2,7 +2,6 @@
 //! - Wasm is a bit annoying because it's designed to be compact and fast to load, not to be output in one pass. 
 //!   For example, you can't know the index of any functions until you know how many imports there are. 
 //! - It requires structured control flow. 
-// TODO: cas (?)
 
 EmitWasmFn :: @struct(
     m: *QbeModule,
@@ -311,6 +310,14 @@ fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
             ::enum(Wasm.ValType);
             push(e.a&, to_wasm_type(i.cls()).raw()); 
         }
+        fn cas1() => {  // T.atomic.rmw.cmpxchg
+            byte: u8 = @if(i.cls().is_wide(), 73, 72);
+            align_hint: u8 = @if(i.cls().is_wide(), 3, 2);
+            e.op(.AtomicPrefix);
+            e.a&.push(byte);
+            e.a&.push(align_hint);
+            e.a&.push(0);  // offset  TODO: use this
+        };
         @default => @panic("TODO: wasm encoding for % %", i.op(), { printfn(e.f, e.f.globals.debug_out); "" });
     };
 }
@@ -559,11 +566,10 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
         };
     };
     
-    @if(m.exports.len > 0)
     push_buf { buf |
         buf.push(@as(u8) Wasm.Section.Export);
         uleb_patch_delta buf {
-            leb128_unsigned(buf, m.exports.len);
+            leb128_unsigned(buf, m.exports.len + 1);
             for m.exports& { id |
                 use_symbol(m, id) { s |
                     @debug_assert_ne(s.got_lookup_offset, -1, "unassigned got_lookup_offset %", s.name);
@@ -572,6 +578,15 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
                     buf.push(@as(u8) Wasm.ImportType.Func);
                     leb128_unsigned(buf, s.got_lookup_offset);
                 };
+            };
+            
+            // TODO: let the user choose if they want to import a memory or export the memory and what the name should be. 
+            {
+                name := "memory";
+                leb128_unsigned(buf, name.len);
+                push_all(buf, name);
+                buf.push(@as(u8) Wasm.ImportType.Memory);
+                leb128_unsigned(buf, 0);
             };
         };
     };

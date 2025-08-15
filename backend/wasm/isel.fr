@@ -139,7 +139,8 @@ fn wasm_type_preleb(t: Wasm.ValType) i32 = {
 fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
     k := i.cls();
     o := i.op();
-    if o != .par && o != .sel1 && try_kill_inst(f, i) {
+    no_kill := @is(o, .par, .sel1, .cas1);
+    if !no_kill && try_kill_inst(f, i) {
         if o == .pop {
             // inserted after a call by abi. even tho we don't use the value, 
             // we need to do some stack book-keeping to satisfy the verifier. 
@@ -231,6 +232,11 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
         o = .sub;
         i.arg&[1] = i.arg&[0];
         i.arg&[0] = SP;
+    };
+    
+    if o == .cas0 {
+        wasm_push_addr(f, i.arg&[0]);
+        return();
     };
     
     // copy is just push+pop, no actual op
@@ -508,7 +514,7 @@ fn wasm_flow(f: *Qbe.Fn) void = {
 // same constants work for both widths because i truncate on emit.
 fn sel_byteswap(f: *Qbe.Fn, i: *Qbe.Ins) void = @emit_instructions((f = f, emit = emitter_for_wasm), (i.cls(), i.arg&[0], i.to), """
 @start
-    %mask     =0 copy 18446462603027742720 # 0xFFFF0000FFFF0000
+    %mask     =0 copy 0xFFFF0000FFFF0000
     %mask_odd =0 xor %mask, -1
     %even     =0 and %1, %mask
     %odd      =0 and %1, %mask_odd
@@ -516,7 +522,7 @@ fn sel_byteswap(f: *Qbe.Fn, i: *Qbe.Ins) void = @emit_instructions((f = f, emit 
     %odd_r    =0 rotr %odd, 16
     %x        =0 or %even_l, %odd_r
     
-    %Mask     =0 copy 71777214294589695 # 0x00FF00FF00FF00FF
+    %Mask     =0 copy 0x00FF00FF00FF00FF
     %Mask_odd =0 xor %Mask, -1
     %Even     =0 and %x, %Mask
     %Odd      =0 and %x, %Mask_odd

@@ -17,6 +17,7 @@
 // TODO: tables, vector ops, call_indirect, br_table, br_if, drop, select, memory grow/init/size/copy/fill, data drop,
 //       T.eqz, abs, ceil, floor, trunc, nearest, copysign, trunc_sat, some other conversions
 //       multiple return values, ref.*
+//       more atomic ops. 
 // TODO: provide standard c api so could run other people's tests? https://github.com/WebAssembly/wasm-c-api/blob/main/include/wasm.h
 
 fn init(m: *QbeModule, w: *WasmModule, a: Alloc) LoadWasm = (
@@ -494,6 +495,26 @@ fn emit_the_code(self: *LoadWasm) void = {
                 self.f.emit(.sel0, .Kw, QbeNull, cond, QbeNull);
                 self.f.emit(.sel1, k, result, t, f);
                 self.stack&.push(result);
+            }
+            fn AtomicPrefix() => {
+                opcode := self.read_u();
+                k: Qbe.Cls = @switch(opcode) {
+                    @case(72) => .Kw;
+                    @case(73) => .Kl;
+                    @default => @panic("TODO: support more atomic ops (%)", opcode);
+                };
+                align := self.read_u();
+                offset := self.read_u();
+                
+                new := self.stack&.pop().expect("stack for cas-new");
+                old := self.stack&.pop().expect("stack for cas-old");
+                p := self.stack&.pop().expect("stack for cas-p");
+                p := self.compute_address(p, offset.bitcast());
+                prev := self.f.newtmp("cas-prev", k);
+                
+                self.f.emit(.cas0, .Kw, QbeNull, p, QbeNull);
+                self.f.emit(.cas1, k, prev, old, new);
+                self.stack&.push(prev);
             }
             @default => @panic("unhandled unstruction %", self.src[self.cursor - 1]);
         }

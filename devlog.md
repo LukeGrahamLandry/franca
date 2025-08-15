@@ -1,4 +1,12 @@
 
+## (Aug 14)
+
+wasm improvements
+- add extra par for vaargs if the function is marked variadic instead of only if it uses vastart instruction. 
+- export the memory so the host can access it easily 
+- implement cas in emit and import_wasm
+- add .ssa tests for cas and unused vararg. 
+
 ## (Aug 13)
 
 trying to decide if i should steal qbe's gvn/gcm. 

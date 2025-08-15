@@ -33,6 +33,7 @@ fn wasm_abi(f: *Qbe.Fn) void = {
     retr := @if(f.retty != QbeNull, f.newtmp("abi", .Kl), QbeNull);
     ret_cls := Qbe.Cls.Ke;
     
+    va_base := @if(f.vararg, f.newtmp("va", .Kl), Qbe.Null);
     for_blocks f { b |
         changed := false; 
         f.reset_scratch();
@@ -59,8 +60,8 @@ fn wasm_abi(f: *Qbe.Fn) void = {
             b.jmp.type = .ret0;
             b.jmp.arg = QbeNull;
         };
-        
-        va_base, no_more_va_par := (QbeNull, false);
+
+        no_more_va_par := false;
         for_insts_rev b { i | 
             continue :: local_return;
             
@@ -73,9 +74,7 @@ fn wasm_abi(f: *Qbe.Fn) void = {
             
             @match(i.op()) {
                 fn vastart() => {
-                    if va_base == QbeNull {
-                        va_base = f.newtmp("va", .Kl);
-                    };
+                    @assert(va_base != Qbe.Null, "tried to use vastart in non-variadic function");
                     f.move_end_of_block_to_scratch(b, i, changed&);
                     
                     // unfortunatly we're doing this after we're in ssa form so need to use memory for mutability. 
@@ -97,19 +96,15 @@ fn wasm_abi(f: *Qbe.Fn) void = {
                     """);
                     continue();
                 }
-                fn par() =>{
-                    if va_base != QbeNull {
-                        @debug_assert(!no_more_va_par);
+                fn par() => {
+                    if va_base != QbeNull && !no_more_va_par {
                         f.move_end_of_block_to_scratch(b, i, changed&);
                         f.emit(.par, .Kl, va_base, QbeNull, QbeNull);
-                        va_base = QbeNull;
                     };
                     no_more_va_par = true;
                 }
                 @default => ();
             };
-            
-            // TODO: we need to know argument types for indirect_call but don't want to rely on consecutive pushes holding cls
             
             if changed {
                 i = f.emit(i[]);
