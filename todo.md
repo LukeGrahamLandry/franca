@@ -287,6 +287,7 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 - why does llvm-mc disassembler arm think my cas is invalid instruction encoding? (check with cas.ssa -d D). 
   objdump thinks it's fine and it clearly runs correctly. 
 - wasm fence instruction
+- TODO: harec/src/gen.c: `[arm64/emit.fr/fixup_arm64] offset from dynamic import builtin_type_nomem+4` but would work when done as one compilation unit.
 
 ## backend symbols rework
 

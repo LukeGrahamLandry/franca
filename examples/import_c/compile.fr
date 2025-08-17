@@ -4,7 +4,6 @@
 // TODO: https://github.com/rui314/chibicc/issues/
 //      #153 #141 #138 #110 #107 #99 #86 #84 more...
 //      - https://github.com/fuhsnn/slimcc/issues?q=is%3Aissue+is%3Aclosed+label%3Aupstream-chibicc&page=2
-//      _Static_assert (tho maybe C23 wants to get rid of it)
 // _Alignas needs more backend support
 // TODO: unary const expr
 // TODO: __builtin_compare_and_swap, __builtin_atomic_exchange
@@ -219,6 +218,7 @@ Ctx :: @rec @struct {
     include_paths: List(Str);
     macro_base_file: Str;
     hide_stack: List(Ty(*Macro, *Token));
+    allow_builtin_headers: bool;
 };
 
 fn align_down(n: i64, align: i64) i64 = 
@@ -1174,6 +1174,13 @@ fn designation(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) void = {
         fn TY_STRUCT() => {
             mem := c.struct_designator(tok&, tok, init.ty);
             c.designation(tok&, tok, init.children[mem.idx.intcast()]);
+            if equal(tok, ",") {  
+                // this happens when they're nested like (T) { .a.b = 1, .c.d = 2, };
+                // TODO: im not super confident i could explain why but this seems to work. 
+                //       i think we're jsut saying the middle struct can't have other fields until after the comma (which is true syntactically)
+                rest[] = tok;
+                return()
+            }
             init.expr = Node.ptr_from_int(0);
             c.struct_initializer2(rest, tok, init, mem.next);
             return();
@@ -1814,7 +1821,7 @@ fn attribute_list(c: *Ctx, tok: *Token, ty: *CType) *Token = {
             };
             
             // TODO: some of these matter: __constructor__, __aligned__
-            skips :: @const_slice("__format__", "__const__", "format", "noreturn"); // , "__constructor__", "__aligned__");
+            skips :: @const_slice("__format__", "__const__", "format", "noreturn", "__noreturn__", "__deprecated__"); // , "__constructor__", "__aligned__");
             if skips.contains(tok.str()) {
                 tok = c.skip_attribute(tok);
                 continue();
@@ -2006,6 +2013,16 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *T
         tok = c.attribute_list(tok, ignore&);
     };
     
+    if consume(tok&, tok, "asm") {
+        // apple's libc headers use `__asm("foo")` after a forward declaration to mean `#[link_name = "foo"]`. 
+        // so this makes that work if you `-D__asm=asm`
+        tok = c.skip(tok, "(");
+        @if(tok.kind != .TK_STR) @error_tok(c, tok, "expected a string (treating asm keyword after function as symbol alias)");
+        alias: []u8 = (ptr = tok.val.str_buf, len = tok.ty.size.intcast());
+        tok = c.skip(tok.next, ")");
+        f.global_symbol = (Some = c.m.intern(alias));
+    };
+    
     if consume(tok&, tok, ";") {
         f.is_definition = false;
         return(tok);
@@ -2181,17 +2198,23 @@ fn parse(c: *Ctx, tok: *Token) *Obj = {
     ::if(*Token);
     while => tok.kind != .TK_EOF {
         continue :: local_return;
-        if tok.kind == .TK_discard_static_scope {
+        @match(tok.kind) {
+        fn TK_discard_static_scope() => {
             c.discard_static_scope();
             tok = tok.next;
             continue();
         };
-        
-        if tok.kind == .TK_FRC {
+        fn TK_FRC() => {
             f :: import("@/examples/import_c/ffi.fr").import_cache_file;
             c.f(tok);
             tok = tok.next;
             continue();
+        };
+        fn _Static_assert() => {
+            tok = c.static_assert(tok);
+            continue();
+        }
+        @default => ();
         };
         
         attr := VarAttr.zeroed();
@@ -2223,6 +2246,20 @@ fn parse(c: *Ctx, tok: *Token) *Obj = {
     c.tentative&.clear();
     
     c.globals
+}
+
+fn static_assert(c: *Ctx, tok: *Token) *Token = {
+    tok = tok.next;
+    tok = c.skip(tok, "(");
+    cond := c.const_expr(tok&, tok);
+    if consume(tok&, tok, ",") {
+        tok = tok.next;  // message
+    };
+    if cond == 0 {
+        @error_tok(c, tok, "static assertion failed");
+    };
+    tok = c.skip(tok, ")");
+    tok
 }
 
 /**************************
@@ -3242,6 +3279,10 @@ block :: fn(c, rest, tok) #prefix(.@"{", .ND_STMT) = {
 };
 empty_stmt :: fn(c, rest, tok) #prefix(.@";", .ND_STMT) = {
     rest[] = tok.next;
+    c.new_node(.ND_STMT, tok)
+};
+_Static_assert :: fn(c, rest, tok) #prefix(._Static_assert, .ND_STMT) = {
+    rest[] = c.static_assert(tok);
     c.new_node(.ND_STMT, tok)
 };
 

@@ -29,6 +29,19 @@ int main() {
   ASSERT(3, tree->lhs->lhs->val);
   ASSERT(4, tree->lhs->rhs->val);
 
+  ASSERT(3, ({
+    struct A { long x, y; };
+    struct B { struct A a; };
+    struct C { struct B b; };
+    struct C c = (struct C){
+        .b = {
+            .a.x = 1,
+            .a.y = 2,
+        },
+    };
+    c.b.a.x + c.b.a.y;
+  }));
+  
   printf("OK\n");
   return 0;
 }

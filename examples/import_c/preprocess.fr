@@ -174,7 +174,9 @@ fn copy_line(c: *Ctx, rest: **Token, tok: *Token) *Token = {
 fn new_num_token(c: *Ctx, val: i64, tmpl: *Token) *Token = {
     @debug_assert_ge(val, 0, "new_num_token negative");
     buf := @tfmt("%", val);  //\0\0\0\0\0  :BoundsPadding
-    c.tokenize(c.new_file(tmpl.file.name, buf))
+    t := c.tokenize(c.new_file(tmpl.file.name, buf));
+    t.origin = tmpl;
+    t
     //tok  := c.copy_token(tmpl);
     //tok.kind = .TK_PP_NUM;
     //buf := u8.list(c.arena);
@@ -232,14 +234,16 @@ fn eval_const_expr(c: *Ctx, rest: **Token, tok: *Token) bool = {
     // we replace remaining non-macro identifiers with "0" before
     // evaluating a constant expression. For example, `#if foo` is
     // equivalent to `#if 0` if foo is not defined.
+    head := Token.zeroed();
+    cur := head&;
     t := expr;
     for_linked t { t |
-        if t.valid_macro_name() {
-            next := t.next;
-            t[] = c.new_num_token(0, t)[];
-            t.next = next;
-        }
+        // TODO: if you get a "not a function" error because you tried to call it as a macro in an #if, 
+        //       it's misleading because it says "while expanding" but the problem is really that the macro was not defined.
+        new := @if(t.valid_macro_name(), c.new_num_token(0, t), t);
+        c.append_one(cur&, new, false);
     };
+    expr = head.next;
 
     // Convert pp-numbers to regular numbers
     c.convert_pp_tokens(expr);
@@ -647,6 +651,7 @@ fn search_include_paths(c: *Ctx, filename: Str) ?Str = {
         };
     };
     
+    @if(c.allow_builtin_headers)
     if find_builtin_header(filename) { _ |
         return(Some = @tfmt("%%", HACK_BUILTIN_FOLDER_PREFIX, filename));
     };
@@ -663,7 +668,8 @@ fn search_include_next(c: *Ctx, filename: Str) ?Str = {
             return(Some = path.items());
         };
     };
-    
+   
+    @if(c.allow_builtin_headers) 
     if find_builtin_header(filename) { _ |
         return(Some = @tfmt("%%", HACK_BUILTIN_FOLDER_PREFIX, filename));
     };

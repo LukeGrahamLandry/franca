@@ -9,6 +9,7 @@ Args :: @struct {
     defines: []Ty(Str, Str) = empty();
     includes: []Str = empty();
     debug: Str = "";
+    no_builtin_headers := false;
 };
 
 main :: fn() void = {
@@ -26,6 +27,10 @@ main :: fn() void = {
         continue :: local_return;
         i += 1;
         arg := args[i].str();
+        if arg == "-no_builtin_headers" {
+            cfg.no_builtin_headers = true;
+            continue();
+        }
         if arg == "-o" {
             i += 1;
             @assert_lt(i, args.len, "expected path after -o");
@@ -68,7 +73,9 @@ main :: fn() void = {
             continue();
         };
         if arg.starts_with("-I") {
-            includes&.push(arg.rest(2));
+            path := arg.rest(2);
+            eprintln(path);
+            includes&.push(path);
             continue();
         };
         
@@ -131,10 +138,10 @@ fn compile(args: Args) Result(void, Str) = {
     // it's nicer to just generate a string and pass it in, so it can just be treated as an opaque blob in FrcModule.dep 
     // when deciding if a cache file can be reused. 
     src := create_single_source(args&);
-    compile(src, args.target, args.debug, args.output_path)
+    compile(src, args.target, args.debug, args.output_path, args.no_builtin_headers)
 }
 
-fn compile(src: Str, target: QbeTargetEnv, debug: Str, output_path: Str) Result(void, Str) = {
+fn compile(src: Str, target: QbeTargetEnv, debug: Str, output_path: Str, no_builtin_headers: bool) Result(void, Str) = {
     m := @uninitialized QbeModule;
     
     backend'init_module(m&, target);
@@ -145,6 +152,7 @@ fn compile(src: Str, target: QbeTargetEnv, debug: Str, output_path: Str) Result(
     
     c := C'Compile.Ctx.zeroed();
     import_c'init_c(c&, m&);
+    c.allow_builtin_headers = !no_builtin_headers;
     c.emitter = (Some = ctx);
     c.enqueue_task = backend.worker_enqueue; 
     

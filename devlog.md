@@ -12,6 +12,24 @@
   - updated example programs to set f.ret_cls
   - made import_c not have inconsistant ret types when a function has an unreachable fall through return
 - make native_abi() pass slices instead of begin/end pointers. 
+- getting import_c closer to compiling harec
+  - check.c:1489:25: support multiple nested dot fields in struct initializer
+  - identifier.c:70:29: static_assert
+  - more stuff in include.fr 
+  - i really don't want to paste a sys/stat.h for include.fr,
+    because that's one that really sucks to make work on multiple targets.
+    - i'll make an attempt at using system headers. want to know how far i get. 
+      - implement `asm` symbol alias
+      - unistd.h i get "unterminated conditional directive", 
+        definitly my bug but it goes away if i ask for an older version of posix so maybe lets just see what happens. 
+      - `__darwin_arm_neon_state64` uses `__uint128_t`, which i can just `-D` away if i don't care about that for now. 
+      - if i change my va_list to *void (which breaks the .ssa test drivers) then:
+      - got to this point which does work but like, ugh, it doesn't spark joy. 
+        `franca examples/import_c/cc.fr target/harec/src/util.c -Itarget/harec/include -I/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include -D__uint128_t=long -c -D__asm=asm  -D_POSIX_C_SOURCE=200809L -r -D__arm64__`
+      - adding `-no_builtin_headers` doesn't have stdarg.h without ` -I/opt/homebrew/Cellar/llvm/19.1.7_1/lib/clang/19/include`
+        and clang's stdarg.h needs `__has_include_next`
+    - maybe its time to finally do the cleanup work to export the franca libc bindings as something import_c can use.
+- keep location info when replacing idents in preprocess.fr/eval_const_expr()
 
 ## (Aug 15)
 
