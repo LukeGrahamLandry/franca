@@ -109,7 +109,7 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
                 general_allocator: import("@/lib/alloc/debug_alloc.fr").DebugAlloc = init();
                 c.general_allocator = general_allocator&.borrow();
             }, {
-                if is_linking_libc() && !NEVER_USE_LIBC_ALLOC {
+                if is_linking_libc() && !NEVER_USE_LIBC_ALLOC && (!TODOWASM || query_current_arch() != .wasm32) {
                     c.general_allocator = libc_allocator;
                 } else {
                     A :: import("@/lib/alloc/fixed_block.fr").BlockAlloc;
@@ -142,6 +142,7 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
         };
     };
 
+    @if(!TODOWASM || query_current_arch() != .wasm32)
     @if(!IS_BOOTSTRAPPING)
     if is_linux && is_linking_libc() {
         // TODO: the NOSYS is a HACK to make -syscalls make a real static binary
@@ -177,7 +178,9 @@ fn align_stack(s: i64) void #inline = {
         encode_op_reg(PrimaryOp.PushBase, X86Reg.rax),
         encode_op_reg(PrimaryOp.PushBase, X86Reg.rax), 
         PrimaryOp.Ret,
-    ) out;};
+    ) out;} wasm { (out: *List(u8)) |
+        out.push_all(@slice(0x02, 0x00, 0x0B)); // 2 bytes. 0 locals. end.
+    };
     
     @debug_assert_eq(s.mod(8), 0);
     if s.mod(16) != 0 {

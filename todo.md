@@ -1,7 +1,4 @@
 
-- TODOWASM
-- the TODOWASM block in bounce_body_call breaks the output of examples/import_wuffs/test.fr. 
-  (because that type of shim doesn't work with varargs maybe?)
 - crack down on smurf naming conventions (ie import("@/lib/alloc/debug_alloc.fr").DebugAlloc is kinda dumb). 
   could steal what zig does where a file is a struct. but that always annoys me because it makes you 
   pick one blessed struct to have the top level fields when the rest of your file is a namespace which looks odd. 
@@ -35,8 +32,6 @@
   i need to add support for: `__attribute__ (visibility, constructor, used)` and 
   `__builtin_(expectbswap32, bswap32, clz, clzl, popcount, popcountl, fminf, fmin, fmaxf, fmax)`
 - add a test for #discard_static_scope now that i gave up on scc. 
-- backend needs signeture type checking when targetting wasm. it's better i give you the error and show you the mistake in your ir
-  instead of getting something unintelligible from the verifier. 
 - extend the cross repro tests to all the example programs. not just the compiler. maybe just add a file with hashes of binaries to the released artifact. 
 - import_bytes("@/examples/import_wuffs/base.wuffs") that works like import() in that it invalidates the cache if the file changes 
   but instead of giving you a ScopeId just give you the bytes. 
@@ -247,6 +242,17 @@ different subsets of the same resources.
 //fn source_location(arg: FatExpr) FatExpr #macro = 
     //@literal arg.loc;
 
+## wasm
+
+- remove all the TODOWASM (ifdefs/comments)
+- emit_insertions for loadopt doesn't compile on wasm. `bad nesting. expected to end @39 but found @6`
+- the TODOWASM block in bounce_body_call breaks the output of examples/import_wuffs/test.fr. 
+  (because that type of shim doesn't work with varargs maybe?)
+- wasm instruction for wait/wake/fence
+- let frontends directly provide signeture for imports since they probably know instead of only trying to infer from callsites. 
+  (currently emit_ir just always outputs a shim with a direct call which works but is hacky and not something i'd be proud to explain). 
+- generate better code (see comments in wasm/isel.fr)
+
 ## backend 
 
 - instead of QbeModule.intern_mutex, make it easy to wrap an allocator to make it thread safe. 
@@ -286,7 +292,6 @@ hould just make them local constants in each file like they are here in riscv
 need to be careful about the refs which have tags in the high bits so won't leb well directly. 
 - why does llvm-mc disassembler arm think my cas is invalid instruction encoding? (check with cas.ssa -d D). 
   objdump thinks it's fine and it clearly runs correctly. 
-- wasm fence instruction
 - TODO: harec/src/gen.c: `[arm64/emit.fr/fixup_arm64] offset from dynamic import builtin_type_nomem+4` but would work when done as one compilation unit.
 
 ## backend symbols rework
@@ -334,8 +339,6 @@ need to be careful about the refs which have tags in the high bits so won't leb 
   it's probably emit_suspended_inlinables but it's confusing what Target.finish_module is supposed to do for you. 
   and it's confusing whether make_exec should do something or just assert that you're in a mode that doesn't need it. 
 - at the end you should make always sure there are no strong imports that haven't been patched. 
-- sane type errors for signetures when targetting wasm. it might even be easy now that i deduplicate them. 
-  also let frontends directly provide one for imports since they probably know instead of only trying to infer from callsites. 
 
 ## don't rely on libc
 
@@ -479,7 +482,6 @@ program_source:26:5: error: constant sampler must be declared constexpr
 ## Quest Lines
 
 - compiler: add a defer expression that lets you run cleanup from a closure even if you jump out past it
-- wasm:     get all the ssa tests passing verifier
 - linux:    make all the tests pass with -syscalls
 - external: make it not a 100 line copy-paste to setup a driver that links an object file
 
@@ -788,9 +790,6 @@ the right/fast/safe/whatever thing to do is also the easy thing to do.
   - enable static_memmove for simplify blit when examples/import_wasm/run.fr jitting. 
     maybe just use the memory.copy instruction. 
 - make import_wasm not crash on implicit return 
-- it would be nice if the backend did a bit of typechecking when you were 
-targetting wasm so it could give you the errors instead of producing a program 
-that fails the wasm verifier
 - bake for list/hashmap need to get rid of uninit memory
 - List.shrink_to_fit for places that i push and then return a slice so you can free it on allocators that don't track size
 

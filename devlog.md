@@ -1,4 +1,27 @@
 
+## (Aug 17)
+
+trying to get dump_wasm to work in wasm
+- mega confusion caused by fixup_wasm32()/WasmAddr doing leb128_unsigned() instead of leb128_signed(). 
+  (manifested as function pointer table indices having negative values).
+- it's so ass that Uint8Array.set(ArrayBuffer) silently does nothing and Uint8Array.set(new Uint8Array(ArrayBuffer)) works
+- works now with some load bearing debug prints 
+- it's sad that if you throw an exception you don't get a stack trace that shows the wasm functions
+  but if you hit the unreachable instruction you do. 
+  
+make it work with the normal runtime
+- finish_alias: add to exports list
+- franca_runtime_init references libc_allocator and `__libc_start_main` are a pain because there's no weak imports
+- finish the plumbing for AsmFunction
+
+ditto kalidescope. i want to get it to the point of crashing because you can't jit. 
+- need .frc to work a bit for the generated module in opt/fold.fr
+  - convert int neg to sub
+  - store ret_cls in FncFlags
+- insert a extuw for i64.extend(16/8)_s (same reason as for cmp)
+- just disable loadopt for now (TODO: fix real flow problem)
+- TODO: still getting junk vptr indices
+
 ## (Aug 16)
 
 - easy uses of local.tee 

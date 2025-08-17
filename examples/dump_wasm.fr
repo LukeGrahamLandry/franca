@@ -20,6 +20,9 @@ dump :: fn(input: []u8) void = {
     out := u8.list(temp()); out := out&;
     
     import_types := temp().alloc_uninit(Wasm.TypeIdx, w.imported_function_count);
+    f_count := min(w.functions.len, w.code.len);
+    function_names := temp().alloc_zeroed(Str, f_count + w.imported_function_count);
+    
     ::enum(Wasm.ValType);
     if w.imports.len > 0 {
         @fmt(out, "=== BEGIN IMPORT SECTION ===\n");
@@ -27,10 +30,11 @@ dump :: fn(input: []u8) void = {
         each w.imports { it |
             ::tagged(@type it.desc);
             @fmt(out, "- '%' from '%' is a %", it.name.items(), it.module.items(), it.desc&.tag());
-            @if_let(it.desc) fn Function(it) => {
+            @if_let(it.desc) fn Function(type) => {
                 @fmt(out, "\n    - ");
-                show_type(out, w, it);  
-                import_types[n] = it; n += 1;
+                show_type(out, w, type);  
+                function_names[n] = @tfmt("%$%", it.name.items(), it.module.items());
+                import_types[n] = type; n += 1;
             };
             @fmt(out, "\n");
         };
@@ -42,9 +46,12 @@ dump :: fn(input: []u8) void = {
     
     if w.exports.len > 0 {
         @fmt(out, "=== BEGIN EXPORT SECTION ===\n");
-        each w.exports { it |
+        enumerate w.exports { i, it |
             ::enum(Wasm.ImportType);
             @fmt(out, "- '%' % %\n", it.name.items(), it.type, it.id);
+            @if_let(it.type) fn Func() => {
+                function_names[it.id.zext()] = it.name.items();
+            };
         };
         @fmt(out, "=== END EXPORT SECTION ===\n\n");
     } else {
@@ -125,10 +132,11 @@ dump :: fn(input: []u8) void = {
         print(out.items()); out.clear();
     };
     
-    f_count := min(w.functions.len, w.code.len);
     locals := Wasm.ValType.list(temp());
     enumerate w.code { i, code | 
-        @fmt(out, "[F%]: \n- signeture ", i);
+        abs_index := i + w.imported_function_count;
+        name := function_names[abs_index];
+        @fmt(out, "[F%]: %\n- signeture ", i, name);
         if i < w.functions.len {
             ty := w.functions[i];
             show_type(out, w, ty);

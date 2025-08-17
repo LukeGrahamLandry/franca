@@ -9,9 +9,11 @@ EmitWasmFn :: @struct(
     locals: []i32 = empty(),
     a: List(u8),
     block_stack: List(*Qbe.Blk),
+    
+    // These are just for a debug assertion. TODO: maybe remove them. 
+    local_def := zeroed Qbe.BSet,
+    local_use := zeroed Qbe.BSet,
 );
-
-WASM_INDEX_PADDING :: 4;
 
 fn record_wasm_function_index(m: *Qbe.Module, id: Qbe.Sym) void = {
     use_symbol(m, id) { s |
@@ -19,9 +21,6 @@ fn record_wasm_function_index(m: *Qbe.Module, id: Qbe.Sym) void = {
         s.referenced = true;
     };
     m.local_needs_reloc&.push(id);
-    
-    // TODO: rn franca only works if you add this because -freestanding doesn't export main()
-    @if(TODOWASM) m.exports&.push(id);
 }
 
 fn emit_func_wasm32(f: *Qbe.Fn) []Ty(Fixup, Qbe.Sym) = {
@@ -33,6 +32,8 @@ fn emit_func_wasm32(f: *Qbe.Fn) []Ty(Fixup, Qbe.Sym) = {
         block_stack = list(temp()), 
     ); e := e&;
    
+    @if(TODOWASM) @if(!f.lnk.export) e.m.exports&.push(f.lnk.id);
+    
     record_wasm_function_index(e.m, f.lnk.id);
     e.pad(WASM_INDEX_PADDING); // reserve space for length of code. 
     
@@ -44,6 +45,8 @@ fn emit_func_wasm32(f: *Qbe.Fn) []Ty(Fixup, Qbe.Sym) = {
     e.op(.Unreachable);  // keep the verifier happy (wihtout this the implicit return needs to typecheck)
     e.op(.End);
     code.next = code.next.offset(e.a.len());
+    
+    @debug_assert_eq({ bsdiff(e.local_use&, e.local_def&); e.local_use&.bscount() }, 0, "use without def");
     
     size_of_func := e.a.len;
     e.a.len = 0;
@@ -84,7 +87,6 @@ pack_wasm_result_type_outlined :: fn(m: *Qbe.Module, prev_len: i64) i32 = {
     s := m.wasm_types&;
     c := m.wasm_function_type_count&;
     
-    // deduplicate them. there are likely a small set of block types repeated a lot. 
     bytes := s.mmapped.slice(prev_len, s.len());
     if m.wasm_types_cache&.get(bytes) { i |
         s.next = s.next.offset(-bytes.len());  // take it back now yall
@@ -103,11 +105,13 @@ fn pack_locals(e: *EmitWasmFn) void = {
    
     e.locals = temp().alloc_uninit(i32, e.f.ntmp.zext());
     e.locals.interpret_as_bytes().set_bytes(0xFF);  // -1
+    e.local_def = init_bitset(e.locals.len);
+    e.local_use = init_bitset(e.locals.len);
     
     total_locals: i32 = 0;
     for_pars e.f { i |
         e.locals[i.to.val()] = total_locals;
-        // TODO: use cls to say function signeture. 
+        e.local_def&.bsset(i.to.val());
         total_locals += 1;
         i.set_nop();
     };
@@ -181,7 +185,6 @@ fn emit_flow(e: *EmitWasmFn, b: *Qbe.Blk, i: *Qbe.Ins) void = {
     
     // my loops never produce an output (because they never fall through, you break out to a block). 
     // blocks output whatever types thier end block expects. 
-    // TODO: cache wasm_type_preleb(.EmptyBlock) for the common case (but really should deduplicate all types)
     if @is(flow, .block, .loop) {
         type := pack_wasm_result_type e.f.globals { $yield_arg #duplicated |
             for_phi_rev_TODOSLOW b { p |
@@ -246,6 +249,7 @@ fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
             
             // Lookup a function reference in a table and call it. 
             e.op(.CallIndirect);
+            @debug_assert_eq(rtype(i.arg&[1]), .RCall);
             type_index := i.arg&[1].rsval().intcast();
             @debug_assert_ge(type_index, 0);
             leb128_unsigned(e.a&, type_index); // type index
@@ -258,25 +262,25 @@ fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
                     fn CBits() => e.push_bits(c, i.cls());
                     fn CAddr() => {
                         use_symbol(e.m, c.sym) { symbol | 
+                            e.op(@if(i.cls().is_wide(), .I64_Const, .I32_Const));
                             // if it's a function address we have to wait until the end to know its index in the table. 
                             if symbol.kind == .Local && symbol.segment == .MutableData {
-                                e.op(@if(i.cls().is_wide(), .I64_Const, .I32_Const));
                                 leb128_signed(e.a&, symbol.offset + c.bits());
                             } else {
                                 @debug_assert(symbol.segment != .ConstantData, "TODO: ConstantData");
                                 patch_at := u8.raw_from_ptr(e.a.maybe_uninit.ptr.offset(e.a.len));
                                 push_fixup(e.m, symbol, (
                                     patch_at = patch_at, 
-                                    type = (WasmAddr = (wide = i.cls().is_wide(), increment = c.bits().trunc())),
+                                    type = (WasmAddr = (increment = c.bits().trunc())),
                                 ));
-                                // note: we don't push an op here. 
-                                e.pad(WASM_INDEX_PADDING);  // TODO: might need more space than this.
+                                e.pad(WASM_INDEX_PADDING);
                             };
                         };
                     }
                 };
             }
             fn RTmp() => {
+                e.local_use&.bsset(i.arg&[0].val());
                 local_index := e.locals[i.arg&[0].val()];
                 @debug_assert_ne(local_index, -1, "read from tmp without assigned local");
                 e.op(.LocalGet);
@@ -295,12 +299,14 @@ fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
             };
             @debug_assert(rtype(i.to) == .RTmp, "pop to tmp");
             local_index := e.locals[i.to.val()];
+            e.local_def&.bsset(i.to.val());
             @debug_assert_ne(local_index, -1, "write to % without assigned local", i.to);
             e.op(.LocalSet);
             leb128_unsigned(e.a&, local_index.zext());
         }
         fn local_tee() => {
             @debug_assert(rtype(i.to) == .RTmp, "pop to tmp");
+            e.local_def&.bsset(i.to.val());
             local_index := e.locals[i.to.val()];
             @debug_assert_ne(local_index, -1, "write to % without assigned local", i.to);
             e.op(.LocalTee);
@@ -368,8 +374,16 @@ fn index_patch(e: *EmitWasmFn, id: Qbe.Sym, _space: Wasm.ImportType) void = {
     e.pad(WASM_INDEX_PADDING);
 }
 
+// This is the amount of space reserved when i need to output a leb index too soon so it needs a patch. 
+// The placeholder is hlt instructions so hopefully you'll notice immediately if it isn't filled (because of a compiler bug).
+// After the patch the extra space is filled with zero bytes with just the continuation bit set 
+// (which is less annoying to look at in the disassembly than if i used nops, but it also hides the bloat which is bad). 
+// So a trivial size optimization would be to go over the whole module and repack the numbers. 
+// For signed, 3 bytes limits you to indices <262144 which ought to be enough for anybody :).
+WASM_INDEX_PADDING :: 3;
+
 fn pad(e: *EmitWasmFn, count: i64) void = range(0, count) { _ |
-    e.op(.Nop);
+    e.op(.Unreachable);
 };
 
 fn op(e: *EmitWasmFn, o: Wasm.Inst) void = {
@@ -379,24 +393,26 @@ fn op(e: *EmitWasmFn, o: Wasm.Inst) void = {
 
 fn fixup_wasm32(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_reloc: *?Fixup) void = {
     @match(fixup.type) {
+        // used when the value is an immediate 
         fn WasmIndex() => {
+            @debug_assert(symbol.segment == .Code);
             @debug_assert_ne(symbol.got_lookup_offset, -1, "missing index for $%", symbol.name);
             lst: List(u8) = fixed_list(ptr = u8.ptr_from_raw(fixup.patch_at), len = WASM_INDEX_PADDING);
-            leb128_unsigned(lst&, symbol.got_lookup_offset);
+            leb128_unsigned(lst&, symbol.got_lookup_offset, WASM_INDEX_PADDING);
         }
+        // used when producing the value on the stack
         fn WasmAddr(it) => {
             lst: List(u8) = fixed_list(ptr = u8.ptr_from_raw(fixup.patch_at), len = WASM_INDEX_PADDING);
-            o := @if(it.wide, Wasm.Inst.I64_Const, Wasm.Inst.I32_Const);
-            lst&.push(@as(u8) o);
             value := if(symbol.segment == .Code, => symbol.got_lookup_offset, => symbol.offset + it.increment.zext());
             @debug_assert_ge(value, 0, "missing index for $%", symbol.name);
-            leb128_unsigned(lst&, value);
+            leb128_signed(lst&, value, WASM_INDEX_PADDING); // NOTE: immediate of T.const is always signed
         }
         fn DataAbsolute(it) => {
             if symbol.segment == .Code {
                 @debug_assert(it.increment == 0 && symbol.got_lookup_offset >= 0, "invalid code fixup");
                 i64.ptr_from_raw(fixup.patch_at)[] = symbol.got_lookup_offset;
             } else {
+                @debug_assert(symbol.kind == .Local);
                 // the symbol's offset already includes :WasmZeroPage
                 i64.ptr_from_raw(fixup.patch_at)[] = symbol.offset + it.increment;
             }
@@ -425,15 +441,21 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     data_size := data_seg.len() - wasm_page_size;  // :WasmZeroPage
     memory_reserved += data_size;
     
+    // TODO: allow these, they're just the same. zeroinit can go at the end so you don't need to include the bytes to init it. 
+    @assert_eq(m.segments&[.ConstantData]&.len(), m.goal.max_got_size, "wasm constdata len");
+    @assert_eq(m.segments&[.ZeroInitData]&.len(), 0, "wasm bss len");
+    
     // TODO: remove
     code_count := m.segments&[.Code]&.len() - m.goal.commands_size_guess;
     @if(show_backend_stats())
     @eprintln(">>> % bytes of code, % bytes of data.", code_count, data_size);
     
+    @debug_assert(m.imports.len == 0);
     // import functions ids start at zero. 
     // we need to know how many imports there are before we can start patching anything. 
     for_symbols m { id, symbol | // :SLOW  just keep list of pending symbols instead
-        if symbol.kind == .Pending && symbol.fixups.len != 0 {
+        is_import := @is(symbol.kind, .Pending, .DynamicPatched);
+        if is_import && symbol.fixups.len != 0 {
             symbol.got_lookup_offset = m.imports.len;
             m.imports&.push(id); 
             symbol.kind = .DynamicPatched;
@@ -450,10 +472,14 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
                 @assert(symbol.got_lookup_offset != -1, "missing local function $%", symbol.name);
                 symbol.got_lookup_offset += m.imports.len;
             };
+            @debug_assert(symbol.got_lookup_offset != -1 || symbol.segment == .MutableData, "% %", symbol.name, symbol.segment);
             m.do_fixups(rawptr_from_int(0), symbol);
         };
     };
     
+    // TODO: better error when you run out of commands_size_guess or better just dynamically allocate this 
+    //       becaause offsets don't matter (make sure im not relying on pointer stability here but i don't think so).
+    //       needed because you run out fast if you want to export every function so you get symbol names. 
     code_segment := m.segments&[.Code]&;
     chunks := list([]u8, temp());
     cursor: List(u8) = fixed_list(ptr = code_segment.mmapped.ptr, len = m.goal.commands_size_guess);  // :UnacceptablePanic
@@ -526,6 +552,7 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
         };
     }
     
+    // TODO: reserve index 0 as null for sanity purposes
     // :OnlyOneTable for indirect function calls
     @if(m.wasm_has_any_indirect_calls)
     push_buf { buf |
@@ -586,7 +613,7 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     push_buf { buf |
         buf.push(@as(u8) Wasm.Section.Export);
         uleb_patch_delta buf {
-            leb128_unsigned(buf, m.exports.len + 1);
+            leb128_unsigned(buf, m.exports.len + 2);
             for m.exports& { id |
                 use_symbol(m, id) { s |
                     @debug_assert_ne(s.got_lookup_offset, -1, "unassigned got_lookup_offset %", s.name);
@@ -603,6 +630,14 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
                 leb128_unsigned(buf, name.len);
                 push_all(buf, name);
                 buf.push(@as(u8) Wasm.ImportType.Memory);
+                leb128_unsigned(buf, 0);
+            };
+            
+            {
+                name := "__stack_base";
+                leb128_unsigned(buf, name.len);
+                push_all(buf, name);
+                buf.push(@as(u8) Wasm.ImportType.Global);
                 leb128_unsigned(buf, 0);
             };
         };
@@ -622,7 +657,7 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
             leb128_unsigned(buf, 0);  // elem tag for active, table 0, funcref
             // offset in table
             push(buf, @as(u8) Wasm.Inst.I32_Const);
-            leb128_unsigned(buf, 0);
+            leb128_signed(buf, 0);
             push(buf, @as(u8) Wasm.Inst.End);
             
             n := f_count+m.imports.len;
@@ -684,6 +719,7 @@ fn uleb_patch_delta(buf: *List(u8), $body: @Fn() void) void = {
     length := buf.len - start;
     buf.len = start - PAD;
     leb128_unsigned(buf, length, PAD);
+    @debug_assert_eq(buf.len - (start - PAD), PAD);
     buf.len += length;
 }
 

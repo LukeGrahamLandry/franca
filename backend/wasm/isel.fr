@@ -9,12 +9,18 @@
 //! - no instruction for ordered/unordered fcmp
 //!
 
+//
+// I AM AWARE THIS GENERATES GARBAGE CODE! WIP!
+//
 // TODO: remove redundant push-pop pairs
 //       like when you pop it off, do some stuff, then push it again: you could just use tee and leave it on the stack. 
 // TODO: reorder + flip args to create redundant push-pop pairs
 // TODO: address offset folding 
 // TODO: more tests for dynalloc
 // TODO: make it work with elide_abi_slots and simplify_jump_chains
+// TODO: `%c =l ceqK %a, %b; jnz %c;` generates `K.eq i64.extend_i32_u i32.wrap_i64 br_if` instead of `K.eq br_if`,
+//        probably same problem for address computation that's used immediately. 
+//
 
 fn wasm_isel(f: *Qbe.Fn) void = {
     assign_alloc_slots(f);
@@ -151,11 +157,6 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
         return();
     };
     
-    if o == .ceqw {
-        Simplify'fix_ceqw_not(f, i);  // TODO: this is probably a dumb place to do this. 
-        o = i.op();
-    };
-    
     @match(o) {
         fn push() => {
             @debug_assert(i.to == QbeNull);
@@ -186,8 +187,14 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
             f.sel_byteswap(i);
             return();
         }
+        fn neg() => if k.is_int() {
+            o = .sub;
+            i.set_op(.sub);
+            i.arg&[1] = Qbe.ConZero;
+            i.arg&.items().swap(0, 1);
+        };
         @default => {
-            if is_par(o) || (@is(o, .pop, .dbgloc)) {  // TODO: call_indirect
+            if is_par(o) || (@is(o, .pop, .dbgloc)) {
                 f.emit(i[]);
                 return();
             };
@@ -197,10 +204,13 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
     if i.to != QbeNull {
         f.wasm_pop(i.cls(), i.to);
     };
-
+    
+    // TODO: this is kinda wrong for the ext, it's only if k=kl && k(arg)=kw, but this way works just with two casts instead of one. 
+    //       (problem is argcls is Kw but wasm wants i64 input if the output is i64)
     // our cmp can return Kw or Kl, but wasm always returns I32
-    if iscmp(o) && i.cls() == .Kl {
-        i.set_cls(.Kw);
+    needs_ext := iscmp(o) || @is(o, .extsh, .extsb);
+    if needs_ext && i.cls() == .Kl {
+        i.set_cls(.Kw); k = .Kw;
         f.emit(.extuw, .Kl, QbeNull, QbeNull, QbeNull);
     };
     
@@ -289,7 +299,7 @@ fn wasm_push(f: *Qbe.Fn, k: Qbe.Cls, r: Qbe.Ref) void = {
             };
             
             if k != t.cls {
-                @debug_assert(k.is_int() && t.cls.is_int());
+                @debug_assert(k.is_int() && t.cls.is_int(), "non-int push wrong cls % %", r, => printfn(f, f.globals.debug_out));
                 o: Qbe.O = @if(k == .Kw, .truncl, .extuw);
                 f.emit(o, k, QbeNull, QbeNull, QbeNull);
                 k = t.cls;

@@ -88,9 +88,8 @@ FixupType :: @tagged(
         got_load := false /*only used when .Relocatable*/
     ), // TODO: add safety checks for size of Qbe.Con.bits.i
     
-    // wasm
     WasmIndex,
-    WasmAddr: @struct(increment: u32, wide: bool),
+    WasmAddr: @struct(increment: u32),
 );
 
 Fixup :: @struct(
@@ -271,8 +270,8 @@ fn emit_data(self: *QbeModule, dat: Dat2) void = {
         //       to materialize things made by import_c or meta/parse. 
         //@debug_assert_ne(self.goal.type, .JitOnly, "TODO: the franca compiler doens't do this because the data's already in the comptime address space\nat the very least you need to mmap something for ZeroInitData before you can turn this on.");
         ::enum(@type self.goal.type);
-        if self.goal.type == .JitOnly {
-            @debug_assert_ne(dat.seg, .ZeroInitData, "no allocation for jitted bss");
+        if self.goal.type == .JitOnly || self.goal.arch == .wasm32 {
+            @debug_assert_ne(dat.seg, .ZeroInitData, "no allocation for jitted/wasm bss");
         } else {
             dat.seg = .ZeroInitData;
         }
@@ -297,6 +296,7 @@ fn emit_data(self: *QbeModule, dat: Dat2) void = {
         }
     };    
     next[] = next[].offset(dest.len);
+    // TODO: wasm data export can just be a global that has the pointer in it? 
     if self.goal.arch != .wasm32 {
         maybe_add_export(self, dat.id, dat.export);
         if self.goal.exe_debug_symbol_table {
@@ -418,7 +418,7 @@ fn declare_alias(m: *Qbe.Module, target: Qbe.Sym, alias: *Qbe.Lnk) void = {
     //       that doesn't have a got_lookup_offset yet i think. might not be worth dealing with.  -- Jul 22, 2025
     // TODO: inlinable should work like local. but that needs emit_suspended_inlinables to be aware of it which i don't want to deal with yet. 
     if target_kind == .Local { // || !target_inline.is_null() {
-        m.finish_alias(target, alias.id);
+        m.finish_alias(target, alias.id, alias.export);
     } else {
         @debug_assert(m.goal.arch != .wasm32, "TODO: alias_via_bounce doesn't work on wasm");
         alias_via_bounce(m, target, alias);
@@ -446,7 +446,8 @@ fn alias_via_bounce(m: *Qbe.Module, target: Qbe.Sym, alias: *Qbe.Lnk) void = {
 }
 
 // TODO: maybe_add_export(alias)
-fn finish_alias(m: *Qbe.Module, target: Qbe.Sym, alias: Qbe.Sym) void = {
+fn finish_alias(m: *Qbe.Module, target: Qbe.Sym, alias: Qbe.Sym, export: bool) void = {
+    maybe_add_export(m, alias, export);
     use_symbol(m, target) { t | 
         @debug_assert_eq(t.kind, .Local, "alias(non local: %)", t.name);
         use_symbol(m, alias) { a | 
@@ -706,10 +707,11 @@ fn llvm_mc_dis(out: *List(u8), code: []u8, arch: Arch) void = {
     #use("@/lib/sys/subprocess.fr");
     #use("@/lib/sys/fs.fr");
     
-    if !is_linking_libc() {
+    if TODOWASM || !is_linking_libc() {
         out.push_all("no disassembler included\n");
         return();
     };
+    @if(TODOWASM) unreachable();
     
     arch_name := @match(arch) {
         fn x86_64()  => "--arch=x86-64";
@@ -787,7 +789,7 @@ fn seal_debug_info(m: *QbeModule, debug_source_code: []u8, include: bool, files_
     if m.goal.type == .Exe {
         // TODO: figure out how to make this work for .Relocatable
         //       it is needed for relocations without libc on linux (in franca_runtime_init). 
-        m.do_jit_fixups(base_p, @if(harvard, .ConstantData, .Code), 0);
+        m.do_jit_fixups(base_p, @if(harvard, .MutableData, .Code), 0);
     };
     
     ::[]u64;
