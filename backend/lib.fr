@@ -711,18 +711,31 @@ fn fails_typecheck(f: *Qbe.Fn) ?Str = {
             if i.op() == .blit1 && rtype(i.arg&[0]) != .RInt {
                 return(Some = @tfmt("blit1 expected a0 to be RInt not %", rtype(i.arg&[0])));
             };
+            if i.op() == .vastart && !f.vararg {
+                return(Some = "used vastart in non-variadic function");
+            };
         };
     
         r := b.jmp.arg;
         jump_error := false;
         if is_ret(b.jmp.type) {
-            k: Qbe.Cls = @if(b.jmp.type == .retc, .Kl, @if(b.jmp.type.raw() >= Qbe.J.retsb.raw(), .Kw, b.jmp.type.cls()));
+            scalar := b.jmp.type != .retc;
+            k: Qbe.Cls = @if(!scalar, .Kl, @if(b.jmp.type.raw() >= Qbe.J.retsb.raw(), .Kw, b.jmp.type.cls()));
             jump_error = !usecheck(r, k, f);
+            @if(!jump_error) if !scalar {
+                jump_error = rtype(f.retty) != .RType || f.ret_cls != .Ke;
+            } else {
+                if b.jmp.type == .ret0 {
+                    jump_error = f.ret_cls != .Kx || b.jmp.arg != QbeNull;
+                } else {
+                    jump_error = !usecheck(f.ret_cls, k);
+                };
+            };
         };
         if b.jmp.type == .jnz {
             jump_error = !usecheck(r, .Kw, f) || !@is(rtype(b.jmp.arg), .RTmp, .RCon);
         };
-        if @is(b.jmp.type, .ret0, .hlt) {
+        if b.jmp.type == .hlt {
             jump_error = b.jmp.arg != QbeNull;
         };
         if jump_error {
@@ -743,8 +756,11 @@ fn fails_typecheck(f: *Qbe.Fn) ?Str = {
 fn usecheck(r: Qbe.Ref, k: Qbe.Cls, f: *Qbe.Fn) bool = {
     rtype(r) == .RTmp || return(true);
     t := f.get_temporary(r);
-    t.cls == k || (t.cls == .Kl && k == .Kw)
+    usecheck(k, t.cls)
 }
+
+fn usecheck(k_ref: Qbe.Cls, k_tmp: Qbe.Cls) bool #inline = 
+    k_tmp == k_ref || (k_tmp == .Kl && k_ref == .Kw);
 
 wasm_page_size :: 65536;
 

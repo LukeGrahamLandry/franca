@@ -220,11 +220,12 @@ fn to_rcall(r: Qbe.Ref, $RCall: Type) RCall #generic = {
     r
 }
 
+// TODO: use move_end_of_block_to_scratch? how common are large blocks that don't make any calls? 
 native_abi :: fn(
     f: *Qbe.Fn,
     $Params: Type, 
-    $selpar: @Fn(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) Params,
-    $selcall: @Fn(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins, allocs_out: *List(Qbe.Ins)) void,
+    $selpar: @Fn(f: *Qbe.Fn, par_i: []Qbe.Ins) Params,
+    $selcall: @Fn(f: *Qbe.Fn, arg_i: []Qbe.Ins, allocs_out: *List(Qbe.Ins)) void,
     $selvastart: @Fn(f: *Qbe.Fn, fa: Params, ap: Qbe.Ref) void,
     $selvaarg: @Fn(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) void, 
     $selret: @Fn(b: *Qbe.Blk, f: *Qbe.Fn) void,
@@ -237,7 +238,7 @@ native_abi :: fn(
     /* lower parameters */
     i := f.find_past_last_param();
     m := f.globals;
-    p := selpar(f, f.start.ins.ptr, i);
+    p := selpar(f, between(f.start.ins.ptr, i));
     f.realloc_for_params(i);
 
     /* lower calls, returns, and vararg instructions */
@@ -257,15 +258,14 @@ native_abi :: fn(
             @match(i[].op()) {
                 fn call() => {
                     i0 := b.find_first_arg(i[]);
-                    selcall(f, i0, i[], il&);
+                    selcall(f, between(i0, i[]), il&);
                     i[] = i0;
                 }
                 fn vastart() => selvastart(f, p, i.arg&[0]);
                 fn vaarg() => selvaarg(f, b, i[]);
-                // TODO: check this in fails_typecheck
-                fn arg() => @panic("loose arg instruction (missing call)");
-                fn argc() => @panic("loose argc instruction (missing call)");
                 @default => {
+                    // TODO: check this in fails_typecheck
+                    @debug_assert(!@is(i[].op(), .arg, .argc, .arge));
                     f.emit(i[][]);
                 };
             };

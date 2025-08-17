@@ -6,141 +6,96 @@
 //! - hidden env parameter is passed in a global (which is good enough until i want to support some extension that adds threads)
 
 // TODO: untangle Kw vs Kl: vararg, indirect return
+// TODO: use alloc instead of direct RSlot for varargs so it's consistant with the other targets. 
 
+#use("@/backend/abi.fr");
 fn wasm_abi(f: *Qbe.Fn) void = {
-    m := f.globals;
-    
+    f.native_abi(Qbe.Ref, selpar, sel_call, selvastart, selvaarg, selret);
+    f.slot = f.slot.align_to(4);
+}
+
+selpar :: fn(f: *Qbe.Fn, par_i: []Qbe.Ins) Qbe.Ref = {
     // params come in as locals, not on the stack, which seems odd, 
     // but to be fair, the first thing i would do here is save them in locals anyway so i can't complain. 
-    // we leave par instructions because then we can look at them later to know the function signeture. 
-    // emit.fr just skips them and creates thier locals directly. 
-    for_pars f { i |
+    // we leave par instructions, emit.fr needs to create those locals as the first ones (instead of ordered by tmp index). 
+    
+    // TODO: check if they said its a type but really there's only one scalar 
+    f.retr = @if(f.retty != QbeNull, f.newtmp("abi", .Kl), QbeNull);
+    va_base := @if(f.vararg, f.newtmp("va", .Kl), Qbe.Null);
+    
+    if va_base != QbeNull {
+        // append varargs pointer
+        f.emit(.par, .Kl, va_base, QbeNull, QbeNull);
+    };
+    
+    m := f.globals;
+    par_cls := Qbe.Cls.list(par_i.len, temp());
+    each_rev par_i { i |
         @match(i.op()) {
             fn pare() => {
-                i[] = make_ins(.global_get, .Kl, i.to, f.symcon(m.wasm_symbol_env_parameter), QbeNull);
+                f.emit(.global_get, .Kl, i.to, f.symcon(m.wasm_symbol_env_parameter), QbeNull);
             }
             fn parc() => {
                 // TODO: we're supposed to insert a copy here
                 // TODO: check if they said its a type but really there's only one scalar so the ir expects a pointer but we got a value. 
-                i.set_op(.par);
-                i.arg&[0] = QbeNull;
+                // TODO: the par should be .Kw for the abi
+                f.emit(.par, i.cls(), i.to, Qbe.Null, Qbe.Null);
+                par_cls&.push(i.cls());
             }
-            @default => ();
+            fn par() => {
+                f.emit(.par, i.cls(), i.to, Qbe.Null, Qbe.Null);
+                par_cls&.push(i.cls());
+            }
+            @default => unreachable();
         };
     };
     
-    // TODO: check if they said its a type but really there's only one scalar 
-    retr := @if(f.retty != QbeNull, f.newtmp("abi", .Kl), QbeNull);
-    ret_cls := Qbe.Cls.Ke;
-    
-    va_base := @if(f.vararg, f.newtmp("va", .Kl), Qbe.Null);
-    for_blocks f { b |
-        changed := false; 
-        f.reset_scratch();
-        
-        if is_ret(b.jmp.type) && b.jmp.arg != QbeNull {
-            @debug_assert(b.jmp.type != .ret0, "J.ret0 had arg");
-            // TODO: check if they said its a type but really there's only one scalar 
-            is_scalar := b.jmp.type != .retc;
-            changed = true;
-            if is_scalar {
-                k := b.jmp.type.cls();
-                ret_cls = k;
-                if need_trunc(f, k, b.jmp.arg) {
-                    f.emit(.truncl, k, QbeNull, QbeNull, QbeNull);
-                    k = .Kl;
-                };
-                f.emit(.push, k, QbeNull, b.jmp.arg, QbeNull);
-            } else {
-                @debug_assert(retr != QbeNull, "missing indirect return pointer");
-                size := f.get_type(f.retty)[].header.size; 
-                f.emit(.blit1, .Kw, QbeNull, INT(zext size), QbeNull);
-                f.emit(.blit0, .Kw, QbeNull, b.jmp.arg, retr);  // src, dest
-            };
-            b.jmp.type = .ret0;
-            b.jmp.arg = QbeNull;
-        };
-
-        no_more_va_par := false;
-        for_insts_rev b { i | 
-            continue :: local_return;
-            
-            if i[].op() == .call {
-                f.move_end_of_block_to_scratch(b, i[], changed&);
-                i[] = sel_call(f, b, i[]);
-                continue();
-            };
-            i := i[];
-            
-            @match(i.op()) {
-                fn vastart() => {
-                    @assert(va_base != Qbe.Null, "tried to use vastart in non-variadic function");
-                    f.move_end_of_block_to_scratch(b, i, changed&);
-                    
-                    // unfortunatly we're doing this after we're in ssa form so need to use memory for mutability. 
-                    f.emit(.storel, .Kw, QbeNull, va_base, i.arg&[0]);
-                    continue();
-                }
-                fn vaarg() => {
-                    f.move_end_of_block_to_scratch(b, i, changed&);
-                    // move the pointer up by one slot and load the new value
-                    size := if(i.cls().is_wide(), => 8, => 4);
-                    @emit_instructions((f = f), (i.arg&[0], i.to, i.cls(), f.getcon(size-1), f.getcon(bit_not(size-1)), f.getcon(size)), """
-                    @start
-                        %old =l load %0
-                        %raw =l add %old, %3  # align
-                        %cur =l and %raw, %4  # ^
-                        %new =l add %cur, %5
-                        storel %new, %0
-                        %1   =2 load %cur
-                    """);
-                    continue();
-                }
-                fn par() => {
-                    if va_base != QbeNull && !no_more_va_par {
-                        f.move_end_of_block_to_scratch(b, i, changed&);
-                        f.emit(.par, .Kl, va_base, QbeNull, QbeNull);
-                    };
-                    no_more_va_par = true;
-                }
-                @default => ();
-            };
-            
-            if changed {
-                i = f.emit(i[]);
-            };
-        };
-        
-        if retr != QbeNull && f.start.identical(b) {
-            // prepend aggragate return pointer to our parameters
-            f.move_end_of_block_to_scratch(b, b.ins.ptr, changed&);
-            f.emit(.par, .Kl, retr, QbeNull, QbeNull);
-        };
-        
-        if changed {
-            f.copy_instructions_from_scratch(b); 
-        };
+    if f.retr != QbeNull {
+        // prepend aggragate return pointer to our parameters
+        f.emit(.par, .Kl, f.retr, QbeNull, QbeNull);
     };
-    
-    f.slot = f.slot.align_to(4);
     
     type := pack_wasm_result_type m { $yield_arg #duplicated |
-        for_pars f { i |
-            yield_arg(i.cls());
-        };
+        @if(f.retr != Qbe.Null) yield_arg(.Kl);
+        for_rev(par_cls, yield_arg);
+        @if(va_base != Qbe.Null) yield_arg(.Kl);
     } and { $yield_ret |
-        if(ret_cls != .Ke, => yield_ret(ret_cls));
+        if(!@is(f.ret_cls, .Ke, .Kx), => yield_ret(f.ret_cls));
     };
     save_signature(m, f.lnk.id, type);
     
-    when_debug_printfn(f, .Abi, "\n## After ABI lowering:\n");
-}
+    va_base
+};
 
-sel_call :: fn(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) *Qbe.Ins = {
-    arg0 := b.find_first_arg(i);
+selret :: fn(b: *Qbe.Blk, f: *Qbe.Fn) void = {
+    if !is_ret(b.jmp.type) || b.jmp.arg == QbeNull {
+        return();
+    };
+    @debug_assert(b.jmp.type != .ret0, "J.ret0 had arg");
+    // TODO: check if they said its a type but really there's only one scalar 
+    is_scalar := b.jmp.type != .retc;
+    if is_scalar {
+        k := f.ret_cls;
+        if need_trunc(f, k, b.jmp.arg) {
+            f.emit(.truncl, k, QbeNull, QbeNull, QbeNull);
+            k = .Kl;
+        };
+        f.emit(.push, k, QbeNull, b.jmp.arg, QbeNull);
+    } else {
+        @debug_assert_ne(f.retr, QbeNull, "missing indirect return pointer");
+        size := f.get_type(f.retty)[].header.size; 
+        f.emit(.blit1, .Kw, QbeNull, INT(zext size), QbeNull);
+        f.emit(.blit0, .Kw, QbeNull, b.jmp.arg, f.retr);  // src, dest
+    };
+    b.jmp.type = .ret0;
+    b.jmp.arg = QbeNull;
+};
+
+sel_call :: fn(f: *Qbe.Fn, args: []Qbe.Ins, il: *List(Qbe.Ins)) *Qbe.Ins = {
+    arg0, i := (args.ptr, args.ptr.offset(args.len));
     m    := f.globals;
     
-    type := type_index_for_call(f, b, i, arg0);
+    type := type_index_for_call(f, i, arg0);
     if f.get_sym(i.arg&[0]) { id, off | 
         msg :: "tried to call offset from symbol ($% + %)\nwhich is probably a mistake for any target but certainly not possible on wasm.";
         @debug_assert_eq(off, 0, msg, m.str(id), off);
@@ -163,8 +118,6 @@ sel_call :: fn(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) *Qbe.Ins = {
     call_arg1 := i.arg&[1];
     i.arg&[1] = CALL(type.intcast());
     f.emit(i[]);
-    
-    args := between(arg0, i);
     
     // varargs are passed by writing them to memory and appending that pointer as an argument. 
     is_va := false;
@@ -220,6 +173,25 @@ sel_call :: fn(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) *Qbe.Ins = {
     arg0
 };
 
+selvastart :: fn(f: *Qbe.Fn, va_base: Qbe.Ref, ap: Qbe.Ref) void = {
+    @debug_assert(va_base != Qbe.Null);
+    f.emit(.storel, .Kw, QbeNull, va_base, ap);
+};
+
+selvaarg :: fn(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) void = {
+    // move the pointer up by one slot and load the new value
+    size := if(i.cls().is_wide(), => 8, => 4);
+    @emit_instructions((f = f), (i.arg&[0], i.to, i.cls(), f.getcon(size-1), f.getcon(bit_not(size-1)), f.getcon(size)), """
+    @start
+        %old =l load %0
+        %raw =l add %old, %3  # align
+        %cur =l and %raw, %4  # ^
+        %new =l add %cur, %5
+        storel %new, %0
+        %1   =2 load %cur
+    """);
+};
+
 fn save_signature(m: *Qbe.Module, id: Qbe.Sym, type: i32) void = {
     use_symbol(m, id) { s |
         if s.wasm_type_index != -1 {
@@ -230,7 +202,7 @@ fn save_signature(m: *Qbe.Module, id: Qbe.Sym, type: i32) void = {
     }; 
 };
 
-fn type_index_for_call(f: *Qbe.Fn, b: *Qbe.Blk, call: *Qbe.Ins, arg0: *Qbe.Ins) i32 = {
+fn type_index_for_call(f: *Qbe.Fn, call: *Qbe.Ins, arg0: *Qbe.Ins) i32 = {
     void := call.to == QbeNull;
     scalar := !void && is_scalar(f, call.arg&[1]);
     pack_wasm_result_type f.globals { $yield_arg #duplicated |

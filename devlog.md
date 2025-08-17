@@ -1,4 +1,18 @@
 
+## (Aug 16)
+
+- easy uses of local.tee 
+- make frontends explicitly say the return Cls on functions instead of just picking one from the first ret encountered.
+  - because you need to be able to have a function that always ends with a hlt but still has a signeture like it returns something. 
+    like you're allowed to export `foo :: fn() i64 = unreachable();` and wasm type checker cares about the return type 
+    but previously there was no way to tell the backend what you wanted. added a .ssa test for that. 
+  - add debug checking for that in fails_typecheck()
+  - that makes it easier to do all the par stuff together in wasm_abi 
+    instead of spreading it out (no longer need to see all jmps before knowing signeture)
+  - updated example programs to set f.ret_cls
+  - made import_c not have inconsistant ret types when a function has an unreachable fall through return
+- make native_abi() pass slices instead of begin/end pointers. 
+
 ## (Aug 15)
 
 wasm improvements

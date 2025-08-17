@@ -1,5 +1,7 @@
 
 - TODOWASM
+- the TODOWASM block in bounce_body_call breaks the output of examples/import_wuffs/test.fr. 
+  (because that type of shim doesn't work with varargs maybe?)
 - crack down on smurf naming conventions (ie import("@/lib/alloc/debug_alloc.fr").DebugAlloc is kinda dumb). 
   could steal what zig does where a file is a struct. but that always annoys me because it makes you 
   pick one blessed struct to have the top level fields when the rest of your file is a namespace which looks odd. 
@@ -136,6 +138,7 @@ as different types even when they're the same size.
 - self compile in blink on (arm-macos and arm-linux) on github actions seems to hang forever sometimes? 
 - still a mystery bug in amd-linux. 
   race? seems improved by sleeping for a millisecond after spawning a thread. 
+  TODO: REMOVE THE SLEEP IN sys_clone !!
 - wuffs/gif.c fails at random
 - there have been very rare failures in my lua tests for a while
 - soft_draw.fr crashes when you quit the program
@@ -676,6 +679,15 @@ just a problem with how that program is doing directions not with the app lib)
 - :DEPTH (which is also for msaa)
 - bindgroups_cache 
 - comptime thing to generate SgShaderDesc
+- this happens occasionally: (but i have to redo the whole wgpu shit anyway because just yoloing a specific version of libwebgpu_dawn.dylib is not acceptable) 
+```
+franca examples/mandelbrot_ui.fr -wgpu -jit
+panic! graphics/web/webgpu.fr:1221:34
+wgpuDeviceCreateCommandEncoder :: fn(device: Device, descriptor: *CommandEncoderDescriptor) CommandEncoder #import("webgpu");
+Compile Error: we hit a dynamicimport ('wgpuDeviceCreateCommandEncoder' from 'webgpu') with no comptimeaddr for jit
+the frontend should make sure this doesn't happen. 
+TODO: this happens when compiling targetting libc from a compiler built without libc on linux
+```
 
 ## stuff i broke
 

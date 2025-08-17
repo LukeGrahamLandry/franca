@@ -2041,6 +2041,9 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *T
     c.f.vararg = ty.is_variadic;
     rty := ty.return_ty;
     c.f.retty = c.ir_index(rty);
+    if rty.kind != .TY_VOID {
+        c.f.ret_cls = @if(c.f.retty != Qbe.Null, .Ke, rty.cls());
+    };
     
     tok = c.skip(tok, "{");
 
@@ -2066,12 +2069,14 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *T
     
     _ := c.compound_stmt(tok&, tok);
     if c.b.jmp.type == .Jxxx {
-        // void functions are allowed to just fall off the end
-        // it would be nice to give an error otherwise but it's non-trivial to decide if this codepath is reachable. 
-        // TODO: also for main() falling off the end means returning 0
-        c.b.jmp = @if(rty.is_void(), (type = .ret0, arg = QbeNull), (type = .retw, arg = QbeConZero));
-        if c.f.retty != QbeNull {  // sketchy
-            c.b.jmp.type = .retc;
+        c.b.jmp = @if_else {
+            // void functions are allowed to just fall off the end
+            @if(rty.is_void())    => (type = .ret0, arg = QbeNull);
+            // for main() falling off the end is legal and means returning 0
+            @if(f.name == "main") => (type = .retw, arg = QbeConZero);
+            // it would be nice to give an error otherwise but it's non-trivial to decide if this codepath is reachable. 
+            // TODO: does the spec say i have to just give you garbage or is it ub that lets me crash?
+            @else                 => (type = .hlt, arg = QbeNull);
         };
     };
     

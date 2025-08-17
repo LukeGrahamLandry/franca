@@ -10,8 +10,8 @@
 //!
 
 // TODO: remove redundant push-pop pairs
+//       like when you pop it off, do some stuff, then push it again: you could just use tee and leave it on the stack. 
 // TODO: reorder + flip args to create redundant push-pop pairs
-// TODO: if a local is used again but also by the next instruction, use local.tee
 // TODO: address offset folding 
 // TODO: more tests for dynalloc
 // TODO: make it work with elide_abi_slots and simplify_jump_chains
@@ -151,6 +151,11 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
         return();
     };
     
+    if o == .ceqw {
+        Simplify'fix_ceqw_not(f, i);  // TODO: this is probably a dumb place to do this. 
+        o = i.op();
+    };
+    
     @match(o) {
         fn push() => {
             @debug_assert(i.to == QbeNull);
@@ -173,10 +178,10 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
         fn loaduw() => if k == .Kw {
             o = .load;
         };
-        fn cod()  => { sel_nan_cmp(f, i, .ceqd, .and); return(); };
-        fn cuod() => { sel_nan_cmp(f, i, .cned, .or); return(); };
-        fn cos()  => { sel_nan_cmp(f, i, .ceqs, .and); return(); };
-        fn cuos() => { sel_nan_cmp(f, i, .cnes, .or); return(); };
+        fn cod()  => { sel_nan_cmp(f, i, .ceqd, .and, .Kd); return(); };
+        fn cuod() => { sel_nan_cmp(f, i, .cned, .or, .Kd); return(); };
+        fn cos()  => { sel_nan_cmp(f, i, .ceqs, .and, .Ks); return(); };
+        fn cuos() => { sel_nan_cmp(f, i, .cnes, .or, .Ks); return(); };
         fn byteswap() => {
             f.sel_byteswap(i);
             return();
@@ -282,15 +287,12 @@ fn wasm_push(f: *Qbe.Fn, k: Qbe.Cls, r: Qbe.Ref) void = {
             if slot_offset != -1 {
                 return(push_slot_addr(f, k, slot_offset));
             };
-            if k == .Kw && t.cls == .Kl {
-                f.emit(.truncl, .Kw, QbeNull, QbeNull, QbeNull);
-                f.emit(.push, .Kl, QbeNull, r, QbeNull);
-                return();
-            };
-            if k == .Kl && t.cls == .Kw {
-                f.emit(.extuw, .Kl, QbeNull, QbeNull, QbeNull);
-                f.emit(.push, .Kw, QbeNull, r, QbeNull);
-                return();
+            
+            if k != t.cls {
+                @debug_assert(k.is_int() && t.cls.is_int());
+                o: Qbe.O = @if(k == .Kw, .truncl, .extuw);
+                f.emit(o, k, QbeNull, QbeNull, QbeNull);
+                k = t.cls;
             };
         }
         fn RSlot() => return(push_slot_addr(f, k, r.rsval()));
@@ -319,7 +321,20 @@ fn need_trunc(f: *Qbe.Fn, k: Qbe.Cls, r: Qbe.Ref) bool = {
 }
 
 fn wasm_pop(f: *Qbe.Fn, k: Qbe.Cls, r: Qbe.Ref) void = {
-    f.emit(.pop, k, r, QbeNull, QbeNull);
+    i := f.emit(.pop, k, r, QbeNull, QbeNull);
+    
+    i0 := i.offset(1);
+    if f.len_scratch() != 0 && i0.op() == .push && i0.arg&[0] == r {
+        // (a = pop, push a) -> (a = tee)
+        i0.set_nop();
+        i.set_op(.local_tee);
+        
+        if f.get_temporary(r)[].nuse <= 1 {
+            i.set_nop();
+        };
+    };
+    
+    return();
 }
 
 // TODO: convert addresses to .Kw earlier so don't have to insert as many .truncl
@@ -538,19 +553,25 @@ fn sel_byteswap(f: *Qbe.Fn, i: *Qbe.Ins) void = @emit_instructions((f = f, emit 
 """);
 
 // o: !(nan|nan), uo: (nan|nan)
-fn sel_nan_cmp(f: *Qbe.Fn, i: *Qbe.Ins, cmp: Qbe.O, join: Qbe.O) void = {
-    f.emit(.pop, .Kw, i.to, QbeNull, QbeNull);
+fn sel_nan_cmp(f: *Qbe.Fn, i: *Qbe.Ins, cmp: Qbe.O, join: Qbe.O, k: Qbe.Cls) void = {
+    f.emit(.pop, i.cls(), i.to, QbeNull, QbeNull);
+    if i.cls() == .Kl {
+        f.emit(.extuw, .Kl, QbeNull, QbeNull, QbeNull);
+    };
+    
     f.emit(join, .Kw, QbeNull, QbeNull, QbeNull);
     f.emit(cmp, .Kw, QbeNull, QbeNull, QbeNull);
-    f.wasm_push(i.cls(), i.arg&[1]);
-    f.wasm_push(i.cls(), i.arg&[1]);
+    f.wasm_push(k, i.arg&[1]);
+    f.wasm_push(k, i.arg&[1]);
     f.emit(cmp, .Kw, QbeNull, QbeNull, QbeNull);
-    f.wasm_push(i.cls(), i.arg&[0]);
-    f.wasm_push(i.cls(), i.arg&[0]);
+    f.wasm_push(k, i.arg&[0]);
+    f.wasm_push(k, i.arg&[0]);
 }
 
 emitter_for_wasm :: fn(f: *Qbe.Fn, o: Qbe.O, k: Qbe.Cls, r: Qbe.Ref, a0: Qbe.Ref, a1: Qbe.Ref) void = {
     i := make_ins(o, k, r, a0, a1);
+    chuse(a0, 1, f);
+    chuse(a1, 1, f);
     sel_wasm(f, i&);
 };
 

@@ -332,7 +332,8 @@ stkblob :: fn(r: Qbe.Ref, t: *Qbe.Typ, f: *Qbe.Fn, ilp: *List(Qbe.Ins)) void ={
     ilp.push(make_ins(@as(Qbe.O) @as(i32) Qbe.O.alloc4.raw() + al, .Kl, r, f.getcon(zext sz), Qbe.Null));
 }
 
-selcall :: fn(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins, ilp: *List(Qbe.Ins)) void = {
+selcall :: fn(f: *Qbe.Fn, arg_i: []Qbe.Ins, ilp: *List(Qbe.Ins)) void = {
+    i0, i1 := (arg_i.ptr, arg_i.ptr.offset(arg_i.len));
     ca := temp().alloc_zeroed(Class, ptr_diff(i0, i1));
     cr := zeroed Class;
 
@@ -471,7 +472,9 @@ selcall :: fn(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins, ilp: *List(Qbe.Ins)) void 
     f.emit(.salloc, .Kl, r, f.getcon(stk), Qbe.Null);
 }
 
-selpar :: fn(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) Params = {
+selpar :: fn(f: *Qbe.Fn, par_i: []Qbe.Ins) Params = {
+    i0, i1 := (par_i.ptr, par_i.ptr.offset(par_i.len));
+
     ca := temp().alloc_zeroed(Class, ptr_diff(i0, i1));
     cr := zeroed Class;
     f.reset_scratch();
@@ -519,7 +522,7 @@ selpar :: fn(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) Params = {
     }
 
     t := 0;
-    s := 2 + 8*f.vararg.int();
+    s := 2 + 8*f.vararg.int();  // :has_stack_params
     zip_args(i0, i1, ca) { i, c, $continue |
         if i.op() == .parc && !c.class.has(.Cptr) {
             if c.nreg == 0 {
@@ -566,7 +569,9 @@ selvaarg :: fn(f: *Qbe.Fn, _: *Qbe.Blk, i: *Qbe.Ins) void = {
 selvastart :: fn(f: *Qbe.Fn, p: Params, ap: Qbe.Ref) void = {
     rsave := f.newtmp("abi", .Kl);
     f.emit(.storel, .Kw, Qbe.Null, rsave, ap);
-    s := @if(p.stk > 2 + 8 * f.vararg.int(), p.stk, 2 + p.ngp);
+    @debug_assert(f.vararg);
+    has_stack_params := p.stk > 2 + 8;  // :has_stack_params
+    s := @if(has_stack_params, p.stk, 2 + p.ngp);
     f.emit(.addr, .Kl, rsave, SLOT(-s), Qbe.Null);
 }
 
