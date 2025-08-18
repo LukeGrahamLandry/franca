@@ -455,7 +455,8 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     // we need to know how many imports there are before we can start patching anything. 
     for_symbols m { id, symbol | // :SLOW  just keep list of pending symbols instead
         is_import := @is(symbol.kind, .Pending, .DynamicPatched);
-        if is_import && symbol.fixups.len != 0 {
+        if is_import && (symbol.fixups.len != 0 || symbol.referenced) {
+            @debug_assert(symbol.segment == .Code);
             symbol.got_lookup_offset = m.imports.len;
             m.imports&.push(id); 
             symbol.kind = .DynamicPatched;
@@ -685,13 +686,13 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     if data_size > 0 {
         push_buf { buf |
             buf.push(@as(u8) Wasm.Section.Data);
-            leb128_unsigned(buf, 1 + 1 + 1 + uleb_size(wasm_page_size) + 1 + uleb_size(data_size) + data_size);
+            leb128_unsigned(buf, 1 + 1 + 1 + sleb_size(wasm_page_size) + 1 + uleb_size(data_size) + data_size);
             leb128_unsigned(buf, 1); // number of datas 
             leb128_unsigned(buf, 0); // mode: active
             
             // offset expr
             buf.push(@as(u8) Wasm.Inst.I32_Const);
-            leb128_signed(buf, wasm_page_size); 
+            leb128_signed(buf, wasm_page_size);  // :wasmzeropage
             buf.push(@as(u8) Wasm.Inst.End);
             
             leb128_unsigned(buf, data_size);

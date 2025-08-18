@@ -218,6 +218,15 @@ fn translate_func(self: *LoadWasm, local_func_i: i64, f: *Qbe.Fn) void = {
     self.return_types = signature.ret.items();
     self.emit_the_code();
     
+    // implicit fallthrough return at the end of the function. 
+    ::enum(Qbe.J);
+    @if(self.get_blk()[].jmp.type == .Jxxx)
+    if self.stack.len >= self.return_types.len {
+        self.emit_return();
+    } else {
+        self.get_blk()[].jmp.type = .hlt;
+    };
+    
     self.f.lnk.export = true; // TODO: kind depends if this is the final thing. if it's aot into a franca program, you want to to TOFKALTO
 }
 
@@ -234,6 +243,7 @@ fn create_globals(self: *LoadWasm) void = {
             self.function_types[f_i] = id[];
             f_i += 1;
         };
+        @debug_assert(import.desc&.is(.Function), "TODO: support other non-function imports (need to change local_global_i/table_i below)");
     };
     @debug_assert_eq(f_i, self.w.imported_function_count);
     range(0, self.w.functions.len) { i |
@@ -645,6 +655,7 @@ fn local_inst(self: *LoadWasm, delta: i64) void = {
 }
 
 fn emit_return(self: *LoadWasm) void = {
+    ::enum(Qbe.Cls);
     @debug_assert(self.get_blk()[].jmp.type == .Jxxx, "tried to return from terminated block");
     @switch(self.return_types.len) {
         @case(0) => {

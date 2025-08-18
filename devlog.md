@@ -22,6 +22,23 @@ ditto kalidescope. i want to get it to the point of crashing because you can't j
 - just disable loadopt for now (TODO: fix real flow problem)
 - TODO: still getting junk vptr indices
 
+why am i not doing this with import_wasm as well...?
+- implemented fallthrough return
+- extremely reassuring that the fragile order dependence with the indices can be reproduced in import_wasm. 
+- silly mistake. i was having SP point to the old stackbase instead of the new one. 
+  manifested as stack variables getting stomped when you made a call.
+
+how hard can it be to put 1.4MB of text on the screen?
+- `<pre>.innerText+=str` is super slow. forced reflow is the whole time in the profiler. running it once takes ~20ms and twice takes 600ms.
+- `overflow:hidden` didn't help and isn't what i want anyway. `white-space: nowrap;` gets it under 500ms. 
+- interestingly innerhtml is instant but then you don't get new lines.
+- textarea.value is 100ms for twice and 10ms for once. which is still not at all linear but at least im not going to wither away while i wait. 
+- now all the forced reflow is at the end so really the timing is cheating and it's still an extra 250ms. 
+  but even of the fake 100ms, there are 7 calls to js to show the text, about 10ms each. that's still pretty high overhead.
+- for referece, running `./target/w.out a.wasm` in terminal.fr is 130ms (that's for twice) but it's about the same for once, 
+  so we're learning v8 has a much faster jit than i do which makes sense. 
+  i wonder if they cheat by caching the compiled wasm. 
+
 ## (Aug 16)
 
 - easy uses of local.tee 

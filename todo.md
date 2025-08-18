@@ -41,6 +41,12 @@
   is the same thing handed out to user code for builting vtables so it delays compiling hoping 
   you wont actually try to call it (which is often the right choice, like for objc bindings, etc.). 
 - everywhere i ENABLE_ENABLE_TRACY is garbage. i need a better pattern for that. 
+- compile error if you try to bake something that is not in ast_alloc 
+  because it's so easy to accedently type foo :: read_entire_file(temp(), path),
+  and then you waste so much fucking time. 
+  or is it better to just make a copy? 
+  really i should nail down the semantics of when the bake snapshot happens. 
+  (all at once at the end of compilation probably?). 
 
 ## remaining nondeterminism
 
@@ -134,6 +140,7 @@ as different types even when they're the same size.
 - still a mystery bug in amd-linux. 
   race? seems improved by sleeping for a millisecond after spawning a thread. 
   TODO: REMOVE THE SLEEP IN sys_clone !!
+  (much to nobody's surprise, it's still fucked)
 - wuffs/gif.c fails at random
 - there have been very rare failures in my lua tests for a while
 - soft_draw.fr crashes when you quit the program
@@ -293,6 +300,7 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 - why does llvm-mc disassembler arm think my cas is invalid instruction encoding? (check with cas.ssa -d D). 
   objdump thinks it's fine and it clearly runs correctly. 
 - TODO: harec/src/gen.c: `[arm64/emit.fr/fixup_arm64] offset from dynamic import builtin_type_nomem+4` but would work when done as one compilation unit.
+- mem3.ssa fails without opt/load.fr/loadopt()
 
 ## backend symbols rework
 

@@ -128,21 +128,26 @@ dump :: fn(input: []u8) void = {
     
     @fmt(out, "=== BEGIN FUNCTION/CODE SECTION ===\n");
     if w.functions.len != w.code.len {
-        @fmt(out, "ERROR: % function types and % function bodies.\n", w.functions.len, w.code.len);
+        @fmt(out, "(ERROR: % function types and % function bodies)\n", w.functions.len, w.code.len);
         print(out.items()); out.clear();
     };
     
     locals := Wasm.ValType.list(temp());
     enumerate w.code { i, code | 
+        continue :: local_return;
         abs_index := i + w.imported_function_count;
         name := function_names[abs_index];
-        @fmt(out, "[F%]: %\n- signeture ", i, name);
+        @fmt(out, "[F%]: %\n- signeture ", abs_index, name);
         if i < w.functions.len {
             ty := w.functions[i];
-            show_type(out, w, ty);
+            if !show_type(out, w, ty) {
+                print(out.items()); out.clear();
+                continue();
+            };
             locals&.push_all(w.types[ty.id.zext()].arg.items());
         } else {
             @fmt(out, "(ERROR: missing. only % entries signeture section)", w.functions.len);
+            print(out.items()); out.clear();
         };
         @fmt(out, "\n");
         if code.locals.len == 0 {
@@ -175,6 +180,10 @@ fn dump_wasm_expr(w: *WasmModule, full_input: []u8, insts: []u8, out: *List(u8),
     
     start := ptr_diff(full_input.ptr, insts.ptr);
     @fmt(out, "{  // [%..<%]", start, start + insts.len);
+    if start < 0 || insts.len < 0 { 
+        @fmt(out, "\n // (ERROR: negative sizes??)\n");
+        print(out.items()); out.clear();
+    };
     c := 0;
     indent := 1;
     next_label := 0;
@@ -237,7 +246,7 @@ fn dump_wasm_expr(w: *WasmModule, full_input: []u8, insts: []u8, out: *List(u8),
                 @fmt(out, "%", value);
                 value
             } else {
-                @fmt(out, " ERROR: invalid leb encoding");
+                @fmt(out, " (ERROR: invalid leb encoding)");
                 continue()
             }
         };
@@ -248,7 +257,7 @@ fn dump_wasm_expr(w: *WasmModule, full_input: []u8, insts: []u8, out: *List(u8),
                 c += ptr_diff(insts.ptr.offset(c), r.ptr);
                 value
             } else {
-                @fmt(out, " ERROR: invalid leb encoding");
+                @fmt(out, " (ERROR: invalid leb encoding)");
                 continue()
             }
         };
@@ -326,8 +335,8 @@ fn dump_wasm_expr(w: *WasmModule, full_input: []u8, insts: []u8, out: *List(u8),
                 @fmt(out, "  // import; ");
                 show_type(out, w, import_types[v]);
             } else {
+                @fmt(out, "  // F%; ", v);
                 id := v - w.imported_function_count;
-                @fmt(out, "  // F%; ", id);
                 show_type(out, w, w.functions[id]);
             };
             continue()
@@ -347,18 +356,19 @@ fn dump_wasm_expr(w: *WasmModule, full_input: []u8, insts: []u8, out: *List(u8),
     @fmt(out, "\n");
 }
 
-fn show_type(out: *List(u8), w: *WasmModule, i: Wasm.TypeIdx) void = {
+fn show_type(out: *List(u8), w: *WasmModule, i: Wasm.TypeIdx) bool = {
     i: i64 = i.id.zext();
     @fmt(out, "[T%]: (", i);
     if i >= w.types.len {
         @fmt(out, "ERROR: not enough entries in `type` section)");
-        return();
+        return(false);
     };
     type := w.types.index(i);
     for(type.arg, fn(t) => @fmt(out, "%,", t));
     @fmt(out, ") -> (");
     for(type.ret, fn(t) => @fmt(out, "%,", t));
     @fmt(out, ")");
+    true
 }
 
 #use("@/lib/sys/fs.fr");

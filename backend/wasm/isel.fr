@@ -77,18 +77,19 @@ fn wasm_isel(f: *Qbe.Fn) void = {
         maybe_sp_load :: fn() => if !did_sp_load && need_sp {
             if !f.leaf {
                 if saved_stack != f.retr {
-                    f.emit(.pop, .Kl, saved_stack, QbeNull, QbeNull);
-                    f.wasm_push(.Kl, f.retr);
+                    f.emitter_for_wasm(.copy, .Kl, saved_stack, f.retr, Qbe.Null);
                 };
-            
-                f.emit(.global_set, .Kl, QbeNull, stackbase, QbeNull);
-                f.emit(.sub, .Kl, QbeNull, QbeNull, QbeNull);
-                f.wasm_push(.Kl, f.getcon(f.slot.intcast()));
-                f.wasm_push(.Kl, f.retr);
+                
+                // TODO: parse "global_setK" same as "argK" so i don't need this hack with null placeholder
+                @emit_instructions((f = f, emit = emitter_for_wasm), (stackbase, f.retr, f.getcon(f.slot.intcast()), Qbe.Null), """
+                @start
+                    %prev_stack =l global_get %0
+                    %1 =l sub %prev_stack, %2
+                    %3 =l global_set %0, %1
+                """);
+            } else {
+                f.emitter_for_wasm(.global_get, .Kl, f.retr, stackbase, Qbe.Null);
             };
-            
-            f.emit(.pop, .Kl, f.retr, QbeNull, QbeNull);
-            f.emit(.global_get, .Kl, QbeNull, stackbase, QbeNull);
             did_sp_load = true;
         };
         

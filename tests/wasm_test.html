@@ -1,9 +1,8 @@
 <!doctype html>
-<html>
-    <body>
-        see dev console. <br>
-        <div id="time"></div>
-        <pre id="out"></pre>
+<html style="height:100%;">
+    <body style="height:100%; overflow: hidden;">
+        <div id="time">Wasm loading...</div>
+        <textarea id="out" style="white-space: nowrap; width:100%; height:90%; outline: none; border: none;"></textarea>
         <script>
             let Franca;
             let FrancaXXX = {};
@@ -11,6 +10,7 @@
             let line = ""; // TODO: have write() use this too (its only for putchar rn)
             let start_load = performance.now();
             function handleWasmLoaded(wasm) {
+                document.getElementById("time").innerText = "Wasm loaded. ";
                 Franca = wasm.instance.exports;
                 console.log(Franca);
                 console.log(module_bytes);
@@ -22,7 +22,15 @@
                 
                 let a = performance.now();
                 if (Franca.main !== undefined) {
-                  Franca.main(0n, 0n, 0n, 0n);
+                  try {
+                    Franca.main(0n, 0n, 0n, 0n);
+                  } catch(e) {
+                    if (e !== "called exit 0") {
+                      console.error(e);
+                      document.getElementById("time").innerText += e;
+                      alert(e);
+                    }
+                  }
                 } else {
                   let length = module_bytes.byteLength;
                   console.log(length);
@@ -45,6 +53,9 @@
             
             let bump = 0n;
             const page_size = 1n << 16n;
+            const show = (s) => {
+              document.getElementById("out").value +=s;
+            };
             const callbacks = {
                 env: {
                     puts: (ptr) => {
@@ -53,25 +64,22 @@
                         while (buf.getInt8(Number(ptr) + len) != 0) {
                             len += 1;
                         };
-                        let line = get_wasm_string(ptr, len);
-                        // console.log(line);
-                        document.getElementById("out").innerText += line + "\n";
+                        let msg = get_wasm_string(ptr, len);
+                        show(msg + "\n");
                         return 0;
                     },
                     write: (fd, ptr, len) => {
                         const msg = get_wasm_string(ptr, len);
                         switch (fd) {
                             case 1:
-                                document.getElementById("out").innerText += msg;
-                                // console.log(msg);
                                 break;
                             case 2:
-                                document.getElementById("out").innerText += msg;
-                                // console.error(msg);
                                 break;
                             default:
                                 alert("todo: write non-stdout: " + msg);
                         }
+                        
+                        show(msg);
                         return len;
                     },
                     clock_gettime: (clock_id, ptr) => {
@@ -86,11 +94,9 @@
                         time_spec[1] = BigInt(Math.floor(ms * 1000000));
                     },
                     abort: () => {
-                        alert("called abort");
                         throw "called abort";
                     },
                     exit: (status) => {
-                        alert("called exit " + status);
                         throw "called exit " + status;
                         // better: instead, return and hit unreachable instruction 
                         // so the stack trace shows wasm functions
@@ -113,8 +119,7 @@
                     },
                     putchar: (c) => {
                         if (c == 10) {
-                            // console.log(line);
-                            document.getElementById("out").innerText += line + "\n";
+                            show(line + "\n");
                             line = "";
                             return;
                         }
@@ -128,6 +133,8 @@
                     pthread_jit_write_protect_np: (a) => { return 0; },
                 },
             };
+            // this is strictly better for anything interesting. 
+            // but rn i want to be able to access the bytes so and can show the disassembly. 
             // WebAssembly.instantiateStreaming(
             //     fetch("../a.wasm"),
             //     callbacks,

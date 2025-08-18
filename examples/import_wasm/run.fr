@@ -1,6 +1,7 @@
 #use("@/examples/import_wasm/convert.fr");
 #use("@/examples/import_wasm/parse.fr");
 #use("@/backend/lib.fr");  // TODO: garbage that this needs to be in the root scope
+Crash :: import("@/lib/crash_report.fr");
 
 // TODO: -o to output a binary
 // TODO: use fill_backend_vtable to toggle between recompiling 
@@ -8,6 +9,7 @@
 //       (see import_c for an example). 
 
 fn main() void = {
+    Crash'hook_backtrace();
     args := cli_args();
     logging := "";
     i := 0;
@@ -38,7 +40,7 @@ fn main() void = {
 
 fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str, args: []CStr) void = {
     module := QbeModule.zeroed(); m := module&;
-    init_default_module(m, (type = .JitOnly, os = query_current_os(), arch = query_current_arch()));
+    init_default_module(m, (type = .JitOnly, os = query_current_os(), arch = query_current_arch(), link_libc = false));
     
     arena: ArenaAlloc = init(page_allocator, 1.shift_left(12));
     a := arena&.borrow();
@@ -83,6 +85,14 @@ fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str, args: []CStr) void 
     
     m.emit_suspended_inlinables();
     m.make_exec();
+    
+    for_symbols m { id, s | // :SLOW
+        ::enum(@type s.kind);
+        @debug_assert(s.kind != .Pending || s.fixups.len == 0, "unfilled patch: %", s.name);
+    };
+    
+    trace := Crash'push_resolver(QbeModule, m, find_ip_in_module);
+    
     init_data, _ := m.get_addr(initializer).expect("init compiled");
     init_data := assume_types_fn(Arg = i64, Ret = void, ptr = init_data);
     init_data(wasm_context_pointer);
@@ -96,17 +106,19 @@ fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str, args: []CStr) void 
         @panic("couldn't find %: %", n.id, m.str(n));
     };
     //@println(">>> Calling %", wasm.m.str(n));
-    f := assume_types_fn(Arg = Ty(i64, u32, u32), Ret = i64, ptr = f);
-    result := f(wasm_context_pointer, argc.trunc(), argv);
+    f := assume_types_fn(Arg = Ty(i64, u32, u32, u32, u32), Ret = i64, ptr = f);
+    result := f(wasm_context_pointer, argc.trunc(), argv, 0, 0);
     if result != 0 {
         @eprintln(">>> returned %", result);
     };
     
+    pop_resolver(trace);
     drop(m);
     page_allocator.dealloc(u8, buf);
     arena&.deinit();
 }
 
+// note: this is on the opposite end of how i did it in wasm_test.html
 heap_base :: @static(u32) 0;  // TODO: BAD!
 
 // TODO: make it easy to ship these as a binary form of the ir so you can inline accross host calls. 
@@ -170,6 +182,10 @@ Exports :: @struct {
             panic("wasm called abort");
         }
         exit :: fn(ctx: *u8, status: u32) void = {
+            if status != 0 {
+                // i want a stack trace.
+                @panic("wasm guest called exit(%)", status);
+            }
             Syscall'exit(status.zext());
         }
         strcmp :: fn(ctx: *u8, a: u32, b: u32) i32 = {
@@ -196,6 +212,19 @@ Exports :: @struct {
             strncmp :: fn(a: *u8, b: *u8, n: i64) i32 #libc;
             strncmp(a, b, n.zext())
         }
+          mmap :: fn(ctx: *u8, addr: u32, len: u32, prot: u32, flags: u32, fd: u32, offset: u32) i64 = 
+            calloc(ctx, 1, len.align_to(65536)).zext();
+        munmap :: fn(ctx: *u8, addr: u32, len: u32) i64 = 0;
+          free :: fn(ctx: *u8, p: u32) i64 = 0;
+        malloc :: fn(ctx: *u8, len: u32) i64 = calloc(ctx, 1, len).zext();
+         write :: fn(ctx: *u8, fd: i32, addr: u32, len: u32) i64 = {
+            if fd != 1 && fd != 2 {
+                return(-1);
+            };
+            r := Syscall'write((fd = fd), ctx.offset(addr.zext()), len.zext());
+            r.value
+        };
+        __libc_start_main :: fn(ctx: *u8) void = panic("weak");
     }
 }
 

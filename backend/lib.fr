@@ -367,6 +367,7 @@ fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
             // :WasmZeroPage Skip the low page so we don't live in crazy town where the null pointer is valid. 
             next := m.segments&[.MutableData].next&;
             next[] = next[].offset(wasm_page_size); 
+            // TODO: make this size configurable on .goal
             mem := forever.alloc_uninit(u8, 1.shift_left(11));
             m.wasm_types = (mmapped = mem, next = mem.ptr);
         };
@@ -540,7 +541,7 @@ run_qbe_passes_common :: fn(f: *Qbe.Fn) bool = {
     fillalias(f); // !
     
     ::if(Qbe.O);
-    @if(!TODOWASM)
+    //@if(!TODOWASM)
     import("@/backend/opt/load.fr")'loadopt(f); // optional
     fill_use(f);
     fillalias(f); // for coalesce
@@ -1081,3 +1082,31 @@ OutputPurpose :: QbeOutputPurpose;
 #use("@/lib/sys/threads.fr");
 #use("@/lib/sys/sync/atomics.fr");
 #use("@/lib/collections/deque.fr");
+
+// This can be used with push_resolver. 
+// used for .frc when there's no debug info. also for jitting in import_wasm. etc. 
+// TODO: always push_resolver() when you create a module? 
+// TODO: "you really want to lock the module in case there's another thread trying to compile into it"
+find_ip_in_module :: fn(m: *QbeModule, addr: rawptr) ?Str = {
+    #use("@/lib/crash_report.fr");
+    if(!m.initialized, => return(.None));
+    
+    code := m.segments&.index(.Code);
+    code_segment := code.mmapped.ptr.slice(code.len());
+    if !code_segment.contains_address(u8.ptr_from_raw(addr)) {
+        return(.None);
+    };
+    
+    @if(!m.debug_info.enabled) return(.None);
+    
+    debug: AotDebugInfo = (
+        code_segment = code_segment.rest(m.text_padding()),
+        headers = m.debug_info.headers.items(),
+        payload = m.debug_info.data.items(),
+        source = empty(),
+        files = empty(),
+        nullable_cached_codemap = zeroed rawptr,
+    );
+    
+    find_in_debug_info(AotDebugInfo.raw_from_ptr(debug&), addr)
+};
