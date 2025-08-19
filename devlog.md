@@ -8,6 +8,11 @@
   and like maybe this will just work, make a new module that imports memory,table,etc 
   have an offset to where it starts putting its own functions in the table, 
   the host instantiates it with the old module as the imports and then you can access the functions in the table. 
+- works! but sure looks like safari loses a few dots. 
+- implemented more table stuff in import_wasm. 
+- made import_wasm/convert.fr/comptime_exports() not use inline_for so it should compile a bit faster. 
+- no shim for varargs imported for .frc (fixes import_wuffs demo)
+- put the demo in a web worker
 
 ## (Aug 17)
 

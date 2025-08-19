@@ -253,16 +253,30 @@ different subsets of the same resources.
 ## wasm
 
 - remove all the TODOWASM (ifdefs/comments)
-- the TODOWASM block in bounce_body_call breaks the output of examples/import_wuffs/test.fr. 
-  (because that type of shim doesn't work with varargs maybe?)
 - wasm instruction for wait/wake/fence
 - let frontends directly provide signeture for imports since they probably know instead of only trying to infer from callsites. 
   (currently emit_ir just always outputs a shim with a direct call which works but is hacky and not something i'd be proud to explain). 
 - generate better code (see comments in wasm/isel.fr)
+- (see comments in wasm/abi.fr)
+- finish jit_instantiate_module in import_wasm/run.fr
+- refactor output_wasm_module_jit so it shares more code with the aot version
+- don't export everything when jitting (only exports and things called indirectly)
+- import_c
+  - setjmp/longjmp with exceptions
+  - don't depend on libc (strtoul, strncasecmp, strtod)
+- import_wasm working in wasm would be cute. 
+  - dont reserve giant virtual memory
+  - don't depend on libc (import_wasm/run.fr/Exports for the .ssa tests)
+- get franca compiler working in wasm
+  - stub out some weak imports
+  - what to do about file system
+- syscall wrappers support wasip1
+- web demo that runs all the tests
+  - make it run in node in actions
+- web demo like compiler explorer that lets you compile/run ssa/c/franca/kalidescope/wuffs/hare and toggle backend logging
 
 ## backend 
 
-- instead of QbeModule.intern_mutex, make it easy to wrap an allocator to make it thread safe. 
 - macho/emit.fr/emplace_fixup() allow negative offset for DataAbsolute of dynamic import in .Exe
 - arm64/emit.fr/loadaddr_bits() allow large offset in .Relocatable
 - rm64/emit.fr/fixup_arm64(): offset from dynamic import
@@ -301,6 +315,8 @@ need to be careful about the refs which have tags in the high bits so won't leb 
   objdump thinks it's fine and it clearly runs correctly. 
 - TODO: harec/src/gen.c: `[arm64/emit.fr/fixup_arm64] offset from dynamic import builtin_type_nomem+4` but would work when done as one compilation unit.
 - mem3.ssa fails without opt/load.fr/loadopt()
+- :CopyElimTruncSymbolBug
+- TODO: i broke examples/mandelbrot_ui.fr -jit (different symptoms on arm and amd??)
 
 ## backend symbols rework
 

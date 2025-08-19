@@ -8,7 +8,7 @@ Crash :: import("@/lib/crash_report.fr");
 //       and using the host's backend when running as a driver 
 //       (see import_c for an example). 
 
-fn main() void = {
+main :: fn() void = {
     Crash'hook_backtrace();
     args := cli_args();
     logging := "";
@@ -79,8 +79,9 @@ fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str, args: []CStr) void 
     
     self: LoadWasm = init(m, w&, a);
     self&.load_module();
+    // TODO: save the typeinfo and at least do arity checking
     exports := comptime_exports(Exports);
-    fill_imports(self&, exports);
+    fill_imports(self&, exports&);
     initializer := self&.create_init_func();
     
     m.emit_suspended_inlinables();
@@ -120,6 +121,16 @@ fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str, args: []CStr) void 
 
 // note: this is on the opposite end of how i did it in wasm_test.html
 heap_base :: @static(u32) 0;  // TODO: BAD!
+
+// TODO
+// Generate a wrapper to promote offsets in linear memory to native pointers. 
+// This avoids writing a lot of verbose code like `ctx.offset(ptr.zext())`. 
+// (fn(a: *T, b: i32, c: *U) *R) -> (fn(ctx: *u8, a_off: u32, b: i32, c_off: u32) u32)
+PromotePointers :: fn(fid: FuncId) FuncId #fold = {
+    callee := get_function_ast(fid, true, false, true, false);
+    todo();
+    intern_func(wrapper&)
+}
 
 // TODO: make it easy to ship these as a binary form of the ir so you can inline accross host calls. 
 Exports :: @struct {
@@ -224,12 +235,42 @@ Exports :: @struct {
             r := Syscall'write((fd = fd), ctx.offset(addr.zext()), len.zext());
             r.value
         };
-        __libc_start_main :: fn(ctx: *u8) void = panic("weak");
         mprotect :: fn(ctx: *u8, a: u32, b: u32, c: u32) u32 = 0;
-        __clear_cache :: fn(ctx: *u8, a: u32, b: u32) u32 = 0;
-        pthread_jit_write_protect_np :: fn(ctx: *u8, a: u32) u32 = 0;
+        __libc_start_main :: fn(ctx: *u8) void = panic("weak");
+        __error :: fn(ctx: *u8) void = panic("weak");
+        __errno_location :: fn(ctx: *u8) void = panic("weak");
+        __clear_cache :: fn(ctx: *u8, a: u32, b: u32) u32 = panic("weak");
+        pthread_jit_write_protect_np :: fn(ctx: *u8, a: u32) u32 = panic("weak");
+        remove :: fn() void = panic("weak");
+        poll :: fn() void = panic("weak");
+        fork :: fn() void = panic("weak");
+        close :: fn() void = panic("weak");
+        wait4 :: fn() void = panic("weak");
+        pipe :: fn() void = panic("weak");
+        nanosleep :: fn() void = panic("weak");
+        execvp :: fn() void = panic("weak");
+        read :: fn() void = panic("weak");
+        mkstemp :: fn() void = panic("weak");
+        dup2 :: fn() void = panic("weak");
+        
         jit_instantiate_module :: fn(ctx: *u8, address: i64, length: i64, first_export: i64, table_index: u32) void = {
             @debug_assert_eq(table_index, 0);
+            module_bytes := ctx.offset(address).slice(length);
+            
+            a := general_allocator();
+            w: WasmModule = empty(a);
+            p: ParseWasm = (w = w&, src = module_bytes);
+            or parse_wasm(p&) { e |
+                @panic("% (at byte index %)", e, p.cursor);
+            };
+            
+            // TODO
+            // - stash the old module somewhere in main(). might be better to just allow userdata. 
+            // - instantiate with LoadWasm
+            // - fill imports with exports from the old module
+            // - copy all exports to the old table starting at first_export
+            // - make the api nice so it's not more painful than the js version
+            
             todo()
         }
     }

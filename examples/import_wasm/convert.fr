@@ -59,29 +59,29 @@ fn collect_exports(self: *LoadWasm, a: Alloc) []Qbe.Sym = {
     e
 }
 
+// Call this at comptime. 
 // Take a struct like { Module :: { Func :: fn(); } } and create a map [func$module -> fnptr]
-fn comptime_exports($Exports: Type) *RawHashMap(Str, rawptr) = {
-    // TODO: it would be great if these could just be normal for loops since we can just be running in comptime anyway. 
-    //       but calling get_constant to get a rawptr from a closure literal doesn't bake it properly. 
-    //       and `fid` needs to be const for @as(rawptr) to work (maybe we should just allow that for free at comptime).
+fn comptime_exports(Exports: Type) RawHashMap(Str, rawptr) #fold = {
     // TODO: sane error message if you try to have this be the whole HashMap that includes ast_alloc as a rawptr
     //       but it wont have been baked before so you cant bake it now and don't know why but the error makes it sound like its a rawptr value in the map. 
-    exports :: @static(RawHashMap(Str, rawptr)) { // TODO: make this := after ^
-        exports: HashMap(Str, rawptr) = init(ast_alloc());
-        s :: scope_of(Type, Exports);
-        inline_for get_constants(s) { $module_name |
-            s2 :: scope_of(Type, get_constant(Type, s, module_name[]).unwrap());
-            func_names :: get_constants(s2);
-            inline_for func_names { $func_name | 
-                addr :: get_constant(FuncId, s2, func_name[]).unwrap();
-                mangled_name :: (@tfmt("%$%", func_name[].str(), module_name[].str())).shallow_copy(ast_alloc());
-                exports&.insert(mangled_name, @as(rawptr) addr);
-            }
+    fr := current_compiler_context();
+    a := ast_alloc();
+    exports: HashMap(Str, rawptr) = init(a);
+    s := scope_of(Type, Exports);
+    for get_constants(s) { module_name |
+        s2 := scope_of(Type, get_constant(Type, s, module_name).unwrap());
+        func_names := get_constants(s2);
+        for func_names { func_name | 
+            // note: get_constant(rawptr, _, _) when the value is an Expr::Closure does not bake it properly
+            fid := get_constant(FuncId, s2, func_name).unwrap();
+            addr := fr.get_jitted(fid);
+            
+            mangled_name := (@tfmt("%$%", func_name.str(), module_name.str())).shallow_copy(a);
+            exports&.insert(mangled_name, addr);
         }
-        exports.raw&.zero_unused_slots();
-        exports.raw
     }
-    exports
+    exports.raw&.zero_unused_slots();
+    exports.raw
 } 
 
 fn const_eval_wasm_expr(expr: []u8) Ty(i64, Qbe.Cls) = {
@@ -308,19 +308,21 @@ fn create_globals(self: *LoadWasm) void = {
             };
         };
         @assert(found, "TODO: uninit table");
+        repr: []rawptr = (ptr = zeroed(*rawptr), len = table.limits.min.zext());
+        ::[][]rawptr;
         
         // Reserve a symbol to hold the address of the table since we want to be able to resize it later
         self.m.emit_data(
             id = table_pointer, 
-            template = (Zeroes = size_of(rawptr)), 
+            template = (Bytes = repr&.slice(1).interpret_as_bytes()), 
             relocations = @slice(@as(Dat2.Reloc) (off = 0, id = table_initial)),
         );
         
         table_pointer
     };
-    
 }   
 
+Rt :: import("@/examples/import_wasm/runtime.fr");
 BlockEntry :: @struct(continue: *Qbe.Blk, break: *Qbe.Blk, current: *Qbe.Blk, loop: bool);
 
 fn emit_the_code(self: *LoadWasm) void = {
@@ -526,10 +528,29 @@ fn emit_the_code(self: *LoadWasm) void = {
                 
                 delta := self.stack&.pop().expect("stack for delta");  // i32
                 fill := self.stack&.pop().expect("stack for fill");  // externref
+                f: rawptr = Rt.table_grow;
+                f := bit_cast_unchecked(rawptr, i64, f);
+                // TODO: this has the warning for truncating a symbol because the bits get split
+                //       but the warning was right currently because :CopyElimTruncSymbolBug
+                callee := self.f.getcon(f);
+                table_var := self.f.symcon(self.tables[table.bitcast()]);
+                result := self.f.newtmp("prev_size", .Kw);
                 
-                @eprintln("TODO: implement table grow!");
+                // TODO: comptime thing to just iterate the Rt scope and generate what's needed
+                //       but it does need some decoding for the immediate index. 
+                //       self.runtime_call(.table_get, @slice(table_var, delta, fill));
+                //       at least you could get a bit of static signeture checking. 
+                //       and maybe comptime generate a module for Rt like for static_memmove and then i can do AOT of the wasm. 
                 
-                self.stack&.push(self.f.getcon(-1));
+                // TODO: get it from base_pointer instead? it's dumb to pass two things around. 
+                @debug_assert(self.preserve_franca_env, "need env for runtime call");
+                self.f.emit(.arge, .Kl, QbeNull, self.franca_env, QbeNull);
+                self.f.emit(.arg, .Kl, QbeNull, self.base_pointer, QbeNull);
+                self.f.emit(.arg, .Kl, QbeNull, table_var, QbeNull);
+                self.f.emit(.arg, .Kw, QbeNull, delta, QbeNull);
+                self.f.emit(.arg, .Kl, QbeNull, fill, QbeNull);
+                self.f.emit(.call, .Kw, result, callee, QbeNull);
+                self.stack&.push(result);
             }
             @default => @panic("unhandled unstruction %", self.src[self.cursor - 1]);
         }

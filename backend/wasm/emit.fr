@@ -406,7 +406,6 @@ fn fixup_wasm32(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_re
             @debug_assert(self.goal.type != .JitOnly || symbol.kind == .Local, "wasm jit cannot direct call an import");
             @debug_assert_ne(symbol.got_lookup_offset, -1, "missing index for $%", symbol.name);
             lst: List(u8) = fixed_list(ptr = u8.ptr_from_raw(fixup.patch_at), len = WASM_INDEX_PADDING);
-            @println("direct call to % %", symbol.name, symbol.got_lookup_offset);
             leb128_unsigned(lst&, symbol.got_lookup_offset, WASM_INDEX_PADDING);
         }
         // used when producing the value on the stack
@@ -744,6 +743,7 @@ fn push_qual_name(buf: *List(u8), mod: Str, name: Str) void = {
 }
 
 // TODO: this thing with the $ is a hack from before i had SymbolInfo.library. they need to be unified!
+//       this is extra not ok because i have symbol names that have dollar signs in them (like readdir$INODE64)
 fn wasm_name(m: *Qbe.Module, s: *SymbolInfo) Ty(Str, Str) = {
     sep := index_of(s.name, "$".ascii());
     mod, name := ("", s.name);
@@ -762,9 +762,7 @@ fn wasm_name(m: *Qbe.Module, s: *SymbolInfo) Ty(Str, Str) = {
 //       you need function pointers to able to move between the modules. 
 // TODO: refactor this to remove duplication with the normal output_wasm_module
 fn output_wasm_module_jit(m: *QbeModule, indirect_table_base: i64) [][]u8 = {
-    @debug_assert(indirect_table_base >= 0, "bad indirect_table_base");
-    min_mem_pages := 200; // TODO: set this to something good
-    stack_size := 1.shift_left(23); // 8MB
+    @debug_assert(indirect_table_base >= 0, "failed to grow table");
     
     @assert_eq(m.segments&[.ConstantData]&.len(), m.goal.max_got_size, "wasm constdata len");
     @assert_eq(m.segments&[.ZeroInitData]&.len(), 0, "wasm bss len");
@@ -780,6 +778,7 @@ fn output_wasm_module_jit(m: *QbeModule, indirect_table_base: i64) [][]u8 = {
     
     @debug_assert(m.imports.len == 0);
     for_symbols m { id, symbol | // :SLOW  just keep list of pending symbols instead
+        ::enum(@type symbol.kind);
         is_import := @is(symbol.kind, .Pending, .DynamicPatched);
         if is_import && (symbol.fixups.len != 0 || symbol.referenced) {
             @assert(!symbol.jit_addr.is_null(), "$%: wasm jit import must already be patched!", symbol.name);
@@ -791,7 +790,6 @@ fn output_wasm_module_jit(m: *QbeModule, indirect_table_base: i64) [][]u8 = {
             if symbol.kind == .Local && symbol.segment == .Code {
                 @assert(symbol.got_lookup_offset != -1, "missing local function $%", symbol.name);
             };
-            @println("YYY % got_lookup_offset=% jit_addr=% kind=%", symbol.name, symbol.got_lookup_offset, symbol.jit_addr, symbol.kind);
             
             // note: not this one (it sets jit_addr which isn't what i want!)
             //m.do_fixups(_, symbol);
@@ -931,7 +929,7 @@ make_exec :: fn(m: *Qbe.Module) void = {
     
     module := output_wasm_module_jit(m, first_export);
     module := concat(module&, temp());
-    import("@/examples/dump_wasm.fr")'dump(module);
+    //import("@/examples/dump_wasm.fr")'dump(module);
     
     // This relies on indirect function table being index 0. 
     // Grow it by delta and fill the new entries with the zeroth function. 
