@@ -1,0 +1,61 @@
+C :: import("@/examples/import_c/lib.fr");
+
+#use("@/backend/lib.fr");
+
+main :: fn() void = {
+    or compile(SRC) { err |
+        panic(err);
+    };
+}
+
+fn compile(src: Str) Result(void, Str) = {
+    m := @uninitialized QbeModule;
+    debug := "PAD";
+    
+    target: QbeTargetEnv = (os = query_current_os(), arch = query_current_arch(), type = .JitOnly);
+    backend'init_module(m&, target);
+    m&.set_debug_types(debug, true);
+    
+    ctx: *C.Compile.CodegenShared = backend'worker_start(m&, general_allocator(), backend.worker_thread, false);
+    
+    c := C'Compile.Ctx.zeroed();
+    import_c'init_c(c&, m&);
+    c.preserve_franca_env = true;
+    c.emitter = (Some = ctx);
+    c.enqueue_task = backend.worker_enqueue; 
+    
+    prog := @try(c&.import_c'compile_c("-", src)) return;
+    ctx.backend'worker_join();
+    c.arena_storage&.deinit();
+
+    ::enum(@type m.goal.type);
+    
+    f: rawptr = (fn(fd: i32, p: *u8, len: i64) i64 = {
+        @println("called write!");
+        r := Syscall'write((fd = fd), p, len);
+        r.value
+    });
+    c.m.put_jit_addr(c.m.intern("write"), f);
+    
+    println("compiling...");
+    m&.make_exec();
+    f, _ := m&.get_addr(m&.intern("main")) 
+        || @panic("missing function main()");
+    f := assume_types_fn(Arg = void, Ret = i32, ptr = f);
+    println("calling...");
+    status := f();
+    @if(status != 0) @panic("\n\nReturned status %", status);
+
+    drop(m&);
+    .Ok
+}
+
+#use("@/examples/import_c/ffi.fr");
+
+SRC :: """
+long write(int a, long b, long c);
+int main() {
+    write(1, "Hello World!\n", 13);
+    return 42;
+}
+""";

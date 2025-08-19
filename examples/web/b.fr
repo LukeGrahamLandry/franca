@@ -1,0 +1,37 @@
+#include_std("lib/core.fr");
+#include_std("compiler/lib.fr");
+DEBUG_SPAM_LOG :: false;
+DISABLE_IMPORT_FRC :: false;
+
+main :: fn() void = {
+    a := general_allocator();
+    vtable := init_driver_vtable();
+    comp := {vtable.init_compiler}(vtable.default_build_options()); // TODO: comptime get the current arch
+    c := vtable.with(comp);
+    file := c.add_file("repl!", prelude);
+    self := c.data.cast()[][];
+    id := self.parser.push_parse(prelude, file);
+    stmts := self.parser.finish_pending_stmts(id);
+    stmts := self.unwrap_report_error(RawList(FatStmt), stmts); // TODO: don't return RawList -- Jun 29
+    stmts := stmts.items();
+    r := {c.vtable.make_and_resolve_and_compile_top_level}(c.data, stmts);
+    self.unwrap_report_error(void, r);
+    // TODO: these numbers are experimentally where it happens to put the prelude constants right now. should do something more robust where you can ask it. 
+    scope_id := self.scopes.new_scope(TOP_LEVEL_SCOPE, self.get_alloc(), file);
+    scope := self.scopes[scope_id]&;
+}
+
+prelude :: """
+#include_std("compiler");
+bool  :: @builtin bool;
+false :: @builtin false;
+i64   :: @builtin i64;
+Type  :: @builtin Type;
+void  :: @builtin void;
+fn UInt(bits: i64) Type #fold = IntType(bits, false);
+u8 :: UInt(8);
+:: {
+    putchar :: fn(c: u8) void #import("libc");
+    putchar(67);
+};
+""";

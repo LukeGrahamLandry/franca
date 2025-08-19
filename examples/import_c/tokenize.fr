@@ -97,6 +97,7 @@ fn error_tok(ee: FatExpr) FatExpr #macro = {
         out := c.error_buf&;
         fmt_error_prefix(@[tok], out);
         @[format_into(@{ out }, e.rest(2), ee.loc)];
+        @if(TODOWASM) @println("%", out.items());
         throw(c.a_little_hidden_control_flow&)
     }
 }
@@ -461,15 +462,39 @@ fn convert_pp_int(tok: *Token) bool = {
         10
     };
     
-    // 🤡🤡
-    strtoul :: fn(str: *u8, end_out: **u8, base: i64) i64 #libc;  // TODO: can't be calling libc for stuff like this  
-    val := strtoul(p, p&, base);
+    val := if query_current_arch() == .wasm32 {
+        @assert_eq(base, 10, "TODO: base");  // can't even use the literal 0 because that's treated as octal
+        n := 0;
+        while => p[].is_ascii_digit() {
+            n *= 10;
+            n += p[].zext() - "0".char();
+            p = p.offset(1);
+        };
+        n
+    } else {
+        // 🤡🤡
+        strtoul :: fn(str: *u8, end_out: **u8, base: i64) i64 #libc;  // TODO: can't be calling libc for stuff like this  
+        strtoul(p, p&, base)
+    };
     
     startswith :: fn(p: *u8, needle: Str) bool = 
         p.slice(needle.len) == needle;
-    // 🤡🤡 don't use libc for this
-    strncasecmp :: fn(s: *u8, needle: CStr, size: i64) bool #libc; // TODO
-        
+    
+    // :UGLY
+    strncasecmp :: fn(s: *u8, needle: CStr, size: i64) bool = {
+        range(0, size) { _ |
+            lower :: fn(c) => @if(c >= "A".ascii() && c <= "Z".ascii(), 
+                @as(u8) (@as(i64)c.zext()).bit_xor(0x20).trunc(), 
+                c);
+            if s[].lower() != needle.ptr[].lower() {
+                return(true);
+            };
+            s = s.offset(1);
+            needle.ptr = needle.ptr.offset(1);
+        };
+        false
+    };
+    
     // Read U, L or LL suffixes. :UGLY
     delta, l, u := @if_else {
         @if(startswith(p, "LLU") || startswith(p, "LLu") || startswith(p, "llU") ||

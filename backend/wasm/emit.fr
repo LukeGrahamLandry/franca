@@ -268,7 +268,8 @@ fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
                             e.op(@if(i.cls().is_wide(), .I64_Const, .I32_Const));
                             // if it's a function address we have to wait until the end to know its index in the table. 
                             if symbol.kind == .Local && symbol.segment == .MutableData {
-                                leb128_signed(e.a&, symbol.offset + c.bits());
+                                base := @if(e.m.goal.type == .JitOnly, symbol.jit_addr.int_from_rawptr(), symbol.offset);
+                                leb128_signed(e.a&, base + c.bits());
                             } else {
                                 @debug_assert(symbol.segment != .ConstantData, "TODO: ConstantData");
                                 patch_at := u8.raw_from_ptr(e.a.maybe_uninit.ptr.offset(e.a.len));
@@ -411,7 +412,8 @@ fn fixup_wasm32(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_re
         // used when producing the value on the stack
         fn WasmAddr(it) => {
             lst: List(u8) = fixed_list(ptr = u8.ptr_from_raw(fixup.patch_at), len = WASM_INDEX_PADDING);
-            value := if(symbol.segment == .Code, => indirect_index, => symbol.offset + it.increment.zext());
+            base := @if(self.goal.type == .JitOnly, indirect_index, symbol.offset);
+            value := if(symbol.segment == .Code, => indirect_index, => base + it.increment.zext());
             @debug_assert_ge(value, 0, "missing index for $%", symbol.name);
             leb128_signed(lst&, value, WASM_INDEX_PADDING); // NOTE: immediate of T.const is always signed
         }
@@ -422,7 +424,8 @@ fn fixup_wasm32(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_re
             } else {
                 @debug_assert(symbol.kind == .Local);
                 // the symbol's offset already includes :WasmZeroPage
-                i64.ptr_from_raw(fixup.patch_at)[] = symbol.offset + it.increment;
+                base := @if(self.goal.type == .JitOnly, indirect_index, symbol.offset);
+                i64.ptr_from_raw(fixup.patch_at)[] = base + it.increment;
             }
         }
         @default => @panic("invalid fixup type for wasm %", fixup.type&.tag());
@@ -744,8 +747,12 @@ fn push_qual_name(buf: *List(u8), mod: Str, name: Str) void = {
 
 // TODO: this thing with the $ is a hack from before i had SymbolInfo.library. they need to be unified!
 //       this is extra not ok because i have symbol names that have dollar signs in them (like readdir$INODE64)
+//       ... so i changed it to ^ and it turns out nothing actually uses it. 
+//       but at least it gives you the ability to do real namespacing in a hacky way. 
+// TODO: use s.library as the module. but that doesn't quite work because you need to allow the same name in multiple modules. 
+//       i'm not sure what to do about this. maybe pre-mangling the name is actually the easist
 fn wasm_name(m: *Qbe.Module, s: *SymbolInfo) Ty(Str, Str) = {
-    sep := index_of(s.name, "$".ascii());
+    sep := index_of(s.name, "^".ascii());
     mod, name := ("", s.name);
     if sep { sep |
         name = s.name.slice(0, sep);
@@ -766,7 +773,8 @@ fn output_wasm_module_jit(m: *QbeModule, indirect_table_base: i64) [][]u8 = {
     
     @assert_eq(m.segments&[.ConstantData]&.len(), m.goal.max_got_size, "wasm constdata len");
     @assert_eq(m.segments&[.ZeroInitData]&.len(), 0, "wasm bss len");
-    @assert_eq(m.segments&[.MutableData]&.len(), wasm_page_size, "wasm jit data");  // :WasmZeroPage
+    // note: MutableData is fine even though i don't output a data for this module. 
+    //       since it imports the whole memory, it can just use the literal pointers. 
     
     @debug_assert_eq(m.exports.len, m.local_needs_reloc.len, "missing exports");
     enumerate m.local_needs_reloc& { i, id |
@@ -923,13 +931,18 @@ fn uleb_patch_delta(buf: *List(u8), $body: @Fn() void) void = {
 // so function/data imports are just the literal values from the current module, same as native. 
 make_exec :: fn(m: *Qbe.Module) void = {
     @if(!TODOWASM) unreachable();
-    @debug_assert_eq(m.segments&[.MutableData]&.len(), wasm_page_size, "TODO: emit_data needs to allow a base address");
 
     first_export := grow(m.exports.len.intcast()).intcast();
     
     module := output_wasm_module_jit(m, first_export);
     module := concat(module&, temp());
-    //import("@/examples/dump_wasm.fr")'dump(module);
+    
+    
+    when_debug(m, .Disassemble) { out |
+        // TODO: use `out`!
+        import("@/examples/dump_wasm.fr")'dump(module);
+    };
+    
     
     // This relies on indirect function table being index 0. 
     // Grow it by delta and fill the new entries with the zeroth function. 

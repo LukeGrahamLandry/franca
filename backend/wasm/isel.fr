@@ -37,15 +37,11 @@ fn wasm_isel(f: *Qbe.Fn) void = {
     need_sp := f.slot > 0 || f.dynalloc || f.varcall;
     if need_sp {
         f.retr = f.newtmp("SP", .Kl);
-        f.get_temporary(f.retr)[].nuse = 99; // HACK
+        // TODO: do i need to add_use here?
     } else {
         f.retr = QbeNull;
     };
-    saved_stack := f.retr;
-    
-    if f.dynalloc {
-        saved_stack = f.newtmp("BP", .Kl);
-    };
+    saved_stack := f.newtmp("BP", .Kl);
     
     for_blocks f { b | 
         f.reset_scratch();
@@ -54,8 +50,7 @@ fn wasm_isel(f: *Qbe.Fn) void = {
         @match(b.jmp.type) {
             fn ret0() => {
                 if need_sp && !f.leaf {
-                    f.emit(.global_set, .Kl, QbeNull, stackbase, QbeNull);
-                    f.wasm_push(.Kl, saved_stack);
+                    f.emitter_for_wasm(.global_set, .Kl, QbeNull, stackbase, saved_stack);
                 };
             }
             fn hlt() => ();
@@ -70,21 +65,17 @@ fn wasm_isel(f: *Qbe.Fn) void = {
                 f.wasm_push(.Kw, b.jmp.arg);
                 b.jmp.arg = QbeNull;
             }
-            @default => @panic("invalid jump type in $% @%", f.name(), b.name());
+            @default => @panic("invalid jump type % in $% @%", b.jmp.type, f.name(), b.name());
         };
         @debug_assert(b.jmp.arg == QbeNull);
         
         maybe_sp_load :: fn() => if !did_sp_load && need_sp {
             if !f.leaf {
-                if saved_stack != f.retr {
-                    f.emitter_for_wasm(.copy, .Kl, saved_stack, f.retr, Qbe.Null);
-                };
-                
                 // TODO: parse "global_setK" same as "argK" so i don't need this hack with null placeholder
-                @emit_instructions((f = f, emit = emitter_for_wasm), (stackbase, f.retr, f.getcon(f.slot.intcast()), Qbe.Null), """
+                @emit_instructions((f = f, emit = emitter_for_wasm), (stackbase, f.retr, f.getcon(f.slot.intcast()), Qbe.Null, saved_stack), """
                 @start
-                    %prev_stack =l global_get %0
-                    %1 =l sub %prev_stack, %2
+                    %4 =l global_get %0
+                    %1 =l sub %4, %2
                     %3 =l global_set %0, %1
                 """);
             } else {
@@ -234,6 +225,10 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
     };
 
     if is_alloc(o) {  // dynamic size alloca
+        // TODO: we don't know up front so this doesn't work. its only set by parser. 
+        //       other targets don't care and set it in isel as needed. 
+        @if(!f.dynalloc) @eprintln("TODO: late dynalloc!"); 
+        @eprintln("TODO: this is wrong because offsets are still computed from sp");
         // TODO: align THIS IS NOT FINISHED
         // TODO: this feels about right but i haven't actually thought about it at all and theres only one test that uses it.
         SP := f.retr;

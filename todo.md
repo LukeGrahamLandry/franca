@@ -259,17 +259,36 @@ different subsets of the same resources.
 - generate better code (see comments in wasm/isel.fr)
 - (see comments in wasm/abi.fr)
 - finish jit_instantiate_module in import_wasm/run.fr
+- finish PromotePointers in import_wasm/run.fr
+- make AsmFunction not suck. at least do the length for you. 
 - refactor output_wasm_module_jit so it shares more code with the aot version
 - don't export everything when jitting (only exports and things called indirectly)
-- import_c
+- relatedly, don't put everything in the indirect table. only if exported or address taken. 
+- it's tempting to expand into allowing the jitted module to be reused instead of hardcoding the first_export. 
+  that needs data relocations for function pointers, at which point i should just give up and follow the convention other tools use. 
+  - https://github.com/WebAssembly/tool-conventions/blob/main/DynamicLinking.md
+  - https://github.com/WebAssembly/tool-conventions/blob/main/Linking.md
+- a page_allocator that can reclaim
+- do the libc replacement stuff with (unimplemented) vtable.fill_import. 
+  - so you can have a layer that's wasm aware and exposes a tighter interface to the host. 
+  - rn most of the Exports in run.fr are just to make the ssa tests work without changes, 
+    not because they really need to be provided by the host. 
+  - maybe this should be wrapped up in getting official about exposing libc api from a .frc 
+    since i want to do that for static native binaries anyway. 
+- make import_c work without hacks
   - setjmp/longjmp with exceptions
-  - don't depend on libc (strtoul, strncasecmp, strtod)
+  - don't depend on libc (strtoul, strtod)
+  - SLOW_LEAK_ARENAS=true fixes the import_c hello world (c.fr)
 - import_wasm working in wasm would be cute. 
   - dont reserve giant virtual memory
   - don't depend on libc (import_wasm/run.fr/Exports for the .ssa tests)
 - get franca compiler working in wasm
-  - stub out some weak imports
   - what to do about file system
+    - can't decide if i want drop in posix-ish like wasip1 or declare that it's better
+      for programs to make themselves embedable and the compiler shouldn't be opening files
+      anyway, you should pass in a vtable of how to get imports when creating the compiler, 
+      so you just have two different entry points. 
+  - comptime needs to work with the dlopen style jitting (so many modules instead of one)
 - syscall wrappers support wasip1
 - web demo that runs all the tests
   - make it run in node in actions
@@ -338,6 +357,12 @@ need to be careful about the refs which have tags in the high bits so won't leb 
   you need at least two layers of namespaces so you can import two different libraries that export a symbol with the same name. 
   but you also need to allow choosing the unmangled real symbol name for working and playing well with others. 
 - unify SymbolInfo.library with the old name$module i was using for wasm .ssa tests
+- the weak_imports shit for wasm is garbage. have like vtable.fill_import(library, name, funcid) 
+  that you call at comptime to rebind an import to a local function. then you can just have another 
+  entry point / driver for targetting wasm that stomps over the weak symbols you don't want to fill normally. 
+- allow the same symbol name in different libraries. you should be able to actually use them for namespacing. 
+  but also keep the ability to have a named import without declaring where it's from? 
+  maybe a special default library name and you fix that for yourself by calling vtable.fill_import later? 
 - be consistant about how weak symbols work. it would be nice guarentee the address is 0 if it's not available, 
   but that prevents you from handing out the address of a jit-shim or got-shim before you know if the import will get filled. 
   so im not sure what to do about that. 

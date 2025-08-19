@@ -33,9 +33,22 @@ main :: fn() void = {
     }
     args := args.rest(i - 1);  // meh, for now: argv[0] == "--"
     
+    E :: {  
+        E :: Exports;
+        s := Type.scope_of(E.env);
+        fr := current_compiler_context();
+        for weak_imports { name |
+            fid := fn() void = panic("wasm guest called a weak function");
+            if get_constant(s, name.sym()).is_none() {
+                (fr.vtable.add_to_scope)(fr.data, s, name.sym(), FuncId, FuncId.raw_from_ptr(fid&));
+            };
+        };
+        E
+    };
+    
     #use("@/lib/sys/fs.fr");
     bytes := temp().read_to_string_or_crash(wasm_file).items(); // :panic
-    exec_wasm_file(Exports, bytes, logging, args);
+    exec_wasm_file(E, bytes, logging, args);
 }
 
 fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str, args: []CStr) void = {
@@ -52,6 +65,10 @@ fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str, args: []CStr) void 
         @panic("% (at byte index %)", e, p.cursor);
     };
     
+    // TODO: need 33 bits becase memarg has offset 
+    //       (but nobody uses it that way because you'd need to know statically which half you're on)
+    // TODO: can't do this if i want to run in wasm (meta-circularly). so at least need an option to be normal. 
+    //       this also doesn't work if i want to support memory64. 
     // relies on page allocator giving zeroes
     buf := page_allocator.alloc_uninit(u8, 1.shift_left(32)); // wasm.w.memories[0].min.zext() * wasm_page_size);
     wasm_context_pointer := u8.int_from_ptr(buf.ptr);
@@ -76,6 +93,7 @@ fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str, args: []CStr) void 
         buf.subslice(heap_base[].zext(), src.len).copy_from(src);
         (arg_offsets.len - 1, heap_base[])
     };
+    heap_base[] = align_back(heap_base[], 65536);
     
     self: LoadWasm = init(m, w&, a);
     self&.load_module();
@@ -132,14 +150,20 @@ PromotePointers :: fn(fid: FuncId) FuncId #fold = {
     intern_func(wrapper&)
 }
 
+weak_imports :: @const_slice(
+   "__libc_start_main", "__error", "__errno_location", "__clear_cache", 
+   "pthread_jit_write_protect_np", "remove", "poll", "fork", "close", 
+   "wait4", "pipe", "nanosleep", "execvp", "read", "mkstemp", "dup2",
+   "readdir$INODE64", "dlsym", "fstatat", "fstatat$INODE64", "renameat", 
+   "readlink", "_NSGetExecutablePath", "mkdirat", "pthread_attr_setstack", 
+   "opendir$INODE64", "closedir", "readdir", "lseek", "pthread_create",
+   "pthread_join", "opendir", "dlopen", "clock_gettime", "sigaction",
+   "pthread_attr_init", 
+   "strtoul", "strtod", "localtime", "time",
+);
+
 // TODO: make it easy to ship these as a binary form of the ir so you can inline accross host calls. 
 Exports :: @struct {
-    host :: @struct {
-        write :: fn(ctx: *u8, ptr: u32, len: u32) void = {
-            s: []u8 = (ptr = ctx.offset(ptr.zext()), len = len.zext());
-            println(s);
-        }
-    }
     env :: @struct {
         putchar :: fn(_: *u8, c: u8) void = {
             putchar_UNBUFFERED(c);
@@ -223,8 +247,10 @@ Exports :: @struct {
             strncmp :: fn(a: *u8, b: *u8, n: i64) i32 #libc;
             strncmp(a, b, n.zext())
         }
-          mmap :: fn(ctx: *u8, addr: u32, len: u32, prot: u32, flags: u32, fd: u32, offset: u32) i64 = 
-            calloc(ctx, 1, len.align_to(65536)).zext();
+        mmap :: fn(ctx: *u8, addr: u32, len: u32, prot: u32, flags: u32, fd: u32, offset: u32) i64 = {
+            heap_base[] = align_back(heap_base[], 65536);
+            calloc(ctx, 1, len.align_to(65536)).zext()
+        }
         munmap :: fn(ctx: *u8, addr: u32, len: u32) i64 = 0;
           free :: fn(ctx: *u8, p: u32) i64 = 0;
         malloc :: fn(ctx: *u8, len: u32) i64 = calloc(ctx, 1, len).zext();
@@ -236,23 +262,6 @@ Exports :: @struct {
             r.value
         };
         mprotect :: fn(ctx: *u8, a: u32, b: u32, c: u32) u32 = 0;
-        __libc_start_main :: fn(ctx: *u8) void = panic("weak");
-        __error :: fn(ctx: *u8) void = panic("weak");
-        __errno_location :: fn(ctx: *u8) void = panic("weak");
-        __clear_cache :: fn(ctx: *u8, a: u32, b: u32) u32 = panic("weak");
-        pthread_jit_write_protect_np :: fn(ctx: *u8, a: u32) u32 = panic("weak");
-        remove :: fn() void = panic("weak");
-        poll :: fn() void = panic("weak");
-        fork :: fn() void = panic("weak");
-        close :: fn() void = panic("weak");
-        wait4 :: fn() void = panic("weak");
-        pipe :: fn() void = panic("weak");
-        nanosleep :: fn() void = panic("weak");
-        execvp :: fn() void = panic("weak");
-        read :: fn() void = panic("weak");
-        mkstemp :: fn() void = panic("weak");
-        dup2 :: fn() void = panic("weak");
-        
         jit_instantiate_module :: fn(ctx: *u8, address: i64, length: i64, first_export: i64, table_index: u32) void = {
             @debug_assert_eq(table_index, 0);
             module_bytes := ctx.offset(address).slice(length);

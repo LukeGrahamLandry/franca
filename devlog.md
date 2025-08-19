@@ -1,5 +1,18 @@
 
-## (Aug 18)
+## (Aug 19) wasm
+
+- make it clear that O.cas0 class doesn't matter
+- the name$module thing isn't used anyway so it's easy to get rid of but i need a replacement eventually. 
+- experiment with the compiler itself. got to the point of running call_dynamic_values which needs more invasive porting. 
+- getting import_c to work
+  - trying to use mutex crashes in my wasm runtime but not browser.
+    i don't like that the addresses are unaligned. that's suspicious. 
+    yep, making sure Exports.env.mmap returns page aligned addresses as it should makes it match browser behaviour. 
+  - now memory corruption stuff that's fixed by not resetting arenas, lets just see how far we get with that hack. 
+  - last thing was making sure data address is the comptime one instead of local offset in segment. 
+    now c hello world works jitted in wasm
+
+## (Aug 18) wasm 
 
 - fixed "emit_insertions for loadopt doesn't compile on wasm. `bad nesting. expected to end @39 but found @6`". 
   problem was a loop that had to wait before being ended. 

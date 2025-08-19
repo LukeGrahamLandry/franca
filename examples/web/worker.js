@@ -1,4 +1,3 @@
-const main_url = "./a.wasm";
 const page_size = 1n << 16n;
 
 let bump = 0n;
@@ -6,7 +5,7 @@ let Franca;
 let FrancaXXX = {};
 
 function handleWasmLoaded(wasm) {
-    show_log("Wasm loaded. ");
+    show_log(" Wasm loaded.");
     Franca = wasm.instance.exports;
     console.log(Franca);
 
@@ -26,6 +25,7 @@ function handleWasmLoaded(wasm) {
     show("");
     let b = performance.now();
     show_log(" Ran in " + Math.round(b - a) + "ms.");
+    self.postMessage({ tag: "done" });
 }
 
 const imports = {
@@ -120,9 +120,30 @@ let weak_imports = [
     "read",
     "mkstemp",
     "dup2",
+    "readdir$INODE64",
+    "dlsym",
+    "fstatat",
+    "fstatat$INODE64",
+    "renameat",
+    "readlink",
+    "_NSGetExecutablePath",
+    "mkdirat",
+    "pthread_attr_setstack",
+    "opendir$INODE64",
+    "closedir",
+    "readdir",
+    "lseek",
+    "pthread_create",
+    "pthread_join",
+    "opendir",
+    "dlopen",
+    "sigaction",
+    "pthread_attr_init",
+    "strtoul", "strtod", "localtime", "time",
 ];
 
 for (const it of weak_imports) {
+    if(imports.env[it] === undefined)
     imports.env[it] = () => {
         throw new Error("called weak function: " + it);
     };
@@ -132,7 +153,7 @@ const handle = (_msg) => {
     const msg = _msg.data;
     switch (msg.tag) {
         case "start": {
-            WebAssembly.instantiateStreaming(fetch(main_url), imports)
+            WebAssembly.instantiateStreaming(fetch(msg.url), imports)
                 .then(handleWasmLoaded)
                 .catch(show_error);
             break;

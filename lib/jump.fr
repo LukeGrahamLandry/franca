@@ -24,12 +24,15 @@ WhichJump :: @enum(i64) (Try = 0, Catch = 1);
 // TODO: version of these that let you pass userdata to throw and retrive it from try(which=Catch)
 fn try(buf: *JumpBuf) WhichJump = {  // aka setjmp
     @run assert_eq(@as(i64) WhichJump.Try, 0);
+    // note: you can't do anything in this function before this call 
+    //       because you can't fuck with the return address before it gets saved in the jumpbuf
     _userdata, which := try_impl(buf);
     which
 }
 
 // TODO: this won't get inlined by the backend because it ends in hlt. doesn't matter but makes be sad.
 fn throw(buf: *JumpBuf) Never = {  // aka longjmp
+    @if(TODOWASM) @if(query_current_arch() == .wasm32) panic("TODO: longjmp throw");
     throw_impl(buf)
 }
 
@@ -73,7 +76,25 @@ try_impl :: AsmFunction(fn(_: *JumpBuf) Ty(rawptr, WhichJump) = (), @const_slice
     // return (_, WhichJump.Try)
     encode_imm(PrimaryOp.MovImm32, X86Reg.rdx, 0), 
     PrimaryOp.Ret
-) out;};
+) out;} wasm { (out: *List(u8)) | 
+    // not implemented. throw will assert. 
+    out.push(0x12);  // length
+    out.push(0x00);  // 0 locals
+    
+    range(0, 2) { i |
+        off: u8 = trunc(i*8);
+        out.push(0x20);  // local.get(0)
+        out.push(0x00);  // ^
+        out.push(0xA7);  // trunc
+        out.push(0x42);  // i64.const(0)
+        out.push(0x00);  // ^
+        out.push(0x37);  // i64.store
+        out.push(0x03);  // ^ align
+        out.push(off);   // ^
+    };
+    
+    out.push(0x0B);  // end
+};
 
 throw_impl :: AsmFunction(fn(_: *JumpBuf) Never = (), @const_slice(
     ldp_so(.X64, fp, lr, x0, @as(i7) 0),
