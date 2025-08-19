@@ -47,6 +47,7 @@
   or is it better to just make a copy? 
   really i should nail down the semantics of when the bake snapshot happens. 
   (all at once at the end of compilation probably?). 
+- make #export work on `foo :: fn() #` instead of only `fn foo() #`
 
 ## remaining nondeterminism
 
@@ -252,7 +253,6 @@ different subsets of the same resources.
 ## wasm
 
 - remove all the TODOWASM (ifdefs/comments)
-- emit_insertions for loadopt doesn't compile on wasm. `bad nesting. expected to end @39 but found @6`
 - the TODOWASM block in bounce_body_call breaks the output of examples/import_wuffs/test.fr. 
   (because that type of shim doesn't work with varargs maybe?)
 - wasm instruction for wait/wake/fence

@@ -1,4 +1,14 @@
 
+## (Aug 18)
+
+- fixed "emit_insertions for loadopt doesn't compile on wasm. `bad nesting. expected to end @39 but found @6`". 
+  problem was a loop that had to wait before being ended. 
+  needed a `<=` instead of `==` when comparing block id to top of loop_stack. 
+- now kalidescope gets to the part where we need to actually jit. 
+  and like maybe this will just work, make a new module that imports memory,table,etc 
+  have an offset to where it starts putting its own functions in the table, 
+  the host instantiates it with the old module as the imports and then you can access the functions in the table. 
+
 ## (Aug 17)
 
 trying to get dump_wasm to work in wasm
@@ -19,7 +29,7 @@ ditto kalidescope. i want to get it to the point of crashing because you can't j
   - convert int neg to sub
   - store ret_cls in FncFlags
 - insert a extuw for i64.extend(16/8)_s (same reason as for cmp)
-- just disable loadopt for now (TODO: fix real flow problem)
+- just disable loadopt for now 
 - TODO: still getting junk vptr indices
 
 why am i not doing this with import_wasm as well...?
@@ -38,6 +48,7 @@ how hard can it be to put 1.4MB of text on the screen?
 - for referece, running `./target/w.out a.wasm` in terminal.fr is 130ms (that's for twice) but it's about the same for once, 
   so we're learning v8 has a much faster jit than i do which makes sense. 
   i wonder if they cheat by caching the compiled wasm. 
+- `white-space: pre` works on safari. much faster than chrome surprisingly. the lie number is 30ms for twice. 
 
 ## (Aug 16)
 

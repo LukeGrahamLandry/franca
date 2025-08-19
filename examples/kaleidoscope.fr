@@ -59,7 +59,7 @@ KExpr :: @rec @tagged(
     VarIn: @struct(body: *KExpr, vars: []Ty(Str, *KExpr)),
 );
 
-Proto :: @struct(id: Qbe.Sym, args: []Str, operator: i64 = Token.identifier.raw(), prec := 0);
+Proto :: @struct(id: Qbe.Sym, args: []Str, operator: i64 = Token.identifier.raw(), prec := 0, export := false);
 
 RR :: Result(Qbe.Ref, Str);
 E :: fn(s: Str) => (Err = s);
@@ -497,6 +497,7 @@ fn codegen(c: *Ctx, proto: Proto, body: *KExpr) Result(void, Str) = {
     }
     
     c.start_fn(proto.id);
+    c.f.lnk.export = proto.export;
     for proto.args { name |
         r := c.f.newtmp(name, .Kd);
         c.f.emit(.par, .Kd, r, QbeNull, QbeNull);
@@ -539,8 +540,7 @@ fn compile_loop(c: *Ctx) Result(void, Str) = {
                     // wrap it up in a function so we can call it later
                     id := c.m.intern(@tfmt("@toplevel%", c.top_level.len));
                     c.top_level&.push(id);
-                    c.m.maybe_add_export(id, true);
-                    @try(c.codegen((id = id, args = empty()), body)) return;
+                    @try(c.codegen((id = id, args = empty(), export = true), body)) return;
                 }
             };
         }
@@ -550,7 +550,9 @@ fn compile_loop(c: *Ctx) Result(void, Str) = {
 main :: fn() void = {
     m := zeroed QbeModule;
     init_default_module(m&, (arch = query_current_arch(), os = query_current_os(), type = .JitOnly));
+    @if(TODOWASM) m&.set_debug_types("GIP", true);
     c: *Ctx = init(general_allocator(), EXAMPLE_PROGRAM, m&);
+    
     @match(c.compile_loop()) {
         fn Ok() => ();
         fn Err(s) => @panic("%\n before line %", s, c.line);

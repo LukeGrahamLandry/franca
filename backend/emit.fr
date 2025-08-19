@@ -161,7 +161,13 @@ fn make_exec(self: *QbeModule) void = {
     @debug_assert_eq(self.goal.arch, query_current_arch());
     @debug_assert_eq(self.goal.type, .JitOnly);
     if self.goal.expecting_wx {
+        @debug_assert_ne(self.goal.arch, .wasm32);
         return();  // already executable so this is a nop
+    };
+    
+    if self.goal.arch == .wasm32 {
+        import("@/backend/wasm/emit.fr")'make_exec(self);
+        return();
     };
     
     segment := SegmentType.Code;
@@ -211,6 +217,9 @@ fn get_addr(self: *QbeModule, name: Str) ?rawptr = {
 fn get_addr(self: *QbeModule, symbol: *SymbolInfo) ?Ty(rawptr, i64) = {
     ::enum(SymbolKind);
     if(symbol.kind != .Local, => return(.None));
+    if self.goal.arch == .wasm32 {
+        return(Some = (symbol.jit_addr, 0));
+    };
     segment := self.segments&[symbol.segment];
     addr    := segment.mmapped.ptr.offset(symbol.offset);
     (Some = (u8.raw_from_ptr(addr), symbol.size.zext()))
@@ -570,6 +579,7 @@ fn do_fixups_impl(self: *QbeModule, address: rawptr, symbol: *SymbolInfo) void =
     };
     
     if self.goal.arch == .wasm32 && symbol.segment == .Code && symbol.got_lookup_offset == -1 {
+        // TODO: actually when jitting we do know the indices of locals for direct calls. 
         // Need to wait until the end of compilation to know its index. 
         return();
     };

@@ -401,24 +401,17 @@ fn emit_the_code(self: *LoadWasm) void = {
             // TODO: this is unfortunate code to generate but i don't know how you do better without knowing that tables are immutable. 
             //       if max=min then at least you know they don't resize and you could save an indirection. 
             fn CallIndirect() => {
-                type_index       := self.read_u();
-                table_index      := self.read_u();
-                index_in_table_W := self.stack&.pop().expect("call index on stack");
-                table_var        := self.tables[table_index.bitcast()];
-                table_var        := self.f.symcon(table_var);
-                callee           := self.f.newtmp("Icallee", .Kl);
-                index_in_table_L := self.f.newtmp("Iindex", .Kl);
-                table_slot       := self.f.newtmp("Islot", .Kl);
-                table_offset     := self.f.newtmp("Ioff", .Kl);
-                table_base       := self.f.newtmp("Ibase", .Kl);
-                
-                self.f.emit(.load, .Kl, table_base, table_var, QbeNull);
-                self.f.emit(.extuw, .Kl, index_in_table_L, index_in_table_W, QbeNull);
-                self.f.emit(.mul, .Kl, table_offset, index_in_table_L, self.f.getcon(8));
-                self.f.emit(.add, .Kl, table_slot, table_base, table_offset);
-                self.f.emit(.load, .Kl, callee, table_slot, QbeNull);
-                
+                type_index := self.read_u();
+                table := self.read_u();
+                index := self.stack&.pop().expect("call index on stack");
+                callee := self.table_get(table, index);
                 self.emit_call_from_stack(callee, (id = type_index.trunc()));
+            }
+            fn TableGet() => {
+                table := self.read_u();
+                index := self.stack&.pop().expect("table index on stack");
+                r := self.table_get(table, index);
+                self.stack&.push(r);
             }
             fn Call() => {
                 callee := self.read_index(Wasm.FuncIdx);
@@ -526,9 +519,38 @@ fn emit_the_code(self: *LoadWasm) void = {
                 self.f.emit(.cas1, k, prev, old, new);
                 self.stack&.push(prev);
             }
+            fn TablePrefix() => {
+                opcode := self.read_u();
+                @assert_eq(opcode, 15, "TODO: implement more table ops (only grow is supported)");
+                table := self.read_u();
+                
+                delta := self.stack&.pop().expect("stack for delta");  // i32
+                fill := self.stack&.pop().expect("stack for fill");  // externref
+                
+                @eprintln("TODO: implement table grow!");
+                
+                self.stack&.push(self.f.getcon(-1));
+            }
             @default => @panic("unhandled unstruction %", self.src[self.cursor - 1]);
         }
     }
+}
+
+fn table_get(self: *LoadWasm, table_index: u64, index_in_table_W: Qbe.Ref) Qbe.Ref = {
+    table_var        := self.tables[table_index.bitcast()];
+    table_var        := self.f.symcon(table_var);
+    result           := self.f.newtmp("Icallee", .Kl);
+    index_in_table_L := self.f.newtmp("Iindex", .Kl);
+    table_slot       := self.f.newtmp("Islot", .Kl);
+    table_offset     := self.f.newtmp("Ioff", .Kl);
+    table_base       := self.f.newtmp("Ibase", .Kl);
+    
+    self.f.emit(.load, .Kl, table_base, table_var, QbeNull);
+    self.f.emit(.extuw, .Kl, index_in_table_L, index_in_table_W, QbeNull);
+    self.f.emit(.mul, .Kl, table_offset, index_in_table_L, self.f.getcon(8));
+    self.f.emit(.add, .Kl, table_slot, table_base, table_offset);
+    self.f.emit(.load, .Kl, result, table_slot, QbeNull);
+    result
 }
 
 fn parse_branch_target(self: *LoadWasm) *Qbe.Blk = {

@@ -166,7 +166,8 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
         }
         fn call() => {
             @debug_assert(i.to == QbeNull);
-            if rtype(i.arg&[0]) != .RCon {
+            // the way i do jit you don't get any imports. TODO: maybe that's bad and slow, idk. 
+            if rtype(i.arg&[0]) != .RCon || (f.globals.goal.type == .JitOnly && could_be_import(f, f.get_constant(i.arg&[0]))) {
                 f.emit(.call_indirect, .Kw, QbeNull, QbeNull, i.arg&[1]);
                 wasm_push_addr(f, i.arg&[0]);
                 return();
@@ -440,8 +441,14 @@ fn wasm_flow(f: *Qbe.Fn) void = {
     fn prepend(b: *Qbe.Blk, i: Qbe.Ins) void = {  // :SLOW
         b.ins&.reserve(1, temp());
         j := 0;
-        cond :: fn() => (b.ins.index(j).op() == .flow && (b.ins[j].arg&[0] == INT(Flow.loop.raw()) || b.ins[j].arg&[1].rsval() > i.arg&[1].rsval()));
-        while => j < b.ins.len && (is_par(b.ins.index(j).op()) || cond()) {
+        cond :: fn(i1) => is_par(i1.op()) || (i1.op() == .flow && {
+            if i1.arg&[0] == INT(Flow.loop.raw()) {
+                true
+            } else {
+                i1.arg&[1].rsval() > i.arg&[1].rsval()
+            }
+        });
+        while => j < b.ins.len && cond(b.ins.index(j)) {
             j += 1;
         };
         if b.ins.index(j).op() == .nop {
@@ -529,12 +536,17 @@ fn wasm_flow(f: *Qbe.Fn) void = {
             push(b, make_ins(.flow, .Kw, QbeNull, INT(br), dest));
         };
         
-        while => loop_stack.len > 0 && loop_stack[loop_stack.len - 1].end == b.id {
+        // - only take from the end of the stack so nesting works out. 
+        // - check id so only end a loop once there are no more jumps to it. 
+        while => loop_stack.len > 0 && loop_stack[loop_stack.len - 1].end <= b.id {
             // insert the end of a loop
             l := loop_stack&.pop().unwrap();
             push(b, make_ins(.flow, .Kw, QbeNull, INT(Flow.end), INT(l.entry.intcast()))); 
         };
     };
+    @debug_assert_eq(loop_stack.len, 0, "unfinished loops!");
+    
+    when_debug(f, .InstSelect, fn(out) => dump_flow_cfg(f, out));
 }
 
 // several operations that all interesting cpus have but we have to pretend don't exist 
