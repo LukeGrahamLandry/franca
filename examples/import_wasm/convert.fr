@@ -9,95 +9,24 @@
 //         (i have the machinery to do this already because the Franca compiler works that way)
 //         + you could compile multiple functions in parallel (but that would need more work).
 //       - the number of bounds checks the parser does per byte is a bit sad. 
-//       - the way i deal with adjusting indexes for imports is silly. 
 //       - could inline more if we pre-sorted based on callgraph,
 //         but maybe the expectation with wasm is that the first compiler did that already?
 
 // TODO: validation
-// TODO: tables, vector ops, call_indirect, br_table, br_if, drop, select, memory grow/init/size/copy/fill, data drop,
+// TODO: 
 //       T.eqz, abs, ceil, floor, trunc, nearest, copysign, trunc_sat, some other conversions
 //       multiple return values, ref.*
 //       more atomic ops. 
+//       memory ops: grow/init/size/copy/fill/drop
+//       br_table
+//       more table ops: set/size/fill/copy/init/drop
+//       vectors. 
+//       multiple memories. 
+//       0x1B version of select
+//
+// TODO: support aot. needs extra work because of import_wasm/runtime.fr
+//       
 // TODO: provide standard c api so could run other people's tests? https://github.com/WebAssembly/wasm-c-api/blob/main/include/wasm.h
-
-fn init(m: *QbeModule, w: *WasmModule, a: Alloc) LoadWasm = (
-    m = m,
-    w = w,
-    stack = list(temp()),
-    locals = empty(),
-    blocks = list(temp()),
-    preserve_franca_env = true,
-    alloc = a,
-);
-
-fn fill_imports(self: *LoadWasm, imports: *RawHashMap(Str, rawptr)) void = {
-    each self.w.imports& { it |
-        name := @tfmt("%$%", it.name.items(), it.module.items());  // :leak
-        if imports.get(name) { addr |
-            self.m.put_jit_addr(self.m.intern(name), addr);
-        } else {
-            @panic("ERROR: missing import '%'", name);
-        }
-    };
-}
-
-fn collect_exports(self: *LoadWasm, a: Alloc) []Qbe.Sym = {
-    count := 0;
-    each self.w.exports& { it |
-        ::enum(@type it.type);
-        count += int(it.type == .Func);
-    };
-    e := a.alloc_uninit(Qbe.Sym, count);
-    i := 0;
-    each self.w.exports& { it |
-        if it.type == .Func {
-            e[i] = self.functions[it.id.zext()];
-            i += 1;
-        };
-    };
-    @debug_assert_eq(e.len, i);
-    e
-}
-
-// Call this at comptime. 
-// Take a struct like { Module :: { Func :: fn(); } } and create a map [func$module -> fnptr]
-fn comptime_exports(Exports: Type) RawHashMap(Str, rawptr) #fold = {
-    // TODO: sane error message if you try to have this be the whole HashMap that includes ast_alloc as a rawptr
-    //       but it wont have been baked before so you cant bake it now and don't know why but the error makes it sound like its a rawptr value in the map. 
-    fr := current_compiler_context();
-    a := ast_alloc();
-    exports: HashMap(Str, rawptr) = init(a);
-    s := scope_of(Type, Exports);
-    for get_constants(s) { module_name |
-        s2 := scope_of(Type, get_constant(Type, s, module_name).unwrap());
-        func_names := get_constants(s2);
-        for func_names { func_name | 
-            // note: get_constant(rawptr, _, _) when the value is an Expr::Closure does not bake it properly
-            fid := get_constant(FuncId, s2, func_name).unwrap();
-            addr := fr.get_jitted(fid);
-            
-            mangled_name := (@tfmt("%$%", func_name.str(), module_name.str())).shallow_copy(a);
-            exports&.insert(mangled_name, addr);
-        }
-    }
-    exports.raw&.zero_unused_slots();
-    exports.raw
-} 
-
-fn const_eval_wasm_expr(expr: []u8) Ty(i64, Qbe.Cls) = {
-    o := @as(Wasm.Inst) expr[0];
-    ::enum(Wasm.Inst);
-    @assert(@is(o, .I32_Const, .I64_Const), "TODO: complex expr");
-    v, _, ok := read_leb128_signed(expr.rest(1));
-    @debug_assert(ok, "bad constant expression");
-    (v, @match(o) {
-        fn I32_Const() => .Kw;
-        fn I64_Const() => .Kl;
-        fn F32_Const() => .Ks;
-        fn F64_Const() => .Kd;
-        @default => @panic("unhandled op in const_eval_wasm_expr");
-    })
-} 
 
 LoadWasm :: @struct(
     m: *QbeModule,
@@ -121,12 +50,129 @@ LoadWasm :: @struct(
     link := zeroed(**Qbe.Blk),
     franca_env := QbeNull,
     alloc: Alloc,
+    
+    imports_needed: Qbe.BSet,
+    fixed_memory_base := Qbe.no_symbol_S,  // TODO
 );
+
+fn init(m: *QbeModule, w: *WasmModule, a: Alloc) LoadWasm = (
+    m = m,
+    w = w,
+    stack = list(temp()),
+    locals = empty(),
+    blocks = list(temp()),
+    // for now this always needs to be true because of import_wasm/runtime.fr
+    preserve_franca_env = true,
+    alloc = a,
+    imports_needed = bsinit_full(w.imports.len),
+);
+
+fn assert_all_imports_filled(self: *LoadWasm) void = {
+    for self.imports_needed& { i |
+        it := self.w.imports&.index(i);
+        @if(!it.desc&.is(.Memory))
+        @panic("ERROR: missing import '%'", it.mangle_name());
+    };
+}
+
+fn mangle_name(it: *Wasm.Import) Str = 
+    @tfmt("%^%", it.name.items(), it.module.items());  // :NamespaceChar
+
+fn fill_imports(self: *LoadWasm, imports: *RawHashMap(Str, rawptr)) void = {
+    enumerate self.w.imports& { i, it |
+        name := it.mangle_name();
+        if imports.get(name) { addr |
+            self.m.put_jit_addr(self.m.intern(name), addr);
+            @debug_assert(self.imports_needed&.bshas(i), "% was filled twice", name);
+            self.imports_needed&.bsclr(i);
+        };
+    };
+}
+
+fn fill_imports(self: *LoadWasm, name: Str, imports: *LoadWasm) void = {
+    // TODO: use some hashmaps :SLOW
+    exports := imports.collect_exports(temp());
+    enumerate self.w.imports& { i, it |
+        @if(!it.desc&.is(.Memory))  // TODO
+        if it.module.items() == name {
+            enumerate imports.w.exports { j, jt |
+                if it.name.items() == jt.name.items() {
+                    id := exports[j];
+                    name := it.mangle_name();
+                    addr, _ := imports.m.get_addr(id).unwrap();
+                    self.m.put_jit_addr(self.m.intern(name), addr);
+                    @debug_assert(self.imports_needed&.bshas(i), "% was filled twice", name);
+                    self.imports_needed&.bsclr(i);
+                }
+            };
+        }
+    };
+}
+
+fn collect_exports(self: *LoadWasm, a: Alloc) []Qbe.Sym = {
+    a.alloc_init(Qbe.Sym, self.w.exports.len) { i |
+        it := self.w.exports.index(i);
+        ::enum(@type it.type);
+        symbols := @match(it.type) {
+            fn Func()   => self.functions;
+            fn Global() => self.global_names;
+            fn Table()  => self.tables;
+            fn Memory() => @slice(self.fixed_memory_base);
+        };
+        symbols[it.id.zext()]
+    }
+}
+
+// Call this at comptime. 
+// Take a struct like { Module :: { Func :: fn(); } } and create a map [func^module -> fnptr]
+fn comptime_exports(Exports: Type) RawHashMap(Str, rawptr) #fold = {
+    // TODO: sane error message if you try to have this be the whole HashMap that includes ast_alloc as a rawptr
+    //       but it wont have been baked before so you cant bake it now and don't know why but the error makes it sound like its a rawptr value in the map. 
+    fr := current_compiler_context();
+    a := ast_alloc();
+    exports: HashMap(Str, rawptr) = init(a);
+    s := scope_of(Type, Exports);
+    for get_constants(s) { module_name |
+        s2 := scope_of(Type, get_constant(Type, s, module_name).unwrap());
+        func_names := get_constants(s2);
+        for func_names { func_name | 
+            // note: get_constant(rawptr, _, _) when the value is an Expr::Closure does not bake it properly
+            fid := get_constant(FuncId, s2, func_name).unwrap();
+            addr := fr.get_jitted(fid);
+            
+            // :NamespaceChar
+            mangled_name := (@tfmt("%^%", func_name.str(), module_name.str())).shallow_copy(a);
+            exports&.insert(mangled_name, addr);
+        }
+    }
+    exports.raw&.zero_unused_slots();
+    exports.raw
+} 
+
+fn const_eval_wasm_expr(expr: []u8) Ty(i64, Qbe.Cls) = {
+    o := @as(Wasm.Inst) expr[0];
+    ::enum(Wasm.Inst);
+    @assert(@is(o, .I32_Const, .I64_Const), "TODO: complex expr");
+    v, _, ok := read_leb128_signed(expr.rest(1));
+    @debug_assert(ok, "bad constant expression");
+    (v, @match(o) {
+        fn I32_Const() => .Kw;
+        fn I64_Const() => .Kl;
+        fn F32_Const() => .Ks;
+        fn F64_Const() => .Kd;
+        @default => @panic("unhandled op in const_eval_wasm_expr");
+    })
+} 
+
+// :NamespaceChar
+fn private_symbol(self: *LoadWasm, name: Str) Qbe.Sym = {
+    self.m.intern(@tfmt("%__^%", name, self.module_name))
+}
 
 fn create_init_func(self: *LoadWasm) Qbe.Sym = {
     f := Qbe.Fn.zeroed(); f := f&;
     f.default_init(self.m);
-    f.lnk.id = self.m.intern(@tfmt("init$%$", self.module_name));
+    f.lnk.id = self.private_symbol("init");
     f.lnk.export = true;
     f.start = newblk();
     f.start.jmp = (type = .ret0, arg = QbeNull);
@@ -139,7 +185,7 @@ fn create_init_func(self: *LoadWasm) Qbe.Sym = {
         @assert_ne(expr.len, 0, "TODO: passive data");
         off, k := const_eval_wasm_expr(expr.items());
         @debug_assert_eq(k, .Kw, "offset expression");
-        id := self.m.intern(@tfmt("data%$%$", i, self.module_name));
+        id := self.private_symbol(@tfmt("data%", i));
         self.m.emit_data(template = (Bytes = data.bytes.items()), id = id, relocations = empty());
         dest := f.newtmp("dat", .Kl);
         // :ThisSureIsABigBlit I AM BAD AT MY JOB
@@ -156,7 +202,10 @@ fn create_init_func(self: *LoadWasm) Qbe.Sym = {
 preleb :: import("@/backend/wasm/isel.fr").wasm_type_preleb;
 
 fn load_module(self: *LoadWasm) void = {
-    self.create_globals();
+    // :Leak
+    self.declare_functions();
+    self.declare_globals();
+    self.declare_tables();
     
     range(0, self.w.code.len) { i |
         mark := mark_temporary_storage();
@@ -169,7 +218,7 @@ fn load_module(self: *LoadWasm) void = {
 
 fn translate_func(self: *LoadWasm, local_func_i: i64, f: *Qbe.Fn) void = {
     code := self.w.code.index(local_func_i);
-    global_func_i := local_func_i + self.w.imported_function_count;
+    global_func_i := local_func_i + self.w.import_count&[.Func];
     self.f = f;
     self.f.default_init(self.m);
     
@@ -230,24 +279,21 @@ fn translate_func(self: *LoadWasm, local_func_i: i64, f: *Qbe.Fn) void = {
     self.f.lnk.export = true; // TODO: kind depends if this is the final thing. if it's aot into a franca program, you want to to TOFKALTO
 }
 
-// choose names for functions, globals, tables
-fn create_globals(self: *LoadWasm) void = {
+fn declare_functions(self: *LoadWasm) void = {
     a := self.alloc;
-    count := self.w.functions.len + self.w.imported_function_count;
+    count := self.w.functions.len + self.w.import_count&[.Func];
     self.functions = a.alloc_uninit(Qbe.Sym, count); // :Leak
     self.function_types = a.alloc_uninit(Wasm.TypeIdx, count);
     f_i := 0;
     each self.w.imports& { import |
         @if_let(import.desc&) fn Function(id) => {
-            self.functions[f_i] = self.m.intern(@tfmt("%$%", import.name.items(), import.module.items()));
+            self.functions[f_i] = self.m.intern(import.mangle_name());
             self.function_types[f_i] = id[];
             f_i += 1;
         };
-        @debug_assert(import.desc&.is(.Function), "TODO: support other non-function imports (need to change local_global_i/table_i below)");
     };
-    @debug_assert_eq(f_i, self.w.imported_function_count);
     range(0, self.w.functions.len) { i |
-        self.functions[f_i] = self.m.intern(@tfmt("F%$%", f_i, self.module_name));
+        self.functions[f_i] = self.private_symbol(@tfmt("F%", f_i));
         self.function_types[f_i] = self.w.functions[i];
         f_i += 1;
     };
@@ -257,32 +303,60 @@ fn create_globals(self: *LoadWasm) void = {
     each self.w.exports& { it |
         ::enum(@type it.type);
         if it.type == .Func {
-            self.functions[it.id.zext()] = self.m.intern(@tfmt("%$%", it.name.items(), self.module_name));
+            // :NamespaceChar
+            self.functions[it.id.zext()] = self.m.intern(@tfmt("%^%", it.name.items(), self.module_name));
+        };
+    };
+}
+
+fn declare_globals(self: *LoadWasm) void = {
+    a := self.alloc;
+    count := self.w.globals.len + self.w.import_count&[.Global];
+    self.global_names = a.alloc_uninit(Qbe.Sym, count);
+    self.global_cls = a.alloc_uninit(Qbe.Cls, count);
+    
+    i := 0;
+    each self.w.imports& { import |
+        @if_let(import.desc&) fn Global(it) => {
+            self.global_names[i] = self.m.intern(import.mangle_name());
+            self.global_cls[i] = it.ref_type.cls();
+            i += 1;
         };
     };
     
-    self.global_names = a.alloc_uninit(Qbe.Sym, self.w.globals.len); // :Leak
-    self.global_cls = a.alloc_uninit(Qbe.Cls, self.w.globals.len); // :Leak
-    enumerate self.w.globals& { local_global_i, global | 
-        // TODO: offset the index by number of imported globals
-        id := self.m.intern(@tfmt("G%$%", local_global_i, self.module_name));
-        self.global_names[local_global_i] = id;
+    each self.w.globals& { global |
+        id := self.private_symbol(@tfmt("G%", i));
+        self.global_names[i] = id;
+        value, k := const_eval_wasm_expr(global.init_expr.items());
+        self.global_cls[i] = k;
+        @debug_assert_eq(k, global.type.cls());
         
-        value, k := const_eval_wasm_expr(global.init_expr.items());  // TODO: is this k always the same as global.type?
-        self.global_cls[local_global_i] = k;
         self.m.emit_data(
             id = id, 
             template = (Bytes = (ptr = ptr_cast_unchecked(i64, u8, value&), len = 4 + 4 * int(k.is_wide()))), 
             relocations = empty(),
         );
+        i += 1;
+    };
+    @debug_assert_eq(i, count);
+}
+
+fn declare_tables(self: *LoadWasm) void = {
+    a := self.alloc;
+    count := self.w.tables.len + self.w.import_count&[.Table];
+    self.tables = a.alloc_uninit(Qbe.Sym, count);
+    
+    table_i := 0;
+    each self.w.imports& { import |
+        @if_let(import.desc&) fn Table(it) => {
+            self.tables[table_i] = self.m.intern(import.mangle_name());
+            table_i += 1;
+        };
     };
     
-    // :Leak
-    self.tables = a.alloc_init(Qbe.Sym, self.w.tables.len) { table_i | 
-        table := self.w.tables.index(table_i);
-        name := @tfmt("T%$%", table_i, self.module_name);
-        table_pointer := self.m.intern(name);
-        table_initial := self.m.intern(@tfmt("init__%", name));
+    each self.w.tables { table | 
+        table_pointer := self.private_symbol(@tfmt("T%", table_i));
+        table_initial := self.private_symbol(@tfmt("T%_init", table_i));
         
         ::enum(@type table.type);
         @assert(table.type == .FuncRef, "TODO: non-func tables");
@@ -318,8 +392,10 @@ fn create_globals(self: *LoadWasm) void = {
             relocations = @slice(@as(Dat2.Reloc) (off = 0, id = table_initial)),
         );
         
-        table_pointer
+        self.tables[table_i] = table_pointer;
+        table_i += 1;
     };
+    @debug_assert_eq(count, table_i);
 }   
 
 Rt :: import("@/examples/import_wasm/runtime.fr");
@@ -747,7 +823,3 @@ fn emit_call_from_stack(self: *LoadWasm, callee: Qbe.Ref, type: Wasm.TypeIdx) vo
     };
 }
 
-// (dest_offset, src_offset_in_data, size_to_copy)  // TODO: make sure those arguments are right
-fn emit_memory_init(self: *WasmModule, data_id: i64) void = {
-    todo()
-}

@@ -49,6 +49,7 @@ const toggle_worker = () => {
         document.getElementById("btn").innerText = "Kill";
     } else {
         worker.terminate();
+        show("");
         document.getElementById("err").innerText += "KILLED";
         worker = null;
         document.getElementById("btn").innerText = start_message;
@@ -68,7 +69,7 @@ let line = "";
 const show = (s) => {
     if (s.length == 1) {
         line += s;
-        if (s.charCodeAt(0) != 10) return;
+        if (s.charCodeAt(0) != 10 && line.length < 128) return;
         s = line;
         line = "";
     }

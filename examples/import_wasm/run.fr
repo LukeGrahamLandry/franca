@@ -100,10 +100,12 @@ fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str, args: []CStr) void 
     // TODO: save the typeinfo and at least do arity checking
     exports := comptime_exports(Exports);
     fill_imports(self&, exports&);
+    self&.assert_all_imports_filled();
     initializer := self&.create_init_func();
     
     m.emit_suspended_inlinables();
     m.make_exec();
+    main_module[] = self&;
     
     for_symbols m { id, s | // :SLOW
         ::enum(@type s.kind);
@@ -118,7 +120,19 @@ fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str, args: []CStr) void 
     
     // TODO: there's a segment where it tells you the entry point
     exports := self&.collect_exports(temp());
-    main := exports.index_of(fn(it) => m.str(it[]) == "main$module")
+    
+    {  // TODO
+        enumerate self.w.exports& { i, it |
+            @if_let(it.type) fn Table() => {
+                addr, _ := m.get_addr(exports[i]).unwrap();
+                // TODO: this shouldn't need the '::'
+                the_table[] = bit_cast_unchecked(rawptr, ::*[]rawptr, addr);
+            };
+        };
+    };
+    
+    // :NamespaceChar
+    main := exports.index_of(fn(it) => m.str(it[]) == "main^module")
         || @panic("expected export called 'main'");
     n := exports[main];
     f, _ := or m.get_addr(n) {
@@ -139,6 +153,8 @@ fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str, args: []CStr) void 
 
 // note: this is on the opposite end of how i did it in wasm_test.html
 heap_base :: @static(u32) 0;  // TODO: BAD!
+main_module :: @static(*LoadWasm);
+the_table :: @static(*[]rawptr);
 
 // TODO
 // Generate a wrapper to promote offsets in linear memory to native pointers. 
@@ -266,21 +282,46 @@ Exports :: @struct {
             @debug_assert_eq(table_index, 0);
             module_bytes := ctx.offset(address).slice(length);
             
-            a := general_allocator();
+            // TODO: should probably just allow userdata
+            main_module := main_module[];
+            
+            a := general_allocator(); // TODO
+            m := a.box(Qbe.Module);
+            init_default_module(m, (type = .JitOnly, os = query_current_os(), arch = query_current_arch(), link_libc = false));
+            m.debug = main_module.m.debug;
             w: WasmModule = empty(a);
             p: ParseWasm = (w = w&, src = module_bytes);
             or parse_wasm(p&) { e |
                 @panic("% (at byte index %)", e, p.cursor);
             };
             
-            // TODO
-            // - stash the old module somewhere in main(). might be better to just allow userdata. 
-            // - instantiate with LoadWasm
-            // - fill imports with exports from the old module
-            // - copy all exports to the old table starting at first_export
-            // - make the api nice so it's not more painful than the js version
+            new: LoadWasm = init(m, w&, a);
+            new.module_name = "other";  // TODO
+            new&.load_module();
+            new&.fill_imports("main", main_module);
+            new&.assert_all_imports_filled();
             
-            todo()
+            initializer := new&.create_init_func();
+            m.emit_suspended_inlinables();
+            m.make_exec();
+            
+            init_data, _ := m.get_addr(initializer).expect("init compiled");
+            init_data := assume_types_fn(Arg = *u8, Ret = void, ptr = init_data);
+            init_data(ctx);
+            
+            exports := new&.collect_exports(temp());
+            
+            table := the_table[][];
+            j := first_export;
+            enumerate new.w.exports& { i, it |
+                @if_let(it.type) fn Func() => {
+                    addr, _ := m.get_addr(exports[i]).unwrap();
+                    table[j] = addr;
+                    j += 1;
+                };
+            };
+            
+            // TODO: make the api nice so it's not more painful than the js version
         }
     }
 }

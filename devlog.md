@@ -1,4 +1,9 @@
 
+import_wasm
+- support importing globals/tables
+- make it easy to fill the imports of one module with the exports of another
+- finish jit_instantiate_module
+
 ## (Aug 19) wasm
 
 - make it clear that O.cas0 class doesn't matter

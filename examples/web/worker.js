@@ -46,7 +46,7 @@ function write_args(args) {
         let dest = new Uint8Array(Franca.memory.buffer, Number(p) + off, args[i].byteLength);
         // note the extra `new`, passing it an arraybuffer silently does nothing ?? 
         dest.set(new Uint8Array(args[i].buffer));
-        // big endien is the default because we're smoking crack
+        // big endian is the default because we're smoking crack
         pointers.setBigInt64(Number(p) + i*8, p + BigInt(off), true);
         // null terminator already zero
         off += args[i].byteLength + 1;
