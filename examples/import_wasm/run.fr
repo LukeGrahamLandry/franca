@@ -71,7 +71,7 @@ fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str, args: []CStr) void 
     //       this also doesn't work if i want to support memory64. 
     // relies on page allocator giving zeroes
     buf := page_allocator.alloc_uninit(u8, 1.shift_left(32)); // wasm.w.memories[0].min.zext() * wasm_page_size);
-    wasm_context_pointer := u8.int_from_ptr(buf.ptr);
+    wasm_context_pointer := buf.ptr;
     heap_base[] = trunc(buf.len - 1);
 
     // write the cli arguments into memory the module can access. 
@@ -100,23 +100,10 @@ fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str, args: []CStr) void 
     // TODO: save the typeinfo and at least do arity checking
     exports := comptime_exports(Exports);
     fill_imports(self&, exports&);
-    self&.assert_all_imports_filled();
-    initializer := self&.create_init_func();
-    
-    m.emit_suspended_inlinables();
-    m.make_exec();
+    self&.instantiate(wasm_context_pointer);
     main_module[] = self&;
     
-    for_symbols m { id, s | // :SLOW
-        ::enum(@type s.kind);
-        @debug_assert(s.kind != .Pending || s.fixups.len == 0, "unfilled patch: %", s.name);
-    };
-    
     trace := Crash'push_resolver(QbeModule, m, find_ip_in_module);
-    
-    init_data, _ := m.get_addr(initializer).expect("init compiled");
-    init_data := assume_types_fn(Arg = i64, Ret = void, ptr = init_data);
-    init_data(wasm_context_pointer);
     
     // TODO: there's a segment where it tells you the entry point
     exports := self&.collect_exports(temp());
@@ -139,7 +126,7 @@ fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str, args: []CStr) void 
         @panic("couldn't find %: %", n.id, m.str(n));
     };
     //@println(">>> Calling %", wasm.m.str(n));
-    f := assume_types_fn(Arg = Ty(i64, u32, u32, u32, u32), Ret = i64, ptr = f);
+    f := assume_types_fn(Arg = Ty(*u8, u32, u32, u32, u32), Ret = i64, ptr = f);
     result := f(wasm_context_pointer, argc.trunc(), argv, 0, 0);
     if result != 0 {
         @eprintln(">>> returned %", result);
@@ -299,16 +286,8 @@ Exports :: @struct {
             new.module_name = "other";  // TODO
             new&.load_module();
             new&.fill_imports("main", main_module);
-            new&.assert_all_imports_filled();
-            
-            initializer := new&.create_init_func();
-            m.emit_suspended_inlinables();
-            m.make_exec();
-            
-            init_data, _ := m.get_addr(initializer).expect("init compiled");
-            init_data := assume_types_fn(Arg = *u8, Ret = void, ptr = init_data);
-            init_data(ctx);
-            
+            new&.instantiate(ctx);
+
             exports := new&.collect_exports(temp());
             
             table := the_table[][];

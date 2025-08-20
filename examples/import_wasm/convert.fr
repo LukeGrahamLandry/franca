@@ -70,7 +70,8 @@ fn init(m: *QbeModule, w: *WasmModule, a: Alloc) LoadWasm = (
 fn assert_all_imports_filled(self: *LoadWasm) void = {
     for self.imports_needed& { i |
         it := self.w.imports&.index(i);
-        @if(!it.desc&.is(.Memory))
+        ::tagged(@type it.desc);
+        @if(!it.desc&.is(.Memory))  // TODO
         @panic("ERROR: missing import '%'", it.mangle_name());
     };
 }
@@ -109,17 +110,46 @@ fn fill_imports(self: *LoadWasm, name: Str, imports: *LoadWasm) void = {
     };
 }
 
+fn fill_import(self: *LoadWasm, module: Str, name: Str, addr: rawptr) bool = {
+    // :SLOW
+    i := self.w.imports&.items().index_of(fn(it) => it.module.items() == module && it.name.items() == name)
+        || return(false);
+    it := self.w.imports.index(i);
+    name := it.mangle_name();
+    self.m.put_jit_addr(self.m.intern(name), addr);
+    @debug_assert(self.imports_needed&.bshas(i), "% was filled twice", name);
+    self.imports_needed&.bsclr(i);
+    true
+}
+
+fn get_export(self: *LoadWasm, name: Str) ?rawptr = {
+    each self.w.exports& { it |
+        if it.name.items() == name {
+            symbols := self.get_symbols(it.type);
+            id := symbols[it.id.zext()];
+            addr, _ := self.m.get_addr(id) || return(.None);
+            return(Some = addr);
+        }
+    };
+    .None
+}
+
 fn collect_exports(self: *LoadWasm, a: Alloc) []Qbe.Sym = {
     a.alloc_init(Qbe.Sym, self.w.exports.len) { i |
         it := self.w.exports.index(i);
-        ::enum(@type it.type);
-        symbols := @match(it.type) {
-            fn Func()   => self.functions;
-            fn Global() => self.global_names;
-            fn Table()  => self.tables;
-            fn Memory() => @slice(self.fixed_memory_base);
-        };
+        symbols := self.get_symbols(it.type);
         symbols[it.id.zext()]
+    }
+}
+
+fn get_symbols(self: *LoadWasm, type: Wasm.ImportType) []Qbe.Sym #inline/*semantic*/ = {
+    ::enum(Wasm.ImportType);
+    @match(type) {
+        fn Func()   => self.functions;
+        fn Global() => self.global_names;
+        fn Table()  => self.tables;
+        // TODO
+        fn Memory() => @slice(self.fixed_memory_base);
     }
 }
 
@@ -148,6 +178,20 @@ fn comptime_exports(Exports: Type) RawHashMap(Str, rawptr) #fold = {
     exports.raw&.zero_unused_slots();
     exports.raw
 } 
+
+fn instantiate(self: *LoadWasm, wasm_context_pointer: *u8) void = {
+    m := self.m;
+    ::enum(@type m.goal.type);
+    @debug_assert_eq(m.goal.type, .JitOnly);
+    self.assert_all_imports_filled();
+    initializer := self.create_init_func();
+    m.emit_suspended_inlinables();
+    m.make_exec();
+    
+    init_data, _ := m.get_addr(initializer).expect("init compiled");
+    init_data := assume_types_fn(Arg = *u8, Ret = void, ptr = init_data);
+    init_data(wasm_context_pointer);
+}
 
 fn const_eval_wasm_expr(expr: []u8) Ty(i64, Qbe.Cls) = {
     o := @as(Wasm.Inst) expr[0];

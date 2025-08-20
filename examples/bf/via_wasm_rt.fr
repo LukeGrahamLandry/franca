@@ -1,0 +1,37 @@
+// This is the same idea as via_wasm.fr except this time we're running a bf
+// program that isn't available at comptime so it can't be statically 
+// compiled into a normal function. Instead the translation must happen at runtime, 
+// and the wasm compiler must be included in the executable as a library. 
+// You'll notice that via_wasm_rt.fr has a much larger AOT binary than via_wasm.fr. 
+
+// Reusing the bf->wasm translation code from the comptime example. 
+ViaWasm :: import("@/examples/bf/via_wasm.fr");
+
+main :: fn() void = {
+    bf_source := import("@/examples/bf/README.fr").HELLO_WORLD;
+    wasm := ViaWasm'to_wasm_module(temp(), bf_source).items();
+    exports := comptime_exports(ViaWasm.Exports);
+    
+    m := @uninitialized Qbe.Module; m := m&;
+    init_default_module(m, (arch = query_current_arch(), os = query_current_os(), type = .JitOnly));
+    w: WasmModule = empty(temp());
+    p: ParseWasm = (w = w&, src = wasm);
+    or parse_wasm(p&) { e |
+        @panic("% (at byte index %)", e, p.cursor);
+    };
+    instance: LoadWasm = init(m, w&, temp());
+    instance&.load_module();
+    
+    instance&.fill_import("env", "putchar", ViaWasm.Exports.env.putchar);
+    instance&.fill_import("env", "getchar", ViaWasm.Exports.env.getchar);
+    mem := temp().alloc_zeroed(u8, 30000);
+    instance&.instantiate(mem.ptr);
+    
+    f := instance&.get_export("main").unwrap();
+    f := bit_cast_unchecked(rawptr, @FnPtr(ctx: *u8, p: u32) void, f);
+    f(mem.ptr, 0);
+}
+
+#use("@/examples/import_wasm/convert.fr");
+#use("@/examples/import_wasm/parse.fr");
+Qbe :: import("@/backend/lib.fr");
