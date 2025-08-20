@@ -8,11 +8,58 @@ driver :: fn(vtable: *ImportVTable) void = {
     build("examples/kaleidoscope.fr", "a.wasm");
     build("examples/web/b.fr", "b.wasm");
     build("examples/web/c.fr", "c.wasm");
+    build("examples/web/d.fr", "d.wasm");
     
     src := import("@/examples/kaleidoscope.fr").EXAMPLE_PROGRAM;
     write_entire_file_or_crash("examples/web/target/mandel.txt", src);
+    
+    ssa := collect_with_extension("examples/import_c/test", ".ssa") || panic("lost tests");
+    
+    manifest := @tfmt(template,
+        "[\"mandel.txt\"]",
+        filenames("examples/import_c/test", ".c"),
+        filenames("backend/test", ".ssa"),
+    );
+    write_entire_file_or_crash("examples/web/target/manifest.json", manifest);
 }
+
+filenames :: fn(path: Str, ext: Str) Str = {
+    files := collect_with_extension(path, ext) || panic("lost tests");
+    out := u8.list(temp());
+    @fmt(out&, "[");
+    for files { it |
+        @fmt(out&, "\"%\",", it);
+        src := read_entire_file_or_crash(temp(), @tfmt("%/%", path, it));
+        write_entire_file_or_crash(@tfmt("examples/web/target/%", it), src);
+    };
+    @if(files.len > 0) { out.len -= 1; };
+    @fmt(out&, "]");
+    out.items()
+}
+
+template :: """{
+"worker": "worker.js",
+"compilers": [
+{
+    "name": "Kaleidoscope",
+    "url": "a.wasm",
+    "examples": %
+},
+{
+    "name": "C",
+    "url": "c.wasm",
+    "examples": %
+},
+{
+    "name": "Qbe IR",
+    "url": "d.wasm",
+    "examples": %
+}
+]
+}""";
+
 
 #use("@/lib/sys/process.fr");
 #use("@/lib/sys/subprocess.fr");
 #use("@/lib/sys/fs.fr");
+#use("@/examples/testing.fr");
