@@ -3,9 +3,11 @@ const page_size = 1n << 16n;
 let bump = 0n;
 let Franca;
 let FrancaXXX = {};
+let start = performance.now();
 
-function handleWasmLoaded(wasm) {
-    show_log(" Wasm loaded.");
+function handleWasmLoaded(wasm, args) {
+    let load_end = performance.now();
+    show_log(" Loaded in " + Math.round(load_end - start) + "ms.");
     Franca = wasm.instance.exports;
     console.log(Franca);
 
@@ -13,19 +15,43 @@ function handleWasmLoaded(wasm) {
     //       might be better to have page_allocator do something different instead?
     FrancaXXX.__heap_base = BigInt(Franca.memory.buffer.byteLength);
     FrancaXXX.__heap_end = FrancaXXX.__heap_base;
-
-    let a = performance.now();
+    
+    let p = write_args(args);
     try {
-        Franca.main(0n, 0n, 0n, 0n);
+        Franca.main(BigInt(args.length), p, 0n, 0n);
     } catch (e) {
         if (e !== "called exit 0") {
             show_error(e);
         }
     }
     show("");
-    let b = performance.now();
-    show_log(" Ran in " + Math.round(b - a) + "ms.");
+    let run_end = performance.now();
+    show_log(" Ran in " + Math.round(run_end - load_end) + "ms.");
     self.postMessage({ tag: "done" });
+}
+
+// i this so much
+function write_args(args) {
+    var e = new TextEncoder();
+    let length = (args.length + 1) * 8;
+    let off = length;
+    for (let i = 0; i < args.length; i++) {
+        args[i] = e.encode(args[i]);
+        length += args[i].byteLength + 1;
+    }
+    
+    let p = imports.env.mmap(0, BigInt(length), 0, 0, 0, 0);
+    let pointers = new DataView(Franca.memory.buffer);
+    for (let i = 0; i < args.length; i++) {
+        let dest = new Uint8Array(Franca.memory.buffer, Number(p) + off, args[i].byteLength);
+        // note the extra `new`, passing it an arraybuffer silently does nothing ?? 
+        dest.set(new Uint8Array(args[i].buffer));
+        // big endien is the default because we're smoking crack
+        pointers.setBigInt64(Number(p) + i*8, p + BigInt(off), true);
+        // null terminator already zero
+        off += args[i].byteLength + 1;
+    }
+    return p;
 }
 
 const imports = {
@@ -68,7 +94,7 @@ const imports = {
         mmap: (addr, len_, prot, flags, fd, offset) => {
             const start = FrancaXXX.__heap_base + bump;
 
-            const len = len_;
+            const len = ((len_ + page_size - 1n) / page_size) * page_size;
             bump += len;
             if (start + len >= FrancaXXX.__heap_end) {
                 const pages = len / page_size + 1n;
@@ -153,8 +179,8 @@ const handle = (_msg) => {
     const msg = _msg.data;
     switch (msg.tag) {
         case "start": {
-            WebAssembly.instantiateStreaming(fetch(msg.url), imports)
-                .then(handleWasmLoaded)
+            WebAssembly.instantiateStreaming(fetch("target/" + msg.url), imports)
+                .then(it => handleWasmLoaded(it, msg.args))
                 .catch(show_error);
             break;
         }

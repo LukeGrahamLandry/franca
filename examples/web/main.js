@@ -18,7 +18,7 @@ const handle = (_msg) => {
         }
         case "done": {
             // don't terminate the worker here because that kills the nice objects in the console
-            document.getElementById("btn").innerText = "Restart Process";
+            document.getElementById("btn").innerText = start_message;
             running = false;
             break;
         }
@@ -26,6 +26,7 @@ const handle = (_msg) => {
     }
 };
 
+const start_message = "Run";
 let worker = null; 
 let running = false;
 const toggle_worker = () => {
@@ -39,17 +40,28 @@ const toggle_worker = () => {
         document.getElementById("err").innerText = "";
         document.getElementById("time").innerText = "(" + url + ")";
         document.getElementById("out").value = "";
+        document.getElementById("stale").hidden = true;
+        const args = ["---literal_input", document.getElementById("in").value];
         
         worker = new Worker("worker.js");
         worker.onmessage = handle;
-        worker.postMessage({ tag: "start", url: url });
-        document.getElementById("btn").innerText = "Kill Process";
+        worker.postMessage({ tag: "start", url: url, args: args });
+        document.getElementById("btn").innerText = "Kill";
     } else {
         worker.terminate();
+        document.getElementById("err").innerText += "KILLED";
         worker = null;
-        document.getElementById("btn").innerText = "Restart Process";
+        document.getElementById("btn").innerText = start_message;
     }
 };
+
+let kalidescope = await (await fetch("target/mandel.txt")).text();
+document.getElementById("in").value = kalidescope;
+
+document.getElementById("in").oninput = () => {
+    document.getElementById("stale").hidden = false;
+};
+document.getElementById("btn").onclick = toggle_worker;
 toggle_worker();
 
 let line = "";
