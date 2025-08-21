@@ -124,6 +124,16 @@ const imports = {
         mprotect: (a, b, c) => {
             return 0n;
         },
+        fetch_file: (ptr, len) => {
+            const path = get_wasm_string(ptr, len);
+            const text = sync_fetch("target/" + path);
+            if (text === null) return 0n;
+            let src = new TextEncoder().encode(text)
+            const p = imports.env.mmap(0, BigInt(src.byteLength + 1), 0, 0, 0, 0);
+            let dest = new Uint8Array(Franca.memory.buffer, Number(p), src.byteLength);
+            dest.set(new Uint8Array(src.buffer));
+            return p;
+        }
     },
 };
 
@@ -208,6 +218,14 @@ function get_wasm_string(ptr, len) {
         Number(len),
     );
     return new TextDecoder().decode(buffer);
+}
+
+const sync_fetch = (url) => {
+    let it = new XMLHttpRequest();
+    it.open("GET", url, false);
+    it.send(null);
+    if (it.status !== 200) return null;
+    return it.responseText;
 }
 
 self.onmessage = handle;

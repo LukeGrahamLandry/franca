@@ -143,7 +143,7 @@ fn parse_stmt_inner(self: *Parser, has_annotations: bool) Result(FatStmt, *Compi
             self.pop();
             loc := self.last.span;
             func := @try(self.parse_func()) return;
-            (Ok = self.stmt((DeclFunc = self.box(func)), loc))
+            (Ok = self.stmt((DeclFunc = func), loc))
         }
         fn Symbol(name) => self.parse_decl_or_start_expr(name);
         fn Semicolon() => {
@@ -451,10 +451,10 @@ fn quick_lambda(self: *Parser, prec: Prec) ParseRes = {
 
 fn func_expr(self: *Parser) ParseRes = {
     func := @try(self.parse_func()) return;
-    (Ok = self.expr((Closure = self.box(func)), func.loc))
+    (Ok = self.expr((Closure = func), func.loc))
 }
 
-fn parse_func(self: *Parser) Result(Func, *CompileError) = {
+fn parse_func(self: *Parser) Result(*Func, *CompileError) = {
     loc := self.last.span;
     fn_def := @try(self.fn_def_signeture(loc, true)) return;
     //fn_def.line = self.pool.insert_borrowed(@tfmt("AnonL%", self.lex.line), general_allocator());
@@ -463,7 +463,7 @@ fn parse_func(self: *Parser) Result(Func, *CompileError) = {
     may_capture := @match(self.peek()) {
         fn Equals()         => false;
         fn FatRightArrow()  => true;
-        fn Semicolon() => return(Ok = make_func(fn_def, .None, false, self.top_level))
+        fn Semicolon() => return(Ok = self.box(make_func(fn_def, .None, false, self.top_level)))
         @default => @report_error("expected '=' or '=>' or ';' after function decl ") (return, self.last.span);
     };
     self.pop();
@@ -477,7 +477,7 @@ fn parse_func(self: *Parser) Result(Func, *CompileError) = {
             id := self.push_parse(src, span);
             body := self.expr((GetParsed = id), loc);
             self.last.type = .RightSquiggle; // :HackFakeSquiggle
-            return((Ok = make_func(fn_def, (Some = body), may_capture, self.top_level)));
+            return(Ok = self.box(make_func(fn_def, (Some = body), may_capture, self.top_level)));
         };
     };
     
@@ -485,7 +485,7 @@ fn parse_func(self: *Parser) Result(Func, *CompileError) = {
     self.top_level = false;
     body := @try(self.parse_expr(Prec_None)) return;
     self.top_level = prev;
-    (Ok = make_func(fn_def, (Some = body), may_capture, self.top_level))
+    (Ok = self.box(make_func(fn_def, (Some = body), may_capture, self.top_level)))
 }
 
 fn named_call(self: *Parser, prec: Prec, name: Flag) ParseRes = {

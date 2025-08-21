@@ -150,6 +150,10 @@ const show = (s) => {
         s = line;
         line = "";
     }
+    if (line.length != 0) {
+        s = line + s;
+        line = ""
+    }
     document.getElementById("out").value += s;
     s = "";
 };

@@ -1,8 +1,33 @@
 
+## (Aug 21) wasm
+
 import_wasm
 - support importing globals/tables
 - make it easy to fill the imports of one module with the exports of another
 - finish jit_instantiate_module
+
+making the compiler work.
+- temporary hack: forcing #inline on make_func makes it get farther
+- wait_for_symbol needs to make_exec every time like i used to when i didn't rely on WX memory. 
+- call_indirect if it's a numeric constant
+- now the first call_dynamic_values works
+- the thing jitshims are doing where they check if the pointer is ready yet and skip the compiler
+  doesn't work because the indirect table don't produce observable values the way the GOT does. 
+  but it doesn't matter because i haven't hooked up #libc yet anyway so for now just use a #comptime_addr, 
+  and then my tiny freestanding putchar program works. 
+- now on to making imports work. 
+  gave it a shitty `fetch_file(str) -> cstr`. 
+- macros with 1 vs 2 parameters matter now. compile_prefix_macro can't just always pass two. 
+- now `get_aggregate>insert>hashmap_expand_erased` has null allocator.
+  - can make tiny repro with just init_codegen. 
+  - reducing this really feels the same as when i broke seal_dynamic/mem5.ssa 
+    but it's like the reverse cause that was broken by opt/slot but i don't run that on wasm. 
+  - leaf function was using sp directly instead of subtracting it's slot. 
+    it doesn't need to save it in the global but it can't reach backward into the last guy's stack. 
+  - indeed that was also the problem with make_func
+- now it gets through the comptime prelude and can run tiny putchar. 
+- no real programs work without jit-shims tho because of scary_exit/scary_log
+- get a bit farther if i turn off the fast path in create_jit_shim
 
 ## (Aug 19) wasm
 

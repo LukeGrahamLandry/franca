@@ -678,6 +678,12 @@ fn dyn_import(self: *SelfHosted, name: Symbol, lib_name: Symbol, weak: bool) Dyn
         };
     };
     };
+    
+    @if(TODOWASM)
+    if self.todo_injected.get(self.pool.get(name)) { addr |
+        return(name = name, lib = lib_name, comptime = addr.int_from_rawptr(), weak = weak);
+    };
+    
     // :AssumeDones
     // TODO: how to catch if it actually doesn't exist or they typo-ed the #import string.
     (name = name, lib = lib_name, comptime = 0, weak = weak)
@@ -1144,6 +1150,12 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
                     info.comptime = addr.int_from_rawptr();
                 };
             };
+            if info.comptime == 0 {
+                @if(TODOWASM)
+                if self.todo_injected.get(self.pool.get(info.name)) { addr |
+                    info.comptime = addr.int_from_rawptr();
+                };
+            }
         }
         fn CVariadic(args) => {
             each args { it |
@@ -4192,11 +4204,24 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
     assert(f_ty.ret == fat_expr_type, "tried to call macro with bad ret type. missing overload? \nresolve_in_overloadset assumes someone later will typecheck so giving a garabge match is fine");
     assert(f_ty.arg.eq(fat_expr_type).or(f_ty.arg == pair), "tried to call macro with bad arg type. missing overload? \nresolve_in_overloadset assumes someone later will typecheck so giving a garabge match is fine");
     expr.expr = (Poison = .InProgressMacro);  // they call me RefCell<FatExpr> because im always refing cells 
-    callee := assume_types_fn(Arg = Ty(FatExpr, FatExpr), Ret = FatExpr, ptr = fn_ptr);
     self.bump_dirty_new();
     zone := zone_begin(.CallDynamic);
     self.stats.macro_calls += 1;
-    expr[] = callee(invocation.arg[], invocation.target[]);  // :call_dynamic_values
+    //@if(self.tempdebug) @println("call %", fn_ptr);
+    @if(TODOWASM, {
+        // TODO: this is still wrong. need the type of the declaration. 
+        if single {
+            callee := assume_types_fn(Arg = FatExpr, Ret = FatExpr, ptr = fn_ptr);
+            expr[] = callee(invocation.arg[]);
+        } else {
+            callee := assume_types_fn(Arg = Ty(FatExpr, FatExpr), Ret = FatExpr, ptr = fn_ptr);
+            expr[] = callee(invocation.arg[], invocation.target[]);
+        };
+    }, {
+        callee := assume_types_fn(Arg = Ty(FatExpr, FatExpr), Ret = FatExpr, ptr = fn_ptr);
+        expr[] = callee(invocation.arg[], invocation.target[]);  // :call_dynamic_values
+    });
+    //@if(self.tempdebug) @println("ok");
     zone_end(zone);
     .Ok
 }

@@ -16,11 +16,29 @@ driver :: fn(vtable: *ImportVTable) void = {
     ssa := collect_with_extension("examples/import_c/test", ".ssa") || panic("lost tests");
     
     manifest := @tfmt(template,
+        filenames("tests", ".fr"),
         "[\"mandel.txt\"]",
         filenames("examples/import_c/test", ".c"),
         filenames("backend/test", ".ssa"),
     );
     write_entire_file_or_crash("examples/web/target/manifest.json", manifest);
+    
+    dirs :: @const_slice("lib", "compiler");
+    for(dirs, copy_dir);
+}
+
+copy_dir :: fn(path: Str) void = {
+    names := collect_directory_ordered(path, temp(), temp()) || @panic("failed to read %", path);
+    make_dirs_or_crash(@tfmt("examples/web/target/%", path));
+    for names { it |
+        @if(!it.name.starts_with("."))
+        if it.name.ends_with(".fr") {
+            src := read_entire_file_or_crash(temp(), @tfmt("%/%", path, it.name));
+            write_entire_file_or_crash(@tfmt("examples/web/target/%/%", path, it.name), src);
+        } else {
+            copy_dir(@tfmt("%/%", path, it.name));
+        }
+    };
 }
 
 filenames :: fn(path: Str, ext: Str) Str = {
@@ -41,6 +59,11 @@ template :: """{
 "worker": "worker.js",
 "compilers": [
 {
+    "name": "Franca",
+    "url": "b.wasm",
+    "examples": %
+},
+{
     "name": "Kaleidoscope",
     "url": "a.wasm",
     "examples": %
@@ -57,7 +80,6 @@ template :: """{
 }
 ]
 }""";
-
 
 #use("@/lib/sys/process.fr");
 #use("@/lib/sys/subprocess.fr");

@@ -4,9 +4,8 @@
 DynCallShim :: @tagged(Pending: Qbe.Sym, Ready: rawptr);
 
 fn call_dynamic_values(self: *SelfHosted, f_ptr: i64, f_ty: FnType, args_value: []u8) Values = {
-    @if(TODOWASM)
-    @if(query_current_arch() == .wasm32)
-    @println("call_dynamic_values %; % -> %", f_ptr, self.log_type(f_ty.arg), self.log_type(f_ty.ret));
+    //@if(self.tempdebug)
+    //    @println("call_dynamic_values %; % -> %", f_ptr, self.log_type(f_ty.arg), self.log_type(f_ty.ret));
     self.stats.dyn_call += 1;
     callee := self.dyncalls&.get_or_insert(f_ty) {
         // 
@@ -28,6 +27,7 @@ fn call_dynamic_values(self: *SelfHosted, f_ptr: i64, f_ty: FnType, args_value: 
             c
         }
     };
+    //@if(self.tempdebug) @println("ready for call");
     callee := assume_types_fn(Arg = Ty(*u8, *u8, i64), Ret = void, ptr = callee);
    
     // TODO: canary?
@@ -35,6 +35,7 @@ fn call_dynamic_values(self: *SelfHosted, f_ptr: i64, f_ty: FnType, args_value: 
     ret_buf := temp().alloc_zeroed(u8, ret_size);  // TODO: alignment?
     zone := zone_begin(.CallDynamic);
     callee(args_value.ptr, ret_buf.ptr, f_ptr);
+    //@if(self.tempdebug) @println("ok");
     zone_end(zone);
     self.from_bytes(ret_buf)
 }
@@ -50,9 +51,9 @@ fn wait_for_symbol(shared: *FrontendCodegen, id: Qbe.Sym) rawptr = {
     use_symbol(shared.m, id) { symbol | 
         ::enum(@type symbol.kind);
         @if(TODOWASM)
-        if symbol.kind == .Local && symbol.jit_addr.is_null() && query_current_arch() == .wasm32 {
-            println("probably doesn't work yet...");
+        if shared.m.goal.arch == .wasm32 && symbol.kind == .Local && symbol.segment == .Code {
             shared.m.make_exec();
+            @assert(symbol.kind == .DynamicPatched);
         };
         c = symbol.jit_addr;  
     };
@@ -197,7 +198,11 @@ fn create_jit_shim(self: CompCtx, shared: *FrontendCodegen, fid: FuncId, handler
         myself := f.symcon(id);
         is_ready := f.newtmp("ready", .Kl); 
         push(f.start, make_ins(.cnel, .Kl, is_ready, myself, target));
-        //is_ready := f.getcon(0);  // to test if this is helping, toggle this and add logging in report_called_uncompiled_or_just_fix_the_problem. 
+        
+        // to test if this is helping, toggle this and add logging in report_called_uncompiled_or_just_fix_the_problem. 
+        @if(TODOWASM) if m.goal.arch == .wasm32 {
+            is_ready = f.getcon(0);  
+        };
         f.start.jmp = (arg = is_ready, type = .jnz);
         f.start.s1 = do_the_call;
         f.start.s2 = not_ready;

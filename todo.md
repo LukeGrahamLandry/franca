@@ -262,7 +262,6 @@ different subsets of the same resources.
 - finish PromotePointers in import_wasm/run.fr
 - make AsmFunction not suck. at least do the length for you. 
 - refactor output_wasm_module_jit so it shares more code with the aot version
-- don't export everything when jitting (only exports and things called indirectly)
 - relatedly, don't put everything in the indirect table. only if exported or address taken. 
 - it's tempting to expand into allowing the jitted module to be reused instead of hardcoding the first_export. 
   that needs data relocations for function pointers, at which point i should just give up and follow the convention other tools use. 
@@ -292,7 +291,11 @@ different subsets of the same resources.
 - syscall wrappers support wasip1
 - web demo that runs all the tests
   - make it run in node in actions
-- web demo like compiler explorer that lets you compile/run ssa/c/franca/kalidescope/wuffs/hare and toggle backend logging
+- web demo: support -d on all of them. less duplicated code. libc shims. tab key. 
+- stack traces
+- make the wasmtime version work
+- fix dynalloc in isel and add a .ssa test that tests it with a deeper callstack
+- in wasm/make_exec use debug_out when dumping module so you can redirect it
 
 ## backend 
 

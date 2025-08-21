@@ -37,10 +37,12 @@ main :: fn() void = {
         E :: Exports;
         s := Type.scope_of(E.env);
         fr := current_compiler_context();
-        for weak_imports { name |
-            fid := fn() void = panic("wasm guest called a weak function");
-            if get_constant(s, name.sym()).is_none() {
-                (fr.vtable.add_to_scope)(fr.data, s, name.sym(), FuncId, FuncId.raw_from_ptr(fid&));
+        inline_for weak_imports { $name |
+            // TODO: this should work without the rebind
+            XX :: name[];
+            crash := fn() void = @panic("wasm guest called a weak function: %", XX);
+            if get_constant(s, ::name[].sym()).is_none() {
+                (fr.vtable.add_to_scope)(fr.data, s, ::name[].sym(), FuncId, FuncId.raw_from_ptr(crash&));
             };
         };
         E
@@ -301,6 +303,15 @@ Exports :: @struct {
             };
             
             // TODO: make the api nice so it's not more painful than the js version
+        }
+        
+        fetch_file :: fn(ctx: *u8, ptr: i64, length: i64) i64 = {
+            path := ctx.offset(ptr).slice(length);
+            // TODO: do it without the extra copy. 
+            src := read_entire_file(temp(), path) || return(0);
+            p := malloc(ctx, src.len.trunc() + 1);
+            (@as([]u8) (ptr = ctx.offset(p), len = src.len)).copy_from(src);
+            p
         }
     }
 }

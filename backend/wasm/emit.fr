@@ -399,12 +399,14 @@ fn fixup_wasm32(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_re
     indirect_index := @if(self.goal.type == .JitOnly, symbol.jit_addr.int_from_rawptr(), symbol.got_lookup_offset);
     // TODO: for JitOnly the assertions won't catch a null jit_addr since that's a valid wasm index when aot since you get the whole table, 
     //       but i want to change that anyway and reserve zero as a null function you're not allowed to call. 
-
+    
+    //@if(TODOWASM) @if(self.goal.type == .JitOnly)
+    //    @println("fixup_wasm32 %; jit_addr=%; got_lookup_offset=%;", symbol.name, symbol.jit_addr, symbol.got_lookup_offset);
     @match(fixup.type) {
         // used when the value is an immediate 
         fn WasmIndex() => {
             @debug_assert(symbol.segment == .Code);
-            @debug_assert(self.goal.type != .JitOnly || symbol.kind == .Local, "wasm jit cannot direct call an import");
+            @debug_assert(self.goal.type != .JitOnly || symbol.kind == .Local, "wasm jit cannot direct call an import: %", symbol.name);
             @debug_assert_ne(symbol.got_lookup_offset, -1, "missing index for $%", symbol.name);
             lst: List(u8) = fixed_list(ptr = u8.ptr_from_raw(fixup.patch_at), len = WASM_INDEX_PADDING);
             leb128_unsigned(lst&, symbol.got_lookup_offset, WASM_INDEX_PADDING);
@@ -931,18 +933,17 @@ fn uleb_patch_delta(buf: *List(u8), $body: @Fn() void) void = {
 // so function/data imports are just the literal values from the current module, same as native. 
 make_exec :: fn(m: *Qbe.Module) void = {
     @if(!TODOWASM) unreachable();
+    @if(m.exports.len == 0) return();
 
     first_export := grow(m.exports.len.intcast()).intcast();
     
     module := output_wasm_module_jit(m, first_export);
     module := concat(module&, temp());
     
-    
     when_debug(m, .Disassemble) { out |
         // TODO: use `out`!
         import("@/examples/dump_wasm.fr")'dump(module);
     };
-    
     
     // This relies on indirect function table being index 0. 
     // Grow it by delta and fill the new entries with the zeroth function. 
@@ -969,8 +970,19 @@ make_exec :: fn(m: *Qbe.Module) void = {
     enumerate m.exports& { i, id |
         use_symbol(m, id[]) { s |
             s.jit_addr = rawptr_from_int(first_export + i);
+            // forget that this was a local
+            s.got_lookup_offset = -1;
+            s.kind = .DynamicPatched;
         };
     };
+    
+    // it's fine to call this multiple times to keep adding jitted code to the module, 
+    // just don't re-emit stuff that's already done. 
+    // TODO: make sure not to re-fixup these
+    m.exports&.clear();
+    m.local_needs_reloc&.clear();
+    // TODO: could reuse the memory instead
+    m.goal.commands_size_guess = m.segments&[.Code]&.len();
 }
 
 //

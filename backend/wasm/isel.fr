@@ -24,7 +24,6 @@
 
 fn wasm_isel(f: *Qbe.Fn) void = {
     assign_alloc_slots(f);
-    
     insert_blocks_for_conditional_phis(f);
     
     // We want to help the compiler on the other end:
@@ -79,7 +78,11 @@ fn wasm_isel(f: *Qbe.Fn) void = {
                     %3 =l global_set %0, %1
                 """);
             } else {
-                f.emitter_for_wasm(.global_get, .Kl, f.retr, stackbase, Qbe.Null);
+                @emit_instructions((f = f, emit = emitter_for_wasm), (stackbase, f.retr, f.getcon(f.slot.intcast()), Qbe.Null, saved_stack), """
+                @start
+                    %4 =l global_get %0
+                    %1 =l sub %4, %2
+                """);
             };
             did_sp_load = true;
         };
@@ -157,8 +160,15 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
         }
         fn call() => {
             @debug_assert(i.to == QbeNull);
-            // the way i do jit you don't get any imports. TODO: maybe that's bad and slow, idk. 
-            if rtype(i.arg&[0]) != .RCon || (f.globals.goal.type == .JitOnly && could_be_import(f, f.get_constant(i.arg&[0]))) {
+            need_indirect := rtype(i.arg&[0]) != .RCon || {
+                c := f.get_constant(i.arg&[0]);
+                // the way i do jit you don't get any imports. TODO: maybe that's bad and slow, idk. 
+                no_direct := f.globals.goal.type == .JitOnly && could_be_import(f, c);
+                // calling a literal function pointer is fine when jitting but needs indirect to load from table. 
+                // TODO: warn on that if not jitting?
+                no_direct || c.type() == .CBits
+            };
+            if need_indirect {
                 f.emit(.call_indirect, .Kw, QbeNull, QbeNull, i.arg&[1]);
                 wasm_push_addr(f, i.arg&[0]);
                 return();

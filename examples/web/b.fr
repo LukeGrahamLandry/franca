@@ -4,34 +4,52 @@ DEBUG_SPAM_LOG :: false;
 DISABLE_IMPORT_FRC :: false;
 
 main :: fn() void = {
+    src := "";
+    a := cli_args();
+    logging := "";
+    range(0, a.len) { i |
+        if a[i] == "---literal_input" && i < a.len - 1 {
+            src = a[i + 1].str();
+        }
+        if a[i] == "-d" && i < a.len - 1 {
+            logging = a[i + 1].str();
+        }
+    };
+    src := @tfmt("""#include_std("lib/core.fr");%""", src);
+
+    if query_current_arch() != .wasm32 {
+        update_global_stdlib_path();
+    };
     a := general_allocator();
     vtable := init_driver_vtable();
     comp := {vtable.init_compiler}(vtable.default_build_options()); // TODO: comptime get the current arch
     c := vtable.with(comp);
-    file := c.add_file("repl!", prelude);
+    
+    file := c.add_file("repl!", src);
     self := c.data.cast()[][];
-    id := self.parser.push_parse(prelude, file);
+    self.comptime_codegen.m.set_debug_types(logging, true);
+    
+    self.do_export("putchar", @Fn(c: u8) void, putchar_UNBUFFERED);
+    self.do_export("exit", @Fn(c: i32) Never, Syscall.exit);
+    self.do_export("write", @Fn(fd: i32, p: *u8, l: i64) i64, fn(a, b, c) = { x := Syscall'write((fd = a), b, c); x.value });
+    
+    id := self.parser.push_parse(src, file);
     stmts := self.parser.finish_pending_stmts(id);
-    stmts := self.unwrap_report_error(RawList(FatStmt), stmts); // TODO: don't return RawList -- Jun 29
+    stmts := self.unwrap_report_error(RawList(FatStmt), stmts);
     stmts := stmts.items();
     r := {c.vtable.make_and_resolve_and_compile_top_level}(c.data, stmts);
     self.unwrap_report_error(void, r);
-    // TODO: these numbers are experimentally where it happens to put the prelude constants right now. should do something more robust where you can ask it. 
-    scope_id := self.scopes.new_scope(TOP_LEVEL_SCOPE, self.get_alloc(), file);
-    scope := self.scopes[scope_id]&;
 }
 
-prelude :: """
-#include_std("compiler");
-bool  :: @builtin bool;
-false :: @builtin false;
-i64   :: @builtin i64;
-Type  :: @builtin Type;
-void  :: @builtin void;
-fn UInt(bits: i64) Type #fold = IntType(bits, false);
-u8 :: UInt(8);
-:: {
-    putchar :: fn(c: u8) void #libc;
-    putchar(67);
-};
-""";
+do_export :: fn(self: *SelfHosted, name: Str, $T: Type, $F: FuncId) void = {
+    ff: T : F;
+    f: rawptr = ff;
+    self.todo_injected.insert(name, f);
+}
+
+
+//:: {
+//write :: fn(fd: u32, p: *u8, l: i64) i64 #libc;
+//s := "Hello World";
+//write(1, s.ptr, s.len);
+//};

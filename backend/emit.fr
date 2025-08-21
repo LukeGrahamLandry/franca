@@ -201,7 +201,7 @@ fn get_addr(self: *QbeModule, id: Qbe.Sym) ?Ty(rawptr, i64) = {
         if result.is_none() {
             msg :: "Tried to get_addr for uncompiled '%' because it was suspended for inlining. it should be marked as exported.";
             ::ptr_utils(Qbe.InlineFn);
-            @debug_assert(!symbol.inlinable, msg, symbol.name);
+            @debug_assert(!symbol.inlinable || symbol.export, msg, symbol.name);
         };
     };
     result
@@ -216,10 +216,10 @@ fn get_addr(self: *QbeModule, name: Str) ?rawptr = {
 
 fn get_addr(self: *QbeModule, symbol: *SymbolInfo) ?Ty(rawptr, i64) = {
     ::enum(SymbolKind);
-    if(symbol.kind != .Local, => return(.None));
     if self.goal.arch == .wasm32 {
         return(Some = (symbol.jit_addr, 0));
     };
+    if(symbol.kind != .Local, => return(.None));
     segment := self.segments&[symbol.segment];
     addr    := segment.mmapped.ptr.offset(symbol.offset);
     (Some = (u8.raw_from_ptr(addr), symbol.size.zext()))
@@ -572,12 +572,18 @@ fn do_fixups_impl(self: *QbeModule, address: rawptr, symbol: *SymbolInfo) void =
     @debug_assert(!self.fixups_locked, "you cannot add more fixups after emitting for aot");
     ::enum(@type symbol.kind);
     @debug_assert_ne(symbol.kind, .Pending, "cannot do fixups of pending symbol");
+    // TODO: this is junk on wasm but i use it to track whether the function is done somewhere. this sucks. 
     symbol.jit_addr = address;  
     if self.goal.type == .JitOnly {
+        //@if(TODOWASM) if self.goal.arch == .wasm32 && symbol.segment == .Code {
+        //    @println("do_fixups_impl(%, %)", symbol.name, address);
+        //};
+    
         // TODO: should probably still have the frontend make a shim for weak symbols or it sucks to debug if you make a mistake. 
         @debug_assert(!symbol.strong || !address.is_null(), "do_fixups jit null symbol %", symbol.name);
     };
     
+    @if(TODOWASM)
     if self.goal.arch == .wasm32 && symbol.segment == .Code && symbol.got_lookup_offset == -1 {
         // TODO: actually when jitting we do know the indices of locals for direct calls. 
         // Need to wait until the end of compilation to know its index. 
