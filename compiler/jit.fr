@@ -197,11 +197,13 @@ fn create_jit_shim(self: CompCtx, shared: *FrontendCodegen, fid: FuncId, handler
         target := f.symcon(target_id);
         myself := f.symcon(id);
         is_ready := f.newtmp("ready", .Kl); 
-        push(f.start, make_ins(.cnel, .Kl, is_ready, myself, target));
         
         // to test if this is helping, toggle this and add logging in report_called_uncompiled_or_just_fix_the_problem. 
-        @if(TODOWASM) if m.goal.arch == .wasm32 {
+        if m.goal.arch == .wasm32 {
             is_ready = f.getcon(0);  
+        } else {
+            // TODO: it should be the same to do this and just not use the value. fold should remove the symbol. 
+            push(f.start, make_ins(.cnel, .Kl, is_ready, myself, target));
         };
         f.start.jmp = (arg = is_ready, type = .jnz);
         f.start.s1 = do_the_call;
@@ -270,6 +272,13 @@ fn create_jit_shim(self: CompCtx, shared: *FrontendCodegen, fid: FuncId, handler
     if func.get_flag(.TookPointerValue) {
         self.data.cast()[][].created_jit_fn_ptr_value(fid, shared.wait_for_symbol(id).int_from_rawptr());
     };
+    @if(TODOWASM) @if_let(func.body) fn Redirect(target) => {
+        use_symbol(shared.m, id) { s_shim |
+            use_symbol(shared.m, shared.m.intern(self.fmt_fn_name(target))) { s_target |
+                s_target.wasm_type_index = s_shim.wasm_type_index;
+            };
+        };
+    };
 }
 
 fn shallow_jit_func(self: *SelfHosted, fid: FuncId) Res(void) = {
@@ -331,6 +340,10 @@ fn bump_dirty_new(m: *QbeModule) void = {
 fn save_in_got(self: *SelfHosted, fid: FuncId, addr: rawptr) void = {
     // :InsaneCaches
     m := self.comptime_codegen.m;
+    @if(m.goal.arch == .wasm32) {
+        // TODO: use the indirect_table as GOT and do a table.set here
+        return();
+    };
     id := self.comptime_jit_symbol_id(fid);
     use_symbol(m, id) { s |
         @debug_assert(s.got_lookup_offset != -1, "save_in_got missing slot for %", s.name);

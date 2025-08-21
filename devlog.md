@@ -1,4 +1,18 @@
 
+- rn i don't allow you to call something that doesn't have an assigned index yet. 
+  which is going to have to change eventually. but for now, can't just make_exec after each shim
+  to get a jit_addr because there might be something in the pipe. need to track the shim symbol
+  and use that jit_addr instead when filling the patch, instead of copying the jit_addr like i can on native. 
+  this sucks and needs to be unified. i should just let you give out table indices early and use it like GOT. 
+- if you have a add_code_bytes that needs to be emitted before the first call to it, you don't know the type.
+  same problem as i had before with DataSymbol. just now with the jitting the modules are much smaller 
+  so it's reasonable to not have a callsite (tho why are we emitting it then?).
+  so same hack with asking for a wrapper with a callsite of the right type, 
+  but when jitting emit_ir.pending just makes shims, so have shims translate thier type_index to the callee. 
+  fuck but the callee is the fake wrapper, so have create_jit_shim check if it's Redirect and save the type.
+  hack hack hack, need to clean that up, but it works! now i can call println!
+  
+
 ## (Aug 21) wasm
 
 import_wasm

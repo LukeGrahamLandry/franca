@@ -133,6 +133,9 @@ const imports = {
             let dest = new Uint8Array(Franca.memory.buffer, Number(p), src.byteLength);
             dest.set(new Uint8Array(src.buffer));
             return p;
+        },
+        null: () => {
+            throw new Error("wasm guest tried to call a null function pointer");
         }
     },
 };

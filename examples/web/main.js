@@ -22,6 +22,9 @@ const handle = (_msg) => {
             // don't terminate the worker here because that kills the nice objects in the console
             document.getElementById("btn").innerText = start_message;
             running = false;
+            let end = performance.now();
+            document.getElementById("time").innerText += " Wall: " + Math.round(end - real_start_time) + "ms.";
+            flush();
             break;
         }
         default:
@@ -29,6 +32,8 @@ const handle = (_msg) => {
     }
 };
 
+
+let real_start_time;
 const start_message = "Run";
 let worker = null;
 let running = false;
@@ -56,6 +61,7 @@ const toggle_worker = () => {
         ];
         worker = new Worker(manifest.worker);
         worker.onmessage = handle;
+        real_start_time = performance.now();
         worker.postMessage({ tag: "start", url: url, args: args });
         document.getElementById("btn").innerText = "Kill";
     } else {
@@ -144,19 +150,16 @@ document.getElementById("all").onclick = async () => {
 
 let line = "";
 const show = (s) => {
-    if (s.length == 1) {
-        line += s;
-        if (s.charCodeAt(0) != 10 && line.length < 128) return;
-        s = line;
+    line += s;
+};
+
+const flush = () => {
+    if (line.length != 0) {
+        document.getElementById("out").value += line;
         line = "";
     }
-    if (line.length != 0) {
-        s = line + s;
-        line = ""
-    }
-    document.getElementById("out").value += s;
-    s = "";
 };
+window.setInterval(flush, 200);
 
 const wait = (f, step, timeout) => {
     return new Promise((resolve) => {

@@ -4,7 +4,7 @@ DEBUG_SPAM_LOG :: false;
 DISABLE_IMPORT_FRC :: false;
 
 main :: fn() void = {
-    src := "";
+    src := """:: println("A");""";
     a := cli_args();
     logging := "";
     range(0, a.len) { i |
@@ -27,11 +27,13 @@ main :: fn() void = {
     
     file := c.add_file("repl!", src);
     self := c.data.cast()[][];
+    self.tempdebug = true;
     self.comptime_codegen.m.set_debug_types(logging, true);
     
     self.do_export("putchar", @Fn(c: u8) void, putchar_UNBUFFERED);
     self.do_export("exit", @Fn(c: i32) Never, Syscall.exit);
     self.do_export("write", @Fn(fd: i32, p: *u8, l: i64) i64, fn(a, b, c) = { x := Syscall'write((fd = a), b, c); x.value });
+    self.do_export("mprotect", @Fn(a: rawptr, b: i64, c: i64) i64, fn(a, b, c) = { x := Syscall'mprotect(a, b, c); x.value });
     
     id := self.parser.push_parse(src, file);
     stmts := self.parser.finish_pending_stmts(id);
@@ -39,6 +41,19 @@ main :: fn() void = {
     stmts := stmts.items();
     r := {c.vtable.make_and_resolve_and_compile_top_level}(c.data, stmts);
     self.unwrap_report_error(void, r);
+    
+    fid := c.get_unique_named("main") || @panic("no function called 'main'");
+    f := self.unwrap_report_error(rawptr, self.poll_in_place(rawptr) {
+        R :: local_return;
+        if self.get_fn_callable(fid) { a |
+            R(Ok = a);
+        };
+        (Suspend = self.wait_for(Jit = fid))
+    });
+    // TODO: this should just work. makes a shim and then you call it but the jit_addr is a code offset not an index. 
+    //f := c.get_jitted(fid);
+    f := bit_cast_unchecked(rawptr, @FnPtr() void, f);
+    f();
 }
 
 do_export :: fn(self: *SelfHosted, name: Str, $T: Type, $F: FuncId) void = {
@@ -47,9 +62,10 @@ do_export :: fn(self: *SelfHosted, name: Str, $T: Type, $F: FuncId) void = {
     self.todo_injected.insert(name, f);
 }
 
-
-//:: {
-//write :: fn(fd: u32, p: *u8, l: i64) i64 #libc;
-//s := "Hello World";
-//write(1, s.ptr, s.len);
-//};
+TINY :: """
+:: {
+    write :: fn(fd: u32, p: *u8, l: i64) i64 #libc;
+    s := "Hello World";
+    write(1, s.ptr, s.len);
+};
+""";

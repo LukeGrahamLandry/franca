@@ -16,11 +16,16 @@ EmitWasmFn :: @struct(
 );
 
 fn record_wasm_function_index(m: *Qbe.Module, id: Qbe.Sym) void = {
+    export := false;
     use_symbol(m, id) { s |
         s.got_lookup_offset = m.local_needs_reloc.len;
         s.referenced = true;
+        export = s.export;
     };
     m.local_needs_reloc&.push(id);
+    
+    // :WasmJitExportAllFunctions 
+    @if(TODOWASM) @if(!export) m.exports&.push(id);
 }
 
 fn emit_func_wasm32(f: *Qbe.Fn) []Ty(Fixup, Qbe.Sym) = {
@@ -31,10 +36,6 @@ fn emit_func_wasm32(f: *Qbe.Fn) []Ty(Fixup, Qbe.Sym) = {
         a = fixed_list(ptr = code.next, len = code.cap() - code.len()),
         block_stack = list(temp()), 
     ); e := e&;
-    
-    // :WasmJitExportAllFunctions 
-    // TODO: do this for add_code_bytes, bounce, as well!
-    @if(TODOWASM) @if(!f.lnk.export) e.m.exports&.push(f.lnk.id);
     
     record_wasm_function_index(e.m, f.lnk.id);
     e.pad(WASM_INDEX_PADDING); // reserve space for length of code. 
@@ -397,11 +398,17 @@ fn op(e: *EmitWasmFn, o: Wasm.Inst) void = {
 
 fn fixup_wasm32(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_reloc: *?Fixup) void = {
     indirect_index := @if(self.goal.type == .JitOnly, symbol.jit_addr.int_from_rawptr(), symbol.got_lookup_offset);
-    // TODO: for JitOnly the assertions won't catch a null jit_addr since that's a valid wasm index when aot since you get the whole table, 
-    //       but i want to change that anyway and reserve zero as a null function you're not allowed to call. 
+    
+    if indirect_index > u8.int_from_ptr(self.segments&[.Code].mmapped.ptr) {
+        if symbol.my_shim != Qbe.no_symbol_S {
+            use_symbol(self, symbol.my_shim) { s |
+                indirect_index = s.jit_addr.int_from_rawptr();
+            };
+        }
+    };
     
     //@if(TODOWASM) @if(self.goal.type == .JitOnly)
-    //    @println("fixup_wasm32 %; jit_addr=%; got_lookup_offset=%;", symbol.name, symbol.jit_addr, symbol.got_lookup_offset);
+    //    @println("fixup_wasm32 %; jit_addr=%; got_lookup_offset=%; shim_addr=%;", symbol.name, symbol.jit_addr, symbol.got_lookup_offset, symbol.shim_addr);
     @match(fixup.type) {
         // used when the value is an immediate 
         fn WasmIndex() => {
@@ -416,7 +423,8 @@ fn fixup_wasm32(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_re
             lst: List(u8) = fixed_list(ptr = u8.ptr_from_raw(fixup.patch_at), len = WASM_INDEX_PADDING);
             base := @if(self.goal.type == .JitOnly, indirect_index, symbol.offset);
             value := if(symbol.segment == .Code, => indirect_index, => base + it.increment.zext());
-            @debug_assert_ge(value, 0, "missing index for $%", symbol.name);
+            @if(symbol.name != "__franca_base_address"/*HACK*/) 
+                @debug_assert_gt(value, 0, "missing index for $%", symbol.name);
             leb128_signed(lst&, value, WASM_INDEX_PADDING); // NOTE: immediate of T.const is always signed
         }
         fn DataAbsolute(it) => {
@@ -472,6 +480,19 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     @eprintln(">>> % bytes of code, % bytes of data.", code_count, data_size);
     
     @debug_assert(m.imports.len == 0);
+    
+    {
+        // make sure the zeroth function pointer is invalid. 
+        // i could just change the mapping to table indices and put a nullref there, 
+        // but also i think it's nicer if you can give your own error message instead of the engine doing it. 
+        // (but since the signeture won't match you don't really get that away, so idk) 
+        id := m.intern("null");
+        m.imports&.push(id);
+        use_symbol(m, id) { s |
+            s.wasm_type_index = 0;  // don't care
+        };
+    };
+    
     // import functions ids start at zero. 
     // we need to know how many imports there are before we can start patching anything. 
     for_symbols m { id, symbol | // :SLOW  just keep list of pending symbols instead
@@ -787,13 +808,6 @@ fn output_wasm_module_jit(m: *QbeModule, indirect_table_base: i64) [][]u8 = {
     };
     
     @debug_assert_eq(m.imports.len, 0, "imports list should be empty when jitting on wasm");
-    for_symbols m { id, symbol | // :SLOW  just keep list of pending symbols instead
-        ::enum(@type symbol.kind);
-        is_import := @is(symbol.kind, .Pending, .DynamicPatched);
-        if is_import && (symbol.fixups.len != 0 || symbol.referenced) {
-            @assert(!symbol.jit_addr.is_null(), "$%: wasm jit import must already be patched!", symbol.name);
-        };
-    };
     
     for_symbols m { id, symbol |
         if symbol.export || symbol.referenced || symbol.fixups.len != 0 {
@@ -973,6 +987,10 @@ make_exec :: fn(m: *Qbe.Module) void = {
             // forget that this was a local
             s.got_lookup_offset = -1;
             s.kind = .DynamicPatched;
+            
+            // TODO: maybe keep DataAbsolute so if it was a shim you can update it, 
+            //       but it's wasteful to keep spam filling the same fixup each time you make_exec. 
+            s.fixups.len = 0;
         };
     };
     
