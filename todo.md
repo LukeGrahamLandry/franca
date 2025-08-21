@@ -170,6 +170,7 @@ do
 ./target/f.out examples/import_c/test/test.fr || { echo "fail"; break; }
 done
 ```
+- tests/exe/sys.fr might not work with SLOW_LEAK_ARENAS=true?
 
 ## import_symbol / weak
 

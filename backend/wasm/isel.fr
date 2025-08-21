@@ -15,16 +15,40 @@
 // TODO: remove redundant push-pop pairs
 //       like when you pop it off, do some stuff, then push it again: you could just use tee and leave it on the stack. 
 // TODO: reorder + flip args to create redundant push-pop pairs
-// TODO: address offset folding 
+// TODO: address offset folding (rn i only do it for stack slots)
 // TODO: more tests for dynalloc
 // TODO: make it work with elide_abi_slots and simplify_jump_chains
-// TODO: `%c =l ceqK %a, %b; jnz %c;` generates `K.eq i64.extend_i32_u i32.wrap_i64 br_if` instead of `K.eq br_if`,
-//        probably same problem for address computation that's used immediately. 
+// TODO: some dead code elimination is done by liveness+spill+rega on native targets. make sure to do that for wasm as well. 
 //
+
+k_mem :: Qbe.Cls.Kw;
 
 fn wasm_isel(f: *Qbe.Fn) void = {
     assign_alloc_slots(f);
     insert_blocks_for_conditional_phis(f);
+    
+    // TODO: if this is good enough, arm/isel should do it this way as well. it's way less confusing than collapse_op_arm64. 
+    fillpreds(f);
+    fillrpo(f);
+    range(0, f.nblk.zext()) { i |
+        b := f.rpo[i];
+        for_insts_forward b { i |
+            continue :: local_return;
+            if i.op() == .add && rtype(i.arg&[0]) == .RTmp {
+                if f.get_int(i.arg&[1]) { delta |
+                    a := f.get_temporary(i.arg&[0]);
+                    d := f.get_temporary(i.to);
+                    new := a.slot.intcast() + delta;
+                    if a.slot != -1 && new >= 0 && fits_in_i32(new) {
+                        d.slot = intcast(new);
+                        d.def = Qbe.Ins.ptr_from_int(0);
+                        chuse(i.arg&[0], -1, f);
+                        i.set_nop();
+                    };
+                };
+            };
+        };
+    };
     
     // We want to help the compiler on the other end:
     // we know that we don't care about any changes to this global inside our callees (because they'll always reset it),
@@ -35,12 +59,12 @@ fn wasm_isel(f: *Qbe.Fn) void = {
     fslot := f.slot;
     need_sp := f.slot > 0 || f.dynalloc || f.varcall;
     if need_sp {
-        f.retr = f.newtmp("SP", .Kl);
+        f.retr = f.newtmp("SP", k_mem);
         // TODO: do i need to add_use here?
     } else {
         f.retr = QbeNull;
     };
-    saved_stack := f.newtmp("BP", .Kl);
+    saved_stack := f.newtmp("BP", k_mem);
     
     for_blocks f { b | 
         f.reset_scratch();
@@ -49,7 +73,7 @@ fn wasm_isel(f: *Qbe.Fn) void = {
         @match(b.jmp.type) {
             fn ret0() => {
                 if need_sp && !f.leaf {
-                    f.emitter_for_wasm(.global_set, .Kl, QbeNull, stackbase, saved_stack);
+                    f.emitter_for_wasm(.global_set, k_mem, QbeNull, stackbase, saved_stack);
                 };
             }
             fn hlt() => ();
@@ -71,17 +95,17 @@ fn wasm_isel(f: *Qbe.Fn) void = {
         maybe_sp_load :: fn() => if !did_sp_load && need_sp {
             if !f.leaf {
                 // TODO: parse "global_setK" same as "argK" so i don't need this hack with null placeholder
-                @emit_instructions((f = f, emit = emitter_for_wasm), (stackbase, f.retr, f.getcon(f.slot.intcast()), Qbe.Null, saved_stack), """
+                @emit_instructions((f = f, emit = emitter_for_wasm), (stackbase, f.retr, f.getcon(f.slot.intcast()), Qbe.Null, saved_stack, k_mem), """
                 @start
-                    %4 =l global_get %0
-                    %1 =l sub %4, %2
-                    %3 =l global_set %0, %1
+                    %4 =5 global_get %0
+                    %1 =5 sub %4, %2
+                    %3 =5 global_set %0, %1
                 """);
             } else {
-                @emit_instructions((f = f, emit = emitter_for_wasm), (stackbase, f.retr, f.getcon(f.slot.intcast()), Qbe.Null, saved_stack), """
+                @emit_instructions((f = f, emit = emitter_for_wasm), (stackbase, f.retr, f.getcon(f.slot.intcast()), Qbe.Null, saved_stack, k_mem), """
                 @start
-                    %4 =l global_get %0
-                    %1 =l sub %4, %2
+                    %4 =5 global_get %0
+                    %1 =5 sub %4, %2
                 """);
             };
             did_sp_load = true;
@@ -214,7 +238,7 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
     needs_ext := iscmp(o) || @is(o, .extsh, .extsb);
     if needs_ext && i.cls() == .Kl {
         i.set_cls(.Kw); k = .Kw;
-        f.emit(.extuw, .Kl, QbeNull, QbeNull, QbeNull);
+        f.emit_ext_trunc(.extuw, .Kl);
     };
     
     // wasm doesn't have zero extend from 8/16 so it becomes a mask
@@ -244,10 +268,10 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
         SP := f.retr;
         @debug_assert_ne(SP, QbeNull, "ICE: alloca without loading stack");
         stackbase := f.symcon(f.globals.wasm_symbol_stackbase);
-        f.emit(.global_set, .Kl, QbeNull, stackbase, QbeNull);  // save for callees
-        f.emit(.push, .Kl, QbeNull, SP, QbeNull);
-        f.emit(.push, .Kl, QbeNull, SP, QbeNull);  // result of this inst
-        f.emit(.pop, .Kl, SP, QbeNull, QbeNull);  // save locally
+        f.emit(.global_set, k_mem, QbeNull, stackbase, QbeNull);  // save for callees
+        f.emit(.push, k_mem, QbeNull, SP, QbeNull);
+        f.emit(.push, k_mem, QbeNull, SP, QbeNull);  // result of this inst
+        f.wasm_pop(k_mem, SP);  // save locally
         i.set_op(.sub);  // decrement sp
         o = .sub;
         i.arg&[1] = i.arg&[0];
@@ -259,12 +283,35 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
         return();
     };
     
+    emitted := Qbe.Ins.ptr_from_int(0);
     // copy is just push+pop, no actual op
     if o != .copy {
-        f.emit(o, i.cls(), QbeNull, QbeNull, QbeNull);
+        emitted = f.emit(o, i.cls(), QbeNull, QbeNull, QbeNull);
+        
+        if o.iscmp() {
+            i0 := emitted.offset(1);
+            i1 := emitted.offset(2);
+            
+            if i0.op() == .extuw && i1.op() == .truncl {
+                i1[] = emitted[];
+                f.unemit(emitted);
+                f.unemit(i0);
+                emitted = i1;
+            };
+        }
     };
     
     if is_store(o) {
+        // TODO: fold all addressing, not just stack
+        off := 0;
+        if f.get_slot(i.arg&[1]) { slot | 
+            if slot >= 0 && fits_in_i32(slot) {
+                off = slot;
+                i.arg&[1] = f.retr;
+            };
+        };
+        emitted.arg&[0] = INT(off);
+    
         k := argcls(i, 0);
         f.wasm_push(k, i.arg&[0]);
         wasm_push_addr(f, i.arg&[1]);
@@ -272,6 +319,15 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
     };
     
     if is_load(o) {
+        // TODO: fold all addressing, not just stack
+        off := 0;
+        if f.get_slot(i.arg&[0]) { slot | 
+            if slot >= 0 && fits_in_i32(slot) {
+                off = slot;
+                i.arg&[0] = f.retr;
+            };
+        };
+        emitted.arg&[0] = INT(off);
         wasm_push_addr(f, i.arg&[0]);
         return();
     };
@@ -308,7 +364,7 @@ fn wasm_push(f: *Qbe.Fn, k: Qbe.Cls, r: Qbe.Ref) void = {
             if k != t.cls {
                 @debug_assert(k.is_int() && t.cls.is_int(), "non-int push wrong cls % %", r, => printfn(f, f.globals.debug_out));
                 o: Qbe.O = @if(k == .Kw, .truncl, .extuw);
-                f.emit(o, k, QbeNull, QbeNull, QbeNull);
+                f.emit_ext_trunc(o, k);
                 k = t.cls;
             };
         }
@@ -321,16 +377,27 @@ fn wasm_push(f: *Qbe.Fn, k: Qbe.Cls, r: Qbe.Ref) void = {
 fn push_slot_addr(f: *Qbe.Fn, k: Qbe.Cls, slot_offset: i32) void = {
     // TODO: i think i want to split the memory folding out from coming out of ssa form. 
     //r = SLOT(slot_offset);
-    //if k == .Kl {
-    //    f.emit(.extuw, k, QbeNull, QbeNull, QbeNull);
-    //    k = Qbe.Cls.Kw;
-    //};
+    if k == .Kl {
+        f.emit_ext_trunc(.extuw, k);
+        k = Qbe.Cls.Kw;
+    };
     //slot_offset = f.slot - slot_offset;
     // Stack grows downwards and __stack_base points to the bottom of our frame. 
     SP := f.retr;
     @debug_assert(SP != QbeNull, "missing SP %", { printfn(f, f.globals.debug_out); "" });
-    ins := make_ins(.add, .Kl, QbeNull, SP, f.getcon(slot_offset.intcast()));
+    ins := make_ins(.add, .Kw, QbeNull, SP, f.getcon(slot_offset.intcast()));
     f.sel_wasm(ins&);
+}
+
+fn emit_ext_trunc(f: *Qbe.Fn, o: Qbe.O, k: Qbe.Cls) void = {
+    i := f.emit(o, k, QbeNull, QbeNull, QbeNull);
+    @if(f.len_scratch() <= 1) return();
+    i0 := i.offset(1);
+    if o == .extuw && i0.op() == .truncl {
+        f.unemit(i);
+        f.unemit(i0);
+    };
+    // note: the other way is not true. it clears the high bits. 
 }
 
 fn need_trunc(f: *Qbe.Fn, k: Qbe.Cls, r: Qbe.Ref) bool = {
@@ -340,26 +407,26 @@ fn need_trunc(f: *Qbe.Fn, k: Qbe.Cls, r: Qbe.Ref) bool = {
 fn wasm_pop(f: *Qbe.Fn, k: Qbe.Cls, r: Qbe.Ref) void = {
     i := f.emit(.pop, k, r, QbeNull, QbeNull);
     
+    @if(f.len_scratch() <= 1) return();
     i0 := i.offset(1);
-    if f.len_scratch() != 0 && i0.op() == .push && i0.arg&[0] == r {
+    if i0.op() == .push && i0.arg&[0] == r {
         // (a = pop, push a) -> (a = tee)
-        i0.set_nop();
         i.set_op(.local_tee);
+        i0[] = i[];
+        f.unemit(i);
         
         if f.get_temporary(r)[].nuse <= 1 {
-            i.set_nop();
+            f.unemit(i0);
         };
     };
-    
-    return();
 }
 
 // TODO: convert addresses to .Kw earlier so don't have to insert as many .truncl
 // TODO: fold imm offset / slots
 fn wasm_push_addr(f: *Qbe.Fn, r: Qbe.Ref) void = {
     k := Qbe.Cls.Kw;
-    if rtype(r) == .RTmp || rtype(r) == .RSlot {//&& f.get_temporary(r)[].slot == -1 {
-        f.emit(.truncl, k, QbeNull, QbeNull, QbeNull);
+    if rtype(r) == .RTmp && f.get_temporary(r)[].slot == -1 {
+        f.emit_ext_trunc(.truncl, k);
         k = .Kl;
     };
     f.wasm_push(k, r);
@@ -425,8 +492,6 @@ Flow :: @enum(i64) (end, loop, block, if, else, br, br_if);
 // this is the only architecture of which the news has come to harvard.
 // there may be many others but they havent been discovered.
 fn wasm_flow(f: *Qbe.Fn) void = {
-    fillpreds(f);
-    fillrpo(f);
     fillloop(f);
     fillrpo(f);
     set_link_from_rpo(f);
@@ -584,7 +649,7 @@ fn sel_byteswap(f: *Qbe.Fn, i: *Qbe.Ins) void = @emit_instructions((f = f, emit 
 fn sel_nan_cmp(f: *Qbe.Fn, i: *Qbe.Ins, cmp: Qbe.O, join: Qbe.O, k: Qbe.Cls) void = {
     f.emit(.pop, i.cls(), i.to, QbeNull, QbeNull);
     if i.cls() == .Kl {
-        f.emit(.extuw, .Kl, QbeNull, QbeNull, QbeNull);
+        f.emit_ext_trunc(.extuw, .Kl);
     };
     
     f.emit(join, .Kw, QbeNull, QbeNull, QbeNull);

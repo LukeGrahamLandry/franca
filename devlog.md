@@ -11,7 +11,16 @@
   but when jitting emit_ir.pending just makes shims, so have shims translate thier type_index to the callee. 
   fuck but the callee is the fake wrapper, so have create_jit_shim check if it's Redirect and save the type.
   hack hack hack, need to clean that up, but it works! now i can call println!
-  
+
+TODO: that broke tests/exe/sys.fr
+
+size of the compiler (examples/web/b.fr) wasm build with -unsafe -keep-names:
+- before: 2750476 (time to comptime hello world in import_wasm: 1086)
+- prepass to fold slot math: 2315530 (-15%)
+- make SP global Kw instead of Kl: 2202240 (-5%)
+- use fold SP+offset into load/store: 2121009 (-3.5%)
+- remove trivial extuw+truncl pairs: 1973902 (-7%)
+- remove truncl+extuw after cmp: 1960386 (time to comptime hello world in import_wasm: 880)
 
 ## (Aug 21) wasm
 
