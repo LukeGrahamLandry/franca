@@ -1,3 +1,4 @@
+// #foreign("git");
 driver :: fn(vtable: *ImportVTable) void = {
     franca := get_executable_path(temp());
     make_dirs_or_crash("examples/web/target");
@@ -5,6 +6,7 @@ driver :: fn(vtable: *ImportVTable) void = {
     build :: fn(src, dest) => 
         run_cmd_blocking(franca, @slice("examples/default_driver.fr", "build", src, "-o", @tfmt("examples/web/target/%", dest), "-arch", "wasm32"));
 
+    // TODO: spin these up and just wait for them at the end. 
     build("examples/kaleidoscope.fr", "a.wasm");
     build("examples/web/b.fr", "b.wasm");
     build("examples/web/c.fr", "c.wasm");
@@ -15,11 +17,22 @@ driver :: fn(vtable: *ImportVTable) void = {
     
     ssa := collect_with_extension("examples/import_c/test", ".ssa") || panic("lost tests");
     
+    commit := {
+        ok, o, e := exec_and_catch("git", @slice("rev-parse", "HEAD"), temp());
+        @assert(ok, "failed git rev-parse");
+        while => o[o.len - 1].is_ascii_whitespace() {
+            o.len -= 1;
+        };
+        @assert_eq(o.len, 40, "failed git rev-parse");
+        o.items()
+    };
+    
     manifest := @tfmt(template,
         "[\"examples/mandelbrot.fr\"]",
         "[\"mandel.txt\"]",
         filenames("examples/import_c/test", ".c"),
         filenames("backend/test", ".ssa"),
+        commit,
     );
     write_entire_file_or_crash("examples/web/target/manifest.json", manifest);
     
@@ -79,7 +92,8 @@ template :: """{
     "url": "d.wasm",
     "examples": %
 }
-]
+],
+"commit": "%"
 }""";
 
 #use("@/lib/sys/process.fr");

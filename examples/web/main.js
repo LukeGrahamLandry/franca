@@ -75,7 +75,7 @@ const toggle_worker = () => {
 
 let manifest = await (await fetch("target/manifest.json")).json();
 console.log(manifest);
-
+document.getElementById("version").innerText = manifest.commit;
 const load_example = async (path) => {
     let src = await (await fetch("target/" + path)).text();
     document.getElementById("stale").hidden = false;

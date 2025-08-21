@@ -287,22 +287,49 @@ native_abi :: fn(
     when_debug_printfn(f, .Abi, "\n## After ABI lowering:\n");
 };
 
+fn collapse_addr(f: *Qbe.Fn) void = {
+    for_blocks_rpo_forward f { b |
+        for_insts_forward b { i |
+            continue :: local_return;
+            @if(i.op() != .add) continue();
+            @if(i.cls().is_float()) continue();
+            a := f.get_tmp(i.arg&[0]) || continue();
+            @if(a.slot < -1) continue();
+            delta := f.get_int(i.arg&[1]) || continue();
+            d := f.get_temporary(i.to);
+            @debug_assert(!i.to.isreg());
+            new := a.slot.intcast() + delta;
+            if a.slot != -1 {
+                if new >= 0 && fits_in_i32(new) && d.slot == -1 {
+                    d.slot = intcast(new);
+                    d.def = Qbe.Ins.ptr_from_int(0);
+                    chuse(i.arg&[0], -1, f);
+                    i.set_nop();
+                }
+            } else {
+                i2 := a.def;
+                @if(i2.is_null() || i2.op() != .add) continue();
+                delta2 := f.get_int(i2.arg&[1]) || continue();
+                @debug_assert(i.arg&[0] != i2.arg&[0], "cycle in add chain");
+                chuse(i.arg&[0], -1, f);
+                chuse(i2.arg&[0], 1, f);
+                i.arg&[0] = i2.arg&[0];
+                i.arg&[1] = f.getcon(delta + delta2);
+            };
+        };
+    };
+}
+
 native_isel :: fn(
     f: *Qbe.Fn,
-    $enable_collapse: bool,
-    $collapse_op: @Fn(f: *Qbe.Fn, i: *Qbe.Ins, bid: i32) void,
     $fixarg: @Fn(a: *Qbe.Ref, k: Qbe.Cls, nullable_i: *Qbe.Ins, f: *Qbe.Fn) void #duplicated,
     $sel_terminator: @Fn(b: *Qbe.Blk, f: *Qbe.Fn) void,
     $sel_inst: @Fn(i: **Qbe.Ins, b: *Qbe.Blk, f: *Qbe.Fn) void,
 ) void #generic = {
     f.assign_alloc_slots();
-    // In this pass, if `t.slot != -1` then `TMP(t) == addr SLOT(t.slot)`
+    f.collapse_addr();
     
-    @if(enable_collapse) for_blocks f { b | 
-        for_insts_forward b { i |
-            collapse_op(f, i, b);
-        };
-    }; 
+    // In this pass, if `t.slot != -1` then `TMP(t) == addr SLOT(t.slot)`
     
     for_blocks f { b | 
         f.reset_scratch();

@@ -9,8 +9,9 @@
 
 // TODO: reuse flag setting instructions like amd64/isel
 
-fn arm64_isel(f: *Qbe.Fn) void = 
-    native_isel(f, true, fn(f, i, b) => collapse_op_arm64(f, i, b.id), fn(r, k, i, f) => fixarg(f, r, k, !i.is_null()), seljmp, sel_inst);
+fn arm64_isel(f: *Qbe.Fn) void = {
+    native_isel(f, fn(r, k, i, f) => fixarg(f, r, k, !i.is_null()), seljmp, sel_inst);
+}
 
 sel_inst :: fn(i: **Qbe.Ins, b: *Qbe.Blk, f: *Qbe.Fn) void = {
     if i[].op() == .sel1 {
@@ -34,66 +35,6 @@ sel_inst :: fn(i: **Qbe.Ins, b: *Qbe.Blk, f: *Qbe.Fn) void = {
     };
 };
 
-fn collapse_op_arm64(f: *Qbe.Fn, i: *Qbe.Ins, bid: i32) void = {
-    @if(is_int(i.cls()))
-    @match(i.op()) {
-        fn add() => {
-            // you could swap if the left is constant, but i found it happens 62 out of 174835 times you get here -- Jan 18, 2025. 
-            if f.get_int(i.arg&[1]) { off | 
-                if f.is_symbol(i.arg&[0]) {
-                    // If this symbol is only used once in the block it makes sense to fold the offset into the adrp+add,
-                    // But it seems the more common case is you use the same symbol multiple times and read different offests, 
-                    // So it's nicer to create the constant in a register once and then fold all the small offsets into the memory instructions. 
-                    // (opt/slots deduplicates addr(RCon)) + fewer relocations should make linker stuff faster (?).
-                    // -- Jan 19, 2025
-                    
-                    // c := f.get_constant(i.arg&[0])[];
-                    // c.bits.i += off;
-                    // i[] = make_ins(.copy, .Kl, i.to, f.newcon(c&), QbeNull);
-                    return();
-                };
-                slot := f.get_slot(i.arg&[0]) || { 
-                    r := i.arg&[0];
-                    if(rtype(r) != .RTmp || isreg(r), => return()); 
-                    t := f.get_temporary(r);
-                    if(t.def.is_null(), => return());
-                    if t.defining_block != bid {
-                        // we might not have got there yet.
-                        collapse_op_arm64(f, t.def, t.defining_block);
-                    };
-                    @match(t.def.op()) {
-                        fn addr() => f.get_slot(t.def.arg&[0]).expect("this happens before other isel so only RSlot can be addr");
-                        fn copy() => f.get_slot(t.def.arg&[0]) || return();
-                        fn add()  => {
-                            if f.get_int(t.def.arg&[1]) { off2 | 
-                                if off + off2 < 4096 {
-                                    chuse(t.def.arg&[0], 1, f);
-                                    chuse(r, -1, f);
-                                    i.arg&[0] = t.def.arg&[0];
-                                    i.arg&[1] = f.getcon(off + off2);
-                                    return(collapse_op_arm64(f, i, bid));
-                                };
-                            };
-                            return()
-                        }
-                        @default => return();
-                    }
-                };
-                // negative slots are abi push stuff
-                if slot >= 0 {
-                    new := slot + off;
-                    if new >= 0 {
-                        chuse(i.arg&[0], -1, f);
-                        i[] = make_ins(.addr, .Kl, i.to, SLOT(new), QbeNull);
-                    };
-                };
-            };
-        }
-        fn ceqw() => Simplify'fix_ceqw_not(f, i);  // TODO: this is probably a dumb place to do this. 
-        @default => ();
-    };
-}
-
 fn get_slot(f: *Qbe.Fn, r: Qbe.Ref) ?i64 = {
     @match(rtype(r)) {
         fn RSlot() => return(Some = rsval(r).intcast());
@@ -110,7 +51,7 @@ fn get_slot(f: *Qbe.Fn, r: Qbe.Ref) ?i64 = {
 
 //
 // This will compress a sequence like `add x1, x29, #24; add x1, x1, #8; ldr x1, [x1]` into `ldr x1, [x29, #32]`
-// (doesn't need to recurse because of the prepass of collapse_op_arm64)
+// (doesn't need to recurse because of the prepass of collapse_addr)
 
 fn fix_memarg(f: *Qbe.Fn, i: *Qbe.Ins) *Qbe.Ref = {
     iarg := i.arg&;
@@ -120,6 +61,20 @@ fn fix_memarg(f: *Qbe.Fn, i: *Qbe.Ins) *Qbe.Ref = {
     size: i64 = if(store, => size_of_store(i).zext(), => size_of_load(i).zext());
     r := iarg[store.int()]&;
     new_addr, off := fuse_addr(f, r[], size);
+    
+    //if f.get_tmp(r[]) { t |
+    //    a := t.alias&;
+    //    if t.slot == -1 {
+    //        if a.type == .ACon || a.type == .ASym {
+            
+    //        } else {
+    //            @if(new_addr.val() != t.alias.base.intcast())
+    //            @println("% -> (% + %) | (% + %)", r[], new_addr, off, t.alias.base, t.alias.offset);
+    //        }
+    //    } else {
+            
+    //    };
+    //};
     
     max_off := size * 4096;
     if(off < 0 || off >= max_off || off.mod(size) != 0, => return(r));
@@ -158,7 +113,7 @@ fn fuse_addr(f: *Qbe.Fn, a: Qbe.Ref, size: i64) Ty(Qbe.Ref, i64) = {
     // :ReferencingOldBlock
     if(addr.def.is_null() || addr.def.to != a, => return(a, 0));
     def_a := addr.def.arg&;
-    @debug_assert(addr.nuse > 0);
+    @debug_assert_gt(addr.nuse, 0, "nuse");
     @match(addr.def.op()) {
         fn add() => if f.get_int(def_a[1]) { off | 
             @debug_assert(def_a[0] != QbeNull, "add missing arg");

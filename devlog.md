@@ -12,8 +12,6 @@
   fuck but the callee is the fake wrapper, so have create_jit_shim check if it's Redirect and save the type.
   hack hack hack, need to clean that up, but it works! now i can call println!
 
-TODO: that broke tests/exe/sys.fr
-
 size of the compiler (examples/web/b.fr) wasm build with -unsafe -keep-names:
 - before: 2750476 (time to comptime hello world in import_wasm: 1086)
 - prepass to fold slot math: 2315530 (-15%)
@@ -21,6 +19,17 @@ size of the compiler (examples/web/b.fr) wasm build with -unsafe -keep-names:
 - use fold SP+offset into load/store: 2121009 (-3.5%)
 - remove trivial extuw+truncl pairs: 1973902 (-7%)
 - remove truncl+extuw after cmp: 1960386 (time to comptime hello world in import_wasm: 880)
+
+experimenting with removing the recursive collapse_op_arm64:
+- just collapse_op_arm64: 909196
+- just slot scan: 930040
+- both: 907196
+- niether: 1281632
+- slot scan + add chain but no collapse: 910212
+---
+
+- use new collapse_addr on wasm: 1945008
+  - TODO: number might be too low because removed arm's simplify_ceqw so the compiler's smaller
 
 ## (Aug 21) wasm
 
