@@ -350,6 +350,9 @@ fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
             e.a&.push(align_hint);
             e.a&.push(0);  // offset  TODO: use this
         };
+        fn blit1() => {
+            e.a&.push_all(@const_slice(0xFC, 0x0A, 0x00, 0x00));
+        }
         @default => @panic("TODO: wasm encoding for % %", i.op(), { printfn(e.f, e.f.globals.debug_out); "" });
     };
 }
@@ -403,12 +406,18 @@ fn op(e: *EmitWasmFn, o: Wasm.Inst) void = {
 fn fixup_wasm32(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_reloc: *?Fixup) void = {
     indirect_index := @if(self.goal.type == .JitOnly, symbol.jit_addr.int_from_rawptr(), symbol.got_lookup_offset);
     
-    if indirect_index > u8.int_from_ptr(self.segments&[.Code].mmapped.ptr) {
+    // TODO: so hacky that you automatically get the computed offset as a jit_addr (because that's right for native targets)
+    //       so if it's not on the list to be emitted this round, there's a high risk of having a non-zero junk value.
+    invalid := u8.int_from_ptr(self.segments&[.Code].mmapped.ptr);
+    if indirect_index > invalid {
         if symbol.my_shim != Qbe.no_symbol_S {
             use_symbol(self, symbol.my_shim) { s |
                 indirect_index = s.jit_addr.int_from_rawptr();
             };
         }
+    };
+    if symbol.segment == .Code && indirect_index > invalid {
+        @panic("wasm tried to call unfinished: $%", symbol.name);
     };
     
     //@if(TODOWASM) @if(self.goal.type == .JitOnly)
@@ -810,7 +819,15 @@ fn output_wasm_module_jit(m: *QbeModule, indirect_table_base: i64) [][]u8 = {
         };
         @debug_assert_eq(m.exports[i].id, id[].id, "export order wrong");
     };
-    
+    when_debug(m, .Patch) { out |
+        @fmt(out, "# Jit: [");
+        enumerate m.local_needs_reloc& { i, id |
+            use_symbol(m, id[]) { s |
+                @fmt(out, "%: %, ", s.jit_addr, s.name);
+            };
+        };
+        @fmt(out, "]\n");
+    };
     @debug_assert_eq(m.imports.len, 0, "imports list should be empty when jitting on wasm");
     
     for_symbols m { id, symbol |
@@ -988,7 +1005,8 @@ make_exec :: fn(m: *Qbe.Module) void = {
 
     enumerate m.exports& { i, id |
         use_symbol(m, id[]) { s |
-            s.jit_addr = rawptr_from_int(first_export + i);
+            @debug_assert_eq(s.jit_addr.int_from_rawptr(), first_export + i);
+            
             // forget that this was a local
             s.got_lookup_offset = -1;
             s.kind = .DynamicPatched;

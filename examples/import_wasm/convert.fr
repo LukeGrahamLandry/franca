@@ -17,7 +17,8 @@
 //       T.eqz, abs, ceil, floor, trunc, nearest, copysign, trunc_sat, some other conversions
 //       multiple return values, ref.*
 //       more atomic ops. 
-//       memory ops: grow/init/size/copy/fill/drop
+//       memory ops: grow/init/size/fill/drop
+//       memory.copy: allow non-constant size. allow overlapping where you need to copy backwards. 
 //       br_table
 //       more table ops: set/size/fill/copy/init/drop
 //       vectors. 
@@ -643,6 +644,24 @@ fn emit_the_code(self: *LoadWasm) void = {
             }
             fn TablePrefix() => {
                 opcode := self.read_u();
+                if opcode == 10 {  // memory.copy
+                    @debug_assert(self.src[self.cursor] == 0 && self.src[self.cursor + 1] == 0);
+                    self.cursor += 2;
+                    n := self.stack&.pop().unwrap();
+                    src := self.stack&.pop().unwrap();
+                    dest := self.stack&.pop().unwrap();
+                    src := self.compute_address(src, 0);
+                    dest := self.compute_address(dest, 0);
+                    if self.f.get_int(n) { n |
+                        // TODO: this is wrong! you're allowed overlap
+                        self.f.emit(.blit0, .Kw, QbeNull, src, dest);
+                        self.f.emit(.blit1, .Kw, Qbe.Null, INT(n), Qbe.Null);
+                    } else {
+                        panic("TODO: non-constant memory.copy");
+                    }
+                    continue();
+                };
+                
                 @assert_eq(opcode, 15, "TODO: implement more table ops (only grow is supported)");
                 table := self.read_u();
                 

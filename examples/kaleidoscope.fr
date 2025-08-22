@@ -550,21 +550,52 @@ fn compile_loop(c: *Ctx) Result(void, Str) = {
 main :: fn() void = {
     src := EXAMPLE_PROGRAM;
     a := cli_args();
+    logging := "";
     range(0, a.len) { i |
         if a[i] == "---literal_input" && i < a.len - 1 {
             src = a[i + 1].str();
+        }
+        if a[i] == "-d" && i < a.len - 1 {
+            logging = a[i + 1].str();
         }
     };
 
     m := zeroed QbeModule;
     init_default_module(m&, (arch = query_current_arch(), os = query_current_os(), type = .JitOnly));
     c: *Ctx = init(general_allocator(), src, m&);
+    c.m.set_debug_types(logging, true);
     
     @match(c.compile_loop()) {
         fn Ok() => ();
         fn Err(s) => @panic("%\n before line %", s, c.line);
     }
     
+    // TODO: fixme !
+    @if(TODOWASM) {
+        f :: fn(name: Str, f: rawptr) void => {
+            use_symbol(c.m, c.m.intern(name)) {s |
+                s.jit_addr = f;
+                s.kind = .DynamicPatched;
+                
+                fix := c.m.target.fixup;
+                new_got_reloc := (?Fixup).None;
+                each s.fixups { fixup | 
+                    fix(c.m, s, fixup, new_got_reloc&);
+                };
+                s.fixups.len = 0;
+            };
+        };
+        f("putchard", @as(rawptr) (fn(d: f64) f64 = {
+            c: u8 = d.int().trunc();
+            print(@as(Str) (ptr = c&, len = 1));  // :SLOW (unbuffered)
+            0.0
+        }));
+        f("printd", @as(rawptr) (fn(d: f64) f64 = {
+            @println("%", d);  // :SLOW (unbuffered)
+            0.0
+        }));
+    }
+
     c.m.emit_suspended_inlinables();
     c.m.make_exec();
     
@@ -621,12 +652,14 @@ fn init(a: Alloc, src: Str, m: *QbeModule) *Ctx = {
     // assignment has special handling (so I don't provide an implementation here). 
     c.binary_precedence&.insert(tok("="), 2);
     
-    c.m.put_jit_addr(c.m.intern("putchard"), @as(rawptr) (fn(d: f64) f64 = {
+    // TODOWASM: this needs to work on wasm without the extra '::'
+    //      "panic! missing index for $Anon__30699"
+    c.m.put_jit_addr(c.m.intern("putchard"), ::@as(rawptr) (fn(d: f64) f64 = {
         c: u8 = d.int().trunc();
         print(@as(Str) (ptr = c&, len = 1));  // :SLOW (unbuffered)
         0.0
     }));
-    c.m.put_jit_addr(c.m.intern("printd"), @as(rawptr) (fn(d: f64) f64 = {
+    c.m.put_jit_addr(c.m.intern("printd"), ::@as(rawptr) (fn(d: f64) f64 = {
         @println("%", d);  // :SLOW (unbuffered)
         0.0
     }));

@@ -14,6 +14,17 @@ main :: fn() void = {
         if a[i] == "-d" && i < a.len - 1 {
             logging = a[i + 1].str();
         }
+        
+        @if(TODOWASM)
+        @if(query_current_arch() == .wasm32)
+        if a[i] == "-file" && i < a.len - 1 {
+            name := a[i + 1].str();
+            fetch_file :: fn(ptr: *u8, len: i64) *u8 #weak #import("libc");
+            result := fetch_file(name.ptr, name.len);
+            @assert(!result.is_null(), "failed to read %", name);
+            result: CStr = (ptr = result);
+            src = result.str();
+        }
     };
     src := @tfmt("""#include_std("lib/core.fr");%""", src);
 
@@ -34,6 +45,16 @@ main :: fn() void = {
     self.do_export("exit", @Fn(c: i32) Never, Syscall.exit);
     self.do_export("write", @Fn(fd: i32, p: *u8, l: i64) i64, fn(a, b, c) = { x := Syscall'write((fd = a), b, c); x.value });
     self.do_export("mprotect", @Fn(a: rawptr, b: i64, c: i64) i64, fn(a, b, c) = { x := Syscall'mprotect(a, b, c); x.value });
+    self.do_export("mmap", @Fn(a: rawptr, b: i64, c: i64, d: i64, e: i32, f: i64) i64, fn(a, b, c, d, e, f) = { Syscall'mmap(a, b, c, d, (fd = e), f) });
+    self.do_export("munmap", @Fn(a: rawptr, b: i64) i64, fn(a, b) = { x := Syscall'munmap(a, b); x.value });
+    jit_instantiate_module :: fn(a: *u8, b: i64, c: i64, d: u32) void #weak #import("libc");
+    self.do_export("jit_instantiate_module", @Fn(a: *u8, b: i64, c: i64, d: u32) void, jit_instantiate_module);
+    
+    weak :: import("@/examples/import_wasm/run.fr").weak_imports;
+    inline_for weak { $name |
+        // TODO: use the right signetures so you actually get the message. 
+        self.do_export(::name[], @Fn() void, fn() = @panic("comptime code tried to call a weak import"));
+    };
     
     id := self.parser.push_parse(src, file);
     stmts := self.parser.finish_pending_stmts(id);
@@ -53,7 +74,10 @@ main :: fn() void = {
     // TODO: this should just work. makes a shim and then you call it but the jit_addr is a code offset not an index. 
     //f := c.get_jitted(fid);
     f := bit_cast_unchecked(rawptr, @FnPtr() void, f);
-    f();
+    push_dynamic_context {
+        context(DefaultContext)[].cli_arguments = empty();
+        f();
+    };
 }
 
 do_export :: fn(self: *SelfHosted, name: Str, $T: Type, $F: FuncId) void = {

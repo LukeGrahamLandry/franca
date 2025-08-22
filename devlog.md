@@ -1,4 +1,6 @@
 
+## (Aug 21) wasm
+
 - rn i don't allow you to call something that doesn't have an assigned index yet. 
   which is going to have to change eventually. but for now, can't just make_exec after each shim
   to get a jit_addr because there might be something in the pipe. need to track the shim symbol
@@ -11,6 +13,9 @@
   but when jitting emit_ir.pending just makes shims, so have shims translate thier type_index to the callee. 
   fuck but the callee is the fake wrapper, so have create_jit_shim check if it's Redirect and save the type.
   hack hack hack, need to clean that up, but it works! now i can call println!
+
+> mandelbrot only works in chrome. 
+> `RangeError: Maximum call stack size exceeded.` in safari. also firefox. 
 
 size of the compiler (examples/web/b.fr) wasm build with -unsafe -keep-names:
 - before: 2750476 (time to comptime hello world in import_wasm: 1086)
@@ -26,12 +31,39 @@ experimenting with removing the recursive collapse_op_arm64:
 - both: 907196
 - niether: 1281632
 - slot scan + add chain but no collapse: 910212
----
+now it's something sane that doesn't have arm specific size limits so i can use it for all targets. 
 
-- use new collapse_addr on wasm: 1945008
-  - TODO: number might be too low because removed arm's simplify_ceqw so the compiler's smaller
+back to wasm size
+- use new collapse_addr on wasm: 1945008 (-0.7%)
+- only do the pairs thing in simplify blit on arm: 1856773 (-4.5%). 
+> at this point mandelbrot works in the other browsers. 
+> so reducing number of locals helps it which is surprising. 
+- fix_ceqw_not saves 4kb on arm but makes the others worse. so maybe it's better to just have fewer lines of code. 
+- since im not doing opt/slots yet i should just always use memory.copy instruction for blit.
+  - lol i was a bit disappointed that it only saved like 20kb but it turned out i had turned off -unsafe.  
+  - doing it myself for 8 bytes is still better. 
+  - 1398795 (-24%)
 
-## (Aug 21) wasm
+make more comptime work.
+- sudoku: `wasm tried to call unfinished: $assign__637`. 
+  don't call ensure_got_slot when making a shim. 
+- kalidescope
+    - `panic! missing index for $Anon__30699`
+        - hack fixed by putting an extra '::' on the function literal when calling put_jit_addr
+        - TODO: real fix
+    - now it gets to the point of make_exec on the second layer of jit (the actual kalidescope program).
+    - `wasm tried to call unfinished: $putchard`
+      - also it looks suspisiously like my previous hack is giving me a junk jit_addr. 
+      - put_jit_addr doesn't work on wasm becuase of the offset confusiong.
+        with manually setting jit_addr i can get to 
+        `[while handling a jit shim callback] Tried to call uncompiled function: jit_instantiate_module`.  
+        that's just a missing do_export in b.fr, and then it works!!
+        mega garbage hacks but i get my mandelbrot set! soon it will be time to pay my debts... 
+- comptime qbe_frontend.fr -jit mandel works. 
+  only takes like as long 3x as native, more like 2x with -unsafe. that's pretty good,
+  that means the plan of recompile the compiler itself in the browser is feasable. 
+
+## (Aug 20) wasm
 
 import_wasm
 - support importing globals/tables
