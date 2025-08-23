@@ -27,6 +27,15 @@ const handle = (_msg) => {
             flush();
             break;
         }
+        case "download": {
+            let a = document.createElement("a");
+            let url = window.URL.createObjectURL(msg.content);
+            a.href = url;
+            a.download = "a.out";
+            a.click();
+            window.URL.revokeObjectURL(url);
+            break;
+        }
         default:
             throw msg;
     }
@@ -44,9 +53,9 @@ const toggle_worker = () => {
     }
     running = worker === null;
     if (running) {
-        let compiler = document.getElementById("compiler").value;
-        const index = parseInt(compiler);
-        let url = manifest.compilers[index].url;
+        let compiler_i = document.getElementById("compiler").value;
+        const compiler = manifest.compilers[parseInt(compiler_i)];
+        let url = "demo.wasm"; 
         document.getElementById("err").innerText = "";
         document.getElementById("time").innerText = "(" + url + ")";
         document.getElementById("out").value = "";
@@ -57,6 +66,10 @@ const toggle_worker = () => {
             url,
             "---literal_input",
             input,
+            "-lang",
+            compiler.name,
+            "-target",
+            document.getElementById("target").value,
             ...(dbg.length == 0 ? [] : ["-d", dbg]),
         ];
         worker = new Worker(`${manifest.worker}?v=${version}`);
@@ -115,6 +128,16 @@ document.getElementById("example").onchange = function () {
 };
 show_compilers();
 await load_example(manifest.compilers[0].examples[0]);
+
+{
+    let targets = ["wasm-jit", "wasm-aot", "arm64-macos", "amd64-macos", "arm64-linux", "amd64-linux"];
+    let src = "";
+    for (const it of targets) {
+        src += `<option value="${it}"> ${it} </option>`;
+    }
+    document.getElementById("target").innerHTML = src; 
+}
+
 toggle_worker();
 
 document.getElementById("all").onclick = async () => {

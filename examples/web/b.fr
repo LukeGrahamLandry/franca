@@ -1,32 +1,8 @@
-#include_std("lib/core.fr");
-#include_std("compiler/lib.fr");
-DEBUG_SPAM_LOG :: false;
-DISABLE_IMPORT_FRC :: false;
 
+#use("@/examples/web/demo.fr")
 main :: fn() void = {
-    src := TINY;
-    a := cli_args();
-    logging := "";
-    range(0, a.len) { i |
-        if a[i] == "---literal_input" && i < a.len - 1 {
-            src = a[i + 1].str();
-        }
-        if a[i] == "-d" && i < a.len - 1 {
-            logging = a[i + 1].str();
-        }
-        
-        @if(TODOWASM)
-        @if(query_current_arch() == .wasm32)
-        if a[i] == "-file" && i < a.len - 1 {
-            name := a[i + 1].str();
-            fetch_file :: fn(ptr: *u8, len: i64) *u8 #weak #import("libc");
-            result := fetch_file(name.ptr, name.len);
-            @assert(!result.is_null(), "failed to read %", name);
-            result: CStr = (ptr = result);
-            src = result.str();
-        }
-    };
-    src := @tfmt("""#include_std("lib/core.fr");%""", src);
+    args := get_args(TINY);
+    src := @tfmt("""#include_std("lib/core.fr");%""", args.src);
 
     if query_current_arch() != .wasm32 {
         update_global_stdlib_path();
@@ -39,21 +15,10 @@ main :: fn() void = {
     file := c.add_file("repl!", src);
     self := c.data.cast()[][];
     self.tempdebug = true;
-    self.comptime_codegen.m.set_debug_types(logging, true);
+    self.comptime_codegen.m.set_debug_types(args.logging, true);
     
-    self.do_export("putchar", @Fn(c: u8) void, putchar_UNBUFFERED);
-    self.do_export("exit", @Fn(c: i32) Never, Syscall.exit);
-    self.do_export("write", @Fn(fd: i32, p: *u8, l: i64) i64, fn(a, b, c) = { x := Syscall'write((fd = a), b, c); x.value });
-    self.do_export("mprotect", @Fn(a: rawptr, b: i64, c: i64) i64, fn(a, b, c) = { x := Syscall'mprotect(a, b, c); x.value });
-    self.do_export("mmap", @Fn(a: rawptr, b: i64, c: i64, d: i64, e: i32, f: i64) i64, fn(a, b, c, d, e, f) = { Syscall'mmap(a, b, c, d, (fd = e), f) });
-    self.do_export("munmap", @Fn(a: rawptr, b: i64) i64, fn(a, b) = { x := Syscall'munmap(a, b); x.value });
-    jit_instantiate_module :: fn(a: *u8, b: i64, c: i64, d: u32) void #weak #import("libc");
-    self.do_export("jit_instantiate_module", @Fn(a: *u8, b: i64, c: i64, d: u32) void, jit_instantiate_module);
-    
-    weak :: import("@/examples/import_wasm/run.fr").weak_imports;
-    inline_for weak { $name |
-        // TODO: use the right signetures so you actually get the message. 
-        self.do_export(::name[], @Fn() void, fn() = @panic("comptime code tried to call a weak import"));
+    for_exports { name, addr |
+        self.todo_injected.insert(name, addr);
     };
     
     id := self.parser.push_parse(src, file);
@@ -65,7 +30,7 @@ main :: fn() void = {
     
     fid := c.get_unique_named("main") || @panic("no function called 'main'");
     
-    SAME_MODULE :: true;
+    SAME_MODULE :: false;
     f := if !SAME_MODULE {
         // TODO: this is what i want but unfortunatly it's slower
         //       because it doesn't allow jit shims so it has to compile the whole program
@@ -74,31 +39,39 @@ main :: fn() void = {
         name := c.fmt_fn_name(fid);
     
         m := general_allocator().box(QbeModule);
-        backend'init_module(m, (
-            arch = query_current_arch(), 
-            os = query_current_os(), 
-            type = .JitOnly,
-        ));
+        backend'init_module(m, args.target);
+        m.set_debug_types(args.logging, true);
         self.other_module&.push(m, self.get_alloc());
         shared := init_codegen(m, self.get_alloc(), false); // nothreads
-        main_thread_pump(c, shared, @slice(fid), false);  // nowrapmain
+        ::enum(@type m.goal.type);
+        aot := m.goal.type != .JitOnly;
+        main_thread_pump(c, shared, @slice(fid), aot);
+        if aot {
+            m.seal_debug_info("", false, empty());  // TODO
+            chunks := {c.vtable.finish_qbe_module}(QbeModule.raw_from_ptr(m));
+            bytes := concat(chunks&, temp());
+            
+            if query_current_arch() == .wasm32 {
+                @println("size = %;", bytes.len);
+                yield_file :: fn(p: *u8, l: i64) void #weak #libc;
+                yield_file(bytes.ptr, bytes.len);
+            } else {
+                write_entire_file_or_crash("a.out", bytes);
+                @println("wrote % bytes to a.out", bytes.len);
+            };
+            return();
+        };
+        
         m.make_exec();
         m.get_addr(name) || @panic("ICE: lost %", name)
     } else {
         c.get_jitted(fid)
     };
-    
     f := bit_cast_unchecked(rawptr, @FnPtr() void, f);
     push_dynamic_context {
         context(DefaultContext)[].cli_arguments = empty();
         f();
     };
-}
-
-do_export :: fn(self: *SelfHosted, name: Str, $T: Type, $F: FuncId) void = {
-    ff: T : F;
-    f: rawptr = ff;
-    self.todo_injected.insert(name, f);
 }
 
 TINY :: """
@@ -108,3 +81,7 @@ fn main() void = {
     write(1, s.ptr, s.len);
 };
 """;
+
+#include_std("compiler/lib.fr");
+DEBUG_SPAM_LOG :: false;
+DISABLE_IMPORT_FRC :: false;

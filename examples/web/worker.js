@@ -135,6 +135,18 @@ const imports = {
             dest.set(new Uint8Array(src.buffer));
             return p;
         },
+        yield_file: (ptr, len) => {
+            const bytes = new Uint8Array(
+                Franca.memory.buffer,
+                Number(ptr),
+                Number(len),
+            );
+            self.postMessage({
+                tag: "download",
+                content: new Blob([bytes], { type: "octet/stream" }),
+                name: "a.out",
+            });
+        },
         null: () => {
             throw new Error("wasm guest tried to call a null function pointer");
         }

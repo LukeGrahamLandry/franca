@@ -2,27 +2,14 @@ C :: import("@/examples/import_c/lib.fr");
 
 #use("@/backend/lib.fr");
 
+#use("@/examples/web/demo.fr")
 main :: fn() void = {
-    src := "";
-    a := cli_args();
-    range(0, a.len) { i |
-        if a[i] == "---literal_input" && i < a.len - 1 {
-            src = a[i + 1].str();
-        }
-    };
-
-    or compile(src) { err |
-        panic(err);
-    };
-}
-
-fn compile(src: Str) Result(void, Str) = {
+    args := get_args("");
     m := @uninitialized QbeModule;
-    debug := "PAD";
     
     target: QbeTargetEnv = (os = query_current_os(), arch = query_current_arch(), type = .JitOnly);
     backend'init_module(m&, target);
-    m&.set_debug_types(debug, true);
+    m&.set_debug_types(args.logging, true);
     
     ctx: *C.Compile.CodegenShared = backend'worker_start(m&, general_allocator(), backend.worker_thread, false);
     
@@ -32,7 +19,8 @@ fn compile(src: Str) Result(void, Str) = {
     c.emitter = (Some = ctx);
     c.enqueue_task = backend.worker_enqueue; 
     
-    prog := @try(c&.import_c'compile_c("-", src)) return;
+    c&.import_c'compile_c("-", args.src)
+        .or(fn(err) => panic(err));
     ctx.backend'worker_join();
     c.arena_storage&.deinit();
 
@@ -55,7 +43,6 @@ fn compile(src: Str) Result(void, Str) = {
     @if(status != 0) @panic("\n\nReturned status %", status);
 
     drop(m&);
-    .Ok
 }
 
 #use("@/examples/import_c/ffi.fr");

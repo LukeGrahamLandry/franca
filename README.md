@@ -22,7 +22,7 @@ runtime code will automatically be included in the final binary.
 
 ## Supported Targets
 
-The self-hosted backend generates machine code for arm64 (aarch64) and amd64 (x86_64). 
+The self-hosted backend generates machine code for arm64 (aarch64), amd64 (x86_64) and wasm. 
 There is no dependency on assemblers, linkers, llvm, or xcode-codesign. 
 
 - mach-o (macos): executables, dynamic libraries, relocatable object files
@@ -36,11 +36,10 @@ On windows you can use WSL.
 
 The compiler does not depend on libc (on linux, when built with -syscalls). 
 
-A bootstrap binary is committed for macos-arm64 only. 
-Binaries for other platforms are available as [github actions artifacts](https://github.com/LukeGrahamLandry/franca/actions).
-(which requires being logged in which sucks. thinking about a better system... sorry.)  
+The webassembly target is still a work in progress (no threads, doesn't follow c abi, poor codegen, etc), 
+but the compiler can (slowly) compile itself. 
 
-> There is vauge work towards targetting wasm and riscv, but it is not yet usable. 
+> There is vauge work towards targetting riscv, but it is not yet usable. 
 
 ## Documentation
 
@@ -57,6 +56,8 @@ Some does exist, see the `docs/README.md`.
   - can run at comptime so franca programs can import c libraries directly without depending on another compiler
 - Windowing/3d graphics library [@/graphics](./graphics) (based on Sokol)
   - very unfinished! macos-arm64-metal only currently
+- You can try the [WebAssembly demo](https://franca.lukegrahamlandry.ca) in your browser without installing anything. 
+  It can even cross compile a native version of the compiler that you can download as a way to bootstrap your first franca installation. 
 
 ## Goals
 
