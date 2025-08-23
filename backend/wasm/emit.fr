@@ -18,11 +18,14 @@ EmitWasmFn :: @struct(
 fn record_wasm_function_index(m: *Qbe.Module, id: Qbe.Sym) void = {
     export := false;
     use_symbol(m, id) { s |
-        s.got_lookup_offset = m.local_needs_reloc.len;
         s.referenced = true;
         export = s.export;
+        if m.goal.type == .JitOnly {
+            s.wasm_module_function_index = m.local_needs_reloc.len.intcast();
+        }; // else, AOT: there can be imports so real index can't be assigned yet. 
     };
     m.local_needs_reloc&.push(id);
+    
     
     // :WasmJitExportAllFunctions 
     @if(TODOWASM) @if(!export) m.exports&.push(id);
@@ -270,7 +273,22 @@ fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
                     fn CBits() => e.push_bits(c, i.cls());
                     fn CAddr() => {
                         use_symbol(e.m, c.sym) { symbol | 
+                            break :: local_return;
                             e.op(@if(i.cls().is_wide(), .I64_Const, .I32_Const));
+                            
+                            is_function := symbol.wasm_type_index != -1;
+                            if e.m.goal.type == .JitOnly && is_function {
+                                if symbol.got_lookup_offset == -1 {
+                                    // reserve an index in the table early. it will be filled in by make_exec();
+                                    symbol.got_lookup_offset = table_grow(1).intcast();
+                                    @debug_assert_ne(symbol.got_lookup_offset, -1, "failed to grow table");
+                                    //@println("reserve T[%] = %", symbol.got_lookup_offset, symbol.name);
+                                };
+                                @debug_assert(c.bits() == 0 && symbol.segment == .Code);
+                                leb128_signed(e.a&, symbol.got_lookup_offset);
+                                break();
+                            };
+                            
                             // if it's a function address we have to wait until the end to know its index in the table. 
                             if symbol.kind == .Local && symbol.segment == .MutableData {
                                 base := @if(e.m.goal.type == .JitOnly, symbol.jit_addr.int_from_rawptr(), symbol.offset);
@@ -404,21 +422,10 @@ fn op(e: *EmitWasmFn, o: Wasm.Inst) void = {
 }
 
 fn fixup_wasm32(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_reloc: *?Fixup) void = {
-    indirect_index := @if(self.goal.type == .JitOnly, symbol.jit_addr.int_from_rawptr(), symbol.got_lookup_offset);
-    
-    // TODO: so hacky that you automatically get the computed offset as a jit_addr (because that's right for native targets)
-    //       so if it's not on the list to be emitted this round, there's a high risk of having a non-zero junk value.
-    invalid := u8.int_from_ptr(self.segments&[.Code].mmapped.ptr);
-    if indirect_index > invalid {
-        if symbol.my_shim != Qbe.no_symbol_S {
-            use_symbol(self, symbol.my_shim) { s |
-                indirect_index = s.jit_addr.int_from_rawptr();
-            };
-        }
-    };
-    if symbol.segment == .Code && indirect_index > invalid {
-        @panic("wasm tried to call unfinished: $%", symbol.name);
-    };
+    // TODO: this is kinda using segment==Code to mean is it a function but that will also be set for data symbol imports. 
+    //       the problem is put_jit_addr won't know the type if you do it before any calls. 
+    indirect_index := @if(self.goal.type == .JitOnly && symbol.segment != .Code, 
+        symbol.jit_addr.int_from_rawptr(), symbol.got_lookup_offset);
     
     //@if(TODOWASM) @if(self.goal.type == .JitOnly)
     //    @println("fixup_wasm32 %; jit_addr=%; got_lookup_offset=%; shim_addr=%;", symbol.name, symbol.jit_addr, symbol.got_lookup_offset, symbol.shim_addr);
@@ -427,9 +434,9 @@ fn fixup_wasm32(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_re
         fn WasmIndex() => {
             @debug_assert(symbol.segment == .Code);
             @debug_assert(self.goal.type != .JitOnly || symbol.kind == .Local, "wasm jit cannot direct call an import: %", symbol.name);
-            @debug_assert_ne(symbol.got_lookup_offset, -1, "missing index for $%", symbol.name);
+            @debug_assert_ne(symbol.wasm_module_function_index, -1, "WasmIndex: missing index for $%", symbol.name);
             lst: List(u8) = fixed_list(ptr = u8.ptr_from_raw(fixup.patch_at), len = WASM_INDEX_PADDING);
-            leb128_unsigned(lst&, symbol.got_lookup_offset, WASM_INDEX_PADDING);
+            leb128_unsigned(lst&, symbol.wasm_module_function_index.intcast(), WASM_INDEX_PADDING);
         }
         // used when producing the value on the stack
         fn WasmAddr(it) => {
@@ -437,13 +444,12 @@ fn fixup_wasm32(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_re
             base := @if(self.goal.type == .JitOnly, indirect_index, symbol.offset);
             value := if(symbol.segment == .Code, => indirect_index, => base + it.increment.zext());
             @if(symbol.name != "__franca_base_address"/*HACK*/) 
-                @debug_assert_gt(value, 0, "missing index for $%", symbol.name);
+                @debug_assert_gt(value, 0, "WasmAddr: missing index for $%", symbol.name);
             leb128_signed(lst&, value, WASM_INDEX_PADDING); // NOTE: immediate of T.const is always signed
         }
         fn DataAbsolute(it) => {
-            if symbol.segment == .Code {
-                @debug_assert(it.increment == 0 && indirect_index >= 0, "invalid code fixup");
-                i64.ptr_from_raw(fixup.patch_at)[] = indirect_index;
+            if symbol.segment == .Code && symbol.wasm_type_index != -1 {
+                i64.ptr_from_raw(fixup.patch_at)[] = symbol.got_lookup_offset;
             } else {
                 @debug_assert(symbol.kind == .Local);
                 // the symbol's offset already includes :WasmZeroPage
@@ -466,11 +472,15 @@ fn push_global_index(e: *EmitWasmFn, id: Qbe.Sym) void = @if_else {
 
 
 // 
-// - AOT: got_lookup_offset is the index in the indirect function table. 
-//        first import is 0, local functions are after all imports. 
-// - JIT: jit_addr is the index in the indirect function table.
-//        no wasm imports, the first local function is at the old length of the table. 
-//        got_lookup_offset is local index for direct calls. 
+// got_lookup_offset
+//   the index in the indirect function table. 
+//   - AOT: first import is 0, local functions are after all imports. 
+//   - JIT: no wasm imports, the first local function is at the old length of the table. 
+// wasm_module_function_index
+//   real wasm index in the module for direct calls. 
+//   first import is 0, local functions are after all imports. 
+//   JIT: no imports so it can be assigned early  
+//        
 //
 // The order of segments matters. 
 fn output_wasm_module(m: *QbeModule) [][]u8 = {
@@ -506,6 +516,11 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
         };
     };
     
+    for_symbols m { id, symbol |
+        @assert(symbol.got_lookup_offset == -1);
+        @assert(symbol.wasm_module_function_index == -1);
+    };
+    
     // import functions ids start at zero. 
     // we need to know how many imports there are before we can start patching anything. 
     for_symbols m { id, symbol | // :SLOW  just keep list of pending symbols instead
@@ -513,6 +528,7 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
         if is_import && (symbol.fixups.len != 0 || symbol.referenced) {
             @debug_assert(symbol.segment == .Code);
             symbol.got_lookup_offset = m.imports.len;
+            symbol.wasm_module_function_index = m.imports.len.intcast();
             m.imports&.push(id); 
             symbol.kind = .DynamicPatched;
         };
@@ -520,17 +536,40 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     
     // our own function ids come after all the imports, but we already started assigning numbers so apply that offset here. 
     // this is also where we do fixups (ie. to get a function pointer out of a table). 
+    i := m.imports.len;
+    for m.local_needs_reloc& { id |
+        use_symbol(m, id) { symbol | 
+            @debug_assert(symbol.segment == .Code && symbol.kind == .Local);
+            @debug_assert(symbol.got_lookup_offset == -1 && symbol.wasm_module_function_index == -1);
+            // TODO: to make got_lookup_offset != wasm_module_function_index, need to fix outputtting the table elem below. 
+            symbol.got_lookup_offset = i;
+            symbol.wasm_module_function_index = i.intcast();
+            m.do_fixups(rawptr_from_int(0), symbol);
+            i += 1;
+        };
+    };
+    
+    for m.temporary_alias { target, alias |
+        use_symbol(m, target) { t | 
+            use_symbol(m, alias) { a | 
+                // TODO: make sure it works if the alias is exported but not the target. 
+                a.got_lookup_offset = t.got_lookup_offset;
+                a.wasm_module_function_index = t.wasm_module_function_index;
+                m.do_fixups(rawptr_from_int(0), a);
+            };
+        };
+    };
+    
     // if we were just doing functions we could use `local_needs_reloc` instead of iterating 
     // every symbol but there are also globals in the data segment which need fixups as well. 
     for_symbols m { id, symbol |
-        if symbol.referenced || symbol.fixups.len != 0 {
-            if symbol.kind == .Local && symbol.segment == .Code {
-                @assert(symbol.got_lookup_offset != -1, "missing local function $%", symbol.name);
-                symbol.got_lookup_offset += m.imports.len;
-            };
-            @debug_assert(symbol.got_lookup_offset != -1 || symbol.segment == .MutableData, "% %", symbol.name, symbol.segment);
+        ref := symbol.referenced || symbol.fixups.len != 0;
+        new := symbol.segment != .Code || symbol.kind != .Local;
+        if ref && new {
             m.do_fixups(rawptr_from_int(0), symbol);
-        };
+        } else {
+            @debug_assert(symbol.segment != .Code || symbol.got_lookup_offset != -1 || !symbol.referenced, "% unfilled", symbol.name);
+        }
     };
     
     // TODO: better error when you run out of commands_size_guess or better just dynamically allocate this 
@@ -656,11 +695,11 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
             leb128_unsigned(buf, m.exports.len + 2 + int(m.wasm_has_any_indirect_calls) + int(m.wasm_any_pare));
             for m.exports& { id |
                 use_symbol(m, id) { s |
-                    @debug_assert_ne(s.got_lookup_offset, -1, "unassigned got_lookup_offset %", s.name);
+                    @debug_assert_ne(s.wasm_module_function_index, -1, "unassigned got_lookup_offset %", s.name);
                     leb128_unsigned(buf, s.name.len);
                     push_all(buf, s.name);
                     buf.push(@as(u8) Wasm.ImportType.Func);
-                    leb128_unsigned(buf, s.got_lookup_offset);
+                    leb128_unsigned(buf, s.wasm_module_function_index.intcast());
                 };
             };
             
@@ -815,10 +854,16 @@ fn output_wasm_module_jit(m: *QbeModule, indirect_table_base: i64) [][]u8 = {
     @debug_assert_eq(m.exports.len, m.local_needs_reloc.len, "missing exports");
     enumerate m.local_needs_reloc& { i, id |
         use_symbol(m, id[]) { s |
-            s.jit_addr = rawptr_from_int(indirect_table_base + i);
+            if s.got_lookup_offset == -1 {
+                // if it hasn't already needed a GOT slot, assign one now, because that's the only way i export functions on jit-wasm. 
+                s.got_lookup_offset = indirect_table_base + i;
+            };
+            s.jit_addr = s.got_lookup_offset.rawptr_from_int();
+            @debug_assert_eq(s.wasm_module_function_index, i.intcast());
         };
         @debug_assert_eq(m.exports[i].id, id[].id, "export order wrong");
     };
+    
     when_debug(m, .Patch) { out |
         @fmt(out, "# Jit: [");
         enumerate m.local_needs_reloc& { i, id |
@@ -834,7 +879,21 @@ fn output_wasm_module_jit(m: *QbeModule, indirect_table_base: i64) [][]u8 = {
         if symbol.export || symbol.referenced || symbol.fixups.len != 0 {
             ::enum(@type symbol.kind);
             if symbol.kind == .Local && symbol.segment == .Code {
-                @assert(symbol.got_lookup_offset != -1, "missing local function $%", symbol.name);
+                @assert(symbol.wasm_module_function_index != -1, "missing local function $%", symbol.name);
+            };
+            s := symbol;
+            if s.wasm_type_index != -1 {
+                addr := s.jit_addr.int_from_rawptr();
+                invalid := u8.int_from_ptr(m.segments&[.Code].mmapped.ptr);
+                if addr < invalid /*HACK*/ {
+                    if s.wasm_module_function_index == -1 && s.got_lookup_offset != -1 && addr != 0 && s.got_lookup_offset != addr {
+                        //@println("XX T[%] = T[%]", s.got_lookup_offset.intcast(), s.jit_addr);
+                        table_assign(s.got_lookup_offset.intcast(), s.jit_addr.int_from_rawptr().intcast());
+                    };
+                    if s.wasm_module_function_index == -1 && s.got_lookup_offset == -1 && addr != 0 {
+                        s.got_lookup_offset = addr;
+                    };
+                } 
             };
             
             // note: not this one (it sets jit_addr which isn't what i want!)
@@ -922,11 +981,11 @@ fn output_wasm_module_jit(m: *QbeModule, indirect_table_base: i64) [][]u8 = {
             leb128_unsigned(buf, m.exports.len);
             for m.exports& { id |
                 use_symbol(m, id) { s |
-                    @debug_assert_ne(s.got_lookup_offset, -1, "unassigned got_lookup_offset % (jit_addr=%)", s.name, s.jit_addr);
+                    @debug_assert_ne(s.wasm_module_function_index, -1, "unassigned wasm_module_function_index % (jit_addr=%)", s.name, s.jit_addr);
                     leb128_unsigned(buf, s.name.len);
                     push_all(buf, s.name);
                     buf.push(@as(u8) Wasm.ImportType.Func);
-                    leb128_unsigned(buf, s.got_lookup_offset);
+                    leb128_unsigned(buf, s.wasm_module_function_index.intcast());
                 };
             };
         };
@@ -971,7 +1030,7 @@ make_exec :: fn(m: *Qbe.Module) void = {
     @if(!TODOWASM) unreachable();
     @if(m.exports.len == 0) return();
 
-    first_export := grow(m.exports.len.intcast()).intcast();
+    first_export := table_grow(m.exports.len.intcast()).intcast();
     
     module := output_wasm_module_jit(m, first_export);
     module := concat(module&, temp());
@@ -981,22 +1040,6 @@ make_exec :: fn(m: *Qbe.Module) void = {
         import("@/examples/dump_wasm.fr")'dump(module);
     };
     
-    // This relies on indirect function table being index 0. 
-    // Grow it by delta and fill the new entries with the zeroth function. 
-    grow :: AsmFunctionWasmOnly(fn(delta: i32) i32 = (), fn(out) = {
-        out.push(0x0B);  // length
-        out.push(0x00);  // 0 locals
-        out.push(0x41);  // i32.const(0)
-        out.push(0x00);  // ^
-        out.push(0x25);  // table.get(0)
-        out.push(0x00);  // ^
-        out.push(0x20);  // local.get(0)
-        out.push(0x00);  // ^
-        out.push(0xFC);  // table.grow(0)
-        out.push(0x0F);  // ^
-        out.push(0x00);  // ^
-        out.push(0x0B);  // end
-    });
     // creates the module and appends the exported functions to our indirect function table. 
     jit_instantiate_module :: fn(address: *u8, length: i64, table_start: i64, table_index: u32) void #weak #import("libc");
     
@@ -1005,15 +1048,31 @@ make_exec :: fn(m: *Qbe.Module) void = {
 
     enumerate m.exports& { i, id |
         use_symbol(m, id[]) { s |
-            @debug_assert_eq(s.jit_addr.int_from_rawptr(), first_export + i);
+            //@debug_assert_eq(s.jit_addr.int_from_rawptr(), first_export + i);
+            
+            @debug_assert_ne(s.got_lookup_offset, -1);
+            if s.got_lookup_offset != -1 && s.got_lookup_offset != first_export + i {
+                table_assign(s.got_lookup_offset.intcast(), intcast(first_export + i));
+            };
             
             // forget that this was a local
-            s.got_lookup_offset = -1;
+            s.wasm_module_function_index = -1;
             s.kind = .DynamicPatched;
             
             // TODO: maybe keep DataAbsolute so if it was a shim you can update it, 
             //       but it's wasteful to keep spam filling the same fixup each time you make_exec. 
             s.fixups.len = 0;
+        };
+    };
+    
+    for m.temporary_alias { target, alias |
+        use_symbol(m, target) { t | 
+            use_symbol(m, alias) { a | 
+                if a.got_lookup_offset == -1 {
+                    a.got_lookup_offset = t.got_lookup_offset;
+                };
+                table_assign(a.got_lookup_offset.intcast(), t.got_lookup_offset.intcast());
+            };
         };
     };
     
@@ -1024,7 +1083,40 @@ make_exec :: fn(m: *Qbe.Module) void = {
     m.local_needs_reloc&.clear();
     // TODO: could reuse the memory instead
     m.goal.commands_size_guess = m.segments&[.Code]&.len();
-}
+};
+
+// This relies on indirect function table being index 0. 
+// Grow it by delta and fill the new entries with the zeroth function. 
+// Returns the old size of the table. 
+table_grow :: AsmFunctionWasmOnly(fn(delta: i32) i32 = (), fn(out) = {
+    out.push(0x0B);  // length
+    out.push(0x00);  // 0 locals
+    out.push(0x41);  // i32.const(0)
+    out.push(0x00);  // ^
+    out.push(0x25);  // table.get(0)
+    out.push(0x00);  // ^
+    out.push(0x20);  // local.get(0)
+    out.push(0x00);  // ^
+    out.push(0xFC);  // table.grow(0)
+    out.push(0x0F);  // ^
+    out.push(0x00);  // ^
+    out.push(0x0B);  // end
+});
+
+// table[dest] = table[src]
+table_assign :: AsmFunctionWasmOnly(fn(dest: i32, src: i32) void = (), fn(out) = {
+    out.push(0x0A);  // length
+    out.push(0x00);  // 0 locals
+    out.push(0x20);  // local.get(0)
+    out.push(0x00);  // ^
+    out.push(0x20);  // local.get(1)
+    out.push(0x01);  // ^
+    out.push(0x25);  // table.get(0)
+    out.push(0x00);  // ^
+    out.push(0x26);  // table.set(0)
+    out.push(0x00);  // ^
+    out.push(0x0B);  // end
+});
 
 //
 // After the magic + version, the thing is a list of sections. 

@@ -1,3 +1,22 @@
+## (Aug 22) wasm
+ 
+- web demo
+  - tab key in textarea. 
+  - dumbest thing that could possibly make it not cache the files seperatly. 
+- allow allocating table slots early
+- import_wasm: implement table.get
+- sprinkle around some assignments between table slots. 
+  eventually i want to unify that to the same abstraction as the native GOT functions. 
+- now it works in browser but not import_wasm. 
+  (i get no '@' for comptime mandelbrot.fr, but comptime kelidescope.fr works which is surprising).
+  oh even just aot mandelbrot.fr doesn't work for me. 
+  works if you #noinline on `fn init(x: f64, y: f64) Pos` 
+  but not if you disable using memory.copy which is the obvious thing i know is broken. 
+  TODO
+- in the interim where i hadn't quite transitioned to fully using the table indices, 
+  had to have a hack with temporary_alias: List(Ty(sym, sym)) and copy the got_lookup_offset at the end, 
+  but i think it can go away now? for jit yes, not aot yet tho. 
+  at least i can get rid of symbol.my_shim. 
 
 ## (Aug 21) wasm
 
@@ -62,6 +81,7 @@ make more comptime work.
 - comptime qbe_frontend.fr -jit mandel works. 
   only takes like as long 3x as native, more like 2x with -unsafe. that's pretty good,
   that means the plan of recompile the compiler itself in the browser is feasable. 
+  (it's super caching stuff tho so it sucks the first time). 
 
 ## (Aug 20) wasm
 

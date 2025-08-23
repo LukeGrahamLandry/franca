@@ -197,14 +197,14 @@ fn create_jit_shim(self: CompCtx, shared: *FrontendCodegen, fid: FuncId, handler
         target := f.symcon(target_id);
         myself := f.symcon(id);
         is_ready := f.newtmp("ready", .Kl); 
-        
+        push(f.start, make_ins(.cnel, .Kl, is_ready, myself, target));
         // to test if this is helping, toggle this and add logging in report_called_uncompiled_or_just_fix_the_problem. 
         if m.goal.arch == .wasm32 {
+            // can't do the fast path comparison on wasm because the indirect table 
+            // doesn't yield observable function pointers in the way the GOT does
             is_ready = f.getcon(0);  
-        } else {
-            // TODO: it should be the same to do this and just not use the value. fold should remove the symbol. 
-            push(f.start, make_ins(.cnel, .Kl, is_ready, myself, target));
         };
+        
         f.start.jmp = (arg = is_ready, type = .jnz);
         f.start.s1 = do_the_call;
         f.start.s2 = not_ready;
@@ -342,15 +342,18 @@ fn bump_dirty_new(m: *QbeModule) void = {
 fn save_in_got(self: *SelfHosted, fid: FuncId, addr: rawptr) void = {
     // :InsaneCaches
     m := self.comptime_codegen.m;
-    @if(m.goal.arch == .wasm32) {
-        // TODO: use the indirect_table as GOT and do a table.set here
-        return();
-    };
     id := self.comptime_jit_symbol_id(fid);
     use_symbol(m, id) { s |
         @debug_assert(s.got_lookup_offset != -1, "save_in_got missing slot for %", s.name);
-        got := m.segment_address(.ConstantData, s.got_lookup_offset);  // :GotAtConstantDataBase 
-        rawptr.ptr_from_raw(got)[] = addr;
+        if m.goal.arch == .wasm32 {
+            // TODO: might not need this. either way, clean it up!
+            f :: import("@/backend/wasm/emit.fr").table_assign;
+            @if(TODOWASM)
+            f(s.got_lookup_offset.intcast(), addr.int_from_rawptr().intcast());
+        } else {
+            got := m.segment_address(.ConstantData, s.got_lookup_offset);  // :GotAtConstantDataBase 
+            rawptr.ptr_from_raw(got)[] = addr;
+        }
     };
 }
 

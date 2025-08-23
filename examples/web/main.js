@@ -59,10 +59,10 @@ const toggle_worker = () => {
             input,
             ...(dbg.length == 0 ? [] : ["-d", dbg]),
         ];
-        worker = new Worker(manifest.worker);
+        worker = new Worker(`${manifest.worker}?v=${version}`);
         worker.onmessage = handle;
         real_start_time = performance.now();
-        worker.postMessage({ tag: "start", url: url, args: args });
+        worker.postMessage({ tag: "start", url: url, args: args, version: version });
         document.getElementById("btn").innerText = "Kill";
     } else {
         worker.terminate();
@@ -73,11 +73,12 @@ const toggle_worker = () => {
     }
 };
 
-let manifest = await (await fetch("target/manifest.json")).json();
+let manifest = await (await fetch("target/manifest.json?v=" + new Date().valueOf())).json();
+const version = manifest.commit.slice(0, 7);
 console.log(manifest);
 document.getElementById("version").innerText = manifest.commit;
 const load_example = async (path) => {
-    let src = await (await fetch("target/" + path)).text();
+    let src = await (await fetch(`target/${path}?v=${version}`)).text();
     document.getElementById("stale").hidden = false;
     document.getElementById("in").value = src;
 };
@@ -133,7 +134,7 @@ document.getElementById("all").onclick = async () => {
             results += it;
             await load_example(it);
             toggle_worker();
-            await wait(() => !running, 25, 1000);
+            await wait(() => !running, 25, 3000);
             let ok = err.innerText.length == 0;
             results += " " + (ok ? "ok" : "FAIL") + "\n";
             if (ok) passed += 1;
@@ -177,3 +178,24 @@ const wait = (f, step, timeout) => {
         loop();
     });
 };
+
+// who fucking knows man, i don't care. https://stackoverflow.com/questions/6637341/use-tab-to-indent-in-textarea
+for (const it of document.getElementsByTagName("textarea")) {
+    it.addEventListener('keydown', function (e) {
+        const insert = (s) => document.execCommand("insertText", false, s);
+        const tab = "    ";
+        const start_line = /^/gm;
+        if (e.key !== "Tab") return; 
+        e.preventDefault();
+        const [start, end] = [this.selectionStart, this.selectionEnd];
+        if (start === end) {
+            insert(tab);
+            return;
+        }
+        const old = this.value.substring(start, end);
+        const new_ = old.replace(start_line, tab);
+        insert(new_);
+        this.selectionStart = start;
+        this.selectionEnd = end + (new_.length - old.length);
+    });
+}

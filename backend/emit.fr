@@ -48,7 +48,7 @@ SymbolInfo :: @struct(
     // list from inside a use_symbol so the bucket is already locked. 
     id: Qbe.Sym,
     alias: Qbe.Sym,
-    my_shim: Qbe.Sym,
+    wasm_module_function_index: i32,
 );
 
 SymbolKind :: @enum(u8) (
@@ -166,6 +166,7 @@ fn make_exec(self: *QbeModule) void = {
         return();  // already executable so this is a nop
     };
     
+    @if(TODOWASM)
     if self.goal.arch == .wasm32 {
         import("@/backend/wasm/emit.fr")'make_exec(self);
         return();
@@ -369,6 +370,7 @@ fn add_code_bytes(m: *QbeModule, name_id: Qbe.Sym, code: *MultiArchAsm) void = {
     
     code := m.segments&[.Code]&;
     
+    @if(TODOWASM)
     if m.goal.arch == .wasm32 {
         import("@/backend/wasm/emit.fr")'record_wasm_function_index(m, name_id);
     };
@@ -436,6 +438,7 @@ fn declare_alias(m: *Qbe.Module, target: Qbe.Sym, alias: *Qbe.Lnk) void = {
 }
 
 fn alias_via_bounce(m: *Qbe.Module, target: Qbe.Sym, alias: *Qbe.Lnk) void = {
+    @debug_assert_ne(m.goal.arch, .wasm32);
     f := temp().box_zeroed(Qbe.Fn);
     f.leaf = true;  // This is a lie but really we're asking for no stack frame
     f.nblk = 1;
@@ -470,6 +473,8 @@ fn finish_alias(m: *Qbe.Module, target: Qbe.Sym, alias: Qbe.Sym, export: bool) v
             a.wasm_type_index = t.wasm_type_index;
             a.got_lookup_offset = t.got_lookup_offset;
             m.do_fixups(a.jit_addr, a);
+    
+            push(m.temporary_alias&, (target, alias));
         };
     };
 }
@@ -508,6 +513,18 @@ fn align_to(s: *SegmentCursor, align: i64) void = {
 
 fn put_jit_addr(self: *QbeModule, name: Qbe.Sym, addr: rawptr) void = {
     use_symbol(self, name) { symbol |
+        invalid := u8.int_from_ptr(self.segments&[.Code].mmapped.ptr);
+        @if(TODOWASM)
+        if self.goal.arch == .wasm32 && self.goal.type == .JitOnly && addr.int_from_rawptr() < invalid /*HACK*/{
+            addr := addr.int_from_rawptr();
+            if symbol.got_lookup_offset == -1 {
+                symbol.got_lookup_offset = addr;
+            } else {
+                f :: import("@/backend/wasm/emit.fr").table_assign;
+                f(symbol.got_lookup_offset.intcast(), addr.intcast());
+            };
+        };
+    
         @debug_assert(symbol.kind == .Pending, "(put_jit_addr) redeclared symbol %: %", name.id, symbol.name);
         symbol.kind = .DynamicPatched;
         self.do_fixups(addr, symbol);

@@ -4,6 +4,7 @@ let bump = 0n;
 let Franca;
 let FrancaXXX = {};
 let start = performance.now();
+let version;
 
 function handleWasmLoaded(wasm, args) {
     let load_end = performance.now();
@@ -24,9 +25,9 @@ function handleWasmLoaded(wasm, args) {
             show_error(e);
         }
     }
-    show("");
-    let run_end = performance.now();
-    show_log(" Ran in " + Math.round(run_end - load_end) + "ms.");
+    let time = Math.round(performance.now() - load_end);
+    let mem = (FrancaXXX.__heap_end - FrancaXXX.__heap_base) / 1024n / 1024n;
+    show_log(" Ran in " + time + "ms. " + mem + "MB. ");
     self.postMessage({ tag: "done" });
 }
 
@@ -126,7 +127,7 @@ const imports = {
         },
         fetch_file: (ptr, len) => {
             const path = get_wasm_string(ptr, len);
-            const text = sync_fetch("target/" + path);
+            const text = sync_fetch(`target/${path}?v=${version}`);
             if (text === null) return 0n;
             let src = new TextEncoder().encode(text)
             const p = imports.env.mmap(0, BigInt(src.byteLength + 1), 0, 0, 0, 0);
@@ -192,7 +193,8 @@ const handle = (_msg) => {
     const msg = _msg.data;
     switch (msg.tag) {
         case "start": {
-            WebAssembly.instantiateStreaming(fetch("target/" + msg.url), imports)
+            version = msg.version;
+            WebAssembly.instantiateStreaming(fetch(`target/${msg.url}?v=${version}`), imports)
                 .then(it => handleWasmLoaded(it, msg.args))
                 .catch(show_error);
             break;

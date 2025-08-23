@@ -570,32 +570,6 @@ main :: fn() void = {
         fn Err(s) => @panic("%\n before line %", s, c.line);
     }
     
-    // TODO: fixme !
-    @if(TODOWASM) {
-        f :: fn(name: Str, f: rawptr) void => {
-            use_symbol(c.m, c.m.intern(name)) {s |
-                s.jit_addr = f;
-                s.kind = .DynamicPatched;
-                
-                fix := c.m.target.fixup;
-                new_got_reloc := (?Fixup).None;
-                each s.fixups { fixup | 
-                    fix(c.m, s, fixup, new_got_reloc&);
-                };
-                s.fixups.len = 0;
-            };
-        };
-        f("putchard", @as(rawptr) (fn(d: f64) f64 = {
-            c: u8 = d.int().trunc();
-            print(@as(Str) (ptr = c&, len = 1));  // :SLOW (unbuffered)
-            0.0
-        }));
-        f("printd", @as(rawptr) (fn(d: f64) f64 = {
-            @println("%", d);  // :SLOW (unbuffered)
-            0.0
-        }));
-    }
-
     c.m.emit_suspended_inlinables();
     c.m.make_exec();
     
@@ -651,18 +625,19 @@ fn init(a: Alloc, src: Str, m: *QbeModule) *Ctx = {
     };
     // assignment has special handling (so I don't provide an implementation here). 
     c.binary_precedence&.insert(tok("="), 2);
-    
-    // TODOWASM: this needs to work on wasm without the extra '::'
-    //      "panic! missing index for $Anon__30699"
-    c.m.put_jit_addr(c.m.intern("putchard"), ::@as(rawptr) (fn(d: f64) f64 = {
+    // TODO: this doesn't work on jit-wasm without the extra name binding
+    //       "WasmAddr: missing index for $Anon__30976. Assertion Failed. Expected (-1 > 0)"
+    F :: (fn(d: f64) f64 = {
         c: u8 = d.int().trunc();
         print(@as(Str) (ptr = c&, len = 1));  // :SLOW (unbuffered)
         0.0
-    }));
-    c.m.put_jit_addr(c.m.intern("printd"), ::@as(rawptr) (fn(d: f64) f64 = {
+    });
+    c.m.put_jit_addr(c.m.intern("putchard"), @as(rawptr) F);
+    G :: @as(rawptr) (fn(d: f64) f64 = {
         @println("%", d);  // :SLOW (unbuffered)
         0.0
-    }));
+    });
+    c.m.put_jit_addr(c.m.intern("printd"), G);
     
     c.pop_token();
     c

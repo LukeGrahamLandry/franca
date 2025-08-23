@@ -536,6 +536,13 @@ fn emit_the_code(self: *LoadWasm) void = {
                 r := self.table_get(table, index);
                 self.stack&.push(r);
             }
+            fn TableSet() => {
+                table := self.read_u();
+                value := self.stack&.pop().unwrap();
+                index := self.stack&.pop().unwrap();
+                table_slot := self.compute_table_slot(table, index);
+                self.f.emit(.storel, .Kw, Qbe.Null, value, table_slot);
+            }
             fn Call() => {
                 callee := self.read_index(Wasm.FuncIdx);
                 type_index := self.function_types[callee.id.zext()];
@@ -697,9 +704,15 @@ fn emit_the_code(self: *LoadWasm) void = {
 }
 
 fn table_get(self: *LoadWasm, table_index: u64, index_in_table_W: Qbe.Ref) Qbe.Ref = {
+    table_slot := self.compute_table_slot(table_index, index_in_table_W);
+    result := self.f.newtmp("table.get", .Kl);
+    self.f.emit(.load, .Kl, result, table_slot, QbeNull);
+    result
+}
+
+fn compute_table_slot(self: *LoadWasm, table_index: u64, index_in_table_W: Qbe.Ref) Qbe.Ref = {
     table_var        := self.tables[table_index.bitcast()];
     table_var        := self.f.symcon(table_var);
-    result           := self.f.newtmp("Icallee", .Kl);
     index_in_table_L := self.f.newtmp("Iindex", .Kl);
     table_slot       := self.f.newtmp("Islot", .Kl);
     table_offset     := self.f.newtmp("Ioff", .Kl);
@@ -709,8 +722,7 @@ fn table_get(self: *LoadWasm, table_index: u64, index_in_table_W: Qbe.Ref) Qbe.R
     self.f.emit(.extuw, .Kl, index_in_table_L, index_in_table_W, QbeNull);
     self.f.emit(.mul, .Kl, table_offset, index_in_table_L, self.f.getcon(8));
     self.f.emit(.add, .Kl, table_slot, table_base, table_offset);
-    self.f.emit(.load, .Kl, result, table_slot, QbeNull);
-    result
+    table_slot
 }
 
 fn parse_branch_target(self: *LoadWasm) *Qbe.Blk = {
