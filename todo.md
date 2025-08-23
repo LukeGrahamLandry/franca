@@ -299,6 +299,7 @@ different subsets of the same resources.
 - in wasm/make_exec use debug_out when dumping module so you can redirect it
 - make sure `::@as(rawptr)(fn() void = ())` gives you the got_lookup_offset not the junk jit_addr. 
 - for examples/web, instead of `url?v=version` the sane thing is to just put content hash in the file name
+- :TodoImportWasmMandelInlineBug
 
 ## backend 
 

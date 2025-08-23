@@ -247,19 +247,13 @@ fn dump_wasm_expr(w: *WasmModule, full_input: []u8, insts: []u8, out: *List(u8),
         };
         
         push_leb :: fn($signed) => {
-            value, r, ok := read_leb128(insts.rest(c), signed);
-            if ok {
-                c += ptr_diff(insts.ptr.offset(c), r.ptr);
-                @fmt(out, "%", value);
-                value
-            } else {
-                @fmt(out, " (ERROR: invalid leb encoding)");
-                continue()
-            }
+            value := read_leb(signed);
+            @fmt(out, "%", value);
+            value
         };
         
-        read_leb_s :: fn() => {
-            value, r, ok := read_leb128_signed(insts.rest(c));
+        read_leb :: fn($signed) => {
+            value, r, ok := read_leb128(insts.rest(c), signed);
             if ok {
                 c += ptr_diff(insts.ptr.offset(c), r.ptr);
                 value
@@ -273,7 +267,7 @@ fn dump_wasm_expr(w: *WasmModule, full_input: []u8, insts: []u8, out: *List(u8),
             indent += 1;
             @fmt(out, "% \"", inst);
             first_type_byte := insts[c];
-            type_index := read_leb_s();
+            type_index := read_leb(true);
             if type_index >= 0 {
                 show_type(out, w, (id = type_index.trunc()));  
             } else {
@@ -289,6 +283,26 @@ fn dump_wasm_expr(w: *WasmModule, full_input: []u8, insts: []u8, out: *List(u8),
             stack&.push(n = next_label, loop = inst == .Loop);
             next_label += 1;
             
+            continue();
+        };
+        
+        if inst == .TablePrefix {
+            opcode := read_leb(false);
+            @switch(opcode) {
+                @case(10) => @fmt(out, "MemoryCopy(%, %);", read_leb(false), read_leb(false));
+                @case(15) => @fmt(out, "TableGrow(%);", read_leb(false));
+                @default => @fmt(out, "TodoMultiByte(0xFC, %);", opcode);
+            };
+            continue();
+        };
+        
+        if inst == .AtomicPrefix {
+            opcode := read_leb(false);
+            @switch(opcode) {
+                @case(3) => @fmt(out, "AtomicFence(%);", read_leb(false));
+                // TODO: show the names of different ops
+                @default => @fmt(out, "Atomic(%, o = %, a = %);", opcode, read_leb(false), read_leb(false));
+            };
             continue();
         };
         
@@ -357,8 +371,12 @@ fn dump_wasm_expr(w: *WasmModule, full_input: []u8, insts: []u8, out: *List(u8),
             show_type(out, w, (id = type_index.trunc()));
         };
         
-        @fmt(out, ");");
+        // TODO: VectorPrefix some have lane and memarg immediates. 
+        if @is(inst, .TableGet, .TableSet, .VectorPrefix) {
+            push_leb(false);
+        };
         
+        @fmt(out, ");");
     };
     @fmt(out, "\n");
 }

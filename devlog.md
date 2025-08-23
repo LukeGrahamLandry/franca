@@ -12,11 +12,13 @@
   oh even just aot mandelbrot.fr doesn't work for me. 
   works if you #noinline on `fn init(x: f64, y: f64) Pos` 
   but not if you disable using memory.copy which is the obvious thing i know is broken. 
-  TODO
+  :TodoImportWasmMandelInlineBug
 - in the interim where i hadn't quite transitioned to fully using the table indices, 
   had to have a hack with temporary_alias: List(Ty(sym, sym)) and copy the got_lookup_offset at the end, 
   but i think it can go away now? for jit yes, not aot yet tho. 
   at least i can get rid of symbol.my_shim. 
+- ok jit_addr being junk sometimes is a massive source of confusion, that has to go. 
+- no need for backend/emit/get_addr() to be different from symbol.jit_addr. 
 
 ## (Aug 21) wasm
 

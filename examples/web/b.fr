@@ -64,15 +64,30 @@ main :: fn() void = {
     self.unwrap_report_error(void, r);
     
     fid := c.get_unique_named("main") || @panic("no function called 'main'");
-    f := self.unwrap_report_error(rawptr, self.poll_in_place(rawptr) {
-        R :: local_return;
-        if self.get_fn_callable(fid) { a |
-            R(Ok = a);
-        };
-        (Suspend = self.wait_for(Jit = fid))
-    });
-    // TODO: this should just work. makes a shim and then you call it but the jit_addr is a code offset not an index. 
-    //f := c.get_jitted(fid);
+    
+    SAME_MODULE :: true;
+    f := if !SAME_MODULE {
+        // TODO: this is what i want but unfortunatly it's slower
+        //       because it doesn't allow jit shims so it has to compile the whole program
+        //       and can't skip vtables you don't call. like if you use the backend it has to do all targets. 
+        
+        name := c.fmt_fn_name(fid);
+    
+        m := general_allocator().box(QbeModule);
+        backend'init_module(m, (
+            arch = query_current_arch(), 
+            os = query_current_os(), 
+            type = .JitOnly,
+        ));
+        self.other_module&.push(m, self.get_alloc());
+        shared := init_codegen(m, self.get_alloc(), false); // nothreads
+        main_thread_pump(c, shared, @slice(fid), false);  // nowrapmain
+        m.make_exec();
+        m.get_addr(name) || @panic("ICE: lost %", name)
+    } else {
+        c.get_jitted(fid)
+    };
+    
     f := bit_cast_unchecked(rawptr, @FnPtr() void, f);
     push_dynamic_context {
         context(DefaultContext)[].cli_arguments = empty();

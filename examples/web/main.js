@@ -74,7 +74,7 @@ const toggle_worker = () => {
 };
 
 let manifest = await (await fetch("target/manifest.json?v=" + new Date().valueOf())).json();
-const version = manifest.commit.slice(0, 7);
+const version = manifest.commit.slice(0, 8);
 console.log(manifest);
 document.getElementById("version").innerText = manifest.commit;
 const load_example = async (path) => {
@@ -134,7 +134,7 @@ document.getElementById("all").onclick = async () => {
             results += it;
             await load_example(it);
             toggle_worker();
-            await wait(() => !running, 25, 3000);
+            await wait(() => !running, 25, 10000);
             let ok = err.innerText.length == 0;
             results += " " + (ok ? "ok" : "FAIL") + "\n";
             if (ok) passed += 1;

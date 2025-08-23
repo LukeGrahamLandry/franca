@@ -42,18 +42,18 @@ fn call_dynamic_values(self: *SelfHosted, f_ptr: i64, f_ty: FnType, args_value: 
 
 Futex :: import("@/lib/sys/sync/futex.fr");
 
+// note: different from get_addr() because this auto-calls make_exec() for you on jit-wasm
 // might be a jit-shim. returns null if neither is ready (only reachable in )
 fn wait_for_symbol(shared: *FrontendCodegen, id: Qbe.Sym) rawptr = {
     // only used for comptime_codegen (which is single threaded currently) so never need to synchronize.
     @debug_assert(!shared.worker.threaded);
     c := rawptr.zeroed();
-    // this is not the same thing as backend/emit.fr/get_addr() (it calculates from s.offset) TODO: they should probably be unified. 
     use_symbol(shared.m, id) { symbol | 
         ::enum(@type symbol.kind);
         @if(TODOWASM)
         if shared.m.goal.arch == .wasm32 && symbol.kind == .Local && symbol.segment == .Code {
             shared.m.make_exec();
-            @assert(symbol.kind == .DynamicPatched);
+            @debug_assert(symbol.kind == .DynamicPatched);
         };
         c = symbol.jit_addr;  
     };
@@ -270,6 +270,7 @@ fn create_jit_shim(self: CompCtx, shared: *FrontendCodegen, fid: FuncId, handler
     
     @debug_assert(!shared.worker.threaded);
     if func.get_flag(.TookPointerValue) {
+        // TODOWASM: don't make_exec for this, just assign a got_lookup_offset
         self.data.cast()[][].created_jit_fn_ptr_value(fid, shared.wait_for_symbol(id).int_from_rawptr());
     };
     

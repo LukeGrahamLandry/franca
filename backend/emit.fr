@@ -47,7 +47,7 @@ SymbolInfo :: @struct(
     // it from just a *SymbolInfo without calling intern() if you want to add it to a 
     // list from inside a use_symbol so the bucket is already locked. 
     id: Qbe.Sym,
-    alias: Qbe.Sym,
+    alias: Qbe.Sym,  // used in mark_seen to help deduplication in suspend_for_inlining
     wasm_module_function_index: i32,
 );
 
@@ -193,8 +193,6 @@ fn make_exec(self: *QbeModule) void = {
     self.start_of_writable_code = end[];
 }
 
-// TODO: this always returns .None for imports. that's dumb. it's fine if they're already filled. 
-// TODO: redundant with jit_addr? this is confusing. when do i even call this? 
 fn get_addr(self: *QbeModule, id: Qbe.Sym) ?Ty(rawptr, i64) = {
     @debug_assert(!self.fixups_locked, "you can't get a jit pointer after emitting for aot becuase it stomps data with relocation info.");
     result: ?Ty(rawptr, i64) = .None;
@@ -218,13 +216,7 @@ fn get_addr(self: *QbeModule, name: Str) ?rawptr = {
 
 fn get_addr(self: *QbeModule, symbol: *SymbolInfo) ?Ty(rawptr, i64) = {
     ::enum(SymbolKind);
-    if self.goal.arch == .wasm32 {
-        return(Some = (symbol.jit_addr, 0));
-    };
-    if(symbol.kind != .Local, => return(.None));
-    segment := self.segments&[symbol.segment];
-    addr    := segment.mmapped.ptr.offset(symbol.offset);
-    (Some = (u8.raw_from_ptr(addr), symbol.size.zext()))
+    (Some = (symbol.jit_addr, symbol.size.zext()))
 }
 
 // TODO: add_asm functions don't go through this currently but they should
@@ -472,7 +464,7 @@ fn finish_alias(m: *Qbe.Module, target: Qbe.Sym, alias: Qbe.Sym, export: bool) v
             a.shim_addr = t.shim_addr;
             a.wasm_type_index = t.wasm_type_index;
             a.got_lookup_offset = t.got_lookup_offset;
-            m.do_fixups(a.jit_addr, a);
+            m.do_fixups(a);
     
             push(m.temporary_alias&, (target, alias));
         };
@@ -513,9 +505,9 @@ fn align_to(s: *SegmentCursor, align: i64) void = {
 
 fn put_jit_addr(self: *QbeModule, name: Qbe.Sym, addr: rawptr) void = {
     use_symbol(self, name) { symbol |
-        invalid := u8.int_from_ptr(self.segments&[.Code].mmapped.ptr);
         @if(TODOWASM)
-        if self.goal.arch == .wasm32 && self.goal.type == .JitOnly && addr.int_from_rawptr() < invalid /*HACK*/{
+        if self.goal.arch == .wasm32 && self.goal.type == .JitOnly {
+            // TODO: only do this if it's a function
             addr := addr.int_from_rawptr();
             if symbol.got_lookup_offset == -1 {
                 symbol.got_lookup_offset = addr;
@@ -527,7 +519,8 @@ fn put_jit_addr(self: *QbeModule, name: Qbe.Sym, addr: rawptr) void = {
     
         @debug_assert(symbol.kind == .Pending, "(put_jit_addr) redeclared symbol %: %", name.id, symbol.name);
         symbol.kind = .DynamicPatched;
-        self.do_fixups(addr, symbol);
+        symbol.jit_addr = addr;
+        self.do_fixups(symbol);
     };
 }
 
@@ -552,59 +545,61 @@ fn do_jit_fixups(self: *QbeModule, id: Qbe.Sym, segment: SegmentType, final_offs
     inbounds := segment == .ZeroInitData || (final_offset >= 0 && final_offset < self.segments&[segment].mmapped.len);
     @debug_assert(inbounds, "thats not in the segment");
     use_symbol(self, id) { symbol | 
+        break :: local_return;
         ::enum(@type symbol.kind);
         @debug_assert(int_from_ptr(@type symbol[], symbol) != 0, "fixups for a null symbol! (forgot to set Fn.lnk.id?)"); // only catches it if you haven't had something hash to 0 yet. 
         @debug_assert(symbol.kind != .Local, "(do_jit_fixups) redeclared symbol %: % %[%]", id.id, symbol.name, segment, final_offset);
         symbol.segment = segment;
         symbol.offset = final_offset;
         symbol.kind = .Local;
+        
+        // harvard: jit_addr in code segment is useless. 
+        @if(self.goal.arch == .wasm32) break();
+        
         dest := self.segment_address(symbol.segment, symbol.offset);
+        symbol.jit_addr = dest;
         fixups := symbol.fixups&;
-        self.do_fixups(dest, symbol);
-        if self.goal.arch != .wasm32 {
-            if self.goal.type == .JitOnly || self.goal.type == .Exe || self.goal.type == .Dynamic { //  || symbol.segment == .Code // :canireallynothavecodeberelative
-                // Since it's a local symbol, we don't care about the relocations anymore. The linker never needs to know. 
-                // TODO: actually thats also true for imports becuase calls go through __got. 
-                // TODO: for jitonly you do need to keep __got for weak. 
-                ::tagged(@type fixups[0].type);
-                unordered_retain(fixups, fn(it) => it.type&.is(.DataAbsolute));
-                //if(fixups.len == 0, => fixups.drop(self.gpa));
-            } else {
-                // you still care because the static linker wants to move things around. :track_got_reloc
-                if !symbol.local_but_marked_for_relocation {
-                    self.local_needs_reloc&.push(id);
-                    symbol.local_but_marked_for_relocation = true;
-                };
-            }; 
+        self.do_fixups(symbol);
+        
+        if self.goal.type == .Relocatable {
+            // you still care about relocations because the static linker wants to move things around. :track_got_reloc
+            if !symbol.local_but_marked_for_relocation {
+                self.local_needs_reloc&.push(id);
+                symbol.local_but_marked_for_relocation = true;
+            };
+            break();
         };
+        
+        // Since it's a local symbol, we don't care about the relocations anymore. The linker never needs to know. 
+        // TODO: actually thats also true for imports becuase calls go through __got. 
+        // TODO: for jitonly you do need to keep __got for weak. 
+        ::tagged(@type fixups[0].type);
+        unordered_retain(fixups, fn(it) => it.type&.is(.DataAbsolute));
     };
 }
 
-fn do_fixups(self: *QbeModule, address: rawptr, symbol: *SymbolInfo) void = {
+fn do_fixups(self: *QbeModule, symbol: *SymbolInfo) void = {
     ::tagged(FixupType);
     with_write_protect self { 
-        do_fixups_impl(self, address, symbol);
+        do_fixups_impl(self, symbol);
     };
 }
 
-fn do_fixups_impl(self: *QbeModule, address: rawptr, symbol: *SymbolInfo) void = {
+fn do_fixups_impl(self: *QbeModule, symbol: *SymbolInfo) void = {
     @debug_assert(!self.fixups_locked, "you cannot add more fixups after emitting for aot");
     ::enum(@type symbol.kind);
-    @debug_assert_ne(symbol.kind, .Pending, "cannot do fixups of pending symbol");
-    // TODO: this is junk on wasm but i use it to track whether the function is done somewhere. this sucks. 
-    symbol.jit_addr = address;  
+    // confusing: on wasm you need to make_exec and thus fill patches, 
+    // which can reference something that has a shim before i want to mark it as Local.  
+    // this feels bad, idk. 
+    @debug_assert(symbol.kind != .Pending || self.goal.arch == .wasm32, "cannot do fixups of pending symbol");
     if self.goal.type == .JitOnly {
-        //@if(TODOWASM) if self.goal.arch == .wasm32 && symbol.segment == .Code {
-        //    @println("do_fixups_impl(%, %)", symbol.name, address);
-        //};
-    
         // TODO: should probably still have the frontend make a shim for weak symbols or it sucks to debug if you make a mistake. 
-        @debug_assert(!symbol.strong || !address.is_null(), "do_fixups jit null symbol %", symbol.name);
+        @debug_assert(!symbol.strong || !symbol.jit_addr.is_null(), "do_fixups jit null symbol %", symbol.name);
     };
     
     @if(TODOWASM)
     if self.goal.arch == .wasm32 && symbol.segment == .Code && symbol.got_lookup_offset == -1 {
-        // TODO: actually when jitting we do know the indices of locals for direct calls. 
+        @debug_assert(self.goal.type != .JitOnly, "wasm-jit should have known got_lookup_offset");
         // Need to wait until the end of compilation to know its index. 
         return();
     };
@@ -798,7 +793,8 @@ fn patch_pending_symbols(m: *QbeModule) void = {
         if symbol.kind == .Pending && symbol.fixups.len != 0 {
             m.imports&.push(id); 
             symbol.kind = .DynamicPatched;
-            m.do_fixups(rawptr_from_int(0), symbol);
+            @debug_assert(symbol.jit_addr.is_null());
+            m.do_fixups(symbol);
         };
     };
 }

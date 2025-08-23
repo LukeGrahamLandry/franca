@@ -544,7 +544,7 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
             // TODO: to make got_lookup_offset != wasm_module_function_index, need to fix outputtting the table elem below. 
             symbol.got_lookup_offset = i;
             symbol.wasm_module_function_index = i.intcast();
-            m.do_fixups(rawptr_from_int(0), symbol);
+            m.do_fixups(symbol);
             i += 1;
         };
     };
@@ -555,7 +555,7 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
                 // TODO: make sure it works if the alias is exported but not the target. 
                 a.got_lookup_offset = t.got_lookup_offset;
                 a.wasm_module_function_index = t.wasm_module_function_index;
-                m.do_fixups(rawptr_from_int(0), a);
+                m.do_fixups(a);
             };
         };
     };
@@ -566,7 +566,7 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
         ref := symbol.referenced || symbol.fixups.len != 0;
         new := symbol.segment != .Code || symbol.kind != .Local;
         if ref && new {
-            m.do_fixups(rawptr_from_int(0), symbol);
+            m.do_fixups(symbol);
         } else {
             @debug_assert(symbol.segment != .Code || symbol.got_lookup_offset != -1 || !symbol.referenced, "% unfilled", symbol.name);
         }
@@ -617,16 +617,7 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     };
     
     push_buf { buf |
-        buf.push(@as(u8) Wasm.Section.Function);
-        uleb_patch_delta buf {
-            leb128_unsigned(buf, f_count);
-            for m.local_needs_reloc& { id |
-                use_symbol(m, id) { s |
-                    @debug_assert_ge(s.wasm_type_index, 0, "unknown type for local function $%", s.name);
-                    leb128_unsigned(buf, s.wasm_type_index.intcast()); 
-                };
-            };
-        };
+        write_function_section(m, buf);
     };
     
     // TODO: reserve index 0 as null for sanity purposes
@@ -805,6 +796,19 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     chunks.items()
 }
 
+fn write_function_section(m: *Qbe.Module, buf: *List(u8)) void = {
+    buf.push(@as(u8) Wasm.Section.Function);
+    uleb_patch_delta buf {
+        leb128_unsigned(buf, m.local_needs_reloc.len);
+        for m.local_needs_reloc& { id |
+            use_symbol(m, id) { s |
+                @debug_assert_ge(s.wasm_type_index, 0, "unknown type for local function $%", s.name);
+                leb128_unsigned(buf, s.wasm_type_index.intcast()); 
+            };
+        };
+    };
+}
+
 fn write_limits(buf: *List(u8), min: i64, max: ?i64) void = {
     buf.push(int(max.is_some()).trunc());
     leb128_unsigned(buf, min);
@@ -882,28 +886,16 @@ fn output_wasm_module_jit(m: *QbeModule, indirect_table_base: i64) [][]u8 = {
                 @assert(symbol.wasm_module_function_index != -1, "missing local function $%", symbol.name);
             };
             s := symbol;
-            if s.wasm_type_index != -1 {
-                addr := s.jit_addr.int_from_rawptr();
-                invalid := u8.int_from_ptr(m.segments&[.Code].mmapped.ptr);
-                if addr < invalid /*HACK*/ {
-                    if s.wasm_module_function_index == -1 && s.got_lookup_offset != -1 && addr != 0 && s.got_lookup_offset != addr {
-                        //@println("XX T[%] = T[%]", s.got_lookup_offset.intcast(), s.jit_addr);
-                        table_assign(s.got_lookup_offset.intcast(), s.jit_addr.int_from_rawptr().intcast());
-                    };
-                    if s.wasm_module_function_index == -1 && s.got_lookup_offset == -1 && addr != 0 {
-                        s.got_lookup_offset = addr;
-                    };
-                } 
+            addr := s.jit_addr.int_from_rawptr();
+            if s.wasm_type_index != -1 && s.wasm_module_function_index == -1 && addr != 0 {
+                if s.got_lookup_offset == -1 {
+                    s.got_lookup_offset = addr;
+                } else {
+                    table_assign(s.got_lookup_offset.intcast(), s.jit_addr.int_from_rawptr().intcast());
+                }
             };
             
-            // note: not this one (it sets jit_addr which isn't what i want!)
-            //m.do_fixups(_, symbol);
-            
-            fix := m.target.fixup;
-            new_got_reloc := (?Fixup).None;
-            each symbol.fixups { fixup | 
-                fix(m, symbol, fixup, new_got_reloc&);
-            };
+            m.do_fixups(symbol);
         };
     };
     
@@ -963,16 +955,7 @@ fn output_wasm_module_jit(m: *QbeModule, indirect_table_base: i64) [][]u8 = {
     };
     
     push_buf { buf |
-        buf.push(@as(u8) Wasm.Section.Function);
-        uleb_patch_delta buf {
-            leb128_unsigned(buf, f_count);
-            for m.local_needs_reloc& { id |
-                use_symbol(m, id) { s |
-                    @debug_assert_ge(s.wasm_type_index, 0, "unknown type for local function $%", s.name);
-                    leb128_unsigned(buf, s.wasm_type_index.intcast()); 
-                };
-            };
-        };
+        write_function_section(m, buf);
     };
     
     push_buf { buf |
@@ -1048,12 +1031,11 @@ make_exec :: fn(m: *Qbe.Module) void = {
 
     enumerate m.exports& { i, id |
         use_symbol(m, id[]) { s |
-            //@debug_assert_eq(s.jit_addr.int_from_rawptr(), first_export + i);
-            
             @debug_assert_ne(s.got_lookup_offset, -1);
             if s.got_lookup_offset != -1 && s.got_lookup_offset != first_export + i {
                 table_assign(s.got_lookup_offset.intcast(), intcast(first_export + i));
             };
+            s.jit_addr = s.got_lookup_offset.rawptr_from_int();
             
             // forget that this was a local
             s.wasm_module_function_index = -1;
