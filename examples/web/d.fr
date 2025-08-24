@@ -9,7 +9,7 @@ main :: fn() void = {
     @assert(src.len > 0 && src[src.len - 1] == 10, "TODO: input must end in a new line");
 
     m := @uninitialized Qbe.Module; m := m&;
-    Qbe'backend'init_module(m, (type = .JitOnly, os = query_current_os(), arch = query_current_arch(), exe_debug_symbol_table = true, prefer_libc_memmove = false));
+    Qbe'backend'init_module(m, args.target);
     m.set_debug_types(args.logging, true);
     
     parse :: import("@/backend/meta/parse.fr").parse_top_level;
@@ -18,26 +18,19 @@ main :: fn() void = {
         panic(res.Err);
     };
     
-    c := C'Compile.Ctx.zeroed();
-    Ffi'import_c'init_c(c&, m);
-    c.enqueue_task = Qbe.backend.worker_enqueue;
-    ctx: *C'Compile.CodegenShared = Qbe'backend'worker_start(m, general_allocator(), zeroed C'Compile.CodegenWorker, false);
-    c.emitter = (Some = ctx);
-    // TODO: this way of doing it means you lose location information which sucks
-    result := Ffi'import_c'compile_c(c&, ">>>driver", res.Ok&.items());
-    result.or(fn(e) => panic(e));
-    c.arena_storage&.deinit();
-    Qbe'backend'worker_join(ctx);
-    res.Ok&.drop();
+    if res.Ok.len > 0 {
+        c := C'Compile.Ctx.zeroed();
+        Ffi'import_c'init_c(c&, m);
+        c.enqueue_task = Qbe.backend.worker_enqueue;
+        ctx: *C'Compile.CodegenShared = Qbe'backend'worker_start(m, general_allocator(), zeroed C'Compile.CodegenWorker, false);
+        c.emitter = (Some = ctx);
+        // TODO: this way of doing it means you lose location information which sucks
+        result := Ffi'import_c'compile_c(c&, ">>>driver", res.Ok&.items());
+        result.or(fn(e) => panic(e));
+        c.arena_storage&.deinit();
+        Qbe'backend'worker_join(ctx);
+        res.Ok&.drop();
+    }
     
-    m.put_jit_addr(m.intern("putchar"), fn(c: u8) u32 = { putchar_UNBUFFERED(c); 0 });
-    m.emit_suspended_inlinables();
-    m.make_exec();
-    f := or m.get_addr("main") {
-        panic("couldn't find main()")
-    };
-    f := assume_types_fn(Arg = void, Ret = i32, ptr = f);
-    status := f();
-    @if(status != 0) @panic("Returned status %", status);
-    drop(m);
+    yield_module_main(m);
 }

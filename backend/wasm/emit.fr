@@ -45,10 +45,19 @@ fn emit_func_wasm32(f: *Qbe.Fn) []Ty(Fixup, Qbe.Sym) = {
     
     pack_locals(e);
     
+    last_jmp := Qbe.J.Jxxx;
     for_blocks e.f { b |
         emit_block(e, b);
+        last_jmp = b.jmp.type;
     };
-    e.op(.Unreachable);  // keep the verifier happy (wihtout this the implicit return needs to typecheck)
+    @match(last_jmp) {
+        fn hlt()  => ();
+        fn ret0() => {
+            e.a.len -= 1;
+        };
+        // keep the verifier happy (without this the implicit return needs to typecheck)
+        @default => e.op(.Unreachable);  
+    };
     e.op(.End);
     code.next = code.next.offset(e.a.len());
     
@@ -371,6 +380,9 @@ fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
         fn blit1() => {
             e.a&.push_all(@const_slice(0xFC, 0x0A, 0x00, 0x00));
         }
+        fn reqz() => {
+            e.op(@if(i.cls().is_wide(), .I64_EqZero, .I32_EqZero));
+        }
         @default => @panic("TODO: wasm encoding for % %", i.op(), { printfn(e.f, e.f.globals.debug_out); "" });
     };
 }
@@ -409,8 +421,8 @@ fn index_patch(e: *EmitWasmFn, id: Qbe.Sym, _space: Wasm.ImportType) void = {
 // After the patch the extra space is filled with zero bytes with just the continuation bit set 
 // (which is less annoying to look at in the disassembly than if i used nops, but it also hides the bloat which is bad). 
 // So a trivial size optimization would be to go over the whole module and repack the numbers. 
-// For signed, 3 bytes limits you to indices <262144 which ought to be enough for anybody :).
-WASM_INDEX_PADDING :: 3;
+// TODO: use smaller padding when you know it's a function index vs a jit data address that could be near the end of linear memory. 
+WASM_INDEX_PADDING :: 5;
 
 fn pad(e: *EmitWasmFn, count: i64) void = range(0, count) { _ |
     e.op(.Unreachable);
@@ -436,7 +448,9 @@ fn fixup_wasm32(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_re
             @debug_assert(self.goal.type != .JitOnly || symbol.kind == .Local, "wasm jit cannot direct call an import: %", symbol.name);
             @debug_assert_ne(symbol.wasm_module_function_index, -1, "WasmIndex: missing index for $%", symbol.name);
             lst: List(u8) = fixed_list(ptr = u8.ptr_from_raw(fixup.patch_at), len = WASM_INDEX_PADDING);
-            leb128_unsigned(lst&, symbol.wasm_module_function_index.intcast(), WASM_INDEX_PADDING);
+            value := symbol.wasm_module_function_index.intcast();
+            when_debug(self, .Patch, fn(out) => @fmt(out, "# WasmIndex(%) = %\n", symbol.name, value)); self.flush_debug();
+            leb128_unsigned(lst&, value, WASM_INDEX_PADDING);
         }
         // used when producing the value on the stack
         fn WasmAddr(it) => {
@@ -445,17 +459,20 @@ fn fixup_wasm32(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_re
             value := if(symbol.segment == .Code, => indirect_index, => base + it.increment.zext());
             @if(symbol.name != "__franca_base_address"/*HACK*/) 
                 @debug_assert_gt(value, 0, "WasmAddr: missing index for $%", symbol.name);
+            when_debug(self, .Patch, fn(out) => @fmt(out, "# WasmAddr(%) = %\n", symbol.name, value)); self.flush_debug();
             leb128_signed(lst&, value, WASM_INDEX_PADDING); // NOTE: immediate of T.const is always signed
         }
         fn DataAbsolute(it) => {
-            if symbol.segment == .Code && symbol.wasm_type_index != -1 {
-                i64.ptr_from_raw(fixup.patch_at)[] = symbol.got_lookup_offset;
+            value := if symbol.segment == .Code && symbol.wasm_type_index != -1 {
+                symbol.got_lookup_offset
             } else {
                 @debug_assert(symbol.kind == .Local);
                 // the symbol's offset already includes :WasmZeroPage
                 base := @if(self.goal.type == .JitOnly, indirect_index, symbol.offset);
-                i64.ptr_from_raw(fixup.patch_at)[] = base + it.increment;
-            }
+                base + it.increment
+            };
+            when_debug(self, .Patch, fn(out) => @fmt(out, "# DataAbsolute(%) = %\n", symbol.name, value)); self.flush_debug();
+            i64.ptr_from_raw(fixup.patch_at)[] = value;
         }
         @default => @panic("invalid fixup type for wasm %", fixup.type&.tag());
     };

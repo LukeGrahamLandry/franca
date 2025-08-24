@@ -24,6 +24,7 @@
 // TODO: might be better to not always convert phis to stack block arguments. 
 //       instead, assign multiple tmps to the same local and try to map them so you don't need copies. 
 //       same idea as rega just you can have infinite registers. see if that makes smaller code. 
+// TODO: make sure `pushd(-1);stored;` doesn't become `pushl(-4616189618054758400);storel;`, that takes more bytes to encode. 
 //
 
 k_mem :: Qbe.Cls.Kw;
@@ -289,7 +290,16 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
                 f.unemit(i0);
                 emitted = i1;
             };
-        }
+            
+            if i.arg&[1] == Qbe.ConZero && @is(o, .ceqw, .ceql) {
+                // shorter encoding than (push 0; T.eq); saves 2 bytes each time. kinda not worth it. 
+                k := @if(o == .ceqw, Qbe.Cls.Kw, .Kl);
+                emitted.set_op(.reqz);
+                emitted.set_cls(k);
+                f.wasm_push(k, i.arg&[0]);
+                return();
+            }
+        };
     };
     
     if is_store(o) {
@@ -366,18 +376,19 @@ fn wasm_push(f: *Qbe.Fn, k: Qbe.Cls, r: Qbe.Ref) void = {
 }
 
 fn push_slot_addr(f: *Qbe.Fn, k: Qbe.Cls, slot_offset: i32) void = {
-    // TODO: i think i want to split the memory folding out from coming out of ssa form. 
-    //r = SLOT(slot_offset);
     if k == .Kl {
         f.emit_ext_trunc(.extuw, k);
         k = Qbe.Cls.Kw;
     };
-    //slot_offset = f.slot - slot_offset;
-    // Stack grows downwards and __stack_base points to the bottom of our frame. 
+    // Stack grows downwards and SP points to the bottom of our frame. 
     SP := f.retr;
     @debug_assert(SP != QbeNull, "missing SP %", { printfn(f, f.globals.debug_out); "" });
-    ins := make_ins(.add, .Kw, QbeNull, SP, f.getcon(slot_offset.intcast()));
-    f.sel_wasm(ins&);
+    if slot_offset != 0 {
+        ins := make_ins(.add, .Kw, QbeNull, SP, f.getcon(slot_offset.intcast()));
+        f.sel_wasm(ins&);
+    } else {
+        f.wasm_push(.Kw, SP);
+    };
 }
 
 fn emit_ext_trunc(f: *Qbe.Fn, o: Qbe.O, k: Qbe.Cls) void = {
@@ -512,7 +523,7 @@ fn wasm_flow(f: *Qbe.Fn) void = {
         while => j < b.ins.len && cond(b.ins.index(j)) {
             j += 1;
         };
-        if b.ins.index(j).op() == .nop {
+        if j < b.ins.len && b.ins.index(j).op() == .nop {
             b.ins[j] = i;
             return();
         };

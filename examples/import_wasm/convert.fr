@@ -14,13 +14,13 @@
 
 // TODO: validation
 // TODO: 
-//       T.eqz, abs, ceil, floor, trunc, nearest, copysign, trunc_sat, some other conversions
+//       abs, ceil, floor, trunc, nearest, copysign, trunc_sat, some other conversions
 //       multiple return values, ref.*
 //       more atomic ops. 
 //       memory ops: grow/init/size/fill/drop
 //       memory.copy: allow non-constant size. allow overlapping where you need to copy backwards. 
 //       br_table
-//       more table ops: set/size/fill/copy/init/drop
+//       more table ops: size/fill/copy/init/drop
 //       vectors. 
 //       multiple memories. 
 //       0x1B version of select
@@ -516,8 +516,8 @@ fn emit_the_code(self: *LoadWasm) void = {
         @match(inst) {
             fn I32_Const() => self.stack&.push(self.f.getcon(self.read_s()));
             fn I64_Const() => self.stack&.push(self.f.getcon(self.read_s()));
-            fn F64_Const() => self.push_float(8);
-            fn F32_Const() => self.push_float(4);
+            fn F64_Const() => self.push_float(u64);
+            fn F32_Const() => self.push_float(u32);
             fn LocalGet()  => self.local_inst(1);
             fn LocalSet()  => self.local_inst(-1);
             fn LocalTee()  => self.local_inst(0);
@@ -698,9 +698,18 @@ fn emit_the_code(self: *LoadWasm) void = {
                 self.f.emit(.call, .Kw, result, callee, QbeNull);
                 self.stack&.push(result);
             }
+            fn I32_EqZero() => self.eqz(.ceqw);
+            fn I64_EqZero() => self.eqz(.ceql);
             @default => @panic("unhandled unstruction %", self.src[self.cursor - 1]);
         }
     }
+}
+
+fn eqz(self: *LoadWasm, o: Qbe.O) void = {
+    result := self.f.newtmp("eqz", .Kw);
+    value := self.stack&.pop().unwrap();
+    self.f.emit(o, .Kw, result, value, Qbe.ConZero);
+    self.stack&.push(result);
 }
 
 fn table_get(self: *LoadWasm, table_index: u64, index_in_table_W: Qbe.Ref) Qbe.Ref = {
@@ -731,10 +740,10 @@ fn parse_branch_target(self: *LoadWasm) *Qbe.Blk = {
     @if(it.loop, it.continue, it.break)
 }
 
-fn push_float(self: *LoadWasm, $size: i64) void = {
-    v := IntType(size * 8, false).cast_front_unaligned(self.src.rest(self.cursor));
-    value: i64 = @if(size == 4, v.zext(), @if(size == 8, v.bitcast(), unreachable()));
-    self.cursor += size;
+fn push_float(self: *LoadWasm, $Bits: Type) void = {
+    v := Bits.cast_front_unaligned(self.src.rest(self.cursor));
+    value: i64 = v.int();
+    self.cursor += Bits.size_of();
     self.stack&.push(self.f.getcon(value));
 }
 

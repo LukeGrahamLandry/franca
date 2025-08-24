@@ -1,3 +1,26 @@
+
+## (Aug 23)
+
+- web demo
+  - less code duplication. just shim one wasm module with all the languages. 
+  - select cross target and download an exe
+- only set the env global for arge if it's a different value than the functions pare. 
+  1444565 -> 1393720 (-3.5%)
+- convert_number_dyn
+- mandelbrot.fr not working in import_wasm was a problem with my read_leb128(signed = true). 
+  the stored(-1) became a storel(-4616189618054758400) 
+  and that number overflowed the shift amount when adding back one bits at the top. 
+- use T.eqz instruction. 1400060 -> 1394554. not worth it. 
+- making more tests pass.
+  - env.ssa: import labs. 46/121
+  - max.ssa: to fixup.WasmAddr on the jit data address i had to bump WASM_INDEX_PADDING up to 5
+    which is very sad, makes demo.wasm 2.6% larger. 59/121
+  - call1.ssa: callsite wrong return type
+  - queen.ssa: import calloc
+  - import_c/test/ffi.fr: varargs write as long but read as int
+  - most of the rest are blocked on strtod/printf
+- ctz in sudoku.fr/for helps a tiny bit on the hard1 test: 1020 -> 985, and it looks prettier
+
 ## (Aug 22) wasm
  
 - web demo
@@ -12,7 +35,6 @@
   oh even just aot mandelbrot.fr doesn't work for me. 
   works if you #noinline on `fn init(x: f64, y: f64) Pos` 
   but not if you disable using memory.copy which is the obvious thing i know is broken. 
-  :TodoImportWasmMandelInlineBug
 - in the interim where i hadn't quite transitioned to fully using the table indices, 
   had to have a hack with temporary_alias: List(Ty(sym, sym)) and copy the got_lookup_offset at the end, 
   but i think it can go away now? for jit yes, not aot yet tho. 

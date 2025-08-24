@@ -15,9 +15,47 @@ main :: fn() void = {
         @case("franca") => import("@/examples/web/b.fr")'main();
         @case("c") => import("@/examples/web/c.fr")'main();
         @case("qbe") => import("@/examples/web/d.fr")'main();
-        @case("kaleidoscope") => import("@/examples/kaleidoscope.fr")'main();
+        @case("kaleidoscope") => kaleidoscope_main();
         @default => println("other");
     };
+}
+
+#use("@/examples/kaleidoscope.fr")
+kaleidoscope_main :: fn() void = {
+    args := get_args(EXAMPLE_PROGRAM);
+    m := zeroed QbeModule;
+    init_default_module(m&, args.target);
+    c: *Ctx = init(general_allocator(), args.src, m&);
+    c.m.set_debug_types(args.logging, true);
+    
+    @match(c.compile_loop()) {
+        fn Ok() => ();
+        fn Err(s) => @panic("%\n before line %", s, c.line);
+    };
+    
+    // TODO: provide implementations of printd/putchard 
+    //       or only allow outputting libraries with imports, not exes (and then this main function wouldn't make sense). 
+    {
+        default_init(c.f, c.m);
+        c.f.lnk.id = c.m.intern("main");
+        c.f.ret_cls = .Kw;
+        c.f.lnk.export = true;
+        c.link = c.f.start&;
+        b := c.push_block();
+        env := c.f.newtmp("env", .Kl);
+        c.f.emit(.pare, .Kl, env, QbeNull, QbeNull);
+        for c.top_level { id |
+            c.f.emit(.arge, .Kl, QbeNull, env, QbeNull);
+            c.f.emit(.call, .Kd, Qbe.Null, c.f.symcon(id), QbeNull);
+        };
+        c.f.copy_instructions_from_scratch_reversed_which_means_forwards(b);
+        b.jmp = (type = .retw, arg = Qbe.ConZero);
+        c.end_fn();
+    };
+    
+    yield_module_main(m&);
+    drop(c);
+    
 }
 
 CompileArgs :: @struct {
@@ -80,7 +118,7 @@ for_exports :: fn($body: @Fn(name: Str, addr: rawptr) void #duplicated) void = {
         body(name, f);
     };
     
-    do_export("putchar", @Fn(c: u8) void, putchar_UNBUFFERED);
+    do_export("putchar", @Fn(c: u8) i32, fn(c) = { putchar_UNBUFFERED(c); @as(i32) 0 });
     do_export("exit", @Fn(c: i32) Never, Syscall.exit);
     do_export("write", @Fn(fd: i32, p: *u8, l: i64) i64, fn(a, b, c) = { x := Syscall'write((fd = a), b, c); x.value });
     do_export("mprotect", @Fn(a: rawptr, b: i64, c: i64) i64, fn(a, b, c) = { x := Syscall'mprotect(a, b, c); x.value });
@@ -88,10 +126,48 @@ for_exports :: fn($body: @Fn(name: Str, addr: rawptr) void #duplicated) void = {
     do_export("munmap", @Fn(a: rawptr, b: i64) i64, fn(a, b) = { x := Syscall'munmap(a, b); x.value });
     jit_instantiate_module :: fn(a: *u8, b: i64, c: i64, d: u32) void #weak #import("libc");
     do_export("jit_instantiate_module", @Fn(a: *u8, b: i64, c: i64, d: u32) void, jit_instantiate_module);
+    do_export("puts", @Fn(p: *u8) i32, fn(p) = { println(str(@as(CStr) (ptr = p))); @as(i32) 0 });
+    do_export("strlen", @Fn(p: *u8) i32, fn(p) = { len(str(@as(CStr) (ptr = p))).intcast() });
+    do_export("labs", @Fn(i: i64) i64, fn(i) = i.abs());
+    do_export("calloc", @Fn(m: u32, n: u32) i64, fn(m, n) = {
+        n := m.mul(n).zext().align_to(65536);
+        Syscall'mmap(zeroed(rawptr), n, 0, 0, (fd = -1), 0)  // only works on wasm cause i don't care about flags
+    });
     
     weak :: import("@/examples/import_wasm/run.fr").weak_imports;
     inline_for weak { $name |
         // TODO: use the right signetures so you actually get the message. 
         do_export(::name[], @Fn() void, fn() = @panic("comptime code tried to call a weak import"));
     };
+}
+
+yield_module_main :: fn(m: *Qbe.Module) void = {
+    ::enum(@type m.goal.type);
+    backend'compile_suspended(m);
+    if m.goal.type == .JitOnly {
+        for_exports { name, f |
+            m.put_jit_addr(m.intern(name), f);
+        };
+    
+        m.make_exec();
+        f, _ := m.get_addr(m.intern("main")) 
+            || @panic("missing function main()");
+        f := assume_types_fn(Arg = void, Ret = i32, ptr = f);
+        status := f();
+        @if(status != 0) @panic("\n\nReturned status %", status);
+    } else {
+        m.seal_debug_info("", false, empty());  // TODO
+        chunks := {m.target.finish_module}(m);
+        bytes := concat(chunks&, temp());
+        
+        if query_current_arch() == .wasm32 {
+            @println("size = %;", bytes.len);
+            yield_file :: fn(p: *u8, l: i64) void #weak #libc;
+            yield_file(bytes.ptr, bytes.len);
+        } else {
+            write_entire_file_or_crash("a.out", bytes);
+            @println("wrote % bytes to a.out", bytes.len);
+        };
+    };
+    drop(m);
 }

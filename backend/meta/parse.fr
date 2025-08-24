@@ -12,7 +12,6 @@
 //! - R00, S00, I00 for register, RSlot, RInt so you can parse back the output of later passes. 
 //! - parse back internal ops (including par*, arg*, ret*) because ^
 //! - %00 and =00 for placeholders when using @emit_instructions
-//! - $name$module for imports (for wasm, but TODO: also mach-o so you can import things that aren't from libc)
 //! - { p 00 } for padding fields in types (not useful but seems like a bad idea to have dump_type hide it)
 //! - Removed: thread and section keywords 
 //! - allow hexadecimal integer constants (0x prefix)
@@ -623,7 +622,6 @@ fn parse_block_arg_list(self: *QParseCtx, why: Str, $body: @Fn(blk: *Qbe.Blk, ar
     };
 }
 
-// TODO: sb,ub,sh,uh for apple abi
 fn cls_from_char(c: u8) ?Qbe.Cls = {
     (Some = @switch(c) {
         @case("w".ascii()) => .Kw;
@@ -748,7 +746,7 @@ fn parse_ref(self: *QParseCtx) Qbe.Ref = {
         @fmt(self.error&, "number with both prefix S and I");
         return(QbeNull);
     };
-    if(slot, => return(SLOT(i)));  // note: you have to do the /4 yourself
+    if(slot, => return(SLOT(i)));
     if(int, => return(INT(i)));
     self.f.getcon(i)
 }
@@ -767,21 +765,15 @@ fn parse_blk(self: *QParseCtx) ?*Qbe.Blk = {
 }
 
 fn parse_number(self: *QParseCtx) i64 = {
-    v := 0;
-    if self.input[self.cursor] == "0".ascii() && self.input[self.cursor + 1] == "x".ascii() {
+    base := if self.input[self.cursor] == "0".ascii() && self.input[self.cursor + 1] == "x".ascii() {
         self.cursor += 2;
-        while => self.input[self.cursor].hex_digit() { d |
-            v *= 16;
-            v += d;
-            self.cursor += 1;
-        };
+        16
     } else {
-        while => self.input[self.cursor].is_ascii_digit() {
-            v *= 10;
-            v += self.input[self.cursor].zext() - "0".char();
-            self.cursor += 1;
-        };
+        10
     };
+    s := self.input.rest(self.cursor);
+    v, rest := convert_number_dyn(s, base);
+    self.cursor += s.len - rest.len;
     v
 }
 

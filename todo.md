@@ -259,11 +259,9 @@ different subsets of the same resources.
   (currently emit_ir just always outputs a shim with a direct call which works but is hacky and not something i'd be proud to explain). 
 - generate better code (see comments in wasm/isel.fr)
 - (see comments in wasm/abi.fr)
-- finish jit_instantiate_module in import_wasm/run.fr
 - finish PromotePointers in import_wasm/run.fr
 - make AsmFunction not suck. at least do the length for you. 
 - refactor output_wasm_module_jit so it shares more code with the aot version
-- relatedly, don't put everything in the indirect table. only if exported or address taken. 
 - it's tempting to expand into allowing the jitted module to be reused instead of hardcoding the first_export. 
   that needs data relocations for function pointers, at which point i should just give up and follow the convention other tools use. 
   - https://github.com/WebAssembly/tool-conventions/blob/main/DynamicLinking.md
@@ -282,24 +280,20 @@ different subsets of the same resources.
 - import_wasm working in wasm would be cute. 
   - dont reserve giant virtual memory
   - don't depend on libc (import_wasm/run.fr/Exports for the .ssa tests)
-- get franca compiler working in wasm
-  - what to do about file system
+- what to do about file system
     - can't decide if i want drop in posix-ish like wasip1 or declare that it's better
       for programs to make themselves embedable and the compiler shouldn't be opening files
       anyway, you should pass in a vtable of how to get imports when creating the compiler, 
       so you just have two different entry points. 
-  - comptime needs to work with the dlopen style jitting (so many modules instead of one)
 - syscall wrappers support wasip1
 - web demo that runs all the tests
   - make it run in node in actions
-- web demo: support -d on all of them. less duplicated code. libc shims. tab key. 
 - stack traces
 - make the wasmtime version work
 - fix dynalloc in isel and add a .ssa test that tests it with a deeper callstack
 - in wasm/make_exec use debug_out when dumping module so you can redirect it
 - make sure `::@as(rawptr)(fn() void = ())` gives you the got_lookup_offset not the junk jit_addr. 
 - for examples/web, instead of `url?v=version` the sane thing is to just put content hash in the file name
-- :TodoImportWasmMandelInlineBug
 
 ## backend 
 

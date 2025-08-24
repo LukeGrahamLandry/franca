@@ -9,7 +9,14 @@ main :: fn() void = {
     };
     a := general_allocator();
     vtable := init_driver_vtable();
-    comp := {vtable.init_compiler}(vtable.default_build_options()); // TODO: comptime get the current arch
+    opts := vtable.default_build_options();
+    if true {  // TODO: ui toggle for this
+        it := opts.safety_checks&;
+        it.insert(.Bounds, false);
+        it.insert(.DebugAssertions, false);
+        it.insert(.InvalidTag, false);
+    };
+    comp := {vtable.init_compiler}(opts); // TODO: comptime get the current arch
     c := vtable.with(comp);
     
     file := c.add_file("repl!", src);
@@ -47,18 +54,7 @@ main :: fn() void = {
         aot := m.goal.type != .JitOnly;
         main_thread_pump(c, shared, @slice(fid), aot);
         if aot {
-            m.seal_debug_info("", false, empty());  // TODO
-            chunks := {c.vtable.finish_qbe_module}(QbeModule.raw_from_ptr(m));
-            bytes := concat(chunks&, temp());
-            
-            if query_current_arch() == .wasm32 {
-                @println("size = %;", bytes.len);
-                yield_file :: fn(p: *u8, l: i64) void #weak #libc;
-                yield_file(bytes.ptr, bytes.len);
-            } else {
-                write_entire_file_or_crash("a.out", bytes);
-                @println("wrote % bytes to a.out", bytes.len);
-            };
+            yield_module_main(m);
             return();
         };
         

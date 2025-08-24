@@ -97,11 +97,14 @@ const load_example = async (path) => {
 };
 const show_examples = (lang_i) => {
     let src = `<option selected disabled> Load Example </option>`;
-    for (let it of manifest.compilers[lang_i].examples) {
+    let c = manifest.compilers[lang_i];
+    for (let it of c.examples) {
         src += `<option value="${it}"> ${it} </option>`;
     }
     const it = document.getElementById("example");
     it.innerHTML = src;
+    
+    document.getElementById("version").innerText = `${manifest.commit} ${c.about}`;
 };
 const show_compilers = () => {
     let src = "";
