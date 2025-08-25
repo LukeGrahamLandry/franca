@@ -312,6 +312,7 @@ different subsets of the same resources.
     (no github pages, no `python3 -m http.server`)
   - no shared tables so have to keep them in sync manually so need to keep a list of every
     time you load jitted code or do a table assignment and replay them when you span a new thread. 
+- web demo: hare, wuffs, more nontrivial c programs, webgpu
 
 ## backend 
 

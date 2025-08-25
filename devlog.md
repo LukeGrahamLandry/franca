@@ -1,4 +1,12 @@
 
+## (Aug 25)
+
+- taking a break; porting a parser generator i did in university 
+- fixed unfilled fixup for symbol_memmove when 
+  `type=JitOnly && prefer_libc_memmove=false && FRANCA_NO_CACHE=1 && got_indirection_instead_of_patches=false`
+  - but actually, if i just put_jit_addr that at the beginning instead of the end, it works for got_indirection_instead_of_patches as well. 
+    only happens a few times in comptime code but doesn't hurt (zeroed, match_on_enum, match, default_init, emit_instructions)
+
 ## (Aug 24) wasm
 
 - do read_and_push and file_exists for web in a dumb way just to make c demo 

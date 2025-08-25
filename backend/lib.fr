@@ -406,6 +406,22 @@ fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
         m.symbol_memmove = m.intern("__franca_builtin_static_memmove");
     };
     
+    if IS_BOOTSTRAPPING {
+        m.goal.prefer_libc_memmove = false;
+    };
+    
+    @if(!IS_BOOTSTRAPPING)
+    if m.goal.type == .JitOnly {
+        // when jitting there's no point not lowering blits to calls (since it's not a big deal to add imports). 
+        // doing this up front instead of in emit_suspended_inlinables means it works when got_indirection_instead_of_patches. 
+        m.goal.prefer_libc_memmove = true;
+        m.have_static_memmove = true;
+        use_symbol(m, m.symbol_memmove) { s |
+            f: @Fn(rawptr, rawptr, i64) void : copy_bytes;
+            m.put_jit_addr(m.symbol_memmove, @as(rawptr) f);
+        };
+    };
+    
     // :leak
     m.wasm_types_cache      = init(gpa);
     m.libraries&.push("", general_allocator());

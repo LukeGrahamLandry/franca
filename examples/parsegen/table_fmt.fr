@@ -100,6 +100,18 @@ fn load_tables(e: FatExpr) FatExpr #macro = {
     @literal out.items()
 }
 
+fn save_tables_franca(out: *List(u8), t: *Tables) void = {
+    @fmt(out, "tables: Tables : (\nkeywords = @const_slice(");
+    for t.keywords { it |
+        @fmt(out, "\"%\", ", it);
+    };
+    @fmt(out, "),\nparser = @load_tables");
+    save_tables_franca(out, t.parser);
+    @fmt(out, "),\nscanner = @load_tables");
+    save_tables_franca(out, t.scanner);
+    @fmt(out, "),\n);");
+}
+
 fn save_tables_franca(out: *List(u8), tables: []Table) void = {
     fn save();
     :: {
@@ -126,6 +138,7 @@ fn save_tables_franca(out: *List(u8), tables: []Table) void = {
             fn save(self: *RawHashMap(K, V), out: *List(u8)) = {
                 @fmt(out, "(");
                 prefix := "";
+                // TODO: sort these
                 each self { k, v |
                     @fmt(out, "%(", prefix);
                     save(k&, out);
@@ -133,6 +146,9 @@ fn save_tables_franca(out: *List(u8), tables: []Table) void = {
                     save(v, out);
                     @fmt(out, ")");
                     prefix = ", "
+                };
+                if self.len_including_tombstones == 1 {
+                    @fmt(out, ", ()");
                 };
                 @fmt(out, ")");
             }
@@ -142,6 +158,7 @@ fn save_tables_franca(out: *List(u8), tables: []Table) void = {
         map_save(Ty(Str, i64), Ty(ParserAttributeList, i64));
     };
     
+    start := out.len;
     last_type := -1;
     count := 0;
     enumerate tables { i, table | 
@@ -168,8 +185,39 @@ fn save_tables_franca(out: *List(u8), tables: []Table) void = {
         prefix := "";
         @match(table) {
             fn AcceptTable() => @fmt(out, "()");
-            fn ScannerReadaheadTable()  => {
+            fn ScannerReadaheadTable(it)  => {
                 sort :: import("@/lib/sort.fr")'quicksort(i64, fn(a, b) => a[] <= b[]);
+                
+                ::AutoEq(Ty(ParserAttributeList, i64));
+                ::AutoEq(ParserAttributeList);
+                ::AutoHash(Ty(ParserAttributeList, i64), TrivialHasher);
+                ::AutoHash(ParserAttributeList, TrivialHasher);
+                joined: HashMap(Ty(ParserAttributeList, i64), List(i64)) = init(temp());
+                each it.transitions& { k, v |
+                    vals := joined&.get_or_insert(v[], fn(_) => list(temp()));
+                    vals.push(k);
+                };
+                
+                @fmt(out, "(");
+                each joined& { k, names |
+                    attrs, goto := k;
+                    sort(names.items());
+                    @fmt(out, "%((", prefix);
+                    for names { it |
+                        @fmt(out, "%, ", it);
+                    };
+                    if names.len != 0 {
+                        out.len -= 2;
+                    }
+                    @fmt(out, "), (%, %))", attrs&, goto);
+                    prefix = ", "
+                };
+                
+                if joined.raw.len_including_tombstones == 1 {
+                    @fmt(out, ", ()");
+                };
+                
+                @fmt(out, ")");
             }
             fn SemanticTable(it) => {
                 @fmt(out, "(\"%\", (", it.action);
@@ -193,4 +241,5 @@ fn save_tables_franca(out: *List(u8), tables: []Table) void = {
         @fmt(out, ", ()");  // :HACK
     };
     @fmt(out, "\n))");
+    out[start] = "(".ascii();
 }
