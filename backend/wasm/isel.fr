@@ -47,13 +47,18 @@ fn wasm_isel(f: *Qbe.Fn) void = {
     f.slot = align_to(f.slot, 16);
     fslot := f.slot;
     need_sp := f.slot > 0 || f.dynalloc || f.varcall;
+    // TODO: using retr+env_par as globals with the wrong names is kinda dumb
     if need_sp {
-        f.retr = f.newtmp("SP", k_mem);
-        // TODO: do i need to add_use here?
+        // lowest address of statically known frame. fast-allocs are a positive offset from this. 
+        f.retr = f.newtmp("BP", k_mem);
+        // for dynalloc
+        f.env_par = f.newtmp("SP", k_mem);
     } else {
         f.retr = QbeNull;
+        f.env_par = QbeNull;
     };
-    saved_stack := f.newtmp("BP", k_mem);
+    BP := f.retr;
+    SP := f.env_par;
     
     for_blocks f { b | 
         f.reset_scratch();
@@ -62,7 +67,8 @@ fn wasm_isel(f: *Qbe.Fn) void = {
         @match(b.jmp.type) {
             fn ret0() => {
                 if need_sp && !f.leaf {
-                    f.emitter_for_wasm(.global_set, k_mem, QbeNull, stackbase, saved_stack);
+                    f.emitter_for_wasm(.global_set, k_mem, QbeNull, stackbase, BP);
+                    f.emitter_for_wasm(.add, k_mem, BP, BP, f.getcon(f.slot.intcast()));
                 };
             }
             fn hlt() => ();
@@ -85,8 +91,10 @@ fn wasm_isel(f: *Qbe.Fn) void = {
             if !f.leaf {
                 f.emitter_for_wasm(.global_set, k_mem, Qbe.Null, stackbase, f.retr);
             };
-            f.emitter_for_wasm(.sub, k_mem, f.retr, saved_stack, f.getcon(f.slot.intcast()));
-            f.emitter_for_wasm(.global_get, k_mem, saved_stack, stackbase, Qbe.Null);
+            r := f.newtmp("isel", k_mem);
+            f.emitter_for_wasm(.copy, k_mem, SP, BP, Qbe.Null);  // TODO: only if dynalloc
+            f.emitter_for_wasm(.sub, k_mem, BP, r, f.getcon(f.slot.intcast()));
+            f.emitter_for_wasm(.global_get, k_mem, r, stackbase, Qbe.Null);
             did_sp_load = true;
         };
         
@@ -112,6 +120,7 @@ fn wasm_isel(f: *Qbe.Fn) void = {
     // phis are now represented as block arguments, but keep them anyway so emit() can use them to know block types. 
     
     f.retr = QbeNull;
+    f.env_par = QbeNull;
     wasm_flow(f);
     @debug_assert_eq(f.slot, fslot, "can't make new slots after incrementing SP");
 
@@ -251,23 +260,17 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
     };
 
     if is_alloc(o) {  // dynamic size alloca
-        // TODO: we don't know up front so this doesn't work. its only set by parser. 
-        //       other targets don't care and set it in isel as needed. 
-        @if(!f.dynalloc) @eprintln("TODO: late dynalloc!"); 
-        @eprintln("TODO: this is wrong because offsets are still computed from sp");
         // TODO: align THIS IS NOT FINISHED
         // TODO: this feels about right but i haven't actually thought about it at all and theres only one test that uses it.
-        SP := f.retr;
+        SP := f.env_par;
         @debug_assert_ne(SP, QbeNull, "ICE: alloca without loading stack");
         stackbase := f.symcon(f.globals.wasm_symbol_stackbase);
-        f.emit(.global_set, k_mem, QbeNull, stackbase, QbeNull);  // save for callees
-        f.emit(.push, k_mem, QbeNull, SP, QbeNull);
-        f.emit(.push, k_mem, QbeNull, SP, QbeNull);  // result of this inst
-        f.wasm_pop(k_mem, SP);  // save locally
-        i.set_op(.sub);  // decrement sp
-        o = .sub;
-        i.arg&[1] = i.arg&[0];
-        i.arg&[0] = SP;
+        
+        f.wasm_push(i.cls(), SP);
+        f.emitter_for_wasm(.global_set, k_mem, Qbe.Null, stackbase, SP);  // save for callees
+        f.emitter_for_wasm(.sub, k_mem, SP, SP, i.arg&[0]);
+        f.dynalloc = true;
+        return();
     };
     
     if o == .cas0 {
@@ -302,13 +305,14 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
         };
     };
     
+    BP := f.retr;
     if is_store(o) {
         // TODO: fold all addressing, not just stack
         off := 0;
         if f.get_slot(i.arg&[1]) { slot | 
             if slot >= 0 && fits_in_i32(slot) {
                 off = slot;
-                i.arg&[1] = f.retr;
+                i.arg&[1] = BP;
             };
         };
         emitted.arg&[0] = INT(off);
@@ -325,7 +329,7 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
         if f.get_slot(i.arg&[0]) { slot | 
             if slot >= 0 && fits_in_i32(slot) {
                 off = slot;
-                i.arg&[0] = f.retr;
+                i.arg&[0] = BP;
             };
         };
         emitted.arg&[0] = INT(off);

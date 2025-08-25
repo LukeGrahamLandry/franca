@@ -761,18 +761,18 @@ fn detect_include_guard(c: *Ctx, tok: *Token) ?Str = {
     .None
 }
 
-fn include_file(c: *Ctx, tok: *Token, path: Str, filename_tok: *Token) *Token = {
+fn include_file(c: *Ctx, tok: *Token, path: Str, filename_tok: *Token) ?*Token = {
     // Check for "#pragma once"
-    if(c.pragma_once&.get(path).is_some(), => return(tok));
+    if(c.pragma_once&.get(path).is_some(), => return(Some = tok));
 
     // If we read the same file before, and if the file was guarded
     // by the usual #ifndef ... #endif pattern, we may be able to
     // skip the file without opening it.
     if c.include_guards&.get(path) { guard_name |
-        if(c.macros&.get(guard_name).is_some(), => return(tok));
+        if(c.macros&.get(guard_name).is_some(), => return(Some = tok));
     };
 
-    tok2 := c.tokenize_file(path, filename_tok);
+    tok2 := c.tokenize_file(path, filename_tok) || return(.None);
 
     if detect_include_guard(c, tok2) { guard_name | 
         // detect_include_guard returns a borrow of the token but we need it to live past this file. 
@@ -780,7 +780,7 @@ fn include_file(c: *Ctx, tok: *Token, path: Str, filename_tok: *Token) *Token = 
         c.include_guards&.insert(path, guard_name);
     };
 
-    c.append(tok2, tok)
+    (Some = c.append(tok2, tok))
 }
 
 // Read #line arguments
@@ -846,22 +846,24 @@ fn preprocess2(c: *Ctx, tok: *Token) *Token = {
                 };
                 // pop_path_segment has trailing slash
                 path := @tfmt("%%", dirname(start.file.name), filename);
-                if file_exists(path) {
-                    tok = c.include_file(tok, path, start.next.next);
+                if c.include_file(tok, path, start.next.next) { t |
+                    tok = t;
                     continue();
                 };
                 // fallthrough
             };
 
             path := c.search_include_paths(filename) || filename;
-            tok   = c.include_file(tok, path, start.next.next);
+            tok   = c.include_file(tok, path, start.next.next)
+                || @error_tok(c, tok, "Failed to open file: %", path);
             continue();
         };
 
         if equal(tok, "include_next") {
             filename, _ := c.read_include_filename(tok&, tok.next);
             path := c.search_include_next(filename) || filename;
-            tok = c.include_file(tok, path, start.next.next);
+            tok = c.include_file(tok, path, start.next.next)
+                || @error_tok(c, tok, "Failed to open file: %", path);
             continue();
         };
 

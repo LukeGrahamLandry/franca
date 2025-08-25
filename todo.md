@@ -48,6 +48,12 @@
   really i should nail down the semantics of when the bake snapshot happens. 
   (all at once at the end of compilation probably?). 
 - make #export work on `foo :: fn() #` instead of only `fn foo() #`
+- at some point i have to go through and make error handling not suck as bad. 
+  there's a bunch of places i do `if thing_should_work then do_thing else not_that` instead of 
+  `do_thing catch no_that`. file_exists -> open_file is a common one. 
+  twice the syscalls and you produce toctou problems for no reason. 
+  the reason it's annoying to fix is you want to know why something failed not 
+  just that it failed so then i need to deal with remapping errno values for the different targets. 
 
 ## remaining nondeterminism
 
@@ -275,8 +281,6 @@ different subsets of the same resources.
     since i want to do that for static native binaries anyway. 
 - make import_c work without hacks
   - setjmp/longjmp with exceptions
-  - don't depend on libc (strtoul, strtod)
-  - SLOW_LEAK_ARENAS=true fixes the import_c hello world (c.fr)
 - import_wasm working in wasm would be cute. 
   - dont reserve giant virtual memory
   - don't depend on libc (import_wasm/run.fr/Exports for the .ssa tests)
@@ -290,10 +294,20 @@ different subsets of the same resources.
   - make it run in node in actions
 - stack traces
 - make the wasmtime version work
-- fix dynalloc in isel and add a .ssa test that tests it with a deeper callstack
+- add a .ssa test that tests dynalloc with a deeper callstack
 - in wasm/make_exec use debug_out when dumping module so you can redirect it
 - make sure `::@as(rawptr)(fn() void = ())` gives you the got_lookup_offset not the junk jit_addr. 
 - for examples/web, instead of `url?v=version` the sane thing is to just put content hash in the file name
+- pass the tests
+  - cast.c, float.c, literal.c, fpcnv.ssa: `e` in float literals
+  - macro.c: `__FILE__; 1 != 0; ends_with(main_filename1, "test/macro.c")`
+  - varargs.c, function.c: vsprintf
+  - pragma_once.c: `redefinition of function 'assert'`
+  - abi5.ssa, abi6.ssa, abi8.ssa: the case in my hacky printf that calls snprintf
+  - echo.ssa: `$main(w %argc, l %argv)`
+  - vararg1.ssa, vararg2.ssa: vprintf
+  - compiler/main.fr jit: `wasm-jit $__franca_aot_debug_info should have known got_lookup_offset`
+
 
 ## backend 
 

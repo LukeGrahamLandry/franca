@@ -452,7 +452,7 @@ fn convert_pp_int(tok: *Token) bool = {
     p0, p1, p2 := (p[], p.offset(1)[], p.offset(2)[]);
     base := if p2 != 0 && p0 == "0".ascii() {
         delta, base := @if_else {
-            @if(p1 == "x".ascii() && hex_digit(p2).is_some()) => (2, 16);
+            @if((p1 == "x".ascii() || p1 == "X".ascii()) && hex_digit(p2).is_some()) => (2, 16);
             @if((p1 == "b".ascii() || p1 == "B".ascii()) && (p2 == "0".ascii() || p2 == "1".ascii())) => (2, 2);
             @else => (1, 8);
         };
@@ -541,11 +541,19 @@ fn convert_pp_number(c: *Ctx, tok: *Token) void = {
     if(convert_pp_int(tok), => return());
 
     // If it's not an integer, it must be a floating point constant.
-    // TODO: can't be calling libc for stuff like this 🤡🤡  
-    strtod :: fn(str: CStr, end_out: **u8) f64 #libc;  
-    end := @uninitialized *u8;
-    s: CStr = (ptr = tok.str().as_ptr());
-    val := strtod(s, end&);
+    p := tok.str().as_ptr();
+    ::if(Ty(f64, *u8));
+    val, end := if TODOWASM && query_current_arch() == .wasm32 {
+        // TODO: this one doesn't support all the syntax. 1e-2
+        N :: 128;  // arbitrary max length
+        n, rest := parse_float(p.slice(N));
+        (n, p.offset(N - rest.len))
+    } else {
+        // TODO: can't be calling libc for stuff like this 🤡🤡  
+        strtod :: fn(str: *u8, end_out: **u8) f64 #libc;  
+        end := @uninitialized *u8;
+        (strtod(p, end&), end)
+    };
     
     end_char := end[];
     ty := @if_else {
@@ -851,18 +859,17 @@ fn new_file(c: *Ctx, name: Str, contents: Str) *File = {
     file
 }
 
-fn tokenize_file(c: *Ctx, path: Str, tok: *Token) *Token = {
+fn tokenize_file(c: *Ctx, path: Str, tok: *Token) ?*Token = {
     prefix := Preprocess.HACK_BUILTIN_FOLDER_PREFIX;
     src := u8.list(c.arena);   // TODO: can probably be temp() since we copy string literals out
     if path.starts_with(prefix) {
         path = path.rest(prefix.len());
         src&.push_all(find_builtin_header(path).unwrap());
     } else {
-        read_and_push(src&, path) || {
-            @error_tok(c, tok, "Failed to open file: %", path)
-        };
+        read_and_push(src&, path) || return(.None);
     };
-    c.tokenize_string(path, src&.items())
+    
+    (Some = c.tokenize_string(path, src&.items()))
 }
 
 fn tokenize_string(c: *Ctx, path: Str, src: Str) *Token = {

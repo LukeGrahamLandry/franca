@@ -92,8 +92,16 @@ fn make_dir(path: Str) bool = {
 fn dir_exists(path: Str) bool = 
     stat_exists(path, Posix.S.IFDIR);
 
-fn file_exists(path: Str) bool = 
-    stat_exists(path, Posix.S.IFREG);
+fn file_exists(path: Str) bool = {
+    @if(TODOWASM) if query_current_arch() == .wasm32 {
+        // TODO: this is stupid!!! :SLOW :SLOW :SLOW :SLOW
+        //       but eventually im going to replace it with wasi so there's kinda no point. 
+        fetch_file :: fn(ptr: *u8, len: i64) *u8 #weak #import("libc");
+        result := fetch_file(path.ptr, path.len);
+        return(!result.is_null());
+    };
+    stat_exists(path, Posix.S.IFREG)
+}
 
 fn stat_exists(path: Str, mode: i64) bool = {
     s := zeroed Posix.Stat;
@@ -237,6 +245,17 @@ fn read_entire_file_or_crash(a: Alloc, path: Str) Str = {
 // It's useful that this allocates exactly the right amount if the list is empty (... and the file has >4 bytes), 
 // so you can read_entire_file to an empty list and then free(list.items())
 fn read_and_push(out: *List(u8), path: Str) bool = {
+    @if(TODOWASM) if query_current_arch() == .wasm32 {
+        // TODO: do this without the extra copy. :SLOW
+        //       but eventually im going to replace it with wasi so there's kinda no point. 
+        fetch_file :: fn(ptr: *u8, len: i64) *u8 #weak #import("libc");
+        result := fetch_file(path.ptr, path.len);
+        @if(result.is_null()) return(false);
+        result: CStr = (ptr = result);
+        out.push_all(result.str());
+        return(true);
+    };
+    
     path := as_cstr path;
     f := open_read(path) || return(false);
     len := f.Syscall'lseek(0, .End) || {

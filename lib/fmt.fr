@@ -386,13 +386,8 @@ fn print(i: i64) void = {
 
 // for porting c code that uses 0 prefixed numbers because they hate you
 fn octal(s: Str) i64 #fold = {
-    value := 0;
-    for s { c |
-        c := c - "0".ascii();
-        @assert(c >= 0 && c <= 8);
-        value *= 8;
-        value += c.zext();
-    };
+    value, rest := convert_number_dyn(s, 8);
+    @assert(rest.len == 0, "invalid octal: %", s);
     value
 }
 
@@ -476,23 +471,31 @@ fn dec_digit(cc: u8) ?i64 = {
     
 // TODO: this should return an error. 
 fn float(s: Str) f64 = {
+    i, rest := parse_float(s);
+    @assert_eq(rest.len, 0, "invalid input to float: %", s);
+    i
+}
+
+fn parse_float(s: Str) Ty(f64, Str) = {
     value := 0.0;
+    
+    while => s.len > 0 && s[0] != ".".ascii() {
+        c := dec_digit(s[0]) || return(value, s);
+        value *= 10.0;
+        value += c.float();
+        s = s.rest(1);
+    };
+    s = s.rest(int(s.len > 0 && s[0] == ".".ascii()));
+    
     scale := 0.1;
-    seen_decimal := false;
-    dec_digit2 :: fn(c) => dec_digit(c).unwrap();
-    for(s){c|
-        if seen_decimal {
-            value += dec_digit2(c).float().mul(scale);
-            scale = scale.div(10.0);  // TODO: /= doesn't work??
-        } else {
-            if(c == ".".ascii(), => { seen_decimal = true; }) {
-                value *= 10.0;
-                value += dec_digit2(c).float();
-            }
-        };
+    while => s.len > 0 {
+        c := dec_digit(s[0]) || return(value, s);
+        value += c.float() * scale;
+        scale /= 10.0;
+        s = s.rest(1);
     };
     
-    value
+    (value, s)
 }
 
 fn is_ascii_digit(c: u8) bool #inline = c >= "0".ascii() && c <= "9".ascii();

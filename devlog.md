@@ -1,5 +1,19 @@
 
-## (Aug 23)
+## (Aug 24) wasm
+
+- do read_and_push and file_exists for web in a dumb way just to make c demo 
+- generify printf in import_wasm/run.fr and use it in for_exports
+- alias_via_bounce still happens on wasm for vararg imports because they can't have a shim. 
+  - just record the alias and the table indices will work out. 
+  - copy over the type index when emitting. 
+- passing 82/122
+- added a shitty strtod replacement. 97.
+- fix a few signeture mismatches in tests.
+- share implementations of well known libc stuff between import_wasm/run and web/demo
+- do dynalloc properly so vla.c passes
+- revert function order in env.ssa so the comments about inlining are true. idk why i changed it last time. 
+
+## (Aug 23) wasm
 
 - web demo
   - less code duplication. just shim one wasm module with all the languages. 
@@ -165,7 +179,7 @@ making the compiler work.
 - no shim for varargs imported for .frc (fixes import_wuffs demo)
 - put the demo in a web worker
 
-## (Aug 17)
+## (Aug 17) wasm
 
 trying to get dump_wasm to work in wasm
 - mega confusion caused by fixup_wasm32()/WasmAddr doing leb128_unsigned() instead of leb128_signed(). 

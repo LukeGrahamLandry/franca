@@ -165,26 +165,24 @@ weak_imports :: @const_slice(
    "pthread_join", "opendir", "dlopen", "clock_gettime", "sigaction",
    "pthread_attr_init", 
    "strtoul", "strtod", "localtime", "time",
+   "snprintf", 
 );
+
+WellKnown :: import("@/examples/import_wasm/well_known.fr");
 
 // TODO: make it easy to ship these as a binary form of the ir so you can inline accross host calls. 
 Exports :: @struct {
     env :: @struct {
-        putchar :: fn(_: *u8, c: u8) void = {
-            putchar_UNBUFFERED(c);
-        }
+        putchar :: fn(_: *u8, c: u8) i32 = 
+            WellKnown'putchar(c);
         getchar :: fn(_: *u8) u8 = {
             getchar_UNBUFFERED().zext().trunc()
         }
-        puts :: fn(ctx: *u8, p: u32) void = {
-            s: CStr = (ptr = ctx.offset(p.zext()));
-            @println("%", s);
-        }
-        strlen :: fn(ctx: *u8, p: u32) i64 = {
-            s: CStr = (ptr = ctx.offset(p.zext()));
-            s.slow_len()
-        }
-        labs :: fn(ctx: *u8, i: i64) i64 = i.abs();
+        puts :: fn(ctx: *u8, p: u32) i32 = 
+            WellKnown'puts(ctx.offset(p.zext()));
+        strlen :: fn(ctx: *u8, p: u32) i64 = 
+            WellKnown'strlen(ctx.offset(p.zext()));
+        labs :: fn(ctx: *u8, i: i64) i64 = WellKnown'labs(i);
         calloc :: fn(ctx: *u8, m: u32, n: u32) u32 = {  // HACK
             heap_base[] -= align_to(m*n, 16);
             heap_base[]
@@ -228,24 +226,17 @@ Exports :: @struct {
             }
             Syscall'exit(status.zext());
         }
-        strcmp :: fn(ctx: *u8, a: u32, b: u32) i32 = {
-            a: CStr = (ptr = ctx.offset(a.zext()));
-            b: CStr = (ptr = ctx.offset(b.zext()));
-            strcmp :: fn(a: CStr, b: CStr) i32 #libc;
-            strcmp(a, b)
+        strcmp :: fn(ctx: *u8, a: u32, b: u32) i32 = 
+            WellKnown'strcmp(ctx.offset(a.zext()), ctx.offset(b.zext()));
+        
+        memcmp :: fn(ctx: *u8, a: u32, b: u32, n: u32) i32 = 
+            WellKnown'memcmp(ctx.offset(a.zext()), ctx.offset(b.zext()), n.zext());
+        
+        memcpy :: fn(ctx: *u8, a: u32, b: u32, n: u32) u32 = {
+            WellKnown'memcpy(ctx.offset(a.zext()), ctx.offset(b.zext()), n.zext());
+            a
         }
-        memcmp :: fn(ctx: *u8, a: u32, b: u32, n: u32) i32 = {
-            a := ctx.offset(a.zext());
-            b := ctx.offset(b.zext());
-            memcmp :: fn(a: *u8, b: *u8, n: i64) i32 #libc;
-            memcmp(a, b, n.zext())
-        }
-        memcpy :: fn(ctx: *u8, a: u32, b: u32, n: u32) i32 = {
-            a := ctx.offset(a.zext());
-            b := ctx.offset(b.zext());
-            memcpy :: fn(a: *u8, b: *u8, n: i64) i32 #libc;
-            memcpy(a, b, n.zext())
-        }
+
         strncmp :: fn(ctx: *u8, a: u32, b: u32, n: u32) i32 = {
             a := ctx.offset(a.zext());
             b := ctx.offset(b.zext());
@@ -328,15 +319,30 @@ Exports :: @struct {
 
 // 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 
 // blehhhhh todo
-printf_impl :: fn(out: *List(u8), ctx: *u8, fmt_s: u32, args: *i64) void = {
-    i := 0;
-    c :: fn(i) => ctx.offset(i + fmt_s.zext())[];
-    get_arg :: fn($T) T #generic => {
+fn printf_impl();
+fn printf_impl(out: *List(u8), ctx: *u8, fmt_s: u32, args: *i64) void = {
+    printf_impl(out, ctx.offset(fmt_s.zext()), fn($T) => {
         args[] = align_to(args[], ::align_of(T));
         value := ptr_cast_unchecked(u8, T, ctx.offset(args[]))[];
         args[] += ::size_of(T);
         value
-    };
+    }, fn(p) => ctx.offset(p));
+}
+
+fn printf_impl(out: *List(u8), fmt_s: CStr, va: *CVariadicArgumentList) void = {
+    printf_impl(out, fmt_s.ptr, fn($T) => va.next(T), fn(p) => u8.ptr_from_int(p));
+}
+
+fn printf_impl(
+    out: *List(u8), 
+    fmt_s: *u8, 
+    $get_arg: FuncId #duplicated /* @Fn($T: Type) T */, 
+    $m: @Fn(p: i64) *u8 #duplicated,
+) void #generic = {
+    i := 0;
+    c :: fn(i) => fmt_s.offset(i)[];
+    snprintf :: fn(buf: *u8, len: i64, fmt: CStr, _: CVariadic) i64 #weak #libc;
+    
     putchar :: Exports.env.putchar;
     while => c(i) != 0 {
         if c(i) != "%".ascii() {
@@ -362,7 +368,6 @@ printf_impl :: fn(out: *List(u8), ctx: *u8, fmt_s: u32, args: *i64) void = {
                 }
                 @case("g".ascii()) => {
                     i += 1;
-                    snprintf :: fn(buf: *u8, len: i64, fmt: CStr, _: CVariadic) i64 #libc;
                     x := get_arg(f64);
                     //@print("%", x);  // TODO: just fix my float printing to not suck
                     out.reserve(64);
@@ -372,7 +377,6 @@ printf_impl :: fn(out: *List(u8), ctx: *u8, fmt_s: u32, args: *i64) void = {
                 }
                 @case("f".ascii()) => {  // TODO: this is a copy-paste
                     i += 1;
-                    snprintf :: fn(buf: *u8, len: i64, fmt: CStr, _: CVariadic) i64 #libc;
                     x := get_arg(f64); 
                     //@print("%", x);  // TODO: just fix my float printing to not suck
                     out.reserve(64);
@@ -392,12 +396,12 @@ printf_impl :: fn(out: *List(u8), ctx: *u8, fmt_s: u32, args: *i64) void = {
                     // this isn't what you want anyway but its still a compiler bug
                     //puts(ctx, p);  // TODO: You can't have a void pointer 4582761636 as a constant :FUCKED
                     
-                    s: CStr = (ptr = ctx.offset(p));
+                    s: CStr = (ptr = m(p));
                     @fmt(out, "%", s);
                 }
                 // TODO: fix this!! i just dont care rn. 
                 @case("0".ascii()) => {
-                    @assert_eq(ctx.offset(i + fmt_s.zext()).slice(3), "08x", "HACK to make load2.ssa work");
+                    @assert_eq(fmt_s.offset(i).slice(3), "08x", "HACK to make load2.ssa work");
                     i += 3;
                     x := get_arg(u32);
                     range_rev(0, 4) { i |
@@ -407,14 +411,14 @@ printf_impl :: fn(out: *List(u8), ctx: *u8, fmt_s: u32, args: *i64) void = {
                 // TODO: fix this!! i just dont care rn. 
                 // ops.ssa uses #010x, usualconv.c uses #04x
                 @case("#".ascii()) => {
-                    @assert_eq(ctx.offset(i + fmt_s.zext()).slice(2), "#0", "HACK to make ops.ssa work");
+                    @assert_eq(fmt_s.offset(i).slice(2), "#0", "HACK to make ops.ssa work");
                     i += 2;
                     j := i;
-                    while => ctx.offset(i + fmt_s.zext())[].is_ascii_digit() {
+                    while => c(i).is_ascii_digit() {
                         i += 1;
                     };
-                    count := parse_int(ctx.offset(j + fmt_s.zext()).slice(i-j));
-                    @assert_eq(ctx.offset(i + fmt_s.zext()).slice(1), "x", "HACK");
+                    count := parse_int(fmt_s.offset(j).slice(i-j));
+                    @assert_eq(fmt_s.offset(i).slice(1), "x", "HACK");
                     i += 1;
                     @assert(count.mod(2) == 0, "HACK");
                     
@@ -427,15 +431,14 @@ printf_impl :: fn(out: *List(u8), ctx: *u8, fmt_s: u32, args: *i64) void = {
                 // TODO: fix this!! i just dont care rn. 
                 @case(".".ascii()) => {
                     // HACK to make abi8.ssa work
-                    if ctx.offset(i + fmt_s.zext()).slice(4) == ".17s" {
+                    if fmt_s.offset(i).slice(4) == ".17s" {
                         i += 4;
                         p := get_arg(i64);  // TODO: this should be u32 but then the ir needs to know what's a pointer 
-                        @fmt(out, "%", ctx.offset(p).slice(17));
+                        @fmt(out, "%", m(p).slice(17));
                     } else {
                         // HACK to make function.c work
-                        if ctx.offset(i + fmt_s.zext()).slice(3) == ".1f" {
+                        if fmt_s.offset(i).slice(3) == ".1f" {
                             i += 3;
-                            snprintf :: fn(buf: *u8, len: i64, fmt: CStr, _: CVariadic) i64 #libc;
                             x := get_arg(f64); 
                             //@print("%", x);  // TODO: just fix my float printing to not suck
                             out.reserve(64);

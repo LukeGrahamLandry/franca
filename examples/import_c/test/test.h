@@ -6,7 +6,7 @@ void exit(int n);
 void *memcpy(void *dest, const void *src, unsigned long n);
 int strcmp(char *p, char *q);
 int sprintf(char *buf, char *fmt, ...);
-int strlen(char*);
+long strlen(char*);
 int strncmp ( const char * str1, const char * str2, long num);
 
 static void assert(int expected, int actual, char *code) {

@@ -111,30 +111,58 @@ get_args :: fn(default_src: Str) CompileArgs = {
     out
 }
 
+FnTypeOf :: fn(fid: FuncId) Type #fold = {
+    func := get_function_ast(fid, true, false, true, false);
+    f_ty := func.finished_ty().unwrap();
+    intern_type(Fn = f_ty)
+}
+
 for_exports :: fn($body: @Fn(name: Str, addr: rawptr) void #duplicated) void = {
     do_export :: fn(name: Str, $T: Type, $F: FuncId) void => {
         ff: T : F;
         f: rawptr = ff;
         body(name, f);
     };
+   
+    WellKnown :: import("@/examples/import_wasm/well_known.fr");
+    inline_for get_constants(WellKnown) { $name |
+        fid :: get_constant(FuncId, WellKnown, name[]).unwrap();
+        do_export(::name[].str(), FnTypeOf(fid), fid);
+    };
     
-    do_export("putchar", @Fn(c: u8) i32, fn(c) = { putchar_UNBUFFERED(c); @as(i32) 0 });
-    do_export("exit", @Fn(c: i32) Never, Syscall.exit);
+    // TODO: some of these look extra dumb because i don't do wasm scalar struct abi correctly yet. 
+    
+    do_export("exit", @Fn(c: i32) Never, fn(c) = { Syscall'exit(c.intcast()) });
     do_export("write", @Fn(fd: i32, p: *u8, l: i64) i64, fn(a, b, c) = { x := Syscall'write((fd = a), b, c); x.value });
     do_export("mprotect", @Fn(a: rawptr, b: i64, c: i64) i64, fn(a, b, c) = { x := Syscall'mprotect(a, b, c); x.value });
     do_export("mmap", @Fn(a: rawptr, b: i64, c: i64, d: i64, e: i32, f: i64) i64, fn(a, b, c, d, e, f) = { Syscall'mmap(a, b, c, d, (fd = e), f) });
     do_export("munmap", @Fn(a: rawptr, b: i64) i64, fn(a, b) = { x := Syscall'munmap(a, b); x.value });
     jit_instantiate_module :: fn(a: *u8, b: i64, c: i64, d: u32) void #weak #import("libc");
     do_export("jit_instantiate_module", @Fn(a: *u8, b: i64, c: i64, d: u32) void, jit_instantiate_module);
-    do_export("puts", @Fn(p: *u8) i32, fn(p) = { println(str(@as(CStr) (ptr = p))); @as(i32) 0 });
-    do_export("strlen", @Fn(p: *u8) i32, fn(p) = { len(str(@as(CStr) (ptr = p))).intcast() });
-    do_export("labs", @Fn(i: i64) i64, fn(i) = i.abs());
+
     do_export("calloc", @Fn(m: u32, n: u32) i64, fn(m, n) = {
         n := m.mul(n).zext().align_to(65536);
         Syscall'mmap(zeroed(rawptr), n, 0, 0, (fd = -1), 0)  // only works on wasm cause i don't care about flags
     });
     
-    weak :: import("@/examples/import_wasm/run.fr").weak_imports;
+    Run :: import("@/examples/import_wasm/run.fr");
+    do_export("printf", @Fn(fmt: *u8, va: CVariadic) i32, fn(fmt, va) = {
+        // TODO: this won't work on amd64 (env + vararg)
+        out := u8.list(temp());
+        Run'printf_impl(out&, (ptr = fmt), va&.start());
+        print(out.items());
+        out.len.intcast()
+    });
+    
+    do_export("sprintf", @Fn(dest: *u8, fmt: *u8, va: CVariadic) i32, fn(dest, fmt, va) = {
+        // TODO: this won't work on amd64 (env + vararg)
+        out := u8.list(temp());
+        Run'printf_impl(out&, (ptr = fmt), va&.start());
+        dest.slice(out.len).copy_from(out.items());
+        out.len.intcast()
+    });
+    
+    weak :: Run.weak_imports;
     inline_for weak { $name |
         // TODO: use the right signetures so you actually get the message. 
         do_export(::name[], @Fn() void, fn() = @panic("comptime code tried to call a weak import"));
@@ -146,7 +174,14 @@ yield_module_main :: fn(m: *Qbe.Module) void = {
     backend'compile_suspended(m);
     if m.goal.type == .JitOnly {
         for_exports { name, f |
-            m.put_jit_addr(m.intern(name), f);
+            id := m.intern(name);
+            use_symbol(m, id) { s |
+                ::enum(@type s.kind);
+                // it's fine if they declared thier own function with one of the well known names (ie. backend/test/strcmp.ssa)
+                if s.kind == .Pending {
+                    m.put_jit_addr(id, f);
+                };
+            };
         };
     
         m.make_exec();
@@ -169,5 +204,9 @@ yield_module_main :: fn(m: *Qbe.Module) void = {
             @println("wrote % bytes to a.out", bytes.len);
         };
     };
-    drop(m);
+ 
+    // TODO: something's messed up. some specific tests die calling a null function index if you do this? 
+    //drop(m);
 }
+
+#use("@/lib/variadic.fr");
