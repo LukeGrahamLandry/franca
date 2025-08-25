@@ -6,7 +6,10 @@
 /// wake up `count` threads who are wait()-ing on `addr` 
 wake :: fn(addr: *u32, count: u32) void = {
 @if(SLOW_USERSPACE_THREADS) return(import("@/lib/sys/sync/green.fr")'wake(addr, count));
-@if(TODOWASM) @if(query_current_arch() == .wasm32) return();  // TODO: there's an instruction for this
+if query_current_arch() == .wasm32 {
+    _ := wasm_atomic_notify(addr, count);
+    return();
+};
 @match(query_current_os()) {
     fn macos() => {
         op := Syscall'ULockFlags.zeroed();
@@ -29,7 +32,10 @@ wake :: fn(addr: *u32, count: u32) void = {
 /// If addr==expect, sleep the thread until wake() is called on the same addr. 
 wait :: fn(addr: *u32, expect: u32) void = {
 @if(SLOW_USERSPACE_THREADS) return(import("@/lib/sys/sync/green.fr")'wait(addr, expect));
-@if(TODOWASM) @if(query_current_arch() == .wasm32) return();  // TODO: there's an instruction for this
+if query_current_arch() == .wasm32 {
+    _ := wasm_atomic_wait(addr, expect, -1);
+    return();
+};
 @match(query_current_os()) {
     // Return values just tell you stuff about timeouts and spurious wake ups 
     // which we don't care about since we're calling it in a loop. 
@@ -46,3 +52,36 @@ wait :: fn(addr: *u32, expect: u32) void = {
     @default => unreachable();
 };
 };
+
+// returns the number that were woken
+wasm_atomic_notify :: AsmFunctionWasmOnly(fn(addr: *u32, count: u32) i32 = (), fn(out) = {
+    out.push(0x00);  // 0 locals
+    out.push(0x20);  // local.get(0)
+    out.push(0x00);  // ^
+    out.push(0xA7);  // truncl (my pointers are 64 bit)
+    out.push(0x20);  // local.get(1)
+    out.push(0x01);  // ^
+    out.push(0xFE);  // atomic.notify
+    out.push(0x00);  // ^
+    out.push(0x02);  // ^ align
+    out.push(0x00);  // ^ off
+    out.push(0x0B);  // end
+});
+
+WasmWaitResult :: @enum(u32) (Ok = 0, NotEqual = 1, TimedOut = 2);
+// negative timeout means forever
+wasm_atomic_wait :: AsmFunctionWasmOnly(fn(addr: *u32, expect: u32, timeout_nanoseconds: i64) WasmWaitResult = (), fn(out) = {
+    out.push(0x00);  // 0 locals
+    out.push(0x20);  // local.get(0)
+    out.push(0x00);  // ^
+    out.push(0xA7);  // truncl (my pointers are 64 bit)
+    out.push(0x20);  // local.get(1)
+    out.push(0x01);  // ^
+    out.push(0x20);  // local.get(2)
+    out.push(0x02);  // ^
+    out.push(0xFE);  // atomic.wait(32)
+    out.push(0x01);  // ^
+    out.push(0x02);  // ^ align
+    out.push(0x00);  // ^ off
+    out.push(0x0B);  // end
+});

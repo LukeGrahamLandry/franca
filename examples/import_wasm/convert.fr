@@ -13,20 +13,7 @@
 //         but maybe the expectation with wasm is that the first compiler did that already?
 
 // TODO: validation
-// TODO: 
-//       abs, ceil, floor, trunc, nearest, copysign, trunc_sat, some other conversions
-//       multiple return values, ref.*
-//       more atomic ops. 
-//       memory ops: grow/init/size/fill/drop
-//       memory.copy: allow non-constant size. allow overlapping where you need to copy backwards. 
-//       br_table
-//       more table ops: size/fill/copy/init/drop
-//       vectors. 
-//       multiple memories. 
-//       0x1B version of select
-//
 // TODO: support aot. needs extra work because of import_wasm/runtime.fr
-//       
 // TODO: provide standard c api so could run other people's tests? https://github.com/WebAssembly/wasm-c-api/blob/main/include/wasm.h
 
 LoadWasm :: @struct(
@@ -631,13 +618,38 @@ fn emit_the_code(self: *LoadWasm) void = {
             }
             fn AtomicPrefix() => {
                 opcode := self.read_u();
+                align := self.read_u();
+                offset: u64 = @if(opcode == 3, 0, self.read_u());
+                
                 k: Qbe.Cls = @switch(opcode) {
+                    @case(0) => {  // atomic.notify
+                        count := self.stack&.pop().unwrap();
+                        p := self.stack&.pop().unwrap();
+                        p := self.compute_address(p, offset.bitcast());
+                        woken_count := Qbe.ConZero;
+                        self.stack&.push(woken_count);
+                        @eprintln("TODO: atomic.notify");
+                        continue()
+                    };
+                    @case(1) => {  // atomic.wait
+                        timeout := self.stack&.pop().unwrap();
+                        expect := self.stack&.pop().unwrap();
+                        p := self.stack&.pop().unwrap();
+                        p := self.compute_address(p, offset.bitcast());
+                        result := Qbe.ConZero;
+                        self.stack&.push(result);
+                        @eprintln("TODO: atomic.wait");
+                        continue()
+                    };
+                    @case(3) => {
+                        @assert_eq(align, 0, "the number after atomic(3)");
+                        @eprintln("TODO: atomic.fence");
+                        continue()
+                    };
                     @case(72) => .Kw;
                     @case(73) => .Kl;
                     @default => @panic("TODO: support more atomic ops (%)", opcode);
                 };
-                align := self.read_u();
-                offset := self.read_u();
                 
                 new := self.stack&.pop().expect("stack for cas-new");
                 old := self.stack&.pop().expect("stack for cas-old");
@@ -649,8 +661,8 @@ fn emit_the_code(self: *LoadWasm) void = {
                 self.f.emit(.cas1, k, prev, old, new);
                 self.stack&.push(prev);
             }
-            fn TablePrefix() => {
-                opcode := self.read_u();
+            fn PrefixFC() => {
+                opcode := @as(u64) self.read_u();
                 if opcode == 10 {  // memory.copy
                     @debug_assert(self.src[self.cursor] == 0 && self.src[self.cursor + 1] == 0);
                     self.cursor += 2;

@@ -266,7 +266,7 @@ different subsets of the same resources.
 - generate better code (see comments in wasm/isel.fr)
 - (see comments in wasm/abi.fr)
 - finish PromotePointers in import_wasm/run.fr
-- make AsmFunction not suck. at least do the length for you. 
+- make AsmFunction not suck
 - refactor output_wasm_module_jit so it shares more code with the aot version
 - it's tempting to expand into allowing the jitted module to be reused instead of hardcoding the first_export. 
   that needs data relocations for function pointers, at which point i should just give up and follow the convention other tools use. 
@@ -307,7 +307,11 @@ different subsets of the same resources.
   - echo.ssa: `$main(w %argc, l %argv)`
   - vararg1.ssa, vararg2.ssa: vprintf
   - compiler/main.fr jit: `wasm-jit $__franca_aot_debug_info should have known got_lookup_offset`
-
+- threads. it's a pain in the ass tho. 
+  - need cors to use sharedarraybuffer which limits the environments people can use your thing in.
+    (no github pages, no `python3 -m http.server`)
+  - no shared tables so have to keep them in sync manually so need to keep a list of every
+    time you load jitted code or do a table assignment and replay them when you span a new thread. 
 
 ## backend 
 

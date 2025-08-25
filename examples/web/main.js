@@ -144,6 +144,7 @@ await load_example(manifest.compilers[0].examples[0]);
 toggle_worker();
 
 document.getElementById("all").onclick = async () => {
+    document.getElementById("target").options.selectedIndex = 0;
     let saved = document.getElementById("in").value;
     let err = document.getElementById("err");
     let results = "";
@@ -225,3 +226,5 @@ for (const it of document.getElementsByTagName("textarea")) {
         this.selectionEnd = end + (new_.length - old.length);
     });
 }
+
+document.getElementById("wisdom").innerText = manifest.wisdom[Math.floor(Math.random() * manifest.wisdom.length)];

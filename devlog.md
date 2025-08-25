@@ -12,6 +12,25 @@
 - share implementations of well known libc stuff between import_wasm/run and web/demo
 - do dynalloc properly so vla.c passes
 - revert function order in env.ssa so the comments about inlining are true. idk why i changed it last time. 
+- make AsmFunction do the length for you
+
+i want threads
+- did the plumbing for atomic wake/wait/fence
+- i think the idea is you just make a new Worker and instantiate the same module on it. 
+  it needs to import the memory and indirect table so they share, 
+  but not the globals for stack pointer and env parameter. 
+  oh and it has to not run the data segment initializers. 
+- im a bit concerned it won't let me share tables between workers
+  because the shared-everything-threads proposal (which maybe doesn't exist yet) says 
+  "The lack of shared tables makes dynamic loading extremely complicated and slow, even for languages that otherwise can already use threads."
+  so maybe im just fucked.
+  yeah emscripten has dlsync_self which seems to be you re-dlopen everything you've ever dlopened every time you spawn a thread. 
+  which is... unfortunate. 
+  maybe it's kinda fine because the fast majority of the jitted code i only call on the main thread anyway.
+- "Failed to execute 'decode' on 'TextDecoder': The provided ArrayBufferView value must not be shared",
+  oh for fuck sake.
+- and then if you want to send a sharedarraybuffer to another worker you need the stupid CORS thing. 
+- you know what, no, im not doing things that dull my sparkle. 
 
 ## (Aug 23) wasm
 
