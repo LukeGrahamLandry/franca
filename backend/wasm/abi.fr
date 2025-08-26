@@ -9,7 +9,6 @@
 //       should use the same k_mem as isel does and it should be dynamic so i can support memory64 as well. 
 // TODO: use alloc instead of direct RSlot for varargs so it's consistant with the other targets. 
 // TODO: blit for argc
-// TODO: argc of just one scalar should be passed by value
 
 #use("@/backend/abi.fr");
 fn wasm_abi(f: *Qbe.Fn) void = {
@@ -23,10 +22,24 @@ selpar :: fn(f: *Qbe.Fn, par_i: []Qbe.Ins) Qbe.Ref = {
     // but to be fair, the first thing i would do here is save them in locals anyway so i can't complain. 
     // we leave par instructions, emit.fr needs to create those locals as the first ones (instead of ordered by tmp index). 
     
-    // TODO: check if they said its a type but really there's only one scalar 
+    @if(f.retty != Qbe.Null) if f.scalar_struct(f.retty) { k |
+        // single element struct returned by value 
+        f.ret_cls = k;
+        f.retty = Qbe.Null;
+    };
     f.retr = @if(f.retty != QbeNull, f.newtmp("abi", .Kl), QbeNull);
-    va_base := @if(f.vararg, f.newtmp("va", .Kl), Qbe.Null);
     
+    each par_i { i |
+        @if_let(i.op()) fn parc() => if f.scalar_struct(i.arg&[0]) { k |
+            // TODO: none of the .ssa tests get here
+            r := f.newtmp("abi", k);
+            f.emit(k.store_op(), .Kw, Qbe.Null, r, i.to);
+            f.emit(.alloc8, .Kw, i.to, f.getcon(8), Qbe.Null);
+            i[] = make_ins(.par, k, r, Qbe.Null, Qbe.Null);
+        };
+    };
+    
+    va_base := @if(f.vararg, f.newtmp("va", .Kl), Qbe.Null);
     if va_base != QbeNull {
         // append varargs pointer
         f.emit(.par, .Kl, va_base, QbeNull, QbeNull);
@@ -41,7 +54,6 @@ selpar :: fn(f: *Qbe.Fn, par_i: []Qbe.Ins) Qbe.Ref = {
                 f.env_par = i.to;
             }
             fn parc() => {
-                // TODO: check if they said its a type but really there's only one scalar so the ir expects a pointer but we got a value. 
                 // TODO: the par should be .Kw for the abi
                 f.emit(.par, i.cls(), i.to, Qbe.Null, Qbe.Null);
                 par_cls&.push(i.cls());
@@ -76,6 +88,15 @@ selret :: fn(b: *Qbe.Blk, f: *Qbe.Fn) void = {
         return();
     };
     @debug_assert(b.jmp.type != .ret0, "J.ret0 had arg");
+    
+    if b.jmp.type == .retc && f.retty == Qbe.Null {
+        r := f.newtmp("abi", f.ret_cls);
+        f.emit(.push, f.ret_cls, QbeNull, r, QbeNull);
+        f.emit(.load, f.ret_cls, r, b.jmp.arg, QbeNull);
+        b.jmp = (type = .ret0, arg = QbeNull);
+        return();
+    };
+    
     // TODO: check if they said its a type but really there's only one scalar 
     is_scalar := b.jmp.type != .retc;
     if is_scalar {
@@ -91,13 +112,32 @@ selret :: fn(b: *Qbe.Blk, f: *Qbe.Fn) void = {
         f.emit(.blit1, .Kw, QbeNull, INT(zext size), QbeNull);
         f.emit(.blit0, .Kw, QbeNull, b.jmp.arg, f.retr);  // src, dest
     };
-    b.jmp.type = .ret0;
-    b.jmp.arg = QbeNull;
+    b.jmp = (type = .ret0, arg = QbeNull);
 };
 
 sel_call :: fn(f: *Qbe.Fn, args: []Qbe.Ins, il: *List(Qbe.Ins)) *Qbe.Ins = {
     arg0, i := (args.ptr, args.ptr.offset(args.len));
     m    := f.globals;
+    
+    @if(i.arg&[1].rtype() == .RType) 
+    if scalar_struct(f, i.arg&[1]) { k |
+        // single element struct passed by value but the ir expects it in memory. 
+        r := f.newtmp("abi", k);
+        i.set_cls(k);
+        i.arg&[1] = Qbe.Null;
+        f.emit(k.store_op(), .Kw, Qbe.Null, r, i.to);
+        f.emit(.alloc8, .Kw, i.to, f.getcon(8), Qbe.Null);
+        i.to = r;
+    };
+    
+    before := Qbe.Ins.list(temp());
+    each args { i |
+        @if_let(i.op()) fn argc() => if f.scalar_struct(i.arg&[0]) { k |
+            r := f.newtmp("abi", k);
+            before&.push(make_ins(.load, k, r, i.arg&[1], Qbe.Null));
+            i[] = make_ins(.arg, k, Qbe.Null, r, Qbe.Null);
+        };
+    };
     
     type := type_index_for_call(f, i, arg0);
     if f.get_sym(i.arg&[0]) { id, off | 
@@ -108,7 +148,6 @@ sel_call :: fn(f: *Qbe.Fn, args: []Qbe.Ins, il: *List(Qbe.Ins)) *Qbe.Ins = {
         save_signature(m, id, type);
     };
     
-    // TODO: check if they said its a type but really there's only one scalar and it should be converted to a load. 
     is_scalar := i.arg&[1] == QbeNull;
     pending_indirect_return := QbeNull;
     if is_scalar {
@@ -153,8 +192,6 @@ sel_call :: fn(f: *Qbe.Fn, args: []Qbe.Ins, il: *List(Qbe.Ins)) *Qbe.Ins = {
     
     each_rev args { i |
         @match(i.op()) {
-            // TODO: check if they said its a type but really there's only one scalar and it should be converted to a load. 
-            // it's a pointer to a struct. just pass the pointer. 
             fn argc() => {
                 // TODO: need to insert a blit.
                 //       but this doesn't work. maybe just because the dynalloc isnt respecting alignment? 
@@ -196,6 +233,7 @@ sel_call :: fn(f: *Qbe.Fn, args: []Qbe.Ins, il: *List(Qbe.Ins)) *Qbe.Ins = {
         f.emit(.copy, i.cls(), pending_indirect_return, SLOT(f.slot), QbeNull);
         f.slot += t.header.size.bitcast();
     };
+    for(before, fn(i) => f.emit(i));
     
     arg0
 };
@@ -232,7 +270,7 @@ fn save_signature(m: *Qbe.Module, id: Qbe.Sym, type: i32) void = {
 
 fn type_index_for_call(f: *Qbe.Fn, call: *Qbe.Ins, arg0: *Qbe.Ins) i32 = {
     void := call.to == QbeNull;
-    scalar := !void && is_scalar(f, call.arg&[1]);
+    scalar := !void && rtype(call.arg&[1]) != .RType;
     pack_wasm_result_type f.globals { $yield_arg #duplicated |
         if !void && !scalar {
             // TODO: really this pointer should be Kw but then i have to change the par added above. 
@@ -249,25 +287,27 @@ fn type_index_for_call(f: *Qbe.Fn, call: *Qbe.Ins, arg0: *Qbe.Ins) i32 = {
             };
         };
     } and { $yield_ret |
-        if(scalar, => yield_ret(call.cls())); // TODO: cls is wrong once we do single field structs correctly
+        if(scalar, => yield_ret(call.cls()));
     }
 }
 
-fn is_scalar(f: *Qbe.Fn, maybe_type: Qbe.Ref) bool = {
-    if(rtype(maybe_type) != .RType, => return(true));
-    // TODO: you need to do this to implement the abi properly but then need to deal with converting to a pointer when expected by the ir. 
-    // is_scalar(f, maybe_type.val())
-    false
+fn scalar_struct(f: *Qbe.Fn, maybe_type: Qbe.Ref) ?Qbe.Cls = {
+    @debug_assert_eq(rtype(maybe_type), .RType);
+    scalar_struct(f, maybe_type.val())
 }
 
-fn is_scalar(f: *Qbe.Fn, type_index: i64) bool = {
+fn scalar_struct(f: *Qbe.Fn, type_index: i64) ?Qbe.Cls = {
     m := f.globals;
     type := m.get_type(type_index);
-    if(type.is_union, => return(false));
-    fst := type.fields[0]&;
+    if(type.is_union(), => return(.None));
+    fst := type.fields[0].unpack();
     @debug_assert(fst.type != .FEnd, "You should not have 0-sized types in the IR. Lower them in the frontend instead please.");
-    if(type.fields[1].type != .FEnd, => return(false));
-    fst.type != .FType || is_scalar(f, fst.len.intcast()) 
+    snd := type.fields[1].unpack();
+    if(snd.type != .FEnd, => return(.None));
+    k := fst.type.cls();
+    @if(k != .Ke) return(Some = k);
+    @if(fst.type == .FTyp) return(scalar_struct(f, fst.len.zext()));
+    .None
 }
 
 #use("@/backend/lib.fr");

@@ -32,7 +32,6 @@ You can still print out the ir as human readable text between passes and modify 
 - Emit Elf executables (and relocatable libraries) directly
   - WIP: I can't do dynamic libraries yet and exes rely on franca_runtime_init
 - Added a Web Assembly target (outputs the binary format directly).
-  - WIP: does not correctly follow the extern-c abi for small structs and pointers. 
   - WIP: no dynamic/relocatable libraries and can't export/import globals.  
   - WIP: code quality is poor. there's lots of low hanging fruit optimisations in wasm/isel.fr.  
   - WIP: irreducible control flow is not supported. 

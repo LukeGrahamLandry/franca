@@ -1,4 +1,11 @@
 
+## (Aug 26)
+
+- wasm: correct abi for single scalar structs. 
+  - heh, emit_ir actually does it in the frontend anyway, and none of the .ssa tests have scalar struct parc. 
+    makes this whole operation a bit silly. ah ok import_c doesn't do it tho, so before 
+    it wouldn't have worked calling a franca function on wasm with a scalar struct parameter. 
+
 ## (Aug 25)
 
 - taking a break; porting a parser generator i did in university 
@@ -7,6 +14,7 @@
   - but actually, if i just put_jit_addr that at the beginning instead of the end, it works for got_indirection_instead_of_patches as well. 
     only happens a few times in comptime code but doesn't hurt (zeroed, match_on_enum, match, default_init, emit_instructions)
   - oh hey! that cured `franca examples/mandelbrot_ui.fr -jit`, problems just go away if you ignore them!
+- very beginnings of graphics/web/app.fr browser event handling
 
 ## (Aug 24) wasm
 
