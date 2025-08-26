@@ -1,5 +1,6 @@
 // #foreign("git");
 driver :: fn(vtable: *ImportVTable) void = {
+    ci := get_environment_variable("GITHUB_REPOSITORY").is_some();
     franca := get_executable_path(temp());
     make_dirs_or_crash("examples/web/target");
 
@@ -10,7 +11,7 @@ driver :: fn(vtable: *ImportVTable) void = {
     
     ssa := collect_with_extension("examples/import_c/test", ".ssa") || panic("lost tests");
     
-    commit := if get_environment_variable("GITHUB_REPOSITORY").is_some() {
+    commit := if ci {
         ok, o, e := exec_and_catch("git", @slice("rev-parse", "HEAD"), temp());
         @assert(ok, "failed git rev-parse");
         while => o[o.len - 1].is_ascii_whitespace() {
@@ -39,6 +40,21 @@ driver :: fn(vtable: *ImportVTable) void = {
     
     dirs :: @const_slice("lib", "compiler", "backend", "bindings", "examples");
     for(dirs, copy_dir);
+    
+    // TODO: this is slowly approching crazy town...
+    if ci {
+        default := "Math.floor(new Date().valueOf())";
+        prefix := "let manifest_version = ";
+        main_js := read_entire_file_or_crash(temp(), "examples/web/main.js");
+        dest := main_js.rest(prefix.len).slice(0, default.len);
+        @assert(main_js.starts_with(prefix) && dest == default);
+        commit.len = min(commit.len, dest.len - 2);
+        dest[0] = "\"".ascii();
+        dest[dest.len - 1] = "\"".ascii();
+        dest.slice(1, commit.len + 1).copy_from(commit);
+        dest.slice(commit.len + 1, dest.len - 1).set_bytes("-".ascii());
+        write_entire_file_or_crash("examples/web/main.js", main_js);
+    };
 }
 
 copy_dir :: fn(path: Str) void = {

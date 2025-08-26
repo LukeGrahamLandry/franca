@@ -1,3 +1,4 @@
+let manifest_version = Math.floor(new Date().valueOf());
 if (typeof WebAssembly === "undefined")
     alert("Your browser does not support web assembly.");
 if (typeof Worker === "undefined")
@@ -86,7 +87,7 @@ const toggle_worker = () => {
     }
 };
 
-let manifest = await (await fetch("target/manifest.json?v=" + new Date().valueOf())).json();
+let manifest = await (await fetch("target/manifest.json?v=" + manifest_version)).json();
 const version = manifest.commit.slice(0, 8);
 console.log(manifest);
 document.getElementById("version").innerText = manifest.commit;
