@@ -355,7 +355,6 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 - TODO: harec/src/gen.c: `[arm64/emit.fr/fixup_arm64] offset from dynamic import builtin_type_nomem+4` but would work when done as one compilation unit.
 - mem3.ssa fails without opt/load.fr/loadopt()
 - :CopyElimTruncSymbolBug
-- TODO: i broke examples/mandelbrot_ui.fr -jit (different symptoms on arm and amd??)
 
 ## backend symbols rework
 

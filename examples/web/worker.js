@@ -6,7 +6,7 @@ let FrancaXXX = {};
 let start = performance.now();
 let version;
 
-function handleWasmLoaded(wasm, args) {
+export function handleWasmLoaded(wasm, args) {
     let load_end = performance.now();
     show_log(" Loaded in " + Math.round(load_end - start) + "ms.");
     Franca = wasm.instance.exports;
@@ -55,7 +55,7 @@ function write_args(args) {
     return p;
 }
 
-const imports = {
+export const imports = {
     env: {
         puts: (ptr) => {
             let len = 0;

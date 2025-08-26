@@ -1,0 +1,65 @@
+// THIS IS UNFINISHED
+// TODO: replace webgpu.fr with this
+
+dawn_json :: {
+    b64 := fetch_text_or_crash(
+        "https://dawn.googlesource.com/dawn/+/dfe3855e5d0b5367a598e60674766ffa1c894c71/src/dawn/dawn.json?format=TEXT",
+        237144, "6cf95730c0cab2b19256d0a58b40fc1f2af8ab1bfb460bc7cd00707f01e6c1ac", temp(),
+    );
+    out := u8.list(ast_alloc());
+    base64_decode(out&, b64);
+    // lets just make sure my decoding isn't broken
+    @assert_eq(Sha256'hex(out.items()), "bdf681b2c963d39f839b6590a25a739fa3a64f68ac9e0e8c0dc6d85f48c087ec");
+    out.items()
+}
+
+main :: fn() void = {
+    json: JsonParser = new_json(dawn_json, temp());
+    
+    loop {
+        it := or json&.next() { e |
+            panic(e)
+        };
+    }
+}
+
+// TODO: put this in @/lib somewhere
+// TODO: return error on invalid input
+fn base64_decode(out: *List(u8), b64: Str) void = {
+    @assert_eq(b64.len.mod(4), 0, "padding is required");
+    out.reserve(b64.len / 4 * 3);
+    i := 0;
+    while => i + 4 <= b64.len {
+        chunk(out, b64, i);
+        i += 4;
+    };
+    out.len -= int(b64.ends_with("==")) * 2;
+    out.len -= int(b64.ends_with("="));
+    
+    chunk :: fn(out: *List(u8), b64: []u8, i: i64) void #inline = {
+        operator_index :: index_unchecked;
+        v := b64[i+3].char()
+            .bit_or(b64[i+2].char().shift_left(6))
+            .bit_or(b64[i+1].char().shift_left(12))
+            .bit_or(b64[i+0].char().shift_left(18));
+        out.push_assume_capacity(v.shift_right_logical(16).trunc());
+        out.push_assume_capacity(v.shift_right_logical(8).trunc());
+        out.push_assume_capacity(v.trunc());
+    }
+    char :: fn(c: u8) i64 = {
+        operator_index :: index_unchecked;
+        table :: ast_alloc().alloc_init(u8, 255, fn(i) => char_calc(i.trunc()));
+        table[c.zext()].zext()
+    }
+    char_calc :: fn(c: u8) u8 = {
+        @if(c >= "A".ascii() && c <= "Z".ascii()) return((c - "A".ascii()) + 0);
+        @if(c >= "a".ascii() && c <= "z".ascii()) return((c - "a".ascii()) + 26);
+        @if(c >= "0".ascii() && c <= "9".ascii()) return((c - "0".ascii()) + 52);
+        @if(c == "+".ascii()) return(62);
+        @if(c == "/".ascii()) return(63);
+        0
+    };
+}
+
+#use("@/lib/json.fr");
+::import("@/examples/testing.fr");

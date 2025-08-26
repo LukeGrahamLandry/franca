@@ -73,7 +73,7 @@ const toggle_worker = () => {
             document.getElementById("target").value,
             ...(dbg.length == 0 ? [] : ["-d", dbg]),
         ];
-        worker = new Worker(`${manifest.worker}?v=${version}`);
+        worker = new Worker(`${manifest.worker}?v=${version}`, { type: "module" });
         worker.onmessage = handle;
         real_start_time = performance.now();
         worker.postMessage({ tag: "start", url: url, args: args, version: version });
