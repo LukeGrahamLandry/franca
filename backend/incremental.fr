@@ -1,7 +1,7 @@
 /// This defines the .frc file format used by the franca compiler. 
 /// See @/docs/caching.md
 
-MAGIC :: 0x000F_41434E415246;  // FRANCA__
+MAGIC :: 0x0010_41434E415246;  // FRANCA__
 Header :: @struct {
     meta: Meta #use;
     dep: Storage(Dep);
@@ -39,12 +39,12 @@ Dep :: @struct {
     hashcode: Sha256.Digest;
 };
 
-Sym :: @struct {
+Sym :: @rec @struct {
     segment: Seg; 
     align_log2: u8;
     name: Ref(u8);  // TODO: having names is kinda dumb
     // TODO: this should parse when inlined but then need to :UpdateBoot :Compiler
-    P :: @union(fnc: Fnc, dat: Dat, imp: Imp, asm: Asm);  
+    P :: @union(fnc: Fnc, dat: Dat, imp: Imp, asm: Asm, alias: One(Sym));  
     payload: P #use;  // active variant depends on segment
 };
 
@@ -54,6 +54,7 @@ Seg :: @enum(u8) (
     ConstantData, MutableData, ZeroInitData,  // payload: Dat;
     Import,  // payload: Imp;
     MachineCode,  // payload: Asm; goes in Segment.Code
+    Alias,
 );
 
 Asm :: @struct {
@@ -632,6 +633,12 @@ fn compile_all_symbols(header: *Header, m: *QbeModule) void = {
                 m.set_library(syms[i.off.zext()], lib, it.imp.weak);
             }
             fn Invalid() => ();
+            fn Alias() => {
+                lnk := Qbe.Lnk.zeroed();
+                lnk.id = syms[i.off.zext()];
+                target := syms[it.alias.off.zext()];
+                declare_alias(m, target, lnk&);
+            }
             @default => {
                 dat := load(header, m, i, syms);
                 m.emit_data(dat);

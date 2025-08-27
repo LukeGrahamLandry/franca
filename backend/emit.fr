@@ -393,74 +393,54 @@ fn add_code_bytes(m: *QbeModule, name_id: Qbe.Sym, code: *MultiArchAsm) void = {
     finish_function(m, dest, name_id);
 }
 
+// TODO: make this work when the alias is exported but the target isn't. 
 fn declare_alias(m: *Qbe.Module, target: Qbe.Sym, alias: *Qbe.Lnk) void = {
     // if the target thing is inlinable, this function can inline to the same thing. 
     target_kind := SymbolKind.Pending;
-    target_inline := Qbe.InlineFn.ptr_from_int(0);
-    inlinable := false;
-    use_symbol(m, target) { s | 
-        mark_referenced(m, target, s);
-        target_inline = s.inline;
-        target_kind = s.kind;
-        inlinable = s.inlinable;
+    use_symbol(m, alias.id) { a | 
+        // makes future push_fixup go to the target symbol instead. 
+        a.alias = target;
+        
+        use_symbol(m, target) { t | 
+            mark_referenced(m, target, t);
+            target_kind = t.kind;
+            
+            if target_kind == .Pending {
+                for a.fixups { it |
+                    push_fixup(m, t, it);
+                };
+                a.fixups.len = 0;
+            };
+            
+            @if(!IS_BOOTSTRAPPING)
+            if m.save { writer |
+                id := writer.map_sym(m, a.id);
+                it := writer.sym[id]&;
+                it.segment = .Alias;
+                it.alias.off = writer.map_sym(m, t.id).trunc();
+            };
+            
+            a.inline = t.inline;
+            a.inlinable = t.inlinable;
+            // make sure it never gets added to inlinable_but_referenced_later (inline being non-null normally means it wasn't emitted). 
+            // other than being wasteful, redefining something that already exists is bad for business, and since the other one aliases 
+            // the Qbe.Fn, it would be emitted twice and double free arrays, or something bad i guess. the problem only exhibits when 
+            // constant folding is disabled (which has to happen to re-bootstrap whenever the .frc version number changes). 
+            // TODO: simpler repro than the whole compiler!
+            a.referenced = a.referenced || !t.inline.is_null();  
+        };
     };
     
-    use_symbol(m, alias.id) { s | 
-        s.inline = target_inline;
-        s.inlinable = inlinable;
-        // make sure it never gets added to inlinable_but_referenced_later (inline being non-null normally means it wasn't emitted). 
-        // other than being wasteful, redefining something that already exists is bad for business, and since the other one aliases 
-        // the Qbe.Fn, it would be emitted twice and double free arrays, or something bad i guess. the problem only exhibits when 
-        // constant folding is disabled (which has to happen to re-bootstrap whenever the .frc version number changes). 
-        // TODO: simpler repro than the whole compiler!
-        s.referenced = s.referenced || !target_inline.is_null();  
+    if target_kind == .Pending {
+        return();
     };
-
-    // TODO: it would be nice if it i could use the real aliasing thing for everything 
-    //       but it's a pain for things that aren't ready yet. i don't want to make you check 
-    //       for aliases every time you use a symbol. main problem is when it's an import 
-    //       that doesn't have a got_lookup_offset yet i think. might not be worth dealing with.  -- Jul 22, 2025
-    // TODO: inlinable should work like local. but that needs emit_suspended_inlinables to be aware of it which i don't want to deal with yet. 
-    if target_kind == .Local { // || !target_inline.is_null() {
-        m.finish_alias(target, alias.id, alias.export);
-    } else {
-        // TODO: lets just see what happens...
-        //@debug_assert(m.goal.arch != .wasm32, "TODO: alias_via_bounce doesn't work on wasm $%; TODOWASM=%", m.str(alias.id), TODOWASM);
     
-        if m.goal.arch == .wasm32 {
-            push(m.temporary_alias&, (target, alias.id));
-            // TODO: link up got slots now?
-        } else {
-            alias_via_bounce(m, target, alias);
-        }
-    }
+    m.finish_alias(target, alias.id, alias.export);
 }
 
-fn alias_via_bounce(m: *Qbe.Module, target: Qbe.Sym, alias: *Qbe.Lnk) void = {
-    f := temp().box_zeroed(Qbe.Fn);
-    f.leaf = true;  // This is a lie but really we're asking for no stack frame
-    f.nblk = 1;
-    f.globals = m;
-    f.con = new(fixed_const_count);
-    f.getcon(0xdeaddead);
-    f.getcon(0);
-    f.lnk = alias[];
-    f.start = newblk();
-    callee := f.symcon(target);
-    f.reset_scratch();
-    f.emit(.call, .Kw, QbeNull, callee, Qbe.RCALL_TAIL_SENTINAL);
-    f.copy_instructions_from_scratch_reversed_which_means_forwards(f.start);
-    f.start.jmp.type = .hlt;
-
-    // emit asm directly; don't run the normal passes
-    emit_fn(f);
-}
-
-// TODO: maybe_add_export(alias)
 fn finish_alias(m: *Qbe.Module, target: Qbe.Sym, alias: Qbe.Sym, export: bool) void = {
-    maybe_add_export(m, alias, export);
+    //maybe_add_export(m, alias, export);  // TODO: also be careful of wasm
     use_symbol(m, target) { t | 
-        @debug_assert_eq(t.kind, .Local, "alias(non local: %)", t.name);
         use_symbol(m, alias) { a | 
             a.alias = target;
             a.kind = t.kind;
@@ -605,9 +585,28 @@ fn do_fixups_impl(self: *QbeModule, symbol: *SymbolInfo) void = {
     
     @if(TODOWASM)
     if self.goal.arch == .wasm32 && symbol.segment == .Code && symbol.got_lookup_offset == -1 {
-        @debug_assert(self.goal.type != .JitOnly, "wasm-jit $% should have known got_lookup_offset", symbol.name);
-        // Need to wait until the end of compilation to know its index. 
-        return();
+        if symbol.alias == Qbe.no_symbol_S || self.goal.type != .JitOnly {
+            @debug_assert(self.goal.type != .JitOnly, "wasm-jit $% should have known got_lookup_offset", symbol.name);
+            // Need to wait until the end of compilation to know its index. 
+            return();
+        };
+        
+        // TODO: can this move to declare_alias?
+        use_symbol(self, symbol.alias) { a |
+            // :wasmgotunify
+            if a.got_lookup_offset == -1 {
+                f :: import("@/backend/wasm/emit.fr").table_grow;
+                a.got_lookup_offset = f(1).intcast();
+                // TODO: only if it's a function
+                if a.jit_addr.is_null() {
+                    a.jit_addr = a.got_lookup_offset.rawptr_from_int();
+                }
+            };
+            symbol.got_lookup_offset = a.got_lookup_offset;
+            symbol.wasm_module_function_index = a.wasm_module_function_index;
+            symbol.jit_addr = a.jit_addr;
+            symbol.kind = .DynamicPatched;
+        };
     };
     
     fixups := symbol.fixups.items();
@@ -645,7 +644,6 @@ fn ensure_got_slot(self: *QbeModule, symbol: *SymbolInfo, jit_address: rawptr) ?
     got := rawptr.ptr_from_raw(got);
     if self.goal.got_indirection_instead_of_patches {
         if jit_address.is_null() {
-            //@println("ensure_got_slot null %", symbol.name);
             got[] = @as(rawptr) (fn() Never = panic("ICE: tried to call got null jit_address"));
         } else {
             got[] = jit_address;
@@ -773,8 +771,14 @@ fn llvm_mc_dis(out: *List(u8), code: []u8, arch: Arch) void = {
     out.push_all(e.items());
 }
 
-fn push_fixup(m: *QbeModule, symbol: *SymbolInfo, fix: Fixup) void #inline = {
+fn push_fixup(m: *QbeModule, symbol: *SymbolInfo, fix: Fixup) void = {
     a := m.forever&.borrow();
+    if symbol.alias != Qbe.no_symbol_S {
+        use_symbol(m, symbol.alias) { target |
+            push_fixup(m, target, fix);
+        };
+        return();
+    };
     symbol.fixups&.push(fix, a);
 }
 

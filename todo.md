@@ -54,6 +54,11 @@
   twice the syscalls and you produce toctou problems for no reason. 
   the reason it's annoying to fix is you want to know why something failed not 
   just that it failed so then i need to deal with remapping errno values for the different targets. 
+- `FRANCA_NO_CACHE=1 ./q.out examples/import_wuffs/test.fr`
+  > Assertion Failed: need_reify on threaded codegen of wuffs_base__io_reader__read_u8__46298
+- repl.fr doesn't work jitted with FRANCA_NO_CACHE=1 on arm-macos because it needs to call apple_thread_jit_write_protect.
+  should allow not writing to exec memory and call a tiny bit of aot code to do the copy when you're done each function. 
+- #log_ir needs to do something in declare_alias
 
 ## remaining nondeterminism
 
@@ -355,6 +360,7 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 - TODO: harec/src/gen.c: `[arm64/emit.fr/fixup_arm64] offset from dynamic import builtin_type_nomem+4` but would work when done as one compilation unit.
 - mem3.ssa fails without opt/load.fr/loadopt()
 - :CopyElimTruncSymbolBug
+- get rid of RCALL_TAIL_SENTINAL now that i don't need alias_via_bounce
 
 ## backend symbols rework
 

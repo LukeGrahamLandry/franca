@@ -5,8 +5,37 @@
   - heh, emit_ir actually does it in the frontend anyway, and none of the .ssa tests have scalar struct parc. 
     makes this whole operation a bit silly. ah ok import_c doesn't do it tho, so before 
     it wouldn't have worked calling a franca function on wasm with a scalar struct parameter. 
+- for saving signeture before you have a callsite. did it's own thing that directly calls abi.sel_call
+  instead of compiling a whole fake function for it. still not happy with the added repetitive code. 
+- trying to make declare_alias less insane. 
+  - gave up on my old idea and made push_fixup check symbol.alias and recurse until it finds the real one. 
+  - added a special thing for aliases in incremental.fr to fix the printf call in import_wuffs/test.fr 
+    which has to go through multiple layers of modules. that was confusing. 
+  - now i want to get rid of verbose_bounce_body
+    - things that use choose_inode64_on_applex8664 crash on native
+      (but not AOT and not when NO_CACHE=1, just cached->jit). 
+      it's an unfilled loadaddr_bits of an import (not of the alias tho). 
+      it works on amd, not arm. right, it's the same problem 
+      as i fix in emit_suspended_inlinables when `got_indirection_instead_of_patches && !link_libc`,
+      the `name$INODE64` versions don't exist on arm so the patch is never filled,
+      but it needs to be able to produce a null address and just not call it. 
+      the pending GOT access is a hlt. worked before because it was getting the address of a local trampoline. 
+    - now repl.fr has an unfilled call_symbol in get_info. 
+      it's a #redirect on a `!=` overload (`ne__1020 -> ne__3472` is for Type). 
+      declare_alias needs to only move the fixups to the target if it's pending. 
+      if it's already done, it won't do fixups again, so it does them itself at the end of declare_alias. 
+    - now native works but not wasm. 
+      need a whole dance of syncronising thier got_lookup_offset for wasm-jit. 
+    - wasm bf2ir: `add_numbers: invalid argument for op push RNull:0`. 
+      doesn't like CodegenTask.FromCache
+      wtf, where's it even getting a call_indirect from? 
+      woah!! that was a mistake in SaveSign, need to call reset_scratch at the end. 
+      - also fixed inlcalls leaking scratch, which was fine because everybody else resets at the beginning, 
+        but that's why i didn't immediately notice that mistake in SaveSign, so it's more robust now perhaps. 
+    - delete verbose_bounce_body
 
 ## (Aug 25)
+
 
 - taking a break; porting a parser generator i did in university 
 - fixed unfilled fixup for symbol_memmove when 

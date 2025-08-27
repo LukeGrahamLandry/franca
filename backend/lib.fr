@@ -833,6 +833,7 @@ CodegenTask :: @tagged(
     // :UpdateBoot
     SetLibrary: []Ty(@slice(Qbe.Sym, Str, bool)), // id, lib, weak
     FromCache: @struct(f: *Qbe.Fn, did_regalloc: bool),
+    SaveSign: *Qbe.Fn,
 );
 
 CodegenEntry :: @struct(
@@ -1023,6 +1024,7 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
     entry.logging = "";
     prev_debug := m.debug;
     m.set_debug_types(logging, true);
+    @debug_assert(identical(m.curi, m.insb.index_unchecked(Qbe.MaxInstructions)), "leaked scratch");
     @match(entry.task) {
         fn Dead() => @panic("dead codegen task %", m.initialized);
         fn Func(f) => {
@@ -1039,6 +1041,7 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
             jit_addr := shim_s.jit_addr;
             use_symbol(m, it.shim_for) { s | 
                 break :: local_return;
+                // :wasmgotunify
                 @if(TODOWASM) if m.goal.arch == .wasm32 {
                     import("@/backend/wasm/abi.fr")'save_signature(m, it.shim_for, shim_s.wasm_type_index);
                     @debug_assert(shim_s.got_lookup_offset == -1);
@@ -1116,6 +1119,19 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
             } else {
                 // TODO: still inlsave(), that's kinda the whole point of this operation
                 {f.globals.target.finish_passes}(f);
+            };
+        }
+        fn SaveSign(f) => {
+            f.lnk.id = m.intern("xx");  // in case you want to printf debug in sel_call
+            @if(!IS_BOOTSTRAPPING)
+            if m.goal.arch == .wasm32 {
+                xxx := Qbe.Ins.list(temp());
+                i := f.start.ins.items();
+                with m.types_mutex& {
+                    import("@/backend/wasm/abi.fr")'sel_call(f, i.slice(0, i.len-1), xxx&);
+                };
+                // sel call outputs instructions for its normal usage, but here i just wanted the type
+                f.reset_scratch();
             };
         }
     };
