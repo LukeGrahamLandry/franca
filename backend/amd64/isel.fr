@@ -24,10 +24,8 @@
 // so they're in @if(!ENABLE_CONST_FOLD). 
 //
 
-NEW_ADDR_FOLDING :: false; // TODO: finish this
-
 /* instruction selection requires use counts */
-fn amd64_isel(f: *Qbe.Fn) void = // NEW_ADDR_FOLDING, collapse_op_amd64, 
+fn amd64_isel(f: *Qbe.Fn) void =
     native_isel(f, fixarg, sel_terminator, sel_inst);
 
 sel_inst :: fn(i: **Qbe.Ins, b: *Qbe.Blk, f: *Qbe.Fn) void = {
@@ -42,10 +40,6 @@ fn noimm(r: Qbe.Ref, f: *Qbe.Fn, o: Qbe.O) bool = {
     if(rtype(r) != .RCon, => return(false));
     c := f.get_constant(r);
     @match(c.type()) {
-        /* we only support the 'small'
-         * code model of the ABI, this
-         * means that we can always
-         * address data with 32bits */
         fn CAddr() => false;
         // jitting on linux you can reasonably have <4GB constant address, but since call instruction 
         // is relative, you might not be able to reach all the way down there in 32 bits of immediate. 
@@ -58,19 +52,6 @@ fn rslot(r: Qbe.Ref, f: *Qbe.Fn) i32 = {
     if(rtype(r) != .RTmp, => return(-1));
     f.get_temporary(r)[].slot
 }
-
-// unstable!
-fn hascon(r: Qbe.Ref, pc: **Qbe.Con, f: *Qbe.Fn) bool = @match(rtype(r)) {
-    fn RCon() => {
-        pc[] = f.get_constant(r);
-        true
-    }
-    fn RMem() => {
-        pc[] = f.get_memory(r)[].offset&;
-        true
-    }
-    @default => false;
-};
 
 fn fixarg(r: *Qbe.Ref, k: Qbe.Cls, i: *Qbe.Ins, f: *Qbe.Fn) void = {
     T := f.globals.target&;
@@ -146,24 +127,6 @@ fn lea(f: *Qbe.Fn, dest: Qbe.Ref, con_in: Qbe.Ref) void = {
     f.emit(@if(f.is_symbol(con_in), .addr, .copy), .Kl, dest, con_in, QbeNull);
 }
 
-fn collapse_op_amd64(f: *Qbe.Fn, i: *Qbe.Ins, _bid: i32) void = {
-    if(!i.cls().is_int(), => return());
-    if(!@is(i.op(), .add, .mul), => return());
-    r := i.to;
-    mem: Qbe.Addr = (base = r, index = QbeNull, scale = 1, offset = (type = .CBits, bits = (i = 0)));
-    f.merge_amd_addr(mem&);
-    when_debug(f, .InstSelect) { out |
-        @fmt(out, "\n");
-    };
-    @debug_assert(mem.offset.type != .CAddr || (mem.index == QbeNull && mem.base == QbeNull), "generated illegal addressing mode");
-    if(mem.base == r && mem.index == QbeNull && mem.offset.bits.i == 0, => return());
-
-    chuse(r, 1, f);  // because merge_amd_addr -1
-    m := f.new_mem(mem);
-    chuse(m, 1, f);
-    i[] = make_ins(.addr, i.cls(), r, m, QbeNull);
-}
-
 // TODO: this would be better if you did it in the other order and converted everything to lea as a way of memoizing for future uses of the same address. 
 //       then it would be O(amount of math + amount of dereferences) instead of O(amount of math * amount of dereferences)
 fn merge_amd_addr(f: *Qbe.Fn, mem: *Qbe.Addr) void = {
@@ -171,7 +134,7 @@ fn merge_amd_addr(f: *Qbe.Fn, mem: *Qbe.Addr) void = {
     loop {
         continue :: local_return;
         n += 1;
-        @debug_assert(n < 1000, "probably infinite looping in merge_amd_addr of %", f.name());
+        @debug_assert(n < 10, "probably infinite looping in merge_amd_addr of %", f.name());
         
         when_debug(f, .InstSelect) { out |
             printmem(mem, f, out);
@@ -252,23 +215,6 @@ fn merge_amd_addr(f: *Qbe.Fn, mem: *Qbe.Addr) void = {
                     if mem.scale == 1 {
                         t := mem.base; mem.base = mem.index; mem.index = t;
                         goto_index();
-                    };
-                }
-                fn addr() => {
-                    m := f.get_memory(a0);
-                    if mem.index == QbeNull {
-                        if mem.offset&.bits() == 0 && mem.offset&.type() != .CAddr {
-                            chuse(mem.base, -1, f);
-                            mem[] = m[];
-                            continue();
-                        };
-                    };
-                    if m.index == QbeNull && mem.offset&.type() != .CAddr {
-                        chuse(mem.base, -1, f);
-                        mem.offset.sym = m.offset.sym;
-                        mem.offset&.set_bits(mem.offset&.bits() + m.offset&.bits());
-                        mem.base = m.base;
-                        continue();
                     };
                 }
                 @default => ();
@@ -361,37 +307,15 @@ fn fix_slot(f: *Qbe.Fn, r: *Qbe.Ref) void = {
 }
 
 fn seladdr(r: *Qbe.Ref, f: *Qbe.Fn) void = {
-    if(!NEW_ADDR_FOLDING && rtype(r[]) == .RMem, => return());  // trace_* get here
-    if rtype(r[]) == .RCon {  
-        // r[] can be a CBits (which might fits_in_i32),
-        // - when writting a test that stores to a constant and catches the segsev
-        // - in jitted code (= known addr) on linux (= low 4gb)
-        // But it still needs to go in an RMem so amd64_encoding_table can just have .M entries. 
-        if f.get_int(r[]).is_none() {
-            //return();  // arg_t(.CAddr) == .M, but we need to check "only LEA can be converted to GOT load [...]" all the way at the bottom TODO
-        };
+    @debug_assert_ne(rtype(r[]), .RMem);
+    mem: Qbe.Addr = (base = r[], index = QbeNull, scale = 1, offset = @run con(Qbe.no_symbol_S, 0));
+    f.merge_amd_addr(mem&);
+    when_debug(f, .InstSelect) { out |
+        printmem(mem&, f, out);
     };
-    mem: Qbe.Addr = (base = r[], index = QbeNull, scale = 1, offset = con(Qbe.no_symbol_S, 0));
-    if NEW_ADDR_FOLDING {
-        if mem.base.rtype() == .RTmp {
-            def := f.get_temporary(mem.base)[].def;
-            if !def.is_null() && def.op() == .addr && def.arg&[0].rtype() == .RMem {
-                chuse(mem.base, -1, f);
-                mem = f.get_memory(def.arg&[0])[];
-                chuse(mem.base, 1, f);
-                chuse(mem.index, 1, f);
-            };
-        };
-        f.fix_amd_mem(mem&, false);
-    } else {
-        f.merge_amd_addr(mem&);
-        when_debug(f, .InstSelect) { out |
-            printmem(mem&, f, out);
-        };
-        f.fix_amd_mem(mem&, false);
-        when_debug(f, .InstSelect) { out |
-            @fmt(out, "\n");
-        };
+    f.fix_amd_mem(mem&, false);
+    when_debug(f, .InstSelect) { out |
+        @fmt(out, "\n");
     };
     r[] = f.new_mem(mem);
 }
@@ -468,12 +392,7 @@ fn could_be_import(m: *Qbe.Module, id: Qbe.Sym) bool = {
     result
 }
 
-fn new_mem(f: *Qbe.Fn, mem: Qbe.Addr) Qbe.Ref #inline = {
-    push(f.mem&, f.nmem&, mem);
-    MEM(f.nmem.zext() - 1)
-}
-
-fn cmpswap(arg: *Array(Qbe.Ref, 2), cmp: i32) bool = {
+fn need_cmpswap(arg: *Array(Qbe.Ref, 2), cmp: i32) bool = {
     cmp := @as(Qbe.Cmp) cmp;
     @match(cmp) {
         fn Cflt() => true;
@@ -512,7 +431,7 @@ fn selsel_amd64(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) *Qbe.Ins = {
     };
     t := f.get_temporary(r); 
     nuse := t.nuse;
-    fi := flagi(b.ins.ptr, isel0);
+    fi := flagi(between(b.ins.ptr, isel0));
     cr0, cr1 := (QbeNull, QbeNull);
     gencmp, gencpy, need_swap := (false, false, false);
     k := t.cls;
@@ -524,7 +443,7 @@ fn selsel_amd64(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) *Qbe.Ins = {
             cr1 = QbeConZero;
         };
         @if(iscmp(fi.op(), k&, c&) && c != Qbe.Cmp.Cfeq.raw() && c != Qbe.Cmp.Cfne.raw()) => {  /* see sel() */
-            need_swap = cmpswap(fi.arg&, c);
+            need_swap = need_cmpswap(fi.arg&, c);
             if need_swap {
                 c = cmp_swap(c);
             };
@@ -643,13 +562,7 @@ fn sel_inner(i: *Qbe.Ins, f: *Qbe.Fn) void = {
         fn dtoui()  => f.sel_ftoi(i, .Kd, .dtosi, 0xc3e0000000000000);
         fn nop()    => ();
         fn asm()    => { f.emit(i[]); } // no fixargs, you're allowed an RCon u32 with the high bit set
-        fn addr() => {
-            @debug_assert(NEW_ADDR_FOLDING, "shouldn't have addr ops yet.");
-            i := f.emit(i[]);
-            m := f.get_memory(i.arg&[0]);
-            f.fix_amd_mem(m, true);
-            // TODO: bring back the thing where if it's just a CAddr, it's inline so opt/slots.fr can deduplicate it. 
-        }
+        fn addr() => unreachable();
         // TODO: do we trust that it leaves the destination unmodifed when input is zero? then this could be much simpler. 
         fn clz() => {
             // TODO: maybe i should just declare i don't care about cpus that don't have LZCNT and then this can be one instruction
@@ -722,7 +635,7 @@ fn sel_inner(i: *Qbe.Ins, f: *Qbe.Fn) void = {
                     fn Cfne() => emit_check_order_flag(f, i, .or, .flagfuo);
                     @default => ();
                 };
-                swap := cmpswap(i.arg&, x);
+                swap := need_cmpswap(i.arg&, x);
                 if swap {
                     x = cmp_swap(x);
                 };
@@ -824,31 +737,14 @@ fn sel_shift(f: *Qbe.Fn, i: *Qbe.Ins) void = {
     fixarg(i1.arg&.index(0), argcls(i, 0), i1, f);
 }
 
-fn flagi(i0: *Qbe.Ins, i: *Qbe.Ins) *Qbe.Ins = {
+fn flagi(i: []Qbe.Ins) *Qbe.Ins = {
     null := Qbe.Ins.ptr_from_int(0);
-    while => i.in_memory_after(i0) {
-        i = i.offset(-1);
-        zflag, lflag := amd64_flag_table(i.op());
+    each_rev i { i |
+        zflag, lflag := ops_table_amd_flag(i.op());
         if(zflag, => return(i));
         if(!lflag, => return(null));
     };
     null
-}
-
-// returns (SetsZeroFlag, LeavesFlags)
-fn amd64_flag_table(o: Qbe.O) Ty(bool, bool) = {
-    b :: fn($o1: Qbe.O, $o2: Qbe.O) => o.between(o1, o2);
-    if b(.ceqw, .cuod) || b(.add, .neg) || b(.and, .shl) || b(.blit0, .blit1) || b(.xcmp, .xtest) || (@is(o, .ctz, .clz)) {
-        return(true, false)
-    };
-    if b(.storeb, .cast) || o.between(.flagieq, .flagfuo) || o == .copy || o == .dbgloc || b(.nop, .addr) || o == .sel0 || o == .byteswap {
-        return(false, true)
-    };
-    if b(.acmp, .call) || b(.div, .mul) || b(.swap, .xdiv) || (@is(o, .cas1, .sel1, .rotr, .rotl, .ones)) {
-        return(false, false)
-    };
-    
-    @panic("TODO: unhandled op for amd64_flag_table() %", o)
 }
 
 fn sel_ftoi(f: *Qbe.Fn, i: *Qbe.Ins, kc: Qbe.Cls, o: Qbe.O, t4: u64) void = {
@@ -924,7 +820,7 @@ fn seljnz(b: *Qbe.Blk, f: *Qbe.Fn) void = {
         b.s2 = Qbe.Blk.ptr_from_int(0);
         return();
     };
-    fi := flagi(b.ins.ptr, b.ins.index_unchecked(b.ins.len));
+    fi := flagi(b.ins.items());
     k := Qbe.Cls.Kw; // :jnz_is_Kw
     c: i32 = 0;
     @if_else {
@@ -937,7 +833,7 @@ fn seljnz(b: *Qbe.Blk, f: *Qbe.Fn) void = {
         @if(iscmp(fi.op(), k&, c&)
             && c != Qbe.Cmp.Cfeq.raw() /* see sel() */
             && c != Qbe.Cmp.Cfne.raw()) => {
-            swap := cmpswap(fi.arg&, c);
+            swap := need_cmpswap(fi.arg&, c);
             if swap {
                 c = cmp_swap(c);
             };

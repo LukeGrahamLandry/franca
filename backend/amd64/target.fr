@@ -1,7 +1,5 @@
 #use("@/backend/amd64/sysv.fr");
 
-X86cc :: Amd.X86cc;
-
 fn fill_target_amd(t: *Qbe.Target, apple: bool) void = {
     Emit :: import("@/backend/amd64/emit.fr");
 
@@ -14,9 +12,6 @@ fn fill_target_amd(t: *Qbe.Target, apple: bool) void = {
     t.emit_fn = Emit.emit_func_amd64;
     
     ::enum(Amd64Reg);
-    ::List(Amd64Reg);
-    
-    ::List(X86cc);
     
     t.apple = apple;
     t.gpr0 = zext Amd64Reg.RAX.raw();
@@ -35,22 +30,10 @@ fn fill_target_amd(t: *Qbe.Target, apple: bool) void = {
 // The number returned here is WHICH (not how many) arguments are allowed to be accessed 
 // indirectly from thier spill slot in memory if there's a lot of register pressure. 
 // 0 means none. 1 means only the first. 2 means either (but not both in the same instruction). 
+// TODO: this happens a grand total of 27 times in the compiler. why bother? 
 //
 fn amd64_memargs(o: Qbe.O) i32 = {
-    @debug_assert(!o.between(.ceqw, .cuod), "C**K is frontend only");
-    if o.between(.acmp, .flagfuo) || o.between(.ceqw, .blit1) || o.between(.div, .urem) || o.between(.sign, .salloc) || o.is_sel_flag() || (@is(o, .cas0, .cas1)) {
-        return(0);
-    };
-    if o.between(.add, .sub) || o.between(.mul, .xor) {
-        return(2);
-    };
-    if o == .neg || o == .swap || o.between(.sar, .shl) || o.between(.xidiv, .xtest) || (@is(o, .rotl, .rotr, .clz, .ctz)) {
-        return(1);
-    };
-    if (@is(o, .asm, .byteswap)) {  
-        return(0);
-    };
-    @panic("unknown op for amd64_memargs")
+    import("@/backend/meta/ops.fr").tables[intcast @as(i32) o].shift_right_logical(24).bit_and(2).bitcast()
 }
 
 // Note: these numbers are NOT the ones you encode in the instructions. ints are of by 1, floats are off by 1+16
@@ -64,13 +47,6 @@ Amd64Reg :: @enum(u8) (
     /* sse */
     XMM0, XMM1, XMM2,  XMM3,  XMM4,  XMM5,  XMM6,  XMM7,
     XMM8, XMM9, XMM10, XMM11, XMM12, XMM13, XMM14, XMM15,
-);
-
-amd_condition_codes :: @const_slice( // :CmpOrder
-    // Cieq Cine Cisge Cisgt Cisle Cislt Ciuge Ciugt Ciule Ciult
-    X86cc.e, .ne,  .ge,  .g,  .le,  .l,  .ae,  .a,  .be,  .b,
-    // Cfeq Cfge Cfgt Cfle Cflt Cfne Cfo  Cfuo
-         .e, .ae, .a, .be, .b,  .ne, .np, .p
 );
 
 fn TMP(r: Amd64Reg) Qbe.Ref = { 

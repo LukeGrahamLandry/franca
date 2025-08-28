@@ -629,8 +629,6 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
             assemble(e, i&); 
         }
         fn storeh() => {
-            // TODO: has RTmp already been converted to RMem for all stores?
-            
             if e.f.get_int(i.arg&[0]) { c |
                 c = c.bit_and(1.shift_left(16) - 1);
                 i.arg&[0] = TMP(reg_for_extension(0));
@@ -875,9 +873,6 @@ fn encode(e: *AmdState, i: *Qbe.Ins, w: bool, immediate_size: i64) EncodedArgs =
         return(modrm = pack_modrm(ModrmMode.Direct, rr1, rr0), rex = pack_rex_si(w, rr0, rr1, DONT_CARE_REG), sib = .None, force_rex = force_rex);
     };
     
-    // TODO: im often wasting a byte. i think sib? example:
-    //       17: f3 44 0f 11 44 25 f0         	movss	dword ptr [rbp + riz - 0x10], xmm8
-    //       12: f3 44 0f 11 45 f0            	movss	dword ptr [rbp - 0x10], xmm8
     if t1 == .RMem {
         @debug_assert(t0 != .RMem, "cannot encode two memory arguments");
         m := e.f.get_memory(r1)[]; // copy!
@@ -895,11 +890,12 @@ fn encode(e: *AmdState, i: *Qbe.Ins, w: bool, immediate_size: i64) EncodedArgs =
         };
         @debug_assert(valid_offset, "cannot encode offset %", m.offset&.bits()); 
         small := m.offset&.bits() <= 127 && m.offset&.bits() >= -128;
-        no_disp := m.offset&.bits() == 0 && m.index != TMP(Amd64Reg.RBP) && m.index != TMP(Amd64Reg.R13);
+        no_disp := m.offset&.bits() == 0;
         disp_size: Displacement = @if(no_disp, .D0, @if(small, .D8, .D32)); // more - than +!
         
         special_base := m.base == TMP(Amd64Reg.RBP) || m.base == TMP(Amd64Reg.R13);
         if special_base && disp_size == .D0 {
+            // Indirect00 with base=RBP decodes as RIP+disp32 so encode it as [r/m + disp8=0] instead.  
             disp_size = .D8;
             no_disp = false;
         };
@@ -924,7 +920,11 @@ fn encode(e: *AmdState, i: *Qbe.Ins, w: bool, immediate_size: i64) EncodedArgs =
         };
         
         ri, rb, rr0 := (m.index.int_reg_d(), m.base.int_reg_d(), r0.int_reg_d());
-        dont_need_sib := (no_disp || (m.base != TMP(Amd64Reg.RBP) && m.base != TMP(Amd64Reg.R13))) && m.index == TMP(Amd64Reg.RSP) && m.base != TMP(Amd64Reg.RSP) && m.base != TMP(Amd64Reg.R12);
+        
+        // if we're not encoding an index register, don't need to spend a byte on SIB, just put base in R/M. 
+        // but some combinations are unencodable that way: R/M = rsp/r12 is how you ask to use SIB.
+        // So if you actaully want those registers, you have to use them in both R/M and SIB.base. 
+        dont_need_sib := m.index == TMP(Amd64Reg.RSP) && m.base != TMP(Amd64Reg.RSP) && m.base != TMP(Amd64Reg.R12);
         if dont_need_sib {
             return(disp_size = disp_size, disp = disp, modrm = pack_modrm(mode, rb, rr0), rex = pack_rex_si(w, rr0, rb, DONT_CARE_REG), sib = .None, force_rex = force_rex);
         };
@@ -1040,8 +1040,7 @@ fn assemble(e: *AmdState, i: *Qbe.Ins) void = {
     w := i.cls() == .Kl || i.cls() == .Kd || i.op() == .storel || i.op() == .stored;
     ext_index := int((i.arg&[1] == QbeNull || (rtype(i.arg&[1]) == .RCon && e.f.get_constant(i.arg&[1]).type() == .CBits)));  
     
-    xxx :: amd64_encoding_table();
-    table, offsets := xxx;
+    table, offsets := @run amd64_encoding_table();
     idx: i64 = offsets[i.op().raw().zext()].zext();
     entry := table.index(idx);
     dowhile {
@@ -1068,7 +1067,6 @@ fn assemble(e: *AmdState, i: *Qbe.Ins) void = {
         shift := @is(i.op(), .shl, .sar, .shr, .rotl, .rotr);
         if shift && rtype(i.arg&[ext_index]) == .RTmp && i.arg&[int(ext_index == 0)] == TMP(Amd64Reg.RCX) {
             ext_index = int(ext_index == 0);
-            //i.arg&.items().swap(0, 1); // HACK
         };
         // one argument is an immediate or fixed register and its slot in modrm holds an opcode extension instead. 
         i.arg&[ext_index] = TMP(@as(i64) entry.ext.zext()); 
@@ -1120,6 +1118,7 @@ fn amd64_encoding_data(e: FatExpr) FatExpr #macro = {
     ::enum(AmdArgType); 
     ArgType :: AmdArgType;
     ops := e&.items();
+    assert_eq(size_of(AmdEncodingEntry), size_of(i64));  // doesn't actually matter, just don't bloat it frivolously. 
     // TODO: truncate the table since the last many are all not needed
     offset_by_op := ast_alloc().alloc_zeroed(u16, Qbe.O.enum_count());
     lookup_table := AmdEncodingEntry.list(ops.len, ast_alloc());
@@ -1382,6 +1381,13 @@ fn amd64_encoding_table() Ty([]AmdEncodingEntry, []u16) = @amd64_encoding_data (
     (.sqrt, 
         (.F, .F, (0x0F, 0x51), (), (0xF2)),
     ),
+);
+
+amd_condition_codes :: @const_slice( // :CmpOrder
+    // Cieq Cine Cisge Cisgt Cisle Cislt Ciuge Ciugt Ciule Ciult
+Amd.X86cc.e, .ne,  .ge,  .g,  .le,  .l,  .ae,  .a,  .be,  .b,
+    // Cfeq Cfge Cfgt Cfle Cflt Cfne Cfo  Cfuo
+         .e, .ae, .a, .be, .b,  .ne, .np, .p
 );
 
 #use("@/backend/amd64/target.fr");

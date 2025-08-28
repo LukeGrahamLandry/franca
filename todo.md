@@ -10,6 +10,8 @@
   - tests for backtraces
   - programatic access to the data from resolvers instead of just a string. 
   - disassembly annotated with the debug info
+  - annotate functions to skip dbgloc for. rn, `if` gets 3 entries in the trace which is useless. 
+    kinda like rust's `#[track_caller]`
 - life would be better if i tracked line numbers instead of byte offsets. 
   also that would make it trivial to move them between .frc modules. 
 - you need a trace of what was being compiled when you get a compile error. 
@@ -174,6 +176,16 @@ as different types even when they're the same size.
   race? seems improved by sleeping for a millisecond after spawning a thread. 
   TODO: REMOVE THE SLEEP IN sys_clone !!
   (much to nobody's surprise, it's still fucked)
+```
+examples/bf/interpreter.fr              [FAIL]  265ms | 
+
+libc::execvp() failed!
+-1 26
+Failed to exec:
+./target/test_interpreter.out 
+```
+what does that mean? `#define ETXTBSY 26 /* Text file busy */` 
+
 - wuffs/gif.c fails at random
 - there have been very rare failures in my lua tests for a while
 - soft_draw.fr crashes when you quit the program
@@ -538,7 +550,6 @@ q.out`impl2__7041:
 - amd64: examples/import_c/test/test.fr
 - import_c can't compile lua targetting amd64 (makes an exe but it crashes immediately)
 - import_c/test/ffi.fr: panic! sysv abi does not support variadic env calls
-- finish amd64/isel/NEW_ADDR_FOLDING
 - be less strict about amd64 address folding when there's a large constant pointer (which is valid when jitting)
   - idk, i might have done this already? 
 - CLOCK_REALTIME

@@ -1,4 +1,11 @@
 
+- get rid of the unfinished NEW_ADDR_FOLDING
+- use the table for amd64_memargs and amd64_flag_table
+- removed a `m.index != TMP(Amd64Reg.RBP) && m.index != TMP(Amd64Reg.R13);`, 
+  that's not a special encoding right? i think i was confusing it with the special_base below it. 
+- fixed using unnecessary SIB for RBP access: (`[rbp + riz - 0x10] vs [rbp - 0x10]`).
+  compiler bytes of code: 1208987 -> 1151666 (-4%)
+
 ## (Aug 27)
 
 need to fix stack trace with #inline/#macro, it sucks that it's useless for @assert. 
