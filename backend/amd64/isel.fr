@@ -40,7 +40,7 @@ fn noimm(r: Qbe.Ref, f: *Qbe.Fn, o: Qbe.O) bool = {
     if(rtype(r) != .RCon, => return(false));
     c := f.get_constant(r);
     @match(c.type()) {
-        fn CAddr() => false;
+        fn CAddr() => o == .call && c.bits() != 0;
         // jitting on linux you can reasonably have <4GB constant address, but since call instruction 
         // is relative, you might not be able to reach all the way down there in 32 bits of immediate. 
         // i think 64-bit macOS never gives out the bottom 4GB of address space so it doesn't come up. 
@@ -84,7 +84,7 @@ fn fixarg(r: *Qbe.Ref, k: Qbe.Cls, i: *Qbe.Ins, f: *Qbe.Fn) void = {
             /* load fast locals' addresses into
             * temporaries right before the
             * instruction */
-            r1 = f.newtmp("isel", .Kl);
+            r1 = f.newtmp("isel", .Kl);  // :IselRSlotGetsNewTmp
             f.emit(.addr, .Kl, r1, SLOT(s), QbeNull);
         };
         @if(!(is_store(o) && r.identical(i.arg&.index(1)))
@@ -127,8 +127,6 @@ fn lea(f: *Qbe.Fn, dest: Qbe.Ref, con_in: Qbe.Ref) void = {
     f.emit(@if(f.is_symbol(con_in), .addr, .copy), .Kl, dest, con_in, QbeNull);
 }
 
-// TODO: this would be better if you did it in the other order and converted everything to lea as a way of memoizing for future uses of the same address. 
-//       then it would be O(amount of math + amount of dereferences) instead of O(amount of math * amount of dereferences)
 fn merge_amd_addr(f: *Qbe.Fn, mem: *Qbe.Addr) void = {
     n := 0;
     loop {

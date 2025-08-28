@@ -180,7 +180,6 @@ fn emit_the_code(e: *AmdState) void = {
     need_frame := !f.leaf || f.vararg || f.dynalloc;
     if need_frame {
         e.fp = .RBP;
-        // TODO: this doesn't need modrm(w=1), it's always 64 bit
         e.a&.encode_op_reg(PrimaryOp.PushBase, X86Reg.rbp);
         e.a&.encode_bin(PrimaryOp.MovReg, X86Reg.rbp, X86Reg.rsp);
     } else {
@@ -286,8 +285,6 @@ fn apply_patch(e: *AmdState, labels: []i64, patch: *Patch) void = {
 }
 
 fn write_jump_patch(e: *AmdState, dest: i64, src: i64, cond: i32) void = {
-    // TODO: this is a dump nounification. 
-    //patch_at := e.m.segments&[.Code].mmapped.ptr.offset(e.start_of_function + src);
     patch_at := e.a.maybe_uninit.ptr.offset(src);
     patch_size := @if(cond == -1, 5, 6);
     patch_bytes: List(u8) = fixed_list(ptr = patch_at, len = patch_size);
@@ -573,10 +570,8 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
             @match(rtype(i.arg&[0])) {
                 fn RCon() => {
                     c := e.f.get_constant(i.arg&[0]);
-                    off := c.bits();
-                    @debug_assert(c.type() == .CAddr, "cannot call a constant");
-                    @debug_assert_eq(off, 0, "call to offset from symbol $% seems like a mistake?", e.m.str(c.sym));
-                    call_symbol(e, c.sym, i.arg&[1] != Qbe.RCALL_TAIL_SENTINAL);
+                    @debug_assert(c.type() == .CAddr && c.bits() == 0, "isel");
+                    call_symbol(e, c.sym);
                 }
                 fn RTmp() => encode_call_reg(e.a&, ModrmMode.Direct, int_reg_d(i.arg&[0]));  
                 // TODO: we could allow memory argument? 
@@ -584,10 +579,7 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
             }
         }
         fn salloc() => {
-            /* there is no good reason why this is here
-            * maybe we should split Osalloc in 2 different
-            * instructions depending on the result
-            */
+            // TODO:
             // why not just do math on RSP directly like arm abi does? 
             // one should be changed so they're the same? 
             
@@ -728,7 +720,7 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
     }; // early returns
 }
 
-fn call_symbol(e: *AmdState, sym: Qbe.Sym, set_link: bool) void #once = {
+fn call_symbol(e: *AmdState, sym: Qbe.Sym) void #once = {
     use_symbol(e.m, sym) { symbol |
         kind := symbol.kind;
         
@@ -741,7 +733,7 @@ fn call_symbol(e: *AmdState, sym: Qbe.Sym, set_link: bool) void #once = {
                 when_debug(e.f, .Patch) { out |
                     @fmt(out, "# call offset % for '%' %[%]\n", off, symbol.name, symbol.segment, symbol.offset);
                 };
-                encode_direct_call(e.a&, off.trunc(), set_link);
+                encode_direct_call(e.a&, off.trunc(), true);
                 // TODO: on arm we do a patch if goal==Relocatable, should be same here? or remove there? 
             }
             @default => {
@@ -757,7 +749,7 @@ fn call_symbol(e: *AmdState, sym: Qbe.Sym, set_link: bool) void #once = {
                     };
                     encoded_size :: 6;
                     off += e.m.distance_between(.Code, current_offset + encoded_size, .ConstantData, symbol.got_lookup_offset);
-                    encode_indirect_call(e.a&, off.trunc(), set_link);
+                    encode_indirect_call(e.a&, off.trunc(), true);
                 } else {
                     // Otherwise this will get patched to a local or __stub call later. 
                     patch_at := e.next_no_write().offset(1);
@@ -766,7 +758,7 @@ fn call_symbol(e: *AmdState, sym: Qbe.Sym, set_link: bool) void #once = {
                         type = (RipDisp32 = (increment = 0, call = true)),
                     );
                     push_fixup(e.m, symbol, fix);
-                    encode_direct_call(e.a&, 0, set_link);
+                    encode_direct_call(e.a&, 0, true);
                 };
             };
         };
@@ -1320,7 +1312,7 @@ fn amd64_encoding_table() Ty([]AmdEncodingEntry, []u16) = @amd64_encoding_data (
     (.copy, 
         (.M, .imm32, (0xC7), 0), // "Move imm32 sign extended to 64-bits to r/m64."
         (.R, .M, (0x8B)),
-        (.M, .R, (0x89)), // TODO: is this right? 
+        (.M, .R, (0x89)),
         (.F, .F, (0x0F, 0x10), (), (0xF2)), // movsd
         (.F, .M, (0x0F, 0x10), (), (0xF2)),
         (.M, .F, (0x0F, 0x11), (), (0xF2)),

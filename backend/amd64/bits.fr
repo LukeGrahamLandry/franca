@@ -208,9 +208,6 @@ fn pack_modrm(mode: ModrmMode, rm__dest_or_addr: X86Reg, reg__src: X86Reg) u8 = 
     modrm.trunc()
 }
 
-// TODO: don't need prefix if all bits unset?
-// TODO: do i ever want W=0? 
-// TODO: X extends SIB.index 
 // 0100WRXB
 // W = use 64-bit operand?? idk
 // R = extend modrm.reg
@@ -245,7 +242,6 @@ SibScale :: @enum(u2) (One = 0b00, Two = 0b01, Four = 0b10, Eight = 0b11);
 
 // three operand instructions can have 2 in sib + 1 in modrm (other still matters tho somehow?)
 fn pack_sib(scale: SibScale, index: X86Reg, base: X86Reg) u8 = {
-    // TODO: also need another version of pack_rex that puts our extension bits there + an extra one for the third register. 
     sib := (@as(i64) @as(u2) scale).shift_left(6);
     sib = sib.bit_or((@as(i64) @as(u4) index).bit_and(@as(i64) 0b111).shift_left(3));
     sib = sib.bit_or((@as(i64) @as(u4) base).bit_and(@as(i64) 0b111));
@@ -395,14 +391,21 @@ fn encode_movcc(code: *List(u8), dest: X86Reg, src: X86Reg, cc: X86cc) void = {
 }
 
 fn encode_imm64(out: *List(u8), reg: X86Reg, value: u64) void = {
-    encode_op_reg(out, PrimaryOp.MovImm64Base, reg);
+    encode_op_reg(out, PrimaryOp.MovImm64Base, reg, true);
     out.push_u64(value);
 }
 
-fn encode_op_reg(out: *List(u8), op: PrimaryOp, reg: X86Reg) void = {
-    out.push(pack_rex_si(true, reg, reg, reg)); // TODO: only one of these
-    x := @as(i64) (@as(u8) op).zext() + bit_and(@as(i64) reg, @as(i64) 0b111);
-    out.push(@as(u8) x.trunc());  // :W=1
+// For push/pop, it's always 64 bit, you don't need rex.w=1
+fn encode_op_reg(out: *List(u8), op: PrimaryOp, reg: X86Reg) void = 
+    encode_op_reg(out, op, reg, false);
+
+fn encode_op_reg(out: *List(u8), op: PrimaryOp, reg: X86Reg, w: bool) void = {
+    r := @as(i64) reg;
+    if w || r >= 8 {
+        out.push(pack_rex_si(w, reg, reg, reg)); // TODO: only one of these
+    };
+    x := @as(i64) (@as(u8) op).zext() + bit_and(r, @as(i64) 0b111);
+    out.push(@as(u8) x.trunc());
 }
 
 fn encode_non_sp_offset(asm: *List(u8), op: PrimaryOp, reg: X86Reg, index: X86Reg, offset: i64) void = {
@@ -463,22 +466,10 @@ fn asm_x64(arg: FatExpr, out: FatExpr) FatExpr #macro = {
 //    (fn(out: *List(u8)) void = @asm_x64(@[arg]) out)
 //};
 
-// TODO: this was before i decided alignment was no fun
-
 fn push_u32(code: *List(u8), value: u32) void = {
-    code.push(@as(u8) value.bit_and(0xFF).trunc());
-    code.push(@as(u8) value.shift_right_logical(8).bit_and(0xFF).trunc());
-    code.push(@as(u8) value.shift_right_logical(16).bit_and(0xFF).trunc());
-    code.push(@as(u8) value.shift_right_logical(24).bit_and(0xFF).trunc());
+    code.reserve_type(u32)[] = value;
 }
 
 fn push_u64(code: *List(u8), value: u64) void = {
-    code.push(@as(u8) value.bit_and(0xFF).trunc());
-    code.push(@as(u8) value.shift_right_logical(8).bit_and(0xFF).trunc());
-    code.push(@as(u8) value.shift_right_logical(16).bit_and(0xFF).trunc());
-    code.push(@as(u8) value.shift_right_logical(24).bit_and(0xFF).trunc());
-    code.push(@as(u8) value.shift_right_logical(32).bit_and(0xFF).trunc());
-    code.push(@as(u8) value.shift_right_logical(40).bit_and(0xFF).trunc());
-    code.push(@as(u8) value.shift_right_logical(48).bit_and(0xFF).trunc());
-    code.push(@as(u8) value.shift_right_logical(56).bit_and(0xFF).trunc());
+    code.reserve_type(u64)[] = value;
 }

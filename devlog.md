@@ -5,6 +5,36 @@
   that's not a special encoding right? i think i was confusing it with the special_base below it. 
 - fixed using unnecessary SIB for RBP access: (`[rbp + riz - 0x10] vs [rbp - 0x10]`).
   compiler bytes of code: 1208987 -> 1151666 (-4%)
+- spring cleaning
+  - going through and deleting outdated todos
+  - no longer need the faster dce in spill. 
+    that case only happens 2983 times now instead of the 150k it did when i wrote it and got a speed up. 
+    it's not for code size because rega does it anyway, it was just about speed. 
+  - arm/isel: did immediate for sub, 3kb, might as well. 
+    also i was avoiding immediate when it was SP (which abi inserts) but that's encodable, its movs that are special for SP. 
+  - got rid of FixupType.Call.set_link because it's always true now
+  - push/pop is always 64 bit so don't need w=1 and can elide rex more often. saves 5k. 
+  - experimented with push+pop instead of mov when thats shorter, saves 20k.
+    I feel like this should be a pattern the cpu knows and treats the same as mov,
+    but unfortunately rosetta hates it: 1830ms vs 2195ms ?? so sure isn't worth it for me. 
+    also clang uses mov even when it would be shorter as push+pop so maybe im wrong about them magically being the same speed. 
+    ```
+    // in emitins for copy
+    if rtype(i.to) == .RTmp && t0 == .RTmp && i&.cls() == .Kl {
+        encode_best_mov(e.a&, i.to.int_reg_d(), i.arg&[0].int_reg_d());
+        return();
+    };
+    
+    fn encode_best_mov(code: *List(u8), dest: X86Reg, src: X86Reg) void = {
+        d, s := (@as(i64) src, @as(i64) dest);
+        if d < 8 && s < 8 {
+            code.encode_op_reg(PrimaryOp.PushBase, src);
+            code.encode_op_reg(PrimaryOp.PopBase, dest);
+            return();
+        };
+        code.encode_bin(PrimaryOp.MovReg, dest, src);
+    }
+    ```
 
 ## (Aug 27)
 

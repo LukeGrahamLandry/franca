@@ -62,9 +62,7 @@ fn fillcost(f: *Qbe.Fn) void = {
         t := f.get_temporary(i);
         is_reg := i < Qbe.Tmp0;
         ::if(u32);
-        // TODO: this can't be all ones because i compare u32 like they were i32
-        //       fascinating to me that i only broke with new_comptime_jit
-        t.cost = if(is_reg, => 1.shift_left(31), => 0); 
+        t.cost = if(is_reg, => MAX_u32, => 0); 
         t.nuse = 0;
         t.ndef = 0;
     };
@@ -352,8 +350,6 @@ fn merge(f: *Qbe.Fn, u: *Qbe.BSet, bu: *Qbe.Blk, v: *Qbe.BSet, bv: *Qbe.Blk) voi
 
 fn spill(f: *Qbe.Fn) void = {
     T := f.globals.target&;
-    // TODO: are we copying these because we might resize the array or can i inline them?
-    tmp := f.tmp;
     ntmp: i64 = f.ntmp.zext();
     pass: SpillPass = (
         f = f, locs = f.slot, slot4 = 0, slot8 = 0, 
@@ -361,9 +357,12 @@ fn spill(f: *Qbe.Fn) void = {
         scratch_lir = init_bitset(ntmp),
         scratch_dpm = init_bitset(ntmp),
     );
+    
+    // in this pass t.slot is its spill address. 
+    // -1 means hasn't been spilled yet. 
+    // on entry, all used tmps will have slot=-1 because of newtmp() and :IselRSlotGetsNewTmp
     range(0, ntmp) { t | 
-        f.tmp[t].slot = -1; // TODO: remove. should be fine. just making sure.
-        is_float := !is_int(tmp[t].cls);  // don't need to check (t >= Qbe.Tmp0), util.fr/default_init sets tmp.cls correctly. 
+        is_float := !is_int(f.tmp[t].cls);  // don't need to check (t >= Qbe.Tmp0), util.fr/default_init sets tmp.cls correctly. 
         bsset(pass.class_mask&.index(int(is_float)), t);
     };
 
@@ -372,11 +371,7 @@ fn spill(f: *Qbe.Fn) void = {
     in_reg := init_bitset(ntmp);
     prioritize := init_bitset(ntmp);
     
-    bp := f.rpo.index_unchecked(f.nblk.zext());
-    while => !bp.identical(f.rpo.first) {
-        bp = bp.offset(-1);
-        b := bp[];
-        
+    for_blocks_rpo_rev f { b |
         /* invariant: all blocks with bigger rpo got
          * their in,out updated. */
 
@@ -403,11 +398,6 @@ fn spill(f: *Qbe.Fn) void = {
                 if bscount(all_needed_later&).bitcast() < n {
                     j: i32 = bscount(prioritize&).bitcast(); /* live through */
                     l := backwards.nlive&[k];
-                    //TODO: this is super fucking sketchy?
-                    //i must be making a mistake elsewhere
-                    //this is what made it think it was out of registers -- Nov 25
-                    //but qbe seems to pass negative here as well it just doesn't choke on it as hard
-                    //because its for loop just ends immediately as tho it was 0. 
                     pass&.limit(prioritize&, max(0, n - (l - j)), .None);
                     bsunion(all_needed_later&, prioritize&);
                 } else {
@@ -454,7 +444,7 @@ fn spill(f: *Qbe.Fn) void = {
             // abi removes ret with value and non-rv-isel replaces jnz with cmp+jmpCC
             @debug_assert(f.globals.goal.arch == .rv64);  // on other arches 
             t := b.jmp.arg.val();
-            @debug_assert(tmp[t].cls.is_int(), "can only jump on int");
+            @debug_assert(f.tmp[t].cls.is_int(), "can only jump on int");
             bsset(in_reg&, t);
             bscopy(all_needed_later&, in_reg&);
             bszero(prioritize&); 
@@ -483,33 +473,6 @@ fn spill(f: *Qbe.Fn) void = {
                     bsclr(in_reg&, t);
                 } else {
                     // Either not used later in the block (but maybe in another block) or spilled later in the block.
-                    dead := pass.f.tmp[t].slot == -1 && !b.out&.bshas(t);
-                    if dead && !(@is(i[].op(), .salloc, .cas1)) { 
-                        // my fuse_addressing in arm isel doesn't update usage counts correctly so i end up with a lot of dead pointer arithmetic. 
-                        // rega would remove the dead code anyway but we can skip doing some work and reduce false register pressure. 
-                        // A less hacky solution would be to fix it in fuse_addressing instead. that would prevent us from incorrectly thinking the args are live until getting here. 
-                        // saves ~70ms. This happens 150k times with fuse_addressing on and 6k times with it off which mostly reassures me that i understand how we get here. -- Nov 23
-                        // TODO: are there other bitsets im supposed to update?
-                        
-                        // TODO: need to do more if mem arg?
-                        // :clear_dead_args
-                        range(0, 2) { n | 
-                            if rtype(i.arg&[n]) == .RTmp {
-                                t := i.arg&[n].val();
-                                if !bshas(in_reg&, t) {
-                                    // if this instruction was the reason we though we cared about this argument, we don't anymore. 
-                                    bsclr(all_needed_later&, t);
-                                }
-                            }
-                        };
-                        
-                        // invariant: instructions that have outputs do not have side effects. (not salloc tho) 
-                        //   amd64/isel tries to reuse flags a little (like {c := a+b; jnz c;} becomes {c := a+b; jmpCC;} not {c := a+b; cmp c; jmpCC;}), 
-                        //   but it's careful to emit a fake copy if that's the last use so it won't get here. 
-                        @debug_assert(!is_store(i[].op()) && i[].op() != .call, "sideeffect");
-                        // don't emit() this instruction 
-                        continue();
-                    };
                     /* make sure we have a reg
                      * for the result */
                     @debug_assert_ge(t, Qbe.Tmp0, "dead reg");
@@ -557,7 +520,6 @@ fn spill(f: *Qbe.Fn) void = {
             };
             bscopy(all_needed_later&, in_reg&);
             pass&.limit_in_reg(in_reg&, false, (Some = prioritize&));
-            // :clear_dead_args
             range(0, 2) { n | 
                 if rtype(i.arg&[n]) == .RTmp {
                     t := i.arg&[n].val();
@@ -611,30 +573,10 @@ fn spill(f: *Qbe.Fn) void = {
         f.copy_instructions_from_scratch(b);
     };
 
-    /* align the locals to a 16 byte boundary */
     /* specific to NAlign == 3 */
-    pass.slot8 += pass.slot8.zext().div(4).bit_and(3).intcast() * 4;
-    f.slot += pass.slot8;
-
-    when_debug(f, .Spill) { out |
-        @fmt(out, "\n## Block information:\n");
-        for_blocks f { b |
-            ::FmtPad(i32);
-            @fmt(out, "#\t% (%) ", f_pad(b.name(), 10, .After), f_pad(b.loop, 5, .Before));
-            dumpts(b.out&, f.tmp, out);
-        };
-        @fmt(out, "\n## After spilling:\n");
-        printfn(f, out);
-    };
-}
-
-fn bytes_to_bit_mask(bytes: []u8) u64 = {
-    r: u64 = 0; 
-    for bytes { b | 
-        r = r.bit_or(BIT(b));
-    };
-    @debug_assert_eq(bytes.len, r.count_ones().zext(), "bytes_to_bit_mask expected unique entries");
-    r
+    f.slot += pass.slot8.align_to(16);
+    
+    when_debug(f, .Spill, fn(out) => f.dump_spill(out));
 }
 
 #use("@/backend/lib.fr");

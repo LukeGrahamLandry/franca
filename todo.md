@@ -215,6 +215,8 @@ do
 done
 ```
 - tests/exe/sys.fr might not work with SLOW_LEAK_ARENAS=true?
+- i seem to have made `assert(handled_a_signal[], "did you not unmap the memory my guy?");`
+  flaky on amd-macos
 
 ## import_symbol / weak
 
@@ -393,7 +395,6 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 - TODO: harec/src/gen.c: `[arm64/emit.fr/fixup_arm64] offset from dynamic import builtin_type_nomem+4` but would work when done as one compilation unit.
 - mem3.ssa fails without opt/load.fr/loadopt()
 - :CopyElimTruncSymbolBug
-- get rid of RCALL_TAIL_SENTINAL now that i don't need alias_via_bounce
 
 ## backend symbols rework
 

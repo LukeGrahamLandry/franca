@@ -75,7 +75,7 @@ fn fixup_arm64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
             };
             @assert_lt(distance.abs(), 1.shift_left(26), "can't even jump to trampoline, thats bad.");
             inst := u32.ptr_from_raw(fixup.patch_at);
-            inst[] = b_jmp(s_trunc(distance, 26), @if(it.set_link, 1, 0));
+            inst[] = b_jmp(s_trunc(distance, 26), 1);
         }
         fn InReg(it) => {
             when_debug(self, .Patch) { out |
@@ -696,7 +696,7 @@ fn emitins(self: *ArmState, i: *Qbe.Ins, block: *Qbe.Blk) void = {
             if rtype(callee) == .RCon {
                 c := self.f.get_constant(a0);
                 @assert(c.type() == .CAddr && c.bits() == 0, "invalid call argument");
-                call_symbol(self, c.sym, a1 != Qbe.RCALL_TAIL_SENTINAL);
+                call_symbol(self, c.sym);
             } else {
                 self.inst(br(callee.int_reg(), 1));
             };
@@ -897,11 +897,11 @@ fn decode_mem(self: *ArmState, a: Qbe.Ref, other: Qbe.Ref, size: i64) Ty(u5, u12
     (addr, @as(u12) scaled)
 }
 
-fn call_symbol(self: *ArmState, sym: Qbe.Sym, set_link: bool) void #once = {
+fn call_symbol(self: *ArmState, sym: Qbe.Sym) void #once = {
     use_symbol(self.m, sym) { symbol |
         kind := symbol.kind;
         patch_at := u8.raw_from_ptr(self.m.segments&[.Code].next);
-        patch: Fixup = (patch_at = patch_at, type = (Call = (set_link = set_link)));
+        patch: Fixup = (patch_at = patch_at, type = .Call);
         @match(kind) {
             fn DynamicPatched() => {
                 new_got_slot: ?Fixup = .None;
@@ -916,7 +916,7 @@ fn call_symbol(self: *ArmState, sym: Qbe.Sym, set_link: bool) void #once = {
                 // already compiled it so branch there directly
                 distance := self.m.distance_between(.Code, self.m.current_offset(.Code), symbol.segment, symbol.offset) / 4;
                 assert(distance.abs() < 1.shift_left(26), "can't call that far but I don't let modules be that big yet.");
-                self.inst(b_jmp(s_trunc(distance, 26), @if(set_link, 1, 0)));
+                self.inst(b_jmp(s_trunc(distance, 26), 1));
                 // :canireallynothavecodeberelative
                 // TODO: I don't have a test that requires this 
                 //       but i think you do because you need the other ones?
@@ -928,7 +928,7 @@ fn call_symbol(self: *ArmState, sym: Qbe.Sym, set_link: bool) void #once = {
                 if self.m.goal.got_indirection_instead_of_patches {
                     dest_reg := TMP(arm_scratch_int).int_reg();
                     self.immediate_fixup_got(dest_reg, 0, symbol);
-                    self.inst(br(dest_reg, @if(set_link, 1, 0)));
+                    self.inst(br(dest_reg, 1));
                 } else {
                     // haven't compiled it yet so will need a patch. 
                     push_fixup(self.m, symbol, patch);
