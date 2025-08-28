@@ -203,6 +203,25 @@ fn printins(f: *Qbe.Fn, i: *Qbe.Ins, out: *List(u8)) void = {
             @fmt(out, " @%", f.rpo[i.arg&[1].rsval().intcast()].name());
         };
     };
+    
+    if f.globals.codemap { codemap |
+        if i.op() == .dbgloc && i.arg&[0].rtype() == .RInt && i.arg&[1].rtype() == .RInt {
+            hi, lo := (rsval(i.arg&[0]).intcast(), rsval(i.arg&[1]).intcast());
+            tag := hi.shift_right_logical(16);  // :DebugTag
+            offset_in_source := hi.bit_and(0xFFFF).shift_left(16).bit_or(lo);
+            if codemap.total_len <= offset_in_source.trunc() {
+                return();
+            };
+            loc: Span = (low = offset_in_source.trunc(), high = offset_in_source.trunc() + 1);
+            @fmt(out, " # % ", @switch(tag) {
+                @case(0) => "CALL";
+                @case(1) => "PUSH";
+                @case(2) => "POP";
+                @default => @tfmt("%", tag);
+            });
+            fmt_error_loc(codemap, loc, out, false);
+        };
+    };
 };
 
 fn printfn(f: *Qbe.Fn, out: *List(u8)) void = {
@@ -577,17 +596,6 @@ fn dump_folding(f: *Qbe.Fn, fold_vals: []i32, out: *List(u8), folded_sel: bool) 
         @fmt(out, ")"); 
     } else {
         @fmt(out, "\n# no foldable constants");
-    };
-    @fmt(out, "\n# dead code: ");
-    any_dead_blocks := false;
-    for_blocks f { b |
-        if b.visit == 0 {
-            any_dead_blocks = true;
-            @fmt(out, "% ", b.name());
-        };
-    };
-    if !any_dead_blocks {
-        @fmt(out, "(none)\n");
     };
     if any_folded {
         @fmt(out, "\n\n## After constant folding:\n");

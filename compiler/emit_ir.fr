@@ -644,6 +644,15 @@ fn intrinsic_shim(self: *EmitIr, func: *Func) Ty(Qbe.Ref, Qbe.Ref, Type) = {
 fn ret_op(k: Qbe.Cls) Qbe.J = 
     @as(Qbe.J) @as(i32) Qbe.J.retw.raw() + k.raw()
 
+fn dbgloc(self: *EmitIr, loc: Span, tag: i64) void = {
+    if self.debug {
+        n: i64 = loc.low.zext();
+        // :DebugTag
+        hi, lo := (n.shift_right_logical(16).bit_or(tag.shift_left(16)), n.bit_and(1.shift_left(16) - 1));
+        self.emit(.dbgloc, .Kw, QbeNull, INT(hi), INT(lo));  
+    };
+}
+
 // :EmitIrCall TODO: it would be nice if i didn't need to repeat so many variations of the par/arg/call/ret logic. 
 fn emit_runtime_call(
     self: *EmitIr,
@@ -654,11 +663,7 @@ fn emit_runtime_call(
     dyn_context: bool,
     loc: Span,
 ) CRes(Qbe.Ref) = { 
-    if self.debug {
-        n: i64 = loc.low.zext();
-        hi, lo := (n.shift_right_logical(16), n.bit_and(1.shift_left(16) - 1));
-        self.emit(.dbgloc, .Kw, QbeNull, INT(hi), INT(lo));  
-    };
+    self.dbgloc(loc, 0);
     
     self.f.leaf = false;
     if dyn_context && self.context != QbeNull {
@@ -1142,12 +1147,15 @@ fn func_ref(self: *EmitIr, f_id: FuncId) Qbe.Ref #inline =
 
 fn emit_block_expr(self: *EmitIr, expr: *FatExpr, p: Placement) CRes(Qbe.Ref) #once = {
     block   := expr.expr.Block&;
+    self.dbgloc(expr.loc, 1);
     ret_var := or block.ret_label {
         // Simple case: its just grouping some statements into an expression. 
         each block.body& { stmt |
             @try(self.compile_stmt(stmt)) return;
         };
-        return(self.compile_expr(block.result, p))
+        result := self.compile_expr(block.result, p);
+        self.dbgloc(expr.loc, 2);
+        return result;
     };
     must_return: u32 = int(block.flags.bit_and(1.shift_left(@as(i64) BlockFlags.MustReturn)) != 0).trunc();
     self.label_depth += must_return;
@@ -1192,6 +1200,7 @@ fn emit_block_expr(self: *EmitIr, expr: *FatExpr, p: Placement) CRes(Qbe.Ref) #o
         // We did generate slightly more noisy code by `unify_placement` earlier than necessary. 
     };
     self.label_depth -= must_return;
+    self.dbgloc(expr.loc, 2);
     (Ok = dest)
 }
 

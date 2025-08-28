@@ -295,29 +295,60 @@ fn find_in_debug_info(userdata: rawptr, ip: rawptr) ?Str = {
             best_byte := 0;
             off_in_func := 0;
             offset_in_source := 0;
+            result := u8.list(temp());  // TODO: wasteful
             
+            inline_stack := i64.list(temp());
+            best_stack := inline_stack;
             // at this point we know addr is in this function. 
             // try to find the closest dbgloc instruction to give a more precise source location. 
             // (emit_ir inserts them before each function call when compiled with -debug-info). 
             @if(debug_info.source.len != 0)
             dowhile {
+                tag := data[0];  // :DebugTag
+                data = data.rest(1);
                 delta_off_in_func, r, ok := read_leb128(data, false);
                 data = r;
                 delta_offset_in_source, r, ok := read_leb128(data, true);
                 data = r;
                 off_in_func += delta_off_in_func;
                 offset_in_source += delta_offset_in_source;
-                check := dist - off_in_func;
-                if check > 0 && check < best_distance {
-                    best_distance = check;
-                    best_byte = offset_in_source;
+                
+                @switch(tag) {
+                    @case(0) => ();
+                    @case(1) => inline_stack&.push(offset_in_source);
+                    @case(2) => {
+                        break :: local_return;
+                        // dead code results in leaking dbgloc instructions. 
+                        // TODO: don't emit the junk cause it takes up space!
+                        // see devlog Aug 27, 2025. 
+                        while => inline_stack&.pop() { place |
+                            if place == offset_in_source {
+                                break();
+                            };
+                        };
+                    };
+                    @default => ();
                 };
-                delta_off_in_func != 0 || delta_offset_in_source != 0
+                
+                // not <= because return address is after the call instruction
+                if tag == 0 && off_in_func < dist {
+                    best_stack = inline_stack.clone();
+                    best_byte = offset_in_source;
+                    best_distance = off_in_func;
+                };
+                tag != 4 && off_in_func < dist
             };
-            
             loc: Span = (low = best_byte.trunc(), high = best_byte.trunc() + 1);
             // TODO: this "AOT" is misleading now
-            return(Some = fmt_for_trace(codemap, loc, name, "AOT"));
+            @fmt(result&, "%", fmt_for_trace(codemap, loc, name, "AOT"));
+            if best_stack.len != 0 {
+                @fmt(result&, "\n");
+            };
+            for_rev best_stack { best_byte |
+                loc: Span = (low = best_byte.trunc(), high = best_byte.trunc() + 1);
+                @fmt(result&, "%\n", fmt_for_trace(codemap, loc, "", "INLINE"));
+            };
+            return(Some = result.items());
         };
         
         off += size;

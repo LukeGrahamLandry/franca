@@ -1,4 +1,28 @@
 
+## (Aug 27)
+
+need to fix stack trace with #inline/#macro, it sucks that it's useless for @assert. 
+- feels like it would be easy, just allow multiple source locations for an instruction. 
+  but it needs to be a stack where you push an inlined thing and then all the following 
+  instructions count for that until you pop it. 
+  idk at what point this gets silly and i should just give up and use dwarf. 
+- tried having push/pop versions of dbgloc that are used when emitting a block. 
+  i feel like blocks can move around so it can't quite work trying to read it back 
+  from my linear debug info encoding. 
+- made the ir dump show the location info. should have done that a long time ago. 
+- but also the push+pop aren't even turning out well nested in the ir. 
+    - somehow the pop ends up in a dead block and fold eats it. 
+      but it's supposed to be in the join after both branches of the if? 
+    - fixed `-d F` dead blocks listing. i was trying to do it after removing them from the list. 
+    - ok the problem is `if(bytes == 0, => return(empty()));` in alloc_raw. 
+      when you do `list(temp())` the size is zero so the whole thing folds away to nothing, 
+      which is great, but results in confused debug info.
+      all the blocks in that function are between the push and the pop, but 
+      one in the middle early returns and the rest aren't reachable so the one with the pop doesn't get emitted. 
+      that's improved by just popping extra as needed when reading reading the debug info back. 
+- had some confusion with counting the zero terminator entry 
+  but now that i have a tag byte amnyway, use that and it seems to work now. 
+
 ## (Aug 26)
 
 - wasm: correct abi for single scalar structs. 

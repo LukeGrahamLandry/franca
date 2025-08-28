@@ -1,4 +1,25 @@
 
+- more stack trace improvements
+  - macros don't always get a block. 
+  - another source of confusion is that for comptime code, source location doesn't come from 
+    the fake debug info, it parses the string and finds that function call in the ast. 
+    make that work with #inline too. 
+  - including every function definition in the trace as INLINE is confusing. 
+  - allow hook_backtrace only if not already hosted
+  - give a franca_aot_debug_info when running directly (`franca crash2.fr`) so it works if you do your own hook_backtrace. 
+  - tests for backtraces
+  - programatic access to the data from resolvers instead of just a string. 
+  - disassembly annotated with the debug info
+- life would be better if i tracked line numbers instead of byte offsets. 
+  also that would make it trivial to move them between .frc modules. 
+- you need a trace of what was being compiled when you get a compile error. 
+  like the chain of references so you know why you're trying to compile that function. 
+- replace import_c/includes.fr with a .frc module generated from the franca libc bindings. 
+- run all the tests on linux
+- enable caching of the .frc between -syscalls and normal. (they're one byte different)
+
+---
+
 - crack down on smurf naming conventions (ie import("@/lib/alloc/debug_alloc.fr").DebugAlloc is kinda dumb). 
   could steal what zig does where a file is a struct. but that always annoys me because it makes you 
   pick one blessed struct to have the top level fields when the rest of your file is a namespace which looks odd. 
@@ -318,6 +339,8 @@ different subsets of the same resources.
   - no shared tables so have to keep them in sync manually so need to keep a list of every
     time you load jitted code or do a table assignment and replay them when you span a new thread. 
 - web demo: hare, wuffs, more nontrivial c programs, webgpu
+- use dump_wasm to disassemble one function at a time (like i do with llvm-mc) 
+  instead of only all at once in output_wasm_module_jit
 
 ## backend 
 
@@ -331,9 +354,7 @@ different subsets of the same resources.
 - rv64/isel: fuse cmp+jnz
 - error prone that the other isels have overloads called fixarg,fixargs etc and i rely on the types being different. 
 hould just make them local constants in each file like they are here in riscv
-- factor out the top level ARCH_isel(), they're all the same shape
 - test for phi of stack slot? 
-- rv64 address+offset folding like i did for arm. they can probably share? 
 - remove redundant extension for `b := a & 31; c := extub b;`
 - i don't like that direct to exe vs to frc_inlinable then to exe give different binaries. 
 - be able to output frc/frc_inlinable in the same module as compiling normally so you don't have to do two passes over things to cache it
@@ -408,7 +429,6 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 - make sure im not redundantly calling clear_instruction_cache. 
   for pending_immediate_fixup_got, i think i might be doing it after the function, 
   then doing patches, then doing it again. so you flush the whole function twice whenever it calls anything. 
-- make symbol aliases work when compiling a .frc and make them work for non-local symbols
 - need to be consistant about a place to do stuff at the very end of emitting a module. 
   it's probably emit_suspended_inlinables but it's confusing what Target.finish_module is supposed to do for you. 
   and it's confusing whether make_exec should do something or just assert that you're in a mode that doesn't need it. 
@@ -462,16 +482,12 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 - make the platform detection in franca_runtime_init less hacky
 - demonstrate that i can support more platforms 
   - finish riscv backend
-  - finish wasm backend
-    - maybe even an interpreter option for comptime so the compiler would work in an environment 
-      where you can't give yourself an import to jit new modules? yuck. 
   - support (free, net, open)bsd
 - the bootstrapping system can't be committing a macos-arm binary. linux-amd seems more old / emulator enthused, could use blink, etc. 
 - seperate out the tests that download things and run them as an extra thing at the end. so if they disappear it's not a bit deal. 
   like it's nice to test import_c on lua,tcc, etc. but it doesn't matter for the main franca stuff if you can't run those tests. 
 - fix the non-deterministic test failures
 - report all test failures instead of stopping on the first one
-- be more serious about testing reproducible builds
 - i want the transcribed magic numbers for syscalls, sys struct layouts, instruction encoding, object formats, etc. to be more auditable. 
   maybe make it structured consistantly enough that i can generate a c program that asserts everything matches
   for a certain target when compiled by a normal c installation. for instruction encoding, maybe do more like tests/exe/x64_encoding.fr. 
