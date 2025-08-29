@@ -82,6 +82,7 @@
 - repl.fr doesn't work jitted with FRANCA_NO_CACHE=1 on arm-macos because it needs to call apple_thread_jit_write_protect.
   should allow not writing to exec memory and call a tiny bit of aot code to do the copy when you're done each function. 
 - #log_ir needs to do something in declare_alias
+- stop doing superstitious fence()
 
 ## remaining nondeterminism
 
@@ -172,12 +173,7 @@ as different types even when they're the same size.
 ### !! BROKEN !!
 
 - self compile in blink on (arm-macos and arm-linux) on github actions seems to hang forever sometimes? 
-- still a mystery bug in amd-linux. 
-  race? seems improved by sleeping for a millisecond after spawning a thread. 
-  TODO: REMOVE THE SLEEP IN sys_clone !!
-  (much to nobody's surprise, it's still fucked)
-  ... but it does help. there are two problems, the thread sleep fixes segfault with -syscalls,
-  this is something different:
+- still a mystery bug on linux. for now im just retrying in exec but that's stupid. 
 ```
 examples/bf/interpreter.fr              [FAIL]  265ms | 
 

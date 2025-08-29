@@ -165,60 +165,68 @@ get_executable_path :: fn(a: Alloc) Str = {
 };
 
 sys_clone :: fn(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr, child_tid: *u32) i32 = {
+    // beware! clone returns twice: once in the original thread and once in a newly created thread. 
+    // the child thread's sp points at (the end of) the new stack, so you can't RET after SYSCALL (ret does a pop on amd). 
+    // it as a custom wrapper so it doesn't have to worry about a race from the compiler trying to access a spilled 
+    // value in the child by offsetting from the FP that's shared with the parent (kernel sets sp, but not fp, 
+    // and the value wouldn't be on the new stack anyway). 
+    // and the callee must terminate the thread when it's done.
+    
     // CLONE_PTRACE is 0x2000 and i feel like i want it? but blink doesn't like it. 
     clone_flags :: 0x81250F00; // CLONE_FILES | CLONE_FS | CLONE_IO | CLONE_THREAD | CLONE_VM | CLONE_SIGHAND | CLONE_SYSVSEM | CLONE_CHILD_CLEARTID | CLONE_CHILD_SETTID
-    use_clone3 :: false;  // I'd rather do this but blink doesn't do clone3()
-    ::if(i32);
-    result := if use_clone3 {
-        arg := zeroed Syscall'Clone3;
-        arg.flags = clone_flags;
-        arg.stack = stack;
-        arg.child_tid = child_tid;
-        
-        Syscall'clone3(arg&, size_of(@type arg))
-    } else {
-        null := u32.ptr_from_int(0);
-        a, b, c := @match(query_current_arch()) {
-            fn x86_64() => (null, child_tid, null);
-            fn aarch64() => (null, null, child_tid);
-            @default => todo();
-        };
-        Syscall'clone(clone_flags, stack.ptr.offset(stack.len), a, b, c)
-    };  
-    
-    // :CloneReturnsTwice
-    // beware! that syscall returns twice: once in the original thread and once in a newly created thread. 
-    // the child thread's sp points at (the end of) stack, so you can't RET after SYSCALL, 
-    // so any wrappers must execute the return instruction (i.e. be inlined or tail calls) 
-    // and this function must terminate the thread after the callee returns.  
-    //
-    // TODO: i think this is still a race because it relies on the child being able to retrive
-    //       spilled callee/userdata before the parent returns and calls something else that 
-    //       stomps that part of the old stack. so it relies on callee,userdata getting registers. 
-    //       which they always should but it's super fragile. 
+    tid := perform_clone(clone_flags, stack.ptr.offset(stack.len), child_tid, callee, userdata);
+    @assert_gt(tid, 0, "failed to clone thread");  // TODO: error handling
+    tid
+};
 
-    if result < 0 {
-        @panic("failed to clone thread %.", result);
-    };
-    if result == 0 {  // Child
-        callee(userdata);
-        Syscall'exit_thread(0);
-    };
-    
-    // HACK HACK HACK HACK
-    // I AM BAD AT MY JOB 
-    // I AM BAD AT MY JOB 
-    // I AM BAD AT MY JOB 
-    // I AM BAD AT MY JOB 
-    // I AM BAD AT MY JOB 
-    // I AM BAD AT MY JOB 
-    // I AM BAD AT MY JOB 
-    // I AM BAD AT MY JOB 
-    // 
-    usleep(1000); // TODO: remove this!!!!!! for now im just experimenting... 
-   
-    // else, Parent
-    result
+perform_clone :: AsmFunction(fn(clone_flags: i64, sp: *u8, tid_futex: *u32, callee: @FnPtr(it: rawptr) void, it: rawptr) i32 = (), {
+    #use("@/backend/arm64/bits.fr");
+    @const_slice(
+        mov(.X64, x10, x3),  // save callee for later
+        mov(.X64, x11, x4),  // ^
+        
+        // (flags, sp, parent_tid: *i32, tls: rawptr, child_tid: *i32)
+        mov(.X64, x4, x2),   // tid_futex
+        movz(.X64, x2, 0, .Left0),
+        movz(.X64, x3, 0, .Left0),
+        movz(.X64, x8, 220, .Left0),  // syscall number
+        
+        svc,
+        cbnz(.X64, 4, x0),
+        mov(.X64, x0, x11),
+        movz(.X64, fp, 0, .Left0),  // don't try to trace_prev into the other thread's stack
+        br(x10, 0b0),
+        
+        ret(),
+    )
+}) { (out: *List(u8)) | 
+    // TODO: I'd rather do clone3 but blink doesn't implement it. 
+    //       could do just do clone on amd and clone3 on arm but maybe consistancy is better. idk. 
+    #use("@/backend/amd64/bits.fr");
+    // RDI, RSI, RDX, RCX, R8
+    //                R10
+    @asm_x64(
+        // save callee for later
+        encode_op_reg(PrimaryOp.PushBase, X86Reg.r12),  // only need to restore on the parent
+        encode_bin(PrimaryOp.MovReg, X86Reg.r9, X86Reg.rcx),
+        encode_bin(PrimaryOp.MovReg, X86Reg.r12, X86Reg.r8),
+        
+        // (flags, sp, parent_tid: *i32, child_tid: *i32, tls: rawptr)
+        encode_bin(PrimaryOp.MovReg, X86Reg.r10, X86Reg.rdx),  // tid_futex
+        encode_imm(X86Reg.rdx, 0),
+        encode_imm(X86Reg.r8, 0),
+        encode_imm(X86Reg.rax, 56),  // syscall number
+        
+        0x0F, 0x05,  // syscall
+        encode_cmp_imm32(X86Reg.rax, 0),
+        encode_jmp(X86cc.ne, 13), // :DontShrinkInstructions
+        encode_bin(PrimaryOp.MovReg, X86Reg.rdi, X86Reg.r12),  // 3
+        encode_imm(X86Reg.rbp, 0),  // 7. don't try to trace_prev into the other thread's stack
+        encode_jmp_reg(ModrmMode.Direct, X86Reg.r9), // 3
+        
+        encode_op_reg(PrimaryOp.PopBase, X86Reg.r12),  // restore
+        PrimaryOp.Ret
+    ) out;
 };
 
 LandLock :: @struct {

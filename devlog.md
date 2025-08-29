@@ -6,7 +6,14 @@
   - tried adding the OutputPurpose to the name so it's always unique
   - what if i just give up and loop trying to exec, that seems to work.... clearly i don't understand something...
 - somehow now ive produced a situation where the -syscalls version segfaults when trying to check the tag of a CRes?
- ah the sleep after making a thread does something after all. 
+  ah the sleep after making a thread does something after all. 
+  at least i understand why that one's a race. 
+  do a asm wrapper just for clone that directly calls the new thread's function 
+  so it can't be broken by the compiler trying to use stuff that was saved on the stack. 
+  - race was because slots are accessed as an offset from rbp/fp, which isn't changed by the clone syscall, 
+    so the parent had to not return until the child had called the thread function or the next thing the parent did would 
+    mess up the original stack that the child's rbp was still pointing at. i even knew that was a problem before, now i can get rid of that comment. 
+  - now one of the cases in @syscall can go away and the convoluted thing with xmm1 in perform_syscall can go away
 
 ## (Aug 28)
 

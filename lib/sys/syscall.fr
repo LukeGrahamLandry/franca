@@ -73,27 +73,6 @@ sys_futex :: @S("sys_futex") fn(addr: *u32, futex_op: u32, val: u32, timeout: *T
 
 exit_thread :: @S("exit_thread") fn(status: i64) Never #syscall(93, 60, NOSYS);
 
-// (a, b, c) = 
-// - amd64: (parent_tid: *i32, child_tid: *i32, tls: rawptr)
-// - arm64: (parent_tid: *i32, tls: rawptr, child_tid: *i32)
-clone :: @S("clone") fn(flags: i64, stack: *u8, a: *u32, b: *u32, c: *u32) pid_t #syscall(220, 56, NOSYS) = {
-    // :CloneReturnsTwice this needs a body so it gets a return label so it can be inlined because the new thread can't return on its fresh stack
-};
-clone3 :: @S("clone3") fn(arg: *Clone3, size: i64) pid_t #syscall(435, 435, NOSYS) = {
-    // :CloneReturnsTwice this needs a body so it gets a return label so it can be inlined because the new thread can't return on its fresh stack
-};
-Clone3 :: @struct {
-    flags: i64;
-    pidfd: *i32;
-    child_tid: *u32; // pid_t
-    parent_tid: *pid_t;
-    exit_signal: i64;
-    stack: []u8;
-    tls: i64;
-    set_tid: []pid_t;
-    cgroup: i64;
-};
-
 rt_sigaction :: @S("rt_sigaction") fn(signum: i64, new: *Linux.KSigAction, old: *Linux.KSigAction, sigsetsize: i64) i64 #syscall(134, 13, /*49*/NOSYS);
 rt_sigreturn :: @S("rt_sigreturn") fn() Never #syscall(139, 15, NOSYS);
 
@@ -110,7 +89,6 @@ S :: fn(name: FatExpr, fid: FatExpr) FatExpr #macro = {
 
     @if(IS_BOOTSTRAPPING) {
         // #syscall used to be a magic builtin thing
-        func.body = .Empty; // undo clone hack on old compilers where the syscall shim will be small enough to inline on its own
         return(@literal fid);
     };
     
@@ -230,13 +208,21 @@ fn syscall(arg: FatExpr) FatExpr #macro = {
         loc = loc, ty = FnPtr(arg, ret), done = false,
     );
     
-    @if(!TODOWASM)  // TODO: this nice debloated one doesn't work on wasm
-    if !func.name.str().starts_with("clone") {
-        if !libc {
-            callee = @{ zeroed(rawptr) };
-        };
-        arg_expr := @as(FatExpr) (expr = (Tuple = inst.as_raw()), ty = UnknownType, done = false, loc = loc);
-        return @{
+    if func.name.str().starts_with("clone") {
+        compile_error("use perform_clone instead. it's special because it returns again in a different stack.", loc);
+    };
+
+    if !libc {
+        callee = @{ zeroed(rawptr) };
+    };
+    arg_expr_padded := @as(FatExpr) (expr = (Tuple = inst.as_raw()), ty = UnknownType, done = false, loc = loc);
+    return @{
+        // TODO: the nice debloated one doesn't work on wasm. 
+        //       if i keep it this way, i might as well always do the libc case here instead of also in choose_syscall? 
+        @if(query_current_arch() == .wasm32, {
+            @if(@[@literal !libc]) crash();
+            @[callee](@[arg_expr])
+        }, {
             // TODO: you really really want these to be read only
             // TODO: "You can't have a void pointer 6518175468 as a constant" :CompilerBug
             //        when doing a DataSymbol it doesn't have a FuncId to put in the pagemap. 
@@ -244,43 +230,11 @@ fn syscall(arg: FatExpr) FatExpr #macro = {
             vtable := @static(SyscallVTable) (n = @[@literal sys], libc = (it = zeroed rawptr));
             f := @as(rawptr) @[callee];
             vtable.libc.it = f;
-            args := @array(@[arg_expr]);
+            args := @array(@[arg_expr_padded]);
             result := choose_syscall(args&, vtable);
             bit_cast_unchecked(i64, @[@literal ret], result)
-        };
-    };
-    // TODO: move the special case for clone elsewhere
-    
-    @{
-        want_syscall := prefer_syscalls() || @[@literal !libc];
-        if TODOWASM && query_current_arch() == .wasm32 {
-            want_syscall = false;  // TODO: why ?? 
-        };
-        @if(want_syscall, {
-            @if(@[@literal !can_syscall]) crash();
-            numbers := @[@literal sys];
-            sys_index := @if(query_current_os() == .macos, 2, @if(query_current_arch() == .aarch64, 0, 1));
-            n := numbers&[sys_index];
-            @if(n == NOSYS) crash();
-            OS[].it = query_current_os();  // I hope this is just an :UpdateBoot
-            args := @array(@[{
-                e := @as(FatExpr) (expr = (Tuple = inst.as_raw()), ty = UnknownType, done = false, loc = loc);
-                e
-            }]);
-            result, flag := perform_syscall(args&, n);
-            // I think you really shouldn't hold `sys_index` or even the environment pointer 
-            // across the syscall because of :CloneReturnsTwice, it's a race if they get spilled 
-            // to the stack. so using the global instead. There's only r(12, 13, 14, 15)
-            // which fits (callee, userdata, sys_index, unused env) so it works either way but feels fragile. 
-            if flag.bit_and(1) == 1 && OS[].it == .macos {
-                result = -result;
-            };
-            bit_cast_unchecked(i64, @[@literal ret], result)
-        }, {
-            @if(@[@literal !libc]) crash();
-            @[callee](@[arg_expr])
         })
-    }
+    };
 }
 
 SyscallVTable :: @struct {
@@ -333,12 +287,6 @@ perform_syscall :: AsmFunction(fn(args: *Array(i64, 6), n: i64) Ty(i64, u8) = ()
         encode_base_plus_offset(o, PrimaryOp.MovRegLoad, d, s, off);
     
     @asm_x64(
-        // :CloneReturnsTwice pop the return address early and use xmm0 as link register
-        // This is necessary because the clone syscall returns twice and one of them is in a new stack, 
-        // which won't have the return address on it.  
-        encode_op_reg(PrimaryOp.PopBase, X86Reg.rcx),
-        0x66, 0b01001000, 0x0F, 0x6E, @as(u8) pack_modrm(ModrmMode.Direct, /*src*/X86Reg.rcx, /*dest*/X86Reg.rax/*xmm0*/),
-        
         encode_bin(PrimaryOp.MovReg, X86Reg.rax, X86Reg.rsi), // syscall number
         
         // arguments
@@ -356,9 +304,7 @@ perform_syscall :: AsmFunction(fn(args: *Array(i64, 6), n: i64) Ty(i64, u8) = ()
         encode_2cc(TwoByteOp.SetCC, X86cc.b),
         @as(u8) pack_modrm(ModrmMode.Direct, X86Reg.rdx, X86Reg.rdx),
         
-        // :CloneReturnsTwice tail call to the return address in xmm0
-        0x66, 0b01001000, 0x0F, 0x7E, @as(u8) pack_modrm(ModrmMode.Direct, /*dest*/X86Reg.rcx, /*src*/X86Reg.rax/*xmm0*/),
-        encode_jmp_reg(ModrmMode.Direct, X86Reg.rcx), 
+        PrimaryOp.Ret
     ) out;
 };
 
