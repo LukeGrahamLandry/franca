@@ -6,8 +6,7 @@ driver :: fn(vtable: *ImportVTable) void = {
 
     ok := run_cmd_blocking(franca, @slice("examples/default_driver.fr", "build", "examples/web/demo.fr", "-o", "examples/web/target/demo.wasm", "-arch", "wasm32", "-unsafe"));
     @assert(ok, "failed build");
-    src := import("@/examples/kaleidoscope.fr").EXAMPLE_PROGRAM;
-    write_entire_file_or_crash("examples/web/target/mandel.txt", src);
+    mandel := import("@/examples/kaleidoscope.fr").EXAMPLE_PROGRAM;
     
     ssa := collect_with_extension("examples/import_c/test", ".ssa") || panic("lost tests");
     
@@ -23,8 +22,20 @@ driver :: fn(vtable: *ImportVTable) void = {
         now := time_t.zeroed();
         time(now&);
         tm := localtime(now&);
-        @tfmt("%:%:%_dev", tm.hour, tm.min, tm.sec)
+        @tfmt("%-%-%_dev", tm.hour, tm.min, tm.sec)
     };
+    
+    paths := collect_paths @const_slice("lib", "compiler", "backend", "bindings", "examples");
+    fs := u8.list(temp());
+    contents := u8.list(temp());
+    for paths { s |
+        l := contents.len;
+        read_and_push_or_crash(contents&, s);
+        @fmt(fs&, "\"%\": [%, %],", s, l, contents.len - l);
+    };
+    @fmt(fs&, "\"mandel.txt\": [%, %],", contents.len, mandel.len);
+    contents&.push_all(mandel);
+    fs.len -= 1;
     
     manifest := @tfmt(template,
         """["examples/mandelbrot.fr", "examples/sudoku.fr", "examples/kaleidoscope.fr",
@@ -35,11 +46,11 @@ driver :: fn(vtable: *ImportVTable) void = {
         filenames("examples/import_c/test", ".c"),
         filenames("backend/test", ".ssa"),
         commit,
+        fs.items(),
     );
-    write_entire_file_or_crash("examples/web/target/manifest.json", manifest);
     
-    dirs :: @const_slice("lib", "compiler", "backend", "bindings", "examples");
-    for(dirs, copy_dir);
+    write_entire_file_or_crash("examples/web/target/manifest.json", manifest);
+    write_entire_file_or_crash(@tfmt("examples/web/target/%.txt", commit), contents.items());
     
     // TODO: this is slowly approching crazy town...
     if ci {
@@ -57,22 +68,6 @@ driver :: fn(vtable: *ImportVTable) void = {
     };
 }
 
-copy_dir :: fn(path: Str) void = {
-    @if(!dir_exists(path) || path == "examples/web" || path == "bindings/tracy") return();
-    names := collect_directory_ordered(path, temp(), temp()) || @panic("failed to read %", path);
-    make_dirs_or_crash(@tfmt("examples/web/target/%", path));
-    for names { it |
-        full := @tfmt("%/%", path, it.name);
-        @if(!it.name.starts_with("."))
-        if it.name.ends_with(".fr") || it.name.ends_with(".h") || it.name.ends_with(".c") {
-            src := read_entire_file_or_crash(temp(), full);
-            write_entire_file_or_crash(@tfmt("examples/web/target/%/%", path, it.name), src);
-        } else {
-            copy_dir(full);
-        }
-    };
-}
-
 filenames :: fn(path: Str, ext: Str) Str = {
     files := collect_with_extension(path, ext) || panic("lost tests");
     
@@ -85,8 +80,9 @@ filenames :: fn(path: Str, ext: Str) Str = {
     out := u8.list(temp());
     @fmt(out&, "[");
     for files { it |
-        @fmt(out&, "\"%\",", it);
-        src := read_entire_file_or_crash(temp(), @tfmt("%/%", path, it));
+        full := @tfmt("%/%", path, it);
+        @fmt(out&, "\"%\",", full);
+        src := read_entire_file_or_crash(temp(), full);
         write_entire_file_or_crash(@tfmt("examples/web/target/%", it), src);
     };
     @if(files.len > 0) { out.len -= 1; };
@@ -123,9 +119,45 @@ template :: """{
     "Blazingly 9x slower than native!", 
     "Abstraction will continue until moral improves.",
     "High precision timers are considered unsafe."
-]
+],
+"filesystem": { % }
 }""";
 
+collect_paths :: fn(root: []Str) []Str = {
+    extensions := @const_slice(".fr", ".md", ".ssa", ".c", ".h");
+    files := Str.list(temp());
+    dirs := Str.list(temp());
+    dirs&.push_all(root);
+    while => dirs&.pop() { s |
+        prev_f, prev_d := (files.len, dirs.len);
+        (walk_directory_unordered(as_cstr s) { e |
+            continue :: local_return;
+            if e.is(.Directory) {
+                skip := @const_slice(".git", "target", "examples/web/target", "bindings/tracy");
+                if(s == "." && skip.contains(e.name), => continue());
+                skip := @const_slice(".", "..", "node_modules", "tracy", "cimgui", "test_wasm_rt");
+                if(skip.contains(e.name), => continue());
+                
+                dirs&.push(@tfmt("%/%", s, e.name));
+            } else {
+                for extensions { ext |
+                    if e.name.ends_with(ext) {
+                        path := @tfmt("%/%", s, e.name);
+                        if(path == "./examples/parsegen/boot.g.fr", => continue());
+                        files&.push(path);
+                        continue();
+                    }
+                }
+            }
+        }) || @panic("walk dir '%' failed", s);
+        Sort :: import("@/lib/sort.fr");
+        sort :: Sort'quicksort(Str, Sort.order_strings);
+        sort(files.items().rest(prev_f));
+        sort(dirs.items().rest(prev_d));
+    };
+    files.items()
+}
+    
 #use("@/lib/sys/process.fr");
 #use("@/lib/sys/subprocess.fr");
 #use("@/lib/sys/fs.fr");

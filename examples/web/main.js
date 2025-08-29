@@ -76,7 +76,7 @@ const toggle_worker = () => {
         worker = new Worker(`${manifest.worker}?v=${version}`, { type: "module" });
         worker.onmessage = handle;
         real_start_time = performance.now();
-        worker.postMessage({ tag: "start", url: url, args: args, version: version });
+        worker.postMessage({ tag: "start", url: url, args: args, version: version, fs_bytes: fs_bytes, fs_index: manifest.filesystem });
         document.getElementById("btn").innerText = "Kill";
     } else {
         worker.terminate();
@@ -91,8 +91,13 @@ let manifest = await (await fetch("target/manifest.json?v=" + manifest_version))
 const version = manifest.commit.slice(0, 8);
 console.log(manifest);
 document.getElementById("version").innerText = manifest.commit;
+let fs_bytes = await (await fetch(`target/${manifest.commit}.txt`)).arrayBuffer();
+
 const load_example = async (path) => {
-    let src = await (await fetch(`target/${path}?v=${version}`)).text();
+    let it = manifest.filesystem[path];
+    if (it === undefined) alert(path + " not found");
+    let [off, len] = it;
+    let src = new TextDecoder().decode(new Uint8Array(fs_bytes, off, len));
     document.getElementById("stale").hidden = false;
     document.getElementById("in").value = src;
 };

@@ -5,6 +5,8 @@ let Franca;
 let FrancaXXX = {};
 let start = performance.now();
 let version;
+let fs_index;
+let fs_bytes;
 
 export function handleWasmLoaded(wasm, args) {
     let load_end = performance.now();
@@ -126,13 +128,16 @@ export const imports = {
             return 0n;
         },
         fetch_file: (ptr, len) => {
-            const path = get_wasm_string(ptr, len);
-            const text = sync_fetch(`target/${path}?v=${version}`);
-            if (text === null) return 0n;
-            let src = new TextEncoder().encode(text)
+            let path = get_wasm_string(ptr, len);
+            if (path.startsWith("./")) path = path.slice(2);
+            const offset_length = fs_index[path];
+            if (offset_length == undefined) return 0n;
+            // note: not shadowing the paremeter called 'len' or the worker silently doesn't run and there's no error in the console. 
+            const [off, lenXXX] = offset_length;
+            let src = new Uint8Array(fs_bytes, off, lenXXX);
             const p = imports.env.mmap(0, BigInt(src.byteLength + 1), 0, 0, 0, 0);
             let dest = new Uint8Array(Franca.memory.buffer, Number(p), src.byteLength);
-            dest.set(new Uint8Array(src.buffer));
+            dest.set(src);
             return p;
         },
         yield_file: (ptr, len) => {
@@ -207,6 +212,8 @@ const handle = (_msg) => {
     switch (msg.tag) {
         case "start": {
             version = msg.version;
+            fs_index = msg.fs_index;
+            fs_bytes = msg.fs_bytes;
             WebAssembly.instantiateStreaming(fetch(`target/${msg.url}?v=${version}`), imports)
                 .then(it => handleWasmLoaded(it, msg.args))
                 .catch(show_error);
@@ -236,14 +243,6 @@ function get_wasm_string(ptr, len) {
         Number(len),
     );
     return new TextDecoder().decode(buffer);
-}
-
-const sync_fetch = (url) => {
-    let it = new XMLHttpRequest();
-    it.open("GET", url, false);
-    it.send(null);
-    if (it.status !== 200) return null;
-    return it.responseText;
 }
 
 self.onmessage = handle;

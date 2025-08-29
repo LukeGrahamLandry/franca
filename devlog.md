@@ -1,4 +1,6 @@
 
+## (Aug 28)
+
 - get rid of the unfinished NEW_ADDR_FOLDING
 - use the table for amd64_memargs and amd64_flag_table
 - removed a `m.index != TMP(Amd64Reg.RBP) && m.index != TMP(Amd64Reg.R13);`, 
