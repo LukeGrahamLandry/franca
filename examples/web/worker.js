@@ -127,6 +127,7 @@ export const imports = {
         mprotect: (a, b, c) => {
             return 0n;
         },
+        fsync: (fd) => 0n,
         fetch_file: (ptr, len) => {
             let path = get_wasm_string(ptr, len);
             if (path.startsWith("./")) path = path.slice(2);
