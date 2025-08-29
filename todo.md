@@ -174,7 +174,10 @@ as different types even when they're the same size.
 - self compile in blink on (arm-macos and arm-linux) on github actions seems to hang forever sometimes? 
 - still a mystery bug in amd-linux. 
   race? seems improved by sleeping for a millisecond after spawning a thread. 
+  TODO: REMOVE THE SLEEP IN sys_clone !!
   (much to nobody's surprise, it's still fucked)
+  ... but it does help. there are two problems, the thread sleep fixes segfault with -syscalls,
+  this is something different:
 ```
 examples/bf/interpreter.fr              [FAIL]  265ms | 
 

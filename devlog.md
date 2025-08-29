@@ -1,4 +1,13 @@
 
+- errno 26 is text file busy
+  - tried calling fsync after write... if anything that made it worse?
+  - maybe i have to fsync the directory after rename? 
+    i tried not doing the temporary file + rename because there's only one person trying that file at a time in the situation that's broken. 
+  - tried adding the OutputPurpose to the name so it's always unique
+  - what if i just give up and loop trying to exec, that seems to work.... clearly i don't understand something...
+- somehow now ive produced a situation where the -syscalls version segfaults when trying to check the tag of a CRes?
+ ah the sleep after making a thread does something after all. 
+
 ## (Aug 28)
 
 - get rid of the unfinished NEW_ADDR_FOLDING
