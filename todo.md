@@ -173,17 +173,6 @@ as different types even when they're the same size.
 ### !! BROKEN !!
 
 - self compile in blink on (arm-macos and arm-linux) on github actions seems to hang forever sometimes? 
-- still a mystery bug on linux. for now im just retrying in exec but that's stupid. 
-```
-examples/bf/interpreter.fr              [FAIL]  265ms | 
-
-libc::execvp() failed!
--1 26
-Failed to exec:
-./target/test_interpreter.out 
-```
-what does that mean? `#define ETXTBSY 26 /* Text file busy */` 
-
 - wuffs/gif.c fails at random
 - there have been very rare failures in my lua tests for a while
 - soft_draw.fr crashes when you quit the program
@@ -205,6 +194,7 @@ All is fine! (passed 35 tests)
   - safety check failed in do_jit_fixup
   - undefined variable: <many different places have happened>
   - unlocked a mutex that was already unlocked
+  - Assertion Failed. Expected (-8564907313 >= -2147483648
 ```
 for i in $(seq 1 1000);
 do

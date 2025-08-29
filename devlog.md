@@ -14,6 +14,16 @@
     so the parent had to not return until the child had called the thread function or the next thing the parent did would 
     mess up the original stack that the child's rbp was still pointing at. i even knew that was a problem before, now i can get rid of that comment. 
   - now one of the cases in @syscall can go away and the convoluted thing with xmm1 in perform_syscall can go away
+- without the hack in exec, after writting the file i can read it back, assert the bytes are correct, and it still fails to exec it. 
+- woah!!! maybe it just can't fucking be done: 
+  - https://github.com/golang/go/issues/22315
+  - https://github.com/golang/go/commit/a4b2c5efbc259c7d23159d304f9cb4266cd64643
+  - https://github.com/dotnet/runtime/pull/59765
+  to be fair, i did make it worse by not using CLOEXEC but fixing that just makes it reproduce less often, 
+  it doesn't mean the program is actually correct without retrying on a failed exec. 
+  no CLOEXEC widens the race window from just the time between fork->exec to fork->exit 
+  (the whole time the child process runs) so you can see the problem more easily. 
+  
 
 ## (Aug 28)
 
