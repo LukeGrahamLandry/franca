@@ -83,6 +83,9 @@
   should allow not writing to exec memory and call a tiny bit of aot code to do the copy when you're done each function. 
 - #log_ir needs to do something in declare_alias
 - stop doing superstitious fence()
+- it would be nice to have a good assembler for AsmFunction. 
+  the current thing is just enough more verbose that it looks confusing. 
+  whatever it is has to stay just a user space comptime thing tho, not part of the compiler. 
 
 ## remaining nondeterminism
 

@@ -1,4 +1,27 @@
 
+## (Aug 31)
+
+- i think i need to get rid of deduplication.
+  - arm binary size: (with shrink: 905200, always shrink=false: 928200, dedup code commented out: 925056). 
+    speed is about the same. it's ~50 lines saved. 
+  - 20k bytes isn't worth it. 
+    - the vauge stress of knowing the way im doing the hashing is super fragile. 
+      i don't want to actaully do eq on all the ir because that has slow vibes (even if it's actually fine). 
+    - feels lame to save a copy of the functions, if im doing that i should just use normal allocator 
+      instead of an arena and i like the idea of the arena. 
+    - i don't like the cruch of having the frontend generate redundant code for generics and having the backend clean it up. 
+      it would be better if i had another layer of ir between like real people do (rust, swift, others im sure) 
+      where you do stuff before monomorphization... even if im never going to actually do that because it sounds hard. 
+      even with what i have now it might be better to try to deduplicate at the ast phase before generating the ir. 
+      my previous idea of trying to re-dynamic-ize generics is creepy and has the same problem of doing extra work and then more work to undo it. 
+    - needing to carefully dedup types is easy to break and not something i want to write tests for.  
+      and you can't give generic types readable names for the ir (which i don't do anyway but it might be a nice idea). 
+    - early follow symbol aliases is still required which creeps me out, feels like it might be an ordering bug. 
+    - looking at the things it deduplicates, many of them are trivial and you kinda wish i was good enough at inlining to get rid of them that way instead. 
+    - really im just justifying to myself that im allowed to generate shitier code if it makes me happier about the codebase.  
+
+## (Aug 29)
+
 - errno 26 is text file busy
   - tried calling fsync after write... if anything that made it worse?
   - maybe i have to fsync the directory after rename? 

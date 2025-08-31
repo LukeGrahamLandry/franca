@@ -146,13 +146,6 @@ QbeModule :: @rec @struct(
     libraries: RawList(Str),  // :SLOW but n=4 so like it's probably fine 
     scratch_for_blink_smc: List(u8),
     
-    // only added when f.lnk.shrink=true, 
-    // not relying on frontend telling you which group it's in 
-    // because (im lazy but also) it would be neat to have multiple versions of a library with small changes and deduplicate across them. 
-    deduplicate: RawHashMap(i64 /*Fn.hash*/, RawList(Qbe.Sym)),
-    // to improve deduplication
-    type_lookup: RawHashMap(Qbe.Typ, i64),
-    
     // TODOWASM: remove this once indirect_table as GOT works 
     temporary_alias: List(Ty(Qbe.Sym, Qbe.Sym)),
     
@@ -390,7 +383,6 @@ fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
     
     m.debug_out_storage = list(gpa);
     m.debug_out = m.debug_out_storage&;
-    m.deduplicate = init();
     
     m.insb   = forever.box(@type m.insb[]);
     // coconut.jpg
@@ -501,13 +493,6 @@ fn show_backend_stats() bool =
     get_environment_variable("FRANCA_LOG_STATS").is_some();
 
 fn drop(m: *QbeModule) void = {
-    //each m.deduplicate& { k, v |
-    //    @print("[");
-    //    for v { s |
-    //        @print("%, ", m.str(s));
-    //    };
-    //    @println("]%", k);
-    //};
     fst := m.segments.data&[0].mmapped;
     page_allocator.dealloc(u8, (ptr = fst.ptr, len = fst.len * 3)); // ZeroInitData has no allocation
     @if(enable_incremental()) if m.save { save |
@@ -534,7 +519,6 @@ fn drop(m: *QbeModule) void = {
 // returns false if suspended for inlining 
 run_qbe_passes_common :: fn(f: *Qbe.Fn) bool = {
     ::ptr_utils(*Qbe.Blk);
-
     #use("@/backend/opt/mem.fr");
     
     ::if(Qbe.Ref);
@@ -580,7 +564,6 @@ run_qbe_passes_common :: fn(f: *Qbe.Fn) bool = {
     Fold'fold_constants(f);
     if save_for_inlining(f) {
         // all uses might be inlined so we suspend processing until we know you took a function pointer later. 
-        // also happens if got deduplicated
         when_debug(f, .Inlining, fn(out) => @fmt(out, "\n# Suspending: %\n", f.name()));
         return(false);
     };
