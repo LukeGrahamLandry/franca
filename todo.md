@@ -19,6 +19,7 @@
 - replace import_c/includes.fr with a .frc module generated from the franca libc bindings. 
 - run all the tests on linux
 - enable caching of the .frc between -syscalls and normal. (they're one byte different)
+- better apis for working with paths and temporary files
 
 ---
 
@@ -49,11 +50,6 @@
 - not all the tests pass with FRANCA_NO_CACHE=1
 - can almost enable cacching when -syscalls 
 - document `store v, [Sxxx]` vs `store v, Sxxx` on amd64
-- it would be cool to provide the same abi as tcc 
-  and see if i could get libriscv to use me as it's c compiler for binary translation. 
-  looking at the .c it generates for hello world, 
-  i need to add support for: `__attribute__ (visibility, constructor, used)` and 
-  `__builtin_(expectbswap32, bswap32, clz, clzl, popcount, popcountl, fminf, fmin, fmaxf, fmax)`
 - add a test for #discard_static_scope now that i gave up on scc. 
 - extend the cross repro tests to all the example programs. not just the compiler. maybe just add a file with hashes of binaries to the released artifact. 
 - import_bytes("@/examples/import_wuffs/base.wuffs") that works like import() in that it invalidates the cache if the file changes 
@@ -86,6 +82,7 @@
 - it would be nice to have a good assembler for AsmFunction. 
   the current thing is just enough more verbose that it looks confusing. 
   whatever it is has to stay just a user space comptime thing tho, not part of the compiler. 
+- might be able to get rid of is_wrongly_illegal_instruction now, but maybe it's safer just to leave it for good luck. 
 
 ## remaining nondeterminism
 
@@ -96,14 +93,6 @@
 > (note) solutions for others: SLOW_USERSPACE_THREADS, NEVER_USE_LIBC_ALLOC
 > TODO: should make docs/debugging.md and document strategies for narrowing down bugs. 
 
-## deduplication
-
-- make finish_alias() work for -frc so deduplication can too
-- deduplication is assuming there are no hash collissions
-- dynamic lifting for deduplication when only a few constants are different
-- reevaluate whether it should be enabled for emit_ir(when=.Aot)
-- if the only difference in constants is a reference to itself because it's recursive, that's fine to deduplicate. 
-  
 ## tooling for debugging
 
 - sampling profiler with setitimer
@@ -176,10 +165,6 @@ as different types even when they're the same size.
 ### !! BROKEN !!
 
 - self compile in blink on (arm-macos and arm-linux) on github actions seems to hang forever sometimes? 
-- arm linux with -unsafe segfaults(orb) / hangs(actions)? (static most of the time, dynamic sometimes)
-  `FRANCA_BACKTRACE=1 /Users/luke/Documents/mods/infered/target/release/franca-linux-arm64-sta examples/default_driver.fr build backend/meta/qbe_frontend.fr`
-  getting rid of deduplication broke it somehow? that's alarming. 
-  note that most of the tests aren't compiled by the -unsafe compiler so they can still pass with this being cripplingly broken. 
 - wuffs/gif.c fails at random
 - there have been very rare failures in my lua tests for a while
 - soft_draw.fr crashes when you quit the program
@@ -219,6 +204,7 @@ Assertion Failed: failed to read file 'target/franca/deps/fonts/ttf/JetBrainsMon
 ```
 🤡 which is extra plausible because i'm not even checking that unzip was successful because it complains about weird filenames in wuffs. 
 all the more reason to continue sequestering the tests with dependencies. 
+i think it's just a race where it gets confused if two programs try to cache the same dependency at the same time. 
 
 ## import_symbol / weak
 
@@ -451,13 +437,10 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 
 ## don't rely on libc
 
-- import_c/tokenize: strtoul, strncasecmp, strtod
+- import_c/tokenize: strtod
 - import_wasm/run.fr: 
-  - snprintf
-  - (because .ssa test calls it): getchar, strcmp, memcmp, memcpy, strncmp
+  - (because .ssa test calls it): snprintf, strncmp
 - prospero: atof
-- fetch_or_crash: stop exec-ing random shit! that's even worse than depending on libc!
-- examples/bf: putchar, getchar
 - (epicyles, geo): fmod
 - (graphics): cosf, sinf
 - dlsym, dlopen, dlclose
@@ -471,15 +454,22 @@ need to be careful about the refs which have tags in the high bits so won't leb 
   just provide a script that you can use as hare's assembler that dispatches to a real assembler if it's actually text? 
   (needs to pass -force_static_builtin_memmove to qbe_frontend. tho maybe that should be the default). 
 - easy way to expose c api when it can't pass the environment pointer. 
-  sadly might have to reimplement thread locals. 
+  sadly might have to reimplement thread locals. (which would be nice anyway so i could support more qbe languages)
+- it would be cool to provide the same abi as tcc 
+  and see if i could get libriscv to use me as it's c compiler for binary translation. 
+  looking at the .c it generates for hello world, 
+  i need to add support for: `__attribute__ (visibility, constructor, used)` and 
+  `__builtin_(expectbswap32, bswap32, clz, clzl, popcount, popcountl, fminf, fmin, fmaxf, fmax)`
 - support fini/init sections in elf (and macho i think has a special load command for them)
 - generate c headers from .frc files
 - hare
-  - auto test
+  - enable the tests that use testmod
   - fix 09-funcs so it gets as far as the assertion failing because i don't do init/fini.
   - compile harec with import_c
   - pass the library tests as well
   - don't forget ASSUME_NO_ALIAS_ARGS might break things
+  - why isn't clang giving me a static binary?
+- demo that uses tcc assembler at comptime for AsmFunction
 
 ## longevity
 
@@ -487,6 +477,8 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 
 - vendor the things i care about: stb(truetype, image, image_write), jetbrains mono font
   - get sdf data out of that and generate my own test data for prospero.fr
+  - generate my own laz data to render with geo. im sure there are fun shapes that can be created with little code
+  - teminal.fr, view_image.fr, import_wuffs/test.fr (wuffs input programs)
 - the graphics stuff is a bit of a dumpster fire
   - give up on native webgpu? 
   - slow software rendering implementation as documentation of what it's supposed to do
@@ -631,8 +623,6 @@ also it's cripplingly broken because it doesn't track buildoptions so it's disab
 
 -  run inlining and if something changes redo the other early passes as well
 - someone needs to detect undeclared symbols
-- pre-regalloc is almost target independant but it doesn't quite work 
-  - because of apple_extsb
 - make it work with did_regalloc if you know you only care about one architecture
 - check arch in import_frc() if did_regalloc 
 - need to merge deps if we're generating a cache file? 

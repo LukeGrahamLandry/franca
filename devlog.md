@@ -1,4 +1,18 @@
 
+
+- i definitly have a problem in aarch64_clear_instruction_cache (signal 4 is illegal instruction),
+  - if i use the linker's `__clear_cache` i never hit is_wrongly_illegal_instruction.  
+  - seems fixed if i do another `dsb ish` after the instruction flushing part, not just the data flushing part.
+    if thems the rules and im cured now thats fine with me.
+  - i'd love to understand the rules for the barriers. 
+    experimentally, it's important that there's a dsb at the end (the one in the middle after the dc does nothing and isb does nothing). 
+    but i assume im just discovering something about one specific cpu and there's some higher truth available.
+    it's made extra confusing that executing these instructions on macos is illegal 
+    but im testing the linux stuff with orbstack on the same cpu, so there's an extra level of someone gets to choose how it behaves?
+  - i really thought i was seeing a segfault before but maybe im misremembering cause it seems fine now... scary. 
+- oh i bet the thing with failing to fetch the font is just you race when two programs try to cache the dependency at the same time? 
+  for now lets just see if hack reorder the tests makes it happen less often. 
+
 ## (Aug 31)
 
 - i think i need to get rid of deduplication.
@@ -22,6 +36,7 @@
 - reorganized most of the tests that compile external programs
 - auto run some of the harec tests with qbe_frontend.fr
 - im hoping the problems i was having with blink were because of the race in my clone wrapper, so giving it another chance. 
+  ... signs point to no. 
 
 ## (Aug 29)
 

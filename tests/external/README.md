@@ -16,4 +16,3 @@ compilers that output qbe ir as text for qbe_frontend.fr:
 
 linux emulators:
 - libriscv: run my hello world ssa program
-- blink: make sure the non-libc compiler repros
