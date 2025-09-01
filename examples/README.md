@@ -11,7 +11,6 @@
 - bf: include a brainfuck program in a franca program with various flavours of meta-programming. 
   - interpreter, franca source, c source, ir, wasm
 - repl: a franca repl using the comptime jit.
-- hacky_incremental: call a function in a loop and hot load recompile it when the file changes
 - view_image: print a jpeg of the mona lisa to the terminal by importing a c library (lib:wuffs)
 - turing_art: randomized turing machines draw on a colourful canvas
 

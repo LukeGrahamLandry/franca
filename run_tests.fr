@@ -22,13 +22,13 @@ test_cmds :: @S(
     @S("./target/f.out", "tests/exe/sys.fr"),
     @S("./target/r.out", "all", "-bin", "./target/q.out", "-cc", "-force_linker"), // dep:clang
     @S("./target/r.out", "all", "-bin", "./target/q.out"),  // dep:clang
-    @S("./target/f.out", "examples/import_c/test/wuffs.fr"),  // dep:wuffs
+    @S("./target/f.out", "tests/external/wuffs.fr"),  // dep:wuffs
     @S("./target/f.out", "examples/import_c/test/test.fr"),
     @S("./target/f.out", "examples/import_c/test/test.fr", "-w", "target/w.out"),
-    @S("./target/f.out", "examples/import_c/test/lua.fr"),  // dep:lua
+    @S("./target/f.out", "tests/external/lua.fr"),  // dep:lua
     @S("./target/f.out", "examples/import_c/test/ffi.fr"),
     @S("./target/f.out", "examples/lox/test.fr", "-pass", "-hush"), // dep:lox
-    @S("./target/f.out", "examples/import_c/test/tcc.fr", "-ddc"),  // dep:tcc dep:clang
+    @S("./target/f.out", "tests/external/tcc.fr", "-ddc"),  // dep:tcc dep:clang
     @S("./target/f.out", "backend/test/generate.fr"),  // dep:qbe
     @S("./target/f.out", "examples/default_driver.fr", "build", "examples/60fps.fr", "-dynamiclib"),
     @S("./target/f.out", "examples/import_wuffs/test.fr"),
@@ -125,8 +125,23 @@ fn driver(vtable: *ImportVTable) void = {
                     sh(cmd);
                 };
                 
+                // If running linux with libc, can still run the compiler built without libc and make sure it repros. 
+                if current_os() == .linux && is_linking_libc() {
+                    franca := @if(query_current_arch() == .x86_64, "target/release/franca-linux-amd64-sta", "target/release/franca-linux-arm64-sta");
+                    _ := Syscall'remove("a.out");
+                    sh(@slice(franca, "examples/default_driver.fr", "build", "compiler/main.fr", "-unsafe", "-syscalls"));
+                    sh(@slice("diff", franca, "a.out"));
+                    println("OK: linux_native_no_libc");
+                } else {
+                    println("SKIP: linux_native_no_libc(): native target is not linux+libc");
+                };
+                
                 if get_environment_variable("GITHUB_REPOSITORY").is_some() {
-                    sh(@slice("./target/f.out", "tests/exe/cross.fr"));
+                    sh(@slice("./target/f.out", "tests/external/libriscv.fr"));
+                    if current_os() == .linux {
+                        sh(@slice("./target/f.out", "tests/external/hare.fr"));
+                    };
+                    sh(@slice("./target/f.out", "tests/external/blink.fr"));
                 };
             };
             @default => ();

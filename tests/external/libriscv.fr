@@ -1,0 +1,24 @@
+// #foreign("libriscv", "cmake");
+// This builds a linux-riscv64 emulator and then uses it to run a hello world .ssa program. 
+// This relies on ./target/q.out already being compiled. 
+main :: fn() void = {
+    root := fetch_or_crash(
+        "https://github.com/libriscv/libriscv/archive/352ab7829e69e50867d970e8839c80c7dd58b33b.zip",
+        2747863, "506110dcf0e2afaa14a689d0feb863e5fa13e9d4eb03c80d594a320b77996dfd",
+        "libriscv-352ab7829e69e50867d970e8839c80c7dd58b33b",
+    );
+    start := get_working_directory(temp()).items();
+    Syscall'chdir(@fmt_cstr("%/emulator", root)) || @panic("failed to set cwd to %", root);
+    @println("compiling libriscv...");
+    sh(@slice("./build.sh"));
+    Syscall'chdir(start.as_cstr());
+    
+    _ := Syscall'remove("a.out");
+    sh(@slice("./target/q.out", "-t", "rv64", "-o", "./a.out", "a.ssa"));
+    rvlinux := @tfmt("%/emulator/rvlinux", root);
+    ok, o, e := exec_and_catch(rvlinux, @slice("-s", "./a.out"), temp());
+    ok = ok && o.items() == "Hello World!\n";
+    @assert(ok, "libriscv hello world failed\n%\n%", o.items(), e.items());
+};
+
+#use("@/examples/testing.fr");

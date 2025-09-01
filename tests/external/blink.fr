@@ -1,0 +1,51 @@
+// #foreign("blink", "diff", "homebrew", "gmake");
+// This builds a linux-amd64 emulator and then uses it to rebuild the compiler (without libc!). 
+// Finally it checks that it repros with the one build natively in target/release. 
+// This relies on target/release/franca-* already being compiled. 
+main :: fn() void = {
+    if current_os() == .macos && current_arch() == .x86_64 {
+        // i've tried it on (rosetta2 macos15.4 on an M1) and (github actions macos-13). no luck. 
+        // i can certainly imagine it being my fault because my programs are clearly fragile 
+        // but im running identical binaries on the two platforms (cross arch repro of franca-linux-amd64-sta works on github actions) 
+        // so if the emulator behaves differently depending on the host platform, i don't see how that could be my bug. 
+        // it works fine on macos-arm64 and linux-amd64 (but not in orbstack/rosetta).
+        // -- Aug 11, 2025
+        println("SKIP: blink(): jart/blink does not appear to work on macos-amd64...?");
+        return();
+    };
+
+    root := fetch_or_crash(
+        "https://github.com/jart/blink/archive/7de0bd8330aa0484b5a66ce627d6d35f9ea5efa2.zip",
+        3759302, "1de6a380bd8160d99daabd8d5da7ac381480a82572e6b7049b7c9b2fb7f728ca",
+        "blink-7de0bd8330aa0484b5a66ce627d6d35f9ea5efa2",
+    );
+    start := get_working_directory(temp()).items();
+    Syscall'chdir(root.as_cstr()) || @panic("failed to set cwd to %", root);
+    if current_os() == .macos && get_environment_variable("GITHUB_REPOSITORY").is_some() {
+        // fucking waste of time factory
+        sh(@slice("brew", "install", "make"));
+    };
+    println("compiling blink...");
+    // TODO: ugh, rerunning configure every time changes the modified date so make doesn't cache anything :(
+    sh(@slice("./configure")); 
+    sh(@slice("gmake"));
+    Syscall'chdir(start.as_cstr());
+    franca := "target/release/franca-linux-amd64-sta";
+    _ := Syscall'remove("a.out");
+    println("running blink...");
+    sh(@slice(@tfmt("%/o/blink/blink", root), franca, "examples/default_driver.fr", "build", "compiler/main.fr", "-unsafe", "-syscalls"));
+    sh(@slice("diff", franca, "a.out"));
+    println("OK: blink");
+};
+
+#use("@/examples/testing.fr");
+
+sh :: fn(a: []Str) Str = {
+    ok, out, err := exec_and_catch(a[0], a.rest(1), temp());
+    if !ok {
+        print(out.items());
+        print(err.items());
+        @panic("failed %", a);
+    };
+    out.items()
+}

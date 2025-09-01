@@ -19,6 +19,9 @@
     - early follow symbol aliases is still required which creeps me out, feels like it might be an ordering bug. 
     - looking at the things it deduplicates, many of them are trivial and you kinda wish i was good enough at inlining to get rid of them that way instead. 
     - really im just justifying to myself that im allowed to generate shitier code if it makes me happier about the codebase.  
+- reorganized most of the tests that compile external programs
+- auto run some of the harec tests with qbe_frontend.fr
+- im hoping the problems i was having with blink were because of the race in my clone wrapper, so giving it another chance. 
 
 ## (Aug 29)
 

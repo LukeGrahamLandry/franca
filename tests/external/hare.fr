@@ -1,0 +1,86 @@
+// #foreign("harec");
+// TODO: this is only the 'harec' tests, should run the 'hare' ones as well
+// TODO: flag to use tcc instead of clang
+main :: fn() void = {
+    franca := get_executable_path(temp());
+    start := get_working_directory(temp()).items();
+    backend := @tfmt("%/target/q.out", start);
+    sh(@slice(franca, "examples/default_driver.fr", "build", "backend/meta/qbe_frontend.fr", "-o", backend));
+
+    root := fetch_git_commit("bc75c323739c390026cf5052cd108bd23106769b", "harec", "https://git.sr.ht/~sircmpwn/harec");
+    Syscall'chdir(root.as_cstr());
+    
+    arch := @match(query_current_arch()) {
+        fn aarch64() => "aarch64";
+        fn x86_64() => "x86_64";
+        @default => todo();
+    };
+    @assert_eq(query_current_os(), .linux, "TODO: hare os");
+    
+    files := collect_directory_ordered("src", temp(), temp()).unwrap();
+    cmd := Str.list(temp());
+    cmd&.push("clang");
+    cmd&.push("-o");
+    cmd&.push(".bin/harec");  // this path matters because the tests exec it
+    @assert make_dir("out");
+    @assert make_dir(".bin");
+    for files { it |
+        if it.name.ends_with(".c") {  // if you had run the harec makefile there it shits .o files everywhere
+            dest := @tfmt("out/%.o", it.name.slice(0, it.name.len - 2));
+            sh(@slice(
+                "clang", "-Iinclude", "-c", @tfmt("-DDEFAULT_TARGET=\"%\"", arch), "-DVERSION=\"xxx\"", 
+                @tfmt("src/%", it.name), "-o", dest,
+            ));
+            cmd&.push(dest);
+        }
+    };
+    sh(cmd.items());
+    
+    rt_hare := @slice(
+        "rt/abort.ha", 
+        "rt/compile.ha",
+        "rt/cstrings.ha",
+        "rt/ensure.ha",
+        "rt/itos.ha",
+        "rt/memcpy.ha",
+        "rt/memmove.ha",
+        "rt/memset.ha",
+        "rt/strcmp.ha",
+        "rt/+linux/errno.ha",
+        "rt/+linux/syscalls.ha",
+        "rt/+linux/start.ha",
+        "rt/malloc.ha",
+        @tfmt("rt/+linux/syscallno+%.ha", arch),
+        "rt/+linux/segmalloc.ha",
+    );
+    
+    rt_o := "out/rt.o";
+    cmd := Str.list(temp());
+    cmd&.push_all(@slice("./.bin/harec", "-t", "out/rt.td.tmp", "-N", "rt", "-o", "out/rt.ssa"));
+    cmd&.push_all(rt_hare);
+    sh(cmd&.items());
+    sh(@slice(backend, "out/rt.ssa", "-o", rt_o, "-c", "-force_static_builtin_memmove"));
+    
+    tests := collect_directory_ordered("tests", temp(), temp()).unwrap();
+    for tests { it |
+        continue :: local_return;
+        @if(!it.name.ends_with(".ha")) continue();
+        @if(it.name == "09-funcs.ha") continue(); // TODO: init,fini
+        @if(it.name == "15-enums.ha") continue(); // TODO: testmod
+        @if(it.name == "06-structs.ha") continue(); // TODO: testmod
+        @if(it.name == "24-imports.ha") continue(); // TODO: testmod
+        @if(it.name == "10-binarithms.ha") continue(); // TODO: testmod
+        @if(it.name == "37-annotations.ha") continue(); // TODO: testmod
+        @if(it.name == "34-declarations.ha") continue(); // TODO: testmod
+        
+        ssa := @tfmt("out/%.ssa", it.name);
+        o := @tfmt("out/%.o", it.name);
+        exe := @tfmt("out/%.out", it.name);
+        sh(@slice("env", "HARE_TD_rt=out/rt.td.tmp", "./.bin/harec", @tfmt("tests/%", it.name), "-o", ssa));
+        sh(@slice(backend, ssa, "-o", o, "-c", "-force_static_builtin_memmove"));
+        sh(@slice("clang", o, rt_o, @tfmt("rt/+linux/start+%.s", arch), @tfmt("rt/+linux/syscall+%.s", arch), "-o", exe, "-nostartfiles"));
+        sh(@slice("env", "HARE_TD_rt=out/rt.td.tmp", exe));  // compile() in the tests execs harec
+    };
+}
+
+#use("@/examples/testing.fr");

@@ -176,6 +176,10 @@ as different types even when they're the same size.
 ### !! BROKEN !!
 
 - self compile in blink on (arm-macos and arm-linux) on github actions seems to hang forever sometimes? 
+- arm linux with -unsafe segfaults(orb) / hangs(actions)? (static most of the time, dynamic sometimes)
+  `FRANCA_BACKTRACE=1 /Users/luke/Documents/mods/infered/target/release/franca-linux-arm64-sta examples/default_driver.fr build backend/meta/qbe_frontend.fr`
+  getting rid of deduplication broke it somehow? that's alarming. 
+  note that most of the tests aren't compiled by the -unsafe compiler so they can still pass with this being cripplingly broken. 
 - wuffs/gif.c fails at random
 - there have been very rare failures in my lua tests for a while
 - soft_draw.fr crashes when you quit the program
@@ -208,6 +212,13 @@ done
 - tests/exe/sys.fr might not work with SLOW_LEAK_ARENAS=true?
 - i seem to have made `assert(handled_a_signal[], "did you not unmap the memory my guy?");`
   flaky on amd-macos
+- i've seen this a couple times on actions:
+```
+>>> unpacking [target/franca/deps/fonts.zip]...
+Assertion Failed: failed to read file 'target/franca/deps/fonts/ttf/JetBrainsMonoNL-Bold.ttf'
+```
+🤡 which is extra plausible because i'm not even checking that unzip was successful because it complains about weird filenames in wuffs. 
+all the more reason to continue sequestering the tests with dependencies. 
 
 ## import_symbol / weak
 
