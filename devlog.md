@@ -25,6 +25,11 @@
     is done in an insane way and passes out the name on a field of the type. 
     because i stole it from a c program and didn't bother to un-stupid that part.
   - sadly that's one that the mutability obsessed people would have caught. 
+- fix CopyElimTruncSymbolBug (inlining `fn con`).
+  opt/slots was reusing a truncated symbol. added a test for that. 
+- added a backend debug flag for warnings 
+  so i don't have to feel quite as guilty about hiding things that are probably a mistake but are technically legal.
+  not that i'll ever turn it on... but hey, it's the thought that counts. 
 
 ## (Aug 31)
 

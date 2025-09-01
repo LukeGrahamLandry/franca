@@ -916,6 +916,7 @@ fn parse_type(self: *QParseCtx) Result(void, Str) = {
     
     m := self.m;
     typ := Qbe.Typ.zeroed(); typ := typ&;
+    typ.name = name;
     
     typ.align_log2 = 255;
     if self.eat("align") {
@@ -936,7 +937,10 @@ fn parse_type(self: *QParseCtx) Result(void, Str) = {
             return(Err = "expected '}' to end type declaration");
         };
         typ.set_is_dark(true);
-        @debug_assert(size.ult(MAX_u32) || size == -1, "opaque type too large");
+        if !size.ult(MAX_u32) {
+            when_debug(self.f, .Warn, fn(out) => @fmt(out, "very large abi type: %", typ.name));
+            size = MAX_u32; // TODO: error if you try to use it
+        };
         typ.size = size.trunc();
     } else {
         fields := u32.list(m.forever&.borrow());
@@ -952,7 +956,6 @@ fn parse_type(self: *QParseCtx) Result(void, Str) = {
         };
         typ.fields = fields.items();
     };
-    typ.name = name;
     
     // types can't refer to themselves so adding it at the end is fine
     t := m.new_type(typ[]);
@@ -1027,10 +1030,10 @@ fn parse_type_fields(self: *QParseCtx, typ: *Qbe.Typ, fields: *List(u32)) Result
     align := 1.shift_left(my_align);
     my_size = my_size.max(zext typ.size);
     my_size := bit_and(my_size + align - 1, -align);
-    if my_size > MAX_u32 {
+    if !my_size.ult(MAX_u32) {
+        when_debug(self.f, .Warn, fn(out) => @fmt(out, "very large abi type: %", typ.name));
         my_size = MAX_u32; // TODO: error if you try to use it
     };
-    @assert_le(my_size, MAX_u32);
     typ.size = trunc my_size;
     typ.align_log2 = my_align.trunc();
     fields.push(pack(type = .FEnd, len = 0));

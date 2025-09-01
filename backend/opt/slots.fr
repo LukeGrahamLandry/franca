@@ -15,7 +15,7 @@ elide_abi_slots :: fn(f: *Qbe.Fn) void = {
     stores: HashMap(i64, StoreEntry) = init(temp());
     live_stack := init_bitset(f.slot.zext()+2);
     bscopy(live_stack&, f.escaping_slots&);
-    constants: HashMap(u32, Ty(Qbe.Ref, bool)) = init(temp());
+    constants: HashMap(u32, Ty(Qbe.Ref, Qbe.Cls)) = init(temp());
     
     dead_loads  := 0;
     dead_stores := 0;
@@ -127,9 +127,16 @@ elide_abi_slots :: fn(f: *Qbe.Fn) void = {
             if i.op() == .addr || (i.op() == .copy && rtype(i.arg&[0]) == .RCon) {
                 a0 := i.arg&[0];
                 if constants&.get_ptr(a0.type3_val29) { prev |
+                    if !prev._1.is_wide() && i.cls().is_wide() {
+                        // creating the constant as Kw truncates so that value can't be used as a Kl. 
+                        c := f.get_constant(a0);
+                        if c.type() == .CAddr || c.bits._1 != 0 {
+                            continue();
+                        }
+                    };
                     chuse(prev._0, 1, f);
                     dead_consts += 1;
-                    o: Qbe.O = @if(prev._1 == i.cls().is_int(), .copy, .cast);
+                    o: Qbe.O = @if(prev._1.is_int() == i.cls().is_int(), .copy, .cast);
                     i[] = make_ins(o, i.cls(), i.to, prev._0, QbeNull);
                 } else {
                     if i.op() == .addr {
@@ -145,7 +152,7 @@ elide_abi_slots :: fn(f: *Qbe.Fn) void = {
                     };
                     
                     if !isreg(i.to) {
-                        constants&.insert(a0.type3_val29, (i.to, i.cls().is_int()));
+                        constants&.insert(a0.type3_val29, (i.to, i.cls()));
                     };
                 };
             };

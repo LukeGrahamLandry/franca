@@ -1,4 +1,5 @@
 
+- autotest all the stuff from the web demo in import_wasm 
 - more stack trace improvements
   - macros don't always get a block. 
   - another source of confusion is that for comptime code, source location doesn't come from 
@@ -369,7 +370,6 @@ need to be careful about the refs which have tags in the high bits so won't leb 
   objdump thinks it's fine and it clearly runs correctly. 
 - TODO: harec/src/gen.c: `[arm64/emit.fr/fixup_arm64] offset from dynamic import builtin_type_nomem+4` but would work when done as one compilation unit.
 - mem3.ssa fails without opt/load.fr/loadopt()
-- :CopyElimTruncSymbolBug
 
 ## backend symbols rework
 
@@ -529,7 +529,6 @@ q.out`impl2__7041:
 ## amd64
 
 - amd64: `std/json        cc      FAIL test_wuffs_strconv_parse_number_f64_regular: "-0.000e0": have 0x0000000000000000, want 0x8000000000000000`
-- amd64: examples/import_c/test/test.fr
 - import_c can't compile lua targetting amd64 (makes an exe but it crashes immediately)
 - import_c/test/ffi.fr: panic! sysv abi does not support variadic env calls
 - be less strict about amd64 address folding when there's a large constant pointer (which is valid when jitting)
@@ -866,11 +865,7 @@ the right/fast/safe/whatever thing to do is also the easy thing to do.
 - implement examples/testing.fr/fetch_or_crash() with import_c (wuffs and libcurl) instead of exec-ing shit
 - fetch_or_crash hashes are of the compressed file which is garbage. will break if github changes compression level or whatever. 
 - use import_c for the parts of sokol i haven't ported yet (can't for the mac stuff because thats objective c)
-- shouldn't have `alloc` be the nice name, it should be `alloc_uninit`
-- :ThisSureIsABigBlit
-  - enable static_memmove for simplify blit when examples/import_wasm/run.fr jitting. 
-    maybe just use the memory.copy instruction. 
-- make import_wasm not crash on implicit return 
+- shouldn't have `box` be the nice name, it should be `box_uninit`
 - bake for list/hashmap need to get rid of uninit memory
 - List.shrink_to_fit for places that i push and then return a slice so you can free it on allocators that don't track size
 
@@ -907,6 +902,7 @@ and not need to serialize the arguments to a string.
 - compiler/test.fr run for jit as well
 - automated test that builds are still reproducible (including with -debug-info which doesn't repro currently)
 - fix the test programs to not all write to `./a.out` or whatever so they can run in parallel.  
+  (including cross for different arches at the same time)
 - test compile error for conflicting #use
 - compile all the examples in run_tests: toy
 - repro doesn't work when you do `-repeat`
@@ -917,7 +913,6 @@ and not need to serialize the arguments to a string.
 - make it clear that you can't do this: `franca self.fr && ./a.out driver.dylib run b.fr`. 
 it doesn't like that you stomp a.out, default_driver:run should pick a unique path probably. 
 or just default to jitting and force you to enable aot by specifying an output path. 
-- sort the array of test files so you can always diff the output without hoping the file system iterates in a consistant order 
 - think about how to test the gui programs more convincingly than just that they produce a binary
 - test using import_(c, wasm)/ffi from a precompiled driver to make sure they're not relying on being in their own compilation context 
 - test crash stack traces
