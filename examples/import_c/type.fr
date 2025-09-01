@@ -59,28 +59,47 @@ TypeKind :: @enum(i32) (
     TY_UNION,
 );
 
-fn fixed_type(tag: TypeKind, size: i64, unsigned: bool) *CType = {
-    t := ast_alloc().box_zeroed(CType);
-    t.kind = tag;
-    t.size = size.intcast();
-    t.align = size.intcast();
+fn fixed_type(c: *Ctx, tag: TypeKind, size: i64, unsigned: bool) *CType = {
+    t := c.new_type(tag, size, size);
     t.is_unsigned = unsigned;
     t
 }
 
-ty_void   :: fixed_type(.TY_VOID,   1, false);
-ty_bool   :: fixed_type(.TY_BOOL,   1, false);
-ty_char   :: fixed_type(.TY_CHAR,   1, false);
-ty_short  :: fixed_type(.TY_SHORT,  2, false);
-ty_int    :: fixed_type(.TY_INT,    4, false);
-ty_long   :: fixed_type(.TY_LONG,   8, false);
-ty_uchar  :: fixed_type(.TY_CHAR,   1,  true);
-ty_ushort :: fixed_type(.TY_SHORT,  2,  true);
-ty_uint   :: fixed_type(.TY_INT,    4,  true);
-ty_ulong  :: fixed_type(.TY_LONG,   8,  true);
-ty_float  :: fixed_type(.TY_FLOAT,  4, false);
-ty_double :: fixed_type(.TY_DOUBLE, 8, false);
-ty_ldouble :: fixed_type(.TY_LDOUBLE, 8, false);
+Primitives :: @struct(
+    ty_void: *CType,
+    ty_bool: *CType,
+    ty_char: *CType,
+    ty_short: *CType,
+    ty_int: *CType,
+    ty_long: *CType,
+    ty_uchar: *CType,
+    ty_ushort: *CType,
+    ty_uint: *CType,
+    ty_ulong: *CType,
+    ty_float: *CType,
+    ty_double: *CType,
+    ty_ldouble: *CType,
+);
+
+// 🤡 These can't be static because the name field is mutated when parsing. 
+//    (Need to allow multiple Ctx's on different threads)
+fn fill_primitives(c: *Ctx) void = {
+    c.prims = (
+        ty_void = c.fixed_type(.TY_VOID, 1, false),
+        ty_bool = c.fixed_type(.TY_BOOL, 1, false),
+        ty_char = c.fixed_type(.TY_CHAR, 1, false),
+        ty_short = c.fixed_type(.TY_SHORT, 2, false),
+        ty_int = c.fixed_type(.TY_INT, 4, false),
+        ty_long = c.fixed_type(.TY_LONG, 8, false),
+        ty_uchar = c.fixed_type(.TY_CHAR, 1, true),
+        ty_ushort = c.fixed_type(.TY_SHORT, 2, true),
+        ty_uint = c.fixed_type(.TY_INT, 4, true),
+        ty_ulong = c.fixed_type(.TY_LONG, 8, true),
+        ty_float = c.fixed_type(.TY_FLOAT, 4, false),
+        ty_double = c.fixed_type(.TY_DOUBLE, 8, false),
+        ty_ldouble = c.fixed_type(.TY_LDOUBLE, 8, false),
+    );
+}
 
 fn new_type(c: *Ctx, kind: TypeKind, size: i64, align: i64) *CType = {
     ty := c.arena.box_zeroed(CType);
@@ -158,7 +177,7 @@ fn array_of(c: *Ctx, base: *CType, len: i64) *CType = {
 fn vla_of(c: *Ctx, base: *CType, len: *Node) *CType = {
     ty := c.new_type(.TY_VLA, 8, 8);
     ty.base = base;
-    len = c.new_cast(len, ty_ulong);
+    len = c.new_cast(len, c.ty_ulong);
     ty.vla_len = c.gen_expr(len);
     ty
 }
@@ -176,15 +195,15 @@ fn get_common_type(c: *Ctx, ty1: *CType, ty2: *CType) *CType = {
     if(k1 == .TY_FUNC, => return(c.pointer_to(ty1)));
     if(k2 == .TY_FUNC, => return(c.pointer_to(ty2)));
     
-    if(k1 == .TY_LDOUBLE || k2 == .TY_LDOUBLE, => return(ty_ldouble));
-    if(k1 == .TY_DOUBLE  || k2 == .TY_DOUBLE,  => return(ty_double));
-    if(k1 == .TY_FLOAT   || k2 == .TY_FLOAT,   => return(ty_float));
+    if(k1 == .TY_LDOUBLE || k2 == .TY_LDOUBLE, => return(c.ty_ldouble));
+    if(k1 == .TY_DOUBLE  || k2 == .TY_DOUBLE,  => return(c.ty_double));
+    if(k1 == .TY_FLOAT   || k2 == .TY_FLOAT,   => return(c.ty_float));
     
     if ty1.size < 4 {
-        ty1 = ty_int;
+        ty1 = c.ty_int;
     };
     if ty2.size < 4 {
-        ty2 = ty_int;
+        ty2 = c.ty_int;
     };
     
     ::if(@type ty1);
@@ -254,7 +273,7 @@ fn add_type(c: *Ctx, k: NodeKind, lhs: **Node, rhs: **Node) *CType = {
         @error_tok(c, rhs.tok, "unknown type for right of %", k);
     };
     if lhs.ty.kind == .TY_VOID || rhs.ty.kind == .TY_VOID {
-        return(ty_void);
+        return(c.ty_void);
     };
 @if_else {
     @if(@is(k, .ND_COND, .ND_ADD, .ND_SUB, .ND_MUL, .ND_DIV, .ND_MOD, .ND_BITAND, .ND_BITOR, .ND_BITXOR)) => {
@@ -263,14 +282,14 @@ fn add_type(c: *Ctx, k: NodeKind, lhs: **Node, rhs: **Node) *CType = {
     };
     @if(@is(k, .ND_EQ, .ND_NE, .ND_LT, .ND_LE)) => {
         c.usual_arith_conv(lhs, rhs);
-        ty_int
+        c.ty_int
     };
     @if(@is(k, .ND_SHL, .ND_SHR)) => {
-        @if(lhs.ty.size < 4, ty_int, lhs.ty)
+        @if(lhs.ty.size < 4, c.ty_int, lhs.ty)
     };
     @else => (@match(k) {
         fn ND_NEG() => {
-            ty := c.get_common_type(ty_int, lhs.ty);
+            ty := c.get_common_type(c.ty_int, lhs.ty);
             lhs[] = c.new_cast(lhs[], ty);
             ty
         }
@@ -282,7 +301,7 @@ fn add_type(c: *Ctx, k: NodeKind, lhs: **Node, rhs: **Node) *CType = {
             lhs.ty
         }
         fn ND_COND() => if lhs.ty.kind == .TY_VOID || rhs.ty.kind == .TY_VOID {
-            ty_void
+            c.ty_void
         } else {
             c.usual_arith_conv(lhs, rhs);
             lhs.ty

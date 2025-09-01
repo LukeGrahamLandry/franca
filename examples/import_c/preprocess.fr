@@ -255,11 +255,12 @@ fn eval_const_expr(c: *Ctx, rest: **Token, tok: *Token) bool = {
 }
 
 fn push_cond_incl(c: *Ctx, tok: *Token, included: bool) *CondIncl = {
-    ci := temp().box(CondIncl);
-    ci.next = c.cond_incl;
-    ci.ctx = .Then;
-    ci.tok = tok;
-    ci.included = included;
+    ci := temp().boxed(CondIncl, (
+        next = c.cond_incl,
+        ctx = .Then,
+        tok = tok,
+        included = included,
+    ));
     c.cond_incl = (Some = ci);
     ci
 }
@@ -270,8 +271,7 @@ fn find_macro(c: *Ctx, tok: *Token) ?*Macro = {
 }
 
 fn add_macro(c: *Ctx, name: Str, is_objlike: bool, body: *Token, params: []Str, va_args_name: ?Str) *Macro ={
-    m := c.arena.box(Macro);
-    m[] = (
+    m := c.arena.boxed(Macro, (
         name = name,
         is_objlike = is_objlike,
         body = body,
@@ -279,7 +279,7 @@ fn add_macro(c: *Ctx, name: Str, is_objlike: bool, body: *Token, params: []Str, 
         va_args_name = va_args_name,
         handler = .None,
         enabled = true,
-    );
+    ));
     c.macros&.insert(name, m);
     m
 }
@@ -1272,11 +1272,16 @@ fn join_adjacent_string_literals(c: *Ctx, tok: *Token) void = {
 }
 
 fn promote_to_wide_string_literal(c: *Ctx, tok: *Token, basety: *Types.CType) *Token #once = {
+    // can be called on a macro expanded from another file and new_token needs it to be in range for a 32 bit offset
+    prev := c.current_file;
+    c.current_file = tok.file;  
+
     t := if basety.size == 2 {
         c.read_utf16_string_literal(tok.str().as_ptr(), tok.str().as_ptr())
     } else {
         c.read_utf32_string_literal(tok.str().as_ptr(), tok.str().as_ptr(), basety)
     };
+    c.current_file = prev;
     t.next = tok.next;
     t
 }

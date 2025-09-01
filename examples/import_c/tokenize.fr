@@ -157,8 +157,7 @@ fn new_token(c: *Ctx, kind: TokenKind, start: *u8, end: *u8) *Token = {
     tok := c.arena.box_zeroed(Token);
     tok.kind = kind;
     off := ptr_diff(c.current_file.contents.ptr, start);
-    @debug_assert_lt(off, 1.shift_left(31));
-    @debug_assert_ge(off, - 1.shift_left(31));  // TODO: should always be in the file
+    @debug_assert_ult(off, 1.shift_left(31));
     tok.off = off.trunc();
     tok.len = ptr_diff(start, end).intcast();
     tok.file = c.current_file;
@@ -317,7 +316,7 @@ form_feed    :: 0x0C;
 vertical_tab :: 0x0B;
 
 fn read_string_literal(c: *Ctx, start: *u8, quote: *u8) *Token = {
-    read_string_literal(c, start, quote, u8, ty_char) { p, len, buf |
+    read_string_literal(c, start, quote, u8, c.ty_char) { p, len, buf |
         buf[len[]] = p[][];
         p[] = p[].offset(1);
         len[] += 1;
@@ -332,7 +331,7 @@ fn read_string_literal(c: *Ctx, start: *u8, quote: *u8) *Token = {
 // in the 4 byte sequence is called "surrogate", and a 4 byte sequence
 // is called a "surrogate pair".
 fn read_utf16_string_literal(c: *Ctx, start: *u8, quote: *u8) *Token = {
-    read_string_literal(c, start, quote, u16, ty_ushort) { p, len, buf |
+    read_string_literal(c, start, quote, u16, c.ty_ushort) { p, len, buf |
         ch   := Unicode'decode_utf8(p, p[]);
         wide := ch >= 0x10000;
         if ch < 0x10000 {
@@ -353,7 +352,7 @@ fn read_utf16_string_literal(c: *Ctx, start: *u8, quote: *u8) *Token = {
 // UTF-32 is a fixed-width encoding for Unicode. Each code point is
 // encoded in 4 bytes.
 fn read_utf32_string_literal(c: *Ctx, start: *u8, quote: *u8, ty: *CType) *Token = {
-    read_string_literal(c, start, quote, u32, ty_uint) { p, len, buf |
+    read_string_literal(c, start, quote, u32, c.ty_uint) { p, len, buf |
         buf[len[]] = Unicode'decode_utf8(p, p[]);
         len[] += 1;
     }
@@ -445,7 +444,7 @@ fn read_char_literal(c: *Ctx, start: *u8, quote: *u8, ty: *CType) *Token = {
     tok
 }
 
-fn convert_pp_int(tok: *Token) bool = {
+fn convert_pp_int(c: *Ctx, tok: *Token) bool = {
     p := tok.str().as_ptr();
     
     // Read a binary, octal, decimal or hexadecimal number.
@@ -506,20 +505,20 @@ fn convert_pp_int(tok: *Token) bool = {
     // Infer a type.
     ty := if (base == 10) {
         @if_else {
-            @if(l && u) => ty_ulong;
-            @if(l)      => ty_long;
-            @if(u)      => @if(hi(32), ty_ulong, ty_uint);
-            @else       => @if(hi(31), ty_long, ty_int);
+            @if(l && u) => c.ty_ulong;
+            @if(l)      => c.ty_long;
+            @if(u)      => @if(hi(32), c.ty_ulong, c.ty_uint);
+            @else       => @if(hi(31), c.ty_long, c.ty_int);
         }
     } else {
         @if_else {
-            @if(l && u) => ty_ulong;
-            @if(l)      => @if(hi(63), ty_ulong, ty_long);
-            @if(u)      => @if(hi(32), ty_ulong, ty_uint);
-            @if(hi(63)) => ty_ulong;
-            @if(hi(32)) => ty_long;
-            @if(hi(31)) => ty_uint;
-            @else       => ty_int;
+            @if(l && u) => c.ty_ulong;
+            @if(l)      => @if(hi(63), c.ty_ulong, c.ty_long);
+            @if(u)      => @if(hi(32), c.ty_ulong, c.ty_uint);
+            @if(hi(63)) => c.ty_ulong;
+            @if(hi(32)) => c.ty_long;
+            @if(hi(31)) => c.ty_uint;
+            @else       => c.ty_int;
         }
     };
 
@@ -538,7 +537,7 @@ fn convert_pp_int(tok: *Token) bool = {
 // This function converts a pp-number token to a regular number token.
 fn convert_pp_number(c: *Ctx, tok: *Token) void = {
     // Try to parse as an integer constant.
-    if(convert_pp_int(tok), => return());
+    if(convert_pp_int(c, tok), => return());
 
     // If it's not an integer, it must be a floating point constant.
     p := tok.str().as_ptr();
@@ -560,13 +559,13 @@ fn convert_pp_number(c: *Ctx, tok: *Token) void = {
         @if(end_char == "f".ascii() || end_char == "F".ascii()) => {
             end = end.offset(1);
             val = val.to_single_precision_with_hi_zeroed();
-            ty_float
+            c.ty_float
         };
         @if(end_char == "l".ascii() || end_char == "L".ascii()) => {
             end = end.offset(1);
-            ty_ldouble
+            c.ty_ldouble
         };
-        @else => ty_double;
+        @else => c.ty_double;
     };
     
     if ptr_diff(tok.str().as_ptr(), end) != tok.len.intcast() {
@@ -747,9 +746,9 @@ fn tokenize(c: *Ctx, file: *File) *Token = {
                 // UTF-16 string literal
                 @case("u".ascii()) => continue_tok(c.read_utf16_string_literal(p, p.offset(1)));
                 // Wide string literal
-                @case("L".ascii()) => continue_tok(c.read_utf32_string_literal(p, p.offset(1), ty_int));
+                @case("L".ascii()) => continue_tok(c.read_utf32_string_literal(p, p.offset(1), c.ty_int));
                 // UTF-32 string literal
-                @case("U".ascii()) => continue_tok(c.read_utf32_string_literal(p, p.offset(1), ty_uint));
+                @case("U".ascii()) => continue_tok(c.read_utf32_string_literal(p, p.offset(1), c.ty_uint));
                 @default => (); // fallthrough
             };
         };
@@ -760,7 +759,7 @@ fn tokenize(c: *Ctx, file: *File) *Token = {
     
         // Character literal
         if p[] == "'".ascii() {
-            tok := c.read_char_literal(p, p, ty_int);
+            tok := c.read_char_literal(p, p, c.ty_int);
             if tok.val.i > 255 {
                 @error_tok(c, tok, "char literal too large. use a size prefix.");
             };
@@ -773,14 +772,14 @@ fn tokenize(c: *Ctx, file: *File) *Token = {
             @switch(p[]) {
                 // UTF-16 character literal
                 @case("u".ascii()) => {
-                    tok := c.read_char_literal(p, p.offset(1), ty_ushort);
+                    tok := c.read_char_literal(p, p.offset(1), c.ty_ushort);
                     tok.val.i = tok.val.i.bit_and(0xFFFF);  // TODO: is this supposed to be sign extended?
                     continue_tok(tok);
                 };
                 // Wide character literal
-                @case("L".ascii()) => continue_tok(c.read_char_literal(p, p.offset(1), ty_int));
+                @case("L".ascii()) => continue_tok(c.read_char_literal(p, p.offset(1), c.ty_int));
                 // UTF-32 character literal
-                @case("U".ascii()) => continue_tok(c.read_char_literal(p, p.offset(1), ty_uint));
+                @case("U".ascii()) => continue_tok(c.read_char_literal(p, p.offset(1), c.ty_uint));
                 @default => (); // fallthrough
             };
         };
@@ -836,7 +835,6 @@ fn read_universal_char(p: *u8, len: i64) u32 = {
 }
 
 fn new_file(c: *Ctx, name: Str, contents: Str) *File = {
-    file := c.arena.box(File);
     // :BoundsPadding
     // we want it to be a c string, and if we add some extra zeros, the lexer doesn't 
     // have to worry about bounds checks when it looks a few characters ahead to match 
@@ -850,12 +848,12 @@ fn new_file(c: *Ctx, name: Str, contents: Str) *File = {
         dest.rest(contents.len).set_zeroed();
         dest
     };
-    file[] = (
+    file := c.arena.boxed(File, (
         name = name,
         display_name = name,
         line_delta = 0,
         contents = contents,
-    );
+    ));
     file
 }
 

@@ -1,4 +1,5 @@
 
+## (Sep 1)
 
 - i definitly have a problem in aarch64_clear_instruction_cache (signal 4 is illegal instruction),
   - if i use the linker's `__clear_cache` i never hit is_wrongly_illegal_instruction.  
@@ -12,6 +13,18 @@
   - i really thought i was seeing a segfault before but maybe im misremembering cause it seems fine now... scary. 
 - oh i bet the thing with failing to fetch the font is just you race when two programs try to cache the dependency at the same time? 
   for now lets just see if hack reorder the tests makes it happen less often. 
+- import_c/test/test.fr problem 
+  - only when the test runner is multithreaded. using more threads i can make crash happen every time. 
+  - fix the thing where new_token gets called on a string that's not in the file. 
+    problem was promote_to_wide_string_literal, can get called on a macro expanded on a different file,
+    and using more threads made it more likely to eventually get allocations that were more than 2gb apart?
+    so that gets rid of the assertion failure. 
+  - the other problem isn't consistant even with lots of threads but still seems to be never when single threaded.
+  - still broken if i remove the codegenworker and running the executable, it's just in the frontend part. 
+  - oh fuck me it's always a primitive, problem is the ty_FOO are static but the declaration parsing 
+    is done in an insane way and passes out the name on a field of the type. 
+    because i stole it from a c program and didn't bother to un-stupid that part.
+  - sadly that's one that the mutability obsessed people would have caught. 
 
 ## (Aug 31)
 
