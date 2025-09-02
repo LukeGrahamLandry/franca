@@ -116,6 +116,11 @@ start_elf :: fn(m: *Qbe.Module) EmitElf #inline = {
         fn Dynamic() => .Dynamic;
         @default => unreachable();
     };
+    if m.goal.arch == .rv64 {
+        // this fixes `ld.lld: error: a.o: cannot link object files with different floating-point ABI from [...]/crt1.o`
+        h.flags = h.flags.bit_or(Elf.EF_RISCV_FLOAT_ABI_DOUBLE);
+    };
+    
     h.machine = @match(m.goal.arch) {
         fn aarch64() => .arm64;
         fn x86_64()  => .amd64;
@@ -561,6 +566,7 @@ create_rela_table :: fn(
                 (@match(m.goal.arch) {
                     fn x86_64()  => Elf.R_AMD64_64;
                     fn aarch64() => Elf.R_AARCH64_ABS64;
+                    fn rv64()    => Elf.R_RISCV_64;
                     @default     => todo();
                 }, it.increment)
             }
@@ -604,6 +610,10 @@ create_rela_table :: fn(
                         Elf.R_AARCH64_ADR_PREL_PG_HI21, Elf.R_AARCH64_ADD_ABS_LO12_NC,
                         Elf.R_AARCH64_ADR_GOT_PAGE, Elf.R_AARCH64_LD64_GOT_LO12_NC,
                     );
+                    fn rv64() => (
+                        Elf.R_RISCV_PCREL_HI20, Elf.R_RISCV_PCREL_LO12_I,
+                        Elf.R_RISCV_PCREL_HI20, Elf.R_RISCV_PCREL_LO12_I,
+                    );
                     @default => todo();
                 };
                 
@@ -618,6 +628,16 @@ create_rela_table :: fn(
                     addend = inc,
                     type = fst.trunc(),
                 );
+                
+                if e.m.goal.type == .Relocatable && e.m.goal.arch == .rv64 {
+                    // :StupidEncodingsWinStupidRelocations
+                    anon := e.m.intern(@tfmt(".auipc%", off));
+                    use_symbol(e.m, anon) { s |
+                        @debug_assert(s.got_lookup_offset != -1);
+                        sym = s.got_lookup_offset.trunc() + 1;
+                    };
+                };
+                
                 off += 4;
                 (snd, inc)
             }

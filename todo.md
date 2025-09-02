@@ -488,6 +488,8 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 
 ## linux 
 
+- do i have to use header.type=ET_DYN on mt executables to get aslr? (it's what clang does if you pass -pie)
+  does that replace Elf.MYSTERY_SPICE?
 - linux fault-na.ssa need to do the signal struct (rn it's skipped in backend/meta/test.fr)
 - :TodoLinux CLOCK_REALTIME
 - repro doesn't work cross compiling from linux to macos,

@@ -1,4 +1,25 @@
 
+
+## (Sep 2) rv
+
+- call1.ssa: load, extsw
+- libriscv doesn't do relocations unless the elf header.type is ET_DYN. 
+  - hmm, that also works on the other architectures, maybe it just doesn't matter?
+    oh and that's what clang does for if you pass `-pie`. 
+  - tho actually im normally using a linker when running the tests on linux 
+    so the fact that it works at all in the emulator is it doing me a favour. 
+- so for sanity i should be using a linker for riscv too until im ready to do my own entry point
+  - set a flag about float abi
+  - `ld.lld: error: R_RISCV_PCREL_LO12 relocation points to a.o:(.data+0x0) without an associated R_RISCV_PCREL_HI20 relocation`
+    time for my favourite game of see what clang does on a c program i guess.
+    ew, because both immediates are sign extended you can't do the two instructions seperatly so you 
+    need to make an extra symbol every single time and then the lo points to the hi which points to the actual symbol you care about????
+    can i just have one symbol at the start of my code section and use the addend to point to the other instruction? 
+    seems like no... https://github.com/ahjragaas/binutils-gdb/commit/50331d64f1080c2c9957fb608e0af236b96c1a41
+    they combine both addends and use it for the real symbol. that sucks so much :(
+    :StupidEncodingsWinStupidRelocations 
+  - now call1.ssa works with `zig cc -target riscv64-linux-musl`
+
 ## (Sep 1)
 
 - i definitly have a problem in aarch64_clear_instruction_cache (signal 4 is illegal instruction),

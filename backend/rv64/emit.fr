@@ -27,6 +27,7 @@ emit_the_code :: fn(e: *EmitRv) void = {
         }
     }
     
+    // TODO: elide this for leaf without stack frame
     e.emit_store_off(TMP(RvReg.FP), TMP(RvReg.SP), -16);
     e.emit_store_off(TMP(RvReg.RA), TMP(RvReg.SP), -8);
     e.emit(make_ins(.add, .Kl, TMP(RvReg.FP), TMP(RvReg.SP), f.getcon(-16)));
@@ -224,12 +225,30 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
                 e.emit(make_ins(.copy, .Kl, i.to, TMP(RvReg.SP), Qbe.Null));
             }
         }
+        fn loadsb() => e.load(i, 0b000);
+        fn loadsh() => e.load(i, 0b001);
+        fn loadub() => e.load(i, 0b100);
+        fn loaduh() => e.load(i, 0b101);
+        fn loadsw() => e.load(i, 0b010);
+        fn loaduw() => unreachable();
+        fn load() => {
+            @assert(i.cls().is_int(), "TODO: load float");
+            e.load(i, @if(i.cls().is_wide(), 0b011, 0b110));
+        }
+        // ADDIW sign extends the result, so adding zero is just a sign extension. 
+        fn extsw() => e.inst(R(0, 0, a0.rv().bits(), @as(u3) OpI.add, i.to.rv().bits(), .opw))
         fn add() => e.simple_op(i, .add);
         @default => {
             @println("%", i.op());
             todo()
         };
     }
+}
+
+fn load(e: *EmitRv, i: *Qbe.Ins, op: u3) void = {
+    off := 0; // TODO: isel address folding
+    addr := i.arg&[0].rv().bits();
+    e.inst(I(off, addr, op, i.to.rv().bits(), .load));
 }
 
 // TODO: factor together with arm/loadaddr_bits>
@@ -242,8 +261,6 @@ fn load_symbol(e: *EmitRv, c: *Qbe.Con, dest_reg: RvReg) void = {
         @match(symbol.kind) {
             fn DynamicPatched() => todo();
             fn Local() => {
-                distance := e.m.distance_between(.Code, e.m.current_offset(.Code), symbol.segment, symbol.offset + inc);
-                @debug_assert(symbol.segment != .Code || distance < 0, "we must be jumping backwards");
                 dest := e.m.segment_address(symbol.segment, symbol.offset + inc);
                 i_page, i_off := rel_off(dest, patch_addr, dest_reg);
                 e.inst(i_page);
@@ -256,12 +273,30 @@ fn load_symbol(e: *EmitRv, c: *Qbe.Con, dest_reg: RvReg) void = {
             fn Pending() => todo();
         };
     };
+    
+    if e.m.goal.type == .Relocatable {
+        // :StupidEncodingsWinStupidRelocations
+        // need to make a fake symbol so the lo reloc can reference the hi one. 
+        // the linker can't do them seperatly because of the weird double sign extension (see ./bits.fr/rel_off). 
+        // note also that the addend doesn't apply to the instruction reference so you really do need a unique symbol each time. 
+        // TODO: represent that link more explicitly, having both places re-mangle this name is fragile. 
+        // TODO: have a more sane thing for anonymous symbols that doesn't required allocating strings for names and hoping they're unique. 
+        off := e.m.segments&[.Code]&.len() - 8;  // local offset not vaddr; important for repro
+        anon := e.m.intern(@tfmt(".auipc%", off));
+        use_symbol(e.m, anon) { s |
+            s.kind = .Local;
+            s.offset = off;
+            s.segment = .Code;
+            e.m.local_needs_reloc&.push(s.id);
+        };
+    };
 }
 
 fn simple_op(e: *EmitRv, i: *Qbe.Ins, o: OpI) void = {
+    e.m.flush_debug();
     @debug_assert(i.cls().is_int(), "TODO: riscv float instruction encoding");
     a0, a1 := (i.arg&[0], i.arg&[1]);
-    @debug_assert(isreg(i.to) && a0.val() < 64);
+    @debug_assert(isreg(i.to));
     @debug_assert(i.op() != .sar, "TODO: arithmetic");
     i := if rtype(a1) == .RCon {
         c := e.f.get_constant(a1);
@@ -275,7 +310,7 @@ fn simple_op(e: *EmitRv, i: *Qbe.Ins, o: OpI) void = {
 }
 
 fn rv(r: Qbe.Ref) RvReg = {
-    @debug_assert(r.val() < 64);
+    @debug_assert(r.isreg() || r == Qbe.Null/*zero register is a legal argument*/, "rv(non-reg)");
     @as(RvReg) @as(u8) r.val().trunc()
 }
 
@@ -305,7 +340,29 @@ fn emit_add_off(e: *EmitRv, dest: Qbe.Ref, a: Qbe.Ref, off: i64) void = {
 }
 
 fixup_rv64 :: fn(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_reloc: *?Fixup) void = {
-    todo()
+    address := symbol.jit_addr;
+    local  := symbol.kind == .Local;
+    @match(fixup.type) {
+        fn Call(it) => {
+            panic("TODO: rv fixup Call");
+        }
+        fn InReg(it) => {
+            inst: []u32 = (ptr = u32.ptr_from_raw(fixup.patch_at), len = 2);
+            if local {
+                i_page, i_off := rel_off(address.offset(it.increment), fixup.patch_at, @as(RvReg) @as(u8) it.r.trunc());
+                inst[0] = i_page;
+                inst[1] = i_off;
+            } else {
+                panic("TODO: rv fixup InReg import");
+            };
+        }
+        fn DataAbsolute(it) => {
+            rawptr.ptr_from_raw(fixup.patch_at)[] = address.offset(it.increment);
+            m := self;
+            @debug_assert(!(m.goal.got_indirection_instead_of_patches && m.goal.type == .JitOnly && address.is_null()), "you cant do that bro");
+        }
+        @default => @panic("unexpected fixup type for %", symbol.name);
+    }
 }
 
 fn next_inst_offset(self: *EmitRv) i64 = {
