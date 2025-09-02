@@ -30,6 +30,7 @@
 - added a backend debug flag for warnings 
   so i don't have to feel quite as guilty about hiding things that are probably a mistake but are technically legal.
   not that i'll ever turn it on... but hey, it's the thought that counts. 
+- box -> box_uninit
 
 ## (Aug 31)
 

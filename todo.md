@@ -865,7 +865,6 @@ the right/fast/safe/whatever thing to do is also the easy thing to do.
 - implement examples/testing.fr/fetch_or_crash() with import_c (wuffs and libcurl) instead of exec-ing shit
 - fetch_or_crash hashes are of the compressed file which is garbage. will break if github changes compression level or whatever. 
 - use import_c for the parts of sokol i haven't ported yet (can't for the mac stuff because thats objective c)
-- shouldn't have `box` be the nice name, it should be `box_uninit`
 - bake for list/hashmap need to get rid of uninit memory
 - List.shrink_to_fit for places that i push and then return a slice so you can free it on allocators that don't track size
 

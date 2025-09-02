@@ -101,7 +101,7 @@ fn files_unchanged(header: *Header) bool = {
 
 fn compile_cached(header: *Header, to_free: *?Ty(*QbeModule, *Crash'LocationResolverNode)) (@FnPtr(*ImportVTable) void) = {
     a := general_allocator();
-    m := a.box(QbeModule);
+    m := a.box_uninit(QbeModule);
     backend'init_module(m, (
         arch = query_current_arch(), 
         os = query_current_os(), 
@@ -254,15 +254,14 @@ fn import_frc(self: *SelfHosted, bytes: []u8) CRes(ScopeId) = {
     //write_entire_file("target/a.frc", bytes);
     
     a := self.get_alloc();
-    module := a.box(FrcModule);
-    module[] = (
+    module := a.boxed(FrcModule, (
         header = header, 
         scope = scope,
         sym = a.alloc_init(u32, zext header.sym.count, fn(_) => Qbe.no_symbol), 
         sym_ty = a.alloc_init(One(FTy), zext header.sym.count, fn(_) => (off = Qbe.no_symbol)), 
         fty = a.alloc_zeroed(Type, zext header.fty.count),
         data_symbols = empty(),
-    );
+    ));
     @err_assert(header.fty.count != 0, "tried to import_frc without frontend type info (fty)") return;
     
     sym_ty := module.sym_ty;
@@ -730,8 +729,7 @@ fn find_module(self: *SelfHosted, shared: *FrontendCodegen, module: *FrcModule) 
             enter_task shared { entry |
                 id := shared.m.intern(self.pool.get(info.name));
                 if shared.m.goal.type == .JitOnly && info.comptime != 0 {
-                    lnk := temp().box(Qbe.Lnk);
-                    lnk.id = id;
+                    lnk := temp().boxed(Qbe.Lnk, (id = id));
                     entry.task = (JitImport = (lnk = lnk, addr = rawptr_from_int(info.comptime)));
                 } else {
                     arg := temp().boxed(Ty(@slice(Qbe.Sym, Str, bool)), 
@@ -816,7 +814,7 @@ cached_compile_module :: fn(path: Str, opts: *BuildOptions, out_alloc: Alloc) CR
         compiler := new_with_src(vtable, src, opts);
         self := compiler.cast()[][];
         
-        m := self.get_alloc().box(QbeModule);
+        m := self.get_alloc().box_uninit(QbeModule);
         // TODO: "need to be consistant about how to handle modules like this that don't actually compile anything"
         init_default_module_dyn(m, vtable, (
             os = .macos, 
