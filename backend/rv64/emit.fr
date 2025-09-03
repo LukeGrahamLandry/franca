@@ -1,3 +1,6 @@
+// in contrast to amd/arm, the riscv 32 bit instructions generally sign extend the result. 
+// TODO: a test for overflowing 32 bit add to make sure it's sign extended after discarding 
+//       the overflow instead of using a 64 bit add. (if those are different, idk)
 
 EmitRv :: @struct {
     f: *Qbe.Fn;
@@ -95,7 +98,7 @@ emit_the_code :: fn(e: *EmitRv) void = {
                 };
                 @debug_assert(isreg(b.jmp.arg));
                 cond := @if(swap, Qbe.Cmp.Cine, .Cieq);
-                patches&.push(target_bid = b.s2.id, offset_from_start = e.next_inst_offset(), cond = cond.raw());
+                patches&.push(target_bid = b.s2.id, offset_from_start = e.next_inst_offset(), cond = cond.raw(), reg = b.jmp.arg);
                 e.inst(ebreak);
                 if !b.s1.identical(b.link) {
                     patches&.push(target_bid = b.s1.id, offset_from_start = e.next_inst_offset(), cond = -1);
@@ -115,13 +118,16 @@ emit_the_code :: fn(e: *EmitRv) void = {
         patch := ptr_cast_unchecked(u8, u32, patch);
         @debug_assert_eq(ebreak, patch[], "not expecting patch");
         if p.cond >= 0 {
-            // Opcode.bcmp, j, b.jmp.type, zero register, b.s2
-            //_ := _[p.cond.zext()];
-            patch[] = todo(); 
-            // TODO: assert in range
+            kind: Bcmp = @match(@as(Qbe.Cmp) p.cond) {
+                fn Cieq() => .beq;
+                fn Cine() => .bne;
+                @default => todo();
+            };
+            @debug_assert(distance.fits_sext(12), "TODO: rv branch too far: %", distance);
+            patch[] = B(@as(i13) distance, RvReg.Zero.bits(), p.reg.rv().bits(), @as(u3) kind, .bcmp);
         } else {
-            patch[] = jal(0, .Zero); 
-            // TODO: assert in range
+            @debug_assert(distance.fits_sext(20), "TODO: rv branch too far: %", distance);
+            patch[] = jal(@as(i21) distance, .Zero); 
         };
     };
 }
@@ -138,17 +144,13 @@ fixmem :: fn(e: *EmitRv, pr: *Qbe.Ref) void = {
     }
 }
 
+fn emit(e: *EmitRv, o: Qbe.O, k: Qbe.Cls, r: Qbe.Ref, a: Qbe.Ref, b: Qbe.Ref) void = 
+    emit(e, make_ins(o, k, r, a, b));
+
 fn emit(e: *EmitRv, i: Qbe.Ins) void = 
     emit(e, i&);
     
 fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
-    if is_load(i.op()) {
-        e.fixmem(i.arg&[0]&);
-    }
-    if is_store(i.op()) {
-        e.fixmem(i.arg&[1]&);
-    }
-    
     f := e.f;
     a0 := i.arg&[0];
     @match(i.op()) {
@@ -161,24 +163,19 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
         fn copy() => {
             if(i.to == a0, => return());
             if rtype(i.to) == .RSlot {
-                @debug_assert(isreg(i.arg&[0]));
+                @debug_assert(isreg(i.arg&[0]), "copy %", a0);
                 i.arg&[1] = i.to;
                 i.to = Qbe.Null;
                 i.set_op(i.cls().store_op());
                 e.emit(i);
                 return();
             }
-            @debug_assert(i.to.isreg());
+            @debug_assert(i.to.isreg(), "% copy", i.to);
             @match(rtype(a0)) {
                 fn RCon() => {
                     c := f.get_constant(a0);
-                    off := c.bits();
                     @match(c.type()) {
-                        fn CBits() => if off <= 2047 && off >= -2048 {
-                            e.emit(make_ins(.add, .Kl, i.to, TMP(RvReg.Zero), a0));
-                        } else {
-                            panic("todo: riscv copy big");
-                        };
+                        fn CBits() => e.load_number(c.bits(), i.to, i.cls());
                         fn CAddr() => e.load_symbol(c, i.to.rv());
                     }
                 }
@@ -187,8 +184,8 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
                     e.emit(i);
                 }
                 fn RTmp() => {
-                    @debug_assert(a0.isreg());
-                    @debug_assert(i.cls().is_int());
+                    @debug_assert(a0.isreg(), "copy %", a0);
+                    @debug_assert(i.cls().is_int(), "copy float");
                     // op_imm not zero register so it disassembles to `mv` (more readable)
                     e.emit(make_ins(.add, .Kl, i.to, a0, Qbe.ConZero));
                 }
@@ -196,7 +193,7 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
             }
         }
         fn addr() => {
-            @debug_assert(rtype(a0) == .RSlot);
+            @debug_assert_eq(rtype(a0), .RSlot);
             s := f.slot(a0);
             // TODO: very unfortunate precedence :compiler
             if (-s < 2048) {
@@ -209,9 +206,12 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
         fn call() => {
             @match(rtype(i.arg&[0])) {
                 fn RCon() => {
-                    c := f.get_constant(i.arg&[0]);
+                    c := f.get_constant(a0);
                     @debug_assert(c.type() == .CAddr && c.bits() == 0, "invalid call");
-                    panic("todo: riscv call symbol");
+                    // TODO: use jal instead of wasting an extra instruction
+                    // RA is stomped by the call instruction anyway so it's fine to use it as scratch. 
+                    e.emit(make_ins(.copy, .Kl, TMP(RvReg.RA), a0, Qbe.Null));
+                    e.inst(jalr(.RA, 0, .RA));
                 }
                 fn RTmp() => {
                     e.inst(jalr(a0.rv(), 0, .RA));
@@ -225,44 +225,109 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
                 e.emit(make_ins(.copy, .Kl, i.to, TMP(RvReg.SP), Qbe.Null));
             }
         }
-        fn loadsb() => e.load(i, 0b000);
-        fn loadsh() => e.load(i, 0b001);
-        fn loadub() => e.load(i, 0b100);
-        fn loaduh() => e.load(i, 0b101);
-        fn loadsw() => e.load(i, 0b010);
-        fn loaduw() => unreachable();
-        fn load() => {
-            @assert(i.cls().is_int(), "TODO: load float");
-            e.load(i, @if(i.cls().is_wide(), 0b011, 0b110));
-        }
         // ADDIW sign extends the result, so adding zero is just a sign extension. 
-        fn extsw() => e.inst(R(0, 0, a0.rv().bits(), @as(u3) OpI.add, i.to.rv().bits(), .opw))
-        fn add() => e.simple_op(i, .add);
+        fn extsw() => e.inst(R(0, 0, a0.rv().bits(), @as(u3) OpI.add, i.to.rv().bits(), .opw));
+        fn add() => e.simple_op(i, .add, 0);
+        // TODO: convert sub immediate to add -immediate in isel
+        fn sub() => e.simple_op(i, .add, 0b0100000);
+        fn and() => e.simple_op(i, .and, 0);
+        fn xor() => e.simple_op(i, .xor, 0);
+        fn or() => e.simple_op(i, .or, 0);
+        
+        fn mul()  => e.simple_op(i, @as(OpI) 0b000, 1);
+        fn div()  => e.simple_op(i, @as(OpI) 0b100, 1);
+        fn udiv() => e.simple_op(i, @as(OpI) 0b101, 1);
+        fn rem()  => e.simple_op(i, @as(OpI) 0b110, 1);
+        fn urem() => e.simple_op(i, @as(OpI) 0b111, 1);
+        
+        fn csltl() => e.simple_op(i, .slt, 0);
+        fn cultl() => e.simple_op(i, .sltu, 0);
+        fn swap() => {
+            if i.cls().is_int() {
+                e.emit(.copy, i.cls(), rv_scratch_int, i.arg&[0], Qbe.Null); 
+                e.emit(.copy, i.cls(), i.arg&[0], i.arg&[1], Qbe.Null); 
+                e.emit(.copy, i.cls(), i.arg&[1], rv_scratch_int, Qbe.Null); 
+            } else {
+                panic("TODO: rv swap floats");
+            };
+        }
         @default => {
-            @println("%", i.op());
-            todo()
+            if i.maybe_load() { size |
+                addr, off := decode_mem(e, a0, i.arg&[1]);
+                // TODO: should load.w be sext or zext?
+                zero_ext := @is(i.op(), .loadub, .loaduh, .loaduw);
+                e.inst(load(i.to.rv(), addr, off, size.intcast(), zero_ext, i.cls().is_float()));
+                return();
+            };
+            if i.maybe_store() { size |
+                addr, off := decode_mem(e, i.arg&[1], Qbe.Null);
+                e.inst(store(a0.rv(), addr, off, size.intcast(), i.cls().is_float()));
+                return();
+            };
+        
+            @panic("TODO: rv encoding for %", i.op());
         };
     }
 }
 
-fn load(e: *EmitRv, i: *Qbe.Ins, op: u3) void = {
-    off := 0; // TODO: isel address folding
-    addr := i.arg&[0].rv().bits();
-    e.inst(I(off, addr, op, i.to.rv().bits(), .load));
+fn load_number(e: *EmitRv, off: i64, to: Qbe.Ref, k: Qbe.Cls) void = {
+    fits_double_extend :: fn(i) => true
+        && i >= -(1.shift_left(31)) - 1.shift_left(11) 
+        && i <= 1.shift_left(31) - 1.shift_left(11) - 1;
+    if k == .Kw {
+        // if the high bits don't matter, sign extended is easier to encode. 
+        off = off.sign_extend_low32();
+    };
+    r := to.rv().bits();
+    @if_else {
+        @if(off.fits_sext(11)) => {
+            e.inst(I(@as(i12) off, 0b00000, @as(u3) OpI.add, r, .op_imm));
+        }
+        @if(off.fits_double_extend()) => {
+            lo, hi := double_sign_extend_imm(off);
+            e.inst(U(hi, r, .lui));
+            e.inst(I(lo, r, @as(u3) OpI.add, r, .op_imm));
+        }
+        @else => @panic("todo: riscv copy big: %", off);
+    };
+}
+
+// TODO: sad how similar this is to the arm one
+fn decode_mem(e: *EmitRv, a: Qbe.Ref, other: Qbe.Ref) Ty(RvReg, i12) = {
+    e.fixmem(a&);
+    offset := 0;
+    addr := @match(rtype(a)) {
+        fn RSlot() => {
+            offset = e.f.slot(a);
+            TMP(RvReg.FP)
+        }
+        fn RTmp() => a;
+        fn RMem() => {
+            m := e.f.get_memory(a);
+            offset = m.offset&.bits();
+            m.base
+        }
+        @default => panic("bad address type");
+    };
+    // TODO: isel address folding
+    if rtype(other) == .RInt {
+        offset += other.rsval().zext();
+    };
+    @debug_assert(offset.fits_sext(11), "decode_mem: %", offset);
+    (addr.rv(), @as(i12) offset)
 }
 
 // TODO: factor together with arm/loadaddr_bits>
 fn load_symbol(e: *EmitRv, c: *Qbe.Con, dest_reg: RvReg) void = {
     use_symbol(e.m, c.sym) { symbol |
-        @assert(symbol.kind == .Local, "TODO: riscv relocations");
         patch_addr := e.m.segment_address(.Code, e.m.current_offset(.Code));
         inc := c.bits();
         patch: Fixup = (patch_at = patch_addr, type = (InReg = (r = dest_reg.raw().zext(), increment = inc)));
         @match(symbol.kind) {
-            fn DynamicPatched() => todo();
+            fn DynamicPatched() => panic("TODO: rv DynamicPatched");
             fn Local() => {
                 dest := e.m.segment_address(symbol.segment, symbol.offset + inc);
-                i_page, i_off := rel_off(dest, patch_addr, dest_reg);
+                i_page, i_off := rel_off(dest, patch_addr, dest_reg, false);
                 e.inst(i_page);
                 e.inst(i_off);
                 
@@ -270,7 +335,11 @@ fn load_symbol(e: *EmitRv, c: *Qbe.Con, dest_reg: RvReg) void = {
                     push_fixup(e.m, symbol, patch);
                 };
             }
-            fn Pending() => todo();
+            fn Pending() => {
+                e.inst(ebreak);
+                e.inst(ebreak);
+                push_fixup(e.m, symbol, patch);
+            }
         };
     };
     
@@ -292,7 +361,7 @@ fn load_symbol(e: *EmitRv, c: *Qbe.Con, dest_reg: RvReg) void = {
     };
 }
 
-fn simple_op(e: *EmitRv, i: *Qbe.Ins, o: OpI) void = {
+fn simple_op(e: *EmitRv, i: *Qbe.Ins, o: OpI, funct7: u7) void = {
     e.m.flush_debug();
     @debug_assert(i.cls().is_int(), "TODO: riscv float instruction encoding");
     a0, a1 := (i.arg&[0], i.arg&[1]);
@@ -301,22 +370,23 @@ fn simple_op(e: *EmitRv, i: *Qbe.Ins, o: OpI) void = {
     i := if rtype(a1) == .RCon {
         c := e.f.get_constant(a1);
         off := c.bits();
-        @debug_assert(c.type() == .CBits && off <= 2047 && off >= -2048);
+        @debug_assert(c.type() == .CBits && off.fits_sext(11), "out of range %", off);
+        @debug_assert_eq(0, @as(i64) funct7, "bad simple_op");
         I(@as(i12) off, a0.rv().bits(), @as(u3) o, i.to.rv().bits(), .op_imm)
     } else {
-        R(0, a1.rv().bits(), a0.rv().bits(), @as(u3) o, i.to.rv().bits(), .op)
+        R(funct7, a1.rv().bits(), a0.rv().bits(), @as(u3) o, i.to.rv().bits(), .op)
     };
     e.inst(i);
 }
 
 fn rv(r: Qbe.Ref) RvReg = {
-    @debug_assert(r.isreg() || r == Qbe.Null/*zero register is a legal argument*/, "rv(non-reg)");
+    @debug_assert(r.isreg() || r == Qbe.Null/*zero register is a legal argument*/, "rv(non-reg: %)", r);
     @as(RvReg) @as(u8) r.val().trunc()
 }
 
 slot :: fn(f: *Qbe.Fn, r: Qbe.Ref) i64 = {
     s := rsval(r);
-    -intcast @if(s < 0, 2 * s, f.slot - s)
+    -intcast @if(s < 0, 8 * s, f.slot - s)
 }
 
 fn inst(e: *EmitRv, opcode: u32) void = {
@@ -342,18 +412,20 @@ fn emit_add_off(e: *EmitRv, dest: Qbe.Ref, a: Qbe.Ref, off: i64) void = {
 fixup_rv64 :: fn(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_reloc: *?Fixup) void = {
     address := symbol.jit_addr;
     local  := symbol.kind == .Local;
-    @match(fixup.type) {
+    @match(fixup.type&) {
         fn Call(it) => {
             panic("TODO: rv fixup Call");
         }
         fn InReg(it) => {
             inst: []u32 = (ptr = u32.ptr_from_raw(fixup.patch_at), len = 2);
             if local {
-                i_page, i_off := rel_off(address.offset(it.increment), fixup.patch_at, @as(RvReg) @as(u8) it.r.trunc());
+                i_page, i_off := rel_off(address.offset(it.increment), fixup.patch_at, @as(RvReg) @as(u8) it.r.trunc(), false);
                 inst[0] = i_page;
                 inst[1] = i_off;
             } else {
-                panic("TODO: rv fixup InReg import");
+                @assert_eq(it.increment, 0, "TODO: [rv/emit.fr/fixup] offset from dynamic import %+%", symbol.name, it.increment);
+                new_got_reloc[] = load_from_got(self, symbol, it.r, inst, address).or_else(=> new_got_reloc[]);
+                it.got_load = true;
             };
         }
         fn DataAbsolute(it) => {
@@ -363,6 +435,17 @@ fixup_rv64 :: fn(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_r
         }
         @default => @panic("unexpected fixup type for %", symbol.name);
     }
+}
+
+load_from_got :: fn(self: *QbeModule, symbol: *SymbolInfo, reg_encoding: i64, insts: []u32, jit_address: rawptr) ?Fixup = {
+    new_got_reloc := ensure_got_slot(self, symbol, jit_address);
+    @debug_assert(symbol.got_lookup_offset >= 0 && symbol.got_lookup_offset.mod(8) == 0);
+    got := self.segment_address(.ConstantData, symbol.got_lookup_offset);  // :GotAtConstantDataBase 
+    here := u32.raw_from_ptr(insts.ptr);
+    i_page, i_off := rel_off(got, here, @as(RvReg) @as(u8) reg_encoding.trunc(), true);
+    insts[0] = i_page;
+    insts[1] = i_off;
+    new_got_reloc
 }
 
 fn next_inst_offset(self: *EmitRv) i64 = {

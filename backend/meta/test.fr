@@ -23,6 +23,9 @@ Args :: @struct {
     keep := false;
     force_linker := false;
     skip_non_driver := false;
+    rv: Str = "";
+    // HACK: if it ends with "zig" i add "cc" to the arguments
+    linker: Str = "clang";
 }
 
 main :: fn() void = {
@@ -32,7 +35,7 @@ main :: fn() void = {
     HELP :: collect_help(Args, "[test.fr] [options] ['all' or list of .ssa files]");
     
     to_run := Str.list(temp());
-    wasm_runner: ?Str = .None;
+    runner: ?Str = .None;
     
     for args.paths { arg |
         continue :: local_return;
@@ -62,8 +65,12 @@ main :: fn() void = {
         @if(args.x64) => .x86_64;
         @if(args.arm) => .aarch64;
         @if(args.w) => {
-            wasm_runner = (Some = "./target/w.out");
+            runner = (Some = "./target/w.out");
             .wasm32
+        };
+        @if(args.rv != "") => {
+            runner = (Some = args.rv);
+            .rv64
         };
         @else => query_current_arch();
     }
@@ -88,8 +95,8 @@ main :: fn() void = {
     make_dirs_or_crash("target/out");  // TODO: don't just shit files places perhaps
     os := query_current_os();
     
-    Ctx :: @struct(args: *Args, arch: Arch, wasm_runner: ?Str);
-    ctx: Ctx = (args = args&, arch = arch, wasm_runner = wasm_runner);
+    Ctx :: @struct(args: *Args, arch: Arch, runner: ?Str);
+    ctx: Ctx = (args = args&, arch = arch, runner = runner);
     
     @print("SKIP:[");
     ordered_retain to_run& { file |
@@ -106,11 +113,11 @@ main :: fn() void = {
     @println("]");
     
     run_tests_main_threaded(Ctx, Str, ctx, to_run.items(), fn(_, it) = it[], fn(ctx, file) = {
-        run_one(ctx.args, file[], ctx.arch, ctx.wasm_runner)
+        run_one(ctx.args, file[], ctx.arch, ctx.runner)
     });
 }
 
-run_one :: fn(arg: *Args, file_path: Str, arch: Arch, wasm_runner: ?Str) Ty(bool, List(u8), List(u8), Str) #inline = {
+run_one :: fn(arg: *Args, file_path: Str, arch: Arch, runner: ?Str) Ty(bool, List(u8), List(u8), Str) #inline = {
     ::FmtPad(Str);
     qbe_path, verbose, flags, iamthecompilernow := (arg.bin, arg.v, arg.d, arg.cc);
     src := temp().read_to_string_or_crash(file_path).items(); // :panic
@@ -134,18 +141,18 @@ run_one :: fn(arg: *Args, file_path: Str, arch: Arch, wasm_runner: ?Str) Ty(bool
     args := Str.list(temp());
     if driver.is_some() || arg.force_linker {
         args&.push("-c");
-        @assert(wasm_runner.is_none(), "todo: c+wasm");
+        @assert(arch != .wasm32, "todo: c+wasm");
     };
 
     args&.push("-t");
-    if wasm_runner.is_some() {
-        // TODO: import_wasm shouldn't care about the file extension
-        exe_path = "q.wasm".mangle();
-        my_path = exe_path;
-        args&.push("wasm32");
-    } else {
-        args&.push(qbe_target_name(arch, query_current_os()));
+    if runner.is_some() {
+        if arch == .wasm32 {
+            // TODO: import_wasm shouldn't care about the file extension
+            exe_path = "q.wasm".mangle();
+            my_path = exe_path;
+        };
     };
+    args&.push(qbe_target_name(arch, query_current_os()));
     if flags != "" {
         args&.push("-d");
         args&.push(flags);
@@ -174,7 +181,8 @@ run_one :: fn(arg: *Args, file_path: Str, arch: Arch, wasm_runner: ?Str) Ty(bool
     @if(!arg.jit) run(qbe_path, "gen ir");
     b := timestamp();
     
-    clang_triple := target_triple(arch, query_current_os());
+    os := @if(arch == .rv64, Os.linux, query_current_os());
+    clang_triple := target_triple(arch, os);
     
     show :: fn(exe: Str, what: Str) => if verbose {
         @print("\n% ", exe);
@@ -198,24 +206,28 @@ run_one :: fn(arg: *Args, file_path: Str, arch: Arch, wasm_runner: ?Str) Ty(bool
     if driver { driver_src | 
         write_entire_file_or_crash(driver_path, driver_src);
         args&.clear();
+        @if(arg.linker.ends_with("zig")) args&.push("cc");  // HACK
         args&.push_all(@slice("-target", clang_triple, "-c", "-o", obj_path_driver, driver_path));
-        run("clang", "driver");
+        run(arg.linker, "driver");
     };
     
     if driver.is_some() || arg.force_linker {
         args&.clear();
+        @if(arg.linker.ends_with("zig")) args&.push("cc");  // 
         if driver { _ |
             args&.push(obj_path_driver);
         };
         args&.push_all(@slice(obj_path_mine, "-o", exe_path, "-target", clang_triple));
-        run("clang", "link");
+        run(arg.linker, "link");
     }; // else we have our own codesign implementation so we're done
     @if(!arg.jit) args&.clear();
     old_exe_path := exe_path;
-    if wasm_runner { wasm_runner |
+    if runner { runner |
         args&.push(exe_path);
-        args&.push("--");
-        exe_path = wasm_runner;
+        if arch == .wasm32 {
+            args&.push("--");
+        };
+        exe_path = runner;
     };
     if arg.frc {
         args&.push(exe_path);
@@ -230,15 +242,24 @@ run_one :: fn(arg: *Args, file_path: Str, arch: Arch, wasm_runner: ?Str) Ty(bool
         println(err.items());
         println(out.items());
     };
+    if arch == .rv64 && ok {  // HACK for libriscv
+        ok = out.items().contains("Program exited, exit code = 0");
+    };
+    
     if !ok {
-        if wasm_runner.is_none() && !arg.jit && !arg.frc && !arg.keep {
+        if runner.is_none() && !arg.jit && !arg.frc && !arg.keep {
             exe_path.three_trillion_dollars_does_not_buy_an_operating_system_that_works();
         };
         return(false, out, err, "run");
     };
     
     if expected { expected | 
-        if expected != out.items() {
+        ok := @if(arch == .rv64, 
+            out.items().contains(expected), // HACK for libriscv
+            expected == out.items(),
+        );
+    
+        if !ok {
             name_len := file_path.len - file_path.pop_until_endswith(PATH_SEP).len();
             name := file_path.slice(file_path.len - name_len, file_path.len);
             old := @tfmt("target/%.old.txt", name);
@@ -251,7 +272,7 @@ run_one :: fn(arg: *Args, file_path: Str, arch: Arch, wasm_runner: ?Str) Ty(bool
     }; 
     d := timestamp();
     
-    if arg.verify && wasm_runner.is_some() {
+    if arg.verify && arch == .wasm32 {
         args&.clear();
         args&.push(old_exe_path);
         args&.push("--enable-threads");

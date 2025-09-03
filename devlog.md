@@ -19,6 +19,40 @@
     they combine both addends and use it for the real symbol. that sucks so much :(
     :StupidEncodingsWinStupidRelocations 
   - now call1.ssa works with `zig cc -target riscv64-linux-musl`
+- puts10.ssa: jnz, storeb, xor, call import via GOT
+- added some hacks to make my test runner libriscv's emulator. 
+  it doesn't exit with the status code, need to find the string in the output, 
+  and you don't get that output if you pass -silent so can't compare directly to the expected stdout. 
+  added an option to use zig's copy of clang as the linker. 
+  ```
+  franca backend/meta/test.fr all -rv ./target/franca/deps/libriscv-352ab7829e69e50867d970e8839c80c7dd58b33b/emulator/rvlinux -linker ~/Downloads/zig-aarch64-macos-0.14.1/zig -force_linker
+  55 of 75 tests failed.
+  ```
+- stop pretending rnez/reqz are real instructions. several mistakes but got there in the end. 
+- lui for producing 32 bit constants.
+- fix a few typos with jmp and some assertions in abi. 
+- 41
+- hmmmm, libriscv is broken perhaps? fixup1.ssa doesn't work 
+  but it does if you step through in the debugger or pass `--single-step`. 
+  - without that it seems calling printf (or write) stomps s1 which is supposed to be callee saved? 
+    also same for putchar which doesn't do a syscall immediatly (buffered) so it's not a syscall stomping it. 
+  - tried more recent version (dee1731f65d62974e901de6070193475e952f0e0) same problem. 
+    `--no-translate` also doesn't help. 
+  - looking at the disassembly of the linked libc stuff, i can see it saving and restoring s1 correctly. 
+    to add to the confusion, their debugger seems to disassemble things wrong? 
+  	`[0x1005D64] 64a2 C.FLWSP FS1, [SP+8]` but binutils's objdump thinks `1005d64: 64a2 ld s1,8(sp)`,
+    it still affects the int register correctly tho (in the debugger). 
+      - https://www.aboutrv.com/tools/disassembler agrees with objdump
+      - https://luplab.gitlab.io/rvcodecjs agrees with libriscv,
+        oh ok defaults to RV32I which decodes as the float one but if you select RV64I you get the int one. 
+    so i guess libriscv defaults to disassembling the wrong version of the isa? 
+    they choose which one to execute as based on elf header.class correctly tho. 
+  - also works if you say --no-jit to build.sh but then it takes 10 seconds to run instead of 0.6
+  - theres no way they have all those tests and none of them use callee saved registers
+    so it must be my fault but i don't understand how if it behaves differently depending how you run it. 
+- (sub. 34), (mul,div,rem. 29), (swap. 27)
+- abi10.ssa: parameter slot computation was off by 4x. 25. 
+- (strcmp.ssa: extub), 
 
 ## (Sep 1)
 

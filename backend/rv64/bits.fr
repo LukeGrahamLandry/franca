@@ -68,7 +68,7 @@ fn jalr(target: RvReg, off: i12, link: RvReg) u32 = {
 // note: `off` is always a multiple of 2 so the low bit is ignored
 // link = pc + 4; pc += off;
 fn jal(off: i21, link: RvReg) u32 = 
-    J(off, link.bits(), .jalr);
+    J(off, link.bits(), .jal);
 
 fn load(dest: RvReg, addr: RvReg, off: i12, size_bytes: i64, zero_extend: bool, float: bool) u32 #inline = 
     I(off, addr.bits(), mem_width(size_bytes, zero_extend), dest.bits(), @if(float, .loadf, .load));
@@ -95,23 +95,25 @@ mem_width :: fn(size_bytes: i64, zero_extend_load: bool) u3 = {
 // and then add the low u12 bits. Here you compute the address of the nearest page boundary (in 
 // either direction) and then adjust by i12 bits. 
 //
-fn rel_off(dest: rawptr, src: rawptr, reg: RvReg) Ty(u32, u32) = {
-    dest := int_from_rawptr(dest);
-    src := int_from_rawptr(src);
-    distance := dest - src;
-    // TODO: that's not quite the right range. high is 2^31-2^11-1?
-    @debug_assert(distance.fits_sext(32), "rel_off too far: %", distance);
-    
-    d := distance + int(distance.bit_and(1.shift_left(11)) != 0).shift_left(12);
-    lo := @as(i64) d.imm(11, 0);
-    hi := @as(i64) d.imm(31, 12);
-    @debug_assert_eq(distance, hi.shift_left(12).sign_extend(31) + lo.sign_extend(11));
-    
-    (U(@as(i20) hi, reg.bits(), .auipc), I(@as(i12) lo, reg.bits(), @as(u3) OpI.add, reg.bits(), .op_imm))
+fn rel_off(dest: rawptr, src: rawptr, reg: RvReg, is_import: bool) Ty(u32, u32) = {
+    lo, hi := double_sign_extend_imm(ptr_diff(src, dest));
+    small := @if(is_import, 
+        load(reg, reg, lo, 8, false, false),
+        I(@as(i12) lo, reg.bits(), @as(u3) OpI.add, reg.bits(), .op_imm));
+    (U(hi, reg.bits(), .auipc), small)
 }
 
-fn fits_sext(n: i64, $bits: i64) bool = {
-    n <= 1.shift_left(bits) - 1 && n >= -(1.shift_left(bits))
+fn double_sign_extend_imm(i: i64) Ty(i12, i20) = {
+    d := i + int(i.bit_and(1.shift_left(11)) != 0).shift_left(12);
+    lo := @as(i64) d.imm(11, 0);
+    hi := @as(i64) d.imm(31, 12);
+    @debug_assert_eq(i, hi.shift_left(12).sign_extend(31) + lo.sign_extend(11), "unencodable imm: %", i);
+    (@as(i12) lo, @as(i20) hi)
+}
+
+// TODO: don't name it this...
+fn fits_sext(n: i64, $bit_index: i64) bool = {
+    n <= 1.shift_left(bit_index) - 1 && n >= -(1.shift_left(bit_index))
 }
 
 I :: fn(i: i12, rs1: u5, funct3: u3, rd: u5, opcode: Opcode) u32 = 
@@ -128,7 +130,7 @@ S :: fn(i: i12, rs2: u5, rs1: u5, funct3: u3, opcode: Opcode) u32 =
 
 // note: `i` is always a multiple of 2 so the low bit is ignored
 B :: fn(i: i13, rs2: u5, rs1: u5, funct3: u3, opcode: Opcode) u32 = 
-    @bits(i.imm(12), i.imm(10, 5), rs2, rs1, func3, i.imm(4, 1), i.imm(11), opcode);
+    @bits(i.imm(12), i.imm(10, 5), rs2, rs1, funct3, i.imm(4, 1), i.imm(11), opcode);
 
 // note: `i` is always a multiple of 2 so the low bit is ignored
 J :: fn(i: i21, rd: u5, opcode: Opcode) u32 = 

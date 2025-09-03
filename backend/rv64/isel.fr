@@ -44,6 +44,7 @@ fixarg :: fn(r: *Qbe.Ref, k: Qbe.Cls, i: *Qbe.Ins, f: *Qbe.Fn) void = {
         if c.type() == .CBits && o == .copy {
             break();
         }
+        // the I immediates are 12 bits, sign extended
         if c.type() == .CBits && immarg(r, o, i)
         && -2048 <= c.bits() && c.bits() < 2048 {
             break();
@@ -148,9 +149,13 @@ cmp_float_order :: fn(i: Qbe.Ins, k: Qbe.Cls, uo: bool, f: *Qbe.Fn) void = {
 
 // (a xor b) = 0 iff a=b
 cmp_int_zero :: fn(i: Qbe.Ins, k: Qbe.Cls, equals: bool, f: *Qbe.Fn) void = {
-    o: Qbe.O = @if(equals, .reqz, .rnez);
     r := f.newtmp("isel", k);
-    f.emit(o, i&.cls(), i.to, r, Qbe.Null);
+    // SNEZ/SEQZ are pseudoinstructions. 
+    if equals {  // (a == 0) = (a < 1)
+        f.emit(.cultl, i&.cls(), i.to, r, f.getcon(1));
+    } else {     // (a != 0) = (0 < a)
+        f.emit(.cultl, i&.cls(), i.to, Qbe.Null, r);
+    };
     icmp := f.emit(.xor, k, r, i.arg&[0], i.arg&[1]);
     fixargs(k, icmp, f);
 }
@@ -164,6 +169,11 @@ sel :: fn(i: *Qbe.Ins, f: *Qbe.Fn) void = {
     if @is(i.op(), .asm, .dbgloc) {
         f.emit(i[]);
         return();
+    };
+    
+    if i.op() == .extub {
+        i.set_op(.and);
+        i.arg&[1] = f.getcon(255);
     };
     
     if is_alloc(i.op()) {
