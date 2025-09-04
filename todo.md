@@ -425,11 +425,14 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 ## riscv
 
 - autotest all the riscv ssa tests
+  - don't forget to apply libriscv_mmap_macos.patch
 - rnez/reqz aren't real instruction in riscv so i fix them to be ult R0 in isel,
   so remove those ops? so remove them? but now i use them in wasm/isel. 
   not sure if its more sane to move the wasm cmp zero checking to emit or let rv use the fake instruction and lower it in emit. 
   i guess there's no winning, one of them can't be done in isel if i don't want to having boring instructions. 
 - to make -cc work with static linking, import_c needs to not make weak symbols
+- llvm-mc doesn't disassemble float instructions
+- isel fixarg is doing redundant sign extensions
 
 ## don't rely on libc
 

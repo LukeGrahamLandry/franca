@@ -1,6 +1,7 @@
 // in contrast to amd/arm, the riscv 32 bit instructions generally sign extend the result. 
 // TODO: a test for overflowing 32 bit add to make sure it's sign extended after discarding 
 //       the overflow instead of using a 64 bit add. (if those are different, idk)
+// TODO: what should go in the static float rounding field? 
 
 EmitRv :: @struct {
     f: *Qbe.Fn;
@@ -185,12 +186,21 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
                 }
                 fn RTmp() => {
                     @debug_assert(a0.isreg(), "copy %", a0);
-                    @debug_assert(i.cls().is_int(), "copy float");
-                    // op_imm not zero register so it disassembles to `mv` (more readable)
-                    e.emit(make_ins(.add, .Kl, i.to, a0, Qbe.ConZero));
+                    if i.cls().is_int() {
+                        // op_imm not zero register so it disassembles to `mv` (more readable)
+                        e.emit(.add, .Kl, i.to, a0, Qbe.ConZero);
+                    } else {
+                        i.arg&[1] = i.arg&[0];
+                        e.float_op(i, .sgnj, 0b000);  // FSGNJ = FMV
+                    }
                 }
                 @default => unreachable();
             }
+        }
+        fn neg() => {
+            @debug_assert(i.cls().is_float());
+            i.arg&[1] = i.arg&[0];
+            e.float_op(i, .sgnj, 0b001);  // FSGNJN = FNEG
         }
         fn addr() => {
             @debug_assert_eq(rtype(a0), .RSlot);
@@ -227,21 +237,35 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
         }
         // ADDIW sign extends the result, so adding zero is just a sign extension. 
         fn extsw() => e.inst(R(0, 0, a0.rv().bits(), @as(u3) OpI.add, i.to.rv().bits(), .opw));
-        fn add() => e.simple_op(i, .add, 0);
+        fn add() => @if(i.cls().is_int(), 
+            e.simple_op(i, .add, 0),
+            e.float_op(i, .add, 0b000));
         // TODO: convert sub immediate to add -immediate in isel
-        fn sub() => e.simple_op(i, .add, 0b0100000);
+        fn sub() => @if(i.cls().is_int(), 
+            e.simple_op(i, .add, 0b0100000),
+            e.float_op(i, .sub, 0b000));
         fn and() => e.simple_op(i, .and, 0);
         fn xor() => e.simple_op(i, .xor, 0);
         fn or() => e.simple_op(i, .or, 0);
-        
-        fn mul()  => e.simple_op(i, @as(OpI) 0b000, 1);
-        fn div()  => e.simple_op(i, @as(OpI) 0b100, 1);
+        fn mul() => @if(i.cls().is_int(), 
+            e.simple_op(i, @as(OpI) 0b000, 1),
+            e.float_op(i, .mul, 0b000));
+        fn div()  => @if(i.cls().is_int(), 
+            e.simple_op(i, @as(OpI) 0b100, 1),
+            e.float_op(i, .div, 0b000));
         fn udiv() => e.simple_op(i, @as(OpI) 0b101, 1);
         fn rem()  => e.simple_op(i, @as(OpI) 0b110, 1);
         fn urem() => e.simple_op(i, @as(OpI) 0b111, 1);
-        
+        // add.uw
+        fn extuw() => e.inst(R(0b0000100, 0b00000, a0.rv().bits(), 0b000, i.to.rv().bits(), .op32));
         fn csltl() => e.simple_op(i, .slt, 0);
         fn cultl() => e.simple_op(i, .sltu, 0);
+        fn ceqs() => e.float_cmp(i, .eq, false);
+        fn ceqd() => e.float_cmp(i, .eq, true);
+        fn clts() => e.float_cmp(i, .lt, false);
+        fn cltd() => e.float_cmp(i, .lt, true);
+        fn cles() => e.float_cmp(i, .le, false);
+        fn cled() => e.float_cmp(i, .le, true);
         fn swap() => {
             if i.cls().is_int() {
                 e.emit(.copy, i.cls(), rv_scratch_int, i.arg&[0], Qbe.Null); 
@@ -250,6 +274,12 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
             } else {
                 panic("TODO: rv swap floats");
             };
+        }
+        fn cast() => {
+            to, a0 := (i.to.rv().bits(), i.arg&[0].rv().bits());
+            wide := i.cls().is_wide();
+            to_f := i.cls().is_float();
+            e.inst(@bits(0b111, to_f, 0b00, wide, 0b00000, a0, 0b000, to, Opcode.op_fp));  // R
         }
         @default => {
             if i.maybe_load() { size |
@@ -261,19 +291,38 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
             };
             if i.maybe_store() { size |
                 addr, off := decode_mem(e, i.arg&[1], Qbe.Null);
-                e.inst(store(a0.rv(), addr, off, size.intcast(), i.cls().is_float()));
+                e.inst(store(a0.rv(), addr, off, size.intcast(), @is(i.op(), .stores, .stored)));
                 return();
             };
+            if @is(i.op(), .shl, .shr, .sar, .rotl, .rotr) {
+                e.encode_shift(i);
+                return();
+            }
         
             @panic("TODO: rv encoding for %", i.op());
         };
     }
 }
 
+// TODO: factor out the encoding part so it can be used with AsmFunction, etc. 
+fn encode_shift(e: *EmitRv, i: *Qbe.Ins) void = {
+    rd, rs1 := (i.to.rv().bits(), i.arg&[0].rv().bits());
+    con, rs2 := @match(e.f.get_int(i.arg&[1])) { 
+        fn Some(imm) => (false, @as(u5) imm);
+        fn None() => (true, i.arg&[1].rv().bits());
+    };
+    right := @is(i.op(), .rotr, .shr, .sar);
+    kw := i.cls() == .Kw;
+    rot := @is(i.op(), .rotl, .rotr);
+    arith := i.op() == .sar || rot;
+    e.inst(@bits(0b0, arith, rot, 0b0000, rs2, rs1, right, 0b01, rd, 0b0, con, 0b1, kw, 0b011));
+}
+
 fn load_number(e: *EmitRv, off: i64, to: Qbe.Ref, k: Qbe.Cls) void = {
     fits_double_extend :: fn(i) => true
         && i >= -(1.shift_left(31)) - 1.shift_left(11) 
         && i <= 1.shift_left(31) - 1.shift_left(11) - 1;
+    @debug_assert_lt(to.val(), 32);
     if k == .Kw {
         // if the high bits don't matter, sign extended is easier to encode. 
         off = off.sign_extend_low32();
@@ -288,7 +337,16 @@ fn load_number(e: *EmitRv, off: i64, to: Qbe.Ref, k: Qbe.Cls) void = {
             e.inst(U(hi, r, .lui));
             e.inst(I(lo, r, @as(u3) OpI.add, r, .op_imm));
         }
-        @else => @panic("todo: riscv copy big: %", off);
+        @else => {
+            @debug_assert_ne(to, rv_scratch_int);
+            // TODO: this is convoluted. just put it in memory and load it. 
+            hi, lo := (off.shift_right_logical(32).sign_extend_low32(), off.bit_and(MAX_u32).sign_extend_low32());
+            e.load_number(hi, rv_scratch_int, .Kl);
+            e.load_number(lo, to, .Kl);
+            e.emit(.shl, .Kl, rv_scratch_int, rv_scratch_int, e.f.getcon(32));
+            // add.uw (zero extends rs1, thats why high bits of lo don't matter)
+            e.inst(R(0b0000100, rv_scratch_int.rv().bits(), r, 0b000, r, .op32));
+        };
     };
 }
 
@@ -362,11 +420,9 @@ fn load_symbol(e: *EmitRv, c: *Qbe.Con, dest_reg: RvReg) void = {
 }
 
 fn simple_op(e: *EmitRv, i: *Qbe.Ins, o: OpI, funct7: u7) void = {
-    e.m.flush_debug();
-    @debug_assert(i.cls().is_int(), "TODO: riscv float instruction encoding");
+    @debug_assert(i.cls().is_int(), "float %", i.op());
     a0, a1 := (i.arg&[0], i.arg&[1]);
     @debug_assert(isreg(i.to));
-    @debug_assert(i.op() != .sar, "TODO: arithmetic");
     i := if rtype(a1) == .RCon {
         c := e.f.get_constant(a1);
         off := c.bits();
@@ -377,6 +433,17 @@ fn simple_op(e: *EmitRv, i: *Qbe.Ins, o: OpI, funct7: u7) void = {
         R(funct7, a1.rv().bits(), a0.rv().bits(), @as(u3) o, i.to.rv().bits(), .op)
     };
     e.inst(i);
+}
+
+fn float_op(e: *EmitRv, i: *Qbe.Ins, o: OpF, rm: u3) void = {
+    to, a0, a1 := (i.to.rv().bits(), i.arg&[0].rv().bits(), i.arg&[1].rv().bits());
+    size := @if(i.cls().is_wide(), 0b01, 0b00);
+    e.inst(@bits(o, size, a1, a0, rm, to, Opcode.op_fp));  // R
+}
+
+fn float_cmp(e: *EmitRv, i: *Qbe.Ins, c: OpF_cmp, wide: bool) void = {
+    to, a0, a1 := (i.to.rv().bits(), i.arg&[0].rv().bits(), i.arg&[1].rv().bits());
+    e.inst(@bits(OpF.cmp, 0b0, wide, a1, a0, c, to, Opcode.op_fp));  // R
 }
 
 fn rv(r: Qbe.Ref) RvReg = {

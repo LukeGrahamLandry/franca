@@ -41,7 +41,7 @@ fixarg :: fn(r: *Qbe.Ref, k: Qbe.Cls, i: *Qbe.Ins, f: *Qbe.Fn) void = {
                 break();
             }
         };
-        if c.type() == .CBits && o == .copy {
+        if c.type() == .CBits && o == .copy && !is_float(k) {
             break();
         }
         // the I immediates are 12 bits, sign extended
@@ -108,13 +108,15 @@ selcmp :: fn(i: Qbe.Ins, k: Qbe.Cls, op: Qbe.Cmp, f: *Qbe.Fn) void = {
         fn Cine() => return cmp_int_zero(i, k, false, f);
         fn Cfuo() => return cmp_float_order(i, k, true, f);
         fn Cfo()  => return cmp_float_order(i, k, false, f);
-        fn Cfne() => {
-            i&.set_op(@if(is_wide(k), .ceqd, .ceqs));
-        }
+        // for floats, only (eq, lt, le) are real
+        fn Cfne() => i&.set_op(@if(is_wide(k), .ceqd, .ceqs));
+        fn Cfgt() => i&.set_op(@if(is_wide(k), .cltd, .clts));
+        fn Cfge() => i&.set_op(@if(is_wide(k), .cled, .cles));
         @default => ();
     };
+
     sign := @is(op, .Cisge, .Cisgt, .Cisle, .Cislt);
-    swap := @is(op, .Cisgt, .Cisle, .Ciugt, .Ciule);
+    swap := @is(op, .Cisgt, .Cisle, .Ciugt, .Ciule, .Cfgt, .Cfge);
     neg  := @is(op, .Cisge, .Cisle, .Ciuge, .Ciule, .Cfne);
     
     if op.raw() < Qbe.CmpICount {
@@ -174,6 +176,9 @@ sel :: fn(i: *Qbe.Ins, f: *Qbe.Fn) void = {
     if i.op() == .extub {
         i.set_op(.and);
         i.arg&[1] = f.getcon(255);
+    };
+    if i.op() == .neg && i.cls().is_int() {
+        i[] = make_ins(.sub, i.cls(), i.to, Qbe.Null, i.arg&[0]);
     };
     
     if is_alloc(i.op()) {

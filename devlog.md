@@ -1,4 +1,17 @@
 
+## (Sep 3) rv
+
+- it's very creepy to me that running the tests in libriscv pins a core in kernel_task 
+  but none of the other ways of running them do. whats up with that? 
+  lol profiler says the entire time is in `libsystem_platform.dylib.__bzero`, that's unfortunate. 
+  ew, https://github.com/libriscv/libriscv/blob/dee1731f65d62974e901de6070193475e952f0e0/lib/libriscv/memory.cpp#L82 
+  on liunx they call mmap (sane), but on macos they just `new` an array of bytes (cringe), which it appears touches all the memory. 
+  add `__APPLE__` to a few ifdefs in memory.cpp and now hello world is 3 samples instead of 381 samples,
+  and the ssa tests run in 4 seconds instead of 28 seconds. now clang is the slowpoke. 
+- floats: add,sub,mul,div, cast, fix store class. 17. 
+- float copy and neg are one instruction: fsgnj 
+- lower gt/ge to other comparisons
+- fixarg(float copy) in isel. 12. 
 
 ## (Sep 2) rv
 
@@ -53,6 +66,9 @@
 - (sub. 34), (mul,div,rem. 29), (swap. 27)
 - abi10.ssa: parameter slot computation was off by 4x. 25. 
 - (strcmp.ssa: extub), 
+- shl. add.uw for extuw and larger constants. 21
+- the shift/rot encoding is a nice bit set of the things you care about. 19. 
+  - allow bool in `@bits` so it's less painful
 
 ## (Sep 1)
 
