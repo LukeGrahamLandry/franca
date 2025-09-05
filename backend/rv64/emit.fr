@@ -59,7 +59,7 @@ emit_the_code :: fn(e: *EmitRv) void = {
     for_blocks f { b | 
         local_labels[b.id.zext()] = e.next_inst_offset();
         for_insts_forward b { i |
-            e.emit(i[]);
+            e.emit(i);
         };
         
         @match(b.jmp.type) {
@@ -281,6 +281,21 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
             to_f := i.cls().is_float();
             e.inst(@bits(0b111, to_f, 0b00, wide, 0b00000, a0, 0b000, to, Opcode.op_fp));  // R
         }
+        fn selieq() => e.simple_op(i, @as(OpI) 0b101, 0b0000111);  // czero.eqz
+        fn seline() => e.simple_op(i, @as(OpI) 0b111, 0b0000111);  // czero.nez
+        
+        // have_ints, from_int, double, long, unsigned
+        fn stosi()  => e.fcnvt(i,  true, false, false, i.cls().is_wide(), false);
+        fn stoui()  => e.fcnvt(i,  true, false, false, i.cls().is_wide(),  true);
+        fn dtosi()  => e.fcnvt(i,  true, false,  true, i.cls().is_wide(), false);
+        fn dtoui()  => e.fcnvt(i,  true, false,  true, i.cls().is_wide(),  true);
+        fn swtof()  => e.fcnvt(i,  true,  true, i.cls().is_wide(), false, false);
+        fn uwtof()  => e.fcnvt(i,  true,  true, i.cls().is_wide(), false,  true);
+        fn sltof()  => e.fcnvt(i,  true,  true, i.cls().is_wide(),  true, false);
+        fn ultof()  => e.fcnvt(i,  true,  true, i.cls().is_wide(),  true,  true);
+        fn exts()   => e.fcnvt(i, false, false,  true,             false,  true);
+        fn truncd() => e.fcnvt(i, false, false, false,             false, false);
+
         @default => {
             if i.maybe_load() { size |
                 addr, off := decode_mem(e, a0, i.arg&[1]);
@@ -302,6 +317,11 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
             @panic("TODO: rv encoding for %", i.op());
         };
     }
+}
+
+fn fcnvt(e: *EmitRv, i: *Qbe.Ins, have_ints: bool, from_int: bool, double: bool, long: bool, unsigned: bool) void = {
+    rm := @if(from_int, 0b000, 0b001);
+    e.inst(encode_fcnvt(i.arg&[0].rv(), rm, i.to.rv(), have_ints, from_int, double, long, unsigned))
 }
 
 // TODO: factor out the encoding part so it can be used with AsmFunction, etc. 
@@ -393,6 +413,7 @@ fn load_symbol(e: *EmitRv, c: *Qbe.Con, dest_reg: RvReg) void = {
                     push_fixup(e.m, symbol, patch);
                 };
             }
+            // TODO: load from got now if got_indirection_instead_of_patches
             fn Pending() => {
                 e.inst(ebreak);
                 e.inst(ebreak);
@@ -490,6 +511,7 @@ fixup_rv64 :: fn(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_r
                 inst[0] = i_page;
                 inst[1] = i_off;
             } else {
+                // todo: it would be fine, the problem is i only handle one new_got_reloc per symbol rn (its an option instead of a list) 
                 @assert_eq(it.increment, 0, "TODO: [rv/emit.fr/fixup] offset from dynamic import %+%", symbol.name, it.increment);
                 new_got_reloc[] = load_from_got(self, symbol, it.r, inst, address).or_else(=> new_got_reloc[]);
                 it.got_load = true;

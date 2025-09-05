@@ -1,10 +1,11 @@
 // Adapted from Qbe. MIT License. © 2015-2024 Quentin Carbonneaux <quentin@c9x.me>
-// Contributed to Qbe by Michael Forney
+// Originally contributed to Qbe by Michael Forney
 
 // TODO
-// - sel, cas, rotr, rotl, byteswap, ctz, clz, ones, min, max, sqrt, trace
+// - cas, byteswap, ctz, clz, ones, min, max, sqrt
 // - address folding like arm (can they share?)
 // - replace cmp+jnz (they don't have a flags register)
+// - dont insert redundant sign extensions
 
 rv64_isel :: fn(f: *Qbe.Fn) void = {
     assign_alloc_slots(f);
@@ -168,17 +169,44 @@ fixargs :: fn(k: Qbe.Cls, icmp: *Qbe.Ins, f: *Qbe.Fn) void = {
 }
 
 sel :: fn(i: *Qbe.Ins, f: *Qbe.Fn) void = {
+    k := i.cls();
     if @is(i.op(), .asm, .dbgloc) {
         f.emit(i[]);
         return();
     };
+    @match(i.op()) {
+        fn nop() => return();
+        // (it's tempting to just leave it as sel1+sel0 but then it gets messed up if fixarg or rega puts something else between them). 
+        // TODO: if one of the inputs is ConZero this generates dumb code
+        fn sel1() => {
+            isel0 := i.offset(-1);
+            @debug_assert_eq(isel0.op(), .sel0);
+            cond := isel0.arg&[0];
+            isel0.set_nop();
     
-    if i.op() == .extub {
-        i.set_op(.and);
-        i.arg&[1] = f.getcon(255);
-    };
-    if i.op() == .neg && i.cls().is_int() {
-        i[] = make_ins(.sub, i.cls(), i.to, Qbe.Null, i.arg&[0]);
+            // (r = c?a:b;) -> (t0 = c?a:0; t1 = !c?b:0; t = t0|t1;)
+            t0, t1 := (f.newtmp("isel", k), f.newtmp("isel", k));
+            f.emit(.or, k, i.to, t0, t1);
+            i1 := f.emit(.seline, k, t0, i.arg&[1], cond);  // czero.nez
+            fixarg(i1.arg&[0]&, k, i1, f);
+            i0 := f.emit(.selieq, k, t1, i.arg&[0], cond);  // czero.eqz
+            fixarg(i0.arg&[0]&, k, i0, f);
+            
+            // cond is the same in both
+            fixarg(i0.arg&[1]&, .Kw, i0, f);
+            i1.arg&[1] = i0.arg&[1];
+            chuse(i0.arg&[1], 1, f);
+            
+            return();
+        };
+        fn extub() => {
+            i.set_op(.and);
+            i.arg&[1] = f.getcon(255);
+        };
+        fn neg() => if k.is_int() {
+            i[] = make_ins(.sub, k, i.to, Qbe.Null, i.arg&[0]);
+        };
+        @default => ();
     };
     
     if is_alloc(i.op()) {
@@ -187,16 +215,16 @@ sel :: fn(i: *Qbe.Ins, f: *Qbe.Fn) void = {
         fixarg(i0.arg&[0]&, .Kl, i0, f);
         return();
     }
+    
     ck, cc := (Qbe.Cls.Kw, @as(i32) -1);
     if (iscmp(i.op(), ck&, cc&)) {
         selcmp(i[], ck, @as(Qbe.Cmp) cc, f);
         return();
     }
-    if (i.op() != .nop) {
-        i0 := f.emit(i[]);
-        fixarg(i0.arg&[0]&, argcls(i, 0), i0, f);
-        fixarg(i0.arg&[1]&, argcls(i, 1), i0, f);
-    }
+    
+    i0 := f.emit(i[]);
+    fixarg(i0.arg&[0]&, argcls(i, 0), i0, f);
+    fixarg(i0.arg&[1]&, argcls(i, 1), i0, f);
 }
 
 seljmp :: fn(b: *Qbe.Blk, f: *Qbe.Fn) void = {

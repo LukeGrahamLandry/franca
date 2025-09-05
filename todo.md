@@ -1,5 +1,8 @@
 
 - autotest all the stuff from the web demo in import_wasm 
+- make it easy to run all the tests with qemu-user
+  - -L /usr/x86_64-linux-gnu
+  - document what needs to be installed: qemu-user-static, libc6-amd64-cross, libc6-riscv64-cross
 - more stack trace improvements
   - macros don't always get a block. 
   - another source of confusion is that for comptime code, source location doesn't come from 
@@ -193,6 +196,10 @@ Assertion Failed: failed to read file 'target/franca/deps/fonts/ttf/JetBrainsMon
 🤡 which is extra plausible because i'm not even checking that unzip was successful because it complains about weird filenames in wuffs. 
 all the more reason to continue sequestering the tests with dependencies. 
 i think it's just a race where it gets confused if two programs try to cache the same dependency at the same time. 
+- similarly i think write_entire_file doesn't work at all. 
+  should probably have more targetted tests for library stuff like that. 
+  `failed to write 4935560 bytes to 'target/franca/cache/__backend_meta_qbe_frontend_fr.frc'`
+  when running backend/meta/test.fr without -bin so it recompiles and tries to cache on multiple threads. 
 
 ## import_symbol / weak
 
@@ -433,6 +440,7 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 - to make -cc work with static linking, import_c needs to not make weak symbols
 - llvm-mc doesn't disassemble float instructions
 - isel fixarg is doing redundant sign extensions
+- (fixup1.ssa, fpcnv.ssa, encoding.ssa) work in qemu but not libriscv. report bugs? 
 
 ## don't rely on libc
 
@@ -606,6 +614,9 @@ but then need to deal with including build options in the cache (like -unsafe, -
 - caching an invalid thing i think? if you Compile Error: we hit a dynamicimport ('puts_unlocked' from 'libc') with no comptimeaddr for jit
 (happening with import_c)
 - persist #noinline
+- decide the policy on mutating the ir module. 
+  some of the passes mutate in place and emit() does when fixing arg even if you saved after rega. 
+  so i guess if the module needs to be reused it needs to copy the blocks when loading. 
 
 next impressive advancement: 
 make this work well enough that i don't need to re-export the backend functions in the driver vtable. 
@@ -1185,20 +1196,17 @@ StbTrueType :: include { C |
 
 ## behaviour considered disrespectful
 
-- accessing the wrong enum field
-- holding a pointer to an enum member while changing its tag
+- accessing the wrong tagged field
+- holding a pointer to an tagged member while changing its tag
 - read off the end of an array
 - div(0)
-- overflow/underflow. add,sub,mul
-- bitshifting too far
-- constructing a slice with a bad length
+- constructing a slice with a bad length (can trick someone else into breaking the rules)
 - escaping pointer to stack
-- holding a pointer to a variable that goes out of scope (stack slot might get reused)
 - double free, use after free
 - holding pointer accross a collection resize (common case of ^)
 - void pointer cast
-- hacky rust pointer ffi
-- inline asm
+- AsmFunction
 - reading from uninitialized memory
 - init from small union field then read from large.
 - c style variadic functions
+- nan bit pattern for any instructions other than load/copy

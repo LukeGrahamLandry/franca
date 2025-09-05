@@ -1,4 +1,21 @@
 
+## (Sep 5) rv
+
+- fpcnv.ssa: comparing disassembly between mine and qbe: 
+  needed to set rm differently for some. now it works in qemu. 
+    - which i don't understand because the ones that i had trouble with 
+    were fcvt.d.wu and fcvt.d.w which should never round? but seems i need to have rm=0b00
+
+## (Sep 4) rv
+
+- sel with czero pair and then `or` them together. 8.
+- did float conversion instructions. 
+  fpcnv.ssa: `if (dtow(fin[i]) != (unsigned int)fin[i])` doesn't work, 
+  but it also doesn't work if i use real qbe with libriscv. 
+  so i wonder if it's the emulators problem? yeah real qbe's works in qemu. 
+- qemu says "Invalid ELF image for this architecture" for my binaries.
+  fixed by setting the ehsize field of the header.0
+
 ## (Sep 3) rv
 
 - it's very creepy to me that running the tests in libriscv pins a core in kernel_task 
