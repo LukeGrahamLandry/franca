@@ -63,8 +63,8 @@ Params :: @struct {
 };
 
 // Parameters
-gpreg :: @const_slice( RvReg.A0,  .A1,  .A2,  .A3,  .A4,  .A5,  .A6,  .A7);
-fpreg :: @const_slice(RvReg.FA0, .FA1, .FA2, .FA3, .FA4, .FA5, .FA6, .FA7);
+gpreg :: @const_slice( RvReg.A0,  .A1,  .A2,  .A3,  .A4,  .A5,  .A6,  .A7, .Zero, .Zero);
+fpreg :: @const_slice(RvReg.FA0, .FA1, .FA2, .FA3, .FA4, .FA5, .FA6, .FA7, .Zero, .Zero);
 
 // Caller Saved
 rv64_rsave :: (@const_slice(
@@ -89,8 +89,7 @@ RCallRv :: @bit_fields(
     gp_arg   := 4,
     fp_arg   := 4,
     env      := 1,  // env pointer passed in t5
-    sys      := 1,  // syscall number passed in a7
-    _        := 15,
+    _        := 16,
     tag      := 3,
 );
 
@@ -114,17 +113,14 @@ rv64_argregs :: fn(r: Qbe.Ref, p: *Array(i32, 2)) u64 = {
     ngp := get(r, .gp_arg);
     nfp := get(r, .fp_arg);
     t5  := get(r, .env);
-    a7  := get(r, .sys);
-    // syscall number is the same register as eighth argument, tracked separately to represent a gap in the consecutive registers. 
-    @debug_assert(a7 == 0 || ngp < 8);  
     if !p.is_null() {
-        p[0] = intcast(ngp + t5 + a7);
+        p[0] = intcast(ngp + t5);
         p[1] = nfp.intcast();
     };
     ngp_mask := (1.shift_left(ngp) - 1).shift_left(zext RvReg.A0.raw());
     nfp_mask := (1.shift_left(nfp) - 1).shift_left(zext RvReg.FA0.raw());
     b := bit_or(ngp_mask, nfp_mask);
-    b  = b.bit_or(t5.shift_left(zext RvReg.T5.raw())).bit_or(a7.shift_left(zext RvReg.A7.raw()));
+    b  = b.bit_or(t5.shift_left(zext RvReg.T5.raw()));
     b.bitcast()
 }
 
@@ -187,9 +183,6 @@ typclass :: fn(f: *Qbe.Fn, c: *Class, t: *Qbe.Typ, fpabi: bool, gp: []RvReg, fp:
     }
 
     c.nreg = c.nfp + c.ngp;
-    if c.nfp > fp.len || c.ngp > gp.len {
-        return()
-    };
     range(0, c.nreg) { i |
         if is_int(c.cls&[i]) {
             c.reg&[i] = TMP gp[0];

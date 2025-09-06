@@ -256,8 +256,10 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
         fn udiv() => e.simple_op(i, @as(OpI) 0b101, 1);
         fn rem()  => e.simple_op(i, @as(OpI) 0b110, 1);
         fn urem() => e.simple_op(i, @as(OpI) 0b111, 1);
-        // add.uw
-        fn extuw() => e.inst(R(0b0000100, 0b00000, a0.rv().bits(), 0b000, i.to.rv().bits(), .op32));
+        fn min() => e.float_op(i, .min_max, 0b000);
+        fn max() => e.float_op(i, .min_max, 0b001);
+        fn sqrt() => e.float_op(i, .sqrt, 0b000);
+        
         fn csltl() => e.simple_op(i, .slt, 0);
         fn cultl() => e.simple_op(i, .sltu, 0);
         fn ceqs() => e.float_cmp(i, .eq, false);
@@ -267,13 +269,12 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
         fn cles() => e.float_cmp(i, .le, false);
         fn cled() => e.float_cmp(i, .le, true);
         fn swap() => {
-            if i.cls().is_int() {
-                e.emit(.copy, i.cls(), rv_scratch_int, i.arg&[0], Qbe.Null); 
-                e.emit(.copy, i.cls(), i.arg&[0], i.arg&[1], Qbe.Null); 
-                e.emit(.copy, i.cls(), i.arg&[1], rv_scratch_int, Qbe.Null); 
-            } else {
-                panic("TODO: rv swap floats");
-            };
+            // TODO: this is the only place the reserved _FT11 is used,
+            //       is it worth the weirdness over just using cast to int and back to use rv_scratch_int for both cases here?  
+            t := @if(i.cls().is_int(), rv_scratch_int, TMP(RvReg._FT11));
+            e.emit(.copy, i.cls(), t, i.arg&[0], Qbe.Null); 
+            e.emit(.copy, i.cls(), i.arg&[0], i.arg&[1], Qbe.Null); 
+            e.emit(.copy, i.cls(), i.arg&[1], t, Qbe.Null); 
         }
         fn cast() => {
             to, a0 := (i.to.rv().bits(), i.arg&[0].rv().bits());
@@ -295,7 +296,39 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
         fn ultof()  => e.fcnvt(i,  true,  true, i.cls().is_wide(),  true,  true);
         fn exts()   => e.fcnvt(i, false, false,  true,             false,  true);
         fn truncd() => e.fcnvt(i, false, false, false,             false, false);
-
+        
+        // :paste from arm/emit
+        fn cas1() => {
+            m := e.f.get_memory(i.arg&[0]);
+            k := i.cls();
+            t := rv_scratch_int;
+            if i.to == QbeNull {
+                i.to = t;
+            };
+            p, new, old_in, res := (i.arg&[1], m.index, m.base, i.to);
+            real_res := res;
+            if res != old_in {
+                if res == new || res == p {
+                    res = t;
+                };
+                e.emit(.copy, k, res, old_in, QbeNull);
+            };
+            rd, rs2, rs1 := (@as(u5) res.rv().bits(), @as(u5) new.rv().bits(), @as(u5) p.rv().bits());
+            e.inst(@bits(0b00101, 0b1, 0b1, rs2, rs1, 0b01, i.cls().is_wide(), rd, Opcode.amo)); 
+            if res != real_res {
+                e.emit(.copy, k, real_res, res, QbeNull);
+            };
+        }
+        
+        fn byteswap() => e.unary(i, 0b011010111000, 0b101, .op_imm);  // rev8
+        fn ones()     => e.unary(i, 0b011000000010, 0b001, @if(i.cls() == .Kw, .opw, .op_imm)); // cpop
+        fn clz()      => e.unary(i, 0b011000000000, 0b001, @if(i.cls() == .Kw, .opw, .op_imm));
+        fn ctz()      => e.unary(i, 0b011000000001, 0b001, @if(i.cls() == .Kw, .opw, .op_imm));
+        fn extsb()    => e.unary(i, 0b011000000100, 0b001, .op_imm);
+        fn extsh()    => e.unary(i, 0b011000000101, 0b001, .op_imm);
+        fn extuh()    => e.unary(i, 0b000010000000, 0b100, .op32);
+        fn extuw()    => e.unary(i, 0b000010000000, 0b000, .op32);  // add.uw 0
+        
         @default => {
             if i.maybe_load() { size |
                 addr, off := decode_mem(e, a0, i.arg&[1]);
@@ -319,6 +352,10 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
     }
 }
 
+fn unary(e: *EmitRv, i: *Qbe.Ins, funct12: i12, funct3: u3, opcode: Opcode) void = {
+    e.inst(I(funct12, i.arg&[0].rv().bits(), funct3, i.to.rv().bits(), opcode))
+}
+
 fn fcnvt(e: *EmitRv, i: *Qbe.Ins, have_ints: bool, from_int: bool, double: bool, long: bool, unsigned: bool) void = {
     rm := @if(from_int, 0b000, 0b001);
     e.inst(encode_fcnvt(i.arg&[0].rv(), rm, i.to.rv(), have_ints, from_int, double, long, unsigned))
@@ -328,7 +365,10 @@ fn fcnvt(e: *EmitRv, i: *Qbe.Ins, have_ints: bool, from_int: bool, double: bool,
 fn encode_shift(e: *EmitRv, i: *Qbe.Ins) void = {
     rd, rs1 := (i.to.rv().bits(), i.arg&[0].rv().bits());
     con, rs2 := @match(e.f.get_int(i.arg&[1])) { 
-        fn Some(imm) => (false, @as(u5) imm);
+        fn Some(imm) => {
+            imm := imm.bit_and(@if(i.cls().is_wide(), 63, 31));
+            (false, @as(u5) imm)
+        }
         fn None() => (true, i.arg&[1].rv().bits());
     };
     right := @is(i.op(), .rotr, .shr, .sar);
@@ -397,9 +437,10 @@ fn decode_mem(e: *EmitRv, a: Qbe.Ref, other: Qbe.Ref) Ty(RvReg, i12) = {
 
 // TODO: factor together with arm/loadaddr_bits>
 fn load_symbol(e: *EmitRv, c: *Qbe.Con, dest_reg: RvReg) void = {
+    import := e.f.could_be_import(c);
+    inc := @if(import, 0, c.bits());
     use_symbol(e.m, c.sym) { symbol |
         patch_addr := e.m.segment_address(.Code, e.m.current_offset(.Code));
-        inc := c.bits();
         patch: Fixup = (patch_at = patch_addr, type = (InReg = (r = dest_reg.raw().zext(), increment = inc)));
         @match(symbol.kind) {
             fn DynamicPatched() => panic("TODO: rv DynamicPatched");
@@ -437,6 +478,15 @@ fn load_symbol(e: *EmitRv, c: *Qbe.Con, dest_reg: RvReg) void = {
             s.segment = .Code;
             e.m.local_needs_reloc&.push(s.id);
         };
+    };
+    
+    // TODO: decide if this is better or if i should just allow multiple GOT slots with different addends. 
+    //       if i keep this way, use add immediate when it's small. 
+    //       (same question applies to arm but im not sure if mach-o can do negative addends)
+    if import {
+        @debug_assert(TMP(dest_reg) != rv_scratch_int);
+        e.emit(.copy, .Kl, rv_scratch_int, e.f.getcon(c.bits()), Qbe.Null);
+        e.emit(.add, .Kl, TMP(dest_reg), TMP(dest_reg), rv_scratch_int);
     };
 }
 

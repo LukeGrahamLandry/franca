@@ -1,33 +1,23 @@
 // Adapted from Qbe. MIT License. © 2015-2024 Quentin Carbonneaux <quentin@c9x.me>
 // Originally contributed to Qbe by Michael Forney
 
-// TODO
-// - cas, byteswap, ctz, clz, ones, min, max, sqrt
-// - address folding like arm (can they share?)
-// - replace cmp+jnz (they don't have a flags register)
-// - dont insert redundant sign extensions
+rv64_isel :: fn(f: *Qbe.Fn) void = 
+    native_isel(f, fixarg, seljmp, sel_inst);
 
-rv64_isel :: fn(f: *Qbe.Fn) void = {
-    assign_alloc_slots(f);
-    
-    for_blocks f { b |
-        f.reset_scratch();
-        
-        for_jump_targets b { sb |
-            for_phi sb { p |
-                n := index_in_phi(b, p);
-                fixarg(p.arg&.index(n), p.cls, Qbe.Ins.ptr_from_int(0), f);
-            };
-        };
-        
-        seljmp(b, f);
-        for_insts_rev b { i |
-            sel(i[], f);
-        };
-        f.copy_instructions_from_scratch(b);
+sel_inst :: fn(i: **Qbe.Ins, b: *Qbe.Blk, f: *Qbe.Fn) void = {
+    if i[].op() == .cas1 {
+        // :paste from arm/isel
+        cas0, cas1 := find_cas(i[], b);
+        cas1 := f.emit(cas1[]);
+        k := cas1.cls();
+        fixarg(cas0.arg&.index(0), k, cas0, f);
+        fixargs(k, cas1, f);
+        cas1.arg&[0] = f.new_mem(cas1.arg&[0], cas1.arg&[1], 0, 0);
+        cas1.arg&[1] = cas0.arg&[0];
+        cas0.set_nop();
+    } else {
+        sel(i[], f);
     }
-
-    when_debug_printfn(f, .InstSelect, "\n## After instruction selection:\n");
 }
 
 fixarg :: fn(r: *Qbe.Ref, k: Qbe.Cls, i: *Qbe.Ins, f: *Qbe.Fn) void = {
@@ -38,7 +28,7 @@ fixarg :: fn(r: *Qbe.Ref, k: Qbe.Cls, i: *Qbe.Ins, f: *Qbe.Fn) void = {
         break :: local_return;
         c := f.get_constant(r0);
         if c.type() == .CAddr && memarg(r, o, i) {
-            if o == .call { // TODO: local load/store can access symbol directly: || !f.could_be_import(c) {
+            if o == .call { // TODO: local call can access symbol directly: || !f.could_be_import(c) {
                 break();
             }
         };
@@ -206,6 +196,14 @@ sel :: fn(i: *Qbe.Ins, f: *Qbe.Fn) void = {
         fn neg() => if k.is_int() {
             i[] = make_ins(.sub, k, i.to, Qbe.Null, i.arg&[0]);
         };
+        fn byteswap() => if k == .Kw {
+            // rev8 is always on the whole register
+            r := f.newtmp("isel", .Kl);
+            f.emit(.sar, .Kl, i.to, r, f.getcon(32));
+            i0 := f.emit(.byteswap, .Kl, r, i.arg&[0], Qbe.Null);
+            fixarg(i0.arg&[0]&, .Kw, i0, f);
+            return();
+        }
         @default => ();
     };
     
@@ -237,6 +235,7 @@ seljmp :: fn(b: *Qbe.Blk, f: *Qbe.Fn) void = {
 memarg :: fn(r: *Qbe.Ref, op: Qbe.O, i: *Qbe.Ins) bool = {
     @if(is_load(op) || op == .call) return(r.identical(i.arg&[0]&));
     @if(is_store(op)) return(r.identical(i.arg&[1]&));
+    // cas also references memory but it doesn't get an immediate.
     false
 }
 
@@ -247,3 +246,4 @@ immarg :: fn(r: *Qbe.Ref, o: Qbe.O, i: *Qbe.Ins) bool = {
 
 
 #use("@/backend/lib.fr");
+#use("@/backend/abi.fr");

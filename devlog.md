@@ -1,10 +1,20 @@
 
+## (Sep 6) rv
+
+- abi8.ssa: add back the padding at the end of the parameter register lists so it's fine for argsclass to go past the end
+- emit for bit ops: byteswap, ones, clz, ctz, extsb, extsh, extuh
+- untested float ops: min, max, sqrt, swap
+- for now, just do an extra instruction for offset from an import. 
+  - strangely that made encoding.ssa work in libriscv. 
+    added $no_fixup_addend now it's back to only working with --single-step OR in qemu. 
+
 ## (Sep 5) rv
 
 - fpcnv.ssa: comparing disassembly between mine and qbe: 
   needed to set rm differently for some. now it works in qemu. 
     - which i don't understand because the ones that i had trouble with 
     were fcvt.d.wu and fcvt.d.w which should never round? but seems i need to have rm=0b00
+- ugly thing for cas based on what i did on arm. works in qemu. 
 
 ## (Sep 4) rv
 

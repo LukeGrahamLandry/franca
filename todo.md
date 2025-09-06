@@ -377,6 +377,7 @@ need to be careful about the refs which have tags in the high bits so won't leb 
   objdump thinks it's fine and it clearly runs correctly. 
 - TODO: harec/src/gen.c: `[arm64/emit.fr/fixup_arm64] offset from dynamic import builtin_type_nomem+4` but would work when done as one compilation unit.
 - mem3.ssa fails without opt/load.fr/loadopt()
+- some instructions don't have a .ssa test: float(sqrt, min, max, swap), int(extsb, extsh, extuh)
 
 ## backend symbols rework
 
@@ -440,7 +441,17 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 - to make -cc work with static linking, import_c needs to not make weak symbols
 - llvm-mc doesn't disassemble float instructions
 - isel fixarg is doing redundant sign extensions
+- isel address folding into load/store like arm
+- isel replace cmp+jnz with bcmp (they don't have a flags register)
+- handle out of range branch in emit
 - (fixup1.ssa, fpcnv.ssa, encoding.ssa) work in qemu but not libriscv. report bugs? 
+  - fixup1 and encoding work with --single-step but not without
+  - also cas.ssa but there it has an expcilit error message for not supporting that extension instead of just giving the wrong answer like the others
+- call local symbol directly without producing it in a register first
+- load_symbol(DynamicPatched)
+- trampolines for imported symbols
+- once i can do franca i want to get rid of: 
+  - a.ssa, tests/external/libriscv.fr, ExprLevelAsm (and that part of tests/exe/sys.fr)
 
 ## don't rely on libc
 

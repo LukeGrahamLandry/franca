@@ -12,7 +12,6 @@ You can still print out the ir as human readable text between passes and modify 
 - C11    (../examples/import_c/compile.fr)
 - Qbe IR (../backend/meta/parse.fr)
 - Wasm   (../examples/import_wasm/convert.fr)
-  - WIP
 - Kaleidoscope (../examples/kaleidoscope.fr)
 - BrainFuck    (../examples/bf/bf2ir.fr)
 
@@ -23,7 +22,7 @@ You can still print out the ir as human readable text between passes and modify 
 - Generate machine code directly without depending on an external assembler (arm clang is so slow!).
   Your program will contain only the finest organic bit patterns lovingly transcribed from the Arm Architecture Reference Manual
   (or painfully scavenged from whatever amd tables i can find).
-  self contained instruction encoding for arm64 and amd64. 
+  self contained instruction encoding for arm64/aarch64, amd64/x86_64, and riscv64. 
 - Jit compile your program and run it in memory without needing to emit/link an executable.
   You can freely call between jit and aot code (even extern-c code from other compilers) because they follow the same standard abi.
   (This is what Franca uses for compile-time execution).
@@ -36,10 +35,7 @@ You can still print out the ir as human readable text between passes and modify 
   - WIP: code quality is poor. there's lots of low hanging fruit optimisations in wasm/isel.fr.  
   - WIP: irreducible control flow is not supported. 
   - WIP: late Cached .frc is not supported. 
-- Removed the RISC-V target for now
-  - WIP: started adding it back but instruction encoding is very unfinished
-         (i can do a static hello world (../a.ssa) but nothing else)
-  
+
 ### Features
 
 - A library interface for producing and compiling ir in memory instead of outputting text and exec-ing a seperate program to process it.
@@ -50,14 +46,8 @@ You can still print out the ir as human readable text between passes and modify 
   - atomic compare-and-swap 
     - a bit useless because you need to insert your own fences
   - conditional select (ie. `a ? b : c`)
-- Binary form of the ir that's faster to load than the text form (could be a building block for incremental compilation)
-- Insert raw asm bytes in function bodies with arbitrary input/output/clobber register lists.
-  > currently very limited: you pick specific registers, do your own assembling, can't reference symbols.  
-  > but it lets you access instructions that we don't know about without calling convention spilling overhead.  
-  > example use case: a c compiler implementing `__builtin_clzl` as a single instruction.
-  > (which is a dumb example because i have a clz instruction). or @/tests/exe/sys.fr uses it to make syscalls. 
-  > (not well tested because franca doesn't use it yet but it will likely be converted eventually).
-- binary serialization format of the ir that can be used as a building block for incremental compilation. (see @/docs/caching.md)
+- Binary serialization of the ir that's faster to load than the text form. 
+  (could be a building block for incremental compilation, see @/docs/caching.md)
 - Removed support for thread locals. Franca achieves an equivilent by passing around an implicit env parameter.
 - Removed support for custom section names.
 
@@ -82,10 +72,6 @@ You can still print out the ir as human readable text between passes and modify 
 - simplified matching of amd64 addressing modes: instead of 1600 lines of ocaml implementing a dsl
   with 150 lines of glue code to use the results, just write 150 lines of tedious code to solve the problem directly.
 - Strength reduction for signed div/rem by power of two (using a conditional move to get the right rounding for negative numbers). 
-- Removed several codegen optimisations until we have a solid foundation (but I want to bring them back eventually).
-  - all: load float constants from memory (instead of using int immediate + fmov)
-  - amd: negating floats by xoring from memory
-  - amd: use spilled floats directly from memory
 
 ## Qbe License
 
