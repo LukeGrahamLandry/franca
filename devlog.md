@@ -7,6 +7,30 @@
 - for now, just do an extra instruction for offset from an import. 
   - strangely that made encoding.ssa work in libriscv. 
     added $no_fixup_addend now it's back to only working with --single-step OR in qemu. 
+- did the AsmFunction stuff needed for the franca start/runtime/whatever. 
+  hello world works with -syscalls but not with libc.
+- deal with conditional jump farther than 4kb 
+  by adding an extra direct jump and conditionally jumping over that instead.  
+- try more random shit for loading immediates that don't fit well. 
+- setup temporary thing to cross compile and run `test/*.fr` (until compiler itself runs on riscv). 
+  only `23 of 399 tests failed` 
+  - tho some are just at comptime so aren't testing anything
+  - and some fails are just because `-syscalls`
+- lldb seems to be able to talk to qemu which is very nice. 
+  pass `-g 1024` to qemu-riscv64 and it waits on port 1024 before starting. 
+  run lldb and `file a.out` to get symbols and `gdb-remote localhost:1024` to connect 
+  and then you're in a breakpoint at main and just `c` to continue. 
+- dying in try_lock: `2182c: 2e63a2af           .insn 4, 0x2e63a2af`
+  - it's casw, sadly even when i encode it right (like the cas.ssa test that works) objdump doesn't know it. 
+    aboutrv.com/tools/disassembler says it's right: `0x2e63a2af → amocas.w t0, t1, (t2)`
+    and anyway it's `stop reason = signal SIGSEGV` not illegal instruction. 
+  - so is this a bad pointer? `t2 = 0xffffffff891ef880`
+    i bet that i sign extended 0x0000ffff891ef880 cause that's closer to other values i see in registers. 
+  - yeah, in isel im doing fixarg(k) on the cas which would be Kw here 
+    and i hyperactively insert sign extensions 
+    when using a Kl tmp as a Kw arg (because comparisons want that i think?)
+  - that fixed lox_main and parser_doesnt_crash. 
+    and now stuff that uses the backend gets past init_default_module
 
 ## (Sep 5) rv
 

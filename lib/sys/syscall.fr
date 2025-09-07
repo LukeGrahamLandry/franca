@@ -247,7 +247,7 @@ SyscallVTable :: @struct {
 choose_syscall :: fn(a: *Array(i64, 6), info: *SyscallVTable) i64 = {
     want_syscall := prefer_syscalls() || info.libc.it.is_null();
     if want_syscall {
-        sys_index := @if(query_current_os() == .macos, 2, @if(query_current_arch() == .aarch64, 0, 1));
+        sys_index := @if(query_current_os() == .macos, 2, @if(query_current_arch() == .aarch64 || query_current_arch() == .rv64, 0, 1));
         n := info.n&[sys_index];
         if n == NOSYS {
             panic("unimplemented syscall")
@@ -280,7 +280,7 @@ perform_syscall :: AsmFunction(fn(args: *Array(i64, 6), n: i64) Ty(i64, u8) = ()
         cset(.X64, x1, .LO), // macos sets carry flag on error
         ret(),
     )
-}) { (out: *List(u8)) | 
+}, fn(out: *List(u8)) => {
     #use("@/backend/amd64/bits.fr");
     
     ldr :: fn(o: *List(u8), d: X86Reg, s: X86Reg, off: i64) void = 
@@ -306,7 +306,22 @@ perform_syscall :: AsmFunction(fn(args: *Array(i64, 6), n: i64) Ty(i64, u8) = ()
         
         PrimaryOp.Ret
     ) out;
-};
+}, fn(out: *List(u8)) => out.push_all(@const_slice(0x00, 0x00, 0x0B)) /* 0 locals. unreachable. end */, {
+    #use("@/backend/rv64/bits.fr");
+    @const_slice(
+        I(0, RvReg.A1.bits(), @as(u3) OpI.add, RvReg.A7.bits(), .op_imm),  // syscall number
+        
+        load(.A5, .A0, 40, 8, false, false),
+        load(.A4, .A0, 32, 8, false, false),
+        load(.A3, .A0, 24, 8, false, false),
+        load(.A2, .A0, 16, 8, false, false),
+        load(.A1, .A0, 8, 8, false, false),
+        load(.A0, .A0, 0, 8, false, false),
+        
+        ecall,
+        jalr(.RA, 0, .Zero),
+    )
+});
 
 fn prefer_syscalls() bool = {
     c := context(DefaultContext);

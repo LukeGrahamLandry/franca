@@ -7,6 +7,7 @@ EmitRv :: @struct {
     f: *Qbe.Fn;
     m: *Qbe.Module;
     start_of_function: i64;
+    patches: List(Patch);
 };
 
 rv64_emitfn :: fn(f: *Qbe.Fn) []Ty(Fixup, Qbe.Sym) = {
@@ -14,6 +15,7 @@ rv64_emitfn :: fn(f: *Qbe.Fn) []Ty(Fixup, Qbe.Sym) = {
         f = f,
         m = f.globals,
         start_of_function = f.globals.segments&.index(.Code).len(),
+        patches = Patch.list(f.nblk.zext(), temp()),
     );
     emit_the_code(e&);
     empty()
@@ -55,7 +57,6 @@ emit_the_code :: fn(e: *EmitRv) void = {
     };
     
     local_labels := temp().alloc_zeroed(i64, e.f.nblk.zext());
-    patches := Patch.list(e.f.nblk.zext(), temp());
     for_blocks f { b | 
         local_labels[b.id.zext()] = e.next_inst_offset();
         for_insts_forward b { i |
@@ -87,8 +88,7 @@ emit_the_code :: fn(e: *EmitRv) void = {
                 e.inst(jalr(.RA, 0, .Zero)); // ret
             }
             fn jmp() => if !b.s1.identical(b.link) {
-                patches&.push(target_bid = b.s1.id, offset_from_start = e.next_inst_offset(), cond = -1);
-                e.inst(ebreak);
+                e.jmp(b.s1.id, -1, Qbe.Null);
             };
             fn jnz() => {
                 swap := b.link.identical(b.s2);
@@ -98,19 +98,31 @@ emit_the_code :: fn(e: *EmitRv) void = {
                     b.s2 = s;
                 };
                 @debug_assert(isreg(b.jmp.arg));
-                cond := @if(swap, Qbe.Cmp.Cine, .Cieq);
-                patches&.push(target_bid = b.s2.id, offset_from_start = e.next_inst_offset(), cond = cond.raw(), reg = b.jmp.arg);
-                e.inst(ebreak);
+                
+                // conditional branch only has 4kb of range which is really not enough. 
+                // add a little trampoline as needed. 
+                src := e.next_inst_offset();
+                bid := b.s2.id;
+                dest := local_labels[bid.intcast()];
+                far := dest == 0 || src - dest >= 1.shift_left(12);
+                if far {
+                    cond := @if(!swap, Qbe.Cmp.Cine, .Cieq);
+                    e.inst(cond_jmp(8, cond, b.jmp.arg));
+                    e.jmp(bid, -1, Qbe.Null);
+                } else {
+                    cond := @if(swap, Qbe.Cmp.Cine, .Cieq);
+                    e.jmp(bid, cond.raw(), b.jmp.arg);
+                }
+                
                 if !b.s1.identical(b.link) {
-                    patches&.push(target_bid = b.s1.id, offset_from_start = e.next_inst_offset(), cond = -1);
-                    e.inst(ebreak);
+                    e.jmp(b.s1.id, -1, Qbe.Null);
                 };
             };
             @default => unreachable();
         }
     };
     
-    each patches& { p |
+    each e.patches& { p |
         target := local_labels[p.target_bid.zext()];
         @debug_assert(target != 0);  
         distance := (target - p.offset_from_start);
@@ -119,18 +131,28 @@ emit_the_code :: fn(e: *EmitRv) void = {
         patch := ptr_cast_unchecked(u8, u32, patch);
         @debug_assert_eq(ebreak, patch[], "not expecting patch");
         if p.cond >= 0 {
-            kind: Bcmp = @match(@as(Qbe.Cmp) p.cond) {
-                fn Cieq() => .beq;
-                fn Cine() => .bne;
-                @default => todo();
-            };
-            @debug_assert(distance.fits_sext(12), "TODO: rv branch too far: %", distance);
-            patch[] = B(@as(i13) distance, RvReg.Zero.bits(), p.reg.rv().bits(), @as(u3) kind, .bcmp);
+            patch[] = cond_jmp(distance, @as(Qbe.Cmp) p.cond, p.reg);
         } else {
-            @debug_assert(distance.fits_sext(20), "TODO: rv branch too far: %", distance);
+            @debug_assert(distance.fits_sext(20), "TODO: rv branch too far");
             patch[] = jal(@as(i21) distance, .Zero); 
         };
     };
+}
+
+fn cond_jmp(distance: i64, cond: Qbe.Cmp, r: Qbe.Ref) u32 = {
+    kind: Bcmp = @match(cond) {
+        fn Cieq() => .beq;
+        fn Cine() => .bne;
+        @default => todo();
+    };
+    @debug_assert(distance.fits_sext(12), "TODO: rv branch too far: %", distance);
+    B(@as(i13) distance, RvReg.Zero.bits(), r.rv().bits(), @as(u3) kind, .bcmp)
+}
+
+
+fn jmp(e: *EmitRv, bid: i32, cond: i32, r: Qbe.Ref) void = {
+    e.patches&.push(target_bid = bid, offset_from_start = e.next_inst_offset(), cond = cond, reg = r);
+    e.inst(ebreak);
 }
 
 fixmem :: fn(e: *EmitRv, pr: *Qbe.Ref) void = {
@@ -164,11 +186,12 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
         fn copy() => {
             if(i.to == a0, => return());
             if rtype(i.to) == .RSlot {
-                @debug_assert(isreg(i.arg&[0]), "copy %", a0);
-                i.arg&[1] = i.to;
-                i.to = Qbe.Null;
-                i.set_op(i.cls().store_op());
-                e.emit(i);
+                if rtype(i.arg&[0]) != .RTmp {
+                    @debug_assert(i.cls().is_int(), "TODO: copy slot float");
+                    e.emit(.copy, i.cls(), rv_scratch_int, i.arg&[0], Qbe.Null);
+                    i.arg&[0] = rv_scratch_int;
+                };
+                e.emit(i.cls().store_op(), .Kw, Qbe.Null, i.arg&[0], i.to);
                 return();
             }
             @debug_assert(i.to.isreg(), "% copy", i.to);
@@ -217,7 +240,6 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
             @match(rtype(i.arg&[0])) {
                 fn RCon() => {
                     c := f.get_constant(a0);
-                    @debug_assert(c.type() == .CAddr && c.bits() == 0, "invalid call");
                     // TODO: use jal instead of wasting an extra instruction
                     // RA is stomped by the call instruction anyway so it's fine to use it as scratch. 
                     e.emit(make_ins(.copy, .Kl, TMP(RvReg.RA), a0, Qbe.Null));
@@ -397,12 +419,34 @@ fn load_number(e: *EmitRv, off: i64, to: Qbe.Ref, k: Qbe.Cls) void = {
             e.inst(U(hi, r, .lui));
             e.inst(I(lo, r, @as(u3) OpI.add, r, .op_imm));
         }
+        @if(fits_double_extend(off.bit_not())) => {
+            e.load_number(off.bit_not(), to, .Kl);
+            e.inst(R(0b0100000, r, 0b00000, 0b110, r, .op));  // orn. r = 0 | ~r
+        }
         @else => {
-            @debug_assert_ne(to, rv_scratch_int);
             // TODO: this is convoluted. just put it in memory and load it. 
-            hi, lo := (off.shift_right_logical(32).sign_extend_low32(), off.bit_and(MAX_u32).sign_extend_low32());
-            e.load_number(hi, rv_scratch_int, .Kl);
-            e.load_number(lo, to, .Kl);
+            hi, lo := (off.shift_right_logical(32), off.bit_and(MAX_u32));
+            
+            if lo == 0 {
+                e.load_number(hi, to, .Kw);
+                e.emit(.shl, .Kl, to, to, e.f.getcon(32));
+                return();
+            };
+            @debug_assert_ne(to, rv_scratch_int);
+            
+            if hi == 0 || k == .Kw {
+                hi := @as(i64) lo.imm(31, 12);
+                lo := bit_and(@as(i64) lo.imm(11, 0), 1.shift_left(13) - 1);
+            
+                e.load_number(lo, rv_scratch_int, .Kl);
+                e.inst(U(hi, r, .lui));
+                e.inst(R(0b0000100, rv_scratch_int.rv().bits(), r, 0b000, r, .op32));  // add.uw 
+                return();
+            };
+            
+            e.load_number(hi, rv_scratch_int, .Kw);
+            e.load_number(lo, to, .Kw);
+            
             e.emit(.shl, .Kl, rv_scratch_int, rv_scratch_int, e.f.getcon(32));
             // add.uw (zero extends rs1, thats why high bits of lo don't matter)
             e.inst(R(0b0000100, rv_scratch_int.rv().bits(), r, 0b000, r, .op32));

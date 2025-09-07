@@ -171,18 +171,19 @@ fn query_current_os() Os = {
 fn align_stack(s: i64) void #inline = {
     #use("@/backend/amd64/bits.fr");
     #use("@/backend/arm64/bits.fr");
+    #use("@/backend/rv64/bits.fr");
     
     fix_stack :: AsmFunction(fn() void = (), {
         @const_slice(ret(),ret())  // hopefully unreachable. i think the stack alignment hting is much more strict on arm. 
-    }) { (out: *List(u8)) | @asm_x64(
+    }, fn(out: *List(u8)) => @asm_x64(
         // We just want to sub 8 from sp but we have to return by popping something off the stack. 
         encode_op_reg(PrimaryOp.PopBase, X86Reg.rax),
         encode_op_reg(PrimaryOp.PushBase, X86Reg.rax),
         encode_op_reg(PrimaryOp.PushBase, X86Reg.rax), 
         PrimaryOp.Ret,
-    ) out;} wasm { (out: *List(u8)) |
+    ) out, fn(out: *List(u8)) => {
         out.push_all(@slice(0x00, 0x0B)); // 0 locals. end.
-    };
+    }, @const_slice(jalr(.RA, 0, .Zero), jalr(.RA, 0, .Zero)));
     
     @debug_assert_eq(s.mod(8), 0);
     if s.mod(16) != 0 {
@@ -257,7 +258,7 @@ do_relocations_static_linux :: fn() void = {
     ::ptr_utils(Elf.Symbol);
     unpacked.relocations.ptr = unpacked.relocations.ptr.offset_bytes(skew);
     each unpacked.relocations { it |
-        @debug_assert(it.type == Elf.R_AMD64_64 || it.type == Elf.R_AARCH64_ABS64, "TODO: unknown relocation type %", it.type);
+        @debug_assert(it.type == Elf.R_AMD64_64 || it.type == Elf.R_AARCH64_ABS64 || it.type == Elf.R_RISCV_64, "TODO: unknown relocation type %", it.type);
         sym := unpacked.symbols.offset(it.sym.zext()).offset_bytes(skew);
         dest := rawptr.ptr_from_raw(base.offset(it.offset - Elf.MYSTERY_SPICE));
         dest[] = base.offset(sym.value).offset(it.addend - Elf.MYSTERY_SPICE);

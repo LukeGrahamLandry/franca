@@ -1,0 +1,41 @@
+#use("@/lib/sys/fs.fr");
+
+#use("@/compiler/test.fr")
+run_lang_tests :: fn(vtable: *ImportVTable) void = {
+    franca := get_executable_path(temp());
+    passed := 0;
+    failed := 0;
+    ::FmtPad(Str);
+    tests := collect_tests(vtable);
+    ::import("@/examples/testing.fr");
+    each tests& { file, functions | 
+        for functions[].items() { case |
+            continue :: local_return;
+            @print("% %", f_pad(file, 30, .After), f_pad(case, 20, .After));
+            src := gen_test_program(file, @slice(case));
+            
+            write_entire_file_or_crash("target/a.fr", src);
+            {
+                ok, out, err := exec_and_catch(franca, @slice("examples/default_driver.fr", "build", "target/a.fr", "-arch", "rv64", "-os", "linux", "-syscalls"), temp());
+                if !ok {
+                    @println("FAILED COMPILE\n%\n%", out.items(), err.items());
+                    failed += 1;
+                    continue();
+                }
+            };
+            
+            ok, out, err := exec_and_catch("orb", @slice("-m", "arm64", "qemu-riscv64", "-L", "/usr/riscv64-linux-gnu", "a.out"), temp());
+            (@if(ok, passed&, failed&))[] += 1;
+            @print("[%]", if(ok, => "ok", => "failed run"));
+            print(out.items());
+            if !ok {
+                print(err.items());
+            };
+            println("");
+        };
+    };
+    @panic("% of % tests failed.", failed, failed + passed);
+};
+
+driver :: fn(vtable: *ImportVTable) void = 
+    run_lang_tests(vtable);

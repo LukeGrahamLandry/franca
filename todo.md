@@ -452,6 +452,39 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 - trampolines for imported symbols
 - once i can do franca i want to get rid of: 
   - a.ssa, tests/external/libriscv.fr, ExprLevelAsm (and that part of tests/exe/sys.fr)
+- once the compiler works, get rid of tests/exe/rv.fr
+- fr lib
+  - SysUContext
+  - clear_instruction_cache
+- fr broken tests
+  - toy/args.fr: i don't get cli arguments
+  - toy/ls.fr (getdents layout?)
+- tests/
+  - basic_libc
+    - import_all_calls_indirect (not linking libc)
+    - call_fork (not linking libc)
+    - catch_signal (UContext)
+    - exceptional (jump.fr)
+    - walk_dir (getdents layout?)
+    - allocation (not linking libc)
+  - a 
+    - float_trunc_encoding (?)
+  - multiple_stacks (AsmFunction)
+  - hello_va (not linking libc)
+  - collections
+    - removing (Compile Error: Poison expression Argument. probably not riscv related, just that i don't normally run one function at a time. :compilerbug)
+  - multithread: (perform_clone)
+  - intrins (AsmFunction)
+  - asm_rework_tdd
+    - spilling_stompable (not linking libc)
+  - small_types (load_number i assume)
+    - high_bits_of_f32_literal
+    - load_store_u32
+  - inline_asm_jit (AsmFunction)
+- franca linking libc doesn't work
+  - clang's binary does something with __global_pointer in start. do i have to do that?
+- ssa test that uses the constant 9223372036854775807
+- `thread backtrace` doesn't work in lldb. is my stack layout wrong? 
 
 ## don't rely on libc
 
