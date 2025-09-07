@@ -377,7 +377,7 @@ need to be careful about the refs which have tags in the high bits so won't leb 
   objdump thinks it's fine and it clearly runs correctly. 
 - TODO: harec/src/gen.c: `[arm64/emit.fr/fixup_arm64] offset from dynamic import builtin_type_nomem+4` but would work when done as one compilation unit.
 - mem3.ssa fails without opt/load.fr/loadopt()
-- some instructions don't have a .ssa test: float(sqrt, min, max, swap), int(extsb, extsh, extuh)
+- some instructions don't have a .ssa test: float(sqrt, min, max, swap, truncd), int(extsb, extsh, extuh)
 
 ## backend symbols rework
 
@@ -443,48 +443,27 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 - isel fixarg is doing redundant sign extensions
 - isel address folding into load/store like arm
 - isel replace cmp+jnz with bcmp (they don't have a flags register)
-- handle out of range branch in emit
 - (fixup1.ssa, fpcnv.ssa, encoding.ssa) work in qemu but not libriscv. report bugs? 
   - fixup1 and encoding work with --single-step but not without
   - also cas.ssa but there it has an expcilit error message for not supporting that extension instead of just giving the wrong answer like the others
 - call local symbol directly without producing it in a register first
-- load_symbol(DynamicPatched)
 - trampolines for imported symbols
 - once i can do franca i want to get rid of: 
   - a.ssa, tests/external/libriscv.fr, ExprLevelAsm (and that part of tests/exe/sys.fr)
 - once the compiler works, get rid of tests/exe/rv.fr
-- fr lib
-  - SysUContext
-  - clear_instruction_cache
-- fr broken tests
-  - toy/args.fr: i don't get cli arguments
-  - toy/ls.fr (getdents layout?)
 - tests/
-  - basic_libc
-    - import_all_calls_indirect (not linking libc)
-    - call_fork (not linking libc)
-    - catch_signal (UContext)
-    - exceptional (jump.fr)
-    - walk_dir (getdents layout?)
-    - allocation (not linking libc)
-  - a 
-    - float_trunc_encoding (?)
-  - multiple_stacks (AsmFunction)
-  - hello_va (not linking libc)
+  - import_all_calls_indirect, call_fork, allocation, spilling_stompable, hello_va (not linking libc)
+  - catch_signal (UContext)
+  - exceptional (jump.fr)
+  - multiple_stacks, intrins, inline_asm_jit (AsmFunction)
   - collections
     - removing (Compile Error: Poison expression Argument. probably not riscv related, just that i don't normally run one function at a time. :compilerbug)
-  - multithread: (perform_clone)
-  - intrins (AsmFunction)
-  - asm_rework_tdd
-    - spilling_stompable (not linking libc)
-  - small_types (load_number i assume)
-    - high_bits_of_f32_literal
-    - load_store_u32
-  - inline_asm_jit (AsmFunction)
+- stack traces: UContext
 - franca linking libc doesn't work
   - clang's binary does something with __global_pointer in start. do i have to do that?
 - ssa test that uses the constant 9223372036854775807
 - `thread backtrace` doesn't work in lldb. is my stack layout wrong? 
+- riscv_flush_icache syscall vs FENCE.I instruction for clear_instruction_cache
 
 ## don't rely on libc
 

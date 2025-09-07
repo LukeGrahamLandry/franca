@@ -13,6 +13,7 @@
   - emit
     - setup a stack frame
     - new types of relocations
+    - UnfilledGotAccessStillNeedsPatch
   - bits: instruction encoding
   - elf: dynamic loader path and e_machine magic number
   - set regalloc masks in ir.fr/Target 

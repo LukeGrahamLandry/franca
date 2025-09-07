@@ -199,7 +199,7 @@ perform_clone :: AsmFunction(fn(clone_flags: i64, sp: *u8, tid_futex: *u32, call
         
         ret(),
     )
-}) { (out: *List(u8)) | 
+}, fn(out: *List(u8)) => { 
     // TODO: I'd rather do clone3 but blink doesn't implement it. 
     //       could do just do clone on amd and clone3 on arm but maybe consistancy is better. idk. 
     #use("@/backend/amd64/bits.fr");
@@ -227,7 +227,33 @@ perform_clone :: AsmFunction(fn(clone_flags: i64, sp: *u8, tid_futex: *u32, call
         encode_op_reg(PrimaryOp.PopBase, X86Reg.r12),  // restore
         PrimaryOp.Ret
     ) out;
-};
+}, fn(out: *List(u8)) => out.push_all(@const_slice(0x00, 0x00, 0x0B)) /* 0 locals. unreachable. end */, {
+        #use("@/backend/rv64/bits.fr");
+        mov :: fn(dest: RvReg, src: RvReg) u32 = 
+            I(0, src.bits(), @as(u3) OpI.add, dest.bits(), .op_imm);  // syscall number
+        li :: fn(dest: RvReg, i: i64) u32 = 
+            I(@as(i12) i, 0b00000, @as(u3) OpI.add, dest.bits(), .op_imm);
+            
+ 
+        @const_slice(
+            mov(.T0, .A3),
+            mov(.T1, .A4),
+            
+            // (flags, sp, parent_tid: *i32, tls: rawptr, child_tid: *i32)
+            mov(.A4, .A2),   // tid_futex
+            li(.A2, 0),
+            li(.A3, 0),
+            li(.A7, 220),  // syscall number
+            
+            ecall,
+            B(16, RvReg.Zero.bits(), RvReg.A0.bits(), @as(u3) Bcmp.bne, .bcmp),
+            mov(.A0, .T1),
+            li(.FP, 0),  // don't try to trace_prev into the other thread's stack
+            jalr(.T0, 0, .Zero),
+            
+            jalr(.RA, 0, .Zero),
+        )
+    });
 
 LandLock :: @struct {
     // TODO: have a nice BitFlags type like @bit_fields (then remove #flags below. it doesn't do anything)

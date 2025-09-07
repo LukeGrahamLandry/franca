@@ -8,6 +8,7 @@ EmitRv :: @struct {
     m: *Qbe.Module;
     start_of_function: i64;
     patches: List(Patch);
+    pending_immediate_fixup_got: List(Ty(Fixup, Qbe.Sym));
 };
 
 rv64_emitfn :: fn(f: *Qbe.Fn) []Ty(Fixup, Qbe.Sym) = {
@@ -16,9 +17,10 @@ rv64_emitfn :: fn(f: *Qbe.Fn) []Ty(Fixup, Qbe.Sym) = {
         m = f.globals,
         start_of_function = f.globals.segments&.index(.Code).len(),
         patches = Patch.list(f.nblk.zext(), temp()),
+        pending_immediate_fixup_got = list(temp()),
     );
     emit_the_code(e&);
-    empty()
+    e.pending_immediate_fixup_got.items()
 }
 
 rv_scratch_int :: TMP(RvReg._T6);
@@ -34,6 +36,7 @@ emit_the_code :: fn(e: *EmitRv) void = {
     }
     
     // TODO: elide this for leaf without stack frame
+    //       (be careful! might have to update franca_runtime_init)
     e.emit_store_off(TMP(RvReg.FP), TMP(RvReg.SP), -16);
     e.emit_store_off(TMP(RvReg.RA), TMP(RvReg.SP), -8);
     e.emit(make_ins(.add, .Kl, TMP(RvReg.FP), TMP(RvReg.SP), f.getcon(-16)));
@@ -316,8 +319,8 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
         fn uwtof()  => e.fcnvt(i,  true,  true, i.cls().is_wide(), false,  true);
         fn sltof()  => e.fcnvt(i,  true,  true, i.cls().is_wide(),  true, false);
         fn ultof()  => e.fcnvt(i,  true,  true, i.cls().is_wide(),  true,  true);
-        fn exts()   => e.fcnvt(i, false, false,  true,             false,  true);
-        fn truncd() => e.fcnvt(i, false, false, false,             false, false);
+        fn exts()   => e.fcnvt(i, false, false,  true,             false,  false);
+        fn truncd() => e.fcnvt(i, false, false, false,             false, true);
         
         // :paste from arm/emit
         fn cas1() => {
@@ -354,8 +357,13 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
         @default => {
             if i.maybe_load() { size |
                 addr, off := decode_mem(e, a0, i.arg&[1]);
-                // TODO: should load.w be sext or zext?
                 zero_ext := @is(i.op(), .loadub, .loaduh, .loaduw);
+                if i.op() == .loaduw && i.cls() == .Kw {
+                    // confusing! Kw comparisons aren't a seperate instruction, 
+                    // ceqw is done as a 64 bit xor between the values and then comparing the result to zero, 
+                    // so sign extension on Kw values needs to be consistant. 
+                    zero_ext = false;
+                };
                 e.inst(load(i.to.rv(), addr, off, size.intcast(), zero_ext, i.cls().is_float()));
                 return();
             };
@@ -487,7 +495,15 @@ fn load_symbol(e: *EmitRv, c: *Qbe.Con, dest_reg: RvReg) void = {
         patch_addr := e.m.segment_address(.Code, e.m.current_offset(.Code));
         patch: Fixup = (patch_at = patch_addr, type = (InReg = (r = dest_reg.raw().zext(), increment = inc)));
         @match(symbol.kind) {
-            fn DynamicPatched() => panic("TODO: rv DynamicPatched");
+            fn DynamicPatched() => {
+                patch.type.InReg.got_load = true;
+                if e.m.goal.type != .JitOnly || !e.m.goal.got_indirection_instead_of_patches {
+                    push_fixup(e.m, symbol, patch); 
+                };
+                e.inst(ebreak);
+                e.inst(ebreak);
+                push(e.pending_immediate_fixup_got&, (patch, symbol.id));
+            }
             fn Local() => {
                 dest := e.m.segment_address(symbol.segment, symbol.offset + inc);
                 i_page, i_off := rel_off(dest, patch_addr, dest_reg, false);
@@ -502,7 +518,13 @@ fn load_symbol(e: *EmitRv, c: *Qbe.Con, dest_reg: RvReg) void = {
             fn Pending() => {
                 e.inst(ebreak);
                 e.inst(ebreak);
-                push_fixup(e.m, symbol, patch);
+                if e.m.goal.got_indirection_instead_of_patches {
+                    patch.type.InReg.got_load = true;
+                    push(e.pending_immediate_fixup_got&, (patch, symbol.id));
+                };
+                if e.m.goal.type != .JitOnly || !e.m.goal.got_indirection_instead_of_patches {
+                    push_fixup(e.m, symbol, patch);
+                }
             }
         };
     };

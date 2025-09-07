@@ -31,6 +31,38 @@
     when using a Kl tmp as a Kw arg (because comparisons want that i think?)
   - that fixed lox_main and parser_doesnt_crash. 
     and now stuff that uses the backend gets past init_default_module
+- `type(*Con)` is giving the wrong answer. it has comparison ceqw between constant -1 and a loaduw -> Kw, 
+  so the load needs sign extension to compare equal because it's after being xored with the sign extended constant. 
+  thats confusing. 
+    ```
+    %v.69 =w loaduw %f.68
+    %v.70 =l ceqw %v.69, 4294967295
+    ---
+    R5 =w loaduw R5
+    R6 =w copy 4294967295
+    R5 =w xor R5, R6
+    R5 =l cultl R5, 1
+    R10 =l extsw R5 
+    ```
+  - it also fixed load_store_u32 test. 
+- i'd swapped a bit in truncd/exts encoding
+- handle DynamicPatched in load_symbol. 
+- now backend stuff works other than the assertion in clear_instruction_cache. 
+  use riscv_flush_icache syscall. 
+- make cli args work: continue tradition of adding random hack value to sp in franca_runtime_init
+- trying to run the compiler itself. 
+  - hits an ebreak unfilled patch. lots of fffff in the address means jitted code, 
+    probably because im not respecting got_indirection_instead_of_patches. 
+  - yeah, now i get ebreak in aot code: asm called from sys_clone. 
+  - did that, now jit toy/hello2.fr gets to the callee in run_franca_file and then hits another unfilled patch. 
+    - works all the way if i set got_indirection_instead_of_patches for the non-comptime module as well. 
+    - right, need to make sure Pending adds a patch even if it's jitted 
+      and then add riscv to the UnfilledGotAccessStillNeedsPatch cleanup at the end, that's a bit of a recurring nightmare. 
+    - yay! jit hello world works
+- fix sqrt encoding. now things that use the backend can be jitted (ie. kaleidoscope)
+  - (backend needs sqrt at comptime for generating sha256 tables for mach-o code sign)
+- self compile works (you just have to run `./a.out.<time>.atomic` because rename still doesn't)
+- riscv only has renameat2
 
 ## (Sep 5) rv
 
