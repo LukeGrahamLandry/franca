@@ -192,9 +192,10 @@ perform_clone :: AsmFunction(fn(clone_flags: i64, sp: *u8, tid_futex: *u32, call
         movz(.X64, x8, 220, .Left0),  // syscall number
         
         svc,
-        cbnz(.X64, 4, x0),
+        cbnz(.X64, 5, x0),
         mov(.X64, x0, x11),
         movz(.X64, fp, 0, .Left0),  // don't try to trace_prev into the other thread's stack
+        movz(.X64, lr, 0, .Left0),
         br(x10, 0b0),
         
         ret(),
@@ -246,9 +247,10 @@ perform_clone :: AsmFunction(fn(clone_flags: i64, sp: *u8, tid_futex: *u32, call
             li(.A7, 220),  // syscall number
             
             ecall,
-            B(16, RvReg.Zero.bits(), RvReg.A0.bits(), @as(u3) Bcmp.bne, .bcmp),
+            B(20, RvReg.Zero.bits(), RvReg.A0.bits(), @as(u3) Bcmp.bne, .bcmp),
             mov(.A0, .T1),
             li(.FP, 0),  // don't try to trace_prev into the other thread's stack
+            li(.RA, 0), 
             jalr(.T0, 0, .Zero),
             
             jalr(.RA, 0, .Zero),
@@ -368,6 +370,21 @@ MContextAmd64 :: @struct {
     gpr: Array(rawptr, 23);
     fpr: rawptr; // pointer to some struct i don't want to deal with yet
     _: Array(i64, 8);
+};
+
+UContextRiscv64 :: @rec @struct {
+    flags: i64;
+    link: *UContextRiscv64;
+    stack: stack_t;
+    sigmask: Array(i64, 16);
+    mcontext: MContextRiscv64;
+};
+
+MContextRiscv64 :: @struct {
+    gpr: Array(rawptr, 32);  // [0]=pc
+    // note: the #align doesn't change layout of this struct 
+    //       but makes it have align 16 which changes layout of ucontext
+    fpr: Array(u8, 33*16) #align(16);
 };
 
 // 

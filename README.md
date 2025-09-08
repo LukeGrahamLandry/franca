@@ -22,7 +22,7 @@ runtime code will automatically be included in the final binary.
 
 ## Supported Targets
 
-The self-hosted backend generates machine code for arm64 (aarch64), amd64 (x86_64) and wasm. 
+The self-hosted backend generates machine code for arm64 (aarch64), amd64 (x86_64), riscv64, and wasm32. 
 There is no dependency on assemblers, linkers, llvm, or xcode-codesign. 
 
 - mach-o (macos): executables, dynamic libraries, relocatable object files
@@ -30,7 +30,7 @@ There is no dependency on assemblers, linkers, llvm, or xcode-codesign.
 - jit: for comptime execution 
 
 All the tests pass on macos-arm64 and most on macos-amd64.  
-On linux-amd64 and linux-arm64, the compiler can compile itself but not all tests pass.  
+On linux-(amd64,arm64,riscv64) the compiler can compile itself but not all tests pass.  
 (I haven't transcribed all the platform specific struct layouts/magic numbers yet). 
 On windows you can use WSL. 
 
@@ -38,8 +38,6 @@ The compiler does not depend on libc (on linux, when built with -syscalls).
 
 The webassembly target is still a work in progress (no threads, doesn't follow c abi, poor codegen, etc), 
 but the compiler can (slowly) compile itself. 
-
-> There is vauge work towards targetting riscv, but it is not yet usable. 
 
 ## Documentation
 

@@ -1,3 +1,67 @@
+## (Sep 8)
+
+- examples/repl.fr
+  - query_current_os is wrong and making it choose `__error` instead of `__errno_location`
+  - franca_runtime_init isn't called when running a program directly in the compiler. 
+    which is kinda dumb, it has the case for DRIVER_VTABLE_MAGIC and every time this comes up 
+    i look at that and assume thats the entry point because that would make sense but actually 
+    it's only used if you explicitly compile to .frc and then run that.  
+  - so when you do `franca examples/repl.fr` the compiler sets 
+    when the repl inits a new compiler it gets 
+    `ComptimeEnvironment.comptime_os = query_current_os(),` 
+    which is correct because it's inherited from the aot compiler, 
+    its global OS is still wrong (zeroed), 
+    (that comptime_os is only used for the child program in the repl so that one's OS is correct).
+    so then the next time the jitted compiler does push_zeroed_dynamic_context for 
+    report_called_uncompiled_or_just_fix_the_problem, it messes it up for anything down the callstack. 
+    doesn't quite make sense because i don't see that in the callstack where it's dying? 
+    maybe it's lost between:
+    ```
+    23: Anon__27374 AOT
+    28: call_dynamic_values__1723 AOT
+    ```
+    yeah! it's the Anon, it's not getting the right inferred name. 
+  - anyway, that was a linux problem not a riscv one. 
+    and i only tested it aot, not running like a driver. 
+    that was an unfortuate collision of many the hacky things i do in this compiler. 
+    should probably try to do some pruning so stuffs less confusing. 
+- rv: oops i was doing the isel sub thing on floats too
+
+## (Sep 7) rv
+
+- compiler/main.fr linking libc doesn't work without FRANCA_NO_CACHE=1. 
+  so the problem is just in cache loading.
+  - qbe_frontend mandel.ssa -frc and then -r on that works, so fill_from_libc isn't the problem. 
+  - i'd fucked up as_asm(Sym, Header) because it uses array syntax that's dependent on 
+    the order of the Arch enum and i didn't notice because i didn't try to do caching on wasm anyway.  
+- trying to run compiler/test.fr natively: 
+  - `error while loading shared libraries: libc.so.6: cannot open shared object file: No such file or directory`
+    does qemu really not capture the exec syscall? i have to do the binfmt_misc thing? 
+    that kinda sucks. blink and orb are magic and just work. 
+  - the incantation that seems to have done it is: 
+    `sudo apt install binfmt-support && sudo dpkg --add-architecture riscv64 && sudo apt update && sudo apt install libc6:riscv64` 
+  - and now i can just run a riscv binary like it's normal. that's kinda cool. 
+  - can't just -target riscv-linux-gnu to clang tho that would be too easy. 
+    some how it's easier to make a new fake orb universe and install only the riscv clang 
+    than it is to just link the program i want to link... every time i have to interact with 
+    this sort of thing i get more respect for zig's personal copy paste of clang 
+    that doesn't suck as much and just works via magic. but idk i feel wierd about adding more people 
+    to the chain that have to touch the compiler, i want it to work with the normal one. 
+    but really it doesn't matter, the answer is i should just stop relying on a linker to give me a crt0 for non-franca programs. 
+- fix double addend in auipc relocation... but the old way was sure working before...
+  did they change whether the second addend gets ignored or added between clang 19.1.7 and 20.1.2? 
+  that's a bit unsettling. 
+- skip the tests that aren't expected to pass yet
+- do signal_handler_body so stack traces work 
+  - had a hard time with fp always being 1 because i forgot an #align
+- stub try_impl so import_c works (as long as there's no compile error)
+- isel: convert sub(const) to add(-const) because it might fit in an immediate
+- examples/import_c/test/test.fr: `bad simple_op`
+  - fixed fixarg after salloc being on the wrong instruction
+- examples/ascii_table.fr: `rv(non-reg: RCon:1)`
+  - never try to use immediate in float instructions
+  - which is a bug qbe has as well: 
+    `%a =d add %b, d_0` -> `error: invalid operand for instruction: fadd.d fa0, fa0, 0`
 
 ## (Sep 6) rv
 

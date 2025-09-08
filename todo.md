@@ -1,4 +1,8 @@
 
+- lite version of franca_runtime_init when running drivers so theres a sane place to make sure OS gets set
+- make stack trace debug info work accross multiple compilers. it needs to go in GlobalFrancaRuntime
+  (test with crashing in examples/repl.fr when running it as a driver)
+- `f :: fn() = ` isn't getting an inferred name (report_called_uncompiled_or_just_fix_the_problem)
 - autotest all the stuff from the web demo in import_wasm 
 - make it easy to run all the tests with qemu-user
   - -L /usr/x86_64-linux-gnu
@@ -87,6 +91,8 @@
   the current thing is just enough more verbose that it looks confusing. 
   whatever it is has to stay just a user space comptime thing tho, not part of the compiler. 
 - might be able to get rid of is_wrongly_illegal_instruction now, but maybe it's safer just to leave it for good luck. 
+- compiling tests/collections.fr/removing alone fails:
+  (Compile Error: Poison expression Argument. probably not riscv related, just that i don't normally run one function at a time. :compilerbug)
 
 ## remaining nondeterminism
 
@@ -165,6 +171,7 @@ bodies on different targets which i don't deal with well.
   just have it as imported symbols that reference the old one. 
 - :BrokenCGeneric i think erroring on conflicting `_Generic` cases is correct but you're supposed to treat `long` and `long long`
 as different types even when they're the same size. 
+- make it good enough to compile musl
 
 ### !! BROKEN !!
 
@@ -338,6 +345,7 @@ different subsets of the same resources.
 - web demo: hare, wuffs, more nontrivial c programs, webgpu
 - use dump_wasm to disassemble one function at a time (like i do with llvm-mc) 
   instead of only all at once in output_wasm_module_jit
+- improve import_wasm until it can cope with bootstrapping zig1.wasm
 
 ## backend 
 
@@ -432,8 +440,6 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 
 ## riscv
 
-- autotest all the riscv ssa tests
-  - don't forget to apply libriscv_mmap_macos.patch
 - rnez/reqz aren't real instruction in riscv so i fix them to be ult R0 in isel,
   so remove those ops? so remove them? but now i use them in wasm/isel. 
   not sure if its more sane to move the wasm cmp zero checking to emit or let rv use the fake instruction and lower it in emit. 
@@ -452,18 +458,16 @@ need to be careful about the refs which have tags in the high bits so won't leb 
   - a.ssa, tests/external/libriscv.fr, ExprLevelAsm (and that part of tests/exe/sys.fr)
 - once the compiler works, get rid of tests/exe/rv.fr
 - tests/
-  - import_all_calls_indirect, call_fork, allocation, spilling_stompable, hello_va (not linking libc)
-  - catch_signal (UContext)
   - exceptional (jump.fr)
   - multiple_stacks, intrins, inline_asm_jit (AsmFunction)
-  - collections
-    - removing (Compile Error: Poison expression Argument. probably not riscv related, just that i don't normally run one function at a time. :compilerbug)
-- stack traces: UContext
-- franca linking libc doesn't work
-  - clang's binary does something with __global_pointer in start. do i have to do that?
+- clang's binary does something with `__global_pointer` in start. do i have to do that?
 - ssa test that uses the constant 9223372036854775807
 - `thread backtrace` doesn't work in lldb. is my stack layout wrong? 
 - riscv_flush_icache syscall vs FENCE.I instruction for clear_instruction_cache
+- :TodoRiscv
+- compiler/test.fr (broken with exe+cached+cachedearly but works fine just running normally)
+  - examples/kaleidoscope.fr: dies in compile_all_symbols > elide_abi_slots > copy_bytes 
+  - examples/repl.fr -testrepl: same ^
 
 ## don't rely on libc
 
@@ -1095,9 +1099,6 @@ A :: @struct {
 ## demos 
 
 - go through c++26 reflection examples and make sure i can do them better https://isocpp.org/files/papers/P2996R4.html
-- examples/bf that translates to wasm and then uses examples/import_wasm to run it
-- get wasm to work well enough that i can make a compiler-explorer like thing for the .ssa/.c/.wasm 
-(.fr is probably harder because need to figure out how to jit. is making a new module for every function feasable?)
 - https://andrewkelley.me/post/string-matching-comptime-perfect-hashing-zig.html
 - fix examples/compiler_gui
 - rust format! macro. they have format_args! builtin to the compiler which is kinda funny
@@ -1105,7 +1106,10 @@ A :: @struct {
 - profiler gui. it's silly that i have to open CLion just for it to run DTrace and draw a graph
 - something that generates point clouds / LAZ files so you can use the geo demo without 
 needing to go find some data in the right format (and without me including a blob for it)   
-- tcc at comptime. use their assembler for AsmFunction
+- tcc at comptime. use their assembler for AsmFunction 
+  - amd64/rv64 only
+- use https://luajit.org/dynasm_features.html for AsmFunction 
+  - amd64/arm64 only but there's a pr for rv64 https://github.com/LuaJIT/LuaJIT/pull/1267
 
 ## make it not suck
 

@@ -422,6 +422,7 @@ SysUContext :: @union(
     m: Macos.UContext, 
     ld: Linux.UContextAmd64, 
     lr: Linux.UContextArm64, 
+    lv: Linux.UContextRiscv64,
 );
 
 sigaction :: fn(signum: i64, opt_new: *SigAction, sys_old: *SysSigAction) SysResult(void) = {
@@ -542,6 +543,10 @@ fn signal_handler_body(info_s: *SysSigInfo, ctx_s: *SysUContext, $body: @Fn(info
                         ctx_d.gpr = ctx_s.lr.mcontext.gpr;
                         ctx_d.ip = ctx_s.lr.mcontext.pc;
                     }
+                    fn rv64() => {
+                        ctx_d.gpr = ctx_s.lv.mcontext.gpr;
+                        ctx_d.ip = ctx_d.gpr&[0];
+                    }
                     @default => panic("TODO: linux signal_handler_body new arch");
                 };
                 
@@ -557,6 +562,7 @@ fn signal_handler_body(info_s: *SysSigInfo, ctx_s: *SysUContext, $body: @Fn(info
         fp_index := @match(current_arch()) {
             fn aarch64() => 29;
             fn x86_64() => 5;
+            fn rv64() => 8;
             @default => todo();
         };
         ctx_d.fp = ctx_d.gpr&[fp_index];
@@ -586,7 +592,7 @@ errno :: fn() *i32 = {
     @if(IS_BOOTSTRAPPING) return(__error());          // :UpdateBoot
 
     // This has different names on different libc-s.
-    // https://github.com/ziglang/zig/blob/master/lib/std/c.zig#L9876
+    // https://github.com/ziglang/zig/blob/52fc0469079d061c7482f5708557c35b389cd800/lib/std/c.zig#L9876
     __error :: fn() *i32 #weak #libc;
     __errno_location :: fn() *i32 #weak #libc;
     @match(current_os()) {

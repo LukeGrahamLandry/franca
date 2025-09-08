@@ -33,7 +33,6 @@ fn wasm_isel(f: *Qbe.Fn) void = {
     assign_alloc_slots(f);
     insert_blocks_for_conditional_phis(f);
     
-    // TODO: if this is good enough, arm/isel should do it this way as well. it's way less confusing than collapse_op_arm64. 
     fillpreds(f);
     fillrpo(f);
     
@@ -46,17 +45,12 @@ fn wasm_isel(f: *Qbe.Fn) void = {
     did_sp_load := false; // :UGLY
     f.slot = align_to(f.slot, 16);
     fslot := f.slot;
-    need_sp := f.slot > 0 || f.dynalloc || f.varcall;
+    // TODO: don't load sp if slot==0 and no late allocas (but you don't know that up front)
     // TODO: using retr+env_par as globals with the wrong names is kinda dumb
-    if need_sp {
-        // lowest address of statically known frame. fast-allocs are a positive offset from this. 
-        f.retr = f.newtmp("BP", k_mem);
-        // for dynalloc
-        f.env_par = f.newtmp("SP", k_mem);
-    } else {
-        f.retr = QbeNull;
-        f.env_par = QbeNull;
-    };
+    // lowest address of statically known frame. fast-allocs are a positive offset from this. 
+    f.retr = f.newtmp("BP", k_mem);
+    // for dynalloc
+    f.env_par = f.newtmp("SP", k_mem);
     BP := f.retr;
     SP := f.env_par;
     
@@ -66,7 +60,7 @@ fn wasm_isel(f: *Qbe.Fn) void = {
         // Last thing before we jump to another block: push phi values to the stack. 
         @match(b.jmp.type) {
             fn ret0() => {
-                if need_sp && !f.leaf {
+                if !f.leaf {
                     f.emitter_for_wasm(.global_set, k_mem, QbeNull, stackbase, BP);
                     f.emitter_for_wasm(.add, k_mem, BP, BP, f.getcon(f.slot.intcast()));
                 };
@@ -87,7 +81,7 @@ fn wasm_isel(f: *Qbe.Fn) void = {
         };
         @debug_assert(b.jmp.arg == QbeNull);
         
-        maybe_sp_load :: fn() => if !did_sp_load && need_sp {
+        maybe_sp_load :: fn() => if !did_sp_load {
             if !f.leaf {
                 f.emitter_for_wasm(.global_set, k_mem, Qbe.Null, stackbase, f.retr);
             };
