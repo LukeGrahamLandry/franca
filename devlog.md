@@ -26,6 +26,23 @@
     that was an unfortuate collision of many the hacky things i do in this compiler. 
     should probably try to do some pruning so stuffs less confusing. 
 - rv: oops i was doing the isel sub thing on floats too
+- i want to find an embeddable assembler i can use for inline asm in import_c. research:
+  - tcc is tempting but it's so annoying that it wants to have the target be an ifdef so 
+    i have to have many copies of it to cross compile. also it doesn't have an arm64 assembler. 
+  - https://github.com/tyfkda/xcc 
+    - has all the arches i want, tho same ifdef annoyance. 
+    - they also have a very non-offensive libc, other than the one function per file thing that everyone does. 
+      maybe that's what i want in general, doesn't solve my no ifdefs requirement of course.
+      and they don't have pthreads, sad. 
+    - no mach-o linker but thier as does do mach-o, 
+      tho for my inline asm thing i'd rather just always use elf anyway. 
+      hopefully nothing in the assembler other than which object format to use cares about XCC_PLATFORM_APPLE.
+      sadly it does: @gotpage vs @page, rules about addends. 
+- tried to clean up my hare test runner, mostly just made it longer, idk
+- use get_or_insert more: 
+  - backend/(meta/parse.fr/parse_ref, pack_wasm_result_type_outlined)
+  - import_c/(tokenize.fr/read_punct, compile.fr/get_block)
+  - compiler/values.fr/intern_type
 
 ## (Sep 7) rv
 

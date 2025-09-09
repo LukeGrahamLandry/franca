@@ -10,11 +10,7 @@ main :: fn() void = {
     root := fetch_git_commit("bc75c323739c390026cf5052cd108bd23106769b", "harec", "https://git.sr.ht/~sircmpwn/harec");
     Syscall'chdir(root.as_cstr());
     
-    arch := @match(query_current_arch()) {
-        fn aarch64() => "aarch64";
-        fn x86_64() => "x86_64";
-        @default => todo();
-    };
+    arch := to_harec_arch(query_current_arch());
     @assert_eq(query_current_os(), .linux, "TODO: hare os");
     
     files := collect_directory_ordered("src", temp(), temp()).unwrap();
@@ -55,32 +51,89 @@ main :: fn() void = {
     );
     
     rt_o := "out/rt.o";
-    cmd := Str.list(temp());
-    cmd&.push_all(@slice("./.bin/harec", "-t", "out/rt.td.tmp", "-N", "rt", "-o", "out/rt.ssa"));
-    cmd&.push_all(rt_hare);
-    sh(cmd&.items());
+    run((
+        a = query_current_arch(), 
+        input = rt_hare,
+        o = (Some = "out/rt.ssa"),
+        t = (Some = "out/rt.td.tmp"),
+        N = (Some = "rt"),
+        td = empty(),
+    ), "./.bin/harec", temp()).unwrap();
     sh(@slice(backend, "out/rt.ssa", "-o", rt_o, "-c", "-force_static_builtin_memmove"));
     
     tests := collect_directory_ordered("tests", temp(), temp()).unwrap();
-    for tests { it |
-        continue :: local_return;
-        @if(!it.name.ends_with(".ha")) continue();
-        @if(it.name == "09-funcs.ha") continue(); // TODO: init,fini
-        @if(it.name == "15-enums.ha") continue(); // TODO: testmod
-        @if(it.name == "06-structs.ha") continue(); // TODO: testmod
-        @if(it.name == "24-imports.ha") continue(); // TODO: testmod
-        @if(it.name == "10-binarithms.ha") continue(); // TODO: testmod
-        @if(it.name == "37-annotations.ha") continue(); // TODO: testmod
-        @if(it.name == "34-declarations.ha") continue(); // TODO: testmod
-        
+    tests&.ordered_retain(fn(it) => it.name.ends_with(".ha") && !(@const_slice(
+        "09-funcs.ha", // TODO: init,fini
+        // TODO: testmod
+        "15-enums.ha", "06-structs.ha", "24-imports.ha", "10-binarithms.ha", "37-annotations.ha", "34-declarations.ha"
+    )).contains(it.name));
+    run_tests_main(@type tests[0], tests.items(), fn(it) => it.name, fn(it) => {
         ssa := @tfmt("out/%.ssa", it.name);
         o := @tfmt("out/%.o", it.name);
         exe := @tfmt("out/%.out", it.name);
-        sh(@slice("env", "HARE_TD_rt=out/rt.td.tmp", "./.bin/harec", @tfmt("tests/%", it.name), "-o", ssa));
+        td := ("rt", "out/rt.td.tmp");
+        run((
+            a = query_current_arch(), 
+            input = @slice(@tfmt("tests/%", it.name)),
+            o = (Some = ssa),
+            td = td&.slice(1),
+        ), "./.bin/harec", temp()).unwrap();
         sh(@slice(backend, ssa, "-o", o, "-c", "-force_static_builtin_memmove"));
         sh(@slice("clang", o, rt_o, @tfmt("rt/+linux/start+%.s", arch), @tfmt("rt/+linux/syscall+%.s", arch), "-o", exe, "-nostartfiles"));
         sh(@slice("env", "HARE_TD_rt=out/rt.td.tmp", exe));  // compile() in the tests execs harec
-    };
+        (true, list(u8, temp()), list(u8, temp()), "")
+    });
 }
 
 #use("@/examples/testing.fr");
+
+HareCmd :: @struct {
+    N: ?Str = .None;
+    o: ?Str = .None;
+    t: ?Str = .None;
+    a: Arch;
+    input: []Str;
+    td: []Ty(Str, Str);
+};
+
+fn run(cmd: HareCmd, bin: Str, a: Alloc) Result(List(u8), List(u8)) = {
+    args := Str.list(temp());
+    for cmd.td { it |
+        @debug_assert(!it._0.contains("="));
+        args&.push(@tfmt("HARE_TD_%=%", it._0, it._1));
+    };
+    args&.push(bin);
+    args&.push("-a");
+    args&.push(to_harec_arch(cmd.a));
+    if cmd.N { N |
+        args&.push("-N");
+        args&.push(N);
+    };
+    if cmd.t { t |
+        args&.push("-t");
+        args&.push(t);
+    };
+    if cmd.o { o |
+        args&.push("-o");
+        args&.push(o);
+    };
+    for cmd.input { it |
+        args&.push(it);
+    };
+    
+    // TODO: use execvpe instead of the env binary 🤡
+    ok, out, err := exec_and_catch("env", args.items(), a);
+    if ok {
+        return(Ok = out);
+    };
+    (Err = err)
+}
+
+fn to_harec_arch(a: Arch) Str = @match(a) {
+    fn x86_64()  => "x86_64";
+    fn aarch64() => "aarch64";
+    fn rv64()    => "riscv64";
+    @default     => @panic("invalid harec architecture: %", a);
+};
+
+sh :: hush;

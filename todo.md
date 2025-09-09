@@ -35,7 +35,7 @@
   could steal what zig does where a file is a struct. but that always annoys me because it makes you 
   pick one blessed struct to have the top level fields when the rest of your file is a namespace which looks odd. 
 - real error handling for lib/sys/posix.fr. need to be able to remap the errno values to something consistant. 
-- i've lost 20ms of speed. i should really make something that automatically times it every commit. 
+- i've lost 100ms of speed. i should really make something that automatically times it every commit. 
 - i hate the vscode/zed extension build junk being in here. each are 300 lines of dependencies. 
 - `@inline` at the callsite 
 - need an option to make `@safety` assertions give you more information. it's hard without a runtime bootstrapping 
@@ -170,17 +170,25 @@ bodies on different targets which i don't deal with well.
 - when including a .frc but also outputting a .frc, don't copy everything into the new file, 
   just have it as imported symbols that reference the old one. 
 - :BrokenCGeneric i think erroring on conflicting `_Generic` cases is correct but you're supposed to treat `long` and `long long`
-as different types even when they're the same size. 
-- make it good enough to compile musl
+as different types even when they're the same size.
+- generate c headers from .frc files
+- option to use system headers instead of my builtin ones
+- make it good enough to compile impressive things
+  - blink
+  - musl
+  - git
+  - linux kernel
+- for inline assembly, i think it would be easier to give up on ExprLevelAsm
+  and use someone else's assembler to compile the `asm` blocks into an elf file 
+  and then just call them as functions. they give you clobber lists so you just have 
+  to put some code on either side to translate that to the normal abi. 
+  probably have to deal with more types of relocations. 
+  are you allowed to jmp between asm blocks? 
 
 ### !! BROKEN !!
 
 - self compile in blink on (arm-macos and arm-linux) on github actions seems to hang forever sometimes? 
-- wuffs/gif.c fails at random
-- there have been very rare failures in my lua tests for a while
 - soft_draw.fr crashes when you quit the program
-- spurious failure of import_c/tests/wuffs.fr on macos-x86_64 
-  (failed in github actions and then worked when rerun with no change)
 - ./boot/temporary/macos-amd64.sh with SLOW_USERSPACE_THREADS=true
 ```
 pragma-once.c                           [ok] 
@@ -193,8 +201,6 @@ All is fine! (passed 35 tests)
 - `FRANCA_NO_CACHE=1 franca examples/import_c/test/test.fr` 
   dies in init_codegen_worker. spawning threads from a shim doesn't work? 
 - tests/exe/sys.fr might not work with SLOW_LEAK_ARENAS=true?
-- i seem to have made `assert(handled_a_signal[], "did you not unmap the memory my guy?");`
-  flaky on amd-macos
 - i've seen this a couple times on actions:
 ```
 >>> unpacking [target/franca/deps/fonts.zip]...
@@ -230,10 +236,6 @@ TODO: be consistant about spelling: zeros or zeroes
   - e.fr: #use inside a block prevents lookups that escape to the outer scope
   - f.fr: missing ; should be disallowed
   - g.fr: bad performace of linked list of `body = @{ @[body]; @[next]; }`
-- repro doesn't work accross linux <-> macos
-- `@debug_assert(macos.common().valid, "not valid");` compiles 
-and gives you junk (that's not 0 or 1) when `common()` uses `#unsafe_noop_cast`. 
-rn you're supposed to need a redundant `[]` in a call like that. 
 - fix the infinite loop when a constant references itself
 - `@struct(a: A #use = (),);`
 - // TODO: don't segfault if you get a compile error inside a jit_shim. 
@@ -268,7 +270,6 @@ TODO: end of loop. still too many options for 'index'
 - fix callgraph sorting to improve inlining. like make sure the ge/le in lex_int/is_ascii_digit are inlined 
 - make AsmFunction get an inferred name
 - @bit_fields in incremental.fr don't work inline in the structs
-- use HashMap.get_or_insert more
 - #ir tries to ignore zero-sized params but not if they're first which is sad
 - "need to be consistant about how to handle modules like this that don't actually compile anything"
 - fix examples/terminal.fr -jit so it doesn't freak out about nested compiler contexts because of the repl
@@ -386,6 +387,10 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 - TODO: harec/src/gen.c: `[arm64/emit.fr/fixup_arm64] offset from dynamic import builtin_type_nomem+4` but would work when done as one compilation unit.
 - mem3.ssa fails without opt/load.fr/loadopt()
 - some instructions don't have a .ssa test: float(sqrt, min, max, swap, truncd), int(extsb, extsh, extuh)
+- support fini/init sections in elf (and macho i think has a special load command for them)
+  - needed for import_c constructor attribute
+- easy way to expose c api when it can't pass the environment pointer. 
+  sadly might have to reimplement thread locals. (which would be nice anyway so i could support more qbe languages)
 
 ## backend symbols rework
 
@@ -479,31 +484,16 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 - (graphics): cosf, sinf
 - dlsym, dlopen, dlclose
 
-## working and playing well with others
-
-- option to make import_c work with system headers instead of my builtin ones
-- output qbe text ir that it can parse so i can test my stuff without my backend implementation 
-  (doesn't help for comptime because qbe can't jit)
-- be a drop in replacement for qbe that harec can use. need to deal with the fact that i don't output text assembly. 
-  just provide a script that you can use as hare's assembler that dispatches to a real assembler if it's actually text? 
-  (needs to pass -force_static_builtin_memmove to qbe_frontend. tho maybe that should be the default). 
-- easy way to expose c api when it can't pass the environment pointer. 
-  sadly might have to reimplement thread locals. (which would be nice anyway so i could support more qbe languages)
-- it would be cool to provide the same abi as tcc 
-  and see if i could get libriscv to use me as it's c compiler for binary translation. 
-  looking at the .c it generates for hello world, 
-  i need to add support for: `__attribute__ (visibility, constructor, used)` and 
-  `__builtin_(expectbswap32, bswap32, clz, clzl, popcount, popcountl, fminf, fmin, fmaxf, fmax)`
-- support fini/init sections in elf (and macho i think has a special load command for them)
-- generate c headers from .frc files
-- hare
+## hare
   - enable the tests that use testmod
   - fix 09-funcs so it gets as far as the assertion failing because i don't do init/fini.
   - compile harec with import_c
   - pass the library tests as well
   - don't forget ASSUME_NO_ALIAS_ARGS might break things
   - why isn't clang giving me a static binary?
-- demo that uses tcc assembler at comptime for AsmFunction
+  - be a drop in replacement for qbe that harec can use. need to deal with the fact that i don't output text assembly. 
+    just provide a script that you can use as hare's assembler that dispatches to a real assembler if it's actually text? 
+    (needs to pass -force_static_builtin_memmove to qbe_frontend. tho maybe that should be the default). 
 
 ## longevity
 
@@ -521,9 +511,7 @@ need to be careful about the refs which have tags in the high bits so won't leb 
   - glibc fstatat somehow sucks 
   - macos: now sure if (ulock_wait, ulock_wake) are supposed to be public. have an option to use something from pthread
 - make the platform detection in franca_runtime_init less hacky
-- demonstrate that i can support more platforms 
-  - finish riscv backend
-  - support (free, net, open)bsd
+- support (free, net, open)bsd
 - the bootstrapping system can't be committing a macos-arm binary. linux-amd seems more old / emulator enthused, could use blink, etc. 
 - seperate out the tests that download things and run them as an extra thing at the end. so if they disappear it's not a bit deal. 
   like it's nice to test import_c on lua,tcc, etc. but it doesn't matter for the main franca stuff if you can't run those tests. 
@@ -532,6 +520,8 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 - i want the transcribed magic numbers for syscalls, sys struct layouts, instruction encoding, object formats, etc. to be more auditable. 
   maybe make it structured consistantly enough that i can generate a c program that asserts everything matches
   for a certain target when compiled by a normal c installation. for instruction encoding, maybe do more like tests/exe/x64_encoding.fr. 
+- output qbe text ir that it can parse so i can test my stuff without my backend implementation 
+  (doesn't help for comptime because qbe can't jit)
 
 ## linux 
 
@@ -957,7 +947,6 @@ and not need to serialize the arguments to a string.
 - test compile error for conflicting #use
 - compile all the examples in run_tests: toy
 - repro doesn't work when you do `-repeat`
-- more calling convention tests between jitted code and c.
 - have one command that lets me run the tests on all targets
 - tests for failing progeams. ie. panic backtrace
 - compiler/tests.fr stops when something doesn't compile but it should show which other tests passed like it does for runtime failures
@@ -1106,10 +1095,30 @@ A :: @struct {
 - profiler gui. it's silly that i have to open CLion just for it to run DTrace and draw a graph
 - something that generates point clouds / LAZ files so you can use the geo demo without 
 needing to go find some data in the right format (and without me including a blob for it)   
+
+### assembler
+
 - tcc at comptime. use their assembler for AsmFunction 
   - amd64/rv64 only
 - use https://luajit.org/dynasm_features.html for AsmFunction 
   - amd64/arm64 only but there's a pr for rv64 https://github.com/LuaJIT/LuaJIT/pull/1267
+
+### mimic
+
+- it would be cool to provide the same abi as tcc 
+  and see if i could get libriscv to use me as it's c compiler for binary translation. 
+  looking at the .c it generates for hello world, 
+  i need to add support for: `__attribute__ (visibility, constructor, used)` and 
+  `__builtin_(expectbswap32, bswap32, clz, clzl, popcount, popcountl, fminf, fmin, fmaxf, fmax)`
+- i like the idea of providing the same api as luajit's c ffi but on the normal lua interpreter
+  - can i do better than other people?
+    - https://github.com/q66/cffi-lua
+    - https://github.com/zhaojh329/lua-ffi
+    - https://github.com/facebookarchive/luaffifb
+- ditto libffi or dyncall. that's probably a great source of calling convention tests. 
+  do the same as call_dynamic_values where i just jit a new function for each signeture,
+  compile thier tests with clang but against my version implementation of the ffi library 
+  and hopefully they've done the work of finding edge cases that i can test against my backend.  
 
 ## make it not suck
 

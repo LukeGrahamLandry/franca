@@ -139,7 +139,7 @@ show_compilers();
 await load_example(manifest.compilers[0].examples[0]);
 
 {
-    let targets = ["wasm-jit", "wasm-aot", "arm64-macos", "amd64-macos", "arm64-linux", "amd64-linux"];
+    let targets = ["wasm-jit", "wasm-aot", "arm64-macos", "amd64-macos", "arm64-linux", "amd64-linux", "riscv64-linux"];
     let src = "";
     for (const it of targets) {
         src += `<option value="${it}"> ${it} </option>`;
