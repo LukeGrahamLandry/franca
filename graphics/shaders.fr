@@ -298,6 +298,13 @@ fn msl_expr2(self: *Function, e: *FatExpr) u32 = {
         fn Addr(it) => {
             panic("Addr expor")
         }
+        fn Loop(it) => {
+            println("TODO: this isn't going to work because i can't call labels yet");
+            self.body&.push(op = .Loop);
+            self.msl_expr(it[]);
+            self.body&.push(op = .End);
+            0
+        }
         @default => {
             debug_log_ast(e[]);
             compile_error("unhandled expression type in shader", e.loc)
@@ -423,12 +430,26 @@ fn msl_stmt(self: *Function, e: *FatStmt) void = {
             }
         }
         fn DeclVarPattern(it) => {
-            @ct_assert(it.binding.bindings.len == 1, e.loc, "TODO: multi-DeclVarPattern");
-            result := self.msl_expr(it.value&);
-            if it.value.ty != void {
-                name := it.binding.bindings[0].name;
-                @debug_assert(name&.is(.Var));
-                self.locals&.insert(name.Var.id, result);
+            @ct_assert(it.binding.bindings.len <= 1 || it.value.expr&.is(.Tuple), e.loc, "TODO: multi-DeclVarPattern");
+            
+            if it.binding.bindings.len == 1 {
+                result := self.msl_expr(it.value&);
+                if it.value.ty != void {
+                    name := it.binding.bindings[0].name;
+                    @debug_assert(name&.is(.Var));
+                    self.locals&.insert(name.Var.id, result);
+                }
+            } else {
+                values := it.value&.items();
+                range(0, it.binding.bindings.len) { i |
+                    v := values.index(i);
+                    result := self.msl_expr(v);
+                    if v.ty != void {
+                        name := it.binding.bindings[i].name;
+                        @debug_assert(name&.is(.Var));
+                        self.locals&.insert(name.Var.id, result);
+                    }
+                };
             }
         }
         @default => {
@@ -531,8 +552,8 @@ fn type_name(self: *Function, type: Type) u16 = {
         @case(Sgl.Matrix)      => (Matrix = (inner = .F32, row = 4, col = 4));
         @case(ShaderTexture2f) => .Texture;
         @case(ShaderSampler)   => .Sampler;
-        @case(UShort2) => (Scalar = .I32);
-        @case(UByte4)  => (Scalar = .I32);
+        @case(UShort2) => (Scalar = .U32);
+        @case(UByte4)  => (Scalar = .U32);
         @default => {
             info := get_type_info_ref(type);
             @if_else {

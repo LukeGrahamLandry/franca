@@ -1,3 +1,22 @@
+
+## (Sep 9)
+
+- converting more of the c in web/gfx.fr
+  - whats going on in copy_buffer_data? extra_data isn't used. 
+    lol, twinning: https://github.com/floooh/sokol/commit/92d1649e
+- web/shaders: 
+  - insert casts for unpacking functions. they only take u32 not i32. 
+    - actually no, im just giving UShort2/UByte2 the wrong types
+  - sadly wgsl doesn't let you put textures in structs (unlike msl),
+    if i just hack it out of debugtext and put them in parameters 
+    instead so they get lifted to globals, app_events.fr works. 
+    did some stupid hacks to automatically pull struct fields out when they're resource types like that. 
+    kinda garbage. 
+  - no point_size
+- pleasingly, depth_test.fr works on webgpu native but not metal, so i've narrowed down the problem.
+- terminal.fr -wgpu is flickering garbage. ive had this problem before. 
+  so glad i wrote that down last time: don't call surface.present after trying to skip a frame. 
+
 ## (Sep 8)
 
 - examples/repl.fr

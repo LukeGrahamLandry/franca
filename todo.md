@@ -778,8 +778,9 @@ actually that's a bit too agressive but certainly stop processing ANSI escape co
 ## Graphics
 
 - https://github.com/floooh/sokol/commit/50bbbe4521af356c3b0879e1d46e30114feb4e6b
-- finsih webgpu
-- finish gfx-metal. need to make sure everything is reachable
+- tests that reach discard(), compute shader dispatch(), and create(Attachments)
+  - finish gfx-webgpu
+  - finish gfx-metal
 - example program that tries to use all features
 - finish gfx validation and enable that based on DebugAssetions
 - clean up defaults

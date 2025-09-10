@@ -4,6 +4,7 @@ Counters :: @struct(user: u16, sampler: u16, texture: u16);
 
 emit_all :: fn(self: *Function, out: *List(u8)) void = {
     n := zeroed Counters;
+    junk_types := u16.list(temp());
     enumerate self.types& { i, info |
         if !info.is(.Void) && !info.is(.Struct) {
             @fmt(out, "alias T% = ", i);
@@ -19,16 +20,23 @@ emit_all :: fn(self: *Function, out: *List(u8)) void = {
             // TODO: int vec
             fn Vector(it) => @fmt(out, "vec%f", it.len);
             fn Matrix(it) => @fmt(out, "mat%x%f", it.col, it.row); // TODO: flipped?
-            fn Texture() => @fmt(out, "texture_storage_2d<f32>");
+            fn Texture() => @fmt(out, "texture_2d<f32>");
             fn Sampler() => @fmt(out, "sampler");
             fn Struct(it) => {
+                prev_len := out.len;
+                count := 0;
                 @fmt(out, "struct T% {\n", i);
                 enumerate it.fields { j, it |
                     @fmt(out, "    ");
-                    self.ann_field(it, out, it.name.str(), n&);
-                    @fmt(out, ",\n");
+                    ok := self.ann_field(it, out, it.name.str(), n&);
+                    @if(ok) @fmt(out, ",\n");
+                    count += int(ok);
                 };
                 @fmt(out, "}");
+                if count == 0 {
+                    out.len = prev_len;
+                    junk_types&.push(i.trunc());
+                };
             };
             // TODO: this is wrong and Index needs to produce a pointer
             fn Ptr(it) => @fmt(out, /*"ptr<private, T%>"*/"T%", it[]);  // TODO
@@ -39,34 +47,54 @@ emit_all :: fn(self: *Function, out: *List(u8)) void = {
     };
     #use("@/lib/collections/bit_set.fr");
     @debug_assert(self.stage != .COMPUTE);
+    
     was_var: DynamicBitSet = empty(temp());
+    next_id := self.body.len;
+    resource_fields: HashMap(Ty(i64, Symbol), u16) = init(temp());
+    ::AutoHash(Ty(i64, Symbol), TrivialHasher);
+    ::AutoEq(Ty(i64, Symbol));
+    
     enumerate self.input { i, it |
-        if self.ann_var(it, out, @tfmt("v%", i+1), n&) {
+        v := @tfmt("v%", i+1);
+        if self.ann_var(it, out, v, n&) {
             was_var&.set(i);
             @fmt(out, ";\n");
         }
+        info := self.types[it.type.zext()]&;
+        @if_let(info) fn Struct(it) => each it.fields { it |
+            info := self.types[it.type.zext()]&;
+            if @is(info, .Texture, .Sampler) {
+                resource_fields&.insert((i+1, it.name), next_id.trunc());
+                @assert self.ann_var(it, out, @tfmt("v%", next_id), n&);
+                @fmt(out, ";\n");
+                next_id += 1;
+            }
+        };
     };
     @fmt(out, "\n% fn %(", if(self.stage == .VERTEX, => "@vertex", => "@fragment"), self.name.str());
     enumerate self.input { i, it |
-        if !was_var&.get(i) {
-            self.ann_field(it, out, @tfmt("v%", i+1), n&);
-            if i != self.input.len - 1 {
+        if !was_var&.get(i) && !junk_types.items().contains(it.type) {
+            ok := self.ann_field(it, out, @tfmt("v%", i+1), n&);
+            if i != self.input.len - 1 && ok {
                 @fmt(out, ", ")
             }
         }
     };
     @fmt(out, ") -> T% {\n", self.ret);
-    emit_body(self, out);
+    emit_body(self, out, junk_types.items(), resource_fields&);
 }
 
-ann_field :: fn(self: *Function, it: *IoField, out: *List(u8), name: Str, n: *Counters) void = {
+ann_field :: fn(self: *Function, it: *IoField, out: *List(u8), name: Str, n: *Counters) bool = {
     info := self.types[it.type.zext()]&;
+    if @is(info, .Texture, .Sampler) {
+        return false;
+    }
     @match(it.builtin) {
         fn vertex_index() => @fmt(out, "@builtin(vertex_index) ");
         fn position()     => @fmt(out, "@builtin(position) ");
         fn colour()       => @fmt(out, "@location(0) ");
         fn input()        => ();
-        fn point_size()   => ();
+        fn point_size()   => return(false);  // webgpu doesn't let you set this (it's always 1)
         fn user()         => {
             @fmt(out, "@location(%) ", n.user);
             n.user += 1;
@@ -74,6 +102,7 @@ ann_field :: fn(self: *Function, it: *IoField, out: *List(u8), name: Str, n: *Co
         @default => ();  // TODO
     };
     @fmt(out, "%: T%", name, it.type);
+    true
 }
 
 ann_var :: fn(self: *Function, it: *IoField, out: *List(u8), name: Str, n: *Counters) bool = {
@@ -115,11 +144,16 @@ ann_var :: fn(self: *Function, it: *IoField, out: *List(u8), name: Str, n: *Coun
     success
 }
 
-emit_body :: fn(self: *Function, out: *List(u8)) void = {
+// TODO: all this shit with (resource_fields,indentation,junk_types) is a HACK
+//       because you can't have textures/samplers in struct fields / local variables. 
+//       but it feels better to me if they look like normal types in your code and you can group them like msl lets you. 
+//       maybe this whole operation is stupid and i should force you to make your code look like the lowest common denominator api.
+emit_body :: fn(self: *Function, out: *List(u8), junk_types: []u16, resource_fields: *HashMap(Ty(i64, Symbol), u16)) void = {
     fr := current_compiler_context();
     
     enumerate self.body { i, inst |
-        if inst.type != 0 {
+        info := self.types[inst.type.zext()]&;
+        if inst.type != 0 && !junk_types.contains(inst.type) && !@is(info, .Texture, .Sampler) {
             @fmt(out, "    var v%: T%;\n", i, inst.type);
         }
     };
@@ -127,21 +161,27 @@ emit_body :: fn(self: *Function, out: *List(u8)) void = {
     i := -1;
     first_arg := -1;
     indentation := 1;
+    replacements := temp().alloc_zeroed(u16, self.body.len);
+    fix :: fn(a: u32) u32 => 
+        @if(replacements[a.zext()] != 0, replacements[a.zext()].zext(), a);
+    
     while => i < self.body.len - 1 {
         continue :: local_return;
         i += 1;
         inst := self.body[i];
         if(@is(inst.op, .Join, .Par, .Nop), => continue());
         
+        prev_len := -1;
         if inst.op != .Arg {
             @fmt(out, ";\n");
             indentation -= int(@is(inst.op, .End, .Else));
             range(0, indentation, fn(_) => @fmt(out, "    "));
             indentation += int(@is(inst.op, .Loop, .If, .Else));
+            prev_len = out.len;
             if(inst.type != 0, => @fmt(out, "v% = ", i));
         }
         
-        name := msl_operator(inst.op);
+        name := wgsl_operator(inst.op);
         if name != "" {
             if inst.b != 0 {
                 @fmt(out, "v% % v%", inst.a, name, inst.b);
@@ -151,7 +191,7 @@ emit_body :: fn(self: *Function, out: *List(u8)) void = {
             continue();
         };
         
-        name := msl_function(inst.op);
+        name := wgsl_function(inst.op);
         if name != "" {
             if inst.b != 0 {
                 if inst.c != 0 {
@@ -165,7 +205,7 @@ emit_body :: fn(self: *Function, out: *List(u8)) void = {
             continue();
         };
         
-        name := msl_function_multi(inst.op);
+        name := wgsl_function_multi(inst.op);
         if name != "" { // TODO: share with Call below
             @fmt(out, "%(", name);
             @debug_assert(first_arg != -1, "malformed shader call '%'", name);
@@ -214,10 +254,22 @@ emit_body :: fn(self: *Function, out: *List(u8)) void = {
                 @debug_assert(info.is(.Scalar));
                 emit_bits(out, inst.a, info.Scalar);
             }
-            fn sample() => @fmt(out, "v%.sample(v%, v%)", inst.a, inst.b, inst.c);
+            fn sample() => {
+                @fmt(out, "textureSample(v%, v%, v%)", fix inst.a, fix inst.b, inst.c);
+            }
             fn SetVar() => @fmt(out, "v% = v%", inst.a, inst.b);
             fn SetVarField() => {
                 name: Symbol = inst.c.symbol_from_id();
+                
+                // TODO: maybe i want to seperate all the legalization stuff out
+                type := self.types[self.body[inst.a.zext()].type.zext()]&;
+                @if(type.is(.Struct))
+                each type.Struct.fields { it |
+                    if it.name == name && it.builtin == .point_size {
+                        continue();
+                    }
+                };
+                
                 @fmt(out, "v%.% = v%", inst.a, name.str(), inst.b);
             }
             fn SetDeref() => @fmt(out, "*v% = v%", inst.a, inst.b);
@@ -231,7 +283,12 @@ emit_body :: fn(self: *Function, out: *List(u8)) void = {
             }
             fn GetVarField() => {
                 name: Symbol = inst.b.symbol_from_id();
-                @fmt(out, "v%.%", inst.a, name.str());
+                if get(resource_fields, (inst.a.zext(), name)) { alias |
+                    out.len = prev_len;
+                    replacements[i] = alias;
+                } else {
+                    @fmt(out, "v%.%", inst.a, name.str());
+                };
             }
             fn Swizzle() => {
                 @fmt(out, "v%.", inst.a);
@@ -249,9 +306,6 @@ emit_body :: fn(self: *Function, out: *List(u8)) void = {
         };
         
         if first_arg != -1 {
-            //for self.body.items().slice(0, i) { it |
-            //    @println("% % % %", it.op, it.a, it.b, it.c);
-            //};
             @panic("loose args in shader translation. inst %", i);
         }
     };
@@ -267,7 +321,7 @@ emit_bits :: fn(out: *List(u8), v: u32, type: Scalar) void = @match(type) {
     fn Bool() => @fmt(out, "%", v != 0 );
 };
 
-msl_operator :: fn(op: AstOp) Str = @match(op) {
+wgsl_operator :: fn(op: AstOp) Str = @match(op) {
     fn AddrOf() => "&";
     fn Deref() => "*";
     fn add() => "+";
@@ -290,13 +344,13 @@ msl_operator :: fn(op: AstOp) Str = @match(op) {
     @default => "";
 };
 
-msl_function :: fn(op: AstOp) Str = @match(op) {
+wgsl_function :: fn(op: AstOp) Str = @match(op) {
     fn min() => "min";
     fn max() => "max";
     fn abs() => "abs";
     fn fract() => "fract";
-    fn u2x16() => "unpack_unorm2x16_to_float";
-    fn u4x8() => "unpack_unorm4x8_to_float";
+    fn u2x16() => "unpack2x16unorm";
+    fn u4x8() => "unpack4x8unorm";
     fn vec2() => "vec2";
     fn clamp() => "clamp";
     fn mix() => "mix";
@@ -304,7 +358,7 @@ msl_function :: fn(op: AstOp) Str = @match(op) {
     @default => "";
 };
 
-msl_function_multi :: fn(op: AstOp) Str = @match(op) {
+wgsl_function_multi :: fn(op: AstOp) Str = @match(op) {
     fn vec4() => "vec4";
     @default => "";
 };
