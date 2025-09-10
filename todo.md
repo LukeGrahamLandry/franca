@@ -1,4 +1,5 @@
 
+- real test for dynamic libraries
 - lite version of franca_runtime_init when running drivers so theres a sane place to make sure OS gets set
 - make stack trace debug info work accross multiple compilers. it needs to go in GlobalFrancaRuntime
   (test with crashing in examples/repl.fr when running it as a driver)
@@ -903,7 +904,6 @@ the right/fast/safe/whatever thing to do is also the easy thing to do.
 - is :jnz_is_Kw really what i want the semantic to be?
 - RSlot overflow
 - default arg values (any const expr and inject at callsite? or based on other args so generate shims or multiple entry points to the function)
-- clean up what goes in lib/build.fr vs lib/sys/fs.fr
 - make fetching dependencies (ie. lua for testing import_c) not embarrassing
 - implement examples/testing.fr/fetch_or_crash() with import_c (wuffs and libcurl) instead of exec-ing shit
 - fetch_or_crash hashes are of the compressed file which is garbage. will break if github changes compression level or whatever. 

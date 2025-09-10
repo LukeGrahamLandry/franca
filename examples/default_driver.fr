@@ -83,6 +83,8 @@ fn do_it(vtable: *ImportVTable, cmd: *Command) void = {
     libs := Str.list(temp());
     @if(ENABLE_COMMANDS)
     @if(enable_tracy) {
+        f  :: import("@/examples/testing.fr").fetch_or_crash;
+        _ := f("https://github.com/wolfpld/tracy/archive/ec455c8ee634569447462af7bc42b8ac57b1dda7.zip", 6352360, "09176722dd58b134852be663ea07b2ed12088f702599e9fddf4ba176d4035809", "tracy-ec455c8ee634569447462af7bc42b8ac57b1dda7");
         libs&.push(c.add_lib(tracy_lib));
         cmd.goal = .Relocatable;
     };
@@ -316,6 +318,161 @@ fn parse_cli_args() Command = {
         };
     };
     panic(choose_action)
+}
+
+// #foreign("clang"); 
+
+LinkTime :: @enum(i64) (Static, Dynamic);
+
+fn save_path_for_lib(env: Ty(Arch, Os), linking: LinkTime, lib_name: Str) Str = {
+    ::enum(LinkTime);
+    ext := @match(linking) {
+        fn Static() => "o";
+        fn Dynamic() => "dylib";
+    };
+    @tfmt("target/franca/%-%-%.%", env._0, env._1, lib_name, ext)
+}
+
+#redirect(Ty(i64, i64), bool) fn eq(a: LinkTime, b: LinkTime) bool;
+
+::display_slice(Str);
+
+ForeignLibrary :: @struct(
+    name: Str, // for caching the output file and #import functions knowing which dylib to check. 
+    input_files: Slice(Str) = empty(),
+    macro_defines: Slice(Str) = empty(),     // -D, ie. SOME_LIB_IMPL
+    include_paths: Slice(Str) = empty(),     // -I,
+    macos_frameworks: Slice(Str) = empty(),  // -framework, ie. MetalKit
+    objective_c: bool = false,
+    raw_c_source: ?Str = .None,
+    allow_at_comptime: bool = true,
+    cpp: bool = false,
+);
+
+// TODO: be consistant about figuring out the cwd
+tracy_lib: ForeignLibrary : (
+    name = "tracy",
+    input_files = "target/franca/deps/tracy-ec455c8ee634569447462af7bc42b8ac57b1dda7/public/TracyClient.cpp".single(ast_alloc()),
+    macro_defines = "TRACY_ENABLE=1".single(ast_alloc()),
+    include_paths = "bindings/tracy".single(ast_alloc()),
+    cpp = true,
+);
+
+fn build_foreign_cached(lib: ForeignLibrary, env: Ty(Arch, Os), linking: LinkTime) Result(Str, void) = {
+    #use("@/lib/sys/fs.fr");
+    path := save_path_for_lib(env, linking, lib.name);
+    if(path.file_exists(), => return((Ok = path)));
+    
+    args: List(Str) = list(10, temp());
+    
+    for lib.include_paths { s | 
+        args&.push(@tfmt("-I%", s));
+    };
+    
+    for lib.macro_defines { s | 
+        args&.push(@tfmt("-D%", s));
+    };
+    
+    if lib.objective_c {
+        args&.push_all(@slice ("-x", "objective-c"));
+    };
+    
+    if lib.cpp {
+        args&.push_all(@slice ("-x", "c++"));
+        args&.push("-lc++");    
+    };
+    
+    // TODO: put this on the lib struct? tracy spams
+    args&.push("-Wno-deprecated-declarations");
+    
+    src_file: ?TmpFile = .None;
+    if lib.raw_c_source { src | 
+        src_file = (Some = open_temp_file());
+        f := src_file.Some&;
+        f.fd&.write(src);
+        args&.push(f.s_name()); // Note: this points into the thing so it can't move. // TODO: footgun :(
+    };
+    
+    for lib.input_files { s | 
+        args&.push(s);
+    };
+    
+    ::enum(LinkTime);
+    @match(linking) {
+        fn Static() => {
+            args&.push("-c");
+            args&.push("-static");// TODO: only tracy?
+        };
+        fn Dynamic() => {
+            args&.push("-dynamiclib");
+            
+            // TODO: if os == macos
+            for lib.macos_frameworks { name |
+                args&.push("-framework");
+                args&.push(name);
+            };
+        };
+    };
+    args&.push_all(@slice ("-o", path));
+    
+    // Since we save it, might as well take the extra hundred years to make it go fast. 
+    args&.push("-Os");
+    
+    args&.push("-target");
+    args&.push(target_triple(env._0, env._1));
+    #use("@/lib/sys/subprocess.fr");
+    @println("[build %] %;", lib.name, args.items());
+    success := run_cmd_blocking("clang", args.items());  // TODO: use the right clang (might not want ++ for something that can be compiled as either)
+    if(not(success), => return(.Err));
+    
+    if src_file { f |
+        f.remove();
+    };
+    
+    (Ok = path)
+}
+
+fn target_triple(arch: Arch, os: Os) Str = {
+    if arch == .wasm32 {
+        return("wasm32");
+    };
+    @match(os) {
+        fn macos() => {
+            @match(arch) {
+                fn aarch64() => return("aarch64-apple-darwin");
+                fn x86_64()  => return("x86_64-apple-darwin");
+                @default => ();
+            };
+        }
+        fn linux() => {
+            // TODO: dont always say gnu!!
+            @match(arch) {
+                fn aarch64() => return("aarch64-linux-gnu");
+                fn x86_64()  => return("x86_64-linux-gnu");
+                fn rv64() => return("riscv64-linux-gnu");
+                @default => ();
+            };
+        }
+        @default => ();
+    };
+    @panic("we don't support the triple for % % because we are dumb and bad and new", arch, os)
+}
+   
+fn add_lib(ctx: CompCtx, lib: ForeignLibrary) Str = {
+    env := (query_current_arch(), query_current_os());  // TODO: pass in for cross compiling
+    
+    ::Result(Str, void);
+    aot_path := lib.build_foreign_cached(env, .Static).unwrap();
+    
+    name := ctx.intern_string(lib.name);
+    if lib.allow_at_comptime {
+        jit_path := lib.build_foreign_cached(env, .Dynamic).unwrap(); 
+        jit := import("@/lib/dynamic_lib.fr")'open(jit_path) 
+            || @panic("failed to open '%' at '%' for comptime", lib.name, jit_path);
+        ctx.add_comptime_library(name, jit);
+    };
+    
+    aot_path
 }
 
 #use("@/backend/lib.fr"); 

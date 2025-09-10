@@ -1,3 +1,155 @@
+
+fn with(vtable: *ImportVTable, comp: Compiler) CompCtx = 
+    (data = comp, vtable = vtable);
+
+fn get_tagged(comp: CompCtx, tag: Str) Slice(FuncId) = {
+    tag := {comp.vtable.intern_string}(comp.data, tag);
+    {comp.vtable.get_fns_with_tag}(comp.data, tag)
+}
+
+// TODO: overloading
+fn get_unique_named(c: CompCtx, name: Str) ?FuncId = {
+    f := {c.vtable.intern_string}(c.data, name);
+    {c.vtable.find_unique_func}(c.data, f)
+}
+
+// TODO: no unwrap! return error.
+fn get_jitted(c: CompCtx, f: FuncId) rawptr = {
+    res := {c.vtable.compile_func}(c.data, f, .Jit);
+    or res { err |
+        c.report_error(err)
+    };
+    ptr := {c.vtable.get_jitted_ptr}(c.data, f);
+    ptr := or ptr { err |
+        c.report_error(err)
+    };
+    ptr
+}
+
+fn default_build_options(vtable: *ImportVTable) *BuildOptions = 
+    temp().boxed(BuildOptions, ());
+
+fn add_comptime_library(c: CompCtx, lib_name: Symbol, handle: import("@/lib/dynamic_lib.fr").Handle) void = {
+    {c.vtable.add_comptime_library}(c.data, lib_name, bit_cast_unchecked(import("@/lib/dynamic_lib.fr").Handle, rawptr, handle));
+}
+
+fn report_error(c: CompCtx, err: *CompileError) Never = {
+    out: List(u8) = list(temp());
+    {c.vtable.fmt_error}(c.data, err, out&);
+    panic(out.items())
+}
+
+fn new_with_src(vtable: *ImportVTable, src: Str, options: *BuildOptions) Compiler = {
+    new_with_src(vtable, src, "-", options)
+}
+
+// This copies src,filename,options 
+fn new_with_src(vtable: *ImportVTable, src: Str, filename: Str, options: *BuildOptions) Compiler = {
+    comp := {vtable.init_compiler}(options);
+    src := src.shallow_copy(vtable'get_alloc(comp));
+    filename := filename.shallow_copy(vtable'get_alloc(comp));
+    file := {vtable.add_file}(comp, filename, src).shrink();
+    stmts := {vtable.parse_stmts}(comp, file&);
+    stmts := or stmts { err |
+        vtable.with(comp).report_error(err)
+    };
+    //@debug_assert(stmts.len != 0, "parse_stmts returned 0");
+    res := {vtable.make_and_resolve_and_compile_top_level}(comp, stmts);
+    or res { err |
+        vtable.with(comp).report_error(err)
+    };
+    comp
+}
+
+fn intern_string(comp: CompCtx, s: Str) Symbol = {
+    {comp.vtable.intern_string}(comp.data, s)
+}
+
+fn get_string(comp: CompCtx, s: Symbol) Str = {
+    {comp.vtable.get_string}(comp.data, s)
+}
+
+fn get_function(comp: CompCtx, f: FuncId) *Func = {
+    {comp.vtable.get_function}(comp.data, f)
+}
+
+fn get_function_name(comp: CompCtx, f: FuncId) Symbol = {
+    comp.get_function(f)[].name
+}
+
+UnknownType :: @builtin UnknownType;
+
+fn intern_type(ty: TypeInfo) Type = intern_type_ref(ty&);
+
+// TODO: really you want the compiler ffi things to be defined here so they're easy to see and hang comments off. 
+//       but for now its convient to have thier signetures in the same place as i assign thier comptime_addr.  -- Apr 20
+
+fn const_eval($T: Type, value: FatExpr) T #generic = 
+    const_eval(T)(value);
+
+fn const_eval($T: Type) (@Fn(value: FatExpr) T) #generic = (fn(value: FatExpr) T = {
+    out := @uninitialized T;
+    const_eval(value, T, T.raw_from_ptr(out&)); // crashes on type error
+    out
+});
+
+fn ne(a: Type, b: Type) bool #redirect(Ty(u32, u32), bool);
+
+// This checks if types are identical. 
+// You might want to use can_assign_types instead since that has more knowledge about assignable but not identical types.
+fn eq(a: Type, b: Type) bool #redirect(Ty(u32, u32), bool);
+
+#fold fn int(s: Symbol) i64 = {
+    i := ptr_cast_unchecked(From = Symbol, To = u32, ptr = s&)[];
+    i.zext()
+}
+
+fn get_flag(self: *Func, flag: FnFlag) bool #inline = {
+    mask := 1.shift_left(@as(i64) flag);
+    self.flags.bit_and(mask) != 0
+}
+
+fn set_flag(self: *Func, flag: FnFlag) void = {
+    mask := 1.shift_left(@as(i64) flag);
+    new := self.flags.bit_or(mask);
+    self.flags = new;
+}
+
+fn unset_flag(self: *Func, flag: FnFlag) void = {
+    mask := 1.shift_left(@as(i64) flag);
+    new := self.flags.bit_and(mask.bit_not());
+    self.flags = new;
+}
+
+fn ident(self: *Binding) ?Symbol = {
+    @match(self.name) {
+        fn Var(v) => (Some = v.name);
+        fn Ident(v) => (Some = v);
+        @default => .None;
+    }
+}
+
+fn ne(a: FuncId, b: FuncId) bool #redirect(Ty(u32, u32), bool);
+
+fn TypedIndex($T: Type) void = {
+    fn as_index(f: T) i64 = f.to_index().zext();
+    
+    fn to_index(f: T) u32 #ir(.copy, .Kw);
+    
+    fn from_index(idx: i64) T = {
+        val: u32 = idx.trunc();
+        ptr_cast_unchecked(From = u32, To = T, ptr = val&)[]
+    }
+}
+
+:: TypedIndex(FuncId);
+:: TypedIndex(OverloadSet);
+:: TypedIndex(LabelId);
+:: TypedIndex(Type);
+
+fn Ty(a: Type, b: Type, c: Type, d: Type, e: Type) Type #fold = 
+    Ty(@slice(a, b, c, d, e));
+
 fn has_pointers(T: Type) bool #fold = {
     i := T.get_meta();
     i.contains_pointers
@@ -302,7 +454,7 @@ fn AsmFunction(template: FuncId, arm64: []u32, amd64: @FnPtr(out: *List(u8)) voi
     amd64_bytes := u8.list(a);
     amd64(amd64_bytes&);
     wasm32_bytes := u8.list(a);
-    ::import("@/lib/leb128.fr");
+    ::import("@/lib/encoding/leb128.fr");
     uleb_patch_delta wasm32_bytes& {
         wasm32(wasm32_bytes&);
     };
