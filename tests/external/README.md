@@ -13,6 +13,3 @@ c programs to test import_c:
 
 compilers that output qbe ir as text for qbe_frontend.fr:
 - hare
-
-linux emulators:
-- libriscv: run my hello world ssa program

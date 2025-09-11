@@ -1,4 +1,5 @@
 
+- get rid of ExprLevelAsm
 - real test for dynamic libraries
 - lite version of franca_runtime_init when running drivers so theres a sane place to make sure OS gets set
 - make stack trace debug info work accross multiple compilers. it needs to go in GlobalFrancaRuntime
@@ -460,9 +461,6 @@ need to be careful about the refs which have tags in the high bits so won't leb 
   - also cas.ssa but there it has an expcilit error message for not supporting that extension instead of just giving the wrong answer like the others
 - call local symbol directly without producing it in a register first
 - trampolines for imported symbols
-- once i can do franca i want to get rid of: 
-  - a.ssa, tests/external/libriscv.fr, ExprLevelAsm (and that part of tests/exe/sys.fr)
-- once the compiler works, get rid of tests/exe/rv.fr
 - tests/
   - exceptional (jump.fr)
   - multiple_stacks, intrins, inline_asm_jit (AsmFunction)
@@ -1176,6 +1174,19 @@ StbTrueType :: include { C |
 
 // TODO: derive ne from eq so you can use != more often. 
 // TODO: better error message for *T vs **T, should say dereference not unsafe cast. 
+
+/* List of grievances. 
+- write f64 to string (better)
+- derive eq/display for unique types. 
+- derive recursive drop/default.
+- nicer switch over incomplete enum. 
+- jump table switch, mine is gonna be so slow. 
+- passing arch overload set to typed Fn 
+- need smarter overload resolution so you can use enum contextual fields more often. I hate typing the name a bunch. 
+- debug state stack should include eval const ident. 
+- multiple cases with one handler in switch. 
+- expand macros in switch
+*/
 
 ## data structure changes
 

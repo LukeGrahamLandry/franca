@@ -1,39 +1,13 @@
 // This is a test of examples: elf_loader/macho_loader and dump_elf/dump_macho. 
-// It creates a hello world program that makes syscalls with O.asm, 
-// dumps it to text (.ssa), parses that back and compiles it. 
 // TODO: for now it mostly tests the native target (not cross compiling)
 
 main :: fn() void = {
     macos := query_current_os() == .macos;
-    src := @if(macos, 
-        @if(query_current_arch() == .x86_64, SYS.macos_amd, SYS.macos_arm), 
-        @if(query_current_arch() == .x86_64, SYS.linux_amd, SYS.linux_arm));
-    src := emit_hello_world(src);
-
     loader := @if(macos, "examples/macho_loader.fr", "examples/elf_loader.fr");
     dump := @if(macos, "examples/dump_macho.fr", "examples/dump_elf.fr");
     franca := get_executable_path(temp());
     
-    ssa := open_temp_file();
     exe := open_temp_file();
-    ssa.fd&.write(src);
-    
-    {  // === static .ssa ===
-    b := sh(@slice(franca, "backend/meta/qbe_frontend.fr", ssa&.s_name(), "-r"));
-    sh(@slice(franca, "backend/meta/qbe_frontend.fr", ssa&.s_name(), "-o", exe&.s_name()));
-    c := sh(@slice(franca, loader, exe&.s_name()));
-    //chmod(exe&.c_name(), .OwnerAll);  // probably not a good idea anyway; but doesn't work on orb??
-    //a := sh(@slice(exe&.s_name()));
-    //@assert_eq(a, b);
-    @assert_eq(b, c);
-    @assert_eq(b, "Hello World!\n");
-    text := sh(@slice(franca, dump, exe&.s_name()));
-    if macos {
-        @assert(!text.contains("lib_ordinal") && text.contains("imports_count = 0"), "expected no imports");
-    } else {
-        @assert(!text.contains("Dynamic") && !text.contains("Interp"), "expected static executable:\n%", text);
-    }
-    };
     
     {  // === dynamic .fr ===
     // TODO: can't do this on linux because i rely on franca_runtime_init to align the stack
@@ -64,104 +38,5 @@ main :: fn() void = {
 }
 
 sh :: import("@/examples/testing.fr").hush;
-
-fn emit_hello_world(sys: SYS.Sys) Str = {    
-    m := zeroed Qbe.Module; m := m&;
-    init_empty_for_template_only(m, temp());
-    
-    s := "Hello World!\n";
-    msg := m.intern("msg");
-    dat: Dat2 = (template = (Bytes = s), id = msg, relocations = empty());
-    
-    f := zeroed Qbe.Fn; f := f&;
-    default_init(f, m);
-    f.lnk.export = true;
-    f.lnk.id = m.intern("main");
-    b := temp().box_zeroed(Qbe.Blk);
-    f.start = b;
-    f.nblk = 1;
-    b.jmp.type = .hlt;
-    
-    b.push(.copy, .Kl, sys.aN, f.getcon(sys.write), Qbe.Null);
-    b.push(.copy, .Kl, sys.a0, f.getcon(1), Qbe.Null);
-    b.push(.copy, .Kl, sys.a1, f.symcon(msg, 0), Qbe.Null);
-    b.push(.copy, .Kl, sys.a2, f.getcon(s.len), Qbe.Null);
-    b.push(.asm, .Kw, Qbe.Null, f.getcon(sys.asm.zext()), Qbe.Null);
-    clobbers();
-    b.push(.copy, .Kl, sys.aN, f.getcon(sys.exit), Qbe.Null);
-    b.push(.copy, .Kl, sys.a0, f.getcon(0), Qbe.Null);
-    b.push(.asm, .Kw, Qbe.Null, f.getcon(sys.asm.zext()), Qbe.Null);
-    clobbers();
-    
-    clobbers :: => {
-        b.push(.copy, .Kl, Qbe.Null, sys.aN, Qbe.Null);
-        b.push(.copy, .Kl, Qbe.Null, sys.ret, Qbe.Null);
-        b.push(.copy, .Kl, Qbe.Null, sys.a0, Qbe.Null);
-        b.push(.copy, .Kl, Qbe.Null, sys.a1, Qbe.Null);
-        b.push(.copy, .Kl, Qbe.Null, sys.a2, Qbe.Null);
-    };
-    
-    out := u8.list(temp());
-    print_data(m, dat&, out&);
-    printfn(f, out&);
-    out.items()
-}
-
-SYS :: @struct {
-    macos_arm: Sys : (
-        aN = TMP(Arm64Reg.IP0), a0 = TMP(Arm64Reg.R0), a1 = TMP(Arm64Reg.R1), a2 = TMP(Arm64Reg.R2), 
-        ret = TMP(Arm64Reg.R0),
-        write = 0x2000004, exit = 0x2000001,
-        asm = svc,
-    );
-    
-    linux_arm :: {
-        it := macos_arm;
-        it.aN = TMP(Arm64Reg.R8);
-        it.write = 64;
-        it.exit = 94;
-        it
-    };
-    
-    linux_riscv: Sys : (
-        aN = TMP(RvReg.A7), a0 = TMP(RvReg.A0), a1 = TMP(RvReg.A1), a2 = TMP(RvReg.A2), 
-        ret = TMP(RvReg.A0),
-        write = 64, exit = 94,
-        asm = ecall,
-    );
-    
-    macos_amd: Sys : (
-        aN = TMP(Amd64Reg.RAX), a0 = TMP(Amd64Reg.RDI), a1 = TMP(Amd64Reg.RSI), a2 = TMP(Amd64Reg.RDX), 
-        ret = TMP(Amd64Reg.RAX),
-        write = 0x2000004, exit = 0x2000001,
-        asm = 0x9090050F,
-    );
-    
-    linux_amd :: {
-        it := macos_amd;
-        it.write = 1;
-        it.exit = 231;
-        it
-    };
-    
-    Sys :: @struct {
-        exit: i64;
-        write: i64;
-        aN: Qbe.Ref;
-        a0: Qbe.Ref;
-        a1: Qbe.Ref;
-        a2: Qbe.Ref;
-        ret: Qbe.Ref;
-        asm: u32;
-    };
-    
-    #use("@/backend/arm64/bits.fr");
-    #use("@/backend/amd64/bits.fr");
-    #use("@/backend/rv64/bits.fr");
-    #use("@/backend/arm64/target.fr");
-    #use("@/backend/amd64/target.fr");
-    #use("@/backend/rv64/abi.fr");
-    #use("@/lib/sys/fs.fr");
-    #use("@/lib/sys/subprocess.fr");
-};
 #use("@/backend/lib.fr");
+#use("@/lib/sys/fs.fr");
