@@ -21,10 +21,16 @@ fn display(self: Value, out: *List(u8)) void = {
             fn String() => {
                 o := self.to_string();
                 o.data.display(out);
-                return();
             }
-            fn _temp() => unreachable();
+            fn Function() => {
+                o := self.to_function();
+                @fmt(out, "<fn %>", o.name);
+            }
+            fn Native() => {
+                @fmt(out, "<fn <native>>");
+            }
         };
+        return();
     };
     
     "~~BAD_VALUE~~".display(out)
@@ -41,6 +47,7 @@ true_value  : Value : (bits = 3.bit_or(qnan));
 #inline fn to_value(self: bool) Value = if(self, => true_value, => false_value);
 #inline fn to_value(self: *Obj) Value = Obj.from_obj_subtype(self);
 #inline fn to_value(self: *ObjString) Value = ObjString.from_obj_subtype(self);
+#inline fn to_value(self: *ObjFunction) Value = ObjFunction.from_obj_subtype(self);
 
 null_object :: sign_bit.bit_or(qnan);
 
@@ -65,18 +72,21 @@ fn is_obj(self: Value, type: ObjType) bool = {
 
 to_obj_subtype :: fn($T: Type, self: Value) *T #generic = {
     addr := self.bits.bit_and(null_object.bit_not());
-    T.ptr_from_int(addr)
+    obj := T.ptr_from_int(addr);
+    @if(@run(T != Obj)) @debug_assert_eq(obj.obj.type, T.TAG);
+    obj
 };
 
 fn to_obj(self: Value) *Obj #inline  = Obj.to_obj_subtype(self);
 fn to_string(self: Value) *ObjString #inline = ObjString.to_obj_subtype(self);
+fn to_function(self: Value) *ObjFunction #inline = ObjFunction.to_obj_subtype(self);
 
 fn eq(lhs: Value, rhs: Value) bool = {
     // strings are interned so this is good enough for them too. 
     lhs.bits == rhs.bits // TODO: IEEE NaN
 }
 
-ObjType :: @enum(i64) (String, _temp); :: enum(ObjType);
+ObjType :: @enum(i64) (String, Function, Native); :: enum(ObjType);
 Obj :: @rec @struct(
     type: ObjType,
     next: *Obj,
@@ -87,6 +97,21 @@ ObjString :: @struct {
     obj: Obj;
     data: Str;
     hash: i64 = 0;
+};
+
+ObjFunction :: @struct {
+    TAG :: ObjType.Function;
+    obj: Obj;
+    arity: i64;
+    name: Str;
+    chunk: Chunk;
+};
+
+ObjNative :: @struct {
+    TAG :: ObjType.Native;
+    obj: Obj;
+    function: F;
+    F :: @FnPtr(args: []Value) Value;
 };
 
 fn obj_type(self: Value) ObjType #inline = {
@@ -196,9 +221,17 @@ fn free_obj(self: *Vm, obj: *Obj) void = {
         fn String() => {
             obj := obj.to_value().to_string();
             self.gc.dealloc(u8, obj.data);
-            self.gc.dealloc(ObjString, @as([]ObjString) (ptr = obj, len = 1));
+            self.gc.dealloc_one(ObjString, obj);
         }
-        fn _temp() => unreachable();
+        fn Function() => {
+            obj := obj.to_value().to_function();
+            obj.chunk&.drop();
+            self.gc.dealloc_one(ObjFunction, obj);
+        }
+        fn Native() => {
+            obj := ObjNative.to_obj_subtype(obj.to_value());
+            self.gc.dealloc_one(ObjNative, obj);
+        }
     };
 }
 

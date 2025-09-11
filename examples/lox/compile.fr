@@ -3,11 +3,16 @@ Parser :: @struct(
     scanner: Scanner, 
     current: Token, 
     previous: Token, 
-    had_error: bool, 
-    panic_mode: bool,
-    chunk: *Chunk,
+    had_error := false, 
+    panic_mode := false,
+    chunk := zeroed(*Chunk),
     scope_depth: i64 = 0,
+    function: *ObjFunction,
+    function_type := FunctionType.Script, 
+    locals: List(Local),
 );
+
+FunctionType :: @enum(Function, Script);
 
 Local :: @struct(name: Str, depth: i64);
 
@@ -37,7 +42,7 @@ null_rule : ParseFn : fn(self: *Parser, can_assign: bool) void = {
     table := ast_alloc().alloc_init(ParseRule, TokenType.enum_count(), fn(_) => 
         (prefix = null_rule, infix = null_rule, prec = .None));
     
-    T(.LeftParen,     grouping,        null_rule,  .None);
+    T(.LeftParen,     grouping,        call,       .Call);
     T(.Plus,          null_rule,       binary,     .Term);
     T(.Minus,         unary,           binary,     .Term);
     T(.Star,          null_rule,       binary,     .Factor);
@@ -63,16 +68,20 @@ null_rule : ParseFn : fn(self: *Parser, can_assign: bool) void = {
     rules[] = table;
 };
 
-fn compile(vm: *Vm, source: Str, chunk: *Chunk) bool = {
+fn compile(vm: *Vm, source: Str) ?*ObjFunction = {
     self: Parser = (
         vm = vm,
         scanner = init(source), 
         current = Token.zeroed(), 
         previous = Token.zeroed(), 
-        had_error = false, 
-        panic_mode = false,
-        chunk = chunk, // TODO: be like rust where you can leave off the name if it matches the expr var name. 
+        function = vm.allocate_obj(ObjFunction),
+        locals = list(temp()),
     );
+    self.function.chunk = init();
+    self.function.name = "<script>";
+    self.chunk = self.function.chunk&;
+    self.locals&.push(name = "", depth = 0);
+    
     self&.advance();
     while => self.current.type != .Eof {
         self&.statement(true);
@@ -80,16 +89,24 @@ fn compile(vm: *Vm, source: Str, chunk: *Chunk) bool = {
     };
     self&.consume(.Eof, "Expect end of expression.");
     
-    if(debug_print_code.and(not(self.had_error))) {
-        self&.current_chunk().disassemble("just parsed");
+    if debug_print_code && !self.had_error {
+        self.chunk.disassemble(self.function.name);
     };
-    self.had_error.not()
+    
+    if self.had_error {
+        return(.None);
+    };
+    (Some = self.function)
 }
 
 fn statement(self: *Parser, may_declare: bool) void = {
     keyword_expr :: fn(op: OpCode) void => {
         self.advance();
-        self.expression();
+        if self.current.type == .Semicolon && op != .Print {
+            self.emit(OpCode.Nil);
+        } else {
+            self.expression();
+        }
         self.emit(op);
     };
     @match(self.current.type) {
@@ -103,14 +120,7 @@ fn statement(self: *Parser, may_declare: bool) void = {
         }
         fn LeftBrace() => {
             self.advance();
-            self.scope_depth += 1;
-            while => self.current.type != .Eof && self.current.type != .RightBrace {
-                self.statement(true);
-                if(self.panic_mode, => self.syncronize());
-            };
-            // TODO: this will emit extra pops if the block ended with a return. (don't just check last op becuase of jumps)
-            self.end_scope();
-            self.consume(.RightBrace, "Expected '}' to close block");
+            self.parse_block();
             return(); // no semicolon required after a block. 
         }
         fn If() => {
@@ -191,6 +201,7 @@ fn statement(self: *Parser, may_declare: bool) void = {
             self.patch_jump(skip_inc);
             
             self.consume(.RightParen, "Expected ')' after for::inc");
+            
             self.statement(false);  // body
             self.patch_jump(self.emit_jump(.Loop), to_inc);
             
@@ -199,12 +210,80 @@ fn statement(self: *Parser, may_declare: bool) void = {
             self.end_scope();
             return();
         }
+        fn Fun() => {
+            self.advance();
+            self.consume(TokenType.Ident, "expected function name after 'fun'");
+            name := self.previous;
+            function := self.vm.allocate_obj(ObjFunction);
+            function.name = name.lexeme;
+            self.emit(function.to_value());
+            self.define_var_from_stack(name);
+            self.start_function_body(function, .Function);
+            return();
+        }
         @default => {
             self.expression();
             self.emit(OpCode.Pop);
         };
     };
     self.consume(.Semicolon, "Expected ';' after statement");
+}
+
+fn parse_block(self: *Parser) void = {
+    self.scope_depth += 1;
+    while => self.current.type != .Eof && self.current.type != .RightBrace {
+        self.statement(true);
+        if(self.panic_mode, => self.syncronize());
+    };
+    // TODO: this will emit extra pops if the block ended with a return. (don't just check last op becuase of jumps)
+    self.end_scope();
+    self.consume(.RightBrace, "Expected '}' to close block");
+}
+
+fn start_function_body(self: *Parser, function: *ObjFunction, t: FunctionType) void = {
+    inner: Parser = (
+        vm = self.vm,
+        scanner = self.scanner,
+        current = self.current, 
+        previous = self.previous,
+        function = function,
+        locals = list(temp()),
+    );
+    inner.function.chunk = init();
+    inner.chunk = inner.function.chunk&;
+    inner.locals&.push(name = "", depth = 0);
+    
+    inner&.parse_function_body();
+    
+    if debug_print_code && !inner.had_error {
+        inner.chunk.disassemble(inner.function.name);
+    };
+    self.had_error = self.had_error || inner.had_error;
+    self.previous = inner.previous;
+    self.current = inner.current;
+    self.scanner = inner.scanner;
+}
+
+fn parse_function_body(self: *Parser) void = {
+    self.scope_depth += 1;
+    
+    self.consume(.LeftParen, "before arguments");
+    if self.current.type != .RightParen {
+        dowhile {            
+            self.consume(TokenType.Ident, "expected parameter name");
+            name := self.previous;
+            self.define_var_from_stack(name);
+            
+            self.function.arity += 1;
+            self.maybe(.Comma)
+        }
+    }
+    
+    self.consume(.RightParen, "after arguments");
+    self.consume(.LeftBrace, "before body");
+    self.parse_block();
+    self.emit(OpCode.Nil);
+    self.emit(OpCode.Return);
 }
 
 fn emit_jump(self: *Parser, op: OpCode) i64 = {
@@ -246,7 +325,7 @@ parse_or :: fn(self: *Parser, _can_assign: bool) void = {
 
 fn end_scope(self: *Parser) void = {
     self.scope_depth -= 1;
-    locals := self.vm.compiler_locals&;
+    locals := self.locals&;
     cond   :: => !locals.is_empty() && locals[locals.len - 1].depth > self.scope_depth;
     while cond {
         locals.len -= 1;
@@ -353,6 +432,34 @@ parse_string :: fn(self: *Parser, _can_assign: bool) void = {
     self.emit(s.to_value())
 };
 
+call :: fn(self: *Parser, _can_assign: bool) void = {
+    arg_count := self.arg_list();
+    self.emit(OpCode.Call, arg_count);
+    self.consume(.RightParen, "Expect ')' after call arguments.");
+};
+
+fn arg_list(self: *Parser) i64 = {
+    if self.current.type == .RightParen {
+        return 0;
+    };
+    count := 0;
+    dowhile {
+        count += 1;
+        self.expression();
+        self.maybe(.Comma)
+    };
+    if count > 255 {
+        self.error_at(self.previous, "Too many arguments in call (>255)");
+    }
+    count
+}
+
+fn maybe(self: *Parser, t: TokenType) bool = {
+    more := self.current.type == t;
+    @if(more) self.advance();
+    more
+}
+
 fn declare_var(self: *Parser) void = {
     self.advance();
     self.consume(TokenType.Ident, "expected variable name after 'var'");
@@ -363,13 +470,17 @@ fn declare_var(self: *Parser) void = {
     } else {
         self.emit(OpCode.Nil);
     };
+    self.define_var_from_stack(name);
+}
+
+fn define_var_from_stack(self: *Parser, name: Token) void = {
     if self.scope_depth > 0 {
         // TODO: make it an error to shadow in the same scope. "Already a variable with this name in this scope." :lazy
         // TODO: deny the initilizer accessing something in an upper scope that its shadowing. Can't read local variable in its own initializer."
         //       currently i just declare later so the error message would be that its undeclared. 
         // locals just fall through and keep thier stack slot, so no opcode here.
-        self.vm.compiler_locals&.push(name = name.lexeme, depth = self.scope_depth);
-        if self.vm.compiler_locals.len > 255 {
+        self.locals&.push(name = name.lexeme, depth = self.scope_depth);
+        if self.locals.len > 255 {
             // TODO: EXTRA: GetLocal16 and SetLocal16
             self.error_at(name, "Too many locals in chunk (>255)");
         };
@@ -406,7 +517,7 @@ parse_ident :: fn(self: *Parser, can_assign: bool) void = {
 };
 
 fn find_local_index(self: *Parser, name: Str) ?i64 = {
-    enumerate_rev self.vm.compiler_locals& { i, local |
+    enumerate_rev self.locals& { i, local |
         if local.name == name {
             return(Some = i);
         };
@@ -444,13 +555,13 @@ fn error_at(self: *Parser, token: Token, msg: Str) void = {
         self.panic_mode = true;
         self.had_error = true;
         // TODO: render lex err vs eof vs normal token differently
-        @fmt(self.vm.errors&, "[line %] Error: % at %", token.line, msg, token.lexeme);
+        @fmt(self.vm.errors&, "[line %] Error: % at %\n", token.line, msg, token.lexeme);
     }
 }
 
 #redirect(Ty(*Parser, i64), void) fn emit(self: *Parser, b: OpCode) void;
 fn emit(self: *Parser, b: i64) void = {
-    self.current_chunk().push(b, self.previous.line);
+    self.chunk.push(b, self.previous.line);
 }
 fn emit(self: *Parser, a: i64, b: i64) void = {
     self.emit(a);
@@ -465,12 +576,10 @@ fn emit(self: *Parser, a: OpCode, b: i64) void = {
 fn emit(self: *Parser, value: Value) void = self.emit(OpCode.Constant, self.make_constant(value));
 
 fn make_constant(self: *Parser, value: Value) i64 = {
-    c := self.current_chunk().push(value);
-    if(c.gt(255), => self.error("Too many constants in one chunk."));
+    c := self.chunk.push(value);
+    if(c > 255, => self.error("Too many constants in one chunk."));
     c
 }
-
-fn current_chunk(self: *Parser) *Chunk = self.chunk;
 
 // Skip until a statement boundary: last token ends one or current token starts one. 
 fn syncronize(self: *Parser) void = {

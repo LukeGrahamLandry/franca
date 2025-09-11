@@ -3,8 +3,6 @@ debug_print_code :: false;
 stack_max :: 256;
 
 Vm :: @struct(
-    chunk: *Chunk,
-    ip: *u8,
     stack: List(Value), // TODO: inline fixed size array
     stack_top: *Value,
     last_return: Value,
@@ -12,9 +10,15 @@ Vm :: @struct(
     objects: *Obj,
     strings: Table,
     globals: Table,
-    compiler_locals: List(Local), // Only used during parse but we reuse the memory. 
     errors: List(u8),
+    frames: List(CallFrame),
 );
+
+CallFrame :: @struct {
+    function: *ObjFunction;
+    ip: *u8;
+    first_local: i64;
+};
 
 Table :: RawHashMap(*ObjString, Value);
 
@@ -25,15 +29,24 @@ fn init_vm() Vm = {
     self.objects = Obj.ptr_from_int(0); // EVIL
     self.strings = init(); 
     self.globals = init(); 
-    self.compiler_locals = list(128, self.gc);
     self&.reset_stack();
     self.errors = list(self.gc);
+    self.frames = list(self.gc);
+    self&.define_native("clock", fn(_) = {
+        timestamp_s().to_value()
+    });
     self
+}
+
+fn define_native(self: *Vm, name: Str, callee: ObjNative.F) void = {
+    name := self.copy_string(name);
+    obj := self.allocate_obj(ObjNative);
+    obj.function = callee;
+    self.globals&.insert(name, obj.obj&.to_value(), self.gc);
 }
 
 fn drop(self: *Vm) void = {
     self.stack&.drop();
-    self.compiler_locals&.drop();
     self.globals&.drop(self.gc);
     self.strings&.drop(self.gc);
     self.errors&.drop();
@@ -43,17 +56,15 @@ fn drop(self: *Vm) void = {
 InterpretResult :: @enum(i64) (Ok, CompileError, RuntimeError, SuspendPrint); ::enum(InterpretResult);
 
 fn interpret(self: *Vm, source: Str, collect_errors: bool, $print: Fn(Value, void) #duplicated) InterpretResult = {
-    chunk: Chunk = init();    
     ::if(InterpretResult);
-    self.compiler_locals&.clear();
-    result := if(compile(self, source, chunk&)) {
-       self.interpret(chunk&, collect_errors, print)
-    } {| InterpretResult.CompileError };
-    
+    function := self.compile(source) || {
+        print(self.errors.items());
+        return(.CompileError);
+    };
+    result := self.interpret(function, collect_errors, print);
     if !collect_errors && self.errors.len > 0 {
         print(self.errors.items());
     }
-    chunk&.drop();
     result
 }
 
@@ -63,15 +74,23 @@ fn interpret(self: *Vm, source: Str) InterpretResult = {
     }
 }
 
-fn interpret(self: *Vm, chunk: *Chunk, collect_errors: bool, $print: Fn(Value, void) #duplicated) InterpretResult = {
-    self.chunk = chunk;
-    self.ip = chunk.code&.as_ptr();
+fn interpret(self: *Vm, function: *ObjFunction, collect_errors: bool, $print: Fn(Value, void) #duplicated) InterpretResult = {
+    self.stack_top = self.stack.maybe_uninit.ptr;
+    self.stack&.clear();
+    
+    self.frames&.push(
+        function = function, ip = 
+        function.chunk.code.index(0), 
+        first_local = ptr_diff(self.stack.maybe_uninit.ptr, self.stack_top),
+    );
+    self.push(function.to_value());
+    
     loop {
         result := self.run();
         if result == .SuspendPrint {
             print(self.last_return);
         } else {
-            self.chunk = Chunk.ptr_from_int(0);
+            self.frames&.pop();
             return(result);
         };
     }
@@ -82,13 +101,13 @@ is_falsy :: fn(v: Value) bool = v.is_bool().and(=> v.to_bool().not()).or(v.is_ni
 fn run(self: *Vm) InterpretResult = {
     out := InterpretResult.RuntimeError;
     debug: List(u8) = list(temp());  // :LEAK someone needs to reset temp in this program
-    
+    frame := self.frames&.last().unwrap();
+    ip := frame.ip&;
     loop {
         continue :: local_return;
-        @debug_assert(ptr_diff(self.chunk.code.maybe_uninit.ptr, self.ip) < self.chunk.code.len, "fell of the end of function");
+        @debug_assert(ptr_diff(frame.function.chunk.code.maybe_uninit.ptr, ip[]) < frame.function.chunk.code.len, "fell off the end of function");
         
-        @if(debug_trace_execution) {
-            
+        if debug_trace_execution {
             debug&.clear();
             @fmt(debug&, "       stack:");
             for(self.stack&.as_ptr(), self.stack_top) {slot|
@@ -100,9 +119,9 @@ fn run(self: *Vm) InterpretResult = {
             };
         
             @fmt(debug&, "\n"); 
-            p := self.chunk[].code&.as_ptr();
-            i := p.ptr_diff(self.ip);
-            self.chunk.dis_inst(debug&, i);
+            p := frame.function.chunk.code&.as_ptr();
+            i := p.ptr_diff(ip[]);
+            frame.function.chunk&.dis_inst(debug&, i);
             
             print(debug&.items());
         };
@@ -115,12 +134,26 @@ fn run(self: *Vm) InterpretResult = {
                 constant := self.read_constant();
                 self.push(constant);
             };
+            @case(OpCode.Call) => {
+                arg_count: i64 = self.read_byte().zext();
+                if !self.call_value(self.peek(arg_count), arg_count) {
+                    return(.RuntimeError);
+                };
+                frame = self.frames&.last().unwrap();
+                ip = frame.ip&;
+            };
             @case(OpCode.Return) => {
                 value := self.pop();
-                self.last_return = value;
-                self.stack_top = self.stack.maybe_uninit.ptr; // TODO: this will change when we have functions.
-                @if(debug_trace_execution) @println("RET: %", value);
-                return(.Ok);
+                self.frames&.pop().unwrap();
+                if self.frames.len == 0 {
+                    self.last_return = value;
+                    return(.Ok);
+                }
+                self.stack_top = self.stack.index_unchecked(frame.first_local);
+                self.stack.len = frame.first_local; // redundant [...] safety check
+                frame = self.frames&.last().unwrap();
+                ip = frame.ip&;
+                self.push(value);
             };
             @case(OpCode.Negate) => {
                 val := self.pop();
@@ -199,7 +232,7 @@ fn run(self: *Vm) InterpretResult = {
                 @match(self.globals&.get(name.to_string())) {
                     fn Some(value) => self.push(value);
                     fn None() => {
-                        self.runtime_error("Accessed undeclared global variable.");
+                        self.runtime_error(@tfmt("Accessed undeclared global variable: %", name.to_string()[].data));
                         return(.RuntimeError);
                     }
                 };
@@ -219,25 +252,25 @@ fn run(self: *Vm) InterpretResult = {
             };
             @case(OpCode.SetLocal) => {
                 idx: i64 = self.read_byte().zext();
-                self.stack[idx] = self.peek();
+                self.stack[frame.first_local + idx] = self.peek();
             };
             @case(OpCode.GetLocal) => {
                 idx: i64 = self.read_byte().zext();
-                self.push(self.stack[idx]);
+                self.push(self.stack[frame.first_local + idx]);
             };
             @case(OpCode.JumpIfFalse) => {
                 distance := self.read_u16();
                 if self.peek().is_falsy() {
-                    self.ip = self.ip.offset(distance);
+                    ip[] = ip[].offset(distance);
                 };
             };
             @case(OpCode.Jump) => {
                 distance := self.read_u16();
-                self.ip = self.ip.offset(distance);
+                ip[] = ip[].offset(distance);
             };
             @case(OpCode.Loop) => {
                 distance := -self.read_u16();
-                self.ip = self.ip.offset(distance);
+                ip[] = ip[].offset(distance);
             };
             @default => {
                 println("bad opcode");
@@ -249,7 +282,7 @@ fn run(self: *Vm) InterpretResult = {
     binary_op :: fn($op: OverloadSet) void => {
         rhs := self.pop();
         lhs := self.pop();
-        if(rhs.is_number().and(lhs.is_number()).not()){
+        if !(rhs.is_number() && lhs.is_number()) {
             self.runtime_error("Operands must be numbers.");
             return(.RuntimeError); // non-local returns baby~
         };
@@ -260,23 +293,56 @@ fn run(self: *Vm) InterpretResult = {
     out
 }
 
+fn call_value(self: *Vm, callee: Value, arg_count: i64) bool = {
+    if !callee.is_obj() {
+        self.runtime_error("tried to call non-function");
+        return false;
+    }
+    f := @match(callee.to_obj()[].type) {
+        fn Function() => callee.to_function();
+        fn Native() => {
+            callee := ObjNative.to_obj_subtype(callee);
+            args := self.stack_top.offset(-arg_count).slice(arg_count);
+            result := callee'function(args);
+            self.stack_top = self.stack_top.offset(-arg_count - 1);
+            self.stack.len -= arg_count + 1;  // [...]
+            self.push(result);
+            return(true)
+        }
+        @default => {
+            self.runtime_error("tried to call non-function");
+            return(false)
+        };
+    };
+    if arg_count != f.arity {
+        self.runtime_error(@tfmt("expected % arguments but got %", f.arity, arg_count));
+        return false;
+    }
+    s := ptr_diff(self.stack.maybe_uninit.ptr, self.stack_top);
+    self.frames&.push(function = f, ip = f.chunk.code.index(0), first_local = s - arg_count - 1);
+    true
+}
+
 #inline fn read_byte(self: *Vm) u8 = {
-    b := self.ip[];
-    self.ip = self.ip.offset(1);
+    ip := self.frames&[self.frames.len - 1].ip&;
+    b := ip[][];
+    ip[] = ip[].offset(1);
     b
 }
 
 #inline fn read_u16(self: *Vm) i64 = {
-    a: i64= self.ip[].zext();
-    b: i64 = self.ip.offset(1)[].zext();
-    self.ip = self.ip.offset(2);
+    ip := self.frames&[self.frames.len - 1].ip&;
+    a: i64 = ip[][].zext();
+    b: i64 = ip[].offset(1)[].zext();
+    ip[] = ip[].offset(2);
     a.bit_or(b.shift_left(8))
 }
 
 #inline fn read_constant(self: *Vm) Value = {
     // TODO: you can't put the type annotation that does the cast on the var or the call because then it changes the overload resolution. 
     index := self.read_byte();
-    self.chunk.constants&.get(@as(i64) index.zext())
+    chunk := self.frames.last().unwrap()[].function.chunk&;
+    chunk.constants&.get(@as(i64) index.zext())
 }
 
 fn push(self: *Vm, value: Value) void = {
@@ -294,7 +360,10 @@ fn pop(self: *Vm) Value = {
 }
 
 fn peek(self: *Vm) Value = {
-    self.stack_top.offset(-1)[]
+    self.peek(0)
+}
+fn peek(self: *Vm, n: i64) Value = {
+    self.stack_top.offset(-1 - n)[]
 }
 
 fn reset_stack(self: *Vm) void = {
@@ -302,10 +371,14 @@ fn reset_stack(self: *Vm) void = {
 }
 
 fn runtime_error(self: *Vm, msg: Str) void = {
-    p := self.chunk.code&.as_ptr();
-    i := p.ptr_diff(self.ip);
-    line := self.chunk.lines[i];
     @fmt(self.errors&, "Runtime Error: %", msg);
+    each_rev self.frames& { frame |
+        chunk := frame.function.chunk&;
+        p := chunk.code&.as_ptr();
+        i := p.ptr_diff(frame.ip);
+        line := chunk.lines[i];
+        @fmt(self.errors&, "\n[line %] in %", line, frame.function.name);
+    };
 }
 
 ::ptr_utils(u8);
