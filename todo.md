@@ -392,6 +392,12 @@ need to be careful about the refs which have tags in the high bits so won't leb 
   - needed for import_c constructor attribute
 - easy way to expose c api when it can't pass the environment pointer. 
   sadly might have to reimplement thread locals. (which would be nice anyway so i could support more qbe languages)
+- make @emit_instructions not as painful to read. 
+  give placeholders names instead of numbers (and pass them as Expr::StructLiteralP instead of Expr::Tuple). 
+  or maybe allow tuple if the expressions are just a single variable and use that for the name as well. 
+  or maybe if you're just using it once, have `@{escapes}` where that string gets passed
+  to the macro and becomes an Expr::GetParsed so you don't have to give things names. 
+  and auto-convert i64 with f.getcon().
 
 ## backend symbols rework
 

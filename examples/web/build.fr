@@ -6,9 +6,6 @@ driver :: fn(vtable: *ImportVTable) void = {
 
     ok := run_cmd_blocking(franca, @slice("examples/default_driver.fr", "build", "examples/web/demo.fr", "-o", "examples/web/target/demo.wasm", "-arch", "wasm32", "-unsafe"));
     @assert(ok, "failed build");
-    mandel := import("@/examples/kaleidoscope.fr").EXAMPLE_PROGRAM;
-    
-    ssa := collect_with_extension("examples/import_c/test", ".ssa") || panic("lost tests");
     
     commit := if ci {
         ok, o, e := exec_and_catch("git", @slice("rev-parse", "HEAD"), temp());
@@ -25,31 +22,15 @@ driver :: fn(vtable: *ImportVTable) void = {
         @tfmt("%-%-%_dev", tm.hour, tm.min, tm.sec)
     };
     
-    paths := collect_paths @const_slice("lib", "compiler", "backend", "examples");
-    fs := u8.list(temp());
-    contents := u8.list(temp());
-    for paths { s |
-        l := contents.len;
-        read_and_push_or_crash(contents&, s);
-        @fmt(fs&, "\"%\": [%, %],", s, l, contents.len - l);
-    };
-    @fmt(fs&, "\"mandel.txt\": [%, %],", contents.len, mandel.len);
-    contents&.push_all(mandel);
-    fs.len -= 1;
+    fs, contents := collect_fs(temp());
+    m := manifest(fs, commit);
     
-    manifest := @tfmt(template,
-        """["examples/mandelbrot.fr", "examples/sudoku.fr", "examples/kaleidoscope.fr",
-            "examples/bf/bf2ir.fr", "examples/bf/code_string.fr", "examples/bf/inline_for.fr",
-            "compiler/main.fr", "examples/bf/c_string.fr", "examples/import_c/test/ffi.fr"
-        ]""",
-        "[\"mandel.txt\"]",
-        filenames("examples/import_c/test", ".c"),
-        filenames("backend/test", ".ssa"),
-        commit,
-        fs.items(),
-    );
+    ::DeriveJson(Manifest);
+    ::DeriveJson(Manifest.Compiler);
+    manifest := u8.list(temp());
+    m&.dump_json(manifest&);
     
-    write_entire_file_or_crash("examples/web/target/manifest.json", manifest);
+    write_entire_file_or_crash("examples/web/target/manifest.json", manifest.items());
     write_entire_file_or_crash(@tfmt("examples/web/target/%.txt", commit), contents.items());
     
     // TODO: this is slowly approching crazy town...
@@ -68,60 +49,85 @@ driver :: fn(vtable: *ImportVTable) void = {
     };
 }
 
-filenames :: fn(path: Str, ext: Str) Str = {
+manifest :: fn(fs: Fs, commit: Str) Manifest = (
+    compilers = (@slice(@as(Manifest.Compiler) (
+        name = "franca",
+        about = "",
+        examples = @const_slice(
+            "examples/mandelbrot.fr", "examples/sudoku.fr", "examples/kaleidoscope.fr",
+            "examples/bf/bf2ir.fr", "examples/bf/code_string.fr", "examples/bf/inline_for.fr",
+            "compiler/main.fr", "examples/bf/c_string.fr", "examples/import_c/test/ffi.fr",
+        ),
+    ), (
+        name = "c",
+        about = "See also: https://github.com/rui314/chibicc",
+        examples = filenames("examples/import_c/test", ".c"),
+    ), (
+        name = "qbe",
+        about = "See also: https://c9x.me/compile",
+        examples = filenames("backend/test", ".ssa"),
+    ), (
+        name = "kaledidoscope",
+        about = "See also: https://llvm.org/docs/tutorial/MyFirstLanguageFrontend",
+        examples = @const_slice("mandel.txt"),
+    ))).shallow_copy(temp()),
+    worker = "worker.js",
+    commit = commit,
+    wisdom = @const_slice(
+        "Blazingly 9x slower than native!", 
+        "Abstraction will continue until moral improves.",
+        "High precision timers are considered unsafe.",
+    ),
+    filesystem = fs,
+);
+
+collect_fs :: fn(a: Alloc) Ty(Fs, List(u8)) = {
+    paths := collect_paths @const_slice("lib", "compiler", "backend", "examples");
+    fs: HashMap(Str, Ty(i64, i64)) = init(a);
+    contents := u8.list(a);
+    for paths { s |
+        l := contents.len;
+        read_and_push_or_crash(contents&, s);
+        insert(fs&, s, (l, contents.len - l));
+    };
+    mandel := import("@/examples/kaleidoscope.fr").EXAMPLE_PROGRAM;
+    insert(fs&, "mandel.txt", (contents.len, mandel.len));
+    contents&.push_all(mandel);
+    (fs.raw, contents)
+} 
+
+filenames :: fn(path: Str, ext: Str) []Str = {
     files := collect_with_extension(path, ext) || panic("lost tests");
     
     @if(ext == ".ssa") // TODO: this is dumb
     ordered_retain files& { it |
         it := it[];
-        !it.ends_with("-na.ssa") && !it.ends_with("-arm.ssa") && !it.ends_with("-amd.ssa")
+        !it.ends_with("-na.ssa")
     };
     
-    out := u8.list(temp());
-    @fmt(out&, "[");
+    out := Str.list(temp());
     for files { it |
         full := @tfmt("%/%", path, it);
-        @fmt(out&, "\"%\",", full);
-        src := read_entire_file_or_crash(temp(), full);
-        write_entire_file_or_crash(@tfmt("examples/web/target/%", it), src);
+        out&.push(full);
     };
-    @if(files.len > 0) { out.len -= 1; };
-    @fmt(out&, "]");
     out.items()
 }
 
-template :: """{
-"worker": "worker.js",
-"compilers": [
-{
-    "name": "franca",
-    "about": "",
-    "examples": %
-},
-{
-    "name": "kaleidoscope",
-    "about": "See also: https://llvm.org/docs/tutorial/MyFirstLanguageFrontend",
-    "examples": %
-},
-{
-    "name": "c",
-    "about": "See also: https://github.com/rui314/chibicc",
-    "examples": %
-},
-{
-    "name": "qbe",
-    "about": "See also: https://c9x.me/compile",
-    "examples": %
+Fs :: RawHashMap(Str, Ty(i64, i64));
+
+Manifest :: @struct {
+    worker: Str;
+    compilers: []Compiler;
+    commit: Str;
+    wisdom: []Str;
+    filesystem: Fs;
+    
+    Compiler :: @struct {
+        name: Str;
+        about: Str;
+        examples: []Str;
+    };
 }
-],
-"commit": "%",
-"wisdom": [
-    "Blazingly 9x slower than native!", 
-    "Abstraction will continue until moral improves.",
-    "High precision timers are considered unsafe."
-],
-"filesystem": { % }
-}""";
 
 collect_paths :: fn(root: []Str) []Str = {
     extensions := @const_slice(".fr", ".md", ".ssa", ".c", ".h");
@@ -157,8 +163,10 @@ collect_paths :: fn(root: []Str) []Str = {
     };
     files.items()
 }
-    
+
 #use("@/lib/sys/process.fr");
 #use("@/lib/sys/subprocess.fr");
 #use("@/lib/sys/fs.fr");
 #use("@/examples/testing.fr");
+#use("@/lib/encoding/json_reflect.fr");
+#use("@/lib/collections/map.fr");

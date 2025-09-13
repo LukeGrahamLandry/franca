@@ -1,0 +1,149 @@
+// TODO: parse_json for tuple, rawhashmap, slice
+// TODO: return meaningful error message. 
+// TODO: options for how permisive to be about unexpected fields. 
+
+fn DeriveJson($T: Type) void = {
+    fn parse_json(json: *JsonParser, self: *T) bool = {
+        @inline_match(@run T.get_type_info_ref()) {
+            (fn Struct($_) => {
+                token := json.next().or(fn(_: Str) => return(false));
+                if(!token&.is(.StartDict), => return(false));
+                
+                found := 0;
+                
+                fields :: T.get_fields();
+                while => found < fields.len() {
+                    continue :: local_return;
+                    token := json.next().or(fn(_: Str) => return(false));
+                    if(!token&.is(.Key), => return(false));
+                    
+                    inline_for fields { $f | 
+                        name :: f[].name.str();
+                        if name == token.Key {
+                            inner := T.get_field_ptr(self, f);
+                            success := json.parse_json(inner);
+                            if(!success, => return(false));
+                            found += 1;
+                            continue();
+                        };
+                    };
+                    
+                    json.skip_next_value();
+                    continue();
+                };
+                json.skip_current_value();
+            });
+            @default => {
+                panic("Unsupported type for DeriveJson");
+            };
+        };
+        
+        true
+    }
+    
+    fn dump_json(self: *T, out: *List(u8)) void = {
+        @inline_match(@run T.get_type_info_ref()) {
+            (fn Struct($it) => {
+                fields :: T.get_fields();
+                prefix := "";
+                out.push_all("{");
+                inline_for fields { $f | 
+                    name :: f[].name.str();
+                    @fmt(out, "%\"%\": ", prefix, name);
+                    prefix = ",";
+                    inner := T.get_field_ptr(self, f);
+                    inner.dump_json(out);
+                };
+                out.push_all("}");
+            });
+            @default => {
+                panic("Unsupported type for DeriveJson");
+            };
+        };
+    }
+}
+
+#where(fn(T) => PointerTo(IsCollection(Slice))(T) && (T != *Str))
+fn dump_json(self: ~S, out: *List(u8)) void = {
+    out.push_all("[");
+    prefix := "";
+    each self[] { inner | 
+        out.push_all(prefix);
+        prefix = ",";
+        inner.dump_json(out);
+    };
+    out.push_all("]");
+}
+
+IsRawHashMap :: fn(T: Type) bool = {
+    check :: fn($T: Type) Type = RawHashMap(T.Key, T.Value);
+    has_const_field(T, @symbol Key) && has_const_field(T, @symbol Value) && invoke_specialized(Type, Type, check, T) == T
+}
+
+#where(PointerTo(IsRawHashMap))
+fn dump_json(self: ~S, out: *List(u8)) void = {
+    out.push_all("{");
+    prefix := "";
+    each self { key, value | 
+        ::@ct_assert((@type key) == Str, zeroed Span, "TODO: trait for dump_json map key");
+        out.push_all(prefix);
+        prefix = ",";
+        key&.dump_json(out);
+        @fmt(out, ":");
+        value.dump_json(out);
+    };
+    out.push_all("}");
+}
+
+IsTuple :: fn(T: Type) bool = {
+    info := T.get_type_info_ref();
+    info.is(.Struct) && info.Struct.is_tuple
+}
+
+#where(PointerTo(IsTuple))
+fn dump_json(self: ~S, out: *List(u8)) void = {
+    T :: Deref(S);
+    fields :: T.get_fields();
+    prefix := "";
+    out.push_all("[");
+    inline_for fields { $f | 
+        @fmt(out, "%", prefix);
+        prefix = ",";
+        inner := T.get_field_ptr(self, f);
+        inner.dump_json(out);
+    };
+    out.push_all("]");
+}
+
+fn parse_json(json: *JsonParser, i: *i64) bool = {
+    token := json.next().or(fn(_: Str) => return(false));
+    if(!token&.is(.Float), => return(false));
+    i[] = token.Float.int();
+    true
+}
+
+fn parse_json(json: *JsonParser, i: *Str) bool = {
+    token := json.next().or(fn(_: Str) => return(false));
+    if(!token&.is(.StringValue), => return(false));
+    i[] = token.StringValue;
+    true
+}
+
+fn dump_json(i: *i64, out: *List(u8)) void = {
+    i.display(out);
+}
+
+// TODO: other types of escapes
+fn dump_json(i: *Str, out: *List(u8)) void = {
+    out.push_all("\"");
+    for i[] { c |
+        if c == "\"".ascii() {
+            out.push_all("\\\"");
+        } else {
+            out.push(c);
+        };
+    };
+    out.push_all("\"");
+}
+
+#use("@/lib/encoding/json.fr");

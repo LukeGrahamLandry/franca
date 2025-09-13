@@ -1,4 +1,10 @@
 
+## (Sep 12)
+
+- stop making json strings manually for the web demo. 
+  think i spent less time doing it properly than i spent messing around with trailing commas before. 
+  strange when its hard to tell which things will be hard. 
+
 ## (Sep 9)
 
 - converting more of the c in web/gfx.fr
