@@ -439,9 +439,7 @@ fn declare_alias(m: *Qbe.Module, target: Qbe.Sym, alias: *Qbe.Lnk) void = {
 }
 
 fn finish_alias(m: *Qbe.Module, target: Qbe.Sym, alias: Qbe.Sym, export: bool) void = {
-    if m.goal.type != .JitOnly || m.goal.arch != .wasm32 {
-        maybe_add_export(m, alias, export);
-    };
+    maybe_add_export(m, alias, export);
     use_symbol(m, target) { t | 
         use_symbol(m, alias) { a | 
             a.alias = target;
@@ -450,18 +448,19 @@ fn finish_alias(m: *Qbe.Module, target: Qbe.Sym, alias: Qbe.Sym, export: bool) v
             a.offset = t.offset;
             a.jit_addr = t.jit_addr;
             a.shim_addr = t.shim_addr;
-            a.wasm_type_index = t.wasm_type_index;
+            @if(!IS_BOOTSTRAPPING) {
+            ::import("@/backend/wasm/abi.fr");
+            @if(t.wasm_type_index != -1) save_signature(m, alias, t.wasm_type_index);
+            @if(a.wasm_type_index != -1) save_signature(m, target, a.wasm_type_index);
+            };
             a.got_lookup_offset = t.got_lookup_offset;
+            a.wasm_module_function_index = t.wasm_module_function_index;
             m.do_fixups(a);
-    
-            push(m.temporary_alias&, (target, alias));
         };
     };
 }
 
 fn finish_function(m: *QbeModule, dest: []u8, name_id: Qbe.Sym) void #inline = {
-    // :SLOW
-    lock(m.icache_mutex&);
     m.last_function_end = dest.ptr.offset(dest.len);
     use_symbol(m, name_id) { s |
         s.size = dest.len.trunc();
@@ -474,13 +473,13 @@ fn finish_function(m: *QbeModule, dest: []u8, name_id: Qbe.Sym) void #inline = {
     };
     
     ::enum(@type m.goal.type);
-    if m.goal.got_indirection_instead_of_patches && m.goal.type == .JitOnly && m.goal.arch == .aarch64 {
+    if m.goal.expecting_wx && m.goal.type == .JitOnly && m.goal.arch == .aarch64 {
+        // :SLOW this is done redundantly in emit_fn
         clear_instruction_cache(u8.raw_from_ptr(dest.ptr), dest.len);
     };
     
     @debug_assert(m.currently_emitting_function);
     m.currently_emitting_function = false;
-    unlock(m.icache_mutex&);
 }
 
 // not a repro problem because the memory is already zeroed by page allocator
@@ -492,9 +491,10 @@ fn align_to(s: *SegmentCursor, align: i64) void = {
 }
 
 fn put_jit_addr(self: *QbeModule, name: Qbe.Sym, addr: rawptr) void = {
+    @debug_assert_eq(self.goal.type, .JitOnly);
     use_symbol(self, name) { symbol |
         @if(TODOWASM)
-        if self.goal.arch == .wasm32 && self.goal.type == .JitOnly {
+        if self.goal.arch == .wasm32 {
             // TODO: only do this if it's a function
             addr := addr.int_from_rawptr();
             if symbol.got_lookup_offset == -1 {
@@ -525,10 +525,6 @@ fn for_symbols(m: *QbeModule, $body: @Fn(id: Qbe.Sym, s: *SymbolInfo) void) void
     };
 }
 
-// TODO: when doing aot we just have to ask for our segments to have the same spacing as they did now and then relative addressing will just work out. 
-//       but for data constants with pointers we'll need to remember what relocations to ask the loader to do at runtime. 
-//       would be great if my language had nice relative pointers and then you wouldn't have to deal with that as much
-//
 fn do_jit_fixups(self: *QbeModule, id: Qbe.Sym, segment: SegmentType, final_offset: i64) void = {
     inbounds := segment == .ZeroInitData || (final_offset >= 0 && final_offset < self.segments&[segment].mmapped.len);
     @debug_assert(inbounds, "thats not in the segment");
@@ -633,10 +629,8 @@ fn ensure_got_slot(self: *QbeModule, symbol: *SymbolInfo, jit_address: rawptr) ?
     new_got_reloc: ?Fixup = .None;
     if symbol.got_lookup_offset == -1 {
         // need to reserve a new __got entry.  :GotAtConstantDataBase 
-        lock(self.icache_mutex&);
         symbol.got_lookup_offset = self.got&.len();
         got := self.got&.reserve(rawptr);  // :TodoErrorMessage
-        unlock(self.icache_mutex&);
         when_debug(self, .Patch) { out |
             @fmt(out, "# reserve __got[%] = %\n", symbol.got_lookup_offset / 8, symbol.name);
         };
@@ -692,7 +686,6 @@ fn emit_fn(f: *Qbe.Fn) void = {
     // you can remove this limit on the function but then have to add the check when emitting each branch. 
     @assert_lt(size, func_size_limit_bytes, "we don't allow a function larger than one arm64 instruction can jump");
     
-    lock(m.icache_mutex&);
     code_bytes := code.mmapped.subslice(start_offset, size);
     finish_function(m, code_bytes, name_id);
     
@@ -706,7 +699,6 @@ fn emit_fn(f: *Qbe.Fn) void = {
     // TODO: don't clear_instruction_cache in finish_function if i have to redo it here
     @if(pending_immediate_fixup_got.len != 0)
     with_write_protect m {
-        lock(m.icache_mutex&);
         fixup := m.target.fixup;
         start := code_bytes.ptr;
         //start := m.segments&[.Code].next;
@@ -721,17 +713,14 @@ fn emit_fn(f: *Qbe.Fn) void = {
         };
         
         m.last_function_end = m.segments&[.Code].next;
-        @if(m.goal.type == .JitOnly && m.goal.arch == .aarch64)
+        @if(m.goal.expecting_wx && m.goal.type == .JitOnly && m.goal.arch == .aarch64)
         clear_instruction_cache(u8.raw_from_ptr(start), u8.raw_from_ptr(m.last_function_end));
-        unlock(m.icache_mutex&);
     };
-    unlock(m.icache_mutex&);
 }
 
 fn reserve_stub(m: *Qbe.Module, symbol: *SymbolInfo, $T: Type) *T #generic = {
     start_debug_info(m, symbol);
     code := m.segments&.index(.Code);
-    lock(m.icache_mutex&);
     @debug_assert(!m.currently_emitting_function);
     @debug_assert_eq(symbol.offset, -1);
     symbol.offset = code.len();
@@ -739,7 +728,6 @@ fn reserve_stub(m: *Qbe.Module, symbol: *SymbolInfo, $T: Type) *T #generic = {
     @debug_assert_eq(symbol.segment, .Code, "zero value");
     trampoline := code.reserve(T);
     m.last_function_end = code.next;
-    unlock(m.icache_mutex&);
     end_debug_info(m, symbol);
     trampoline
 }

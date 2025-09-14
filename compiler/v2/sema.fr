@@ -356,8 +356,6 @@ fn deref_one(self: *SelfHosted, ptr: *FatExpr) Maybe(void) = {
 }
 
 fn decl_var(self: *SelfHosted, name: Var, ty: *LazyType, value: *FatExpr) Maybe(void) = {
-    // TODO: this would make sense but i don't actually need it i guess since i store variable types globally.
-    //@debug_assert(self.dispatch.enclosing_function.is_some(), "ICE: runtime vars must have an enclosing function");
     no_type := ty.is(.Infer);
     self.last_loc = value.loc;
     want := ResultType.None;
@@ -489,7 +487,6 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
         };
         
         @check(self.compile_expr(expr, func.finished_ret.want())) return;
-        //@debug_assert(self.dispatch.enclosing_function.is_some() && self.dispatch.enclosing_function.unwrap() == fid, "lost enclosing");
         
         if func.ret&.is(.Infer) {
             func.finished_ret = (Some = expr.ty);
@@ -1111,18 +1108,8 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
         fn FromBitLiteral(f) => {
             ty := self.intern_type(Int = (bit_count = f.bit_count, signed = false));
             value := self.to_values(i64, f.value);
-            @switch(f.bit_count) {
-                @case(8) => {
-                    value.Small._1 = 1;
-                };
-                @case(16) => {
-                    value.Small._1 = 2;
-                };
-                @case(32) => {
-                    value.Small._1 = 4;
-                };
-                @default => ();
-            };
+            small := f.bit_count == 8 || f.bit_count == 16 || f.bit_count == 32;
+            value.Small._1 = @if(small, f.bit_count.trunc() / 8, 8);
             expr.set(value, ty);
         }
         fn Unreachable() => {
@@ -1220,10 +1207,7 @@ fn compile_quote(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe
         @check(self.infer_return(unquote_placeholders)) return;
         return(Suspend = self.wait_for(Jit = unquote_placeholders));
     };
-    
-    //walk: MarkNotDone = ();
-    //walk&.walk_expr(arg); // TODO: might not need this :SLOW
-    
+   
     walk: Unquote = (compiler = self, placeholders = list(self.get_alloc()));
     @try(walk&.walk_expr(arg)) return;
     expr_ty := @unwrap(self.env.fat_expr_type, "used quoted ast during bootstrapping") return;
@@ -4155,12 +4139,7 @@ fn invoke(self: *SelfHosted, callee: FuncId, argument: *FatExpr, return_type: Ty
 /// Macro Expansion ///
 
 fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
-    // TODO: Bring back tag checks so i don't have to be paranoid!!
-    //       this annoys be enough that im tempted to go back to inlining all of these. 
-    //       tho maybe #once is reassuring enough. think about it. -- Jul 22
     @debug_assert(expr.expr&.is(.PrefixMacro)); 
-    // TODO: you probably want this but constants don't have it (really they shouldn't be compiled without being wrapped in a function?)
-    //@err_assert( self.dispatch.enclosing_function.is_some(), "ice: macro expansion must be in function context") return;
     invocation := expr.expr.PrefixMacro&;
     
     // This allows @a E; instead of @a(E);
@@ -4205,10 +4184,8 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
     assert(f_ty.ret == fat_expr_type, "tried to call macro with bad ret type. missing overload? \nresolve_in_overloadset assumes someone later will typecheck so giving a garabge match is fine");
     assert(f_ty.arg.eq(fat_expr_type).or(f_ty.arg == pair), "tried to call macro with bad arg type. missing overload? \nresolve_in_overloadset assumes someone later will typecheck so giving a garabge match is fine");
     expr.expr = (Poison = .InProgressMacro);  // they call me RefCell<FatExpr> because im always refing cells 
-    self.bump_dirty_new();
     zone := zone_begin(.CallDynamic);
     self.stats.macro_calls += 1;
-    //@if(self.tempdebug) @println("call %", fn_ptr);
     @if(TODOWASM, {
         // TODO: this is still wrong. need the type of the declaration. 
         if single {
@@ -4222,7 +4199,6 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
         callee := assume_types_fn(Arg = Ty(FatExpr, FatExpr), Ret = FatExpr, ptr = fn_ptr);
         expr[] = callee(invocation.arg[], invocation.target[]);  // :call_dynamic_values
     });
-    //@if(self.tempdebug) @println("ok");
     zone_end(zone);
     .Ok
 }

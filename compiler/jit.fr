@@ -4,8 +4,6 @@
 DynCallShim :: @tagged(Pending: Qbe.Sym, Ready: rawptr);
 
 fn call_dynamic_values(self: *SelfHosted, f_ptr: i64, f_ty: FnType, args_value: []u8) Values = {
-    //@if(self.tempdebug)
-    //    @println("call_dynamic_values %; % -> %", f_ptr, self.log_type(f_ty.arg), self.log_type(f_ty.ret));
     self.stats.dyn_call += 1;
     callee := self.dyncalls&.get_or_insert(f_ty) {
         // 
@@ -27,7 +25,6 @@ fn call_dynamic_values(self: *SelfHosted, f_ptr: i64, f_ty: FnType, args_value: 
             c
         }
     };
-    //@if(self.tempdebug) @println("ready for call");
     callee := assume_types_fn(Arg = Ty(*u8, *u8, i64), Ret = void, ptr = callee);
    
     // TODO: canary?
@@ -35,7 +32,6 @@ fn call_dynamic_values(self: *SelfHosted, f_ptr: i64, f_ty: FnType, args_value: 
     ret_buf := temp().alloc_zeroed(u8, ret_size);  // TODO: alignment?
     zone := zone_begin(.CallDynamic);
     callee(args_value.ptr, ret_buf.ptr, f_ptr);
-    //@if(self.tempdebug) @println("ok");
     zone_end(zone);
     self.from_bytes(ret_buf)
 }
@@ -315,21 +311,6 @@ fn shallow_jit_func(self: *SelfHosted, fid: FuncId) Res(void) = {
     .Ok
 }
 
-fn bump_dirty_new(self: *SelfHosted) void = 
-    bump_dirty_new(self.comptime_codegen.m);
-
-fn bump_dirty_new(m: *QbeModule) void = {
-    lock(m.icache_mutex&);
-    
-    start := m.start_of_writable_code;
-    end   := m.last_function_end;
-    if ptr_diff(start, end) > 0 {
-        clear_instruction_cache(u8.raw_from_ptr(start), ptr_diff(start, end));
-        m.start_of_writable_code = end;
-    };
-    unlock(m.icache_mutex&);
-}
-
 fn save_in_got(self: *SelfHosted, fid: FuncId, addr: rawptr) void = {
     // :InsaneCaches
     m := self.comptime_codegen.m;
@@ -414,7 +395,6 @@ report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHo
             save_in_got(self, fid, result);
             reset_temporary_storage(mark);
         };
-        self.comptime_codegen.m.bump_dirty_new();  // SLOW
     };
     result
 };

@@ -1,4 +1,13 @@
 
+## (Sep 14)
+
+- wasm situation seems fine without temporary_alias, 
+  for aot you can always do fixups and for jit it's been replaced by using the table. 
+- bump_dirty_new must be left over from when i was doing comptime_jit on another thread.
+  it's only called in compile_prefix_macro and report_called_uncompiled_or_just_fix_the_problem
+  which doesn't make any sense if it was doing anything. 
+  similarly icache_mutex
+
 ## (Sep 12)
 
 - stop making json strings manually for the web demo. 

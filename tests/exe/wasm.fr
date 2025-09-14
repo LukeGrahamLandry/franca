@@ -1,0 +1,42 @@
+// TODO: import_wasm/run.fr should cache a dynamic library
+// TODO: autotest run this
+
+main :: fn() void = {
+    franca := get_executable_path(temp());
+    hush(@slice(franca, "examples/web/build.fr"));
+    hush(@slice(franca, "examples/default_driver.fr", "build", "examples/import_wasm/run.fr", "-o", "target/w.out"));
+    
+    B :: import("@/examples/web/build.fr");
+    manifest := B'manifest(B.Fs.zeroed(), "");
+    
+    manifest.compilers[0].examples&.ordered_retain(fn(it) => it[] != "compiler/main.fr");
+    manifest.compilers[1].examples&.ordered_retain(fn(it) => true
+        && !it[].ends_with("pragma-once.c") 
+        && !it[].ends_with("function.c") 
+        && !it[].ends_with("varargs.c") 
+        && !it[].ends_with("literal.c")  // 3e+8
+        && !it[].ends_with("macro.c") 
+        && !it[].ends_with("float.c")  // 2e3
+        && !it[].ends_with("cast.c")  // 2e15
+    );
+    manifest.compilers[2].examples&.ordered_retain(fn(it) => true
+        && !it[].ends_with("abi5.ssa")  // snprintf
+        && !it[].ends_with("abi6.ssa")  // snprintf
+        && !it[].ends_with("abi8.ssa")  // snprintf
+        && !it[].ends_with("echo.ssa")
+        && !it[].ends_with("fpcnv.ssa")  // 9.499222733527032e+18
+        && !it[].ends_with("vararg1.ssa")
+        && !it[].ends_with("vararg2.ssa")
+    );
+    each manifest.compilers { it |
+        run_tests_main_threaded(Str, Str, it.name, it.examples, fn(_, it) = it[], fn(name, file) = {
+            a := @slice("examples/web/target/demo.wasm", "--", "-lang", name, "-file", file[]);
+            ok, o, e := exec_and_catch("target/w.out", a, temp());
+            (ok, o, e, "")
+        });
+    };
+}
+
+#use("@/lib/sys/process.fr");
+#use("@/lib/sys/subprocess.fr");
+#use("@/examples/testing.fr");

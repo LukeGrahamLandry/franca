@@ -21,14 +21,10 @@ fn record_wasm_function_index(m: *Qbe.Module, id: Qbe.Sym) void = {
         s.referenced = true;
         export = s.export;
         if m.goal.type == .JitOnly {
-            s.wasm_module_function_index = m.local_needs_reloc.len.intcast();
+            s.wasm_module_function_index = m.local_needs_reloc.len.intcast(); 
         }; // else, AOT: there can be imports so real index can't be assigned yet. 
     };
     m.local_needs_reloc&.push(id);
-    
-    
-    // :WasmJitExportAllFunctions 
-    @if(TODOWASM) @if(!export) m.exports&.push(id);
 }
 
 fn emit_func_wasm32(f: *Qbe.Fn) []Ty(Fixup, Qbe.Sym) = {
@@ -568,20 +564,6 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
         };
     };
     
-    for m.temporary_alias { target, alias |
-        use_symbol(m, target) { t | 
-            use_symbol(m, alias) { a | 
-                // TODO: make sure it works if the alias is exported but not the target. 
-                a.got_lookup_offset = t.got_lookup_offset;
-                a.wasm_module_function_index = t.wasm_module_function_index;
-                ::import("@/backend/wasm/abi.fr");
-                @if(t.wasm_type_index != -1) save_signature(m, alias, t.wasm_type_index);
-                @if(a.wasm_type_index != -1) save_signature(m, target, a.wasm_type_index);
-                m.do_fixups(a);
-            };
-        };
-    };
-    
     // if we were just doing functions we could use `local_needs_reloc` instead of iterating 
     // every symbol but there are also globals in the data segment which need fixups as well. 
     for_symbols m { id, symbol |
@@ -590,7 +572,7 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
         if ref && new {
             m.do_fixups(symbol);
         } else {
-            @debug_assert(symbol.segment != .Code || symbol.got_lookup_offset != -1 || !symbol.referenced, "% unfilled", symbol.name);
+            @debug_assert(symbol.segment != .Code || symbol.got_lookup_offset != -1 || symbol.fixups.len == 0, "% unfilled", symbol.name);
         }
     };
     
@@ -864,10 +846,6 @@ fn wasm_name(m: *Qbe.Module, s: *SymbolInfo) Ty(Str, Str) = {
     (mod, name)
 }
 
-//       :WasmJitExportAllFunctions
-// note: i rely on all functions being exported. 
-//       so indirect calls are going through the same table that gets filled out when calling instantiate_module_jit.
-//       you need function pointers to able to move between the modules. 
 // TODO: refactor this to remove duplication with the normal output_wasm_module
 fn output_wasm_module_jit(m: *QbeModule, indirect_table_base: i64) [][]u8 = {
     @debug_assert(indirect_table_base >= 0, "failed to grow table");
@@ -877,7 +855,6 @@ fn output_wasm_module_jit(m: *QbeModule, indirect_table_base: i64) [][]u8 = {
     // note: MutableData is fine even though i don't output a data for this module. 
     //       since it imports the whole memory, it can just use the literal pointers. 
     
-    @debug_assert_eq(m.exports.len, m.local_needs_reloc.len, "missing exports");
     enumerate m.local_needs_reloc& { i, id |
         use_symbol(m, id[]) { s |
             if s.got_lookup_offset == -1 {
@@ -887,7 +864,6 @@ fn output_wasm_module_jit(m: *QbeModule, indirect_table_base: i64) [][]u8 = {
             s.jit_addr = s.got_lookup_offset.rawptr_from_int();
             @debug_assert_eq(s.wasm_module_function_index, i.intcast());
         };
-        @debug_assert_eq(m.exports[i].id, id[].id, "export order wrong");
     };
     
     when_debug(m, .Patch) { out |
@@ -1020,9 +996,16 @@ fn output_wasm_module_jit(m: *QbeModule, indirect_table_base: i64) [][]u8 = {
 // so function/data imports are just the literal values from the current module, same as native. 
 make_exec :: fn(m: *Qbe.Module) void = {
     @if(!TODOWASM) unreachable();
+    
+    // note: i rely on all functions being exported. 
+    //       so indirect calls are going through the same table that gets filled out when calling instantiate_module_jit.
+    //       you need function pointers to able to move between the modules. 
+    m.exports&.clear();
+    m.exports&.push_all(m.local_needs_reloc.items());
     @if(m.exports.len == 0) return();
 
     first_export := table_grow(m.exports.len.intcast()).intcast();
+    @debug_assert_gt(first_export, 0, "failed to grow table");
     
     module := output_wasm_module_jit(m, first_export);
     module := concat(module&, temp());
@@ -1035,7 +1018,6 @@ make_exec :: fn(m: *Qbe.Module) void = {
     // creates the module and appends the exported functions to our indirect function table. 
     jit_instantiate_module :: fn(address: *u8, length: i64, table_start: i64, table_index: u32) void #weak #import("libc");
     
-    @debug_assert_gt(first_export, 0, "failed to grow table");
     jit_instantiate_module(module.ptr, module.len, first_export, 0);
 
     enumerate m.exports& { i, id |
@@ -1056,20 +1038,8 @@ make_exec :: fn(m: *Qbe.Module) void = {
         };
     };
     
-    for m.temporary_alias { target, alias |
-        use_symbol(m, target) { t | 
-            use_symbol(m, alias) { a | 
-                if a.got_lookup_offset == -1 {
-                    a.got_lookup_offset = t.got_lookup_offset;
-                };
-                table_assign(a.got_lookup_offset.intcast(), t.got_lookup_offset.intcast());
-            };
-        };
-    };
-    
     // it's fine to call this multiple times to keep adding jitted code to the module, 
     // just don't re-emit stuff that's already done. 
-    // TODO: make sure not to re-fixup these
     m.exports&.clear();
     m.local_needs_reloc&.clear();
     // TODO: could reuse the memory instead
