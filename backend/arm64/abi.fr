@@ -114,11 +114,7 @@ fn typclass(c: *Class, t: *Qbe.Typ, gp: []Arm64Reg, fp: []Arm64Reg, globals: *Qb
     c.size = bitcast sz;
 
     if c.ishfa {
-        if ((@as(i64) c.hfa.size.zext()) != t.header.size.zext() / if(is_wide(c.hfa.base), => 8, => 4)) {
-            type_index := ptr_diff(globals.types.ptr, t);
-            print_type(globals, type_index, globals.debug_out);
-            @panic("hfa size wrong! % % %", c.hfa.size, t.header.size, if(is_wide(c.hfa.base), => 8, => 4));
-        };
+        @debug_assert_eq(@as(i64) c.hfa.size.zext(), t.header.size.zext() / if(is_wide(c.hfa.base), => 8, => 4), "hfa size");
         range(0, c.hfa.size.zext()) { n |
             c.reg&[n] = fp.index_unchecked(0)[];
             fp = fp.slice_pop_first();
@@ -563,11 +559,14 @@ fn apple_selvaarg(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) void =
         storel %stk8, %1
     """);
 
-// this is very similar to the sysv one but of course not exactly the same. 
+// > https://github.com/ARM-software/abi-aa/blob/c51addc3dc03e73a016a1e4edf25440bcac76431/aapcs64/aapcs64.rst#14appendix-variable-argument-lists
+// > Procedure Call Standard for the Arm 64-bit Architecture (AArch64). 2025Q1
+// (stack: *u8, gr_top: *u8, vr_top: *u8, gr_offs: i32, vr_offs: i32);
+
 fn arm64_selvaarg(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) void = {
     isint     := is_int(i.cls());
-    if_24_28  := f.getcon(if(isint, => 24, => 28));
-    if_8_16   := f.getcon(if(isint, => 8, => 16));
+    if_24_28  := if(isint, => 24, => 28);
+    if_8_16   := if(isint, => 8, => 16);
     
     @emit_instructions((f = f, b = b), (i.arg&[0], if_24_28, if_8_16, i.to, i.cls()), """
     @b
@@ -595,7 +594,7 @@ fn arm64_selvaarg(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) void = {
 }
 
 fn apple_selvastart(f: *Qbe.Fn, p: Params, ap: Qbe.Ref) void = 
-    @emit_instructions((f = f), (f.getcon(p.stk.zext()), ap), """
+    @emit_instructions((f = f), (p.stk.zext(), ap), """
     @start
         %stk =l addr S-1
         %arg =l add %stk, %0
@@ -603,7 +602,7 @@ fn apple_selvastart(f: *Qbe.Fn, p: Params, ap: Qbe.Ref) void =
     """);
 
 fn arm64_selvastart(f: *Qbe.Fn, p: Params, ap: Qbe.Ref) void = 
-    @emit_instructions((f = f), (f.getcon((p.nfp.zext()-8)*16), f.getcon((p.ngp.zext()-8)*8), f.getcon(p.stk.zext() + 192), ap), """
+    @emit_instructions((f = f), ((p.nfp.zext()-8)*16, (p.ngp.zext()-8)*8, p.stk.zext() + 192, ap), """
     @start
         %ap28 =l add %3, 28
         storew %0, %ap28
@@ -619,7 +618,6 @@ fn arm64_selvastart(f: *Qbe.Fn, p: Params, ap: Qbe.Ref) void =
         %r0 =l add %rsave, %2
         storel %r0, %3
     """);
-
     
 selvastart :: fn(f: *Qbe.Fn, p: Params, ap: Qbe.Ref) void = if f.globals.target.apple {
     apple_selvastart(f, p, ap);

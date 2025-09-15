@@ -7,6 +7,31 @@
   it's only called in compile_prefix_macro and report_called_uncompiled_or_just_fix_the_problem
   which doesn't make any sense if it was doing anything. 
   similarly icache_mutex
+- emit_instructions
+  - auto-convert i64 argument with f.getcon(). 
+  - tried to not have the runtime array of Cls but it gets painful 
+    because you don't want to evaluate them muliple times 
+    and if a ref is an argument, not a new one, the cls will be wrong 
+    so can't just notice it's a template cls when emitting 
+    and replace the cls in the instruction with the one on the tmp. 
+    - tho the reason it annoys me is just that the useless stores to create the array don't get eliminated. 
+      problem there is that slots opt pessimistically treats all loads as 8 bytes when deciding if a slot is live.  
+- unfortunate that getting rid of the coalesce() opt 
+  makes it slower but smaller code 
+  because slots opt does better when slots don't alias.
+- the winds have shifted; SAVED_PAIRS is smaller and faster now, 
+  with the slight disadvantage that it doesn't work (mostly shows up with the wuffs c examples). 
+  but i think the pairs were already broken when it needs fixarg,
+  i just got lucky that i don't have many big stack frames. 
+  ```
+  //       if both need fixing with x17 we're fucked. 
+  //       because the first one gets fixed first and x17 goes in the instruction,
+  //       then decode_mem for the second fucks up x17. 
+  //       `off` will be 0 for both because they both try to put the exact address in x17. 
+  //        so it will bail out and leave the second address in x17 instead of the first. 
+  ```
+- did i somehow make run_tests_main_threaded more crash-y this commit? i don't understand. 
+  (started happening before i turned on SAVED_PAIRS so it's not that)
 
 ## (Sep 12)
 

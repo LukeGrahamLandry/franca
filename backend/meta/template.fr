@@ -68,7 +68,7 @@ fn emit_instructions(in: FatExpr) FatExpr #macro = {
     
     ref_count := f.ntmp.zext() - Qbe.Tmp0 + f.ncon.zext() - fcc;
     rt_map := FatExpr.list(ref_count, ast_alloc());
-    rt_cls := repeated(@{Qbe.Cls.Kw}, 10, ast_alloc());
+    rt_cls := repeated(@{Qbe.Cls.Kw}, args.len, ast_alloc());
     find :: fn(f: *Qbe.Fn, r: Qbe.Ref) ?i64 = {
         first, off, cap := @match(rtype(r)) {
             fn RTmp() => (Qbe.Tmp0, 0 - Qbe.Tmp0, f.ntmp.zext());
@@ -86,7 +86,7 @@ fn emit_instructions(in: FatExpr) FatExpr #macro = {
             rt_cls[i] = a[];
             any_cls_args = true;
         } else {
-            @ct_assert(a.ty == Qbe.Ref, a.loc, "template arg must be Ref or Cls");
+            @ct_assert(a.ty == Qbe.Ref || a.ty == i64, a.loc, "template arg must be Ref or Cls or int");
         };
     };
     @{
@@ -98,6 +98,9 @@ fn emit_instructions(in: FatExpr) FatExpr #macro = {
             enumerate f.tmp.slice(Qbe.Tmp0, f.ntmp.zext()) { i, t |
                 if t.visit != 0 {
                     arg_index: i64 = t.visit.intcast() - 1;
+                    if args[arg_index].ty == i64 {
+                        args[arg_index] = @{ getcon(rt_f, @[args[arg_index]]) };
+                    };
                     rt_map&.push(args[arg_index]);
                 } else {
                     n2 := @if(Qbe.TRACK_IR_NAMES, {
@@ -130,7 +133,6 @@ fn emit_instructions(in: FatExpr) FatExpr #macro = {
                 });
             };
             
-            refs := in;
             in.expr.Tuple = rt_map.as_raw();
             in.ty = UnknownType;
             classes := in;
@@ -141,9 +143,7 @@ fn emit_instructions(in: FatExpr) FatExpr #macro = {
                 k = @[classes]; // this was forward declared so the rt_k above can bind to them based on `replacements` 
                 refs := @slice(@[in]);
                 rt_block_map := @uninitialized Array(*Qbe.Blk, @[@literal @as(i64) f.nblk.zext()]);
-                @[{
-                    body := @{};
-                    
+                @[{                    
                     translate_ref :: fn(f: *Qbe.Fn, r: Qbe.Ref, loc: Span) FatExpr = {
                         ::assert_eq(Qbe.RegKind.enum_count(), 8);
                         t := rtype(r);
@@ -173,8 +173,9 @@ fn emit_instructions(in: FatExpr) FatExpr #macro = {
                     };
                     
                     emit_func := @literal emit_func;
+                    body := FatExpr.list(ast_alloc());
                     do_bodies(emit_func&, body&, replacements, f, src_node.loc, forward);
-                    do_bodies :: fn(emit_func: *FatExpr, body: *FatExpr, reps: [](Replacement), f: *Qbe.Fn, loc: Span, forward: bool) void = {
+                    do_bodies :: fn(emit_func: *FatExpr, body: *List(FatExpr), reps: [](Replacement), f: *Qbe.Fn, loc: Span, forward: bool) void = {
                         has_multiple_blocks := f.nblk != 1;
                         blocks := get_blocks(f);
                         block_index: i64 = f.nblk.zext();
@@ -195,20 +196,18 @@ fn emit_instructions(in: FatExpr) FatExpr #macro = {
                                 };
                                 a0 := f.translate_ref(i.arg&[0], loc);
                                 a1 := f.translate_ref(i.arg&[1], loc);
-                                body[] = @{ 
-                                    @[body[]]; 
+                                body.push(@{ 
                                     @[emit_func[]](rt_f, @[@literal i.op()], @[ct_k], @[to], @[a0], @[a1]); 
-                                };
+                                });
                             };
                             if has_multiple_blocks {
-                                body[] = @{ 
-                                    @[body[]]; 
+                                body.push(@{ 
                                     @[get_rt_block(block_index)] = @[if block_index != 0 {
                                         @{ split(rt_f, rt_block_start) }    
                                     } else {
                                         @{ rt_block_start }
                                     }];
-                                };
+                                });
                             } else {
                                 @ct_assert(b.jmp.type == .Jxxx, loc, "single block template cannot have terminators");
                             };
@@ -221,7 +220,7 @@ fn emit_instructions(in: FatExpr) FatExpr #macro = {
                         ::ptr_utils(Qbe.Phi);
                         @ct_assert(f.start.phi.is_null(), src_node.loc, "cannot use phi nodes when creating only a single block");
                     };
-                    do_terminators :: fn(body: *FatExpr, reps: []Replacement, f: *Qbe.Fn, loc: Span) void = {
+                    do_terminators :: fn(body: *List(FatExpr), reps: []Replacement, f: *Qbe.Fn, loc: Span) void = {
                         translate_block :: fn(f: *Qbe.Fn, b: *Qbe.Blk) FatExpr = {
                             if b.is_null() {
                                 return(@{ Qbe.Blk.ptr_from_int(0) });
@@ -237,8 +236,7 @@ fn emit_instructions(in: FatExpr) FatExpr #macro = {
                         };
                         
                         block_index := -1;
-                        body[] = @{
-                            @[body[]];
+                        body.push(@{
                             b := @[get_rt_block(0)];
                             b0 := @[get_rt_block(f.nblk.zext() - 1)];
                             b0.jmp = b.jmp;
@@ -248,61 +246,47 @@ fn emit_instructions(in: FatExpr) FatExpr #macro = {
                             for_jump_targets b { s | 
                                 chpred(s, b, b0);
                             };
-                        };
+                        });
                         for_blocks f { b |
                             block_index += 1;
                             
-                            body[] = @{
-                                @[body[]];
+                            body.push(@{
                                 rt_block = @[get_rt_block(block_index)];
-                            };
+                            });
                             
                             for_phi b { p | 
                                 arg_count := @literal @as(i64) p.narg.zext();
-                                body[] = @{
-                                    @[body[]];
-                                    prev := rt_block.phi;
-                                    rt_block.phi = temp().boxed(Qbe.Phi, (
-                                        cls = .Kl, 
-                                        to = @[f.translate_ref(p.to, loc)],
-                                        narg = 2,
-                                        blk = new(@[arg_count]),
-                                        arg = new(@[arg_count]),
-                                        link = prev,
-                                    ));
-                                };
+                                body.push(@{
+                                    rt_block.new_phi(.Kl, @[arg_count], @[f.translate_ref(p.to, loc)]);
+                                    rt_block.phi.narg = @[arg_count];
+                                });
                                 range(0, p.narg.zext()) { a |
                                     rt_a := @literal a;
-                                    body[] = @{
-                                        @[body[]];
+                                    body.push(@{
                                         rt_block.phi.arg[@[rt_a]] = @[f.translate_ref(p.arg[a], loc)];
                                         rt_block.phi.blk[@[rt_a]] = @[translate_block(f, p.blk[a])];
-                                    };
+                                    });
                                 };
                             };
                             
                             ::enum(Qbe.J);
                             if b.jmp.type != .Jxxx {
                                 @debug_assert(block_index != f.nblk.zext() - 1);
-                                body[] = @{
-                                    @[body[]];
+                                body.push(@{
                                     rt_block.jmp.type = @[@literal b.jmp.type];
                                     rt_block.jmp.arg = @[f.translate_ref(b.jmp.arg, loc)];
                                     rt_block.s1 = @[translate_block(f, b.s1)];
                                     rt_block.s2 = @[translate_block(f, b.s2)];
-                                };
+                                });
                             } else {
                                 @debug_assert(block_index == f.nblk.zext() - 1);
                             }
                         };
                     };
                     
-                    //debug_log_ast(body);
-                    body
+                    body.exprs_as_void(src_node.loc)
                 }]
             }
         }]
     }
 }
-
-

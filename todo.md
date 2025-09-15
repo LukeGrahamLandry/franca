@@ -397,7 +397,6 @@ need to be careful about the refs which have tags in the high bits so won't leb 
   or maybe allow tuple if the expressions are just a single variable and use that for the name as well. 
   or maybe if you're just using it once, have `@{escapes}` where that string gets passed
   to the macro and becomes an Expr::GetParsed so you don't have to give things names. 
-  and auto-convert i64 with f.getcon().
 
 ## backend symbols rework
 
