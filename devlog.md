@@ -1,4 +1,31 @@
 
+## (Sep 15)
+
+- trying to get rid of some of the tests/todo
+  - c.fr: taking address of direct field access on a constant pointer. 
+    - just compile the var as normal in compile_place_expr. 
+      allowing Expr::Value with ty=ptr makes it work for field load as well. 
+    - not sure if i want to allow arbitrary values to cast to thier address as well
+      (would allow using field of `::` but also mutating it which feels wrong)
+  - l.fr: coercing Fn->FnPtr->rawptr as argument to a call works at runtime but not with an `@run` on the call. 
+    - it's fixed by adding an extra check against requested in compile_expr(FnPtr), 
+      but i don't understand why it makes a difference if it got there through immediate_eval_expr or not. 
+    - oh ok, the difference is that the const path calls compile_expr more times 
+      so the runtime way it gets bored of compiling soon enough that it gets to emit_ir 
+      which doesn't care about fnptr vs rawptr? 
+      makes a difference because compile_expr->GetVar->compile_get_var->coerce_constant->make_fn_ptr_expr
+      doesn't set expr.done=true, so that coerce sets the type to rawptr, and then compile_fn_ptr sets it back again. 
+    - so the alternative solution is to only update the type make_fn_ptr_expr if it's UnknownType.
+    - also raises the question of why im ok with implicit casts to rawptr of function pointers but not other pointers. 
+  - b.fr: just a parser mistake 
+    - wasn't requiring a comma so `(a = b c d)` parsed as `(a = b c, d)`. 
+    - can't chain multiple quick exprs like that because it's the same as `if foo() {`, 
+      where you want the block to be passed to `if` not `foo`.
+  - switch_type_error and index_type_error work now, move them to the errors test
+  - declare that the deduplication tests aren't going to be fixed. 
+    even if i bring back deduplication, trying to do it without shims is too restrictive. 
+    i have no intention of guaranteeing the pointer identity it expects.
+
 ## (Sep 14)
 
 - wasm situation seems fine without temporary_alias, 

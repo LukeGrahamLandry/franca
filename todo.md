@@ -1,4 +1,10 @@
 
+- now that field access on const static works, 
+  can remove some places where i redundantly rebind it. 
+  clean those up!
+  - like `state := state[]` in terminal.fr, im sure there are more.
+  - tho some will need will need UpdateBoot (`wasm_type;` in to_wasm_type maybe?)
+- clearly Expr::Value.coerced is useless
 - real test for dynamic libraries
 - lite version of franca_runtime_init when running drivers so theres a sane place to make sure OS gets set
 - make stack trace debug info work accross multiple compilers. it needs to go in GlobalFrancaRuntime
@@ -230,9 +236,6 @@ TODO: be consistant about spelling: zeros or zeroes
 - #use is ordered
 - tests/todo
   - a.fr: first_ref_os, const_field_unordered
-  - b.fr: multiple prefix calls `float intcast 123`
-          (might even be a parser bug? always a surprise when that's the problem)
-  - c.fr: first use of constant is fieldaccess?
   - d.fr: OverloadingConfusedCoerce
   - e.fr: #use inside a block prevents lookups that escape to the outer scope
   - f.fr: missing ; should be disallowed

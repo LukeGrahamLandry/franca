@@ -48,6 +48,7 @@ fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(Ty(bool, bool)) #once =
         }
         fn Set(f) => {
             if f.place.expr&.is(.GetVar) {
+                @err_assert(f.place.expr.GetVar.kind != .Const, "Cannot assign to a ::constant") return;
                 @check(self.compile_get_var(f.place&, .None, false)) return;
                 @check(self.compile_expr(f.value&, f.place.ty.want())) return;
                 if !self.ask_can_assign(f.place.ty, f.value.ty) {
@@ -154,7 +155,16 @@ fn compile_place_expr(self: *SelfHosted, place: *FatExpr, requested: ResultType,
         fn Cast(arg) => {
             return(self.compile_place_expr(arg[], requested, want_deref));
         }
+        fn Value(it) => {
+            @err_assert(self.get_type(place.ty).is(.Ptr), "For now const-place-expr must be a pointer.") return;
+            return(.Ok);
+        }
         fn GetVar(var) => {
+            if var.kind == .Const {
+                @err_assert(!want_deref, "TODO: does want_deref of a constant ever make sense?") return;
+                @check(self.compile_get_var(place, requested, false)) return;
+                return(.Ok);
+            };
             info := self.scopes.get_var_type(var[]) || { 
                 return(@err("var must be declared: %", var.log(self)))
             };
@@ -723,6 +733,7 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
         fn Value(f) => {
             if(expr.ty == UnknownType, => return(@err("ICE: Value expression must have known type:\n %", log(f.bytes&, self, UnknownType))));
             if !f.coerced {
+                // TODO: this always happens. coerced is never true. why bother with it. 
                 @if_let(requested) fn Specific(ty) => {
                     if expr.ty != ty {
                         @check(self.coerce_const_expr(expr, requested, false)) return;
@@ -850,6 +861,7 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
         }
         fn Deref(inner) => @check(self.compile_deref_place(expr, requested, true)) return;
         fn Addr(inner) => {
+            @err_assert(!inner.expr&.is(.GetVar) || inner.expr.GetVar.kind != .Const, "cannot take address of a ::constant") return;
             // Note: the old version had special handling for GetVar here to avoid loops but this seems fine... - Jul 30
             @check(self.compile_place_expr(inner[], requested, false)) return;
             expr[] = inner[][];
@@ -1252,7 +1264,10 @@ fn compile_fn_ptr(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
     // The backend still needs to do something with this, so just leave it
     ty := @unwrap(func.finished_ty(), "!fnptr expected known type") return;
     ty := self.intern_type(FnPtr = (ty = ty));
-    expr.ty = ty;
+    if expr.ty == UnknownType {
+        // don't want to reset it if it's already been coereced. 
+        expr.ty = ty;
+    };
     .Ok
 }
 
@@ -3505,15 +3520,6 @@ fn set(self: *SelfHosted, expr: *FatExpr, $T: Type, value: T) void #generic = {
 }
 
 fn handle_finish_rec_type(self: *SelfHosted, hole: Type, name: Var, value: *FatExpr) Maybe(void) = {
-    if false {
-        @println("handle_finish_rec_type % % %", name.scope.as_index(), self.pool.get(name.name), hole);
-        if self.pool.get(name.name) == "QbeModule" {
-            each self.imports { name, value |
-                @println("- %: %", self.pool.get(name), value[].as_index());
-            };
-            println("---");
-        };
-    };
     result_type := @check(self.eval(value, Type)) return;
     assert(result_type != hole, "ICE: @rec resolved to itself");
     self.update_placeholder(hole, result_type, name.name);
@@ -3596,15 +3602,16 @@ fn ask_coerce_const_expr(self: *SelfHosted, expr: *FatExpr, want: Type, query: b
                 if(query, => return(Ok = true));
                 
                 expr.ty = want;
-                // TODO: typecheck args
                 return(Ok = true);
             }
             fn FnPtr(f_ty) => {
                 expr.done = false;
                 fid := @check(self.eval(expr, FuncId)) return;
                 @check(self.check_promote_id_to_func(fid, f_ty.ty)) return;
-                self.make_fn_ptr_expr(expr, fid, UnknownType);  // TODO: why am i saying `want` directly in the overloadset case but not here
-                // TODO: typecheck
+                if(query, => return(Ok = true));
+                // TODO: check_promote_id_to_func doesn't check argument types. 
+                //       fix that then this can pass want directly and not call compile_expr again. 
+                self.make_fn_ptr_expr(expr, fid, UnknownType);
                 @check(self.compile_expr(expr, (Specific = want))) return;
                 return(Ok = true);
             }
@@ -3612,7 +3619,6 @@ fn ask_coerce_const_expr(self: *SelfHosted, expr: *FatExpr, want: Type, query: b
                 if(query, => return(Ok = true));
                 fid := @check(self.eval(expr, FuncId)) return;
                 self.make_fn_ptr_expr(expr, fid, rawptr);  // :get_or_create_type
-                // TODO: could call compile_expr/compile_fn_expr instead of imm+took
                 return(Ok = true);
             }
             @default => ();
@@ -3965,9 +3971,6 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
             };
         };
     };
-    
-    //println(self.comp().log(expr));
-    //self.codemap.show_error_line(expr.loc, true);
     
     // The expression is too complex to deal with here. 
     // So box it into a function, compile that normally, and then just call into it with no arguments when we come around again.

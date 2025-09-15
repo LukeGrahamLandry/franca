@@ -68,6 +68,22 @@ fn type_errors() #test => {
             println("A");
         };
     };
+    
+    @assert_type_error(Ty([]i64, i64), Ty([]i64, u32)) {
+        a := @slice(1, 2, 3);
+        b: u32 = 2;
+        c := a[b];  // indices are always i64
+    };
+    
+    @assert_type_error(u8, Str) {
+        c: u8 = 0;
+        b := @switch(c) {
+            @case("a".ascii()) => 1;
+            @case("0") => 2;  // oops, missing .ascii()
+            @case(0) => 3;
+            @default => 4;
+        };
+    };
 }
 
 // TODO: check that its the right error message
@@ -137,6 +153,9 @@ fn other_errors() #test = {
             };
         };
     };
+    
+    @assert_compile_error { a :: @static(i64); a = 123; };
+    @assert_compile_error { a :: @static(i64); b := a&; };
 }
 
 
@@ -155,19 +174,14 @@ fn assert_type_error(want_found: FatExpr, expr: FatExpr) FatExpr #macro = {
             };
             want := @[parts[0]];
             found := @[parts[1]];
-            @match(err) {
-                fn CoerceConst(it) => {
-                    m :: "CoerceConst wrong type";
-                    @assert_eq(it.wanted, want, m);
-                    @assert_eq(it.found, found, m);
-                }
-                fn TypeMismatch(it) => {
-                    m :: "CoerceConst wrong type";
-                    @assert_eq(it.wanted, want, m);
-                    @assert_eq(it.found, found, m);
-                }
+            w, f := @match(err) {
+                fn CoerceConst(it) => (it.wanted, it.found);
+                fn TypeMismatch(it) => (it.wanted, it.found);
                 @default => panic("expected type error");
             };
+            m :: "% wrong type: % vs %";
+            @assert_eq(w, want, m, err.tag(), w.typename().str(), want.typename().str());
+            @assert_eq(f, found, m, err.tag(), f.typename().str(), found.typename().str());
         };
     }
 }
