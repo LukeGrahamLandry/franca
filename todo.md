@@ -237,9 +237,8 @@ TODO: be consistant about spelling: zeros or zeroes
 - tests/todo
   - a.fr: first_ref_os, const_field_unordered
   - d.fr: OverloadingConfusedCoerce
-  - e.fr: #use inside a block prevents lookups that escape to the outer scope
   - f.fr: missing ; should be disallowed
-  - g.fr: bad performace of linked list of `body = @{ @[body]; @[next]; }`
+  - bad performace of linked list of `body = @{ @[body]; @[next]; }`
 - fix the infinite loop when a constant references itself
 - `@struct(a: A #use = (),);`
 - // TODO: don't segfault if you get a compile error inside a jit_shim. 

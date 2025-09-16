@@ -285,7 +285,7 @@ fn new_scope(self: *Scopes, parent: ScopeId, a: Alloc, loc: Span) ScopeId = {
 }
 
 ResolveScope :: @struct(
-    captures: List(Var),
+    captures: List(Var),  // TODO: unused
     compiler: *SelfHosted,
     scope: ScopeId,
     top_level := false,
@@ -917,7 +917,10 @@ fn log_it(old: *Var, why: Str) void = {
     self.codemap.show_error_line(it.expr.loc, false);
 }
 
+// TODO: copy #use to the new scope?
 fn decl_scope(self: *RenumberVars, name: *ScopeId) void = {
+    // TODO: name[] can already be in self.mapping for @{ quote } which seems wrong. 
+    
     a := self.compiler.get_alloc();
     prev := name[];
     old_scope := self.scope[prev]&;
@@ -929,7 +932,7 @@ fn decl_scope(self: *RenumberVars, name: *ScopeId) void = {
     new_vars: List(Var) = old_scope.vars&.items().clone(a);
     
     if SPAM_SCOPES {
-        @println("decl_scope SCOPE");
+        @println("decl_scope SCOPE S% -> S% (^S%)", @as(u32) prev, @as(u32) id, @as(u32) parent);
         each new_vars { old | 
             @println("- % %", self.compiler.log(old[]), old.kind);
         };
@@ -937,6 +940,7 @@ fn decl_scope(self: *RenumberVars, name: *ScopeId) void = {
     };
     
     new_constants := zeroed RawHashMap(Symbol, Var);
+    a := self.compiler.get_alloc();
     each new_vars { old | 
         v := old;
         new := v[];
@@ -952,7 +956,7 @@ fn decl_scope(self: *RenumberVars, name: *ScopeId) void = {
             self.scope.put_constant(new, expr, ty);
         };
         old[] = new;
-        new_constants&.insert(new.name, new, self.compiler.get_alloc());
+        new_constants&.insert(new.name, new, a);
     };
     new_scope := self.scope[id]&;
     new_scope.vars = new_vars.as_raw();
@@ -977,6 +981,15 @@ fn handle_expr(self: *RenumberVars, expr: *FatExpr) Result(DoMore, void) #once =
             // because sema/compile_quote does not recurse until after filling placeholders.  
         
             if !(f.scope == NOSCOPE) {
+                // when there's a #use in a block, ResolveScope will stop 
+                // and the resolve will happen when compile_expr gets there instead. 
+                // when that's in a nested capturing call, 
+                // the inner block will be renumbered before being resolved. 
+                // which somehow results in variables in the parent scope 
+                // being resolved to the original instead of the renumbered one. 
+                // TODO: i don't understand why the scope stored in the block isn't enough to make it work out when compile_expr eventually tries to resolve the new block.
+                _ := self.compiler.ensure_resolved(f);
+
                 self.decl_scope(f.scope&);
             };
             each f.body { stmt |

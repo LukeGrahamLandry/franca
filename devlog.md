@@ -25,7 +25,16 @@
   - declare that the deduplication tests aren't going to be fixed. 
     even if i bring back deduplication, trying to do it without shims is too restrictive. 
     i have no intention of guaranteeing the pointer identity it expects.
-
+  - e.fr: #use inside a block prevents lookups that escape to the outer scope. 
+    read gets treated as a new declaration? 
+    the problem is only when it's inside nested capturing_call. 
+    so it's pausing the do the #use and then getting called and renumbered. 
+    but the outer is inlined before the inner, so the inner one hasn't been 
+    resolved yet, still has GetNamed, which isn't renumbered, 
+    and still points to the parent scope not the cloned one? maybe? 
+    i can fix it by just ensure_resolved() before renumbering a block, 
+    but i feel like that shouldn't be necessary. 
+    
 ## (Sep 14)
 
 - wasm situation seems fine without temporary_alias, 
