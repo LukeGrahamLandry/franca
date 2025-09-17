@@ -140,7 +140,7 @@ fn fill_directory_scope(self: *SelfHosted, s: ScopeId) Res(void) = {
 // TODO: this provides an obvious extension point for being able to pass arguments when importing a library (replace the arg=empty_pattern).  
 fn make_function_scope(c: *SelfHosted, body: []FatStmt, name: Symbol, scope: ScopeId) Res(FuncId) = {
     loc := body[0].loc;
-    result := c.box(synthetic_ty((Value = (bytes = unit_value, coerced = false)), loc, void));
+    result := c.box(synthetic_ty((Value = (bytes = unit_value)), loc, void));
     result := synthetic_ty(new_block(body.as_raw_list(), result), loc, void);
     def: FnDef = (name = (Some = name), arg = empty_pattern(c.get_alloc(), loc), ret = (Finished = void), tags = list(temp()), loc = loc);
     func := make_func(def, (Some = result&), false, true);
@@ -285,14 +285,12 @@ fn new_scope(self: *Scopes, parent: ScopeId, a: Alloc, loc: Span) ScopeId = {
 }
 
 ResolveScope :: @struct(
-    captures: List(Var),  // TODO: unused
     compiler: *SelfHosted,
     scope: ScopeId,
     top_level := false,
 );
 
 fn new(compiler: *SelfHosted, scope: ScopeId, last_loc: Span) ResolveScope = (
-    captures = list(temp()),
     compiler = compiler,
     scope = scope,
 );
@@ -503,23 +501,6 @@ fn resolve_func_body(self: *ResolveScope, func: *Func) PRes = {
     self.pop_block();
     self.pop_block();
     self.pop_scope();
-
-    capures := self.captures;
-
-    if func.get_flag(.AllowRtCapture) {
-        // TODO: this is only needed for the error reporting below but involves a slow iteration (in find_var). 
-        //       Track which scope you're capturing from the first time we get the var so don't have to look it up again? -- Jun 26
-        // Now check which things we captured from *our* parent.
-        // Remember this is in temp allocator! 
-        //for self.captures { c |
-        //    self.find_var(c.name); // This adds it back to self.captures if needed
-        //};
-    } else {
-        // TODO: show the captured var use site and declaration site.
-        // TODO: add a test that this error is reported
-        @err_assert(capures.is_empty(), "Must use '=>' for closure '%' with captures", self.compiler.pool.get(func.name)) return;
-    };
-    self.captures&.clear();
 
     .Ok
 }
@@ -1168,7 +1149,7 @@ fn find_in_scope(self: *SelfHosted, s: ScopeId, name: Symbol, type: Type) Maybe(
     @if(var.kind != .Const) return(Ok = .None);
     value, type_found := @check(self.find_const(var, (Specific = type))) return;
     if type != type_found {
-        expr := synthetic_ty((Value = (bytes = value, coerced = false)), self.last_loc, type_found);
+        expr := synthetic_ty((Value = (bytes = value)), self.last_loc, type_found);
         // can't be @check because we just made a new expression. bleh. 
         value = @try(self.poll_in_place(Values, => self.immediate_eval_expr(expr&, type))) return;
     };

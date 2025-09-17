@@ -1,10 +1,4 @@
 
-- now that field access on const static works, 
-  can remove some places where i redundantly rebind it. 
-  clean those up!
-  - like `state := state[]` in terminal.fr, im sure there are more.
-  - tho some will need will need UpdateBoot (`wasm_type;` in to_wasm_type maybe?)
-- clearly Expr::Value.coerced is useless
 - real test for dynamic libraries
 - lite version of franca_runtime_init when running drivers so theres a sane place to make sure OS gets set
 - make stack trace debug info work accross multiple compilers. it needs to go in GlobalFrancaRuntime

@@ -434,8 +434,8 @@ fn ensure_resolved_body(self: *SelfHosted, fid: FuncId) Res(void) #inline = {
 fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = {
     func := self.get_function(fid);
     if(func.get_flag(.EnsuredCompiled), => return(.Ok));
-    assert(!func.get_flag(.MayHaveAquiredCaptures), "closures need to be specialized");
-    assert(!func.get_flag(.AnyConstArgs), "const args need to be specialized");
+    @debug_assert(!func.get_flag(.MayHaveAquiredCaptures), "closures need to be specialized");
+    @debug_assert(!func.get_flag(.AnyConstArgs), "const args need to be specialized");
     
     @try(self.ensure_resolved_body(fid)) return;
     
@@ -732,12 +732,9 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
         }
         fn Value(f) => {
             if(expr.ty == UnknownType, => return(@err("ICE: Value expression must have known type:\n %", log(f.bytes&, self, UnknownType))));
-            if !f.coerced {
-                // TODO: this always happens. coerced is never true. why bother with it. 
-                @if_let(requested) fn Specific(ty) => {
-                    if expr.ty != ty {
-                        @check(self.coerce_const_expr(expr, requested, false)) return;
-                    };
+            @if_let(requested) fn Specific(ty) => {
+                if expr.ty != ty {
+                    @check(self.coerce_const_expr(expr, requested, false)) return;
                 };
             };
             expr.done = true;
@@ -1246,8 +1243,6 @@ fn compile_fn_ptr(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
     @check(self.infer_arguments(fid)) return;
     @check(self.infer_return(fid)) return;
     func := self.get_function(fid);
-    // TODO: typecheck
-    //err!("!fn_ptr expected const fn not {}", self.program.log_type(ty));
     
     @err_assert(!func.get_flag(.AnyConstArgs), "cannot take pointer to function with const args") return;
     
@@ -1265,7 +1260,7 @@ fn compile_fn_ptr(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
     ty := @unwrap(func.finished_ty(), "!fnptr expected known type") return;
     ty := self.intern_type(FnPtr = (ty = ty));
     if expr.ty == UnknownType {
-        // don't want to reset it if it's already been coereced. 
+        // don't want to reset it if it's already been coerced. 
         expr.ty = ty;
     };
     .Ok
@@ -1336,9 +1331,7 @@ fn construct_struct_literal(self: *SelfHosted, expr: *FatExpr, requested: Result
             // also it's not ok if you suspend before going through to_remove. 
             done := true;
             enumerate bindings { i, b | 
-                value := or b.get_default() {
-                    return(@err("struct literal requires field value (use '=' not ':')"))
-                };
+                value := @unwrap(b.get_default(), "struct literal requires field value (use '=' not ':')") return;
                 ty := b.unwrap_ty();
                 @check(self.compile_expr(value, (Specific = ty))) return;
                 done = done && value.done;
@@ -1382,9 +1375,7 @@ fn construct_struct_literal(self: *SelfHosted, expr: *FatExpr, requested: Result
         fn Tagged(f) => {
             @err_assert(bindings.len == 1, "% is a @tagged, value should have one active varient not %", self.log_type(requested), bindings.len) return;
             b := bindings.index(0);
-            name := or b.ident() {
-                return(@err("struct literal requires field names"))
-            };
+            name := @unwrap(b.ident(), "struct literal requires field names") return;
             each f.cases& { f |
                 if f._0 == name {
                     ::as_ref(FatExpr);
@@ -1475,18 +1466,6 @@ fn compile_call_overload_set(self: *SelfHosted, expr: *FatExpr, requested: Resul
     if data.ready.len == 1 && data.pending.len == 0 {
         self.set(f, FuncId, data.ready[0]);
     } else {
-        // HACK. experiment. 
-        // interesting that this doesnt work. i guess it needs help to know the type? 
-        //if Flag.if.ident() == data.name {
-            //self.codemap.show_error_line(arg.loc);
-        //    if arg.expr&.is(.Tuple) && arg.expr.Tuple.len == 3 {
-        //        parts := arg.expr.Tuple&;
-        //        tt := synthetic_ty((Call = (f = parts.index(1), arg = self.make_unit_expr(expr.loc))), expr.loc, UnknownType);
-        //        ff := synthetic_ty((Call = (f = parts.index(2), arg = self.make_unit_expr(expr.loc))), expr.loc, UnknownType);
-        //        expr.expr = (If = (cond = parts.index(0), if_true = self.box(tt), if_false = self.box(ff)));
-        //        return(self.compile_expr(expr, requested));
-        //    };
-        //};
         mem := self.recycle_funcid&.pop() || empty();
         return(Suspend = self.wait_for(ResolveOverload = (
             os = os, 
@@ -1735,7 +1714,7 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
         // TODO: better error message. should show the previous usage. 
         if(func.get_flag(.OnceConsumed), => return(@err("tried to call once function again")));
         func.set_flag(.OnceConsumed);
-        assert(expr.done, "ICE: if we applied #once, the expression really needs to be .done");
+        @debug_assert(expr.done, "ICE: if we applied #once, the expression really needs to be .done");
     };
     
     if self.dispatch.enclosing_function.is_some() {
@@ -1937,7 +1916,7 @@ fn const_args_key(self: *SelfHosted, original_f: FuncId, arg_expr: *FatExpr) May
                         taken := or self.chop_prefix(ty, reader&) {| 
                             return(@err("ICE: not enough bytes to destructure value!"))
                         };
-                        parts&.push(synthetic_ty((Value = (bytes = taken, coerced = false)), arg_expr.loc, ty));
+                        parts&.push(synthetic_ty((Value = (bytes = taken)), arg_expr.loc, ty));
                     };
                     @debug_assert_eq(reader.bytes.len, reader.i, "ICE: didn't consume all bytes.");
                     arg_expr.expr = (Tuple = parts.as_raw());
@@ -2014,14 +1993,15 @@ fn remove_const_args(self: *SelfHosted, original_f: FuncId, arg_expr: *FatExpr) 
                 @check(self.can_assign(expected, found)) return;
             };
         };
-        removed := 0;
-        enumerate func.arg.bindings { i, binding | 
-            if binding.kind == .Const {
-                // TODO: this would be better if i was iterating backwards
-                arg_exprs.ordered_remove(i - removed);
-                removed += 1; // TODO: this sucks
-            };
+        
+        @debug_assert_eq(func.arg.bindings.len, arg_exprs.len);
+        i := 0;
+        ordered_retain arg_exprs { it |
+            keep := func.arg.bindings[i].kind != .Const;
+            i += 1;
+            keep
         };
+        
         if arg_exprs.is_empty() {
             // Note: this started being required when I added fn while.
             arg_expr.set(unit_value, void);
@@ -2106,7 +2086,7 @@ fn curry_const_args_inner(self: *SelfHosted, original_f: FuncId, new_fid: FuncId
     original_arg_count := old_func.arg.bindings.len();
     ::if(Maybe(FuncId));
     if original_arg_count == 1 {
-        assert(initial_removed_count == 0, "TODO: removed_count single");
+        @debug_assert(initial_removed_count == 0, "TODO: removed_count single");
         binding := func.arg.bindings[0]&;
         @debug_assert_eq(binding.kind, .Const);
         name := or binding.var() {
@@ -2430,7 +2410,6 @@ fn type_of(self: *SelfHosted, expr: *FatExpr) Maybe(Type) = {
             (Ok = field_val_ty)
         }
         @default => @err("failed to guess type");
-        //@default => @err("failed to guess type %", expr.log(self)); 
     }
 }
 
@@ -2456,7 +2435,6 @@ fn adjust_named_arguments(self: *SelfHosted, fid: FuncId, arg_expr: *FatExpr) Re
             };
             // but it might be an inline @tagged so this can't be an error
             return(.Ok);
-            //return(@err("arg not found for %", self.pool.get(want_name)));
         };
         arg_expr.expr = (Tuple = args.as_raw());
         arg_expr.done = false;
@@ -2905,7 +2883,7 @@ fn evaluate_where_clauses(self: *SelfHosted, fid: FuncId, generic_types: []Type,
     // Type of the argument to #where, NOT the function itself
     f_ty := self.intern_type(Fn = (arg = slow_arg_ty, ret = bool, unary = generic_types.len <= 1));  // :get_or_create_type
     
-    types_arg_expr: FatExpr = (expr = (Value = (bytes = types_value, coerced = false)), done = false, ty = slow_arg_ty, loc = loc);
+    types_arg_expr: FatExpr = (expr = (Value = (bytes = types_value)), done = false, ty = slow_arg_ty, loc = loc);
     each func.annotations& { ann |
         if ann.name == Flag.where.ident() {
             if ann.non_void_arg() { where_expr |
@@ -3057,7 +3035,6 @@ fn filter_overload_sync(self: *SelfHosted, arg_expr: *FatExpr, arg_expr_arity: i
 // TODO: need to check for conflicts somehow but we can't assume we're able to infer all the options here,
 //       because there might be cycles or more might be added later. 
 //       do i need to keep a list of all the (os, arg_ty -> fn) and check at the end?
-// TODO: do merges
 fn resolve_in_overload_set(self: *SelfHosted, f_ty: FnType, i: OverloadSet, loc: Span) Maybe(FuncId) = {
     types := self.arg_types(f_ty.arg);
     self.last_loc = loc;
@@ -3199,7 +3176,6 @@ fn hoist_constants(self: *SelfHosted, body: []FatStmt) Maybe(void) #once = {
                 // I thought i dont have to add to constants here because we'll find it on the first call when resolving overloads.
                 // But it does need to have an empty entry in the overload pool because that allows it to be closed over so later stuff can find it and share if they compile it.
                 if func.var_name& { var |
-                    // TODO: allow function name to be any expression that resolves to an OverloadSet so you can overload something in a module with dot syntax.
                     // TODO: distinguish between overload sets that you add to and those that you re-export
                     // TODO: assert placeholdervalue
                     i := @check(self.get_or_create_overloads(var.name, var.scope, func.loc)) return;
@@ -3289,7 +3265,7 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
                 os := @unwrap(os, "#redirect function only makes sense as part of an overload set") return;
                 os := self.to_values(OverloadSet, os);
                 expr := @unwrap(tag.non_void_arg(), "#redirect requires argument") return;
-                os := synthetic_ty((Value = (bytes = os, coerced = false)), expr.loc, OverloadSet);
+                os := synthetic_ty((Value = (bytes = os)), expr.loc, OverloadSet);
                 @err_assert(expr.expr&.is(.Tuple), "#redirect expected tuple") return;
                 parts := expr.expr.Tuple&;
                 parts.push(os, self.get_alloc());
@@ -3521,32 +3497,21 @@ fn set(self: *SelfHosted, expr: *FatExpr, $T: Type, value: T) void #generic = {
 
 fn handle_finish_rec_type(self: *SelfHosted, hole: Type, name: Var, value: *FatExpr) Maybe(void) = {
     result_type := @check(self.eval(value, Type)) return;
-    assert(result_type != hole, "ICE: @rec resolved to itself");
+    @debug_assert(result_type != hole, "ICE: @rec resolved to itself");
     self.update_placeholder(hole, result_type, name.name);
     .Ok
 }
 
 fn save_const_values(self: *SelfHosted, name: Var, value: Values, final_ty: Type, loc: Span) CRes(void) = {
-    self.save_const(name, (Value = (bytes = value, coerced = false)), final_ty, loc)
+    self.save_const(name, (Value = (bytes = value)), final_ty, loc)
 }
 
 fn save_const(self: *SelfHosted, name: Var, val_expr: Expr, final_ty: Type, loc: Span) CRes(void) #once = {
     @debug_assert(name.kind == .Const, "tried to save non-constant");
-    // TODO: do i have to check if someone is already working on this constant? -- Jul 30
     val := self.scopes.get_var_data(name);
-    // TODO: this used to work before new overloading rework. -- Aug 27
-    //if val._1&.is(.Finished) {
-    //    return(@err("tried to re-save constant %", name&.log(self)));
-    //};
-    //if !val._0.expr&.is(.Poison) {
-    //    return(@err("tried to stomp constant %", name&.log(self)));
-    //};
-    
     val.expr.expr = val_expr;
     val.expr.ty = final_ty;
-    // TODO: don't allocate for this. just use .temporary
     val.set_type(Finished = final_ty);
-    //self.scopes.put_var_type(name, final_ty);
     .Ok
 }
 
@@ -3555,9 +3520,6 @@ fn ask_coerce_const_expr(self: *SelfHosted, expr: *FatExpr, want: Type, query: b
     if found == want {
         return(Ok = true);
     };
-    // can't do this because it mightn ot be a value
-    //@assert(!expr.expr.Value.coerced, "const mismatch. % vs % but already coerced", self.log_type(found), self.log_type(want));
-    // TODO: set coereced? 
     
     want_info := self.get_type(want);
     found_info := self.get_type(found);
@@ -3568,7 +3530,7 @@ fn ask_coerce_const_expr(self: *SelfHosted, expr: *FatExpr, want: Type, query: b
                 os := @check(self.eval(expr, OverloadSet)) return;
                 fid := @check(self.resolve_by_type(os, f_ty[], expr.loc)) return;
                 if(query, => return(Ok = true));
-                self.set(expr, FuncId, fid); // :HERE
+                self.set(expr, FuncId, fid);
                 return(Ok = true);
             }
             fn FnPtr(f) => {
@@ -3956,7 +3918,7 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
         
         values := self.to_values(rawptr, fn_ptr);
         @debug_assert(values.Small._0 != 0, "Expr:FnPtr cannot return null");
-        expr.expr = (Value = (bytes = values, coerced = false));
+        expr.expr = (Value = (bytes = values));
         expr.done = true;
         return(Ok = values);
     };
@@ -4036,7 +3998,7 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
                     //       but without this you get an infinite loop on #link_rename
                     //       TODO: revisit this, #link_rename doesn't exist anymore but whatever the problem it revealed probably does -- Jun 15, 2025
                     // TODO: make a test that fails if you just do this now!
-                    expr.expr = (Value = (bytes = f._0&.clone(self.get_alloc()), coerced = false));
+                    expr.expr = (Value = (bytes = f._0&.clone(self.get_alloc())));
                     expr.ty = f._1;
                     // We can't report a type erorr from here so just let the slow path deal with it. 
                     if(ret_ty == f._1, => return(Some = f._0));
@@ -4112,7 +4074,7 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
             if self.check_quick_eval(it.ptr, it.ptr.ty) { ptr |
                 @debug_assert(ptr&.is(.Small) && ptr.Small._1 == 8);
                 ptr.Small._0 += it.bytes;
-                expr.expr = (Value = (bytes = ptr, coerced = false));
+                expr.expr = (Value = (bytes = ptr));
                 return(Some = ptr);
             };
             .None
@@ -4449,7 +4411,6 @@ fn enum_macro(self: *SelfHosted, arg: *FatExpr, target: *FatExpr) Maybe(FatExpr)
             @err_assert(sequential, "@enum on tuple of names must be of int type") return;
             as_int := as_int.unwrap();
             repr := if(as_int.bit_count == 8 || as_int.bit_count == 16 || as_int.bit_count == 32, => as_int.bit_count / 8, => 8);
-            //@err_assert(type == i64, "TODO: @enum(other-int-types)(Tuple)") return;
             enumerate names { i, name |
                 name := @unwrap(name.ident(), "@enum expected ident") return;
                 value := self.to_values(i64, i);
