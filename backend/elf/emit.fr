@@ -1,5 +1,3 @@
-// UNFINISHED: this only supports Exe and Relocatable not Dynamic. 
-
 EmitElf :: @struct {
     m: *Qbe.Module;
     header: *Elf.Header;
@@ -17,7 +15,7 @@ EmitElf :: @struct {
 SymbolTableInfo :: @struct {  
     fixups: []FixP = empty();
     symbols: []*SymbolInfo = empty();
-    local_count := 0;
+    local_count := 0;  // NOT counting exports
 };
 
 max_program_headers :: 9;
@@ -47,9 +45,24 @@ align_segments :: fn(m: *Qbe.Module) i64 = {
 finalize_symbols :: fn(m: *Qbe.Module) SymbolTableInfo = {
     fixups, symbols := collect_aot_fixups(m);
     
+    // TODO: would it be nicer to have multiple symbol tables (put exports elsewhere?)
+    //       if not, still have collect_aot_fixups return the list so you keep the extra capacity. :SLOW
+    if m.goal.type == .Dynamic {
+        ::List(@type symbols[0]);
+        s := symbols.assume_owned(temp());
+        for m.exports { id | 
+            it := m.get_symbol_info(id);
+            if it.fixups.len == 0 {
+                s&.push(it);
+            }
+        };
+        symbols = s.items();
+    };
+    
     // local symbols are kept seperate from imports. 
     // dynsym.sh_info is the index of the first global symbol. 
-    partition_unordered(*SymbolInfo, symbols, fn(it) => it.kind == .Local);
+    // exports are also global (same as imports)
+    partition_unordered(*SymbolInfo, symbols, fn(it) => it.kind == .Local && (!it.export || !@is(m.goal.type, .Relocatable, .Dynamic)));
     
     local_count := 0;
     enumerate symbols { i, s |
@@ -245,8 +258,6 @@ fn output_elf(m: *QbeModule) [][]u8 = {
     
     e: EmitElf = start_elf(m); e := e&;
     
-    @assert(m.goal.type != .Dynamic, "TODO: other types of elf");
-    
     e.section_header("")[] = Elf.SectionHeader.zeroed();
     p_header := e.program_header();
 
@@ -384,14 +395,33 @@ for_dynamic_loader :: fn(
         dynamics&.push(tag = .Needed, val = off);
     };
     
+    if e.m.goal.type == .Dynamic {
+        @debug_assert_eq(e.payload.len.mod(4), 0);
+        start := e.payload.len;
+        emit_dynamic_exports_hash(e, T);
+        dynamics&.push(tag = .Hash, val = base.virtual + start);
+        e.section_header(".hash")[] = (
+            name = 0,
+            type = .Hash, 
+            flags = 1.shift_left(@as(i64) Elf.SectionFlag.Alloc),
+            addr = 0,
+            offset = base.file + start, 
+            size = e.payload.len - start,
+            addr_align = 4,
+            ent_size = 4,
+            link = table.symbol_table_index.zext(),
+            info = 0,
+        );
+    };
+    
     dynamics&.push(tag = .StrTab, val = table.strtab);
     dynamics&.push(tag = .StrSz, val = table.strsz);
     dynamics&.push(tag = .SymTab, val = table.symtab);
     dynamics&.push(tag = .SymEnt, val = size_of(Elf.Symbol));
     
-    table := e.create_rela_table(T.fixups, base, table.symbol_table_index, 0, u8.ptr_from_int(0));
-    dynamics&.push(tag = .RelA, val = table.rela);
-    dynamics&.push(tag = .RelASz, val = table.relasz);
+    r_table := e.create_rela_table(T.fixups, base, table.symbol_table_index, 0, u8.ptr_from_int(0));
+    dynamics&.push(tag = .RelA, val = r_table.rela);
+    dynamics&.push(tag = .RelASz, val = r_table.relasz);
     dynamics&.push(tag = .RelAEnt, val = size_of(Elf.RelA));
     
     if m.goal.exe_debug_symbol_table {
@@ -403,6 +433,26 @@ for_dynamic_loader :: fn(
     dynamics
 };
 
+fn emit_dynamic_exports_hash(e: *EmitElf, T: SymbolTableInfo) void = {
+    // TODO: more buckets, actually do the hash table properly instead of just a linked list :SLOW
+    nbucket := 1;
+    nchain  := T.symbols.len + 1;
+    e.payload&.reserve((1 + 1 + nbucket + nchain) * size_of(u32));
+    e.payload&.reserve_type(u32)[] = nbucket.trunc();
+    e.payload&.reserve_type(u32)[] = nchain.trunc();
+    bucket := e.payload&.reserve_type(u32, nbucket);
+    chain  := e.payload&.reserve_type(u32, nchain);
+    
+    prev := 0;
+    range(0, e.m.exports.len) { i |
+        idx := e.m.get_symbol_info(e.m.exports[i])[].got_lookup_offset + 1;  // in symbol table
+        @debug_assert(idx != 0);
+        chain[idx] = prev.trunc();
+        prev = idx;
+    };
+    bucket[0] = prev.trunc();
+}
+
 SymbolTableResults :: @struct {
     string_table_index: u16;
     symbol_table_index: u16;
@@ -410,6 +460,7 @@ SymbolTableResults :: @struct {
     strsz: i64;
     symtab: i64;
     extra_strings: []i64;
+    first_global: i64;  // counting exports
 };
 
 // This sets symbol.got_lookup_offset to it's index in the table. 
@@ -437,7 +488,7 @@ create_symbol_table :: fn(
     out.extra_strings = extra_strings_out.items();
     
     imported_symbol_name_offsets := u32.list(symbols.len, temp());
-    is_local :: fn(info) => info.kind == .Local && (!info.export || e.m.goal.type != .Relocatable);
+    is_local :: fn(info) => info.kind == .Local && (!info.export || !@is(e.m.goal.type, .Relocatable, .Dynamic));
     
     local_count := 0;
     for symbols { info |
@@ -483,10 +534,10 @@ create_symbol_table :: fn(
         if local {
             section = e.section_index&[symbol.segment];
         };
-        
+
         type := @if(is_local(symbol), 
             Elf.STB_LOCAL, 
-                @if(symbol.strong || (symbol.export && e.m.goal.type == .Relocatable), 
+                @if(symbol.strong || symbol.export, 
                     Elf.STB_GLOBAL, 
                     Elf.STB_WEAK));
                     
@@ -525,6 +576,7 @@ create_symbol_table :: fn(
         info = local_count.trunc() + 1, 
     );
     out.symtab = base.virtual + symbol_table_start;
+    out.first_global = local_count + 1;  // not the same as T.local_count
     
     out
 };

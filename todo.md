@@ -1,4 +1,11 @@
 
+- examples/count.fr total lines is wrong
+- seperate all the tests that exec stuff or download stuff
+  and make run them seperatly. 
+  it's not acceptable that if i update macos and fuck up my clang, my normal tests fail. 
+- make all the tests pass on linux
+- backend provide linux start function for exe
+- fake assembler to be drop in for hare
 - real test for dynamic libraries
 - lite version of franca_runtime_init when running drivers so theres a sane place to make sure OS gets set
 - make stack trace debug info work accross multiple compilers. it needs to go in GlobalFrancaRuntime
@@ -528,15 +535,11 @@ need to be careful about the refs which have tags in the high bits so won't leb 
   does that replace Elf.MYSTERY_SPICE?
 - linux fault-na.ssa need to do the signal struct (rn it's skipped in backend/meta/test.fr)
 - :TodoLinux CLOCK_REALTIME
-- repro doesn't work cross compiling from linux to macos,
-but dump_macho.fr and objdump -d say they're the same (for mandelbrot_ui.fr at least). 
-so something in the data i guess? 
 - can't cross compile from (macos) to (linux -syscalls) if you call 
   write_entire_file at comptime because it wants gettime (for atomic file name, bleh)
   which i havn't transcribed syscall for on macos. will be fixed when i make prefer_syscall
   not a constant which i want to do anyway for reusing frc_inlinable when cross compiling. 
   (same for linux-sta -> linux-dyn)
-- elf Dynamic
 - how are you supposed to ask for page size? blink wants 64k instead of 4k. 
 - standalone import_c/cc.fr and meta/qbe_backend.fr can't make statically linked binaries because the `_init` is written in franca
 - if macos {  // todo: "why does this work on my linux but not github's linux"
@@ -561,9 +564,9 @@ q.out`impl2__7041:
 ```
 - shared libraries (backend/elf/emit.fr)
 - shader translation for the gui examples
-- non-amd64 support
 - mprotect .ConstantData segment after applying relocations
-  
+- readelf: Error: File contains multiple dynamic string tables
+
 ## amd64
 
 - amd64: `std/json        cc      FAIL test_wuffs_strconv_parse_number_f64_regular: "-0.000e0": have 0x0000000000000000, want 0x8000000000000000`

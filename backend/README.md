@@ -26,10 +26,9 @@ You can still print out the ir as human readable text between passes and modify 
 - Jit compile your program and run it in memory without needing to emit/link an executable.
   You can freely call between jit and aot code (even extern-c code from other compilers) because they follow the same standard abi.
   (This is what Franca uses for compile-time execution).
-- Emit Mach-O executables directly without depending on an external linker or (relocatable or dynamic) libraries for linking with other languages.
+- Emit Mach-O or Elf executables directly, without depending on an external linker, 
+  or (relocatable or dynamic) libraries for linking with other languages.
 - Ad-hoc signetures for Mach-O binaries so you can target macOS without depending on Apple's `codesign` program.
-- Emit Elf executables (and relocatable libraries) directly
-  - WIP: I can't do dynamic libraries yet and exes rely on franca_runtime_init
 - Added a Web Assembly target (outputs the binary format directly).
   - WIP: no dynamic/relocatable libraries and can't export/import globals.  
   - WIP: code quality is poor. there's lots of low hanging fruit optimisations in wasm/isel.fr.  

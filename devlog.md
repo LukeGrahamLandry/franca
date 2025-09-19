@@ -1,4 +1,17 @@
 
+## (Sep 18)
+
+- tests/x64_encoding.fr is more code than it's worth and i don't even run it
+- dynamic libraries on linux
+  - dlopen doesn't accept it if there's no symbol table, fair. 
+    make sure to add exports after collect_aot_fixups. 
+  - now dlsym can't find the function. `readelf -s` sees it. 
+    probably need `.hash` or `.gnu.hash` (clang puts them in Elf.Dyn as well). 
+    this is what google tells me https://docs.oracle.com/cd/E23824_01/html/819-0690/chapter6-48031.html
+    can i just not bother with the hashing and have one bucket so the chain is just incrementing indices. 
+    have to mark them global in the symbol table as well.
+    ok that works, but exports every symbol. so only put the exports in the linked list. 
+ 
 ## (Sep 15)
 
 - trying to get rid of some of the tests/todo
