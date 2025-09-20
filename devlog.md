@@ -1,4 +1,8 @@
 
+## (Sep 20)
+
+- there must be some pattern that breaks my arena allocator. 
+
 ## (Sep 19)
 
 - provide a start function for linux exe so .ssa and .c work without a linker

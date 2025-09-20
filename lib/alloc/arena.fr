@@ -72,7 +72,7 @@ ArenaCanary :: @struct {
 arena_alloc :: fn(raw_self: rawptr, size: i64, align: i64) rawptr = {
     self := ArenaAlloc.ptr_from_raw(raw_self);
     
-    chunk := self.chunk.or() {
+    chunk := self.chunk || {
         next := new_arena_chunk(self.parent, self.base_size, .None, self.making_new_chunk&);
         self.start = ArenaHeader.size_of();
         self.end = next.size;
@@ -86,9 +86,10 @@ arena_alloc :: fn(raw_self: rawptr, size: i64, align: i64) rawptr = {
     };
     loop {
         self.start = align_to(self.start, align);
+        @debug_assert(self.start <= self.end);  // TODO
         end  := self.start + size;
         
-        if end <= self.end {
+        if end </*=*/ self.end {
             ptr := ptr_cast_unchecked(From = ArenaHeader, To = u8, ptr = chunk);
             mem := ptr.offset(self.start);
             self.start = end;
@@ -100,14 +101,8 @@ arena_alloc :: fn(raw_self: rawptr, size: i64, align: i64) rawptr = {
             return(u8.raw_from_ptr(mem));
         };
         
-        if chunk.next { next |
-            chunk.used = self.start;
-            self.chunk = (Some = next);
-            self.start = ArenaHeader.size_of();
-            self.end = next.size;
-            chunk = next;
-        } else {
-            chunk.used = self.start;
+        chunk.used = self.start;
+        chunk = chunk.next || {
             if size >= MAX_ARENA_BUCKET {
                 panic("allocating so many bytes bro");
             };
@@ -115,11 +110,11 @@ arena_alloc :: fn(raw_self: rawptr, size: i64, align: i64) rawptr = {
             next_size := size.add(8).max(chunk.size.mul(2)).min(MAX_ARENA_BUCKET);
             new := new_arena_chunk(self.parent, next_size, (Some = chunk), self.making_new_chunk&);
             chunk.next = (Some = new);
-            self.chunk = (Some = new);
-            self.start = ArenaHeader.size_of();
-            self.end = new.size;
-            chunk = new;
+            new
         };
+        self.chunk = (Some = chunk);
+        self.end = chunk.size;
+        self.start = ArenaHeader.size_of();
         chunk.used = ArenaHeader.size_of();
     }
 };

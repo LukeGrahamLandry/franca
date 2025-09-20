@@ -273,6 +273,11 @@ Parse Error: unterminated block (mismatched '{')
 ```
 - `./target/cc.out examples/import_c/test/function.c -r` doesn't work
 
+## random failures
+
+- failed to read file 'target/franca/deps/fonts/ttf/JetBrainsMonoNL-Bold.ttf'
+  unpacking race probably
+
 ## 
 
 - put more stuff in read only data. 
@@ -569,10 +574,9 @@ q.out`impl2__7041:
 - shader translation for the gui examples
 - mprotect .ConstantData segment after applying relocations
 - readelf: Error: File contains multiple dynamic string tables
-- linux amd64 compiler/test.fr segfaults on examples/repl.fr -testrepl
-  but any of the exec styles work alone. 
-  (crashes in compile_all_symbols, i think this is a recurring problem?
-  it used to happen on riscv but now doesn't)
+- linux amd: consistantly fails in actions but not in orb rosetta. 
+  - wuffs/(png, jpeg, deflate) 
+  - import_c/tests/(macro, varargs, function, attribute, usualconv)
 
 ## amd64
 

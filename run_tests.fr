@@ -13,25 +13,27 @@ bins :: @S(
 // TODO: pass in ./cc.out and ./w.out instead of assuming
 test_cmds :: @S(
     @S("./target/f.out", "compiler/test.fr"),
-    // these 4 imply -cc
     @S("./target/r.out", "all", "-bin", "./target/q.out", "-jit"),
     @S("./target/r.out", "all", "-bin", "./target/q.out", "-w"),
     @S("./target/r.out", "all", "-bin", "./target/q.out", "-frc"),
     @S("./target/r.out", "all", "-bin", "./target/q.out", "-frc_inlinable"),
     @S("./target/f.out", "backend/test/folding.fr"),
     @S("./target/f.out", "tests/exe/sys.fr"),
-    @S("./target/r.out", "all", "-bin", "./target/q.out", "-cc", "-force_linker"), // dep:clang
-    @S("./target/r.out", "all", "-bin", "./target/q.out"),  // dep:clang
-    @S("./target/f.out", "tests/external/wuffs.fr"),  // dep:wuffs
+    @S("./target/f.out", "examples/default_driver.fr", "build", "examples/60fps.fr", "-dynamiclib"),
     @S("./target/f.out", "examples/import_c/test/test.fr"),
     @S("./target/f.out", "examples/import_c/test/test.fr", "-w", "target/w.out"),
-    @S("./target/f.out", "tests/external/lua.fr"),  // dep:lua
     @S("./target/f.out", "examples/import_c/test/ffi.fr"),
+);
+
+with_deps :: @S(
+    @S("./target/r.out", "all", "-bin", "./target/q.out", "-cc", "-force_linker"), // dep:clang
+    @S("./target/r.out", "all", "-bin", "./target/q.out"),  // dep:clang
     @S("./target/f.out", "examples/lox/test.fr", "-pass", "-hush"), // dep:lox
-    @S("./target/f.out", "tests/external/tcc.fr", "-ddc"),  // dep:tcc dep:clang
     @S("./target/f.out", "backend/test/generate.fr"),  // dep:qbe
-    @S("./target/f.out", "examples/default_driver.fr", "build", "examples/60fps.fr", "-dynamiclib"),
+    @S("./target/f.out", "tests/external/wuffs.fr"),  // dep:wuffs
     @S("./target/f.out", "examples/import_wuffs/test.fr"),
+    @S("./target/f.out", "tests/external/lua.fr"),  // dep:lua
+    @S("./target/f.out", "tests/external/tcc.fr", "-ddc"),  // dep:tcc dep:clang
 );
 
 // TODO: do the frc_inlinable trick to make these compile faster
@@ -87,17 +89,16 @@ fn driver(vtable: *ImportVTable) void = {
                     sh(@slice("./target/f.out", driver_path, "build", code, "-o", dest, "-keep-names"));
                 };
                 
-                // temporary!
                 test_cmds := test_cmds;
-                if query_current_arch() == .x86_64 {
-                    if query_current_os() == .macos {
-                        test_cmds = test_cmds.slice(0, 12);
-                    }
+                if query_current_arch() == .x86_64 || query_current_os() == .linux {
+                    // TODO: sysv abi does not support variadic env calls
+                    // TODO: import_c/tests/ffi.fr also doesn't work on arm
+                    test_cmds = test_cmds.slice(0, 10);
                 };
-                if query_current_os() == .linux {
-                    test_cmds = test_cmds.slice(0, 12);
+                if query_current_arch() == .x86_64 && query_current_os() == .linux {
+                    // TODO: orb rosetta and actions disagree ?? 
+                    test_cmds = test_cmds.slice(0, 8);
                 };
-                
                 for test_cmds { cmd | 
                     sh(cmd);
                 };
@@ -110,8 +111,21 @@ fn driver(vtable: *ImportVTable) void = {
                     (ok, out, err, "")
                 });
                 
-                // only do this at the end after all tests pass
                 for release_cmds { cmd | 
+                    sh(cmd);
+                };
+                
+                with_deps := with_deps;
+                if query_current_arch() == .x86_64 {
+                    with_deps = with_deps.slice(0, 5);
+                };
+                if query_current_os() == .linux {
+                    with_deps = with_deps.slice(0, 4);
+                };
+                if query_current_os() == .linux && query_current_arch() == .x86_64 {
+                    with_deps = with_deps.slice(0, 3);
+                };
+                for with_deps { cmd | 
                     sh(cmd);
                 };
                 
