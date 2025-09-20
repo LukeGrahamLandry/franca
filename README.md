@@ -25,8 +25,8 @@ runtime code will automatically be included in the final binary.
 The self-hosted backend generates machine code for arm64 (aarch64), amd64 (x86_64), riscv64, and wasm32. 
 There is no dependency on assemblers, linkers, llvm, or xcode-codesign. 
 
-- mach-o (macos): executables, dynamic libraries, relocatable object files
-- elf (linux): executables, relocatable object files (no dynamic libraries yet)
+- mach-o (macos), elf (linux)
+- executables, dynamic libraries, relocatable object files
 - jit: for comptime execution 
 
 All the tests pass on macos-arm64 and most on macos-amd64.  

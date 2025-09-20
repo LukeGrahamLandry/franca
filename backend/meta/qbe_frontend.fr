@@ -20,6 +20,7 @@ Args :: @struct {
     @"t?": bool #help("TODO: query the native target") = false;
     force_static_builtin_memmove: bool = false;  // hack for static builds with harec. TODO: formalize this? 
     paths: []Str #rest = empty();
+    nostart := false;
 }
 
 main :: fn() void = { 
@@ -72,7 +73,12 @@ main :: fn() void = {
     @assert(!args.cc || INCLUDE_MY_C_COMPILER, "didn't INCLUDE_MY_C_COMPILER can't -cc");
     @assert_le(int(args.c) + int(args.r) + int(args.frc), 1, "conflicting output type");
     m := Qbe.Module.zeroed(); m := m&;
-    Qbe'backend'init_module(m, (type = goal, os = os, arch = arch, exe_debug_symbol_table = true, prefer_libc_memmove = !args.force_static_builtin_memmove));
+    Qbe'backend'init_module(m, (
+        type = goal, os = os, arch = arch, 
+        exe_debug_symbol_table = true, 
+        prefer_libc_memmove = !args.force_static_builtin_memmove,
+        wrap_entry_for_linux_libc = !args.nostart,
+    ));
     set_debug_types(m, args.d, true);
     
     ::if(Fd);
@@ -136,9 +142,8 @@ main :: fn() void = {
     
         @if(is_linking_libc()) m.fill_from_libc();
         m.make_exec();
-        f := or m.get_addr("main") {
-            panic("couldn't find main()")
-        };
+        f := m.get_addr(m.goal.entry_point) 
+            || @panic("couldn't find %", m.goal.entry_point);
         f := assume_types_fn(Arg = Ty(i64, *CStr, *CStr), Ret = i64, ptr = f);
         cli_args&.insert(0, "thisisjittedcodegoodluckwiththat.exe");
         cli_args&.push(zeroed(CStr));

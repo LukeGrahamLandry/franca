@@ -260,10 +260,10 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
         }
         // ADDIW sign extends the result, so adding zero is just a sign extension. 
         fn extsw() => e.inst(R(0, 0, a0.rv().bits(), @as(u3) OpI.add, i.to.rv().bits(), .opw));
+        // TODO: ADDIW, ADDW, SUBW, MULW, DIVW, DIVUW, REMW, REMUW
         fn add() => @if(i.cls().is_int(), 
             e.simple_op(i, .add, 0),
             e.float_op(i, .add, 0b000));
-        // TODO: convert sub immediate to add -immediate in isel
         fn sub() => @if(i.cls().is_int(), 
             e.simple_op(i, .add, 0b0100000),
             e.float_op(i, .sub, 0b000));
@@ -385,7 +385,7 @@ fn unary(e: *EmitRv, i: *Qbe.Ins, funct12: i12, funct3: u3, opcode: Opcode) void
 }
 
 fn fcnvt(e: *EmitRv, i: *Qbe.Ins, have_ints: bool, from_int: bool, double: bool, long: bool, unsigned: bool) void = {
-    rm := @if(from_int, 0b000, 0b001);
+    rm := @if(from_int || i.op() == .truncd, 0b000, 0b001);
     e.inst(encode_fcnvt(i.arg&[0].rv(), rm, i.to.rv(), have_ints, from_int, double, long, unsigned))
 }
 
@@ -410,6 +410,7 @@ fn load_number(e: *EmitRv, off: i64, to: Qbe.Ref, k: Qbe.Cls) void = {
     fits_double_extend :: fn(i) => true
         && i >= -(1.shift_left(31)) - 1.shift_left(11) 
         && i <= 1.shift_left(31) - 1.shift_left(11) - 1;
+    @debug_assert(k.is_int());
     @debug_assert_lt(to.val(), 32);
     if k == .Kw {
         // if the high bits don't matter, sign extended is easier to encode. 
@@ -450,8 +451,8 @@ fn load_number(e: *EmitRv, off: i64, to: Qbe.Ref, k: Qbe.Cls) void = {
                 return();
             };
             
-            e.load_number(hi, rv_scratch_int, .Kw);
             e.load_number(lo, to, .Kw);
+            e.load_number(hi, rv_scratch_int, .Kw);
             
             e.emit(.shl, .Kl, rv_scratch_int, rv_scratch_int, e.f.getcon(32));
             // add.uw (zero extends rs1, thats why high bits of lo don't matter)

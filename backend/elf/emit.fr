@@ -253,6 +253,12 @@ create_the_segments :: fn(e: *EmitElf) PayloadBase = {
 
 // results are in temp()
 fn output_elf(m: *QbeModule) [][]u8 = {
+    if m.goal.wrap_entry_for_linux_libc {
+        start := "start";
+        m.emit_linux_start(m.intern(m.goal.entry_point), m.intern(start));
+        m.goal.entry_point = start;
+    };
+    
     debug_log_byte_size(m);
     code_size := align_segments(m);
     
@@ -817,6 +823,64 @@ section_header :: fn(e: *EmitElf, name: Str) *Elf.SectionHeader = {
     e.header.section_header_num += 1;
     h
 };
+
+fn emit_linux_start(m: *Qbe.Module, main: Qbe.Sym, start: Qbe.Sym) void = {
+    @if(IS_BOOTSTRAPPING) unreachable();  // :UpdateBoot
+    
+    // HACK: since i got rid of ExprLevelAsm and it's annoying to make another layer of
+    // wrapper function that calls the ir part, this asm function doesn't have a return 
+    // instruction so it falls through to the ir part. 
+    // TODO: will that work for relocatable library? 
+    //       im outputting relocations for local calls as though linker is allowed to move 
+    //       functions around, so maybe i need to make sure the size of the symbol covers the whole function. 
+
+    // (experimentally) I think only amd64 needs me to align sp myself 
+    // but it doesn't hurt to do it for the others as well just for good luck. 
+    // TODO: set fp/lr to zero so backtraces can stop safely?
+    code: MultiArchAsm = (data = ({
+        #use(Arm);
+        imm :: encode_bitmask(-16, true).unwrap();
+        (@const_slice(
+            add_im(.X64, x0, sp, 0, 0), 
+            // TODO: shouldn't need the @as(u5), the constants have a type annotation :CompilerBug
+            @bits(Bits.X64, 0b00, 0b100100, @as(u13) imm, @as(u5) x0, @as(u5) sp),  // :SpEncoding
+        )).interpret_as_bytes()
+    }, { 
+        #use(Amd);
+        b := u8.list(temp());
+        b&.encode_bin(.MovReg, .rdi, .rsp);
+        b&.encode_extended_op(.Direct, 0x83, 4, .rsp);  // r/m64 AND imm8 (sign-extended)
+        b&.push(@as(u8) 0 - 16);
+        b.items()
+    }, { 
+        #use("@/backend/rv64/bits.fr");
+        (@const_slice(
+            I(0, RvReg.SP.bits(), @as(u3) OpI.add, RvReg.A0.bits(), .op_imm),
+            I(-16, RvReg.SP.bits(), @as(u3) OpI.and, RvReg.SP.bits(), .op_imm),
+        )).interpret_as_bytes()
+    },
+        empty()  // wasm; unreachable
+    ));
+    m.add_code_bytes(start, code&);  
+    m.maybe_add_export(start, true);
+    
+    f := temp().box_uninit(Qbe.Fn);
+    default_init(f, m);
+    f.lnk = (id = m.intern("__start_middle"), no_inline = true);
+    f.start = temp().box_zeroed(Qbe.Blk);
+    f.nblk = 1;
+    f.start.jmp.type = .hlt;
+    
+    @emit_instructions((f = f), (f.symcon(main)),  """
+    @start
+        %sp =l par
+        %argc =l load %sp
+        %argv =l add %sp, 8
+        call $__libc_start_main(l %0, l %argc, l %argv, l 0, l 0, l 0, l 0)
+    """);
+    f.copy_instructions_from_scratch(f.start);
+    run_qbe_passes(f);
+}
 
 Elf :: import("@/backend/elf/bits.fr");
 #use("@/backend/lib.fr");

@@ -195,6 +195,9 @@ QbeTargetEnv :: @struct(
     // when this is false, builtin_static_memmove will be emitted and called instead of trying to import lib's memmove. 
     prefer_libc_memmove := true,
     
+    // call __libc_start_main and then call the entry point. 
+    wrap_entry_for_linux_libc := false,
+    
     segment_size        := 1.shift_left(25),
     max_got_size        := 1.shift_left(15),
     _       := 1.shift_left(11),  // :UpdateBoot
@@ -204,7 +207,8 @@ QbeTargetEnv :: @struct(
     // called for debug["D"]. the default one just execs 'llvm-mc' and hopes for the best. 
     dis: DisassemblerFunc = llvm_mc_dis,
     
-    //default_wasm_import_module := "env", TODO: layout change needs re-make
+    default_wasm_import_module := "env",
+    entry_point := "main",
 );
 
 QbeOutputPurpose :: @enum(i64) (Cached, JitOnly, Exe, Relocatable, Dynamic, CachedEarly);
@@ -419,6 +423,14 @@ fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
     };
     if m.goal.exe_debug_symbol_table && m.goal.os == .macos {
         leb128_unsigned(m.debug_info.macho_function_starts&, m.text_padding());
+    };
+    
+    // TODO: annoying that for relocatable or .frc, it could reasonably be a whole program (that should have wrap)
+    //       or a library (that shouldn't) so i can't really just do the right thing automatically. 
+    //       since i do emit_linux_start in elf/emit, it won't happen for .frc. 
+    //       and when doing Relocatable, even if this is the one containing the entry point, you have to use a linker anyway so it can give you a _start. 
+    if goal.os != .linux || goal.arch == .wasm32 || !goal.link_libc || goal.type != .Exe {
+        goal.wrap_entry_for_linux_libc = false;
     };
 }
 

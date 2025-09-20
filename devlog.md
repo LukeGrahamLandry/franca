@@ -1,4 +1,43 @@
 
+## (Sep 19)
+
+- provide a start function for linux exe so .ssa and .c work without a linker
+  - kinda regretting getting rid of ExprLevelAsm, adding another layer of wrapper to get 
+    sp and then call an ir wrapper because i don't want to write the calling 
+    __libc_start_main 3 times (each arcitecture) is annoying, 
+    actually it's kinda fine to just do an add_code_bytes without a return 
+    and fallthrough since i know functions are output linearly. 
+- function.c
+  - `-2131779649 0 glibc.cpu.aarch64_gcs` from 
+    `{ char buf[100]; fmt(buf, "%d %d %s", 1, 2, "foo"); printf("%s\n", buf); }`
+    (number changes every time, uninit memory clearly)
+  - maybe i was wrong about not needing to align sp on arm? 
+    no that's not it, also it works with calling printf directly. 
+  - not just arm, riscv is same (with different junk),
+    also broken with `-c -nostart` and linker. it works on amd tho.
+  - i bet im passing va_list by value wrong. 
+    yeah, rv works if i make it a single pointer, 
+    and arm it's 32 bytes not 24.
+- riscv: `./target/r.out abi5.ssa -bin ./target/q.out -cc`
+  ```
+  < ta: -10 10.100000
+  ---
+  > ta: -10 10.099999
+  ```
+  - works with clang compiling the driver instead of import_c
+  - also works with cross compiling (`franca backend/meta/qbe_frontend.fr backend/test/abi5.ssa -cc -t rv64 -o a.out`)
+  - strtod in tokenize is returning the same bits on both: 4621875412584313651
+  - difference in binaries is just when adjusting that constant after lui: 
+  ```
+  14768:	99a28293          	addi	t0,t0,-1638
+  ---
+  14768:	99928293          	addi	t0,t0,-1639
+  ```
+  - can't recreate in .ssa with an integer literal of that number or the f32 version 0x4121999a. 
+    oh so problem with downcasting the f64 to a f32? 
+    yeah, with that i can make a that that behaves the same when cross compiled. 
+  - truncd wants rm=0 instead of rm=1
+
 ## (Sep 18)
 
 - tests/x64_encoding.fr is more code than it's worth and i don't even run it

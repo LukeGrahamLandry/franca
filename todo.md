@@ -1,10 +1,8 @@
-
 - examples/count.fr total lines is wrong
 - seperate all the tests that exec stuff or download stuff
   and make run them seperatly. 
   it's not acceptable that if i update macos and fuck up my clang, my normal tests fail. 
 - make all the tests pass on linux
-- backend provide linux start function for exe
 - fake assembler to be drop in for hare
 - real test for dynamic libraries
 - lite version of franca_runtime_init when running drivers so theres a sane place to make sure OS gets set
@@ -262,6 +260,18 @@ TODO: end of loop. still too many options for 'index'
 - #inline returning Never doesn't remember that it returns Never
 - there's still a compilation order problem with inlining intrinsics. look at copy_bytes(). 
 - :ThisIsNotOkBecauseMemoryWillBeReused
+- rarely:
+```
+orb ./boot/temporary/linux-arm64.sh
+mkdir: cannot create directory ‘target’: File exists
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+100 1001k  100 1001k    0     0  5822k      0 --:--:-- --:--:-- --:--:-- 5858k
+panic! backend/lib.fr:1171:58
+find_ip_in_module :: fn(m: *QbeModule, addr: rawptr) ?Str = {
+Parse Error: unterminated block (mismatched '{')
+```
+- `./target/cc.out examples/import_c/test/function.c -r` doesn't work
 
 ## 
 
@@ -476,9 +486,7 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 - `thread backtrace` doesn't work in lldb. is my stack layout wrong? 
 - riscv_flush_icache syscall vs FENCE.I instruction for clear_instruction_cache
 - :TodoRiscv
-- compiler/test.fr (broken with exe+cached+cachedearly but works fine just running normally)
-  - examples/kaleidoscope.fr: dies in compile_all_symbols > elide_abi_slots > copy_bytes 
-  - examples/repl.fr -testrepl: same ^
+- ./target/f.out backend/test/folding.fr: panic! TODO: copy slot float
 
 ## don't rely on libc
 
@@ -547,10 +555,6 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 - elf_loader.fr doesn't work on linker output: `panic! not divisible by page size`
 - lldb doesn't have symbol names or let you set break points. do i need to do dwarf stuff?
   (it kinda works in gdb!)
-- decide what to do about entry point without linker (need to align stack always + 
-  static relocations or call `__libc_start_main`), but franca_runtime_init is 
-  written in franca (same problem for cc.fr). could do like staticmemmove and compile 
-  to module embedded in the compiler and spit that out on demand. 
 - once is_linking_libc isn't #fold, if you have a static compiler and want to link a libc thing
   and notice that the path to dynamic loader is valid, 
   it would be cool to try to do something where you morph by poking in the Dynamic header
@@ -562,10 +566,13 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 q.out`impl2__7041:
 ->  0x1016b78 <+224>: cas    x17, x0, [x2]
 ```
-- shared libraries (backend/elf/emit.fr)
 - shader translation for the gui examples
 - mprotect .ConstantData segment after applying relocations
 - readelf: Error: File contains multiple dynamic string tables
+- linux amd64 compiler/test.fr segfaults on examples/repl.fr -testrepl
+  but any of the exec styles work alone. 
+  (crashes in compile_all_symbols, i think this is a recurring problem?
+  it used to happen on riscv but now doesn't)
 
 ## amd64
 
