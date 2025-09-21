@@ -30,6 +30,7 @@
       create the copy, like if it's a spill slot that's far away because of a large stack frame. 
     - have to give up and reserve a float on riscv, but that's easy.
     - should output them backwards instead of reversing at the end
+- sethint for tmp->tmp copy in rega/do_block_instructions: 912848 -> 905052
 
 ## (Sep 19)
 

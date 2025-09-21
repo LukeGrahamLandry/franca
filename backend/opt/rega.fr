@@ -234,9 +234,13 @@ PMStat :: @enum(i64) (ToMove, Moving, Moved);
 
 ADD_TO_REG_WAIT_LIST :: false;
 
+// not exactly the same (we do it backwards and with swap instead of a temporary) but similar: 
 // Rideau, L., Serpette, B.P. & Leroy, X. Tilting at Windmills with Coq: Formal Verification of a Compilation Algorithm for Parallel Moves. J Autom Reasoning 40, 307–326 (2008).
 // https://xavierleroy.org/publi/parallel-move.pdf
-
+//
+// swap generates suboptimal code on arm/rv (3 instructions). 
+// can do better with a temporary instead but its a tiny improvement and not worth the hassle. see devlog Sep 21, 2025
+//
 // note: k is a pointer. we mutate back up through levels of recursion. 
 fn pmrec(c: *RegaCtx, status: []PMStat, i: i64, k: *Qbe.Cls) i64 = {
     /* note, this routine might emit
@@ -285,36 +289,6 @@ fn pmrec(c: *RegaCtx, status: []PMStat, i: i64, k: *Qbe.Cls) i64 = {
     cycle
 }
 
-// TODO: this is arm int only
-fn pmrec_NEW(c: *RegaCtx, status: []PMStat, i: i64, k: *Qbe.Cls) void = {
-    if c.pm&[i].src == c.pm&[i].dest {
-        status[i] = .Moved;
-        return();
-    };
-    @debug_assert(KBASE(c.pm&[i].cls) == KBASE(k[]), "bad kbase");
-    ::assert(Qbe.Cls.Kw.raw().bit_or(Qbe.Cls.Kl.raw()) == Qbe.Cls.Kl.raw(), "Cls numbers");
-    ::assert(Qbe.Cls.Ks.raw().bit_or(Qbe.Cls.Kd.raw()) == Qbe.Cls.Kd.raw(), "Cls numbers");
-    k[] = @as(Qbe.Cls) @as(i32) k[].raw().bit_or(c.pm&[i].cls.raw());
-    status[i] = .Moving;
-    range(0, c.pm.len) { j |
-        if c.pm&[i].dest == c.pm&[j].src {
-            @match(status[j]) {
-                fn Moving() => {
-                    t := TMP(18);  @debug_assert(c.f.globals.goal.arch == .aarch64 && k[].is_int());
-                    c.f.emit(.copy, c.pm&[j].cls, t, c.pm&[j].src, QbeNull); // xxx same
-                    c.pm&[j].src = t;
-                }
-                fn ToMove() => c.pmrec_NEW(status, j, k);
-                fn Moved() => ()
-            };
-        }
-    };
-    c.f.emit(.copy, c.pm&[i].cls, c.pm&[i].dest, c.pm&[i].src, QbeNull); // xxx same
-    status[i] = .Moved;
-}
-
-SWAP_PM :: true;
-
 fn pmgen(c: *RegaCtx) void = {
     ::enum_basic(PMStat);
     status := temp().alloc_zeroed(PMStat, c.pm.len);
@@ -324,18 +298,9 @@ fn pmgen(c: *RegaCtx) void = {
     range(0, c.pm.len) { i | 
         if status[i] == .ToMove {
             k := c.pm&[i].cls;
-            if SWAP_PM {
-                c.pmrec(status, i, k&);
-            } else {
-                c.pmrec_NEW(status, i, k&);
-            }
+            c.pmrec(status, i, k&);
         };
     };
-    if !SWAP_PM {
-        start := c.f.globals.curi;
-        ins := between(start, end);
-        ins.reverse();
-    }
 }
 
 fn move(c: *RegaCtx, r: i64, to: Qbe.Ref, m: *RMap) void = {
@@ -447,27 +412,6 @@ fn do_block_instructions(c: *RegaCtx, b: *Qbe.Blk, cur: *RMap) void = { // #log_
         continue :: local_return;
         i := c.f.emit(i1[][]);
         just_freed := -1;
-        other :: fn() => {
-            if i.to != QbeNull  {
-                @debug_assert(rtype(i.to) == .RTmp, "can only assign tmp");
-                r := i.to.val();
-                if r >= Qbe.Tmp0 || !T.rglob.bit_is_set(r) {
-                    goto_args :: local_return;
-                    just_freed = c.rfree(cur, r);
-                    if just_freed == -1 {
-                        if i.op() == .cas1 { // HACK
-                            i.to = QbeNull;
-                            goto_args();
-                        };
-                        // DCE: if we didn't need the value later, we don't need the instruction that creates it. 
-                        @debug_assert(!isreg(i.to), "DCE reg");
-                        curi[] = curi[].offset(1); // pop off the emit() from this iteration
-                        continue();
-                    };
-                    i.to = TMP(just_freed);
-                };
-            };
-        };
         
         @debug_assert(!@is(i.op(), .blit0, .blit1, .sel0, .sel1), "frontend op % in rega", i.op());
         @match(i.op()) {
@@ -482,10 +426,8 @@ fn do_block_instructions(c: *RegaCtx, b: *Qbe.Blk, cur: *RMap) void = { // #log_
                 if isreg(i.to) && rtype(i.arg&[0]) == .RTmp {
                     c.sethint(i.arg&[0].val(), i.to.val());  // try to arrange so this copy is a nop.
                 };
-                other();
             }
-            @default => {
-                if (@is(i.op(), .call)) {
+            fn call() => {
                     discard := Array(i32, 2).ptr_from_int(0);
                     needed_at_call := {T.argregs}(i.arg&[1], discard).bit_or(T.rglob);
                     to_free := T.caller_saved.bit_and(bit_not needed_at_call);
@@ -493,9 +435,31 @@ fn do_block_instructions(c: *RegaCtx, b: *Qbe.Blk, cur: *RMap) void = { // #log_
                     for_bits to_free { r |
                         c.rfree(cur, r);
                     };
-                } else {
-                    other();
+            }
+            @default => ();
+        };
+        
+        if i.to != QbeNull && i.op() != .call {
+            @debug_assert(rtype(i.to) == .RTmp, "can only assign tmp");
+            r := i.to.val();
+            if r >= Qbe.Tmp0 || !T.rglob.bit_is_set(r) {
+                goto_args :: local_return;
+                just_freed = c.rfree(cur, r);
+                if just_freed == -1 {
+                    if i.op() == .cas1 { // HACK
+                        i.to = QbeNull;
+                        goto_args();
+                    };
+                    // DCE: if we didn't need the value later, we don't need the instruction that creates it. 
+                    @debug_assert(!isreg(i.to), "DCE reg");
+                    curi[] = curi[].offset(1); // pop off the emit() from this iteration
+                    continue();
                 };
+                i.to = TMP(just_freed);
+                
+                if i.op() == .copy && rtype(i.arg&[0]) == .RTmp {
+                    c.sethint(i.arg&[0].val(), just_freed);  // try to arrange so this copy is a nop.
+                }
             };
         };
         reg_args_count := 0;
@@ -528,6 +492,7 @@ fn do_block_instructions(c: *RegaCtx, b: *Qbe.Blk, cur: *RMap) void = { // #log_
             c.f.globals.curi = c.f.globals.curi.offset(1); // pop off the emit() from this iteration
         };
 
+        @if(!ADD_TO_REG_WAIT_LIST) continue();
         /* try to change the register of a hinted
          * temporary if `just_freed` is available */
         if(just_freed == -1, => continue());
@@ -573,8 +538,7 @@ fn prio2(c: *RegaCtx, t1: i64, t2: i32) i64 = {
 
 /* peel loop nests from inside out */
 carve :: fn(ba: **Qbe.Blk, bb: **Qbe.Blk) bool = { 
-    // TODO: flipping these conditions to >= generates less code but breaks backend/test/folding.fr
-    @if(ba.loop == bb.loop, ba.id <= bb.id, ba.loop <= bb.loop)
+    @if(ba.loop == bb.loop, ba.id < bb.id, ba.loop > bb.loop)
 };
 
 /* register allocation
@@ -825,11 +789,7 @@ fn name_phi_block(f: *Qbe.Fn, source: *Qbe.Blk, dest: *Qbe.Blk, inserted: *Qbe.B
 
 // we want our parameters to be assgned to thier abi registers so we don't actually have to do a copy. 
 fn set_param_copy_hints(c: *RegaCtx) void = {
-    // turning this off makes x64 fail tests. encoding.ssa mem4.ssa 
-    // which is scary cause it should be just an optimisation. 
-    // so hopefully ive revealed some other subtle problem. TODO! 
-    @if(!ADD_TO_REG_WAIT_LIST && c.f.globals.goal.arch == .aarch64) return();
-    // 1004012 -> 981364
+    @if(!ADD_TO_REG_WAIT_LIST) return();
     
     for_insts_forward c.f.start { i |
         if i.op() != .copy || !isreg(i.arg&[0]) {
