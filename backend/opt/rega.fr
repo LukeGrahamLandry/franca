@@ -156,7 +156,7 @@ fn ralloctry(c: *RegaCtx, m: *RMap, t: i32, try: bool) Qbe.Ref = {
         // but its hard to think about because we're going backwards
         // is it too dumb to add an extra pass that tries harder to remove redundant copies? probably. 
         // the other places hints are added are useful it seems.
-        //
+        // -- Mar 18, 2025
         /*
         R20 =l copy R1
     	# R1 =l copy R1
@@ -173,6 +173,19 @@ fn ralloctry(c: *RegaCtx, m: *RMap, t: i32, try: bool) Qbe.Ref = {
 		R1 =l copy R20
 		call $no_epar, C33
         */
+        // the situation that it really hurts is that i use the env parameter so much,
+        // (it you do it on import_c without preserve_franca_env, it's much less dramatic), 
+        // it remembers on entry that env wants to be in x9 and then does an extra instruction 
+        // of shuffleing every time it gets stomped by a call. 
+        // that only explains why removing it in set_param_copy_hints helps, not here, 
+        // so i think the problem is more general, that just adds an argument preserved accross every single call so it's more obvious. 
+        // code size numbers kinda agree with that intuition:  
+        // both disabled:                 912928
+        // ralloctry disabled:            919640
+        // set_param_copy_hints disabled: 940832
+        // both enabled:                 1043424
+        // set_param_copy_hints disabled only for x9 on arm: 935592 (so env is 1/4 of the cost there)
+        // -- Sep 21, 2025
         @if(ADD_TO_REG_WAIT_LIST) {
             m.wait_list&[r_hinted] = t.intcast();
         };
@@ -221,7 +234,9 @@ PMStat :: @enum(i64) (ToMove, Moving, Moved);
 
 ADD_TO_REG_WAIT_LIST :: false;
 
-// :Explain
+// Rideau, L., Serpette, B.P. & Leroy, X. Tilting at Windmills with Coq: Formal Verification of a Compilation Algorithm for Parallel Moves. J Autom Reasoning 40, 307–326 (2008).
+// https://xavierleroy.org/publi/parallel-move.pdf
+
 // note: k is a pointer. we mutate back up through levels of recursion. 
 fn pmrec(c: *RegaCtx, status: []PMStat, i: i64, k: *Qbe.Cls) i64 = {
     /* note, this routine might emit
@@ -270,16 +285,57 @@ fn pmrec(c: *RegaCtx, status: []PMStat, i: i64, k: *Qbe.Cls) i64 = {
     cycle
 }
 
+// TODO: this is arm int only
+fn pmrec_NEW(c: *RegaCtx, status: []PMStat, i: i64, k: *Qbe.Cls) void = {
+    if c.pm&[i].src == c.pm&[i].dest {
+        status[i] = .Moved;
+        return();
+    };
+    @debug_assert(KBASE(c.pm&[i].cls) == KBASE(k[]), "bad kbase");
+    ::assert(Qbe.Cls.Kw.raw().bit_or(Qbe.Cls.Kl.raw()) == Qbe.Cls.Kl.raw(), "Cls numbers");
+    ::assert(Qbe.Cls.Ks.raw().bit_or(Qbe.Cls.Kd.raw()) == Qbe.Cls.Kd.raw(), "Cls numbers");
+    k[] = @as(Qbe.Cls) @as(i32) k[].raw().bit_or(c.pm&[i].cls.raw());
+    status[i] = .Moving;
+    range(0, c.pm.len) { j |
+        if c.pm&[i].dest == c.pm&[j].src {
+            @match(status[j]) {
+                fn Moving() => {
+                    t := TMP(18);  @debug_assert(c.f.globals.goal.arch == .aarch64 && k[].is_int());
+                    c.f.emit(.copy, c.pm&[j].cls, t, c.pm&[j].src, QbeNull); // xxx same
+                    c.pm&[j].src = t;
+                }
+                fn ToMove() => c.pmrec_NEW(status, j, k);
+                fn Moved() => ()
+            };
+        }
+    };
+    c.f.emit(.copy, c.pm&[i].cls, c.pm&[i].dest, c.pm&[i].src, QbeNull); // xxx same
+    status[i] = .Moved;
+}
+
+SWAP_PM :: true;
+
 fn pmgen(c: *RegaCtx) void = {
     ::enum_basic(PMStat);
     status := temp().alloc_zeroed(PMStat, c.pm.len);
     ::assert(PMStat.zeroed() == .ToMove, "zero init is ToMove");
+    
+    end := c.f.globals.curi;
     range(0, c.pm.len) { i | 
         if status[i] == .ToMove {
             k := c.pm&[i].cls;
-            c.pmrec(status, i, k&);
+            if SWAP_PM {
+                c.pmrec(status, i, k&);
+            } else {
+                c.pmrec_NEW(status, i, k&);
+            }
         };
     };
+    if !SWAP_PM {
+        start := c.f.globals.curi;
+        ins := between(start, end);
+        ins.reverse();
+    }
 }
 
 fn move(c: *RegaCtx, r: i64, to: Qbe.Ref, m: *RMap) void = {
@@ -321,7 +377,7 @@ fn do_parallel_moves(c: *RegaCtx, b: *Qbe.Blk, last_move: *Qbe.Ins, m: *RMap) *Q
     };
     
     // :RequireCopyAfterCall
-    @debug_assert(m0.len <= m.len, "m0<=m. this happens when we're confused by 'asm' copies not being symetric");
+    @debug_assert(m0.len <= m.len);
     is_after_call := !first_move.identical(b.ins.ptr) && @is(first_move.offset(-1).op(), .call);
     if is_after_call {
         discard := Array(i32, 2).ptr_from_int(0); // TODO: helper for this 
@@ -345,8 +401,7 @@ fn do_parallel_moves(c: *RegaCtx, b: *Qbe.Blk, last_move: *Qbe.Ins, m: *RMap) *Q
             }
         }
     };
-    ip := first_move;
-    while => Qbe.Ins.int_from_ptr(ip) < Qbe.Ins.int_from_ptr(past_last_move) {
+    for(first_move, past_last_move) { ip |
         if ip.to != QbeNull {
             c.rfree(m, ip.to.val());
         };
@@ -354,8 +409,9 @@ fn do_parallel_moves(c: *RegaCtx, b: *Qbe.Blk, last_move: *Qbe.Ins, m: *RMap) *Q
         if rfind(m, r).is_none() {
             c.radd(m, r, r);
         };
-        ip = ip.offset(1);
     };
+    // until now, we've just been updating the RMap bookkeeping 
+    // to match the goal register state (without any emits). 
     c.pmgen();
     first_move
 }
@@ -468,6 +524,7 @@ fn do_block_instructions(c: *RegaCtx, b: *Qbe.Blk, cur: *RMap) void = { // #log_
         };
         was_nop_copy := i.op() == .copy && i.to == i.arg&[0];
         if was_nop_copy { 
+            // :LookAtLastInst
             c.f.globals.curi = c.f.globals.curi.offset(1); // pop off the emit() from this iteration
         };
 
@@ -705,8 +762,7 @@ fn emit_phi_blocks(c: *RegaCtx, beg: []RMap, end: []RMap) void = {
     blist := Qbe.Blk.ptr_from_int(0);
     f := c.f;
     for_blocks f { b | 
-        // TODO
-        //@debug_assert(!b.s1.identical(b.s2), "i think these are removed and my behaviour here differs if not"); // :SketchyIterTargets
+        @debug_assert(!b.s1.identical(b.s2) || b.s2.is_null(), "i think these are removed and my behaviour here differs if not"); // :SketchyIterTargets
         for_jump_targets_mut b { ps |
             s := ps[];
             c.pm&.clear();

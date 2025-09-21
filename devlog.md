@@ -17,6 +17,19 @@
   - old compiler both times, the code for that only costs 915856 -> 916104
   - it only saved (916104-912904)/4 = 800 instructions, 
     so sometimes the register allocator is too dumb to put both sides of the copy in the same register
+- experimenting with rega/do_parallel_moves because the code generated for swap on arm looks really silly.  
+  - found tilting at windmills paper and got it to work with carrying the temporary 
+    register across the moves so it doesn't waste time putting a value back in the wrong place,
+    and 2 dependent swaps become 4 instructions instead of 6. 
+  - looks nicer but code size is only 913596 -> 911968 (-0.17%). 
+    so clearly this is the wrong tact and i should be trying to assign registers better, 
+    not micro-optimise how fast i can get them to the poorly chosen places. 
+  - also some problems:
+    - can't reserve an int for scratch on amd so need to do swap there anyway and it's sad to have two code paths
+    - since holds the scratch for longer than usual, its a problem if emit needs to use it to 
+      create the copy, like if it's a spill slot that's far away because of a large stack frame. 
+    - have to give up and reserve a float on riscv, but that's easy.
+    - should output them backwards instead of reversing at the end
 
 ## (Sep 19)
 
