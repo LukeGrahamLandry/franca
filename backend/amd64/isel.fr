@@ -32,7 +32,7 @@ sel_inst :: fn(i: **Qbe.Ins, b: *Qbe.Blk, f: *Qbe.Fn) void = {
     @match(i[].op()) {
         fn sel1() => selsel_amd64(f, b, i[]);
         fn cas1() => sel_cas_amd64(f, b, i[]);
-        @default  => sel(i[][], f);
+        @default  => sel(i[], f);
     };
 };
 
@@ -473,7 +473,7 @@ fn selsel_amd64(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) *Qbe.Ins = {
     isel1 := i;
     @debug_assert_eq(isel1.op(), .sel1);
     isel1.set_op(@as(Qbe.O) @as(i32) Qbe.O.selieq.raw() + c);
-    sel(isel1[], f);
+    sel(isel1, f);
     
     @debug_assert(nand(gencpy, gencmp));
     @if(gencmp) selcmp(@slice(cr0, cr1), k, need_swap, f);
@@ -486,11 +486,17 @@ fn selsel_amd64(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) *Qbe.Ins = {
     isel0
 }
 
-fn sel(i: Qbe.Ins, f: *Qbe.Fn) void = {
-    if(try_kill_inst(f, i&), => return());  // TODO
+fn sel();
+fn sel(f: *Qbe.Fn, o: Qbe.O, k: Qbe.Cls, r: Qbe.Ref, a: Qbe.Ref, b: Qbe.Ref) void = {
+    i := make_ins(o, k, r, a, b);
+    sel(i&, f);
+} 
+
+fn sel(i: *Qbe.Ins, f: *Qbe.Fn) void = {
+    if(try_kill_inst(f, i), => return());  // TODO
     
     i0 := f.globals.curi; // :LookAtLastInst
-    sel_inner(i&, f);
+    sel_inner(i, f);
     i1 := f.globals.curi;
     
     while => i0.in_memory_after(i1) {
@@ -517,7 +523,7 @@ fn sel_cas_amd64(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) void = {
     //       i guess rega doesn't touch reg copies at all, not just arounds calls. 
     f.emit(.copy, k, cas1.to, rax, QbeNull);
     cas1.to = QbeNull;
-    cas1 := f.emit(cas1[]);
+    cas1 := f.emit(cas1);
     i2   := f.emit(.copy, k, rax, cas1.arg&[0], QbeNull);
     fixarg(cas1.arg&.index(1), k, cas1, f);
     fixarg(i2.arg&.index(0), k, i2, f);
@@ -539,8 +545,9 @@ fn sel_inner(i: *Qbe.Ins, f: *Qbe.Fn) void = {
             fixarg(ins.arg&.index(0), k, ins, f);
         }
         fn ultof() => {
+            // TODO: the overload set should coerce to FuncId. :CompilerBug
             emitter :: fn(f, o, k, r, a0, a1) => 
-                sel(make_ins(o, k, r, a0, a1), f);
+                f.sel(o, k, r, a0, a1);
             
             kc, sh := @if(k == .Ks, (Qbe.Cls.Kw, 23), (Qbe.Cls.Kl, 52));
             @emit_instructions((f = f, emit = emitter), (i.arg&[0], i.to, kc, sh, k), """
@@ -571,10 +578,10 @@ fn sel_inner(i: *Qbe.Ins, f: *Qbe.Fn) void = {
             r1 := f.newtmp("isel", k);
             mask := f.getcon(@if(k == .Kw, 31, 63));
             alt := f.getcon(@if(k == .Kw, 63, 127));
-            sel(make_ins(.xor, k, i.to, r1, mask), f);
-            sel(make_ins(.selieq, k, r1, alt, r), f);
+            f.sel(.xor, k, i.to, r1, mask);
+            f.sel(.selieq, k, r1, alt, r);
             i.to = r;
-            i1 := f.emit(i[]);
+            i1 := f.emit(i);
             f.fixargs(i1); 
         }
         fn ctz() => {
@@ -583,9 +590,9 @@ fn sel_inner(i: *Qbe.Ins, f: *Qbe.Fn) void = {
             // to = ZF ? 1_000 : r   # if input was 0 just want the high bit for operand size
             r := f.newtmp("isel", k);
             alt := f.getcon(@if(k == .Kw, 32, 64));
-            sel(make_ins(.selieq, k, i.to, alt, r), f);
+            f.sel(.selieq, k, i.to, alt, r);
             i.to = r;
-            i1 := f.emit(i[]);
+            i1 := f.emit(i);
             f.fixargs(i1); 
         }
         @default => {
@@ -601,7 +608,7 @@ fn sel_inner(i: *Qbe.Ins, f: *Qbe.Fn) void = {
                 return();
             };
             if is_load(i.op()) {
-                new_ins := f.emit(i[]);
+                new_ins := f.emit(i);
                 r := new_ins.arg&.index(0);
                 seladdr(r, f);
                 @debug_assert(rtype(r[]) != .RTmp, "seladdr failed");
@@ -614,7 +621,7 @@ fn sel_inner(i: *Qbe.Ins, f: *Qbe.Fn) void = {
                     if(i.op() == .stored, => i.set_op(.storel));
                     if(i.op() == .stores, => i.set_op(.storew));
                 };
-                i1 := f.emit(i[]);
+                i1 := f.emit(i);
                 seladdr(i1.arg&.index(1), f);
                 f.fixargs(i1);
                 return();
@@ -663,7 +670,7 @@ fn emit_check_order_flag(f: *Qbe.Fn, i: *Qbe.Ins, merge: Qbe.O, flag: Qbe.O) voi
 }
 
 fn sel_emit(f: *Qbe.Fn, i: *Qbe.Ins) void = {
-    i1 := f.emit(i[]);
+    i1 := f.emit(i);
     f.fixargs(i1); 
 }
 
@@ -722,7 +729,7 @@ fn sel_shift(f: *Qbe.Fn, i: *Qbe.Ins) void = {
     rcx := TMP(Amd64Reg.RCX);
     i.arg&[1] = rcx;
     f.emit(.copy, .Kw, QbeNull, rcx, QbeNull);
-    i1 := f.emit(i[]);
+    i1 := f.emit(i);
     f.emit(.copy, .Kw, rcx, r0, QbeNull);
     fixarg(i1.arg&.index(0), argcls(i, 0), i1, f);
 }

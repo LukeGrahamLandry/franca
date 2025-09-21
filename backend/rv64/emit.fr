@@ -31,7 +31,7 @@ rv_scratch_int :: TMP(RvReg._T6);
 emit_the_code :: fn(e: *EmitRv) void = {
     f := e.f;
     if f.vararg {
-        e.emit(make_ins(.add, .Kl, TMP(RvReg.SP), TMP(RvReg.SP), f.getcon(-64)));
+        e.emit(.add, .Kl, TMP(RvReg.SP), TMP(RvReg.SP), f.getcon(-64));
         range(0, 8) { i |
             e.emit_store_off(TMP(@as(i64) RvReg.A0.raw().zext() + i), TMP(RvReg.SP), 8*i);
         }
@@ -41,17 +41,17 @@ emit_the_code :: fn(e: *EmitRv) void = {
     //       (be careful! might have to update franca_runtime_init)
     e.emit_store_off(TMP(RvReg.FP), TMP(RvReg.SP), -16);
     e.emit_store_off(TMP(RvReg.RA), TMP(RvReg.SP), -8);
-    e.emit(make_ins(.add, .Kl, TMP(RvReg.FP), TMP(RvReg.SP), f.getcon(-16)));
+    e.emit(.add, .Kl, TMP(RvReg.FP), TMP(RvReg.SP), f.getcon(-16));
 
     to_save   := f.reg.bit_and(Abi.rv64_rclob);
     save_area := to_save.count_ones().zext() * 8;
     frame := f.slot.zext().add(16).align_to(16).add(save_area).align_to(16);
 
     if frame <= 2048 {  // '<=' is not a mistake; there are more negative numbers than positive ones 
-        e.emit(make_ins(.add, .Kl, TMP(RvReg.SP), TMP(RvReg.SP), f.getcon(-frame)));
+        e.emit(.add, .Kl, TMP(RvReg.SP), TMP(RvReg.SP), f.getcon(-frame));
     } else {
-        e.emit(make_ins(.copy, .Kl, rv_scratch_int, f.getcon(frame), Qbe.Null));
-        e.emit(make_ins(.sub, .Kl, TMP(RvReg.SP), TMP(RvReg.SP), rv_scratch_int));
+        e.emit(.copy, .Kl, rv_scratch_int, f.getcon(frame), Qbe.Null);
+        e.emit(.sub, .Kl, TMP(RvReg.SP), TMP(RvReg.SP), rv_scratch_int);
     }
 
     off := 0;
@@ -73,10 +73,10 @@ emit_the_code :: fn(e: *EmitRv) void = {
             fn ret0() => {
                 if f.dynalloc {
                     if frame - 16 <= 2048 {
-                        e.emit(make_ins(.add, .Kl, TMP(RvReg.SP), TMP(RvReg.FP), f.getcon(-(frame - 16))));
+                        e.emit(.add, .Kl, TMP(RvReg.SP), TMP(RvReg.FP), f.getcon(-(frame - 16)));
                     } else {
-                        e.emit(make_ins(.copy, .Kl, rv_scratch_int, f.getcon(frame - 16), Qbe.Null));
-                        e.emit(make_ins(.sub, .Kl, TMP(RvReg.SP), TMP(RvReg.FP), rv_scratch_int));
+                        e.emit(.copy, .Kl, rv_scratch_int, f.getcon(frame - 16), Qbe.Null);
+                        e.emit(.sub, .Kl, TMP(RvReg.SP), TMP(RvReg.FP), rv_scratch_int);
                     }
                 };
                 
@@ -165,8 +165,8 @@ fixmem :: fn(e: *EmitRv, pr: *Qbe.Ref) void = {
     if rtype(r) == .RSlot {
         s := e.f.slot(r);
         if s < -2048 || s > 2047 {
-            e.emit(make_ins(.copy, .Kl, rv_scratch_int, e.f.getcon(s), Qbe.Null));
-            e.emit(make_ins(.add, .Kl, rv_scratch_int, TMP(RvReg.FP), rv_scratch_int));
+            e.emit(.copy, .Kl, rv_scratch_int, e.f.getcon(s), Qbe.Null);
+            e.emit(.add, .Kl, rv_scratch_int, TMP(RvReg.FP), rv_scratch_int);
             pr[] = rv_scratch_int;
         }
     }
@@ -233,8 +233,8 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
             if (-s < 2048) {
                 e.emit_add_off(i.to, TMP(RvReg.FP), s);
             } else {
-                e.emit(make_ins(.copy, .Kl, i.to, f.getcon(s), Qbe.Null));
-                e.emit(make_ins(.add, .Kl, i.to, TMP(RvReg.FP), i.to));
+                e.emit(.copy, .Kl, i.to, f.getcon(s), Qbe.Null);
+                e.emit(.add, .Kl, i.to, TMP(RvReg.FP), i.to);
             }
         }
         fn call() => {
@@ -243,7 +243,7 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
                     c := f.get_constant(a0);
                     // TODO: use jal instead of wasting an extra instruction
                     // RA is stomped by the call instruction anyway so it's fine to use it as scratch. 
-                    e.emit(make_ins(.copy, .Kl, TMP(RvReg.RA), a0, Qbe.Null));
+                    e.emit(.copy, .Kl, TMP(RvReg.RA), a0, Qbe.Null);
                     e.inst(jalr(.RA, 0, .RA));
                 }
                 fn RTmp() => {
@@ -253,9 +253,9 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
             }
         }
         fn salloc() => {
-            e.emit(make_ins(.sub, .Kl, TMP(RvReg.SP), TMP(RvReg.SP), i.arg&[0]));
+            e.emit(.sub, .Kl, TMP(RvReg.SP), TMP(RvReg.SP), i.arg&[0]);
             if i.to != Qbe.Null {
-                e.emit(make_ins(.copy, .Kl, i.to, TMP(RvReg.SP), Qbe.Null));
+                e.emit(.copy, .Kl, i.to, TMP(RvReg.SP), Qbe.Null);
             }
         }
         // ADDIW sign extends the result, so adding zero is just a sign extension. 
@@ -610,7 +610,7 @@ fn emit_load_off(e: *EmitRv, dest: Qbe.Ref, addr: Qbe.Ref, off: i64) void = {
 }
 
 fn emit_add_off(e: *EmitRv, dest: Qbe.Ref, a: Qbe.Ref, off: i64) void = {
-    e.emit(make_ins(.add, .Kl, dest, a, e.f.getcon(off)));
+    e.emit(.add, .Kl, dest, a, e.f.getcon(off));
 }
 
 fixup_rv64 :: fn(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_reloc: *?Fixup) void = {

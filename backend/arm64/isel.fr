@@ -31,7 +31,7 @@ sel_inst :: fn(i: **Qbe.Ins, b: *Qbe.Blk, f: *Qbe.Fn) void = {
             cas1.arg&[1] = cas0.arg&[0];
             cas0.set_nop();
         } else {
-            f.sel(i[][], b.id);
+            f.sel(i[], b.id);
         };
     };
 };
@@ -115,10 +115,11 @@ fn fuse_addr(f: *Qbe.Fn, a: Qbe.Ref, size: i64) Ty(Qbe.Ref, i64) = {
     (a, 0)
 }
 
-fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32) void = {
-    if(try_kill_inst(f, i&), => return());
+sel :: fn(f: *Qbe.Fn, i: *Qbe.Ins, blk: i32) void = {
+    if(try_kill_inst(f, i), => return());
     
-    if is_alloc(i&.op()) {
+    o := i.op();
+    if is_alloc(o) {
         // note: i0 is what we're about to emit not what we just emitted
         i0 := f.globals.curi.offset(-1); // :LookAtLastInst
         is_dyn := salloc(i.to, i.arg&[0], f);
@@ -131,22 +132,19 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32) void = {
     };
     ck := Qbe.Cls.zeroed();
     cc: i32 = 0;
-    if iscmp(i&.op(), ck&, cc&) {
-        i0 := f.emit(.flagieq, i&.cls(), i.to, QbeNull, QbeNull);
+    if iscmp(o, ck&, cc&) {
+        i0 := f.emit(.flagieq, i.cls(), i.to, QbeNull, QbeNull);
         if f.selcmp(i.arg, ck, blk) {
-            x := i0.op().raw() + cmp_swap(cc);
-            i0.set_op(@as(Qbe.O) x);
-        } else {
-            x := i0.op().raw() + cc;
-            i0.set_op(@as(Qbe.O) x);
+            cc = cmp_swap(cc);
         };
+        x := i0.op().raw() + cc;
+        i0.set_op(@as(Qbe.O) x);
         return();
     };
-    if (i&.op() == .call && f.callable(i.arg&[0])) {
+    if o == .call && f.callable(i.arg&[0]) {
         f.emit(i);
         return();
     };
-    o := i&.op();
     @match(o) {
         fn dbgloc() => f.emit(i);
         fn nop() => ();
@@ -154,7 +152,7 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32) void = {
             // you can only popcnt on a simd/float register
             f_in := f.newtmp("isel", .Kd);
             f_out := f.newtmp("isel", .Kd);
-            ki := i&.cls();
+            ki := i.cls();
             kf: Qbe.Cls = @if(ki.is_wide(), .Kd, .Ks);
             f.emit(.cast, ki, i.to, f_out, QbeNull);
             f.emit(.ones, kf, f_out, f_in, QbeNull);
@@ -164,7 +162,7 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32) void = {
         fn rotl() => {
             new_ins := f.emit(i);
             iarg := new_ins.arg&;
-            k0 := argcls(i&, 0);
+            k0 := argcls(i, 0);
             new_ins.set_op(.rotr);
             width := 1.shift_left(5 + k0.is_wide().int());
             if f.get_int(iarg[1]) { imm |
@@ -195,8 +193,8 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32) void = {
                 };
                 return();
             };
-            k0 := argcls(i&, 0);
-            k1 := argcls(i&, 1);
+            k0 := argcls(i, 0);
+            k1 := argcls(i, 1);
             
             commutes := (@is(o, .and, .or, .xor, .add));
             if commutes && rtype(iarg[0]) == .RCon {
@@ -212,7 +210,7 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32) void = {
                 return();
             };
 
-            copy_from_con := i&.op() == .copy && rtype(iarg[0]) == .RCon && !isreg(i.to);
+            copy_from_con := i.op() == .copy && rtype(iarg[0]) == .RCon && !isreg(i.to);
             if !copy_from_con {
                 f.fixarg(iarg[0]&, k0);
             };
@@ -223,10 +221,8 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32) void = {
                 };
                 return();
             };
-            // TODO: do this for sub, etc as wel. this alone makes the compiler go from 2485100 -> 2089352 bytes of code. thats insane.
-            //       this looks branchy but it generates so much less code that its faster even before accounting for it generating better code for itself. 
+            // this looks branchy but it generates so much less code that its faster even before accounting for it generating better code for itself. 
             if o == .add && is_int(k1) {
-                // ~358KB, amazing! (that was before other addr folding i think, now its less impressive )
                 if f.get_int(iarg[1]) { imm |
                     if imm.bit_and(1.shift_left(12) - 1) == imm {
                         if imm == 0 {
@@ -241,7 +237,6 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32) void = {
                         return();
                     }
                 };
-                // ~10KB, meh
                 arg1 := iarg[1];
                 if rtype(arg1) == .RTmp {
                     a1 := arg1;
@@ -257,7 +252,6 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32) void = {
                     };
                 };  
             };
-            // ~1KB, not really worth it
             if o == .sub && is_int(k1) {
                 if f.get_int(iarg[1]) { imm |
                     if imm.bit_and(1.shift_left(12) - 1) == imm {
@@ -271,7 +265,7 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32) void = {
             };
             
             if (@is(o, .shl, .shr, .sar, .rotr)) {
-                warn_if_unlikely_argument(f, i&, iarg[1]);
+                warn_if_unlikely_argument(f, i, iarg[1]);
                 // Since these are done modulo data size, we can fit any constant in the immediate. 
                 if f.get_int(iarg[1]) { _ |
                     return();
@@ -290,7 +284,7 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32) void = {
             f.fixarg(iarg[1]&, k1);
         };
     };
-}
+};
 
 // This is where we combine cmp+jnz.
 fn seljmp(b: *Qbe.Blk, f: *Qbe.Fn) void = {
@@ -358,7 +352,7 @@ fn selsel_arm64(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) void = {
     @debug_assert_eq(isel1.op(), .sel1);
     o := @as(Qbe.O) @as(i32) Qbe.O.selieq.raw() + c;
     isel1.set_op(o);
-    sel(f, isel1[], b.id);
+    sel(f, isel1, b.id);
     
     swapped := f.selcmp(@array(cr0, cr1), cmp_cls, b.id);
     @debug_assert_eq(needed_swap, swapped, "confused about cmp swapping");

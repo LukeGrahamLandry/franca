@@ -77,6 +77,8 @@ fn move_end_of_block_to_scratch(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins, changed: *
         f.globals.curi = f.scratch_start();
         ni := ptr_diff(i.offset(1), b.ins.index_unchecked(b.ins.len));
         f.globals.curi = f.globals.curi.offset(-ni);
+        icpy :: fn(dest: *Qbe.Ins, src: []Qbe.Ins) void = 
+            (@as([]Qbe.Ins)(ptr = dest, len = src.len)).copy_from(src);
         icpy(f.globals.curi, i.offset(1).slice(ni));
         changed[] = true;
     }
@@ -111,16 +113,20 @@ fn len_scratch(f: *Qbe.Fn) i64 #inline =
 //
 // TODO: we rely on globals.curi pointing to the last inst we emitted (in isel) :LookAtLastInst
 fn emit(f: *Qbe.Fn, op: Qbe.O, k: Qbe.Cls, to: Qbe.Ref, arg0: Qbe.Ref, arg1: Qbe.Ref) *Qbe.Ins = {
+    f.emit(make_ins(op, k, to, arg0, arg1))
+}
+
+fn emit(f: *Qbe.Fn, i: Qbe.Ins) *Qbe.Ins #inline = 
+    f.emit(i&);
+
+fn emit(f: *Qbe.Fn, src: *Qbe.Ins) *Qbe.Ins = {
     i := f.globals.curi&;
     @debug_assert(!i[].identical(f.globals.insb.as_ptr()), "emit, too many instructions");
     i[] = i[].offset(-1);
-    i[][] = make_ins(op, k, to, arg0, arg1);
+    //i[][] = src[];  // TODO: somehow this generates more code 922k vs 916k -- Sep 21, 2025
+    i[].slice(1).copy_from(src.slice(1));
     i[]
 }
-
-// ONLY CALL ON THE BACKEND THREAD
-fn emit(f: *Qbe.Fn, i: Qbe.Ins) *Qbe.Ins #inline = 
-    f.emit(i&.op(), i&.cls(), i.to, i.arg&[0], i.arg&[1]);
 
 fn newtmp(f: *Qbe.Fn, debug_hint: Str, k: Qbe.Cls) Qbe.Ref = {
     t: i64 = f.ntmp.zext();
@@ -201,39 +207,7 @@ fn con(sym: Qbe.Sym, bits: i64) Qbe.Con =
 fn idup(b: *Qbe.Blk, src: []Qbe.Ins) void = {
     b.ins.len = 0;
     b.ins&.push_all(src, temp());
-}
-
-fn icpy(dest: *Qbe.Ins, src: []Qbe.Ins) void = {
-    (@as([]Qbe.Ins)(ptr = dest, len = src.len)).copy_from(src);
-}
-
-// TODO: this fits better in abi.fr
-fn salloc(rt: Qbe.Ref, rs: Qbe.Ref, f: *Qbe.Fn) bool = {
-    /* we need to make sure
-    * the stack remains aligned
-    * (rsp = 0) mod 16
-    */
-    f.dynalloc = true;
-    if rtype(rs) == .RCon {
-        sz := f.con[rs.val()]&.bits();
-        if sz < 0 || sz >= MAX_i32 - 15 {
-            @panic("invalid alloc size %", sz);
-        };
-        sz = (sz + 15).bit_and(-16);
-        f.emit(.salloc, .Kl, rt, f.getcon(sz), QbeNull);
-        false
-    } else {
-        /* r0 = (r + 15) & -16 */
-        r0 := f.newtmp("isel", .Kl);
-        r1 := f.newtmp("isel", .Kl);
-        f.emit(.salloc, .Kl, rt, r0, QbeNull);
-        f.emit(.and, .Kl, r0, r1, f.getcon(-16));
-        f.emit(.add, .Kl, r1, rs, f.getcon(15));
-        if f.tmp[rs.val()].slot != -1 {
-            @panic("unlikely alloc argument % for %", f.tmp[rs.val()]&.name(), f.tmp[rt.val()]&.name());
-        };
-        true
-    }
+    //append(b.ins&, src.ptr, src.index_unchecked(src.len))
 }
 
 // Inclusive!
@@ -272,12 +246,7 @@ fn append(dest: *RawList(Qbe.Ins), src_start: *Qbe.Ins, src_end: *Qbe.Ins) void 
     // it feels like this would be better but no, clearing out the nops is faster. -- Nov 20
     // it also feels too fragile that the below only works if you remove the nop check from addins.
     // same problem as :CreepyNop i suppose...
-    //old_len := dest_len[];
-    //dest_len[] += count;
-    //dest.grow(dest_len[]);
-    //dest: []Qbe.Ins = (ptr = dest.index(old_len), len = count);
-    //src:  []Qbe.Ins = (ptr = src_start, len = count);
-    //dest.copy_from(src);
+    //dest.push_all(src_start.between(src_end), temp());
 }
 
 fn addbins(b: *Qbe.Blk, pvins: *RawList(Qbe.Ins)) void = 
@@ -296,9 +265,7 @@ fn bytes_to_bit_mask(bytes: []u8) u64 = {
     r
 }
 
-///////////////////////
 /// Condition Codes ///
-///////////////////////
 
 fn is_sel_flag(op: Qbe.O) bool =  
     op.between(.selieq, .selfuo);
@@ -405,9 +372,7 @@ fn cmp_swap(cc: i32) i32 = {
     swap_cc[cc.zext()].raw()
 }
 
-////////////////
 /// Bit Sets ///
-////////////////
 // TODO: use unsigned division can be shifts (if negative you truncate towards 0 not -inifinity which a shift gives you)
 
 fn bsinit(bs: *Qbe.BSet, n: i64) void #inline = {

@@ -28,7 +28,7 @@ fn extsb_parargret(f: *Qbe.Fn) void = {
         };
         for_insts_rev b { i | 
             if changed {
-                f.emit(i[][]);
+                f.emit(i[]);
             };
             if i[].op() == .call {
                 i1 := i[];
@@ -38,13 +38,13 @@ fn extsb_parargret(f: *Qbe.Fn) void = {
                     i[] = i[].offset(-1);
                     if is_argbh(i[].op()) {
                         f.move_end_of_block_to_scratch(b, i[], changed&);
-                        prev := f.emit(i[][]);
+                        prev := f.emit(i[]);
                         prev.set_op(.arg);
                         i.to = f.newtmp("abi", .Kl);
                         prev.arg&[0] = i.to;
                     } else {
                         if changed {
-                            f.emit(i[][]);
+                            f.emit(i[]);
                         };
                     }
                 };
@@ -269,7 +269,7 @@ native_abi :: fn(
                 @default => {
                     // TODO: check this in fails_typecheck
                     @debug_assert(!@is(i[].op(), .arg, .argc, .arge));
-                    f.emit(i[][]);
+                    f.emit(i[]);
                 };
             };
         };
@@ -360,3 +360,31 @@ zip_args_g :: fn($Class: Type) FuncId = fn(i0: *Qbe.Ins, i1: *Qbe.Ins, ac: []Cla
         body(i, a, continue);
     };
 };
+
+fn salloc(rt: Qbe.Ref, rs: Qbe.Ref, f: *Qbe.Fn) bool = {
+    /* we need to make sure
+    * the stack remains aligned
+    * (rsp = 0) mod 16
+    */
+    f.dynalloc = true;
+    if rtype(rs) == .RCon {
+        sz := f.con[rs.val()]&.bits();
+        if sz < 0 || sz >= MAX_i32 - 15 {
+            @panic("invalid alloc size %", sz);
+        };
+        sz = (sz + 15).bit_and(-16);
+        f.emit(.salloc, .Kl, rt, f.getcon(sz), QbeNull);
+        false
+    } else {
+        @emit_instructions((f = f), (rs, rt), """
+        @start
+            %r1 =l add %0, 15
+            %r0 =l and %r1, -16
+            %1  =l salloc %r0
+        """);
+        if f.tmp[rs.val()].slot != -1 {
+            @panic("unlikely alloc argument % for %", f.tmp[rs.val()]&.name(), f.tmp[rt.val()]&.name());
+        };
+        true
+    }
+}

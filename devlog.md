@@ -1,7 +1,9 @@
 
-## (Sep 20)
+## (Sep 20/21)
 
 - there must be some pattern that breaks my arena allocator. 
+- got annoyed by all the places i have to `emit(i[])` instead of emit(i), added an overload. 
+  - arm code size 925k -> 916k, thats nice. that's like half what i lost by getting rid of deduplication. 
 
 ## (Sep 19)
 
