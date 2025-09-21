@@ -288,9 +288,24 @@ native_abi :: fn(
 };
 
 fn collapse_addr(f: *Qbe.Fn) void = {
+    implicit_zero_extend_kw := @is(f.globals.goal.arch, .aarch64, .x86_64);
     for_blocks_rpo_forward f { b |
         for_insts_forward b { i |
             continue :: local_return;
+
+            // needs use.
+            // this is here because must be after frc_inlinable since it's architecture dependent. 
+            if implicit_zero_extend_kw && i.op() == .extuw {
+                t := f.get_tmp(i.arg&[0]) || continue();
+                @if(t.def.is_null()) continue();
+                @if(t.def.cls() != .Kw) continue();
+                // || !t.def.arg&[0].isreg() { would be a tighter bound but that's always why its a copy so it doesn't help 
+                if t.def.op() != .copy { 
+                    i.set_op(.copy);  // most of the time register allocation will remove this copy
+                };
+                continue();
+            };
+            
             @if(i.op() != .add) continue();
             @if(i.cls().is_float()) continue();
             a := f.get_tmp(i.arg&[0]) || continue();

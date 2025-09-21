@@ -2,8 +2,21 @@
 ## (Sep 20/21)
 
 - there must be some pattern that breaks my arena allocator. 
+- figuring out which tests newly work on linux now that backend provides start wrapper
 - got annoyed by all the places i have to `emit(i[])` instead of emit(i), added an overload. 
   - arm code size 925k -> 916k, thats nice. that's like half what i lost by getting rid of deduplication. 
+- arm/amd implicitly zero extend 32 bit operations,
+  - before isel, replace extuw with a copy if the argument's def is Kw. 
+    - don't want it in copy_elimination because i want to reuse cache between architectures
+  - doesn't work if the def is itself a copy instruction which is a bit concerning. 
+    oh it's when its a copy from register for a parameter, 
+    and that's the case every time its a copy because of copy-elim, so tightening the condition doesn't help.  
+  - happens 1119 times (filtering type=Exe so only counting what goes in the binary). 
+    arm bytes of code: 915856 -> 912904 (-0.3%). 
+    (amd only saved half that but still an improvement). 
+  - old compiler both times, the code for that only costs 915856 -> 916104
+  - it only saved (916104-912904)/4 = 800 instructions, 
+    so sometimes the register allocator is too dumb to put both sides of the copy in the same register
 
 ## (Sep 19)
 
