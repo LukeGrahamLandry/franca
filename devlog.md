@@ -11,6 +11,21 @@
   but also, just changing the block iteration order i can trade 30k for 30ms, 
   and that's a one identifier diff instead of a 100 line one, 
   so seems like the code im getting rid of was a lot of hassle to get the same effect. 
+- tried another round of copy elimination in opt/slots instead of relying on rega to fix it. 
+  size is 897984 -> 886356 (-1.3%). nifty but not worth the trouble: 
+  - the tests pass except for wuffs_c/(webp.c, jpeg.c) on amd. 
+    narrowed it down to one tmp in wuffs_webp__decoder__decode_pixels_slow. 
+    the problem is the interaction with previous removal of extuw of Kw results. 
+    produces a copy assigning a Kw to a Kl. you end up with a value that gets 
+    produced as a Kw and used in a Kl phi. it's spilled to a 4 byte slot 
+    and the phi uses an 8 byte load from it. 
+    can hackily fix by always using 8 byte spill slot and 8 byte store to it, 
+    that way it's fine for the phi to load more and get extra zeros. 
+  - but that also breaks (xz,lzip,lzma) on arm. 
+    not even reliant on the new copy stuff, 
+    maybe its just making a stack frame large enough to reveal an encoding problem. 
+    yeah problem is a store where value and address both need to go in the scratch register. 
+    happens when there's a copy where both sides are a spill slot out of immediate range.
 
 ## (Sep 20/21)
 
