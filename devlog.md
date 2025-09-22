@@ -1,4 +1,17 @@
 
+## (Sep 22)
+
+- oops, i wasn't setting RegaCtx.loop, 
+  but fixing that still doesn't make the wait_list or prio2 stuff seem helpful.
+  tho something i wasnt thinking about is that for loop stuff it isn't just about 
+  fewer copies is better, having more copies in the program but fewer in deeply nested loops
+  is faster. by flipping the loop sort order in carve() i can choose between 5k of code size or 10ms of time. 
+- for now im just going to go with less code is better and get rid of stuff. 
+  getting rid of everything i want to costs about 25ms, which makes it seem like the wrong choice. 
+  but also, just changing the block iteration order i can trade 30k for 30ms, 
+  and that's a one identifier diff instead of a 100 line one, 
+  so seems like the code im getting rid of was a lot of hassle to get the same effect. 
+
 ## (Sep 20/21)
 
 - there must be some pattern that breaks my arena allocator. 

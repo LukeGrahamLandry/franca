@@ -17,7 +17,6 @@ RMap :: @struct(
     // parallel arrays. the tmp value t[i] is in register r[i]
     tmps: Array(i32, Qbe.Tmp0),
     regs: Array(i32, Qbe.Tmp0),
-    wait_list: Array(i32, Qbe.Tmp0), /* for unmatched hints */ // [register] = temp that wants to be there.
     live: Qbe.BSet,
     len: i64,  // numbers of registers used so far
 );
@@ -32,7 +31,6 @@ RegaCtx :: @struct(
     f: *Qbe.Fn,
     regu: u64,       /* registers used */
     pm: List(PMove), /* parallel move constructed */
-    loop:  i32,      /* current loop level */
     added_moves:  u32, 
     added_blocks: u32,
 );
@@ -41,18 +39,15 @@ fn hint(c: *RegaCtx, t: i64) *i32 #inline =
     c.f.tmp[phi_dest(t, c.f)].hint.register&;
 
 fn sethint(c: *RegaCtx, t: i64, r: i64) void = {
-    p := c.f.tmp[phi_dest(t, c.f)]&;
-    if p.hint.register == -1 || p.hint.weight > c.loop {
-        p.hint.register = r.intcast();
-        p.hint.weight = c.loop;
-        c.f.tmp[t].visit = -1;
+    h := hint(c, t);
+    if h[] == -1 {
+        h[] = r.intcast();
     }
 }
 
 fn rcopy(dest: *RMap, src: *RMap) void = {
     dest.tmps&.items().copy_from(src.tmps&.items());
     dest.regs&.items().copy_from(src.regs&.items());
-    dest.wait_list&.items().copy_from(src.wait_list&.items());
     bscopy(dest.live&, src.live&);
     dest.len = src.len;
 }
@@ -107,89 +102,30 @@ fn ralloctry(c: *RegaCtx, m: *RMap, t: i32, try: bool) Qbe.Ref = {
         r := rfind(m, t).expect("thought we allocated but don't know where");
         return(TMP(r));
     };
-    r_hinted := c.f.tmp[t].visit;
-    if r_hinted == -1 || bshas(m.live&, r_hinted.intcast()) {
-        r_hinted = c.hint(t)[];
-    };
-    T := c.f.globals.target&;
+    r_hinted := c.hint(t)[];
     r_allocated := if r_hinted != -1 && !bshas(m.live&, r_hinted.zext()) {
         r_hinted.intcast()
     } else {
-        found :: local_return;
         if try {
             return(QbeNull);
         };
         to_avoid := c.f.tmp[phi_dest(t, c.f)].hint.avoid;
         
-        ::if(Ty(i32, i32));
+        T := c.f.globals.target&;
         of_kind := @if(c.f.tmp[t].cls.is_int(), T.gpr, T.fpr);
         allow := of_kind.bit_and(bit_not m.live.t[]);
         
         // at least try not to get a bad place
         prefer := allow.bit_and(bit_not to_avoid);
-        for_bits prefer { r |
-            found(r);
+        if prefer == 0 {
+            // ok fine, anything will do
+            prefer = allow;
         };
-        // ok fine, anything will do
-        for_bits allow { r |
-            found(r);
-        };
-        c.f.debug_dump(m, c.f.globals.debug_out);
-        printfn(c.f, c.f.globals.debug_out);
-        @panic("no register free for % in %. this should be unreachable becuase of the spill pass.", c.f.tmp.index(t).name(), c.f.name());
+        @assert(prefer != 0, "no register free for % in %. this should be unreachable becuase of the spill pass.", c.f.tmp.index(t).name(), c.f.name());
+        prefer.bitcast().trailing_zeros()
     };
     c.radd(m, t, r_allocated);
     c.sethint(t, r_allocated);
-    c.f.tmp[t].visit = r_allocated.intcast(); // remember that we were allocated this register for later. 
-    r_hinted := c.hint(t)[].intcast();
-    if r_hinted != -1 && r_hinted != r_allocated {
-        // if we didn't get where we wanted, remember that we should be swapped in if r_hinted frees up. 
-
-        // TODO: the hinting sounds like a good idea but seems to generate worse code. 
-        //       is there something weird about the shape of code i output that confuses it somehow? 
-        // 1098396 -> 1003912
-        // qbe does this but it makes the code size 10% bigger and not faster. 
-        // it seems to generate a useless move to restore local variables after a call? 
-        // T64 was allocated R20 but wants R1
-        // @println("T% was allocated R% but wants R%", t, r_allocated, r_hinted);
-        // which like does make sense but we have to somehow remember that it's already there or it inserts a bunch of useless stuff
-        // but its hard to think about because we're going backwards
-        // is it too dumb to add an extra pass that tries harder to remove redundant copies? probably. 
-        // the other places hints are added are useful it seems.
-        // -- Mar 18, 2025
-        /*
-        R20 =l copy R1
-    	# R1 =l copy R1
-    	call $no_epar, C33
-    	R1 =l copy R20
-    	R20 =l copy R1
-    	# R1 =l copy R1
-    	call $no_epar, C33
-        ------
-	
-        R20 =l copy R1
-		R1 =l copy R20  <-- still dumb
-		call $no_epar, C33
-		R1 =l copy R20
-		call $no_epar, C33
-        */
-        // the situation that it really hurts is that i use the env parameter so much,
-        // (it you do it on import_c without preserve_franca_env, it's much less dramatic), 
-        // it remembers on entry that env wants to be in x9 and then does an extra instruction 
-        // of shuffleing every time it gets stomped by a call. 
-        // that only explains why removing it in set_param_copy_hints helps, not here, 
-        // so i think the problem is more general, that just adds an argument preserved accross every single call so it's more obvious. 
-        // code size numbers kinda agree with that intuition:  
-        // both disabled:                 912928
-        // ralloctry disabled:            919640
-        // set_param_copy_hints disabled: 940832
-        // both enabled:                 1043424
-        // set_param_copy_hints disabled only for x9 on arm: 935592 (so env is 1/4 of the cost there)
-        // -- Sep 21, 2025
-        @if(ADD_TO_REG_WAIT_LIST) {
-            m.wait_list&[r_hinted] = t.intcast();
-        };
-    };
     TMP(r_allocated)
 }
 
@@ -231,8 +167,6 @@ fn pmadd(c: *RegaCtx, src: Qbe.Ref, dst: Qbe.Ref, k: Qbe.Cls) void #inline =
     c.pm&.push(src = src, dest = dst, cls = k);
 
 PMStat :: @enum(i64) (ToMove, Moving, Moved);
-
-ADD_TO_REG_WAIT_LIST :: false;
 
 // not exactly the same (we do it backwards and with swap instead of a temporary) but similar: 
 // Rideau, L., Serpette, B.P. & Leroy, X. Tilting at Windmills with Coq: Formal Verification of a Compilation Algorithm for Parallel Moves. J Autom Reasoning 40, 307–326 (2008).
@@ -381,28 +315,8 @@ fn do_parallel_moves(c: *RegaCtx, b: *Qbe.Blk, last_move: *Qbe.Ins, m: *RMap) *Q
     first_move
 }
 
-fn prio1(c: *RegaCtx, r1: Qbe.Ref, r2: Qbe.Ref) bool = {
-    /* trivial heuristic to begin with,
-     * later we can use the distance to
-     * the definition instruction
-     */
-    c.hint(r1.val())[] != -1
-}
-
-fn insert(c: *RegaCtx, r: *Qbe.Ref, rs: *Array(*Qbe.Ref, 4), p: i64) void = {
-    i := p;
-    rs[i] = r;
-    while => i > 0 && c.prio1(r[], rs[i - 1][]) {
-        i -= 1;
-        rs[i+1] = rs[i];
-        rs[i] = r;
-    }
-}
-
-fn do_block_instructions(c: *RegaCtx, b: *Qbe.Blk, cur: *RMap) void = { // #log_ir("RIS") = {
+fn do_block_instructions(c: *RegaCtx, b: *Qbe.Blk, cur: *RMap) void = {
     T := c.f.globals.target&;
-    reg_args := Array(*Qbe.Ref, 4).zeroed(); reg_args := reg_args&;
-
     if rtype(b.jmp.arg) == .RTmp {
         b.jmp.arg = c.ralloc(cur, b.jmp.arg.val().intcast());
     };
@@ -462,93 +376,39 @@ fn do_block_instructions(c: *RegaCtx, b: *Qbe.Blk, cur: *RMap) void = { // #log_
                 }
             };
         };
-        reg_args_count := 0;
         each i.arg& { arg | 
             @match(rtype(arg[])) {
                 fn RMem() => {
                     m := c.f.get_memory(arg[]);
                     if rtype(m.base) == .RTmp {
-                        c.insert(m.base&, reg_args, reg_args_count);
-                        reg_args_count += 1;
+                        m.base = c.ralloc(cur, m.base.val().intcast());
                     };
                     if rtype(m.index) == .RTmp {
-                        c.insert(m.index&, reg_args, reg_args_count);
-                        reg_args_count += 1;
+                        m.index = c.ralloc(cur, m.index.val().intcast());
                     };
                 }
                 fn RTmp() => {
-                    c.insert(arg, reg_args, reg_args_count);
-                    reg_args_count += 1;
+                    arg[] = c.ralloc(cur, arg[].val().intcast());
                 }
                 @default => ();
             };
-        };
-        range(0, reg_args_count) { r |
-            reg_args[r][] = c.ralloc(cur, reg_args[r][].val().intcast());
         };
         was_nop_copy := i.op() == .copy && i.to == i.arg&[0];
         if was_nop_copy { 
             // :LookAtLastInst
             c.f.globals.curi = c.f.globals.curi.offset(1); // pop off the emit() from this iteration
         };
-
-        @if(!ADD_TO_REG_WAIT_LIST) continue();
-        /* try to change the register of a hinted
-         * temporary if `just_freed` is available */
-        if(just_freed == -1, => continue());
-        t := cur.wait_list&[just_freed];
-        if(t == 0, => continue());
-        if(bshas(cur.live&, just_freed), => continue());
-        r_hint := c.hint(t.intcast())[].intcast();
-        if(r_hint != just_freed, => continue());
-        rt := c.rfree(cur, t.intcast()).intcast();
-        if(rt == -1, => continue());
-        
-        c.f.tmp[t.intcast()].visit = -1;
-        c.ralloc(cur, t);
-        @debug_assert(bshas(cur.live&, just_freed));
-        c.f.emit(.copy, c.f.tmp[t.intcast()].cls, TMP(rt), TMP(just_freed), QbeNull);
-        c.added_moves += 1;
-        cur.wait_list&[just_freed] = 0;
-        range(0, reg_args_count) { r | 
-            if reg_args[r][] == TMP(rt) { // rT // TODO: rename. 
-                reg_args[r][] = TMP(just_freed); 
-            }
-        };
-        /* one could iterate this logic with
-         * the newly freed rt, but in this case
-         * the above loop must be changed */
     };
     c.f.copy_instructions_from_scratch(b);
 }
 
-/* comparison function to order temporaries
- * for allocation at the end of blocks */
-fn prio2(c: *RegaCtx, t1: i64, t2: i32) i64 = {
-    if c.f.tmp[t1].visit.intcast().bit_xor(c.f.tmp[t2.intcast()].visit.intcast()) < 0 { /* != signs */
-        return(if(c.f.tmp[t1].visit != -1, => 1, => -1));
-    };
-    if c.hint(t1)[].intcast().bit_xor(c.hint(t2.intcast())[].intcast()) < 0 {
-        return(if(c.hint(t1)[] != -1, => 1, => -1));
-    };
-    xxx := c.f.tmp[t1].cost;
-    xxxx := c.f.tmp[t2.intcast()].cost;
-    (xxx - xxxx).bitcast().intcast()
-}
-
-/* peel loop nests from inside out */
-carve :: fn(ba: **Qbe.Blk, bb: **Qbe.Blk) bool = { 
-    @if(ba.loop == bb.loop, ba.id < bb.id, ba.loop > bb.loop)
-};
-
 /* register allocation
- * depends on rpo, phi, cost, (and obviously spill)
+ * depends on rpo, phi, (and obviously spill)
  */
 fn register_allocation(f: *Qbe.Fn) void = {
     /* 1. setup */
-    c: RegaCtx = (f = f, regu = 0, pm = PMove.list(temp()), loop = MAX_i32, added_moves = 0, added_blocks = 0); c := c&;
+    c: RegaCtx = (f = f, regu = 0, pm = PMove.list(temp()), added_moves = 0, added_blocks = 0); c := c&;
     rl := Array(i32, Qbe.Tmp0).zeroed(); rl := rl&.items();
-    blk := temp().alloc_zeroed(*Qbe.Blk, f.nblk.zext());
     end := temp().alloc_zeroed(RMap, f.nblk.zext());
     beg := temp().alloc_zeroed(RMap, f.nblk.zext());
     each(end, fn(it) => bsinit(it.live&, f.ntmp.zext()));
@@ -557,29 +417,14 @@ fn register_allocation(f: *Qbe.Fn) void = {
     old := temp().alloc_zeroed(RMap, 1).as_ptr();
     bsinit(cur.live&, f.ntmp.zext());
     bsinit(old.live&, f.ntmp.zext());
-    enumerate f.tmps() { t, it |
-        ::if(i32);
-        it.hint.register = if(t < Qbe.Tmp0, => t.intcast(), => -1);
-        it.hint.weight = c.loop;
-        it.visit = -1;
-    };
-    
-    n := 0;
-    for_blocks f { b |  
-        blk[n] = b;
-        n += 1;
-    };
-    c.set_param_copy_hints();
-    sort :: quicksort(*Qbe.Blk, carve);
-    blk.sort();
+    // (t.hint.register is setup in spill)
     
     /* 2. assign registers */
-    for blk { b | 
+    // note: toggling this iteration order trades size for speed. 
+    for_blocks_rpo_forward f { b | 
         n: i64 = b.id.zext();
-        loop := b.loop;
         cur.len = 0;
         bszero(cur.live&);
-        cur.wait_list&.set_zeroed();
         
         // From spill pass, we know which tmps need to be in registers at the end of this block. 
         live_at_end_count := 0;
@@ -587,11 +432,6 @@ fn register_allocation(f: *Qbe.Fn) void = {
             j := live_at_end_count;
             live_at_end_count += 1;
             rl[j] = t.intcast();
-            while => j > 0 && c.prio2(t, rl[j-1]) > 0 {
-                j -= 1;
-                rl[j+1] = rl[j];
-                rl[j] = t.intcast();
-            };
         };
         T := f.globals.target&;
         @debug_assert(live_at_end_count.intcast() <= T.ngpr + T.nfpr, "too many live tmps");
@@ -784,19 +624,5 @@ fn emit_phi_blocks(c: *RegaCtx, beg: []RMap, end: []RMap) void = {
 fn name_phi_block(f: *Qbe.Fn, source: *Qbe.Blk, dest: *Qbe.Blk, inserted: *Qbe.Blk) void #inline = {
     @if(f.track_ir_names()) {
         inserted.name = @tfmt("%_%", source.name(), dest.name());
-    };
-}
-
-// we want our parameters to be assgned to thier abi registers so we don't actually have to do a copy. 
-fn set_param_copy_hints(c: *RegaCtx) void = {
-    @if(!ADD_TO_REG_WAIT_LIST) return();
-    
-    for_insts_forward c.f.start { i |
-        if i.op() != .copy || !isreg(i.arg&[0]) {
-            return();
-        };
-        @debug_assert(rtype(i.to) == .RTmp, "can only copy to tmp");
-        abi_reg := i.arg&[0].val();
-        c.sethint(i.to.val(), abi_reg);
     };
 }
