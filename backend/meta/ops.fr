@@ -2,36 +2,51 @@
 
 tables :: gen_table();
 
-fn ops_table_argscls(value: u32, k: Qbe.Cls, argument_index: i64) Qbe.Cls = {
+fn ops_table_argscls(value: i64, k: Qbe.Cls, argument_index: i64) Qbe.Cls = {
     off := ((intcast @as(i32) k) * 3) + argument_index*12;
     it  := value.shift_right_logical(off).bit_and(0b111);
-    it  := @as(i32) it.bitcast();
+    it  := @as(i32) it.intcast();
     @as(Qbe.Cls) it
 }
 
-fn ops_table_canfold(value: u32) bool = 
-    value.shift_right_logical(24+4).bit_and(1) != 0;
+fn ops_table_canfold(value: i64) bool = 
+    value.read_op_bit(.can_fold);
 
 fn arithmetic_identity_table(o: Qbe.O) Ty(bool, u64) = {
-    tables := tables;
     value := tables[intcast @as(i32) o];
-    HasId := value.shift_right_logical(24+4+1).bit_and(1) != 0;
-    IdVal: u64 = value.shift_right_logical(24+4+2).bit_and(1).uext();
-    (HasId, IdVal)
+    (value.read_op_bit(.has_id), value.read_op_bit(.id_val).int().bitcast())
 }
-
-fn ops_table_rv_imm(value: u32) bool = 
-    value.shift_right_logical(31) != 0;
 
 fn ops_table_amd_flag(o: Qbe.O) Ty(bool, bool) = {
-    tables := tables;
     value := tables[intcast @as(i32) o];
-    SetsZeroFlag := value.shift_right_logical(24+2).bit_and(1) != 0;
-    LeavesFlags := value.shift_right_logical(24+2+1).bit_and(1) != 0;
-    (SetsZeroFlag, LeavesFlags)
+    (value.read_op_bit(.amd_sets_zero_flag), value.read_op_bit(.amd_leaves_flag))
 }
 
-gen_table :: fn() []u32 = {
+get :: fn(o: Qbe.O, i: OpBit) bool = 
+    tables[intcast @as(i32) o].read_op_bit(i);
+
+fn read_op_bit(value: i64, i: OpBit) bool = 
+    value.shift_right_logical(24 + @as(i64) i).bit_and(1) != 0;
+
+OpBit :: @enum(
+    amd_memarg_one,  // see amd64_memargs()
+    amd_memarg_either,
+    amd_sets_zero_flag,
+    amd_leaves_flag,
+    rv_imm,
+    can_fold,
+    has_id,  // to=a[0] if a[1]=id_val
+    id_val,
+    pinned, 
+    eqval,  // to=eqval if a[0]=a[1] if int cmp
+    cmplgtewl,  /* c[us][gl][et][wl] */
+    cmpeqwl,  /* c{eq,ne}[wl] */ 
+    idempotent,  // to=a[0] if a[0]=a[1]
+    associative,
+    commutative,
+);
+
+gen_table :: fn() []i64 = {
     C :: Qbe.Cls;
     w :: C.Kw; l :: C.Kl; s :: C.Ks; d :: C.Kd; e :: C.Ke; x :: C.Kx; m :: l;
     T :: fn(a: C, b: C, c: C, d: C, e: C, f: C, g: C, h: C) u32 #fold = {  // 24 bits
@@ -43,93 +58,98 @@ gen_table :: fn() []u32 = {
         r.shift_right_logical(3)
     };
     
-    X :: fn(NMemArgs: i64, SetsZeroFlag: i64, LeavesFlags: i64) u32 #fold = // 4 bits
-        trunc(NMemArgs + SetsZeroFlag*4 + LeavesFlags*8).shift_left(24);
-    P :: fn(CanFold: i64, HasId: i64, IdVal: i64) u32 #fold = // 3 bits
-        trunc(CanFold + HasId*2 + IdVal*4).shift_left(24+4);
-    V :: fn(v: i64) u32 #fold =  // 1 bit
-        v.trunc().shift_left(24+4+3); 
+    X :: fn(NMemArgs: i64, SetsZeroFlag: i64, LeavesFlags: i64) i64 #fold = // 4 bits
+        (NMemArgs + SetsZeroFlag*4 + LeavesFlags*8).shift_left(24);
+    P :: fn(CanFold: i64, HasId: i64, IdVal: i64) i64 #fold = // 3 bits
+        (CanFold + HasId*2 + IdVal*4).shift_left(24+4+1);
+    V :: fn(v: i64) i64 #fold =  // 1 bit
+        v.shift_left(24+4); 
     
     fn O();
-    fn O(o: Qbe.O, t: u32, p: u32, x: u32, v: u32) void = {
-        argcls[intcast @as(i32) o] = t.bit_or(p).bit_or(x).bit_or(v);
+    fn O(o: Qbe.O, t: i64, p: i64, x: i64, v: i64) void = 
+        O(o, t, p, x, v, 0);
+    fn O(o: Qbe.O, t: i64, p: i64, x: i64, v: i64, g: u7) void = {
+        g := shift_left(@as(i64) g, 24+4+3+1);
+        argcls[intcast @as(i32) o] = t.bit_or(p).bit_or(x).bit_or(v).bit_or(g);
     };
-    fn O(o: Qbe.O, t: u32) void = O(o, t, P(0,0,0), X(0,0,0), V(0));
+    // for the ones that use this, g=1 is either right or its a late op and doesn't matter
+    fn O(o: Qbe.O, t: i64) void = O(o, t, P(0,0,0), X(0,0,0), V(0), 0b000001);  
     
-    argcls :: ast_alloc().alloc_zeroed(u32, Qbe.O.enum_count());
+    argcls :: ast_alloc().alloc_zeroed(i64, Qbe.O.enum_count());
 
+    
 /* Arithmetic and Bits */
-O(.add,     T(w,l,s,d, w,l,s,d), P(1,1,0), X(2,1,0), V(1));
+O(.add,     T(w,l,s,d, w,l,s,d), P(1,1,0), X(2,1,0), V(1), 0b1100000);
 O(.sub,     T(w,l,s,d, w,l,s,d), P(1,1,0), X(2,1,0), V(0));
 O(.neg,     T(w,l,s,d, x,x,x,x), P(1,0,0), X(1,1,0), V(0));
 O(.div,     T(w,l,s,d, w,l,s,d), P(1,1,1), X(0,0,0), V(0));
 O(.rem,     T(w,l,e,e, w,l,e,e), P(1,0,0), X(0,0,0), V(0));
 O(.udiv,    T(w,l,e,e, w,l,e,e), P(1,1,1), X(0,0,0), V(0));
 O(.urem,    T(w,l,e,e, w,l,e,e), P(1,0,0), X(0,0,0), V(0));
-O(.mul,     T(w,l,s,d, w,l,s,d), P(1,1,1), X(2,0,0), V(0));
-O(.and,     T(w,l,e,e, w,l,e,e), P(1,0,0), X(2,1,0), V(1));
-O(.or,      T(w,l,e,e, w,l,e,e), P(1,1,0), X(2,1,0), V(1));
-O(.xor,     T(w,l,e,e, w,l,e,e), P(1,1,0), X(2,1,0), V(1));
+O(.mul,     T(w,l,s,d, w,l,s,d), P(1,1,1), X(2,0,0), V(0), 0b1000000);
+O(.and,     T(w,l,e,e, w,l,e,e), P(1,0,0), X(2,1,0), V(1), 0b1110000);
+O(.or,      T(w,l,e,e, w,l,e,e), P(1,1,0), X(2,1,0), V(1), 0b1110000);
+O(.xor,     T(w,l,e,e, w,l,e,e), P(1,1,0), X(2,1,0), V(1), 0b1100000);
 O(.sar,     T(w,l,e,e, w,w,e,e), P(1,1,0), X(1,1,0), V(1));
 O(.shr,     T(w,l,e,e, w,w,e,e), P(1,1,0), X(1,1,0), V(1));
 O(.shl,     T(w,l,e,e, w,w,e,e), P(1,1,0), X(1,1,0), V(1));
 
 /* Comparisons */
-O(.ceqw,    T(w,w,e,e, w,w,e,e), P(1,0,0), X(0,1,0), V(0));
-O(.cnew,    T(w,w,e,e, w,w,e,e), P(1,0,0), X(0,1,0), V(0));
-O(.csgew,   T(w,w,e,e, w,w,e,e), P(1,0,0), X(0,1,0), V(0));
-O(.csgtw,   T(w,w,e,e, w,w,e,e), P(1,0,0), X(0,1,0), V(0));
-O(.cslew,   T(w,w,e,e, w,w,e,e), P(1,0,0), X(0,1,0), V(0));
-O(.csltw,   T(w,w,e,e, w,w,e,e), P(1,0,0), X(0,1,0), V(1));
-O(.cugew,   T(w,w,e,e, w,w,e,e), P(1,0,0), X(0,1,0), V(0));
-O(.cugtw,   T(w,w,e,e, w,w,e,e), P(1,0,0), X(0,1,0), V(0));
-O(.culew,   T(w,w,e,e, w,w,e,e), P(1,0,0), X(0,1,0), V(0));
-O(.cultw,   T(w,w,e,e, w,w,e,e), P(1,0,0), X(0,1,0), V(1));
+O(.ceqw,    T(w,w,e,e, w,w,e,e), P(1,0,0), X(0,1,0), V(0), 0b1001010);
+O(.cnew,    T(w,w,e,e, w,w,e,e), P(1,0,0), X(0,1,0), V(0), 0b1001000);
+O(.csgew,   T(w,w,e,e, w,w,e,e), P(1,0,0), X(0,1,0), V(0), 0b0000110);
+O(.csgtw,   T(w,w,e,e, w,w,e,e), P(1,0,0), X(0,1,0), V(0), 0b0000100);
+O(.cslew,   T(w,w,e,e, w,w,e,e), P(1,0,0), X(0,1,0), V(0), 0b0000110);
+O(.csltw,   T(w,w,e,e, w,w,e,e), P(1,0,0), X(0,1,0), V(1), 0b0000100);
+O(.cugew,   T(w,w,e,e, w,w,e,e), P(1,0,0), X(0,1,0), V(0), 0b0000110);
+O(.cugtw,   T(w,w,e,e, w,w,e,e), P(1,0,0), X(0,1,0), V(0), 0b0000100);
+O(.culew,   T(w,w,e,e, w,w,e,e), P(1,0,0), X(0,1,0), V(0), 0b0000110);
+O(.cultw,   T(w,w,e,e, w,w,e,e), P(1,0,0), X(0,1,0), V(1), 0b0000100);
 
-O(.ceql,    T(l,l,e,e, l,l,e,e), P(1,0,0), X(0,1,0), V(0));
-O(.cnel,    T(l,l,e,e, l,l,e,e), P(1,0,0), X(0,1,0), V(0));
-O(.csgel,   T(l,l,e,e, l,l,e,e), P(1,0,0), X(0,1,0), V(0));
-O(.csgtl,   T(l,l,e,e, l,l,e,e), P(1,0,0), X(0,1,0), V(0));
-O(.cslel,   T(l,l,e,e, l,l,e,e), P(1,0,0), X(0,1,0), V(0));
-O(.csltl,   T(l,l,e,e, l,l,e,e), P(1,0,0), X(0,1,0), V(1));
-O(.cugel,   T(l,l,e,e, l,l,e,e), P(1,0,0), X(0,1,0), V(0));
-O(.cugtl,   T(l,l,e,e, l,l,e,e), P(1,0,0), X(0,1,0), V(0));
-O(.culel,   T(l,l,e,e, l,l,e,e), P(1,0,0), X(0,1,0), V(0));
-O(.cultl,   T(l,l,e,e, l,l,e,e), P(1,0,0), X(0,1,0), V(1));
+O(.ceql,    T(l,l,e,e, l,l,e,e), P(1,0,0), X(0,1,0), V(0), 0b1001010);
+O(.cnel,    T(l,l,e,e, l,l,e,e), P(1,0,0), X(0,1,0), V(0), 0b1001000);
+O(.csgel,   T(l,l,e,e, l,l,e,e), P(1,0,0), X(0,1,0), V(0), 0b0000110);
+O(.csgtl,   T(l,l,e,e, l,l,e,e), P(1,0,0), X(0,1,0), V(0), 0b0000100);
+O(.cslel,   T(l,l,e,e, l,l,e,e), P(1,0,0), X(0,1,0), V(0), 0b0000110);
+O(.csltl,   T(l,l,e,e, l,l,e,e), P(1,0,0), X(0,1,0), V(1), 0b0000100);
+O(.cugel,   T(l,l,e,e, l,l,e,e), P(1,0,0), X(0,1,0), V(0), 0b0000110);
+O(.cugtl,   T(l,l,e,e, l,l,e,e), P(1,0,0), X(0,1,0), V(0), 0b0000100);
+O(.culel,   T(l,l,e,e, l,l,e,e), P(1,0,0), X(0,1,0), V(0), 0b0000110);
+O(.cultl,   T(l,l,e,e, l,l,e,e), P(1,0,0), X(0,1,0), V(1), 0b0000100);
 
-O(.ceqs,    T(s,s,e,e, s,s,e,e), P(1,0,0), X(0,1,0), V(0));
+O(.ceqs,    T(s,s,e,e, s,s,e,e), P(1,0,0), X(0,1,0), V(0), 0b1000000);
 O(.cges,    T(s,s,e,e, s,s,e,e), P(1,0,0), X(0,1,0), V(0));
 O(.cgts,    T(s,s,e,e, s,s,e,e), P(1,0,0), X(0,1,0), V(0));
 O(.cles,    T(s,s,e,e, s,s,e,e), P(1,0,0), X(0,1,0), V(0));
 O(.clts,    T(s,s,e,e, s,s,e,e), P(1,0,0), X(0,1,0), V(0));
-O(.cnes,    T(s,s,e,e, s,s,e,e), P(1,0,0), X(0,1,0), V(0));
-O(.cos,     T(s,s,e,e, s,s,e,e), P(1,0,0), X(0,1,0), V(0));
-O(.cuos,    T(s,s,e,e, s,s,e,e), P(1,0,0), X(0,1,0), V(0));
+O(.cnes,    T(s,s,e,e, s,s,e,e), P(1,0,0), X(0,1,0), V(0), 0b1000000);
+O(.cos,     T(s,s,e,e, s,s,e,e), P(1,0,0), X(0,1,0), V(0), 0b1000000);
+O(.cuos,    T(s,s,e,e, s,s,e,e), P(1,0,0), X(0,1,0), V(0), 0b1000000);
 
-O(.ceqd,    T(d,d,e,e, d,d,e,e), P(1,0,0), X(0,1,0), V(0));
+O(.ceqd,    T(d,d,e,e, d,d,e,e), P(1,0,0), X(0,1,0), V(0), 0b1000000);
 O(.cged,    T(d,d,e,e, d,d,e,e), P(1,0,0), X(0,1,0), V(0));
 O(.cgtd,    T(d,d,e,e, d,d,e,e), P(1,0,0), X(0,1,0), V(0));
 O(.cled,    T(d,d,e,e, d,d,e,e), P(1,0,0), X(0,1,0), V(0));
 O(.cltd,    T(d,d,e,e, d,d,e,e), P(1,0,0), X(0,1,0), V(0));
-O(.cned,    T(d,d,e,e, d,d,e,e), P(1,0,0), X(0,1,0), V(0));
-O(.cod,     T(d,d,e,e, d,d,e,e), P(1,0,0), X(0,1,0), V(0));
-O(.cuod,    T(d,d,e,e, d,d,e,e), P(1,0,0), X(0,1,0), V(0));
+O(.cned,    T(d,d,e,e, d,d,e,e), P(1,0,0), X(0,1,0), V(0), 0b1000000);
+O(.cod,     T(d,d,e,e, d,d,e,e), P(1,0,0), X(0,1,0), V(0), 0b1000000);
+O(.cuod,    T(d,d,e,e, d,d,e,e), P(1,0,0), X(0,1,0), V(0), 0b1000000);
 
 /* Memory */
-O(.storeb,  T(w,e,e,e, m,e,e,e), P(0,0,0), X(0,0,1), V(0));
-O(.storeh,  T(w,e,e,e, m,e,e,e), P(0,0,0), X(0,0,1), V(0));
-O(.storew,  T(w,e,e,e, m,e,e,e), P(0,0,0), X(0,0,1), V(0));
-O(.storel,  T(l,e,e,e, m,e,e,e), P(0,0,0), X(0,0,1), V(0));
-O(.stores,  T(s,e,e,e, m,e,e,e), P(0,0,0), X(0,0,1), V(0));
-O(.stored,  T(d,e,e,e, m,e,e,e), P(0,0,0), X(0,0,1), V(0));
+O(.storeb,  T(w,e,e,e, m,e,e,e), P(0,0,0), X(0,0,1), V(0), 0b000001);
+O(.storeh,  T(w,e,e,e, m,e,e,e), P(0,0,0), X(0,0,1), V(0), 0b000001);
+O(.storew,  T(w,e,e,e, m,e,e,e), P(0,0,0), X(0,0,1), V(0), 0b000001);
+O(.storel,  T(l,e,e,e, m,e,e,e), P(0,0,0), X(0,0,1), V(0), 0b000001);
+O(.stores,  T(s,e,e,e, m,e,e,e), P(0,0,0), X(0,0,1), V(0), 0b000001);
+O(.stored,  T(d,e,e,e, m,e,e,e), P(0,0,0), X(0,0,1), V(0), 0b000001);
 
-O(.loadsb,  T(m,m,e,e, x,x,e,e), P(0,0,0), X(0,0,1), V(0));
-O(.loadub,  T(m,m,e,e, x,x,e,e), P(0,0,0), X(0,0,1), V(0));
-O(.loadsh,  T(m,m,e,e, x,x,e,e), P(0,0,0), X(0,0,1), V(0));
-O(.loaduh,  T(m,m,e,e, x,x,e,e), P(0,0,0), X(0,0,1), V(0));
-O(.loadsw,  T(m,m,e,e, x,x,e,e), P(0,0,0), X(0,0,1), V(0));
-O(.loaduw,  T(m,m,e,e, x,x,e,e), P(0,0,0), X(0,0,1), V(0));
-O(.load,    T(m,m,m,m, x,x,x,x), P(0,0,0), X(0,0,1), V(0));
+O(.loadsb,  T(m,m,e,e, x,x,e,e), P(0,0,0), X(0,0,1), V(0), 0b000001);
+O(.loadub,  T(m,m,e,e, x,x,e,e), P(0,0,0), X(0,0,1), V(0), 0b000001);
+O(.loadsh,  T(m,m,e,e, x,x,e,e), P(0,0,0), X(0,0,1), V(0), 0b000001);
+O(.loaduh,  T(m,m,e,e, x,x,e,e), P(0,0,0), X(0,0,1), V(0), 0b000001);
+O(.loadsw,  T(m,m,e,e, x,x,e,e), P(0,0,0), X(0,0,1), V(0), 0b000001);
+O(.loaduw,  T(m,m,e,e, x,x,e,e), P(0,0,0), X(0,0,1), V(0), 0b000001);
+O(.load,    T(m,m,m,m, x,x,x,x), P(0,0,0), X(0,0,1), V(0), 0b000001);
 
 /* Extensions and Truncations */
 O(.extsb,   T(w,w,e,e, x,x,e,e), P(1,0,0), X(0,0,1), V(0));
@@ -163,13 +183,13 @@ O(.vastart, T(m,e,e,e, x,e,e,e));
 O(.copy,    T(w,l,s,d, x,x,x,x), P(0,0,0), X(0,0,1), V(0));
 
 /* Debug */
-O(.dbgloc,  T(w,e,e,e, w,e,e,e), P(0,0,0), X(0,0,1), V(0));
+O(.dbgloc,  T(w,e,e,e, w,e,e,e), P(0,0,0), X(0,0,1), V(0), 0b000001);
 
 /* Miscellaneous and Architecture-Specific Operations */;
 O(.nop,     T(x,x,x,x, x,x,x,x), P(0,0,0), X(0,0,1), V(0));
 O(.addr,    T(m,m,e,e, x,x,e,e), P(0,0,0), X(0,0,1), V(0));
-O(.blit0,   T(m,e,e,e, m,e,e,e), P(0,0,0), X(0,0,0), V(0));
-O(.blit1,   T(w,e,e,e, x,e,e,e), P(0,0,0), X(0,0,0), V(0));
+O(.blit0,   T(m,e,e,e, m,e,e,e), P(0,0,0), X(0,0,0), V(0), 0b000001);
+O(.blit1,   T(w,e,e,e, x,e,e,e), P(0,0,0), X(0,0,0), V(0), 0b000001);
 O(.swap,    T(w,l,s,d, w,l,s,d), P(0,0,0), X(1,0,0), V(0));
 O(.sign,    T(w,l,e,e, x,x,e,e));
 O(.salloc,  T(e,l,e,e, e,x,e,e));
@@ -247,6 +267,7 @@ O(.global_get,    T(x,x,x,x, x,x,x,x));
 O(.global_set,    T(l,l,l,l, w,l,s,d));
 O(.flow,          T(e,e,e,e, e,e,e,e));
 
+// TODO: don't pin sel, but make sure they stay together
 // movCC frontend
 O(.sel0,    T(w,e,e,e, x,e,e,e));
 O(.sel1,    T(w,l,e,e, w,l,e,e));

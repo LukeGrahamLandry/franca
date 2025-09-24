@@ -1,4 +1,11 @@
 
+## (Sep 23)
+
+- stealing qbe's global value numbering
+  - confusing time because now it needs defining_block zeroed and i was only doing that in debug mode before
+  - self compile works. not impressed, it increases time and code size, 
+    but it also doesn't pass on all the tests, so very possible i've still made a mistake. 
+
 ## (Sep 22)
 
 - oops, i wasn't setting RegaCtx.loop, 

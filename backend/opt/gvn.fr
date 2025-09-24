@@ -1,0 +1,387 @@
+// Adapted from Qbe. MIT License. © 2015-2024 Quentin Carbonneaux <quentin@c9x.me>
+
+mix :: fn(x0: u32, x1: u32) u32 = 
+    x0 + 17*x1;
+
+rhash :: fn(r: Qbe.Ref) u32 = {
+    t := r.type3_val29.bit_and(1.shift_left(3) - 1);
+    v := r.type3_val29.shift_right_logical(3);
+    mix(t, v)
+}
+
+ihash :: fn(i: *Qbe.Ins) u32 = {
+    i.op().raw().bitcast()
+    .mix(i.cls().raw().bitcast())
+    .mix(rhash(i.arg&[0]))
+    .mix(rhash(i.arg&[1]))
+}
+
+ieq :: fn(ia: *Qbe.Ins, ib: *Qbe.Ins) bool = 
+    ia.op30_cls2 == ib.op30_cls2 && ia.arg&[0] == ib.arg&[0] && ia.arg&[1] == ib.arg&[1];
+
+Gvn :: @struct {
+    con01: Array(Qbe.Ref, 2);
+    table: []*Qbe.Ins;
+};
+
+gvndup :: fn(c: *Gvn, i: *Qbe.Ins, insert: bool) ?*Qbe.Ins = {
+    idx := ihash(i).zext().mod(c.table.len);
+    n := 1;
+    loop {
+        ii := c.table[idx];
+        if ii.is_null() {
+            if insert {
+                c.table[idx] = i;
+            }
+            return(.None);
+        }
+        if ieq(i, ii) {
+            return(Some = ii);
+        }
+        idx += 1;
+        if c.table.len <= idx {
+            idx = 0
+        }
+    }
+}
+
+replaceuse :: fn(f: *Qbe.Fn, u: *Qbe.Use, r1: Qbe.Ref, r2: Qbe.Ref) void = {
+    b := f.rpo[u.bid];
+    refs := @match(u.type) {
+        fn UPhi() => u.u.phi.arg();
+        fn UIns() => u.u.ins.arg&.items();
+        fn UJmp() => b.jmp.arg&.slice(1);
+        fn UXXX() => unreachable();
+    };
+    each refs { a |
+        if a[] == r1 {
+            a[] = r2;
+        }
+    };
+    f.adduse(r2, u.type, b, u.u.r);
+}
+
+replaceuses :: fn(f: *Qbe.Fn, r1: Qbe.Ref, r2: Qbe.Ref) void = {
+    t1 := f.get_temporary(r1);
+    each t1.uses() { u |
+        replaceuse(f, u, r1, r2);
+    };
+    t1.nuse = 0;
+}
+
+dedupphi :: fn(f: *Qbe.Fn, g: *Gvn, b: *Qbe.Blk) void = {
+    filter_phis b { p |
+        phicopyref :: import("@/backend/opt/copy2.fr").phicopyref;
+        r := phicopyref(f, b, p, g.con01&);
+        keep := r == Qbe.Null;
+        if !keep {
+            replaceuses(f, p.to, r);
+            p.to = Qbe.Null;
+        }
+        keep
+    };
+}
+
+rcmp :: fn(a: Qbe.Ref, b: Qbe.Ref) i32 = {
+    if rtype(a) != rtype(b) {
+        return rtype(a).raw() - rtype(b).raw();
+    };
+    (a.val() - b.val()).intcast()
+}
+
+normins :: fn(f: *Qbe.Fn, i: *Qbe.Ins) void = {
+    /* truncate constant bits to
+     * 32 bits for s/w uses */
+    range(0, 2) { n |
+        @if(!is_wide(argcls(i, n)))
+        if f.get_int(i.arg&[n]) { v |
+            if v.bit_and(MAX_u32) != v {
+                i.arg&[n] = f.getcon(v.bit_and(MAX_u32));
+            }
+        };
+    }
+    /* order arg[0] <= arg[1] for
+     * commutative ops, preferring
+     * RTmp in arg[0] */
+    if OpTab'get(i.op(), .commutative) && rcmp(i.arg&[0], i.arg&[1]) > 0 {
+        i.arg&.items().swap(0, 1);
+    }
+}
+
+negcon :: fn(cls: Qbe.Cls, c: *Qbe.Con) bool = {
+    z := @static(Qbe.Con) con(Qbe.no_symbol_S, 0);
+    if try_fold(.sub, cls, z, c) { result |
+        c[] = result;
+        return true;
+    };
+    false
+}
+
+assoccon :: fn(f: *Qbe.Fn, b: *Qbe.Blk, i1: *Qbe.Ins) void = {
+    o := i1.op();
+    if o == .sub {
+        o = .add;
+    }
+
+    if !OpTab'get(o, .associative) || is_float(i1.cls()) || rtype(i1.arg&[1]) != .RCon {
+        return()
+    }
+    t2 := f.get_tmp(i1.arg&[0]) || return();
+    c1 := f.get_constant(i1.arg&[1])[];
+    if t2.def.is_null() {
+        return();
+    }
+    i2 := t2.def;
+    
+    if rtype(i2.arg&[1]) != .RCon || o != @if(i2.op() == .sub, .add, i2.op()) {
+        return();
+    }
+    c2 := f.get_constant(i2.arg&[1])[];
+
+    @debug_assert(is_int(i2.cls()));
+    @debug_assert(is_wide(i2.cls()).int() >= is_wide(i1.cls()).int());
+
+    if i1.op() == .sub && !negcon(i1.cls(), c1&) {
+        return();
+    }
+    if i2.op() == .sub && !negcon(i2.cls(), c2&) {
+        return();
+    }
+    
+    c := try_fold(o, i1.cls(), c1&, c2&) || return();
+
+    if o == .add && c&.type() == .CBits {
+        @debug_assert(i1.cls().is_int());
+        b := @if(i1.cls() == .Kl, c&.bits(), c&.bits().sign_extend_low32());
+        if b < 0 {
+            ok := negcon(i1.cls(), c&);
+            @debug_assert(ok);
+            o = .sub;
+        }
+    }
+
+    i1.set_op(o);
+    i1.arg&[0] = i2.arg&[0];
+    i1.arg&[1] = f.newcon(c&);
+    f.adduse(i1.arg&[0], .UIns, b, Qbe.Ins, i1);
+}
+
+killins :: fn(f: *Qbe.Fn, i: *Qbe.Ins, r: Qbe.Ref) void = {
+    replaceuses(f, i.to, r);
+    i.set_nop();
+}
+
+dedupins :: fn(f: *Qbe.Fn, g: *Gvn, b: *Qbe.Blk, i: *Qbe.Ins) void = {
+    normins(f, i);
+    
+    @if(i.op() == .nop || pinned(i)) return();
+
+    @debug_assert_ne(i.to, Qbe.Null, "tried to number inst without output: % in $%", i.op(), f.name());
+    assoccon(f, b, i);
+
+    copyref :: import("@/backend/opt/copy2.fr").copyref;
+    r := copyref(f, b, i, g.con01&);
+    if r != Qbe.Null {
+        killins(f, i, r);
+        return();
+    }
+    r := Fold'foldref(f, i);
+    if r != Qbe.Null {
+        killins(f, i, r);
+        return();
+    }
+    if g.gvndup(i, true) { i1 |
+        killins(f, i, i1.to);
+        return();
+    }
+}
+
+cmpeqz :: fn(f: *Qbe.Fn, r: Qbe.Ref) ?Ty(Qbe.Ref, Qbe.Cls, i64) = {
+    t := f.get_tmp(r) || return(.None);
+    i := t.def;
+    if i.is_null() || !OpTab'get(i.op(), .cmpeqwl) || i.arg&[1] != Qbe.ConZero {
+        return(.None);
+    };
+    (Some = (i.arg&[0], argcls(i, 0), OpTab'get(i.op(), .eqval).int()))
+}
+
+branchdom :: fn(f: *Qbe.Fn, bif: *Qbe.Blk, bbr1: *Qbe.Blk, bbr2: *Qbe.Blk, b: *Qbe.Blk) bool = {
+    @debug_assert(bif.jmp.type == .jnz);
+    !b.identical(bif) && dom(bbr1, b) && !reachesnotvia(f, bbr2, b, bif)
+}
+
+domzero :: fn(f: *Qbe.Fn, d: *Qbe.Blk, b: *Qbe.Blk) ?i64 = {
+    @if(branchdom(f, d, d.s1, d.s2, b)) return(Some = 0);
+    @if(branchdom(f, d, d.s2, d.s1, b)) return(Some = 1);
+    .None
+}
+
+/* infer 0/non-0 value from dominating jnz */
+zeroval :: fn(f: *Qbe.Fn, b: *Qbe.Blk, r: Qbe.Ref, cls: Qbe.Cls) ?i64 = {
+    d := b.idom;
+    while => !d.is_null() {
+        continue :: local_return;
+        if d.jmp.type != .jnz {
+            d = d.idom;  // :defer
+            continue();
+        }
+        
+        @if(r == d.jmp.arg && cls == .Kw)
+        if domzero(f, d, b) { z | 
+            return(Some = z);
+        };
+        if cmpeqz(f, d.jmp.arg) { arg, cls1, eqval |
+            @if(r == arg && cls == cls1)
+            if domzero(f, d, b) { z |
+                return(Some = z.bit_xor(eqval));
+            }
+        }
+        d = d.idom;  // :defer
+    };
+    .None
+}
+
+usecls :: fn(u: *Qbe.Use, r: Qbe.Ref, cls: Qbe.Cls) Qbe.Cls = {
+    @match(u.type) {
+        fn UIns() => {
+            k := Qbe.Cls.Kx;  /* widest use */
+            if u.u.ins.arg&[0] == r {
+                k = argcls(u.u.ins, 0);
+            }
+            if u.u.ins.arg&[1] == r && (k == .Kx || !is_wide(k)) {
+                k = argcls(u.u.ins, 1);
+            }
+            @if(k == .Kx, cls, k)
+        }
+        fn UPhi() => {
+            eliminated := u.u.phi.to == Qbe.Null;
+            @if(eliminated, cls, u.u.phi.cls)
+        }
+        fn UJmp() => .Kw;
+        fn UXXX() => unreachable();
+    }
+}
+
+propjnz0 :: fn(f: *Qbe.Fn, bif: *Qbe.Blk, s0: *Qbe.Blk, snon0: *Qbe.Blk, r: Qbe.Ref, cls: Qbe.Cls) void = {
+    @if(s0.npred != 1) return();
+    t := f.get_tmp(r) || return();
+    each t.uses() { u |
+        b := f.rpo[u.bid];
+        /* we may compare an l temp with a w
+        * comparison; so check that the use
+        * does not involve high bits */
+        if usecls(u, r, cls) == cls && branchdom(f, bif, s0, snon0, b) {
+            replaceuse(f, u, r, Qbe.ConZero);
+        }
+    }
+}
+
+dedupjmp :: fn(f: *Qbe.Fn, b: *Qbe.Blk) void = {
+    @if(b.jmp.type != .jnz) return();
+
+    /* propagate jmp arg as 0 through s2 */
+    propjnz0(f, b, b.s2, b.s1, b.jmp.arg, .Kw);
+    /* propagate cmp eq/ne 0 def of jmp arg as 0 */
+    if cmpeqz(f, b.jmp.arg) { arg, cls, eqval |
+        ps := @slice(b.s1, b.s2);
+        propjnz0(f, b, ps[eqval.bit_xor(1)], ps[eqval], arg, cls);
+    }
+
+    /* collapse trivial/constant jnz to jmp */
+    v := f.get_int(b.jmp.arg);
+    z: ?i64 = .None;
+    
+    kill := b.s1.identical(b.s2) || v.is_some();
+    if !kill {
+        z = zeroval(f, b, b.jmp.arg, .Kw);
+        kill = z.is_some();
+    }
+    if kill {
+        v := v || 1;
+        z := z || 0;
+        if v == 0 || z != 0 {
+            b.s1 = b.s2;
+        }
+        /* we later move active ins out of dead blks */
+        b.s2 = zeroed(*Qbe.Blk);
+        b.jmp = (type = .jmp, arg = Qbe.Null);
+    }
+}
+
+rebuildcfg :: fn(f: *Qbe.Fn, g: *Gvn) void = {
+    rpo := f.rpo.slice(0, f.nblk.zext()).shallow_copy(temp());
+    fillcfg(f);
+
+    /* move instructions that were in
+     * killed blocks and may be active
+     * in the computation in the start
+     * block */
+    for rpo { b |
+        continue :: local_return;
+        @if(b.id != MAX_u32.bitcast()) continue();
+        /* blk unreachable after GVN */
+        @debug_assert(!b.identical(f.start));
+        for_insts_forward b { i |
+            if !OpTab'get(i.op(), .pinned) {
+                if g.gvndup(i, false) { i2 |
+                    if i.identical(i2) {
+                        f.start.push(i[]);
+                    }
+                };
+            }
+        }
+    }
+}
+
+/* requires rpo pred ssa use
+ * recreates rpo preds
+ * breaks pred use dom ssa (GCM fixes ssa)
+ */
+gvn :: fn(f: *Qbe.Fn) void = {
+    /* copy.c uses the visit bit */
+    for_blocks f { b |
+        for_phi b { p |
+            p.visit = 0;
+        };
+    };
+
+    fillloop(f);
+    import("@/backend/opt/copy2.fr")'narrowpars(f);  // TODO: i don't think this is helping
+    fill_use(f);
+    ssacheck(f);
+
+    nins := 0;
+    for_blocks f { b |
+        b.visit = 0;
+        nins += b.ins.len;
+    }
+
+    g: Gvn = (
+        table = temp().alloc_zeroed(*Qbe.Ins, nins + nins/2),
+        con01 = (f.getcon(0), f.getcon(1)),
+    );
+    for_blocks_rpo_forward f { b |
+        dedupphi(f, g&, b);
+        for_insts_forward b { i | 
+            dedupins(f, g&, b, i);
+        };
+        dedupjmp(f, b);
+    }
+    rebuildcfg(f, g&);
+
+    when_debug_printfn(f, .GCM, "\n## After GVN:\n");
+    
+    
+    // TODO: only do this for actually used ones after some blocks are removed. like old fold did. 
+    range(fixed_const_count, f.ncon.zext()) { i |
+        c := f.con[i]&;
+        if c.type() == .CAddr{ 
+            use_symbol(f.globals, c.sym) { s | 
+                mark_referenced(f.globals, c.sym, s);
+            };
+        };
+    };
+}
+
+#use("@/backend/opt/gcm.fr");
+#use("@/backend/lib.fr");

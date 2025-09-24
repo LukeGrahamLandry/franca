@@ -1,0 +1,326 @@
+// Adapted from Qbe. MIT License. © 2015-2024 Quentin Carbonneaux <quentin@c9x.me>
+
+Ext :: @struct {
+    zext: u8;
+    nopw: u8; /* is a no-op if arg width is <= nopw */
+    usew: u8; /* uses only the low usew bits of arg */
+};
+
+ext :: fn(i: *Qbe.Ins) ?*Ext = {
+    tbl :: @const_slice(@as(Ext)
+        /*extsb*/ (zext = 0, nopw =  7, usew =  8),
+        /*extub*/ (zext = 1, nopw =  8, usew =  8),
+        /*extsh*/ (zext = 0, nopw = 15, usew = 16),
+        /*extuh*/ (zext = 1, nopw = 16, usew = 16),
+        /*extsw*/ (zext = 0, nopw = 31, usew = 32),
+        /*extuw*/ (zext = 1, nopw = 32, usew = 32),
+    );
+    @if(!is_ext(i.op())) return(.None);
+    idx := i.op().raw() - Qbe.O.extsb.raw();
+    ::tbl;
+    (Some = tbl[idx.intcast()]&)
+}
+
+bitwidth :: fn(v: i64) i64 = 
+    64 - v.leading_zeros();
+
+/* no more than w bits are used */
+usewidthle :: fn(f: *Qbe.Fn, r: Qbe.Ref, w: i64) bool = {
+    t := f.get_temporary(r);
+    each t.uses() { u |
+        continue :: local_return;
+        @match(u.type) {
+            fn UPhi() => {
+                p := u.u.phi;
+                /* during gvn, phi nodes may be
+                * replaced by other temps; in
+                * this case, the replaced phi
+                * uses are added to the
+                * replacement temp uses and
+                * Phi.to is set to Qbe.Null */
+                @if(p.visit != 0 || p.to == Qbe.Null) continue();
+                p.visit = 1;
+                b := usewidthle(f, p.to, w);
+                p.visit = 0;
+                @if(b) continue();
+            }
+            fn UIns() => {
+                i := u.u.ins;
+                if i.op() == .copy && usewidthle(f, i.to, w) {
+                    continue()
+                }
+                if ext(i) { e |
+                    if e.usew.zext() <= w || usewidthle(f, i.to, w) {
+                        continue();
+                    }
+                }
+                if i.op() == .and {
+                    @debug_assert(i.arg&[0] == r || i.arg&[1] == r);
+                    rc := i.arg&[int(r == i.arg&[0])];
+                    if f.get_int(rc) { v |
+                        @if(bitwidth(v) <= w) continue();
+                    }
+                }
+            }
+            @default => ();
+        };
+        return false;
+    };
+    true
+}
+
+/* is the ref narrower than w bits */
+defwidthle :: fn(f: *Qbe.Fn, r: Qbe.Ref, w: i64) bool = {
+    if f.get_int(r) { v |
+        @if(bitwidth(v) <= w) return(true);
+    };
+    
+    t := f.get_tmp(r) || return(false);
+    @if(t.cls != .Kw) return(false);
+    
+    if t.def.is_null() {
+        /* phi def */
+        p := find_phi(f.rpo[t.defining_block], r).unwrap();
+        @if(p.visit != 0) return(true);
+        p.visit = 1;
+        for p.arg() { a |
+            if !defwidthle(f, a, w) {
+                p.visit = 0;  // :defer
+                return false;
+            }
+        };
+        p.visit = 0;  // :defer
+        return true;
+    }
+
+    i := t.def;
+    if i.op() == .copy {
+        return defwidthle(f, i.arg&[0], w);
+    }
+    if @is(i.op(), .shr, .sar) {
+        if f.get_int(i.arg&[1]) { v |
+            if 0 < v && v <= 32 {
+                if i.op() == .shr && w+v >= 32 {
+                    return true;
+                }
+                if w < 32 {
+                    value_bits := @if(i.op() == .sar, 31, 32);
+                    w = min(value_bits, w+v);
+                }
+            }
+            return defwidthle(f, i.arg&[0], w);
+        }
+    }
+    @if(iscmp(i.op())) return(w >= 1);
+    
+    if i.op() == .and {
+        return defwidthle(f, i.arg&[0], w) || defwidthle(f, i.arg&[1], w);
+    }
+    if @is(i.op(), .or, .xor) {
+        return defwidthle(f, i.arg&[0], w) && defwidthle(f, i.arg&[1], w);
+    }
+    if ext(i) { e |
+        @if(e.zext != 0 && e.usew.int() <= w) return(true);
+        w := min(w, e.nopw.int());
+        return defwidthle(f, i.arg&[0], w);
+    }
+
+    false
+}
+
+isw1 :: fn(f: *Qbe.Fn, r: Qbe.Ref) bool = 
+    defwidthle(f, r, 1);
+
+/* insert early extub/extuh instructions
+ * for pars used only narrowly; this
+ * helps factoring extensions out of
+ * loops
+ *
+ * needs use; breaks use
+ */
+narrowpars :: fn(f: *Qbe.Fn) void = {
+    /* only useful for functions with loops */
+    @if(!f.has_any_loops()) return();
+    b := f.start;
+
+    end := f.find_past_last_param();
+    npar := b.ins.ptr.ptr_diff(end);
+    @if(npar == 0) return();
+
+    nins := b.ins.len + npar;
+    ins := temp().alloc_uninit(Qbe.Ins, nins);
+    ins.slice(0, npar).copy_from(b.ins.slice(0, npar));
+    ins.rest(2*npar).copy_from(b.ins.items().rest(npar));
+    b.ins = ins.as_raw_list();
+
+    each b.ins.slice(0, npar) { i |
+        ext := make_ins(.nop, .Kw, Qbe.Null, Qbe.Null, Qbe.Null);
+        if i.cls() == .Kw && usewidthle(f, i.to, 16) {
+            ext&.set_op(.extuh);
+            if usewidthle(f, i.to, 8) {
+                ext&.set_op(.extub);
+            }
+            r := f.newtmp("vw", i.cls());
+            ext&.set_cls(i.cls());
+            ext.to = i.to;
+            ext.arg&[0] = r;
+            i.to = r;
+        }
+        i.offset(npar)[] = ext;
+    }
+}
+
+copyref :: fn(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins, con01: *Array(Qbe.Ref, 2)) Qbe.Ref = {
+    /* which extensions are copies for a given
+     * argument width */
+    extcpy :: {
+        // TODO: use @or
+        T :: Qbe.TmpType;
+        r :: fn(t: T) i64 = t.raw().zext();
+        t := ast_alloc().alloc_zeroed(u64, T.enum_count());
+        t[T.WFull.r()] = 0;
+        t[T.Wsb.r()] = BIT(T.Wsb.r()).bit_or(BIT(T.Wsh.r())).bit_or(BIT(T.Wsw.r()));
+        t[T.Wub.r()] = BIT(T.Wub.r()).bit_or(BIT(T.Wuh.r())).bit_or(BIT(T.Wuw.r()));
+        t[T.Wsh.r()] = BIT(T.Wsh.r()).bit_or(BIT(T.Wsw.r()));
+        t[T.Wuh.r()] = BIT(T.Wuh.r()).bit_or(BIT(T.Wuw.r()));
+        t[T.Wsw.r()] = BIT(T.Wsw.r());
+        t[T.Wuw.r()] = BIT(T.Wuw.r());
+        t
+    };
+    @if(i.op() == .copy) return(i.arg&[0]);
+
+    /* op identity value */
+    @if(OpTab'get(i.op(), .has_id)
+    && is_int(i.cls()) /* integer only - fp NaN! */
+    && i.arg&[1] == con01[OpTab'get(i.op(), .id_val).int()]
+    && (!OpTab'get(i.op(), .cmpeqwl) || isw1(f, i.arg&[0])))
+        return(i.arg&[0]);
+
+    /* idempotent op with identical args */
+    if OpTab'get(i.op(), .idempotent) && i.arg&[0] == i.arg&[1] {
+        return i.arg&[0];
+    }
+    
+    /* integer cmp with identical args */
+    has_eqval := OpTab'get(i.op(), .cmpeqwl) || OpTab'get(i.op(), .cmplgtewl);
+    if has_eqval && i.arg&[0] == i.arg&[1] {
+        v := OpTab'get(i.op(), .eqval).int();
+        return con01[v];
+    }
+    
+    /* cmpeq/ne 0 with 0/non-0 inference */
+    if OpTab'get(i.op(), .cmpeqwl) && i.arg&[1] == Qbe.ConZero {
+        zeroval :: import("@/backend/opt/gvn.fr").zeroval;
+        if zeroval(f, b, i.arg&[0], argcls(i, 0)) { z |
+            v := OpTab'get(i.op(), .eqval).int();
+            return con01[v.bit_xor(z).bit_xor(1)];
+        };
+    }
+
+    /* redundant and mask */
+    if i.op() == .and {
+        if f.get_int(i.arg&[1]) { v |
+            if v > 0 && v.add(1).bit_and(v) == 0 && defwidthle(f, i.arg&[0], bitwidth(v)) {
+                return i.arg&[0];
+            }
+        }
+    }
+
+    if i.cls() == .Kw && (@is(i.op(), .extsw, .extuw)) {
+        return i.arg&[0];
+    }
+
+    e := ext(i) || return(Qbe.Null);
+    t := f.get_tmp(i.arg&[0]) || return(Qbe.Null);
+    @debug_assert(t.cls.is_int());
+
+    /* do not break typing by returning
+        * a narrower temp */
+    @if(is_wide(i.cls()).int() > is_wide(t.cls).int()) return(Qbe.Null);
+
+    w := Qbe.TmpType.Wsb.raw() + i.op().raw() - Qbe.O.extsb.raw();
+    ::extcpy;
+    if BIT(w.zext()).bit_and(extcpy[t.width.raw().zext()]) != 0 {
+        return i.arg&[0];
+    }
+
+    /* avoid eliding extensions of params
+     * inserted in the start block; their
+     * point is to make further extensions
+     * redundant */
+    @if ((t.def.is_null() || !is_par(t.def.op()))
+    && usewidthle(f, i.to, e.usew.zext()))
+        return(i.arg&[0]);
+
+    if defwidthle(f, i.arg&[0], e.nopw.zext()) {
+        return i.arg&[0];
+    }
+
+    Qbe.Null
+}
+
+phieq :: fn(pa: *Qbe.Phi, pb: *Qbe.Phi) bool = {
+    @debug_assert(pa.narg == pb.narg);
+    range(0, pa.narg.zext()) { n |
+        r := index_in_phi(pa.blk[n], pb);
+        if pa.arg[n] != pb.arg[r] {
+            return false;
+        }
+    };
+    true
+}
+
+phicopyref :: fn(f: *Qbe.Fn, b: *Qbe.Blk, p: *Qbe.Phi, con01: *Array(Qbe.Ref, 2)) Qbe.Ref = {
+    /* identical args */
+    n := 0;
+    while => n < p.narg.zext() - 1 && p.arg&[n] == p.arg&[n + 1] {
+        n += 1;
+    }
+    if n == p.narg.zext() - 1 {
+        return p.arg[n];
+    }
+
+    /* same as a previous phi */
+    p1 := b.phi;
+    while => !p1.identical(p) {
+        @debug_assert(!p1.is_null());
+        @if(phieq(p1, p)) return(p1.to);
+        p1 = p1.link;
+    };
+
+    /* can be replaced by a
+     * dominating jnz arg */
+    d := b.idom;
+    if p.narg != 2 || d.jmp.type != .jnz || !isw1(f, d.jmp.arg) {
+        return Qbe.Null;
+    }
+
+    s := @slice(zeroed(*Qbe.Blk), zeroed(*Qbe.Blk));
+    range(0, 2) { n |
+        range(0, 2) { c |
+            if p.arg[n] == con01[c] {
+                s[c] = p.blk[n];
+            }
+        };
+    };
+
+    /* if s1 ends with a jnz on either b
+     * or s2; the inference below is wrong
+     * without the jump type checks */
+    @if(d.s1.identical(s[1]) && d.s2.identical(s[0])
+    && d.s1.jmp.type == .jmp
+    && d.s2.jmp.type == .jmp)
+        return(d.jmp.arg);
+        
+    Qbe.Null
+}
+
+fn find_phi(b: *Qbe.Blk, to: Qbe.Ref) ?*Qbe.Phi = {
+    for_phi b { p |
+        @if(p.to == to) return(Some = p);
+    };
+    .None
+}
+
+#use("@/backend/lib.fr");
+

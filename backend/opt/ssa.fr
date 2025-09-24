@@ -16,6 +16,7 @@ fn convert_to_ssa(f: *Qbe.Fn) void = {
         @fmt(out, "\n## Dominators:\n");
         for_blocks f { b1 |
             if !b1.dom.is_null() {
+                ::FmtPad(Str);
                 @fmt(out, "# %:", f_pad(b1.name(), 10, .Before));
                 for_dom b1 { b |
                     @fmt(out, " %", b.name());
@@ -215,15 +216,15 @@ fn fill_use(f: *Qbe.Fn) void = {
             t.cls = p.cls;
             t.def = Qbe.Ins.ptr_from_int(0);
             phi_to = phi_dest(phi_to, f);
-            range(0, p.narg.zext()) { a | 
-                if adduse(f, p.arg[a], .UPhi, b, Qbe.Phi.raw_from_ptr(p)) {
-                    arg := p.arg[a].val();
+            for p.arg() { a |
+                if adduse(f, a, .UPhi, b, Qbe.Phi, p) {
+                    arg := a.val();
                     arg = phi_dest(arg, f);
                     if arg != phi_to {
                         f.tmp[arg].phi = phi_to.intcast();
                     };
                 }
-            }
+            };
         };
         
         for_insts_forward b { i |
@@ -237,13 +238,19 @@ fn fill_use(f: *Qbe.Fn) void = {
             };
             
             for i.arg& { arg | 
-                adduse(f, arg, .UIns, b, Qbe.Ins.raw_from_ptr(i));
+                adduse(f, arg, .UIns, b, Qbe.Ins, i);
             };
         };
         
-        adduse(f, b.jmp.arg, .UJmp, b, 0.rawptr_from_int());
+        adduse(f, b.jmp.arg, .UJmp, b);
     };
 }
+
+fn adduse(f: *Qbe.Fn, r: Qbe.Ref, ty: Qbe.UseType, b: *Qbe.Blk, $T: Type, t: *T) bool #inline #generic = 
+    adduse(f, r, ty, b, T.raw_from_ptr(t));
+
+fn adduse(f: *Qbe.Fn, r: Qbe.Ref, ty: Qbe.UseType, b: *Qbe.Blk) bool #inline = 
+    adduse(f, r, ty, b, 0.rawptr_from_int());
 
 // TODO: damn if only we had a language feature to make this look less silly... (hint: @tagged)
 fn adduse(f: *Qbe.Fn, r: Qbe.Ref, ty: Qbe.UseType, b: *Qbe.Blk, ptr: rawptr) bool #inline = { 
@@ -263,9 +270,9 @@ fn clear_usage_info(f: *Qbe.Fn) void = {
             t.use = new(0);
         }; // else we can just reuse the memory 
         
+        t.defining_block = -1;
+        t.def = Qbe.Ins.ptr_from_int(0); // this isn't an array
         @if(::safety_check_enabled(.DebugAssertions)) {
-            t.def = Qbe.Ins.ptr_from_int(0); // this isn't an array
-            t.defining_block = -1;
             t.width = .WFull;
             t.cls = .Kw;
         };

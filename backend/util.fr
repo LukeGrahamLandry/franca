@@ -41,14 +41,12 @@ fn clsmerge(pk: *Qbe.Cls, k: Qbe.Cls) bool = {
     k1 != k
 }
 
-fn slice_pending_scratch(f: *Qbe.Fn) []Qbe.Ins = {
-    n := Qbe.MaxInstructions;
-    f.globals.insb.items().slice(n - f.len_scratch(), n)
-}
+fn slice_pending_scratch(f: *Qbe.Fn) []Qbe.Ins = 
+    f.scratch_next().slice(f.len_scratch());
 
 fn copy_instructions_from_scratch(f: *Qbe.Fn, b: *Qbe.Blk) void = {
     @assert_ge(f.len_scratch(), 0, "too many instructions");
-    idup(b, f.scratch_next().slice(f.len_scratch()));
+    idup(b, f.slice_pending_scratch());
     f.globals.curi = f.scratch_start(); 
 }
 
@@ -64,22 +62,19 @@ fn copy_instructions_from_scratch_reversed_which_means_forwards(f: *Qbe.Fn, b: *
     };
     b.ins.len = n;
     i := 0;
-    for(f.scratch_next(), f.scratch_start()) { ins |
+    each f.slice_pending_scratch() { ins |
         b.ins[n - i - 1] = ins[];
         i += 1;
     };
     
-	f.globals.curi = f.scratch_start();
+    f.reset_scratch();
 }
 
 fn move_end_of_block_to_scratch(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins, changed: *bool) void #inline = {
     if !changed[] {
-        f.globals.curi = f.scratch_start();
         ni := ptr_diff(i.offset(1), b.ins.index_unchecked(b.ins.len));
         f.globals.curi = f.globals.curi.offset(-ni);
-        icpy :: fn(dest: *Qbe.Ins, src: []Qbe.Ins) void = 
-            (@as([]Qbe.Ins)(ptr = dest, len = src.len)).copy_from(src);
-        icpy(f.globals.curi, i.offset(1).slice(ni));
+        f.globals.curi.slice(ni).copy_from(i.offset(1).slice(ni));
         changed[] = true;
     }
 }
@@ -89,7 +84,6 @@ fn scratch_start(f: *Qbe.Fn) *Qbe.Ins #inline =
 
 fn scratch_next(f: *Qbe.Fn) *Qbe.Ins #inline =
     f.globals.curi;
-
 
 fn unemit(f: *Qbe.Fn, i: *Qbe.Ins) void = {
     @debug_assert(identical(i, f.globals.curi));
@@ -308,7 +302,7 @@ fn default_init(f: *Qbe.Fn, m: *QbeModule) void = {
         tmp := f.tmp.index(i);
         ::[]Qbe.Tmp;
         tmp.slice(1).set_zeroed();
-   	    tmp.cls = @if(t.fpr.bit_is_set(i), .Kd, .Kl);  // spill() cares about this
+        tmp.cls = @if(t.fpr.bit_is_set(i), .Kd, .Kl);  // spill() cares about this
         tmp.slot = -1;
         tmp.defining_block = -1;
     };
@@ -591,6 +585,12 @@ fn QList($T: Type) Type = {
         s.first.offset(i)
     }
     
+    fn index(s: Self, i: u32) *T =
+        s.index(i.zext());
+        
+    fn index(s: Self, i: i32) *T =
+        s.index(i.zext());
+    
     fn index_unchecked(s: Self, i: i64) *T = 
         s.first.offset(i);
 
@@ -801,6 +801,21 @@ fn for_insts_forward(b: *Qbe.Blk, $body: @Fn(i: *Qbe.Ins) void) void = {
     };
 }
 
+fn filter_phis(b: *Qbe.Blk, $keep: @Fn(p: *Qbe.Phi) bool) void = {
+    pp := b.phi&;
+    while => !pp[].is_null() { 
+        p := pp[];
+        if !keep(p) {
+            pp[] = p.link;
+        } else {
+            pp = p.link&;
+        }
+    };
+}
+
+fn arg(p: *Qbe.Phi) []Qbe.Ref =
+    p.arg.slice(0, p.narg.zext());
+
 fn for(bs: *Qbe.BSet, $body: @Fn(i: i64) void) void = {
     for(bs, 0, fn(i) => body(i))
 }
@@ -933,7 +948,7 @@ fn argcls(i: *Qbe.Ins, argument_index: i64) Qbe.Cls =
     argcls(i.op(), i.cls(), argument_index);
 
 fn argcls(o: Qbe.O, k: Qbe.Cls, argument_index: i64) Qbe.Cls = {
-    argcls := import("@/backend/meta/ops.fr").tables;
+    argcls := OpTab.tables;
     it  := argcls[intcast @as(i32) o];
     ops_table_argscls(it, k, argument_index)
 };
@@ -1022,9 +1037,6 @@ fn get_temporary(f: *Qbe.Fn, r: Qbe.Ref) *Qbe.Tmp #inline = {
     f.tmp.index(i)
 }
 
-fn trunc(x: u32) i16 #redirect(u32, u16); // TODO
-fn shift_right_logical(v: i16, shift_amount: i64) i16 = v.int().shift_right_logical(shift_amount).intcast().trunc();
-
 MAX_REF_VAL: u32 : 1.shift_left(29) - 1;
 
 fn ref(cls: Qbe.RegKind, id: i64) Qbe.Ref #inline = {
@@ -1033,10 +1045,8 @@ fn ref(cls: Qbe.RegKind, id: i64) Qbe.Ref #inline = {
     (type3_val29 = cls.raw().bitcast().bit_or(id.shift_left(3).trunc()))
 }
 
-fn val(r: Qbe.Ref) i64 #inline = {
-   x := @as(u32) r.type3_val29.shift_right_logical(3).bit_and(MAX_REF_VAL);
-   x.zext()
-}
+fn val(r: Qbe.Ref) i64 = 
+   r.type3_val29.shift_right_logical(3).zext();
 
 fn rsval(r: Qbe.Ref) i32 #inline = {    
    intcast(r.val().bit_xor(0x10000000) - 0x10000000)
@@ -1211,6 +1221,42 @@ fn find_cas(i: *Qbe.Ins, b: *Qbe.Blk) Ty(*Qbe.Ins, *Qbe.Ins) = {
     }
 }
 
+// TODO: deduplicate between find_first_arg, find_past_last_param?
+fn igroup(b: *Qbe.Blk, i: *Qbe.Ins) []Qbe.Ins = {
+    if @is(i.op(), .blit0, .cas0, .sel0) {
+        return i.slice(2);
+    };
+    if @is(i.op(), .blit1, .cas1, .sel1) {
+        return i.offset(-1).slice(2);
+    };
+    ib := b.ins.ptr;
+    ie := ib.offset(b.ins.len);
+    if i.op().is_par() {
+        while => i.in_memory_after(ib) && i.offset(-1).op().is_par() {
+            i = i.offset(-1);
+        };
+        start := i;
+        while => ie.in_memory_after(i) && i.op().is_par() {
+            i = i.offset(1);
+        };
+        return start.between(i);
+    };
+    if i.op().is_arg() || i.op() == .call {
+        while => i.in_memory_after(ib) && i.offset(-1).op().is_arg() {
+            i = i.offset(-1);
+        };
+        start := i;
+        while => i.op() != .call {
+            i = i.offset(1);
+        };
+        @debug_assert(ie.in_memory_after(i));
+        i := i.offset(1);
+        return start.between(i);
+    };
+    i.slice(1)
+}
+
+
 ///////////////////////////////////////////////////////////////////////////////
 
 fn ge(a: Qbe.Cls, b: Qbe.Cls) bool = a.raw().int() >= b.raw().int();
@@ -1247,3 +1293,9 @@ fn ne(a: Qbe.Sym, b: Qbe.Sym) bool #redirect(Ty(u32, u32), bool);
 
 fn ispow2(v: i64) bool = 
     v != 0 && v.bit_and(v - 1) == 0;
+
+fn sign_extend_low32(x: i64) i64 = {
+    x: u32 = x.trunc();
+    x: i32 = x.bitcast();
+    x.intcast()
+}

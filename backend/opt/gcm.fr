@@ -1,0 +1,304 @@
+// Adapted from Qbe. MIT License. © 2015-2024 Quentin Carbonneaux <quentin@c9x.me>
+
+NOBID :: MAX_u32;
+
+isdivwl :: fn(i: *Qbe.Ins) bool = 
+    (@is(i.op(), .div, .rem, .udiv, .urem)) && i.cls().is_int();
+
+pinned :: fn(i: *Qbe.Ins) bool = 
+    OpTab'get(i.op(), .pinned) || isdivwl(i);
+
+/* pinned ins that can be eliminated if unused */
+canelim :: fn(i: *Qbe.Ins) bool = 
+    i.op().is_load() || i.op().is_alloc() || i.isdivwl();
+
+schedearly :: fn(f: *Qbe.Fn, r: Qbe.Ref) u32 = {
+    t := f.get_tmp(r) || return(0);
+    @if(t.gcmbid != NOBID) return(t.gcmbid);
+
+    b := f.rpo[t.defining_block];
+    ::if(u32);
+    t.gcmbid = if !t.def.is_null() {
+        @debug_assert(b.ins.items().contains_address(t.def));
+        t.gcmbid = 0;  /* mark as visiting */
+        earlyins(f, b, t.def)
+    } else {
+        /* phis do not move */
+        t.defining_block.bitcast()
+    };
+    t.gcmbid
+}
+
+earlyins :: fn(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) u32 = {
+    b0 := schedearly(f, i.arg&[0]);
+    @debug_assert(b0 != NOBID);
+    b1 := schedearly(f, i.arg&[1]);
+    @debug_assert(b1 != NOBID);
+    if f.rpo[b0].depth < f.rpo[b1].depth {
+        @debug_assert(dom(f.rpo[b0], f.rpo[b1]));
+        b0 = b1;
+    }
+    @if(pinned(i), b.id.bitcast(), b0)
+}
+
+earlyblk :: fn(f: *Qbe.Fn, bid: u32) void = {
+    b := f.rpo[bid];
+    for_phi b { p |
+        for p.arg() { a |
+            schedearly(f, a);
+        };
+    }
+    for_insts_forward b { i |
+        if pinned(i) {
+            schedearly(f, i.arg&[0]);
+            schedearly(f, i.arg&[1]);
+        }
+    }
+    schedearly(f, b.jmp.arg);
+}
+
+/* least common ancestor in dom tree */
+lcabid :: fn(f: *Qbe.Fn, bid1: u32, bid2: u32) u32 = {
+    @if(bid1 == NOBID) return(bid2);
+    @if(bid2 == NOBID) return(bid1);
+    b := lca(f.rpo[bid1], f.rpo[bid2]);
+    @debug_assert(!b.is_null());
+    b.id.bitcast()
+}
+
+bestbid :: fn(f: *Qbe.Fn, earlybid: u32, latebid: u32) u32 = {
+    @if(latebid == NOBID) return(NOBID);  /* unused */
+    @debug_assert(earlybid != NOBID);
+
+    earlyb := f.rpo[earlybid];
+    curb   := f.rpo[latebid];
+    bestb  := curb;
+    @debug_assert(dom(earlyb, curb));
+
+    while => !curb.identical(earlyb) {
+        curb = curb.idom;
+        if curb.loop < bestb.loop {
+            bestb = curb;
+        }
+    }
+    bestb.id.bitcast()
+}
+
+/* return lca bid of ref uses */
+schedlate :: fn(f: *Qbe.Fn, r: Qbe.Ref) u32 = {
+    t := f.get_tmp(r) || return(NOBID);
+    @if(t.visit != 0) return(t.gcmbid); 
+
+    t.visit = 1;
+    earlybid := t.gcmbid;
+    @if(earlybid == NOBID) return(NOBID); /* not used */
+
+    /* reuse gcmbid for late bid */
+    t.gcmbid = t.defining_block.bitcast();
+    latebid := NOBID;
+    for t.uses() { u |
+        @debug_assert(u.bid < f.nblk);
+        b := f.rpo[u.bid];
+        uselatebid := @match(u.type) {
+            fn UXXX() => unreachable();
+            fn UPhi() => latephi(f, u.u.phi, r);
+            fn UIns() => lateins(f, b, u.u.ins, r);
+            fn UJmp() => latejmp(b, r);
+        }
+        latebid = lcabid(f, latebid, uselatebid);
+    }
+    /* latebid may be NOBID if the temp is used
+     * in fixed instructions that may be eliminated
+     * and are themselves unused transitively */
+
+    if !t.def.is_null() && !pinned(t.def) {
+        t.gcmbid = bestbid(f, earlybid, latebid);
+    }
+    /* else, keep the early one */
+
+    /* now, gcmbid is the best bid */
+    t.gcmbid
+}
+
+/* returns lca bid of uses or NOBID if
+ * the definition can be eliminated */
+lateins :: fn(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins, r: Qbe.Ref) u32 = {
+    @debug_assert(b.ins.items().contains_address(i));
+    @debug_assert(i.arg&[0] == r || i.arg&[1] == r);
+
+    latebid := schedlate(f, i.to);
+    @if(!pinned(i)) return(latebid);
+    needed := latebid != NOBID || !canelim(i);
+    @if(needed, b.id.bitcast(), NOBID)
+}
+
+latephi :: fn(f: *Qbe.Fn, p: *Qbe.Phi, r: Qbe.Ref) u32 = {
+    latebid := NOBID;
+    @if(p.narg == 0) return(NOBID); /* marked as unused */
+
+    range(0, p.narg.zext()) { n |
+        if p.arg[n] == r {
+            latebid = lcabid(f, latebid, p.blk[n].id.bitcast());
+        }
+    }
+    @debug_assert(latebid != NOBID);
+    latebid
+}
+
+latejmp :: fn(b: *Qbe.Blk, r: Qbe.Ref) u32 = {
+    @if(b.jmp.arg == Qbe.Null) return(NOBID);
+    @debug_assert(b.jmp.arg == r);
+    b.id.bitcast()
+}
+
+lateblk :: fn(f: *Qbe.Fn, bid: u32) void = {
+    b := f.rpo[bid];
+    filter_phis b { p |
+        keep := schedlate(f, p.to) != NOBID;
+        if !keep {
+            p.narg = 0; /* mark unused */
+        };
+        keep
+    };
+    for_insts_forward b { i |
+        if pinned(i) {
+             schedlate(f, i.to); 
+        }
+    }
+}
+
+addgcmins :: fn(f: *Qbe.Fn, vins: []Qbe.Ins) void = {
+    each vins { i |
+        t := f.get_temporary(i.to);
+        b := f.rpo[t.gcmbid];
+        addins(b.ins&, i[]);
+    }
+}
+
+/* move live instructions to the
+ * end of their target block; use-
+ * before-def errors are fixed by
+ * schedblk */
+gcmmove :: fn(f: *Qbe.Fn) void = {
+    vins := Qbe.Ins.list(temp());
+    each f.tmp.slice(0, f.ntmp.zext()) { t |
+        continue :: local_return;
+        @if(t.def.is_null()) continue();
+        @if(t.defining_block == t.gcmbid.bitcast()) continue();
+        i := t.def;
+        @if(pinned(i) && !canelim(i)) continue();
+        @debug_assert(f.get_temporary(i.to).identical(t));
+        @if(t.gcmbid != NOBID) vins&.push(i[]);
+        i.set_nop();
+    };
+    addgcmins(f, vins.items());
+}
+
+/* dfs ordering */
+schedins :: fn(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins, vins: *List(Qbe.Ins)) i64 = {
+    ins := igroup(b, i);
+    each ins { i |
+        for i.arg& { a |
+            continue :: local_return;
+            t := f.get_tmp(a) || continue();
+            @if(t.defining_block != b.id || t.def.is_null()) continue();
+            schedins(f, b, t.def, vins);
+        }
+    }
+    each ins { i |
+        vins.push(i[]);
+        i.set_nop();
+    }
+    ins.len
+}
+
+/* order ins within a block */
+schedblk :: fn(f: *Qbe.Fn) void = {
+    vins := Qbe.Ins.list(temp());
+    for_blocks f { b |
+        vins&.clear();
+        i := b.ins.ptr;
+        n := 0;
+        while => n < b.ins.len {
+            n += schedins(f, b, b.ins.index(n), vins&);
+        }
+        idup(b, vins.items());
+    }
+}
+
+cheap :: fn(i: *Qbe.Ins) bool = {
+    @if(i.cls().is_float()) return(false);
+    @if(iscmp(i.op())) return(true);
+    @is(i.op(), .neg, .add, .sub, .mul, .and, .or, .xor, .sar, .shr, .shl)
+}
+
+sinkref :: fn(f: *Qbe.Fn, b: *Qbe.Blk, pr: *Qbe.Ref) void = {
+    t := f.get_tmp(pr[]) || return();
+    if t.def.is_null() || t.defining_block == b.id || pinned(t.def) || !cheap(t.def) {
+        return();
+    }
+
+    /* sink t.def to b */
+    i := t.def[];
+    r := f.newtmp("snk", t.cls);
+    t := ();  /* invalidated */
+    pr[] = r;
+    i.to = r;
+    f.tmp[r.val()].gcmbid = b.id.bitcast();
+    // TODO: qbe mutates the arg of the copy instead of the emitted one ??
+    f.emit(i);  
+    //i := f.emit(i);   // ... should it be this instead? or am i not understanding whats happening
+    sinkref(f, b, i.arg&[0]&);
+    sinkref(f, b, i.arg&[1]&);
+}
+
+/* redistribute trivial ops to point of
+ * use to reduce register pressure
+ * requires rpo, use; breaks use
+ */
+sink :: fn(f: *Qbe.Fn) void = {
+    for_blocks f { b | 
+        for_insts_forward b { i |
+            if is_load(i.op()) {
+                sinkref(f, b, i.arg&[0]&);
+            } else {
+                if is_store(i.op()) {
+                    sinkref(f, b, i.arg&[1]&);
+                }
+            }
+        }
+        sinkref(f, b, b.jmp.arg&);
+    }
+    addgcmins(f, f.slice_pending_scratch());
+}
+
+/* requires use dom
+ * maintains rpo pred dom
+ * breaks use
+ */
+gcm :: fn(f: *Qbe.Fn) void = {
+    filldepth(f);
+    fillloop(f);
+
+    each f.tmp.slice(0, f.ntmp.zext()) { t |
+        t.visit = 0;
+        t.gcmbid = NOBID;
+    }
+    range(0, f.nblk.zext()) { bid |
+        earlyblk(f, bid.trunc());
+    }
+    range(0, f.nblk.zext()) { bid |
+        lateblk(f, bid.trunc());
+    }
+    
+    gcmmove(f);
+    fill_use(f);
+    f.reset_scratch();
+    sink(f);
+    fill_use(f);
+    schedblk(f);
+    
+    when_debug_printfn(f, .GCM, "\n## After GCM:\n");
+}
+
+#use("@/backend/lib.fr");
