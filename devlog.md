@@ -1,4 +1,35 @@
 
+## (Sep 24)
+
+- just by inspection, it does work, like functions that call i.op() multiple 
+  times now only does the `op30_cls2 & 1073741823` once, which makes me feel better 
+  about not storing things in variables when im writing code which is kinda the point 
+  of doing optimisations. but its sad that the net effect doesn't make the compiler faster. 
+- i can't get rid of blkmerge because it helps inlining (and emit_static_memmove has a hard dependency on that),
+  - use edgedel in dedupjmp so phis don't reference dead blocks, 
+    fixes assertions in replacepreds and write_phi
+  - TODO: still broken "rpo not in order" on examples/ascii_table.fr
+- interestingly with old fold+copy instead of gvn, mark_seen(force=true) 
+  makes it go 896188 -> 943716, 
+  so maybe a lot of the code size bloat im seeing with gvn 
+  is just that it's emitting functions that have all uses inlined and never calling them. 
+  yeah iterating all the instructions after gvn to mark_referenced correctly  
+  goes (983380, 1073ms -> 935696, 1055ms) which is still worse than the old way but not as bad. 
+- don't sink or gvndup when its just offseting from an alloc (check by looking at tmp.alias.slot)
+  because isel converts those to RSlot right before use site anyway. 
+  saves 5k and 15ms codegen time. 
+- a weird aspect of these numbers is that its compiling the new compiler with itself, 
+  so if the new gvn stuff is more code then it's doing more work. i want the optimisation to pay for itself. 
+  - old copy+fold: `896188 bytes, frontend: 981ms, codegen: 450ms, 1.012 s ±  0.007 s`
+  - gvn: `930196 bytes, frontend: 1010ms, codegen: 509ms, 1.048 s ±  0.007 s`
+  - old copy then gvn: `914828 bytes, frontend: 965ms, codegen: 518ms, 1.012 s ±  0.008 s`
+  - running old fold before gvn as well doesn't help, so the problem isn't that gvn can't fold sel instructions. 
+    similarly the situation in test/fold2.ssa being worse isn't the main problem because that's also in fold. 
+- disabling simplify_phi in old copy puts it back to 930k, 
+  so im making redundant phis that the new thing can't get rid of. 
+  using simplify_phi as part of phicopyref gets the code size improvement but is slower. 
+  `915868 bytes, frontend: 1004ms, codegen: 502ms, 1.046 s ±  0.006 s`
+
 ## (Sep 23)
 
 - stealing qbe's global value numbering

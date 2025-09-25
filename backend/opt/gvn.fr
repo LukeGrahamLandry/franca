@@ -22,6 +22,12 @@ ieq :: fn(ia: *Qbe.Ins, ib: *Qbe.Ins) bool =
 Gvn :: @struct {
     con01: Array(Qbe.Ref, 2);
     table: []*Qbe.Ins;
+    copy_of: []Qbe.Ref;
+    
+    // These are just used inside simplify_phi (and cleared every time), we just want to reuse thier memory. 
+    t_s: Qbe.BSet;
+    a_s: Qbe.BSet;
+    stk: List(*Qbe.Use);
 };
 
 gvndup :: fn(c: *Gvn, i: *Qbe.Ins, insert: bool) ?*Qbe.Ins = {
@@ -61,8 +67,9 @@ replaceuse :: fn(f: *Qbe.Fn, u: *Qbe.Use, r1: Qbe.Ref, r2: Qbe.Ref) void = {
     f.adduse(r2, u.type, b, u.u.r);
 }
 
-replaceuses :: fn(f: *Qbe.Fn, r1: Qbe.Ref, r2: Qbe.Ref) void = {
+replaceuses :: fn(f: *Qbe.Fn, g: *Gvn, r1: Qbe.Ref, r2: Qbe.Ref) void = {
     t1 := f.get_temporary(r1);
+    g.copy_of[r1.val()] = r2;
     each t1.uses() { u |
         replaceuse(f, u, r1, r2);
     };
@@ -72,12 +79,12 @@ replaceuses :: fn(f: *Qbe.Fn, r1: Qbe.Ref, r2: Qbe.Ref) void = {
 dedupphi :: fn(f: *Qbe.Fn, g: *Gvn, b: *Qbe.Blk) void = {
     filter_phis b { p |
         phicopyref :: import("@/backend/opt/copy2.fr").phicopyref;
-        r := phicopyref(f, b, p, g.con01&);
+        r := phicopyref(f, b, p, g);
         keep := r == Qbe.Null;
         if !keep {
-            replaceuses(f, p.to, r);
+            replaceuses(f, g, p.to, r);
             p.to = Qbe.Null;
-        }
+        };
         keep
     };
 }
@@ -127,6 +134,11 @@ assoccon :: fn(f: *Qbe.Fn, b: *Qbe.Blk, i1: *Qbe.Ins) void = {
         return()
     }
     t2 := f.get_tmp(i1.arg&[0]) || return();
+    if t2.alias.slot != Qbe.Null {
+        // computing the address of a stack slot is pulled to usage site by isel.
+        return();
+    }
+    
     c1 := f.get_constant(i1.arg&[1])[];
     if t2.def.is_null() {
         return();
@@ -166,8 +178,8 @@ assoccon :: fn(f: *Qbe.Fn, b: *Qbe.Blk, i1: *Qbe.Ins) void = {
     f.adduse(i1.arg&[0], .UIns, b, Qbe.Ins, i1);
 }
 
-killins :: fn(f: *Qbe.Fn, i: *Qbe.Ins, r: Qbe.Ref) void = {
-    replaceuses(f, i.to, r);
+killins :: fn(f: *Qbe.Fn, g: *Gvn, i: *Qbe.Ins, r: Qbe.Ref) void = {
+    replaceuses(f, g, i.to, r);
     i.set_nop();
 }
 
@@ -177,23 +189,36 @@ dedupins :: fn(f: *Qbe.Fn, g: *Gvn, b: *Qbe.Blk, i: *Qbe.Ins) void = {
     @if(i.op() == .nop || pinned(i)) return();
 
     @debug_assert_ne(i.to, Qbe.Null, "tried to number inst without output: % in $%", i.op(), f.name());
-    assoccon(f, b, i);
+    @if(ENABLE_CONST_FOLD) assoccon(f, b, i);
 
     copyref :: import("@/backend/opt/copy2.fr").copyref;
-    r := copyref(f, b, i, g.con01&);
+    r := copyref(f, b, i, g);
     if r != Qbe.Null {
-        killins(f, i, r);
+        killins(f, g, i, r);
         return();
     }
-    r := Fold'foldref(f, i);
-    if r != Qbe.Null {
-        killins(f, i, r);
+    
+    @if(ENABLE_CONST_FOLD) {
+        r := Fold'foldref(f, i);
+        if r != Qbe.Null {
+            killins(f, g, i, r);
+            return();
+        }
+    };
+    
+    alias := f.get_temporary(i.to)[].alias&;
+    if alias.slot != Qbe.Null {
+        // computing the address of a stack slot is pulled to usage site by isel.
+        g.copy_of[i.to.val()] = i.to;
         return();
     }
+    
     if g.gvndup(i, true) { i1 |
-        killins(f, i, i1.to);
+        killins(f, g, i, i1.to);
         return();
     }
+    
+    g.copy_of[i.to.val()] = i.to;
 }
 
 cmpeqz :: fn(f: *Qbe.Fn, r: Qbe.Ref) ?Ty(Qbe.Ref, Qbe.Cls, i64) = {
@@ -300,10 +325,12 @@ dedupjmp :: fn(f: *Qbe.Fn, b: *Qbe.Blk) void = {
         v := v || 1;
         z := z || 0;
         if v == 0 || z != 0 {
+            tmp := b.s1;
             b.s1 = b.s2;
-        }
+            b.s2 = tmp;
+        };
         /* we later move active ins out of dead blks */
-        b.s2 = zeroed(*Qbe.Blk);
+        edgedel(b, b.s2&);  // this makes sure you don't have dead preds in the phi so blkmerge and write_phi work
         b.jmp = (type = .jmp, arg = Qbe.Null);
     }
 }
@@ -359,6 +386,10 @@ gvn :: fn(f: *Qbe.Fn) void = {
     g: Gvn = (
         table = temp().alloc_zeroed(*Qbe.Ins, nins + nins/2),
         con01 = (f.getcon(0), f.getcon(1)),
+        copy_of = temp().alloc_zeroed(Qbe.Ref, f.ntmp.zext()),
+        t_s = init_bitset(f.ntmp.zext()),
+        a_s = init_bitset(f.ntmp.zext()),
+        stk = list(*Qbe.Use, 10, temp()),
     );
     for_blocks_rpo_forward f { b |
         dedupphi(f, g&, b);
@@ -371,16 +402,22 @@ gvn :: fn(f: *Qbe.Fn) void = {
 
     when_debug_printfn(f, .GCM, "\n## After GVN:\n");
     
-    
-    // TODO: only do this for actually used ones after some blocks are removed. like old fold did. 
-    range(fixed_const_count, f.ncon.zext()) { i |
-        c := f.con[i]&;
-        if c.type() == .CAddr{ 
-            use_symbol(f.globals, c.sym) { s | 
-                mark_referenced(f.globals, c.sym, s);
-            };
+    // :SLOW do this in there somewhere
+    seen := init_bitset(f.ncon.zext());
+    for_blocks f { b |
+        refcon :: fn(r: Qbe.Ref) => @if(rtype(r) == .RCon) bsset(seen&, r.val());
+        for_phi b { p |        
+            for(p.arg(), refcon);
         };
+        for_insts_forward b { i | 
+            for(i.arg&, refcon);
+        };
+        refcon(b.jmp.arg);
+        
+        // HACK: my frontend is putting loads that get eliminated between cas0,cas1 thats probably that :CreepyNop is
+        b.clear_nops();  
     };
+    Fold'mark_seen(f, seen&, false);
 }
 
 #use("@/backend/opt/gcm.fr");

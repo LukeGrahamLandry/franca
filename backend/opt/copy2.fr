@@ -170,7 +170,7 @@ narrowpars :: fn(f: *Qbe.Fn) void = {
     }
 }
 
-copyref :: fn(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins, con01: *Array(Qbe.Ref, 2)) Qbe.Ref = {
+copyref :: fn(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins, g: *Gvn) Qbe.Ref = {
     /* which extensions are copies for a given
      * argument width */
     extcpy :: {
@@ -192,7 +192,7 @@ copyref :: fn(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins, con01: *Array(Qbe.Ref, 2)) Q
     /* op identity value */
     @if(OpTab'get(i.op(), .has_id)
     && is_int(i.cls()) /* integer only - fp NaN! */
-    && i.arg&[1] == con01[OpTab'get(i.op(), .id_val).int()]
+    && i.arg&[1] == g.con01&[OpTab'get(i.op(), .id_val).int()]
     && (!OpTab'get(i.op(), .cmpeqwl) || isw1(f, i.arg&[0])))
         return(i.arg&[0]);
 
@@ -205,7 +205,7 @@ copyref :: fn(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins, con01: *Array(Qbe.Ref, 2)) Q
     has_eqval := OpTab'get(i.op(), .cmpeqwl) || OpTab'get(i.op(), .cmplgtewl);
     if has_eqval && i.arg&[0] == i.arg&[1] {
         v := OpTab'get(i.op(), .eqval).int();
-        return con01[v];
+        return g.con01&[v];
     }
     
     /* cmpeq/ne 0 with 0/non-0 inference */
@@ -213,7 +213,7 @@ copyref :: fn(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins, con01: *Array(Qbe.Ref, 2)) Q
         zeroval :: import("@/backend/opt/gvn.fr").zeroval;
         if zeroval(f, b, i.arg&[0], argcls(i, 0)) { z |
             v := OpTab'get(i.op(), .eqval).int();
-            return con01[v.bit_xor(z).bit_xor(1)];
+            return g.con01&[v.bit_xor(z).bit_xor(1)];
         };
     }
 
@@ -270,7 +270,14 @@ phieq :: fn(pa: *Qbe.Phi, pb: *Qbe.Phi) bool = {
     true
 }
 
-phicopyref :: fn(f: *Qbe.Fn, b: *Qbe.Blk, p: *Qbe.Phi, con01: *Array(Qbe.Ref, 2)) Qbe.Ref = {
+Gvn :: import("@/backend/opt/gvn.fr").Gvn;
+
+phicopyref :: fn(f: *Qbe.Fn, b: *Qbe.Blk, p: *Qbe.Phi, g: *Gvn) Qbe.Ref = {
+    r := g.copy_of[p.to.val()];
+    if r != Qbe.Null && r != p.to {
+        return r;
+    };
+    
     /* identical args */
     n := 0;
     while => n < p.narg.zext() - 1 && p.arg&[n] == p.arg&[n + 1] {
@@ -279,7 +286,26 @@ phicopyref :: fn(f: *Qbe.Fn, b: *Qbe.Blk, p: *Qbe.Phi, con01: *Array(Qbe.Ref, 2)
     if n == p.narg.zext() - 1 {
         return p.arg[n];
     }
-
+    
+    @if(!ALSO_OLD_COPY) {
+        Copy :: import("@/backend/opt/copy.fr");
+        first_arg := QbeNull;
+        range(0, p.narg.zext()) { a | 
+            if p.blk[a].id.zext() < b.id.zext() {
+                check_arg := Copy'get_src_or_self(p.arg[a], g.copy_of);
+                if first_arg == QbeNull || first_arg == QbeUndef {
+                    first_arg = check_arg;
+                };
+            };
+        };
+        g.copy_of[p.to.val()] = p.to;
+        Copy'simplify_phi(f, p, first_arg, g.copy_of, g.stk&, g.t_s&, g.a_s&);
+        r := g.copy_of[p.to.val()];
+        if r != p.to {
+            return r;
+        }
+    };
+    
     /* same as a previous phi */
     p1 := b.phi;
     while => !p1.identical(p) {
@@ -298,7 +324,7 @@ phicopyref :: fn(f: *Qbe.Fn, b: *Qbe.Blk, p: *Qbe.Phi, con01: *Array(Qbe.Ref, 2)
     s := @slice(zeroed(*Qbe.Blk), zeroed(*Qbe.Blk));
     range(0, 2) { n |
         range(0, 2) { c |
-            if p.arg[n] == con01[c] {
+            if p.arg[n] == g.con01&[c] {
                 s[c] = p.blk[n];
             }
         };

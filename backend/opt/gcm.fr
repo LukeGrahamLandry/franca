@@ -2,6 +2,7 @@
 
 NOBID :: MAX_u32;
 
+// treated as pinned because it traps on amd and wasm
 isdivwl :: fn(i: *Qbe.Ins) bool = 
     (@is(i.op(), .div, .rem, .udiv, .urem)) && i.cls().is_int();
 
@@ -196,6 +197,8 @@ gcmmove :: fn(f: *Qbe.Fn) void = {
 
 /* dfs ordering */
 schedins :: fn(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins, vins: *List(Qbe.Ins)) i64 = {
+    @if(i.op() == .nop) return(1);
+    
     ins := igroup(b, i);
     each ins { i |
         for i.arg& { a |
@@ -237,6 +240,10 @@ sinkref :: fn(f: *Qbe.Fn, b: *Qbe.Blk, pr: *Qbe.Ref) void = {
     if t.def.is_null() || t.defining_block == b.id || pinned(t.def) || !cheap(t.def) {
         return();
     }
+    if t.alias.slot != Qbe.Null {
+        // computing the address of a stack slot is pulled to usage site by isel.
+        return();
+    };
 
     /* sink t.def to b */
     i := t.def[];
@@ -270,6 +277,7 @@ sink :: fn(f: *Qbe.Fn) void = {
         sinkref(f, b, b.jmp.arg&);
     }
     addgcmins(f, f.slice_pending_scratch());
+    f.reset_scratch();
 }
 
 /* requires use dom

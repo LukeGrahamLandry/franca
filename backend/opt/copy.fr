@@ -5,7 +5,7 @@ copy_elimination :: fn(f: *Qbe.Fn) void = {
     // These are just used inside simplify_phi (and cleared every time), we just want to reuse thier memory. 
     t_s := init_bitset(f.ntmp.zext());          //
     a_s := init_bitset(f.ntmp.zext());          //
-    stk: QList(*Qbe.Use) = new(10); //
+    stk := list(*Qbe.Use, 10, temp());          //
     //////////////////////////////////////////////
     
     copy_of := temp().alloc_zeroed(Qbe.Ref, f.ntmp.zext());
@@ -87,27 +87,21 @@ copy_elimination :: fn(f: *Qbe.Fn) void = {
     };
 
     when_debug(f, .Copy, fn(out) => f.debug_dump_copy(copy_of, out));
-    
-    free(stk);
-    temp().dealloc(Qbe.Ref, copy_of); // no need
 };
 
 /* detects a cluster of phis/copies redundant with 'r';
  * the algorithm is inspired by Section 3.2 of "Simple
  * and Efficient SSA Construction" by Braun M. et al.
  */
-simplify_phi :: fn(f: *Qbe.Fn, phi_start: *Qbe.Phi, r: Qbe.Ref, copy_of: []Qbe.Ref, pstk: *QList(*Qbe.Use), dests_seen: *Qbe.BSet, arguments: *Qbe.BSet) void = {
+simplify_phi :: fn(f: *Qbe.Fn, phi_start: *Qbe.Phi, r: Qbe.Ref, copy_of: []Qbe.Ref, use_stack: *List(*Qbe.Use), dests_seen: *Qbe.BSet, arguments: *Qbe.BSet) void = {
     bszero(dests_seen);
     bszero(arguments);
     phi_none  := Qbe.Phi.zeroed();
-    use_stack := pstk[];
-    count  := 1;
+    use_stack.clear();
     use_stack_base: Qbe.Use = (type = .UPhi, bid = 0, u = (phi = phi_start));
-    use_stack[0] = use_stack_base&;
-    while => count != 0 {
+    use_stack.push(use_stack_base&);
+    while => use_stack.pop() { u |
         continue :: local_return;
-        count -= 1;
-        u := use_stack[count]; // pop
         
         dest, using_phi := @match(u.type) {
             fn UIns() => {
@@ -129,12 +123,10 @@ simplify_phi :: fn(f: *Qbe.Fn, phi_start: *Qbe.Phi, r: Qbe.Ref, copy_of: []Qbe.R
         };
         
         // Now push all uses of `dest` to the stack for the next iteration. 
-        uses := f.tmp[dest].use.slice(0, f.tmp[dest].nuse.zext());
-        grow(pstk, count + uses.len);  // reserve
-        use_stack = pstk[]; // it might have resized
-        each uses { u | 
-            use_stack[count] = u; // push
-            count += 1;
+        uses := f.tmp.index(dest).uses();
+        use_stack.reserve(uses.len);
+        each uses { u |
+            use_stack.push(u);
         };
     };
     

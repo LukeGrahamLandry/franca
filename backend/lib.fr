@@ -57,7 +57,10 @@ ENABLE_STATIC_MEMMOVE :: true
 
 // replaces the old fold and copy passes. 
 ENABLE_GVN :: true
-    && !IS_BOOTSTRAPPING && ENABLE_CONST_FOLD;
+    && !IS_BOOTSTRAPPING;
+    
+ALSO_OLD_COPY :: false 
+    && ENABLE_GVN;
 
 Arm  :: import("@/backend/arm64/bits.fr");
 Amd  :: import("@/backend/amd64/bits.fr");
@@ -570,7 +573,17 @@ run_qbe_passes_common :: fn(f: *Qbe.Fn) bool = {
     filldom(f);  // TODO: do we need this here? i dont think anything breaks it after convert_to_ssa does it
     ssacheck(f); // debug
     
-    @if(ENABLE_GVN, {
+    @if(@run(!ENABLE_GVN)) {
+        import("@/backend/opt/copy.fr")'copy_elimination(f);
+        fill_use(f);
+        Fold'fold_constants(f);
+    };
+    @if(ALSO_OLD_COPY) {
+        import("@/backend/opt/copy.fr")'copy_elimination(f);
+        fill_use(f);
+    };
+    
+    @if(ENABLE_GVN) {
         import("@/backend/opt/gvn.fr")'gvn(f);
         fillcfg(f);
         fill_use(f);
@@ -578,11 +591,8 @@ run_qbe_passes_common :: fn(f: *Qbe.Fn) bool = {
         import("@/backend/opt/gcm.fr")'gcm(f);
         fill_use(f);  // only for ssacheck, TODO: disable when not doing debug assertions
         ssacheck(f);
-    }, {
-        import("@/backend/opt/copy.fr")'copy_elimination(f);
-        fill_use(f);
-        Fold'fold_constants(f);
-    });
+        fillcfg(f);
+    };
     
     if save_for_inlining(f) {
         // all uses might be inlined so we suspend processing until we know you took a function pointer later. 
@@ -767,7 +777,7 @@ fn fails_typecheck(f: *Qbe.Fn) ?Str = {
         if b.jmp.type == .jnz {
             jump_error = !usecheck(r, .Kw, f) || !@is(rtype(b.jmp.arg), .RTmp, .RCon);
         };
-        if b.jmp.type == .hlt {
+        if @is(b.jmp.type, .hlt, .jmp) {
             jump_error = b.jmp.arg != QbeNull;
         };
         if jump_error {
