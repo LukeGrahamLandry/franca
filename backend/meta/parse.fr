@@ -450,7 +450,6 @@ fn parse_inst(self: *QParseCtx) void = {
             };
         }
     };
-    self.skip_blanks();
     n := self.eat_word();
     arg0 := self.parse_ref();
     n = @switch(n) {
@@ -849,7 +848,8 @@ fn parse_data(self: *QParseCtx, export: bool) Result(Dat2, Str) = {
             if(dat_type != 1, => return(Err = @tfmt("expected 'b' prefix for string literal in %", name)));
             s := @try(self.consume_string()) return;
             move_zeroes();
-            expand_string_escapes(s, bytes&);
+            error_index := expand_string_escapes(s, bytes&);
+            @if(error_index != -1) return(Err = @tfmt("invalid escape character at index % of string", error_index));
         } else {
             // :NeedFunctionInitForData
             r := self.parse_ref();
@@ -1099,14 +1099,36 @@ fn allow_in_identifier(c: u8) bool #inline = {
     c.is_ascii_alpha() || c.is_ascii_digit() || c == "_".ascii() || c == ".".ascii() 
 }
 
-// TODO: bounds
 fn eat_word(self: *QParseCtx) Str = {
     self.skip_blanks();
+    if self.cursor < self.input.len && self.input[self.cursor] == "\"".ascii() {
+        return self.eat_quoted_word();
+    };
+    
     start := self.cursor;
     while => self.cursor < self.input.len && self.input[self.cursor].allow_in_identifier() {
         self.cursor += 1;
     };
     self.input.slice(start, self.cursor)
+}
+
+fn eat_quoted_word(self: *QParseCtx) Str = {
+    @match(self.consume_string()) {
+        fn Ok(s) => {
+            bytes := u8.list(s.len, temp());
+            error_index := expand_string_escapes(s, bytes&);
+            if error_index != -1 {
+                @fmt(self.error&, "invalid escape character at index % of string", error_index);
+                return("");
+            };
+            bytes.items()
+        }
+        fn Err(msg) => {
+            // TODO: callers need to properly short-circuit
+            @fmt(self.error&, "%", msg);
+            ""
+        }
+    }
 }
 
 #use("@/lib/collections/map.fr");

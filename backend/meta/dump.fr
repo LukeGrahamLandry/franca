@@ -78,7 +78,8 @@ fn printcon(m: *QbeModule, c: *Qbe.Con, out: *List(u8)) void = {
     ::enum(Qbe.ConType);
     @match(c.type()) {
         fn CAddr() => {
-            @fmt(out, "$%", m.str(c.sym));
+            @fmt(out, "$");
+            safe_print(m.str(c.sym), out);
             if c.bits() != 0 {
                 @fmt(out, "+%", c.bits());
             };
@@ -230,6 +231,10 @@ fn printfn(f: *Qbe.Fn, out: *List(u8)) void = {
         printref(f.retty, f, out);
         @fmt(out, " ");
     };
+    ::enum(Qbe.Cls);
+    if @is(f.ret_cls, .Kw, .Kl, .Ks, .Kd) {
+        @fmt(out, "% ", f.ret_cls.kname().slice(0, 1));
+    };
     use_symbol(f.globals, f.lnk.id) { s |
         @fmt(out, "$%", s.name);
     };
@@ -307,19 +312,6 @@ fn printjmp(f: *Qbe.Fn, b: *Qbe.Blk, out: *List(u8)) void = {
         printref(b.jmp.arg, f, out);
         write(out, ", ");
     };
-    if b.jmp.type == .hlt {
-        return();
-    };
-    
-    if b.jmp.type == .jmp {
-        if b.s1.is_null() {
-            @fmt(out, "ERROR: NULL JUMP TARGET: ");
-            @fmt(out, "%, %", Qbe.Blk.int_from_ptr(b.s1), Qbe.Blk.int_from_ptr(b.s2));
-            return();
-        };
-        @fmt(out, "@%", b.s1.name());
-        return();
-    };
     
     if b.jmp.type == .switch {
         n := b.jmp.arg.val();
@@ -336,12 +328,14 @@ fn printjmp(f: *Qbe.Fn, b: *Qbe.Blk, out: *List(u8)) void = {
             case, value := s;
             @fmt(out, "@% %, ", case.name(), value);
         };
-    } else {
-        if b.jmp.type != .Jxxx && !b.s1.is_null() && !b.s2.is_null() {
-            @fmt(out, "@%, @%", b.s1.name(), b.s2.name());
-        } else {
-            @fmt(out, "%, %", Qbe.Blk.int_from_ptr(b.s1), Qbe.Blk.int_from_ptr(b.s2));
-        };
+        return();
+    };
+   
+    if !b.s1.is_null() {
+        @fmt(out, "@%", b.s1.name());
+    };
+    if !b.s2.is_null() {
+        @fmt(out, ", @%", b.s2.name());
     };
 }
 
@@ -529,7 +523,11 @@ fn print_data(m: *QbeModule, dat: *Dat2, out: *List(u8)) void = {
                             if c == "\n".ascii() {
                                 out.push_all("\\n");
                             } else {
-                                out.push(c);
+                                if c == "\"".ascii() {
+                                    out.push_all("\\\"");
+                                } else {
+                                    out.push(c);
+                                }
                             }
                         }
                     }
@@ -688,4 +686,28 @@ fn warn_if_unlikely_argument(f: *Qbe.Fn, i: *Qbe.Ins, r0: Qbe.Ref) void = {
         };
         @if(slot) @fmt(out, "$%: unlikely argument %: % by an address", f.name(), n, i.op());
     };
+}
+
+// TODO: use this for all the names (tmp, type, block) so its lossless with the text parser
+// TODO: share with print_dat but it's not really the same since that's allowed to bail out and do it as longs instead
+fn safe_print(s: Str, out: *List(u8)) void = {
+    printable :: fn(c) => 
+        c >= 32 && c <= 126 && c != "\"".ascii() && c != "\\".ascii();
+    allow_in_identifier :: import("@/backend/meta/parse.fr").allow_in_identifier;
+    range(0, s.len) { i |
+        if !allow_in_identifier(s[i]) {
+            out.push_all("\"");
+            out.push_all(s.slice(0, i));
+            for s.rest(i) { c |
+                if printable(c) {
+                    out.push(c);
+                } else {
+                    @fmt(out, "\\x%", c);
+                }
+            };
+            out.push_all("\"");
+            return();
+        }
+    };
+    out.push_all(s);
 }

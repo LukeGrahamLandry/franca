@@ -260,7 +260,6 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
         }
         // ADDIW sign extends the result, so adding zero is just a sign extension. 
         fn extsw() => e.inst(R(0, 0, a0.rv().bits(), @as(u3) OpI.add, i.to.rv().bits(), .opw));
-        // TODO: ADDIW, ADDW, SUBW, MULW, DIVW, DIVUW, REMW, REMUW
         fn add() => @if(i.cls().is_int(), 
             e.simple_op(i, .add, 0),
             e.float_op(i, .add, 0b000));
@@ -555,7 +554,6 @@ fn load_symbol(e: *EmitRv, c: *Qbe.Con, dest_reg: RvReg) void = {
     };
 }
 
-// TODO: add,sub,mul,div,rem have a W version
 fn simple_op(e: *EmitRv, i: *Qbe.Ins, o: OpI, funct7: u7) void = {
     @debug_assert(i.cls().is_int(), "float %", i.op());
     a0, a1 := (i.arg&[0], i.arg&[1]);
@@ -565,9 +563,13 @@ fn simple_op(e: *EmitRv, i: *Qbe.Ins, o: OpI, funct7: u7) void = {
         off := c.bits();
         @debug_assert(c.type() == .CBits && off.fits_sext(11), "out of range %", off);
         @debug_assert_eq(0, @as(i64) funct7, "bad simple_op % should not have immediate", i.op());
-        I(@as(i12) off, a0.rv().bits(), @as(u3) o, i.to.rv().bits(), .op_imm)
+        op := @if(i.cls().is_wide() || !@is(i.op(), .add), 
+            Opcode.op_imm, Opcode.opw);
+        I(@as(i12) off, a0.rv().bits(), @as(u3) o, i.to.rv().bits(), op)
     } else {
-        R(funct7, a1.rv().bits(), a0.rv().bits(), @as(u3) o, i.to.rv().bits(), .op)
+        op := @if(i.cls().is_wide() || !@is(i.op(), .add, .sub, .mul, .div, .udiv, .rem, .urem), 
+            Opcode.op, Opcode.op32);
+        R(funct7, a1.rv().bits(), a0.rv().bits(), @as(u3) o, i.to.rv().bits(), op)
     };
     e.inst(i);
 }

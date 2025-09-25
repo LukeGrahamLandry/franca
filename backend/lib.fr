@@ -57,7 +57,7 @@ ENABLE_STATIC_MEMMOVE :: true
 
 // replaces the old fold and copy passes. 
 ENABLE_GVN :: true
-    && !IS_BOOTSTRAPPING;
+    && !{ fr := current_compiler_context(); IS_BOOTSTRAPPING || fr.vtable.driver_abi_version < 1349 };
     
 ALSO_OLD_COPY :: false 
     && ENABLE_GVN;
@@ -589,7 +589,9 @@ run_qbe_passes_common :: fn(f: *Qbe.Fn) bool = {
         fill_use(f);
         filldom(f);
         import("@/backend/opt/gcm.fr")'gcm(f);
-        fill_use(f);  // only for ssacheck, TODO: disable when not doing debug assertions
+        if @run(safety_check_enabled(.DebugAssertions)) {
+            fill_use(f);
+        };
         ssacheck(f);
         fillcfg(f);
     };
@@ -735,7 +737,12 @@ fn fails_typecheck(f: *Qbe.Fn) ?Str = {
                 if k == .Ke {
                     return(Some = @tfmt("invalid instruction output type % in %", i.cls(), i.op()));
                 };
-                if(rtype(r) == .RType, => continue());
+                if rtype(r) == .RType {
+                    if !is_par(i.op()) && !is_arg(i.op()) && i.op() != .call {
+                        return(Some = @tfmt("% cannot have RType arg", i.op()));
+                    };
+                    continue();
+                };
                 word :: fn() => if(n == 1, => "second", => "first");
                 if rtype(r) != .RNull && k == .Kx {
                     return(Some = @tfmt("no % operand expected in %", word(), i.op()));
@@ -774,8 +781,20 @@ fn fails_typecheck(f: *Qbe.Fn) ?Str = {
                 };
             };
         };
+        if b.jmp.type != .jnz && !b.s2.is_null() {
+            return(Some = @tfmt("@%: % cannot have a second target", b.name(), b.jmp.type));
+        };
+        if b.jmp.type != .jnz && b.jmp.type != .jmp && !b.s1.is_null() {
+            return(Some = @tfmt("@%: % cannot have a target", b.name(), b.jmp.type));
+        };
         if b.jmp.type == .jnz {
             jump_error = !usecheck(r, .Kw, f) || !@is(rtype(b.jmp.arg), .RTmp, .RCon);
+            if b.s1.is_null() || b.s2.is_null() {
+                return(Some = @tfmt("@%: jnz must have targets", b.name()));
+            };
+        };
+        if b.jmp.type == .jnz && b.s1.is_null() {
+            return(Some = @tfmt("@%: jmp must have target", b.name()));
         };
         if @is(b.jmp.type, .hlt, .jmp) {
             jump_error = b.jmp.arg != QbeNull;

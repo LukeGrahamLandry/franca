@@ -196,8 +196,9 @@ sel :: fn(f: *Qbe.Fn, i: *Qbe.Ins, blk: i32) void = {
             k0 := argcls(i, 0);
             k1 := argcls(i, 1);
             
-            commutes := (@is(o, .and, .or, .xor, .add));
-            if commutes && rtype(iarg[0]) == .RCon {
+            @if(!ENABLE_CONST_FOLD) 
+            if OpTab'get(i.op(), .commutative) && rtype(iarg[1]) != .RCon {
+                // note: it's still possible for both sides to be constant because blit is lowered later
                 i.arg&.items().swap(0, 1);
             };
             
@@ -309,8 +310,7 @@ fn seljmp(b: *Qbe.Blk, f: *Qbe.Fn) void = {
             if f.selcmp(i.arg, cmp_cls, b.id) {
                 cc = cmp_swap(cc);
             };
-            xxx: i32 = Qbe.J.jfieq.raw() + cc;
-            b.jmp.type = @as(Qbe.J) xxx;
+            b.jmp.type = @as(Qbe.J) @as(i32) Qbe.J.jfieq.raw() + cc;
             i.set_nop();
             return();
         } // else fallthrough
@@ -323,6 +323,12 @@ fn seljmp(b: *Qbe.Blk, f: *Qbe.Fn) void = {
 fn selsel_arm64(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) void = {
     isel0 := i.offset(-1);
     @debug_assert_eq(isel0.op(), .sel0);
+    if try_kill_inst(f, i) {
+        // this gets more compilcated if i want to allow multiple to share a condition
+        chuse(isel0.arg&[0], -1, f);
+        isel0.set_nop();
+        return();
+    };
     
     r := isel0.arg&[0];
     if rtype(r) != .RTmp {

@@ -65,6 +65,7 @@ fn rporec(b: *Qbe.Blk, x: i32) i32 = {
     if b.is_null() || b.id != -1 {
         return(x);
     };
+    @debug_assert(b.jmp.type != .jmp || b.s2.is_null());
     b.id = 1;
     s1 := b.s1;
     s2 := b.s2;
@@ -385,7 +386,7 @@ fn blkmerge(f: *Qbe.Fn) void = {
             curb.s2 = b.s2;
             curb = ptr_from_int(Qbe.Blk, 0);
         } else {
-            @debug_assert_eq(b.s1.id.zext(), bid + 1, "rpo not in order in $%", f.name());
+            @debug_assert_eq(b.s1.id.zext(), bid + 1, "rpo not in order in $%: @% -> @% (expected @%)", f.name(), b.name(), b.s1.name(), f.rpo[bid + 1].name());
             when_debug(f, .Block) { out |
                 @fmt(out, "#    merging blocks @% -> @%\n", b.name(), b.s1.name());
                 changed = true;
@@ -417,11 +418,11 @@ fn clear_nops(b: *Qbe.Blk) void = {
 
 fn set_link_from_rpo(f: *Qbe.Fn) void = {
     @debug_assert(identical(f.rpo.first[], f.start), "wrong start block");
-    // We have a linear array but want a linked list for some reason. 
-    range(0, f.nblk.zext() - 1) { n |
-        f.rpo[n].link = f.rpo[n + 1];
+    prev := Qbe.Blk.ptr_from_int(0);
+    for_rev f.rpo.slice(0, f.nblk.zext()) { b | 
+        b.link = prev;
+        prev = b;
     };
-    f.rpo[f.nblk.zext() - 1].link = Qbe.Blk.ptr_from_int(0);   
 }
 
 fn index_in_phi(dest: *Qbe.Blk, p: *Qbe.Phi) i64 = {
@@ -603,13 +604,6 @@ fn fillcfg(f: *Qbe.Fn) void = {
     fillrpo(f);
     fillpreds(f);
     fixphis(f);
-}
-
-fn has_any_loops(f: *Qbe.Fn) bool = {
-    for_blocks f { b |
-        @if(b.loop > 1) return(true);
-    };
-    false
 }
 
 #use("@/backend/lib.fr");

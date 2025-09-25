@@ -422,6 +422,12 @@ fn selcmp(arg: []Qbe.Ref, k: Qbe.Cls, need_swap: bool, f: *Qbe.Fn) void = {
 fn selsel_amd64(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) *Qbe.Ins = {
     isel0 := i.offset(-1);
     @debug_assert_eq(isel0.op(), .sel0);
+    if try_kill_inst(f, i) {
+        // this gets more compilcated if i want to allow multiple to share a condition
+        chuse(isel0.arg&[0], -1, f);
+        isel0.set_nop();
+        return isel0;
+    };
     
     r := isel0.arg&[0];
     old_r := r;
@@ -433,7 +439,7 @@ fn selsel_amd64(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) *Qbe.Ins = {
     fi := flagi(between(b.ins.ptr, isel0));
     cr0, cr1 := (QbeNull, QbeNull);
     gencmp, gencpy, need_swap := (false, false, false);
-    k := t.cls;
+    k := Qbe.Cls.Kw; // :jnz_is_Kw
     c := Qbe.Cmp.Cine.raw();
     @if_else {
         @if(fi.is_null() || fi.to != r) => {
@@ -494,7 +500,7 @@ fn sel(f: *Qbe.Fn, o: Qbe.O, k: Qbe.Cls, r: Qbe.Ref, a: Qbe.Ref, b: Qbe.Ref) voi
 } 
 
 fn sel(i: *Qbe.Ins, f: *Qbe.Fn) void = {
-    if(try_kill_inst(f, i), => return());  // TODO
+    if(try_kill_inst(f, i), => return());
     
     i0 := f.globals.curi; // :LookAtLastInst
     sel_inner(i, f);
@@ -653,7 +659,7 @@ fn sel_inner(i: *Qbe.Ins, f: *Qbe.Fn) void = {
                 f.sel_div(i);
                 return();
             };
-            if (@is(i.op(), .sar, .shr, .shl, .rotr, .rotl)) {
+            if i.op().is_shift() {
                 f.sel_shift(i);
                 return();
             };

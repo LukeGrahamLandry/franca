@@ -1,4 +1,21 @@
 
+## (Sep 25)
+
+- qbe doesn't say ceql/cnel has_id but i guess they're kinda not a copy because they change width?
+  i feel like its fine, i just have to check that i.cls=arg0.cls. 
+  similarly, why not do defwidthle for Kl?
+- i don't trust narrowpars, if hoisting ext-s was important, why only do it for pars? 
+  and it's slower than it looks cause it's an extra fill_use
+- `908880 bytes, frontend: 1000ms, codegen: 491ms, 1.036 s ±  0.006 s`
+- allow quoted symbol names in text ir parse and dump them that way when they're not valid identifiers,
+  so it can parse back the output of import_c's mangled statics. 
+- ascii_table works if output it to text and then parse that back and compile it. 
+  so its some piece of state that's wrong. 
+  works if i do `>=` instead of `>` on sN.loop in rporec. 
+  problem was in import_c conditional being folded and not clearing cond_block.s2,
+  added that to fails_typecheck. 
+- riscv Kw emit
+
 ## (Sep 24)
 
 - just by inspection, it does work, like functions that call i.op() multiple 
@@ -29,6 +46,8 @@
   so im making redundant phis that the new thing can't get rid of. 
   using simplify_phi as part of phicopyref gets the code size improvement but is slower. 
   `915868 bytes, frontend: 1004ms, codegen: 502ms, 1.046 s ±  0.006 s`
+- did sel folding: 913116
+  - added a test that it only looks at the low 32 bits of the comparison
 
 ## (Sep 23)
 

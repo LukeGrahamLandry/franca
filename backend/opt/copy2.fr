@@ -46,6 +46,7 @@ usewidthle :: fn(f: *Qbe.Fn, r: Qbe.Ref, w: i64) bool = {
             }
             fn UIns() => {
                 i := u.u.ins;
+                @debug_assert(i.arg&[0] == r || i.arg&[1] == r || i.op() == .nop);
                 if i.op() == .copy && usewidthle(f, i.to, w) {
                     continue()
                 }
@@ -55,11 +56,14 @@ usewidthle :: fn(f: *Qbe.Fn, r: Qbe.Ref, w: i64) bool = {
                     }
                 }
                 if i.op() == .and {
-                    @debug_assert(i.arg&[0] == r || i.arg&[1] == r);
                     rc := i.arg&[int(r == i.arg&[0])];
                     if f.get_int(rc) { v |
                         @if(bitwidth(v) <= w) continue();
                     }
+                }
+                if i.op().is_shift() && i.arg&[0] != r {
+                    n := 5 + i.cls().is_wide().int();
+                    @if(n <= w) continue();
                 }
             }
             @default => ();
@@ -76,7 +80,7 @@ defwidthle :: fn(f: *Qbe.Fn, r: Qbe.Ref, w: i64) bool = {
     };
     
     t := f.get_tmp(r) || return(false);
-    @if(t.cls != .Kw) return(false);
+    @if(t.cls.is_float()) return(false);
     
     if t.def.is_null() {
         /* phi def */
@@ -98,13 +102,15 @@ defwidthle :: fn(f: *Qbe.Fn, r: Qbe.Ref, w: i64) bool = {
         return defwidthle(f, i.arg&[0], w);
     }
     if @is(i.op(), .shr, .sar) {
+        size := 1.shift_left(5 + t.cls.is_wide().int());
+        mask := size - 1;
         if f.get_int(i.arg&[1]) { v |
-            if 0 < v && v <= 32 {
-                if i.op() == .shr && w+v >= 32 {
+            if 0 < v && v <= size {
+                if i.op() == .shr && w+v >= size {
                     return true;
                 }
-                if w < 32 {
-                    value_bits := @if(i.op() == .sar, 31, 32);
+                if w < size {
+                    value_bits := @if(i.op() == .sar, mask, size);
                     w = min(value_bits, w+v);
                 }
             }
@@ -131,45 +137,6 @@ defwidthle :: fn(f: *Qbe.Fn, r: Qbe.Ref, w: i64) bool = {
 isw1 :: fn(f: *Qbe.Fn, r: Qbe.Ref) bool = 
     defwidthle(f, r, 1);
 
-/* insert early extub/extuh instructions
- * for pars used only narrowly; this
- * helps factoring extensions out of
- * loops
- *
- * needs use; breaks use
- */
-narrowpars :: fn(f: *Qbe.Fn) void = {
-    /* only useful for functions with loops */
-    @if(!f.has_any_loops()) return();
-    b := f.start;
-
-    end := f.find_past_last_param();
-    npar := b.ins.ptr.ptr_diff(end);
-    @if(npar == 0) return();
-
-    nins := b.ins.len + npar;
-    ins := temp().alloc_uninit(Qbe.Ins, nins);
-    ins.slice(0, npar).copy_from(b.ins.slice(0, npar));
-    ins.rest(2*npar).copy_from(b.ins.items().rest(npar));
-    b.ins = ins.as_raw_list();
-
-    each b.ins.slice(0, npar) { i |
-        ext := make_ins(.nop, .Kw, Qbe.Null, Qbe.Null, Qbe.Null);
-        if i.cls() == .Kw && usewidthle(f, i.to, 16) {
-            ext&.set_op(.extuh);
-            if usewidthle(f, i.to, 8) {
-                ext&.set_op(.extub);
-            }
-            r := f.newtmp("vw", i.cls());
-            ext&.set_cls(i.cls());
-            ext.to = i.to;
-            ext.arg&[0] = r;
-            i.to = r;
-        }
-        i.offset(npar)[] = ext;
-    }
-}
-
 copyref :: fn(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins, g: *Gvn) Qbe.Ref = {
     /* which extensions are copies for a given
      * argument width */
@@ -193,8 +160,13 @@ copyref :: fn(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins, g: *Gvn) Qbe.Ref = {
     @if(OpTab'get(i.op(), .has_id)
     && is_int(i.cls()) /* integer only - fp NaN! */
     && i.arg&[1] == g.con01&[OpTab'get(i.op(), .id_val).int()]
-    && (!OpTab'get(i.op(), .cmpeqwl) || isw1(f, i.arg&[0])))
-        return(i.arg&[0]);
+    && (!OpTab'get(i.op(), .cmpeqwl) || isw1(f, i.arg&[0]))) {
+        if f.get_tmp(i.arg&[0]) { t |
+            if i.cls() == .Kw || t.cls == i.cls() {
+                return(i.arg&[0]);
+            }
+        };
+    };
 
     /* idempotent op with identical args */
     if OpTab'get(i.op(), .idempotent) && i.arg&[0] == i.arg&[1] {
@@ -234,8 +206,7 @@ copyref :: fn(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins, g: *Gvn) Qbe.Ref = {
     t := f.get_tmp(i.arg&[0]) || return(Qbe.Null);
     @debug_assert(t.cls.is_int());
 
-    /* do not break typing by returning
-        * a narrower temp */
+    /* do not break typing by returning a narrower temp */
     @if(is_wide(i.cls()).int() > is_wide(t.cls).int()) return(Qbe.Null);
 
     w := Qbe.TmpType.Wsb.raw() + i.op().raw() - Qbe.O.extsb.raw();
@@ -244,13 +215,9 @@ copyref :: fn(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins, g: *Gvn) Qbe.Ref = {
         return i.arg&[0];
     }
 
-    /* avoid eliding extensions of params
-     * inserted in the start block; their
-     * point is to make further extensions
-     * redundant */
-    @if ((t.def.is_null() || !is_par(t.def.op()))
-    && usewidthle(f, i.to, e.usew.zext()))
-        return(i.arg&[0]);
+    if usewidthle(f, i.to, e.usew.zext()) {
+        return i.arg&[0];
+    };
 
     if defwidthle(f, i.arg&[0], e.nopw.zext()) {
         return i.arg&[0];

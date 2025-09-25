@@ -68,6 +68,7 @@ replaceuse :: fn(f: *Qbe.Fn, u: *Qbe.Use, r1: Qbe.Ref, r2: Qbe.Ref) void = {
 }
 
 replaceuses :: fn(f: *Qbe.Fn, g: *Gvn, r1: Qbe.Ref, r2: Qbe.Ref) void = {
+    @debug_assert_ne(r1, r2);
     t1 := f.get_temporary(r1);
     g.copy_of[r1.val()] = r2;
     each t1.uses() { u |
@@ -96,17 +97,28 @@ rcmp :: fn(a: Qbe.Ref, b: Qbe.Ref) i32 = {
     (a.val() - b.val()).intcast()
 }
 
+maskcon :: fn(f: *Qbe.Fn, r: *Qbe.Ref, mask: i64) void = {
+    if f.get_int(r[]) { v |
+        if v.bit_and(mask) != v {
+            r[] = f.getcon(v.bit_and(mask));
+        }
+    };
+}
+
 normins :: fn(f: *Qbe.Fn, i: *Qbe.Ins) void = {
+    if i.op().is_shift() {
+        mask := 1.shift_left(5 + i.cls().is_wide().int()) - 1;
+        f.maskcon(i.arg&.index(1), mask);
+    }
+
     /* truncate constant bits to
      * 32 bits for s/w uses */
     range(0, 2) { n |
-        @if(!is_wide(argcls(i, n)))
-        if f.get_int(i.arg&[n]) { v |
-            if v.bit_and(MAX_u32) != v {
-                i.arg&[n] = f.getcon(v.bit_and(MAX_u32));
-            }
-        };
+        if !is_wide(argcls(i, n)) {
+            f.maskcon(i.arg&.index(n), MAX_u32);
+        }
     }
+    
     /* order arg[0] <= arg[1] for
      * commutative ops, preferring
      * RTmp in arg[0] */
@@ -185,6 +197,17 @@ killins :: fn(f: *Qbe.Fn, g: *Gvn, i: *Qbe.Ins, r: Qbe.Ref) void = {
 
 dedupins :: fn(f: *Qbe.Fn, g: *Gvn, b: *Qbe.Blk, i: *Qbe.Ins) void = {
     normins(f, i);
+    
+    if i.op() == .sel1 {
+        sel := igroup(b, i);
+        if truthiness(f, b, i.arg&[0] == i.arg&[1], sel[0].arg&[0]) { cond |
+            sel[0]&.set_nop();
+            killins(f, g, i, i.arg&[cond.not().int()]);
+            return();
+        };
+        g.copy_of[i.to.val()] = i.to;
+        return();
+    };
     
     @if(i.op() == .nop || pinned(i)) return();
 
@@ -313,18 +336,8 @@ dedupjmp :: fn(f: *Qbe.Fn, b: *Qbe.Blk) void = {
     }
 
     /* collapse trivial/constant jnz to jmp */
-    v := f.get_int(b.jmp.arg);
-    z: ?i64 = .None;
-    
-    kill := b.s1.identical(b.s2) || v.is_some();
-    if !kill {
-        z = zeroval(f, b, b.jmp.arg, .Kw);
-        kill = z.is_some();
-    }
-    if kill {
-        v := v || 1;
-        z := z || 0;
-        if v == 0 || z != 0 {
+    if truthiness(f, b, b.s1.identical(b.s2), b.jmp.arg) { cond |
+        if !cond {
             tmp := b.s1;
             b.s1 = b.s2;
             b.s2 = tmp;
@@ -332,7 +345,22 @@ dedupjmp :: fn(f: *Qbe.Fn, b: *Qbe.Blk) void = {
         /* we later move active ins out of dead blks */
         edgedel(b, b.s2&);  // this makes sure you don't have dead preds in the phi so blkmerge and write_phi work
         b.jmp = (type = .jmp, arg = Qbe.Null);
-    }
+        @debug_assert(b.s2.is_null(), "edgedel didn't work");
+    };
+}
+
+// :jnz_is_Kw
+truthiness :: fn(f: *Qbe.Fn, b: *Qbe.Blk, force: bool, cond: Qbe.Ref) ?bool = {
+    if force {
+        return(Some = true);
+    };
+    if f.get_int(cond) { v |
+        return(Some = v.bit_and(MAX_u32) != 0);
+    };
+    if zeroval(f, b, cond, .Kw) { z |
+        return(Some = z == 0);
+    };
+    .None
 }
 
 rebuildcfg :: fn(f: *Qbe.Fn, g: *Gvn) void = {
@@ -371,11 +399,6 @@ gvn :: fn(f: *Qbe.Fn) void = {
             p.visit = 0;
         };
     };
-
-    fillloop(f);
-    import("@/backend/opt/copy2.fr")'narrowpars(f);  // TODO: i don't think this is helping
-    fill_use(f);
-    ssacheck(f);
 
     nins := 0;
     for_blocks f { b |
