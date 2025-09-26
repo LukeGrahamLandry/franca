@@ -1,9 +1,17 @@
 
+- cmpneg is unsound for floats so if a cmp gets folded into a jnz it can behave wrong for nans. 
+- don't just disable elide_abi_slots when the function has variadic parameters. 
+  im not convinced i understand the aliasing mistake. 
+  it must be that somehow it uses am address that goes past the save area? 
 - dont be slower than qbe 
   (even for programs that aren't my compiler so the paying for itself thing doesn't help)
   - bring back the rega hinting
   - sort so inlining can do better
-  - ifopt https://git.sr.ht/~mpu/qbe/tree/2024-10-23-gcm9+assoc-ifc-sel
+- why go i get faster core mark with my import_c than my qbe_frontend on cproc's ir? 
+  differences i see in the ir:
+  - i insert redundant cnew 0 before jnz
+  - cproc inserts redundant extub after loadub
+  - i insert unused loads
 - don't just crash at runtime when you `import_c/cc.fr -r`
   and try to call a function that was forward declared but not linked against
 - examples/count.fr total lines is wrong

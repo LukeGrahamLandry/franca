@@ -10,6 +10,10 @@
   - CORE_DEBUG first `Initialized list:` is different for me and clang, `[0000,ffff8080] vs [0000,8080]`. 
     problem is passing `(unsigned short) nonconstant_signed_short`, to a variadic sign extends on the laod.
     add promotion to int in import_c/compile/funcall. 
+- took ifopt from https://git.sr.ht/~mpu/qbe/tree/2024-11-16-gcm9+assoc-ifcv4-inlinev4
+  great success, gets codegen thread time back down to what it was before gvn. 
+  - before: `908144 bytes, frontend: 1011ms, codegen: 493ms, 1.041 s ±  0.007 s`
+  - after: `905276 bytes, frontend: 993ms, codegen: 455ms, 1.025 s ±  0.006 s`
 
 > i sure wish zed wouldn't leak file descriptors (??)  
 > it eventually dies and says "too many open files os error 24"
