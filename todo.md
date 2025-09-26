@@ -1,3 +1,11 @@
+
+- dont be slower than qbe 
+  (even for programs that aren't my compiler so the paying for itself thing doesn't help)
+  - bring back the rega hinting
+  - sort so inlining can do better
+  - ifopt https://git.sr.ht/~mpu/qbe/tree/2024-10-23-gcm9+assoc-ifc-sel
+- don't just crash at runtime when you `import_c/cc.fr -r`
+  and try to call a function that was forward declared but not linked against
 - examples/count.fr total lines is wrong
 - seperate all the tests that exec stuff or download stuff
   and make run them seperatly. 

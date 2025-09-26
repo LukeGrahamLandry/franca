@@ -1,4 +1,27 @@
 
+## (Sep 26)
+
+- qbe says 15% perf gain from gvn on "coremark" which i guess is this: https://github.com/eembc/coremark
+  - use import_c on that to see if i get the same or if i made a mistake or if my other improvements dwarf it. 
+  - allow passing arguments to `cc.fr -r`
+  - i get -13% reported `Total time` (for fixed iteration count) with ENABLE_GVN=true, so that's reassuring, 
+    it is generating better code (at least for some programs), 
+    its just doing more work to do so which makes the compiler slower. 
+  - CORE_DEBUG first `Initialized list:` is different for me and clang, `[0000,ffff8080] vs [0000,8080]`. 
+    problem is passing `(unsigned short) nonconstant_signed_short`, to a variadic sign extends on the laod.
+    add promotion to int in import_c/compile/funcall. 
+
+> i sure wish zed wouldn't leak file descriptors (??)  
+> it eventually dies and says "too many open files os error 24"
+> and pegs a core in "system" and you have to restart it and lose your undos. 
+> i feel like it started happening once i started having two windows open. 
+> maybe letting it update will help, who knows. 
+> hey i wasn't crazy about the scrolling thing!
+> "•macOS 26: Fixed an issue where scrolling could sometimes feel choppy. #38179"
+> note also that their markdown viewer thingy for the release notes is not 
+> text that you can copy from so to get that sentance i took a screenshot 
+> and used preview's ocr to copy it out of the image. 
+
 ## (Sep 25)
 
 - qbe doesn't say ceql/cnel has_id but i guess they're kinda not a copy because they change width?
@@ -15,6 +38,7 @@
   problem was in import_c conditional being folded and not clearing cond_block.s2,
   added that to fails_typecheck. 
 - riscv Kw emit
+- fix amd64/isel/fixarg calling is_int(Kx)
 
 ## (Sep 24)
 

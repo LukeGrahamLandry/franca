@@ -10,9 +10,12 @@ Args :: @struct {
     includes: []Str = empty();
     debug: Str = "";
     no_builtin_headers := false;
+    jit_args: []CStr = empty();
 };
 
 main :: fn() void = {
+    import("@/lib/crash_report.fr")'hook_backtrace();
+
     ::?Arch;
     cfg: Args = (
         target = (arch = query_current_arch(), os = query_current_os(), type = .Exe, exe_debug_symbol_table = true, wrap_entry_for_linux_libc = true), 
@@ -82,7 +85,6 @@ main :: fn() void = {
         };
         if arg.starts_with("-I") {
             path := arg.rest(2);
-            eprintln(path);
             includes&.push(path);
             continue();
         };
@@ -123,6 +125,7 @@ main :: fn() void = {
             continue();
         };
         if arg == "--" {
+            cfg.jit_args = args.rest(i + 1);
             i = args.len;
             ::enum(@type cfg.target.type);
             @assert(cfg.target.type == .JitOnly, "found '--' to start callee parameters so expected '-r' to run a program");
@@ -146,10 +149,10 @@ fn compile(args: Args) Result(void, Str) = {
     // it's nicer to just generate a string and pass it in, so it can just be treated as an opaque blob in FrcModule.dep 
     // when deciding if a cache file can be reused. 
     src := create_single_source(args&);
-    compile(src, args.target, args.debug, args.output_path, args.no_builtin_headers)
+    compile(src, args.target, args.debug, args.output_path, args.no_builtin_headers, args.jit_args)
 }
 
-fn compile(src: Str, target: QbeTargetEnv, debug: Str, output_path: Str, no_builtin_headers: bool) Result(void, Str) = {
+fn compile(src: Str, target: QbeTargetEnv, debug: Str, output_path: Str, no_builtin_headers: bool, jit_args: []CStr) Result(void, Str) = {
     m := @uninitialized QbeModule;
     
     backend'init_module(m&, target);
@@ -173,14 +176,17 @@ fn compile(src: Str, target: QbeTargetEnv, debug: Str, output_path: Str, no_buil
         // TODO: :paste from qbe_frontend.fr
         @if(is_linking_libc()) import("@/backend/meta/qbe_frontend.fr")'fill_from_libc(m&);
         m&.make_exec();
+        r := push_resolver(QbeModule, m&, find_ip_in_module);
         f, _ := m&.get_addr(m&.intern("main")) 
             || @panic("missing function main()");
         f := assume_types_fn(Arg = Ty(i64, *CStr), Ret = i64, ptr = f);
         args := CStr.list(temp());
         args&.push(@as(CStr) "thisisjittedcodegoodluckwiththat.exe");
+        args&.push_all(jit_args);
         args&.push(zeroed CStr);
         status := f(args.len - 1, args.maybe_uninit.ptr);
         @if(status != 0) @panic("Returned status %", status);
+        r.pop_resolver();
     } else {
         chunks := {m.target.finish_module}(m&);
         write_chunks_or_crash(output_path, chunks);

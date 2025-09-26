@@ -90,7 +90,7 @@ dedupphi :: fn(f: *Qbe.Fn, g: *Gvn, b: *Qbe.Blk) void = {
     };
 }
 
-rcmp :: fn(a: Qbe.Ref, b: Qbe.Ref) i32 = {
+rcmp :: fn(a: Qbe.Ref, b: Qbe.Ref) i32 #inline = {
     if rtype(a) != rtype(b) {
         return rtype(a).raw() - rtype(b).raw();
     };
@@ -390,7 +390,7 @@ rebuildcfg :: fn(f: *Qbe.Fn, g: *Gvn) void = {
 
 /* requires rpo pred ssa use
  * recreates rpo preds
- * breaks pred use dom ssa (GCM fixes ssa)
+ * breaks use dom ssa (GCM fixes ssa)
  */
 gvn :: fn(f: *Qbe.Fn) void = {
     /* copy.c uses the visit bit */
@@ -415,11 +415,18 @@ gvn :: fn(f: *Qbe.Fn) void = {
         stk = list(*Qbe.Use, 10, temp()),
     );
     for_blocks_rpo_forward f { b |
-        dedupphi(f, g&, b);
-        for_insts_forward b { i | 
-            dedupins(f, g&, b, i);
-        };
-        dedupjmp(f, b);
+        if b.npred != 0 || b.identical(f.start) {
+            dedupphi(f, g&, b);
+            for_insts_forward b { i | 
+                dedupins(f, g&, b, i);
+            };
+            dedupjmp(f, b);
+        } else {
+            // block was dead before we got there, 
+            // so none of its instructions can be live in table, 
+            // and rebuildcfg doesn't have to bother. 
+            b.ins.len = 0;
+        }
     }
     rebuildcfg(f, g&);
 
