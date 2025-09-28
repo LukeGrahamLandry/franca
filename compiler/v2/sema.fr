@@ -2728,13 +2728,26 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
         end();
     };
     
+    self.resolve_overload_cold(parts, want_arity, attempt, overloads, arg_expr)
+}
+
+fn resolve_overload_cold(self: *SelfHosted, parts: []FatExpr, want_arity: i64, attempt: *OverloadAttempt, overloads: *OverloadSetData, arg_expr: *FatExpr) Maybe(FuncId) = {
+    are_we_done_yet :: fn() => {
+        if attempt.options.len == 1 {
+            return(Ok = self.done_resolving_overload(attempt, overloads, arg_expr));
+        };
+        if attempt.options.len == 0 {
+            self.last_loc = arg_expr.loc;
+            return(self.report_missing_overload(parts, overloads, attempt.call.requested));
+        };
+    };
+    
     if attempt.state < 5 {
-        start(5, "");
         enumerate parts { arg_index, arg_expr | 
             continue :: local_return;
             
             arg_fid := if arg_expr.is_const() && (arg_expr.ty.eq(FuncId) || self.get_type(arg_expr.ty).is(.Fn)) {
-                @check(self.immediate_eval_expr(arg_expr, arg_expr.ty)) return2
+                @check(self.immediate_eval_expr(arg_expr, arg_expr.ty)) return
             } else {
                 continue()
             };
@@ -2769,22 +2782,20 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
                         if res&.is(.Err) {
                             reject();
                         };
-                        @check(res) return2;
+                        @check(res) return;
                     };
                 };
             };
             are_we_done_yet();
         };
         attempt.state = 5;
-        end();
     };
     
     // this is garbage
     {
-        start(7, "");
         enumerate parts { arg_index, arg_expr | 
             continue :: local_return;
-            @check(self.compile_expr(arg_expr, .None)) return2;
+            @check(self.compile_expr(arg_expr, .None)) return;
             type := arg_expr.ty;
             
             f_i := attempt.options.len;
@@ -2812,9 +2823,12 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
             };
             are_we_done_yet();
         };
-        end();
     };
 
+    self.failed_resolving_overload(attempt, overloads, arg_expr)
+}
+
+fn failed_resolving_overload(self: *SelfHosted, attempt: *OverloadAttempt, overloads: *OverloadSetData, arg_expr: *FatExpr) Maybe(FuncId) = {
     self.last_loc = arg_expr.loc;
     out := u8.list(temp());
     @fmt(out&, "% matching options for %\n", attempt.options.len, self.pool.get(overloads.name));

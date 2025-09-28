@@ -206,6 +206,20 @@ copyref :: fn(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins, g: *Gvn) Qbe.Ref = {
     t := f.get_tmp(i.arg&[0]) || return(Qbe.Null);
     @debug_assert(t.cls.is_int());
 
+    if i.cls() == .Kl && t.cls == .Kw && !t.def.is_null() {
+        if rebase(i.op(), .loadsb, .extsb) == t.def.op() {
+            // since the old load made a Kw value, we know all uses only look at the low bits, 
+            // so its safe to convert it to a load that defines the high bits 
+            // to be what this specific usage wants. 
+            // currently loads aren't deduped so def can't already be in g.table. 
+            // TODO: this optimisation is what makes sink() worth it. why?
+            t.def.set_cls(.Kl);
+            t.cls = .Kl;
+            @debug_assert_eq(t.def.to, i.arg&[0]);
+            return t.def.to;
+        }
+    }
+    
     /* do not break typing by returning a narrower temp */
     @if(is_wide(i.cls()).int() > is_wide(t.cls).int()) return(Qbe.Null);
 

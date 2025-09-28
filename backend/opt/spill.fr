@@ -57,7 +57,7 @@ fn fillcost(f: *Qbe.Fn) void = {
             f.tmpuse(p.to, false, 0);
             range(0, p.narg.zext()) { a | 
                 n := p.blk[a].loop;
-                t.cost = trunc(@as(i64) t.cost.zext() + n.intcast()); // :Casts
+                t.cost += n.bitcast();
                 f.tmpuse(p.arg[a], true, n);
             };
         };
@@ -74,7 +74,10 @@ fn fillcost(f: *Qbe.Fn) void = {
     when_debug(f, .Spill) { out |
         @fmt(out, "\n## Spill costs:\n");
         range(Qbe.Tmp0, f.ntmp.zext()) { n | 
-            @fmt(out, "#\t% %\n", f_pad(f.tmp[n]&.name(), 10, .After), f.tmp[n].cost);
+            t := f.tmp[n]&;
+            if t.cost != 0 {
+                @fmt(out, "#\t%.% %\n", f_pad(t.name(), 10, .Before), n, t.cost);
+            }
         };
         @fmt(out, "\n");
     };
@@ -91,6 +94,8 @@ SpillPass :: @struct(
     // nothing persists between calls, i just want to reuse the memory (and save rezeroing in bsinit)
     scratch_lir: Qbe.BSet,
     scratch_dpm: Qbe.BSet,
+    loads := 0,
+    stores := 0,
 );
 
 // Get the stack slot assigned for spilling t. 
@@ -185,7 +190,7 @@ fn limit(pass: *SpillPass, in_reg: *Qbe.BSet, max_in_reg: i32, prioritize: ?*Qbe
     for live_tmps.slice(0, in_reg_count) { t |
         bsset(in_reg, t.zext());
     };
-    for live_tmps.slice(in_reg_count, live_tmps.len) { t |
+    for live_tmps.rest(in_reg_count) { t |
         pass.slot(t.zext());
     };
 }
@@ -227,15 +232,20 @@ fn reload_spilled(pass: *SpillPass, required_in_reg: *Qbe.BSet, already_in_reg: 
     for(required_in_reg, Qbe.Tmp0) { t | 
         if !bshas(already_in_reg, t) {
             pass.f.emit(.load, pass.f.tmp[t].cls, TMP(t), pass.slot(t), QbeNull);
+            pass.loads += 1;
         }
     };
 }
 
-fn maybe_store(f: *Qbe.Fn, r: Qbe.Ref, slot: i32) void #inline = {
-    if slot != -1 {
-        op := Qbe.O.storew.raw().zext() + f.get_temporary(r)[].cls.raw().zext();
+fn maybe_store(pass: *SpillPass, r: Qbe.Ref) void #inline = {
+    t := pass.f.get_temporary(r);
+    if t.slot != -1 {
+        // TODO: debug_assert(t.alias.slot != qbe.null) but that doesn't work because of fake_alloca
+        f := pass.f;
+        op := Qbe.O.storew.raw().zext() + t.cls.raw().zext();
         op := @as(Qbe.O) @as(i32) op.intcast();
-        f.emit(op, .Kw, QbeNull, r, SLOT(slot.zext()));
+        f.emit(op, .Kw, QbeNull, r, SLOT(t.slot.zext()));
+        pass.stores += 1;
     };
 }
 
@@ -265,7 +275,7 @@ fn do_parallel_moves(pass: *SpillPass, b: *Qbe.Blk, last_copy: *Qbe.Ins, in_reg:
             t := i.to.val();
             if i.to != QbeNull && bshas(in_reg, t) {
                 bsclr(in_reg, t);
-                f.maybe_store(i.to, f.tmp[t].slot);
+                pass.maybe_store(i.to);
             };
             bsset(in_reg, i.arg&[0].val());
             !i.identical(b.ins.ptr) && is_copy_from_reg(i.offset(-1))
@@ -303,7 +313,6 @@ fn do_parallel_moves(pass: *SpillPass, b: *Qbe.Blk, last_copy: *Qbe.Ins, in_reg:
     };
     first_copy
 }
-
 
 fn merge(f: *Qbe.Fn, u: *Qbe.BSet, bu: *Qbe.Blk, v: *Qbe.BSet, bv: *Qbe.Blk) void = {
     ::if(u64);
@@ -523,7 +532,7 @@ fn spill(f: *Qbe.Fn) void = {
             pass&.reload_spilled(all_needed_later&, in_reg&);
             if i.to != QbeNull {
                 t := i.to.val();
-                f.maybe_store(i.to, f.tmp[t].slot);
+                pass&.maybe_store(i.to);
                 if t >= Qbe.Tmp0 {
                     /* in case i.to was a
                      * dead temporary */
@@ -547,7 +556,7 @@ fn spill(f: *Qbe.Fn) void = {
             t := p.to.val();
             if bshas(in_reg&, t) {
                 bsclr(in_reg&, t);
-                f.maybe_store(p.to, f.tmp[t].slot);
+                pass&.maybe_store(p.to);
             } else {
                 if bshas(b.in&, t) {
                     /* only if the phi is live */
@@ -562,7 +571,7 @@ fn spill(f: *Qbe.Fn) void = {
     /* specific to NAlign == 3 */
     f.slot += pass.slot8.align_to(16);
     
-    when_debug(f, .Spill, fn(out) => f.dump_spill(out));
+    when_debug(f, .Spill, fn(out) => f.dump_spill(out, pass.loads, pass.stores));
 }
 
 #use("@/backend/lib.fr");

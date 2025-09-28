@@ -228,7 +228,6 @@ fn pmgen(c: *RegaCtx) void = {
     status := temp().alloc_zeroed(PMStat, c.pm.len);
     ::assert(PMStat.zeroed() == .ToMove, "zero init is ToMove");
     
-    end := c.f.globals.curi;
     range(0, c.pm.len) { i | 
         if status[i] == .ToMove {
             k := c.pm&[i].cls;
@@ -321,7 +320,6 @@ fn do_block_instructions(c: *RegaCtx, b: *Qbe.Blk, cur: *RMap) void = {
         b.jmp.arg = c.ralloc(cur, b.jmp.arg.val().intcast());
     };
     c.f.reset_scratch();
-    curi := c.f.globals.curi&; // :LookAtLastInst (but just to pop off dead code)
     for_insts_rev b { i1 |
         continue :: local_return;
         i := c.f.emit(i1[][]);
@@ -332,9 +330,10 @@ fn do_block_instructions(c: *RegaCtx, b: *Qbe.Blk, cur: *RMap) void = {
             fn copy() => {
                 if is_copy_from_reg(i) {
                     // consecutive copies from registers are handled seperatly. 
-                    curi[] = curi[].offset(1);  // pop off the emit() from this iteration
+                    c.f.unemit(i);
                     i1[] = c.do_parallel_moves(b, i1[], cur);
-                    c.added_moves += curi[].ptr_diff(i.offset(1)).trunc();
+                    // :LookAtLastInst but just for logging
+                    c.added_moves += c.f.globals.curi.ptr_diff(i.offset(1)).trunc();
                     continue();
                 };
                 if isreg(i.to) && rtype(i.arg&[0]) == .RTmp {
@@ -353,7 +352,8 @@ fn do_block_instructions(c: *RegaCtx, b: *Qbe.Blk, cur: *RMap) void = {
             @default => ();
         };
         
-        if i.to != QbeNull && i.op() != .call {
+        if i.to != QbeNull {
+            @debug_assert(i.op() != .call);
             @debug_assert(rtype(i.to) == .RTmp, "can only assign tmp");
             r := i.to.val();
             if r >= Qbe.Tmp0 || !T.rglob.bit_is_set(r) {
@@ -366,7 +366,7 @@ fn do_block_instructions(c: *RegaCtx, b: *Qbe.Blk, cur: *RMap) void = {
                     };
                     // DCE: if we didn't need the value later, we don't need the instruction that creates it. 
                     @debug_assert(!isreg(i.to), "DCE reg");
-                    curi[] = curi[].offset(1); // pop off the emit() from this iteration
+                    c.f.unemit(i);
                     continue();
                 };
                 i.to = TMP(just_freed);
@@ -395,8 +395,7 @@ fn do_block_instructions(c: *RegaCtx, b: *Qbe.Blk, cur: *RMap) void = {
         };
         was_nop_copy := i.op() == .copy && i.to == i.arg&[0];
         if was_nop_copy { 
-            // :LookAtLastInst
-            c.f.globals.curi = c.f.globals.curi.offset(1); // pop off the emit() from this iteration
+            c.f.unemit(i);
         };
     };
     c.f.copy_instructions_from_scratch(b);
@@ -420,7 +419,6 @@ fn register_allocation(f: *Qbe.Fn) void = {
     // (t.hint.register is setup in spill)
     
     /* 2. assign registers */
-    // note: toggling this iteration order trades size for speed. 
     for_blocks_rpo_forward f { b | 
         n: i64 = b.id.zext();
         cur.len = 0;

@@ -35,41 +35,28 @@ fn good4ifc(f: *Qbe.Fn, src: *Qbe.Blk, then: *Qbe.Blk, else: *Qbe.Blk, join: *Qb
     true
 }
 
-fn ifcblk(f: *Qbe.Fn, src: *Qbe.Blk, then: *Qbe.Blk, else: *Qbe.Blk, join: *Qbe.Blk, scratch: *RawList(Qbe.Ins)) void = {
-    vins := scratch;
-    vins.clear();
-    @debug_assert(src.id <= then.id && src.id <= else.id, "rpo");
-    @debug_assert(then.id <= join.id && else.id <= join.id, "rpo");
-    
+fn ifcblk(f: *Qbe.Fn, src: *Qbe.Blk, then: *Qbe.Blk, else: *Qbe.Blk, join: *Qbe.Blk) void = {
     /* merge if/then/else blks */
-    addbins(src, vins);
-    merge :: fn(s) => if !s.identical(src) {
-        addbins(s, vins);
+    kill :: fn(s) => if !s.identical(src) {
+        @debug_assert(src.id < s.id && s.id < join.id, "rpo");
+        f.rpo[s.id] = Qbe.Blk.ptr_from_int(0);
+        addbins(s, src.ins&);
     };
-    merge(then); merge(else);
+    kill(then); kill(else);
 
     /* if-convert the phis to sel1*/
     for_phi join { p |
-        continue :: local_return;
-        @if(p.to == Qbe.Null) continue();
+        @debug_assert(p.narg == 2 && p.to != Qbe.Null);
         
         // TODO: allow multiple sel1 to share a single sel0
-        vins.push(make_ins(.sel0, .Kw, Qbe.Null, src.jmp.arg, Qbe.Null), temp());
+        src.push(make_ins(.sel0, .Kw, Qbe.Null, src.jmp.arg, Qbe.Null));
         
-        @debug_assert(p.narg == join.npred);
         argt := p.arg[index_in_phi(then, p)];
         argf := p.arg[index_in_phi(else, p)];
-        @debug_assert(p.cls.is_int() && p.narg == 2);
-        vins.push(make_ins(.sel1, p.cls, p.to, argt, argf), temp());
+        src.push(make_ins(.sel1, p.cls, p.to, argt, argf));
     }
 
     /* fix up the CFG */
-    kill :: fn(s) => if !s.identical(src) {
-        f.rpo[s.id] = Qbe.Blk.ptr_from_int(0);
-    };
-    kill(then); kill(else);
-    
-    idup(src, vins.items());
     src.jmp = (type = .jmp, arg = Qbe.Null);
     src.s1 = join;
     src.s2 = Qbe.Blk.ptr_from_int(0);
@@ -86,7 +73,6 @@ fn ifconvert(f: *Qbe.Fn) void = {
     fillcfg(f);
 
     changed := false;
-    scratch: RawList(Qbe.Ins) = empty();
     for f.rpo() { src |
         @if(!src.is_null()) /* not already eliminated */
         if ifgraph(src) { then, else, join |
@@ -94,7 +80,7 @@ fn ifconvert(f: *Qbe.Fn) void = {
                 when_debug(f, .IfOpt) { out |
                     @fmt(out, "\n#    if-converting @% -> @%, @% -> @%", src.name, then.name, else.name, join.name);
                 };
-                ifcblk(f, src, then, else, join, scratch&);
+                ifcblk(f, src, then, else, join);
                 changed = true;
             }
         };
@@ -108,23 +94,19 @@ fn ifconvert(f: *Qbe.Fn) void = {
 
 /* (otherwise) isolated if-then[-else] graphlet */
 ifgraph :: fn(src: *Qbe.Blk) ?Ty(*Qbe.Blk, *Qbe.Blk, *Qbe.Blk) = {
-    lonesucc :: fn(b: *Qbe.Blk, s: *Qbe.Blk) bool = {
+    lone_successor :: fn(b: *Qbe.Blk, s: *Qbe.Blk) bool #inline = {
         @debug_assert(!s.is_null());
         !s.identical(b)
         && s.npred == 1
         && s.pred[0].identical(b)
         && s.phi.is_null()
+        && s.jmp.type == .jmp
     };
     
-    lonejmpsucc :: fn(b: *Qbe.Blk, s: *Qbe.Blk) bool = 
-        s.jmp.type == .jmp && lonesucc(b, s);
-
     @if(src.jmp.type != .jnz) return(.None);
     @debug_assert(!src.s1.is_null() && !src.s2.is_null());
     @debug_assert(!src.s1.identical(src.s2));  /* dubious */
-    then := src.s1;
-    else := src.s2;
-    join := src.s1.s1;
+    then, else, join := (src.s1, src.s2, src.s1.s1);
     if src.s1.identical(src.s2.s1) {
         /* empty then */
         then = src;
@@ -136,7 +118,7 @@ ifgraph :: fn(src: *Qbe.Blk) ?Ty(*Qbe.Blk, *Qbe.Blk, *Qbe.Blk) = {
     };
     
     f :: fn(b) => if !(b.identical(src) ||
-        (b.s1.identical(join) && lonejmpsucc(src, b))) {
+        (b.s1.identical(join) && lone_successor(src, b))) {
             return(.None);
         };
     f(then); f(else);

@@ -1,4 +1,26 @@
 
+## (Sep 27)
+
+- mystery kinda solved. thats fascinating. 
+  only sink if name ends starts resolve_in_overload_set_new...
+  `899628 bytes, frontend: 965ms, codegen: 447ms, 994.5 ms ±   6.3 ms, coremark: 19651`
+  since my language is stupid, that one function is 400 lines and 25% of the run time,
+  and i guess there's some pattern that sink helps there and it goes 400 -> 350 samples. 
+  - just splitting that function into smaller ones makes it faster: `967.5 ms ±   8.3 ms`. 
+    so problem is im bad at big functions. probably because rega only does one hint per temporary,
+    and even inserting a spill doesn't make more temporaries (ie. its not ssa after spill()). 
+    so if you have a value produced early in the function and used in multiple (non-nested) loops,
+    the first one that's processed will hint it to go somewhere, and it will keep using that 
+    old hint for the next loop even if the situation is different. 
+    and like it already sort of allows for range splitting, like if it can't get the hinted 
+    one its fine with the same value being in different registers at different times, 
+    but it doesn't realize that the hint has a limited time value. 
+    so the reason sink helps is that its pulling things down to point of use and making new temporaries 
+    for them (because its still ssa at that point), so its effectively letting 
+    those different live ranges have a unique hint slot. 
+- ifcblk: push to the block instead of always reallocating
+- filter the debug printing `## Spill costs:` to not show dead temps so its less spam
+
 ## (Sep 26)
 
 - qbe says 15% perf gain from gvn on "coremark" which i guess is this: https://github.com/eembc/coremark
@@ -14,6 +36,25 @@
   great success, gets codegen thread time back down to what it was before gvn. 
   - before: `908144 bytes, frontend: 1011ms, codegen: 493ms, 1.041 s ±  0.007 s`
   - after: `905276 bytes, frontend: 993ms, codegen: 455ms, 1.025 s ±  0.006 s`
+- tried tracking if a tmp came from a comparison (so known to be 0/1 and remember after breaking t.def)
+  and convert some patterns with constant 0/1 to and/or instead of sel in ifcblk but doesn't seem to be faster. 
+  sad that i don't know when a load is known to be a bool. 
+  llvm's type obsession is looking more reasonable now.
+- part of why sink() on memargs helps so much is that isel can't even pull an offset into the memory access
+  if the address is computed in a different block and is not an RSlot because of :ReferencingOldBlock, 
+  - so like ok, just iterate blocks in post order for isel right? 
+  - ha, yeah, now sink() just makes the compiler slightly larger 
+    and removing it makes coremark iter/sec go 17420 -> 19540.
+  - strangely, while sink isn't helpful, getting rid of it makes ALSO_OLD_COPY=true 
+    no longer help either. sink+copy still saves 30ms self compile wall time. 
+    - the part of old copy that matters now is the folding extension into load. 
+      moved that to new copy and now the compilier is fast with sink() and coremark is fast without sink(). 
+      which is backwards from the intuition? duplicating the code out more 
+      makes the compiler do more work in the hopes of making other programs faster. 
+    - maybe sink() prevents inlining something and thus makes the compiler do less work?
+      no, both save_for_inlining the same number of things. 
+  - no sink: `898800 bytes, frontend: 1003ms, codegen: 447ms,  1.028 s ±  0.006 s, coremark: 19444`
+  - sink: `902436 bytes, frontend: 950ms, codegen: 446ms, 991.3 ms ±   2.8 ms, coremark: 17470`
 
 > i sure wish zed wouldn't leak file descriptors (??)  
 > it eventually dies and says "too many open files os error 24"

@@ -42,8 +42,7 @@ earlyins :: fn(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) u32 = {
     @if(pinned(i), b.id.bitcast(), b0)
 }
 
-earlyblk :: fn(f: *Qbe.Fn, bid: u32) void = {
-    b := f.rpo[bid];
+earlyblk :: fn(f: *Qbe.Fn, b: *Qbe.Blk) void = {
     for_phi b { p |
         for p.arg() { a |
             schedearly(f, a);
@@ -64,6 +63,7 @@ lcabid :: fn(f: *Qbe.Fn, bid1: u32, bid2: u32) u32 = {
     @if(bid2 == NOBID) return(bid1);
     b := lca(f.rpo[bid1], f.rpo[bid2]);
     @debug_assert(!b.is_null());
+    @debug_assert(b.id <= bid1.bitcast() && b.id <= bid2.bitcast());
     b.id.bitcast()
 }
 
@@ -152,8 +152,7 @@ latejmp :: fn(b: *Qbe.Blk, r: Qbe.Ref) u32 = {
     b.id.bitcast()
 }
 
-lateblk :: fn(f: *Qbe.Fn, bid: u32) void = {
-    b := f.rpo[bid];
+lateblk :: fn(f: *Qbe.Fn, b: *Qbe.Blk) void = {
     filter_phis b { p |
         keep := schedlate(f, p.to) != NOBID;
         if !keep {
@@ -168,6 +167,7 @@ lateblk :: fn(f: *Qbe.Fn, bid: u32) void = {
     }
 }
 
+// breaks use
 addgcmins :: fn(f: *Qbe.Fn, vins: []Qbe.Ins) void = {
     each vins { i |
         t := f.get_temporary(i.to);
@@ -256,8 +256,8 @@ sinkref :: fn(f: *Qbe.Fn, b: *Qbe.Blk, pr: *Qbe.Ref) void = {
     // TODO: qbe mutates the arg of the copy instead of the emitted one ??
     f.emit(i);  
     //i := f.emit(i);   // ... should it be this instead? or am i not understanding whats happening
-    sinkref(f, b, i.arg&[0]&);
-    sinkref(f, b, i.arg&[1]&);
+    //sinkref(f, b, i.arg&[0]&);
+    //sinkref(f, b, i.arg&[1]&);
 }
 
 /* redistribute trivial ops to point of
@@ -289,21 +289,24 @@ gcm :: fn(f: *Qbe.Fn) void = {
     filldepth(f);
     fillloop(f);
 
-    each f.tmp.slice(0, f.ntmp.zext()) { t |
+    each f.tmps() { t |
         t.visit = 0;
         t.gcmbid = NOBID;
     }
-    range(0, f.nblk.zext()) { bid |
-        earlyblk(f, bid.trunc());
+    for f.rpo() { b |
+        earlyblk(f, b);
     }
-    range(0, f.nblk.zext()) { bid |
-        lateblk(f, bid.trunc());
+    for f.rpo() { b |
+        lateblk(f, b);
     }
     
     gcmmove(f);
-    fill_use(f);
-    f.reset_scratch();
-    sink(f);
+    //if f.name().starts_with("resolve_in_overload_set_new") { 
+    if f.nblk > 400 {
+        // :HACK
+        fill_use(f);
+        sink(f);
+    }
     fill_use(f);
     schedblk(f);
     

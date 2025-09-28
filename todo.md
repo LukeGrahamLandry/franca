@@ -1,4 +1,10 @@
 
+- spill() can insert dead stores
+- document RSlot. t.slot=-1 for None, but S-1 means start of vararg save area
+  and other negative S means par passed on stack, 
+  and the number is stored as -(off+2) so it doesn't collide with the special -1. 
+  qbe stores it at 4 byte granularity but i don't because i wanted elide_abi_slots to work on smaller types 
+- get rid of gvm.fr/sink. but first need to make rega do better live range spiltting in large functions. 
 - cmpneg is unsound for floats so if a cmp gets folded into a jnz it can behave wrong for nans. 
 - don't just disable elide_abi_slots when the function has variadic parameters. 
   im not convinced i understand the aliasing mistake. 
