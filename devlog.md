@@ -1,4 +1,8 @@
 
+## (Sep 29)
+
+- don't pin constant divisor division that can't trap 
+
 ## (Sep 28)
 
 - without gvn: `894232 bytes, frontend: 962ms, codegen: 404ms, 988.6 ms ±   8.1 ms, coremark: 14123`

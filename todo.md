@@ -1,4 +1,3 @@
-- @syscall giving aliased memory (vtable.libc.it) to choose_syscall is an obvious race :FUCKED
 - don't just crash at runtime when you `import_c/cc.fr -r`
   and try to call a function that was forward declared but not linked against
 - examples/count.fr total lines is wrong

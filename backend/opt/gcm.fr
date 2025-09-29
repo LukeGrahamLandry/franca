@@ -2,12 +2,19 @@
 
 NOBID :: MAX_u32;
 
-// treated as pinned because it traps on amd and wasm
 isdivwl :: fn(i: *Qbe.Ins) bool = 
     (@is(i.op(), .div, .rem, .udiv, .urem)) && i.cls().is_int();
 
-pinned :: fn(i: *Qbe.Ins) bool = 
-    OpTab'get(i.op(), .pinned) || isdivwl(i);
+pinned :: fn(f: *Qbe.Fn, i: *Qbe.Ins) bool = {
+    if isdivwl(i) {
+        // treated as pinned because it traps on amd and wasm
+        n := f.get_int(i.arg&[1]) || return(true);
+        signed := @is(i.op(), .div, .rem);
+        mask := @if(i.cls().is_wide(), -1, MAX_u32);  // div(max, -1) traps
+        return n == 0 || (signed && n.bit_and(mask) == mask);
+    }
+    OpTab'get(i.op(), .pinned)
+}
 
 /* pinned ins that can be eliminated if unused */
 canelim :: fn(i: *Qbe.Ins) bool = 
@@ -39,7 +46,7 @@ earlyins :: fn(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) u32 = {
         @debug_assert(dom(f.rpo[b0], f.rpo[b1]));
         b0 = b1;
     }
-    @if(pinned(i), b.id.bitcast(), b0)
+    @if(f.pinned(i), b.id.bitcast(), b0)
 }
 
 earlyblk :: fn(f: *Qbe.Fn, b: *Qbe.Blk) void = {
@@ -49,7 +56,7 @@ earlyblk :: fn(f: *Qbe.Fn, b: *Qbe.Blk) void = {
         };
     }
     for_insts_forward b { i |
-        if pinned(i) {
+        if f.pinned(i) {
             schedearly(f, i.arg&[0]);
             schedearly(f, i.arg&[1]);
         }
@@ -112,7 +119,7 @@ schedlate :: fn(f: *Qbe.Fn, r: Qbe.Ref) u32 = {
      * in fixed instructions that may be eliminated
      * and are themselves unused transitively */
 
-    if !t.def.is_null() && !pinned(t.def) {
+    if !t.def.is_null() && !f.pinned(t.def) {
         t.gcmbid = bestbid(f, earlybid, latebid);
     }
     /* else, keep the early one */
@@ -128,7 +135,7 @@ lateins :: fn(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins, r: Qbe.Ref) u32 = {
     @debug_assert(i.arg&[0] == r || i.arg&[1] == r);
 
     latebid := schedlate(f, i.to);
-    @if(!pinned(i)) return(latebid);
+    @if(!f.pinned(i)) return(latebid);
     needed := latebid != NOBID || !canelim(i);
     @if(needed, b.id.bitcast(), NOBID)
 }
@@ -161,7 +168,7 @@ lateblk :: fn(f: *Qbe.Fn, b: *Qbe.Blk) void = {
         keep
     };
     for_insts_forward b { i |
-        if pinned(i) {
+        if f.pinned(i) {
              schedlate(f, i.to); 
         }
     }
@@ -187,7 +194,7 @@ gcmmove :: fn(f: *Qbe.Fn) void = {
         @if(t.def.is_null()) continue();
         @if(t.defining_block == t.gcmbid.bitcast()) continue();
         i := t.def;
-        @if(pinned(i) && !canelim(i)) continue();
+        @if(f.pinned(i) && !canelim(i)) continue();
         @debug_assert(f.get_temporary(i.to).identical(t));
         @if(t.gcmbid != NOBID) vins&.push(i[]);
         i.set_nop();
@@ -238,7 +245,7 @@ cheap :: fn(i: *Qbe.Ins) bool = {
 sinkref :: fn(f: *Qbe.Fn, b: *Qbe.Blk, pr: *Qbe.Ref) void = {
     t := f.get_tmp(pr[]) || return();
     @debug_assert(t.defining_block != NOBID.bitcast());
-    if t.def.is_null() || t.defining_block == b.id || pinned(t.def) || !cheap(t.def) {
+    if t.def.is_null() || t.defining_block == b.id || f.pinned(t.def) || !cheap(t.def) {
         return();
     }
     if t.alias.slot != Qbe.Null {
