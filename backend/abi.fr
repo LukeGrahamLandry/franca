@@ -303,6 +303,9 @@ fn collapse_addr(f: *Qbe.Fn) void = {
                 @if(t.def.cls() != .Kw) continue();
                 // || !t.def.arg&[0].isreg() { would be a tighter bound but that's always why its a copy so it doesn't help 
                 if t.def.op() != .copy { 
+                    // (leave t.def.cls=Kw because that has a shorter encoding on amd64. 
+                    //  won't be saved in -frc but its fine because that happens after spill+rega so slot sizes are already assigned)
+                    t.cls = .Kl;  // make it get a wide spill slot
                     i.set_op(.copy);  // most of the time register allocation will remove this copy
                 };
                 continue();
@@ -362,6 +365,18 @@ native_isel :: fn(
         for_insts_rev b { i |
             sel_inst(i, b, f);
         };
+        
+        // TODO: gvn should do this so it can forward the copies sooner (but cant because it only does one pass)
+        // doing it here mostly just makes the ir more readable
+        filter_phis b { p |
+            keep := p.narg != 1;
+            if !keep {
+                i := f.emit(.copy, p.cls, p.to, p.arg[0], Qbe.Null);
+                fixarg(i.arg&.index(0), p.cls, i, f);
+            };
+            keep
+        };
+        
         f.copy_instructions_from_scratch(b);
     };
 

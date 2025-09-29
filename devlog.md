@@ -1,4 +1,19 @@
 
+## (Sep 28)
+
+- without gvn: `894232 bytes, frontend: 962ms, codegen: 404ms, 988.6 ms ±   8.1 ms, coremark: 14123`
+    - ifopt + smaller resolve_overloads helped that too so gvn 
+      still doesn't beat backend time tho in total its helpful, 
+      i think i don't want to commit to it until every number is strictly better
+      since it's more source code. 
+- did some reminding myself how rega works. 
+  notably not all spills are inserted in spill(), there's still copies to stack slots added in rega. 
+- changed my mind about late copy elim in elide_abi_slots. 
+  doesn't help speed (small size improvement tho), but the important thing is it makes the ir 
+  more readable which is nice if im going to be working on spill+rega. 
+  - same thing: bring back the trivial dce in spill
+- don't copy instructions in untouched blocks in blkmerge
+
 ## (Sep 27)
 
 - mystery kinda solved. thats fascinating. 

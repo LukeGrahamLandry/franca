@@ -1,23 +1,4 @@
-
-- spill() can insert dead stores
-- document RSlot. t.slot=-1 for None, but S-1 means start of vararg save area
-  and other negative S means par passed on stack, 
-  and the number is stored as -(off+2) so it doesn't collide with the special -1. 
-  qbe stores it at 4 byte granularity but i don't because i wanted elide_abi_slots to work on smaller types 
-- get rid of gvm.fr/sink. but first need to make rega do better live range spiltting in large functions. 
-- cmpneg is unsound for floats so if a cmp gets folded into a jnz it can behave wrong for nans. 
-- don't just disable elide_abi_slots when the function has variadic parameters. 
-  im not convinced i understand the aliasing mistake. 
-  it must be that somehow it uses am address that goes past the save area? 
-- dont be slower than qbe 
-  (even for programs that aren't my compiler so the paying for itself thing doesn't help)
-  - bring back the rega hinting
-  - sort so inlining can do better
-- why go i get faster core mark with my import_c than my qbe_frontend on cproc's ir? 
-  differences i see in the ir:
-  - i insert redundant cnew 0 before jnz
-  - cproc inserts redundant extub after loadub
-  - i insert unused loads
+- @syscall giving aliased memory (vtable.libc.it) to choose_syscall is an obvious race :FUCKED
 - don't just crash at runtime when you `import_c/cc.fr -r`
   and try to call a function that was forward declared but not linked against
 - examples/count.fr total lines is wrong
@@ -437,6 +418,37 @@ need to be careful about the refs which have tags in the high bits so won't leb 
   or maybe allow tuple if the expressions are just a single variable and use that for the name as well. 
   or maybe if you're just using it once, have `@{escapes}` where that string gets passed
   to the macro and becomes an Expr::GetParsed so you don't have to give things names. 
+- document RSlot. t.slot=-1 for None, but S-1 means start of vararg save area
+  and other negative S means par passed on stack, 
+  and the number is stored as -(off+2) so it doesn't collide with the special -1. 
+  qbe stores it at 4 byte granularity but i don't because i wanted elide_abi_slots to work on smaller types 
+- get rid of gvm.fr/sink. but first need to make rega do better live range spiltting in large functions. 
+- cmpneg is unsound for floats so if a cmp gets folded into a jnz it can behave wrong for nans. 
+- don't just disable elide_abi_slots when the function has variadic parameters. 
+  im not convinced i understand the aliasing mistake. 
+  it must be that somehow it uses am address that goes past the save area? 
+- why go i get faster core mark with my import_c than my qbe_frontend on cproc's ir? 
+  differences i see in the ir:
+  - i insert redundant cnew 0 before jnz
+  - cproc inserts redundant extub after loadub
+  - i insert unused loads
+- register allocation
+  (problems / confusions, either way i should make it more obvious that it's doing the right thing)
+  - only one hint per temp so bad code for very large functions. 
+    - similarly spill cost is global per temp so if it's only used 
+      in one code path but a lot it's still treated as important everywhere else
+    - need to do better live range splitting. it does some, a value can live in a 
+      register for a bit, then get spilled, then reloaded to a different register,
+      but its always trying to get to the same one.
+      which is probably why getting rid of wait lists was an improvement,
+      in big functions the hint is wrong a lot of the time. 
+  - rega() inserts spills to meet register constraints (call/phi parallel moves). 
+    spill() decides which temps get spilled before knowing which ones have to end up in a specific register
+  - each temp gets its own spill slot so i think phis might have an argument reloaded 
+    just to spill it back to the phi's dest. should put phi args in the same spill slot 
+    if its spilled on both ends? temps can overlap tho so thats another place where 
+    you want to be able to split them. rn they can only have a single stack slot. 
+- be drop in qbe replacement for cproc. its string literals use `\012\000` instead of `\n\0`
 
 ## backend symbols rework
 

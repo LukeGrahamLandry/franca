@@ -366,18 +366,19 @@ fn blkmerge(f: *Qbe.Fn) void = {
             f.rpo[bid] = ptr_from_int(Qbe.Blk, 0);
         };
         
-        // :CreepyNop
-        // This seems wasteful, it does an extra copy for any block that isn't part of a jump chain.
-        // But if you change that, you still need to clear out the nop instructions or it doesn't work, 
-        // and it seems to end up being slower that way. TODO: so that's a bit off putting... 
-        // This was also why disabling inlining didn't work for a while (because i was also not calling blkmerge). 
-        addbins(b, vins&);
-        
         ::ptr_utils(Qbe.Phi);
         if b.jmp.type != .jmp || b.s1.npred != 1 || !b.s1.phi.is_null() {
             // b does not end in a linear jump so put all the collected instructions in curb. 
-            { t := curb.ins; curb.ins = vins; vins = t; };
-            vins.len = 0;
+            if vins.len != 0 { 
+                @debug_assert(!b.identical(curb));
+                addbins(b, vins&);
+                t := curb.ins;
+                curb.ins = vins;
+                vins = t;
+                vins.len = 0;
+            } else {
+                curb.ins = b.ins;
+            };
             curb.jmp = b.jmp;
             for_jump_targets_mut b { s |
                 replacepreds(s[], curb, b);
@@ -391,10 +392,16 @@ fn blkmerge(f: *Qbe.Fn) void = {
                 @fmt(out, "#    merging blocks @% -> @%\n", b.name(), b.s1.name());
                 changed = true;
             };
+            if vins.len == 0 {
+                vins = b.ins;
+                b.ins = empty();
+            } else {
+                addbins(b, vins&);
+            };
         };
         bid += 1;
     };
-    @debug_assert(curb.is_null(), "still have blocks??");
+    @debug_assert(curb.is_null() && vins.len == 0, "still have blocks??");
     killblks(f);
     when_debug(f, .Block) { out |
         @if(changed, printfn(f, out), @fmt(out, "# (no change)\n\n"));
@@ -427,11 +434,11 @@ fn set_link_from_rpo(f: *Qbe.Fn) void = {
     };
 }
 
-fn index_in_phi(dest: *Qbe.Blk, p: *Qbe.Phi) i64 = {
+fn index_in_phi(src: *Qbe.Blk, p: *Qbe.Phi) i64 = {
     n := 0;
     // find the value the phi needs to have when coming from this block.
-    while => !p.blk[n].identical(dest) {
-        @debug_assert(n+1 < p.narg.zext(), "expected phi value when coming from %", dest.name());
+    while => !p.blk[n].identical(src) {
+        @debug_assert(n+1 < p.narg.zext(), "expected phi value when coming from %", src.name());
         n += 1;
     };
     n

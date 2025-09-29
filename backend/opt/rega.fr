@@ -33,6 +33,8 @@ RegaCtx :: @struct(
     pm: List(PMove), /* parallel move constructed */
     added_moves:  u32, 
     added_blocks: u32,
+    loads := 0,
+    stores := 0,
 );
 
 fn hint(c: *RegaCtx, t: i64) *i32 #inline = 
@@ -46,10 +48,11 @@ fn sethint(c: *RegaCtx, t: i64, r: i64) void = {
 }
 
 fn rcopy(dest: *RMap, src: *RMap) void = {
-    dest.tmps&.items().copy_from(src.tmps&.items());
-    dest.regs&.items().copy_from(src.regs&.items());
+    n := src.len;
+    dest.len = n;
+    dest.tmps&.items().slice(0, n).copy_from(src.tmps&.items().slice(0, n));
+    dest.regs&.items().slice(0, n).copy_from(src.regs&.items().slice(0, n));
     bscopy(dest.live&, src.live&);
-    dest.len = src.len;
 }
 
 fn rfind(m: *RMap, t: i64) ?i32 = {  
@@ -69,7 +72,7 @@ fn rref(c: *RegaCtx, m: *RMap, t: i64) Qbe.Ref = {
         TMP(r)
     } else {
         s := c.f.tmp[t].slot;
-        @debug_assert(s != -1, "should have spilled");
+        @debug_assert(s != -1, "should have spilled TMP(%)", t);
         SLOT(s)
     }
 }
@@ -163,8 +166,11 @@ fn rfree_at_index(c: *RegaCtx, m: *RMap, t: i64, i: i64) i64 = {
     r
 }
 
-fn pmadd(c: *RegaCtx, src: Qbe.Ref, dst: Qbe.Ref, k: Qbe.Cls) void #inline = 
+fn pmadd(c: *RegaCtx, src: Qbe.Ref, dst: Qbe.Ref, k: Qbe.Cls) void #inline = {
+    c.loads += int(rtype(src) == .RSlot);
+    c.stores += int(rtype(dst) == .RSlot);
     c.pm&.push(src = src, dest = dst, cls = k);
+}
 
 PMStat :: @enum(i64) (ToMove, Moving, Moved);
 
@@ -552,9 +558,9 @@ fn register_allocation(f: *Qbe.Fn) void = {
 
     when_debug(f, .RegAlloc) { out |
         if c.added_moves != 0 || c.added_blocks != 0 {
+            // some of the loads/stores are double counted as moves but not all. 
             @fmt(out, "\n## Register allocation statistics:\n");
-            @fmt(out, "#\tnew moves:  %\n", c.added_moves);
-            @fmt(out, "#\tnew blocks: %\n", c.added_blocks);
+            @fmt(out, "#\t(moves: %, blocks: %, loads: %, stores: %)\n", c.added_moves, c.added_blocks, c.loads, c.stores);
         };
         @fmt(out, "\n## After register allocation:\n");
         printfn(f, out);
@@ -579,11 +585,7 @@ fn emit_phi_blocks(c: *RegaCtx, beg: []RMap, end: []RMap) void = {
                     };
                     dst = TMP(r);
                 };
-                u := 0;
-                while => !p.blk[u].identical(b) {
-                    @debug_assert(u+1 < p.narg.zext());
-                    u += 1;
-                };
+                u := index_in_phi(b, p);
                 src := p.arg[u];
                 if rtype(src) == .RTmp {
                     //@debug_assert(usecheck(src, p.cls, f), "phi cls mismatch % in $%", src, f.name());

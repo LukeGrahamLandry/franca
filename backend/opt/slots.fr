@@ -6,6 +6,8 @@
 // so just scan though each block and convert redundant load-store pairs to copies. 
 //
 
+// requires rpo, isel
+// breaks use counts
 elide_abi_slots :: fn(f: *Qbe.Fn) void = {
     @if(!ENABLE_ELIDE_SLOTS) return();
     // TODO: armlinux_vararg_slots_example.c
@@ -18,15 +20,25 @@ elide_abi_slots :: fn(f: *Qbe.Fn) void = {
     live_stack := init_bitset(f.slot.zext()+2);
     bscopy(live_stack&, f.escaping_slots&);
     constants: HashMap(u32, Ty(Qbe.Ref, Qbe.Cls)) = init(temp());
+    copy_of := temp().alloc_zeroed(Qbe.Ref, f.ntmp.zext());
     
     dead_loads  := 0;
     dead_stores := 0;
     dead_consts := 0;
     
     made_addr_escape_mistake := false;
-    for_blocks f { b |
+    for_blocks_rpo_forward f { b |
+        for_phi b { p |
+            each p.arg() { r |
+                f.replace_copy(r, copy_of);
+            };
+        };
         for_insts_forward b { i |
             continue :: local_return;
+            
+            each i.arg& { r |
+                f.replace_copy(r, copy_of);
+            };
             
             if maybe_load(i) { size |
                 addr := i.arg&[0];
@@ -51,10 +63,11 @@ elide_abi_slots :: fn(f: *Qbe.Fn) void = {
                         // since this is after isel, we can't generate invalid instructions. 
                         is_con_to_float := entry.value.rtype() == .RCon && !i.cls().is_int();
                         
-                        if entry.size == size && !is_con_to_float {
+                        if entry.size == size && !is_con_to_float && i.op() == .load /*not extending*/ {
                             // TODO: share this logic with load.fr
                             o: Qbe.O = @if(entry.k.is_int() == i.cls().is_int(), .copy, .cast);
                             i[] = make_ins(o, i.cls(), i.to, entry.value, QbeNull);
+                            f.add_copy(i, copy_of);
                             dead_loads += 1;
                             continue();
                         };
@@ -136,7 +149,6 @@ elide_abi_slots :: fn(f: *Qbe.Fn) void = {
                             continue();
                         }
                     };
-                    chuse(prev._0, 1, f);
                     dead_consts += 1;
                     o: Qbe.O = @if(prev._1.is_int() == i.cls().is_int(), .copy, .cast);
                     i[] = make_ins(o, i.cls(), i.to, prev._0, QbeNull);
@@ -165,9 +177,11 @@ elide_abi_slots :: fn(f: *Qbe.Fn) void = {
                 constants&.clear();
             };
             
+            f.add_copy(i, copy_of);
             @debug_assert(i.op() != .blit1, "TODO: wasm blit1 mark memory escaping");
             @debug_assert(i.op() != .blit0, "no blits!");
         };
+        f.replace_copy(b.jmp.arg&, copy_of);
         
         // TODO: We know block dominators so we could do something across blocks maybe?
         slot_contains&.clear();
@@ -209,6 +223,32 @@ local_slot :: fn(f: *Qbe.Fn, a: Qbe.Ref) ?i64 = {
     s := slot / 4;
     !bshas(f.escaping_slots&, s)     || return(.None);
     (Some = s)
+};
+
+// careful not to break the isel reg constraint copies. 
+add_copy :: fn(f: *Qbe.Fn, i: *Qbe.Ins, copy_of: []Qbe.Ref) void = @if(LATE_COPY_ELIM) {
+    if i.op() != .copy || rtype(i.to) != .RTmp || i.to.isreg() || rtype(i.arg&[0]) != .RTmp || i.arg&[0].isreg() {
+        return();
+    };
+    copy_of[i.to.val()] = i.arg&[0];
+};
+
+replace_copy :: fn(f: *Qbe.Fn, r: *Qbe.Ref, copy_of: []Qbe.Ref) void =  @if(LATE_COPY_ELIM) {
+    if rtype(r[]) == .RMem {
+        m := f.get_memory(r[]);
+        f.replace_copy(m.base&, copy_of);
+        f.replace_copy(m.index&, copy_of);
+        return();
+    };
+    if rtype(r[]) != .RTmp {
+        return();
+    };
+    r2 := copy_of[r[].val()];
+    if r2 == Qbe.Null {
+        return();
+    };
+    @debug_assert(!r[].isreg() && !r2.isreg());
+    r[] = r2;
 };
 
 #use("@/backend/lib.fr");
