@@ -1,4 +1,10 @@
 
+## (Sep 30)
+
+- when folding jnz, propagate block death down the children to reduce narg of phis in live blocks,
+  self compile: previously 1119 phis got to isel with narg=1, now only 1 gets there.
+  the stack.pop() loop in dedupjmp runs 2149 times, seems like a good ratio. 
+
 ## (Sep 29)
 
 - don't pin constant divisor division that can't trap 

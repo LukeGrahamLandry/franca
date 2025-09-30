@@ -68,7 +68,13 @@ replaceuse :: fn(f: *Qbe.Fn, u: *Qbe.Use, r1: Qbe.Ref, r2: Qbe.Ref) void = {
 }
 
 replaceuses :: fn(f: *Qbe.Fn, g: *Gvn, r1: Qbe.Ref, r2: Qbe.Ref) void = {
-    @debug_assert_ne(r1, r2);
+    @if(::safety_check_enabled(.DebugAssertions)) 
+    if r1 == r2 {
+        // happens after propagating dead edges in dedupjmp. 
+        // i guess its fine, i think a phi=itself (with narg=1) can only happen in unreachable blocks.
+        // TODO: make a more minimal test than tcc/collect_sections()
+        r2 = Qbe.Undef;
+    }
     t1 := f.get_temporary(r1);
     g.copy_of[r1.val()] = r2;
     each t1.uses() { u |
@@ -343,9 +349,22 @@ dedupjmp :: fn(f: *Qbe.Fn, b: *Qbe.Blk) void = {
             b.s2 = tmp;
         };
         /* we later move active ins out of dead blks */
-        edgedel(b, b.s2&);  // this makes sure you don't have dead preds in the phi so blkmerge and write_phi work
+        dest := edgedel(b, b.s2&);  // this makes sure you don't have dead preds in the phi so blkmerge and write_phi work
         b.jmp = (type = .jmp, arg = Qbe.Null);
-        @debug_assert(b.s2.is_null(), "edgedel didn't work");
+        
+        if dest.npred == 0 {
+            // propagate removal of edges to create more foldable phis in live blocks. 
+            stack := list(*Qbe.Blk, temp());
+            stack&.push(dest);
+            while => stack&.pop() { b |
+                for_jump_targets_mut b { s |
+                    dest := edgedel(b, s);
+                    if dest.npred == 0 {
+                        stack&.push(dest);
+                    }
+                };
+            };
+        };
     };
 }
 

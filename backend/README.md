@@ -57,15 +57,14 @@ You can still print out the ir as human readable text between passes and modify 
 
 ### Optimisations
 
-- added peephole optimisations for arm isel: ~40% code size reduction vs Qbe on the franca compiler.
+- added peephole optimisations for arm isel
   - fold address computation chains
   - use small immediates for instructions that allow them. 
-    - u12: add/sub, ldr/str
-    - bit fields: shl/shr/sar/rotr, and/or/xor
+    - u12: add/sub, ldr/str, bit fields: shl/shr/sar/rotr, and/or/xor
   - fuse mul followed by add into 3 arg madd.
   - fuse ldr+ldr/str+str pairs into ldp/stp
 - Inline small (single block) functions.
-  - based on <https://lists.sr.ht/~mpu/qbe/patches/55945>
+- Convert simple phi instructions into conditional select 
 - elide some redundant memory operations introduced when the abi passes aggregates in registers. (see opt/slots.fr)
 - reuse constants that are produced multiple times in the same basic block (but not across calls) 
 - simplified matching of amd64 addressing modes: instead of 1600 lines of ocaml implementing a dsl
@@ -93,3 +92,12 @@ THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+
+### Credits
+
+> notable contributions by other people that i inherited from qbe
+
+- [global value numbering, Roland Paterson-Jones](https://lists.sr.ht/~mpu/qbe/patches/54774)
+- [single block inlining, Roland Paterson-Jones](https://lists.sr.ht/~mpu/qbe/patches/55945)
+- [phi to sel ifopt, Roland Paterson-Jones](https://lists.sr.ht/~mpu/qbe/patches/55968)
+- [riscv64 isel/abi, Michael Forney](https://lists.sr.ht/~mpu/qbe/patches/29328)
