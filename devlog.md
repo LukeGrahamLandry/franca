@@ -2,6 +2,17 @@
 ## (Sep 29)
 
 - don't pin constant divisor division that can't trap 
+- tried replacing all the deriveindexable with something that calls items() to get a slice and then does it on that. 
+  initially spends more time in overload resolution brings to wall time to 1000ms. 
+  but then simplifying the real implimentations by knowing they're slices speeds it up a bit. 
+  some are a bit unfortunate:
+  - like just having each() go by cursoring a pointer along instead of indexing each time saves 10ms,
+  - spilting out the items call into a variable so it's not overloading a nested expression helps a bit too.
+  - taking out the non-slice ne overload is another 10ms
+  so its 80 lines of dumb code that mostly moves time around so it ends up the same speed,
+  but its moving run time to compile time so i guess its a win for programs that aren't the compiler. 
+  and adds more stuff i can delete as a treat if i make overloading suck less. 
+- `880276 bytes, frontend: 924ms, codegen: 428ms, 952.9 ms ±   3.8 ms, coremark: 19422`
 
 ## (Sep 28)
 
