@@ -28,6 +28,11 @@ align_segments :: fn(m: *Qbe.Module) i64 = {
     code := m.segments&[.Code]&;
     code_size := code.len() - m.goal.commands_size_guess;
 
+    // who fucking knows
+    if m.segments&[.ZeroInitData]&.len() > 0 && m.segments&[.MutableData]&.len() == 0 {
+        m.segments&.index(.MutableData).reserve(u8);
+    };
+    
     @if(m.goal.type != .Relocatable)
     for_enum SegmentType { s | 
         m.align_to(s, 4096);
@@ -224,6 +229,10 @@ create_the_segments :: fn(e: *EmitElf) PayloadBase = {
     
     bss := e.m.segments&[.ZeroInitData]&;
     if bss.len() > 0 {
+        // idk why this doesn't work for me without its own program header. 
+        // shouldn't i just be able to do .mem_size += bss.len(); on the MutableData's program header? 
+        // that was the reasoning behind always making sure there's at least one byte in taht segment when theres bss.
+        // but booting doesn't work without this.... and undef.ssa doesn't work without that^ (which would make sense except that im giving it its own here so wtf)
         e.program_header()[] = (
             type = .Load,
             prot = RW,
@@ -239,7 +248,9 @@ create_the_segments :: fn(e: *EmitElf) PayloadBase = {
         e.section_header(".bss")[] = (
             name = 0, // TODO
             type = .Bss, 
-            flags = 0, 
+            // doesn't do anything...
+            flags = 1.shift_left(@as(i64) Elf.SectionFlag.Write)
+                .bit_or(1.shift_left(@as(i64) Elf.SectionFlag.Alloc)),
             addr = virtual_offset,  
             offset = file_offset, 
             size = bss.len(),
