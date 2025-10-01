@@ -4,6 +4,14 @@
 - when folding jnz, propagate block death down the children to reduce narg of phis in live blocks,
   self compile: previously 1119 phis got to isel with narg=1, now only 1 gets there.
   the stack.pop() loop in dedupjmp runs 2149 times, seems like a good ratio. 
+- ssa/insert_phis
+    - bring back the thing that lets you have a maybe undef variable. 
+    - use dominators when deciding if a single def tmp is ok instead of just if all uses are in the same block. 
+        - self compile, how many got to the slow case that iterates every instruction: 
+          (before: 19120, after: 4380)
+    - skip iterating all instructions if the block's gen bit set doesn't contain t. 
+- save a fill_use() in release mode that's only for ssacheck
+- maintian use info in promote() and save a fill_use()
 
 ## (Sep 29)
 

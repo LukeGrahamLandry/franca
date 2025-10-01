@@ -1,6 +1,6 @@
 // Adapted from Qbe. MIT License. © 2015-2024 Quentin Carbonneaux <quentin@c9x.me>
 
-/* require use, maintains use counts */
+/* require use, maintains use */
 fn promote(f: *Qbe.Fn) void = {
     @if(!ENABLE_PROMOTE) return(); 
     /* promote uniform stack slots to temporaries */
@@ -26,14 +26,24 @@ fn promote(f: *Qbe.Fn) void = {
         };
         /* get rid of the alloc and replace uses */
         i.set_nop();
+        @debug_assert(t.def.identical(i));
+        t.def = Qbe.Ins.ptr_from_int(0);
         t.ndef -= 1;
         k := or k {
             @assert(t.nuse == 0, "slot %% is read but never stored to", "%", t.name());
             skip()
         };
-        each t.uses() { u |
-            replace_access_with_copy(f, t, u.u.ins, k, r)
+        t.cls = k;
+        uses := t.uses();
+        each uses { u |
+            replace_access_with_copy(f, t, u, k, r);
         };
+        @debug_assert(t.ndef == 0 || !t.def.is_null());
+        
+        // maintain usage info to save a fill_use() call
+        unordered_retain(uses&, fn(u) => u.type != .UXXX);
+        @debug_assert_eq(uses.len, t.nuse.zext());
+        
         when_debug(f, .Memory, fn(out) => @fmt(out, "%%, ", "%", t.name()));
     };
     when_debug_printfn(f, .Memory, ")\n## After slot promotion:\n");
@@ -85,12 +95,19 @@ fn is_uniform_access(f: *Qbe.Fn, l: *Qbe.Ins, k: *?Qbe.Cls, s: *?i32, address: Q
 
 store_by_size :: @const_slice(Qbe.O.Oxxx, .storeb, .storeh, .Oxxx, .storew, .Oxxx, .Oxxx, .Oxxx, .storel);
 
-fn replace_access_with_copy(f: *Qbe.Fn, t: *Qbe.Tmp, l: *Qbe.Ins, k: Qbe.Cls, address: Qbe.Ref) void #once = {  
-    if is_store(l.op()) {
-        @debug_assert(address == l.arg&[1]);
-        l[] = make_ins(.copy, k, l.arg&[1], l.arg&[0], QbeNull);
+fn replace_access_with_copy(f: *Qbe.Fn, t: *Qbe.Tmp, u: *Qbe.Use, k: Qbe.Cls, address: Qbe.Ref) void #once = {  
+    l := u.u.ins;
+    make_def :: fn(o: Qbe.O) => {
+        l[] = make_ins(o, k, address, l.arg&[0], QbeNull);
+        t.def = l;
+        t.defining_block = u.bid;
         t.nuse -= 1;
         t.ndef += 1;
+        u.type = .UXXX;
+    };
+    if is_store(l.op()) {
+        @debug_assert(address == l.arg&[1]);
+        make_def(.copy);
         return();
     };
     if l.op() == .blit0 {
@@ -107,17 +124,16 @@ fn replace_access_with_copy(f: *Qbe.Fn, t: *Qbe.Tmp, l: *Qbe.Ins, k: Qbe.Cls, ad
             };
             l[] = make_ins(o, .Kw, QbeNull, src, dest);
         } else {
+            @debug_assert(dest == address);
             ops := @const_slice(Qbe.O.Oxxx, .loadub, .loaduh, .Oxxx, .loaduw, .Oxxx, .Oxxx, .Oxxx, .load);
             o := @if(k == .Ks, Qbe.O.load, ops[size]);
-            l[] = make_ins(o, k, dest, src, QbeNull);
-            t.nuse -= 1;
-            t.ndef += 1;
+            make_def(o);
         };
         blit1.set_nop();
         return();
     };
     
-    @debug_assert(address == l.arg&[0]);
+    @debug_assert(address == l.arg&[0] && is_load(l.op()));
      
     // HACK: examples/import_c has a habit of reading from uninitialized memory 
     // but not using the result which confuses ssa_check later. 
@@ -127,6 +143,8 @@ fn replace_access_with_copy(f: *Qbe.Fn, t: *Qbe.Tmp, l: *Qbe.Ins, k: Qbe.Cls, ad
     if f.get_temporary(l.to)[].nuse == 0 {
         l.arg&[0] = QbeUndef;
         l.set_op(.copy);
+        t.nuse -= 1;
+        u.type = .UXXX;
         return();
     };
     

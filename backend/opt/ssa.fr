@@ -5,6 +5,7 @@
 // This requires computing usage/liveness information which is used by some other passes as well (generally needs to be recomputed after making changes). 
 
 /* require rpo and use */
+// breaks use
 fn convert_to_ssa(f: *Qbe.Fn) void = {
     ::ptr_utils(QbeName);
     nt: i64 = f.ntmp.zext();
@@ -38,34 +39,37 @@ fn insert_phis(f: *Qbe.Fn) void = {
     u := init_bitset(f.nblk.zext());
     defs := init_bitset(f.nblk.zext());
     
-    blist := temp().alloc_uninit(*Qbe.Blk, f.nblk.zext());  // TODO: just use a List for this stack
-    be := blist.index_unchecked(f.nblk.zext());
+    blist := list(*Qbe.Blk, f.nblk.zext(), temp());
     range(Qbe.Tmp0, f.ntmp.zext()) { t |
         continue :: local_return;
-        f.tmp[t].visit = 0;
-        if(f.tmp[t].phi != 0, => continue());
-        if f.tmp[t].ndef == 1 {
-            // TODO: is this ok?? it seems fine...
+        it := f.tmp.index(t);
+        it.visit = 0;
+        if(it.phi != 0 || it.ndef == 0, => continue());
+
+        if it.ndef == 1 {
+            break :: local_return;
+            // if the single definition dominates all uses, its already valid ssa form. 
+            defb := it.defining_block;
+            @if(defb == f.start.id) continue();  // entry block dominates everything
+            each it.uses() { u |
+                if !dom(f.rpo[defb], f.rpo[u.bid]) {
+                    // create phis with Undef for some blocks. 
+                    // only happens for :ThisShouldBeValidUndef
+                    break();
+                }
+            };
             continue();
-            /*
-            no_escape_block := true;
-            defb := f.tmp[t].defining_block;
-            range(0, f.tmp[t].nuse.zext()) { n | 
-                use := f.tmp[t].use[n];
-                no_escape_block = no_escape_block && use.bid == defb;
-            };
-            // :MakeATestThatFails if you just always continue() here. if there's only one def doesn't that mean we never need a phi node? 
-            if no_escape_block || defb == f.start.id {
-                continue();
-            };
-            */
         };
-        
+        it := ();
         bszero(u&);
         k := Qbe.Cls.Kx;
-        bp := be;
+        @debug_assert_eq(blist.len, 0);
         for_blocks f { b | 
+            continue :: local_return;
             b.visit = 0;
+            if !bshas(b.gen&, t) {
+                continue();
+            };
             r := QbeNull;
             for_insts_forward b { i |
                 if r != QbeNull {
@@ -83,8 +87,7 @@ fn insert_phis(f: *Qbe.Fn) void = {
                     } else {
                         if !bshas(u&, b.id.zext()) {
                             bsset(u&, b.id.zext());
-                            bp = bp.offset(-1);
-                            bp[] = b;
+                            blist&.push(b);
                         };
                         if clsmerge(k&, i.cls()) {
                             panic("invalid input");
@@ -97,29 +100,19 @@ fn insert_phis(f: *Qbe.Fn) void = {
             };
         };
         bscopy(defs&, u&);
-        while => !bp.identical(be) {
+        while => blist&.pop() { b |
             f.tmp[t].visit = t.intcast();
-            b := bp[];
-            bp = bp.offset(1);
             bsclr(u&, b.id.zext());
             range(0, b.nfron.zext()) { n | 
                 a := b.fron[n];
                 if a.visit == 0 {
                     a.visit += 1;
                     if bshas(a.in&, t) {
-                        a.phi = temp().boxed(Qbe.Phi, (
-                            cls = k,
-                            to = TMP(t),
-                            link = a.phi,
-                            arg = new(0),
-                            blk = new(0),
-                            narg = 0,
-                        ));
+                        a.new_phi(k, 0, TMP(t));
                         id: i64 = a.id.zext();
                         if !bshas(defs&, id) && !bshas(u&, id) {
                             bsset(u&, id);
-                            bp = bp.offset(-1);
-                            bp[] = a;
+                            blist&.push(a);
                         };
                     };
                 };
@@ -147,15 +140,10 @@ fn renumber_block(b: *Qbe.Blk, stk: []*QbeName, f: *Qbe.Fn) void = {
     
     for_jump_targets b { s |
         for_phi s { p |
-            t := f.get_temporary(p.to);
-            t := t.visit;
+            t := f.get_temporary(p.to)[].visit;
             if t != 0 {
-                m: i64 = p.narg.zext();
-                p.narg += 1;
-                grow(p.arg&, p.narg.zext());
-                grow(p.blk&, p.narg.zext());
-                p.arg[m] = f.getstk(t.zext(), b, stk);
-                p.blk[m] = b;
+                r := f.getstk(t.zext(), b, stk);
+                p.push(b, r);
             };
         };
     };
@@ -179,10 +167,11 @@ fn getstk(f: *Qbe.Fn, t: i64, b: *Qbe.Blk, stk: []*QbeName) Qbe.Ref = {
     };
     stk[t] = n;
     if n.is_null() { 
+        // :ThisShouldBeValidUndef
         // Couldn't find a dominating definition. 
         // This can happen in programs that look valid but we don't realize a there's an unreachable combination of conditions so you end up always going through the definition. 
         // Qbe allows this, maybe i should too, my frontend seems to not do it though so it's fine like this for now.
-        @debug_assert(false, "Couldn't find dominating definition for tmp % % in $%", t, f.tmp&.index(t).name(), f.name());
+        //@debug_assert(false, "Couldn't find dominating definition for tmp % % in $%", t, f.tmp&.index(t).name(), f.name());
         return(QbeUndef);
     };
     n.r
