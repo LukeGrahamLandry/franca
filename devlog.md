@@ -1,4 +1,31 @@
 
+## (Oct 1/2)
+
+- playing with musl, just pointing import_c at random files and seeing if they compile. 
+  - to get through a bunch of arch headers, for now just parse extended asm stmts and replace with hlt
+  - found a situation where i don't re-enable a macro
+  - allow `if` on a float
+  - cleaned up the ir for bool casts for jumps a bit
+  - tre_tnfa_run_parallel: defwidthle gets stuck looping on a phi
+    - running old copy first fixes it
+    - maybe its not an infinite loop, maybe it's just O(a billion) 
+      because loadopt is creating an insane nest of phis when theres
+      a lot of tiny blocks that don't access a value and import_c 
+      inflates block counts for logical expressions and CHECK_ASSERTIONS is a gigantic logical expression. 
+    - but i don't understand why cproc's ir for that function doesn't have the same problem. 
+      looking at a graphviz of the two cfgs, they look pretty much the same to me, 
+      and they seem to lower short circuiting logic to the same sort of phis that i do. 
+    - ohhhh, my lvar_initializer called gen_zero_var just in case it was a  initializer list,
+      so when it was a scalar, gen_zero_var would set the stack slot to zero by doing 
+      `%t =l add %var, 0; storel 0, %t` and that didn't count as is_uniform_access in promote() 
+      so there were a bunch of trivial stack slots that didn't get converted to temporaries 
+      and instead had to go through the compicated unification thing in loadopt 
+      where it assumes the memory can escape and has to carefully trace back from each load. 
+    - fixed that. lines of loadopt debug output: 1368 -> 63. 
+      solved old mystery of why my import_c was always spending so long in load.fr/def. 
+      sadly makes coremark drop 19159 -> 18585. same deal as sink where it was relying on that to spilt live ranges?
+- save a few copies of b.ins in loadopt and inlcall.
+
 ## (Sep 30)
 
 - when folding jnz, propagate block death down the children to reduce narg of phis in live blocks,
@@ -11,7 +38,7 @@
           (before: 19120, after: 4380)
     - skip iterating all instructions if the block's gen bit set doesn't contain t. 
 - save a fill_use() in release mode that's only for ssacheck
-- maintian use info in promote() and save a fill_use()
+- maintain use info in promote() and save a fill_use()
 
 ## (Sep 29)
 

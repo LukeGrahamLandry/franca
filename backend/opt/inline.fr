@@ -235,7 +235,7 @@ fn inlargs(inlfn: *Qbe.InlineFn, f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins /*dest*/, 
             // callee wants an env arg but caller does not provide one. they get 0.
             rto := getinlref(inlfn, i1.to, f, c);
     		ins := make_ins(.copy, i1.cls(), rto, QbeConZero, QbeNull);
-    		addins(c.vins&, ins&);
+    		addins(c.vins, ins&);
             i1 = i1.offset(1);
         };
     };
@@ -261,7 +261,7 @@ fn inlargs(inlfn: *Qbe.InlineFn, f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins /*dest*/, 
 		};
 
 		ins := make_ins(.copy, i.cls(), rto, r, QbeNull);
-		addins(c.vins&, ins&);
+		addins(c.vins, ins&);
 
         i  = i.offset(1);
         i1 = i1.offset(1);
@@ -291,9 +291,9 @@ fn insert_blit(f: *Qbe.Fn, rty: Qbe.Ref, rty1: Qbe.Ref, r: Qbe.Ref, c: *InlineCt
 
     f.emit(alloc_op(zext ty.align_log2), .Kl, ral, f.getcon(zext sz), QbeNull);
     ins := make_ins(.blit0, .Kw, QbeNull, r, ral);
-    addins(c.vins&, ins&);
+    addins(c.vins, ins&);
     ins := make_ins(.blit1, .Kw, QbeNull, INT(zext ty.size), QbeNull);
-    addins(c.vins&, ins&);
+    addins(c.vins, ins&);
     unlock(m.types_mutex&);
     ral
 }
@@ -305,7 +305,7 @@ fn inlbins(inlfn: *Qbe.InlineFn, f: *Qbe.Fn, c: *InlineCtx) void = {
     last := inlb.ins.index_unchecked(inlb.ins.len);
     /* copy remaining instructions, translating refs to current fn */
     for(i, last) { i |
-        addins(c.vins&, i);
+        addins(c.vins, i);
         i1 := c.vins.index(c.vins.len - 1);
         i1.to = getinlref(inlfn, i1.to, f, c);
         i1.arg&[0] = getinlref(inlfn, i1.arg&[0], f, c);
@@ -331,18 +331,16 @@ InlineCtx :: @struct(
     remapped_consts: []Qbe.Ref,
     // for RTmp this stores: [val() in callee] -> ref in caller. (QbeNull means not remapped yet).
     remapped_tmp: []Qbe.Ref,
-    vins: RawList(Qbe.Ins), 
+    vins: *RawList(Qbe.Ins), 
 );
 
 
 // TODO: insert push/pop of dbgloc? 
-/* return index of last inlined ins */
-fn inlcall(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) i64 = {
-    @debug_assert(ptr_diff(b.ins.ptr, i) >= 0 && ptr_diff(i, b.ins.index_unchecked(b.ins.len)) >= 0, "bad size for inlining");
+fn inlcall(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins, vins: *RawList(Qbe.Ins)) void = {
     @debug_assert(i.op() == .call, "expected to be inlining call");
     inlfn := or inlfind(f, i.arg&[0]) {
         f.leaf = false;
-        return(ptr_diff(b.ins.ptr, i))
+        return()
     };
     f.leaf = f.leaf && inlfn.leaf;
     
@@ -354,16 +352,17 @@ fn inlcall(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) i64 = {
     c: InlineCtx = (
         remapped_consts = temp().alloc_zeroed(Qbe.Ref, inlfn.ncon.zext()),
         remapped_tmp = temp().alloc_zeroed(Qbe.Ref, inlfn.ntmp.zext()),
-        vins  = init(temp(), b.ins.len + inlfn.start()[].ins.len),
+        vins = vins,
     );
+    vins.reserve(inlfn.start()[].ins.len, temp());
     
+    vins.len -= 1;  // remove call instruction
     /* go back to start of args */
     i1 := i;
     while => ptr_diff(b.ins.ptr, i1) > 0 && is_arg(i1.offset(-1).op()) {
         i1 = i1.offset(-1);
+        vins.len -= 1;
     };
-    
-    append(c.vins&, b.ins.ptr, i1);
     
     /* replace arg ins with copy to inline fn par tmps */
     inlargs(inlfn, f, b, i1, c&);
@@ -401,15 +400,8 @@ fn inlcall(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) i64 = {
             };
         };
         ins := make_ins(.copy, i.cls(), i.to, new_ref, QbeNull);
-        addins(c.vins&, ins&);
+        addins(c.vins, ins&);
     };
-    nret := c.vins.len - 1;
-    
-    // TODO: copy chunks as we go so you don't recopy the end of the block for every inlined call :SLOW
-    append(c.vins&, i.offset(1), b.ins.index_unchecked(b.ins.len));
-    idup(b, c.vins.items());
-    
-    nret
 }
 
 fn inlcalls(f: *Qbe.Fn) void = {
@@ -420,16 +412,16 @@ fn inlcalls(f: *Qbe.Fn) void = {
     f.reset_scratch();
     
     f.leaf = true;  // updated in inlcall()
+    vins: RawList(Qbe.Ins) = empty();
     for_blocks f { b | 
-        n := 0;
-        while => n < b.ins.len {
-            i := b.ins.index(n);
+        vins&.reserve(b.ins.len, temp());
+        for_insts_forward b { i |
+            vins&.push(i[], temp());
             if i.op() == .call {
-                /* careful, this rewrites b.ins */
-                n = inlcall(f, b, i); 
+                inlcall(f, b, i, vins&); 
             };
-            n += 1;
         };
+        idup(b, vins&);
     };
     
     /* some new allocs in fn->start for retc, parc etc. */

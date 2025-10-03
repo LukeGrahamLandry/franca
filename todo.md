@@ -192,6 +192,7 @@ as different types even when they're the same size.
   to put some code on either side to translate that to the normal abi. 
   probably have to deal with more types of relocations. 
   are you allowed to jmp between asm blocks? 
+- musl uses `__visibility__("hidden")` and `__weak__, __alias__("foo")`
 
 ### !! BROKEN !!
 

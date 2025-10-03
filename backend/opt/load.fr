@@ -53,12 +53,34 @@ LoadCtx :: @struct(
 loadopt :: fn(f: *Qbe.Fn) void = {
     c: LoadCtx = (f = f, ilog = new(0), nlog = 0, inum = 0); c := c&;
     for_blocks f { b |
+        b.visit = 0;
         for_insts_forward b { i |
+            continue :: local_return;
             if maybe_load(i) { size |
                 sl: MSlice = (ref = i.arg&[0], off = 0, size = size, cls = i.cls());
                 l: Loc = (type = .LRoot, index_in_block = ptr_diff(b.ins.ptr, i).trunc(), blk = b);
                 @debug_assert(i.arg&[1] == QbeNull, "load pass runs after isel so my arm thingy wont mess with it");
+                nlog := c.nlog;
                 i.arg&[1] = c.def(sl, ones_mask_of_size(size), b, (Some = i), l&);
+                // note: leave it as a load so future loads can deduplicate to this one.
+                //       its converted to a copy at the end in emit_insertions.  
+                
+                if i.arg&[1] != Qbe.Null {
+                    b.visit = 1;  // mark it as needing convert_load_to_move's
+                    
+                    when_debug(f, .Memory) { o |
+                        @fmt(o, "\n# ");
+                        printins(f, i, o);
+                        each c.ilog.slice(nlog, c.nlog) { i |
+                            @fmt(o, "\n# |> @%: ", f.rpo[i.bid].name());
+                            if i.is_phi {
+                                printphi(f, i.new.phi.p, o);
+                            } else {
+                                printins(f, i.new.ins&, o);
+                            }
+                        };
+                    };
+                };
             }
         }
     };
@@ -85,20 +107,34 @@ emit_insertions :: fn(f: *Qbe.Fn, ilog: QList(Insert), nlog: i64) void = {
     ilog&.grow(nlog + 1);
     ilog[nlog].bid = f.nblk.bitcast(); /* add a sentinel */
     
-    // TODO: explain more
-    ib: RawList(Qbe.Ins) = init(temp(), 0);
+    new: RawList(Qbe.Ins) = init(temp(), 0);
     next_insertion := ilog.first;
     range(0, f.nblk.zext()) { current_bid |
         move_to_next_block :: local_return; 
         b := f.rpo[current_bid];
-        changed := next_insertion.bid == current_bid.trunc();
         while => next_insertion.bid == current_bid.trunc() && next_insertion.is_phi {
             next_insertion.new.phi.p.link = b.phi;
             b.phi = next_insertion.new.phi.p;
             next_insertion = next_insertion.offset(1);
         };
+        
+        if next_insertion.bid != current_bid.trunc() {
+            // fast path, avoid copying the block if there are no insertions. 
+            if b.visit == 1 {
+                for_insts_forward b { i |
+                    if is_load(i.op()) && i.arg&[1] != QbeNull {
+                        convert_load_to_move(i);
+                    };
+                };
+            };
+            b.visit = 0;
+            move_to_next_block();
+        };
+        b.visit = 0;
+        
+        // re-emit the block, splicing in the new instructions. 
         index_in_old_block := 0;
-        ib.len = 0;
+        new&.reserve(b.ins.len, temp());
         loop {
             ::if(*Qbe.Ins);
             next_goes_here := next_insertion.bid == current_bid.trunc() && next_insertion.index_in_block == index_in_old_block.trunc();
@@ -108,22 +144,17 @@ emit_insertions :: fn(f: *Qbe.Fn, ilog: QList(Insert), nlog: i64) void = {
                 i
             } else {
                 if b.ins.len == index_in_old_block {
-                    if changed {
-                        idup(b, ib.items());
-                    } else {
-                        @debug_assert_eq(b.ins.len, ib.len, "load ins count");
-                    };
+                    idup(b, new&);
                     move_to_next_block();
                 };
                 i := b.ins.index(index_in_old_block);
                 index_in_old_block += 1;
                 if is_load(i.op()) && i.arg&[1] != QbeNull {
                     convert_load_to_move(i);
-                    changed = true;
                 };
                 i
             };
-            push(ib&, i[], temp());
+            push(new&, i[], temp());
         };
     };
     free(ilog);

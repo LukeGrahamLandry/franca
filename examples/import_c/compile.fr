@@ -1033,6 +1033,18 @@ fn declaration(c: *Ctx, tok: *Token, basety: *CType, attr: ?*VarAttr, first_decl
                 var.align = attr.align;
             };
         };
+        
+        if consume(tok&, tok, "asm") {
+            // :AsmNotYetImplemented
+            // musl does like `register long x8 __asm__("x8") = n;` and passes that to inline asm block. 
+            // for now just skip it.
+            tok = c.skip(tok, "(");
+            if tok.kind != .TK_STR || tok.ty.base.kind != .TY_CHAR {
+                @error_tok(c, tok, "expected string literal for asm template");
+            };
+            _constraint := tok.string_value();
+            tok = c.skip(tok.next, ")");
+        };
 
         if equal(tok, "=") {
             c.lvar_initializer(tok&, tok.next, var);
@@ -1795,7 +1807,6 @@ fn struct_members(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) void = {
     ty.members = head.next;
 }
 
-// attribute = ("__attribute__" "(" "(" "packed" ")" ")")*
 fn attribute_list(c: *Ctx, tok: *Token, ty: *CType) *Token = {
     while => consume(tok&, tok, "__attribute__") {
         tok = c.skip(tok, "(");
@@ -1815,8 +1826,18 @@ fn attribute_list(c: *Ctx, tok: *Token, ty: *CType) *Token = {
                 continue();
             };
             
-            // TODO: some of these matter: __constructor__, __aligned__
-            skips :: @const_slice("__format__", "__const__", "format", "noreturn", "__noreturn__", "__deprecated__"); // , "__constructor__", "__aligned__");
+            // TODO: some of these matter
+            skips :: @const_slice(
+                "__format__", "format", 
+                "__const__", 
+                "noreturn", "__noreturn__", 
+                "__deprecated__",
+                "__visibility__",
+                "__weak__",
+                "__alias__",
+                // "__constructor__", 
+                // "__aligned__",
+            ); 
             if skips.contains(tok.str()) {
                 tok = c.skip_attribute(tok);
                 continue();
@@ -1834,6 +1855,7 @@ fn attribute_list(c: *Ctx, tok: *Token, ty: *CType) *Token = {
 fn skip_attribute(c: *Ctx, tok: *Token) *Token = {
     tok = tok.next;
     if(equal(tok, ")"), => return(tok));
+    if(equal(tok, ","), => return(tok));
     n := 0;
     dowhile {
         n -= int equal(tok, ")");
@@ -2004,16 +2026,20 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *T
     };
     
     if equal(tok, "__attribute__") {
+        // TODO: attribute_list should give you back a struct instead of poking it into a CType
+        // - __visibility__("hidden")
+        // - __weak__, __alias__("foo")
+        // - __constructor__         needs backend support to put them in the magic elf section
+        // and it means the same if its before the function name instead of after. 
         ignore := zeroed CType;
         tok = c.attribute_list(tok, ignore&);
     };
     
     if consume(tok&, tok, "asm") {
-        // apple's libc headers use `__asm("foo")` after a forward declaration to mean `#[link_name = "foo"]`. 
-        // so this makes that work if you `-D__asm=asm`
+        // `asm("foo")` after a forward declaration means `#[link_name = "foo"]`. 
         tok = c.skip(tok, "(");
         @if(tok.kind != .TK_STR) @error_tok(c, tok, "expected a string (treating asm keyword after function as symbol alias)");
-        alias: []u8 = (ptr = tok.val.str_buf, len = tok.ty.size.intcast());
+        alias: []u8 = (ptr = tok.val.str_buf, len = tok.ty.size.intcast() - tok.ty.base.size.intcast());
         tok = c.skip(tok.next, ")");
         f.global_symbol = (Some = c.m.intern(alias));
     };
@@ -2462,13 +2488,26 @@ fn parse_binary_inner(c: *Ctx, rest: **Token, tok: *Token, lhs: *Node) *Node = {
 
 ::if(*Node);
 
+// if immediately jumping on a value that's already <= 32 bits, don't insert an extra comparison. 
+fn cast_cond(c: *Ctx, cond: *Node) *Node = {
+    small := @is(cond.ty.kind, .TY_BOOL, .TY_CHAR, .TY_SHORT, .TY_INT, .TY_ENUM);
+    if !small {
+        // jnz only looks at low 32 bits but we might be jumping on a long 
+        // (or a float)
+        cond = c.new_cast(cond, c.ty_bool);
+    } else {
+        @debug_assert_le(cond.ty.size, 4);
+    }
+    cond
+}
+
 parsers :: @struct {
 // TODO: less dumb ir for if conditions
 // short-circuiting, output is always 0 or 1
 #infix(.@"||", .LogOr, .ND_BITOR) #infix(.@"&&", .LogAnd, .ND_BITAND) 
 parse_logical :: fn(c, rest, tok, cond) = {
     fold_op := rules.index(tok.kind)[].op;
-    cond := c.new_cast(cond, c.ty_bool);  // jnz only looks at low 32 bits but we might be jumping on a long
+    cond := c.cast_cond(cond);
     
     else_block := c.new_block();
     join_block := c.new_block();
@@ -2484,7 +2523,7 @@ parse_logical :: fn(c, rest, tok, cond) = {
     c.b = else_block; 
     rule := rules.index(tok.kind);
     rhs  := parse_expr(c, rest, tok.next, @as(Prec) @as(i32) rule.prec.raw() + 1);
-    rhs  := c.new_cast(rhs, c.ty_bool);
+    rhs  := c.new_cast(rhs, c.ty_bool);  // not cast_cond
     else_block_end := c.b;
     then, else, s1, s2, phi1, phi2 := @match(tok.kind) {
         fn @"&&"() => (rhs, c.new_num(0, tok), else_block, join_block, else_block_end, prev_block);
@@ -2502,6 +2541,7 @@ parse_logical :: fn(c, rest, tok, cond) = {
     ty := c.add_type(.ND_COND, then&, else&);
 
     r := if rtype(cond.r) == .RCon && rtype(rhs.r) == .RCon {
+        cond := c.new_cast(cond, c.ty_bool);  // not cast_cond
         // :FrontendConstantFolding 
         c.gen_binary(fold_op, cond.r, rhs.r, c.ty_bool, c.ty_bool, tok)
     } else {
@@ -2524,7 +2564,7 @@ parse_logical :: fn(c, rest, tok, cond) = {
 conditional :: fn(c, rest, tok, cond) #infix(.@"?", .Conditional) = {
     // note: the [GNU] case below still uses the old `cond` node without this cast. 
     original_cond := c.gen_expr(cond);
-    cond_r := c.gen_expr(c.new_cast(cond, c.ty_bool));
+    cond_r := c.gen_expr(c.cast_cond(cond));
     if(!c.speculate && cond_r == QbeNull, => @error_tok(c, cond.tok, "ICE: failed to compile condition"));
     
     cond_block := c.b;
@@ -2560,7 +2600,6 @@ conditional :: fn(c, rest, tok, cond) #infix(.@"?", .Conditional) = {
     
     r := if rtype(cond_r) == .RCon {  
         // :FrontendConstantFolding (only matters if the values are RCon too)
-        // TODO: need to use Ref instead of creating a new var for [GNU] :?
         is_false := iscon(c.f.get_constant(cond_r), false, 0);
         if cond_block.jmp.type == .jnz {
             cond_block.jmp = (type = .jmp, arg = Qbe.Null);
@@ -2676,7 +2715,7 @@ parse_ident :: fn(c, rest, tok) #prefix(.TK_IDENT) = {
 };
 
 parse_string :: fn(c, rest, tok) #prefix(.TK_STR) = {
-    s: []u8 = (ptr = tok.val.str_buf, len = tok.ty.size.intcast());
+    s := tok.string_value().unwrap();
     var := c.new_string_literal(s, tok.ty, tok);
     rest[] = tok.next;
     node := c.new_var_node(var, tok);
@@ -2937,6 +2976,10 @@ va_start :: fn(c, rest, tok) #prefix(.__builtin_va_start) = {
     start := tok;
     tok = c.skip(tok.next, "(");
     ap := c.parse_expr(tok&, tok, .Assign);
+    if consume(tok&, tok, ",") {
+        // for compatibility, allow a second argument (last named parameter)
+        rest[] = c.skip(tok, "TK_IDENT");
+    }
     rest[] = c.skip(tok, ")");
     r := c.gen_expr(ap);
     c.emit(.vastart, .Kw, QbeNull, r, QbeNull);
@@ -2996,8 +3039,8 @@ return :: fn(c, rest, tok) #prefix(.return, .ND_STMT) = {
 if_ :: fn(c, rest, tok) #prefix(.if, .ND_STMT) = {
     tok = c.skip(tok.next, "(");
     cond := c.parse_expr(tok&, tok, .None);
+    cond := c.assert_gen_expr(c.cast_cond(cond));
     tok = c.skip(tok, ")");
-    cond := c.gen_expr(cond);
     
     //
     // TODO: 
@@ -3165,7 +3208,7 @@ for_ :: fn(c, rest, tok) #prefix(.for, .ND_STMT) = {
 
         c.b = cond_block;
         cond := if !equal(tok, ";") {
-            c.new_cast(c.parse_expr(tok&, tok, .None), c.ty_bool)
+            c.cast_cond(c.parse_expr(tok&, tok, .None))
         } else {
             c.new_num(1, tok)  // wasteful to rely on folding for this 
         };
@@ -3197,7 +3240,7 @@ while_ :: fn(c, rest, tok) #prefix(.while, .ND_STMT) = {
         c.jmp_if_unterminated(cont_label);
         c.b = cont_label;
         tok = c.skip(tok.next, "(");
-        cond := c.new_cast(c.parse_expr(tok&, tok, .None), c.ty_bool);
+        cond := c.cast_cond(c.parse_expr(tok&, tok, .None));
         cond := c.assert_gen_expr(cond);
         tok = c.skip(tok, ")");
         body_block := c.new_block();
@@ -3233,16 +3276,42 @@ do :: fn(c, rest, tok) #prefix(.do, .ND_STMT) = {
     c.new_node(.ND_STMT, tok)
 };
 asm :: fn(c, rest, tok) #prefix(.asm, .ND_STMT) = {
+    // :AsmNotYetImplemented
+    // for now just parse it and hope the function isn't actually called. 
     tok = tok.next;
     dowhile {
         ignore(tok&, tok, @const_slice("volatile", "inline"))
     };
     tok = c.skip(tok, "(");
     if tok.kind != .TK_STR || tok.ty.base.kind != .TY_CHAR {
-        @error_tok(c, tok, "expected string literal");
+        @error_tok(c, tok, "expected string literal for asm template");
     };
-    rest[] = c.skip(tok.next, ")");
-    @error_tok(c, tok, "asm stmt is not supported");
+    _template := tok.string_value();
+    tok = tok.next;
+    
+    // eat gnu extended assembly 
+    while => consume(tok&, tok, ":") {
+        dowhile {
+            if tok.kind == .TK_STR && tok.ty.base.kind == .TY_CHAR {
+                _constraint := tok.string_value();
+                tok = tok.next;
+                if consume(tok&, tok, "(") {
+                    c.speculate(tok&, tok, .None, false);
+                    tok = c.skip(tok, ")");
+                }
+            };
+            consume(tok&, tok, ",")
+        }
+    };
+    
+    rest[] = c.skip(tok, ")");
+    @warn_tok(c, tok, "asm stmt is not supported");
+    if !c.f.is_null() {
+        c.b.jmp.type = .hlt;
+        c.b = c.new_block();
+    };
+    c.new_node(.ND_STMT, tok)
+    
 };
 goto :: fn(c, rest, tok) #prefix(.goto, .ND_STMT) = {
     if equal(tok.next, "*") {
@@ -3752,8 +3821,13 @@ fn gen_zero_var(c: *Ctx, var: *Obj, tok: *Token) void = {
     off := 0;
     each Qbe.Simplify.blit_op_table { o |
         while => size >= o.size {
-            d := c.f.newtmp("c", .Kl);
-            c.emit(.add, .Kl, d, dest, c.f.getcon(off));
+            d := if off == 0 {
+                dest 
+            } else {
+                d := c.f.newtmp("c", .Kl);
+                c.emit(.add, .Kl, d, dest, c.f.getcon(off));
+                d
+            };
             c.emit(o.store, .Kw, QbeNull, QbeConZero, d);
             size -= o.size;
             off  += o.size;
@@ -3866,7 +3940,6 @@ fn gen_cast(c: *Ctx, src: Qbe.Ref, from: *CType, to: *CType, tok: *Token) Qbe.Re
     };
     if(p_from == p_to, => return(src));
     if p_to == .B {  
-        // TODO: do i need to zero extend byte/short? 
         return(c.emit(Simplify'cmp_ne(k_from), k_to, src, QbeConZero))
     };
     ::if(Qbe.O);
@@ -3880,8 +3953,8 @@ fn gen_cast(c: *Ctx, src: Qbe.Ref, from: *CType, to: *CType, tok: *Token) Qbe.Re
             fn F64() => .truncd;
             @default => {
                 //  bool/byte/short to float/double cast
-                src = c.gen_cast(src, from, c.ty_long, tok);
-                .sltof
+                src = c.gen_cast(src, from, c.ty_int, tok);
+                .swtof
             };
         }
     } else {  // k_to is integer
@@ -3893,7 +3966,10 @@ fn gen_cast(c: *Ctx, src: Qbe.Ref, from: *CType, to: *CType, tok: *Token) Qbe.Re
         };
         ::enum(Qbe.Cls);
         @match(p_from) {
-            fn B()   => .extub;
+            fn B()   => {
+                @if(k_to == .Kw) return(src);
+                .extub
+            }
             fn U8()  => .extub;
             fn I8()  => .extsb;
             fn U16() => .extuh;
