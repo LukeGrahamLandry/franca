@@ -13,8 +13,15 @@
   that matches what apple clang does. 1118.
 - parse (and ignore for now) global asm statement.
 - now i get through all the .c files
-
-TODO: locale/iconv.c takes a very long time to compile
+- make running on all of musl less slow. 
+  - 1378 samples in tokenize_file, 325 are update_kind for keywords. 
+    replace that with generated switch tree like read_punct. now 1064 samples tokenize_file. 
+  - locale/iconv.c is slow. newcon is O(n^2). its 35% of the whole musl time. 
+    - putting back CONMAP in getcon makes the franca compiler take 20 samples there instead of 12,
+      plus i'd have to do something in mark_seen to take out symbols in case isel recreated a symbol+offset that it thought was unused which is a pain. 
+    - sticking a hashmap on the c compiler makes global_variable samples go 1781 -> 119. 
+  - don't box_zeroed in new_token: 190 -> 105
+  - quadratic resizing of Initializer.children for array literal without specified length. global_variable 124 -> 28.
 
 ## (Oct 3) import_c/musl
 

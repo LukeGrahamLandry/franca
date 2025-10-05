@@ -159,20 +159,27 @@ fn fmt_error_prefix(tok: *Token, msg: *List(u8)) void = {
 }
 
 // Create a new token.
-fn new_token(c: *Ctx, kind: TokenKind, start: *u8, end: *u8) *Token = {
-    tok := c.arena.box_zeroed(Token);
+fn new_token(c: *Ctx, kind: TokenKind, start: *u8, end: *u8) *Token #inline = {
+    tok := c.arena.box_uninit(Token);
     tok.kind = kind;
     off := ptr_diff(c.current_file.contents.ptr, start);
     @debug_assert_ult(off, 1.shift_left(31));
     tok.off = off.trunc();
     tok.len = ptr_diff(start, end).intcast();
     tok.file = c.current_file;
-    //tok.filename = c.current_file.display_name;
     tok.at_bol = c.at_bol;
     tok.has_space = c.has_space;
-    update_kind(tok);
     c.at_bol = false;
     c.has_space = false;
+    
+    // i allocate so many of these that box_zeroed is slow. 
+    tok.next = zeroed(@type tok.next);
+    tok.val = zeroed(@type tok.val);
+    tok.ty = zeroed(@type tok.ty);
+    tok.no_macro = zeroed(@type tok.no_macro);
+    tok.line_no = zeroed(@type tok.line_no);
+    tok.origin = zeroed(@type tok.origin);
+    
     tok
 }
 
@@ -196,6 +203,16 @@ fn read_ident(start: *u8) i64 #inline = {
         p = q;
     }
 }
+
+keyword_tokens :: {
+    a := Str.list(ast_alloc());
+    for_enum TokenKind { it |
+        if it.valid_macro_name() {
+            a&.push(it.name_str());
+        }
+    };
+    a.items()
+};
 
 punctuation_tokens :: @const_slice(
     "<<=", ">>=", "...", "==", "!=", "<=", ">=", "->", "+=", "-=", "*=", "/=",
@@ -594,25 +611,8 @@ fn convert_pp_tokens(c: *Ctx, tok: *Token) void = {
         if tok.kind == .TK_PP_NUM {
             c.convert_pp_number(tok);
         };
-        //update_kind(tok);  // done in new_token now
         tok = tok.next;
     };
-}
-
-fn update_kind(tok: *Token) void = {
-    max :: max_enum_name_len(TokenKind);
-    if(tok.len > max || !@is(tok.kind, .TK_IDENT, .TK_KEYWORD), => return());
-    kw := TokenKind.from_name(tok.str()) || return();
-    if(kw.raw() <= TokenKind.TK_ERROR.raw(), => return());
-    tok.kind = kw;  // TODO: filter for the ones that aren't literal. ie. what if someone has a variable called `TK_EOF`
-}
-
-fn max_enum_name_len(E: Type) i64 #fold = {
-    hi := 0;
-    for get_enum_names(E) { n |
-        hi = max(hi, n.len);
-    };
-    hi
 }
 
 // Tokenize a given string and returns new tokens.
@@ -785,8 +785,6 @@ fn tokenize(c: *Ctx, file: *File) *Token = {
             };
         };
        
-        // TODO: do update_kind here instead of always having to check the kind
-        
         // Identifier or keyword
         len := read_ident(p);
         if p.offset(len)[] == "\\".ascii() && p.offset(len + 1)[] == "\n".ascii() {
@@ -799,7 +797,12 @@ fn tokenize(c: *Ctx, file: *File) *Token = {
             continue();
         };
         if len != 0 {
-            continue_tok(c.new_token(.TK_IDENT, p, p.offset(len)))
+            kw_len, kind := read_punct(p, keyword_tokens, TokenKind, TokenKind.TK_IDENT);
+            if kw_len != len {
+                // prefix of the identifier is a valid keyword. 
+                kind = .TK_IDENT;
+            };
+            continue_tok(c.new_token(kind, p, p.offset(len)))
         };
         
         // Punctuators
@@ -894,9 +897,6 @@ TokenKind :: @enum(u8) (
     TK_discard_static_scope,
     TK_FRC,
     TK_ERROR,   // Only used for calling @error_tok
-    // start update_kind
-    
-    // TK_KEYWORD and TK_PUNCT get converted to one of these:
     
     // start valid_macro_name 
     return,    if,         else,

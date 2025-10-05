@@ -127,7 +127,7 @@ Initializer :: @rec @struct {
 
     // If it's an initializer for an aggregate type (e.g. array or struct),
     // `children` has initializers for its children.
-    children: []*Initializer;
+    children: RawList(*Initializer);
 
     // Only one member can be initialized for a union.
     // `mem` is used to clarify which member is initialized.
@@ -183,6 +183,8 @@ Ctx :: @rec @struct {
     
     tentative: HashMap(Str, *Obj);
     prims: Primitives #use;
+    
+    consts: *HashMap(Qbe.Con, Qbe.Ref);
     
     // I'm probably going to regret this. 
     error_buf: List(u8);
@@ -308,7 +310,7 @@ fn new_addr(c: *Ctx, expr: *Node, tok: *Token) *Node #once = {
 
 fn new_num(c: *Ctx, val: i64, tok: *Token, ty: *CType) *Node = {
     @debug_assert(!c.f.is_null(), "no fun");
-    c.ir_node(ty, c.f.getcon(val), QbeNull, tok)
+    c.ir_node(ty, c.getcon(val), QbeNull, tok)
 }
 
 fn new_num(c: *Ctx, val: i64, tok: *Token) *Node = 
@@ -328,7 +330,7 @@ fn new_var_node(c: *Ctx, var: *Obj, tok: *Token) *Node = {
     node.lvalue = if node.var.is_local {
         node.var.stack_slot
     } else {
-        c.f.symcon(node.var.global_symbol.expect("mangle"))
+        c.getcon(node.var.global_symbol.expect("mangle"))
     };
     if node.var.is_function || var.ty.kind == .TY_ARRAY {
         // arrays decay to pointers: `array` === `&array` === `&array[0]`
@@ -395,7 +397,7 @@ fn new_initializer(ty: *CType, is_flexible: bool) *Initializer = {
         };
 
         init.children = temp().alloc_init(*Initializer, ty.array_len.intcast(), 
-            fn(_) => new_initializer(ty.base, false));
+            fn(_) => new_initializer(ty.base, false)).as_raw_list();
     };
 
     if ty.kind == .TY_STRUCT || ty.kind == .TY_UNION {
@@ -404,7 +406,7 @@ fn new_initializer(ty: *CType, is_flexible: bool) *Initializer = {
         for_linked ty.members { mem |
             len += 1;
         };
-        init.children = temp().alloc_uninit(*Initializer, len);
+        init.children = temp().alloc_uninit(*Initializer, len).as_raw_list();
 
         for_linked ty.members { mem |
             ::if(*Initializer);
@@ -460,7 +462,7 @@ fn create_stack_slot(c: *Ctx, var: *Obj) void = {
     if var.stack_slot == QbeNull {
         var.stack_slot = c.f.newtmp(var.name, .Kl);
     };
-    push(c.f.start, make_ins(.alloc8, .Kl, var.stack_slot, c.f.getcon(var.ty.size.intcast()), QbeNull));  // TODO: smaller align stack slots
+    push(c.f.start, make_ins(.alloc8, .Kl, var.stack_slot, c.getcon(var.ty.size.intcast()), QbeNull));  // TODO: smaller align stack slots
 }
 
 fn new_gvar(c: *Ctx, name: Str, ty: *CType, tok: *Token, is_static: bool) *Obj = {
@@ -962,7 +964,7 @@ fn compute_vla_size(c: *Ctx, ty: *CType) Qbe.Ref = {
     base_sz := if ty.base.kind == .TY_VLA {
        ty.base.vla_size
     } else {
-       c.f.getcon(ty.base.size.intcast())
+       c.getcon(ty.base.size.intcast())
     };
 
     @debug_assert_ne(ty.vla_len, QbeNull, "compute_vla_size with unknown length");
@@ -1265,16 +1267,12 @@ fn index(self: *Initializer, i: i64) **Initializer = {
         @debug_assert(i >= 0);
         return(self.children.index(i));
     };
-    
-    // TODO: use RawList :SLOW
     @debug_assert(self.ty.kind == .TY_ARRAY && self.is_flexible, "expected flex array");
-    new := temp().alloc_uninit(*Initializer, i + 1);
-    new.slice(0, self.children.len).copy_from(self.children);
-    each new.rest(self.children.len) { it |
-        it[] = new_initializer(self.ty.base, false);
+    self.children&.reserve(i - self.children.len + 1, temp());
+    range(self.children.len, i + 1) { _ |
+        self.children&.push_assume_capacity(new_initializer(self.ty.base, false));
     };
-    self.children = new;
-    new.index(i)
+    self.children.index(i)
 }
 
 // array-initializer2 = initializer ("," initializer)*
@@ -1500,7 +1498,7 @@ fn access_member(c: *Ctx, lhs: *Node, mem: *Member, tok: *Token) *Node = {
     node.lhs = lhs;
     node.member = mem;
     node.ty = node.member.ty;
-    node.lvalue = c.emit(.add, .Kl, node.lhs.lvalue, c.f.getcon(node.member.offset.intcast()));
+    node.lvalue = c.emit(.add, .Kl, node.lhs.lvalue, c.getcon(node.member.offset.intcast()));
     node
 }
 
@@ -2089,8 +2087,7 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *T
     f.is_definition = true;
     c.current_fn = (Some = f);
     
-    c.f = temp().box_uninit(Qbe.Fn);
-    c.f.default_init(c.m);
+    c.init_function(temp());
     c.f.lnk.id = f.global_symbol.expect("mangle");
     c.f.lnk.export = !f.is_static;
     //c.speculate = false;
@@ -2153,6 +2150,18 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *T
 //};
     @debug_assert_eq(depth, c.scope_depth);
     tok
+}
+
+fn init_function(c: *Ctx, a: Alloc) void = {
+    c.f = a.box_uninit(Qbe.Fn);
+    c.f.default_init(c.m);
+    
+    c.consts = a.box_zeroed(@type c.consts[]);
+    c.consts[] = init(a);
+    for c.f.con.slice(0, c.f.ncon.zext()) { cc |
+        c.consts.insert(cc, c.f.newcon(cc&));
+    };
+    c.f.track_ir_names = c.m.debug != 0;
 }
 
 fn global_variable(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, first_declarator: *CType, expect_var: bool) *Token = {
@@ -2289,9 +2298,11 @@ fn parse(c: *Ctx, tok: *Token) *Obj = {
             ty := c.declarator(tok&, tok, basety);
             ::enum(@type ty.kind);
             if ty.kind == .TY_FUNC {
+                prev_c := c.consts;
                 prev := c.f;   // :TopLevelFunction
                 tok := c.function(tok, basety, attr&, ty);
                 c.f = prev;
+                c.consts = prev_c;
                 c.b = c.f.start; // HACK
                 tok
             } else {
@@ -2817,7 +2828,7 @@ parse_unary :: fn(c, rest, tok) = {
     arg := c.gen_expr(lhs);
     r := @match(rule.op) {
         fn ND_NEG()    => c.emit(.neg, ty.cls(), arg, QbeNull);
-        fn ND_BITNOT() => c.emit(.xor, ty.cls(), arg, c.f.getcon(-1));
+        fn ND_BITNOT() => c.emit(.xor, ty.cls(), arg, c.getcon(-1));
         fn ND_NOT()    => {  // TODO: do the trick with redirecting jump targets to emit better code when this is in an if condition. 
             // not just xor with 1 bit. it might not be a _Bool. 
             op_eq := cmp_base(lhs.ty.cls());
@@ -2921,7 +2932,7 @@ sizeof :: fn(c, rest, tok) #prefix(.sizeof) = {
         if(node.kind == .ND_MEMBER && node.member.is_bitfield, => @error_tok(c, tok, "sizeof(bitfield) is illegal"));
         node.ty
     };
-    r := if(ty.kind == .TY_VLA, => c.compute_vla_size(ty), => c.f.getcon(ty.size.intcast()));
+    r := if(ty.kind == .TY_VLA, => c.compute_vla_size(ty), => c.getcon(ty.size.intcast()));
     c.ir_node(c.ty_ulong, r, QbeNull, start)
 };
 
@@ -3842,7 +3853,7 @@ fn gen_zero_var(c: *Ctx, var: *Obj, tok: *Token) void = {
                 dest 
             } else {
                 d := c.f.newtmp("c", .Kl);
-                c.emit(.add, .Kl, d, dest, c.f.getcon(off));
+                c.emit(.add, .Kl, d, dest, c.getcon(off));
                 d
             };
             c.emit(o.store, .Kw, QbeNull, QbeConZero, d);
@@ -3863,10 +3874,10 @@ fn gen_store_bitfield(c: *Ctx, addr: Qbe.Ref, value: Qbe.Ref, mem: *Member) void
     
     prev := c.gen_load(addr, mem.ty);
     mask := 1.shift_left(mem.bit_width.intcast()) - 1;
-    c.emit(.and, k, r[0], value, c.f.getcon(mask));
-    c.emit(.shl, k, r[1], r[0], c.f.getcon(mem.bit_offset.intcast()));
+    c.emit(.and, k, r[0], value, c.getcon(mask));
+    c.emit(.shl, k, r[1], r[0], c.getcon(mem.bit_offset.intcast()));
     mask := mask.shift_left(mem.bit_offset.intcast()).bit_not();
-    c.emit(.and, k, r[2], prev, c.f.getcon(mask));
+    c.emit(.and, k, r[2], prev, c.getcon(mask));
     c.emit(.or, k, r[3], r[2], r[1]);
     
     c.gen_store(addr, r[3], mem.ty);
@@ -3878,9 +3889,9 @@ fn gen_load_bitfield(c: *Ctx, addr: Qbe.Ref, mem: *Member) Qbe.Ref = {
     r := c.gen_load(addr, mem.ty);
     k := mem.ty.cls();
     r1, r2 := (c.f.newtmp("c", k), c.f.newtmp("c", k));
-    c.emit(.shl, k, r1, r, c.f.getcon(64 - mem.bit_width.intcast() - mem.bit_offset.intcast()));
+    c.emit(.shl, k, r1, r, c.getcon(64 - mem.bit_width.intcast() - mem.bit_offset.intcast()));
     o: Qbe.O = @if(mem.ty.is_unsigned, .shr, .sar);
-    c.emit(o, k, r2, r1, c.f.getcon(64 - mem.bit_width.intcast()));
+    c.emit(o, k, r2, r1, c.getcon(64 - mem.bit_width.intcast()));
     r2
 }
 
@@ -3922,15 +3933,13 @@ fn emit(c: *Ctx, o: Qbe.O, k: Qbe.Cls, a0: Qbe.Ref, a1: Qbe.Ref) Qbe.Ref = {
     // The backend will do more aggressive constant folding later, 
     // but there are some language constructs that require 
     // known constants in the frontend (ie. array types). 
-    // TODO: this needs to work at top level as well
     if OpTab'get(o, .can_fold) && rtype(a0) == .RCon && (@is(rtype(a1), .RCon, .RNull)) {
         ::if(Qbe.Ref);
         a1 := if(a1 == QbeNull, => QbeConZero, => a1);
         lhs_c, rhs_c := (c.f.get_constant(a0), c.f.get_constant(a1));
         f :: Qbe.backend.try_fold_op;
-        //f :: try_fold;
         if f(o, k, lhs_c, rhs_c) { result |
-            return(c.f.newcon(result&));
+            return(c.getcon(result));
         };
     };
     
@@ -3979,7 +3988,7 @@ fn gen_cast(c: *Ctx, src: Qbe.Ref, from: *CType, to: *CType, tok: *Token) Qbe.Re
         if k_from.is_int() && to.size < from.size {
             // `(char) 256` needs to truncate
             mask := 1.shift_left(to.size.intcast() * 8) - 1;
-            return(c.emit(.and, k_to, src, c.f.getcon(mask)));
+            return(c.emit(.and, k_to, src, c.getcon(mask)));
         };
         ::enum(Qbe.Cls);
         @match(p_from) {
@@ -4123,6 +4132,25 @@ fn gen_addr(c: *Ctx, node: *Node) Qbe.Ref = {
         @error_tok(c, node.tok, "expected lvalue");
     };
     node.lvalue
+}
+
+fn getcon(c: *Ctx, s: Qbe.Sym) Qbe.Ref = 
+    c.getcon(con(s, 0));
+    
+fn getcon(c: *Ctx, i: i64) Qbe.Ref = 
+    c.getcon(con(Qbe.no_symbol_S, i));
+
+// the map makes it not suck for giant array literals
+fn getcon(c: *Ctx, c0: Qbe.Con) Qbe.Ref = {
+    ::AutoHash(Qbe.Con, TrivialHasher);
+    ::AutoHash(Qbe.Sym, TrivialHasher);
+    ::AutoHash(Ty(u32, u32), TrivialHasher);
+    ::AutoEq(Qbe.Con);
+    ::AutoEq(Qbe.Sym);
+    ::AutoEq(Ty(u32, u32));
+    c.consts.get_or_insert(c0, => {
+        c.f.newcon_unchecked(c0&)
+    })[]
 }
 
 #use("@/backend/opt/fold.fr");
