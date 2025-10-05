@@ -155,6 +155,7 @@
 - :ReWalkTokens
 - what is the deal with load_opt::def taking so long for import_c
 - implement _Atomic in import_c
+- :AttributesNotYetImplemented
 - import_c: `__constructor__, __aligned__`
 - import_c, get rid of :BoundsPadding
 - import_c: if you call something at both comptime and runtime it needs to redo the 
@@ -186,13 +187,13 @@ as different types even when they're the same size.
   - musl
   - git
   - linux kernel
+- :AsmNotYetImplemented
 - for inline assembly, i think it would be easier to give up on ExprLevelAsm
   and use someone else's assembler to compile the `asm` blocks into an elf file 
   and then just call them as functions. they give you clobber lists so you just have 
   to put some code on either side to translate that to the normal abi. 
   probably have to deal with more types of relocations. 
   are you allowed to jmp between asm blocks? 
-- musl uses `__visibility__("hidden")` and `__weak__, __alias__("foo")`
 
 ### !! BROKEN !!
 

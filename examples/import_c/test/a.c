@@ -48,6 +48,7 @@ int main() {
     }));
     ASSERT(2, foo() + bar(""));
     
+    // call twice to make sure it's not disabled
     syscall_cp(1, 2);
     syscall_cp(3, 4);
     
@@ -60,8 +61,34 @@ int main() {
         if (!x) return 3;
     }
     
+    ASSERT(7, ({
+        union val { int i; void *p; };
+        union val a = {7};
+        union val b = a;
+        struct val2 { union val d; int e; };
+        struct val2 c = {
+            .d = b,
+            .e = 123,
+        };
+        c.d.i;
+    }));
+
+    // still set .ty when speculate=true
+    if (sizeof(1.0 < 2.0) == sizeof(float));
+    
+    // don't let speculate() stomp live block's jmp. 
+    ASSERT(4, sizeof(({ return 1; 0; })));
+    // 0 ? ({ return 1; }) : 0;  // TODO: this crashes
+    
+    ASSERT(0, ({ long *a = (long[]){0}; *a; }));
+    
+    if (0) return 1;  // can't speculate() because:
+    
     printf("OK\n");
-    return 0;
+    
+    goto ok;
+    if (0) ok: return 0;
+    return 1;
 }
 
 int foo(void) { return 1; }

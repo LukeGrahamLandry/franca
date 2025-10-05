@@ -196,11 +196,6 @@ Ctx :: @rec @struct {
     function_entry: ?*CodegenEntry;
     enqueue_task: @FnPtr(*CodegenShared, *CodegenEntry) void;
     
-    // should `void f()` be treated the same as `void f(...)` instead of `void f(void)`
-    // c23 says no, before says yes. but mostly it doesn't matter because sane programs say the `...` anyway. 
-    // this matters for wasm because it checks signetures and va means append a pointer to the args. 
-    empty_prototype_means_variadic: bool;
-    
     /// Tokenize
     current_file: *File;
     at_bol: bool;  // True if the current position is at the beginning of a line
@@ -352,7 +347,7 @@ fn new_cast(c: *Ctx, expr: *Node, ty: *CType) *Node = {
 
 // TODO: get more serious about this. for now just catching some trivial mistakes. better than nothing. 
 fn check_types(c: *Ctx, tok: *Token, lhs: *CType, rhs: *CType) void = {
-    fail :: fn(cond) => @if(cond) @error_tok(c, tok, "incompatible");
+    fail :: fn(cond) => @if(cond) @error_tok(c, tok, "incompatible % %", lhs.kind, rhs.kind);
     allow :: fn(cond) => @if(cond) return();
 
     allow(lhs.identical(rhs));
@@ -569,7 +564,7 @@ fn declspec(c: *Ctx, rest: **Token, tok: *Token, attr: ?*VarAttr) *CType = {
             continue :: local_return;
             
             if equal(tok, "__attribute__") {
-                // TODO: some of these matter. __constructor__ marks a function that needs to be called before main(). 
+                // :AttributesNotYetImplemented
                 ignore := zeroed CType; 
                 tok = c.attribute_list(tok, ignore&);
             };
@@ -768,7 +763,8 @@ fn func_params(c: *Ctx, rest: **Token, tok: *Token, ret: *CType) *CType = {
     ty := c.func_type(ret);
     ty.params = params.items();
     ty.param_names = names.items();
-    ty.is_variadic = is_variadic || (params.len == 0 && c.empty_prototype_means_variadic);
+    ty.no_prototype = params.len == 0 && !is_variadic;
+    ty.is_variadic = is_variadic;
     rest[] = tok.next;
     ty
 }
@@ -1400,6 +1396,11 @@ fn initializer2(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) void = 
             if equal(tok.next.next, "}") && tok.next.kind == .TK_NUM && tok.next.val.i == 0 {
                 rest[] = tok.next.next.next;
                 init.all_zeros = true;
+                
+                if init.ty.kind == .TY_ARRAY && init.ty.array_len == -1 {
+                    // :StaticArrayOfUnknownLength 
+                    init.ty.array_len = 1;
+                }
             } else {
                 c.array_initializer1(rest, tok, init);  
             };
@@ -1418,10 +1419,28 @@ fn initializer2(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) void = 
         if expr.ty.kind == .TY_STRUCT {
             init.expr = expr;
         } else {
+            // :ReWalkTokens
             c.struct_initializer2(rest, tok, init, init.ty.members);
         };
     };
-    fn TY_UNION() => c.union_initializer(rest, tok, init);
+    fn TY_UNION() => if equal(tok, "{") {
+        c.union_initializer(rest, tok, init)
+    } else {
+        // a union initializer list with a single item initializes the first field,
+        // but the initializer for a union object with automatic storage duration
+        // may be a single expression that has compatible type instead of an initializer list. 
+        // and that applies to nested designatied initionaizers like a struct field that's a union. 
+        // TODO: only allow if coming from lvar_initializer
+        expr := c.parse_expr(rest, tok, .Assign);
+        c.add_type(expr);
+        
+        if expr.ty.kind == .TY_UNION {
+            init.expr = expr;
+        } else {
+            // :ReWalkTokens
+            c.union_initializer(rest, tok, init)
+        };
+    };
     @default => (if equal(tok, "{") {
         // An initializer for a scalar variable can be surrounded by
         // braces. E.g. `int x = {3};`. Handle that case.
@@ -1509,7 +1528,7 @@ fn create_lvar_init(c: *Ctx, init: *Initializer, ty: *CType, desg: *InitDesg, to
         return(node);
     };
 
-    if ty.kind == .TY_UNION {
+    if ty.kind == .TY_UNION && init.expr.is_null() {
         ::if(@type init.mem);
         mem := if(!init.mem.is_null(), => init.mem, => ty.members);
         desg2: InitDesg = (next = desg, idx = 0, member = mem, var = Obj.ptr_from_int(0));
@@ -1542,9 +1561,11 @@ fn lvar_initializer(c: *Ctx, rest: **Token, tok: *Token, var: *Obj) *Node = {
     static_array_of_unknown_length := var.stack_slot == QbeNull;  // :StaticArrayOfUnknownLength
     if static_array_of_unknown_length {
         // This ref needs to exist because create_lvar_init will generate offsets from it to store the elements. 
-        var.stack_slot = c.f.newtmp(var.name, .Kl);
+        // (and can't be made in new_lvar like usual because size is unknown until parsing the initializer)
+        c.create_stack_slot(var);
     };
     
+    // TODO: wasteful in the common case! :SLOW giving the backend a bunch of extra dead stores to remove
     // If a partial initializer list is given, the standard requires
     // that unspecified elements are set to 0. Here, we simply
     // zero-initialize the entire memory region of a variable before
@@ -1554,9 +1575,6 @@ fn lvar_initializer(c: *Ctx, rest: **Token, tok: *Token, var: *Obj) *Node = {
     
     if !init.all_zeros {
         rhs := c.create_lvar_init(init, var.ty, desg&, tok);
-        if static_array_of_unknown_length {  
-            c.create_stack_slot(var);
-        };
         c.gen_expr(node);
         node = rhs;
     };
@@ -1993,6 +2011,16 @@ fn parse_typedef(c: *Ctx, tok: *Token, basety: *CType) *Token = {
     tok
 }
 
+fn asm_alias(c: *Ctx, tok: *Token, obj: *Obj) *Token = {
+    // `asm("foo")` after a forward declaration means `#[link_name = "foo"]`. 
+    tok = c.skip(tok, "(");
+    @if(tok.kind != .TK_STR) @error_tok(c, tok, "expected a string (treating asm keyword after function as symbol alias)");
+    alias: []u8 = (ptr = tok.val.str_buf, len = tok.ty.size.intcast() - tok.ty.base.size.intcast());
+    tok = c.skip(tok.next, ")");
+    obj.global_symbol = (Some = c.m.intern(alias));
+    tok
+}
+
 fn find_func(c: *Ctx, name: Str) ?*Obj = {
     ::ptr_utils(Scope);
     hack := c.scope;
@@ -2026,6 +2054,7 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *T
     };
     
     if equal(tok, "__attribute__") {
+        // :AttributesNotYetImplemented
         // TODO: attribute_list should give you back a struct instead of poking it into a CType
         // - __visibility__("hidden")
         // - __weak__, __alias__("foo")
@@ -2036,12 +2065,7 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *T
     };
     
     if consume(tok&, tok, "asm") {
-        // `asm("foo")` after a forward declaration means `#[link_name = "foo"]`. 
-        tok = c.skip(tok, "(");
-        @if(tok.kind != .TK_STR) @error_tok(c, tok, "expected a string (treating asm keyword after function as symbol alias)");
-        alias: []u8 = (ptr = tok.val.str_buf, len = tok.ty.size.intcast() - tok.ty.base.size.intcast());
-        tok = c.skip(tok.next, ")");
-        f.global_symbol = (Some = c.m.intern(alias));
+        tok = c.asm_alias(tok, f);
     };
     
     if consume(tok&, tok, ";") {
@@ -2166,6 +2190,17 @@ fn global_variable(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, first_d
         if attr.align > 0 {
             var.align = attr.align;
         };
+
+        if equal(tok, "__attribute__") {
+            // :AttributesNotYetImplemented
+            ignore := zeroed CType;
+            tok = c.attribute_list(tok, ignore&);
+        };
+        
+        if consume(tok&, tok, "asm") {
+            tok = c.asm_alias(tok, var);
+            // TODO: should this change is_tentative?
+        }
         
         if equal(tok, "=") {
             if(attr.is_extern, => @error_tok(c, tok, "extern symbol with a value doesn't make any sense?"));
@@ -2233,6 +2268,13 @@ fn parse(c: *Ctx, tok: *Token) *Obj = {
         };
         fn _Static_assert() => {
             tok = c.static_assert(tok);
+            continue();
+        }
+        fn asm() => {
+            // :AsmNotYetImplemented
+            tok = c.skip(tok.next, "(");
+            tok = c.skip(tok, "TK_STR");
+            tok = c.skip(tok, ")");
             continue();
         }
         @default => ();
@@ -2924,7 +2966,15 @@ funcall :: fn(c, rest, tok, f) #infix(.@"(", .PostFix) = {
                 arg = c.new_cast(arg, param_ty);
             };
         } else {
-            if(!ty.is_variadic, => @error_tok(c, tok, "too many arguments"));
+            if !ty.is_variadic {
+                if ty.no_prototype {
+                    // not an error because musl's __syscall_cp_c does this. -- Oct 5
+                    // not the same as variadic! ub if callee is actually variadic. 
+                    @warn_tok(c, tok, "too many arguments (callee does not have a prototype)");
+                } else {
+                    @error_tok(c, tok, "too many arguments");
+                }
+            };
             // "default argument promotions" when parameter type is omitted (e.g. in "..."). 
             // These are defined by the C spec, not the individual abis. 
             if arg.ty.kind == .TY_FLOAT {
@@ -2976,9 +3026,10 @@ va_start :: fn(c, rest, tok) #prefix(.__builtin_va_start) = {
     start := tok;
     tok = c.skip(tok.next, "(");
     ap := c.parse_expr(tok&, tok, .Assign);
+    ap := c.new_addr(ap, tok);
     if consume(tok&, tok, ",") {
         // for compatibility, allow a second argument (last named parameter)
-        rest[] = c.skip(tok, "TK_IDENT");
+        tok = c.skip(tok, "TK_IDENT");
     }
     rest[] = c.skip(tok, ")");
     r := c.gen_expr(ap);
@@ -2989,6 +3040,7 @@ va_arg :: fn(c, rest, tok) #prefix(.__builtin_va_arg) = {
     start := tok;
     tok = c.skip(tok.next, "(");
     ap := c.parse_expr(tok&, tok, .Assign);
+    ap := c.new_addr(ap, tok);
     tok = c.skip(tok, ",");
     type := c.typename(tok&, tok);
     rest[] = c.skip(tok, ")");
@@ -3031,7 +3083,7 @@ return :: fn(c, rest, tok) #prefix(.return, .ND_STMT) = {
     } else {
         (QbeNull, Qbe.J.ret0)
     };
-    if c.b.jmp.type == .Jxxx {
+    if c.b.jmp.type == .Jxxx && !c.speculate {
         c.b.jmp = (type = j, arg = r);
     };
     c.new_node(.ND_STMT, tok)
@@ -3042,27 +3094,6 @@ if_ :: fn(c, rest, tok) #prefix(.if, .ND_STMT) = {
     cond := c.assert_gen_expr(c.cast_cond(cond));
     tok = c.skip(tok, ")");
     
-    //
-    // TODO: 
-    // -- 
-    //       my idea was we could save some work by doing this earlier than the backend's 
-    //       constant propagation, by doing it with speculate now (save generating code that 
-    //       we know won't be used) but that doesn't work.  
-    // -- 
-    //       since cosmo uses this so heavily, and i want to be able to 
-    //       compile stuff that references the windows stuff before i can 
-    //       compile the windows stuff by just setting !SupportsWindows()
-    // -- 
-    // test/c/std/json.c:2740:58: 
-    //  if (102 <= WUFFS_JSON__DECODER_NUMBER_LENGTH_MAX_INCL) {
-    //                                                         ^ fold RCon:1 false
-    // panic! ND_LE should have known type
-    // -- 
-    //
-    
-    // not folding symbols as true because i want to support weak references (todo: need to do that in backend/fold as well)
-    can_fold := !c.speculate && rtype(cond) == .RCon && c.f.get_constant(cond).type() == .CBits;
-    if true || !can_fold {
         then_block := c.new_block();
         else_block := c.new_block();
         join_block := c.new_block();
@@ -3080,21 +3111,7 @@ if_ :: fn(c, rest, tok) #prefix(.if, .ND_STMT) = {
         c.jmp_if_unterminated(join_block);
         
         c.b = join_block;
-    } else {
-        fold_yes := c.f.get_constant(cond).bits() != 0;
-        if fold_yes {
-            c.stmt(tok&, tok);
-        } else {
-            c.speculate(tok&, tok, .None, true);
-        };
-        if equal(tok, "else") {
-            if !fold_yes {
-                c.stmt(tok&, tok.next);
-            } else {
-                c.speculate(tok&, tok.next, .None, true);
-            };
-        };
-    };
+
     rest[] = tok;
     c.new_node(.ND_STMT, tok)
 };
@@ -3414,10 +3431,12 @@ fn new_add(c: *Ctx, lhs: **Node, rhs: **Node, tok: *Token) void = {
 }
 
 fn new_binary2(c: *Ctx, kind: NodeKind, lhs: *Node, rhs: *Node, tok: *Token) *Node = {
-    if c.speculate {
-        return(c.new_binary(kind, lhs, rhs, tok));
-    };
     out_ty := c.add_type(kind, lhs&, rhs&);
+    if c.speculate {
+        node := c.new_binary(kind, lhs, rhs, tok);
+        node.ty = out_ty;
+        return(node);
+    };
     c.gen_expr(lhs);
     c.gen_expr(rhs);
     @debug_assert(lhs.r != QbeNull && rhs.r != QbeNull, "new_binary missing evaluated args");
@@ -3521,18 +3540,14 @@ fn speculate(c: *Ctx, rest: **Token, tok: *Token, prec: Prec, is_stmt: bool) *No
     old_block := c.b;
     prev := c.speculate;
     c.speculate = true;
+    c.b = c.new_block();
     node := if is_stmt {
         c.stmt(rest, tok)
     } else {
         c.parse_expr(rest, tok, prec)
     };
     c.speculate = prev;
-    new_block := c.b;
-    if !old_block.identical(new_block) {
-        c.b = old_block;
-        c.jmp_if_unterminated(new_block);
-        c.b = new_block;
-    };
+    c.b = old_block;
     c.add_type(node);
     node
 }
@@ -3675,6 +3690,8 @@ fn ir_node(c: *Ctx, ty: *CType, r: Qbe.Ref, lvalue: Qbe.Ref, tok: *Token) *Node 
 ********************/
 
 fn new_block(c: *Ctx) *Qbe.Blk = {
+    @if(c.speculate) return(@static(Qbe.Blk));
+    
     f := c.f;
     b := newblk();
     push(f.rpo&, f.nblk&, b);
@@ -3754,7 +3771,7 @@ fn gen_par(c: *Ctx, ty: *CType) void = {
 }
 
 fn assert_gen_expr(c: *Ctx, node: *Node) Qbe.Ref = {
-    @debug_assert(node.r != QbeNull, "assert_gen_expr");    
+    @debug_assert(node.r != QbeNull || c.speculate, "assert_gen_expr");    
     node.r
 }
 

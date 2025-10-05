@@ -26,16 +26,20 @@ A C11 compiler adapted from <https://github.com/rui314/chibicc>.
 - don't segfault when accessing anonymous union fields
 - don't assume that a file starting with an `#ifdef` and ending with an `#endif` can be treated like `#pragma once` 
   (there may be multiple top level `#ifdef` blocks in a file so the last `#endif` isn't closing the first `#ifdef`). 
+- don't segfault on `puts(*&"");`
+- allow a union declaration with a single expression assigning the whole union 
+  instead of a treating it as a single element initializer list initializing only the first member. 
 
 ### Features
 
 - use the franca compiler backend instead of generating amd64 assembly as text and depending on someone else's assembler and linker. 
 - export to the franca compiler's type/function data structures so you don't need to manually write bindings to c libraries. 
-(WIP. for demos, see `examples/bf/c_source.fr` and `examples/view_image.fr`). 
+(for demos, see `examples/bf/c_source.fr` and `examples/view_image.fr`). 
 - optionally use the franca calling convention (passing a hidden environment pointer)
 - allow some function attributes
   - ignored: `__format__`, `__const__`, `format`, `noreturn`
 - show chain of macro declarations in error report
+- declare symbol aliases with the `asm` keyword
 
 ### Refactors 
 

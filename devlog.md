@@ -1,5 +1,32 @@
 
-## (Oct 1/2)
+## (Oct 5) import_c/musl
+
+- make sure defines match their makefile. 589.
+- fgetln: undefined temporary. 628.
+  - for locals with init.all_zeros, im skipping create_lvar_init because gen_zero_var does it, 
+    but when static_array_of_unknown_length like `(long[]) {0}`, it doesn't know how big it should be and never defines var.stack_slot
+    and then also set ty.array_len if its missing when skipping the `{0}`. 
+- oh heck, the early constant folding where i don't even emit code for dead if branch doesn't work
+  because you're allowed to have a goto label in there and jump to it from the reachable code. that's sad. 944.
+- `__syscall_cp_c` is defined without a prototype and then aliased to something with parameters.
+  seems im supposed to just do the default argument promotions but not treat it as variadic on platforms where that has a different abi. 
+  that matches what apple clang does. 1118.
+- parse (and ignore for now) global asm statement.
+- now i get through all the .c files
+
+TODO: locale/iconv.c takes a very long time to compile
+
+## (Oct 3) import_c/musl
+
+- change `__builtin_va_(start, arg)` to expect a value not an address
+- allow more cases of union declarations. 18.
+- parse attribute after variable declaration. 63.
+- `__builtin_va_copy` has to do something or it gets mad about reading unused slot. 79.
+- "ND_LT should have known type" because not setting the type in new_binary2 when speculate=true. 372. 
+  - that almost makes the early branch folding works but now it dies in emitins in the backend. 
+    had to make sure hiting a return statement didn't leak a b.jmp on the old block. 
+
+## (Oct 1/2) import_c/musl
 
 - playing with musl, just pointing import_c at random files and seeing if they compile. 
   - to get through a bunch of arch headers, for now just parse extended asm stmts and replace with hlt

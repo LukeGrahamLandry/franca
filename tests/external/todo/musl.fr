@@ -1,7 +1,85 @@
-// TODO
+// TODO: 
+// - generate: obj/include/bits/alltypes.h, obj/include/bits/syscall.h, obj/src/internal/version.h
+// - :AsmNotYetImplemented (inline, gnu extended, global)
+//   used for atomics, math, syscalls, tls get_tp, dynlink CRTJMP, compiler barrier, crt
+// - __uint128_t for (user_fpsimd_struct, fpregset_t, fpsimd_context)
+// - arch dependent: __builtin_va_copy, __builtin_va_list
+// - :AttributesNotYetImplemented
+//      - __visibility__("hidden")
+//      - __weak__, __alias__("foo")
+// - what to do with __(init,fini)_array_(start,end)
+// - .s files: clone, vfork, fenv
+// - complex
+
+main :: fn() void = {
+    root := "/Users/luke/Downloads/musl";
+    
+    dirs := collect_directory_ordered(@tfmt("%/src", root), temp(), temp())
+        || @panic("missing musl source");
+    files := Str.list(temp());
+    for dirs { it |
+        ::enum(@type it.type);
+        if it.type == .Directory && it.name != "complex" {
+            f := collect_directory_ordered(@tfmt("%/src/%", root, it.name), temp(), temp()).unwrap();
+            for f { jt |
+                if jt.type == .File && jt.name.ends_with(".c") {
+                    files&.push(@tfmt("%/src/%/%", root, it.name, jt.name));
+                }
+            };
+        }
+    };
+    files&.push(@tfmt("%/ldso/dynlink.c", root));
+    files&.push(@tfmt("%/ldso/dlstart.c", root));
+    
+    sh(@slice("./target/release/franca-linux-arm64", "examples/default_driver.fr", "build", "examples/import_c/cc.fr", "-o", "target/ccc.out"));
+    
+    n := 0;
+    for files { path |
+        args := @slice(
+            "target/ccc.out",
+            path,
+            @tfmt("-I%/arch/aarch64", root),    // :arch
+            @tfmt("-I%/arch/generic", root),
+            @tfmt("-I%/obj/src/internal", root),
+            @tfmt("-I%/src/include", root),
+            @tfmt("-I%/src/internal", root),
+            @tfmt("-I%/include", root),
+            @tfmt("-I%/src/internal", root),
+            @tfmt("-I%/obj/include", root),
+            @tfmt("-I%/include", root),
+            "-no_builtin_headers",
+            "-c",
+            "-o",
+            "a.o",
+            "-prelude",
+            prelude,
+            //"-d", "P",
+        );
+        //@if(n == 944)
+            { sh(args); };
+        n += 1;
+        @println("%/% %", n, files.len, path);
+    };
+}
+
+prelude :: """
+    typedef struct { long a[2]; } __uint128_t;  // TODO: alignment
+    
+    typedef long __builtin_va_list; // :arch
+    #define __builtin_va_copy(d, s) ((d) = (s))  // :arch
+    #define __builtin_va_end
+    
+    #define __asm__ asm
+    #define __volatile__ volatile
+    #define __typeof__ typeof
+    #define __typeof typeof
+    
+    #define _XOPEN_SOURCE 700
+""";
+sh :: import("@/examples/testing.fr").hush;
+#use("@/lib/sys/fs.fr");
 
 /*
-orb ./target/release/franca-linux-arm64 examples/import_c/cc.fr "/Users/luke/Downloads/musl-1.2.5 4/src/stdio/vfprintf.c" "-I/Users/luke/Downloads/musl-1.2.5 4/arch/aarch64" "-I/Users/luke/Downloads/musl-1.2.5 4/arch/generic" "-I/Users/luke/Downloads/musl-1.2.5 4/obj/src/internal" "-I/Users/luke/Downloads/musl-1.2.5 4/src/include" "-I/Users/luke/Downloads/musl-1.2.5 4/src/internal" "-I/Users/luke/Downloads/musl-1.2.5 4/include" "-I/Users/luke/Downloads/musl-1.2.5 4/src/internal" "-I/Users/luke/Downloads/musl-1.2.5 4/obj/include" "-I/Users/luke/Downloads/musl-1.2.5 4/include"  -D__asm__=asm -D__volatile__=volatile -D__typeof__=typeof -D__builtin_va_list=long -no_builtin_headers -c -o a.o -D__typeof=typeof "-D__builtin_va_copy=" "-D__builtin_va_end="
 
 https://musl.libc.org/releases/musl-1.2.5.tar.gz
 1080786 a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4
