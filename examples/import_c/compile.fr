@@ -184,6 +184,7 @@ Ctx :: @rec @struct {
     prims: Primitives #use;
     
     consts: *HashMap(Qbe.Con, Qbe.Ref);
+    cache_con01: Array(Qbe.Ref, 2);  // because eval_const_expr does true/false so many times
     
     // I'm probably going to regret this. 
     error_buf: List(u8);
@@ -216,6 +217,7 @@ Ctx :: @rec @struct {
     macro_base_file: Str;
     hide_stack: List(Ty(*Macro, *Token));
     allow_builtin_headers: bool;
+    cached_number_tokens: Array(*Token, 2);
 };
 
 fn align_down(n: i64, align: i64) i64 = 
@@ -2015,16 +2017,11 @@ AttrName :: @enum(
     _,
 );
 
-fn attribute(s: Str) ?AttrName = {
+fn attribute(s: Str) AttrName = {
     if s.starts_with("__") && s.ends_with("__") && s.len > 4 {
         s = s.slice(2, s.len - 2); 
     }
-    // safety: this can read past the end of the string but that should be fine because i check the length after
-    len, kind := read_punct(s.ptr, get_enum_names(AttrName), AttrName, AttrName._);
-    if len != s.len || kind == ._ {
-        return(.None);
-    };
-    (Some = kind)
+    contextual_keyword(s, AttrName)
 }
 
 fn attribute_list(c: *Ctx, rest: **Token, tok: *Token) Attributes = {    
@@ -2046,8 +2043,7 @@ fn attribute_list(c: *Ctx, rest: **Token, tok: *Token) Attributes = {
 
 fn one_attribute(c: *Ctx, tok: *Token, result: *Attributes) *Token #once = {
     ::enum(AttrName);
-    kind := tok.str().attribute() 
-        || @error_tok(c, tok, "unknown attribute");
+    kind := tok.str().attribute();
     
     str_arg :: fn($yield: @Fn(s: Str) void) => {
         tok = c.skip(tok, "(");
@@ -2057,8 +2053,10 @@ fn one_attribute(c: *Ctx, tok: *Token, result: *Attributes) *Token #once = {
         tok = c.skip(tok, ")");
     };
 
+    start := tok;
     c.next(tok&, tok);
     @match(kind) {
+        fn _() => @error_tok(c, start, "unknown attribute");
         fn packed() => {
             result.packed = true;
         }
@@ -2279,9 +2277,12 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *T
 fn init_function(c: *Ctx, a: Alloc) void = {
     c.f = a.box_uninit(Qbe.Fn);
     c.f.default_init(c.m);
+    // todo: f.con is still in tmp which is kinda not what you want for the toplevel one
     
     c.consts = a.box_zeroed(@type c.consts[]);
     c.consts[] = init(a);
+    c.cache_con01&[0] = Qbe.ConZero;
+    c.cache_con01&[1] = c.f.getcon(1);
     for c.f.con.slice(0, c.f.ncon.zext()) { cc |
         c.consts.insert(cc, c.f.newcon(cc&));
     };
@@ -2707,7 +2708,7 @@ parse_logical :: fn(c, rest, tok, cond) = {
     c.b = else_block; 
     c.lookahead(tok, 1);
     rhs  := parse_expr(c, rest, tok.next, @as(Prec) @as(i32) rule.prec.raw() + 1);
-    rhs  := c.new_cast(rhs, c.ty_bool);  // not cast_cond
+    rhs  := c.new_cast(rhs, c.ty_bool);  // not cast_cond (need to force the value to be 0/1)
     else_block_end := c.b;
     then, else, s1, s2, phi1, phi2 := @match(tok.kind) {
         fn @"&&"() => (rhs, c.new_num(0, tok), else_block, join_block, else_block_end, prev_block);
@@ -2722,7 +2723,6 @@ parse_logical :: fn(c, rest, tok, cond) = {
     };
     
     c.b = join_block;
-    ty := c.add_type(.ND_COND, then&, else&);
 
     r := if rtype(cond.r) == .RCon && rtype(rhs.r) == .RCon {
         cond := c.new_cast(cond, c.ty_bool);  // not cast_cond
@@ -2739,9 +2739,8 @@ parse_logical :: fn(c, rest, tok, cond) = {
         }
     };
     
-    lvalue := if(@is(ty.kind, .TY_STRUCT, .TY_UNION), => r, => QbeNull);
-    n := c.ir_node(ty, r, lvalue, tok);
-    n
+    // not ty_bool, _Generic can observe the difference
+    c.ir_node(c.ty_int, r, QbeNull, tok)
 };
 
 // the ternary operator
@@ -4298,6 +4297,12 @@ fn getcon(c: *Ctx, i: i64) Qbe.Ref =
 
 // the map makes it not suck for giant array literals
 fn getcon(c: *Ctx, c0: Qbe.Con) Qbe.Ref = {
+    // profile compiling musl before deciding this is dumb!
+    if c0&.type() == .CBits {
+        n := c0&.bits();
+        @if(n.ule(1)) return(c.cache_con01&[n]);
+    };
+    //@println("xxx % %", c0&.bits(), c0.sym.id);
     ::AutoHash(Qbe.Con, TrivialHasher);
     ::AutoHash(Qbe.Sym, TrivialHasher);
     ::AutoHash(Ty(u32, u32), TrivialHasher);

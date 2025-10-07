@@ -17,6 +17,7 @@ A C11 compiler adapted from <https://github.com/rui314/chibicc>.
 - `_Alignas`
 - inline assembly
 - simd intrinsics (immintrin.h, arm_neon.h, etc.)
+- digraphs, trigraphs
 - the builtin standard headers are incomplete
 
 ## Changes from Chibicc

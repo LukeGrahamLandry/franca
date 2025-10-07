@@ -1,4 +1,19 @@
 
+## (Oct 7)
+
+- trying to be more structured about accessing tok.next while parsing.
+  eventually i want lex/pre to be lazy instead of building the whole list of tokens up front.
+- table for ascii case of is_ident(1,2). musl time: 3215 -> 3052 (-5%).
+    - i also tried two longs and it was worse
+- new_num_token is called 769967 times but its always a 0 or 1 for (read/eval)_const_expr replacing identifiers. 
+  its only 40 samples but so easy to cache, might as well. 
+- use read_punct for preprocessor directives. 
+  it's only like 10 samples of equals() but not doing string comparisons makes me feel better about myself.
+- pfff, getcon skipping the hash table for zero is 2984 -> 2882 (-3%)
+- convert_pp_int: don't check all possible suffixes before checking the length 
+  since most of the time the digits will be the whole token. 2866
+- parse_logical doesn't need to bother with usual_arith_conv because the else branch already did a cast. 2843
+
 ## (Oct 6) import_c/musl
 
 - more parsing in attribute_list

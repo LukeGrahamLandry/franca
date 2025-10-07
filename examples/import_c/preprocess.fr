@@ -97,19 +97,14 @@ fn skip_cond_incl(tok: *Token) *Token = {
     loop {
         if(tok.kind == .TK_EOF, => return(tok)); // error: unterminated conditional directive
         
-        @if(is_hash(tok)) @if_else {
-            @if(depth == 1 && is(tok.next, @const_slice("elif", "else", "endif"))) => {
+        if is_hash(tok) {
+            it := contextual_keyword(tok.next.str(), Directive);
+            if depth == 1 && @is(it, .elif, .else, .endif) {
                 return(tok)
             };
-            @if(depth > 1 && equal(tok.next, "endif")) => {
-                depth -= 1;
-            };
-            @if(is(tok.next, @const_slice("if", "ifdef", "ifndef"))) => {
-                depth += 1;
-            };
-            @else => ();
+            depth -= int(@is(it, .endif));
+            depth += int(@is(it, .if, .ifdef, .ifndef));
         };
-        
         tok = tok.next;
     }
 }
@@ -170,21 +165,25 @@ fn copy_line(c: *Ctx, rest: **Token, tok: *Token) *Token = {
     head.next
 }
 
+// needs to point to a string (not just set tok.val.i) in case it's used in paste() 
+// and needs to be in a File because that's where str() looks. 
 fn new_num_token(c: *Ctx, val: i64, tmpl: *Token) *Token = {
-    @debug_assert_ge(val, 0, "new_num_token negative");
-    buf := @tfmt("%", val);  //\0\0\0\0\0  :BoundsPadding
-    t := c.tokenize(c.new_file(tmpl.file.name, buf));
+    t := if val == 0 || val == 1 {
+        // fast path for eval_const_expr
+        c.copy_token(c.cached_number_tokens&[val])
+    } else {
+        c.new_num_token(val, tmpl.file.name)
+    };
     t.origin = tmpl;
     t
-    //tok  := c.copy_token(tmpl);
-    //tok.kind = .TK_PP_NUM;
-    //buf := u8.list(c.arena);
-    //@fmt(buf&, "%", val);
-    //tok.val.i = val;
-    //// TODO: similar question as new_str_token
-    //tok.str().as_ptr() = buf&.as_ptr();
-    //tok.len = buf.len.intcast();
-    //tok
+}
+
+fn new_num_token(c: *Ctx, val: i64, filename: Str) *Token = {
+    @debug_assert_ge(val, 0, "new_num_token negative");
+    buf := @tfmt("%", val);
+    tok := c.tokenize(c.new_file(filename, buf));
+    @debug_assert_eq(tok.kind, .TK_PP_NUM);
+    tok
 }
 
 fn valid_macro_name(tok: *Token) bool = {
@@ -468,6 +467,7 @@ fn subst(c: *Ctx, tok: *Token, args: []MacroArg) *Token #once = {
         continue :: local_return;
         
         // "#" followed by a parameter is replaced with stringized actuals.
+        // https://gcc.gnu.org/onlinedocs/cpp/Stringizing.html
         if equal(tok, "#") {
             arg := find_arg(args, tok.next) || @error_tok(c, tok.next, "'#' is not followed by a macro parameter");
             c.append_one(cur&, c.stringize(tok, arg.tok), false);
@@ -743,23 +743,18 @@ fn detect_include_guard(c: *Ctx, tok: *Token) ?Str = {
             tok = tok.next;
             continue();
         };
-
-        if equal(tok.next, "endif") {
-            if tok.next.next.kind == .TK_EOF {
-                return(Some = macro);
+        
+        it := contextual_keyword(tok.next.str(), Directive);
+        if it == .endif && tok.next.next.kind == .TK_EOF {
+            return(Some = macro);
+        };
+        if @is(it, .if, .ifdef, .ifndef) {
+            dowhile {
+                tok = skip_cond_incl(tok.next);
+                is_hash(tok) && @is(contextual_keyword(tok.next.str(), Directive), .elif, .else)
             };
-        };
-
-        tok = if equal(tok.next, "if") || equal(tok.next, "ifdef") || equal(tok.next, "ifndef") {
-            t := skip_cond_incl(tok.next);
-            while => equal(t, "#") && (equal(t.next, "elif") || equal(t.next, "else")) {
-                t = skip_cond_incl(t.next);
-            } 
-            t := t.next;
-            t
-        } else {
-            tok.next
-        };
+        }
+        tok = tok.next;
     };
     .None
 }
@@ -812,6 +807,15 @@ fn check_hide(c: *Ctx, tok: *Token) void = {
     };
 }
 
+Directive :: @enum(
+    include, include_next, 
+    define, undef, 
+    if, ifdef, ifndef, elif, else, endif, 
+    pragma, error, warning, line,
+    add_include_path, discard_static_scope,  // TODO: my extensions should probably be pragmas
+    _,
+);
+
 // Visit all tokens in `tok` while evaluating preprocessing
 // macros and directives.
 fn preprocess2(c: *Ctx, tok: *Token) *Token = {
@@ -837,8 +841,10 @@ fn preprocess2(c: *Ctx, tok: *Token) *Token = {
         c.check_hide(tok);
         start := tok;
         tok = tok.next;
-
-        if (equal(tok, "include")) {
+        
+        ::enum(Directive);
+    @match(contextual_keyword(tok.str(), Directive)) {
+        fn include() => {
             filename, is_dquote := c.read_include_filename(tok&, tok.next);
 
             if filename[0] != "/".ascii() && is_dquote {
@@ -859,60 +865,44 @@ fn preprocess2(c: *Ctx, tok: *Token) *Token = {
             path := c.search_include_paths(filename) || filename;
             tok   = c.include_file(tok, path, start.next.next)
                 || @error_tok(c, tok, "Failed to open file: %", path);
-            continue();
         };
-
-        if equal(tok, "include_next") {
+        fn include_next() => {
             filename, _ := c.read_include_filename(tok&, tok.next);
             path := c.search_include_next(filename) || filename;
             tok = c.include_file(tok, path, start.next.next)
                 || @error_tok(c, tok, "Failed to open file: %", path);
-            continue();
         };
-
-        if equal(tok, "define") {
-            c.read_macro_definition(tok&, tok.next);
-            continue();
-        };
-
-        if equal(tok, "undef") {
+        fn define() => c.read_macro_definition(tok&, tok.next);
+        fn undef() => {
             tok = tok.next;
             if(!tok.valid_macro_name(), => @error_tok(c, tok, "macro name must be an identifier"));
             c.undef_macro(tok.str());
             tok = skip_line(tok.next);
-            continue();
         };
-
-        if (equal(tok, "if")) {
+        fn if() => {
             val := c.eval_const_expr(tok&, tok);
             c.push_cond_incl(start, val);
             if !val {
                 tok = skip_cond_incl(tok);
             };
-            continue();
         };
-
-        if (equal(tok, "ifdef")) {
+        fn ifdef() => {
             defined := c.find_macro(tok.next).is_some();
             c.push_cond_incl(tok, defined);
             tok = skip_line(tok.next.next);
             if !defined {
                 tok = skip_cond_incl(tok);
             };
-            continue();
         };
-
-        if equal(tok, "ifndef") {
+        fn ifndef() => {
             defined := c.find_macro(tok.next).is_some();
             c.push_cond_incl(tok, !defined);
             tok = skip_line(tok.next.next);
             if defined {
                 tok = skip_cond_incl(tok);
             };
-            continue();
         };
-
-        if equal(tok, "elif") {
+        fn elif() => {
             cond_incl := c.move_cond_incl(start, true, .Elif);
 
             if !cond_incl.included && c.eval_const_expr(tok&, tok) {
@@ -920,37 +910,22 @@ fn preprocess2(c: *Ctx, tok: *Token) *Token = {
             } else {
                 tok = skip_cond_incl(tok);
             };
-            continue();
         };
-
-        if (equal(tok, "else")) {
+        fn else() => {
             cond_incl := c.move_cond_incl(start, true, .Else);
             tok = skip_line(tok.next);
 
             if cond_incl.included {
                 tok = skip_cond_incl(tok);
             };
-            continue();
         };
-
-        if equal(tok, "endif") {
+        fn endif() => {
             cond_incl := c.cond_incl || @error_tok(c, start, "stray #endif");
             c.cond_incl = cond_incl.next;
             tok = skip_line(tok.next);
-            continue();
         };
-
-        if equal(tok, "line") {
-            c.read_line_marker(tok&, tok.next);
-            continue();
-        };
-
-        if tok.kind == .TK_PP_NUM {
-            c.read_line_marker(tok&, tok);
-            continue();
-        };
-
-        if equal(tok, "pragma") {
+        fn line() => c.read_line_marker(tok&, tok.next);
+        fn pragma() => {
             if equal(tok.next, "once") {
                 c.pragma_once&.insert(tok.file.name, ());
                 tok = skip_line(tok.next.next);
@@ -962,23 +937,18 @@ fn preprocess2(c: *Ctx, tok: *Token) *Token = {
                 tok = tok.next;
                 !tok.at_bol
             };
-            continue();
         }
-
-        if equal(tok, "error") {
-            @error_tok(c, tok, "error");
-        };
-        if equal(tok, "warning") {
+        fn error() => @error_tok(c, tok, "error");
+        fn warning() => {
             @warn_tok(c, tok, "warning");
             tok = skip_line(tok.next.next);
-            continue();
         };
         
         // TODO: maybe add_include_path and discard_static_scope should be `#pragma franca FOO` instead of `#FOO`
         // TODO: see if there's some common extension i should use for this instead. 
         // for convenience in caching i want to represent -Ifoo as something in source text 
         // so i don't have to add a new thing to .frc files. 
-        if equal(tok, "add_include_path") {
+        fn add_include_path() => {
             t := tok.next;
             if t.kind != .TK_STR {
                 @error_tok(c, t, "expected string");
@@ -986,20 +956,24 @@ fn preprocess2(c: *Ctx, tok: *Token) *Token = {
             tok = skip_line(t.next);
             s := t.str().slice(1, t.len.intcast() - 1);
             c.include_paths&.push(s);
-            continue();
         };
-        
-        if equal(tok, "discard_static_scope") {
+        fn discard_static_scope() => {
             tok.kind = .TK_discard_static_scope;
             c.append_one(cur&, tok, false);
             tok = tok.next;
-            continue();
         };
+        fn _() => {
+            if tok.kind == .TK_PP_NUM {
+                c.read_line_marker(tok&, tok);
+                continue();
+            };
 
-        // `#`-only line is legal. It's called a null directive.
-        if(tok.at_bol, => continue());
-
-        @error_tok(c, tok, "invalid preprocessor directive");
+            // `#`-only line is legal. It's called a null directive.
+            if !tok.at_bol {
+                @error_tok(c, tok, "invalid preprocessor directive");
+            }
+        };
+    };
     };
 
     cur.next = tok;
