@@ -1,4 +1,11 @@
 
+## (Oct 6) import_c/musl
+
+- more parsing in attribute_list
+- need to allow a local symbol to be weak. 
+- stub out init_tls in my test program for now.
+- now it gets to the point of dying on unimplimented asm trying to do a syscall. 
+
 ## (Oct 5) import_c/musl
 
 - make sure defines match their makefile. 589.
@@ -22,6 +29,27 @@
     - sticking a hashmap on the c compiler makes global_variable samples go 1781 -> 119. 
   - don't box_zeroed in new_token: 190 -> 105
   - quadratic resizing of Initializer.children for array literal without specified length. global_variable 124 -> 28.
+- making a libc.a from my .o files.
+  `.dynsym local symbol at index 77 (>= sh_info of 70); error adding symbols: bad value`
+  confused myself because emit_dat put the relocation targets in local_needs_reloc 
+  even if they weren't local and things ended up on the wrong end of the elf symbol table
+- can i actually run a program?
+  - woes with weak symbols. `__libc_start_main` for wrap_entry_for_linux_libc needs to be strong. 
+  - either:
+    - `-nostdlib` and need to say -Wl,e,start to have it use my entry point (and i need to give it the entry point even when .o)
+    - `-nolibc` linker still gives me a `start` until im ready to use musl's
+  - now its dying trying to set `__environ`
+    - didn't help: tried setting size field and STT_OBJECT for data in the symbol table
+    - oh im probably trying to get the symbol from GOT because it doesn't know its not a dynamic import,
+      but that doesn't work because init_libc runs before data relocations.
+      no... thats what clang does too. 
+    - must that i need to make all the symbols strong, 
+      which gives me a billion `undefined reference to` 
+      but hopefully those will go away when i do `__weak__,__alias__`
+      - or maybe its tentative definitions not getting emitted? 
+        they all seem to be things that are defined without a value on the right. 
+        yeah im doing it wrong if you declare with `extern` and then provide the tentative one in the same compilation unit. 
+        ok messed with that a bit and now all the errors are for things on the right of `weak_alias`
 
 ## (Oct 3) import_c/musl
 

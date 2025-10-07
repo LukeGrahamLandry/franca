@@ -48,6 +48,7 @@ align_segments :: fn(m: *Qbe.Module) i64 = {
 };
 
 finalize_symbols :: fn(m: *Qbe.Module) SymbolTableInfo = {
+    @debug_assert(m.goal.type != .Relocatable); // TODO: does this really need a different code path?
     fixups, symbols := collect_aot_fixups(m);
     
     // TODO: would it be nicer to have multiple symbol tables (put exports elsewhere?)
@@ -536,7 +537,6 @@ create_symbol_table :: fn(
     symbol_index := 0;
     
     for symbols { symbol |
-        STT_FUNC :: 2;
         xx := e.payload&.reserve_type(Elf.Symbol);
         local := symbol.kind == .Local;
 
@@ -552,9 +552,11 @@ create_symbol_table :: fn(
             section = e.section_index&[symbol.segment];
         };
 
-        type := @if(is_local(symbol), 
+        // note: you can have a weak+export symbol, means it will be replaced if you link against something that has a strong definition.  
+        // TODO: rn only import_c sets all its own symbols to strong. other frontends should do that too.
+        bind := @if(is_local(symbol), 
             Elf.STB_LOCAL, 
-                @if(symbol.strong || symbol.export, 
+                @if(symbol.strong, 
                     Elf.STB_GLOBAL, 
                     Elf.STB_WEAK));
                     
@@ -562,13 +564,19 @@ create_symbol_table :: fn(
             section = e.section_index&[symbol.segment];
             @debug_assert(e.m.goal.exe_debug_symbol_table);
             local = true;  // the import **stub** is actually local
-            type = Elf.STB_LOCAL;
+            bind = Elf.STB_LOCAL;
             local_count += 1;
         };
+        if !local {
+            symbol.size = 0;  // don't show the stub's size. just makes readelf less confusing to look at
+        };
+        
+        STT_OBJECT :: 1; STT_FUNC :: 2;
+        type := @if(symbol.segment == .Code, STT_FUNC, STT_OBJECT);   // TODO: does anyone care about this? 
         
         xx[] = (
             name = imported_symbol_name_offsets[symbol_index],
-            info = type.shift_left(4).trunc(),
+            info = bind.shift_left(4).bit_or(type).trunc(),
             value = @if(local, segment_base + symbol.offset, 0),
             section_header_index = section,
             size = symbol.size.zext(),  // TODO: does anyone care about this? maybe debugger disassemble? 
@@ -795,6 +803,21 @@ seal_dynamic :: fn(
 // so each section that contains relocations needs a seperate section to describe them.
 emit_linker_relocations :: fn(e: *EmitElf, base: PayloadBase) void = {
     m := e.m;
+    
+    for m.exports { id |
+        use_symbol(m, id) { s |
+            @debug_assert(s.export);
+            if !s.local_but_marked_for_relocation && s.kind == .Local {
+                m.local_needs_reloc&.push(id);
+                s.local_but_marked_for_relocation = true;
+            }
+        };
+    };
+    for m.local_needs_reloc { id |
+        s := m.get_symbol_info(id);
+        @debug_assert_eq(s.kind, .Local, "nonlocal %", s.name);
+    };
+    
     cases: EnumMap(SegmentType, List(FixP)) = init(list(temp()));
     // TODO: just pass around lists of Sym instead of *SymbolInfo, fix in collect_aot_fixups and machO as well
     symbols := temp().alloc_uninit(*SymbolInfo, m.local_needs_reloc.len + m.imports.len);
@@ -891,6 +914,10 @@ fn emit_linux_start(m: *Qbe.Module, main: Qbe.Sym, start: Qbe.Sym) void = {
     """);
     f.copy_instructions_from_scratch(f.start);
     run_qbe_passes(f);
+    
+    use_symbol(m, m.intern("__libc_start_main")) { s |
+        s.strong = true;
+    };
 }
 
 Elf :: import("@/backend/elf/bits.fr");

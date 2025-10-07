@@ -41,9 +41,15 @@ fn str(tok: *Token) Str = {
 }
 
 // returns the bytes after processing escapes (might be wide characters) including null terminator
-fn string_value(tok: *Token) ?[]u8 = {
+fn c_string_value(tok: *Token) ?[]u8 = {
     @if(tok.kind != .TK_STR) return(.None);
     (Some = (ptr = tok.val.str_buf, len = tok.ty.size.intcast()))
+}
+
+// sane char string without null terminator (so the compiler can use it for symbol name, inline asm, etc)
+fn string_value(tok: *Token) ?[]u8 = {
+    @if(tok.kind != .TK_STR || tok.ty.base.kind != .TY_CHAR) return(.None);
+    (Some = (ptr = tok.val.str_buf, len = tok.ty.size.intcast() - 1))
 }
 
 // Consumes the current token if it matches `op`.
@@ -230,7 +236,7 @@ read_punct :: fn(p: *u8, $kw: []Str, $E: Type, $invalid_token: E) Ty(i64, E) #in
     // Which is hella faster than for(kw, => if(p.slice(3).starts_with(it), => ...));
     // 50 lines of confusing code saves 90 lines of boring code. not great ratio. 
         // First convert the list to a tree. 
-        Chars :: @rec @struct(x: HashMap(u8, *Chars));  // TODO: this should work without being wrapped in a struct
+        Chars :: @rec @struct(x: HashMap(u8, *Chars), end := false);  // TODO: this should work without being wrapped in a struct
         prongs: Chars = (x = init(temp()));
         for kw { kw |
             case := prongs&;
@@ -238,6 +244,7 @@ read_punct :: fn(p: *u8, $kw: []Str, $E: Type, $invalid_token: E) Ty(i64, E) #in
                 ::?*Chars;
                 case = case.x&.get_or_insert(c, => temp().boxed(Chars, (x = init(temp()))))[];
             };
+            case.end = true;
         };
         
         // Then convert the tree to code.  
@@ -246,13 +253,17 @@ read_punct :: fn(p: *u8, $kw: []Str, $E: Type, $invalid_token: E) Ty(i64, E) #in
             get_val :: fn() => {
                 y :: local_return;
                 ::?E;
+                // note: punctuation_tokens relies on this allowing prefixes that are in the enum but not the array
                 if E.from_name(s.items()) { value | 
                     y @{ (@[N], @[@literal value]) };
-                } else {
-                    y @{ (@[N], invalid_token) };
                 };
+                N := @if(case.end, N, @literal 0);
+                y @{ (@[N], invalid_token) };
                 unreachable()
             };
+            
+            // TODO: maybe now that im using this for identifier like keywords, 
+            //       don't keep checking one character at a time once its down to one option
             
             count := case.x.raw.len_including_tombstones;
             e := Ty(i64, FatExpr).list(count, ast_alloc());

@@ -6,33 +6,46 @@
 // - arch dependent: __builtin_va_copy, __builtin_va_list
 // - :AttributesNotYetImplemented
 //      - __visibility__("hidden")
-//      - __weak__, __alias__("foo")
 // - what to do with __(init,fini)_array_(start,end)
-// - .s files: clone, vfork, fenv
+// - .s files: clone, vfork, fenv, setjmp/longjmp
 // - complex
+// - don't include the inline functions in headers in every single object file
 
 main :: fn() void = {
     root := "/Users/luke/Downloads/musl";
     
-    dirs := collect_directory_ordered(@tfmt("%/src", root), temp(), temp())
+    top_dirs := collect_directory_ordered(@tfmt("%/src", root), temp(), temp())
         || @panic("missing musl source");
-    files := Str.list(temp());
-    for dirs { it |
+    dirs := Str.list(temp());
+    
+    for top_dirs { it |
         ::enum(@type it.type);
         if it.type == .Directory && it.name != "complex" {
-            f := collect_directory_ordered(@tfmt("%/src/%", root, it.name), temp(), temp()).unwrap();
-            for f { jt |
-                if jt.type == .File && jt.name.ends_with(".c") {
-                    files&.push(@tfmt("%/src/%/%", root, it.name, jt.name));
-                }
+            dirs&.push(@tfmt("%/src/%", root, it.name));
+        };
+    };
+    
+    // TODO: undefined reference to longjmp/setjmp
+    //dirs&.push(@tfmt("%/ldso", root));
+    
+    skip := @const_slice("mips", "mips64", "mipsn32", "x32", "powerpc64", "s390x", "sh", "i386", "x86_64"/*:arch*/);
+    files := Str.list(temp());
+    while => dirs&.pop() { path |
+        f := collect_directory_ordered(path, temp(), temp()).unwrap();
+        for f { it |
+            if it.type == .Directory && !skip.contains(it.name) {
+                dirs&.push(@tfmt("%/%", path, it.name));
             };
+            if it.type == .File && it.name.ends_with(".c") {
+                files&.push(@tfmt("%/%", path, it.name));
+            }
         }
     };
-    files&.push(@tfmt("%/ldso/dynlink.c", root));
-    files&.push(@tfmt("%/ldso/dlstart.c", root));
     
     n := 0;
+    make_dirs_or_crash("target/out/musl");
     for files { path |
+        dest := @tfmt("target/out/musl/a%.o", n);
         args := @slice(
             "target/ccc.out",
             path,
@@ -48,7 +61,7 @@ main :: fn() void = {
             "-no_builtin_headers",
             "-c",
             "-o",
-            "a.o",
+            dest,
             "-prelude",
             prelude,
             //"-d", "P",
@@ -85,7 +98,29 @@ prelude :: """
 CC :: import("@/examples/import_c/cc.fr");
 
 /*
-
 https://musl.libc.org/releases/musl-1.2.5.tar.gz
 1080786 a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4
+
+orb ar rc target/out/musl/libmusl.a target/out/musl/*.o       */ // hmmm, comments nesting kinda sucks
+orb ./target/release/franca-linux-arm64 examples/import_c/cc.fr a.c -o a.o -c
+orb cc a.o -nolibc -L./target/out/musl -lmusl
+
+https://repo.or.cz/libc-test.git/tree/HEAD
 */
+
+a_dot_c :: """
+
+int puts(char *);
+int exit(int);
+int main() {
+    puts("Hello World");
+    exit(0);
+    return 0;
+}
+
+
+// TODO: __init_tp is an asm file that i don't compile yet
+//      but its in a weak symbol, so for now, just override it because i don't use thread locals. 
+void __init_tls(long *auxv) {
+}
+""";

@@ -8,6 +8,7 @@ A C11 compiler adapted from <https://github.com/rui314/chibicc>.
 - C11: `_Generic`, `_Noreturn`, `_Alignof`, `_Static_assert`, anonymous structs/unions
 - C23: `__VA_OPT__`, typeof
 - GNU: statement expressions, `a :? b`
+- attributes: packed, aligned
 
 ### NOT IMPLEMENTED
 
@@ -15,6 +16,7 @@ A C11 compiler adapted from <https://github.com/rui314/chibicc>.
 - `_Complex`, `_Imaginary`
 - `_Alignas`
 - inline assembly
+- simd intrinsics (immintrin.h, arm_neon.h, etc.)
 - the builtin standard headers are incomplete
 
 ## Changes from Chibicc

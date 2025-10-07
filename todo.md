@@ -1,3 +1,15 @@
+- DONT EXEC UNZIP IN examples/testing.fr
+  apple's unzip clearly doesn't work...
+  ```
+  /Users/luke/Downloads/wuffs-b1174882799a6d39796a14c9b28fb4977144a480/test/data/non-ascii/++.txt:  write error (disk full?).  Continue? (y/n/^C) n
+  fchmod (file attributes) error: Bad file descriptor
+   (warning) cannot set modif./access times
+            No such file or directory
+  warning:  /Users/luke/Downloads/wuffs-b1174882799a6d39796a14c9b28fb4977144a480/test/data/non-ascii/++.txt is probably truncated
+  ```
+  it worked before and the debian one works in orb on the same machine, the disk clearly isn't full. 
+  this is why we shouldn't just be trusting the system to have random shit preinstalled. 
+  stop being lazy!!
 - don't just crash at runtime when you `import_c/cc.fr -r`
   and try to call a function that was forward declared but not linked against
 - examples/count.fr total lines is wrong
@@ -148,6 +160,7 @@
     
 ## import_c
 
+- C23: `__has_c_attribute`, allow `[[]]` instead of `__attribute__`
 - import_c add a test for the incorrect include guard thing i fixed on jul16
 - import_c faults on function without parameter name: `int aaa(char*) { return 1; }`
 - import_c/cc.fr searches include path for the starting file before your current working directory which is super confusing

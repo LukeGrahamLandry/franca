@@ -10,6 +10,8 @@ int g5 = 456;
 int g5;  // tentative
 extern int g6;
 int g6 = 789;
+extern int g7;
+int g7;  // tentative
 
 int main() {
   ASSERT(3, ({ int a; a=3; a; }));
@@ -41,6 +43,7 @@ int main() {
   ASSERT(1, ({ g2[0]=0; g2[1]=1; g2[2]=2; g2[3]=3; g2[1]; }));
   ASSERT(2, ({ g2[0]=0; g2[1]=1; g2[2]=2; g2[3]=3; g2[2]; }));
   ASSERT(3, ({ g2[0]=0; g2[1]=1; g2[2]=2; g2[3]=3; g2[3]; }));
+  ASSERT(0, g7);
 
   ASSERT(4, sizeof(g1));
   ASSERT(16, sizeof(g2));

@@ -24,7 +24,7 @@ Obj :: @struct(
     name: Str,
     ty: *CType,
     tok: *Token,
-    align: i32,
+    align: i32,  // TODO
     stack_slot: Qbe.Ref, 
     is_function: bool,
     is_definition: bool,
@@ -34,6 +34,7 @@ Obj :: @struct(
     is_local: bool,
     is_inline: bool,
     yielded: bool,
+    is_weak: bool,
     init_data: []u8,
     rel: []Dat2.Reloc,
     f: *Qbe.Fn,
@@ -243,10 +244,13 @@ fn leave_scope(c: *Ctx) void = {
     @debug_assert_ge(c.scope_depth, 0);
 }
 
-// Find a variable by name.
-fn find_var(c: *Ctx, tok: *Token) ?*VarScope = {
+fn find_var(c: *Ctx, tok: *Token) ?*VarScope = 
+    c.find_var(tok.str());
+
+fn find_var(c: *Ctx, name: Str) ?*VarScope = {
+    ::ptr_utils(Scope);
     for_linked c.scope { sc |
-        if sc.vars&.get(tok.str()) { sc2 |
+        if sc.vars&.get(name) { sc2 |
             return(Some = sc2);
         };
     };
@@ -462,6 +466,7 @@ fn create_stack_slot(c: *Ctx, var: *Obj) void = {
     if var.stack_slot == QbeNull {
         var.stack_slot = c.f.newtmp(var.name, .Kl);
     };
+    // TODO: use var.align, backend only supports up to 16
     push(c.f.start, make_ins(.alloc8, .Kl, var.stack_slot, c.getcon(var.ty.size.intcast()), QbeNull));  // TODO: smaller align stack slots
 }
 
@@ -567,8 +572,9 @@ fn declspec(c: *Ctx, rest: **Token, tok: *Token, attr: ?*VarAttr) *CType = {
             
             if equal(tok, "__attribute__") {
                 // :AttributesNotYetImplemented
-                ignore := zeroed CType; 
-                tok = c.attribute_list(tok, ignore&);
+                // TODO: these need to apply to the symbol. (see musl's #define hidden). 
+                //       is it supposed to be broadcast accross commas like VarAttr is?
+                _ := c.attribute_list(tok&, tok);
             };
             
             // Handle storage class specifiers.
@@ -1028,7 +1034,7 @@ fn declaration(c: *Ctx, tok: *Token, basety: *CType, attr: ?*VarAttr, first_decl
         var := c.new_lvar(c.get_ident(ty.name), ty);
         if attr { attr |
             if attr.align != 0 {
-                var.align = attr.align;
+                var.align = attr.align;  // TODO
             };
         };
         
@@ -1823,65 +1829,6 @@ fn struct_members(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) void = {
     ty.members = head.next;
 }
 
-fn attribute_list(c: *Ctx, tok: *Token, ty: *CType) *Token = {
-    while => consume(tok&, tok, "__attribute__") {
-        tok = c.skip(tok, "(");
-        tok = c.skip(tok, "(");
-
-        comma_sep(c, tok&, ")") {
-            continue :: local_return;
-            if consume(tok&, tok, "packed") {
-                ty.is_packed = true;
-                continue();
-            };
-
-            if consume(tok&, tok, "aligned") {
-                tok = c.skip(tok, "(");
-                ty.align = c.const_expr(tok&, tok).intcast();
-                tok = c.skip(tok, ")");
-                continue();
-            };
-            
-            // TODO: some of these matter
-            skips :: @const_slice(
-                "__format__", "format", 
-                "__const__", 
-                "noreturn", "__noreturn__", 
-                "__deprecated__",
-                "__visibility__",
-                "__weak__",
-                "__alias__",
-                // "__constructor__", 
-                // "__aligned__",
-            ); 
-            if skips.contains(tok.str()) {
-                tok = c.skip_attribute(tok);
-                continue();
-            };
-
-            @error_tok(c, tok, "unknown attribute '%'", tok.str());
-        };
-
-        tok = c.skip(tok, ")");
-    };
-
-    tok
-}
-
-fn skip_attribute(c: *Ctx, tok: *Token) *Token = {
-    tok = tok.next;
-    if(equal(tok, ")"), => return(tok));
-    if(equal(tok, ","), => return(tok));
-    n := 0;
-    dowhile {
-        n -= int equal(tok, ")");
-        n += int equal(tok, "(");
-        tok = tok.next;
-        n > 0 && tok.kind != .TK_EOF
-    };
-    tok
-}
-
 // struct-union-decl = attribute? ident? ("{" struct-members)?
 fn struct_union_decl(c: *Ctx, rest: **Token, tok: *Token) *CType = {
     ty := c.struct_type();
@@ -2009,27 +1956,197 @@ fn parse_typedef(c: *Ctx, tok: *Token, basety: *CType) *Token = {
     tok
 }
 
+Attributes :: @struct {
+    packed := false;
+    // TODO: needs backend support to put them in the magic elf section
+    constructor := false;
+    weak := false;
+    hidden := false;  // TODO: do people use internal/protected visibility?
+    align: ?i64 = .None;
+    alias: ?*Token = .None;
+};
+
+fn attribute_list(c: *Ctx, tok: *Token, ty: *CType) *Token = {
+    it := attribute_list(c, tok&, tok);
+    c.apply(ty, it&);
+    tok
+}
+
+fn apply(c: *Ctx, ty: *CType, it: *Attributes) void = {
+    if it.packed {
+        ty.is_packed = true;
+    }
+    if it.align { align |
+        ty.align = align.intcast();
+    }
+    // TODO: is it an error to put symbol specific ones on a type? 
+    //       or do they just fall over to the symbol if its a declaration?
+}
+
+AttrName :: @enum(
+    packed,
+    aligned,
+    weak,
+    alias,
+    visibility,
+    constructor,
+    format, 
+    const,
+    noreturn, 
+    deprecated,
+    may_alias,
+    _,
+);
+
+fn attribute(s: Str) ?AttrName = {
+    if s.starts_with("__") && s.ends_with("__") && s.len > 4 {
+        s = s.slice(2, s.len - 2); 
+    }
+    // safety: this can read past the end of the string but that should be fine because i check the length after
+    len, kind := read_punct(s.ptr, get_enum_names(AttrName), AttrName, AttrName._);
+    if len != s.len || kind == ._ {
+        return(.None);
+    };
+    (Some = kind)
+}
+
+fn attribute_list(c: *Ctx, rest: **Token, tok: *Token) Attributes = {    
+    result: Attributes = ();
+    while => consume(tok&, tok, "__attribute__") {
+        tok = c.skip(tok, "(");
+        tok = c.skip(tok, "(");
+
+        comma_sep(c, tok&, ")") {
+            tok = c.one_attribute(tok, result&);
+        };
+
+        tok = c.skip(tok, ")");
+    };
+
+    rest[] = tok;
+    result
+}
+
+fn one_attribute(c: *Ctx, tok: *Token, result: *Attributes) *Token #once = {
+    ::enum(AttrName);
+    kind := tok.str().attribute() 
+        || @error_tok(c, tok, "unknown attribute");
+    
+    str_arg :: fn($yield: @Fn(s: Str) void) => {
+        tok = c.skip(tok, "(");
+        yield(tok.string_value() 
+            || @error_tok(c, tok, "expected string for %", kind));
+        tok = c.skip(tok.next, ")");
+    };
+
+    tok = tok.next;
+    @match(kind) {
+        fn packed() => {
+            result.packed = true;
+        }
+        fn weak() => {
+            result.weak = true;
+        }
+        fn alias() => str_arg { _ |
+            result.alias = (Some = tok);
+        };
+        fn visibility() => str_arg { vis |
+            if vis == "hidden" {
+                // :AttributesNotYetImplemented
+                result.hidden = true;
+            } else {
+                @error_tok(c, tok, "unknown visibility attribute: %", vis);
+            };
+        };
+        fn constructor() => {
+            // :AttributesNotYetImplemented
+            result.constructor = true;
+        }
+        fn aligned() => {
+            tok = c.skip(tok, "(");
+            result.align = (Some = c.const_expr(tok&, tok));
+            tok = c.skip(tok, ")");
+        }
+        @default => {
+            tok = c.skip_attribute(tok);
+        };
+    };
+    tok
+}
+
+fn skip_attribute(c: *Ctx, tok: *Token) *Token #once = {
+    if(equal(tok, ")"), => return(tok));
+    if(equal(tok, ","), => return(tok));
+    n := 0;
+    dowhile {
+        n -= int equal(tok, ")");
+        n += int equal(tok, "(");
+        tok = tok.next;
+        n > 0 && tok.kind != .TK_EOF
+    };
+    tok
+}
+
+fn parse_symbol_attributes(c: *Ctx, rest: **Token, tok: *Token, obj: *Obj) void = {
+    if consume(tok&, tok, "asm") {
+        tok = c.asm_alias(tok, obj);
+    };
+    
+    if equal(tok, "__attribute__") {
+        // TODO: clearly you're allowed it before the type as well, so like it has to be part of VarAttr,
+        //      but idk if its supposed to be inherited when you have multiple declarations with commas.
+        //      and idk how you decide if it does on the symbol or the type, 
+        //      maybe the attrs that apply to them just never overlap so it's not ambigous, you just can't give an error message when something doesn't make sense. 
+        it := c.attribute_list(tok&, tok);
+        
+        obj.is_weak = it.weak;
+        if it.alias { target_tok |
+            target_name := target_tok.string_value().unwrap();
+            target := c.find_var(target_name) 
+                || @error_tok(c, target_tok, "alias to undefined var %", target_name);
+            target := target.var;
+            
+            @debug_assert(!obj.yielded);
+            obj.yielded = true;
+            if c.emitter { ctx |
+                // TODO: not using the vtable thing (c'enqueue_task) makes this compile slower.
+                enter_task ctx { entry | 
+                    lnk := temp().boxed(Qbe.Lnk, (
+                        id = obj.global_symbol.unwrap(),
+                        export = !obj.is_static,
+                    ));
+                    entry.task = (Bounce = (lnk = lnk, target = target.global_symbol.unwrap()));
+                };
+            };
+        };
+    };
+    
+    // :XXXX otherwise linker doesn't get them from the static archive...
+    use_symbol(c.m, obj.global_symbol.unwrap()) { s |
+        s.strong = !obj.is_weak;
+    };
+    
+    rest[] = tok;
+}
+
+// these are different:
+// - asm alias: the symbol name does not match the source name but there's only one symbol. 
+// - attribute alias: two symbols are made that point to the same place. 
+//      - clang doesn't allow on macos?
 fn asm_alias(c: *Ctx, tok: *Token, obj: *Obj) *Token = {
     // `asm("foo")` after a forward declaration means `#[link_name = "foo"]`. 
     tok = c.skip(tok, "(");
-    @if(tok.kind != .TK_STR) @error_tok(c, tok, "expected a string (treating asm keyword after function as symbol alias)");
-    alias: []u8 = (ptr = tok.val.str_buf, len = tok.ty.size.intcast() - tok.ty.base.size.intcast());
+    alias := tok.string_value() 
+        || @error_tok(c, tok, "expected a string (treating asm keyword after function as symbol alias)");
     tok = c.skip(tok.next, ")");
     obj.global_symbol = (Some = c.m.intern(alias));
     tok
 }
 
-fn find_func(c: *Ctx, name: Str) ?*Obj = {
-    ::ptr_utils(Scope);
-    hack := c.scope;
-    sc := hack.end_linked();
-
-    if sc.vars&.get(name) { sc2 |
-        if !sc2.var.is_null() && sc2.var.is_function {
-            return(Some = sc2.var);
-        };
-    };
-    .None
+fn find_func(c: *Ctx, tok: *Token) ?*Obj = {
+    it := c.find_var(tok) || return(.None);
+    @debug_assert(!it.var.is_null(), tok.str());
+    (Some = it.var)
 }
 
 fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *Token = {
@@ -2037,7 +2154,8 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *T
     if(ty.name.is_null(), => @error_tok(c, tok, "function name omitted"));
     name_str := c.get_ident(ty.name);
     
-    f := if c.find_func(name_str) { f |
+    @debug_assert(identical(ty.name, ty.name_pos));  // todo: confusing to have two things
+    f := if c.find_func(ty.name) { f |
         if(!f.is_function,                     => @error_tok(c, t, "redeclared as a different kind of symbol"));
         if(f.is_definition && equal(tok, "{"), => @error_tok(c, t, "redefinition of function '%'", name_str));
         // note: the other way around is legal. forward declare as static and then define without saying static again will be treated as static. 
@@ -2051,20 +2169,7 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *T
         f
     };
     
-    if equal(tok, "__attribute__") {
-        // :AttributesNotYetImplemented
-        // TODO: attribute_list should give you back a struct instead of poking it into a CType
-        // - __visibility__("hidden")
-        // - __weak__, __alias__("foo")
-        // - __constructor__         needs backend support to put them in the magic elf section
-        // and it means the same if its before the function name instead of after. 
-        ignore := zeroed CType;
-        tok = c.attribute_list(tok, ignore&);
-    };
-    
-    if consume(tok&, tok, "asm") {
-        tok = c.asm_alias(tok, f);
-    };
+    c.parse_symbol_attributes(tok&, tok, f);
     
     if consume(tok&, tok, ";") {
         f.is_definition = false;
@@ -2173,7 +2278,7 @@ fn global_variable(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, first_d
         };
         
         prev_is_tentative   := false;
-        prev_is_declaration := false;
+        prev_is_definition := false;
         prev := c.find_var(ty.name_pos);
         prev_var := Obj.ptr_from_int(0);
         if prev { prev |
@@ -2181,7 +2286,7 @@ fn global_variable(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, first_d
             if !prev.var.is_null() {
                 prev_var = prev.var;
                 prev_is_tentative = prev.var.is_tentative;
-                prev_is_declaration = !prev_is_tentative;
+                prev_is_definition = prev.var.is_definition;
             }
         }
         
@@ -2197,35 +2302,26 @@ fn global_variable(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, first_d
         var.is_definition = !attr.is_extern;
         var.is_tls = attr.is_tls;
         if attr.align > 0 {
-            var.align = attr.align;
-        };
-
-        if equal(tok, "__attribute__") {
-            // :AttributesNotYetImplemented
-            ignore := zeroed CType;
-            tok = c.attribute_list(tok, ignore&);
+            var.align = attr.align;  // TODO: needs backend support
         };
         
-        if consume(tok&, tok, "asm") {
-            tok = c.asm_alias(tok, var);
-            // TODO: should this change is_tentative?
-        }
+        c.parse_symbol_attributes(tok&, tok, var);
         
         if equal(tok, "=") {
             if(attr.is_extern, => @error_tok(c, tok, "extern symbol with a value doesn't make any sense?"));
             if(ty.kind == .TY_FUNC, => @error_tok(c, tok, "function can't be declared with '='"));
             c.gvar_initializer(tok&, tok.next, var);
         } else {
+            var.is_definition = false;
             if ty.kind == .TY_FUNC {
                 var.is_function = true;
-                var.is_definition = false;
                 continue();
             };
             var.is_tentative = var.is_tentative || (!attr.is_extern && !attr.is_tls);
         };
         
         if var.is_tentative {
-            if prev_is_declaration || prev_is_tentative {
+            if prev_is_definition || prev_is_tentative {
                 continue(); 
             };
             if !prev_is_tentative {  // might be filled later
@@ -2246,6 +2342,7 @@ fn declare_builtin_functions(c: *Ctx) void = {
     ty.params = c.arena.alloc_init(*CType, 1, fn(_) => c.ty_int);
     c.builtin_alloca = c.new_gvar("alloca", ty, zeroed(*Token), false); // TODO: this is trash
     c.builtin_alloca.is_definition = false;
+    c.builtin_alloca.is_function = true;
 }
 
 discard_static_scope :: fn(c: *Ctx) void = {
@@ -2768,7 +2865,7 @@ parse_ident :: fn(c, rest, tok) #prefix(.TK_IDENT) = {
 };
 
 parse_string :: fn(c, rest, tok) #prefix(.TK_STR) = {
-    s := tok.string_value().unwrap();
+    s := tok.c_string_value().unwrap();
     var := c.new_string_literal(s, tok.ty, tok);
     rest[] = tok.next;
     node := c.new_var_node(var, tok);
@@ -3311,17 +3408,14 @@ asm :: fn(c, rest, tok) #prefix(.asm, .ND_STMT) = {
         ignore(tok&, tok, @const_slice("volatile", "inline"))
     };
     tok = c.skip(tok, "(");
-    if tok.kind != .TK_STR || tok.ty.base.kind != .TY_CHAR {
-        @error_tok(c, tok, "expected string literal for asm template");
-    };
-    _template := tok.string_value();
+    template := tok.string_value()
+        || @error_tok(c, tok, "expected string literal for asm template");
     tok = tok.next;
     
     // eat gnu extended assembly 
     while => consume(tok&, tok, ":") {
         dowhile {
-            if tok.kind == .TK_STR && tok.ty.base.kind == .TY_CHAR {
-                _constraint := tok.string_value();
+            if tok.string_value() { _constraint |
                 tok = tok.next;
                 if consume(tok&, tok, "(") {
                     c.speculate(tok&, tok, .None, false);
@@ -3333,11 +3427,14 @@ asm :: fn(c, rest, tok) #prefix(.asm, .ND_STMT) = {
     };
     
     rest[] = c.skip(tok, ")");
-    @warn_tok(c, tok, "asm stmt is not supported");
-    if !c.f.is_null() {
-        c.b.jmp.type = .hlt;
-        c.b = c.new_block();
-    };
+    if template != "" {
+        @warn_tok(c, tok, "asm stmt is not supported");
+        if !c.f.is_null() {
+            c.b.jmp.type = .hlt;
+            c.b = c.new_block();
+        };
+    }
+    // TODO: else when its just used as a memory barrier, should insert a no_inline=true call to keep that semantic
     c.new_node(.ND_STMT, tok)
     
 };
@@ -4087,21 +4184,10 @@ fn gen_store(c: *Ctx, addr: Qbe.Ref, value: Qbe.Ref, ty: *CType) void = {
         c.emit(.blit1, .Kw, QbeNull, INT(ty.size.intcast()), QbeNull);
         return();
     };
-    if @is(ty.kind, .TY_DOUBLE, .TY_LDOUBLE) {
-        c.emit(.stored, .Kw, QbeNull, value, addr);
-        return();
-    };
-    if ty.kind == .TY_FLOAT {
-        c.emit(.stores, .Kw, QbeNull, value, addr);
-        return();
-    };
-    
-    o: Qbe.O = @switch(ty.size) {
-        @case(1) => .storeb;
-        @case(2) => .storeh;
-        @case(4) => .storew;
-        @case(8) => .storel;
-        @default => panic("invalid int size");
+    o: Qbe.O = @if_else {
+        @if(@is(ty.kind, .TY_DOUBLE, .TY_LDOUBLE)) => .stored;
+        @if(@is(ty.kind, .TY_FLOAT)) => .stores;
+        @else => import("@/backend/opt/mem.fr")'store_by_size[ty.size.zext()];
     };
     c.emit(o, .Kw, QbeNull, value, addr);
 }
