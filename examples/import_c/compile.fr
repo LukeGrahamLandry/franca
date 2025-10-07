@@ -1,11 +1,9 @@
 // Adapted from chibicc. MIT License. Copyright (c) 2019 Rui Ueyama
 
-// TODO: i don't understand why assign for a _Atomic doesn't have to do something to flush the cacheline. 
 // TODO: https://github.com/rui314/chibicc/issues/
 //      #153 #141 #138 #110 #107 #99 #86 #84 more...
 //      - https://github.com/fuhsnn/slimcc/issues?q=is%3Aissue+is%3Aclosed+label%3Aupstream-chibicc&page=2
 // _Alignas needs more backend support
-// TODO: unary const expr
 // TODO: __builtin_compare_and_swap, __builtin_atomic_exchange
 // TODO: don't be copying types all the time? 
 
@@ -593,7 +591,7 @@ fn declspec(c: *Ctx, rest: **Token, tok: *Token, attr: ?*VarAttr) *CType = {
                 if attr.is_typedef && disallow_typedef {
                     @error_tok(c, tok, "typedef may not be used together with static, extern, inline, __thread or _Thread_local");
                 };
-                tok = tok.next;
+                c.next(tok&, tok);
                 continue();
             };
     
@@ -603,9 +601,9 @@ fn declspec(c: *Ctx, rest: **Token, tok: *Token, attr: ?*VarAttr) *CType = {
             )) || continue();
             
             if equal(tok, "_Atomic") {
-                tok = tok.next;
-                if (equal(tok , "(")) {
-                    ty = c.typename(tok&, tok.next);
+                c.next(tok&, tok);
+                if consume(tok&, tok , "(") {
+                    ty = c.typename(tok&, tok);
                     tok = c.skip(tok, ")");
                 };
                 is_atomic = true;
@@ -614,7 +612,8 @@ fn declspec(c: *Ctx, rest: **Token, tok: *Token, attr: ?*VarAttr) *CType = {
     
             if (equal(tok, "_Alignas")) {
                 attr := attr || @error_tok(c, tok, "_Alignas is not allowed in this context");
-                tok = c.skip(tok.next, "(");
+                c.next(tok&, tok);
+                tok = c.skip(tok, "(");
     
                 ::if(i32);
                 attr.align = if c.is_type_name(tok) {
@@ -628,20 +627,17 @@ fn declspec(c: *Ctx, rest: **Token, tok: *Token, attr: ?*VarAttr) *CType = {
     
             // Handle user-defined types.
             ty2 := c.find_typedef(tok);
-            if (equal(tok, "struct") || equal(tok, "union") || equal(tok, "enum") ||
-                    equal(tok, "typeof") || ty2.is_some()) {
+            if ty2.is_some() || @is(tok.kind, .struct, .union, .enum, .typeof) {
                 if(counter != 0, => break());
     
                 start := tok;
-                ty = @match(tok.kind) {
-                    fn struct() => c.struct_decl(tok&, tok.next);
-                    fn union()  => c.union_decl(tok&, tok.next);
-                    fn enum()   => c.enum_specifier(tok&, tok.next);
-                    fn typeof() => c.typeof_specifier(tok&, tok.next);
-                    @default    => {
-                        tok = tok.next;
-                        ty2.unwrap()
-                    };
+                c.next(tok&, tok);
+                ty = @match(start.kind) {
+                    fn struct() => c.struct_decl(tok&, tok);
+                    fn union()  => c.union_decl(tok&, tok);
+                    fn enum()   => c.enum_specifier(tok&, tok);
+                    fn typeof() => c.typeof_specifier(tok&, tok);
+                    @default    => ty2.unwrap();
                 };
     
                 counter += 1.shift_left(Specifier_Other);
@@ -702,7 +698,7 @@ fn declspec(c: *Ctx, rest: **Token, tok: *Token, attr: ?*VarAttr) *CType = {
                 @case(@SS(.double, .long)) => c.ty_double;  // the spec says this is at least as precise as double, so there you go. 
                 @default => @error_tok(c, tok, "invalid type");
             };
-            tok = tok.next;
+            c.next(tok&, tok);
         };
     };
 
@@ -721,8 +717,10 @@ fn declspec(c: *Ctx, rest: **Token, tok: *Token, attr: ?*VarAttr) *CType = {
 // param             = declspec declarator
 // returns a function type
 fn func_params(c: *Ctx, rest: **Token, tok: *Token, ret: *CType) *CType = {
+    c.lookahead(tok, 1);
     if equal(tok, "void") && equal(tok.next, ")") {
-        rest[] = tok.next.next;
+        c.next(tok&, tok);
+        c.next(rest, tok);
         return(c.func_type(ret));
     };
 
@@ -730,20 +728,16 @@ fn func_params(c: *Ctx, rest: **Token, tok: *Token, ret: *CType) *CType = {
     names  := list(*Token, c.arena);
     is_variadic := false;
 
-    if true {
-        break :: local_return;
-        while => !equal(tok, ")") {
-            if params.len != 0 {
-                tok = c.skip(tok, ",");
-            };
-    
-            if equal(tok, "...") {
-                is_variadic = true;
-                tok = tok.next;
-                c.skip(tok, ")");
-                break();
-            };
-    
+    c.comma_sep(tok&, ")") {
+        continue :: local_return;
+        if consume(tok&, tok, "...") {
+            is_variadic = true;
+            if !equal(tok, ")") {
+                @error_tok(c, tok, "expected ')' after '...'");
+            }
+            continue();
+        };
+
             ty2 := c.declspec(tok&, tok, .None);
             ty2  = c.declarator(tok&, tok, ty2);
     
@@ -765,7 +759,6 @@ fn func_params(c: *Ctx, rest: **Token, tok: *Token, ret: *CType) *CType = {
             };
             params&.push(ty2);
             names&.push(name);
-        };
     };
     
     ty := c.func_type(ret);
@@ -773,7 +766,7 @@ fn func_params(c: *Ctx, rest: **Token, tok: *Token, ret: *CType) *CType = {
     ty.param_names = names.items();
     ty.no_prototype = params.len == 0 && !is_variadic;
     ty.is_variadic = is_variadic;
-    rest[] = tok.next;
+    rest[] = tok;
     ty
 }
 
@@ -783,8 +776,8 @@ fn array_dimensions(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *CType #onc
         ignore(tok&, tok, @const_slice("static", "restrict"))
     };
 
-    if equal(tok, "]") {
-        ty = c.type_suffix(rest, tok.next, ty);
+    if consume(tok&, tok, "]") {
+        ty = c.type_suffix(rest, tok, ty);
         // :StaticArrayOfUnknownLength
         // We don't know the length of the array until we parse the initializer list. 
         // Which is painful because we want to make the var at the beginning but now need to defer creating a stack slot for it. 
@@ -803,7 +796,7 @@ fn array_dimensions(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *CType #onc
         // :ZeroSizeTypes
         length := c.eval(expr);
         if length < 0 {
-            @error_tok(c, tok, "array length cannot be negative");
+            @error_tok(c, expr.tok, "array length cannot be negative");
         };
         c.array_of(ty, length)
     }
@@ -813,8 +806,8 @@ fn array_dimensions(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *CType #onc
 //                         | "[" array-dimensions
 //                         | ε
 fn type_suffix(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *CType = {
-    if(equal(tok, "("), => return(c.func_params(rest, tok.next, ty)));
-    if(equal(tok, "["), => return(c.array_dimensions(rest, tok.next, ty)));
+    if(consume(tok&, tok, "("), => return(c.func_params(rest, tok, ty)));
+    if(consume(tok&, tok, "["), => return(c.array_dimensions(rest, tok, ty)));
     rest[] = tok;
     ty
 }
@@ -842,13 +835,14 @@ fn ignore(rest: **Token, tok: *Token, $ignored: []Str) bool #inline = {
 fn declarator(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *CType = {
     ty = c.pointers(tok&, tok, ty);
 
-    if equal(tok, "(") {
+    if consume(tok&, tok, "(") {
+        // :RewalkTokens
         start := tok;
         dummy := CType.zeroed();
-        c.declarator(tok&, start.next, dummy&);
+        c.declarator(tok&, start, dummy&);
         tok = c.skip(tok, ")");
         ty = c.type_suffix(rest, tok, ty);
-        return(c.declarator(tok&, start.next, ty));
+        return(c.declarator(tok&, start, ty));
     };
 
     name := Token.ptr_from_int(0);
@@ -856,7 +850,7 @@ fn declarator(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *CType = {
 
     if tok.kind == .TK_IDENT {
         name = tok;
-        tok = tok.next;
+        c.next(tok&, tok);
     };
 
     ty = c.type_suffix(rest, tok, ty);
@@ -872,13 +866,14 @@ fn declarator(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *CType = {
 // abstract-declarator = pointers ("(" abstract-declarator ")")? type-suffix
 fn abstract_declarator(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *CType = {
     ty = c.pointers(tok&, tok, ty);
-    if equal(tok, "(") {
+    if consume(tok&, tok, "(") {
+        // :RewalkTokens
         start := tok;
         dummy := CType.zeroed();
-        c.abstract_declarator(tok&, start.next, dummy&);
+        c.abstract_declarator(tok&, start, dummy&);
         tok = c.skip(tok, ")");
         ty  = c.type_suffix(rest, tok, ty);
-        c.abstract_declarator(tok&, start.next, ty)
+        c.abstract_declarator(tok&, start, ty)
     } else {
         c.type_suffix(rest, tok, ty)
     }
@@ -890,21 +885,23 @@ fn typename(c: *Ctx, rest: **Token, tok: *Token) *CType = {
     c.abstract_declarator(rest, tok, ty)
 }
 
-fn is_end(tok: *Token) bool = 
-    equal(tok, "}") || (equal(tok, ",") && equal(tok.next, "}"));
+fn is_end(c: *Ctx, tok: *Token) bool = {
+    c.lookahead(tok, 1);
+    equal(tok, "}") || (equal(tok, ",") && equal(tok.next, "}"))
+}
 
 // enum-specifier = ident? "{" enum-list? "}"
 //                                | ident ("{" enum-list? "}")?
 //
 // enum-list            = ident ("=" num)? ("," ident ("=" num)?)* ","?
 fn enum_specifier(c: *Ctx, rest: **Token, tok: *Token) *CType #once = {
-    ty := c.enum_type();
+    ty := c.new_type(.TY_ENUM, 4, 4);
 
     // Read a struct tag.
     tag: ?*Token = .None;
     if tok.kind == .TK_IDENT {
         tag = (Some = tok);
-        tok = tok.next;
+        c.next(tok&, tok);
     };
 
     if tag { tag |
@@ -924,10 +921,10 @@ fn enum_specifier(c: *Ctx, rest: **Token, tok: *Token) *CType #once = {
     comma_sep(c, tok&, "}") {
         names&.push(tok);
         name := c.get_ident(tok);
-        tok = tok.next;
+        c.next(tok&, tok);
 
-        if equal(tok, "=") {
-            val = c.const_expr(tok&, tok.next);
+        if consume(tok&, tok, "=") {
+            val = c.const_expr(tok&, tok);
         };
 
         sc := c.push_scope(name);
@@ -1005,8 +1002,8 @@ fn declaration(c: *Ctx, tok: *Token, basety: *CType, attr: ?*VarAttr, first_decl
                 // static locals are secretly globals
                 var := c.new_anon_gvar(ty, start);
                 c.push_scope(c.get_ident(ty.name))[].var = var;
-                if equal(tok, "=") {
-                    c.gvar_initializer(tok&, tok.next, var);
+                if consume(tok&, tok, "=") {
+                    c.gvar_initializer(tok&, tok, var);
                 };
                 c.yield(var);
                 continue();
@@ -1043,15 +1040,14 @@ fn declaration(c: *Ctx, tok: *Token, basety: *CType, attr: ?*VarAttr, first_decl
             // musl does like `register long x8 __asm__("x8") = n;` and passes that to inline asm block. 
             // for now just skip it.
             tok = c.skip(tok, "(");
-            if tok.kind != .TK_STR || tok.ty.base.kind != .TY_CHAR {
-                @error_tok(c, tok, "expected string literal for asm template");
-            };
-            _constraint := tok.string_value();
-            tok = c.skip(tok.next, ")");
+            _constraint := tok.string_value()
+                || @error_tok(c, tok, "expected string literal for asm template");
+            c.next(tok&, tok);
+            tok = c.skip(tok, ")");
         };
 
-        if equal(tok, "=") {
-            c.lvar_initializer(tok&, tok.next, var);
+        if consume(tok&, tok, "=") {
+            c.lvar_initializer(tok&, tok, var);
         };
 
         if(var.ty.size < 0,         => @error_tok(c, ty.name, "variable has incomplete type"));
@@ -1062,8 +1058,8 @@ fn declaration(c: *Ctx, tok: *Token, basety: *CType, attr: ?*VarAttr, first_decl
 }
 
 fn skip_excess_element(c: *Ctx, tok: *Token) *Token = {
-    if equal(tok, "{") {
-        tok = c.skip_excess_element(tok.next);
+    if consume(tok&, tok, "{") {
+        tok = c.skip_excess_element(tok);
         tok = c.skip(tok, "}");
     } else {
         c.parse_expr(tok&, tok, .Assign);
@@ -1071,13 +1067,14 @@ fn skip_excess_element(c: *Ctx, tok: *Token) *Token = {
     tok
 }
 
-// string-initializer = string-literal
 fn string_initializer(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) void #once = {
+    @debug_assert(tok.kind == .TK_STR);
     if init.is_flexible {
         init[] = c.new_initializer(c.array_of(init.ty.base, tok.ty.array_len.intcast()), false)[];
     };
 
     len := min(init.ty.array_len, tok.ty.array_len);
+    @debug_assert(len >= 0);
 
     // TODO: this is so garbage :SLOW
     slow :: fn($T) => {
@@ -1094,7 +1091,7 @@ fn string_initializer(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) v
         @default => unreachable();
     };
     
-    rest[] = tok.next;
+    c.next(rest, tok);
 }
 
 // array-designator = "[" const-expr "]"
@@ -1123,12 +1120,13 @@ fn string_initializer(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) v
 //
 // The above initializer sets x.c to 5.
 fn array_designator(c: *Ctx, rest: **Token, tok: *Token, ty: *CType, is_flexible: bool) Ty(i64, i64) = {  // (begin, end)
-    begin := c.const_expr(tok&, tok.next);
+    c.next(tok&, tok);
+    begin := c.const_expr(tok&, tok);
     if(begin >= ty.array_len.intcast() && !is_flexible, => @error_tok(c, tok, "array designator index (%) exceeds array bounds (%)", begin, ty.array_len));
     
     end := begin;
-    if equal(tok, "...") {
-        end = c.const_expr(tok&, tok.next);
+    if consume(tok&, tok, "...") {
+        end = c.const_expr(tok&, tok);
         if(end >= ty.array_len.intcast() && !is_flexible, => @error_tok(c, tok, "array designator index exceeds array bounds"));
         if(end < begin, => @error_tok(c, tok, "array designator range [%d, %d] is empty", begin, end));
     };
@@ -1148,6 +1146,7 @@ fn struct_designator(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *Member = 
         is_anon := (@is(mem.ty.kind, .TY_STRUCT, .TY_UNION)) && mem.name.is_null();
         if is_anon {
             if get_struct_member(mem.ty, tok) { _ |
+                // :ReWalkTokens
                 rest[] = start;
                 return(mem);
             };
@@ -1156,7 +1155,7 @@ fn struct_designator(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *Member = 
 
         // Regular struct member
         if mem.name.str() == tok.str() {
-            rest[] = tok.next;
+            c.next(rest, tok);
             return(mem);
         };
     };
@@ -1204,9 +1203,7 @@ fn designation(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) void = {
         }
         @default => @error_tok(c, tok, "field name not in struct or union initializer"); 
     };
-    if equal(tok, "=") {
-        tok = tok.next;
-    };
+    _ := consume(tok&, tok, "=");
     c.initializer2(rest, tok, init);
 }
 
@@ -1225,8 +1222,6 @@ fn comma_sep(c: *Ctx, tok: **Token, $end: Str, $body: @Fn() void) void = {
 fn array_initializer1(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) void = {
     tok = c.skip(tok, "{");
 
-    first := tok;
-    
     // An array length can be omitted if an array has an initializer
     // (e.g. `int x[] = {1,2,3}`). If it's omitted, count the number
     // of initializer elements as we go. 
@@ -1289,12 +1284,13 @@ fn array_initializer2(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer, i
         init[] = c.new_initializer(c.array_of(init.ty.base, 0), true)[];
     };
 
-    while => { i < init.ty.array_len.intcast() || init.is_flexible } && !is_end(tok) {
+    while => { i < init.ty.array_len.intcast() || init.is_flexible } && !c.is_end(tok) {
         start := tok;
         if i > 0 {
             tok = c.skip(tok, ",");
         };
         if equal(tok, "[") || equal(tok, ".") {
+            // :ReWalkTokens
             rest[] = start;
             if init.is_flexible {
                 @debug_assert_eq(init.ty.kind, .TY_ARRAY);
@@ -1323,7 +1319,7 @@ fn struct_initializer1(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) 
     
     if equal(tok, "}") {
         init.all_zeros = true;
-        rest[] = tok.next;
+        c.next(rest, tok);
         return();
     };
 
@@ -1349,7 +1345,7 @@ fn struct_initializer1(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) 
 // struct-initializer2 = initializer ("," initializer)*
 fn struct_initializer2(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer, mem: *Member) void = {
     first := true;
-    while => !mem.is_null() && !is_end(tok) {
+    while => !mem.is_null() && !c.is_end(tok) {
         start := tok;
         if !first {
             tok = c.skip(tok, ",");
@@ -1357,6 +1353,7 @@ fn struct_initializer2(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer, 
         first = false;
 
         if equal(tok, "[") || equal(tok, ".") {
+            // :ReWalkTokens
             rest[] = start;
             return();
         };
@@ -1371,8 +1368,10 @@ fn union_initializer(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) vo
     // Unlike structs, union initializers take only one initializer,
     // and that initializes the first union member by default.
     // You can initialize other member using a designated initializer.
+    c.lookahead(tok, 1);
     if equal(tok, "{") && equal(tok.next, ".") {
-        mem := c.struct_designator(tok&, tok.next, init.ty);
+        c.next(tok&, tok);
+        mem := c.struct_designator(tok&, tok, init.ty);
         init.mem = mem;
         c.designation(tok&, tok, init[mem.idx.intcast()]);
         rest[] = c.skip(tok, "}");
@@ -1381,9 +1380,9 @@ fn union_initializer(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) vo
 
     init.mem = init.ty.members;
 
-    if equal(tok, "{") {
-        c.initializer2(tok&, tok.next, init[0]);
-        consume(tok&, tok, ",");
+    if consume(tok&, tok, "{") {
+        c.initializer2(tok&, tok, init[0]);
+        _ := consume(tok&, tok, ",");
         rest[] = c.skip(tok, "}");
     } else {
         c.initializer2(rest, tok, init[0]);
@@ -1397,8 +1396,11 @@ fn initializer2(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) void = 
     fn TY_ARRAY() => @if_else {
         @if(tok.kind == .TK_STR) => c.string_initializer(rest, tok, init);
         @if(equal(tok, "{")) => {
+            c.lookahead(tok, 3);
             if equal(tok.next.next, "}") && tok.next.kind == .TK_NUM && tok.next.val.i == 0 {
-                rest[] = tok.next.next.next;
+                c.next(tok&, tok);
+                c.next(tok&, tok);
+                c.next(rest, tok);
                 init.all_zeros = true;
                 
                 if init.ty.kind == .TY_ARRAY && init.ty.array_len == -1 {
@@ -1445,26 +1447,28 @@ fn initializer2(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) void = 
             c.union_initializer(rest, tok, init)
         };
     };
-    @default => (if equal(tok, "{") {
+    @default => (if consume(tok&, tok, "{") {
         // An initializer for a scalar variable can be surrounded by
         // braces. E.g. `int x = {3};`. Handle that case.
-        c.initializer2(tok&, tok.next, init);
+        c.initializer2(tok&, tok, init);
         rest[] = c.skip(tok, "}");
     } else {
         init.expr = c.parse_expr(rest, tok, .Assign);
     }); // TODO: this shouldn't need the extra brackets?
 };
 
-fn initializer(c: *Ctx, rest: **Token, tok: *Token, ty: *CType, new_ty: **CType) *Initializer = {
+fn initializer(c: *Ctx, rest: **Token, tok: *Token, ty: **CType) *Initializer = {
+    c.lookahead(tok, 2);
     if ty.kind == .TY_ARRAY && ty.size > 0 && equal(tok, "{") && equal(tok.next.next, "}") && tok.next.kind == .TK_NUM && tok.next.val.i == 0 { 
         init := temp().box_zeroed(Initializer);
-        init.ty = ty;
+        init.ty = ty[];
         init.all_zeros = true;
-        rest[] = tok.next.next.next;
-        new_ty[] = ty;
+        c.next(tok&, tok);
+        c.next(tok&, tok);
+        c.next(rest, tok);
         return(init);
     };
-    init := c.new_initializer(ty, true);
+    init := c.new_initializer(ty[], true);
     c.initializer2(rest, tok, init);
     if init.ty.kind == .TY_ARRAY && init.is_flexible {
         init.ty.size = init.ty.base.size * init.ty.array_len;
@@ -1472,7 +1476,7 @@ fn initializer(c: *Ctx, rest: **Token, tok: *Token, ty: *CType, new_ty: **CType)
     // if there was a flexible array member chibicc makes a new type to track the exact size of this instantiation. 
     // but [https://www.sigbus.info/n1570#6.7.2.1p18] "In particular, the size of the structure is as if the flexible 
     // array member were omitted except that it may have more trailing padding than the omission would imply"
-    new_ty[] = init.ty;
+    ty[] = init.ty;
     init
 }
 
@@ -1558,7 +1562,8 @@ fn create_lvar_init(c: *Ctx, init: *Initializer, ty: *CType, desg: *InitDesg, to
 //     x[1][0] = 8;
 //     x[1][1] = 9;
 fn lvar_initializer(c: *Ctx, rest: **Token, tok: *Token, var: *Obj) *Node = {
-    init := c.initializer(rest, tok, var.ty, var.ty&);
+    loc := tok;
+    init := c.initializer(rest, tok, var.ty&);
     desg := InitDesg.zeroed();
     desg.var = var;
     
@@ -1574,11 +1579,11 @@ fn lvar_initializer(c: *Ctx, rest: **Token, tok: *Token, var: *Obj) *Node = {
     // that unspecified elements are set to 0. Here, we simply
     // zero-initialize the entire memory region of a variable before
     // initializing it with user-supplied values.
-    c.gen_zero_var(var, tok);
-    node := c.ir_node(c.ty_void, QbeNull, QbeNull, tok);
+    c.gen_zero_var(var, loc);
+    node := c.ir_node(c.ty_void, QbeNull, QbeNull, loc);
     
     if !init.all_zeros {
-        rhs := c.create_lvar_init(init, var.ty, desg&, tok);
+        rhs := c.create_lvar_init(init, var.ty, desg&, loc);
         c.gen_expr(node);
         node = rhs;
     };
@@ -1694,7 +1699,7 @@ fn size(init: *Initializer) i64 =
 // objects to a flat byte array. It is a compile error if an
 // initializer list contains a non-constant expression.
 fn gvar_initializer(c: *Ctx, rest: **Token, tok: *Token, var: *Obj) void = {
-    init := c.initializer(rest, tok, var.ty, var.ty&);
+    init := c.initializer(rest, tok, var.ty&);
     if init.all_zeros {
         return();
     };
@@ -1732,6 +1737,7 @@ fn compound_stmt(c: *Ctx, rest: **Token, tok: *Token) *Node = {
 
     c.enter_scope();
     while => !equal(tok, "}") {
+        c.lookahead(tok, 1);
         if c.is_type_name(tok) && !equal(tok.next, ":") {
             @if(SPAM) @println("type name! %", tok.str());
             attr   := VarAttr.zeroed();
@@ -1760,13 +1766,13 @@ fn compound_stmt(c: *Ctx, rest: **Token, tok: *Token) *Node = {
 
     c.leave_scope();
 
-    rest[]    = tok.next;
+    c.next(rest, tok);
     cur || c.new_node(.ND_NULL_EXPR, tok)
 }
 
 // expr-stmt = expr? ";"
 fn expr_stmt(c: *Ctx, rest: **Token, tok: *Token) *Node = if equal(tok, ";") {
-    rest[] = tok.next;
+    c.next(rest, tok);
     c.new_node(.ND_NULL_EXPR, tok)
 } else {
     node := c.parse_expr(tok&, tok, .None);
@@ -1825,20 +1831,20 @@ fn struct_members(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) void = {
         cur.ty = c.array_of(cur.ty.base, 0);
     };
 
-    rest[] = tok.next;
+    c.next(rest, tok);
     ty.members = head.next;
 }
 
 // struct-union-decl = attribute? ident? ("{" struct-members)?
 fn struct_union_decl(c: *Ctx, rest: **Token, tok: *Token) *CType = {
-    ty := c.struct_type();
+    ty := c.new_type(.TY_STRUCT, 0, 1);
     tok = c.attribute_list(tok, ty);
 
     // Read a tag.
     tag: ?*Token = .None;
     if tok.kind == .TK_IDENT {
         tag = (Some = tok);
-        tok = tok.next;
+        c.next(tok&, tok);
     };
 
     if tag { tag |
@@ -1846,6 +1852,8 @@ fn struct_union_decl(c: *Ctx, rest: **Token, tok: *Token) *CType = {
             rest[] = tok;
             if c.find_tag(tag) { ty2 |
                 // TODO: wastefully allocated `ty` every time you declare a struct variable
+                // TODO: im not copying the attributes here. 
+                //       can you have packed/aligned on a use of a type but not its declaration?
                 return(ty2);
             };
             ty.size = -1;
@@ -1941,8 +1949,17 @@ fn union_decl(c: *Ctx, rest: **Token, tok: *Token) *CType = {
     ty
 }
 
-fn next_is_paren_typename(c: *Ctx, tok: *Token) bool = 
-    equal(tok.next, "(") && c.is_type_name(tok.next.next);
+fn paren_typename(c: *Ctx, rest: **Token, tok: *Token) ?*CType = {
+    c.lookahead(tok, 2);
+    if equal(tok.next, "(") && c.is_type_name(tok.next.next) {
+        c.next(tok&, tok);
+        c.next(tok&, tok);
+        ty := c.typename(tok&, tok);
+        rest[] = c.skip(tok, ")");
+        return(Some = ty);
+    };
+    .None
+}
 
 fn parse_typedef(c: *Ctx, tok: *Token, basety: *CType) *Token = {
     comma_sep(c, tok&, ";") {
@@ -2036,10 +2053,11 @@ fn one_attribute(c: *Ctx, tok: *Token, result: *Attributes) *Token #once = {
         tok = c.skip(tok, "(");
         yield(tok.string_value() 
             || @error_tok(c, tok, "expected string for %", kind));
-        tok = c.skip(tok.next, ")");
+        c.next(tok&, tok);
+        tok = c.skip(tok, ")");
     };
 
-    tok = tok.next;
+    c.next(tok&, tok);
     @match(kind) {
         fn packed() => {
             result.packed = true;
@@ -2081,7 +2099,7 @@ fn skip_attribute(c: *Ctx, tok: *Token) *Token #once = {
     dowhile {
         n -= int equal(tok, ")");
         n += int equal(tok, "(");
-        tok = tok.next;
+        c.next(tok&, tok);
         n > 0 && tok.kind != .TK_EOF
     };
     tok
@@ -2138,7 +2156,8 @@ fn asm_alias(c: *Ctx, tok: *Token, obj: *Obj) *Token = {
     tok = c.skip(tok, "(");
     alias := tok.string_value() 
         || @error_tok(c, tok, "expected a string (treating asm keyword after function as symbol alias)");
-    tok = c.skip(tok.next, ")");
+    c.next(tok&, tok);
+    tok = c.skip(tok, ")");
     obj.global_symbol = (Some = c.m.intern(alias));
     tok
 }
@@ -2310,7 +2329,8 @@ fn global_variable(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, first_d
         if equal(tok, "=") {
             if(attr.is_extern, => @error_tok(c, tok, "extern symbol with a value doesn't make any sense?"));
             if(ty.kind == .TY_FUNC, => @error_tok(c, tok, "function can't be declared with '='"));
-            c.gvar_initializer(tok&, tok.next, var);
+            c.next(tok&, tok);
+            c.gvar_initializer(tok&, tok, var);
         } else {
             var.is_definition = false;
             if ty.kind == .TY_FUNC {
@@ -2363,13 +2383,13 @@ fn parse(c: *Ctx, tok: *Token) *Obj = {
         @match(tok.kind) {
         fn TK_discard_static_scope() => {
             c.discard_static_scope();
-            tok = tok.next;
+            c.next(tok&, tok);
             continue();
         };
         fn TK_FRC() => {
             f :: import("@/examples/import_c/ffi.fr").import_cache_file;
             c.f(tok);
-            tok = tok.next;
+            c.next(tok&, tok);
             continue();
         };
         fn _Static_assert() => {
@@ -2378,7 +2398,8 @@ fn parse(c: *Ctx, tok: *Token) *Obj = {
         }
         fn asm() => {
             // :AsmNotYetImplemented
-            tok = c.skip(tok.next, "(");
+            c.next(tok&, tok);
+            tok = c.skip(tok, "(");
             tok = c.skip(tok, "TK_STR");
             tok = c.skip(tok, ")");
             continue();
@@ -2420,14 +2441,16 @@ fn parse(c: *Ctx, tok: *Token) *Obj = {
 }
 
 fn static_assert(c: *Ctx, tok: *Token) *Token = {
-    tok = tok.next;
+    c.next(tok&, tok);
     tok = c.skip(tok, "(");
     cond := c.const_expr(tok&, tok);
+    msg := "";
     if consume(tok&, tok, ",") {
-        tok = tok.next;  // message
+        msg = tok.string_value() || tok.str();
+        c.next(tok&, tok);
     };
     if cond == 0 {
-        @error_tok(c, tok, "static assertion failed");
+        @error_tok(c, tok, "static assertion failed %", msg);
     };
     tok = c.skip(tok, ")");
     tok
@@ -2551,21 +2574,21 @@ fn parse_expr(c: *Ctx, rest: **Token, tok: *Token, prec: Prec) *Node = {
     ::comptime_init_rules_table();
     rules := rules;  // TODO: shouldn't need to do this but otherwise if can't call the function ?? 
     rule := rules.index(tok.kind);
-    node := (rule.prefix)(c, rest, tok);
+    node := (rule.prefix)(c, tok&, tok);
     c.gen_expr(node);
-    tok   = rest[];
     ::enum(@type prec);
     rule := rules.index(tok.kind);
     while => prec.raw() <= rule.prec.raw() {
         @if(SPAM) @println("Infix: % %", tok.str(), tok.kind);
-        node = (rule.infix)(c, rest, tok, node);
-        if tok.kind == .@":" {
+        hack := tok.kind == .@":";
+        node = (rule.infix)(c, tok&, tok, node);
+        if hack {
             prec = .Primary; // HACK
         };
-        tok  = rest[];
         rule = rules.index(tok.kind);
         c.gen_expr(node);
     };
+    rest[] = tok;
     @if(SPAM) @println("End Expression: % % %", tok.str(), tok.kind, node.kind);
     c.gen_expr(node);
     node
@@ -2587,6 +2610,7 @@ fn parse_binary_inner(c: *Ctx, rest: **Token, tok: *Token, lhs: *Node) *Node = {
         prec = @as(Prec) @as(i32) prec.raw() + 1;  
     }; 
     
+    c.lookahead(tok, 1);
     rhs  := parse_expr(c, rest, tok.next, prec);
     @match(tok.kind) {
         fn @"+="()  => {
@@ -2651,12 +2675,22 @@ fn cast_cond(c: *Ctx, cond: *Node) *Node = {
     cond
 }
 
+fn lookahead(c: *Ctx, tok: *Token, n: i64) void = {
+    
+}
+
+fn next(c: *Ctx, rest: **Token, tok: *Token) void = {
+    c.lookahead(tok, 1);
+    rest[] = tok.next;
+}
+
 parsers :: @struct {
 // TODO: less dumb ir for if conditions
 // short-circuiting, output is always 0 or 1
 #infix(.@"||", .LogOr, .ND_BITOR) #infix(.@"&&", .LogAnd, .ND_BITAND) 
 parse_logical :: fn(c, rest, tok, cond) = {
-    fold_op := rules.index(tok.kind)[].op;
+    rule := rules.index(tok.kind);
+    fold_op := rule.op;
     cond := c.cast_cond(cond);
     
     else_block := c.new_block();
@@ -2671,7 +2705,7 @@ parse_logical :: fn(c, rest, tok, cond) = {
     };
     
     c.b = else_block; 
-    rule := rules.index(tok.kind);
+    c.lookahead(tok, 1);
     rhs  := parse_expr(c, rest, tok.next, @as(Prec) @as(i32) rule.prec.raw() + 1);
     rhs  := c.new_cast(rhs, c.ty_bool);  // not cast_cond
     else_block_end := c.b;
@@ -2723,17 +2757,18 @@ conditional :: fn(c, rest, tok, cond) #infix(.@"?", .Conditional) = {
     join_block := c.new_block();
     
     ::if(Ty(*CType, *Qbe.Blk, Qbe.Ref, Qbe.Ref));
-    ty, then_phi_src, then_r, else_r := if equal(tok.next, ":") {
+    c.next(tok&, tok);
+    ty, then_phi_src, then_r, else_r := if consume(tok&, tok, ":") {
         // [GNU] Compile `a ?: b` as `tmp = a, tmp ? tmp : b`.
         then_block = join_block;
         then := c.ir_node(cond.ty, original_cond, QbeNull, tok);
         c.b = else_block;
-        else := c.parse_expr(rest, tok.next.next, .Conditional);
+        else := c.parse_expr(rest, tok, .Conditional);
         ty := c.add_type(.ND_COND, then&, else&);
         (ty, cond_block, then.r, else.r)
     } else {
         c.b = then_block;
-        then := c.parse_expr(tok&, tok.next, .None);
+        then := c.parse_expr(tok&, tok, .None);
         then_phi_src := c.b;
         c.jmp_if_unterminated(join_block);
         tok = c.skip(tok, ":");
@@ -2776,9 +2811,10 @@ conditional :: fn(c, rest, tok, cond) #infix(.@"?", .Conditional) = {
 };
 
 parse_bracketed :: fn(c, rest, tok) #prefix(.@"(") = {
-    node := if c.is_type_name(tok.next) {
-        start := tok;
-        ty := c.typename(tok&, tok.next);
+    start := tok;
+    tok = c.skip(tok, "(");
+    node := if c.is_type_name(tok) {
+        ty := c.typename(tok&, tok);
         tok = c.skip(tok, ")");
 
         is_compound_literal := equal(tok, "{");
@@ -2802,16 +2838,16 @@ parse_bracketed :: fn(c, rest, tok) #prefix(.@"(") = {
             node
         }
     } else {
-        node := if equal(tok.next, "{") {
+        node := if consume(tok&, tok, "{") {
             // This is a [GNU] statement expresssion.
-            node := c.compound_stmt(tok&, tok.next.next);
+            node := c.compound_stmt(tok&, tok);
             ::ptr_utils(@type node.ty[]);
             //@if(node.ty.is_null() || node.ty.kind == .TY_VOID)
             //@error_tok(c, node.tok, "statement expression returning void is not supported");
             node
         } else {
             // just a braketed expression like in math
-            parse_expr(c, tok&, tok.next, .None)
+            parse_expr(c, tok&, tok, .None)
         };
         rest[] = c.skip(tok, ")");
         node
@@ -2828,82 +2864,91 @@ label :: fn(c, rest, tok, prev) #infix(.@":", .Stmt) = {
     unique_label := c.get_block(prev.tok.str());
     c.jmp_if_unterminated(unique_label);
     c.b = unique_label;
-    c.stmt(rest, tok.next)
+    c.next(tok&, tok);
+    c.stmt(rest, tok)
 };
 
 parse_ident :: fn(c, rest, tok) #prefix(.TK_IDENT) = {
     // Variable or enum constant
     sc := c.find_var(tok);
-    rest[] = tok.next;
+    start := tok;
+    c.next(rest, tok);
     // For "static inline" function  // TODO: what? explain
     ::ptr_utils(Obj);
     ::?*Obj;
     if sc { sc |
         if !sc.var.is_null() {
             var := sc.var;
-            node := c.new_var_node(var, tok);
+            node := c.new_var_node(var, start);
             node.ty = var.ty;
             return(node);
         };
         ::ptr_utils(@type sc.enum_ty[]);
-        if(!sc.enum_ty.is_null(), => return(c.new_num(sc.enum_val, tok)));
+        if(!sc.enum_ty.is_null(), => return(c.new_num(sc.enum_val, start)));
     };
 
-    if(equal(tok.next, "("), => @error_tok(c, tok, "implicit declaration of a function (%)", tok.str()));
-    if equal(tok.next, ":") {
+    tok = rest[];
+    if(equal(tok, "("), => @error_tok(c, start, "implicit declaration of a function (%)", start.str()));
+    if equal(tok, ":") {
         // :LabelAsInfix
         // might be a label: the colon will be treated as an infix operator
         // this case can't skip the var lookup tho because of `a?b:c;`, from here we can't tell that b is not a label.
-        node := c.new_node(.ND_STMT, tok);
+        node := c.new_node(.ND_STMT, start);
         // Undef makes sure gen_expr/gen_addr skip it
         node.r = QbeUndef;
         node.lvalue = QbeUndef;
         node.ty = c.ty_int;  // HACK: without this, it crashes on `"" + a` when a is undeclared 
         return(node);
     };  
-    @error_tok(c, tok, "undefined variable: '%'", tok.str())
+    @error_tok(c, start, "undefined variable: '%'", start.str())
 };
 
 parse_string :: fn(c, rest, tok) #prefix(.TK_STR) = {
     s := tok.c_string_value().unwrap();
     var := c.new_string_literal(s, tok.ty, tok);
-    rest[] = tok.next;
     node := c.new_var_node(var, tok);
     c.gen_expr(node);
+    c.next(rest, tok);
     node
 };
 
 parse_number :: fn(c, rest, tok) #prefix(.TK_NUM) = {
     // could be a float or an int. backend just cares about the bits. 
     node := c.new_num(tok.val.i, tok, tok.ty);
-    rest[] = tok.next;
+    c.next(rest, tok);
     node
 };
 
-unary_plus :: fn(c, rest, tok) #prefix(.@"+") = 
-    c.parse_expr(rest, tok.next, .Unary);
+unary_plus :: fn(c, rest, tok) #prefix(.@"+") = {
+    c.next(tok&, tok);
+    c.parse_expr(rest, tok, .Unary)
+}
 
 unary_amp :: fn(c, rest, tok) #prefix(.@"&") = {
-    lhs := c.parse_expr(rest, tok.next, .Unary);
+    start := tok;
+    c.next(tok&, tok);
+    lhs := c.parse_expr(rest, tok, .Unary);
     if lhs.kind == .ND_MEMBER && lhs.member.is_bitfield {
-        @error_tok(c, tok, "cannot take address of bitfield");
+        @error_tok(c, start, "cannot take address of bitfield");
     };
-    c.new_addr(lhs, tok)
+    c.new_addr(lhs, start)
 };
 
 unary_star :: fn(c, rest, tok) #prefix(.@"*") = {
+    start := tok;
+    c.next(tok&, tok);
     // TODO: im not totally convinced this is right. 
     //       but it makes `*&""` work (which is something TCC does)
-    if equal(tok.next, "&") {
-        return(c.parse_expr(rest, tok.next.next, .Unary));
+    if consume(tok&, tok, "&") {
+        return(c.parse_expr(rest, tok, .Unary));
     };
     
     // [https://www.sigbus.info/n1570#6.5.3.2p4] This is an oddity
     // in the C spec, but dereferencing a function shouldn't do
     // anything. If foo is a function, `*foo`, `**foo` or `*****foo`
     // are all equivalent to just `foo`.
-    node := c.parse_expr(rest, tok.next, .Unary);
-    node := if(node.ty.kind == .TY_FUNC, => node, => c.new_deref(node, tok));
+    node := c.parse_expr(rest, tok, .Unary);
+    node := if(node.ty.kind == .TY_FUNC, => node, => c.new_deref(node, start));
     c.gen_expr(node);
     node
 };
@@ -2911,7 +2956,9 @@ unary_star :: fn(c, rest, tok) #prefix(.@"*") = {
 #prefix(.@"-", .ND_NEG) #prefix(.@"~", .ND_BITNOT) #prefix(.@"!", .ND_NOT) 
 parse_unary :: fn(c, rest, tok) = {
     rule := rules.index(tok.kind);
-    lhs := c.parse_expr(rest, tok.next, .Unary);
+    start := tok;
+    c.next(tok&, tok);
+    lhs := c.parse_expr(rest, tok, .Unary);
     ty := @match(rule.op) {
         fn ND_NEG() => {
             ty := c.get_common_type(c.ty_int, lhs.ty);
@@ -2933,20 +2980,22 @@ parse_unary :: fn(c, rest, tok) = {
         }
         @default => unreachable();
     };
-    c.ir_node(ty, r, QbeNull, tok)
+    c.ir_node(ty, r, QbeNull, start)
 };
 
 pre_inc :: fn(c, rest, tok) #prefix(.@"++") = { // Read ++i as i+=1
-    lhs := c.parse_expr(rest, tok.next, .Unary);
     rhs := c.new_num(1, tok);
-    c.new_add(lhs&, rhs&, tok);
-    node := c.to_assign(.ND_ADD, lhs, rhs, tok);
+    c.next(tok&, tok);
+    lhs := c.parse_expr(rest, tok, .Unary);
+    c.new_add(lhs&, rhs&, rhs.tok);
+    node := c.to_assign(.ND_ADD, lhs, rhs, rhs.tok);
     c.gen_expr(node);
     node
 };
 
 pre_dec :: fn(c, rest, tok) #prefix(.@"--") = { // Read --i as i-=1
-    node := c.new_sub(c.parse_expr(rest, tok.next, .Unary), c.new_num(1, tok), tok);
+    c.next(tok&, tok);
+    node := c.new_sub(c.parse_expr(rest, tok, .Unary), c.new_num(1, tok), tok);
     if node.lhs.kind == .ND_CAST {
         node.lhs = node.lhs.lhs;  // HACK. 
     };
@@ -2964,7 +3013,8 @@ pre_dec :: fn(c, rest, tok) #prefix(.@"--") = { // Read --i as i-=1
 // A branch is chosen based on the ~type~ of the first expression. 
 generic_selection :: fn(c, rest, tok) #prefix(._Generic) = {
     start := tok;
-    tok = c.skip(tok.next, "(");
+    c.next(tok&, tok);
+    tok = c.skip(tok, "(");
 
     ctrl := c.speculate(tok&, tok, .Assign, false);
     c.add_type(ctrl);
@@ -2979,11 +3029,11 @@ generic_selection :: fn(c, rest, tok) #prefix(._Generic) = {
     // Now choose one of the branches to use based on that type. 
     ret: ?*Node = .None;
     use_default := false; 
-    while => !consume(rest, tok, ")") {
+    while => !consume(tok&, tok, ")") {
         tok = c.skip(tok, ",");
 
-        if equal(tok, "default") {
-            tok = c.skip(tok.next, ":");
+        if consume(tok&, tok, "default") {
+            tok = c.skip(tok, ":");
             node := c.speculate(tok&, tok, .Assign, false);
             if ret.is_none() {
                 ret = (Some = node);
@@ -3015,17 +3065,15 @@ generic_selection :: fn(c, rest, tok) #prefix(._Generic) = {
         // emit default into a different branch and discard the other one
         c.gen_expr(node);
     };
+    rest[] = tok;
     node
 };
 
 sizeof :: fn(c, rest, tok) #prefix(.sizeof) = {
     start := tok;
-    ty := if c.next_is_paren_typename(tok) {  // | "sizeof" "(" type-name ")"
-        ty := c.typename(tok&, tok.next.next);
-        rest[] = c.skip(tok, ")");
-        ty
-    } else {  // | "sizeof" unary
-        node := c.speculate(rest, tok.next, .Unary, false);
+    ty := c.paren_typename(rest, tok) || {
+        c.next(tok&, tok);
+        node := c.speculate(rest, tok, .Unary, false);
         if(node.kind == .ND_MEMBER && node.member.is_bitfield, => @error_tok(c, tok, "sizeof(bitfield) is illegal"));
         node.ty
     };
@@ -3035,25 +3083,23 @@ sizeof :: fn(c, rest, tok) #prefix(.sizeof) = {
 
 alignof :: fn(c, rest, tok) #prefix(._Alignof) = {
     start := tok;
-    ty := if c.next_is_paren_typename(tok) {
-        ty := c.typename(tok&, tok.next.next);
-        rest[] = c.skip(tok, ")");
-        ty
-    } else {
-        c.speculate(rest, tok.next, .Unary, false)[].ty
+    ty := c.paren_typename(rest, tok) || {
+        c.next(tok&, tok);
+        c.speculate(rest, tok, .Unary, false)[].ty
     };
     c.new_ulong(ty.align.intcast(), start)
 };
 
 prefix_ampamp :: fn(c, rest, tok) #prefix(.@"&&") = {
-    label := c.get_ident(tok.next);
+    c.next(tok&, tok);
+    label := c.get_ident(tok);
     @error_tok(c, tok, "[GNU] labels-as-values is not supported (name = %)", label);
 };
 
 // funcall = (assign ("," assign)*)? ")"
 funcall :: fn(c, rest, tok, f) #infix(.@"(", .PostFix) = {
     start := tok;
-    tok = tok.next;
+    c.next(tok&, tok);
     c.add_type(f);
 
     if (f.ty.kind != .TY_FUNC && (f.ty.kind != .TY_PTR || f.ty.base.kind != .TY_FUNC)) {
@@ -3104,7 +3150,8 @@ funcall :: fn(c, rest, tok, f) #infix(.@"(", .PostFix) = {
 square :: fn(c, rest, tok, node) #infix(.@"[", .PostFix) = {
     // x[y] is short for *(x+y)
     start := tok;
-    idx := c.parse_expr(tok&, tok.next, .None);
+    c.next(tok&, tok);
+    idx := c.parse_expr(tok&, tok, .None);
     c.new_add(node&, idx&, start);
     node := c.new_binary2(.ND_ADD, node, idx, start);
     c.gen_expr(node);
@@ -3112,27 +3159,34 @@ square :: fn(c, rest, tok, node) #infix(.@"[", .PostFix) = {
     set_rest_and_gen(c, rest, c.skip(tok, "]"), node)
 };
 dot :: fn(c, rest, tok, node) #infix(.@".", .PostFix) = {
-    node := c.struct_ref(node, tok.next);
-    set_rest_and_gen(c, rest, tok.next.next, node)
+    c.next(tok&, tok);
+    node := c.struct_ref(node, tok);
+    c.next(tok&, tok);
+    set_rest_and_gen(c, rest, tok, node)
 };
 arrow :: fn(c, rest, tok, node) #infix(.@"->", .PostFix) = {
     // x->y is short for (*x).y
     node := c.new_deref(node, tok);
-    node := c.struct_ref(node, tok.next);
-    set_rest_and_gen(c, rest, tok.next.next, node)
+    c.next(tok&, tok);
+    node := c.struct_ref(node, tok);
+    c.next(tok&, tok);
+    set_rest_and_gen(c, rest, tok, node)
 };
 post_inc :: fn(c, rest, tok, node) #infix(.@"++", .PostFix) = {
     node := c.new_inc_dec(node, tok, 1);
-    set_rest_and_gen(c, rest, tok.next, node)
+    c.next(tok&, tok);
+    set_rest_and_gen(c, rest, tok, node)
 };
 post_dec :: fn(c, rest, tok, node) #infix(.@"--", .PostFix) = {
     node := c.new_inc_dec(node, tok, -1);
-    set_rest_and_gen(c, rest, tok.next, node)
+    c.next(tok&, tok);
+    set_rest_and_gen(c, rest, tok, node)
 };
 
 va_start :: fn(c, rest, tok) #prefix(.__builtin_va_start) = {
     start := tok;
-    tok = c.skip(tok.next, "(");
+    c.next(tok&, tok);
+    tok = c.skip(tok, "(");
     ap := c.parse_expr(tok&, tok, .Assign);
     ap := c.new_addr(ap, tok);
     if consume(tok&, tok, ",") {
@@ -3146,7 +3200,8 @@ va_start :: fn(c, rest, tok) #prefix(.__builtin_va_start) = {
 };
 va_arg :: fn(c, rest, tok) #prefix(.__builtin_va_arg) = {
     start := tok;
-    tok = c.skip(tok.next, "(");
+    c.next(tok&, tok);
+    tok = c.skip(tok, "(");
     ap := c.parse_expr(tok&, tok, .Assign);
     ap := c.new_addr(ap, tok);
     tok = c.skip(tok, ",");
@@ -3158,7 +3213,8 @@ va_arg :: fn(c, rest, tok) #prefix(.__builtin_va_arg) = {
 };
 compatible :: fn(c, rest, tok) #prefix(.__builtin_types_compatible_p) = {
     start := tok;
-    tok = c.skip(tok.next, "(");
+    c.next(tok&, tok);
+    tok = c.skip(tok, "(");
     t1 := c.typename(tok&, tok);
     tok = c.skip(tok, ",");
     t2 := c.typename(tok&, tok);
@@ -3170,8 +3226,9 @@ return :: fn(c, rest, tok) #prefix(.return, .ND_STMT) = {
     current_fn := c.current_fn || @error_tok(c, tok, "stray return");
     ty := current_fn.ty.return_ty;
     ::if(Ty(Qbe.Ref, Qbe.J));
-    r, j := if !consume(rest, tok.next, ";") {
-        exp := c.parse_expr(tok&, tok.next, .None);
+    c.next(tok&, tok);
+    r, j := if !consume(rest, tok, ";") {
+        exp := c.parse_expr(tok&, tok, .None);
         rest[] = c.skip(tok, ";");
     
         c.add_type(exp);
@@ -3197,7 +3254,8 @@ return :: fn(c, rest, tok) #prefix(.return, .ND_STMT) = {
     c.new_node(.ND_STMT, tok)
 };
 if_ :: fn(c, rest, tok) #prefix(.if, .ND_STMT) = {
-    tok = c.skip(tok.next, "(");
+    c.next(tok&, tok);
+    tok = c.skip(tok, "(");
     cond := c.parse_expr(tok&, tok, .None);
     cond := c.assert_gen_expr(c.cast_cond(cond));
     tok = c.skip(tok, ")");
@@ -3213,8 +3271,8 @@ if_ :: fn(c, rest, tok) #prefix(.if, .ND_STMT) = {
         c.jmp_if_unterminated(join_block);
         
         c.b = else_block;
-        if equal(tok, "else") {
-            c.stmt(tok&, tok.next);
+        if consume(tok&, tok, "else") {
+            c.stmt(tok&, tok);
         };
         c.jmp_if_unterminated(join_block);
         
@@ -3225,7 +3283,8 @@ if_ :: fn(c, rest, tok) #prefix(.if, .ND_STMT) = {
 };
 switch_ :: fn(c, rest, tok) #prefix(.switch, .ND_STMT) = {
     payload := temp().box_zeroed(Qbe.SwitchPayload);
-    tok = c.skip(tok.next, "(");
+    c.next(tok&, tok);
+    tok = c.skip(tok, "(");
     cond := c.parse_expr(tok&, tok, .None);
     tok = c.skip(tok, ")");
     //cond := c.new_cast(cond, ty_long);
@@ -3279,13 +3338,14 @@ case :: fn(c, rest, tok) #prefix(.case, .ND_STMT) = {
     current_switch := c.current_switch || @error_tok(c, tok, "stray case");
     
     // TODO :WrongSwitchCast
-    begin := c.const_expr(tok&, tok.next);
+    c.next(tok&, tok);
+    begin := c.const_expr(tok&, tok);
     begin: u32 = begin.trunc();
     begin: i32 = begin.bitcast();
     begin: i64 = begin.intcast();
 
-    if equal(tok, "...") {
-        end := c.const_expr(tok&, tok.next);
+    if consume(tok&, tok, "...") {
+        end := c.const_expr(tok&, tok);
         if(end < begin, => @error_tok(c, tok, "empty case range specified"));
         @error_tok(c, tok, "[GNU] Case ranges are not supported (% ... %)", begin, end);
     };
@@ -3305,7 +3365,8 @@ default :: fn(c, rest, tok) #prefix(.default, .ND_STMT) = {
     c.b = unique_label;
     current_switch := c.current_switch || @error_tok(c, tok, "stray default");
     
-    tok = c.skip(tok.next, ":");
+    c.next(tok&, tok);
+    tok = c.skip(tok, ":");
     c.stmt(rest, tok);
     current_switch.default = unique_label;
     
@@ -3320,7 +3381,8 @@ for_ :: fn(c, rest, tok) #prefix(.for, .ND_STMT) = {
         body_block := c.new_block();
         
         c.enter_scope();
-        tok = c.skip(tok.next, "(");
+        c.next(tok&, tok);
+        tok = c.skip(tok, "(");
         if c.is_type_name(tok) {
             basety := c.declspec(tok&, tok, .None);
             expect_var := !equal(tok, ";");
@@ -3364,7 +3426,8 @@ while_ :: fn(c, rest, tok) #prefix(.while, .ND_STMT) = {
     push_loop c { brk_label, cont_label |
         c.jmp_if_unterminated(cont_label);
         c.b = cont_label;
-        tok = c.skip(tok.next, "(");
+        c.next(tok&, tok);
+        tok = c.skip(tok, "(");
         cond := c.cast_cond(c.parse_expr(tok&, tok, .None));
         cond := c.assert_gen_expr(cond);
         tok = c.skip(tok, ")");
@@ -3384,7 +3447,8 @@ do :: fn(c, rest, tok) #prefix(.do, .ND_STMT) = {
     c.jmp_if_unterminated(body_block);
     brk_label, cont_label := push_loop c { _, _ |
         c.b = body_block;
-        c.stmt(tok&, tok.next);
+        tok = c.skip(tok, "do");
+        c.stmt(tok&, tok);
     };
     c.jmp_if_unterminated(cont_label);  // goto condition
     
@@ -3403,20 +3467,20 @@ do :: fn(c, rest, tok) #prefix(.do, .ND_STMT) = {
 asm :: fn(c, rest, tok) #prefix(.asm, .ND_STMT) = {
     // :AsmNotYetImplemented
     // for now just parse it and hope the function isn't actually called. 
-    tok = tok.next;
+    c.next(tok&, tok);
     dowhile {
         ignore(tok&, tok, @const_slice("volatile", "inline"))
     };
     tok = c.skip(tok, "(");
     template := tok.string_value()
         || @error_tok(c, tok, "expected string literal for asm template");
-    tok = tok.next;
+    c.next(tok&, tok);
     
     // eat gnu extended assembly 
     while => consume(tok&, tok, ":") {
         dowhile {
             if tok.string_value() { _constraint |
-                tok = tok.next;
+                c.next(tok&, tok);
                 if consume(tok&, tok, "(") {
                     c.speculate(tok&, tok, .None, false);
                     tok = c.skip(tok, ")");
@@ -3439,21 +3503,24 @@ asm :: fn(c, rest, tok) #prefix(.asm, .ND_STMT) = {
     
 };
 goto :: fn(c, rest, tok) #prefix(.goto, .ND_STMT) = {
-    if equal(tok.next, "*") {
-        _dest := c.parse_expr(tok&, tok.next.next, .None);
+    c.next(tok&, tok);
+    if consume(tok&, tok, "*") {
+        _dest := c.parse_expr(tok&, tok, .None);
         @error_tok(c, tok, "[GNU] labels-as-values is not supported (goto *ptr)");
     };
 
-    unique_label := c.get_block(c.get_ident(tok.next));
+    unique_label := c.get_block(c.get_ident(tok));
     c.jmp_if_unterminated(unique_label);
-    rest[] = c.skip(tok.next.next, ";");
+    c.next(tok&, tok);
+    rest[] = c.skip(tok, ";");
     c.b = c.new_block();
     c.new_node(.ND_STMT, tok)
 };
 break :: fn(c, rest, tok) #prefix(.break, .ND_STMT) = {
     brk_label := c.brk_label || @error_tok(c, tok, "stray break");
     unique_label := brk_label;
-    rest[] = c.skip(tok.next, ";");
+    c.next(tok&, tok);
+    rest[] = c.skip(tok, ";");
     c.jmp_if_unterminated(brk_label);
     c.b = c.new_block();
     c.new_node(.ND_STMT, tok)
@@ -3461,17 +3528,19 @@ break :: fn(c, rest, tok) #prefix(.break, .ND_STMT) = {
 continue :: fn(c, rest, tok) #prefix(.continue, .ND_STMT) = {
     cont_label := c.cont_label || @error_tok(c, tok, "stray continue");
     unique_label := cont_label;
-    rest[] = c.skip(tok.next, ";");
+    c.next(tok&, tok);
+    rest[] = c.skip(tok, ";");
     c.jmp_if_unterminated(cont_label);
     c.b = c.new_block();
     c.new_node(.ND_STMT, tok)
 };
 block :: fn(c, rest, tok) #prefix(.@"{", .ND_STMT) = {
-    c.compound_stmt(rest, tok.next);
+    c.next(tok&, tok);
+    c.compound_stmt(rest, tok);
     c.new_node(.ND_STMT, tok)
 };
 empty_stmt :: fn(c, rest, tok) #prefix(.@";", .ND_STMT) = {
-    rest[] = tok.next;
+    c.next(rest, tok);
     c.new_node(.ND_STMT, tok)
 };
 _Static_assert :: fn(c, rest, tok) #prefix(._Static_assert, .ND_STMT) = {
@@ -3491,11 +3560,12 @@ fn stmt(c: *Ctx, rest: **Token, tok: *Token) *Node = {
     rule := rules.index(tok.kind);
     if rule.op == .ND_STMT {
         node := (rule.prefix)(c, rest, tok);
-        c.gen_expr(node);
+        @debug_assert(node.rhs.is_null() && node.lhs.is_null() && node.member.is_null());
+        node.tok = tok;
         node
     } else {
         node := c.parse_expr(rest, tok, .Stmt);
-        consume(rest, rest[], ";");
+        _ := consume(rest, rest[], ";");
         node
     }
 }
