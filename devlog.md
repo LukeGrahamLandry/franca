@@ -8,6 +8,21 @@ vacation. porting my old chess program.
   idk how it works but it seems to get the right answers. 
   https://www.chessprogramming.org/Traversing_Subsets_of_a_Set 
 - got precalc (magic bit boards) working
+- inline_for does help possibleSlideTargets.
+  and then also inline_for goes by reference 
+  and the compiler doesn't trust that its constant so backend doesn't hoist the load,
+  so doing that manually helps even more 
+  samples in that function: 253->212->184, runtime: 360ms -> 297ms.
+- tho actually there's only 120832 unique possibleTargets calls 
+  and for_subsets is in a deterministic order so it could be a 1MB table,
+  without hashing, using your place in the iteration order as the index. 
+  tho as i type that, i realize why don't i just use the old magic bitboards while searching for new ones. 
+  (still, the known index thing might be an advantage over the real case where you only have the blockers mask). 
+- the one where you skip the edge is harder to think about 
+  (it's not just ignoring 0xff818181818181ff because its fine to move along the edge, its just when its the last square of movement)
+  but helpfully the one that's easy to get rid of is the one in the loop,
+  samples: -> 1. 91.6ms. now set_bytes is all the time.
+  oh and the other one is what i already have to store for masking the key so move that into OneTable instead of keeping it in a seperate array. 
 
 
 Things that were better in the zig version than in my language:
