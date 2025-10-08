@@ -1,4 +1,27 @@
 
+## (Oct 8)
+
+vacation. porting my old chess program. 
+
+- its so sad how much easier the trick for VisitBitPermutations is than what i was doing before. 
+  127 lines -> 17, and most of that is still iterator unrolling junk. 
+  idk how it works but it seems to get the right answers. 
+  https://www.chessprogramming.org/Traversing_Subsets_of_a_Set 
+- got precalc (magic bit boards) working
+
+
+Things that were better in the zig version than in my language:
+- bit fields that contain enums
+- small tags. my @tagged always uses 8 bytes so i don't like using it
+- automatically taking address when calling a method that expects a pointer
+- i need to take address to index array which is verbose
+- bit boards sure use a lot of &|^ that don't have syntax sugar in my language
+
+> im convinced my computer is slower now. 
+> i can cmd+tab to the terminal and recompile before zed autosaves
+> so i get the same compile error again 
+> and have the error message show the text that doesn't exist in the file anymore. 
+
 ## (Oct 7)
 
 - trying to be more structured about accessing tok.next while parsing.
