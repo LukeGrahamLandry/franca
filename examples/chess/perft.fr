@@ -1,8 +1,11 @@
 // Runs perft on the positions from perft.txt.
-// TODO: CLI divide command like the fish
-// TODO: reimplement debugging against stockfish
+// TODO: CLI divide command like the fish (tho really thats part of uci)
+// TODO: allow testing a different uci engine with myself as the oracle?
+// TODO: cli argument to set the oracle (default to stockfish)
 
 positionData :: include_bytes("examples/chess/data/perft");
+
+doFishDebugOnFail :: true;  // #foreign("stockfish")
 
 main :: fn() void = {
     Crash :: import("@/lib/crash_report.fr");
@@ -17,7 +20,7 @@ main :: fn() void = {
         for cli_args() { it |
             if fromFen(it.str()) { game |
                 range(1, 7) { depth |
-                    nodes := countPossibleGames(game&, game.nextPlayer, depth, lists&);
+                    nodes := countPossibleGames(game&, depth, lists&);
                     @println("depth=% nodes=%", depth, nodes);
                 }
                 any = true;
@@ -93,16 +96,14 @@ fn workerFn(self: *Worker) void = {
         break :: local_return;
         @println("%", game&);
         for position.levels { perft |
-            nodes := countPossibleGames(game&, game.nextPlayer, perft.depth, self.lists&);
+            nodes := countPossibleGames(game&, perft.depth, self.lists&);
             totalNodes += nodes;
             if (nodes != perft.nodes) {
                 @print("[%/%] Failed % depth %. Expected % but found %.\n", nextTask + 1, self.tasks.len, position.fen, perft.depth, perft.nodes, nodes);
                 self.failedCount += 1;
-                // TODO
-                //if (doFishDebugOnFail) {
-                //    try debugPerft(&self.fish, position.fen, perft.depth, &self.arena, &self.lists);
-                //    _ = self.arena.reset(.retain_capacity);
-                //}
+                if doFishDebugOnFail {
+                    debugPerft(position.fen, perft.depth);
+                }
                 break(); // All deeper levels will also fail.
             } else {
                 @print("[%/%] Passed % depth %.\n", nextTask + 1, self.tasks.len, position.fen, perft.depth);
@@ -119,17 +120,17 @@ fn workerFn(self: *Worker) void = {
 }
 
 // TODO: try using a memo table here as well. Obviously cheating if i'm just trying to brag about NPS numbers but would make the tests run faster and be an extra check for acidently making collissions more common.
-fn countPossibleGames(game: *Board, me: Colour, remainingDepth: usize, lists: *ListPool) i64 = {
+fn countPossibleGames(game: *Board, remainingDepth: usize, lists: *ListPool) i64 = {
     @debug_assert_gt(remainingDepth, 0, "should early exit for depth 0");
     
     games := 0;
-    allMoves := possibleMoves(game, me, lists);
+    allMoves := possibleMoves(game, game.nextPlayer, lists);
     if remainingDepth == 1 {
         games = allMoves.items().len();
     } else {
         for (allMoves.items()) { move |
             unMove := game.play(move);
-            games += countPossibleGames(game, me.other(), remainingDepth - 1, lists);
+            games += countPossibleGames(game, remainingDepth - 1, lists);
             game.unplay(unMove);
         }
     };
@@ -190,6 +191,144 @@ fn parsePerfts(s: Str, a: Alloc) Result([]Perfts, Str) = {
     (Ok = all&.shrink_to_fit())
 }
 
-#use("@/lib/sys/threads.fr");
+fn debugPerft(fen: Str, depth: i64) void = {
+    ::imactuallygoingtolosemymind();
+    mark := temp().mark();
+    board: Board = fromFen(fen).unwrap();
+    @print("===== Starting % \n", fen);
+    fish: EngineProcess = init(temp());
+    lists: ListPool = init(temp());
+    foundProblems := 0;
+    walkPerft(fish&, board&, depth, lists&, foundProblems&);
+    if foundProblems == 0 {
+        println("ERROR: Fish didn't find the problem. \nPerft failed but fish agrees on counts for all leaf nodes. \nThat means when I make a move I'm getting a different fen than it would have. \nLast time it was a castling rights mistake.\n");
+    }
+    fish&.send(.quit);
+    // TODO: add a method to EngineProcess that force kills the process after a timeout
+    @print("===== Finished %\n", fen);
+    temp().reset(mark);
+}
+
+fn walkPerft(fish: *EngineProcess, board: *Board, depth: i64, lists: *ListPool, foundProblems: *i64) void = {
+    @if (depth == 0) return();
+
+    // First decide if this is the branch where we disagree about possible moves.
+    // (run with full depth because if we agree on moves at this level, i use these counts to choose which branch to follow)
+    fishMoves := runFishPerft(fish, board, depth);
+    fishMoves := fishMoves.childCount;
+    myMoves := possibleMoves(board, board.nextPlayer, lists);
+
+    myMovesSet: HashMap(Move, void) = init(temp());
+    done := false;
+    
+    // Do I have extra illegal moves?
+    for myMoves { move |
+        // Don't need to check that it's legal because comparing to stockfish will catch that mistake.
+        prev := myMovesSet&.insert(move, ());
+        if prev.is_some() {
+            @print("ERROR: I have duplicate move! %\n", move);
+            foundProblems[] += 1;
+            done = true;
+        };
+        if fishMoves&.get(move).is_none() {
+            @print("[%] Found! I have move % but fish doesn't. \n| %\n", depth, move, board.t_fen());
+            foundProblems[] += 1;
+            done = true;
+        }
+    }
+
+    // Am I missing moves?
+    for_keys fishMoves& { move |
+        if myMovesSet&.get(move).is_none() {
+            @print("[%] Found! Fish has move % but I don't. \n| %\n", depth, move, board.t_fen());
+            foundProblems[] += 1;
+            done = true;
+        }
+    };
+
+    // If we disagreed on moves, this level is the problem, don't need to keep going.
+    if done {
+        lists.release(myMoves); // :defer
+        return();
+    }
+    
+    // We agree on which moves are possible from here but disagree on the total size of the tree.
+    // Now need to decide which branch we disagree on by running both counts on a higher depth.
+    // Recursively repeat this whole process for each child.
+    for myMoves { myMove |
+        unMove := board.play(myMove);
+        myCount := countPossibleGames(board, depth - 1, lists);
+        fishCount := fishMoves&.get(myMove).unwrap();
+        if myCount != fishCount {
+            // This branch is the problem.
+            @print("Disagree on count at depth %: me:% vs fish:% \n| %\n", depth - 1, myCount, fishCount, board.t_fen());
+            walkPerft(fish, board, depth - 1, lists, foundProblems);
+        }
+        board.unplay(unMove);
+    }
+
+    lists.release(myMoves); // :defer
+}
+
+fn t_fen(self: *Board) Str = {
+    out := u8.list(temp());
+    self.writeFen(out&);
+    out.items()
+}
+
+FishResult :: @struct {
+    childCount: HashMap(Move, i64);
+};
+
+fn runFishPerft(fish: *EngineProcess, board: *Board, depth: i64) FishResult = {
+    fish.send(.uci);
+    fish.send(SetPositionMoves = (board = board));
+    fish.send(Go = (perft = (Some = depth)));
+    
+    result: FishResult = (childCount = init(temp()));
+    dowhile {
+        continue :: local_return;
+        // TODO: don't busy wait. use blockuntilrecieve
+        msg := fish.recieve() || continue(true);
+        @match(msg) {
+            fn PerftDivide(info) => {
+                result.childCount&.insert(info.move, info.count);
+                true
+            }
+            fn PerftDone(info) => false;
+            @default => true;
+        }
+    };
+    result
+}
+
+// note: only using from/to/promote fields because those are the ones i parse from uci 
+
+// :compilerbug/ordering
+fn imactuallygoingtolosemymind() void = {
+    fn hash(h: *TrivialHasher, s: *Move) void = {
+        h.hash(s.to&);
+        h.hash(s.from&);
+        if s.action == .promote {
+            xxx := s.actionData.promote.raw();
+            h.hash(xxx&);
+        }
+    }
+    
+    fn eq(a: *Move, b: *Move) bool = {
+        if a.action == .promote || b.action == .promote {
+            @if(a.action != b.action) return(false);
+            @if(a.actionData.promote != b.actionData.promote) return(false);
+        }
+        a.to == b.to && a.from == b.from
+    }
+    
+    fn display(a: Move, out: *List(u8)) void = {
+        a.writeAlgebraic(out);
+    }
+}
+
 #use("@/examples/chess/moves.fr");
 #use("@/examples/chess/uci.fr");
+#use("@/lib/collections/map.fr");
+#use("@/lib/sys/threads.fr");

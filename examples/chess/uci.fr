@@ -108,6 +108,11 @@ fn letterToFile(letter: u8) ?u8 = {
     (Some = letter - "a".ascii())
 }
 
+fn letterToRank(letter: u8) ?u8 = {
+    @if (letter < "1".ascii() || letter > "8".ascii()) return(.None);
+    (Some = letter - "1".ascii())
+}
+
 fn fromChar(letter: u8) ?Piece = {
     (Some = new(
         colour = @if(letter.ascii_is_upper(), .White, .Black),
@@ -124,9 +129,516 @@ fn fromChar(letter: u8) ?Piece = {
 }
 
 fn toUnicode(self: Piece) Str = {
-    letters :: " ♔♕♗♘♖♙ ♚♛♝♞♜♟";
+    // for empty, i want something that looks monospace even in a proportional font.
+    // underscore seems to work better than space or . or ⋅
+    letters :: "_♔♕♗♘♖♙_♚♛♝♞♜♟";  // :PieceKindOrderMatters
     off :: @const_slice(@as(u8) 0, 1, 4, 7, 10, 13, 16, 19, 20, 23, 26, 29, 32, 35, 38);  // TODO: use decode_utf8 at comptime
     i := int(self.kind().raw() + self.colour().raw() * 7);
     lo, hi := (off[i].int(), off[i + 1].int());
     letters.slice(lo, hi)
 }
+
+fn toChar(self: Piece) u8 = {
+    letters :: " kqbnrp";  // :PieceKindOrderMatters
+    letter := letters[self.kind().raw().int()];
+    @match(self.colour()) {
+        fn White() => letter.ascii_to_upper();
+        fn Black() => letter;
+    }
+}
+
+fn writeFen(self: *Board, out: *List(u8)) void = {
+    range(0, 8) { rank |
+        empty := 0;
+        range(0, 8) { file |
+            continue :: local_return;
+            p := self.get(file, 7 - rank);
+            if p.is_empty() {
+                empty += 1;
+                continue();
+            }
+            if empty > 0 {
+                @fmt(out, "%", empty);
+                empty = 0;
+            }
+            out.push(p.toChar());
+        }
+        @if(empty > 0) @fmt(out, "%", empty);
+        @if(rank < 7)  @fmt(out, "/");
+    }
+
+    @fmt(out, " % ", @if(self.nextPlayer == .White, "w", "b"));
+
+    @if(self.castling.get(.White, false)) @fmt(out, "K");
+    @if(self.castling.get(.White,  true)) @fmt(out, "Q");
+    @if(self.castling.get(.Black, false)) @fmt(out, "k");
+    @if(self.castling.get(.Black,  true)) @fmt(out, "q");
+    @if(!self.castling.any()) @fmt(out, "-");
+
+    @match(self.frenchMove) {
+        fn none() => @fmt(out, " - ");
+        fn file(file) => {
+            @fmt(out, " ");
+            out.push(fileToLetter(file));
+            @fmt(out, "% ", @if(self.nextPlayer == .White, "6", "3"));
+        };
+    }
+
+    @fmt(out, "% %", self.halfMoveDraw, self.fullMoves);
+}
+
+fn fileToLetter(file: u8) u8 = {
+    @debug_assert(file < 8);
+    "a".ascii() + file
+}
+
+fn rankToLetter(rank: u8) u8 = {
+    @debug_assert(rank < 8);
+    "1".ascii() + rank
+}
+
+// TODO: make sure this does the right thing for castling
+//       e1g1 means white short castling -- https://gist.github.com/DOBRO/2592c6dad754ba67e6dcaec8c90165bf
+fn writeAlgebraic(move: Move, out: *List(u8)) void = {
+    out.reserve(4 + int(move.action == .promote));
+    
+    fromRank, fromFile := move.from.div_mod(8);
+    toRank, toFile := move.to.div_mod(8);
+    out.push(fileToLetter(fromFile));
+    out.push(rankToLetter(fromRank));
+    out.push(fileToLetter(toFile));
+    out.push(rankToLetter(toRank));
+    
+    if move.action == .promote {
+        p: Piece = new(kind = move.actionData.promote, colour = .Black /*lower case*/);
+        out.push(p.toChar());
+        @debug_assert(@is(p.kind(), .Queen, .Knight, .Rook, .Bishop));
+    }
+}
+
+// field names matter!
+GoCmd :: @struct {
+    movetime: ?i64 = .None;  // maxSearchTimeMs
+    depth: ?i64 = .None;  // maxDepthPly
+    perft: ?i64 = .None;
+    winc: ?i64 = .None;
+    binc: ?i64 = .None;
+    wtime: ?i64 = .None;
+    btime: ?i64 = .None;
+};
+
+// TODO: do I want to use the same names as the commands?
+/// A command from a gui to an engine.
+UciCommand :: @tagged(
+    uci: void, // Init,
+    isready, // AreYouReady,
+    ucinewgame, // NewGame,
+    quit,
+    stop,
+    SetPositionInitial,
+    SetPositionMoves: @struct(board: *Board), // lifetime! don't save these pointers!
+    Go: GoCmd,
+    SetOption: @struct(name: Str, value: Str),
+    Unknown: Str,
+);
+
+// :compilerbug/ordering it doesn't like when 'display' overload set references UciCommand->Board,
+//      probably same :BitFieldsCompileError i was having before. so Board->Piece->@bit_fields
+fn displayXXX(cmd: *UciCommand, out: *List(u8)) void = {
+    @match(cmd) {
+        fn SetPositionInitial() => @fmt(out, "position startpos");
+        fn Go(args) => {
+            @fmt(out, "go");
+            inline_for GoCmd.get_fields() { $field |
+                name :: field[].name.str();
+                if GoCmd.get_field_ptr(args, field) { value |
+                    @fmt(out, " % %", name, value);
+                }
+            };
+        }
+        fn SetPositionMoves(state) => {
+            @fmt(out, "position fen ");
+            writeFen(state.board, out);
+        }
+        fn SetOption(option) => {
+            @fmt(out, "setoption name % value %", option.name, option.value);
+        }
+        fn Unknown(s) => @fmt(out, "%", s);
+        @default => @fmt(out, "%", cmd.tag());
+    }
+    @fmt(out, "\n");
+}
+
+// TODO: this sucks. use read_punct?
+// SetPositionMoves allocates the board pointer, caller owns it now.
+fn parse(s: []const u8, alloc: std.mem.Allocator, lists: *ListPool) UciCommand = {
+    // TODO: trim whitespace for the one word commands
+    simple :: @const_slice(UciCommand.Tag().uci, .isready, .ucinewgame, .quit, .stop);
+    inline_for simple { $it |
+        if s == it.name.str() {
+            return it;
+        }
+    };
+    
+    @if(s == "position startpos") return(.SetPositionInitial);
+    if s.starts_with("position fen ") {
+        if (std.mem.indexOf(u8, s, "moves") != null) {
+            panic("TODO: support moves after fen starting position. currently only supports startpos.", .{});
+        }
+
+        const startingWithFen = s[13..];
+        const board = try alloc.create(Board);
+        board.* = try Board.fromFEN(startingWithFen);
+        return .{ .SetPositionMoves = .{ .board = board } };
+    };
+    if s.starts_with("position startpos moves ") {
+        var words = std.mem.splitScalar(u8, str, ' ');
+        assert(std.mem.eql(u8, words.next().?, "position"));
+        assert(std.mem.eql(u8, words.next().?, "startpos"));
+        assert(std.mem.eql(u8, words.next().?, "moves"));
+        const board = try alloc.create(Board);
+        board.* = try Board.initial();
+        while (words.next()) |word| {
+            if (word.len <= 5) {
+                var moveStr = std.mem.zeroes([5]u8);
+                @memcpy(moveStr[0..word.len], word);
+                _ = try playAlgebraic(board, moveStr, lists);
+            }
+        }
+        return .{ .SetPositionMoves = .{ .board = board } };
+    } 
+    if s.starts_with("go") {
+        i := 3;
+        result: GoCmd = ();
+        
+        while => i < s.len {
+            word := advance_word(s, i&);
+            inline_for GoCmd.get_fields() { $field |
+                name :: field[].name.str();
+                if (std.mem.eql(u8, word, name)) {
+                    value = std.fmt.parseInt(u64, words.next() orelse break, 10) catch continue;
+                    GoCmd.get_field_ptr(result&, field)[] = (Some = value);
+                }
+            };
+        }
+        return .{ .Go = result };
+    }
+
+    // TODO: the rest
+    (Unknown = s)
+}
+
+fn advance_word(s: Str, i: *i64) Str = {
+    start := i[];
+    while => i[] < s.len && !s[i[]].is_ascii_whitespace() {
+        i[] += 1;
+    };
+    word := s.slice(start, i[]);
+    while => i[] < s.len && s[i[]].is_ascii_whitespace() {
+        i[] += 1;
+    };
+    word
+}
+
+UciInfo :: @struct {
+    depth: ?i64 = .None;
+    seldepth: ?i64 = .None;
+    multipv: ?i64 = .None;
+    nodes: ?i64 = .None;
+    nps: ?i64 = .None;
+    hashfull: ?i64 = .None;
+    tbhits: ?i64 = .None;
+    time: ?i64 = .None;
+    pv: ?Str = .None; // algebraic notation moves seperated by spaces. Has the lifetime of the string it was parsed from!
+    pvFirstMove: ?Move = .None; // If you just want the first move, and not need to deal with lifetimes.
+    mate: ?i64 = .None;
+    cp: ?i64 = .None;
+    
+    simple :: @const_slice(Fields(UciInfo).time, .depth, .seldepth, .multipv, .nodes, .nps, .hashfull, .tbhits, .time);
+};
+
+PerftNode :: @struct(move: Move, count: i64);
+
+// note: only from/to/promotion fields are set
+fn readAlgebraic(s: Str) ?Move = {
+    @if(s.len < 4) return(.None);
+    fromFile := letterToFile(s[0]) || return(.None);
+    fromRank := letterToRank(s[1]) || return(.None);
+    toFile := letterToFile(s[2]) || return(.None);
+    toRank := letterToRank(s[3]) || return(.None);
+    move := zeroed Move;
+    move.from = fromRank * 8 + fromFile;
+    move.to = toRank * 8 + toFile;
+    move.action = .none;
+    if s.len > 4 {
+        move.action = .promote;
+        p: Piece = fromChar(s[4]) || return(.None);
+        move.actionData.promote = p.kind();
+    };
+    (Some = move)
+}
+
+// A response from an engine to a gui.
+UciResult :: @tagged(
+    uciok: void, // InitOk,
+    readyok,
+    Info: UciInfo,
+    BestMove: ?Move,
+    PerftDivide: PerftNode,
+    PerftDone: @struct(total: i64),
+    Unknown: Str,
+);
+
+// TODO: this sucks. use read_punct?
+fn parse(s: Str) UciResult = {
+    simple :: @const_slice(UciResult.Tag().uciok, .readyok);
+    inline_for simple { $it |
+        @if(s == it[].name_str()) {
+            result := zeroed UciResult;
+            result&.tag_ptr()[] = it[];
+            return result;
+        }
+    };
+    
+    if s.starts_with("info") {
+        result: UciInfo = ();
+        i := 4;
+        while => i < s.len {
+            continue :: local_return;
+            word := advance_word(s, i&);
+            
+            inline_for UciInfo.simple { $field |
+                it := UciInfo.get_field(result&, field[]);
+                if word == field[].name_str() {
+                    value := 0; // TODO
+                    todo();
+                    it[] = value;
+                    continue();
+                }
+            };
+            
+            // TODO
+            /*
+            if word == "score" {
+                const units = words.next() orelse break;
+                if (std.mem.eql(u8, units, "cp")) {
+                    result.cp = std.fmt.parseInt(i64, words.next() orelse break, 10) catch continue;
+                } else if (std.mem.eql(u8, units, "mate")) {
+                    result.mate = std.fmt.parseInt(i64, words.next() orelse break, 10) catch continue;
+                }
+                continue();
+            };
+            if word == "pv" {
+                result.pv = str[words.index.?..str.len];
+                const first = words.next() orelse break;
+                if (first.len <= 5) {
+                    result.pvFirstMove = std.mem.zeroes([5]u8);
+                    @memcpy(result.pvFirstMove.?[0..first.len], first);
+                }
+                i = s.len;  // break
+                continue();
+            }
+            */
+        };
+        return(Info = result);
+    }
+    /* // TODO
+    if (std.mem.startsWith(u8, str, "bestmove")) {
+        var words = std.mem.splitScalar(u8, str, ' ');
+        std.debug.assert(std.mem.eql(u8, words.next().?, "bestmove"));
+        const first = words.next() orelse return error.UnknownUciStr;
+        if (std.mem.eql(u8, first, "(none)")) || first == "0000" {
+            return .{ .BestMove = null };
+        } else if (first.len <= 5) {
+            var move = std.mem.zeroes([5]u8);
+            @memcpy(move[0..first.len], first);
+            return .{ .BestMove = move };
+        }
+    } 
+    */
+    
+    i := 0;
+    if ((s.len > 4 && s[4] == ":".ascii()) || (s.len > 5 && s[5] == ":".ascii())) { // perft
+        while => s[i] != ":".ascii() {
+            i += 1;
+        };
+        move: Move = readAlgebraic(s.slice(0, i)) 
+            || @panic("TODO: readAlgebraic error");
+        
+        i += 1;
+        while => s[i].is_ascii_whitespace() {
+            i += 1;
+        };
+        
+        // TODO: sane way of detecting if there was no number to parse
+        value, _ := convert_number_dyn(s.rest(i), 10);
+        
+        return(PerftDivide = (move = move, count = value));
+    } 
+    if s.starts_with("Nodes searched:") {
+        i += "Nodes searched:".len();
+        while => s[i].is_ascii_whitespace() {
+            i += 1;
+        };
+        
+        // TODO: sane way of detecting if there was no number to parse
+        value, _ := convert_number_dyn(s.rest(i), 10);
+        return(PerftDone = (total = value));
+    };
+
+    (Unknown = s)
+}
+
+fn display(cmd: *UciResult, out: *List(u8)) void = {
+    @match(cmd) {
+        fn uciok() => @fmt(out, "uciok");
+        fn readyok() => @fmt(out, "readyok");
+        fn BestMove(move) => {
+            @fmt(out, "bestmove ");
+            if move { move |
+                writeAlgebraic(move[], out);
+            } else {
+                @fmt(out, "(none)"); // TODO: should this be "0000" instead? 
+            }
+        }
+        fn Info(info) => {
+            @fmt(out, "info");
+            
+            inline_for UciInfo.simple { $field |
+                it := UciInfo.get_field(field[], info);
+                if it { value |
+                    @fmt(out, " % %", field, value);
+                };
+            };
+            
+            if info.cp { cp |
+                @fmt(out, " score cp %", cp);
+            };
+            if info.pv { pv |
+                @fmt(out, " pv %", pv);
+            } else {
+                // My search isnt tracking pvs rn but it can give the best move at each level.
+                if info.pvFirstMove { move |
+                    @fmt(out, " pv ");
+                    writeAlgebraic(move, out);
+                }
+            }
+        }
+        fn PerftDivide() => panic("TODO: write PerftDivide");
+        fn PerftDone() => panic("TODO: write PerftDone");
+        fn Unknown(s) => @fmt(out, "%", s);
+    }
+    @fmt(out, "\n");
+}
+
+// An external engine controlled by uci via stdio. 
+EngineProcess :: @struct {
+    process: RunningProcess; // /TODO
+    output: List(u8);
+    cursor: i64;
+};
+
+fn init(a: Alloc) EngineProcess = {
+    // TODO: helpful error message if stockfish isnt installed.
+    initOther(@slice(@fmt_cstr("stockfish"), zeroed CStr), a)
+}
+
+fn initOther(command: []CStr, a: Alloc) EngineProcess = {
+    p := sys_capture_exec(command);
+    if p&.is_err() {
+        @panic("TODO: EngineProcess init error: %", p.Err);
+        // TODO: i feel like you shouldn't handle init errors, they should just be folded in to process error while running, 
+        //       because why have seperate codepaths for an error now vs an error 0.00001ms later?  
+    };
+    
+    (process = p.Ok, output = list(a), cursor = 0)
+}
+
+fn deinit(self: *EngineProcess) void = {
+    _ = try self.process.kill();
+}
+
+fn send(self: *EngineProcess, cmd: UciCommand) void = {
+    input := u8.list(temp());
+    displayXXX(cmd&, input&);
+    //@print("[SEND] %", input.items());  // TODO: cli flag somewhere to log uci messages for debugging
+    
+    // TODO: annoying that i don't have a way to send input without also reading output
+    error := u8.list(temp());
+    input := input.items();
+    status := poll(self.process&, @slice(self.output&, error&), true, input&, false);
+    
+    if error.len != 0 || status&.is_err() || status.Ok.is_some() || input.len != 0 {
+        @panic("TODO: finish EngineProcess.send");
+        // aaaa..... i just want to debug my perft, this doesn't matter yet. 
+    }
+}
+
+fn recieve(self: *EngineProcess) ?UciResult = {
+    while => self.cursor < self.output.len && self.output[self.cursor].is_ascii_whitespace() {
+        self.cursor += 1;
+    };
+
+    i := self.cursor;
+    while => i < self.output.len && self.output[i] != "\n".ascii() {
+        i += 1;
+    };
+    
+    if i == self.output.len {
+        error := u8.list(temp());
+        input := "";
+        status := poll(self.process&, @slice(self.output&, error&), true, input&, false);
+    
+        // TODO: process the new stuff in self.output before these errors tho. 
+        
+        { // TODO: ugh
+            // for now just forward debug logging
+            // TODO: do i want to add fake entries to UciResult for that? 
+            if error.len() != 0 {
+                eprint(error.items());
+            };
+            // TODO: this should clearly be part of the UciResult tho. 
+            //       eventually i want to make a gui for this and probably want to show logs in it somewhere. 
+            //       tho you do need to treat io errors as different from parsing errors since one could be helped by restarting the engine. 
+            if status&.is_err() {
+                @eprintln("UCI engine error: %", status.Err);
+                return(Some = (Unknown = "error"));
+            };
+            if status.Ok { status |
+                @eprintln("UCI engine exit status: %", status);
+                return(Some = (Unknown = "error"));
+            };
+        };
+    };
+    
+    while => i < self.output.len && self.output[i] != "\n".ascii() {
+        i += 1;
+    };
+    command := self.output.items().slice(self.cursor, i);
+    if command.len == 0 {
+        return(.None);
+    }
+    if i == self.output.len || self.output[i] != "\n".ascii() {
+        // don't have a full command yet
+        return(.None);
+    }
+    self.cursor = i;  // can't shift out old output here because the parsed command can point to it, TODO: shift out at the beginning i guess
+    while => self.cursor < self.output.len && self.output[self.cursor].is_ascii_whitespace() {
+        self.cursor += 1;
+    };
+    
+    //@println("[RECIEVE] %", command);  // TODO: cli flag somewhere to log uci messages for debugging
+    result: UciResult = parse(command);
+    (Some = result)
+}
+
+fn blockUntilRecieve(self: *EngineProcess, expected: UCI.UciResult) void = {
+    // TODO: timeout detect to if it died
+    while (true) {
+        std.Thread.yield() catch continue;
+        const msg = self.recieve() catch continue;
+        if (std.meta.eql(msg, expected)) break;
+    }
+}
+
+#use("@/lib/sys/subprocess.fr");
