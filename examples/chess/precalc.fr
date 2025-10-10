@@ -1,9 +1,15 @@
 //! Calculate good numbers to use in movegen lookup table hash functions.
 
+// TODO: put it in ClearOnAotBake so you can use the chess stuff at comptime and runtime without bloating your binary
 // This is immutable so multiple threads can share one.
 tables :: @static(Tables);
 
 fn initTables(a: Alloc) void = {
+    rng: Random.Rng = (next = Random.xoshiro256SS, s = ZOIDBERG_SEED);
+    each ZOIDBERG { it |
+        it[] = rng&.next().bitcast();
+    };
+    
     tables[] = (
         rooks = makeSliderAttackTable(a, possibleRookTargets, magic.rook&),
         bishops = makeSliderAttackTable(a, possibleBishopTargets, magic.bishop&),
@@ -24,7 +30,7 @@ Tables :: @struct {
     kings :: ast_alloc().alloc_init(i64, 64, possibleKingTargets);
 };
 
-TargetSquares :: @Fn(rookIndex: i64, blockerFlag: i64, skipEdgeSquares: bool) i64;
+TargetSquares :: @Fn(i: i64, blockerFlag: i64, skipEdgeSquares: bool) i64;
 
 // Use the hardcoded primes to build an attack table.
 // Doesn't need to try increasing table sizes because the correct size for no collisions given that hasher is precalculated.
@@ -36,7 +42,7 @@ fn makeSliderAttackTable(alloc: Alloc, $possibleTargets: TargetSquares, magic: *
         table := fillSliderTable(i, magic.magic&[i], magic.size&[i], alloc, possibleTargets)
             || @panic("Table % had collisions. Precalculated size % was wrong. (invalid bitboards data file)", i, magic.size&[i]);
         result&[i] = table;
-        totalSize += result&[i].buffer.len * size_of(i64) / 1024;
+        totalSize += result&[i].buffer_len() * size_of(i64) / 1024;
     }
     // @print("Slider attack table size: % KB.\n", totalSize);
     result
@@ -44,6 +50,8 @@ fn makeSliderAttackTable(alloc: Alloc, $possibleTargets: TargetSquares, magic: *
 
 main :: fn() void = {
     test_unblocked_rooks_can_move_14_squares();
+    _ := Tables.kings;
+    _ := Tables.knights;
 
     initTables(general_allocator());
     a := findBetterSliderAttackTable(magic.rook&, "ROOK", tables.rooks&);
@@ -152,29 +160,29 @@ fn fillSliderTableFast(sqI: i64, magic: i64, bits: u8, alloc: Alloc, old: *Attac
     (Some = result)
 }
 
-// TODO: can i do this with bit ops?
 fn possibleKingTargets(i: i64) i64 = {
     result := 0;
     rank, file := i.div_mod(8);
-
-    ff :: fn(r, f) => BIT(r*8+f);
+    f :: fn(cond, r, f) => {
+        bit := cond.int().shift_left(r*8+f);
+        result = result.bit_or(bit);
+    };
+    
     // forward
-    if (file < 7) {
-        result |= ff(rank, file + 1);
-        if (rank < 7) result |= ff(rank + 1, file + 1);
-        if (rank > 0) result |= ff(rank - 1, file + 1);
-    }
-    // back
-    if (file > 0) {
-        result |= ff(rank, file - 1);
-        if (rank < 7) result |= ff(rank + 1, file - 1);
-        if (rank > 0) result |= ff(rank - 1, file - 1);
-    }
-    // horizontal
-    if (rank < 7) result |= ff(rank + 1, file);
-    if (rank > 0) result |= ff(rank - 1, file);
+    f(file < 7, rank, file + 1);
+    f(file < 7 && rank < 7, rank + 1, file + 1);
+    f(file < 7 && rank > 0, rank - 1, file + 1);
 
-    return result;
+    // back
+    f(file > 0, rank, file - 1);
+    f(file > 0 && rank < 7, rank + 1, file - 1);
+    f(file > 0 && rank > 0, rank - 1, file - 1);
+    
+    // horizontal
+    f(rank < 7, rank + 1, file);
+    f(rank > 0, rank - 1, file);
+
+    result
 }
 
 // Yield once for each combination of set bits in n.
@@ -189,8 +197,8 @@ fn for_subsets(d: i64, $body: @Fn(n: i64) void) = {
     }
 } 
 
+// :DirectionsOrderMatters
 fn possibleRookTargets(rookIndex: i64, blockerFlag: i64, $skipEdgeSquares: bool) i64 = {
-    // TODO: if (blockerFlag == 0) use bit ops to build the plus sign
     return possibleSlideTargets(rookIndex, blockerFlag, skipEdgeSquares, allDirections.slice(0, 4));
 }
 
@@ -212,6 +220,7 @@ fn possibleSlideTargets(startIndex: i64, blockerFlag: i64, $skipEdgeSquares: boo
             checkFile += offset._0;
             checkRank += offset._1;
             if (skipEdgeSquares) {
+                // :DirectionsOrderMatters
                 @if (dir >= 2 && (checkRank > 6 || checkRank < 1)) break();
                 @if (dir < 2 && (checkFile > 6 || checkFile < 1)) break();
             }
@@ -239,7 +248,7 @@ test_unblocked_rooks_can_move_14_squares :: fn() void = {
     }
 }
 
-// order matters: sliced in possibleXXXTargets, loop counter in possibleSlideTargets/getChecksInfo
+// :DirectionsOrderMatters
 allDirections :: @const_slice(
     (1, 0),
     (-1, 0),
@@ -262,7 +271,8 @@ possibleKnightTargets :: fn(i: i64) i64 = {
                 checkFile := i.mod(8) + x;
                 checkRank := i / 8 + y;
                 invalid := checkFile > 7 || checkRank > 7 || checkFile < 0 || checkRank < 0;
-                if (!invalid) result |= BIT(checkRank * 8 + checkFile);
+                bit := int(!invalid).shift_left(checkRank * 8 + checkFile);
+                result = result.bit_or(bit);
             }
         }
     }
@@ -274,7 +284,7 @@ possibleKnightTargets :: fn(i: i64) i64 = {
 AttackTable :: Array(OneTable, 64);
 
 OneTable :: @struct {
-    buffer: []i64;
+    buffer: *i64;
     bitsInv: u8;
     magic: i64;  // brute forced by findBetterSliderAttackTable
     mask: i64;  // bitboard of relevant blockers. same as move targets, assuming no blocking pieces, and skipEdgeSquares=true.
@@ -284,15 +294,18 @@ OneTable :: @struct {
 fn init(a: Alloc, bits: u8, magic: i64, mask: i64) OneTable = 
     (bitsInv = 64 - bits, buffer = allocOnes(a, bits), magic = magic, mask = mask);
 
+fn buffer_len(self: OneTable) i64 =
+    1.shift_left(64 - self.bitsInv.zext());
+
 fn deinit(self: OneTable, a: Alloc) void = 
-    a.dealloc(i64, self.buffer);
+    a.dealloc(i64, self.buffer.slice(self.buffer_len()));
 
 // Zero is a possible value since there might be no possible moves so have the default be all ones
 // (nobody can teleport to all squares of the board), so I can detect it while building the map.
-fn allocOnes(a: Alloc, bits: u8) []i64 = {
+fn allocOnes(a: Alloc, bits: u8) *i64 = {
     it := a.alloc_uninit(i64, 1.shift_left(bits.zext()));
     it.interpret_as_bytes().set_bytes(0xFF);
-    it
+    it.ptr
 }
 
 // Returns false on collision. Only used while building the table at the very start.
@@ -302,7 +315,7 @@ fn set(self: *OneTable, key: i64, value: i64) bool = {
     // if they collide but the values happen to be the same that's fine.
     // idk if that happens often. feels like it should because of extra dudes past the one that actually blocked you?
     @if(prev != OneTable.EMPTY && prev != value) return(false);
-    self.buffer[self.indexOf(key)] = value;
+    self.buffer.offset(self.indexOf(key))[] = value;
     true
 }
 
@@ -320,7 +333,7 @@ fn indexOf(self: *OneTable, unmasked_key: i64) i64 = {
 }
 
 fn get(self: *OneTable, key: i64) i64 =
-    self.buffer[self.indexOf(key)];
+    self.buffer.offset(self.indexOf(key))[];
 
 // For movegen lookup tables. Generated by precalc.zig by trying random numbers.
 // HASH_MUL is the multiplier to use in the hash function.
@@ -336,11 +349,16 @@ Magic :: @struct {
     };
 }
 
-magic :: {
-    #use("@/lib/sys/fs.fr");
-    bytes := read_entire_file_or_crash(ast_alloc(), "examples/chess/data/bitboards");
-    @assert_eq(bytes.len, size_of(Magic), "corrupt bitboards data file");
-    ptr_cast_unchecked(u8, Magic, bytes.ptr)  // TODO: is alignment real?
-};
+magic :: Magic.include_bytes("examples/chess/data/bitboards");
 
 fn BIT(i: i64) i64 = 1.shift_left(i);
+
+// TODO: are there better numbers? experimentally run a bunch of games until I find the ones with least collissions?
+/// Magic numbers for Zobrist hashing. I think I'm so funny.
+/// https://en.wikipedia.org/wiki/Zobrist_hashing
+// TODO: make sure i use bss for this!
+// TODO: put it in ClearOnAotBake so you can use the chess stuff at comptime and runtime without bloating your binary
+ZOIDBERG :: @static(Array(i64, 781 + 128));  // arbitrary numbers filled in at runtime
+// TODO: how did i pick these numbers? can i just make it 4 or whatever...?
+// TODO: ugly... compiler shouldn't complain about u64 literal with high bit set :compilerbug
+ZOIDBERG_SEED :Array(u64, 4): (@as(u64) 11196532868861123662.bitcast(), @as(u64) 6132230720027805519.bitcast(), @as(u64) 14166148882366595784.bitcast(), @as(u64) 2320488099995370816.bitcast());

@@ -1,0 +1,132 @@
+
+fn fromFen(s: Str) ?Board = {
+    b: Board = blank();
+    if !fromFenNoUpdateChecks(b&, s) {
+        return(.None)
+    }
+    b.checks = getChecksInfo(b&, b.nextPlayer);
+    b.pastBoardHashes&[0] = b.zoidberg;
+    (Some = b)
+}
+
+// note: not atomic. failed parse will write junk on the board. 
+fn fromFenNoUpdateChecks(self: *Board, s: Str) bool = {
+    err :: fn(cond) => @if(cond) return(false);
+
+    err(s.len < 15);
+    self.zoidberg = 1;
+    file, rank, i := (0, 7, 0);
+    while => i < s.len && s[i] != " ".ascii() {
+        letter := s[i]; i += 1;
+        if letter.dec_digit() { count |
+            file += count;
+        } else {
+            if letter == "/".ascii() {
+                err(file != 8);
+                file = 0;
+                err(rank == 0); // This assumes no trailing '/'
+                rank -= 1;
+            } else {
+                ::?Piece;
+                piece: Piece = fromChar(letter) || return(false);
+                self.set(file, rank, piece);
+                file += 1;
+                err(rank > 8);
+            }
+        };
+    }
+    err(file != 8);
+    err(i + 2 >= s.len);
+    err(s[i] != " ".ascii()); i += 1;
+    player := s[i]; i += 1;
+
+    self.nextPlayer = @switch(player) {
+        @case("w".ascii()) => .White;
+        @case("b".ascii()) => .Black;
+        @default => return(false);
+    };
+    
+    // These fields are less important so are optional.
+    self.castling = CastlingRights.NONE;
+    self.frenchMove = .none;
+    self.halfMoveDraw = 0;
+    self.fullMoves = 1;
+    
+    @if(i == s.len) return(true);
+    err(s[i] != " ".ascii()); i += 1;
+    while => i < s.len && s[i] != " ".ascii() {
+        @switch(s[i]) {
+            @case("K".ascii()) => self.castling&.set(.White, false, true);
+            @case("Q".ascii()) => self.castling&.set(.White, true, true);
+            @case("k".ascii()) => self.castling&.set(.Black, false, true);
+            @case("q".ascii()) => self.castling&.set(.Black, true, true);
+            @case("-".ascii()) => ();  // nobody can castle
+            @default => err(true);
+        };
+        i += 1;
+    };
+    
+    @if(i == s.len) return(true);
+    err(s[i] != " ".ascii()); i += 1;
+    
+    // TODO: update zoidberg for turn index / french move / castling ?
+    
+    if s[i] != "-".ascii() {
+        err(i + 1 >= s.len);
+        targetRank := @if(self.nextPlayer == .White, "6".ascii(), "3".ascii());
+        // The target must be on the right rank given the player that just moved.
+        err(s[i + 1] != targetRank);
+        ::?u8;
+        self.frenchMove = (file = letterToFile(s[i]) || return(false));
+        i += 1;
+    }
+    // else, no french move is possible.
+    i += 1;
+
+    @if(i == s.len) return(true);
+    err(s[i] != " ".ascii()); i += 1;
+    
+    // TODO: need to reliably return error. rest.len==0 doesn't work because we might be at the end of input. d
+    halfMoveDraw, s1 := convert_number_dyn(s.rest(i), 10);
+    err(/*s1.len == 0 || */halfMoveDraw < 0);
+    i = s.len - s1.len;
+    self.halfMoveDraw = halfMoveDraw.trunc();
+    
+    @if(i == s.len) return(true);
+    err(s[i] != " ".ascii()); i += 1;
+    
+    fullMoves, s2 := convert_number_dyn(s.rest(i), 10);
+    err(/*s2.len == 0 || */fullMoves < 0);
+    i = s.len - s2.len;
+    self.fullMoves = fullMoves.trunc();
+
+    true
+}
+
+fn letterToFile(letter: u8) ?u8 = {
+    @if (letter < "a".ascii() || letter > "h".ascii()) return(.None);
+    (Some = letter - "a".ascii())
+}
+
+fn fromChar(letter: u8) ?Piece = {
+    (Some = new(
+        colour = @if(letter.ascii_is_upper(), .White, .Black),
+        kind = @switch(letter.ascii_to_upper()) {
+            @case("P".ascii()) => .Pawn;
+            @case("B".ascii()) => .Bishop;
+            @case("N".ascii()) => .Knight;
+            @case("R".ascii()) => .Rook;
+            @case("Q".ascii()) => .Queen;
+            @case("K".ascii()) => .King;
+            @default => return(.None);
+        },
+    ))
+}
+
+fn toUnicode(self: Piece) Str = {
+    letters :: " ♔♕♗♘♖♙ ♚♛♝♞♜♟";
+    off :: @const_slice(@as(u8) 0, 1, 4, 7, 10, 13, 16, 19, 20, 23, 26, 29, 32, 35, 38);  // TODO: use decode_utf8 at comptime
+    i := int(self.kind().raw() + self.colour().raw() * 7);
+    lo, hi := (off[i].int(), off[i + 1].int());
+    letters.slice(lo, hi)
+}

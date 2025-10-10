@@ -341,9 +341,10 @@ fn switch(arg: FatExpr, handlers: FatExpr) FatExpr = {
     handlers := handlers.expr.Block.body.items();
     arg = compile_ast(arg);
     inspected_ty: Type = arg.ty; // TODO: if you dont have the type hint you get confusing error message trying to call fn as(Type, Ast) becuase its the unique ffi TypeId type. -- Apr 21 
-    body := @{ panic("unhandled switch case") };
+    body := @{};
     first := true;
     i := handlers.len().sub(1);
+    had_default := false;
     
     // Declaring variables is weird because name resolution has already run. 
     // All the references to it need to be in its lexical scope, so the whole code is in an unquote. 
@@ -382,6 +383,7 @@ fn switch(arg: FatExpr, handlers: FatExpr) FatExpr = {
                                 } else {
                                     body = @{ @[action](arg_var) };
                                 };
+                                had_default = true;
                                 
                             } else {
                                 compile_error("@default must be the last handler in @switch", stmt.loc);
@@ -402,6 +404,9 @@ fn switch(arg: FatExpr, handlers: FatExpr) FatExpr = {
                     first = false;
                 };
                 i = i.sub(1);
+            };
+            if !had_default {
+                compile_error("@switch requires a @default branch", arg.loc);
             };
             body
         }]
@@ -545,8 +550,8 @@ fn is_fake_int(T: *TypeInfo) bool = {
 fn enum_basic($T: Type) void = {
     ::@late T.expect_enum();
         
-    fn eq(a: T, b: T) bool #inline = a.raw() == b.raw();
-    fn ne(a: T, b: T) bool #inline = a.raw() != b.raw();
+    fn eq(a: T, b: T) bool #inline #fold = a.raw() == b.raw();
+    fn ne(a: T, b: T) bool #inline #fold = a.raw() != b.raw();
     
     RAW :: { i := get_type_info_ref(T); i.Enum.raw };
     

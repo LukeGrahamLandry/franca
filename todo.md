@@ -1,3 +1,6 @@
+
+- using @switch on an enum instead of @match is an easy footgun because it expects @case(.foo) instead of fn foo() and then you'll be confused
+- Type Error when calling a function ugently needs to show both the call site and the declaration site
 - DONT EXEC UNZIP IN examples/testing.fr
   apple's unzip clearly doesn't work...
   ```
@@ -808,6 +811,16 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
 - epicycles: make it actually trace the correct path
 - lambda: imporove diagrams and implement evaluation
 - import_wasm: make it usable for libraries written in other languages
+
+### Chess
+
+- once perft works, print a mnps number in the main run_tests so i notice if it gets 3x slower via compiler bug
+- experiment with New Types for index/rank/file/mask so you can't mess up the unit conversion
+- have Slider :: @enum(Rook, Bishop) instead of functions with isRook: bool parameters
+- regressions (unported):
+  - Learned.Weights
+  - doFishDebugOnFail
+- gui
 
 ### Terminal
 

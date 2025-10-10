@@ -1,0 +1,195 @@
+// Runs perft on the positions from perft.txt.
+// TODO: CLI divide command like the fish
+// TODO: reimplement debugging against stockfish
+
+positionData :: include_bytes("examples/chess/data/perft");
+
+main :: fn() void = {
+    Crash :: import("@/lib/crash_report.fr");
+    //Crash'hook_backtrace();
+    
+    import("@/examples/chess/precalc.fr")'initTables(temp());
+    perfts := parsePerfts(positionData, temp()).or(fn(e) => panic(e));
+        
+    {
+        any := false;
+        lists: ListPool = init(temp());
+        for cli_args() { it |
+            if fromFen(it.str()) { game |
+                range(1, 7) { depth |
+                    nodes := countPossibleGames(game&, game.nextPlayer, depth, lists&);
+                    @println("depth=% nodes=%", depth, nodes);
+                }
+                any = true;
+            };
+        };
+        if any {
+            return();
+        }
+    };
+
+    // For best parallelism, don't put the longest tasks at the end. You don't want time at the end where only one therad is working.
+    sort :: import("@/lib/sort.fr")'quicksort(Perfts, fn(a, b) => 
+        a.allCount >= b.allCount);  // ascending
+    perfts.sort();
+
+    cores := 1;  // TODO
+    taskIndex := 0;
+    workers := temp().alloc_uninit(Worker, cores);
+    enumerate workers { i, it |
+        it.id = i;
+        it.lists = init(temp());  // :DontStoreTheAllocator
+        it.nextTask = taskIndex&;
+        it.tasks = perfts;
+        it.failedCount = 0;
+        it.thread = start_thread(Worker, workerFn, it); // last!
+    };
+    
+    failed := 0;
+    each workers { it |
+        it.thread.join();
+        failed += it.failedCount;
+    };
+
+    if (failed == 0) {
+        @print("Passed All %.\n", perfts.len);
+    } else {
+        @print("Failed %/%.\n", failed, perfts.len);
+    }
+}
+
+Perfts :: @struct {
+    fen: Str;
+    levels: []Perft;
+    allCount: i64; // for sorting
+};
+
+Perft :: @struct {
+    nodes: i64;
+    depth: i64;
+};
+
+Worker :: @struct {
+    id: i64;
+    thread: *Thread;
+    lists: ListPool;
+    nextTask: *i64;
+    tasks: []Perfts;
+    failedCount: i64;
+};
+
+fn next(self: *Worker) ?i64 = {
+    nextTask := i64.atomic_inc(self.nextTask);
+    @if(nextTask >= self.tasks.len) return(.None);
+    (Some = nextTask)
+}
+
+fn workerFn(self: *Worker) void = {
+    startTime := timestamp();
+    totalNodes, passedCount := (0, 0);
+    while => self.next() { nextTask |
+        position := self.tasks[nextTask]&;
+        game: Board = fromFen(position.fen).unwrap();
+        break :: local_return;
+        @println("%", game&);
+        for position.levels { perft |
+            nodes := countPossibleGames(game&, game.nextPlayer, perft.depth, self.lists&);
+            totalNodes += nodes;
+            if (nodes != perft.nodes) {
+                @print("[%/%] Failed % depth %. Expected % but found %.\n", nextTask + 1, self.tasks.len, position.fen, perft.depth, perft.nodes, nodes);
+                self.failedCount += 1;
+                // TODO
+                //if (doFishDebugOnFail) {
+                //    try debugPerft(&self.fish, position.fen, perft.depth, &self.arena, &self.lists);
+                //    _ = self.arena.reset(.retain_capacity);
+                //}
+                break(); // All deeper levels will also fail.
+            } else {
+                @print("[%/%] Passed % depth %.\n", nextTask + 1, self.tasks.len, position.fen, perft.depth);
+            }
+        };
+        passedCount += 1;
+    }
+
+    if (self.failedCount == 0) {
+        endTime := timestamp();
+        ms := endTime - startTime;
+        @print("Thread % finished % perfts in %ms. % nodes / second.\n", self.id, passedCount, ms, totalNodes * 1000 / ms);
+    }
+}
+
+// TODO: try using a memo table here as well. Obviously cheating if i'm just trying to brag about NPS numbers but would make the tests run faster and be an extra check for acidently making collissions more common.
+fn countPossibleGames(game: *Board, me: Colour, remainingDepth: usize, lists: *ListPool) i64 = {
+    @debug_assert_gt(remainingDepth, 0, "should early exit for depth 0");
+    
+    games := 0;
+    allMoves := possibleMoves(game, me, lists);
+    if remainingDepth == 1 {
+        games = allMoves.items().len();
+    } else {
+        for (allMoves.items()) { move |
+            unMove := game.play(move);
+            games += countPossibleGames(game, me.other(), remainingDepth - 1, lists);
+            game.unplay(unMove);
+        }
+    };
+    
+    lists.release(allMoves);  // :defer
+    games
+}
+
+fn parsePerfts(s: Str, a: Alloc) Result([]Perfts, Str) = {
+    all := Perfts.list(a);
+    i := 0;
+    while => i < s.len {
+        continue :: local_return;
+        while => i < s.len && s[i].is_ascii_whitespace() {
+            i += 1;
+        };
+        if i+1 < s.len && s[i] == "/".ascii() && s[i+1] == "/".ascii() {
+            while => i < s.len && s[i] != "\n".ascii() {
+                i += 1;
+            };
+            continue()
+        };
+        if i >= s.len {
+            continue();
+        }
+        
+        start := i;
+        while => i < s.len && s[i] != ";".ascii() {
+            i += 1;
+        };
+        fen := s.slice(start, i);
+        ::?Board;
+        _: Board = fromFen(fen)
+            || return(Err = "failed to parse fen");
+        perfts := Perft.list(a);
+        total := 0;
+        
+        while => i < s.len && s[i] == ";".ascii() {
+            err :: fn() => return(Err = "expected ;D<depth> <nodes>");
+            @if(s[i+1] != "D".ascii()) err();
+            
+            depth, s2 := convert_number_dyn(s.rest(i+2), 10);
+            @if(s2.len == 0) err();
+            i = s.len - s2.len;
+            @if(s[i] != " ".ascii()) err();
+            nodes, s3 := convert_number_dyn(s.rest(i+1), 10);
+            @if(s3.len == 0) err();
+            i = s.len - s3.len;
+            i += 1;
+            
+            perfts&.push(depth = depth, nodes = nodes);
+            total += nodes;
+            
+        }
+        all&.push(fen = fen, levels = perfts&.shrink_to_fit(), allCount = total);
+    };
+
+    (Ok = all&.shrink_to_fit())
+}
+
+#use("@/lib/sys/threads.fr");
+#use("@/examples/chess/moves.fr");
+#use("@/examples/chess/uci.fr");

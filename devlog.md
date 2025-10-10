@@ -1,5 +1,33 @@
 
-## (Oct 8)
+## (Oct 10) chess
+
+mistakes
+  - one place i was using zoidberg index instead of value. 
+  - typoed a variable in knightMove and lost one
+
+## (Oct 9) chess
+
+- even more of a detour, something's fucked up about the zig version... 
+  my notes say i was getting ~140 MNPS perft but now i get 44 MNPS. 
+  spending 66% of the time in `_platform_memmove`. 
+  where am i even calling that? lldb says getZoidberg(), wtf? 
+  lol it's copying the whole array every time 
+  just to read one value out of it... with -Doptimize=ReleaseFast
+  fixed by explicitly taking the address of the array before indexing it. wtf. 
+  idk why only that one place i index the array matters, maybe its freaked out by the index being a function call. 
+  ```
+  before: Thread 0 finished 165 perfts in 154040ms.  44031273 nodes / second.
+  after:  Thread 0 finished 165 perfts in  44173ms. 153545771 nodes / second.
+  ```
+  i guess they broke that between `0.11.0-dev.3937+78eb3c561` and `0.14.1`, 
+  and i didn't rebenchmark when i updated zig.
+  probably https://github.com/ziglang/zig/issues/13938
+  so glad i can focus on debugging my application rather than debugging my programming language knowledge.
+- continuing porting movegen, found some nice compiler bugs, so this was worth it. 
+- made `@switch` require a default case. dumb that i was letting you silently panic instead of documenting that you thought you were being exhaustive. 
+- lots of silly mistakes with parsing fens, very error prone
+
+## (Oct 8) chess
 
 vacation. porting my old chess program. 
 
@@ -24,15 +52,18 @@ vacation. porting my old chess program.
   samples: -> 1. 91.6ms. now set_bytes is all the time.
   oh and the other one is what i already have to store for masking the key so move that into OneTable instead of keeping it in a seperate array. 
 
-
 Things that were better in the zig version than in my language:
 - bit fields that contain enums
 - small tags. my @tagged always uses 8 bytes so i don't like using it
 - automatically taking address when calling a method that expects a pointer
 - i need to take address to index array which is verbose
 - bit boards sure use a lot of &|^ that don't have syntax sugar in my language
+- defer
+- `inline for (directions[0..8], 0..) |offset, dir| outer: { while (true) { break :outer; } }`
+- `@case("P".ascii()) => foo;` is much clunkier than `'P' => foo,`
+- needing to instantate overload sets for @enum is dumb
+- can't put constant fields on a @bit_fields so i end up with like Piece_EMPTY instead of Piece.EMPTY
 
-> im convinced my computer is slower now. 
 > i can cmd+tab to the terminal and recompile before zed autosaves
 > so i get the same compile error again 
 > and have the error message show the text that doesn't exist in the file anymore. 

@@ -1,0 +1,1285 @@
+// This code's predecessor: https://github.com/LukeGrahamLandry/ChessBot
+
+// TODO: there are comments that talk about what profiled as faster,
+//       but that was for the llvm release build when this was written in zig. 
+//       should re-benchmark and see if its still true for my dumber backend. 
+
+//! Representing the game. Playing and unplaying moves.
+
+// order matters if i want to hook it up to https://github.com/LukeGrahamLandry/ChessBot/blob/7092e33760e604389467f7424ce935d2a35823c0/web/chess.js
+Kind :: @enum(u8) (Empty, King, Queen, Bishop, Knight, Rook, Pawn);
+
+// TODO: do this as part of the square wieght lookup table
+fn material(self: Kind) i64 = {
+    values :: @const_slice(@as(u16) 0, 65535, 900, 330, 320, 500, 100);
+    values[self.raw().zext()].zext()
+}
+
+Colour :: @enum(u8) (White, Black);
+
+fn other(self: Colour) Colour = 
+    @as(Colour) @as(u8) trunc(bit_xor(1, self.raw().zext()));
+
+// 0 -> 1, 1 -> -1
+fn dir(self: Colour) i64 = 
+    1 - 2 * self.raw().zext();
+
+// This is packed so I can cast board.squares a to byte array
+Piece :: @(import("@/lib/bit_fields.fr")'bit_fields)(
+    colour := 1,
+    kind := 4,
+    _ := 3,
+);
+
+Piece_EMPTY :: zeroed Piece;
+
+fn new(it: @struct(kind: Kind, colour: Colour)) Piece =
+    construct(kind = it.kind.raw().zext(), colour = it.colour.raw().zext());
+
+// TODO: this sucks
+fn colour(self: Piece) Colour = @as(Colour) @as(u8) self.get(.colour).trunc();
+fn kind(self: Piece) Kind = @as(Kind) @as(u8) self.get(.kind).trunc();
+fn colour(self: *Piece, value: Colour) void = self.set(.colour, value.raw().zext());
+fn kind(self: *Piece, value: Kind) void = self.set(.kind, value.raw().zext());
+
+EMPTY: Piece : new(kind = .Empty, colour = .White);
+
+
+fn eval(self: Piece) i64 = 
+    self.colour().dir() * self.kind().material();
+
+// TODO: hang if you just call this `empty` :compilerbug
+fn is_empty(self: Piece) bool = 
+    self.kind() == .Empty;
+
+// TODO: just make the other one and compare repr
+fn is(self: Piece, c: Colour, k: Kind) bool = 
+    self.kind() == k && self.colour() == c;
+
+INIT_FEN :: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+Square :: i64;
+
+BitBoardPair :: @struct(bw := zeroed EnumMap(Colour, i64));
+
+fn setBit(self: *BitBoardPair, index: Square, colour: Colour) void = {
+    self.getFlag(colour).bor(BIT(index));
+}
+
+fn unsetBit(self: *BitBoardPair, index: Square, colour: Colour) void = {
+    self := self.getFlag(colour);
+    self[] = self[].bit_xor(1.shift_left(index));
+}
+
+fn getFlag(self: *BitBoardPair, colour: Colour) *i64 = 
+    self.bw&.index(colour);
+
+fn both(self: BitBoardPair) i64 = 
+    self.bw&[.White].bit_or(self.bw&[.Black]);
+
+OldMove :: @struct {
+    move: Move;
+    taken: Piece;
+    original: Piece;
+    old_castling: CastlingRights;
+    lastMove: ?Move;
+    // TODO: remove or easy way to toggle off in release. probably doesnt matter but offends me.
+    debugPeicePositions: BitBoardPair;
+    debugSimpleEval: i64;
+    frenchMove: FrenchMove;
+    oldHalfMoveDraw: u32;
+    debugZoidberg: i64;
+    oldChecks: ChecksInfo;
+    pastStartIndex: i64;
+};
+
+CastlingRights :: @struct {
+    _: u8;
+    NONE :: zeroed CastlingRights;
+    ALL: CastlingRights : (_ = 0b1111);
+};
+
+fn get(self: CastlingRights, colour: Colour, $going_left: bool) bool = {
+    i: i64 = colour.raw().zext() * 2 + going_left.int();
+    self._.bit_and(1.shift_left(i)) != 0
+}
+
+fn set(self: *CastlingRights, colour: Colour, $going_left: bool, value: bool) void = {
+    i: i64 = colour.raw().zext() * 2 + going_left.int();
+    self._ = (@as(i64) self._.zext()).bit_and(1.shift_left(i).bit_not()).bit_or(value.int().shift_left(i)).trunc();
+}
+
+fn any(self: CastlingRights) bool = 
+    self._ != 0;
+
+FrenchMove :: @tagged(none: void, file: u8);
+
+fn getRawIndex(piece: Piece, square: Square) i64 = 
+    (piece.kind().raw().zext() + (piece.colour().raw().zext() * 7)) * 64 + square;
+
+// This is a chonker struct (if I store repititions inline) but that's fine because I only ever need one.
+Board :: @struct {
+    squares := zeroed Array(Piece, 64);
+    peicePositions := zeroed BitBoardPair;
+    // Absolute material eval (+ any extra heuristics like prefer castling). Positive means white is winning.
+    simpleEval := 0; // TODO: a test that recalculates
+    kingIndex := zeroed EnumMap(Colour, Square);
+    frenchMove: FrenchMove = .none;
+    nextPlayer: Colour = .White;
+    castling := CastlingRights.ALL;
+    halfMoveDraw: u32 = 0;
+    fullMoves: u32 = 1;
+    // line: if (slowTrackAllMoves) std.BoundedArray(OldMove, 300) else void = if (slowTrackAllMoves) std.BoundedArray(OldMove, 300).init(0) catch @panic("Overflow line.") else {}, // inefficient but useful for debugging.
+    zoidberg: i64 = 1;
+    lastMove: ?Move = .None;
+    checks: ChecksInfo = ();
+    knights: BitBoardPair = ();
+
+    // For draw by repetition.
+    // If I were reusing the list it would only need to be 50 long (becuase draw anyway if no captures or pawn moves),
+    // but to allow undo, I'm just keeping the whole history and moving the start index forward.
+    pastBoardHashes := zeroed Array(i64, 512); // = undefined;
+    pastStartIndex: i64 = 0;
+    pastEndIndex: i64 = 1;
+};
+
+// tests/todo/void_to_struct_as_return.fr fn blank() Board = ();
+fn blank() Board = {
+    x: Board = ();
+    x
+}
+
+fn get(self: *Board, file: i64, rank: i64) Piece = {
+    return self.squares&[rank * 8 + file];
+}
+
+fn set(self: *Board, file: i64, rank: i64, value: Piece) void = {
+    index := rank * 8 + file;
+    @debug_assert(self.emptyAt(file, rank)); // self.pieceRemoved(self.squares&[index], index);
+    self.pieceAdded(value, index.trunc());
+    self.squares&[index] = value;
+    if (value.kind() == .King) {
+        self.kingIndex&[value.colour()] = index;
+    };
+}
+
+// TODO: returning an error because can't be comptime because needs move lookup table.
+fn initial() Board = {
+    return fromFEN(INIT_FEN);
+}
+
+fn emptyAt(self: *Board, file: i64, rank: i64) bool =
+    self.emptyAtI(rank * 8 + file);
+
+fn emptyAtI(self: *Board, i: Square) bool = 
+    self.peicePositions.both().bit_and(BIT(i)) == 0;
+
+/// This assumes that <move> is legal.
+fn play(self: *Board, move: Move) OldMove = {
+    unMove := self.playNoUpdateChecks(move);
+    self.checks = getChecksInfo(self, self.nextPlayer);
+    unMove
+}
+
+/// This assumes that <move> is legal.
+fn playNoUpdateChecks(self: *Board, move: Move) OldMove = {
+    @debug_assert(move.from != move.to);
+    thisMove: OldMove = (
+        move = move, 
+        taken = self.squares&[move.to], 
+        original = self.squares&[move.from], 
+        old_castling = self.castling, 
+        debugPeicePositions = self.peicePositions, 
+        debugSimpleEval = self.simpleEval, 
+        frenchMove = self.frenchMove, 
+        oldHalfMoveDraw = self.halfMoveDraw, 
+        debugZoidberg = self.zoidberg, 
+        lastMove = self.lastMove, 
+        oldChecks = self.checks, 
+        pastStartIndex = self.pastStartIndex,
+    );
+    @debug_assert(thisMove.original.colour() == self.nextPlayer);
+    myColour := thisMove.original.colour();
+    self.frenchMove = .none;
+
+    self.fullMoves += int(myColour == .Black).trunc();
+    self.halfMoveDraw += 1;
+    if (move.isCapture) {
+        self.halfMoveDraw = 0;
+        // captures irreversibly change board state
+        self.pastStartIndex = self.pastEndIndex;
+    }
+    @match(thisMove.original.kind()) {
+        fn King() => {
+            self.kingIndex&[myColour] = move.to.zext();
+        }
+        fn Pawn() => {
+            self.halfMoveDraw = 0;
+            // pawns can't go backwards so irreversibly change board state
+            self.pastStartIndex = self.pastEndIndex;
+        }
+        @default => ();
+    }
+
+    // Most of the time, nobody can castle. Handle that case in the fewest branches.
+    // TODO: punish for loosing castling rights
+    // TODO: Zobrist needs to include castling rights!!!!!
+    if self.castling.any() {
+        if thisMove.original.kind() == .King {
+            // If you move your king, you can't castle on either side.
+            self.castling&.set(myColour, true, false);
+            self.castling&.set(myColour, false, false);
+        }
+
+        // If you move your rook, you can't castle on that side.
+        self.maybeRookMove(thisMove.original, move.from.zext());
+        // If you take a rook, they can't castle on that side.
+        self.maybeRookMove(thisMove.taken, move.to.zext());
+        
+        maybeRookMove :: fn(self: *Board, piece: Piece, index: Square) void #inline = {
+            if piece.kind() == .Rook {
+                colour := piece.colour();
+                fromRank := index / 8;
+                rookRank := @if(colour == .White, 0, 7);
+                if (fromRank == rookRank) { // check for weird constructed positions where your rook got to the other side. TODO: do it by colour instead
+                    if (index == 0 || index == (7 * 8)) {
+                        self.castling&.set(colour, true, false);
+                    } else {
+                        if (index == 7 || index == (7 * 8 + 7)) {
+                            self.castling&.set(colour, false, false);
+                        }
+                    }
+                }
+            }
+        };
+    }
+
+    self.zoidberg(ZOID_TURN_INDEX);
+
+    self.pieceRemoved(thisMove.original, move.from);
+    self.pieceAdded(thisMove.original, move.to);
+    @if(!thisMove.taken.is_empty()) self.pieceRemoved(thisMove.taken, move.to);
+
+    sq := self.squares&;
+    @match(move.action) {
+        fn none() => {
+            @debug_assert(move.isCapture == (thisMove.taken.kind() != .Empty));
+            sq[move.to] = thisMove.original;
+            sq[move.from] = Piece_EMPTY;
+        }
+        fn promote() => {
+            newKind := move.actionData.promote;
+            sq[move.to] = new(colour = myColour, kind = newKind);
+            sq[move.from] = Piece_EMPTY;
+            @debug_assert(move.isCapture == (thisMove.taken.kind() != .Empty));
+            self.pieceRemoved(thisMove.original, move.to); // undo the pawn at target square
+            self.pieceAdded(sq[move.to], move.to); // add the promoted thing
+        }
+        fn castle() => {
+            info := move.actionData.castle;
+            self.pieceRemoved(sq[info.rookFrom], info.rookFrom); // remove the rook
+            @debug_assert(sq[move.from].is(myColour, .King));
+            sq[move.to] = thisMove.original;
+            sq[move.from] = Piece_EMPTY;
+
+            @debug_assert(thisMove.taken.is_empty());
+            @debug_assert(sq[info.rookTo].is_empty());
+            @debug_assert(sq[info.rookFrom].is(myColour, .Rook));
+            sq[info.rookTo] = new(colour = myColour, kind = .Rook);
+            sq[info.rookFrom] = Piece_EMPTY;
+            @debug_assert(!move.isCapture && (thisMove.taken.kind() == .Empty));
+            self.simpleEval += CASTLE_REWARD * myColour.dir();
+
+            self.pieceAdded(sq[info.rookTo], info.rookTo); // add rook back
+        }
+        fn allowFrenchMove() => {
+            @debug_assert(sq[move.from].is(myColour, .Pawn));
+            sq[move.to] = thisMove.original;
+            sq[move.from] = Piece_EMPTY;
+            file := move.to.mod(8);
+            self.frenchMove = (file = file);
+            @debug_assert(!move.isCapture && (thisMove.taken.kind() == .Empty));
+            self.zoidberg(ZOID_FRENCH_START + file.zext());
+        }
+        fn useFrenchMove() => {
+            captureIndex := move.actionData.useFrenchMove;
+            self.pieceRemoved(sq[captureIndex], captureIndex); // remove the taken pawn
+
+            @debug_assert(sq[move.from].is(myColour, .Pawn));
+            @debug_assert(sq[move.to].is_empty());
+            @debug_assert(sq[captureIndex].is(myColour.other(), .Pawn));
+            sq[move.to] = thisMove.original;
+            sq[move.from] = Piece_EMPTY;
+            sq[captureIndex] = Piece_EMPTY;
+            @debug_assert(move.isCapture && thisMove.taken.kind() == .Empty); // confusing
+            sq[captureIndex] = Piece_EMPTY;
+        }
+    }
+
+    self.nextPlayer = self.nextPlayer.other();
+    // if (slowTrackAllMoves) self.line.append(thisMove) catch @panic("Overflow line.");
+    self.lastMove = (Some = move);
+
+    // Unsafe! This assumes capacity.
+    // (google says the longest chess game was 269 moves so 500 should be plenty...)
+    self.pastBoardHashes&[self.pastEndIndex] = self.zoidberg;
+    self.pastEndIndex += 1;
+    thisMove
+}
+
+
+// Thought this would be faster because less copying but almost no difference (at the time. TODO: check again).
+/// <move> must be the value returned from playing the most recent move.
+fn unplay(self: *Board, move: OldMove) void = {
+    ::iambadatmyjob(); ::enum(Kind);
+    
+    // _ = self.pastBoardHashes.pop();
+    // print("start unplay\n", .{});
+    if self.lastMove { expected |
+        wrongMove := expected.to != move.move.to || expected.from != move.move.from;
+        @debug_assert(!wrongMove, "unplayed the wrong move");
+    }
+    self.checks = move.oldChecks;
+    self.lastMove = move.lastMove;
+    self.zoidberg(ZOID_TURN_INDEX);
+    // if (slowTrackAllMoves) @debug_assert(std.meta.eql(self.line.pop(), move));
+    colour := move.original.colour();
+    self.castling = move.old_castling;
+    self.halfMoveDraw = move.oldHalfMoveDraw;
+    self.frenchMove = move.frenchMove;
+    self.pastStartIndex = move.pastStartIndex;
+    self.pastEndIndex -= 1;
+
+    sq := self.squares&;
+    ::enum(@type move.move.action);
+    @match(move.move.action) {
+        fn none() => ();
+        fn promote() => {
+            self.pieceRemoved(sq[move.move.to], move.move.to); // undo the promoted thing
+            self.pieceAdded(move.original, move.move.to); // undo undoing the pawn at target square
+        }
+        fn castle() => {
+            info := move.move.actionData.castle;
+            self.pieceRemoved(sq[info.rookTo], info.rookTo);
+            @debug_assert(sq[info.rookTo].is(colour, .Rook));
+            @debug_assert(sq[info.rookFrom].is_empty());
+            @debug_assert(sq[move.move.to].is(colour, .King));
+            @debug_assert(sq[move.move.from].is_empty());
+
+            sq[info.rookTo] = new(colour = .White, kind = .Empty);
+            sq[info.rookFrom] = new(colour = colour, kind = .Rook);
+            self.simpleEval -= CASTLE_REWARD * colour.dir();
+            self.pieceAdded(sq[info.rookFrom], info.rookFrom);
+        }
+        fn allowFrenchMove() => {
+            file: i64 = move.move.to.mod(8).zext();
+            self.zoidberg(ZOID_FRENCH_START + file);
+        }
+        fn useFrenchMove() => {
+            captureIndex := move.move.actionData.useFrenchMove;
+            sq[captureIndex] = new(kind = .Pawn, colour = colour.other());
+            self.pieceAdded(sq[captureIndex], captureIndex); // add back the taken pawn
+        }
+    }
+
+    sq[move.move.to] = move.taken;
+    sq[move.move.from] = move.original;
+
+    self.pieceAdded(move.original, move.move.from);
+    self.pieceRemoved(move.original, move.move.to);
+    @if(!move.taken.is_empty()) self.pieceAdded(move.taken, move.move.to);
+
+    self.fullMoves -= int(colour == .Black).trunc();
+
+    if move.original.kind() == .King {
+        self.kingIndex&[colour] = move.move.from.zext();
+    }
+
+    self.nextPlayer = self.nextPlayer.other();
+    @debug_assert(colour == self.nextPlayer);
+    @debug_assert(move.debugPeicePositions.bw&[.White] == self.peicePositions.bw&[.White] && move.debugPeicePositions.bw&[.Black] == self.peicePositions.bw&[.Black]);
+    @debug_assert(self.simpleEval == move.debugSimpleEval);
+    @debug_assert(self.zoidberg == move.debugZoidberg);
+}
+
+fn pieceAdded(self: *Board, piece: Piece, index: u8) void = {
+    index: i64 = index.zext();
+    self.zoidberg(ZOID_PIECE_START + getRawIndex(piece, index));
+    self.simpleEval += piece.eval() + 0; // Learned.Weights.ALL[getRawIndex(piece, index)];
+    @debug_assert(piece.kind() != .Empty);
+    self.peicePositions&.setBit(index, piece.colour());
+    @if(piece.kind() == .Knight) self.knights&.setBit(index, piece.colour());
+}
+
+fn pieceRemoved(self: *Board, piece: Piece, index: u8) void = {
+    index: i64 = index.zext();
+    self.zoidberg(ZOID_PIECE_START + getRawIndex(piece, index));
+    self.simpleEval -= piece.eval() + 0; // Learned.Weights.ALL[getRawIndex(piece, index)];
+    @debug_assert(piece.kind() != .Empty);
+    self.peicePositions&.unsetBit(index, piece.colour());
+    @if(piece.kind() == .Knight) self.knights&.unsetBit(index, piece.colour());
+}
+
+fn nextPlayerInCheck(self: *Board) bool = {
+    myKingIndex := self.kingIndex&[self.nextPlayer];
+    kingFlag := BIT(myKingIndex);
+    self.checks.targetedSquares.bit_and(kingFlag) != 0
+}
+
+fn zoidberg(self: *Board, index: i64) void = {
+    value := Precalc.ZOIDBERG[index];
+    self.zoidberg = self.zoidberg.bit_xor(value);
+}
+
+fn gameOverReason(game: *Board, lists: *ListPool) GameOver = @if_else {
+    @if(game.halfMoveDraw >= 100) => .FiftyMoveDraw;
+    @if(game.hasInsufficientMaterial()) => .MaterialDraw;
+    @if(game.lastMoveWasRepetition()) => .RepetitionDraw;
+    @if(game.nextPlayerHasLegalMoves(lists)) => .Continue;
+    @if(game.nextPlayerInCheck()) => @if(game.nextPlayer == .White, .BlackWins, .WhiteWins);
+    @else => .Stalemate;
+};
+
+// This could be faster if it didn't generate every possible move first but it's not used in the search loop so nobody cares.
+fn nextPlayerHasLegalMoves(game: *Board, lists: *ListPool) bool = {
+    moves := possibleMoves(game, game.nextPlayer, lists);
+    lists.release(moves);
+    moves.items.len > 0
+}
+
+fn lastMoveWasRepetition(self: *Board) bool = {
+    @if(self.pastEndIndex - self.pastStartIndex < 3) return(false);
+    repetitions := 1;
+    range(self.pastStartIndex, self.pastEndIndex - 1) { past |
+        repetitions += int(self.zoidberg == self.pastBoardHashes[past]);
+    }
+    repetitions >= 3
+}
+
+// https://www.chess.com/article/view/how-chess-games-can-end-8-ways-explained#insufficient-material
+fn hasInsufficientMaterial(game: *Board) bool = {
+    total := game.peicePositions.both().count_ones();
+    @if(total > 4) return(false);
+    minor := zeroed EnumMap(Colour, i64);
+    minorWhite := 0;
+    minorBlack := 0;
+    for game.squares& { piece |
+        @if(@is(piece.kind, .Rook, .Queen, .Pawn)) return(false);
+        minor&[piece.colour()] += @is(piece.kind, .Bishop, .Knight);
+    };
+    // TODO: king vs king + 2N
+    // (king vs king, king+1 vs king) or (king+1 vs king+1)
+    (minor&[.White] + minor&[.Black]) <= 1 || (minor&[.White] == 1 && minor&[.Black] == 1)
+}
+
+CastleMove :: @struct(rookFrom: u8, rookTo: u8);
+
+// TODO: this seems much too big (8 bytes?). castling info is redunant cause other side can infer if king moves 2 squares, bool field is evil and redundant
+Move :: @struct {
+    from: u8;
+    to: u8;
+    isCapture: bool; // french move says true but to square isnt the captured one
+    action: Action = .none;
+    actionData := zeroed U;
+    
+    U :: @union(
+        promote: Kind,
+        castle: CastleMove,
+        useFrenchMove: u8,  // capture index
+        //none: void, // :compilerbug tests/todo/zero_sized_union.fr
+    );
+    Action :: @enum(u8) (none, promote, castle, allowFrenchMove, useFrenchMove);
+};
+
+GameOver :: @enum(Continue, Stalemate, FiftyMoveDraw, MaterialDraw, RepetitionDraw, WhiteWins, BlackWins);
+
+//! Generating the list of possible moves for a position.
+
+fn possibleMoves(board: *Board, me: Colour, lists: *ListPool) ListPool.List = {
+    moves := lists.get();
+    out: CollectMoves = (moves = moves&);
+    ::MoveGen(CollectMoves);
+    genPossibleMoves(out&, board, me);
+    moves
+}
+
+// TODO: test this.
+// TODO: does the peace search need special handling for being in check?
+fn capturesOnlyMoves(board: *Board, me: Colour, lists: *ListPool) ListPool.List = {
+    // For non-king pieces blockSingleCheck already acts as a filter for target squares so can reuse that for this as well.
+    // For peace search 3, filtering this way instead of gening all moves and skipping captures is 1.25x as fast.
+    it := board.checks.blockSingleCheck&;
+    realSlidingChecks := it[];
+    otherPieces := board.peicePositions&.getFlag(board.nextPlayer.other())[];
+    it[] = it[].bit_and(otherPieces);
+    board.checks.kingGetCapturesOnly = true;
+
+    var moves = lists.get();
+    out: CollectMoves = (moves = moves&);
+    genPossibleMoves(out&, board, me);
+    board.checks.kingGetCapturesOnly = false;
+    it[] = realSlidingChecks;
+    moves
+}
+
+fn collectOnePieceMoves(board: *Board, i: i64, lists: *ListPool) ListPool.List = {
+    var moves = lists.get();
+    out: CollectMoves = (moves = moves);
+    genOnePieceMoves(out, board, i);
+    return moves;
+}
+
+MoveFilter :: @enum(Any, CurrentlyCalcChecks);
+
+// TODO: this is still a tempting language feature
+// @trait {
+//     $filter: MoveFilter;
+//     fn pawnAttack(self, *Board, fromIndex, toFile, toRank, Colour) void;
+//     fn maybePromote(self, *Board, fromIndex, toFile, toRank, Colour) void;
+// };
+fn MoveGen($Output: Type) void = {
+    fn genPossibleMoves(out: *Output, board: *Board, me: Colour) void = {
+        mySquares := board.peicePositions&.getFlag(me)[];
+        ::enum(MoveFilter);
+        @if (Output.filter != .CurrentlyCalcChecks) @debug_assert(me == board.nextPlayer);
+    
+        if (Output.filter != .CurrentlyCalcChecks && board.checks.doubleCheck) { // must move king.
+            kingIndex := board.kingIndex&[me];
+            kingMove(out, board, kingIndex, board.nextPlayer);
+            return();
+        }
+    
+        for_bits mySquares { i |
+            genOnePieceMoves(out, board, i);
+        };
+    }
+    
+    // TODO: is it faster to have a bit board of each type of piece so you can do each kind all at once?
+    fn genOnePieceMoves(out: *Output, board: *Board, i: i64) void = {
+        piece := board.squares&[i];
+        @match(piece.kind()) {
+            fn Pawn() => pawnMove(out, board, i, piece);
+            fn Bishop() => sliderMoves(out, board, i, piece.colour(), false);
+            fn Knight() => knightMove(out, board, i, piece.colour());
+            fn Rook() => sliderMoves(out, board, i, piece.colour(), true);
+            fn King() => kingMove(out, board, i, piece.colour());
+            fn Queen() => {
+                sliderMoves(out, board, i, piece.colour(), true);
+                sliderMoves(out, board, i, piece.colour(), true);
+            };
+            fn Empty() => unreachable();
+        }
+    }
+    
+    fn rookSlide(out: *Output, board: *Board, i: i64, colour: Colour) void = {
+        sliderMoves(out, board, i, colour, true);
+    }
+    
+    fn bishopSlide(out: *Output, board: *Board, i: i64, colour: Colour) void = {
+        sliderMoves(out, board, i, colour, false);
+    }
+
+    fn sliderMoves(out: *Output, board: *Board, i: i64, colour: Colour, $isRook: bool) void = {
+        // These aren't really branches. The function is generic over that param.
+        XXX :: Precalc.tables;  // TODO: this doesn't work if you inline it :compilerbug
+        targetsTable := @if (isRook, XXX.rooks&, XXX.bishops&);
+        myPinKind := @if (isRook, board.checks.pinsByRook, board.checks.pinsByBishop);
+        otherPinKind := @if (isRook, board.checks.pinsByBishop, board.checks.pinsByRook);
+    
+        // When calculating danger squares the king can't move to,
+        // - defended pieces count as targetable
+        // - the king doesn't count as a blocker
+        // - you don't care about pins
+        // This being simpler is a win from using the lookup to generate all targets at once.
+        // TODO: this should be a seperate function.
+        @if (Output.filter == .CurrentlyCalcChecks) {
+            pieces := board.peicePositions.both();
+            kingFlag := BIT(board.kingIndex&[colour.other()]);
+            pieces = pieces.bit_and(kingFlag.bit_not());
+            targets := targetsTable[i]&.get(pieces);
+            out.bb&.bor(targets);
+            return();
+        }
+    
+        // If pinned by the other type of piece, you can't move at all.
+        startFlag := BIT(i);
+        @if (otherPinKind.bit_and(startFlag) != 0) return();
+    
+        pieces := board.peicePositions.both();
+    
+        myPieces := board.peicePositions&.getFlag(colour)[];
+        targets := targetsTable[i]&.get(pieces).bit_and(myPieces.bit_not()).bit_and(board.checks.blockSingleCheck);
+    
+        // If pinned by the same type of piece, you need to stay on the pin lines
+        if (myPinKind.bit_and(startFlag) != 0) {
+            targets = targets.bit_and(myPinKind);
+        }
+    
+        emitMoves(out, board, i, targets, colour);
+    }
+    
+    fn pawnMove(out: *Output, board: *Board, i: i64, piece: Piece) void = {
+        rank, file := i.div_mod(8);
+        startFlag := BIT(i);
+        rookPinned := board.checks.pinsByRook.bit_and(startFlag) != 0 && Output.filter != .CurrentlyCalcChecks;
+        bishopPinned := board.checks.pinsByBishop.bit_and(startFlag) != 0 && Output.filter != .CurrentlyCalcChecks;
+    
+        @debug_assert(rank != @if(piece.colour() == .White, 7, 0), "would have already promoted");
+        homeRank := @if(piece.colour() == .White, 1, 6);
+        d := piece.colour().dir();
+        @if(Output.filter == .Any)
+        if !bishopPinned && rank == homeRank && board.emptyAt(file, homeRank+d) && board.emptyAt(file, homeRank+d+d) { // forward two
+            pawnForwardTwo(out.moves, board, i, file, homeRank+d+d); // can't promote
+        }
+        targetRank := rank + d;
+    
+        if Output.filter == .Any && board.emptyAt(file, targetRank) { // forward
+            out.maybePromote(board, i, file, targetRank, piece.colour());
+        }
+    
+        @if (rookPinned) return();
+    
+        if file < 7 { // right
+            out.pawnAttack(board, i, file + 1, targetRank, piece.colour());
+            @if (board.emptyAt(file + 1, targetRank)) frenchMove(out, board, i, file + 1, targetRank, piece.colour());
+        }
+        if file > 0 { // left
+            out.pawnAttack(board, i, file - 1, targetRank, piece.colour());
+            @if (board.emptyAt(file - 1, targetRank)) frenchMove(out, board, i, file - 1, targetRank, piece.colour());
+        }
+    }
+    
+    fn frenchMove(out: *Output, board: *Board, i: i64, targetFile: i64, targetRank: i64, colour: Colour) void = {
+        @if (Output.filter == .CurrentlyCalcChecks) return(); // dont care, cant take kings.
+    
+        // Most of the time you can't en-passant so make that case as fast as possible.
+        @match (board.frenchMove) {
+            fn none() => return();
+            fn file(validTargetFile) => {
+                @if (targetFile != validTargetFile.zext()) return();
+                @if ((colour == .White && targetRank != 5) || (colour == .Black && targetRank != 2)) return();
+                endIndex := targetRank * 8 + targetFile;
+                captureIndex := ((@if(colour == .White, targetRank - 1, targetRank + 1)) * 8) + targetFile;
+                @if (!board.squares&[captureIndex].is(colour.other(), .Pawn)) return(); // TODO: why isnt this always true?
+                toFlag := BIT(endIndex);
+                captureFlag := BIT(captureIndex);
+                // Works because block**Single**Check so only one thing will be attacking.
+                @if (board.checks.blockSingleCheck.bit_and(toFlag) == 0 && board.checks.blockSingleCheck.bit_and(captureFlag) == 0) return();
+                fromFlag := BIT(i);
+    
+                // TODO: no and. can both be crushed it together into one bit thing?
+    
+                // Normal pins
+                rookPinned := board.checks.pinsByRook.bit_and(fromFlag) != 0;
+                bishopPinned := board.checks.pinsByBishop.bit_and(fromFlag) != 0;
+                @if (rookPinned && board.checks.pinsByRook.bit_and(toFlag) == 0) return();
+                @if (bishopPinned && board.checks.pinsByBishop.bit_and(toFlag) == 0) return();
+    
+                // Fancy pins
+                frenchRookPinned := board.checks.frenchPinByRook.bit_and(captureFlag) != 0;
+                frenchBishopPinned := board.checks.frenchPinByBishop.bit_and(captureFlag) != 0;
+                @if (frenchRookPinned && board.checks.frenchPinByRook.bit_and(toFlag) == 0) return();
+                @if (frenchBishopPinned && board.checks.frenchPinByBishop.bit_and(toFlag) == 0) return();
+    
+                out.moves.push_assume_capacity(
+                    from = trunc(i), 
+                    to = trunc(endIndex), 
+                    action = .useFrenchMove,
+                    actionData = (useFrenchMove = captureIndex.trunc()), 
+                    isCapture = true,
+                );
+            }
+        }
+    }
+    
+    fn kingMove(out: *Output, board: *Board, i: i64, colour: Colour) void = {
+        @if (Output.filter == .CurrentlyCalcChecks) {
+            out.bb&.bor(Precalc.Tables.kings[i]);
+            return();
+        }
+    
+        // Kings can't be pinned or block pins, don't need to check.
+        myPieces := board.peicePositions&.getFlag(colour)[];
+        targets := Precalc.Tables.kings[i].bit_and(myPieces.bit_not()).bit_and(board.checks.targetedSquares.bit_not());
+        if (board.checks.kingGetCapturesOnly) {
+            emitMoves(out, board, i, targets.bit_and(board.checks.blockSingleCheck), colour);
+        } else {
+            emitMoves(out, board, i, targets, colour);
+            tryCastle(out, board, colour, true);
+            tryCastle(out, board, colour, false);
+        }
+    }
+    
+    // This wouldn't work for fisher random but that's not the universe we live in right now.
+    fn tryCastle(out: *Output, board: *Board, colour: Colour, $goingLeft: bool) void = {
+        @if (@run(Output.filter == .CurrentlyCalcChecks)) return();
+        @if (!board.castling.get(colour, goingLeft)) return();
+    
+        // Are there any pieces blocking us from castling?
+        shift := @if(colour == .Black, 7 * 8, 0);
+        leftNoChecks :: @or(BIT(2), BIT(3), BIT(4));
+        rightNoChecks :: @or(BIT(6), BIT(5), BIT(4));
+        pathFlag := (@if(goingLeft, leftNoChecks, rightNoChecks)).shift_left(shift);
+        leftNoPieces :: @or(BIT(1), BIT(2), BIT(3));
+        rightNoPieces :: @or(BIT(5), BIT(6));
+        emptyFlag := (@if(goingLeft, leftNoPieces, rightNoPieces)).shift_left(shift);
+        pieces := board.peicePositions.both();
+        bad := pieces.bit_and(emptyFlag).bit_or(board.checks.targetedSquares.bit_and(pathFlag));
+        @if(bad != 0) return();
+    
+        // Where would we be going?
+        kingFrom := shift + 4;
+        kingTo := shift + @if(goingLeft, 2, 6);
+        rookFrom := shift + @if(goingLeft, 0, 7);
+        rookTo := shift + @if(goingLeft, 3, 5);
+        @debug_assert(board.squares&[kingFrom].is(colour, .King));
+        @debug_assert(board.squares&[kingTo].is_empty());
+        @debug_assert(board.squares&[rookFrom].is(colour, .Rook));
+        @debug_assert(board.squares&[rookTo].is_empty());
+    
+        out.moves.push_assume_capacity(
+            from = kingFrom.trunc(), 
+            to = kingTo.trunc(), 
+            action = .castle,
+            actionData = (castle = (
+                rookFrom = rookFrom.trunc(),
+                rookTo = rookTo.trunc(),
+            )),
+            isCapture = false,
+        );
+    }
+    
+    fn knightMove(out: *Output, board: *Board, i: i64, colour: Colour) void = {
+        @if (Output.filter == .CurrentlyCalcChecks) {
+            out.bb&.bor(Precalc.Tables.knights[i]);
+            return();
+        }
+    
+        // Pinned knights can never move.
+        startFlag := BIT(i);
+        pins := bit_or(board.checks.pinsByBishop, board.checks.pinsByRook);
+        @if(pins.bit_and(startFlag) != 0) return(); 
+    
+        myPieces := board.peicePositions&.getFlag(colour)[];
+        targets := Precalc.Tables.knights[i].bit_and(myPieces.bit_not()).bit_and(board.checks.blockSingleCheck);
+    
+        emitMoves(out, board, i, targets, colour);
+    }
+    
+    fn emitMoves(out: *Output, board: *Board, i: i64, targets: i64, colour: Colour) void = {
+        for_bits targets { dest |
+            addMoveOrdered(out.moves, board, i, dest, colour);
+        };
+    }
+}
+
+// TODO: this is a paste from backend/util.fr
+fn for_bits(b: i64, $body: @Fn(i: i64) void) void = {
+    while => b != 0 {
+        body(trailing_zeros(b));
+        bit := b.bit_and(-b);  // pick out the least significant bit
+        b = b.bit_xor(bit);    // unset that bit
+    };
+}
+
+// The new lookup move gen doesn't need to be told when to stop sliders so this method can be simpler.
+// This does not do any validation. The piece moving must not be a king and the target square must be legal.
+// All this does is make the move and do the ordering trick of prefering captures.
+// TODO: try just making the list and doing more complicated ordering like prefer capture string pieces with weak ones.
+fn addMoveOrdered(moves: *ListPool.List, board: *Board, fromIndex: Square, toIndex: Square, colour: Colour) void = {
+    enemyPieces := board.peicePositions&.getFlag(colour.other())[];
+    toFlag := BIT(toIndex);
+
+    toPush: Move = (from = fromIndex.trunc(), to = toIndex.trunc(), isCapture = toFlag.bit_and(enemyPieces) != 0);
+    if toPush.isCapture { // moving to empty square
+        moves.push_assume_capacity(toPush);
+    } else { // taking an enemy piece. do move ordering for better prune.
+        // Have this be a comptime param that gets passed down so I can easily benchmark.
+        // (then can disable it if just want better perft numbers)
+        // This is a capture, we like that, put it first. Capturing more valuable pieces is also good.
+        if true {| break :: local_return;
+        enumerate moves { index, move |
+            holding := board.squares&[toPush.to].kind().material();
+            lookingAt := board.squares&[move.to].kind().material();
+            @if (holding == 0) break();
+            if (holding > lookingAt) {
+                tmp := move[];
+                moves[index] = toPush;
+                toPush = tmp;
+            }
+        }
+        };
+
+        moves.push_assume_capacity(toPush);
+    }    
+}
+
+fn pawnForwardTwo(moves: *ListPool.List, board: *Board, fromIndex: Square, toFile: i64, toRank: i64) void = {
+    toIndex := toRank * 8 + toFile;
+    toFlag := BIT(toIndex);
+    fromFlag := BIT(fromIndex);
+    @if(board.checks.blockSingleCheck.bit_and(toFlag) == 0) return();
+    @if(board.checks.pinsByRook.bit_and(fromFlag) != 0 && board.checks.pinsByRook.bit_and(toFlag) == 0) return();
+    
+    moves.push_assume_capacity(
+        from = fromIndex.trunc(), 
+        to = toIndex.trunc(), 
+        action = .allowFrenchMove, 
+        isCapture = false,
+    );
+}
+
+directions :: import("@/examples/chess/precalc.fr").allDirections;
+
+// TODO: goal of the movegen adventure is get rid of this complicated struct because the functions know that one is just rying to colelct the bit map and they can deal with that more efficiently
+
+CollectMoves :: @struct {
+    moves: *ListPool.List;
+    filter :: MoveFilter.Any;
+
+    fn pawnAttack(self: *CollectMoves, board: *Board, fromIndex: i64, toFile: i64, toRank: i64, myColour: Colour) void = {
+        if !board.emptyAt(toFile, toRank) && board.get(toFile, toRank).colour() != myColour {
+            self.maybePromote(board, fromIndex, toFile, toRank, myColour);
+        }
+    }
+
+    // TODO: make sure queen goes first in list? test that
+    fn maybePromote(self: *CollectMoves, board: *Board, fromIndex: i64, toFile: i64, toRank: i64, myColour: Colour) void = {
+        toFlag := BIT(toRank * 8 + toFile);
+        @if(board.checks.blockSingleCheck.bit_and(toFlag) == 0) return();
+        fromFlag := BIT(fromIndex);
+
+        // TODO: no and. can both be crushed it together into one bit thing?
+        rookPinned := board.checks.pinsByRook.bit_and(fromFlag) != 0;
+        bishopPinned := board.checks.pinsByBishop.bit_and(fromFlag) != 0;
+        @if (rookPinned && board.checks.pinsByRook.bit_and(toFlag) == 0) return();
+        @if (bishopPinned && board.checks.pinsByBishop.bit_and(toFlag) == 0) return();
+
+        // TODO: including promotions on fast path should be seperate option
+        check := board.get(toFile, toRank);
+
+        promotionRank := @if(myColour.other() == .White, 0, 7);
+        if toRank == promotionRank {
+            @debug_assert(check.is_empty() || check.colour() != myColour);
+            move: Move = (
+                from = fromIndex.trunc(), 
+                to = trunc(toRank * 8 + toFile), 
+                action = .promote,
+                actionData = (promote = .Queen),
+                isCapture = !check.is_empty(),
+            );
+            // Queen promotions are so good that we don't even care about preserving order of the old stuff.
+            // TODO: that's wrong cause mate
+            if (self.moves.items().len() > 0) {
+                self.moves.push_assume_capacity(self.moves.items()[0]);
+                self.moves.items()[0] = move;
+            } else {
+                self.moves.push_assume_capacity(move);
+            }
+
+            // Technically you might want a knight but why ever anything else? For correctness (avoiding draws?) still want to consider everything.
+            options :: @const_slice(Kind.Knight, .Rook, .Bishop);
+            for options { k |
+                move.actionData.promote = k;
+                self.moves.push_assume_capacity(move);
+            }
+        } else {
+            addMoveOrdered(self.moves, board, fromIndex, toRank * 8 + toFile, myColour);
+        }
+    }
+};
+
+fn toMask(f: i64, r: i64) i64 = 
+    BIT(r * 8 + f);
+
+GetAttackSquares :: @struct {
+    /// Includes your own peices when they could be taken back. Places the other king can't move.
+    bb := 0;
+    filter :: MoveFilter.CurrentlyCalcChecks;
+
+    fn pawnAttack(self: *GetAttackSquares, board: *Board, fromIndex: i64, toFile: i64, toRank: i64, colour: Colour) void = {
+        _ := fromIndex;
+        _ := colour;
+        _ := board;
+        self.bb&.bor(toMask(toFile, toRank));
+    }
+
+    fn maybePromote(self: *GetAttackSquares, board: *Board, fromIndex: i64, toFile: i64, toRank: i64, colour: Colour) void = {
+        _ := colour;
+        _ := board;
+        if toFile != fromIndex.mod(8) {
+            self.bb&.bor(toMask(toFile, toRank));
+        }
+    }
+};
+
+ChecksInfo :: @struct {
+    // If not in check: all ones.
+    // If in single check: a piece must move TO one of these squares OR the king must move to a safe square.
+    // Includes the enemy (even a single knight) because capturing is fine.
+    blockSingleCheck := 0;
+    // Your peices may not move FROM these squares because they will reveal a check from an enemy slider.
+    // Directions must be tracked seperatly because you can move along the pin axis. It works out so they never overlaop and let you move between pins.
+    pinsByRook := 0;
+    pinsByBishop := 0;
+    // If true, the king must move to a safe square, because multiple enemies can't be blocked/captured.
+    doubleCheck := false; // 64 bit boolean sad padding noises but we never put this in an array
+    // Where the enemy can attack. The king may not move here.
+    // Note: this might not include captures that can't take kings like french move.
+    targetedSquares := 0;
+
+    // Pin lines like above but for enemy pawn that could have be captured en-passant but might reveal a check.
+    frenchPinByBishop := 0;
+    frenchPinByRook := 0;
+    kingGetCapturesOnly := false;
+};
+
+// TODO: This is super branchy. Maybe I could do better if I had bit boards of each piece type.
+// TODO: It would be very nice if I could update this iterativly as moves were made instead of recalculating every time. Feels almost possible?
+// TODO: split into more manageable functions.
+// TODO: dont call this on the leaf nodes fo the tree. the hope was that even if its slower, it moves the work up the tree a level.
+fn getChecksInfo(game: *Board, defendingPlayer: Colour) ChecksInfo = {
+    ::enum(Kind);
+
+    mySquares := game.peicePositions&.getFlag(defendingPlayer)[];
+    otherSquares := game.peicePositions&.getFlag(defendingPlayer.other())[];
+    myKingIndex := game.kingIndex&[defendingPlayer];
+
+    result: ChecksInfo = ();
+
+    if true {| break_outer :: local_return;
+    // Queens, Rooks, Bishops and any resulting pins.
+    dir := -1;
+    inline_for directions { $offset |
+        offset := @run offset[]; dir += 1;
+        checkRank, checkFile := myKingIndex.div_mod(8);
+        wipFlag := 0;
+        lookingForPin := false;
+        break :: local_return;
+        loop {
+            continue :: local_return;
+            checkFile += offset._0;
+            checkRank += offset._1;
+            @if (checkFile > 7 || checkRank > 7 || checkFile < 0 || checkRank < 0) break();
+            checkIndex := checkRank * 8 + checkFile;
+            checkFlag := BIT(checkIndex);
+            kind := game.squares&[checkIndex].kind();
+            isEnemy := otherSquares.bit_and(checkFlag) != 0;
+            wipFlag&.bor(checkFlag);
+            if (isEnemy) {
+                // :DirectionsOrderMatters
+                isSlider := (kind == .Queen || ((dir < 4 && kind == .Rook) || (dir >= 4 && kind == .Bishop)));
+                if (isSlider) {
+                    if (lookingForPin) { // Found a pin. Can't move the friend from before.
+                        pins := @if(dir < 4, result.pinsByRook&, result.pinsByBishop&);
+                        pins.bor(wipFlag);
+                    } else {
+                        if (result.blockSingleCheck != 0) {
+                            result.doubleCheck = true;
+                            // Don't care about any other checks or pins. Just need to move king.
+                            break_outer();
+                        }
+                        result.blockSingleCheck&.bor(wipFlag);
+                    }
+                }
+
+                // Don't need to look for pins of enemy pieces. We're done this dir!
+                break();
+            }
+            isFriend := mySquares.bit_and(checkFlag) != 0;
+            if (isFriend) {
+                @if (lookingForPin) break(); // Two friendly in a row means we're safe
+                // This piece might be pinned, so keep looking for an enemy behind us.
+                lookingForPin = true;
+            }
+        }
+    };
+    };
+    
+    // Knights. Can't be blocked, they just take up one square in the flag and must be captured.
+    // This is the same speed as the loop but it looks simpler.
+    allKnightTargets := Precalc.Tables.knights[myKingIndex];
+    knightTargets := allKnightTargets.bit_and(game.knights&.getFlag(defendingPlayer.other())[]);
+    if (knightTargets != 0 && (result.blockSingleCheck != 0 || count_ones(knightTargets) > 1)) {
+        result.doubleCheck = true;
+    }
+    result.blockSingleCheck&.bor(knightTargets);
+
+    // Pawns. Don't care about going forward or french move because those can't capture a king.
+    // They only move one so can't be blocked.
+    // TODO: this is kinda copy-paste-y
+    kingRank, kingFile := myKingIndex.div_mod(8);
+    onEdge := @if(defendingPlayer == .White, kingRank == 7, kingRank == 0);
+    if !onEdge {
+        targetRank := kingRank + defendingPlayer.dir();
+
+        check(7, 1); // right
+        check(0, -1); // left
+        check :: fn(ignoreFile, d) => if kingFile != ignoreFile {
+            attacker := game.get(kingFile + d, targetRank);
+            if attacker.kind() == .Pawn && attacker.colour() != defendingPlayer {
+                if result.blockSingleCheck == 0 {
+                    pawnIndex := targetRank * 8 + (kingFile + d);
+                    result.blockSingleCheck&.bor(BIT(pawnIndex));
+                } else {
+                    result.doubleCheck = true;
+                }
+            };
+        };
+    }
+
+    // Can never be in check from the other king. Don't need to consider it.
+
+    result.targetedSquares = getTargetedSquares(game, defendingPlayer.other());
+
+    if result.doubleCheck { // Must move king.
+        result.blockSingleCheck = 0;
+    } else {
+        // Don't need to bother doing this if we we're in double check because king must move.
+        @match(game.frenchMove) {
+            fn none() => {
+                // No french available so don't care.
+            }
+            fn file(file) => {
+                // It feels like you could also avoid this by checking if enemy is targeting thier own pawn but since a pawn from both sides moves it doesn't work.
+                // TODO: could check bit map two out on either side and need to do more work if any of those hit.
+
+                // If we don't have a pawn in position to take, there's no need to do more work to check if its pinned.
+                capturedPawnRank := @if(defendingPlayer == .White, 4, 3);
+                hasLeft := file > 0 && game.get(file.zext() - 1, capturedPawnRank).is(defendingPlayer, .Pawn);
+                hasRight := file < 7 && game.get(file.zext() + 1, capturedPawnRank).is(defendingPlayer, .Pawn);
+                if (hasLeft || hasRight) {
+                    getFrenchPins(game, defendingPlayer, file.zext(), result&);
+                }
+            }
+        }
+
+        if result.blockSingleCheck == 0 { // Not in check.
+            result.blockSingleCheck = result.blockSingleCheck.bit_not();
+        }
+    }
+
+    result
+}
+
+// TODO: this doesnt include french move because this used to just be for detecting checks.
+fn getTargetedSquares(game: *Board, attacker: Colour) i64 = {
+    ::MoveGen(GetAttackSquares);
+    out: GetAttackSquares = ();
+    genPossibleMoves(out&, game, attacker);
+    out.bb
+}
+
+// TODO: This is fricken branch town. Is there a better way to do this?
+fn getFrenchPins(game: *Board, defendingPlayer: Colour, frenchFile: i64, result: *ChecksInfo) void = {
+    mySquares := game.peicePositions&.getFlag(defendingPlayer)[];
+    otherSquares := game.peicePositions&.getFlag(defendingPlayer.other())[];
+    myKingIndex := game.kingIndex&[defendingPlayer];
+    capturedPawnRank := @if(defendingPlayer == .White, 4, 3);
+
+    // TODO: checking all directions seems silly, should only look towards the pawn.
+    // TODO: before the loop, check if I have any pawns in the right squares to capture. because it actually happening is rare
+    dir := -1;
+    inline_for directions { $offset |
+        offset := @run offset[]; dir += 1;
+        checkRank, checkFile := myKingIndex.div_mod(8);
+        wipFlag := 0;
+        lookingForPin := false;
+        sawAPotentialFrenchFriend := false;
+        break :: local_return;
+        loop {
+            continue :: local_return;
+            checkFile += offset._0;
+            checkRank += offset._1;
+            @if (checkFile > 7 || checkRank > 7 || checkFile < 0 || checkRank < 0) break();
+            checkIndex := checkRank * 8 + checkFile;
+            checkFlag := BIT(checkIndex);
+            kind := game.squares&[checkIndex].kind();
+            isEnemy := otherSquares.bit_and(checkFlag) != 0;
+            wipFlag&.bor(checkFlag);
+            if (isEnemy) {
+                if (lookingForPin) {
+                    // :DirectionsOrderMatters
+                    isSlider := (kind == .Queen || ((dir < 4 && kind == .Rook) || (dir >= 4 && kind == .Bishop)));
+                    if (isSlider) {
+                        // ok heck, we're pinned!
+                        pins := @if(dir < 4, result.frenchPinByRook&, result.frenchPinByBishop&);
+                        pins.bor(wipFlag);
+                    } else {
+                        // hit something that blocks but can't slide so don't care any move
+                        break();
+                    }
+                } else {
+                    if (kind == .Pawn) {
+                        if (checkRank == capturedPawnRank && checkFile == frenchFile) {
+                            lookingForPin = true;
+                            // this is the pawn we care about and we didn't see anything blocking line of sight so keep looking for sliders.
+                            continue();
+                        } else {
+                            // wrong pawn. dont care
+                            break();
+                        }
+                    } else {
+                        // We didn't hit the french target pawn so don't care.
+                        break();
+                    }
+                }
+            }
+            isFriend := mySquares.bit_and(checkFlag) != 0;
+            if (isFriend) {
+                isLeft := frenchFile > 0 && (frenchFile - 1 == checkFile);
+                isRight := frenchFile < 7 && (frenchFile + 1 == checkFile);
+
+                if (kind == .Pawn && checkRank == capturedPawnRank && (isLeft || isRight)) {
+                    // this is our pawn that would move
+                    if (sawAPotentialFrenchFriend) { // this is our second time here, we block ourselves, so its fine
+                        break();
+                    } else {
+                        sawAPotentialFrenchFriend = true;
+                        // need to keep looking to see if we're pinned
+                        continue();
+                    }
+                } else {
+                    // otherwise, it can't be a french pin, dont care.
+                    break();
+                }
+            }
+        }
+    }
+}
+
+fn bor(dest: *i64, src: i64) void = {
+    dest[] = dest[].bit_or(src);
+}
+
+ListType :: @if(safety_check_enabled(.DebugAssertions),
+    RawList, UnsafeList);
+
+ListPool :: AnyListPool(Move);
+fn AnyListPool($T: Type) Type = {
+    Self :: @struct {
+        lists: ListType(ListType(T));
+        List :: ListType(T);
+    };
+    
+    LIST_SIZE :: 512;
+    POOL_SIZE :: 512;
+
+    // :DontStoreTheAllocator 
+    fn init(alloc: Alloc) Self = {
+        self: Self = (lists = init(alloc, POOL_SIZE));
+        // pre-allocate enough lists that we'll probably never need to make a new one. should be > the expected depth number.
+        range(0, POOL_SIZE) { _ |
+            // If all 16 of your pieces were somehow a queen in the middle of the board with no other pieces blocking
+            // (maybe they're magic 4th dimensional queens, idk), that's still only 448 moves. So 512 will never overflow.
+            // I'm sure there's a smaller upper bound than that but also nobody cares.
+            self.lists&.push_assume_capacity(init(alloc, LIST_SIZE));
+        }
+        self
+    }
+
+    /// Do not deinit the list! Return it to the pool with release
+    fn get(self: *Self) ListType(T) = {
+        l := self.lists.items().len() - 1;
+        hushdebugmode := self.lists[l];
+        self.lists&.set_len(l);
+        hushdebugmode
+    }
+
+    fn release(self: *Self, list: ListType(T)) void = {
+        list&.clear();
+        self.lists&.push_assume_capacity(list);
+    }
+
+    fn copyOf(self: Self, other: *ListType(T)) ListType(T) = {
+        new := self.get();
+        new.set_len(other.items().len());
+        new.items().copy_from(other.items());
+        new
+    }
+
+    fn noneLost(self: Self) bool = 
+        self.lists.items().len() == POOL_SIZE;
+    
+    Self
+}
+
+// This is a terrible idea but its also like 15% faster and probably fine.
+// Very disappointing. Clearly a sign that I shouldn't be putting so many things in lists
+// but not sure how to do that and still get move ordering.
+// I also don't really understand how the overhead of ArrayList could be that makes a difference.
+// The capacity check should be the most predictable of branches.
+// TODO: Maybe cause its bigger so copying more when using the pool?
+fn UnsafeList($T: Type) Type = {
+    Self :: @struct(items: []T);
+
+    fn init(a: Alloc, num: i64) Self = {
+        self: Self = (items = a.alloc_uninit(T, num));
+        self.items.len = 0;
+        self
+    }
+
+    fn push_assume_capacity(self: *Self, e: T) void = {
+        self.items.len += 1;
+        self.items[self.items.len - 1] = e;
+    }
+
+    fn clear(self: *Self) void = {
+        self.items.len = 0;
+    }
+    
+    fn items(self: Self) []T = 
+        self.items;
+    
+    fn items(self: *Self) []T = 
+        self.items;
+    
+    fn index(self: Self, i: i64) *T =
+        self.items.index(i);
+        
+    fn index(self: *Self, i: i64) *T =
+        self.items.index(i);
+    
+    fn set_len(self: *Self, l: i64) void = {
+        self.items.len = l;
+    }
+    
+    ::DeriveAsSliceIndexable(Self, T);
+    ::DeriveAsSliceIndexable(*Self, T);
+    
+    Self
+}
+
+
+CASTLE_REWARD :: 0;
+
+// These indicate which segment of the Zobrist list is used for each feature of the board.
+ZOID_TURN_INDEX :: 0;
+ZOID_FRENCH_START :: 1;
+ZOID_CASTLE_START :: 9;
+ZOID_PIECE_START :: 13;
+
+Precalc :: import("@/examples/chess/precalc.fr");
+
+fn iambadatmyjob() void = {
+    // TOOD: this can't be at top level. :compilerbug/ordering
+    fn index(self: *Array(Piece, 64), i: u8) *Piece = 
+        self.index(@as(i64) i.zext());
+        
+    // TODO: this can't be at top level :compilerbug/ordering
+    //       Compile Error: Poison expression InProgressMacro.  
+    fn display(self: *Board, out: *List(u8)) void = {
+        out.reserve(64 + 8 + (64 * 3) + 64 + 8 + 8 + 2);
+        //try UCI.writeFen(self, letters.writer()); // TODO
+        //out.push_all("\n");
+    
+        range(0, 8) { rank |
+            out.push_all("|");
+            range(0, 8) { file |
+                s := self.get(file, 7 - rank).toUnicode();
+                out.push_all(s);
+                out.push_all("|");
+            };
+            out.push_all("\n");
+        }
+    }
+}
