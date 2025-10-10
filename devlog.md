@@ -4,6 +4,7 @@
 mistakes
   - one place i was using zoidberg index instead of value. 
   - typoed a variable in knightMove and lost one
+  - moved queen like rook twice instead of rook then bishop
 
 ## (Oct 9) chess
 
