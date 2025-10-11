@@ -1,0 +1,250 @@
+State :: @struct(
+    pipe: Sgl.Pipeline,
+    pass_action: Sg.PassAction,
+    text: Sdtx.Self,
+    draw: Sgl.Self,
+    sg: Sg.Self,
+
+    board: BoardView,
+    dirty: bool,
+);
+
+fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    allocator := general_allocator();
+    Chess'Precalc'initTables(allocator);
+    sapp.set_window_title("Chess");
+    
+    state.draw&.setup(
+        allocator = allocator,
+        sg = sg,
+    );
+
+    state.text&.setup(
+        allocator = allocator,
+        fonts = @slice(Sdtx.font.kc854),
+        sg = sg,
+    );
+    
+    init_pipeline(state.draw&, state.pipe&, sg, (colors = (
+        (blend = (  // This makes transparency work
+            enabled = true,
+            src_factor_rgb = .SRC_ALPHA,
+            dst_factor_rgb = .ONE_MINUS_SRC_ALPHA,
+        )),
+        ..,
+    )));
+    
+    state.pass_action.colors&[0] = (
+        load_action = .CLEAR,
+        clear_value = (r = 0.3, g = 0.3, b = 0.3, a = 1.0),
+    );
+    
+    state.board = (
+        board = initial(),
+        lists = init(allocator),
+        click_index = .None,
+        pos = vec2(100.0),
+        size = 600.0,
+        window_size = zeroed Vec2,
+    );
+    
+    state.dirty = true;
+};
+  
+fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    @if(Easy'should_skip_frame(sapp, state.dirty&)) return();
+
+    sgl := state.draw&;
+    sdtx := state.text.default_context&;
+    
+    sgl.defaults();
+    sgl.viewport(0.intcast(), 0.intcast(), sapp.width().intcast(), sapp.height().intcast(), true);
+    sgl.load_pipeline(state.pipe);
+    
+    state.board.window_size = vec2(sapp.width().float().cast(), sapp.height().float().cast());
+    draw(state.board&, sgl, sdtx);
+    
+    Easy'glue_begin_pass(sapp, sg, state.pass_action);
+    
+    sgl.draw_layer(sg, 0);
+    sdtx.draw_layer(0);
+    
+    sg.end_pass();
+    sg.commit();
+};
+
+fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
+    ::enum(@type event.mouse_button);
+    if event.type == .MOUSE_DOWN && event.mouse_button == .LEFT {
+        state.dirty = true;
+        click(state.board&, vec2(event.mouse_x, event.mouse_y));
+    }
+};
+
+BoardView :: @struct {
+    pos: Vec2;
+    size: f32;
+    window_size: Vec2;
+    
+    board: Chess.Board;
+    lists: Chess.ListPool;
+    click_index: ?i64;
+};
+
+// TODO: clean this up!
+fn draw(self: *BoardView, sgl: *Sgl.Self, sdtx: *Sdtx.Context) void = {
+    sgl.begin(.QUADS);
+    
+    // TODO: this is a paste from farm_game, factor out sgl.rectangle()?
+    square :: fn(pos: Vec2, size: Vec2, colour: u32) void => {
+        sgl.color = colour;
+        w, h := (self.window_size.x, self.window_size.y);
+        
+        x1 := pos.x.sub(0.0).div(w).sub(1.0);
+        x2 := pos.x.add(size.x).div(w).sub(1.0);
+        y1 := pos.y.sub(0.0).div(h.neg()).add(1.0);
+        y2 := pos.y.add(size.y).div(h.neg()).add(1.0);
+        
+        sgl.v2f(x1, y1);
+        sgl.v2f(x2, y1);
+        sgl.v2f(x2, y2);
+        sgl.v2f(x1, y2);
+    }
+    
+    sgl.load_identity();
+    
+    base := self.pos;
+    c := true;
+    s: f32 = self.size / 8;
+    
+    L, D := (pack_rgba(1.0, 0.808, 0.620, 1.0), pack_rgba(0.820, 0.545, 0.278, 1.0));
+    // solid background
+    square(base, vec2(s*8, s*8), D);  
+    // add in every other square
+    c := true;
+    range(0, 8) { file |
+        range(0, 8) { rank |
+            if c {
+                pos := vec2(s * file.int().float().cast(), s * rank.int().float().cast());
+                square(base + pos, vec2(s, s), L);
+            }
+            c = !c;
+        }
+        c = !c;
+    }
+    
+    ss: f32 = s / 80.0;
+    sss: f32 = 16.0 * ss;
+    sdtx.canvas(self.window_size.x / ss, self.window_size.y / ss);
+    msg := zeroed(Array(u8, 2));
+    range(0, 8) { file |
+        range(0, 8) { rank |
+            pos := vec2(s * file.int().float().cast(), s * (7-rank).int().float().cast());
+            #use("@/examples/chess/uci.fr");  // this #use is part of the :compiler bug below so don't remove it until i make a nicer repro
+            msg&[0] = fileToLetter(file.trunc()).ascii_to_upper();
+            msg&[1] = rankToLetter(rank.trunc());
+            sdtx.pos.x = (pos.x + base.x) / sss;
+            sdtx.pos.y = (pos.y + base.y) / sss;
+            sdtx.color = pack_rgba(0.0, 0.0, 1.0, 1.0);
+            sdtx.put(msg&.items());
+        };
+    };
+    
+    // TODO: if this isn't in a new scope :compilerbug
+    //       Unknown type for runtime var sss%36101%54103
+    //       its something like use_in_nested_capturing_call, only happens with the #use above
+    {
+        ss: f32 = s / 50.0;
+        sss: f32 = 16.0 * ss;
+        sdtx.canvas(self.window_size.x / ss, self.window_size.y / ss);
+        range(0, 8) { file |
+            range(0, 8) { rank |
+                pos := vec2(s * file.int().float().cast(), s * (7-rank).int().float().cast());
+                sdtx.pos.x = (pos.x + base.x) / sss + 1.0;
+                sdtx.pos.y = (pos.y + base.y) / sss + 1.0;
+                
+                p := self.board&.get(file, rank);
+                msg&[0] = p.toChar();
+                sdtx.color = @if(p.colour() == .White, pack_rgba(1.0, 1.0, 1.0, 1.0), pack_rgba(0.0, 0.0, 0.0, 1.0));
+                sdtx.put(msg&.items().slice(0, 1));
+            };
+        };
+    };
+    
+    note :: fn(i: u8, colour: u32) void => {
+        scale: f32 = 0.50;
+        rank, file := i.div_mod(8);
+        pos := vec2(s * file.int().float().cast(), s * (7 - rank).int().float().cast());
+        square(base + pos + vec2((1.0 - scale) / 2 * s), vec2(s * scale), colour);
+    };
+    
+    if self.click_index { i |
+        break :: local_return;
+        rank, file := i.div_mod(8);
+        p := self.board&.get(file, rank);
+        ::enum(@type p.kind());
+        if p.kind() == .Empty {
+            break();
+        };
+        
+        // TODO: only generate moves from the one piece, not all of them!
+        moves := possibleMoves(self.board&, p.colour(), self.lists&);
+        
+        for moves { move |
+            if move.from == i.trunc() {
+                note(move.to, pack_rgba(0.678, 0.847, 0.902, 1.0));
+            }
+        };
+        
+        self.lists&.release(moves);
+    };
+    
+    sgl.end();
+}
+
+fn click(self: *BoardView, pos: Vec2) void = {
+    // TODO: why are these off by a factor of two compared to the rendering ones? is it high_dpi related?
+    pos *= 2;
+    pos -= self.pos;
+    if pos.x < 0 || pos.y < 0 || pos.x > self.size || pos.y > self.size {
+        return()
+    };
+    pos /= self.size / 8;
+    rank, file := (7 - pos.y.cast().int(), pos.x.cast().int());
+    new := rank * 8 + file;
+
+    if self.click_index { old |
+        if infer_play_move(self.board&, old, new, self.lists&) {
+            self.click_index = .None;
+            return();
+        }
+    };
+    self.click_index = (Some = new);
+}
+
+// TODO: be able to ask for promotion
+fn infer_play_move(self: *Chess.Board, from: i64, to: i64, lists: *Chess.ListPool) bool = {
+    // TODO: seperate out the infer (from, to) -> Move logic
+    // TODO: only generate moves from the one piece, not all of them!
+    moves := possibleMoves(self, lists);
+    
+    for moves { move |
+        if move.from == from.trunc() && move.to == to.trunc() {
+            unmove := self.play(move);
+            lists.release(moves);  // :defer
+            return true;
+        }
+    };
+    
+    lists.release(moves);  // :defer
+    false
+}
+
+fn main() void = 
+    Easy'start(State);
+
+fn driver(vtable: *ImportVTable) void = 
+    Easy'build_for_graphics(vtable, "examples/chess/gui.fr"); 
+
+Chess :: import("@/examples/chess/moves.fr");
+#include_std("graphics/lib.fr");

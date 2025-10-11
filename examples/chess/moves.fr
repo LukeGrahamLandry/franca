@@ -162,9 +162,12 @@ fn set(self: *Board, file: i64, rank: i64, value: Piece) void = {
     };
 }
 
-// TODO: returning an error because can't be comptime because needs move lookup table.
+// TODO: call initTables at comptime (and then clearonaotbake to avoid bloat) so this can be #fold
 fn initial() Board = {
-    return fromFEN(INIT_FEN);
+    #use("@/examples/chess/uci.fr");
+    ::?Board;
+    b := fromFen(INIT_FEN);
+    b.unwrap()
 }
 
 fn emptyAt(self: *Board, file: i64, rank: i64) bool =
@@ -330,7 +333,7 @@ fn playNoUpdateChecks(self: *Board, move: Move) OldMove = {
 // Thought this would be faster because less copying but almost no difference (at the time. TODO: check again).
 /// <move> must be the value returned from playing the most recent move.
 fn unplay(self: *Board, move: OldMove) void = {
-    ::iambadatmyjob(); ::enum(Kind);
+    ::iambadatmyjob();
     
     // _ = self.pastBoardHashes.pop();
     // print("start unplay\n", .{});
@@ -350,7 +353,6 @@ fn unplay(self: *Board, move: OldMove) void = {
     self.pastEndIndex -= 1;
 
     sq := self.squares&;
-    ::enum(@type move.move.action);
     @match(move.move.action) {
         fn none() => ();
         fn promote() => {
@@ -494,7 +496,9 @@ GameOver :: @enum(Continue, Stalemate, FiftyMoveDraw, MaterialDraw, RepetitionDr
 
 //! Generating the list of possible moves for a position.
 
-// TODO: don't take colour as a parameter, nextPlayer is part of board state
+fn possibleMoves(board: *Board, lists: *ListPool) ListPool.List = 
+    possibleMoves(board, board.nextPlayer, lists);
+
 fn possibleMoves(board: *Board, me: Colour, lists: *ListPool) ListPool.List = {
     moves := lists.get();
     out: CollectMoves = (moves = moves&);
@@ -541,7 +545,8 @@ fn MoveGen($Output: Type) void = {
     fn genPossibleMoves(out: *Output, board: *Board, me: Colour) void = {
         mySquares := board.peicePositions&.getFlag(me)[];
         ::enum(MoveFilter);
-        @if (Output.filter != .CurrentlyCalcChecks) @debug_assert(me == board.nextPlayer);
+        // not true because the gui wants to ask for the other guy's moves
+        //@if (Output.filter != .CurrentlyCalcChecks) @debug_assert(me == board.nextPlayer);
     
         if (Output.filter != .CurrentlyCalcChecks && board.checks.doubleCheck) { // must move king.
             kingIndex := board.kingIndex&[me];
@@ -556,6 +561,7 @@ fn MoveGen($Output: Type) void = {
     
     // TODO: is it faster to have a bit board of each type of piece so you can do each kind all at once?
     fn genOnePieceMoves(out: *Output, board: *Board, i: i64) void = {
+        ::iambadatmyjob();
         piece := board.squares&[i];
         @match(piece.kind()) {
             fn Pawn() => pawnMove(out, board, i, piece);
@@ -1262,6 +1268,9 @@ ZOID_PIECE_START :: 13;
 Precalc :: import("@/examples/chess/precalc.fr");
 
 fn iambadatmyjob() void = {
+    ::enum(Kind);
+    ::enum(Move.Action);
+
     // TOOD: this can't be at top level. :compilerbug/ordering
     fn index(self: *Array(Piece, 64), i: u8) *Piece = 
         self.index(@as(i64) i.zext());
@@ -1282,3 +1291,5 @@ fn iambadatmyjob() void = {
         }
     }
 }
+
+BIT :: fn(i: i64) i64 = 1.shift_left(i);

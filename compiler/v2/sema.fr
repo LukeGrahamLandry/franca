@@ -2698,8 +2698,9 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
         start(4, "");
         enumerate parts { arg_index, arg_expr | 
             continue :: local_return;
-            @check(self.compile_expr(arg_expr, .None)) return2;
-            type := arg_expr.ty;
+            if !(arg_expr.expr&.is(.StructLiteralP) && arg_expr.ty == UnknownType) {
+                @check(self.compile_expr(arg_expr, .None)) return2;
+            };
             
             f_i := attempt.options.len;
             while => f_i > 0 {
@@ -2717,8 +2718,32 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
                 
                 b := func.arg.bindings.index(arg_index);
                 if b.ty&.ty() { param | 
-                    if !self.ask_can_assign(param, type) {
+                    if !self.ask_can_assign(param, arg_expr.ty) {
                         reject();
+                    };
+                    
+                    // This allows using a struct to enumlate named arguments and get syntax that disambiguates overloads. 
+                    @if_let(arg_expr.expr&) fn StructLiteralP(have) => if arg_expr.ty == UnknownType {
+                        @match(self.get_type(param)) {
+                            fn Struct(want) => {
+                                each have.bindings { have |
+                                    have_name := have.name.unwrap();
+                                    break :: local_return;
+                                    each want.fields { want |
+                                        if want.name == have_name {
+                                            break();
+                                        };
+                                    };
+                                    // TODO: check #use
+                                    // we're binding a name that doesn't exist on the struct so this overload can't match
+                                    reject();
+                                };
+                            }
+                            fn Tagged() => (); // TODO
+                            fn Named() => (); // TODO
+                            fn Placeholder() => ();  // hopefully unreachable?
+                            @default => reject();  // primitives can't be made from a struct literal
+                        }
                     };
                 };
             };

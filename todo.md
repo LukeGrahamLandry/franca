@@ -819,8 +819,12 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
 - have Slider :: @enum(Rook, Bishop) instead of functions with isRook: bool parameters
 - regressions (unported):
   - Learned.Weights
-  - doFishDebugOnFail
+  - search
 - gui
+  - play against uci engine
+  - pretty piece images
+  - promotion
+  - bit board overlays like the old one
 
 ### Terminal
 

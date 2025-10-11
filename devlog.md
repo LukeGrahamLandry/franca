@@ -1,10 +1,27 @@
 
+## (Oct 11)
+
+- added overloading check that compares struct literal names to the requested type,
+  so you can have both of these:
+  ```
+  fn new($classname: Str) id(classname);
+  fn new(it: @struct(kind: Kind, colour: Colour)) Piece;
+  ```
+  in a program and a call to `new(kind = a, colour = b)` is unambiguous.
+- chess gui
+  - draw the board
+  - click to make moves
+
 ## (Oct 10) chess
 
-mistakes
+- mistakes
   - one place i was using zoidberg index instead of value. 
   - typoed a variable in knightMove and lost one
   - moved queen like rook twice instead of rook then bishop
+- ported the perft-devide debugging code (which involved the uci parsing stuff). 
+  very nice to have it spit out a position with 3 pieces and the illegal move im making. 
+  so easy to fix things. 
+- noticed i never implemented the "click for ruble" in farm_game.fr, did that. 
 
 ## (Oct 9) chess
 
