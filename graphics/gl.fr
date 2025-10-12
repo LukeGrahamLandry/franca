@@ -21,7 +21,7 @@
 // when you call sgl.draw_layer(0) in your render pass. 
 //
 // There are vtx() overloads that let you leave off colour/uv/point_size and use the defaults 
-// set on the Sgl.Context, so you can update those fields to affect multiple vtx() calls. 
+// set on the Sgl.Self, so you can update those fields to affect multiple vtx() calls. 
 // Those fields live in the vertex data so you can change them between vtx() calls as often as you want. 
 // The rest: transforms/image/sampler/pipeline are only stored when you call end(), 
 // so they're shared by all the vertices of a shape. 
@@ -30,9 +30,14 @@
 // render into multiple gfx off screen passes). They can share the same `defaults: Shared` 
 // resources. 
 //
-
-// TODO: I think this would be less confusing if Context became Self and 
-//       just stored another copy of the shared default gpu state. 
+// To make alpha/transparency work:
+//     init_pipeline(_, _, _, (colours = ((blend = (enabled = true, src_factor_rgb = .SRC_ALPHA, dst_factor_rgb = .ONE_MINUS_SRC_ALPHA), ..)));
+// To use a texture instead of only solid colours: 
+//     sgl.texturing_enabled = true;
+//     sgl.texture(_, _); 
+// Each draw call (begin(_, _) + end(_) pair) only gets one texture. 
+// If you want multiple in a single call, you can pack them into an atlas and use uv to select which part to use for each shape.  
+//
 
 Sg :: import("@/graphics/gfx.fr");
 
@@ -84,6 +89,8 @@ Self :: @rec @struct(
     cur_prim_type: PrimitiveType,
     cur_img: Sg.Image,
     cur_smp: Sg.Sampler,
+    // when false, defaults.(img, smp) will be used instead of cur_(img, smp). 
+    // which defaults to a solid white square so you can just control the colour. 
     texturing_enabled: bool,
     matrix_dirty: bool,      /* reset in sgl_end(), set in any of the matrix stack functions */
 
@@ -628,7 +635,8 @@ fn scissor_rect(ctx: *Self, x: i32, y: i32, w: i32, h: i32, origin_top_left: boo
 fn scissor_rect(ctx: *Self, x: f32, y: f32, w: f32, h: f32, origin_top_left: bool) bool = 
     scissor_rect(ctx, x.int(), y.int(), w.int(), h.int(), origin_top_left);
 
-fn texture(ctx: *Self, img: SgImage, smp: SgSampler) void = {
+// don't forget to set texturing_enabled=true. TODO: that's kinda error prone...
+fn texture(ctx: *Self, img: Sg.Image, smp: Sg.Sampler) void = {
     @debug_assert(!ctx.in_begin);
     ctx.cur_img = @if(img.id != Sg.INVALID_ID, img, ctx.defaults.img);
     ctx.cur_smp = @if(smp.id != Sg.INVALID_ID, smp, ctx.defaults.smp);

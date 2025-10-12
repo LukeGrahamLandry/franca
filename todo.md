@@ -1,4 +1,5 @@
 
+- `u1, u2, v1, v2 : Ty(f32, f32, f32, f32) = (0.0, 1.0, 0.0, 1.0);  // TODO: allow this :compiler`
 - using @switch on an enum instead of @match is an easy footgun because it expects @case(.foo) instead of fn foo() and then you'll be confused
 - Type Error when calling a function ugently needs to show both the call site and the declaration site
 - DONT EXEC UNZIP IN examples/testing.fr

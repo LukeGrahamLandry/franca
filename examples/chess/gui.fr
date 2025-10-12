@@ -1,9 +1,17 @@
+
+// choose between using images or letters to represent pieces. 
+// UGLY=false: takes an extra 600ms to compile my c compiler and stb_image to load the png file. 
+// UGLY=true: removes the dependency on stb_image. makes this program more self contained.
+// TODO: make the import_module caching work well enough that its less embarrassing. 
+UGLY :: false;
+
 State :: @struct(
     pipe: Sgl.Pipeline,
     pass_action: Sg.PassAction,
     text: Sdtx.Self,
     draw: Sgl.Self,
     sg: Sg.Self,
+    pieces_image: Sg.Image,  // only used when UGLY=false
 
     board: BoardView,
     dirty: bool,
@@ -18,7 +26,37 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         allocator = allocator,
         sg = sg,
     );
-
+    
+    // TODO: my png is super blury. maybe i need to find an svg renderer. 
+    //       also i like the idea of text file of lines to draw more than blob of compressed pixels. 
+    @if(!UGLY) {
+        // The binary is smaller if it just includes the png+stb_image and decompresses at runtime, 
+        // but sometimes it's more fun to flex that this works at comptime :)
+        p, w, h := @run {
+            // The same textures every other low effort chess game in the universe found by googling for free chess icons.
+            // https://commons.wikimedia.org/wiki/File:Chess_Pieces_Sprite.svg jurgenwesterhof (adapted from work of Cburnett), CC BY-SA 3.0 https://creativecommons.org/licenses/by-sa/3.0, via Wikimedia Commons
+            data := include_bytes("examples/chess/data/pieces.png");
+            src_w :i32= 0;
+            src_h :i32= 0;
+            bytes_per_pixel :i32= 4; 
+            pixels := Stb'stbi_load_from_memory(data.ptr, data.len.intcast(), src_w&, src_h&, zeroed(*i32), bytes_per_pixel);
+            (pixels.slice(intcast(src_w*src_h*bytes_per_pixel)), src_w, src_h)
+        };
+    
+        state.pieces_image = sg.make(
+            width = w,
+            height = h,
+            pixel_format = .RGBA8,
+            label = "chess-pieces",
+            data = (
+                subimage = (
+                    (p, ..""), 
+                    ..zeroed(Array([]u8, 16)),
+                ),
+            ),
+        );
+    };
+    
     state.text&.setup(
         allocator = allocator,
         fonts = @slice(Sdtx.font.kc854),
@@ -46,6 +84,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         pos = vec2(100.0),
         size = 600.0,
         window_size = zeroed Vec2,
+        show_square_labels = false,
     );
     
     state.dirty = true;
@@ -62,6 +101,8 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sgl.load_pipeline(state.pipe);
     
     state.board.window_size = vec2(sapp.width().float().cast(), sapp.height().float().cast());
+    sgl.texture(state.pieces_image, (id = Sg.INVALID_ID));
+    
     draw(state.board&, sgl, sdtx);
     
     Easy'glue_begin_pass(sapp, sg, state.pass_action);
@@ -79,24 +120,33 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         state.dirty = true;
         click(state.board&, vec2(event.mouse_x, event.mouse_y));
     }
+    if event.type == .KEY_DOWN && event.key_code == .SPACE && !event.key_repeat {
+        state.dirty = true;
+        state.board.show_square_labels = !state.board.show_square_labels;
+    }
+    if @is(event.type, .RESIZED) {
+        state.dirty = true;
+    }
 };
 
 BoardView :: @struct {
     pos: Vec2;
     size: f32;
     window_size: Vec2;
+    show_square_labels: bool;
     
     board: Chess.Board;
     lists: Chess.ListPool;
     click_index: ?i64;
 };
 
-// TODO: clean this up!
 fn draw(self: *BoardView, sgl: *Sgl.Self, sdtx: *Sdtx.Context) void = {
     sgl.begin(.QUADS);
     
-    // TODO: this is a paste from farm_game, factor out sgl.rectangle()?
-    square :: fn(pos: Vec2, size: Vec2, colour: u32) void => {
+    square :: fn(pos: Vec2, size: Vec2, colour: u32) void => 
+        square_uv(pos, size, colour, vec2(0), vec2(0));
+    
+    square_uv :: fn(pos: Vec2, size: Vec2, colour: u32, u: Vec2, v: Vec2) void => {
         sgl.color = colour;
         w, h := (self.window_size.x, self.window_size.y);
         
@@ -105,11 +155,12 @@ fn draw(self: *BoardView, sgl: *Sgl.Self, sdtx: *Sdtx.Context) void = {
         y1 := pos.y.sub(0.0).div(h.neg()).add(1.0);
         y2 := pos.y.add(size.y).div(h.neg()).add(1.0);
         
-        sgl.v2f(x1, y1);
-        sgl.v2f(x2, y1);
-        sgl.v2f(x2, y2);
-        sgl.v2f(x1, y2);
-    }
+        (u1: f32, u2: f32, v1: f32, v2: f32) := (u.x, u.y, v.x, v.y);
+        sgl.v2f_t2f(x1, y1, u1, v1);
+        sgl.v2f_t2f(x2, y1, u2, v1);
+        sgl.v2f_t2f(x2, y2, u2, v2);
+        sgl.v2f_t2f(x1, y2, u1, v2);
+    };
     
     sgl.load_identity();
     
@@ -125,7 +176,7 @@ fn draw(self: *BoardView, sgl: *Sgl.Self, sdtx: *Sdtx.Context) void = {
     range(0, 8) { file |
         range(0, 8) { rank |
             if c {
-                pos := vec2(s * file.int().float().cast(), s * rank.int().float().cast());
+                pos := to_pixels(file, rank);
                 square(base + pos, vec2(s, s), L);
             }
             c = !c;
@@ -133,48 +184,36 @@ fn draw(self: *BoardView, sgl: *Sgl.Self, sdtx: *Sdtx.Context) void = {
         c = !c;
     }
     
-    ss: f32 = s / 80.0;
-    sss: f32 = 16.0 * ss;
-    sdtx.canvas(self.window_size.x / ss, self.window_size.y / ss);
-    msg := zeroed(Array(u8, 2));
-    range(0, 8) { file |
-        range(0, 8) { rank |
-            pos := vec2(s * file.int().float().cast(), s * (7-rank).int().float().cast());
-            #use("@/examples/chess/uci.fr");  // this #use is part of the :compiler bug below so don't remove it until i make a nicer repro
-            msg&[0] = fileToLetter(file.trunc()).ascii_to_upper();
-            msg&[1] = rankToLetter(rank.trunc());
-            sdtx.pos.x = (pos.x + base.x) / sss;
-            sdtx.pos.y = (pos.y + base.y) / sss;
-            sdtx.color = pack_rgba(0.0, 0.0, 1.0, 1.0);
-            sdtx.put(msg&.items());
-        };
+    set_font_scale :: fn(label_scale: f32) => {
+        sdtx.desc.char_width = s * label_scale;
+        sdtx.desc.char_height = s * label_scale;
+        sdtx.canvas(self.window_size.x * 2, self.window_size.y * 2);
     };
     
-    // TODO: if this isn't in a new scope :compilerbug
-    //       Unknown type for runtime var sss%36101%54103
-    //       its something like use_in_nested_capturing_call, only happens with the #use above
-    {
-        ss: f32 = s / 50.0;
-        sss: f32 = 16.0 * ss;
-        sdtx.canvas(self.window_size.x / ss, self.window_size.y / ss);
-        range(0, 8) { file |
-            range(0, 8) { rank |
-                pos := vec2(s * file.int().float().cast(), s * (7-rank).int().float().cast());
-                sdtx.pos.x = (pos.x + base.x) / sss + 1.0;
-                sdtx.pos.y = (pos.y + base.y) / sss + 1.0;
-                
-                p := self.board&.get(file, rank);
-                msg&[0] = p.toChar();
-                sdtx.color = @if(p.colour() == .White, pack_rgba(1.0, 1.0, 1.0, 1.0), pack_rgba(0.0, 0.0, 0.0, 1.0));
-                sdtx.put(msg&.items().slice(0, 1));
-            };
-        };
+    set_text_position :: fn(pos: Vec2) => {
+        sdtx.pos.x = pos.x / sdtx.desc.char_width;
+        sdtx.pos.y = pos.y / sdtx.desc.char_height;
+    };
+    
+    to_pixels :: fn(file, rank) => 
+        vec2(s * file.int().float().cast(), s * (7-rank).int().float().cast());
+    
+    set_font_scale(0.2);
+    msg := zeroed(Array(u8, 2));
+    @if(self.show_square_labels)
+    iter { rank, file, pos, p |
+        #use("@/examples/chess/uci.fr");
+        msg&[0] = fileToLetter(file.trunc()).ascii_to_upper();
+        msg&[1] = rankToLetter(rank.trunc());
+        set_text_position(pos + base);
+        sdtx.color = pack_rgba(0.0, 0.0, 1.0, 1.0);
+        sdtx.put(msg&.items());
     };
     
     note :: fn(i: u8, colour: u32) void => {
         scale: f32 = 0.50;
         rank, file := i.div_mod(8);
-        pos := vec2(s * file.int().float().cast(), s * (7 - rank).int().float().cast());
+        pos := to_pixels(file, rank);
         square(base + pos + vec2((1.0 - scale) / 2 * s), vec2(s * scale), colour);
     };
     
@@ -199,7 +238,45 @@ fn draw(self: *BoardView, sgl: *Sgl.Self, sdtx: *Sdtx.Context) void = {
         self.lists&.release(moves);
     };
     
+    if UGLY {
+        set_font_scale(0.5);
+        iter { rank, file, pos, p |
+            set_text_position(pos + base + vec2(s/4));
+            msg&[0] = p.toChar();
+            sdtx.color = @if(p.colour() == .White, pack_rgba(1.0, 1.0, 1.0, 1.0), pack_rgba(0.0, 0.0, 0.0, 1.0));
+            sdtx.put(msg&.items().slice(0, 1));
+        };
+    } else {
+        sgl.end();
+        sgl.begin(.QUADS);
+        sgl.texturing_enabled = true;
+        
+        iter { rank, file, pos, p |
+            if p.kind() != .Empty {
+                (w: f32, h: f32) := (1.0 / 6.0, 1.0 / 2.0);
+                x: f32 = p.kind().raw().int().sub(1).float().cast();
+                y: f32 = p.colour().eq(.Black).int().float().cast();
+                // TODO: how much do i care about the outline? 
+                //       i could just have one row in the image file 
+                //       and invert the colours for the other side. 
+                square_uv(base + pos, vec2(s, s), 0xFFFFFFFF, vec2(x*w, x*w + w), vec2(y*h, y*h + h));
+            }
+        };
+        
+        sgl.end();
+        sgl.begin(.QUADS);
+    };
+    
     sgl.end();
+    
+    iter :: fn($body: @Fn(rank: i64, file: i64, pos: Vec2, p: Chess.Piece) void) void => {
+        range(0, 8) { file |
+            range(0, 8) { rank |
+                p := self.board&.get(file, rank);
+                body(rank, file, to_pixels(file, rank), p);
+            };
+        };
+    }    
 }
 
 fn click(self: *BoardView, pos: Vec2) void = {
@@ -248,3 +325,17 @@ fn driver(vtable: *ImportVTable) void =
 
 Chess :: import("@/examples/chess/moves.fr");
 #include_std("graphics/lib.fr");
+
+Stb :: {
+    get  :: import("@/examples/testing.fr").fetch_or_crash;
+    root := get("https://github.com/nothings/stb/archive/f0569113c93ad095470c54bf34a17b36646bbbb5.zip", 1754150, "b62be3009cb9d4b6385bd4854bddf72d8e91f4e19d1347d6cf9589b19f70d45d", "stb-f0569113c93ad095470c54bf34a17b36646bbbb5");
+    Ffi  :: import("@/examples/import_c/ffi.fr");
+    c_source := @tfmt("""
+        #define STB_IMAGE_IMPLEMENTATION
+        #define STBI_ONLY_PNG
+        #define STBI_NO_SIMD
+        #define STBI_NO_STDIO
+        #include "%/stb_image.h"
+    """, root);
+    Ffi'include(current_compiler_context(), c_source)
+}

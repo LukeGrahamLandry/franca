@@ -1,4 +1,9 @@
 
+## (Oct 12)
+
+- 700 years messing with the weird coordinate space for debugtext
+- 700 years on not setting sgl.texturing_enabled
+
 ## (Oct 11)
 
 - added overloading check that compares struct literal names to the requested type,
