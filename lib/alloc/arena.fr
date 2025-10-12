@@ -1,6 +1,7 @@
-ArenaAlloc :: @struct(
+Allocator :: Self;
+Self :: @struct(
     parent: Alloc,
-    chunk: ?*ArenaHeader,
+    chunk: ?*Header,
     start: i64,
     end: i64,
     base_size: i64,
@@ -8,26 +9,26 @@ ArenaAlloc :: @struct(
     canary: bool = SLOW_ARENA_CANARY,
 );
 
-ArenaHeader :: @rec @struct(
+Header :: @rec @struct(
     size: i64,
     used := 0, // for debugging but should use in arena_owns as well for more precision. probably worth the 8 bytes, especially since we're wasting 16 on tags anyway. 
-    prev: ?*ArenaHeader,
-    next: ?*ArenaHeader,
+    prev: ?*Header,
+    next: ?*Header,
 );
 
-fn init(parent: Alloc, base_size: i64) ArenaAlloc #inline = 
+fn init(parent: Alloc, base_size: i64) Self #inline = 
     (parent = parent, chunk = .None, start = 0, end = 0, base_size = base_size, making_new_chunk = false);
 
-fn new_arena_chunk(allocator: Alloc, size: i64, prev: ?*ArenaHeader, making_new_chunk: *bool) *ArenaHeader = {
+fn new_arena_chunk(allocator: Alloc, size: i64, prev: ?*Header, making_new_chunk: *bool) *Header = {
     if making_new_chunk[] {
         scary_log(size);
         scary_log("recursing in new_arena_chunk");
         scary_exit();
     };
     making_new_chunk[] = true;
-    buf := allocator.alloc_uninit(u8, size.max(ArenaHeader.size_of())); // TODO: align
+    buf := allocator.alloc_uninit(u8, size.max(Header.size_of())); // TODO: align
     making_new_chunk[] = false;
-    chunk := ptr_cast_unchecked(From = u8, To = ArenaHeader, ptr = buf.ptr);
+    chunk := ptr_cast_unchecked(From = u8, To = Header, ptr = buf.ptr);
     chunk[] = (size = buf.len, prev = prev, next = .None);
     chunk
 }
@@ -37,7 +38,7 @@ arena_allocator_fn :: fn(self: rawptr, action: Alloc.Action, ptr: rawptr, count:
     if action == Alloc.Action.Allocate {
         return(ptr = u8.ptr_from_raw(arena_alloc(self, count, align)), len = count);
     };
-    self := ArenaAlloc.ptr_from_raw(self);
+    self := Self.ptr_from_raw(self);
     if action == .FreeAll {
         self.reset_retaining_capacity();
         return Alloc.void_result;
@@ -70,11 +71,11 @@ ArenaCanary :: @struct {
 // Don't try to printf debug in here...
 // TODO: make this less derranged. 
 arena_alloc :: fn(raw_self: rawptr, size: i64, align: i64) rawptr = {
-    self := ArenaAlloc.ptr_from_raw(raw_self);
+    self := Self.ptr_from_raw(raw_self);
     
     chunk := self.chunk || {
         next := new_arena_chunk(self.parent, self.base_size, .None, self.making_new_chunk&);
-        self.start = ArenaHeader.size_of();
+        self.start = Header.size_of();
         self.end = next.size;
         self.chunk = (Some = next);
         next
@@ -90,7 +91,7 @@ arena_alloc :: fn(raw_self: rawptr, size: i64, align: i64) rawptr = {
         end  := self.start + size;
         
         if end </*=*/ self.end {
-            ptr := ptr_cast_unchecked(From = ArenaHeader, To = u8, ptr = chunk);
+            ptr := ptr_cast_unchecked(From = Header, To = u8, ptr = chunk);
             mem := ptr.offset(self.start);
             self.start = end;
             if SLOW_ARENA_CANARY {
@@ -114,26 +115,26 @@ arena_alloc :: fn(raw_self: rawptr, size: i64, align: i64) rawptr = {
         };
         self.chunk = (Some = chunk);
         self.end = chunk.size;
-        self.start = ArenaHeader.size_of();
-        chunk.used = ArenaHeader.size_of();
+        self.start = Header.size_of();
+        chunk.used = Header.size_of();
     }
 };
 
 // note: Alloc.Mark.zeroed() means unsupported so that's why the +1 for start
 // :ugly
 fn erase(self: ArenaMarker) Alloc.Mark = 
-    (opaque = (ptr = u8.ptr_from_int(@if(self.chunk.is_some(), ArenaHeader.int_from_ptr(self.chunk.Some), 0)), len = self.start + 1));
+    (opaque = (ptr = u8.ptr_from_int(@if(self.chunk.is_some(), Header.int_from_ptr(self.chunk.Some), 0)), len = self.start + 1));
 // :ugly
 fn unerase(self: Alloc.Mark) ArenaMarker = 
-    (chunk = @if(self.opaque.ptr.is_null(), .None, (Some = bit_cast_unchecked(*u8, *ArenaHeader, self.opaque.ptr))), start = self.opaque.len - 1);
+    (chunk = @if(self.opaque.ptr.is_null(), .None, (Some = bit_cast_unchecked(*u8, *Header, self.opaque.ptr))), start = self.opaque.len - 1);
 
-ArenaMarker :: @struct(chunk: ?*ArenaHeader, start: i64);
-fn mark(self: *ArenaAlloc) ArenaMarker #inline = (chunk = self.chunk, start = self.start);
+ArenaMarker :: @struct(chunk: ?*Header, start: i64);
+fn mark(self: *Self) ArenaMarker #inline = (chunk = self.chunk, start = self.start);
 
 // remember, you can't do this if you acceppted an output allocator as a parameter because they might have passed you the temp allocator. 
 // # Safety: This invalidates any allocations in self before the corresponding call to mark. 
 // Memory is NOT returned to the backing allocator. 
-fn reset_retaining_capacity(self: *ArenaAlloc, mark: ArenaMarker) void = {
+fn reset_retaining_capacity(self: *Self, mark: ArenaMarker) void = {
     @if(SLOW_LEAK_ARENAS) return();
     if mark.chunk.is_none() {
         self.reset_retaining_capacity();
@@ -144,11 +145,11 @@ fn reset_retaining_capacity(self: *ArenaAlloc, mark: ArenaMarker) void = {
     @if(SLOW_ARENA_CANARY) if self.canary {
         c := self.chunk.unwrap();
         c.used = self.start;
-        ::ptr_utils(ArenaHeader);
+        ::ptr_utils(Header);
         while => !identical(c, chunk) {
             consume_canaries(c, c.used);
             if !SLOW_MEMORY_DEBUGGING {
-                c.used = ArenaHeader.size_of();
+                c.used = Header.size_of();
             };
             c = c.prev.unwrap();
         };
@@ -164,7 +165,7 @@ fn reset_retaining_capacity(self: *ArenaAlloc, mark: ArenaMarker) void = {
         while => c { it |
             c = it.next;
             size := it.size.align_back(page_size());
-            start := ArenaHeader.raw_from_ptr(it);
+            start := Header.raw_from_ptr(it);
             next_page := start.align_to(page_size());
             if size > 0 && ptr_diff(start, next_page) < size {
                 Syscall'mprotect(next_page, size, 0).unwrap();
@@ -182,13 +183,13 @@ fn reset_retaining_capacity(self: *ArenaAlloc, mark: ArenaMarker) void = {
     chunk.used = self.start;
 }
 
-fn consume_canaries(c: *ArenaHeader, used: i64) void = {
-    base := ArenaHeader.raw_from_ptr(c);
+fn consume_canaries(c: *Header, used: i64) void = {
+    base := Header.raw_from_ptr(c);
     it := base.offset(used);
     @assert(used.ule(c.size), "chunk.used oob");
     //scary_log(used); scary_log(" "); scary_log(base); scary_log(" XXX ");
     
-    while => !(identical(it, base) || identical(it, base.offset(ArenaHeader.size_of()))){
+    while => !(identical(it, base) || identical(it, base.offset(Header.size_of()))){
         @assert(base.int_from_rawptr().ult(it.int_from_rawptr()));
         canary := ArenaCanary.ptr_from_raw(it.offset(-size_of(ArenaCanary)));
         start := u8.raw_from_ptr(canary.start);
@@ -208,18 +209,18 @@ fn consume_canaries(c: *ArenaHeader, used: i64) void = {
 // set all the memory after a mark to 0xABABABA in the hopes of crashing you if you try to use it accidentally.
 // you can call this at the top of reset_retaining_capacity to reveal use-after-reset bugs more quickly,
 // at the cost of some performance. this should not change the behaviour of correct programs. 
-fn debug_stomp_after(self: *ArenaAlloc, mark: ArenaMarker) void = {
-    stomp_all :: fn(chunk) => stomp_some(chunk, ArenaHeader.size_of());
+fn debug_stomp_after(self: *Self, mark: ArenaMarker) void = {
+    stomp_all :: fn(chunk) => stomp_some(chunk, Header.size_of());
     stomp_some :: fn(chunk, clear_after) => {
-        clear_after = max(clear_after, ArenaHeader.size_of());
+        clear_after = max(clear_after, Header.size_of());
         if chunk.used > clear_after {
-            mem: []u8 = (ptr = ptr_cast_unchecked(ArenaHeader, u8, chunk).offset(clear_after), len = chunk.used - clear_after);
+            mem: []u8 = (ptr = ptr_cast_unchecked(Header, u8, chunk).offset(clear_after), len = chunk.used - clear_after);
             mem.set_bytes(SLOW_MEMORY_JUNK);
             chunk.used = clear_after;
         };
     };
     if mark.chunk { chunk | 
-        ::ptr_utils(ArenaHeader);
+        ::ptr_utils(Header);
         if chunk.identical(self.chunk.unwrap()) {
             chunk.used = self.start;
         };
@@ -238,7 +239,7 @@ fn debug_stomp_after(self: *ArenaAlloc, mark: ArenaMarker) void = {
 
 // # Safety: This invalidates all allocations in self!
 // Memory is NOT returned to the backing allocator. 
-fn reset_retaining_capacity(self: *ArenaAlloc) void = {
+fn reset_retaining_capacity(self: *Self) void = {
     @if(SLOW_LEAK_ARENAS) return();
     if self.chunk { chunk |
         chunk.used = self.start;
@@ -248,17 +249,17 @@ fn reset_retaining_capacity(self: *ArenaAlloc) void = {
             };
             @if(SLOW_MEMORY_DEBUGGING) {
                 // TODO: this doesn't happen to the last chunk
-                S :: ArenaHeader.size_of();
-                mem: []u8 = (ptr = ptr_cast_unchecked(ArenaHeader, u8, chunk).offset(S), len = max(chunk.used - S, 0));
+                S :: Header.size_of();
+                mem: []u8 = (ptr = ptr_cast_unchecked(Header, u8, chunk).offset(S), len = max(chunk.used - S, 0));
                 mem.set_bytes(SLOW_MEMORY_JUNK);
             };
-            chunk.used = ArenaHeader.size_of();
+            chunk.used = Header.size_of();
             chunk = c;
         };
         @if(SLOW_ARENA_CANARY) if self.canary {
             consume_canaries(chunk, chunk.used);
         };
-        self.start = ArenaHeader.size_of();
+        self.start = Header.size_of();
         self.end = chunk.size;
         self.chunk = (Some = chunk);
         chunk.used = self.start;
@@ -268,8 +269,8 @@ fn reset_retaining_capacity(self: *ArenaAlloc) void = {
 // Memory is returned to the backing allocator. 
 // # Safety
 //     - This invalidates all allocations in self!
-fn deinit(self: *ArenaAlloc) void = {
-    ::if_opt(*ArenaHeader, bool);
+fn deinit(self: *Self) void = {
+    ::if_opt(*Header, bool);
     if self.chunk { chunk |
         chunk.used = self.start;
         while => chunk.next { it |
@@ -282,7 +283,7 @@ fn deinit(self: *ArenaAlloc) void = {
             
             prev := chunk.prev;
             
-            ptr := ptr_cast_unchecked(From = ArenaHeader, To = u8, ptr = chunk);
+            ptr := ptr_cast_unchecked(From = Header, To = u8, ptr = chunk);
             buf := slice(ptr, chunk.size);
             addr := u8.int_from_ptr(ptr);
             self.parent.dealloc(u8, buf);
@@ -300,7 +301,7 @@ fn deinit(self: *ArenaAlloc) void = {
     
 }
 
-fn current_allocated_size(self: *ArenaAlloc) i64 = {
+fn current_allocated_size(self: *Self) i64 = {
     size := 0;
     if self.chunk { chunk |
         // go all the way back then all the way forward because we might not be at the latest chunk. 
@@ -318,7 +319,7 @@ fn current_allocated_size(self: *ArenaAlloc) i64 = {
 }
 
 // doesn't count those after the current chunk (that were allocated before the last reset).
-fn current_used_size(self: *ArenaAlloc) i64 = {
+fn current_used_size(self: *Self) i64 = {
     size := 0;
     if self.chunk { chunk |
         size += self.start;
@@ -331,15 +332,15 @@ fn current_used_size(self: *ArenaAlloc) i64 = {
     size
 }
 
-fn borrow(self: *ArenaAlloc) Alloc = {
-    self := ArenaAlloc.raw_from_ptr(self);
+fn borrow(self: *Self) Alloc = {
+    self := Self.raw_from_ptr(self);
     (data = self, vptr = arena_allocator_fn)
 }
 
-fn bake_relocatable_value(self: *ArenaAlloc) Slice(BakedEntry) = {
-    empty: ArenaAlloc = init(self.parent, self.base_size);
-    bytes := ArenaAlloc.cast_to_bytes(empty&);
-    entries := dyn_bake_relocatable_value(bytes, ArenaAlloc, true);
+fn bake_relocatable_value(self: *Self) Slice(BakedEntry) = {
+    empty: Self = init(self.parent, self.base_size);
+    bytes := Self.cast_to_bytes(empty&);
+    entries := dyn_bake_relocatable_value(bytes, Self, true);
     entries
 }
 
