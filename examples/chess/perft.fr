@@ -1,4 +1,4 @@
-// Runs perft on the positions from perft.txt.
+// Runs perft on the positions from examples/chess/data/perft
 // TODO: CLI divide command like the fish (tho really thats part of uci)
 // TODO: allow testing a different uci engine with myself as the oracle?
 // TODO: cli argument to set the oracle (default to stockfish)
@@ -42,7 +42,17 @@ main :: fn() void = {
         a.allCount >= b.allCount);  // ascending
     perfts.sort();
 
-    cores := 4;
+    if query_current_arch() == .wasm32 {
+        it := zeroed Worker;
+        taskIndex := 0;
+        it.lists = init(temp());  // :DontStoreTheAllocator
+        it.nextTask = taskIndex&;
+        it.tasks = perfts;
+        workerFn(it&);
+        return();
+    }
+    
+    cores := 1;
     taskIndex := 0;
     workers := temp().alloc_uninit(Worker, cores);
     enumerate workers { i, it |
@@ -197,6 +207,8 @@ fn parsePerfts(s: Str, a: Alloc) Result([]Perfts, Str) = {
 }
 
 fn debugPerft(fen: Str, depth: i64) void = {
+    @assert(query_current_arch() != .wasm32, "debugPerft() works by exec-ing another chess engine. this aint gonna work in wasm");
+    
     ::imactuallygoingtolosemymind();
     mark := temp().mark();
     board: Board = fromFen(fen).unwrap();
@@ -253,7 +265,8 @@ fn walkPerft(fish: *EngineProcess, board: *Board, depth: i64, lists: *ListPool, 
     };
 
     // If we disagreed on moves, this level is the problem, don't need to keep going.
-    if done {
+    if done || depth == 1 {
+        // depth=1 is unreachable in a sane world but the point of this is debugging when the program is broken
         lists.release(myMoves); // :defer
         return();
     }
@@ -308,25 +321,19 @@ fn runFishPerft(fish: *EngineProcess, board: *Board, depth: i64) FishResult = {
     result
 }
 
-// note: only using from/to/promote fields because those are the ones i parse from uci 
 
 // :compilerbug/ordering
 fn imactuallygoingtolosemymind() void = {
+    // note: not looking at action field because it's not set when parsing from uci 
     fn hash(h: *TrivialHasher, s: *Move) void = {
         h.hash(s.to&);
         h.hash(s.from&);
-        if s.action == .promote {
-            xxx := s.actionData.promote.raw();
-            h.hash(xxx&);
-        }
+        xxx := s.promote.raw();
+        h.hash(xxx&);
     }
     
     fn eq(a: *Move, b: *Move) bool = {
-        if a.action == .promote || b.action == .promote {
-            @if(a.action != b.action) return(false);
-            @if(a.actionData.promote != b.actionData.promote) return(false);
-        }
-        a.to == b.to && a.from == b.from
+        a.to == b.to && a.from == b.from && a.promote == b.promote
     }
     
     fn display(a: Move, out: *List(u8)) void = {

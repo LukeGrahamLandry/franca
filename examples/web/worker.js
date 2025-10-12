@@ -84,8 +84,9 @@ export const imports = {
                 Number(ptr),
                 2,
             );
-            time_spec[0] = BigInt(Math.floor(ms / 1000));
-            time_spec[1] = BigInt(Math.floor(ms * 1000000));
+            const seconds = Math.floor(ms / 1000);
+            time_spec[0] = BigInt(seconds);
+            time_spec[1] = BigInt(Math.floor((ms - seconds*1000) * 1000000));
         },
         abort: () => {
             throw new Error("called abort");
@@ -128,7 +129,7 @@ export const imports = {
             return 0n;
         },
         fsync: (fd) => 0n,
-        fetch_file: (ptr, len) => {
+        fetch_file: (ptr, len, p_file_length) => {
             let path = get_wasm_string(ptr, len);
             if (path.startsWith("./")) path = path.slice(2);
             const offset_length = fs_index[path];
@@ -136,9 +137,17 @@ export const imports = {
             // note: not shadowing the paremeter called 'len' or the worker silently doesn't run and there's no error in the console. 
             const [off, lenXXX] = offset_length;
             let src = new Uint8Array(fs_bytes, off, lenXXX);
-            const p = imports.env.mmap(0, BigInt(src.byteLength + 1), 0, 0, 0, 0);
+            const p = imports.env.mmap(0, BigInt(src.byteLength), 0, 0, 0, 0);
             let dest = new Uint8Array(Franca.memory.buffer, Number(p), src.byteLength);
             dest.set(src);
+            
+            const file_length = new BigInt64Array(
+                Franca.memory.buffer,
+                Number(p_file_length),
+                1,
+            );
+            file_length[0] = BigInt(src.byteLength);
+            
             return p;
         },
         yield_file: (ptr, len) => {

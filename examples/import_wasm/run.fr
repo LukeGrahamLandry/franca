@@ -162,7 +162,7 @@ weak_imports :: @const_slice(
    "readdir$INODE64", "dlsym", "fstatat", "fstatat$INODE64", "renameat", 
    "readlink", "_NSGetExecutablePath", "mkdirat", "pthread_attr_setstack", 
    "opendir$INODE64", "closedir", "readdir", "lseek", "pthread_create",
-   "pthread_join", "opendir", "dlopen", "clock_gettime", "sigaction",
+   "pthread_join", "opendir", "dlopen", "sigaction",
    "pthread_attr_init", 
    "strtod", "localtime", "time",
    "snprintf", 
@@ -259,6 +259,13 @@ Exports :: @struct {
         };
         mprotect :: fn(ctx: *u8, a: u32, b: u32, c: u32) u32 = 0;
         fsync :: fn(ctx: *u8, p: u32) i64 = 0;
+        clock_gettime :: fn(ctx: *u8, clock_id: u32, p: i64) u32 = {
+            time_spec := bit_cast_unchecked(*u8, *Array(i64, 2), ctx.offset(p));
+            ms := timestamp();
+            time_spec[0] = ms / 1000;
+            time_spec[1] = (ms - time_spec[0]*1000) * 1000000;
+            0
+        }
         jit_instantiate_module :: fn(ctx: *u8, address: i64, length: i64, first_export: i64, table_index: u32) void = {
             @debug_assert_eq(table_index, 0);
             module_bytes := ctx.offset(address).slice(length);
@@ -297,12 +304,14 @@ Exports :: @struct {
             // TODO: make the api nice so it's not more painful than the js version
         }
         
-        fetch_file :: fn(ctx: *u8, ptr: i64, length: i64) i64 = {
+        fetch_file :: fn(ctx: *u8, ptr: i64, length: i64, p_filelen: i64) i64 = {
             path := ctx.offset(ptr).slice(length);
             // TODO: do it without the extra copy. 
             src := read_entire_file(temp(), path) || return(0);
-            p := malloc(ctx, src.len.trunc() + 1);
+            p := malloc(ctx, src.len.trunc());
             (@as([]u8) (ptr = ctx.offset(p), len = src.len)).copy_from(src);
+            filelen := bit_cast_unchecked(*u8, *i64, ctx.offset(p_filelen));
+            filelen[] = src.len;
             p
         }
         

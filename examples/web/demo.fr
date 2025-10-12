@@ -83,11 +83,11 @@ get_args :: fn(default_src: Str) CompileArgs = {
         // TODO: this is dumb. should do a more official wasi thing? 
         if a[i] == "-file" {
             if query_current_arch() == .wasm32 {
-                fetch_file :: fn(ptr: *u8, len: i64) *u8 #weak #import("libc");
-                result := fetch_file(value.ptr, value.len);
-                @assert(!result.is_null(), "failed to read %", value);
-                result: CStr = (ptr = result);
-                out.src = result.str();
+                fetch_file :: fn(ptr: *u8, name_len: i64, len_out: *i64) *u8 #weak #import("libc");
+                length := -1;
+                result := fetch_file(value.ptr, value.len, length&);
+                @assert(!result.is_null() && length >= 0, "failed to read %", value);
+                out.src = result.slice(length);
             } else {
                 out.src = read_entire_file_or_crash(temp(), value);
             }
@@ -161,6 +161,11 @@ for_exports :: fn($body: @Fn(name: Str, addr: rawptr) void #duplicated) void = {
         dest.slice(out.len).copy_from(out.items());
         out.len.intcast()
     });
+    
+    do_export("clock_gettime", @Fn(c: i64, p: *TimeSpec) void, fn(c, p) = { Syscall'clock_gettime(c, p); });
+    
+    fetch_file :: fn(ptr: *u8, len: i64, len_out: *i64) *u8 #weak #import("libc");
+    do_export("fetch_file", @Fn(p: *u8, l: i64, len_out: *i64) *u8, fetch_file);
     
     weak :: Run.weak_imports;
     inline_for weak { $name |

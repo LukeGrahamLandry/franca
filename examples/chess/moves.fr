@@ -206,7 +206,8 @@ fn playNoUpdateChecks(self: *Board, move: Move) OldMove = {
 
     self.fullMoves += int(myColour == .Black).trunc();
     self.halfMoveDraw += 1;
-    if (move.isCapture) {
+    isCapture := thisMove.taken.kind() == .Empty || move.action == .useFrenchMove;
+    if isCapture {
         self.halfMoveDraw = 0;
         // captures irreversibly change board state
         self.pastStartIndex = self.pastEndIndex;
@@ -265,20 +266,18 @@ fn playNoUpdateChecks(self: *Board, move: Move) OldMove = {
     sq := self.squares&;
     @match(move.action) {
         fn none() => {
-            @debug_assert(move.isCapture == (thisMove.taken.kind() != .Empty));
             sq[move.to] = thisMove.original;
             sq[move.from] = Piece_EMPTY;
         }
         fn promote() => {
-            newKind := move.actionData.promote;
+            newKind := move.promote;
             sq[move.to] = new(colour = myColour, kind = newKind);
             sq[move.from] = Piece_EMPTY;
-            @debug_assert(move.isCapture == (thisMove.taken.kind() != .Empty));
             self.pieceRemoved(thisMove.original, move.to); // undo the pawn at target square
             self.pieceAdded(sq[move.to], move.to); // add the promoted thing
         }
         fn castle() => {
-            info := move.actionData.castle;
+            info := castleMove(move, myColour);
             self.pieceRemoved(sq[info.rookFrom], info.rookFrom); // remove the rook
             @debug_assert(sq[move.from].is(myColour, .King));
             sq[move.to] = thisMove.original;
@@ -289,7 +288,6 @@ fn playNoUpdateChecks(self: *Board, move: Move) OldMove = {
             @debug_assert(sq[info.rookFrom].is(myColour, .Rook));
             sq[info.rookTo] = new(colour = myColour, kind = .Rook);
             sq[info.rookFrom] = Piece_EMPTY;
-            @debug_assert(!move.isCapture && (thisMove.taken.kind() == .Empty));
             self.simpleEval += CASTLE_REWARD * myColour.dir();
 
             self.pieceAdded(sq[info.rookTo], info.rookTo); // add rook back
@@ -300,11 +298,11 @@ fn playNoUpdateChecks(self: *Board, move: Move) OldMove = {
             sq[move.from] = Piece_EMPTY;
             file := move.to.mod(8);
             self.frenchMove = (file = file);
-            @debug_assert(!move.isCapture && (thisMove.taken.kind() == .Empty));
+            @debug_assert(thisMove.taken.kind() == .Empty);
             self.zoidberg(ZOID_FRENCH_START + file.zext());
         }
         fn useFrenchMove() => {
-            captureIndex := move.actionData.useFrenchMove;
+            captureIndex: u8 = frenchCaptureIndex(move.to.zext(), myColour).trunc();
             self.pieceRemoved(sq[captureIndex], captureIndex); // remove the taken pawn
 
             @debug_assert(sq[move.from].is(myColour, .Pawn));
@@ -313,7 +311,7 @@ fn playNoUpdateChecks(self: *Board, move: Move) OldMove = {
             sq[move.to] = thisMove.original;
             sq[move.from] = Piece_EMPTY;
             sq[captureIndex] = Piece_EMPTY;
-            @debug_assert(move.isCapture && thisMove.taken.kind() == .Empty); // confusing
+            @debug_assert(thisMove.taken.kind() == .Empty); // confusing
             sq[captureIndex] = Piece_EMPTY;
         }
     }
@@ -360,7 +358,7 @@ fn unplay(self: *Board, move: OldMove) void = {
             self.pieceAdded(move.original, move.move.to); // undo undoing the pawn at target square
         }
         fn castle() => {
-            info := move.move.actionData.castle;
+            info := castleMove(move.move, colour);
             self.pieceRemoved(sq[info.rookTo], info.rookTo);
             @debug_assert(sq[info.rookTo].is(colour, .Rook));
             @debug_assert(sq[info.rookFrom].is_empty());
@@ -377,7 +375,7 @@ fn unplay(self: *Board, move: OldMove) void = {
             self.zoidberg(ZOID_FRENCH_START + file);
         }
         fn useFrenchMove() => {
-            captureIndex := move.move.actionData.useFrenchMove;
+            captureIndex: u8 = frenchCaptureIndex(move.move.to.zext(), colour).trunc();
             sq[captureIndex] = new(kind = .Pawn, colour = colour.other());
             self.pieceAdded(sq[captureIndex], captureIndex); // add back the taken pawn
         }
@@ -475,21 +473,14 @@ fn hasInsufficientMaterial(game: *Board) bool = {
 
 CastleMove :: @struct(rookFrom: u8, rookTo: u8);
 
-// TODO: this seems much too big (8 bytes?). castling info is redunant cause other side can infer if king moves 2 squares, bool field is evil and redundant
 Move :: @struct {
     from: u8;
     to: u8;
-    isCapture: bool; // french move says true but to square isnt the captured one
-    action: Action = .none;
-    actionData := zeroed U;
-    
-    U :: @union(
-        promote: Kind,
-        castle: CastleMove,
-        useFrenchMove: u8,  // capture index
-        //none: void, // :compilerbug tests/todo/zero_sized_union.fr
-    );
+    action := Action.none;
+    promote := Kind.Empty;
     Action :: @enum(u8) (none, promote, castle, allowFrenchMove, useFrenchMove);
+    // query metadata with frenchCaptureIndex() and castleMove() based on the action field. 
+    // since those are rare, it's cheaper to recompute than to store. 
 };
 
 GameOver :: @enum(Continue, Stalemate, FiftyMoveDraw, MaterialDraw, RepetitionDraw, WhiteWins, BlackWins);
@@ -665,7 +656,7 @@ fn MoveGen($Output: Type) void = {
                 @if (targetFile != validTargetFile.zext()) return();
                 @if ((colour == .White && targetRank != 5) || (colour == .Black && targetRank != 2)) return();
                 endIndex := targetRank * 8 + targetFile;
-                captureIndex := ((@if(colour == .White, targetRank - 1, targetRank + 1)) * 8) + targetFile;
+                captureIndex := frenchCaptureIndex(endIndex, colour);
                 @if (!board.squares&[captureIndex].is(colour.other(), .Pawn)) return(); // TODO: why isnt this always true?
                 toFlag := BIT(endIndex);
                 captureFlag := BIT(captureIndex);
@@ -691,8 +682,6 @@ fn MoveGen($Output: Type) void = {
                     from = trunc(i), 
                     to = trunc(endIndex), 
                     action = .useFrenchMove,
-                    actionData = (useFrenchMove = captureIndex.trunc()), 
-                    isCapture = true,
                 );
             }
         }
@@ -747,11 +736,6 @@ fn MoveGen($Output: Type) void = {
             from = kingFrom.trunc(), 
             to = kingTo.trunc(), 
             action = .castle,
-            actionData = (castle = (
-                rookFrom = rookFrom.trunc(),
-                rookTo = rookTo.trunc(),
-            )),
-            isCapture = false,
         );
     }
     
@@ -779,6 +763,23 @@ fn MoveGen($Output: Type) void = {
     }
 }
 
+fn frenchCaptureIndex(targetIndex: i64, colour: Colour) i64 #inline = {
+    targetRank, targetFile := targetIndex.div_mod(8);
+    captureRank := @if(colour == .White, targetRank - 1, targetRank + 1);
+    captureIndex := captureRank * 8 + targetFile;
+    captureIndex
+}
+
+fn castleMove(move: Move, me: Colour) CastleMove #inline = {
+    @debug_assert(move.action == .castle);
+    shift: u8 = @if(me == .Black, 7 * 8, 0);
+    goingLeft := move.to - shift == 2;
+    (
+        rookFrom = shift + @if(goingLeft, 0, 7), 
+        rookTo = shift + @if(goingLeft, 3, 5),
+    )
+}
+
 // TODO: this is a paste from backend/util.fr
 fn for_bits(b: i64, $body: @Fn(i: i64) void) void = {
     while => b != 0 {
@@ -796,12 +797,13 @@ fn addMoveOrdered(moves: *ListPool.List, board: *Board, fromIndex: Square, toInd
     enemyPieces := board.peicePositions&.getFlag(colour.other())[];
     toFlag := BIT(toIndex);
 
-    toPush: Move = (from = fromIndex.trunc(), to = toIndex.trunc(), isCapture = toFlag.bit_and(enemyPieces) != 0);
-    if toPush.isCapture { // moving to empty square
-        moves.push_assume_capacity(toPush);
-    } else { // taking an enemy piece. do move ordering for better prune.
+    toPush: Move = (from = fromIndex.trunc(), to = toIndex.trunc());
+    if toFlag.bit_and(enemyPieces) != 0 {
+        // TODO:
         // Have this be a comptime param that gets passed down so I can easily benchmark.
         // (then can disable it if just want better perft numbers)
+        
+        // do move ordering for better prune.
         // This is a capture, we like that, put it first. Capturing more valuable pieces is also good.
         if true {| break :: local_return;
         enumerate moves { index, move |
@@ -815,9 +817,9 @@ fn addMoveOrdered(moves: *ListPool.List, board: *Board, fromIndex: Square, toInd
             }
         }
         };
-
-        moves.push_assume_capacity(toPush);
-    }    
+    }
+    
+    moves.push_assume_capacity(toPush);
 }
 
 fn pawnForwardTwo(moves: *ListPool.List, board: *Board, fromIndex: Square, toFile: i64, toRank: i64) void = {
@@ -831,7 +833,6 @@ fn pawnForwardTwo(moves: *ListPool.List, board: *Board, fromIndex: Square, toFil
         from = fromIndex.trunc(), 
         to = toIndex.trunc(), 
         action = .allowFrenchMove, 
-        isCapture = false,
     );
 }
 
@@ -871,8 +872,7 @@ CollectMoves :: @struct {
                 from = fromIndex.trunc(), 
                 to = trunc(toRank * 8 + toFile), 
                 action = .promote,
-                actionData = (promote = .Queen),
-                isCapture = !check.is_empty(),
+                promote = .Queen,
             );
             // Queen promotions are so good that we don't even care about preserving order of the old stuff.
             // TODO: that's wrong cause mate
@@ -886,7 +886,7 @@ CollectMoves :: @struct {
             // Technically you might want a knight but why ever anything else? For correctness (avoiding draws?) still want to consider everything.
             options :: @const_slice(Kind.Knight, .Rook, .Bishop);
             for options { k |
-                move.actionData.promote = k;
+                move.promote = k;
                 self.moves.push_assume_capacity(move);
             }
         } else {

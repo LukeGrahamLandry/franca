@@ -820,6 +820,7 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
 - regressions (unported):
   - Learned.Weights
   - search
+- use ZOID_CASTLE_START
 - gui
   - play against uci engine
   - pretty piece images

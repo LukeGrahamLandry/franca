@@ -11,6 +11,15 @@
 - chess gui
   - draw the board
   - click to make moves
+- shrink Move to 4 bytes. don't store the castling rook to/from or the french capture target, 
+  they're fixed based on the move to/from, just recompute as needed. 86 -> 92 MNPS (-unsafe, cores=1).
+- made perft.fr work on wasm
+  - my dumb fetch_file was being extra dumb and not allowing internal null bytes. fixed that.
+  - so thats a benchmark which is just compute heavy and not hurt by needing to load many many tiny modules for comptime jit on wasm. 
+    (both single threaded and -unsafe. name: native ms -> chrome ms = overhead)
+    - self compile: 1309 -> 5927 = 4.5x
+    - perft: 73321 -> 114421 = 1.5x
+    looks like the sucky way of doing jit is where most of the slow is coming from.
 
 ## (Oct 10) chess
 
