@@ -20,7 +20,26 @@
     - self compile: 1309 -> 5927 = 4.5x
     - perft: 73321 -> 114421 = 1.5x
     looks like the sucky way of doing jit is where most of the slow is coming from.
-
+- macos/app.fr hellscape trying to get a menu bar in full screen
+  - `NSApp.setActivationPolicy(NSApplicationActivationPolicyRegular)`  
+    lets you select the window and get key events
+  - `w.setCollectionBehavior(NSWindowCollectionBehaviorFullScreenPrimary)`  
+    gives you a menu bar when you mouse to the top in full screen 
+    but it doesn't work if you do the activation policy as well (so no key press)
+  - `NSApp.setMainMenu(new "NSMenu")`  
+    instead, explicitly adding an empty menu bar makes it work and doesn't break activationpolicy
+  - sadly part of my process was dear gemini-ing 
+    (because if you google anything you just get idiots telling you to use the settings app)
+    - "my macos application does not show the menu bar when i put the mouse at the top of the screen in full screen mode"
+    - "it works if i use MTKView instead of CAMetalLayer"
+    - (`[...]` show you a minimal example of a Cocoa app?) "yes"
+  - its answers weren't true but its example program did compile 
+    and randomly removing different combinations of lines 
+    until i could make it behave like my broken thing or correct narrowed down the probem. 
+  - does the lies machine still turn my brain into soup if im just using it to replace 
+    apple's "chuck a zip file that opens in xcode over the wall" examples with something that's one file you can feed to clang? 
+    maybe it's not worth the moral dilemma.  
+  
 ## (Oct 10) chess
 
 - mistakes
