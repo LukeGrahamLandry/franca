@@ -21,6 +21,7 @@
       and when it's zero sized, EmitIr.alloca gives you back 0 as the address, because reading void is a nop anyway, 
       but then it wants to copy the 8 byte union out of the 0 byte fake allocation. 
       just don't do the fast path for unions, they're rare anyway. 
+    - that was the last thing using TypeMeta.size_slots so it can go away now
 
 ## (Oct 12)
 

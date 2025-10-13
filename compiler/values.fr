@@ -446,7 +446,7 @@ fn zero_padding(program: CompCtx, ty: Type, bytes: *ReadBytes) PRes = {
         fn Enum(f)   => return(zero_padding(program, f.raw, bytes));
         fn Named(f)  => return(zero_padding(program, f._0, bytes)); 
         fn Array(f) => {
-            inner_align := program.get_info(f.inner).align_bytes();
+            inner_align := program.get_info(f.inner)[].align_bytes;
             range(0, f.len.zext()) { _ |
                 @debug_assert_eq(bytes.i.mod(inner_align.zext()), 0);
                 @try(zero_padding(program, f.inner, bytes)) return;
@@ -664,12 +664,11 @@ fn get_info(self: *SelfHosted, ty_original: Type) *TypeMeta = {
     };
     
     // TODO: when i didnt have some of the trunc impls this had a "tried to call missing function"
-    new :: fn(size_slots: u16, align_bytes: u16, contains_pointers: bool, stride_bytes: u32) TypeMeta = {
+    new :: fn(align_bytes: u16, contains_pointers: bool, stride_bytes: u32) TypeMeta = {
         @debug_assert_eq(stride_bytes.mod(align_bytes.zext()), 0);
         (
             loc = (low = 0),
             stride_bytes = stride_bytes,
-            size_slots = size_slots,
             align_bytes = align_bytes,
             contains_pointers = contains_pointers,
             is_sized = true,
@@ -686,7 +685,6 @@ fn get_info(self: *SelfHosted, ty_original: Type) *TypeMeta = {
             //       old sema didn't need this, it just obsessively calledfinish_layout every time it produced a value. 
             self.finish_layout(ty); 
             @debug_assert(f.layout_done, "ICE: layout not done! T%", ty);
-            size: u16 = 0;
             align: u16 = 1;
             pointers := false;
             bytes := 0;
@@ -702,10 +700,8 @@ fn get_info(self: *SelfHosted, ty_original: Type) *TypeMeta = {
                 @debug_assert(f.is_union || arg.byte_offset >= bytes, "ICE: fields not in order in T% field: % at % is before %", ty, self.pool.get(arg.name), arg.byte_offset, bytes); // TODO: assert not past max_u16 or better have a safety checking intcast
                 end := arg.byte_offset + info.stride_bytes.zext();
                 if f.is_union {
-                    size = size.max(info.size_slots);
                     bytes = bytes.max(info.stride_bytes.zext());
                 } else {
-                    size += info.size_slots;
                     bytes = bytes.max(end);
                 };
                 pointers = pointers.or(info.contains_pointers);
@@ -713,21 +709,19 @@ fn get_info(self: *SelfHosted, ty_original: Type) *TypeMeta = {
             
             bytes = align_to(bytes, align.zext());
             @assert_lt(bytes, 1.shift_left(32), "cannot have a type larger than 4GB");
-            new(size, align, pointers, bytes.trunc())
+            new(align, pointers, bytes.trunc())
         }
         fn Tagged(f) => {
-            size: u16 = 0;
             bytes: u32 = 0;
             pointers := false;  
             
             @debug_assert(f.cases.len > 0, "TODO: i guess this can just be void");
             each f.cases { f |
                 info := self.get_info(f._1);
-                size = size.max(info.size_slots);
                 bytes = bytes.max(info.stride_bytes);
                 pointers = pointers.or(info.contains_pointers);
             };
-            size += 1;  // :tag_is_i64
+            // :tag_is_i64
             bytes += 8;
             
             align: u32 = 8;
@@ -738,37 +732,36 @@ fn get_info(self: *SelfHosted, ty_original: Type) *TypeMeta = {
             
             // TODO: currently tag is always i64 so align 8 but should use byte since almost always enough. but you just have to pad it out anyway.
             //       even without that, if i add 16 byte align, need to check the fields too.  :tag_is_i64
-            new(size, 8, pointers, bytes)
+            new(8, pointers, bytes)
         }
-        fn Never() => new(0, 1, false, 0);
+        fn Never() => new(1, false, 0);
         fn Int(int) => {
             // :SmallTypes
             @switch(int.bit_count) {
-                @case(8) => new(1, 1, false, 1);
-                @case(16) => new(1, 2, false, 2);
-                @case(32) => new(1, 4, false, 4);
-                @default => new(1, 8, false, 8);
+                @case(8) => new(1, false, 1);
+                @case(16) => new(2, false, 2);
+                @case(32) => new(4, false, 4);
+                @default => new(8, false, 8);
             }
         }
-        fn F32()  => new(1, 4, false, 4);
-        fn F64()  => new(1, 8, false, 8);
-        fn void() => new(0, 1, false, 0);
-        fn Bool() => new(1, 1, false, 1); // :SmallTypes
-        fn Ptr(_)     => new(1, 8, true, 8);
-        fn VoidPtr()  => new(1, 8, true, 8);
-        fn FnPtr(_)   => new(1, 8, true, 8);
-        fn Label(_)   => new(1, 4, false, 4);
-        fn Fn(_)      => new(1, 4, false, 4);
+        fn F32()  => new(4, false, 4);
+        fn F64()  => new(8, false, 8);
+        fn void() => new(1, false, 0);
+        fn Bool() => new(1, false, 1); // :SmallTypes
+        fn Ptr(_)     => new(8, true, 8);
+        fn VoidPtr()  => new(8, true, 8);
+        fn FnPtr(_)   => new(8, true, 8);
+        fn Label(_)   => new(4, false, 4);
+        fn Fn(_)      => new(4, false, 4);
         fn Array(f) => {
             ::if(TypeMeta);
             if f.len == 0 {
-                new(0, 1, false, 0)
+                new(1, false, 0)
             } else {
                 info := self.get_info(f.inner);
                 bytes: i64 = info.stride_bytes.zext() * f.len.zext();
                 @assert_lt(bytes, 1.shift_left(32), "cannot have a type larger than 4GB (trying to make an Array of % elements)", f.len);
                 new(
-                    info.size_slots * @as(u16) f.len.trunc(),
                     info.align_bytes,
                     info.contains_pointers,
                     bytes.trunc(),
