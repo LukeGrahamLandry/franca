@@ -706,8 +706,8 @@ fn emit_runtime_call(
 }
 
 fn is_local_scalar(self: CompCtx, v: Var, ty: Type) bool #inline = {
-    info := self.get_info(ty);
-    info.size_slots == 1 && info.stride_bytes <= 8 && !{self.vtable.took_address}(self.data, v&)
+    _, k := load_op(self, ty);
+    k != .Ke && !{self.vtable.took_address}(self.data, v&)
 }
 
 fn compile_stmt(self: *EmitIr, stmt: *FatStmt) CRes(void) = {
@@ -1517,9 +1517,6 @@ fn construct_aggregate(self: *EmitIr, pattern: *Pattern, requested: Type, p: Pla
                     return(self.compile_expr(expr, p));
                 };
             };
-            if expected == 1 {
-                return(self.compile_expr(pattern.bindings.index(0).get_default().unwrap(), p));
-            };
             
             // This is perhaps more hassle than it's worth. 
             if @is(p&.tag(), .ScalarTransient, .Assign, .Scalar) {
@@ -1587,7 +1584,7 @@ fn declare_var_mem(self: *EmitIr, name: Var, ptr: Qbe.Ref, type: Type) void #inl
         return()  
     };
 
-    @debug_assert(rtype(ptr) == .RTmp);
+    @debug_assert_eq(rtype(ptr), .RTmp, "declare_var_mem %", ptr);
     self.record_var_decl(name, (Alloca = ptr));
 }
 
@@ -1690,7 +1687,7 @@ fn get_memory(self: *EmitIr, r: Placement, ty: Type) Qbe.Ref = {
         fn NewMemory() => self.alloca(ty);
         fn Blit(it) => it;
         fn Discard() => self.alloca(ty);  // TODO: maybe force the caller to early out? 
-        @default => panic("invalid Placement type for get_memory");
+        @default => @panic("invalid Placement type for get_memory: %", r&.tag());
     }
 }
 

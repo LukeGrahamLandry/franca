@@ -7,6 +7,20 @@
   - ported the simple version of best move search and hooked it up to the gui
   - gui: zoom in/out, show fen when piece labels enabled
   - kinda wasting time with uci supporting things i don't need and making it more convoluted but here we are. 
+- maybe i've collected enough compiler bugs with the chess adventure that i should start fixing them. there's an idea...
+  - zero_sized_union_member
+    - is_local_scalar does it based on size_slots instead of load_op 
+      so the variable declaration tries to put it in a temporary 
+      but the expression tries to initialize into memory. 
+      i want to get rid of size_slots, so going with using load_op everywhere 
+      (which currently always treats unions as aggragates even if they could be a small scalar)
+    - construct_aggregate short circuits when expected=1 and just emits the single field to the placement, 
+      the thought being that structs have the same repr as thier one field. but for unions like this, 
+      the field's type is smaller than the union's type so when the placement is NewMemory, 
+      the variable will be allocated a smaller stack slot than it needs, 
+      and when it's zero sized, EmitIr.alloca gives you back 0 as the address, because reading void is a nop anyway, 
+      but then it wants to copy the 8 byte union out of the 0 byte fake allocation. 
+      just don't do the fast path for unions, they're rare anyway. 
 
 ## (Oct 12)
 

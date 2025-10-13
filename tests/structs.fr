@@ -506,3 +506,31 @@ fn tagged_field_default() #test = {
     s: S = ();
     @assert(s.a.is_none() && s.b.unwrap() == 123);
 }
+
+// note: the const forms of this also put uninitialized memory in your binary 
+//       and even if i called zero_padding (which i currently don't for things that don't contain pointers)
+//       it doesn't work on unions because it doesn't know which case is active. 
+//       maybe i should have a mode that forces padding bits to be zeroed 
+//       if you care about reproducible builds more than performace (you could just enable that for comptime code for example). 
+fn zero_sized_union_member() #test = {
+    A :: @union(a: i64, b: void);
+    a: A = (b = ());  // panic! invalid Placement type for get_memory
+    b: A = :: (b = ()); // fault
+    ::f();  // same as the above but lets you #log_ir so you can see it's doing `retc 0, :T29`
+    c := f(); // Compile Error: ICE: tried to assign aggragate call to scalar placement
+    f :: fn() A #noinline = (b = ());
+}
+
+// this doesn't really test anything because there's no guarentee that stack slots are assigned in declaration order  
+// but at least it documents a possible mistake. 
+fn fragile_union_stack_size() #test = {
+    A :: @union(big: Array(u8, 1000), small: i64);
+    a := 123;
+    b: A = (small = 1);  // the size of NewMemory needs to be size_of(A) not size_of(i64) even tho that's all that's being written here
+    c := 456;
+    b.big&.items().set_zeroed();  // hope this stomp the stack!
+    blackbox :: fn(a: *i64, b: *A, c: *i64) void #noinline = {
+        @assert(a[] == 123 && c[] == 456);
+    };
+    blackbox(a&, b&, c&);
+}
