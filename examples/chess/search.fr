@@ -1,0 +1,390 @@
+//! Choosing the best move for a position.
+
+StratOpts :: @struct {
+    doPruning := true;
+    // When false, it will play garbage moves if it runs out of time because it won't have other levels to fall back to.
+    doIterativeDeepening := true; 
+    doMemo := true;
+    // TODO: ugh. why are we doing :stupidhour with printing shit in the eval loop, can we not. 
+    //       have an io thread and stick things on a queue maybe cause you need one to wait anyway. 
+    printUci := false;
+    trackPv := false;
+};
+
+IM_MATED_EVAL: i32 : -1000000; // Add distance to prefer sooner mates
+LOWEST_EVAL: i32 : -2000000;
+DRAW_EVAL :: 0;
+
+SearchGlobals :: @struct {
+    lists: ListPool;
+    evalLists: AnyListPool(i32);
+    memoMap: MemoTable(MemoValue);
+    // Instead of walkEval doing syscalls to check the time and bail out,
+    // have another thread sleep until the timeout and then set forceStop=1 
+    // to cause walkEval to short circuit and bestMove to pick the result from the previous search depth. 
+    // TODO: other things to try 
+    // - setitimer
+    // - figure out vdso stuff so i don't need to feel guilty about calling clock_gettime a billion times
+    forceStop: u32 = 0;
+};
+
+fn init(memoMapSizeMB: i64, a: Alloc) SearchGlobals = (
+    memoMap = initWithCapacity(memoMapSizeMB, a), 
+    lists = init(a), 
+    evalLists = init(a),
+);
+
+fn resetMemoTable(self: *SearchGlobals) void = {
+    each self.memoMap.buffer { it |
+        it.hash = 0;
+    };
+}
+
+fn bestMove($opts: *StratOpts, ctx: *SearchGlobals, game: *Board, maxDepth: i64 /*, timeLimitMs: i128*/) ?Move = {
+    @debug_assert(ctx.forceStop == 0);
+    @if (!opts.printUci && game.isDraw()) return(.None);
+    
+    me := game.nextPlayer;
+    //if (movegen.BE_EVIL and (!ctx.lists.noneLost() or !ctx.evalLists.noneLost())) {
+        //panic("Unsafe ListPool leak.", .{});
+    //}
+
+    topLevelMoves := possibleMoves(game, ctx.lists&);
+    if (topLevelMoves.len() == 0) {
+        //if (opts.printUci) {
+        //    const result: UCI.UciResult = .{ .BestMove = null };
+        //    try result.writeTo(std.io.getStdOut().writer());
+        //}
+        ctx.lists&.release(topLevelMoves);  // :defer
+        return(.None);  // no legal moves
+    }
+    evals := ctx.evalLists&.get();
+    @debug_assert_ult(maxDepth, ListPool.POOL_SIZE);
+
+    //var thinkTime: i128 = -1;
+    favourite: Move = topLevelMoves[0];
+    startDepth := @if(opts.doIterativeDeepening, 0, maxDepth);
+    // TODO: stop iteration if there's a forced mate. doesnt matter but offends me to do pointless work
+    range(startDepth, maxDepth + 1) { depth | 
+        //var pv = try ctx.lists.get();
+        //defer ctx.lists.release(pv);
+        alpha := LOWEST_EVAL;
+        beta := -LOWEST_EVAL;
+        // TODO: this is almost the same as walkEval.
+        evals&.clear();
+        enumerate topLevelMoves { i, move |
+            //var line = try ctx.lists.get();
+            //try line.append(move);
+            unMove := game.play(move[]);
+            eval := -walkEval(opts, ctx, game, depth.trunc(), -beta, -alpha/*, &line*/);
+            game.unplay(unMove);
+            evals&.push_assume_capacity(eval);
+            
+            // Update a/b to pass better ones to walkEval but it would never be able to prune here because the we're always the same player.
+            if eval > alpha {
+                alpha = eval;
+                //if (opts.trackPv) {
+                //    pv.items.len = line.items.len;
+                //    @memcpy(pv.items, line.items);
+                //}
+            }
+            //ctx.lists.release(line);  // :defer
+
+            if ctx.forceStop != 0 {
+                // :stupidhour
+                // If we ran out of time, just return the best result from the last search.
+                // (`eval` for this search will be junk)
+                //if (thinkTime == -1) {
+                //    if (isWasm) print("Didn't even finish one layer in {}ms! Playing random move! \n", .{timeLimitMs});
+                //} else {
+                //    if (isWasm) print("Out of time. Using move from depth {} ({}ms)\n", .{ depth - 1, @divFloor(thinkTime, std.time.ns_per_ms) });
+                //}
+                //if (opts.printUci) {
+                //    const result: UCI.UciResult = .{ .BestMove = UCI.writeAlgebraic(favourite) };
+                //    try result.writeTo(std.io.getStdOut().writer());
+                //}
+                ctx.lists&.release(topLevelMoves);  // :defer
+                ctx.evalLists&.release(evals);  // :defer
+                return (Some = favourite);
+            }
+        }
+
+        //if (opts.trackPv) assert(pv.items.len > 0); // There must be some best line.
+
+        ctx: PairContext = (moves = topLevelMoves.items(), evals = evals.items());
+        insertion_sort(*PairContext, ctx&);
+        //thinkTime = nanoTimestamp() - startTime;
+
+        // Using topLevelMoves.items[0] passed my simple test by coincidence because I put captures first in the list
+        // so it chooses those over other moves it thinks are equal. I want to use pv because then the move played matches.
+        // But that reveals it thinks hanging pieces beyond depth is fine.
+        favourite = topLevelMoves[0]; // pv.items[0] // remember to use the right score
+
+        // :stupidhour
+        //if (opts.printUci) {
+        //    var str = try std.BoundedArray(u8, 10000).init(0);
+        //    if (opts.trackPv) {
+        //        for (pv.items) |move| {
+        //            if ((try move.text())[4] == 0) {
+        //                try str.appendSlice((try move.text())[0..4]);
+        //            } else {
+        //                try str.appendSlice((try move.text())[0..]);
+        //            }
+
+        //            try str.append(' ');
+        //        }
+        //    } else {
+        //        try str.appendSlice((try favourite.text())[0..4]);
+        //    }
+
+        //    // TODO: report mate distance. don't mind branches here because its only at the top level.
+        //    const info: UCI.UciInfo = .{ .time = @intCast(@divFloor(thinkTime, std.time.ns_per_ms)), .depth = @intCast(depth + 1), .pvFirstMove = UCI.writeAlgebraic(favourite), .cp = evals.items[0], .pv = str.slice() };
+        //    const result: UCI.UciResult = .{ .Info = info };
+        //    try result.writeTo(std.io.getStdOut().writer());
+        //}
+    }
+
+    // :stupidhour
+    //if (opts.printUci) {
+    //    const result: UCI.UciResult = .{ .BestMove = UCI.writeAlgebraic(favourite) };
+    //    try result.writeTo(std.io.getStdOut().writer());
+    //}
+    //if (isWasm) print("Reached max depth {} in {}ms.\n", .{ maxDepth, @divFloor(thinkTime, std.time.ns_per_ms) });
+
+    ctx.lists&.release(topLevelMoves);  // :defer
+    ctx.evalLists&.release(evals);  // :defer
+    (Some = favourite)
+}
+
+PairContext :: @struct {
+    moves: []Move;
+    evals: []i32;
+
+    fn le(self: *PairContext, a: i64, b: i64) bool = 
+        self.evals[a] >= self.evals[b];  // flip
+
+    fn swap(self: *PairContext, a: i64, b: i64) void = {
+        self.moves.swap(a, b);
+        self.evals.swap(a, b);
+    }
+    
+    fn len(self: *PairContext) i64 = {
+        @debug_assert_eq(self.evals.len, self.moves.len);
+        self.evals.len
+    }
+};
+
+fn to_i32(a: i16) i32 #ir(.extsh, .Kw);
+fn to_i16(a: i32) i16 #ir(.extsh, .Kw);
+
+// https://en.wikipedia.org/wiki/Alpha%E2%80%93beta_pruning
+// The alpha-beta values effect lower layers, not higher layers, so passed by value.
+// Returns the relative eval of <game>, positive means current player is winning, after game.nextPlayer makes a move.
+// Returns error.GameOver if there were no possible moves or other draws.
+// TODO: pv doesnt need to copy the whole list every time
+fn walkEval($opts: *StratOpts, ctx: *SearchGlobals, game: *Board, remaining: i32, alpha: i32, beta: i32, /*line: *ListPool.List*/) i32 = {
+    me := game.nextPlayer;
+    @if (ctx.forceStop != 0) return(0);
+    @if (game.isDraw()) return(intcast(DRAW_EVAL * me.dir()));
+
+    cacheHit: ?MemoValue = .None;
+    if opts.doMemo {
+        if ctx.memoMap&.get(game) { cached |
+            if cached.remaining.to_i32() >= remaining {
+                ::enum(@type cached.kind);
+                @debug_assert(opts.doPruning || cached.kind != .BetaPrune);
+
+                eval := cached.eval * me.dir().intcast();
+                @match(cached.kind) {
+                    fn Exact() => return(eval);
+                    fn BetaPrune() => @if(eval >= beta) return(eval);
+                    fn AlphaIgnore() => @if(eval <= alpha) return(eval); // TODO: ?
+                }
+            }
+            cacheHit = (Some = cached);
+        }
+    }
+
+    moves := possibleMoves(game, ctx.lists&);
+
+    if moves.len() == 0 { // <me> can't make any moves. Either got checkmated or its a draw.
+        ctx.lists&.release(moves);  // :defer
+        ::if(i32);
+        return (if game.nextPlayerInCheck() {
+             @as(i32) (IM_MATED_EVAL - remaining)
+        } else {
+            @as(i32) DRAW_EVAL.intcast() * game.nextPlayer.dir().intcast()
+        });
+    }
+
+    if cacheHit { cached |
+        break :: local_return;
+        if cached.have_move {
+            moves := moves.items();
+            range(0, moves.len()) { i |
+                ::import("@/examples/chess/perft.fr")'imactuallygoingtolosemymind();
+                if moves[i]& == cached.move& {
+                    moves.swap(0, i);
+                    break();
+                }
+            }
+        }
+    }
+
+    foundMove: ?Move = .None;
+    //var pv = if (opts.trackPv) ctx.lists.copyOf(line) else try ctx.lists.get();
+    for moves { move |
+        //var nextLine = if (opts.trackPv) ctx.lists.copyOf(line) else try ctx.lists.get();
+        //try nextLine.append(move);
+
+        unMove := @uninitialized OldMove;
+        eval := if (remaining > 1) { // TODO: decide if this should be 0 or 1
+            unMove = game.play(move);
+            -walkEval(opts, ctx, game, remaining - 1, -beta, -alpha/*, &nextLine*/)
+        } else {
+            // TODO: bring back followCapturesDepth/lookForPeace (but make sure it actually wins more games / debug why it doesn't)
+            
+            // Don't need to do the extra work to prep for legal move generation if this is a leaf node.
+            // This trick was the justification for switching from pseudo-legal generation.
+            unMove = game.playNoUpdateChecks(move);
+            intcast(game.simpleEval * me.dir())
+        };
+        game.unplay(unMove);
+        if ctx.forceStop != 0 {
+            // that branch bailed early so don't save the junk eval in the memo table. 
+            ctx.lists&.release(moves);  // :defer
+            //ctx.lists.release(pv);  // :defer
+            //ctx.lists.release(nextLine); // :defer
+            return(0);  // junk!
+        };
+        
+        if (eval > alpha) {
+            alpha = eval;
+            foundMove = (Some = move);
+            // :stupidhour kinda
+            //if (opts.trackPv) {
+            //    pv.items.len = nextLine.items.len;
+            //    @memcpy(pv.items, nextLine.items);
+            //}
+        }
+
+        if (opts.doPruning && eval >= beta) {
+            // That move made this subtree super good so we probably won't get here.
+            // :stupidhour kinda
+            //if (opts.trackPv) {
+            //    line.items.len = nextLine.items.len;
+            //    @memcpy(line.items, nextLine.items);
+            //}
+
+            if opts.doMemo {
+                ctx.memoMap&.setAndOverwriteBucket(game, (
+                    eval = eval * me.dir().intcast(), 
+                    remaining = to_i16(remaining), 
+                    move = move, 
+                    kind = .BetaPrune,
+                    have_move = true,
+                ));
+            }
+            ctx.lists&.release(moves);  // :defer
+            //ctx.lists.release(pv);  // :defer
+            //ctx.lists.release(nextLine); // :defer
+            return beta;
+        }
+        //ctx.lists.release(nextLine); // :defer
+    }
+
+    if (opts.doMemo) { // Can never get here if forceStop=true.
+        
+        if foundMove { move |
+            ctx.memoMap&.setAndOverwriteBucket(game, (
+                eval = alpha * me.dir().intcast(), 
+                remaining = to_i16(remaining), 
+                move = move, 
+                kind = .Exact,
+                have_move = true,
+            ));
+        } else {
+            // No move was good enough to make this subtree interesting
+            ctx.memoMap&.setAndOverwriteBucket(game, (
+                eval = alpha * me.dir().intcast(), 
+                remaining = to_i16(remaining), 
+                move = zeroed Move, 
+                kind = .AlphaIgnore,
+                have_move = false,
+            ));
+        }
+    }
+
+    //if (opts.trackPv) {
+    //    line.items.len = pv.items.len;
+    //    @memcpy(line.items, pv.items);
+    //}
+    ctx.lists&.release(moves);  // :defer
+    //ctx.lists.release(pv);  // :defer
+    alpha
+}
+
+MemoKind :: @enum(u8) (Exact, AlphaIgnore, BetaPrune);
+
+MemoValue :: @struct {
+    eval: i32;
+    move: Move;
+    remaining: i16;
+    kind: MemoKind;
+    have_move: bool;
+};
+
+// Sets overwrite if their buckets collide so never have to worry about it filling up with old boards.
+// That also means there's no chain of bucket collisions to follow when reading a value.
+// Allocates the full capacity up front so never needs to resize.
+fn MemoTable($Value: Type) Type = {
+    MemoTable :: @struct {
+        buffer: []Entry;
+        bucketMask: i64;
+    };
+    
+    Entry :: @struct {
+        hash: i64;
+        value: Value;
+    };
+    
+    fn initWithCapacity(sizeMB: i64, a: Alloc) MemoTable = {
+        // force capacity to be a power of two 
+        targetCapacity := (sizeMB * 1024 * 1024) / size_of(Entry);
+        bits := 64 - targetCapacity.leading_zeros();
+        realCapacity := 1.shift_left(clamp(bits, 0, 31));
+        self: MemoTable = (buffer = a.alloc_uninit(Entry, realCapacity), bucketMask = realCapacity - 1);
+        each self.buffer { it |
+            it.hash = 0;
+        };
+        self
+    }
+
+    fn deinit(self: *MemoTable, a: Alloc) void = {
+        a.dealloc(Entry, self.buffer);
+        self.buffer.len = 0;
+    }
+
+    // TODO: some heuristic for when you get to overwrite bucket? age (epoch counter) vs remaining
+    fn setAndOverwriteBucket(self: *MemoTable, key: *Board, value: Value) void = {
+        bucket := bit_and(key.zoidberg, self.bucketMask);
+        self.buffer[bucket] = (
+            hash = key.zoidberg,
+            value = value,
+        );
+    }
+
+    fn get(self: *MemoTable, key: *Board) ?Value = {
+        bucket := bit_and(key.zoidberg, self.bucketMask);
+        if self.buffer[bucket].hash != key.zoidberg {
+            return(.None);
+        };
+        // could check for hash collision here but that would require storing the board state in each slot...
+        // fuck it, we ball, 2^64 is basically infinity
+        (Some = self.buffer[bucket].value)
+    }
+    
+    MemoTable
+}
+
+#use("@/examples/chess/moves.fr");

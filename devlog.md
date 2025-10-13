@@ -1,8 +1,17 @@
 
+## (Oct 13)
+
+- handled Alias in move_from_module
+- made sort.fr more generic like how zig does it so you can easily use the same algorithms on parallel arrays. 
+- chess
+  - ported the simple version of best move search and hooked it up to the gui
+  - gui: zoom in/out, show fen when piece labels enabled
+
 ## (Oct 12)
 
 - 700 years messing with the weird coordinate space for debugtext
 - 700 years on not setting sgl.texturing_enabled
+  but now i have images for chess pieces instead of letters. 
 
 ## (Oct 11)
 

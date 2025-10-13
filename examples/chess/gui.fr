@@ -13,6 +13,7 @@ State :: @struct(
     sg: Sg.Self,
     pieces_image: Sg.Image,  // only used when UGLY=false
 
+    search: Search.SearchGlobals,
     board: BoardView,
     dirty: bool,
 );
@@ -29,6 +30,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     
     // TODO: my png is super blury. maybe i need to find an svg renderer. 
     //       also i like the idea of text file of lines to draw more than blob of compressed pixels. 
+    //       plus the svg puts the attribution text in the image file which seems more elegant than in a comment here. 
     @if(!UGLY) {
         // The binary is smaller if it just includes the png+stb_image and decompresses at runtime, 
         // but sometimes it's more fun to flex that this works at comptime :)
@@ -77,6 +79,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         clear_value = (r = 0.3, g = 0.3, b = 0.3, a = 1.0),
     );
     
+    state.search = init(100, general_allocator());
     state.board = (
         board = initial(),
         lists = init(allocator),
@@ -118,16 +121,45 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     ::enum(@type event.mouse_button);
     if event.type == .MOUSE_DOWN && event.mouse_button == .LEFT {
         state.dirty = true;
-        click(state.board&, vec2(event.mouse_x, event.mouse_y));
+        valid_move := click(state.board&, vec2(event.mouse_x, event.mouse_y));
+        if valid_move && state.board.board.nextPlayer == .Black {
+            state.play_computer_move();
+        }
     }
-    if event.type == .KEY_DOWN && event.key_code == .SPACE && !event.key_repeat {
+    if event.type == .KEY_DOWN && !event.key_repeat {
+        @match(event.key_code) {
+            fn SPACE() => {
+                state.board.show_square_labels = !state.board.show_square_labels;
+            }
+            fn MINUS() => {
+                state.board.size *= 0.9;
+            }
+            fn EQUAL() => {
+                state.board.size *= 1.1;
+            }
+            @default => return();
+        }
         state.dirty = true;
-        state.board.show_square_labels = !state.board.show_square_labels;
     }
     if @is(event.type, .RESIZED) {
         state.dirty = true;
     }
 };
+
+// TODO: do the search on another thread
+fn play_computer_move(state: *State) void = {
+    // TODO:
+    // ugh. has to be a pointer to make it easy to access fields 
+    // and @static defaults to zeroing if it thinks its being called with one argument 
+    // so you can't use () to get default fields :compiler
+    // and all the `if opts.whatever` in search.fr need a @run now because backend doesn't know that the memory is constant :(
+    opts :: @static(Search.StratOpts) { xxx: Search.StratOpts = (); xxx };  
+    
+    move := bestMove(opts, state.search&, state.board.board&, 4);
+    if move { move |
+        _ := state.board.board&.play(move);
+    };
+}
 
 BoardView :: @struct {
     pos: Vec2;
@@ -198,6 +230,15 @@ fn draw(self: *BoardView, sgl: *Sgl.Self, sdtx: *Sdtx.Context) void = {
     to_pixels :: fn(file, rank) => 
         vec2(s * file.int().float().cast(), s * (7-rank).int().float().cast());
     
+    result := self.board&.gameOverReason(self.lists&);
+    ::enum(@type result);
+    if result != .Continue {
+        set_font_scale(0.8);
+        set_text_position(base + vec2(0, -sdtx.desc.char_height));
+        sdtx.color = pack_rgba(1.0, 0.0, 1.0, 1.0);
+        sdtx.put(@tfmt("%", result));
+    };
+    
     set_font_scale(0.2);
     msg := zeroed(Array(u8, 2));
     @if(self.show_square_labels)
@@ -210,8 +251,15 @@ fn draw(self: *BoardView, sgl: *Sgl.Self, sdtx: *Sdtx.Context) void = {
         sdtx.put(msg&.items());
     };
     
+    if self.show_square_labels {
+        set_font_scale(0.2);
+        set_text_position(base + vec2(0, self.size + sdtx.desc.char_height));
+        sdtx.color = pack_rgba(1.0, 0.0, 1.0, 1.0);
+        sdtx.put(@tfmt("%", self.board&.t_fen()));
+    };
+    
     note :: fn(i: u8, colour: u32) void => {
-        scale: f32 = 0.50;
+        scale: f32 = 0.60;
         rank, file := i.div_mod(8);
         pos := to_pixels(file, rank);
         square(base + pos + vec2((1.0 - scale) / 2 * s), vec2(s * scale), colour);
@@ -229,6 +277,7 @@ fn draw(self: *BoardView, sgl: *Sgl.Self, sdtx: *Sdtx.Context) void = {
         // TODO: only generate moves from the one piece, not all of them!
         moves := possibleMoves(self.board&, p.colour(), self.lists&);
         
+        note(i.trunc(), pack_rgba(1.0, 1.0, 0.0, 1.0));
         for moves { move |
             if move.from == i.trunc() {
                 note(move.to, pack_rgba(0.678, 0.847, 0.902, 1.0));
@@ -279,12 +328,12 @@ fn draw(self: *BoardView, sgl: *Sgl.Self, sdtx: *Sdtx.Context) void = {
     }    
 }
 
-fn click(self: *BoardView, pos: Vec2) void = {
+fn click(self: *BoardView, pos: Vec2) bool = {
     // TODO: why are these off by a factor of two compared to the rendering ones? is it high_dpi related?
     pos *= 2;
     pos -= self.pos;
     if pos.x < 0 || pos.y < 0 || pos.x > self.size || pos.y > self.size {
-        return()
+        return(false)
     };
     pos /= self.size / 8;
     rank, file := (7 - pos.y.cast().int(), pos.x.cast().int());
@@ -293,10 +342,11 @@ fn click(self: *BoardView, pos: Vec2) void = {
     if self.click_index { old |
         if infer_play_move(self.board&, old, new, self.lists&) {
             self.click_index = .None;
-            return();
+            return(true);
         }
     };
     self.click_index = (Some = new);
+    false
 }
 
 // TODO: be able to ask for promotion
@@ -324,6 +374,7 @@ fn driver(vtable: *ImportVTable) void =
     Easy'build_for_graphics(vtable, "examples/chess/gui.fr"); 
 
 Chess :: import("@/examples/chess/moves.fr");
+Search :: import("@/examples/chess/search.fr");
 #include_std("graphics/lib.fr");
 
 Stb :: {

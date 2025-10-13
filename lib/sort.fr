@@ -1,35 +1,64 @@
-// :VoidSortContext TODO: allow passing void as Ctx (same applies to using a hashmap as a hashset)
 // Since this is recursive you can't just use an inline lambda that can access your stack frame (we don't support that without inlining all callsites). 
 // Instead you have to manually pass through a context pointer. 
 // Which is kinda annoying but not quite as garbage as c's qsort just making you put a static variable somewhere to smuggle information to the comparator. 
 // TODO: Eventually I want to support non-escaping capturing closures that pass a pointer to thier stackframe along with the function pointer to access variables. 
-fn quicksort($Ctx: Type, $T: Type, $my_le: @Fn(a: *T, b: *T, ctx: Ctx) bool) (@Fn(self: []T, ctx: Ctx) void) #generic #fold = {
-    inner_sort :: fn(self: []T, ctx: Ctx) void = {
-        if(self.len <= 1, => return());
+// TODO: wrong overload conflict :compilerbug `($Ctx: Type, ctx: Ctx)` and `($T: Type, $my_le: @Fn(a: *T, b: *T) bool)`
+//       its only a problem if you instantiate one with Ctx=@Fn which you don't do so it should be allowed
+fn quicksortXXX($Ctx: Type, ctx: Ctx) void #generic = {
+    inner :: fn(start: i64, end: i64, self: Ctx) void = {
+        if(end - start <= 1, => return());
         
-        pivot := self.index(self.len - 1);
-        s := 0;
-        range(0, self.len - 1) { i | 
-            if self.index(i).my_le(pivot, ctx) {
+        pivot := end - 1;
+        s := start;
+        range(start, end - 1) { i | 
+            if self.le(i, pivot) {
                 self.swap(i, s);
                 s += 1;
             };
         };
-        self.swap(self.len - 1, s);
+        self.swap(end - 1, s);
         
-        inner_sort(self.slice(0, s), ctx);
-        inner_sort(self.slice(s + 1, self.len), ctx);
+        inner(0, s, self);
+        inner(s + 1, end, self);
+    };
+    inner(0, ctx.len(), ctx);
+}
+
+fn quicksort($Ctx: Type, $T: Type, $my_le: @Fn(a: *T, b: *T, ctx: Ctx) bool) (@Fn(self: []T, ctx: Ctx) void) #generic #fold = {
+    inner_sort :: fn(self: []T, ctx: Ctx) void = {
+        C :: SliceSortCtx(Ctx, T, my_le);
+        quicksortXXX(C, (ctx = ctx, s = self));
     };
     inner_sort
 }
 
-// :VoidSortContext should be possible to pass void as Ctx when you don't care instead of i64
 fn quicksort($T: Type, $my_le: @Fn(a: *T, b: *T) bool) (@Fn(self: []T) void) #generic = {
     inner_sort2 :: fn(self: []T) void = {
-        f :: fn(a: *T, b: *T, _: i64) bool = my_le(a, b);
-        quicksort(i64, T, f)(self, 0);
+        f :: fn(a: *T, b: *T, _: void) bool = my_le(a, b);
+        quicksort(void, T, f)(self, ());
     };
     inner_sort2
+}
+
+fn insertion_sort($Ctx: Type, ctx: Ctx) void #generic = {
+    range(0, ctx.len()) { j |
+        i := j;
+        while => i > 0 && !ctx.le(i-1, i) {
+            ctx.swap(i-1, i);
+            i -= 1;
+        }
+    }
+}
+
+fn SliceSortCtx($Ctx: Type, $T: Type, $my_le: @Fn(a: *T, b: *T, ctx: Ctx) bool) Type #generic = {
+    C :: @struct(ctx: Ctx, s: []T);
+    fn le(ctx: C, a: i64, b: i64) bool = 
+        my_le(ctx.s.index(a), ctx.s.index(b), ctx.ctx);
+    fn swap(ctx: C, a: i64, b: i64) void = 
+        ctx.s.swap(a, b);
+    fn len(ctx: C) i64 = 
+        ctx.s.len;
+    C
 }
 
 // sorts the list into two parts, items where put_at_front() 

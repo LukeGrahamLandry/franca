@@ -52,6 +52,7 @@
 - run all the tests on linux
 - enable caching of the .frc between -syscalls and normal. (they're one byte different)
 - better apis for working with paths and temporary files
+- use `#macro #outputs(T)` to give a more sane error message for `x: i64 = @is(foo, .A, .B);` etc. 
 
 ---
 
@@ -71,6 +72,7 @@
   maybe -DFOO=true passed to default_driver could replace a declaration like `FOO :: false`
 - need to auto-test static linux. i wonder if you can landlock away `libc.so` to make sure you can't cheat 
 - create a guard page when allocating a new stack to spawn a thread
+  and have the backend do the probing thing where you read a byte every page when you have a large stack frame so you can't miss the guard page. 
 - since do_codegen tries to do tracy stuff, FRANCA_TRACY=1 doesn't work if you try to run something 
   that uses import_c not through default_driver. ie. `FRANCA_TRACY=true ./trace.out examples/terminal.fr` 
   crashes but `FRANCA_TRACY=true ./trace.out examples/default_driver.fr build examples/terminal.fr` is fine. 
@@ -80,11 +82,15 @@
 - always zero struct padding when baking constants (even when behind a pointer and even when the struct contains no pointers). 
 - why don't lldb/gdb like my linux binaries?
 - not all the tests pass with FRANCA_NO_CACHE=1
+  - examples/import_c/test/test.fr
+  - examples/import_wuffs/test.fr
+  - examples/repl.fr
+- not all the tests pass with import_module caching enabled
 - can almost enable cacching when -syscalls 
 - document `store v, [Sxxx]` vs `store v, Sxxx` on amd64
 - add a test for #discard_static_scope now that i gave up on scc. 
 - extend the cross repro tests to all the example programs. not just the compiler. maybe just add a file with hashes of binaries to the released artifact. 
-- import_bytes("@/examples/import_wuffs/base.wuffs") that works like import() in that it invalidates the cache if the file changes 
+- include_bytes should work like import() in that it invalidates the cache if the file changes 
   but instead of giving you a ScopeId just give you the bytes. 
 - I need to improve @enum for bit flags so i can use that in posix.fr so it doesn't suck as much to call mmap. 
 - i think bake_relocatable_value always gets a jit shim which is a bit wasteful. 
@@ -292,7 +298,6 @@ panic! backend/lib.fr:1171:58
 find_ip_in_module :: fn(m: *QbeModule, addr: rawptr) ?Str = {
 Parse Error: unterminated block (mismatched '{')
 ```
-- `./target/cc.out examples/import_c/test/function.c -r` doesn't work
 
 ## random failures
 
@@ -629,6 +634,14 @@ q.out`impl2__7041:
 - linux amd: consistantly fails in actions but not in orb rosetta. 
   - wuffs/(png, jpeg, deflate) 
   - import_c/tests/(macro, varargs, function, attribute, usualconv)
+- some memory corruption thing the first time you run after fixing a compile error (so not when cached). 
+  ```
+  panic! lib/sys/threads.fr:146:5
+  #use("@/lib/sys/sync/atomics.
+  Parse Error: Expected begin expression, found UnterminatedStr
+  ```
+  happens in many different places. 
+  (orb arm is the one i mostly use but it might happen elsewhere as well)
 
 ## amd64
 
@@ -820,13 +833,18 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
 - have Slider :: @enum(Rook, Bishop) instead of functions with isRook: bool parameters
 - regressions (unported):
   - Learned.Weights
-  - search
+  - search: followCapturesDepth + lookForPeace, 
+    but i had it turned off in the old codebase so clearly i was doing it wrong. 
+    debug / make sure it actually wins more games
+  - seach: uci reporting info/pv/time etc. 
+  - search: time limit
 - use ZOID_CASTLE_START
 - gui
   - play against uci engine
-  - pretty piece images
   - promotion
-  - bit board overlays like the old one
+  - bit board overlays like the old one (and ui to choose which to show)
+  - run search on a seperate thread
+  - ui for turning off the bot and choosing which colour to play
 
 ### Terminal
 

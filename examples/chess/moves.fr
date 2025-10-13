@@ -24,7 +24,6 @@ fn other(self: Colour) Colour =
 fn dir(self: Colour) i64 = 
     1 - 2 * self.raw().zext();
 
-// This is packed so I can cast board.squares a to byte array
 Piece :: @(import("@/lib/bit_fields.fr")'bit_fields)(
     colour := 1,
     kind := 4,
@@ -44,7 +43,6 @@ fn kind(self: *Piece, value: Kind) void = self.set(.kind, value.raw().zext());
 
 EMPTY: Piece : new(kind = .Empty, colour = .White);
 
-
 fn eval(self: Piece) i64 = 
     self.colour().dir() * self.kind().material();
 
@@ -52,9 +50,10 @@ fn eval(self: Piece) i64 =
 fn is_empty(self: Piece) bool = 
     self.kind() == .Empty;
 
-// TODO: just make the other one and compare repr
-fn is(self: Piece, c: Colour, k: Kind) bool = 
-    self.kind() == k && self.colour() == c;
+fn is(self: Piece, c: Colour, k: Kind) bool = {
+    other := new(colour = c, kind = k);
+    self.repr == other.repr
+}
 
 INIT_FEN :: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 Square :: i64;
@@ -439,18 +438,21 @@ fn gameOverReason(game: *Board, lists: *ListPool) GameOver = @if_else {
     @else => .Stalemate;
 };
 
+fn isDraw(game: *Board) bool = 
+    game.halfMoveDraw >= 100 || game.hasInsufficientMaterial() || game.lastMoveWasRepetition();
+
 // This could be faster if it didn't generate every possible move first but it's not used in the search loop so nobody cares.
 fn nextPlayerHasLegalMoves(game: *Board, lists: *ListPool) bool = {
     moves := possibleMoves(game, game.nextPlayer, lists);
     lists.release(moves);
-    moves.items.len > 0
+    moves.len() > 0
 }
 
 fn lastMoveWasRepetition(self: *Board) bool = {
     @if(self.pastEndIndex - self.pastStartIndex < 3) return(false);
     repetitions := 1;
     range(self.pastStartIndex, self.pastEndIndex - 1) { past |
-        repetitions += int(self.zoidberg == self.pastBoardHashes[past]);
+        repetitions += int(self.zoidberg == self.pastBoardHashes&[past]);
     }
     repetitions >= 3
 }
@@ -463,8 +465,8 @@ fn hasInsufficientMaterial(game: *Board) bool = {
     minorWhite := 0;
     minorBlack := 0;
     for game.squares& { piece |
-        @if(@is(piece.kind, .Rook, .Queen, .Pawn)) return(false);
-        minor&[piece.colour()] += @is(piece.kind, .Bishop, .Knight);
+        @if(@is(piece.kind(), .Rook, .Queen, .Pawn)) return(false);
+        minor&[piece.colour()] += int(@is(piece.kind(), .Bishop, .Knight));
     };
     // TODO: king vs king + 2N
     // (king vs king, king+1 vs king) or (king+1 vs king+1)
@@ -1166,20 +1168,20 @@ fn AnyListPool($T: Type) Type = {
     Self :: @struct {
         lists: ListType(ListType(T));
         List :: ListType(T);
+        
+        LIST_SIZE :: 512;
+        POOL_SIZE :: 512;
     };
-    
-    LIST_SIZE :: 512;
-    POOL_SIZE :: 512;
 
     // :DontStoreTheAllocator 
     fn init(alloc: Alloc) Self = {
-        self: Self = (lists = init(alloc, POOL_SIZE));
+        self: Self = (lists = init(alloc, Self.POOL_SIZE));
         // pre-allocate enough lists that we'll probably never need to make a new one. should be > the expected depth number.
-        range(0, POOL_SIZE) { _ |
+        range(0, Self.POOL_SIZE) { _ |
             // If all 16 of your pieces were somehow a queen in the middle of the board with no other pieces blocking
             // (maybe they're magic 4th dimensional queens, idk), that's still only 448 moves. So 512 will never overflow.
             // I'm sure there's a smaller upper bound than that but also nobody cares.
-            self.lists&.push_assume_capacity(init(alloc, LIST_SIZE));
+            self.lists&.push_assume_capacity(init(alloc, Self.LIST_SIZE));
         }
         self
     }
