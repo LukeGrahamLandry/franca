@@ -6,6 +6,7 @@
 - chess
   - ported the simple version of best move search and hooked it up to the gui
   - gui: zoom in/out, show fen when piece labels enabled
+  - kinda wasting time with uci supporting things i don't need and making it more convoluted but here we are. 
 
 ## (Oct 12)
 

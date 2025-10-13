@@ -1,3 +1,4 @@
+// Universal Chess Interface: https://gist.github.com/DOBRO/2592c6dad754ba67e6dcaec8c90165bf
 
 fn fromFen(s: Str) ?Board = {
     b: Board = blank();
@@ -86,18 +87,15 @@ fn fromFenNoUpdateChecks(self: *Board, s: Str) bool = {
     @if(i == s.len) return(true);
     err(s[i] != " ".ascii()); i += 1;
     
-    // TODO: need to reliably return error. rest.len==0 doesn't work because we might be at the end of input. d
-    halfMoveDraw, s1 := convert_number_dyn(s.rest(i), 10);
-    err(/*s1.len == 0 || */halfMoveDraw < 0);
-    i = s.len - s1.len;
+    halfMoveDraw := advance_number(s, i&) 
+        || return(false);
     self.halfMoveDraw = halfMoveDraw.trunc();
     
     @if(i == s.len) return(true);
-    err(s[i] != " ".ascii()); i += 1;
+    err(!s[i].is_ascii_digit());  // because advance_number eats trailing whitespace
     
-    fullMoves, s2 := convert_number_dyn(s.rest(i), 10);
-    err(/*s2.len == 0 || */fullMoves < 0);
-    i = s.len - s2.len;
+    fullMoves := advance_number(s, i&) 
+        || return(false);
     self.fullMoves = fullMoves.trunc();
 
     true
@@ -220,8 +218,26 @@ fn writeAlgebraic(move: Move, out: *List(u8)) void = {
     }
 }
 
+// GUI -> Engine
+Command :: @tagged(
+    uci: void, // Init,
+    isready, // AreYouReady,
+    ucinewgame, // NewGame,
+    quit,
+    stop,
+    ponderhit,
+    register, // TODO
+    debug: bool,
+    // TODO: this doesn't work for sending. board state doesn't represent the game correctly because of repitition draws. 
+    //       (its fine for the engine recieving because playing the moves to build the board fills the pastBoardHashes array)
+    SetPosition: @struct(board: *Board), // lifetime! don't save these pointers!
+    Go: Go,
+    SetOption: @struct(name: Str, value: Str),
+    Unknown: Str,
+);
+
 // field names matter!
-GoCmd :: @struct {
+Go :: @struct {
     movetime: ?i64 = .None;  // maxSearchTimeMs
     depth: ?i64 = .None;  // maxDepthPly
     perft: ?i64 = .None;
@@ -229,38 +245,65 @@ GoCmd :: @struct {
     binc: ?i64 = .None;
     wtime: ?i64 = .None;
     btime: ?i64 = .None;
+    mate: ?i64 = .None;
+    nodes: ?i64 = .None;
+    movestogo: ?i64 = .None;
+    infinite := false;
+    ponder := false;
+    searchmoves: ?[]Move = .None;
 };
 
-// TODO: do I want to use the same names as the commands?
-/// A command from a gui to an engine.
-UciCommand :: @tagged(
-    uci: void, // Init,
-    isready, // AreYouReady,
-    ucinewgame, // NewGame,
-    quit,
-    stop,
-    SetPositionInitial,
-    SetPositionMoves: @struct(board: *Board), // lifetime! don't save these pointers!
-    Go: GoCmd,
-    SetOption: @struct(name: Str, value: Str),
+// Engine -> GUI
+Response :: @tagged(
+    uciok: void, // InitOk,
+    readyok,
+    Info: UciInfo,
+    BestMove: @struct {
+        best: ?Move;
+        ponder: ?Move;
+    },
+    PerftDivide: PerftNode,
+    PerftDone: @struct(total: i64),
+    copyprotection: Str,
+    id: @struct(key: Str, value: Str),
     Unknown: Str,
 );
 
+UciInfo :: @struct {
+    depth: ?i64 = .None;
+    seldepth: ?i64 = .None;
+    multipv: ?i64 = .None;
+    nodes: ?i64 = .None;
+    nps: ?i64 = .None;
+    hashfull: ?i64 = .None;
+    tbhits: ?i64 = .None;
+    sbhits: ?i64 = .None;
+    time: ?i64 = .None;
+    curmove: ?Move = .None;
+    curmovenumber: ?i64 = .None;
+    string: ?Str = .None;
+    
+    mate: ?i64 #prefix("score") = .None;
+    cp: ?i64 #prefix("score") = .None;
+    // TODO: score lowerbound/upperbound
+    
+    // note: when i parse these, action won't be set so you have to compare it to freshly generated moves from the board. 
+    pv: ?[]Move = .None;
+    refutation: ?[]Move = .None;
+    currline: ?[]Move = .None;
+};
+
+PerftNode :: @struct(move: Move, count: i64);
+
 // :compilerbug/ordering it doesn't like when 'display' overload set references UciCommand->Board,
 //      probably same :BitFieldsCompileError i was having before. so Board->Piece->@bit_fields
-fn displayXXX(cmd: *UciCommand, out: *List(u8)) void = {
+fn displayXXX(cmd: *Command, out: *List(u8)) void = {
     @match(cmd) {
-        fn SetPositionInitial() => @fmt(out, "position startpos");
         fn Go(args) => {
             @fmt(out, "go");
-            inline_for GoCmd.get_fields() { $field |
-                name :: field[].name.str();
-                if GoCmd.get_field_ptr(args, field) { value |
-                    @fmt(out, " % %", name, value);
-                }
-            };
+            display_fields(Go, args, out);
         }
-        fn SetPositionMoves(state) => {
+        fn SetPosition(state) => {
             @fmt(out, "position fen ");
             writeFen(state.board, out);
         }
@@ -274,94 +317,55 @@ fn displayXXX(cmd: *UciCommand, out: *List(u8)) void = {
 }
 
 // TODO: this sucks. use read_punct?
-// SetPositionMoves allocates the board pointer, caller owns it now.
-fn parse(s: []const u8, alloc: std.mem.Allocator, lists: *ListPool) UciCommand = {
-    // TODO: trim whitespace for the one word commands
-    simple :: @const_slice(UciCommand.Tag().uci, .isready, .ucinewgame, .quit, .stop);
+// SetPosition allocates the board pointer, caller owns it now.
+fn parse(s: Str, a: Alloc, lists: *ListPool) Command = {
+    i := 0;
+    cmd := advance_word(s, i&);
+    simple :: @const_slice(Command.Tag().uci, .isready, .ucinewgame, .quit, .stop, .ponderhit);
     inline_for simple { $it |
-        if s == it.name.str() {
+        if cmd == it.name.str() {
             return it;
         }
     };
     
-    @if(s == "position startpos") return(.SetPositionInitial);
-    if s.starts_with("position fen ") {
-        if (std.mem.indexOf(u8, s, "moves") != null) {
-            panic("TODO: support moves after fen starting position. currently only supports startpos.", .{});
-        }
-
-        const startingWithFen = s[13..];
-        const board = try alloc.create(Board);
-        board.* = try Board.fromFEN(startingWithFen);
-        return .{ .SetPositionMoves = .{ .board = board } };
-    };
-    if s.starts_with("position startpos moves ") {
-        var words = std.mem.splitScalar(u8, str, ' ');
-        assert(std.mem.eql(u8, words.next().?, "position"));
-        assert(std.mem.eql(u8, words.next().?, "startpos"));
-        assert(std.mem.eql(u8, words.next().?, "moves"));
-        const board = try alloc.create(Board);
-        board.* = try Board.initial();
-        while (words.next()) |word| {
-            if (word.len <= 5) {
-                var moveStr = std.mem.zeroes([5]u8);
-                @memcpy(moveStr[0..word.len], word);
-                _ = try playAlgebraic(board, moveStr, lists);
-            }
-        }
-        return .{ .SetPositionMoves = .{ .board = board } };
-    } 
-    if s.starts_with("go") {
-        i := 3;
-        result: GoCmd = ();
+    if cmd == "debug" {
+        return(debug = @switch(advance_word(s, i&)) {
+            @case("on") => true;
+            @case("off") => false;
+            @default => return(Unknown = s);
+        });
+    }
+    
+    if cmd == "position" {
+        word := advance_word(s, i&);
+        fen := @switch(word) {
+            @case("fen") => advance_word(s, i&);
+            @case("startpos") => INIT_FEN;
+            @default => return(Unknown = s);
+        };
+        board: Board = fromFen(fen) 
+            || return(Unknown = s);
         
-        while => i < s.len {
-            word := advance_word(s, i&);
-            inline_for GoCmd.get_fields() { $field |
-                name :: field[].name.str();
-                if (std.mem.eql(u8, word, name)) {
-                    value = std.fmt.parseInt(u64, words.next() orelse break, 10) catch continue;
-                    GoCmd.get_field_ptr(result&, field)[] = (Some = value);
-                }
+        word := advance_word(s, i&);
+        if word == "moves" {
+            moves := advance_moves(s, i&, temp());
+            for moves { it |
+                inferPlayMove(board&, it, lists) ||
+                    return(Unknown = s);  // TODO: different error for illegal move? 
             };
+            // TODO: maybe i want to return the moves instead?
+            //       this is destroying information and since the @tagged doesn't have it, you can't send a message that includes previous moves. 
+            return(SetPosition = board);
         }
-        return .{ .Go = result };
+    }
+    if cmd == "go" {
+        result := parse_fields(Go, s, i&, a);
+        return(Go = result);
     }
 
     // TODO: the rest
     (Unknown = s)
 }
-
-fn advance_word(s: Str, i: *i64) Str = {
-    start := i[];
-    while => i[] < s.len && !s[i[]].is_ascii_whitespace() {
-        i[] += 1;
-    };
-    word := s.slice(start, i[]);
-    while => i[] < s.len && s[i[]].is_ascii_whitespace() {
-        i[] += 1;
-    };
-    word
-}
-
-UciInfo :: @struct {
-    depth: ?i64 = .None;
-    seldepth: ?i64 = .None;
-    multipv: ?i64 = .None;
-    nodes: ?i64 = .None;
-    nps: ?i64 = .None;
-    hashfull: ?i64 = .None;
-    tbhits: ?i64 = .None;
-    time: ?i64 = .None;
-    pv: ?Str = .None; // algebraic notation moves seperated by spaces. Has the lifetime of the string it was parsed from!
-    pvFirstMove: ?Move = .None; // If you just want the first move, and not need to deal with lifetimes.
-    mate: ?i64 = .None;
-    cp: ?i64 = .None;
-    
-    simple :: @const_slice(Fields(UciInfo).time, .depth, .seldepth, .multipv, .nodes, .nps, .hashfull, .tbhits, .time);
-};
-
-PerftNode :: @struct(move: Move, count: i64);
 
 // note: action field is unset
 fn readAlgebraic(s: Str) ?Move = {
@@ -383,69 +387,26 @@ fn readAlgebraic(s: Str) ?Move = {
     ))
 }
 
-// A response from an engine to a gui.
-UciResult :: @tagged(
-    uciok: void, // InitOk,
-    readyok,
-    Info: UciInfo,
-    BestMove: ?Move,
-    PerftDivide: PerftNode,
-    PerftDone: @struct(total: i64),
-    Unknown: Str,
-);
-
 // TODO: this sucks. use read_punct?
-fn parse(s: Str) UciResult = {
-    simple :: @const_slice(UciResult.Tag().uciok, .readyok);
+fn parse(s: Str) Response = {
+    i := 0;
+    cmd := advance_word(s, i&);
+    simple :: @const_slice(Response.Tag().uciok, .readyok);
     inline_for simple { $it |
-        @if(s == it[].name_str()) {
-            result := zeroed UciResult;
+        @if(cmd == it[].name_str()) {
+            result := zeroed Response;
             result&.tag_ptr()[] = it[];
             return result;
         }
     };
     
-    if s.starts_with("info") {
-        result: UciInfo = ();
-        i := 4;
-        while => i < s.len {
-            continue :: local_return;
-            word := advance_word(s, i&);
-            
-            inline_for UciInfo.simple { $field |
-                it := UciInfo.get_field(result&, field[]);
-                if word == field[].name_str() {
-                    value := 0; // TODO
-                    todo();
-                    it[] = value;
-                    continue();
-                }
-            };
-            
-            // TODO
-            /*
-            if word == "score" {
-                const units = words.next() orelse break;
-                if (std.mem.eql(u8, units, "cp")) {
-                    result.cp = std.fmt.parseInt(i64, words.next() orelse break, 10) catch continue;
-                } else if (std.mem.eql(u8, units, "mate")) {
-                    result.mate = std.fmt.parseInt(i64, words.next() orelse break, 10) catch continue;
-                }
-                continue();
-            };
-            if word == "pv" {
-                result.pv = str[words.index.?..str.len];
-                const first = words.next() orelse break;
-                if (first.len <= 5) {
-                    result.pvFirstMove = std.mem.zeroes([5]u8);
-                    @memcpy(result.pvFirstMove.?[0..first.len], first);
-                }
-                i = s.len;  // break
-                continue();
-            }
-            */
-        };
+    if cmd == "info" {
+        result := parse_fields(UciInfo, s, i&, temp());
         return(Info = result);
+    }
+    if cmd == "id" {
+        key := advance_word(s, i&);
+        return(id = (key = key, value = s.rest(i)));
     }
     /* // TODO
     if (std.mem.startsWith(u8, str, "bestmove")) {
@@ -494,7 +455,7 @@ fn parse(s: Str) UciResult = {
     (Unknown = s)
 }
 
-fn display(cmd: *UciResult, out: *List(u8)) void = {
+fn display(cmd: *Response, out: *List(u8)) void = {
     @match(cmd) {
         fn uciok() => @fmt(out, "uciok");
         fn readyok() => @fmt(out, "readyok");
@@ -508,27 +469,9 @@ fn display(cmd: *UciResult, out: *List(u8)) void = {
         }
         fn Info(info) => {
             @fmt(out, "info");
-            
-            inline_for UciInfo.simple { $field |
-                it := UciInfo.get_field(field[], info);
-                if it { value |
-                    @fmt(out, " % %", field, value);
-                };
-            };
-            
-            if info.cp { cp |
-                @fmt(out, " score cp %", cp);
-            };
-            if info.pv { pv |
-                @fmt(out, " pv %", pv);
-            } else {
-                // My search isnt tracking pvs rn but it can give the best move at each level.
-                if info.pvFirstMove { move |
-                    @fmt(out, " pv ");
-                    writeAlgebraic(move, out);
-                }
-            }
+            display_fields(UciInfo, info, out);
         }
+        fn id(it) => @fmt(out, "id % %", it.key, it.value);
         fn PerftDivide() => panic("TODO: write PerftDivide");
         fn PerftDone() => panic("TODO: write PerftDone");
         fn Unknown(s) => @fmt(out, "%", s);
@@ -563,7 +506,7 @@ fn deinit(self: *EngineProcess) void = {
     _ = try self.process.kill();
 }
 
-fn send(self: *EngineProcess, cmd: UciCommand) void = {
+fn send(self: *EngineProcess, cmd: Command) void = {
     input := u8.list(temp());
     displayXXX(cmd&, input&);
     //@print("[SEND] %", input.items());  // TODO: cli flag somewhere to log uci messages for debugging
@@ -579,7 +522,7 @@ fn send(self: *EngineProcess, cmd: UciCommand) void = {
     }
 }
 
-fn recieve(self: *EngineProcess) ?UciResult = {
+fn recieve(self: *EngineProcess) ?Response = {
     while => self.cursor < self.output.len && self.output[self.cursor].is_ascii_whitespace() {
         self.cursor += 1;
     };
@@ -633,11 +576,11 @@ fn recieve(self: *EngineProcess) ?UciResult = {
     };
     
     //@println("[RECIEVE] %", command);  // TODO: cli flag somewhere to log uci messages for debugging
-    result: UciResult = parse(command);
+    result: Response = parse(command);
     (Some = result)
 }
 
-fn blockUntilRecieve(self: *EngineProcess, expected: UCI.UciResult) void = {
+fn blockUntilRecieve(self: *EngineProcess, expected: Response) void = {
     // TODO: timeout detect to if it died
     while (true) {
         std.Thread.yield() catch continue;
@@ -653,6 +596,143 @@ fn sync(self: *EngineProcess) void = {
         continue :: local_return;
         msg := self.recieve() || continue(true);
         !msg&.is(.readyok)
+    };
+}
+
+parse_fields :: fn($T: Type, s: Str, i: *i64, a: Alloc) T #generic = {
+    result: T = ();
+    
+    while => i[] < s.len {
+        continue :: local_return;
+        word := advance_word(s, i);
+
+        inline_for get_fields(T) { $field |
+            it := T.get_field_ptr(result&, field);
+            
+            if has_tag(field, @symbol "prefix", Str) { prefix |
+                // TODO: this is wrong. really you want to unwind at the end of the loop body if this field didn't match
+                //       since there's multiple with the same prefix and also skip this field if the prefix doesn't match. 
+                if word == prefix {
+                    word = advance_word(s, i);
+                };
+            };
+            
+            name :: field[].name.str();
+            if word == name {
+                @inline_switch(field[].ty) {
+                    @case(?i64) => {
+                        value := advance_number(s, i) ||  
+                            continue(); // TODO: error?
+                        it[] = (Some = value);
+                        continue();
+                    };
+                    @case(bool) => {
+                        it[] = true;
+                    };
+                    @case(?[]Move) => {
+                        moves := advance_moves(s, i, a);
+                        it[] = (Some = moves.items());
+                    };
+                    @case(?Move) => {
+                        word := advance_word(s, i);
+                        move := readAlgebraic(word) 
+                            || continue(); // TODO: error
+                        it[] = (Some = move);
+                    };
+                    @case(?Str) => {
+                        it[] = (Some = s.rest(i[]));
+                        i[] = s.len;
+                    };
+                    @default => @run compile_error(@tfmt("parse_fields: unhandled Uci field type. %: %", name, field[].ty.typename().str()), @source_location());
+                };
+            }
+        };
+        
+        // TODO: error?
+    };
+    
+    result
+}
+
+display_fields :: fn($T: Type, self: *T, out: *List(u8)) void #generic = {
+    inline_for T.get_fields() { $field |
+        name :: field[].name.str();
+        @inline_switch(field[].ty) {
+            @case(?i64) => if T.get_field_ptr(self, field) { value |
+                if has_tag(field, @symbol "prefix", Str) { prefix |
+                    @fmt(out, " %", prefix);
+                };
+                @fmt(out, " % %", name, value);
+            };
+            @case(bool) => if T.get_field_ptr(self, field)[] {
+                @fmt(out, " %", name);
+            };
+            @case(?[]Move) => if Go.get_field_ptr(self, field)[] { moves | 
+                @fmt(out, " %", name);
+                for moves { it |
+                    @fmt(out, " ");
+                    writeAlgebraic(it, out);
+                };
+            };
+            @case(?Move) => if Go.get_field_ptr(self, field)[] { it | 
+                @fmt(out, " % ", name);
+                writeAlgebraic(it, out);
+            };
+            @case(?Str) => if Go.get_field_ptr(self, field)[] { it | 
+                @fmt(out, " % %", name, it);
+            };
+            @default => @run compile_error(@tfmt("display_fields: unhandled Uci field type. %: %", name, field[].ty.typename().str()), @source_location());
+        }
+    };
+}
+
+has_tag :: fn(field: *Field, name: Symbol, $T: Type) ?T #fold #generic = {
+    @if(field.nullable_tag.is_null()) return(.None);
+    each field.nullable_tag { it | 
+        @if(it.name == name) return(Some = T.const_eval(it.args));
+    };
+    .None
+}
+
+// algebraic notation moves seperated by spaces
+advance_moves :: fn(s: Str, i: *i64, a: Alloc) List(Move) = {
+    out := Move.list(temp());
+    while => i[] < s.len {
+        prev := i[];
+        word := advance_word(s, i);
+        if readAlgebraic(word) { move |
+            out&.push(move);
+        } else {
+            i[] = prev;
+            return out;
+        }
+    }
+    out
+}
+
+advance_number :: fn(s: Str, i: *i64) ?i64 = {
+    n, remaining := convert_number_dyn(s.rest(i[]), 10);
+    new_i := s.len - remaining.len;
+    @if(i[] == new_i) return(.None);  // no valid digits
+    i[] = new_i;
+    advance_whitespace(s, i);
+    (Some = n)
+}
+
+advance_word :: fn(s: Str, i: *i64) Str = {
+    advance_whitespace(s, i);
+    start := i[];
+    while => i[] < s.len && !s[i[]].is_ascii_whitespace() {
+        i[] += 1;
+    };
+    word := s.slice(start, i[]);
+    advance_whitespace(s, i);
+    word
+}
+
+advance_whitespace :: fn(s: Str, i: *i64) void = {
+    while => i[] < s.len && s[i[]].is_ascii_whitespace() {
+        i[] += 1;
     };
 }
 
@@ -677,3 +757,4 @@ fn printBitBoard(bb: i64) void = {
 }
 
 #use("@/examples/chess/moves.fr");
+

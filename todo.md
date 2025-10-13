@@ -329,10 +329,6 @@ different subsets of the same resources.
 - make #log_asm work for the #asm replacement 
 - experiment with outputting even more info in .frc and an lsp that reads it back. 
 
-// TODO: use this for stuff
-//fn source_location(arg: FatExpr) FatExpr #macro = 
-    //@literal arg.loc;
-
 ## wasm
 
 - remove all the TODOWASM (ifdefs/comments)
