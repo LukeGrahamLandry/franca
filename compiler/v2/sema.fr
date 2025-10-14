@@ -1118,6 +1118,11 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
                 @check(self.compile_expr(it._1&, expected_type)) return;
                 unify(expected_type&, it._1.ty);
                 done = done && it._1.done;
+                
+                @if_let(expected_type) fn Specific(inner) => {
+                    self.last_loc = it._1.loc;
+                    @check(self.can_assign(inner, it._1.ty)) return;
+                };
             };
             ty := @match(expected_type) {
                 fn Specific(inner) => inner;
@@ -4222,15 +4227,18 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
     zone := zone_begin(.CallDynamic);
     self.stats.macro_calls += 1;
     @if(TODOWASM, {
-        // TODO: this is still wrong. need the type of the declaration. 
+        // TODO: wrong! what if they actually passed unit?
         if single {
+            @err_assert(f_ty.arg == fat_expr_type, "tried to call a pair macro with only one argument") return;
             callee := assume_types_fn(Arg = FatExpr, Ret = FatExpr, ptr = fn_ptr);
             expr[] = callee(invocation.arg[]);
         } else {
+            @err_assert(f_ty.arg == pair, "tried to call a single macro with a pair arguments") return;
             callee := assume_types_fn(Arg = Ty(FatExpr, FatExpr), Ret = FatExpr, ptr = fn_ptr);
             expr[] = callee(invocation.arg[], invocation.target[]);
         };
     }, {
+        // TODO: but even if i go back to this, its still bad to silently pass unit if you forgot an argument. 
         callee := assume_types_fn(Arg = Ty(FatExpr, FatExpr), Ret = FatExpr, ptr = fn_ptr);
         expr[] = callee(invocation.arg[], invocation.target[]);  // :call_dynamic_values
     });

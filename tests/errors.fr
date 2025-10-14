@@ -117,6 +117,38 @@ fn type_errors() #test => {
         a := 1;
         @slice("", a);
     };
+    
+    @assert_type_error(Ty(u32, u32), i64) :: {
+        E :: @tagged(A: void);
+        Foo :: @struct {
+            bar :: 123;
+        };
+        f :: fn(a: u32, foo: E) Ty(u32, u32) = {
+            @match(foo) {
+                fn A() => {
+                    r := 999;
+                    yield := Foo.bar;
+                    // This shouldn't compile. 
+                    r
+                }
+            }
+        };
+        a, b := f(1, .A);
+    };
+    
+    @assert_type_error(i64, u8) :: {
+        E :: @enum(A, B);
+        ::enum(E);
+        g :: fn(a: u8) u8 #noinline = 123;
+        f :: fn(x: E, y: u8) i64 #log_ir = {
+            @match(x) {
+                // previously was broken only when the first time `g` is called so it's still about a yield.
+                fn A() => g(y);  // error!
+                fn B() => 0;
+            }
+        };
+        a := f(.A, 8);
+    };
 }
 
 // TODO: check that its the right error message
@@ -189,6 +221,16 @@ fn other_errors() #test = {
     
     @assert_compile_error { a :: @static(i64); a = 123; };
     @assert_compile_error { a :: @static(i64); b := a&; };
+    
+    // the macro expects two arguments but we're only passing one, 
+    // and since its a direct FuncId it won't be caught by overload resolution. 
+    // should give a nice error, not crash trying to dereference junk in x1. 
+    @assert_compile_error {
+        foo :: fn(a: FatExpr, b: FatExpr) FatExpr #macro = {
+            @{ @[a] + @[b] }
+        };
+        @foo 1;
+    };
 }
 
 

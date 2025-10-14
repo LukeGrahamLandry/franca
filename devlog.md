@@ -15,6 +15,21 @@ more fixes from tests/todo
     bake_relocatable_body needing to handle array itself because when i create the type with intern_type,
     it doesn't instantiate the bake_relocatable_value in `fn Array`.  
     probably not worth the hassle. 
+- added arity checking for direct macro calls so you can't confuse it by passing one expression to something expecting a pair. 
+  mostly didn't come up because they're normally called through overload sets so the overload resolution handles the arity checking.  
+- c.fr skip_to_closing_squigle was eating the first character as though the caller hadn't already seen the `{` 
+  (peek doesn't consume the token but it does advance Lex.current). 
+  - i did confuse myself for several minutes when trying to add that test to front.fr 
+    because i'd run it with the old compiler expecting it to fail 
+    but the test recompiles the parser and the new source had the fix. 
+    spent longer on that than actually the trivial bug :(
+- o.fr, q.fr: 
+  make sure to type check each leaf of Expr.Switch, not just pass the requested type. 
+  recurring theme today is places where a multipart expression doesn't have all parts type checked. 
+  - i think the fragility is sometimes i change expr.ty and then yield before checking it against the requested 
+    one and that ripples out to having a different requested type when you come back? 
+    should be more structured about whats going on next time i rewrite the sema stuff 
+    (which will probably need to happen to get order dependence under control). 
 
 ## (Oct 13)
 
