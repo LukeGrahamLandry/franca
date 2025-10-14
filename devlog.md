@@ -31,6 +31,23 @@ more fixes from tests/todo
     should be more structured about whats going on next time i rewrite the sema stuff 
     (which will probably need to happen to get order dependence under control). 
 
+making unpacking dependencies less fragile
+- need to not rely on exec-ing as many things, start with writing my own reader for the compressed files. 
+  my impression is that .zip is annoying because the wrapper format puts the 
+  header in a random place and you have to start at the end and guess where it is in a fragile way. 
+  so i guess i'll do .tar.gz since thats the other one that seems ubiquitous. 
+  they're both deflate anyway (i assume thats the hard part) so i can change my mind later. 
+  and maybe i'll change my mind entirely and use wuffs instead but thats annoying because you gotta download that somehow too. 
+  probably more fun to read the rfc than just steal one so here we are for one thousand years. 
+- ok the gzip part is trivial, thats nice. and i feel like you don't even need to use any of the fields, just skip them. 
+  like who cares what the original file name was, the only thing im going to do is put a tar file in there, 
+  and it seems the compression algorithm's always deflate, they just reserved 255 more in 1996. 
+- the tar part seems more convoluted. theres like 6 different flavours of headers? 
+  hopefully everyone just uses the posix one, that sounds possible. 
+  the file starts with the string "pax_global_header" which i guess has more stuff in there, idk, 
+  but it's shaped like a file so it seems i can just ignore it and still get all my files out 
+  (for the one .tar.gz file i've tested).
+
 ## (Oct 13)
 
 - handled Alias in move_from_module

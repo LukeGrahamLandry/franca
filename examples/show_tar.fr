@@ -1,0 +1,65 @@
+
+main :: fn() void = {
+    in := read_file_from_last_arg();
+    ::if_opt(i64, []u8);
+    decompressed := if GZip'header_size(in) { (skip: i64) |
+        compressed := in.rest(skip);
+        length: i32 = -1;
+        p := bit_cast_unchecked(*u8, *i8, compressed.ptr);
+        p := Stb'stbi_zlib_decode_noheader_malloc(p, compressed.len.intcast(), length&);  // :leak
+        p := bit_cast_unchecked(*i8, *u8, p);
+        @assert(!p.is_null() && length >= 0, "failed to decompress");
+        @println("  compressed size = %", compressed.len);
+        @println("decompressed size = %", length);
+        p.slice(length.intcast())
+    } else {
+        in
+    };
+    
+    if true {
+        break :: local_return;
+        @assert_eq(size_of(Tar.Header), 512);
+        i := 0;
+        while => i + size_of(Tar.Header) <= decompressed.len {
+            header := decompressed.rest(i).peek_type(Tar.Header);
+            i += size_of(Tar.Header);
+            size := Tar'as_octal(header.size&);
+            size := size || {
+                if i + size_of(Tar.Header) <= decompressed.len && is_all_zeroes(decompressed.slice(i - size_of(Tar.Header), i + size_of(Tar.Header))) {
+                    // end marker
+                    println("that's all folks!");
+                    @println("trailing bytes = %", decompressed.len - 512 - i);
+                    break()
+                };
+                @panic("invalid size for |%|", header.name&.items())
+            };
+            @println("%|%|%| size=% type=% magic=%", 
+                header.size&.items(), header.prefix&.items(), header.name&.items(), size, header.typeflag - "0".ascii(), header.magic&.items());
+            if i + size >= decompressed.len {
+                @panic("file truncated");
+            };
+            i += size.align_to(size_of(Tar.Header));
+        };
+    };
+}
+
+GZip :: import("@/lib/encoding/gzip.fr");
+Tar :: import("@/lib/encoding/tar.fr");
+#use("@/lib/sys/fs.fr");
+
+// for now just using the deflate from stb_image
+Stb :: {
+    get  :: import("@/examples/testing.fr").fetch_or_crash;
+    root := get("https://github.com/nothings/stb/archive/f0569113c93ad095470c54bf34a17b36646bbbb5.zip", 1754150, "b62be3009cb9d4b6385bd4854bddf72d8e91f4e19d1347d6cf9589b19f70d45d", "stb-f0569113c93ad095470c54bf34a17b36646bbbb5");
+    Ffi  :: import("@/examples/import_c/ffi.fr");
+    c_source := @tfmt("""
+        #define STB_IMAGE_IMPLEMENTATION
+        #define STBI_NO_SIMD
+        #define STBI_NO_STDIO
+        #define STBI_SUPPORT_ZLIB
+        #define STBI_ONLY_PNG
+        #define STBI_NO_PNG
+        #include "%/stb_image.h"
+    """, root);
+    Ffi'include(current_compiler_context(), c_source)
+}

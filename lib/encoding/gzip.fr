@@ -1,0 +1,46 @@
+// https://www.ietf.org/rfc/rfc1952.txt
+
+header_size :: fn(in: []u8) ?i64 = {
+    Header :: @struct {
+        id1: u8;
+        id2: u8;
+        cm: u8;
+        flg: u8;
+        mtime: Array(u8, 4);
+        xfl: u8;
+        os: u8;
+    };
+
+    i := size_of(Header);
+    @if(in.len < i) return(.None);
+    h := in.peek_type(Header);
+    bad_magic := h.id1 != 0x1f || h.id2 != 0x8b || h.cm != 0x08 || h.flg.bit_and(0b11100000) != 0 /*reserved*/;
+    @if(bad_magic) return(.None);
+    
+    if h.flg.bit_and(1.shift_left(2)) != 0 /*FEXTRA*/ {
+        @if(i + 2 > in.len) return(.None);
+        xlen := in.rest(i).peek_type(u16)[];
+        i += 2 + xlen.zext();
+        @if(i > in.len) return(.None);
+    };
+    
+    for(@const_slice(3, 4)) { bit |  // FNAME, FCOMMENT
+        if h.flg.bit_and(1.shift_left(bit)) != 0 {
+            @if(i >= in.len) return(.None);
+            while => in[i] != 0 {
+                i += 1;
+                @if(i >= in.len) return(.None);
+            };
+            i += 1;
+            @if(i > in.len) return(.None);
+        }
+    };
+    
+    if h.flg.bit_and(1.shift_left(1)) != 0 /*FHCRC*/ {
+        @if(i + 2 > in.len) return(.None);
+        i += 2;
+        // TODO: tell caller there will be 4 bytes at the end with crc,size
+    };
+    
+    (Some = i)
+}

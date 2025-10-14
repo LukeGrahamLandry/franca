@@ -1,4 +1,5 @@
 // this segfaults while trying to panic if you jit it with `cc.out -r`
+// the problem is that JitOnly doesn't use ZeroInitData and `data $ttf_buffer = { z 33554432 }` doesn't fit in my default 2^25 MutableData
 
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "/Users/luke/Downloads/stb-f0569113c93ad095470c54bf34a17b36646bbbb5/stb_truetype.h"
