@@ -806,7 +806,6 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
                 types&.push(part.ty);
                 done = done && part.done;
             };
-            expr.done = done;
             
             if expr.ty.is_unknown() {
                 expr.ty = self.tuple_of(types.items());
@@ -816,10 +815,13 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
             // homogeneous tuple literals to coerce to arrays
             @if_let(requested) fn Specific(ty) => if ty != expr.ty {
                 @if_let(self.get_type(ty)) fn Array(it) => if parts.len == it.len.zext() {
+                    for types { element |
+                        @check(self.can_assign(it.inner, element)) return;
+                    };
                     expr.ty = ty;
-                    // TODO: do i need to re-typecheck each part or did passing it in as requested handle that?
                 };
             };
+            expr.done = done;
         }
         fn PrefixMacro() => {
             @check(self.compile_prefix_macro(expr)) return;
@@ -978,10 +980,15 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
                     @check(self.compile_expr(fst, .None)) return;
                     if !fst.ty.is_unknown() {
                         hint: ResultType = (Specific = fst.ty);
+                        done := fst.done;
                         each parts.items().slice(1, parts.len) { e | 
                             @check(self.compile_expr(e, hint)) return;
+                            done = done && e.done;
                         };
-                        @check(self.compile_expr(arg[], .None)) return; // TODO: don't recompile. just poke the type in.
+                        // its fine that this doesn't instantiate bake_relocatable_value because the Tuple won't be folded to a Value. 
+                        // there just needs to be a type here so emit_ir doesn't think its uncompiled.
+                        arg.ty = self.intern_type(Array = (inner = fst.ty, len = parts.len.trunc()));
+                        arg.done = done;
                     } else {
                         @check(self.compile_expr(arg[], .None)) return;
                     };
@@ -990,9 +997,20 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
                     @check(self.compile_expr(arg[], .None)) return;
                 };
             };
-            types := self.arg_types(arg.ty);
-            // TODO: typecheck that all are the same!
-            expr.ty = @check(self.create_slice_type(types[0], arg.loc)) return;
+            inner := {  //  typecheck that all are the same
+                parts := arg[].items();
+                @err_assert(parts.len > 0 && parts[0].ty != UnknownType) return;
+                inner := parts[0].ty;
+                each parts.rest(1) { it |
+                    if it.ty != inner {
+                        return(Err = self.error(TypeMismatch = 
+                            (span = it.loc, wanted = inner, found = it.ty),
+                        ));
+                    }
+                };
+                inner
+            };
+            expr.ty = @check(self.create_slice_type(inner, arg.loc)) return;
             expr.done = arg.done;
         }
         fn As(f) => {
@@ -1192,7 +1210,7 @@ fn expand_spread(self: *SelfHosted, parts: *RawList(FatExpr), requested_types: [
     spread_ty := requested_types[want - 1];
     // TODO: better error message if you try to coerce V:() to something that doesn't have all default fields. 
     @check(self.compile_expr(spread_value, spread_ty)) return;
-    // TODO: type check that all the new elements are the same type
+    // note: caller checks that types match the tuple so don't need to check that all the new elements are the same type here. 
     parts.len -= 1;  // AFTER the yield
     
     // TODO: only evaluate spread_value once, this would be super easy in emit_ir but making new variables here is painful.  
@@ -1224,10 +1242,11 @@ fn compile_quote(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe
     expr.set(value, expr_ty);
         
     if !walk.placeholders.is_empty() {
+        slice_ty := @check(self.create_slice_type(expr_ty, expr.loc)) return;
         walk.placeholders&.push(expr[]);
         arg: FatExpr = (expr = (Tuple = walk.placeholders.as_raw()), loc = expr.loc, ty = UnknownType, done = false);
         arg := self.box(arg);
-        arg: FatExpr = (expr = (Slice = arg), loc = expr.loc, ty = UnknownType, done = false);
+        arg: FatExpr = (expr = (Slice = arg), loc = expr.loc, ty = slice_ty, done = false);
         f := self.to_expr(FuncId, unquote_placeholders, expr.loc); 
         f.done = true;
         expr[] = synthetic_ty((Call = (f = self.box(f), arg = self.box(arg))), expr.loc, expr_ty);
@@ -1681,6 +1700,18 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
         if !deny_inline && arg_expr.is_raw_unit() {
             @if_let(func.body&) fn Normal(value) => {
                 if value.expr&.is(.Value) {
+                    if value.ty != ret_ty && value.ty == void {  
+                        // literal `()` may be used for a struct with all default fields. 
+                        // (if any fields are provided parser won't make a Value so it won't get here without going through handle_compile_func_body)
+                        @check(self.coerce_const_expr(value, (Specific = ret_ty), false)) return;   
+                        // that might have replaced with a struct literal. 
+                        // TODO: maybe this should be enough on its own without the extra coerce_const_expr
+                        _ := @check(self.immediate_eval_expr(value, ret_ty)) return;  
+                        @debug_assert(value.expr&.is(.Value));
+                        // TODO: maybe get rid of the `value.ty == void` condition, 
+                        //       like you could have poked your own thing in as the body from comptime code even tho the compiler doesn't do that? 
+                        //       and maybe you should still allow a coerce there... idk                 
+                    };
                     bytes := value.expr.Value.bytes&;
                     expr.set(bytes.clone(self.get_alloc()), ret_ty);
                 };

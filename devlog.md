@@ -1,4 +1,21 @@
 
+## (Oct 14)
+
+more fixes from tests/todo
+- void_to_struct_as_return
+  - call_direct auto inlines the body if it's an Expr.Value without checking if func.EnsuredCompiled, 
+    which is fine except if it's a unit literal `()` from the parser that needs to be coerced to a struct with all default fields. 
+- w.fr is the same as undef.ssa which has been fixed.
+- x.fr (typchk_unquote) problem is that @slice doesn't check all arguments
+- also while im looking at @slice
+  - have sema always force the arg's type to be an Array at the end. 
+    and make emit_ir/compile_expr(Slice) get the count out of the type instead of looking at the shape 
+    of the expression again, means it can't get out of sync with how sema counted the elements. 
+  - heck but that spirals into construct_aggregate needing to allow single element array and 
+    bake_relocatable_body needing to handle array itself because when i create the type with intern_type,
+    it doesn't instantiate the bake_relocatable_value in `fn Array`.  
+    probably not worth the hassle. 
+
 ## (Oct 13)
 
 - handled Alias in move_from_module
@@ -22,6 +39,7 @@
       but then it wants to copy the 8 byte union out of the 0 byte fake allocation. 
       just don't do the fast path for unions, they're rare anyway. 
     - that was the last thing using TypeMeta.size_slots so it can go away now
+  - array_spread_type_check: was actually a problem with Expr.Tuple -> Array, not the spread operator
 
 ## (Oct 12)
 
