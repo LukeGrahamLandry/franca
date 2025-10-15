@@ -26,6 +26,16 @@ and
   ```
 - that took samples in decompress (-unsafe) from 8564 to 227. 
   for scale, stbi__parse_zlib is 99 samples. 
+- this is something where i can measure division being slower. 
+  ```
+  byte_i, bit_i := c.i.div_mod(8);  // 378.5 ms ±   1.7 ms
+  byte_i, bit_i := c.i.udiv_mod(8);  //  369.1 ms ±   1.7 ms
+  byte_i, bit_i := (c.i.shift_right_logical(3), c.i.bit_and(1.shift_left(3) - 1));  // 366.7 ms ±   2.6 ms
+  ```
+  udiv_mod lets backend convert it to shift. 
+  becomes `366.6 ms ±   1.0 ms` if i make udiv_mod use 
+  udiv+umod instead of udiv+mul so it can convert to shift+and. 
+  thats cool. 
 
 ## (Oct 14)
 
