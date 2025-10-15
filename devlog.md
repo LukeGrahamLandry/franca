@@ -1,4 +1,7 @@
 
+the wuffs people have an example that goes bit by bit which is very very helpful.
+https://github.com/google/wuffs/blob/1e2e58cea012ea4c7553f327b63fafe196b0f9e2/std/deflate/README.md
+
 ## (Oct 14)
 
 more fixes from tests/todo
@@ -47,6 +50,9 @@ making unpacking dependencies less fragile
   the file starts with the string "pax_global_header" which i guess has more stuff in there, idk, 
   but it's shaped like a file so it seems i can just ignore it and still get all my files out 
   (for the one .tar.gz file i've tested).
+- deflate
+  - spent far too long on not reading the BFINAL bit
+
 
 ## (Oct 13)
 

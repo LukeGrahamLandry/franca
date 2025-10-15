@@ -1,0 +1,56 @@
+
+#test fn write_leb() = {
+    #use("@/lib/encoding/leb128.fr");
+    ::assert_eq(u8);
+    ::assert_eq([] u8);
+    
+    out: List(u8) = list(temp());
+    out&.leb128_unsigned(0);
+    assert_eq(out.items(), @slice(@as(u8) 0));
+    out&.clear();
+    out&.leb128_unsigned(50);
+    assert_eq(out.items(), @slice(@as(u8) 50));
+    out&.clear();
+    out&.leb128_unsigned(1234);
+    assert_eq(out.items(), @slice(@as(u8) 210, @as(u8) 9));
+    
+    out&.clear();
+    out&.leb128_signed(-1234);
+    assert_eq(out.items(), @slice(@as(u8) 174, @as(u8) 118));
+    
+    // shift>64 at the end of the decode loop
+    n := @as(i64) bitcast(@as(f64) -1.0);
+    @assert_eq(n, -4616189618054758400);
+    o := u8.list(temp());
+    o&.leb128_signed(n, 0);
+    value, rest, ok := read_leb128_signed(o.items());
+    @assert(ok && rest.len == 0 && value == n, "% % %", ok, rest.len, value);
+}
+
+fn b64() #test = {
+    f :: fn(in: Str, expect: Str) void = {
+        out := u8.list(temp());
+        #use("@/lib/encoding/base64.fr");
+        base64_decode(out&, in);
+        @assert_eq(out.items(), expect, "%", in);
+    };
+    // padding examples from wikipedia
+    f("bGlnaHQgd29yay4=", "light work.");
+    f("bGlnaHQgd29yaw==", "light work");
+    f("bGlnaHQgd29y", "light wor");
+}
+
+fn deflate() #test = {
+    Deflate :: import("@/lib/encoding/deflate.fr");
+    {  
+        // this is the example from RFC 1951 3.2.2. 
+        length :: @const_slice(@as(u8) 3, 3, 3, 3, 3, 2, 4, 4);
+        expect :: @const_slice(@as(u16) 0b010, 0b011, 0b100, 0b101, 0b110, 0b00, 0b1110, 0b1111);
+        
+        codes := zeroed Array(u16, length.len());
+        Deflate'codes_from_lengths(codes&.items(), length);
+        range(0, length.len()) { i |
+            @assert_eq(codes&[i], expect[i]);
+        };
+    };
+}

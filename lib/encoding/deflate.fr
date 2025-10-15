@@ -1,0 +1,229 @@
+// https://www.ietf.org/rfc/rfc1951.txt
+
+decompress :: fn(in: []u8, correct_output: []u8) void = {
+    c: Cursor = (in = in, i = 0, j = 0, correct_output = correct_output); c := c&;
+    final := c.get_bits(1);
+    fixed := c.get_bits(1);
+    dynamic := c.get_bits(1);
+    @println("final=%; fixed=%; dynamic=%;", final, fixed, dynamic);
+    if fixed == 1 && dynamic == 1 {   
+        @panic("error 0b11");
+    };
+    if fixed == 0 && dynamic == 0 {
+        c.noncompressed_block();
+    };
+    if dynamic == 1 {
+        c.dynamic_block();
+    };
+    
+    Syscall'exit(0);
+}
+
+noncompressed_block :: fn(c: *Cursor) void = {  //  3.2.4. 
+    c.skip_to_full_byte();
+    len := c.get_bits(16);
+    nlen := c.get_bits(16);
+    @println("% % |%", len, nlen, nlen.bit_not().bit_and(0xFFFF));
+    range(0, len) { _ |
+        @assert_eq(c.in[c.i/8], c.correct_output[c.j], "i/8=% j=%", c.i/8, c.j);
+        c.i += 8;
+        c.j += 1;
+    };
+}
+
+dynamic_block :: fn(c: *Cursor) void = {  // 3.2.7.
+    hlit := c.get_bits(5);
+    hdist := c.get_bits(5);
+    hclen := c.get_bits(4);
+    @println("hlit=%; hdist=%; hclen=%;", hlit, hdist, hclen);
+    @debug_assert(hlit <= 286 - 257 && hdist <= 32 - 1 && hclen <= 19 - 4);  // TODO: error
+    
+    // need to read the code-lengths that will be used to decode the data, 
+    // but those code-lengths are also huffman-coded, 
+    // so read another set of code-lengths used to decode the code-lengths. 
+
+    alphabet :: code_length_alphabet;
+    code_length := zeroed Array(u8, alphabet.len());
+    range(0, hclen + 4) { i |
+        code_length&[alphabet[i].zext()] = c.get_bits(3).trunc();
+        @println("code_length[%] = %", alphabet[i], code_length&[alphabet[i].zext()]);
+    };
+    codes := zeroed Array(u16, alphabet.len());
+    codes_from_lengths(codes&.items(), code_length&.items());
+    range(0, 19) { i |
+        @println("codes[%] = %", i, codes&[i]);
+    }
+    
+    // for literal/length alphabet
+    ll_lengths := zeroed Array(u8, 286);  
+    c.read_code_lengths(ll_lengths&.items(), codes&.items(), code_length&.items(), hlit + 257);
+    
+    // for distance alphabet
+    d_lengths := zeroed Array(u8, 32);
+    c.read_code_lengths(d_lengths&.items(), codes&.items(), code_length&.items(), hdist + 1);
+    
+    ll_codes := zeroed Array(u16, 286);  
+    codes_from_lengths(ll_codes&.items(), ll_lengths&.items());
+    
+    d_codes := zeroed Array(u16, 32);
+    codes_from_lengths(d_codes&.items(), d_lengths&.items());
+    
+    // now read the actual compressed data
+    ll_code: u16 = 0;
+    while => ll_code != 256 {
+        ll_code = c.read_symbol(ll_codes&.items(), ll_lengths&.items());
+        if ll_code < 256 {
+            c.yield_byte(ll_code.trunc());
+        };
+        if ll_code > 256 {
+            ll_index: i64 = ll_code.zext() - 257;
+            extra_bits_needed := ll_extra[ll_index];
+            extra := c.get_bits(extra_bits_needed.zext());
+            length := extra + ll_base[ll_index].zext();
+            @println("length code=% count=% value=% total=%", ll_index, extra_bits_needed, extra, length);
+            
+            d_index: i64 = c.read_symbol(d_codes&.items(), d_lengths&.items()).zext();
+            extra_bits_needed := d_extra[d_index];
+            extra := c.get_bits(extra_bits_needed.zext());
+            distance := extra + d_base[d_index].zext();
+            @println("distance code=% count=% value=% total=%", d_index, extra_bits_needed, extra, distance);
+            
+            i := c.j - distance;
+            range(0, length) { _ |
+                @assert(i < c.j);
+                c.yield_byte(c.correct_output[i]);
+                i += 1;
+            };
+        };
+    };
+}
+
+read_code_lengths :: fn(c: *Cursor, lengths: []u8, tree_code: []u16, tree_len: []u8, count: i64) void = {
+    i := 0;
+    lengths[0] = 0;  // TODO: are they allowed to do 16 as the first item? i guess you'd always just use 17/18
+    while => i < count {
+        s := c.read_symbol(tree_code, tree_len);
+        (n: i64, value: u8) := @switch(s) {
+            @case(16) => (c.get_bits(2) + 3, lengths[i]);
+            @case(17) => (c.get_bits(3) + 3, 0);
+            @case(18) => (c.get_bits(7) + 11, 0);
+            @default => {
+                @debug_assert(s < 16);
+                (1, s.trunc())
+            };
+        };
+        range(i, i + n) { j |
+            lengths[j] = value;
+        };
+        i += n;
+    };
+    range(0, count) { i |
+        if lengths[i] != 0 {
+            @println("lengths[%] = %", i, lengths[i]);
+        }
+    };
+}
+
+// :SLOW clearly you can do this by actually following the tree instead of checking each one but this works for now
+read_symbol :: fn(c: *Cursor, tree_code: []u16, tree_len: []u8) u16 = {
+    code: u16 = 0;
+    len: u8 = 0;
+    loop {
+        code = code.shift_left(1);
+        code = code.bit_or(c.get_bits(1).trunc());
+        len += 1;
+        
+        range(0, tree_code.len) { i |
+            if code == tree_code[i] && len == tree_len[i] {
+                @println("code=% s=%", code, i);
+                return i.trunc();
+            }
+        };
+    };
+}
+
+// symbols are 0-287 so codes need 9 bits
+codes_from_lengths :: fn(tree_code: []u16, tree_len: []u8) void = {  // 3.2.2.
+    // 1)
+    bl_count := zeroed Array(u16, MAX_BITS+1);
+    for tree_len { l |
+        bl_count&[l.zext()] += 1;
+    };
+    
+    // 2)
+    code: u16 = 0;
+    bl_count&[0] = 0;
+    MAX_BITS :: 9;
+    next_code := zeroed Array(u16, MAX_BITS+1);
+    range(1, MAX_BITS+1) { bits |
+        code = (code + bl_count&[bits-1]).shift_left(1);
+        next_code&[bits] = code;
+    }
+    
+    // 3)
+    max_code := tree_len.len-1;
+    range(0, max_code + 1) { n |
+        len: i64 = tree_len[n].zext();
+        if len != 0 {
+            tree_code[n] = next_code&[len];
+            next_code&[len] += 1;
+        } else {
+            tree_code[n] = UNUSED_CODE;
+        }
+    }
+}
+
+UNUSED_CODE :: 0xFFFF;
+
+yield_byte :: fn(c: *Cursor, value: u8) void = {
+    @assert_eq(c.correct_output[c.j], value, "wrong output[%]", c.j);
+    c.j += 1;
+}
+
+Cursor :: @struct {
+    in: []u8;
+    i: i64;
+    correct_output: []u8;
+    j: i64;
+};
+
+fn get_bit(c: *Cursor) bool = {
+    byte_i, bit_i := c.i.div_mod(8);
+    c.i += 1;
+    c.in[byte_i].bit_and(1.shift_left(bit_i)) != 0
+}
+
+// least signifigant bit of the input byte is taken first 
+// ?? and is the least signifigant bit of the result. 
+fn get_bits(c: *Cursor, n: i64) i64 = {
+    @debug_assert(n < 64);
+    byte_i, bit_i := c.i.div_mod(8);
+    @debug_assert_ule(c.i + n, c.in.len * 8);
+    // safety: this reads out of bounds (at the end if in.len is not a multiple of 8) but masks off the extra. 
+    //         so only a problem if we're at the end of a page and the next one is unmapped. 
+    word := bit_cast_unchecked(*u8, *i64, c.in.ptr.offset(byte_i))[];  // :endian :alignment
+    word := word.shift_right_logical(bit_i);  // throw out already consumed bits
+    word := word.bit_and(1.shift_left(n) - 1); // mask out extra bits
+    c.i += n;
+    word
+}
+
+fn skip_to_full_byte(c: *Cursor) void = {
+    c.i = c.i.align_to(8);
+}
+
+// tables pasted from the spec. 
+// TODO: little program that dumps them as ascii art so you can diff it with the rfc trivially. just for sanity. 
+ll_extra :: @const_slice(@as(u8) 0,0,0,0,0,0,0,0, 1,1,1,1, 2,2,2,2, 3,3,3,3, 4,4,4,4, 5,5,5,5, 0);
+ll_base :: @const_slice(@as(u16) 
+    3,4,5,6,7,8,9,10,11,13, 
+    15,17,18,19,23,27,31,35,43,51,59, 
+    67,83,99,115,131,163,195,227,258,
+);
+d_extra :: @const_slice(@as(u8) 0,0,0,0, 1,1, 2,2, 3,3, 4,4, 5,5, 6,6, 7,7, 8,8, 9,9, 10,10, 11,11, 12,12, 13,13);
+d_base :: @const_slice(@as(u16)
+    1,2,3,4,5,7,9,13,17,25,
+    33,49,65,97,129,193,257,385,513,769,
+    1025,1537,2049,3073,4097,6145,8193,12289,16385,24577,
+);
+code_length_alphabet :: @const_slice(@as(u8) 16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15);  

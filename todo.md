@@ -210,6 +210,7 @@ as different types even when they're the same size.
   - musl
   - git
   - linux kernel
+  - sqlite
 - :AsmNotYetImplemented
 - for inline assembly, i think it would be easier to give up on ExprLevelAsm
   and use someone else's assembler to compile the `asm` blocks into an elf file 
