@@ -12,6 +12,20 @@ and
 - now i can do wuffs/test/data/archive.tar.gz and i get through 22414 output bytes of wuffs-main.tar.gz.
   oh i just had to bump up MAX_BITS again, i don't understand why it isn't 9, todo i guess. 
   but it works now. takes a solid 15 seconds on wuffs-main.tar.gz (compared to 150ms by stb). 
+- now that im sure im interpreting the bits in the right order, 
+  traverse the tree correctly instead of scanning the whole thing. 
+  get to use my favourite strategy to make sure i'm doing it right: 
+  ```
+  bit_index_start := c.i;
+  new := c.read_symbol_fast(tree);
+  bit_index_end := c.i;
+  c.i = bit_index_start;
+  old := read_symbol_slow(c, tree);
+  @assert(new == old && c.i == bit_index_end);
+  new
+  ```
+- that took samples in decompress (-unsafe) from 8564 to 227. 
+  for scale, stbi__parse_zlib is 99 samples. 
 
 ## (Oct 14)
 
