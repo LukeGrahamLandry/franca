@@ -1,9 +1,8 @@
 
+## (Oct 15)
+
 - the wuffs people have an example that goes bit by bit which is very very helpful.
   https://github.com/google/wuffs/blob/1e2e58cea012ea4c7553f327b63fafe196b0f9e2/std/deflate/README.md
-- i can do 
-and 
-
 - i can do test/data/romeo.txt.gz (the one from thier example). 
 - on wuffs-main.tar.gz i get stuck after 18 bytes of output. 
 - there's also https://github.com/madler/infgen which now that i understand what it means is also great. 

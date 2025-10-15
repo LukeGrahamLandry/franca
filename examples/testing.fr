@@ -163,33 +163,74 @@ fn fetch_or_crash(url: Str, zip_size_bytes: i64, sha256_hash: Str, HACK_name: St
     // TODO: this is stupid. should be able to pipe to a process. 
     zip_file_path := @tfmt("%.%", folder_path, extension);
     
+    zip_bytes := "";
     if !file_exists(zip_file_path) {
         @eprintln(">>> downloading [%]...", url);
         ok, out, err := exec_and_catch("curl", @slice(url, "-s", "-L"), temp());
         @assert(ok, "failed curl %\n%", url, err.items());
+        zip_bytes = out.items();
         
         @eprintln(">>> verifying [%]...", zip_file_path);
-        @assert_eq(out.len, zip_size_bytes, "bad size: %", url);
-        digest := Sha256'hex(out.items());
+        @assert_eq(zip_bytes.len, zip_size_bytes, "bad size: %", url);
+        digest := Sha256'hex(zip_bytes);
         @assert_eq(digest, sha256_hash, "bad hash %", url);
         
-        write_entire_file_or_crash(zip_file_path, out.items());
+        write_entire_file_or_crash(zip_file_path, zip_bytes);
     };
     @eprintln(">>> unpacking [%]...", zip_file_path);
     
     if extension == "zip" {
         ok, out, err := exec_and_catch("unzip", @slice("-oq", "-d", FRANCA_CACHE_PATH, zip_file_path), temp());
     } else {
-        ok, out, err := exec_and_catch("tar", @slice("-C", FRANCA_CACHE_PATH, "-xzvf", zip_file_path), temp());
-        if !ok {
-            println(out.items());
-            println(err.items());
-        }
+        if zip_bytes.len == 0 {
+            zip_bytes = read_entire_file_or_crash(temp(), zip_file_path);
+        };
+        extract_tar_gz(zip_bytes, FRANCA_CACHE_PATH);
     };
     // not checking !ok because it doesn't like strange filenames 
     // this is why we can't be using whatever random shit i happen to have installed. 
     folder_path
 }
+
+extract_tar_gz :: fn(compressed: []u8, dir: Str) void = {
+    Deflate :: import("@/lib/encoding/deflate.fr");
+    GZip :: import("@/lib/encoding/gzip.fr");
+    Tar :: import("@/lib/encoding/tar.fr");
+    o := u8.list(temp());
+    skip := GZip'header_size(compressed) 
+        || @panic("missing gzip header");
+    _, err := Deflate'decompress(compressed.rest(skip), o&);
+    ::enum(@type err);
+    @assert_eq(err, .Ok, "failed to un-gzip (for output path: %)", dir);
+    err := Tar'iter(o.items()) { h, b |
+        name: CStr = (ptr = h.name&.as_ptr());
+        
+        p := u8.list(temp());
+        p&.push_all(dir);
+        p&.push_all("/");
+        p&.push_all(name.str());
+        
+        // TODO: check that there's no wonky escapes in the path
+        // TODO: use prefix for longer than 100 char names
+        @switch(h.typeflag) {
+            @case(Tar.TYPE.REG) => {
+                n := p.len;
+                p&.pop_path_segment();
+                make_dirs_or_crash(p.items());  // sometimes it doesn't contain the directories as seperate items
+                p.len = n;
+                write_entire_file_or_crash(p.items(), b);
+            };
+            @case(Tar.TYPE.DIR) => {
+                @assert_eq(b.len, 0, "non zero size directory: %", name);
+                make_dirs_or_crash(p.items());
+            };
+            @case(Tar.TYPE.PAX) => ();  // TODO: get whatever data's in there since it might change the meaning of other stuff?
+            @default => @panic("unhandled tar block type % for %", h.typeflag, name);
+        }
+    };
+    ::enum(@type err.Err);
+    err.or(fn(e) => @panic("%: failed to un-tar (for output path: %)", e, dir));
+};
 
 // 🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡
 fn fetch_text_or_crash(url: Str, size: i64, sha256_hash: Str, a: Alloc) Str = {

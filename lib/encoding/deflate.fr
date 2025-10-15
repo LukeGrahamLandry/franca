@@ -3,9 +3,9 @@
 Error :: @enum(Ok, BlockType3, CorruptNLen, BackTooFar, BadDynamicHeader);
 
 // returns number of consumed bytes so you can read a footer if your format has one. 
-decompress :: fn(in: []u8, correct_output: []u8) Ty(i64, Error) = {
+decompress :: fn(in: []u8, out: *List(u8)) Ty(i64, Error) = {
     ::enum(Error);
-    c: Cursor = (in = in, i = 0, j = 0, correct_output = correct_output); c := c&;
+    c: Cursor = (in = in, i = 0, out = out, start = out.len); c := c&;
     final := 0;
     while => final != 1 {
         final = c.get_bits(1);
@@ -22,7 +22,6 @@ decompress :: fn(in: []u8, correct_output: []u8) Ty(i64, Error) = {
             return(c.i, err);
         };
     };
-    @assert_eq(c.j, c.correct_output.len, "didn't output enough bytes");
     (c.i.align_to(8)/8, .Ok)
 }
 
@@ -30,7 +29,7 @@ noncompressed_block :: fn(c: *Cursor) Error = {  //  3.2.4.
     c.skip_to_full_byte();
     len := c.get_bits(16);
     nlen := c.get_bits(16);
-    @if(len != nlen.bit_not().bit_and(0xFFFF)) return(.CorruptNLen);
+    @if(len != nlen.bit_xor(0xFFFF)) return(.CorruptNLen);
     range(0, len) { _ |
         c.yield_byte(c.in[c.i.udiv(8)]);
         c.i += 8;
@@ -63,17 +62,17 @@ dynamic_block :: fn(c: *Cursor) Error = {  // 3.2.7.
     codes_from_lengths(cl, alphabet.len());
     
     // TODO: tighter bound than 750KB of stack? (but it's uninitialized so it doesn't actually matter)
-    ll := stack_tree(286, MAX_BITS);  // length/literal
-    c.read_code_lengths(ll.len, cl, hlit);
-    debug_log_lengths(ll, hlit, "litlen");
-    codes_from_lengths(ll, hlit);
-    
-    d := stack_tree(32, 5);  // distance
-    c.read_code_lengths(d.len, cl, hdist);
-    debug_log_lengths(d, hdist, "dist");
-    codes_from_lengths(d, hdist);
-    
+    ll := c.read_tree(286, MAX_BITS, cl, hlit, "litlen");  // length/literal
+    d := c.read_tree(32, 5, cl, hdist, "dist");  // distance
     c.read_block(ll, d)
+}
+
+read_tree :: fn(c: *Cursor, $n: i64, $nbit: i64, cl: *Tree, count: i64, label: Str) *Tree #inline/*semantic*/ = {
+    t := stack_tree(n, nbit);
+    c.read_code_lengths(t.len, cl, count);
+    debug_log_lengths(t, count, label);
+    codes_from_lengths(t, count);
+    t
 }
 
 read_block :: fn(c: *Cursor, ll: *Tree, d: *Tree) Error = {  // 3.2.5.
@@ -84,24 +83,26 @@ read_block :: fn(c: *Cursor, ll: *Tree, d: *Tree) Error = {  // 3.2.5.
         } else {
             @if(ll_code == 256) return(.Ok);
 
-            ll_index: i64 = ll_code.zext() - 257;
-            extra_bits_needed := ll_extra[ll_index];
-            extra := c.get_bits(extra_bits_needed.zext());
-            length := extra + ll_base[ll_index].zext();
+            @debug_assert(ll_code <= 285);  // TODO: error
+            length := c.read_extra_bits(ll_code - 257, ll_extra, ll_base);
+            d_code := c.read_symbol(d);
+            @debug_assert(d_code <= 29);  // TODO: error
+            distance := c.read_extra_bits(d_code, d_extra, d_base);
             
-            d_index: i64 = c.read_symbol(d).zext();
-            extra_bits_needed := d_extra[d_index];
-            extra := c.get_bits(extra_bits_needed.zext());
-            distance := extra + d_base[d_index].zext();
-            
-            i := c.j - distance;
-            @if(i < 0) return(.BackTooFar);
+            i := c.out.len - c.start - distance;
+            @if(i < c.start) return(.BackTooFar);
+            c.out.reserve(length);
             range(0, length) { _ |
-                c.yield_byte(c.correct_output[i]);
+                c.yield_byte(c.out[i]);
                 i += 1;
             };
         };
     };
+}
+
+read_extra_bits :: fn(c: *Cursor, code: u16, extra: []u8, base: []u16) i64 #inline = {
+    i: i64 = code.zext();
+    base[i].zext() + c.get_bits(extra[i].zext())
 }
 
 read_code_lengths :: fn(c: *Cursor, lengths: []u8, tree: *Tree, count: i64) void = {
@@ -171,6 +172,7 @@ codes_from_lengths :: fn(tree: *Tree, count: i64) void = {  // 3.2.2.
 
 MAX_BITS :: 15;  // sizes the encoding in 3.2.7 can express: ll/d: 0-15, cl:0-7 
 
+// TODO: see if i can measure prefetcher if i sort the low length (high probability ones) together
 fill_tree :: fn(tree: *Tree) void = {
     count := 1;
     tree.node[0] = (value = BLANK, next = (BLANK, BLANK));
@@ -201,6 +203,7 @@ fill_tree :: fn(tree: *Tree) void = {
     // check you can't fall off the tree. 
     // TODO: error if they gave lengths that don't work?
     // TODO: is it allowed to have one leaf so there'd be a blank slot? 
+    //       yes. TODO: find a test file that does that. 
     @debug_assert(count < 0xFFFF);
     each tree.node.slice(0, count) { it |
         l, r := (it.next&[0], it.next&[1]);
@@ -214,14 +217,14 @@ fill_tree :: fn(tree: *Tree) void = {
 
 BLANK :: 0xFFFF;
 
-yield_byte :: fn(c: *Cursor, value: u8) void #inline = {
-    @assert_eq(c.correct_output[c.j], value, "wrong output[%]", c.j);
-    c.j += 1;
+yield_byte :: fn(c: *Cursor, value: u8) void = {
+    c.out.push(value);
 }
 
+// <len> is used to build <code> which is used to build <node> which is used to decode
 Tree :: @struct {
-    code: []u16;
     len: []u8;
+    code: []u16;
     node: []Node;
     n := 0;
     
@@ -253,8 +256,8 @@ alloc_tree :: fn(n: i64, a: Alloc) Tree = (
 Cursor :: @struct {
     in: []u8;
     i: i64;
-    correct_output: []u8;
-    j: i64;
+    out: *List(u8);
+    start: i64;
 };
 
 // TODO: error if run out of input
@@ -292,7 +295,7 @@ debug_log_lengths :: fn(tree: *Tree, count: i64, label: Str) void = @if(INFGEN) 
 // TODO: if people mostly don't use these, compute them at runtime 
 //       the first time they're needed instead of including them in the binary
 
-ll_fixed :: @static(Tree) {
+ll_fixed :: @static(Tree) {  // 3.2.6.
     it := alloc_tree(288, ast_alloc());
     
     it.len.slice(0, 143+1).set_bytes(8);
@@ -317,8 +320,8 @@ d_fixed :: @static(Tree) {
     it
 }
 
-// tables pasted from the spec. 
 // TODO: little program that dumps them as ascii art so you can diff it with the rfc trivially. just for sanity. 
+// 3.2.5. 
 ll_extra :: @const_slice(@as(u8) 0,0,0,0,0,0,0,0, 1,1,1,1, 2,2,2,2, 3,3,3,3, 4,4,4,4, 5,5,5,5, 0);
 ll_base :: @const_slice(@as(u16) 
     3,4,5,6,7,8,9,10,11,13, 

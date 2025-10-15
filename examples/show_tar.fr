@@ -10,17 +10,18 @@ dump :: fn(in: []u8, out: *List(u8)) void = {
     ::if_opt(i64, []u8);
     decompressed := if GZip'header_size(in) { (skip: i64) |
         compressed := in.rest(skip);
-        length: i32 = -1;
-        p := bit_cast_unchecked(*u8, *i8, compressed.ptr);
-        p := Stb'stbi_zlib_decode_noheader_malloc(p, compressed.len.intcast(), length&);  // :leak
-        p := bit_cast_unchecked(*i8, *u8, p);
-        @assert(!p.is_null() && length >= 0, "failed to decompress");
+        decompressed := u8.list(temp());
+        consumed, error := Deflate'decompress(compressed, decompressed&);
+        ::enum(Deflate.Error);
         @fmt(out, "      header size = %\n", skip);
         @fmt(out, "  compressed size = %\n", compressed.len);
-        @fmt(out, "decompressed size = %\n", length);
-        p := p.slice(length.intcast());
-        Deflate'decompress(compressed, p);
-        p
+        if error != .Ok {
+            @fmt(out, "error: % after % input bytes and % output bytes\n", error, consumed, decompressed.len);
+            return();
+        };
+        @fmt(out, "decompressed size = %\n", decompressed.len);
+        @fmt(out, "remaining bytes after compressed blob: %\n", compressed.len - consumed);
+        decompressed.items()
     } else {
         in
     };
@@ -41,20 +42,3 @@ GZip :: import("@/lib/encoding/gzip.fr");
 Tar :: import("@/lib/encoding/tar.fr");
 Deflate :: import("@/lib/encoding/deflate.fr");
 #use("@/lib/sys/fs.fr");
-
-// for now just using the deflate from stb_image
-Stb :: {
-    get  :: import("@/examples/testing.fr").fetch_or_crash;
-    root := get("https://github.com/nothings/stb/archive/f0569113c93ad095470c54bf34a17b36646bbbb5.zip", 1754150, "b62be3009cb9d4b6385bd4854bddf72d8e91f4e19d1347d6cf9589b19f70d45d", "stb-f0569113c93ad095470c54bf34a17b36646bbbb5");
-    Ffi  :: import("@/examples/import_c/ffi.fr");
-    c_source := @tfmt("""
-        #define STB_IMAGE_IMPLEMENTATION
-        #define STBI_NO_SIMD
-        #define STBI_NO_STDIO
-        #define STBI_SUPPORT_ZLIB
-        #define STBI_ONLY_PNG
-        #define STBI_NO_PNG
-        #include "%/stb_image.h"
-    """, root);
-    Ffi'include(current_compiler_context(), c_source)
-}
