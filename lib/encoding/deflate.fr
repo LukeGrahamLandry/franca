@@ -40,12 +40,7 @@ noncompressed_block :: fn(c: *Cursor) void = {  //  3.2.4.
 }
 
 fixed_block :: fn(c: *Cursor) void = {  // 3.2.6.
-    :: { ll_fixed_tree; d_fixed_tree; };  // ugh. my language is dumb. 
-    
-    c.read_block(
-        ll_fixed_tree._1&.items(), ll_fixed_tree._0&.items(), 
-        d_fixed_tree._1&.items(), d_fixed_tree._0&.items(),
-    );
+    c.read_block(ll_fixed, d_fixed);
 }
 
 dynamic_block :: fn(c: *Cursor) void = {  // 3.2.7.
@@ -63,56 +58,57 @@ dynamic_block :: fn(c: *Cursor) void = {  // 3.2.7.
 
     @if(SPAM) @println("=== code-length code-lengths ===");
     alphabet :: code_length_alphabet;
-    code_length := zeroed Array(u8, alphabet.len());
+    cl := @ref @as(Tree) (
+        len = items(@ref(zeroed Array(u8, alphabet.len()))),
+        code = items(@ref(zeroed Array(u16, alphabet.len()))),
+    );
     range(0, hclen + 4) { i |
-        code_length&[alphabet[i].zext()] = c.get_bits(3).trunc();
-        @if(SPAM) @println("code_length[%] = %", alphabet[i], code_length&[alphabet[i].zext()]);
+        cl.len[alphabet[i].zext()] = c.get_bits(3).trunc();
+        @if(SPAM) @println("code_length[%] = %", alphabet[i], cl.len[alphabet[i].zext()]);
     };
-    codes := zeroed Array(u16, alphabet.len());
-    codes_from_lengths(codes&.items(), code_length&.items());
+    codes_from_lengths(cl);
     @if(SPAM) range(0, 19) { i |
-        @println("codes[%] = %", i, codes&[i]);
+        @println("codes[%] = %", i, cl.code[i]);
     }
     
     @if(SPAM) @println("=== ll code-lengths ===");
     // for literal/length alphabet
-    ll_lengths := zeroed Array(u8, 286);  
-    c.read_code_lengths(ll_lengths&.items(), codes&.items(), code_length&.items(), hlit + 257);
+    ll := stack_tree(286);
+    c.read_code_lengths(ll.len, cl, hlit + 257);
     
     @if(INFGEN) range(0, hlit + 257) { i |
-        if ll_lengths&[i] != 0 {
-            @println("litlen % %", i, ll_lengths&[i]);
+        if ll.len[i] != 0 {
+            @println("litlen % %", i, ll.len[i]);
         }
     };
     
     @if(SPAM) @println("=== d code-lengths ===");
     // for distance alphabet
-    d_lengths := zeroed Array(u8, 32);
-    c.read_code_lengths(d_lengths&.items(), codes&.items(), code_length&.items(), hdist + 1);
+    d := stack_tree(32);
+    c.read_code_lengths(d.len, cl, hdist + 1);
     
     @if(INFGEN) range(0, hdist + 1) { i |
-        if d_lengths&[i] != 0 {
-            @println("dist % %", i, d_lengths&[i]);
+        if d.len[i] != 0 {
+            @println("dist % %", i, d.len[i]);
         }
     };
     
     @if(SPAM) @println("=== ll codes_from_lengths ===");
     ll_codes := zeroed Array(u16, 286);  
-    codes_from_lengths(ll_codes&.items(), ll_lengths&.items());
+    codes_from_lengths(ll);
     
     @if(SPAM) @println("=== d codes_from_lengths ===");
-    d_codes := zeroed Array(u16, 32);
-    codes_from_lengths(d_codes&.items(), d_lengths&.items());
+    codes_from_lengths(d);
     
    @if(SPAM) @println("=== read_block ===");
     // now read the actual compressed data
-    c.read_block(ll_codes&.items(), ll_lengths&.items(), d_codes&.items(), d_lengths&.items());
+    c.read_block(ll, d);
 }
 
-read_block :: fn(c: *Cursor, ll_codes: []u16, ll_lengths: []u8, d_codes: []u16, d_lengths: []u8) void = {  // 3.2.5.
+read_block :: fn(c: *Cursor, ll: *Tree, d: *Tree) void = {  // 3.2.5.
     ll_code: u16 = 0;
     while => ll_code != 256 {
-        ll_code = c.read_symbol(ll_codes, ll_lengths);
+        ll_code = c.read_symbol(ll);
         if ll_code < 256 {
             c.yield_byte(ll_code.trunc());
         };
@@ -123,7 +119,7 @@ read_block :: fn(c: *Cursor, ll_codes: []u16, ll_lengths: []u8, d_codes: []u16, 
             length := extra + ll_base[ll_index].zext();
             @if(SPAM) @println("LENGTH code=% count=% value=% base=% total=%", ll_index, extra_bits_needed, extra, ll_base[ll_index], length);
             
-            d_index: i64 = c.read_symbol(d_codes, d_lengths).zext();
+            d_index: i64 = c.read_symbol(d).zext();
             extra_bits_needed := d_extra[d_index];
             extra := c.get_bits(extra_bits_needed.zext());
             distance := extra + d_base[d_index].zext();
@@ -140,11 +136,11 @@ read_block :: fn(c: *Cursor, ll_codes: []u16, ll_lengths: []u8, d_codes: []u16, 
     };
 }
 
-read_code_lengths :: fn(c: *Cursor, lengths: []u8, tree_code: []u16, tree_len: []u8, count: i64) void = {
+read_code_lengths :: fn(c: *Cursor, lengths: []u8, tree: *Tree, count: i64) void = {
     i := 0;
     lengths[0] = 0;  // TODO: are they allowed to do 16 as the first item? i guess you'd always just use 17/18
     while => i < count {
-        s := c.read_symbol(tree_code, tree_len);
+        s := c.read_symbol(tree);
         (n: i64, value: u8) := @switch(s) {
             @case(16) => (c.get_bits(2) + 3, lengths[i - 1]);
             @case(17) => (c.get_bits(3) + 3, 0);
@@ -168,7 +164,7 @@ read_code_lengths :: fn(c: *Cursor, lengths: []u8, tree_code: []u16, tree_len: [
 }
 
 // :SLOW clearly you can do this by actually following the tree instead of checking each one but this works for now
-read_symbol :: fn(c: *Cursor, tree_code: []u16, tree_len: []u8) u16 = {
+read_symbol :: fn(c: *Cursor, tree: *Tree) u16 = {
     code: u16 = 0;
     len: u8 = 0;
     loop {
@@ -177,8 +173,8 @@ read_symbol :: fn(c: *Cursor, tree_code: []u16, tree_len: []u8) u16 = {
         code = code.bit_or(bit);
         len += 1;
         
-        range(0, tree_code.len) { i |
-            if code == tree_code[i] && len == tree_len[i] {
+        range(0, tree.code.len) { i |
+            if code == tree.code[i] && len == tree.len[i] {
                 @if(SPAM) @println("read_symbol -> (code=% s=%)", code, i);
                 return i.trunc();
             }
@@ -189,11 +185,11 @@ read_symbol :: fn(c: *Cursor, tree_code: []u16, tree_len: []u8) u16 = {
 }
 
 // symbols are 0-287 so codes need 9 bits? but somehow no....
-codes_from_lengths :: fn(tree_code: []u16, tree_len: []u8) void = {  // 3.2.2.
+codes_from_lengths :: fn(tree: *Tree) void = {  // 3.2.2.
     // 1)
     bl_count := zeroed Array(u16, MAX_BITS+1);
     i := 0;
-    for tree_len { l |
+    for tree.len { l |
         bl_count&[l.zext()] += 1;
         i += 1;
     };
@@ -209,22 +205,22 @@ codes_from_lengths :: fn(tree_code: []u16, tree_len: []u8) void = {  // 3.2.2.
     }
     
     // 3)
-    max_code := tree_len.len-1;
+    max_code := tree.len.len-1;
     range(0, max_code + 1) { n |
-        len: i64 = tree_len[n].zext();
+        len: i64 = tree.len[n].zext();
         if len != 0 {
-            tree_code[n] = next_code&[len];
+            tree.code[n] = next_code&[len];
             next_code&[len] += 1;
             
-            @if(SPAM) @println("code[%] = %", n, tree_code[n]);
+            @if(SPAM) @println("code[%] = %", n, tree.code[n]);
         } else {
-            tree_code[n] = UNUSED_CODE;
+            tree.code[n] = UNUSED_CODE;
         }
     }
     
     range(0, max_code + 1) { n |
-        if tree_code[n] != UNUSED_CODE {
-            @debug_assert_lt(tree_code[n], 1.shift_left(tree_len[n].zext()));
+        if tree.code[n] != UNUSED_CODE {
+            @debug_assert_lt(tree.code[n], 1.shift_left(tree.len[n].zext()));
         }
     }
 }
@@ -236,6 +232,21 @@ yield_byte :: fn(c: *Cursor, value: u8) void = {
     @assert_eq(c.correct_output[c.j], value, "wrong output[%]", c.j);
     c.j += 1;
 }
+
+Tree :: @struct {
+    code: []u16;
+    len: []u8;
+};
+
+stack_tree :: fn($n: i64) *Tree #inline/*semantic*/ = @ref @as(Tree) (
+    len = items(@ref(zeroed Array(u8, n))),
+    code = items(@ref(zeroed Array(u16, n))),
+);
+
+alloc_tree :: fn(n: i64, a: Alloc) Tree = (
+    len = a.alloc_zeroed(u8, n),
+    code = a.alloc_zeroed(u16, n),
+);
 
 Cursor :: @struct {
     in: []u8;
@@ -269,31 +280,27 @@ fn skip_to_full_byte(c: *Cursor) void = {
     c.i = c.i.align_to(8);
 }
 
-ll_fixed_tree :: @static(Ty(Array(u8, 288), Array(u16, 288))) {
-    lengths := zeroed Array(u8, 288);  
-    codes := zeroed Array(u16, 288);
+ll_fixed :: @static(Tree) {
+    it := alloc_tree(288, ast_alloc());
     
-    lengths&.items().slice(0, 143+1).set_bytes(8);
-    lengths&.items().slice(144, 255+1).set_bytes(9);
-    lengths&.items().slice(256, 279+1).set_bytes(7);
-    lengths&.items().slice(280, 287+1).set_bytes(8);
+    it.len.slice(0, 143+1).set_bytes(8);
+    it.len.slice(144, 255+1).set_bytes(9);
+    it.len.slice(256, 279+1).set_bytes(7);
+    it.len.slice(280, 287+1).set_bytes(8);
     
-    codes_from_lengths(codes&.items(), lengths&.items());
-    (lengths, codes)
+    codes_from_lengths(it&);
+    it
 };
 
 // this is dumb but makes it more consistant 
-d_fixed_tree :: @static(Ty(Array(u8, 32), Array(u16, 32))) {
-    lengths := zeroed Array(u8, 32);  
-    codes := zeroed Array(u16, 32);
-    
-    lengths&.items().set_bytes(5);
-    enumerate codes&.items() { i, it |
+d_fixed :: @static(Tree) {
+    it := alloc_tree(32, ast_alloc());
+    it.len.set_bytes(5);
+    enumerate it.code { i, it |
         it[] = i.trunc();
     };
-    
-    (lengths, codes)
-};
+    it
+}
 
 // tables pasted from the spec. 
 // TODO: little program that dumps them as ascii art so you can diff it with the rfc trivially. just for sanity. 
