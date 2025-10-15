@@ -1,6 +1,17 @@
 
-the wuffs people have an example that goes bit by bit which is very very helpful.
-https://github.com/google/wuffs/blob/1e2e58cea012ea4c7553f327b63fafe196b0f9e2/std/deflate/README.md
+- the wuffs people have an example that goes bit by bit which is very very helpful.
+  https://github.com/google/wuffs/blob/1e2e58cea012ea4c7553f327b63fafe196b0f9e2/std/deflate/README.md
+- i can do 
+and 
+
+- i can do test/data/romeo.txt.gz (the one from thier example). 
+- on wuffs-main.tar.gz i get stuck after 18 bytes of output. 
+- there's also https://github.com/madler/infgen which now that i understand what it means is also great. 
+  im missing some of the litlen entries. 
+  read_code_lengths for 16 was copying i instead of i-1. 
+- now i can do wuffs/test/data/archive.tar.gz and i get through 22414 output bytes of wuffs-main.tar.gz.
+  oh i just had to bump up MAX_BITS again, i don't understand why it isn't 9, todo i guess. 
+  but it works now. takes a solid 15 seconds on wuffs-main.tar.gz (compared to 150ms by stb). 
 
 ## (Oct 14)
 
