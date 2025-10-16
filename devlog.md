@@ -1,4 +1,18 @@
 
+## (Oct 16)
+
+- timing `examples/toy/shasum.fr wuffs-main.tar.gz`  
+  using variables instead of array for v and inline_range the loop over v:  
+  588 bytes -> 8040 bytes, 90 samples -> 77 samples  
+  move the w loop into the inlined v loop:  
+  -> 13240 bytes, 60 samples  
+  but takes 10ms longer to compile.   
+  which actually becomes worth it pretty quickly.   
+  FRANCA_NO_CACHE=1 franca examples/toy/shasum.fr wuffs-main.tar.gz:   
+  148.7 ms ±   1.1 ms -> 135.8 ms ±   1.5 ms  
+  franca examples/toy/shasum.fr wuffs-main.tar.gz:    
+  93.8 ms ±   0.4 ms -> 66.0 ms ±   0.6 ms  
+
 ## (Oct 15)
 
 - the wuffs people have an example that goes bit by bit which is very very helpful.

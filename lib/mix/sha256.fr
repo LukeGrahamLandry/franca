@@ -32,7 +32,11 @@ hash :: fn(message: []u8) Digest = {
         message.ptr = message.ptr.offset(64);
     };
     message.len -= chunk_count * 64;
-    
+    finalize(message, h, length_in_bits)
+};
+
+finalize :: fn(incomplete_chunk: []u8, h: Digest, length_in_bits: i64) Digest = {
+    message := incomplete_chunk;
     chunk := @uninitialized Array(u8, 64); 
     extra := chunk&.items();
     extra.slice(0, message.len).copy_from(message);  // the unaligned end of the input
@@ -57,45 +61,42 @@ hash :: fn(message: []u8) Digest = {
 update :: fn(h: *Array(u32, 8), chunk: *Array(u8, 64)) void = {
     round_constants :: u32.map_in_place(eratosthenes(312), 
         fn(x) => x.float().cbrt().fraction32());
-    
-    w := @uninitialized Array(u32, 64); w := w&;
-    operator_index :: index_unchecked;
-    rotr :: rotate_right;
+    rotr :: rotate_right; xor :: bit_xor; shr :: shift_right_logical; and :: bit_and;
     
     // TODO: is alignment real? 
     chunk := ptr_cast_unchecked(@type chunk[], Array(u32, 16), chunk);
-    range(0, 16) { i |
-        w[i] = byte_swap(chunk[i]); // because we work at the confusion factory
-    };
     
-    range(16, 64) { i |
-        s0  := w[i - 15].rotr(7).bit_xor(w[i - 15].rotr(18)).bit_xor(w[i - 15].shift_right_logical(3));
-        s1  := w[i - 2].rotr(17).bit_xor(w[i - 2].rotr(19)).bit_xor(w[i - 2].shift_right_logical(10));
-        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
-    };
-    v := h[]; v := v&;
-    range(0, 64) { i |
-        S1    := v[4].rotr(6).bit_xor(v[4].rotr(11)).bit_xor(v[4].rotr(25));
-        ch    := v[4].bit_and(v[5]).bit_xor(bit_not(v[4]).bit_and(v[6]));
-        temp1 := v[7] + S1 + ch + round_constants[i] + w[i];
-        S0    := v[0].rotr(2).bit_xor(v[0].rotr(13)).bit_xor(v[0].rotr(22));
-        maj   := v[0].bit_and(v[1]).bit_xor(v[0].bit_and(v[2])).bit_xor(v[1].bit_and(v[2]));
+    w := @uninitialized Array(u32, 64); w := w&;
+    v0 := h[0]; v1 := h[1]; v2 := h[2]; v3 := h[3];
+    v4 := h[4]; v5 := h[5]; v6 := h[6]; v7 := h[7];
+    inline_range(0, 64) { i |
+        w[i] = @if(i >= 16, {
+            wi15, wi2 := (w[i - 15], w[i - 2]);
+            s0  := wi15.rotr(7).xor(wi15.rotr(18)).xor(wi15.shr(3));
+            s1  := wi2.rotr(17).xor(wi2.rotr(19)).xor(wi2.shr(10));
+            w[i - 16] + s0 + w[i - 7] + s1
+        }, {
+            byte_swap(chunk[i]) // because we work at the confusion factory
+        });
+    
+        S1    := v4.rotr(6).xor(v4.rotr(11)).xor(v4.rotr(25));
+        ch    := v4.and(v5).xor(v4.bit_not().and(v6));
+        temp1 := v7 + S1 + ch + round_constants[i] + w[i];
+        S0    := v0.rotr(2).xor(v0.rotr(13)).xor(v0.rotr(22));
+        maj   := v0.and(v1).xor(v0.and(v2)).xor(v1.and(v2));
         temp2 := S0 + maj;
 
-        // TODO: this seems like a lot of shuffling.
-        //       can i use inline_range as ~register renaming?
-        v[7] = v[6];
-        v[6] = v[5];
-        v[5] = v[4];
-        v[4] = v[3] + temp1;
-        v[3] = v[2];
-        v[2] = v[1];
-        v[1] = v[0];
-        v[0] = temp1 + temp2;
+        v7 = v6;
+        v6 = v5;
+        v5 = v4;
+        v4 = v3 + temp1;
+        v3 = v2;
+        v2 = v1;
+        v1 = v0;
+        v0 = temp1 + temp2;
     };
-    range(0, 8) { i |
-        h[i] += v[i];
-    };
+    h[0] += v0; h[1] += v1; h[2] += v2; h[3] += v3;
+    h[4] += v4; h[5] += v5; h[6] += v6; h[7] += v7;
 };
 
 // TODO: something broken with ::assert_eq(a, b) outside a block at top level :fucked
