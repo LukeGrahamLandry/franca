@@ -1,4 +1,21 @@
 
+## (Oct 17)
+
+- failed at making prospero optimise_intervals know that mul with same arguments can't output a negative number.   
+  thats clearly true so idk what my problem is :( very frustrating.   
+  like maybe it's just revealing a broken thing about one of my other optimisations?   
+  works if i take out the `@if(b.max < a.min) => only(1);` case for min.  
+  804 -> 384.  
+- use a bit set instead of `s.ints.interpret_as_bytes().set_bytes(255);` -> 310
+  ditto for s.copy -> 270. 
+- idiot, for one thing in only() i was doing 
+  ```
+  i[] = make_ins(.copy, .Kd, i.to, i.arg&[n], QbeNull);
+  copy&[i.to.val()] = i.arg&[n];  // wrong if n=1 ^^^
+  ```
+  fixed that but still doesn't work if you set i there, but does if you don't, so then i can turn back on the min opt.
+  -> 245.
+
 ## (Oct 16)
 
 - timing `examples/toy/shasum.fr wuffs-main.tar.gz`  
@@ -8,10 +25,19 @@
   -> 13240 bytes, 60 samples  
   but takes 10ms longer to compile.   
   which actually becomes worth it pretty quickly.   
-  FRANCA_NO_CACHE=1 franca examples/toy/shasum.fr wuffs-main.tar.gz:   
-  148.7 ms ±   1.1 ms -> 135.8 ms ±   1.5 ms  
-  franca examples/toy/shasum.fr wuffs-main.tar.gz:    
-  93.8 ms ±   0.4 ms -> 66.0 ms ±   0.6 ms  
+  `FRANCA_NO_CACHE=1 franca examples/toy/shasum.fr`: 148.7 ms ±   1.1 ms -> 135.8 ms ±   1.5 ms  
+  `franca examples/toy/shasum.fr`:  93.8 ms ±   0.4 ms -> 66.0 ms ±   0.6 ms  
+  which is a pleasing result because (if i aot compile mine) im the same speed as whatever `shasum` apple gives me.
+  `shasum -a 256`: 59.9 ms ±   0.3 ms
+  `./a.out`: 60.9 ms ±   0.3 ms
+- deflate: 
+  - simplifying yield_byte to just poke values into the array: decompress() samples, 283 -> 252.
+  - brief attempt at sorting the low length (high probability ones) together in tree.node, 
+    didn't make read_symbol faster (not including the time to sort). thought maybe it would be cool similar to examples/toy/predict.fr but no. 
+  - tried reserving bits into an i64 on the struct so get_bits can be simplier. 260. (worse)
+  - tried always reserving 32 bits so you can just read a u32 and not fiddle with masking it. 240. (better)
+  - tried looping to always add 1 byte at a time so no unaligned read (like examples/geo/laz) does. 260.
+  - meh, the middle one that was better still makes the code look more confusing, doesn't feel worth it for now.
 
 ## (Oct 15)
 

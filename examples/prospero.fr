@@ -54,7 +54,9 @@ fn impl(v: *ImportVTable) void = {
         
         if args.width == 64 {  // i do this in run_tests.fr
             // hardcoding the numbers is lame but i'm can't just check the picture every time i run the tests so here we are
-            @assert(yes == 22 && no+yes == 253 && set == 3578, "something changed!");
+            // it's fine if you make optimise_intervals smarter and it makes `yes` go up, 
+            // that just means it did less work (`set` should stay the same or the picture changed).
+            @assert(yes == 23 && no+yes == 253 && set == 3578, "something changed!");
             eprintln("ok!");
         }
     }
@@ -341,6 +343,7 @@ fn draw(width: i64, out: Qbe.BSet, f: @FnPtr(x: f64, y: f64, z: f64) f64, x_int:
 }
 
 fn draw(out: *List(u8), pixels: Qbe.BSet, width: i64) void = {
+    out.reserve(width*width*12+width+15);
     @fmt(out, "P3 % % 255\n", width, width);
     range_rev(0, width) { y |
         range(0, width) { x |
@@ -379,41 +382,51 @@ fn is_nan(self: Interval) bool =
     is_nan(self.min + self.max);
 
 fn optimise_intervals(f: *Qbe.Fn, input: *Interval2, s: *RecState, $mut: bool) Interval = {
-    s.ints.interpret_as_bytes().set_bytes(255);  // all ones is a nan
-    s.copy.interpret_as_bytes().set_bytes(0); 
     r := f.start.jmp.arg&;
     @debug_assert_ne(r[].rtype(), .RCon);
 
     k := 0;
     j := f.start.ins.ptr;
-    s.ints[64+0] = input.x;
-    s.ints[64+1] = input.y;
+    
+    ints: OptMap(Interval) = init(s.ints);
+    ints&.insert(64+0, input.x);
+    ints&.insert(64+1, input.y);
+    copy: OptMap(Qbe.Ref) = init(s.copy);
+    
     while => j.op() == .par {
         j = j.offset(1);
     }
+    
+    GET :: fn(r: Qbe.Ref) Interval => {
+        ::?Interval;
+        @match(rtype(r)) {
+            fn RTmp() => ints&.get(r.val()) || Interval.nan;
+            fn RCon() => {
+                v: f32 = f.get_constant(r).bits().bitcast().cast();
+                (min = v, max = v)
+            }
+            @default => Interval.nan;
+        }
+    };
     
     end := f.start.ins.ptr.offset(f.start.ins.len);
     while => !identical(j, end) {
         continue :: local_return;
         i := j; j = i.offset(1);
-        a, b := @if(rtype(i.arg&[0]) == .RTmp, 
-            (s.ints[i.arg&[0].val()], s.ints[i.arg&[1].val()]),
-            (Interval.nan, Interval.nan),
-        );
+        a, b := (GET(i.arg&[0]), GET(i.arg&[1]));
         
         // remove useless copy chains
         @if(mut) {
             each i.arg& { a |
                 if rtype(a[]) == .RTmp {
-                    r := s.copy[a[].val()];
-                    if r != QbeNull {
+                    if copy&.get(a[].val()) { r |
                         a[] = r;
-                    }
+                    };
                 }
             };
             
             if i.op() == .copy && rtype(i.arg&[0]) == .RTmp {
-                s.copy[i.to.val()] = i.arg&[0];
+                copy&.insert(i.to.val(), i.arg&[0]);
             };
         };
         
@@ -429,32 +442,32 @@ fn optimise_intervals(f: *Qbe.Fn, input: *Interval2, s: *RecState, $mut: bool) I
         // when min/max args have intervals that don't overlap, only care about one side. 
         only :: fn(n) => {
             @if(mut) {
-                i[] = make_ins(.copy, .Kd, i.to, i.arg&[n], QbeNull);
-                s.copy[i.to.val()] = i.arg&[n];
+                copy&.insert(i.to.val(), i.arg&[n]);
+                // TODO: i don't understand why this doesn't work
+                //i[] = make_ins(.copy, .Kd, i.to, i.arg&[n], QbeNull);
             };
             @if(n == 0, a, b)
         }
         
         new: Interval = @match(i.op()) {
-            fn copy() => @match(rtype(i.arg&[0])) {
-                fn RTmp() => a;
-                fn RCon() => {
-                    x: f32 = f.get_constant(i.arg&[0]).bits().bitcast().cast();
-                    (min = x, max = x)
-                }
-                @default => @panic("bad copy source");
-            };
+            fn copy() => GET(i.arg&[0]);
             fn add() => (min = a.min + b.min, max = a.max + b.max);
             fn sub() => (min = a.min - b.max, max = a.max - b.min);
             fn mul() => {
                 // https://en.wikipedia.org/wiki/Interval_arithmetic
                 v0, v1, v2, v3 := (a.min*b.min, a.min*b.max, a.max*b.min, a.max*b.max);
-                (min = v0.min(v1).min(v2).min(v3), max = v0.max(v1).max(v2).max(v3))
-            }
+                r: Interval = (min = v0.min(v1).min(v2).min(v3), max = v0.max(v1).max(v2).max(v3));
+                if i.arg&[0] == i.arg&[1] {
+                    // x^2 can't be negative
+                    r.min = r.min.max(0);
+                    r.max = r.max.max(0);
+                }
+                r
+            };
             // mul specialized for -1
             fn neg() => {
                 v0, v1 := (-a.min, -a.max);
-                (min = v0.min(v1), max = v0.max(v1))
+                (min = v1, max = v0)
             }
             fn div() => continue();  // TODO: steal from wikipedia
             fn min() => @if_else { 
@@ -478,18 +491,11 @@ fn optimise_intervals(f: *Qbe.Fn, input: *Interval2, s: *RecState, $mut: bool) I
             @default => continue();
         };
         @debug_assert_le(new.min, new.max, "thats not in order %", i.op());
-        
-        s.ints[i.to.val()] = new;
-        
-        // if the range is exact, convert it to the constant
-        @if(mut) if rtype(i.arg&[0]) != .RCon && new.min == new.max {
-            r := f.getcon(new.min.cast().bitcast());
-            i[] = make_ins(.copy, .Kd, i.to, r, QbeNull);
-        };
+        ints&.insert(i.to.val(), new);
     };
     
     @debug_assert_eq(rtype(r[]), .RTmp);
-    final := s.ints[r[].val()];
+    final := ints&.get(r[].val()) || Interval.nan;
     final
 }
 
@@ -660,4 +666,23 @@ fn parse_program(al: Alloc, name: Str, s: Str) Program = {
         a = a.items().shallow_copy(al),
         b = b.items().shallow_copy(al),
     )
+}
+
+fn OptMap($T: Type) Type = {
+    Self :: @struct(mem: []T, valid: Qbe.BSet);
+    
+    fn init(uninit: []T) Self #inline = 
+        (mem = uninit, valid = init_bitset(uninit.len));
+    
+    fn get(self: *Self, i: i64) ?T #inline = {
+        @if(!self.valid&.bshas(i)) return(.None);
+        (Some = self.mem[i])
+    }
+    
+    fn insert(self: *Self, i: i64, t: T) void #inline = {
+        self.valid&.bsset(i);
+        self.mem[i] = t;
+    }
+    
+    Self
 }

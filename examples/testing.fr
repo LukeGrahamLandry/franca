@@ -152,6 +152,7 @@ fn fetch_or_crash(url: Str, zip_size_bytes: i64, sha256_hash: Str, HACK_name: St
     if path_exists(folder_path) {
         return(folder_path);
     };
+    mark := temp().mark();
     
     // 🤡 no just look at whats in the file my guy
     extension := @if_else { 
@@ -185,14 +186,17 @@ fn fetch_or_crash(url: Str, zip_size_bytes: i64, sha256_hash: Str, HACK_name: St
         if zip_bytes.len == 0 {
             zip_bytes = read_entire_file_or_crash(temp(), zip_file_path);
         };
-        extract_tar_gz(zip_bytes, FRANCA_CACHE_PATH);
+        extract_tar_gz(zip_bytes, FRANCA_CACHE_PATH, HACK_name);
     };
     // not checking !ok because it doesn't like strange filenames 
     // this is why we can't be using whatever random shit i happen to have installed. 
+    
+    temp().reset(mark);
     folder_path
 }
 
-extract_tar_gz :: fn(compressed: []u8, dir: Str) void = {
+extract_tar_gz :: fn(compressed: []u8, dir: Str, HACK_name: Str) void = {
+    @debug_assert(!dir.ends_with(PATH_SEP) && dir.len > 0);
     Deflate :: import("@/lib/encoding/deflate.fr");
     GZip :: import("@/lib/encoding/gzip.fr");
     Tar :: import("@/lib/encoding/tar.fr");
@@ -201,28 +205,31 @@ extract_tar_gz :: fn(compressed: []u8, dir: Str) void = {
         || @panic("missing gzip header");
     _, err := Deflate'decompress(compressed.rest(skip), o&);
     ::enum(@type err);
-    @assert_eq(err, .Ok, "failed to un-gzip (for output path: %)", dir);
+    @assert_eq(err, .Ok, "failed to un-gzip (for output path: %/%)", dir, HACK_name);
+    
+    File :: @struct {
+        name: Str;
+        contents: Str;
+        dir: bool;
+    };
+    
+    files := File.list(temp());
     err := Tar'iter(o.items()) { h, b |
         name: CStr = (ptr = h.name&.as_ptr());
+        name := name.str();
+        @assert(name.starts_with(HACK_name), "'%' does not have prefix '%'", name, HACK_name);
+        @assert(!name.has_path_escapes(), "'%' is a path with special dots, i don't like that", name);
         
-        p := u8.list(temp());
-        p&.push_all(dir);
-        p&.push_all("/");
-        p&.push_all(name.str());
-        
-        // TODO: check that there's no wonky escapes in the path
         // TODO: use prefix for longer than 100 char names
+        //       (careful of checking for /../ that spans between prefix and name)
         @switch(h.typeflag) {
             @case(Tar.TYPE.REG) => {
-                n := p.len;
-                p&.pop_path_segment();
-                make_dirs_or_crash(p.items());  // sometimes it doesn't contain the directories as seperate items
-                p.len = n;
-                write_entire_file_or_crash(p.items(), b);
+                // TODO: maybe want to set executable bit based on mode field
+                files&.push(name = name, contents = b, dir = false);
             };
             @case(Tar.TYPE.DIR) => {
                 @assert_eq(b.len, 0, "non zero size directory: %", name);
-                make_dirs_or_crash(p.items());
+                files&.push(name = name, contents = b, dir = true);
             };
             @case(Tar.TYPE.PAX) => ();  // TODO: get whatever data's in there since it might change the meaning of other stuff?
             @default => @panic("unhandled tar block type % for %", h.typeflag, name);
@@ -230,6 +237,42 @@ extract_tar_gz :: fn(compressed: []u8, dir: Str) void = {
     };
     ::enum(@type err.Err);
     err.or(fn(e) => @panic("%: failed to un-tar (for output path: %)", e, dir));
+    
+    // make the order fixed so the hash doesn't change based on how the archive was made
+    Sort :: import("@/lib/sort.fr");
+    sort :: Sort'quicksort(File, fn(a, b) => Sort'order_strings(a.name&, b.name&));
+    sort(files.items());
+    
+    // TODO: i skip extract_tar_gz if the directory exists, so if any of these writes fail
+    //       i need to delete the outer directory so trying again doesn't just assume it's fine. 
+    
+    p := u8.list(temp());
+    each files { it |
+        p&.clear();
+        p&.push_all(dir);
+        p&.push_all("/");
+        p&.push_all(it.name);
+        
+        // lua-5.4.7-tests.tar.gz: 
+        // - you're allowed to have files in nested directories without explicitly making them
+        // - you're allowed to have directories with no files and they need to get made 
+        //   (like attrib.lua needs libs/P1 to pre-exist)
+        if it.dir {
+            make_dirs_or_crash(p.items());
+        } else {
+            {  // :SLOW
+                n := p.len;
+                p&.pop_path_segment();
+                @debug_assert(p.items().ends_with(PATH_SEP) && p.items().starts_with(dir));
+                if p.len > dir.len + 1 {
+                    make_dirs_or_crash(p.items());  
+                };
+                p.len = n;
+            };
+            
+            write_entire_file_or_crash(p.items(), it.contents);
+        }
+    };
 };
 
 // 🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡
@@ -332,4 +375,24 @@ hush :: fn(a: []Str) Str = {
         panic("sh failed");
     };
     out.items()
+};
+
+// weird names that won't come out right:
+// - "a//b" means "a/b" because can't have directory called ""
+// - "a/../b" means "b" because ".." is parent directory
+// - "a/./b" means "a/b" because "." means current directory 
+// - similarly can't end with "." or ".." as a file name because they're taken
+// - leading "/" is root, which doesn't matter if im putting a prefix anyway but still seems like a weird thing to do.  
+// idk if i should just allow the ones that aren't harmful just confusing. 
+has_path_escapes :: fn(path: Str) bool = {
+    @run @ct_assert(PATH_SEP == "/", @source_location(), "");
+    while => path.len > 0 {
+        prefix := path.pop_path_segment();
+        segment := path.rest(prefix.len);  // will end with a / when its not the last one. 
+        if segment == "../" || segment == "./" || segment == ".." || segment == "." || segment == "/" {
+            return(true);
+        };
+        path = prefix;
+    };
+    path.starts_with("/")
 };

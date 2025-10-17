@@ -30,10 +30,9 @@ noncompressed_block :: fn(c: *Cursor) Error = {  //  3.2.4.
     len := c.get_bits(16);
     nlen := c.get_bits(16);
     @if(len != nlen.bit_xor(0xFFFF)) return(.CorruptNLen);
-    range(0, len) { _ |
-        c.yield_byte(c.in[c.i.udiv(8)]);
-        c.i += 8;
-    };
+    bytes := c.in.subslice(c.i.udiv(8), len);
+    c.out.push_all(bytes);
+    c.i += len * 8;
     .Ok
 }
 
@@ -79,7 +78,7 @@ read_block :: fn(c: *Cursor, ll: *Tree, d: *Tree) Error = {  // 3.2.5.
     loop {
         ll_code := c.read_symbol(ll);
         if ll_code < 256 {
-            c.yield_byte(ll_code.trunc());
+            c.out.push(ll_code.trunc());
         } else {
             @if(ll_code == 256) return(.Ok);
 
@@ -91,10 +90,14 @@ read_block :: fn(c: *Cursor, ll: *Tree, d: *Tree) Error = {  // 3.2.5.
             
             i := c.out.len - c.start - distance;
             @if(i < c.start) return(.BackTooFar);
+            @if(INFGEN) @println("match % %", length, distance);
+           
+            // note: the copy is allowed to overlap the new bytes it writes.  
             c.out.reserve(length);
-            range(0, length) { _ |
-                c.yield_byte(c.out[i]);
-                i += 1;
+            dest := c.out.len;
+            c.out.len += length;
+            range(0, length) { j |
+                c.out[dest+j] = c.out[i+j];
             };
         };
     };
@@ -172,7 +175,9 @@ codes_from_lengths :: fn(tree: *Tree, count: i64) void = {  // 3.2.2.
 
 MAX_BITS :: 15;  // sizes the encoding in 3.2.7 can express: ll/d: 0-15, cl:0-7 
 
-// TODO: see if i can measure prefetcher if i sort the low length (high probability ones) together
+// you could inline this together with codes_from_lengths and not coonstruct the array of codes in the middle, 
+// but this isn't the slow part and doing it split this way makes it more clear that codes_from_lengths 
+// is directly lifted from the rfc so its easy to verify that part. 
 fill_tree :: fn(tree: *Tree) void = {
     count := 1;
     tree.node[0] = (value = BLANK, next = (BLANK, BLANK));
@@ -216,10 +221,6 @@ fill_tree :: fn(tree: *Tree) void = {
 } 
 
 BLANK :: 0xFFFF;
-
-yield_byte :: fn(c: *Cursor, value: u8) void = {
-    c.out.push(value);
-}
 
 // <len> is used to build <code> which is used to build <node> which is used to decode
 Tree :: @struct {
