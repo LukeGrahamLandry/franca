@@ -18,9 +18,15 @@ MAX_IMG_SMP_SBUF_BIND_SLOTS :: (128);
 // generate nicer overloads of the imported wgpu methods 
 // `wgpuFooBarBaz :: fn(foo: Foo);` -> `fn barBaz(foo: Foo);`
 // This relies on TypeMeta.inferred_name + typename() working properly. 
-:: @if(SOKOL_BACKEND == .WGPU) {
+:: @if(@run(SOKOL_BACKEND == .WGPU)) {
+    // TODO: probably just add the source directly (add_file) instead of writing it like this
+    // TODO: why doesn't this work? Poison expression InProgressMacro on PipelineDesc :compilerbug
+    //@run import("@/graphics/web/webgpu_api.fr")'main();
+    
     #use("@/compiler/ast_external.fr");
-    WGPU :: import("@/graphics/web/webgpu.fr");
+    //WGPU :: import("@/graphics/web/webgpu.fr");
+    // TODO: get_constants doesn't see #reexport
+    WGPU :: import("@/target/franca/webgpu.g.fr");
     c := current_compiler_context();
     skips := 0;
     for WGPU.get_constants() { n |
@@ -42,7 +48,7 @@ MAX_IMG_SMP_SBUF_BIND_SLOTS :: (128);
             }
         };
     };
-    @assert_eq(skips, 5, "new fuctions added to @/graphics/web/webgpu.fr ?")
+    //@assert_eq(skips, 5, "new fuctions added to @/graphics/web/webgpu.fr ?")
 };  // TODO: don't silently not run if you forget this semicolon
 
 Buffer :: @struct {
@@ -175,7 +181,7 @@ fn to_wgpu(t: Sg.BufferType, u: Sg.Usage) WGPU.BufferUsage = {
     
     // TODO: better things for flags and then put these numbers in the bindings instead so 
     //       you can sanely use wgpu from franca without the gfx abstraction layer. :LazyMagicNumbers
-    res: u64 = @map_enum(t) (VERTEXBUFFER = 0x20, STORAGEBUFFER = 0x80, INDEXBUFFER = 0x10);
+    res: i64 = @map_enum(t) (VERTEXBUFFER = 0x20, STORAGEBUFFER = 0x80, INDEXBUFFER = 0x10);
     (_ = res.bit_or(@if(u == .IMMUTABLE, 0, 0x8))) // CopyDst
 }
 
@@ -296,7 +302,7 @@ fn to_wgpu(it: Sg.BlendFactor) WGPU.BlendFactor = @map_enum(it) (
 fn to_wgpu(m: Sg.ColorMask) WGPU.ColorWriteMask = {
     // FIXME: change to WGPU.ColorWriteMask once Emscripten and Dawn webgpu.h agree
     
-    res: u64 = 0;
+    res := 0;
     X :: fn(s: Sg.ColorMask, w) => if bit_and((@as(u32) m), @as(u32) s) != 0 {
         res = res.bit_or(w);
     };
@@ -380,8 +386,8 @@ fn uniform_buffer_init(wgpu: *Impl, desc: *Sg.Desc) void #once = {
     wgpu.uniform.staging = wgpu.sg.desc.allocator.alloc_uninit(u8, intcast num_bytes);
 
     ub_desc: WGPU.BufferDescriptor = (
-        size = num_bytes.intcast().bitcast(),
-        usage = (_ = 0x48), // :LazyMagicNumbers WGPU.BufferUsage_Uniform|WGPU.BufferUsage_CopyDst,
+        size = num_bytes.intcast(),
+        usage = (_ = @or(WGPU.BufferUsage.Uniform, WGPU.BufferUsage.CopyDst)),
     );
     wgpu.uniform.buf = createBuffer(wgpu.dev, ub_desc&);
     @debug_assert(!wgpu.uniform.buf._.is_null());
@@ -394,7 +400,7 @@ fn uniform_buffer_discard(wgpu: *Impl) void = {
 }
 
 fn uniform_buffer_on_commit(wgpu: *Impl) void = {
-    writeBuffer(wgpu.queue, wgpu.uniform.buf, 0, wgpu.uniform.staging.ptr, wgpu.uniform.offset);
+    writeBuffer(wgpu.queue, wgpu.uniform.buf, 0, u8.raw_from_ptr(wgpu.uniform.staging.ptr), wgpu.uniform.offset);
     wgpu.sg.stat(.wgpu_uniforms_size_write_buffer, trunc wgpu.uniform.offset);
     wgpu.uniform.offset = 0;
     wgpu.uniform.bind_offsets&.items().set_zeroed();
@@ -849,6 +855,7 @@ fn setup_backend(wgpu: *Impl, desc: *Sg.Desc) void = {
     @debug_assert(!empty_bgl._.is_null());
     wgpu.empty_bind_group = createBindGroup(wgpu.dev, @ref @as(WGPU.BindGroupDescriptor) (
         layout = empty_bgl,
+        entryCount = 0,
     ));
     @debug_assert(!wgpu.empty_bind_group._.is_null());
     release(empty_bgl);
@@ -892,7 +899,7 @@ fn create(wgpu: *Impl, buf: *Sg.Buffer.T, desc: *Sg.Buffer.Desc) Sg.ResourceStat
         map_at_creation := buf.cmn.usage == .IMMUTABLE && !desc.data.ptr.is_null();
         buf.mtl.buf = createBuffer(wgpu.dev, @ref @as(WGPU.BufferDescriptor) (
             usage = to_wgpu(buf.cmn.type, buf.cmn.usage),
-            size = wgpu_buf_size.zext().bitcast(),
+            size = wgpu_buf_size.zext(),
             mappedAtCreation = to_wgpu map_at_creation,
             label = str(desc.label),
         ));
@@ -907,6 +914,7 @@ fn create(wgpu: *Impl, buf: *Sg.Buffer.T, desc: *Sg.Buffer.Desc) Sg.ResourceStat
             // FIXME: inefficient on WASM
             ptr := getMappedRange(buf.mtl.buf, 0, intcast wgpu_buf_size);
             @debug_assert(!ptr.is_null());
+            ptr := u8.ptr_from_raw(ptr);
             ptr.slice(desc.data.len).copy_from(desc.data);
             unmap(buf.mtl.buf);
         }
@@ -932,13 +940,13 @@ fn copy_buffer_data(wgpu: *Impl, buf: *Sg.Buffer.T, offset: i64, data: []u8) voi
     // WebGPU's write-buffer requires the size to be a multiple of four, so we may need to split the copy
     // operation into two writeBuffer calls
     clamped_size, extra_size := (data.len.align_to(4), data.len.mod(4));
-    wgpu.queue.writeBuffer(buf.mtl.buf, offset, data.ptr, clamped_size);
+    wgpu.queue.writeBuffer(buf.mtl.buf, offset, u8.raw_from_ptr(data.ptr), clamped_size);
     if extra_size > 0 {
         extra_src_offset := clamped_size;
         extra_dst_offset := offset + clamped_size;
         extra_data := items(@ref Array(u8, 4).zeroed());
         extra_data.slice(0, extra_size).copy_from(data.subslice(extra_src_offset, extra_size));
-        wgpu.queue.writeBuffer(buf.mtl.buf, extra_dst_offset, extra_data.ptr, 4);
+        wgpu.queue.writeBuffer(buf.mtl.buf, extra_dst_offset, u8.raw_from_ptr(extra_data.ptr), 4);
     }
 }
 
@@ -972,7 +980,8 @@ fn copy_image_data(wgpu: *Impl, img: *Sg.Image.T, wgpu_tex: WGPU.Texture, data: 
                 },
             );
             mip_data := data.subimage&[face_index]&[mip_index];
-            writeTexture(wgpu.queue, wgpu_copy_tex&, mip_data.ptr, mip_data.len, wgpu_layout&, wgpu_extent&);
+            ptr := u8.raw_from_ptr(mip_data.ptr);
+            writeTexture(wgpu.queue, wgpu_copy_tex&, ptr, mip_data.len, wgpu_layout&, wgpu_extent&);
         }
     }
 }
@@ -990,11 +999,11 @@ fn create(wgpu: *Impl, img: *Sg.Image.T, desc: *Sg.Image.Desc) Sg.ResourceState 
         wgpu_tex_desc: WGPU.TextureDescriptor = (
             label = str(desc.label),
             usage = {
-                u := zeroed WGPU.TextureUsage;
-                u&.set(.CopyDst, 1);
-                u&.set(.TextureBinding, 1);
-                u&.set(.RenderAttachment, int(desc.render_target));
-                u
+                u := @or(WGPU.TextureUsage.CopyDst, WGPU.TextureUsage.TextureBinding);
+                if desc.render_target {
+                    u = u.bit_or(WGPU.TextureUsage.RenderAttachment);
+                };
+                (_ = u)
             },
             dimension = to_wgpu(img.cmn.type),
             size = (
@@ -1015,6 +1024,7 @@ fn create(wgpu: *Impl, img: *Sg.Image.T, desc: *Sg.Image.Desc) Sg.ResourceState 
             wgpu.copy_image_data(img, img.mtl.tex, desc.data&);
         }
         wgpu_texview_desc: WGPU.TextureViewDescriptor = (
+            usage = (_ = 0),
             label = str(desc.label),
             dimension = to_wgpu(img.cmn.type),
             mipLevelCount = bitcast img.cmn.num_mipmaps,
@@ -1347,7 +1357,7 @@ fn create(wgpu: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg.Pipelin
             vbl_state := desc.layout.buffers&[vb_idx]&;
             if(vbl_state.stride == 0, => break());
             wgpu_vb_layouts&[vb_idx] = (
-                arrayStride = bitcast(zext vbl_state.stride),
+                arrayStride = zext vbl_state.stride,
                 stepMode = to_wgpu(vbl_state.step_func),
                 attributes = wgpu_vtx_attrs&[vb_idx]&.as_ptr(),
                 attributeCount = 0,  // set by loop below
@@ -1363,7 +1373,7 @@ fn create(wgpu: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg.Pipelin
             layout := wgpu_vb_layouts&[zext vb_idx]&;
             wgpu_vtx_attrs&[zext vb_idx]&[layout.attributeCount] = (
                 format = to_wgpu va_state.format,
-                offset = bitcast(zext va_state.offset),
+                offset = zext va_state.offset,
                 shaderLocation = trunc va_idx,
             );
             layout.attributeCount += 1;
@@ -1717,6 +1727,7 @@ fn set_ub_bindgroup(wgpu: *Impl, shd: *Sg.Shader.T) void = {
     @debug_assert(shd.mtl.ub_num_dynoffsets < Sg.SG_MAX_UNIFORMBLOCK_BINDSLOTS);
     dyn_offsets := zeroed Array(u32, Sg.SG_MAX_UNIFORMBLOCK_BINDSLOTS);
     rangec(0, Sg.SG_MAX_UNIFORMBLOCK_BINDSLOTS) { i, $continue |
+        ::enum(@type shd.cmn.uniform_blocks&[0].stage);
         if(shd.cmn.uniform_blocks&[i].stage == .NONE, => continue());
         dynoffset_index := shd.mtl.ub_dynoffsets&[i];
         @debug_assert(dynoffset_index < shd.mtl.ub_num_dynoffsets);
