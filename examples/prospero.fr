@@ -73,27 +73,24 @@ fn impl(v: *ImportVTable) void = {
 }
 
 render :: fn(p: *Program, width: i64, v: *ImportVTable) Ty(Qbe.BSet, i64, i64) = {
-    N := max(log(width, 2) - 3, 1); // (@if(INTERPRET, 9, 8));
+    N := max(log(width, 2) - 3, 1);
 
     m := zeroed QbeModule;
     init_default_module_dyn(m&, v, (type = .JitOnly, os = query_current_os(), arch = query_current_arch()));
     do_imports(m&);
     f0 := temp().box_uninit(Qbe.Fn);
-    if !MUTATE {
-        default_init(f0, m&);
-        compile_program(f0, p);
-    }
     n := 64+3+p.o.len;
     s: RecState = (
         f = temp().alloc_uninit(Qbe.Fn, N+2),
         vals = temp().alloc_uninit(f32, n),
         ints = temp().alloc_uninit(Interval, n),
         pixels = init_bitset(width * width),
-        top = @if(MUTATE, zeroed F, compile(dup(f0), p.name)),
+        top = zeroed F,
         needed = init_bitset(n),
         copy = temp().alloc_zeroed(Qbe.Ref, n),
         jit_at = max(0, N - 2),
         width = width, 
+        enable_jit = true,
     );
     each s.f { f |
         f.start = temp().box_zeroed(Qbe.Blk);
@@ -127,23 +124,17 @@ RecState :: @struct {
     jit_at: i64;
     n := 0;
     width: i64;
+    enable_jit: bool;
 }
-
-MUTATE :: true;
-INTERPRET :: false;
 
 fn quad_rec(s: *RecState, int: Interval2, depth: i64) void = {
     f := s.f.index(depth);
     f0 := s.f.index(depth+1);
-    if MUTATE {
-        dup(f, f0);
-    } else {
-        f = f0;
-    };
+    dup(f, f0);
 
     n: Interval = (min = NaN, max = NaN);
     
-    known := optimise_intervals(f, int&, s, MUTATE);
+    known := optimise_intervals(f, int&, s);
     f0.ncon = f.ncon;
     f0.con = f.con;
     
@@ -161,12 +152,10 @@ fn quad_rec(s: *RecState, int: Interval2, depth: i64) void = {
         };
     }
     
-    @if(MUTATE) {
-        dead_code(s, f);
-        renumber(f);
-    };
+    dead_code(s, f);
+    renumber(f);
 
-    if MUTATE && !INTERPRET && depth == s.jit_at {
+    if s.enable_jit && depth == s.jit_at {
         mark := mark_temporary_storage();
         f := dup(f);
         s.top = compile(f, @tfmt("%", s.n));
@@ -176,7 +165,7 @@ fn quad_rec(s: *RecState, int: Interval2, depth: i64) void = {
     
     if depth == 0 {
         s.no += 1;
-        if (INTERPRET) {
+        if !s.enable_jit {
             iter_intervals(s.width, int.x, int.y) { x, y, i |
                 hit := interpret(f, s.vals, x, y) > 0.0;
                 if hit {
@@ -310,6 +299,9 @@ fn interpret(f: *Qbe.Fn, vals: []f32, x: f64, y: f64) f32 = {
             fn par() => ();
             fn nop() => ();
             @default => {
+                if @is(i.op(), .arg, .call) {
+                    @panic("TODO: abs, exp, ln, cos, sin");
+                };
                 a: u32 = vals[i.arg&[0].val()].bitcast();
                 b: u32 = vals[i.arg&[1].val()].bitcast();
                 fold :: import("@/backend/opt/fold.fr").do_fold;
@@ -381,9 +373,9 @@ Interval :: @struct {
 fn is_nan(self: Interval) bool = 
     is_nan(self.min + self.max);
 
-fn optimise_intervals(f: *Qbe.Fn, input: *Interval2, s: *RecState, $mut: bool) Interval = {
+fn optimise_intervals(f: *Qbe.Fn, input: *Interval2, s: *RecState) Interval = {
     r := f.start.jmp.arg&;
-    @debug_assert_ne(r[].rtype(), .RCon);
+    @debug_assert_eq(r[].rtype(), .RTmp);
 
     k := 0;
     j := f.start.ins.ptr;
@@ -416,7 +408,7 @@ fn optimise_intervals(f: *Qbe.Fn, input: *Interval2, s: *RecState, $mut: bool) I
         a, b := (GET(i.arg&[0]), GET(i.arg&[1]));
         
         // remove useless copy chains
-        @if(mut) {
+        {
             each i.arg& { a |
                 if rtype(a[]) == .RTmp {
                     if copy&.get(a[].val()) { r |
@@ -441,7 +433,7 @@ fn optimise_intervals(f: *Qbe.Fn, input: *Interval2, s: *RecState, $mut: bool) I
         
         // when min/max args have intervals that don't overlap, only care about one side. 
         only :: fn(n) => {
-            @if(mut) {
+            {
                 copy&.insert(i.to.val(), i.arg&[n]);
                 // TODO: i don't understand why this doesn't work
                 //i[] = make_ins(.copy, .Kd, i.to, i.arg&[n], QbeNull);
@@ -482,9 +474,7 @@ fn optimise_intervals(f: *Qbe.Fn, input: *Interval2, s: *RecState, $mut: bool) I
             };
             // we're not doing complex numbers so if it could be negative, who knows man just skip it
             fn sqrt() => {
-                if a.max < 0.0 {
-                    @debug_assert(a.min < 0, "% %", a.min, a.max);
-                }
+                @debug_assert(!(a.max < 0.0) || a.min < 0, "% %", a.min, a.max);
                 if(a.min < 0.0 || a.max < 0.0 || a.is_nan(), => continue());
                 (min = a.min.sqrt(), max = a.max.sqrt())
             }

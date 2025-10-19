@@ -1,37 +1,62 @@
 // TODO: parse_json for tuple, rawhashmap, slice
 // TODO: return meaningful error message. 
 // TODO: options for how permisive to be about unexpected fields. 
+//       or duplicated fields. 
 
 fn DeriveJson($T: Type) void = {
     fn parse_json(json: *JsonParser, self: *T) bool = {
         @inline_match(@run T.get_type_info_ref()) {
             (fn Struct($_) => {
                 token := json.next().or(fn(_: Str) => return(false));
+                ::tagged(@type token);
                 if(!token&.is(.StartDict), => return(false));
                 
-                found := 0;
+                found := zeroed StaticBitSet(fields.len());
                 
                 fields :: T.get_fields();
-                while => found < fields.len() {
+                loop {
                     continue :: local_return;
                     token := json.next().or(fn(_: Str) => return(false));
+                    
+                    if token&.is(.End) {
+                        i := 0;
+                        inline_for fields { $f | 
+                            inner := T.get_field_ptr(self, f);
+                            @if(@run(f.default.id.id != 0)) 
+                            if !found&.get(i) {
+                                value := f.get_default_value();
+                                inner[] = value.unwrap();
+                                found&.set(i);
+                            };
+                            @if(@run IsOption(f.ty)) 
+                            if !found&.get(i) {
+                                inner[] = .None;
+                                found&.set(i);
+                            };
+                            i += 1;
+                        };
+                        
+                        return found&.count_ones() == fields.len();
+                    };
+                    
                     if(!token&.is(.Key), => return(false));
                     
+                    i := 0;
                     inline_for fields { $f | 
                         name :: f[].name.str();
                         if name == token.Key {
                             inner := T.get_field_ptr(self, f);
                             success := json.parse_json(inner);
                             if(!success, => return(false));
-                            found += 1;
+                            found&.set(i);
                             continue();
                         };
+                        i += 1;
                     };
                     
                     json.skip_next_value();
                     continue();
                 };
-                json.skip_current_value();
             });
             @default => {
                 panic("Unsupported type for DeriveJson");
@@ -73,6 +98,27 @@ fn dump_json(self: ~S, out: *List(u8)) void = {
         inner.dump_json(out);
     };
     out.push_all("]");
+}
+
+#where(fn(T) => PointerTo(IsCollection(Slice))(T) && (T != *Str))
+fn parse_json(json: *JsonParser, self: ~S) bool = {
+    a := general_allocator();
+    token := json.next().or(fn(_: Str) => return(false));
+    if(!token&.is(.StartList), => return(false));
+    
+    out := Deref(S).Element.list(a);
+    // TODO: aaaa need to check that the error was because its a ']'
+    //       because can't peek. :fucked
+    dowhile {
+        self := out&.push_uninit();
+        ok := parse_json(json, self);
+        if !ok {
+            out.len -= 1;
+        }
+        ok
+    };
+    self[] = out.items();
+    true
 }
 
 IsRawHashMap :: fn(T: Type) bool = {
@@ -133,17 +179,45 @@ fn dump_json(i: *i64, out: *List(u8)) void = {
     i.display(out);
 }
 
-// TODO: other types of escapes
+// TODO: deduplicate with backend/meta/dump.fr/safe_print
 fn dump_json(i: *Str, out: *List(u8)) void = {
     out.push_all("\"");
     for i[] { c |
-        if c == "\"".ascii() {
-            out.push_all("\\\"");
-        } else {
+        printable :: fn(c) => 
+            c >= 32 && c <= 126 && c != "\"".ascii() && c != "\\".ascii();
+        if printable(c) {
             out.push(c);
-        };
+        } else {
+            @fmt(out, "\\x");
+            push_hex_byte(out, c, false);
+        }
     };
     out.push_all("\"");
 }
 
+fn parse_json(json: *JsonParser, self: *bool) bool = {
+    token := json.next().or(fn(_: Str) => return(false));
+    @if_let(token) fn BoolValue(value) => {
+        self[] = value;
+        return true;
+    };
+    false
+}
+
+IsOption :: fn(T: Type) bool #fold = {
+    it := T.get_type_info_ref();
+    it.is(.Tagged) && {
+        it := it.Tagged.cases&;
+        it.len == 2 && it[0]._0 == (@symbol Some) && it[1]._0 == (@symbol None)
+    }
+}
+
+#where(PointerTo(IsOption))
+fn parse_json(json: *JsonParser, self: ~S) bool #where = {
+    self.tag_ptr()[] = .Some;
+    ok := parse_json(json, self.Some&);
+    ok
+}
+
 #use("@/lib/encoding/json.fr");
+#use("@/lib/collections/bit_set.fr");

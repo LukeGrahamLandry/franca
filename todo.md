@@ -835,7 +835,9 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
     debug / make sure it actually wins more games
   - seach: uci reporting info/pv/time etc. 
   - search: time limit
+- i don't think lastMoveWasRepetition works. gui doesn't stop after repetitions. 
 - use ZOID_CASTLE_START
+- Move would fit in 16 bits. 6 per square leaves 4 for promote+action. 
 - gui
   - play against uci engine
   - promotion

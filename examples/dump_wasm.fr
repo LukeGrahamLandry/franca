@@ -8,7 +8,10 @@ LoadWasm :: void;  // TODO: bleh
 
 main :: fn() void = dump(read_file_from_last_arg());
 
+errors :: @static(i64);
+
 dump :: fn(input: []u8) void = {
+    errors[] = 0;
     w: WasmModule = empty(temp()); w := w&;
     @println("--- read % bytes ---", input.len);
     p: ParseWasm = (w = w, src = input);
@@ -51,6 +54,7 @@ dump :: fn(input: []u8) void = {
             @fmt(out, "- '%' % %\n", it.name.items(), it.type, it.id);
             @if_let(it.type) fn Func() => {
                 if function_names.len.ule(it.id.zext()) {
+                    errors[] += 1;
                     @fmt(out, "(ERROR: % is larger than number of functions)\n", it.id);
                 } else {
                     function_names[it.id.zext()] = it.name.items();
@@ -135,6 +139,7 @@ dump :: fn(input: []u8) void = {
     
     @fmt(out, "=== BEGIN FUNCTION/CODE SECTION ===\n");
     if w.functions.len != w.code.len {
+        errors[] += 1;
         @fmt(out, "(ERROR: % function types and % function bodies)\n", w.functions.len, w.code.len);
         print(out.items()); out.clear();
     };
@@ -153,6 +158,7 @@ dump :: fn(input: []u8) void = {
             };
             locals&.push_all(w.types[ty.id.zext()].arg.items());
         } else {
+            errors[] += 1;
             @fmt(out, "(ERROR: missing. only % entries signeture section)", w.functions.len);
             print(out.items()); out.clear();
         };
@@ -174,6 +180,9 @@ dump :: fn(input: []u8) void = {
     };
     @fmt(out, "=== END FUNCTION/CODE SECTION ===\n");
     
+    if errors[] != 0 {
+        @fmt(out, "!!! found % errors !!!\n", errors[]);
+    }
     print(out.items());
 }
 
@@ -188,6 +197,7 @@ fn dump_wasm_expr(w: *WasmModule, full_input: []u8, insts: []u8, out: *List(u8),
     start := ptr_diff(full_input.ptr, insts.ptr);
     @fmt(out, "{  // [%..<%]", start, start + insts.len);
     if start < 0 || insts.len < 0 { 
+        errors[] += 1;
         @fmt(out, "\n // (ERROR: negative sizes??)\n");
         print(out.items()); out.clear();
     };
@@ -207,9 +217,11 @@ fn dump_wasm_expr(w: *WasmModule, full_input: []u8, insts: []u8, out: *List(u8),
         if @is(inst, .End) {
             indent -= 1;
             if indent < 0 {
+                errors[] += 1;
                 @fmt(out, "         (ERROR: closed too many blocks)");
             } else {
                 if indent == 0 && c != insts.len {
+                    errors[] += 1;
                     @fmt(out, "        (ERROR: closed all blocks but there is still code)");
                 };
             };
@@ -258,6 +270,7 @@ fn dump_wasm_expr(w: *WasmModule, full_input: []u8, insts: []u8, out: *List(u8),
                 c += ptr_diff(insts.ptr.offset(c), r.ptr);
                 value
             } else {
+                errors[] += 1;
                 @fmt(out, " (ERROR: invalid leb encoding)");
                 continue()
             }
@@ -385,6 +398,7 @@ fn show_type(out: *List(u8), w: *WasmModule, i: Wasm.TypeIdx) bool = {
     i: i64 = i.id.zext();
     @fmt(out, "[T%]: (", i);
     if i >= w.types.len {
+        errors[] += 1;
         @fmt(out, "ERROR: not enough entries in `type` section)");
         return(false);
     };

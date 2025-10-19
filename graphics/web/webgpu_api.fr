@@ -14,15 +14,195 @@ dawn_json :: {
 }
 
 main :: fn() void = {
-    json: JsonParser = new_json(dawn_json, temp());
+    mark := temp().mark();
     
-    loop {
-        it := or json&.next() { e |
-            panic(e)
+    json: JsonParser = new_json(dawn_json, temp());
+    result := or json&.parse_dawn_api() { e |
+        panic(e)
+    };
+    
+    out := u8.list(temp()); out := out&;
+    
+    each result& { name, item |
+        @fmt(out, "@\"%\" :: @struct {\n", name);
+        @match(item) {
+            fn structure(it) => {
+                each it.members { it |
+                    @fmt(out, "    @\"%\": @\"%\",\n", it.name, it.type);
+                };
+            }
+            @default => @fmt(out, "// TODO\n");
         };
-    }
+        @fmt(out, "};\n");
+    };
+    
+    print(out.items());
+    temp().reset(mark);
+}
+
+parse_dawn_api :: fn(json: *JsonParser) Result(HashMap(Str, Item), Str) = {
+    it := @try(json.next()) return;
+    ::tagged(@type it);
+    @assert(it&.is(.StartDict));
+    out: HashMap(Str, Item) = init(temp());
+    loop {
+        continue :: local_return;
+        it := @try(json.next()) return;
+        if it&.is(.Key) {
+            item_name := it.Key;
+            if item_name.starts_with("_") {
+                @try(json.skip_next_value()) return;
+            } else {
+                // TODO: derive for internally tagged things and #use for shared fields
+                mark := json.mark();
+                it := @try(json.next()) return;
+                @assert(it&.is(.StartDict));
+                @try(json.skip_until_key("category")) return;
+                it := @try(json.next()) return;
+                @assert(it&.is(.StringValue));
+                category := it.StringValue;
+                json.reset(mark);
+                
+                item := zeroed Item;
+                ::tagged(Item);
+                ::DeriveJson(Member);
+                ::DeriveJson(Object.Method);
+                ::DeriveJson(Enum.Value);
+                inline_for Item.get_variants() { $case |
+                    name :: case._0.str();
+                    if category == name {
+                        tag :: Item.Tag().from_name(name).unwrap();
+                        item&.tag_ptr()[] = tag;
+                        data := get_variant_ptr(Item, item&, tag);
+                        ::DeriveJson(@type data[]);
+                        ok := parse_json(json, data);
+                        @if(!ok) return(Err = @tfmt("failed to parse '%'", item_name));
+                        out&.insert(item_name, item);
+                        continue();
+                    };
+                };
+                return(Err = @tfmt("unknown category '%' for '%'", category, item_name));
+            };
+        } else {
+            @assert(it&.is(.End));
+            it := @try(json.next()) return;
+            @assert(it&.is(.Eof));
+            return(Ok = out);
+        };
+    };
 }
 
 #use("@/lib/encoding/json.fr");
+#use("@/lib/encoding/json_reflect.fr");
 #use("@/lib/encoding/base64.fr");
+#use("@/lib/collections/map.fr");
 ::import("@/examples/testing.fr");
+
+Item :: @tagged(
+    structure: Structure,
+    native: Native,
+    typedef: TypeDef,
+    enum: Enum,
+    bitmask: Enum,
+    @"function pointer": Function,
+    object: Object,
+    constant: Constant,
+    function: Function,
+    @"callback function": Function,
+    @"callback info": Structure,
+);
+
+Member :: @struct {
+    name: Str;
+    type: Str;
+    annotation: ?Str;
+    length: NumberOrString = (int = 1);
+    optional := false;
+    default: ?NumberOrString;
+    wire_is_data_only := false;
+};
+
+Native :: @struct {
+    @"wire transparent" := true;
+};
+
+TypeDef :: @struct {
+    type: Str;
+};
+
+Enum :: @struct {
+    values: []Value;
+    emscripten_no_enum_table := false;
+    
+    Value :: @struct {
+        name: Str;
+        value: NumberOrString;
+        jsrepr: ?Str;
+        value := true;
+    }
+};
+
+Structure :: @struct {
+    members: []Member = empty();
+    extensible: BoolOrString = (bool = false);  // Chained.none;
+    chained: ?Str;  // = Chained.none;
+    @"chain roots": []Str = empty();
+    
+    //Chained :: @enum(none, in, out, false);  // TODO
+}
+
+Object :: @struct {
+    methods: []Method;
+    @"no autolock" := false;
+    
+    Method :: @struct {
+        name: Str;
+        returns := "void";
+        args: []Member = empty();
+        @"no autolock" := false;
+    }
+}
+
+Constant :: @struct {
+    type: Str;
+    value: Str;
+};
+
+Function :: @struct {
+    returns := "void";
+    args: []Member;
+};
+
+NumberOrString :: @tagged(int: i64, str: Str);
+
+fn parse_json(json: *JsonParser, self: *NumberOrString) bool = {
+    token := json.next().or(fn(_: Str) => return(false));
+    @match(token) {
+        fn Float(n) => {
+            self[] = (int = n.int());
+            true
+        }
+        fn StringValue(s) => {
+            self[] = (str = s);
+            true
+        }
+        @default => false;
+    }
+}
+
+BoolOrString :: @tagged(bool: bool, str: Str);
+
+fn parse_json(json: *JsonParser, self: *BoolOrString) bool = {
+    token := json.next().or(fn(_: Str) => return(false));
+    @match(token) {
+        fn BoolValue(n) => {
+            self[] = (bool = n);
+            true
+        }
+        fn StringValue(s) => {
+            self[] = (str = s);
+            true
+        }
+        @default => false;
+    }
+}

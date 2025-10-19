@@ -8,40 +8,45 @@ fn bit_fields(e: FatExpr) FatExpr #macro = {
     @ct_assert(e.expr&.is(.StructLiteralP), e.loc, "expected @bit_fields(name = size, ...)");
     parts := e.expr.StructLiteralP.bindings&;
     total_bits := 0;
-    each parts { it | 
+    widths := ast_alloc().alloc_init(u8, parts.len) { i |
+        it := parts.index(i);
         name := it.ident() || panic("@bit_field missing field name");
         bits := const_eval(i64)(it.default);
         total_bits += bits;
+        @ct_assert(bits >= 0 && bits <= 64, it.default.loc, "invalid bit width % for field %", bits, name.str());
+        bits.trunc()
     };
     valid :: fn(b) => (b == 8 || b == 16 || b == 32 || b == 64);
     @ct_assert(valid(total_bits), e.loc, "@bit_fields invalid number of total bits: expected 8/16/32/64 but found %", total_bits);
     // :BitFieldCompileError avoiding the display like this makes it segfault instead of Compile Error: Poison expression InProgressMacro. which isn't exactly better... :compilerbug -- Oct 10, 2025
     //      (if you try to make a conflicting overload for fn display(*T, List))
-    //@ct_assert(valid(total_bits), e.loc, "@bit_fields invalid number of total bits: expected 8/16/32/64");
+    //    (by commenting out the various @ct_assert calls here)
     repr_type := IntType(total_bits, false);
     
-    @{ BitFieldImpl(@struct(repr: @[@literal repr_type], Repr :: @[@literal repr_type], Wide :: @struct @[e])) }
+    w := @literal widths;
+    @{ BitFieldImpl(@struct {
+        repr: @[@literal repr_type];
+        Repr :: @[@literal repr_type];
+        Wide :: @struct @[e];
+        widths :: @[w];
+    })}
 }
 
 fn BitFieldImpl($T: Type) Type = {
     F :: T.Wide.Fields();
     ::enum(F);
-    A :: Array(i64, F.enum_count());
+    
+    //                                                `widths`
     // TODO: some sort of #comptime_only to assert that this doesn't make it into the final binary 
     //       (it already won't be in theory but it would be better if it was a compile error if you broke that). 
-    widths :: @static(A) { 
-        wide: T.Wide = ();
-        bit_cast_unchecked(T.Wide, A, wide)
-    };
-    
     // TODO: make sure a ,:= call to this folds to just integers without loading them from memory (it's bad on -- Feb 26, 2025)
     info :: fn(name: F) Ty(i64, i64) #fold = {
         off := 0;
-        prev := widths.items().slice(0, name.raw());
+        prev := T.widths.slice(0, name.raw());
         for prev { w |
-            off += w;
+            off += w.zext();
         };
-        size := widths[name.raw()];
+        size: i64 = T.widths[name.raw()].zext();
         (1.shift_left(size) - 1, off)
     };
     

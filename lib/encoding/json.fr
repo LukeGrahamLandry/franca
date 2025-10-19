@@ -50,7 +50,6 @@ fn next(self: *JsonParser) Result(JsonPart, Str) = {
             @case("{".ascii()) => { 
                 self.last_thing_was_key = false;
                 self.current += 1;
-                self.last_thing_was_key = false;
                 self.depth += 1;
                 self.is_dict&.set(self.depth);
                 return(Ok = .StartDict);
@@ -58,7 +57,6 @@ fn next(self: *JsonParser) Result(JsonPart, Str) = {
             @case("[".ascii()) => { 
                 self.last_thing_was_key = false;
                 self.current += 1;
-                self.last_thing_was_key = false;
                 self.depth += 1;
                 self.is_dict&.unset(self.depth);
                 return(Ok = .StartList);
@@ -75,26 +73,12 @@ fn next(self: *JsonParser) Result(JsonPart, Str) = {
                 self.depth -= 1;
                 return(Ok = .End);
             };
-            // TODO: do these literals properly
-            @case("f".ascii()) => {
-                self.last_thing_was_key = false;
-                self.current += "false".len();
-                return(Ok = (BoolValue = false));
-            };
-            @case("t".ascii()) => {
-                self.last_thing_was_key = false;
-                self.current += "true".len();
-                return(Ok = (BoolValue = true));
-            };
-            @case("n".ascii()) => {
-                self.last_thing_was_key = false;
-                self.current += "null".len();
-                return(Ok = .Null);
-            };
+            @case("f".ascii()) => return(self.literal("false", (BoolValue = false)));
+            @case("t".ascii()) => return(self.literal("true", (BoolValue = true)));
+            @case("n".ascii()) => return(self.literal("null", .Null));
             @case("\"".ascii()) => {
                 self.current += 1;
                 s := @try(self.lex_str()) return;
-                self.current += 1;
                 if self.expecting_key() && !self.last_thing_was_key {
                     self.last_thing_was_key = true;
                     return(Ok = (Key = s));
@@ -107,7 +91,6 @@ fn next(self: *JsonParser) Result(JsonPart, Str) = {
                 self.last_thing_was_key = false;
                 return(Ok = (Float = self.lex_num()))
             };
-            // TODO: error if you forget the .ascii()
             @case(",".ascii()) => { 
                 self.current += 1;
             };
@@ -120,6 +103,15 @@ fn next(self: *JsonParser) Result(JsonPart, Str) = {
         };
     };
     unreachable()
+}
+
+fn literal(self: *JsonParser, keyword: Str, value: JsonPart) Result(JsonPart, Str) #inline = {
+    if self.input.subslice(self.current, keyword.len) != keyword {
+        return(Err = "invalid identifer");
+    };
+    self.last_thing_was_key = false;
+    self.current += keyword.len();
+    return(Ok = value);
 }
 
 fn expecting_key(self: *JsonParser) bool = 
@@ -182,6 +174,25 @@ fn skip_until_key(self: *JsonParser, name: Str) Result(void, Str) = {
         };
     };
     unreachable()
+}
+
+JsonMark :: @struct {
+    depth: i64;
+    current: i64;
+    last_thing_was_key: bool;
+};
+
+fn mark(self: *JsonParser) JsonMark = (
+    depth = self.depth,
+    current = self.current,
+    last_thing_was_key = self.last_thing_was_key,
+);
+
+fn reset(self: *JsonParser, mark: JsonMark) void = {
+    @debug_assert_le(mark.depth, self.depth, "tried to rewind forwards");
+    self.depth = mark.depth;
+    self.current = mark.current;
+    self.last_thing_was_key = mark.last_thing_was_key;
 }
 
 // TODO: have a simple lexer library? this is the third one ive written. 

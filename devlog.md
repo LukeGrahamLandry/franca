@@ -1,4 +1,11 @@
 
+## (Oct 18)
+
+- (wasm) fix exporting a CodegenTask.Bounce
+- (json.fr) dumb eating an extra character after a string so it didn't work if theres no white space before the end token. 
+  added a test. 
+- parse_json: structs use default field value when not provided
+
 ## (Oct 17)
 
 - failed at making prospero optimise_intervals know that mul with same arguments can't output a negative number.   
