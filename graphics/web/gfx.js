@@ -1,4 +1,4 @@
-import { webgpu, reader as R } from "../../target/franca/webgpu.g.js";
+import { webgpu, reader as R, writer as W } from "../../target/franca/webgpu.g.js";
 import * as FrancaGraphics from "../../graphics/web/app.js";
 
 let G = {
@@ -8,16 +8,36 @@ let G = {
     device: null,
     surface: null,
     
-    // TODO: ref counts and free list of indices
     objects: [undefined],
+    refs: [0],
+    free: [],
     
     push: function(it) {
         if (it === null || it === undefined) return 0;
-        this.objects.push(it);
-        return BigInt(this.objects.length - 1);
+        if (this.free.length == 0) {
+            this.objects.push(it);
+            this.refs.push(1);
+            return BigInt(this.objects.length - 1);
+        } else {
+            let i = this.free.pop();
+            this.objects[i] = it;
+            this.refs[i] = 1;
+            return BigInt(i);
+        }
     },
     get: function(it) {
         return this.objects[Number(it)];
+    },
+    ref: function(it) {
+        this.refs[Number(it)] += 1;
+    },
+    release: function(it) {
+        it = Number(it);
+        this.refs[it] -= 1;
+        if (this.refs[it] <= 0) {
+            this.objects[it] = undefined;
+            this.free.push(it);
+        }
     },
     M: function() {
         return this.wasm.instance.exports.memory.buffer;
@@ -44,19 +64,21 @@ export const init_gpu = async (wasm, canvas) => {
 
 webgpu.francaRequestState = (I, frame_callback_p) => {
     console.log(G);
-    let [width, height] = [BigInt(G.canvas.width), BigInt(G.canvas.width)];
-    G.wasm.instance.exports.francaSaveState(I, G.adapter, G.device, G.surface, width, height);
+    let [width, height] = [BigInt(G.canvas.clientWidth), BigInt(G.canvas.clientHeight)];
+    G.wasm.instance.exports.francaSaveState(I, G.adapter, G.device, G.surface, width, height, window.devicePixelRatio);
     FrancaGraphics.js_init(I, G.wasm, G.canvas);
     requestAnimationFrame(call_frame);
     const frame_callback = G.wasm.instance.exports.__indirect_table.get(Number(frame_callback_p));
     function call_frame() {
-        frame_callback(I);
+        let noframe = frame_callback(I) != 0;
+        // TODO: figure out how to make should_skip_frame work. 
+        //       there's no present() call so if you try to just drop the frame 
+        //       you get black instead of the previous frame. 
         requestAnimationFrame(call_frame);
     }
 };
 
 webgpu.wgpuDeviceGetQueue = (device) => {
-    // TODO: don't give it a new slot every time
     return G.push(G.get(device).queue);
 };
 
@@ -83,6 +105,11 @@ webgpu.wgpuDeviceCreateCommandEncoder = (device, i) => {
 webgpu.wgpuQueueWriteBuffer = (queue, buffer, buffer_offset, data, size) => {
     const src = new Uint8Array(G.M(), Number(data), Number(size));
     G.get(queue).writeBuffer(G.get(buffer), Number(buffer_offset), src, 0, Number(size));
+}
+
+webgpu.wgpuDeviceGetLimits = (device, i) => {
+    let o = G.get(device).limits;
+    W.Limits(i, o);
 }
 
 webgpu.wgpuDeviceCreateShaderModule = (device, i) => {
@@ -160,11 +187,33 @@ webgpu.wgpuSurfacePresent = (surface) => {
 webgpu.wgpuInstanceProcessEvents = (instance) => {
     // nop
 };
+webgpu.wgpuDeviceCreateTexture = (device, i) => {
+    let o = R.TextureDescriptor(i);
+    return G.push(G.get(device).createTexture(o));
+}
 
+webgpu.wgpuQueueWriteTexture = (self, destination, data, data_size, data_layout, write_size) => {
+    destination = R.TexelCopyTextureInfo(destination);
+    data_layout = R.TexelCopyBufferLayout(data_layout);
+    write_size = R.Extent3D(write_size);
+    let src = new Uint8Array(G.M(), Number(data), Number(data_size));
+    G.get(self).writeTexture(destination, src, data_layout, write_size);
+};
+
+webgpu.wgpuDeviceCreateSampler = (self, descriptor) => {
+    let o = R.SamplerDescriptor(descriptor);
+    return G.push(G.get(self).createSampler(o));
+};
+
+webgpu.wgpuRenderPassEncoderSetViewport = (self, x, y, width, height, min_depth, max_depth) => {
+    G.get(self).setViewport(x, y, width, height, min_depth, max_depth);
+};
 
 R.u32 = (i) => new DataView(G.M()).getUint32(Number(i), true);
+R.u16 = (i) => new DataView(G.M()).getUint16(Number(i), true);
 R.p64 = (i) => new DataView(G.M()).getBigUint64(Number(i), true);
 R.f64 = (i) => new DataView(G.M()).getFloat64(Number(i), true);
+R.f32 = (i) => new DataView(G.M()).getFloat32(Number(i), true);
 R.r64 = (i) => G.get(R.p64(i));
 R.i64 = function (i) {
     return Number(this.p64(i));
@@ -224,7 +273,9 @@ R.RenderPassColorAttachment = function (i) {
 let BindGroupEntry = R.BindGroupEntry.bind(R);
 R.BindGroupEntry = function (i) {
     let o = BindGroupEntry(i);
-    o.resource = o;
+    if (o.buffer !== undefined) o.resource = o;
+    if (o.sampler !== undefined) o.resource = o.sampler;
+    if (o.textureView !== undefined) o.resource = o.textureView;
     return o;
 }
 
@@ -238,3 +289,15 @@ for (let name of ["BufferBindingLayout", "TextureBindingLayout", "SamplerBinding
         return o;
     }
 }
+
+for (let name of Object.keys(webgpu)) {
+    if (name.endsWith("Release")){
+        webgpu[name] = (self) => G.release(self);
+    }
+    if (name.endsWith("AddRef")){
+        webgpu[name] = (self) => G.ref(self);
+    }
+}
+
+W.u32 = (i, o) => new DataView(G.M()).setUint32(Number(i), o, true);
+W.i64 = (i, o) => new DataView(G.M()).setBigUint64(Number(i), BigInt(o), true);

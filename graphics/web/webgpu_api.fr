@@ -273,6 +273,12 @@ gen_js :: fn(out: *List(u8), all: *HashMap(Str, FullItem), WGPU: ScopeId) void =
                     if it.name == "BGRA8 unorm" {  // TODO: ffs
                         it.jsrepr = (Some = "'bgra8unorm'");
                     };
+                    if it.name == "RGBA8 unorm" {  // TODO: ffs
+                        it.jsrepr = (Some = "'rgba8unorm'");
+                    };
+                    if it.name == "R8 unorm" {  // TODO: ffs
+                        it.jsrepr = (Some = "'r8unorm'");
+                    };
                     repr := it.jsrepr || @tfmt("\"%\"", it.name.dashcase());
                     @fmt(out, "    if (i == %) return %;\n", it.value, repr);
                 };
@@ -287,6 +293,33 @@ gen_js :: fn(out: *List(u8), all: *HashMap(Str, FullItem), WGPU: ScopeId) void =
             fn object(it) => {
                 @fmt(out, "%: function(i) {\n", self_name);
                 @fmt(out, "    return this.r64(i);\n");
+                @fmt(out, "},\n");
+            }
+            @default => ();
+        };
+    };
+    @fmt(out, "};\n");
+    @fmt(out, "export const writer = {\n");
+    each all { name, item |
+        self_name := name.camelcase(true);
+        @match(item.item&) {
+            fn structure(it) => if name == "limits" {
+                Self := Type.get_constant(WGPU, self_name.sym()).unwrap();
+                require_layout_ready(Self);
+                
+                @fmt(out, "%: function(i, o) {\n", self_name);
+                @fmt(out, "    if (i == 0n) return;\n");
+                members := it.members&;
+                each members { it |
+                    f := find_field(Self, it);
+                    reader_name := @if_else {
+                        @if(f.ty == []u8) => "Str";
+                        @else => it.type.type_name(it.annotation);
+                    };
+                    ::tagged(@type it.length);
+                    @fmt(out, "    this.%(i + %n, o.%)", reader_name, f.byte_offset, f.name.str());
+                    @fmt(out, ";\n");
+                };
                 @fmt(out, "},\n");
             }
             @default => ();

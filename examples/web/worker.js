@@ -59,6 +59,10 @@ function write_args(args) {
 
 export const imports = {
     env: {
+        fmodf: (a, b) => a % b,
+        fmod: (a, b) => a % b,
+        sinf: (a) => Math.sin(a),
+        cosf: (a) => Math.cos(a),
         puts: (ptr) => {
             let len = 0;
             let buf = new DataView(Franca.memory.buffer);

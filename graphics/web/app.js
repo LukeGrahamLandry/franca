@@ -26,10 +26,18 @@ export const js_init = (I, wasm, canvas) => {
             F.key_event(I, 3, c.codePointAt(0), e.altKey, e.ctrlKey, e.metaKey, e.shiftKey, e.repeat);
         }
     });
+    window.addEventListener("resize", (e) => {
+        canvas.width = canvas.clientWidth * window.devicePixelRatio;
+        canvas.height = canvas.clientHeight * window.devicePixelRatio;
+        let [w, h] = [canvas.clientWidth, canvas.clientHeight];
+        F.resize_event(I, w, h, w, h, window.devicePixelRatio);
+    });
+    event("wheel", (e) => {
+        F.scroll_event(I, e.deltaX, e.deltaY);
+    });
     
     // TODO
-    // MOUSE_SCROLL,
-    // MOUSE_ENTER, MOUSE_LEAVE, RESIZED,
+    // MOUSE_ENTER, MOUSE_LEAVE,
     // ICONIFIED, RESTORED, FOCUSED, UNFOCUSED, QUIT_REQUESTED,
     // CLIPBOARD_PASTED, FILES_DROPPED
 }

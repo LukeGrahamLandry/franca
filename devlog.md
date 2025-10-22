@@ -4,6 +4,15 @@
 - a few more tedious bindings. 
   confused myself with R.array wanting a pointer to a pointer. 
   but now hello_triangle works in the browser. 
+- mandelbrot_ui didn't work because minUniformBufferOffsetAlignment=0 in apply_uniforms. 
+  need to do getLimits.
+- my attempt to make it take up the whole window and be less blurry instead made it much much more blurry. 
+  setviewport makes it less blurry but not fit in the screen. 
+- it seems that canvas.width controls the size you get back from getCurrentTexture, 
+  and you have to manually scale clientWidth by devicePixelRatio to get something sane
+- did reference counting so `G.objects` doesn't grow forever
+- bit of event progress: scroll, some modifiers,
+- mandelbrot_ui: clamp scale so you can overshoot by scrolling really fast
 
 ## (Oct 21)
 

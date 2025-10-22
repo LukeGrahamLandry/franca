@@ -164,23 +164,25 @@ print_error :: fn(status: WGPU.PopErrorScopeStatus, kind: WGPU.ErrorType, messag
 
 Impl :: @struct {
     env: rawptr;
+    modifiers: Sapp.Modifiers;
 }
 
 // this asks the js side to call francaSaveState
-francaRequestState :: fn(web: *Impl, frame: @FnPtr(web: *Impl) void) void #import("webgpu");
+francaRequestState :: fn(web: *Impl, frame: @FnPtr(web: *Impl) bool) void #import("webgpu");
 
 fn run(web: *Impl, desc: *Sapp.Desc) Never = {
     web.env = get_dynamic_context();
-    francaRequestState(web, fn(web: *Impl) void = {
+    francaRequestState(web, fn(web: *Impl) bool = {
         set_dynamic_context(web.env);
         web.common().frame();
+        web.common()[].webgpu.noframe
     });
     throw := bit_cast_unchecked(i64, @FnPtr() Never, 0);
     throw()
 }
 
 #export
-fn francaSaveState(web: *Impl, adapter: WGPU.Adapter, device: WGPU.Device, surface: WGPU.Surface, width: i64, height: i64) void = {
+fn francaSaveState(web: *Impl, adapter: WGPU.Adapter, device: WGPU.Device, surface: WGPU.Surface, width: i64, height: i64, devicePixelRatio: f64) void = {
     set_dynamic_context(web.env);
     sapp := web.common();
     sapp.webgpu.adapter = adapter;
@@ -191,6 +193,7 @@ fn francaSaveState(web: *Impl, adapter: WGPU.Adapter, device: WGPU.Device, surfa
     sapp.framebuffer_height = height;
     sapp.window_width = width;
     sapp.window_height = height;
+    sapp.dpi_scale = devicePixelRatio.cast();
 }
 
 fn set_icon(web: *Impl, desc: []Sapp.ImageDesc) void = {
@@ -203,6 +206,7 @@ fn set_window_title(web: *Impl, title: CStr) void = {
 
 fn get_clipboard_string(web: *Impl) *RawList(u8) = {
     eprintln("TODO: get_clipboard_string");
+    zeroed(*RawList(u8))
 }
 
 fn set_clipboard_string(web: *Impl, str: CStr) void = {
@@ -230,13 +234,70 @@ fn keytable(web: *Impl) []Sapp.Keycode = {
     empty()
 }
 
+// TODO: remap key_code and char_code
 #export
 fn mouse_event(web: *Impl, type: Sapp.EventType, button: u32, x: f32, y: f32, dx: f32, dy: f32) void = {
-    @println("% % % % % %", type, button, x, y, dx, dy);
+    //@println("% % % % % %", type, button, x, y, dx, dy);
+    ::enum(Sapp.EventType);
+    sapp := web.common();
+    sapp.mouse.x = x * sapp.dpi_scale;
+    sapp.mouse.y = y * sapp.dpi_scale;
+    sapp.mouse.dx = dx * sapp.dpi_scale;
+    sapp.mouse.dy = dy * sapp.dpi_scale;
+    sapp.init_event(type);
+    sapp.event.mouse_button = @as(Sapp.Mousebutton) button;
+    ::enum(Sapp.Mousebutton);
+    if @is(type, .MOUSE_DOWN, .MOUSE_UP) {
+        @match(sapp.event.mouse_button) {
+            fn LEFT() => web.modifiers&.set(.left_mouse, int(type == .MOUSE_DOWN));
+            fn RIGHT() => web.modifiers&.set(.right_mouse, int(type == .MOUSE_DOWN));
+            fn MIDDLE() => web.modifiers&.set(.middle_mouse, int(type == .MOUSE_DOWN));
+            @default => ();
+        };
+    };
+    sapp.event.modifiers = web.modifiers;
+    sapp.call_event(sapp.event&);
 }
 
 #export
 fn key_event(web: *Impl, type: Sapp.EventType, key: u32, alt: bool, ctrl: bool, meta: bool, shift: bool, repeat: bool) void = {
+    //@println("% % % % % % %", type, key, alt, ctrl, meta, shift, repeat);
     ::enum(Sapp.EventType);
-    @println("% % % % % % %", type, key, alt, ctrl, meta, shift, repeat);
+    sapp := web.common();
+    sapp.init_event(type);
+    sapp.event.key_code = @as(Sapp.Keycode) @as(u16) key.trunc();
+    sapp.event.key_repeat = repeat;
+    // TODO: alt, ctrl, meta, shift, repeat
+    sapp.event.modifiers = web.modifiers;
+    sapp.call_event(sapp.event&);
+    // TODO: modifiers
+    //shift        := 1,
+    //control      := 1,
+    //alt          := 1,
+    //super        := 1,  // command
+}
+
+#export
+fn resize_event(web: *Impl, fw: f64, fh: f64, ww: f64, wh: f64, devicePixelRatio: f64) void = {
+    ::enum(Sapp.EventType);
+    sapp := web.common();
+    sapp.init_event(.RESIZED);
+    sapp.window_width = ww.int();
+    sapp.window_height = wh.int();
+    sapp.framebuffer_width = fw.int();
+    sapp.framebuffer_height = fh.int();
+    sapp.dpi_scale = devicePixelRatio.cast();
+    sapp.event.modifiers = web.modifiers;
+    sapp.call_event(sapp.event&);
+}
+
+#export
+fn scroll_event(web: *Impl, dx: f64, dy: f64) void = {
+    ::enum(Sapp.EventType);
+    sapp := web.common();
+    sapp.init_event(.MOUSE_SCROLL);
+    sapp.event.scroll_x = dx.cast();
+    sapp.event.scroll_y = dy.cast();
+    sapp.event.modifiers = web.modifiers;
+    sapp.call_event(sapp.event&);
 }
