@@ -9,6 +9,9 @@ positionData :: include_bytes("examples/chess/data/perft");
 // and follow the tree down to find the exact position with the bug.
 doFishDebugOnFail :: true;  // #foreign("stockfish")
 
+fastSkipCount :: 40;
+hush :: @static(bool) false;
+
 main :: fn() void = {
     Crash :: import("@/lib/crash_report.fr");
     //Crash'hook_backtrace();
@@ -16,14 +19,16 @@ main :: fn() void = {
     import("@/examples/chess/precalc.fr")'initTables(temp());
     perfts := parsePerfts(positionData, temp()).or(fn(e) => panic(e));
         
+    fast := false;
     {
         any := false;
         lists: ListPool = init(temp());
         check := false;
         for cli_args() { it |
-            if Uci'fromFen(it.str()) { game |
+            it := it.str();
+            if Uci'fromFen(it) { game |
                 if check {
-                    debugPerft(it.str(), 6);
+                    debugPerft(it, 6);
                 } else {
                     range(1, 7) { depth |
                         nodes := countPossibleGames(game&, depth, lists&);
@@ -32,7 +37,11 @@ main :: fn() void = {
                 };
                 any = true;
             };
-            check = it.str() == "-check";
+            check = it == "-check";
+            fast = fast || it == "-fast";
+            if it == "-hush" {
+                hush[] = true;
+            }
         };
         if any {
             return();
@@ -41,8 +50,11 @@ main :: fn() void = {
 
     // For best parallelism, don't put the longest tasks at the end. You don't want time at the end where only one therad is working.
     sort :: import("@/lib/sort.fr")'quicksort(Perfts, fn(a, b) => 
-        a.allCount >= b.allCount);  // ascending
+        a.allCount >= b.allCount);
     perfts.sort();
+    if fast {
+        perfts = perfts.rest(fastSkipCount);
+    };
 
     if query_current_arch() == .wasm32 {
         it := zeroed Worker;
@@ -54,7 +66,7 @@ main :: fn() void = {
         return();
     }
     
-    cores := 1;
+    cores := 4;
     taskIndex := 0;
     workers := temp().alloc_uninit(Worker, cores);
     enumerate workers { i, it |
@@ -77,6 +89,7 @@ main :: fn() void = {
     } else {
         @print("Failed %/%.\n", failed, perfts.len);
     }
+    @if(fast) @print("(-fast: skipped % slowest)\n", fastSkipCount);
 }
 
 Perfts :: @struct {
@@ -123,6 +136,7 @@ fn workerFn(self: *Worker) void = {
                 }
                 break(); // All deeper levels will also fail.
             } else {
+                @if(!hush[])
                 @print("[%/%] % depth % nodes %.\n", nextTask + 1, self.tasks.len, position.fen, perft.depth, nodes);
             }
         };

@@ -1,10 +1,45 @@
 
+## (Oct 22)
+
+- a few more tedious bindings. 
+  confused myself with R.array wanting a pointer to a pointer. 
+  but now hello_triangle works in the browser. 
+
+## (Oct 21)
+
+- now i need to read the structs out of linear memory and make js objects i can pass to webgpu. 
+- enum names are inconsistant and painful
+- the unused layouts in BindGroupLayoutEntry aren't optional pointers in the c api, 
+  instead there's a BindingNotUsed value for the type field and if its that, 
+  the whole thing has to be passed as undefined in the js api. 
+- create(Buffer) mapped_at_creation :WebBufferInitHack
+  - the arrayview i get from getmappedrange isn't going to be in linear memory
+    so am i supposed to allocate a fake one an then copy it when you unmap? that seems like a pain.
+  - can i use writeBuffer instead or does that need the data to stay live until the queue is submitted?
+    no, im pretty sure it does a staging buffer for me. but then it complains that i can't use it while its mapped. 
+    but its just initializing i don't need to ask for mappedatcreation because its going to be unmapped immediately anyway. 
+  - that seems to work, but means i have to make it CopyDst even if that's not what you asked for, does it ever matter?
+  
+## (Oct 20)
+
+- got to the point of the wasm calling webgpu wrappers so at least i can tell which ones i actually need. 
+  kinda fudged the setup stuff for now, can come back later. 
+
+## (Oct 19)
+
+- generate code from dawn.json
+- so fucking annoying that you can't use webgpu without https. 
+  like `python3 -m http.server` is very convenient but then `navigator.gpu` is undefined 
+  because drawing a pretty picture is considered unsafe. 
+  ugh. 
+
 ## (Oct 18)
 
 - (wasm) fix exporting a CodegenTask.Bounce
 - (json.fr) dumb eating an extra character after a string so it didn't work if theres no white space before the end token. 
   added a test. 
 - parse_json: structs use default field value when not provided
+- got dawn.json into structs
 
 ## (Oct 17)
 

@@ -897,10 +897,17 @@ fn create(wgpu: *Impl, buf: *Sg.Buffer.T, desc: *Sg.Buffer.Desc) Sg.ResourceStat
         wgpu_buf_size := Sg'roundup(buf.cmn.size, 4);
         ::enum(@type buf.cmn.usage);
         map_at_creation := buf.cmn.usage == .IMMUTABLE && !desc.data.ptr.is_null();
+        @debug_assert(map_at_creation || desc.data.len == 0, "mutable buffer created with data is not automatically initialized");
+        if map_at_creation && GRAPHICS_TARGET_WEB {
+            // TODO: im not sure if you ever need it to not be CopyDst, 
+            //       then i have to do a convoluted thing on the js side 
+            //       because i can't map it into linear memory.  :WebBufferInitHack 
+            buf.cmn.usage = .DYNAMIC;  
+        };
         buf.mtl.buf = createBuffer(wgpu.dev, @ref @as(WGPU.BufferDescriptor) (
             usage = to_wgpu(buf.cmn.type, buf.cmn.usage),
             size = wgpu_buf_size.zext(),
-            mappedAtCreation = to_wgpu map_at_creation,
+            mappedAtCreation = to_wgpu (map_at_creation && !GRAPHICS_TARGET_WEB /*:WebBufferInitHack*/),
             label = str(desc.label),
         ));
         if buf.mtl.buf._.is_null() {
@@ -911,12 +918,16 @@ fn create(wgpu: *Impl, buf: *Sg.Buffer.T, desc: *Sg.Buffer.Desc) Sg.ResourceStat
         if map_at_creation {
             @debug_assert(!desc.data.ptr.is_null() && (desc.data.len > 0));
             @debug_assert(desc.data.len <= intcast buf.cmn.size);
-            // FIXME: inefficient on WASM
-            ptr := getMappedRange(buf.mtl.buf, 0, intcast wgpu_buf_size);
-            @debug_assert(!ptr.is_null());
-            ptr := u8.ptr_from_raw(ptr);
-            ptr.slice(desc.data.len).copy_from(desc.data);
-            unmap(buf.mtl.buf);
+            @if(GRAPHICS_TARGET_WEB, {
+                // :WebBufferInitHack
+                wgpu.copy_buffer_data(buf, 0, desc.data);
+            }, {
+                ptr := getMappedRange(buf.mtl.buf, 0, intcast wgpu_buf_size);
+                @debug_assert(!ptr.is_null());
+                ptr := u8.ptr_from_raw(ptr);
+                ptr.slice(desc.data.len).copy_from(desc.data);
+                unmap(buf.mtl.buf);
+            });
         }
     };
     .VALID

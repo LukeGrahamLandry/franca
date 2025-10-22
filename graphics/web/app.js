@@ -1,8 +1,7 @@
 // THIS IS UNFINISHED
 
-export const js_init = (wasm, canvas) => {
+export const js_init = (I, wasm, canvas) => {
     const F = wasm.instance.exports;
-    const I = 0n;
     const event = (name, f) => canvas.addEventListener(name, f);
     
     event("mousedown", (e) => {
@@ -33,11 +32,6 @@ export const js_init = (wasm, canvas) => {
     // MOUSE_ENTER, MOUSE_LEAVE, RESIZED,
     // ICONIFIED, RESTORED, FOCUSED, UNFOCUSED, QUIT_REQUESTED,
     // CLIPBOARD_PASTED, FILES_DROPPED
-
-    try {
-        F.main(0n, 0n, 0n, 0n); 
-    } catch {
-    }
 }
 
 export const set_icon = () => {

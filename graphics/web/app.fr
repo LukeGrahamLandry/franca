@@ -3,6 +3,7 @@
 // Using Dawn is a bit like if you make an electron app but then make a canvas 
 // that covers you whole screen and just draw into that.
 //
+// (pre_init, get_swapchain, pre_frame, post_frame)
 // This is cannibalized from various sample code for integration with glfw: 
 //  wgpu: https://github.com/gfx-rs/wgpu-native/blob/afba393d99a8bc98b57b03a5ae8afa6f6eb72d17/examples/triangle/main.c
 // sokol: https://github.com/floooh/sokol-samples/blob/d94da3bbb54695801eb5daf2c3ee4638305e5f0a/wgpu/wgpu_entry_swapchain.c
@@ -115,21 +116,13 @@ pre_frame :: fn(sapp: *Sapp.Self) void = {
     web.instance.processEvents();  // TODO: does this do anything? does it need to go at the end?
     
     web.surface.getCurrentTexture(surface_tex&);
+    
     ::enum(@type surface_tex.status);
     if @is(surface_tex.status, .Timeout, .Outdated, .Lost) {
         panic("todo: failed surface");
         // Skip this frame, and re-configure surface.
-        //if (surface_texture.texture != NULL) {
-        //    wgpuTextureRelease(surface_texture.texture);
-        //}
-        //int width, height;
-        //glfwGetWindowSize(window, &width, &height);
-        //if (width != 0 && height != 0) {
-        //    demo.config.width = width;
-        //    demo.config.height = height;
-        //    wgpuSurfaceConfigure(demo.surface, &demo.config);
-        //}
-        // TODO: the wgpu example skips the frame?
+        // - release surface_tex.texture if it was set  
+        // - update web.config.(width, height)
         return();
     };
     if !@is(surface_tex.status, .SuccessOptimal, .SuccessSuboptimal) {
@@ -138,7 +131,7 @@ pre_frame :: fn(sapp: *Sapp.Self) void = {
     @debug_assert(!surface_tex.texture._.is_null());
     web.swapchain_view = createView(surface_tex.texture, zeroed(*WGPU.TextureViewDescriptor));
     release(surface_tex.texture);
-    @debug_assert(!web.swapchain_view._.is_null());
+    @debug_assert(!web.swapchain_view._.is_null());    
 }
 
 post_frame :: fn(sapp: *Sapp.Self) void = {
@@ -170,11 +163,34 @@ print_error :: fn(status: WGPU.PopErrorScopeStatus, kind: WGPU.ErrorType, messag
 //
 
 Impl :: @struct {
-
+    env: rawptr;
 }
 
-fn run(web: *Impl, desc: Sapp.Desc) Never = {
-    eprintln("TODO: run");
+// this asks the js side to call francaSaveState
+francaRequestState :: fn(web: *Impl, frame: @FnPtr(web: *Impl) void) void #import("webgpu");
+
+fn run(web: *Impl, desc: *Sapp.Desc) Never = {
+    web.env = get_dynamic_context();
+    francaRequestState(web, fn(web: *Impl) void = {
+        set_dynamic_context(web.env);
+        web.common().frame();
+    });
+    throw := bit_cast_unchecked(i64, @FnPtr() Never, 0);
+    throw()
+}
+
+#export
+fn francaSaveState(web: *Impl, adapter: WGPU.Adapter, device: WGPU.Device, surface: WGPU.Surface, width: i64, height: i64) void = {
+    set_dynamic_context(web.env);
+    sapp := web.common();
+    sapp.webgpu.adapter = adapter;
+    sapp.webgpu.device = device;
+    sapp.webgpu.surface = surface;
+    sapp.valid = true;
+    sapp.framebuffer_width = width;
+    sapp.framebuffer_height = height;
+    sapp.window_width = width;
+    sapp.window_height = height;
 }
 
 fn set_icon(web: *Impl, desc: []Sapp.ImageDesc) void = {

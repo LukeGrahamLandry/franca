@@ -57,7 +57,7 @@ build_for_graphics :: fn(vtable: *ImportVTable, input_path: Str) void = {
     // 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡
     // 🤡 but it doesn't work yet anyway
     dawn_folder := "/Users/luke/Downloads/dawn/out/Debug/src/dawn/native";
-    if SOKOL_BACKEND == .WGPU {
+    if SOKOL_BACKEND == .WGPU && arch != .wasm32 {
         path := @tfmt("%/libwebgpu_dawn.dylib", dawn_folder);
         dyn := Dyn'open(path) || @panic("missing dylib: %", path);
         ctx.add_comptime_library(ctx.intern_string("webgpu"), dyn);
@@ -65,16 +65,27 @@ build_for_graphics :: fn(vtable: *ImportVTable, input_path: Str) void = {
     
     main_sym := {vtable.intern_string}(comp, "main");
     main_f := {vtable.find_unique_func}(comp, main_sym).unwrap();
+    exports := FuncId.list(temp());
+    exports&.push(main_f);
+    
+    if arch == .wasm32 {
+        exports&.push_all(ctx.get_tagged("export"));
+    };
     
     m := QbeModule.zeroed();
     init_default_module_dyn(m&, vtable, (
         arch = arch, 
         os = os, 
-        type = @if(arg.jit, .JitOnly, @if(arg.c, .Relocatable, .Exe)),
+        type = @if_else {
+            @if(arch == .wasm32) => .Dynamic;
+            @if(arg.jit) => .JitOnly;
+            @if(arg.c) => .Relocatable;
+            @else => .Exe;
+        },
         exe_debug_symbol_table = opts.retain_function_names,
     ));
     set_debug_types(m&, arg.d, true);
-    bytes := emit_qbe_included_dyn(m&, ctx&, @slice(main_f), .WrapMain); 
+    bytes := emit_qbe_included_dyn(m&, ctx&, exports.items(), @if(arch == .wasm32, .ExportWithNames, .WrapMain)); 
     
     if arg.jit {
         @debug_assert(!arg.c);
@@ -198,6 +209,7 @@ start :: fn($UserData: Type) void = {
         on_event(state.user&, sapp, event);
     
         ::enum(@type event.type);
+        ::enum(@type event.key_code);
         @if(!has_const_field(UserData, @symbol NO_EXIT_ON_CMD_W))
         if event.type == .KEY_DOWN && event.key_code == .W && event.modifiers.get(.super) != 0 {
             sapp.quit_requested = true;

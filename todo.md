@@ -825,7 +825,6 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
 
 ### Chess
 
-- once perft works, print a mnps number in the main run_tests so i notice if it gets 3x slower via compiler bug
 - experiment with New Types for index/rank/file/mask so you can't mess up the unit conversion
 - have Slider :: @enum(Rook, Bishop) instead of functions with isRook: bool parameters
 - regressions (unported):
