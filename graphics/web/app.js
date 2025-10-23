@@ -26,11 +26,11 @@ export const js_init = (I, wasm, canvas) => {
             F.key_event(I, 3, c.codePointAt(0), e.altKey, e.ctrlKey, e.metaKey, e.shiftKey, e.repeat);
         }
     });
-    window.addEventListener("resize", (e) => {
+    window.addEventListener("resize", () => {
         canvas.width = canvas.clientWidth * window.devicePixelRatio;
         canvas.height = canvas.clientHeight * window.devicePixelRatio;
         let [w, h] = [canvas.clientWidth, canvas.clientHeight];
-        F.resize_event(I, w, h, w, h, window.devicePixelRatio);
+        F.resize_event(I, 10, w, h, w, h, window.devicePixelRatio);
     });
     event("wheel", (e) => {
         F.scroll_event(I, e.deltaX, e.deltaY);

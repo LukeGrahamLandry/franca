@@ -2,8 +2,18 @@
 #use("@/examples/web/demo.fr")
 main :: fn() void = {
     args := get_args(TINY);
-    src := @tfmt("""#include_std("lib/core.fr");%""", args.src);
-
+    
+    src := u8.list(temp());
+    src&.push_all("""#include_std("lib/core.fr");""");
+    src&.push_all(args.src);
+    gfx := args.src.contains("graphics/lib.fr") && args.target.type == .JitOnly && query_current_arch() == .wasm32;
+    if gfx {
+        src&.push_all("\n:: Sapp.Wgpu;");
+        src&.push_all("\nSOKOL_BACKEND :: RenderBackend.WGPU;");
+        src&.push_all("\nGRAPHICS_TARGET_WEB :: true;");
+    };
+    src := src.items();
+    
     if query_current_arch() != .wasm32 {
         update_global_stdlib_path();
     };
@@ -25,6 +35,23 @@ main :: fn() void = {
     
     for_exports { name, addr |
         self.todo_injected.insert(name, addr);
+    };
+    if gfx {
+        ::Sapp.Wgpu;
+        //WGPU :: Sg.Webgpu.WGPU;
+        WGPU :: import("@/target/franca/webgpu.g.fr");
+        //addr := @import_symbol("francaRequestState", "webgpu");  
+        fid :: get_constant(FuncId, Sapp.Wgpu, @symbol francaRequestState).unwrap();
+        addr :: current_compiler_context().get_jitted(fid);
+        self.todo_injected.insert("francaRequestState", addr);
+        inline_for WGPU.get_constants() { $n |
+            name :: n[].str();
+            @if(@run name.starts_with("wgpu")) {
+                fid :: get_constant(FuncId, WGPU, n[]).unwrap();
+                addr :: current_compiler_context().get_jitted(fid);
+                self.todo_injected.insert(name, addr);
+            };
+        };
     };
     
     id := self.parser.push_parse(src, file);

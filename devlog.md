@@ -21,6 +21,7 @@
 - the unused layouts in BindGroupLayoutEntry aren't optional pointers in the c api, 
   instead there's a BindingNotUsed value for the type field and if its that, 
   the whole thing has to be passed as undefined in the js api. 
+  :JsReprLiftUndefined
 - create(Buffer) mapped_at_creation :WebBufferInitHack
   - the arrayview i get from getmappedrange isn't going to be in linear memory
     so am i supposed to allocate a fake one an then copy it when you unmap? that seems like a pain.

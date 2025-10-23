@@ -7,8 +7,9 @@ let start = performance.now();
 let version;
 let fs_index;
 let fs_bytes;
+let canvas;
 
-export function handleWasmLoaded(wasm, args) {
+export async function handleWasmLoaded(wasm, args) {
     let load_end = performance.now();
     show_log(" Loaded in " + Math.round(load_end - start) + "ms.");
     Franca = wasm.instance.exports;
@@ -19,9 +20,14 @@ export function handleWasmLoaded(wasm, args) {
     FrancaXXX.__heap_base = BigInt(Franca.memory.buffer.byteLength);
     FrancaXXX.__heap_end = FrancaXXX.__heap_base;
     
+    await init_gpu(wasm, canvas);  // TODO: await
     let p = write_args(args);
     try {
-        Franca.main(BigInt(args.length), p, 0n, 0n);
+        if (Franca.browser_entry_point !== undefined) {
+            Franca.browser_entry_point(); 
+        } else {
+            Franca.main(BigInt(args.length), p, 0n, 0n);
+        }
     } catch (e) {
         if (e !== "called exit 0") {
             show_error(e);
@@ -57,7 +63,9 @@ function write_args(args) {
     return p;
 }
 
+import { webgpu_wasm_exports, init_gpu } from "./target/gfx.js";
 export const imports = {
+    webgpu: webgpu_wasm_exports,
     env: {
         fmodf: (a, b) => a % b,
         fmod: (a, b) => a % b,
@@ -120,7 +128,7 @@ export const imports = {
             );
             const module = new WebAssembly.Module(buffer);
             const instance = new WebAssembly.Instance(module, { main: Franca });
-            console.log(instance);
+            // console.log(instance);
 
             let i = Number(first_export);
             for (let func in instance.exports) {
@@ -228,6 +236,7 @@ const handle = (_msg) => {
             version = msg.version;
             fs_index = msg.fs_index;
             fs_bytes = msg.fs_bytes;
+            canvas = msg.canvas;
             WebAssembly.instantiateStreaming(fetch(`target/${msg.url}?v=${version}`), imports)
                 .then(it => handleWasmLoaded(it, msg.args))
                 .catch(show_error);

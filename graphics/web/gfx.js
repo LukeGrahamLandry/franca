@@ -1,5 +1,5 @@
-import { webgpu, reader as R, writer as W } from "../../target/franca/webgpu.g.js";
-import * as FrancaGraphics from "../../graphics/web/app.js";
+import { webgpu, reader as R, writer as W } from "./webgpu.g.js";
+import { js_init } from "./app.js";
 
 let G = {
     wasm: null,
@@ -7,6 +7,7 @@ let G = {
     adapter: null,
     device: null,
     surface: null,
+    valid: false,
     
     objects: [undefined],
     refs: [0],
@@ -60,13 +61,17 @@ export const init_gpu = async (wasm, canvas) => {
       device,
       format: navigator.gpu.getPreferredCanvasFormat(),
     });
+    G.valid = true;
 };
 
-webgpu.francaRequestState = (I, frame_callback_p) => {
+webgpu.francaRequestState = (I, frame_callback_p, init_callback_p) => {
+    if (!G.valid) console.error("called francaRequestState before init_gpu");
     console.log(G);
-    let [width, height] = [BigInt(G.canvas.clientWidth), BigInt(G.canvas.clientHeight)];
-    G.wasm.instance.exports.francaSaveState(I, G.adapter, G.device, G.surface, width, height, window.devicePixelRatio);
-    FrancaGraphics.js_init(I, G.wasm, G.canvas);
+    let [width, height] = [BigInt(G.canvas.width), BigInt(G.canvas.height)];
+    let ratio = 2; // TODO: window.devicePixelRatio
+    const init_callback = G.wasm.instance.exports.__indirect_table.get(Number(init_callback_p));
+    init_callback(I, G.adapter, G.device, G.surface, width, height, ratio);
+    // js_init(I, G.wasm, G.canvas);  // TODO: this needs to be on the other thread
     requestAnimationFrame(call_frame);
     const frame_callback = G.wasm.instance.exports.__indirect_table.get(Number(frame_callback_p));
     function call_frame() {
@@ -231,6 +236,7 @@ R.Bool = function (i) {
 
 R.array = function (reader, element_size, count, address_of_pointer) {
     if (count == 0xFFFFFFFFn) return undefined;
+    if (count == 0n) return [];
     return R.array_loaded(reader, element_size, count, this.p64(address_of_pointer));
 };
 
@@ -270,6 +276,8 @@ R.RenderPassColorAttachment = function (i) {
     return o;
 }
 
+// in the c api you provide all three as optional pointers and only set one of them, 
+// in the js api you only provide one in the resource field (which doesn't exist in the c api). 
 let BindGroupEntry = R.BindGroupEntry.bind(R);
 R.BindGroupEntry = function (i) {
     let o = BindGroupEntry(i);
@@ -279,6 +287,7 @@ R.BindGroupEntry = function (i) {
     return o;
 }
 
+// :JsReprLiftUndefined
 for (let name of ["BufferBindingLayout", "TextureBindingLayout", "SamplerBindingLayout", "StorageTextureBindingLayout"]) {
     let prev = R[name].bind(R);
     R[name] = function (i) {

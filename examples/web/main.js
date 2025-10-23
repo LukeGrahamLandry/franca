@@ -75,8 +75,23 @@ const toggle_worker = () => {
         ];
         worker = new Worker(`worker.js?v=${version}`, { type: "module" });
         worker.onmessage = handle;
+        
+        // need to do this extra dance because you can't un-transferControlToOffscreen, 
+        // and when you run a new program i give you a new worker. 
+        let old_canvas = document.getElementById("canvas");
+        let canvas = old_canvas.cloneNode();
+        old_canvas.replaceWith(canvas);
+        
+        let surface = canvas.transferControlToOffscreen();
+        // TODO: i don't understand why you have to do this but it makes it not suck ass.
+        //       (its not the same as multiplying framebuffer_(w/h)
+        //        on the franca side because we don't pick the size of getcurrenttexture)
+        surface.width = canvas.clientWidth * window.devicePixelRatio;
+        surface.height = canvas.clientHeight * window.devicePixelRatio;
+        console.log(canvas.clientWidth, surface.width);
+        
         real_start_time = performance.now();
-        worker.postMessage({ tag: "start", url: url, args: args, version: version, fs_bytes: fs_bytes, fs_index: manifest.filesystem });
+        worker.postMessage({ tag: "start", url: url, args: args, version: version, fs_bytes: fs_bytes, fs_index: manifest.filesystem, canvas: surface }, [surface]);
         document.getElementById("btn").innerText = "Kill";
     } else {
         worker.terminate();
@@ -147,6 +162,7 @@ await load_example(manifest.compilers[0].examples[0]);
     document.getElementById("target").innerHTML = src; 
 }
 
+enable_graphics(true);  // TODO: only do this if the program being compiled needs it
 toggle_worker();
 
 document.getElementById("all").onclick = async () => {
@@ -234,3 +250,21 @@ for (const it of document.getElementsByTagName("textarea")) {
 }
 
 document.getElementById("wisdom").innerText = manifest.wisdom[Math.floor(Math.random() * manifest.wisdom.length)];
+
+document.getElementById("togglecanvas").addEventListener("click", (e) => enable_graphics(e.target.checked));
+function enable_graphics(on) {
+    document.getElementById("togglecanvas").checked = on;
+    let out = document.getElementById("out");
+    let c = document.getElementById("canvas");
+    c.hidden = !on;
+    if (on) {
+        out.style.height = "29%";
+        c.style.height = "70%";
+        c.style.width = "100%";
+        // c.width = c.clientWidth * window.devicePixelRatio;
+        // c.height = c.clientHeight * window.devicePixelRatio;
+        console.log(c);
+    } else {
+        out.style.height = "100%";
+    }
+}

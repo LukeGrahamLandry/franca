@@ -6,6 +6,8 @@ driver :: fn(vtable: *ImportVTable) void = {
 
     ok := run_cmd_blocking(franca, @slice("examples/default_driver.fr", "build", "examples/web/demo.fr", "-o", "examples/web/target/demo.wasm", "-arch", "wasm32", "-unsafe"));
     @assert(ok, "failed build");
+    ok := run_cmd_blocking(franca, @slice("graphics/web/webgpu_api.fr"));
+    @assert(ok, "failed build");
     
     commit := if ci {
         ok, o, e := exec_and_catch("git", @slice("rev-parse", "HEAD"), temp());
@@ -32,6 +34,9 @@ driver :: fn(vtable: *ImportVTable) void = {
     
     write_entire_file_or_crash("examples/web/target/manifest.json", manifest.items());
     write_entire_file_or_crash(@tfmt("examples/web/target/%.txt", commit), contents.items());
+    write_entire_file_or_crash("examples/web/target/app.js", read_entire_file_or_crash(temp(), "graphics/web/app.js"));
+    write_entire_file_or_crash("examples/web/target/gfx.js", read_entire_file_or_crash(temp(), "graphics/web/gfx.js"));
+    write_entire_file_or_crash("examples/web/target/webgpu.g.js", read_entire_file_or_crash(temp(), "target/franca/webgpu.g.js"));
     
     // TODO: this is slowly approching crazy town...
     if ci {
@@ -54,10 +59,14 @@ manifest :: fn(fs: Fs, commit: Str) Manifest = (
         name = "franca",
         about = "",
         examples = @const_slice(
+            "examples/mandelbrot_ui.fr",
             "examples/mandelbrot.fr", "examples/sudoku.fr", "examples/kaleidoscope.fr",
             "examples/bf/bf2ir.fr", "examples/bf/code_string.fr", "examples/bf/inline_for.fr",
             "compiler/main.fr", "examples/bf/c_string.fr", "examples/import_c/test/ffi.fr",
             "examples/chess/perft.fr",
+            // "examples/chess/gui.fr", // TODO
+            "examples/app_events.fr", 
+            "examples/farm_game.fr", 
         ),
     ), (
         name = "c",
@@ -82,7 +91,8 @@ manifest :: fn(fs: Fs, commit: Str) Manifest = (
 );
 
 collect_fs :: fn(a: Alloc) Ty(Fs, List(u8)) = {
-    paths := collect_paths @const_slice("lib", "compiler", "backend", "examples");
+    paths := collect_paths @const_slice("lib", "compiler", "backend", "examples", "graphics");
+    paths&.push("target/franca/webgpu.g.fr");
     fs: HashMap(Str, Ty(i64, i64)) = init(a);
     contents := u8.list(a);
     for paths { s |
@@ -128,7 +138,7 @@ Manifest :: @struct {
     };
 }
 
-collect_paths :: fn(root: []Str) []Str = {
+collect_paths :: fn(root: []Str) List(Str) = {
     extensions := @const_slice(".fr", ".md", ".ssa", ".c", ".h");
     files := Str.list(temp());
     dirs := Str.list(temp());
@@ -164,7 +174,7 @@ collect_paths :: fn(root: []Str) []Str = {
         sort(files.items().rest(prev_f));
         sort(dirs.items().rest(prev_d));
     };
-    files.items()
+    files
 }
 
 #use("@/lib/sys/process.fr");

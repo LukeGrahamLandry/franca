@@ -881,8 +881,7 @@ actually that's a bit too agressive but certainly stop processing ANSI escape co
 - finish gfx validation and enable that based on DebugAssetions
 - clean up defaults
 - dearimgui backend
-- support x11 / opengl / glsl
-- support web (depends on finishing wasm backend), don't use emscripten
+- support x11
 - revive compiler_gui (try to export all info to the driver so it can run in comptime)
 - provide the same c api as sokol so can test with their examples? 
 - translate a more serious subset of my language into the shader languages
@@ -910,6 +909,20 @@ Compile Error: we hit a dynamicimport ('wgpuDeviceCreateCommandEncoder' from 'we
 the frontend should make sure this doesn't happen. 
 TODO: this happens when compiling targetting libc from a compiler built without libc on linux
 ```
+- web
+  - safari
+  - remap key codes (keytable)
+  - modifiers
+  - should_skip_frame
+  - integrate with examples/web/index.html so you can jit graphics programs
+  - make test programs that force me to implement the rest of the wgpu api surface
+  - a bunch of the bindings im writing manually in gfx.js could be generated
+  - do the rest of the events in app.js
+  - all the app commands are stubs
+  - might want to limit the scrolling so the scale of the numbers is the same as native. 
+    ie. i had to clamp mandelbrot_ui so you can't overshoot and that isn't a problem in the macos version. 
+  - import("@/examples/terminal.fr")'main();  // TODO: wrong signeture for exit()
+  - the franca side should call requestAdapter/requestDevice/configure so it can pass arguments. 
 
 ## stuff i broke
 

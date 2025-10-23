@@ -196,6 +196,14 @@ finish_function_signeture :: fn(args: []Member, returns: Str, out: *List(u8), ca
 }
 
 gen_js :: fn(out: *List(u8), all: *HashMap(Str, FullItem), WGPU: ScopeId) void = {
+    // TODO: either remove this or actually do something useful. 
+    // for now the function wrappers are written manually in gfx.js, 
+    // what im generating here just makes it easy to see which ones im missing. 
+    // (log when one an unimplimented one is called and see if it can keep going so i can see more errors at once). 
+    // also, gfx.js looks at the keys to know which AddRef/Release functions are needed. 
+    // eventually i like the idea of always regenerating for each program 
+    // and doing more of it here so you can have a minimal js file 
+    // that only includes the things you actually call. 
     @fmt(out, "export const webgpu = {\n");
     each all { name, item |
         self_name := name.camelcase(true);
@@ -222,6 +230,7 @@ gen_js :: fn(out: *List(u8), all: *HashMap(Str, FullItem), WGPU: ScopeId) void =
         };
     };
     @fmt(out, "};\n");
+    // the primitives are added in gfx.js
     @fmt(out, "export const reader = {\n");
     each all { name, item |
         self_name := name.camelcase(true);
@@ -233,7 +242,7 @@ gen_js :: fn(out: *List(u8), all: *HashMap(Str, FullItem), WGPU: ScopeId) void =
                 
                 @fmt(out, "%: function(i) {\n", self_name);
                 @fmt(out, "    if (i == 0n) return undefined;\n");
-                @fmt(out, "    let o = {};\n");
+                @fmt(out, "    return {\n");
                 members := it.members&;
                 each members { it |
                     f := find_field(Self, it);
@@ -257,13 +266,13 @@ gen_js :: fn(out: *List(u8), all: *HashMap(Str, FullItem), WGPU: ScopeId) void =
                         reader_name = @tfmt("pointer(this.%, ", reader_name);
                         paren = true;
                     };
-                    @fmt(out, "    o.% = this.%(i + %n)", f.name.str(), reader_name, f.byte_offset);
+                    @fmt(out, "        %: this.%(i + %n)", f.name.str(), reader_name, f.byte_offset);
                     if paren {
                         @fmt(out, ")");
                     };
-                    @fmt(out, ";\n");
+                    @fmt(out, ",\n");
                 };
-                @fmt(out, "    return o;\n");
+                @fmt(out, "    };\n");
                 @fmt(out, "},\n");
             }
             fn enum(it) => {
@@ -299,6 +308,8 @@ gen_js :: fn(out: *List(u8), all: *HashMap(Str, FullItem), WGPU: ScopeId) void =
         };
     };
     @fmt(out, "};\n");
+    // only need to generate writers for out parameters. 
+    // the primitives are added in gfx.js
     @fmt(out, "export const writer = {\n");
     each all { name, item |
         self_name := name.camelcase(true);

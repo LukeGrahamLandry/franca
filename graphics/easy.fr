@@ -21,6 +21,7 @@ build_for_graphics :: fn(vtable: *ImportVTable, input_path: Str) void = {
         c := false;
         d := "";
         @"debug-info" := false;
+        wgpu := false;
     };
     arg := parse_args(Args);
     arg.@"keep-names" = arg.@"debug-info" || arg.@"keep-names";
@@ -31,6 +32,15 @@ build_for_graphics :: fn(vtable: *ImportVTable, input_path: Str) void = {
     os   := @if(arg.os == "" || arg.jit, query_current_os(), Os.from_name(arg.os) || @panic("invalid -os %", arg.os));
     arch := @if(arg.arch == "" || arg.jit, query_current_arch(), Arch.from_name(arg.arch) || @panic("invalid -arch %", arg.arch));
     
+    GRAPHICS_TARGET_WEB := arch == .wasm32;
+    if GRAPHICS_TARGET_WEB {
+        arg.wgpu = true;
+    };
+    
+    // TODO: formalize communicating config options with the driver program 
+    SOKOL_BACKEND := @if(arg.wgpu, 
+        RenderBackend.WGPU, RenderBackend.METAL_MACOS); // :hardcode_os
+    
     if arg.unsafe {
         s := opts.safety_checks&;
         s.insert(.Bounds, false);
@@ -39,6 +49,12 @@ build_for_graphics :: fn(vtable: *ImportVTable, input_path: Str) void = {
     };
     
     src := @tfmt("""#include_std("lib/core.fr");#include_std("%"); EASY_GRAPHICS_IS_JITTING_HACK :: %;""", input_path, arg.jit);
+    if GRAPHICS_TARGET_WEB {
+        // force the #export functions to be referenced
+        src = @tfmt("%\n:: Sapp.Wgpu;\n", src);
+    }
+    src = @tfmt("%\nSOKOL_BACKEND :: RenderBackend.%;\nGRAPHICS_TARGET_WEB :: %;\n", src, SOKOL_BACKEND, GRAPHICS_TARGET_WEB);
+    
     comp := vtable.new_with_src(src, input_path, opts);
     ctx := vtable.with(comp);
     
@@ -57,7 +73,7 @@ build_for_graphics :: fn(vtable: *ImportVTable, input_path: Str) void = {
     // 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡
     // 🤡 but it doesn't work yet anyway
     dawn_folder := "/Users/luke/Downloads/dawn/out/Debug/src/dawn/native";
-    if SOKOL_BACKEND == .WGPU && arch != .wasm32 {
+    if SOKOL_BACKEND == .WGPU && !GRAPHICS_TARGET_WEB && arg.jit {
         path := @tfmt("%/libwebgpu_dawn.dylib", dawn_folder);
         dyn := Dyn'open(path) || @panic("missing dylib: %", path);
         ctx.add_comptime_library(ctx.intern_string("webgpu"), dyn);
@@ -68,7 +84,7 @@ build_for_graphics :: fn(vtable: *ImportVTable, input_path: Str) void = {
     exports := FuncId.list(temp());
     exports&.push(main_f);
     
-    if arch == .wasm32 {
+    if GRAPHICS_TARGET_WEB {
         exports&.push_all(ctx.get_tagged("export"));
     };
     
@@ -77,7 +93,7 @@ build_for_graphics :: fn(vtable: *ImportVTable, input_path: Str) void = {
         arch = arch, 
         os = os, 
         type = @if_else {
-            @if(arch == .wasm32) => .Dynamic;
+            @if(GRAPHICS_TARGET_WEB) => .Dynamic;
             @if(arg.jit) => .JitOnly;
             @if(arg.c) => .Relocatable;
             @else => .Exe;
