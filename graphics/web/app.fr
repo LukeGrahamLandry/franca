@@ -170,35 +170,6 @@ Impl :: @struct {
 // this asks the js side to call francaSaveState
 francaRequestState :: fn(web: *Impl, frame: @FnPtr(web: *Impl) bool, init: @FnPtr(web: *Impl, adapter: WGPU.Adapter, device: WGPU.Device, surface: WGPU.Surface, width: i64, height: i64, devicePixelRatio: f64) void) void #import("webgpu");
 
-// TODO: make it easy to setup and environment that's not on your stack  
-//       so you don't have to do everything from inside your main function. 
-// TODO: the only reason this is so painful is i don't allow you to wrapmain when compiling 
-//       to a dynamiclib which i need so the wasm can have multiple exports. 
-#export
-fn browser_entry_point() void = {
-    // TODO: this is getting dumb...
-    //       at this point i should just call the real franca_runtime_init
-    ROOT :: import("@/compiler/ast_external.fr").TOP_LEVEL_SCOPE;
-    fid :: FuncId.get_constant(ROOT, @symbol main).unwrap();
-    main_r :: current_compiler_context().get_jitted(fid);
-    main := bit_cast_unchecked(rawptr, @FnPtr() void, main_r);
-    
-    push_zeroed_dynamic_context {
-        c := context(DefaultContext);
-        temporary_allocator: Arena.Allocator = init(page_allocator, 1.shift_left(20));
-        set_temporary_allocator(temporary_allocator&);
-        c.panic_hook = print_and_exit1;
-        c.global = @static(GlobalFrancaRuntime);
-        c.thread_index = 1;
-        c.global.next_thread_id = 2;  // :ThreadIdStartsAtOne
-        A :: import("@/lib/alloc/fixed_block.fr").BlockAlloc;
-        general_allocator: A = init(page_allocator);
-        c.general_allocator = general_allocator&.borrow();
-        main();
-        unreachable();
-    };
-}
-
 fn run(web: *Impl, desc: *Sapp.Desc) Never = {
     web.env = get_dynamic_context();
     francaRequestState(web, fn(web: *Impl) bool = {
@@ -269,6 +240,8 @@ fn mouse_event(web: *Impl, type: Sapp.EventType, button: u32, x: f32, y: f32, dx
     //@println("% % % % % %", type, button, x, y, dx, dy);
     ::enum(Sapp.EventType);
     sapp := web.common();
+    if(!sapp.events_enabled(), => return());
+    set_dynamic_context(web.env);
     sapp.mouse.x = x * sapp.dpi_scale;
     sapp.mouse.y = y * sapp.dpi_scale;
     sapp.mouse.dx = dx * sapp.dpi_scale;
@@ -293,6 +266,8 @@ fn key_event(web: *Impl, type: Sapp.EventType, key: u32, alt: bool, ctrl: bool, 
     //@println("% % % % % % %", type, key, alt, ctrl, meta, shift, repeat);
     ::enum(Sapp.EventType);
     sapp := web.common();
+    if(!sapp.events_enabled(), => return());
+    set_dynamic_context(web.env);
     sapp.init_event(type);
     sapp.event.key_code = @as(Sapp.Keycode) @as(u16) key.trunc();
     sapp.event.key_repeat = repeat;
@@ -310,6 +285,8 @@ fn key_event(web: *Impl, type: Sapp.EventType, key: u32, alt: bool, ctrl: bool, 
 fn resize_event(web: *Impl, type: Sapp.EventType, fw: f64, fh: f64, ww: f64, wh: f64, devicePixelRatio: f64) void = {
     ::enum(Sapp.EventType);
     sapp := web.common();
+    if(!sapp.events_enabled(), => return());
+    set_dynamic_context(web.env);
     sapp.init_event(type);
     sapp.window_width = ww.int();
     sapp.window_height = wh.int();
@@ -324,6 +301,8 @@ fn resize_event(web: *Impl, type: Sapp.EventType, fw: f64, fh: f64, ww: f64, wh:
 fn scroll_event(web: *Impl, dx: f64, dy: f64) void = {
     ::enum(Sapp.EventType);
     sapp := web.common();
+    if(!sapp.events_enabled(), => return());
+    set_dynamic_context(web.env);
     sapp.init_event(.MOUSE_SCROLL);
     sapp.event.scroll_x = dx.cast();
     sapp.event.scroll_y = dy.cast();

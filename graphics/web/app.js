@@ -1,39 +1,41 @@
 // THIS IS UNFINISHED
 
-export const js_init = (I, wasm, canvas) => {
-    const F = wasm.instance.exports;
+
+export const add_events = (I, canvas, send) => {
     const event = (name, f) => canvas.addEventListener(name, f);
+    event("contextmenu", (e) => { 
+        e.preventDefault();
+    });
     
     event("mousedown", (e) => {
-        F.mouse_event(I, 4, e.button, e.offsetX, e.offsetY, 0.0, 0.0);
+        send("mouse_event", I, 4, e.button, e.offsetX, e.offsetY, 0.0, 0.0);
     });
     event("mouseup", (e) => {
-        F.mouse_event(I, 5, e.button, e.offsetX, e.offsetY, 0.0, 0.0);
+        send("mouse_event", I, 5, e.button, e.offsetX, e.offsetY, 0.0, 0.0);
     });
     event("mousemove", (e) => {
-        F.mouse_event(I, 7, e.button, e.offsetX, e.offsetY, e.movementX, e.movementY);
+       send("mouse_event", I, 7, e.button, e.offsetX, e.offsetY, e.movementX, e.movementY);
     });
     // TODO: you're not supposed to use keyCode anymore. 
     //      for now i just want to get something on the screen. 
     event("keydown", (e) => {
-        F.key_event(I, 1, e.keyCode, e.altKey, e.ctrlKey, e.metaKey, e.shiftKey, e.repeat);
+        send("key_event", I, 1, e.keyCode, e.altKey, e.ctrlKey, e.metaKey, e.shiftKey, e.repeat);
+        // e.preventDefault(); TODO: i want this for tab but not for cmd+r and i still want to get keypress
     });
     event("keyup", (e) => {
-        F.key_event(I, 2, e.keyCode, e.altKey, e.ctrlKey, e.metaKey, e.shiftKey, e.repeat);
+        send("key_event", I, 2, e.keyCode, e.altKey, e.ctrlKey, e.metaKey, e.shiftKey, e.repeat);
     });
     event("keypress", (e) => {
         for (let c of e.key) {
-            F.key_event(I, 3, c.codePointAt(0), e.altKey, e.ctrlKey, e.metaKey, e.shiftKey, e.repeat);
+            send("key_event", I, 3, c.codePointAt(0), e.altKey, e.ctrlKey, e.metaKey, e.shiftKey, e.repeat);
         }
     });
     window.addEventListener("resize", () => {
-        canvas.width = canvas.clientWidth * window.devicePixelRatio;
-        canvas.height = canvas.clientHeight * window.devicePixelRatio;
         let [w, h] = [canvas.clientWidth, canvas.clientHeight];
-        F.resize_event(I, 10, w, h, w, h, window.devicePixelRatio);
+        send("resize_event", I, 10, w, h, w, h, window.devicePixelRatio);
     });
     event("wheel", (e) => {
-        F.scroll_event(I, e.deltaX, e.deltaY);
+        send("scroll_event", I, e.deltaX, e.deltaY);
     });
     
     // TODO

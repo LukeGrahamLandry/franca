@@ -1,13 +1,14 @@
 import { webgpu, reader as R, writer as W } from "./webgpu.g.js";
-import { js_init } from "./app.js";
 
-let G = {
+export const G = {
     wasm: null,
     canvas: null,
     adapter: null,
     device: null,
     surface: null,
     valid: false,
+    I: null,
+    animation_id: null,
     
     objects: [undefined],
     refs: [0],
@@ -67,19 +68,19 @@ export const init_gpu = async (wasm, canvas) => {
 webgpu.francaRequestState = (I, frame_callback_p, init_callback_p) => {
     if (!G.valid) console.error("called francaRequestState before init_gpu");
     console.log(G);
+    G.I = I;
     let [width, height] = [BigInt(G.canvas.width), BigInt(G.canvas.height)];
     let ratio = 2; // TODO: window.devicePixelRatio
     const init_callback = G.wasm.instance.exports.__indirect_table.get(Number(init_callback_p));
     init_callback(I, G.adapter, G.device, G.surface, width, height, ratio);
-    // js_init(I, G.wasm, G.canvas);  // TODO: this needs to be on the other thread
-    requestAnimationFrame(call_frame);
+    G.animation_id = requestAnimationFrame(call_frame);
     const frame_callback = G.wasm.instance.exports.__indirect_table.get(Number(frame_callback_p));
     function call_frame() {
         let noframe = frame_callback(I) != 0;
         // TODO: figure out how to make should_skip_frame work. 
         //       there's no present() call so if you try to just drop the frame 
         //       you get black instead of the previous frame. 
-        requestAnimationFrame(call_frame);
+        G.animation_id = requestAnimationFrame(call_frame);
     }
 };
 

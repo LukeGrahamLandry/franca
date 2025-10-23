@@ -43,6 +43,8 @@ const handle = (_msg) => {
 };
 
 
+import { add_events } from "./target/app.js";
+
 let real_start_time;
 const start_message = "Run";
 let worker = null;
@@ -81,14 +83,17 @@ const toggle_worker = () => {
         let old_canvas = document.getElementById("canvas");
         let canvas = old_canvas.cloneNode();
         old_canvas.replaceWith(canvas);
-        
         let surface = canvas.transferControlToOffscreen();
+        
+        const send = (handler, ...args) => 
+            worker.postMessage({ tag: "event", handler, args });
+        add_events(0, canvas, send);
+        
         // TODO: i don't understand why you have to do this but it makes it not suck ass.
         //       (its not the same as multiplying framebuffer_(w/h)
         //        on the franca side because we don't pick the size of getcurrenttexture)
         surface.width = canvas.clientWidth * window.devicePixelRatio;
         surface.height = canvas.clientHeight * window.devicePixelRatio;
-        console.log(canvas.clientWidth, surface.width);
         
         real_start_time = performance.now();
         worker.postMessage({ tag: "start", url: url, args: args, version: version, fs_bytes: fs_bytes, fs_index: manifest.filesystem, canvas: surface }, [surface]);
