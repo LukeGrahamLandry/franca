@@ -20,12 +20,13 @@ export async function handleWasmLoaded(wasm, args) {
     FrancaXXX.__heap_base = BigInt(Franca.memory.buffer.byteLength);
     FrancaXXX.__heap_end = FrancaXXX.__heap_base;
     
-    await init_gpu(wasm, canvas);  // TODO: await
+    if (canvas !== undefined) await init_gpu(wasm, canvas);
+    
     let p = write_args(args);
     try {
         Franca.main(BigInt(args.length), p, 0n, 0n);
     } catch (e) {
-        if (e !== "called exit 0") {
+        if (e !== "called exit 0" && e !== ESCAPE_MAIN) {
             show_error(e);
         }
     }
@@ -59,7 +60,7 @@ function write_args(args) {
     return p;
 }
 
-import { webgpu_wasm_exports, init_gpu, G } from "./target/gfx.js";
+import { webgpu_wasm_exports, init_gpu, G, ESCAPE_MAIN } from "./target/gfx.js";
 export const imports = {
     webgpu: webgpu_wasm_exports,
     env: {
@@ -240,7 +241,7 @@ const handle = (_msg) => {
             break;
         }
         case "event": {
-            if (!G.valid || G.I == 0n) break;
+            if (!G.valid || G.I === null || canvas === undefined) break;
             msg.args[0] = G.I;
             if (msg.handler == "resize_event") {
                 let [clientWidth, clientHeight, devicePixelRatio] = [msg.args[4], msg.args[5], msg.args[6]];
@@ -248,7 +249,7 @@ const handle = (_msg) => {
                 canvas.height = clientHeight * devicePixelRatio;
             }
 
-            Franca[msg.handler].apply(undefined, msg.args);
+            Franca[msg.handler].apply(Franca, msg.args);
             break;
         }
         default:

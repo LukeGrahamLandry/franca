@@ -48,6 +48,7 @@ export const G = {
 
 export const webgpu_wasm_exports = webgpu;
 export const init_gpu = async (wasm, canvas) => {
+    if (navigator.gpu === undefined) return;  // should be unreachable but clearly not
     G.wasm = wasm;
     G.canvas = canvas;
     const adapter = await navigator.gpu.requestAdapter();
@@ -65,9 +66,10 @@ export const init_gpu = async (wasm, canvas) => {
     G.valid = true;
 };
 
+export const ESCAPE_MAIN = "escape main";
+
 webgpu.francaRequestState = (I, frame_callback_p, init_callback_p) => {
     if (!G.valid) console.error("called francaRequestState before init_gpu");
-    console.log(G);
     G.I = I;
     let [width, height] = [BigInt(G.canvas.width), BigInt(G.canvas.height)];
     let ratio = 2; // TODO: window.devicePixelRatio
@@ -82,6 +84,10 @@ webgpu.francaRequestState = (I, frame_callback_p, init_callback_p) => {
         //       you get black instead of the previous frame. 
         G.animation_id = requestAnimationFrame(call_frame);
     }
+    
+    // TODO: make it less painful to setup a dynamicenvironment thats not on your stack frame
+    //       but need to be careful because that changes the semantics of app.run
+    throw ESCAPE_MAIN;
 };
 
 webgpu.wgpuDeviceGetQueue = (device) => {

@@ -1,4 +1,5 @@
 
+- the graphics test programs are no longer compiled in ci
 - `u1, u2, v1, v2 : Ty(f32, f32, f32, f32) = (0.0, 1.0, 0.0, 1.0);  // TODO: allow this :compiler`
 - using @switch on an enum instead of @match is an easy footgun because it expects @case(.foo) instead of fn foo() and then you'll be confused
 - Type Error when calling a function ugently needs to show both the call site and the declaration site
@@ -385,10 +386,11 @@ different subsets of the same resources.
     (no github pages, no `python3 -m http.server`)
   - no shared tables so have to keep them in sync manually so need to keep a list of every
     time you load jitted code or do a table assignment and replay them when you span a new thread. 
-- web demo: hare, wuffs, more nontrivial c programs, webgpu
+- web demo: hare, wuffs, more nontrivial c programs
 - use dump_wasm to disassemble one function at a time (like i do with llvm-mc) 
   instead of only all at once in output_wasm_module_jit
 - improve import_wasm until it can cope with bootstrapping zig1.wasm
+- kinda lame that web/demo.fr has to special case the graphics programs instead of drivers working properly
 
 ## backend 
 
@@ -914,7 +916,6 @@ TODO: this happens when compiling targetting libc from a compiler built without 
   - remap key codes (keytable)
   - modifiers
   - should_skip_frame
-  - integrate with examples/web/index.html so you can jit graphics programs
   - make test programs that force me to implement the rest of the wgpu api surface
   - a bunch of the bindings im writing manually in gfx.js could be generated
   - do the rest of the events in app.js
@@ -922,7 +923,15 @@ TODO: this happens when compiling targetting libc from a compiler built without 
   - might want to limit the scrolling so the scale of the numbers is the same as native. 
     ie. i had to clamp mandelbrot_ui so you can't overshoot and that isn't a problem in the macos version. 
   - import("@/examples/terminal.fr")'main();  // TODO: wrong signeture for exit()
+  - make chess/gui.fr work jitted in the browser
+  - make demo.fr work in import_wasm using dawn for graphics. 
   - the franca side should call requestAdapter/requestDevice/configure so it can pass arguments. 
+  - app_events starts off small and then zooms in the first time you cause a resize event. 
+  - make the js code less messy and make it less painful to integrate into your own project. 
+    ideally i could just spit out a wasm file and a js file and it would just work. 
+  - its cringe that im pre-generating webgpu.g.js and webgpu.g.fr instead of doing it in the browser like everything else. 
+  - be able to precompile the graphics library so the demo isn't as slow
+  - make downloading one compiled for aot macos graphics work in the demo and give sane error if you try for linux
 
 ## stuff i broke
 

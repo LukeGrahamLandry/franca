@@ -21,6 +21,7 @@ const handle = (_msg) => {
         }
         case "done": {
             // don't terminate the worker here because that kills the nice objects in the console
+            // also, if it's a graphics program, its still controlling the canvas. 
             document.getElementById("btn").innerText = start_message;
             running = false;
             let end = performance.now();
@@ -56,6 +57,8 @@ const toggle_worker = () => {
     }
     running = worker === null;
     if (running) {
+        real_start_time = performance.now();
+        
         let compiler_i = document.getElementById("compiler").value;
         const compiler = manifest.compilers[parseInt(compiler_i)];
         let url = "demo.wasm"; 
@@ -77,26 +80,40 @@ const toggle_worker = () => {
         ];
         worker = new Worker(`worker.js?v=${version}`, { type: "module" });
         worker.onmessage = handle;
+        let need_canvas = input.includes("graphics/lib.fr");  // :HackyGraphicsDetection
         
         // need to do this extra dance because you can't un-transferControlToOffscreen, 
         // and when you run a new program i give you a new worker. 
         let old_canvas = document.getElementById("canvas");
         let canvas = old_canvas.cloneNode();
         old_canvas.replaceWith(canvas);
+        
+        if (need_canvas && navigator.gpu === undefined) {
+            document.getElementById("out").value = "Your browser doesn't support WebGPU.\nTry one of the non-graphical examples.\n\n";
+            enable_graphics(false);
+            document.getElementById("err").innerText = "Your browser doesn't support WebGPU.";
+            worker.terminate();
+            worker = null;
+            document.getElementById("btn").innerText = start_message;
+            return;
+        }
+        
+        enable_graphics(need_canvas);
+        
         let surface = canvas.transferControlToOffscreen();
         
         const send = (handler, ...args) => 
             worker.postMessage({ tag: "event", handler, args });
-        add_events(0, canvas, send);
+        if (need_canvas) add_events(0, canvas, send);
         
         // TODO: i don't understand why you have to do this but it makes it not suck ass.
         //       (its not the same as multiplying framebuffer_(w/h)
         //        on the franca side because we don't pick the size of getcurrenttexture)
         surface.width = canvas.clientWidth * window.devicePixelRatio;
         surface.height = canvas.clientHeight * window.devicePixelRatio;
-        
-        real_start_time = performance.now();
-        worker.postMessage({ tag: "start", url: url, args: args, version: version, fs_bytes: fs_bytes, fs_index: manifest.filesystem, canvas: surface }, [surface]);
+        if (!need_canvas) surface = undefined;
+        let transfer = need_canvas ? [surface] : [];
+        worker.postMessage({ tag: "start", url: url, args: args, version: version, fs_bytes: fs_bytes, fs_index: manifest.filesystem, canvas: surface }, transfer);
         document.getElementById("btn").innerText = "Kill";
     } else {
         worker.terminate();
@@ -156,7 +173,7 @@ document.getElementById("example").onchange = function () {
     load_example(this.value);
 };
 show_compilers();
-await load_example(manifest.compilers[0].examples[0]);
+await load_example(manifest.compilers[0].examples[navigator.gpu === undefined ? 1 : 0]);
 
 {
     let targets = ["wasm-jit", "wasm-aot", "arm64-macos", "amd64-macos", "arm64-linux", "amd64-linux", "riscv64-linux"];
@@ -266,9 +283,8 @@ function enable_graphics(on) {
         out.style.height = "29%";
         c.style.height = "70%";
         c.style.width = "100%";
-        // c.width = c.clientWidth * window.devicePixelRatio;
-        // c.height = c.clientHeight * window.devicePixelRatio;
-        console.log(c);
+        c.width = c.clientWidth * window.devicePixelRatio;
+        c.height = c.clientHeight * window.devicePixelRatio;
     } else {
         out.style.height = "100%";
     }

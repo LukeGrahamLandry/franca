@@ -1,4 +1,14 @@
 
+## (Oct 23)
+
+- use an offscreen canvas to run the rendering in a worker 
+  so it's convenient to use with the existing jit demo, 
+  and make the event handlers more indirect. 
+- for now, demo can have some more hacky glue to add the webgpu stuff to todo_injected
+- automatically replace the output text box with a canvas when the program imports the graphics stuff. 
+  rn doing it hackily since they all need to include_std(graphics/lib) at top level so it doesn't even need the compiler to tell you. 
+- don't need the hello.html example anymore
+
 ## (Oct 22)
 
 - a few more tedious bindings. 
