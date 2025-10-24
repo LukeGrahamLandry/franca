@@ -157,15 +157,33 @@ ptr_from_int :: fn($To: Type, ptr: i64) *To #generic #ir(.copy, .Kl);
 erase_types_fn :: fn($Arg: Type, $Ret: Type, ptr: FnPtr(Arg, Ret)) rawptr #generic #ir(.copy, .Kl);
 assume_types_fn :: fn($Arg: Type, $Ret: Type, ptr: rawptr) FnPtr(Arg, Ret) #generic #ir(.copy, .Kl);
 
-// TODO: this no longer works if it's an expr
 fn zeroed($T: Type) T #generic #inline = {
-    impl :: fn() T = {
-        t := @uninitialized T;
-        set_zeroed(@as([]T) (ptr = t&, len = 1));
-        t
-    };
-    ::impl() 
+    @zeroed T
 }
+
+fn zeroed(T: FatExpr) FatExpr #macro = {
+    @if(IS_BOOTSTRAPPING) return(@{:: {
+        t := @uninitialized @[T];
+        set_zeroed(@as([]@[T]) (ptr = t&, len = 1));
+        t
+    }});
+
+    loc := T.loc;
+    T := Type.const_eval(T);
+    
+    size := T.size_of();
+    value: Values = @if(size <= 8, 
+        (Small = (0, size.trunc())),
+        (Big = {
+            // note: alloc_raw calls empty() which calls zeroed()
+            allocator := ast_alloc();
+            s := {allocator.vptr}(allocator.data, .Allocate, rawptr_from_int(0), size, 8/*todo*/);
+            s.set_bytes(0);
+            s.as_raw_list()
+        }));
+    expr: FatExpr = (expr = (Value = (bytes = value)), loc = loc, done = true, ty = T);
+    expr
+};
 
 // Signs aren't real. You just use different operations depending on the type. 
 fn bitcast(v: u64) i64 #ir(.copy, .Kl);

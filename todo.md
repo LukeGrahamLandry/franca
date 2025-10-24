@@ -859,9 +859,9 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
 - && to run two commands
 - make it compile faster when ENABLE_FRANCA_REPL
 - multiline franca commands
-- restore session when you restart it
+- save cmd history to file as well (not just output) so up/down work across restarts (and maybe auto save)
 - jump around past commands like warp
-- search
+- ui for showing search results
 - environment variable syntax
 - tell child programs that im a terminal. ie. ls gives me one column instead of two.
 - if something's outputting invalid utf8, switch to hex view,
@@ -872,6 +872,7 @@ actually that's a bit too agressive but certainly stop processing ANSI escape co
 - drag a tab out to make a new window
 - auto-scroll if you put the mouse at the edge of the screen while highlighting to grow your selection
 - undo
+- factor out a text widget so its not a big deal to make other gui examples that want a bit of text input. 
 
 ## Graphics
 

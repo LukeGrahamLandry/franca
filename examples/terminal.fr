@@ -28,7 +28,7 @@ Replay :: import("@/graphics/replay.fr");
 State :: @struct(
     pass_action: Sg.PassAction,
     text: *Sdtx.Self,
-    buffers: List(TextBuffer),
+    buffers: List(*TextBuffer),
     selected_buffer: i64,
     app: Sapp.Self,
     sg: Sg.Self,
@@ -44,6 +44,8 @@ State :: @struct(
     click_count: i64,
     scale: f64,  // height = 2 * scale
     recording: ?Replay'Recorder,
+    search_tasks: List(*SearchTask),
+    save_file: ?Str,
 );
 
 ProcessInfo :: @struct {
@@ -75,6 +77,7 @@ on_init :: fn(userdata: rawptr) void = {
     );
     @if(ENABLE_FRANCA_REPL) {
         prelude := "#include_std(\"lib/core.fr\");#include_std(\"examples/terminal.fr\");\n";
+        prelude := @tfmt("%\nSOKOL_BACKEND :: RenderBackend.%;\n", prelude, SOKOL_BACKEND);
         state.repl = Repl'init_repl(allocator, prelude);
         if Repl.STDLIB_PATH { path |
             cd(path.items());
@@ -108,11 +111,23 @@ on_init :: fn(userdata: rawptr) void = {
     w_width := sapp.width().float();
     w_height := sapp.height().float();
     
-    buffer: TextBuffer = empty(allocator);
+    buffer: *TextBuffer = empty(allocator);
     //buffer.at.pos = (x = 20, y = 10);
     buffer.at.w = w_width - 20; // - 200;
     buffer.at.h = w_height;
     push(state.buffers&, buffer);
+    
+    if state.save_file { path |
+        mark := temp().mark();
+        if read_entire_file(temp(), path) { s |
+            @println("loaded % bytes from %", s.len, path);
+            // this needs to be set for it to scroll up the right amount, otherwise everything is off screen. 
+            buffer.num_lines_fit_on_screen = int(buffer.at.h / (state.scale * 2)) + 1;
+            buffer.append_string(s);
+            buffer.put_cursor_at_end();
+        };
+        temp().reset(mark);
+    };
     
     //buffer: TextBuffer = empty(allocator);
     //buffer.at = (pos = (x = w_width - 200, y = 10), w = 100, h = 100);
@@ -172,8 +187,14 @@ Pos :: @struct(x: f64, y: f64);
 Rect :: @struct(pos: Pos, w: f64, h: f64);
 
 on_frame :: fn(userdata: rawptr) void = {
+    with state.buffers&[0].line_lock& {
+        draw_frame();
+    };
+}
+
+draw_frame :: fn() void = {
     if state.process& { p |
-        buffer := state.buffers&[0]&;
+        buffer := state.buffers&[0];
         input := "";  // TODO: send it key presses
         status := poll(p.process&, @slice(state.scratch&, state.scratch&), false, input&, true);
         buffer.append_string(state.scratch.items());
@@ -198,7 +219,7 @@ on_frame :: fn(userdata: rawptr) void = {
     // if no events and no text from process, don't render a frame
     @if(Easy'should_skip_frame(state.app&, state.dirty&)) return();
     
-    each state.buffers& { b |
+    for state.buffers& { b |
         draw_text(b);
     };
     sg := state.sg&;
@@ -303,6 +324,13 @@ fn exit() void = {
 }
 
 on_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
+    b := selected_buffer();
+    if(b, fn(b) => b.line_lock&.lock());
+    handle_event(event);
+    if(b, fn(b) => b.line_lock&.unlock());
+};
+
+handle_event :: fn(event: *Sapp.Event) void = {
     if state.recording& { it |
         it.push(event);
     };
@@ -483,6 +511,27 @@ on_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
             // TODO: off the end to next line?
         };
         
+        if event.key_code == .F && event.modifiers.get(.super) != 0 {
+            search_for_selected(buffer);
+        };
+        
+        if event.key_code == .S && event.modifiers.get(.super) != 0 {
+            if state.save_file { path |
+                // :SLOW
+                out := u8.list(temp());
+                each buffer.lines& { line |
+                    out&.push_all(line.str());
+                    out&.push_all("\n");
+                };
+                out.len -= int(out.len != 0);  // remove trailing new line
+                if write_entire_file(path, out.items()) {
+                    @println("wrote % bytes to %", out.len, path);
+                } else {
+                    @println("failed to write to %", path);
+                }
+            };
+        };
+        
         if event.key_code == .ENTER {
             if event.modifiers.get(.shift) != 0 {
                 buffer.append_string("\n");
@@ -497,6 +546,7 @@ on_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
     };
     buffer := selected_buffer() || return();
     
+    // if it's ascii and not a keyboard shortcut, insert a character at the cursor. 
     if event.type == .CHAR && event.char_code < 127 && event.char_code >= 32 && event.modifiers.get(.super) == 0 {
         s: Str = (ptr = ptr_cast_unchecked(u32, u8, event.char_code&), len = 1);
         l := min(buffer.cursor.y.int(), buffer.lines.len - 1);
@@ -528,8 +578,14 @@ on_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
 };
 
 copy_from_selection :: fn(self: *TextBuffer) void = {
-    sel := fix(self.selection || return());
     buf := u8.list(temp());
+    self.get_selection(buf&);
+    buf&.push(0);
+    state.app&.set_clipboard_string(ptr = buf.maybe_uninit.ptr); 
+}
+
+get_selection :: fn(self: *TextBuffer, buf: *List(u8)) void = {
+    sel := fix(self.selection || return());
     
     startL := max(0, sel.start.y.int());
     endL   := min(self.lines.len, sel.end.y.int() + 1);
@@ -537,14 +593,11 @@ copy_from_selection :: fn(self: *TextBuffer) void = {
         text := self.lines[i]&.str();
         left := if(i == startL, => sel.start.x.int().min(text.len), => 0);
         right := if(i == endL - 1, => sel.end.x.int().min(text.len), => text.len);
-        buf&.push_all(text.slice(left, right));
+        buf.push_all(text.slice(left, right));
         if i != endL - 1 {
-            buf&.push("\n".ascii());
+            buf.push("\n".ascii());
         }
     };
-    
-    buf&.push(0);
-    state.app&.set_clipboard_string(ptr = buf.maybe_uninit.ptr); 
 }
 
 move_in_history :: fn(b: *TextBuffer, up: bool) void = {
@@ -581,7 +634,7 @@ find_mouse :: fn(event: *Sapp.Event) ?Ty(*TextBuffer, Pos) = {
                 x = (pos.x - b.at.pos.x) / state.scale + b.render.x, 
                 y = (pos.y - b.at.pos.y) / (state.scale * 2) + b.render.y,
             );
-            return(Some = (b, pos));
+            return(Some = (b[], pos));
         };
     };
     .None
@@ -627,7 +680,7 @@ find_link_at :: fn(b: *TextBuffer, line: i64, col: i64) ?Ty(i64, i64, i64) = {
 
 fn selected_buffer() ?*TextBuffer = {
     if(state.selected_buffer >= state.buffers.len, => return(.None));
-    b := state.buffers.index(state.selected_buffer);
+    b := state.buffers[state.selected_buffer];
     @debug_assert(b.lines.len > 0);
     (Some = b)
 }
@@ -637,7 +690,9 @@ main :: fn() void = {
     state[] = allocator.box_zeroed(State);
     state.text = allocator.box_zeroed(@type state.text[]);
     state.buffers = list(allocator);
+    state.search_tasks = list(allocator);
     state.process = .None;
+    state.save_file = .None;
     
     i := 0;
     a := cli_args();
@@ -653,6 +708,11 @@ main :: fn() void = {
                 user_data = zeroed rawptr,
                 allocator = general_allocator(),
             ));
+        };
+        if a[i] == "-save" {
+            path := a[i + 1].str();
+            state.save_file = (Some = path);
+            // TODO: load if the file already exists?
         };
         i += 1;
     };
@@ -694,6 +754,7 @@ TextBuffer :: @struct(
     num_lines_fit_on_screen: i64,
     
     selection: ?Selection,
+    line_lock: Mutex,
     
     // TODO: can be stale. should call update_hover more (so it shouldn't 
     //       take an Event, i should just remember the last mouse position)
@@ -701,6 +762,8 @@ TextBuffer :: @struct(
     //       - when you type and add text to the line
     hover: ?Ty(i64, i64, i64),   // (line, start col, end col)
 );
+
+#use("@/lib/sys/sync/mutex.fr");
 
 // in `state.selection`, `start` is always the first place you clicked (not the higher up one)
 Selection :: @struct {
@@ -908,8 +971,8 @@ fn remove_at(self: *Line, i: i64) void = {
     self.set_len(prev.len - 1);
 }
 
-fn empty(a: Alloc) TextBuffer = {
-    b := zeroed TextBuffer;
+fn empty(a: Alloc) *TextBuffer = {
+    b := a.box_zeroed(TextBuffer);
     b.gpa = a;
     b.lines&.push(empty_line, b.gpa);
     b.selection = .None;
@@ -1046,6 +1109,81 @@ exec_program :: fn(buffer: *TextBuffer, raw_command: Str) void = {
     };
 }
 
+search_for_selected :: fn(b: *TextBuffer) void = {
+    self := state.search_tasks.items().find(fn(it) => it.have_work == 0);
+    self := self || {
+        it := general_allocator().box_zeroed(SearchTask);
+        it.thread = SearchTask.start_thread(run, it);
+        it.needle = u8.list(general_allocator());
+        state.search_tasks&.push(it);
+        it&  // ugh... this is fine because of how stack frames work
+    };
+    b.get_selection(self.needle&);
+    self.buffer = b;
+    self.have_work = 1;
+    Futex'wake(self.have_work&, 1);
+};
+
+SearchTask :: @struct {
+    needle: List(u8);
+    buffer: *TextBuffer;
+    thread: *Thread;
+    have_work: u32;
+};
+
+fn run(self: *SearchTask) void = {
+    loop {
+        continue :: local_return;
+        Futex'wait(self.have_work&, 0);
+        if self.have_work == 0 {
+            continue();
+        };
+        start := timestamp();
+        needle := self.needle.items();
+        if needle.starts_with("\n") {
+            needle = needle.slice(1, needle.len);
+        };
+        if needle.ends_with("\n") {
+            needle = needle.slice(0, needle.len - 1);
+        };
+        // TODO: could imagine allowing this, its just a big inconvenient. 
+        //       currently the real terminal i use doesn't let you so its not a big deal for me yet. 
+        if needle.contains("\n") {
+            @println("searches containing new line are not supported");
+            self.needle&.clear();
+            self.have_work = 0;
+            continue();
+        }
+        @println("SEARCH:\n%", needle);
+        // TODO: allow case insensitive
+        
+        n := 0;
+        with self.buffer.line_lock& { 
+            n = self.buffer.lines.len;
+        };
+        matches := 0;
+        range_rev(0, n) { n |
+            with self.buffer.line_lock& {
+                line := self.buffer.lines[n]&.str();
+                // TODO: collect the locations that match and let you click around to them
+                if line.contains(needle) {
+                    @println("found needle on line %: %", n, line);
+                    matches += 1;
+                }
+            };
+            // drop the lock after each line in case the search takes multiple frames to complete. 
+            // gives the other thread a chance to take the lock. 
+            // TODO: that sucks if there are super long lines, maybe allow splitting them up more. 
+            // TODO: it would be nice if i had some way to give the ui thread priority if they contend. 
+        };
+        println("done searching");
+        ms := timestamp() - start;
+        @println("matched %/% lines in % ms", matches, n, ms);
+        self.needle&.clear();
+        self.have_work = 0;
+    }
+};
+
 StbTrueType :: {
     get  :: import("@/examples/testing.fr").fetch_or_crash;
     root := get("https://github.com/nothings/stb/archive/f0569113c93ad095470c54bf34a17b36646bbbb5.zip", 1754150, "b62be3009cb9d4b6385bd4854bddf72d8e91f4e19d1347d6cf9589b19f70d45d", "stb-f0569113c93ad095470c54bf34a17b36646bbbb5");
@@ -1066,7 +1204,6 @@ font_data_ttf :: fn() []u8 = :: {
     ast_alloc().read_to_string_or_crash(path).items()
 }
 
-
 // example usage:
 // { S :: @static(@type state); S[] = state; go(fn() void = { loop {| usleep(100000); S[].theme.background.r += 0.01; S[].dirty = true; } } ); };
 fn go(body: @FnPtr() void) void = {
@@ -1075,3 +1212,6 @@ fn go(body: @FnPtr() void) void = {
     ::F; // :OverloadingConfusedCoerce
     start_thread(F, fn(b: *F) void = b[](), body&);
 }
+
+#use("@/lib/sys/threads.fr");
+Futex :: import("@/lib/sys/sync/futex.fr");

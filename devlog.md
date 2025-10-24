@@ -1,4 +1,23 @@
 
+## (Oct 24)
+
+- micro comptime optimisations 
+  - (969.5 ms ±   6.8 ms, lit_fn = 3075, ir_ops = 487672, macro_calls = 35816, spec_const_fn = 16104, dyn_call = 46818)
+  - Fields -> make_enum_for_fields_uncached
+  - enum_basic.RAW -> get_enum_raw_type
+  - zeroed 
+    - offensive because it gets compiled for each slice type calling empty(). 
+      measuring the time in tracy for CompileBody:empty of each empty() default field value of EmitMacho struct
+    - before. 226us
+    - first outline `u8.ptr_from_raw(p).slice(T.size_of()).set_bytes(0);` 82us
+    - then make it a macro that just makes a Values of all zeros. 8us
+  - (910.2 ms ±  16.8 ms, lit_fn = 2754, ir_ops = 478884, macro_calls = 33227, spec_const_fn = 15344, dyn_call = 40458)
+    - it also disproportionately helped wasm. self: 5257ms -> 3887ms, mandelbrot_ui: 833ms -> 636ms. 
+      which i guess is consistant with the previous observation that jit_instantiate_module is the problem. 
+    - introduced a weird InProgressMacro problem in import_wuffs,
+      but the bug existed either way and its so much faster that ill just pretend its fine for now. 
+  - don't always re-intern expr_pair_type
+
 ## (Oct 23)
 
 - use an offscreen canvas to run the rendering in a worker 
@@ -8,6 +27,10 @@
 - automatically replace the output text box with a canvas when the program imports the graphics stuff. 
   rn doing it hackily since they all need to include_std(graphics/lib) at top level so it doesn't even need the compiler to tell you. 
 - don't need the hello.html example anymore
+- terminal: 
+  - basic searching. no ui yet, just printing the results. 
+    but running it on another thread so it can't hang on spinning wheel like warp.  
+  - save/load whole output history to a file so its easier to build up a large buffer so i can make sure the searching isn't slow
 
 ## (Oct 22)
 
