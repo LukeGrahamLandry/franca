@@ -178,6 +178,13 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
             // TODO: check that the handlers are unique! this just checks that its the right number of them. 
             @ct_assert(!count.ne(varients.len).and(not(had_default)), loc, "wrong number of @match cases",);
             @ct_assert(not(had_default).or(count.lt(varients.len)), loc, "@default but too many @match cases");
+            
+            // TODO: could do this in release mode. same speed but saves 10k. 
+            //if cases.len > 0 && !had_default {
+            //    default = cases[cases.len - 1]._1;
+            //    cases.len -= 1;
+            //};
+            
             make_switch(@{ tag_val }, default, cases)
         }]
     }
@@ -541,25 +548,17 @@ fn tagged($Tagged: Type) void = {
     fn is(self: *Tagged, check: T) bool #inline = self.tag().eq(check);
 }
 
-fn expect_enum(T: Type) void = {
-    info := get_type_info_ref(T);
-    // TODO: this doesn't compile with trying to eq on **FnBody ?????! :FUCKED
-    //assert(info.is(.Enum), "expected enum type");
-    //assert(info.Enum.sequential, "expected enum elements to be sequential");
-}
-
 fn is_fake_int(T: *TypeInfo) bool = {
     T.is(.Int) && T.Int.bit_size != 64 && T.Int.bit_size != 32 && T.Int.bit_size != 16 && T.Int.bit_size != 8
 }
 
 get_enum_raw_type :: fn(T: Type) Type #fold = { 
     i := get_type_info_ref(T); 
+    // TODO: assert(i.is(.Enum), "expected enum type");
     i.Enum.raw 
 };
     
 fn enum_basic($T: Type) void = {
-    ::@late T.expect_enum();
-        
     fn eq(a: T, b: T) bool #inline #fold = a.raw() == b.raw();
     fn ne(a: T, b: T) bool #inline #fold = a.raw() != b.raw();
     
@@ -653,20 +652,6 @@ fn try_ordinal(self: ~RefT) ?i64 #where(PointerTo(IsEnum)) #inline = {
     })
 }
 
-// TODO: fix infinite loop from ?i64 if this is in fn enum. -- Jul 8
-fn from_raw($T: Type) void = {
-    ::@late T.expect_enum();
-    
-    fn from_raw(raw: i64) ?T = {
-        ::if(?T);
-        // Note: this relies on it being sequentual. 
-        if(raw < 0 || raw >= @run T.enum_cases().len(), => .None) {
-            value := bit_cast_unchecked(i64, T, raw);
-            (Some = value)
-        }
-    } 
-}
-
 fn enum_cases(T: Type) []Ty(Symbol, Values) = {
     info := get_type_info_ref(T);
     assert(info.is(.Enum), "expected enum type");
@@ -678,15 +663,13 @@ fn enum_cases(T: Type) []Ty(Symbol, Values) = {
 fn late(e: FatExpr) FatExpr #macro = e;
 
 // TODO: define the syntax as a call to this function. maybe get rid of the syntax. cause its a pain.
-//       then this can just be an export_ffi that calls immediate_eval_expr, but that requores passing expected type to macros. 
-fn run(e: FatExpr) FatExpr #macro = @{ :: @[e] };
+fn run(e: FatExpr) FatExpr #macro = {
+    e := ast_alloc().boxed(FatExpr, e);
+    (expr = (ConstEval = e), loc = e.loc, ty = UnknownType, done = false)
+};
 
-// TODO: this is useless because you can't unquote inside. 
-//       tho actually, it does get here, you could handle the unquoting in here... maybe. 
-fn quote(e: FatExpr) FatExpr #macro = 
-    @literal e;
-
-/// @expand @quote X === X
+// This lets you use comptime code to construct an expression and embed it without making a #macro function. 
+// Which can be less verbose if the macro would have just done const_eval(T) on all its parameters. 
 fn expand(e: FatExpr) FatExpr #macro = 
     (const_eval(FatExpr)(e));
 

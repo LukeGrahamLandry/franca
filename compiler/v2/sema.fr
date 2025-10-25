@@ -1436,7 +1436,7 @@ fn contextual_field(self: *SelfHosted, name: Symbol, expr_out: *FatExpr, type: T
             each f.fields { f |
                 if f._0 == name {
                     ff := f._1&;
-                    value := ff.clone(self.get_alloc());
+                    value := ff[];
                     expr_out.set(value, type);
                     return(.Ok);
                 };
@@ -1718,7 +1718,7 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
                         //       and maybe you should still allow a coerce there... idk                 
                     };
                     bytes := value.expr.Value.bytes&;
-                    expr.set(bytes.clone(self.get_alloc()), ret_ty);
+                    expr.set(bytes[], ret_ty);
                 };
             };
         };
@@ -2552,10 +2552,10 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
     };
     
     self.compute_new_overloads(overloads);
-    had_new_overloads := overloads.ready.len > attempt.last_ready_count;
+    had_new_overloads := overloads.ready.len > attempt.last_ready_count.zext();
     if had_new_overloads {
         attempt.state = 0;
-        new := overloads.ready.items().slice(attempt.last_ready_count, overloads.ready.len);
+        new := overloads.ready.items().slice(attempt.last_ready_count.zext(), overloads.ready.len);
         attempt.options&.reserve(new.len);
         want_arity := arity(arg_expr);
         for new { option | 
@@ -2564,7 +2564,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
                 attempt.options&.push_assume_capacity(option);
             };
         };
-        attempt.last_ready_count = overloads.ready.len;
+        attempt.last_ready_count = overloads.ready.len.trunc();
     };
     want_arity := arity(arg_expr);
     ::if([]FatExpr);
@@ -2594,7 +2594,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
                 func := self.get_function(fid[]);
                 func.get_flag(.UnboundGenerics) || func.finished_arg.is_none() || func.first_par_type() == first_type
             };
-            attempt.prev_index = attempt.options.len;
+            attempt.prev_index = attempt.options.len.trunc();
         };
     };
     
@@ -2604,12 +2604,11 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
         @if(!SPAM_TRACE) start(1, "");
         are_we_done_yet();
         // TODO: while is it faster to write the loop like this than with for?
-        current_len := attempt.options.len;
-        f_i := if(!had_new_overloads, => attempt.prev_index, => attempt.options.len);
-        attempt.prev_index = f_i;
+        f_i := if(!had_new_overloads, => attempt.prev_index.zext(), => attempt.options.len);
+        attempt.prev_index = f_i.trunc();
         
         while => f_i > 0 {
-            attempt.prev_index = f_i;
+            attempt.prev_index = f_i.trunc();
             f_i -= 1;
             fid := attempt.options[f_i];
             @if(SPAM_TRACE) start(1, @if(ENABLE_TRACY, @tfmt("%", fid), ""));
@@ -2643,7 +2642,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
         };
         
         attempt.state = 1;
-        attempt.prev_index = attempt.options.len;
+        attempt.prev_index = attempt.options.len.trunc();
         @if(!SPAM_TRACE) end();
     };
     
@@ -2695,18 +2694,17 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
             are_we_done_yet();
         };
         attempt.state = 2;
-        attempt.prev_index = attempt.options.len;
+        attempt.prev_index = attempt.options.len.trunc();
         end();
     };
     
     if attempt.state < 3 {
         start(3, "");
         @if_let(attempt.call.requested) fn Specific(type) => {
-            current_len := attempt.options.len;
-            f_i := if(!had_new_overloads, => attempt.prev_index, => attempt.options.len);
+            f_i := if(!had_new_overloads, => attempt.prev_index.zext(), => attempt.options.len);
             while => f_i > 0 {
                 continue :: local_return;
-                attempt.prev_index = f_i;
+                attempt.prev_index = f_i.trunc();
                 f_i -= 1;
                 reject :: fn() void => {
                     attempt.options&.unordered_remove_discard(f_i);
@@ -3456,7 +3454,7 @@ fn find_const(self: *SelfHosted, name: Var, requested: ResultType) Maybe(Ty(Valu
                 //self.save_guessed_name(Type.assume_cast(f.bytes&)[], name.name, var.expr.loc);
             };
         
-            return(Ok = (f.bytes&.clone(self.get_alloc()), var.expr.ty));
+            return(Ok = (f.bytes, var.expr.ty));
         };
     };
     
@@ -3467,7 +3465,7 @@ fn find_const_non_blocking(self: *SelfHosted, name: Var) ?Ty(Values, Type) #once
     var := self.scopes.get_constant(name);
     var := or(var, => return(.None));
     @if_let(var.expr.expr&) fn Value(f) => {
-        return(Some = (f.bytes&.clone(self.get_alloc()), var.expr.ty));
+        return(Some = (f.bytes, var.expr.ty));
     };
     .None
 }
@@ -4063,7 +4061,7 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
 // TODO: decide if need to set 
 fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
     @match(expr.expr&) {
-        fn Value(f) => (Some = f.bytes&.clone(self.get_alloc()));
+        fn Value(f) => (Some = f.bytes);
         fn GetVar(f) => {
             if f.kind == .Const {
                 // This is a super common case because you type `arg: i64` a lot. 
@@ -4073,7 +4071,7 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
                     //       but without this you get an infinite loop on #link_rename
                     //       TODO: revisit this, #link_rename doesn't exist anymore but whatever the problem it revealed probably does -- Jun 15, 2025
                     // TODO: make a test that fails if you just do this now!
-                    expr.expr = (Value = (bytes = f._0&.clone(self.get_alloc())));
+                    expr.expr = (Value = (bytes = f._0));
                     expr.ty = f._1;
                     // We can't report a type erorr from here so just let the slow path deal with it. 
                     if(ret_ty == f._1, => return(Some = f._0));
@@ -4111,7 +4109,7 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
                         zone := zone_begin(.CallDynamic);
                         res := self.call_dynamic_values(f_ptr, f.ty, arg_value&.bytes());
                         zone_end(zone);
-                        expr.set(res&.clone(self.get_alloc()), f.ty.ret);
+                        expr.set(res, f.ty.ret);
                         return(Some = res);
                     };
                 };
@@ -4127,7 +4125,7 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
                             if(func.get_flag(.AvoidJitShim), => return(.None));
                             self.finish_layout_deep(it.f.ty);
                             res := self.call_dynamic_values(f_ptr.int_from_rawptr(), f[], arg_value&.bytes());
-                            expr.set(res&.clone(self.get_alloc()), f.ret);
+                            expr.set(res, f.ret);
                         };
                     };
                 };

@@ -197,7 +197,7 @@ fn tuple_of(self: CompCtx, types: []Type) Type = {
     }
 }
 
-fn get_tuple_field_name(self: CompCtx, i: i64) Symbol = {
+fn get_tuple_field_name(self: CompCtx, i: i64) Symbol #inline = {
     ::if(Symbol);
     ::enum(Flag);
     if i <= 20 {  // don't allocate for common numbers
@@ -256,10 +256,15 @@ fn unwrap(arg: FatExpr, ret: FatExpr) FatExpr #macro = {
     @{
         cond := @[parts[0]];
         if cond&.is_none() {
-            out: List(u8) = list(temp());
-            out&.push_all("Missing Value: ");
-            @[format_into(@{ out& }, parts.rest(1), arg.loc)];
-            @[ret](@err(out.items()));
+            msg := @[@if(parts.len == 2, {
+                parts[1]
+            }, @{
+                out: List(u8) = list(current_comptime().get_alloc());
+                out&.push_all("Missing Value: ");
+                @[format_into(@{ out& }, parts.rest(1), arg.loc)];
+                out.items()
+            })];
+            @[ret](Err = make_error(msg));
         };
         cond.unwrap()
     }
@@ -367,8 +372,6 @@ add_compiler_hashers :: {
     fn display(a: *ScopeId, out: *List(u8)) void = 
         @fmt(out, "S%", a[].as_index());
     
-    fn hash(h: *H, s: *VarType) void #redirect(Ty(*H, *i64), void);
-    
     fn hash(h: *H, s: *Var) void = {
         h.hash(s.id&);
     }
@@ -461,8 +464,6 @@ fn find_struct_field(f: *get_variant_type(TypeInfo, .Struct), name: Symbol, inde
 
 fn log(v: *Var, pool: CompCtx) Str = 
     @tfmt("%%%", pool.get_string(v.name), "%", v.id.id);
-
-//fn log(self: *SelfHosted, v: *Var) Str = log(v, self.comp());
 
 fn unwrap_ty(self: *Binding) Type = {
     @debug_assert(self.ty&.is(.Finished), "type not ready!");
@@ -658,7 +659,6 @@ BakedValue :: @struct {
     export: bool = false;
     need_reify := false;
     loc: Span;
-    //jit_addr := 0;
     name: Symbol = Flag.SYMBOL_ZERO.ident();
 };
 
@@ -666,7 +666,6 @@ SymIdx :: @tagged(FuncId: FuncId, BakedVarId: BakedVarId, Var: VarId);
 BakedReloc :: @struct {
     target: SymIdx;
     off: u32;
-    // TODO: franca code can't use this yet but import_c can so we just pass it through to the backend
     addend: i64;
 };
 

@@ -415,8 +415,6 @@ hould just make them local constants in each file like they are here in riscv
 - macho exe_debug_symbol_table doesn't work i clion profiler (dtrace?)
 - debug assert that all tmps have a definition in rega. 
   (especially because @emit_instructions doesn't catch it)
-- turn off ASSUME_NO_ALIAS_ARGS in arm/abi. it doesn't help much and it would be better to do the hard thing 
-  and figure out how to make UNSOUND_SKIP_EXTRA_BLIT in emit_ir work. 
 - arm relocatable import: relocation to fold symbol offsets into the adrp+add instead of wasting an extra instruction :SLOW
 - fixup2.ssa: "this should work without the indirection, i just don't handle folding the offset into the constant correctly."
   i think that's fixed now. add a little test of that too
@@ -564,7 +562,6 @@ need to be careful about the refs which have tags in the high bits so won't leb 
   - fix 09-funcs so it gets as far as the assertion failing because i don't do init/fini.
   - compile harec with import_c
   - pass the library tests as well
-  - don't forget ASSUME_NO_ALIAS_ARGS might break things
   - why isn't clang giving me a static binary?
   - be a drop in replacement for qbe that harec can use. need to deal with the fact that i don't output text assembly. 
     just provide a script that you can use as hare's assembler that dispatches to a real assembler if it's actually text? 

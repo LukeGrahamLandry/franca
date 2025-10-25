@@ -1,4 +1,25 @@
 
+## (Oct 25)
+
+- there's a few places in sema where im cloning a Values 
+  as though i have to avoid alising the bytes that a Big points to,
+  but think i never mutate a Values directly like that, 
+  i just replace the expr.Value.bytes field entirely with a new one. 
+  clone is just a shallow copy of those bytes anyway so it can't do anything meaningful for pointers. 
+  the places that are sketchy is 
+  - call_dynamic_values(args_value). passes a pointer to those bytes to the trampoline from create_dyncall_shim
+    but that's fine because argc does a copy. 
+    - tho ASSUME_NO_ALIAS_ARGS is wrong then so extra reason to get rid of it. made a test that only fails with @run to proves it.
+  - bake_relocatable_value, but again im not cloning in that so it would only work by luck if the other 
+    code path caused it to always get fresh values. and it recurses through pointers since thats 
+    its whole purpose and those wouldn't be cloned and couldn't be because you're allowed to 
+    point at memory that isn't mananged by the compiler. really the bake operation is the clone. 
+- woah, turning off ASSUME_NO_ALIAS_ARGS makes it like 15ms faster. that's strange. i guess it helps elide_abi_slots? 
+- shrink OverloadAttempt. size_of(Task) 184 -> 152.
+- (874.8 ms ±   6.6 ms, lit_fn = 2754, ir_ops = 475912, macro_calls = 33188, spec_const_fn = 15343, dyn_call = 40485, 888800 bytes)
+- just make the struct in @run instead of using the syntax
+- from_raw(Enum) is only used in one place. inline it.
+
 ## (Oct 24)
 
 - micro comptime optimisations 
