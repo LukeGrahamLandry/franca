@@ -34,6 +34,8 @@ main :: fn() void = {
     args := args.rest(i - 1);  // meh, for now: argv[0] == "--"
     
     E :: {  
+        insert :: fn(scope, name, value) => 
+            (fr.vtable.add_to_scope)(fr.data, scope, name, @type value, raw_from_ptr(@type value, value&));
         E :: Exports;
         s := Type.scope_of(E.env);
         fr := current_compiler_context();
@@ -42,9 +44,30 @@ main :: fn() void = {
             XX :: name[];
             crash := fn() void = @panic("wasm guest called a weak function: %", XX);
             if get_constant(s, ::name[].sym()).is_none() {
-                (fr.vtable.add_to_scope)(fr.data, s, ::name[].sym(), FuncId, FuncId.raw_from_ptr(crash&));
+                insert(s, ::name[].sym(), crash);
             };
         };
+        
+        // for now just stub these out so it can still run examples/web/demo.fr as its compiling a non-graphics program. 
+        // the way i handle imports for the child jitted program in b.fr means the compiler always 
+        // has to import the graphics functions before knowing if it actually needs them. 
+        // TODO: eventually i want to link dawn and make this work for real. 
+        if file_exists("target/franca/webgpu.g.fr") {
+            WGPU := import("@/target/franca/webgpu.g.fr");
+            crash :: fn() void = @panic("TODO: import_wasm does not support webgpu");
+            // TODO: i don't make a scope for @struct(francaRequestState :: crash); it only works with {} :compilerbug
+            webgpu := @struct {
+                francaRequestState :: crash;
+            };
+            w := Type.scope_of(webgpu);
+            for WGPU.get_constants() { n |
+                if n.str().starts_with("wgpu") {
+                    insert(w, n, crash);
+                };
+            };
+            insert(Type.scope_of(E), @symbol webgpu, webgpu);
+        };
+        
         E
     };
     
@@ -173,6 +196,12 @@ WellKnown :: import("@/examples/import_wasm/well_known.fr");
 // TODO: make it easy to ship these as a binary form of the ir so you can inline accross host calls. 
 Exports :: @struct {
     env :: @struct {
+        // (same reasoning as the webgpu ones. see comment above.)
+        fmodf :: fn() void = panic("TODO: fmodf");
+         fmod :: fn() void = panic("TODO: fmod");
+         sinf :: fn() void = panic("TODO: sinf");
+         cosf :: fn() void = panic("TODO: cosf");
+    
         putchar :: fn(_: *u8, c: u8) i32 = 
             WellKnown'putchar(c);
         getchar :: fn(_: *u8) u8 = {

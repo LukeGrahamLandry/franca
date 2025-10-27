@@ -1,5 +1,11 @@
 
-- the graphics test programs are no longer compiled in ci
+- sad redundant work:
+  - it runs the backend twice when something is used at comptime and runtime,
+    even if both are the same architecture, and even the early passes where i carefully kept them target independent. 
+    (easy example: fill_tree and codes_from_lengths)
+  - inline_for makes it re-sema even when thats not helpful. 
+    sha256.update would be better off if i could just generate the ir once 
+    and require the backend to unroll the loop. 
 - `u1, u2, v1, v2 : Ty(f32, f32, f32, f32) = (0.0, 1.0, 0.0, 1.0);  // TODO: allow this :compiler`
 - using @switch on an enum instead of @match is an easy footgun because it expects @case(.foo) instead of fn foo() and then you'll be confused
 - Type Error when calling a function ugently needs to show both the call site and the declaration site
@@ -364,8 +370,6 @@ different subsets of the same resources.
       anyway, you should pass in a vtable of how to get imports when creating the compiler, 
       so you just have two different entry points. 
 - syscall wrappers support wasip1
-- web demo that runs all the tests
-  - make it run in node in actions
 - stack traces
 - make the wasmtime version work
 - add a .ssa test that tests dynalloc with a deeper callstack
@@ -381,6 +385,9 @@ different subsets of the same resources.
   - echo.ssa: `$main(w %argc, l %argv)`
   - vararg1.ssa, vararg2.ssa: vprintf
   - compiler/main.fr jit: `wasm-jit $__franca_aot_debug_info should have known got_lookup_offset`
+- autotest run tests/exe/wasm.fr
+- add the small franca tests to the web demo
+- add the import_c things with dependencies to the web demo
 - threads. it's a pain in the ass tho. 
   - need cors to use sharedarraybuffer which limits the environments people can use your thing in.
     (no github pages, no `python3 -m http.server`)
@@ -391,6 +398,7 @@ different subsets of the same resources.
   instead of only all at once in output_wasm_module_jit
 - improve import_wasm until it can cope with bootstrapping zig1.wasm
 - kinda lame that web/demo.fr has to special case the graphics programs instead of drivers working properly
+- examples/terminal.fr stbtt__run_charstring panic! missing br_if target @120 -> @122
 
 ## backend 
 

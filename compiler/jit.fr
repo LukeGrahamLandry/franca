@@ -4,6 +4,7 @@
 DynCallShim :: @tagged(Pending: Qbe.Sym, Ready: rawptr);
 
 fn call_dynamic_values(self: *SelfHosted, f_ptr: i64, f_ty: FnType, args_value: []u8) Values = {
+    zone := self.zone_begin_dyncall(f_ptr.rawptr_from_int());
     self.stats.dyn_call += 1;
     callee := self.dyncalls&.get_or_insert(f_ty) {
         // 
@@ -30,7 +31,6 @@ fn call_dynamic_values(self: *SelfHosted, f_ptr: i64, f_ty: FnType, args_value: 
     // TODO: canary?
     ret_size: i64 = self.get_info(f_ty.ret)[].stride_bytes.zext();
     ret_buf := temp().alloc_zeroed(u8, ret_size);  // TODO: alignment?
-    zone := zone_begin(.CallDynamic);
     callee(args_value.ptr, ret_buf.ptr, f_ptr);
     zone_end(zone);
     self.from_bytes(ret_buf)
@@ -264,7 +264,7 @@ fn create_jit_shim(self: CompCtx, shared: *FrontendCodegen, fid: FuncId, handler
     };
     
     @debug_assert(!shared.worker.threaded);
-    if func.get_flag(.TookPointerValue) {
+    if func.get_flag(.TookPointerValue) || ENABLE_TRACY {
         // TODOWASM: don't make_exec for this, just assign a got_lookup_offset
         self.data.cast()[][].created_jit_fn_ptr_value(fid, shared.wait_for_symbol(id).int_from_rawptr());
     };
@@ -294,7 +294,7 @@ fn shallow_jit_func(self: *SelfHosted, fid: FuncId) Res(void) = {
     
     shared := self.comptime_codegen;
     @debug_assert(!shared.worker.threaded);
-    if func.get_flag(.TookPointerValue) {
+    if func.get_flag(.TookPointerValue) || ENABLE_TRACY {
         id := self.comptime_jit_symbol_id(fid);
         self.created_jit_fn_ptr_value(fid, shared.wait_for_symbol(id).int_from_rawptr());
     };
@@ -356,8 +356,6 @@ report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHo
             @panic("Called an #avoid_shim function through a jit_shim");
         };
         if func.get_flag(.RealAsmDone) { 
-            // TODO: this probably needs to be inside the push_context because it might hit an inner poll_in_place,
-            //       but that's sad because most of the time its just an array lookup.  -- Nov 25
             if self.get_fn_callable(fid) { addr | 
                 // the shim itself checks that the address in GOT matches the shim address before calling into the compiler. 
                 // so replacing it with the real address now makes future calls faster (even if they go through the old function pointer). 
@@ -381,7 +379,6 @@ report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHo
                     };
                 };
                 if !first {
-                
                     // If its an import we're never gonna make progress by trying to compile it. 
                     if func.get_flag(.BodyIsSpecial) {
                         @panic("Tried to call uncompiled function:\n %", self.get_function(fid).log(self));
@@ -416,4 +413,18 @@ fn get_fn_callable(self: *SelfHosted, fid: FuncId) ?rawptr = {
         result = (Some = c);
     };
     result
+}
+
+fn zone_begin_dyncall(self: *SelfHosted, f_ptr: rawptr) TraceCtx = {
+    zone := zone_begin(.CallDynamic);
+    @if(ENABLE_TRACY) {
+        if self.baked.vmem&.get(f_ptr) { it, _ |
+            @if_let(it) fn FuncId(it) => {
+                m := self.comptime_codegen.m;
+                name := m.str(self.comptime_jit_symbol_id(it));
+                ___tracy_emit_zone_name(zone, name);
+            };
+        };
+    };
+    zone
 }
