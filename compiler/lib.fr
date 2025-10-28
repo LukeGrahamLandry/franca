@@ -492,23 +492,23 @@ fn main_thread_pump(comp: CompCtx, shared: *FrontendCodegen, fns: []FuncId, wrap
     a      := comp.get_alloc();
     env    := comp.get_comptime_env();
     opts   := comp.get_build_options();
-    
     ::enum(@type shared.m.goal.type);
     when := @if(shared.m.goal.type == .JitOnly, ExecStyle.Jit, .Aot);
-    // TODO: really you want to mark them export
+    // TODO: dynamiclib is kinda broken because i rely on OS being set by runtime_init
+    dynamiclib := shared.m.goal.type == .Dynamic;
+    wrap_main := wrap_main && when == .Aot && !dynamiclib;
+    
     for fns { f |
         id := shared.m.intern(comp.fmt_fn_name(f));
         use_symbol(shared.m, id) { s |
             s.referenced = true;
+            if !dynamiclib && !wrap_main {
+                s.export = true;
+            };
         };
-        // TODO
-        //comp.get_function(f).set_flag(.Export);
     };
     
     self: MainThreadPump = (funcs_done = empty(a), funcs_seen = empty(a), work_stack = list(a), pending = list(a), comp = comp);
-    // TODO: dynamiclib is kinda broken because i rely on OS being set by runtime_init
-    dynamiclib := shared.m.goal.type == .Dynamic;
-    wrap_main := wrap_main && when == .Aot && !dynamiclib;
     if wrap_main {
         rt_init := env.runtime_init.expect("declaration of franca_runtime_init (forgot to include lib/core.fr?)");
         self.work_stack&.push(rt_init);

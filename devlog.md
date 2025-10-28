@@ -1,4 +1,16 @@
 
+## (Oct 28)
+
+- build script with very convoluted way of doing relocations in an AsmFunction 
+  so i don't need to use a real assembler just to make an extry point 
+  that sets the stack pointer. recurring pain point. 
+
+## (Oct 27)
+
+- giving a more serious attempt to having a thing run in qemu without an operating system
+- failed at trying to make qemu exit at the end instead of just being there forever. 
+  at least `wfi` makes it hang at 0% cpu instead of 100% cpu (which `b .` does), thats an improvement. 
+
 ## (Oct 25)
 
 - there's a few places in sema where im cloning a Values 

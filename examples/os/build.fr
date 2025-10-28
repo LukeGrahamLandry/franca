@@ -1,0 +1,91 @@
+
+driver :: fn(vtable: *ImportVTable) void = {
+    compile(vtable);
+    #use("@/examples/testing.fr");
+    sh(@slice("ld", "-nostdlib", "-Texamples/os/linker.ld", "target/kernel.o", "-o", "target/kernel.elf"));
+    println("running...   (to turn it off, ctrl-a then press x)");
+    sh(@slice("qemu-system-aarch64", "-machine", "virt", "-cpu", "cortex-a57", "-kernel", "target/kernel.elf", "-nographic"));
+}
+
+compile :: fn(vtable: *ImportVTable) void = {
+    env: TargetEnv = (arch = .aarch64, os = .linux);
+    src := "#include_std(\"lib/core.fr\");#include_std(\"examples/os/kernel/start.fr\");";
+    build_options := vtable.default_build_options();
+    build_options.retain_function_names = true;
+    comp := vtable.new_with_src(src, "examples/os/kernel/start.fr", build_options);
+    fr := vtable.with(comp);
+    
+    entry := ProgramEntry.GiveMeTheCodeAndGiveItToMeRaw;
+    fid := or fr.get_unique_named("main") {
+        panic("expected exactly one function called 'main'")
+    };
+    fns := @slice(fid);
+    
+    m := @uninitialized Qbe.Module;
+    init_default_module_dyn(m&, fr.vtable, (
+        os = .linux, 
+        arch = .aarch64, 
+        type = .Relocatable,
+        link_libc = false,
+    ));
+    m.goal.have_entry_point = true;  // TODO: why isn't this enough to replace `ENTRY(_start)`
+    
+    // HACK: shouldn't be relying on name mangling like this 
+    // TODO: i don't have a way to ask for sane names without franca_runtime_init or making a dynamic library
+    emit_entry(m&, @tfmt("main__%", @as(u32) fid));
+    chunks := {fr.vtable.emit_qbe_included}(Qbe.Module.raw_from_ptr(m&), fr&, fns, entry);
+    bytes := concat(chunks&, temp());
+    write_entire_file_or_crash("target/kernel.o", bytes);
+}
+
+// TODO: should make an api for this that isn't so painful
+emit_entry :: fn(m: *Qbe.Module, main: Str) void = {
+    #use("@/backend/arm64/bits.fr");
+    start := m.intern("_start");
+    main := m.intern(main);
+    m.goal.entry_point = "_start";
+
+    code := zeroed Qbe.MultiArchAsm;
+    wfi :: 0xd503207f;
+    code&[.aarch64] = interpret_as_bytes(@const_slice(
+        arm_nop,  // adr fp, stack_top
+        arm_nop,  // ^
+        add_im(.X64, sp, fp, @as(u12) 0, 0b0),
+        arm_nop,  // bl main
+        wfi
+    ));
+    m.add_code_bytes(start, code&);  
+    m.maybe_add_export(start, true);
+    m.emit_data(
+        id = m.intern("stack_end"),
+        template = (Zeroes = 0x10000),
+        relocations = empty(),
+    );
+    stack_top := m.intern("stack_top");
+    m.emit_data(
+        id = stack_top,
+        template = (Zeroes = 0),
+        export = true,
+        relocations = empty(),
+    );
+    // +4 becuase i insert bti. :(
+    use_symbol(m, start) { s_start |
+        use_symbol(m, stack_top) { s_stack_top |
+            push_fixup(m, s_stack_top, (
+                patch_at = u8.raw_from_ptr(m.segments&[.Code].mmapped.index(s_start.offset + 0 + 4)),
+                type = (InReg = (r = fp, increment = 0)),
+            ));
+        };
+        
+        use_symbol(m, main) { s_main |
+            s_main.strong = true;
+            push_fixup(m, s_main, (
+                patch_at = u8.raw_from_ptr(m.segments&[.Code].mmapped.index(s_start.offset + 12 + 4)),
+                type = .Call,
+            ));
+        };
+    };
+}
+
+Qbe :: import("@/backend/lib.fr");
+#use("@/lib/sys/fs.fr");
