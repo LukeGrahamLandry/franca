@@ -60,6 +60,7 @@
 - enable caching of the .frc between -syscalls and normal. (they're one byte different)
 - better apis for working with paths and temporary files
 - use `#macro #outputs(T)` to give a more sane error message for `x: i64 = @is(foo, .A, .B);` etc. 
+- improve interactive_read_line
 
 ---
 
@@ -399,6 +400,7 @@ different subsets of the same resources.
 - improve import_wasm until it can cope with bootstrapping zig1.wasm
 - kinda lame that web/demo.fr has to special case the graphics programs instead of drivers working properly
 - examples/terminal.fr stbtt__run_charstring panic! missing br_if target @120 -> @122
+- examples/web/build.fr don't leak old target/dev-time.txt files. seems rude that you have to go clean them up yourself. 
 
 ## backend 
 
@@ -867,6 +869,7 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
 - save cmd history to file as well (not just output) so up/down work across restarts (and maybe auto save)
 - jump around past commands like warp
 - ui for showing search results
+- ui for canceling search
 - environment variable syntax
 - tell child programs that im a terminal. ie. ls gives me one column instead of two.
 - if something's outputting invalid utf8, switch to hex view,
@@ -878,6 +881,24 @@ actually that's a bit too agressive but certainly stop processing ANSI escape co
 - auto-scroll if you put the mouse at the edge of the screen while highlighting to grow your selection
 - undo
 - factor out a text widget so its not a big deal to make other gui examples that want a bit of text input. 
+- paste at the cursor instead of always at the end of the buffer
+- allow limiting scroll back so it doesn't eat memory forever. 
+  maybe an option to have it dump to a file when it scrolls off to far so it doesn't delete information. 
+- triple clicking past the end of a line should count as clicking on the line and select it all
+- make highlighting feel less bad. 
+  currently you have to be careful not to drag up past your starting height or you loose it. 
+- add some margin on the left so it feels less cramped and its easier to click on the beginning of a line. 
+- backspace should delete the whole selection instead of one character
+- cmd+x to cut
+- left/right arrow key should move to that side of the selection and unselect
+- cmd+a to select the whole line
+- poll() only gets 81920 bytes per frame.
+  the BigOutputBuffer isn't enough, sometimes it doesn't get a full 64k before the next read. 
+  if you cat a gigabyte file it takes like 3 minutes
+  but its 5 seconds with the poll loop condition changed to `(len != 0 && (len < space || realloc))`.
+  (which is still slow but better. and also wrong because then its a blocking poll 
+   until the process doesn't get a turn to run between reads tho its fine for my terminal because it has realloc=false)
+- let you get out of lock_to_bottom while a process is spamming output
 
 ## Graphics
 
@@ -938,6 +959,39 @@ TODO: this happens when compiling targetting libc from a compiler built without 
   - its cringe that im pre-generating webgpu.g.js and webgpu.g.fr instead of doing it in the browser like everything else. 
   - be able to precompile the graphics library so the demo isn't as slow
   - make downloading one compiled for aot macos graphics work in the demo and give sane error if you try for linux
+
+## os
+
+what do i need to run my compiler (and some fun test programs)
+- syscalls
+- virtual memory
+  - mmap, munmap, mprotect
+- signals for catching segfault etc
+  - sigaction
+- file system
+  - open, read, write, remove, readdir, close, lseek, mkdir, rename, fstat
+  - what fake block device will qemu give me? 
+  - do i want to use a real file system layout so i can maybe share folders, etc.?
+- threads
+  - create, join
+- futex
+  - wait, wake
+- processes
+  - spawn (preferably without fork because i think thats kinda dumb)
+  - poll, waitpid, exit, pipe, dup2
+- timers
+  - clock_gettime, sleep
+- keyboard input so you can type commands in a terminal
+- dynamic libraries
+  - dlopen, dlsym
+- cli arguments / get exe path
+
+really a lot of that should just be in user space probably. 
+like the only useful primitive is having tasks with mostly seperate address spaces 
+but some shared memory so they can send messages back and forth, 
+and sandboxing who's allowed to talk to what hardware things. 
+all the chrome around the file system like how paths are resolved or whatever 
+should just be a program so i can test it in a normal operating system with a fake block device. 
 
 ## stuff i broke
 

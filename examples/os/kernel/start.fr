@@ -1,24 +1,129 @@
 
 main :: fn() void = {
+    sane_main();
+}
+
+sane_main :: fn() void = {
     _, c := create_and_set_unsafe_environment();
     c.panic_hook = kpanic;
-    raw_print("These are the first words I have to say.\nThat's probably why they took so long to write.\n");
+    kprint("These are the first words I have to say.\nThat's probably why they took so long to write.\n");
+    
+    print_el();
+    setup_interrupts();
+    
+    kprint("A\n");
+    do_eret(789, @as(rawptr) user_func);
+    kpanic("eret returned");
+}
+
+print_el :: fn() void = {
+    kprint("Current Exception Level: ");
+    c := "0".char() + current_el().shift_right_logical(2);
+    putchar(c.trunc());
+    kprint("\n");
+}
+
+setup_interrupts :: fn() void = {
+    interrupt_base := int_from_ptr(@type interrupt_handlers[], interrupt_handlers);
+    if interrupt_base.umod(2048) != 0 {
+        // TODO: have a way to ask for the global to have the right alignment
+        // TODO: have a more official way to ask for it to be in executable memory
+        kpanic("unaligned exception vector");
+    };
+    
+    // TODO: preserve and restore all registers
+    #use("@/backend/arm64/bits.fr");
+    each interrupt_handlers { it |
+        distance := int_from_rawptr(@as(rawptr) syscall_func) - u32.int_from_ptr(it);
+        it[] = b(distance / 4, 0);
+    };
+    
+    set_interrupt_vec_to_el1(interrupt_handlers);
 };
+
+interrupt_handlers :: @static(Array(u32, 0x200));
+
+user_func :: fn(arg: i64) void = {
+    kprint("inside user_func\n");
+    kprint_label("user argument is: ", arg);
+    // print_el();  // you can tell you're in el0 because reading CurrentEL is an illegal instruction
+    
+    result := do_syscall(123);
+    kprint_label("syscall result is: ", result);
+    // TODO: if you try to do it again, it happens an extra time, oops. 
+    //       problem is that syscall_func's stack frame doesn't get unwound. 
+    
+    spin();
+};
+
+syscall_func :: fn(arg: i64) void = {
+    kprint("inside syscall_func\n");
+    print_el();
+    kprint_label("syscall argument is: ", arg);
+    
+    // look backward on the stack. 
+    // last lr was the call to do_syscall because interrupt_handlers uses set_link=false.
+    p := Crash'trace_start();
+    p := Crash'trace_prev(p);
+    p := Crash'trace_return(p);
+    
+    do_eret(arg * 2, p);
+    kpanic("failed to eret from syscall");
+};
+
+Crash :: import("@/lib/crash_report.fr");
+
+do_syscall :: @AsmFunctionArmOnly(fn(arg: i64) i64 = ()) => (
+    svc,
+    ret(), 
+);
+
+current_el :: @AsmFunctionArmOnly(fn() i64 = ()) => (
+    SYS(0b1, 0b11, 0b000, 0b0100, 0b0010, 0b010, x0), // mrs x0, CurrentEL
+    arm_nop,  // just to demonstrate that the hacky scope parenting thing works
+    ret(), 
+);
+
+set_interrupt_vec_to_el1 :: @AsmFunctionArmOnly(fn(vec: *Array(u32, 0x200)) void = ()) => (
+    SYS(0b0, 0b11, 0b000, 0b1100, 0b0000, 0b000, x0), // msr VBAR_EL1, x
+    ret(), 
+);
+
+do_eret :: @AsmFunctionArmOnly(fn(result: i64, callee: rawptr) i64 = ()) => (
+    // keep the same stack
+    add_im(Bits.X64, x2, sp, 0, 0),
+    SYS(0b0, 0b11, 0b000, 0b0100, 0b0001, 0b000, x2), // msr SP_EL0
+    // set eret destination
+    SYS(0b0, 0b11, 0b000, 0b0100, 0b0000, 0b001, x1), // msr ELR_EL1
+    // jump to callee but in el0
+    eret,
+    ret(), // unreachable
+);
 
 // TODO: make calling panic() work
 kpanic :: fn(msg: Str) Never = {
-    raw_print("we're so fucked\n");
-    raw_print(msg);
-    raw_print("\ni repeat, we're so fucked\n");
-    loop {
-        // TODO: wfi / shutdown / whatever 
-        // spin
-    };
+    kprint("we're so fucked\n===\n");
+    kprint(msg);
+    kprint("\n===\ni repeat, we're so fucked\n");
+    spin()
 };
 
-raw_print :: fn(s: Str) void = 
+kprint_label :: fn(msg: Str, value: i64) void = {
+    kprint(msg);
+    kscary_log(value);
+    kprint("\n");
+}
+
+spin :: fn() Never = {
+    loop {
+        // TODO: wfi / shutdown / whatever 
+    };
+}
+
+kprint :: fn(s: Str) void = 
     for(s, putchar);
 
+// TODO: read the magic number from the device tree thingy?
 uart :: 0x09000000;
 putchar :: fn(c: u8) void = {
     volatile_store(uart, c);
@@ -27,4 +132,97 @@ putchar :: fn(c: u8) void = {
 // TODO: can't let it try to bake the junk address or it crashes in bake_relocatable_constant :compilerbug
 volatile_store :: fn(addr: i64, c: u8) void #noinline = {
     bit_cast_unchecked(i64, *u8, addr)[] = c;
+}
+
+fn kscary_log(i: i64) void = {
+    buf := @uninitialized Array(u8, 40);
+    if i != 0 && i == -i { // ugly twos compliment :hack
+        kprint("-9223372036854775808");
+        return();
+    };
+    operator_index :: index_unchecked;
+    len := 0;
+    inner :: fn(i: i64, buf: []u8, len: *i64) void = {
+        if i < 0 {
+            buf[len[]] = "-".ascii();
+            len[] += 1;
+            inner(-i, buf, len);
+        } else {
+            is_digit := i >= 0 && i < 10;
+            if is_digit {
+                buf[len[]] = i.trunc() + 48;
+                len[] += 1;
+            } else {
+                inner(i / 10, buf, len);
+                buf[len[]] = i.mod(10).trunc() + 48;
+                len[] += 1;
+            };
+        };
+    };
+    inner(i, buf&.items(), len&);
+    kprint(@as(Str) (ptr = buf&.as_ptr(), len = len));
+}
+
+// TODO: this is a neat demo but it would be more simple to just make the syntax such that it doesn't resolve
+//       eagarly which might just mean using `fn() = {}` instead of `fn() => ()` but then its annoying to get 
+//       the tuple out of the block... idk this whole operation is kinda dumb anyway. 
+// this is convoluted to trick it into resolving the expression in the context of #use(arm/bits)
+fn AsmFunctionArmOnly(signeture: FatExpr, code: FatExpr) FatExpr #macro = {
+    signeture := FuncId.const_eval(signeture);
+    code_fid := FuncId.const_eval(code);
+    code := get_function_ast(code_fid, false, false, false, false);
+    ::tagged(@type code.body);
+    @debug_assert(code.body&.is(.Normal));
+
+    code.body.Normal = @{ @const_slice(@[code.body.Normal]) };
+    unresolve_scopes(code.body.Normal&);
+    
+    code.resolve_scope = FuncId.scope_of(fn() = {
+        // the body of `code` will be able to see any constants declared here.
+        #use("@/backend/arm64/bits.fr");
+    });
+    // TODO: makes sense that you need this,
+    //       but you shouldn't panic without it, should be an error instead of 
+    //       `panic! Unreachable unless you set the load factor to 100%`
+    code.unset_flag(.ResolvedBody);
+    
+    code := Slice(u32).const_eval(@{ @[@literal code_fid]() });
+    @literal AsmFunctionArmOnly(signeture, code)
+}
+
+// time to do some sketchy shit do da do da
+fn unresolve_scopes(expr: *FatExpr) void = {
+    #use("@/compiler/walk_ast.fr");
+    #use("@/compiler/ast_external.fr");
+    UnResolve :: @struct();
+    ::WalkAst(UnResolve, void);
+    
+    // TODO: `@ref(@as(UnResolve) ())` ambigous overload for FatExpr -> FatExpr. :compilerbug?
+    unresolve: UnResolve = ();  
+    walk_expr(unresolve&, expr);
+
+    fn handle_expr(self: *UnResolve, expr: *FatExpr) Result(DoMore, void) = {
+        @match(expr.expr&) {
+            fn GetVar(it) => {
+                expr.expr = (GetNamed = it.name);
+            }
+            fn UndeclaredVar(it) => {
+                expr.expr = (GetNamed = it.name);
+            }
+            fn Block(it) => {
+                it.flags = it.flags.bit_and(bit_not(1.shift_left(@as(i64) BlockFlags.Resolved)));
+                it.scope = NOSCOPE;
+            }
+            @default => ();
+        };
+        (Ok = .Continue)
+    }
+    fn handle_stmt(self: *UnResolve, stmt: *FatStmt) Result(DoMore, void) = (Ok = .Continue);
+    fn handle_type(self: *UnResolve, type: *LazyType) Result(DoMore, void) = (Ok = .Continue);
+    fn handle_func(self: *UnResolve, func: *Func) Result(DoMore, void) = (Ok = .Continue);
+    fn handle_pattern(self: *UnResolve, pattern: *Pattern) Result(DoMore, void) = (Ok = .Continue);
+}
+
+fn AsmFunctionArmOnly(signeture: FuncId, code: []u32) FuncId #fold = {
+    AsmFunction(signeture, code, fn(out: *List(u8)) => (), fn(out: *List(u8)) => (), empty())
 }

@@ -1,12 +1,25 @@
 
 ## (Oct 28)
 
+os
 - build script with very convoluted way of doing relocations in an AsmFunction 
   so i don't need to use a real assembler just to make an extry point 
   that sets the stack pointer. recurring pain point. 
+- playing with macro that injects a scope so you can have AsmFunction without #use the encoding file every time. 
+- learned it puts me in el1, seems i can't read SPSR_EL1 from el1, can't control your own interrupt mask. 
+  set the special lr and eret puts me in el0 at that address, 
+  then i can syscall and puts me at the "interrupt vector" 
+  (whose address is just set in a special register) at el1 again. 
+  registers are shared when doing that so i can pass values with the normal calling convention,
+  so thats syscalls basically working. 
+
+terminal
+- when i got rid of `state := state[];` it broke the repl because i was using `raw_from_ptr(@type state,`. 
+  switched to naming it directly so that can't happen again 
 
 ## (Oct 27)
 
+- import_wasm stubs for webgpu functions so it can run examples/web/demo.fr on other programs again. 
 - giving a more serious attempt to having a thing run in qemu without an operating system
 - failed at trying to make qemu exit at the end instead of just being there forever. 
   at least `wfi` makes it hang at 0% cpu instead of 100% cpu (which `b .` does), thats an improvement. 
