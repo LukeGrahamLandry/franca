@@ -11,7 +11,6 @@ sane_main :: fn() void = {
     print_el();
     setup_interrupts();
     
-    kprint("A\n");
     do_eret(789, @as(rawptr) user_func);
     kpanic("eret returned");
 }
@@ -30,18 +29,55 @@ setup_interrupts :: fn() void = {
         // TODO: have a more official way to ask for it to be in executable memory
         kpanic("unaligned exception vector");
     };
+    // this assumes we're starting in el1 and don't have to set any interrupt masks, etc.
     
-    // TODO: preserve and restore all registers
+    // the registers preserved here are the inverse of jump.fr/try(),
+    // because here the caller doesn't know it's making a call (it was interrupted),
+    // but the callee follows the calling convention, so the trampoline can ignore callee saved registers. 
+    // TODO: if it ends up being a signal, need everything so can give the userspace handler a full UContext.
+    // TODO: floats
+    // TODO: flags?
+    // TODO: need to save what caused the interrupt
     #use("@/backend/arm64/bits.fr");
     each interrupt_handlers { it |
-        distance := int_from_rawptr(@as(rawptr) syscall_func) - u32.int_from_ptr(it);
-        it[] = b(distance / 4, 0);
+        i := 0; 
+        emit :: fn(inst) => { it[i] = inst; i += 1;};
+        
+        // write SavedRegisters
+        emit(stp_pre(.X64, fp, lr, sp, @as(i7) -2));
+        range_rev(0, 9) { r |  // x0..=x17
+            a, b := (r*2, r*2+1);
+            emit(stp_pre(.X64, a, b, sp, @as(i7) -2));
+        };
+        
+        // TODO: kernel use a different stack so userspace can't see what's left there
+        // call syscall_func
+        emit(add_im(Bits.X64, x0, sp, 0, 0));
+        distance := int_from_rawptr(@as(rawptr) syscall_func) - u32.int_from_ptr(it.index(i));
+        emit(b(distance / 4, 1));
+        
+        // read SavedRegisters
+        range(0, 9) { r |  // x0..=x15
+            a, b := (r*2, r*2+1);
+            emit(ldp_post(.X64, a, b, sp, @as(i7) 2));
+        };
+        emit(ldp_post(.X64, fp, lr, sp, @as(i7) 2));
+        
+        // branch to ELR_EL1 which was set by the interrupt gods
+        emit(eret);  
+
+        // just for good luck
+        each it.items().rest(i) { it |
+            it[] = b(0, 0);  // spin (unreachable)
+        };
     };
     
     set_interrupt_vec_to_el1(interrupt_handlers);
+    @run assert_eq(size_of(InterruptVector), 0x800);
 };
 
-interrupt_handlers :: @static(Array(u32, 0x200));
+InterruptVector :: Array(Array(u32, 32), 16);
+interrupt_handlers :: @static(InterruptVector);
 
 user_func :: fn(arg: i64) void = {
     kprint("inside user_func\n");
@@ -50,25 +86,31 @@ user_func :: fn(arg: i64) void = {
     
     result := do_syscall(123);
     kprint_label("syscall result is: ", result);
-    // TODO: if you try to do it again, it happens an extra time, oops. 
-    //       problem is that syscall_func's stack frame doesn't get unwound. 
     
+    if false {
+        echo();
+    };
     spin();
 };
 
-syscall_func :: fn(arg: i64) void = {
+echo :: fn() void = {
+    prev := 0;
+    loop {
+        i: i64 = getchar().zext();
+        if i != prev {
+            prev = i;
+            kprint_label("input: ", i);
+        }
+    };
+}
+
+SavedRegisters :: Array(i64, 20);
+syscall_func :: fn(args: *SavedRegisters) void = {
+    arg := args[0];
     kprint("inside syscall_func\n");
     print_el();
     kprint_label("syscall argument is: ", arg);
-    
-    // look backward on the stack. 
-    // last lr was the call to do_syscall because interrupt_handlers uses set_link=false.
-    p := Crash'trace_start();
-    p := Crash'trace_prev(p);
-    p := Crash'trace_return(p);
-    
-    do_eret(arg * 2, p);
-    kpanic("failed to eret from syscall");
+    args[0] = arg * 2;
 };
 
 Crash :: import("@/lib/crash_report.fr");
@@ -84,7 +126,7 @@ current_el :: @AsmFunctionArmOnly(fn() i64 = ()) => (
     ret(), 
 );
 
-set_interrupt_vec_to_el1 :: @AsmFunctionArmOnly(fn(vec: *Array(u32, 0x200)) void = ()) => (
+set_interrupt_vec_to_el1 :: @AsmFunctionArmOnly(fn(vec: *InterruptVector) void = ()) => (
     SYS(0b0, 0b11, 0b000, 0b1100, 0b0000, 0b000, x0), // msr VBAR_EL1, x
     ret(), 
 );
@@ -116,7 +158,10 @@ kprint_label :: fn(msg: Str, value: i64) void = {
 
 spin :: fn() Never = {
     loop {
-        // TODO: wfi / shutdown / whatever 
+        (@AsmFunctionArmOnly(fn() void = ()) => (
+            wfi,
+            ret(), 
+        ))();
     };
 }
 
@@ -132,6 +177,14 @@ putchar :: fn(c: u8) void = {
 // TODO: can't let it try to bake the junk address or it crashes in bake_relocatable_constant :compilerbug
 volatile_store :: fn(addr: i64, c: u8) void #noinline = {
     bit_cast_unchecked(i64, *u8, addr)[] = c;
+}
+
+getchar :: fn() u8 = {
+    volatile_load(uart)
+}
+
+volatile_load :: fn(addr: i64) u8 #noinline = {
+    bit_cast_unchecked(i64, *u8, addr)[]
 }
 
 fn kscary_log(i: i64) void = {

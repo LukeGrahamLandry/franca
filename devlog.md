@@ -1,4 +1,7 @@
 
+- save the registers in the interrupt so the stack gets restored to the right place, 
+  and unexpected interrupts won't eat your data. 
+
 ## (Oct 28)
 
 os
