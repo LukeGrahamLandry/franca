@@ -30,50 +30,67 @@ setup_interrupts :: fn() void = {
         kpanic("unaligned exception vector");
     };
     // this assumes we're starting in el1 and don't have to set any interrupt masks, etc.
-    
-    // the registers preserved here are the inverse of jump.fr/try(),
-    // because here the caller doesn't know it's making a call (it was interrupted),
-    // but the callee follows the calling convention, so the trampoline can ignore callee saved registers. 
-    // TODO: if it ends up being a signal, need everything so can give the userspace handler a full UContext.
-    // TODO: floats
-    // TODO: flags?
-    // TODO: need to save what caused the interrupt
     #use("@/backend/arm64/bits.fr");
+    
+    // TODO: idk if i have to enable the caches somehow but i figure this can't hurt
+    cc :: import("@/lib/sys/process.fr").aarch64_clear_instruction_cache;
+    clear_cache :: AsmFunctionArmOnly(fn(beg: rawptr, end: rawptr) void = (), cc);
+    
+    // this is a pain because AsmFunction doesn't have a way to do relocations.
+    // but since this runs before memory protection is set up, its fine to patch the jump offsets. 
+    
+    // each slot of the InterruptVector is limited to 32 instructions, 
+    // just branch to a seperate function where the size doesn't matter. 
+    int_callee := @as(rawptr) interrupt_trampoline;
     each interrupt_handlers { it |
-        i := 0; 
-        emit :: fn(inst) => { it[i] = inst; i += 1;};
-        
-        // write SavedRegisters
-        emit(stp_pre(.X64, fp, lr, sp, @as(i7) -2));
-        range_rev(0, 9) { r |  // x0..=x17
-            a, b := (r*2, r*2+1);
-            emit(stp_pre(.X64, a, b, sp, @as(i7) -2));
-        };
-        
-        // TODO: kernel use a different stack so userspace can't see what's left there
-        // call syscall_func
-        emit(add_im(Bits.X64, x0, sp, 0, 0));
-        distance := int_from_rawptr(@as(rawptr) syscall_func) - u32.int_from_ptr(it.index(i));
-        emit(b(distance / 4, 1));
-        
-        // read SavedRegisters
-        range(0, 9) { r |  // x0..=x15
-            a, b := (r*2, r*2+1);
-            emit(ldp_post(.X64, a, b, sp, @as(i7) 2));
-        };
-        emit(ldp_post(.X64, fp, lr, sp, @as(i7) 2));
-        
-        // branch to ELR_EL1 which was set by the interrupt gods
-        emit(eret);  
-
-        // just for good luck
-        each it.items().rest(i) { it |
-            it[] = b(0, 0);  // spin (unreachable)
-        };
+        // TODO: tell it which one this is somehow
+        src := u32.raw_from_ptr(it.index(0));
+        it[0] = b(ptr_diff(src, int_callee) / 4, 0);
+        clear_cache(src, src.offset(128));
     };
+    
+    // :patch interrupt_trampoline calls syscall_func
+    i := @run interrupt_trampoline_code.index_of(arm_nop).unwrap();
+    i += 1;  // TODO: really shouldn't force a bti because this super error prone
+    src := u32.ptr_from_raw(int_callee).offset(i);
+    dest := u32.ptr_from_raw(@as(rawptr) syscall_func);
+    src[] = b(ptr_diff(src, dest), 1);
+    clear_cache(int_callee, int_callee.offset(128));
     
     set_interrupt_vec_to_el1(interrupt_handlers);
     @run assert_eq(size_of(InterruptVector), 0x800);
+};
+
+// TODO: floats, flags?
+// TODO: need to save what caused the interrupt
+interrupt_trampoline :: AsmFunctionArmOnly(fn() void = (), interrupt_trampoline_code);
+interrupt_trampoline_code :: {
+    #use("@/backend/arm64/bits.fr");
+    out := u32.list(64, ast_alloc());
+    emit :: fn(inst) => out&.push(inst);
+    
+    // write SavedRegisters
+    range_rev(0, 16) { r |
+        a, b := (r*2, r*2+1);
+        emit(stp_pre(.X64, a, b, sp, @as(i7) -2));
+    };
+    // TODO: kernel use a different stack so userspace can't see what's left there
+    //       (don't forget 31 in stp_pre is xzr not sp)
+    // call syscall_func
+    emit(add_im(Bits.X64, x0, sp, 0, 0));
+    emit(arm_nop);  // :patch
+    @debug_assert_eq(out.items().index_of(arm_nop).unwrap(), out.len - 1, "patch must be first nop");
+    
+    // read SavedRegisters
+    range(0, 16) { r |
+        a, b := (r*2, r*2+1);
+        emit(ldp_post(.X64, a, b, sp, @as(i7) 2));
+    };
+    
+    // branch to ELR_EL1 which was set by the interrupt gods
+    emit(eret);  
+    
+    out.items()
 };
 
 InterruptVector :: Array(Array(u32, 32), 16);
@@ -104,13 +121,16 @@ echo :: fn() void = {
     };
 }
 
-SavedRegisters :: Array(i64, 20);
+SavedRegisters :: @struct {
+    gpr: Array(i64, 32);
+};
+
 syscall_func :: fn(args: *SavedRegisters) void = {
-    arg := args[0];
+    arg := args.gpr&[0];
     kprint("inside syscall_func\n");
     print_el();
     kprint_label("syscall argument is: ", arg);
-    args[0] = arg * 2;
+    args.gpr&[0] = arg * 2;
 };
 
 Crash :: import("@/lib/crash_report.fr");
@@ -277,5 +297,7 @@ fn unresolve_scopes(expr: *FatExpr) void = {
 }
 
 fn AsmFunctionArmOnly(signeture: FuncId, code: []u32) FuncId #fold = {
-    AsmFunction(signeture, code, fn(out: *List(u8)) => (), fn(out: *List(u8)) => (), empty())
+    fid := AsmFunction(signeture, code, fn(out: *List(u8)) => (), fn(out: *List(u8)) => (), empty());
+    _ := get_function_ast(fid, true, true, true, false);
+    fid
 }
