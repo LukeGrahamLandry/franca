@@ -586,7 +586,6 @@ need to be careful about the refs which have tags in the high bits so won't leb 
   - generate my own laz data to render with geo. im sure there are fun shapes that can be created with little code
   - teminal.fr, view_image.fr, import_wuffs/test.fr (wuffs input programs)
 - the graphics stuff is a bit of a dumpster fire
-  - give up on native webgpu? 
   - slow software rendering implementation as documentation of what it's supposed to do
 - make sure everything works just using posix libc stuff as a fallback (syscalls and private apis need to be optional)
   - (openat, ioctl) use varargs
@@ -1273,6 +1272,8 @@ A :: @struct {
 - profiler gui. it's silly that i have to open CLion just for it to run DTrace and draw a graph
 - something that generates point clouds / LAZ files so you can use the geo demo without 
 needing to go find some data in the right format (and without me including a blob for it)   
+- http://www.xmailserver.org/diff2.pdf
+- https://spidermonkey.dev/blog/2025/10/28/iongraph-web.html
 
 ### assembler
 

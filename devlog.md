@@ -1,6 +1,19 @@
 
+## (Oct 29) os
+
 - save the registers in the interrupt so the stack gets restored to the right place, 
   and unexpected interrupts won't eat your data. 
+- made msr/mrs a bit more readable
+- achived timer by transcribing random magic numbers from someone's blog post, 
+  pleasing that it works but i hope i get to the point that i can actually do my own stuff soon. 
+  the beginning where you just have to transcribe the same thing as everyone else's fake os is kinda boring. 
+- asking qemu for `,gic-version=3` lets me read ICC_IAR1_EL1 which maybe has the INTID 
+  that tells me which interrupt happened but makes it spam forever so maybe that kills the memory mapped part 
+  and i need to do everything with the system registers instead? 
+  i can read GICC_IAR memory and get the right intid, but now the timer doesn't fire again. 
+  ah, next row of the table (12.12 The GIC CPU interface register map), write to GICC_EOIR turns it back on again. 
+- thats good progress, kinda all you need for preemption, if i had anything to preempt. 
+
 
 ## (Oct 28)
 
@@ -10,6 +23,7 @@ os
   that sets the stack pointer. recurring pain point. 
 - playing with macro that injects a scope so you can have AsmFunction without #use the encoding file every time. 
 - learned it puts me in el1, seems i can't read SPSR_EL1 from el1, can't control your own interrupt mask. 
+  (update: must have tried to read SPSR_EL2, names are confusing. i think XXX_EL1 means for interrupts TO el1, so from userspace to kernel)
   set the special lr and eret puts me in el0 at that address, 
   then i can syscall and puts me at the "interrupt vector" 
   (whose address is just set in a special register) at el1 again. 

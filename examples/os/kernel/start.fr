@@ -17,7 +17,8 @@ sane_main :: fn() void = {
 
 print_el :: fn() void = {
     kprint("Current Exception Level: ");
-    c := "0".char() + current_el().shift_right_logical(2);
+    el := i64.sys_get(.CurrentEL);
+    c := "0".char() + el.shift_right_logical(2);
     putchar(c.trunc());
     kprint("\n");
 }
@@ -30,7 +31,7 @@ setup_interrupts :: fn() void = {
         kpanic("unaligned exception vector");
     };
     // this assumes we're starting in el1 and don't have to set any interrupt masks, etc.
-    #use("@/backend/arm64/bits.fr");
+    #use(Arm);
     
     // TODO: idk if i have to enable the caches somehow but i figure this can't hurt
     cc :: import("@/lib/sys/process.fr").aarch64_clear_instruction_cache;
@@ -57,19 +58,58 @@ setup_interrupts :: fn() void = {
     src[] = b(ptr_diff(src, dest), 1);
     clear_cache(int_callee, int_callee.offset(128));
     
-    set_interrupt_vec_to_el1(interrupt_handlers);
+    sys_set(*InterruptVector, .VBAR_EL1, interrupt_handlers);
     @run assert_eq(size_of(InterruptVector), 0x800);
+    
+    // magic to make the timer actually work:    
+    // these are memory mapped but have names you can look up as registers in the pdf 
+    // TODO: make struct for these
+    // TODO: make it work with ,gic-version=3 
+    u32.volatile(gicd, 1);  // GICD_CTLR: enable distributor
+    u32.volatile(gicc, 1);  // GICC_CTLR: enable cpu interface controller
+    u32.volatile(gicc + 4, 255);  // GICC_PMR: priority mask register (255 is low, 0 is high)
+    //u32.volatile(gicc + 8, 0);  // GICC_BPR = GICC_BPR_NO_GROUP; TODO: what does this do?
+    // now for the specific interrupt
+    set_field(timer_irq, gicd + 0x100, 1, 1); // GICD_ISENABLER enable
+    set_field(timer_irq, gicd + 0x280, 1, 1); // GICD_ICPENDR clear
+    //set_field(timer_irq, gicd + 0x800, 8, 1);  // GICD_ITARGETSR which core
+    //set_field(timer_irq, gicd + 0x400, 8, 0);  // GICD_IPRIORITYR
+    
+    // start timer
+    frequency := i64.sys_get(.CNTFRQ_EL0);
+    i64.sys_set(.CNTP_TVAL_EL0, frequency);  // count down from the frequency, so wait 1 second
+    i64.sys_set(.CNTP_CTL_EL0, 1);  // turn it on
+    kprint_label("frequency: ", frequency);
 };
 
+set_field :: fn(interrupt_id: i64, addr: i64, bit_width: i64, value: u32) void = {
+    mask: u32 = 1.shift_left(bit_width) - 1;
+    value := value.bit_and(mask);
+    count_per_word := 32.umod(bit_width);
+    shift := interrupt_id.umod(count_per_word) * bit_width;
+    addr += interrupt_id.udiv(count_per_word);
+    old := u32.volatile(addr);
+    new := old.bit_and(mask.shift_left(shift).bit_not()).bit_or(value.shift_left(shift));
+    u32.volatile(addr, new);
+}
+
+// generic interrupt controller
+// TODO: device tree?
+gicd :: 0x08000000;
+gicc :: 0x08010000;
+timer_irq :: 30;
+
+Arm :: import("@/backend/arm64/bits.fr");
 // TODO: floats, flags?
 // TODO: need to save what caused the interrupt
 interrupt_trampoline :: AsmFunctionArmOnly(fn() void = (), interrupt_trampoline_code);
 interrupt_trampoline_code :: {
-    #use("@/backend/arm64/bits.fr");
+    #use(Arm);
     out := u32.list(64, ast_alloc());
     emit :: fn(inst) => out&.push(inst);
     
     // write SavedRegisters
+    emit(sub_im(Bits.X64, sp, sp, 64, 0));  // leave space for special registers
     range_rev(0, 16) { r |
         a, b := (r*2, r*2+1);
         emit(stp_pre(.X64, a, b, sp, @as(i7) -2));
@@ -86,6 +126,7 @@ interrupt_trampoline_code :: {
         a, b := (r*2, r*2+1);
         emit(ldp_post(.X64, a, b, sp, @as(i7) 2));
     };
+    emit(add_im(Bits.X64, sp, sp, 64, 0));
     
     // branch to ELR_EL1 which was set by the interrupt gods
     emit(eret);  
@@ -123,14 +164,54 @@ echo :: fn() void = {
 
 SavedRegisters :: @struct {
     gpr: Array(i64, 32);
+    // why are we being interrupted?
+    esr: i64;  // exception syndrome
+    far: i64;  // fault address
+    // how do we return after the interrupt?
+    elr: i64;  // eret link register
+    spsr: i64; // saved program status
+    _: Array(u32, 4);
 };
 
+// for now im using the same handler for every slot of the InterruptVector
 syscall_func :: fn(args: *SavedRegisters) void = {
-    arg := args.gpr&[0];
     kprint("inside syscall_func\n");
-    print_el();
-    kprint_label("syscall argument is: ", arg);
-    args.gpr&[0] = arg * 2;
+    
+    // these being in SavedRegisters isn't important because i don't restore them 
+    // but it seems convient to have one context thing you can pass around.
+    // TODO: if i keep these do it in the assembly part instead of as a bunch of calls here. 
+    args.esr = i64.sys_get(.ESR_EL1);
+    args.far = i64.sys_get(.FAR_EL1);
+    
+    // saving and restoring these only matters if i allow nested interrupts. 
+    // TODO: maybe i want that so unset PSTATE I/F/A mask at some point?
+    //       its also not clear to me what happens if i fault while in EL1,
+    //       cause if im not the hypervisor i can't control whether those go to me or not, right? 
+    args.elr = i64.sys_get(.ELR_EL1);
+    args.spsr = i64.sys_get(.SPSR_EL1);
+    
+    intid := u32.volatile(gicc + 0x000C);  // GICC_IAR: Interrupt Acknowledge Register
+    kprint_label("intid: ", intid.zext());
+    
+    if intid == 1023 {
+        arg := args.gpr&[0];
+        kprint_label("ESR_EL1: ", args.esr);
+        kprint_label("SPSR_EL1: ", args.spsr);
+        print_el();
+        kprint_label("syscall argument is: ", arg);
+        args.gpr&[0] = arg * 2;
+    };
+    
+    if intid == timer_irq {
+        kprint("timer fired!\n");
+        frequency := i64.sys_get(.CNTFRQ_EL0);
+        i64.sys_set(.CNTP_TVAL_EL0, frequency);
+        
+        u32.volatile(gicc + 0x0010, intid);  // GICC_EOIR: End of Interrupt Register
+    };
+    
+    i64.sys_set(.ELR_EL1, args.elr);
+    i64.sys_set(.SPSR_EL1, args.spsr);
 };
 
 Crash :: import("@/lib/crash_report.fr");
@@ -140,26 +221,35 @@ do_syscall :: @AsmFunctionArmOnly(fn(arg: i64) i64 = ()) => (
     ret(), 
 );
 
-current_el :: @AsmFunctionArmOnly(fn() i64 = ()) => (
-    SYS(0b1, 0b11, 0b000, 0b0100, 0b0010, 0b010, x0), // mrs x0, CurrentEL
-    arm_nop,  // just to demonstrate that the hacky scope parenting thing works
-    ret(), 
-);
+sys_get :: fn($T: Type, $name: Arm.SystemRegister) T #generic = {
+    @run @ct_assert(size_of(T) == 8, @source_location(), "type must fit in a register");
+    #use(Arm);
+    AsmFunctionArmOnly(fn() T = (), @const_slice(
+        mrs(x0, name),
+        ret(), 
+    ))()
+}
 
-set_interrupt_vec_to_el1 :: @AsmFunctionArmOnly(fn(vec: *InterruptVector) void = ()) => (
-    SYS(0b0, 0b11, 0b000, 0b1100, 0b0000, 0b000, x0), // msr VBAR_EL1, x
-    ret(), 
-);
+sys_set :: fn($T: Type, $name: Arm.SystemRegister, value: T) void #generic = {
+    @run @ct_assert(size_of(T) == 8, @source_location(), "type must fit in a register");
+    #use(Arm);
+    AsmFunctionArmOnly(fn(value: T) void = (), @const_slice(
+        msr(name, x0),
+        ret(), 
+    ))(value);
+}
 
 do_eret :: @AsmFunctionArmOnly(fn(result: i64, callee: rawptr) i64 = ()) => (
     // keep the same stack
     add_im(Bits.X64, x2, sp, 0, 0),
-    SYS(0b0, 0b11, 0b000, 0b0100, 0b0001, 0b000, x2), // msr SP_EL0
+    msr(.SP_EL0, x2),
     // set eret destination
-    SYS(0b0, 0b11, 0b000, 0b0100, 0b0000, 0b001, x1), // msr ELR_EL1
+    msr(.ELR_EL1, x1),
     // jump to callee but in el0
     eret,
-    ret(), // unreachable
+    // unreachable
+    wfi,
+    b(0, 0),
 );
 
 // TODO: make calling panic() work
@@ -191,20 +281,20 @@ kprint :: fn(s: Str) void =
 // TODO: read the magic number from the device tree thingy?
 uart :: 0x09000000;
 putchar :: fn(c: u8) void = {
-    volatile_store(uart, c);
-}
-
-// TODO: can't let it try to bake the junk address or it crashes in bake_relocatable_constant :compilerbug
-volatile_store :: fn(addr: i64, c: u8) void #noinline = {
-    bit_cast_unchecked(i64, *u8, addr)[] = c;
+    u8.volatile(uart, c);
 }
 
 getchar :: fn() u8 = {
-    volatile_load(uart)
+    u8.volatile(uart)
 }
 
-volatile_load :: fn(addr: i64) u8 #noinline = {
-    bit_cast_unchecked(i64, *u8, addr)[]
+// TODO: can't let it try to bake the junk address or it crashes in bake_relocatable_constant :compilerbug
+fn volatile($T: Type, addr: i64, value: T) void #noinline #generic = {
+    bit_cast_unchecked(i64, *T, addr)[] = value;
+}
+
+fn volatile($T: Type, addr: i64) T #noinline #generic = {
+    bit_cast_unchecked(i64, *T, addr)[]
 }
 
 fn kscary_log(i: i64) void = {
@@ -252,7 +342,7 @@ fn AsmFunctionArmOnly(signeture: FatExpr, code: FatExpr) FatExpr #macro = {
     
     code.resolve_scope = FuncId.scope_of(fn() = {
         // the body of `code` will be able to see any constants declared here.
-        #use("@/backend/arm64/bits.fr");
+        #use(Arm);
     });
     // TODO: makes sense that you need this,
     //       but you shouldn't panic without it, should be an error instead of 
