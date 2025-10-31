@@ -1,4 +1,14 @@
 
+## (Oct 30)
+
+- look at the device tree:
+```
+qemu-system-aarch64 -machine virt,dumpdtb=a.txt
+sudo apt-get install device-tree-compiler
+fdtdump a.txt > b.txt
+```
+- dump_devicetree to experiment with how the bits are arranged.  
+
 ## (Oct 29) os
 
 - save the registers in the interrupt so the stack gets restored to the right place, 
@@ -13,7 +23,6 @@
   i can read GICC_IAR memory and get the right intid, but now the timer doesn't fire again. 
   ah, next row of the table (12.12 The GIC CPU interface register map), write to GICC_EOIR turns it back on again. 
 - thats good progress, kinda all you need for preemption, if i had anything to preempt. 
-
 
 ## (Oct 28)
 

@@ -1,0 +1,142 @@
+// this reads a flattened devicetree (.dtb file) and dumps it as readable text. 
+// you can get the binary form out of qemu by adding `,dumpdtb=a.dtb` to the `-machine` argument. 
+// its a format bootloaders use to tell an operating system the shape of the hardware its running on, 
+// so you don't have to hard code memory mapped io addresses, etc. and ship a seperate kernel for each board.
+
+main :: fn() void = {
+    input := read_file_from_last_arg();
+    out := u8.list(temp());
+    dump(out&, input);
+    print(out.items());
+}
+
+dump :: fn(out: *List(u8), in: []u8) void = {
+    if in.len < Header.size_of() {
+        @fmt(out, "(ERROR: input too small to fit the header)\n");
+        return();
+    };
+    header := in.peek_type(Header)[];
+    Header.byte_swap_fields(header&);
+    @fmt(out, "Header:\n%\n", header&);
+    if header.magic != header.magic || header.last_comp_version != 16 {
+        @fmt(out, "(ERROR: bad magic/version)\n");
+        return();
+    };
+    @fmt(out, "Memory Reservation Block:\n");
+    {
+        in := in.rest(header.off_mem_rsvmap.zext());
+        dowhile {
+            it := in&.pop_type(ReserveEntry)[];
+            ReserveEntry.byte_swap_fields(it&);
+            @fmt(out, "- %\n", it&);
+            it.address != 0 || it.size != 0
+        };
+    };
+    @fmt(out, "Structure Block:\n");
+    {
+        strings := in.subslice(header.off_dt_strings.zext(), header.size_dt_strings.zext());
+        in := in.subslice(header.off_dt_struct.zext(), header.size_dt_struct.zext());
+        depth := 0;
+        width :: 4;
+        dowhile {
+            out.push_repeated(depth*width, " ".ascii());
+            tag := in&.pop_type(FDT)[];
+            @match(tag) {
+                fn BEGIN_NODE() => {
+                    depth += 1;
+                    name := in&.pop_cstr();
+                    @fmt(out, "% {\n", name);
+                    in = in.rest(name.len.add(1).ualign_to(4) - name.len.add(1));
+                }
+                fn END_NODE() => {
+                    depth -= 1;
+                    out.len -= width;
+                    @fmt(out, "};\n");
+                }
+                fn END() => ();
+                fn NOP() => ();
+                fn PROP() => {
+                    prop := in&.pop_type(Prop)[];
+                    Prop.byte_swap_fields(prop&);
+                    name: CStr = (ptr = strings.index(prop.nameoff.zext()));
+                    @fmt(out, "%", name);
+                    data := in.slice(0, prop.len.zext());
+                    // TODO: show the data properly. i think you need to know the types of the fields already. 
+                    if data.len > 0 {
+                        @fmt(out, " =");
+                        if looks_like_strings(data) {
+                            dowhile {
+                                s := data&.pop_cstr();
+                                @fmt(out, " \"%\"", s);
+                                data.len > 0
+                            }
+                        } else {
+                            // hard to pick between u32/u64 list
+                            for data { it |
+                                @fmt(out, " ");
+                                out.push_hex_byte(it, true);
+                            };
+                        };
+                    };
+                    @fmt(out, ";\n");
+                    in = in.rest(prop.len.zext().ualign_to(4));
+                }
+            };
+            tag != .END
+        };
+    };
+}
+
+// if its just ascii with null terminators, assume its a string. 
+// numbers tend to contain consecutive zeros and disallowing empty strings a decent heuristic. 
+// disallowing quotes because that makes it ambiguous between a list and just an inner `" "`. 
+looks_like_strings :: fn(data: []u8) bool = {
+    @if(data.len == 0 || data[data.len - 1] != 0) return(false);
+    zero_count := 0;
+    for data { it |
+        if it == 0 {
+            zero_count += 1;
+            @if(zero_count > 1) return(false);
+        } else {
+            zero_count = 0;
+            @if(it < 32 || it > 127 || it == "\"".ascii()) return(false);
+        }
+    };
+    true
+}
+
+#use("@/lib/sys/fs.fr");
+::DeriveFmt(Header);
+::DeriveFmt(ReserveEntry);
+::DeriveFmt(Prop);
+::enum(FDT);
+
+// Devicetree Specification, Release v0.4
+// https://github.com/devicetree-org/devicetree-specification/releases/tag/v0.4
+// all the numbers in this format are big endian. 
+
+MAGIC :: 0xd00dfeed;
+Header :: @struct {
+    magic: u32;
+    totalsize: u32;
+    off_dt_struct: u32;
+    off_dt_strings: u32;
+    off_mem_rsvmap: u32;
+    version: u32;
+    last_comp_version: u32;
+    boot_cpuid_phys: u32;
+    size_dt_strings: u32;
+    size_dt_struct: u32;
+}
+
+ReserveEntry :: @struct(address: u64, size: u64);
+
+FDT :: @enum(u32) (
+    BEGIN_NODE = byte_swap(1),
+    END_NODE = byte_swap(2),
+    PROP = byte_swap(3),
+    NOP = byte_swap(4),
+    END = byte_swap(9),
+);
+
+Prop :: @struct(len: u32, nameoff: u32);
