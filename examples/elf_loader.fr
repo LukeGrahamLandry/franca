@@ -20,6 +20,18 @@ main :: fn() void = {
     @assert_eq(h.magic, Elf.MAGIC, "invalid magic. expected an elf program");
     @assert(h.program_header_num != 0, "no program headers. expected an executable");
     @assert(h.program_header_entsize == size_of(Elf.ProgramHeader).trunc(), "phentsize");
+    machine: Elf.Machine = @match(query_current_arch()) {
+        fn aarch64() => .arm64;
+        fn x86_64()  => .amd64;
+        fn rv64()    => .rv64;
+        @default     => unreachable();
+    };
+    ::enum(@type machine);
+    @assert_eq(h.machine, machine, "elf file does not match host architecture");
+    @assert_ne(h.machine, .rv64, "TODO: implement call_in_stack for riscv");
+    if query_current_os() != .linux {
+        @eprint("WARNING:\ntrying to run an elf file on non-linux host. this probably won't work but who am i to judge... lets give it a try.\n===\n");
+    };
     
     ph := bytes.rest(h.program_header_off).peek_type(Elf.ProgramHeader);
     ph: []Elf.ProgramHeader = ph.slice(h.program_header_num.zext());
@@ -47,6 +59,7 @@ main :: fn() void = {
     each ph { it |
         if it.type == .Load {
             dest := virtual.subslice(it.vaddr - lo, it.mem_size);
+            @eprint("Load %[..+%] -> %; Prot=%\n", it.vaddr, it.mem_size, u8.int_from_ptr(dest.ptr), it.prot);
             
             if it.file_size != 0 {
                 @assert(u8.int_from_ptr(dest.ptr).mod(page_size()) == 0, "not divisible by page size");
@@ -97,11 +110,11 @@ main :: fn() void = {
         libs := open_needed_dylibs(dyn, unpacked.strings);
         
         each unpacked.relocations { it |
-            @debug_assert_eq(it.type, Elf.R_AMD64_64, "TODO: unknown relocation type %", it.type);
+            @debug_assert(it.type == Elf.R_AMD64_64 || it.type == Elf.R_AARCH64_ABS64 || it.type == Elf.R_RISCV_64, "TODO: unknown relocation type %", it.type);
             sym := unpacked.symbols.offset(it.sym.zext());
             type := sym.info.shift_right_logical(4);
             dest := rawptr.ptr_from_raw(base.offset(it.offset - lo));
-            if type == Elf.STB_LOCAL {
+            if sym.value != 0 {
                 dest[] = base.offset(sym.value).offset(it.addend);
             } else {
                 break :: local_return;
@@ -115,6 +128,7 @@ main :: fn() void = {
                     };
                 };
                 @assert(type == Elf.STB_WEAK, "missing non-weak import: %", name);
+                @eprintln(">>> IGNORE '%' (weak)", name);
             }
         };
     };
@@ -136,7 +150,7 @@ main :: fn() void = {
     argc_argv_envp[] = (0, z&, z&);
     sp := par.offset(-8);
     
-    @eprintln(">>> calling entry point: %", entry);
+    @eprintln(">>> calling entry point: %", u8.int_from_ptr(entry));
     call_in_stack(sp, entry);
     unreachable();
 }
@@ -183,14 +197,12 @@ call_in_stack :: AsmFunction(fn(sp: *u8, callee: *u8) void = (), @const_slice(
     // TODO: THIS ARM IS UNTESTED
     add_im(.X64, sp, x0, @as(u12) 0, 0b0),  // setup new stack 
     br(x1, 0b0),  // call a user function (no link)
-    brk(0x1234),  // crash
 ), (fn(out) = @asm_x64(
     encode_bin(PrimaryOp.MovReg, X86Reg.rsp, X86Reg.rdi),  // setup new stack
     // call a user function. 
     // don't push a return address, sp needs to point to the parameters being passed to the program. 
     // you can see the other side of this calling convention in franca_runtime_init()
     encode_jmp_reg(ModrmMode.Direct, X86Reg.rsi),  
-    PrimaryOp.Int3,  // crash
 ) out));
 
 #use("@/backend/amd64/bits.fr");

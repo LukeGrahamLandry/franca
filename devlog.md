@@ -23,6 +23,16 @@ still trying to turn on virtual memory.
 - now i seem to have made WFI be an Undefined Instruction. 
   thats easy ive seen the bit in SCTLR, set nTWI=1. 
 
+---
+
+elf_loader: wasn't working on arm. 
+if x0 looks like a pointer (which it will because its used to set sp),
+i try to look for DRIVER_VTABLE_MAGIC 112 bytes after it, but since 
+stack grows down, reading up from a newly mmapped stack reasonably could be unmapped. 
+that was a dumb hacky thing anyway, just get rid of it. 
+  - the better thing to replace it with might be backend/incremental.fr/Meta having two entry_syms, 
+    one for the user's hosted main and one for the runtimeinit main so the caller could choose which to use.
+
 ## (Oct 30)
 
 - look at the device tree:
