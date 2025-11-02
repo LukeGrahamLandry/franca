@@ -27,12 +27,11 @@ print_el :: fn() void = {
 }
 
 setup_interrupts :: fn() void = {
-    interrupt_base := int_from_ptr(@type interrupt_handlers[], interrupt_handlers);
-    if interrupt_base.umod(2048) != 0 {
-        // TODO: have a way to ask for the global to have the right alignment
-        // TODO: have a more official way to ask for it to be in executable memory
-        kpanic("unaligned exception vector");
-    };
+    interrupt_base := align_the_thing(interrupt_handlers, 2048, size_of(InterruptVector));
+    interrupt_handlers := InterruptVector.ptr_from_raw(interrupt_base);
+    // TODO: have a way to ask for the global to have the right alignment
+    // TODO: have a more official way to ask for it to be in executable memory
+
     // this assumes we're starting in el1 and don't have to set any interrupt masks, etc.
     #use(Arm);
     
@@ -134,18 +133,23 @@ interrupt_trampoline_code :: {
 };
 
 InterruptVector :: Array(Array(u32, 32), 16);
-interrupt_handlers :: @static(InterruptVector);
+interrupt_handlers :: @static(Array(u8, size_of(InterruptVector) * 2));
 
-setup_virtual_memory :: fn() void = {
-    tt := int_from_ptr(@type translation_table[], translation_table);
+align_the_thing :: fn(it: ~T, need_align: i64, need_size: i64) rawptr #where = {
+    tt := int_from_ptr(@type it[], it);
     start := tt; 
-    end := start + size_of(@type translation_table[]);
-    tt := tt.ualign_to(1.shift_left(16));
-    tt := i64.ptr_from_int(tt);
-    tt := tt.slice(8192);
-    if i64.int_from_ptr(tt.ptr.offset(tt.len)) > end {
+    end := start + size_of(@type it[]);
+    tt := tt.ualign_to(need_align);
+    if tt + need_size > end {
         kprint("fucked\n!!!\n");
     };
+    rawptr_from_int(tt)
+}
+
+setup_virtual_memory :: fn() void = {
+    // translation tables must be aligned to the size of the table.
+    tt := align_the_thing(translation_table, 1.shift_left(16), 8192*8);
+    tt := i64.ptr_from_raw(tt).slice(8192);
     // TODO: check ID_AA64MMFR0_EL1 to make sure the granule size i want is supported
     
     parange := i64.sys_get(.ID_AA64MMFR0_EL1).bit_and(0b111);
@@ -171,13 +175,14 @@ setup_virtual_memory :: fn() void = {
     p_addr: u64 = 0;
     block_size: u64 = 512*1024*1024;
     each tt { it |
-        // low bits are attributes, the address is always aligned
+        // low bits are attributes, the address is always aligned so its low bits are zero and don't matter. 
         device := p_addr < 0x40000000;
         idx := int(device);
         // block type, mair index, permissions, sharable, access flag
         attr: BlockEntry = (repr = p_addr);
         attr&.set(.tag, 0b01);
         attr&.set(.idx, idx);
+        // ?? regardless of UXN/PXN, virtual memory that's writable from el0 cannot be executable from el1 ??
         //                       // e0 e1
         if !device {
             attr&.set(.ap, 0b00);  // -- RW
@@ -199,17 +204,10 @@ setup_virtual_memory :: fn() void = {
     attr&.set(.ap, 0b01);
     attr.repr -= block_size;
     xxx[] = attr.repr.bitcast();
-    
-    
     barrier();
-    kprint_label("translation_table: ", bit_cast_unchecked(*i64, i64, tt.ptr));
-    kprint_label("setup_virtual_memory: ", bit_cast_unchecked(rawptr, i64, setup_virtual_memory));
 
     sys_set(*i64, .TTBR0_EL1, tt.ptr);
-    sys_set(*i64, .TTBR1_EL1, tt.ptr);  // ?
     
-    //tcr := TcrEl1.sys_get(.TCR_EL1);
-    //sctlr := SctlrEl1.sys_get(.SCTLR_EL1);
     tcr := TcrEl1.zeroed();
     sctlr := SctlrEl1.zeroed();
     
@@ -218,19 +216,11 @@ setup_virtual_memory :: fn() void = {
     tcr&.set(.ips, parange);
     tcr&.set(.t0sz, 64 - nbit);
     tcr&.set(.ha, 0);
-    tcr&.set(.tg1, 0b11);  // ?
-    tcr&.set(.t1sz, 64 - nbit);  // ?
 
     sctlr&.set(.EE, 0);  // little endian
-    //sctlr&.set(.span, 1);
     sctlr&.set(.M, 1);  // address translation enabled
     sctlr&.set(.nTWI, 1);
     // TODO: make sure to turn on I: "instruction access Cacheability control"
-    
-    // TODO: why doesn't this work?
-    //out := u8.list(1024, stack_alloc(1024));
-    //@fmt(out&, "%\n", tcr&);
-    //kprint(out.items());
     
     kprint_label("TCR_EL1: ", tcr.repr.bitcast());
     kprint_label("SCTLR_EL1: ", sctlr.repr.bitcast());

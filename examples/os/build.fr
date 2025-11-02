@@ -1,14 +1,14 @@
 
 driver :: fn(vtable: *ImportVTable) void = {
-    compile(vtable);
+    bytes := compile(vtable);
     #use("@/examples/testing.fr");
-    // TODO: i need to not depend on on a fucking linker
-    sh(@slice("ld", "-nostdlib", "-Texamples/os/linker.ld", "target/kernel.o", "-o", "target/kernel.out"));
+    flat_link(bytes, 0x40100000);
+    write_entire_file_or_crash("target/kernel.out", bytes);
     println("running...   (to turn it off, ctrl-a then press x)");
     sh(@slice("qemu-system-aarch64", "-machine", "virt", "-cpu", "cortex-a57", "-kernel", "target/kernel.out", "-nographic"));
 }
 
-compile :: fn(vtable: *ImportVTable) void = {
+compile :: fn(vtable: *ImportVTable) []u8 = {
     env: TargetEnv = (arch = .aarch64, os = .linux);
     src := "#include_std(\"lib/core.fr\");#include_std(\"examples/os/kernel/start.fr\");";
     build_options := vtable.default_build_options();
@@ -39,8 +39,7 @@ compile :: fn(vtable: *ImportVTable) void = {
     // TODO: i don't have a way to ask for sane names without franca_runtime_init or making a dynamic library
     emit_entry(m&, @tfmt("main__%", @as(u32) fid));
     chunks := {fr.vtable.emit_qbe_included}(Qbe.Module.raw_from_ptr(m&), fr&, fns, entry);
-    bytes := concat(chunks&, temp());
-    write_entire_file_or_crash("target/kernel.o", bytes);
+    concat(chunks&, temp())
 }
 
 // TODO: should make an api for this that isn't so painful
@@ -54,6 +53,8 @@ emit_entry :: fn(m: *Qbe.Module, main: Str) void = {
     code&[.aarch64] = interpret_as_bytes(@const_slice(
         arm_nop,  // adr fp, stack_top
         arm_nop,  // ^
+        sub_im(.X64, x0, x0, @as(u12) 16, 0b0),
+        and_sr(.X64, fp, fp, x0, .LSL, 0b0),
         add_im(.X64, sp, fp, @as(u12) 0, 0b0),
         arm_nop,  // bl main
         wfi
@@ -69,7 +70,6 @@ emit_entry :: fn(m: *Qbe.Module, main: Str) void = {
     m.emit_data(
         id = stack_top,
         template = (Zeroes = 0),
-        export = true,
         relocations = empty(),
     );
     // +4 becuase i insert bti. :(
@@ -84,11 +84,140 @@ emit_entry :: fn(m: *Qbe.Module, main: Str) void = {
         use_symbol(m, main) { s_main |
             s_main.strong = true;
             push_fixup(m, s_main, (
-                patch_at = u8.raw_from_ptr(m.segments&[.Code].mmapped.index(s_start.offset + 12 + 4)),
+                patch_at = u8.raw_from_ptr(m.segments&[.Code].mmapped.index(s_start.offset + 20 + 4)),
                 type = .Call,
             ));
         };
     };
+}
+
+// this is a bit overkill, maybe the sane thing would be to refactor elf/emit.fr
+// such that there's a nice api that looks like a linker script for doing this sort of thing. 
+// it would certainly be less fucking around to do this without making the intermediate elf file. 
+// for now i thinks its cute that this works so i'll deal with it later. 
+// whatever i decide with that, the important thing is not to depend on the gnu linker 
+// because i disagree with their whole mental model of how toolchains for cross compiling should work. 
+//
+// this takes a relocatable elf file and does the relocations to make it loadable 
+// at ram_base and with only one load command (i.e. no virtual memory holes). 
+// it ignores section.addr_align
+// (which is eventually going to get annoying enough that i replace this function with something sane)
+flat_link :: fn(in: []u8, ram_base: i64) void = {
+    Elf :: import("@/backend/elf/bits.fr");
+    Arm :: import("@/backend/arm64/bits.fr");
+    
+    h := in.peek_type(Elf.Header);
+    sh := in.rest(h.section_header_off).peek_type(Elf.SectionHeader);
+    sh: []Elf.SectionHeader = sh.slice(h.section_header_num.zext());
+    new_voff := temp().alloc_zeroed(i64, sh.len);
+    
+    is_alloc :: fn(it) => it.flags.bit_and(1.shift_left(@as(i64) Elf.SectionFlag.Alloc)) != 0;
+    section_bytes :: fn(it) => in.subslice(it.offset, it.size);
+    section_array :: fn(it, $T) => {
+        bytes := section_bytes(it);
+        @as([]T) (ptr = ptr_cast_unchecked(u8, T, bytes.ptr), len = bytes.len / T.size_of())
+    };
+    
+    voff := ram_base;
+    found_entry := false;
+    file_high := 0;
+    enumerate sh { i, it |
+        if is_alloc(it) {
+            if h.entry >= it.addr && h.entry < it.addr + it.size {
+                @assert(!found_entry);
+                h.entry -= it.addr;
+                h.entry += voff;
+                found_entry = true;
+            };
+            ::enum(@type it.type);
+            if it.type == .ProgramBits {
+                end := it.offset + it.size;
+                file_high = max(file_high, end);
+            };
+        
+            new_voff[i] = voff;
+            it.addr = voff;
+            voff += it.size;
+        };
+    };
+    @assert(file_high > 0);
+    
+    enumerate sh { mem_section_i, mem_section |
+        if is_alloc(mem_section) {
+            mem_bytes := section_bytes(mem_section);
+            each sh { rel_section |
+                ::enum(Elf.SectionType);
+                if rel_section.info.zext() == mem_section_i && rel_section.type == .RelocAddend {
+                    symbols := section_array(sh[rel_section.link.zext()]&, Elf.Symbol);
+                    relocs := section_array(rel_section, Elf.RelA);
+                    each relocs { it |
+                        continue :: local_return;
+                        sym := symbols[it.sym.zext()]&;
+                        sym_type := sym.info.shift_right_logical(4);
+                        
+                        dest_vaddr := new_voff[sym.section_header_index.zext()] + sym.value;
+                        src_vaddr := new_voff[mem_section_i] + it.offset + it.addend;
+                        inst := bit_cast_unchecked(*u8, *u32, mem_bytes.index(it.offset));
+                        
+                        @switch(it.type) {
+                            @case(Elf.R_AARCH64_ABS64) => {
+                                // the addresses are fixed because the kernel is loaded at a known base address.
+                                @assert(mem_section.type != .Bss, "TODO: reloc in bss");
+                                bit_cast_unchecked(*u8, *i64, mem_bytes.index(it.offset))[] = dest_vaddr;
+                            };
+                            @case(Elf.R_AARCH64_JUMP26) => unreachable();
+                            @case(Elf.R_AARCH64_CALL26) => {
+                                @assert(inst[].bit_and(1.shift_left(31)) != 0, "call expected set_link");
+                                distance := dest_vaddr - src_vaddr;
+                                inst[] = Arm'b(distance / 4, 0b1);
+                            };
+                            @case(Elf.R_AARCH64_ADR_PREL_PG_HI21) => {
+                                reg := inst[].bit_and(0b11111).zext();
+                                i, _ := Arm'encode_adrp_add(dest_vaddr, src_vaddr, reg);
+                                inst[] = i;
+                            };
+                            @case(Elf.R_AARCH64_ADR_GOT_PAGE) => unreachable();
+                            @case(Elf.R_AARCH64_ADD_ABS_LO12_NC) => {
+                                is_add := inst[].shift_right_logical(32-9) == 0b100100010;
+                                //is_load := inst[].shift_right_logical(32-9) == 0b111100101;
+                                @assert(is_add, "TODO: ldr12 reloc");
+                                reg := inst[].bit_and(0b11111).zext();
+                                _, i := Arm'encode_adrp_add(dest_vaddr, src_vaddr, reg);
+                                inst[] = i;
+                            };
+                            @case(Elf.R_AARCH64_LD64_GOT_LO12_NC) => unreachable();
+                            @default => unreachable();
+                        };
+                        it.type = 0;
+                    };
+                    
+                    relocs&.ordered_retain(fn(it) => it.type != 0);
+                    rel_section.size = relocs.len * size_of(Elf.RelA);
+                }
+            };
+        };
+    };
+    
+    h.type = .Executable;
+    h.program_header_entsize = size_of(Elf.ProgramHeader);
+    available := in.slice(size_of(Elf.Header), h.section_header_off);
+    @assert(available.len > size_of(Elf.ProgramHeader));
+    h.program_header_num = 1;
+    h.program_header_off = size_of(Elf.Header);
+    ph := available&.pop_type(Elf.ProgramHeader);
+    ph[] = (
+        type = .Load,
+        prot = 0b111,
+        offset = 0,
+        vaddr = ram_base, 
+        paddr = ram_base,
+        file_size = in.len,
+        mem_size = in.len,
+        align = 65536,
+    );
+    h.section_header_entsize = 0;
+    in.rest(file_high).set_zeroed();
+    h.section_header_num = 0;
 }
 
 Qbe :: import("@/backend/lib.fr");

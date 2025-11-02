@@ -1,5 +1,16 @@
 
 
+- the amount im using the linker for is so little that i can just do it myself until im ready 
+  to think about how to make my elf emit code more general. 
+- conveniently the fixed base address means i can do DataAbsolute fixups in the linker. 
+- now need to be more careful about aligning interrupt_handlers.
+  i guess the linker was inserting some bytes to fulfill the section's addr_align so it always started 
+  4096 aligned, but im trying to do it in place so each section has to just continue 
+  from the file offset of the last (and elf/emit doesn't align when type=Relocatable). 
+  now it doesn't do anything at all (not even the error message for unaligned global). 
+  ahhh, same applies to stack_top being 16 aligned, its fragile when you add new instructions,
+  so align it in emit_entry and now it works. no more linker script. 
+
 ## (Nov 1) os
 
 still trying to turn on virtual memory. 

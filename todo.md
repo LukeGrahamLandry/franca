@@ -617,8 +617,6 @@ need to be careful about the refs which have tags in the high bits so won't leb 
   (same for linux-sta -> linux-dyn)
 - how are you supposed to ask for page size? blink wants 64k instead of 4k. 
 - standalone import_c/cc.fr and meta/qbe_backend.fr can't make statically linked binaries because the `_init` is written in franca
-- if macos {  // todo: "why does this work on my linux but not github's linux"
-  (tests/sys.fr using elf_loader.fr on a dynamic executable)
 - elf_loader.fr doesn't work on linker output: `panic! not divisible by page size`
 - lldb doesn't have symbol names or let you set break points. do i need to do dwarf stuff?
   (it kinda works in gdb!)
