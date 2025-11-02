@@ -9,10 +9,12 @@ sane_main :: fn() void = {
     kprint("These are the first words I have to say.\nThat's probably why they took so long to write.\n");
     
     print_el();
-    kprint_label("ID_AA64MMFR0_EL1: ", i64.sys_get(.ID_AA64MMFR0_EL1));
     setup_interrupts();
+    setup_virtual_memory();
+    kprint("done setup\n");
     
-    do_eret(789, @as(rawptr) user_func);
+    xxx := (@as(rawptr) user_func);
+    do_eret(789, xxx, 0, 512*1024*1024);
     kpanic("eret returned");
 }
 
@@ -79,7 +81,7 @@ setup_interrupts :: fn() void = {
     kprint_label("frequency: ", frequency);
 };
 
-set_field :: fn(interrupt_id: i64, addr: i64, bit_width: i64, value: u32) void = {
+set_field :: fn(interrupt_id: i64, addr: i64, bit_width: i64, value: u32) void #inline = {
     mask: u32 = 1.shift_left(bit_width) - 1;
     value := value.bit_and(mask);
     count_per_word := 32.umod(bit_width);
@@ -133,6 +135,157 @@ interrupt_trampoline_code :: {
 
 InterruptVector :: Array(Array(u32, 32), 16);
 interrupt_handlers :: @static(InterruptVector);
+
+setup_virtual_memory :: fn() void = {
+    tt := int_from_ptr(@type translation_table[], translation_table);
+    start := tt; 
+    end := start + size_of(@type translation_table[]);
+    tt := tt.ualign_to(1.shift_left(16));
+    tt := i64.ptr_from_int(tt);
+    tt := tt.slice(8192);
+    if i64.int_from_ptr(tt.ptr.offset(tt.len)) > end {
+        kprint("fucked\n!!!\n");
+    };
+    // TODO: check ID_AA64MMFR0_EL1 to make sure the granule size i want is supported
+    
+    parange := i64.sys_get(.ID_AA64MMFR0_EL1).bit_and(0b111);
+    kprint_label("ID_AA64MMFR0_EL1: ", i64.sys_get(.ID_AA64MMFR0_EL1));
+    kprint("--\n");
+    
+    // make sure its turned off before we start fucking with the tables
+    barrier();
+    i64.sys_set(.SCTLR_EL1, 0);
+    barrier();
+    
+    // Memory Attribute Indirection Register
+    // each slot is 1 byte, describes a caching behaviour, 
+    // page table entries contain an index of which slot to use.
+    // [0] = normal, [1..=7] = device nGnRnE
+    i64.sys_set(.MAIR_EL1, 0xff);
+    
+    // Translation Table Base Register
+    // "Together, the granule and the size of the virtual address space control the starting level of address translation."
+    // 64KB granule, level 2 table has 512MB per entry, indexed by bits 41:29, 
+    // so with a 42 bit address space, theres only one level of table (a Level Two table) because theres no bits left over.  
+    nbit := 42;
+    p_addr: u64 = 0;
+    block_size: u64 = 512*1024*1024;
+    each tt { it |
+        // low bits are attributes, the address is always aligned
+        device := p_addr < 0x40000000;
+        idx := int(device);
+        // block type, mair index, permissions, sharable, access flag
+        attr: BlockEntry = (repr = p_addr);
+        attr&.set(.tag, 0b01);
+        attr&.set(.idx, idx);
+        //                       // e0 e1
+        if !device {
+            attr&.set(.ap, 0b00);  // -- RW
+        } else {
+            attr&.set(.ap, 0b01);  // RW RW
+        };
+        //attr&.set(.ap, 0b10);  // -- R-
+        //attr&.set(.ap, 0b11);  // R- R-
+        attr&.set(.sh, 0b11);
+        attr&.set(.af, 0b1);
+        
+        it[] = attr.repr.bitcast();
+        p_addr += block_size;
+    };
+    // remap the first chunk of physical as the second chunk of virtual as R+W for el0. 
+    // so el1 can execute that memory by its real address and el0 can use it by this new fake address. 
+    xxx := tt[(0x40000000/block_size.bitcast()) + 1]&;
+    attr: BlockEntry = (repr = xxx[].bitcast());
+    attr&.set(.ap, 0b01);
+    attr.repr -= block_size;
+    xxx[] = attr.repr.bitcast();
+    
+    
+    barrier();
+    kprint_label("translation_table: ", bit_cast_unchecked(*i64, i64, tt.ptr));
+    kprint_label("setup_virtual_memory: ", bit_cast_unchecked(rawptr, i64, setup_virtual_memory));
+
+    sys_set(*i64, .TTBR0_EL1, tt.ptr);
+    sys_set(*i64, .TTBR1_EL1, tt.ptr);  // ?
+    
+    //tcr := TcrEl1.sys_get(.TCR_EL1);
+    //sctlr := SctlrEl1.sys_get(.SCTLR_EL1);
+    tcr := TcrEl1.zeroed();
+    sctlr := SctlrEl1.zeroed();
+    
+    // note: tg0 and tg1 have different encodings
+    tcr&.set(.tg0, 0b01);  // Granule size for the TTBR0_EL1 = 64KB
+    tcr&.set(.ips, parange);
+    tcr&.set(.t0sz, 64 - nbit);
+    tcr&.set(.ha, 0);
+    tcr&.set(.tg1, 0b11);  // ?
+    tcr&.set(.t1sz, 64 - nbit);  // ?
+
+    sctlr&.set(.EE, 0);  // little endian
+    //sctlr&.set(.span, 1);
+    sctlr&.set(.M, 1);  // address translation enabled
+    sctlr&.set(.nTWI, 1);
+    // TODO: make sure to turn on I: "instruction access Cacheability control"
+    
+    // TODO: why doesn't this work?
+    //out := u8.list(1024, stack_alloc(1024));
+    //@fmt(out&, "%\n", tcr&);
+    //kprint(out.items());
+    
+    kprint_label("TCR_EL1: ", tcr.repr.bitcast());
+    kprint_label("SCTLR_EL1: ", sctlr.repr.bitcast());
+    TcrEl1.sys_set(.TCR_EL1, tcr);
+    barrier();
+    SctlrEl1.sys_set(.SCTLR_EL1, sctlr);
+    barrier();
+    kprint("it works!\n");
+}
+
+#use("@/lib/bit_fields.fr");
+
+TcrEl1 :: @bit_fields(
+    t0sz := 6,
+    res0_epd0_irgn0_orgn0 := 8,
+    tg0 := 2,
+    t1sz := 6,
+    a1_epd1_irgn1_orgn1_sh1 := 8,
+    tg1 := 2,
+    ips := 3,
+    res0_as_tbi0_tbi1 := 4,
+    ha := 1,
+    _ := 24,
+);
+
+SctlrEl1 :: @bit_fields(
+    M := 1,
+    ____ := 15,
+    nTWI := 1,
+    _ := 6,
+    span := 1,
+    ___ := 1,
+    EE := 1,
+    __ := 38,
+);
+
+BlockEntry :: @bit_fields(
+    tag := 2,
+    idx := 3,
+    ns := 1,
+    ap := 2,
+    sh := 2,
+    af := 1,
+    _ := 53,
+);
+
+translation_table :: @static(Array(i64, 8192*2));
+
+// all the barriers for good luck
+barrier :: @AsmFunctionArmOnly(fn() void = ()) => (
+    @bits(0b11010101000000110011, 0b1111, 0b101, 0b11111),  // DMB SY
+    @bits(0b11010101000000110011, 0b1111, 0b100, 0b11111),  // DSB SY
+    @bits(0b11010101000000110011, 0b1111, 0b110, 0b11111),  // ISB SY
+    ret(),
+);
 
 user_func :: fn(arg: i64) void = {
     kprint("inside user_func\n");
@@ -192,6 +345,7 @@ syscall_func :: fn(args: *SavedRegisters) void = {
     
     if intid == 1023 {
         arg := args.gpr&[0];
+        kprint_label("FAR_EL1: ", args.far);
         kprint_label("ESR_EL1: ", args.esr);
         kprint_label("SPSR_EL1: ", args.spsr);
         print_el();
@@ -236,9 +390,14 @@ sys_set :: fn($T: Type, $name: Arm.SystemRegister, value: T) void #generic = {
     ))(value);
 }
 
-do_eret :: @AsmFunctionArmOnly(fn(result: i64, callee: rawptr) i64 = ()) => (
+do_eret :: @AsmFunctionArmOnly(fn(result: i64, callee: rawptr, _xx2: i64, xx3: i64) i64 = ()) => (
     // keep the same stack
+    // , but mapped differently because everything is a massive pain in the ass
     add_im(Bits.X64, x2, sp, 0, 0),
+    add_sr(Bits.X64, x2, x2, x3, .LSL, 0),
+    add_sr(Bits.X64, x1, x1, x3, .LSL, 0),
+    add_sr(Bits.X64, fp, fp, x3, .LSL, 0),
+    
     msr(.SP_EL0, x2),
     // set eret destination
     msr(.ELR_EL1, x1),
@@ -388,3 +547,31 @@ fn AsmFunctionArmOnly(signeture: FuncId, code: []u32) FuncId #fold = {
     _ := get_function_ast(fid, true, true, true, false);
     fid
 }
+
+// TODO: these should go somewhere else
+fn stack_alloc($bytes: i64) Alloc #inline /*semantic*/ = {
+    buf := @uninitialized Array(u8, bytes + 16);
+    self: FixedBufAlloc = (buf = buf&.items(), i = 0);
+    // TODO: should be able to ask for higher aligned stack slot
+    i := u8.int_from_ptr(self.buf.ptr);
+    self.i += i.ualign_to(16) - i;
+    self&.borrow()
+}
+
+FixedBufAlloc :: @struct {
+    buf: []u8;
+    i: i64;
+    impl :: fn(self: rawptr, action: Alloc.Action, ptr: rawptr, count: i64, align: i64) []u8 = {
+        self := FixedBufAlloc.ptr_from_raw(self);
+        if action == Alloc.Action.Allocate {
+            self.i = self.i.ualign_to(align);
+            start := self.i;
+            self.i += count;
+            return(self.buf.slice(start, self.i));
+        };
+        empty()
+    };
+    
+    fn borrow(self: *FixedBufAlloc) Alloc = 
+        (data = FixedBufAlloc.raw_from_ptr(self), vptr = impl);
+};

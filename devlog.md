@@ -1,4 +1,28 @@
 
+
+## (Nov 1) os
+
+still trying to turn on virtual memory. 
+- i tried to run a few other people's examples but like you can't just compile a program,
+  everything sucks and wants a specific version of rust that doesn't exist anymore or a specific 
+  name for your gcc cross compiler that i don't care enough to install also because why am i cross 
+  compiling from arm to arm. so once again reminded that i need to not depend on a linker for this
+  so i can have a program that actually works (and is usable by people like me who have zero patience for toolchain hell). 
+- one thing i was doing wrong was not aligning the translation table enough but that doesn't fix it. 
+- translation table entry attr:
+  "If you set `Bits[7:6]` to 0b01, which means the user can read/write the region, then the kernel is automatically not executable in that region no matter what the value of `Bits[53]` is."
+  helpfully thats not fucking written down anywhere other than https://grasslab.github.io/NYCU_Operating_System_Capstone/labs/lab8.html
+  that seems true, if i just use 0b00 then the el1 part works fine, and if i use 0b01 it dies and the fault address is the return instruction immediatly after setting SCTLR_EL1. 
+  but i don't understand why. 
+  - Armv8-A Address Translation talks about SCTLR_EL1.WXN which does that but i have it set to 0, 
+    so like i guess theres another place the enforces the same thing?
+  - PAN sounds vaugly similar but cortex-a57 doesn't have it. 
+- ok whatever, it works if i map the same physical memory once (identity) as RW el1 only 
+  and have el1 execute in that code, and then the next block of vm points to the same place, 
+  RW for both el1 and el0, which el0 can execute but el1 cant (for reasons i don't understand but thats fine). 
+- now i seem to have made WFI be an Undefined Instruction. 
+  thats easy ive seen the bit in SCTLR, set nTWI=1. 
+
 ## (Oct 30)
 
 - look at the device tree:
