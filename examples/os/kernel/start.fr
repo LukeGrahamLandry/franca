@@ -1,12 +1,43 @@
 
-main :: fn() void = {
-    sane_main();
+#use("@/examples/os/kernel/pages.fr");
+
+Kernel :: @struct {
+    physical: Physical;
+    next_vaddr: i64;
+    tasks: Array(Task, 2);
+};
+
+fn kernel() *Kernel = {
+    // when the mmu is off, all memory is treated as device memory and doesn't allow unaligned access. 
+    // (and my flat_link doesn't align the data segment)
+    k :: @static(Array(u8, Kernel.size_of()*2));
+    kernel := align_the_thing(k, 8, size_of(Kernel));
+    kernel := Kernel.ptr_from_raw(kernel);
+    kernel
 }
 
-sane_main :: fn() void = {
+// this is called by emit_entry's _start
+main :: fn(arg: i64) void = {
+    init_kernel();
+}
+
+init_kernel :: fn() void = {
     _, c := create_and_set_unsafe_environment();
     c.panic_hook = kpanic;
     kprint("These are the first words I have to say.\nThat's probably why they took so long to write.\n");
+    
+    kernel := kernel();
+    
+    kernel_image_base: i64 = 0x40100000;
+    kernel_image_size := 1.shift_left(21);  // TODO: tighter bound. 
+    ram_size: i64 = 0x08000000 - 0x00100000; // TODO: get this from device tree
+    kernel.physical.remaining = (
+         ptr = u8.ptr_from_int(kernel_image_base + kernel_image_size), 
+         len = ram_size - kernel_image_size,
+    );
+    kernel.next_vaddr = (512*1024*1024) * 4;
+    
+    _ := kernel.physical&.map(10);
     
     print_el();
     setup_interrupts();
@@ -14,6 +45,10 @@ sane_main :: fn() void = {
     kprint("done setup\n");
     
     xxx := (@as(rawptr) user_func);
+    c.prefer_syscalls = true;
+    c.current_os = 1;
+    // still won't work because it tries to syscall write "panic!"
+    c.panic_hook = bit_cast_unchecked(rawptr, @type c.panic_hook, bit_cast_unchecked(@type c.panic_hook, rawptr, c.panic_hook).offset(512*1024*1024));
     do_eret(789, xxx, 0, 512*1024*1024);
     kpanic("eret returned");
 }
@@ -107,7 +142,8 @@ interrupt_trampoline_code :: {
     emit :: fn(inst) => out&.push(inst);
     
     // write SavedRegisters
-    emit(sub_im(Bits.X64, sp, sp, 64, 0));  // leave space for special registers
+    emit(sub_im(Bits.X64, sp, sp, 512, 0));  // ?? for good luck TODO: why do i need this?
+    emit(sub_im(Bits.X64, sp, sp, 32, 0));  // leave space for special registers
     range_rev(0, 16) { r |
         a, b := (r*2, r*2+1);
         emit(stp_pre(.X64, a, b, sp, @as(i7) -2));
@@ -124,7 +160,8 @@ interrupt_trampoline_code :: {
         a, b := (r*2, r*2+1);
         emit(ldp_post(.X64, a, b, sp, @as(i7) 2));
     };
-    emit(add_im(Bits.X64, sp, sp, 64, 0));
+    emit(add_im(Bits.X64, sp, sp, 32, 0));
+    emit(add_im(Bits.X64, sp, sp, 512, 0));  // ?? for good luck
     
     // branch to ELR_EL1 which was set by the interrupt gods
     emit(eret);  
@@ -174,7 +211,7 @@ setup_virtual_memory :: fn() void = {
     nbit := 42;
     p_addr: u64 = 0;
     block_size: u64 = 512*1024*1024;
-    each tt { it |
+    each tt.slice(0, 4) { it |
         // low bits are attributes, the address is always aligned so its low bits are zero and don't matter. 
         device := p_addr < 0x40000000;
         idx := int(device);
@@ -197,6 +234,10 @@ setup_virtual_memory :: fn() void = {
         it[] = attr.repr.bitcast();
         p_addr += block_size;
     };
+    each tt.rest(4) { it |
+        it[] = 0;
+    };
+    // TODO: should unmap the low addresses to make sure null pointers fault. 
     // remap the first chunk of physical as the second chunk of virtual as R+W for el0. 
     // so el1 can execute that memory by its real address and el0 can use it by this new fake address. 
     xxx := tt[(0x40000000/block_size.bitcast()) + 1]&;
@@ -229,6 +270,9 @@ setup_virtual_memory :: fn() void = {
     SctlrEl1.sys_set(.SCTLR_EL1, sctlr);
     barrier();
     kprint("it works!\n");
+    
+    kernel := kernel();
+    kernel.tasks&[0].mem.root = bit_cast_unchecked(*i64, *TranslationTable, tt.ptr);
 }
 
 #use("@/lib/bit_fields.fr");
@@ -284,6 +328,18 @@ user_func :: fn(arg: i64) void = {
     
     result := do_syscall(123);
     kprint_label("syscall result is: ", result);
+    result := do_syscall(42);
+    kprint_label("syscall result is: ", result);
+    
+    import("@/examples/toy/hello2.fr")'main();
+    
+    range(0, 2) { _ |
+        mem := mmap_anon(zeroed rawptr, PAGE_SIZE, 0, 0);
+        kprint_label("mmapped: ", mem.int_from_rawptr());
+        mem := u8.ptr_from_raw(mem).slice(PAGE_SIZE);
+        mem[0] = 123; 
+        kprint("ok!\n");
+    };
     
     if false {
         echo();
@@ -302,6 +358,13 @@ echo :: fn() void = {
     };
 }
 
+// TODO: have the mcontext be by value here, store *Task in the special thread system register 
+//       and save registers to that in the interrupt handler instead of to the stack. 
+Task :: @struct {
+    mcontext: *SavedRegisters;
+    mem: AddressSpace;
+};
+
 SavedRegisters :: @struct {
     gpr: Array(i64, 32);
     // why are we being interrupted?
@@ -310,12 +373,17 @@ SavedRegisters :: @struct {
     // how do we return after the interrupt?
     elr: i64;  // eret link register
     spsr: i64; // saved program status
-    _: Array(u32, 4);
 };
 
 // for now im using the same handler for every slot of the InterruptVector
 syscall_func :: fn(args: *SavedRegisters) void = {
+    kernel := kernel();
+    kernel.tasks&[0].mcontext = args;
+    
     kprint("inside syscall_func\n");
+    //::ptr_utils(SavedRegisters);
+    //args = args.offset(1);
+    kprint_label("sp ish: ", SavedRegisters.int_from_ptr(args));
     
     // these being in SavedRegisters isn't important because i don't restore them 
     // but it seems convient to have one context thing you can pass around.
@@ -333,14 +401,47 @@ syscall_func :: fn(args: *SavedRegisters) void = {
     intid := u32.volatile(gicc + 0x000C);  // GICC_IAR: Interrupt Acknowledge Register
     kprint_label("intid: ", intid.zext());
     
+    exception_class := args.esr.shift_right_logical(26).bit_and(0b111111);
+    
     if intid == 1023 {
         arg := args.gpr&[0];
         kprint_label("FAR_EL1: ", args.far);
         kprint_label("ESR_EL1: ", args.esr);
         kprint_label("SPSR_EL1: ", args.spsr);
+        kprint_label("ELR_EL1: ", args.elr);
         print_el();
+        
+        if exception_class != 0b010101 {
+            kprint_label("exception class: ", exception_class);
+            kpanic("uncaught exception");
+        };
+        
         kprint_label("syscall argument is: ", arg);
-        args.gpr&[0] = arg * 2;
+        
+        syscall_number := args.gpr&[8];
+        kprint_label("syscall_number: ", syscall_number);
+        
+        @switch(syscall_number) {
+            @case(64) => {
+                buf, len := (args.gpr&[1], args.gpr&[2]);
+                kprint_label("buf argument is: ", buf);
+                kprint_label("len argument is: ", len);
+                kprint("WRITE: ");
+                kprint(u8.ptr_from_int(buf).slice(len));
+                kprint("\n");
+                args.gpr&[0] = len;
+            };
+            @case(222) => {
+                addr, len, prot, flags, fd, offset := (args.gpr&[0], args.gpr&[1], args.gpr&[2], args.gpr&[3], args.gpr&[4], args.gpr&[5]);
+                result_addr := vmap_empty_any(kernel, kernel.tasks&[0].mem&, len / PAGE_SIZE);
+                args.gpr&[0] = result_addr;
+                barrier();
+                // TODO: theres an instruction to kill the tlb or something
+            };
+            @default => {
+                args.gpr&[0] = arg * 2;
+            };
+        };
     };
     
     if intid == timer_irq {
@@ -349,6 +450,11 @@ syscall_func :: fn(args: *SavedRegisters) void = {
         i64.sys_set(.CNTP_TVAL_EL0, frequency);
         
         u32.volatile(gicc + 0x0010, intid);  // GICC_EOIR: End of Interrupt Register
+    };
+    
+    if args.elr == 0 {
+        kprint("returning to null isn't going to work\n");
+        spin();
     };
     
     i64.sys_set(.ELR_EL1, args.elr);
@@ -386,9 +492,11 @@ do_eret :: @AsmFunctionArmOnly(fn(result: i64, callee: rawptr, _xx2: i64, xx3: i
     add_im(Bits.X64, x2, sp, 0, 0),
     add_sr(Bits.X64, x2, x2, x3, .LSL, 0),
     add_sr(Bits.X64, x1, x1, x3, .LSL, 0),
+    add_sr(Bits.X64, x9, x9, x3, .LSL, 0),  // dynamic environment
     add_sr(Bits.X64, fp, fp, x3, .LSL, 0),
     
     msr(.SP_EL0, x2),
+    0xd50040bf, // msr SPSel, #0x0
     // set eret destination
     msr(.ELR_EL1, x1),
     // jump to callee but in el0

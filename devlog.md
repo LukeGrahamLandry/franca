@@ -1,5 +1,18 @@
 
 
+## (Nov 3) os
+
+- provide a thing like mmap so you can ask for new memory. 
+  unlike before, don't just do identity mapping, don't care where the physical pages come from
+  - mistakes with levels of indirction that get confusing because rn the behaviour when you try to write 
+    to a null pointer is just that it doesn't nothing and always reads 0.
+    so i had `root: *TT; TT :: (entries: *Array);` and was setting like `root.entries = bit_cast()`,
+    so auto-dereferencing root which was zeroed because not initted yet and then endless confusion. 
+  - when you have enough levels of page table to get to individual pages, 
+    the last one's tag is 0b11 (like table entry) not 0b01 (like block entry that you use if stopping at fewer levels)
+
+## (Nov 2) os
+
 - the amount im using the linker for is so little that i can just do it myself until im ready 
   to think about how to make my elf emit code more general. 
 - conveniently the fixed base address means i can do DataAbsolute fixups in the linker. 
@@ -10,6 +23,13 @@
   now it doesn't do anything at all (not even the error message for unaligned global). 
   ahhh, same applies to stack_top being 16 aligned, its fragile when you add new instructions,
   so align it in emit_entry and now it works. no more linker script. 
+- emit_entry don't assume registers are zeroed
+- very beginnings of handing out pages in a structured way
+- discovered you're not allowed unaligned access at all while the mmu is disabled. 
+  so with flat_link, its not just the special hardware statics that need larger alignment
+  to be careful of, its any statics at all that contain anything bigger than a u8. 
+- somehow i don't understand where the stack frame ends and trying to do more syscalls clobbers a return address. 
+  i can make it work by just skipping some but i don't trust that im not just getting lucky. 
 
 ## (Nov 1) os
 

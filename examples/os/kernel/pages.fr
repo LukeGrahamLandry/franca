@@ -1,0 +1,133 @@
+
+Physical :: @struct {
+    remaining: []u8;
+    free: *Free;
+    // TODO: have a scheme that represents contiguous chunks better
+    Free :: @rec @struct(link: *Free);
+};
+
+fn map(self: *Physical, n: i64) *Physical.Free = {
+    ::ptr_utils(@type self.free[]);
+    if self.free.is_null() {
+        self.free = self.new();
+    };
+    
+    head := self.free;
+    prev := head;
+    while => n > 0 && !self.free.is_null() {
+        prev = self.free;
+        self.free = self.free.link;
+        n -= 1;
+    };
+    while => n > 0 {
+        it := self.new();
+        prev.link = it;
+        prev = it;
+        n -= 1;
+    };
+    prev.link = zeroed(*Physical.Free);
+    head
+}
+
+fn unmap_one(self: *Physical, it: *Physical.Free) void = {
+    it.link = self.free;
+    self.free = it;
+}
+
+fn new(self: *Physical) *Physical.Free = {
+    it := bit_cast_unchecked(*u8, *Physical.Free, self.remaining.ptr);
+    self.remaining = self.remaining.rest(PAGE_SIZE);
+    it.link = zeroed(*Physical.Free);
+    it
+}
+
+fn vmap_empty_any(kernel: *Kernel, addrs: *AddressSpace, page_count: i64) i64 = {
+    vaddr := kernel.next_vaddr;
+    kernel.next_vaddr += page_count * PAGE_SIZE;
+    vmap_empty(kernel, addrs, vaddr, page_count);
+    vaddr
+}
+
+// TODO: be able to over commit
+fn vmap_empty(kernel: *Kernel, addrs: *AddressSpace, vaddr: i64, page_count: i64) void = {
+    vmap(kernel, addrs, vaddr, page_count, kernel.physical&.map(page_count));
+}
+
+fn vmap(kernel: *Kernel, addrs: *AddressSpace, vaddr: i64, page_count: i64, phys: *Physical.Free) void = {
+    range(0, page_count) { _ |
+        vmap_one(kernel, addrs, vaddr, phys);
+        vaddr += PAGE_SIZE;
+        prev := phys;
+        phys = phys.link;
+        prev.link = zeroed(*Physical.Free);
+    };
+}
+
+fn vmap_one(kernel: *Kernel, addrs: *AddressSpace, vaddr: i64, phys: *Physical.Free) void = {
+    L2 := make_level_index(41, 29);
+    L3 := make_level_index(28, 16);
+    TableField := make_level_index(48, 16);
+    
+    tt_2 := addrs.root&;
+    i_2 := L2.get(vaddr);
+    e_2 := tt_2.entries&[i_2];
+    if e_2 == 0 {
+        // this is the first page on this 512mb chunk, need to make a next level table for it. 
+        mem := kernel.physical&.map(1);
+        mem.link = zeroed(*Physical.Free);
+        // stored address points to the L3 table
+        kprint_label("want tt_3: ", Physical.Free.int_from_ptr(mem));
+        attr: BlockEntry = (repr = Physical.Free.int_from_ptr(mem).bitcast());
+        attr&.set(.tag, 0b11);  // table entry
+        // attrs don't matter here, set for individual pages latter. 
+
+        e_2 = attr.repr.bitcast();
+        tt_2.entries&[i_2] = e_2;
+    } else {
+        if e_2.bit_and(0b11) != 0b11 {
+            kpanic("L2 table not a table");
+        };
+    };
+    
+    tt_3 := TableField.get(e_2).shift_left(16);
+    tt_3 := TranslationTable.ptr_from_int(tt_3);
+    i_3 := L3.get(vaddr);
+
+    if tt_3.entries&[i_3] != 0 {
+        kpanic("stomp mapping");
+    };
+    
+    p_addr: u64 = Physical.Free.int_from_ptr(phys).bitcast();
+    attr: BlockEntry = (repr = p_addr);
+    attr&.set(.tag, 0b11); // since its a single page, its not 0b01=block
+    attr&.set(.idx, 0);  // normal
+    attr&.set(.ap, 0b01);  // RW RW
+    attr&.set(.sh, 0b11);
+    attr&.set(.af, 0b1);
+    
+    tt_3.entries&[i_3] = attr.repr.bitcast();
+
+    if i_3.shift_left(16).bit_or(i_2.shift_left(29)) != vaddr {
+        kpanic("unaligned page vaddr");
+    };
+}
+
+PAGE_SIZE :: 1.shift_left(16);
+
+AddressSpace :: @struct {
+    root: *TranslationTable;
+};
+
+// the table controls the range [vbase..+step*8192].
+// step depends on its level in the tree, vbase depends on its position in the tree. 
+TranslationTable :: @struct(entries: Array(i64, 8192));
+
+BitRange :: @struct(off: u8, len: u8);
+fn get(range: BitRange, addr: i64) i64 = {
+    mask := 1.shift_left(range.len.zext()) - 1;
+    addr.shift_right_logical(range.off.zext()).bit_and(mask)
+}
+
+fn make_level_index(hi: u8, lo: u8) BitRange =
+    (off = lo, len = hi - lo + 1);
+

@@ -13,6 +13,7 @@ compile :: fn(vtable: *ImportVTable) []u8 = {
     src := "#include_std(\"lib/core.fr\");#include_std(\"examples/os/kernel/start.fr\");";
     build_options := vtable.default_build_options();
     build_options.retain_function_names = true;
+    build_options.use_raw_syscalls = true;
     it := build_options.safety_checks&;
     it.insert(.Bounds, false);
     it.insert(.DebugAssertions, false);
@@ -53,7 +54,7 @@ emit_entry :: fn(m: *Qbe.Module, main: Str) void = {
     code&[.aarch64] = interpret_as_bytes(@const_slice(
         arm_nop,  // adr fp, stack_top
         arm_nop,  // ^
-        sub_im(.X64, x0, x0, @as(u12) 16, 0b0),
+        movn(.X64, x0, 0b1111, .Left0),
         and_sr(.X64, fp, fp, x0, .LSL, 0b0),
         add_im(.X64, sp, fp, @as(u12) 0, 0b0),
         arm_nop,  // bl main
@@ -63,7 +64,7 @@ emit_entry :: fn(m: *Qbe.Module, main: Str) void = {
     m.maybe_add_export(start, true);
     m.emit_data(
         id = m.intern("stack_end"),
-        template = (Zeroes = 0x10000),
+        template = (Zeroes = 0x100000),
         relocations = empty(),
     );
     stack_top := m.intern("stack_top");
@@ -109,7 +110,6 @@ flat_link :: fn(in: []u8, ram_base: i64) void = {
     h := in.peek_type(Elf.Header);
     sh := in.rest(h.section_header_off).peek_type(Elf.SectionHeader);
     sh: []Elf.SectionHeader = sh.slice(h.section_header_num.zext());
-    new_voff := temp().alloc_zeroed(i64, sh.len);
     
     is_alloc :: fn(it) => it.flags.bit_and(1.shift_left(@as(i64) Elf.SectionFlag.Alloc)) != 0;
     section_bytes :: fn(it) => in.subslice(it.offset, it.size);
@@ -135,11 +135,11 @@ flat_link :: fn(in: []u8, ram_base: i64) void = {
                 file_high = max(file_high, end);
             };
         
-            new_voff[i] = voff;
             it.addr = voff;
             voff += it.size;
         };
     };
+    @eprintln(">>> file size = %, mem size = %;", in.len, voff - ram_base);
     @assert(file_high > 0);
     
     enumerate sh { mem_section_i, mem_section |
@@ -147,6 +147,7 @@ flat_link :: fn(in: []u8, ram_base: i64) void = {
             mem_bytes := section_bytes(mem_section);
             each sh { rel_section |
                 ::enum(Elf.SectionType);
+                @debug_assert_ne(rel_section.type, .RelocNoAddend, "todo: link no addend");
                 if rel_section.info.zext() == mem_section_i && rel_section.type == .RelocAddend {
                     symbols := section_array(sh[rel_section.link.zext()]&, Elf.Symbol);
                     relocs := section_array(rel_section, Elf.RelA);
@@ -155,50 +156,53 @@ flat_link :: fn(in: []u8, ram_base: i64) void = {
                         sym := symbols[it.sym.zext()]&;
                         sym_type := sym.info.shift_right_logical(4);
                         
-                        dest_vaddr := new_voff[sym.section_header_index.zext()] + sym.value;
-                        src_vaddr := new_voff[mem_section_i] + it.offset + it.addend;
+                        dest_vaddr := sh[sym.section_header_index.zext()].addr + sym.value;
+                        src_vaddr := mem_section.addr + it.offset + it.addend;
                         inst := bit_cast_unchecked(*u8, *u32, mem_bytes.index(it.offset));
                         
-                        @switch(it.type) {
-                            @case(Elf.R_AARCH64_ABS64) => {
+                        // TODO: ehhh, using this with imports that expect a GOT slot doesn't really make sense. 
+                        @if_else {
+                            @if(it.type == Elf.R_AARCH64_ABS64) => {
                                 // the addresses are fixed because the kernel is loaded at a known base address.
                                 @assert(mem_section.type != .Bss, "TODO: reloc in bss");
                                 bit_cast_unchecked(*u8, *i64, mem_bytes.index(it.offset))[] = dest_vaddr;
                             };
-                            @case(Elf.R_AARCH64_JUMP26) => unreachable();
-                            @case(Elf.R_AARCH64_CALL26) => {
-                                @assert(inst[].bit_and(1.shift_left(31)) != 0, "call expected set_link");
+                            @if(it.type == Elf.R_AARCH64_CALL26 || it.type == Elf.R_AARCH64_JUMP26) => {
+                                set_link := inst[].bit_and(1.shift_left(31)) != 0;
                                 distance := dest_vaddr - src_vaddr;
-                                inst[] = Arm'b(distance / 4, 0b1);
+                                inst[] = Arm'b(distance / 4, @as(u1) @as(i64) set_link.int());
                             };
-                            @case(Elf.R_AARCH64_ADR_PREL_PG_HI21) => {
+                            @if(it.type == Elf.R_AARCH64_ADR_PREL_PG_HI21 || it.type == Elf.R_AARCH64_ADR_GOT_PAGE) => {
                                 reg := inst[].bit_and(0b11111).zext();
-                                i, _ := Arm'encode_adrp_add(dest_vaddr, src_vaddr, reg);
+                                i, _ := Arm'encode_adrp_off(dest_vaddr, src_vaddr, @as(u5) reg, false);
                                 inst[] = i;
                             };
-                            @case(Elf.R_AARCH64_ADR_GOT_PAGE) => unreachable();
-                            @case(Elf.R_AARCH64_ADD_ABS_LO12_NC) => {
+                            @if(it.type == Elf.R_AARCH64_ADD_ABS_LO12_NC || it.type == Elf.R_AARCH64_LD64_GOT_LO12_NC) => {
                                 is_add := inst[].shift_right_logical(32-9) == 0b100100010;
-                                //is_load := inst[].shift_right_logical(32-9) == 0b111100101;
-                                @assert(is_add, "TODO: ldr12 reloc");
+                                is_load := inst[].shift_right_logical(32-10) == 0b1111100101;
+                                @assert(is_add || is_load);
+                                if dest_vaddr == 0 {
+                                    @assert(sym_type == Elf.STB_WEAK);
+                                    is_load = false;
+                                };
+                                // note: this assumes load's dest & addr are the same
                                 reg := inst[].bit_and(0b11111).zext();
-                                _, i := Arm'encode_adrp_add(dest_vaddr, src_vaddr, reg);
+                                _, i := Arm'encode_adrp_off(dest_vaddr, src_vaddr, @as(u5) reg, is_load);
                                 inst[] = i;
                             };
-                            @case(Elf.R_AARCH64_LD64_GOT_LO12_NC) => unreachable();
-                            @default => unreachable();
+                            @else => unreachable();
                         };
                         it.type = 0;
                     };
                     
-                    relocs&.ordered_retain(fn(it) => it.type != 0);
+                    relocs&.unordered_retain(fn(it) => it.type != 0);
                     rel_section.size = relocs.len * size_of(Elf.RelA);
                 }
             };
         };
     };
     
-    h.type = .Executable;
+    //h.type = .Executable;  // leaving this as Relocatable makes objdump look for symbols in the right place
     h.program_header_entsize = size_of(Elf.ProgramHeader);
     available := in.slice(size_of(Elf.Header), h.section_header_off);
     @assert(available.len > size_of(Elf.ProgramHeader));
@@ -215,9 +219,6 @@ flat_link :: fn(in: []u8, ram_base: i64) void = {
         mem_size = in.len,
         align = 65536,
     );
-    h.section_header_entsize = 0;
-    in.rest(file_high).set_zeroed();
-    h.section_header_num = 0;
 }
 
 Qbe :: import("@/backend/lib.fr");

@@ -523,29 +523,29 @@ decode_bitmask :: fn(n: i64, immr: i64, imms: i64) i64 = {
     value
 };
 
-fn encode_adrp_add(dest: rawptr, src: rawptr, reg: u5) Ty(u32, u32) = 
-    encode_adrp_add(int_from_rawptr(dest), int_from_rawptr(src), reg);
-
-fn encode_adrp_add(dest: i64, src: i64, reg: u5) Ty(u32, u32) = {
+encode_adrp_off :: fn(dest: i64, src: i64, reg: u5, load: bool) Ty(u32, u32) #inline = {
     distance := dest - src;
     adr_range :: 1.shift_left(20);
-    // TODO: this is kinda cute but its asking for trouble with flat_link
-    /*
     if distance.abs() < adr_range {
         // if its an import, you need the extra nop so you take up the right amount of space for the relocation when doing AOT. 
         return(encode_adr(distance, reg), arm_nop); 
     };
-    */
     
     page_offset := dest.shift_right_logical(12) - src.shift_right_logical(12);
     high := page_offset.shift_right_logical(2).bit_and(1.shift_left(19) - 1);
     low := page_offset.bit_and(0b11);
     bottom12 := @as(u12) @as(i64) dest.bit_and(1.shift_left(12) - 1);
-    (adrp(high, low, reg), add_im(Bits.X64, reg, reg, bottom12, 0))
-}
+    second := @if(load, {
+        @debug_assert_eq(bottom12.umod(8), 0, "cannot encode unaligned ldr_uo");
+        ldr_uo(Bits.X64, reg, reg, bottom12.udiv(8))
+    }, {
+        add_im(Bits.X64, reg, reg, bottom12, 0)
+    });
+    (adrp(high, low, reg), second)
+};
 
-fn encode_adr(distance: i64, reg: u5) u32 = {
+encode_adr :: fn(distance: i64, reg: u5) u32 = {
     high := distance.shift_right_arithmetic(2).bit_and(1.shift_left(19) - 1);
     low := distance.bit_and(0b11);
     adr(high, low, reg)
-}
+};
