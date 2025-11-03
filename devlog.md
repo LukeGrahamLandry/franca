@@ -10,6 +10,11 @@
     so auto-dereferencing root which was zeroed because not initted yet and then endless confusion. 
   - when you have enough levels of page table to get to individual pages, 
     the last one's tag is 0b11 (like table entry) not 0b01 (like block entry that you use if stopping at fewer levels)
+- stop trying to use the same stack for el0+el1. 
+  it's the right thing to do anyway and it avoids accidentally stomping the user code's stack 
+  if they weren't using sp strictly by the calling convention. 
+- seperate the part where you eret out from the interrupt handler 
+  and store the mcontext not on the stack so its easy to return to a different task instead. 
 
 ## (Nov 2) os
 

@@ -982,6 +982,7 @@ what do i need to run my compiler (and some fun test programs)
 - dynamic libraries
   - dlopen, dlsym
 - cli arguments / get exe path
+- ptrace for a debugger is pretty important
 
 really a lot of that should just be in user space probably. 
 like the only useful primitive is having tasks with mostly seperate address spaces 

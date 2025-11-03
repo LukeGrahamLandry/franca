@@ -3,9 +3,14 @@ driver :: fn(vtable: *ImportVTable) void = {
     bytes := compile(vtable);
     #use("@/examples/testing.fr");
     flat_link(bytes, 0x40100000);
-    write_entire_file_or_crash("target/kernel.out", bytes);
+    output := "target/kernel.out";
+    write_entire_file_or_crash(output, bytes);
+    if !cli_args().contains(fn(it) => it[] == "-qemu") {
+        @println(">>> wrote to %; (run with -qemu to run the os as well)", output);
+        return();
+    };
     println("running...   (to turn it off, ctrl-a then press x)");
-    sh(@slice("qemu-system-aarch64", "-machine", "virt", "-cpu", "cortex-a57", "-kernel", "target/kernel.out", "-nographic"));
+    sh(@slice("qemu-system-aarch64", "-machine", "virt", "-cpu", "cortex-a57", "-kernel", output, "-nographic"));
 }
 
 compile :: fn(vtable: *ImportVTable) []u8 = {
@@ -54,6 +59,7 @@ emit_entry :: fn(m: *Qbe.Module, main: Str) void = {
     code&[.aarch64] = interpret_as_bytes(@const_slice(
         arm_nop,  // adr fp, stack_top
         arm_nop,  // ^
+        0xd50041bf, // msr SPSel, #0x1; probably already the case but just make sure. 
         movn(.X64, x0, 0b1111, .Left0),
         and_sr(.X64, fp, fp, x0, .LSL, 0b0),
         add_im(.X64, sp, fp, @as(u12) 0, 0b0),
@@ -85,7 +91,7 @@ emit_entry :: fn(m: *Qbe.Module, main: Str) void = {
         use_symbol(m, main) { s_main |
             s_main.strong = true;
             push_fixup(m, s_main, (
-                patch_at = u8.raw_from_ptr(m.segments&[.Code].mmapped.index(s_start.offset + 20 + 4)),
+                patch_at = u8.raw_from_ptr(m.segments&[.Code].mmapped.index(s_start.offset + 24 + 4)),
                 type = .Call,
             ));
         };
