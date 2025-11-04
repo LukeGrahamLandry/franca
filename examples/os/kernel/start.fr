@@ -30,12 +30,18 @@ main :: fn(arg: i64) void = {
 init_kernel :: fn() void = {
     _, c := create_and_set_unsafe_environment();
     c.panic_hook = kpanic;
-    kprint("These are the first words I have to say.\nThat's probably why they took so long to write.\n");
+    
+    if i64.sys_get(.CurrentEL).shift_right_logical(2) != 1 {
+        kpanic("expected to run in el1");
+    };
+    if i64.sys_get(.ID_AA64ISAR0_EL1).shift_right_logical(20).bit_and(0b1111) == 0 {
+        kprint("WARNING: atomic instructions are not implemented on this cpu\n");
+    };
     
     kernel := kernel();
     
     kernel_image_base: i64 = 0x40100000;
-    kernel_image_size := 1.shift_left(21);  // TODO: tighter bound. 
+    kernel_image_size := 1.shift_left(23);  // TODO: tighter bound. 
     ram_size: i64 = 0x08000000 - 0x00100000; // TODO: get this from device tree
     kernel.physical.remaining = (
          ptr = u8.ptr_from_int(kernel_image_base + kernel_image_size), 
@@ -44,10 +50,10 @@ init_kernel :: fn() void = {
     kernel.next_vaddr = (512*1024*1024) * 4;
     kernel.env = get_dynamic_context();
     
-    print_el();
     setup_interrupts();
     setup_virtual_memory();
-    kprint("done setup\n");
+    kprint_label("ID_AA64ISAR0_EL1: ", i64.sys_get(.ID_AA64ISAR0_EL1));
+    kprint("=== done setup ===\n");
     
     stack_size_pages := 16;
     kstack := kernel.physical&.map(stack_size_pages);  // TODO: its hacky to assume this will be contiguous
@@ -136,7 +142,6 @@ setup_interrupts :: fn() void = {
     frequency := i64.sys_get(.CNTFRQ_EL0);
     i64.sys_set(.CNTP_TVAL_EL0, frequency);  // count down from the frequency, so wait 1 second
     i64.sys_set(.CNTP_CTL_EL0, 1);  // turn it on
-    kprint_label("frequency: ", frequency);
 };
 
 set_field :: fn(interrupt_id: i64, addr: i64, bit_width: i64, value: u32) void #inline = {
@@ -252,23 +257,26 @@ barrier :: @AsmFunctionArmOnly(fn() void = ()) => (
 
 user_func :: fn(arg: i64) void = {
     _, c := create_and_set_unsafe_environment();
-    c.panic_hook = kpanic;
+    c.panic_hook = print_and_exit1;
     c.prefer_syscalls = true;
     c.current_os = 1;
+    c.temporary_allocator_i = Arena'stack_alloc(1.shift_left(15));
     
-    kprint("inside user_func\n");
-    kprint_label("user argument is: ", arg);
+    @print("user argument is: %\n", arg);
     
-    import("@/examples/toy/hello2.fr")'main();
-    
-    range(0, 2) { _ |
-        kprint("calling mmap...\n");
-        mem := mmap_anon(zeroed rawptr, PAGE_SIZE, 0, 0);
-        kprint_label("mmapped: ", mem.int_from_rawptr());
-        mem := u8.ptr_from_raw(mem).slice(PAGE_SIZE);
-        mem[0] = 123; 
-        kprint("ok!\n");
+    elf_bytes := @run {
+        franca := get_executable_path(temp());
+        o := "target/userspaceprogram.out";
+        import("@/examples/testing.fr")'sh(@slice(
+            franca, "examples/default_driver.fr", "build", "examples/toy/hello2.fr", 
+            "-os", "linux", "-arch", "aarch64", 
+            "-syscalls",
+            "-keep-names",
+            "-o", o,
+        ));
+        read_entire_file_or_crash(ast_alloc(), o)
     };
+    import("@/examples/elf_loader.fr")'load_elf_file(elf_bytes);
     
     if false {
         echo();
@@ -282,7 +290,7 @@ echo :: fn() void = {
         i: i64 = getchar().zext();
         if i != prev {
             prev = i;
-            kprint_label("input: ", i);
+            @print("input: %\n", i);
         }
     };
 }
@@ -304,6 +312,7 @@ SavedRegisters :: @struct {
     spsr: i64; // saved program status
 };
 
+tracing :: false; 
 // for now im using the same handler for every slot of the InterruptVector
 syscall_func :: fn(task: *Task) void = {
     return :: ();  // must do it via return_to_user
@@ -312,7 +321,9 @@ syscall_func :: fn(task: *Task) void = {
     set_dynamic_context(kernel.env);
     args := task.mcontext&;
     
+    if tracing {
     kprint("=== inside syscall_func ===\n");
+    }; 
     
     // these are restored by return_to_user
     args.elr = i64.sys_get(.ELR_EL1);
@@ -325,47 +336,88 @@ syscall_func :: fn(task: *Task) void = {
     args.esr = i64.sys_get(.ESR_EL1);
     args.far = i64.sys_get(.FAR_EL1);
     
+    intid := u32.volatile(gicc + 0x000C);  // GICC_IAR: Interrupt Acknowledge Register
+    if tracing {
     kprint_label("thread pointer: ", SavedRegisters.int_from_ptr(args));
     kprint_label("SP_EL0: ", i64.sys_get(.SP_EL0));
     kprint_label("saved fp: ", args.gpr&[29]);
-    
-    intid := u32.volatile(gicc + 0x000C);  // GICC_IAR: Interrupt Acknowledge Register
     kprint_label("intid: ", intid.zext());
+    };
     
     exception_class := args.esr.shift_right_logical(26).bit_and(0b111111);
     
     if intid == 1023 {
         arg := args.gpr&[0];
+        uncaught := exception_class != 0b010101;
+        if tracing || uncaught {
         kprint_label("FAR_EL1: ", args.far);
         kprint_label("ESR_EL1: ", args.esr);
         kprint_label("SPSR_EL1: ", args.spsr);
         kprint_label("ELR_EL1: ", args.elr);
         print_el();
+        };
         
-        if exception_class != 0b010101 {
+        if uncaught {
             kprint_label("exception class: ", exception_class);
+            if exception_class == 0 {
+                inst := u32.ptr_from_int(args.elr)[];
+                kprint_label("instruction: ", inst.zext());
+            };
             kpanic("uncaught exception");
         };
         
         syscall_number := args.gpr&[8];
+        if tracing {
         kprint_label("syscall_number: ", syscall_number);
+        };
         
         @switch(syscall_number) {
             @case(64) => {
                 buf, len := (args.gpr&[1], args.gpr&[2]);
+                if tracing {
                 kprint_label("buf argument is: ", buf);
                 kprint_label("len argument is: ", len);
                 kprint("WRITE: ");
+                };
                 kprint(u8.ptr_from_int(buf).slice(len));
+                if tracing {
                 kprint("\n");
+                };
                 args.gpr&[0] = len;
             };
+            // mmap
             @case(222) => {
                 addr, len, prot, flags, fd, offset := (args.gpr&[0], args.gpr&[1], args.gpr&[2], args.gpr&[3], args.gpr&[4], args.gpr&[5]);
-                result_addr := vmap_empty_any(kernel, kernel.tasks&[0].mem&, len / PAGE_SIZE);
+                pages := len.ualign_to(PAGE_SIZE).udiv(PAGE_SIZE);
+                result_addr := vmap_empty_any(kernel, kernel.tasks&[0].mem&, pages);
                 args.gpr&[0] = result_addr;
                 barrier();
                 // TODO: theres an instruction to kill the tlb or something
+            };
+            // mprotect
+            @case(226) => {
+                addr, len, prot := (args.gpr&[0], args.gpr&[1], args.gpr&[2]);
+                // TODO: do the protection. for now everything is RWX so it doesn't matter. 
+                args.gpr&[0] = 0;
+                barrier();
+                // TODO: theres an instruction to kill the tlb or something
+            };
+            // exit
+            @case(94) => {
+                kprint("called exit\n");
+                callee: rawptr = spin;
+                // confusing! 
+                // without the offset 512*1024*1024, it works, but won't work 
+                // if you try to access mutable statics from the user space code 
+                // (which spin won't so it doesn't matter buts its still spiritually wrong).
+                // with the offset _*_*_, you need to launder it to prevent folding and then it works, 
+                // but i don't understand why. 
+                // TODO: why doesn't this work with offset  but ?
+                launder :: fn(a: rawptr) rawptr #noinline = a;
+                callee = callee.launder();
+                args.elr = callee.offset(512*1024*1024).int_from_rawptr();
+                // i still want to get the timer and then poweroff which doesn't happen if you just spin here because interrupts are masked
+                //spin(); // TODO: dellocate the task and schedule something else
             };
             @default => kpanic("unknown syscall");
         };
@@ -469,32 +521,10 @@ fn volatile($T: Type, addr: i64) T #noinline #generic = {
 }
 
 fn kscary_log(i: i64) void = {
-    buf := @uninitialized Array(u8, 40);
-    if i != 0 && i == -i { // ugly twos compliment :hack
-        kprint("-9223372036854775808");
-        return();
-    };
-    operator_index :: index_unchecked;
-    len := 0;
-    inner :: fn(i: i64, buf: []u8, len: *i64) void = {
-        if i < 0 {
-            buf[len[]] = "-".ascii();
-            len[] += 1;
-            inner(-i, buf, len);
-        } else {
-            is_digit := i >= 0 && i < 10;
-            if is_digit {
-                buf[len[]] = i.trunc() + 48;
-                len[] += 1;
-            } else {
-                inner(i / 10, buf, len);
-                buf[len[]] = i.mod(10).trunc() + 48;
-                len[] += 1;
-            };
-        };
-    };
-    inner(i, buf&.items(), len&);
-    kprint(@as(Str) (ptr = buf&.as_ptr(), len = len));
+    buf := @uninitialized Array(u8, 24);
+    buf := buf&.items();
+    len := write_int_to_buffer(buf, i);
+    kprint(buf.slice(0, len));
 }
 
 // TODO: this is a neat demo but it would be more simple to just make the syntax such that it doesn't resolve

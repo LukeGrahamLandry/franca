@@ -83,10 +83,10 @@ arena_alloc :: fn(raw_self: rawptr, size: i64, align: i64) rawptr = {
     if SLOW_ARENA_CANARY {
         // TODO: support largert alignments
         align = 8;
-        size = (size + size_of(ArenaCanary)).align_to(8);
+        size = (size + size_of(ArenaCanary)).ualign_to(8);
     };
     loop {
-        self.start = align_to(self.start, align);
+        self.start = ualign_to(self.start, align);
         @debug_assert(self.start <= self.end);  // TODO
         end  := self.start + size;
         
@@ -356,14 +356,13 @@ todo_allocator_fn :: fn(_: rawptr, action: Alloc.Action, ptr: rawptr, count: i64
     f(a.data, action, ptr, count, align)
 };
 
-// TODO: untested
+// don't call this in a loop. it's not the same as a C style alloca.
 stack_alloc :: fn($bytes: i64) Alloc #inline /*semantic*/ = {
     buf := @uninitialized Array(u8, bytes);
     self: Fixed = (buf = buf&.items(), i = 0);
     self&.borrow()
 };
 
-// TODO: untested
 Fixed :: @struct {
     buf: []u8;
     i: i64;
@@ -371,7 +370,7 @@ Fixed :: @struct {
         self := Fixed.ptr_from_raw(self);
         if action == Alloc.Action.Allocate {
             p := self.buf.index(self.i);
-            start := u8.int_from_ptr(p).ualign_to(align);
+            start := u8.int_from_ptr(p).ualign_to(align) - u8.int_from_ptr(self.buf.ptr);
             self.i = start + count;
             return(self.buf.slice(start, self.i));
         };

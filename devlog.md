@@ -23,6 +23,16 @@
   maybe shutdown sequence isn't part of the isa somehow? like is it different for every cpu
   and i need to ask about cortex-a57 specifically?
   the magic letters to google are PSCI and theres a hyperviser call that does it. 
+- ifdef out most of the spammy logging, deduplicate code in kscary_log, userspace code can call print now. 
+- trying to run elf_loader
+  - "data abort" trying to copy the last segment into place.
+    mmap wasn't aligning the size forward so was rounding down.
+  - now it gets to "calling entry point" and dies on cas as an illegal instruction. 
+    fair enough, ID_AA64ISAR0_EL1's Atomic field is all zeros for cortex-a57, but 0b0010 for `-cpu max`,
+  - but that breaks everything else. it dies trying to write to the device memory in the interrupt handler. 
+    `Taking exception 4 [Data Abort] on CPU 0...from EL1 to EL1...with SPSR 0x804023c5` PAN is set.
+    fixed by setting `sctlr.span=1` (which confusingly disables it).
+  - yay! elf_loader can load a real hello world elf program on my os now.
 
 ## (Nov 2) os
 

@@ -73,20 +73,19 @@ fn vmap_one(kernel: *Kernel, addrs: *AddressSpace, vaddr: i64, phys: *Physical.F
     tt_2 := addrs.root&;
     i_2 := L2.get(vaddr);
     e_2 := tt_2.entries&[i_2];
-    if e_2 == 0 {
+    if e_2.repr == 0 {
         // this is the first page on this 512mb chunk, need to make a next level table for it. 
         mem := kernel.physical&.map(1);
         mem.link = zeroed(*Physical.Free);
         // stored address points to the L3 table
-        kprint_label("want tt_3: ", Physical.Free.int_from_ptr(mem));
-        attr: BlockEntry = (repr = Physical.Free.int_from_ptr(mem).bitcast());
+        attr: PageTableEntry = (repr = Physical.Free.int_from_ptr(mem).bitcast());
         attr&.set(.tag, 0b11);  // table entry
         // attrs don't matter here, set for individual pages latter. 
 
-        e_2 = attr.repr.bitcast();
+        e_2 = attr;
         tt_2.entries&[i_2] = e_2;
     } else {
-        if e_2.bit_and(0b11) != 0b11 {
+        if e_2.get(.tag) != 0b11 {
             kpanic("L2 table not a table");
         };
     };
@@ -95,19 +94,19 @@ fn vmap_one(kernel: *Kernel, addrs: *AddressSpace, vaddr: i64, phys: *Physical.F
     tt_3 := TranslationTable.ptr_from_int(tt_3);
     i_3 := L3.get(vaddr);
 
-    if tt_3.entries&[i_3] != 0 {
+    if tt_3.entries&[i_3].repr != 0 {
         kpanic("stomp mapping");
     };
     
     p_addr: u64 = Physical.Free.int_from_ptr(phys).bitcast();
-    attr: BlockEntry = (repr = p_addr);
+    attr: PageTableEntry = (repr = p_addr);
     attr&.set(.tag, 0b11); // since its a single page, its not 0b01=block
     attr&.set(.idx, 0);  // normal
     attr&.set(.ap, 0b01);  // RW RW
     attr&.set(.sh, 0b11);
     attr&.set(.af, 0b1);
     
-    tt_3.entries&[i_3] = attr.repr.bitcast();
+    tt_3.entries&[i_3] = attr;
 
     if i_3.shift_left(16).bit_or(i_2.shift_left(29)) != vaddr {
         kpanic("unaligned page vaddr");
@@ -122,13 +121,16 @@ AddressSpace :: @struct {
 
 // the table controls the range [vbase..+step*8192].
 // step depends on its level in the tree, vbase depends on its position in the tree. 
-TranslationTable :: @struct(entries: Array(i64, 8192));
+TranslationTable :: @struct(entries: Array(PageTableEntry, 8192));
 
 BitRange :: @struct(off: u8, len: u8);
 fn get(range: BitRange, addr: i64) i64 = {
     mask := 1.shift_left(range.len.zext()) - 1;
     addr.shift_right_logical(range.off.zext()).bit_and(mask)
 }
+
+fn get(range: BitRange, addr: PageTableEntry) i64 = 
+    get(range, addr.repr.bitcast());
 
 fn make_level_index(hi: u8, lo: u8) BitRange =
     (off = lo, len = hi - lo + 1);
@@ -141,8 +143,6 @@ setup_virtual_memory :: fn() void = {
     // TODO: check ID_AA64MMFR0_EL1 to make sure the granule size i want is supported
     
     parange := i64.sys_get(.ID_AA64MMFR0_EL1).bit_and(0b111);
-    kprint_label("ID_AA64MMFR0_EL1: ", i64.sys_get(.ID_AA64MMFR0_EL1));
-    kprint("--\n");
     
     // make sure its turned off before we start fucking with the tables
     barrier();
@@ -167,18 +167,15 @@ setup_virtual_memory :: fn() void = {
         device := p_addr < 0x40000000;
         idx := int(device);
         // block type, mair index, permissions, sharable, access flag
-        attr: BlockEntry = (repr = p_addr);
+        attr: PageTableEntry = (repr = p_addr);
         attr&.set(.tag, 0b01);
         attr&.set(.idx, idx);
         // ?? regardless of UXN/PXN, virtual memory that's writable from el0 cannot be executable from el1 ??
-        //                       // e0 e1
         if !device {
             attr&.set(.ap, 0b00);  // -- RW
         } else {
             attr&.set(.ap, 0b01);  // RW RW
         };
-        //attr&.set(.ap, 0b10);  // -- R-
-        //attr&.set(.ap, 0b11);  // R- R-
         attr&.set(.sh, 0b11);
         attr&.set(.af, 0b1);
         
@@ -193,7 +190,7 @@ setup_virtual_memory :: fn() void = {
     // remap the first chunk of physical as the second chunk of virtual as R+W for el0. 
     // so el1 can execute that memory by its real address and el0 can use it by this new fake address. 
     xxx := tt[(0x40000000/block_size.bitcast()) + 1]&;
-    attr: BlockEntry = (repr = xxx[].bitcast());
+    attr: PageTableEntry = (repr = xxx[].bitcast());
     attr&.set(.ap, 0b01);
     attr.repr -= block_size;
     xxx[] = attr.repr.bitcast();
@@ -216,14 +213,19 @@ setup_virtual_memory :: fn() void = {
     sctlr&.set(.nTWI, 1);
     sctlr&.set(.I, 1);
     sctlr&.set(.C, 1);
+    // when FEAT_PAN is implemented and SPAN=0, when you take an exception to el1, 
+    // PSTATE.PAN will be set and PrivledgedAccessNever means 
+    // "Disables privileged read and write accesses to addresses accessible at EL0"
+    sctlr&.set(.span, 1);
     
+    if tracing {
     kprint_label("TCR_EL1: ", tcr.repr.bitcast());
     kprint_label("SCTLR_EL1: ", sctlr.repr.bitcast());
+    };
     TcrEl1.sys_set(.TCR_EL1, tcr);
     barrier();
     SctlrEl1.sys_set(.SCTLR_EL1, sctlr);
     barrier();
-    kprint("it works!\n");
     
     kernel := kernel();
     kernel.tasks&[0].mem.root = bit_cast_unchecked(*i64, *TranslationTable, tt.ptr);
@@ -261,12 +263,20 @@ SctlrEl1 :: @bit_fields(
     __ := 38,
 );
 
-BlockEntry :: @bit_fields(
-    tag := 2,
-    idx := 3,
+PageTableEntry :: @bit_fields(
+    tag := 2,  // 0b00 = invalid, 0b01 = block, 0b11 = page or next table
+    idx := 3,  // index in MAIR_EL1
     ns := 1,
-    ap := 2,
-    sh := 2,
-    af := 1,
-    _ := 53,
+    ap := 2,  // access permission (el0 el1; 0b00 = -- RW, 0b01 = RW RW, 0b10 = -- R-, 0b11 = R- R-)
+    sh := 2,  // shareable
+    af := 1,  // access flag
+    
+    // physical address of next table or page base.
+    // (shifted; the low attribute bits are naturally ignored because the address is always aligned to 4k or higher)
+    value := 42,  
+
+    pxn := 1,   // privledged execute never
+    uxn := 1,   // unprivledged execute never
+    soft := 4,  // "reserved for software use"
+    _ := 5,
 );
