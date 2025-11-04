@@ -15,6 +15,14 @@
   if they weren't using sp strictly by the calling convention. 
 - seperate the part where you eret out from the interrupt handler 
   and store the mcontext not on the stack so its easy to return to a different task instead. 
+- reset the stack before syscall_func
+- continuing the saga of how do i exit qemu from the guest. 
+  aledgedly its just ask the cpu to power down, so how do i do that?? 
+  `Set the CPUPWRCTLR.CORE_PWRDN_EN bit to 1 [...; isb; wfi;]` says arms website 
+  but thats an illegal instruction and objdump doesn't even know about it.
+  maybe shutdown sequence isn't part of the isa somehow? like is it different for every cpu
+  and i need to ask about cortex-a57 specifically?
+  the magic letters to google are PSCI and theres a hyperviser call that does it. 
 
 ## (Nov 2) os
 
