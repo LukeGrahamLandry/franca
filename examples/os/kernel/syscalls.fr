@@ -1,0 +1,89 @@
+write :: fn(fd: i64, buf: i64, len: i64) i64 #n(64) = {
+    kprint(u8.ptr_from_int(buf).slice(len));
+    len
+}
+
+mmap :: fn(kernel: *Kernel, addr: i64, len: i64, prot: i64, flags: i64, fd: i64, offset: i64) i64 #n(222) = {
+    pages := len.ualign_to(PAGE_SIZE).udiv(PAGE_SIZE);
+    result_addr := vmap_empty_any(kernel, kernel.tasks&[0].mem&, pages);
+    barrier();  // TODO: theres an instruction to kill the tlb or something
+    result_addr
+}
+
+mprotect :: fn(addr: i64, len: i64, prot: i64) i64 #n(226) = {
+    // TODO: do the protection. for now everything is RWX so it doesn't matter. 
+    barrier(); // TODO: theres an instruction to kill the tlb or something
+    0
+}
+
+exit :: fn(task: *Task) i64 #n(94) = {
+    kprint("called exit\n");
+    callee: rawptr = spin;
+    // confusing! 
+    // without the offset 512*1024*1024, it works, but won't work 
+    // if you try to access mutable statics from the user space code 
+    // (which spin won't so it doesn't matter buts its still spiritually wrong).
+    // with the offset _*_*_, you need to launder it to prevent folding and then it works, 
+    // but i don't understand why. 
+    // TODO: why doesn't this work with offset  but ?
+    launder :: fn(a: rawptr) rawptr #noinline = a;
+    callee = callee.launder();
+    task.mcontext.elr = callee.offset(512*1024*1024).int_from_rawptr();
+    // i still want to get the timer and then poweroff which doesn't happen if you just spin here because interrupts are masked
+    //spin(); // TODO: dellocate the task and schedule something else
+    0
+}
+
+generate :: fn() []Ty(@FnPtr(task: *Task) void, i64) = {
+    results := Ty(@FnPtr(task: *Task) void, i64).list(ast_alloc());
+    s := import("@/examples/os/kernel/syscalls.fr");
+    for get_constants(s) { name |
+        continue :: local_return;
+        impl_fid := get_constant(FuncId, s, name).unwrap();
+        impl_func := get_function_ast(impl_fid, true, true, true, false);
+        loc := impl_func.loc;
+        
+        i := impl_func.annotations&.index_of(fn(it) => it.name == @symbol n)
+            || continue();
+        syscall_number := const_eval(i64)(impl_func.annotations[i].args);
+        
+        fr := current_compiler_context();
+        func := empty_fn(impl_func.name, loc);
+        func.resolve_scope = s; // :WhatScope
+        fill_bindings(func&, fr, @slice(*Task));
+        wrapper_fid := fr.intern_func(func&);
+        func := get_function_ast(wrapper_fid, true, true, false, false);
+        
+        the_task := func.arg.bindings[0].name.Var;
+        the_task: FatExpr = (expr = (GetVar = the_task), ty = UnknownType, done = false, loc = loc);
+        args := FatExpr.list(ast_alloc());
+        i := 0;  // choosing this index gets more complicated once its not just for arm
+        each impl_func.arg.bindings& { it |
+            @switch(it.ty.Finished) {
+                @case(*Task) => args&.push(the_task);
+                @case(*Kernel) => args&.push(@{ kernel() });
+                @case(i64) => {
+                    args&.push(@{ @[the_task].mcontext.gpr&[@[@literal i]] });
+                    i += 1;
+                };
+                @default => panic("invalid syscall argument type");
+            };
+        };
+        @debug_assert_le(i, 8, "too many syscall arguments");
+        
+        args: FatExpr = if args.len == 1 {
+            args[0]
+        } else {
+            (expr = (Tuple = args.as_raw()), ty = UnknownType, done = false, loc = loc)
+        };
+        func.body = (Normal = @{ 
+            x0: i64 = @[@literal impl_fid](@[args]);
+            @[the_task].mcontext.gpr&[0] = x0;
+        });
+        
+        callee := fr.get_jitted(wrapper_fid);
+        callee := bit_cast_unchecked(rawptr, @FnPtr(task: *Task) void, callee);
+        push(results&, (callee, syscall_number));
+    };
+    results.items()
+}

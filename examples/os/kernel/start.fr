@@ -94,6 +94,8 @@ setup_interrupts :: fn() void = {
 }
 
 init_interrupt_vector :: fn() void #use(Arm) = {
+    InterruptVector :: Array(Array(u32, 32), 16);
+    interrupt_handlers := @static(Array(u8, size_of(InterruptVector) * 2));
     interrupt_base := align_the_thing(interrupt_handlers, 2048, size_of(InterruptVector));
     interrupt_handlers := InterruptVector.ptr_from_raw(interrupt_base);
     // TODO: have a way to ask for the global to have the right alignment
@@ -262,9 +264,6 @@ return_to_user :: AsmFunctionArmOnly(fn(task_x0: *Task) Never = (), {
     out.items()
 });
 
-InterruptVector :: Array(Array(u32, 32), 16);
-interrupt_handlers :: @static(Array(u8, size_of(InterruptVector) * 2));
-
 align_the_thing :: fn(it: ~T, need_align: i64, need_size: i64) rawptr #where = {
     tt := int_from_ptr(@type it[], it);
     start := tt; 
@@ -362,7 +361,7 @@ syscall_func :: fn(task: *Task) void = {
     kprint_label("intid: ", intid.zext());
     };
     
-    if intid == 33 {
+    if intid == irq_uart {
         //                     TMIS           RXMIS
         if u32.volatile(uart + 0x040).bit_and(0b10000) == 0 {
             kpanic("got uart interrupt but not ready to receive");
@@ -375,79 +374,29 @@ syscall_func :: fn(task: *Task) void = {
     exception_class := args.esr.shift_right_logical(26).bit_and(0b111111);
     
     if intid == 1023 {
-        arg := args.gpr&[0];
-        uncaught := exception_class != 0b010101;
-        if tracing || uncaught {
+        is_svc := exception_class == 0b010101;
+        if is_svc {
+            syscall_number := args.gpr&[8];
+            calls := @run import("@/examples/os/kernel/syscalls.fr")'generate();
+            i := calls.index_of(fn(it) => it._1 == syscall_number) || {
+                kprint_label("syscall_number: ", syscall_number);
+                // TODO: just kill that one task
+                kpanic("unimplemented syscall")
+            };
+            (calls[i]._0)(task);
+            return_to_user(task);
+        };
+        
         kprint_label("FAR_EL1: ", args.far);
         kprint_label("ESR_EL1: ", args.esr);
         kprint_label("SPSR_EL1: ", args.spsr);
         kprint_label("ELR_EL1: ", args.elr);
-        };
-        
-        if uncaught {
             kprint_label("exception class: ", exception_class);
             if exception_class == 0 {
                 inst := u32.ptr_from_int(args.elr)[];
                 kprint_label("instruction: ", inst.zext());
             };
             kpanic("uncaught exception");
-        };
-        
-        syscall_number := args.gpr&[8];
-        if tracing {
-        kprint_label("syscall_number: ", syscall_number);
-        };
-        
-        @switch(syscall_number) {
-            @case(64) => {
-                buf, len := (args.gpr&[1], args.gpr&[2]);
-                if tracing {
-                kprint_label("buf argument is: ", buf);
-                kprint_label("len argument is: ", len);
-                kprint("WRITE: ");
-                };
-                kprint(u8.ptr_from_int(buf).slice(len));
-                if tracing {
-                kprint("\n");
-                };
-                args.gpr&[0] = len;
-            };
-            // mmap
-            @case(222) => {
-                addr, len, prot, flags, fd, offset := (args.gpr&[0], args.gpr&[1], args.gpr&[2], args.gpr&[3], args.gpr&[4], args.gpr&[5]);
-                pages := len.ualign_to(PAGE_SIZE).udiv(PAGE_SIZE);
-                result_addr := vmap_empty_any(kernel, kernel.tasks&[0].mem&, pages);
-                args.gpr&[0] = result_addr;
-                barrier();
-                // TODO: theres an instruction to kill the tlb or something
-            };
-            // mprotect
-            @case(226) => {
-                addr, len, prot := (args.gpr&[0], args.gpr&[1], args.gpr&[2]);
-                // TODO: do the protection. for now everything is RWX so it doesn't matter. 
-                args.gpr&[0] = 0;
-                barrier();
-                // TODO: theres an instruction to kill the tlb or something
-            };
-            // exit
-            @case(94) => {
-                kprint("called exit\n");
-                callee: rawptr = spin;
-                // confusing! 
-                // without the offset 512*1024*1024, it works, but won't work 
-                // if you try to access mutable statics from the user space code 
-                // (which spin won't so it doesn't matter buts its still spiritually wrong).
-                // with the offset _*_*_, you need to launder it to prevent folding and then it works, 
-                // but i don't understand why. 
-                // TODO: why doesn't this work with offset  but ?
-                launder :: fn(a: rawptr) rawptr #noinline = a;
-                callee = callee.launder();
-                args.elr = callee.offset(512*1024*1024).int_from_rawptr();
-                // i still want to get the timer and then poweroff which doesn't happen if you just spin here because interrupts are masked
-                //spin(); // TODO: dellocate the task and schedule something else
-            };
-            @default => kpanic("unknown syscall");
-        };
     };
     
     if intid == timer_irq {
@@ -464,14 +413,9 @@ syscall_func :: fn(task: *Task) void = {
         };
     };
     
-    if intid != 1023 && intid != timer_irq && intid != 33 { 
+    if intid != timer_irq && intid != irq_uart { 
         kprint_label("intid: ", intid.zext());
         kpanic("unknown interrupt");
-    };
-    
-    if args.elr == 0 {
-        kprint("returning to null isn't going to work\n");
-        spin();
     };
     
     return_to_user(task);
