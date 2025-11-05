@@ -453,6 +453,41 @@ syscall_func :: fn(task: *Task) void = {
             //       to a syscall, so should do the auto commit here as well.  
             kpanic("data abort from el1");
         };
+        
+        if exception_class == 0b000111 {
+            cpacr := i64.sys_get(.CPACR_EL1);
+            // TODO: instead of this enable them at the beginning.
+            //       but to be correct i have to save the floats on interrupt. 
+            //       maybe its better to use this to only save them as needed. 
+            // FPEN
+            if cpacr.bit_and(0b11.shift_left(20)) == 0 {
+                i64.sys_set(.CPACR_EL1, cpacr.bit_or(0b11.shift_left(20)));
+                return_to_user(task);
+            };
+            kprint_label("cpacr: ", cpacr);
+            kpanic("floats disabled");
+        };
+        
+        if exception_class == 0b011000 {
+            // for now im doing this in a slow dumb way just to get examples/kaleidoscope.fr to run.
+            inst := u32.ptr_from_int(args.elr)[];
+            if inst == 0xd53b0024 {  // HACK
+                args.gpr&[4] = i64.sys_get(.CTR_EL0);
+                args.elr += 4;
+                return_to_user(task);
+            };
+            if inst == 0xd50b7b22 || inst == 0xd5033b9f || inst == 0xd50b7522 || inst == 0xd5033fdf {  // HACK
+                // TODO: figure out the right way to turn these on
+                //       but for now i only have one core so it doesn't matter.
+                //       WRONG. thats not true!! idk if qemu emulates the noncoherent data vs inst caches. 
+                //       either way the stress of the interrupt seems good enough to sync them
+                args.elr += 4;
+                return_to_user(task);
+            };
+            
+            kprint_label("instruction: ", inst.zext());
+            kpanic("trapped system instruction");
+        };
     
         is_svc := exception_class == 0b010101;
         if is_svc {

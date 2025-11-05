@@ -1,6 +1,5 @@
 
-
-## (Nov 5)
+## (Nov 5) os
 
 - factor out the syscall handlers
 - have an array of tasks and cycle to running the next one after every context switch.
@@ -8,8 +7,12 @@
   make a syscall for calling the elf loader in a new task so its like fork+exec (rn relies on there being only one address space). 
 - don't allocate physical pages up front. mmap just reserves a virtual range 
   and then it gets mapped to something real the first time you fault on it.
+- getting it to run kaleidoscope. 
+  magic register to enable float instructions. 
+  hacky thing to ignore the system instructions in aarch64_clear_instruction_cache, there's probably a way to just enable them for el0.
+  fascinating, it mostly works but the output is slightly wrong. 
 
-## (Nov 4)
+## (Nov 4) os
 
 i want to get an interrupt when theres input on the uart so i don't have to poll it. 
 - setting the low bit of UARTCR, now `-d guest_errors` doesn't say "PL011 data written to disabled UART",
