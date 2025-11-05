@@ -3,6 +3,14 @@ write :: fn(fd: i64, buf: i64, len: i64) i64 #n(64) = {
     len
 }
 
+read :: fn(fd: i64, buf: i64, len: i64) i64 #n(63) = {
+    @if(fd != 0) return(-1);
+    dest := u8.ptr_from_int(buf).slice(len);
+    count := 0;
+    // TODO
+    count
+}
+
 mmap :: fn(kernel: *Kernel, addr: i64, len: i64, prot: i64, flags: i64, fd: i64, offset: i64) i64 #n(222) = {
     pages := len.ualign_to(PAGE_SIZE).udiv(PAGE_SIZE);
     result_addr := vmap_empty_any(kernel, kernel.tasks&[0].mem&, pages);
@@ -18,19 +26,24 @@ mprotect :: fn(addr: i64, len: i64, prot: i64) i64 #n(226) = {
 
 exit :: fn(task: *Task) i64 #n(94) = {
     kprint("called exit\n");
-    callee: rawptr = spin;
-    // confusing! 
-    // without the offset 512*1024*1024, it works, but won't work 
-    // if you try to access mutable statics from the user space code 
-    // (which spin won't so it doesn't matter buts its still spiritually wrong).
-    // with the offset _*_*_, you need to launder it to prevent folding and then it works, 
-    // but i don't understand why. 
-    // TODO: why doesn't this work with offset  but ?
-    launder :: fn(a: rawptr) rawptr #noinline = a;
-    callee = callee.launder();
-    task.mcontext.elr = callee.offset(512*1024*1024).int_from_rawptr();
-    // i still want to get the timer and then poweroff which doesn't happen if you just spin here because interrupts are masked
-    //spin(); // TODO: dellocate the task and schedule something else
+    // TODO: deallocate its pages and stuff
+    task.active = false;
+    0
+}
+
+spawn :: fn(kernel: *Kernel, buf: i64, len: i64) i64 #n(0xFFFF0001) = {
+    //elf_bytes := u8.ptr_from_int(buf).slice(len);
+    
+    task := kernel.alloc_task();
+    tt := kernel.idle_task.mem.root;
+    init_task(task, user_exec, tt);
+    task.mcontext.gpr&[0] = buf;
+    task.mcontext.gpr&[1] = len;
+    
+    0
+}
+
+yield :: fn(task: *Task) i64 #n(0xFFFF0002) = {
     0
 }
 

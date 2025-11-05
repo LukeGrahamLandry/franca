@@ -6,10 +6,12 @@ Kernel :: @struct {
     // for now i always increase the virtual addresses being handed out 
     // so you can tell which address space a pointer is in for debugging. 
     next_vaddr: i64;
-    tasks: Array(Task, 2);
+    tasks: Array(Task, 16);
+    next_task: i64;
     env: rawptr;
     interrupt_stack: []u8;
     timer_counter: u64;
+    idle_task: Task;
 };
 
 fn kernel() *Kernel = {
@@ -55,20 +57,38 @@ init_kernel :: fn() void = {
     kernel.env = get_dynamic_context();
     
     setup_interrupts();
-    setup_virtual_memory();
+    tt := setup_virtual_memory();
     
     stack_size_pages := 16;
     kstack := kernel.physical&.map(stack_size_pages);  // TODO: its hacky to assume this will be contiguous
     ksize := stack_size_pages*PAGE_SIZE;
     kernel.interrupt_stack = bit_cast_unchecked(*Physical.Free, *u8, kstack).slice(ksize);
+
+    ::[]Task;
+    task := kernel.idle_task&;
+    task.slice(1).set_zeroed();
+    init_task(task, spin, tt);
     
-    task := kernel.tasks&[0]&;
-    init_task(task, user_func);
+    task := kernel.alloc_task();
+    init_task(task, user_func, tt);
     kprint("kernel ready\n");
-    return_to_user(task);
+    
+    return_to_scheduler();
 }
 
-init_task :: fn(task: *Task, callee: rawptr) void = {
+alloc_task :: fn(kernel: *Kernel) *Task = {
+    each kernel.tasks& { it |
+        if !it.active {
+            it.slice(1).set_zeroed();
+            it.active = true;
+            return it;
+        };
+    };
+    kpanic("too many tasks running")
+}
+
+init_task :: fn(task: *Task, callee: rawptr, tt: *TranslationTable) void = {
+    task.mem.root = tt;
     kernel := kernel();
     stack_size_pages := 10;
     user_stack := vmap_empty_any(kernel, task.mem&, stack_size_pages);
@@ -76,7 +96,6 @@ init_task :: fn(task: *Task, callee: rawptr) void = {
     user_stack += stack_size_pages * PAGE_SIZE; 
     
     task.mcontext.gpr&[31] = user_stack;
-    task.mcontext.gpr&[0] = 789;
     // TODO: remove the remapping hack, just copy the bytes. 
     task.mcontext.elr = callee.offset(512*1024*1024).int_from_rawptr();
     
@@ -159,9 +178,13 @@ init_timer :: fn() void = {
     set_field(timer_irq, rd_sgi + 0x80, 1, 1);  // IGROUPR0 set to group 1
     set_field(timer_irq, rd_sgi + 0x100, 1, 1); // ISENABLER0 
     
-    frequency := i64.sys_get(.CNTFRQ_EL0);
-    i64.sys_set(.CNTP_TVAL_EL0, frequency);  // count down from the frequency, so wait 1 second
+    reset_countdown();
     i64.sys_set(.CNTP_CTL_EL0, 1);  // turn it on
+}
+
+reset_countdown :: fn() void = {
+    frequency := i64.sys_get(.CNTFRQ_EL0);
+    i64.sys_set(.CNTP_TVAL_EL0, frequency / 1000);
 }
 
 // TODO: the 1 is the middle number in devicetree.pl011@<whatever>.interrupts
@@ -264,6 +287,19 @@ return_to_user :: AsmFunctionArmOnly(fn(task_x0: *Task) Never = (), {
     out.items()
 });
 
+return_to_scheduler :: fn() Never = {
+    kernel := kernel();
+    cap := size_of(@type kernel.tasks) / size_of(Task);
+    range(0, cap) { _ |
+        task := kernel.tasks&[kernel.next_task]&;
+        kernel.next_task = kernel.next_task.add(1).mod(cap);
+        if task.active {
+            return_to_user(task);
+        };
+    };
+    return_to_user(kernel.idle_task&)
+}
+
 align_the_thing :: fn(it: ~T, need_align: i64, need_size: i64) rawptr #where = {
     tt := int_from_ptr(@type it[], it);
     start := tt; 
@@ -283,14 +319,21 @@ barrier :: @AsmFunctionArmOnly(fn() void = ()) => (
     ret(),
 );
 
-user_func :: fn(arg: i64) void = {
+user_exec :: fn(elf_bytes: []u8) void = {
     _, c := create_and_set_unsafe_environment();
     c.panic_hook = print_and_exit1;
     c.prefer_syscalls = true;
     c.current_os = 1;
     c.temporary_allocator_i = Arena'stack_alloc(1.shift_left(15));
+    import("@/examples/elf_loader.fr")'load_elf_file(elf_bytes);
+}
     
-    @print("user argument is: %\n", arg);
+user_func :: fn() void = {
+    _, c := create_and_set_unsafe_environment();
+    c.panic_hook = print_and_exit1;
+    c.prefer_syscalls = true;
+    c.current_os = 1;
+    c.temporary_allocator_i = Arena'stack_alloc(1.shift_left(15));
     
     elf_bytes := @run {
         franca := get_executable_path(temp());
@@ -304,8 +347,15 @@ user_func :: fn(arg: i64) void = {
         ));
         read_entire_file_or_crash(ast_alloc(), o)
     };
-    import("@/examples/elf_loader.fr")'load_elf_file(elf_bytes);
-    unreachable();
+
+    args: Array(i64, 6) = (u8.int_from_ptr(elf_bytes.ptr), elf_bytes.len, 0, 0, 0, 0);
+    Syscall'perform_syscall(args&, 0xFFFF0001);  // spawn
+    
+    range(0, 1000) { _ |
+        args: Array(i64, 6) = (0, 0, 0, 0, 0, 0);
+        Syscall'perform_syscall(args&, 0xFFFF0002);  // yield
+    };
+    Syscall'exit(0);
 };
 
 Task :: @struct {
@@ -313,6 +363,7 @@ Task :: @struct {
     mcontext: SavedRegisters;  
     mem: AddressSpace;
     kernel_sp: *u8;
+    active: bool;
 };
 
 SavedRegisters :: @struct {
@@ -384,7 +435,7 @@ syscall_func :: fn(task: *Task) void = {
                 kpanic("unimplemented syscall")
             };
             (calls[i]._0)(task);
-            return_to_user(task);
+            return_to_scheduler();
         };
         
         kprint_label("FAR_EL1: ", args.far);
@@ -401,13 +452,14 @@ syscall_func :: fn(task: *Task) void = {
     
     if intid == timer_irq {
         kernel.timer_counter += 1;
-        kprint("timer fired!\n");
-        frequency := i64.sys_get(.CNTFRQ_EL0);
-        i64.sys_set(.CNTP_TVAL_EL0, frequency);
+        reset_countdown();
         
         i64.sys_set(.ICC_EOIR1_EL1, intid.zext());
         
-        if kernel.timer_counter == 2 {
+        if kernel.timer_counter.mod(1000) == 0 {
+            kprint("1s\n");
+        };
+        if kernel.timer_counter == 2000 {
             kprint("goodbye!\n");
             poweroff();
         };
@@ -418,7 +470,7 @@ syscall_func :: fn(task: *Task) void = {
         kpanic("unknown interrupt");
     };
     
-    return_to_user(task);
+    return_to_scheduler();
 };
 
 Crash :: import("@/lib/crash_report.fr");
