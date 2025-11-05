@@ -12,6 +12,8 @@ Kernel :: @struct {
     interrupt_stack: []u8;
     timer_counter: u64;
     idle_task: Task;
+    pages_reserved: i64;
+    pages_committed: i64;
 };
 
 fn kernel() *Kernel = {
@@ -91,7 +93,7 @@ init_task :: fn(task: *Task, callee: rawptr, tt: *TranslationTable) void = {
     task.mem.root = tt;
     kernel := kernel();
     stack_size_pages := 10;
-    user_stack := vmap_empty_any(kernel, task.mem&, stack_size_pages);
+    user_stack := vmap_reserve(kernel, task.mem&, stack_size_pages);
     // stack grows left, so start at the right of the allocation. 
     user_stack += stack_size_pages * PAGE_SIZE; 
     
@@ -102,6 +104,12 @@ init_task :: fn(task: *Task, callee: rawptr, tt: *TranslationTable) void = {
     // TODO: its dumb to store this on every task but it makes it easy for the interrupt handler to get it. 
     // TODO: really it needs to be local to the core if multiple threads are allowed to be in the kernel at once. 
     task.kernel_sp = kernel.interrupt_stack.end_pointer();
+}
+
+fn kill_task(task: *Task) void = {
+    // TODO: deallocate its pages and stuff
+    // TODO: fix race. need to make it non-schedulable, then free pages, then make the task slot reusable. 
+    task.active = false;
 }
 
 setup_interrupts :: fn() void = {
@@ -425,14 +433,35 @@ syscall_func :: fn(task: *Task) void = {
     exception_class := args.esr.shift_right_logical(26).bit_and(0b111111);
     
     if intid == 1023 {
+        if exception_class == 0b100100 {
+            vaddr := args.far.align_back(PAGE_SIZE);
+            // TODO: don't create a L2 table for it if its just a junk pointer 
+            pte := index_page_table(kernel, task.mem&, vaddr);
+            if pte.res.get(.tag) == 0b00 && pte.res.get(.reserved) == 0b1 {
+                pte.res.repr = 0;  // TODO: store permissions there and pass them to vmap_one
+                vmap_one(kernel, task.mem&, vaddr, kernel.physical&.map(1));
+                return_to_user(task);
+            };
+            
+            kprint_label("fault address: ", args.far);
+            kprint_label("ip: ", args.elr);
+            kpanic("data abort from el0");
+        };
+        
+        if exception_class == 0b100101 {
+            // TODO: its fine for user to pass pointer to memory they haven't touched yet (implicitly zeroed)
+            //       to a syscall, so should do the auto commit here as well.  
+            kpanic("data abort from el1");
+        };
+    
         is_svc := exception_class == 0b010101;
         if is_svc {
             syscall_number := args.gpr&[8];
             calls := @run import("@/examples/os/kernel/syscalls.fr")'generate();
             i := calls.index_of(fn(it) => it._1 == syscall_number) || {
-                kprint_label("syscall_number: ", syscall_number);
-                // TODO: just kill that one task
-                kpanic("unimplemented syscall")
+                kprint_label("killed for attempting unknown syscall: ", syscall_number);
+                kill_task(task);
+                return_to_scheduler()
             };
             (calls[i]._0)(task);
             return_to_scheduler();
@@ -460,6 +489,8 @@ syscall_func :: fn(task: *Task) void = {
             kprint("1s\n");
         };
         if kernel.timer_counter == 2000 {
+            kprint_label("pages_reserved: ", kernel.pages_reserved);
+            kprint_label("pages_committed: ", kernel.pages_committed);
             kprint("goodbye!\n");
             poweroff();
         };

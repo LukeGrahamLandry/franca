@@ -42,61 +42,31 @@ fn new(self: *Physical) *Physical.Free = {
     it
 }
 
-fn vmap_empty_any(kernel: *Kernel, addrs: *AddressSpace, page_count: i64) i64 = {
+// TODO: permissions
+fn vmap_reserve(kernel: *Kernel, addrs: *AddressSpace, page_count: i64) i64 = {
+    kernel.pages_reserved += page_count;
     vaddr := kernel.next_vaddr;
     @if(page_count < 0) kpanic("-pages");
     @if(vaddr < 0) kpanic("voom");
     kernel.next_vaddr += page_count * PAGE_SIZE;
-    vmap_empty(kernel, addrs, vaddr, page_count);
-    vaddr
-}
-
-// TODO: be able to over commit
-// TODO: permissions
-fn vmap_empty(kernel: *Kernel, addrs: *AddressSpace, vaddr: i64, page_count: i64) void = {
-    vmap(kernel, addrs, vaddr, page_count, kernel.physical&.map(page_count));
-}
-
-fn vmap(kernel: *Kernel, addrs: *AddressSpace, vaddr: i64, page_count: i64, phys: *Physical.Free) void = {
-    range(0, page_count) { _ |
-        vmap_one(kernel, addrs, vaddr, phys);
-        vaddr += PAGE_SIZE;
-        prev := phys;
-        phys = phys.link;
-        prev.link = zeroed(*Physical.Free);
-    };
-}
-
-fn vmap_one(kernel: *Kernel, addrs: *AddressSpace, vaddr: i64, phys: *Physical.Free) void = {
-    L2 := make_level_index(41, 29);
-    L3 := make_level_index(28, 16);
-    TableField := make_level_index(48, 12);
-    
-    tt_2 := addrs.root&;
-    i_2 := L2.get(vaddr);
-    e_2 := tt_2.entries&[i_2];
-    if e_2.repr == 0 {
-        // this is the first page on this 512mb chunk, need to make a next level table for it. 
-        mem := kernel.physical&.map(1);
-        mem.link = zeroed(*Physical.Free);
-        // stored address points to the L3 table
-        attr: PageTableEntry = (repr = Physical.Free.int_from_ptr(mem).bitcast());
-        attr&.set(.tag, 0b11);  // table entry
-        // attrs don't matter here, set for individual pages latter. 
-
-        e_2 = attr;
-        tt_2.entries&[i_2] = e_2;
-    } else {
-        if e_2.get(.tag) != 0b11 {
-            kpanic("L2 table not a table");
+    {
+        vaddr := vaddr;
+        range(0, page_count) { _ |
+            pte := index_page_table(kernel, addrs, vaddr);
+            pte.res&.set(.tag, 0b00);
+            pte.res&.set(.reserved, 0b1);            
+            vaddr += PAGE_SIZE;
         };
     };
     
-    tt_3 := TableField.get(e_2).shift_left(12);
-    tt_3 := TranslationTable.ptr_from_int(tt_3);
-    i_3 := L3.get(vaddr);
+    vaddr
+}
 
-    if tt_3.entries&[i_3].repr != 0 {
+// this is called by the interrupt handler the first time you try to access a new page
+fn vmap_one(kernel: *Kernel, addrs: *AddressSpace, vaddr: i64, phys: *Physical.Free) void = {
+    kernel.pages_committed += 1;
+    pte := index_page_table(kernel, addrs, vaddr);
+    if pte.map.repr != 0 {
         kpanic("stomp mapping");
     };
     
@@ -108,11 +78,46 @@ fn vmap_one(kernel: *Kernel, addrs: *AddressSpace, vaddr: i64, phys: *Physical.F
     attr&.set(.sh, 0b11);
     attr&.set(.af, 0b1);
     
-    tt_3.entries&[i_3] = attr;
+    pte.map = attr;
+    
+    // zero fill incase its an old page being reused. 
+    bit_cast_unchecked(*Physical.Free, *u8, phys).slice(PAGE_SIZE).set_bytes(0);
+}
+
+fn index_page_table(kernel: *Kernel, addrs: *AddressSpace, vaddr: i64) *PTE = {
+    L2 := make_level_index(41, 29);
+    L3 := make_level_index(28, 16);
+    TableField := make_level_index(48, 12);
+    
+    tt_2 := addrs.root&;
+    i_2 := L2.get(vaddr);
+    e_2 := tt_2.entries&[i_2].map;
+    if e_2.repr == 0 {
+        // this is the first page on this 512mb chunk, need to make a next level table for it. 
+        mem := kernel.physical&.map(1);
+        mem.link = zeroed(*Physical.Free);
+        // stored address points to the L3 table
+        attr: PageTableEntry = (repr = Physical.Free.int_from_ptr(mem).bitcast());
+        attr&.set(.tag, 0b11);  // table entry
+        // attrs don't matter here, set for individual pages latter. 
+
+        e_2 = attr;
+        tt_2.entries&[i_2].map = e_2;
+    } else {
+        if e_2.get(.tag) != 0b11 {
+            kpanic("L2 table not a table");
+        };
+    };
+    
+    tt_3 := TableField.get(e_2).shift_left(12);
+    tt_3 := TranslationTable.ptr_from_int(tt_3);
+    i_3 := L3.get(vaddr);
 
     if i_3.shift_left(16).bit_or(i_2.shift_left(29)) != vaddr {
         kpanic("unaligned page vaddr");
     };
+    
+    tt_3.entries&[i_3]&
 }
 
 PAGE_SIZE :: 1.shift_left(16);
@@ -123,7 +128,7 @@ AddressSpace :: @struct {
 
 // the table controls the range [vbase..+step*8192].
 // step depends on its level in the tree, vbase depends on its position in the tree. 
-TranslationTable :: @struct(entries: Array(PageTableEntry, 8192));
+TranslationTable :: @struct(entries: Array(PTE, 8192));
 
 BitRange :: @struct(off: u8, len: u8);
 fn get(range: BitRange, addr: i64) i64 = {
@@ -265,6 +270,11 @@ SctlrEl1 :: @bit_fields(
     __ := 38,
 );
 
+PTE :: @union(
+    map: PageTableEntry,
+    res: PagePlaceholder,
+);
+
 PageTableEntry :: @bit_fields(
     tag := 2,  // 0b00 = invalid, 0b01 = block, 0b11 = page or next table
     idx := 3,  // index in MAIR_EL1
@@ -281,4 +291,13 @@ PageTableEntry :: @bit_fields(
     uxn := 1,   // unprivledged execute never
     soft := 4,  // "reserved for software use"
     _ := 5,
+);
+
+// when PageTableEntry.tag=0b00, its always invalid so i can put whatever i want in the other bits. 
+// so when you mmap, just reserve a range of virtual memory and remember the flags it was mapped with, 
+// and the first time you try to access it and fault, allocate a zero filled physical page. 
+PagePlaceholder :: @bit_fields(
+    tag := 2,
+    reserved := 1,
+    _ := 61,
 );

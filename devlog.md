@@ -1,4 +1,14 @@
 
+
+## (Nov 5)
+
+- factor out the syscall handlers
+- have an array of tasks and cycle to running the next one after every context switch.
+  bump up the timer frequency so its preemptive. 
+  make a syscall for calling the elf loader in a new task so its like fork+exec (rn relies on there being only one address space). 
+- don't allocate physical pages up front. mmap just reserves a virtual range 
+  and then it gets mapped to something real the first time you fault on it.
+
 ## (Nov 4)
 
 i want to get an interrupt when theres input on the uart so i don't have to poll it. 
