@@ -30,12 +30,16 @@ main :: fn(arg: i64) void = {
 init_kernel :: fn() void = {
     _, c := create_and_set_unsafe_environment();
     c.panic_hook = kpanic;
+    kprint("Hi\n");
     
     if i64.sys_get(.CurrentEL).shift_right_logical(2) != 1 {
         kpanic("expected to run in el1");
     };
     if i64.sys_get(.ID_AA64ISAR0_EL1).shift_right_logical(20).bit_and(0b1111) == 0 {
-        kprint("WARNING: atomic instructions are not implemented on this cpu\n");
+        kprint("WARNING: atomic instructions are not implemented on this cpu (qemu: try -cpu cortex-a76)\n");
+    };
+    if i64.sys_get(.ICC_SRE_EL1).bit_and(1) == 0 {
+        kprint("WARNING: ICC_SRE_EL1 (system register interface for GIC) is disabled\n");
     };
     
     kernel := kernel();
@@ -52,8 +56,6 @@ init_kernel :: fn() void = {
     
     setup_interrupts();
     setup_virtual_memory();
-    kprint_label("ID_AA64ISAR0_EL1: ", i64.sys_get(.ID_AA64ISAR0_EL1));
-    kprint("=== done setup ===\n");
     
     stack_size_pages := 16;
     kstack := kernel.physical&.map(stack_size_pages);  // TODO: its hacky to assume this will be contiguous
@@ -62,6 +64,7 @@ init_kernel :: fn() void = {
     
     task := kernel.tasks&[0]&;
     init_task(task, user_func);
+    kprint("kernel ready\n");
     return_to_user(task);
 }
 
@@ -82,22 +85,21 @@ init_task :: fn(task: *Task, callee: rawptr) void = {
     task.kernel_sp = kernel.interrupt_stack.end_pointer();
 }
 
-print_el :: fn() void = {
-    kprint("Current Exception Level: ");
-    el := i64.sys_get(.CurrentEL);
-    c := "0".char() + el.shift_right_logical(2);
-    putchar(c.trunc());
-    kprint("\n");
+setup_interrupts :: fn() void = {
+    init_interrupt_vector();
+    init_gic();
+    init_timer();
+    init_uart();
+    barrier();
 }
 
-setup_interrupts :: fn() void = {
+init_interrupt_vector :: fn() void #use(Arm) = {
     interrupt_base := align_the_thing(interrupt_handlers, 2048, size_of(InterruptVector));
     interrupt_handlers := InterruptVector.ptr_from_raw(interrupt_base);
     // TODO: have a way to ask for the global to have the right alignment
     // TODO: have a more official way to ask for it to be in executable memory
-
+    
     // this assumes we're starting in el1 and don't have to set any interrupt masks, etc.
-    #use(Arm);
     
     // TODO: idk if i have to enable the caches somehow but i figure this can't hurt
     cc :: import("@/lib/sys/process.fr").aarch64_clear_instruction_cache;
@@ -127,44 +129,70 @@ setup_interrupts :: fn() void = {
     
     sys_set(*InterruptVector, .VBAR_EL1, interrupt_handlers);
     @run assert_eq(size_of(InterruptVector), 0x800);
+}
+
+// generic interrupt controller
+// TODO: get these numbers from devicetree.intc@<whatever>.reg (addr, size) pairs
+gicd :: 0x08000000;
+gicr :: 0x080a0000;
+init_gic :: fn() void = {
+    // ignore interrupts with lower priority than PMR 
+    // (but 255 is low, 0 is high, so this means allow all). 
+    i64.sys_set(.ICC_PMR_EL1, 255);  
+    i64.sys_set(.ICC_IGRPEN1_EL1, 1);  // enable group 1 interrupts
     
-    // magic to make the timer actually work:    
-    // these are memory mapped but have names you can look up as registers in the pdf 
-    // TODO: make struct for these
-    // TODO: make it work with ,gic-version=3 
-    u32.volatile(gicd, 1);  // GICD_CTLR: enable distributor
-    u32.volatile(gicc, 1);  // GICC_CTLR: enable cpu interface controller
-    u32.volatile(gicc + 4, 255);  // GICC_PMR: priority mask register (255 is low, 0 is high)
-    // now for the specific interrupt
-    set_field(timer_irq, gicd + 0x100, 1, 1); // GICD_ISENABLER enable
+    u32.volatile(gicd + 0x0000, 0b10);  // CTLR.EnableGrp1NS=1
+    // there's a whole thing about waking up the redistributor with GICR_WAKER (rd_lpi + 0x0014) 
+    // but it seems fine. (maybe a problem once i have more cores)
+}
+
+// EL1 Physical Timer. INTID defined by the Server Base System Architecture (doesn't show in device tree?)
+timer_irq :: 30;
+init_timer :: fn() void = {
+    // one per core but i only have one core
+    rd_sgi: i64 = gicr + 0x10000;
+
+    // timer is private so its enabled in ---R only. 
+    // any priority/ICFGR is fine.
+    set_field(timer_irq, rd_sgi + 0x80, 1, 1);  // IGROUPR0 set to group 1
+    set_field(timer_irq, rd_sgi + 0x100, 1, 1); // ISENABLER0 
     
-    // start timer
     frequency := i64.sys_get(.CNTFRQ_EL0);
     i64.sys_set(.CNTP_TVAL_EL0, frequency);  // count down from the frequency, so wait 1 second
     i64.sys_set(.CNTP_CTL_EL0, 1);  // turn it on
+}
+
+// TODO: the 1 is the middle number in devicetree.pl011@<whatever>.interrupts
+irq_uart :: 32 + 1;
+init_uart :: fn() void = {
+    // any priority/ICFGR is fine. IROUTER doesn't matter because i only have one core.
+    set_field(irq_uart, gicd + 0x80, 1, 1);  // IGROUPR set to group 1
+    set_field(irq_uart, gicd + 0x100, 1, 1); // ISENABLER 
+    
+    // RSR,LCR_H,DMACR seem to be fine as reset=0.
+    // strangely so are IBRD,FBRD (you're supposed to compute them from clock-frequency in device tree and desired baudrate)
+    
+    // ask for interrupt when it recieves something
+    u32.volatile(uart + 0x038, 0b10000);  // IMSC
+    // TODO: some bits are "reserved do not modify"
+    // enable and allow transmit + recieve
+    u32.volatile(uart + 0x030, 0b1100000001);  // CR  
 };
 
 set_field :: fn(interrupt_id: i64, addr: i64, bit_width: i64, value: u32) void #inline = {
     mask: u32 = 1.shift_left(bit_width) - 1;
     value := value.bit_and(mask);
-    count_per_word := 32.umod(bit_width);
+    count_per_word := 32.udiv(bit_width);
     shift := interrupt_id.umod(count_per_word) * bit_width;
-    addr += interrupt_id.udiv(count_per_word);
+    idx := interrupt_id.udiv(count_per_word);
+    addr += idx * 4;
     old := u32.volatile(addr);
     new := old.bit_and(mask.shift_left(shift).bit_not()).bit_or(value.shift_left(shift));
     u32.volatile(addr, new);
 }
 
-// generic interrupt controller
-// TODO: device tree?
-gicd :: 0x08000000;
-gicc :: 0x08010000;
-// EL1 Physical Timer. INTID defined by the Server Base System Architecture (doesn't show in device tree?)
-timer_irq :: 30;
-
 Arm :: import("@/backend/arm64/bits.fr");
 // TODO: floats
-// - this stomps the user space x18
 // - don't need to save sp here, sp=SP_EL1 already, have to explicitly access SP_EL0 to get the userspace one. 
 interrupt_trampoline :: AsmFunctionArmOnly(fn() void = (), interrupt_trampoline_code);
 interrupt_trampoline_code :: {
@@ -217,6 +245,7 @@ return_to_user :: AsmFunctionArmOnly(fn(task_x0: *Task) Never = (), {
     emit(msr(.SP_EL0, x1)); 
     emit(msr(.TPIDR_EL1, x0)); 
     // TODO: set TTBR0_EL1
+    // (because each task should have its own address space)
     
     // restore general registers. 
     // rev so x0 is last to be restored so it can be used as indexer
@@ -277,23 +306,8 @@ user_func :: fn(arg: i64) void = {
         read_entire_file_or_crash(ast_alloc(), o)
     };
     import("@/examples/elf_loader.fr")'load_elf_file(elf_bytes);
-    
-    if false {
-        echo();
-    };
-    spin();
+    unreachable();
 };
-
-echo :: fn() void = {
-    prev := 0;
-    loop {
-        i: i64 = getchar().zext();
-        if i != prev {
-            prev = i;
-            @print("input: %\n", i);
-        }
-    };
-}
 
 Task :: @struct {
     // mcontext must be the first field because the interrupt handler starts saving at TPIDR_EL1
@@ -336,12 +350,26 @@ syscall_func :: fn(task: *Task) void = {
     args.esr = i64.sys_get(.ESR_EL1);
     args.far = i64.sys_get(.FAR_EL1);
     
-    intid := u32.volatile(gicc + 0x000C);  // GICC_IAR: Interrupt Acknowledge Register
+    intid: u32 = i64.sys_get(.ICC_IAR1_EL1).bit_and(0xfff).trunc();
+    intid0 := i64.sys_get(.ICC_IAR0_EL1).bit_and(0xfff);
+    if intid0 != 1023 {
+        kpanic("intid0");
+    };
     if tracing {
     kprint_label("thread pointer: ", SavedRegisters.int_from_ptr(args));
     kprint_label("SP_EL0: ", i64.sys_get(.SP_EL0));
     kprint_label("saved fp: ", args.gpr&[29]);
     kprint_label("intid: ", intid.zext());
+    };
+    
+    if intid == 33 {
+        //                     TMIS           RXMIS
+        if u32.volatile(uart + 0x040).bit_and(0b10000) == 0 {
+            kpanic("got uart interrupt but not ready to receive");
+        };
+        byte := getchar();  // the read clears the bit  ^
+        putchar(byte);
+        i64.sys_set(.ICC_EOIR1_EL1, intid.zext());
     };
     
     exception_class := args.esr.shift_right_logical(26).bit_and(0b111111);
@@ -354,7 +382,6 @@ syscall_func :: fn(task: *Task) void = {
         kprint_label("ESR_EL1: ", args.esr);
         kprint_label("SPSR_EL1: ", args.spsr);
         kprint_label("ELR_EL1: ", args.elr);
-        print_el();
         };
         
         if uncaught {
@@ -429,12 +456,17 @@ syscall_func :: fn(task: *Task) void = {
         frequency := i64.sys_get(.CNTFRQ_EL0);
         i64.sys_set(.CNTP_TVAL_EL0, frequency);
         
-        u32.volatile(gicc + 0x0010, intid);  // GICC_EOIR: End of Interrupt Register
+        i64.sys_set(.ICC_EOIR1_EL1, intid.zext());
         
         if kernel.timer_counter == 2 {
             kprint("goodbye!\n");
             poweroff();
         };
+    };
+    
+    if intid != 1023 && intid != timer_irq && intid != 33 { 
+        kprint_label("intid: ", intid.zext());
+        kpanic("unknown interrupt");
     };
     
     if args.elr == 0 {
@@ -502,13 +534,14 @@ kprint :: fn(s: Str) void =
     for(s, putchar);
 
 // TODO: read the magic number from the device tree thingy?
+// https://developer.arm.com/documentation/ddi0183/g/programmers-model/summary-of-registers?lang=en
 uart :: 0x09000000;
 putchar :: fn(c: u8) void = {
-    u8.volatile(uart, c);
+    u32.volatile(uart, c.zext());
 }
 
 getchar :: fn() u8 = {
-    u8.volatile(uart)
+    u32.volatile(uart).trunc()
 }
 
 // TODO: can't let it try to bake the junk address or it crashes in bake_relocatable_constant :compilerbug

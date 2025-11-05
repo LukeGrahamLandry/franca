@@ -1,5 +1,38 @@
 
+## (Nov 4)
 
+i want to get an interrupt when theres input on the uart so i don't have to poll it. 
+- setting the low bit of UARTCR, now `-d guest_errors` doesn't say "PL011 data written to disabled UART",
+  which is encouraging because it means im looking at the right pdf. 
+- eventually make someone else's example work so at least i know its possible.
+```
+https://github.com/google/osdemo
+rustup target add aarch64-unknown-none
+cargo install cargo-binutils
+rustup component add llvm-tools
+```
+  which is not super helpful because its spread across a billion crates so you can't tell what's going on. 
+- tried changing to gicv3 and using more of the system registers
+  but that fucked everything and now i don't get the timer irq anymore. 
+  - an example that seems to actually be by arm: 
+    https://github.com/calinyara/AArch64_GIC_v3_v4_example/blob/main/src/main_basic.c
+    (which of course you can't compile without getting a license for thier personal copy of clang)
+  - oh suddenly works now? idk which part of this i wasn't doing for the last however many hours but 
+    it seems the only important things (for gicV3 timer) are:
+    - set bit 0b10 of gicd.CTLR
+    - set ICC_PMR_EL1
+    - set the bit for the specific irq in IGROUPR0 and ISENABLER0 of rd_sgi=gicr+0x10000
+    - set ICC_IGRPEN1_EL1
+  - so now im back to the point i was at this morning but with v3 instead of v2. useless. 
+- if i read the current interrupts from UARTMIS manually, the bit for recieve is set 
+  at the same time that the bit 33 of PENDR in gicd is set, so thats a good sign at least.
+  but its not set in ENABLER? am i stupid, does set_field not work?
+  yeah ok thats totally my bad im just an idiot. fuck. 
+  i'd fixed a missing `*4` earlier but also was doing mod instead of div. 
+  so that should have taking zero time instead of all day and switching to v3 was pointless, but here we are. 
+  aaaaaaaaaaaaaaa. it works tho.
+- now the thrilling task of sorting through all the random things i tried and getting rid of the ones that aren't required
+ 
 ## (Nov 3) os
 
 - provide a thing like mmap so you can ask for new memory. 
@@ -57,6 +90,7 @@
 ## (Nov 1) os
 
 still trying to turn on virtual memory. 
+- https://krinkinmu.github.io/2024/01/14/aarch64-virtual-memory.html
 - i tried to run a few other people's examples but like you can't just compile a program,
   everything sucks and wants a specific version of rust that doesn't exist anymore or a specific 
   name for your gcc cross compiler that i don't care enough to install also because why am i cross 
@@ -102,6 +136,7 @@ fdtdump a.txt > b.txt
 - save the registers in the interrupt so the stack gets restored to the right place, 
   and unexpected interrupts won't eat your data. 
 - made msr/mrs a bit more readable
+- https://lowenware.com/blog/aarch64-gic-and-timer-interrupt/
 - achived timer by transcribing random magic numbers from someone's blog post, 
   pleasing that it works but i hope i get to the point that i can actually do my own stuff soon. 
   the beginning where you just have to transcribe the same thing as everyone else's fake os is kinda boring. 
@@ -119,6 +154,7 @@ os
   so i don't need to use a real assembler just to make an extry point 
   that sets the stack pointer. recurring pain point. 
 - playing with macro that injects a scope so you can have AsmFunction without #use the encoding file every time. 
+- https://krinkinmu.github.io/2021/01/10/aarch64-interrupt-handling.html
 - learned it puts me in el1, seems i can't read SPSR_EL1 from el1, can't control your own interrupt mask. 
   (update: must have tried to read SPSR_EL2, names are confusing. i think XXX_EL1 means for interrupts TO el1, so from userspace to kernel)
   set the special lr and eret puts me in el0 at that address, 
@@ -134,6 +170,7 @@ terminal
 ## (Oct 27)
 
 - import_wasm stubs for webgpu functions so it can run examples/web/demo.fr on other programs again. 
+- https://wiki.osdev.org/QEMU_AArch64_Virt_Bare_Bones
 - giving a more serious attempt to having a thing run in qemu without an operating system
 - failed at trying to make qemu exit at the end instead of just being there forever. 
   at least `wfi` makes it hang at 0% cpu instead of 100% cpu (which `b .` does), thats an improvement. 
