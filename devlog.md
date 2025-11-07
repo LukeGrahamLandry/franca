@@ -1,4 +1,22 @@
 
+## (Nov 6)
+
+- went down a bit of a dead end with trying to redo relocations in a normal program
+  so i could have something that wrapped my compiler for my os and intercepted the libc things 
+  as a temporary way of running it. 
+  - trying to do it that way gets annoying because if you ask for 
+    `-syscalls` then you just get symbols for the empty shims not the GOT slots but if you ask for libc
+    (which i don't have) then the start up code dies before you get to the main program. 
+  - ive also revealed a different problem, that my elf_loader gives non-zero base address
+    and the way i do relocations for `-syscalls` doesn't handle that correctly.
+    yeah, the xxx-in-data things in reloc.fr are 0. 
+    - previously elf_loader did the right thing with `fix` so it worked if the exe asks for an interp. 
+    - ive been down this road before when i was thinking about which elf type to use Executable vs Dynamic.
+  - made do_relocations_static_linux work with nonzero base address,
+    so now i can set elfheader.type=dynamic so the loader knows im position independant and can give me aslr. 
+  - updated the sys.fr test because dump_elf having the string Dynamic no longer means its actually dynamic, 
+    also run reloc.fr in elf_loader there so it can't regress. still works in blink. 
+  
 ## (Nov 5) os
 
 - factor out the syscall handlers

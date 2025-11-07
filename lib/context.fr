@@ -234,7 +234,15 @@ do_relocations_static_linux :: fn() void = {
     ::enum(Elf.DynTag);
         
     unpacked := Elf.DynUnpacked.zeroed();
-    skew := 0;//base.int_from_rawptr() - Elf.MYSTERY_SPICE;  // this will always be zero except for my hacked blink
+    
+    // TODO: it seems static elf doesn't require phdr (gcc doesn't put it but clang and i do) so think of a better way to do this. 
+    @debug_assert(headers[0].type == .Phdr, "missing phdr");
+    // skew != 0 requires PIC (which my compiler always outputs). 
+    // on real linux skew==0 always if header.type==.Executable (you only get randomized if it says .Dynamic). 
+    // my elf_loader always assumes PIC and puts you somewhere random. 
+    requested_base := headers[0].vaddr - header.ehsize.zext();
+    skew := base.int_from_rawptr() - requested_base;
+    
     each headers { h |
         if h.type == .Dynamic {
             dynamic: []Elf.Dyn = (ptr = Elf.Dyn.ptr_from_int(h.vaddr + skew), len = h.mem_size / 16);
@@ -247,8 +255,8 @@ do_relocations_static_linux :: fn() void = {
     each unpacked.relocations { it |
         @debug_assert(it.type == Elf.R_AMD64_64 || it.type == Elf.R_AARCH64_ABS64 || it.type == Elf.R_RISCV_64, "TODO: unknown relocation type %", it.type);
         sym := unpacked.symbols.offset(it.sym.zext()).offset_bytes(skew);
-        dest := rawptr.ptr_from_raw(base.offset(it.offset - Elf.MYSTERY_SPICE));
-        dest[] = base.offset(sym.value).offset(it.addend - Elf.MYSTERY_SPICE);
+        dest := rawptr.ptr_from_raw(base.offset(it.offset - requested_base));
+        dest[] = base.offset(sym.value).offset(it.addend - requested_base);
     };
 };
 
