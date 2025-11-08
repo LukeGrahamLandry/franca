@@ -115,15 +115,11 @@ fn load_file_in_compiler(vtable: *ImportVTable, path: Str, opts: *BuildOptions) 
 
 Dyn :: import("@/lib/dynamic_lib.fr");
 
-fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
+fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) = {
     mark := mark_temporary_storage();
     F :: @FnPtr(*ImportVTable) void;
     callee: ?F = .None;
     cachepath := choose_cache_filename(path);
-    
-    // TODO: is_linking_libc() is not required here. but need to include -syscalls in deciding if a cached file is valid
-    //       or behaviour is very confusing so just denying it entirely in that case is my HACK for now :CacheKeySyscalls
-    no_cache := get_environment_variable("FRANCA_NO_CACHE").is_some() || !is_linking_libc();
     
     a := general_allocator();
     to_free: ?Ty(*QbeModule, *Crash'LocationResolverNode) = .None;
@@ -436,6 +432,8 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
             self.comptime_libraries&.insert(libc_name, libc);
         };
     };
+    @if(TODOWASM)
+    add_my_imports_to_injected(self.todo_injected);
     
     c := context(DefaultContext)[].comptime&;
     @assert(c[].is_null(), "Cannot call init_self_hosted inside another compiler. push_context with comptime=null first.");
@@ -453,6 +451,67 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
     
     self
 }
+
+// TODO: this is a hack to make it work on examples/os before have dynamic libraries, 
+//       makes it deal with my other hack where its kinda in between linking libc and not. 
+//       same idea as the for_exports thing in the web demo. should unify them more. 
+//       the thing here only works for elf. 
+//       it shouldn't be part of the compiler. just make todo_injected an argument to main2 and pass it down? 
+//       its annoying to have to paste the whole thing like the web demo does. 
+fn add_my_imports_to_injected(todo_injected: *HashMap(Str, rawptr)) void = {
+    Elf :: import("@/backend/elf/bits.fr");
+    base   := @import_symbol "__franca_base_address";
+    if u32.ptr_from_raw(base)[] != Elf.MAGIC {
+        return();
+    };
+    
+    header := Elf.Header.ptr_from_raw(base);
+    headers: []Elf.ProgramHeader = (
+        ptr = Elf.ProgramHeader.ptr_from_raw(base.offset(header.program_header_off)), 
+        len = header.program_header_num.zext(),
+    );
+    ::enum(Elf.SegmentType);
+    ::enum(Elf.DynTag);
+        
+    @if(headers[0].type != .Phdr) return();
+    requested_base := headers[0].vaddr - header.ehsize.zext();
+    skew := base.int_from_rawptr() - requested_base;
+    
+    unpacked := Elf.DynUnpacked.zeroed();
+    each headers { h |
+        if h.type == .Dynamic {
+            dynamic: []Elf.Dyn = (ptr = Elf.Dyn.ptr_from_int(h.vaddr + skew), len = h.mem_size / 16);
+            unpacked = Elf'load_from_dynamic_header(dynamic);
+        };
+    };
+    
+    ::ptr_utils(Elf.Symbol);
+    // TODO
+    // it seems a real dynamic loader already fixes the pointers for me.
+    //skew = 0;
+    // and it still doesn't work if static?
+    @if(!is_linking_libc()) return();  // todo: it should work??
+    // HACK that detects os/init because it gives you something even for missing imports
+    // this is stupid. it should just work on real linux too!! TODO
+    fetch_file :: fn(ptr: *u8, name_len: i64, len_out: *i64) *u8 #weak #import("libc");
+    f := @as(rawptr) fetch_file;
+    @if(is_null(f) || query_current_arch() == .wasm32) return();
+    
+    unpacked.relocations.ptr = unpacked.relocations.ptr.offset_bytes(skew);
+    unpacked.strings.ptr = unpacked.strings.ptr.offset_bytes(skew);
+    each unpacked.relocations { it |
+        @debug_assert(it.type == Elf.R_AMD64_64 || it.type == Elf.R_AARCH64_ABS64 || it.type == Elf.R_RISCV_64, "TODO: unknown relocation type %", it.type);
+        sym := unpacked.symbols.offset(it.sym.zext()).offset_bytes(skew);
+        dest := rawptr.ptr_from_raw(base.offset(it.offset - requested_base));
+        name: CStr = (ptr = unpacked.strings.index(sym.name.zext()));
+        name := name.str();
+        
+        type := sym.info.shift_right_logical(4);
+        if sym.value == 0 && !dest[].is_null() {
+            todo_injected.get_or_insert(name, => dest[]);
+        }
+    };
+};
 
 FrontendCodegen :: @struct {
     worker: *CodegenShared;

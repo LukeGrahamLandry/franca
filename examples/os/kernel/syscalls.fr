@@ -29,8 +29,12 @@ munmap :: fn(addr: i64, len: i64) i64 #n(215) = {
     0
 }
 
-exit :: fn(task: *Task) i64 #n(94) = {
-    kprint("called exit\n");
+exit :: fn(task: *Task, status: i64) i64 #n(94) = {
+    kprint_label("called exit: ", status);
+    if status == 81 {  // :temporarystacktraceonexithack
+        task.mcontext.esr = 0;
+        send_signal(task);
+    };
     kill_task(task);
     0
 }
@@ -55,6 +59,21 @@ spawn :: fn(kernel: *Kernel, buf: i64, len: i64) i64 #n(0xFFFF0001) = {
 yield :: fn(task: *Task) i64 #n(0xFFFF0002) = {
     // return_to_scheduler always cycles through all the tasks so don't need to do anything here. 
     0
+}
+
+sig_action :: fn(task: *Task, callee: i64, save_space: i64) i64 #n(0xFFFF0003) = {
+    prev := task.signal_handler;
+    task.signal_handler = callee;
+    task.signal_mcontext = save_space;
+    prev
+}
+
+sig_return :: fn(task: *Task, saved: i64) i64 #n(0xFFFF0004) = {
+    saved := SavedRegisters.ptr_from_int(saved);
+    task.mcontext.gpr = saved.gpr;
+    task.mcontext.elr = saved.elr;
+    task.signal_depth -= 1;
+    task.mcontext.gpr&[0]
 }
 
 generate :: fn() []Ty(@FnPtr(task: *Task) void, i64) = {

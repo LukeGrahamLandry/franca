@@ -15,7 +15,6 @@ want_backtrace :: @static(bool);
 
 main :: fn() void = {
     Incr'set_self_hash();
-    vtable := init_driver_vtable();
     if ENABLE_TRACY {
         eprintln(">>> Compiler includes tracy instrumentation.");
     };
@@ -34,7 +33,17 @@ main :: fn() void = {
     };
     
     want_backtrace[] = get_environment_variable("FRANCA_BACKTRACE").is_some() || ALWAYS_BE_SIGNALLING;
+    filename := args[1].str();
+
+    // TODO: is_linking_libc() is not required here. but need to include -syscalls in deciding if a cached file is valid
+    //       or behaviour is very confusing so just denying it entirely in that case is my HACK for now :CacheKeySyscalls
+    no_cache := get_environment_variable("FRANCA_NO_CACHE").is_some() || !is_linking_libc();
     
+    main2(filename, no_cache);
+};
+
+main2 :: fn(filename: Str, no_cache: bool) void = {
+    vtable := init_driver_vtable();
     do_signals();
     Crash'push_resolver(@import_symbol "__franca_aot_debug_info", find_in_debug_info);
     if want_backtrace[] {
@@ -42,8 +51,7 @@ main :: fn() void = {
     };
    
     ::?Arch;
-    filename := args[1].str();
-    @match(run_franca_file(vtable, filename)) {
+    @match(run_franca_file(vtable, filename, no_cache)) {
         (fn Ok(_) => ());
         (fn Err(e) => {
             // TODO: better error message logging but its a pain becuase you don't have the compiler instance here. -- Sep 19

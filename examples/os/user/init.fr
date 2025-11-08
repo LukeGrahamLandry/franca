@@ -1,13 +1,270 @@
 
+// don't forget!
+// :todoosthreads 
+// :temporarystacktraceonexithack
+DBG :: false;
+
 main :: fn() void = {
     // TODO: real file system. for now just embed the blob of all the files like the web demo does. 
-    fs, contents := @run {
+    fs_i, contents := @run {
         fs, contents := import("@/examples/web/build.fr")'collect_fs(ast_alloc());
         (fs, contents.items())
     };
-    @println("fs.len=% contents.len=%", fs.len_including_tombstones, contents.len);
+    fs.index = fs_i;
+    fs.contents = contents;
+    fs.fd = list(general_allocator());
+    range(0, 3) { _ |
+        fs.fd&.push(zeroed FileHandle);
+    };
+    //@println("fs.len=% contents.len=%", fs.len_including_tombstones, contents.len);
     
+    saved := @static(MContext);
+    args: Array(i64, 6) = (int_from_rawptr(handle_signal), MContext.int_from_ptr(saved), 0, 0, 0, 0);
+    Syscall'perform_syscall(args&, 0xFFFF0003);  // sig_action
+    
+    //import("@/examples/toy/reloc.fr")'main();
+    if query_current_arch() != .wasm32 {
+        redo_relocations_static_linux();
+    };
     push_dynamic_context {
-        import("@/examples/toy/reloc.fr")'main();
+        c := context(DefaultContext);
+        c.prefer_syscalls = false;
+        
+        Crash'push_aot_debug_resolver();
+        c.panic_hook = fn(s) = {
+            c := context(DefaultContext);
+            c.prefer_syscalls = true;
+            Crash'backtracing_panic_handler(s)
+        };
+        
+        // TODO: this shouldn't be needed but the compiler's dying in get_environment_variable. 
+        envp := context(DefaultContext)[].environment_variables;
+        while => !envp[].ptr.is_null() {
+            @if(DBG) @println("XXX % % %", envp[], CStr.raw_from_ptr(envp), u8.raw_from_ptr(envp.ptr));
+            envp = envp.offset(1);
+        };
+        xxx := zeroed CStr;
+        context(DefaultContext)[].environment_variables = xxx&;
+        
+        c.cli_arguments = empty();
+        //import("@/examples/kaleidoscope.fr")'main();
+        //import("@/examples/sudoku.fr")'main();
+        import("@/compiler/main.fr")'main2("examples/sudoku.fr", true);
+        
+        //c.cli_arguments = @slice(@as(CStr) "", @as(CStr) "backend/test/mandel.ssa", "-r");
+        //import("@/backend/meta/qbe_frontend.fr")'main();
     };
 }
+
+fs :: @static(@struct {
+    contents: []u8;
+    index: RawHashMap(Str, Ty(i64, i64));
+    fd: List(FileHandle);
+});
+
+FileHandle :: @struct {
+    off: i64;
+    len: i64;
+    pos: i64;
+    readable: bool;
+};
+
+MContext :: @struct {
+    gpr: Array(i64, 32);
+    esr: i64;
+    far: i64;
+    elr: i64;
+    spsr: i64;
+};
+
+handle_signal :: fn(ctx: *MContext) void = {
+    ctx := ctx[];
+    ec := ctx.esr.shift_right_logical(26).bit_and(0b111111);
+    if ec != 0b010101 {
+        push_emergency_dynamic_environment {
+            context(DefaultContext)[].prefer_syscalls = true;
+            Crash'backtracing_panic_handler("fatal signal");
+        };
+    };
+    
+    syscall_number := ctx.gpr&[8];
+    @switch(syscall_number) {
+        @case(56) => {  // openat
+            path := u8.ptr_from_int(ctx.gpr&[1]);
+            path := (@as(CStr) (ptr = path)).str();
+            @if(DBG) @println("openat(%)", path);
+            if fs.index&.get(path) { off, len |
+                fd := fs.fd.len;
+                fs.fd&.push(
+                    off = off,
+                    len = len,
+                    pos = 0,
+                    readable = true,
+                );
+                ctx.gpr&[0] = fd;
+            } else {
+                ctx.gpr&[0] = -1;
+            };
+        };
+        @case(79) => {  // fstatat
+            path := u8.ptr_from_int(ctx.gpr&[1]);
+            path := (@as(CStr) (ptr = path)).str();
+            out := Posix.Linux.StatArm64.ptr_from_int(ctx.gpr&[2]);
+            ::[]@type out[];
+            out.slice(1).set_zeroed();
+            if fs.index&.get(path) { off, len |
+                out.st_mode = Posix.S.IFREG;
+                ctx.gpr&[0] = 0;
+            } else {
+                ctx.gpr&[0] = -1;
+            };
+        };
+        @default => {
+            @panic("invalid syscall %", syscall_number);
+        };
+    };
+    
+    args: Array(i64, 6) = (MContext.int_from_ptr(ctx&), 0, 0, 0, 0, 0);
+    Syscall'perform_syscall(args&, 0xFFFF0004);  // sig_return
+}
+
+redo_relocations_static_linux :: fn() void = {
+    Elf :: import("@/backend/elf/bits.fr");
+    // TODO: use (maybe backwards offset from) AT_PHDR instead of this symbol, 
+    //       then it should work when going through a relocatable object as well
+    base   := @import_symbol "__franca_base_address";
+    header := Elf.Header.ptr_from_raw(base);
+    @assert_eq(header.magic, Elf.MAGIC, "we're not in an elf file?");
+    headers: []Elf.ProgramHeader = (
+        ptr = Elf.ProgramHeader.ptr_from_raw(base.offset(header.program_header_off)), 
+        len = header.program_header_num.zext(),
+    );
+    ::enum(Elf.SegmentType);
+    ::enum(Elf.DynTag);
+        
+    unpacked := Elf.DynUnpacked.zeroed();
+    
+    // TODO: it seems static elf doesn't require phdr (gcc doesn't put it but clang and i do) so think of a better way to do this. 
+    @debug_assert(headers[0].type == .Phdr, "missing phdr");
+    // skew != 0 requires PIC (which my compiler always outputs). 
+    // on real linux skew==0 always if header.type==.Executable (you only get randomized if it says .Dynamic). 
+    // my elf_loader always assumes PIC and puts you somewhere random. 
+    requested_base := headers[0].vaddr - header.ehsize.zext();
+    skew := base.int_from_rawptr() - requested_base;
+    
+    each headers { h |
+        if h.type == .Dynamic {
+            dynamic: []Elf.Dyn = (ptr = Elf.Dyn.ptr_from_int(h.vaddr + skew), len = h.mem_size / 16);
+            unpacked = Elf'load_from_dynamic_header(dynamic);
+        };
+    };
+    
+    ::ptr_utils(Elf.Symbol);
+    unpacked.relocations.ptr = unpacked.relocations.ptr.offset_bytes(skew);
+    unpacked.strings.ptr = unpacked.strings.ptr.offset_bytes(skew);
+    each unpacked.relocations { it |
+        @debug_assert(it.type == Elf.R_AMD64_64 || it.type == Elf.R_AARCH64_ABS64 || it.type == Elf.R_RISCV_64, "TODO: unknown relocation type %", it.type);
+        sym := unpacked.symbols.offset(it.sym.zext()).offset_bytes(skew);
+        dest := rawptr.ptr_from_raw(base.offset(it.offset - requested_base));
+        name: CStr = (ptr = unpacked.strings.index(sym.name.zext()));
+        name := name.str();
+        
+        type := sym.info.shift_right_logical(4);
+        if sym.value == 0 {
+            temporary_libc_import(name, dest);
+        }
+    };
+};
+
+temporary_libc_import :: fn(name: Str, dest: *rawptr) void = {
+    @switch(name) {
+        @case("mmap") => {
+            dest[] = fn(addr: rawptr, len: i64, prot: i64, flags: i64, fd: Fd, offset: i64) i64 = {
+                c := context(DefaultContext);
+                c.prefer_syscalls = true;
+                @assert(addr.is_null() && fd.fd == -1 && offset == 0);
+                result := Syscall'mmap(addr, len, prot, flags, fd, offset);
+                @if(DBG) @println("mmap(%) -> %", len, result);
+                @assert(result != 0, "some sort of corruption is going on because i over commit and can't null");
+                c.prefer_syscalls = false;
+                result
+            };
+        };
+        @case("munmap") => { dest[] = fn() = 0; };
+        @case("mprotect") => { dest[] = fn() = 0; };
+        @case("read") => {
+            dest[] = fn(fd: Fd, buf: *u8, len: i64) i64 = {
+                fd := fs.fd.index(fd.fd.zext());
+                if !fd.readable { 
+                    return(-1);
+                };
+                len := min(len, fd.len - fd.pos).max(0);
+                dest := buf.slice(len);
+                src := fs.contents.subslice(fd.off, len);
+                dest.copy_from(src);
+                fd.pos += len;
+                len
+            };
+        };
+        @case("close") => {
+            dest[] = fn(fd: Fd) i64 = {
+                fd := fs.fd.index(fd.fd.zext());
+                fd.readable = false;
+                // TODO: reuse slots of the array
+                0
+            };
+        };
+        @case("dlopen") => {
+            dest[] = fn() = 0;
+        };
+        @case("write") => {
+            dest[] = fn(fd: Fd, buf: *u8, size: i64) i64Result = {
+                c := context(DefaultContext);
+                c.prefer_syscalls = true;
+                result := Syscall'write(fd, buf, size);
+                c.prefer_syscalls = false;
+                result
+            };
+        };
+        @case("lseek") => {
+            dest[] = fn(fd: Fd, offset: i64, whence: Whence) i64 = {
+                fd := fs.fd.index(fd.fd.zext());
+                if !fd.readable { 
+                    return(-1);
+                };
+                ::enum(Whence);
+                fd.pos = @match(whence) {
+                    fn End() => fd.len;
+                    fn Set() => offset;
+                    @default => todo();
+                };
+                fd.pos
+            };
+        };
+        @case("__errno_location") => {
+            dest[] = fn() *i64 = @static(i64);
+        };
+        @case("sigaction") => {
+            dest[] = fn() i64 = 0;
+        };
+        @case("clock_gettime") => {
+            dest[] = fn() i64 = 0;
+        };
+        @case("memmove") => {
+            // ugh
+            dest[] = fn(dest: rawptr, src: rawptr, count: i64) void =
+                copy_bytes_static(dest, src, count);
+        };
+        // todo: annoyingly fstatat in glibc is super painful so i just do the syscall. 
+        // todo: openat is annoying because its variadic so i just do the syscall
+        @default => {
+            @if(DBG) println(name);
+            dest[] = fn() void = panic("called a weak import");
+        };
+    };
+}
+
+// TODO: make this less annoying
+DISABLE_IMPORT_FRC :: true;
+DEBUG_SPAM_LOG :: false;
+#include_std("compiler/lib.fr"); 

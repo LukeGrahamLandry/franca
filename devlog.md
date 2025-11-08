@@ -1,4 +1,20 @@
 
+## (Nov 8)
+
+enough of a shim of a file system to run the compiler on my os. 
+pretending im linking libc and then just overwriting the relocations 
+at runtime with my temporary implementations mostly works.
+the annoying ones are openat and fstatat where using the libc ones sucks 
+so i just do the syscalls directly. so did a very basic signaling thing  
+so when the kernel gets an unknown syscall it just gets sent to userspace. 
+to get the child program to work, fill todo_injected by reading the elf. 
+without that it hits an unfilled import (which it shouldn't, should just be null, 
+so thats kinda a compiler bug, it just only comes up when you do !prefer_syscalls 
+while not linking a real libc so its a bit niche). also add_my_imports_to_injected 
+doesn't seem to work on real linux so im wrong about which pointers the loader 
+fixes to the new base address? so should fix that out of curiosity but this 
+whole thing is temporary anyway so im going to wait until its more established. 
+
 ## (Nov 6)
 
 - went down a bit of a dead end with trying to redo relocations in a normal program
@@ -29,6 +45,7 @@
   magic register to enable float instructions. 
   hacky thing to ignore the system instructions in aarch64_clear_instruction_cache, there's probably a way to just enable them for el0.
   fascinating, it mostly works but the output is slightly wrong. 
+  (tho in a different way to how the wasm one is wrong on safari, extra fascinating)
 
 ## (Nov 4) os
 
