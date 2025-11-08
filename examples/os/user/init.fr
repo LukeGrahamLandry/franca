@@ -1,7 +1,4 @@
 
-// don't forget!
-// :todoosthreads 
-// :temporarystacktraceonexithack
 DBG :: false;
 
 main :: fn() void = {
@@ -255,6 +252,53 @@ temporary_libc_import :: fn(name: Str, dest: *rawptr) void = {
             dest[] = fn(dest: rawptr, src: rawptr, count: i64) void =
                 copy_bytes_static(dest, src, count);
         };
+        @case("pthread_attr_init") => {
+            dest[] = fn(out: *ThreadAttr) i64 = {
+                out[] = zeroed(@type out[]);
+                0
+            };
+        };
+        @case("pthread_create") => {
+            dest[] = fn(out: *pthread_t, attr: *ThreadAttr, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) i64 = {
+                attr := bit_cast_unchecked(*ThreadAttr, *MyAttr, attr);
+                ctx := zeroed MContext;
+                ctx.elr = bit_cast_unchecked(@type callee, i64, callee);
+                ctx.gpr&[0] = bit_cast_unchecked(@type userdata, i64, userdata);
+                ctx.gpr&[30] = int_from_rawptr(fn() void = {
+                    context(DefaultContext)[].prefer_syscalls = true;
+                    Syscall'exit(0);
+                });
+                ctx.gpr&[31] = bit_cast_unchecked(*u8, i64, attr.stack.end_pointer());
+                
+                args: Array(i64, 6) = (MContext.int_from_ptr(ctx&), 0, 0, 0, 0, 0);
+                id, _ := Syscall'perform_syscall(args&, 0xFFFF0005);  // spawn_thread
+                out[] = bit_cast_unchecked(@type id, pthread_t, id);
+                
+                0
+            };
+        };
+        @case("pthread_attr_setstack") => {
+            dest[] = fn(attr: *ThreadAttr, ptr: *u8, len: i64) i64 = {
+                attr := bit_cast_unchecked(*ThreadAttr, *MyAttr, attr);
+                attr.stack = ptr.slice(len);
+                0
+            };
+        };
+        @case("pthread_getcpuclockid") => {
+            dest[] = fn() = 0;
+        };
+        @case("pthread_join") => {
+            dest[] = fn(thread: pthread_t, value_ptr: *rawptr) i64 = {
+                id := bit_cast_unchecked(@type thread, i64, thread);
+                args: Array(i64, 6) = (id, 0, 0, 0, 0, 0);
+                dowhile {
+                    done, _ := Syscall'perform_syscall(args&, 0xFFFF0006);  // check_thread
+                    done == 0
+                };
+                value_ptr[] = zeroed rawptr; // TODO
+                0
+            };
+        };
         // todo: annoyingly fstatat in glibc is super painful so i just do the syscall. 
         // todo: openat is annoying because its variadic so i just do the syscall
         @default => {
@@ -262,7 +306,15 @@ temporary_libc_import :: fn(name: Str, dest: *rawptr) void = {
             dest[] = fn() void = panic("called a weak import");
         };
     };
+    
+    MyAttr :: @struct {
+        stack: []u8;
+        callee: @FnPtr(userdata: rawptr) void;
+        userdata: rawptr;
+    };
 }
+
+#use("@/lib/sys/threads.fr");
 
 // TODO: make this less annoying
 DISABLE_IMPORT_FRC :: true;

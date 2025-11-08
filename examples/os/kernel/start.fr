@@ -7,7 +7,8 @@ Kernel :: @struct {
     // so you can tell which address space a pointer is in for debugging. 
     next_vaddr: i64;
     tasks: Array(Task, 16);
-    next_task: i64;
+    next_task_to_run: i64;
+    next_task_id: i64;
     env: rawptr;
     interrupt_stack: []u8;
     timer_counter: u64;
@@ -70,7 +71,8 @@ init_kernel :: fn() void = {
     task := kernel.idle_task&;
     task.slice(1).set_zeroed();
     init_task(task, spin, tt);
-    
+
+    kernel.next_task_id = 1;
     task := kernel.alloc_task();
     init_task(task, user_func, tt);
     kprint("kernel ready\n");
@@ -83,6 +85,8 @@ alloc_task :: fn(kernel: *Kernel) *Task = {
         if !it.active {
             it.slice(1).set_zeroed();
             it.active = true;
+            it.thread_id = kernel.next_task_id;
+            kernel.next_task_id += 1;
             return it;
         };
     };
@@ -298,9 +302,10 @@ return_to_user :: AsmFunctionArmOnly(fn(task_x0: *Task) Never = (), {
 return_to_scheduler :: fn() Never = {
     kernel := kernel();
     cap := size_of(@type kernel.tasks) / size_of(Task);
+    i := kernel.next_task_to_run&;
     range(0, cap) { _ |
-        task := kernel.tasks&[kernel.next_task]&;
-        kernel.next_task = kernel.next_task.add(1).mod(cap);
+        task := kernel.tasks&[i[]]&;
+        i[] = i[].add(1).mod(cap);
         if task.active {
             return_to_user(task);
         };
@@ -378,6 +383,7 @@ Task :: @struct {
     signal_handler: i64;  // @FnPtr(task: *Task) void;
     signal_mcontext: i64; // *SavedRegisters;
     signal_depth: i64;
+    thread_id: i64;
     active: bool;
 };
 

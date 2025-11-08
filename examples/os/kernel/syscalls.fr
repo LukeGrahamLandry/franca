@@ -15,6 +15,9 @@ mmap :: fn(kernel: *Kernel, addr: i64, len: i64, prot: i64, flags: i64, fd: i64,
     pages := len.ualign_to(PAGE_SIZE).udiv(PAGE_SIZE);
     result_addr := vmap_reserve(kernel, kernel.tasks&[0].mem&, pages);
     barrier();  // TODO: theres an instruction to kill the tlb or something
+    if result_addr == 0 {
+        kpanic("vmap_reserve can't return null");
+    };
     result_addr
 }
 
@@ -44,6 +47,7 @@ futex :: fn(addr: i64, futex_op: i64, val: i64, timeout: i64) i64 #n(98) = {
     0
 }
 
+// TODO: new address space
 spawn :: fn(kernel: *Kernel, buf: i64, len: i64) i64 #n(0xFFFF0001) = {
     //elf_bytes := u8.ptr_from_int(buf).slice(len);
     
@@ -74,6 +78,27 @@ sig_return :: fn(task: *Task, saved: i64) i64 #n(0xFFFF0004) = {
     task.mcontext.elr = saved.elr;
     task.signal_depth -= 1;
     task.mcontext.gpr&[0]
+}
+
+spawn_thread :: fn(kernel: *Kernel, parent: *Task, ctx: i64) i64 #n(0xFFFF0005) = {
+    ctx := SavedRegisters.ptr_from_int(ctx);
+    child := kernel.alloc_task();
+    child.mem = parent.mem;
+    child.mcontext.gpr = ctx.gpr;
+    child.mcontext.elr = ctx.elr;
+    child.kernel_sp = kernel.interrupt_stack.end_pointer();
+    child.active = true;
+    child.thread_id
+}
+
+// TODO: have a more efficient waitpid than calling this in a loop
+check_thread :: fn(kernel: *Kernel, id: i64) i64 #n(0xFFFF0006) = {
+    each kernel.tasks& { it |
+        if it.thread_id == id {
+            return it.active.not().int();
+        }
+    };
+    1
 }
 
 generate :: fn() []Ty(@FnPtr(task: *Task) void, i64) = {
