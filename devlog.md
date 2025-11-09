@@ -5,6 +5,13 @@
   i only have one core rn but threads can preempt so it still matters.
 - scheduler knows about futexes so it can skip threads that are waiting and save two context switches
 - reset the time slice when a new thing gets scheduled 
+- the curse of randomly losing syscalls is helped by making the time slice longer,
+  so something's wrong with my preemption. that's concerning. 
+- the `&& !(@import_symbol "exit").is_null()` in is_linking_libc was being confusing. 
+  it was that import of exit that wasn't getting filled when trying to jit the kalidescope example. 
+  added a todo test. 
+- no need for all the hassle with add_my_imports_to_injected, 
+  just pretend to have dlopen like im pretending to have the rest of the imports. silly. 
 
 ## (Nov 8)
 

@@ -44,13 +44,12 @@ main :: fn() void = {
         //import("@/examples/sudoku.fr")'main();
         //import("@/compiler/main.fr")'main2("examples/sudoku.fr", true);
         
-        range(0, 10) { i |
-            println(i);
-            context(DefaultContext)[].comptime = zeroed rawptr;
-            import("@/compiler/main.fr")'main2("examples/sudoku.fr", true);
-        };
-        // TODO: why doesn't this work? 
-        //import("@/compiler/main.fr")'main2("examples/kaleidoscope.fr", true);
+        //range(0, 100) { i |
+        //    println(i);
+        //    context(DefaultContext)[].comptime = zeroed rawptr;
+        //    import("@/compiler/main.fr")'main2("examples/sudoku.fr", true);
+        //};
+        import("@/compiler/main.fr")'main2("examples/kaleidoscope.fr", true);
         
         // doesn't work because it imports putchar 
         // (and i don't have dlopen yet, and putting it in temporary_libc_import 
@@ -58,8 +57,6 @@ main :: fn() void = {
         //c.cli_arguments = @slice(@as(CStr) "", @as(CStr) "backend/test/mandel.ssa", "-r");
         //import("@/backend/meta/qbe_frontend.fr")'main();
     };
-    
-    Syscall'exit(0);
 }
 
 fs :: @static(@struct {
@@ -184,15 +181,34 @@ redo_relocations_static_linux :: fn() void = {
         
         type := sym.info.shift_right_logical(4);
         if sym.value == 0 {
-            temporary_libc_import(name, dest);
+            temporary_libc_import(name, dest, false);
         }
     };
 };
 
-temporary_libc_import :: fn(name: Str, dest: *rawptr) void = {
-    @switch(name) {
-        @case("mmap") => {
-            dest[] = fn(addr: rawptr, len: i64, prot: i64, flags: i64, fd: Fd, offset: i64) i64 = {
+temporary_libc_import :: fn(name: Str, dest: *rawptr, allow_null: bool) void = {
+    LIBC_s :: Type.scope_of(LIBC);
+    inline_for get_constants(LIBC_s) { $n |
+        fid :: get_constant(FuncId, LIBC_s, n[]).unwrap();
+        check := @run n[].str();
+        if name == check {
+            dest[] = fid;
+            return();
+        };
+    };
+    
+    if !allow_null {
+        @if(DBG) println(name);
+        dest[] = fn() void = panic("called a weak import");
+    };
+}
+
+MyAttr :: @struct {
+    stack: []u8;
+};
+
+LIBC :: @struct {
+    mmap :: fn(addr: rawptr, len: i64, prot: i64, flags: i64, fd: Fd, offset: i64) i64 = {
                 c := context(DefaultContext);
                 c.prefer_syscalls = true;
                 result := Syscall'mmap(addr, len, prot, flags, fd, offset);
@@ -200,21 +216,17 @@ temporary_libc_import :: fn(name: Str, dest: *rawptr) void = {
                 @assert_ne(result, 0, "some sort of corruption is going on because i over commit and can't null");
                 c.prefer_syscalls = false;
                 result
-            };
-        };
-        @case("munmap") => { 
-            dest[] = fn(addr: rawptr, len: i64) voidResult = {
+    };
+    munmap :: fn(addr: rawptr, len: i64) voidResult = {
                 c := context(DefaultContext);
                 c.prefer_syscalls = true;
                 result := Syscall'munmap(addr, len);
                 @assert_eq(result.value, 0, "some sort of corruption is going on. munmap(%) can't fail", addr);
                 c.prefer_syscalls = false;
                 result
-            };
-        };
-        @case("mprotect") => { dest[] = fn() = 0; };
-        @case("read") => {
-            dest[] = fn(fd: Fd, buf: *u8, len: i64) i64 = {
+    };
+    mprotect :: fn() = 0;
+    read :: fn(fd: Fd, buf: *u8, len: i64) i64 = {
                 fs.mutex&.lock();
                 fd := fs.fd.index(fd.fd.zext());
                 if !fd.readable { 
@@ -228,32 +240,40 @@ temporary_libc_import :: fn(name: Str, dest: *rawptr) void = {
                 fd.pos += len;
                 fs.mutex&.unlock();
                 len
-            };
-        };
-        @case("close") => {
-            dest[] = fn(fd: Fd) i64 = {
+    };
+    close :: fn(fd: Fd) i64 = {
                 fs.mutex&.lock();
                 fd := fs.fd.index(fd.fd.zext());
                 fd.readable = false;
                 // TODO: reuse slots of the array
                 fs.mutex&.unlock();
                 0
-            };
+    };
+    dlopen :: fn(name: CStr) rawptr = {
+        if name == "libc.so.6" {
+            return(123.rawptr_from_int());
         };
-        @case("dlopen") => {
-            dest[] = fn() = 0;
-        };
-        @case("write") => {
-            dest[] = fn(fd: Fd, buf: *u8, size: i64) i64Result = {
+        zeroed(rawptr)
+    };
+    dlsym :: fn(lib: rawptr, name: CStr) rawptr = {
+        @assert_eq(lib.int_from_rawptr(), 123);
+        dest := zeroed(rawptr);
+        temporary_libc_import(name.str(), dest&, true);
+        dest
+    };
+    dlclose :: fn() = 0;
+    exit :: fn(status: i64) void = {
+        args: Array(i64, 6) = (status, 0, 0, 0, 0, 0);
+        Syscall'perform_syscall(args&, 94);  // exit
+    };
+    write :: fn(fd: Fd, buf: *u8, size: i64) i64Result = {
                 c := context(DefaultContext);
                 c.prefer_syscalls = true;
                 result := Syscall'write(fd, buf, size);
                 c.prefer_syscalls = false;
                 result
-            };
-        };
-        @case("lseek") => {
-            dest[] = fn(fd: Fd, offset: i64, whence: Whence) i64 = {
+    };
+    lseek :: fn(fd: Fd, offset: i64, whence: Whence) i64 = {
                 fs.mutex&.lock();
                 fd := fs.fd.index(fd.fd.zext());
                 if !fd.readable { 
@@ -269,30 +289,17 @@ temporary_libc_import :: fn(name: Str, dest: *rawptr) void = {
                 pos := fd.pos;
                 fs.mutex&.unlock();
                 pos
-            };
-        };
-        @case("__errno_location") => {
-            dest[] = fn() *i64 = @static(i64);
-        };
-        @case("sigaction") => {
-            dest[] = fn() i64 = 0;
-        };
-        @case("clock_gettime") => {
-            dest[] = fn() i64 = 0;
-        };
-        @case("memmove") => {
-            // ugh
-            dest[] = fn(dest: rawptr, src: rawptr, count: i64) void =
+    };
+    __errno_location :: fn() *i64 = @static(i64);
+    sigaction :: fn() i64 = 0;
+    clock_gettime :: fn() i64 = 0;
+    memmove :: fn(dest: rawptr, src: rawptr, count: i64) void =
                 copy_bytes_static(dest, src, count);
-        };
-        @case("pthread_attr_init") => {
-            dest[] = fn(out: *ThreadAttr) i64 = {
+    pthread_attr_init :: fn(out: *ThreadAttr) i64 = {
                 out[] = zeroed(@type out[]);
                 0
-            };
-        };
-        @case("pthread_create") => {
-            dest[] = fn(out: *pthread_t, attr: *ThreadAttr, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) i64 = {
+    };
+    pthread_create :: fn(out: *pthread_t, attr: *ThreadAttr, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) i64 = {
                 attr := bit_cast_unchecked(*ThreadAttr, *MyAttr, attr);
                 ctx := zeroed MContext;
                 ctx.elr = bit_cast_unchecked(@type callee, i64, callee);
@@ -309,20 +316,14 @@ temporary_libc_import :: fn(name: Str, dest: *rawptr) void = {
                 out[] = bit_cast_unchecked(@type id, pthread_t, id);
                 
                 0
-            };
-        };
-        @case("pthread_attr_setstack") => {
-            dest[] = fn(attr: *ThreadAttr, ptr: *u8, len: i64) i64 = {
+    };
+    pthread_attr_setstack :: fn(attr: *ThreadAttr, ptr: *u8, len: i64) i64 = {
                 attr := bit_cast_unchecked(*ThreadAttr, *MyAttr, attr);
                 attr.stack = ptr.slice(len);
                 0
-            };
-        };
-        @case("pthread_getcpuclockid") => {
-            dest[] = fn() = 0;
-        };
-        @case("pthread_join") => {
-            dest[] = fn(thread: pthread_t, value_ptr: *rawptr) i64 = {
+    };
+    pthread_getcpuclockid :: fn() = 0;
+    pthread_join :: fn(thread: pthread_t, value_ptr: *rawptr) i64 = {
                 id := bit_cast_unchecked(@type thread, i64, thread);
                 args: Array(i64, 6) = (id, 0, 0, 0, 0, 0);
                 dowhile {
@@ -331,20 +332,10 @@ temporary_libc_import :: fn(name: Str, dest: *rawptr) void = {
                 };
                 value_ptr[] = zeroed rawptr; // TODO
                 0
-            };
-        };
-        @default => {
-            @if(DBG) println(name);
-            dest[] = fn() void = panic("called a weak import");
-        };
     };
-    
-    MyAttr :: @struct {
-        stack: []u8;
-        callee: @FnPtr(userdata: rawptr) void;
-        userdata: rawptr;
-    };
-}
+    // for mandel.ssa
+    putchar :: fn(c: u8) = print(c&.slice(1));
+};
 
 #use("@/lib/sys/threads.fr");
 #use("@/lib/sys/sync/mutex.fr");

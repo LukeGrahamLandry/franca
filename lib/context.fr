@@ -86,6 +86,11 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
     CAPTURE :: @static(@FnPtr() void);
     CAPTURE[] = user;
     
+    // is_linking_libc() checks if we expected to link a libc at compile time, 
+    // have_libc[] checks if relocations were successfully done, if not, clearly there's no dynamic loader and we can't use libc stuff. 
+    // the distinction matters for examples/os/user/init.fr where the os doesn't ship a libc but i want to fake it by redoing the relocations once i get to main().
+    have_libc :: @static(bool);
+    
     impl2 :: fn(argc: i64, argv: *CStr, envp: *CStr) void = {
         push_zeroed_dynamic_context {   // for now this sets c.current_os=OS[]
             c := context(DefaultContext);
@@ -94,12 +99,13 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
             c.panic_hook = print_and_exit1;
             c.global = @static(GlobalFrancaRuntime);
             c.global.next_thread_id = 1;  // :ThreadIdStartsAtOne
+            c.prefer_syscalls = !have_libc[] || !is_linking_libc();
             
             @if(SLOW_DEBUG_ALLOC, {
                 general_allocator: import("@/lib/alloc/debug_alloc.fr").DebugAlloc = init();
                 c.general_allocator = general_allocator&.borrow();
             }, {
-                if is_linking_libc() && !NEVER_USE_LIBC_ALLOC {
+                if have_libc[] && !NEVER_USE_LIBC_ALLOC {
                     c.general_allocator = libc_allocator;
                 } else {
                     A :: import("@/lib/alloc/fixed_block.fr").BlockAlloc;
@@ -114,7 +120,7 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
             
             @if(!TODOWASM || query_current_arch() != .wasm32)
             @if(!IS_BOOTSTRAPPING)  // :UpdateBoot
-            if !is_linking_libc() && query_current_os() == .linux {
+            if !have_libc[] && query_current_os() == .linux {
                 do_relocations_static_linux();
             };
             
@@ -132,13 +138,20 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
             Syscall'exit(0);
         };
     };
+    
+    have_libc[] = IS_BOOTSTRAPPING;
+    @if(!IS_BOOTSTRAPPING)
+    {
+    
+    __libc_start_main :: fn(user: @FnPtr(argc: i64, argv: *CStr, envp: *CStr) void, argc: i64, argv: *CStr, i: i64, f: i64, l: i64) i64 #weak #libc;
+    start := @as(rawptr) __libc_start_main;
+    have_libc[] = !is_linux || !start.is_null();
 
     @if(!TODOWASM || query_current_arch() != .wasm32)
-    @if(!IS_BOOTSTRAPPING)
-    if is_linux && is_linking_libc() {
-        __libc_start_main :: fn(user: @FnPtr(argc: i64, argv: *CStr, envp: *CStr) void, argc: i64, argv: *CStr, i: i64, f: i64, l: i64) i64 #weak #libc;
+    if is_linux && have_libc[] {
         __libc_start_main(impl2, argc, argv, 0, 0, 0);
         unreachable();
+    };
     };
     
     impl2(argc, argv, envp);
