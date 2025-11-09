@@ -15,6 +15,11 @@ doesn't seem to work on real linux so im wrong about which pointers the loader
 fixes to the new base address? so should fix that out of curiosity but this 
 whole thing is temporary anyway so im going to wait until its more established. 
 
+- enough of pthread for CodegenShared
+- save floats in mcontext
+- munmap
+- in setup_virtual_memory, unmap the low addresses so null dereferences fault correctly
+
 ## (Nov 6)
 
 - went down a bit of a dead end with trying to redo relocations in a normal program

@@ -15,6 +15,8 @@ Kernel :: @struct {
     idle_task: Task;
     pages_reserved: i64;
     pages_committed: i64;
+    pages_reserved_freed: i64;
+    pages_committed_freed: i64;
 };
 
 fn kernel() *Kernel = {
@@ -51,7 +53,7 @@ init_kernel :: fn() void = {
     
     kernel_image_base: i64 = 0x40100000;
     kernel_image_size := 1.shift_left(23);  // TODO: tighter bound. 
-    ram_size: i64 = 0x08000000 - 0x00100000; // TODO: get this from device tree
+    ram_size: i64 = 1.shift_left(29) - 0x00100000; // TODO: get this from device tree
     kernel.physical.remaining = (
          ptr = u8.ptr_from_int(kernel_image_base + kernel_image_size), 
          len = ram_size - kernel_image_size,
@@ -59,6 +61,10 @@ init_kernel :: fn() void = {
     kernel.next_vaddr = (512*1024*1024) * 4;
     kernel.env = get_dynamic_context();
     
+    // TODO: maybe better to use this to only save on interrupt if they're actually being used by that process
+    cpacr := i64.sys_get(.CPACR_EL1);
+    i64.sys_set(.CPACR_EL1, cpacr.bit_or(0b11.shift_left(20)));  // FPEN
+        
     setup_interrupts();
     tt := setup_virtual_memory();
     
@@ -70,31 +76,54 @@ init_kernel :: fn() void = {
     ::[]Task;
     task := kernel.idle_task&;
     task.slice(1).set_zeroed();
-    init_task(task, spin, tt);
+    task.mem.root = tt;
+    init_task(task, spin);
 
     kernel.next_task_id = 1;
-    task := kernel.alloc_task();
-    init_task(task, user_func, tt);
-    kprint("kernel ready\n");
+    task := kernel.alloc_task(tt);
+    init_task(task, user_exec);
+    elf_bytes := root_task_elf_bytes;
+    task.mcontext.gpr&[0] = u8.int_from_ptr(elf_bytes.ptr) + 512*1024*1024;
+    task.mcontext.gpr&[1] = elf_bytes.len;
     
+    kprint("kernel ready\n");
     return_to_scheduler();
 }
 
-alloc_task :: fn(kernel: *Kernel) *Task = {
+root_task_elf_bytes :: {
+    franca := get_executable_path(temp());
+    o := "target/userspaceprogram.out";
+    // TODO: this needs to be cacheable (rn -syscalls isn't but it shouldn't be hard to fix since thats not foldable)
+    //       but also only the driver gets cached, not the program you're compiling, so need to fix that too. 
+    import("@/examples/testing.fr")'sh(@slice(
+        franca, "examples/default_driver.fr", "build", 
+        "examples/os/user/init.fr", 
+        "-os", "linux", "-arch", "aarch64", 
+        //"-syscalls",
+        "-keep-names",
+        "-o", o,
+    ));
+    read_entire_file_or_crash(ast_alloc(), o)
+};
+
+alloc_task :: fn(kernel: *Kernel, tt: *TranslationTable) *Task = {
     each kernel.tasks& { it |
         if !it.active {
             it.slice(1).set_zeroed();
             it.active = true;
             it.thread_id = kernel.next_task_id;
             kernel.next_task_id += 1;
+            // TODO: its dumb to store this on every task but it makes it easy for the interrupt handler to get it. 
+            // TODO: really it needs to be local to the core if multiple threads are allowed to be in the kernel at once. 
+            it.kernel_sp = kernel.interrupt_stack.end_pointer();
+            it.mem.root = tt;
             return it;
         };
     };
     kpanic("too many tasks running")
 }
 
-init_task :: fn(task: *Task, callee: rawptr, tt: *TranslationTable) void = {
-    task.mem.root = tt;
+init_task :: fn(task: *Task, callee: rawptr) void = {
     kernel := kernel();
     stack_size_pages := 10;
     user_stack := vmap_reserve(kernel, task.mem&, stack_size_pages);
@@ -105,13 +134,11 @@ init_task :: fn(task: *Task, callee: rawptr, tt: *TranslationTable) void = {
     // TODO: remove the remapping hack, just copy the bytes. 
     task.mcontext.elr = callee.offset(512*1024*1024).int_from_rawptr();
     
-    // TODO: its dumb to store this on every task but it makes it easy for the interrupt handler to get it. 
-    // TODO: really it needs to be local to the core if multiple threads are allowed to be in the kernel at once. 
-    task.kernel_sp = kernel.interrupt_stack.end_pointer();
 }
 
 fn kill_task(task: *Task) void = {
     // TODO: deallocate its pages and stuff
+    //       (but for now everything is thread-like not process-like)
     // TODO: fix race. need to make it non-schedulable, then free pages, then make the task slot reusable. 
     task.active = false;
 }
@@ -229,7 +256,6 @@ set_field :: fn(interrupt_id: i64, addr: i64, bit_width: i64, value: u32) void #
 }
 
 Arm :: import("@/backend/arm64/bits.fr");
-// TODO: floats
 // - don't need to save sp here, sp=SP_EL1 already, have to explicitly access SP_EL0 to get the userspace one. 
 interrupt_trampoline :: AsmFunctionArmOnly(fn() void = (), interrupt_trampoline_code);
 interrupt_trampoline_code :: {
@@ -256,6 +282,13 @@ interrupt_trampoline_code :: {
     @debug_assert_lt(off, 1.shift_left(12));
     emit(ldr_uo(.X64, x1, x0, off));
     emit(add_im(.X64, sp, x1, 0, 0));
+    
+    @assert_lt(SavedRegisters.offset_of(.fpr) / 16 + 32, 1.shift_left(6));
+    range(0, 16) { r |
+        a, b := (r*2, r*2+1);
+        off := r * 2 + SavedRegisters.offset_of(.fpr) / 16;
+        emit(f_stp_so(FType.Q128, a, b, x0, @as(i7) off));
+    };
     
     // call syscall_func(task = x0)
     // (which will save some special registers to task.mcontext itself)
@@ -284,6 +317,12 @@ return_to_user :: AsmFunctionArmOnly(fn(task_x0: *Task) Never = (), {
     // TODO: set TTBR0_EL1
     // (because each task should have its own address space)
     
+    range(0, 16) { r |
+        a, b := (r*2, r*2+1);
+        off := r * 2 + SavedRegisters.offset_of(.fpr) / 16;
+        emit(f_ldp_so(FType.Q128, a, b, x0, @as(i7) off));
+    };
+    
     // restore general registers. 
     // rev so x0 is last to be restored so it can be used as indexer
     // note: x31 here is xzr not sp.
@@ -300,6 +339,7 @@ return_to_user :: AsmFunctionArmOnly(fn(task_x0: *Task) Never = (), {
 });
 
 return_to_scheduler :: fn() Never = {
+    barrier();
     kernel := kernel();
     cap := size_of(@type kernel.tasks) / size_of(Task);
     i := kernel.next_task_to_run&;
@@ -311,6 +351,12 @@ return_to_scheduler :: fn() Never = {
         };
     };
     return_to_user(kernel.idle_task&)
+}
+
+stop :: fn() Never = {
+    dump_page_stats();
+    kprint("goodbye!\n");
+    poweroff()
 }
 
 align_the_thing :: fn(it: ~T, need_align: i64, need_size: i64) rawptr #where = {
@@ -342,38 +388,6 @@ user_exec :: fn(elf_bytes: []u8) void = {
     //       for Load commands but not accessed by the running program.
     import("@/examples/elf_loader.fr")'load_elf_file(elf_bytes);
 }
-    
-user_func :: fn() void = {
-    _, c := create_and_set_unsafe_environment();
-    c.panic_hook = print_and_exit1;
-    c.prefer_syscalls = true;
-    c.current_os = 1;
-    c.temporary_allocator_i = Arena'stack_alloc(1.shift_left(15));
-    
-    elf_bytes := @run {
-        franca := get_executable_path(temp());
-        o := "target/userspaceprogram.out";
-        // TODO: this needs to be cacheable (rn -syscalls isn't but it shouldn't be hard to fix since thats not foldable)
-        import("@/examples/testing.fr")'sh(@slice(
-            franca, "examples/default_driver.fr", "build", 
-            "examples/os/user/init.fr", 
-            "-os", "linux", "-arch", "aarch64", 
-            //"-syscalls",
-            "-keep-names",
-            "-o", o,
-        ));
-        read_entire_file_or_crash(ast_alloc(), o)
-    };
-
-    args: Array(i64, 6) = (u8.int_from_ptr(elf_bytes.ptr), elf_bytes.len, 0, 0, 0, 0);
-    Syscall'perform_syscall(args&, 0xFFFF0001);  // spawn
-    
-    range(0, 1000) { _ |
-        args: Array(i64, 6) = (0, 0, 0, 0, 0, 0);
-        Syscall'perform_syscall(args&, 0xFFFF0002);  // yield
-    };
-    Syscall'exit(0);
-};
 
 Task :: @struct {
     // mcontext must be the first field because the interrupt handler starts saving at TPIDR_EL1
@@ -395,6 +409,8 @@ SavedRegisters :: @struct {
     // how do we return after the interrupt?
     elr: i64;  // eret link register
     spsr: i64; // saved program status
+    //
+    fpr: Array(i64, 64);
     // TODO: share this struct with the userspace one so don't have to keep them in sync
 };
 
@@ -442,6 +458,8 @@ syscall_func :: fn(task: *Task) void = {
         byte := getchar();  // the read clears the bit  ^
         putchar(byte);
         i64.sys_set(.ICC_EOIR1_EL1, intid.zext());
+        
+        stop();  // TODO: not this
     };
     
     exception_class := args.esr.shift_right_logical(26).bit_and(0b111111);
@@ -477,20 +495,6 @@ syscall_func :: fn(task: *Task) void = {
             kpanic("data abort from el1");
         };
         
-        if exception_class == 0b000111 {
-            cpacr := i64.sys_get(.CPACR_EL1);
-            // TODO: instead of this enable them at the beginning.
-            //       but to be correct i have to save the floats on interrupt. 
-            //       maybe its better to use this to only save them as needed. 
-            // FPEN
-            if cpacr.bit_and(0b11.shift_left(20)) == 0 {
-                i64.sys_set(.CPACR_EL1, cpacr.bit_or(0b11.shift_left(20)));
-                return_to_user(task);
-            };
-            kprint_label("cpacr: ", cpacr);
-            kpanic("floats disabled");
-        };
-        
         if exception_class == 0b011000 {
             // for now im doing this in a slow dumb way just to get examples/kaleidoscope.fr to run.
             inst := u32.ptr_from_int(args.elr)[];
@@ -522,11 +526,17 @@ syscall_func :: fn(task: *Task) void = {
         is_svc := exception_class == 0b010101;
         if is_svc {
             syscall_number := args.gpr&[8];
+            if syscall_number != args.gpr&[16] {
+                kpanic("perform_syscall always uses both x8 and x16");
+            };
             calls := @run import("@/examples/os/kernel/syscalls.fr")'generate();
             i := calls.index_of(fn(it) => it._1 == syscall_number) || {
                 send_signal(task)
             };
+            //kprint_label("n ", syscall_number);
+            //kprint_label("A ", task.mcontext.gpr&[0]);
             (calls[i]._0)(task);
+            //kprint_label("B ", task.mcontext.gpr&[0]);
             return_to_scheduler();
         };
         
@@ -547,17 +557,6 @@ syscall_func :: fn(task: *Task) void = {
         reset_countdown();
         
         i64.sys_set(.ICC_EOIR1_EL1, intid.zext());
-        
-        if kernel.timer_counter.mod(1000) == 0 {
-            kprint("1s\n");
-        };
-        if kernel.timer_counter == 2000 {
-            kprint_label("pages_remaining: ", kernel.physical.remaining.len / PAGE_SIZE);
-            kprint_label("pages_reserved : ", kernel.pages_reserved);
-            kprint_label("pages_committed: ", kernel.pages_committed);
-            kprint("goodbye!\n");
-            poweroff();
-        };
     };
     
     if intid != timer_irq && intid != irq_uart { 
@@ -568,8 +567,18 @@ syscall_func :: fn(task: *Task) void = {
     return_to_scheduler();
 };
 
+dump_page_stats :: fn() void = {
+    kernel := kernel();
+    kprint_label("pages_remaining: ", kernel.physical.remaining.len / PAGE_SIZE);
+    kprint_label("pages_reserved : ", kernel.pages_reserved);
+    kprint_label("pages_committed: ", kernel.pages_committed);
+    kprint_label("pages_reserved_freed : ", kernel.pages_reserved_freed);
+    kprint_label("pages_committed_freed: ", kernel.pages_committed_freed);
+    kprint_label("next_vaddr: ", kernel.next_vaddr);
+}
+
 send_signal :: fn(task: *Task) Never = {
-    if task.signal_depth >= 5 {
+    if task.signal_depth >= 2 {
         kprint("killed task with too many nested signal handlers\n");
         kill_task(task);
         return_to_scheduler()
@@ -624,7 +633,7 @@ kpanic :: fn(msg: Str) Never = {
     kprint("we're so fucked\n===\n");
     kprint(msg);
     kprint("\n===\ni repeat, we're so fucked\n");
-    spin()
+    poweroff()
 };
 
 kprint_label :: fn(msg: Str, value: i64) void = {

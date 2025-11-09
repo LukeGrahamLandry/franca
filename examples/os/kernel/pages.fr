@@ -50,6 +50,7 @@ fn vmap_reserve(kernel: *Kernel, addrs: *AddressSpace, page_count: i64) i64 = {
     @if(page_count < 0) kpanic("-pages");
     @if(vaddr < 0) kpanic("voom");
     kernel.next_vaddr += page_count * PAGE_SIZE;
+    kernel.next_vaddr += PAGE_SIZE;  // bit of padding as a guard page
     {
         vaddr := vaddr;
         range(0, page_count) { _ |
@@ -61,6 +62,28 @@ fn vmap_reserve(kernel: *Kernel, addrs: *AddressSpace, page_count: i64) i64 = {
     };
     
     vaddr
+}
+
+// :SLOW
+fn vunmap(kernel: *Kernel, addrs: *AddressSpace, vaddr: i64, page_count: i64) void = {
+    range(0, page_count) { _ |
+        kernel.pages_reserved_freed += 1;
+        pte := index_page_table(kernel, addrs, vaddr);
+        @switch(pte.map.get(.tag)) {
+            @case(0b00) => if pte.res.repr == 0 {
+                kpanic("unmapped a page that was already unmapped");  // todo: just log
+            };
+            @case(0b11) => {
+                kernel.pages_committed_freed += 1;
+                phys := get_pointer(pte[], Physical.Free);
+                pte.res.repr = 0;
+                phys.link = kernel.physical.free;
+                kernel.physical.free = phys;
+            };
+            @default => kpanic("invalid page table");
+        };
+        vaddr += PAGE_SIZE;
+    };
 }
 
 // this is called by the interrupt handler the first time you try to access a new page
@@ -89,7 +112,6 @@ fn vmap_one(kernel: *Kernel, addrs: *AddressSpace, vaddr: i64, phys: *Physical.F
 fn index_page_table(kernel: *Kernel, addrs: *AddressSpace, vaddr: i64) *PTE = {
     L2 := make_level_index(41, 29);
     L3 := make_level_index(28, 16);
-    TableField := make_level_index(48, 12);
     
     tt_2 := addrs.root&;
     i_2 := L2.get(vaddr);
@@ -111,8 +133,7 @@ fn index_page_table(kernel: *Kernel, addrs: *AddressSpace, vaddr: i64) *PTE = {
         };
     };
     
-    tt_3 := TableField.get(e_2).shift_left(12);
-    tt_3 := TranslationTable.ptr_from_int(tt_3);
+    tt_3 := get_pointer((map = e_2), TranslationTable);
     i_3 := L3.get(vaddr);
 
     if i_3.shift_left(16).bit_or(i_2.shift_left(29)) != vaddr {
@@ -122,6 +143,13 @@ fn index_page_table(kernel: *Kernel, addrs: *AddressSpace, vaddr: i64) *PTE = {
     
     tt_3.entries&[i_3]&
 }
+
+fn get_pointer(it: PTE, $T: Type) *T #generic = {
+    TableField := make_level_index(48, 12);
+    it := TableField.get(it.map).shift_left(12);
+    it := T.ptr_from_int(it);
+    it
+} 
 
 PAGE_SIZE :: 1.shift_left(16);
 
@@ -146,10 +174,14 @@ fn make_level_index(hi: u8, lo: u8) BitRange =
     (off = lo, len = hi - lo + 1);
 
 setup_virtual_memory :: fn() *TranslationTable = {
-    translation_table :: @static(Array(i64, 8192*2));
     // translation tables must be aligned to the size of the table.
-    tt := align_the_thing(translation_table, 1.shift_left(16), 8192*8);
-    tt := i64.ptr_from_raw(tt).slice(8192);
+    mem: AddressSpace = (root = {
+        tt := kernel()[].physical&.map(1);
+        tt.link = zeroed(*Physical.Free);
+        @run @debug_assert_eq(PAGE_SIZE, size_of(TranslationTable));
+        bit_cast_unchecked(*Physical.Free, *TranslationTable, tt)
+    });
+    tt := mem.root.entries&.items();
     // TODO: check ID_AA64MMFR0_EL1 to make sure the granule size i want is supported
     
     parange := i64.sys_get(.ID_AA64MMFR0_EL1).bit_and(0b111);
@@ -172,41 +204,45 @@ setup_virtual_memory :: fn() *TranslationTable = {
     nbit := 42;
     p_addr: u64 = 0;
     block_size: u64 = 512*1024*1024;
-    each tt.slice(0, 4) { it |
+    // TODO: explicitly map pages for the devices (read addresses from device tree) instead of a massive chunk like this. 
+    while => p_addr < block_size * 4 {
+    if p_addr < block_size * 3 {
         // low bits are attributes, the address is always aligned so its low bits are zero and don't matter. 
         device := p_addr < 0x40000000;
         idx := int(device);
-        // block type, mair index, permissions, sharable, access flag
         attr: PageTableEntry = (repr = p_addr);
-        attr&.set(.tag, 0b01);
+        attr&.set(.tag, 0b11);
         attr&.set(.idx, idx);
         // ?? regardless of UXN/PXN, virtual memory that's writable from el0 cannot be executable from el1 ??
-        if !device {
-            attr&.set(.ap, 0b00);  // -- RW
-        } else {
-            attr&.set(.ap, 0b01);  // RW RW
-        };
+        attr&.set(.ap, 0b00);  // -- RW
         attr&.set(.sh, 0b11);
         attr&.set(.af, 0b1);
+        if device {
+            attr&.set(.pxn, 0b1);
+        };
         
-        it[] = attr.repr.bitcast();
-        p_addr += block_size;
-    };
-    each tt.rest(4) { it |
-        it[] = 0;
-    };
-    // TODO: should unmap the low addresses to make sure null pointers fault. 
+        pte := index_page_table(kernel(), mem&, p_addr.bitcast());
+        pte.map = attr;
+    } else {
     // TODO: copy the part for user space instead of letting it write to the kernel part!!
     // remap the first chunk of physical as the second chunk of virtual as R+W for el0. 
     // so el1 can execute that memory by its real address and el0 can use it by this new fake address. 
-    xxx := tt[(0x40000000/block_size.bitcast()) + 1]&;
-    attr: PageTableEntry = (repr = xxx[].bitcast());
-    attr&.set(.ap, 0b01);
-    attr.repr -= block_size;
-    xxx[] = attr.repr.bitcast();
-    barrier();
-
-    sys_set(*i64, .TTBR0_EL1, tt.ptr);
+        old_pte := index_page_table(kernel(), mem&, (p_addr - block_size).bitcast())[];
+        pte := index_page_table(kernel(), mem&, p_addr.bitcast());
+        old_pte.map&.set(.ap, 0b01);
+        old_pte.map&.set(.pxn, 0b1);  // redundant but can't hurt
+        pte[] = old_pte;
+    };
+        
+        p_addr += PAGE_SIZE;
+    };
+    
+    // unmap the low addresses to make sure null pointers fault. 
+    range(0, 1024) { i |
+        index_page_table(kernel(), mem&, i * PAGE_SIZE)[].map.repr = 0;
+    };
+    
+    sys_set(*PTE, .TTBR0_EL1, tt.ptr);
     
     tcr := TcrEl1.zeroed();
     sctlr := SctlrEl1.zeroed();
@@ -237,8 +273,7 @@ setup_virtual_memory :: fn() *TranslationTable = {
     SctlrEl1.sys_set(.SCTLR_EL1, sctlr);
     barrier();
     
-    kernel := kernel();
-    bit_cast_unchecked(*i64, *TranslationTable, tt.ptr)
+    mem.root
 }
 
 #use("@/lib/bit_fields.fr");
@@ -290,8 +325,8 @@ PageTableEntry :: @bit_fields(
     // (shifted; the low attribute bits are naturally ignored because the address is always aligned to 4k or higher)
     value := 42,  
 
-    pxn := 1,   // privledged execute never
-    uxn := 1,   // unprivledged execute never
+    pxn := 1,   // privileged execute never
+    uxn := 1,   // unprivileged execute never
     soft := 4,  // "reserved for software use"
     _ := 5,
 );

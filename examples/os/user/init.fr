@@ -2,6 +2,7 @@
 DBG :: false;
 
 main :: fn() void = {
+    println("init!");
     // TODO: real file system. for now just embed the blob of all the files like the web demo does. 
     fs_i, contents := @run {
         fs, contents := import("@/examples/web/build.fr")'collect_fs(ast_alloc());
@@ -13,7 +14,6 @@ main :: fn() void = {
     range(0, 3) { _ |
         fs.fd&.push(zeroed FileHandle);
     };
-    //@println("fs.len=% contents.len=%", fs.len_including_tombstones, contents.len);
     
     saved := @static(MContext);
     args: Array(i64, 6) = (int_from_rawptr(handle_signal), MContext.int_from_ptr(saved), 0, 0, 0, 0);
@@ -35,22 +35,30 @@ main :: fn() void = {
         };
         
         // TODO: this shouldn't be needed but the compiler's dying in get_environment_variable. 
-        envp := context(DefaultContext)[].environment_variables;
-        while => !envp[].ptr.is_null() {
-            @if(DBG) @println("XXX % % %", envp[], CStr.raw_from_ptr(envp), u8.raw_from_ptr(envp.ptr));
-            envp = envp.offset(1);
-        };
         xxx := zeroed CStr;
         context(DefaultContext)[].environment_variables = xxx&;
         
         c.cli_arguments = empty();
         //import("@/examples/kaleidoscope.fr")'main();
         //import("@/examples/sudoku.fr")'main();
-        import("@/compiler/main.fr")'main2("examples/sudoku.fr", true);
+        //import("@/compiler/main.fr")'main2("examples/sudoku.fr", true);
         
+        range(0, 10) { i |
+            println(i);
+            context(DefaultContext)[].comptime = zeroed rawptr;
+            import("@/compiler/main.fr")'main2("examples/sudoku.fr", true);
+        };
+        // TODO: why doesn't this work? 
+        //import("@/compiler/main.fr")'main2("examples/kaleidoscope.fr", true);
+        
+        // doesn't work because it imports putchar 
+        // (and i don't have dlopen yet, and putting it in temporary_libc_import 
+        //  wouldn't help because qbe_frontend doesn't check that)
         //c.cli_arguments = @slice(@as(CStr) "", @as(CStr) "backend/test/mandel.ssa", "-r");
         //import("@/backend/meta/qbe_frontend.fr")'main();
     };
+    
+    Syscall'exit(0);
 }
 
 fs :: @static(@struct {
@@ -72,6 +80,7 @@ MContext :: @struct {
     far: i64;
     elr: i64;
     spsr: i64;
+    fpr: Array(i64, 64);
 };
 
 handle_signal :: fn(ctx: *MContext) void = {
@@ -179,15 +188,23 @@ temporary_libc_import :: fn(name: Str, dest: *rawptr) void = {
             dest[] = fn(addr: rawptr, len: i64, prot: i64, flags: i64, fd: Fd, offset: i64) i64 = {
                 c := context(DefaultContext);
                 c.prefer_syscalls = true;
-                @assert(addr.is_null() && fd.fd == -1 && offset == 0);
                 result := Syscall'mmap(addr, len, prot, flags, fd, offset);
                 @if(DBG) @println("mmap(%) -> %", len, result);
-                @assert(result != 0, "some sort of corruption is going on because i over commit and can't null");
+                @assert_ne(result, 0, "some sort of corruption is going on because i over commit and can't null");
                 c.prefer_syscalls = false;
                 result
             };
         };
-        @case("munmap") => { dest[] = fn() = 0; };
+        @case("munmap") => { 
+            dest[] = fn(addr: rawptr, len: i64) voidResult = {
+                c := context(DefaultContext);
+                c.prefer_syscalls = true;
+                result := Syscall'munmap(addr, len);
+                @assert_eq(result.value, 0, "some sort of corruption is going on. munmap(%) can't fail", addr);
+                c.prefer_syscalls = false;
+                result
+            };
+        };
         @case("mprotect") => { dest[] = fn() = 0; };
         @case("read") => {
             dest[] = fn(fd: Fd, buf: *u8, len: i64) i64 = {
@@ -317,6 +334,6 @@ temporary_libc_import :: fn(name: Str, dest: *rawptr) void = {
 #use("@/lib/sys/threads.fr");
 
 // TODO: make this less annoying
-DISABLE_IMPORT_FRC :: true;
+DISABLE_IMPORT_FRC :: false;
 DEBUG_SPAM_LOG :: false;
 #include_std("compiler/lib.fr"); 

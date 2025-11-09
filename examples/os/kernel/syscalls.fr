@@ -7,13 +7,17 @@ read :: fn(fd: i64, buf: i64, len: i64) i64 #n(63) = {
     @if(fd != 0) return(-1);
     dest := u8.ptr_from_int(buf).slice(len);
     count := 0;
+    todo();
     // TODO
     count
 }
 
-mmap :: fn(kernel: *Kernel, addr: i64, len: i64, prot: i64, flags: i64, fd: i64, offset: i64) i64 #n(222) = {
+mmap :: fn(kernel: *Kernel, task: *Task, addr: i64, len: i64, prot: i64, flags: i64, fd: i64, offset: i64) i64 #n(222) = {
+    if addr != 0 || fd.intcast() != -1 || offset != 0 {
+        kpanic("non-trivial mmap");
+    };
     pages := len.ualign_to(PAGE_SIZE).udiv(PAGE_SIZE);
-    result_addr := vmap_reserve(kernel, kernel.tasks&[0].mem&, pages);
+    result_addr := vmap_reserve(kernel, task.mem&, pages);
     barrier();  // TODO: theres an instruction to kill the tlb or something
     if result_addr == 0 {
         kpanic("vmap_reserve can't return null");
@@ -27,13 +31,21 @@ mprotect :: fn(addr: i64, len: i64, prot: i64) i64 #n(226) = {
     0
 }
 
-munmap :: fn(addr: i64, len: i64) i64 #n(215) = {
-    // TODO: dont just leak it. also unmap any physical pages that were committed. 
+munmap :: fn(kernel: *Kernel, task: *Task, addr: i64, len: i64) i64 #n(215) = {
+    addr := addr.align_back(PAGE_SIZE);
+    page_count := len.ualign_to(PAGE_SIZE).udiv(PAGE_SIZE);
+    if addr + page_count * PAGE_SIZE >= kernel.next_vaddr || addr < (512*1024*1024) * 4 || page_count < 0 {
+        kpanic("bad munmap");
+    };
+    vunmap(kernel, task.mem&, addr, page_count);
+    barrier();  // TODO: theres an instruction to kill the tlb or something
     0
 }
 
 exit :: fn(task: *Task, status: i64) i64 #n(94) = {
-    kprint_label("called exit: ", status);
+    if status != 0 {
+        kprint_label("called exit: ", status);
+    };
     if status == 81 {  // :temporarystacktraceonexithack
         task.mcontext.esr = 0;
         send_signal(task);
@@ -43,20 +55,7 @@ exit :: fn(task: *Task, status: i64) i64 #n(94) = {
 }
 
 futex :: fn(addr: i64, futex_op: i64, val: i64, timeout: i64) i64 #n(98) = {
-    // TODO
-    0
-}
-
-// TODO: new address space
-spawn :: fn(kernel: *Kernel, buf: i64, len: i64) i64 #n(0xFFFF0001) = {
-    //elf_bytes := u8.ptr_from_int(buf).slice(len);
-    
-    task := kernel.alloc_task();
-    tt := kernel.idle_task.mem.root;
-    init_task(task, user_exec, tt);
-    task.mcontext.gpr&[0] = buf;
-    task.mcontext.gpr&[1] = len;
-    
+    // TODO: don't busy wait
     0
 }
 
@@ -76,17 +75,17 @@ sig_return :: fn(task: *Task, saved: i64) i64 #n(0xFFFF0004) = {
     saved := SavedRegisters.ptr_from_int(saved);
     task.mcontext.gpr = saved.gpr;
     task.mcontext.elr = saved.elr;
+    task.mcontext.fpr = saved.fpr;
     task.signal_depth -= 1;
     task.mcontext.gpr&[0]
 }
 
 spawn_thread :: fn(kernel: *Kernel, parent: *Task, ctx: i64) i64 #n(0xFFFF0005) = {
     ctx := SavedRegisters.ptr_from_int(ctx);
-    child := kernel.alloc_task();
-    child.mem = parent.mem;
+    child := kernel.alloc_task(parent.mem.root);
     child.mcontext.gpr = ctx.gpr;
     child.mcontext.elr = ctx.elr;
-    child.kernel_sp = kernel.interrupt_stack.end_pointer();
+    child.mcontext.fpr = ctx.fpr;
     child.active = true;
     child.thread_id
 }
