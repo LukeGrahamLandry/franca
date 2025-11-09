@@ -15,6 +15,7 @@ main :: fn() void = {
         fs.fd&.push(zeroed FileHandle);
     };
     
+    // note: this only affects the main thread
     saved := @static(MContext);
     args: Array(i64, 6) = (int_from_rawptr(handle_signal), MContext.int_from_ptr(saved), 0, 0, 0, 0);
     Syscall'perform_syscall(args&, 0xFFFF0003);  // sig_action
@@ -65,6 +66,7 @@ fs :: @static(@struct {
     contents: []u8;
     index: RawHashMap(Str, Ty(i64, i64));
     fd: List(FileHandle);
+    mutex: Mutex;
 });
 
 FileHandle :: @struct {
@@ -93,13 +95,17 @@ handle_signal :: fn(ctx: *MContext) void = {
         };
     };
     
+    // when targeting real linux, (open,fstat)at have a sucky abi so its easier to just do the syscall 
+    // instead of trying to use glibc, which makes intercepting them more painful. 
     syscall_number := ctx.gpr&[8];
+    @assert_eq(syscall_number, ctx.gpr&[16]);
     @switch(syscall_number) {
         @case(56) => {  // openat
             path := u8.ptr_from_int(ctx.gpr&[1]);
             path := (@as(CStr) (ptr = path)).str();
             @if(DBG) @println("openat(%)", path);
             if fs.index&.get(path) { off, len |
+                fs.mutex&.lock();
                 fd := fs.fd.len;
                 fs.fd&.push(
                     off = off,
@@ -107,6 +113,7 @@ handle_signal :: fn(ctx: *MContext) void = {
                     pos = 0,
                     readable = true,
                 );
+                fs.mutex&.unlock();
                 ctx.gpr&[0] = fd;
             } else {
                 ctx.gpr&[0] = -1;
@@ -208,8 +215,10 @@ temporary_libc_import :: fn(name: Str, dest: *rawptr) void = {
         @case("mprotect") => { dest[] = fn() = 0; };
         @case("read") => {
             dest[] = fn(fd: Fd, buf: *u8, len: i64) i64 = {
+                fs.mutex&.lock();
                 fd := fs.fd.index(fd.fd.zext());
                 if !fd.readable { 
+                    fs.mutex&.unlock();
                     return(-1);
                 };
                 len := min(len, fd.len - fd.pos).max(0);
@@ -217,14 +226,17 @@ temporary_libc_import :: fn(name: Str, dest: *rawptr) void = {
                 src := fs.contents.subslice(fd.off, len);
                 dest.copy_from(src);
                 fd.pos += len;
+                fs.mutex&.unlock();
                 len
             };
         };
         @case("close") => {
             dest[] = fn(fd: Fd) i64 = {
+                fs.mutex&.lock();
                 fd := fs.fd.index(fd.fd.zext());
                 fd.readable = false;
                 // TODO: reuse slots of the array
+                fs.mutex&.unlock();
                 0
             };
         };
@@ -242,8 +254,10 @@ temporary_libc_import :: fn(name: Str, dest: *rawptr) void = {
         };
         @case("lseek") => {
             dest[] = fn(fd: Fd, offset: i64, whence: Whence) i64 = {
+                fs.mutex&.lock();
                 fd := fs.fd.index(fd.fd.zext());
                 if !fd.readable { 
+                    fs.mutex&.unlock();
                     return(-1);
                 };
                 ::enum(Whence);
@@ -252,7 +266,9 @@ temporary_libc_import :: fn(name: Str, dest: *rawptr) void = {
                     fn Set() => offset;
                     @default => todo();
                 };
-                fd.pos
+                pos := fd.pos;
+                fs.mutex&.unlock();
+                pos
             };
         };
         @case("__errno_location") => {
@@ -282,8 +298,9 @@ temporary_libc_import :: fn(name: Str, dest: *rawptr) void = {
                 ctx.elr = bit_cast_unchecked(@type callee, i64, callee);
                 ctx.gpr&[0] = bit_cast_unchecked(@type userdata, i64, userdata);
                 ctx.gpr&[30] = int_from_rawptr(fn() void = {
-                    context(DefaultContext)[].prefer_syscalls = true;
-                    Syscall'exit(0);
+                    args: Array(i64, 6) = (0, 0, 0, 0, 0, 0);
+                    Syscall'perform_syscall(args&, 94);  // exit
+                    unreachable()
                 });
                 ctx.gpr&[31] = bit_cast_unchecked(*u8, i64, attr.stack.end_pointer());
                 
@@ -316,8 +333,6 @@ temporary_libc_import :: fn(name: Str, dest: *rawptr) void = {
                 0
             };
         };
-        // todo: annoyingly fstatat in glibc is super painful so i just do the syscall. 
-        // todo: openat is annoying because its variadic so i just do the syscall
         @default => {
             @if(DBG) println(name);
             dest[] = fn() void = panic("called a weak import");
@@ -332,6 +347,7 @@ temporary_libc_import :: fn(name: Str, dest: *rawptr) void = {
 }
 
 #use("@/lib/sys/threads.fr");
+#use("@/lib/sys/sync/mutex.fr");
 
 // TODO: make this less annoying
 DISABLE_IMPORT_FRC :: false;

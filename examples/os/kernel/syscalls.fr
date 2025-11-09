@@ -54,9 +54,39 @@ exit :: fn(task: *Task, status: i64) i64 #n(94) = {
     0
 }
 
-futex :: fn(addr: i64, futex_op: i64, val: i64, timeout: i64) i64 #n(98) = {
-    // TODO: don't busy wait
-    0
+futex :: fn(kernel: *Kernel, task: *Task, addr: i64, op: i64, val: i64, timeout: i64) i64 #n(98) = {
+    @if(timeout != 0) kpanic("TODO: futex timeout");
+    // TODO: check that `addr` is committed and readable
+    pte := index_page_table(kernel, task.mem&, addr.align_back(PAGE_SIZE));
+    @if(pte.map.repr == 0) kpanic("futex unmapped address");
+    
+    @switch(op) {
+        @case(0) => {  // wait
+            // TODO: gets more complicated when i have multiple cores
+            // TODO: what happens if `addr` is shared memory thats mapped to different virtual addresses?
+            p := u32.ptr_from_int(addr);
+            barrier();
+            sleep := p[] == val.trunc();
+            if sleep {
+                task.futex_wait = addr;
+            };
+            int(sleep) - 1
+        };
+        @case(1) => {  // wake
+            @if(val <= 0) return(0);
+            // TODO: unfair and :slow, maybe i want a queue per futex
+            n := 0;
+            each kernel.tasks& { it |
+                if it.futex_wait == addr {
+                    it.futex_wait = 0;
+                    n += 1;
+                    @if(n >= val) return(n);
+                };
+            };
+            n
+        };
+        @default => kpanic("bad futex op");
+    }
 }
 
 yield :: fn(task: *Task) i64 #n(0xFFFF0002) = {
@@ -83,6 +113,9 @@ sig_return :: fn(task: *Task, saved: i64) i64 #n(0xFFFF0004) = {
 spawn_thread :: fn(kernel: *Kernel, parent: *Task, ctx: i64) i64 #n(0xFFFF0005) = {
     ctx := SavedRegisters.ptr_from_int(ctx);
     child := kernel.alloc_task(parent.mem.root);
+    if u32.ptr_from_int(ctx.elr)[] != Arm.branch_target_marker {
+        kpanic("spawn thread expected bti");
+    };
     child.mcontext.gpr = ctx.gpr;
     child.mcontext.elr = ctx.elr;
     child.mcontext.fpr = ctx.fpr;

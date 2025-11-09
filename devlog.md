@@ -1,4 +1,11 @@
 
+## (Nov 9)
+
+- put a lock around the fake file system. 
+  i only have one core rn but threads can preempt so it still matters.
+- scheduler knows about futexes so it can skip threads that are waiting and save two context switches
+- reset the time slice when a new thing gets scheduled 
+
 ## (Nov 8)
 
 enough of a shim of a file system to run the compiler on my os. 

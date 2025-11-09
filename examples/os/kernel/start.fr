@@ -77,6 +77,7 @@ init_kernel :: fn() void = {
     task := kernel.idle_task&;
     task.slice(1).set_zeroed();
     task.mem.root = tt;
+    task.kernel_sp = kernel.interrupt_stack.end_pointer();
     init_task(task, spin);
 
     kernel.next_task_id = 1;
@@ -133,7 +134,6 @@ init_task :: fn(task: *Task, callee: rawptr) void = {
     task.mcontext.gpr&[31] = user_stack;
     // TODO: remove the remapping hack, just copy the bytes. 
     task.mcontext.elr = callee.offset(512*1024*1024).int_from_rawptr();
-    
 }
 
 fn kill_task(task: *Task) void = {
@@ -141,6 +141,9 @@ fn kill_task(task: *Task) void = {
     //       (but for now everything is thread-like not process-like)
     // TODO: fix race. need to make it non-schedulable, then free pages, then make the task slot reusable. 
     task.active = false;
+    if task.thread_id == 0 {
+        kpanic("tried to kill idle_task");
+    }
 }
 
 setup_interrupts :: fn() void = {
@@ -346,7 +349,13 @@ return_to_scheduler :: fn() Never = {
     range(0, cap) { _ |
         task := kernel.tasks&[i[]]&;
         i[] = i[].add(1).mod(cap);
-        if task.active {
+        if task.active && task.futex_wait == 0 {
+            // TODO: doing this means i can't use it for actual timer
+            // if the guy before you used most of their time slice and then did a syscall that yielded,
+            // the next guy should still get a full time slice, 
+            // otherwise you could starve people by controlling the order processes get spawned. 
+            reset_countdown();
+            
             return_to_user(task);
         };
     };
@@ -398,6 +407,7 @@ Task :: @struct {
     signal_mcontext: i64; // *SavedRegisters;
     signal_depth: i64;
     thread_id: i64;
+    futex_wait: i64;  // *u32
     active: bool;
 };
 
@@ -533,10 +543,7 @@ syscall_func :: fn(task: *Task) void = {
             i := calls.index_of(fn(it) => it._1 == syscall_number) || {
                 send_signal(task)
             };
-            //kprint_label("n ", syscall_number);
-            //kprint_label("A ", task.mcontext.gpr&[0]);
             (calls[i]._0)(task);
-            //kprint_label("B ", task.mcontext.gpr&[0]);
             return_to_scheduler();
         };
         
@@ -578,7 +585,10 @@ dump_page_stats :: fn() void = {
 }
 
 send_signal :: fn(task: *Task) Never = {
+    task.futex_wait = 0;
     if task.signal_depth >= 2 {
+        // the nesting is fine as long as the callee copies the MContext out of signal_mcontext
+        // but my one program doesn't need them to nest so this dies on bugs faster. 
         kprint("killed task with too many nested signal handlers\n");
         kill_task(task);
         return_to_scheduler()
@@ -586,6 +596,8 @@ send_signal :: fn(task: *Task) Never = {
     if task.signal_handler != 0 {
         task.signal_depth += 1;
         // TODO: should set up a stack for it?
+        //       currently its mostly just for unknown syscalls 
+        //       and its safe to use the stack pointer there since sig_return will restore it
         saved := SavedRegisters.ptr_from_int(task.signal_mcontext);
         saved[] = task.mcontext;
         task.mcontext.elr = task.signal_handler;
