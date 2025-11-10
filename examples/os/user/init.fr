@@ -45,26 +45,15 @@ main :: fn() void = {
         
         // TODO: this shouldn't be needed but the compiler's dying in get_environment_variable. 
         xxx := zeroed CStr;
-        context(DefaultContext)[].environment_variables = xxx&;
+        c.environment_variables = xxx&;
         
         c.cli_arguments = empty();
         signal_env[] = c[];
-        //import("@/examples/kaleidoscope.fr")'main();
-        //import("@/examples/sudoku.fr")'main();
-        //import("@/compiler/main.fr")'main2("examples/sudoku.fr", true);
         
-        //range(0, 100) { i |
-        //    println(i);
-        //    context(DefaultContext)[].comptime = zeroed rawptr;
-        //    import("@/compiler/main.fr")'main2("examples/sudoku.fr", true);
-        //};
-        //import("@/compiler/main.fr")'main2("examples/kaleidoscope.fr", true);
-        
-            loop {
-            c := context(DefaultContext);
-            c.prefer_syscalls = false;  // TODO: why??
-            
-            buf := u8.list(general_allocator());
+        buf := u8.list(general_allocator());
+        loop {
+            mark := temp().mark();
+            // TODO: don't busy wait
             Term'interactive_read_line(buf&);
             print("\n");
             
@@ -73,15 +62,14 @@ main :: fn() void = {
                 @case("exit") => Syscall'exit(0);
                 @case("quit") => Syscall'exit(0);
                 @case("uptime") => {   
-                    c.prefer_syscalls = true;
                     @println("%ms", timestamp());
-                    c.prefer_syscalls = false;
                 };
                 @default => {
                     if command.ends_with(".fr") {
                         println("compiling...");
-                        c.comptime = zeroed rawptr;
-                        import("@/compiler/main.fr")'main2(command, true);
+                        push_dynamic_context { 
+                            import("@/compiler/main.fr")'main2(command, true);
+                        };
                         // TODO: don't crash on compile error
                     } else {
                         @print("unknown command: |%|\n", buf.items());
@@ -89,10 +77,8 @@ main :: fn() void = {
                 };
             };
             buf&.clear();
+            temp().reset(mark);
         };
-        
-        //c.cli_arguments = @slice(@as(CStr) "", @as(CStr) "backend/test/mandel.ssa", "-r");
-        //import("@/backend/meta/qbe_frontend.fr")'main();
     };
 }
 
@@ -272,22 +258,16 @@ MyAttr :: @struct {
 };
 
 LIBC :: @struct {
-    mmap :: fn(addr: rawptr, len: i64, prot: i64, flags: i64, fd: Fd, offset: i64) i64 = {
-                c := context(DefaultContext);
-                c.prefer_syscalls = true;
+    mmap :: fn(addr: rawptr, len: i64, prot: i64, flags: i64, fd: Fd, offset: i64) i64 = with_syscalls {
                 result := Syscall'mmap(addr, len, prot, flags, fd, offset);
                 @if(DBG) @println("mmap(%) -> %", len, result);
                 @assert_ne(result, 0, "some sort of corruption is going on because i over commit and can't null");
-                c.prefer_syscalls = false;
                 result
     };
-    munmap :: fn(addr: rawptr, len: i64) voidResult = {
-                c := context(DefaultContext);
-                c.prefer_syscalls = true;
+    munmap :: fn(addr: rawptr, len: i64) i64 = with_syscalls {
                 result := Syscall'munmap(addr, len);
                 @assert_eq(result.value, 0, "some sort of corruption is going on. munmap(%) can't fail", addr);
-                c.prefer_syscalls = false;
-                result
+                result.value
     };
     mprotect :: fn() = 0;
     read :: fn(fd: Fd, buf: *u8, len: i64) i64 = with_file fd { fd |
@@ -323,7 +303,6 @@ LIBC :: @struct {
     };
     __errno_location :: fn() *i64 = @static(i64);
     sigaction :: fn() i64 = 0;
-    clock_gettime :: fn() i64 = 0;
     memmove :: fn(dest: rawptr, src: rawptr, count: i64) void =
                 copy_bytes_static(dest, src, count);
     pthread_attr_init :: fn(out: *ThreadAttr) i64 = {
@@ -375,31 +354,43 @@ LIBC :: @struct {
         // TODO
         0
     };
+    // TODO: really this should be in userspace
+    clock_gettime :: fn(clock_id: i64, time_spec: *TimeSpec) i64 = with_syscalls {
+        Syscall'clock_gettime(clock_id, time_spec);
+        0
+    };
     // TODO: do this more efficiently. 
     //       if multiple threads are sleeping, just have one yield like this for the shortest duration and the rest futex wait.
     nanosleep :: fn(duration: *TimeSpec, nullable_remainder_out: *TimeSpec) i64 = {
         // TODO: nullable_remainder_out
         zeroes := zeroed Array(i64, 6);
-        c := context(DefaultContext);
-        c.prefer_syscalls = true;
-        now := zeroed TimeSpec;
-        Syscall'clock_gettime(0, now&);
-        end := now + duration[];
-        dowhile {
-            _ := Syscall'perform_syscall(zeroes&, 0xFFFF0002);  // yield
-            _ := Syscall'clock_gettime(0, now&);
-            end.ms() > now.ms()
-        };
-        c.prefer_syscalls = false;
-        0
+        with_syscalls {
+            now := zeroed TimeSpec;
+            Syscall'clock_gettime(0, now&);
+            end := now + duration[];
+            dowhile {
+                _ := Syscall'perform_syscall(zeroes&, 0xFFFF0002);  // yield
+                _ := Syscall'clock_gettime(0, now&);
+                end.ms() > now.ms()
+            };
+            0
+        }
     };
 };
 
 fn with_file(fd: Fd, $body: @Fn(fd: *FileHandle) i64) i64 = {
     fs.mutex&.lock();
     fd := fs.fd.index(fd.fd.zext());
-    result := body(fd);
+    result := @must_return body(fd);
     fs.mutex&.unlock();
+    result
+}
+
+fn with_syscalls($body: @Fn() i64) i64 = {
+    c := context(DefaultContext);
+    c.prefer_syscalls = true;
+    result := @must_return body();
+    c.prefer_syscalls = false;
     result
 }
 
@@ -430,11 +421,8 @@ read_only_mem_file :: @static(FileVTable) (
 
 stdout_file :: @static(FileVTable) (
     read = fn(_fd, _dest) = 0,
-    write = fn(_fd, src) = {
-        c := context(DefaultContext);
-        c.prefer_syscalls = true;
+    write = fn(_fd, src) = with_syscalls {
         result := Syscall'write((fd = 1), src.ptr, src.len);
-        c.prefer_syscalls = false;
         result.value
     },
     lseek = fn(_fd, _offset, _whence) = -1,

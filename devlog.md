@@ -1,4 +1,8 @@
 
+## (Nov 10)
+
+- fixed a nasty control flow bug in emit_ir
+
 ## (Nov 9)
 
 - put a lock around the fake file system. 
@@ -18,6 +22,7 @@
   is a problem while you're copying the mcontext. now have a stack, and use that as the callstack as well
   so two birds with one stone, no longer dies if you interrupt in the prelude of a function 
   (tho thats still a problem for the interrupt handler itself). 
+- use my new reading powers to make a little shell that can jit programs
 
 ## (Nov 8)
 
