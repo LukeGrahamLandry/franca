@@ -3,6 +3,15 @@ DBG :: false;
 
 main :: fn() void = {
     println("init!");
+    
+    // note: this only affects the main thread
+    buf := page_allocator.alloc_uninit(u8, 1.shift_left(16) * 10);
+    range(0, 10) { i |
+        buf[1.shift_left(16) * i] = 0;  // commit the page
+    };
+    args: Array(i64, 6) = (int_from_rawptr(handle_signal), u8.int_from_ptr(buf.ptr), buf.len, 0, 0, 0);
+    Syscall'perform_syscall(args&, 0xFFFF0003);  // sig_action
+    
     // TODO: real file system. for now just embed the blob of all the files like the web demo does. 
     fs_i, contents := @run {
         fs, contents := import("@/examples/web/build.fr")'collect_fs(ast_alloc());
@@ -10,15 +19,14 @@ main :: fn() void = {
     };
     fs.index = fs_i;
     fs.contents = contents;
+    fs.stdin = init(general_allocator(), 1.shift_left(16));
     fs.fd = list(general_allocator());
     range(0, 3) { _ |
-        fs.fd&.push(zeroed FileHandle);
+        f := zeroed FileHandle;
+        f.vtable = stdout_file;
+        fs.fd&.push(f);
     };
-    
-    // note: this only affects the main thread
-    saved := @static(MContext);
-    args: Array(i64, 6) = (int_from_rawptr(handle_signal), MContext.int_from_ptr(saved), 0, 0, 0, 0);
-    Syscall'perform_syscall(args&, 0xFFFF0003);  // sig_action
+    fs.fd[0].vtable = stdin_file;
     
     //import("@/examples/toy/reloc.fr")'main();
     if query_current_arch() != .wasm32 {
@@ -40,6 +48,7 @@ main :: fn() void = {
         context(DefaultContext)[].environment_variables = xxx&;
         
         c.cli_arguments = empty();
+        signal_env[] = c[];
         //import("@/examples/kaleidoscope.fr")'main();
         //import("@/examples/sudoku.fr")'main();
         //import("@/compiler/main.fr")'main2("examples/sudoku.fr", true);
@@ -64,13 +73,21 @@ fs :: @static(@struct {
     index: RawHashMap(Str, Ty(i64, i64));
     fd: List(FileHandle);
     mutex: Mutex;
+    stdin: import("@/lib/collections/deque.fr")'RawDeque(u8);
 });
 
-FileHandle :: @struct {
-    off: i64;
-    len: i64;
+FileHandle :: @rec @struct {
+    vtable: *FileVTable;
+    contents: []u8;
     pos: i64;
     readable: bool;
+};
+
+FileVTable :: @struct {
+     read: @FnPtr(self: *FileHandle, buf: []u8) i64;
+    write: @FnPtr(self: *FileHandle, buf: []u8) i64;
+    lseek: @FnPtr(self: *FileHandle, offset: i64, whence: Whence) i64;
+    close: @FnPtr(self: *FileHandle) void = fn(self) = ();
 };
 
 MContext :: @struct {
@@ -79,15 +96,34 @@ MContext :: @struct {
     far: i64;
     elr: i64;
     spsr: i64;
+    intid: i64;
+    _: i64;
     fpr: Array(i64, 64);
 };
 
-handle_signal :: fn(ctx: *MContext) void = {
-    ctx := ctx[];
+signal_env :: @static(DefaultContext);
+
+// note: intid != ctx.intid is legal because an interrupt might have triggered while a different task was running. 
+//       ex. uart always goes to the init task. 
+handle_signal :: fn(ctx: *MContext, intid: i64, data: i64) i64 = {
+    set_dynamic_context(DefaultContext.raw_from_ptr(signal_env));
+    if intid == 33 {
+        char: u8 = data.trunc();
+        if char == 3 {
+            println("^C");
+            Syscall'exit(1);  // will stop the whole system if this is the init task (which it always is rn)
+        };
+        // TODO: what if interrupted while reading
+        fs.stdin&.push_back(char, panicking_allocator);
+        @println("INPUT: %", data);
+        return(intid);
+    };
+    
     ec := ctx.esr.shift_right_logical(26).bit_and(0b111111);
-    if ec != 0b010101 {
+    if intid != 1023 || ec != 0b010101 {
         push_emergency_dynamic_environment {
             context(DefaultContext)[].prefer_syscalls = true;
+            @println("sp = %; fp = %; lr = %; ip = %;", ctx.gpr&[31], ctx.gpr&[29], ctx.gpr&[30], ctx.elr);
             Crash'backtracing_panic_handler("fatal signal");
         };
     };
@@ -105,8 +141,8 @@ handle_signal :: fn(ctx: *MContext) void = {
                 fs.mutex&.lock();
                 fd := fs.fd.len;
                 fs.fd&.push(
-                    off = off,
-                    len = len,
+                    vtable = read_only_mem_file,
+                    contents = fs.contents.subslice(off, len),
                     pos = 0,
                     readable = true,
                 );
@@ -133,9 +169,7 @@ handle_signal :: fn(ctx: *MContext) void = {
             @panic("invalid syscall %", syscall_number);
         };
     };
-    
-    args: Array(i64, 6) = (MContext.int_from_ptr(ctx&), 0, 0, 0, 0, 0);
-    Syscall'perform_syscall(args&, 0xFFFF0004);  // sig_return
+    intid
 }
 
 redo_relocations_static_linux :: fn() void = {
@@ -227,27 +261,19 @@ LIBC :: @struct {
     };
     mprotect :: fn() = 0;
     read :: fn(fd: Fd, buf: *u8, len: i64) i64 = {
-                fs.mutex&.lock();
-                fd := fs.fd.index(fd.fd.zext());
-                if !fd.readable { 
-                    fs.mutex&.unlock();
-                    return(-1);
-                };
-                len := min(len, fd.len - fd.pos).max(0);
-                dest := buf.slice(len);
-                src := fs.contents.subslice(fd.off, len);
-                dest.copy_from(src);
-                fd.pos += len;
-                fs.mutex&.unlock();
-                len
+        fs.mutex&.lock();
+        fd := fs.fd.index(fd.fd.zext());
+        result := fd'vtable'read(fd, buf.slice(len));
+        fs.mutex&.unlock();
+        result
     };
     close :: fn(fd: Fd) i64 = {
-                fs.mutex&.lock();
-                fd := fs.fd.index(fd.fd.zext());
-                fd.readable = false;
-                // TODO: reuse slots of the array
-                fs.mutex&.unlock();
-                0
+        fs.mutex&.lock();
+        fd := fs.fd.index(fd.fd.zext());
+        fd'vtable'close(fd);
+        // TODO: reuse slots of the array
+        fs.mutex&.unlock();
+        0
     };
     dlopen :: fn(name: CStr) rawptr = {
         if name == "libc.so.6" {
@@ -266,29 +292,19 @@ LIBC :: @struct {
         args: Array(i64, 6) = (status, 0, 0, 0, 0, 0);
         Syscall'perform_syscall(args&, 94);  // exit
     };
-    write :: fn(fd: Fd, buf: *u8, size: i64) i64Result = {
-                c := context(DefaultContext);
-                c.prefer_syscalls = true;
-                result := Syscall'write(fd, buf, size);
-                c.prefer_syscalls = false;
-                result
+    write :: fn(fd: Fd, buf: *u8, size: i64) i64 = {
+        fs.mutex&.lock();
+        fd := fs.fd.index(fd.fd.zext());
+        result := fd'vtable'write(fd, buf.slice(size));
+        fs.mutex&.unlock();
+        result
     };
     lseek :: fn(fd: Fd, offset: i64, whence: Whence) i64 = {
-                fs.mutex&.lock();
-                fd := fs.fd.index(fd.fd.zext());
-                if !fd.readable { 
-                    fs.mutex&.unlock();
-                    return(-1);
-                };
-                ::enum(Whence);
-                fd.pos = @match(whence) {
-                    fn End() => fd.len;
-                    fn Set() => offset;
-                    @default => todo();
-                };
-                pos := fd.pos;
-                fs.mutex&.unlock();
-                pos
+        fs.mutex&.lock();
+        fd := fs.fd.index(fd.fd.zext());
+        result := fd'vtable'lseek(fd, offset, whence);
+        fs.mutex&.unlock();
+        result
     };
     __errno_location :: fn() *i64 = @static(i64);
     sigaction :: fn() i64 = 0;
@@ -336,6 +352,60 @@ LIBC :: @struct {
     // for mandel.ssa
     putchar :: fn(c: u8) = print(c&.slice(1));
 };
+
+read_only_mem_file :: @static(FileVTable) (
+    read = fn(fd, dest) = {
+        @if(!fd.readable) return(-1);
+        dest.len = min(dest.len, fd.contents.len - fd.pos).max(0);
+        src := fd.contents.subslice(fd.pos, dest.len);
+        dest.copy_from(src);
+        fd.pos += dest.len;
+        dest.len
+    },
+    write = fn(_self, _src) = -1,
+    lseek = fn(fd, offset, whence) = {
+        @if(!fd.readable) return(-1);
+        ::enum(Whence);
+        fd.pos = @match(whence) {
+            fn End() => fd.contents.len;
+            fn Set() => offset;
+            @default => todo();
+        };
+        fd.pos
+    },
+    close = fn(fd) = {
+        fd.readable = false;
+    },
+);
+
+stdout_file :: @static(FileVTable) (
+    read = fn(_fd, _dest) = 0,
+    write = fn(_fd, src) = {
+        c := context(DefaultContext);
+        c.prefer_syscalls = true;
+        result := Syscall'write((fd = 1), src.ptr, src.len);
+        c.prefer_syscalls = false;
+        result.value
+    },
+    lseek = fn(_fd, _offset, _whence) = -1,
+    close = fn(_fd) = (),
+);
+
+stdin_file :: @static(FileVTable) (
+    read = fn(_fd, dest) = {
+        i := 0;
+        while => i < dest.len {
+            c := fs.stdin&.pop_front()  // :SLOW
+                || return(i);
+            dest[i] = c;
+            i += 1;
+        };
+        i
+    },
+    write = fn(_fd, _src) = -1,
+    lseek = fn(_fd, _offset, _whence) = -1,
+    close = fn(_fd) = (),
+);
 
 #use("@/lib/sys/threads.fr");
 #use("@/lib/sys/sync/mutex.fr");

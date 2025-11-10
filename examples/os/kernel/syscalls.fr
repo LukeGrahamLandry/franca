@@ -3,24 +3,15 @@ write :: fn(fd: i64, buf: i64, len: i64) i64 #n(64) = {
     len
 }
 
-read :: fn(fd: i64, buf: i64, len: i64) i64 #n(63) = {
-    @if(fd != 0) return(-1);
-    dest := u8.ptr_from_int(buf).slice(len);
-    count := 0;
-    todo();
-    // TODO
-    count
-}
-
 mmap :: fn(kernel: *Kernel, task: *Task, addr: i64, len: i64, prot: i64, flags: i64, fd: i64, offset: i64) i64 #n(222) = {
     if addr != 0 || fd.intcast() != -1 || offset != 0 {
-        kpanic("non-trivial mmap");
+        tpanic("non-trivial mmap");
     };
     pages := len.ualign_to(PAGE_SIZE).udiv(PAGE_SIZE);
     result_addr := vmap_reserve(kernel, task.mem&, pages);
     barrier();  // TODO: theres an instruction to kill the tlb or something
     if result_addr == 0 {
-        kpanic("vmap_reserve can't return null");
+        tpanic("vmap_reserve can't return null");
     };
     result_addr
 }
@@ -35,7 +26,7 @@ munmap :: fn(kernel: *Kernel, task: *Task, addr: i64, len: i64) i64 #n(215) = {
     addr := addr.align_back(PAGE_SIZE);
     page_count := len.ualign_to(PAGE_SIZE).udiv(PAGE_SIZE);
     if addr + page_count * PAGE_SIZE >= kernel.next_vaddr || addr < (512*1024*1024) * 4 || page_count < 0 {
-        kpanic("bad munmap");
+        tpanic("bad munmap");
     };
     vunmap(kernel, task.mem&, addr, page_count);
     barrier();  // TODO: theres an instruction to kill the tlb or something
@@ -55,10 +46,10 @@ exit :: fn(task: *Task, status: i64) i64 #n(94) = {
 }
 
 futex :: fn(kernel: *Kernel, task: *Task, addr: i64, op: i64, val: i64, timeout: i64) i64 #n(98) = {
-    @if(timeout != 0) kpanic("TODO: futex timeout");
+    @if(timeout != 0) tpanic("TODO: futex timeout");
     // TODO: check that `addr` is committed and readable
     pte := index_page_table(kernel, task.mem&, addr.align_back(PAGE_SIZE));
-    @if(pte.map.repr == 0) kpanic("futex unmapped address");
+    @if(pte.map.repr == 0) tpanic("futex unmapped address");
     
     @switch(op) {
         @case(0) => {  // wait
@@ -85,7 +76,7 @@ futex :: fn(kernel: *Kernel, task: *Task, addr: i64, op: i64, val: i64, timeout:
             };
             n
         };
-        @default => kpanic("bad futex op");
+        @default => tpanic("bad futex op");
     }
 }
 
@@ -94,19 +85,26 @@ yield :: fn(task: *Task) i64 #n(0xFFFF0002) = {
     0
 }
 
-sig_action :: fn(task: *Task, callee: i64, save_space: i64) i64 #n(0xFFFF0003) = {
+sig_action :: fn(task: *Task, callee: i64, buf: i64, len: i64) i64 #n(0xFFFF0003) = {
+    // TODO: check that buf[..+len] is writable by task
     prev := task.signal_handler;
     task.signal_handler = callee;
-    task.signal_mcontext = save_space;
+    task.signal_stack_left = buf;
+    task.signal_stack = buf + len;
     prev
 }
 
-sig_return :: fn(task: *Task, saved: i64) i64 #n(0xFFFF0004) = {
-    saved := SavedRegisters.ptr_from_int(saved);
-    task.mcontext.gpr = saved.gpr;
-    task.mcontext.elr = saved.elr;
-    task.mcontext.fpr = saved.fpr;
-    task.signal_depth -= 1;
+sig_return :: fn(task: *Task, intid: i64, sp: i64) i64 #n(0xFFFF0004) = {
+    elr := 5*4 + 4/*bti*/ + launder_to_user_pointer(user_unwind_signal); // :end_user_unwind_signal
+    @if(task.mcontext.elr != elr) tpanic("sig_return is #once");
+    @if(task.signal_stack != sp) tpanic("poorly nested sig_return");
+    saved := SavedRegisters.ptr_from_int(sp);
+    if intid != 1023 {
+        i64.sys_set(.ICC_EOIR1_EL1, intid);
+    };
+    // TODO: probably shouldn't expose all the bits of spsr mutably to user space but do want to store them
+    task.mcontext = saved[];
+    task.signal_stack += size_of(SavedRegisters);
     task.mcontext.gpr&[0]
 }
 
@@ -114,7 +112,7 @@ spawn_thread :: fn(kernel: *Kernel, parent: *Task, ctx: i64) i64 #n(0xFFFF0005) 
     ctx := SavedRegisters.ptr_from_int(ctx);
     child := kernel.alloc_task(parent.mem.root);
     if u32.ptr_from_int(ctx.elr)[] != Arm.branch_target_marker {
-        kpanic("spawn thread expected bti");
+        tpanic("spawn thread expected bti");
     };
     child.mcontext.gpr = ctx.gpr;
     child.mcontext.elr = ctx.elr;
