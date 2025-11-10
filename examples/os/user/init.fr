@@ -58,11 +58,39 @@ main :: fn() void = {
         //    context(DefaultContext)[].comptime = zeroed rawptr;
         //    import("@/compiler/main.fr")'main2("examples/sudoku.fr", true);
         //};
-        import("@/compiler/main.fr")'main2("examples/kaleidoscope.fr", true);
+        //import("@/compiler/main.fr")'main2("examples/kaleidoscope.fr", true);
         
-        // doesn't work because it imports putchar 
-        // (and i don't have dlopen yet, and putting it in temporary_libc_import 
-        //  wouldn't help because qbe_frontend doesn't check that)
+            loop {
+            c := context(DefaultContext);
+            c.prefer_syscalls = false;  // TODO: why??
+            
+            buf := u8.list(general_allocator());
+            Term'interactive_read_line(buf&);
+            print("\n");
+            
+            command := buf.items();
+            @switch(command) {
+                @case("exit") => Syscall'exit(0);
+                @case("quit") => Syscall'exit(0);
+                @case("uptime") => {   
+                    c.prefer_syscalls = true;
+                    @println("%ms", timestamp());
+                    c.prefer_syscalls = false;
+                };
+                @default => {
+                    if command.ends_with(".fr") {
+                        println("compiling...");
+                        c.comptime = zeroed rawptr;
+                        import("@/compiler/main.fr")'main2(command, true);
+                        // TODO: don't crash on compile error
+                    } else {
+                        @print("unknown command: |%|\n", buf.items());
+                    };
+                };
+            };
+            buf&.clear();
+        };
+        
         //c.cli_arguments = @slice(@as(CStr) "", @as(CStr) "backend/test/mandel.ssa", "-r");
         //import("@/backend/meta/qbe_frontend.fr")'main();
     };
@@ -113,9 +141,11 @@ handle_signal :: fn(ctx: *MContext, intid: i64, data: i64) i64 = {
             println("^C");
             Syscall'exit(1);  // will stop the whole system if this is the init task (which it always is rn)
         };
+        if char == 13 {
+            char = 10;
+        };
         // TODO: what if interrupted while reading
         fs.stdin&.push_back(char, panicking_allocator);
-        @println("INPUT: %", data);
         return(intid);
     };
     
@@ -260,19 +290,12 @@ LIBC :: @struct {
                 result
     };
     mprotect :: fn() = 0;
-    read :: fn(fd: Fd, buf: *u8, len: i64) i64 = {
-        fs.mutex&.lock();
-        fd := fs.fd.index(fd.fd.zext());
-        result := fd'vtable'read(fd, buf.slice(len));
-        fs.mutex&.unlock();
-        result
+    read :: fn(fd: Fd, buf: *u8, len: i64) i64 = with_file fd { fd |
+        fd'vtable'read(fd, buf.slice(len))
     };
-    close :: fn(fd: Fd) i64 = {
-        fs.mutex&.lock();
-        fd := fs.fd.index(fd.fd.zext());
+    close :: fn(fd: Fd) i64 = with_file fd { fd |
         fd'vtable'close(fd);
         // TODO: reuse slots of the array
-        fs.mutex&.unlock();
         0
     };
     dlopen :: fn(name: CStr) rawptr = {
@@ -292,19 +315,11 @@ LIBC :: @struct {
         args: Array(i64, 6) = (status, 0, 0, 0, 0, 0);
         Syscall'perform_syscall(args&, 94);  // exit
     };
-    write :: fn(fd: Fd, buf: *u8, size: i64) i64 = {
-        fs.mutex&.lock();
-        fd := fs.fd.index(fd.fd.zext());
-        result := fd'vtable'write(fd, buf.slice(size));
-        fs.mutex&.unlock();
-        result
+    write :: fn(fd: Fd, buf: *u8, size: i64) i64 = with_file fd { fd |
+        fd'vtable'write(fd, buf.slice(size))
     };
-    lseek :: fn(fd: Fd, offset: i64, whence: Whence) i64 = {
-        fs.mutex&.lock();
-        fd := fs.fd.index(fd.fd.zext());
-        result := fd'vtable'lseek(fd, offset, whence);
-        fs.mutex&.unlock();
-        result
+    lseek :: fn(fd: Fd, offset: i64, whence: Whence) i64 = with_file fd { fd |
+        fd'vtable'lseek(fd, offset, whence)
     };
     __errno_location :: fn() *i64 = @static(i64);
     sigaction :: fn() i64 = 0;
@@ -351,7 +366,42 @@ LIBC :: @struct {
     };
     // for mandel.ssa
     putchar :: fn(c: u8) = print(c&.slice(1));
+    tcgetattr :: fn(fd: Fd, it: *Term.Terminos) i64 = with_file fd { fd |
+        // TODO
+        it[] = zeroed(Term.Terminos);
+        0
+    };
+    tcsetattr :: fn(fd: Fd, optional_actions: i64, it: *Term.Terminos) i64 = with_file fd { fd |
+        // TODO
+        0
+    };
+    // TODO: do this more efficiently. 
+    //       if multiple threads are sleeping, just have one yield like this for the shortest duration and the rest futex wait.
+    nanosleep :: fn(duration: *TimeSpec, nullable_remainder_out: *TimeSpec) i64 = {
+        // TODO: nullable_remainder_out
+        zeroes := zeroed Array(i64, 6);
+        c := context(DefaultContext);
+        c.prefer_syscalls = true;
+        now := zeroed TimeSpec;
+        Syscall'clock_gettime(0, now&);
+        end := now + duration[];
+        dowhile {
+            _ := Syscall'perform_syscall(zeroes&, 0xFFFF0002);  // yield
+            _ := Syscall'clock_gettime(0, now&);
+            end.ms() > now.ms()
+        };
+        c.prefer_syscalls = false;
+        0
+    };
 };
+
+fn with_file(fd: Fd, $body: @Fn(fd: *FileHandle) i64) i64 = {
+    fs.mutex&.lock();
+    fd := fs.fd.index(fd.fd.zext());
+    result := body(fd);
+    fs.mutex&.unlock();
+    result
+}
 
 read_only_mem_file :: @static(FileVTable) (
     read = fn(fd, dest) = {
@@ -407,6 +457,7 @@ stdin_file :: @static(FileVTable) (
     close = fn(_fd) = (),
 );
 
+Term :: import("@/lib/sys/terminal.fr");
 #use("@/lib/sys/threads.fr");
 #use("@/lib/sys/sync/mutex.fr");
 

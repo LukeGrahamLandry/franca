@@ -12,6 +12,12 @@
   added a todo test. 
 - no need for all the hassle with add_my_imports_to_injected, 
   just pretend to have dlopen like im pretending to have the rest of the imports. silly. 
+- vtables for files so i can have stdio be normal file descriptors. 
+  now need to signal userspace for the uart interrupt so i can get something to read from my fancy new vtables.
+  rework the calling convention for signals to get rid of the window where getting a nested signal
+  is a problem while you're copying the mcontext. now have a stack, and use that as the callstack as well
+  so two birds with one stone, no longer dies if you interrupt in the prelude of a function 
+  (tho thats still a problem for the interrupt handler itself). 
 
 ## (Nov 8)
 
