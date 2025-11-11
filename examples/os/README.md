@@ -13,6 +13,7 @@ currently it's good enough to run the franca compiler on qemu-system-aarch64's v
 - timer for preemption
 - futex wait/wake
 - signal user space on fault
+- minimal shell
 
 ## incomplete
 
@@ -20,7 +21,6 @@ currently it's good enough to run the franca compiler on qemu-system-aarch64's v
 - read device tree
 - multiple address spaces
 - multiple cores
-- shell
 - sleep
 - block device
 - file system

@@ -64,7 +64,11 @@ init_kernel :: fn() void = {
     // TODO: maybe better to use this to only save on interrupt if they're actually being used by that process
     cpacr := i64.sys_get(.CPACR_EL1);
     i64.sys_set(.CPACR_EL1, cpacr.bit_or(0b11.shift_left(20)));  // FPEN
-        
+    
+    // EL0PCTEN: allow userspace to read CNTPCT_EL0 and CNTFRQ_EL0
+    cntctl := i64.sys_get(.CNTKCTL_EL1);
+    i64.sys_set(.CNTKCTL_EL1, cntctl.bit_or(1));
+    
     setup_interrupts();
     tt := setup_virtual_memory();
     
@@ -147,7 +151,7 @@ fn kill_task(task: *Task) void = {
     };
     if task.thread_id == 0 {
         kpanic("tried to kill idle_task");
-    }
+    };
 }
 
 setup_interrupts :: fn() void = {
@@ -363,6 +367,7 @@ return_to_scheduler :: fn() Never = {
             return_to_user(task);
         };
     };
+    reset_countdown();
     return_to_user(kernel.idle_task&)
 }
 
@@ -415,21 +420,7 @@ Task :: @struct {
     active: bool;
 };
 
-SavedRegisters :: @struct {
-    gpr: Array(i64, 32);
-    // why are we being interrupted?
-    esr: i64;  // exception syndrome
-    far: i64;  // fault address
-    // how do we return after the interrupt?
-    elr: i64;  // eret link register
-    spsr: i64; // saved program status
-    intid: i64;
-    _: i64;
-    //
-    fpr: Array(i64, 64);
-    // TODO: share this struct with the userspace one so don't have to keep them in sync
-};
-
+SavedRegisters :: MContext;
 tracing :: false; 
 // for now im using the same handler for every slot of the InterruptVector
 syscall_func :: fn(task: *Task) void = {
@@ -517,24 +508,10 @@ syscall_func :: fn(task: *Task) void = {
         };
         
         if exception_class == 0b011000 {
-            // for now im doing this in a slow dumb way just to get examples/kaleidoscope.fr to run.
             inst := u32.ptr_from_int(args.elr)[];
-            if inst == 0xd53b0024 {  // HACK
-                args.gpr&[4] = i64.sys_get(.CTR_EL0);
-                args.elr += 4;
-                return_to_user(task);
-            };
-            if inst == 0xd50b7b22 || inst == 0xd5033b9f || inst == 0xd50b7522 || inst == 0xd5033fdf {  // HACK
-                // TODO: figure out the right way to turn these on
-                //       but for now i only have one core so it doesn't matter.
-                //       WRONG. thats not true!! idk if qemu emulates the noncoherent data vs inst caches. 
-                //       either way the stress of the interrupt seems good enough to sync them
-                args.elr += 4;
-                return_to_user(task);
-            };
-            
+            kprint("trapped system instruction\n");
             kprint_label("instruction: ", inst.zext());
-            tpanic("trapped system instruction");
+            send_signal(task);
         };
         
         if exception_class == 0b111100 {
@@ -555,7 +532,7 @@ syscall_func :: fn(task: *Task) void = {
                 send_signal(task)
             };
             (calls[i]._0)(task);
-            return_to_scheduler();
+            return_to_user(task);
         };
         
         kprint_label("FAR_EL1: ", args.far);
@@ -567,14 +544,14 @@ syscall_func :: fn(task: *Task) void = {
                 inst := u32.ptr_from_int(args.elr)[];
                 kprint_label("instruction: ", inst.zext());
             };
-            tpanic("uncaught exception");
+            
+        send_signal(task);
     };
     
     if intid == timer_irq {
         kernel.timer_counter += 1;
-        reset_countdown();
-        
         i64.sys_set(.ICC_EOIR1_EL1, intid.zext());
+        return_to_scheduler();  // this does reset_countdown
     };
     
     if intid != timer_irq && intid != irq_uart { 
@@ -652,24 +629,6 @@ poweroff :: fn() Never = {
     // Arm Power State Coordination Interface. Version 1.3 issue F.b
     SYSTEM_OFF :: 0x84000008;
     hypervisor_call(SYSTEM_OFF)
-}
-
-sys_get :: fn($T: Type, $name: Arm.SystemRegister) T #generic = {
-    @run @ct_assert(size_of(T) == 8, @source_location(), "type must fit in a register");
-    #use(Arm);
-    AsmFunctionArmOnly(fn() T = (), @const_slice(
-        mrs(x0, name),
-        ret(), 
-    ))()
-}
-
-sys_set :: fn($T: Type, $name: Arm.SystemRegister, value: T) void #generic = {
-    @run @ct_assert(size_of(T) == 8, @source_location(), "type must fit in a register");
-    #use(Arm);
-    AsmFunctionArmOnly(fn(value: T) void = (), @const_slice(
-        msr(name, x0),
-        ret(), 
-    ))(value);
 }
 
 fn tpanic(msg: Str) Never = 
@@ -797,8 +756,5 @@ fn unresolve_scopes(expr: *FatExpr) void = {
     fn handle_pattern(self: *UnResolve, pattern: *Pattern) Result(DoMore, void) = (Ok = .Continue);
 }
 
-fn AsmFunctionArmOnly(signeture: FuncId, code: []u32) FuncId #fold = {
-    fid := AsmFunction(signeture, code, fn(out: *List(u8)) => (), fn(out: *List(u8)) => (), empty());
-    _ := get_function_ast(fid, true, true, true, false);
-    fid
-}
+#use("@/examples/os/libkernel.fr");
+#use("@/lib/sys/process.fr");  // TODO: maybe sys_get/sys_set should go somewhere else

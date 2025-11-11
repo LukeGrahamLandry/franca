@@ -1,16 +1,14 @@
 
-DBG :: false;
-
 main :: fn() void = {
     println("init!");
     
     // note: this only affects the main thread
+    //       should probably wrap it for the pthread_create part
     buf := page_allocator.alloc_uninit(u8, 1.shift_left(16) * 10);
     range(0, 10) { i |
         buf[1.shift_left(16) * i] = 0;  // commit the page
     };
-    args: Array(i64, 6) = (int_from_rawptr(handle_signal), u8.int_from_ptr(buf.ptr), buf.len, 0, 0, 0);
-    Syscall'perform_syscall(args&, 0xFFFF0003);  // sig_action
+    _ := set_signal_handler(callee = handle_signal, stack = buf);
     
     // TODO: real file system. for now just embed the blob of all the files like the web demo does. 
     fs_i, contents := @run {
@@ -49,13 +47,23 @@ main :: fn() void = {
         
         c.cli_arguments = empty();
         signal_env[] = c[];
+        signal_env.thread_index = -1;  // make handle_signal NOT count as the same thread for reenterant mutex
+        //fs.strace = true;
+
+        //push_dynamic_context { 
+        //    //import("@/compiler/main.fr")'main2("examples/kaleidoscope.fr", true);
+        //    import("@/compiler/main.fr")'main2("examples/sudoku.fr", true);
+        //};
+        //Syscall'exit(0);
         
         buf := u8.list(general_allocator());
         loop {
             mark := temp().mark();
-            // TODO: don't busy wait
+            old := fs.strace;  // TODO: not thread safe
+            fs.strace = false;
             Term'interactive_read_line(buf&);
             print("\n");
+            fs.strace = old;
             
             command := buf.items();
             @switch(command) {
@@ -64,8 +72,26 @@ main :: fn() void = {
                 @case("uptime") => {   
                     @println("%ms", timestamp());
                 };
+                @case("strace off") => {
+                    fs.strace = false;
+                };
+                @case("strace on") => {
+                    fs.strace = true;
+                };
+                @case("help") => print(SHELL_HELP.rest(1));
                 @default => {
+                    break :: local_return;
                     if command.ends_with(".fr") {
+                        if fs.index&.get(command).is_none() {
+                            check := @tfmt("examples/%", command);
+                            if fs.index&.get(check).is_none() {
+                                @println("file not found: %", command);
+                                break();
+                            } else {
+                                command = check;
+                            };
+                        }
+                        
                         println("compiling...");
                         push_dynamic_context { 
                             import("@/compiler/main.fr")'main2(command, true);
@@ -88,6 +114,7 @@ fs :: @static(@struct {
     fd: List(FileHandle);
     mutex: Mutex;
     stdin: import("@/lib/collections/deque.fr")'RawDeque(u8);
+    strace: bool;
 });
 
 FileHandle :: @rec @struct {
@@ -104,17 +131,6 @@ FileVTable :: @struct {
     close: @FnPtr(self: *FileHandle) void = fn(self) = ();
 };
 
-MContext :: @struct {
-    gpr: Array(i64, 32);
-    esr: i64;
-    far: i64;
-    elr: i64;
-    spsr: i64;
-    intid: i64;
-    _: i64;
-    fpr: Array(i64, 64);
-};
-
 signal_env :: @static(DefaultContext);
 
 // note: intid != ctx.intid is legal because an interrupt might have triggered while a different task was running. 
@@ -124,7 +140,8 @@ handle_signal :: fn(ctx: *MContext, intid: i64, data: i64) i64 = {
     if intid == 33 {
         char: u8 = data.trunc();
         if char == 3 {
-            println("^C");
+            println("^c");
+            // TODO: this doesn't work reliably. try it in examples/chess/perft.fr and it can get stuck? 
             Syscall'exit(1);  // will stop the whole system if this is the init task (which it always is rn)
         };
         if char == 13 {
@@ -132,6 +149,10 @@ handle_signal :: fn(ctx: *MContext, intid: i64, data: i64) i64 = {
         };
         // TODO: what if interrupted while reading
         fs.stdin&.push_back(char, panicking_allocator);
+        
+        p := bit_cast_unchecked(*i64, *u32, fs.stdin.len&);
+        Futex'wake(p, 1);  // :SLOW. only needed if its not the init process sleeping in the read
+        
         return(intid);
     };
     
@@ -148,13 +169,16 @@ handle_signal :: fn(ctx: *MContext, intid: i64, data: i64) i64 = {
     // instead of trying to use glibc, which makes intercepting them more painful. 
     syscall_number := ctx.gpr&[8];
     @assert_eq(syscall_number, ctx.gpr&[16]);
+    // TODO: instead of doing work here, just poke a call to the libc handler into ctx[lr, elr]
     @switch(syscall_number) {
         @case(56) => {  // openat
             path := u8.ptr_from_int(ctx.gpr&[1]);
             path := (@as(CStr) (ptr = path)).str();
-            @if(DBG) @println("openat(%)", path);
             if fs.index&.get(path) { off, len |
-                fs.mutex&.lock();
+                // TODO: this is a dead lock if the thing locking it is the thing that was interrupted
+                if !fs.mutex&.try_lock() {
+                    panic("fucked: openat with fs.mutex locked");
+                };
                 fd := fs.fd.len;
                 fs.fd&.push(
                     vtable = read_only_mem_file,
@@ -167,10 +191,12 @@ handle_signal :: fn(ctx: *MContext, intid: i64, data: i64) i64 = {
             } else {
                 ctx.gpr&[0] = -1;
             };
+            @trace("openat(%) = %", path, ctx.gpr&[0]);
         };
         @case(79) => {  // fstatat
             path := u8.ptr_from_int(ctx.gpr&[1]);
             path := (@as(CStr) (ptr = path)).str();
+            @trace("fstatat(%)", path);
             out := Posix.Linux.StatArm64.ptr_from_int(ctx.gpr&[2]);
             ::[]@type out[];
             out.slice(1).set_zeroed();
@@ -248,7 +274,6 @@ temporary_libc_import :: fn(name: Str, dest: *rawptr, allow_null: bool) void = {
     };
     
     if !allow_null {
-        @if(DBG) println(name);
         dest[] = fn() void = panic("called a weak import");
     };
 }
@@ -260,25 +285,29 @@ MyAttr :: @struct {
 LIBC :: @struct {
     mmap :: fn(addr: rawptr, len: i64, prot: i64, flags: i64, fd: Fd, offset: i64) i64 = with_syscalls {
                 result := Syscall'mmap(addr, len, prot, flags, fd, offset);
-                @if(DBG) @println("mmap(%) -> %", len, result);
+                @trace("mmap(%, %) = %", len, flags, result);
                 @assert_ne(result, 0, "some sort of corruption is going on because i over commit and can't null");
                 result
     };
     munmap :: fn(addr: rawptr, len: i64) i64 = with_syscalls {
                 result := Syscall'munmap(addr, len);
+                @trace("mumap(%, %)", addr, len);
                 @assert_eq(result.value, 0, "some sort of corruption is going on. munmap(%) can't fail", addr);
                 result.value
     };
     mprotect :: fn() = 0;
-    read :: fn(fd: Fd, buf: *u8, len: i64) i64 = with_file fd { fd |
+    read :: fn(f: Fd, buf: *u8, len: i64) i64 = with_file f { fd |
+        @trace("read(%, %, %)", f.fd, u8.int_from_ptr(buf), len);
         fd'vtable'read(fd, buf.slice(len))
     };
-    close :: fn(fd: Fd) i64 = with_file fd { fd |
+    close :: fn(f: Fd) i64 = with_file f { fd |
+        @trace("close(%)", f.fd);
         fd'vtable'close(fd);
         // TODO: reuse slots of the array
         0
     };
     dlopen :: fn(name: CStr) rawptr = {
+        @trace("dlopen(%)", name);
         if name == "libc.so.6" {
             return(123.rawptr_from_int());
         };
@@ -288,18 +317,23 @@ LIBC :: @struct {
         @assert_eq(lib.int_from_rawptr(), 123);
         dest := zeroed(rawptr);
         temporary_libc_import(name.str(), dest&, true);
+        @trace("dlsym(%, %) = %", lib, name, dest);
         dest
     };
     dlclose :: fn() = 0;
     exit :: fn(status: i64) void = {
+        @trace("exit(%)", status);
         args: Array(i64, 6) = (status, 0, 0, 0, 0, 0);
         Syscall'perform_syscall(args&, 94);  // exit
     };
-    write :: fn(fd: Fd, buf: *u8, size: i64) i64 = with_file fd { fd |
+    write :: fn(f: Fd, buf: *u8, size: i64) i64 = with_file f { fd |
+        @trace("write(%, %, %)", f.fd, u8.int_from_ptr(buf), size);
         fd'vtable'write(fd, buf.slice(size))
     };
-    lseek :: fn(fd: Fd, offset: i64, whence: Whence) i64 = with_file fd { fd |
-        fd'vtable'lseek(fd, offset, whence)
+    lseek :: fn(f: Fd, offset: i64, whence: Whence) i64 = with_file f { fd |
+        result := fd'vtable'lseek(fd, offset, whence);
+        @trace("lseek(fd = %, %, %) = %", f.fd, offset, @as(i64) whence, result);
+        result
     };
     __errno_location :: fn() *i64 = @static(i64);
     sigaction :: fn() i64 = 0;
@@ -324,7 +358,7 @@ LIBC :: @struct {
                 args: Array(i64, 6) = (MContext.int_from_ptr(ctx&), 0, 0, 0, 0, 0);
                 id, _ := Syscall'perform_syscall(args&, 0xFFFF0005);  // spawn_thread
                 out[] = bit_cast_unchecked(@type id, pthread_t, id);
-                
+                @trace("pthread_create(elr = %, x0 = %, sp = %) = %", ctx.elr, ctx.gpr&[0], ctx.gpr&[31], id);
                 0
     };
     pthread_attr_setstack :: fn(attr: *ThreadAttr, ptr: *u8, len: i64) i64 = {
@@ -333,13 +367,17 @@ LIBC :: @struct {
                 0
     };
     pthread_getcpuclockid :: fn() = 0;
+    // TODO: do something like tid_futex instead of just spam yielding like this
     pthread_join :: fn(thread: pthread_t, value_ptr: *rawptr) i64 = {
                 id := bit_cast_unchecked(@type thread, i64, thread);
                 args: Array(i64, 6) = (id, 0, 0, 0, 0, 0);
-                dowhile {
+                @trace("pthread_join(%)", id);
+                while(=> {
                     done, _ := Syscall'perform_syscall(args&, 0xFFFF0006);  // check_thread
                     done == 0
-                };
+                }, => {
+                    Syscall'perform_syscall(args&, 0xFFFF0002);  // yield
+                });
                 value_ptr[] = zeroed rawptr; // TODO
                 0
     };
@@ -354,29 +392,38 @@ LIBC :: @struct {
         // TODO
         0
     };
-    // TODO: really this should be in userspace
-    clock_gettime :: fn(clock_id: i64, time_spec: *TimeSpec) i64 = with_syscalls {
-        Syscall'clock_gettime(clock_id, time_spec);
+    clock_gettime :: fn(clock_id: i64, time_spec: *TimeSpec) i64 = {
+        // TODO: other clock_id's
+        time_spec[] = system_counter_uptime();
         0
     };
     // TODO: do this more efficiently. 
     //       if multiple threads are sleeping, just have one yield like this for the shortest duration and the rest futex wait.
-    nanosleep :: fn(duration: *TimeSpec, nullable_remainder_out: *TimeSpec) i64 = {
-        // TODO: nullable_remainder_out
+    nanosleep :: fn(duration: *TimeSpec, nullable_remainder_out: i64) i64 = {
+        @trace("nanosleep(s = %, ns = %)", duration.seconds, duration.nanoseconds);
+        @debug_assert_eq(nullable_remainder_out, 0, "todo: sleep remainder");
         zeroes := zeroed Array(i64, 6);
-        with_syscalls {
-            now := zeroed TimeSpec;
-            Syscall'clock_gettime(0, now&);
+            now := system_counter_uptime();
             end := now + duration[];
             dowhile {
                 _ := Syscall'perform_syscall(zeroes&, 0xFFFF0002);  // yield
-                _ := Syscall'clock_gettime(0, now&);
+                now := system_counter_uptime();
                 end.ms() > now.ms()
             };
             0
-        }
     };
 };
+
+system_counter_uptime :: fn() TimeSpec = {
+    // 2^64 nanoseconds is ~585 years.
+    // TODO: ns*S_PER_NS overflows in 5.85 years at 1GHz which is enough that it doesn't matter for me but not infinity
+    //       but you have to multiply first so you don't truncate
+    ticks := u64.sys_get(.CNTPCT_EL0);
+    ticks_per_s := u64.sys_get(.CNTFRQ_EL0);
+    ns := ticks * NS_PER_S / ticks_per_s;
+    s, ns_r := ns.div_mod(NS_PER_S);
+    (seconds = s.bitcast(), nanoseconds = ns_r.bitcast())
+}
 
 fn with_file(fd: Fd, $body: @Fn(fd: *FileHandle) i64) i64 = {
     fs.mutex&.lock();
@@ -431,10 +478,25 @@ stdout_file :: @static(FileVTable) (
 
 stdin_file :: @static(FileVTable) (
     read = fn(_fd, dest) = {
+        fd := ptr_diff(fs.fd.maybe_uninit.ptr, _fd);
         i := 0;
         while => i < dest.len {
+            continue :: local_return;
+            // TODO: this is a race with the interrupt handler adding more bytes
             c := fs.stdin&.pop_front()  // :SLOW
-                || return(i);
+                || {
+                if i == 0 {
+                    // TODO: don't hardcode blocking + MIN=1 + timeout=infinity (which is what interactive_read_line wants)
+                    // since send_signal clears Task.futex_wait, this sleeps until we get a byte if its the init process reading. 
+                    p := bit_cast_unchecked(*i64, *u32, fs.stdin.len&);
+                    fs.mutex&.unlock();
+                    Futex'wait(p, 0);
+                    fs.mutex&.lock();
+                    _fd = fs.fd.index(fd);
+                    continue();
+                };
+                return(i)
+            };
             dest[i] = c;
             i += 1;
         };
@@ -445,6 +507,19 @@ stdin_file :: @static(FileVTable) (
     close = fn(_fd) = (),
 );
 
+fn trace(arg: FatExpr) FatExpr #macro = @{
+    if fs.strace {
+        c := context(DefaultContext);
+        t := c.temporary_allocator_i;
+        old := fs.strace;    // TODO: not thread safe
+        fs.strace = false;
+        c.temporary_allocator_i = Arena'stack_alloc(1024);
+        @[println arg];
+        c.temporary_allocator_i = t;
+        fs.strace = old;
+    };
+};
+
 Term :: import("@/lib/sys/terminal.fr");
 #use("@/lib/sys/threads.fr");
 #use("@/lib/sys/sync/mutex.fr");
@@ -453,3 +528,12 @@ Term :: import("@/lib/sys/terminal.fr");
 DISABLE_IMPORT_FRC :: false;
 DEBUG_SPAM_LOG :: false;
 #include_std("compiler/lib.fr"); 
+
+#use("@/examples/os/libkernel.fr");
+
+SHELL_HELP :: """
+exit                 (power down the machine)
+<path>               (jit and run a .fr program)
+strace <on, off>     (toggle libc logging)
+uptime               (read the system counter)
+""";

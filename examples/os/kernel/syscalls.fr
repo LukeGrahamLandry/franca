@@ -42,7 +42,7 @@ exit :: fn(task: *Task, status: i64) i64 #n(94) = {
         send_signal(task);
     };
     kill_task(task);
-    0
+    return_to_scheduler()  // yield
 }
 
 futex :: fn(kernel: *Kernel, task: *Task, addr: i64, op: i64, val: i64, timeout: i64) i64 #n(98) = {
@@ -60,19 +60,24 @@ futex :: fn(kernel: *Kernel, task: *Task, addr: i64, op: i64, val: i64, timeout:
             sleep := p[] == val.trunc();
             if sleep {
                 task.futex_wait = addr;
+                task.mcontext.gpr&[0] = 0;
+                return_to_scheduler();  // yield
             };
-            int(sleep) - 1
+            -1
         };
         @case(1) => {  // wake
             @if(val <= 0) return(0);
             // TODO: unfair and :slow, maybe i want a queue per futex
             n := 0;
-            each kernel.tasks& { it |
+            i := 0;
+            cap := size_of(@type kernel.tasks) / size_of(Task);
+            while => i < cap && n < val {
+                it := kernel.tasks&[i]&;
                 if it.futex_wait == addr {
                     it.futex_wait = 0;
                     n += 1;
-                    @if(n >= val) return(n);
                 };
+                i += 1;
             };
             n
         };
@@ -80,32 +85,26 @@ futex :: fn(kernel: *Kernel, task: *Task, addr: i64, op: i64, val: i64, timeout:
     }
 }
 
-// TODO: this is kinda dumb. it could be in userspace. 
-//       really its just here so i don't have to choose where to put sys_get. 
-//       also limiting to millisecond resolution is dumb
-clock_gettime :: fn(task: *Task, clock_id: i64, out: i64) i64 #n(113) = {
-    out := TimeSpec.ptr_from_int(out);
-    counter := i64.sys_get(.CNTPCT_EL0);
-    ticks_per_ms := i64.sys_get(.CNTFRQ_EL0) / MS_PER_S;
-    ms := counter / ticks_per_ms;
-    out.seconds = ms / MS_PER_S;
-    out.nanoseconds = (ms - out.seconds * MS_PER_S) * NS_PER_MS;
-    task.mcontext.gpr&[0] = 0;
-    return_to_user(task)
-}
-
 yield :: fn(task: *Task) i64 #n(0xFFFF0002) = {
-    // return_to_scheduler always cycles through all the tasks so don't need to do anything here. 
-    0
+    task.mcontext.gpr&[0] = 0;
+    return_to_scheduler()
 }
 
-sig_action :: fn(task: *Task, callee: i64, buf: i64, len: i64) i64 #n(0xFFFF0003) = {
+sig_action :: fn(task: *Task, new: i64, old: i64) i64 #n(0xFFFF0003) = {
+    old := SignalHandler.ptr_from_int(old);
+    old.callee = bit_cast_unchecked(i64, @type old.callee, task.signal_handler);
+    old.stack.ptr = u8.ptr_from_int(task.signal_stack_left);
+    // TODO: this length is wrong if its currently in a signal handler (which it will be since its doing a syscall)
+    old.stack.len = task.signal_stack - task.signal_stack_left;
+    
     // TODO: check that buf[..+len] is writable by task
-    prev := task.signal_handler;
-    task.signal_handler = callee;
+    new := SignalHandler.ptr_from_int(new);
+    task.signal_handler = bit_cast_unchecked(@type new.callee, i64, new.callee);
+    buf := u8.int_from_ptr(new.stack.ptr);
     task.signal_stack_left = buf;
-    task.signal_stack = buf + len;
-    prev
+    task.signal_stack = buf + new.stack.len;
+    
+    0
 }
 
 sig_return :: fn(task: *Task, intid: i64, sp: i64) i64 #n(0xFFFF0004) = {
@@ -135,6 +134,7 @@ spawn_thread :: fn(kernel: *Kernel, parent: *Task, ctx: i64) i64 #n(0xFFFF0005) 
     child.thread_id
 }
 
+// TODO: instead of this for joining threads, do tid_futex like linux
 // TODO: have a more efficient waitpid than calling this in a loop
 check_thread :: fn(kernel: *Kernel, id: i64) i64 #n(0xFFFF0006) = {
     each kernel.tasks& { it |

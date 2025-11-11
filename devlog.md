@@ -2,6 +2,27 @@
 ## (Nov 10)
 
 - fixed a nasty control flow bug in emit_ir
+  problem was if there was unreachable code after an infinite loop without a break or continue, 
+  it would be emitted to the end of the loop body instead of being discarded. 
+  but that doesn't come up much because a) why loop forever and b) sema tries to discard 
+  obvious unreachable code so it can only happen when its obscured by a capturing call. 
+- set EL0PCTEN so i can move clock_gettime to user space
+- test that makes sure some instructions, that user space shouldn't have, are correctly trapped
+- sig_action return more info about the old one so you can restore it or chain them
+- make interactive_read_line use blocking read instead of sleeping a random amount
+  - so it doesn't suck cpu with my dumb busy wait sleeping
+  - updated the examples that use start_raw to restore terminos more exactly at the end
+- ive gotten it to a state where ctrl+c just makes it hang instead of exiting. 
+  ah right, problem was trying to treat the signal handler as a seperate thread_index 
+  and then deadlocking on the file system mutex.
+- make syscalls default to returning to the same task instead of yielding the rest of the time slice. 
+  - fixes the thing where pressing ctrl+c in chess/perft.fr would have to keep letting all the other 
+    threads get more time before the init task got to exiting. 
+    (even before i don't understand why that wouldn't be super fast, like `3*4*5ms`, each time slice seems way longer than i'd expect)
+  - somehow that makes it use more memory and even if i bump it up, kalidescope never works.
+    works if i reduce codegen_queue_size.
+- set UCI=1 and UCT=1 so don't need to fake as much for aarch64_clear_instruction_cache
+- shitty strace thing just so you can kinda see whats going on 
 
 ## (Nov 9)
 

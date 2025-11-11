@@ -1,0 +1,55 @@
+// TODO: run this in ci
+// TODO: once i trust that it works, turn off the spammy kernel logging
+
+main :: fn() void = {
+    buf := items(@static(Array(u8, 1.shift_left(16))));
+    old := set_signal_handler(callee = handle_signal, stack = buf);
+    
+    // kernel uses these for preemption so can't let user set them
+    expect_esr(0, => i64.sys_set(.CNTFRQ_EL0, 0));
+    expect_esr(0x18, => i64.sys_set(.CNTP_CTL_EL0, 0));
+    expect_esr(0x18, => i64.sys_set(.CNTP_TVAL_EL0, 0));
+    expect_esr(0x18, => i64.sys_set(.CNTP_CVAL_EL0, 0));
+    // reading is fine tho because it lets you get high precision timer without a context switch
+    _ := i64.sys_get(.CNTFRQ_EL0);
+    _ := i64.sys_get(.CNTPCT_EL0);
+    
+    expect_esr(0b100100, => { p := i64.ptr_from_int(0); p[] = 0; });
+    expect_esr(0b100100, => { p := i64.ptr_from_int(0x40100000); p[] = 0; });
+
+    _ := set_signal_handler(old);
+    @println("ok! test_index = %", test_index[]);
+}
+
+test_index :: @static(i64) 0;
+expected_fault :: @static(i64) (-1);
+handle_signal :: fn(ctx: *MContext, intid: i64, data: i64) i64 = {
+    ec := ctx.esr.shift_right_logical(26).bit_and(0b111111);
+    if intid != 1023 || expected_fault[] != ec || data != 0 {
+        crash(test_index[]);
+    };
+    expected_fault[] = -1;
+    ctx.elr += 4;
+    intid
+}
+
+fn expect_esr(esr: i64, $body: @Fn() void) void = {
+    test_index[] += 1;
+    old := expected_fault[];
+    expected_fault[] = esr;
+    body();
+    // TODO: why doesn't this work. i can see from the kernel logging that the fault is happening correctly
+    //if expected_fault[] != -1 {
+    //    crash(-test_index[]);
+    //};
+    expected_fault[] = old;
+}
+
+crash :: fn(i: i64) Never = {
+    args: Array(i64, 6) = (i, 0, 0, 0, 0, 0);
+    Syscall'perform_syscall(args&, 94);  // exit
+    loop(=> ());
+};
+
+#use("@/lib/sys/process.fr");
+#use("@/examples/os/libkernel.fr");

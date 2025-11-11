@@ -1,4 +1,15 @@
 
+- Terminos/tcsetattr confuses me. 
+  theres like a parallel thing for configuring if you're going to do a blocking read or poll
+  if the file descriptor feels in its heart that it's a terminal? 
+  im imagining stdin/stdout just being pipes and it doesn't matter if the other end of your pipe 
+  is a file or a process or a "terminal". maybe the idea is its a different thing when we're
+  pretending theres a device driver on the other end. so a tcsetattr should correspond to 
+  setting some magic bytes in the uart device memory. 
+  - https://man7.org/linux/man-pages/man3/termios.3.html
+  - https://man7.org/linux/man-pages/man2/TCSETS.2const.html
+- elf_loader set auxiliary vector and use it to get the right page size for page_allocator
+  - https://man7.org/linux/man-pages/man3/getauxval.3.html
 - sad redundant work:
   - it runs the backend twice when something is used at comptime and runtime,
     even if both are the same architecture, and even the early passes where i carefully kept them target independent. 
