@@ -17,6 +17,7 @@ Kernel :: @struct {
     pages_committed: i64;
     pages_reserved_freed: i64;
     pages_committed_freed: i64;
+    device_tree: []u8;
 };
 
 fn kernel() *Kernel = {
@@ -28,13 +29,32 @@ fn kernel() *Kernel = {
     kernel
 }
 
-// this is called by emit_entry's _start
-// SPSel=1, so SP_EL0 != SP_EL1
-main :: fn(arg: i64) void = {
-    init_kernel();
-}
+DT :: import("@/examples/dump_devicetree.fr");
 
-init_kernel :: fn() void = {
+// this is called by emit_entry's _start
+main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
+    link_image_base: i64 = 0x40100000;
+    kernel_image_size := -1;
+    if device_tree == 0 || kernel_image_base == -4 {
+        // qemu running as elf instead of as linux image
+        device_tree = 0x40000000;
+        kernel_image_base = link_image_base;
+        kernel_image_size = 1.shift_left(23);  // TODO: tighter bound. 
+    } else {
+        kernel_image_size = i64.ptr_from_int(kernel_image_base + 16)[].align_to(PAGE_SIZE);
+    };
+    kprint_label("main ", int_from_rawptr(main));
+    kprint_label("image_base ", kernel_image_base);
+    kprint_label("device_tree ", device_tree);
+    
+    dt := DT.Header.ptr_from_int(device_tree)[];
+    DT.Header.byte_swap_fields(dt&);
+    if dt.magic != DT.MAGIC {
+        kprint("bad dt magic");  // yolo
+        poweroff();
+    };
+    device_tree_bytes := u8.ptr_from_int(device_tree).slice(dt.totalsize.zext());
+    
     _, c := create_and_set_unsafe_environment();
     c.panic_hook = kpanic;
     kprint("Hi\n");
@@ -51,8 +71,6 @@ init_kernel :: fn() void = {
     
     kernel := kernel();
     
-    kernel_image_base: i64 = 0x40100000;
-    kernel_image_size := 1.shift_left(23);  // TODO: tighter bound. 
     ram_size: i64 = 1.shift_left(29) - 0x00100000; // TODO: get this from device tree
     kernel.physical.remaining = (
          ptr = u8.ptr_from_int(kernel_image_base + kernel_image_size), 
@@ -60,6 +78,7 @@ init_kernel :: fn() void = {
     );
     kernel.next_vaddr = (512*1024*1024) * 4;
     kernel.env = get_dynamic_context();
+    kernel.device_tree = device_tree_bytes;
     
     // TODO: maybe better to use this to only save on interrupt if they're actually being used by that process
     cpacr := i64.sys_get(.CPACR_EL1);
@@ -68,9 +87,14 @@ init_kernel :: fn() void = {
     // EL0PCTEN: allow userspace to read CNTPCT_EL0 and CNTFRQ_EL0
     cntctl := i64.sys_get(.CNTKCTL_EL1);
     i64.sys_set(.CNTKCTL_EL1, cntctl.bit_or(1));
-    
+
     setup_interrupts();
     tt := setup_virtual_memory();
+    
+    a := Arena'stack_alloc(100000);
+    out := u8.list(a);
+    DT'dump(out&, device_tree_bytes);
+    kprint(out.items());
     
     stack_size_pages := 16;
     kstack := kernel.physical&.map(stack_size_pages);  // TODO: its hacky to assume this will be contiguous
@@ -527,12 +551,17 @@ syscall_func :: fn(task: *Task) void = {
             if syscall_number != args.gpr&[16] {
                 tpanic("perform_syscall always uses both x8 and x16");
             };
-            calls := @run import("@/examples/os/kernel/syscalls.fr")'generate();
-            i := calls.index_of(fn(it) => it._1 == syscall_number) || {
-                send_signal(task)
+            // note: not iterating over the array at runtime so it doesn't need data relocations so the kernel is PIC
+            calls :: @run import("@/examples/os/kernel/syscalls.fr")'generate();
+            inline_for calls { $it |
+                callee, n := @run it[];
+                if syscall_number == n {
+                    callee(task);
+                    return_to_user(task);
+                }
             };
-            (calls[i]._0)(task);
-            return_to_user(task);
+            // unknown syscall
+            send_signal(task);
         };
         
         kprint_label("FAR_EL1: ", args.far);
@@ -666,19 +695,28 @@ spin :: fn() Never = {
     };
 }
 
-kprint :: fn(s: Str) void = 
-    for(s, putchar);
+kprint :: fn(s: Str) void = {
+    for s { c |
+        u32.volatile(uart, c.zext());
+    };
+}
 
 // TODO: read the magic number from the device tree thingy?
 // https://developer.arm.com/documentation/ddi0183/g/programmers-model/summary-of-registers?lang=en
 uart :: 0x09000000;
-putchar :: fn(c: u8) void = {
-    u32.volatile(uart, c.zext());
-}
 
 getchar :: fn() u8 = {
     u32.volatile(uart).trunc()
 }
+
+// TODO: can't decide if this is where i want to go with this
+SerialPort :: @struct {
+    addr: i64;
+    intid: i64;
+    interrupt: @FnPtr(ctx: *MContext) void;
+    putchar: @FnPtr(c: u8) void;
+    getchar: @FnPtr() u8;
+};
 
 // TODO: can't let it try to bake the junk address or it crashes in bake_relocatable_constant :compilerbug
 fn volatile($T: Type, addr: i64, value: T) void #noinline #generic = {

@@ -1,4 +1,19 @@
 
+- it seems my woes with virtualization.framework were just that i downloaded the 
+  wrong files to use as a liunx kernel from clicking around in the link from their example. 
+  https://developer.apple.com/documentation/virtualization/running-linux-in-a-virtual-machine
+  it worked with whatever puipui-linux is, from https://github.com/Code-Hex/vz `make download_kernel`.
+  so if i make it think my thing is a linux kernel, maybe it will Just Work (tm).
+- https://www.kernel.org/doc/Documentation/arm64/booting.txt
+  this implies that i just give it a flat file and it jumps to the beginning of it 
+  with the device tree address in x0. which is almost too good to be true. 
+  that seems to work, if i put the magic header with the first u32 being Arm'b(0, 0)
+  it hangs and if the first u32 is 0 it crashes with `VZErrorDomain Code=1 "The virtual machine failed to start."`
+  so that's promising. jumping to my entry point makes it run some code in qemu before crashing. 
+  in apple's virt, it doesn't print anything because my hardcoded uart addresses don't work,
+  but i can choose between shutdown, crash, hang, so its definitely running it. 
+- get rid of the relocations for the syscall dispatch array
+
 ## (Nov 10)
 
 - fixed a nasty control flow bug in emit_ir

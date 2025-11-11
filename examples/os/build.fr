@@ -3,11 +3,17 @@ driver :: fn(vtable: *ImportVTable) void = {
     start := timestamp();
     bytes := compile(vtable);
     #use("@/examples/testing.fr");
-    flat_link(bytes, 0x40100000);
+    ram_base: i64 = 0x40100000;
+    flat_link(bytes, ram_base);
+    // before stomping the elf header, save it as something objdump understands
+    write_entire_file_or_crash("target/kernel.elf", bytes);
     output := "target/kernel.out";
+    link_linux_boot(bytes, ram_base);
     write_entire_file_or_crash(output, bytes);
+    
     if !cli_args().contains(fn(it) => it[] == "-qemu") {
         @println(">>> wrote to %; (run with -qemu to run the os as well)", output);
+        @println("    (follows linux boot protocol)");
         return();
     };
     @eprintln(">>> compiled in %ms;", timestamp() - start);
@@ -58,13 +64,15 @@ emit_entry :: fn(m: *Qbe.Module, main: Str) void = {
     m.goal.entry_point = "_start";
 
     code := zeroed Qbe.MultiArchAsm;
+    // linux boot protocol: x0 = device tree
     code&[.aarch64] = interpret_as_bytes(@const_slice(
         arm_nop,  // adr fp, stack_top
         arm_nop,  // ^
         0xd50041bf, // msr SPSel, #0x1; probably already the case but just make sure. 
-        movn(.X64, x0, 0b1111, .Left0),
-        and_sr(.X64, fp, fp, x0, .LSL, 0b0),
+        movn(.X64, x1, 0b1111, .Left0),
+        and_sr(.X64, fp, fp, x1, .LSL, 0b0),
         add_im(.X64, sp, fp, @as(u12) 0, 0b0),
+        sub_im(.X64, x2, lr, 4, 0),  // base address if loaded as linux image
         arm_nop,  // bl main
         wfi
     ));
@@ -93,7 +101,7 @@ emit_entry :: fn(m: *Qbe.Module, main: Str) void = {
         use_symbol(m, main) { s_main |
             s_main.strong = true;
             push_fixup(m, s_main, (
-                patch_at = u8.raw_from_ptr(m.segments&[.Code].mmapped.index(s_start.offset + 24 + 4)),
+                patch_at = u8.raw_from_ptr(m.segments&[.Code].mmapped.index(s_start.offset + 28 + 4)),
                 type = .Call,
             ));
         };
@@ -171,7 +179,7 @@ flat_link :: fn(in: []u8, ram_base: i64) void = {
                         // TODO: ehhh, using this with imports that expect a GOT slot doesn't really make sense. 
                         @if_else {
                             @if(it.type == Elf.R_AARCH64_ABS64) => {
-                                // the addresses are fixed because the kernel is loaded at a known base address.
+                                // TODO: get rid of these so base address doesn't matter!
                                 @assert(mem_section.type != .Bss, "TODO: reloc in bss");
                                 bit_cast_unchecked(*u8, *i64, mem_bytes.index(it.offset))[] = dest_vaddr;
                             };
@@ -228,6 +236,35 @@ flat_link :: fn(in: []u8, ram_base: i64) void = {
         align = 65536,
     );
 }
+
+// TODO: the constant R_AARCH64_ABS64 are wrong now because don't know where it will be loaded in ram.
+//       but theres only two left and it seems to work
+// note: ram_base won't be the address its loaded at runtime, it's just used to offset constant addresses. 
+link_linux_boot :: fn(in: []u8, ram_base: i64) void = {
+    Elf :: import("@/backend/elf/bits.fr");
+    Arm :: import("@/backend/arm64/bits.fr");
+    
+    elf_h := in.peek_type(Elf.Header)[];
+    lin_h := in.peek_type(LinuxBootHeader);
+    distance := (elf_h.entry - ram_base) / 4;
+    lin_h[] = (
+        code = (Arm'b(distance, 1), 0),
+        text_offset = 0,
+        image_size = in.len,
+        flags = 0b0_11_0,
+    );
+}
+
+// https://www.kernel.org/doc/Documentation/arm64/booting.txt
+LinuxBootHeader :: @struct {
+    code: Array(u32, 2);
+    text_offset: i64;
+    image_size: i64;
+    flags: i64;
+    res := zeroed Array(i64, 3);
+    magic: u32 = 0x644d5241;
+    res5: u32 = 0;
+};
 
 Qbe :: import("@/backend/lib.fr");
 #use("@/lib/sys/fs.fr");

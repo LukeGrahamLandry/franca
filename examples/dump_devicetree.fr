@@ -18,7 +18,7 @@ dump :: fn(out: *List(u8), in: []u8) void = {
     header := in.peek_type(Header)[];
     Header.byte_swap_fields(header&);
     @fmt(out, "Header:\n%\n", header&);
-    if header.magic != header.magic || header.last_comp_version != 16 {
+    if header.magic != MAGIC || header.last_comp_version != 16 {
         @fmt(out, "(ERROR: bad magic/version)\n");
         return();
     };
@@ -33,20 +33,14 @@ dump :: fn(out: *List(u8), in: []u8) void = {
         };
     };
     @fmt(out, "Structure Block:\n");
-    {
-        strings := in.subslice(header.off_dt_strings.zext(), header.size_dt_strings.zext());
-        in := in.subslice(header.off_dt_struct.zext(), header.size_dt_struct.zext());
-        depth := 0;
-        width :: 4;
-        dowhile {
+    depth := 0;
+    width :: 4;
+    for_props in { tag, name, data |
             out.push_repeated(depth*width, " ".ascii());
-            tag := in&.pop_type(FDT)[];
             @match(tag) {
                 fn BEGIN_NODE() => {
                     depth += 1;
-                    name := in&.pop_cstr();
                     @fmt(out, "% {\n", name);
-                    in = in.rest(name.len.add(1).ualign_to(4) - name.len.add(1));
                 }
                 fn END_NODE() => {
                     depth -= 1;
@@ -56,11 +50,7 @@ dump :: fn(out: *List(u8), in: []u8) void = {
                 fn END() => ();
                 fn NOP() => ();
                 fn PROP() => {
-                    prop := in&.pop_type(Prop)[];
-                    Prop.byte_swap_fields(prop&);
-                    name: CStr = (ptr = strings.index(prop.nameoff.zext()));
                     @fmt(out, "%", name);
-                    data := in.slice(0, prop.len.zext());
                     // TODO: show the data properly. i think you need to know the types of the fields already. 
                     if data.len > 0 {
                         @fmt(out, " =");
@@ -79,11 +69,64 @@ dump :: fn(out: *List(u8), in: []u8) void = {
                         };
                     };
                     @fmt(out, ";\n");
-                    in = in.rest(prop.len.zext().ualign_to(4));
                 }
-            };
-            tag != .END
         };
+    };
+}
+
+Iter :: @struct {
+    in: []u8;
+    strings: []u8;
+    depth: i64;
+    
+    Node :: @struct(tag: FDT, name: Str, data: []u8);
+};
+
+iter :: fn(in: []u8) Iter = {
+    header := in.peek_type(Header)[];
+    Header.byte_swap_fields(header&);
+    @debug_assert_eq(header.magic, MAGIC);
+    (
+        strings = in.subslice(header.off_dt_strings.zext(), header.size_dt_strings.zext()),
+        in = in.subslice(header.off_dt_struct.zext(), header.size_dt_struct.zext()),
+        depth = 0,
+    )
+}
+
+fn next(self: *Iter) Iter.Node = {
+    loop {
+        continue :: local_return;
+        tag := self.in&.pop_type(FDT)[];
+        name, data := @match(tag) {
+            fn BEGIN_NODE() => {
+                name := self.in&.pop_cstr();
+                self.in = self.in.rest(name.len.add(1).ualign_to(4) - name.len.add(1));
+                (name, "")
+            }
+            fn END_NODE() => ("", "");
+            fn END() => ("", "");
+            fn NOP() => continue();
+            fn PROP() => {
+                prop := self.in&.pop_type(Prop)[];
+                Prop.byte_swap_fields(prop&);
+                name: CStr = (ptr = self.strings.index(prop.nameoff.zext()));
+                data := self.in.slice(0, prop.len.zext());
+                self.in = self.in.rest(prop.len.zext().ualign_to(4));
+                (name.str(), data)
+            }
+        };
+        self.depth += int(tag == .BEGIN_NODE);
+        self.depth -= int(tag == .END_NODE);
+        return(tag = tag, name = name, data = data);
+    }
+}
+
+for_props :: fn(in: []u8, $body: @Fn(tag: FDT, name: Str, data: []u8) void #duplicated) void = {
+    self := iter(in);
+    dowhile {
+        it := self&.next();
+        body(it.tag, it.name, it.data);
+        it.tag != .END
     };
 }
 
