@@ -4,6 +4,7 @@
 // so you don't have to hard code memory mapped io addresses, etc. and ship a seperate kernel for each board.
 
 main :: fn() void = {
+    #use("@/lib/sys/fs.fr");
     input := read_file_from_last_arg();
     out := u8.list(temp());
     dump(out&, input);
@@ -11,6 +12,12 @@ main :: fn() void = {
 }
 
 dump :: fn(out: *List(u8), in: []u8) void = {
+    #use("@/examples/os/drivers/devicetree.fr");
+    ::DeriveFmt(Header);
+    ::DeriveFmt(ReserveEntry);
+    ::DeriveFmt(Prop);
+    ::enum(FDT);
+
     if in.len < Header.size_of() {
         @fmt(out, "(ERROR: input too small to fit the header)\n");
         return();
@@ -73,115 +80,3 @@ dump :: fn(out: *List(u8), in: []u8) void = {
         };
     };
 }
-
-Iter :: @struct {
-    in: []u8;
-    strings: []u8;
-    depth: i64;
-    
-    Node :: @struct(tag: FDT, name: Str, data: []u8);
-};
-
-iter :: fn(in: []u8) Iter = {
-    header := in.peek_type(Header)[];
-    Header.byte_swap_fields(header&);
-    @debug_assert_eq(header.magic, MAGIC);
-    (
-        strings = in.subslice(header.off_dt_strings.zext(), header.size_dt_strings.zext()),
-        in = in.subslice(header.off_dt_struct.zext(), header.size_dt_struct.zext()),
-        depth = 0,
-    )
-}
-
-fn next(self: *Iter) Iter.Node = {
-    loop {
-        continue :: local_return;
-        tag := self.in&.pop_type(FDT)[];
-        name, data := @match(tag) {
-            fn BEGIN_NODE() => {
-                name := self.in&.pop_cstr();
-                self.in = self.in.rest(name.len.add(1).ualign_to(4) - name.len.add(1));
-                (name, "")
-            }
-            fn END_NODE() => ("", "");
-            fn END() => ("", "");
-            fn NOP() => continue();
-            fn PROP() => {
-                //prop := self.in&.pop_type(Prop)[];
-                prop := self.in&.pop_type(Prop);                       // HACK: avoid unaligned read before turning on mmu, only works because my backend is dumb
-                prop: Prop = (nameoff = prop.nameoff, len = prop.len); // 
-                Prop.byte_swap_fields(prop&);
-                name: CStr = (ptr = self.strings.index(prop.nameoff.zext()));
-                data := self.in.slice(0, prop.len.zext());
-                self.in = self.in.rest(prop.len.zext().ualign_to(4));
-                (name.str(), data)
-            }
-        };
-        self.depth += int(tag == .BEGIN_NODE);
-        self.depth -= int(tag == .END_NODE);
-        return(tag = tag, name = name, data = data);
-    }
-}
-
-for_props :: fn(in: []u8, $body: @Fn(tag: FDT, name: Str, data: []u8) void #duplicated) void = {
-    self := iter(in);
-    dowhile {
-        it := self&.next();
-        body(it.tag, it.name, it.data);
-        it.tag != .END
-    };
-}
-
-// if its just ascii with null terminators, assume its a string. 
-// numbers tend to contain consecutive zeros and disallowing empty strings a decent heuristic. 
-// disallowing quotes because that makes it ambiguous between a list and just an inner `" "`. 
-looks_like_strings :: fn(data: []u8) bool = {
-    @if(data.len == 0 || data[data.len - 1] != 0) return(false);
-    zero_count := 0;
-    for data { it |
-        if it == 0 {
-            zero_count += 1;
-            @if(zero_count > 1) return(false);
-        } else {
-            zero_count = 0;
-            @if(it < 32 || it > 127 || it == "\"".ascii()) return(false);
-        }
-    };
-    true
-}
-
-#use("@/lib/sys/fs.fr");
-::DeriveFmt(Header);
-::DeriveFmt(ReserveEntry);
-::DeriveFmt(Prop);
-::enum(FDT);
-
-// Devicetree Specification, Release v0.4
-// https://github.com/devicetree-org/devicetree-specification/releases/tag/v0.4
-// all the numbers in this format are big endian. 
-
-MAGIC :: 0xd00dfeed;
-Header :: @struct {
-    magic: u32;
-    totalsize: u32;
-    off_dt_struct: u32;
-    off_dt_strings: u32;
-    off_mem_rsvmap: u32;
-    version: u32;
-    last_comp_version: u32;
-    boot_cpuid_phys: u32;
-    size_dt_strings: u32;
-    size_dt_struct: u32;
-}
-
-ReserveEntry :: @struct(address: u64, size: u64);
-
-FDT :: @enum(u32) (
-    BEGIN_NODE = byte_swap(1),
-    END_NODE = byte_swap(2),
-    PROP = byte_swap(3),
-    NOP = byte_swap(4),
-    END = byte_swap(9),
-);
-
-Prop :: @struct(len: u32, nameoff: u32);

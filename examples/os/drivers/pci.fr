@@ -1,0 +1,64 @@
+
+Header :: @struct {
+    vendor_id: u16;
+    device_id: u16;
+    command: u16;
+    status: u16;
+    revision: u8;
+    prog_if: u8;
+    subclass: u8;
+    class_code: u8;
+    _: u16;
+    header_type: u8;
+    bist: u8;
+    // tag is header_type. 0 = end point, 1 = bridge
+    body: @union(
+        _0: @struct {
+            bar: Array(u32, 6);
+            _: Array(u32, 3);
+            cap: u8;  // same place in both _0 and _1
+            __: Array(u8, 3);
+            ___: Array(u32, 2);
+        },
+        _1: @struct {
+            _: Array(u32, 12);
+        },
+    );
+}
+
+// TODO: this is just the only one i have for now
+CapNode :: import("@/examples/os/drivers/virtio.fr").pci_cap;  
+fn for_cap(h: *Header, $body: @Fn(it: *CapNode) void) void = {
+    base := Header.int_from_ptr(h);
+    it := CapNode.ptr_from_int(base + h.body._0.cap&.vol().zext());
+    dowhile {
+        body(it);
+        off := it.cap_next&.vol();
+        it = CapNode.ptr_from_int(base + off.zext());
+        off != 0
+    };
+}
+
+BarResult :: @struct {
+    old_address: i64;
+    size: i64;
+    flags: u8;
+    mem: []u8;
+};
+// TODO: is this different for body._1?
+// TODO: error if address not in size_mask so caller can try again with something aligned?
+// address must be a valid mmio address from the pci.reg node of the device tree
+set_bar64 :: fn(h: *Header, bar: u8, address: i64, stomp: bool) BarResult = {
+    bar := h.body._0.bar&[bar.zext()]&;
+    initial := vol_2x32(bar);
+    old_address := initial.bit_and(bit_not(0xF));
+    vol_2x32(bar, -1);
+    size_mask := vol_2x32(bar).bit_and(bit_not(0xF));
+    size := size_mask.bit_not().add(1);
+    if old_address != 0 && !stomp {
+        address = old_address;
+    };
+    vol_2x32(bar, address);
+    flags: u8 = initial.bit_and(0xF).trunc();
+    (old_address = old_address, size = size, flags = flags, mem = u8.ptr_from_int(address).slice(size))
+}

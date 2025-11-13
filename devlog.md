@@ -30,6 +30,9 @@
   doesn't have a pcie node, and does have a bunch of virtio_mmio, 
   and it claims to use Virtualization.framework which makes sense to me because its not slow as fuck, 
   which implies i can ask for the type of io thats not super complicated. 
+  i choose to believe its just lying and remapping them secretly. 
+- if the decission is apple just doesn't have emerg_wr, then i just have to do the virt queue thing. 
+  got hello world to work on qemu eventually... would you believe... doesn't work on avf. 
 
 ## (Nov 11)
 

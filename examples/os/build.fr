@@ -18,7 +18,18 @@ driver :: fn(vtable: *ImportVTable) void = {
     };
     @eprintln(">>> compiled in %ms;", timestamp() - start);
     println("running...   (to turn it off, ctrl-a then press x)");
-    sh(@slice("qemu-system-aarch64", "-machine", "virt,gic-version=3", "-cpu", "cortex-a76", "-kernel", output, "-nographic", "-m", "512M"));
+    sh(@slice(
+        "qemu-system-aarch64", "-machine", "virt,gic-version=3", 
+        "-cpu", "cortex-a76", "-kernel", output, "-nographic", 
+        "-m", "512M",
+        "-global", "virtio-mmio.force-legacy=false",
+        "-device", "virtio-serial-pci,id=virtio-serial0",
+        "-device", "virtconsole,chardev=vc02",
+        "-chardev", "file,path=target/qemuconsoleoutput.txt,id=vc02",
+    ));
+    console := read_entire_file_or_crash(temp(), "target/qemuconsoleoutput.txt");
+    print(console);
+    _ := Syscall'remove("target/qemuconsoleoutput.txt");
 }
 
 compile :: fn(vtable: *ImportVTable) []u8 = {
@@ -80,7 +91,7 @@ emit_entry :: fn(m: *Qbe.Module, main: Str) void = {
     m.maybe_add_export(start, true);
     m.emit_data(
         id = m.intern("stack_end"),
-        template = (Zeroes = 0x10000),
+        template = (Zeroes = 0x100000),
         relocations = empty(),
     );
     stack_top := m.intern("stack_top");

@@ -1,0 +1,114 @@
+// https://docs.oasis-open.org/virtio/virtio/v1.3/virtio-v1.3.html
+
+pci_vendor_id :: 0x1AF4;
+
+// 4.1.4.3 Common configuration structure layout
+PciCommonCfg :: @struct {
+    device_feature: Features;
+    driver_feature: Features;
+    config_msix_vector: u16;
+    num_queues: u16;
+    status: u8;
+    config_generation: u8;
+    
+    /* About a specific virtqueue. */ 
+    queue_select: u16;
+    queue_size: u16;
+    queue_msix_vector: u16;
+    queue_enable: u16;
+    queue_notify_off: u16;
+    queue_desc: *Desc;
+    queue_driver: *Queue.Avail;  // avail
+    queue_device: *Queue.Used;  // used
+    queue_notif_config_data: u16;
+    queue_reset: u16;
+
+    /* About the administration virtqueue. */ 
+    admin_queue_index: u16;
+    admin_queue_num: u16;
+};
+
+Features :: @struct {
+    select: u32;
+    value: u32;
+};
+
+// 4.1.4 Virtio Structure PCI Capabilities
+pci_cap :: @struct {
+    cap_vndr: u8;
+    cap_next: u8;
+    cap_len: u8;
+    cfg_type: PCI_CAP;
+    bar: u8;  // which base-address-register from pci header
+    id: u8;
+    _: Array(u8, 2);
+    // slice of bar
+    offset: u32;
+    length: u32;
+};
+
+PCI_CAP :: @enum(u8) (_0, COMMON, NOTIFY, ISR, DEVICE, PCI, _6, _7, SHARED_MEMORY, VENDOR);
+
+Queue :: @struct {
+    desc: Array(Desc, QUEUE_SIZE);
+    driver: Avail;
+    Avail :: @struct {  // avail
+        flags: u16;  //  VIRTQ_AVAIL_F_NO_INTERRUPT(1)
+        idx: u16;
+        ring: Array(u16, QUEUE_SIZE);
+        avail_event: u16; /* Only if VIRTIO_F_EVENT_IDX */ 
+    };
+    device: Used;
+    Used :: @struct {
+        flags: u16;  // VIRTQ_USED_F_NO_NOTIFY(1)
+        idx: u16;
+        ring: Array(UsedElem, QUEUE_SIZE);
+        used_event: u16; /* Only if VIRTIO_F_EVENT_IDX */ 
+    };
+};
+
+Desc :: @struct {
+    addr: *u8;
+    len: u32;
+    flags: u16; 
+    next: u16 = 0;  // valid if VIRTQ_DESC_F_NEXT
+};
+
+UsedElem :: @struct  { 
+    id: u32; 
+    len: u32; 
+};
+
+QUEUE_SIZE :: 16;   // TODO: make this dynamic
+ 
+// TODO: error if they don't agree on features
+// TODO: allow optional features
+// TODO: wait between steps until the flag reads back something? 
+fn init_features(self: *PciCommonCfg, required: i64) i64 = {
+    self.status&.vol(0);  // reset
+    // todo: don't hang if the device never responds... also uncommenting this makes it crash??
+    dowhile(=> self.status&.vol() != 0);  
+    self.status&.vol(self.status&.vol().bit_or(1));  // ACKNOWLEDGE
+    self.status&.vol(self.status&.vol().bit_or(2));  // DRIVER
+    offered := self.device_feature&.get();
+    agree := required.bit_and(offered);
+    self.driver_feature&.set(agree);
+    self.status&.vol(self.status&.vol().bit_or(8));  // FEATURES_OK
+    self.status&.vol(self.status&.vol().bit_or(4));  // DRIVER_OK
+    agree
+}
+
+fn set(self: *Features, it: i64) void = {
+    self.select&.vol(1);
+    self.value&.vol(it.shift_right_logical(32).trunc());
+    self.select&.vol(0);
+    self.value&.vol(it.trunc());
+}
+
+fn get(self: *Features) i64 = {
+    self.select&.vol(1);
+    hi := self.value&.vol();
+    self.select&.vol(0);
+    lo := self.value&.vol();
+    hi.zext().shift_left(32).bit_or(lo.zext())
+}
