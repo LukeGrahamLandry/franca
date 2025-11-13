@@ -56,10 +56,13 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
     device_tree_bytes := u8.ptr_from_int(device_tree).slice(dt.totalsize.zext());
     
     _, c := create_and_set_unsafe_environment();
-    c.panic_hook = kpanic;
+    //c.panic_hook = kpanic;
+    c.panic_hook = bit_cast_unchecked(i64, @type c.panic_hook, 0xABABABAB);
     kprint("Hi\n");
     
-    if i64.sys_get(.CurrentEL).shift_right_logical(2) != 1 {
+    el := i64.sys_get(.CurrentEL).shift_right_logical(2);
+    if el != 1 {
+        kprint_label("el ", el);
         kpanic("expected to run in el1");
     };
     if i64.sys_get(.ID_AA64ISAR0_EL1).shift_right_logical(20).bit_and(0b1111) == 0 {
@@ -88,13 +91,231 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
     cntctl := i64.sys_get(.CNTKCTL_EL1);
     i64.sys_set(.CNTKCTL_EL1, cntctl.bit_or(1));
 
-    setup_interrupts();
-    tt := setup_virtual_memory();
+    //setup_interrupts();
+    //tt := setup_virtual_memory();
+    tt := zeroed(*TranslationTable);
+
+    //a := Arena'stack_alloc(100000);
+    //out := u8.list(a);
+    //DT'dump(out&, device_tree_bytes);
+    //kprint(out.items());
     
-    a := Arena'stack_alloc(100000);
-    out := u8.list(a);
-    DT'dump(out&, device_tree_bytes);
-    kprint(out.items());
+    //franca examples/os/build.fr && qemu-system-aarch64 -machine virt,gic-version=3 -global virtio-mmio.force-legacy=false \
+    //        -cpu cortex-a76 -kernel target/kernel.out -serial stdio -display none -m 512M \
+    //        -device virtio-serial-pci,id=virtio-serial0 \
+    //        -device virtconsole,chardev=vc02 \
+    //        -chardev file,path=a.txt,id=vc02  && ls -l a.txt && cat a.txt && rm a.txt
+    
+    // TODO: annoying avoiding unaligned read so it works without mmu. only works because backend is dumb. 
+    pop_int :: fn(in) i64 => 
+        in.pop_type(u32)[].zext().bit_or(in.pop_type(u32)[].zext().shift_left(32)).byte_swap();
+    
+    legal_pci_addr := 0;
+    prev := "";
+    
+    self := DT'iter(device_tree_bytes);
+    dowhile {
+        continue :: local_return;
+        it := self&.next();
+        
+        if it.name == "ranges" && prev.starts_with("pci") {
+            // TODO: check that various size/address cells count is 2/3
+            while => it.data.len > 7*4 {
+                kprint("PCI RANGE\n");
+                flags: i64 = it.data&.pop_type(u32)[].zext();
+                pci_addr := pop_int(it.data&);
+                cpu_addr := pop_int(it.data&);
+                pci_size := pop_int(it.data&);
+                kprint_label("flags ", flags);
+                kprint_label("pci_addr ", pci_addr);
+                kprint_label("cpu_addr ", cpu_addr);
+                kprint_label("pci_size ", pci_size);
+                kprint_label("cpu_addr[0] ", u32.volatile(cpu_addr).zext());
+                
+                if pci_addr == cpu_addr {
+                    legal_pci_addr = pci_addr;
+                    kprint_label("legal_pci_addr ", legal_pci_addr);
+                }
+            };
+        };
+        
+        
+        if it.tag == .BEGIN_NODE {
+            prev = it.name;
+        };
+        
+        it.tag != .END
+    };
+    self := DT'iter(device_tree_bytes);
+    dowhile {
+        continue :: local_return;
+        it := self&.next();
+        // device tree pci.reg replaces ACPI 'MCFG' table and lets you find the config space. 
+        // "The PCI Express bus extends the Configuration Space from 256 bytes to 4096 bytes."
+        //    so maybe i need prev.starts_with("pcie") or else step by 256?
+        // vendorid = 0xffff means non existant device
+        //
+        if it.name == "reg" && prev.starts_with("pci") {
+            addr := pop_int(it.data&);  // i think this is the "configuration space"
+            size := pop_int(it.data&);
+            kprint("PCI REG\n");
+            kprint_label("addr ", addr);
+            kprint_label("size ", size);
+            
+            range(0, size / 4096) { i |
+                a := addr + i*4096;
+                vendorid := u32.volatile(a).bit_and(0xFFFF);
+                //if vendorid != 0xFFFF {
+                if vendorid == 0x1AF4 {
+                    header_type := u32.volatile(a + 12).shift_right_logical(16).bit_and(0xFF);
+                    command := u32.volatile(a + 4).bit_and(0xFFFF);
+
+                    deviceid := u32.volatile(a).shift_right_logical(16).bit_and(0xFFFF);
+                    //virtio_id := deviceid - 0x1040;  // TODO: 0x1040 apple or 0x1000 qemu
+                    if deviceid == 0x1043 || deviceid == 0x1003 {
+                            //u32.volatile(addr + 0x100 + 8, 67);
+                        kprint_label("found at ", i);
+                        //kprint_label("virtio_id ", virtio_id.zext());
+                        kprint_label("header_type ", header_type.zext());
+                        kprint_label("command ", command.zext());
+                        
+                        u32.volatile(a + 4, 0b110);  // command. enable memory space
+                        
+                        //bars: Array(u32, 6) = (
+                        //    u32.volatile(a + 0x10),
+                        //    u32.volatile(a + 0x14),
+                        //    u32.volatile(a + 0x18),
+                        //    u32.volatile(a + 0x1c),
+                        //    u32.volatile(a + 0x20),
+                        //    u32.volatile(a + 0x24),
+                        //);
+                        //kprint_label("bar4 ", bars&[4].zext());
+                        
+                        
+                        //cap_ptr: i64 = u16.volatile(a + 0x34).bit_and(0b11111111111100).zext();
+                        cap_ptr: i64 = u8.volatile(a + 0x34).zext();
+                        kprint_label("cap_ptr ", cap_ptr);
+                        
+                        // 4.1.4 Virtio Structure PCI Capabilities
+                        cap := a + cap_ptr;
+                        dowhile {
+                            cap_vndr: i64 = u8.volatile(cap).zext();
+                            kprint_label("cap_vndr ", cap_vndr);
+                            
+                            if cap_vndr == 9 {
+                                cfg_type := u8.volatile(cap + 3);
+                                bar := u8.volatile(cap + 4);
+                                off := u32.volatile(cap + 8);
+                                len := u32.volatile(cap + 12);
+                                kprint_label("cfg_type ", cfg_type.zext());
+                                kprint_label("bar ", bar.zext());
+                                kprint_label("off ", off.zext());
+                                kprint_label("len ", len.zext());
+                                
+                                //if cfg_type == 5 {   // VIRTIO_PCI_CAP_PCI_CFG. crashes qemu. doesn't exist in avf. 
+                                //    kprint_label("caplen ", u8.volatile(cap + 2).zext());
+                                //    u8.volatile(cap + 4, 4);  // bar
+                                //    u32.volatile(cap + 8, 8192 + 8);  // off
+                                //    u32.volatile(cap + 12, 4);  // len
+                                //    u32.volatile(cap + 16, 67);
+                                //};
+                                kprint_label("bar val ",  u32.volatile(a + 0x10 + (bar.zext() * 4)).zext());
+                                if cfg_type == 4 {  // 4=VIRTIO_PCI_CAP_DEVICE_CFG
+                                    //if bars&[bar.zext()].bit_and(0b110) == 0b100 {
+                                    //  // 64 bit memory space
+                                    //};
+                                    
+                                    //X :: @struct(a: u32, b: u32, c: u32);
+                                    //my_addr: X = (a = 0, b = 0, c = 0);
+                                    //my_addr := X.int_from_ptr(my_addr&);
+                                    //u32.volatile(a + 0x10 + (bar.zext() * 4), my_addr.trunc());
+                                    //u32.volatile(a + 0x10 + (bar.zext() * 4) + 4, my_addr.shift_right_logical(32).trunc());
+                                    //my_addr := my_addr + 8 + off.zext();
+                                    
+                                    read_int :: fn(it: i64) i64 = 
+                                        u32.volatile(it).zext().bit_or(u32.volatile(it + 4).zext().shift_left(32));
+                                    
+                                    write_int :: fn(addr: i64, val: i64) void = {
+                                        u32.volatile(addr, val.trunc());
+                                        u32.volatile(addr + 4, val.shift_right_logical(32).trunc());
+                                    };
+                                    
+
+                                    bar_addr := a + 0x10 + (bar.zext() * 4);
+                                    base := read_int(bar_addr).bit_and(bit_not(0xF));
+                                    kprint_label("OLD_BASE ", base);
+                                    write_int(bar_addr, -1);
+                                    size_mask := read_int(bar_addr).bit_and(bit_not(0xF));
+                                    size := size_mask.bit_not().add(1);
+                                    
+                                    base: i64 = legal_pci_addr;
+                                    write_int(bar_addr, base);
+                                    //base := read_int(bar_addr).bit_and(bit_not(0xF));
+                                    
+                                    kprint_label("BASE ", base);
+                                    kprint_label("SIZE_MASK ", size_mask);
+                                    kprint_label("SIZE ", size);
+                                    emerg_wr := base + 8 + off.zext();
+
+                                    u32.volatile(emerg_wr, 67);
+                                    u32.volatile(emerg_wr, 10);
+                                    u32.volatile(emerg_wr, 67);
+                                    u32.volatile(emerg_wr, 10);
+                                    dopoweroff();
+                                    //dohang();
+                                }
+                            };
+                            cap_next: i64 = u8.volatile(cap + 1).zext();
+                            kprint_label("cap_next ", cap_next);
+                            cap = a + cap_next;
+                            cap_next != 0
+                        };
+                        
+                    };
+                }
+            };
+            
+            //kprint_label("addr[0] ", u32.volatile(addr).zext());
+            //kprint_label("addr[1] ", u32.volatile(addr + 4).zext());
+            //kprint_label("addr[2] ", u32.volatile(addr + 8).zext());
+            //kprint_label("addr[3] ", u32.volatile(addr + 12).zext());
+            //kprint_label("addr[4] ", u32.volatile(addr + 16).zext());
+            
+            //range(0, 256) { bus |
+            //    range(0, 64) { device |
+            //        function := 0;
+            //        pci_get(addr, bus, device, function)
+            //    };
+            //};
+            
+        };
+        if it.name == "reg" && it.data.len == 16 && prev != "memory" {
+            addr := pop_int(it.data&);
+            size := pop_int(it.data&);
+            kprint("REG\n");
+            kprint_label("addr ", addr);
+            kprint_label("size ", size);
+            
+            if size >= 0x100 {
+                init_virt_device(addr, prev);
+            };
+            continue(true);
+        };
+        
+        if it.tag == .BEGIN_NODE {
+            prev = it.name;
+            //kprint(prev);
+            //kprint("\n");
+            //prefix := "virtio_mmio@";
+            //if it.name.starts_with(prefix) && it.name.len > prefix.len {
+            //    if hex(it.name.rest(prefix.len)) { addr |
+            //        init_virt_device(addr, prev);
+            //    };
+            //}
+        };
+        it.tag != .END
+    };
+    dopoweroff();
     
     stack_size_pages := 16;
     kstack := kernel.physical&.map(stack_size_pages);  // TODO: its hacky to assume this will be contiguous
@@ -118,6 +339,56 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
     kprint("kernel ready\n");
     return_to_scheduler();
 }
+
+pci_get :: fn(base: i64, bus: i64, slot: i64, func: i64, offs: i64) u32 = 
+    u32.volatile(base + (((bus * 256) + (slot * 8) + func) * 4096) + offs);
+
+dopoweroff :: fn() void #noinline = {
+    poweroff();
+};
+dohang :: fn() void #noinline = {
+    loop {
+    
+    };
+};
+
+init_virt_device :: fn(addr: i64, msg: Str) void = {
+    MAGIC :: 0x74726976;
+    magic: i64 = u32.volatile(addr + 0).zext();
+    version: i64 = u32.volatile(addr + 4).zext();
+    if magic == MAGIC && version == 2 {
+        id: i64 = u32.volatile(addr + 8).zext();
+        if id != 0 {
+            kprint_label("virtio_mmio at ", addr);
+            kprint_label("magic ", magic);
+            kprint_label("version ", version);
+            kprint_label("DeviceID ", id);
+            
+            if id == 3 {
+                status := addr + 0x070;
+                u32.volatile(status, 0);  // reset
+                u32.volatile(status, u32.volatile(status).bit_or(1));  // ACKNOWLEDGE
+                u32.volatile(status, u32.volatile(status).bit_or(2));  // DRIVER
+                feature_flags := u32.volatile(addr + 0x10);
+                kprint_label("flags ", feature_flags.zext());
+                u32.volatile(addr + 0x020, feature_flags);
+                u32.volatile(status, u32.volatile(status).bit_or(8));  // FEATURES_OK
+                features_ok := u32.volatile(status).bit_and(8) != 0;
+                u32.volatile(status, u32.volatile(status).bit_or(4));  // DRIVER_OK
+                
+                emerg_wr := addr + 0x100 + 8;
+                range(0, 26) { i |
+                    u32.volatile(emerg_wr, 65 + i.trunc());
+                };
+                u32.volatile(emerg_wr, 10);
+                for msg { c |
+                    u32.volatile(emerg_wr, c.zext());
+                };
+                u32.volatile(emerg_wr, 10);
+            }
+        }
+    };
+};
 
 root_task_elf_bytes :: {
     franca := get_executable_path(temp());
@@ -697,7 +968,7 @@ spin :: fn() Never = {
 
 kprint :: fn(s: Str) void = {
     for s { c |
-        u32.volatile(uart, c.zext());
+        //u32.volatile(uart, c.zext());
     };
 }
 

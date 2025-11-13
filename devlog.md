@@ -1,3 +1,37 @@
+// :dontforgetslowcopy
+
+- in the device tree, pci.reg tells me where the configuration space is, 
+  and then i can iterate through that and find the active ones with vendorid != 0xFFFF,
+  and the deviceid is offset 0x1000 from the ones in the virtio spec? 
+  looks promising in qemu, i find exactly one with id=3 when i ask for `virtio-serial-pci` 
+  and zero with `virtio-serial-device`. still doesn't look like that works in avf,
+  tho it does have the right vendorid for virtio, just not deviceid=3 for console. it has 66. 
+  really hard to do this with one bit communication channel of did it hang or not. 
+  oh wait thats for "Transitional PCI Device ID", if its not transitional (whatever that means),
+  offset is 0x1040 and then apple does have deviceid=3. 
+- not clear to me if cap_ptr and cap_next are supposed to be 8 bits or 16 bits. 
+  maybe one is pci and one is pcie? am i supposed to manually add 0x40 to skip the header?
+  maybe i thought it was hitting dohang but really the loop wasnt terminating
+  i think osdev is lying to me about "The bottom two bits are reserved and should be masked before the Pointer is used to access the Configuration Space."
+  because without that, it gets VIRTIO_PCI_CAP_DEVICE_CFG in qemu which it should.
+  ok we've learned i get to pick an address and write it in the bar to choose where i want the mmio to work
+  does it have to be one of the addresses in pci.ranges? seems like yes. 
+  once again, works in qemu (after much time wasted on double adding the offset). hangs avf. 
+- ayyyy at least ive achived another information channel, when i fail at it, 
+  Console.app has `Not mapping BAR because address 0xffffffffdabc0000 is not valid.` 
+  so i can give myself 64 bits at a time instead of 1. 
+  its just a bit lossy because you don't get the message if you try to write a valid address, 
+  so just set a high bit and ignore that one i guess. 
+- looks like setting bar isn't the problem. the one from ranges i try to use is 0x0000000050000000 and it doesn't think thats invalid. 
+  but its promising that i was looking for something called BAR and i found something called BAR. 
+  maybe they just don't implement emerg_wr for some reason (and express their displeasure at me trying to use it by hanging). 
+  im pretty sure interrupts start off masked (thats what the linux boot thingy says you have to do), so im not just dying over and over in the missing interrupt handler. 
+- tho, a slight detour that concerns me: `orb dtc -fI fs /sys/firmware/devicetree/base`
+  doesn't have a pcie node, and does have a bunch of virtio_mmio, 
+  and it claims to use Virtualization.framework which makes sense to me because its not slow as fuck, 
+  which implies i can ask for the type of io thats not super complicated. 
+
+## (Nov 11)
 
 - it seems my woes with virtualization.framework were just that i downloaded the 
   wrong files to use as a liunx kernel from clicking around in the link from their example. 
@@ -13,6 +47,20 @@
   in apple's virt, it doesn't print anything because my hardcoded uart addresses don't work,
   but i can choose between shutdown, crash, hang, so its definitely running it. 
 - get rid of the relocations for the syscall dispatch array
+- with a bunch of random qemu flags i can ask for a new serial port that goes to a file 
+  and print to it with the virtio console's emerg_wr but it doesn't work in 
+  avf, perhaps because my turning on the mmu doesn't work,
+  if i skip turning on the mmu it doesn't work in qemu either. 
+  can fix alignment and then it works on qemu again but still not apple. 
+- maybe they just call it vertio and are lying?
+- ohh maybe the you find pci devices is different than mmio devices and its one of the former?
+  virtio-serial-device vs virtio-serial-pci. 
+  oh joy the pci spec is paywalled. maybe this guy will tell me the secrets:
+  - https://michael2012z.medium.com/understanding-pci-node-in-fdt-769a894a13cc
+  - https://wiki.osdev.org/PCI
+
+
+make a blank one `orb truncate --size=4096 /Users/luke/Documents/mods/infered/target/disk.img`
 
 ## (Nov 10)
 
