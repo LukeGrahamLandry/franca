@@ -43,21 +43,16 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
         // wrong because theres some trailing bss
         //kernel_image_size = i64.ptr_from_int(kernel_image_base + 16)[].align_to(PAGE_SIZE);
     };
-    kprint_label("main ", int_from_rawptr(main));
-    kprint_label("image_base ", kernel_image_base);
-    kprint_label("device_tree ", device_tree);
     
     dt := DT.Header.ptr_from_int(device_tree)[];
     DT.Header.byte_swap_fields(dt&);
     if dt.magic != DT.MAGIC {
-        kprint("bad dt magic");  // yolo
-        poweroff();
+        kpanic("bad dt magic");
     };
     device_tree_bytes := u8.ptr_from_int(device_tree).slice(dt.totalsize.zext());
     
     _, c := create_and_set_unsafe_environment();
-    //c.panic_hook = kpanic;
-    c.panic_hook = bit_cast_unchecked(i64, @type c.panic_hook, 0xABABABAB);
+    c.panic_hook = kpanic;
     kprint("Hi\n");
     
     el := i64.sys_get(.CurrentEL).shift_right_logical(2);
@@ -91,184 +86,7 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
     cntctl := i64.sys_get(.CNTKCTL_EL1);
     i64.sys_set(.CNTKCTL_EL1, cntctl.bit_or(1));
 
-    //a := Arena'stack_alloc(100000);
-    //out := u8.list(a);
-    //DT'dump(out&, device_tree_bytes);
-    //kprint(out.items());
-    //out&.clear();
-    
-    // TODO: annoying avoiding unaligned read so it works without mmu. only works because backend is dumb. 
-    pop_int :: fn(in) i64 => 
-        in.pop_type(u32)[].zext().bit_or(in.pop_type(u32)[].zext().shift_left(32)).byte_swap();
-    
-    legal_pci_addr := 0;
-    prev := "";
-    
-    self := DT'iter(device_tree_bytes);
-    dowhile {
-        continue :: local_return;
-        it := self&.next();
-        
-        // TODO: maybe the physical memory it reads has to be in one of the other reg ranges from device tree?
-        if it.name == "ranges" && prev.starts_with("pci") {
-            // TODO: check that various size/address cells count is 2/3
-            while => it.data.len > 7*4 {
-                kprint("PCI RANGE\n");
-                flags: i64 = it.data&.pop_type(u32)[].zext();
-                pci_addr := pop_int(it.data&);
-                cpu_addr := pop_int(it.data&);
-                pci_size := pop_int(it.data&);
-                kprint_label("flags ", flags);
-                kprint_label("pci_addr ", pci_addr);
-                kprint_label("cpu_addr ", cpu_addr);
-                kprint_label("pci_size ", pci_size);
-                kprint_label("cpu_addr[0] ", u32.volatile(cpu_addr).zext());
-                
-                if pci_addr == cpu_addr {
-                    legal_pci_addr = pci_addr;
-                    kprint_label("legal_pci_addr ", legal_pci_addr);
-                }
-            };
-        };
-        
-        ::enum(@type it.tag);
-        if it.tag == .BEGIN_NODE {
-            prev = it.name;
-        };
-        
-        it.tag != .END
-    };
-    // TODO: make this work with the mmu turned on. just need to identity map the magic ranges. 
-    self := DT'iter(device_tree_bytes);
-    dowhile {
-        continue :: local_return;
-        it := self&.next();
-        // device tree pci.reg replaces ACPI 'MCFG' table and lets you find the config space. 
-        // "The PCI Express bus extends the Configuration Space from 256 bytes to 4096 bytes."
-        //    so maybe i need prev.starts_with("pcie") or else step by 256?
-        // vendorid = 0xffff means non existant device
-        //
-        if it.name == "reg" && prev.starts_with("pci") {
-            addr := pop_int(it.data&);  // i think this is the "configuration space"
-            size := pop_int(it.data&);
-            kprint("PCI REG\n");
-            kprint_label("addr ", addr);
-            kprint_label("size ", size);
-            
-            range(0, size / 4096) { i |
-                a := addr + i*4096;
-                h := Pci.Header.ptr_from_int(a);
-                vendorid := h.vendor_id&.volatile();
-                
-                if vendorid != 0xFFFF {
-                    kprint_label("index ", i);
-                    kprint_label("vendorid ", vendorid.zext());
-                    kprint_label("header_type ", (@as(u8) h.header_type&.vol()).zext());
-                    kprint_label("revision ", h.revision&.vol().zext());
-                    kprint_label("prog_if ", h.prog_if&.vol().zext());
-                    kprint_label("subclass ", h.subclass&.vol().zext());
-                    kprint_label("class_code ", h.class_code&.vol().zext());
-                }
-                notify_off_multiplier := 0;
-                notify_base := 0;
-                have_notify := false;
-                need_notify := false;
-                notify_bar: u8 = 0;
-                //if vendorid != 0xFFFF {
-                if vendorid == Virt.pci_vendor_id {
-
-                    deviceid := h.device_id&.volatile();
-                    if deviceid == 0x1043 || deviceid == 0x1003 {  // console
-                        header_type := h.header_type&.vol();
-                        kprint_label("found at ", i);
-                        
-                        h.command&.vol(0b110);  // enable memory space
-                        
-                        for_cap h { c |
-                            continue :: local_return;
-                            if(c.cap_vndr&.volatile() != 9, => continue());
-                            cfg_type := c.cfg_type&.volatile();
-                            ::enum(@type cfg_type);
-                            
-                            if cfg_type == .NOTIFY {
-                                // TODO: i hope all caps in a queue use the same BAR
-                                notify_off_multiplier = u32.vol(int_from_ptr(@type c[], c) + size_of(@type c[])).zext();
-                                notify_base = c.offset&.vol().zext();
-                                notify_bar = c.bar&.vol();
-                                have_notify = true;
-                            };
-                        };
-                        
-                        for_cap h { c |
-                            continue :: local_return;
-                            if(c.cap_vndr&.volatile() != 9, => continue());
-                            cfg_type := c.cfg_type&.volatile();
-                            bar := c.bar&.volatile();
-                            
-                            if cfg_type == .COMMON {
-                                // TODO: don't use the same address if its a different bar
-                                @if(have_notify && bar != notify_bar) kpanic("TODO: can this happen?");
-                                bar := Pci'set_bar64(h, bar, legal_pci_addr, true);
-                                cfg := bit_cast_unchecked(*u8, *Virt.PciCommonCfg, bar.mem.index(c.offset&.vol().zext()));
-                                
-                                // VIRTIO_F_VERSION_1,// VIRTIO_CONSOLE_F_EMERG_WRITE
-                                feat := 1.shift_left(32);// @or(1.shift_left(32), 1.shift_left(2));
-                                agree := cfg.init_features(feat);
-                                kprint_label("agree features ", agree);
-                                
-                                q := @uninitialized Virt.Queue;
-                                ::[]@type q;
-                                
-                                cfg.queue_select&.vol(1);  // transmitq(port0)
-                                kprint_label("default queue size ", cfg.queue_size&.vol().zext());
-                                cfg.queue_size&.vol(Virt.QUEUE_SIZE);
-                                cfg.queue_desc&.vol(q.desc&.index(0));
-                                cfg.queue_driver&.vol(q.driver&);
-                                cfg.queue_device&.vol(q.device&);
-                                cfg.queue_enable&.vol(1);
-                                
-                                barrier();
-                                cfg.status&.vol(cfg.status&.vol().bit_or(4));  // DRIVER_OK
-                                
-                                notify := bit_cast_unchecked(*u8, i64, bar.mem.ptr)
-                                    + notify_base + cfg.queue_notify_off&.vol().zext() * notify_off_multiplier;
-                                barrier();
-                                @if(have_notify) u16.vol(notify, 1);
-                                barrier();
-                                q.device.flags = 1;  // no events please
-                                msg := "Hello World\n";
-                                d := q.desc&[0]&; 
-                                d.addr = msg.ptr;
-                                d.len = msg.len.trunc();
-                                barrier();
-                                // TODO: Device Ring Wrap Counter.
-                                d.flags = 1.shift_left(7);  // VIRTQ_DESC_F_AVAIL
-                                
-                                q.driver.ring&[0] = 0;
-                                barrier();
-                                q.driver.idx = 1;
-                                barrier();
-                                
-                                if have_notify {
-                                    u16.vol(notify, 1);
-                                    while => q.device.idx&.volatile() == 0 {
-                                        barrier();
-                                        // spin
-                                    };
-                                }
-                            };
-                        };
-                    };
-                };
-            };
-        };
-        
-        if it.tag == .BEGIN_NODE {
-            prev = it.name;
-        };
-        it.tag != .END
-    };
-    poweroff();
+    find_pci_devices(device_tree_bytes);
     setup_interrupts();
     tt := setup_virtual_memory();
 
@@ -293,6 +111,67 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
     
     kprint("kernel ready\n");
     return_to_scheduler();
+}
+
+find_pci_devices :: fn(device_tree_bytes: []u8) void = {
+    kernel := kernel();
+    // TODO: make this work with the mmu turned on. just need to identity map the magic ranges. 
+    pci := Pci'find_config_space(DT'iter(device_tree_bytes));
+    pci := pci || kpanic("failed to read pci addresses from device tree");
+    
+    range(0, pci.config.len / 4096) { i |
+        continue :: local_return;
+        h := bit_cast_unchecked(*u8, *Pci.Header, pci.config.index(i*4096));
+        vendorid := h.vendor_id&.volatile();
+        
+        if(vendorid == 0xFFFF, => continue());
+        if(vendorid != Virt.pci_vendor_id, => continue());
+        
+        deviceid := h.device_id&.volatile();
+        if !(deviceid == 0x1043 || deviceid == 0x1003) {  // console
+            continue();
+        };
+        header_type := h.header_type&.vol();
+        
+        h.command&.vol(0b110);  // enable memory space
+        
+        note_cap := h.find_pci_cap(.NOTIFY);
+        c := h.find_pci_cap(.COMMON).unwrap();
+        bar_index := c.bar&.volatile();
+        
+        // TODO: keep track of the part thats been used so i can have multiple BARs
+        legal_pci_addr := u8.int_from_ptr(pci.bar.ptr);  
+        bar := Pci'set_bar64(h, bar_index, legal_pci_addr, true);
+        cfg := bit_cast_unchecked(*u8, *Virt.PciCommonCfg, bar.mem.index(c.offset&.vol().zext()));
+        
+        note: ?Virt.NotifyStep = .None;
+        if note_cap { c | 
+            @if(bar_index != c.bar&.vol()) kpanic("TODO: can this happen?");
+            note = (Some = (
+                off_multiplier = u32.vol(int_from_ptr(@type c[], c) + size_of(@type c[])).zext(),
+                base = c.offset&.vol().zext(),
+                bar = bar.mem,
+            ));
+        };
+    
+        feat := 1.shift_left(32);  // VIRTIO_F_VERSION_1
+        agree := cfg.init_features(feat);
+        @if(agree != feat) kpanic("didn't agree on device features");
+        
+        buf := kernel.physical&.map(1);
+        buf: []u8 = (ptr = bit_cast_unchecked(*Physical.Free, *u8, buf), len = PAGE_SIZE);
+        each buf { it |
+            it[] = 0;
+        };
+        
+        // q[1] = transmitq(port0)
+        q := init_queue(cfg, 1, buf, 128, note); q := q&;
+        cfg.publish_queues();
+        q.push("Hello", 0);
+        q.push("World", 0);
+        q.push("!\n", 0);
+        q.publish_chain();
+    };
 }
 
 dopoweroff :: fn() void #noinline = {
@@ -885,8 +764,7 @@ spin :: fn() Never = {
 
 kprint :: fn(s: Str) void = {
     for s { c |
-        //u32.volatile(uart, c.zext());
-        //
+        u32.volatile(uart, c.zext());
     };
 }
 

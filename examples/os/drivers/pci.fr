@@ -1,6 +1,6 @@
 
 Header :: @struct {
-    vendor_id: u16;
+    vendor_id: u16;  //  0xffff means non-existant device
     device_id: u16;
     command: u16;
     status: u16;
@@ -27,7 +27,7 @@ Header :: @struct {
 }
 
 // TODO: this is just the only one i have for now
-CapNode :: import("@/examples/os/drivers/virtio.fr").pci_cap;  
+CapNode :: import("@/examples/os/drivers/virtio.fr").PciCap;  
 fn for_cap(h: *Header, $body: @Fn(it: *CapNode) void) void = {
     base := Header.int_from_ptr(h);
     it := CapNode.ptr_from_int(base + h.body._0.cap&.vol().zext());
@@ -62,3 +62,56 @@ set_bar64 :: fn(h: *Header, bar: u8, address: i64, stomp: bool) BarResult = {
     flags: u8 = initial.bit_and(0xF).trunc();
     (old_address = old_address, size = size, flags = flags, mem = u8.ptr_from_int(address).slice(size))
 }
+
+// TODO: nicer api for device tree
+find_config_space :: fn(self: DT.Iter) ?MemoryRegion = {
+    // find the pci node
+    dowhile {
+        it := self&.next();
+        ::enum(@type it.tag);
+        @if(it.tag == .END) return(.None);
+        !(it.tag == .BEGIN_NODE && it.name.starts_with("pci"))
+    };
+    depth := self.depth;
+    
+    // read its childen
+    // annoying: vol_2x32 is just for avoiding unaligned read so it works without mmu, not because its actually volatile.
+    config: []u8 = empty();
+    bar: []u8 = empty();
+    dowhile {
+        it := self&.next();
+        // device tree pci.reg replaces ACPI 'MCFG' table and lets you find the config space. 
+        // "The PCI Express bus extends the Configuration Space from 256 bytes to 4096 bytes."
+        //    so maybe i need prev.starts_with("pcie") or else step by 256?
+        if it.name == "reg" {
+            data := u32.reinterpret_bytes(it.data);
+            addr := data.index(0).vol_2x32().byte_swap();
+            size := data.index(2).vol_2x32().byte_swap();
+            config = (ptr = u8.ptr_from_int(addr), len = size);
+            @if(bar.len != 0) return(Some = (config = config, bar = bar));
+        };
+        
+        if it.name == "ranges" {
+            // TODO: check that various size/address cells count is 2/3
+            data := u32.reinterpret_bytes(it.data);
+            while => data.len >= 7 {
+                flags: i64 = data[0].zext();
+                pci_addr := data.index(1).vol_2x32().byte_swap();
+                cpu_addr := data.index(3).vol_2x32().byte_swap();
+                pci_size := data.index(5).vol_2x32().byte_swap();
+                data = data.rest(7);
+                if pci_addr == cpu_addr {
+                    bar = (ptr = u8.ptr_from_int(pci_addr), len = pci_size);
+                    @if(config.len != 0) return(Some = (config = config, bar = bar));
+                }
+            };
+        };
+        self.depth >= depth
+    };
+    .None
+}
+
+MemoryRegion :: @struct {
+    config: []u8;  // array of Headers (but spaced out by 4096 bytes)
+    bar: []u8;     // memory that can be allocated to the bars for specific devices
+};

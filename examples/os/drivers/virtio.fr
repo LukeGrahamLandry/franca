@@ -1,4 +1,5 @@
 // https://docs.oasis-open.org/virtio/virtio/v1.3/virtio-v1.3.html
+// i only support the pci transport mechanism, split virtqueues. 
 
 pci_vendor_id :: 0x1AF4;
 
@@ -11,19 +12,17 @@ PciCommonCfg :: @struct {
     status: u8;
     config_generation: u8;
     
-    /* About a specific virtqueue. */ 
     queue_select: u16;
     queue_size: u16;
     queue_msix_vector: u16;
     queue_enable: u16;
     queue_notify_off: u16;
-    queue_desc: *Desc;
-    queue_driver: *Queue.Avail;  // avail
-    queue_device: *Queue.Used;  // used
+    queue_desc: *Desc;          // physical!
+    queue_driver: *Queue.Head;  // physical!
+    queue_device: *Queue.Head;  // physical!
     queue_notif_config_data: u16;
     queue_reset: u16;
 
-    /* About the administration virtqueue. */ 
     admin_queue_index: u16;
     admin_queue_num: u16;
 };
@@ -34,11 +33,11 @@ Features :: @struct {
 };
 
 // 4.1.4 Virtio Structure PCI Capabilities
-pci_cap :: @struct {
+PciCap :: @struct {
     cap_vndr: u8;
     cap_next: u8;
     cap_len: u8;
-    cfg_type: PCI_CAP;
+    cfg_type: PciCapTag;
     bar: u8;  // which base-address-register from pci header
     id: u8;
     _: Array(u8, 2);
@@ -47,28 +46,112 @@ pci_cap :: @struct {
     length: u32;
 };
 
-PCI_CAP :: @enum(u8) (_0, COMMON, NOTIFY, ISR, DEVICE, PCI, _6, _7, SHARED_MEMORY, VENDOR);
+PciCapTag :: @enum(u8) (_0, COMMON, NOTIFY, ISR, DEVICE, PCI, _6, _7, SHARED_MEMORY, VENDOR);
 
+// call sequence: init_features -> init_queue xN -> publish_queues -> notify_device
 Queue :: @struct {
-    desc: Array(Desc, QUEUE_SIZE);
-    driver: Avail;
-    Avail :: @struct {  // avail
-        flags: u16;  //  VIRTQ_AVAIL_F_NO_INTERRUPT(1)
-        idx: u16;
-        ring: Array(u16, QUEUE_SIZE);
-        avail_event: u16; /* Only if VIRTIO_F_EVENT_IDX */ 
+    desc: []Desc;
+    driver: @struct {  // avail  VIRTQ_AVAIL_F_NO_INTERRUPT(1)
+        head: *Head #use;
+        ring: []u16;
+        tail: *Tail #use;
     };
-    device: Used;
-    Used :: @struct {
-        flags: u16;  // VIRTQ_USED_F_NO_NOTIFY(1)
-        idx: u16;
-        ring: Array(UsedElem, QUEUE_SIZE);
-        used_event: u16; /* Only if VIRTIO_F_EVENT_IDX */ 
+    device: @struct {  // used  VIRTQ_USED_F_NO_NOTIFY(1)
+        head: *Head #use;
+        ring: []UsedElem;
+        tail: *Tail #use;
     };
+    notify: *u16;
+    
+    Head :: @struct(flags: u16, idx: u16);
+    Tail :: @struct(event: u16); /* Only if VIRTIO_F_EVENT_IDX */ 
+    
+    buf: []u8;  // all the physical memory backing this queue
+    this_queue_index: u16;
+    // next thing we'll write to driver.head.idx 
+    // (to allow delaying making a change public until a whole chain is ready)
+    driver_idx: u16;  
+    // last thing we read from device.head.idx
+    // (so we don't miss anything)
+    device_idx: u16;  
 };
 
+// TODO: unclear if i need to align `device` to 4096
+memory_needed :: fn(s: i64) i64 = {
+    size_of(Desc)*s + size_of(Queue.Head)*2 + size_of(Queue.Tail)*2 + size_of(u16)*2*s
+}
+
+fn init_queue(cfg: *PciCommonCfg, q_index: u16, buf: []u8, size: i64, notify: ?NotifyStep) Queue = {
+    init_pipe :: fn(it, $T) => {
+        it.head = buf&.pop_type(Queue.Head);
+        it.ring = buf&.pop_slice(T, size);
+        it.tail = buf&.pop_type(Queue.Tail);
+    };
+    q := zeroed Queue;
+    q.this_queue_index = q_index;
+    q.buf = buf;
+    q.desc = buf&.pop_slice(Desc, size);
+    init_pipe(q.driver&, u16);
+    init_pipe(q.device&, UsedElem);
+    
+    cfg.queue_select&.vol(q_index);
+    // TODO: check that it accepts our `size`
+    max_queue_size := cfg.queue_size&.vol();
+    cfg.queue_size&.vol(size.trunc());  
+    cfg.queue_desc&.vol(q.desc.index(0));
+    cfg.queue_driver&.vol(q.driver.head);
+    cfg.queue_device&.vol(q.device.head);
+    cfg.queue_enable&.vol(1);
+    
+    if notify { notify |
+        notify := bit_cast_unchecked(*u8, i64, notify.bar.ptr)
+            + notify.base + cfg.queue_notify_off&.vol().zext() * notify.off_multiplier;
+        q.notify = u16.ptr_from_int(notify);
+    };
+    
+    q
+}
+
+fn publish_queues(cfg: *PciCommonCfg) void = {
+    barrier();
+    cfg.status&.vol(cfg.status&.vol().bit_or(4));  // DRIVER_OK
+    status := cfg.status&.vol();  // READING SOMETHING IS IMPORTANT on avf ??
+    @if(status != 15) kpanic("driver failed to init");  // TODO: don't crash
+}
+
+NotifyStep :: @struct {
+    bar: []u8;
+    base: i64;
+    off_multiplier: i64;
+};
+
+fn notify_device(q: *Queue) void = {
+    barrier();
+    @if(q.notify.is_null()) return();
+    q.notify.vol(q.this_queue_index);
+    barrier();
+}
+
+// don't forget to publish_chain() after!
+fn push(self: *Queue, physical: []u8, flags: u16) void = {
+    @debug_assert_eq(physical.len.bit_and(MAX_u32), physical.len);
+    id := self.driver_idx;
+    i: i64 = id.zext().umod(self.desc.len);
+    // TODO: i guess im supposed to keep track of which descriptors are free 
+    //       seperately because they might not be processed in order? 
+    self.driver_idx += 1;
+    self.desc[i] = (addr = physical.ptr, len = physical.len.trunc(), flags = flags);
+    self.driver.ring[i] = id;
+}
+
+fn publish_chain(self: *Queue) void = {
+    barrier();
+    self.driver.head.idx&.vol(self.driver_idx);
+    self.notify_device();
+}
+
 Desc :: @struct {
-    addr: *u8;
+    addr: *u8;  // physical!
     len: u32;
     flags: u16; 
     next: u16 = 0;  // valid if VIRTQ_DESC_F_NEXT
@@ -78,8 +161,6 @@ UsedElem :: @struct  {
     id: u32; 
     len: u32; 
 };
-
-QUEUE_SIZE :: 128;   // TODO: make this dynamic
  
 // TODO: error if they don't agree on features
 // TODO: allow optional features
@@ -93,7 +174,7 @@ fn init_features(self: *PciCommonCfg, required: i64) i64 = {
     agree := required.bit_and(offered);
     self.driver_feature&.set(agree);
     self.status&.vol(self.status&.vol().bit_or(8));  // FEATURES_OK
-    features_ok := self.status&.vol().bit_and(8) != 0 ;
+    features_ok := self.status&.vol().bit_and(8) != 0;
     if !features_ok {
         agree = 0;
     };
@@ -114,3 +195,15 @@ fn get(self: *Features) i64 = {
     lo := self.value&.vol();
     hi.zext().shift_left(32).bit_or(lo.zext())
 }
+
+fn find_pci_cap(h: *Pci.Header, want: PciCapTag) ?*PciCap = {
+    for_cap h { c |
+        ::enum(@type want);
+        if c.cap_vndr&.vol() == 9 && c.cfg_type&.vol() == want {
+            return(Some = c);
+        };
+    };
+    .None
+}
+
+Pci :: import("@/examples/os/drivers/pci.fr");

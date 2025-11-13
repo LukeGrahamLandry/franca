@@ -41,7 +41,6 @@ dump :: fn(out: *List(u8), input: []u8) void = {
         };
         @fmt(out, "=== End Program Headers ===\n\n");
     };
-    //println(out.items()); out.clear();
     
     if header.section_header_entsize != size_of(Elf.SectionHeader) {
         @fmt(out, "Unexpected phentsize (wanted %)\n", ::size_of(Elf.SectionHeader));
@@ -81,23 +80,17 @@ dump :: fn(out: *List(u8), input: []u8) void = {
                     @fmt(out, "Unexpected entsize (wanted %)\n", ::size_of(Elf.Symbol));
                 } else {
                     mem := section_bytes(section_i);
+                    if mem.len.mod(size_of(Elf.Symbol)) != 0 {
+                        @fmt(out, "ERROR: Section size was not a multiple of entsize\n");
+                    };
                     str_bytes := section_bytes(section.link);
                     i := 0;
-                    dowhile {
-                        symbol := mem&.pop_type(Elf.Symbol);
+                    each Elf.Symbol.reinterpret_bytes(mem) { symbol |
                         n: i64 = symbol.name.zext();
                         name: CStr = @if(n < str_bytes.len, (ptr = str_bytes.index(n)), "ERROR: symbol name OOB");
                         @fmt(out, "    [%] % %\n", i, symbol, name);
-                        //s_i: i64 = symbol.section_header_index.zext();
-                        //@if(s_i != 65521)
-                        //if s_i >= sections.len || symbol.value > sections[s_i].addr + sections[s_i].size || symbol.value < sections[s_i].addr {
-                        //    @fmt(out, "ERROR: symbol offset doesn't fit in section_header_index!\n");
-                        //};
                         i += 1;
                         mem.len >= size_of(Elf.Symbol)
-                    };
-                    if mem.len != 0 {
-                        @fmt(out, "ERROR: Section size was not a multiple of entsize\n");
                     };
                 };
             };
@@ -106,17 +99,15 @@ dump :: fn(out: *List(u8), input: []u8) void = {
                 dump_elf_dynamic(out, input.subslice(section.offset, section.size));
             };
             
-            //println(out.items()); out.clear();
             show_relocs :: fn($Record, name) => {
                 @fmt(out, "=== Relocations (%) === \n", name);
                 mem := input.subslice(section.offset, section.size);
                 symbols_section := sections.index(section.link.zext());
                 symbols_bytes := section_bytes(section.link);
-                symbols: []Elf.Symbol = (ptr = ptr_cast_unchecked(u8, Elf.Symbol, symbols_bytes.ptr), len = symbols_bytes.len / Elf.Symbol.size_of());
+                symbols := Elf.Symbol.reinterpret_bytes(symbols_bytes);
                 str_bytes := section_bytes(symbols_section.link);
                 
-                while => mem.len > 0 {
-                    dyn := mem&.pop_type(Record);
+                each Record.reinterpret_bytes(mem) { dyn |
                     s := "????";
                     if dyn.sym < symbols.len.trunc() {
                         n: i64 = symbols[dyn.sym.zext()].name.zext();
@@ -137,7 +128,7 @@ dump :: fn(out: *List(u8), input: []u8) void = {
             if section.type == .VerSym {
                 @fmt(out, "  [Symbol Versions]\n    ");
                 mem := input.subslice(section.offset, section.size);
-                symbols: []u16 = (ptr = ptr_cast_unchecked(u8, u16, mem.ptr), len = mem.len / u16.size_of());
+                symbols := u16.reinterpret_bytes(mem);
                 enumerate symbols { i, v | 
                     @fmt(out, "(%. %), ", i, v[]);
                 };
@@ -175,20 +166,19 @@ dump :: fn(out: *List(u8), input: []u8) void = {
             has_strings := section.flags.bit_and(1.shift_left(@as(i64) Elf.SectionFlag.Strings)) != 0 || section.type == .StringTable;
             if section.size > 0 && has_strings {
                 @fmt(out, "  [Strings]\n");
-                c := 0;
                 i := 0;
+                mem := input.subslice(section.offset, section.size);
+                base := mem.ptr;
                 dowhile {
-                    s: CStr = (ptr = input.index(section.offset + c));
-                    s := s.str();
+                    s := mem&.pop_cstr();
+                    c := base.ptr_diff(mem.ptr);
                     if s.len > 0 {
                         @fmt(out, "    %. [%..<%] %\n", i, c, c + s.len + 1, s);
                     };
                     i += 1;
-                    c += s.len + 1;
-                    c < section.size
+                    mem.len > 0
                 };
             };
-            
             
             if section.type == .Hash {
                 @fmt(out, "  [Hash]\n");
@@ -210,11 +200,9 @@ dump :: fn(out: *List(u8), input: []u8) void = {
     };
 }
 
-
 fn dump_elf_dynamic(out: *List(u8), mem: []u8) void = {
     @fmt(out, "=== Dynamic === \n");
-    while => mem.len > 0 {
-        dyn := mem&.pop_type(Elf.Dyn);
+    each Elf.Dyn.reinterpret_bytes(mem) { dyn |
         @fmt(out, "    - %\n", dyn);
     };
     @fmt(out, "===\n");

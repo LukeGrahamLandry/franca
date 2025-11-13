@@ -1,5 +1,17 @@
 // :dontforgetslowcopy
 
+## (Nov 13)
+
+- for sanity purposes, make sure each section is at least aligned to 16 even when .Relocatable because flat_link doesn't respect the section.align
+- made queue struct not require constant queue size for arrays
+- it seems i don't need a notify after setting driver_ok but before adding to the queues, 
+  the important thing is that i READ queue_notify_off again (even tho it doesn't change?). 
+  if i don't do that, it just discards the first thing i put in the queue?? 
+  oh maybe its just waiting for me to read anything at all because im supposed to read back the 
+  status again to wait for it to agree we're ready. 
+
+## (Nov 12)
+
 - in the device tree, pci.reg tells me where the configuration space is, 
   and then i can iterate through that and find the active ones with vendorid != 0xFFFF,
   and the deviceid is offset 0x1000 from the ones in the virtio spec? 
@@ -62,9 +74,6 @@
   oh joy the pci spec is paywalled. maybe this guy will tell me the secrets:
   - https://michael2012z.medium.com/understanding-pci-node-in-fdt-769a894a13cc
   - https://wiki.osdev.org/PCI
-
-
-make a blank one `orb truncate --size=4096 /Users/luke/Documents/mods/infered/target/disk.img`
 
 ## (Nov 10)
 
