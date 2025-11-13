@@ -33,6 +33,7 @@
   i choose to believe its just lying and remapping them secretly. 
 - if the decission is apple just doesn't have emerg_wr, then i just have to do the virt queue thing. 
   got hello world to work on qemu eventually... would you believe... doesn't work on avf. 
+- yayyyy, the last thing missing was notify after changing config but before putting a thing in the queue. 
 
 ## (Nov 11)
 

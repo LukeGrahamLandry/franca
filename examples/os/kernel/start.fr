@@ -109,6 +109,7 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
         continue :: local_return;
         it := self&.next();
         
+        // TODO: maybe the physical memory it reads has to be in one of the other reg ranges from device tree?
         if it.name == "ranges" && prev.starts_with("pci") {
             // TODO: check that various size/address cells count is 2/3
             while => it.data.len > 7*4 {
@@ -170,6 +171,9 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
                 }
                 notify_off_multiplier := 0;
                 notify_base := 0;
+                have_notify := false;
+                need_notify := false;
+                notify_bar: u8 = 0;
                 //if vendorid != 0xFFFF {
                 if vendorid == Virt.pci_vendor_id {
 
@@ -185,31 +189,35 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
                             if(c.cap_vndr&.volatile() != 9, => continue());
                             cfg_type := c.cfg_type&.volatile();
                             ::enum(@type cfg_type);
-                            bar := c.bar&.volatile();
-                            off := c.offset&.volatile();
-                            len := c.length&.volatile();
-                            kprint_label("cfg_type ", zext @as(u8) cfg_type);
                             
-                            // TODO: don't choke if this is after COMMON
                             if cfg_type == .NOTIFY {
                                 // TODO: i hope all caps in a queue use the same BAR
                                 notify_off_multiplier = u32.vol(int_from_ptr(@type c[], c) + size_of(@type c[])).zext();
                                 notify_base = c.offset&.vol().zext();
+                                notify_bar = c.bar&.vol();
+                                have_notify = true;
                             };
+                        };
+                        
+                        for_cap h { c |
+                            continue :: local_return;
+                            if(c.cap_vndr&.volatile() != 9, => continue());
+                            cfg_type := c.cfg_type&.volatile();
+                            bar := c.bar&.volatile();
+                            
                             if cfg_type == .COMMON {
                                 // TODO: don't use the same address if its a different bar
+                                @if(have_notify && bar != notify_bar) kpanic("TODO: can this happen?");
                                 bar := Pci'set_bar64(h, bar, legal_pci_addr, true);
                                 cfg := bit_cast_unchecked(*u8, *Virt.PciCommonCfg, bar.mem.index(c.offset&.vol().zext()));
                                 
-                                // VIRTIO_F_VERSION_1, VIRTIO_CONSOLE_F_EMERG_WRITE
-                                agree := cfg.init_features(@or(1.shift_left(32), 1.shift_left(2)));
+                                // VIRTIO_F_VERSION_1,// VIRTIO_CONSOLE_F_EMERG_WRITE
+                                feat := 1.shift_left(32);// @or(1.shift_left(32), 1.shift_left(2));
+                                agree := cfg.init_features(feat);
                                 kprint_label("agree features ", agree);
                                 
                                 q := @uninitialized Virt.Queue;
                                 ::[]@type q;
-                                each q&.slice(1).interpret_as_bytes() { it |
-                                    it[] = 0;
-                                };
                                 
                                 cfg.queue_select&.vol(1);  // transmitq(port0)
                                 kprint_label("default queue size ", cfg.queue_size&.vol().zext());
@@ -217,23 +225,37 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
                                 cfg.queue_desc&.vol(q.desc&.index(0));
                                 cfg.queue_driver&.vol(q.driver&);
                                 cfg.queue_device&.vol(q.device&);
-                                barrier();
                                 cfg.queue_enable&.vol(1);
                                 
+                                barrier();
+                                cfg.status&.vol(cfg.status&.vol().bit_or(4));  // DRIVER_OK
+                                
+                                notify := bit_cast_unchecked(*u8, i64, bar.mem.ptr)
+                                    + notify_base + cfg.queue_notify_off&.vol().zext() * notify_off_multiplier;
+                                barrier();
+                                @if(have_notify) u16.vol(notify, 1);
+                                barrier();
+                                q.device.flags = 1;  // no events please
                                 msg := "Hello World\n";
-                                q.desc&[0] = (
-                                    addr = msg.ptr, 
-                                    len = msg.len.trunc(),
-                                    flags = 0,
-                                );
+                                d := q.desc&[0]&; 
+                                d.addr = msg.ptr;
+                                d.len = msg.len.trunc();
+                                barrier();
+                                // TODO: Device Ring Wrap Counter.
+                                d.flags = 1.shift_left(7);  // VIRTQ_DESC_F_AVAIL
                                 
                                 q.driver.ring&[0] = 0;
-                                q.driver.idx&.vol(1);
+                                barrier();
+                                q.driver.idx = 1;
                                 barrier();
                                 
-                                notify := bit_cast_unchecked(*u8, i64, bar.mem.index(c.offset&.vol().zext()))
-                                    + notify_base + cfg.queue_notify_off&.vol().zext() * notify_off_multiplier;
-                                u16.vol(notify, 0);
+                                if have_notify {
+                                    u16.vol(notify, 1);
+                                    while => q.device.idx&.volatile() == 0 {
+                                        barrier();
+                                        // spin
+                                    };
+                                }
                             };
                         };
                     };
@@ -246,7 +268,7 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
         };
         it.tag != .END
     };
-    dopoweroff();
+    poweroff();
     setup_interrupts();
     tt := setup_virtual_memory();
 
@@ -863,7 +885,8 @@ spin :: fn() Never = {
 
 kprint :: fn(s: Str) void = {
     for s { c |
-        u32.volatile(uart, c.zext());
+        //u32.volatile(uart, c.zext());
+        //
     };
 }
 
