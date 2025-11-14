@@ -34,7 +34,6 @@
   stop being lazy!!
 - don't just crash at runtime when you `import_c/cc.fr -r`
   and try to call a function that was forward declared but not linked against
-- examples/count.fr total lines is wrong
 - seperate all the tests that exec stuff or download stuff
   and make run them seperatly. 
   it's not acceptable that if i update macos and fuck up my clang, my normal tests fail. 

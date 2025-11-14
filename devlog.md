@@ -1,9 +1,22 @@
-// :dontforgetslowcopy
+
+## (Nov 14)
+
+- making page size not a constant so i can do 16kb pages
+  - mistakes:
+    - not shifting by the right amount in get_pointer
+    - too high nbit
+    - not changing tg0
+    - not committing all the pages for the signal stack
+  - now it works with `-accel hvf` which speeds up boot-sudoku-exit 862ms -> 171ms (5x),
+    which is still a lot slower than native 73ms but a big improvement. 
+    hopefully a lot of whats left is just the time to spin up a new universe. 
+    yeah, for kaleidoscope it's 16666ms -> 1382ms (12x), and native is 627ms. 
 
 ## (Nov 13)
 
 - for sanity purposes, make sure each section is at least aligned to 16 even when .Relocatable because flat_link doesn't respect the section.align
 - made queue struct not require constant queue size for arrays
+- clean up my virtio code so its at least a somewhat useable abstraction
 - it seems i don't need a notify after setting driver_ok but before adding to the queues, 
   the important thing is that i READ queue_notify_off again (even tho it doesn't change?). 
   if i don't do that, it just discards the first thing i put in the queue?? 

@@ -18,6 +18,8 @@ Kernel :: @struct {
     pages_reserved_freed: i64;
     pages_committed_freed: i64;
     device_tree: []u8;
+    page_size: i64;
+    page_index_bits: []i64;
 };
 
 fn kernel() *Kernel = {
@@ -43,6 +45,9 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
         // wrong because theres some trailing bss
         //kernel_image_size = i64.ptr_from_int(kernel_image_base + 16)[].align_to(PAGE_SIZE);
     };
+    // TODO: could allow data relocations in the kernel. 
+    //       just read elf sections here and do it based on kernel_image_base-link_image_base
+    //       but be careful because the linux header stomps part of the elf header. 
     
     dt := DT.Header.ptr_from_int(device_tree)[];
     DT.Header.byte_swap_fields(dt&);
@@ -86,14 +91,13 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
     cntctl := i64.sys_get(.CNTKCTL_EL1);
     i64.sys_set(.CNTKCTL_EL1, cntctl.bit_or(2));
 
+    kernel.choose_page_size();
     find_pci_devices(device_tree_bytes);
-    setup_interrupts();
     tt := setup_virtual_memory();
-
-    stack_size_pages := 16;
-    kstack := kernel.physical&.map(stack_size_pages);  // TODO: its hacky to assume this will be contiguous
-    ksize := stack_size_pages*PAGE_SIZE;
-    kernel.interrupt_stack = bit_cast_unchecked(*Physical.Free, *u8, kstack).slice(ksize);
+    setup_interrupts();
+    
+    kstack := kernel.physical&.map_contiguous(16 * 1.shift_left(16) / kernel.page_size);
+    kernel.interrupt_stack = kstack;
 
     ::[]Task;
     task := kernel.idle_task&;
@@ -158,8 +162,7 @@ find_pci_devices :: fn(device_tree_bytes: []u8) void = {
         agree := cfg.init_features(feat);
         @if(agree != feat) kpanic("didn't agree on device features");
         
-        buf := kernel.physical&.map(1);
-        buf: []u8 = (ptr = bit_cast_unchecked(*Physical.Free, *u8, buf), len = PAGE_SIZE);
+        buf := kernel.physical&.map_contiguous(1.shift_left(16) / kernel.page_size);
         each buf { it |
             it[] = 0;
         };
@@ -221,10 +224,10 @@ alloc_task :: fn(kernel: *Kernel, tt: *TranslationTable) *Task = {
 
 init_task :: fn(task: *Task, callee: rawptr) void = {
     kernel := kernel();
-    stack_size_pages := 10;
-    user_stack := vmap_reserve(kernel, task.mem&, stack_size_pages);
+    stack_size := 1.shift_left(20);
+    user_stack := vmap_reserve(kernel, task.mem&, stack_size / kernel.page_size);
     // stack grows left, so start at the right of the allocation. 
-    user_stack += stack_size_pages * PAGE_SIZE; 
+    user_stack += stack_size;
     
     task.mcontext.gpr&[31] = user_stack;
     // TODO: remove the remapping hack, just copy the bytes. 
@@ -569,32 +572,29 @@ syscall_func :: fn(task: *Task) void = {
     
     if intid == 1023 {
         if exception_class == 0b100100 {
-            vaddr := args.far.align_back(PAGE_SIZE);
-            
-            if vaddr.bit_and(1.shift_left(42).sub(1).bit_not()) != 0 {
-                kprint("data abort from el0\n");
-                kprint_label("fault address: ", args.far);
-                kprint_label("ip: ", args.elr);
-                send_signal(task);
-            };
+            vaddr := args.far.align_back(kernel.page_size);
             
             // TODO: don't create a L2 table for it if its just a junk pointer 
             pte := index_page_table(kernel, task.mem&, vaddr);
             if pte.res.get(.tag) == 0b00 && pte.res.get(.reserved) == 0b1 {
                 pte.res.repr = 0;  // TODO: store permissions there and pass them to vmap_one
-                vmap_one(kernel, task.mem&, vaddr, kernel.physical&.map(1));
+                vmap_one(kernel, task.mem&, vaddr, kernel.physical&.map(1), false);
                 return_to_user(task);
             };
             
             kprint("data abort from el0\n");
             kprint_label("fault address: ", args.far);
             kprint_label("ip: ", args.elr);
+            inst := u32.ptr_from_int(args.elr)[];
+            kprint_label("instruction: ", inst.zext());
             send_signal(task);  // give userspace a chance to print a stack trace
         };
         
         if exception_class == 0b100101 {
             // TODO: its fine for user to pass pointer to memory they haven't touched yet (implicitly zeroed)
             //       to a syscall, so should do the auto commit here as well.  
+            kprint_label("fault address: ", args.far);
+            kprint_label("ip: ", args.elr);
             kpanic("data abort from el1");
         };
         
@@ -660,7 +660,7 @@ syscall_func :: fn(task: *Task) void = {
 
 dump_page_stats :: fn() void = {
     kernel := kernel();
-    kprint_label("pages_remaining: ", kernel.physical.remaining.len / PAGE_SIZE);
+    kprint_label("pages_remaining: ", kernel.physical.remaining.len / kernel.page_size);
     kprint_label("pages_reserved : ", kernel.pages_reserved);
     kprint_label("pages_committed: ", kernel.pages_committed);
     kprint_label("pages_reserved_freed : ", kernel.pages_reserved_freed);

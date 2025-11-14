@@ -7,6 +7,7 @@ mmap :: fn(kernel: *Kernel, task: *Task, addr: i64, len: i64, prot: i64, flags: 
     if addr != 0 || fd.intcast() != -1 || offset != 0 {
         tpanic("non-trivial mmap");
     };
+    PAGE_SIZE := kernel.page_size;
     pages := len.ualign_to(PAGE_SIZE).udiv(PAGE_SIZE);
     result_addr := vmap_reserve(kernel, task.mem&, pages);
     barrier();  // TODO: theres an instruction to kill the tlb or something
@@ -23,6 +24,7 @@ mprotect :: fn(addr: i64, len: i64, prot: i64) i64 #n(226) = {
 }
 
 munmap :: fn(kernel: *Kernel, task: *Task, addr: i64, len: i64) i64 #n(215) = {
+    PAGE_SIZE := kernel.page_size;
     addr := addr.align_back(PAGE_SIZE);
     page_count := len.ualign_to(PAGE_SIZE).udiv(PAGE_SIZE);
     if addr + page_count * PAGE_SIZE >= kernel.next_vaddr || addr < (512*1024*1024) * 4 || page_count < 0 {
@@ -48,7 +50,7 @@ exit :: fn(task: *Task, status: i64) i64 #n(94) = {
 futex :: fn(kernel: *Kernel, task: *Task, addr: i64, op: i64, val: i64, timeout: i64) i64 #n(98) = {
     @if(timeout != 0) tpanic("TODO: futex timeout");
     // TODO: check that `addr` is committed and readable
-    pte := index_page_table(kernel, task.mem&, addr.align_back(PAGE_SIZE));
+    pte := index_page_table(kernel, task.mem&, addr.align_back(kernel.page_size));
     @if(pte.map.repr == 0) tpanic("futex unmapped address");
     
     @switch(op) {
