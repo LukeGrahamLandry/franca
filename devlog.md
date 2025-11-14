@@ -9,6 +9,16 @@
   if i don't do that, it just discards the first thing i put in the queue?? 
   oh maybe its just waiting for me to read anything at all because im supposed to read back the 
   status again to wait for it to agree we're ready. 
+- the thing that causes `Assertion failed: (isv), function hvf_vcpu_exec, file hvf.c, line 2030.`
+  with `-accel hvf` is `sys_set(.CNTP_TVAL_EL0`,
+  in qemu's source: `case EC_DATAABORT: { bool isv = syndrome & ARM_EL_ISV;  [...]; assert(isv);`
+  with `-d trace:hvf_unhandled_sysreg_write` it tells me 
+  `hvf_unhandled_sysreg_write unhandled sysreg write at pc=0x402040cc: 0x0030f804 (op0=3 op1=3 crn=14 crm=2 op2=0)`
+  idk what 0x0030f804 is, `msr	CNTP_TVAL_EL0, x0` should be 0xd51be200, but the part in brackets is right so fair enough
+  but like it seems unreasonable that they wouldn't let me have a timer. 
+  `hvf_sysreg_write: Guests should not rely on the physical counter, but macOS emits disable writes to it. Let it do so, but ignore the requests.`
+  ok sure, just use CNTV instead of CNTP and let the hypervisor lie about the number or whatever, it seems fine. 
+  could have saved a lot of fucking around with avf if i'd just investigated this in the beginning. 
 
 ## (Nov 12)
 
@@ -74,6 +84,7 @@
   oh joy the pci spec is paywalled. maybe this guy will tell me the secrets:
   - https://michael2012z.medium.com/understanding-pci-node-in-fdt-769a894a13cc
   - https://wiki.osdev.org/PCI
+  - https://elinux.org/Device_Tree_Usage#PCI_Address_Translation
 
 ## (Nov 10)
 
