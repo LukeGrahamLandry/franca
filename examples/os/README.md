@@ -40,7 +40,6 @@ currently it's good enough to run the franca compiler on qemu-system-aarch64's v
 
 - finish virtio queues
 - virtio interrupts so i can get input again
-- support 16kb page size so it works on m1 avf
 - put kprint in a vtable so it can use virtio console once thats set up
 - nicer device tree api
 - don't hardcode interrupt ids (use device tree)

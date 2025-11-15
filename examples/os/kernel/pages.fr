@@ -35,16 +35,22 @@ fn unmap_one(self: *Physical, it: *Physical.Free) void = {
     self.free = it;
 }
 
-fn new(self: *Physical) *Physical.Free = {
-    buf := self.map_contiguous(1);
+fn new(self: *Physical) *Physical.Free #inline = {
+    buf := self.map_contiguous(self.page_size, 1);
     it := bit_cast_unchecked(*u8, *Physical.Free, buf.ptr);
     it.link = zeroed(*Physical.Free);
     it
 }
 
 // TODO: when called directly (not from new()), this should reuse memory
-fn map_contiguous(self: *Physical, n: i64) []u8 = {
-    n *= self.page_size;
+fn map_contiguous(self: *Physical, n: i64, align: i64) []u8 #inline = {
+    if align > self.page_size {
+        base := u8.int_from_ptr(self.remaining.ptr);
+        waste := base.ualign_to(align) - base;
+        self.remaining = self.remaining.rest(waste);  // TODO: add the gap to .free
+    };
+    
+    n = n.align_to(self.page_size);
     @if(self.remaining.len < n) kpanic("oom");
     mem := self.remaining.slice(0, n);
     self.remaining = self.remaining.rest(n);
@@ -95,8 +101,9 @@ fn vunmap(kernel: *Kernel, addrs: *AddressSpace, vaddr: i64, page_count: i64) vo
     };
 }
 
+// TODO: use flags instead of crazy bools
 // this is called by the interrupt handler the first time you try to access a new page
-fn vmap_one(kernel: *Kernel, addrs: *AddressSpace, vaddr: i64, phys: *Physical.Free, device: bool) void = {
+fn vmap_one(kernel: *Kernel, addrs: *AddressSpace, vaddr: i64, phys: *Physical.Free, user: bool, pxn: bool, device: bool, zerofill: bool) void = {
     kernel.pages_committed += 1;
     pte := index_page_table(kernel, addrs, vaddr);
     if pte.map.repr != 0 {
@@ -107,15 +114,23 @@ fn vmap_one(kernel: *Kernel, addrs: *AddressSpace, vaddr: i64, phys: *Physical.F
     attr: PageTableEntry = (repr = p_addr);
     attr&.set(.tag, 0b11); // since its a single page, its not 0b01=block
     attr&.set(.idx, int(device));
-    attr&.set(.ap, 0b01);  // RW RW
+    if user {
+        attr&.set(.ap, 0b01);  // RW RW
+    } else {
+        attr&.set(.ap, 0b00);  // -- RW
+    };
     attr&.set(.sh, 0b11);
     attr&.set(.af, 0b1);
-    attr&.set(.pxn, 0b1);  // the kernel code is fixed. never add more. (redundant if it's el0 writable but can't hurt)
+    if pxn {
+        attr&.set(.pxn, 0b1);  // the kernel code is fixed. never add more. (redundant if it's el0 writable but can't hurt)
+    };
     
     pte.map = attr;
     
     // zero fill incase its an old page being reused. 
-    bit_cast_unchecked(*Physical.Free, *u8, phys).slice(kernel.page_size).set_bytes(0);
+    if zerofill {
+        bit_cast_unchecked(*Physical.Free, *u8, phys).slice(kernel.page_size).set_bytes(0);
+    }
 }
 
 fn index_page_table(kernel: *Kernel, addrs: *AddressSpace, vaddr: i64) *PTE = {
@@ -131,7 +146,7 @@ fn index_page_table(kernel: *Kernel, addrs: *AddressSpace, vaddr: i64) *PTE = {
         if e.repr == 0 {
             //table_size := 1.shift_left(L.len);  // TODO: use this to map the right amount
             // this is the first page on this chunk, need to make a next level table for it. 
-            mem := kernel.physical&.map_contiguous(size_of(TranslationTable) / kernel.page_size);
+            mem := kernel.physical&.map_contiguous(size_of(TranslationTable), size_of(TranslationTable));
             // stored address points to the next level of table
             attr: PageTableEntry = (repr = u8.int_from_ptr(mem.ptr).bitcast());
             attr&.set(.tag, 0b11);  // table entry
@@ -180,17 +195,17 @@ fn get(range: BitRange, addr: PageTableEntry) i64 =
 fn make_level_index(hi: i64, lo: i64) BitRange =
     (off = lo, len = hi - lo + 1);
 
-fn map_identity(kernel: *Kernel, mem: *AddressSpace, mem: []u8, device: bool) void = {
+fn map_identity(kernel: *Kernel, addrs: *AddressSpace, mem: []u8, user: bool, pxn: bool, device: bool) void = {
     // TODO: if its in physical memory, make sure its not in remaining/free?
     vaddr := u8.int_from_ptr(mem.ptr);
     end := vaddr + mem.len;
     while => vaddr < end {
-        vmap_one(kernel, mem, vaddr, Physical.Free.ptr_from_int(vaddr), device);      
+        vmap_one(kernel, addrs, vaddr, Physical.Free.ptr_from_int(vaddr), user, pxn, device, false);      
         vaddr += kernel.page_size;
     };
 }
 
-setup_virtual_memory :: fn() *TranslationTable = {
+setup_virtual_memory :: fn(ram: []u8) *TranslationTable = {
     kernel := kernel();
     page_size := kernel.page_size;
     kprint_label("page size = ", page_size);
@@ -198,9 +213,8 @@ setup_virtual_memory :: fn() *TranslationTable = {
     // translation tables must be aligned to the size of the table.
     mem: AddressSpace = (root = {
         // TODO: not all page tables are full size when not using 64kb pages
-        tt := kernel.physical&.map(size_of(TranslationTable) / page_size);
-        tt.link = zeroed(*Physical.Free);
-        bit_cast_unchecked(*Physical.Free, *TranslationTable, tt)
+        mem := kernel.physical&.map_contiguous(size_of(TranslationTable), size_of(TranslationTable));
+        bit_cast_unchecked(*u8, *TranslationTable, mem.ptr)
     });
     tt := mem.root.entries&.items();
     
@@ -219,43 +233,28 @@ setup_virtual_memory :: fn() *TranslationTable = {
     // TODO: shouldn't it be this: kernel.page_index_bits[kernel.page_index_bits.len - 1];
     nbit := 48; 
     
-    p_addr: u64 = 0;
-    block_size: u64 = 512*1024*1024;
-    // TODO: explicitly map pages for the devices (read addresses from device tree) instead of a massive chunk like this. 
-    while => p_addr < block_size * 4 {
-    if p_addr < block_size * 3 {
-        // low bits are attributes, the address is always aligned so its low bits are zero and don't matter. 
-        device := p_addr < 0x40000000;
-        idx := int(device);
-        attr: PageTableEntry = (repr = p_addr);
-        attr&.set(.tag, 0b11);
-        attr&.set(.idx, idx);
-        // ?? regardless of UXN/PXN, virtual memory that's writable from el0 cannot be executable from el1 ??
-        attr&.set(.ap, 0b00);  // -- RW
-        attr&.set(.sh, 0b11);
-        attr&.set(.af, 0b1);
-        if device {
-            attr&.set(.pxn, 0b1);
-        };
-        
-        pte := index_page_table(kernel, mem&, p_addr.bitcast());
-        pte.map = attr;
-    } else {
-    // TODO: copy the part for user space instead of letting it write to the kernel part!!
-    // remap the first chunk of physical as the second chunk of virtual as R+W for el0. 
-    // so el1 can execute that memory by its real address and el0 can use it by this new fake address. 
-        old_pte := index_page_table(kernel, mem&, (p_addr - block_size).bitcast())[];
-        pte := index_page_table(kernel, mem&, p_addr.bitcast());
-        old_pte.map&.set(.ap, 0b01);
-        old_pte.map&.set(.pxn, 0b1);  // redundant but can't hurt
-        pte[] = old_pte;
+    // map everything below ram as device memory for kernel
+    map_identity(kernel, mem&, u8.ptr_from_int(0).slice(u8.int_from_ptr(ram.ptr)), false, true, true);
+    // TODO: only kimage should be kernel executable
+    // map the whole ram into kernel memory
+    map_identity(kernel, mem&, ram, false, false, false);
+    
+    // map a copy of the init image into user memory
+    // TODO: make it virtual instead of physical
+    kernel.user_image = kernel.physical&.map_contiguous(kernel.kernel_image.len, 1);
+    kernel.user_image.copy_from(kernel.kernel_image);
+    range(0, kernel.user_image.len / kernel.page_size) { i |
+        pte := kernel.index_page_table(mem&, u8.int_from_ptr(kernel.user_image.ptr) + i * page_size);
+        pte.map&.set(.pxn, 1);  // redundant but can't hurt
+        pte.map&.set(.ap, 0b01);  // RW RW
     };
-        
-        p_addr += page_size.bitcast();
-    };
+    // TODO: unmap the kernel copy of elf_bytes so that physical memory can be reused
+    
+    kernel.pages_committed = 0;
+    kernel.pages_reserved = 0;
     
     // unmap the low addresses to make sure null pointers fault. 
-    unmapped := 1.shift_left(26);
+    unmapped := 1.shift_left(20);
     range(0, unmapped / page_size) { i |
         index_page_table(kernel, mem&, i * page_size)[].map.repr = 0;
     };
@@ -295,6 +294,7 @@ setup_virtual_memory :: fn() *TranslationTable = {
     barrier();
     SctlrEl1.sys_set(.SCTLR_EL1, sctlr);
     barrier();
+    kprint("mmu on\n");
     
     mem.root
 }

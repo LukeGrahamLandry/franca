@@ -20,14 +20,15 @@ Kernel :: @struct {
     device_tree: []u8;
     page_size: i64;
     page_index_bits: []i64;
+    kernel_image: []u8;
+    user_image: []u8;
+    ram: []u8;
 };
 
 fn kernel() *Kernel = {
     // when the mmu is off, all memory is treated as device memory and doesn't allow unaligned access. 
     // (and my flat_link doesn't align the data segment)
-    k :: @static(Array(u8, Kernel.size_of()*2));
-    kernel := align_the_thing(k, 8, size_of(Kernel));
-    kernel := Kernel.ptr_from_raw(kernel);
+    kernel := aligned_static(Kernel, 8);
     kernel
 }
 
@@ -36,15 +37,17 @@ DT :: import("@/examples/os/drivers/devicetree.fr");
 // this is called by emit_entry's _start
 main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
     link_image_base: i64 = 0x40100000;
-    kernel_image_size := 1.shift_left(23);  // TODO: tighter bound. 
+    kernel_image_size := -1;
     if device_tree == 0 || kernel_image_base == -4 {
         // qemu running as elf instead of as linux image
         device_tree = 0x40000000;
         kernel_image_base = link_image_base;
+        kernel_image_size = 1.shift_left(23);  // TODO: tighter bound. 
     } else {
-        // wrong because theres some trailing bss
-        //kernel_image_size = i64.ptr_from_int(kernel_image_base + 16)[].align_to(PAGE_SIZE);
+        // LinuxBootHeader.image_size
+        kernel_image_size = i64.ptr_from_int(kernel_image_base + 16)[];
     };
+    kprint_label("kernel_image_size ", kernel_image_size);
     // TODO: could allow data relocations in the kernel. 
     //       just read elf sections here and do it based on kernel_image_base-link_image_base
     //       but be careful because the linux header stomps part of the elf header. 
@@ -73,13 +76,27 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
     };
     
     kernel := kernel();
-    
-    ram_size: i64 = 1.shift_left(29) - 0x00100000; // TODO: get this from device tree
+    kernel.choose_page_size();
+    ram := find_physical_memory(DT'iter(device_tree_bytes));
+    kernel.ram = ram;
+    //kprint_label("main ", int_from_rawptr(main));  // TODO: this really freaks it out
+    //kprint_label("ram.ptr ", u8.int_from_ptr(ram.ptr));
+    //kprint_label("ram.len ", ram.len);
+    //kprint_label("kernel_image_base ", kernel_image_base);
+    //kprint_label("device_tree_bytes.ptr ", u8.int_from_ptr(device_tree_bytes.ptr));
+    //kprint_label("device_tree_bytes.len ", device_tree_bytes.len);
+
+    end_of_kernel := (kernel_image_base + kernel_image_size).ualign_to(kernel.page_size);
+    before_end_of_kernel := end_of_kernel - u8.int_from_ptr(ram.ptr);
+    kernel.kernel_image = u8.ptr_from_int(kernel_image_base).slice(end_of_kernel - kernel_image_base);
     kernel.physical.remaining = (
-         ptr = u8.ptr_from_int(kernel_image_base + kernel_image_size), 
-         len = ram_size - kernel_image_size,
+         ptr = u8.ptr_from_int(end_of_kernel), 
+         len = ram.len - before_end_of_kernel,
     );
-    kernel.next_vaddr = (512*1024*1024) * 4;
+    //kprint_label("physical.len ", kernel.physical.remaining.len);
+    // TODO: don't include this in physical.free, don't want to stomp it. 
+    //@if(kernel.physical.remaining.contains_address(device_tree_bytes.ptr)) kpanic("free ram stomps device tree");
+    kernel.next_vaddr = u8.int_from_ptr(ram.end_pointer()) + 0x40000000;
     kernel.env = get_dynamic_context();
     kernel.device_tree = device_tree_bytes;
     
@@ -91,12 +108,11 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
     cntctl := i64.sys_get(.CNTKCTL_EL1);
     i64.sys_set(.CNTKCTL_EL1, cntctl.bit_or(2));
 
-    kernel.choose_page_size();
     find_pci_devices(device_tree_bytes);
-    tt := setup_virtual_memory();
+    tt := setup_virtual_memory(ram);
     setup_interrupts();
     
-    kstack := kernel.physical&.map_contiguous(16 * 1.shift_left(16) / kernel.page_size);
+    kstack := kernel.physical&.map_contiguous(16 * 1.shift_left(16), 1);
     kernel.interrupt_stack = kstack;
 
     ::[]Task;
@@ -110,11 +126,36 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
     task := kernel.alloc_task(tt);
     init_task(task, user_exec);
     elf_bytes := root_task_elf_bytes;
-    task.mcontext.gpr&[0] = launder_to_user_pointer(u8.raw_from_ptr(elf_bytes.ptr));
+    task.mcontext.gpr&[0] = kernel.launder_to_user_pointer(u8.raw_from_ptr(elf_bytes.ptr));
     task.mcontext.gpr&[1] = elf_bytes.len;
     
     kprint("kernel ready\n");
     return_to_scheduler();
+}
+
+// TODO: nicer api for device tree
+find_physical_memory :: fn(self: DT.Iter) []u8 = {
+    dowhile {
+        it := self&.next();
+        ::enum(@type it.tag);
+        @if(it.tag == .END) kpanic("no memory node");
+        !(it.tag == .BEGIN_NODE && it.name.starts_with("memory"))
+    };
+    depth := self.depth;
+    // read its childen
+    // annoying: vol_2x32 is just for avoiding unaligned read so it works without mmu, not because its actually volatile.
+    dowhile {
+        it := self&.next();
+        if it.name == "reg" {
+            data := u32.reinterpret_bytes(it.data);
+            addr := data.index(0).vol_2x32().byte_swap();
+            size := data.index(2).vol_2x32().byte_swap();
+            return(ptr = u8.ptr_from_int(addr), len = size);
+        };
+        
+        self.depth >= depth
+    };
+    kpanic("devicetree: no memory.reg")
 }
 
 find_pci_devices :: fn(device_tree_bytes: []u8) void = {
@@ -162,7 +203,7 @@ find_pci_devices :: fn(device_tree_bytes: []u8) void = {
         agree := cfg.init_features(feat);
         @if(agree != feat) kpanic("didn't agree on device features");
         
-        buf := kernel.physical&.map_contiguous(1.shift_left(16) / kernel.page_size);
+        buf := kernel.physical&.map_contiguous(1.shift_left(16), 1);
         each buf { it |
             it[] = 0;
         };
@@ -231,7 +272,7 @@ init_task :: fn(task: *Task, callee: rawptr) void = {
     
     task.mcontext.gpr&[31] = user_stack;
     // TODO: remove the remapping hack, just copy the bytes. 
-    task.mcontext.elr = launder_to_user_pointer(callee);
+    task.mcontext.elr = kernel.launder_to_user_pointer(callee);
 }
 
 fn kill_task(task: *Task) void = {
@@ -258,9 +299,7 @@ setup_interrupts :: fn() void = {
 
 init_interrupt_vector :: fn() void #use(Arm) = {
     InterruptVector :: Array(Array(u32, 32), 16);
-    interrupt_handlers := @static(Array(u8, size_of(InterruptVector) * 2));
-    interrupt_base := align_the_thing(interrupt_handlers, 2048, size_of(InterruptVector));
-    interrupt_handlers := InterruptVector.ptr_from_raw(interrupt_base);
+    interrupt_handlers := aligned_static(InterruptVector, 2048);
     // TODO: have a way to ask for the global to have the right alignment
     // TODO: have a more official way to ask for it to be in executable memory
     
@@ -471,15 +510,17 @@ stop :: fn() Never = {
     poweroff()
 }
 
-align_the_thing :: fn(it: ~T, need_align: i64, need_size: i64) rawptr #where = {
+aligned_static :: fn($T: Type, $need_align: i64) *T #generic #inline = {
+    need_size :: size_of(T);
+    it := @static(Array(u8, need_size + need_align));
     tt := int_from_ptr(@type it[], it);
     start := tt; 
     end := start + size_of(@type it[]);
     tt := tt.ualign_to(need_align);
     if tt + need_size > end {
-        kprint("fucked\n!!!\n");
+        kprint("aligned_static: fucked");
     };
-    rawptr_from_int(tt)
+    T.ptr_from_int(tt)
 }
 
 // all the barriers for good luck
@@ -496,6 +537,7 @@ user_exec :: fn(elf_bytes: []u8) void = {
     c.prefer_syscalls = true;
     c.current_os = 1;
     c.temporary_allocator_i = Arena'stack_alloc(1.shift_left(15));
+    print("user_exec\n");
     // TODO: its sad that i have to commit new pages for the bytes copied 
     //       for Load commands but not accessed by the running program.
     import("@/examples/elf_loader.fr")'load_elf_file(elf_bytes);
@@ -578,7 +620,7 @@ syscall_func :: fn(task: *Task) void = {
             pte := index_page_table(kernel, task.mem&, vaddr);
             if pte.res.get(.tag) == 0b00 && pte.res.get(.reserved) == 0b1 {
                 pte.res.repr = 0;  // TODO: store permissions there and pass them to vmap_one
-                vmap_one(kernel, task.mem&, vaddr, kernel.physical&.map(1), false);
+                vmap_one(kernel, task.mem&, vaddr, kernel.physical&.map(1), true, true, false, true);
                 return_to_user(task);
             };
             
@@ -688,7 +730,7 @@ push_signal_context :: fn(task: *Task) void = {
         ctx.gpr&[1] = ctx.intid;
         ctx.gpr&[2] = 0;
         ctx.gpr&[31] = task.signal_stack;
-        ctx.gpr&[30] = launder_to_user_pointer(user_unwind_signal);
+        ctx.gpr&[30] = kernel().launder_to_user_pointer(user_unwind_signal);
         
         if task.signal_stack < task.signal_stack_left {
             tpanic(task, "too many nested signals");
@@ -703,7 +745,11 @@ send_signal :: fn(task: *Task) Never = {
     return_to_scheduler()
 }
 
-launder_to_user_pointer :: fn(a: rawptr) i64 #noinline = a.int_from_rawptr() + 512*1024*1024;
+launder_to_user_pointer :: fn(kernel: *Kernel, a: rawptr) i64 #noinline = {
+    i := int_from_rawptr(a) - u8.int_from_ptr(kernel.kernel_image.ptr);
+    @if(i >= kernel.kernel_image.len) kpanic("bad launder");
+    u8.int_from_ptr(kernel.user_image.ptr) + i
+}
 
 user_unwind_signal :: @AsmFunctionArmOnly(fn(intid_x0: i64) Never = ()) => (
     add_im(.X64, x1, sp, 0, 0),

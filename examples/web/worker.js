@@ -216,7 +216,7 @@ let weak_imports = [
     "dlopen",
     "sigaction",
     "pthread_attr_init",
-    "strtod", "localtime", "time",
+    "strtod", "localtime_r", "time",
     "snprintf",
 ];
 

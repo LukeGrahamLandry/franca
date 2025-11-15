@@ -1,4 +1,31 @@
 
+## (Nov 15)
+
+- briefly thought LinuxBootHeader.image_size being 0 made a difference to where it places device tree
+  so passed that via entry point instead of header but it seems to not really, i think i just misread a number. 
+- stop hard coding the relationship 512MB block step between the kernel's executable memory 
+  and where user_exec runs in userspace. so now i can deal with having more than 512mb of ram. 
+  get ram size from device tree. 
+- lots of wasted time being confused (as with every time i touch page tables). 
+  - big one is that TranslationTable has to be aligned to its size, which is up to 64kb,
+    so need to be a bit careful when using a smaller page size, it doesn't just happen automatically. 
+  - there's something very weird going on thats sensitive to code layout. 
+    where it crashes with `ELR_EL1: 0` before doing anything in user_exec (but after "kernel ready")
+    - only broken with `-accel hvf` (just qemu's normal slow mode works fine)
+    - sprinkling around #inline makes it work
+    - doesn't matter if linux image or elf
+    - doesn't matter if i give more stack space in build.fr/emit_entry
+    - just calling `int_from_rawptr(main);` in main breaks it in the same way. 
+      - only difference in code there is that it emits and calls ptr_diff__335. 
+        (which should be inlined but the first call never is because of the order i emit functions is dumb). 
+    - real entry point being less than 11 instructions also breaks it
+    - it must be an alignment thing (because flat_link doesn't space things out)
+      but i don't understand why because i shouldn't have anything that needs more than 16 byte alignment,
+      other than the interrupt vector and page tables which get special treatment to make sure they're aligned right. 
+      and elf/emit.fr does `m.align_to(s, 16)` now so it should be fine? 
+      stack_end's align doesn't matter because entry fixes it. 
+- cleanup: call localtime_r instead of localtime (for import_c's `__DATE__`)
+
 ## (Nov 14)
 
 - making page size not a constant so i can do 16kb pages
@@ -11,6 +38,9 @@
     which is still a lot slower than native 73ms but a big improvement. 
     hopefully a lot of whats left is just the time to spin up a new universe. 
     yeah, for kaleidoscope it's 16666ms -> 1382ms (12x), and native is 627ms. 
+    oh and im only using one core compared to 2 threads when native so it makes sense that its slower. 
+- interesting source of confusion, when loading as a linux kernel image, 
+  it doesn't necessarily put the device tree before the kernel so my current system will overflow into it. 
 
 ## (Nov 13)
 

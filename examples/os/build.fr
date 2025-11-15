@@ -3,12 +3,12 @@ driver :: fn(vtable: *ImportVTable) void = {
     start := timestamp();
     bytes := compile(vtable);
     #use("@/examples/testing.fr");
-    ram_base: i64 = 0x40100000;
-    flat_link(bytes, ram_base);
+    link_image_base: i64 = 0x40100000;
+    mem_size := flat_link(bytes, link_image_base);
     // before stomping the elf header, save it as something objdump understands
     write_entire_file_or_crash("target/kernel.elf", bytes);
     output := "target/kernel.out";
-    link_linux_boot(bytes, ram_base);
+    link_linux_boot(bytes, link_image_base, mem_size);
     write_entire_file_or_crash(output, bytes);
     
     if !cli_args().contains(fn(it) => it[] == "-qemu") {
@@ -85,7 +85,9 @@ emit_entry :: fn(m: *Qbe.Module, main: Str) void = {
         add_im(.X64, sp, fp, @as(u12) 0, 0b0),
         sub_im(.X64, x2, lr, 4, 0),  // base address if loaded as linux image
         arm_nop,  // bl main
-        wfi
+        b(0, 0),
+        arm_nop,
+        arm_nop,
     ));
     m.add_code_bytes(start, code&);  
     m.maybe_add_export(start, true);
@@ -112,7 +114,7 @@ emit_entry :: fn(m: *Qbe.Module, main: Str) void = {
         use_symbol(m, main) { s_main |
             s_main.strong = true;
             push_fixup(m, s_main, (
-                patch_at = u8.raw_from_ptr(m.segments&[.Code].mmapped.index(s_start.offset + 28 + 4)),
+                patch_at = u8.raw_from_ptr(m.segments&[.Code].mmapped.index(s_start.offset + 7*4 + 4)),
                 type = .Call,
             ));
         };
@@ -130,7 +132,7 @@ emit_entry :: fn(m: *Qbe.Module, main: Str) void = {
 // at ram_base and with only one load command (i.e. no virtual memory holes). 
 // it ignores section.addr_align
 // (which is eventually going to get annoying enough that i replace this function with something sane)
-flat_link :: fn(in: []u8, ram_base: i64) void = {
+flat_link :: fn(in: []u8, ram_base: i64) i64 = {
     Elf :: import("@/backend/elf/bits.fr");
     Arm :: import("@/backend/arm64/bits.fr");
     
@@ -148,10 +150,12 @@ flat_link :: fn(in: []u8, ram_base: i64) void = {
     voff := ram_base;
     found_entry := false;
     file_high := 0;
+    entry_file_off := 0;
     enumerate sh { i, it |
         if is_alloc(it) {
             if h.entry >= it.addr && h.entry < it.addr + it.size {
                 @assert(!found_entry);
+                entry_file_off = h.entry - it.addr + it.offset;
                 h.entry -= it.addr;
                 h.entry += voff;
                 found_entry = true;
@@ -166,7 +170,8 @@ flat_link :: fn(in: []u8, ram_base: i64) void = {
             voff += it.size;
         };
     };
-    @eprintln(">>> file size = %, mem size = %;", in.len, voff - ram_base);
+    mem_size := voff - ram_base;
+    @eprintln(">>> file size = %, mem size = %;", in.len, mem_size);
     @assert(file_high > 0);
     
     enumerate sh { mem_section_i, mem_section |
@@ -193,6 +198,7 @@ flat_link :: fn(in: []u8, ram_base: i64) void = {
                                 // TODO: get rid of these so base address doesn't matter!
                                 // TODO: what are the 137 data relocations that clearly don't matter that much?
                                 @assert(mem_section.type != .Bss, "TODO: reloc in bss");
+                                dest_vaddr = 0;  // TODO: redo at runtime. don't want fixed base address so can't do it here, but it seems fine without
                                 bit_cast_unchecked(*u8, *i64, mem_bytes.index(it.offset))[] = dest_vaddr;
                             };
                             @if(it.type == Elf.R_AARCH64_CALL26 || it.type == Elf.R_AARCH64_JUMP26) => {
@@ -249,12 +255,14 @@ flat_link :: fn(in: []u8, ram_base: i64) void = {
         mem_size = in.len,
         align = 65536,
     );
+    
+    mem_size
 }
 
 // TODO: the constant R_AARCH64_ABS64 are wrong now because don't know where it will be loaded in ram.
 //       but theres only two left and it seems to work
 // note: ram_base won't be the address its loaded at runtime, it's just used to offset constant addresses. 
-link_linux_boot :: fn(in: []u8, ram_base: i64) void = {
+link_linux_boot :: fn(in: []u8, ram_base: i64, mem_size: i64) void = {
     Elf :: import("@/backend/elf/bits.fr");
     Arm :: import("@/backend/arm64/bits.fr");
     
@@ -264,7 +272,7 @@ link_linux_boot :: fn(in: []u8, ram_base: i64) void = {
     lin_h[] = (
         code = (Arm'b(distance, 1), 0),
         text_offset = 0,
-        image_size = in.len,
+        image_size = mem_size,
         flags = 0b0_11_0,
     );
 }

@@ -1,4 +1,7 @@
 
+- elf: fix the first 0x4000 (commands_size_guess) of text section (at least when Relocatable probably also exe)
+  being marked as executable but being elf header junk, etc.
+  so objdump tries to disassemble it and you get something confusing. 
 - Terminos/tcsetattr confuses me. 
   theres like a parallel thing for configuring if you're going to do a blocking read or poll
   if the file descriptor feels in its heart that it's a terminal? 
