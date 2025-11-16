@@ -23,6 +23,7 @@ Kernel :: @struct {
     kernel_image: []u8;
     user_image: []u8;
     ram: []u8;
+    uart: ?Pl011;
 };
 
 fn kernel() *Kernel = {
@@ -36,6 +37,9 @@ DT :: import("@/examples/os/drivers/devicetree.fr");
 
 // this is called by emit_entry's _start
 main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
+    kernel := kernel();
+    kernel.uart = .None;
+
     link_image_base: i64 = 0x40100000;
     kernel_image_size := -1;
     if device_tree == 0 || kernel_image_base == -4 {
@@ -47,7 +51,6 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
         // LinuxBootHeader.image_size
         kernel_image_size = i64.ptr_from_int(kernel_image_base + 16)[];
     };
-    kprint_label("kernel_image_size ", kernel_image_size);
     // TODO: could allow data relocations in the kernel. 
     //       just read elf sections here and do it based on kernel_image_base-link_image_base
     //       but be careful because the linux header stomps part of the elf header. 
@@ -75,7 +78,6 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
         kprint("WARNING: ICC_SRE_EL1 (system register interface for GIC) is disabled\n");
     };
     
-    kernel := kernel();
     kernel.choose_page_size();
     ram := find_physical_memory(DT'iter(device_tree_bytes));
     kernel.ram = ram;
@@ -110,7 +112,15 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
 
     find_pci_devices(device_tree_bytes);
     tt := setup_virtual_memory(ram);
-    setup_interrupts();
+    gic := find_interrupt_controller(DT'iter(device_tree_bytes));
+    kernel.uart = find_uart(DT'iter(device_tree_bytes));
+    init_interrupt_vector();
+    init_gic(gic);
+    init_timer(gic);
+    if kernel.uart { uart |
+        init_uart(gic, uart);
+    };
+    barrier();
     
     kstack := kernel.physical&.map_contiguous(16 * 1.shift_left(16), 1);
     kernel.interrupt_stack = kstack;
@@ -133,29 +143,24 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
     return_to_scheduler();
 }
 
-// TODO: nicer api for device tree
 find_physical_memory :: fn(self: DT.Iter) []u8 = {
-    dowhile {
-        it := self&.next();
-        ::enum(@type it.tag);
-        @if(it.tag == .END) kpanic("no memory node");
-        !(it.tag == .BEGIN_NODE && it.name.starts_with("memory"))
-    };
-    depth := self.depth;
-    // read its childen
-    // annoying: vol_2x32 is just for avoiding unaligned read so it works without mmu, not because its actually volatile.
-    dowhile {
-        it := self&.next();
-        if it.name == "reg" {
-            data := u32.reinterpret_bytes(it.data);
-            addr := data.index(0).vol_2x32().byte_swap();
-            size := data.index(2).vol_2x32().byte_swap();
-            return(ptr = u8.ptr_from_int(addr), len = size);
-        };
-        
-        self.depth >= depth
-    };
-    kpanic("devicetree: no memory.reg")
+    self&.consume_root();
+    self&.find_node(.BEGIN_NODE, fn(it) => it.name.starts_with("memory"))
+        || kpanic("no memory node");
+    it := self&.find_node(.PROP, fn(it) => it.name == "reg")
+        || kpanic("devicetree: no memory.reg");
+    (ptr = u8.ptr_from_int(it.read_2x32(0)), len = it.read_2x32(2))
+}
+
+find_interrupt_controller :: fn(self: DT.Iter) Gic = {
+    self&.consume_root();
+    //                                                          qemu                           vzf
+    self&.find_node(.BEGIN_NODE, fn(it) => it.name.starts_with("intc") || it.name.starts_with("gic"))
+        || kpanic("no intc/gic node");
+    // TODO: make sure `compatible = arm,gic-v3`
+    it := self&.find_node(.PROP, fn(it) => it.name == "reg")
+        || kpanic("devicetree: no intc.reg");
+    (gicd = it.read_2x32(0), gicr = it.read_2x32(4))
 }
 
 find_pci_devices :: fn(device_tree_bytes: []u8) void = {
@@ -289,14 +294,6 @@ fn kill_task(task: *Task) void = {
     };
 }
 
-setup_interrupts :: fn() void = {
-    init_interrupt_vector();
-    init_gic();
-    init_timer();
-    init_uart();
-    barrier();
-}
-
 init_interrupt_vector :: fn() void #use(Arm) = {
     InterruptVector :: Array(Array(u32, 32), 16);
     interrupt_handlers := aligned_static(InterruptVector, 2048);
@@ -336,25 +333,27 @@ init_interrupt_vector :: fn() void #use(Arm) = {
 }
 
 // generic interrupt controller
-// TODO: get these numbers from devicetree.intc@<whatever>.reg (addr, size) pairs
-gicd :: 0x08000000;
-gicr :: 0x080a0000;
-init_gic :: fn() void = {
+Gic :: @struct {
+    gicd: i64;
+    gicr: i64;
+};
+init_gic :: fn(gic: Gic) void = {
     // ignore interrupts with lower priority than PMR 
     // (but 255 is low, 0 is high, so this means allow all). 
     i64.sys_set(.ICC_PMR_EL1, 255);  
     i64.sys_set(.ICC_IGRPEN1_EL1, 1);  // enable group 1 interrupts
     
-    u32.volatile(gicd + 0x0000, 0b10);  // CTLR.EnableGrp1NS=1
+    u32.volatile(gic.gicd + 0x0000, 0b10);  // CTLR.EnableGrp1NS=1
     // there's a whole thing about waking up the redistributor with GICR_WAKER (rd_lpi + 0x0014) 
     // but it seems fine. (maybe a problem once i have more cores)
 }
 
-// EL1 Physical Timer. INTID defined by the Server Base System Architecture (doesn't show in device tree?)
+// EL1 Physical Timer. INTID defined by the Server Base System Architecture 
+// device tree: timer.interrupts[4] + 16 (Private Peripheral Interrupts)
 timer_irq :: 30;
-init_timer :: fn() void = {
+init_timer :: fn(gic: Gic) void = {
     // one per core but i only have one core
-    rd_sgi: i64 = gicr + 0x10000;
+    rd_sgi: i64 = gic.gicr + 0x10000;
 
     // timer is private so its enabled in ---R only. 
     // any priority/ICFGR is fine.
@@ -370,12 +369,39 @@ reset_countdown :: fn() void = {
     i64.sys_set(.CNTV_TVAL_EL0, frequency / 200);
 }
 
-// TODO: the 1 is the middle number in devicetree.pl011@<whatever>.interrupts
-irq_uart :: 32 + 1;
-init_uart :: fn() void = {
+// ARM PrimeCell UART (PL011) 
+// https://developer.arm.com/documentation/ddi0183/g/programmers-model/summary-of-registers?lang=en
+Pl011 :: @struct {
+    base: i64;
+    irq: i64; 
+};
+
+find_uart :: fn(self: DT.Iter) ?Pl011 = {
+    self&.consume_root();
+    self&.find_node(.BEGIN_NODE, fn(it) => it.name.starts_with("pl011"))
+        || return(.None);
+    saved := self&.mark();
+    // TODO: make sure `compatible = arm,pl011`
+    reg := self&.find_node(.PROP, fn(it) => it.name == "reg")
+        || return(.None);
+    self&.reset(saved);
+    interrupts := self&.find_node(.PROP, fn(it) => it.name == "interrupts")
+        || return(.None);
+    (Some = (
+        base = reg.read_2x32(0), 
+        // TODO: not entirely sure about this. what are the other two words?
+        // +32 is because that the start of the range for Shared Peripheral Interrupts 
+        irq = interrupts.read_32(1).zext() + 32,
+    ))
+}
+
+init_uart :: fn(gic: Gic, self: Pl011) void = {
+    uart, irq_uart := (self.base, self.irq);
+    @if(irq_uart != 33) kpanic("TODO: need to update timer_irq in userspace");
+    
     // any priority/ICFGR is fine. IROUTER doesn't matter because i only have one core.
-    set_field(irq_uart, gicd + 0x80, 1, 1);  // IGROUPR set to group 1
-    set_field(irq_uart, gicd + 0x100, 1, 1); // ISENABLER 
+    set_field(irq_uart, gic.gicd + 0x80, 1, 1);  // IGROUPR set to group 1
+    set_field(irq_uart, gic.gicd + 0x100, 1, 1); // ISENABLER 
     
     // RSR,LCR_H,DMACR seem to be fine as reset=0.
     // strangely so are IBRD,FBRD (you're supposed to compute them from clock-frequency in device tree and desired baudrate)
@@ -582,7 +608,7 @@ syscall_func :: fn(task: *Task) void = {
     args.far = i64.sys_get(.FAR_EL1);
     args.intid = i64.sys_get(.ICC_IAR1_EL1).bit_and(0xfff);
     
-    intid: u32 = args.intid.trunc();
+    intid := args.intid;
     intid0 := i64.sys_get(.ICC_IAR0_EL1).bit_and(0xfff);
     if intid0 != 1023 {
         kpanic("intid0");
@@ -591,21 +617,26 @@ syscall_func :: fn(task: *Task) void = {
     kprint_label("thread pointer: ", SavedRegisters.int_from_ptr(args));
     kprint_label("SP_EL0: ", i64.sys_get(.SP_EL0));
     kprint_label("saved fp: ", args.gpr&[29]);
-    kprint_label("intid: ", intid.zext());
+    kprint_label("intid: ", intid);
     };
     
+    ::if_opt(Pl011, i64);
+    irq_uart: i64 = if(kernel.uart, fn(it) => it.irq, => -1);
     if intid == irq_uart {
+        uart := kernel.uart.unwrap();
+        uart := uart.base;
         //                     TMIS           RXMIS
         if u32.volatile(uart + 0x040).bit_and(0b10000) == 0 {
             kpanic("got uart interrupt but not ready to receive");
         };
-        byte := getchar();  // the read clears the bit  ^
+        // the read clears the bit  ^
+        byte: u8 = u32.volatile(uart).trunc();
         
         // always the init task! not whatever task was interrupted. 
         init := kernel.tasks&[0]&;
         @if(init.signal_handler == 0) kpanic("got input before init signal handler");
         push_signal_context(init);
-        init.mcontext.gpr&[1] = intid.zext();
+        init.mcontext.gpr&[1] = intid;
         init.mcontext.gpr&[2] = byte.zext();  // HACK
         return_to_user(init);
     };
@@ -688,12 +719,12 @@ syscall_func :: fn(task: *Task) void = {
     
     if intid == timer_irq {
         kernel.timer_counter += 1;
-        i64.sys_set(.ICC_EOIR1_EL1, intid.zext());
+        i64.sys_set(.ICC_EOIR1_EL1, intid);
         return_to_scheduler();  // this does reset_countdown
     };
     
     if intid != timer_irq && intid != irq_uart { 
-        kprint_label("intid: ", intid.zext());
+        kprint_label("intid: ", intid);
         kpanic("unknown interrupt");
     };
     
@@ -808,18 +839,13 @@ spin :: fn() Never = {
     };
 }
 
-kprint :: fn(s: Str) void = {
+kprint :: fn(s: Str) void #noinline = {
+    ::if_opt(Pl011, i64);
+    uart: i64 = if(kernel()[].uart, fn(it) => it.base, => 0x09000000);
+    
     for s { c |
         u32.volatile(uart, c.zext());
     };
-}
-
-// TODO: read the magic number from the device tree thingy?
-// https://developer.arm.com/documentation/ddi0183/g/programmers-model/summary-of-registers?lang=en
-uart :: 0x09000000;
-
-getchar :: fn() u8 = {
-    u32.volatile(uart).trunc()
 }
 
 // TODO: can't decide if this is where i want to go with this

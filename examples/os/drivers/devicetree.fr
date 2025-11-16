@@ -19,6 +19,13 @@ iter :: fn(in: []u8) Iter = {
     )
 }
 
+fn mark(self: *Iter) Iter = 
+    self[];
+
+fn reset(self: *Iter, mark: Iter) void = {
+    self[] = mark;
+}
+
 fn next(self: *Iter) Iter.Node = {
     loop {
         continue :: local_return;
@@ -56,6 +63,37 @@ for_props :: fn(in: []u8, $body: @Fn(tag: FDT, name: Str, data: []u8) void) void
         body(it.tag, it.name, it.data);
         it.tag != .END
     };
+}
+
+fn find_node(self: *Iter, kind: FDT, $where: @Fn(it: *Iter.Node) bool) ?Iter.Node = {
+    start := self.depth;
+    loop {
+        it := self.next();
+        ::enum(@type it.tag);
+        @if(it.tag == .END) return(.None);
+        @if(self.depth < start && it.tag == .END_NODE) return(.None);
+        
+        @if(self.depth == start + int(kind == .BEGIN_NODE))
+        @if(it.tag == kind)
+        @if(where(it&))
+            return(Some = it);
+    }
+}
+
+fn consume_root(self: *Iter) void = {
+    @assert_eq(self.depth, 0);
+    _ := self.find_node(.BEGIN_NODE, fn(_) => true);
+}
+
+fn read_2x32(it: DT.Iter.Node, u32_index: i64) i64 = {
+    data := u32.reinterpret_bytes(it.data);
+    // annoying: vol_2x32 is just for avoiding unaligned read so it works without mmu, not because its actually volatile.
+    data.index(u32_index).vol_2x32().byte_swap()
+}
+
+fn read_32(it: DT.Iter.Node, u32_index: i64) u32 = {
+    data := u32.reinterpret_bytes(it.data);
+    data[u32_index].byte_swap()
 }
 
 // if its just ascii with null terminators, assume its a string. 

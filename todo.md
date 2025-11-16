@@ -134,6 +134,8 @@
   just that it failed so then i need to deal with remapping errno values for the different targets. 
 - `FRANCA_NO_CACHE=1 ./q.out examples/import_wuffs/test.fr`
   > Assertion Failed: need_reify on threaded codegen of wuffs_base__io_reader__read_u8__46298
+- `FRANCA_NO_CACHE=1 ./target/f.out examples/import_c/test/ffi.fr`
+  > Assertion Failed: need_reify on threaded codegen of get_s__40986
 - repl.fr doesn't work jitted with FRANCA_NO_CACHE=1 on arm-macos because it needs to call apple_thread_jit_write_protect.
   should allow not writing to exec memory and call a tiny bit of aot code to do the copy when you're done each function. 
 - #log_ir needs to do something in declare_alias

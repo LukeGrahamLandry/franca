@@ -19,12 +19,15 @@ currently it's good enough to run the franca compiler on qemu-system-aarch64's v
 ## incomplete
 
 - mprotect
-- read device tree
 - multiple address spaces
 - multiple cores
 - sleep
 - block device
 - file system
+- shared file system (ex. VZVirtioFileSystemDevice)
+- exec and capture stdout
+- thread groups and clean up resources when all exit
+- dlopen
 - ptrace
 - swapping
 - frame buffer
@@ -41,12 +44,9 @@ currently it's good enough to run the franca compiler on qemu-system-aarch64's v
 - finish virtio queues
 - virtio interrupts so i can get input again
 - put kprint in a vtable so it can use virtio console once thats set up
-- nicer device tree api
-- don't hardcode interrupt ids (use device tree)
-- don't hardcoded addresses (use device tree): uart, gic, ram size
 - allow choosing console device. so support both pl011 and virtio. 
 - keep track of how mmio space is allocated to bars so once i have multiple they don't overlap
 - move device drivers to user space. 
-- call avf from my language and bundle the whole thing into one exe
+- call virtualization.framework from my language and bundle the whole thing into one exe
 - support entitlements in my codesign
 - make volatile pointers less painful in my language

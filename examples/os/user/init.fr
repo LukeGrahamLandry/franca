@@ -55,6 +55,8 @@ main :: fn() void = {
         
         buf := u8.list(general_allocator());
         timer := false;
+        @println("The system took %ms to boot.", timestamp());
+        // TODO: this shell should share some logic with examples/terminal.fr
         loop {
             mark := temp().mark();
             old := fs.strace;  // TODO: not thread safe
@@ -64,27 +66,23 @@ main :: fn() void = {
             fs.strace = old;
             
             command := buf.items();
-            @switch(command) {
+            parts := command.split(" ", temp()).items();
+            @switch(parts[0]) {
                 @case("exit") => Syscall'exit(0);
                 @case("quit") => Syscall'exit(0);
                 @case("uptime") => {   
                     @println("%ms", timestamp());
                 };
-                @case("strace off") => {
-                    fs.strace = false;
+                @case("strace") => {
+                    fs.strace = parts[1] == "on" || parts[1] == "true";
                 };
-                @case("strace on") => {
-                    fs.strace = true;
-                };
-                @case("time off") => {
-                    timer = false;
-                };
-                @case("time on") => {
-                    timer = true;
+                @case("time") => {
+                    timer = parts[1] == "on" || parts[1] == "true";
                 };
                 @case("help") => print(SHELL_HELP.rest(1));
                 @default => {
                     break :: local_return;
+                    command := parts[0];
                     if command.ends_with(".fr") {
                         if fs.index&.get(command).is_none() {
                             check := @tfmt("examples/%", command);
@@ -99,6 +97,14 @@ main :: fn() void = {
                         println("compiling...");
                         start := timestamp();
                         push_dynamic_context { 
+                            c := context(DefaultContext);
+                            args := CStr.list(temp());
+                            args&.push("franca".as_cstr());
+                            for parts { it |
+                                args&.push(it.as_cstr());
+                            };
+                            c.cli_arguments = args.items();
+                            
                             import("@/compiler/main.fr")'main2(command, true);
                         };
                         if timer {
@@ -145,6 +151,7 @@ signal_env :: @static(DefaultContext);
 //       ex. uart always goes to the init task. 
 handle_signal :: fn(ctx: *MContext, intid: i64, data: i64) i64 = {
     set_dynamic_context(DefaultContext.raw_from_ptr(signal_env));
+    // TODO: don't hardcode the 33. get it from device tree. 
     if intid == 33 {
         char: u8 = data.trunc();
         if char == 3 {
@@ -391,6 +398,11 @@ LIBC :: @struct {
     };
     // for mandel.ssa
     putchar :: fn(c: u8) = print(c&.slice(1));
+    puts :: fn(s: CStr) i64 = {  // for hello.c
+        println(s.str());
+        0
+    };
+    
     tcgetattr :: fn(fd: Fd, it: *Term.Terminos) i64 = with_file fd { fd |
         // TODO
         it[] = zeroed(Term.Terminos);
@@ -420,6 +432,14 @@ LIBC :: @struct {
             };
             0
     };
+    
+    localtime_r :: fn(time_in: *time_t, time_out: *BigTime) *BigTime = {
+        // TODO
+        time_out[] = zeroed(BigTime);
+        time_out
+    };
+    // TODO: this is supposed to be calander time not system up time
+    time :: fn(out: *time_t) time_t = (seconds = timestamp() * 1000);
 };
 
 system_counter_uptime :: fn() TimeSpec = {

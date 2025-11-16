@@ -25,6 +25,41 @@
       and elf/emit.fr does `m.align_to(s, 16)` now so it should be fine? 
       stack_end's align doesn't matter because entry fixes it. 
 - cleanup: call localtime_r instead of localtime (for import_c's `__DATE__`)
+- another round of using device tree instead of hard coded magic numbers. 
+  kinda makes the code shittier, idk. maybe it will grow on me. 
+
+---
+
+taking a break. playing with someone else's thing that uses qbe (https://github.com/kengorab/abra-lang)
+- too slow to be fun: 17233ms
+- BufferedWriter: 11440ms
+  - libsystem_kernel.dylib.write samples: 5166 -> 31
+- no gc: 8437ms
+  - just leak all the memory because compilers are short-lived
+  - could make it a cli flag to call GC_malloc or malloc, if i was more committed to the idea
+- whats left is 730 compiler, 2255 qbe, 5303 clang (thier arm assembler is really slow as ive learned).
+- qbe_frontend.fr on thier ssa is 569ms but doesn't work
+  - ret without argument in `$.10.Typechecker..._typecheckIndexingArraylike` 
+    (in presumably unreachable block after you return from match stmt). 
+    for now just allow that and replace it with hlt in my backend. 
+  - `.lambda_192.discard` has an env parameter and calls $.lambda_191 which also has an env parameter 
+    but it doesn't pass it explicitly, relies on it just happening to still be in the register.
+    but when i inline a call without an env argument i set it to zero. 
+    just threaded env through in the discard case of compileFunctionValue. 
+  - they also have a lot of `(env %__env__...) {` where its missing a comma so its just 
+    part of the name instead of being variadic (same on real qbe, dot is a legal character in identifiers), 
+    but those functions don't need to be variadic, so i can't really tell what the goal is. 
+- using my backend: 1345ms
+- oh they also have a StringBuilder which achieves the same thing as my BufferedWriter,
+  they just only use it for the js backend. i forget we're in gc land where its not 
+  socially acceptable to mutate a string so you're allowed to just hold on to an array of them.
+  that's kinda convient. tho it segfaults so maybe not. 
+- one more broken test. compiler/types.abra: `$.f4.discard(...): Wanted alias for RTmp:69 x`,
+  its called with too few arguments and then gets inlined so we notice. i don't give a very good error message for that. 
+  in debug mode its slightly better but not much: `ssa temporary %x.69 is used undefined in @start of $.f4.discard (no def)`
+  tho their ir_compiler doesn't have that problem,  
+  but can't compile itself so ive caught them in the middle of a rewrite i suppose, 
+  maybe i'll just wait for that instead of spending time fixing thier old code that seems to be on the way out anyway. 
 
 ## (Nov 14)
 

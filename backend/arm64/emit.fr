@@ -101,7 +101,7 @@ fn fixup_arm64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
 // do not push to symbol.fixups here!
 fn load_from_got(self: *QbeModule, symbol: *SymbolInfo, reg_encoding: i64, insts: []u32, jit_address: rawptr) ?Fixup = {
     new_got_reloc := ensure_got_slot(self, symbol, jit_address);
-    @debug_assert(symbol.got_lookup_offset >= 0 && symbol.got_lookup_offset.mod(8) == 0);
+    @debug_assert(symbol.got_lookup_offset >= 0 && symbol.got_lookup_offset.mod(8) == 0, "load_from_got corrupt");
     got := self.segment_address(.ConstantData, symbol.got_lookup_offset);  // :GotAtConstantDataBase 
     //@debug_assert_eq(ptr_cast_unchecked(u8, rawptr, got)[], jit_address); // TODO: this should be true except for got_indirection_instead_of_patches 
     
@@ -524,7 +524,7 @@ fn check_args(i: *Qbe.Ins) void = {
 arm_scratch_int :: Arm64Reg.IP1;
 
 fn emitins(self: *ArmState, i: *Qbe.Ins, block: *Qbe.Blk) void = {
-    @debug_assert(block.is_null() || block.ins.items().contains_address(i));
+    @debug_assert(block.is_null() || block.ins.items().contains_address(i), "emit ins oob");
     ::if(u32);
     F :: @Fn(s: FType, dest: u5, a: u5, b: u5) u32;
     I :: @Fn(s: Bits, dest: u5, a: u5, b: u5) u32;
@@ -591,7 +591,7 @@ fn emitins(self: *ArmState, i: *Qbe.Ins, block: *Qbe.Blk) void = {
     
     if maybe_store(i) { size |
         addr, off := decode_mem(self, a1, Qbe.Null, size.intcast());
-        @debug_assert(!(addr == arm_scratch_int.int_id() && a0 == TMP(arm_scratch_int)));  // TODO
+        @debug_assert(!(addr == arm_scratch_int.int_id() && a0 == TMP(arm_scratch_int)), "str scratch frame");  // TODO
         
         if i.op() == .storel && addr != arm_scratch_int.int_id() {
             break :: local_return;
@@ -599,7 +599,7 @@ fn emitins(self: *ArmState, i: *Qbe.Ins, block: *Qbe.Blk) void = {
             j := i.offset(1);
             @if(j.op() != i.op()) break();
             addr2, off2 := decode_mem(self, j.arg&[1], Qbe.Null, size.intcast());
-            @debug_assert(!(addr2 == arm_scratch_int.int_id() && (a0 == TMP(arm_scratch_int) || j.arg&[0] == TMP(arm_scratch_int))));  // TODO
+            @debug_assert(!(addr2 == arm_scratch_int.int_id() && (a0 == TMP(arm_scratch_int) || j.arg&[0] == TMP(arm_scratch_int))), "stp scratch frame");  // TODO
             @if(addr != addr2) break();
             r0, r1 := (i.arg&[0].int_reg(), j.arg&[0].int_reg());
             off := off;
@@ -649,7 +649,7 @@ fn emitins(self: *ArmState, i: *Qbe.Ins, block: *Qbe.Blk) void = {
         fn dbgloc() => self.m.add_debug_info(i, self.next_inst_offset());
         fn copy() => {
             if (i.to == a0, => return()); 
-            @debug_assert(!(i.to == QbeNull || a0 == QbeNull));
+            @debug_assert(!(i.to == QbeNull || a0 == QbeNull), "null copy in $%", self.f.name());
             // this is kinda clunky, we let rega insert copies that reference stack slots and then lower them here. 
             if rtype(i.to) == .RSlot {
                 r := i.to;
@@ -713,7 +713,7 @@ fn emitins(self: *ArmState, i: *Qbe.Ins, block: *Qbe.Blk) void = {
             };
         }
         fn salloc() => {
-            @debug_assert(self.needs_frame);
+            @debug_assert(self.needs_frame, "salloc frame");
             self.inst(sub_er(Bits.X64, sp, sp, a0.int_reg()));
             if i.to != QbeNull {
                 self.inst(sub_im(Bits.X64, i.to.int_reg(), sp, 0, 0)); // :SpEncoding
@@ -726,11 +726,11 @@ fn emitins(self: *ArmState, i: *Qbe.Ins, block: *Qbe.Blk) void = {
             }
             fn RCon() => {
                 c := self.f.get_constant(a1);
-                @debug_assert(is_int(i.cls()) && c.bits().bit_and(1.shift_left(12) - 1) == c.bits() && c.type() == .CBits);
+                @debug_assert(is_int(i.cls()) && c.bits().bit_and(1.shift_left(12) - 1) == c.bits() && c.type() == .CBits, "add_im oob");
                 self.inst(add_im(si, i.to.int_reg(), a0.int_reg(), @as(u12) @as(i64) c.bits(), 0));
             }
             fn RMem() => {
-                @debug_assert(is_int(i.cls()));
+                @debug_assert(is_int(i.cls()), "madd float");
                 m := self.f.get_memory(a1);
                 self.inst(madd(si, i.to.int_reg(), m.base.int_reg(), m.index.int_reg(), a0.int_reg()));
             }
@@ -738,7 +738,7 @@ fn emitins(self: *ArmState, i: *Qbe.Ins, block: *Qbe.Blk) void = {
         };
         fn sub() => {
             if self.f.get_int(a1) { imm |
-                @debug_assert(is_int(i.cls()) && imm.bit_and(1.shift_left(12) - 1) == imm);
+                @debug_assert(is_int(i.cls()) && imm.bit_and(1.shift_left(12) - 1) == imm, "sub_im oob");
                 self.inst(sub_im(si, i.to.int_reg(), a0.int_reg(), @as(u12) imm, 0));
                 return();
             };
@@ -768,8 +768,8 @@ fn emitins(self: *ArmState, i: *Qbe.Ins, block: *Qbe.Blk) void = {
             if i.cls().is_int() {
                 a, b := (a0.int_reg(), a1.int_reg());
                 r := arm_scratch_int.int_id();
-                @debug_assert_ne(@as(i64) r, @as(i64) a);
-                @debug_assert_ne(@as(i64) r, @as(i64) b);
+                @debug_assert_ne(@as(i64) r, @as(i64) a, "swap scratch");
+                @debug_assert_ne(@as(i64) r, @as(i64) b, "swap scratch");
                 self.inst(mov(si, r, a)); 
                 self.inst(mov(si, a, b));
                 self.inst(mov(si, b, r));

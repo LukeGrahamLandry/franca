@@ -74,13 +74,9 @@ set_bar64 :: fn(h: *Header, bar: u8, address: i64, stomp: bool) BarResult = {
 
 // TODO: nicer api for device tree
 read_device_tree :: fn(self: DT.Iter) ?MemoryRegion = {
-    // find the pci node
-    dowhile {
-        it := self&.next();
-        ::enum(@type it.tag);
-        @if(it.tag == .END) return(.None);
-        !(it.tag == .BEGIN_NODE && it.name.starts_with("pci"))
-    };
+    self&.consume_root();
+    self&.find_node(.BEGIN_NODE, fn(it) => it.name.starts_with("pci")) 
+        || return(.None);
     depth := self.depth;
     
     // read its childen
@@ -93,22 +89,20 @@ read_device_tree :: fn(self: DT.Iter) ?MemoryRegion = {
         // "The PCI Express bus extends the Configuration Space from 256 bytes to 4096 bytes."
         //    so maybe i need prev.starts_with("pcie") or else step by 256?
         if it.name == "reg" {
-            data := u32.reinterpret_bytes(it.data);
-            addr := data.index(0).vol_2x32().byte_swap();
-            size := data.index(2).vol_2x32().byte_swap();
+            addr := it.read_2x32(0);
+            size := it.read_2x32(2);
             config = (ptr = u8.ptr_from_int(addr), len = size);
             @if(bar.len != 0) return(Some = (config = config, bar = bar));
         };
         
         // TODO: use #address-cells, #size-cells, #interrupt-cells
         if it.name == "ranges" {
-            data := u32.reinterpret_bytes(it.data);
-            while => data.len >= 7 {
-                flags: i64 = data[0].zext();
-                pci_addr := data.index(1).vol_2x32().byte_swap();
-                cpu_addr := data.index(3).vol_2x32().byte_swap();
-                pci_size := data.index(5).vol_2x32().byte_swap();
-                data = data.rest(7);
+            while => it.data.len >= 7 * size_of(u32) {
+                flags: i64 = it.read_32(0).zext();
+                pci_addr := it.read_2x32(1);
+                cpu_addr := it.read_2x32(3);
+                pci_size := it.read_2x32(5);
+                it.data = it.data.rest(7 * size_of(u32));
                 if pci_addr == cpu_addr {
                     bar = (ptr = u8.ptr_from_int(pci_addr), len = pci_size);
                     @if(config.len != 0) return(Some = (config = config, bar = bar));
