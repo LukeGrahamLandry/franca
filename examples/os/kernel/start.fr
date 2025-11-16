@@ -1,6 +1,7 @@
 
 #use("@/examples/os/kernel/pages.fr");
 
+kernel :: @static(Kernel);
 Kernel :: @struct {
     physical: Physical;
     // for now i always increase the virtual addresses being handed out 
@@ -26,18 +27,10 @@ Kernel :: @struct {
     uart: ?Pl011;
 };
 
-fn kernel() *Kernel = {
-    // when the mmu is off, all memory is treated as device memory and doesn't allow unaligned access. 
-    // (and my flat_link doesn't align the data segment)
-    kernel := aligned_static(Kernel, 8);
-    kernel
-}
-
 DT :: import("@/examples/os/drivers/devicetree.fr");
 
 // this is called by emit_entry's _start
 main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
-    kernel := kernel();
     kernel.uart = .None;
 
     link_image_base: i64 = 0x40100000;
@@ -78,15 +71,9 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
         kprint("WARNING: ICC_SRE_EL1 (system register interface for GIC) is disabled\n");
     };
     
-    kernel.choose_page_size();
+    choose_page_size();
     ram := find_physical_memory(DT'iter(device_tree_bytes));
     kernel.ram = ram;
-    //kprint_label("main ", int_from_rawptr(main));  // TODO: this really freaks it out
-    //kprint_label("ram.ptr ", u8.int_from_ptr(ram.ptr));
-    //kprint_label("ram.len ", ram.len);
-    //kprint_label("kernel_image_base ", kernel_image_base);
-    //kprint_label("device_tree_bytes.ptr ", u8.int_from_ptr(device_tree_bytes.ptr));
-    //kprint_label("device_tree_bytes.len ", device_tree_bytes.len);
 
     end_of_kernel := (kernel_image_base + kernel_image_size).ualign_to(kernel.page_size);
     before_end_of_kernel := end_of_kernel - u8.int_from_ptr(ram.ptr);
@@ -95,7 +82,6 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
          ptr = u8.ptr_from_int(end_of_kernel), 
          len = ram.len - before_end_of_kernel,
     );
-    //kprint_label("physical.len ", kernel.physical.remaining.len);
     // TODO: don't include this in physical.free, don't want to stomp it. 
     //@if(kernel.physical.remaining.contains_address(device_tree_bytes.ptr)) kpanic("free ram stomps device tree");
     kernel.next_vaddr = u8.int_from_ptr(ram.end_pointer()) + 0x40000000;
@@ -133,10 +119,10 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
     init_task(task, spin);
 
     kernel.next_task_id = 1;
-    task := kernel.alloc_task(tt);
+    task := alloc_task(tt);
     init_task(task, user_exec);
     elf_bytes := root_task_elf_bytes;
-    task.mcontext.gpr&[0] = kernel.launder_to_user_pointer(u8.raw_from_ptr(elf_bytes.ptr));
+    task.mcontext.gpr&[0] = launder_to_user_pointer(u8.raw_from_ptr(elf_bytes.ptr));
     task.mcontext.gpr&[1] = elf_bytes.len;
     
     kprint("kernel ready\n");
@@ -164,7 +150,6 @@ find_interrupt_controller :: fn(self: DT.Iter) Gic = {
 }
 
 find_pci_devices :: fn(device_tree_bytes: []u8) void = {
-    kernel := kernel();
     // TODO: make this work with the mmu turned on. just need to identity map the magic ranges. 
     pci := Pci'read_device_tree(DT'iter(device_tree_bytes));
     pci := pci || kpanic("failed to read pci addresses from device tree");
@@ -244,14 +229,13 @@ root_task_elf_bytes :: {
         franca, "examples/default_driver.fr", "build", 
         "examples/os/user/init.fr", 
         "-os", "linux", "-arch", "aarch64", 
-        //"-syscalls",
         "-keep-names",
         "-o", o,
     ));
     read_entire_file_or_crash(ast_alloc(), o)
 };
 
-alloc_task :: fn(kernel: *Kernel, tt: *TranslationTable) *Task = {
+alloc_task :: fn(tt: *TranslationTable) *Task = {
     each kernel.tasks& { it |
         if !it.active {
             it.slice(1).set_zeroed();
@@ -269,15 +253,14 @@ alloc_task :: fn(kernel: *Kernel, tt: *TranslationTable) *Task = {
 }
 
 init_task :: fn(task: *Task, callee: rawptr) void = {
-    kernel := kernel();
     stack_size := 1.shift_left(20);
-    user_stack := vmap_reserve(kernel, task.mem&, stack_size / kernel.page_size);
+    user_stack := vmap_reserve(task.mem&, stack_size / kernel.page_size);
     // stack grows left, so start at the right of the allocation. 
     user_stack += stack_size;
     
     task.mcontext.gpr&[31] = user_stack;
     // TODO: remove the remapping hack, just copy the bytes. 
-    task.mcontext.elr = kernel.launder_to_user_pointer(callee);
+    task.mcontext.elr = launder_to_user_pointer(callee);
 }
 
 fn kill_task(task: *Task) void = {
@@ -510,7 +493,6 @@ return_to_user :: AsmFunctionArmOnly(fn(task_x0: *Task) Never = (), {
 
 return_to_scheduler :: fn() Never = {
     barrier();
-    kernel := kernel();
     cap := size_of(@type kernel.tasks) / size_of(Task);
     i := kernel.next_task_to_run&;
     range(0, cap) { _ |
@@ -588,7 +570,6 @@ tracing :: false;
 syscall_func :: fn(task: *Task) void = {
     return :: ();  // must do it via return_to_user
     
-    kernel := kernel();
     set_dynamic_context(kernel.env);
     args := task.mcontext&;
     
@@ -648,10 +629,10 @@ syscall_func :: fn(task: *Task) void = {
             vaddr := args.far.align_back(kernel.page_size);
             
             // TODO: don't create a L2 table for it if its just a junk pointer 
-            pte := index_page_table(kernel, task.mem&, vaddr);
+            pte := index_page_table(task.mem&, vaddr);
             if pte.res.get(.tag) == 0b00 && pte.res.get(.reserved) == 0b1 {
                 pte.res.repr = 0;  // TODO: store permissions there and pass them to vmap_one
-                vmap_one(kernel, task.mem&, vaddr, kernel.physical&.map(1), true, true, false, true);
+                vmap_one(task.mem&, vaddr, kernel.physical&.map(1), true, true, false, true);
                 return_to_user(task);
             };
             
@@ -732,7 +713,6 @@ syscall_func :: fn(task: *Task) void = {
 };
 
 dump_page_stats :: fn() void = {
-    kernel := kernel();
     kprint_label("pages_remaining: ", kernel.physical.remaining.len / kernel.page_size);
     kprint_label("pages_reserved : ", kernel.pages_reserved);
     kprint_label("pages_committed: ", kernel.pages_committed);
@@ -761,7 +741,7 @@ push_signal_context :: fn(task: *Task) void = {
         ctx.gpr&[1] = ctx.intid;
         ctx.gpr&[2] = 0;
         ctx.gpr&[31] = task.signal_stack;
-        ctx.gpr&[30] = kernel().launder_to_user_pointer(user_unwind_signal);
+        ctx.gpr&[30] = launder_to_user_pointer(user_unwind_signal);
         
         if task.signal_stack < task.signal_stack_left {
             tpanic(task, "too many nested signals");
@@ -776,7 +756,7 @@ send_signal :: fn(task: *Task) Never = {
     return_to_scheduler()
 }
 
-launder_to_user_pointer :: fn(kernel: *Kernel, a: rawptr) i64 #noinline = {
+launder_to_user_pointer :: fn(a: rawptr) i64 #noinline = {
     i := int_from_rawptr(a) - u8.int_from_ptr(kernel.kernel_image.ptr);
     @if(i >= kernel.kernel_image.len) kpanic("bad launder");
     u8.int_from_ptr(kernel.user_image.ptr) + i
@@ -841,21 +821,12 @@ spin :: fn() Never = {
 
 kprint :: fn(s: Str) void #noinline = {
     ::if_opt(Pl011, i64);
-    uart: i64 = if(kernel()[].uart, fn(it) => it.base, => 0x09000000);
+    uart: i64 = if(kernel[].uart, fn(it) => it.base, => 0x09000000);
     
     for s { c |
         u32.volatile(uart, c.zext());
     };
 }
-
-// TODO: can't decide if this is where i want to go with this
-SerialPort :: @struct {
-    addr: i64;
-    intid: i64;
-    interrupt: @FnPtr(ctx: *MContext) void;
-    putchar: @FnPtr(c: u8) void;
-    getchar: @FnPtr() u8;
-};
 
 // TODO: the volatile helpers should go elsewhere
 

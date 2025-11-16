@@ -1,4 +1,9 @@
 
+# (Nov 16)
+
+- (what i thought was an alignment problem yesterday): i am are have stupid. 
+  i was adding the addend to src instead of dest in flat_link
+
 ## (Nov 15)
 
 - briefly thought LinuxBootHeader.image_size being 0 made a difference to where it places device tree

@@ -3,13 +3,13 @@ write :: fn(fd: i64, buf: i64, len: i64) i64 #n(64) = {
     len
 }
 
-mmap :: fn(kernel: *Kernel, task: *Task, addr: i64, len: i64, prot: i64, flags: i64, fd: i64, offset: i64) i64 #n(222) = {
+mmap :: fn(task: *Task, addr: i64, len: i64, prot: i64, flags: i64, fd: i64, offset: i64) i64 #n(222) = {
     if addr != 0 || fd.intcast() != -1 || offset != 0 {
         tpanic("non-trivial mmap");
     };
     PAGE_SIZE := kernel.page_size;
     pages := len.ualign_to(PAGE_SIZE).udiv(PAGE_SIZE);
-    result_addr := vmap_reserve(kernel, task.mem&, pages);
+    result_addr := vmap_reserve(task.mem&, pages);
     barrier();  // TODO: theres an instruction to kill the tlb or something
     if result_addr == 0 {
         tpanic("vmap_reserve can't return null");
@@ -23,14 +23,14 @@ mprotect :: fn(addr: i64, len: i64, prot: i64) i64 #n(226) = {
     0
 }
 
-munmap :: fn(kernel: *Kernel, task: *Task, addr: i64, len: i64) i64 #n(215) = {
+munmap :: fn(task: *Task, addr: i64, len: i64) i64 #n(215) = {
     PAGE_SIZE := kernel.page_size;
     addr := addr.align_back(PAGE_SIZE);
     page_count := len.ualign_to(PAGE_SIZE).udiv(PAGE_SIZE);
     if addr + page_count * PAGE_SIZE >= kernel.next_vaddr || addr < u8.int_from_ptr(kernel.ram.end_pointer()) || page_count < 0 {
         tpanic("bad munmap");
     };
-    vunmap(kernel, task.mem&, addr, page_count);
+    vunmap(task.mem&, addr, page_count);
     barrier();  // TODO: theres an instruction to kill the tlb or something
     0
 }
@@ -47,10 +47,10 @@ exit :: fn(task: *Task, status: i64) i64 #n(94) = {
     return_to_scheduler()  // yield
 }
 
-futex :: fn(kernel: *Kernel, task: *Task, addr: i64, op: i64, val: i64, timeout: i64) i64 #n(98) = {
+futex :: fn(task: *Task, addr: i64, op: i64, val: i64, timeout: i64) i64 #n(98) = {
     @if(timeout != 0) tpanic("TODO: futex timeout");
     // TODO: check that `addr` is committed and readable
-    pte := index_page_table(kernel, task.mem&, addr.align_back(kernel.page_size));
+    pte := index_page_table(task.mem&, addr.align_back(kernel.page_size));
     @if(pte.map.repr == 0) tpanic("futex unmapped address");
     
     @switch(op) {
@@ -109,8 +109,8 @@ sig_action :: fn(task: *Task, new: i64, old: i64) i64 #n(0xFFFF0003) = {
     0
 }
 
-sig_return :: fn(kernel: *Kernel, task: *Task, intid: i64, sp: i64) i64 #n(0xFFFF0004) = {
-    elr := 5*4 + 4/*bti*/ + kernel.launder_to_user_pointer(user_unwind_signal); // :end_user_unwind_signal
+sig_return :: fn(task: *Task, intid: i64, sp: i64) i64 #n(0xFFFF0004) = {
+    elr := 5*4 + 4/*bti*/ + launder_to_user_pointer(user_unwind_signal); // :end_user_unwind_signal
     @if(task.mcontext.elr != elr) tpanic("sig_return is #once");
     @if(task.signal_stack != sp) tpanic("poorly nested sig_return");
     saved := SavedRegisters.ptr_from_int(sp);
@@ -123,9 +123,9 @@ sig_return :: fn(kernel: *Kernel, task: *Task, intid: i64, sp: i64) i64 #n(0xFFF
     task.mcontext.gpr&[0]
 }
 
-spawn_thread :: fn(kernel: *Kernel, parent: *Task, ctx: i64) i64 #n(0xFFFF0005) = {
+spawn_thread :: fn(parent: *Task, ctx: i64) i64 #n(0xFFFF0005) = {
     ctx := SavedRegisters.ptr_from_int(ctx);
-    child := kernel.alloc_task(parent.mem.root);
+    child := alloc_task(parent.mem.root);
     if u32.ptr_from_int(ctx.elr)[] != Arm.branch_target_marker {
         tpanic("spawn thread expected bti");
     };
@@ -138,7 +138,7 @@ spawn_thread :: fn(kernel: *Kernel, parent: *Task, ctx: i64) i64 #n(0xFFFF0005) 
 
 // TODO: instead of this for joining threads, do tid_futex like linux
 // TODO: have a more efficient waitpid than calling this in a loop
-check_thread :: fn(kernel: *Kernel, id: i64) i64 #n(0xFFFF0006) = {
+check_thread :: fn(id: i64) i64 #n(0xFFFF0006) = {
     each kernel.tasks& { it |
         if it.thread_id == id {
             return it.active.not().int();
@@ -174,7 +174,6 @@ generate :: fn() []Ty(@FnPtr(task: *Task) void, i64) = {
         each impl_func.arg.bindings& { it |
             @switch(it.ty.Finished) {
                 @case(*Task) => args&.push(the_task);
-                @case(*Kernel) => args&.push(@{ kernel() });
                 @case(i64) => {
                     args&.push(@{ @[the_task].mcontext.gpr&[@[@literal i]] });
                     i += 1;
