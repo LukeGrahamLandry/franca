@@ -90,7 +90,7 @@ fn vunmap(addrs: *AddressSpace, vaddr: i64, page_count: i64) void = {
             };
             @case(0b11) => {
                 kernel.pages_committed_freed += 1;
-                phys := get_pointer(kernel.page_index_bits, pte[], Physical.Free);
+                phys := get_pointer(kernel.page_index_bits, pte[], *Physical.Free);
                 phys.link = kernel.physical.free;
                 kernel.physical.free = phys;
             };
@@ -107,6 +107,8 @@ fn vmap_one(addrs: *AddressSpace, vaddr: i64, phys: *Physical.Free, user: bool, 
     kernel.pages_committed += 1;
     pte := index_page_table(addrs, vaddr);
     if pte.map.repr != 0 {
+        kprint_label("vaddr ", vaddr);
+        kprint_label("paddr ", Physical.Free.int_from_ptr(phys));
         kpanic("stomp mapping");
     };
     
@@ -147,6 +149,7 @@ fn index_page_table(addrs: *AddressSpace, vaddr: i64) *PTE = {
             //table_size := 1.shift_left(L.len);  // TODO: use this to map the right amount
             // this is the first page on this chunk, need to make a next level table for it. 
             mem := kernel.physical&.map_contiguous(size_of(TranslationTable), size_of(TranslationTable));
+            mem.set_zeroed();
             // stored address points to the next level of table
             attr: PageTableEntry = (repr = u8.int_from_ptr(mem.ptr).bitcast());
             attr&.set(.tag, 0b11);  // table entry
@@ -160,7 +163,7 @@ fn index_page_table(addrs: *AddressSpace, vaddr: i64) *PTE = {
             };
         };
         
-        tt = get_pointer(kernel.page_index_bits, (map = e), TranslationTable);
+        tt = get_pointer(kernel.page_index_bits, (map = e), *TranslationTable);
         level -= 1;
     };
     L := make_level_index(bits[level] - 1, bits[level - 1]);
@@ -168,12 +171,22 @@ fn index_page_table(addrs: *AddressSpace, vaddr: i64) *PTE = {
     tt.entries&[i]&
 }
 
-fn get_pointer(bits: []i64, it: PTE, $T: Type) *T #generic = {
+fn get_pointer(bits: []i64, it: PTE, $T: Type) T #generic = {
     TableField := make_level_index(bits[bits.len - 1], bits[0]);
     it := TableField.get(it.map).shift_left(bits[0]);
-    it := T.ptr_from_int(it);
-    it
+    bit_cast_unchecked(i64, T, it)
 } 
+
+fn v_to_p(mem: *AddressSpace, vaddr: i64) i64 = {
+    @if(!kernel.mmu_enabled) return(vaddr);
+    v_base := vaddr.align_back(kernel.page_size);
+    pte := index_page_table(mem, v_base)[];
+    if pte.map.get(.tag) != 0b11 {
+        kpanic("v_to_p: unmapped");
+    };
+    p_base := get_pointer(kernel.page_index_bits, pte, i64);
+    p_base + (vaddr - v_base)
+}
 
 AddressSpace :: @struct {
     root: *TranslationTable;  // TTBR0_EL1
@@ -213,6 +226,7 @@ setup_virtual_memory :: fn(ram: []u8) *TranslationTable = {
     mem: AddressSpace = (root = {
         // TODO: not all page tables are full size when not using 64kb pages
         mem := kernel.physical&.map_contiguous(size_of(TranslationTable), size_of(TranslationTable));
+        mem.set_zeroed();
         bit_cast_unchecked(*u8, *TranslationTable, mem.ptr)
     });
     tt := mem.root.entries&.items();
@@ -293,6 +307,7 @@ setup_virtual_memory :: fn(ram: []u8) *TranslationTable = {
     barrier();
     SctlrEl1.sys_set(.SCTLR_EL1, sctlr);
     barrier();
+    kernel.mmu_enabled = true;
     kprint("mmu on\n");
     
     mem.root

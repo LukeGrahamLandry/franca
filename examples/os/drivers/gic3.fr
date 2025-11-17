@@ -1,0 +1,81 @@
+// Generic Interrupt Controller
+//
+// Software Generated Interrupts (id: 0-15) 
+// - target a specific core
+// Private Peripheral Interrupts (id: 16-31) 
+// - target a specific core
+// Shared Peripheral Interrupts (id: 32-1020) 
+// - global and need to be routed to a core to be handled
+//
+// TODO: there's also extended PPIs and SPIs?
+//
+// SGI/PPI: since they're private to a core, the Distributor doesn't get a vote. 
+// each core has its own Redistributor where they're configured. 
+// starting at gicr, its an array of [RD_base...64kb, SGI_base...64kb]. 
+//
+// TODO: do SPIs need to be enabled in both D and R? rn i just do D, maybe they default to on in R?
+//
+
+Self :: @struct {
+    gicd: i64;  // Distributor
+    gicr: i64;  // Redistributor
+};
+
+find :: fn(self: DT.Iter) Self = {
+    self&.consume_root();
+    //                                                          qemu                           vzf
+    self&.find_node(.BEGIN_NODE, fn(it) => it.name.starts_with("intc") || it.name.starts_with("gic"))
+        || kpanic("no intc/gic node");
+    // TODO: make sure `compatible = arm,gic-v3`
+    it := self&.find_node(.PROP, fn(it) => it.name == "reg")
+        || kpanic("devicetree: no intc.reg");
+    (gicd = it.read_2x32(0), gicr = it.read_2x32(4))
+}
+
+fn init(gic: Self) void = {
+    // ignore interrupts with lower priority than PMR 
+    // (but 255 is low, 0 is high, so this means allow all). 
+    i64.sys_set(.ICC_PMR_EL1, 255);  
+    i64.sys_set(.ICC_IGRPEN1_EL1, 1);  // enable group 1 interrupts
+    
+    u32.volatile(gic.gicd + 0x0000, 0b10);  // CTLR.EnableGrp1NS=1
+    // there's a whole thing about waking up the redistributor with GICR_WAKER (rd_lpi + 0x0014) 
+    // but it seems fine. (maybe a problem once i have more cores)
+}
+
+first_spi :: 32;
+
+// this is what you get when you read ICC_IAR1_EL1 in an exception (rather than an interrupt), 
+// ie. syscall, brk, fault, etc. Then you know to check ESR instead to figure out what happened. 
+null_interrupt_id :: 1023;
+
+fn set_group1(gic: Self, id: i64) void = {
+    if id >= first_spi {
+        set_field(id, gic.gicd + 0x80, 1, 1);  // IGROUPR set to group 1
+    } else {
+        SGI_base: i64 = gic.gicr + 0x10000;  // one per core but i only have one core
+        set_field(id, SGI_base + 0x80, 1, 1);  // IGROUPR0
+    };
+}
+
+fn enable(gic: Self, id: i64) void = {
+    if id >= first_spi {
+        set_field(id, gic.gicd + 0x100, 1, 1); // ISENABLER 
+    } else {
+        SGI_base: i64 = gic.gicr + 0x10000;  // one per core but i only have one core
+        set_field(id, SGI_base + 0x100, 1, 1); // ISENABLER0 
+    };
+}
+
+// bit fields are packed into an array of u32. 
+set_field :: fn(interrupt_id: i64, addr: i64, bit_width: i64, value: u32) void #inline = {
+    mask: u32 = 1.shift_left(bit_width) - 1;
+    value := value.bit_and(mask);
+    count_per_word := 32.udiv(bit_width);
+    shift := interrupt_id.umod(count_per_word) * bit_width;
+    idx := interrupt_id.udiv(count_per_word);
+    addr += idx * 4;
+    old := u32.volatile(addr);
+    new := old.bit_and(mask.shift_left(shift).bit_not()).bit_or(value.shift_left(shift));
+    u32.volatile(addr, new);
+}

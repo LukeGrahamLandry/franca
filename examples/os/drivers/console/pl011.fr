@@ -1,0 +1,50 @@
+// ARM PrimeCell UART (PL011) 
+// https://developer.arm.com/documentation/ddi0183/g/programmers-model/summary-of-registers
+
+Self :: @struct {
+    base: i64;
+    irq: i64; 
+};
+
+find :: fn(self: DT.Iter) ?Self = {
+    self&.consume_root();
+    self&.find_node(.BEGIN_NODE, fn(it) => it.name.starts_with("pl011"))
+        || return(.None);
+    saved := self&.mark();
+    // TODO: make sure `compatible = arm,pl011`
+    reg := self&.find_node(.PROP, fn(it) => it.name == "reg")
+        || return(.None);
+    self&.reset(saved);
+    interrupts := self&.find_node(.PROP, fn(it) => it.name == "interrupts")
+        || return(.None);
+    (Some = (
+        base = reg.read_2x32(0), 
+        // TODO: not entirely sure about this. what are the other two words?
+        // +32 is because that the start of the range for Shared Peripheral Interrupts 
+        irq = interrupts.read_32(1).zext() + 32,
+    ))
+}
+
+fn init(self: Self, gic: Gic.Self) void = {
+    uart, irq_uart := (self.base, self.irq);
+    @if(irq_uart != 33) kpanic("TODO: need to update timer_irq in userspace");
+    
+    // any priority/ICFGR is fine. IROUTER doesn't matter because i only have one core.
+    gic.set_group1(irq_uart);
+    gic.enable(irq_uart);
+    
+    // RSR,LCR_H,DMACR seem to be fine as reset=0.
+    // strangely so are IBRD,FBRD (you're supposed to compute them from clock-frequency in device tree and desired baudrate)
+    
+    // ask for interrupt when it recieves something
+    u32.volatile(uart + 0x038, 0b10000);  // IMSC
+    // TODO: some bits are "reserved do not modify"
+    // enable and allow transmit + recieve
+    u32.volatile(uart + 0x030, 0b1100000001);  // CR  
+};
+
+fn write(self: *Self, s: []u8) void = {
+    for s { c |
+        u32.volatile(self.base, c.zext());
+    };
+}

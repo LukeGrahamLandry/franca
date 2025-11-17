@@ -24,7 +24,9 @@ Kernel :: @struct {
     kernel_image: []u8;
     user_image: []u8;
     ram: []u8;
-    uart: ?Pl011;
+    uart: ?Pl011.Self;
+    console: Console;
+    mmu_enabled: bool;
 };
 
 DT :: import("@/examples/os/drivers/devicetree.fr");
@@ -32,7 +34,12 @@ DT :: import("@/examples/os/drivers/devicetree.fr");
 // this is called by emit_entry's _start
 main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
     kernel.uart = .None;
-
+    // for early debugging before reading the device tree, just yolo hope its a pl011 at hardcoded qemu address, 
+    kernel.console = (
+        data = zeroed rawptr, 
+        puts = fn(_, s) = for(s, fn(c) => u32.volatile(0x09000000, c.zext())),
+    );
+    
     link_image_base: i64 = 0x40100000;
     kernel_image_size := -1;
     if device_tree == 0 || kernel_image_base == -4 {
@@ -95,17 +102,23 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
     // EL0PCTEN: allow userspace to read CNTVCT_EL0 and CNTFRQ_EL0
     cntctl := i64.sys_get(.CNTKCTL_EL1);
     i64.sys_set(.CNTKCTL_EL1, cntctl.bit_or(2));
-
-    find_pci_devices(device_tree_bytes);
-    tt := setup_virtual_memory(ram);
-    gic := find_interrupt_controller(DT'iter(device_tree_bytes));
-    kernel.uart = find_uart(DT'iter(device_tree_bytes));
-    init_interrupt_vector();
-    init_gic(gic);
-    init_timer(gic);
-    if kernel.uart { uart |
-        init_uart(gic, uart);
+    
+    if VirtConsole'find(DT'iter(device_tree_bytes)) { console |
+        console := Console'borrow(console&);
+        kernel.console = console;
+        kprint("using virtio console\n");
     };
+    gic := Gic'find(DT'iter(device_tree_bytes));
+    kernel.uart = Pl011'find(DT'iter(device_tree_bytes));
+    init_interrupt_vector();
+    init(gic);
+    init_timer(gic);
+    if kernel.uart& { uart |
+        init(uart[], gic);
+        kernel.console = Console'borrow(uart);
+        kprint("using pl01\n");
+    };
+    tt := setup_virtual_memory(ram);
     barrier();
     
     kstack := kernel.physical&.map_contiguous(16 * 1.shift_left(16), 1);
@@ -138,76 +151,6 @@ find_physical_memory :: fn(self: DT.Iter) []u8 = {
     (ptr = u8.ptr_from_int(it.read_2x32(0)), len = it.read_2x32(2))
 }
 
-find_interrupt_controller :: fn(self: DT.Iter) Gic = {
-    self&.consume_root();
-    //                                                          qemu                           vzf
-    self&.find_node(.BEGIN_NODE, fn(it) => it.name.starts_with("intc") || it.name.starts_with("gic"))
-        || kpanic("no intc/gic node");
-    // TODO: make sure `compatible = arm,gic-v3`
-    it := self&.find_node(.PROP, fn(it) => it.name == "reg")
-        || kpanic("devicetree: no intc.reg");
-    (gicd = it.read_2x32(0), gicr = it.read_2x32(4))
-}
-
-find_pci_devices :: fn(device_tree_bytes: []u8) void = {
-    // TODO: make this work with the mmu turned on. just need to identity map the magic ranges. 
-    pci := Pci'read_device_tree(DT'iter(device_tree_bytes));
-    pci := pci || kpanic("failed to read pci addresses from device tree");
-    
-    range(0, pci.config.len / 4096) { i |
-        continue :: local_return;
-        h := bit_cast_unchecked(*u8, *Pci.Header, pci.config.index(i*4096));
-        vendorid := h.vendor_id&.volatile();
-        
-        if(vendorid == 0xFFFF, => continue());
-        if(vendorid != Virt.pci_vendor_id, => continue());
-        
-        deviceid := h.device_id&.volatile();
-        if !(deviceid == 0x1043 || deviceid == 0x1003) {  // console
-            continue();
-        };
-        header_type := h.header_type&.vol();
-        
-        h.command&.vol(0b110);  // enable memory space
-        
-        note_cap := h.find_pci_cap(.NOTIFY);
-        c := h.find_pci_cap(.COMMON).unwrap();
-        bar_index := c.bar&.volatile();
-        
-        // TODO: keep track of the part thats been used so i can have multiple BARs
-        legal_pci_addr := u8.int_from_ptr(pci.bar.ptr);  
-        bar := Pci'set_bar64(h, bar_index, legal_pci_addr, true);
-        cfg := bit_cast_unchecked(*u8, *Virt.PciCommonCfg, bar.mem.index(c.offset&.vol().zext()));
-        
-        note: ?Virt.NotifyStep = .None;
-        if note_cap { c | 
-            @if(bar_index != c.bar&.vol()) kpanic("TODO: can this happen?");
-            note = (Some = (
-                off_multiplier = u32.vol(int_from_ptr(@type c[], c) + size_of(@type c[])).zext(),
-                base = c.offset&.vol().zext(),
-                bar = bar.mem,
-            ));
-        };
-    
-        feat := 1.shift_left(32);  // VIRTIO_F_VERSION_1
-        agree := cfg.init_features(feat);
-        @if(agree != feat) kpanic("didn't agree on device features");
-        
-        buf := kernel.physical&.map_contiguous(1.shift_left(16), 1);
-        each buf { it |
-            it[] = 0;
-        };
-        
-        // q[1] = transmitq(port0)
-        q := init_queue(cfg, 1, buf, 128, note); q := q&;
-        cfg.publish_queues();
-        q.push("Hello", 0);
-        q.push("World", 0);
-        q.push("!\n", 0);
-        q.publish_chain();
-    };
-}
-
 dopoweroff :: fn() void #noinline = {
     poweroff();
 };
@@ -219,6 +162,7 @@ dohang :: fn() void #noinline = {
 
 Virt :: import("@/examples/os/drivers/virtio.fr");
 Pci :: import("@/examples/os/drivers/pci.fr");
+VirtConsole :: import("@/examples/os/drivers/console/virtio.fr");
 
 root_task_elf_bytes :: {
     franca := get_executable_path(temp());
@@ -253,7 +197,7 @@ alloc_task :: fn(tt: *TranslationTable) *Task = {
 }
 
 init_task :: fn(task: *Task, callee: rawptr) void = {
-    stack_size := 1.shift_left(20);
+    stack_size := 1.shift_left(21);
     user_stack := vmap_reserve(task.mem&, stack_size / kernel.page_size);
     // stack grows left, so start at the right of the allocation. 
     user_stack += stack_size;
@@ -315,97 +259,24 @@ init_interrupt_vector :: fn() void #use(Arm) = {
     @run assert_eq(size_of(InterruptVector), 0x800);
 }
 
-// generic interrupt controller
-Gic :: @struct {
-    gicd: i64;
-    gicr: i64;
-};
-init_gic :: fn(gic: Gic) void = {
-    // ignore interrupts with lower priority than PMR 
-    // (but 255 is low, 0 is high, so this means allow all). 
-    i64.sys_set(.ICC_PMR_EL1, 255);  
-    i64.sys_set(.ICC_IGRPEN1_EL1, 1);  // enable group 1 interrupts
-    
-    u32.volatile(gic.gicd + 0x0000, 0b10);  // CTLR.EnableGrp1NS=1
-    // there's a whole thing about waking up the redistributor with GICR_WAKER (rd_lpi + 0x0014) 
-    // but it seems fine. (maybe a problem once i have more cores)
-}
-
 // EL1 Physical Timer. INTID defined by the Server Base System Architecture 
 // device tree: timer.interrupts[4] + 16 (Private Peripheral Interrupts)
 timer_irq :: 30;
-init_timer :: fn(gic: Gic) void = {
-    // one per core but i only have one core
-    rd_sgi: i64 = gic.gicr + 0x10000;
-
-    // timer is private so its enabled in ---R only. 
+init_timer :: fn(gic: Gic.Self) void = {
     // any priority/ICFGR is fine.
-    set_field(timer_irq, rd_sgi + 0x80, 1, 1);  // IGROUPR0 set to group 1
-    set_field(timer_irq, rd_sgi + 0x100, 1, 1); // ISENABLER0 
-    
+    gic.set_group1(timer_irq);
+    gic.enable(timer_irq);
+
     reset_countdown();
     i64.sys_set(.CNTV_CTL_EL0, 1);  // turn it on
 }
 
+Gic :: import("@/examples/os/drivers/gic3.fr");
+Pl011 :: import("@/examples/os/drivers/console/pl011.fr");
+
 reset_countdown :: fn() void = {
     frequency := i64.sys_get(.CNTFRQ_EL0);
     i64.sys_set(.CNTV_TVAL_EL0, frequency / 200);
-}
-
-// ARM PrimeCell UART (PL011) 
-// https://developer.arm.com/documentation/ddi0183/g/programmers-model/summary-of-registers?lang=en
-Pl011 :: @struct {
-    base: i64;
-    irq: i64; 
-};
-
-find_uart :: fn(self: DT.Iter) ?Pl011 = {
-    self&.consume_root();
-    self&.find_node(.BEGIN_NODE, fn(it) => it.name.starts_with("pl011"))
-        || return(.None);
-    saved := self&.mark();
-    // TODO: make sure `compatible = arm,pl011`
-    reg := self&.find_node(.PROP, fn(it) => it.name == "reg")
-        || return(.None);
-    self&.reset(saved);
-    interrupts := self&.find_node(.PROP, fn(it) => it.name == "interrupts")
-        || return(.None);
-    (Some = (
-        base = reg.read_2x32(0), 
-        // TODO: not entirely sure about this. what are the other two words?
-        // +32 is because that the start of the range for Shared Peripheral Interrupts 
-        irq = interrupts.read_32(1).zext() + 32,
-    ))
-}
-
-init_uart :: fn(gic: Gic, self: Pl011) void = {
-    uart, irq_uart := (self.base, self.irq);
-    @if(irq_uart != 33) kpanic("TODO: need to update timer_irq in userspace");
-    
-    // any priority/ICFGR is fine. IROUTER doesn't matter because i only have one core.
-    set_field(irq_uart, gic.gicd + 0x80, 1, 1);  // IGROUPR set to group 1
-    set_field(irq_uart, gic.gicd + 0x100, 1, 1); // ISENABLER 
-    
-    // RSR,LCR_H,DMACR seem to be fine as reset=0.
-    // strangely so are IBRD,FBRD (you're supposed to compute them from clock-frequency in device tree and desired baudrate)
-    
-    // ask for interrupt when it recieves something
-    u32.volatile(uart + 0x038, 0b10000);  // IMSC
-    // TODO: some bits are "reserved do not modify"
-    // enable and allow transmit + recieve
-    u32.volatile(uart + 0x030, 0b1100000001);  // CR  
-};
-
-set_field :: fn(interrupt_id: i64, addr: i64, bit_width: i64, value: u32) void #inline = {
-    mask: u32 = 1.shift_left(bit_width) - 1;
-    value := value.bit_and(mask);
-    count_per_word := 32.udiv(bit_width);
-    shift := interrupt_id.umod(count_per_word) * bit_width;
-    idx := interrupt_id.udiv(count_per_word);
-    addr += idx * 4;
-    old := u32.volatile(addr);
-    new := old.bit_and(mask.shift_left(shift).bit_not()).bit_or(value.shift_left(shift));
-    u32.volatile(addr, new);
 }
 
 Arm :: import("@/backend/arm64/bits.fr");
@@ -544,7 +415,8 @@ user_exec :: fn(elf_bytes: []u8) void = {
     c.panic_hook = print_and_exit1;
     c.prefer_syscalls = true;
     c.current_os = 1;
-    c.temporary_allocator_i = Arena'stack_alloc(1.shift_left(15));
+    c.temporary_allocator_i = Arena'stack_alloc(1.shift_left(16));
+    c.general_allocator = c.temporary_allocator_i;
     print("user_exec\n");
     // TODO: its sad that i have to commit new pages for the bytes copied 
     //       for Load commands but not accessed by the running program.
@@ -591,7 +463,7 @@ syscall_func :: fn(task: *Task) void = {
     
     intid := args.intid;
     intid0 := i64.sys_get(.ICC_IAR0_EL1).bit_and(0xfff);
-    if intid0 != 1023 {
+    if intid0 != Gic.null_interrupt_id {
         kpanic("intid0");
     };
     if tracing {
@@ -601,7 +473,7 @@ syscall_func :: fn(task: *Task) void = {
     kprint_label("intid: ", intid);
     };
     
-    ::if_opt(Pl011, i64);
+    ::if_opt(Pl011.Self, i64);
     irq_uart: i64 = if(kernel.uart, fn(it) => it.irq, => -1);
     if intid == irq_uart {
         uart := kernel.uart.unwrap();
@@ -624,7 +496,7 @@ syscall_func :: fn(task: *Task) void = {
     
     exception_class := args.esr.shift_right_logical(26).bit_and(0b111111);
     
-    if intid == 1023 {
+    if intid == Gic.null_interrupt_id {    
         if exception_class == 0b100100 {
             vaddr := args.far.align_back(kernel.page_size);
             
@@ -669,6 +541,9 @@ syscall_func :: fn(task: *Task) void = {
         is_svc := exception_class == 0b010101;
         if is_svc {
             syscall_number := args.gpr&[8];
+            if tracing {
+                kprint_label("syscall_number: ", syscall_number);
+            };
             if syscall_number != args.gpr&[16] {
                 tpanic("perform_syscall always uses both x8 and x16");
             };
@@ -819,14 +694,24 @@ spin :: fn() Never = {
     };
 }
 
-kprint :: fn(s: Str) void #noinline = {
-    ::if_opt(Pl011, i64);
-    uart: i64 = if(kernel[].uart, fn(it) => it.base, => 0x09000000);
+Console :: @struct {
+    data: rawptr;
+    puts: @FnPtr(self: rawptr, s: []u8) void;
     
-    for s { c |
-        u32.volatile(uart, c.zext());
-    };
-}
+    // TODO: this doesn't get the scoping i want if the overload set is called the same thing 
+    //       as the field of the interface. resolve is before sema so don't know the @struct block is special.
+    //       :compiler
+    borrow :: fn(self: ~T) Console #where = (
+        data = Deref(T).raw_from_ptr(self),
+        puts = fn(self, s) = Deref(T).ptr_from_raw(self).write(s),
+    );
+};
+
+fn puts(self: *Console, s: Str) = 
+    self'puts(self.data, s);
+
+kprint :: fn(s: Str) void = 
+    kernel.console&.puts(s);
 
 // TODO: the volatile helpers should go elsewhere
 

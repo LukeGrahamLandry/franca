@@ -1,8 +1,24 @@
 
+## (Nov 17)
+
+- continuing to refactor the drivers. doesn't spark joy. 
+  but at least now there's a sane way to choose which console is used for logging in the kernel. 
+- reason why vzf wasn't getting past turning on the mmu was "stomp mapping",
+  i wasn't zeroing the memory used for translation tables. 
+  i assumed all the fresh pages in the vm would be zeroed because surely it can't leak whatever
+  the host had on that page last. so im a bit afraid i might be writting over something that's used elsewhere?
+  hopefully its just the device tree (which is still a problem but at least i know its a problem)
+- virt console:
+  - wasnt wrapping around the index stored in the ring
+  - now it gets to load_elf_file but not init. 
+  - problem is the Desc needs physical address not virtual address
+  - now in vzf it gets to printing the shell prompt
+
 # (Nov 16)
 
 - (what i thought was an alignment problem yesterday): i am are have stupid. 
   i was adding the addend to src instead of dest in flat_link
+- started factoring out the interrupt controler stuff
 
 ## (Nov 15)
 

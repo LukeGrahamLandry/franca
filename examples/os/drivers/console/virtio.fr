@@ -1,0 +1,91 @@
+
+Self :: @struct {
+    transmit: Virt.Queue;
+};
+
+// this working with mmu relies on it being before ram start and setup_virtual_memory mapping all that as device
+find :: fn(dt: DT.Iter) ?Self = {
+    pci := Pci'read_device_tree(dt);
+    pci := pci || return(.None);
+    
+    range(0, pci.config.len / 4096) { i |
+        continue :: local_return;
+        h := bit_cast_unchecked(*u8, *Pci.Header, pci.config.index(i*4096));
+        vendorid := h.vendor_id&.volatile();
+        
+        if(vendorid == 0xFFFF, => continue());
+        if(vendorid != Virt.pci_vendor_id, => continue());
+        
+        deviceid := h.device_id&.volatile();
+        if !(deviceid == 0x1043 || deviceid == 0x1003) {  // console
+            continue();
+        };
+        header_type := h.header_type&.vol();
+        
+        h.command&.vol(0b110);  // enable memory space
+        
+        note_cap := h.find_pci_cap(.NOTIFY);
+        c := h.find_pci_cap(.COMMON).unwrap();
+        bar_index := c.bar&.volatile();
+        
+        // TODO: keep track of the part thats been used so i can have multiple BARs
+        legal_pci_addr := u8.int_from_ptr(pci.bar.ptr);  
+        bar := Pci'set_bar64(h, bar_index, legal_pci_addr, true);
+        cfg := bit_cast_unchecked(*u8, *Virt.PciCommonCfg, bar.mem.index(c.offset&.vol().zext()));
+        
+        note: ?Virt.NotifyStep = .None;
+        if note_cap { c | 
+            @if(bar_index != c.bar&.vol()) kpanic("TODO: can this happen?");
+            note = (Some = (
+                off_multiplier = u32.vol(int_from_ptr(@type c[], c) + size_of(@type c[])).zext(),
+                base = c.offset&.vol().zext(),
+                bar = bar.mem,
+            ));
+        };
+    
+        feat := 1.shift_left(32);  // VIRTIO_F_VERSION_1
+        agree := cfg.init_features(feat);
+        @if(agree != feat) kpanic("didn't agree on device features");
+        
+        buf := kernel.physical&.map_contiguous(1.shift_left(16), 1);
+        each buf { it |
+            it[] = 0;
+        };
+        
+        // q[1] = transmitq(port0)
+        q := init_queue(cfg, 1, buf, 128, note);
+        cfg.publish_queues();
+        return(Some = (transmit = q));
+    };
+    
+    .None
+}
+
+fn write(self: *Self, virtual: []u8) void = {
+    q := self.transmit&;
+    
+    // the addresses in Virt.Desc are physical, so step through each page of the message 
+    // and manually translate the addresses before pushing them to the queue. 
+    // (because physical memory is only contiguous at page granularity)
+    mem: AddressSpace = (root = sys_get(*TranslationTable, .TTBR0_EL1));
+    v := u8.int_from_ptr(virtual.ptr);
+    len := virtual.len;
+    while => len > 0 {  
+        p := v_to_p(mem&, v);
+        space := p.align_to(kernel.page_size) - p;
+        if space == 0 {
+            space = kernel.page_size;
+        }
+        space := min(space, len);
+        q.push(u8.ptr_from_int(p).slice(space), 0);
+        len -= space;
+        v += space;
+    };
+    
+    // TODO: this needs to be nonblocking eventually but then the lifetime of the message gets complicated
+    i := q.driver_idx;
+    q.publish_chain();
+    while => q.device.head.idx&.vol() != i {
+        barrier();  // spin
+    };
+}
