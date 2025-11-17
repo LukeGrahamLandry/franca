@@ -1,8 +1,14 @@
 
 Self :: @struct {
-    transmit: Virt.Queue;
+    device: Virt.Device #use;
 };
 
+RECEIVE :: 0;
+TRANSMIT :: 1;
+
+// TODO: seperate find and init
+// TODO: seperate out the part that's reusable for all virtio devices. 
+// TODO: use VIRTIO_F_EVENT_IDX to not get an interrupt until a whole chunk of work is done
 // this working with mmu relies on it being before ram start and setup_virtual_memory mapping all that as device
 find :: fn(dt: DT.Iter) ?Self = {
     pci := Pci'read_device_tree(dt);
@@ -25,6 +31,7 @@ find :: fn(dt: DT.Iter) ?Self = {
         h.command&.vol(0b110);  // enable memory space
         
         note_cap := h.find_pci_cap(.NOTIFY);
+        isr_cap := h.find_pci_cap(.ISR);
         c := h.find_pci_cap(.COMMON).unwrap();
         bar_index := c.bar&.volatile();
         
@@ -42,6 +49,11 @@ find :: fn(dt: DT.Iter) ?Self = {
                 bar = bar.mem,
             ));
         };
+        status: *u8 = zeroed(*u8);
+        if isr_cap { c |
+            @if(bar_index != c.bar&.vol()) kpanic("TODO: can this happen?");
+            status = bar.mem.index(c.offset&.vol().zext());
+        };
     
         feat := 1.shift_left(32);  // VIRTIO_F_VERSION_1
         agree := cfg.init_features(feat);
@@ -52,17 +64,59 @@ find :: fn(dt: DT.Iter) ?Self = {
             it[] = 0;
         };
         
-        // q[1] = transmitq(port0)
-        q := init_queue(cfg, 1, buf, 128, note);
+        qs := buf&.pop_slice(Virt.Queue, 2);
+        self: Self = (device = (queues = qs, interrupt_status = status));
+        init_queue(cfg, qs.index(TRANSMIT), TRANSMIT, buf&, 128, note);
+        init_queue(cfg, qs.index(RECEIVE), RECEIVE, buf&, 128, note);
         cfg.publish_queues();
-        return(Some = (transmit = q));
+        return(Some = self);
     };
     
     .None
 }
 
+
+VIRTQ_DESC_F_WRITE :: 2;
+
+fn check_interrupt(self: *Self, intid: i64) void = {
+    if self.device.interrupt_status.vol().bit_and(1) != 0 {
+        each self.queues { q |
+            i := q.device.head.idx&.vol();  // this read resets it to zero
+            if q.this_queue_index == RECEIVE {
+                if i != q.device_idx {
+                    // TODO: do the right thing when it gives me more than one (which is what happens when you paste)
+                    byte: u8 = 0;
+                    
+                    // TODO: this won't wrap correctly
+                    range(q.device_idx.zext(), i.zext()) { i |
+                        i := i.mod(q.device.ring.len);
+                        used := q.device.ring[i];
+                        desc := q.desc[used.id.zext()];
+                        capacity := desc.addr.slice(desc.len.zext());
+                        bytes := capacity.slice(0, used.len.zext());
+                        byte = bytes[0];
+                        // TODO: just reuse the one desc
+                        q.push(capacity, VIRTQ_DESC_F_WRITE);
+                    };
+
+                    q.device_idx = i;
+                    q.publish_chain();
+                    
+                    // HACK?
+                    init := kernel.tasks&[0]&;
+                    @if(init.signal_handler == 0) kpanic("got input before init signal handler");
+                    push_signal_context(init);
+                    init.mcontext.gpr&[1] = intid;
+                    init.mcontext.gpr&[2] = byte.zext();  // HACK
+                    return_to_user(init);
+                };
+            };
+        };
+    };
+}
+
 fn write(self: *Self, virtual: []u8) void = {
-    q := self.transmit&;
+    q := self.queues.index(TRANSMIT);
     
     // the addresses in Virt.Desc are physical, so step through each page of the message 
     // and manually translate the addresses before pushing them to the queue. 

@@ -48,6 +48,12 @@ PciCap :: @struct {
 
 PciCapTag :: @enum(u8) (_0, COMMON, NOTIFY, ISR, DEVICE, PCI, _6, _7, SHARED_MEMORY, VENDOR);
 
+// when we get an interrupt, need to look through all the queues to find which one changed. 
+Device :: @struct {
+    queues: []Queue;
+    interrupt_status: *u8;
+};
+
 // call sequence: init_features -> init_queue xN -> publish_queues -> notify_device
 Queue :: @struct {
     desc: []Desc;
@@ -81,18 +87,18 @@ memory_needed :: fn(s: i64) i64 = {
     size_of(Desc)*s + size_of(Queue.Head)*2 + size_of(Queue.Tail)*2 + size_of(u16)*2*s
 }
 
-fn init_queue(cfg: *PciCommonCfg, q_index: u16, buf: []u8, size: i64, notify: ?NotifyStep) Queue = {
+fn init_queue(cfg: *PciCommonCfg, q: *Queue, q_index: u16, buf: *[]u8, size: i64, notify: ?NotifyStep) void = {
     init_pipe :: fn(it, $T) => {
-        it.head = buf&.pop_type(Queue.Head);
-        it.ring = buf&.pop_slice(T, size);
-        it.tail = buf&.pop_type(Queue.Tail);
+        it.head = buf.pop_type(Queue.Head);
+        it.ring = buf.pop_slice(T, size);
+        it.tail = buf.pop_type(Queue.Tail);
     };
-    q := zeroed Queue;
+    start := buf[];
     q.this_queue_index = q_index;
-    q.buf = buf;
-    q.desc = buf&.pop_slice(Desc, size);
+    q.desc = buf.pop_slice(Desc, size);
     init_pipe(q.driver&, u16);
     init_pipe(q.device&, UsedElem);
+    q.buf = (ptr = start.ptr, len = start.len - buf.len);
     
     cfg.queue_select&.vol(q_index);
     // TODO: check that it accepts our `size`
@@ -108,8 +114,6 @@ fn init_queue(cfg: *PciCommonCfg, q_index: u16, buf: []u8, size: i64, notify: ?N
             + notify.base + cfg.queue_notify_off&.vol().zext() * notify.off_multiplier;
         q.notify = u16.ptr_from_int(notify);
     };
-    
-    q
 }
 
 fn publish_queues(cfg: *PciCommonCfg) void = {

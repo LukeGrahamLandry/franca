@@ -27,6 +27,7 @@ Kernel :: @struct {
     uart: ?Pl011.Self;
     console: Console;
     mmu_enabled: bool;
+    vcon: ?VirtConsole.Self;
 };
 
 DT :: import("@/examples/os/drivers/devicetree.fr");
@@ -103,8 +104,9 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
     cntctl := i64.sys_get(.CNTKCTL_EL1);
     i64.sys_set(.CNTKCTL_EL1, cntctl.bit_or(2));
     
-    if VirtConsole'find(DT'iter(device_tree_bytes)) { console |
-        console := Console'borrow(console&);
+    kernel.vcon = VirtConsole'find(DT'iter(device_tree_bytes));
+    if kernel.vcon& { console |
+        console := Console'borrow(console);
         kernel.console = console;
         kprint("using virtio console\n");
     };
@@ -120,6 +122,20 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
     };
     tt := setup_virtual_memory(ram);
     barrier();
+    
+    if kernel.vcon& { it |
+        gic.set_group1(69);
+        gic.enable(69);
+        gic.set_group1(37);
+        gic.enable(37);
+        
+        // give it some memory to store the input
+        q := it.device.queues.index(0);
+        mem := kernel.physical&.map_contiguous(1.shift_left(16), 1);
+        VIRTQ_DESC_F_WRITE :: 2;
+        q.push(mem, VIRTQ_DESC_F_WRITE);
+        q.publish_chain();
+    };
     
     kstack := kernel.physical&.map_contiguous(16 * 1.shift_left(16), 1);
     kernel.interrupt_stack = kstack;
@@ -577,6 +593,14 @@ syscall_func :: fn(task: *Task) void = {
         kernel.timer_counter += 1;
         i64.sys_set(.ICC_EOIR1_EL1, intid);
         return_to_scheduler();  // this does reset_countdown
+    };
+    
+    if kernel.vcon& { console |
+        if intid == 69 || intid == 37 {  // TODO: don't hard code this
+            console.check_interrupt(intid);
+            i64.sys_set(.ICC_EOIR1_EL1, intid);
+            return_to_scheduler();
+        };
     };
     
     if intid != timer_irq && intid != irq_uart { 

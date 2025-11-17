@@ -13,6 +13,12 @@
   - now it gets to load_elf_file but not init. 
   - problem is the Desc needs physical address not virtual address
   - now in vzf it gets to printing the shell prompt
+  - need interrupts for when it gets input
+    - as a start just enable every intid so i can hard code it and make it work 
+      before needing to figure out how to get that info out of pci. seems to be 69 on vzf and 37 on qemu. 
+    - important to set VIRTQ_DESC_F_WRITE or you just get spammed with interrupts that say they wrote zero bytes
+
+TODO: broke qemu without -accel hvf
 
 # (Nov 16)
 
