@@ -621,6 +621,14 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 
 ## linux 
 
+- problem when statically linked
+```
+orb ./target/release/franca-linux-arm64-sta compiler/test.fr
+failed compile main
+panic! tests/basic_libc.fr:29:7
+    if open(libc_path) { libc |
+Compile Error: (Undeclared Variable 'open'[Symbol=5452] in S44081)
+```
 - linux fault-na.ssa need to do the signal struct (rn it's skipped in backend/meta/test.fr)
 - :TodoLinux CLOCK_REALTIME
 - can't cross compile from (macos) to (linux -syscalls) if you call 
