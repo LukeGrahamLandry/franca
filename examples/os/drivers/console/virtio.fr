@@ -10,10 +10,7 @@ TRANSMIT :: 1;
 // TODO: seperate out the part that's reusable for all virtio devices. 
 // TODO: use VIRTIO_F_EVENT_IDX to not get an interrupt until a whole chunk of work is done
 // this working with mmu relies on it being before ram start and setup_virtual_memory mapping all that as device
-find :: fn(dt: DT.Iter) ?Self = {
-    pci := Pci'read_device_tree(dt);
-    pci := pci || return(.None);
-    
+find :: fn(pci: Pci.MemoryRegion) ?Self = {
     range(0, pci.config.len / 4096) { i |
         continue :: local_return;
         h := bit_cast_unchecked(*u8, *Pci.Header, pci.config.index(i*4096));
@@ -27,6 +24,17 @@ find :: fn(dt: DT.Iter) ?Self = {
             continue();
         };
         header_type := h.header_type&.vol();
+        
+        intid := {
+            a := i*4096;
+            function := a.shift_right_logical(12).bit_and(0b111);
+            device := a.shift_right_logical(15).bit_and(0b11111);
+            bus := a.shift_right_logical(20).bit_and(0b11111111);
+            
+            Pci'find_interrupt(pci.interrupt_map, bus, device, function, h.body._0.interrupt_pin.zext())
+                || -1
+        };
+        @if(intid != 69 && intid != 37) kpanic("TODO: need to update console intid in userspace");
         
         h.command&.vol(0b110);  // enable memory space
         
@@ -65,7 +73,7 @@ find :: fn(dt: DT.Iter) ?Self = {
         };
         
         qs := buf&.pop_slice(Virt.Queue, 2);
-        self: Self = (device = (queues = qs, interrupt_status = status));
+        self: Self = (device = (queues = qs, interrupt_status = status, intid = intid));
         init_queue(cfg, qs.index(TRANSMIT), TRANSMIT, buf&, 128, note);
         init_queue(cfg, qs.index(RECEIVE), RECEIVE, buf&, 128, note);
         cfg.publish_queues();
@@ -75,11 +83,13 @@ find :: fn(dt: DT.Iter) ?Self = {
     .None
 }
 
-
 VIRTQ_DESC_F_WRITE :: 2;
 
 fn check_interrupt(self: *Self, intid: i64) void = {
-    if self.device.interrupt_status.vol().bit_and(1) != 0 {
+    @if(intid != self.device.intid) return();
+    @if(self.device.interrupt_status.is_null()) return();
+    @if(self.device.interrupt_status.vol().bit_and(1) == 0) return();
+    
         each self.queues { q |
             i := q.device.head.idx&.vol();  // this read resets it to zero
             if q.this_queue_index == RECEIVE {
@@ -87,9 +97,9 @@ fn check_interrupt(self: *Self, intid: i64) void = {
                     // TODO: do the right thing when it gives me more than one (which is what happens when you paste)
                     byte: u8 = 0;
                     
-                    // TODO: this won't wrap correctly
-                    range(q.device_idx.zext(), i.zext()) { i |
-                        i := i.mod(q.device.ring.len);
+                    while => q.device_idx != i {
+                        i := q.device_idx.zext().mod(q.device.ring.len);
+                        q.device_idx += 1;
                         used := q.device.ring[i];
                         desc := q.desc[used.id.zext()];
                         capacity := desc.addr.slice(desc.len.zext());
@@ -99,7 +109,6 @@ fn check_interrupt(self: *Self, intid: i64) void = {
                         q.push(capacity, VIRTQ_DESC_F_WRITE);
                     };
 
-                    q.device_idx = i;
                     q.publish_chain();
                     
                     // HACK?
@@ -112,10 +121,10 @@ fn check_interrupt(self: *Self, intid: i64) void = {
                 };
             };
         };
-    };
 }
 
 fn write(self: *Self, virtual: []u8) void = {
+    @if(virtual.len == 0) return();
     q := self.queues.index(TRANSMIT);
     
     // the addresses in Virt.Desc are physical, so step through each page of the message 

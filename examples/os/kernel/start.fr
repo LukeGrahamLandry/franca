@@ -35,9 +35,11 @@ DT :: import("@/examples/os/drivers/devicetree.fr");
 // this is called by emit_entry's _start
 main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
     kernel.uart = .None;
+    kernel.vcon = .None;
     // for early debugging before reading the device tree, just yolo hope its a pl011 at hardcoded qemu address, 
     kernel.console = (
         data = zeroed rawptr, 
+        //puts = fn(_, __) = (),
         puts = fn(_, s) = for(s, fn(c) => u32.volatile(0x09000000, c.zext())),
     );
     
@@ -67,18 +69,7 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
     c.panic_hook = kpanic;
     kprint("Hi\n");
     
-    el := i64.sys_get(.CurrentEL).shift_right_logical(2);
-    if el != 1 {
-        kprint_label("el ", el);
-        kpanic("expected to run in el1");
-    };
-    if i64.sys_get(.ID_AA64ISAR0_EL1).shift_right_logical(20).bit_and(0b1111) == 0 {
-        kprint("WARNING: atomic instructions are not implemented on this cpu (qemu: try -cpu cortex-a76)\n");
-    };
-    if i64.sys_get(.ICC_SRE_EL1).bit_and(1) == 0 {
-        kprint("WARNING: ICC_SRE_EL1 (system register interface for GIC) is disabled\n");
-    };
-    
+    check_system_registers();
     choose_page_size();
     ram := find_physical_memory(DT'iter(device_tree_bytes));
     kernel.ram = ram;
@@ -96,38 +87,35 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
     kernel.env = get_dynamic_context();
     kernel.device_tree = device_tree_bytes;
     
-    // TODO: maybe better to use this to only save on interrupt if they're actually being used by that process
-    cpacr := i64.sys_get(.CPACR_EL1);
-    i64.sys_set(.CPACR_EL1, cpacr.bit_or(0b11.shift_left(20)));  // FPEN
-    
-    // EL0PCTEN: allow userspace to read CNTVCT_EL0 and CNTFRQ_EL0
-    cntctl := i64.sys_get(.CNTKCTL_EL1);
-    i64.sys_set(.CNTKCTL_EL1, cntctl.bit_or(2));
-    
-    kernel.vcon = VirtConsole'find(DT'iter(device_tree_bytes));
+    kernel.uart = Pl011'find(DT'iter(device_tree_bytes));
+    if kernel.uart& { uart |
+        kernel.console = Console'borrow(uart);
+        kprint("using pl01\n");
+    };
+    pci := Pci'read_device_tree(DT'iter(device_tree_bytes));
+    if pci { pci |
+        kernel.vcon = VirtConsole'find(pci);
+    };
+    @if(kernel.uart&.is_none())
     if kernel.vcon& { console |
-        console := Console'borrow(console);
-        kernel.console = console;
+        kernel.console = Console'borrow(console);
         kprint("using virtio console\n");
     };
     gic := Gic'find(DT'iter(device_tree_bytes));
-    kernel.uart = Pl011'find(DT'iter(device_tree_bytes));
     init_interrupt_vector();
     init(gic);
     init_timer(gic);
     if kernel.uart& { uart |
         init(uart[], gic);
-        kernel.console = Console'borrow(uart);
-        kprint("using pl01\n");
     };
-    tt := setup_virtual_memory(ram);
+    tt := setup_virtual_memory(ram, pci);
     barrier();
     
+    // TODO: the gic part and the publish_chain part freak out without -accel hvf
     if kernel.vcon& { it |
-        gic.set_group1(69);
-        gic.enable(69);
-        gic.set_group1(37);
-        gic.enable(37);
+        // TODO: these are still hard coded in syscall_func and the one in user space
+        gic.set_group1(it.device.intid);
+        gic.enable(it.device.intid);
         
         // give it some memory to store the input
         q := it.device.queues.index(0);
@@ -157,6 +145,28 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
     kprint("kernel ready\n");
     return_to_scheduler();
 }
+
+check_system_registers :: fn() void = {
+    el := i64.sys_get(.CurrentEL).shift_right_logical(2);
+    if el != 1 {
+        kprint_label("el ", el);
+        kpanic("expected to run in el1");
+    };
+    if i64.sys_get(.ID_AA64ISAR0_EL1).shift_right_logical(20).bit_and(0b1111) == 0 {
+        kprint("WARNING: atomic instructions are not implemented on this cpu (qemu: try -cpu cortex-a76)\n");
+    };
+    if i64.sys_get(.ICC_SRE_EL1).bit_and(1) == 0 {
+        kprint("WARNING: ICC_SRE_EL1 (system register interface for GIC) is disabled\n");
+    };
+    
+    // TODO: maybe better to use this to only save on interrupt if they're actually being used by that process
+    cpacr := i64.sys_get(.CPACR_EL1);
+    i64.sys_set(.CPACR_EL1, cpacr.bit_or(0b11.shift_left(20)));  // FPEN
+    
+    // EL0PCTEN: allow userspace to read CNTVCT_EL0 and CNTFRQ_EL0
+    cntctl := i64.sys_get(.CNTKCTL_EL1);
+    i64.sys_set(.CNTKCTL_EL1, cntctl.bit_or(2));
+};
 
 find_physical_memory :: fn(self: DT.Iter) []u8 = {
     self&.consume_root();
@@ -551,6 +561,7 @@ syscall_func :: fn(task: *Task) void = {
             inst := u32.ptr_from_int(args.elr)[];
             context := inst.shift_right_logical(5).bit_and(0xFFFF);
             kprint_label("executed brk: ", context.zext());
+            kprint_label("ip: ", args.elr);
             send_signal(task);
         };
     
@@ -596,7 +607,7 @@ syscall_func :: fn(task: *Task) void = {
     };
     
     if kernel.vcon& { console |
-        if intid == 69 || intid == 37 {  // TODO: don't hard code this
+        if intid == console.intid {
             console.check_interrupt(intid);
             i64.sys_set(.ICC_EOIR1_EL1, intid);
             return_to_scheduler();

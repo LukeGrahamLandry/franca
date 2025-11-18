@@ -1,3 +1,22 @@
+// Peripheral Component Interconnect 
+//
+// DT.pci.(ranges, reg) gives you the MemoryRegion containing the Headers and usable for BARs.
+// 
+// Base Address Registers:
+// low 4 bits are flags. high bits will read zero at the beginning. 
+// the driver chooses where in the valid pci range that bar should be allocated 
+// (and writes that address to the bar). its always aligned to the size and
+// low bits that make it unaligned are masked out (so writing all ones 
+// lets you check the size by seeing which bits stick)
+// 64 bit addresses just used two consecutive slots. 
+// vendor specific info in the capabilities will tell you which bar slot of the header to use, 
+// and how much memory needs to be allocated for it. 
+// 
+// DT.pci.interrupt-map gives you a Map<K=(bus, device, function, pin), V=intid>. 
+// (bus, device, function) is determined by which position in the array of Headers you're looking at. 
+// and the header's interrupt_pin tells you which pin you care about. 
+// note: each intid can appear multiple times and you just have to check all the devices that match? 
+//
 
 Header :: @struct {
     vendor_id: u16;  //  0xffff means non-existant device
@@ -15,10 +34,13 @@ Header :: @struct {
     body: @union(
         _0: @struct {
             bar: Array(u32, 6);
-            _: Array(u32, 3);
+            _0: Array(u32, 3);
             cap: u8;  // same place in both _0 and _1
-            __: Array(u8, 3);
-            ___: Array(u32, 2);
+            _1: Array(u8, 3);
+            _2: u32;
+            _3: u8;
+            interrupt_pin: u8;
+            _4: u16;
         },
         _1: @struct {
             _: Array(u32, 12);
@@ -39,15 +61,6 @@ fn for_cap(h: *Header, $body: @Fn(it: *CapNode) void) void = {
     };
 }
 
-// 
-// Base Address Registers:
-// low 4 bits are flags. high bits will read zero at the beginning. 
-// the driver chooses where in the valid pci range that bar should be allocated 
-// (and writes that address to the bar). its always aligned to the size and
-// low bits that make it unaligned are masked out (so writing all ones 
-// lets you check the size by seeing which bits stick)
-// 64 bit addresses just used two consecutive slots. 
-// 
 BarResult :: @struct {
     old_address: i64;
     size: i64;
@@ -79,10 +92,7 @@ read_device_tree :: fn(self: DT.Iter) ?MemoryRegion = {
         || return(.None);
     depth := self.depth;
     
-    // read its childen
-    // annoying: vol_2x32 is just for avoiding unaligned read so it works without mmu, not because its actually volatile.
-    config: []u8 = empty();
-    bar: []u8 = empty();
+    result := zeroed MemoryRegion;
     dowhile {
         it := self&.next();
         // device tree pci.reg replaces ACPI 'MCFG' table and lets you find the config space. 
@@ -91,30 +101,28 @@ read_device_tree :: fn(self: DT.Iter) ?MemoryRegion = {
         if it.name == "reg" {
             addr := it.read_2x32(0);
             size := it.read_2x32(2);
-            config = (ptr = u8.ptr_from_int(addr), len = size);
-            @if(bar.len != 0) return(Some = (config = config, bar = bar));
+            result.config = (ptr = u8.ptr_from_int(addr), len = size);
         };
         
         // TODO: use #address-cells, #size-cells, #interrupt-cells
+        //       does interrupt-map-mask matter?
         if it.name == "ranges" {
             while => it.data.len >= 7 * size_of(u32) {
-                flags: i64 = it.read_32(0).zext();
+                flags: PciAddrInfo = (repr = it.read_32(0));
                 pci_addr := it.read_2x32(1);
                 cpu_addr := it.read_2x32(3);
                 pci_size := it.read_2x32(5);
                 it.data = it.data.rest(7 * size_of(u32));
                 if pci_addr == cpu_addr {
-                    bar = (ptr = u8.ptr_from_int(pci_addr), len = pci_size);
-                    @if(config.len != 0) return(Some = (config = config, bar = bar));
+                    result.bar = (ptr = u8.ptr_from_int(pci_addr), len = pci_size);
                 }
             };
         };
-        
-        if it.name == "interrupt-map-mask" {
-            // TODO
-        }
         if it.name == "interrupt-map" {
-            // TODO
+            result.interrupt_map = it.data;
+        };
+        if result.config.len != 0 && result.bar.len != 0 && result.interrupt_map.len != 0 {
+            return(Some = result);
         };
         
         self.depth >= depth
@@ -122,7 +130,34 @@ read_device_tree :: fn(self: DT.Iter) ?MemoryRegion = {
     .None
 }
 
+find_interrupt :: fn(data: []u8, bus: i64, device: i64, function: i64, pin: i64) ?i64 = {
+    it: DT.Iter.Node = (name = "", data = data, tag = .PROP);
+    while => it.data.len >= 10 * size_of(u32) {
+        flags: PciAddrInfo = (repr = it.read_32(0));
+        // 1,2: rest of pci address should be zero
+        irq_pin := it.read_32(3);
+        // 4,5,6: interrupt controller handle, don't care there's only one?
+        irq_type := it.read_32(7);  // 0=SPI, 1=PPI
+        irq_number := it.read_32(8);
+        // 9: triggering type, ?
+        it.data = it.data.rest(10 * size_of(u32));
+        if flags.get(.bus) == bus && flags.get(.device) == device && flags.get(.function) == function && irq_pin.zext() == pin {
+            return(Some = irq_number.zext() + @if(irq_type == 0, 32, 0));
+        };
+    };
+    .None
+}
+
+PciAddrInfo :: @bit_fields(
+    register := 8,
+    function := 3,
+    device := 5,
+    bus := 8,
+    _ := 8,
+);
+
 MemoryRegion :: @struct {
     config: []u8;  // array of Headers (but spaced out by 4096 bytes)
     bar: []u8;     // memory that can be allocated to the bars for specific devices
+    interrupt_map: []u8;
 };

@@ -218,7 +218,7 @@ fn map_identity(addrs: *AddressSpace, mem: []u8, user: bool, pxn: bool, device: 
     };
 }
 
-setup_virtual_memory :: fn(ram: []u8) *TranslationTable = {
+setup_virtual_memory :: fn(ram: []u8, pci: ?Pci.MemoryRegion) *TranslationTable = {
     page_size := kernel.page_size;
     kprint_label("page size = ", page_size);
     
@@ -251,6 +251,22 @@ setup_virtual_memory :: fn(ram: []u8) *TranslationTable = {
     // TODO: only kimage should be kernel executable
     // map the whole ram into kernel memory
     map_identity(mem&, ram, false, false, false);
+    
+    if pci& { pci |
+        if u8.int_from_ptr(pci.config.ptr) > u8.int_from_ptr(ram.ptr) {
+            @if(u8.int_from_ptr(pci.config.ptr) < u8.int_from_ptr(ram.end_pointer())) kpanic("TODO: pci config overlaps ram");
+            map_identity(mem&, pci.config, false, true, true);
+        } else {
+            @if(u8.int_from_ptr(pci.config.end_pointer()) > u8.int_from_ptr(ram.ptr)) kpanic("TODO: pci config overlaps ram");
+        };
+        // TODO: catch mistakes by only mapping the parts of bar that are allocated
+        if u8.int_from_ptr(pci.bar.ptr) > u8.int_from_ptr(ram.ptr) {
+            @if(u8.int_from_ptr(pci.bar.ptr) < u8.int_from_ptr(ram.end_pointer())) kpanic("TODO: pci bar overlaps ram");
+            map_identity(mem&, pci.bar, false, true, true);
+        } else {
+            @if(u8.int_from_ptr(pci.bar.end_pointer()) > u8.int_from_ptr(ram.ptr)) kpanic("TODO: pci bar overlaps ram");
+        };
+    };
     
     // map a copy of the init image into user memory
     // TODO: make it virtual instead of physical

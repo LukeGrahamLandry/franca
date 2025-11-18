@@ -1,4 +1,14 @@
 
+## (Nov 18)
+
+- i think i just confused myself yesterday, because i never got vzf to the point of actually working before
+  since i couldn't do input. so the situation where qemu worked but vzf hangs is fine because 
+  thats still progress. vzf seems helped by just bumping up the amount of ram a lot, which 
+  i don't understand and is probably still a bug in my thing but for now its fine. 
+  also very possible that my attempt to make qemu use stdio for a virtio console and not have a pl011 one 
+  is using the wrong cli arguments because i really have no idea how they work, i just try random combinations. 
+  also the order in which i init the different devices is now a terrible spaghetti. 
+
 ## (Nov 17)
 
 - continuing to refactor the drivers. doesn't spark joy. 
@@ -17,8 +27,18 @@
     - as a start just enable every intid so i can hard code it and make it work 
       before needing to figure out how to get that info out of pci. seems to be 69 on vzf and 37 on qemu. 
     - important to set VIRTQ_DESC_F_WRITE or you just get spammed with interrupts that say they wrote zero bytes
-
-TODO: broke qemu without -accel hvf
+    - i think im correctly reading the pci interrupt-map,
+      but i somehow completely broke everything else.   
+      identity_map-ing some of the pci memory seemed to help a bit. maybe its not always before the ram.   
+      problems:  
+      if you do uart qemu-hfv works,  
+      if you don't it panics and fails to print the message,
+      but then qemu-tcg works. 
+      either way, vzf hangs trying to compile sudoku  
+- lib/sys: transcribe a few more linux syscalls. 
+  trying to get run_tests to work statically linked. 
+  - remove calls unlinkat with flag if its a directory
+  - readlink doesn't exist on arm, use readlinkat
 
 # (Nov 16)
 
