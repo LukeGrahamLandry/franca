@@ -95,12 +95,13 @@ sys_capture_exec :: fn(args: []CStr) Result(RunningProcess, Str) = {
 
 exec :: fn(args: []CStr) Never = {
     execvp :: fn(pathname: CStr, null_terminated_argv: *CStr) i32 #weak #libc;
-
+    e: (@FnPtr(p: CStr, v: *CStr) i32) = @if(prefer_syscalls(), static_execvp, execvp);
+    
     // HACK: it may appear that i am bad at my job... but so is everyone else... it just can't be done apparently?
     //       https://github.com/golang/go/commit/a4b2c5efbc259c7d23159d304f9cb4266cd64643
     i := 0;
     loop {
-        never := execvp(args[0], args.ptr);
+        never := e(args[0], args.ptr);
         if query_current_os() != .linux || Posix'errno()[] != 26 || i >= 10 {
             @eprintln("libc::execvp() failed!");
             err := u8.list(temp());
@@ -113,6 +114,13 @@ exec :: fn(args: []CStr) Never = {
         i += 1;
     }
 };
+
+// TODO: search PATH
+static_execvp :: fn(path: CStr, argv: *CStr) i32 = {
+    envp := context(DefaultContext)[].environment_variables;
+    Syscall'execve(path, argv, envp)
+};
+
 
 // TODO: allow using a hanging poll for when you're just calling this in a loop to collect everything
 //       but need to do the right thing if the process dies while you're polling it so it never writes anything else. 

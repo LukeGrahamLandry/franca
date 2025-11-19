@@ -19,10 +19,11 @@ exit :: @S("exit") fn(status: i64) Never #libc #syscall(94, 231, 1);
 
 nanosleep :: @S("nanosleep") fn(duration: *TimeSpec, nullable_remainder_out: *TimeSpec) voidResult #libc #syscall(101, 35, NOSYS);
 
-dup2 :: @S("dup2") fn(oldfd: Fd, newfd: Fd) FdResult #libc #syscall(NOSYS, 33, 90);
-dup3 :: @S("dup3") fn(oldfd: Fd, newfd: Fd, flags: i32) voidResult #libc #syscall(24, 292, NOSYS);
+// linux: dup3, flags=0 is the same as dup2, just don't pass oldfd=newfd. 
+dup2 :: @S("dup2") fn(oldfd: Fd, newfd: Fd) FdResult #libc #syscall(24, 292, 90);
 chdir :: @S("chdir") fn(path: CStr) voidResult #weak #libc #syscall(49, 80, 12);
 fsync :: @S("fsync") fn(fd: Fd) voidResult #weak #libc #syscall(82, 74, 95);
+execve :: @S("execve") fn(path: CStr, argv: *CStr, envp: *CStr) i32 #libc #syscall(221, 59, 59);
 
 // renameat2 has an extra flags arg but my wrappers set it to zero so its fine to not list it here
 renameat :: @S("renameat") fn(old_dir: Fd, old: CStr, new_dir: Fd, new: CStr) voidResult #libc #syscall(276, 316, 465);
@@ -87,9 +88,15 @@ pipe :: @S("pipe") fn(pipefd: *Array(Fd, 2)) voidResult #weak #libc #syscall(59,
 // If you're running at comptime, you might not be done compiling and the child 
 // will hang forever because fork() doesn't take threads with you (codegen runs 
 // in a different thread). 
-//
-// macos: fork, linux: clone (@syscall pads with zeros until 6 args and flags=0 makes it not share with the parent)
-fork :: @S("fork") fn() i32 #weak #libc #syscall(220, 56, 2);
+fork :: fn() i32 = {
+    // macos: fork
+    // linux: clone. low byte of flags is exit_signal, this lets you use it with wait4. 
+    //  everything else 0 makes it not share with the parent. 
+    //  @syscall pads with zeros until 6 args (don't need to set stack, etc.)
+    SIGCHLD :: 17;
+    fork :: @S("fork") fn(flags: i64) i32 #libc #syscall(220, 56, 2);
+    fork(SIGCHLD)
+};
 
 Macos :: import("@/lib/sys/macos.fr");
 Linux :: import("@/lib/sys/linux.fr");
@@ -186,12 +193,18 @@ fn syscall(arg: FatExpr) FatExpr #macro = {
                 bit_cast_unchecked(T, u32, @[e[]]).zext(),
             )
         });
+        
+        if size_of(e.ty) > 8 {
+            compile_error("syscall argument must fit in a register", loc);
+        };
     };
     
     if arg.len > 6 {
         compile_error("syscall has too many arguments", loc);
     };
     
+    // the zero padding is important becuase sometimes i use it for flags without explicitly 
+    // mentioning the parameter. ie. fork->clone, dup2->3, 
     while => inst.len < 6 {
         inst&.push(@literal 0);
     };

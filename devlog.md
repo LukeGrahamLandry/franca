@@ -1,4 +1,12 @@
 
+## (Nov 19)
+
+- sys static: poll, execve, 
+- give a clear error if you try to rely on slice abi in one of the syscall wrappers
+- wait4 was giving ECHILD because i wasn't setting a exit_signal in clone_flags when forking. 
+- fixed O_arm.DIRECTORY for static opendir, the curse of people using octal
+- skip the tests that are specifically about importing something when not linking libc
+
 ## (Nov 18)
 
 - i think i just confused myself yesterday, because i never got vzf to the point of actually working before

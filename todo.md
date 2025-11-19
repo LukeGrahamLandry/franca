@@ -1,4 +1,6 @@
 
+- should default to -keep-names so you get nice stack traces. 
+  have -strip be explicit if you want small binaries. 
 - elf: fix the first 0x4000 (commands_size_guess) of text section (at least when Relocatable probably also exe)
   being marked as executable but being elf header junk, etc.
   so objdump tries to disassemble it and you get something confusing. 
