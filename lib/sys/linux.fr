@@ -1,13 +1,4 @@
 
-// TODO: these are for musl. do other libcs use different lengths?
-Utsname    :: @struct(
-    sysname: Array(u8, 65),
-    nodename: Array(u8, 65),
-    release: Array(u8, 65),
-    version: Array(u8, 65),
-    machine: Array(u8, 65),
-    __domainname: Array(u8, 65),
-);
 DirEnt :: @struct(
     d_ino: u64, 
     d_seekoff: u64, 
@@ -45,10 +36,6 @@ O_amd :: @struct {
     NOFOLLOW  :: 0x0020000;
     CLOEXEC   :: 0x0080000; 
 };
-
-// TODO: it would be more sane to mark this #libc but (compile bug)            HACK
-//       i redeclare the symbol in the ir for aot with get_smuggled_libc_function if it doesn't match the target.  -- Sep 17
-fn uname(buf: *Utsname) voidResult #redirect(*MacosLibc.Utsname, voidResult);
 
 Stat :: @struct {
     st_dev: i64;
@@ -120,39 +107,6 @@ fn fix(d: *Posix.Stat, s: *StatArm64) void = {
 }
 
 Posix :: import("@/lib/sys/posix.fr");
-
-fn slowly_get_cli_args_from_proc_self(alloc: Alloc) []CStr = { // :Leak
-    // can't use read_to_string because you can't seek the magic /proc things? 
-    out: List(u8) = list(4096, alloc); // :Leak
-    path :: @as(CStr) "/proc/self/cmdline";
-    f := open_read(path).unwrap();
-    loop {
-        continue :: local_return;
-        read_len := read(f, out.maybe_uninit.ptr.offset(out.len), out.maybe_uninit.len - out.len);
-        if read_len.is_ok() {
-            len := read_len.unwrap();
-            out.len += len;
-            if len != 0 {
-                continue();
-            };
-        }; // else i sure hope we're done... TODO: return error? unwrap it?
-        
-        close(f); // TODO: defer
-        
-        // if we're gonna be slow we might as well be super :slow fixme fixme fixme
-        args: List(CStr) = list(4096, alloc); // :Leak
-        
-        while => out.len != 0 {
-            s: CStr = (ptr = out.maybe_uninit.ptr);
-            args&.push(s);
-            len := s.str().len() + 1;
-            out.maybe_uninit.ptr = out.maybe_uninit.ptr.offset(len);
-            out.len -= len;
-        }; 
-        
-        return(args.items());
-    }
-}
 
 get_executable_path :: fn(a: Alloc) Str = {
     path :: @as(CStr) "/proc/self/exe";

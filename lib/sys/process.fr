@@ -1,24 +1,9 @@
-// this one does something os specific that doesn't rely on the program starting through franca_runtime_init
-fn query_cli_args() []CStr = {
-    @match(query_current_os()) {
-        fn macos() => {
-            argc := MacosLibc'_NSGetArgc()[];
-            argv := MacosLibc'_NSGetArgv()[];
-            // Safety: the os wouldn't lie to us... hopefully.
-            slice(argv, argc)
-        }
-        // TODO: uhg, its not ok to allocate here! :slow
-        //       if we're gonna be slow we might as well be super slow
-        //       but if im committed to doing it this way caller should pass in allocator or i should cache it, or something, idk. 
-        fn linux() => slowly_get_cli_args_from_proc_self(page_allocator)  // :Leak
-        @default => unreachable();
-    }
-}
 
 fn timestamp() i64 = // :TodoLinux 
     clock_ms(MacosLibc.CLOCK_REALTIME);
 
 fn clock_ms(clock_id: i64) i64 = {
+    @if(prefer_syscalls() && query_current_os() == .macos) return(0);  // :TodoMacosSyscall
     time_spec: TimeSpec = (seconds = 0, nanoseconds = 0);
     Syscall'clock_gettime(clock_id, time_spec&);
     time_spec.ms()
@@ -37,27 +22,6 @@ fn get_executable_path(a: Alloc) Str = {
         fn macos() => MacosLibc'get_executable_path(a);
         fn linux() => LinuxLibc'get_executable_path(a);
         @default => unreachable();
-    }
-}
-
-fn read_link(path: CStr, out: *List(u8)) bool = {
-    start := out.len;
-    if out.maybe_uninit.len == out.len {
-        out.reserve(32);
-    };
-    loop {
-        cap := out.maybe_uninit.len - start;
-        len := Syscall'readlinkat(Posix'AT'FDCWD(), path, out.maybe_uninit.ptr.offset(start), cap) 
-            || return(false);
-        
-        if len < cap {
-            out.len += len;
-            return(true);
-        };
-        @debug_assert_eq(cap, len);
-        
-        // else, we probably didn't have enough room to read the whole file path, try again. 
-        out.reserve(2 * out.maybe_uninit.len);
     }
 }
 

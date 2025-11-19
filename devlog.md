@@ -8,6 +8,13 @@
   also very possible that my attempt to make qemu use stdio for a virtio console and not have a pl011 one 
   is using the wrong cli arguments because i really have no idea how they work, i just try random combinations. 
   also the order in which i init the different devices is now a terrible spaghetti. 
+- taking out libc bindings that i don't use
+  - demote query_cli_args from sys/process.fr to a test 
+    because the one in dynamic env from the entry point is always what i want
+  - demote uname/Utsname to examples/toy/where_am_i.fr
+- transcribe syscalls: fork, pipe
+- don't try to call clock_gettime without libc on macos. 
+  not super useful but its a fun trick to have the compiler technically work
 
 ## (Nov 17)
 

@@ -79,6 +79,18 @@ rt_sigreturn :: @S("rt_sigreturn") fn() Never #syscall(139, 15, NOSYS);
 
 wait4 :: @S("wait4") fn(pid: pid_t, status: *i32, options: i64, usage: *Posix.rusage) i32 #weak #libc #syscall(260, 61, 7);
 
+// linux: pipe2 with flags=0 is the same as pipe (which doesn't exist on arm64)
+// :TodoMacosSyscall
+pipe :: @S("pipe") fn(pipefd: *Array(Fd, 2)) voidResult #weak #libc #syscall(59, 293, NOSYS/*42*/);
+
+// Be very very careful using this to do anything other than exec a new process. 
+// If you're running at comptime, you might not be done compiling and the child 
+// will hang forever because fork() doesn't take threads with you (codegen runs 
+// in a different thread). 
+//
+// macos: fork, linux: clone (@syscall pads with zeros until 6 args and flags=0 makes it not share with the parent)
+fork :: @S("fork") fn() i32 #weak #libc #syscall(220, 56, 2);
+
 Macos :: import("@/lib/sys/macos.fr");
 Linux :: import("@/lib/sys/linux.fr");
 
@@ -111,11 +123,6 @@ S :: fn(name: FatExpr, fid: FatExpr) FatExpr #macro = {
         result
     });
     func.unset_flag(.BodyIsSpecial);
-    
-    // hack!
-    if name == "clone" || name == "clone3" {
-        func.set_flag(.Inline);
-    };
     
     @literal fid
 };
@@ -200,6 +207,9 @@ fn syscall(arg: FatExpr) FatExpr #macro = {
     arg_expr := @as(FatExpr) (expr = (Tuple = arg.as_raw_list()), ty = UnknownType, done = false, loc = loc);
     if arg.len == 1 {
         arg_expr = arg[0];
+    };
+    if arg.len == 0 {
+        arg_expr = @literal ();
     };
     
     arg, ret := (func.finished_arg.unwrap(), func.finished_ret.unwrap());

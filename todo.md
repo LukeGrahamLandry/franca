@@ -636,6 +636,7 @@ Compile Error: (Undeclared Variable 'open'[Symbol=5452] in S44081)
   which i havn't transcribed syscall for on macos. will be fixed when i make prefer_syscall
   not a constant which i want to do anyway for reusing frc_inlinable when cross compiling. 
   (same for linux-sta -> linux-dyn)
+- :TodoMacosSyscall
 - how are you supposed to ask for page size? blink wants 64k instead of 4k. 
 - standalone import_c/cc.fr and meta/qbe_backend.fr can't make statically linked binaries because the `_init` is written in franca
 - elf_loader.fr doesn't work on linker output: `panic! not divisible by page size`

@@ -1,10 +1,10 @@
 // TODO: better error handling. 
 // TODO: use posix_spawnp instead? that makes it easier to return an error to the caller. using fork is a pain. 
-// TODO: it doesn't look up the command like a shell does.
 fn run_cmd_blocking(path: Str, args: Slice(Str)) bool = {
-    pid := fork();
+    cargs := make_args_for_exec(path, args, temp());
+    pid := Syscall'fork();
     if pid == 0 {
-        exec_cmd(path, args);
+        exec(cargs);
     };
     
     status: i32 = 0;
@@ -48,16 +48,6 @@ fn exec_and_catch(path: Str, args: Slice(Str), alloc: Alloc, input: []u8) Ty(boo
     (ok, out, err)
 }
 
-fn exec_cmd(path: Str, args: Slice(Str)) Never = {
-    cargs := make_args_for_exec(path, args, temp());
-    execvp(cargs[0], cargs.ptr);
-    // ERROR
-    err := u8.list(temp());
-    report_exec_error(err&, cargs);
-    eprintln(err.items());
-    panic("failed to exec!")
-}
-
 RunningProcess :: @struct {
     pipes: Array(Fd, 3);  // in, out, err
     pid: i32;
@@ -71,11 +61,12 @@ RunningProcess :: @struct {
 sys_capture_exec :: fn(args: []CStr) Result(RunningProcess, Str) = {
     pipes := zeroed Array(Array(Fd, 2), 3);
     each pipes& { p |
-        pipe(p) || return(Err = "libc::pipe() failed");
+        Syscall'pipe(p) 
+            || return(Err = "libc::pipe() failed");
     };
     @debug_assert(args[args.len - 1].ptr.is_null());
     
-    pid := fork();
+    pid := Syscall'fork();
     if pid == 0 { // Child
         // The important thing is that the child closes it's copy of the write end of its standard-input
         // so when the parent closes its copy too, the child will read it as EOF so a program 
@@ -91,22 +82,7 @@ sys_capture_exec :: fn(args: []CStr) Result(RunningProcess, Str) = {
         Syscall'dup2(pipes&[2]&[1], STD_ERR)
             || panic("failed to dup2(err)");
         
-        // HACK: it may appear that i am bad at my job... but so is everyone else... it just can't be done apparently?
-        //       https://github.com/golang/go/commit/a4b2c5efbc259c7d23159d304f9cb4266cd64643
-        i := 0;
-        loop {
-            never := execvp(args[0], args.ptr);
-            if query_current_os() != .linux || Posix'errno()[] != 26 || i >= 10 {
-                @eprintln("libc::execvp() failed!");
-                err := u8.list(temp());
-                @fmt(err&, "% %\n", never, Posix'errno()[]);
-                report_exec_error(err&, args);
-                eprintln(err.items());
-                Syscall'exit(1);
-            };
-            usleep(10000);
-            i += 1;
-        }
+        exec(args);
     };
     // else: Parent
 
@@ -115,6 +91,27 @@ sys_capture_exec :: fn(args: []CStr) Result(RunningProcess, Str) = {
     Syscall'close(pipes&[2]&[1]).unwrap();  // "
     
     (Ok = (pid = pid, pipes = @array(pipes&[0]&[1], pipes&[1]&[0], pipes&[2]&[0]), status = -1))
+};
+
+exec :: fn(args: []CStr) Never = {
+    execvp :: fn(pathname: CStr, null_terminated_argv: *CStr) i32 #weak #libc;
+
+    // HACK: it may appear that i am bad at my job... but so is everyone else... it just can't be done apparently?
+    //       https://github.com/golang/go/commit/a4b2c5efbc259c7d23159d304f9cb4266cd64643
+    i := 0;
+    loop {
+        never := execvp(args[0], args.ptr);
+        if query_current_os() != .linux || Posix'errno()[] != 26 || i >= 10 {
+            @eprintln("libc::execvp() failed!");
+            err := u8.list(temp());
+            @fmt(err&, "% %\n", never, Posix'errno()[]);
+            report_exec_error(err&, args);
+            eprintln(err.items());
+            Syscall'exit(1);
+        };
+        usleep(10000);
+        i += 1;
+    }
 };
 
 // TODO: allow using a hanging poll for when you're just calling this in a loop to collect everything
@@ -201,16 +198,13 @@ fn poll(self: *RunningProcess, buf: []*List(u8), realloc: bool, input: *[]u8, la
     (Ok = .None)
 };
 
+// better to do this before forking so you don't have to copy COW pages in the child. 
 make_args_for_exec :: fn(path: Str, args: []Str, a: Alloc) []CStr = {
-    cargs := a.alloc_uninit(CStr, args.len + 2);
-    i := 0;
-    cargs[i] = path.as_cstr(); i += 1;
-    for args { it |
-        cargs[i] = it.as_cstr(); i += 1;
-    };
-    cargs[i] = zeroed CStr; i += 1;
-    @debug_assert_eq(i, cargs.len);
-    cargs
+    cargs := CStr.list(args.len + 2, temp());
+    cargs&.push(path.as_cstr());
+    for(args, fn(it) => cargs&.push(it.as_cstr()));
+    cargs&.push(zeroed CStr);
+    cargs.items()
 };
 
 report_exec_error :: fn(err: *List(u8), cargs: []CStr) void = {

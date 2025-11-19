@@ -174,7 +174,7 @@ Go calls this a slice.
 that maps them down to a smaller index space to look up a slot in the table. 
 It's the kind where if the slot you want is taken you check the next one, not a linked list of buckets. 
 - RawDeque: Same as a List but stores a beginning index as well so it's cheap to append to either end. 
-Sepending on usage pattern, the items might not be stored contiguously in memory. They might be split 
+Depending on usage pattern, the items might not be stored contiguously in memory. They might be split 
 on the end of the array and wrap around to the other side. So you'd need to trigger some copying 
 if you want it as a single slice. 
 - DynamicBitSet: like a List(bool) but using one bit per value instead of one byte per value. 

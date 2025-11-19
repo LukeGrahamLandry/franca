@@ -1,0 +1,62 @@
+
+main :: fn() void = {
+    os_args := query_cli_args(temp());
+    env_args := cli_args();
+    
+    @assert_eq(os_args.len, env_args.len);
+    range(0, os_args.len) { i |
+        @assert_eq(os_args[i].str(), env_args[i].str(), "args[%]", i);
+    };
+}
+
+// this one does something os specific that doesn't rely on the program starting through franca_runtime_init
+query_cli_args :: fn(a: Alloc) []CStr = {
+    @match(query_current_os()) {
+        fn macos() => {
+            argc := MacosLibc'_NSGetArgc()[];
+            argv := MacosLibc'_NSGetArgv()[];
+            // Safety: the os wouldn't lie to us... hopefully.
+            slice(argv, argc)
+        }
+        fn linux() => slowly_get_cli_args_from_proc_self(a)  // :Leak
+        @default => unreachable();
+    }
+}
+
+_NSGetArgc :: fn() *i64 #weak #libc;
+_NSGetArgv :: fn() **CStr #weak #libc;
+
+slowly_get_cli_args_from_proc_self :: fn(alloc: Alloc) []CStr = { // :Leak
+    #use("@/lib/sys/fs.fr");
+    #use("@/lib/sys/syscall.fr");
+    // can't use read_to_string because you can't seek the magic /proc things? 
+    out: List(u8) = list(4096, alloc); // :Leak
+    path :: @as(CStr) "/proc/self/cmdline";
+    f := open_read(path).unwrap();
+    loop {
+        continue :: local_return;
+        read_len := read(f, out.maybe_uninit.ptr.offset(out.len), out.maybe_uninit.len - out.len);
+        if read_len.is_ok() {
+            len := read_len.unwrap();
+            out.len += len;
+            if len != 0 {
+                continue();
+            };
+        }; // else i sure hope we're done... TODO: return error? unwrap it?
+        
+        close(f); // TODO: defer
+        
+        // if we're gonna be slow we might as well be super :slow fixme fixme fixme
+        args: List(CStr) = list(4096, alloc); // :Leak
+        
+        while => out.len != 0 {
+            s: CStr = (ptr = out.maybe_uninit.ptr);
+            args&.push(s);
+            len := s.str().len() + 1;
+            out.maybe_uninit.ptr = out.maybe_uninit.ptr.offset(len);
+            out.len -= len;
+        }; 
+        
+        return(args.items());
+    }
+}

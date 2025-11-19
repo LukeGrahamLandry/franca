@@ -52,6 +52,7 @@ This feature is mainly used for:
 - running the frontend once and getting IR that dynamically chooses the right behaviour for the current operating system
 - comptime code inheriting state from the compiler
 - me not needing to implement thread locals
+
 all of which are things i like and don't want to get rid of, 
 but I'm definitly considering moving to a less fragile (and more efficient) abi to enable them. 
 
