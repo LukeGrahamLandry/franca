@@ -1,0 +1,97 @@
+// https://users.cs.jmu.edu/buchhofp/forensics/formats/pkzip.html
+
+EndCentralDir :: @struct {
+    MAGIC :: 0x06054b50;
+    magic: u32 #align(1);
+    _: Array(u8, 4);
+    disk_entries: u16 #align(1);
+    total_entries: u16 #align(1);
+    cd_size: u32 #align(1);
+    cd_offset: u32 #align(1);
+    comment_len: u16 #align(1);
+};
+
+EcdHeader :: @struct {
+    MAGIC :: 0x02014b50;
+    magic: u32 #align(1);
+    _: Array(u8, 16);
+    compressed_size: u32 #align(1);
+    uncompressed_size: u32 #align(1);
+    name_len: u16 #align(1);
+    extra_len: u16 #align(1);
+    comment_len: u16 #align(1);
+    __: Array(u8, 8);
+    local_header_offset: u32 #align(1);
+};
+
+LocalHeader :: @struct {
+    MAGIC :: 0x04034b50;
+    magic: u32 #align(1);
+    _: Array(u8, 4);
+    compression: u16 #align(1);
+    __: Array(u8, 8);
+    compressed_size: u32 #align(1);
+    uncompressed_size: u32 #align(1);
+    name_len: u16 #align(1);
+    extra_len: u16 #align(1);
+};
+
+Node :: @struct(h: *LocalHeader, name: Str, data: []u8);
+
+// TODO: return errors instead of panicking!
+iter :: fn(in: []u8, $body: @Fn(it: Node) void) void = {
+    off := in.len - size_of(EndCentralDir);
+    while => off > 0 {
+        ecd := bit_cast_unchecked(*u8, *EndCentralDir, in.ptr.offset(off));
+        if ecd.magic == EndCentralDir.MAGIC {
+            @assert_eq(ecd.disk_entries, ecd.total_entries, "idk what multiple disks means");
+            cd_bytes := in.subslice(ecd.cd_offset.zext(), ecd.cd_size.zext());
+            i := 0;
+            while => cd_bytes.len > 0 {
+                h := cd_bytes&.pop_type(EcdHeader);
+                @assert_eq(h.magic, EcdHeader.MAGIC, "header % in central directory bad magic", i);
+                name2 := cd_bytes&.pop_slice(u8, h.name_len.zext());
+                _ := cd_bytes&.pop_slice(u8, h.extra_len.zext());
+                _ := cd_bytes&.pop_slice(u8, h.comment_len.zext());
+                h2 := h;
+                
+                local_bytes := in.rest(h.local_header_offset.zext());
+                h := local_bytes&.pop_type(LocalHeader);
+                name := local_bytes&.pop_slice(u8, h.name_len.zext());
+                @assert(true
+                    && h.uncompressed_size == h2.uncompressed_size 
+                    && h.compressed_size == h2.compressed_size 
+                    && name == name2, 
+                    "local header does not match central header for %", name,
+                );
+                _ := local_bytes&.pop_slice(u8, h.extra_len.zext());
+                data := local_bytes&.pop_slice(u8, h.compressed_size.zext());
+                @assert(h.compression == 8 || h.compression == 0, "unknown compression for %", name);
+                body(h = h, name = name, data = data);
+                i += 1;
+            };
+            return();
+        };
+        off -= 1;
+    };
+    panic("TODO: EndCentralDir not found");
+}
+
+fn data(it: *Node, a: Alloc) []u8 = {
+    @switch(it.h.compression) {
+        @case(0) => {
+            @assert_eq(it.h.compressed_size, it.h.uncompressed_size);
+            it.data
+        };
+        @case(8) => {
+            Deflate :: import("@/lib/encoding/deflate.fr");
+            o := u8.list(it.h.uncompressed_size.zext(), a);
+            _, err := Deflate'decompress(it.data, o&);
+            ::enum(@type err);
+            @assert_eq(err, .Ok, "failed to decompress %", it.name);
+            @assert_eq(o.len, it.h.uncompressed_size.zext(), "% bad decompressed size", it.name);
+            o.items()
+        };
+        @default => @panic("unknown compression for %", it.name);
+    }
+}

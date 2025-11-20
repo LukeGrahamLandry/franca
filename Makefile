@@ -1,3 +1,3 @@
 boot:
-	./boot/franca-macos-arm64 run_tests.fr -- github
+	./boot/strap.sh
 .PHONY: boot

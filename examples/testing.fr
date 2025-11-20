@@ -1,4 +1,4 @@
-// #foreign("curl", "unzip", "tar");  
+// #foreign("curl", "git");  
 
 #reexport("@/lib/sys/subprocess.fr");
 #reexport("@/lib/sys/process.fr");
@@ -179,14 +179,10 @@ fn fetch_or_crash(url: Str, zip_size_bytes: i64, sha256_hash: Str, HACK_name: St
     };
     @eprintln(">>> unpacking [%]...", zip_file_path);
     
-    if extension == "zip" {
-        ok, out, err := exec_and_catch("unzip", @slice("-oq", "-d", FRANCA_CACHE_PATH, zip_file_path), temp());
-    } else {
-        if zip_bytes.len == 0 {
-            zip_bytes = read_entire_file_or_crash(temp(), zip_file_path);
-        };
-        extract_tar_gz(zip_bytes, FRANCA_CACHE_PATH, HACK_name);
+    if zip_bytes.len == 0 {
+        zip_bytes = read_entire_file_or_crash(temp(), zip_file_path);
     };
+    extract_archive(zip_bytes, FRANCA_CACHE_PATH, HACK_name, extension == "zip");
     // not checking !ok because it doesn't like strange filenames 
     // this is why we can't be using whatever random shit i happen to have installed. 
     
@@ -194,17 +190,13 @@ fn fetch_or_crash(url: Str, zip_size_bytes: i64, sha256_hash: Str, HACK_name: St
     folder_path
 }
 
-extract_tar_gz :: fn(compressed: []u8, dir: Str, HACK_name: Str) void = {
+extract_archive :: fn(compressed: []u8, dir: Str, HACK_name: Str, is_zip: bool) void = {
     @debug_assert(!dir.ends_with(PATH_SEP) && dir.len > 0);
     Deflate :: import("@/lib/encoding/deflate.fr");
     GZip :: import("@/lib/encoding/gzip.fr");
+    Zip :: import("@/lib/encoding/pkzip.fr");
     Tar :: import("@/lib/encoding/tar.fr");
-    o := u8.list(temp());
-    skip := GZip'header_size(compressed) 
-        || @panic("missing gzip header");
-    _, err := Deflate'decompress(compressed.rest(skip), o&);
     ::enum(@type err);
-    @assert_eq(err, .Ok, "failed to un-gzip (for output path: %/%)", dir, HACK_name);
     
     File :: @struct {
         name: Str;
@@ -213,36 +205,50 @@ extract_tar_gz :: fn(compressed: []u8, dir: Str, HACK_name: Str) void = {
     };
     
     files := File.list(temp());
-    err := Tar'iter(o.items()) { h, b |
-        name: CStr = (ptr = h.name&.as_ptr());
-        name := name.str();
-        @assert(name.starts_with(HACK_name), "'%' does not have prefix '%'", name, HACK_name);
-        @assert(!name.has_path_escapes(), "'%' is a path with special dots, i don't like that", name);
-        
-        // TODO: use prefix for longer than 100 char names
-        //       (careful of checking for /../ that spans between prefix and name)
-        @switch(h.typeflag) {
-            @case(Tar.TYPE.REG) => {
-                // TODO: maybe want to set executable bit based on mode field
-                files&.push(name = name, contents = b, dir = false);
-            };
-            @case(Tar.TYPE.DIR) => {
-                @assert_eq(b.len, 0, "non zero size directory: %", name);
-                files&.push(name = name, contents = b, dir = true);
-            };
-            @case(Tar.TYPE.PAX) => ();  // TODO: get whatever data's in there since it might change the meaning of other stuff?
-            @default => @panic("unhandled tar block type % for %", h.typeflag, name);
-        }
+    if is_zip {
+        Zip'iter(compressed) { it |
+           files&.push(
+                name = it.name,
+                contents = it&.data(temp()),
+                dir = it.name.ends_with("/") && it.data.len == 0
+            );
+        };
+    } else {
+        o := u8.list(temp());
+        skip := GZip'header_size(compressed) 
+            || @panic("missing gzip header");
+        _, err := Deflate'decompress(compressed.rest(skip), o&);
+        ::enum(@type err);
+        @assert_eq(err, .Ok, "failed to un-gzip (for output path: %/%)", dir, HACK_name);
+        err := Tar'iter(o.items()) { h, b |
+            name: CStr = (ptr = h.name&.as_ptr());
+            name := name.str();
+            
+            // TODO: use prefix for longer than 100 char names
+            //       (careful of checking for /../ that spans between prefix and name)
+            @switch(h.typeflag) {
+                @case(Tar.TYPE.REG) => {
+                    // TODO: maybe want to set executable bit based on mode field
+                    files&.push(name = name, contents = b, dir = false);
+                };
+                @case(Tar.TYPE.DIR) => {
+                    @assert_eq(b.len, 0, "non zero size directory: %", name);
+                    files&.push(name = name, contents = b, dir = true);
+                };
+                @case(Tar.TYPE.PAX) => ();  // TODO: get whatever data's in there since it might change the meaning of other stuff?
+                @default => @panic("unhandled tar block type % for %", h.typeflag, name);
+            }
+        };
+        ::enum(@type err.Err);
+        err.or(fn(e) => @panic("%: failed to un-tar (for output path: %)", e, dir));
     };
-    ::enum(@type err.Err);
-    err.or(fn(e) => @panic("%: failed to un-tar (for output path: %)", e, dir));
-    
     // make the order fixed so the hash doesn't change based on how the archive was made
     Sort :: import("@/lib/sort.fr");
     sort :: Sort'quicksort(File, fn(a, b) => Sort'order_strings(a.name&, b.name&));
     sort(files.items());
+    // TODO: instead of hashing the compressed archive before, hash the file contents now. 
     
-    // TODO: i skip extract_tar_gz if the directory exists, so if any of these writes fail
+    // TODO: i skip extract_archive if the directory exists, so if any of these writes fail
     //       i need to delete the outer directory so trying again doesn't just assume it's fine. 
     
     p := u8.list(temp());
@@ -250,7 +256,12 @@ extract_tar_gz :: fn(compressed: []u8, dir: Str, HACK_name: Str) void = {
         p&.clear();
         p&.push_all(dir);
         p&.push_all("/");
+        if !it.name.starts_with(HACK_name) {  // HACK
+            p&.push_all(HACK_name);
+            p&.push_all("/");
+        };
         p&.push_all(it.name);
+        @assert(!it.name.has_path_escapes(), "'%' is a path with special dots, i don't like that", it.name);
         
         // lua-5.4.7-tests.tar.gz: 
         // - you're allowed to have files in nested directories without explicitly making them

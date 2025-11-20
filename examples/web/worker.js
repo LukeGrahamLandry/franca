@@ -218,6 +218,7 @@ let weak_imports = [
     "pthread_attr_init",
     "strtod", "localtime_r", "time",
     "snprintf",
+    "ppoll", "execve",
 ];
 
 for (const it of weak_imports) {

@@ -25,18 +25,6 @@
 - `u1, u2, v1, v2 : Ty(f32, f32, f32, f32) = (0.0, 1.0, 0.0, 1.0);  // TODO: allow this :compiler`
 - using @switch on an enum instead of @match is an easy footgun because it expects @case(.foo) instead of fn foo() and then you'll be confused
 - Type Error when calling a function ugently needs to show both the call site and the declaration site
-- DONT EXEC UNZIP IN examples/testing.fr
-  apple's unzip clearly doesn't work...
-  ```
-  /Users/luke/Downloads/wuffs-b1174882799a6d39796a14c9b28fb4977144a480/test/data/non-ascii/++.txt:  write error (disk full?).  Continue? (y/n/^C) n
-  fchmod (file attributes) error: Bad file descriptor
-   (warning) cannot set modif./access times
-            No such file or directory
-  warning:  /Users/luke/Downloads/wuffs-b1174882799a6d39796a14c9b28fb4977144a480/test/data/non-ascii/++.txt is probably truncated
-  ```
-  it worked before and the debian one works in orb on the same machine, the disk clearly isn't full. 
-  this is why we shouldn't just be trusting the system to have random shit preinstalled. 
-  stop being lazy!!
 - don't just crash at runtime when you `import_c/cc.fr -r`
   and try to call a function that was forward declared but not linked against
 - seperate all the tests that exec stuff or download stuff
@@ -148,6 +136,7 @@
 - might be able to get rid of is_wrongly_illegal_instruction now, but maybe it's safer just to leave it for good luck. 
 - compiling tests/collections.fr/removing alone fails:
   (Compile Error: Poison expression Argument. probably not riscv related, just that i don't normally run one function at a time. :compilerbug)
+- add pkzip to examples/show_tar.fr
 
 ## remaining nondeterminism
 
@@ -623,14 +612,6 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 
 ## linux 
 
-- problem when statically linked
-```
-orb ./target/release/franca-linux-arm64-sta compiler/test.fr
-failed compile main
-panic! tests/basic_libc.fr:29:7
-    if open(libc_path) { libc |
-Compile Error: (Undeclared Variable 'open'[Symbol=5452] in S44081)
-```
 - linux fault-na.ssa need to do the signal struct (rn it's skipped in backend/meta/test.fr)
 - :TodoLinux CLOCK_REALTIME
 - can't cross compile from (macos) to (linux -syscalls) if you call 

@@ -57,6 +57,19 @@ Some does exist, see the `docs/README.md`.
 - You can try the [WebAssembly demo](https://franca.lukegrahamlandry.ca) in your browser without installing anything. 
   It can even cross compile a native version of the compiler that you can download as a way to bootstrap your first franca installation. 
 
+## Getting Started
+
+There's no "install" process, you just need the compiler binary and the code in this repository.  
+
+```
+git clone https://github.com/LukeGrahamLandry/franca.git && cd franca && make
+```
+
+That will download the source and an old version of the compiler, use it to compile 
+the new compiler, then run all the tests. The tests have more system dependencies 
+(mainly: libc, clang, curl, git) than the compiler itself. If the later tests fail, 
+you'll still end up with a working compiler. 
+
 ## Goals
 
 - make a language stable enough to use for future projects

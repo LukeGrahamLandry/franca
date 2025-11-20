@@ -95,22 +95,24 @@ sys_capture_exec :: fn(args: []CStr) Result(RunningProcess, Str) = {
 
 exec :: fn(args: []CStr) Never = {
     execvp :: fn(pathname: CStr, null_terminated_argv: *CStr) i32 #weak #libc;
-    e: (@FnPtr(p: CStr, v: *CStr) i32) = @if(prefer_syscalls(), static_execvp, execvp);
+    libc_execvp: rawptr = execvp;
+    use_sys := prefer_syscalls() || libc_execvp.is_null();
+    e: (@FnPtr(p: CStr, v: *CStr) i32) = @if(use_sys, static_execvp, execvp);
     
     // HACK: it may appear that i am bad at my job... but so is everyone else... it just can't be done apparently?
     //       https://github.com/golang/go/commit/a4b2c5efbc259c7d23159d304f9cb4266cd64643
     i := 0;
     loop {
         never := e(args[0], args.ptr);
-        if query_current_os() != .linux || Posix'errno()[] != 26 || i >= 10 {
-            @eprintln("libc::execvp() failed!");
+        error := @if(use_sys, -never, Posix'errno()[]);
+        if query_current_os() != .linux || error != 26 || i >= 10 {
             err := u8.list(temp());
-            @fmt(err&, "% %\n", never, Posix'errno()[]);
+            @fmt(err&, "errno=%\n", error);
             report_exec_error(err&, args);
             eprintln(err.items());
             Syscall'exit(1);
         };
-        usleep(10000);
+        usleep(10000);  // delay chosen by fair die roll
         i += 1;
     }
 };
