@@ -862,12 +862,8 @@ wasm_page_size :: 65536;
 
 CodegenShared :: @struct(
     entries: []CodegenEntry,
-    waiting_for_bouba: RawDeque(*CodegenEntry),
     // It's important that these are processed in the order they're created so it's not a race to get a reproducible build. 
-    waiting_for_kiki: RawDeque(*CodegenEntry),
-    mutex: import("@/lib/sys/sync/mutex.fr").Mutex,
-    waiting_for_bouba_futex: u32,
-    waiting_for_kiki_futex: u32,
+    pipe: QRing'Cycle(*CodegenEntry),
 
     no_more_functions: bool,
     no_more_codegen: u32,
@@ -891,6 +887,7 @@ CodegenTask :: @tagged(
     SetLibrary: []Ty(@slice(Qbe.Sym, Str, bool)), // id, lib, weak
     FromCache: @struct(f: *Qbe.Fn, did_regalloc: bool),
     SaveSign: *Qbe.Fn,
+    Done: void,
 );
 
 CodegenEntry :: @struct(
@@ -903,80 +900,44 @@ CodegenEntry :: @struct(
 CodegenWorker :: @FnPtr(s: *CodegenShared) void;
 fn init_codegen_worker(m: *QbeModule, arena: Alloc, worker: CodegenWorker, threaded: bool) *CodegenShared = {
     s := arena.box_zeroed(CodegenShared); 
-    s.mutex&.lock();
     // TODOWASM
     s.threaded = threaded && use_threads && query_current_arch() != .wasm32;
     m.need_write_protect = !threaded && m.use_map_jit_on_apple_silicon;
     s.m = m;
     n := codegen_queue_size;
     s.entries = arena.alloc_zeroed(CodegenEntry, n);
-    s.waiting_for_bouba = init(arena, n);
-    s.waiting_for_kiki = init(arena, n);
+    s.pipe = init(arena, n);
     each s.entries { it |
         if s.threaded {
             it.arena_storage = init(general_allocator(), 16000);  // these are freed in join_codegen_thread
             it.arena = it.arena_storage&.borrow();
         };
-        s.waiting_for_bouba&.push_back(it, arena);
+        s.pipe.done&.push(it);
     };
     s.alloc = arena;
-    s.waiting_for_bouba_futex = n.trunc();
     @if(s.threaded) {
         s.thread = start_thread(CodegenShared, worker, s);
     };
-    s.mutex&.unlock();
     s
 }
 
+// TODO: bring back `@if(ENABLE_ENABLE_TRACY, zone_begin(.Wait), ());`
 // don't reset the arena here, the other guy might want it.
 fn acquire(shared: *CodegenShared, $i_am_bouba: bool) ?*CodegenEntry = {
-    futex := @if(i_am_bouba, shared.waiting_for_bouba_futex&, shared.waiting_for_kiki_futex&);
-    if shared.threaded {
-        zone := @if(ENABLE_ENABLE_TRACY, zone_begin(.Wait), ());
-        fence();
-        while => futex[] == 0 {
-            fence();
-            if shared.no_more_functions {
-                @debug_assert(!i_am_bouba);
-                return(.None);
-            };
-            Futex'wait(futex, 0);
-        };
-        zone_end(zone);
-        fence();
-    };
-    
-    shared.mutex&.lock();
-    source := @if(i_am_bouba, shared.waiting_for_bouba&, shared.waiting_for_kiki&);
-    it := source.pop_front().expect("acquire CodegenEntry");
-    if shared.threaded {
-        futex[] -= 1;
-    };
-    shared.mutex&.unlock();
-    (Some = it)
+    q := @if(i_am_bouba, shared.pipe.done&, shared.pipe.work&);
+    value := q.pop();
+    ::tagged(@type value.task);
+    @if(value.task&.tag() == .Done) return(.None);
+    (Some = value)
 }
+
+QRing :: import("@/lib/sys/sync/qring.fr");
 
 // don't reset the arena here, the other guy might want it.
 fn release(shared: *CodegenShared, entry: *CodegenEntry, $i_am_bouba: bool) void = {
     @debug_assert(shared.threaded);
-    shared.mutex&.lock();
-    if i_am_bouba {
-        // when the frontend is done, that entry goes on the end of the queue 
-        // to make sure compilation order is deterministic (required for repro)
-        shared.waiting_for_kiki&.push_back(entry, panicking_allocator);
-    } else {
-        // when the backend is done, have that entry be reused as soon as possible. 
-        // this avoids needing to warm up as many arenas (and reduces memory usage). 
-        // Aug 3, 2025: this saves ~10ms on self compile (1.08%)
-        shared.waiting_for_bouba&.push_front(entry, panicking_allocator);
-    };
-    fence();
-    futex := @if(!i_am_bouba, shared.waiting_for_bouba_futex&, shared.waiting_for_kiki_futex&);
-    
-    prev := u32.atomic_add(futex, 1);
-    need_wake := prev == 0 || shared.no_more_functions;
-    @if(need_wake) Futex'wake(futex, 1);
-    shared.mutex&.unlock();
+    q := @if(i_am_bouba, shared.pipe.work&, shared.pipe.done&);
+    q.push(entry);
 }
 
 fn join_codegen_thread(shared: *CodegenShared) void = {
@@ -984,26 +945,19 @@ fn join_codegen_thread(shared: *CodegenShared) void = {
     shared.no_more_functions = true;
     fence();
     if shared.threaded {
-        while => shared.no_more_codegen == 0 {
-            Futex'wake(shared.waiting_for_bouba_futex&, 1);
-            Futex'wake(shared.waiting_for_kiki_futex&, 1);
-            Futex'wait(shared.no_more_codegen&, 0);
+        enter_task shared { e |
+            e.task = .Done;
         };
         shared.thread.join();
         shared.thread = zeroed(@type shared.thread);
     };
-    shared.mutex&.lock();
-    
-    @debug_assert_eq(shared.waiting_for_bouba&.len(), shared.entries.len);
-    @debug_assert_eq(shared.waiting_for_bouba_futex, shared.entries.len.trunc());
-    @debug_assert_eq(shared.waiting_for_kiki&.len(), 0);
     @if(shared.threaded) each shared.entries { q |
         q.arena.deinit();
     };
     arena := shared.alloc;
     arena.dealloc(@type shared.entries[0], shared.entries);
-    shared.waiting_for_bouba&.drop(arena);
-    shared.waiting_for_kiki&.drop(arena);
+    arena.dealloc(@type shared.pipe.work.ring[0], shared.pipe.work.ring);
+    arena.dealloc(@type shared.pipe.done.ring[0], shared.pipe.done.ring);
     
     if !shared.threaded {
         shared.m.emit_suspended_inlinables();
@@ -1040,7 +994,7 @@ fn enqueue_task(shared: *CodegenShared, old_entry: *CodegenEntry) void = {
     @debug_assert(!old_entry.task&.is(.Dead), "tried to enqueue dead task");
     if !shared.threaded {
         do_codegen(shared.m, old_entry);
-        shared.waiting_for_bouba&.push_back(old_entry, panicking_allocator);
+        shared.pipe.done&.push(old_entry);
     } else {
         release(shared, old_entry, true);
     };
@@ -1084,6 +1038,7 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
     @debug_assert(identical(m.curi, m.insb.index_unchecked(Qbe.MaxInstructions)), "leaked scratch");
     @match(entry.task) {
         fn Dead() => @panic("dead codegen task %", m.initialized);
+        fn Done() => unreachable();
         fn Func(f) => {
             @if(ENABLE_ENABLE_TRACY) @if(ENABLE_TRACY) ___tracy_emit_zone_name(zone, f.globals.str(f.lnk.id));
             run_qbe_passes(f);

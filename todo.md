@@ -187,7 +187,15 @@
 - tests for all this somehow. need to make configuring it more programatic. so choosing a different allocator at top level
   (like how DebugAlloc works) is more convient than just checking the constant in the implementation (like how ArenaAlloc works). 
 - nicer interface for bloat.fr, make you a pie chart of function size by file or something idk but the list is kinda unreadable. 
-    
+- compiler bug:
+```
+// fn(buf_ptr: i64, buf_len: i64) {
+// this should work: 
+// bufs := bit_cast_unchecked(Ty(i64, i64), [][]u8, (buf_ptr, buf_len));
+// and this shouldn't need the @run to avoid `cannot .Aot .ComptimeOnly F47 (fn operator_star_prefix` :compilerbug
+bufs: [][]u8 = (ptr = bit_cast_unchecked(i64, @run(*[]u8), buf_ptr), len = buf_len);
+```
+
 ## import_c
 
 - C23: `__has_c_attribute`, allow `[[]]` instead of `__attribute__`

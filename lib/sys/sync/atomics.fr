@@ -36,14 +36,21 @@ fn cas($T: Type, p: *T, $update: @Fn(old: T) T) T #generic = {
     };
 }
 
+// TODO: wide cas/same_bits sucks to make it work with @struct(a: u32, b: u32);
+//       probably emit_ir should be smarter about packing things into a register. 
+
 // TODO: #inline broke with reordering in main_thread_pump which is creepy. but also it's better if you let the backend do it anyway
 fn cas($T: Type, p: *T, old: T, new: T) T #generic = { 
     // TODO: sad that i don't want to use Qbe.Cls here
     @if(type_is_wide(T), {
-        part0 :: fn(p: *T) void #ir(.cas0, .Kw);
-        part1 :: fn(old: T, new: T) T #ir(.cas1, .Kl);
+        p := bit_cast_unchecked(*T, *i64, p);
+        old := bit_cast_unchecked(T, i64, old);
+        new := bit_cast_unchecked(T, i64, new);
+        part0 :: fn(p: *i64) void #ir(.cas0, .Kw);
+        part1 :: fn(old: i64, new: i64) i64 #ir(.cas1, .Kl);
         part0(p);
-        part1(old, new)
+        prev := part1(old, new);
+        bit_cast_unchecked(i64, T, prev)
     }, {
         part0 :: fn(p: *T) void #ir(.cas0, .Kw);
         part1 :: fn(old: T, new: T) T #ir(.cas1, .Kw);
@@ -73,8 +80,10 @@ fn type_is_wide(T: Type) bool #fold = @switch(size_of(T)) {
 
 fn same_bits($T: Type, a: T, b: T) bool #generic = {
     @if(type_is_wide(T), {
-        eq :: fn(a: T, b: T) bool #ir(.ceql, .Kw);
-        eq(a, b)
+        aa := bit_cast_unchecked(T, i64, a);
+        bb := bit_cast_unchecked(T, i64, b);
+        //eq :: fn(a: T, b: T) bool #ir(.ceql, .Kw);
+        eq(aa, bb)
     }, {
         eq :: fn(a: T, b: T) bool #ir(.ceqw, .Kw);
         eq(a, b)

@@ -1,0 +1,84 @@
+// TODO: might be better to just use a mutex than inlining a fragile thing thats basically just a mutex again
+
+Tube :: fn($T: Type) Type = {
+    Pair :: @struct(bouba: u32 = 0, kiki: u32 = 0);
+    Self :: @struct {
+        ring: []T;
+        claimed: Pair = ();
+        committed: Pair = ();
+        waiting: i32 = 0;
+    };
+    Futex :: import("@/lib/sys/sync/futex.fr");
+    
+    fn push(self: *Self, value: T) void = {
+        i32.atomic_add(self.waiting&, 1);
+        fence();
+        cb := cas(u32, self.claimed.bouba&) { cb |
+            // TODO: does the overflow do what i want when its wrapping? 
+            ck := self.committed.kiki;
+            while => cb - ck == self.ring.len.trunc() {
+                Futex'wait(self.committed.kiki&, ck);
+                fence();
+                ck = self.committed.kiki;
+                cb = self.claimed.bouba;
+            };
+            cb += 1;
+            cb
+        };
+        fence();
+        i32.atomic_add(self.waiting&, -1);
+        
+        i := cb.zext().umod(self.ring.len);
+        self.ring[i] = value;
+        fence();
+        dowhile {
+            cas(u32, self.committed.bouba&, cb, cb + 1) != cb
+        };
+        fence();
+        if self.waiting != 0 {
+            Futex'wake(self.committed.bouba&, 1);
+        };
+    }
+    
+    fn pop(self: *Self) T = {
+        i32.atomic_add(self.waiting&, 1);
+        fence();
+        ck := cas(u32, self.claimed.kiki&) { ck |
+            cb := self.committed.bouba;
+            while => ck == cb {
+                Futex'wait(self.committed.bouba&, cb);
+                fence();
+                ck = self.claimed.kiki;
+                cb = self.committed.bouba;
+            };
+            ck += 1;
+            ck
+        };
+        fence();
+        i32.atomic_add(self.waiting&, -1);
+        
+        i := ck.zext().umod(self.ring.len);
+        value := self.ring[i];
+        fence();
+        dowhile {
+            cas(u32, self.committed.kiki&, ck, ck + 1) != ck
+        };
+        fence();
+        if self.waiting != 0 {
+            Futex'wake(self.committed.kiki&, 1);
+        };
+        value
+    }
+    
+    Self
+};
+
+Cycle :: fn($T: Type) Type = {
+    Self :: @struct(work: Tube(T), done: Tube(T));
+    
+    fn init(a: Alloc, n: i64) Self = 
+        (work = (ring = a.alloc_zeroed(T, n)), done = (ring = a.alloc_zeroed(T, n)));
+    
+    Self
+};
+

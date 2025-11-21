@@ -1,6 +1,7 @@
 
 ## (Nov 21)
 
+os: virtfs
 - moved some virtio code around to prep for shared file system
 - i think this is where i start needing to set DESC_F_NEXT, 
   unlike printing its not just a flat stream of bytes. 
@@ -22,6 +23,21 @@ Instance 0 needs reset for reason: Missing Fuse::OutHeader
 - fuck me, 40 days and 40 nights spent on not passing the flags from push_virt to push_phys. 
   clearly zig is right and i need to deny unused variables. 
   it takes my init message now tho so thats nice. this should have been so easy. 
+
+backend: experimenting with making the queue used for CodegenShared more generic. 
+- old (waiting_for b/k):  867.7 ms ±   5.8 ms   (2379 lines of strace)
+- old (waiting_for b/k without push_back): 875.6 ms ±   8.5 ms
+- new qring (Pos = (first, count)):  880.9 ms ±   6.4 ms  (11892 lines of strace)
+- new with waiting flag: 872.4 ms ±   3.9 ms  (2160 lines of strace)
+- works on my machine but super doesn't in actions which is off-putting but not surprising. 
+  the problem i feel in my heart is you increment before storing the value in the array 
+  so the other guy could grab it before you're done. 
+- qring (claimed & committed): 871.9 ms ±   4.9 ms  (3275 lines of strace)
+- still no good
+- few tweaks? 878.7 ms ±  11.9 ms
+- that seems to work both places. run it again to make sure. 
+  i do fear i may have just inlined my mutex and there's no point to this operation. 
+  but i think i can get rid of the paired atomics at least. 
 
 ## (Nov 20)
 
