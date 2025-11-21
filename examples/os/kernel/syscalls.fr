@@ -147,6 +147,85 @@ check_thread :: fn(id: i64) i64 #n(0xFFFF0006) = {
     1
 }
 
+virtq_poll :: fn(task: *Task, it: i64) i64 #n(0xFFFF0007) = {
+    it := UQueue.ptr_from_int(it);
+    q := Virt.Queue.ptr_from_raw(it.system_handle);
+    pipe := it.pipe&;
+    need_wake := 0;
+    
+    // q.used -> p.done
+    while => q.device_idx != q.device.head.idx&.vol() && pipe.done.claimed.bouba - pipe.done.committed.kiki != pipe.done.ring.len.trunc() {
+        i := q.device_idx.zext().mod(q.device.ring.len);
+        q.device_idx += 1;
+        used := q.device.ring[i];
+        desc := q.desc[used.id.zext()];
+
+        j := pipe.work.committed.kiki;
+        while => j != pipe.work.claimed.kiki && pipe.work.ring[j.zext().mod(pipe.work.ring.len)].system_id != used.id {
+            j += 1;
+        };
+        if j == pipe.work.claimed.kiki {
+            tpanic("done: currupt UQueue.Entry id");
+        };
+        // TODO: debug check that the addresses match
+        if j != pipe.work.claimed.kiki - 1 {
+            tpanic("TODO: allow completing virtio requests out of order");
+        };
+        
+        it := pipe.work.ring[j.zext().mod(pipe.work.ring.len)];
+        pipe.work.committed.kiki += 1;
+        it.n.bytes_written = desc.len;
+        it.system_id = MAX_u32;
+        
+        // TODO: be more careful about being atomic? but there's only one kernel thread so its fine. 
+        // pipe.push(it) but without syscalls
+        pipe.done.claimed.bouba += 1;
+        pipe.done.ring[pipe.done.claimed.bouba.zext().sub(1).umod(pipe.done.ring.len)] = it;
+        pipe.done.committed.bouba += 1;
+        need_wake += 1;
+    };
+    
+    // p.work -> q.avail
+    while => pipe.work.claimed.kiki != pipe.work.claimed.bouba {
+        pipe.work.claimed.kiki += 1;
+        i := pipe.work.claimed.kiki.zext().sub(1).umod(pipe.work.ring.len);
+        // note: `it` is left in the pipe, claimed but uncommitted, until the device finishes the request.  
+        it := pipe.work.ring[i]&;
+        if it.system_id != MAX_u32 {
+            tpanic("work: corrupt UQueue.Entry id");
+        };
+        read_n := it.n.bufs_readable;
+        kprint_label("=== bufs.len = ", it.bufs.len);
+        for it.bufs { it |
+            kprint_label("- buf.ptr = ", u8.int_from_ptr(it.ptr));
+            kprint_label("- buf.len = ", it.len);
+            q.push_virt(it, @if(read_n > 0, 0, Virt.DESC_F_WRITE));
+            read_n -= 1;
+        };
+        it.system_id = q.driver_chain_start.expect("driver_chain_start").zext();
+        q.publish_chain();
+    };
+    
+    if need_wake != 0 {
+        _ := futex(task, u32.int_from_ptr(pipe.done.committed.bouba&), 1, need_wake, 0);
+        _ := futex(task, u32.int_from_ptr(pipe.work.committed.kiki&), 1, need_wake, 0);
+    };
+    
+    0
+}
+
+virtq_create :: fn(it: i64, p: i64, l: i64) i64 #n(0xFFFF0008) = {
+    it := UQueue.ptr_from_int(it);
+    label := u8.ptr_from_int(p).slice(l);
+    kprint(label);
+    kprint("\n");
+    if kernel.fuse& { device |
+        it.system_handle = Virt.Queue.raw_from_ptr(device.device.queues.index(VirtFuse.REQUEST));
+        return 0;
+    };
+    -1
+}
+
 generate :: fn() []Ty(@FnPtr(task: *Task) void, i64) = {
     results := Ty(@FnPtr(task: *Task) void, i64).list(ast_alloc());
     s := import("@/examples/os/kernel/syscalls.fr");

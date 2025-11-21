@@ -28,63 +28,11 @@ find :: fn(pci: *Pci.MemoryRegion) ?Self = {
         it[] = 0;
     };
     
-    kprint_label("num_queues = ", it.cfg.num_queues.zext());
-    kprint_label("num_request_queues = ", config.num_request_queues.zext());
-    //kprint_label("notify_buf_size = ", config.notify_buf_size.zext());
-    
     qs := buf&.pop_slice(Virt.Queue, 2);
     self: Self = (device = (queues = qs, interrupt_status = it.status, intid = it.intid));
     init_queue(it.cfg, qs.index(REQUEST), REQUEST, buf&, 128, it.note);
     init_queue(it.cfg, qs.index(HIPRIO), HIPRIO, buf&, 128, it.note);
     it.cfg.publish_queues();
-    
-    q := self.device.queues.index(REQUEST);
-    
-    header_in := zeroed Fuse.InHeader;
-    header_in.opcode = .INIT;
-    header_in.len = size_of(Fuse.InHeader) + size_of(Fuse.InitIn);
-    init_in := zeroed Fuse.InitIn;
-    init_in.major = Fuse.MAJOR;
-    init_in.minor = Fuse.MINOR;
-    header_out := zeroed Fuse.OutHeader;
-    init_out := zeroed Fuse.InitOut;
-    
-    f :: fn(data: ~T, write: bool) void #where => {
-        ::[]@type data[];
-        bytes := data.slice(1).interpret_as_bytes();
-        q.push_virt(bytes, @if(write, Virt.DESC_F_WRITE, 0));
-    };
-    
-    f(header_in&, false);
-    f(init_in&, false);
-    f(header_out&, true);
-    f(init_out&, true);
-    q.publish_chain();
-    
-    // TODO: this needs to be nonblocking eventually but then the lifetime of the message gets complicated
-    i := q.driver_idx;
-    while => q.device.head.idx&.vol() != i {
-        barrier();  // spin
-    };
-    
-    @if(header_out.error != 0) kpanic("fuse error");
-    @if(init_out.major != init_in.major) kpanic("bad fuse major");
-    kprint_label("error: ", header_out.error.zext());
-    kprint_label("major: ", init_out.major.zext());
-    kprint_label("minor: ", init_out.minor.zext());
-    
-    /* TODO: why doesn't this work?
-    ::DeriveFmt(Fuse.InitOut);
-    ::DeriveFmt(Array(u16, 11));
-    out := u8.list(Arena'stack_alloc(16000));
-    @fmt(out&, "%\n", init_out&);
-    kprint(out.items());
-    */
-    
-    // TODO: recycle the descs (should be tracking which are free,
-    //       in case you do requests faster than they can be handled)
-    // TODO: check length of response
-    
     (Some = self)
 }
 

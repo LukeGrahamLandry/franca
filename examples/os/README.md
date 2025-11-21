@@ -53,3 +53,4 @@ currently it's good enough to run the franca compiler on qemu-system-aarch64's v
 - make volatile pointers less painful in my language
 - accel-hvf and vzf use 100% cpu when spinning in wfi
 - vzf: sometimes you don't get the `>>>` prompt until you hit a key
+- why does mmap die sometimes??

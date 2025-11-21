@@ -39,6 +39,11 @@ backend: experimenting with making the queue used for CodegenShared more generic
   i do fear i may have just inlined my mutex and there's no point to this operation. 
   but i think i can get rid of the paired atomics at least. 
 
+os
+- queue glue
+- mystery of why DeriveFmt wasn't working in the kernel, 
+  it was panicking at runtime instead of comptime in the default branch. 
+
 ## (Nov 20)
 
 - consolidate the boot scripts. just chech the uname and run the right binary. 

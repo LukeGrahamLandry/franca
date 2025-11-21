@@ -25,6 +25,35 @@ fn set_signal_handler(new: SignalHandler) SignalHandler = {
     old
 }
 
+UQueue :: @rec @struct {
+    pipe: QRing'Cycle(Entry);
+    system_handle: rawptr;
+    poll: Poll;
+    
+    Entry :: @struct {
+        bufs: [][]u8;
+        n: @union(
+            bufs_readable: i32,
+            bytes_written: u32,
+        );
+        system_id: u32 = MAX_u32;
+    };
+    Poll :: @FnPtr(self: *UQueue) void;
+    QRing :: import("@/lib/sys/sync/qring.fr");
+};
+
+fn virtq_poll(it: *UQueue) void = {
+    args: Array(i64, 6) = (UQueue.int_from_ptr(it), 0, 0, 0, 0, 0);
+    _ := Syscall'perform_syscall(args&, 0xFFFF0007);
+}
+
+fn virtq_create(it: *UQueue, label: Str) bool = {
+    it.poll = virtq_poll;
+    args: Array(i64, 6) = (UQueue.int_from_ptr(it), u8.int_from_ptr(label.ptr), label.len, 0, 0, 0);
+    result, _ := Syscall'perform_syscall(args&, 0xFFFF0008);
+    result == 0
+}
+
 // TODO: pass something like this to user space init
 SystemInfo :: @struct {
     page_size_shift: u8;

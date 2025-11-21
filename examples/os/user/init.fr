@@ -47,6 +47,49 @@ main :: fn() void = {
         signal_env[] = c[];
         signal_env.thread_index = -1;  // make handle_signal NOT count as the same thread for reenterant mutex
 
+        q := zeroed UQueue; q := q&;
+        ok := virtq_create(q, "Shared.fs.1");
+        @println("virtq_create? ok=%", ok);
+        q: ?*UQueue = @if(ok, (Some = q), .None);
+        
+        if q { q |
+            q.pipe = init(general_allocator(), 128);
+            Fuse :: import("@/examples/os/drivers/fs/fuse.fr");
+            header_in := zeroed Fuse.InHeader;
+            header_in.opcode = .INIT;
+            init_in := zeroed Fuse.InitIn;
+            init_in.major = Fuse.MAJOR;
+            init_in.minor = Fuse.MINOR;
+            header_out := zeroed Fuse.OutHeader;
+            init_out := zeroed Fuse.InitOut;
+            
+            fn send(self: *UQueue, hi: *Fuse.InHeader, in: ~I, ho: *Fuse.OutHeader, out: ~O) void #where = 
+                send(self, hi, in, empty(), ho, out, empty());
+            
+            fn send(q: *UQueue, hi: *Fuse.InHeader, in: ~I, ei: []u8, ho: *Fuse.OutHeader, out: ~O, eo: []u8) void #where = {
+                f :: fn(data: ~T) []u8 #where => {
+                    ::[]@type data[];
+                    data.slice(1).interpret_as_bytes()
+                };
+                hi.len = size_of(@type hi[]) + size_of(@type in[]) + ei.len.trunc();
+                bufs := @slice(f(hi), ei, f(in), f(ho), f(out), eo);
+                for bufs { it |
+                    @println("ptr=% len=%", u8.int_from_ptr(it.ptr), it.len);  // coconut.jpg
+                };
+                q.pipe.work&.push(bufs = bufs, n = (bufs_readable = 3))
+            }
+            
+            q.send(header_in&, init_in&, header_out&, init_out&);
+            while => q.pipe.done.committed.bouba == 0 {
+                q'poll(q);
+            };
+            
+            ::DeriveFmt(Fuse.InitOut);
+            ::DeriveFmt(Array(u16, 11));
+            ::display_slice(u16);
+            @println("%", init_out&);
+        };
+        
         buf := u8.list(general_allocator());
         timer := false;
         @println("The system took %ms to boot.", timestamp());
