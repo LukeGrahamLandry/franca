@@ -1,4 +1,13 @@
 
+## (Nov 20)
+
+- consolidate the boot scripts. just chech the uname and run the right binary. 
+- dont depend on the unzip binary, just do the little bit of wrapper around deflate myself. 
+  - main mistake i made was forgetting `#align(1)`
+  - now switching to macos-15-intel in ci worked, so looks like i was right that it died because 
+    it has the same broken version of unzip that tahoe does. 
+    had to fix that before github takes the old one away. 
+
 ## (Nov 19)
 
 - sys static: poll, execve, 

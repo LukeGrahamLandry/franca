@@ -71,7 +71,6 @@
   could steal what zig does where a file is a struct. but that always annoys me because it makes you 
   pick one blessed struct to have the top level fields when the rest of your file is a namespace which looks odd. 
 - real error handling for lib/sys/posix.fr. need to be able to remap the errno values to something consistant. 
-- i've lost 100ms of speed. i should really make something that automatically times it every commit. 
 - i hate the vscode/zed extension build junk being in here. each are 300 lines of dependencies. 
 - `@inline` at the callsite 
 - need an option to make `@safety` assertions give you more information. it's hard without a runtime bootstrapping 
@@ -134,9 +133,15 @@
   the current thing is just enough more verbose that it looks confusing. 
   whatever it is has to stay just a user space comptime thing tho, not part of the compiler. 
 - might be able to get rid of is_wrongly_illegal_instruction now, but maybe it's safer just to leave it for good luck. 
-- compiling tests/collections.fr/removing alone fails:
-  (Compile Error: Poison expression Argument. probably not riscv related, just that i don't normally run one function at a time. :compilerbug)
 - add pkzip to examples/show_tar.fr
+- remove implicit dependencies in the tests.
+  ex. some of the tests/extenal depend on import_c being compiled at target/cc.out
+- don't exec `diff` in run_tests.fr
+- use O_EXCL for fetch_or_crash, write_entire_file
+- be more structured about the random temporary files in tests. 
+  i don't care about the names so should use mkstemp or whatever 
+  so you can run the tests twice on the same file system at the same time. 
+- stop using environment variables so much. they annoy me. 
 
 ## remaining nondeterminism
 

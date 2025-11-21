@@ -20,20 +20,48 @@ test_cmds :: @S(
     @S("./target/f.out", "backend/test/folding.fr"),
     @S("./target/f.out", "tests/exe/sys.fr"),
     @S("./target/f.out", "examples/default_driver.fr", "build", "examples/60fps.fr", "-dynamiclib"),
-    @S("./target/f.out", "examples/import_c/test/test.fr"),
     @S("./target/f.out", "examples/import_c/test/test.fr", "-w", "target/w.out"),
+    @S("./target/f.out", "examples/chess/perft.fr", "-fast", "-hush"),
+    @S("./target/f.out", "examples/os/build.fr"),
+    @S("./target/f.out", "tests/exe/cli_args.fr", "a", "b", "c", "d"),
+);
+
+// TODO: sysv abi does not support variadic env calls
+test_cmds_skip_amd :: @S(
     @S("./target/f.out", "examples/import_c/test/ffi.fr"),
+);
+
+// TODO: why?? it works on mine but not github actions. macro,varargs,function,attribute,usualconv fail consistantly. 
+test_cmds_skip_linux_amd :: @S(
+    @S("./target/f.out", "examples/import_c/test/test.fr"),
 );
 
 with_deps :: @S(
     @S("./target/r.out", "all", "-bin", "./target/q.out", "-cc", "-force_linker"), // dep:clang
     @S("./target/r.out", "all", "-bin", "./target/q.out"),  // dep:clang
     @S("./target/f.out", "examples/lox/test.fr", "-pass", "-hush"), // dep:lox
-    @S("./target/f.out", "backend/test/generate.fr"),  // dep:qbe
-    @S("./target/f.out", "tests/external/wuffs.fr"),  // dep:wuffs
+);
+
+with_deps_arm_only :: @S(
+    // amd: sysv abi does not support variadic env calls
     @S("./target/f.out", "examples/import_wuffs/test.fr"),
+);
+
+with_deps_macos_arm_only :: @S(
+    // TODO: macos-amd64: crashes. linux: need to transcribe signal.h
     @S("./target/f.out", "tests/external/lua.fr"),  // dep:lua
+    // TODO: need to write config.h for non-macos-arm
     @S("./target/f.out", "tests/external/tcc.fr", "-ddc"),  // dep:tcc dep:clang
+);
+
+with_deps_skip_linux_amd :: @S(
+    // TODO: rv: lzip, lzma, xz: Expected (RTmp:31 != RTmp:31
+    //       rv: json: FAIL test_wuffs_strconv_parse_number_f64_options
+    // TODO: linux_amd: why?? it works on mine but not github actions. deflate,jpg,png
+    @S("./target/f.out", "tests/external/wuffs.fr"),  // dep:wuffs
+    // TODO: why?? it works on mine but not github actions.
+    //       ./target/qbe_miniyacc.out target/franca/deps/qbe-d9f1121763c126316ab338ca8b1b9d51967a33b1/minic/minic.y 
+    @S("./target/f.out", "backend/test/generate.fr"),  // dep:qbe
 );
 
 // TODO: do the frc_inlinable trick to make these compile faster
@@ -90,19 +118,17 @@ fn driver(vtable: *ImportVTable) void = {
                 };
                 
                 test_cmds := test_cmds;
-                if query_current_arch() == .x86_64 || query_current_os() == .linux {
-                    // TODO: sysv abi does not support variadic env calls
-                    // TODO: import_c/tests/ffi.fr also doesn't work on arm
-                    test_cmds = test_cmds.slice(0, 10);
-                };
-                if query_current_arch() == .x86_64 && query_current_os() == .linux {
-                    // TODO: orb rosetta and actions disagree ?? 
-                    test_cmds = test_cmds.slice(0, 8);
-                };
                 for test_cmds { cmd | 
                     sh(cmd);
                 };
-            
+                
+                if query_current_arch() != .x86_64 {
+                    for(test_cmds_skip_amd, fn(it) => sh(it));
+                };
+                if query_current_arch() != .x86_64 || query_current_os() != .linux {
+                    for(test_cmds_skip_linux_amd, fn(it) => sh(it));
+                };
+                
                 ::import("@/examples/testing.fr");
                 files := collect_with_extension("examples/aoc", ".fr").unwrap();
                 run_tests_main_threaded(Ty(Str, Str), Str, (franca_path, driver_path), files.items(), fn(_, a) = a[], fn(ctx, file) = {
@@ -110,26 +136,27 @@ fn driver(vtable: *ImportVTable) void = {
                     ok, out, err := exec_and_catch(franca_path, @slice(driver_path, "build", @tfmt("examples/aoc/%", file[]), "-o", "/dev/null"), temp());
                     (ok, out, err, "")
                 });
-                sh(@slice("./target/f.out", "examples/chess/perft.fr", "-fast", "-hush"));
-                sh(@slice("./target/f.out", "examples/os/build.fr"));
-                sh(@slice("./target/f.out", "tests/exe/cli_args.fr", "a", "b", "c", "d"));
                 
                 for release_cmds { cmd | 
                     sh(cmd);
                 };
                 
-                with_deps := with_deps;
-                if query_current_arch() == .x86_64 {
-                    with_deps = with_deps.slice(0, 5);
-                };
-                if query_current_os() == .linux {
-                    with_deps = with_deps.slice(0, 4);
-                };
-                if query_current_os() == .linux && query_current_arch() == .x86_64 {
-                    with_deps = with_deps.slice(0, 3);
-                };
                 for with_deps { cmd | 
                     sh(cmd);
+                };
+                
+                if query_current_arch() == .aarch64 {
+                    for(with_deps_arm_only, fn(it) => sh(it));
+                };
+                if query_current_os() != .linux || query_current_arch() != .x86_64 {
+                    with_deps_skip_linux_amd := with_deps_skip_linux_amd;
+                    if query_current_arch() == .rv64 {
+                        with_deps_skip_linux_amd = with_deps_skip_linux_amd.rest(1);
+                    };
+                    for(with_deps_skip_linux_amd, fn(it) => sh(it));
+                };
+                if query_current_os() == .macos && query_current_arch() == .aarch64 {
+                    for(with_deps_macos_arm_only, fn(it) => sh(it));
                 };
                 
                 // If running linux with libc, can still run the compiler built without libc and make sure it repros. 
@@ -157,7 +184,7 @@ fn driver(vtable: *ImportVTable) void = {
 
 #use("@/backend/lib.fr");
 
-// TODO: add test for repro-builds. 
+// :UpdateBoot this can go away if i replace boot/franca-macos-arm64
 fn run_boot(vtable: *ImportVTable) void = {
     make_dirs_or_crash("target/out");
     make_dirs_or_crash("target/franca");
