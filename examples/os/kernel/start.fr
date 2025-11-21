@@ -28,6 +28,7 @@ Kernel :: @struct {
     console: Console;
     mmu_enabled: bool;
     vcon: ?VirtConsole.Self;
+    fuse: ?VirtFuse.Self;
 };
 
 DT :: import("@/examples/os/drivers/devicetree.fr");
@@ -36,6 +37,7 @@ DT :: import("@/examples/os/drivers/devicetree.fr");
 main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
     kernel.uart = .None;
     kernel.vcon = .None;
+    kernel.fuse = .None;
     // for early debugging before reading the device tree, just yolo hope its a pl011 at hardcoded qemu address, 
     kernel.console = (
         data = zeroed rawptr, 
@@ -93,7 +95,7 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
         kprint("using pl01\n");
     };
     pci := Pci'read_device_tree(DT'iter(device_tree_bytes));
-    if pci { pci |
+    if pci& { pci |
         kernel.vcon = VirtConsole'find(pci);
     };
     @if(kernel.uart&.is_none())
@@ -114,15 +116,26 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
     // TODO: the gic part and the publish_chain part freak out without -accel hvf
     if kernel.vcon& { it |
         // TODO: these are still hard coded in syscall_func and the one in user space
-        gic.set_group1(it.device.intid);
-        gic.enable(it.device.intid);
+        if it.device.intid != -1 {
+            gic.set_group1(it.device.intid);
+            gic.enable(it.device.intid);
+        };
         
         // give it some memory to store the input
         q := it.device.queues.index(0);
         mem := kernel.physical&.map_contiguous(1.shift_left(16), 1);
-        VIRTQ_DESC_F_WRITE :: 2;
-        q.push(mem, VIRTQ_DESC_F_WRITE);
+        q.push_phys(mem, Virt.DESC_F_WRITE);
         q.publish_chain();
+    };
+    
+    if pci& { pci |
+        kernel.fuse = VirtFuse'find(pci);
+        if kernel.fuse& { it |
+            if it.device.intid != -1 {
+                gic.set_group1(it.device.intid);
+                gic.enable(it.device.intid);
+            };
+        };
     };
     
     kstack := kernel.physical&.map_contiguous(16 * 1.shift_left(16), 1);
@@ -189,6 +202,7 @@ dohang :: fn() void #noinline = {
 Virt :: import("@/examples/os/drivers/virtio.fr");
 Pci :: import("@/examples/os/drivers/pci.fr");
 VirtConsole :: import("@/examples/os/drivers/console/virtio.fr");
+VirtFuse :: import("@/examples/os/drivers/fs/virtio.fr");
 
 root_task_elf_bytes :: {
     franca := get_executable_path(temp());

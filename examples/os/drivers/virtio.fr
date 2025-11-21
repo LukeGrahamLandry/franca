@@ -78,6 +78,8 @@ Queue :: @struct {
     // next thing we'll write to driver.head.idx 
     // (to allow delaying making a change public until a whole chain is ready)
     driver_idx: u16;  
+    driver_chain_start: ?u16;
+    driver_next_desc: u16;
     // last thing we read from device.head.idx
     // (so we don't miss anything)
     device_idx: u16;  
@@ -104,7 +106,10 @@ fn init_queue(cfg: *PciCommonCfg, q: *Queue, q_index: u16, buf: *[]u8, size: i64
     cfg.queue_select&.vol(q_index);
     // TODO: check that it accepts our `size`
     max_queue_size := cfg.queue_size&.vol();
+    @if(max_queue_size == 0) kpanic("invalid queue");
+    @if(size > max_queue_size.zext()) kpanic("queue size too large");
     cfg.queue_size&.vol(size.trunc());  
+    @if(cfg.queue_size&.vol() != size.trunc()) kpanic("queue size not accepted");
     cfg.queue_desc&.vol(q.desc.index(0));
     cfg.queue_driver&.vol(q.driver.head);
     cfg.queue_device&.vol(q.device.head);
@@ -115,6 +120,8 @@ fn init_queue(cfg: *PciCommonCfg, q: *Queue, q_index: u16, buf: *[]u8, size: i64
             + notify.base + cfg.queue_notify_off&.vol().zext() * notify.off_multiplier;
         q.notify = u16.ptr_from_int(notify);
     };
+    
+    q.driver_chain_start = .None;
 }
 
 fn publish_queues(cfg: *PciCommonCfg) void = {
@@ -137,29 +144,68 @@ fn notify_device(q: *Queue) void = {
     barrier();
 }
 
+fn push_virt(q: *Queue, virtual: []u8, flags: u16) void = {
+    // the addresses in Virt.Desc are physical, so step through each page of the message 
+    // and manually translate the addresses before pushing them to the queue. 
+    // (because physical memory is only contiguous at page granularity)
+    mem: AddressSpace = (root = sys_get(*TranslationTable, .TTBR0_EL1));
+    v := u8.int_from_ptr(virtual.ptr);
+    len := virtual.len;
+    while => len > 0 {  
+        p := v_to_p(mem&, v);
+        space := p.align_to(kernel.page_size) - p;
+        if space == 0 {
+            space = kernel.page_size;
+        }
+        space := min(space, len);
+        q.push_phys(u8.ptr_from_int(p).slice(space), flags);
+        len -= space;
+        v += space;
+    };
+}
+
 // don't forget to publish_chain() after!
-fn push(self: *Queue, physical: []u8, flags: u16) void = {
+fn push_phys(self: *Queue, physical: []u8, flags: u16) void = {
     @debug_assert_eq(physical.len.bit_and(MAX_u32), physical.len);
-    id := self.driver_idx;
-    i: i64 = id.zext().umod(self.desc.len);
-    // TODO: i guess im supposed to keep track of which descriptors are free 
-    //       seperately because they might not be processed in order? 
-    self.driver_idx += 1;
-    self.desc[i] = (addr = physical.ptr, len = physical.len.trunc(), flags = flags);
-    self.driver.ring[i] = i.trunc();
+    id := self.driver_next_desc;
+    next: u16 = id.zext().add(1).umod(self.desc.len).trunc();
+    self.driver_next_desc = next;
+    flags = flags.bit_or(DESC_F_NEXT);
+    self.desc[id.zext()] = (addr = physical.ptr, len = physical.len.trunc(), flags = flags, next = next);
+    if self.driver_chain_start.is_none() {
+        self.driver_chain_start = (Some = id);
+    };
 }
 
 fn publish_chain(self: *Queue) void = {
+    chain_start := self.driver_chain_start&.take()
+        || return();
+
+    // push_phys automatically chains sequential descriptors, 
+    // now that we're done, mark the previous one as the end of the chain. 
+    last: i64 = self.driver_next_desc.zext() - 1;
+    if last < 0 {
+        last = self.desc.len - 1;
+    };
+    desc := self.desc[last]&;
+    desc.flags = desc.flags.bit_and(DESC_F_NEXT.bit_not().trunc());
+    desc.next = 0;
+    
+    i: i64 = self.driver_idx.zext().umod(self.desc.len);
+    self.driver.ring[i] = chain_start;
     barrier();
+    self.driver_idx += 1;  // free running until wrap
     self.driver.head.idx&.vol(self.driver_idx);
     self.notify_device();
 }
 
+DESC_F_NEXT :: 1;
+DESC_F_WRITE :: 2;
 Desc :: @struct {
     addr: *u8;  // physical!
     len: u32;
     flags: u16; 
-    next: u16 = 0;  // valid if VIRTQ_DESC_F_NEXT
+    next: u16;  // valid if VIRTQ_DESC_F_NEXT
 };
 
 UsedElem :: @struct { 
@@ -209,6 +255,57 @@ fn find_pci_cap(h: *Pci.Header, want: PciCapTag) ?*PciCap = {
         };
     };
     .None
+}
+
+DeviceHandle :: @struct {
+    cfg: *Virt.PciCommonCfg;
+    note: ?Virt.NotifyStep;
+    status: *u8;
+    intid: i64;
+    device_config: ?[]u8;
+};
+
+find :: fn(pci: *Pci.MemoryRegion, virtio_id: u16) ?DeviceHandle = {
+    a, h := find_device(pci[]) { h |
+        vendorid := h.vendor_id&.vol();
+        deviceid := h.device_id&.vol();
+        valid := deviceid == 0x1040 + virtio_id || deviceid == 0x1000 + virtio_id;
+        vendorid == Virt.pci_vendor_id && valid
+    } || return(.None);
+    intid := find_interrupt(pci[], h) || -1;
+    
+    h.command&.vol(0b110);  // enable memory space
+    
+    c := h.find_pci_cap(.COMMON).unwrap();
+    bar_index := c.bar&.volatile();
+    
+    legal_pci_addr := u8.int_from_ptr(pci.bar.ptr) + pci.bar_offset;  
+    bar := Pci'set_bar64(h, bar_index, legal_pci_addr, false);
+    if u8.int_from_ptr(bar.mem.ptr) == legal_pci_addr {
+        pci.bar_offset += bar.size;
+    };
+    cfg := bit_cast_unchecked(*u8, *Virt.PciCommonCfg, bar.mem.index(c.offset&.vol().zext()));
+    
+    note: ?Virt.NotifyStep = .None;
+    if h.find_pci_cap(.NOTIFY) { c | 
+        @if(bar_index != c.bar&.vol()) kpanic("TODO: can this happen?");
+        note = (Some = (
+            off_multiplier = u32.vol(int_from_ptr(@type c[], c) + size_of(@type c[])).zext(),
+            base = c.offset&.vol().zext(),
+            bar = bar.mem,
+        ));
+    };
+    config: ?[]u8 = .None;
+    if h.find_pci_cap(.DEVICE) { c |
+        @if(bar_index != c.bar&.vol()) kpanic("TODO: can this happen?");
+        config = (Some = bar.mem.subslice(c.offset&.vol().zext(), c.length&.vol().zext()));
+    };
+    status: *u8 = zeroed(*u8);
+    if h.find_pci_cap(.ISR) { c |
+        @if(bar_index != c.bar&.vol()) kpanic("TODO: can this happen?");
+        status = bar.mem.index(c.offset&.vol().zext());
+    };
+    (Some = (cfg = cfg, note = note, status = status, intid = intid, device_config = config))
 }
 
 Pci :: import("@/examples/os/drivers/pci.fr");

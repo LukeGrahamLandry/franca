@@ -1,0 +1,112 @@
+// Virtio File System Device (mounting a shared directory from the host)
+
+Self :: @struct {
+    device: Virt.Device;
+};
+
+HIPRIO :: 0;
+REQUEST :: 1;  // note: no VIRTIO_FS_F_NOTIFICATION
+
+find :: fn(pci: *Pci.MemoryRegion) ?Self = {
+    // TODO: support multiple shared directories (userspace can pick one by the tag)
+    it := Virt'find(pci, 26) 
+        || return(.None);
+    feat := 1.shift_left(32);  // VIRTIO_F_VERSION_1
+    agree := it.cfg.init_features(feat);
+    @if(agree != feat) kpanic("didn't agree on device features");
+    config := it.device_config.unwrap();
+    config := config&.pop_type(Config);
+    kprint("FUSE!\n");
+    tag := config.get_tag();
+    kprint("tag = ");
+    kprint(tag);
+    kprint("\n");
+    kprint_label("intid = ", it.intid);
+    
+    buf := kernel.physical&.map_contiguous(1.shift_left(16), 1);
+    each buf { it |
+        it[] = 0;
+    };
+    
+    kprint_label("num_queues = ", it.cfg.num_queues.zext());
+    kprint_label("num_request_queues = ", config.num_request_queues.zext());
+    //kprint_label("notify_buf_size = ", config.notify_buf_size.zext());
+    
+    qs := buf&.pop_slice(Virt.Queue, 2);
+    self: Self = (device = (queues = qs, interrupt_status = it.status, intid = it.intid));
+    init_queue(it.cfg, qs.index(REQUEST), REQUEST, buf&, 128, it.note);
+    init_queue(it.cfg, qs.index(HIPRIO), HIPRIO, buf&, 128, it.note);
+    it.cfg.publish_queues();
+    
+    q := self.device.queues.index(REQUEST);
+    
+    header_in := zeroed Fuse.InHeader;
+    header_in.opcode = .INIT;
+    header_in.len = size_of(Fuse.InHeader) + size_of(Fuse.InitIn);
+    init_in := zeroed Fuse.InitIn;
+    init_in.major = Fuse.MAJOR;
+    init_in.minor = Fuse.MINOR;
+    header_out := zeroed Fuse.OutHeader;
+    init_out := zeroed Fuse.InitOut;
+    
+    f :: fn(data: ~T, write: bool) void #where => {
+        ::[]@type data[];
+        bytes := data.slice(1).interpret_as_bytes();
+        q.push_virt(bytes, @if(write, Virt.DESC_F_WRITE, 0));
+    };
+    
+    f(header_in&, false);
+    f(init_in&, false);
+    f(header_out&, true);
+    f(init_out&, true);
+    q.publish_chain();
+    
+    // TODO: this needs to be nonblocking eventually but then the lifetime of the message gets complicated
+    i := q.driver_idx;
+    while => q.device.head.idx&.vol() != i {
+        barrier();  // spin
+    };
+    
+    @if(header_out.error != 0) kpanic("fuse error");
+    @if(init_out.major != init_in.major) kpanic("bad fuse major");
+    kprint_label("error: ", header_out.error.zext());
+    kprint_label("major: ", init_out.major.zext());
+    kprint_label("minor: ", init_out.minor.zext());
+    
+    /* TODO: why doesn't this work?
+    ::DeriveFmt(Fuse.InitOut);
+    ::DeriveFmt(Array(u16, 11));
+    out := u8.list(Arena'stack_alloc(16000));
+    @fmt(out&, "%\n", init_out&);
+    kprint(out.items());
+    */
+    
+    // TODO: recycle the descs (should be tracking which are free,
+    //       in case you do requests faster than they can be handled)
+    // TODO: check length of response
+    
+    (Some = self)
+}
+
+Config :: @struct {
+    tag: Array(u8, 36);
+    num_request_queues: u32;
+    // note: no VIRTIO_FS_F_NOTIFICATION
+    // notify_buf_size: u32;
+};
+
+fn get_tag(config: *Config) Str #inline/*semantic*/ = {
+    // if you don't do this the painful way it doesn't work. 
+    // (because its jail to copy_from because that does unaligned access? 
+    //  and you can't put the bar memory in a virt queue to print?)
+    tag_v := config.tag&.items();
+    tag_v := tag_v&.pop_cstr();
+    tag := @uninitialized Array(u8, 26);
+    range(0, tag_v.len) { i |
+        tag&[i] = tag_v[i];
+    };
+    tag := tag&.items().slice(0, tag_v.len);
+    tag
+}
+
+Fuse :: import("@/examples/os/drivers/fs/fuse.fr");

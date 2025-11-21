@@ -1,4 +1,28 @@
 
+## (Nov 21)
+
+- moved some virtio code around to prep for shared file system
+- i think this is where i start needing to set DESC_F_NEXT, 
+  unlike printing its not just a flat stream of bytes. 
+- important thing i got wrong: you only put the first descriptor of the chain in the ring. 
+- confusion about what queue number is which. queue 2 has max_size=0. 
+  docs say hi=0,no=1,re=2..., but thats only if you have the flag for notifications 
+  (which apple's vzf doesn't support), without that you just skip one and requests are earlier. 
+- Console.app:
+```
+Guest issued a read to Virtio BAR region with unexpected offset: 0x8028
+Instance 0 needs reset for reason: Missing Fuse::OutHeader
+```
+  the former is it doesn't like me trying to read notify_buf_size when it doesn't support VIRTIO_FS_F_NOTIFICATION. 
+- went on an adventure to use someone's example fuse thing with the linux kernel 
+  (https://github.com/cberner/fuser big fan of thier program being something that actually compiles)
+  so i can see what a valid init message looks like 
+  (i failed at getting it from strace which is a bit concerning but i found where to log it in the program)
+  using exactly those bytes in mine still gives the same error. 
+- fuck me, 40 days and 40 nights spent on not passing the flags from push_virt to push_phys. 
+  clearly zig is right and i need to deny unused variables. 
+  it takes my init message now tho so thats nice. this should have been so easy. 
+
 ## (Nov 20)
 
 - consolidate the boot scripts. just chech the uname and run the right binary. 

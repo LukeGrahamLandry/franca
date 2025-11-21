@@ -7,83 +7,27 @@ RECEIVE :: 0;
 TRANSMIT :: 1;
 
 // TODO: seperate find and init
-// TODO: seperate out the part that's reusable for all virtio devices. 
 // TODO: use VIRTIO_F_EVENT_IDX to not get an interrupt until a whole chunk of work is done
 // this working with mmu relies on it being before ram start and setup_virtual_memory mapping all that as device
-find :: fn(pci: Pci.MemoryRegion) ?Self = {
-    range(0, pci.config.len / 4096) { i |
-        continue :: local_return;
-        h := bit_cast_unchecked(*u8, *Pci.Header, pci.config.index(i*4096));
-        vendorid := h.vendor_id&.volatile();
-        
-        if(vendorid == 0xFFFF, => continue());
-        if(vendorid != Virt.pci_vendor_id, => continue());
-        
-        deviceid := h.device_id&.volatile();
-        if !(deviceid == 0x1043 || deviceid == 0x1003) {  // console
-            continue();
-        };
-        header_type := h.header_type&.vol();
-        
-        intid := {
-            a := i*4096;
-            function := a.shift_right_logical(12).bit_and(0b111);
-            device := a.shift_right_logical(15).bit_and(0b11111);
-            bus := a.shift_right_logical(20).bit_and(0b11111111);
-            
-            Pci'find_interrupt(pci.interrupt_map, bus, device, function, h.body._0.interrupt_pin.zext())
-                || -1
-        };
-        @if(intid != 69 && intid != 37) kpanic("TODO: need to update console intid in userspace");
-        
-        h.command&.vol(0b110);  // enable memory space
-        
-        note_cap := h.find_pci_cap(.NOTIFY);
-        isr_cap := h.find_pci_cap(.ISR);
-        c := h.find_pci_cap(.COMMON).unwrap();
-        bar_index := c.bar&.volatile();
-        
-        // TODO: keep track of the part thats been used so i can have multiple BARs
-        legal_pci_addr := u8.int_from_ptr(pci.bar.ptr);  
-        bar := Pci'set_bar64(h, bar_index, legal_pci_addr, true);
-        cfg := bit_cast_unchecked(*u8, *Virt.PciCommonCfg, bar.mem.index(c.offset&.vol().zext()));
-        
-        note: ?Virt.NotifyStep = .None;
-        if note_cap { c | 
-            @if(bar_index != c.bar&.vol()) kpanic("TODO: can this happen?");
-            note = (Some = (
-                off_multiplier = u32.vol(int_from_ptr(@type c[], c) + size_of(@type c[])).zext(),
-                base = c.offset&.vol().zext(),
-                bar = bar.mem,
-            ));
-        };
-        status: *u8 = zeroed(*u8);
-        if isr_cap { c |
-            @if(bar_index != c.bar&.vol()) kpanic("TODO: can this happen?");
-            status = bar.mem.index(c.offset&.vol().zext());
-        };
+find :: fn(pci: *Pci.MemoryRegion) ?Self = {
+    it := Virt'find(pci, 3) 
+        || return(.None);
+    feat := 1.shift_left(32);  // VIRTIO_F_VERSION_1
+    agree := it.cfg.init_features(feat);
+    @if(agree != feat) kpanic("didn't agree on device features");
     
-        feat := 1.shift_left(32);  // VIRTIO_F_VERSION_1
-        agree := cfg.init_features(feat);
-        @if(agree != feat) kpanic("didn't agree on device features");
-        
-        buf := kernel.physical&.map_contiguous(1.shift_left(16), 1);
-        each buf { it |
-            it[] = 0;
-        };
-        
-        qs := buf&.pop_slice(Virt.Queue, 2);
-        self: Self = (device = (queues = qs, interrupt_status = status, intid = intid));
-        init_queue(cfg, qs.index(TRANSMIT), TRANSMIT, buf&, 128, note);
-        init_queue(cfg, qs.index(RECEIVE), RECEIVE, buf&, 128, note);
-        cfg.publish_queues();
-        return(Some = self);
+    buf := kernel.physical&.map_contiguous(1.shift_left(16), 1);
+    each buf { it |
+        it[] = 0;
     };
     
-    .None
+    qs := buf&.pop_slice(Virt.Queue, 2);
+    self: Self = (device = (queues = qs, interrupt_status = it.status, intid = it.intid));
+    init_queue(it.cfg, qs.index(TRANSMIT), TRANSMIT, buf&, 128, it.note);
+    init_queue(it.cfg, qs.index(RECEIVE), RECEIVE, buf&, 128, it.note);
+    it.cfg.publish_queues();
+    (Some = self)
 }
-
-VIRTQ_DESC_F_WRITE :: 2;
 
 fn check_interrupt(self: *Self, intid: i64) void = {
     @if(intid != self.device.intid) return();
@@ -102,11 +46,13 @@ fn check_interrupt(self: *Self, intid: i64) void = {
                         q.device_idx += 1;
                         used := q.device.ring[i];
                         desc := q.desc[used.id.zext()];
+                        @if(desc.flags.bit_and(Virt.DESC_F_NEXT) != 0) kpanic("TODO: restore multiple descriptors");
                         capacity := desc.addr.slice(desc.len.zext());
                         bytes := capacity.slice(0, used.len.zext());
                         byte = bytes[0];
                         // TODO: just reuse the one desc
-                        q.push(capacity, VIRTQ_DESC_F_WRITE);
+                        // TODO: don't chain them
+                        q.push_phys(capacity, Virt.DESC_F_WRITE);
                     };
 
                     q.publish_chain();
@@ -126,28 +72,11 @@ fn check_interrupt(self: *Self, intid: i64) void = {
 fn write(self: *Self, virtual: []u8) void = {
     @if(virtual.len == 0) return();
     q := self.queues.index(TRANSMIT);
-    
-    // the addresses in Virt.Desc are physical, so step through each page of the message 
-    // and manually translate the addresses before pushing them to the queue. 
-    // (because physical memory is only contiguous at page granularity)
-    mem: AddressSpace = (root = sys_get(*TranslationTable, .TTBR0_EL1));
-    v := u8.int_from_ptr(virtual.ptr);
-    len := virtual.len;
-    while => len > 0 {  
-        p := v_to_p(mem&, v);
-        space := p.align_to(kernel.page_size) - p;
-        if space == 0 {
-            space = kernel.page_size;
-        }
-        space := min(space, len);
-        q.push(u8.ptr_from_int(p).slice(space), 0);
-        len -= space;
-        v += space;
-    };
+    q.push_virt(virtual, 0);
     
     // TODO: this needs to be nonblocking eventually but then the lifetime of the message gets complicated
-    i := q.driver_idx;
     q.publish_chain();
+    i := q.driver_idx;
     while => q.device.head.idx&.vol() != i {
         barrier();  // spin
     };

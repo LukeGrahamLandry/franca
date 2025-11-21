@@ -130,6 +130,14 @@ read_device_tree :: fn(self: DT.Iter) ?MemoryRegion = {
     .None
 }
 
+fn find_interrupt(pci: Pci.MemoryRegion, h: *Header) ?i64 = {
+    a := bit_cast_unchecked(*Pci.Header, i64, h) - u8.int_from_ptr(pci.config.ptr);
+    function := a.shift_right_logical(12).bit_and(0b111);
+    device := a.shift_right_logical(15).bit_and(0b11111);
+    bus := a.shift_right_logical(20).bit_and(0b11111111);
+    find_interrupt(pci.interrupt_map, bus, device, function, h.body._0.interrupt_pin.zext())
+}
+
 find_interrupt :: fn(data: []u8, bus: i64, device: i64, function: i64, pin: i64) ?i64 = {
     it: DT.Iter.Node = (name = "", data = data, tag = .PROP);
     while => it.data.len >= 10 * size_of(u32) {
@@ -148,6 +156,16 @@ find_interrupt :: fn(data: []u8, bus: i64, device: i64, function: i64, pin: i64)
     .None
 }
 
+fn find_device(pci: Pci.MemoryRegion, $where: @Fn(h: *Header) bool) ?Ty(i64, *Header) = {
+    range(0, pci.config.len / 4096) { i |
+        continue :: local_return;
+        h := bit_cast_unchecked(*u8, *Pci.Header, pci.config.index(i*4096));
+        if(h.vendor_id&.vol() == 0xFFFF, => continue());
+        if(where(h), => return(Some = (i*4096, h)));
+    };
+    .None
+}
+
 PciAddrInfo :: @bit_fields(
     register := 8,
     function := 3,
@@ -160,4 +178,5 @@ MemoryRegion :: @struct {
     config: []u8;  // array of Headers (but spaced out by 4096 bytes)
     bar: []u8;     // memory that can be allocated to the bars for specific devices
     interrupt_map: []u8;
+    bar_offset: i64;  // how much of the bar space has already been allocated
 };
