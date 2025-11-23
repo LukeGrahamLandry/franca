@@ -8,22 +8,8 @@ main :: fn() void = {
     buf.set_bytes(0);  // :SLOW force it to commit the pages
     _ := set_signal_handler(callee = handle_signal, stack = buf);
     
-    // TODO: real file system. for now just embed the blob of all the files like the web demo does. 
-    fs_i, contents := @run {
-        fs, contents := import("@/examples/web/build.fr")'collect_fs(ast_alloc());
-        (fs, contents.items())
-    };
-    fs.index = fs_i;
-    fs.contents = contents;
-    fs.stdin = init(general_allocator(), 1.shift_left(16));
-    fs.fd = list(general_allocator());
-    range(0, 3) { _ |
-        f := zeroed FileHandle;
-        f.vtable = stdout_file;
-        fs.fd&.push(f);
-    };
-    fs.fd[0].vtable = stdin_file;
-    
+    init_vfs();
+
     if query_current_arch() != .wasm32 {
         redo_relocations_static_linux();
     };
@@ -125,28 +111,7 @@ main :: fn() void = {
     };
 }
 
-fs :: @static(@struct {
-    contents: []u8;
-    index: RawHashMap(Str, Ty(i64, i64));
-    fd: List(FileHandle);
-    mutex: Mutex;
-    stdin: import("@/lib/collections/deque.fr")'RawDeque(u8);
-    strace: bool;
-});
-
-FileHandle :: @rec @struct {
-    vtable: *FileVTable;
-    contents: []u8;
-    pos: i64;
-    readable: bool;
-};
-
-FileVTable :: @struct {
-     read: @FnPtr(self: *FileHandle, buf: []u8) i64;
-    write: @FnPtr(self: *FileHandle, buf: []u8) i64;
-    lseek: @FnPtr(self: *FileHandle, offset: i64, whence: Whence) i64;
-    close: @FnPtr(self: *FileHandle) void = fn(self) = ();
-};
+#use("@/examples/os/user/vfs.fr");
 
 signal_env :: @static(DefaultContext);
 
@@ -293,14 +258,25 @@ LIBC :: @struct {
                 result.value
     };
     mprotect :: fn() = 0;
-    read :: fn(f: Fd, buf: *u8, len: i64) i64 = with_file f { fd |
+    read :: fn(f: Fd, buf: *u8, len: i64) i64 = {
+        fd := get_file(f) || return(-1);
         @trace("read(%, %, %)", f.fd, u8.int_from_ptr(buf), len);
-        fd'vtable'read(fd, buf.slice(len))
+        fd'vtable'read(fd.data, buf.slice(len))
     };
-    close :: fn(f: Fd) i64 = with_file f { fd |
+    close :: fn(f: Fd) i64 = {
+        @if(f.fd == { xxx := LinuxLibc.AT_FDCWD; xxx.fd }) return(-1);
+        fd := get_file(f) || return(-1);
+        ::ptr_utils(@type fd.vtable[]);
+        @if(identical(fd.vtable, closed_file_vtable)) return(-1);
         @trace("close(%)", f.fd);
-        fd'vtable'close(fd);
+        fd'vtable'close(fd.data);
+        fs.mutex&.lock();
+        // default impl for everything to just error
+        closed_file_vtable :: @static(FileVTable) { () };
+        fs.fd[f.fd.intcast()] = (vtable = closed_file_vtable, data = zeroed(rawptr));
+        fs.mutex&.unlock();
         // TODO: reuse slots of the array
+        // note: not freeing fd.data because it's owned by the directory.
         0
     };
     dlopen :: fn(name: CStr) rawptr = {
@@ -323,12 +299,14 @@ LIBC :: @struct {
         args: Array(i64, 6) = (status, 0, 0, 0, 0, 0);
         Syscall'perform_syscall(args&, 94);  // exit
     };
-    write :: fn(f: Fd, buf: *u8, size: i64) i64 = with_file f { fd |
+    write :: fn(f: Fd, buf: *u8, size: i64) i64 = {
+        fd := get_file(f) || return(-1);
         @trace("write(%, %, %)", f.fd, u8.int_from_ptr(buf), size);
-        fd'vtable'write(fd, buf.slice(size))
+        fd'vtable'write(fd.data, buf.slice(size))
     };
-    lseek :: fn(f: Fd, offset: i64, whence: Whence) i64 = with_file f { fd |
-        result := fd'vtable'lseek(fd, offset, whence);
+    lseek :: fn(f: Fd, offset: i64, whence: Whence) i64 = {
+        fd := get_file(f) || return(-1);
+        result := fd'vtable'lseek(fd.data, offset, whence);
         @trace("lseek(fd = %, %, %) = %", f.fd, offset, @as(i64) whence, result);
         result
     };
@@ -393,12 +371,12 @@ LIBC :: @struct {
         0
     };
     
-    tcgetattr :: fn(fd: Fd, it: *Term.Terminos) i64 = with_file fd { fd |
+    tcgetattr :: fn(fd: Fd, it: *Term.Terminos) i64 = {
         // TODO
         it[] = zeroed(Term.Terminos);
         0
     };
-    tcsetattr :: fn(fd: Fd, optional_actions: i64, it: *Term.Terminos) i64 = with_file fd { fd |
+    tcsetattr :: fn(fd: Fd, optional_actions: i64, it: *Term.Terminos) i64 = {
         // TODO
         0
     };
@@ -439,18 +417,11 @@ LIBC :: @struct {
         };
         off, len := fs.index&.get(path) 
             || return(-1);  // TODO: trace
-        // TODO: this is a dead lock if the thing locking it is the thing that was interrupted
-        if !fs.mutex&.try_lock() {
-            panic("fucked: openat with fs.mutex locked");
-        };
-        fd := fs.fd.len;
-        fs.fd&.push(
-            vtable = read_only_mem_file,
+        fd := push_file(MemFileRO, (
             contents = fs.contents.subslice(off, len),
             pos = 0,
-            readable = true,
-        );
-        fs.mutex&.unlock();
+        ));
+        fd := fd.fd.intcast();
         @trace("openat(%) = %", path, fd);
         fd
     }
@@ -486,14 +457,6 @@ system_counter_uptime :: fn() TimeSpec = {
     (seconds = s.bitcast(), nanoseconds = ns_r.bitcast())
 }
 
-fn with_file(fd: Fd, $body: @Fn(fd: *FileHandle) i64) i64 = {
-    fs.mutex&.lock();
-    fd := fs.fd.index(fd.fd.zext());
-    result := @must_return body(fd);
-    fs.mutex&.unlock();
-    result
-}
-
 fn with_syscalls($body: @Fn() i64) i64 = {
     c := context(DefaultContext);
     c.prefer_syscalls = true;
@@ -501,72 +464,6 @@ fn with_syscalls($body: @Fn() i64) i64 = {
     c.prefer_syscalls = false;
     result
 }
-
-read_only_mem_file :: @static(FileVTable) (
-    read = fn(fd, dest) = {
-        @if(!fd.readable) return(-1);
-        dest.len = min(dest.len, fd.contents.len - fd.pos).max(0);
-        src := fd.contents.subslice(fd.pos, dest.len);
-        dest.copy_from(src);
-        fd.pos += dest.len;
-        dest.len
-    },
-    write = fn(_self, _src) = -1,
-    lseek = fn(fd, offset, whence) = {
-        @if(!fd.readable) return(-1);
-        ::enum(Whence);
-        fd.pos = @match(whence) {
-            fn End() => fd.contents.len;
-            fn Set() => offset;
-            @default => todo();
-        };
-        fd.pos
-    },
-    close = fn(fd) = {
-        fd.readable = false;
-    },
-);
-
-stdout_file :: @static(FileVTable) (
-    read = fn(_fd, _dest) = 0,
-    write = fn(_fd, src) = with_syscalls {
-        result := Syscall'write((fd = 1), src.ptr, src.len);
-        result.value
-    },
-    lseek = fn(_fd, _offset, _whence) = -1,
-    close = fn(_fd) = (),
-);
-
-stdin_file :: @static(FileVTable) (
-    read = fn(_fd, dest) = {
-        fd := ptr_diff(fs.fd.maybe_uninit.ptr, _fd);
-        i := 0;
-        while => i < dest.len {
-            continue :: local_return;
-            // TODO: this is a race with the interrupt handler adding more bytes
-            c := fs.stdin&.pop_front()  // :SLOW
-                || {
-                if i == 0 {
-                    // TODO: don't hardcode blocking + MIN=1 + timeout=infinity (which is what interactive_read_line wants)
-                    // since send_signal clears Task.futex_wait, this sleeps until we get a byte if its the init process reading. 
-                    p := bit_cast_unchecked(*i64, *u32, fs.stdin.len&);
-                    fs.mutex&.unlock();
-                    Futex'wait(p, 0);
-                    fs.mutex&.lock();
-                    _fd = fs.fd.index(fd);
-                    continue();
-                };
-                return(i)
-            };
-            dest[i] = c;
-            i += 1;
-        };
-        i
-    },
-    write = fn(_fd, _src) = -1,
-    lseek = fn(_fd, _offset, _whence) = -1,
-    close = fn(_fd) = (),
-);
 
 fn trace(arg: FatExpr) FatExpr #macro = @{
     if fs.strace {
@@ -580,113 +477,6 @@ fn trace(arg: FatExpr) FatExpr #macro = @{
         fs.strace = old;
     };
 };
-
-init_fuse :: fn(q: *UQueue) void = {
-    q.pipe = init(general_allocator(), 128);
-    
-    in := zeroed Fuse.InitIn;
-    in.major = Fuse.MAJOR;
-    in.minor = Fuse.MINOR;
-    result := fuse_blocking(q, .INIT, 0, in, empty(), empty()).unwrap();
-    
-    ::DeriveFmt(Fuse.InitOut);
-    ::DeriveFmt(Array(u16, 11));
-    ::display_slice(u16);
-    @println("%", result.out&);
-    
-    ROOT_NODE :: 1;
-    name := "a.txt\0";
-    in: Fuse.LookupIn = ();
-    result := fuse_blocking(q, .LOOKUP, ROOT_NODE, in, name, empty()).unwrap();
-    node := result.out.nodeid;
-    // TODO: do i have to release/forget this at the end?
-    
-    in: Fuse.OpenIn = (flags = 0, open_flags = 0);
-    result := fuse_blocking(q, .OPEN, node, in, empty(), empty()).unwrap();
-    // TODO: RELEASE at the end
-    
-    in := zeroed Fuse.ReadIn;
-    in.fh = result.out.fh;
-    in.size = 2000;
-    // TODO: putting stack memory in the queue relies on blocking
-    buf := @uninitialized Array(u8, 2000);
-    result := fuse_blocking(q, .READ, node, in, empty(), buf&.items()).unwrap();
-    @println("READ(a.txt) = %", result.extra);
-    
-    println("done init fuse");
-}
-
-Fuse :: import("@/examples/os/drivers/fs/fuse.fr");
-
-FuseResult :: fn($I: Type) Type = {
-    O :: FuseOutType(I);
-    OK :: @struct(out: O, extra: []u8);
-    Self :: @tagged(Err: i64, Ok: OK);
-    
-    // :compilerbug/ordering if you name this "or"
-    fn orr(self: Self, $else: @Fn() Never) OK = {
-        @match(self&) {
-            fn Ok(it) => it[];
-            fn Err() => else();
-        }
-    }
-    
-    fn unwrap(self: Self) OK = 
-        self.orr(=> @panic("fuse failed %", self.Err));
-    
-    fn is_err(self: *Self) bool = 
-        self.is(.Err);
-    
-    Self
-}
-
-fn fuse_blocking(q: *UQueue, op: Fuse.Opcode, node: u64, in: ~I, e_in: []u8, e_out: []u8) FuseResult(I) #where = {
-    hi := zeroed Fuse.InHeader;
-    hi.opcode = op;
-    hi.nodeid = node;
-    ho := zeroed Fuse.OutHeader;
-    out := zeroed FuseOutType(I);
-    old := q.pipe.done.committed.bouba;
-    // TODO: putting stack memory in the queue relies on blocking
-    send(q, hi&, in&, e_in, ho&, out&, e_out);
-    while => q.pipe.done.committed.bouba == old {
-        q'poll(q);
-    };
-    @if(ho.error != 0) return(Err = ho.error.intcast());
-    extra := ho.len.zext() - size_of(@type out);
-    extra := e_out.slice(0, extra.max(0).min(e_out.len));
-    (Ok = (out = out, extra = extra))
-}
-
-fn send(q: *UQueue, hi: *Fuse.InHeader, in: ~I, ei: []u8, ho: *Fuse.OutHeader, out: ~O, eo: []u8) void #where #inline/*semantic*/ = {
-    f :: fn(data: ~T) []u8 #where => {
-        ::[]@type data[];
-        data.slice(1).interpret_as_bytes()
-    };
-    
-    hi.len = 0;
-    hi.len += size_of(@type hi[]);
-    hi.len += size_of(@type in[]);
-    hi.len += ei.len.trunc();
-    // TODO: putting stack memory in the queue relies on blocking
-    bufs := @slice(f(hi), ei, f(in), f(ho), f(out), eo);  
-    for bufs { it |
-        //use :: fn(i: i64) void #noinline = ();
-        //use(it.len);
-        _ := @tfmt("%", it.len);  // coconut.jpg
-    };
-    q.pipe.work&.push(bufs = bufs, n = (bufs_readable = 3))
-}
-
-FuseOutType :: fn(In: Type) Type #fold = {
-    name := In.typename().str();
-    @assert(name.ends_with("In"), "expected In type, found %", name);
-    @assert(!name.starts_with("*"));
-    name = name.slice(0, name.len - 2);
-    name := @tfmt("%Out", name);
-    Type.get_constant(Fuse, name.sym())
-        || @panic("missing Fuse.%", name)
-}
 
 Term :: import("@/lib/sys/terminal.fr");
 #use("@/lib/sys/threads.fr");

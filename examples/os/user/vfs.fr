@@ -1,0 +1,347 @@
+// Virtual File System
+
+fs :: @static(@struct {
+    contents: []u8;
+    index: RawHashMap(Str, Ty(i64, i64));
+    fd: List(FileHandle); // indexed by Fd
+    mutex: Mutex;
+    stdin: import("@/lib/collections/deque.fr")'RawDeque(u8);
+    strace: bool;
+    root_fd: FileHandle;
+});
+
+FileHandle :: @rec @struct {
+    vtable: *FileVTable;
+    data: rawptr;
+};
+
+FileVTable :: @struct {
+     read: @FnPtr(self: rawptr, buf: []u8) i64 = (fn(_0, _1) = -1);
+    write: @FnPtr(self: rawptr, buf: []u8) i64 = (fn(_0, _1) = -1);
+    lseek: @FnPtr(self: rawptr, offset: i64, whence: Whence) i64 = (fn(_0, _1, _2) = -1);
+    close: @FnPtr(self: rawptr) void = fn(self) = ();
+  fstatat: @FnPtr(self: rawptr, path: CStr, out: Posix.Linux.StatArm64) i64 = (fn(_0, _1, _2) = -1);
+   openat: @FnPtr(self: rawptr, path: CStr, flags: i64, mode: i64) i64 = (fn(_0, _1, _2, _3) = -1);
+};
+
+init_vfs :: fn() void = {
+    fs_i, contents := @run {
+        fs, contents := import("@/examples/web/build.fr")'collect_fs(ast_alloc());
+        (fs, contents.items())
+    };
+    fs.index = fs_i;
+    fs.contents = contents;
+    fs.stdin = init(general_allocator(), 1.shift_left(16));
+    fs.fd = list(general_allocator());
+    push_file(StdinFile, ());
+    push_file(StdoutFile, ());
+    push_file(StdoutFile, ());
+    
+    it := general_allocator().boxed(MemDir, (files = empty()));
+    fs.root_fd = (vtable = get_vtable(MemDir), data = MemDir.raw_from_ptr(it));
+}
+
+// mechanisms, not policies :)
+get_vtable :: fn($T: Type) *FileVTable = @static(FileVTable) {
+    vtable: FileVTable = ();
+    S :: Type.scope_of(T);
+
+    fr := current_compiler_context();
+    p := bit_cast_unchecked(*FileVTable, *rawptr, vtable&);
+    for get_constants(S) { name |
+        continue :: local_return;
+        field := Fields(FileVTable).from_name(name.str())
+            || continue();
+        fid := FuncId.get_constant(S, name)
+            || @panic("failed to get func %", name.str());
+        
+        func := get_function_ast(fid, false, false, false, false);
+        fptrtype := FieldType(FileVTable, field).get_type_info_ref();
+        @debug_assert(fptrtype.is(.FnPtr));
+        args := fr.arg_types(fptrtype.FnPtr.ty.arg);
+        @assert_eq(args.len, func.arg.bindings.len, "arity error in FileVTable");
+        range(0, args.len) { i |
+            func.arg.bindings[i].ty = (Finished = args[i]);
+        };
+        func.ret = (Finished = fptrtype.FnPtr.ty.ret);
+        
+        // self := Self.ptr_from_raw(self);
+        @debug_assert_eq(args[0], rawptr);
+        func.arg.bindings[0].ty = (Finished = *T);
+        
+        p.offset(@as(i64) field)[] = fr.get_jitted(fid);
+    };
+    
+    vtable
+};
+
+MemFileRO :: @struct {
+    contents: []u8;
+    pos: i64;
+    
+    read :: fn(fd, dest) = {
+        dest.len = min(dest.len, fd.contents.len - fd.pos).max(0);
+        src := fd.contents.subslice(fd.pos, dest.len);
+        dest.copy_from(src);
+        fd.pos += dest.len;
+        dest.len
+    };
+    lseek :: fn(fd, offset, whence) = {
+        ::enum(Whence);
+        fd.pos = @match(whence) {
+            fn End() => fd.contents.len;
+            fn Set() => offset;
+            @default => todo();
+        };
+        fd.pos
+    };
+};
+
+StdoutFile :: @struct {
+    write :: fn(_0, src) = with_syscalls {
+        result := Syscall'write((fd = 1), src.ptr, src.len);
+        result.value
+    };
+};
+
+StdinFile :: @struct {
+    read :: fn(_fd, dest) = {
+        i := 0;
+        while => i < dest.len {
+            continue :: local_return;
+            // TODO: this is a race with the interrupt handler adding more bytes
+            c := fs.stdin&.pop_front()  // :SLOW
+                || {
+                if i == 0 {
+                    // TODO: don't hardcode blocking + MIN=1 + timeout=infinity (which is what interactive_read_line wants)
+                    // since send_signal clears Task.futex_wait, this sleeps until we get a byte if its the init process reading. 
+                    p := bit_cast_unchecked(*i64, *u32, fs.stdin.len&);
+                    Futex'wait(p, 0);
+                    continue();
+                };
+                return(i)
+            };
+            dest[i] = c;
+            i += 1;
+        };
+        i
+    };
+};
+
+// TODO
+MemDir :: @struct {
+    files: RawList(Entry);
+    Entry :: @struct {
+        name: Str;
+        handle: FileHandle;
+    };
+
+    fstatat :: fn(self, path, out) = {
+        todo();
+    };
+    openat :: fn(self, path, flags, _mode) = {
+        path := path.str();
+        @assert(!path.contains("/".ascii())); // TODO
+        for self.files { it |
+            if it.name == path {
+                fd := push_file(it.handle);
+                return(fd.fd.intcast());
+            };
+        };
+        -2
+    };
+};
+
+fn push_file($T: Type, data: T) Fd #generic = {
+    data := general_allocator().boxed(T, data);
+    push_file(vtable = get_vtable(T), data = T.raw_from_ptr(data))
+}
+
+fn push_file(it: FileHandle) Fd = {
+    fs.mutex&.lock();
+    fd := fs.fd.len;
+    fs.fd&.push(it);
+    @assert_ne(fd, MAX_i32, "TODO: wrap");
+    fs.mutex&.unlock();
+    (fd = fd.intcast())
+}
+
+init_fuse :: fn(q: *UQueue) void = {
+    q.pipe = init(general_allocator(), 128);
+    
+    in := zeroed Fuse.InitIn;
+    in.major = Fuse.MAJOR;
+    in.minor = Fuse.MINOR;
+    result := fuse_blocking(q, .INIT, 0, in, empty(), empty()).unwrap();
+    
+    ::DeriveFmt(Fuse.InitOut);
+    ::DeriveFmt(Array(u16, 11));
+    ::display_slice(u16);
+    @println("%", result.out&);
+    
+    ROOT_NODE :: 1;
+    name := "a.txt\0";
+    in: Fuse.LookupIn = ();
+    result := fuse_blocking(q, .LOOKUP, ROOT_NODE, in, name, empty()).unwrap();
+    node := result.out.nodeid;
+    // TODO: do i have to release/forget this at the end?
+    
+    in: Fuse.OpenIn = (flags = 0, open_flags = 0);
+    result := fuse_blocking(q, .OPEN, node, in, empty(), empty()).unwrap();
+    // TODO: RELEASE at the end
+    
+    in := zeroed Fuse.ReadIn;
+    in.fh = result.out.fh;
+    in.size = 2000;
+    // TODO: putting stack memory in the queue relies on blocking
+    buf := @uninitialized Array(u8, 2000);
+    result := fuse_blocking(q, .READ, node, in, empty(), buf&.items()).unwrap();
+    @println("READ(a.txt) = %", result.extra);
+    
+    println("done init fuse");
+}
+
+Fuse :: import("@/examples/os/drivers/fs/fuse.fr");
+
+FuseResult :: fn($I: Type) Type = {
+    O :: FuseOutType(I);
+    OK :: @struct(out: O, extra: []u8);
+    Self :: @tagged(Err: i64, Ok: OK);
+    
+    // :compilerbug/ordering if you name this "or"
+    fn orr(self: Self, $else: @Fn() Never) OK = {
+        @match(self&) {
+            fn Ok(it) => it[];
+            fn Err() => else();
+        }
+    }
+    
+    fn unwrap(self: Self) OK = 
+        self.orr(=> @panic("fuse failed %", self.Err));
+    
+    fn is_err(self: *Self) bool = 
+        self.is(.Err);
+    
+    Self
+}
+
+fn fuse_blocking(q: *UQueue, op: Fuse.Opcode, node: u64, in: ~I, e_in: []u8, e_out: []u8) FuseResult(I) #where = {
+    hi := zeroed Fuse.InHeader;
+    hi.opcode = op;
+    hi.nodeid = node;
+    ho := zeroed Fuse.OutHeader;
+    out := zeroed FuseOutType(I);
+    old := q.pipe.done.committed.bouba;
+    // TODO: putting stack memory in the queue relies on blocking
+    send(q, hi&, in&, e_in, ho&, out&, e_out);
+    while => q.pipe.done.committed.bouba == old {
+        q'poll(q);
+    };
+    @if(ho.error != 0) return(Err = ho.error.intcast());
+    extra := ho.len.zext() - size_of(@type out);
+    extra := e_out.slice(0, extra.max(0).min(e_out.len));
+    (Ok = (out = out, extra = extra))
+}
+
+fn send(q: *UQueue, hi: *Fuse.InHeader, in: ~I, ei: []u8, ho: *Fuse.OutHeader, out: ~O, eo: []u8) void #where #inline/*semantic*/ = {
+    f :: fn(data: ~T) []u8 #where => {
+        ::[]@type data[];
+        data.slice(1).interpret_as_bytes()
+    };
+    
+    hi.len = 0;
+    hi.len += size_of(@type hi[]);
+    hi.len += size_of(@type in[]);
+    hi.len += ei.len.trunc();
+    // TODO: putting stack memory in the queue relies on blocking
+    bufs := @slice(f(hi), ei, f(in), f(ho), f(out), eo);  
+    for bufs { it |
+        //use :: fn(i: i64) void #noinline = ();
+        //use(it.len);
+        _ := @tfmt("%", it.len);  // coconut.jpg
+    };
+    q.pipe.work&.push(bufs = bufs, n = (bufs_readable = 3))
+}
+
+FuseOutType :: fn(In: Type) Type #fold = {
+    name := In.typename().str();
+    @assert(name.ends_with("In"), "expected In type, found %", name);
+    @assert(!name.starts_with("*"));
+    name = name.slice(0, name.len - 2);
+    name := @tfmt("%Out", name);
+    Type.get_constant(Fuse, name.sym())
+        || @panic("missing Fuse.%", name)
+}
+
+fn get_file(fd: Fd) ?FileHandle = {
+    @if(fd.fd == { xxx := LinuxLibc.AT_FDCWD; xxx.fd }) return(Some = fs.root_fd);
+    fs.mutex&.lock();
+    @if(!fd.fd.intcast().ult(fs.fd.len)) return(.None);
+    file := fs.fd[fd.fd.zext()];
+    fs.mutex&.unlock();
+    (Some = file)
+}
+
+FuseId :: @struct(nodeid: u64, fh: u64);
+FRes :: fn($T: Type) Type = Result(T, i64);
+
+fn follow_path(fd: Fd, path: CStr) SysResult(Fd) = {
+    path := path.str();
+    if path.starts_with("./") {
+        path = path.rest(2);
+    };
+    
+    first := true;
+    i := 0;
+    buf := temp().alloc_uninit(u8, path.len + 1);
+    loop {
+        continue :: local_return;
+        start := i;
+        while => path[i] != PATH_SEP.ascii() && path[i] != 0 {
+            i += 1;
+        };
+        last := path[i] == 0;
+        part := path.slice(start, i);
+        buf.slice(0, part.len).copy_from(part);
+        buf[part.len] = 0;
+        name: Cstr = (ptr = buf.ptr);
+        
+        if part.len == 0 || part == "." {
+            @if(last) return(Ok = fd);
+            i += 1;
+            continue();
+        };
+        if part == ".." {
+            panic("TODO: go up a directory");
+        };
+
+        // :SLOW
+        out := zeroed SysStat;
+        Posix'fstatat(fd, name, out&, 0).or(fn(err) => {
+            if !first {
+                _ := Syscall'close(fd);
+            };
+            return(Err = err)
+        });
+        
+        ifmt := out.st_mode.int().bit_and(Posix.S.IFMT);
+        is_dir := ifmt == Posix.S.IFDIR;
+        
+        @if(!is_dir && !last) return(Err = 20);
+        
+        new_fd := Posix'openat(fd, name, out&, 0).or(fn(err) => {
+            if !first {
+                _ := Syscall'close(fd);
+            };
+            return(Err = err)
+        });
+        
+        if !first {
+            _ := Syscall'close(fd);
+        };
+        @if(last) return(Ok = new_fd);
+        fd = new_fd;
+        first = false;
+        i += 1;
+    }
+}
