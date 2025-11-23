@@ -34,13 +34,14 @@ init_vfs :: fn() void = {
     };
     
     fs.stdin.pipe = init(general_allocator(), 2);
-    virtq_create(fs.stdin&, "stdio.console", 0)
-        .assert("failed to create stdin virtq");
+    if !virtq_create(fs.stdin&, "stdio.console", 0) {
+        fs.stdin.poll = pl011_int_poll;
+    };
     range(0, 2) { _ |
         bufs := general_allocator().alloc_init([]u8, 1, fn(_) => general_allocator().alloc_zeroed(u8, 256));
         fs.stdin.pipe.work&.push(bufs = bufs, n = (bufs_readable = 0));
     };
-    fs'stdin'poll(fs.stdin&);
+    fs'stdin'poll(fs.stdin&, 0);
     
     fs.fd = list(general_allocator());
     push_file(StdinFile, (queue = fs.stdin&));
@@ -166,8 +167,7 @@ StdinFile :: @struct {
         // TODO: don't hardcode blocking + MIN=1 + timeout=infinity (which is what interactive_read_line wants)
         
         if self.buf.len == 0 {
-            // this poll is redundant for current usage where i only read after getting an interrupt
-            self'queue'poll(self.queue);  
+            self'queue'poll(self.queue, 1);  
             entry := self.queue.pipe.done&.pop();
             @debug_assert_eq(entry.bufs.len, 1);
             self.bufs = entry.bufs;
@@ -183,7 +183,7 @@ StdinFile :: @struct {
         };
         if self.buf.len == 0 {
             self.queue.pipe.work&.push(bufs = self.bufs, n = (bufs_readable = 0));
-            self'queue'poll(self.queue);
+            self'queue'poll(self.queue, 0);
         };
         dest.len
     };
@@ -351,7 +351,7 @@ fn fuse_blocking(q: *UQueue, op: Fuse.Opcode, node: u64, in: ~I, e_out: []u8) Re
     // TODO: putting stack memory in the queue relies on blocking
     send(q, hi&, in&, ho&, out&, e_out);
     while => q.pipe.done.committed.bouba == old {
-        q'poll(q);
+        q'poll(q, 0);
     };
     ::enum(@type op);
     @debug_assert(ho.len != 0 || op == .FORGET);  // no reply, virtio is just returning the buffer. 

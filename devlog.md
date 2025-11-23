@@ -5,7 +5,6 @@
     - was setting bytes_written to desc.len instead of used.len
 
 TODO: same for output
-TODO: translate pl011 (rn i broke it)
 
 ## (Nov 22)
 

@@ -150,31 +150,46 @@ main :: fn() void = {
 
 signal_env :: @static(DefaultContext);
 
+pl011_int_poll :: fn(q: *UQueue, who: i64) void = {
+    // if polling after work.push, do nothing, wait for an interrupt.
+    @if(who == 0) return();  
+    // else, polling before done.pop
+    work := fs.stdin.pipe.work&;
+    
+    // handle_signal doesn't done.push, it claims from work without committing. 
+    // so instead of being able to wait in done.pop, we need to wait for 
+    // a claim in work, commit it, and done.push, then the next call to pop won't block. 
+    // need the claim-commit separation becuase handle_signal isn't allowed 
+    // to block on work.pop, and it gets bytes one at a time. 
+    // it can't block because the interrupt is allowed to be on the same thread as the read. 
+    value := work.claimed.kiki;
+    while => work.committed.kiki == value {
+        Futex'wait(work.claimed.kiki&, value);
+        value = work.claimed.kiki;
+    };
+    entry := work.ring.index(work.committed.kiki.zext().mod(work.ring.len))[];
+    work.committed.kiki += 1;
+    @assert(work.claimed.kiki == work.committed.kiki);
+    fs.stdin.pipe.done&.push(entry);
+}
+
 // note: intid != ctx.intid is legal because an interrupt might have triggered while a different task was running. 
 //       ex. uart always goes to the init task. 
 handle_signal :: fn(ctx: *MContext, intid: i64, data: i64) i64 = {
     set_dynamic_context(DefaultContext.raw_from_ptr(signal_env));
     // TODO: don't hardcode the 33. get it from device tree. 
     //       the kernel side now knows the right numbers. just have to use them here. 
-    if intid == 33 || intid == 69 || intid == 37 {
-        char: u8 = data.trunc();
-        if char == 3 {
-            println("^c");
-            // TODO: this doesn't work reliably. try it in examples/chess/perft.fr and it can get stuck? 
-            Syscall'exit(1);  // will stop the whole system if this is the init task (which it always is rn)
+    if intid == 33 {
+        work := fs.stdin.pipe.work&;
+        if work.claimed.kiki == work.committed.kiki {
+            work.claimed.kiki += 1;
         };
-        if char == 13 {
-            char = 10;
-        };
-        todo();
-        // translate to the UQueue
-        
-        // TODO: what if interrupted while reading
-        fs.stdin&.push_back(char, panicking_allocator);
-        
-        p := bit_cast_unchecked(*i64, *u32, fs.stdin.len&);
-        Futex'wake(p, 1);  // :SLOW. only needed if its not the init process sleeping in the read
-        
+        entry := work.ring.index(work.committed.kiki.zext().umod(work.ring.len));
+        if entry.n.bytes_written.zext() < entry.bufs[0].len {
+            entry.bufs[0][entry.n.bytes_written.zext()] = data.trunc();
+            entry.n.bytes_written += 1;
+            Futex'wake(work.committed.kiki&, 1);
+        };  // else, silently drop the bytes :(
         return(intid);
     };
     
