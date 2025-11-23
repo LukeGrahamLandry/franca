@@ -4,10 +4,14 @@ fs :: @static(@struct {
     contents: []u8;
     index: RawHashMap(Str, Ty(i64, i64));
     fd: List(FileHandle); // indexed by Fd
-    mutex: Mutex;
+    mutex: Mutex;  // locked when push to fd / reading an entry from fd. TODO: RWLock
+    // TODO: decide which other things care about being thread safe
     stdin: import("@/lib/collections/deque.fr")'RawDeque(u8);
     strace: bool;
     root_fd: FileHandle;
+    fuse_q: ?*UQueue;
+    fuse_root: Fd;
+    // TODO: put an allocator here instead of trusting general_allocator
 });
 
 FileHandle :: @rec @struct {
@@ -97,6 +101,7 @@ MemFileRO :: @struct {
     };
 };
 
+// TODO: expose the console to userspace as a UQueue
 StdoutFile :: @struct {
     write :: fn(_0, src) = with_syscalls {
         result := Syscall'write((fd = 1), src.ptr, src.len);
@@ -104,6 +109,7 @@ StdoutFile :: @struct {
     };
 };
 
+// TODO: expose the console to userspace as a UQueue
 StdinFile :: @struct {
     read :: fn(_fd, dest) = {
         i := 0;
@@ -166,66 +172,104 @@ fn push_file(it: FileHandle) Fd = {
     (fd = fd.intcast())
 }
 
-init_fuse :: fn(q: *UQueue) void = {
+FuseFile :: @struct {
+    q: *UQueue;
+    nodeid: u64;
+    fh: u64;
+    
+    read :: fn(self, buf) = {
+        in := zeroed Fuse.ReadIn;
+        in.fh = self.fh;
+        in.size = buf.len.trunc();
+        result := fuse_blocking(self.q, .READ, self.nodeid, in, buf)
+            .or(fn(e) => return(e));
+        result.data.len
+    };
+    write :: fn(self, buf) = {
+        in := zeroed Fuse.WriteIn;
+        in.fh = self.fh;
+        in.size = buf.len.trunc();
+        in.data = buf;
+        result := fuse_blocking(self.q, .WRITE, self.nodeid, in)
+            .or(fn(e) => return(e));
+        result.size.zext()
+    };
+    lseek :: fn(self, offset, whence) = {
+        todo();
+    };
+    close :: fn(self) = {
+        in := zeroed Fuse.FlushIn;
+        in.fh = self.fh;
+        fuse_blocking(self.q, .FLUSH, self.nodeid, in)
+            .or(fn(e) => @println("FLUSH failed %", e));
+        in := zeroed Fuse.FsyncIn;
+        in.fh = self.fh;
+        fuse_blocking(self.q, .FSYNC, self.nodeid, in)
+            .or(fn(e) => @println("FSYNC failed %", e));
+        in := zeroed Fuse.ReleaseIn;
+        in.fh = self.fh;
+        fuse_blocking(self.q, .RELEASE, self.nodeid, in)
+            .or(fn(e) => @println("RELEASE failed %", e));
+        in := zeroed Fuse.ForgetIn;
+        fuse_blocking(self.q, .FORGET, self.nodeid, in)
+            .or(fn(e) => @println("FORGET failed %", e));
+    };
+    fstatat :: fn(self, path, out) = {
+        todo();
+    };
+    openat :: fn(self, path, flags, mode) = {
+        todo();
+    };
+};
+
+fuse_openat :: fn(fd: Fd, path: CStr, flags: i64, mode: i64) i64 = {
+    @assert(fd.fd == fs.fuse_root.fd, "TODO");
+    fd := get_file(fd) || return(-1);
+    fd := FuseFile.ptr_from_raw(fd.data);
+    q := fd.q;
+    
+    name := path.str();
+    name.len += 1;
+    @assert(name[name.len - 1] == 0);
+    in: Fuse.LookupIn = (name = name);
+    result := fuse_blocking(q, .LOOKUP, fd.nodeid, in)
+        .or(fn(e) => return(e));
+    node := result.nodeid;
+
+    in: Fuse.OpenIn = (flags = flags.trunc(), open_flags = 0);
+    result := fuse_blocking(q, .OPEN, node, in)
+        .or(fn(e) => return(e));
+    
+    fd := push_file(FuseFile, (q = q, nodeid = node, fh = result.fh));
+    fd.fd.intcast()
+};
+
+init_fuse :: fn(q: *UQueue) Fd = {
     q.pipe = init(general_allocator(), 128);
     
     in := zeroed Fuse.InitIn;
     in.major = Fuse.MAJOR;
     in.minor = Fuse.MINOR;
-    result := fuse_blocking(q, .INIT, 0, in, empty(), empty()).unwrap();
+    result := fuse_blocking(q, .INIT, 0, in).unwrap();
     
     ::DeriveFmt(Fuse.InitOut);
     ::DeriveFmt(Array(u16, 11));
     ::display_slice(u16);
-    @println("%", result.out&);
-    
-    ROOT_NODE :: 1;
-    name := "a.txt\0";
-    in: Fuse.LookupIn = ();
-    result := fuse_blocking(q, .LOOKUP, ROOT_NODE, in, name, empty()).unwrap();
-    node := result.out.nodeid;
-    // TODO: do i have to release/forget this at the end?
-    
-    in: Fuse.OpenIn = (flags = 0, open_flags = 0);
-    result := fuse_blocking(q, .OPEN, node, in, empty(), empty()).unwrap();
-    // TODO: RELEASE at the end
-    
-    in := zeroed Fuse.ReadIn;
-    in.fh = result.out.fh;
-    in.size = 2000;
-    // TODO: putting stack memory in the queue relies on blocking
-    buf := @uninitialized Array(u8, 2000);
-    result := fuse_blocking(q, .READ, node, in, empty(), buf&.items()).unwrap();
-    @println("READ(a.txt) = %", result.extra);
+    @println("%", result&);
     
     println("done init fuse");
+    push_file(FuseFile, (q = q, nodeid = 1, fh = 0))
 }
 
 Fuse :: import("@/examples/os/drivers/fs/fuse.fr");
 
-FuseResult :: fn($I: Type) Type = {
-    O :: FuseOutType(I);
-    OK :: @struct(out: O, extra: []u8);
-    Self :: @tagged(Err: i64, Ok: OK);
-    
-    // :compilerbug/ordering if you name this "or"
-    fn orr(self: Self, $else: @Fn() Never) OK = {
-        @match(self&) {
-            fn Ok(it) => it[];
-            fn Err() => else();
-        }
-    }
-    
-    fn unwrap(self: Self) OK = 
-        self.orr(=> @panic("fuse failed %", self.Err));
-    
-    fn is_err(self: *Self) bool = 
-        self.is(.Err);
-    
-    Self
+fn fuse_blocking(q: *UQueue, op: Fuse.Opcode, node: u64, in: ~I) Result(FuseOutType(I), i64) #where = {
+    _, out_dyn := @run count_bufs(FuseOutType(I));
+    @assert(out_dyn == 0, "fuse_blocking: pass extra memory for out buffer");
+    fuse_blocking(q, op, node, in, empty())
 }
 
-fn fuse_blocking(q: *UQueue, op: Fuse.Opcode, node: u64, in: ~I, e_in: []u8, e_out: []u8) FuseResult(I) #where = {
+fn fuse_blocking(q: *UQueue, op: Fuse.Opcode, node: u64, in: ~I, e_out: []u8) Result(FuseOutType(I), i64) #where = {
     hi := zeroed Fuse.InHeader;
     hi.opcode = op;
     hi.nodeid = node;
@@ -233,34 +277,74 @@ fn fuse_blocking(q: *UQueue, op: Fuse.Opcode, node: u64, in: ~I, e_in: []u8, e_o
     out := zeroed FuseOutType(I);
     old := q.pipe.done.committed.bouba;
     // TODO: putting stack memory in the queue relies on blocking
-    send(q, hi&, in&, e_in, ho&, out&, e_out);
+    send(q, hi&, in&, ho&, out&, e_out);
     while => q.pipe.done.committed.bouba == old {
         q'poll(q);
     };
     @if(ho.error != 0) return(Err = ho.error.intcast());
     extra := ho.len.zext() - size_of(@type out);
     extra := e_out.slice(0, extra.max(0).min(e_out.len));
-    (Ok = (out = out, extra = extra))
+    
+    out_fixed, out_dyn := @run count_bufs(@type out);
+    @assert(out_dyn <= 1, "TODO: multiple output bufs");
+    if out_dyn > 0 {
+        p := ptr_from_int([]u8, int_from_ptr(@type out, out&) + out_fixed);
+        p[] = extra;
+    };
+    
+    (Ok = out)
 }
 
-fn send(q: *UQueue, hi: *Fuse.InHeader, in: ~I, ei: []u8, ho: *Fuse.OutHeader, out: ~O, eo: []u8) void #where #inline/*semantic*/ = {
+fn send(q: *UQueue, hi: *Fuse.InHeader, in: ~I, ho: *Fuse.OutHeader, out: ~O, eo: []u8) void #where #inline/*semantic*/ = {
     f :: fn(data: ~T) []u8 #where => {
         ::[]@type data[];
         data.slice(1).interpret_as_bytes()
     };
+    // TODO: putting stack memory in the queue relies on blocking
+    bufs := @uninitialized Array([]u8, 10); bi := 0;
+    push_buf :: fn(b: []u8) => { bufs&[bi] = b; bi += 1; };
     
     hi.len = 0;
+    ::[]@type hi[];
+    push_buf(hi.slice(1).interpret_as_bytes());
     hi.len += size_of(@type hi[]);
-    hi.len += size_of(@type in[]);
-    hi.len += ei.len.trunc();
-    // TODO: putting stack memory in the queue relies on blocking
-    bufs := @slice(f(hi), ei, f(in), f(ho), f(out), eo);  
-    for bufs { it |
-        //use :: fn(i: i64) void #noinline = ();
-        //use(it.len);
-        _ := @tfmt("%", it.len);  // coconut.jpg
+    
+    in_fixed, in_dyn := @run count_bufs(Deref(I));
+    b := in.f().slice(0, in_fixed);
+    push_buf(b);
+    hi.len += b.len.trunc();
+    range(0, in_dyn) { i |
+        p := ptr_from_int([]u8, Deref(I).int_from_ptr(in) + in_fixed + i * @run size_of([]u8));
+        push_buf(p[]);
+        hi.len += p.len.trunc();
     };
-    q.pipe.work&.push(bufs = bufs, n = (bufs_readable = 3))
+    readable := bi;
+    
+    push_buf(ho.f());
+    out_fixed, _ := @run count_bufs(Deref(O));
+    b := out.f().slice(0, out_fixed);
+    push_buf(b);
+    push_buf(eo);
+    
+    bufs := bufs&.items().slice(0, bi);
+    q.pipe.work&.push(bufs = bufs, n = (bufs_readable = readable.intcast()))
+}
+
+fn count_bufs(T: Type) Ty(i64, i64) #fold = {
+    fields := get_fields(T);
+    i := 0;
+    direct_field_bytes := 0;
+    while => i < fields.len && fields[i].ty != []u8 {
+        direct_field_bytes += size_of(fields[i].ty);
+        i += 1;
+    };
+    indirect_field_count := 0;
+    while => i < fields.len && fields[i].ty == []u8 {
+        indirect_field_count += 1;
+        i += 1;
+    };
+    @assert_eq(i, fields.len, "all #inline fields must be after all normal fields");
+    (direct_field_bytes, indirect_field_count)
 }
 
 FuseOutType :: fn(In: Type) Type #fold = {

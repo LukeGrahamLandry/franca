@@ -38,8 +38,31 @@ main :: fn() void = {
         q: ?*UQueue = @if(ok, (Some = q), .None);
         
         Fs :: import("@/examples/os/user/fs.fr");
+        fs.fuse_q = q;
         if q { q |
-            init_fuse(q);
+            fs.fuse_root = init_fuse(q);
+            
+            fd := Posix'openat(fs.fuse_root, "a.txt".as_cstr(), Posix'O'RDWR, 0)
+                || @panic("failed to open");
+            
+            out := u8.list(1000, temp());
+            read_len := Syscall'read(fd, out.items().end_pointer(), out.maybe_uninit.len - out.len) 
+                || @panic("failed read");
+            out.len += read_len;
+            @println("READ(%): %", read_len, out.items());
+            
+            buf := @tfmt("Goodbye World %!", timestamp());
+            writen_len := Syscall'write(fd, buf.ptr, buf.len)
+                || @panic("failed write");
+            @println("WRITE: %/%", writen_len, buf.len);
+            
+            out := u8.list(1000, temp());
+            read_len := Syscall'read(fd, out.items().end_pointer(), out.maybe_uninit.len - out.len) 
+                || @panic("failed read");
+            out.len += read_len;
+            @println("READ(%): %", read_len, out.items());
+            
+            Syscall'close(fd);
         };
         
         buf := u8.list(general_allocator());
@@ -160,8 +183,8 @@ handle_signal :: fn(ctx: *MContext, intid: i64, data: i64) i64 = {
     @assert_eq(ctx.gpr&[8], ctx.gpr&[16], msg);
     // TODO: FuncId->rawptr doesn't work if its a scope access. :compilerbug
     callee := @switch(syscall_number) {
-        @case(56) => { x :: LIBC.openat_FR; @as(rawptr) x };
-        @case(79) => { x :: LIBC.fstatat_FR; @as(rawptr) x };
+        @case(56) => { x :: LIBC.FR_openat; @as(rawptr) x };
+        @case(79) => { x :: LIBC.FR_fstatat; @as(rawptr) x };
         @default => @panic("invalid syscall %", syscall_number);
     };
     
@@ -410,10 +433,13 @@ LIBC :: @struct {
     time :: fn(out: *time_t) time_t = (seconds = timestamp() * 1000);
     
     // note: this is the linux syscall abi, not the libc abi
-    openat_FR :: fn(fd: Fd, path: CStr, flags: i64, mode: i64) i64 = {
+    FR_openat :: fn(fd: Fd, path: CStr, flags: i64, mode: i64) i64 = {
         path := path.str();
         if path.starts_with("./") {
             path = path.rest(2);
+        };
+        if fs.fuse_q.is_some() && fd.fd == fs.fuse_root.fd {
+            return fuse_openat(fd, path.as_cstr()/*WASTE*/, flags, mode);
         };
         off, len := fs.index&.get(path) 
             || return(-1);  // TODO: trace
@@ -427,7 +453,7 @@ LIBC :: @struct {
     }
     
     // note: this is the linux syscall abi, not the libc abi
-    fstatat_FR :: fn(fd: Fd, path: CStr, out: *Posix.Linux.StatArm64) i64 = {
+    FR_fstatat :: fn(fd: Fd, path: CStr, out: *Posix.Linux.StatArm64) i64 = {
         path := path.str();
         if path.starts_with("./") {
             path = path.rest(2);

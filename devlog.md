@@ -9,6 +9,12 @@ os
 - figure out how to read a file over fuse
 - instead of doing fstatat/openat in handle_signal, put the implementation in its own function 
   and return to it, so you're back in normal land before doing any work. 
+- more object-ish file system
+- more structured handling of variable width fields for fuse. 
+  comptime thing that converts to slice fields on the In/Out structs. 
+- making reading via fuse as a vfs object was easy. 
+  write is harder. err=9. tried doing FLUSH+FSYNC+CLOSE+FORGET after, didn't help.
+  was because i was putting the ACCMODE in OpenIn.open_flags instead of OpenIn.flags. 
 
 ## (Nov 21)
 
