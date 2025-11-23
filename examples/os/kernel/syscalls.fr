@@ -139,6 +139,13 @@ virtq_poll :: fn(task: *Task, it: i64) i64 #n(0xFFFF0007) = {
 }
 
 fn do_virtq_poll(it: *UQueue) bool = {
+    if bit_cast_unchecked(@type it.poll, i64, it.poll) != user_virtq_poll.launder_to_user_pointer() {
+        // note: this isn't as strong a check as the one in sig_return because it doesn't check elr. 
+        // not a big deal if i want to get rid of this to make it more flexible, 
+        // but for now its an easy to detect memory corruption.
+        tpanic("virtq_poll is #once");
+    };
+
     q := Virt.Queue.ptr_from_raw(it.system_handle);
     pipe := it.pipe&;
     made_progress := false;
@@ -204,11 +211,14 @@ fn do_virtq_poll(it: *UQueue) bool = {
     made_progress
 }
 
-virtq_create :: fn(out: i64, p: i64, l: i64, q_index: i64) i64 #n(0xFFFF0008) = {
+virtq_create :: fn(task: *Task, out: i64, p: i64, l: i64, q_index: i64) i64 #n(0xFFFF0008) = {
+    // not a problem to remove this. its just a debugging aid for now. 
+    @if(task.thread_id != 1) tpanic("for now only the init task can create a virtq");
+    
     out := UQueue.ptr_from_int(out);
     label := u8.ptr_from_int(p).slice(l);
-    each kernel.devices { it |
-        if it.label == label {
+    each kernel.devices& { it |
+        if it.label&.get_cstr() == label {
             q := it.queues.index(q_index);
             // only allow virtq_create once per Virt.Queue
             @if(q.user.is_some()) return(-1);
@@ -217,8 +227,8 @@ virtq_create :: fn(out: i64, p: i64, l: i64, q_index: i64) i64 #n(0xFFFF0008) = 
             out.pipe.work&.set_all(q.device_idx.zext());
             out.pipe.done&.set_all(q.driver_idx.zext());
             
-            // TODO: set out.poll to something blessed like how sig_return does
             out.system_handle = Virt.Queue.raw_from_ptr(q);
+            out.poll = bit_cast_unchecked(i64, @type out.poll, user_virtq_poll.launder_to_user_pointer());
             q.user = (Some = out);
             return 0;
         }

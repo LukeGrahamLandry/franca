@@ -51,9 +51,10 @@ PciCapTag :: @enum(u8) (_0, COMMON, NOTIFY, ISR, DEVICE, PCI, _6, _7, SHARED_MEM
 // when we get an interrupt, need to look through all the queues to find which one changed. 
 Device :: @struct {
     queues: []Queue;
-    interrupt_status: *u8;
-    intid: i64;
-    label: CStr = "";  // for syscalls.virtq_create
+    // intid and interupt_status are important for usage. 
+    // the other fields are needed only when creating queues. 
+    handle: *DeviceHandle #use;
+    label := zeroed Array(u8, 40);  // for syscalls.virtq_create
 };
 
 // call sequence: init_features -> init_queue xN -> publish_queues -> notify_device
@@ -156,6 +157,7 @@ fn push_virt(q: *Queue, virtual: []u8, flags: u16) void = {
     v := u8.int_from_ptr(virtual.ptr);
     len := virtual.len;
     while => len > 0 {  
+        // TODO: check memory permissions and commit the pages here
         p := v_to_p(mem&, v);
         space := p.align_to(kernel.page_size) - p;
         if space == 0 {
@@ -175,7 +177,11 @@ fn push_phys(self: *Queue, physical: []u8, flags: u16) void = {
     next: u16 = id.zext().add(1).umod(self.desc.len).trunc();
     self.driver_next_desc = next;
     flags = flags.bit_or(DESC_F_NEXT);
-    self.desc[id.zext()] = (addr = physical.ptr, len = physical.len.trunc(), flags = flags, next = next);
+    it := self.desc[id.zext()]&;
+    it.addr = physical.ptr;
+    it.len = physical.len.trunc();
+    it.flags = flags;
+    it.next = next;
     if self.driver_chain_start.is_none() {
         self.driver_chain_start = (Some = id);
     };
@@ -239,7 +245,7 @@ fn init_features(self: *PciCommonCfg, required: i64) i64 = {
 fn check_interrupt(self: *Virt.Device, intid: i64) void = {
     @if(intid != self.intid) return();
     @if(self.interrupt_status.is_null()) return();
-    @if(self.interrupt_status.vol().bit_and(1) == 0) return();
+    @if(self.handle.interrupt_status.vol().bit_and(1) == 0) return();
     // interrupt_status is reset to zero by reading it
     
     each self.queues { q |
@@ -280,18 +286,29 @@ fn find_pci_cap(h: *Pci.Header, want: PciCapTag) ?*PciCap = {
 DeviceHandle :: @struct {
     cfg: *Virt.PciCommonCfg;
     note: ?Virt.NotifyStep;
-    status: *u8;
+    interrupt_status: *u8;
     intid: i64;
     device_config: ?[]u8;
+    kind: *KnownDevice;
 };
 
-find :: fn(pci: *Pci.MemoryRegion, virtio_id: u16) ?DeviceHandle = {
-    a, h := find_device(pci[]) { h |
+discover_all :: fn(pci: *Pci.MemoryRegion) void = {
+    range(0, pci.config.len / 4096) { i |
+        continue :: local_return;
+        h := bit_cast_unchecked(*u8, *Pci.Header, pci.config.index(i*4096));
         vendorid := h.vendor_id&.vol();
-        deviceid := h.device_id&.vol();
-        valid := deviceid == 0x1040 + virtio_id || deviceid == 0x1000 + virtio_id;
-        vendorid == Virt.pci_vendor_id && valid
-    } || return(.None);
+        if(vendorid == 0xFFFF, => continue());
+        
+        if(vendorid != Virt.pci_vendor_id, => continue());
+        id := h.device_id&.vol();
+        if implemented.find(fn(it) => id == 0x1040 + it.id || id == 0x1000 + it.id) { kind |
+            handle := discover_one(pci, i*4096, h, kind);
+            kernel.handles&.push(handle);
+        }
+    };
+}
+
+discover_one :: fn(pci: *Pci.MemoryRegion, a: i64, h: *Pci.Header, kind: *KnownDevice) DeviceHandle = {
     intid := find_interrupt(pci[], h) || -1;
     
     h.command&.vol(0b110);  // enable memory space
@@ -325,7 +342,113 @@ find :: fn(pci: *Pci.MemoryRegion, virtio_id: u16) ?DeviceHandle = {
         @if(bar_index != c.bar&.vol()) kpanic("TODO: can this happen?");
         status = bar.mem.index(c.offset&.vol().zext());
     };
-    (Some = (cfg = cfg, note = note, status = status, intid = intid, device_config = config))
+    (
+        cfg = cfg, note = note, device_config = config, 
+        interrupt_status = status, intid = intid,
+        kind = kind,
+    )
+}
+
+fn init(it: *DeviceHandle) ?Device = {
+    feat := it.kind.features;
+    agree := it.cfg.init_features(feat);
+    @if(agree != feat) kpanic("didn't agree on device features");
+    
+    // TODO: this is dumb
+    buf := kernel.physical&.map_contiguous(1.shift_left(16), 1);
+    each buf { it |
+        it[] = 0;
+    };
+    
+    hi := 0;
+    for it.kind.queue_indices& { i |
+        hi = max(hi, i);
+    };
+    
+    qs := buf&.pop_slice(Virt.Queue, hi + 1);
+    self: Device = (queues = qs, handle = it);
+    for it.kind.queue_indices& { i |
+        if i >= 0 {
+            // TODO: better way of choosing the buffer size
+            init_queue(it.cfg, qs.index(i), i.trunc(), buf&, 128, it.note);
+        }
+    };
+    it.cfg.publish_queues();
+    (Some = self)
 }
 
 Pci :: import("@/examples/os/drivers/pci.fr");
+
+// TODO: relocations for name and queue_indices (make it a []i64)
+KnownDevice :: @struct {
+    id: u16;
+    //name: Str;
+    features: i64;
+    queue_indices: Array(i64, 10);
+};
+
+VIRTIO_F_VERSION_1 :: 1.shift_left(32);
+
+implemented :: @const_slice(@as(KnownDevice) (
+    // Virtio Console (read/write a stream of bytes to a terminal)
+    id = 3,
+    //name = "console",
+    features = VIRTIO_F_VERSION_1,
+    // [RECEIVE, TRANSMIT]
+    queue_indices = (0, 1, ..(-1)),
+    // TODO: the spread ..-1 doesn't work without the extra brackets :compilerbug
+), (
+    // Virtio File System Device (FUSE, mounting a shared directory from the host)
+    id = 26,
+    //name = "fs",
+    features = VIRTIO_F_VERSION_1,
+    // [HIPRIO, REQUEST] (note: no VIRTIO_FS_F_NOTIFICATION)
+    queue_indices = (0, 1, ..(-1)),
+),
+);
+
+FsConfig :: @struct {
+    tag: Array(u8, 36);
+    num_request_queues: u32;
+    // note: no VIRTIO_FS_F_NOTIFICATION
+    // notify_buf_size: u32;
+};
+
+// note: this is only used for kernel logging (before setting up the UQueue)
+fn console_write(self: *Virt.Device, virtual: []u8) void = {
+    @if(virtual.len == 0) return();
+    TRANSMIT :: 1;
+    q := self.queues.index(TRANSMIT);
+    if q.device_idx != q.driver_idx {
+        // TODO: its kinda fucked to drop writes. 
+        //       but without this, if you try to log while its being used by UQueue.poll,
+        //       you hang everything. 
+        /*
+        self.dropped_write += 1;
+        */
+        return();
+    };
+    q.push_virt(virtual, 0);
+    
+    // TODO: this needs to be nonblocking eventually but then the lifetime of the message gets complicated
+    q.publish_chain();
+    i := q.driver_idx;
+    while => q.device.head.idx&.vol() != i {
+        barrier();  // spin
+    };
+    q.device_idx = i;
+    
+    // TODO: sketchy
+    if q.user { user |
+        user.pipe.work&.set_all(q.device_idx.zext());
+        user.pipe.done&.set_all(q.driver_idx.zext());
+    };
+    
+    /*
+    if self.dropped_write > 0 {
+        self.dropped_write = MIN_i64;
+        write(self, "\nWARNING: DROPPED A LOG MESSAGE\n");
+        self.dropped_write = 0;
+    }
+    */
+}

@@ -20,8 +20,10 @@
   so using that when it's not virtio isn't as much of a hardship. 
   i do think making more syscall numbers different from linux is an improvement
   so you can intercept them even if they try not to go through libc. 
+- making the kernel side of virtio drivers more data driven since they're all the same. 
+  - wasted some time on trying to make a constant containing an array and not getting relocations. 
 
-TODO: paste input no longer works in -qemu
+TODO: doesn't work with `strace on` in vzf
 
 ## (Nov 22)
 

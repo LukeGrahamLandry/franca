@@ -25,18 +25,34 @@ Kernel :: @struct {
     ram: []u8;
     uart: ?Pl011.Self;
     mmu_enabled: bool;
-    devices: []*Virt.Device;
-    device_storage: Array(*Virt.Device, 10);
+    devices: FixedList(Virt.Device, 8);
+    handles: FixedList(Virt.DeviceHandle, 16);
 };
+
+fn FixedList($T: Type, $capacity: i64) Type = {
+    Self :: @struct(maybe_uninit: Array(T, capacity), len: i64);
+    
+    fn items(self: *Self) []T = 
+        self.maybe_uninit&.items().slice(0, self.len);
+        
+    fn push(self: *Self, value: T) void = {
+        self.maybe_uninit&[self.len] = value;
+        self.len += 1;
+    }
+    
+    fn len(self: *Self) i64 = 
+        self.len;
+    
+    ::DeriveAsSliceIndexable(*Self, T); 
+    
+    Self
+}
 
 DT :: import("@/examples/os/drivers/devicetree.fr");
 
 // this is called by emit_entry's _start
 main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
     kernel.uart = .None;
-    vcon: ?VirtConsole.Self = .None;
-    fuse: ?VirtFuse.Self = .None;
-    kernel.devices.ptr = kernel.device_storage&.as_ptr();
     
     link_image_base: i64 = 0x40100000;
     kernel_image_size := -1;
@@ -85,12 +101,13 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
     kernel.uart = Pl011'find(DT'iter(device_tree_bytes));
     pci := Pci'read_device_tree(DT'iter(device_tree_bytes));
     if pci& { pci |
-        vcon = VirtConsole'find(pci);
-        if vcon& { console |
-            kernel.device_storage&[kernel.devices.len] = console.device&;
-            kernel.devices.len += 1;
-            // TODO: use boot args to choose which to use for stdio? 
-            console.device.label = @if(kernel.uart&.is_none(), "stdio.console", "other.console");
+        Virt'discover_all(pci);
+        
+        // TODO: make this work after turning on the mmu
+        each kernel.handles& { it |
+            if init(it) { device |
+                kernel.devices&.push(device);
+            };
         };
     };
     gic := Gic'find(DT'iter(device_tree_bytes));
@@ -103,19 +120,28 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
     tt := setup_virtual_memory(ram, pci);
     barrier();
     
-    if pci& { pci |
-        fuse = VirtFuse'find(pci);
-        if fuse& { it |
-            it.device.label.ptr = it.label&.as_ptr();
-            kernel.device_storage&[kernel.devices.len] = it.device&;
-            kernel.devices.len += 1;
-        };
-    };
-    
-    each kernel.devices { it |
+    first_console := true;
+    each kernel.devices& { it |
         if it.intid != -1 {
             gic.set_group1(it.intid);
             gic.enable(it.intid);
+        };
+        
+        // TODO: use boot args to choose which to use for stdio? 
+        if it.kind.id == 3 {
+            if first_console {
+                first_console = false;
+                label := @if(kernel.uart&.is_none(), "stdio.console", "other.console");
+                set_cstr(it.label&, label);
+            };
+        };
+        
+        if it.kind.id == 26 {
+            config := it.device_config.unwrap();
+            config := config&.pop_type(Virt.FsConfig);
+            tag := config.tag&.get_cstr();
+            append_cstr(it.label&, tag);
+            append_cstr(it.label&, ".fs");
         };
     };
     
@@ -138,6 +164,33 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
     
     kprint("kernel ready\n");
     return_to_scheduler();
+}
+
+#where(PointerTo(fn(T) => T.get_type_info_ref().is(.Array)))
+fn set_cstr(self: ~T, src: Str) bool = {
+    self[0] = 0;
+    append_cstr(self, src)
+}
+
+#where(PointerTo(fn(T) => T.get_type_info_ref().is(.Array)))
+fn append_cstr(self: ~T, src: Str) bool = {
+    dest := self.items();
+    i := 0;
+    while => dest[i] != 0 {
+        @if(i >= dest.len) return(false);
+        i += 1;
+    };
+    dest = dest.rest(i);
+    @if(src.len + 1 > dest.len) return(false);
+    dest.slice(0, src.len).copy_from(src);
+    self[i + src.len] = 0;
+    true
+}
+
+#where(PointerTo(fn(T) => T.get_type_info_ref().is(.Array)))
+fn get_cstr(self: ~T) Str = {
+    self := self.items();
+    self&.pop_cstr()
 }
 
 check_system_registers :: fn() void = {
@@ -618,7 +671,7 @@ syscall_func :: fn(task: *Task) void = {
     };
     
     @if(!handled)
-    for kernel.devices { console |
+    each kernel.devices& { console |
         if intid == console.intid {
             console.check_interrupt(intid);
             handled = true;
@@ -696,6 +749,11 @@ user_unwind_signal :: @AsmFunctionArmOnly(fn(intid_x0: i64) Never = ()) => (
     // :end_user_unwind_signal
 );
 
+user_virtq_poll :: fn(it: *UQueue, _: i64) void = {
+    args: Array(i64, 6) = (UQueue.int_from_ptr(it), 0, 0, 0, 0, 0);
+    _ := Syscall'perform_syscall(args&, 0xFFFF0007);
+}
+
 Crash :: import("@/lib/crash_report.fr");
 
 poweroff :: fn() Never = {
@@ -749,10 +807,10 @@ kprint :: fn(s: Str) void = {
         for(s, fn(c) => u32.volatile(it.base, c.zext()));
         return();
     };
-    for kernel.devices { it |
-        if it.label.str().ends_with(".console") {
-            it := bit_cast_unchecked(*Virt.Device, *VirtConsole.Self, it);
-            it.write(s);
+    each kernel.devices& { it |
+        if it.label&.get_cstr().ends_with(".console") {
+            it := bit_cast_unchecked(*Virt.Device, *Virt.Device, it);
+            it.console_write(s);
             return();
         };
     };
