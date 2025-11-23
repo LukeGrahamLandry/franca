@@ -1,6 +1,7 @@
-write :: fn(fd: i64, buf: i64, len: i64) i64 #n(64) = {
+// this is used when stdout console is a pl011 instead of a virtq. 
+debug_write :: fn(buf: i64, len: i64) i64 #n(0xFFFF0009) = {
     kprint(u8.ptr_from_int(buf).slice(len));
-    len
+    0
 }
 
 mmap :: fn(task: *Task, addr: i64, len: i64, prot: i64, flags: i64, fd: i64, offset: i64) i64 #n(222) = {
@@ -100,7 +101,8 @@ sig_action :: fn(task: *Task, new: i64, old: i64) i64 #n(0xFFFF0003) = {
 sig_return :: fn(task: *Task, intid: i64, sp: i64) i64 #n(0xFFFF0004) = {
     elr := 5*4 + 4/*bti*/ + launder_to_user_pointer(user_unwind_signal); // :end_user_unwind_signal
     @if(task.mcontext.elr != elr) tpanic("sig_return is #once");
-    @if(task.signal_stack != sp) tpanic("poorly nested sig_return");
+    @if(task.signal_stack < sp) tpanic("poorly nested sig_return");
+    task.signal_stack = sp;
     saved := SavedRegisters.ptr_from_int(sp);
     if intid != 1023 {
         i64.sys_set(.ICC_EOIR1_EL1, intid);
@@ -126,10 +128,20 @@ spawn_thread :: fn(parent: *Task, ctx: i64, exit_futex: i64) i64 #n(0xFFFF0005) 
     child.thread_id
 }
 
-virtq_poll :: fn(it: i64) i64 #n(0xFFFF0007) = {
-    it := UQueue.ptr_from_int(it);
+virtq_poll :: fn(task: *Task, it: i64) i64 #n(0xFFFF0007) = {
+    if !do_virtq_poll(UQueue.ptr_from_int(it)) {
+        // TODO: it sucks that i have to spin instead of waiting on a futex
+        //       because i don't get interrupts for the fuse stuff. presumably its a skill issue.
+        //       regardless, yielding if it failed makes it a bit less offensive. 
+        yield(task);
+    };
+    1
+}
+
+fn do_virtq_poll(it: *UQueue) bool = {
     q := Virt.Queue.ptr_from_raw(it.system_handle);
     pipe := it.pipe&;
+    made_progress := false;
     need_wake := 0;
     
     // q.used -> p.done
@@ -140,7 +152,7 @@ virtq_poll :: fn(it: i64) i64 #n(0xFFFF0007) = {
         desc := q.desc[used.id.zext()];
 
         j := pipe.work.committed.kiki;
-        while => j != pipe.work.claimed.kiki && pipe.work.ring[j.zext().mod(pipe.work.ring.len)].system_id != used.id {
+        while => j != pipe.work.claimed.kiki && pipe.work&[j].system_id != used.id {
             j += 1;
         };
         if j == pipe.work.claimed.kiki {
@@ -152,7 +164,7 @@ virtq_poll :: fn(it: i64) i64 #n(0xFFFF0007) = {
             tpanic("TODO: allow completing virtio requests out of order");
         };
         
-        it := pipe.work.ring[j.zext().mod(pipe.work.ring.len)];
+        it := pipe.work&[j];
         pipe.work.committed.kiki += 1;
         it.n.bytes_written = used.len;
         it.system_id = MAX_u32;
@@ -160,17 +172,17 @@ virtq_poll :: fn(it: i64) i64 #n(0xFFFF0007) = {
         // TODO: be more careful about being atomic? but there's only one kernel thread so its fine. 
         // pipe.push(it) but without syscalls
         pipe.done.claimed.bouba += 1;
-        pipe.done.ring[pipe.done.claimed.bouba.zext().sub(1).umod(pipe.done.ring.len)] = it;
+        pipe.done&[pipe.done.claimed.bouba - 1] = it;
         pipe.done.committed.bouba += 1;
         need_wake += 1;
+        made_progress = true;
     };
     
     // p.work -> q.avail
     while => pipe.work.claimed.kiki != pipe.work.claimed.bouba {
         pipe.work.claimed.kiki += 1;
-        i := pipe.work.claimed.kiki.zext().sub(1).umod(pipe.work.ring.len);
         // note: `it` is left in the pipe, claimed but uncommitted, until the device finishes the request.  
-        it := pipe.work.ring[i]&;
+        it := pipe.work&[pipe.work.claimed.kiki - 1]&;
         if it.system_id != MAX_u32 {
             tpanic("work: corrupt UQueue.Entry id");
         };
@@ -181,6 +193,7 @@ virtq_poll :: fn(it: i64) i64 #n(0xFFFF0007) = {
         };
         it.system_id = q.driver_chain_start.expect("driver_chain_start").zext();
         q.publish_chain();
+        made_progress = true;
     };
     
     if need_wake != 0 {
@@ -188,7 +201,7 @@ virtq_poll :: fn(it: i64) i64 #n(0xFFFF0007) = {
         futex_wake(u32.int_from_ptr(pipe.work.committed.kiki&), need_wake);
     };
     
-    0
+    made_progress
 }
 
 virtq_create :: fn(out: i64, p: i64, l: i64, q_index: i64) i64 #n(0xFFFF0008) = {
@@ -200,7 +213,11 @@ virtq_create :: fn(out: i64, p: i64, l: i64, q_index: i64) i64 #n(0xFFFF0008) = 
             // only allow virtq_create once per Virt.Queue
             @if(q.user.is_some()) return(-1);
             // happens if kernel code is using the Virt.Queue directly already
-            @if(q.device_idx != 0 || q.driver_idx != 0) return(-2);
+            @if(q.device_idx != q.driver_idx) return(-2);
+            out.pipe.work&.set_all(q.device_idx.zext());
+            out.pipe.done&.set_all(q.driver_idx.zext());
+            
+            // TODO: set out.poll to something blessed like how sig_return does
             out.system_handle = Virt.Queue.raw_from_ptr(q);
             q.user = (Some = out);
             return 0;

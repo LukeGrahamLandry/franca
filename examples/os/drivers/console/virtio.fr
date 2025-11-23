@@ -1,6 +1,7 @@
 
 Self :: @struct {
     device: Virt.Device #use;
+    dropped_write: i64 = 0;
 };
 
 RECEIVE :: 0;
@@ -29,25 +30,17 @@ find :: fn(pci: *Pci.MemoryRegion) ?Self = {
     (Some = self)
 }
 
-fn check_interrupt(self: *Virt.Device, intid: i64) void = {
-    @if(intid != self.intid) return();
-    @if(self.interrupt_status.is_null()) return();
-    @if(self.interrupt_status.vol().bit_and(1) == 0) return();
-    // interrupt_status is reset to zero by reading it
-    
-    each self.queues { q |
-        if q.user { user |
-            if q.device.head.idx&.vol() != q.device_idx {
-                #use("@/examples/os/kernel/syscalls.fr");
-                virtq_poll(UQueue.int_from_ptr(user));
-            };
-        };
-    };
-}
-
+// note: this is only used for kernel logging (before setting up the UQueue)
 fn write(self: *Self, virtual: []u8) void = {
     @if(virtual.len == 0) return();
     q := self.queues.index(TRANSMIT);
+    if q.device_idx != q.driver_idx {
+        // TODO: its kinda fucked to drop writes. 
+        //       but without this, if you try to log while its being used by UQueue.poll,
+        //       you hang everything. 
+        self.dropped_write += 1;
+        return();
+    };
     q.push_virt(virtual, 0);
     
     // TODO: this needs to be nonblocking eventually but then the lifetime of the message gets complicated
@@ -56,4 +49,18 @@ fn write(self: *Self, virtual: []u8) void = {
     while => q.device.head.idx&.vol() != i {
         barrier();  // spin
     };
+    q.device_idx = i;
+    
+    // TODO: sketchy
+    if q.user { user |
+        user.pipe.work&.set_all(q.device_idx.zext());
+        user.pipe.done&.set_all(q.driver_idx.zext());
+    };
+    
+    if self.dropped_write > 0 {
+        self.dropped_write = MIN_i64;
+        write(self, "\nWARNING: DROPPED A LOG MESSAGE\n");
+        self.dropped_write = 0;
+    }
 }
+

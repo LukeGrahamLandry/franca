@@ -12,7 +12,6 @@ Kernel :: @struct {
     next_task_id: i64;
     env: rawptr;
     interrupt_stack: []u8;
-    timer_counter: u64;
     idle_task: Task;
     pages_reserved: i64;
     pages_committed: i64;
@@ -25,9 +24,7 @@ Kernel :: @struct {
     user_image: []u8;
     ram: []u8;
     uart: ?Pl011.Self;
-    console: Console;
     mmu_enabled: bool;
-    fuse: ?VirtFuse.Self;
     devices: []*Virt.Device;
     device_storage: Array(*Virt.Device, 10);
 };
@@ -38,13 +35,7 @@ DT :: import("@/examples/os/drivers/devicetree.fr");
 main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
     kernel.uart = .None;
     vcon: ?VirtConsole.Self = .None;
-    kernel.fuse = .None;
-    // for early debugging before reading the device tree, just yolo hope its a pl011 at hardcoded qemu address, 
-    kernel.console = (
-        data = zeroed rawptr, 
-        //puts = fn(_, __) = (),
-        puts = fn(_, s) = for(s, fn(c) => u32.volatile(0x09000000, c.zext())),
-    );
+    fuse: ?VirtFuse.Self = .None;
     kernel.devices.ptr = kernel.device_storage&.as_ptr();
     
     link_image_base: i64 = 0x40100000;
@@ -92,24 +83,15 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
     kernel.device_tree = device_tree_bytes;
     
     kernel.uart = Pl011'find(DT'iter(device_tree_bytes));
-    if kernel.uart& { uart |
-        kernel.console = Console'borrow(uart);
-        kprint("using pl01\n");
-    };
     pci := Pci'read_device_tree(DT'iter(device_tree_bytes));
     if pci& { pci |
         vcon = VirtConsole'find(pci);
         if vcon& { console |
             kernel.device_storage&[kernel.devices.len] = console.device&;
             kernel.devices.len += 1;
-            console.device.label = "other.console";
+            // TODO: use boot args to choose which to use for stdio? 
+            console.device.label = @if(kernel.uart&.is_none(), "stdio.console", "other.console");
         };
-    };
-    @if(kernel.uart&.is_none())
-    if vcon& { console |
-        kernel.console = Console'borrow(console);
-        console.device.label = "stdio.console";
-        kprint("using virtio console\n");
     };
     gic := Gic'find(DT'iter(device_tree_bytes));
     init_interrupt_vector();
@@ -122,8 +104,8 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
     barrier();
     
     if pci& { pci |
-        kernel.fuse = VirtFuse'find(pci);
-        if kernel.fuse& { it |
+        fuse = VirtFuse'find(pci);
+        if fuse& { it |
             it.device.label.ptr = it.label&.as_ptr();
             kernel.device_storage&[kernel.devices.len] = it.device&;
             kernel.devices.len += 1;
@@ -188,15 +170,6 @@ find_physical_memory :: fn(self: DT.Iter) []u8 = {
         || kpanic("devicetree: no memory.reg");
     (ptr = u8.ptr_from_int(it.read_2x32(0)), len = it.read_2x32(2))
 }
-
-dopoweroff :: fn() void #noinline = {
-    poweroff();
-};
-dohang :: fn() void #noinline = {
-    loop {
-    
-    };
-};
 
 Virt :: import("@/examples/os/drivers/virtio.fr");
 Pci :: import("@/examples/os/drivers/pci.fr");
@@ -477,7 +450,6 @@ user_exec :: fn(elf_bytes: []u8) void = {
     c.current_os = 1;
     c.temporary_allocator_i = Arena'stack_alloc(1.shift_left(16));
     c.general_allocator = c.temporary_allocator_i;
-    print("user_exec\n");
     // TODO: its sad that i have to commit new pages for the bytes copied 
     //       for Load commands but not accessed by the running program.
     import("@/examples/elf_loader.fr")'load_elf_file(elf_bytes);
@@ -520,9 +492,7 @@ syscall_func :: fn(task: *Task) void = {
     // TODO: if i keep these do it in the assembly part instead of as a bunch of calls here. 
     args.esr = i64.sys_get(.ESR_EL1);
     args.far = i64.sys_get(.FAR_EL1);
-    args.intid = i64.sys_get(.ICC_IAR1_EL1).bit_and(0xfff);
-    
-    intid := args.intid;
+    intid := i64.sys_get(.ICC_IAR1_EL1).bit_and(0xfff);
     intid0 := i64.sys_get(.ICC_IAR0_EL1).bit_and(0xfff);
     if intid0 != Gic.null_interrupt_id {
         kpanic("intid0");
@@ -533,7 +503,7 @@ syscall_func :: fn(task: *Task) void = {
     kprint_label("saved fp: ", args.gpr&[29]);
     kprint_label("intid: ", intid);
     };
-    
+        
     ::if_opt(Pl011.Self, i64);
     irq_uart: i64 = if(kernel.uart, fn(it) => it.irq, => -1);
     if intid == irq_uart {
@@ -552,6 +522,11 @@ syscall_func :: fn(task: *Task) void = {
         push_signal_context(init);
         init.mcontext.gpr&[1] = intid;
         init.mcontext.gpr&[2] = byte.zext();  // HACK
+        // run the signal handler BEFORE acknowledging the signal by setting ICC_EOIR1_EL1 (its done in sig_return). 
+        // if interrupts are being spammed (ie you pasted some text), this lets them be processed 
+        // in queue order instead of stack order.  
+        // also since sig_return sets ICC_EOIR1_EL1, it would be wrong to do so here anyway because
+        // then you'd do it twice and could miss an interrupt. 
         return_to_user(init);
     };
     
@@ -635,26 +610,28 @@ syscall_func :: fn(task: *Task) void = {
         send_signal(task);
     };
     
+    handled := false;
     if intid == timer_irq {
-        kernel.timer_counter += 1;
-        i64.sys_set(.ICC_EOIR1_EL1, intid);
-        return_to_scheduler();  // this does reset_countdown
+        handled = true;
+        // return_to_scheduler does reset_countdown and moves to someone else, 
+        // so don't have to do anything here to get preemption
     };
     
+    @if(!handled)
     for kernel.devices { console |
         if intid == console.intid {
             console.check_interrupt(intid);
-            i64.sys_set(.ICC_EOIR1_EL1, intid);
-            return_to_scheduler();
+            handled = true;
         };
     };
     
-    if intid != timer_irq && intid != irq_uart { 
+    if !handled { 
         kprint_label("intid: ", intid);
         kpanic("unknown interrupt");
     };
     
-    return_to_scheduler();
+    i64.sys_set(.ICC_EOIR1_EL1, intid);
+    return_to_scheduler();  
 };
 
 dump_page_stats :: fn() void = {
@@ -670,9 +647,6 @@ push_signal_context :: fn(task: *Task) void = {
     task.futex_wait = 0;
     if task.signal_handler != 0 {
         ctx := task.mcontext&;
-        // TODO: this is still fucked if its interrupted while pushing or popping 
-        //       the frame for the signal handler in userspace
-        @if(task.signal_stack == ctx.gpr&[31]) kpanic("todo: interrupted before pushing stack frame");
         if ctx.gpr&[31] > task.signal_stack_left && ctx.gpr&[31] < task.signal_stack {
             // when sending a nested signal, update for whatever stack frames have been pushed in user space. 
             task.signal_stack = ctx.gpr&[31];
@@ -683,10 +657,16 @@ push_signal_context :: fn(task: *Task) void = {
         saved[] = ctx[];
         ctx.elr = task.signal_handler;
         ctx.gpr&[0] = task.signal_stack;
-        ctx.gpr&[1] = ctx.intid;
+        ctx.gpr&[1] = Gic.null_interrupt_id;
         ctx.gpr&[2] = 0;
         ctx.gpr&[31] = task.signal_stack;
         ctx.gpr&[30] = launder_to_user_pointer(user_unwind_signal);
+        // HACK
+        // give some buffer in case it gets another signal while pushing the frame,
+        // as long as this is more than handle_signal's stack frame, it's fine. 
+        // i don't have a test that requires this if i delay ICC_EOIR1_EL1 until sig_return,
+        // but i still think you need to do it, its just a very tight race window. 
+        task.signal_stack += 2048;  
         
         if task.signal_stack < task.signal_stack_left {
             tpanic(task, "too many nested signals");
@@ -764,24 +744,22 @@ spin :: fn() Never = {
     };
 }
 
-Console :: @struct {
-    data: rawptr;
-    puts: @FnPtr(self: rawptr, s: []u8) void;
-    
-    // TODO: this doesn't get the scoping i want if the overload set is called the same thing 
-    //       as the field of the interface. resolve is before sema so don't know the @struct block is special.
-    //       :compiler
-    borrow :: fn(self: ~T) Console #where = (
-        data = Deref(T).raw_from_ptr(self),
-        puts = fn(self, s) = Deref(T).ptr_from_raw(self).write(s),
-    );
-};
+kprint :: fn(s: Str) void = {
+    if kernel.uart& { it |
+        for(s, fn(c) => u32.volatile(it.base, c.zext()));
+        return();
+    };
+    for kernel.devices { it |
+        if it.label.str().ends_with(".console") {
+            it := bit_cast_unchecked(*Virt.Device, *VirtConsole.Self, it);
+            it.write(s);
+            return();
+        };
+    };
 
-fn puts(self: *Console, s: Str) = 
-    self'puts(self.data, s);
-
-kprint :: fn(s: Str) void = 
-    kernel.console&.puts(s);
+    // for early debugging before reading the device tree, just yolo hope its a pl011 at hardcoded qemu address, 
+    for(s, fn(c) => u32.volatile(0x09000000, c.zext()));
+}
 
 // TODO: the volatile helpers should go elsewhere
 

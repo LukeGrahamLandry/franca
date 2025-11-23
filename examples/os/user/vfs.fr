@@ -5,6 +5,7 @@ fs :: @static(@struct {
     mutex: Mutex;  // locked when push to fd / reading an entry from fd. TODO: RWLock
     // TODO: decide which other things care about being thread safe
     stdin: UQueue;
+    stdout: UQueue;
     strace: bool;
     fuse_q: ?*UQueue;
     root_dir: Fd;
@@ -43,10 +44,15 @@ init_vfs :: fn() void = {
     };
     fs'stdin'poll(fs.stdin&, 0);
     
+    fs.stdout.pipe = init(general_allocator(), 1);
+    if !virtq_create(fs.stdout&, "stdio.console", 1) {
+        fs.stdout.poll = sys_debug_write_poll;
+    };
+    
     fs.fd = list(general_allocator());
     push_file(StdinFile, (queue = fs.stdin&));
-    push_file(StdoutFile, ());
-    push_file(StdoutFile, ());
+    push_file(StdoutFile, (queue = fs.stdout&));
+    push_file(StdoutFile, (queue = fs.stdout&));
     
     // build a tree of MemDir with MemFileRO leaves containing all the baked files. 
     fs.root_dir = push_file(MemDir, (files = empty()));
@@ -150,11 +156,20 @@ MemFileRO :: @struct {
     };
 };
 
-// TODO: expose the console to userspace as a UQueue
 StdoutFile :: @struct {
-    write :: fn(_0, src) = with_syscalls {
-        result := Syscall'write((fd = 1), src.ptr, src.len);
-        result.value
+    queue: *UQueue;
+    
+    write :: fn(self, src) = {
+        q := self.queue;
+        q'poll(q, 1);
+        old := q.pipe.done.committed.bouba;
+        q.pipe.work&.push(bufs = @slice(src), n = (bufs_readable = 1));
+        while => q.pipe.done.committed.bouba == old {
+            // TODO: can i get an interrupt for this instead of spinning?
+            q'poll(q, 0);
+        };
+        _ := q.pipe.done&.pop();
+        0
     };
 };
 
@@ -351,6 +366,7 @@ fn fuse_blocking(q: *UQueue, op: Fuse.Opcode, node: u64, in: ~I, e_out: []u8) Re
     // TODO: putting stack memory in the queue relies on blocking
     send(q, hi&, in&, ho&, out&, e_out);
     while => q.pipe.done.committed.bouba == old {
+        // TODO: interrupt instead of spinning but im not finding the intid?
         q'poll(q, 0);
     };
     ::enum(@type op);
@@ -513,3 +529,13 @@ fn follow_path(fd: Fd, path: Str) SysResult(Fd) = {
         i += 1;
     }
 }
+
+sys_debug_write_poll :: fn(q, who) = {
+    @if(who == 1) return();
+    entry := q.pipe.work&.pop();
+    for entry.bufs { msg |
+        args: Array(i64, 6) = (u8.int_from_ptr(msg.ptr), msg.len, 0, 0, 0, 0);
+        result, _ := Syscall'perform_syscall(args&, 0xFFFF0009);  // debug_write
+    };
+    q.pipe.done&.push(entry);
+};

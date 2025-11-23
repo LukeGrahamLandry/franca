@@ -1,7 +1,5 @@
 
 main :: fn() void = {
-    println("init!");
-    
     // note: this only affects the main thread
     //       should probably wrap it for the pthread_create part
     buf := page_allocator.alloc_uninit(u8, 1.shift_left(16) * 10);
@@ -20,7 +18,7 @@ main :: fn() void = {
         Crash'push_aot_debug_resolver();
         c.panic_hook = fn(s) = {
             c := context(DefaultContext);
-            c.prefer_syscalls = true;
+            fs.strace = false;
             Crash'backtracing_panic_handler(s)
         };
         
@@ -34,7 +32,6 @@ main :: fn() void = {
 
         q := zeroed UQueue; q := q&;
         ok := virtq_create(q, "Host.fs", 1);
-        @println("virtq_create? ok=%", ok);
         q: ?*UQueue = @if(ok, (Some = q), .None);
         
         Fs :: import("@/examples/os/user/fs.fr");
@@ -167,14 +164,13 @@ pl011_int_poll :: fn(q: *UQueue, who: i64) void = {
         Futex'wait(work.claimed.kiki&, value);
         value = work.claimed.kiki;
     };
-    entry := work.ring.index(work.committed.kiki.zext().mod(work.ring.len))[];
+    entry := work[work.committed.kiki];
     work.committed.kiki += 1;
     @assert(work.claimed.kiki == work.committed.kiki);
+    bytes := entry.bufs[0].slice(0, entry.n.bytes_written.zext());
     fs.stdin.pipe.done&.push(entry);
 }
 
-// note: intid != ctx.intid is legal because an interrupt might have triggered while a different task was running. 
-//       ex. uart always goes to the init task. 
 handle_signal :: fn(ctx: *MContext, intid: i64, data: i64) i64 = {
     set_dynamic_context(DefaultContext.raw_from_ptr(signal_env));
     // TODO: don't hardcode the 33. get it from device tree. 
@@ -184,10 +180,10 @@ handle_signal :: fn(ctx: *MContext, intid: i64, data: i64) i64 = {
         if work.claimed.kiki == work.committed.kiki {
             work.claimed.kiki += 1;
         };
-        entry := work.ring.index(work.committed.kiki.zext().umod(work.ring.len));
-        if entry.n.bytes_written.zext() < entry.bufs[0].len {
-            entry.bufs[0][entry.n.bytes_written.zext()] = data.trunc();
-            entry.n.bytes_written += 1;
+        entry := work[work.committed.kiki]&;
+        i := u32.atomic_inc(entry.n.bytes_written&).zext();
+        if i < entry.bufs[0].len {
+            entry.bufs[0][i] = data.trunc();
             Futex'wake(work.committed.kiki&, 1);
         };  // else, silently drop the bytes :(
         return(intid);
@@ -197,7 +193,7 @@ handle_signal :: fn(ctx: *MContext, intid: i64, data: i64) i64 = {
     // TODO: import Gic.null_interrupt_id
     if intid != 1023 || ec != 0b010101 {
         push_emergency_dynamic_environment {
-            context(DefaultContext)[].prefer_syscalls = true;
+            fs.strace = false;
             @println("sp = %; fp = %; lr = %; ip = %;", ctx.gpr&[31], ctx.gpr&[29], ctx.gpr&[30], ctx.elr);
             eprintln("fatal signal");
             report_backtrace(fp = ctx.gpr&[29].rawptr_from_int(), ip = ctx.elr.rawptr_from_int());
@@ -515,9 +511,10 @@ system_counter_uptime :: fn() TimeSpec = {
 
 fn with_syscalls($body: @Fn() i64) i64 = {
     c := context(DefaultContext);
+    old := c.prefer_syscalls;
     c.prefer_syscalls = true;
     result := @must_return body();
-    c.prefer_syscalls = false;
+    c.prefer_syscalls = old;
     result
 }
 
@@ -526,11 +523,14 @@ fn trace(arg: FatExpr) FatExpr #macro = @{
         c := context(DefaultContext);
         t := c.temporary_allocator_i;
         old := fs.strace;    // TODO: not thread safe
+        old_sys := c.prefer_syscalls;
+        c.prefer_syscalls = false;
         fs.strace = false;
         c.temporary_allocator_i = Arena'stack_alloc(1024);
         @[println arg];
         c.temporary_allocator_i = t;
         fs.strace = old;
+        c.prefer_syscalls = old_sys;
     };
 };
 

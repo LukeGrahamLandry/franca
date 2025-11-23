@@ -3,8 +3,25 @@
   - bamboozled myself a bit 
     - UQueue indices were wrong because the kernel init was still giving it a buffer to write to
     - was setting bytes_written to desc.len instead of used.len
+- when using pl011 instead of virtio, im not sure which side i want to do the translation. 
+  rn its easier to do it in userspace because that's where i have q.poll as a vtable, 
+  so its easy to just not do the syscall, but that means i need to keep the old 
+  side channels around. you can't have both (virtio as the blessed interface) and (all the 
+  special driver code in user space) if i'm committed to not being able to map mmio memory 
+  to userspace because you can't guarantee you have enough granularity to not have them overlap. 
+- the way im doing poll feels very error prone, maybe it should move into 
+  the qring.Tube itself so you don't always need to treat it as though it might not 
+  be consumed by a different thread and awquardly check if things will block. 
+  the current way falls apart if you try to use the concurrent and parallel interfaces at the same time. 
+- do stdout as queue as well, that ones's more annoying because you still 
+  want to be able to debug log in the kernel so they have to share a bit. 
+  for sanity reasons, i probably have to keep the simplest possible write 
+  as a synchronous syscall just in case i break everything, 
+  so using that when it's not virtio isn't as much of a hardship. 
+  i do think making more syscall numbers different from linux is an improvement
+  so you can intercept them even if they try not to go through libc. 
 
-TODO: same for output
+TODO: paste input no longer works in -qemu
 
 ## (Nov 22)
 
