@@ -15,6 +15,11 @@ os
 - making reading via fuse as a vfs object was easy. 
   write is harder. err=9. tried doing FLUSH+FSYNC+CLOSE+FORGET after, didn't help.
   was because i was putting the ACCMODE in OpenIn.open_flags instead of OpenIn.flags. 
+- i think lseek doesn't do anything and im supposed to track the position myself? 
+  because you pass offset to read/write. 
+- for baked fs, use a tree of directory handles instead of a hash map of file name/contents strings.
+- extract the path traversal from openat/fstatat, so fstatat calls openat then fstat, 
+  and openat walks the tree of directories one path segment at a time. 
 
 ## (Nov 21)
 

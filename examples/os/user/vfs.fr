@@ -1,16 +1,13 @@
 // Virtual File System
 
 fs :: @static(@struct {
-    contents: []u8;
-    index: RawHashMap(Str, Ty(i64, i64));
     fd: List(FileHandle); // indexed by Fd
     mutex: Mutex;  // locked when push to fd / reading an entry from fd. TODO: RWLock
     // TODO: decide which other things care about being thread safe
     stdin: import("@/lib/collections/deque.fr")'RawDeque(u8);
     strace: bool;
-    root_fd: FileHandle;
     fuse_q: ?*UQueue;
-    fuse_root: Fd;
+    root_dir: Fd;
     // TODO: put an allocator here instead of trusting general_allocator
 });
 
@@ -24,25 +21,62 @@ FileVTable :: @struct {
     write: @FnPtr(self: rawptr, buf: []u8) i64 = (fn(_0, _1) = -1);
     lseek: @FnPtr(self: rawptr, offset: i64, whence: Whence) i64 = (fn(_0, _1, _2) = -1);
     close: @FnPtr(self: rawptr) void = fn(self) = ();
-  fstatat: @FnPtr(self: rawptr, path: CStr, out: Posix.Linux.StatArm64) i64 = (fn(_0, _1, _2) = -1);
    openat: @FnPtr(self: rawptr, path: CStr, flags: i64, mode: i64) i64 = (fn(_0, _1, _2, _3) = -1);
+    fstat: @FnPtr(self: rawptr, out: *Posix.Linux.StatArm64) i64 = (fn(_0, _1) = -1);
 };
 
 init_vfs :: fn() void = {
     fs_i, contents := @run {
         fs, contents := import("@/examples/web/build.fr")'collect_fs(ast_alloc());
+        // TODO: since i'm not actually using the hash table, store the constant data as a flat array
         (fs, contents.items())
     };
-    fs.index = fs_i;
-    fs.contents = contents;
     fs.stdin = init(general_allocator(), 1.shift_left(16));
     fs.fd = list(general_allocator());
     push_file(StdinFile, ());
     push_file(StdoutFile, ());
     push_file(StdoutFile, ());
     
-    it := general_allocator().boxed(MemDir, (files = empty()));
-    fs.root_fd = (vtable = get_vtable(MemDir), data = MemDir.raw_from_ptr(it));
+    // build a tree of MemDir with MemFileRO leaves containing all the baked files. 
+    fs.root_dir = push_file(MemDir, (files = empty()));
+    // TODO: deduplicate with follow_path
+    each fs_i& { name, info |
+        cwd := get_file(fs.root_dir).unwrap();
+        i := 0;
+        while => i < name.len {
+            continue :: local_return;
+            start := i;
+            while => i < name.len && name[i] != PATH_SEP.ascii() {
+                i += 1;
+            };
+            part := name.slice(start, i);
+            i += 1;
+            self := MemDir.ptr_from_raw(cwd.data);
+            if i >= name.len {  // file
+                off, len := info[];
+                _ := create_child(self, part, MemFileRO, (
+                    contents = contents.subslice(off, len),
+                    pos = 0,
+                ));
+            } else {  // folder
+                break :: local_return;
+                each self.files { it |
+                    if it.name == part {
+                        cwd = it.handle;
+                        break();
+                    }
+                };
+                cwd = create_child(self, part, MemDir, (files = empty()));
+            }
+        }
+    };
+}
+
+fn create_child(self: *MemDir, name: Str, $T: Type, data: T) FileHandle #generic = {
+    data := general_allocator().boxed(T, data);
+    fd: FileHandle = (vtable = get_vtable(T), data = T.raw_from_ptr(data));
+    self.files&.push((name = name, handle = fd), general_allocator());
+    fd
 }
 
 // mechanisms, not policies :)
@@ -99,6 +133,10 @@ MemFileRO :: @struct {
         };
         fd.pos
     };
+    fstat :: fn(self, out) = {
+        out.st_mode = Posix.S.IFREG;
+        0
+    };
 };
 
 // TODO: expose the console to userspace as a UQueue
@@ -134,16 +172,15 @@ StdinFile :: @struct {
     };
 };
 
-// TODO
 MemDir :: @struct {
     files: RawList(Entry);
     Entry :: @struct {
         name: Str;
         handle: FileHandle;
     };
-
-    fstatat :: fn(self, path, out) = {
-        todo();
+    fstat :: fn(self, out) = {
+        out.st_mode = Posix.S.IFDIR;
+        0
     };
     openat :: fn(self, path, flags, _mode) = {
         path := path.str();
@@ -172,17 +209,23 @@ fn push_file(it: FileHandle) Fd = {
     (fd = fd.intcast())
 }
 
+// translate user/vfs/libc requests into FUSE messages over a UQueue  
+// (which might be backed by a virtio-fs device in the kernel). 
+// TODO: qring needs to allow you to wait for a specific entry for this to be thread safe 
 FuseFile :: @struct {
     q: *UQueue;
     nodeid: u64;
     fh: u64;
+    position: u64 = 0;
     
     read :: fn(self, buf) = {
         in := zeroed Fuse.ReadIn;
         in.fh = self.fh;
+        in.offset = self.position;
         in.size = buf.len.trunc();
         result := fuse_blocking(self.q, .READ, self.nodeid, in, buf)
             .or(fn(e) => return(e));
+        self.position += result.data.len.bitcast();
         result.data.len
     };
     write :: fn(self, buf) = {
@@ -190,22 +233,34 @@ FuseFile :: @struct {
         in.fh = self.fh;
         in.size = buf.len.trunc();
         in.data = buf;
+        in.offset = self.position;
         result := fuse_blocking(self.q, .WRITE, self.nodeid, in)
             .or(fn(e) => return(e));
+        self.position += result.size.uext();
         result.size.zext()
     };
     lseek :: fn(self, offset, whence) = {
-        todo();
+        ::enum(Whence);
+        self.position = @match(whence) {
+            fn End() => {
+                in: Fuse.LseekIn = (
+                    fh = self.fh,
+                    offset = offset.bitcast(),
+                    whence = (@as(i64) whence).trunc(),
+                );
+                result := fuse_blocking(self.q, .LSEEK, self.nodeid, in)
+                    .or(fn(e) => return(e));
+                result.offset
+            }
+            fn Set() => offset.bitcast();
+            @default => @panic("TODO: fuse whence=%", whence);
+        };
+        self.position.bitcast()
     };
     close :: fn(self) = {
-        in := zeroed Fuse.FlushIn;
-        in.fh = self.fh;
-        fuse_blocking(self.q, .FLUSH, self.nodeid, in)
-            .or(fn(e) => @println("FLUSH failed %", e));
-        in := zeroed Fuse.FsyncIn;
-        in.fh = self.fh;
-        fuse_blocking(self.q, .FSYNC, self.nodeid, in)
-            .or(fn(e) => @println("FSYNC failed %", e));
+        // for now only the root is stored in a MemDir, every other fd is unique to an open()
+        @if(self.nodeid == 1) return();
+        
         in := zeroed Fuse.ReleaseIn;
         in.fh = self.fh;
         fuse_blocking(self.q, .RELEASE, self.nodeid, in)
@@ -214,18 +269,20 @@ FuseFile :: @struct {
         fuse_blocking(self.q, .FORGET, self.nodeid, in)
             .or(fn(e) => @println("FORGET failed %", e));
     };
-    fstatat :: fn(self, path, out) = {
-        todo();
-    };
     openat :: fn(self, path, flags, mode) = {
-        todo();
+        fuse_openat(self, path, flags, mode)
+    };
+    fstat :: fn(self, out) = {
+        in := zeroed Fuse.StatxIn;
+        result := fuse_blocking(self.q, .STATX, self.nodeid, in)
+            .or(fn(e) => return(e));
+        // TODO: rest of the fucking owl
+        out.st_mode = result.stat.mode.zext();
+        0
     };
 };
 
-fuse_openat :: fn(fd: Fd, path: CStr, flags: i64, mode: i64) i64 = {
-    @assert(fd.fd == fs.fuse_root.fd, "TODO");
-    fd := get_file(fd) || return(-1);
-    fd := FuseFile.ptr_from_raw(fd.data);
+fuse_openat :: fn(fd: *FuseFile, path: CStr, flags: i64, mode: i64) i64 = {
     q := fd.q;
     
     name := path.str();
@@ -244,6 +301,10 @@ fuse_openat :: fn(fd: Fd, path: CStr, flags: i64, mode: i64) i64 = {
     fd.fd.intcast()
 };
 
+fuse_stat :: fn(fd: Fd, out: *Posix.Linux.StatArm64) i64 = {
+    todo()
+}
+
 init_fuse :: fn(q: *UQueue) Fd = {
     q.pipe = init(general_allocator(), 128);
     
@@ -256,8 +317,6 @@ init_fuse :: fn(q: *UQueue) Fd = {
     ::DeriveFmt(Array(u16, 11));
     ::display_slice(u16);
     @println("%", result&);
-    
-    println("done init fuse");
     push_file(FuseFile, (q = q, nodeid = 1, fh = 0))
 }
 
@@ -358,7 +417,9 @@ FuseOutType :: fn(In: Type) Type #fold = {
 }
 
 fn get_file(fd: Fd) ?FileHandle = {
-    @if(fd.fd == { xxx := LinuxLibc.AT_FDCWD; xxx.fd }) return(Some = fs.root_fd);
+    if fd.fd == { xxx := LinuxLibc.AT_FDCWD; xxx.fd } {
+        fd = fs.root_dir;
+    };
     fs.mutex&.lock();
     @if(!fd.fd.intcast().ult(fs.fd.len)) return(.None);
     file := fs.fd[fd.fd.zext()];
@@ -369,8 +430,7 @@ fn get_file(fd: Fd) ?FileHandle = {
 FuseId :: @struct(nodeid: u64, fh: u64);
 FRes :: fn($T: Type) Type = Result(T, i64);
 
-fn follow_path(fd: Fd, path: CStr) SysResult(Fd) = {
-    path := path.str();
+fn follow_path(fd: Fd, path: Str) SysResult(Fd) = {
     if path.starts_with("./") {
         path = path.rest(2);
     };
@@ -381,15 +441,16 @@ fn follow_path(fd: Fd, path: CStr) SysResult(Fd) = {
     loop {
         continue :: local_return;
         start := i;
-        while => path[i] != PATH_SEP.ascii() && path[i] != 0 {
+        while => i < path.len && path[i] != PATH_SEP.ascii() {
             i += 1;
         };
-        last := path[i] == 0;
+        last := i == path.len;
         part := path.slice(start, i);
         buf.slice(0, part.len).copy_from(part);
         buf[part.len] = 0;
-        name: Cstr = (ptr = buf.ptr);
+        name: CStr = (ptr = buf.ptr);
         
+        // TODO: don't allow "foo/bar/file.txt/."
         if part.len == 0 || part == "." {
             @if(last) return(Ok = fd);
             i += 1;
@@ -400,25 +461,31 @@ fn follow_path(fd: Fd, path: CStr) SysResult(Fd) = {
         };
 
         // :SLOW
-        out := zeroed SysStat;
-        Posix'fstatat(fd, name, out&, 0).or(fn(err) => {
+        out := zeroed Posix.Stat;
+        result := Posix'fstatat(fd, name, out&, 0);
+        if result&.is_err() {
+            err := result.Err;
             if !first {
                 _ := Syscall'close(fd);
             };
             return(Err = err)
-        });
+        };
         
         ifmt := out.st_mode.int().bit_and(Posix.S.IFMT);
         is_dir := ifmt == Posix.S.IFDIR;
         
-        @if(!is_dir && !last) return(Err = 20);
+        @if(!is_dir && !last) return(Err = (_ = 20));
         
-        new_fd := Posix'openat(fd, name, out&, 0).or(fn(err) => {
+        // TODO: opendir flag?
+        result := Posix'openat(fd, name, 0, 0);
+        if result&.is_err() {
+            err := result.Err;
             if !first {
                 _ := Syscall'close(fd);
             };
             return(Err = err)
-        });
+        };
+        new_fd := result.Ok;
         
         if !first {
             _ := Syscall'close(fd);

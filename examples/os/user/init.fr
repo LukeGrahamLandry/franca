@@ -33,28 +33,37 @@ main :: fn() void = {
         signal_env.thread_index = -1;  // make handle_signal NOT count as the same thread for reenterant mutex
 
         q := zeroed UQueue; q := q&;
-        ok := virtq_create(q, "Shared.fs.1");
+        ok := virtq_create(q, "/dev/Host.fs/1");
         @println("virtq_create? ok=%", ok);
         q: ?*UQueue = @if(ok, (Some = q), .None);
         
         Fs :: import("@/examples/os/user/fs.fr");
         fs.fuse_q = q;
         if q { q |
-            fs.fuse_root = init_fuse(q);
+            fuse_root := init_fuse(q);
+            cwd := get_file(fs.root_dir).unwrap();
+            cwd := MemDir.ptr_from_raw(cwd.data);
+            child := get_file(fuse_root).unwrap();
+            child := FuseFile.ptr_from_raw(child.data)[];
+            create_child(cwd, "Host", FuseFile, child);
             
-            fd := Posix'openat(fs.fuse_root, "a.txt".as_cstr(), Posix'O'RDWR, 0)
+            bytes := read_entire_file_or_crash(temp(), "Host/a.txt");
+            @println("ALL: %", bytes);
+            
+            fd := Posix'openat(fuse_root, "a.txt".as_cstr(), Posix'O'RDWR, 0)
                 || @panic("failed to open");
             
-            out := u8.list(1000, temp());
-            read_len := Syscall'read(fd, out.items().end_pointer(), out.maybe_uninit.len - out.len) 
-                || @panic("failed read");
-            out.len += read_len;
-            @println("READ(%): %", read_len, out.items());
-            
+            _ := Syscall'lseek(fd, 0, .Set) 
+                || @panic("failed lseek");
+                
             buf := @tfmt("Goodbye World %!", timestamp());
             writen_len := Syscall'write(fd, buf.ptr, buf.len)
                 || @panic("failed write");
             @println("WRITE: %/%", writen_len, buf.len);
+            
+            pos := Syscall'lseek(fd, 10, .Set) 
+                || @panic("failed lseek");
+            @println("seek to %", pos);
             
             out := u8.list(1000, temp());
             read_len := Syscall'read(fd, out.items().end_pointer(), out.maybe_uninit.len - out.len) 
@@ -63,6 +72,9 @@ main :: fn() void = {
             @println("READ(%): %", read_len, out.items());
             
             Syscall'close(fd);
+            
+            bytes := read_entire_file_or_crash(temp(), "Host/foo/bar.txt");
+            @println("foo/bar.txt: %", bytes);
         };
         
         buf := u8.list(general_allocator());
@@ -96,9 +108,9 @@ main :: fn() void = {
                     break :: local_return;
                     command := parts[0];
                     if command.ends_with(".fr") {
-                        if fs.index&.get(command).is_none() {
+                        if !file_exists(command) {
                             check := @tfmt("examples/%", command);
-                            if fs.index&.get(check).is_none() {
+                            if !file_exists(check) {
                                 @println("file not found: %", command);
                                 break();
                             } else {
@@ -333,6 +345,13 @@ LIBC :: @struct {
         @trace("lseek(fd = %, %, %) = %", f.fd, offset, @as(i64) whence, result);
         result
     };
+    FR_fstat :: fn(f: Fd, out: *Posix.Linux.StatArm64) i64 = {
+        out[] = zeroed(@type out[]);
+        fd := get_file(f) || return(-1);
+        result := fd'vtable'fstat(fd.data, out);
+        @trace("fstat(%) = %", f.fd, result);
+        result
+    };
     readlinkat :: fn(parent: Fd, path: CStr, ptr: *u8, len: i64) i64 = 
         -1;
     opendir :: fn(path: CStr) i64 = {
@@ -433,38 +452,31 @@ LIBC :: @struct {
     time :: fn(out: *time_t) time_t = (seconds = timestamp() * 1000);
     
     // note: this is the linux syscall abi, not the libc abi
-    FR_openat :: fn(fd: Fd, path: CStr, flags: i64, mode: i64) i64 = {
+    FR_openat :: fn(f: Fd, path: CStr, flags: i64, mode: i64) i64 = {
         path := path.str();
         if path.starts_with("./") {
             path = path.rest(2);
         };
-        if fs.fuse_q.is_some() && fd.fd == fs.fuse_root.fd {
-            return fuse_openat(fd, path.as_cstr()/*WASTE*/, flags, mode);
+        if path.contains("/") {  // :SLOW
+            result := follow_path(f, path);
+            @if(result&.is_err()) return(-result.Err._);
+            return result.Ok.fd.intcast();
         };
-        off, len := fs.index&.get(path) 
-            || return(-1);  // TODO: trace
-        fd := push_file(MemFileRO, (
-            contents = fs.contents.subslice(off, len),
-            pos = 0,
-        ));
-        fd := fd.fd.intcast();
-        @trace("openat(%) = %", path, fd);
-        fd
+        fd := get_file(f) || return(-1);
+        result := fd'vtable'openat(fd.data, (ptr = path.ptr), flags, mode);
+        @trace("openat(fd = %, %, %, %) = %", f.fd, path, flags, mode, result);
+        result
     }
     
     // note: this is the linux syscall abi, not the libc abi
     FR_fstatat :: fn(fd: Fd, path: CStr, out: *Posix.Linux.StatArm64) i64 = {
-        path := path.str();
-        if path.starts_with("./") {
-            path = path.rest(2);
-        };
-        @trace("fstatat(%)", path);
-        ::[]@type out[];
-        out.slice(1).set_zeroed();
-        off, len := fs.index&.get(path)
-            || return(-1);
-        out.st_mode = Posix.S.IFREG;
-        0
+        fd_in := fd.fd;
+        fd := FR_openat(fd, path, 0, 0);
+        @if(fd < 0) return(fd);
+        fd: Fd = (fd = fd.intcast());
+        result := FR_fstat(fd, out);
+        Syscall'close(fd);
+        result
     }
 };
 
