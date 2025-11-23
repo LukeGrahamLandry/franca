@@ -4,10 +4,11 @@ fs :: @static(@struct {
     fd: List(FileHandle); // indexed by Fd
     mutex: Mutex;  // locked when push to fd / reading an entry from fd. TODO: RWLock
     // TODO: decide which other things care about being thread safe
-    stdin: import("@/lib/collections/deque.fr")'RawDeque(u8);
+    stdin: UQueue;
     strace: bool;
     fuse_q: ?*UQueue;
     root_dir: Fd;
+    next_fuse_request_id: u64;
     // TODO: put an allocator here instead of trusting general_allocator
 });
 
@@ -31,9 +32,18 @@ init_vfs :: fn() void = {
         // TODO: since i'm not actually using the hash table, store the constant data as a flat array
         (fs, contents.items())
     };
-    fs.stdin = init(general_allocator(), 1.shift_left(16));
+    
+    fs.stdin.pipe = init(general_allocator(), 2);
+    virtq_create(fs.stdin&, "stdio.console", 0)
+        .assert("failed to create stdin virtq");
+    range(0, 2) { _ |
+        bufs := general_allocator().alloc_init([]u8, 1, fn(_) => general_allocator().alloc_zeroed(u8, 256));
+        fs.stdin.pipe.work&.push(bufs = bufs, n = (bufs_readable = 0));
+    };
+    fs'stdin'poll(fs.stdin&);
+    
     fs.fd = list(general_allocator());
-    push_file(StdinFile, ());
+    push_file(StdinFile, (queue = fs.stdin&));
     push_file(StdoutFile, ());
     push_file(StdoutFile, ());
     
@@ -147,28 +157,35 @@ StdoutFile :: @struct {
     };
 };
 
-// TODO: expose the console to userspace as a UQueue
 StdinFile :: @struct {
-    read :: fn(_fd, dest) = {
-        i := 0;
-        while => i < dest.len {
-            continue :: local_return;
-            // TODO: this is a race with the interrupt handler adding more bytes
-            c := fs.stdin&.pop_front()  // :SLOW
-                || {
-                if i == 0 {
-                    // TODO: don't hardcode blocking + MIN=1 + timeout=infinity (which is what interactive_read_line wants)
-                    // since send_signal clears Task.futex_wait, this sleeps until we get a byte if its the init process reading. 
-                    p := bit_cast_unchecked(*i64, *u32, fs.stdin.len&);
-                    Futex'wait(p, 0);
-                    continue();
-                };
-                return(i)
-            };
-            dest[i] = c;
-            i += 1;
+    queue: *UQueue;
+    bufs: [][]u8 = empty();
+    buf: []u8 = empty();
+    
+    read :: fn(self, dest) = {
+        // TODO: don't hardcode blocking + MIN=1 + timeout=infinity (which is what interactive_read_line wants)
+        
+        if self.buf.len == 0 {
+            // this poll is redundant for current usage where i only read after getting an interrupt
+            self'queue'poll(self.queue);  
+            entry := self.queue.pipe.done&.pop();
+            @debug_assert_eq(entry.bufs.len, 1);
+            self.bufs = entry.bufs;
+            self.buf = entry.bufs[0].slice(0, entry.n.bytes_written.zext());
         };
-        i
+        dest.len = min(dest.len, self.buf.len);
+        dest.copy_from(self.buf.slice(0, dest.len));
+        self.buf = self.buf.rest(dest.len);
+        each dest { it |
+            if it[] == "\r".ascii() {
+                it[] = "\n".ascii();
+            };
+        };
+        if self.buf.len == 0 {
+            self.queue.pipe.work&.push(bufs = self.bufs, n = (bufs_readable = 0));
+            self'queue'poll(self.queue);
+        };
+        dest.len
     };
 };
 
@@ -184,7 +201,6 @@ MemDir :: @struct {
     };
     openat :: fn(self, path, flags, _mode) = {
         path := path.str();
-        @assert(!path.contains("/".ascii())); // TODO
         for self.files { it |
             if it.name == path {
                 fd := push_file(it.handle);
@@ -301,10 +317,6 @@ fuse_openat :: fn(fd: *FuseFile, path: CStr, flags: i64, mode: i64) i64 = {
     fd.fd.intcast()
 };
 
-fuse_stat :: fn(fd: Fd, out: *Posix.Linux.StatArm64) i64 = {
-    todo()
-}
-
 init_fuse :: fn(q: *UQueue) Fd = {
     q.pipe = init(general_allocator(), 128);
     
@@ -332,6 +344,7 @@ fn fuse_blocking(q: *UQueue, op: Fuse.Opcode, node: u64, in: ~I, e_out: []u8) Re
     hi := zeroed Fuse.InHeader;
     hi.opcode = op;
     hi.nodeid = node;
+    hi.unique = u64.atomic_inc(fs.next_fuse_request_id&);
     ho := zeroed Fuse.OutHeader;
     out := zeroed FuseOutType(I);
     old := q.pipe.done.committed.bouba;
@@ -340,13 +353,17 @@ fn fuse_blocking(q: *UQueue, op: Fuse.Opcode, node: u64, in: ~I, e_out: []u8) Re
     while => q.pipe.done.committed.bouba == old {
         q'poll(q);
     };
+    ::enum(@type op);
+    @debug_assert(ho.len != 0 || op == .FORGET);  // no reply, virtio is just returning the buffer. 
+    @debug_assert(ho.len == 0 || hi.unique == ho.unique);
     @if(ho.error != 0) return(Err = ho.error.intcast());
     extra := ho.len.zext() - size_of(@type out);
     extra := e_out.slice(0, extra.max(0).min(e_out.len));
     
     out_fixed, out_dyn := @run count_bufs(@type out);
-    @assert(out_dyn <= 1, "TODO: multiple output bufs");
+    @debug_assert(out_dyn <= 1, "TODO: multiple output bufs");
     if out_dyn > 0 {
+        @debug_assert(ho.len.zext() >= (@run size_of(@type ho)) + out_fixed);
         p := ptr_from_int([]u8, int_from_ptr(@type out, out&) + out_fixed);
         p[] = extra;
     };

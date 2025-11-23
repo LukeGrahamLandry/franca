@@ -126,7 +126,7 @@ spawn_thread :: fn(parent: *Task, ctx: i64, exit_futex: i64) i64 #n(0xFFFF0005) 
     child.thread_id
 }
 
-virtq_poll :: fn(task: *Task, it: i64) i64 #n(0xFFFF0007) = {
+virtq_poll :: fn(it: i64) i64 #n(0xFFFF0007) = {
     it := UQueue.ptr_from_int(it);
     q := Virt.Queue.ptr_from_raw(it.system_handle);
     pipe := it.pipe&;
@@ -147,13 +147,14 @@ virtq_poll :: fn(task: *Task, it: i64) i64 #n(0xFFFF0007) = {
             tpanic("done: currupt UQueue.Entry id");
         };
         // TODO: debug check that the addresses match
-        if j != pipe.work.claimed.kiki - 1 {
+        //       (phys in desc with virt in bufs)
+        if j != pipe.work.committed.kiki {
             tpanic("TODO: allow completing virtio requests out of order");
         };
         
         it := pipe.work.ring[j.zext().mod(pipe.work.ring.len)];
         pipe.work.committed.kiki += 1;
-        it.n.bytes_written = desc.len;
+        it.n.bytes_written = used.len;
         it.system_id = MAX_u32;
         
         // TODO: be more careful about being atomic? but there's only one kernel thread so its fine. 
@@ -190,14 +191,20 @@ virtq_poll :: fn(task: *Task, it: i64) i64 #n(0xFFFF0007) = {
     0
 }
 
-virtq_create :: fn(it: i64, p: i64, l: i64) i64 #n(0xFFFF0008) = {
-    it := UQueue.ptr_from_int(it);
+virtq_create :: fn(out: i64, p: i64, l: i64, q_index: i64) i64 #n(0xFFFF0008) = {
+    out := UQueue.ptr_from_int(out);
     label := u8.ptr_from_int(p).slice(l);
-    kprint(label);
-    kprint("\n");
-    if kernel.fuse& { device |
-        it.system_handle = Virt.Queue.raw_from_ptr(device.device.queues.index(VirtFuse.REQUEST));
-        return 0;
+    each kernel.devices { it |
+        if it.label == label {
+            q := it.queues.index(q_index);
+            // only allow virtq_create once per Virt.Queue
+            @if(q.user.is_some()) return(-1);
+            // happens if kernel code is using the Virt.Queue directly already
+            @if(q.device_idx != 0 || q.driver_idx != 0) return(-2);
+            out.system_handle = Virt.Queue.raw_from_ptr(q);
+            q.user = (Some = out);
+            return 0;
+        }
     };
     -1
 }

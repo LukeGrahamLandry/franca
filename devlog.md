@@ -1,4 +1,12 @@
 
+- convert the stdin signal hack to use the virtq directly as a UQueue
+  - bamboozled myself a bit 
+    - UQueue indices were wrong because the kernel init was still giving it a buffer to write to
+    - was setting bytes_written to desc.len instead of used.len
+
+TODO: same for output
+TODO: translate pl011 (rn i broke it)
+
 ## (Nov 22)
 
 - sys: oopsie daisy, my join(Thread, -syscalls) was wrong

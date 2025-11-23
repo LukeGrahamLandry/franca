@@ -17,6 +17,7 @@ currently it's good enough to run the franca compiler on qemu-system-aarch64's v
 - read device tree to get addresses for io devices
 - pci device discovery
 - virtio console in/out
+- virtio-fs (FUSE)
 
 ## incomplete
 
@@ -26,7 +27,6 @@ currently it's good enough to run the franca compiler on qemu-system-aarch64's v
 - sleep
 - block device
 - file system
-- shared file system (ex. VZVirtioFileSystemDevice)
 - exec and capture stdout
 - thread groups and clean up resources when all exit
 - dlopen
@@ -44,8 +44,6 @@ currently it's good enough to run the franca compiler on qemu-system-aarch64's v
 ---
 
 - check for needs_reset flag when waiting for virt queue
-- non-blocking virtio queues
-- virtio-console input handle more than one byte so paste works
 - keep track of how mmio space is allocated to bars so once i have multiple they don't overlap
 - move device drivers to user space. 
 - call virtualization.framework from my language and bundle the whole thing into one exe

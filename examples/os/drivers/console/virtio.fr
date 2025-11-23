@@ -29,44 +29,20 @@ find :: fn(pci: *Pci.MemoryRegion) ?Self = {
     (Some = self)
 }
 
-fn check_interrupt(self: *Self, intid: i64) void = {
-    @if(intid != self.device.intid) return();
-    @if(self.device.interrupt_status.is_null()) return();
-    @if(self.device.interrupt_status.vol().bit_and(1) == 0) return();
+fn check_interrupt(self: *Virt.Device, intid: i64) void = {
+    @if(intid != self.intid) return();
+    @if(self.interrupt_status.is_null()) return();
+    @if(self.interrupt_status.vol().bit_and(1) == 0) return();
+    // interrupt_status is reset to zero by reading it
     
-        each self.queues { q |
-            i := q.device.head.idx&.vol();  // this read resets it to zero
-            if q.this_queue_index == RECEIVE {
-                if i != q.device_idx {
-                    // TODO: do the right thing when it gives me more than one (which is what happens when you paste)
-                    byte: u8 = 0;
-                    
-                    while => q.device_idx != i {
-                        i := q.device_idx.zext().mod(q.device.ring.len);
-                        q.device_idx += 1;
-                        used := q.device.ring[i];
-                        desc := q.desc[used.id.zext()];
-                        @if(desc.flags.bit_and(Virt.DESC_F_NEXT) != 0) kpanic("TODO: restore multiple descriptors");
-                        capacity := desc.addr.slice(desc.len.zext());
-                        bytes := capacity.slice(0, used.len.zext());
-                        byte = bytes[0];
-                        // TODO: just reuse the one desc
-                        // TODO: don't chain them
-                        q.push_phys(capacity, Virt.DESC_F_WRITE);
-                    };
-
-                    q.publish_chain();
-                    
-                    // HACK?
-                    init := kernel.tasks&[0]&;
-                    @if(init.signal_handler == 0) kpanic("got input before init signal handler");
-                    push_signal_context(init);
-                    init.mcontext.gpr&[1] = intid;
-                    init.mcontext.gpr&[2] = byte.zext();  // HACK
-                    return_to_user(init);
-                };
+    each self.queues { q |
+        if q.user { user |
+            if q.device.head.idx&.vol() != q.device_idx {
+                #use("@/examples/os/kernel/syscalls.fr");
+                virtq_poll(UQueue.int_from_ptr(user));
             };
         };
+    };
 }
 
 fn write(self: *Self, virtual: []u8) void = {
