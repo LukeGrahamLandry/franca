@@ -1,4 +1,15 @@
 
+## (Nov 22)
+
+- sys: oopsie daisy, my join(Thread, -syscalls) was wrong
+  and was just (a spin lock with a race condition) if the thread hadn't already exited. 
+
+os
+- replace check_thread with tid_futex like linux does
+- figure out how to read a file over fuse
+- instead of doing fstatat/openat in handle_signal, put the implementation in its own function 
+  and return to it, so you're back in normal land before doing any work. 
+
 ## (Nov 21)
 
 os: virtfs
@@ -43,6 +54,9 @@ os
 - queue glue
 - mystery of why DeriveFmt wasn't working in the kernel, 
   it was panicking at runtime instead of comptime in the default branch. 
+- skip `./` in paths so jitting the compiler gets past find_std_lib
+
+compiler: seal_debug_info when cache disabled  
 
 ## (Nov 20)
 

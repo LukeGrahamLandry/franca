@@ -24,7 +24,6 @@ main :: fn() void = {
     };
     fs.fd[0].vtable = stdin_file;
     
-    //import("@/examples/toy/reloc.fr")'main();
     if query_current_arch() != .wasm32 {
         redo_relocations_static_linux();
     };
@@ -52,42 +51,9 @@ main :: fn() void = {
         @println("virtq_create? ok=%", ok);
         q: ?*UQueue = @if(ok, (Some = q), .None);
         
+        Fs :: import("@/examples/os/user/fs.fr");
         if q { q |
-            q.pipe = init(general_allocator(), 128);
-            Fuse :: import("@/examples/os/drivers/fs/fuse.fr");
-            header_in := zeroed Fuse.InHeader;
-            header_in.opcode = .INIT;
-            init_in := zeroed Fuse.InitIn;
-            init_in.major = Fuse.MAJOR;
-            init_in.minor = Fuse.MINOR;
-            header_out := zeroed Fuse.OutHeader;
-            init_out := zeroed Fuse.InitOut;
-            
-            fn send(self: *UQueue, hi: *Fuse.InHeader, in: ~I, ho: *Fuse.OutHeader, out: ~O) void #where = 
-                send(self, hi, in, empty(), ho, out, empty());
-            
-            fn send(q: *UQueue, hi: *Fuse.InHeader, in: ~I, ei: []u8, ho: *Fuse.OutHeader, out: ~O, eo: []u8) void #where = {
-                f :: fn(data: ~T) []u8 #where => {
-                    ::[]@type data[];
-                    data.slice(1).interpret_as_bytes()
-                };
-                hi.len = size_of(@type hi[]) + size_of(@type in[]) + ei.len.trunc();
-                bufs := @slice(f(hi), ei, f(in), f(ho), f(out), eo);
-                for bufs { it |
-                    @println("ptr=% len=%", u8.int_from_ptr(it.ptr), it.len);  // coconut.jpg
-                };
-                q.pipe.work&.push(bufs = bufs, n = (bufs_readable = 3))
-            }
-            
-            q.send(header_in&, init_in&, header_out&, init_out&);
-            while => q.pipe.done.committed.bouba == 0 {
-                q'poll(q);
-            };
-            
-            ::DeriveFmt(Fuse.InitOut);
-            ::DeriveFmt(Array(u16, 11));
-            ::display_slice(u16);
-            @println("%", init_out&);
+            init_fuse(q);
         };
         
         buf := u8.list(general_allocator());
@@ -215,56 +181,33 @@ handle_signal :: fn(ctx: *MContext, intid: i64, data: i64) i64 = {
         push_emergency_dynamic_environment {
             context(DefaultContext)[].prefer_syscalls = true;
             @println("sp = %; fp = %; lr = %; ip = %;", ctx.gpr&[31], ctx.gpr&[29], ctx.gpr&[30], ctx.elr);
-            Crash'backtracing_panic_handler("fatal signal");
+            eprintln("fatal signal");
+            report_backtrace(fp = ctx.gpr&[29].rawptr_from_int(), ip = ctx.elr.rawptr_from_int());
+            Syscall'exit(1);
         };
     };
     
-    // when targeting real linux, (open,fstat)at have a sucky abi so its easier to just do the syscall 
-    // instead of trying to use glibc, which makes intercepting them more painful. 
+    // when targeting real linux, (open,fstat)at have a sucky abi 
+    // so its easier to just do the syscall than try to use glibc, 
+    // but that makes intercepting them on my os more painful. 
     syscall_number := ctx.gpr&[8];
-    @assert_eq(syscall_number, ctx.gpr&[16]);
-    // TODO: instead of doing work here, just poke a call to the libc handler into ctx[lr, elr]
-    @switch(syscall_number) {
-        @case(56) => {  // openat
-            path := u8.ptr_from_int(ctx.gpr&[1]);
-            path := (@as(CStr) (ptr = path)).str();
-            if fs.index&.get(path) { off, len |
-                // TODO: this is a dead lock if the thing locking it is the thing that was interrupted
-                if !fs.mutex&.try_lock() {
-                    panic("fucked: openat with fs.mutex locked");
-                };
-                fd := fs.fd.len;
-                fs.fd&.push(
-                    vtable = read_only_mem_file,
-                    contents = fs.contents.subslice(off, len),
-                    pos = 0,
-                    readable = true,
-                );
-                fs.mutex&.unlock();
-                ctx.gpr&[0] = fd;
-            } else {
-                ctx.gpr&[0] = -1;
-            };
-            @trace("openat(%) = %", path, ctx.gpr&[0]);
-        };
-        @case(79) => {  // fstatat
-            path := u8.ptr_from_int(ctx.gpr&[1]);
-            path := (@as(CStr) (ptr = path)).str();
-            @trace("fstatat(%)", path);
-            out := Posix.Linux.StatArm64.ptr_from_int(ctx.gpr&[2]);
-            ::[]@type out[];
-            out.slice(1).set_zeroed();
-            if fs.index&.get(path) { off, len |
-                out.st_mode = Posix.S.IFREG;
-                ctx.gpr&[0] = 0;
-            } else {
-                ctx.gpr&[0] = -1;
-            };
-        };
-        @default => {
-            @panic("invalid syscall %", syscall_number);
-        };
+    msg :: "perform_syscall always has x8==x16\nallowing someone else to call us is sketchy because i return to lr instead of elr";
+    @assert_eq(ctx.gpr&[8], ctx.gpr&[16], msg);
+    // TODO: FuncId->rawptr doesn't work if its a scope access. :compilerbug
+    callee := @switch(syscall_number) {
+        @case(56) => { x :: LIBC.openat_FR; @as(rawptr) x };
+        @case(79) => { x :: LIBC.fstatat_FR; @as(rawptr) x };
+        @default => @panic("invalid syscall %", syscall_number);
     };
+    
+    // this wouldn't work because perform_syscall doesn't save LR 
+    // but its fine to return to perform_syscall's caller directly, 
+    // because it doesn't do anything useful before returning. 
+    // ctx.gpr[30] = ctx.elr;
+    
+    // redirect the call (keeping the same arguments in x0..<6)
+    ctx.elr = callee.int_from_rawptr();
+    
     intid
 }
 
@@ -389,6 +332,15 @@ LIBC :: @struct {
         @trace("lseek(fd = %, %, %) = %", f.fd, offset, @as(i64) whence, result);
         result
     };
+    readlinkat :: fn(parent: Fd, path: CStr, ptr: *u8, len: i64) i64 = 
+        -1;
+    opendir :: fn(path: CStr) i64 = {
+        __errno_location()[] = 1;
+        0
+    };
+    mkdirat :: fn(parent: Fd, path: CStr, mode: i64) i64 = 
+        -1;
+    
     __errno_location :: fn() *i64 = @static(i64);
     sigaction :: fn() i64 = 0;
     memmove :: fn(dest: rawptr, src: rawptr, count: i64) void =
@@ -397,6 +349,7 @@ LIBC :: @struct {
                 out[] = zeroed(@type out[]);
                 0
     };
+    // note: this requires that userdata be a *Thread (as called by raw_create_thread)
     pthread_create :: fn(out: *pthread_t, attr: *ThreadAttr, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) i64 = {
                 attr := bit_cast_unchecked(*ThreadAttr, *MyAttr, attr);
                 ctx := zeroed MContext;
@@ -409,9 +362,14 @@ LIBC :: @struct {
                 });
                 ctx.gpr&[31] = bit_cast_unchecked(*u8, i64, attr.stack.end_pointer());
                 
-                args: Array(i64, 6) = (MContext.int_from_ptr(ctx&), 0, 0, 0, 0, 0);
+                thread := Thread.ptr_from_raw(userdata);
+                @assert_eq(thread.tid_futex, MAX_u32);
+                exit_futex := u32.int_from_ptr(thread.tid_futex&);
+                args: Array(i64, 6) = (MContext.int_from_ptr(ctx&), exit_futex, 0, 0, 0, 0);
                 id, _ := Syscall'perform_syscall(args&, 0xFFFF0005);  // spawn_thread
-                out[] = bit_cast_unchecked(@type id, pthread_t, id);
+                @if(id < 0) panic("failed to create thread");
+                thread.tid = id.intcast();
+                out.opaque = userdata;
                 @trace("pthread_create(elr = %, x0 = %, sp = %) = %", ctx.elr, ctx.gpr&[0], ctx.gpr&[31], id);
                 0
     };
@@ -421,19 +379,12 @@ LIBC :: @struct {
                 0
     };
     pthread_getcpuclockid :: fn() = 0;
-    // TODO: do something like tid_futex instead of just spam yielding like this
     pthread_join :: fn(thread: pthread_t, value_ptr: *rawptr) i64 = {
-                id := bit_cast_unchecked(@type thread, i64, thread);
-                args: Array(i64, 6) = (id, 0, 0, 0, 0, 0);
-                @trace("pthread_join(%)", id);
-                while(=> {
-                    done, _ := Syscall'perform_syscall(args&, 0xFFFF0006);  // check_thread
-                    done == 0
-                }, => {
-                    Syscall'perform_syscall(args&, 0xFFFF0002);  // yield
-                });
-                value_ptr[] = zeroed rawptr; // TODO
-                0
+        t := Thread.ptr_from_raw(thread.opaque);
+        // not the same as `with_syscalls { t.join(); 0 };` because that would free the stack twice
+        t.sys_join();
+        value_ptr[] = zeroed rawptr; // TODO
+        0
     };
     // for mandel.ssa
     putchar :: fn(c: u8) = print(c&.slice(1));
@@ -479,6 +430,45 @@ LIBC :: @struct {
     };
     // TODO: this is supposed to be calander time not system up time
     time :: fn(out: *time_t) time_t = (seconds = timestamp() * 1000);
+    
+    // note: this is the linux syscall abi, not the libc abi
+    openat_FR :: fn(fd: Fd, path: CStr, flags: i64, mode: i64) i64 = {
+        path := path.str();
+        if path.starts_with("./") {
+            path = path.rest(2);
+        };
+        off, len := fs.index&.get(path) 
+            || return(-1);  // TODO: trace
+        // TODO: this is a dead lock if the thing locking it is the thing that was interrupted
+        if !fs.mutex&.try_lock() {
+            panic("fucked: openat with fs.mutex locked");
+        };
+        fd := fs.fd.len;
+        fs.fd&.push(
+            vtable = read_only_mem_file,
+            contents = fs.contents.subslice(off, len),
+            pos = 0,
+            readable = true,
+        );
+        fs.mutex&.unlock();
+        @trace("openat(%) = %", path, fd);
+        fd
+    }
+    
+    // note: this is the linux syscall abi, not the libc abi
+    fstatat_FR :: fn(fd: Fd, path: CStr, out: *Posix.Linux.StatArm64) i64 = {
+        path := path.str();
+        if path.starts_with("./") {
+            path = path.rest(2);
+        };
+        @trace("fstatat(%)", path);
+        ::[]@type out[];
+        out.slice(1).set_zeroed();
+        off, len := fs.index&.get(path)
+            || return(-1);
+        out.st_mode = Posix.S.IFREG;
+        0
+    }
 };
 
 system_counter_uptime :: fn() TimeSpec = {
@@ -590,6 +580,113 @@ fn trace(arg: FatExpr) FatExpr #macro = @{
         fs.strace = old;
     };
 };
+
+init_fuse :: fn(q: *UQueue) void = {
+    q.pipe = init(general_allocator(), 128);
+    
+    in := zeroed Fuse.InitIn;
+    in.major = Fuse.MAJOR;
+    in.minor = Fuse.MINOR;
+    result := fuse_blocking(q, .INIT, 0, in, empty(), empty()).unwrap();
+    
+    ::DeriveFmt(Fuse.InitOut);
+    ::DeriveFmt(Array(u16, 11));
+    ::display_slice(u16);
+    @println("%", result.out&);
+    
+    ROOT_NODE :: 1;
+    name := "a.txt\0";
+    in: Fuse.LookupIn = ();
+    result := fuse_blocking(q, .LOOKUP, ROOT_NODE, in, name, empty()).unwrap();
+    node := result.out.nodeid;
+    // TODO: do i have to release/forget this at the end?
+    
+    in: Fuse.OpenIn = (flags = 0, open_flags = 0);
+    result := fuse_blocking(q, .OPEN, node, in, empty(), empty()).unwrap();
+    // TODO: RELEASE at the end
+    
+    in := zeroed Fuse.ReadIn;
+    in.fh = result.out.fh;
+    in.size = 2000;
+    // TODO: putting stack memory in the queue relies on blocking
+    buf := @uninitialized Array(u8, 2000);
+    result := fuse_blocking(q, .READ, node, in, empty(), buf&.items()).unwrap();
+    @println("READ(a.txt) = %", result.extra);
+    
+    println("done init fuse");
+}
+
+Fuse :: import("@/examples/os/drivers/fs/fuse.fr");
+
+FuseResult :: fn($I: Type) Type = {
+    O :: FuseOutType(I);
+    OK :: @struct(out: O, extra: []u8);
+    Self :: @tagged(Err: i64, Ok: OK);
+    
+    // :compilerbug/ordering if you name this "or"
+    fn orr(self: Self, $else: @Fn() Never) OK = {
+        @match(self&) {
+            fn Ok(it) => it[];
+            fn Err() => else();
+        }
+    }
+    
+    fn unwrap(self: Self) OK = 
+        self.orr(=> @panic("fuse failed %", self.Err));
+    
+    fn is_err(self: *Self) bool = 
+        self.is(.Err);
+    
+    Self
+}
+
+fn fuse_blocking(q: *UQueue, op: Fuse.Opcode, node: u64, in: ~I, e_in: []u8, e_out: []u8) FuseResult(I) #where = {
+    hi := zeroed Fuse.InHeader;
+    hi.opcode = op;
+    hi.nodeid = node;
+    ho := zeroed Fuse.OutHeader;
+    out := zeroed FuseOutType(I);
+    old := q.pipe.done.committed.bouba;
+    // TODO: putting stack memory in the queue relies on blocking
+    send(q, hi&, in&, e_in, ho&, out&, e_out);
+    while => q.pipe.done.committed.bouba == old {
+        q'poll(q);
+    };
+    @if(ho.error != 0) return(Err = ho.error.intcast());
+    extra := ho.len.zext() - size_of(@type out);
+    extra := e_out.slice(0, extra.max(0).min(e_out.len));
+    (Ok = (out = out, extra = extra))
+}
+
+fn send(q: *UQueue, hi: *Fuse.InHeader, in: ~I, ei: []u8, ho: *Fuse.OutHeader, out: ~O, eo: []u8) void #where #inline/*semantic*/ = {
+    f :: fn(data: ~T) []u8 #where => {
+        ::[]@type data[];
+        data.slice(1).interpret_as_bytes()
+    };
+    
+    hi.len = 0;
+    hi.len += size_of(@type hi[]);
+    hi.len += size_of(@type in[]);
+    hi.len += ei.len.trunc();
+    // TODO: putting stack memory in the queue relies on blocking
+    bufs := @slice(f(hi), ei, f(in), f(ho), f(out), eo);  
+    for bufs { it |
+        //use :: fn(i: i64) void #noinline = ();
+        //use(it.len);
+        _ := @tfmt("%", it.len);  // coconut.jpg
+    };
+    q.pipe.work&.push(bufs = bufs, n = (bufs_readable = 3))
+}
+
+FuseOutType :: fn(In: Type) Type #fold = {
+    name := In.typename().str();
+    @assert(name.ends_with("In"), "expected In type, found %", name);
+    @assert(!name.starts_with("*"));
+    name = name.slice(0, name.len - 2);
+    name := @tfmt("%Out", name);
+    Type.get_constant(Fuse, name.sym())
+        || @panic("missing Fuse.%", name)
+}
 
 Term :: import("@/lib/sys/terminal.fr");
 #use("@/lib/sys/threads.fr");

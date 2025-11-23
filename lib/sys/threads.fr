@@ -120,14 +120,7 @@ fn join(t: *Thread) void = {
         pthread_join(t.opaque, result&);
     } else {
         @debug_assert(query_current_os() == .linux);
-        fence();
-        { tid := t.tid_futex; @debug_assert(tid == MAX_u32 || tid == t.tid.bitcast() || tid == 0); };
-        expect: u32 = 0;
-        // the kernel will zero this address because of CLONE_CHILD_CLEARTID
-        while => t.tid_futex != expect {
-            FUTEX_WAIT :: 0;
-            _ := Syscall'sys_futex(t.tid_futex&, FUTEX_WAIT, expect, TimeSpec.ptr_from_int(0));
-        };
+        sys_join(t);
     };
     
     // TODO: reuse these
@@ -135,6 +128,20 @@ fn join(t: *Thread) void = {
     page_allocator.dealloc(u8, t.stack);
 }
 
+fn sys_join(t: *Thread) void = {
+    fence();
+    value := t.tid_futex;
+    tid: u32 = t.tid.bitcast();
+    @debug_assert(tid != 0 && tid != MAX_u32);
+    //          exited         running         not started
+    @assert(value == 0 || value == tid || value == MAX_u32);
+    // the kernel will zero this address because of CLONE_CHILD_CLEARTID
+    while => value != 0 {
+        Futex :: import("@/lib/sys/sync/futex.fr");
+        Futex'wait(t.tid_futex&, value);
+        value = t.tid_futex;
+    };
+}
 
 // TODO: the NOSYS is a HACK to make -syscalls make a real static binary
 fn pthread_attr_init(out: *ThreadAttr) voidResult #weak #libc #syscall(NOSYS, NOSYS, NOSYS);

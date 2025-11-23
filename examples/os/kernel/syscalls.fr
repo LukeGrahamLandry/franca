@@ -69,19 +69,7 @@ futex :: fn(task: *Task, addr: i64, op: i64, val: i64, timeout: i64) i64 #n(98) 
         };
         @case(1) => {  // wake
             @if(val <= 0) return(0);
-            // TODO: unfair and :slow, maybe i want a queue per futex
-            n := 0;
-            i := 0;
-            cap := size_of(@type kernel.tasks) / size_of(Task);
-            while => i < cap && n < val {
-                it := kernel.tasks&[i]&;
-                if it.futex_wait == addr {
-                    it.futex_wait = 0;
-                    n += 1;
-                };
-                i += 1;
-            };
-            n
+            futex_wake(addr, val)
         };
         @default => tpanic("bad futex op");
     }
@@ -123,7 +111,7 @@ sig_return :: fn(task: *Task, intid: i64, sp: i64) i64 #n(0xFFFF0004) = {
     task.mcontext.gpr&[0]
 }
 
-spawn_thread :: fn(parent: *Task, ctx: i64) i64 #n(0xFFFF0005) = {
+spawn_thread :: fn(parent: *Task, ctx: i64, exit_futex: i64) i64 #n(0xFFFF0005) = {
     ctx := SavedRegisters.ptr_from_int(ctx);
     child := alloc_task(parent.mem.root);
     if u32.ptr_from_int(ctx.elr)[] != Arm.branch_target_marker {
@@ -132,19 +120,10 @@ spawn_thread :: fn(parent: *Task, ctx: i64) i64 #n(0xFFFF0005) = {
     child.mcontext.gpr = ctx.gpr;
     child.mcontext.elr = ctx.elr;
     child.mcontext.fpr = ctx.fpr;
+    child.exit_futex = exit_futex;
     child.active = true;
+    u32.ptr_from_int(exit_futex)[] = child.thread_id.trunc();
     child.thread_id
-}
-
-// TODO: instead of this for joining threads, do tid_futex like linux
-// TODO: have a more efficient waitpid than calling this in a loop
-check_thread :: fn(id: i64) i64 #n(0xFFFF0006) = {
-    each kernel.tasks& { it |
-        if it.thread_id == id {
-            return it.active.not().int();
-        }
-    };
-    1
 }
 
 virtq_poll :: fn(task: *Task, it: i64) i64 #n(0xFFFF0007) = {
@@ -195,10 +174,7 @@ virtq_poll :: fn(task: *Task, it: i64) i64 #n(0xFFFF0007) = {
             tpanic("work: corrupt UQueue.Entry id");
         };
         read_n := it.n.bufs_readable;
-        kprint_label("=== bufs.len = ", it.bufs.len);
         for it.bufs { it |
-            kprint_label("- buf.ptr = ", u8.int_from_ptr(it.ptr));
-            kprint_label("- buf.len = ", it.len);
             q.push_virt(it, @if(read_n > 0, 0, Virt.DESC_F_WRITE));
             read_n -= 1;
         };
@@ -207,8 +183,8 @@ virtq_poll :: fn(task: *Task, it: i64) i64 #n(0xFFFF0007) = {
     };
     
     if need_wake != 0 {
-        _ := futex(task, u32.int_from_ptr(pipe.done.committed.bouba&), 1, need_wake, 0);
-        _ := futex(task, u32.int_from_ptr(pipe.work.committed.kiki&), 1, need_wake, 0);
+        futex_wake(u32.int_from_ptr(pipe.done.committed.bouba&), need_wake);
+        futex_wake(u32.int_from_ptr(pipe.work.committed.kiki&), need_wake);
     };
     
     0

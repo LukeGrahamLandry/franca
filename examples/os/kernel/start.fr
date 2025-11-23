@@ -249,6 +249,11 @@ init_task :: fn(task: *Task, callee: rawptr) void = {
 }
 
 fn kill_task(task: *Task) void = {
+    if task.exit_futex != 0 {
+        u32.ptr_from_int(task.exit_futex)[] = 0;
+        futex_wake(task.exit_futex, MAX_i32);
+    };
+    
     // TODO: deallocate its pages and stuff
     //       (but for now everything is thread-like not process-like)
     // TODO: fix race. need to make it non-schedulable, then free pages, then make the task slot reusable. 
@@ -260,6 +265,22 @@ fn kill_task(task: *Task) void = {
     if task.thread_id == 0 {
         kpanic("tried to kill idle_task");
     };
+}
+
+fn futex_wake(addr: i64, val: i64) i64 = {
+    // TODO: unfair and :slow, maybe i want a queue per futex
+    n := 0;
+    i := 0;
+    cap := size_of(@type kernel.tasks) / size_of(Task);
+    while => i < cap && n < val {
+        it := kernel.tasks&[i]&;
+        if it.futex_wait == addr {
+            it.futex_wait = 0;
+            n += 1;
+        };
+        i += 1;
+    };
+    n
 }
 
 init_interrupt_vector :: fn() void #use(Arm) = {
@@ -474,6 +495,7 @@ Task :: @struct {
     signal_stack_left: i64;
     thread_id: i64;
     futex_wait: i64;  // *u32
+    exit_futex: i64;  // *u32
     active: bool;
 };
 
