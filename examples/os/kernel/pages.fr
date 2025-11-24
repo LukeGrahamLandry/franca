@@ -354,7 +354,23 @@ fn check_user_write($T: Type, addr: i64, len: i64) []T #generic =
 // TODO: this could be done more efficently than manually checking all the page tables if i set PSTATE.PAN
 fn check_user_memory(addr: i64, len: i64, flags: i64) []u8 = {
     task := sys_get(*Task, .TPIDR_EL1);
-    // TODO
+    @if(flags == 0) return(u8.ptr_from_int(addr).slice(len));  // TODO
+    
+    vaddr := addr.align_back(kernel.page_size);
+    end := (addr + len).align_to(kernel.page_size);
+    while => vaddr < end {
+        pte := index_page_table(task.mem&, vaddr);
+        // ensure the page is commited before the kernel tries to access it
+        @if(flags != 0) if pte.res.get(.tag) == 0b00 && pte.res.get(.reserved) == 0b1 {
+            pte.res.repr = 0;  // TODO: store permissions there and pass them to vmap_one
+            vmap_one(task.mem&, vaddr, kernel.physical&.map(1), true, true, false, true);
+            clear_tlb(vaddr);
+        };
+        // TODO: check permissions
+        vaddr += kernel.page_size;
+    };
+    
+    
     u8.ptr_from_int(addr).slice(len)
 }
 

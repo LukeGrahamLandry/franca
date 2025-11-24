@@ -10,24 +10,37 @@ driver :: fn(vtable: *ImportVTable) void = {
     output := "target/kernel.out";
     link_linux_boot(bytes, link_image_base, mem_size);
     write_entire_file_or_crash(output, bytes);
-    @eprintln(">>> compiled in %ms;", timestamp() - start);
+    hush := cli_args().contains(fn(it) => it[] == "-hush");
+    @if(!hush) @eprintln(">>> compiled in %ms;", timestamp() - start);
     
     if !cli_args().contains(fn(it) => it[] == "-qemu") {
-        @println(">>> wrote to %; (run with -qemu to run the os as well)", output);
+        @if(!hush) @eprintln(">>> wrote to %; (run with -qemu to run the os as well)", output);
         return();
     };
-    println("running...   (to turn it off, ctrl-a then press x)");
+    graphics := cli_args().contains(fn(it) => it[] == "-graphics");
+    @if(!hush) @if(!graphics) eprintln("add the -graphics argument if you want more than just the console");
+    @if(!hush) eprintln("running...   (to turn it off, ctrl-a then press x)");
     // TODO: on linux it would be friendly to use `-accel kvm` but that doesn't work on orbstack which is the main thing i use
     accel := @if(query_current_os() == .macos, "hvf", "tcg");
-    sh(@slice(
+    args := Str.list(temp());
+    args&.push_all(@slice(
         "qemu-system-aarch64", "-machine", "virt,gic-version=3", 
-        "-cpu", "cortex-a76", "-kernel", output, "-nographic", 
+        "-cpu", "cortex-a76", "-kernel", output, 
         "-m", "1G",
         "-device", "virtio-serial-pci,id=virtio-serial0",
         "-device", "virtconsole,chardev=vc02",
         "-chardev", "file,path=target/qemuconsoleoutput.txt,id=vc02",
         "-accel", accel,
     ));
+    if graphics {
+        args&.push_all(@slice(
+            "-serial", "stdio",
+            "-device", "virtio-gpu-pci",
+        ));
+    } else {
+        args&.push("-nographic");
+    };
+    sh(args.items());
     console := read_entire_file_or_crash(temp(), "target/qemuconsoleoutput.txt");
     print(console);
     _ := Syscall'remove("target/qemuconsoleoutput.txt");
@@ -170,7 +183,6 @@ flat_link :: fn(in: []u8, ram_base: i64) i64 = {
         };
     };
     mem_size := voff - ram_base;
-    @eprintln(">>> file size = %, mem size = %;", in.len, mem_size);
     @assert(file_high > 0);
     
     enumerate sh { mem_section_i, mem_section |

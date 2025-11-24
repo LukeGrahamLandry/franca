@@ -1,0 +1,136 @@
+
+main :: fn() void = {
+    q := temp().box_zeroed(UQueue);
+    if !virtq_create(q, "Screen.gpu", 0) {
+        return();
+    };
+    q.pipe = init(temp(), 16);
+    
+    none := (); none := none&;
+    data := zeroed Gpu.GetDisplayInfoOut;
+    _ := q.gpu_sync(.GetDisplayInfo, none, data&);
+    it := data.pmodes&[0]&;
+    @assert(it.enabled != 0);
+    fb_rect := it.r;
+    
+    fb: Gpu.Resource = (id = 1);
+    in: Gpu.ResourceCreate2d = (
+        resource = fb,
+        format = .B8G8R8X8,
+        width = fb_rect.width,
+        height = fb_rect.height,
+    );
+    
+    h := q.gpu_sync(.ResourceCreate2d, in&, none);
+    ::enum(@type h.type);
+    @assert_eq(h.type, .OkNoData, "ResourceCreate2d");
+    
+    framebuffer := page_allocator.alloc_zeroed(u32, zext(it.r.width * it.r.height));
+    phys := temp().alloc_zeroed([]u8, 512);
+    phys := virt_translate(framebuffer.interpret_as_bytes(), phys).unwrap();
+    @assert(phys.len <= 250, "TODO: need another param for gpu_sync dynamic input");
+    
+    Msg :: @struct {
+        header: Gpu.ResourceAttachBacking;
+        data: Array(Gpu.ResourceAttachBacking.Entry, 250);
+    };
+    in: Gpu.ResourceAttachBacking = (resource = fb, nr_entries = phys.len.trunc());
+    // TODO: these are actually the same layout because little endian. 
+    data := temp().alloc_uninit(Gpu.ResourceAttachBacking.Entry, phys.len);
+    enumerate data { i, it |
+        it[] = (addr = u8.int_from_ptr(phys[i].ptr), length = phys[i].len.trunc());
+    };
+    h := q.gpu_sync_extra(.ResourceAttachBacking, in&, data, none);
+    @assert_eq(h.type, .OkNoData, "ResourceAttachBacking");
+    in: Gpu.SetScanout = (
+        r = fb_rect,
+        scanout_id = 0,
+        resource = fb,
+    );
+    h := q.gpu_sync(.SetScanout, in&, none);
+    @assert_eq(h.type, .OkNoData, "SetScanout");
+    
+    shift := 0;
+    loop {
+        frame_start := timestamp_ns();
+        shift += 1;
+        range(0, fb_rect.width.zext()) { x |
+            range(0, fb_rect.height.zext()) { y |
+                i := y * fb_rect.width.zext() + x;
+                r := float(x) / float(fb_rect.width.zext());
+                g := float((-shift + y).umod(fb_rect.height.zext())) / float(fb_rect.height.zext());
+                b := float(shift.mod(100)) / 100;
+                framebuffer[i] = pack_rgba(r, g, b, 1.0);
+            };
+        };
+    
+        in: Gpu.TransferToHost2d = (
+            r = fb_rect,
+            offset = 0,
+            resource = fb,
+        );
+        h := q.gpu_sync(.TransferToHost2d, in&, none);
+        @assert_eq(h.type, .OkNoData, "TransferToHost2d");
+        
+        in: Gpu.ResourceFlush = (
+            r = fb_rect,
+            resource = fb,
+        );
+        h := q.gpu_sync(.ResourceFlush, in&, none);
+        @assert_eq(h.type, .OkNoData, "ResourceFlush");
+
+        now := timestamp_ns();
+        next_frame := frame_start + (NS_PER_S / 60);
+        if next_frame > now {
+            usleep(trunc((next_frame - now) / NS_PER_US));
+        };
+    };
+}
+
+fn timestamp_ns() i64 = {
+    it: TimeSpec = (seconds = 0, nanoseconds = 0);
+    Syscall'clock_gettime(0, it&);
+    it.seconds * NS_PER_S + it.nanoseconds
+}
+
+fn pack_rgba(r: i64, g: i64, b: i64, a: i64) u32 = 
+    a.shift_left(24).bit_or(r.shift_left(16).bit_or(g.shift_left(8).bit_or(b))).trunc();
+    // note: bgra                SWAP                                          SWAP
+    
+fn pack_rgba(r: f64, g: f64, b: f64, a: f64) u32 #fold = {
+    r := int(clamp(r, 0.0, 1.0) * 255.0);
+    g := int(clamp(g, 0.0, 1.0) * 255.0);
+    b := int(clamp(b, 0.0, 1.0) * 255.0);
+    a := int(clamp(a, 0.0, 1.0) * 255.0);
+    pack_rgba(r, g, b, a)
+}
+
+// TODO: deduplicate this with the FUSE stuff
+gpu_sync :: fn(q: *UQueue, cmd: Gpu.CtrlType, in: ~I, out: ~O) Gpu.CtrlHdr #where = {
+    none: []u8 = empty();
+    gpu_sync_extra(q, cmd, in, none, out)
+}
+
+gpu_sync_extra :: fn(q: *UQueue, cmd: Gpu.CtrlType, in: ~I, in2: ~IS, out: ~O) Gpu.CtrlHdr #where = {
+    h_in: Gpu.CtrlHdr = (type = cmd);
+    h_out := zeroed Gpu.CtrlHdr;
+    data_out := zeroed Gpu.GetDisplayInfoOut;
+    
+    f :: fn(data: ~T) []u8 #where => {
+        ::[]@type data[];
+        data.slice(1).interpret_as_bytes()
+    };
+    bufs := @slice(f(h_in&), f(in), in2.interpret_as_bytes(), f(h_out&), f(out));
+    q.pipe.work&.push(bufs = bufs, n = (bufs_readable = 3));
+    old := q.pipe.done.committed.bouba;
+    while => q.pipe.done.committed.bouba == old {
+        // TODO: interrupt instead of spinning
+        q'poll(q, 0);
+    };
+    _ := q.pipe.done&.pop();
+    h_out
+}
+
+#use("@/examples/os/libkernel.fr");
+Gpu :: import("@/examples/os/drivers/virtio_gpu.fr");
+#use("@/lib/sys/process.fr");

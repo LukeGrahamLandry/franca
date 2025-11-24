@@ -28,6 +28,10 @@
   - the thing i call strace is just in the userspace libc functions, 
     even the ones that are redirected syscalls just change elr so the work happens back in userspace. 
 
+---
+
+- given that's a dead end, maybe i'll feel better if i put a pretty picture on the screen
+
 ## (Nov 23)
 
 - convert the stdin signal hack to use the virtq directly as a UQueue
