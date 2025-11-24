@@ -118,18 +118,27 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
         init(uart[], gic);
     };
     tt := setup_virtual_memory(ram, pci);
-    barrier();
     
     first_console := true;
     each kernel.devices& { it |
         if it.intid != -1 {
             gic.set_group1(it.intid);
             gic.enable(it.intid);
+            if(kernel.uart, fn(jt) => if(jt.irq == it.intid, => kpanic("intid conflict")));
+            @if(timer_irq == it.intid) kpanic("intid conflict");
         };
         
         // TODO: use boot args to choose which to use for stdio? 
         if it.kind.id == 3 {
             if first_console {
+                // TODO: i should use the interrupt instead of spinning for printing. 
+                //       but clearly my interrupt handling is broken anyway, 
+                //       because if i allow it, random syscall results disappear
+                //       :FUCKED
+                // q[1] is TRANSMIT for printing
+                it.queues[1].driver.head.flags = 1;  // don't notify when the device consumes a buffer
+                //it.queues[1].device.head.flags = 1;  // don't notify when the device returns a buffer. i think it does nothing
+                
                 first_console = false;
                 label := @if(kernel.uart&.is_none(), "stdio.console", "other.console");
                 set_cstr(it.label&, label);
@@ -449,7 +458,6 @@ return_to_user :: AsmFunctionArmOnly(fn(task_x0: *Task) Never = (), {
 });
 
 return_to_scheduler :: fn() Never = {
-    barrier();
     cap := size_of(@type kernel.tasks) / size_of(Task);
     i := kernel.next_task_to_run&;
     range(0, cap) { _ |
@@ -594,6 +602,7 @@ syscall_func :: fn(task: *Task) void = {
             if pte.res.get(.tag) == 0b00 && pte.res.get(.reserved) == 0b1 {
                 pte.res.repr = 0;  // TODO: store permissions there and pass them to vmap_one
                 vmap_one(task.mem&, vaddr, kernel.physical&.map(1), true, true, false, true);
+                clear_tlb(vaddr);
                 return_to_user(task);
             };
             
@@ -663,14 +672,12 @@ syscall_func :: fn(task: *Task) void = {
         send_signal(task);
     };
     
-    handled := false;
     if intid == timer_irq {
-        handled = true;
-        // return_to_scheduler does reset_countdown and moves to someone else, 
-        // so don't have to do anything here to get preemption
+        i64.sys_set(.ICC_EOIR1_EL1, intid);
+        return_to_scheduler();    // calls reset_countdown and moves to someone else
     };
     
-    @if(!handled)
+    handled := false;
     each kernel.devices& { console |
         if intid == console.intid {
             console.check_interrupt(intid);
@@ -684,7 +691,10 @@ syscall_func :: fn(task: *Task) void = {
     };
     
     i64.sys_set(.ICC_EOIR1_EL1, intid);
-    return_to_scheduler();  
+    if identical(task, kernel.idle_task&) {
+        return_to_scheduler();  
+    };
+    return_to_user(task);
 };
 
 dump_page_stats :: fn() void = {
@@ -719,7 +729,7 @@ push_signal_context :: fn(task: *Task) void = {
         // as long as this is more than handle_signal's stack frame, it's fine. 
         // i don't have a test that requires this if i delay ICC_EOIR1_EL1 until sig_return,
         // but i still think you need to do it, its just a very tight race window. 
-        task.signal_stack += 2048;  
+        task.signal_stack -= 2048;  
         
         if task.signal_stack < task.signal_stack_left {
             tpanic(task, "too many nested signals");
@@ -741,7 +751,7 @@ launder_to_user_pointer :: fn(a: rawptr) i64 #noinline = {
 }
 
 user_unwind_signal :: @AsmFunctionArmOnly(fn(intid_x0: i64) Never = ()) => (
-    add_im(.X64, x1, sp, 0, 0),
+    add_im(.X64, x2, sp, 0, 0),
     movz(.X64, x16, 0xFFFF, Hw.Left16),
     movk(.X64, x16, 0x0004, Hw.Left0),
     mov(.X64, x8, x16),

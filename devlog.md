@@ -1,4 +1,35 @@
 
+## (Nov 24)
+
+- problem statement is that sometimes i do a syscall and it just doesn't 
+  happen so it looks like the return value is the first argument. 
+  - only on vzf. qemu-hvf, which you'd think would be the same, seems to work fine. 
+  - manifests as: mmap returns null, munmap doesn't return 0, redirected openat returns 
+    the directory as the file so you try to close it twice. 
+  - with strace on it happens every time, but it was happening before at startup 
+    and i just had to run it a few times to make it work
+- tried TLBI_VALE1IS, just because that something i know im supposed to do, doesn't help. 
+  made qemu-tcg slower so for now i'll do it less. 
+  i assmue doing it at the beginning doesn't matter, 
+  probably doesn't cache the emptiness of all the memory ive never used?
+- its nothing about preemption. if i never init_timer, it still happens. 
+- oooo but it doesn't happen if i don't enable the virtio-console interrupt. 
+ - works if i set VIRTQ_AVAIL_F_NO_INTERRUPT in `q[1].driver.flags`,
+  - so problem is when im printing something it sends an interrupt while im spinning 
+    in StdoutFile.write calling poll. 
+  - really i should be using the other interrupt instead of spinning 
+    but the point is it should work either way. 
+  - why does getting an interrupt there make the next syscall fail?
+    all the kernel does in that interrut handler is poll the queue, 
+    and it interrupts are masked while its doing that so the only possible things should be 
+    intterupt while its in the syscall so when it returns it immediatly polls again even tho
+    thats useless or intterrupt in the loop before the syscall so the syscall is useless 
+    and either of those are fine. 
+  - the thing i call strace is just in the userspace libc functions, 
+    even the ones that are redirected syscalls just change elr so the work happens back in userspace. 
+
+## (Nov 23)
+
 - convert the stdin signal hack to use the virtq directly as a UQueue
   - bamboozled myself a bit 
     - UQueue indices were wrong because the kernel init was still giving it a buffer to write to
@@ -21,9 +52,13 @@
   i do think making more syscall numbers different from linux is an improvement
   so you can intercept them even if they try not to go through libc. 
 - making the kernel side of virtio drivers more data driven since they're all the same. 
-  - wasted some time on trying to make a constant containing an array and not getting relocations. 
-
-TODO: doesn't work with `strace on` in vzf
+  - wasted some time on trying to make a constant containing an array and not getting relocations.
+- return ctx from handle_signal as an extra check that its nested correctly 
+- being a bit less wasteful
+  - for collect_fs, since i'm not actually using the hash table, store the constant data as a flat array, (saves 72k)
+  - don't leak the boxed FuseFile
+  - reuse file descriptors
+- more work on the endless quest for the lost syscalls 
 
 ## (Nov 22)
 

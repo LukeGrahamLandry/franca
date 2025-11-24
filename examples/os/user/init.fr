@@ -6,8 +6,6 @@ main :: fn() void = {
     buf.set_bytes(0);  // :SLOW force it to commit the pages
     _ := set_signal_handler(callee = handle_signal, stack = buf);
     
-    init_vfs();
-
     if query_current_arch() != .wasm32 {
         redo_relocations_static_linux();
     };
@@ -30,53 +28,17 @@ main :: fn() void = {
         signal_env[] = c[];
         signal_env.thread_index = -1;  // make handle_signal NOT count as the same thread for reenterant mutex
 
-        q := zeroed UQueue; q := q&;
-        ok := virtq_create(q, "Host.fs", 1);
-        q: ?*UQueue = @if(ok, (Some = q), .None);
+        init_vfs();
         
-        Fs :: import("@/examples/os/user/fs.fr");
-        fs.fuse_q = q;
-        if q { q |
-            fuse_root := init_fuse(q);
-            cwd := get_file(fs.root_dir).unwrap();
-            cwd := MemDir.ptr_from_raw(cwd.data);
-            child := get_file(fuse_root).unwrap();
-            child := FuseFile.ptr_from_raw(child.data)[];
-            create_child(cwd, "Host", FuseFile, child);
-            
-            bytes := read_entire_file_or_crash(temp(), "Host/a.txt");
-            @println("ALL: %", bytes);
-            
-            fd := Posix'openat(fuse_root, "a.txt".as_cstr(), Posix'O'RDWR, 0)
-                || @panic("failed to open");
-            
-            _ := Syscall'lseek(fd, 0, .Set) 
-                || @panic("failed lseek");
-                
-            buf := @tfmt("Goodbye World %!", timestamp());
-            writen_len := Syscall'write(fd, buf.ptr, buf.len)
-                || @panic("failed write");
-            @println("WRITE: %/%", writen_len, buf.len);
-            
-            pos := Syscall'lseek(fd, 10, .Set) 
-                || @panic("failed lseek");
-            @println("seek to %", pos);
-            
-            out := u8.list(1000, temp());
-            read_len := Syscall'read(fd, out.items().end_pointer(), out.maybe_uninit.len - out.len) 
-                || @panic("failed read");
-            out.len += read_len;
-            @println("READ(%): %", read_len, out.items());
-            
-            Syscall'close(fd);
-            
-            bytes := read_entire_file_or_crash(temp(), "Host/foo/bar.txt");
-            @println("foo/bar.txt: %", bytes);
-        };
-        
-        buf := u8.list(general_allocator());
+        buf := u8.list(fs.allocator);
         timer := false;
         @println("The system took %ms to boot.", timestamp());
+        
+        //push_dynamic_context { 
+        //    fs.strace = true;
+        //    import("@/compiler/main.fr")'main2("examples/sudoku.fr", true);
+        //};
+        
         // TODO: this shell should share some logic with examples/terminal.fr
         loop {
             mark := temp().mark();
@@ -103,18 +65,10 @@ main :: fn() void = {
                 @case("help") => print(SHELL_HELP.rest(1));
                 @default => {
                     break :: local_return;
-                    command := parts[0];
-                    if command.ends_with(".fr") {
-                        if !file_exists(command) {
-                            check := @tfmt("examples/%", command);
-                            if !file_exists(check) {
-                                @println("file not found: %", command);
-                                break();
-                            } else {
-                                command = check;
-                            };
-                        }
-                        
+                    command := search_path(parts[0]) || {
+                        @print("unknown command: |%|\n", buf.items());
+                        break()
+                    };
                         println("compiling...");
                         start := timestamp();
                         push_dynamic_context { 
@@ -132,15 +86,26 @@ main :: fn() void = {
                             @print("(%ms)\n", timestamp() - start);
                         };
                         // TODO: don't crash on compile error
-                    } else {
-                        @print("unknown command: |%|\n", buf.items());
-                    };
                 };
             };
             buf&.clear();
             temp().reset(mark);
         };
     };
+}
+
+search_path :: fn(command: Str) ?Str = {
+    if !command.ends_with(".fr") {
+        command = @tfmt("%.fr", command);
+    };
+    path := @slice("", "examples/", "examples/os/bin/");
+    for path { it |
+        check := @tfmt("%%", it, command);
+        if file_exists(check) {
+            return(Some = check);
+        };
+    };
+    .None
 }
 
 #use("@/examples/os/user/vfs.fr");
@@ -171,7 +136,7 @@ pl011_int_poll :: fn(q: *UQueue, who: i64) void = {
     fs.stdin.pipe.done&.push(entry);
 }
 
-handle_signal :: fn(ctx: *MContext, intid: i64, data: i64) i64 = {
+handle_signal :: fn(ctx: *MContext, intid: i64, data: i64) Ty(i64, *MContext) = {
     set_dynamic_context(DefaultContext.raw_from_ptr(signal_env));
     // TODO: don't hardcode the 33. get it from device tree. 
     //       the kernel side now knows the right numbers. just have to use them here. 
@@ -186,19 +151,22 @@ handle_signal :: fn(ctx: *MContext, intid: i64, data: i64) i64 = {
             entry.bufs[0][i] = data.trunc();
             Futex'wake(work.committed.kiki&, 1);
         };  // else, silently drop the bytes :(
-        return(intid);
+        return(intid, ctx);
     };
     
     ec := ctx.esr.shift_right_logical(26).bit_and(0b111111);
     // TODO: import Gic.null_interrupt_id
     if intid != 1023 || ec != 0b010101 {
-        push_emergency_dynamic_environment {
+        crashing :: @static(bool);
+        fs.strace = false;
+        if !crashing[] {
+            crashing[] = true;
             fs.strace = false;
             @println("sp = %; fp = %; lr = %; ip = %;", ctx.gpr&[31], ctx.gpr&[29], ctx.gpr&[30], ctx.elr);
             eprintln("fatal signal");
             report_backtrace(fp = ctx.gpr&[29].rawptr_from_int(), ip = ctx.elr.rawptr_from_int());
-            Syscall'exit(1);
         };
+        Syscall'exit(1);
     };
     
     // when targeting real linux, (open,fstat)at have a sucky abi 
@@ -211,6 +179,7 @@ handle_signal :: fn(ctx: *MContext, intid: i64, data: i64) i64 = {
     callee := @switch(syscall_number) {
         @case(56) => { x :: LIBC.FR_openat; @as(rawptr) x };
         @case(79) => { x :: LIBC.FR_fstatat; @as(rawptr) x };
+        @case(64) => { x :: LIBC.write; @as(rawptr) x };
         @default => @panic("invalid syscall %", syscall_number);
     };
     
@@ -221,8 +190,7 @@ handle_signal :: fn(ctx: *MContext, intid: i64, data: i64) i64 = {
     
     // redirect the call (keeping the same arguments in x0..<6)
     ctx.elr = callee.int_from_rawptr();
-    
-    intid
+    (intid, ctx)
 }
 
 redo_relocations_static_linux :: fn() void = {
@@ -323,8 +291,8 @@ LIBC :: @struct {
         // default impl for everything to just error
         closed_file_vtable :: @static(FileVTable) { () };
         fs.fd[f.fd.intcast()] = (vtable = closed_file_vtable, data = zeroed(rawptr));
+        fs.free&.push_back(f, fs.allocator);
         fs.mutex&.unlock();
-        // TODO: reuse slots of the array
         // note: not freeing fd.data because it's owned by the directory.
         0
     };
@@ -363,7 +331,10 @@ LIBC :: @struct {
         out[] = zeroed(@type out[]);
         fd := get_file(f) || return(-1);
         result := fd'vtable'fstat(fd.data, out);
-        @trace("fstat(%) = %", f.fd, result);
+        @trace("fstat(%) = %; %", f.fd, result, @if(result == 0, {
+            ifmt := out.st_mode.int().bit_and(Posix.S.IFMT);
+            @if(ifmt == Posix.S.IFDIR, "DIR", "REG")
+        }, "-"));
         result
     };
     readlinkat :: fn(parent: Fd, path: CStr, ptr: *u8, len: i64) i64 = 
@@ -479,12 +450,12 @@ LIBC :: @struct {
         fd := get_file(f) || return(-1);
         result := fd'vtable'openat(fd.data, (ptr = path.ptr), flags, mode);
         @trace("openat(fd = %, %, %, %) = %", f.fd, path, flags, mode, result);
+        @assert(f.fd.intcast() != result, "openat must return new fd");
         result
     }
     
     // note: this is the linux syscall abi, not the libc abi
     FR_fstatat :: fn(fd: Fd, path: CStr, out: *Posix.Linux.StatArm64) i64 = {
-        fd_in := fd.fd;
         fd := FR_openat(fd, path, 0, 0);
         @if(fd < 0) return(fd);
         fd: Fd = (fd = fd.intcast());

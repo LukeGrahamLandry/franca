@@ -11,7 +11,6 @@ mmap :: fn(task: *Task, addr: i64, len: i64, prot: i64, flags: i64, fd: i64, off
     PAGE_SIZE := kernel.page_size;
     pages := len.ualign_to(PAGE_SIZE).udiv(PAGE_SIZE);
     result_addr := vmap_reserve(task.mem&, pages);
-    barrier();  // TODO: theres an instruction to kill the tlb or something
     if result_addr == 0 {
         tpanic("vmap_reserve can't return null");
     };
@@ -20,7 +19,6 @@ mmap :: fn(task: *Task, addr: i64, len: i64, prot: i64, flags: i64, fd: i64, off
 
 mprotect :: fn(addr: i64, len: i64, prot: i64) i64 #n(226) = {
     // TODO: do the protection. for now everything is RWX so it doesn't matter. 
-    barrier(); // TODO: theres an instruction to kill the tlb or something
     0
 }
 
@@ -32,7 +30,6 @@ munmap :: fn(task: *Task, addr: i64, len: i64) i64 #n(215) = {
         tpanic("bad munmap");
     };
     vunmap(task.mem&, addr, page_count);
-    barrier();  // TODO: theres an instruction to kill the tlb or something
     0
 }
 
@@ -59,7 +56,6 @@ futex :: fn(task: *Task, addr: i64, op: i64, val: i64, timeout: i64) i64 #n(98) 
             // TODO: gets more complicated when i have multiple cores
             // TODO: what happens if `addr` is shared memory thats mapped to different virtual addresses?
             p := u32.ptr_from_int(addr);
-            barrier();
             sleep := p[] == val.trunc();
             if sleep {
                 task.futex_wait = addr;
@@ -89,7 +85,7 @@ sig_action :: fn(task: *Task, new: i64, old: i64) i64 #n(0xFFFF0003) = {
     old.stack.len = task.signal_stack - task.signal_stack_left;
     
     // TODO: check that buf[..+len] is writable by task
-    new := SignalHandler.ptr_from_int(new);
+    new := SignalHandler.ptr_from_int(new)[];
     task.signal_handler = bit_cast_unchecked(@type new.callee, i64, new.callee);
     buf := u8.int_from_ptr(new.stack.ptr);
     task.signal_stack_left = buf;
@@ -98,10 +94,11 @@ sig_action :: fn(task: *Task, new: i64, old: i64) i64 #n(0xFFFF0003) = {
     0
 }
 
-sig_return :: fn(task: *Task, intid: i64, sp: i64) i64 #n(0xFFFF0004) = {
+sig_return :: fn(task: *Task, intid: i64, ctx: i64, sp: i64) i64 #n(0xFFFF0004) = {
     elr := 5*4 + 4/*bti*/ + launder_to_user_pointer(user_unwind_signal); // :end_user_unwind_signal
     @if(task.mcontext.elr != elr) tpanic("sig_return is #once");
-    @if(task.signal_stack < sp) tpanic("poorly nested sig_return");
+    @if(sp < task.signal_stack/*over estimate*/ || sp < task.signal_stack_left) tpanic("poorly nested sig_return (stack oob)");
+    @if(ctx != sp) tpanic("poorly nested sig_return (returned wrong ctx)");
     task.signal_stack = sp;
     saved := SavedRegisters.ptr_from_int(sp);
     if intid != 1023 {
@@ -114,14 +111,15 @@ sig_return :: fn(task: *Task, intid: i64, sp: i64) i64 #n(0xFFFF0004) = {
 }
 
 spawn_thread :: fn(parent: *Task, ctx: i64, exit_futex: i64) i64 #n(0xFFFF0005) = {
-    ctx := SavedRegisters.ptr_from_int(ctx);
+    ctx := SavedRegisters.ptr_from_int(ctx)[];
     child := alloc_task(parent.mem.root);
     if u32.ptr_from_int(ctx.elr)[] != Arm.branch_target_marker {
         tpanic("spawn thread expected bti");
     };
-    child.mcontext.gpr = ctx.gpr;
-    child.mcontext.elr = ctx.elr;
-    child.mcontext.fpr = ctx.fpr;
+    if ctx.esr != 0 || ctx.spsr != 0 || ctx.far != 0 {
+        tpanic("spawn_thread: don't try to set esr,spsr,far");
+    };
+    child.mcontext = ctx;
     child.exit_futex = exit_futex;
     child.active = true;
     u32.ptr_from_int(exit_futex)[] = child.thread_id.trunc();
@@ -133,7 +131,7 @@ virtq_poll :: fn(task: *Task, it: i64) i64 #n(0xFFFF0007) = {
         // TODO: it sucks that i have to spin instead of waiting on a futex
         //       because i don't get interrupts for the fuse stuff. presumably its a skill issue.
         //       regardless, yielding if it failed makes it a bit less offensive. 
-        yield(task);
+        //yield(task);
     };
     1
 }
@@ -178,8 +176,8 @@ fn do_virtq_poll(it: *UQueue) bool = {
         
         // TODO: be more careful about being atomic? but there's only one kernel thread so its fine. 
         // pipe.push(it) but without syscalls
-        pipe.done.claimed.bouba += 1;
-        pipe.done&[pipe.done.claimed.bouba - 1] = it;
+        i := u32.atomic_inc(pipe.done.claimed.bouba&);
+        pipe.done&[i] = it;
         pipe.done.committed.bouba += 1;
         need_wake += 1;
         made_progress = true;
@@ -187,9 +185,9 @@ fn do_virtq_poll(it: *UQueue) bool = {
     
     // p.work -> q.avail
     while => pipe.work.claimed.kiki != pipe.work.claimed.bouba {
-        pipe.work.claimed.kiki += 1;
+        i := u32.atomic_inc(pipe.work.claimed.kiki&);
         // note: `it` is left in the pipe, claimed but uncommitted, until the device finishes the request.  
-        it := pipe.work&[pipe.work.claimed.kiki - 1]&;
+        it := pipe.work&[i]&;
         if it.system_id != MAX_u32 {
             tpanic("work: corrupt UQueue.Entry id");
         };
@@ -248,6 +246,7 @@ generate :: fn() []Ty(@FnPtr(task: *Task) void, i64) = {
         i := impl_func.annotations&.index_of(fn(it) => it.name == @symbol n)
             || continue();
         syscall_number := const_eval(i64)(impl_func.annotations[i].args);
+        @assert(results.find(fn(it) => it._1 == syscall_number).is_none(), "duplicate");
         
         fr := current_compiler_context();
         func := empty_fn(impl_func.name, loc);
