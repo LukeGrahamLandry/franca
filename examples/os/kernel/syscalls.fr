@@ -1,6 +1,6 @@
 // this is used when stdout console is a pl011 instead of a virtq. 
 debug_write :: fn(buf: i64, len: i64) i64 #n(0xFFFF0009) = {
-    kprint(u8.ptr_from_int(buf).slice(len));
+    kprint(u8.check_user_read(buf, len));
     0
 }
 
@@ -18,6 +18,7 @@ mmap :: fn(task: *Task, addr: i64, len: i64, prot: i64, flags: i64, fd: i64, off
 }
 
 mprotect :: fn(addr: i64, len: i64, prot: i64) i64 #n(226) = {
+    check_user_remap(addr, len);  // TODO: merge this loop with the one for doing the work
     // TODO: do the protection. for now everything is RWX so it doesn't matter. 
     0
 }
@@ -26,6 +27,7 @@ munmap :: fn(task: *Task, addr: i64, len: i64) i64 #n(215) = {
     PAGE_SIZE := kernel.page_size;
     addr := addr.align_back(PAGE_SIZE);
     page_count := len.ualign_to(PAGE_SIZE).udiv(PAGE_SIZE);
+    check_user_remap(addr, len);  // TODO: merge this loop with the one for doing the work
     if addr + page_count * PAGE_SIZE >= kernel.next_vaddr || addr < u8.int_from_ptr(kernel.ram.end_pointer()) || page_count < 0 {
         tpanic("bad munmap");
     };
@@ -47,15 +49,12 @@ exit :: fn(task: *Task, status: i64) i64 #n(94) = {
 
 futex :: fn(task: *Task, addr: i64, op: i64, val: i64, timeout: i64) i64 #n(98) = {
     @if(timeout != 0) tpanic("TODO: futex timeout");
-    // TODO: check that `addr` is committed and readable
-    pte := index_page_table(task.mem&, addr.align_back(kernel.page_size));
-    @if(pte.map.repr == 0) tpanic("futex unmapped address");
+    p := u32.check_user_read(addr);
     
     @switch(op) {
         @case(0) => {  // wait
             // TODO: gets more complicated when i have multiple cores
             // TODO: what happens if `addr` is shared memory thats mapped to different virtual addresses?
-            p := u32.ptr_from_int(addr);
             sleep := p[] == val.trunc();
             if sleep {
                 task.futex_wait = addr;
@@ -78,56 +77,63 @@ yield :: fn(task: *Task) i64 #n(0xFFFF0002) = {
 }
 
 sig_action :: fn(task: *Task, new: i64, old: i64) i64 #n(0xFFFF0003) = {
-    old := SignalHandler.ptr_from_int(old);
+    old := SignalHandler.check_user_write(old);
     old.callee = bit_cast_unchecked(i64, @type old.callee, task.signal_handler);
     old.stack.ptr = u8.ptr_from_int(task.signal_stack_left);
-    // TODO: this length is wrong if its currently in a signal handler (which it will be since its doing a syscall)
-    old.stack.len = task.signal_stack - task.signal_stack_left;
+    old.stack.len = task.signal_stack_right - task.signal_stack_left;
     
-    // TODO: check that buf[..+len] is writable by task
-    new := SignalHandler.ptr_from_int(new)[];
+    new := SignalHandler.check_user_read(new)[];
     task.signal_handler = bit_cast_unchecked(@type new.callee, i64, new.callee);
     buf := u8.int_from_ptr(new.stack.ptr);
+    u8.check_user_write(buf, new.stack.len);
     task.signal_stack_left = buf;
-    task.signal_stack = buf + new.stack.len;
+    task.signal_stack_right = buf + new.stack.len;
+    task.signal_stack = task.signal_stack_right;
     
     0
 }
 
 sig_return :: fn(task: *Task, intid: i64, ctx: i64, sp: i64) i64 #n(0xFFFF0004) = {
     elr := 5*4 + 4/*bti*/ + launder_to_user_pointer(user_unwind_signal); // :end_user_unwind_signal
-    @if(task.mcontext.elr != elr) tpanic("sig_return is #once");
-    @if(sp < task.signal_stack/*over estimate*/ || sp < task.signal_stack_left) tpanic("poorly nested sig_return (stack oob)");
-    @if(ctx != sp) tpanic("poorly nested sig_return (returned wrong ctx)");
-    task.signal_stack = sp;
-    saved := SavedRegisters.ptr_from_int(sp);
+    bad := false
+        || task.mcontext.elr != elr      // #once
+        || sp < task.signal_stack_left   // oob
+        || sp > task.signal_stack_right  // oob
+        || sp < task.signal_stack        // over estimate of current position
+        || ctx != sp                     // returned the wrong one (poorly nested)
+    ;
+    @if(bad) tpanic("invalid sig_return");
+    // don't need to check_user_read because sig_action does and just checked its in bounds of signal_stack
+    // TODO: probably shouldn't expose all the bits of spsr mutably to user space but do want to store them
+    task.mcontext = SavedRegisters.ptr_from_int(sp)[];
     if intid != 1023 {
         i64.sys_set(.ICC_EOIR1_EL1, intid);
     };
-    // TODO: probably shouldn't expose all the bits of spsr mutably to user space but do want to store them
-    task.mcontext = saved[];
+    task.signal_stack = sp;
     task.signal_stack += size_of(SavedRegisters);
     task.mcontext.gpr&[0]
 }
 
 spawn_thread :: fn(parent: *Task, ctx: i64, exit_futex: i64) i64 #n(0xFFFF0005) = {
-    ctx := SavedRegisters.ptr_from_int(ctx)[];
-    child := alloc_task(parent.mem.root);
+    ctx := SavedRegisters.check_user_read(ctx)[];
     if u32.ptr_from_int(ctx.elr)[] != Arm.branch_target_marker {
         tpanic("spawn thread expected bti");
     };
     if ctx.esr != 0 || ctx.spsr != 0 || ctx.far != 0 {
         tpanic("spawn_thread: don't try to set esr,spsr,far");
     };
+    tid := u32.check_user_write(exit_futex);
+    child := alloc_task(parent.mem.root);
     child.mcontext = ctx;
     child.exit_futex = exit_futex;
     child.active = true;
-    u32.ptr_from_int(exit_futex)[] = child.thread_id.trunc();
+    tid[] = child.thread_id.trunc();
     child.thread_id
 }
 
 virtq_poll :: fn(task: *Task, it: i64) i64 #n(0xFFFF0007) = {
-    if !do_virtq_poll(UQueue.ptr_from_int(it)) {
+    it := UQueue.check_user_write(it);
+    if !do_virtq_poll(it) {
         // TODO: it sucks that i have to spin instead of waiting on a futex
         //       because i don't get interrupts for the fuse stuff. presumably its a skill issue.
         //       regardless, yielding if it failed makes it a bit less offensive. 
@@ -193,6 +199,9 @@ fn do_virtq_poll(it: *UQueue) bool = {
         };
         read_n := it.n.bufs_readable;
         for it.bufs { it |
+            // TODO: really i should be check_user_(read, write) here, but meh.
+            //       if i do that i also have to be careful to do it in the context of the person who
+            //       owns the queue, not the task that  was interrupted if we're in Virt.check_interrupt
             q.push_virt(it, @if(read_n > 0, 0, Virt.DESC_F_WRITE));
             read_n -= 1;
         };
@@ -212,9 +221,8 @@ fn do_virtq_poll(it: *UQueue) bool = {
 virtq_create :: fn(task: *Task, out: i64, p: i64, l: i64, q_index: i64) i64 #n(0xFFFF0008) = {
     // not a problem to remove this. its just a debugging aid for now. 
     @if(task.thread_id != 1) tpanic("for now only the init task can create a virtq");
-    
-    out := UQueue.ptr_from_int(out);
-    label := u8.ptr_from_int(p).slice(l);
+    out := UQueue.check_user_write(out);
+    label := u8.check_user_read(p, l);
     each kernel.devices& { it |
         if it.label&.get_cstr() == label {
             q := it.queues.index(q_index);
@@ -232,6 +240,24 @@ virtq_create :: fn(task: *Task, out: i64, p: i64, l: i64, q_index: i64) i64 #n(0
         }
     };
     -1
+}
+
+// translate a virtual address range to its backing physical address ranges. 
+virt_translate :: fn(task: *Task, addr: i64, len: i64, out_addr: i64, out_len: i64) i64 #n(0xFFFF000A) = {
+    // translating requires write permission because you can use virtio to write to physical memory addresses. 
+    //     which is still not at all secure because you can put any random numbers in there 
+    //     so this has to be replaced eventually, but for now i'm using memory 
+    //     protection to catch bugs not to sandbox untrusted code, so it's fine. 
+    virtual := u8.check_user_write(addr, len);
+    out := Slice(u8).check_user_write(out_addr, out_len);
+    i := 0;
+    Virt'iter_phys_pages(task.mem&, virtual) { phys |
+        if i < out.len {
+            out[i] = phys;
+        };
+        i += 1;
+    };
+    i
 }
 
 generate :: fn() []Ty(@FnPtr(task: *Task) void, i64) = {
