@@ -1,4 +1,9 @@
 
+- pass argc,argv,envp correctly in elf_loader and use that to pass the device tree to user space. 
+- use bootargs to run something on startup 
+  so when im testing something specific i don't have to type the command every time. 
+- catch panics and mostly recover to the shell
+
 ## (Nov 24)
 
 - problem statement is that sometimes i do a syscall and it just doesn't 

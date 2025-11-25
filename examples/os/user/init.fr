@@ -15,12 +15,27 @@ main :: fn() void = {
         _ := Syscall'perform_syscall(args&, 0xAAAA0002);
         
         Crash'push_aot_debug_resolver();
-        c.panic_hook = fn(s) = {
-            c := context(DefaultContext);
-            fs.strace = false;
-            Crash'backtracing_panic_handler(s)
-        };
         
+        #use("@/lib/sys/jump.fr");
+        jumpbuf :: @static(JumpBuf);
+        throw_panic_hook :: fn(s: Str) Never = {
+            panicking :: @static(bool);
+            c := context(DefaultContext);
+            old := fs.strace;
+            fs.strace = false;
+            @if(panicking[]) Crash'backtracing_panic_handler(s);
+            panicking[] = true;
+            println(s);
+            Crash'report_backtrace(fp = Crash'trace_start(), ip = 0.rawptr_from_int());
+            panicking[] = false;
+            fs.strace = old;
+            // TODO: don't leak the compiler, etc.
+            @if(c.thread_index != 1) {
+                @println("child thread % panicked", c.thread_index);
+                Syscall'exit(1); 
+            };
+            throw(jumpbuf);
+        };
         
         fs.device_tree_bytes = {
             devicetree := c.cli_arguments[0].ptr;
@@ -47,7 +62,15 @@ main :: fn() void = {
             Term'interactive_read_line(buf&);
             print("\n");
             fs.strace = old;
-            decode_and_run_cmd(buf.items());
+            
+            push_dynamic_context {
+                context(DefaultContext)[].panic_hook = throw_panic_hook;
+                @match(try(jumpbuf)) {
+                    fn Try() => decode_and_run_cmd(buf.items());
+                    fn Catch() => println("main thread panicked.");
+                };
+            };
+            
             buf&.clear();
             temp().reset(mark);
         };
@@ -677,9 +700,11 @@ spawn <path>         (new thread won't block the shell)
 strace <on, off>     (toggle libc logging)
 time <on, off>       (log runtime after running a program)
 uptime               (read the system counter)
+devicetree           (show hardware info from the boot loader)
 
 example programs:
 test_fuse
 test_faults
 spawn test_screen
+
 """;

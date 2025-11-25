@@ -34,7 +34,6 @@ currently it's good enough to run the franca compiler on qemu-system-aarch64's v
 - dlopen
 - ptrace
 - swapping
-- frame buffer
 - keyboard 
 - mouse
 - audio
