@@ -286,23 +286,21 @@ init_task :: fn(task: *Task, callee: rawptr) void = {
 }
 
 fn kill_task(task: *Task) void = {
-    if task.exit_futex != 0 {
-        u32.ptr_from_int(task.exit_futex)[] = 0;
-        futex_wake(task.exit_futex, MAX_i32);
-    };
-    
     // TODO: deallocate its pages and stuff
     //       (but for now everything is thread-like not process-like)
-    // TODO: fix race. need to make it non-schedulable, then free pages, then make the task slot reusable. 
-    task.active = false;
     if task.thread_id == 1 {
         kprint("init task exited\n");
         stop();
     };
-    if task.thread_id == 0 {
-        kpanic("tried to kill idle_task");
-    };
+    @if(task.thread_id == 0) kpanic("tried to kill idle_task");
+    @if(task.exit_futex[] != task.thread_id.trunc()) kprint("WARN: corrupt exit_futex");
+    task.exit_futex[] = 0;
+    futex_wake(u32.int_from_ptr(task.exit_futex), MAX_i32);
+    task.active = false;
 }
+
+get_current_task :: fn() *Task = 
+    sys_get(*Task, .TPIDR_EL1);
 
 fn futex_wake(addr: i64, val: i64) i64 = {
     // TODO: unfair and :slow, maybe i want a queue per futex
@@ -525,13 +523,10 @@ Task :: @struct {
     mcontext: SavedRegisters;  
     mem: AddressSpace;
     kernel_sp: *u8;
-    signal_handler: i64;  // @FnPtr(task: *Task) void;
+    t: ThreadConfig #use;
     signal_stack: i64;
-    signal_stack_left: i64;
-    signal_stack_right: i64;
     thread_id: i64;
     futex_wait: i64;  // *u32
-    exit_futex: i64;  // *u32
     active: bool;
 };
 
@@ -584,7 +579,7 @@ syscall_func :: fn(task: *Task) void = {
         
         // always the init task! not whatever task was interrupted. 
         init := kernel.tasks&[0]&;
-        @if(init.signal_handler == 0) kpanic("got input before init signal handler");
+        @if(init.signal_stack_buf.len == 0) kpanic("got input before init signal handler");
         push_signal_context(init);
         init.mcontext.gpr&[1] = intid;
         init.mcontext.gpr&[2] = byte.zext();  // HACK
@@ -656,7 +651,7 @@ syscall_func :: fn(task: *Task) void = {
             inline_for calls { $it |
                 callee, n := @run it[];
                 if syscall_number == n {
-                    callee(task);
+                    args.gpr&[0] = callee(args.gpr&[0], args.gpr&[1], args.gpr&[2], args.gpr&[3], args.gpr&[4], args.gpr&[5]);
                     return_to_user(task);
                 }
             };
@@ -713,9 +708,12 @@ dump_page_stats :: fn() void = {
 
 push_signal_context :: fn(task: *Task) void = {
     task.futex_wait = 0;
-    if task.signal_handler != 0 {
+    if task.signal_stack_buf.len == 0 {
+        tpanic(task, "no signal handler")
+    };
         ctx := task.mcontext&;
-        if ctx.gpr&[31] > task.signal_stack_left && ctx.gpr&[31] < task.signal_stack {
+        signal_stack_left, signal_stack_right := task.t&.sigstack();
+        if ctx.gpr&[31] > signal_stack_left && ctx.gpr&[31] < task.signal_stack {
             // when sending a nested signal, update for whatever stack frames have been pushed in user space. 
             task.signal_stack = ctx.gpr&[31];
         };
@@ -723,7 +721,7 @@ push_signal_context :: fn(task: *Task) void = {
         task.signal_stack -= size_of(SavedRegisters);
         saved := SavedRegisters.ptr_from_int(task.signal_stack);
         saved[] = ctx[];
-        ctx.elr = task.signal_handler;
+        ctx.elr = bit_cast_unchecked(SignalHandler.F, i64, task.signal_handler);
         ctx.gpr&[0] = task.signal_stack;
         ctx.gpr&[1] = Gic.null_interrupt_id;
         ctx.gpr&[2] = 0;
@@ -736,13 +734,15 @@ push_signal_context :: fn(task: *Task) void = {
         // but i still think you need to do it, its just a very tight race window. 
         task.signal_stack -= 2048;  
         
-        if task.signal_stack < task.signal_stack_left {
+        if task.signal_stack < signal_stack_left {
             tpanic(task, "too many nested signals");
         };
-    } else {
-        tpanic(task, "no signal handler")
-    };
 }
+
+fn sigstack(t: *ThreadConfig) Ty(i64, i64) = 
+    (u8.int_from_ptr(t.signal_stack_buf.ptr), u8.int_from_ptr(t.signal_stack_buf.end_pointer()));
+    
+SyscallFunc :: @FnPtr(x0: i64, x1: i64, x2: i64, x3: i64, x4: i64, x5: i64) i64;
 
 send_signal :: fn(task: *Task) Never = {
     push_signal_context(task);
@@ -783,7 +783,7 @@ poweroff :: fn() Never = {
 }
 
 fn tpanic(msg: Str) Never = 
-    tpanic(sys_get(*Task, .TPIDR_EL1), msg);
+    tpanic(get_current_task(), msg);
 
 fn tpanic(task: *Task, msg: Str) Never = {
     kprint("killed ");

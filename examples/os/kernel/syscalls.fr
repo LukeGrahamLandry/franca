@@ -4,7 +4,8 @@ debug_write :: fn(buf: i64, len: i64) i64 #n(0xFFFF0009) = {
     0
 }
 
-mmap :: fn(task: *Task, addr: i64, len: i64, prot: i64, flags: i64, fd: i64, offset: i64) i64 #n(222) = {
+mmap :: fn(addr: i64, len: i64, prot: i64, flags: i64, fd: i64, offset: i64) i64 #n(222) = {
+    task := get_current_task();
     if addr != 0 || fd.intcast() != -1 || offset != 0 {
         tpanic("non-trivial mmap");
     };
@@ -23,7 +24,8 @@ mprotect :: fn(addr: i64, len: i64, prot: i64) i64 #n(226) = {
     0
 }
 
-munmap :: fn(task: *Task, addr: i64, len: i64) i64 #n(215) = {
+munmap :: fn(addr: i64, len: i64) i64 #n(215) = {
+    task := get_current_task();
     PAGE_SIZE := kernel.page_size;
     addr := addr.align_back(PAGE_SIZE);
     page_count := len.ualign_to(PAGE_SIZE).udiv(PAGE_SIZE);
@@ -35,7 +37,8 @@ munmap :: fn(task: *Task, addr: i64, len: i64) i64 #n(215) = {
     0
 }
 
-exit :: fn(task: *Task, status: i64) i64 #n(94) = {
+exit :: fn(status: i64) i64 #n(94) = {
+    task := get_current_task();
     if status != 0 {
         kprint_label("called exit: ", status);
     };
@@ -47,7 +50,7 @@ exit :: fn(task: *Task, status: i64) i64 #n(94) = {
     return_to_scheduler()  // yield
 }
 
-futex :: fn(task: *Task, addr: i64, op: i64, val: i64, timeout: i64) i64 #n(98) = {
+futex :: fn(addr: i64, op: i64, val: i64, timeout: i64) i64 #n(98) = {
     @if(timeout != 0) tpanic("TODO: futex timeout");
     p := u32.check_user_read(addr);
     
@@ -57,6 +60,7 @@ futex :: fn(task: *Task, addr: i64, op: i64, val: i64, timeout: i64) i64 #n(98) 
             // TODO: what happens if `addr` is shared memory thats mapped to different virtual addresses?
             sleep := p[] == val.trunc();
             if sleep {
+                task := get_current_task();
                 task.futex_wait = addr;
                 task.mcontext.gpr&[0] = 0;
                 return_to_scheduler();  // yield
@@ -71,34 +75,36 @@ futex :: fn(task: *Task, addr: i64, op: i64, val: i64, timeout: i64) i64 #n(98) 
     }
 }
 
-yield :: fn(task: *Task) i64 #n(0xFFFF0002) = {
+yield :: fn() i64 #n(0xFFFF0002) = {
+    task := get_current_task();
     task.mcontext.gpr&[0] = 0;
     return_to_scheduler()
 }
 
-sig_action :: fn(task: *Task, new: i64, old: i64) i64 #n(0xFFFF0003) = {
+sig_action :: fn(new: i64, old: i64) i64 #n(0xFFFF0003) = {
+    task := get_current_task();
+    @if(task.thread_id != 1) tpanic("only init needs to sig_action, others do it on spawn");
     old := SignalHandler.check_user_write(old);
-    old.callee = bit_cast_unchecked(i64, @type old.callee, task.signal_handler);
-    old.stack.ptr = u8.ptr_from_int(task.signal_stack_left);
-    old.stack.len = task.signal_stack_right - task.signal_stack_left;
+    old.callee = task.signal_handler;
+    old.stack = task.signal_stack_buf;
     
     new := SignalHandler.check_user_read(new)[];
-    task.signal_handler = bit_cast_unchecked(@type new.callee, i64, new.callee);
+    task.signal_handler = new.callee;
     buf := u8.int_from_ptr(new.stack.ptr);
     u8.check_user_write(buf, new.stack.len);
-    task.signal_stack_left = buf;
-    task.signal_stack_right = buf + new.stack.len;
-    task.signal_stack = task.signal_stack_right;
-    
+    task.signal_stack_buf = new.stack;
+    task.signal_stack = u8.int_from_ptr(task.signal_stack_buf.end_pointer());
     0
 }
 
-sig_return :: fn(task: *Task, intid: i64, ctx: i64, sp: i64) i64 #n(0xFFFF0004) = {
+sig_return :: fn(intid: i64, ctx: i64, sp: i64) i64 #n(0xFFFF0004) = {
+    task := get_current_task();
     elr := 5*4 + 4/*bti*/ + launder_to_user_pointer(user_unwind_signal); // :end_user_unwind_signal
+    signal_stack_left, signal_stack_right := task.t&.sigstack();
     bad := false
         || task.mcontext.elr != elr      // #once
-        || sp < task.signal_stack_left   // oob
-        || sp > task.signal_stack_right  // oob
+        || sp < signal_stack_left        // oob
+        || sp > signal_stack_right       // oob
         || sp < task.signal_stack        // over estimate of current position
         || ctx != sp                     // returned the wrong one (poorly nested)
     ;
@@ -114,24 +120,31 @@ sig_return :: fn(task: *Task, intid: i64, ctx: i64, sp: i64) i64 #n(0xFFFF0004) 
     task.mcontext.gpr&[0]
 }
 
-spawn_thread :: fn(parent: *Task, ctx: i64, exit_futex: i64) i64 #n(0xFFFF0005) = {
+spawn_thread :: fn(ctx: i64, t: i64) i64 #n(0xFFFF0005) = {
+    parent := get_current_task();
     ctx := SavedRegisters.check_user_read(ctx)[];
+    t := ThreadConfig.check_user_read(t)[];
     if u32.ptr_from_int(ctx.elr)[] != Arm.branch_target_marker {
         tpanic("spawn thread expected bti");
     };
     if ctx.esr != 0 || ctx.spsr != 0 || ctx.far != 0 {
         tpanic("spawn_thread: don't try to set esr,spsr,far");
     };
-    tid := u32.check_user_write(exit_futex);
+    u32.check_user_write(u32.int_from_ptr(t.exit_futex));
+    @if(t.exit_futex[] != MAX_u32) tpanic("exit_futex[]");
     child := alloc_task(parent.mem.root);
     child.mcontext = ctx;
-    child.exit_futex = exit_futex;
+    signal_stack_left, signal_stack_right := t&.sigstack();
+    u8.check_user_write(signal_stack_left, signal_stack_right - signal_stack_left);
+    child.t = t;
+    child.signal_stack = signal_stack_right;
+    child.exit_futex[] = child.thread_id.trunc();
     child.active = true;
-    tid[] = child.thread_id.trunc();
     child.thread_id
 }
 
-virtq_poll :: fn(task: *Task, it: i64) i64 #n(0xFFFF0007) = {
+virtq_poll :: fn(it: i64) i64 #n(0xFFFF0007) = {
+    task := get_current_task();
     it := UQueue.check_user_write(it);
     if !do_virtq_poll(it) {
         // TODO: it sucks that i have to spin instead of waiting on a futex
@@ -218,7 +231,8 @@ fn do_virtq_poll(it: *UQueue) bool = {
     made_progress
 }
 
-virtq_create :: fn(task: *Task, out: i64, p: i64, l: i64, q_index: i64) i64 #n(0xFFFF0008) = {
+virtq_create :: fn(out: i64, p: i64, l: i64, q_index: i64) i64 #n(0xFFFF0008) = {
+    task := get_current_task();
     // not a problem to remove this. its just a debugging aid for now. 
     out := UQueue.check_user_write(out);
     label := u8.check_user_read(p, l);
@@ -242,7 +256,8 @@ virtq_create :: fn(task: *Task, out: i64, p: i64, l: i64, q_index: i64) i64 #n(0
 }
 
 // translate a virtual address range to its backing physical address ranges. 
-virt_translate :: fn(task: *Task, addr: i64, len: i64, out_addr: i64, out_len: i64) i64 #n(0xFFFF000A) = {
+virt_translate :: fn(addr: i64, len: i64, out_addr: i64, out_len: i64) i64 #n(0xFFFF000A) = {
+    task := get_current_task();
     // translating requires write permission because you can use virtio to write to physical memory addresses. 
     //     which is still not at all secure because you can put any random numbers in there 
     //     so this has to be replaced eventually, but for now i'm using memory 
@@ -259,8 +274,8 @@ virt_translate :: fn(task: *Task, addr: i64, len: i64, out_addr: i64, out_len: i
     i
 }
 
-generate :: fn() []Ty(@FnPtr(task: *Task) void, i64) = {
-    results := Ty(@FnPtr(task: *Task) void, i64).list(ast_alloc());
+generate :: fn() []Ty(SyscallFunc, i64) = {
+    results := Ty(SyscallFunc, i64).list(ast_alloc());
     s := import("@/examples/os/kernel/syscalls.fr");
     for get_constants(s) { name |
         continue :: local_return;
@@ -271,43 +286,23 @@ generate :: fn() []Ty(@FnPtr(task: *Task) void, i64) = {
         i := impl_func.annotations&.index_of(fn(it) => it.name == @symbol n)
             || continue();
         syscall_number := const_eval(i64)(impl_func.annotations[i].args);
-        @assert(results.find(fn(it) => it._1 == syscall_number).is_none(), "duplicate");
+        @ct_assert(results.find(fn(it) => it._1 == syscall_number).is_none(), impl_func.loc, "duplicate");
         
         fr := current_compiler_context();
-        func := empty_fn(impl_func.name, loc);
-        func.resolve_scope = s; // :WhatScope
-        fill_bindings(func&, fr, @slice(*Task));
-        wrapper_fid := fr.intern_func(func&);
-        func := get_function_ast(wrapper_fid, true, true, false, false);
-        
-        the_task := func.arg.bindings[0].name.Var;
-        the_task: FatExpr = (expr = (GetVar = the_task), ty = UnknownType, done = false, loc = loc);
-        args := FatExpr.list(ast_alloc());
-        i := 0;  // choosing this index gets more complicated once its not just for arm
+        i := 0;
         each impl_func.arg.bindings& { it |
             @switch(it.ty.Finished) {
-                @case(*Task) => args&.push(the_task);
                 @case(i64) => {
-                    args&.push(@{ @[the_task].mcontext.gpr&[@[@literal i]] });
                     i += 1;
                 };
-                @default => panic("invalid syscall argument type");
+                @case(void) => ();
+                @default => @ct_assert(false, impl_func.loc, "invalid syscall argument type");
             };
         };
-        @debug_assert_le(i, 8, "too many syscall arguments");
+        @debug_assert_le(i, 6, "too many syscall arguments");
         
-        args: FatExpr = if args.len == 1 {
-            args[0]
-        } else {
-            (expr = (Tuple = args.as_raw()), ty = UnknownType, done = false, loc = loc)
-        };
-        func.body = (Normal = @{ 
-            x0: i64 = @[@literal impl_fid](@[args]);
-            @[the_task].mcontext.gpr&[0] = x0;
-        });
-        
-        callee := fr.get_jitted(wrapper_fid);
-        callee := bit_cast_unchecked(rawptr, @FnPtr(task: *Task) void, callee);
+        callee := fr.get_jitted(impl_fid);
+        callee := bit_cast_unchecked(rawptr, SyscallFunc, callee);
         push(results&, (callee, syscall_number));
     };
     results.items()

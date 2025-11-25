@@ -1,7 +1,5 @@
 
 main :: fn() void = {
-    // note: this only affects the main thread
-    //       should probably wrap it for the pthread_create part
     buf := page_allocator.alloc_uninit(u8, 1.shift_left(16) * 10);
     _ := set_signal_handler(callee = handle_signal, stack = buf);
     
@@ -11,6 +9,10 @@ main :: fn() void = {
     push_dynamic_context {
         c := context(DefaultContext);
         c.prefer_syscalls = false;
+        
+        // need storage for thread.runtime_data (ex. for test_faults)
+        args: Array(i64, 6) = (Thread.int_from_ptr(@static(Thread)), ..0);
+        _ := Syscall'perform_syscall(args&, 0xAAAA0002);
         
         Crash'push_aot_debug_resolver();
         c.panic_hook = fn(s) = {
@@ -70,11 +72,7 @@ main :: fn() void = {
                     cmd: Command = (command = command, parts = parts);
                     if spawn {
                         #use("@/lib/sys/threads.fr");
-                        start_thread(Command, fn(cmd) = {
-                            buf := page_allocator.alloc_uninit(u8, 1.shift_left(16) * 10);
-                            _ := set_signal_handler(callee = handle_signal, stack = buf);
-                            run_command(cmd);
-                        }, cmd&);
+                        start_thread(Command, run_command, cmd&);
                         usleep(5000); // HACK
                     } else {
                         start := timestamp();
@@ -91,6 +89,14 @@ main :: fn() void = {
             temp().reset(mark);
         };
     };
+}
+
+// this is only used once at startup, everyone else does it through libc. TODO: it would be nice to get rid of this
+fn set_signal_handler(new: SignalHandler) SignalHandler = {
+    old := zeroed SignalHandler;
+    args: Array(i64, 6) = (SignalHandler.int_from_ptr(new&), SignalHandler.int_from_ptr(old&), 0, 0, 0, 0);
+    Syscall'perform_syscall(args&, 0xFFFF0003);  // sig_action
+    old
 }
 
 Command :: @struct(command: Str, parts: []Str);
@@ -152,6 +158,19 @@ pl011_int_poll :: fn(q: *UQueue, who: i64) void = {
 
 handle_signal :: fn(ctx: *MContext, intid: i64, data: i64) Ty(i64, *MContext) = {
     set_dynamic_context(DefaultContext.raw_from_ptr(signal_env));
+
+    thread := Thread.ptr_from_raw(ctx.userdata);
+    ::ptr_utils(Thread);
+    if !thread.is_null() {
+        thread := bit_cast_unchecked(@type thread.runtime_data&, *ThreadData, thread.runtime_data&);
+        if bit_cast_unchecked(@type thread.signal_handler, i64, thread.signal_handler) != 0 {
+            result, _ := thread'signal_handler(ctx, intid, data);
+            if result == intid {
+                return(intid, ctx);
+            };
+        };
+    };
+    
     // TODO: don't hardcode the 33. get it from device tree. 
     //       the kernel side now knows the right numbers. just have to use them here. 
     if intid == 33 {
@@ -194,6 +213,14 @@ handle_signal :: fn(ctx: *MContext, intid: i64, data: i64) Ty(i64, *MContext) = 
         @case(56) => { x :: LIBC.FR_openat; @as(rawptr) x };
         @case(79) => { x :: LIBC.FR_fstatat; @as(rawptr) x };
         @case(64) => { x :: LIBC.write; @as(rawptr) x };
+        @case(0xAAAA0001) => {  // get thread data
+            ctx.gpr&[0] = ctx.userdata.int_from_rawptr();  // *Thread
+            return(intid, ctx);
+        };
+        @case(0xAAAA0002) => {  // set thread data
+            ctx.userdata = ctx.gpr&[0].rawptr_from_int();  // *Thread
+            return(intid, ctx);
+        };
         @default => @panic("invalid syscall %", syscall_number);
     };
     
@@ -377,11 +404,17 @@ LIBC :: @struct {
                     unreachable()
                 });
                 ctx.gpr&[31] = bit_cast_unchecked(*u8, i64, attr.stack.end_pointer());
+                ctx.userdata = userdata;
                 
                 thread := Thread.ptr_from_raw(userdata);
-                @assert_eq(thread.tid_futex, MAX_u32);
-                exit_futex := u32.int_from_ptr(thread.tid_futex&);
-                args: Array(i64, 6) = (MContext.int_from_ptr(ctx&), exit_futex, 0, 0, 0, 0);
+                @run @assert_eq(size_of(@type thread.runtime_data), size_of(ThreadData));
+                
+                t: ThreadConfig = (
+                    signal_handler = handle_signal,
+                    signal_stack_buf = page_allocator.alloc_uninit(u8, 1.shift_left(16)),
+                    exit_futex = thread.tid_futex&,
+                );
+                args: Array(i64, 6) = (MContext.int_from_ptr(ctx&), ThreadConfig.int_from_ptr(t&), 0, 0, 0, 0);
                 id, _ := Syscall'perform_syscall(args&, 0xFFFF0005);  // spawn_thread
                 @if(id < 0) panic("failed to create thread");
                 thread.tid = id.intcast();
@@ -519,6 +552,20 @@ LIBC :: @struct {
         };
         n
     }
+    
+    // TODO: this is perhaps becoming more convoluted than i wanted. 
+    //       don't want to trust the dynenv (because signal can happen when its not in the right register)
+    //       so store the *Thread in the MContext but can only read that from the signal handler 
+    //       so i have to make a fake syscall to myself. 
+    FR_set_signal_handler :: fn(callee: SignalHandler.F) SignalHandler.F = {
+        args := zeroed Array(i64, 6);
+        thread, _ := Syscall'perform_syscall(args&, 0xAAAA0001);
+        thread := Thread.ptr_from_int(thread);
+        thread := bit_cast_unchecked(@type thread.runtime_data&, *ThreadData, thread.runtime_data&);
+        old := thread.signal_handler;
+        thread.signal_handler = callee;
+        old
+    }
 };
 
 system_counter_uptime :: fn() TimeSpec = {
@@ -559,6 +606,11 @@ fn trace(arg: FatExpr) FatExpr #macro = @{
         fs.strace = old;
         c.prefer_syscalls = old_sys;
     };
+};
+
+ThreadData :: @struct {
+    signal_handler: SignalHandler.F; 
+    _: Array(i64, 4);
 };
 
 Term :: import("@/lib/sys/terminal.fr");

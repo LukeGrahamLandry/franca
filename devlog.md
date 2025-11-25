@@ -45,7 +45,18 @@
 - was missing a done.pop in fuse_blocking so it hung after 128 requests
 - need to fix "need_reify on threaded codegen" to make it work jitted,
   but not-my-os aot import_c doom gets as far as "No IWAD file was found" error. 
-- added `spawn` to the shell so you can run the graphics test as nonblocking
+- simplification: don't need to generate wrappers for syscalls on the kernel side
+- added `spawn` to the shell so you can run the graphics test as nonblocking.
+  two reasons its not just the jitted program spawning a thread:
+  - need to set_signal_handler
+    - tried doing it by exporting handle_signal in libc, but threaded programs need to just work
+    - instead move it to the spawn syscall. refactor so its easy to setup a bunch of state 
+      for your child. maybe thats a good place to put more fine-grained capabilities eventually? 
+  - need to stay alive and not block the shell, 
+    but when you return from main it drops the compiler which frees the jitted code.
+    still don't have a good solution for that so it stays a shell thing for now. 
+- did a userspace thing where you can override your signal handler to make test_faults work. 
+  got more complicated than i was hoping for, but i have to do that eventually for posix sigaction so maybe its fine. 
 
 ## (Nov 23)
 
