@@ -31,6 +31,21 @@
 ---
 
 - given that's a dead end, maybe i'll feel better if i put a pretty picture on the screen
+- first time i need to put pointers in the virtq, just hack myself a new syscall to do the address translation. 
+- i had more trouble making a view work in my swift program than i had with the actual framebuffer part. 
+- to start with, just make a thread that cycles colours. 
+  its really funny that you can see it slow down when i run kaleidoscope at the same time. 
+  im guessing its just a problem with my timeing or sleep or context switching, 
+  because if you just print how much free time there is between frames its always like 15ms 
+  so its clearly not actually as slow as it looks? 
+- side quest to rewrite follow_path so write works
+- bamboozled myself with `a = &anims[wbs->epsd][i];` being the wrong type, but its 
+  just because you can't just concatenate all the files, they rely on you using different
+  compilation units so they can reuse names
+- was missing a done.pop in fuse_blocking so it hung after 128 requests
+- need to fix "need_reify on threaded codegen" to make it work jitted,
+  but not-my-os aot import_c doom gets as far as "No IWAD file was found" error. 
+- added `spawn` to the shell so you can run the graphics test as nonblocking
 
 ## (Nov 23)
 

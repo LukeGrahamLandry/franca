@@ -28,6 +28,8 @@ FileVTable :: @struct {
     close: @FnPtr(self: rawptr) void = fn(self) = ();
    openat: @FnPtr(self: rawptr, path: CStr, flags: i64, mode: i64) i64 = (fn(_0, _1, _2, _3) = -1);
     fstat: @FnPtr(self: rawptr, out: *Posix.Linux.StatArm64) i64 = (fn(_0, _1) = -1);
+   access: @FnPtr(self: rawptr, mode: i64) i64 = (fn(_0, _1) = 0);
+    mkdir: @FnPtr(self: rawptr, path: CStr, mode: i64) i64 = (fn(_0, _1, _2) = -1);
 };
 
 init_vfs :: fn() void = {
@@ -361,16 +363,19 @@ fuse_openat :: fn(fd: *FuseFile, path: CStr, flags: i64, mode: i64) i64 = {
     q := fd.q;
     
     name := path.str();
+    @trace("fuse_openat(%)", name);
     name.len += 1;
     @assert(name[name.len - 1] == 0);
     in: Fuse.LookupIn = (name = name);
     result := fuse_blocking(q, .LOOKUP, fd.nodeid, in)
         .or(fn(e) => return(e));
     node := result.nodeid;
+    @trace("-> %", node);
 
     in: Fuse.OpenIn = (flags = flags.trunc(), open_flags = 0);
     result := fuse_blocking(q, .OPEN, node, in)
         .or(fn(e) => return(e));
+    @trace("-> %", result.fh);
     
     fd := push_file(FuseFile, (q = q, nodeid = node, fh = result.fh));
     fd.fd.intcast()
@@ -413,6 +418,7 @@ fn fuse_blocking(q: *UQueue, op: Fuse.Opcode, node: u64, in: ~I, e_out: []u8) Re
         // TODO: interrupt instead of spinning but im not finding the intid?
         q'poll(q, 0);
     };
+    _ := q.pipe.done&.pop();
     ::enum(@type op);
     @debug_assert(ho.len != 0 || op == .FORGET);  // no reply, virtio is just returning the buffer. 
     @debug_assert(ho.len == 0 || hi.unique == ho.unique);
@@ -507,55 +513,54 @@ fn get_file(fd: Fd) ?FileHandle = {
 FuseId :: @struct(nodeid: u64, fh: u64);
 FRes :: fn($T: Type) Type = Result(T, i64);
 
-fn follow_path(fd: Fd, path: Str) SysResult(Fd) = {
+fn follow_path_prefix(fd: Fd, path: Str) Result(Ty(Fd, Str), i64) = {
     if path.starts_with("./") {
         path = path.rest(2);
     };
+    while => path.ends_with("/") {
+        path.len -= 1;
+    };
     
     first := true;
-    i := 0;
-    buf := temp().alloc_uninit(u8, path.len + 1);
+    buf := u8.list(1024, Arena'stack_alloc(1024));
     loop {
-        continue :: local_return;
-        start := i;
-        while => i < path.len && path[i] != PATH_SEP.ascii() {
-            i += 1;
+        dir, rest := pop_dir_prefix(path) || {
+            @assert(path != "" && path != "." && path != "..", "TODO: special");
+            return(Ok = (fd, path));
         };
-        last := i == path.len;
-        part := path.slice(start, i);
-        buf.slice(0, part.len).copy_from(part);
-        buf[part.len] = 0;
-        name: CStr = (ptr = buf.ptr);
+        @assert(dir != "" && dir != "." && dir != "..", "TODO: special");
         
-        // TODO: don't allow "foo/bar/file.txt/."
-        if part.len == 0 || part == "." {
-            @assert(!first, "won't be unique");
-            @if(last) return(Ok = fd);
-            i += 1;
-            continue();
-        };
-        if part == ".." {
-            panic("TODO: go up a directory");
-        };
-
-        result := Posix'openat(fd, name, 0, 0);
-        if result&.is_err() {
-            err := result.Err;
+        buf&.clear();
+        buf&.push_all(dir);
+        buf&.push(0);
+        result := LIBC'FR_openat(fd, (ptr = buf&.as_ptr()), Posix.O.RDONLY, 0);
+        @trace("-> %", result);
+        if result < 0 {
             if !first {
-                _ := Syscall'close(fd);
+                _ := LIBC'close(fd);
             };
-            return(Err = err)
+            return(Err = result)
         };
-        new_fd := result.Ok;
+        new_fd: Fd = (fd = result.intcast());
         @assert(new_fd.fd != fd.fd, "openat must return unique!!!");
         if !first {
-            _ := Syscall'close(fd);
+            _ := LIBC'close(fd);
         };
-        @if(last) return(Ok = new_fd);
+        
         fd = new_fd;
+        path = rest;
         first = false;
+    };
+}
+
+fn pop_dir_prefix(path: Str) ?Ty(Str, Str) = {
+    @if(path.len == 0) return(.None);
+    i := 0;
+    while => path[i] != PATH_SEP.ascii() {
         i += 1;
-    }
+        @if(i == path.len) return(.None);
+    };
+    (Some = (path.slice(0, i), path.rest(i + 1)))
 }
 
 sys_debug_write_poll :: fn(q, who) = {

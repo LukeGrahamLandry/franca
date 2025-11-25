@@ -19,6 +19,7 @@ currently it's good enough to run the franca compiler on qemu-system-aarch64's v
 - virtio device drivers
   - console
   - fs (FUSE)
+  - gpu (2d framebuffer for software rendering)
 
 ## incomplete
 

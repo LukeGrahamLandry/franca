@@ -28,17 +28,9 @@ main :: fn() void = {
         signal_env.thread_index = -1;  // make handle_signal NOT count as the same thread for reenterant mutex
 
         init_vfs();
-        
         buf := u8.list(fs.allocator);
         timer := false;
         @println("The system took %ms to boot.", timestamp());
-        
-        #use("@/lib/sys/threads.fr");
-        start_thread_nodata {
-            buf := page_allocator.alloc_uninit(u8, 1.shift_left(16) * 10);
-            _ := set_signal_handler(callee = handle_signal, stack = buf);
-            import("@/compiler/main.fr")'main2("examples/os/bin/test_screen.fr", true);
-        };
         
         // TODO: this shell should share some logic with examples/terminal.fr
         loop {
@@ -66,32 +58,53 @@ main :: fn() void = {
                 @case("help") => print(SHELL_HELP.rest(1));
                 @default => {
                     break :: local_return;
+                    spawn := parts[0] == "spawn";
+                    if spawn {
+                        parts = parts.rest(1);
+                    };
                     command := search_path(parts[0]) || {
                         @print("unknown command: |%|\n", buf.items());
                         break()
                     };
-                        println("compiling...");
+                    
+                    cmd: Command = (command = command, parts = parts);
+                    if spawn {
+                        #use("@/lib/sys/threads.fr");
+                        start_thread(Command, fn(cmd) = {
+                            buf := page_allocator.alloc_uninit(u8, 1.shift_left(16) * 10);
+                            _ := set_signal_handler(callee = handle_signal, stack = buf);
+                            run_command(cmd);
+                        }, cmd&);
+                        usleep(5000); // HACK
+                    } else {
                         start := timestamp();
-                        push_dynamic_context { 
-                            c := context(DefaultContext);
-                            args := CStr.list(temp());
-                            args&.push("franca".as_cstr());
-                            for parts { it |
-                                args&.push(it.as_cstr());
-                            };
-                            c.cli_arguments = args.items();
-                            
-                            import("@/compiler/main.fr")'main2(command, true);
-                        };
+                        println("compiling...");
+                        run_command(cmd&);
                         if timer {
+                            #use("@/lib/sys/process.fr");
                             @print("(%ms)\n", timestamp() - start);
                         };
-                        // TODO: don't crash on compile error
+                    };
                 };
             };
             buf&.clear();
             temp().reset(mark);
         };
+    };
+}
+
+Command :: @struct(command: Str, parts: []Str);
+run_command :: fn(cmd: *Command) void = {
+    command, parts := (cmd.command, cmd.parts);
+    push_dynamic_context { 
+        c := context(DefaultContext);
+        args := CStr.list(temp());
+        args&.push("franca".as_cstr());
+        for parts { it |
+            args&.push(it.as_cstr());
+        };
+        c.cli_arguments = args.items();
+        import("@/compiler/main.fr")'main2(command, true);
     };
 }
 
@@ -344,9 +357,6 @@ LIBC :: @struct {
         __errno_location()[] = 1;
         0
     };
-    mkdirat :: fn(parent: Fd, path: CStr, mode: i64) i64 = 
-        -1;
-    
     __errno_location :: fn() *i64 = @static(i64);
     sigaction :: fn() i64 = 0;
     memmove :: fn(dest: rawptr, src: rawptr, count: i64) void =
@@ -440,18 +450,22 @@ LIBC :: @struct {
     // note: this is the linux syscall abi, not the libc abi
     FR_openat :: fn(f: Fd, path: CStr, flags: i64, mode: i64) i64 = {
         path := path.str();
-        if path.starts_with("./") {
-            path = path.rest(2);
-        };
+        need_close := false;
         if path.contains("/") {  // :SLOW
-            result := follow_path(f, path);
-            @if(result&.is_err()) return(-result.Err._);
-            return result.Ok.fd.intcast();
+            parent, file := or follow_path_prefix(f, path) { e |
+                return(-e.abs());
+            };
+            f = parent;
+            need_close = true;
+            path = @tfmt("%\0", file);
         };
         fd := get_file(f) || return(-1);
         result := fd'vtable'openat(fd.data, (ptr = path.ptr), flags, mode);
         @trace("openat(fd = %, %, %, %) = %", f.fd, path, flags, mode, result);
         @assert(f.fd.intcast() != result, "openat must return new fd");
+        if need_close {
+            close(f);
+        };
         result
     }
     
@@ -461,8 +475,49 @@ LIBC :: @struct {
         @if(fd < 0) return(fd);
         fd: Fd = (fd = fd.intcast());
         result := FR_fstat(fd, out);
-        Syscall'close(fd);
+        close(fd);
         result
+    }
+    
+    mkdirat :: fn(parent: Fd, path: CStr, mode: i64) i64 = {
+        @assert(!path.str().contains("/"), "TODO: mkdirat(%) flow_path but start early", path);
+        f := get_file(parent) || return(-1);
+        result := f'vtable'mkdir(f'data, path, mode);
+        result
+    }
+    
+    access :: fn(path: CStr, mode: i64) i64 = {
+        fd := FR_openat(Posix'AT'FDCWD(), path, 0, 0);
+        @if(fd < 0) return(fd);
+        fd: Fd = (fd = fd.intcast());
+        f := get_file(fd) || return(-1);
+        result := f'vtable'access(f'data, mode);
+        close(fd);
+        result
+    }
+    
+    malloc :: fn(size: i64) *u8 = 
+        general_allocator().alloc_uninit(u8, size).as_ptr();
+    free :: fn(p: rawptr) i64 = {
+        // TODO: need to track size
+        0
+    }
+    system :: fn(command: CStr) i64 = {
+        @eprintln("TODO: implment LIBC.system(%)", command);
+        -1
+    };
+    
+    vsnprintf :: fn() void = @panic("TODO: libc.vsnprintf");
+    
+    strtod :: fn(s: *u8, end_out: **u8) f64 = {
+        // TODO: this one doesn't support all the syntax. 1e-2
+        s: CStr = (ptr = s);
+        n, rest := parse_float(s.str());
+        ::ptr_utils(*u8);
+        if !end_out.is_null() {
+            end_out[] = rest.ptr;
+        };
+        n
     }
 };
 
@@ -520,7 +575,13 @@ DEBUG_SPAM_LOG :: false;
 SHELL_HELP :: """
 exit                 (power down the machine)
 <path>               (jit and run a .fr program)
+spawn <path>         (new thread won't block the shell)
 strace <on, off>     (toggle libc logging)
 time <on, off>       (log runtime after running a program)
 uptime               (read the system counter)
+
+example programs:
+test_fuse
+test_faults
+spawn test_screen
 """;
