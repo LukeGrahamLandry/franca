@@ -21,11 +21,15 @@ main :: fn() void = {
             Crash'backtracing_panic_handler(s)
         };
         
-        // TODO: this shouldn't be needed but the compiler's dying in get_environment_variable. 
-        xxx := zeroed CStr;
-        c.environment_variables = xxx&;
         
+        fs.device_tree_bytes = {
+            devicetree := c.cli_arguments[0].ptr;
+            h := bit_cast_unchecked(*u8, *DT.Header, devicetree)[];
+            DT.Header.byte_swap_fields(h&);
+            devicetree.slice(h.totalsize.zext())
+        };
         c.cli_arguments = empty();
+        
         signal_env[] = c[];
         signal_env.thread_index = -1;  // make handle_signal NOT count as the same thread for reenterant mutex
 
@@ -33,6 +37,7 @@ main :: fn() void = {
         buf := u8.list(fs.allocator);
         timer := false;
         @println("The system took %ms to boot.", timestamp());
+        run_startup_commands();
         
         // TODO: this shell should share some logic with examples/terminal.fr
         loop {
@@ -42,9 +47,39 @@ main :: fn() void = {
             Term'interactive_read_line(buf&);
             print("\n");
             fs.strace = old;
-            
-            command := buf.items();
-            parts := command.split(" ", temp()).items();
+            decode_and_run_cmd(buf.items());
+            buf&.clear();
+            temp().reset(mark);
+        };
+    }
+}
+
+run_startup_commands :: fn() void = {
+    count := 0;
+    start := timestamp();
+    bootargs := find_boot_args(DT'iter(fs.device_tree_bytes)) || "\0";
+    while => bootargs.len > 0 {
+        bootargs := bootargs&.pop_cstr();
+        while => bootargs.len > 2 && !bootargs.starts_with("--") {
+            bootargs = bootargs.rest(1);
+        };
+        if bootargs.starts_with("--") {
+            bootargs = bootargs.rest(2);
+            init := bootargs.split(";", temp()).items();
+            for(init, decode_and_run_cmd);
+            count += init.len;
+        };
+    };
+    @if(count != 0) @println("Finished % startup commands in %ms.", count, timestamp() - start);
+}
+
+decode_and_run_cmd :: fn(full_command: Str) void = {
+    while => full_command.len > 0 && full_command[0].is_ascii_whitespace() {
+        full_command = full_command.rest(1);
+    };
+    @if(full_command == "") return(); 
+    
+            parts := full_command.split(" ", temp()).items();
             @switch(parts[0]) {
                 @case("exit") => Syscall'exit(0);
                 @case("quit") => Syscall'exit(0);
@@ -55,9 +90,14 @@ main :: fn() void = {
                     fs.strace = parts[1] == "on" || parts[1] == "true";
                 };
                 @case("time") => {
-                    timer = parts[1] == "on" || parts[1] == "true";
+                    fs.timer = parts[1] == "on" || parts[1] == "true";
                 };
                 @case("help") => print(SHELL_HELP.rest(1));
+                @case("devicetree") => {
+                    out := u8.list(temp());
+                    import("@/examples/dump_devicetree.fr")'dump(out&, fs.device_tree_bytes);
+                    print(out.items());
+                };
                 @default => {
                     break :: local_return;
                     spawn := parts[0] == "spawn";
@@ -65,7 +105,7 @@ main :: fn() void = {
                         parts = parts.rest(1);
                     };
                     command := search_path(parts[0]) || {
-                        @print("unknown command: |%|\n", buf.items());
+                        @print("unknown command: |%|\n", full_command);
                         break()
                     };
                     
@@ -78,18 +118,24 @@ main :: fn() void = {
                         start := timestamp();
                         println("compiling...");
                         run_command(cmd&);
-                        if timer {
+                        if fs.timer {
                             #use("@/lib/sys/process.fr");
                             @print("(%ms)\n", timestamp() - start);
                         };
                     };
                 };
             };
-            buf&.clear();
-            temp().reset(mark);
-        };
-    };
 }
+
+DT :: import("@/examples/os/drivers/devicetree.fr");
+find_boot_args :: fn(self: DT.Iter) ?Str = {
+    self&.consume_root();
+    self&.find_node(.BEGIN_NODE, fn(it) => it.name == "chosen")
+        || return(.None);
+    it := self&.find_node(.PROP, fn(it) => it.name == "bootargs")
+        || return(.None);
+    (Some = it.data)
+};
 
 // this is only used once at startup, everyone else does it through libc. TODO: it would be nice to get rid of this
 fn set_signal_handler(new: SignalHandler) SignalHandler = {

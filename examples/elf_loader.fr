@@ -4,22 +4,28 @@
 // - push parameters to the stack and call the entry point
 // - if dynamic, dlopen imports and apply relocations (instead of calling program interpreter)
 //  
-// TODO:
-// - auxiliary vector
-// - actually pass argc, argv, envp
-//
 // Note: there is no syscall translation so this can only run linux programs on linux, etc.
 //
 // the purpose of this is just understanding how the format works well enough to produce it. 
 // it's not meant to be useful for running real programs!
+// it is also used by examples/os which makes it a bit more impressive. 
 // 
 
 main :: fn() void = {
-    bytes := read_file_from_last_arg();  // TODO: dumb. just mmap the file?
-    load_elf_file(bytes);
+    args := cli_args();
+    assert(args.len > 1, "Last argument is path to file");
+    path := args[args.len - 1]; 
+    // TODO: dumb. just mmap the file?
+    bytes := temp().read_to_string_or_crash(path.str()).items();
+
+    // TODO: don't fault in franca_runtime_init if argc==0
+    load_elf_file(bytes, (
+        args = @slice(path),  // TODO: pass the rest of args
+        env = empty(),  // TODO: inherit
+    ));
 }
 
-load_elf_file :: fn(bytes: []u8) void = {
+load_elf_file :: fn(bytes: []u8, init: InitArgs) void = {
     h := bytes.peek_type(Elf.Header);
     @assert_eq(h.magic, Elf.MAGIC, "invalid magic. expected an elf program");
     @assert(h.program_header_num != 0, "no program headers. expected an executable");
@@ -147,18 +153,28 @@ load_elf_file :: fn(bytes: []u8) void = {
         @assert(ok, "entry point is not in executable memory");
     };
     
-    // Push the arguments to the new stack. 
-    z: u8 = 0;
-    z := zeroed Array(CStr, 4); z := z&[0]&;
-    par := stack.index_unchecked(stack.len - 24);
-    argc_argv_envp := bit_cast_unchecked(*u8, *Ty(i64, *CStr, *CStr), par);
-    argc_argv_envp[] = (0, z, z);
-    sp := par.offset(-8);
-    
+    sp := write_argc_argv_envp(stack, init);
     //@eprintln(">>> calling entry point: %", u8.int_from_ptr(entry));
     call_in_stack(sp, entry);
     unreachable();
 }
+
+InitArgs :: @struct {
+    args: []CStr;
+    env: []CStr;
+    // TODO: auxvec
+};
+
+write_argc_argv_envp :: fn(stack: []u8, args: InitArgs) *CStr = {
+    argc := args.args.len;
+    size := (1 + argc + 1 + args.env.len + 1) * size_of(CStr);
+    dest := stack.slice(stack.len - size, stack.len);
+    dest := CStr.reinterpret_bytes(dest);
+    dest[0] = bit_cast_unchecked(i64, CStr, argc);
+    dest.subslice(1, argc).copy_from(args.args);
+    dest.subslice(1 + argc + 1, args.env.len).copy_from(args.env);
+    dest.index(0)
+};
 
 open_needed_dylibs :: fn(dyn: []Elf.Dyn, strings: []u8) []Dyn.Handle = {
     libs := Dyn.Handle.list(temp());
@@ -198,8 +214,7 @@ prot_elf_to_posix :: fn(prot: u32) i64 = {
 Elf :: import("@/backend/elf/bits.fr");
 #use("@/lib/sys/fs.fr");
 
-call_in_stack :: AsmFunction(fn(sp: *u8, callee: *u8) void = (), @const_slice(
-    // TODO: THIS ARM IS UNTESTED
+call_in_stack :: AsmFunction(fn(sp: *CStr, callee: *u8) void = (), @const_slice(
     add_im(.X64, sp, x0, @as(u12) 0, 0b0),  // setup new stack 
     br(x1, 0b0),  // call a user function (no link)
 ), (fn(out) = @asm_x64(

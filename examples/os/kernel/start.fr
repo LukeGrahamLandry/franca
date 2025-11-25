@@ -174,6 +174,14 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
     elf_bytes := root_task_elf_bytes;
     task.mcontext.gpr&[0] = launder_to_user_pointer(u8.raw_from_ptr(elf_bytes.ptr));
     task.mcontext.gpr&[1] = elf_bytes.len;
+    task.mcontext.gpr&[2] = {
+        size := device_tree_bytes.len.align_to(kernel.page_size);
+        mem := vmap_reserve(task.mem&, size / kernel.page_size);
+        sys_set(*Task, .TPIDR_EL1, task);
+        mem := u8.check_user_write(mem, size);
+        mem.slice(0, device_tree_bytes.len).copy_from(device_tree_bytes);
+        u8.int_from_ptr(mem.ptr)
+    };
     
     kprint("kernel ready\n");
     return_to_scheduler();
@@ -506,7 +514,7 @@ barrier :: @AsmFunctionArmOnly(fn() void = ()) => (
     ret(),
 );
 
-user_exec :: fn(elf_bytes: []u8) void = {
+user_exec :: fn(elf_bytes: []u8, devicetree: *u8) void = {
     _, c := create_and_set_unsafe_environment();
     c.panic_hook = print_and_exit1;
     c.prefer_syscalls = true;
@@ -515,7 +523,10 @@ user_exec :: fn(elf_bytes: []u8) void = {
     c.general_allocator = c.temporary_allocator_i;
     // TODO: its sad that i have to commit new pages for the bytes copied 
     //       for Load commands but not accessed by the running program.
-    import("@/examples/elf_loader.fr")'load_elf_file(elf_bytes);
+    import("@/examples/elf_loader.fr")'load_elf_file(elf_bytes, (
+        args = @slice(@as(CStr) (ptr = devicetree)),
+        env = empty(),
+    ));
 }
 
 Task :: @struct {
