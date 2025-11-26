@@ -2,10 +2,13 @@
 
 main :: fn() void = {
     println("doom.fr running");
-    doom.vtable[] = vtable[];
-    argv := list(*i8, temp());
-    argv&.push(zeroed (*i8));
-    doom'run(0, argv.maybe_uninit.ptr);
+    argv := list(CStr, temp());
+    argv&.push("doom.fr".as_cstr());
+    argv&.push("-iwad".as_cstr());
+    argv&.push(IWAD[].rest("target/".len()).as_cstr());
+    argv&.push(zeroed CStr);
+    Syscall'chdir("target");
+    doom'run(argv.len.intcast() - 1, bit_cast_unchecked(*CStr, **i8, argv.maybe_uninit.ptr), vtable);
 }
 
 vtable :: @static(doom.VTable) (
@@ -29,27 +32,25 @@ vtable :: @static(doom.VTable) (
     },
 );
 
+fetch :: fn() Ty(Str, Str) = {
+    #use("@/examples/testing.fr");
+    // TODO: use https://github.com/id-Software/DOOM instead
+    root := fetch_or_crash("https://github.com/ozkl/doomgeneric/archive/fc601639494e089702a1ada082eb51aaafc03722.zip", 3237906, "ce728978d1d63a038890306dc7da05e0e2093d2f4c4d37eb111b7f6a5a3bc4db", "doomgeneric-fc601639494e089702a1ada082eb51aaafc03722");
+    iwad := fetch_or_crash("https://www.doomworld.com/3ddownloads/ports/shareware_doom_iwad.zip", 1782482, "845f4f3a449343b068a4e178f9cb018cb1f5b7d5ef09db292864ed554f612276", "doomdata");
+    (root, @tfmt("%/DOOM1.WAD", iwad))
+}
+
+IWAD :: @static(Str);
 doom :: (fn() ScopeId = {
     #use("@/examples/import_c/ffi.fr");
     Qbe :: import("@/backend/ir.fr");
-    root := fetch_or_crash("https://github.com/ozkl/doomgeneric/archive/fc601639494e089702a1ada082eb51aaafc03722.zip", 3237906, "ce728978d1d63a038890306dc7da05e0e2093d2f4c4d37eb111b7f6a5a3bc4db", "doomgeneric-fc601639494e089702a1ada082eb51aaafc03722");
+    root, iwad := fetch();
+    IWAD[] = iwad.shallow_copy(ast_alloc());
     fr := current_compiler_context();
     c := import_c'init_fr(fr);
     src_path := @tfmt("%/doomgeneric", root);
     c.include_paths&.push(src_path);
-    // TODO: shouldn't need to touch (fuse create file should work) target/franca/deps/doomgeneric-fc601639494e089702a1ada082eb51aaafc03722/doomgeneric/strings.h
-    //write_entire_file_or_crash(@tfmt("%/strings.h", src_path), SRC_strings_h);
-    ;{
-        path := @tfmt("%/strings.h", src_path);
-        println(read_entire_file_or_crash(temp(), path));
-        fd := Posix'openat(Posix'AT'FDCWD(), path.as_cstr(), Posix'O'RDWR, 0)
-            || @panic("failed to open %", path);
-        buf := SRC_strings_h;
-        writen_len := Syscall'write(fd, buf.ptr, buf.len)
-            || @panic("failed write %", path);
-        @assert_eq(writen_len, buf.len, "failed to write %", path);
-    };
-    //c.m.set_debug_types("P", true);
+    write_entire_file_or_crash(@tfmt("%/strings.h", src_path), SRC_strings_h);
     root_scope := list(Ty(Str, *import_c'C'Compile'VarScope), temp());
     for source_files { it |
         println(it);
@@ -58,21 +59,17 @@ doom :: (fn() ScopeId = {
             @panic("%", err);
         };
         
-        sc := c.scope;
-        each sc.vars& { name, v |
+        retain c.scope.vars.raw& { name, v |
             ::ptr_utils(@type v.var[]);
-            if !(v.var.is_null() || !v.var.is_static) {
-                push(root_scope&, (name, v[]));
-            }
+            keep := v.var.is_null() || !v.var.is_static;
+            if !keep {
+                push(root_scope&, (name[], v[]));
+            };
+            keep
         };
-        c.import_c'C'Compile'discard_static_scope();
-        //c.scope = c.arena.box_zeroed(import_c'C'Compile.Scope);
-        //c.scope.vars = init(c.arena);
-        //c.scope.tags = init(c.arena);
     };
-    sc := c.scope;
     for root_scope { name, value |
-        sc.vars&.insert(name, value);
+        c.scope.vars&.insert(name, value);
     };
     
     bytes := import_c'compile_fr(fr.get_alloc(), SRC, c);
@@ -104,22 +101,19 @@ source_files :: @const_slice(
 );
 
 SRC :: """
-#include "doomkeys.h"
-#include "m_argv.h"
-#include "doomgeneric.h"
-
 typedef struct VTable {
     void (*DG_Init)(void);
     void (*DG_DrawFrame)(void);
     void (*DG_SleepMs)(unsigned int);
-    unsigned int (DG_GetTicksMs)(void);
+    unsigned int (*DG_GetTicksMs)(void);
     int (*DG_GetKey)(int *pressed, char *doomKey);
     void (*DG_SetWindowTitle)(char *title);
 } VTable;
 
 VTable vtable = { 0 };
 
-void main(int argc, char **argv) {
+void run(int argc, char **argv, VTable *v) {
+    vtable = v[0];
     doomgeneric_Create(argc, argv);
     while (1) doomgeneric_Tick();
 }
@@ -147,26 +141,10 @@ int DG_GetKey(int *pressed, char *doomKey) {
 void DG_SetWindowTitle(char *title) {
     vtable.DG_SetWindowTitle(title);
 }
-
-void run(int argc, char **argv) {
-    doomgeneric_Create(argc, argv);
-    while (1) doomgeneric_Tick();
-}
 """;
-
 
 SRC_strings_h :: """
-int strcasecmp(const char *s1, const char *s2);  // TODO
+int strcasecmp(const char *s1, const char *s2);
 char *strdup(char *s);
-int strncasecmp(const char *s1, const char *s2, long n);  // TODO
-
-
-
-
-
-
-
-
+int strncasecmp(const char *s1, const char *s2, long n);
 """;
-
-#use("@/examples/testing.fr");

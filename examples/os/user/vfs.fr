@@ -13,6 +13,7 @@ fs :: @static(@struct {
     strace: bool;
     timer: bool;
     root_dir: Fd;
+    cwd: Fd;
     next_fuse_request_id: u64;
     allocator: Alloc;
     device_tree_bytes: []u8;
@@ -74,6 +75,7 @@ init_vfs :: fn() void = {
     
     // build a tree of MemDir with MemFileRO leaves containing all the baked files. 
     fs.root_dir = push_file(MemDir, (files = empty()));
+    fs.cwd = fs.root_dir;
     // TODO: deduplicate with follow_path
     while => fs_i.len > 0 {
         continue :: local_return;
@@ -338,7 +340,7 @@ FuseFile :: @struct {
                 result.offset
             }
             fn Set() => offset.bitcast();
-            @default => @panic("TODO: fuse whence=%", whence);
+            fn Cur() => self.position;
         };
         self.position.bitcast()
     };
@@ -576,7 +578,7 @@ FuseOutType :: fn(In: Type) Type #fold = {
 
 fn get_file(fd: Fd) ?FileHandle = {
     if fd.fd == { xxx := LinuxLibc.AT_FDCWD; xxx.fd } {
-        fd = fs.root_dir;
+        fd = fs.cwd;
     };
     fs.mutex&.lock();
     @if(!fd.fd.intcast().ult(fs.fd.len)) return(.None);

@@ -1,61 +1,146 @@
 
 main :: fn() void = {
-    write_entire_file_or_crash("target/b.txt", "This is the new contents of b.txt");
-
-    b_txt := Posix'openat(Posix'AT'FDCWD(), "target/b.txt".as_cstr(), Posix'O'RDWR, 0)
-        || @panic("failed to open target/b.txt\n(probably failed to mount shared folder)");
-    buf := "The contents of b.txt is this string";
-    writen_len := Syscall'write(b_txt, buf.ptr, buf.len)
-        || @panic("failed write b.txt");
-    @println("WRITE: %/%", writen_len, buf.len);
-    Syscall'close(b_txt);
+    globals[] = init(general_allocator());
+    a, b, c := ("target/a.txt", "target/b.txt", "target/c.txt");
+    dir, file := (@symbol dir, @symbol file);
     
-    bytes := read_entire_file_or_crash(temp(), "target/b.txt");
-    @println("b.txt: %", bytes);
+    ()
+    .push("target")
+    .open(O = "r")
+        .named(dir)
+        .open(child = "a.txt", O = "rwtc")
+            .named(file)
+            .write("12AAAA")
+            .write("789")
+            .seek(to = 2)
+            .write("3456")
+            .seek(to = 0)
+            .read().assert_eq("123456789")
+            .var(file, Fd)
+            .close()
+        .var(dir, Fd)
+        .close();
     
-    rename("target/b.txt", "target/c.txt").unwrap();
-    bytes2 := read_entire_file_or_crash(temp(), "target/c.txt");
-    @assert_eq(bytes, bytes2);
+    msg1 := "This is the new contents of b.txt";
+    msg2 := "something else!";
+    msg3 := "Stomp with something else";
     
-    write_entire_file_or_crash("target/b.txt", "This is the new contents of b.txt");
-        
-    bytes := read_entire_file_or_crash(temp(), "target/a.txt");
-    @println("ALL: %", bytes);
+    ()
+    .push(msg1)
+        .write(to = b)
+        .read().assert_eq(msg1)
+    .push(msg2)
+        .write(to = c)
+        .read().assert_eq(msg2)
+    .push(b)
+        .rename(to = c)
+            .read().assert_eq(msg1)
+    .push(msg3)
+        .write_tmp(to = c)
+        .read().assert_eq(msg3)
+    .push(msg3)
+        .write_tmp(to = b)
+        .read().assert_eq(msg3);
     
-    fuse_root := Posix'openat(Posix'AT'FDCWD(), "target".as_cstr(), Posix'O'RDONLY, 0)
-        || @panic("failed to open target/shared");
-    
-    fd := Posix'openat(fuse_root, "a.txt".as_cstr(), Posix'O'RDWR, 0)
-        || @panic("failed to open");
-    
-    _ := Syscall'lseek(fd, 0, .Set) 
-        || @panic("failed lseek");
-        
-    buf := @tfmt("Goodbye World %!", timestamp());
-    writen_len := Syscall'write(fd, buf.ptr, buf.len)
-        || @panic("failed write");
-    @println("WRITE: %/%", writen_len, buf.len);
-    
-    pos := Syscall'lseek(fd, 10, .Set) 
-        || @panic("failed lseek");
-    @println("seek to %", pos);
-    
-    out := u8.list(1000, temp());
-    read_len := Syscall'read(fd, out.items().end_pointer(), out.maybe_uninit.len - out.len) 
-        || @panic("failed read");
-    out.len += read_len;
-    @println("READ(%): %", read_len, out.items());
-    
-    Syscall'close(fd);
-    
-    bytes := read_entire_file_or_crash(temp(), "target/shared/foo/bar.txt");
-    @println("foo/bar.txt: %", bytes);
-    
+    d := "target/a/b/c/d.txt";
     make_dirs_or_crash("target/a/b/c");
-    write_entire_file_or_crash("target/a/b/c/d.txt", "in my new directory");
-    //rename("target/a", "target/a2").unwrap();
+    msg4 := "in my new directory";
+    msg4.write(to = d)
+        .read().assert_eq(msg4);
     
     println("ok");
 }
+
+fn read(path: Str) []u8 =
+    read_entire_file_or_crash(temp(), path);
+
+fn close(fd: Fd) void = {
+    Syscall'close(fd);
+}
+
+fn open(path: Str, it: @struct(O: Str)) Fd = 
+    Posix'AT'FDCWD().open(child = path, O = it.O);
+
+fn open(fd: Fd, it: @struct(child: Str, O: Str)) Fd = {
+    r, w, t, c := (it.O.contains("r"), it.O.contains("w"), it.O.contains("t"), it.O.contains("c"));
+    flags := @if_else {
+        @if(r && w) => Posix.O.RDWR;
+        @if(r) => Posix.O.RDONLY;
+        @if(w) => Posix.O.WRONLY;
+        @else => @panic("open(%): O(%) must contain r or w", it.child, it.O);
+    };
+    if(t) {| flags = flags.bit_or(Posix.O.TRUNC); };
+    if(c) {| flags = flags.bit_or(Posix.O.CREAT); };
+
+    Posix'openat(fd, it.child.as_cstr(), flags, Posix'S'IRWXU)
+        || @panic("failed to open (parent = %)|%|", fd.fd, it.child)
+}
+
+fn write(buf: Str, it: @struct(to: Str)) Str = {
+    it.to.open(O = "wtc").write(buf).close();
+    it.to
+}
+
+fn write_tmp(buf: Str, it: @struct(to: Str)) Str = {
+    write_entire_file_or_crash(it.to, buf);
+    it.to
+}
+
+fn write(fd: Fd, buf: Str) Fd = {
+    len := Syscall'write(fd, buf.ptr, buf.len)
+        || @panic("failed write % bytes", buf.len);
+    @assert_eq(len, buf.len, "incomplete write");
+    fd
+}
+
+fn read(fd: Fd) []u8 = {
+    buf := temp().alloc_uninit(u8, fd.size());
+    len := Syscall'read(fd, buf.ptr, buf.len)
+        || @panic("failed read % bytes", buf.len);
+    @assert_eq(len, buf.len, "incomplete read");
+    buf
+}
+
+fn seek(fd: Fd, it: @struct(to: i64)) Fd = {
+    _ := Syscall'lseek(fd, it.to, .Set) 
+        || @panic("failed lseek to %", it.to);
+    fd
+}
+
+fn cur(fd: Fd) i64 = 
+    Syscall'lseek(fd, 0, .Cur) 
+        || @panic("failed seek(Cur)");
+
+fn size(fd: Fd) i64 = {
+    cur := fd.cur();
+    size := Syscall'lseek(fd, 0, .End) 
+        || @panic("failed seek(End)");
+    fd.seek(to = cur);
+    size
+}
+
+fn rename(old: Str, it: @struct(to: Str)) Str = {
+    rename(old.as_cstr(), it.to.as_cstr()) 
+        || @panic("failed rename % -> %", old, it.to);
+    it.to
+}
+
+#use("@/lib/collections/map.fr");
+globals :: @static(HashMap(Symbol, @union(Fd: Fd, Str: Str)));
+
+fn named(value: Fd, key: Symbol) Fd = {
+    globals.insert(key, (Fd = value));
+    value
+}
+fn named(value: Str, key: Symbol) Str = {
+    globals.insert(key, (Str = value));
+    value
+}
+fn var(_: void, key: Symbol, $T: Type) T #generic = {
+    value := globals.get(key) || @panic("missing global %", key);
+    bit_cast_unchecked(@type value, T, value)
+}
+
+fn push(_: void, value: Str) Str = value;
 
 #use("@/lib/sys/fs.fr");

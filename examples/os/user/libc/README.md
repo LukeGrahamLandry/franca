@@ -20,6 +20,8 @@ I couldn't find another libc that doesn't need to know the target at compile tim
 (even cosmopolitan is only os generic, it still has ifdefs based on architecture). 
 I also have low respect for the compliation model that involves make and a billion tiny object files. 
 
+(WIP: currently the fixed abi thing is true for the franca interface, lib/sys/posix.fr, but not the c one)
+
 ---
 
 Each .fr file here corrisponds to one .h file in a classic c distribution. 

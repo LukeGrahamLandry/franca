@@ -1,4 +1,6 @@
 
+## (Nov 25)
+
 - pass argc,argv,envp correctly in elf_loader and use that to pass the device tree to user space. 
 - use bootargs to run something on startup 
   so when im testing something specific i don't have to type the command every time. 
@@ -12,6 +14,9 @@
     its not about a page being uncommitted because v_to_p does that. 
     works if you read it in small chunks, i guess theres a max read size (and 3449466 is too much)? 
     there's max_readahead, maybe thats what that means? 
+- log all the functions i need for doom
+- start splitting libc up by which header file has that function. 
+  use those instead of well_known.fr for web demo. 
 
 ## (Nov 24)
 
