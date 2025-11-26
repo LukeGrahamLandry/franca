@@ -53,18 +53,13 @@ DT :: import("@/examples/os/drivers/devicetree.fr");
 // this is called by emit_entry's _start
 main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
     kernel.uart = .None;
-    
-    link_image_base: i64 = 0x40100000;
-    kernel_image_size := -1;
+    FullHeader :: import("@/examples/os/build.fr").FullHeader;
     if device_tree == 0 || kernel_image_base == -4 {
-        // qemu running as elf instead of as linux image
-        device_tree = 0x40000000;
-        kernel_image_base = link_image_base;
-        kernel_image_size = 1.shift_left(23);  // TODO: tighter bound. 
-    } else {
-        // LinuxBootHeader.image_size
-        kernel_image_size = i64.ptr_from_int(kernel_image_base + 16)[];
+        kpanic("qemu running as elf instead of as linux image");
     };
+    h := FullHeader.ptr_from_int(kernel_image_base)[].build;
+    kernel_image_size := h.header + h.user + h.kernel;
+    root_task_elf_bytes := u8.ptr_from_int(kernel_image_base + h.header).slice(h.user);
     // TODO: could allow data relocations in the kernel. 
     //       just read elf sections here and do it based on kernel_image_base-link_image_base
     //       but be careful because the linux header stomps part of the elf header. 
@@ -91,9 +86,8 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
          ptr = u8.ptr_from_int(end_of_kernel), 
          len = ram.len - before_end_of_kernel,
     );
-    // TODO: don't include this in physical.free, don't want to stomp it. 
-    //@if(kernel.physical.remaining.contains_address(device_tree_bytes.ptr)) kpanic("free ram stomps device tree");
-    kernel.next_vaddr = u8.int_from_ptr(ram.end_pointer()) + 0x40000000;
+    // offset chosen by fair die roll, just has to not overlap ram
+    kernel.next_vaddr = u8.int_from_ptr(ram.end_pointer()) + 0x40000000;  
     kernel.env = get_dynamic_context();
     kernel.device_tree = device_tree_bytes;
     
@@ -257,21 +251,6 @@ Virt :: import("@/examples/os/drivers/virtio.fr");
 Pci :: import("@/examples/os/drivers/pci.fr");
 VirtConsole :: import("@/examples/os/drivers/console/virtio.fr");
 VirtFuse :: import("@/examples/os/drivers/fs/virtio.fr");
-
-root_task_elf_bytes :: {
-    franca := get_executable_path(temp());
-    o := "target/userspaceprogram.out";
-    // TODO: this needs to be cacheable (rn -syscalls isn't but it shouldn't be hard to fix since thats not foldable)
-    //       but also only the driver gets cached, not the program you're compiling, so need to fix that too. 
-    import("@/examples/testing.fr")'hush(@slice(
-        franca, "examples/default_driver.fr", "build", 
-        "examples/os/user/init.fr", 
-        "-os", "linux", "-arch", "aarch64", 
-        "-keep-names",
-        "-o", o,
-    ));
-    read_entire_file_or_crash(ast_alloc(), o)
-};
 
 alloc_task :: fn(tt: *TranslationTable) *Task = {
     each kernel.tasks& { it |

@@ -1,5 +1,17 @@
 
+## (Nov 26)
+
 - sad waste of time becuase get_constant doesn't type check and just treats it as a func id
+- bit of a slog to get all the bits of libc doom uses, mostly printf. 
+  easier to just copy the framebuffer on a different thread so both can think they own the main loop. 
+  it works tho!!!! great success. so nice of them to make it play a little video 
+  even tho i can't do input yet so i can tell it can actually draw stuff. 
+- os/build.fr takes 1350ms.
+  compile the kernel/start and user/init in parallel and just concat together to make the final image. 
+  only got it down to 1180ms, still that's 14%, not bad. 
+  kernel is tiny, that part takes 150ms (wall time on its own thread).
+  tho im comparing it to compiler/main.fr with -unsafe (which is 880ms),
+  doing init.fr unsafe gets it to 986ms which is more respectable. 
 
 ## (Nov 25)
 

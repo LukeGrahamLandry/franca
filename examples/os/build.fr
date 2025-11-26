@@ -1,14 +1,23 @@
 
 driver :: fn(vtable: *ImportVTable) void = {
     start := timestamp();
-    bytes := compile(vtable);
+    kernel_elf := "";
+    user_elf := "";
+    threads := @slice(
+        start_thread_output(vtable, kernel_elf&, compile_kernel),
+        start_thread_output(vtable, user_elf&, compile_user),
+    );
+    for threads { it |
+        it.join();
+    };
+    
     #use("@/examples/testing.fr");
     link_image_base: i64 = 0x40100000;
-    mem_size := flat_link(bytes, link_image_base);
+    mem_size := flat_link(kernel_elf, link_image_base);
     // before stomping the elf header, save it as something objdump understands
-    write_entire_file_or_crash("target/kernel.elf", bytes);
+    write_entire_file_or_crash("target/kernel.elf", kernel_elf);
     output := "target/kernel.out";
-    link_linux_boot(bytes, link_image_base, mem_size);
+    bytes := link_linux_boot(kernel_elf, link_image_base, mem_size, user_elf);
     write_entire_file_or_crash(output, bytes);
     hush := cli_args().contains(fn(it) => it[] == "-hush");
     @if(!hush) @eprintln(">>> compiled in %ms;", timestamp() - start);
@@ -55,17 +64,25 @@ driver :: fn(vtable: *ImportVTable) void = {
     _ := Syscall'remove("target/qemuconsoleoutput.txt");
 }
 
-compile :: fn(vtable: *ImportVTable) []u8 = {
+make_build_options :: fn(vtable: *ImportVTable) *BuildOptions = {
+    opts := vtable.default_build_options();
+    opts.retain_function_names = true;
+    if cli_args().contains(fn(it) => it[] == "-unsafe") {
+        it := opts.safety_checks&;
+        it.insert(.Bounds, false);
+        it.insert(.DebugAssertions, false);
+        it.insert(.InvalidTag, false);
+    };
+    opts
+}
+
+compile_kernel :: fn(vtable: *ImportVTable) []u8 = {
     env: TargetEnv = (arch = .aarch64, os = .linux);
     src := "#include_std(\"lib/core.fr\");#include_std(\"examples/os/kernel/start.fr\");";
-    build_options := vtable.default_build_options();
-    build_options.retain_function_names = true;
-    build_options.use_raw_syscalls = true;
-    it := build_options.safety_checks&;
-    it.insert(.Bounds, false);
-    it.insert(.DebugAssertions, false);
-    it.insert(.InvalidTag, false);
-    comp := vtable.new_with_src(src, "examples/os/kernel/start.fr", build_options);
+    opts := make_build_options(vtable);
+    opts.use_raw_syscalls = true;
+    
+    comp := vtable.new_with_src(src, "examples/os/kernel/start.fr", opts);
     fr := vtable.with(comp);
     
     entry := ProgramEntry.GiveMeTheCodeAndGiveItToMeRaw;
@@ -80,6 +97,7 @@ compile :: fn(vtable: *ImportVTable) []u8 = {
         arch = .aarch64, 
         type = .Relocatable,
         link_libc = false,
+        exe_debug_symbol_table = opts.retain_function_names,
     ));
     m.goal.have_entry_point = true;  // TODO: why isn't this enough to replace `ENTRY(_start)`
     
@@ -87,7 +105,7 @@ compile :: fn(vtable: *ImportVTable) []u8 = {
     // TODO: i don't have a way to ask for sane names without franca_runtime_init or making a dynamic library
     emit_entry(m&, @tfmt("main__%", @as(u32) fid));
     chunks := {fr.vtable.emit_qbe_included}(Qbe.Module.raw_from_ptr(m&), fr&, fns, entry);
-    concat(chunks&, temp())
+    concat(chunks&, general_allocator())
 }
 
 // TODO: should make an api for this that isn't so painful
@@ -278,28 +296,73 @@ flat_link :: fn(in: []u8, ram_base: i64) i64 = {
     mem_size
 }
 
+// TODO: this needs to be cacheable 
+//       but also only the driver gets cached, not the program you're compiling, so need to fix that too. 
+compile_user :: fn(vtable: *ImportVTable) []u8 = {
+    env: TargetEnv = (arch = .aarch64, os = .linux);
+    src := "#include_std(\"lib/core.fr\");#include_std(\"examples/os/user/init.fr\");";
+    opts := make_build_options(vtable);
+    comp := vtable.new_with_src(src, "examples/os/user/init.fr", opts);
+    fr := vtable.with(comp);
+    fid := or fr.get_unique_named("main") {
+        panic("expected exactly one function called 'main'")
+    };
+    fns := @slice(fid);
+    m := @uninitialized Qbe.Module;
+    init_default_module_dyn(m&, fr.vtable, (
+        os = .linux, 
+        arch = .aarch64, 
+        type = .Exe,
+        link_libc = true,
+        exe_debug_symbol_table = opts.retain_function_names,
+    ));
+    chunks := {fr.vtable.emit_qbe_included}(Qbe.Module.raw_from_ptr(m&), fr&, fns, .WrapMain);
+    concat(chunks&, general_allocator())
+}
+
 // TODO: the constant R_AARCH64_ABS64 are wrong now because don't know where it will be loaded in ram.
-// note: ram_base won't be the address its loaded at runtime, it's just used to offset constant addresses. 
-link_linux_boot :: fn(in: []u8, ram_base: i64, mem_size: i64) void = {
+// note: ram_base won't be the address its loaded at runtime, it's just used to offset constant addresses.
+link_linux_boot :: fn(in: []u8, ram_base: i64, mem_size: i64, user_elf: []u8) []u8 = {
     Elf :: import("@/backend/elf/bits.fr");
     Arm :: import("@/backend/arm64/bits.fr");
     
     elf_h := in.peek_type(Elf.Header)[];
-    lin_h := in.peek_type(LinuxBootHeader);
-    dat_h := in.rest(size_of(@type lin_h[])).peek_type(BuildData);
-    // TODO
-    distance := (elf_h.entry - ram_base) / 4;
-    lin_h[] = (
-        code = (Arm'b(distance, 1), 0),
-        text_offset = 0,
-        image_size = mem_size,
-        flags = 0b0_11_0,
+    prefix_size := size_of(FullHeader) + user_elf.len;
+    // kernel has to be 4k aligned so that flat_link's adrp calculations work 
+    // (without this you compute the wrong address of globals)
+    padding := prefix_size.align_to(1.shift_left(12)) - prefix_size;
+    prefix_size += padding;
+    distance := (elf_h.entry - ram_base + prefix_size) / 4;
+    h: FullHeader = (
+        linux = (
+            code = (Arm'b(distance, 1), 0),
+            text_offset = 0,
+            image_size = prefix_size + mem_size,
+            flags = 0b0_11_0,
+        ),
+        build = (
+            header = size_of(FullHeader) + padding,
+            user = user_elf.len,
+            kernel = mem_size,
+            link_image_base = ram_base,
+        ),
     );
+    ::[]FullHeader;
+    // note: kernel has to be last because it has bss at the end
+    parts := @slice(interpret_as_bytes(h&.slice(1)), temp().alloc_zeroed(u8, padding), user_elf, in);
+    concat(parts, temp())
 }
 
+FullHeader :: @struct {
+    linux: LinuxBootHeader;
+    build: BuildData;
+};
+
 BuildData :: @struct {
-    kernel_size: i64;
-    user_size: i64;
+    header: i64;
+    user: i64;
+    kernel: i64;
+    link_image_base: i64;
 };
 
 // https://www.kernel.org/doc/Documentation/arm64/booting.txt
@@ -316,8 +379,12 @@ LinuxBootHeader :: @struct {
 Qbe :: import("@/backend/lib.fr");
 #use("@/lib/sys/fs.fr");
 
-// TODO: there are 3 blobs i need
-//       kernel, user elf, user source code
-//       instead of compiling all together, spawn 3 processes here
-//       then concatenate them and just pass the lengths to runtime. 
-// >>> compiled in 1355ms;
+#use("@/lib/sys/threads.fr");
+fn start_thread_output(in: ~I, out: ~O, callee: @FnPtr(in: I) Deref(O)) *Thread #where = {
+    IO :: @struct(in: I, out: O, callee: @FnPtr(in: I) Deref(O));
+    io := general_allocator().boxed(IO, (in = in, out = out, callee = callee));
+    IO.start_thread(fn(io) = { 
+        io.out[] = io'callee(io.in);
+        general_allocator().dealloc_one(IO, io);
+    }, io)
+}
