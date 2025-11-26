@@ -3,6 +3,15 @@
 - use bootargs to run something on startup 
   so when im testing something specific i don't have to type the command every time. 
 - catch panics and mostly recover to the shell
+- more fuse. 
+  - rename, awquard because there's two dirs so you have to make sure they're on the same file system
+  - O_CREAT, seems its not magic in OPEN, i do a seperate CREAT call when the OPEN fails. 
+  - mkdir i don't understand, its returning -74 but still making the directory
+  - thats enough to enable frc caching. 
+    works for sudoku but not kaleidoscope, hangs trying to read the file. 
+    its not about a page being uncommitted because v_to_p does that. 
+    works if you read it in small chunks, i guess theres a max read size (and 3449466 is too much)? 
+    there's max_readahead, maybe thats what that means? 
 
 ## (Nov 24)
 

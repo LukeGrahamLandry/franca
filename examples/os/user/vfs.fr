@@ -16,6 +16,7 @@ fs :: @static(@struct {
     next_fuse_request_id: u64;
     allocator: Alloc;
     device_tree_bytes: []u8;
+    have_fuse_target_dir: bool;
 });
 
 FileHandle :: @rec @struct {
@@ -32,6 +33,7 @@ FileVTable :: @struct {
     fstat: @FnPtr(self: rawptr, out: *Posix.Linux.StatArm64) i64 = (fn(_0, _1) = -1);
    access: @FnPtr(self: rawptr, mode: i64) i64 = (fn(_0, _1) = 0);
     mkdir: @FnPtr(self: rawptr, path: CStr, mode: i64) i64 = (fn(_0, _1, _2) = -1);
+   rename: @FnPtr(self: rawptr, dest_dir: Fd, src_name: CStr, dest_name: CStr) i64 = (fn(_0, _1, _2, _3) = -1);
 };
 
 init_vfs :: fn() void = {
@@ -114,6 +116,7 @@ init_vfs :: fn() void = {
         }
     };
     
+    // TODO: let user iterate the tags and mount them manually 
     q := fs.allocator.box_zeroed(UQueue);
     if virtq_create(q, "Host.fs", 1) {
         fuse_root := init_fuse(q);
@@ -122,6 +125,7 @@ init_vfs :: fn() void = {
         child := get_file(fuse_root).unwrap();
         child := FuseFile.ptr_from_raw(child.data)[];
         create_child(cwd, "target", FuseFile, child);
+        fs.have_fuse_target_dir = true;
     };
     // else :leak
 }
@@ -296,6 +300,7 @@ FuseFile :: @struct {
     position: u64 = 0;
     
     read :: fn(self, buf) = {
+    split_io_chunks(buf) { buf |
         in := zeroed Fuse.ReadIn;
         in.fh = self.fh;
         in.offset = self.position;
@@ -304,8 +309,10 @@ FuseFile :: @struct {
             .or(fn(e) => return(e));
         self.position += result.data.len.bitcast();
         result.data.len
+    }
     };
     write :: fn(self, buf) = {
+    split_io_chunks(buf) { buf |
         in := zeroed Fuse.WriteIn;
         in.fh = self.fh;
         in.size = buf.len.trunc();
@@ -315,6 +322,7 @@ FuseFile :: @struct {
             .or(fn(e) => return(e));
         self.position += result.size.uext();
         result.size.zext()
+    }
     };
     lseek :: fn(self, offset, whence) = {
         ::enum(Whence);
@@ -348,8 +356,37 @@ FuseFile :: @struct {
 
         fs.allocator.dealloc_one(FuseFile, self);
     };
-    openat :: fn(self, path, flags, mode) = {
-        fuse_openat(self, path, flags, mode)
+    openat :: fn(fd: *FuseFile, path: CStr, flags: i64, mode: i64) i64 = {
+        q := fd.q;
+        create := flags.bit_and(LinuxLibc.O_arm.CREAT) != 0;
+        flags = flags.bit_and(LinuxLibc.O_arm.CREAT.bit_not());
+        
+        in: Fuse.LookupIn = (name = path.cstr_with_null());
+        fh, node := @match(fuse_blocking(q, .LOOKUP, fd.nodeid, in)) {
+            fn Ok(result) => {
+                node := result.nodeid;
+                in: Fuse.OpenIn = (flags = flags.trunc(), open_flags = 0);
+                result := fuse_blocking(q, .OPEN, node, in)
+                    .or(fn(e) => return(e));
+                (result.fh, node)
+            }
+            fn Err(e) => {
+                @if(!create) return(e);
+                @trace("create(%)", path);
+                in: Fuse.CreateIn = (
+                    flags = flags.trunc(),
+                    mode = mode.trunc(),
+                    open_flags = 0,
+                    umask = 0,
+                    name = path.cstr_with_null(),
+                );
+                result := fuse_blocking(q, .CREATE, fd.nodeid, in)
+                    .or(fn(e) => return(e));
+                (result.open.fh, result.lookup.nodeid)
+            }
+        };
+        fd := push_file(FuseFile, (q = q, nodeid = node, fh = fh));
+        fd.fd.intcast()
     };
     fstat :: fn(self, out) = {
         in := zeroed Fuse.StatxIn;
@@ -359,28 +396,64 @@ FuseFile :: @struct {
         out.st_mode = result.stat.mode.zext();
         0
     };
+    rename :: fn(self, dest_dir, src_name, dest_name) = {
+        dest_dir := get_file(dest_dir) || return(-1);
+        ::ptr_utils(FileVTable);
+        @if(!identical(dest_dir.vtable, get_vtable(FuseFile))) return(-1);
+        dest_dir := FuseFile.ptr_from_raw(dest_dir.data);
+        
+        in: Fuse.RenameIn = (
+            newdir = dest_dir.nodeid, 
+            name = src_name.cstr_with_null(),
+            newname = dest_name.cstr_with_null(),
+        );
+        _ := fuse_blocking(self.q, .RENAME, self.nodeid, in)
+            .or(fn(e) => return(e));
+        
+        0
+    };
+    mkdir :: fn(self, path, mode) = {
+        @trace("fuse mkdir %", path);
+        in: Fuse.MkdirIn = (
+            mode = mode.trunc(),//.bit_or(Posix.S.IFDIR),
+            umask = 0,
+            name = path.cstr_with_null(),
+        );
+        result := fuse_blocking(self.q, .MKDIR, self.nodeid, in)
+            .or(fn(e) => {
+                @if(e == -74) return(0);  // TODO: wtf does that mean, clearly its still makign the directory
+                return(e)
+            });
+        0
+    };
 };
 
-fuse_openat :: fn(fd: *FuseFile, path: CStr, flags: i64, mode: i64) i64 = {
-    q := fd.q;
-    
-    name := path.str();
-    @trace("fuse_openat(%)", name);
-    name.len += 1;
-    @assert(name[name.len - 1] == 0);
-    in: Fuse.LookupIn = (name = name);
-    result := fuse_blocking(q, .LOOKUP, fd.nodeid, in)
-        .or(fn(e) => return(e));
-    node := result.nodeid;
-    @trace("-> %", node);
+// HACK
+split_io_chunks :: fn(buf: []u8, $body: @Fn(buf: []u8) i64) i64 = {
+    // TODO: this means read/write are not atomic anymore! :FUCKED
+    // TODO: get the limit from fuse init info?
+    //       theres a max_write and a max_read_ahead (is that what i want?)
+    // TODO: given that im doing a bunch, its stupid to block on each, one at a time :SLOW
+    MAX :: 1.shift_left(14);  
+    total := 0;
+    dowhile {
+        try_read := buf.len;
+        partial := try_read > MAX; 
+        if partial {
+            try_read = MAX;
+        };
+        read_len := body(buf.subslice(0, try_read));
+        total += read_len;
+        buf = buf.rest(read_len);
+        read_len != 0 && buf.len > 0 && partial
+    };
+    total
+} 
 
-    in: Fuse.OpenIn = (flags = flags.trunc(), open_flags = 0);
-    result := fuse_blocking(q, .OPEN, node, in)
-        .or(fn(e) => return(e));
-    @trace("-> %", result.fh);
-    
-    fd := push_file(FuseFile, (q = q, nodeid = node, fh = result.fh));
-    fd.fd.intcast()
+cstr_with_null :: fn(it: CStr) []u8 = {
+    s: []u8 = (ptr = it.ptr, len = it.str().len() + 1);
+    @assert_eq(s[s.len - 1], 0);
+    s
 };
 
 init_fuse :: fn(q: *UQueue) Fd = {
@@ -424,7 +497,7 @@ fn fuse_blocking(q: *UQueue, op: Fuse.Opcode, node: u64, in: ~I, e_out: []u8) Re
     ::enum(@type op);
     @debug_assert(ho.len != 0 || op == .FORGET);  // no reply, virtio is just returning the buffer. 
     @debug_assert(ho.len == 0 || hi.unique == ho.unique);
-    @if(ho.error != 0) return(Err = ho.error.intcast());
+    @if(ho.error != 0) return(Err = ho.error.intcast().abs().neg());
     extra := ho.len.zext() - size_of(@type out);
     extra := e_out.slice(0, extra.max(0).min(e_out.len));
     
@@ -515,11 +588,13 @@ fn get_file(fd: Fd) ?FileHandle = {
 FuseId :: @struct(nodeid: u64, fh: u64);
 FRes :: fn($T: Type) Type = Result(T, i64);
 
-fn follow_path_prefix(fd: Fd, path: Str) Result(Ty(Fd, Str), i64) = {
+fn follow_path_prefix(fd: Fd, path: Str) Result(Ty(Fd, CStr), i64) = {
     if path.starts_with("./") {
         path = path.rest(2);
     };
     while => path.ends_with("/") {
+        path.len -= 1;
+        path = @tfmt("%\0", path);
         path.len -= 1;
     };
     
@@ -528,7 +603,7 @@ fn follow_path_prefix(fd: Fd, path: Str) Result(Ty(Fd, Str), i64) = {
     loop {
         dir, rest := pop_dir_prefix(path) || {
             @assert(path != "" && path != "." && path != "..", "TODO: special");
-            return(Ok = (fd, path));
+            return(Ok = (fd, (ptr = path.ptr)));
         };
         @assert(dir != "" && dir != "." && dir != "..", "TODO: special");
         
@@ -536,7 +611,6 @@ fn follow_path_prefix(fd: Fd, path: Str) Result(Ty(Fd, Str), i64) = {
         buf&.push_all(dir);
         buf&.push(0);
         result := LIBC'FR_openat(fd, (ptr = buf&.as_ptr()), Posix.O.RDONLY, 0);
-        @trace("-> %", result);
         if result < 0 {
             if !first {
                 _ := LIBC'close(fd);

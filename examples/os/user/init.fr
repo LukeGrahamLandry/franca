@@ -179,7 +179,7 @@ run_command :: fn(cmd: *Command) void = {
             args&.push(it.as_cstr());
         };
         c.cli_arguments = args.items();
-        import("@/compiler/main.fr")'main2(command, true);
+        import("@/compiler/main.fr")'main2(command, !fs.have_fuse_target_dir);
     };
 }
 
@@ -551,18 +551,18 @@ LIBC :: @struct {
     
     // note: this is the linux syscall abi, not the libc abi
     FR_openat :: fn(f: Fd, path: CStr, flags: i64, mode: i64) i64 = {
-        path := path.str();
+        path := path;
         need_close := false;
-        if path.contains("/") {  // :SLOW
-            parent, file := or follow_path_prefix(f, path) { e |
-                return(-e.abs());
+        if path.str().contains("/") {  // :SLOW
+            parent, file := or follow_path_prefix(f, path.str()) { e |
+                return(e);
             };
             f = parent;
             need_close = true;
-            path = @tfmt("%\0", file);
+            path = file;
         };
         fd := get_file(f) || return(-1);
-        result := fd'vtable'openat(fd.data, (ptr = path.ptr), flags, mode);
+        result := fd'vtable'openat(fd.data, path, flags, mode);
         @trace("openat(fd = %, %, %, %) = %", f.fd, path, flags, mode, result);
         @assert(f.fd.intcast() != result, "openat must return new fd");
         if need_close {
@@ -582,9 +582,14 @@ LIBC :: @struct {
     }
     
     mkdirat :: fn(parent: Fd, path: CStr, mode: i64) i64 = {
-        @assert(!path.str().contains("/"), "TODO: mkdirat(%) flow_path but start early", path);
-        f := get_file(parent) || return(-1);
-        result := f'vtable'mkdir(f'data, path, mode);
+        parent2, path2 := follow_path_prefix(parent, path.str()) 
+            .or(fn(e) => return(e));
+        // TODO: don't :leak if parent2 != parent
+        
+        @trace("mkdir(%, %) => mkdir(%, %)", parent.fd, path, parent2.fd, path2);
+        f := get_file(parent2) || return(-1);
+        result := f'vtable'mkdir(f'data, path2, mode);
+        @trace("mkdir(%, %, %) = %", parent.fd, path, mode, result);
         result
     }
     
@@ -594,9 +599,26 @@ LIBC :: @struct {
         fd: Fd = (fd = fd.intcast());
         f := get_file(fd) || return(-1);
         result := f'vtable'access(f'data, mode);
+        @trace("access(%, %) = %", path, mode, result);
         close(fd);
         result
     }
+    
+    renameat :: fn(old_dir: Fd, old: CStr, new_dir: Fd, new: CStr) i64 = {
+        new_dir2, new_file := follow_path_prefix(new_dir, new.str()) 
+            .or(fn(e) => return(e));
+        old_dir2, old_file := follow_path_prefix(old_dir, old.str()) 
+            .or(fn(e) => return(e));  // :leak
+        // :leak
+        // TODO: don't leak the newly opened fds
+    
+        f := get_file(old_dir2) || return(-1);
+        result := f'vtable'rename(f'data, new_dir2, old_file, new_file);
+        @trace("renameat(%, %, %, %) = %", old_dir.fd, old, new_dir.fd, new, result);
+        result
+    }
+    
+    fsync :: fn() i64 = 0;  // TODO
     
     malloc :: fn(size: i64) *u8 = 
         general_allocator().alloc_uninit(u8, size).as_ptr();
