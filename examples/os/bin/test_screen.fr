@@ -4,6 +4,23 @@ main :: fn() void = {
         eprintln("this will block the shell. run `spawn test_screen` instead");
         return();
     };
+    
+    shift := 0;
+    run_loop { framebuffer, fb_rect |
+        shift += 1;
+        range(0, fb_rect.width.zext()) { x |
+            range(0, fb_rect.height.zext()) { y |
+                i := y * fb_rect.width.zext() + x;
+                r := float(x) / float(fb_rect.width.zext());
+                g := float((-shift + y).umod(fb_rect.height.zext())) / float(fb_rect.height.zext());
+                b := float(shift.mod(100)) / 100;
+                framebuffer[i] = pack_rgba(r, g, b, 1.0);
+            };
+        };
+    };
+}
+
+run_loop :: fn($body: @Fn(fb: []u32, rect: *Gpu.Rect) void) void = {
     q := temp().box_zeroed(UQueue);
     if !virtq_create(q, "Screen.gpu", 0) {
         eprintln("failed to bind framebuffer device");
@@ -55,19 +72,9 @@ main :: fn() void = {
     h := q.gpu_sync(.SetScanout, in&, none);
     @assert_eq(h.type, .OkNoData, "SetScanout");
     
-    shift := 0;
     loop {
         frame_start := timestamp_ns();
-        shift += 1;
-        range(0, fb_rect.width.zext()) { x |
-            range(0, fb_rect.height.zext()) { y |
-                i := y * fb_rect.width.zext() + x;
-                r := float(x) / float(fb_rect.width.zext());
-                g := float((-shift + y).umod(fb_rect.height.zext())) / float(fb_rect.height.zext());
-                b := float(shift.mod(100)) / 100;
-                framebuffer[i] = pack_rgba(r, g, b, 1.0);
-            };
-        };
+        body(framebuffer, fb_rect);
     
         in: Gpu.TransferToHost2d = (
             r = fb_rect,

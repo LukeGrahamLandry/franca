@@ -12,72 +12,159 @@ vsnprintf :: fn(dest: *u8, n: i64, fmt: CStr, va: *CVariadicArgumentList) i64 = 
             continue();
         };
         i += 1;
-        @switch(fmt[i]) {  // TODO: bounds
-            @case("i".ascii()) => {
-                i += 1;
-                value := va.next(i32);
-                j += write_int_to_buffer(dest.rest(j), value.intcast());
+        
+        specifiers := "diuoxXfFeFgGaAcspn%";
+        lengths := "hljztL";
+        length_pairs := "hl";
+        flags := "-+ #0";
+        arg: FormatArg = ();
+        // :SLOW
+        // TODO: bounds
+        
+        while => flags.contains(fmt[i]) {
+            @panic("TODO: printf flag %", fmt[i]);
+            i += 1;
+        };
+        if fmt[i].is_ascii_digit() {
+            n, remaining := convert_number_dyn(fmt.rest(i), 10);
+            i = fmt.len - remaining.len;
+            arg.width = n.trunc();
+        };
+        if fmt[i] == ".".ascii() {
+            i += 1;
+            n, remaining := convert_number_dyn(fmt.rest(i), 10);
+            i = fmt.len - remaining.len;
+            arg.precision = (Some = n.trunc());
+        };
+        if lengths.contains(fmt[i]) {
+            arg.length = fmt[i]; i += 1;
+            if fmt[i] == arg.length && length_pairs.contains(arg.length) {
+                arg.length_twice = true;
             };
-            // TODO
-            @case("p".ascii()) => {
-                i += 1;
-                value := va.next(i64);
-                j += write_int_to_buffer(dest.rest(j), value);
+        };
+        if !specifiers.contains(fmt[i]) {
+            eprintln(fmt);
+            eprintln(fmt.rest(i));
+            eprintln("TODO: printf didn't find specifier. did i parse wrong?");
+            return(-1);
+        };
+        arg.specifier = fmt[i]; i += 1;
+        
+        value: FormatArg.Value = @switch(arg.specifier) {
+            @case("d".ascii()) => (i = va.next(i32).intcast());
+            @case("i".ascii()) => (i = va.next(i32).intcast());
+            @case("p".ascii()) => (i = va.next(i64));
+            @case("x".ascii()) => (i = va.next(i64));
+            @case("s".ascii()) => (s = va.next(CStr));
+            @default => {
+                @panic("TODO: printf fmt %\n%", arg.specifier, fmt);
             };
-            // TODO
-            @case("x".ascii()) => {
-                i += 1;
-                value := va.next(i64);
-                j += write_int_to_buffer(dest.rest(j), value);
+        };
+        
+        ::tagged(@type value);
+        @match(value) {
+            fn i(value) => {
+                size := write_int_to_buffer(dest.rest(j), value);
+                if arg.precision { precision |
+                    precision: i64 = precision.zext();
+                    if size < precision {
+                        range(0, precision - size) { i |
+                            dest[j] = "0".ascii(); j += 1;
+                        };
+                        write_int_to_buffer(dest.rest(j), value);
+                    }
+                };
+                j += size;
+            }
+            fn f(value) => {
+                @panic("TODO: printf float % %", fmt, value);
             };
-            @case("s".ascii()) => {
-                i += 1;
-                value := va.next(CStr).str();
+            fn s(value) => {
+                value := value.str();
                 dest.subslice(j, value.len).copy_from(value);
                 j += value.len;
-            };
-            @default => {
-                @panic("TODO: printf fmt %\n%", fmt[i], fmt);
-            };
-        }
+            }
+        };
     };
+    
     // TODO: its supposed to return the amount that would have been written if n was high enough
     //       (rn i panic if not enough space)
     dest[j] = 0;
     j
 };
-fopen :: fn(path: CStr, mode: CStr) i64 = {
-    @eprintln("TODO: fopen(%, %)", path, mode);
-    0
+
+// https://cplusplus.com/reference/cstdio/printf: %[flags][width][.precision][length]specifier
+FormatArg :: @struct {
+    specifier: u8 = 0;
+    width: u8 = 0;
+    precision: ?u8 = .None;
+    length: u8 = 0;
+    length_twice := false;
+    left := false;
+    sign := false;
+    space := false;
+    hash := false;
+    zero_pad := false;
+    Value :: @tagged(f: f64, i: i64, s: CStr);
+};
+
+// TODO: this is unbuffered :SLOW :SLOW :SLOW
+FILE :: @struct {
+    fd: Fd;
+};
+
+fopen :: fn(path: CStr, mode: CStr) *FILE = {
+    fd := Posix'openat(Posix'AT'FDCWD(), path, Posix.O.RDWR, 0)
+        || return(zeroed(*FILE));
+    general_allocator().boxed(FILE, (fd = fd))
 } 
-ftell :: fn() void = 
-    @panic("TODO: ftell");
-fread :: fn() void = 
-    @panic("TODO: fread");
+
+fseek :: fn(self: *FILE, pos: i64, whence: Whence) i64 = {
+    Syscall'lseek(self.fd, pos, whence) || return(-1);
+    0
+}
+
+ftell :: fn(self: *FILE) i64 = {
+    Syscall'lseek(self.fd, 0, .Cur) || (-1)
+}
+
+fread :: fn(dest: *u8, n: i64, m: i64, self: *FILE) i64 = {
+    dest := dest.slice(n * m);
+    @if(dest.len == 0) return(0);
+    read := Syscall'read(self.fd, dest.ptr, dest.len) || return(-1);
+    read / n
+}
+
 fwrite :: fn() void = 
     @panic("TODO: fwrite");
+
 fflush :: fn() void = 
     @panic("TODO: fflush");
-fclose :: fn() void = 
-    @panic("TODO: fclose");
+
+fclose :: fn(self: *FILE) void = {
+    Syscall'close(self.fd);
+}
+
 // todo; I_ERROR faults, probably before fprintf(stderr, _) because stderr is unfilled fixup?
 fprintf :: fn() void = 
     @panic("TODO: fprintf");
+
 vfprintf :: fn() void = 
     @panic("TODO: vfprintf");
-printf :: fn(fmt: CStr, va: CVariadic) i64 = {
+    
+printf :: fn(fmt: CStr, va: CVariadic) i64 /*#inline*/ = 
+    vprintf(fmt, va&.start());
+
+vprintf :: fn(fmt: CStr, va: *CVariadicArgumentList) i64 = {
     out := temp().alloc_uninit(u8, fmt.str().len() + 100);
-    n := vsnprintf(out.ptr, out.len, fmt, va&.start());
+    n := vsnprintf(out.ptr, out.len, fmt, va);
     out := out.slice(0, n);
     print(out);
     out.len
 }
 
-fseek :: fn() void = 
-    @panic("TODO: fseek");
-
-snprintf :: fn() void = 
-    @panic("TODO: snprintf");
+snprintf :: fn(dest: *u8, n: i64, fmt: CStr, va: CVariadic) i64 /*#inline*/ = 
+    vsnprintf(dest, n, fmt, va&.start());
 
 sscanf :: fn() void = 
     @panic("TODO: sscanf");

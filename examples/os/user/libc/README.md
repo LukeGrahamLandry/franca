@@ -33,3 +33,5 @@ Annotations:
 - #inline are trivial wrappers of other libc functions. 
   Like as #static but non-transitive. 
   Examples: malloc calls calloc
+
+(WIP: i don't do anything with #static or #inline yet)

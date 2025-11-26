@@ -1,4 +1,6 @@
 
+- sad waste of time becuase get_constant doesn't type check and just treats it as a func id
+
 ## (Nov 25)
 
 - pass argc,argv,envp correctly in elf_loader and use that to pass the device tree to user space. 
