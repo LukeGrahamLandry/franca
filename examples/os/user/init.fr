@@ -139,7 +139,6 @@ decode_and_run_cmd :: fn(full_command: Str) void = {
                         usleep(5000); // HACK
                     } else {
                         start := timestamp();
-                        println("compiling...");
                         run_command(cmd&);
                         if fs.timer {
                             #use("@/lib/sys/process.fr");
@@ -352,16 +351,33 @@ redo_relocations_static_linux :: fn() void = {
 };
 
 temporary_libc_import :: fn(name: Str, dest: *rawptr, allow_null: bool) void = {
-    LIBC_s :: Type.scope_of(LIBC);
-    inline_for get_constants(LIBC_s) { $n |
-        fid :: get_constant(FuncId, LIBC_s, n[]).unwrap();
-        check := @run n[].str();
-        if name == check {
-            dest[] = fid;
-            return();
+    exports := @static(RawHashMap(Str, rawptr)) {
+        it := ScopeId.list(temp());
+        it&.push(Type.scope_of(LIBC));
+        files := collect_directory_ordered("examples/os/user/libc", temp(), temp()).unwrap();
+        for files { jt |
+            if jt.name.ends_with(".fr") {
+                it&.push(import(@tfmt("@/examples/os/user/libc/%", jt.name)));
+            };
         };
+        
+        fr := current_compiler_context();
+        out: HashMap(Str, rawptr) = init(ast_alloc());
+        for it { s |
+            for get_constants(s) { n |
+                if get_constant(FuncId, s, n) { fid |
+                    old := out&.insert(n.str(), fr.get_jitted(fid));
+                    @assert(old.is_none(), "duplicate libc export: %", n.str());
+                };
+            };
+        };
+        out.raw
     };
     
+    if exports.get(name) { it |
+        dest[] = it;
+        return()
+    };
     if !allow_null {
         dest[] = fn() void = panic("called a weak import");
     };
@@ -371,6 +387,7 @@ MyAttr :: @struct {
     stack: []u8;
 };
 
+// TODO: move all of these to ./libc/*.fr
 LIBC :: @struct {
     mmap :: fn(addr: rawptr, len: i64, prot: i64, flags: i64, fd: Fd, offset: i64) i64 = with_syscalls {
                 result := Syscall'mmap(addr, len, prot, flags, fd, offset);
@@ -453,6 +470,7 @@ LIBC :: @struct {
         __errno_location()[] = 1;
         0
     };
+    // TODO: this needs to be threadlocal
     __errno_location :: fn() *i64 = @static(i64);
     sigaction :: fn() i64 = 0;
     memmove :: fn(dest: rawptr, src: rawptr, count: i64) void =
@@ -502,12 +520,6 @@ LIBC :: @struct {
         // not the same as `with_syscalls { t.join(); 0 };` because that would free the stack twice
         t.sys_join();
         value_ptr[] = zeroed rawptr; // TODO
-        0
-    };
-    // for mandel.ssa
-    putchar :: fn(c: u8) = print(c&.slice(1));
-    puts :: fn(s: CStr) i64 = {  // for hello.c
-        println(s.str());
         0
     };
     
@@ -619,19 +631,6 @@ LIBC :: @struct {
     }
     
     fsync :: fn() i64 = 0;  // TODO
-    
-    malloc :: fn(size: i64) *u8 = 
-        general_allocator().alloc_uninit(u8, size).as_ptr();
-    free :: fn(p: rawptr) i64 = {
-        // TODO: need to track size
-        0
-    }
-    system :: fn(command: CStr) i64 = {
-        @eprintln("TODO: implment LIBC.system(%)", command);
-        -1
-    };
-    
-    vsnprintf :: fn() void = @panic("TODO: libc.vsnprintf");
     
     strtod :: fn(s: *u8, end_out: **u8) f64 = {
         // TODO: this one doesn't support all the syntax. 1e-2

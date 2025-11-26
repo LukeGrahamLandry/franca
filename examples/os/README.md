@@ -66,3 +66,11 @@ currently it's good enough to run the franca compiler on qemu-system-aarch64's v
 ```
 - compile with import_c and mount it in the vfs:
   https://github.com/libfuse/libfuse/blob/master/example/hello_ll.c 
+- generate things from examples/os/user/libc
+  - examples/import_c/include.fr
+  - generate examples/import_wasm/run.fr/Exports/env from examples/os/user/libc
+    (harder because you need to deal with offsetting pointers)
+  - examples/web/demo.fr/for_exports
+    (will probably be made redundant by doing all the web stuff with my os userspace)
+- jit libc functions lazily, don't just include them all in init. 
+- enough of libc to run doom
