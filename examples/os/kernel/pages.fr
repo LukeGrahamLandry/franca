@@ -59,7 +59,6 @@ fn map_contiguous(self: *Physical, n: i64, align: i64) []u8 #inline = {
 
 // TODO: permissions
 fn vmap_reserve(addrs: *AddressSpace, page_count: i64) i64 = {
-    kernel.pages_reserved += page_count;
     vaddr := kernel.next_vaddr;
     @if(page_count < 0) kpanic("-pages");
     @if(vaddr < 0) kpanic("voom");
@@ -81,14 +80,12 @@ fn vmap_reserve(addrs: *AddressSpace, page_count: i64) i64 = {
 // :SLOW
 fn vunmap(addrs: *AddressSpace, vaddr: i64, page_count: i64) void = {
     range(0, page_count) { _ |
-        kernel.pages_reserved_freed += 1;
         pte := index_page_table(addrs, vaddr);
         @switch(pte.map.get(.tag)) {
             @case(0b00) => if pte.res.repr == 0 {
                 kpanic("unmapped a page that was already unmapped");  // todo: just log
             };
             @case(0b11) => {
-                kernel.pages_committed_freed += 1;
                 phys := get_pointer(kernel.page_index_bits, pte[], *Physical.Free);
                 phys.link = kernel.physical.free;
                 kernel.physical.free = phys;
@@ -103,7 +100,6 @@ fn vunmap(addrs: *AddressSpace, vaddr: i64, page_count: i64) void = {
 // TODO: use flags instead of crazy bools
 // this is called by the interrupt handler the first time you try to access a new page
 fn vmap_one(addrs: *AddressSpace, vaddr: i64, phys: *Physical.Free, user: bool, pxn: bool, device: bool, zerofill: bool) void = {
-    kernel.pages_committed += 1;
     pte := index_page_table(addrs, vaddr);
     if pte.map.repr != 0 {
         kprint_label("vaddr ", vaddr);
@@ -185,12 +181,7 @@ fn v_to_p(mem: *AddressSpace, vaddr: i64) i64 = {
     @if(!kernel.mmu_enabled) return(vaddr);
     v_base := vaddr.align_back(kernel.page_size);
     pte := index_page_table(mem, v_base);
-    // TODO: stop pasting this around 
-    if pte.res.get(.tag) == 0b00 && pte.res.get(.reserved) == 0b1 {
-        pte.res.repr = 0;  // TODO: store permissions there and pass them to vmap_one
-        vmap_one(mem, vaddr, kernel.physical&.map(1), true, true, false, true);
-        clear_tlb(vaddr);
-    };
+    commit_if_reserved(mem, v_base, pte);
     if pte.map.get(.tag) != 0b11 {
         kpanic("v_to_p: unmapped");
     };
@@ -201,6 +192,16 @@ fn v_to_p(mem: *AddressSpace, vaddr: i64) i64 = {
 AddressSpace :: @struct {
     root: *TranslationTable;  // TTBR0_EL1
 };
+
+fn commit_if_reserved(mem: *AddressSpace, vaddr: i64, pte: *PTE) bool = {
+    new := pte.res.get(.tag) == 0b00 && pte.res.get(.reserved) == 0b1;
+    if new {
+        pte.res.repr = 0;  // TODO: store permissions there and pass them to vmap_one
+        vmap_one(mem, vaddr, kernel.physical&.map(1), true, true, false, true);
+        clear_tlb(vaddr);
+    };
+    new
+}
 
 // the table controls the range [vbase..+step*8192].
 // step depends on its level in the tree, vbase depends on its position in the tree. 
@@ -288,9 +289,6 @@ setup_virtual_memory :: fn(ram: []u8, pci: ?Pci.MemoryRegion) *TranslationTable 
     };
     // TODO: unmap the kernel copy of elf_bytes so that physical memory can be reused
     
-    kernel.pages_committed = 0;
-    kernel.pages_reserved = 0;
-    
     // unmap the low addresses to make sure null pointers fault. 
     unmapped := 1.shift_left(20);
     range(0, unmapped / page_size) { i |
@@ -324,10 +322,6 @@ setup_virtual_memory :: fn(ram: []u8, pci: ?Pci.MemoryRegion) *TranslationTable 
     sctlr&.set(.UCI, 1);  // allow cache mantinence at el0
     sctlr&.set(.UCT, 1);  // allow CTR_EL0 at el0
     
-    if tracing {
-    kprint_label("TCR_EL1: ", tcr.repr.bitcast());
-    kprint_label("SCTLR_EL1: ", sctlr.repr.bitcast());
-    };
     TcrEl1.sys_set(.TCR_EL1, tcr);
     barrier();
     SctlrEl1.sys_set(.SCTLR_EL1, sctlr);
@@ -366,15 +360,12 @@ fn check_user_memory(addr: i64, len: i64, flags: i64) []u8 = {
     while => vaddr < end {
         pte := index_page_table(task.mem&, vaddr);
         // ensure the page is commited before the kernel tries to access it
-        @if(flags != 0) if pte.res.get(.tag) == 0b00 && pte.res.get(.reserved) == 0b1 {
-            pte.res.repr = 0;  // TODO: store permissions there and pass them to vmap_one
-            vmap_one(task.mem&, vaddr, kernel.physical&.map(1), true, true, false, true);
-            clear_tlb(vaddr);
+        if flags != 0 {
+            commit_if_reserved(task.mem&, vaddr, pte);
         };
         // TODO: check permissions
         vaddr += kernel.page_size;
     };
-    
     
     u8.ptr_from_int(addr).slice(len)
 }

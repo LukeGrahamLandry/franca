@@ -18,6 +18,12 @@
 // note: each intid can appear multiple times and you just have to check all the devices that match? 
 //
 
+// if i ever want to do amd where you ahve to user different instructions for io space memory, 
+// don't stop using structs for everything. do a meta programming thing where you convert 
+// to the io instructions instead of loads/stores. having the code look like code is much better than 
+// foo = ioreadu64(pci_base, PCI_FOO_OFFSET)
+// im going to have to cave on my stance of not having implicit accessors to make .vol() suck less anyway. 
+
 Header :: @struct {
     vendor_id: u16;  //  0xffff means non-existant device
     device_id: u16;
@@ -69,19 +75,34 @@ BarResult :: @struct {
 };
 // TODO: is this different for body._1?
 // TODO: error if address not in size_mask so caller can try again with something aligned?
-// address must be a valid mmio address from the pci.reg node of the device tree
-set_bar64 :: fn(h: *Header, bar: u8, address: i64, stomp: bool) BarResult = {
+
+fn alloc_bar64(pci: *MemoryRegion, h: *Pci.Header, bar: u8) BarResult = {
+    stomp := false;
+    @if(h.header_type != 0) kpanic("alloc_bar for non-end-point-pci-header");
+    
     bar := h.body._0.bar&[bar.zext()]&;
     initial := vol_2x32(bar);
+    flags: u8 = initial.bit_and(0xF).trunc();
+    @if(flags.bit_and(1) != 0) kpanic("invalid bar: io space");
+    @if(flags.bit_and(0b110) != 0b100) kpanic("invalid bar: 32-bit");
+    
     old_address := initial.bit_and(bit_not(0xF));
     vol_2x32(bar, -1);
     size_mask := vol_2x32(bar).bit_and(bit_not(0xF));
     size := size_mask.bit_not().add(1);
+
+    // address must be a valid mmio address from the pci.reg node of the device tree
+    address := u8.int_from_ptr(pci.bar.ptr) + pci.bar_offset.ualign_to(size);  
+    @if(pci.bar_offset.ualign_to(size) + size > pci.bar.len) kpanic("oom mmio");
     if old_address != 0 && !stomp {
         address = old_address;
+    } else {
+        pci.bar_offset = pci.bar_offset.ualign_to(size);
+        pci.bar_offset += size;
     };
     vol_2x32(bar, address);
-    flags: u8 = initial.bit_and(0xF).trunc();
+    @if(vol_2x32(bar).bit_and(0b1111.bit_not()) != address) kpanic("failed at alignment somehow");
+    
     (old_address = old_address, size = size, flags = flags, mem = u8.ptr_from_int(address).slice(size))
 }
 
@@ -139,6 +160,7 @@ fn find_interrupt(pci: Pci.MemoryRegion, h: *Header) ?i64 = {
 }
 
 find_interrupt :: fn(data: []u8, bus: i64, device: i64, function: i64, pin: i64) ?i64 = {
+    @if(pin == 0) return(.None);
     it: DT.Iter.Node = (name = "", data = data, tag = .PROP);
     while => it.data.len >= 10 * size_of(u32) {
         flags: PciAddrInfo = (repr = it.read_32(0));
@@ -156,15 +178,15 @@ find_interrupt :: fn(data: []u8, bus: i64, device: i64, function: i64, pin: i64)
     .None
 }
 
-fn find_device(pci: Pci.MemoryRegion, $where: @Fn(h: *Header) bool) ?Ty(i64, *Header) = {
+fn for(pci: *Pci.MemoryRegion, $body: @Fn(h: *Pci.Header, a: i64) void) void = {
     range(0, pci.config.len / 4096) { i |
-        continue :: local_return;
-        h := bit_cast_unchecked(*u8, *Pci.Header, pci.config.index(i*4096));
-        if(h.vendor_id&.vol() == 0xFFFF, => continue());
-        if(where(h), => return(Some = (i*4096, h)));
+        a := i*4096;
+        h := bit_cast_unchecked(*u8, *Pci.Header, pci.config.index(a));
+        if h.vendor_id&.vol() != 0xFFFF {
+            body(h, a);
+        }
     };
-    .None
-}
+} 
 
 PciAddrInfo :: @bit_fields(
     register := 8,

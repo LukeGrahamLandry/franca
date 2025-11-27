@@ -1,6 +1,7 @@
 
 the beginnings of an operating system. 
 currently it's good enough to run the franca compiler on qemu-system-aarch64's virt machine.
+it also runs doom (i don't have a keyboard driver yet so just the intro render)
 
 ## implemented
 
@@ -73,4 +74,5 @@ currently it's good enough to run the franca compiler on qemu-system-aarch64's v
   - examples/web/demo.fr/for_exports
     (will probably be made redundant by doing all the web stuff with my os userspace)
 - jit libc functions lazily, don't just include them all in init. 
-- enough of libc to run doom
+- usb driver
+- keyboard input for doom

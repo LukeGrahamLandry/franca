@@ -176,6 +176,7 @@ fn push_virt(q: *Queue, virtual: []u8, flags: u16) void = {
     };
 }
 
+// TODO: check that i have enough descriptors free
 // don't forget to publish_chain() after!
 fn push_phys(self: *Queue, physical: []u8, flags: u16) void = {
     @debug_assert_eq(physical.len.bit_and(MAX_u32), physical.len);
@@ -299,16 +300,12 @@ DeviceHandle :: @struct {
 };
 
 discover_all :: fn(pci: *Pci.MemoryRegion) void = {
-    range(0, pci.config.len / 4096) { i |
+    for pci { h, a |
         continue :: local_return;
-        h := bit_cast_unchecked(*u8, *Pci.Header, pci.config.index(i*4096));
-        vendorid := h.vendor_id&.vol();
-        if(vendorid == 0xFFFF, => continue());
-        
-        if(vendorid != Virt.pci_vendor_id, => continue());
+        if(h.vendor_id&.vol() != Virt.pci_vendor_id, => continue());
         id := h.device_id&.vol();
         if implemented.find(fn(it) => id == 0x1040 + it.id || id == 0x1000 + it.id) { kind |
-            handle := discover_one(pci, i*4096, h, kind);
+            handle := discover_one(pci, a, h, kind);
             kernel.handles&.push(handle);
         }
     };
@@ -322,11 +319,7 @@ discover_one :: fn(pci: *Pci.MemoryRegion, a: i64, h: *Pci.Header, kind: *KnownD
     c := h.find_pci_cap(.COMMON).unwrap();
     bar_index := c.bar&.volatile();
     
-    legal_pci_addr := u8.int_from_ptr(pci.bar.ptr) + pci.bar_offset;  
-    bar := Pci'set_bar64(h, bar_index, legal_pci_addr, false);
-    if u8.int_from_ptr(bar.mem.ptr) == legal_pci_addr {
-        pci.bar_offset += bar.size;
-    };
+    bar := alloc_bar64(pci, h, bar_index);
     cfg := bit_cast_unchecked(*u8, *Virt.PciCommonCfg, bar.mem.index(c.offset&.vol().zext()));
     
     note: ?Virt.NotifyStep = .None;

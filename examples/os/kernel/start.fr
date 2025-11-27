@@ -13,11 +13,6 @@ Kernel :: @struct {
     env: rawptr;
     interrupt_stack: []u8;
     idle_task: Task;
-    pages_reserved: i64;
-    pages_committed: i64;
-    pages_reserved_freed: i64;
-    pages_committed_freed: i64;
-    device_tree: []u8;
     page_size: i64;
     page_index_bits: []i64;
     kernel_image: []u8;
@@ -89,7 +84,6 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
     // offset chosen by fair die roll, just has to not overlap ram
     kernel.next_vaddr = u8.int_from_ptr(ram.end_pointer()) + 0x40000000;  
     kernel.env = get_dynamic_context();
-    kernel.device_tree = device_tree_bytes;
     
     // if device tree is too close to start of ram, 
     // we'll stomp it before being able to copy to user space, 
@@ -159,6 +153,11 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
         if it.kind.id == 16 {
             set_cstr(it.label&, "Screen.gpu");
         };
+    };
+
+    if pci& { pci |
+        Xhci :: import("@/examples/os/drivers/usb/xhci.fr");
+        Xhci'discover_all(pci, gic);
     };
     
     kstack := kernel.physical&.map_contiguous(16 * 1.shift_left(16), 1);
@@ -527,17 +526,12 @@ Task :: @struct {
 };
 
 SavedRegisters :: MContext;
-tracing :: false; 
 // for now im using the same handler for every slot of the InterruptVector
 syscall_func :: fn(task: *Task) void = {
     return :: ();  // must do it via return_to_user
     
     set_dynamic_context(kernel.env);
     args := task.mcontext&;
-    
-    if tracing {
-    kprint("=== inside syscall_func ===\n");
-    }; 
     
     // these are restored by return_to_user
     args.elr = i64.sys_get(.ELR_EL1);
@@ -553,12 +547,6 @@ syscall_func :: fn(task: *Task) void = {
     intid0 := i64.sys_get(.ICC_IAR0_EL1).bit_and(0xfff);
     if intid0 != Gic.null_interrupt_id {
         kpanic("intid0");
-    };
-    if tracing {
-    kprint_label("thread pointer: ", SavedRegisters.int_from_ptr(args));
-    kprint_label("SP_EL0: ", i64.sys_get(.SP_EL0));
-    kprint_label("saved fp: ", args.gpr&[29]);
-    kprint_label("intid: ", intid);
     };
         
     ::if_opt(Pl011.Self, i64);
@@ -595,10 +583,7 @@ syscall_func :: fn(task: *Task) void = {
             
             // TODO: don't create a L2 table for it if its just a junk pointer 
             pte := index_page_table(task.mem&, vaddr);
-            if pte.res.get(.tag) == 0b00 && pte.res.get(.reserved) == 0b1 {
-                pte.res.repr = 0;  // TODO: store permissions there and pass them to vmap_one
-                vmap_one(task.mem&, vaddr, kernel.physical&.map(1), true, true, false, true);
-                clear_tlb(vaddr);
+            if commit_if_reserved(task.mem&, vaddr, pte) {
                 return_to_user(task);
             };
             
@@ -636,9 +621,6 @@ syscall_func :: fn(task: *Task) void = {
         is_svc := exception_class == 0b010101;
         if is_svc {
             syscall_number := args.gpr&[8];
-            if tracing {
-                kprint_label("syscall_number: ", syscall_number);
-            };
             if syscall_number != args.gpr&[16] {
                 tpanic("perform_syscall always uses both x8 and x16");
             };

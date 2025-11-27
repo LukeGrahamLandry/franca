@@ -1,4 +1,22 @@
 
+
+## (Nov 27)
+
+- usb
+  - i am the stupid, need to enable the pci.header, now the qemu one gives sane numbers, vzf still says 32 bit tho. 
+  - https://www.intel.com/content/dam/www/public/us/en/documents/technical-specifications/extensible-host-controler-interface-usb-xhci.pdf
+    clearly i need to write my own pdf viewer that doesn't respect the fucking type in a password 
+    to unlock copying the text from our dumpster fire garbage pdf, what the hell. 
+    chrome silently doesn't copy and preview has a popup. like why bro. 
+  - it seems to me that the end state is just a ring buffer queue thing 
+    that they've somehow made super complicated. so maybe this is actually achivable, 
+    like all the insane shit seems to be thier equivalent of my Virt.Queue 
+    and once i can do that, talking to the actual devices might not suck?
+  - 4.2,4.3 have a list, hey there's only 7 pages of stuff i have to do, how hard could it be 
+  - i think the sane thing is to do it gradually so i don't lose my mind
+
+
+
 ## (Nov 26)
 
 - sad waste of time becuase get_constant doesn't type check and just treats it as a func id
@@ -8,10 +26,18 @@
   even tho i can't do input yet so i can tell it can actually draw stuff. 
 - os/build.fr takes 1350ms.
   compile the kernel/start and user/init in parallel and just concat together to make the final image. 
+  (very glad i remembered symptoms of breaking adrp and getting a different place for the kernel struct every function). 
   only got it down to 1180ms, still that's 14%, not bad. 
   kernel is tiny, that part takes 150ms (wall time on its own thread).
   tho im comparing it to compiler/main.fr with -unsafe (which is 880ms),
   doing init.fr unsafe gets it to 986ms which is more respectable. 
+- i fear im going to regret trying to use usb instead of virtio-input.
+  - adding keyboard+mouse in vzf adds (4203 Apple Inc, 6662 xhci_hcd), 
+    and `-device qemu-xhci` adds (6966 Red Hat Inc, 13 QEMU XHCI Host Controller) to pci. 
+  - i can map the bar but all the numbers in there are 0xFFFFFFFF which doesn't make any sense,
+    and on vzf it has the flag for 32 bit which doesn't make sense because the pci base address
+    itself is more than 4gb so it wont fit. 
+    made sure to align the offset to the size, didn't help. maybe it's not always BAR0?
 
 ## (Nov 25)
 
@@ -71,6 +97,7 @@
   im guessing its just a problem with my timeing or sleep or context switching, 
   because if you just print how much free time there is between frames its always like 15ms 
   so its clearly not actually as slow as it looks? 
+- (trying to compile doom)
 - side quest to rewrite follow_path so write works
 - bamboozled myself with `a = &anims[wbs->epsd][i];` being the wrong type, but its 
   just because you can't just concatenate all the files, they rely on you using different

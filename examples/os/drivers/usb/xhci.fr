@@ -1,0 +1,130 @@
+// eXtensible Host Controller Interface
+// https://www.intel.com/content/dam/www/public/us/en/documents/technical-specifications/extensible-host-controler-interface-usb-xhci.pdf
+
+//
+// THIS IS NOT FINISHED YET
+//
+
+discover_all :: fn(pci: *Pci.MemoryRegion, gic: Gic.Self) void = {
+    for pci { h, _ |
+        if h.class_code == 0x0C && h.subclass == 0x03 && h.prog_if == 0x30 {
+            discover_one(pci, h, gic);
+        };
+    };
+}
+
+discover_one :: fn(pci: *Pci.MemoryRegion, h: *Pci.Header, gic: Gic.Self) void = {
+    h.command&.vol(0b110);
+    intid := find_interrupt(pci[], h);
+    bar := alloc_bar64(pci, h, 0);
+    
+    if intid { intid |
+        gic.set_group1(intid);
+        gic.enable(intid);
+    };
+    
+    caps := bar.mem.peek_type(CapReg);
+    opr := bar.mem.rest(caps.CAPLENGTH&.vol().zext()).peek_type(OperReg);
+    rtreg := bar.mem.rest(caps.RTSOFF&.vol().zext()).peek_type(RuntimeReg);
+    
+    irs := bar.mem
+        .rest(caps.RTSOFF&.vol().zext() + size_of(RuntimeReg))
+        .peek_slice(RuntimeReg.IRS, caps.HCSPARAMS1.get(.MaxIters));
+    
+    doorbell := bar.mem
+        .rest(caps.DBOFF&.vol().zext())
+        .peek_slice(u32, caps.HCSPARAMS1.get(.MaxPorts));
+    
+    // 4.2 Host Controller Initialization
+        
+    opr.config&.set(.MaxSlotsEn, 2);
+    
+    dc := allocate(DeviceContext, caps.HCSPARAMS1.get(.MaxSlots), 64);  // first is scratchpad. 
+    dcbaa := allocate(*DeviceContext, caps.HCSPARAMS1.get(.MaxSlots), 64);
+    enumerate dc { i, it |
+        dcbaa[i] = it;
+    };
+    opr.DCBAAP&.vol(dcbaa.ptr);
+    
+    command_ring := allocate(TRB, 128, 64);  // TODO
+    opr.CRCR&.vol(command_ring.ptr);
+        
+    opr.DNCTRL&.vol(2);  // listen for WAKE
+    opr.command&.vol(0b101);  // last thing: turn it on!
+}
+
+// TODO: idk if it has to be in the pci memory region but it probably has to be marked noncachable in the page table. 
+// TODO: be less wasteful
+// TODO: use my allocator interface
+allocate :: fn($T: Type, count: i64, align: i64) []T #generic = {
+    size := size_of(T) * count;
+    mem := kernel.physical&.map_contiguous(size, align);
+    T.reinterpret_bytes(mem)
+}
+
+CapReg :: @struct {
+    CAPLENGTH: u8;  // -> OperReg
+    RSVD: u8;
+    HCIVERSION: u16;
+    HCSPARAMS1: @bit_fields(
+        MaxSlots := 8,
+        MaxIters := 11,
+        _ := 5,
+        MaxPorts := 8,
+    );
+    HCSPARAMS2: u32;
+    HCSPARAMS3: u32;
+    HCCPARAMS1: u32;
+    DBOFF: u32;  // -> Array(u32, MaxPorts)
+    RTSOFF: u32;  // -> RuntimeReg
+    HCCPARMS2: u32;
+};
+
+OperReg :: @struct {
+    command: u32;  // 5.4.1
+    status: u32;
+    page_size: Array(u32, 3);
+    DNCTRL: u32;
+    CRCR: *TRB;  // (first in an array); low bits are flags
+    _ := Array(u32, 4);
+    DCBAAP: **DeviceContext;
+    config: @bit_fields(
+        MaxSlotsEn := 8,
+        _ := 24,
+    );
+};
+
+RuntimeReg :: @struct {
+    MFINDEX: u32;
+    _ := Array(u32, 3);
+    // Array(IRS, MaxIters)
+    
+    IRS :: @struct {
+        IMAN: u32;
+        IMOD: u32;
+        ERSTSZ: i64;
+        ERSTBA: i64;
+        ERDP: i64;
+    };
+};
+
+DeviceContext :: @struct {
+    slot: SlotContext;
+    end: Array(EndPointContext, 31);
+};
+
+SlotContext :: @struct {  // 6.2.2
+    _: Array(u32, 8);
+};
+
+EndPointContext :: @struct {  // 6.2.3
+    _: Array(u32, 8);
+};
+
+TRB :: @union(  // transfer request block
+    _: Array(u32, 4),
+    normal: @struct {
+        data: i64;
+        _: Array(u32, 2);
+    },
+);
