@@ -1,0 +1,49 @@
+pthread_attr_init :: fn(out: *ThreadAttr) i64 = {
+    out[] = zeroed(@type out[]);
+    0
+};
+
+// note: this requires that userdata be a *Thread (as called by raw_create_thread)
+pthread_create :: fn(out: *pthread_t, attr: *ThreadAttr, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) i64 = {
+    attr := bit_cast_unchecked(*ThreadAttr, *MyAttr, attr);
+    ctx := zeroed MContext;
+    ctx.elr = bit_cast_unchecked(@type callee, i64, callee);
+    ctx.gpr&[0] = bit_cast_unchecked(@type userdata, i64, userdata);
+    ctx.gpr&[30] = int_from_rawptr(fn() void = {
+        args: Array(i64, 6) = (0, 0, 0, 0, 0, 0);
+        Syscall'perform_syscall(args&, 94);  // exit
+        unreachable()
+    });
+    ctx.gpr&[31] = bit_cast_unchecked(*u8, i64, attr.stack.end_pointer());
+    ctx.userdata = userdata;
+    
+    thread := Thread.ptr_from_raw(userdata);
+    t: ThreadConfig = (
+        signal_handler = handle_signal,
+        signal_stack_buf = page_allocator.alloc_uninit(u8, 1.shift_left(16)),
+        exit_futex = thread.tid_futex&,
+    );
+    args: Array(i64, 6) = (MContext.int_from_ptr(ctx&), ThreadConfig.int_from_ptr(t&), 0, 0, 0, 0);
+    id, _ := Syscall'perform_syscall(args&, 0xFFFF0005);  // spawn_thread
+    @if(id < 0) panic("failed to create thread");
+    thread.tid = id.intcast();
+    out.opaque = userdata;
+    @trace("pthread_create(elr = %, x0 = %, sp = %) = %", ctx.elr, ctx.gpr&[0], ctx.gpr&[31], id);
+    0
+};
+
+pthread_attr_setstack :: fn(attr: *ThreadAttr, ptr: *u8, len: i64) i64 = {
+    attr := bit_cast_unchecked(*ThreadAttr, *MyAttr, attr);
+    attr.stack = ptr.slice(len);
+    0
+};
+
+pthread_getcpuclockid :: fn() = 0;  // TODO
+
+pthread_join :: fn(thread: pthread_t, value_ptr: *rawptr) i64 = {
+    t := Thread.ptr_from_raw(thread.opaque);
+    // not the same as `with_syscalls { t.join(); 0 };` because that would free the stack twice
+    t.sys_join();
+    value_ptr[] = zeroed rawptr; // TODO
+    0
+};

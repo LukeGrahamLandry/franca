@@ -21,6 +21,7 @@ main :: fn() void = {
         #use("@/lib/sys/jump.fr");
         jumpbuf :: @static(JumpBuf);
         throw_panic_hook :: fn(s: Str) Never = {
+            fs := shell;
             panicking :: @static(bool);
             c := context(DefaultContext);
             old := fs.strace;
@@ -39,7 +40,7 @@ main :: fn() void = {
             throw(jumpbuf);
         };
         
-        fs.device_tree_bytes = {
+        shell.device_tree_bytes = {
             devicetree := c.cli_arguments[0].ptr;
             h := bit_cast_unchecked(*u8, *DT.Header, devicetree)[];
             DT.Header.byte_swap_fields(h&);
@@ -50,8 +51,8 @@ main :: fn() void = {
         signal_env[] = c[];
         signal_env.thread_index = -1;  // make handle_signal NOT count as the same thread for reenterant mutex
 
-        init_vfs();
-        buf := u8.list(fs.allocator);
+        Vfs'init_vfs();
+        buf := u8.list(general_allocator());
         timer := false;
         boottime := timestamp();
         @println("The system took %ms to boot.", boottime);
@@ -61,11 +62,11 @@ main :: fn() void = {
         // TODO: this shell should share some logic with examples/terminal.fr
         loop {
             mark := temp().mark();
-            old := fs.strace;  // TODO: not thread safe
-            fs.strace = false;
+            old := shell.strace;  // TODO: not thread safe
+            shell.strace = false;
             Term'interactive_read_line(buf&);
             print("\n");
-            fs.strace = old;
+            shell.strace = old;
             
             push_dynamic_context {
                 context(DefaultContext)[].panic_hook = throw_panic_hook;
@@ -81,26 +82,24 @@ main :: fn() void = {
     }
 }
 
+Vfs :: import("@/examples/os/user/vfs.fr");
+
 run_startup_commands :: fn() void = {
+    fs := Vfs.fs;
     count := 0;
     start := timestamp();
-    bootargs := find_boot_args(DT'iter(fs.device_tree_bytes)) || "\0";
+    bootargs := find_boot_args(DT'iter(shell.device_tree_bytes)) || "\0";
     while => bootargs.len > 0 {
         bootargs := bootargs&.pop_cstr();
-        //while => bootargs.len > 2 && !bootargs.starts_with("--") {
-        //    bootargs = bootargs.rest(1);
-        //};
-        //if bootargs.starts_with("--") {
-        //    bootargs = bootargs.rest(2);
-            init := bootargs.split(";", temp()).items();
-            for(init, decode_and_run_cmd);
-            count += init.len;
-        //};
+        init := bootargs.split(";", temp()).items();
+        for(init, decode_and_run_cmd);
+        count += init.len;
     };
     @if(count != 0) @println("Finished % startup commands in %ms.", count, timestamp() - start);
 }
 
 decode_and_run_cmd :: fn(full_command: Str) void = {
+    fs := Vfs.fs;
     while => full_command.len > 0 && full_command[0].is_ascii_whitespace() {
         full_command = full_command.rest(1);
     };
@@ -114,15 +113,15 @@ decode_and_run_cmd :: fn(full_command: Str) void = {
                     @println("%ms", timestamp());
                 };
                 @case("strace") => {
-                    fs.strace = parts[1] == "on" || parts[1] == "true";
+                    shell.strace = parts[1] == "on" || parts[1] == "true";
                 };
                 @case("time") => {
-                    fs.timer = parts[1] == "on" || parts[1] == "true";
+                    shell.timer = parts[1] == "on" || parts[1] == "true";
                 };
                 @case("help") => print(SHELL_HELP.rest(1));
                 @case("devicetree") => {
                     out := u8.list(temp());
-                    import("@/examples/dump_devicetree.fr")'dump(out&, fs.device_tree_bytes);
+                    import("@/examples/dump_devicetree.fr")'dump(out&, shell.device_tree_bytes);
                     print(out.items());
                 };
                 @default => {
@@ -144,7 +143,7 @@ decode_and_run_cmd :: fn(full_command: Str) void = {
                     } else {
                         start := timestamp();
                         run_command(cmd&);
-                        if fs.timer {
+                        if shell.timer {
                             #use("@/lib/sys/process.fr");
                             @print("(%ms)\n", timestamp() - start);
                         };
@@ -182,6 +181,7 @@ run_command :: fn(cmd: *Command) void = {
             args&.push(it.as_cstr());
         };
         c.cli_arguments = args.items();
+        fs := Vfs.fs;
         import("@/compiler/main.fr")'main2(command, !fs.have_fuse_target_dir);
     };
 }
@@ -200,11 +200,16 @@ search_path :: fn(command: Str) ?Str = {
     .None
 }
 
-#use("@/examples/os/user/vfs.fr");
+shell :: @static(@struct {
+    strace: bool;
+    timer: bool;
+    device_tree_bytes: []u8;
+});
 
 signal_env :: @static(DefaultContext);
 
 pl011_int_poll :: fn(q: *UQueue, who: i64) void = {
+    fs := Vfs.fs;
     // if polling after work.push, do nothing, wait for an interrupt.
     @if(who == 0) return();  
     // else, polling before done.pop
@@ -230,6 +235,7 @@ pl011_int_poll :: fn(q: *UQueue, who: i64) void = {
 
 handle_signal :: fn(ctx: *MContext, intid: i64, data: i64) Ty(i64, *MContext) = {
     set_dynamic_context(DefaultContext.raw_from_ptr(signal_env));
+    fs := Vfs.fs;
 
     thread := Thread.ptr_from_raw(ctx.userdata);
     ::ptr_utils(Thread);
@@ -265,10 +271,9 @@ handle_signal :: fn(ctx: *MContext, intid: i64, data: i64) Ty(i64, *MContext) = 
     // TODO: import Gic.null_interrupt_id
     if intid != 1023 || ec != 0b010101 {
         crashing :: @static(bool);
-        fs.strace = false;
+        shell.strace = false;
         if !crashing[] {
             crashing[] = true;
-            fs.strace = false;
             @println("sp = %; fp = %; lr = %; ip = %;", ctx.gpr&[31], ctx.gpr&[29], ctx.gpr&[30], ctx.elr);
             eprintln("fatal signal");
             report_backtrace(fp = ctx.gpr&[29].rawptr_from_int(), ip = ctx.elr.rawptr_from_int());
@@ -282,11 +287,12 @@ handle_signal :: fn(ctx: *MContext, intid: i64, data: i64) Ty(i64, *MContext) = 
     syscall_number := ctx.gpr&[8];
     msg :: "perform_syscall always has x8==x16\nallowing someone else to call us is sketchy because i return to lr instead of elr";
     @assert_eq(ctx.gpr&[8], ctx.gpr&[16], msg);
+    unistd :: import("@/examples/os/user/libc/impl/unistd.fr");
     // TODO: FuncId->rawptr doesn't work if its a scope access. :compilerbug
     callee := @switch(syscall_number) {
-        @case(56) => { x :: LIBC.FR_openat; @as(rawptr) x };
-        @case(79) => { x :: LIBC.FR_fstatat; @as(rawptr) x };
-        @case(64) => { x :: LIBC.write; @as(rawptr) x };
+        @case(56) => { x :: unistd.FR_openat; @as(rawptr) x };
+        @case(79) => { x :: unistd.fstatat; @as(rawptr) x };
+        @case(64) => { x :: unistd.write; @as(rawptr) x };
         @case(0xAAAA0001) => {  // get thread data
             ctx.gpr&[0] = ctx.userdata.int_from_rawptr();  // *Thread
             return(intid, ctx);
@@ -360,10 +366,13 @@ temporary_libc_import :: fn(name: Str, dest: *rawptr, allow_null: bool) void = {
     exports := @static(RawHashMap(Str, rawptr)) {
         it := ScopeId.list(temp());
         it&.push(Type.scope_of(LIBC));
-        files := collect_directory_ordered("examples/os/user/libc", temp(), temp()).unwrap();
-        for files { jt |
-            if jt.name.ends_with(".fr") {
-                it&.push(import(@tfmt("@/examples/os/user/libc/%", jt.name)));
+        dirs := @slice("examples/os/user/libc", "examples/os/user/libc/impl");
+        for dirs { dir |
+            files := collect_directory_ordered(dir, temp(), temp()).unwrap();
+            for files { jt |
+                if jt.name.ends_with(".fr") {
+                    it&.push(import(@tfmt("@/%/%", dir, jt.name)));
+                };
             };
         };
         
@@ -398,272 +407,15 @@ MyAttr :: @struct {
     stack: []u8;
 };
 
-// TODO: move all of these to ./libc/*.fr
 LIBC :: @struct {
-    mmap :: fn(addr: rawptr, len: i64, prot: i64, flags: i64, fd: Fd, offset: i64) i64 = with_syscalls {
-                result := Syscall'mmap(addr, len, prot, flags, fd, offset);
-                @trace("mmap(%, %) = %", len, flags, result);
-                @assert_ne(result, 0, "some sort of corruption is going on because i over commit and can't null");
-                result
-    };
-    munmap :: fn(addr: rawptr, len: i64) i64 = with_syscalls {
-                result := Syscall'munmap(addr, len);
-                @trace("mumap(%, %)", addr, len);
-                @assert_eq(result.value, 0, "some sort of corruption is going on. munmap(%) can't fail", addr);
-                result.value
-    };
-    mprotect :: fn() = 0;
-    read :: fn(f: Fd, buf: *u8, len: i64) i64 = {
-        fd := get_file(f) || return(-1);
-        @trace("read(%, %, %)", f.fd, u8.int_from_ptr(buf), len);
-        fd'vtable'read(fd.data, buf.slice(len))
-    };
-    close :: fn(f: Fd) i64 = {
-        @if(f.fd == { xxx := LinuxLibc.AT_FDCWD; xxx.fd }) return(-1);
-        fd := get_file(f) || return(-1);
-        ::ptr_utils(@type fd.vtable[]);
-        @if(identical(fd.vtable, closed_file_vtable)) return(-1);
-        @trace("close(%)", f.fd);
-        fd'vtable'close(fd.data);
-        fs.mutex&.lock();
-        // default impl for everything to just error
-        closed_file_vtable :: @static(FileVTable) { () };
-        fs.fd[f.fd.intcast()] = (vtable = closed_file_vtable, data = zeroed(rawptr));
-        fs.free&.push_back(f, fs.allocator);
-        fs.mutex&.unlock();
-        // note: not freeing fd.data because it's owned by the directory.
-        0
-    };
-    dlopen :: fn(name: CStr) rawptr = {
-        @trace("dlopen(%)", name);
-        if name == "libc.so.6" {
-            return(123.rawptr_from_int());
-        };
-        zeroed(rawptr)
-    };
-    dlsym :: fn(lib: rawptr, name: CStr) rawptr = {
-        @assert_eq(lib.int_from_rawptr(), 123);
-        dest := zeroed(rawptr);
-        temporary_libc_import(name.str(), dest&, true);
-        @trace("dlsym(%, %) = %", lib, name, dest);
-        dest
-    };
-    dlclose :: fn() = 0;
-    exit :: fn(status: i64) void = {
-        @trace("exit(%)", status);
-        args: Array(i64, 6) = (status, 0, 0, 0, 0, 0);
-        Syscall'perform_syscall(args&, 94);  // exit
-    };
-    write :: fn(f: Fd, buf: *u8, size: i64) i64 = {
-        fd := get_file(f) || return(-1);
-        @trace("write(%, %, %)", f.fd, u8.int_from_ptr(buf), size);
-        fd'vtable'write(fd.data, buf.slice(size))
-    };
-    lseek :: fn(f: Fd, offset: i64, whence: Whence) i64 = {
-        fd := get_file(f) || return(-1);
-        result := fd'vtable'lseek(fd.data, offset, whence);
-        @trace("lseek(fd = %, %, %) = %", f.fd, offset, @as(i64) whence, result);
-        result
-    };
-    FR_fstat :: fn(f: Fd, out: *Posix.Linux.StatArm64) i64 = {
-        out[] = zeroed(@type out[]);
-        fd := get_file(f) || return(-1);
-        result := fd'vtable'fstat(fd.data, out);
-        @trace("fstat(%) = %; %", f.fd, result, @if(result == 0, {
-            ifmt := out.st_mode.int().bit_and(Posix.S.IFMT);
-            @if(ifmt == Posix.S.IFDIR, "DIR", "REG")
-        }, "-"));
-        result
-    };
-    readlinkat :: fn(parent: Fd, path: CStr, ptr: *u8, len: i64) i64 = 
-        -1;
-    opendir :: fn(path: CStr) i64 = {
-        __errno_location()[] = 1;
-        0
-    };
     // TODO: this needs to be threadlocal
     __errno_location :: fn() *i64 = @static(i64);
-    sigaction :: fn() i64 = 0;
-    memmove :: fn(dest: rawptr, src: rawptr, count: i64) void =
-                copy_bytes_static(dest, src, count);
-    pthread_attr_init :: fn(out: *ThreadAttr) i64 = {
-                out[] = zeroed(@type out[]);
-                0
-    };
-    // note: this requires that userdata be a *Thread (as called by raw_create_thread)
-    pthread_create :: fn(out: *pthread_t, attr: *ThreadAttr, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) i64 = {
-                attr := bit_cast_unchecked(*ThreadAttr, *MyAttr, attr);
-                ctx := zeroed MContext;
-                ctx.elr = bit_cast_unchecked(@type callee, i64, callee);
-                ctx.gpr&[0] = bit_cast_unchecked(@type userdata, i64, userdata);
-                ctx.gpr&[30] = int_from_rawptr(fn() void = {
-                    args: Array(i64, 6) = (0, 0, 0, 0, 0, 0);
-                    Syscall'perform_syscall(args&, 94);  // exit
-                    unreachable()
-                });
-                ctx.gpr&[31] = bit_cast_unchecked(*u8, i64, attr.stack.end_pointer());
-                ctx.userdata = userdata;
-                
-                thread := Thread.ptr_from_raw(userdata);
-                t: ThreadConfig = (
-                    signal_handler = handle_signal,
-                    signal_stack_buf = page_allocator.alloc_uninit(u8, 1.shift_left(16)),
-                    exit_futex = thread.tid_futex&,
-                );
-                args: Array(i64, 6) = (MContext.int_from_ptr(ctx&), ThreadConfig.int_from_ptr(t&), 0, 0, 0, 0);
-                id, _ := Syscall'perform_syscall(args&, 0xFFFF0005);  // spawn_thread
-                @if(id < 0) panic("failed to create thread");
-                thread.tid = id.intcast();
-                out.opaque = userdata;
-                @trace("pthread_create(elr = %, x0 = %, sp = %) = %", ctx.elr, ctx.gpr&[0], ctx.gpr&[31], id);
-                0
-    };
-    pthread_attr_setstack :: fn(attr: *ThreadAttr, ptr: *u8, len: i64) i64 = {
-                attr := bit_cast_unchecked(*ThreadAttr, *MyAttr, attr);
-                attr.stack = ptr.slice(len);
-                0
-    };
-    pthread_getcpuclockid :: fn() = 0;
-    pthread_join :: fn(thread: pthread_t, value_ptr: *rawptr) i64 = {
-        t := Thread.ptr_from_raw(thread.opaque);
-        // not the same as `with_syscalls { t.join(); 0 };` because that would free the stack twice
-        t.sys_join();
-        value_ptr[] = zeroed rawptr; // TODO
-        0
-    };
-    
-    tcgetattr :: fn(fd: Fd, it: *Term.Terminos) i64 = {
-        // TODO
-        it[] = zeroed(Term.Terminos);
-        0
-    };
-    tcsetattr :: fn(fd: Fd, optional_actions: i64, it: *Term.Terminos) i64 = {
-        // TODO
-        0
-    };
-    clock_gettime :: fn(clock_id: i64, time_spec: *TimeSpec) i64 = {
-        // TODO: other clock_id's
-        time_spec[] = system_counter_uptime();
-        0
-    };
-    // TODO: do this more efficiently. 
-    //       if multiple threads are sleeping, just have one yield like this for the shortest duration and the rest futex wait.
-    nanosleep :: fn(duration: *TimeSpec, nullable_remainder_out: i64) i64 = {
-        @trace("nanosleep(s = %, ns = %)", duration.seconds, duration.nanoseconds);
-        @debug_assert_eq(nullable_remainder_out, 0, "todo: sleep remainder");
-        zeroes := zeroed Array(i64, 6);
-            now := system_counter_uptime();
-            end := now + duration[];
-            dowhile {
-                _ := Syscall'perform_syscall(zeroes&, 0xFFFF0002);  // yield
-                now := system_counter_uptime();
-                end.ms() > now.ms()
-            };
-            0
-    };
-    
-    localtime_r :: fn(time_in: *time_t, time_out: *BigTime) *BigTime = {
-        // TODO
-        time_out[] = zeroed(BigTime);
-        time_out
-    };
-    // TODO: this is supposed to be calander time not system up time
-    time :: fn(out: *time_t) time_t = (seconds = timestamp() * 1000);
-    
-    // note: this is the linux syscall abi, not the libc abi
-    FR_openat :: fn(f: Fd, path: CStr, flags: i64, mode: i64) i64 = {
-        path := path;
-        need_close := false;
-        if path.str().contains("/") {  // :SLOW
-            parent, file := or follow_path_prefix(f, path.str()) { e |
-                return(e);
-            };
-            f = parent;
-            need_close = true;
-            path = file;
-        };
-        fd := get_file(f) || return(-1);
-        result := fd'vtable'openat(fd.data, path, flags, mode);
-        @trace("openat(fd = %, %, %, %) = %", f.fd, path, flags, mode, result);
-        @assert(f.fd.intcast() != result, "openat must return new fd");
-        if need_close {
-            close(f);
-        };
-        result
-    }
-    
-    // note: this is the linux syscall abi, not the libc abi
-    FR_fstatat :: fn(fd: Fd, path: CStr, out: *Posix.Linux.StatArm64) i64 = {
-        fd := FR_openat(fd, path, 0, 0);
-        @if(fd < 0) return(fd);
-        fd: Fd = (fd = fd.intcast());
-        result := FR_fstat(fd, out);
-        close(fd);
-        result
-    }
-    
-    mkdirat :: fn(parent: Fd, path: CStr, mode: i64) i64 = {
-        parent2, path2 := follow_path_prefix(parent, path.str()) 
-            .or(fn(e) => return(e));
-        // TODO: don't :leak if parent2 != parent
-        
-        @trace("mkdir(%, %) => mkdir(%, %)", parent.fd, path, parent2.fd, path2);
-        f := get_file(parent2) || return(-1);
-        result := f'vtable'mkdir(f'data, path2, mode);
-        @trace("mkdir(%, %, %) = %", parent.fd, path, mode, result);
-        result
-    }
-    
-    access :: fn(path: CStr, mode: i64) i64 = {
-        fd := FR_openat(Posix'AT'FDCWD(), path, 0, 0);
-        @if(fd < 0) return(fd);
-        fd: Fd = (fd = fd.intcast());
-        f := get_file(fd) || return(-1);
-        result := f'vtable'access(f'data, mode);
-        @trace("access(%, %) = %", path, mode, result);
-        close(fd);
-        result
-    }
-    
-    renameat :: fn(old_dir: Fd, old: CStr, new_dir: Fd, new: CStr) i64 = {
-        new_dir2, new_file := follow_path_prefix(new_dir, new.str()) 
-            .or(fn(e) => return(e));
-        old_dir2, old_file := follow_path_prefix(old_dir, old.str()) 
-            .or(fn(e) => return(e));  // :leak
-        // :leak
-        // TODO: don't leak the newly opened fds
-    
-        f := get_file(old_dir2) || return(-1);
-        result := f'vtable'rename(f'data, new_dir2, old_file, new_file);
-        @trace("renameat(%, %, %, %) = %", old_dir.fd, old, new_dir.fd, new, result);
-        result
-    }
-    
-    fsync :: fn() i64 = 0;  // TODO
-    
-    strtod :: fn(s: *u8, end_out: **u8) f64 = {
-        // TODO: this one doesn't support all the syntax. 1e-2
-        s: CStr = (ptr = s);
-        n, rest := parse_float(s.str());
-        ::ptr_utils(*u8);
-        if !end_out.is_null() {
-            end_out[] = rest.ptr;
-        };
-        n
-    }
     
     FR_set_signal_handler :: fn(callee: SignalHandler.F) SignalHandler.F = {
         thread := get_current_tls();
         old := thread.signal_handler;
         thread.signal_handler = callee;
         old
-    }
-    chdir :: fn(path: CStr) i64 = {
-        fd := FR_openat(Posix'AT'FDCWD(), path, Posix'O'RDWR, 0);
-        @if(fd < 0) return(fd);
-        // TODO: don't leak the old one
-        fs.cwd.fd = fd.intcast();
-        0
     }
 };
 
@@ -699,17 +451,17 @@ fn with_syscalls($body: @Fn() i64) i64 = {
 }
 
 fn trace(arg: FatExpr) FatExpr #macro = @{
-    if fs.strace {
+    if shell.strace {
         c := context(DefaultContext);
         t := c.temporary_allocator_i;
-        old := fs.strace;    // TODO: not thread safe
+        old := shell.strace;    // TODO: not thread safe
         old_sys := c.prefer_syscalls;
         c.prefer_syscalls = false;
-        fs.strace = false;
+        shell.strace = false;
         c.temporary_allocator_i = Arena'stack_alloc(1024);
         @[println arg];
         c.temporary_allocator_i = t;
-        fs.strace = old;
+        shell.strace = old;
         c.prefer_syscalls = old_sys;
     };
 };

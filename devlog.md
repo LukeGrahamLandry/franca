@@ -14,8 +14,8 @@
     and once i can do that, talking to the actual devices might not suck?
   - 4.2,4.3 have a list, hey there's only 7 pages of stuff i have to do, how hard could it be 
   - i think the sane thing is to do it gradually so i don't lose my mind
-
-
+- store file position on FileHandle directly instead of in the data
+  and have the vtable expose pread/pwrite interface instead of read/write
 
 ## (Nov 26)
 

@@ -10,25 +10,23 @@ fs :: @static(@struct {
     // TODO: decide which other things care about being thread safe
     stdin: UQueue;
     stdout: UQueue;
-    strace: bool;
-    timer: bool;
     root_dir: Fd;
     cwd: Fd;
     next_fuse_request_id: u64;
     allocator: Alloc;
-    device_tree_bytes: []u8;
     have_fuse_target_dir: bool;
 });
 
 FileHandle :: @rec @struct {
     vtable: *FileVTable;
     data: rawptr;
+    position := 0;
 };
 
 FileVTable :: @struct {
-     read: @FnPtr(self: rawptr, buf: []u8) i64 = (fn(_0, _1) = -1);
-    write: @FnPtr(self: rawptr, buf: []u8) i64 = (fn(_0, _1) = -1);
-    lseek: @FnPtr(self: rawptr, offset: i64, whence: Whence) i64 = (fn(_0, _1, _2) = -1);
+     read: @FnPtr(self: rawptr, buf: []u8, position: i64) i64 = (fn(_0, _1, _2) = -1);
+    write: @FnPtr(self: rawptr, buf: []u8, position: i64) i64 = (fn(_0, _1, _3) = -1);
+    lseek: @FnPtr(self: rawptr, offset: i64, whence: Whence, position: *i64) i64 = (fn(_0, _1, _2, _4) = -1);
     close: @FnPtr(self: rawptr) void = fn(self) = ();
    openat: @FnPtr(self: rawptr, path: CStr, flags: i64, mode: i64) i64 = (fn(_0, _1, _2, _3) = -1);
     fstat: @FnPtr(self: rawptr, out: *Posix.Linux.StatArm64) i64 = (fn(_0, _1) = -1);
@@ -105,7 +103,6 @@ init_vfs :: fn() void = {
                 off, len := info;
                 _ := create_child(self, part, MemFileRO, (
                     contents = contents.subslice(off.zext(), len.zext()),
-                    pos = 0,
                 ));
             } else {  // folder
                 break :: local_return;
@@ -160,7 +157,7 @@ get_vtable :: fn($T: Type) *FileVTable = @static(FileVTable) {
         fptrtype := FieldType(FileVTable, field).get_type_info_ref();
         @debug_assert(fptrtype.is(.FnPtr));
         args := fr.arg_types(fptrtype.FnPtr.ty.arg);
-        @assert_eq(args.len, func.arg.bindings.len, "arity error in FileVTable");
+        @ct_assert(args.len == func.arg.bindings.len, func.loc, "arity error in FileVTable");
         range(0, args.len) { i |
             func.arg.bindings[i].ty = (Finished = args[i]);
         };
@@ -178,24 +175,15 @@ get_vtable :: fn($T: Type) *FileVTable = @static(FileVTable) {
 
 MemFileRO :: @struct {
     contents: []u8;
-    pos: i64;
     
-    read :: fn(fd, dest) = {
-        dest.len = min(dest.len, fd.contents.len - fd.pos).max(0);
-        src := fd.contents.subslice(fd.pos, dest.len);
+    read :: fn(fd, dest, pos) = {
+        dest.len = min(dest.len, fd.contents.len - pos).max(0);
+        src := fd.contents.subslice(pos, dest.len);
         dest.copy_from(src);
-        fd.pos += dest.len;
         dest.len
     };
-    lseek :: fn(fd, offset, whence) = {
-        ::enum(Whence);
-        fd.pos = @match(whence) {
-            fn End() => fd.contents.len;
-            fn Set() => offset;
-            @default => todo();
-        };
-        fd.pos
-    };
+    lseek :: fn(fd, offset, whence, position) = 
+        lseek_impl(offset, whence, position, => fd.contents.len); 
     fstat :: fn(self, out) = {
         out.st_mode = Posix.S.IFREG;
         0
@@ -205,7 +193,7 @@ MemFileRO :: @struct {
 StdoutFile :: @struct {
     queue: *UQueue;
     
-    write :: fn(self, src) = {
+    write :: fn(self, src, _) = {
         q := self.queue;
         q'poll(q, 1);
         old := q.pipe.done.committed.bouba;
@@ -225,7 +213,7 @@ StdinFile :: @struct {
     bufs: [][]u8 = empty();
     buf: []u8 = empty();
     
-    read :: fn(self, dest) = {
+    read :: fn(self, dest, _) = {
         // TODO: don't hardcode blocking + MIN=1 + timeout=infinity (which is what interactive_read_line wants)
         
         if self.buf.len == 0 {
@@ -299,51 +287,44 @@ FuseFile :: @struct {
     q: *UQueue;
     nodeid: u64;
     fh: u64;
-    position: u64 = 0;
     
-    read :: fn(self, buf) = {
+    read :: fn(self, buf, position) = {
     split_io_chunks(buf) { buf |
         in := zeroed Fuse.ReadIn;
         in.fh = self.fh;
-        in.offset = self.position;
+        in.offset = position.bitcast();
         in.size = buf.len.trunc();
         result := fuse_blocking(self.q, .READ, self.nodeid, in, buf)
             .or(fn(e) => return(e));
-        self.position += result.data.len.bitcast();
+        position += result.data.len;
         result.data.len
     }
     };
-    write :: fn(self, buf) = {
+    write :: fn(self, buf, position) = {
     split_io_chunks(buf) { buf |
         in := zeroed Fuse.WriteIn;
         in.fh = self.fh;
         in.size = buf.len.trunc();
         in.data = buf;
-        in.offset = self.position;
+        in.offset = position.bitcast();
         result := fuse_blocking(self.q, .WRITE, self.nodeid, in)
             .or(fn(e) => return(e));
-        self.position += result.size.uext();
+        position += result.size.zext();
         result.size.zext()
     }
     };
-    lseek :: fn(self, offset, whence) = {
-        ::enum(Whence);
-        self.position = @match(whence) {
-            fn End() => {
-                in: Fuse.LseekIn = (
-                    fh = self.fh,
-                    offset = offset.bitcast(),
-                    whence = (@as(i64) whence).trunc(),
-                );
-                result := fuse_blocking(self.q, .LSEEK, self.nodeid, in)
-                    .or(fn(e) => return(e));
-                result.offset
-            }
-            fn Set() => offset.bitcast();
-            fn Cur() => self.position;
-        };
-        self.position.bitcast()
-    };
+    lseek :: fn(self, offset, whence, position) = {
+        lseek_impl(offset, whence, position) {
+            in: Fuse.LseekIn = (
+                fh = self.fh,
+                offset = offset.bitcast(),
+                whence = (@as(i64) whence).trunc(),
+            );
+            result := fuse_blocking(self.q, .LSEEK, self.nodeid, in)
+                .or(fn(e) => return(e));
+            result.offset.bitcast()
+        }
+    }
     close :: fn(self) = {
         // for now only the root is stored in a MemDir, every other fd is unique to an open()
         @if(self.nodeid == 1) return();
@@ -429,6 +410,16 @@ FuseFile :: @struct {
         0
     };
 };
+
+fn lseek_impl(offset: i64, whence: Whence, position: *i64, $get_size: @Fn() i64) i64 = {
+    ::enum(@type whence);
+    position[] = offset + @match(whence) {
+        fn End() => get_size();
+        fn Set() => 0;
+        fn Cur() => position[];
+    };
+    position[]
+}
 
 // HACK
 split_io_chunks :: fn(buf: []u8, $body: @Fn(buf: []u8) i64) i64 = {
@@ -577,14 +568,22 @@ FuseOutType :: fn(In: Type) Type #fold = {
 }
 
 fn get_file(fd: Fd) ?FileHandle = {
+    result: ?FileHandle = .None;
+    use_file fd { it |
+        result = (Some = it[]);
+    };
+    result
+}
+
+fn use_file(fd: Fd, $body: @Fn(it: *FileHandle) void) void = {
     if fd.fd == { xxx := LinuxLibc.AT_FDCWD; xxx.fd } {
         fd = fs.cwd;
     };
     fs.mutex&.lock();
-    @if(!fd.fd.intcast().ult(fs.fd.len)) return(.None);
-    file := fs.fd[fd.fd.zext()];
+    if fd.fd.intcast().ult(fs.fd.len) {
+        body(fs.fd[fd.fd.zext()]&);
+    };
     fs.mutex&.unlock();
-    (Some = file)
 }
 
 FuseId :: @struct(nodeid: u64, fh: u64);
@@ -613,17 +612,18 @@ fn follow_path_prefix(fd: Fd, path: Str) Result(Ty(Fd, CStr), i64) = {
         buf&.clear();
         buf&.push_all(dir);
         buf&.push(0);
-        result := LIBC'FR_openat(fd, (ptr = buf&.as_ptr()), Posix.O.RDONLY, 0);
+        unistd :: import("@/examples/os/user/libc/impl/unistd.fr");
+        result := unistd'FR_openat(fd, (ptr = buf&.as_ptr()), Posix.O.RDONLY, 0);
         if result < 0 {
             if !first {
-                _ := LIBC'close(fd);
+                _ := Syscall'close(fd);
             };
             return(Err = result)
         };
         new_fd: Fd = (fd = result.intcast());
         @assert(new_fd.fd != fd.fd, "openat must return unique!!!");
         if !first {
-            _ := LIBC'close(fd);
+            _ := Syscall'close(fd);
         };
         
         fd = new_fd;

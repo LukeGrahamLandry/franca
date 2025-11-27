@@ -21,6 +21,7 @@ I couldn't find another libc that doesn't need to know the target at compile tim
 I also have low respect for the compliation model that involves make and a billion tiny object files. 
 
 (WIP: currently the fixed abi thing is true for the franca interface, lib/sys/posix.fr, but not the c one)
+the impl folder is for my operating system
 
 ---
 

@@ -1,0 +1,150 @@
+#use("@/examples/os/user/vfs.fr");
+
+read :: fn(f: Fd, buf: *u8, len: i64) i64 = {
+    fd := get_file(f) || return(-1);
+    result := fd'vtable'read(fd.data, buf.slice(len), fd.position);
+    @trace("read(%, %, %) = %", f.fd, u8.int_from_ptr(buf), len, result);
+    if result >= 0 {
+        use_file f { it |
+            it.position += result;
+        };
+    };
+    result
+};
+
+write :: fn(f: Fd, buf: *u8, size: i64) i64 = {
+    fd := get_file(f) || return(-1);
+    result := fd'vtable'write(fd.data, buf.slice(size), fd.position);
+    @trace("write(%, %, %) = %", f.fd, u8.int_from_ptr(buf), size, result);
+    if result >= 0 {
+        use_file f { it |
+            it.position += result;
+        };
+    };
+    result
+};
+
+close :: fn(f: Fd) i64 = {
+    @if(f.fd == { xxx := LinuxLibc.AT_FDCWD; xxx.fd }) return(-1);
+    fd := get_file(f) || return(-1);
+    ::ptr_utils(@type fd.vtable[]);
+    @if(identical(fd.vtable, closed_file_vtable)) return(-1);
+    @trace("close(%)", f.fd);
+    fd'vtable'close(fd.data);
+    fs.mutex&.lock();
+    // default impl for everything to just error
+    closed_file_vtable :: @static(FileVTable) { () };
+    fs.fd[f.fd.intcast()] = (vtable = closed_file_vtable, data = zeroed(rawptr));
+    fs.free&.push_back(f, fs.allocator);
+    fs.mutex&.unlock();
+    // note: not freeing fd.data because it's owned by the directory.
+    0
+};
+
+lseek :: fn(f: Fd, offset: i64, whence: Whence) i64 = {
+    fd := get_file(f) || return(-1);
+    result := fd'vtable'lseek(fd.data, offset, whence, fd.position&);
+    use_file f { it |
+        it.position = fd.position;
+    };
+    @trace("lseek(fd = %, %, %) = %", f.fd, offset, whence, result);
+    result
+};
+
+readlinkat :: fn(parent: Fd, path: CStr, ptr: *u8, len: i64) i64 = 
+    -1;
+
+opendir :: fn(path: CStr) i64 = {
+    LIBC'__errno_location()[] = 1;
+    0
+};
+
+// note: this is the linux syscall abi, not the libc abi
+//       (in the c one mode is variadic)
+FR_openat :: fn(f: Fd, path: CStr, flags: i64, mode: i64) i64 = {
+    path := path;
+    need_close := false;
+    if path.str().contains("/") {  // :SLOW
+        parent, file := or follow_path_prefix(f, path.str()) { e |
+            return(e);
+        };
+        f = parent;
+        need_close = true;
+        path = file;
+    };
+    fd := get_file(f) || return(-1);
+    result := fd'vtable'openat(fd.data, path, flags, mode);
+    @trace("openat(fd = %, %, %, %) = %", f.fd, path, flags, mode, result);
+    @assert(f.fd.intcast() != result, "openat must return new fd");
+    if need_close {
+        close(f);
+    };
+    result
+}
+
+fstat :: fn(f: Fd, out: *Posix.Linux.StatArm64) i64 = {
+    out[] = zeroed(@type out[]);
+    fd := get_file(f) || return(-1);
+    result := fd'vtable'fstat(fd.data, out);
+    @trace("fstat(%) = %; %", f.fd, result, @if(result == 0, {
+        ifmt := out.st_mode.int().bit_and(Posix.S.IFMT);
+        @if(ifmt == Posix.S.IFDIR, "DIR", "REG")
+    }, "-"));
+    result
+};
+
+fstatat :: fn(fd: Fd, path: CStr, out: *Posix.Linux.StatArm64) i64 = {
+    fd := FR_openat(fd, path, 0, 0);
+    @if(fd < 0) return(fd);
+    fd: Fd = (fd = fd.intcast());
+    result := fstat(fd, out);
+    close(fd);
+    result
+}
+
+mkdirat :: fn(parent: Fd, path: CStr, mode: i64) i64 = {
+    parent2, path2 := follow_path_prefix(parent, path.str()) 
+        .or(fn(e) => return(e));
+    // TODO: don't :leak if parent2 != parent
+    
+    @trace("mkdir(%, %) => mkdir(%, %)", parent.fd, path, parent2.fd, path2);
+    f := get_file(parent2) || return(-1);
+    result := f'vtable'mkdir(f'data, path2, mode);
+    @trace("mkdir(%, %, %) = %", parent.fd, path, mode, result);
+    result
+}
+
+access :: fn(path: CStr, mode: i64) i64 = {
+    fd := FR_openat(Posix'AT'FDCWD(), path, 0, 0);
+    @if(fd < 0) return(fd);
+    fd: Fd = (fd = fd.intcast());
+    f := get_file(fd) || return(-1);
+    result := f'vtable'access(f'data, mode);
+    @trace("access(%, %) = %", path, mode, result);
+    close(fd);
+    result
+}
+
+renameat :: fn(old_dir: Fd, old: CStr, new_dir: Fd, new: CStr) i64 = {
+    new_dir2, new_file := follow_path_prefix(new_dir, new.str()) 
+        .or(fn(e) => return(e));
+    old_dir2, old_file := follow_path_prefix(old_dir, old.str()) 
+        .or(fn(e) => return(e));  // :leak
+    // :leak
+    // TODO: don't leak the newly opened fds
+
+    f := get_file(old_dir2) || return(-1);
+    result := f'vtable'rename(f'data, new_dir2, old_file, new_file);
+    @trace("renameat(%, %, %, %) = %", old_dir.fd, old, new_dir.fd, new, result);
+    result
+}
+
+fsync :: fn() i64 = 0;  // TODO
+
+chdir :: fn(path: CStr) i64 = {
+    fd := FR_openat(Posix'AT'FDCWD(), path, Posix'O'RDWR, 0);
+    @if(fd < 0) return(fd);
+    // TODO: don't leak the old one
+    fs.cwd.fd = fd.intcast();
+    0
+}
