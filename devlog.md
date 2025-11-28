@@ -1,5 +1,10 @@
 
-todo: fuse posix_getdents
+## (Nov 28)
+  
+- finished off the dirent stuff 
+  - for fuse directories you have to give a different op for open/read/release which is a bit annoying
+  - 10 stars for https://github.com/zargony/fuse-rs/blob/39fde4a5c47ce370d228ac190f950bd835db7f47/src/reply.rs#L572
+    that would have taken me so long if i hadn't thought to cheat when i was getting garbage values. 
 
 ## (Nov 27)
 

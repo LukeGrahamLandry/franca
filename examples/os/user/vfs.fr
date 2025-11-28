@@ -313,13 +313,10 @@ MemDir :: @struct {
             it.d_ino = bit_cast_unchecked(@type fd.handle.data, u64, fd.handle.data);  // idk
             it.d_seekoff = pos[].bitcast();
             it.d_reclen = size_of(LinuxLibc.DirEnt);
-            //it.d_type = todo();
             it.d_name&.items().slice(0, fd.name.len).copy_from(fd.name);
             it.d_name&[fd.name.len] = 0;
-            //it.d_type = 
-            //
-            //openat()
-            //todo();
+            // TODO: d_type
+
             pos[] += 1;
         };
         capacity - buf.len
@@ -353,18 +350,24 @@ FuseFile :: @struct {
     q: *UQueue;
     nodeid: u64;
     fh: u64;
+    is_dir: bool;  // sad
     
-    read :: fn(self, buf, position) = {
+    fn do_read(self: *FuseFile, buf: []u8, position: i64) i64 = {
+        op: Fuse.Opcode = @if(self.is_dir, .READDIR, .READ);
     split_io_chunks(buf) { buf |
         in := zeroed Fuse.ReadIn;
         in.fh = self.fh;
         in.offset = position.bitcast();
         in.size = buf.len.trunc();
-        result := fuse_blocking(self.q, .READ, self.nodeid, in, buf)
+        result := fuse_blocking(self.q, op, self.nodeid, in, buf)
             .or(fn(e) => return(e));
         position += result.data.len;
         result.data.len
     }
+    };
+    read :: fn(self, buf, position) = {
+        @if(self.is_dir) return(-1);
+        do_read(self, buf, position)
     };
     write :: fn(self, buf, position) = {
     split_io_chunks(buf) { buf |
@@ -397,31 +400,37 @@ FuseFile :: @struct {
         
         in := zeroed Fuse.ReleaseIn;
         in.fh = self.fh;
-        fuse_blocking(self.q, .RELEASE, self.nodeid, in)
-            .or(fn(e) => @println("RELEASE failed %", e));
+        op: Fuse.Opcode = @if(self.is_dir, .RELEASEDIR, .RELEASE);
+        ::enum(@type op);
+        fuse_blocking(self.q, op, self.nodeid, in)
+            .or(fn(e) => @trace("% failed %", op, e));
         in := zeroed Fuse.ForgetIn;
         fuse_blocking(self.q, .FORGET, self.nodeid, in)
-            .or(fn(e) => @println("FORGET failed %", e));
+            .or(fn(e) => @trace("FORGET failed %", e));
 
         fs.allocator.dealloc_one(FuseFile, self);
     };
     openat :: fn(fd: *FuseFile, path: CStr, flags: i64, mode: i64) i64 = {
         q := fd.q;
         create := flags.bit_and(LinuxLibc.O_arm.CREAT) != 0;
+        directory := flags.bit_and(LinuxLibc.O_arm.DIRECTORY) != 0;
         flags = flags.bit_and(LinuxLibc.O_arm.CREAT.bit_not());
-        
+        flags = flags.bit_and(LinuxLibc.O_arm.DIRECTORY.bit_not());
+
         in: Fuse.LookupIn = (name = path.cstr_with_null());
         fh, node := @match(fuse_blocking(q, .LOOKUP, fd.nodeid, in)) {
             fn Ok(result) => {
                 node := result.nodeid;
+                op: Fuse.Opcode = @if(directory, .OPENDIR, .OPEN);
                 in: Fuse.OpenIn = (flags = flags.trunc(), open_flags = 0);
-                result := fuse_blocking(q, .OPEN, node, in)
+                result := fuse_blocking(q, op, node, in)
                     .or(fn(e) => return(e));
                 (result.fh, node)
             }
             fn Err(e) => {
                 @if(!create) return(e);
                 @trace("create(%)", path);
+                @if(directory) @trace("ERR: can't O_CREAT a directory");
                 in: Fuse.CreateIn = (
                     flags = flags.trunc(),
                     mode = mode.trunc(),
@@ -434,7 +443,7 @@ FuseFile :: @struct {
                 (result.open.fh, result.lookup.nodeid)
             }
         };
-        fd := push_file(FuseFile, (q = q, nodeid = node, fh = fh));
+        fd := push_file(FuseFile, (q = q, nodeid = node, fh = fh, is_dir = directory));
         fd.fd.intcast()
     };
     fstat :: fn(self, out) = {
@@ -475,6 +484,48 @@ FuseFile :: @struct {
             });
         0
     };
+    
+    posix_getdents :: fn(self, buf, pos) i64 = {
+        @if(!self.is_dir) return(-1);
+        @if(self.nodeid == 1) @panic("TODO: didn't opendir the mount point so this won't work");
+        result := do_read(self, buf, pos[]);
+        @if(result < 0) return(result);
+        pos[] += result;
+        buf.len = result;
+        
+        // remap between fuse and syscall layout. 
+        // the fuse one has a bigger header so it can be done in-place 
+        // (but you can't just use d_reclen to skip copying the name backwards)
+        i := 0;
+        o := 0;
+        while => i < buf.len {
+            @debug_assert(i >= o);
+            in := buf.rest(i).peek_type(Fuse.Dirent);
+            out := buf.rest(o).peek_type(LinuxLibc.DirEnt);
+            namelen: i64 = in.namelen.zext();
+            type := in.type;
+            
+            out.d_ino = in.ino;
+            out.d_seekoff = in.off;
+            out.d_type = @as(DirEntType) @as(u8) type.trunc();  // TODO: unknown if extra bits? 
+            out.d_reclen = trunc(19 + namelen + 1);
+            if namelen > 255 {
+                @trace("TODO: do i want to allow large file names somehow?");
+                return(-1);
+            };
+            src := buf.subslice(i + size_of(Fuse.Dirent), namelen);
+            dest := out.d_name&.items().slice(0, namelen);
+            dest.copy_from(src);
+            dest.end_pointer()[] = 0;
+            
+            // FUSE THINKS ALIGNMENT IS REAL
+            i += (size_of(Fuse.Dirent) + namelen).ualign_to(8);
+            o += out.d_reclen.zext();
+        };
+        
+        o
+    }
+    
 };
 
 fn lseek_impl(offset: i64, whence: Whence, position: *i64, $get_size: @Fn() i64) i64 = {
@@ -527,7 +578,7 @@ init_fuse :: fn(q: *UQueue) Fd = {
     ::DeriveFmt(Array(u16, 11));
     ::display_slice(u16);
     @tfmt("%", result&);  // coconut.jpg
-    push_file(FuseFile, (q = q, nodeid = 1, fh = 0))
+    push_file(FuseFile, (q = q, nodeid = 1, fh = 0, is_dir = true))
 }
 
 Fuse :: import("@/examples/os/drivers/fs/fuse.fr");
