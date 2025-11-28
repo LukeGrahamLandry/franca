@@ -152,6 +152,7 @@ S :: @struct {
     IFLNK  :: octal "0120000";  // symbolic link
     IFSOCK :: octal "0140000";
     IFWHT  :: octal "0160000";
+    DirEntType :: @enum(u8) (Directory = 4, File = 8, SymbolicLink = 10);
     
     ISBLK  :: fn(m: u32) bool = m.bit_and(IFMT) == IFBLK ;
     ISCHR  :: fn(m: u32) bool = m.bit_and(IFMT) == IFCHR ;
@@ -263,6 +264,7 @@ DIR :: @struct {
     impl: @struct {  // used when not linking libc
         fd: Fd;
         done: bool;
+        valid: bool;  // only choose syscall vs libc in opendir, after that it has to match
         cur: i64;
         end: i64;
         buf: []u8;
@@ -272,6 +274,7 @@ DIR :: @struct {
 dirent :: @struct {
     d_ino: u64;
     d_seekoff: u64;
+    d_reclen: u16;
     d_type: u8;
     // TODO: since im making a copy anyway i could tell you the length
     d_name: Array(u8, 256);
@@ -279,25 +282,29 @@ dirent :: @struct {
 
 opendir :: fn(path: CStr) SysResult(*DIR) = {
     a := general_allocator();
-    dir := a.box_zeroed(DIR);
     if prefer_syscalls() {
-        dir.impl.fd = @try(open(path, @or(O.RDONLY, O.DIRECTORY))) return;
+        fd := @try(open(path, @or(O.RDONLY, O.DIRECTORY))) return;
+        dir := a.box_zeroed(DIR);
+        dir.impl.fd = fd;
         dir.impl.buf = a.alloc_uninit(u8, 4096);
-    } else {
+        dir.impl.valid = true;
+        return(Ok = dir);
+    };
+    {
         f := choose_inode64_on_applex8664(Syscall'opendir, Syscall'@"opendir$INODE64");
         r := f(path);
         if r == 0 {
-            a.dealloc_one(DIR, dir);
             return fix_errno(*DIR, r);
         };
+        dir := a.box_zeroed(DIR);
         dir.system = rawptr_from_int r;
+        return(Ok = dir, Err = (_ = int(r == 0)));
     };
     
-    (Ok = dir)
 };
 
 readdir :: fn(dir: *DIR) SysResult(*dirent) = {
-    r := @if(prefer_syscalls(), {
+    r := @if(dir.impl.valid, {
         self, entry := (dir.impl&, dir.entry&);
         @if(self.done) return(Ok = zeroed(*dirent), Err = (_ = 0));
         if self.cur >= self.end {
@@ -335,8 +342,11 @@ readdir :: fn(dir: *DIR) SysResult(*dirent) = {
         d.d_ino = s.d_ino;
         d.d_seekoff = s.d_seekoff;
         d.d_type = @as(u8) s.d_type;
-        strncpy :: import("@/examples/os/user/libc/string.fr").strncpy;
-        strncpy(d.d_name&.as_ptr(), s.d_name&.as_ptr(), 255);
+        name: CStr = (ptr = s.d_name&.as_ptr());
+        name := name.str();
+        d.d_name&.items().slice(0, name.len).copy_from(name);
+        d.d_name&[name.len] = 0;
+        d.d_reclen = trunc(size_of(@type d[]) - size_of(@type d.d_name) + name.len + 1);
     };
 
     
@@ -350,10 +360,12 @@ readdir :: fn(dir: *DIR) SysResult(*dirent) = {
 };
 
 closedir :: fn(dir: *DIR) SysResult(void) = {
+    ::ptr_utils(@type dir[]);
+    @if(dir.is_null()) return();
     a := general_allocator();
     d := dir[];
     a.dealloc_one(DIR, dir);
-    if prefer_syscalls() {
+    if d.impl.valid {
         a.dealloc(u8, d.impl.buf);
         _ := Syscall'close(d.impl.fd);  // TODO: wrap and return error i guess
         return(Ok = ());
@@ -633,6 +645,10 @@ fn fix_errno(err: i64) SysError #noinline = {
     };
     err = abs err;
     // TODO
+    // HACK for my libc
+    if err == 0 {
+        err = MAX_i32;
+    };
     
     (_ = err)
 }

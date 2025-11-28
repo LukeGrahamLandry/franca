@@ -1,4 +1,5 @@
 
+todo: fuse posix_getdents
 
 ## (Nov 27)
 
@@ -22,6 +23,7 @@ vfs
 - started working on opendir
 - hack in fix_errno because i don't do errno in my libc yet
   so if opendir returns null, the SysResult.Err ends up as zero and treated as a success
+- there's something about the dirent api that just turns my brain off, idk, it takes so long every time i touch it 
 
 framebuffer
 - i want to work backwards in the chain of doom forks. 

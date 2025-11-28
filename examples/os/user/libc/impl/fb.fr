@@ -18,11 +18,11 @@ fb_var_screeninfo :: @struct {
 FBIOGET_VSCREENINFO :: 1234;
 FBIOPUT_VSCREENINFO :: 5678;
 
-
 DeviceFile :: @struct {
     Screen :: import("@/examples/os/bin/test_screen.fr");
     handle: ?Screen.Handle = .None;
     info: ?fb_var_screeninfo = .None;
+    worker: ?*Thread = .None;
     
     init :: fn(self: *DeviceFile) bool = {
         fb := Screen'bind() || return(false);
@@ -38,13 +38,13 @@ DeviceFile :: @struct {
             xres_virtual = fb.r.width,
             yres_virtual = fb.r.height,
         ));
-        // or 640,400?
         #use("@/lib/sys/threads.fr");
-        start_thread_data(Screen.Handle, self.handle.Some&) { (fb: *Screen.Handle) |
+        t := start_thread_data(Screen.Handle, self.handle.Some&) { (fb: *Screen.Handle) |
             Screen'run_loop(fb[]) { fb, r |
                 // nop
             };
         };
+        self.worker = (Some = t);
         true
     }
 
@@ -74,5 +74,19 @@ DeviceFile :: @struct {
         buf.len = buf.len.min(dest.len - position).max(0);
         dest.subslice(position, buf.len).copy_from(buf);
         buf.len
+    }
+    
+    close :: fn(self) = {
+        if self.worker { t |
+            t.join();
+        };
+        if self.handle { handle |
+            general_allocator().dealloc(u32, handle.buf);
+            // TODO: don't leak the queue
+        };
+        self.worker = .None;
+        self.handle = .None;
+        self.info = .None;
+        // TODO: be consistant about whose job it is to free the FileHandle.data memory
     }
 };

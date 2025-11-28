@@ -3,6 +3,11 @@
 // some files are backed by a UQueue (which might be a Virt.Queue in the kernel). 
 // libc functions that operate on file descriptors forward to a FileVTable. 
 
+// TODO: be consistant about whose job it is to free the FileHandle.data memory.
+//       i need more separation between the part that's logically an inode on disk 
+//       so shared between file handles and the part thats just state per file handle. 
+//       the part where it gets confusing is devices / MemDir. 
+
 fs :: @static(@struct {
     fd: List(FileHandle); // indexed by Fd
     free: RawDeque(Fd);  // TODO: posix wants it to always reuse the lowest value not the oldest closed
@@ -33,8 +38,9 @@ FileVTable :: @struct {
    access: @FnPtr(self: rawptr, mode: i64) i64 = (fn(_0, _1) = 0);
     mkdir: @FnPtr(self: rawptr, path: CStr, mode: i64) i64 = (fn(_0, _1, _2) = -1);
    rename: @FnPtr(self: rawptr, dest_dir: Fd, src_name: CStr, dest_name: CStr) i64 = (fn(_0, _1, _2, _3) = -1);
+   posix_getdents: @FnPtr(self: rawptr, buf: []u8, pos: *i64) i64 = (fn(_0, _1, _2) = -1);
     ioctl: @FnPtr(self: rawptr, op: i64, data: rawptr) i64 = (fn(_0, _1, _2) = -1);
-   ioctls: []Ty(i64, IoctlErased) = empty();
+    ioctls: []Ty(i64, IoctlErased) = empty();
 };
 
 IoctlErased :: @FnPtr(self: rawptr, data: rawptr) i64;
@@ -79,6 +85,7 @@ init_vfs :: fn() void = {
     fs.root_dir = push_file(MemDir, (files = empty()));
     fs.cwd = fs.root_dir;
     root_dir := get_file(fs.root_dir).unwrap();
+    MemDir.ptr_from_raw(root_dir.data)[].files&.push((name = ".", handle = root_dir), fs.allocator);
     // TODO: deduplicate with follow_path
     while => fs_i.len > 0 {
         continue :: local_return;
@@ -121,6 +128,14 @@ init_vfs :: fn() void = {
         }
     };
     
+    // TODO: i need a thing for doing overlays.
+    //       i want to be able to write a window manager and have you still
+    //       be able to use programs that think they own the whole /dev/fb0 
+    //       and they just get a little rectangle of the real screen. 
+    // TODO: also don't want this as a blessed api, 
+    //       programs that need it should call something to mount it at the beginning? 
+    //       similarly, if a program doesn't need graphics it shouldn't be allowed them
+    //       so this shouldn't exist implicitly
     _, dev := create_child_dir(root_dir, "dev");
     _ := create_child(dev, "fb0", import("@/examples/os/user/libc/impl/fb.fr").DeviceFile, ());
     
@@ -289,6 +304,27 @@ MemDir :: @struct {
         };
         -2
     };
+    posix_getdents :: fn(self, buf, pos) = {
+        capacity := buf.len;
+        while => buf.len > size_of(LinuxLibc.DirEnt) && pos[] < self.files.len {
+            it := buf&.pop_type(LinuxLibc.DirEnt);
+            
+            fd := self.files[pos[]]&;
+            it.d_ino = bit_cast_unchecked(@type fd.handle.data, u64, fd.handle.data);  // idk
+            it.d_seekoff = pos[].bitcast();
+            it.d_reclen = size_of(LinuxLibc.DirEnt);
+            //it.d_type = todo();
+            it.d_name&.items().slice(0, fd.name.len).copy_from(fd.name);
+            it.d_name&[fd.name.len] = 0;
+            //it.d_type = 
+            //
+            //openat()
+            //todo();
+            pos[] += 1;
+        };
+        capacity - buf.len
+    };
+    
 };
 
 fn push_file($T: Type, data: T) Fd #generic = {

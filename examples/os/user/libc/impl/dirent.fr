@@ -1,0 +1,38 @@
+
+DIR :: Posix.DIR;
+dirent :: Posix.dirent;
+posix_dent :: dirent;
+
+opendir :: fn(path: CStr) *DIR = {
+    a := general_allocator();
+    fd := Posix'open(path, @or(Posix.O.RDONLY, Posix.O.DIRECTORY)) 
+        || return(zeroed(*DIR));
+    dir := a.box_zeroed(DIR);
+    dir.impl.fd = fd;
+    dir.impl.buf = a.alloc_uninit(u8, 4096);
+    dir.impl.valid = true;
+    dir
+};
+
+readdir :: fn(self: *DIR) *dirent = {
+    r := Posix'readdir(self);
+    r.Ok
+}
+
+// note: can't assert 4th arg is flags=0 because i call it with macos=pointer
+posix_getdents :: fn(f: Fd, buf: *u8, len: i64) i64 = {
+    fd := get_file(f) || return(-1);
+    result := fd'vtable'posix_getdents(fd.data, buf.slice(len), fd.position&);
+    @trace("posix_getdents(%, %, %) = %", f.fd, u8.int_from_ptr(buf), len, result);
+    if result >= 0 {
+        use_file f { it |
+            it.position = fd.position;
+        };
+    };
+    result
+};
+
+closedir :: fn(self: *DIR) i64 = {
+    Posix'closedir(self);
+    0
+}
