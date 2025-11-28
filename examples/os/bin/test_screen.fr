@@ -5,6 +5,8 @@ main :: fn() void = {
         return();
     };
     
+    fb := bind() 
+        || panic("failed to bind framebuffer device");
     shift := 0;
     run_loop { framebuffer, fb_rect |
         shift += 1;
@@ -20,11 +22,17 @@ main :: fn() void = {
     };
 }
 
-run_loop :: fn($body: @Fn(fb: []u32, rect: *Gpu.Rect) void) void = {
+Handle :: @struct {
+    q: *UQueue;
+    buf: []u32;
+    fb: Gpu.Resource;
+    r: Gpu.Rect;
+};
+
+bind :: fn() ?Handle = {
     q := temp().box_zeroed(UQueue);
     if !virtq_create(q, "Screen.gpu", 0) {
-        eprintln("failed to bind framebuffer device");
-        return();
+        return(.None);
     };
     q.pipe = init(temp(), 16);
     
@@ -72,6 +80,12 @@ run_loop :: fn($body: @Fn(fb: []u32, rect: *Gpu.Rect) void) void = {
     h := q.gpu_sync(.SetScanout, in&, none);
     @assert_eq(h.type, .OkNoData, "SetScanout");
     
+    (Some = (q = q, fb = fb, buf = framebuffer, r = fb_rect))
+}
+
+run_loop :: fn(fb: Handle, $body: @Fn(fb: []u32, rect: *Gpu.Rect) void) void = {
+    q := fb.q; framebuffer := fb.buf; fb_rect := fb.r; fb := fb.fb; 
+    none := (); none := none&;
     loop {
         frame_start := timestamp_ns();
         body(framebuffer, fb_rect);
@@ -129,6 +143,7 @@ gpu_sync_extra :: fn(q: *UQueue, cmd: Gpu.CtrlType, in: ~I, in2: ~IS, out: ~O) G
     data_out := zeroed Gpu.GetDisplayInfoOut;
     
     f :: fn(data: ~T) []u8 #where => {
+        @run @ct_assert(T.get_type_info_ref().is(.Ptr), @source_location(), "expected pointer %", T.typename().str());
         ::[]@type data[];
         data.slice(1).interpret_as_bytes()
     };

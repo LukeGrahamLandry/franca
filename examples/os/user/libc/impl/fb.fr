@@ -1,0 +1,78 @@
+// TODO: use the same layout as linux
+//       for now this just has to match bin/doom.fr
+fb_var_screeninfo :: @struct {
+    Colour :: @struct(offset: u32, length: u32 = 8);
+    red: Colour;
+    green: Colour;
+    blue: Colour;
+    transp: Colour;
+    
+    bits_per_pixel: u32 = 32;
+    grayscale: u32 = 0;
+    xres: u32;
+    yres: u32;
+    xres_virtual: u32;
+    yres_virtual: u32;
+};
+
+FBIOGET_VSCREENINFO :: 1234;
+FBIOPUT_VSCREENINFO :: 5678;
+
+
+DeviceFile :: @struct {
+    Screen :: import("@/examples/os/bin/test_screen.fr");
+    handle: ?Screen.Handle = .None;
+    info: ?fb_var_screeninfo = .None;
+    
+    init :: fn(self: *DeviceFile) bool = {
+        fb := Screen'bind() || return(false);
+        self.handle = (Some = fb);
+        self.info = (Some = (
+            red = (offset = 16),
+            green = (offset = 8),
+            blue = (offset = 0),
+            transp = (offset = 24),
+            
+            xres = fb.r.width,
+            yres = fb.r.height,
+            xres_virtual = fb.r.width,
+            yres_virtual = fb.r.height,
+        ));
+        // or 640,400?
+        #use("@/lib/sys/threads.fr");
+        start_thread_data(Screen.Handle, self.handle.Some&) { (fb: *Screen.Handle) |
+            Screen'run_loop(fb[]) { fb, r |
+                // nop
+            };
+        };
+        true
+    }
+
+    get_vscreeninfo :: fn(self, out: *fb_var_screeninfo) #ioctl(FBIOGET_VSCREENINFO) = {
+        if self.info.is_none() {
+            self.init() || return(-1);
+        };
+        out[] = self.info || return(-1);
+        0
+    };
+    
+    put_vscreeninfo :: fn(self, in: *fb_var_screeninfo) #ioctl(FBIOPUT_VSCREENINFO) = {
+        self.info = (Some = in[]);
+        0
+    };
+    
+    lseek :: fn(self, offset, whence, position) = 
+        lseek_impl(offset, whence, position, 
+            => @if(self.handle.is_some(), self.handle.Some.buf.len * 4, -1)); 
+    
+    write :: fn(self, buf, position) = {
+        if self.handle.is_none() {
+            self.init() || return(-1);
+        };
+        handle := self.handle || return(-1);
+        dest := handle.buf.interpret_as_bytes();
+        buf.len = buf.len.min(dest.len - position).max(0);
+        dest.subslice(position, buf.len).copy_from(buf);
+        buf.len
+    }
+};

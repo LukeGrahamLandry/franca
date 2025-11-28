@@ -13,41 +13,15 @@ main :: fn() void = {
     argv&.push(zeroed CStr);
     Syscall'chdir("target");
     
-    #use("@/lib/sys/threads.fr");
-    start_thread_nodata {
-        import("@/examples/os/bin/test_screen.fr")'run_loop() { fb, r |
-            frame := doom.DG_ScreenBuffer[].slice(640*400);
-            fb.copy_from(frame);
-        };
-    };
-    
-    doom'run(argv.len.intcast() - 1, bit_cast_unchecked(*CStr, **i8, argv.maybe_uninit.ptr), vtable);
+    doom'run(argv.len.intcast() - 1, bit_cast_unchecked(*CStr, **i8, argv.maybe_uninit.ptr));
 }
 
-vtable :: @static(doom.VTable) (
-    DG_Init = fn() = {
-    },
-    DG_DrawFrame = fn() = {
-        // done on the other thread
-    },
-    DG_GetKey = fn(pressed, doomKey) = {
-        // TODO
-        0
-    },
-    DG_SleepMs = fn(ms) = {
-        usleep(ms * US_PER_MS);
-    },
-    DG_GetTicksMs = fn() = timestamp().trunc(),
-    DG_SetWindowTitle = fn(title: *i8) = {
-        title := bit_cast_unchecked(@type title, CStr, title);
-        println(title.str());
-    },
-);
+#use("@/examples/os/user/libc/impl/fb.fr");
 
 fetch :: fn() Ty(Str, Str) = {
     #use("@/examples/testing.fr");
     // TODO: use https://github.com/id-Software/DOOM instead
-    root := fetch_or_crash("https://github.com/ozkl/doomgeneric/archive/fc601639494e089702a1ada082eb51aaafc03722.zip", 3237906, "ce728978d1d63a038890306dc7da05e0e2093d2f4c4d37eb111b7f6a5a3bc4db", "doomgeneric-fc601639494e089702a1ada082eb51aaafc03722");
+    root := fetch_or_crash("https://github.com/maximevince/fbDOOM/archive/72b0675c10f51ba5844df5669991c3ab7038fd1f.zip", 604498, "5dec861e2821301ce992b98872220c2acab08ac894bbb3c0a9c8424cc49890e2", "fbDOOM-72b0675c10f51ba5844df5669991c3ab7038fd1f");
     iwad := fetch_or_crash("https://www.doomworld.com/3ddownloads/ports/shareware_doom_iwad.zip", 1782482, "845f4f3a449343b068a4e178f9cb018cb1f5b7d5ef09db292864ed554f612276", "doomdata");
     (root, @tfmt("%/DOOM1.WAD", iwad))
 }
@@ -60,9 +34,31 @@ doom :: (fn() ScopeId = {
     IWAD[] = iwad.shallow_copy(ast_alloc());
     fr := current_compiler_context();
     c := import_c'init_fr(fr);
-    src_path := @tfmt("%/doomgeneric", root);
+    src_path := @tfmt("%/fbdoom", root);
     c.include_paths&.push(src_path);
     write_entire_file_or_crash(@tfmt("%/strings.h", src_path), SRC_strings_h);
+    make_dirs(@tfmt("%/linux", src_path));
+    write_entire_file_or_crash(@tfmt("%/linux/fb.h", src_path), """
+        struct fb_var_screeninfo {
+            struct { int offset; int length; } red;
+            struct { int offset; int length; } green;
+            struct { int offset; int length; } blue;
+            struct { int offset; int length; } transp;
+            int bits_per_pixel;
+            int grayscale;
+            int xres;
+            int yres;
+            int xres_virtual;
+            int yres_virtual;
+        };
+        #define FBIOGET_VSCREENINFO 1234
+    """);
+    make_dirs(@tfmt("%/sys", src_path));
+    write_entire_file_or_crash(@tfmt("%/sys/socket.h", src_path), "");
+    write_entire_file_or_crash(@tfmt("%/sys/ioctl.h", src_path), """
+        int ioctl(int a, int b, long data);
+    """);
+    
     root_scope := list(Ty(Str, *import_c'C'Compile'VarScope), temp());
     for source_files { it |
         println(it);
@@ -96,13 +92,13 @@ doom :: (fn() ScopeId = {
 source_files :: @const_slice(
     "wi_stuff.c", // TODO: order shouldn't matter
     "am_map.c", "d_event.c", "d_items.c", "d_iwad.c", "d_loop.c", 
-    "d_main.c", "d_mode.c", "d_net.c", "doomdef.c", "doomgeneric.c",
+    "d_main.c", "d_mode.c", "d_net.c", "doomdef.c", 
     "doomstat.c", "dstrings.c", "dummy.c", "f_finale.c", "f_wipe.c",
     "g_game.c", "gusconf.c", "hu_lib.c", "hu_stuff.c", "i_cdmus.c", 
-    "i_endoom.c", "i_input.c", "i_joystick.c", "i_scale.c", "i_sound.c", 
-    "i_system.c", "i_timer.c", "i_video.c", "icon.c", "info.c", "m_argv.c", 
+    "i_endoom.c", "i_joystick.c", "i_scale.c", "i_sound.c", 
+    "i_system.c", "i_timer.c", "i_video_fbdev.c", "icon.c", "info.c", "m_argv.c", 
     "m_bbox.c", "m_cheat.c", "m_config.c", "m_controls.c", "m_fixed.c", 
-    "m_menu.c", "m_misc.c", "m_random.c", "memio.c", "mus2mid.c", "p_ceilng.c",
+    "m_menu.c", "m_misc.c", "m_random.c", "memio.c", "p_ceilng.c",
     "p_doors.c", "p_enemy.c", "p_floor.c", "p_inter.c", "p_lights.c", "p_map.c",
     "p_maputl.c", "p_mobj.c", "p_plats.c", "p_pspr.c", "p_saveg.c", "p_setup.c",
     "p_sight.c", "p_spec.c", "p_switch.c", "p_telept.c", "p_tick.c", "p_user.c", 
@@ -113,45 +109,11 @@ source_files :: @const_slice(
 );
 
 SRC :: """
-typedef struct VTable {
-    void (*DG_Init)(void);
-    void (*DG_DrawFrame)(void);
-    void (*DG_SleepMs)(unsigned int);
-    unsigned int (*DG_GetTicksMs)(void);
-    int (*DG_GetKey)(int *pressed, char *doomKey);
-    void (*DG_SetWindowTitle)(char *title);
-} VTable;
-
-VTable vtable = { 0 };
-
-void run(int argc, char **argv, VTable *v) {
-    vtable = v[0];
-    doomgeneric_Create(argc, argv);
-    while (1) doomgeneric_Tick();
-}
-
-void DG_Init(void) {
-    vtable.DG_Init();
-}
-
-void DG_DrawFrame(void) {
-    vtable.DG_DrawFrame();
-}
-
-void DG_SleepMs(uint32_t ms) {
-  vtable.DG_SleepMs(ms);
-}
-
-uint32_t DG_GetTicksMs(void) {
-    return(vtable.DG_GetTicksMs());
-}
-
-int DG_GetKey(int *pressed, char *doomKey) {
-    return(vtable.DG_GetKey(pressed, doomKey));
-}
-
-void DG_SetWindowTitle(char *title) {
-    vtable.DG_SetWindowTitle(title);
+void run(int argc, char **argv) {
+    myargc = argc;
+    myargv = argv;
+    M_FindResponseFile();
+    D_DoomMain();
 }
 """;
 

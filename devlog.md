@@ -14,8 +14,23 @@
     and once i can do that, talking to the actual devices might not suck?
   - 4.2,4.3 have a list, hey there's only 7 pages of stuff i have to do, how hard could it be 
   - i think the sane thing is to do it gradually so i don't lose my mind
+
+vfs
 - store file position on FileHandle directly instead of in the data
   and have the vtable expose pread/pwrite interface instead of read/write
+- for now, store `.` and `..` explicitly in MemDir, feels a bit wasteful? but i guess you need `..` at least. 
+- started working on opendir
+- hack in fix_errno because i don't do errno in my libc yet
+  so if opendir returns null, the SysResult.Err ends up as zero and treated as a success
+
+framebuffer
+- i want to work backwards in the chain of doom forks. 
+  the one before doomgeneric is maximevince/fbDOOM, which needs linux frame buffer interface at /dev/fb0. 
+  might as well use that as an excuse to setup ioctls and then i can see if i can find any one else's 
+  programs that draw on a framebuffer that might just automatically work. 
+- spent far too long on new doom looking like choppy garbage. 
+  probably was i was giving it a gettimeofday where the seubseconds were ns instead of us. 
+  timespec and timeval are not the same!
 
 ## (Nov 26)
 

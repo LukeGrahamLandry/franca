@@ -33,7 +33,11 @@ FileVTable :: @struct {
    access: @FnPtr(self: rawptr, mode: i64) i64 = (fn(_0, _1) = 0);
     mkdir: @FnPtr(self: rawptr, path: CStr, mode: i64) i64 = (fn(_0, _1, _2) = -1);
    rename: @FnPtr(self: rawptr, dest_dir: Fd, src_name: CStr, dest_name: CStr) i64 = (fn(_0, _1, _2, _3) = -1);
+    ioctl: @FnPtr(self: rawptr, op: i64, data: rawptr) i64 = (fn(_0, _1, _2) = -1);
+   ioctls: []Ty(i64, IoctlErased) = empty();
 };
+
+IoctlErased :: @FnPtr(self: rawptr, data: rawptr) i64;
 
 init_vfs :: fn() void = {
     fs.allocator = general_allocator();
@@ -74,6 +78,7 @@ init_vfs :: fn() void = {
     // build a tree of MemDir with MemFileRO leaves containing all the baked files. 
     fs.root_dir = push_file(MemDir, (files = empty()));
     fs.cwd = fs.root_dir;
+    root_dir := get_file(fs.root_dir).unwrap();
     // TODO: deduplicate with follow_path
     while => fs_i.len > 0 {
         continue :: local_return;
@@ -88,7 +93,7 @@ init_vfs :: fn() void = {
             continue();
         };
         
-        cwd := get_file(fs.root_dir).unwrap();
+        cwd := root_dir;
         i := 0;
         while => i < name.len {
             continue :: local_return;
@@ -107,13 +112,17 @@ init_vfs :: fn() void = {
             } else {  // folder
                 break :: local_return;
                 it := self.files.find(fn(it) => it.name == part) || {
-                    cwd = create_child(self, part, MemDir, (files = empty()));
+                    c, _ := create_child_dir(cwd, part);
+                    cwd = c;
                     break()
                 };
                 cwd = it.handle;
             }
         }
     };
+    
+    _, dev := create_child_dir(root_dir, "dev");
+    _ := create_child(dev, "fb0", import("@/examples/os/user/libc/impl/fb.fr").DeviceFile, ());
     
     // TODO: let user iterate the tags and mount them manually 
     q := fs.allocator.box_zeroed(UQueue);
@@ -127,6 +136,15 @@ init_vfs :: fn() void = {
         fs.have_fuse_target_dir = true;
     };
     // else :leak
+}
+
+fn create_child_dir(parent: FileHandle, name: Str) Ty(FileHandle, *MemDir) = {
+    p := MemDir.ptr_from_raw(parent.data);
+    child := create_child(p, name, MemDir, (files = empty()));
+    c := MemDir.ptr_from_raw(child.data);
+    c.files&.push((name = ".", handle = child), fs.allocator);
+    c.files&.push((name = "..", handle = parent), fs.allocator);
+    (child, c)
 }
 
 fn create_child(self: *MemDir, name: Str, $T: Type, data: T) FileHandle #generic = {
@@ -146,14 +164,25 @@ get_vtable :: fn($T: Type) *FileVTable = @static(FileVTable) {
 
     fr := current_compiler_context();
     p := bit_cast_unchecked(*FileVTable, *rawptr, vtable&);
+    ioctls := Ty(i64, IoctlErased).list(ast_alloc());
     for get_constants(S) { name |
         continue :: local_return;
+        val, ty := get_constant(S, name) || continue();
+        @if(ty != FuncId) continue();
+        fid := FuncId.ptr_from_raw(val)[];
+        func := get_function_ast(fid, true, false, false, false);
+        if func.annotations&.index_of(fn(it) => it.name == @symbol ioctl) { i |
+            func.arg.bindings[0].ty = (Finished = *T);
+            func.ret = (Finished = i64);
+            ioctl := const_eval(i64)(func.annotations[i].args);
+            callee := bit_cast_unchecked(rawptr, IoctlErased, fr.get_jitted(fid));
+            push(ioctls&, (ioctl, callee));
+            continue();
+        };
+        
         field := Fields(FileVTable).from_name(name.str())
             || continue();
-        fid := FuncId.get_constant(S, name)
-            || @panic("failed to get func %", name.str());
         
-        func := get_function_ast(fid, false, false, false, false);
         fptrtype := FieldType(FileVTable, field).get_type_info_ref();
         @debug_assert(fptrtype.is(.FnPtr));
         args := fr.arg_types(fptrtype.FnPtr.ty.arg);
@@ -169,6 +198,7 @@ get_vtable :: fn($T: Type) *FileVTable = @static(FileVTable) {
         
         p.offset(@as(i64) field)[] = fr.get_jitted(fid);
     };
+    vtable.ioctls = ioctls.items();
     
     vtable
 };
@@ -204,7 +234,7 @@ StdoutFile :: @struct {
         };
         done := q.pipe.done&.pop();
         @assert(identical(done.bufs[0].ptr, src.ptr));
-        0
+        src.len
     };
 };
 
@@ -572,6 +602,7 @@ fn get_file(fd: Fd) ?FileHandle = {
     use_file fd { it |
         result = (Some = it[]);
     };
+    @if(result.is_none()) @trace("invalid_file(fd = %)", fd.fd);
     result
 }
 
@@ -591,8 +622,13 @@ FRes :: fn($T: Type) Type = Result(T, i64);
 
 // [fd(a), str(b/c/d)] -> [fd(a/b/c), str(d)] 
 fn follow_path_prefix(fd: Fd, path: Str) Result(Ty(Fd, CStr), i64) = {
+    full_path := path;
     if path.starts_with("./") {
         path = path.rest(2);
+    };
+    if path.starts_with("/") {
+        fd = fs.root_dir;
+        path = path.rest(1);
     };
     while => path.ends_with("/") {
         path.len -= 1;
@@ -604,10 +640,10 @@ fn follow_path_prefix(fd: Fd, path: Str) Result(Ty(Fd, CStr), i64) = {
     buf := u8.list(1024, Arena'stack_alloc(1024));
     loop {
         dir, rest := pop_dir_prefix(path) || {
-            @assert(path != "" && path != "." && path != "..", "TODO: special");
+            @assert(path != "", "TODO: special %", full_path);
             return(Ok = (fd, (ptr = path.ptr)));
         };
-        @assert(dir != "" && dir != "." && dir != "..", "TODO: special");
+        @assert(dir != "", "TODO: special %", full_path);
         
         buf&.clear();
         buf&.push_all(dir);

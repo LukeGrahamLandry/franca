@@ -8,15 +8,15 @@ clock_gettime :: fn(clock_id: i64, time_spec: *TimeSpec) i64 = {
 // TODO: do this more efficiently. 
 //       if multiple threads are sleeping, just have one yield like this for the shortest duration and the rest futex wait.
 nanosleep :: fn(duration: *TimeSpec, nullable_remainder_out: i64) i64 = {
-    @trace("nanosleep(s = %, ns = %)", duration.seconds, duration.nanoseconds);
     @debug_assert_eq(nullable_remainder_out, 0, "todo: sleep remainder");
     zeroes := zeroed Array(i64, 6);
         now := system_counter_uptime();
+        @trace("nanosleep(%)", duration[]);
         end := now + duration[];
         dowhile {
             _ := Syscall'perform_syscall(zeroes&, 0xFFFF0002);  // yield
             now := system_counter_uptime();
-            end.ms() > now.ms()
+            end > now
         };
         0
 };
@@ -27,5 +27,17 @@ localtime_r :: fn(time_in: *time_t, time_out: *BigTime) *BigTime = {
     time_out
 };
 
+
+timeval :: @struct {
+    tv_sec: i64;
+    tv_usec: i64;  // US! not the same as timespec which is NS
+};
+
 // TODO: this is supposed to be calander time not system up time
 time :: fn(out: *time_t) time_t = (seconds = timestamp() * 1000);
+
+gettimeofday :: fn(out: *timeval) void = {
+    now := zeroed TimeSpec;
+    clock_gettime(0, now&);
+    out[] = (tv_sec = now.seconds, tv_usec = now.nanoseconds / NS_PER_US);
+}
