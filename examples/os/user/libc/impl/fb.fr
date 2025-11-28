@@ -18,14 +18,19 @@ fb_var_screeninfo :: @struct {
 FBIOGET_VSCREENINFO :: 1234;
 FBIOPUT_VSCREENINFO :: 5678;
 
+// /dev/fb0
 DeviceFile :: @struct {
     Screen :: import("@/examples/os/bin/test_screen.fr");
     handle: ?Screen.Handle = .None;
     info: ?fb_var_screeninfo = .None;
     worker: ?*Thread = .None;
+    stop := false;
     
     init :: fn(self: *DeviceFile) bool = {
-        fb := Screen'bind() || return(false);
+        fb := Screen'bind() || {
+            @trace("DeviceFile: failed to bind framebuffer");
+            return(false);
+        };
         self.handle = (Some = fb);
         self.info = (Some = (
             red = (offset = 16),
@@ -39,11 +44,14 @@ DeviceFile :: @struct {
             yres_virtual = fb.r.height,
         ));
         #use("@/lib/sys/threads.fr");
-        t := start_thread_data(Screen.Handle, self.handle.Some&) { (fb: *Screen.Handle) |
-            Screen'run_loop(fb[]) { fb, r |
-                // nop
+        t := start_thread_data(DeviceFile, self, fn(self: *DeviceFile) void = {
+            fb := self.handle.unwrap();
+            Screen'run_loop(fb) { fb, r |
+                if self.stop {
+                    return();
+                };
             };
-        };
+        });
         self.worker = (Some = t);
         true
     }
@@ -78,6 +86,7 @@ DeviceFile :: @struct {
     
     close :: fn(self) = {
         if self.worker { t |
+            self.stop = true;
             t.join();
         };
         if self.handle { handle |

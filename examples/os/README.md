@@ -21,6 +21,8 @@ it also runs doom (i don't have a keyboard driver yet so just the intro render)
   - console
   - fs (FUSE)
   - gpu (2d framebuffer for software rendering)
+- virtual file system in userspace 
+- a subset of libc
 
 ## incomplete
 
@@ -29,7 +31,7 @@ it also runs doom (i don't have a keyboard driver yet so just the intro render)
 - multiple cores
 - sleep
 - block device
-- file system
+- persistant file system
 - exec and capture stdout
 - thread groups and clean up resources when all exit
 - dlopen
@@ -58,9 +60,8 @@ it also runs doom (i don't have a keyboard driver yet so just the intro render)
    "wait4", "pipe", "mkstemp", "dup2",
    "renameat", 
    "readlinkat", "mkdirat", 
-   "closedir", "readdir", 
-   "opendir", "sigaction",
-   "strtod", "localtime_r", 
+   "sigaction",
+   "localtime_r", 
    "snprintf", 
    "ppoll", "execve",
    fmodf, fmod, sinf, cosf
@@ -76,3 +77,6 @@ it also runs doom (i don't have a keyboard driver yet so just the intro render)
 - jit libc functions lazily, don't just include them all in init. 
 - usb driver
 - keyboard input for doom
+- other clock types. real time, thread time
+- when you rename a directory its `..` entry needs to change
+- `..` out of a fuse file system into the normal one

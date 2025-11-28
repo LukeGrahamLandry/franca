@@ -19,7 +19,6 @@ fs :: @static(@struct {
     cwd: Fd;
     next_fuse_request_id: u64;
     allocator: Alloc;
-    have_fuse_target_dir: bool;
 });
 
 FileHandle :: @rec @struct {
@@ -86,6 +85,20 @@ init_vfs :: fn() void = {
     fs.cwd = fs.root_dir;
     root_dir := get_file(fs.root_dir).unwrap();
     MemDir.ptr_from_raw(root_dir.data)[].files&.push((name = ".", handle = root_dir), fs.allocator);
+    
+    // TODO: let user iterate the tags and mount them manually 
+    q := fs.allocator.box_zeroed(UQueue);
+    have_fuse_target_dir := virtq_create(q, "Host.fs", 1);
+    if have_fuse_target_dir {
+        fuse_root := init_fuse(q);
+        cwd := get_file(fs.root_dir).unwrap();
+        cwd := MemDir.ptr_from_raw(cwd.data);
+        child := get_file(fuse_root).unwrap();
+        child := FuseFile.ptr_from_raw(child.data)[];
+        create_child(cwd, "target", FuseFile, child);
+    };
+    // else :leak
+    
     // TODO: deduplicate with follow_path
     while => fs_i.len > 0 {
         continue :: local_return;
@@ -94,7 +107,7 @@ init_vfs :: fn() void = {
         fs_i = fs_i.rest(2);
         name := contents.subslice(off.zext(), len.zext());
         
-        if name.contains("target/") {
+        if have_fuse_target_dir && name.contains("target/") {
             // HACK: web version needs you to include a generated file but here i want to just share the whole directory,
             //       and i don't support like an overlay thing where you merge both. 
             continue();
@@ -138,19 +151,6 @@ init_vfs :: fn() void = {
     //       so this shouldn't exist implicitly
     _, dev := create_child_dir(root_dir, "dev");
     _ := create_child(dev, "fb0", import("@/examples/os/user/libc/impl/fb.fr").DeviceFile, ());
-    
-    // TODO: let user iterate the tags and mount them manually 
-    q := fs.allocator.box_zeroed(UQueue);
-    if virtq_create(q, "Host.fs", 1) {
-        fuse_root := init_fuse(q);
-        cwd := get_file(fs.root_dir).unwrap();
-        cwd := MemDir.ptr_from_raw(cwd.data);
-        child := get_file(fuse_root).unwrap();
-        child := FuseFile.ptr_from_raw(child.data)[];
-        create_child(cwd, "target", FuseFile, child);
-        fs.have_fuse_target_dir = true;
-    };
-    // else :leak
 }
 
 fn create_child_dir(parent: FileHandle, name: Str) Ty(FileHandle, *MemDir) = {
@@ -235,6 +235,33 @@ MemFileRO :: @struct {
     };
 };
 
+MemFile :: @struct {
+    contents: RawList(u8);
+    
+    read :: fn(self, dest, pos) = {
+        dest.len = min(dest.len, self.contents.len - pos).max(0);
+        src := self.contents.items().subslice(pos, dest.len);
+        dest.copy_from(src);
+        dest.len
+    };
+    lseek :: fn(self, offset, whence, position) = 
+        lseek_impl(offset, whence, position, => self.contents.len); 
+    fstat :: fn(self, out) = {
+        out.st_mode = Posix.S.IFREG;
+        0
+    };
+    write :: fn(self, src, pos) = {
+        extra := (src.len + pos) - self.contents.len;
+        if extra > 0 {
+            self.contents&.reserve(extra, fs.allocator);
+            self.contents.len += extra;
+        };
+        dest := self.contents.items().subslice(pos, src.len);
+        dest.copy_from(src);
+        dest.len
+    }
+};
+
 StdoutFile :: @struct {
     queue: *UQueue;
     
@@ -296,13 +323,63 @@ MemDir :: @struct {
     };
     openat :: fn(self, path, flags, _mode) = {
         path := path.str();
+        trunc := flags.bit_and(LinuxLibc.O_arm.TRUNC) != 0;
         for self.files { it |
             if it.name == path {
+                ::ptr_utils(FileVTable);
+                if trunc && identical(it.handle.vtable, get_vtable(MemFile)) {
+                    file := MemFile.ptr_from_raw(it.handle.data);
+                    file.contents.len = 0;
+                };
                 fd := push_file(it.handle);
                 return(fd.fd.intcast());
             };
         };
-        -2
+        create := flags.bit_and(LinuxLibc.O_arm.CREAT) != 0;
+        directory := flags.bit_and(LinuxLibc.O_arm.DIRECTORY) != 0;
+        @if(!create) return(-1);
+        if directory {
+            @trace("ERR: can't O_CREAT a directory");
+            return(-1);
+        };
+        
+        path := path.shallow_copy(fs.allocator);
+        fd := create_child(self, path, MemFile, (contents = empty()));
+        fd := push_file(fd);
+        fd.fd.intcast()
+    };
+    mkdir :: fn(self, path, _mode) = {
+        name := path.str();
+        each self.files { it |
+            @if(it.name == name) return(-1);
+        };
+        
+        self: FileHandle = (vtable = get_vtable(MemDir), data = MemDir.raw_from_ptr(self));
+        name := name.shallow_copy(fs.allocator);
+        _ := create_child_dir(self, name);
+        0
+    };
+    rename :: fn(self, dest_dir, src_name, dest_name) = {
+        dest_dir := get_file(dest_dir) || return(-1);
+        ::ptr_utils(FileVTable);
+        @if(!identical(dest_dir.vtable, get_vtable(MemDir))) return(-1);
+        dest_dir := MemDir.ptr_from_raw(dest_dir.data);
+        
+        src_name := src_name.str();
+        i := self.files.index_of(fn(it) => it.name == src_name)
+            || return(-1);
+        src_file := self.files&.unordered_remove(i).unwrap();
+        
+        dest_name := dest_name.str();
+        dest := dest_dir.files.find(fn(it) => it.name == dest_name) || {
+            dest_dir.files&.push((
+                name = dest_name.shallow_copy(fs.allocator), 
+                handle = src_file.handle,
+            ), fs.allocator);
+            return(0)
+        };
+        dest.handle = src_file.handle;
+        0
     };
     posix_getdents :: fn(self, buf, pos) = {
         capacity := buf.len;
@@ -471,7 +548,6 @@ FuseFile :: @struct {
         0
     };
     mkdir :: fn(self, path, mode) = {
-        @trace("fuse mkdir %", path);
         in: Fuse.MkdirIn = (
             mode = mode.trunc(),
             umask = 0,
@@ -501,7 +577,7 @@ FuseFile :: @struct {
         while => i < buf.len {
             @debug_assert(i >= o);
             in := buf.rest(i).peek_type(Fuse.Dirent);
-            out := buf.rest(o).peek_type(LinuxLibc.DirEnt);
+            out := buf.rest(o).peek_type_unchecked(LinuxLibc.DirEnt);
             namelen: i64 = in.namelen.zext();
             type := in.type;
             
@@ -578,7 +654,7 @@ init_fuse :: fn(q: *UQueue) Fd = {
     ::DeriveFmt(Array(u16, 11));
     ::display_slice(u16);
     @tfmt("%", result&);  // coconut.jpg
-    push_file(FuseFile, (q = q, nodeid = 1, fh = 0, is_dir = true))
+    push_file(FuseFile, (q = q, nodeid = 1, fh = 0, is_dir = false))
 }
 
 Fuse :: import("@/examples/os/drivers/fs/fuse.fr");
