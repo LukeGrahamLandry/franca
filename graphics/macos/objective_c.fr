@@ -205,7 +205,9 @@ fn objc_set(self: FatExpr, pat: FatExpr) FatExpr #macro = as_var self { self |
             // No need to choose_objc_dispatcher() here because setters always return void. 
             f: rawptr = objc_msgSend;
             f := assume_types_fn(@[@literal arg], void, f);
-            f(@[self], SEL(@[@literal sel]), @[b.default]);
+            self := @[self];
+            self := @if(@run((@type self) != ObjCId), self._, self);
+            f(self, SEL(@[@literal sel]), @[b.default]);
         };
     };
     body
@@ -419,11 +421,14 @@ fn protocol(name: FatExpr, arg: FatExpr) FatExpr #macro = import_objc(name, arg,
 // instead of hoping the compiler's in a good mood. 
 fn import_objc(name: FatExpr, arg: FatExpr, is_protocol: bool) FatExpr = {
     @ct_assert(arg.expr&.is(.Block), arg.loc, "expected Block for objc import");
+    scope := @match(name.expr&) {
+        fn UndeclaredVar(it) => it.scope;
+        @default => @panic("TODO: extract sopce for import_objc");
+    };
     name := name&.ident().unwrap();
-    S :: import("@/graphics/macos/frameworks.fr");
     c := current_compiler_context();
     
-    c'vtable'add_expr_to_scope(c.data, S, name, @{ @expand import_objc_value(@[@literal name], @[@literal arg], @[@literal is_protocol]) });
+    c'vtable'add_expr_to_scope(c.data, scope, name, @{ @expand import_objc_value(@[@literal name], @[@literal arg], @[@literal is_protocol]) });
     @{}
 }
 

@@ -40,6 +40,7 @@ FileVTable :: @struct {
    posix_getdents: @FnPtr(self: rawptr, buf: []u8, pos: *i64) i64 = (fn(_0, _1, _2) = -1);
     ioctl: @FnPtr(self: rawptr, op: i64, data: rawptr) i64 = (fn(_0, _1, _2) = -1);
     ioctls: []Ty(i64, IoctlErased) = empty();
+ truncate: @FnPtr(self: rawptr, a: i64) void = (fn(_0, _1) = ());
 };
 
 IoctlErased :: @FnPtr(self: rawptr, data: rawptr) i64;
@@ -211,7 +212,8 @@ get_vtable :: fn($T: Type) *FileVTable = @static(FileVTable) {
         @debug_assert_eq(args[0], rawptr);
         func.arg.bindings[0].ty = (Finished = *T);
         
-        p.offset(@as(i64) field)[] = fr.get_jitted(fid);
+        off := FileVTable.offset_of(field) / size_of(rawptr);
+        p.offset(off)[] = fr.get_jitted(fid);
     };
     vtable.ioctls = ioctls.items();
     
@@ -259,6 +261,9 @@ MemFile :: @struct {
         dest := self.contents.items().subslice(pos, src.len);
         dest.copy_from(src);
         dest.len
+    }
+    truncate :: fn(self, a) = {
+        self.contents.len = 0;
     }
 };
 
@@ -327,9 +332,8 @@ MemDir :: @struct {
         for self.files { it |
             if it.name == path {
                 ::ptr_utils(FileVTable);
-                if trunc && identical(it.handle.vtable, get_vtable(MemFile)) {
-                    file := MemFile.ptr_from_raw(it.handle.data);
-                    file.contents.len = 0;
+                if trunc {
+                    it'handle'vtable'truncate(it.handle.data, 0);
                 };
                 fd := push_file(it.handle);
                 return(fd.fd.intcast());

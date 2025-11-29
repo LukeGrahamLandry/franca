@@ -273,7 +273,10 @@ fn output_macho(m: *QbeModule) [][]u8 = {
         //
         codesign_ident := "";  // It seems this can be whatever you want since we're not doing a real signeture. I've tried "foo"
         page_count := ((e.file_offset + chained.len).align_to(codesign_page_size) / codesign_page_size);
-        signeture_size := SuperBlob.size_of() + CodeDirectory.size_of() + (32 * page_count) + codesign_ident.len + 1;
+        signeture_size := SuperBlob.size_of() + 8 + CodeDirectory.size_of() + (32 * page_count) + codesign_ident.len + 1 + (@run(size_of(Array(Sha256.Digest, reserved_special_slots))));
+        if e.m.macho_entitlements.len != 0 {
+            signeture_size += 8 + 8 + e.m.macho_entitlements.len;
+        };
         chained&.reserve(signeture_size);
         codesign_output_bytes := chained.maybe_uninit.slice(chained.len, chained.len + signeture_size);
         chunks&.push(chained.items());  // doesn't include codesign_output_bytes yet, that's added later
@@ -320,6 +323,7 @@ fn output_macho(m: *QbeModule) [][]u8 = {
                 dylib = m.goal.type == .Dynamic,
                 ident = codesign_ident,
                 output_buf = codesign_output_bytes,
+                entitlements = e.m.macho_entitlements,
             );
             
             @if(show_backend_stats())
@@ -866,6 +870,7 @@ fn append_sym_name(bytes: *List(u8), s: Str) void = {
 
 // this also works if you use 4096 but that seems strange to me. 
 codesign_page_size :: macos_page_size;
+reserved_special_slots :: 6;  // just has to be big enough for the highest CSSLOT_ you're using
 
 //
 // Loosly based on ziglang/zig/src/link/MachO/CodeSignature.zig. MIT License. Copyright (c) Zig contributors.
@@ -879,6 +884,8 @@ codesign_page_size :: macos_page_size;
 // Caller must precalulate the correct size of everything
 // because we need to hash all the load commands as well so you can't change them later. 
 //
+// TODO: now that i added entitlements this is a bit of a mess :(
+//
 fn write_adhoc_signature(
     exec_seg_base: i64,
     exec_seg_limit: i64,
@@ -887,6 +894,7 @@ fn write_adhoc_signature(
     dylib: bool,
     ident: []u8,
     output_buf: []u8,
+    entitlements: []u8,
 ) void = {
     //
     // WARNING WARNING WARNING
@@ -895,19 +903,31 @@ fn write_adhoc_signature(
     total_pages := file_size.align_to(codesign_page_size) / codesign_page_size;
     hash_size   := 32;
     all_hashes_size := hash_size * total_pages;
-    code_dir_size := CodeDirectory.size_of() + all_hashes_size + ident.len + 1;
+    Special :: Array(Sha256.Digest, reserved_special_slots);
+    code_dir_size := (@run CodeDirectory.size_of()) + all_hashes_size + ident.len + 1 + (@run size_of(Special));
     
     out: List(u8) = fixed_list(output_buf); out := out&;
     
+    ent_scale := int(entitlements.len != 0);
+    header_size := (@run SuperBlob.size_of()) + 8 + ent_scale*8;
     header := out.reserve_type(SuperBlob);
     header[] = (
         magic = CSMAGIC_EMBEDDED_SIGNATURE,
-        total_length = trunc(SuperBlob.size_of() + code_dir_size), 
-        blob_count = 1,
-        type = CSSLOT_CODEDIRECTORY,
-        offset = SuperBlob.size_of(),
+        total_length = trunc(header_size + code_dir_size + ent_scale*8 + entitlements.len), 
+        blob_count = 1 + ent_scale.trunc(),
     );
     SuperBlob.byte_swap_fields(header);
+    
+    h := out.reserve_type(Ty(u32, u32));
+    h[] = (CSSLOT_CODEDIRECTORY, header_size.trunc());
+    Ty(u32, u32).byte_swap_fields(h);
+        
+    if entitlements.len != 0 {
+        h := out.reserve_type(Ty(u32, u32));
+        h[] = (CSSLOT_ENTITLEMENTS, trunc(header_size + code_dir_size));
+        Ty(u32, u32).byte_swap_fields(h);
+    };
+    @assert_eq(out.len, header_size);
     
     c := out.reserve_type(CodeDirectory);
     c[] = CodeDirectory.zeroed();
@@ -925,11 +945,15 @@ fn write_adhoc_signature(
     c.pageSize = 14;
     @debug_assert_eq(1.shift_left(@as(i64) c.pageSize.zext()), codesign_page_size);
     c.nCodeSlots = total_pages.trunc();
+    c.nSpecialSlots = reserved_special_slots;
     c.hashOffset = trunc(code_dir_size - all_hashes_size);
     CodeDirectory.byte_swap_fields(c);
     
     out.push_all(ident);  // useless
     out.push(0);
+    
+    special_slots_hashes := out.reserve_type(Special);
+    special_slots_hashes.items().set_zeroed();
     
     // Now spam out all the bytes of hashes.
     i := 0;
@@ -951,6 +975,17 @@ fn write_adhoc_signature(
     };
     diff := i * codesign_page_size - file_size;
     @debug_assert(diff <= codesign_page_size && diff >= 0, "codesigned chunks amount did not match file_size");
+    @assert_eq(out.len - header_size, code_dir_size);
+    
+    if entitlements.len != 0 {
+        size := 8 + entitlements.len;
+        entitlements_bytes := out.items().end_pointer().slice(size);
+        h := out.reserve_type(Ty(u32, u32));
+        h[] = (CSMAGIC_EMBEDDED_ENTITLEMENTS, trunc(size));
+        Ty(u32, u32).byte_swap_fields(h);
+        out.push_all(entitlements);
+        special_slots_hashes[reserved_special_slots - CSSLOT_ENTITLEMENTS] = Sha256'hash(entitlements_bytes);
+    };
     
     @assert_eq(out.len, out.maybe_uninit.len, "wrong signeture size");
 }

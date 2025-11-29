@@ -4,6 +4,8 @@
 
 |commit|when|why|
 |-|-|-|
+| dc3e356 | Nov 26, 2025 | os: jit and run doom | 
+| dbf948b | Oct 28, 2025 | os: qemu hello world | 
 | c89d17f | Mar 11, 2025 | import_c at comptime for ffi | 
 | b942f9c | Mar  5, 2025 | linux-amd64 self compile (...) without libc | 
 | 3ab2e71 | Feb 23, 2025 | linux-amd64 self compile (...) | 

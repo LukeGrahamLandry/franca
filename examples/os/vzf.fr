@@ -1,0 +1,227 @@
+//
+// this program starts a vm, loads a kernel image with the linux boot protocol,
+// and gives it access to various virtio devices. 
+// it only supports macos (because it uses Virtualization.Framework)
+// but it means i can produce an executable, that runs my operating system 
+// as though it were a normal program, and doesn't depend on qemu. 
+// also i can compile that executable without installing xcode,
+// the duel of which is that it can't be broken by updating xcode. 
+// of course, my os doesn't depend on vzf, it runs just fine in qemu, 
+// if you can figure out the right incantation. 
+//
+
+main :: fn() void = {
+    args := cli_args();
+    if args.len < 2 {
+        @eprint("Usage: % <kernel-path> <shared-folder-path>\n", args[0]);
+        Syscall'exit(1)
+    }
+    // TODO: bake in the bytes of kernel.out
+    kernel := args[1].str();
+    
+    console := new "VZVirtioConsoleDeviceSerialPortConfiguration";
+    import("@/lib/sys/terminal.fr")'start_raw(STD_IN, false);
+    at := VZFileHandleSerialPortAttachment'alloc();
+    at := at.initWithFileHandleForReading(NSFileHandle'fileHandleWithStandardInput(), NSFileHandle'fileHandleWithStandardOutput());
+    @objc console.setAttachment(at);
+    serialPorts := @objc cls("NSArray").arrayWithObject(console);
+        
+    cfg: VZVirtualMachineConfiguration = (_ = new "VZVirtualMachineConfiguration");
+    
+    @objc_set(cfg) (
+        CPUCount = 1,
+        memorySize = 6 * 1024 * 1024 * 1024,
+        serialPorts = serialPorts,
+    );
+    
+    kernel := NSString'stringWithUTF8String(kernel.as_cstr());
+    boot := VZLinuxBootLoader'alloc();
+    boot := boot.initWithKernelURL(NSURL'fileURLWithPath(kernel));
+    
+    cfg.setBootLoader(boot);
+    
+    
+    vm := VZVirtualMachine'alloc();
+    vm := vm.initWithConfiguration(cfg);
+    
+    register_objc_class(FrancaVmDelegate);
+    del := new "FrancaVmDelegate";
+    // TODO: HACK: this name shouldn't be hardcoded in register_objc_class
+    object_setInstanceVariable(del, "franca_sapp", get_dynamic_context());
+    @objc vm.setDelegate(del);
+    
+    blk := new_global_block(general_allocator(), get_dynamic_context(), fn(self: *Block_literal_1, err: ObjCId) void = {
+        set_dynamic_context(self.userdata);
+        @println("ok = %", err.is_nil());
+    });
+    
+    vm.startWithCompletionHandler(blk);
+    loop := NSRunLoop'mainRunLoop();
+    loop.run();
+};
+
+driver :: fn(vtable: *ImportVTable) void = {
+    opts := vtable.default_build_options();
+    opts.retain_function_names = true;
+    
+    #use("@/lib/args.fr");
+    Args :: @struct {
+        unsafe := false;
+        o := "a.out";
+        // TODO: maybe default to -jit if you don't pass -o, then need to change compiler/test.fr
+        jit := false;
+        arch := "";
+    };
+    arg := parse_args(Args);
+    
+    ::?Os;::?Arch;
+    arch := @if(arg.arch == "" || arg.jit, query_current_arch(), Arch.from_name(arg.arch) || @panic("invalid -arch %", arg.arch));
+    
+    if arg.unsafe {
+        s := opts.safety_checks&;
+        s.insert(.Bounds, false);
+        s.insert(.DebugAssertions, false);
+        s.insert(.InvalidTag, false);
+    };
+    
+    input_path := "examples/os/vzf.fr";
+    src := @tfmt("""#include_std("lib/core.fr");#include_std("%");""", input_path);
+    
+    comp := vtable.new_with_src(src, input_path, opts);
+    ctx := vtable.with(comp);
+    
+    Dyn :: import("@/lib/dynamic_lib.fr");
+    
+    libs :: @const_slice("objc", "Virtualization", "CoreGraphics", "Metal", "QuartzCore", "AppKit", "MetalKit", "Cocoa", "CoreFoundation", "CoreVideo", "Foundation");
+    
+    if query_current_os() == .macos { // && arg.jit { // remove this check so you can just put a '::' in main as a demo
+        for libs { name |
+            path := import("@/backend/macho/emit.fr")'guess_path(name);
+            dyn := Dyn'open(path) || @panic("missing dylib: %", path);
+            ctx.add_comptime_library(ctx.intern_string(name), dyn);
+        };
+    };
+   
+    main_sym := {vtable.intern_string}(comp, "main");
+    main_f := {vtable.find_unique_func}(comp, main_sym).unwrap();
+    exports := FuncId.list(temp());
+    exports&.push(main_f);
+    
+    Qbe :: import("@/backend/ir.fr");
+    m := Qbe.Module.zeroed();
+    init_default_module_dyn(m&, vtable, (
+        arch = arch, 
+        os = .macos, 
+        type = @if_else {
+            @if(arg.jit) => .JitOnly;
+            @else => .Exe;
+        },
+        exe_debug_symbol_table = true,
+    ));
+    m.macho_entitlements = entitlements;
+    for libs { it |
+        m&.new_library(it);
+    };
+    bytes := emit_qbe_included_dyn(m&, ctx&, exports.items(), .WrapMain); 
+    
+    if arg.jit {
+        ptr := m&.get_addr(ctx.fmt_fn_name(main_f)).unwrap();
+        end := timestamp();
+        m&.make_exec();
+        push_dynamic_context {
+            context(DefaultContext)[].comptime = 0.rawptr_from_int();
+            f := assume_types_fn(Arg = void, Ret = void, ptr = ptr);
+            f();
+        };
+        ctx'vtable'drop_qbe_module(Qbe.Module.raw_from_ptr(m&));
+        ctx'vtable'destroy_compiler(ctx.data);
+        return();
+    };
+    
+    #use("@/compiler/ast_external.fr", "@/lib/sys/subprocess.fr", "@/lib/sys/fs.fr");
+    
+    write_chunks_or_crash(arg.o, bytes&);
+    ctx'vtable'drop_qbe_module(Qbe.Module.raw_from_ptr(m&));
+    ctx'vtable'destroy_compiler(ctx.data);
+}
+
+entitlements :: """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.virtualization</key>
+	<true/>
+</dict>
+</plist>""";
+
+FrancaVmDelegate :: @struct {
+    EXTENDS :: "NSObject";
+    //IMPLEMENTS :: "VZVirtualMachineDelegate";
+    
+    guestDidStopVirtualMachine :: fn(self: ObjCId, _: VZVirtualMachine) void = {
+        out := zeroed(rawptr);
+        object_getInstanceVariable(self, "franca_sapp", out&);
+        set_dynamic_context(out);
+        
+        @println("guestDidStopVirtualMachine");
+        Syscall'exit(0);
+    }
+}
+
+#use("@/graphics/macos/objective_c.fr");
+//
+// The rest of this file is bindings to Apple's Virtualization.Framework
+//
+
+@class(VZVirtualMachine) {
+    alloc :: fn() VZVirtualMachine #static;
+    initWithConfiguration :: fn(self, _: VZVirtualMachineConfiguration) VZVirtualMachine;
+    startWithCompletionHandler :: fn(self, _: *Block_literal_1) void;
+};
+
+@class(VZVirtualMachineConfiguration) {
+    CPUCount: i64;
+    memorySize: i64;
+    serialPorts: NSArray_of(VZSerialPortConfiguration);
+    bootLoader: VZLinuxBootLoader;
+};
+
+@class(VZSerialPortConfiguration) {
+    
+};
+
+@class(VZVirtioConsoleDeviceSerialPortConfiguration) {
+    attachment: VZFileHandleSerialPortAttachment;
+};
+
+
+@class(VZFileHandleSerialPortAttachment) {
+    alloc :: fn() VZFileHandleSerialPortAttachment #static;
+    initWithFileHandleForReading :: fn(self, _: NSFileHandle, fileHandleForWriting: NSFileHandle) VZFileHandleSerialPortAttachment;
+};
+
+@class(VZLinuxBootLoader) {
+    alloc :: fn() VZLinuxBootLoader #static;
+    initWithKernelURL :: fn(self, _: NSURL) VZLinuxBootLoader;
+    commandLine: NSString;
+};
+
+@class(NSRunLoop) {
+    mainRunLoop: NSRunLoop #readonly #static;
+    run :: fn(self) void;
+};
+
+@class(NSFileHandle) {
+    initWithFileDescriptor :: fn(_: Fd) NSFileHandle #static;
+    fileHandleWithStandardInput: NSFileHandle #static #readonly;
+    fileHandleWithStandardOutput: NSFileHandle #static #readonly;
+};
+
+@class(NSURL) {
+    fileURLWithPath :: fn(_: NSString) NSURL #static;
+};
+
+@class(NSString) {
+    UTF8String: CStr #readonly;
+    stringWithUTF8String :: fn(string: CStr) NSString #static;
+};

@@ -159,6 +159,67 @@ dump :: fn(bytes: []u8) void = {
                 command := bytes&.pop_type(LinkEditBlob);
                 @println("    [Code Signeture] %", command);
                 data := full_bytes.slice(command.offset.zext(), command.offset.zext() + command.size.zext());
+                full_data := data;
+                ::DeriveFmt(SuperBlob);
+                ::DeriveFmt(Ty(u32, u32));
+                data := data;
+                it := data&.pop_type(SuperBlob);
+                SuperBlob.byte_swap_fields(it);
+                @println("        [SuperBlob] %", it);
+                range(0, it.blob_count.zext()) { it |
+                    it := data&.pop_type(Ty(u32, u32))[]; it := it&;
+                    Ty(u32, u32).byte_swap_fields(it); 
+                    @println("        - %", it);
+                    
+                    off := it._1.zext();
+                    it := full_data.subslice(off, 8).peek_type(Ty(u32, u32))[]; it := it&;
+                    Ty(u32, u32).byte_swap_fields(it);
+                    size := it._1.zext();
+                    
+                    data := full_data.subslice(off, size);
+                    @switch(it._0) {
+                        @case(CSMAGIC_CODEDIRECTORY) => {
+                            it := data.peek_type(CodeDirectory)[]; it := it&;
+                            CodeDirectory.byte_swap_fields(it); 
+                            ::DeriveFmt(CodeDirectory);
+                            @println("          CODEDIRECTORY%", it);
+                            
+                            ident := data.rest(it.identOffset.zext());
+                            ident := ident&.pop_cstr();
+                            @println("          ident = %", ident);
+                            
+                            size_special_hashes := it.nSpecialSlots.zext() * it.hashSize.zext();
+                            hashes0 := data.subslice(it.hashOffset.zext() - size_special_hashes, size_special_hashes);
+                            hashes1 := data.subslice(it.hashOffset.zext(), it.nCodeSlots.zext() * it.hashSize.zext());
+                            
+                            show_hashes :: fn(out, hashes, label, off) => {
+                                i := 0;
+                                while => hashes.len > 0 {
+                                    digest := hashes&.pop_slice(u8, it.hashSize.zext());
+                                    @fmt(out, "          %[%] ", label, f_pad(i - off, 3, .Before));
+                                    i += 1;
+                                    for digest { b | 
+                                        push_hex_byte(out, b, false);
+                                    };
+                                    @fmt(out, "\n");
+                                };
+                            };
+                            
+                            out := u8.list(temp());
+                            @fmt(out&, "          --- special hashes --- \n");
+                            show_hashes(out&, hashes0, "S", it.nSpecialSlots.zext());
+                            @fmt(out&, "          --- code hashes --- \n");
+                            show_hashes(out&, hashes1, "C", 0);
+                            print(out.items());
+                        };
+                        @case(CSMAGIC_EMBEDDED_ENTITLEMENTS) => {
+                            @println("          EMBEDDED_ENTITLEMENTS%", it);
+                            println(data.rest(8));
+                        };
+                        @default => @println("          unknown%", it);
+                    };
+                };
+                
             };
             @case(LoadCommand.ApplicationUuid.raw()) => {
                 command := bytes&.pop_type(ApplicationUuid);

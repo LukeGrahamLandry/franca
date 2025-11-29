@@ -1,4 +1,17 @@
 
+## (Nov 29)
+
+- adding a new field to FileVTable after the slice of ioctls didn't work because get_vtable
+  was using the field's index instead of calling offset_of so relied on them all being a single pointer
+- converting vzf wrapper to my language. 
+  - `*** Terminating app due to uncaught exception 'NSInvalidArgumentException', reason: '+[VZFileHandleSerialPortAttachment initWithFileHandleForReading:fileHandleForWriting:]: unrecognized selector sent to class`  
+    because all the init methods aren't static constructors. you have to alloc it first
+  - now i get to `The process doesn’t have the “com.apple.security.virtualization” entitlement`, great
+  - main mistake was output_type.reserve wasn't giving zeroed memory because chained is in temp(), i was assuming its in page_alloc
+  - but it only works if i reserve 10 slots, oh because you're supposed to index backwards and 
+    the index i need is 5 so 10 made it the middle? thats why codesign -d prints the indices with a negative sign. 
+- finally fixed the "invalid system call" when exiting examples/soft_draw.fr because i made the same mistake in vzf.fr but its obvious since i just wrote it
+
 ## (Nov 28)
   
 - finished off the dirent stuff 
