@@ -10,36 +10,107 @@
 // if you can figure out the right incantation. 
 //
 
+Cfg :: @struct {
+    kernel: Str;
+    bootargs: Str;
+    shared_folders: []Ty(Str, Str);
+    graphics: bool;
+    width: f64;
+    height: f64;
+};
+
+// TODO: an option to bake in the bytes of kernel.out
 main :: fn() void = {
-    args := cli_args();
-    if args.len < 2 {
-        @eprint("Usage: % <kernel-path> <shared-folder-path>\n", args[0]);
-        Syscall'exit(1)
-    }
-    // TODO: bake in the bytes of kernel.out
-    kernel := args[1].str();
-    
+    run_vm(parse(cli_args()));
+};
+
+run_vm :: fn(args: Cfg) Never #use(apple) = {
+    if args.graphics {
+        app := NSApplication'sharedApplication();
+        window: NSWindow = (_ = @objc cls("NSWindow").alloc());
+        
+        state: State = (
+            env = get_dynamic_context(),
+            window = window,
+            cfg = args,
+        );
+        register_objc_class(FrancaVmAppDelegate);
+        del := new "FrancaVmAppDelegate";
+        // TODO: HACK: this name shouldn't be hardcoded in register_objc_class
+        object_setInstanceVariable(del, "franca_sapp", State.raw_from_ptr(state&));
+        @objc app.setDelegate(del);
+        
+        style: i64 = 0b1111;  // NSWindowStyleMask Tiled|Closable|Miniaturizable|Resizable
+        rect: CGRect = (origin = (x = 0, y = 0), size = (width = args.width, height = args.height));
+        window.initWithContentRect(rect, style, 2 /*NSBackingStoreBuffered*/, false);
+        
+        @objc window.makeKeyAndOrderFront(ObjCId.zeroed());
+        app.run();
+    } else {
+        start_vm(args, .None);
+        loop := NSRunLoop'mainRunLoop();
+        loop.run();
+    };
+    unreachable();
+}
+
+// note: can't jit this program because the compiler executable doesn't have the entitlement for virtualization
+start_vm :: fn(args: Cfg, view: ?FuncId.scope_of(apple).VZVirtualMachineView) void #use(apple) = {
+    @assert_eq(query_current_os(), .macos, "this program requires Virtualization.Framework");
+
     console := new "VZVirtioConsoleDeviceSerialPortConfiguration";
     import("@/lib/sys/terminal.fr")'start_raw(STD_IN, false);
     at := VZFileHandleSerialPortAttachment'alloc();
     at := at.initWithFileHandleForReading(NSFileHandle'fileHandleWithStandardInput(), NSFileHandle'fileHandleWithStandardOutput());
     @objc console.setAttachment(at);
     serialPorts := @objc cls("NSArray").arrayWithObject(console);
+    
+    // TODO: there's also VZMultipleDirectoryShare, is it better to have one device? 
+    shared_folders := new "NSMutableArray";
+    for args.shared_folders { tag, path |
+        tag := NSString'stringWithUTF8String(tag.as_cstr());
+        path := NSString'stringWithUTF8String(path.as_cstr());
+        path := NSURL'fileURLWithPath(path);
         
+        dir: VZSharedDirectory = (_ = new "VZSharedDirectory");
+        dir.initWithURL(path, false);
+        
+        share: VZSingleDirectoryShare = (_ = new "VZSingleDirectoryShare");
+        share.initWithDirectory(dir);
+        
+        virtfs: VZVirtioFileSystemDeviceConfiguration = (_ = new "VZVirtioFileSystemDeviceConfiguration");
+        virtfs.initWithTag(tag);
+        @objc virtfs.setShare(share);
+        
+        @objc shared_folders.addObject(virtfs);
+    };
+    
+    screens := new "NSMutableArray";
+    if args.graphics {
+        gfx := new "VZVirtioGraphicsDeviceConfiguration";
+        gfx_cfg := new "VZVirtioGraphicsScanoutConfiguration";
+        @objc gfx_cfg.initWithWidthInPixels(args.width.int(), heightInPixels = args.height.int());
+        s := @objc cls("NSArray").arrayWithObject(gfx_cfg);
+        @objc gfx.setScanouts(s);
+        @objc screens.addObject(gfx);
+    };
+    
     cfg: VZVirtualMachineConfiguration = (_ = new "VZVirtualMachineConfiguration");
     
     @objc_set(cfg) (
         CPUCount = 1,
         memorySize = 6 * 1024 * 1024 * 1024,
         serialPorts = serialPorts,
+        directorySharingDevices = shared_folders,
+        graphicsDevices = screens,
     );
     
-    kernel := NSString'stringWithUTF8String(kernel.as_cstr());
+    kernel := NSString'stringWithUTF8String(args.kernel.as_cstr());
     boot := VZLinuxBootLoader'alloc();
     boot := boot.initWithKernelURL(NSURL'fileURLWithPath(kernel));
-    
+    bootargs := NSString'stringWithUTF8String(args.bootargs.as_cstr());
+    boot.setCommandLine(bootargs);
     cfg.setBootLoader(boot);
-    
     
     vm := VZVirtualMachine'alloc();
     vm := vm.initWithConfiguration(cfg);
@@ -52,13 +123,100 @@ main :: fn() void = {
     
     blk := new_global_block(general_allocator(), get_dynamic_context(), fn(self: *Block_literal_1, err: ObjCId) void = {
         set_dynamic_context(self.userdata);
-        @println("ok = %", err.is_nil());
+        @assert(err.is_nil(), "failed to start vm");
     });
     
+    @assert_eq(args.graphics, view.is_some(), "-graphics vs args.view");
+    if view { view |
+        view.setVirtualMachine(vm);
+    };
+    
     vm.startWithCompletionHandler(blk);
-    loop := NSRunLoop'mainRunLoop();
-    loop.run();
 };
+
+FrancaVmDelegate :: @struct {
+    EXTENDS :: "NSObject";
+    //IMPLEMENTS :: "VZVirtualMachineDelegate";
+    
+    #use(apple);
+    guestDidStopVirtualMachine :: fn(self: ObjCId, _: VZVirtualMachine) void = {
+        out := zeroed(rawptr);
+        object_getInstanceVariable(self, "franca_sapp", out&);
+        set_dynamic_context(out);
+        
+        Syscall'exit(0);
+    }
+}
+
+State :: @struct {
+    env: rawptr;
+    window: FuncId.scope_of(apple).NSWindow;
+    cfg: Cfg;
+};
+
+FrancaVmAppDelegate :: @struct {
+    EXTENDS :: "NSObject";
+    //IMPLEMENTS :: @const_slice("NSApplicationDelegate");
+    
+    #use(apple);
+    applicationDidFinishLaunching :: fn(self: ObjCId, _: id"NSNotification") void = {
+        state := zeroed(rawptr);
+        object_getInstanceVariable(self, "franca_sapp", state&);
+        state := State.ptr_from_raw(state);
+        set_dynamic_context(state.env);
+    
+        app := NSApplication'sharedApplication();
+        @objc app.activateIgnoringOtherApps(true);
+        
+        view: VZVirtualMachineView = (_ = new "VZVirtualMachineView");
+        // TODO: the vm side needs to be aware. rn it just makes it super blurry for a bit and it still doesn't resize
+        // @objc view.setAutomaticallyReconfiguresDisplay(true);
+        @objc state.window.setContentView(view);
+        start_vm(state.cfg, (Some = view));
+    }
+
+    applicationShouldTerminateAfterLastWindowClosed :: fn(self: ObjCId, sender: ObjCId) bool =
+        true;
+}
+
+parse :: fn(args: []CStr) Cfg = {
+    kernel: ?Str = .None;
+    bootargs := u8.list(temp());
+    shared_folders := Ty(Str, Str).list(temp());
+    graphics := false;
+    i := 1;
+    while => i < args.len {
+        c := args[i].str(); i += 1;
+        @switch(c) {
+            @case("-kernel") => {
+                kernel = (Some = args[i].str()); i += 1;
+            };
+            @case("-append") => {
+                bootargs&.push_all(args[i].str()); i += 1;
+            };
+            @case("-share") => {
+                s := args[i].str(); i += 1;
+                i := s.index_of("=".ascii()) 
+                    || @panic("expected -share <tag>=<path>");
+                push(shared_folders&, (s.slice(0, i), s.rest(i + 1)));
+            };
+            @case("-graphics") => {
+                graphics = true;
+            };
+            @default => {
+                @eprintln("unknown argument %", c);
+            };
+        }
+    };
+    (
+        kernel = kernel || @panic("expected -kernel <path>"),
+        bootargs = bootargs.items(),
+        shared_folders = shared_folders.items(),
+        graphics = graphics,
+        width = 1280/2, 
+        height = 800/2,
+    )
+}
 
 driver :: fn(vtable: *ImportVTable) void = {
     opts := vtable.default_build_options();
@@ -68,14 +226,13 @@ driver :: fn(vtable: *ImportVTable) void = {
     Args :: @struct {
         unsafe := false;
         o := "a.out";
-        // TODO: maybe default to -jit if you don't pass -o, then need to change compiler/test.fr
-        jit := false;
         arch := "";
     };
     arg := parse_args(Args);
     
     ::?Os;::?Arch;
-    arch := @if(arg.arch == "" || arg.jit, query_current_arch(), Arch.from_name(arg.arch) || @panic("invalid -arch %", arg.arch));
+    #use("@/lib/sys/process.fr");
+    arch := @if(arg.arch == "", query_current_arch(), Arch.from_name(arg.arch) || @panic("invalid -arch %", arg.arch));
     
     if arg.unsafe {
         s := opts.safety_checks&;
@@ -93,53 +250,24 @@ driver :: fn(vtable: *ImportVTable) void = {
     Dyn :: import("@/lib/dynamic_lib.fr");
     
     libs :: @const_slice("objc", "Virtualization", "CoreGraphics", "Metal", "QuartzCore", "AppKit", "MetalKit", "Cocoa", "CoreFoundation", "CoreVideo", "Foundation");
-    
-    if query_current_os() == .macos { // && arg.jit { // remove this check so you can just put a '::' in main as a demo
-        for libs { name |
-            path := import("@/backend/macho/emit.fr")'guess_path(name);
-            dyn := Dyn'open(path) || @panic("missing dylib: %", path);
-            ctx.add_comptime_library(ctx.intern_string(name), dyn);
-        };
-    };
-   
+
     main_sym := {vtable.intern_string}(comp, "main");
     main_f := {vtable.find_unique_func}(comp, main_sym).unwrap();
-    exports := FuncId.list(temp());
-    exports&.push(main_f);
     
     Qbe :: import("@/backend/ir.fr");
     m := Qbe.Module.zeroed();
     init_default_module_dyn(m&, vtable, (
         arch = arch, 
         os = .macos, 
-        type = @if_else {
-            @if(arg.jit) => .JitOnly;
-            @else => .Exe;
-        },
+        type = .Exe,
         exe_debug_symbol_table = true,
     ));
     m.macho_entitlements = entitlements;
     for libs { it |
         m&.new_library(it);
     };
-    bytes := emit_qbe_included_dyn(m&, ctx&, exports.items(), .WrapMain); 
-    
-    if arg.jit {
-        ptr := m&.get_addr(ctx.fmt_fn_name(main_f)).unwrap();
-        end := timestamp();
-        m&.make_exec();
-        push_dynamic_context {
-            context(DefaultContext)[].comptime = 0.rawptr_from_int();
-            f := assume_types_fn(Arg = void, Ret = void, ptr = ptr);
-            f();
-        };
-        ctx'vtable'drop_qbe_module(Qbe.Module.raw_from_ptr(m&));
-        ctx'vtable'destroy_compiler(ctx.data);
-        return();
-    };
-    
-    #use("@/compiler/ast_external.fr", "@/lib/sys/subprocess.fr", "@/lib/sys/fs.fr");
-    
+    bytes := emit_qbe_included_dyn(m&, ctx&, @slice(main_f), .WrapMain); 
+    #use("@/lib/sys/fs.fr");
     write_chunks_or_crash(arg.o, bytes&);
     ctx'vtable'drop_qbe_module(Qbe.Module.raw_from_ptr(m&));
     ctx'vtable'destroy_compiler(ctx.data);
@@ -154,24 +282,14 @@ entitlements :: """<?xml version="1.0" encoding="UTF-8"?>
 </dict>
 </plist>""";
 
-FrancaVmDelegate :: @struct {
-    EXTENDS :: "NSObject";
-    //IMPLEMENTS :: "VZVirtualMachineDelegate";
-    
-    guestDidStopVirtualMachine :: fn(self: ObjCId, _: VZVirtualMachine) void = {
-        out := zeroed(rawptr);
-        object_getInstanceVariable(self, "franca_sapp", out&);
-        set_dynamic_context(out);
-        
-        @println("guestDidStopVirtualMachine");
-        Syscall'exit(0);
-    }
-}
-
-#use("@/graphics/macos/objective_c.fr");
 //
 // The rest of this file is bindings to Apple's Virtualization.Framework
 //
+
+apple :: fn() = {
+#use("@/graphics/macos/objective_c.fr");
+#reexport("@/graphics/macos/objective_c.fr");
+#reexport("@/graphics/macos/frameworks.fr");
 
 @class(VZVirtualMachine) {
     alloc :: fn() VZVirtualMachine #static;
@@ -184,6 +302,11 @@ FrancaVmDelegate :: @struct {
     memorySize: i64;
     serialPorts: NSArray_of(VZSerialPortConfiguration);
     bootLoader: VZLinuxBootLoader;
+    directorySharingDevices: NSArray_of(VZVirtioFileSystemDevice);
+};
+
+@class(VZVirtualMachineView) {
+    virtualMachine: VZVirtualMachine;
 };
 
 @class(VZSerialPortConfiguration) {
@@ -194,7 +317,6 @@ FrancaVmDelegate :: @struct {
     attachment: VZFileHandleSerialPortAttachment;
 };
 
-
 @class(VZFileHandleSerialPortAttachment) {
     alloc :: fn() VZFileHandleSerialPortAttachment #static;
     initWithFileHandleForReading :: fn(self, _: NSFileHandle, fileHandleForWriting: NSFileHandle) VZFileHandleSerialPortAttachment;
@@ -204,6 +326,22 @@ FrancaVmDelegate :: @struct {
     alloc :: fn() VZLinuxBootLoader #static;
     initWithKernelURL :: fn(self, _: NSURL) VZLinuxBootLoader;
     commandLine: NSString;
+};
+
+@class(VZSingleDirectoryShare) {
+    alloc :: fn() VZSingleDirectoryShare #static;
+    initWithDirectory :: fn(self, _: VZSharedDirectory) VZSingleDirectoryShare;
+};
+
+@class(VZSharedDirectory) {
+    alloc :: fn() VZSharedDirectory #static;
+    initWithURL :: fn(self, _: NSURL, readOnly: bool) VZSharedDirectory;
+};
+
+@class(VZVirtioFileSystemDeviceConfiguration) {
+    share: VZSingleDirectoryShare;
+    alloc :: fn() VZVirtioFileSystemDeviceConfiguration #static;
+    initWithTag :: fn(self, _: NSString) VZVirtioFileSystemDeviceConfiguration; 
 };
 
 @class(NSRunLoop) {
@@ -217,11 +355,4 @@ FrancaVmDelegate :: @struct {
     fileHandleWithStandardOutput: NSFileHandle #static #readonly;
 };
 
-@class(NSURL) {
-    fileURLWithPath :: fn(_: NSString) NSURL #static;
-};
-
-@class(NSString) {
-    UTF8String: CStr #readonly;
-    stringWithUTF8String :: fn(string: CStr) NSString #static;
 };

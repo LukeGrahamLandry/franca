@@ -6,6 +6,10 @@ driver :: fn(vtable: *ImportVTable) void = {
     threads := @slice(
         start_thread_output(vtable, kernel_elf&, compile_kernel),
         start_thread_output(vtable, user_elf&, compile_user),
+        start_thread_nodata {
+            franca := get_executable_path(temp());
+            sh(@slice(franca, "examples/os/vzf.fr", "-o", vzf_out));
+        },
     );
     for threads { it |
         it.join();
@@ -26,11 +30,29 @@ driver :: fn(vtable: *ImportVTable) void = {
         _ := import("@/examples/os/bin/doom.fr")'fetch();
     };
     
+    graphics := cli_args().contains(fn(it) => it[] == "-graphics");
+    vzf_out :: "./target/vzf.out";
+    if cli_args().contains(fn(it) => it[] == "-vzf") {
+        @assert_eq(query_current_os(), .macos, "can't use Virtualization.Framework, try -qemu instead");
+        args := Str.list(temp());
+        args&.push(vzf_out);
+        args&.push_all(@slice("-kernel", output, "-share", "Host=target"));
+        if graphics {
+            args&.push("-graphics");
+        };
+        if cli_args().index_of(fn(it) => it[] == "-append") { i |
+            @assert(i + 1 < cli_args().len(), "usage: -append \"<boot-args>\"");
+            args&.push("-append");
+            args&.push(cli_args().index(i + 1)[].str());
+        };
+        sh(args.items());
+        return();
+    };
+    
     if !cli_args().contains(fn(it) => it[] == "-qemu") {
         @if(!hush) @eprintln(">>> wrote to %; (run with -qemu to run the os as well)", output);
         return();
     };
-    graphics := cli_args().contains(fn(it) => it[] == "-graphics");
     @if(!hush) @if(!graphics) eprintln("add the -graphics argument if you want more than just the console");
     @if(!hush) eprintln("running...   (to turn it off, ctrl-a then press x)");
     // TODO: on linux it would be friendly to use `-accel kvm` but that doesn't work on orbstack which is the main thing i use

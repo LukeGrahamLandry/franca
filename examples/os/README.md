@@ -22,6 +22,7 @@ it also runs doom (i don't have a keyboard driver yet so just the intro render)
   - fs (FUSE)
   - gpu (2d framebuffer for software rendering)
 - virtual file system in userspace 
+  - makes it easy to port programs that expect a unix-like everything-is-a-file interface
 - a subset of libc
 
 ## incomplete
@@ -45,8 +46,6 @@ it also runs doom (i don't have a keyboard driver yet so just the intro render)
 - support riscv and amd64
 - gpu
 - check for needs_reset flag when waiting for virt queue
-- call virtualization.framework from my language and bundle the whole thing into one exe
-- support entitlements in my codesign
 - make volatile pointers less painful in my language
 - accel-hvf and vzf use 100% cpu when spinning in wfi
 - vzf: sometimes you don't get the `>>>` prompt until you hit a key

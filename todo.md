@@ -250,7 +250,6 @@ as different types even when they're the same size.
 ### !! BROKEN !!
 
 - self compile in blink on (arm-macos and arm-linux) on github actions seems to hang forever sometimes? 
-- soft_draw.fr crashes when you quit the program
 - ./boot/temporary/macos-amd64.sh with SLOW_USERSPACE_THREADS=true
 ```
 pragma-once.c                           [ok] 

@@ -7,9 +7,12 @@
   - `*** Terminating app due to uncaught exception 'NSInvalidArgumentException', reason: '+[VZFileHandleSerialPortAttachment initWithFileHandleForReading:fileHandleForWriting:]: unrecognized selector sent to class`  
     because all the init methods aren't static constructors. you have to alloc it first
   - now i get to `The process doesn’t have the “com.apple.security.virtualization” entitlement`, great
+  - backend/macho/emit needs to support entitlements
   - main mistake was output_type.reserve wasn't giving zeroed memory because chained is in temp(), i was assuming its in page_alloc
   - but it only works if i reserve 10 slots, oh because you're supposed to index backwards and 
     the index i need is 5 so 10 made it the middle? thats why codesign -d prints the indices with a negative sign. 
+  - i was hoping i could have a dylib with `com.apple.security.virtualization` and open it from an executable without it, but it seems that doesn't work. 
+  - vzf.fr: make an nsapp to give the vm a view
 - finally fixed the "invalid system call" when exiting examples/soft_draw.fr because i made the same mistake in vzf.fr but its obvious since i just wrote it
 
 ## (Nov 28)
