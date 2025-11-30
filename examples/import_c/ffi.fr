@@ -287,16 +287,19 @@ fn export_members(c: *Ctx, type: *CType, is_union: bool) FTy = {
 
 fn import_cache_file(c: *Ctx, tok: *C.Tokens.Token) void = {
     ::Result(*Header, Str);
+    c.current_file = tok.file;
     h: *Header = or check(tok.file.contents) { e |
         @error_tok(c, tok, "include frc: %", e)
     };
     
     root_scope := h.get(h.root_scope);
+    c.import_type_cache = temp().alloc_zeroed(Array(*CType, 2), h.fty.count.zext());
     for(h, root_scope.payload.fields) { i, it |
         continue :: local_return;
         name_str := h.get(it.name);
         if it.type.off == FTy.TYPE {
             ty := c.import_c_type(h, it.payload.type, false);
+            c.import_type_cache[it.payload.type.off.zext()]&[0] = ty;
             c.push_scope(name_str)[].type_def = ty;
             continue();
         };
@@ -307,23 +310,34 @@ fn import_cache_file(c: *Ctx, tok: *C.Tokens.Token) void = {
         obj := c.new_gvar(name_str, ty, tok, false);
         obj.is_function = ty.kind == .TY_FUNC;
     };
-    
-    @assert(c.emitter.is_none() || !c.emitter.Some.threaded, "TODO: import_c import_cache_file on another thread");
+    c.import_type_cache = empty();
     
     // TODO: if the c Ctx is also being compiled to a .frc file, 
     //       there's no need to duplicate everything. it should probably just reference 
     //       the symbols as imports. and it's the last guy's job to merge everything when actually making an exe. 
-    compile_all_symbols(h, c.m);
+    if c.emitter.is_none() || !c.emitter.Some.threaded {
+        compile_all_symbols(h, c.m);
+    } else {
+        enter_task c.emitter.unwrap() { entry | 
+            entry.task = (All = h);
+        };
+    };
 }
 
-// TODO: cache these so it's not allocating a new type every time it's referenced. 
 fn import_c_type(c: *Ctx, h: *Qbe.Incremental.Header, ty_i: One(Qbe.Incremental.FTy), array_would_decay: bool) *CType = {
+    cache_slot := c.import_type_cache[ty_i.off.zext()]&[int(array_would_decay)]&;
+    if !cache_slot[].is_null() {
+        return cache_slot[];
+    };
     @switch(ty_i.off) {
         @case(1) => return(c.ty_void);
         @case(3) => return(c.ty_long);
+        @case(4) => return(c.ty_bool);
         @case(5) => @panic("TODO: import_c_type variadic function");
+        @case(6) => return(c.ty_void);  // Never
         @case(7) => return(c.ty_double);
         @case(10) => return(c.ty_uint);
+        @case(11) => return(c.pointer_to(c.ty_void));
         @case(12) => return(c.ty_float);
         @default => ();
     }
@@ -354,43 +368,179 @@ fn import_c_type(c: *Ctx, h: *Qbe.Incremental.Header, ty_i: One(Qbe.Incremental.
         }
         fn Array() => {
             inner := c.import_c_type(h, ty.payload.array.inner, false);
+            array := c.array_of(inner, ty.payload.array.count.zext());
             if !array_would_decay {
-                return c.array_of(inner, ty.payload.array.count.zext());
+                return array;
             };
-            // TODO: this sucks. i can't represent value type of an array when passing to a function 
-            panic("TODO: import_c_type wrap array in struct to prevent it from decaying")
+            
+            result := c.new_type(.TY_STRUCT, 0, 0);
+            head := C.Types.Member.zeroed();
+            cur  := head&;
+            
+            mem := c.arena.box_zeroed(C.Types.Member);
+            mem.ty = array;
+            //mem.name = c.new_token(.TK_IDENT, name.index(0), name.index_unchecked(name.len));
+            mem.idx = 0;
+            mem.align = mem.ty.align;
+            cur.next = mem;
+            cur = cur.next;
+            
+            result.members = head.next;
+            c.struct_layout(result);
+            result
         }
         // TODO: proably want to have the imported module say field offsets so you can pack in different ways. 
-        fn Struct() => {
-            result := c.new_type(.TY_STRUCT, 0, 0);
+        fn Struct() => c.import_members(h, ty, .TY_STRUCT);
+        fn Params() => c.import_members(h, ty, .TY_STRUCT);
+        fn Union() => c.import_members(h, ty, .TY_UNION);
+        fn Ptr() => {
+            cache_slot[] = c.pointer_to(c.ty_void);
+            inner := c.import_c_type(h, ty.payload.array.inner, true);
+            cache_slot[][] = c.pointer_to(inner)[];
+            cache_slot[]
+        }
+        fn Number() => {
+            it := ty.payload.int&;
+            @assert(!it.bitfield, "TODO: import_c import frc bitfield");
+            
+            ::[]@type c.prims;
+            fields := (*CType).reinterpret_bytes(interpret_as_bytes(c.prims&.slice(1)));
+            for fields { check |
+                if it.signed == !check.is_unsigned && it.bits == check.size.bitcast() * 8 && it.float == check.is_flonum() {
+                    return(check);
+                };
+            };
+            @panic("TODO: import_c import frc type % %", ty.tag, ty_i.off);
+        }
+        fn Enum() => {
+            result := c.new_type(.TY_ENUM, 4, 4);
             
             // TODO: make this not a linked list :(
             head := C.Types.Member.zeroed();
             cur  := head&;
             idx  := 0;
+            result.param_names = alloc_zeroed(c.arena, *C.Compile.Token, ty.payload.fields.count.zext());
+            idx := 0;
             for(h, ty.payload.fields) { i, it |
-                mem := c.arena.box_zeroed(C.Types.Member);
-                mem.ty = c.import_c_type(h, it.type, false);
                 name := h.get(it.name);
-                if name.len == 0 {
-                    name = "-";
-                };
-                // TODO: new_file
-                mem.name = c.new_token(.TK_IDENT, name.index(0), name.index_unchecked(name.len));
-                mem.idx = idx.intcast();
+                result.param_names[idx] = c.new_token(.TK_IDENT, name.index(0), name.index_unchecked(name.len));
+                sc := c.push_scope(name);
+                sc.enum_ty = c.ty_uint;
+                sc.enum_val = it.payload.offset.zext();
                 idx += 1;
-                mem.align = mem.ty.align;
-                cur.next = mem;
-                cur = cur.next;
             };
-            result.members = head.next;
+            result
+        }
+        fn Tagged() => {
+            result := c.new_type(.TY_STRUCT, 0, 0);
+            head := C.Types.Member.zeroed();
+            cur  := head&;
             
+            mem := c.arena.box_zeroed(C.Types.Member);
+            mem.ty = c.ty_long;
+            //mem.name = c.new_token(.TK_IDENT, name.index(0), name.index_unchecked(name.len));
+            mem.idx = 0;
+            mem.align = mem.ty.align;
+            cur.next = mem;
+            cur = cur.next;
+            
+            mem := c.arena.box_zeroed(C.Types.Member);
+            mem.ty = c.import_members(h, ty, .TY_UNION);
+            //mem.name = c.new_token(.TK_IDENT, name.index(0), name.index_unchecked(name.len));
+            mem.idx = 1;
+            mem.align = mem.ty.align;
+            cur.next = mem;
+            cur = cur.next;
+            
+            result.members = head.next;
             c.struct_layout(result);
             result
         }
+        fn Alias() => c.import_c_type(h, ty.payload.alias, array_would_decay);
         @default => @panic("TODO: import_c import frc type % %", ty.tag, ty_i.off);
     }
 }
+
+import_members :: fn(c: *Ctx, h: *Qbe.Incremental.Header, ty: *Qbe.Incremental.FTy, kind: C.Compile.TypeKind) *CType = { 
+    result := c.new_type(kind, 0, 0);
+    
+    // TODO: make this not a linked list :(
+    head := C.Types.Member.zeroed();
+    cur  := head&;
+    idx  := 0;
+    for(h, ty.payload.fields) { i, it |
+        mem := c.arena.box_zeroed(C.Types.Member);
+        mem.ty = c.import_c_type(h, it.type, false);
+        name := h.get(it.name);
+        if name.len == 0 {
+            name = "-";
+        };
+        
+        mem.name = c.new_token(.TK_IDENT, name.index(0), name.index_unchecked(name.len));
+        mem.idx = idx.intcast();
+        idx += 1;
+        mem.align = mem.ty.align;
+        cur.next = mem;
+        cur = cur.next;
+    };
+    result.members = head.next;
+    
+    c.struct_layout(result);
+    result
+}
+
+// TODO: include the libc/*.fr as deps in cc.fr cache file
+// TODO: only include the signetures, not the code
+// TODO: this won't work in wasm until it doesn't need to write a tmp file
+gen_builtin_includes :: fn(out: *HashMap(Str, Str)) void = {
+    path := "target/string.fr";
+    src := """exports :: import("@/examples/os/user/libc/string.fr");""";
+    write_entire_file_or_crash(path, src);
+    fr := current_compiler_context();
+    opts := fr.vtable.default_build_options();
+    s := fr'vtable'cached_compile_module(@tfmt("@/%", path), opts, ast_alloc());
+    s := s.or(fn(err) => fr.report_error(err));
+    
+    // for now i'm only using the franca part for the type signetures and function names. 
+    // so poke into the symbols and convert to dynamic import with non-mangled name. 
+    // HACK: truncating the count is because when the franca compiler imports something 
+    //       it relies on all the internal functions having full sigentures for shims 
+    //       but it only imports things in the root scope, so when it exports it puts 
+    //       extra junk in the root scope. 
+    h: *Header = check(s).unwrap();
+    root_scope := h.get(h.root_scope);
+    @debug_assert_le(h.hack_real_root_scope_count, root_scope.payload.fields.count);
+    root_scope.payload.fields.count = h.hack_real_root_scope_count;
+    for(h, all(h, Qbe.Incremental.Sym)) { i, it |
+        it.segment = .Invalid;
+    };
+    strcpy_type: ?One(Qbe.Incremental.FTy) = .None;
+    for(h, root_scope.payload.fields) { i, it |
+        s := h.get(it.payload.sym);
+        s.segment = .Import;
+        s.name = it.name;
+        s.payload.imp = (lib = (off = 0));  // :DefaultToLibc
+        
+        if h.get(s.name) == "strcpy" {
+            strcpy_type = (Some = it.type);
+        };
+    };
+    
+    strcpy_type := strcpy_type.unwrap();
+    t := h.get(strcpy_type);
+    @assert_eq(t.tag, .Func);
+    cstr_type := t.payload.func.ret;
+    t := h.get(cstr_type);
+    @assert_eq(t.tag, .Struct);
+    t := h.get(t.payload.fields);
+    charstar_type := t[0].type;
+    h.get(cstr_type)[] = (tag = .Alias, payload = (alias = charstar_type));
+    
+    //o := u8.list(temp());
+    //import("@/backend/meta/dump_bin.fr")'dump(o&, s);
+    //println(o.items());
+    out.insert("string", s);
+};
 
 #use("@/compiler/ast_external.fr");
 C :: import("@/examples/import_c/lib.fr");
