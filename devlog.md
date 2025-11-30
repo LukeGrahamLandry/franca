@@ -1,4 +1,8 @@
 
+- instead of calling cached_compile_module, just export the signetures i need without compiling the bodies. 
+  now gen_builtin_includes is 1ms instead of 47ms. tho it does need to recompile some of the franca stuff.
+  but with `start := @run timestamp();` at the beginning of gen_builtin_includes, its still only 11ms. that's fine. 
+
 ## (Nov 29)
 
 - adding a new field to FileVTable after the slice of ioctls didn't work because get_vtable
@@ -14,6 +18,9 @@
   - i was hoping i could have a dylib with `com.apple.security.virtualization` and open it from an executable without it, but it seems that doesn't work. 
   - vzf.fr: make an nsapp to give the vm a view
 - finally fixed the "invalid system call" when exiting examples/soft_draw.fr because i made the same mistake in vzf.fr but its obvious since i just wrote it
+- started replacing import_c/include.fr with importing a .frc file. 
+  finished import_c_type. too slow tho, its extra 50ms just for string.h when uncached (and even when hit, 830 -> 845). 
+  reworked the ExportCtx stuff to go through the CompCtx vtable so i can call it outside the compiler. 
 
 ## (Nov 28)
   

@@ -834,7 +834,7 @@ cached_compile_module :: fn(path: Str, opts: *BuildOptions, out_alloc: Alloc) CR
         ));
         
         c: ExportCtx = (
-            self = self, 
+            fr = self.comp(), 
             m = m,
             writer = m.save.unwrap(),
             types = init(self.get_alloc()),
@@ -869,7 +869,7 @@ cached_compile_module :: fn(path: Str, opts: *BuildOptions, out_alloc: Alloc) CR
 };
 
 ExportCtx :: @struct {
-    self: *SelfHosted;
+    fr: CompCtx;
     m: *QbeModule;
     writer: *Writer;
     types: HashMap(Type, One(FTy));
@@ -880,14 +880,14 @@ fn build_the_exports_scope(c: *ExportCtx, start_path: Str) CRes([][]u8) = {
     fns, names := @try(collect_fns_from_exports(c)) return;
     // This is kinda copy-paste fusion adventure of emit_qbe_included and finish_qbe_module. 
     
-    fr := c.self.comp();
+    fr := c.fr;
     shared := init_codegen(c.m, fr.get_alloc(), true);
     funcs_done := main_thread_pump(fr, shared, fns, false);
     @debug_assert(c.m.inlinable_but_referenced_later.len == 0);
     
     backend'writer_finish_imports(c.writer, c.m);
     root_scope := export_root_scope(c, fns, funcs_done&, names);
-    entry_dep := write_deps(c.writer, c.self.codemap, start_path);
+    entry_dep := write_deps(c.writer, fr'vtable'get_codemap(fr.data), start_path);
     
     meta: Incremental.Meta = (
         arch_os = 0x0F0F,
@@ -895,7 +895,6 @@ fn build_the_exports_scope(c: *ExportCtx, start_path: Str) CRes([][]u8) = {
         root_scope = root_scope,
         // TODO: don't call this debug_name if im going to use it for stuff
         debug_name = c.writer.push(mangle_name_for_cache(start_path)),
-        hack_real_root_scope_count = fns.len.trunc(),
     );
     bytes := c.writer.to_bytes(meta, c.m);
     (Ok = bytes)
@@ -908,15 +907,14 @@ export_root_scope :: fn(c: *ExportCtx, fns: []FuncId, funcs_done: *DynamicBitSet
 
     range(0, fns.len) { i | 
         fid, export_name := (fns[i], names[i]);
-        name := c.self.comp().fmt_fn_name(fid);
+        name := c.fr.fmt_fn_name(fid);
         id := c.m.intern(name);
         idx := c.writer.map_sym(c.m, id);
         
-        
-        func := c.self.get_function(fid);
+        func := c.fr.get_function(fid);
         // TODO: copy paste
-        f_ty := func.finished_ty() || @panic("unfinished type for %", c.self.comp().log(func));
-        f_ty := c.self.intern_type(FnPtr = (ty = f_ty));
+        f_ty := func.finished_ty() || @panic("unfinished type for %", c.fr.log(func));
+        f_ty := c.fr.intern_type(FnPtr = (ty = f_ty));
         f_ty := export_type(c, f_ty);
         
         decls&.push(
@@ -925,23 +923,18 @@ export_root_scope :: fn(c: *ExportCtx, fns: []FuncId, funcs_done: *DynamicBitSet
             payload = (offset = trunc idx)
         );
     };
-    symbols_exported: Qbe.BSet = init_bitset(c.writer.sym.len + c.self.functions.len);
-    i := 0;
-    each c.self.functions& { func |
-        continue :: local_return;
-        fid: FuncId = i.from_index();
-        i += 1;
-        if(!funcs_done.get(i-1), => continue());
-        i := ();
+    symbols_exported: Qbe.BSet = init_bitset(c.writer.sym.len + funcs_done.bits.len * 64);
+    for funcs_done { i |
+        fid: FuncId = i.from_index(); i := ();
 
-        c.self.last_loc = func.loc;
-        name := c.self.comp().fmt_fn_name(fid);
+        name := c.fr.fmt_fn_name(fid);
         id := c.m.intern(name);
         idx := c.writer.map_sym(c.m, id);
         symbols_exported&.bsset(idx);
         
-        f_ty := func.finished_ty() || @panic("unfinished type for %", c.self.comp().log(func));
-        f_ty := c.self.intern_type(FnPtr = (ty = f_ty));
+        func := c.fr.get_function(fid);
+        f_ty := func.finished_ty() || @panic("unfinished type for %", c.fr.log(func));
+        f_ty := c.fr.intern_type(FnPtr = (ty = f_ty));
         f_ty := export_type(c, f_ty);
         
         decls&.push(
@@ -951,7 +944,7 @@ export_root_scope :: fn(c: *ExportCtx, fns: []FuncId, funcs_done: *DynamicBitSet
         );
         
         @if_let(func.body&) fn DynamicImport(it) => {
-            id := c.m.intern(c.self.comp().get_string(it.name));
+            id := c.m.intern(c.fr.get_string(it.name));
             idx := c.writer.map_sym(c.m, id);
             symbols_exported&.bsset(idx);
             decls&.push(
@@ -992,7 +985,7 @@ export_type :: fn(c: *ExportCtx, type: Type) One(FTy) = {
 
 export_type_info :: fn(c: *ExportCtx, type: Type) FTy = {
     writer := c.m.save.unwrap();
-    @match(c.self.get_type(type)) {
+    @match(c.fr.get_type(type)) {
         fn Int(it) => (
             tag = .Number, 
             payload = (int = (bits = it.bit_count.trunc(), signed = it.signed)),
@@ -1004,7 +997,7 @@ export_type_info :: fn(c: *ExportCtx, type: Type) FTy = {
             for it.fields { it |
                 name, value := it;
                 args&.push(
-                    name = writer.push(c.self.pool.get(name)),
+                    name = writer.push(c.fr.get_string(name)),
                     type = inner,
                     payload = (offset = trunc value.Small._0),
                 );
@@ -1028,7 +1021,7 @@ export_type_info :: fn(c: *ExportCtx, type: Type) FTy = {
             args := Fld.list(it.fields.len, temp());
             each it.fields { it |
                 args&.push(
-                    name = writer.push(c.self.pool.get(it.name)),
+                    name = writer.push(c.fr.get_string(it.name)),
                     type = c.export_type(it.ty),
                     payload = (offset = it.byte_offset.trunc()), 
                 );
@@ -1041,7 +1034,7 @@ export_type_info :: fn(c: *ExportCtx, type: Type) FTy = {
             for it.cases { it |
                 name, type := it;
                 args&.push(
-                    name = writer.push(c.self.pool.get(name)),
+                    name = writer.push(c.fr.get_string(name)),
                     type = c.export_type(type),
                     payload = (offset = 0), 
                 );
@@ -1060,39 +1053,42 @@ export_type_info :: fn(c: *ExportCtx, type: Type) FTy = {
             payload = (alias = c.export_type(it._0)),
         )
         @default => {
-            info := c.self.get_info(type);
+            info := c.fr.get_info(type);
             if info.loc.low != 0 {
-                c.self.last_loc = (low = info.loc.low, high = info.loc.low + 1);
+                // TODO
+                //c.self.last_loc = (low = info.loc.low, high = info.loc.low + 1);
             };
-            e: CRes(void) = @err("TODO: export confusing type %", c.self.log_type(type));
-            c.self.report_error(e.Err, true)
+            @panic("TODO: export confusing type %", c.fr.log(type));
         };
     }
 };
 
 // for now it's just always the toplevel identifier `exports` but eventually i should expose a more powerful api
 collect_fns_from_exports :: fn(c: *ExportCtx) CRes(Ty([]FuncId, []Str)) = {
-    value := c.self.poll_in_place(?Values, => c.self.find_in_scope(TOP_LEVEL_SCOPE, c.self.pool.insert_owned("MODULE_EXPORTS"), ScopeId));
-    value := @try(value) return;
-    value := @unwrap(value, "ICE: import_module() didn't find exports variable") return;
-    s := ScopeId.assume_cast(value&)[];
+    s := c.fr.get_const(ScopeId, TOP_LEVEL_SCOPE, c.fr.intern_string("MODULE_EXPORTS"));
+    s := @unwrap(s, "missing MODULE_EXPORTS") return;
+    (Ok = collect_fns_from_scope(c.fr, s))
+};
     
-    scope := c.self.scopes[s].lookup&;
-    fns := FuncId.list(c.self.get_alloc());
-    names := Str.list(c.self.get_alloc());
-    each c.self.scopes[s].lookup& { name, var | 
+collect_fns_from_scope :: fn(fr: CompCtx, s: ScopeId) Ty([]FuncId, []Str) = {
+    fns := FuncId.list(fr.get_alloc());
+    names := Str.list(fr.get_alloc());
+    for fr'vtable'get_constants(fr.data, s) { name | 
         continue :: local_return;
-        @if(var.kind != .Const) continue();
-        
-        value := c.self.poll_in_place(?Values, => c.self.find_in_scope(s, name, FuncId));
-        value := @try(value) return;
-        value := value.unwrap();
-        fid := FuncId.assume_cast(value&)[];
-        
+        fid := fr.get_const(FuncId, s, name)
+            || continue();
         push(fns&, fid);
-        push(names&, c.self.pool.get(name));
+        push(names&, fr.get_string(name));
     };
-    (Ok = (fns.items(), names.items()))
+    (fns.items(), names.items())
+};
+
+get_const :: fn(fr: CompCtx, $T: Type, s: ScopeId, name: Symbol) ?T #generic = {
+    @run @assert(T == FuncId || T == ScopeId);  // these have a fixed value so doesn't matter which context
+    value, ty := fr'vtable'get_constant(fr.data, s, name)
+        || return(.None);
+    @if(ty != T && !(T == FuncId && fr.get_type(ty).is(.Fn))) return(.None);
+    (Some = T.ptr_from_raw(value)[])
 };
 
 #use("@/lib/collections/bit_set.fr");

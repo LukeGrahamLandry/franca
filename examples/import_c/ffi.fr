@@ -489,44 +489,94 @@ import_members :: fn(c: *Ctx, h: *Qbe.Incremental.Header, ty: *Qbe.Incremental.F
     result
 }
 
-// TODO: include the libc/*.fr as deps in cc.fr cache file
-// TODO: only include the signetures, not the code
-// TODO: this won't work in wasm until it doesn't need to write a tmp file
 gen_builtin_includes :: fn(out: *HashMap(Str, Str)) void = {
-    path := "target/string.fr";
-    src := """exports :: import("@/examples/os/user/libc/string.fr");""";
-    write_entire_file_or_crash(path, src);
+    remap: ?Ty(One(FTy), One(FTy)) = .None;
+    s := fr_to_header("@/examples/os/user/libc/string.fr", remap&);
+    println(s.len);
+    out.insert("string", s);
+}
+
+// TODO: make the binary format less bloated. it's like 4x the byte size as the header. 
+fr_to_header :: fn(path: Str, remap: *?Ty(One(FTy), One(FTy))) []u8 = {
     fr := current_compiler_context();
-    opts := fr.vtable.default_build_options();
-    s := fr'vtable'cached_compile_module(@tfmt("@/%", path), opts, ast_alloc());
-    s := s.or(fn(err) => fr.report_error(err));
+    m := temp().box_uninit(QbeModule);
+    // TODO: "need to be consistant about how to handle modules like this that don't actually compile anything"
+    init_default_module_dyn(m, fr.vtable, (arch = .aarch64, os = .macos, type = .CachedEarly));
     
-    // for now i'm only using the franca part for the type signetures and function names. 
-    // so poke into the symbols and convert to dynamic import with non-mangled name. 
-    // HACK: truncating the count is because when the franca compiler imports something 
-    //       it relies on all the internal functions having full sigentures for shims 
-    //       but it only imports things in the root scope, so when it exports it puts 
-    //       extra junk in the root scope. 
+    c: FrIncr.ExportCtx = (
+        fr = fr, 
+        m = m,
+        writer = m.save.unwrap(),
+        types = init(temp()),
+    ); c := c&;
+
+    // TODO: making everyone remember to do this is kinda lame
+    range(0, FTy.COUNT) { i |
+        c.types&.insert(bit_cast_unchecked(u32, Type, i.trunc()), (off = i.trunc()));
+        c.writer.fty&.push(zeroed Incremental.FTy);   // skip builtin types so offsets work out
+    };
+    
+    fns, names := FrIncr'collect_fns_from_scope(fr, import(path));
+    decls := Fld.list(temp());
+    range(0, fns.len) { i | 
+        fid, export_name := (fns[i], names[i]);
+        id := c.m.intern(export_name);
+        idx := c.writer.map_sym(c.m, id);
+        
+        func := get_function_ast(fid, true, false, true, false);
+        // TODO: copy paste
+        f_ty := func.finished_ty() || @panic("unfinished type for %", c.fr.log(func));
+        require_layout_ready(f_ty.arg);
+        f_ty := c.fr.intern_type(FnPtr = (ty = f_ty));
+        f_ty := FrIncr'export_type(c, f_ty);
+        
+        decls&.push(
+            name = c.writer.push(export_name),
+            type = f_ty,
+            payload = (offset = trunc idx)
+        );
+    };
+    root_scope := save_fields(c.writer, .Scope, decls.items());
+    meta: Incremental.Meta = (
+        arch_os = 0x0F0F,
+        root_scope = root_scope,
+        debug_name = c.writer.push(path),
+    );
+    s := c.writer.to_bytes(meta, c.m);
+    s := s.concat(fr.get_alloc());
+    drop(m);
+    
     h: *Header = check(s).unwrap();
     root_scope := h.get(h.root_scope);
-    @debug_assert_le(h.hack_real_root_scope_count, root_scope.payload.fields.count);
-    root_scope.payload.fields.count = h.hack_real_root_scope_count;
-    for(h, all(h, Qbe.Incremental.Sym)) { i, it |
-        it.segment = .Invalid;
-    };
-    strcpy_type: ?One(Qbe.Incremental.FTy) = .None;
     for(h, root_scope.payload.fields) { i, it |
-        s := h.get(it.payload.sym);
-        s.segment = .Import;
-        s.name = it.name;
-        s.payload.imp = (lib = (off = 0));  // :DefaultToLibc
-        
-        if h.get(s.name) == "strcpy" {
+        h.get(it.payload.sym)[] = (
+            segment = .Import,
+            name = it.name,
+            payload = (imp = (lib = (off = 0))),  // :DefaultToLibc
+        );
+    };
+    
+    h: *Header = check(s).unwrap();
+    root_scope := h.get(h.root_scope);
+    
+    if remap.is_none() {
+        remap[] = (Some = find_cstr_type(h));
+    }
+    if remap[] { cstr_type, charstar_type |
+        h.get(cstr_type)[] = (tag = .Alias, payload = (alias = charstar_type));
+    };
+    
+    s
+};
+
+find_cstr_type :: fn(h: *Header) Ty(One(FTy), One(FTy)) = {
+    strcpy_type: ?One(FTy) = .None;
+    for(h, h.get(h.root_scope)[].payload.fields) { i, it |
+        if h.get(it.name) == "strcpy" {
             strcpy_type = (Some = it.type);
         };
     };
-    
-    strcpy_type := strcpy_type.unwrap();
+    strcpy_type := strcpy_type.expect("to do string.fr first and find strcpy to remap CStr");
     t := h.get(strcpy_type);
     @assert_eq(t.tag, .Func);
     cstr_type := t.payload.func.ret;
@@ -534,18 +584,14 @@ gen_builtin_includes :: fn(out: *HashMap(Str, Str)) void = {
     @assert_eq(t.tag, .Struct);
     t := h.get(t.payload.fields);
     charstar_type := t[0].type;
-    h.get(cstr_type)[] = (tag = .Alias, payload = (alias = charstar_type));
-    
-    //o := u8.list(temp());
-    //import("@/backend/meta/dump_bin.fr")'dump(o&, s);
-    //println(o.items());
-    out.insert("string", s);
-};
+    (cstr_type, charstar_type)
+}
 
 #use("@/compiler/ast_external.fr");
 C :: import("@/examples/import_c/lib.fr");
 Ctx :: C.Compile.Ctx;
 Obj :: C.Compile.Obj;
 CType :: C.Types.CType;
+FrIncr :: import("@/compiler/incremental.fr");
 
 #use("@/backend/lib.fr");
