@@ -531,12 +531,15 @@ fn AsmFunctionArmOnly(signeture: FuncId, code: []u32) FuncId #fold = {
 // file to be reused without recompiling (if none of the contributing files have changed). 
 //
 // TODO: reuse if the same path is used from multiple places in the same compiler instance
+// TODO: doesn't work if one file has both main and exports because the cache files stomp eachother
 fn import_module(path: Str) ScopeId = {
     fr := current_compiler_context();
     opts := get_build_options();
-    no_cache := opts.no_cache || IS_BOOTSTRAPPING;
+    more_cache := get_environment_variable("FRANCA_MORE_CACHE").is_some() ;
+    was_bootstrapping :: { fr := current_compiler_context(); IS_BOOTSTRAPPING || fr.vtable.driver_abi_version == 1119 };
+    no_cache := opts.no_cache || was_bootstrapping || !more_cache;
     exports0 := const_eval(ScopeId)(@{ @[@literal path].import().exports });
-    if no_cache || true {
+    if no_cache {
         // The reference implementation just loads the new module in the same CompCtx. 
         return exports0;
     };
@@ -544,7 +547,6 @@ fn import_module(path: Str) ScopeId = {
     
     // TODO: not everything works with this enabled
     // - examples/import_wuffs/test.fr
-    // - IS_BOOSTRAPPING
     // - wasm
     
     exports1 := {
@@ -626,11 +628,15 @@ fn entry_with_addend(id: BakedVarId, addend: i32) BakedEntry = {
 
 fn import() ScopeId #fold = import("@");
 
-// TODO: this needs to interact with the caching :FUCKED
 // TODO: unify this with import so it doesn't depend on working directory. 
 fn include_bytes(path: Str) []u8 #fold = {
     a := ast_alloc();  // assert comptime
-    import("@/lib/sys/fs.fr")'read_entire_file_or_crash(a, path)
+    bytes := import("@/lib/sys/fs.fr")'read_entire_file_or_crash(a, path);
+    fr := current_compiler_context();
+    codemap := fr'vtable'get_codemap(fr.data);
+    path := @tfmt("@/%", path);
+    codemap.add_file(path.shallow_copy(a), bytes);
+    bytes
 }
 
 fn include_bytes(path: Str, expect_len: i64) []u8 #fold = {

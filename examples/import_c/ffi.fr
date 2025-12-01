@@ -61,7 +61,7 @@ exports :: Type.scope_of(@struct {
     //       `panic! ICE: tried to call got null jit_addres` (when import_module caching is enabled)  :compilerbug -- Oct 13, 2025
     init_fr: (@Fn(fr: CompCtx) *C.Compile.Ctx) : init_for_include;
     compile_fr: (@Fn(out_alloc: Alloc, c_source: Str, c: *C.Compile.Ctx) []u8) : compile_to_module;
-    init_c: (@Fn(c: *C.Compile.Ctx, m: *QbeModule) void) : init_ctx;
+    init_c: (@Fn(c: *C.Compile.Ctx, m: *QbeModule, worker: *CodegenShared) void) : init_ctx;
     compile_c: (@Fn(c: *C.Compile.Ctx, filename: Str, contents: Str) Result(void, Str)) : fn(c, filename, contents) = {
         catch_call(c, void) {
             tok := c.tokenize_string(filename, contents);
@@ -83,16 +83,14 @@ fn init_for_include(fr: CompCtx) *C.Compile.Ctx = {
     //       tho maybe that's a dumb design anyway because you're doing a lot of work
     //       if you import a big library but only call one function (but it makes caching easier... not that i do that tho). 
     // TODO: this should work when not through the vtable but this is better anyway
-    codegen_thread_main := ptr_cast_unchecked(@type fr.vtable.codegen_thread_main, C'Compile'CodegenWorker, fr.vtable.codegen_thread_main&)[];
     // "todo: make this work threaded"
-    ctx: *C.Compile.CodegenShared = init_codegen_worker(m, general_allocator(), codegen_thread_main, false);
-    C'init_ctx(c, m);
-    c.emitter = (Some = ctx);
-    c.enqueue_task = bit_cast_unchecked(@type fr.vtable.enqueue_task, @type c.enqueue_task, fr.vtable.enqueue_task);
+    ctx := init_codegen_worker(m, false, fr.vtable);
+    C'init_ctx(c, m, ctx);
     c.preserve_franca_env = true;
     range(0, FTy.COUNT) { _ |
         m.save.unwrap()[].fty&.push(zeroed FTy);   // skip builtin types so offsets work out
     };
+    
     c
 }
 
@@ -105,7 +103,7 @@ fn compile_to_module(out_alloc: Alloc, c_source: Str, c: *C.Compile.Ctx) []u8 = 
         tok  = c.C'Preprocess'preprocess(tok);
         _ := c.parse(tok);
         
-        c.emitter.unwrap().join_codegen_thread();
+        c.emitter.join_codegen_thread();
         
         // add all the functions/globals/typedefs to a scope
         args := Fld.list(c.arena);
@@ -315,13 +313,9 @@ fn import_cache_file(c: *Ctx, tok: *C.Tokens.Token) void = {
     // TODO: if the c Ctx is also being compiled to a .frc file, 
     //       there's no need to duplicate everything. it should probably just reference 
     //       the symbols as imports. and it's the last guy's job to merge everything when actually making an exe. 
-    if c.emitter.is_none() || !c.emitter.Some.threaded {
-        compile_all_symbols(h, c.m);
-    } else {
-        enter_task c.emitter.unwrap() { entry | 
+        enter_task c.emitter { entry | 
             entry.task = (All = h);
         };
-    };
 }
 
 fn import_c_type(c: *Ctx, h: *Qbe.Incremental.Header, ty_i: One(Qbe.Incremental.FTy), array_would_decay: bool) *CType = {
@@ -492,7 +486,6 @@ import_members :: fn(c: *Ctx, h: *Qbe.Incremental.Header, ty: *Qbe.Incremental.F
 gen_builtin_includes :: fn(out: *HashMap(Str, Str)) void = {
     remap: ?Ty(One(FTy), One(FTy)) = .None;
     s := fr_to_header("@/examples/os/user/libc/string.fr", remap&);
-    println(s.len);
     out.insert("string", s);
 }
 

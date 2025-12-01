@@ -194,9 +194,8 @@ Ctx :: @rec @struct {
     
     preserve_franca_env: bool;
     franca_env: Qbe.Ref;
-    emitter: ?*CodegenShared;
+    emitter: *CodegenShared;
     function_entry: ?*CodegenEntry;
-    enqueue_task: @FnPtr(*CodegenShared, *CodegenEntry) void;
     
     /// Tokenize
     current_file: *File;
@@ -2125,8 +2124,7 @@ fn parse_symbol_attributes(c: *Ctx, rest: **Token, tok: *Token, obj: *Obj) void 
             
             @debug_assert(!obj.yielded);
             obj.yielded = true;
-            if c.emitter { ctx |
-                // TODO: not using the vtable thing (c'enqueue_task) makes this compile slower.
+            ctx := c.emitter;
                 enter_task ctx { entry | 
                     lnk := temp().boxed(Qbe.Lnk, (
                         id = obj.global_symbol.unwrap(),
@@ -2134,7 +2132,6 @@ fn parse_symbol_attributes(c: *Ctx, rest: **Token, tok: *Token, obj: *Obj) void 
                     ));
                     entry.task = (Bounce = (lnk = lnk, target = target.global_symbol.unwrap()));
                 };
-            };
         };
     };
     
@@ -3981,6 +3978,7 @@ fn gen_expr_inner(c: *Ctx, node: *Node) Qbe.Ref = {
         }
         fn ND_MEMBER() => {
             addr := c.gen_addr(node); 
+            ::if(Qbe.Ref);
             r := if node.member.is_bitfield {
                 c.gen_load_bitfield(addr, node.member)
             } else {
@@ -4070,6 +4068,8 @@ fn gen_load_bitfield(c: *Ctx, addr: Qbe.Ref, mem: *Member) Qbe.Ref = {
 }
 
 fn gen_binary(c: *Ctx, kind: NodeKind, lhs_r: Qbe.Ref, rhs_r: Qbe.Ref, out_ty: *CType, ctrl_ty: *CType, tok: *Token) Qbe.Ref = {
+    ::if(Qbe.O);
+    Qbe.Simplify;
     o: Qbe.O = @match(kind) {
         fn ND_ADD()      => .add;
         fn ND_SUB()      => .sub;
@@ -4158,6 +4158,7 @@ fn gen_cast(c: *Ctx, src: Qbe.Ref, from: *CType, to: *CType, tok: *Token) Qbe.Re
             };
         }
     } else {  // k_to is integer
+        ::enum(@type k_to);
         if(to.size == from.size && k_to == k_from, => return(src));  // if sizes are equal, it's a signedness cast which does nothing 
         if k_from.is_int() && to.size < from.size {
             // `(char) 256` needs to truncate
@@ -4264,7 +4265,10 @@ fn gen_store(c: *Ctx, addr: Qbe.Ref, value: Qbe.Ref, ty: *CType) void = {
     o: Qbe.O = @if_else {
         @if(@is(ty.kind, .TY_DOUBLE, .TY_LDOUBLE)) => .stored;
         @if(@is(ty.kind, .TY_FLOAT)) => .stores;
-        @else => import("@/backend/opt/mem.fr")'store_by_size[ty.size.zext()];
+        @else => {
+            xxx := import("@/backend/opt/mem.fr")'store_by_size;
+            xxx[ty.size.zext()]
+        };
     };
     c.emit(o, .Kw, QbeNull, value, addr);
 }

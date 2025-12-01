@@ -12,6 +12,7 @@
 // 
 
 #include_std("graphics/lib.fr");
+ReplFns :: import_module("@/examples/repl.fr");
 Repl :: import("@/examples/repl.fr");
 
 // TODO: THIS IS UNACCEPTABLE FIXME FIXME FIXME
@@ -80,13 +81,18 @@ on_init :: fn(userdata: rawptr) void = {
     @if(ENABLE_FRANCA_REPL) {
         prelude := "#include_std(\"lib/core.fr\");#include_std(\"examples/terminal.fr\");\n";
         prelude := @tfmt("%\nSOKOL_BACKEND :: RenderBackend.%;\n", prelude, SOKOL_BACKEND);
-        state.repl = Repl'init_repl(allocator, prelude);
+        state.repl = ReplFns'init(allocator, prelude);
         if Repl.STDLIB_PATH { path |
             cd(path.items());
         };
-        res := state.repl&.run_chunk(@tfmt("real_state := State.ptr_from_int(%); state[] = real_state; state := state[];", raw_from_ptr(State, state[])));
-        ::Repl;
-        state.repl.program.Repl'unwrap_report_error(void, res);
+        src := @tfmt("real_state := State.ptr_from_int(%); state[] = real_state; state := state[];", raw_from_ptr(State, state[]));
+        res := ReplFns'run(state.repl&, src);
+        if res&.is_err() {
+            out: List(u8) = list(temp());
+            fr := state.repl.program.comp();
+            fr'vtable'fmt_error(fr.data, res.Err, out&);
+            panic(out.items());
+        };
     };
     state.scratch = list(u8, 4*1024*1024, allocator);  // :BigOutputBuffer
     state.lock_to_bottom = true;
@@ -1020,10 +1026,11 @@ exec_franca :: fn(buffer: *TextBuffer, raw_command: Str) void = {
     
     buffer.append_string("\n");
     @if(ENABLE_FRANCA_REPL, {
-        result := state.repl&.run_chunk(raw_command);
+        result := ReplFns'run(state.repl&, raw_command);
         if result&.is_err() {
             out: List(u8) = list(temp());
-            state.repl.program.fmt_error(result.Err, out&, false);
+            fr := state.repl.program.comp();
+            fr'vtable'fmt_error(fr.data, result.Err, out&);
             buffer.append_string(out.items());
         };
     }, echo("This copy of terminal.fr was not compiled with FRANCA_REPL_ENABLED"));

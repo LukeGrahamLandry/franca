@@ -1,7 +1,18 @@
 
+## (Nov 30)
+
 - instead of calling cached_compile_module, just export the signetures i need without compiling the bodies. 
   now gen_builtin_includes is 1ms instead of 47ms. tho it does need to recompile some of the franca stuff.
   but with `start := @run timestamp();` at the beginning of gen_builtin_includes, its still only 11ms. that's fine. 
+- include_bytes: invalidate the cache if the file changes 
+- make import_module a bit more usable. 
+  - pass in enqueue_task when creating a CodegenShared 
+    so enter_task doesn't always need to recompile it (and the whole backend for the single threaded case). 
+  - expose examples/repl as a module and have examples/terminal import it. 
+  - sema_frc_import_fid wasn't adding the alias target to callees. imports tend to be aliases so they were faulting. 
+    i should really print a nice debug message for that. it sucks to find because the name of the 
+    function you were trying to call doesn't show in the stack trace because the value is null,
+    and the call source location is wrong because i don't remap debug info when importing a module. 
 
 ## (Nov 29)
 

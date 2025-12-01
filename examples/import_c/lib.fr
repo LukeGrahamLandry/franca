@@ -8,13 +8,13 @@ Compile :: import("@/examples/import_c/compile.fr");
 #use("@/backend/lib.fr");
 SPAM :: false;
 
-fn init_ctx(c: *Compile.Ctx, m: *QbeModule) void = {
+fn init_ctx(c: *Compile.Ctx, m: *QbeModule, worker: *CodegenShared) void = {
     c.function_entry = .None;
     c.arena_storage = init(general_allocator(), 1.shift_left(15));
     c.arena = c.arena_storage&.borrow(); // TODO: free it in ffi.fr/include()
     c.fill_primitives();
     c.current_fn = .None;
-    c.emitter = .None;
+    c.emitter = worker;
     c.brk_label = .None;
     c.cont_label = .None;
     c.scope = c.arena.box_zeroed(Compile.Scope);
@@ -31,7 +31,6 @@ fn init_ctx(c: *Compile.Ctx, m: *QbeModule) void = {
     c.allow_builtin_headers = true;
     c.tentative = init(c.arena);
     c.m = m;
-    c.enqueue_task = fn(_, __) = @panic("you need to set Ctx.enqueue_task = ImportVTable.enqueue_task");
     
     // you need this before calling parse() in compile because the preprocessor calls into const_expr
     {
@@ -81,27 +80,19 @@ fn yield(c: *Compile.Ctx, obj: *Compile.Obj) void = {
     obj.yielded = true;
     // TODO: maybe export types etc for ffi here instead of waiting until the end?
     //       but need to be careful of fighting with the other thread over the writer if we allow threaded at the same time
-    if c.emitter { _ |
         emit_one(c, obj);
-    };
 }
 
 // TODO: hoist this so temp() is in the arena of the entry
 fn emit_one(c: *Compile.Ctx, obj: *Compile.Obj) void = {
-    ctx := c.emitter.unwrap();
+    ctx := c.emitter;
     @assert(obj.yielded);
-    // TODO: not using the vtable thing (c'enqueue_task) makes this compile slower. need to make my incremental thing work better
     enter_task ctx { entry | 
         if obj.is_function {
-            //entry := c.function_entry&.take().unwrap();
-            //entry := bouba_acquire(ctx);
             f := obj.f;
             entry.task = (Func = f);
-            //c'enqueue_task(ctx, entry);
         } else {
-            //entry := bouba_acquire(ctx);
             entry.task = (AotVar2 = translate_data(ctx.m, obj));
-            //c'enqueue_task(ctx, entry);
         };
     };
 }

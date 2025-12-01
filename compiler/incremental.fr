@@ -91,6 +91,10 @@ fn files_unchanged(header: *Header) bool = {
             (it.hashcode == result.all_deps) || break();  // we disagree about what's supposed to be in the file
             files_unchanged(result) || break();  // out of date
         } else {
+            if !filename.starts_with("@/") {
+                @eprintln("warning: invalid path in .frc (missing discriminator): %", filename);
+                return false;
+            };
             filename := filename.rest(2);
             src := temp().get_include_std(filename) || break();
             if(src.len != it.file_len.zext(), => break());
@@ -117,6 +121,7 @@ fn compile_cached(header: *Header, to_free: *?Ty(*QbeModule, *Crash'LocationReso
     import("@/backend/meta/qbe_frontend.fr")'fill_from_libc(m);
     
     i := header.entry_sym;
+    @assert_ne(i.off, Qbe.no_symbol, "missing frc.entry_sym %", header.get(header.debug_name));
     name := header.get(header.get(i)[].name);
     cc := m.get_addr(name) || @panic("ICE: lost %", name);
     r := push_resolver(QbeModule, m, find_ip_in_module);
@@ -242,6 +247,8 @@ fn import_frc(self: *SelfHosted, bytes: []u8) CRes(ScopeId) = {
         zone_end(zone);
         return(@err("import_frc failed: %", e))
     };
+    
+    @assert_eq(header.entry_sym.off, Qbe.no_symbol, "import_frc: expected no frc.entry_sym %", header.get(header.debug_name));
     
     if header.dep.count > 0 {
         fake_path := (@tfmt("!/%", header.get(header.debug_name))).shallow_copy(self.get_alloc());
@@ -433,6 +440,7 @@ fn sema_frc_import_fid(self: *SelfHosted, module: *FrcModule, i: One(Sym)) CRes(
             func.body = (FrcImport = (module = FrcModule.int_from_ptr(module), index = i.off, table = SYM_TABLE));
             msg :: "TODO: this won't work if did_regalloc on amd64 because it doesn't see RMem. maybe i should just store those differently\n%";
             //@err_assert(it.fnc.tmp != Qbe.no_symbol, msg, caller_name) return; // TODO
+            @if(it.segment == .Code)
             for(h, it.fnc.con) { _, con |
                 if con.sym != Qbe.no_symbol_S {
                     sym := @as(One(Sym)) (off = con.sym.id);
@@ -446,6 +454,13 @@ fn sema_frc_import_fid(self: *SelfHosted, module: *FrcModule, i: One(Sym)) CRes(
                         func.callees&.push(fid, self.get_alloc());
                     };
                 }
+            };
+            
+            if it.segment == .Alias {
+                if @try(self.get_fid(module, it.alias)) return { fid |
+                    // TODO: mutual_ cycles?
+                    func.callees&.push(fid, self.get_alloc());
+                };
             };
         };
     } else {
@@ -582,7 +597,7 @@ fn move_from_module(emit_ir: *EmitIr, import: *FrcImport) CRes(CodegenTask) = {
     
     @assert_eq(it.segment, .Code, "%", header.get(it.name));
     // TODO: this won't work if did_regalloc on amd64 because it doesn't see RMem. maybe i should just store those differently
-    @if(it.segment == .Code) for(header, it.fnc.con) { _, con |
+    for(header, it.fnc.con) { _, con |
         if con.sym != Qbe.no_symbol_S {
             sym := @as(One(Sym)) (off = con.sym.id);
             it := header.get(sym);
@@ -806,6 +821,7 @@ cached_compile_module :: fn(path: Str, opts: *BuildOptions, out_alloc: Alloc) CR
         if(header.entry_dep.off == Qbe.no_symbol, => break());
         entry_dep := header.get(header.entry_dep);
         if(header.get(entry_dep.filename) != path, => break());
+        if(header.entry_sym.off != Qbe.no_symbol, => break());
         
         if(!files_unchanged(header), => break());
         if(show_backend_stats(), => @eprintln(">>> hit: %", cachepath));
@@ -875,7 +891,6 @@ ExportCtx :: @struct {
     types: HashMap(Type, One(FTy));
 };
 
-// TODO: need to include deps 
 fn build_the_exports_scope(c: *ExportCtx, start_path: Str) CRes([][]u8) = {
     fns, names := @try(collect_fns_from_exports(c)) return;
     // This is kinda copy-paste fusion adventure of emit_qbe_included and finish_qbe_module. 

@@ -101,8 +101,6 @@
 - document `store v, [Sxxx]` vs `store v, Sxxx` on amd64
 - add a test for #discard_static_scope now that i gave up on scc. 
 - extend the cross repro tests to all the example programs. not just the compiler. maybe just add a file with hashes of binaries to the released artifact. 
-- include_bytes should work like import() in that it invalidates the cache if the file changes 
-  but instead of giving you a ScopeId just give you the bytes. 
 - I need to improve @enum for bit flags so i can use that in posix.fr so it doesn't suck as much to call mmap. 
 - i think bake_relocatable_value always gets a jit shim which is a bit wasteful. 
   happens because get_custom_bake_handler just calls vtable.get_jitted_ptr which 
@@ -143,6 +141,7 @@
   i don't care about the names so should use mkstemp or whatever 
   so you can run the tests twice on the same file system at the same time. 
 - stop using environment variables so much. they annoy me. 
+- run_qbe_passes_common takes 170ms on wuffs_jpeg__decoder__load_mcu_blocks_for_single_component_smooth
 
 ## remaining nondeterminism
 

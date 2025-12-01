@@ -14,9 +14,11 @@ prelude :: """
 """;
 
 main :: fn() void = {
+Crash :: import("@/lib/crash_report.fr");
+Crash'hook_backtrace();
     for(cli_args(), fn(it) => if(it == "-testrepl", test_repl));
     
-    state := init_repl(general_allocator(), prelude);
+    state := R'init(general_allocator(), prelude);
     text := u8.list(state.allocator);
     loop {
         mark := mark_temporary_storage();
@@ -24,11 +26,12 @@ main :: fn() void = {
         text&.push_all(";");
         println("");
         
-        @match(state&.run_chunk(text.items())) {
+        @match(R'run(state&, text.items())) {
             fn Ok() => ();
             fn Err(e) => {
                 out: List(u8) = list(temp());
-                state.program.fmt_error(e, out&, true);
+                fr := state.program.comp();
+                fr'vtable'fmt_error(fr.data, e, out&);
                 println(out.items());
             }
         };
@@ -43,6 +46,12 @@ ReplState :: @struct(
     top_scope: ScopeId,
     allocator: Alloc,
 );
+
+R :: import_module("@/examples/repl.fr");
+exports :: Type.scope_of(@struct {
+    init :(@Fn(a: Alloc, prelude: Str) ReplState): init_repl;
+    run :(@Fn(state: *ReplState, src: Str) Res(void)): run_chunk;
+});
 
 init_repl :: fn(a: Alloc, prelude: Str) ReplState = {
     vtable := init_driver_vtable();
@@ -68,7 +77,7 @@ init_repl :: fn(a: Alloc, prelude: Str) ReplState = {
     )
 };
 
-fn run_chunk(state: *ReplState, src: Str) Res(void) = {
+run_chunk :: fn(state: *ReplState, src: Str) Res(void) = {
     :: WalkAst(ReplState, void);
     
     self := state.program;
@@ -124,7 +133,7 @@ fn run_chunk(state: *ReplState, src: Str) Res(void) = {
     .Ok
 }
 
-fn repl_eval(self: *SelfHosted, e: *FatExpr, want: ResultType) Res(Values) = {
+repl_eval :: fn(self: *SelfHosted, e: *FatExpr, want: ResultType) Res(Values) = {
     self.poll_in_place(Values) {
         return :: local_return;
         @check(self.compile_expr(e, want)) return;
@@ -154,7 +163,7 @@ fn handle_type(self: *ReplState, ty: *LazyType) Result(DoMore, void) #once = (Ok
 fn handle_pattern(self: *ReplState, p: *Pattern) Result(DoMore, void) #once = (Ok = .Continue);
 
 test_repl :: fn() void = {
-    repl := init_repl(general_allocator(), prelude);
+    repl := R'init(general_allocator(), prelude);
     lines := @const_slice(  
         ("read_to_string_or_crash", false),
         ("""#use("@/lib/sys/fs.fr")""", true),
@@ -171,7 +180,7 @@ test_repl :: fn() void = {
     range(0, lines.len) { i |
         src, expect := lines[i];
         src := @tfmt("%;", src);
-        result := repl&.run_chunk(src);
+        result := R'run(repl&, src);
         @assert_eq(result&.is_ok(), expect, "%. %", i, src);
         src.set_zeroed();  // stomp it to make sure a copy was made before interning anything 
     };

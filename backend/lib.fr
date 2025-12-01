@@ -32,9 +32,9 @@ exports :: Type.scope_of(@struct {
     fold_op: (@Fn(rt_o: Qbe.O, rt_k: Qbe.Cls, out: rawptr, a0: i64, a1: i64) void) :Fold.do_fold;
     try_fold_op: (@Fn(op: Qbe.O, cls: Qbe.Cls, cl: *Qbe.Con, cr: *Qbe.Con) ?Qbe.Con) :Fold.try_fold;
     worker_thread: (@Fn(s: *CodegenShared) void) : codegen_thread_main;
-    worker_start: (@Fn(m: *QbeModule, arena: Alloc, worker: CodegenWorker, threaded: bool) *CodegenShared) : init_codegen_worker;
+    worker_start: (@Fn(m: *QbeModule, arena: Alloc, worker: CodegenWorker, threaded: bool, enqueue: @FnPtr(*CodegenShared, *CodegenEntry) void, join: CodegenWorker) *CodegenShared) : init_codegen_worker;
     worker_enqueue: (@Fn(*CodegenShared, *CodegenEntry) void) : enqueue_task;
-    worker_join: (@Fn(s: *CodegenShared) void) :join_codegen_thread;
+    worker_join: (@Fn(s: *CodegenShared) void) :join_codegen_thread_impl;
     writer_finish_imports: (@Fn(writer: *Incremental.Writer, m: *QbeModule) void) : finish_imports;
 });
 
@@ -862,7 +862,7 @@ wasm_page_size :: 65536;
 // Call join_codegen_thread() at the end to finalize everything. 
 // 
 
-CodegenShared :: @struct(
+CodegenShared :: @rec @struct(
     entries: []CodegenEntry,
     // It's important that these are processed in the order they're created so it's not a race to get a reproducible build. 
     pipe: QRing'Cycle(*CodegenEntry),
@@ -875,6 +875,8 @@ CodegenShared :: @struct(
     thread: *Thread,
     threaded: bool,
     alloc: Alloc,
+    enqueue: @FnPtr(*CodegenShared, *CodegenEntry) void,
+    join: @FnPtr(*CodegenShared) void,
 );
 
 CodegenTask :: @tagged(
@@ -900,8 +902,23 @@ CodegenEntry :: @struct(
     logging := "",
 );
 
+fn init_codegen_worker(m: *QbeModule, threaded: bool) *CodegenShared = {
+    a := general_allocator();
+    @if(IS_BOOTSTRAPPING, 
+        backend'worker_start(m, a, codegen_thread_main, threaded, enqueue_task, join_codegen_thread_impl),
+        backend'worker_start(m, a, backend.worker_thread, threaded, backend.worker_enqueue, backend.worker_join),
+    )
+}
+
+fn init_codegen_worker(m: *QbeModule, threaded: bool, vtable: *ImportVTable) *CodegenShared = {
+    worker := bit_cast_unchecked(@type vtable.codegen_thread_main, CodegenWorker, vtable.codegen_thread_main);
+    join := bit_cast_unchecked(@type vtable.codegen_thread_join, CodegenWorker, vtable.codegen_thread_join);
+    enqueue := bit_cast_unchecked(@type vtable.enqueue_task, @FnPtr(*CodegenShared, *CodegenEntry) void, vtable.enqueue_task);
+    init_codegen_worker(m, general_allocator(), worker, threaded, enqueue, join)
+}
+
 CodegenWorker :: @FnPtr(s: *CodegenShared) void;
-fn init_codegen_worker(m: *QbeModule, arena: Alloc, worker: CodegenWorker, threaded: bool) *CodegenShared = {
+fn init_codegen_worker(m: *QbeModule, arena: Alloc, worker: CodegenWorker, threaded: bool, enqueue: @FnPtr(*CodegenShared, *CodegenEntry) void, join: CodegenWorker) *CodegenShared = {
     s := arena.box_zeroed(CodegenShared); 
     // TODOWASM
     s.threaded = threaded && use_threads && query_current_arch() != .wasm32;
@@ -910,6 +927,8 @@ fn init_codegen_worker(m: *QbeModule, arena: Alloc, worker: CodegenWorker, threa
     n := codegen_queue_size;
     s.entries = arena.alloc_zeroed(CodegenEntry, n);
     s.pipe = init(arena, n);
+    s.enqueue = enqueue;
+    s.join = join;
     each s.entries { it |
         if s.threaded {
             it.arena_storage = init(general_allocator(), 16000);  // these are freed in join_codegen_thread
@@ -943,7 +962,10 @@ fn release(shared: *CodegenShared, entry: *CodegenEntry, $i_am_bouba: bool) void
     q.push(entry);
 }
 
-fn join_codegen_thread(shared: *CodegenShared) void = {
+fn join_codegen_thread(shared: *CodegenShared) void = 
+    shared'join(shared);
+
+fn join_codegen_thread_impl(shared: *CodegenShared) void = {
     @assert(!shared.no_more_functions);
     shared.no_more_functions = true;
     fence();
@@ -982,7 +1004,7 @@ fn enter_task(shared: *CodegenShared, $body: @Fn(it: *CodegenEntry) void) void =
         marker = temp().mark();
     };
     @must_return body(entry);
-    enqueue_task(shared, entry);
+    shared'enqueue(shared, entry);
     if shared.threaded {
         c.temporary_allocator = old;
         c.temporary_allocator_i = old_i;
