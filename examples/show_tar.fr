@@ -1,5 +1,5 @@
 // lists the contents of various archive formats (but does not unpack them). 
-// supports: .tar, .tar.gz
+// supports: .tar, .tar.gz, .zip
 
 main :: fn() void = {
     in := read_file_from_last_arg();
@@ -10,6 +10,20 @@ main :: fn() void = {
 
 dump :: fn(in: []u8, out: *List(u8)) void = {
     ::if_opt(i64, []u8);
+    
+    if Pkzip'find(in) { ecd |
+        @fmt(out, "looks like a pkzip file!\n");
+        Pkzip'iter(in, ecd) { it |
+            @fmt(out, "% ", it.name);
+            if it.h.compressed_size == it.h.uncompressed_size {
+                @fmt(out, "(size: %)\n", it.h.uncompressed_size);
+            } else {
+                @fmt(out, "(size: % -> %)\n", it.h.compressed_size, it.h.uncompressed_size);
+            };
+        };
+        return();
+    };
+    
     decompressed := if GZip'header_size(in) { (skip: i64) |
         compressed := in.rest(skip);
         decompressed := u8.list(temp());
@@ -32,7 +46,7 @@ dump :: fn(in: []u8, out: *List(u8)) void = {
     
     result := Tar'iter(decompressed) { h, contents |
         @fmt(out, "%|%|%| size=% type=% magic=%\n", 
-            h.size&.items(), h.prefix&.items(), h.name&.items(), contents.len, h.typeflag - "0".ascii(), h.magic&.items());
+            @as(CStr) (ptr = h.size&.as_ptr()), @as(CStr) (ptr = h.prefix&.as_ptr()), @as(CStr) (ptr = h.name&.as_ptr()), contents.len, h.typeflag - "0".ascii(), h.magic&.items());
     };
     i := result.or(fn(e) => {
         ::enum(@type e);
@@ -45,4 +59,5 @@ dump :: fn(in: []u8, out: *List(u8)) void = {
 GZip :: import("@/lib/encoding/gzip.fr");
 Tar :: import("@/lib/encoding/tar.fr");
 Deflate :: import("@/lib/encoding/deflate.fr");
+Pkzip :: import("@/lib/encoding/pkzip.fr");
 #use("@/lib/sys/fs.fr");

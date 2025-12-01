@@ -132,7 +132,6 @@
   the current thing is just enough more verbose that it looks confusing. 
   whatever it is has to stay just a user space comptime thing tho, not part of the compiler. 
 - might be able to get rid of is_wrongly_illegal_instruction now, but maybe it's safer just to leave it for good luck. 
-- add pkzip to examples/show_tar.fr
 - remove implicit dependencies in the tests.
   ex. some of the tests/extenal depend on import_c being compiled at target/cc.out
 - don't exec `diff` in run_tests.fr

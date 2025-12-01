@@ -38,12 +38,30 @@ LocalHeader :: @struct {
 
 Node :: @struct(h: *LocalHeader, name: Str, data: []u8);
 
-// TODO: return errors instead of panicking!
-iter :: fn(in: []u8, $body: @Fn(it: Node) void) void = {
+find :: fn(in: []u8) ?*EndCentralDir = {
+    if in.len < 4 || in.peek_type(u32)[] != LocalHeader.MAGIC {
+        // you're supposed to allow any junk at the beginning and look for the central directory starting at the end
+        // but well behaved zip files, created solely to be an archive (and not a self extracting exe or whatever),
+        // will start with a local header (because why waste space with junk at the beginning) 
+        // and those are the only ones i need to support rn. slightly less error prone 
+        // than trying to use it as a zip file if it contains the ECD magic anywhere at all. 
+        // (also means terminal/choose_opener_for doesn't waste time scanning all the bytes if its not a zip file)
+        return(.None);
+    };
+    
     off := in.len - size_of(EndCentralDir);
     while => off > 0 {
         ecd := bit_cast_unchecked(*u8, *EndCentralDir, in.ptr.offset(off));
         if ecd.magic == EndCentralDir.MAGIC {
+            return(Some = ecd);
+        };
+        off -= 1;
+    };
+    .None
+}
+
+// TODO: return errors instead of panicking!
+iter :: fn(in: []u8, ecd: *EndCentralDir, $body: @Fn(it: Node) void) void = {
             @assert_eq(ecd.disk_entries, ecd.total_entries, "idk what multiple disks means");
             cd_bytes := in.subslice(ecd.cd_offset.zext(), ecd.cd_size.zext());
             i := 0;
@@ -70,11 +88,6 @@ iter :: fn(in: []u8, $body: @Fn(it: Node) void) void = {
                 body(h = h, name = name, data = data);
                 i += 1;
             };
-            return();
-        };
-        off -= 1;
-    };
-    panic("TODO: EndCentralDir not found");
 }
 
 fn data(it: *Node, a: Alloc) []u8 = {

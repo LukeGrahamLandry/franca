@@ -30,6 +30,7 @@ State :: @struct(
     pass_action: Sg.PassAction,
     text: *Sdtx.Self,
     buffers: List(*TextBuffer),
+    buffer_stack: List(*TextBuffer),
     selected_buffer: i64,
     app: Sapp.Self,
     sg: Sg.Self,
@@ -47,6 +48,7 @@ State :: @struct(
     recording: ?Replay'Recorder,
     search_tasks: List(*SearchTask),
     save_file: ?Str,
+    show_hover: bool,
 );
 
 ProcessInfo :: @struct {
@@ -196,14 +198,13 @@ Pos :: @struct(x: f64, y: f64);
 Rect :: @struct(pos: Pos, w: f64, h: f64);
 
 on_frame :: fn(userdata: rawptr) void = {
-    with state.buffers&[0].line_lock& {
         draw_frame();
-    };
 }
 
 draw_frame :: fn() void = {
     if state.process& { p |
         buffer := state.buffers&[0];
+    with buffer.line_lock& {
         input := "";  // TODO: send it key presses
         status := poll(p.process&, @slice(state.scratch&, state.scratch&), false, input&, true);
         buffer.append_string(state.scratch.items());
@@ -224,12 +225,15 @@ draw_frame :: fn() void = {
             fn Err(msg) => buffer.append_string(msg);
         };
     };
+    };
     
     // if no events and no text from process, don't render a frame
     @if(Easy'should_skip_frame(state.app&, state.dirty&)) return();
     
     for state.buffers& { b |
-        draw_text(b);
+        with b.line_lock& {
+            draw_text(b);
+        };
     };
     sg := state.sg&;
     
@@ -344,11 +348,10 @@ handle_event :: fn(event: *Sapp.Event) void = {
         it.push(event);
     };
     
+    update_hover(event);
     if event.type != .MOUSE_MOVE {
         state.dirty = true;
     } else {
-        update_hover(event);
-        
         // left mouse + drag -> select text (for copying with cmd+c)
         if event.modifiers.get(.left_mouse) != 0 {
             break :: local_return;
@@ -366,10 +369,10 @@ handle_event :: fn(event: *Sapp.Event) void = {
     if event.type == .MOUSE_DOWN && event.modifiers.get(.left_mouse) != 0 {
         b, pos := find_mouse(event) || return();
         line, col := (pos.y.int(), pos.x.int());
-        b.selection = .None;
         
         now := timestamp();
-        if now - state.last_click_time < 400 {
+        multiclick := now - state.last_click_time < 400;
+        if multiclick {
             break :: local_return;
             if state.click_count == 0 {
                 // double click -> select word
@@ -396,9 +399,14 @@ handle_event :: fn(event: *Sapp.Event) void = {
         
         if event.modifiers.get(.super) != 0 {
             // cmd + left click -> open file path
-            open_link_at(b, line, col);
+            update_hover(event);
+            open_hovered_link(b, event.modifiers.get(.shift) != 0);
             return();
         };
+        
+        if !multiclick {
+            b.selection = .None;
+        }
     };
     
     if event.type == .RESIZED {
@@ -409,6 +417,10 @@ handle_event :: fn(event: *Sapp.Event) void = {
     }
     
     if event.type == .KEY_DOWN {
+        if event.key_code == .ESCAPE {
+            pop_to_previous_buffer();
+        };
+    
         if event.key_code == .W && event.modifiers.get(.super) != 0 {
             // cmd+w -> exit
             state.app.quit_requested = true;
@@ -624,14 +636,33 @@ move_in_history :: fn(b: *TextBuffer, up: bool) void = {
 }
 
 update_hover :: fn(event: *Sapp.Event) void = {
+    // only show which text will be the link while holding command (the rectangle is too annoying otherwise) 
+    state.show_hover = event.modifiers.get(.super) != 0;
+    
     b, pos := find_mouse(event) || return();
     new_hover := find_link_at(b, pos.y.int(), pos.x.int());
+    if b.selection { sel |
+        sel := sel.fix();
+        startL := max(0, sel.start.y.int());
+        endL   := min(b.lines.len, sel.end.y.int());
+        if startL == endL && startL.ult(b.lines.len) {
+            text := b.lines[startL]&.str();
+            left := sel.start.x.int().min(text.len);
+            right := sel.end.x.int().min(text.len);
+            if left > right {
+                t := left; left = right; right = t;
+            };
+            if left != right {
+                new_hover = (Some = (startL, left, right));
+            };
+        };
+    };
     ::AutoEq(@type new_hover); ::AutoEq(Ty(i64, i64, i64));
     if b.hover& != new_hover& {
         b.hover = new_hover;
         state.dirty = true;
     }
-    state.app&.set_mouse_cursor(@if(b.hover.is_none(), .ARROW, .POINTING_HAND));
+    state.app&.set_mouse_cursor(@if(b.hover.is_none() || !state.show_hover, .ARROW, .POINTING_HAND));
 }
 
 find_mouse :: fn(event: *Sapp.Event) ?Ty(*TextBuffer, Pos) = {
@@ -649,19 +680,95 @@ find_mouse :: fn(event: *Sapp.Event) ?Ty(*TextBuffer, Pos) = {
     .None
 }
 
-open_link_at :: fn(b: *TextBuffer, line: i64, col: i64) void = {
-    _, start, end := find_link_at(b, line, col) || return();
-    link := b.lines[line]&.str().slice(start, end);
-    // TODO: is `open` a thing on linux? 
-    //       if i use open i have to parse the :line:col suffix anyway because it doesn't like that. 
-    //cmd := @tfmt("open %", link);
-    //b.append_string(cmd);
-    //exec(b, cmd);  // TODO: this is kinda spammy to dump this in your terminal
-    sys_capture_exec(@slice(
-        @fmt_cstr("zed"), // TODO: is there an env var im supposed to look at to know your default editor? 
-        @fmt_cstr("%", link),
-        zeroed CStr,
-    ));
+open_hovered_link :: fn(b: *TextBuffer, shift: bool) void = {
+    line, start, end := b.hover || return();
+    @if(line < 0 || line >= b.lines.len) return();
+    line := b.lines[line]&.str();
+    @if(start < 0 || end > line.len) return();
+    link := line.slice(start, end);
+    
+    if shift {
+        // TODO: is there an env var im supposed to look at to know your default editor? 
+        sys_capture_exec(@slice("zed".as_cstr(), link.as_cstr(), zeroed(CStr)));
+    } else {
+        open_link(link);
+    }
+}
+
+open_link :: fn(full_link: Str) void = {
+    _ := selected_buffer() || return();
+    @if(full_link.len == 0) return();
+    
+    link, line, col := parse_file_line_col(full_link) 
+        || (full_link, 0, 0);
+    contents := read_entire_file(temp(), link) || return();
+    
+    dest: *TextBuffer = empty(general_allocator());
+    dest.at = state.buffers[0].at;
+    old := state.buffers[state.selected_buffer];
+    state.buffer_stack&.push(old);
+    state.buffers[state.selected_buffer] = dest;
+    
+    if choose_opener_for(contents) { program |
+        // not using the embedded repl to execute the program because this way it doesn't crash the temrinal if the opener parser asserts. 
+        // TODO: instead of relying on `franca` being in path, have a cli arg that lets it re-exec itself to do this. 
+        cmd := @tfmt("franca % %", program, link);
+        dest.append_string(cmd);
+        exec(dest, cmd);
+    } else {
+        dest.append_string(contents);
+    };
+    
+    dest.cursor = (x = col.float(), y = line.float());
+    dest.render = dest.cursor;
+    dest.render.y -= old.num_lines_fit_on_screen.float();
+}
+
+// "file:line:col"
+parse_file_line_col :: fn(link: Str) ?Ty(Str, i64, i64) = {
+    @if(!link[link.len - 1].is_ascii_digit()) return(.None);
+    i := link.len - 1;
+    while => i > 0 && link[i].is_ascii_digit() {
+        i -= 1;
+    };
+    @if(link[i] != ":".ascii() || i == 0) return(.None);
+    col := link.rest(i + 1).parse_int() - 1;
+    end := i; 
+    i -= 1;
+    while => i > 0 && link[i].is_ascii_digit() {
+        i -= 1;
+    };
+    @if(link[i] != ":".ascii() || i == 0) return(.None);
+    line := link.slice(i + 1, end).parse_int() - 1;
+    (Some = (link.slice(0, i), line, col))
+}
+
+pop_to_previous_buffer :: fn() void = {
+    _ := selected_buffer() || return();
+    if state.buffer_stack&.pop() { restored |
+        with restored.line_lock& {
+            removed := state.buffers[state.selected_buffer];
+            state.buffers[state.selected_buffer] = restored;
+            drop(removed);
+        };
+    };
+}
+
+// TODO: option to embed these programs so the terminal binary doesn't have runtime dependencies
+choose_opener_for :: fn(contents: []u8) ?Str = {
+    @if(contents.len < 8) return(.None);
+    magic8 := contents.peek_type(u64)[];
+    magic4: u32 = magic8.trunc();
+    @if(magic4 == import("@/backend/macho/bits.fr").macho_magic) return(Some = "examples/dump_macho.fr");
+    @if(magic4 == import("@/backend/elf/bits.fr").MAGIC) return(Some = "examples/dump_elf.fr");
+    @if(magic8 == import("@/backend/incremental.fr").MAGIC) return(Some = "backend/meta/dump_bin.fr");
+    @if(magic8 == import("@/backend/wasm/bits.fr").MAGIC) return(Some = "examples/dump_wasm.fr");
+    @if(magic4.byte_swap() == import("@/examples/os/drivers/devicetree.fr").MAGIC) return(Some = "examples/dump_devicetree.fr");
+    @if(import("@/lib/encoding/gzip.fr")'header_size(contents).is_some()) return(Some = "examples/show_tar.fr");
+    @if(contents.len > 512 && contents.peek_type(import("@/lib/encoding/tar.fr").Header)[].magic&.items().slice(0, 5) == "ustar") return(Some = "examples/show_tar.fr");
+    @if(import("@/lib/encoding/pkzip.fr")'find(contents).is_some()) return(Some = "examples/show_tar.fr");
+    
+    .None
 }
 
 find_link_at :: fn(b: *TextBuffer, line: i64, col: i64) ?Ty(i64, i64, i64) = {
@@ -669,7 +776,7 @@ find_link_at :: fn(b: *TextBuffer, line: i64, col: i64) ?Ty(i64, i64, i64) = {
     text := b.lines[line]&.str();
     if(col >= text.len || col < 0, => return(.None));
     
-    stop :: fn(c: u8) => c.is_ascii_whitespace() || "[],".contains(c);
+    stop :: fn(c: u8) => c.is_ascii_whitespace() || "[],\"(){}".contains(c);
     
     // spread along the text in both directions
     start := col;
@@ -682,6 +789,9 @@ find_link_at :: fn(b: *TextBuffer, line: i64, col: i64) ?Ty(i64, i64, i64) = {
     end := col;
     while => end < text.len && !text[end].stop() {
         end += 1;
+    };
+    if text.subslice(start, end).starts_with("@/") {
+        start += 2;
     };
     
     (Some = (line, start, end))
@@ -699,6 +809,7 @@ main :: fn() void = {
     state[] = allocator.box_zeroed(State);
     state.text = allocator.box_zeroed(@type state.text[]);
     state.buffers = list(allocator);
+    state.buffer_stack = list(allocator);
     state.search_tasks = list(allocator);
     state.process = .None;
     state.save_file = .None;
@@ -784,7 +895,10 @@ Selection :: @struct {
 fn fix(sel: Selection) Selection = {
     if sel.start.y > sel.end.y {
         t := sel.start; sel.start = sel.end; sel.end = t;
-    }
+    };
+    if sel.start.y == sel.end.y && sel.start.x > sel.end.x {
+        t := sel.start; sel.start = sel.end; sel.end = t;
+    };
     sel
 }
 
@@ -821,6 +935,7 @@ fn draw_text(self: *TextBuffer) void = {
     // building the highlight rectangle out of single char cells like this is stupid
     // and slow but like... it's fine for this program. 
     
+    @if(state.show_hover)
     if self.hover { line, startH, endH | 
         if line >= start && line < end {
             sdtx.color = state.theme.highlight; 
@@ -987,6 +1102,14 @@ fn empty(a: Alloc) *TextBuffer = {
     b.selection = .None;
     b.hover = .None;
     b
+}
+
+fn drop(self: *TextBuffer) void = {
+    each self.lines { it |
+        it.drop(self.gpa);
+    };
+    self.lines&.drop(self.gpa);
+    self.gpa.dealloc_one(TextBuffer, self);
 }
 
 fn contains(r: Rect, p: Pos) bool = 
@@ -1164,6 +1287,11 @@ fn run(self: *SearchTask) void = {
             self.have_work = 0;
             continue();
         }
+        if needle.len == 0 {
+            self.needle&.clear();
+            self.have_work = 0;
+            continue();
+        };
         @println("SEARCH:\n%", needle);
         // TODO: allow case insensitive
         

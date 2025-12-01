@@ -5,7 +5,15 @@
   - add included c files as deps so you can still printf debug by just editing the source in the target directory
   - made a few things in compiler/incremental not depend on being in the compiler's compilation unit
   - skip recompiling the c compiler if the c source didn't change since last time by forcing a jit shim
-
+- add pkzip to examples/show_tar.fr
+- terminal
+  - cmd+click on a file name to show the contents (instead of trying to open in zed)
+    - keep stack of buffers so you can go back to where you were before
+    - if it's a binary file choose one of my dump programs based on the magic
+    - improve the hover logic, use selection instead so you can override it, 
+      hide the hover when not holding command because it's annoying
+    - parse "file:line:col" like my error messages print
+    
 ## (Nov 30)
 
 - instead of calling cached_compile_module, just export the signetures i need without compiling the bodies. 
