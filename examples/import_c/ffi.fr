@@ -44,14 +44,41 @@ fn include(src: Str) ScopeId #fold = {
 }
 
 fn include(fr: CompCtx, c_source: Str) ScopeId = {
+    #use("@/lib/sys/fs.fr");
+    no_cache := get_environment_variable("FRANCA_NO_CACHE").is_some() || !is_linking_libc(); // :CacheKeySyscalls
+    // TODO: using a hash for the name is annoying because if you change the source it won't replace the old one, 
+    //       so it just leaks them and you have to delete the cache directory occasionally to reclaim disk space. 
+    name := Sha256'hex(c_source);
+    cachepath := FrIncr'choose_cache_filename(name);
+    if !no_cache {
+        if FrIncr'read_cached(fr.get_alloc(), cachepath) { header |
+            entry_source := header.get(header.entry_source);
+            // checking entry_source is redundant rn because its hash is used as the file name 
+            if FrIncr'files_unchanged(header, read_entire_file, fr.vtable.self_hash) && entry_source == c_source {
+                result := fr'vtable'import_frc(fr.data, header.as_bytes());
+                return result.or(fn(err) => fr.report_error(err));
+            };
+        };
+    };
+    
+    // force a jit shim so the c compiler isn't recompiled if it isn't going to be called
+    // TODO: should have a macro that does this so it's more explicit and you can grep for where i do it
+    include_cold: (@FnPtr(fr: CompCtx, c_source: Str, name: Str) ScopeId) = include_cold;
+    include_cold(fr, c_source, name)
+}
+
+include_cold :: fn(fr: CompCtx, c_source: Str, name: Str) ScopeId = {
     c := import_c'init_fr(fr);
-    bytes := import_c'compile_fr(fr.get_alloc(), c_source, c);
+    bytes := import_c'compile_fr(fr, c_source, c, mangle_name_for_cache(name));
+    no_cache := get_environment_variable("FRANCA_NO_CACHE").is_some() || !is_linking_libc(); // :CacheKeySyscalls
+    if query_current_arch() != .wasm32 && !no_cache {
+        cachepath := FrIncr'choose_cache_filename(name);
+        make_dirs(FrIncr'cache_dir()) && write_entire_file(cachepath, bytes);
+    };
     fr'vtable'drop_qbe_module(QbeModule.raw_from_ptr(c.m));
     c.arena_storage&.deinit();
     result := fr'vtable'import_frc(fr.data, bytes);
-    or result { err |
-        fr.report_error(err)
-    }
+    result.or(fn(err) => fr.report_error(err))
 }
 
 import_c :: import_module("@/examples/import_c/ffi.fr");
@@ -60,7 +87,7 @@ exports :: Type.scope_of(@struct {
     // TODO: somehow moving `init_fr` to the end of this struct causes 
     //       `panic! ICE: tried to call got null jit_addres` (when import_module caching is enabled)  :compilerbug -- Oct 13, 2025
     init_fr: (@Fn(fr: CompCtx) *C.Compile.Ctx) : init_for_include;
-    compile_fr: (@Fn(out_alloc: Alloc, c_source: Str, c: *C.Compile.Ctx) []u8) : compile_to_module;
+    compile_fr: (@Fn(fr: CompCtx, c_source: Str, c: *C.Compile.Ctx, debug_name: Str) []u8) : compile_to_module;
     init_c: (@Fn(c: *C.Compile.Ctx, m: *QbeModule, worker: *CodegenShared) void) : init_ctx;
     compile_c: (@Fn(c: *C.Compile.Ctx, filename: Str, contents: Str) Result(void, Str)) : fn(c, filename, contents) = {
         catch_call(c, void) {
@@ -94,9 +121,11 @@ fn init_for_include(fr: CompCtx) *C.Compile.Ctx = {
     c
 }
 
-fn compile_to_module(out_alloc: Alloc, c_source: Str, c: *C.Compile.Ctx) []u8 = {
+fn compile_to_module(fr: CompCtx, c_source: Str, c: *C.Compile.Ctx, debug_name: Str) []u8 = {
+    out_alloc := fr.get_alloc();
     writer := c.m.save.unwrap();
     mark := mark_temporary_storage();
+    entry_source := writer.push(c_source);
     result := catch_call(c, One(FTy)) {
         src: List(u8) = assume_owned(c_source, temp());
         tok := c.tokenize_string("import_cTODO", src&.items());
@@ -148,13 +177,25 @@ fn compile_to_module(out_alloc: Alloc, c_source: Str, c: *C.Compile.Ctx) []u8 = 
         panic(err)
     };
     
-    meta: Meta = (arch_os = 0x0F0F, root_scope = root_scope);
+    // TODO: need to include import_c as a dep as well
+    entry_dep := FrIncr'write_deps(writer, c.codemap&, "", fr.vtable.self_hash);
+    
+    // TODO: needs to include __os,__arch because include.fr observes them, 
+    //       but i want to fix that by providing a stable abi from my libc instead. 
+    //       cross compiling already doesn't work if you ifdef on the target because 
+    //       you can't import_frc needs to use the same code at comptime and runtime. 
+    meta: Meta = (
+        arch_os = 0x0F0F, 
+        root_scope = root_scope, 
+        entry_source = entry_source,
+        // TODO: don't call this debug_name if im going to use it for stuff
+        debug_name = writer.push(debug_name),
+    );
     b := writer.to_bytes(meta, c.m);
     
     // We're done with all the c compiler state. Copy out the compiled module and then free everything. 
     // (can't drop(m) here because it was inited-dyn so need the caller to drop it because they have the vtable)
     bytes := concat(b, out_alloc);
-    //write_entire_file_or_crash("target/a.frc", bytes);
     reset_temporary_storage(mark);
     bytes
 }
@@ -388,7 +429,7 @@ fn import_c_type(c: *Ctx, h: *Qbe.Incremental.Header, ty_i: One(Qbe.Incremental.
         fn Params() => c.import_members(h, ty, .TY_STRUCT);
         fn Union() => c.import_members(h, ty, .TY_UNION);
         fn Ptr() => {
-            cache_slot[] = c.pointer_to(c.ty_void);
+            cache_slot[] = c.pointer_to(c.ty_void);  // break cycles
             inner := c.import_c_type(h, ty.payload.array.inner, true);
             cache_slot[][] = c.pointer_to(inner)[];
             cache_slot[]

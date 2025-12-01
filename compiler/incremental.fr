@@ -61,7 +61,7 @@ fn add(a: Array(u32, 8), b: Array(u32, 8)) Array(u32, 8) = {
 // TODO: you'll never hit the cache for !/backend_lib_fr.frc when compiling the compiler itself and then recompiling with the new compiler etc. 
 //       tho maybe thats the behaviour you want, hard to think about. 
 // TODO: hella redundant work. should only load+hash each file once (including across multiple CompCtx in the same process). 
-fn files_unchanged(header: *Header) bool = {
+fn files_unchanged(header: *Header, read: @FnPtr(a: Alloc, name: Str) ?Str, self_hash: *Array(u32, 8)) bool = {
     if(header.dep.count <= 1, => return(false));
     
     it: *Dep = header.get(0);
@@ -85,18 +85,18 @@ fn files_unchanged(header: *Header) bool = {
         if filename.starts_with("!/") {
             // this dep is another frc file added by import_frc. check transitive dependencies. 
             path := @tfmt("%%", cache_dir, filename.rest(2));
-            src := temp().get_include_std(path) || break();
+            src := temp().read(path) || break();
             result := check(src);
             result := result.or(fn(_) => break());  // invalid frc
             (it.hashcode == result.all_deps) || break();  // we disagree about what's supposed to be in the file
-            files_unchanged(result) || break();  // out of date
+            files_unchanged(result, read, self_hash) || break();  // out of date
         } else {
             if !filename.starts_with("@/") {
                 @eprintln("warning: invalid path in .frc (missing discriminator): %", filename);
                 return false;
             };
             filename := filename.rest(2);
-            src := temp().get_include_std(filename) || break();
+            src := temp().read(filename) || break();
             if(src.len != it.file_len.zext(), => break());
             hashcode := Sha256'hash(src);
             if(hashcode&.items() != it.hashcode&.items(), => break());
@@ -130,7 +130,7 @@ fn compile_cached(header: *Header, to_free: *?Ty(*QbeModule, *Crash'LocationReso
     assume_types_fn(Arg = *ImportVTable, Ret = void, ptr = cc)
 }
 
-fn write_deps(writer: *Writer, codemap: *CodeMap, start_path: Str) u32 = {
+fn write_deps(writer: *Writer, codemap: *import("@/compiler/codemap.fr")'CodeMap, start_path: Str, self_hash: *Array(u32, 8)) u32 = {
     writer.dep&.reserve(codemap.files.len+1);
     writer.dep&.push(
         file_len = 0,
@@ -163,7 +163,7 @@ fn write_cache(m: *QbeModule, c: CompCtx, fid: FuncId, outpath2: Str, start_path
     writer := m.save.unwrap();
     backend'writer_finish_imports(writer, m);
     
-    entry_dep := write_deps(writer, self.codemap, start_path);
+    entry_dep := write_deps(writer, self.codemap, start_path, self_hash);
     name := c.fmt_fn_name(fid);
     ::enum(@type m.goal.type);
     meta: Meta = (
@@ -191,6 +191,8 @@ fn is_cachable(name: Str) bool = !(false
     // from an `import("{ foo };")`.
     || name == import_literal_file_name 
 );
+
+import_literal_file_name :: "(import literal)";
 
 // TODO: this is dumb: ./a.fr vs a.fr, also unreadable is sad
 // Also this is very collidable but it's fine beacuse the cache file contains the path of the entry_dep. 
@@ -823,7 +825,7 @@ cached_compile_module :: fn(path: Str, opts: *BuildOptions, out_alloc: Alloc) CR
         if(header.get(entry_dep.filename) != path, => break());
         if(header.entry_sym.off != Qbe.no_symbol, => break());
         
-        if(!files_unchanged(header), => break());
+        if(!files_unchanged(header, get_include_std, self_hash), => break());
         if(show_backend_stats(), => @eprintln(">>> hit: %", cachepath));
         zone_end(zone);
         return(Ok = header.as_bytes());
@@ -862,7 +864,7 @@ cached_compile_module :: fn(path: Str, opts: *BuildOptions, out_alloc: Alloc) CR
             c.writer.fty&.push(zeroed Incremental.FTy);   // skip builtin types so offsets work out
         };
         
-        bytes := build_the_exports_scope(c&, path_unprefixed);
+        bytes := build_the_exports_scope(c&, path_unprefixed, src);
         // TODO: pre-format this error and return it
         bytes := self.unwrap_report_error([][]u8, bytes);
         bytes := bytes.concat(out_alloc);
@@ -891,7 +893,7 @@ ExportCtx :: @struct {
     types: HashMap(Type, One(FTy));
 };
 
-fn build_the_exports_scope(c: *ExportCtx, start_path: Str) CRes([][]u8) = {
+fn build_the_exports_scope(c: *ExportCtx, start_path: Str, entry_source: Str) CRes([][]u8) = {
     fns, names := @try(collect_fns_from_exports(c)) return;
     // This is kinda copy-paste fusion adventure of emit_qbe_included and finish_qbe_module. 
     
@@ -902,7 +904,7 @@ fn build_the_exports_scope(c: *ExportCtx, start_path: Str) CRes([][]u8) = {
     
     backend'writer_finish_imports(c.writer, c.m);
     root_scope := export_root_scope(c, fns, funcs_done&, names);
-    entry_dep := write_deps(c.writer, fr'vtable'get_codemap(fr.data), start_path);
+    entry_dep := write_deps(c.writer, fr'vtable'get_codemap(fr.data), start_path, self_hash);
     
     meta: Incremental.Meta = (
         arch_os = 0x0F0F,
@@ -910,6 +912,7 @@ fn build_the_exports_scope(c: *ExportCtx, start_path: Str) CRes([][]u8) = {
         root_scope = root_scope,
         // TODO: don't call this debug_name if im going to use it for stuff
         debug_name = c.writer.push(mangle_name_for_cache(start_path)),
+        entry_source = c.writer.push(entry_source),
     );
     bytes := c.writer.to_bytes(meta, c.m);
     (Ok = bytes)

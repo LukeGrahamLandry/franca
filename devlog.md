@@ -1,4 +1,11 @@
 
+## (Dec 1)
+
+- import_c/ffi.fr/include: cache the generated .frc file 
+  - add included c files as deps so you can still printf debug by just editing the source in the target directory
+  - made a few things in compiler/incremental not depend on being in the compiler's compilation unit
+  - skip recompiling the c compiler if the c source didn't change since last time by forcing a jit shim
+
 ## (Nov 30)
 
 - instead of calling cached_compile_module, just export the signetures i need without compiling the bodies. 

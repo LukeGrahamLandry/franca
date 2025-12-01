@@ -76,6 +76,7 @@ SelfHosted :: @rec @struct(
     },
     todo_injected: @if(TODOWASM, *HashMap(Str, rawptr), void),
     expr_pair_type := UnknownType,
+    environment_variables_for_jit_shim: *CStr,
 );
 
 OverloadKey :: @struct(arg: Type, req: Type);
@@ -164,8 +165,15 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
             if(header.entry_dep.off == Qbe.no_symbol, => break());
             entry_dep := header.get(header.entry_dep);
             if(header.get(entry_dep.filename) != @tfmt("@/%", path), => break());
+            // don't try to use it if it's from import_module (ie. repl.fr has main and exports in the same file)
+            // TODO: should go in seperate .frc files when that happens. 
+            //       because right now repl.fr's cache file (the exe) will depend on 
+            //       itself (!/examples_repl_fr.frc, the lib) and always (correctly) fail 
+            //       when recursing in files_unchanged because the hash won't match 
+            //       because it was overwritten by the exe. 
+            @if(header.get(header.entry_source) != "") break();
             
-            if(!files_unchanged(header), => break());
+            if(!files_unchanged(header, get_include_std, Incr.self_hash), => break());
             middle := timestamp();
             callee = (Some = compile_cached(header, to_free&));
             end := timestamp();
@@ -412,14 +420,13 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
         library_scope = NOSCOPE, // patched in make_top_level
         main_thread_index = context(DefaultContext)[].thread_index,
         todo_injected = @if(TODOWASM, a.boxed(HashMap(Str, rawptr), init(a)), ()),
+        // HACK because report_called_uncompiled_or_just_fix_the_problem does push_zeroed_dynamic_context 
+        //      maybe i should just store the env pointer instead of copying fields one by one as i need them. 
+        environment_variables_for_jit_shim = context(DefaultContext)[].environment_variables,
     );
     self.add_function(zeroed Func);  // just for good luck. life is better when FuncId=0 is invalid. 
     self.other_module&.push(self.comptime_codegen.m, self.get_alloc());
     
-    if get_dynamic_context().is_null() {
-        scary_log("compiler had null context!");
-        Syscall'exit(1);
-    };
     self.init_fixed_types();
     self.pool.fill_fixed_flags();
     self.get_function(zeroed FuncId)[].name = self.pool.insert_owned("ThisIsThePlaceholderForFuncIdZeroYouShouldNotSeeThis");
@@ -460,7 +467,7 @@ FrontendCodegen :: @struct {
     type_indices: HashMap(Type, i64);
     // index is BakedVarId
     constants_used: import("@/lib/collections/bit_set.fr").DynamicBitSet;
-    frc_imports: RawList(import("@/compiler/incremental.fr").FrcModuleInstance);
+    frc_imports: RawList(Incr.FrcModuleInstance);
 };
 
 fn init_codegen(m: *Qbe.Module, a: Alloc, threaded: bool) *FrontendCodegen = {

@@ -710,16 +710,11 @@ program_source:26:5: error: constant sampler must be declared constexpr
 - crash backtrace with source location
 - keep caches for multiple targets at once?
 - need to be careful if start caching both main+driver from one source file
-- make it work for fetch_or_crash. like if you import a c thing, the hashes of 
-those c files should go in your .frc file. it's tempting to just use the hash of 
-the one zip file for the resource but i think being able to printf debug by just 
-editing your local copy of the c files is important. 
 - api for import() of a string that you want to involve in the cache file. 
 rn it just assumes it's generated from your input files so can be safely ignored. 
 - have examples/default_driver and graphics/easy do it for main(). 
 but then need to deal with including build options in the cache (like -unsafe, -wgpu, ENABLE_TRACY) 
 - do automatic caching for big comptime things (like import_c'include)
-- now that import_c is always serialized, just need to add `dep`s and then it can be cached separately from the rest of your program. 
 - allow smaller compilation units. like not making you recompile the backend when you work on the frontend. 
 - test that .frc files repro and that you can pass them directly
 - dump_bin: print segment.MachineCode as something qbe_frontend.fr can parse so it can round trip
@@ -745,6 +740,12 @@ gets to the point where it's just blocked waiting for the backend thread.
 should allow more backend threads but need to be careful about order because i want repro. 
 also it's cripplingly broken because it doesn't track buildoptions so it's disabled in meta.fr for now. 
 
+this shit with the magic `@/!/` prefixes is stupid. 
+just have a struct with an enum field.
+(or even just know to check recursive deps if it starts with the frc magic, 
+you have to read the file anyway to check the hash so there's no extra information). 
+the only difference rn is whether you have to include the target/franca/cache/ part of the path.
+
 ### FrcImport 
 
 -  run inlining and if something changes redo the other early passes as well
@@ -753,7 +754,6 @@ also it's cripplingly broken because it doesn't track buildoptions so it's disab
 - check arch in import_frc() if did_regalloc 
 - need to merge deps if we're generating a cache file? 
 - import_c: local declaration of import doesn't work because it doesn't get a name in root_scope
-- fix import_c/ffi.fr needing to compile the whole backend now and then time stuff to make sure this way isn't way slower than the old way. 
 - source locations
 - remove DISABLE_IMPORT_FRC. need to deal with scoping when you import(@/compiler)
 - import_c/ffi.fr: make forward declaration of an import work in local scope (rn missing type info in root_scope so can't use it)
@@ -783,7 +783,6 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
 - non-i64 @tagged. doesn't really matter because i don't allow it anyway but should assert on it just in case. 
 - import_module 
   - don't hardcode `exports` as a magic symbol
-  - include deps and chech thier hashes
   - include build options somehow
   - add back !did_regalloc check
   - the things where i just assume something is a One(Sym) feels kinda bad. should have a special tag somewhere maybe? 
