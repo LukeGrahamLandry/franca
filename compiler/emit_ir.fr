@@ -655,10 +655,7 @@ fn emit_runtime_call(
     p: Placement,
     callee: Qbe.Ref,
     dyn_context: bool,
-    loc: Span,
 ) CRes(Qbe.Ref) = { 
-    self.dbgloc(loc, 0);
-    
     self.f.leaf = false;
     if dyn_context && self.context != QbeNull {
         self.emit(.arge, .Kl, QbeNull, self.context, QbeNull);
@@ -1054,7 +1051,9 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
             };
             
             args := @try(self.compile_for_arg(arg)) return;
-            self.emit_runtime_call(f_ty.ret, args, p, callee_r, context, arg.loc)
+            dbg := @if(func.get_flag(.NoTrace), 3, 0);  // :DebugTag
+            self.dbgloc(arg.loc, dbg);
+            self.emit_runtime_call(f_ty.ret, args, p, callee_r, context)
         }
         //
         // :ADistinctionWithoutADifference  -- May 31, 2025 
@@ -1076,7 +1075,8 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
             @if(context) caller.set_flag(.YesContext);
             callee := @try(self.compile_expr(f, .Scalar)) return;
             args   := @try(self.compile_for_arg(arg)) return;
-            self.emit_runtime_call(f_ty.ty.ret, args, p, callee, context, arg.loc)
+            self.dbgloc(arg.loc, 0);
+            self.emit_runtime_call(f_ty.ty.ret, args, p, callee, context)
         }
         fn Label(_) => {
             label := @unwrap(f.as_const(), "called label must be const") return;
@@ -1141,14 +1141,15 @@ fn func_ref(self: *EmitIr, f_id: FuncId) Qbe.Ref #inline =
 
 fn emit_block_expr(self: *EmitIr, expr: *FatExpr, p: Placement) CRes(Qbe.Ref) #once = {
     block   := expr.expr.Block&;
-    self.dbgloc(expr.loc, 1);
+    dbg := block.flags.bit_and(1.shift_left(@as(i64) BlockFlags.NoTrace)) == 0;
+    @if(dbg) self.dbgloc(expr.loc, 1);
     ret_var := or block.ret_label {
         // Simple case: its just grouping some statements into an expression. 
         each block.body& { stmt |
             @try(self.compile_stmt(stmt)) return;
         };
         result := self.compile_expr(block.result, p);
-        self.dbgloc(expr.loc, 2);
+        @if(dbg) self.dbgloc(expr.loc, 2);
         return result;
     };
     must_return: u32 = int(block.flags.bit_and(1.shift_left(@as(i64) BlockFlags.MustReturn)) != 0).trunc();
@@ -1200,7 +1201,7 @@ fn emit_block_expr(self: *EmitIr, expr: *FatExpr, p: Placement) CRes(Qbe.Ref) #o
         };
     };
     self.label_depth -= must_return;
-    self.dbgloc(expr.loc, 2);
+    @if(dbg) self.dbgloc(expr.loc, 2);
     (Ok = dest)
 }
 

@@ -13,7 +13,20 @@
     - improve the hover logic, use selection instead so you can override it, 
       hide the hover when not holding command because it's annoying
     - parse "file:line:col" like my error messages print
-    
+  - fixed crash if you `cd "";` twice in the repl. problem was that ENABLE_FRANCA_REPL
+    changes the layout of State and was true in the binary and false in the the repl's runtime compilation unit. 
+    so when `echo` tries to access a field after `state.repl` it stomps the memory. 
+    passing it through in the repl's prelude is enough to fix it 
+    but might as well not change layout because there's no point. 
+- the last straw that made me give up on wasm threads was not being able to set the magic header to
+  enable SharedArrayBuffer in github pages but cloudflare lets you do it so maybe i'll give it another attempt, 
+- debug-info / stack trace improvements
+  - finally set the right location in assert_cond so the assertion macro call shows in the crash trace. 
+    that was so easy. i should have done it 4 months ago, when i added INLINE to the trace. 
+  - add #no_trace. always hide WasLambdaLiteral capturing calls because they're always 
+    lexically in the same place so don't add information (avoids the like 17 trace nodes 
+    because you had an if statement garabge). hide the function declaration block. 
+
 ## (Nov 30)
 
 - instead of calling cached_compile_module, just export the signetures i need without compiling the bodies. 

@@ -18,11 +18,7 @@ Repl :: import("@/examples/repl.fr");
 // TODO: THIS IS UNACCEPTABLE FIXME FIXME FIXME
 //       what happened to anything you can do at runtime you can do at comptime bro...? 
 //       you can run the fancy gpu stuff just fine but you can't start a new compiler somehow? 
-ENABLE_FRANCA_REPL :: !{
-    is_declared :: fn(target: FatExpr) FatExpr #macro = 
-        @literal @is(target.expr&, .GetVar);
-    @if(@is_declared EASY_GRAPHICS_IS_JITTING_HACK, EASY_GRAPHICS_IS_JITTING_HACK, true)
-};
+ENABLE_FRANCA_REPL :: !EASY_GRAPHICS_IS_JITTING_HACK;
 
 Replay :: import("@/graphics/replay.fr");
 
@@ -39,7 +35,7 @@ State :: @struct(
     lock_to_bottom: bool,
     history: RawList(Str),
     history_index: i64,
-    repl: @if(ENABLE_FRANCA_REPL, Repl.ReplState, void),
+    repl: Repl.ReplState,
     dirty: bool,
     theme: ColourTheme,
     last_click_time: i64,
@@ -82,7 +78,7 @@ on_init :: fn(userdata: rawptr) void = {
     );
     @if(ENABLE_FRANCA_REPL) {
         prelude := "#include_std(\"lib/core.fr\");#include_std(\"examples/terminal.fr\");\n";
-        prelude := @tfmt("%\nSOKOL_BACKEND :: RenderBackend.%;\n", prelude, SOKOL_BACKEND);
+        prelude := @tfmt("%\nSOKOL_BACKEND :: RenderBackend.%;EASY_GRAPHICS_IS_JITTING_HACK :: %;\n", prelude, SOKOL_BACKEND, true);
         state.repl = ReplFns'init(allocator, prelude);
         if Repl.STDLIB_PATH { path |
             cd(path.items());
@@ -1121,7 +1117,11 @@ fn exec(buffer: *TextBuffer, raw_command: Str) void = {
     if(raw_command == "", => return());
     
     push_history(raw_command);
-    
+    if raw_command == "help" {
+        buffer.append_string(HELP);
+        return();
+    };
+
     if raw_command.starts_with(";") || raw_command.ends_with(";") {
         exec_franca(buffer, raw_command);
     } else {
@@ -1353,3 +1353,24 @@ fn go(body: @FnPtr() void) void = {
 
 #use("@/lib/sys/threads.fr");
 Futex :: import("@/lib/sys/sync/futex.fr");
+
+HELP :: """
+cmd+click           (show contents of hovered/selected path. dump if binary)
+escape              (go back to previous file)
+enter               (run current line as a command)
+  <program> <args>  (exec a binary or .fr file)
+  <franca_code>;    (run in repl. note the semicolon)
+up/down arrow       (move through command history)
+tab                 (autocomplete from history)
+ctrl+c              (SIGINT)
+ctrl+shift+c        (SIGKILL)
+cmd+s               (dump to save file. start terminal with cli -save <path> which also loads that on start)
+cmd+w               (exit the terminal. without saving)
+cmd+f               (search selected text)
+right+drag          (scroll the canvas)
+left                (move the cursor. very modern, many wow)
+left+drag           (select text)
+2x/3x click         (select word/line)
+cmd+c/v             (copy / paste)
+backspace           (delete text)
+""";

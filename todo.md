@@ -44,10 +44,10 @@
   - document what needs to be installed: qemu-user-static, libc6-amd64-cross, libc6-riscv64-cross
 - more stack trace improvements
   - macros don't always get a block. 
+    my hack is manually calling .with_loc in @assert/@panic but it would be better if it could "just work"
   - another source of confusion is that for comptime code, source location doesn't come from 
     the fake debug info, it parses the string and finds that function call in the ast. 
     make that work with #inline too. 
-  - including every function definition in the trace as INLINE is confusing. 
   - allow hook_backtrace only if not already hosted
   - give a franca_aot_debug_info when running directly (`franca crash2.fr`) so it works if you do your own hook_backtrace. 
   - tests for backtraces
@@ -867,7 +867,6 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
 
 ### Terminal
 
-- crashes if you `cd "";` twice in the repl
 - tab to autocomplete a file path 
 - escape codes: colour, move the cursor, clear the screen
 - send input to stdin
@@ -876,7 +875,6 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
 - option to reset the repl since it leaks memory indefinitely 
 - unicode characters
 - && to run two commands
-- make it compile faster when ENABLE_FRANCA_REPL
 - multiline franca commands
 - save cmd history to file as well (not just output) so up/down work across restarts (and maybe auto save)
 - jump around past commands like warp

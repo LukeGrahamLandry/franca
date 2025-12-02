@@ -187,7 +187,7 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
             
             make_switch(@{ tag_val }, default, cases)
         }]
-    }
+    }.no_trace()
 }
 
 fn find_used_tagged(type: Type, count: *i64, s: *Symbol, out: *Type) void = {
@@ -1107,3 +1107,22 @@ fn must_return(call: FatExpr) FatExpr #macro = {
 // TODO: use this instead of all the places i do `zeroed Span` just to have one
 fn source_location(arg: FatExpr) FatExpr #macro = 
     @literal arg.loc;
+
+fn with_loc(e: FatExpr, loc: Span) FatExpr = {
+    if e.expr&.is(.Block) && e.expr.Block.body.len == 0 {
+        // TODO: if there's just one thing in the block, sema elides the block and you don't get the right trace location HACK
+        e.expr.Block.result.loc = loc;
+    };
+    e.loc = loc;
+    e
+}
+
+fn no_trace(e: FatExpr) FatExpr = {
+    was_bootstrapping :: { fr := current_compiler_context(); IS_BOOTSTRAPPING || fr.vtable.driver_abi_version <= 1131 };
+    @if(was_bootstrapping) return(e);
+    if e.expr&.is(.Block) {
+        it := e.expr.Block&;
+        it.flags = it.flags.bit_or(1.shift_left(@as(i64) BlockFlags.NoTrace));
+    };
+    e
+}

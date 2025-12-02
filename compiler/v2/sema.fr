@@ -508,6 +508,14 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
             self.last_loc = expr.loc;
             @check(self.can_assign(wanted, expr.ty)) return;
         };
+        
+        // don't show a trace source location for the function definition. 
+        // its redundant because you already get one that says the right name 
+        // for the place in the body you're at so its just confusing spam to have it twice. 
+        if expr.expr&.is(.Block) {
+            expr.expr.Block.flags = expr.expr.Block.flags.bit_or(1.shift_left(@as(i64) BlockFlags.NoTrace));
+        };
+        
         self.dispatch.enclosing_function = old_func;
     };
     if !ok {
@@ -1877,6 +1885,12 @@ fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, request
         zone_end(z);
         e
     };
+    
+    no_trace := func.get_flag(.NoTrace) || func.get_flag(.WasLambdaLiteral) || !func.body.Normal.expr&.is(.Block);
+    if no_trace && owned_body.expr&.is(.Block) {
+        owned_body.expr.Block.flags = owned_body.expr.Block.flags.bit_or(1.shift_left(@as(i64) BlockFlags.NoTrace));
+    };
+    
     loc := arg_expr.loc;
     // :NotForCorrectness the second case would be sufficient but this is so common (if(_,!,!), loop(!), etc) that it makes me less sad. 
     if arg_expr.is_raw_unit() {  // 
@@ -1890,12 +1904,14 @@ fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, request
         stmts&.push(stmt = arg_stmt, loc = loc);
         expr_out.expr = new_block(stmts.as_raw(), self.box(owned_body));
     };
-    if flags.bit_and(1.shift_left(@as(i64) CallFlags.MustReturn)) != 0 {
-        expr_out.expr.Block.flags = expr_out.expr.Block.flags.bit_or(1.shift_left(@as(i64) BlockFlags.MustReturn));
-    };
     b := expr_out.expr.Block&;
+    b.flags = trunc(@or(
+        b.flags.zext(),
+        1.shift_left(@as(i64) BlockFlags.Resolved),
+        int(flags.bit_and(1.shift_left(@as(i64) CallFlags.MustReturn)) != 0).shift_left(@as(i64) BlockFlags.MustReturn),
+        int(no_trace).shift_left(@as(i64) BlockFlags.NoTrace),
+    ));
     b.ret_label = (Some = ret_label);
-    b.flags = b.flags.bit_or(1.shift_left(@as(i64) BlockFlags.Resolved));
     // TODO: self.currently_inlining.retain(|check| *check != f);
     if ret_ty { ret_ty | 
         expr_out.ty = ret_ty;
@@ -3371,6 +3387,7 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
                 func.set_flag(.YesContext);
             };
             @case(Flag.avoid_shim.ident()) => func.set_flag(.AvoidJitShim);
+            @case(Flag.no_trace.ident())  => func.set_flag(.NoTrace);
             @default => ();
         };
     };

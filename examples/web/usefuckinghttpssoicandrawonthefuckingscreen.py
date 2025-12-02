@@ -6,7 +6,12 @@ PORT = 8000
 import http.server
 import ssl
 
-Handler = http.server.SimpleHTTPRequestHandler
+class Handler(http.server.SimpleHTTPRequestHandler):
+    def end_headers(self):
+        self.send_header("Cross-Origin-Embedder-Policy", "require-corp")
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        super().end_headers()
+
 with http.server.HTTPServer((HOST, PORT), Handler) as httpd:
     print("Web Server listening at => " + HOST + ":" + str(PORT))
     sslcontext = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
