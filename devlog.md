@@ -26,6 +26,8 @@
   - add #no_trace. always hide WasLambdaLiteral capturing calls because they're always 
     lexically in the same place so don't add information (avoids the like 17 trace nodes 
     because you had an if statement garabge). hide the function declaration block. 
+- use stack_alloc in deflate
+- bf/c_string.fr: if i'm going to flex that i have a c compiler i shouldn't be so paranoid about precedence
 
 ## (Nov 30)
 

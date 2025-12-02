@@ -1,5 +1,6 @@
 // https://www.ietf.org/rfc/rfc1951.txt
 
+// warning: some malicious input will bounds check fail instead of returning an error
 Error :: @enum(Ok, BlockType3, CorruptNLen, BackTooFar, BadDynamicHeader);
 
 // returns number of consumed bytes so you can read a footer if your format has one. 
@@ -26,7 +27,7 @@ decompress :: fn(in: []u8, out: *List(u8)) Ty(i64, Error) = {
 }
 
 noncompressed_block :: fn(c: *Cursor) Error = {  //  3.2.4. 
-    c.skip_to_full_byte();
+    c.i = c.i.ualign_to(8);
     len := c.get_bits(16);
     nlen := c.get_bits(16);
     @if(len != nlen.bit_xor(0xFFFF)) return(.CorruptNLen);
@@ -55,10 +56,11 @@ dynamic_block :: fn(c: *Cursor) Error = {  // 3.2.7.
 
     alphabet :: code_length_alphabet;
     cl := stack_tree(alphabet.len(), 5);  // code lengths
+    cl.len.set_zeroed();  // the data is sparse
     range(0, hclen) { i |
         cl.len[alphabet[i].zext()] = c.get_bits(3).trunc();
     };
-    codes_from_lengths(cl, alphabet.len());
+    build_tree(cl, alphabet.len());
     
     // TODO: tighter bound than 750KB of stack? (but it's uninitialized so it doesn't actually matter)
     ll := c.read_tree(286, MAX_BITS, cl, hlit, "litlen");  // length/literal
@@ -70,7 +72,7 @@ read_tree :: fn(c: *Cursor, $n: i64, $nbit: i64, cl: *Tree, count: i64, label: S
     t := stack_tree(n, nbit);
     c.read_code_lengths(t.len, cl, count);
     debug_log_lengths(t, count, label);
-    codes_from_lengths(t, count);
+    build_tree(t, count);
     t
 }
 
@@ -140,6 +142,11 @@ read_symbol :: fn(c: *Cursor, tree: *Tree) u16 = {
     node.value
 }
 
+build_tree :: fn(tree: *Tree, count: i64) void = {
+    codes_from_lengths(tree, count);
+    fill_tree(tree, count);
+}
+
 codes_from_lengths :: fn(tree: *Tree, count: i64) void = {  // 3.2.2.
     // 1)
     bl_count := zeroed Array(u16, MAX_BITS+1);
@@ -166,11 +173,10 @@ codes_from_lengths :: fn(tree: *Tree, count: i64) void = {  // 3.2.2.
             tree.code[n] = next_code&[len];
             @debug_assert_lt(tree.code[n], 1.shift_left(len));
             next_code&[len] += 1;
-        }
+        } else {
+            tree.code[n] = 0;
+        };
     }
-    tree.len.rest(count).set_zeroed();
-    
-    fill_tree(tree);
 }
 
 MAX_BITS :: 15;  // sizes the encoding in 3.2.7 can express: ll/d: 0-15, cl:0-7 
@@ -178,10 +184,10 @@ MAX_BITS :: 15;  // sizes the encoding in 3.2.7 can express: ll/d: 0-15, cl:0-7
 // you could inline this together with codes_from_lengths and not coonstruct the array of codes in the middle, 
 // but this isn't the slow part and doing it split this way makes it more clear that codes_from_lengths 
 // is directly lifted from the rfc so its easy to verify that part. 
-fill_tree :: fn(tree: *Tree) void = {
+fill_tree :: fn(tree: *Tree, n: i64) void = {
     count := 1;
     tree.node[0] = (value = BLANK, next = (BLANK, BLANK));
-    range(0, tree.len.len) { i |
+    range(0, n) { i |
         length: i64 = tree.len[i].zext();
         if length != 0 {
             bit :: fn(bi) i64 => 
@@ -203,14 +209,17 @@ fill_tree :: fn(tree: *Tree) void = {
         }
     };
     
-    tree.n = count;
+    tree.node.len = count;
+    // don't need these anymore
+    tree.len.len = 0;
+    tree.code.len = 0;
     
     // check you can't fall off the tree. 
     // TODO: error if they gave lengths that don't work?
     // TODO: is it allowed to have one leaf so there'd be a blank slot? 
     //       yes. TODO: find a test file that does that. 
     @debug_assert(count < 0xFFFF);
-    each tree.node.slice(0, count) { it |
+    each tree.node { it |
         l, r := (it.next&[0], it.next&[1]);
         if it.value != BLANK {
             @debug_assert(l == r && r == BLANK);
@@ -227,7 +236,6 @@ Tree :: @struct {
     len: []u8;
     code: []u16;
     node: []Node;
-    n := 0;
     
     Node :: @struct {
         next: Array(u16, 2);
@@ -235,23 +243,14 @@ Tree :: @struct {
     };
 };
 
-// TODO: i should have an allocator that hands out from a fixed 
-//       chunk of stack and then i wouldn't need to write this twice
 // TODO: choose the length of node array better
-stack_tree :: fn($n: i64, $nbit: i64) *Tree #inline/*semantic*/ = @ref @as(Tree) (
-    len = items(@ref(zeroed Array(u8, n))),
-    code = items(@ref({ ::Array(u16, n); @uninitialized Array(u16, n) })),
-    node = { 
-        N :: 1.shift_left(nbit+1);
-        ::Array(Tree.Node, N); 
-        items(@ref(@uninitialized Array(Tree.Node, N))) 
-    },
-);
+stack_tree :: fn($n: i64, $nbit: i64) *Tree #inline/*semantic*/ = 
+    @ref alloc_tree(n, nbit, Arena'stack_alloc(n*3 + size_of(Tree.Node)*(1.shift_left(nbit+1))));
 
-alloc_tree :: fn(n: i64, a: Alloc) Tree = (
-    len = a.alloc_zeroed(u8, n),
-    code = a.alloc_zeroed(u16, n),
-    node = a.alloc_zeroed(Tree.Node, n*2),  // this size is good enough for the fixed tables
+alloc_tree :: fn(n: i64, nbit: i64, a: Alloc) Tree = (
+    len = a.alloc_uninit(u8, n),
+    code = a.alloc_uninit(u16, n),
+    node = a.alloc_uninit(Tree.Node, 1.shift_left(nbit+1)),
 );
 
 Cursor :: @struct {
@@ -275,13 +274,6 @@ get_bits :: fn(c: *Cursor, n: i64) i64 = {
     word
 }
 
-skip_to_full_byte :: fn(c: *Cursor) void = {
-    c.i = c.i.ualign_to(8);
-}
-
-try :: fn(e: FatExpr, r: FatExpr) FatExpr #macro = 
-    @{ e := @[e]; @if(e != .Ok) @[r](e); };
-
 // for debugging, print log messages in the same format as https://github.com/madler/infgen
 INFGEN :: false;
 
@@ -297,27 +289,25 @@ debug_log_lengths :: fn(tree: *Tree, count: i64, label: Str) void = @if(INFGEN) 
 //       the first time they're needed instead of including them in the binary
 
 ll_fixed :: @static(Tree) {  // 3.2.6.
-    it := alloc_tree(288, ast_alloc());
+    it := alloc_tree(288, MAX_BITS, ast_alloc());
     
     it.len.slice(0, 143+1).set_bytes(8);
     it.len.slice(144, 255+1).set_bytes(9);
     it.len.slice(256, 279+1).set_bytes(7);
     it.len.slice(280, 287+1).set_bytes(8);
     
-    codes_from_lengths(it&, it.len.len);
-    it.node.len = it.n;
+    build_tree(it&, 288);
     it
 };
 
 // this is dumb but makes it more consistant 
 d_fixed :: @static(Tree) {
-    it := alloc_tree(32, ast_alloc());
+    it := alloc_tree(32, 5, ast_alloc());
     it.len.set_bytes(5);
     enumerate it.code { i, it |
         it[] = i.trunc();
     };
-    fill_tree(it&);
-    it.node.len = it.n;
+    fill_tree(it&, it.len.len);
     it
 }
 
