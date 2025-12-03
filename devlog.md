@@ -1,7 +1,8 @@
 
 ## (Dec 3)
 
-
+- import_wasm: do a dumb thing to make memory.grow work
+- get rid of a bunch of libc functions in worker.js since they can use my libc now
 
 ## (Dec 2)
 

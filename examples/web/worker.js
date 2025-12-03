@@ -1,8 +1,5 @@
-const page_size = 1n << 16n;
 
-let bump = 0n;
 let Franca;
-let FrancaXXX = {};
 let start = performance.now();
 let version;
 let fs_index;
@@ -15,11 +12,6 @@ export async function handleWasmLoaded(wasm, args) {
     Franca = wasm.instance.exports;
     console.log(Franca);
 
-    // TODO: something more official than this.
-    //       might be better to have page_allocator do something different instead?
-    FrancaXXX.__heap_base = BigInt(Franca.memory.buffer.byteLength);
-    FrancaXXX.__heap_end = FrancaXXX.__heap_base;
-    
     if (canvas !== undefined) await init_gpu(wasm, canvas);
     
     let p = write_args(args);
@@ -31,8 +23,7 @@ export async function handleWasmLoaded(wasm, args) {
         }
     }
     let time = Math.round(performance.now() - load_end);
-    let mem = (FrancaXXX.__heap_end - FrancaXXX.__heap_base) / 1024n / 1024n;
-    show_log(" Ran in " + time + "ms. " + mem + "MB. ");
+    show_log(" Ran in " + time + "ms.");
     self.postMessage({ tag: "done" });
 }
 
@@ -46,7 +37,9 @@ function write_args(args) {
         length += args[i].byteLength + 1;
     }
     
-    let p = imports.env.mmap(0, BigInt(length), 0, 0, 0, 0);
+    length += (8 - length / 8 * 8);
+    let p = BigInt(Franca.__stackbase.value) - BigInt(length);
+    Franca.__stackbase.value = Number(p);
     let pointers = new DataView(Franca.memory.buffer);
     for (let i = 0; i < args.length; i++) {
         let dest = new Uint8Array(Franca.memory.buffer, Number(p) + off, args[i].byteLength);
@@ -76,44 +69,10 @@ export const imports = {
         fmod: (a, b) => a % b,
         sinf: (a) => Math.sin(a),
         cosf: (a) => Math.cos(a),
-        puts: (ptr) => {
-            let len = 0;
-            let buf = new DataView(Franca.memory.buffer);
-            while (buf.getInt8(Number(ptr) + len) != 0) {
-                len += 1;
-            }
-            let msg = get_wasm_string(ptr, len);
-            show(msg + "\n");
-            return 0n;
-        },
-        write: (fd, ptr, len) => {
-            if (fd != 1 && fd != 2) return -1n;
-            const msg = get_wasm_string(ptr, len);
-            show(msg);
-            return len;
-        },
-        putchar: (c) => show(String.fromCharCode(c)),
-        abort: () => {
-            throw new Error("called abort");
-        },
-        exit: (status) => {
+        js_worker_stop: (status) => {
             if (status == 0) throw "called exit 0";
             cancelAnimationFrame(G.animation_id);
             throw new Error("called exit " + status);
-        },
-        // TODO: dont call this for passing cli args. jsut have a magic file name?
-        mmap: (addr, len_, prot, flags, fd, offset) => {
-            const start = FrancaXXX.__heap_base + bump;
-
-            const len = ((len_ + page_size - 1n) / page_size) * page_size;
-            bump += len;
-            if (start + len >= FrancaXXX.__heap_end) {
-                const pages = len / page_size + 1n;
-                Franca.memory.grow(Number(pages));
-                show(`JS len=${len} old=${FrancaXXX.__heap_end} new=${FrancaXXX.__heap_end + pages * page_size} \n`)
-                FrancaXXX.__heap_end += pages * page_size;
-            }
-            return start;
         },
         jit_instantiate_module: (ptr, len, first_export, table_index) => {
             if (table_index != 0) throw new Error("table_index");
@@ -132,12 +91,6 @@ export const imports = {
                 i += 1;
             }
         },
-        munmap: (addr, len) => 0n,
-        mprotect: (a, b, c) => {
-            return 0n;
-        },
-        fsync: (fd) => 0n,
-        fetch_file: (ptr, len, p_file_length) => { throw "fetch_file"; },
         js_fetch_file: (ptr, len, p_file_length, dest_p, dest_len) => {
             let path = get_wasm_string(ptr, len);
             if (path.startsWith("./")) path = path.slice(2);
@@ -158,22 +111,34 @@ export const imports = {
             dest.set(src);
             return dest_p;
         },
-        yield_file: (ptr, len) => {
-            const bytes = new Uint8Array(
-                Franca.memory.buffer,
-                Number(ptr),
-                Number(len),
-            );
-            self.postMessage({
-                tag: "download",
-                content: new Blob([bytes], { type: "octet/stream" }),
-                name: "a.out",
-            });
+        FR_debug_write: (ptr, len) => show(get_wasm_string(ptr, len)),
+        js_write: (id, ptr, len) => { 
+            switch(id){
+                case 0xBBBB0000n: {
+                    show(get_wasm_string(ptr, len));
+                    return len;
+                }
+                case 0xBBBB0001n: {
+                    const bytes = new Uint8Array(
+                        Franca.memory.buffer,
+                        Number(ptr),
+                        Number(len),
+                    );
+                    const wasteofmytime = new ArrayBuffer(bytes.byteLength);
+                    new Uint8Array(wasteofmytime).set(new Uint8Array(bytes));
+                    self.postMessage({
+                        tag: "download",
+                        content: new Blob([wasteofmytime], { type: "octet/stream" }),
+                        name: "a.out",
+                    });
+                    return len;
+                }
+                default:
+                    console.log(get_wasm_string(ptr, len));
+                    return -1n;
+            }
         },
         js_performace_now: () => performance.now(),
-        null: () => {
-            throw new Error("wasm guest tried to call a null function pointer");
-        }
     },
 };
 
@@ -221,6 +186,8 @@ let weak_imports = [
     "tcgetattr",
     "tcsetattr",
     "clock_gettime",
+    "yield_file",
+    "puts", "putchar", "abort", "exit", "munmap", "mprotect", "fsync", "fetch_file", "mmap", "write", "null",
 ];
 
 for (const it of weak_imports) {

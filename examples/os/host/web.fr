@@ -28,18 +28,16 @@ fn main() void = {
 
 main2 :: fn() void = {
     redo_relocations_wasm();
-    
-    @assert_ne(memory_grow(0), -1);
-    if memory_grow(0) == -1 {
-        import("@/examples/os/user/init.fr")'main();
-    };
+    Vfs'init_vfs();
+    xxx := Vfs.fs;  // :compilerbug ?? Type Error: field 'fs' does not exist
+    xxx.stdin.poll = fn(a, b) = ();
+    //shell.strace = true;
     
     import("@/examples/web/demo.fr")'main();
 }
 
 redo_relocations_wasm :: fn() void #inline = {
     @run {
-        libc_exports.clear();  // TODO
         collect_from_scope(libc_exports, Type.scope_of(Overrides), true);
     };
 
@@ -65,6 +63,9 @@ Host :: @struct {
     jit_instantiate_module :: fn(address: *u8, length: i64, table_start: i64, table_index: u32) void #weak #import("libc");
     js_fetch_file :: fn(ptr: *u8, len: i64, len_out: *i64, dest_p: *u8, dest_len: i64) *u8 #weak #import("libc");
     js_performace_now :: fn() f64 #weak #import("libc");
+    js_write :: fn(id: i64, ptr: *u8, len: i64) i64 #weak #import("libc");
+    js_worker_stop :: fn(status: i64) void #weak #import("libc");
+    
     // TODO: spawn worker
     // TODO: sleep worker
 };
@@ -78,13 +79,24 @@ wasm_page_size :: 65536;
 
 Overrides :: @struct {
     fetch_file :: fn(ptr: *u8, len: i64, len_out: *i64) *u8 = {
+        len_out[] = -1;
         p := Host'js_fetch_file(ptr, len, len_out, zeroed(*u8), 0);
+        @if(p.is_null() && len_out[] == -1) return(p);
         @assert(p.is_null() || len_out[] == 0);
         mem := general_allocator().alloc_uninit(u8, len_out[]);
         p := Host'js_fetch_file(ptr, len, len_out, mem.ptr, mem.len);
         @assert(p.identical(mem.ptr));
         mem.ptr
     }
+    
+    yield_file :: fn(ptr: *u8, len: i64) void = {
+        r := Host'js_write(0xBBBB0001, ptr, len);
+        @assert_eq(r, len, "failed yield_file");
+    }
+    
+    FR_debug_write :: fn(ptr: *u8, len: i64) void = {
+        Host'js_write(0xBBBB0000, ptr, len);
+    };
 
     mmap :: fn(addr: rawptr, len: i64, prot: i64, flags: i64, fd: Fd, off: i64) rawptr = {
         len := len.ualign_to(wasm_page_size);
@@ -113,15 +125,22 @@ Overrides :: @struct {
         0
     };
     
-    /*
+    abort :: fn() void = exit(1);  // TODO: signal or whatever
+    
+    exit :: fn(status: i64) void = {
+        @trace("exit(%)", status);
+        Host'js_worker_stop(status);
+    };
+
     nanosleep :: fn(duration: *TimeSpec, nullable_remainder_out: i64) i64 = {
+        eprintln("TODO: nanosleep");
         0
     };
     
+    #use("@/lib/sys/threads.fr");
     pthread_create :: fn(out: *pthread_t, attr: *ThreadAttr, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) i64 = {
-    
+        panic("TODO: pthread_create");
     };
-    */
 };
 
 // returns old size

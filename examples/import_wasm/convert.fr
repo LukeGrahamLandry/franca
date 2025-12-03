@@ -28,6 +28,7 @@ LoadWasm :: @struct(
     functions: []Qbe.Sym = empty(),  // [...imports, ...exports]
     function_types: []Wasm.TypeIdx = empty(),
     preserve_franca_env: bool,
+    memory_size: Qbe.Sym,
     
     stack: List(Qbe.Ref),
     blocks: List(BlockEntry),
@@ -53,6 +54,7 @@ fn init(m: *QbeModule, w: *WasmModule, a: Alloc) LoadWasm = (
     preserve_franca_env = true,
     alloc = a,
     imports_needed = bsinit_full(w.imports.len),
+    memory_size = m.intern("__importwasm__memorysize"),
 );
 
 fn assert_all_imports_filled(self: *LoadWasm) void = {
@@ -369,6 +371,12 @@ fn declare_globals(self: *LoadWasm) void = {
         i += 1;
     };
     @debug_assert_eq(i, count);
+    
+    self.m.emit_data(
+        id = self.memory_size, 
+        template = (Bytes = @slice(0x2c, 0x01, 0x00, 0x00)), 
+        relocations = empty(),
+    );
 }
 
 fn declare_tables(self: *LoadWasm) void = {
@@ -708,6 +716,23 @@ fn emit_the_code(self: *LoadWasm) void = {
             }
             fn I32_EqZero() => self.eqz(.ceqw);
             fn I64_EqZero() => self.eqz(.ceql);
+            fn Memory_Grow() => {
+                _memory_index := @as(u64) self.read_u();
+                // TODO: more sane implementation of this. 
+                //       for now i always preallocate the whole memory so it doesn't have to resize, 
+                //       but keep track of a smaller "length" value so user code can use memory_grow as the page allocator.
+                //       only support one memory, arbitrary 300 page starting size is enough for my programs constant data.  
+                
+                delta_pages := self.stack&.pop().expect("stack for delta");  // i32
+                old_pages := self.f.newtmp("memold", .Kw);
+                new_pages := self.f.newtmp("memnew", .Kw);
+                p := self.f.symcon(self.memory_size);
+                
+                self.f.emit(.load, .Kw, old_pages, p, Qbe.Null);
+                self.f.emit(.add, .Kw, new_pages, old_pages, delta_pages);
+                self.f.emit(.storew, .Kw, Qbe.Null, new_pages, p);
+                self.stack&.push(old_pages);
+            }
             @default => @panic("unhandled unstruction %", self.src[self.cursor - 1]);
         }
     }
