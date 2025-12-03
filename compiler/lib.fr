@@ -75,7 +75,7 @@ SelfHosted :: @rec @struct(
         shim_calls: i64;
     },
     expr_pair_type := UnknownType,
-    environment_variables_for_jit_shim: *CStr,
+    jit_shim_env: *DefaultContext,
 );
 
 OverloadKey :: @struct(arg: Type, req: Type);
@@ -418,9 +418,7 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
         shim_callback_general_alloc = general_allocator(),
         library_scope = NOSCOPE, // patched in make_top_level
         main_thread_index = context(DefaultContext)[].thread_index,
-        // HACK because report_called_uncompiled_or_just_fix_the_problem does push_zeroed_dynamic_context 
-        //      maybe i should just store the env pointer instead of copying fields one by one as i need them. 
-        environment_variables_for_jit_shim = context(DefaultContext)[].environment_variables,
+        jit_shim_env = a.box_zeroed(DefaultContext),
     );
     self.add_function(zeroed Func);  // just for good luck. life is better when FuncId=0 is invalid. 
     self.other_module&.push(self.comptime_codegen.m, self.get_alloc());
@@ -455,6 +453,16 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
         compiler
     };
     self.legacy_indirection = self.stable_compiler_context();
+    
+    c := self.jit_shim_env;
+    c[] = context(DefaultContext)[];
+    c.temporary_allocator = self.shim_callback_alloc&;
+    c.temporary_allocator_i = self.shim_callback_alloc&.borrow();
+    c.general_allocator = self.shim_callback_general_alloc;
+    c.panic_hook = fn(msg) = {
+        println("[while handling a jit shim callback]");
+        Crash'backtracing_panic_handler(msg);
+    };
     
     self
 }

@@ -217,7 +217,7 @@ QbeTargetEnv :: @struct(
     segment_size        := 1.shift_left(25),
     max_got_size        := 1.shift_left(15),
     _       := 1.shift_left(11),  // :UpdateBoot
-    commands_size_guess := 16384*2,
+    commands_size_guess := 16384,
     chained_size_guess  := 2000000,
     
     // called for debug["D"]. the default one just execs 'llvm-mc' and hopes for the best. 
@@ -283,8 +283,18 @@ fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
     if goal.type == .JitOnly && !is_linking_libc() {
         goal.link_libc = false;
     };
+    @if(TODOWASM)
     if m.goal.arch == .wasm32 {
-        m.goal.commands_size_guess *= 4;
+        m.goal.commands_size_guess *= 8;
+        if goal.type == .JitOnly {
+            Jit :: import("@/backend/wasm/jit.fr");
+            FR_wasm_jit_event :: fn(event: Jit.Event) i64 #weak #libc;
+            if goal.wasm_shared_memory {
+                m.target.wasm_jit_event = FR_wasm_jit_event;
+            } else {
+                m.target.wasm_jit_event = Jit.impl.run;
+            };
+        };
     };
     
     segment_size := goal.segment_size;
@@ -1093,8 +1103,7 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
                     import("@/backend/wasm/abi.fr")'save_signature(m, it.shim_for, shim_s.wasm_type_index);
                     @debug_assert(shim_s.got_lookup_offset == -1);
                     if s.got_lookup_offset == -1 {
-                        f :: import("@/backend/wasm/emit.fr").table_grow;
-                        s.got_lookup_offset = f(1).intcast();
+                        s.got_lookup_offset = (m.target.wasm_jit_event)(Grow = (delta = 1));
                     };
                     shim_s.got_lookup_offset = s.got_lookup_offset;
                     jit_addr = s.got_lookup_offset.rawptr_from_int();

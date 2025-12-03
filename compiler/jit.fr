@@ -319,9 +319,7 @@ fn save_in_got(self: *SelfHosted, fid: FuncId, addr: rawptr) void = {
         @debug_assert(s.got_lookup_offset != -1, "save_in_got missing slot for %", s.name);
         if m.goal.arch == .wasm32 {
             // TODO: might not need this. either way, clean it up!
-            f :: import("@/backend/wasm/emit.fr").table_assign;
-            @if(TODOWASM)
-            f(s.got_lookup_offset.intcast(), addr.int_from_rawptr().intcast());
+            (m.target.wasm_jit_event)(Assign = (dest = s.got_lookup_offset, src = addr.int_from_rawptr()));
         } else {
             got := m.segment_address(.ConstantData, s.got_lookup_offset);  // :GotAtConstantDataBase 
             rawptr.ptr_from_raw(got)[] = addr;
@@ -336,17 +334,9 @@ report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHo
     fence();
     result := rawptr_from_int(0);
     // You want to allow a shim being called from an extern function so we can't assume we have a valid context here. (ie. examples/farm_game.fr has this problem). 
-    push_zeroed_dynamic_context {
-        c := context(DefaultContext);
-        c.comptime = SelfHosted.raw_from_ptr(self);
-        set_temporary_allocator(self.shim_callback_alloc&);
-        c.general_allocator = self.shim_callback_general_alloc;
-        c.panic_hook = fn(msg) = {
-            println("[while handling a jit shim callback]");
-            Crash'backtracing_panic_handler(msg);
-        };
-        c.thread_index = self.main_thread_index; // HACK this is not ok if the comptime code has multiple threads
-        c.environment_variables = self.environment_variables_for_jit_shim;
+    ;{
+        // HACK this is not ok if the comptime code has multiple threads
+        set_dynamic_context(DefaultContext.raw_from_ptr(self.jit_shim_env));
         @debug_assert(!self.debug_deny_jit_shim_calls);
         self.stats.shim_calls += 1;
         

@@ -1,0 +1,55 @@
+
+Event :: @tagged(
+    Assign: @struct(dest: i64, src: i64),
+    Grow: @struct(delta: i64),
+    Module: @struct(wasm: []u8, table_start: i64),
+    Sync,
+);
+
+impl :: @struct {
+
+run :: fn(event: Event) i64 = {
+    @match(event) {
+        fn Assign(it) => table_assign(it.dest.intcast(), it.src.intcast());
+        fn Grow(it)   => return(table_grow(it.delta.intcast()).intcast());
+        fn Module(it) => jit_instantiate_module(it.wasm.ptr, it.wasm.len, it.table_start, 0);
+        fn Sync()     => ();
+    };
+    0
+};
+
+// creates the module and appends the exported functions to our indirect function table. 
+jit_instantiate_module :: fn(address: *u8, length: i64, table_start: i64, table_index: u32) void #weak #import("libc");
+
+// This relies on indirect function table being index 0. 
+// Grow it by delta and fill the new entries with the zeroth function. 
+// Returns the old size of the table. 
+table_grow :: AsmFunctionWasmOnly(fn(delta: i32) i32 = (), fn(out) = {
+    out.push(0x00);  // 0 locals
+    out.push(0x41);  // i32.const(0)
+    out.push(0x00);  // ^
+    out.push(0x25);  // table.get(0)
+    out.push(0x00);  // ^
+    out.push(0x20);  // local.get(0)
+    out.push(0x00);  // ^
+    out.push(0xFC);  // table.grow(0)
+    out.push(0x0F);  // ^
+    out.push(0x00);  // ^
+    out.push(0x0B);  // end
+});
+
+// table[dest] = table[src]
+table_assign :: AsmFunctionWasmOnly(fn(dest: i32, src: i32) void = (), fn(out) = {
+    out.push(0x00);  // 0 locals
+    out.push(0x20);  // local.get(0)
+    out.push(0x00);  // ^
+    out.push(0x20);  // local.get(1)
+    out.push(0x01);  // ^
+    out.push(0x25);  // table.get(0)
+    out.push(0x00);  // ^
+    out.push(0x26);  // table.set(0)
+    out.push(0x00);  // ^
+    out.push(0x0B);  // end
+});
+
+};

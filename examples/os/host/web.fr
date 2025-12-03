@@ -27,7 +27,10 @@ fn main() void = {
 #use("@/examples/os/user/init.fr");
 
 main2 :: fn() void = {
+    context(DefaultContext)[].thread = Thread.raw_from_ptr(@static(Thread));
+    globals.jit_events = list(128, Arena'stack_alloc(2048));
     redo_relocations_wasm();
+    globals.jit_events = globals.jit_events.items().clone(general_allocator());
     Vfs'init_vfs();
     xxx := Vfs.fs;  // :compilerbug ?? Type Error: field 'fs' does not exist
     xxx.stdin.poll = fn(a, b) = ();
@@ -77,13 +80,12 @@ redo_relocations_wasm :: fn() void #inline = {
         collect_from_scope(libc_exports, Type.scope_of(Overrides), true);
     };
 
-    globals.heap_next = memory_grow(0).intcast().mul(wasm_page_size).rawptr_from_int();
+    globals.heap_next = memory_grow(0).intcast().mul(wasm_page_size);
     globals.heap_end = globals.heap_next;
     
     for_wasm_imports { i, name |
         if libc_exports.get(name) { addr |
-            table_assign :: import("@/backend/wasm/emit.fr").table_assign;
-            table_assign(i.intcast(), addr.int_from_rawptr().intcast());
+            Overrides'FR_wasm_jit_event(Assign = (dest = i, src = addr.int_from_rawptr()));
         };
     };
 };
@@ -110,14 +112,51 @@ Host :: @struct {
     // TODO: sleep worker
 };
 
+#use("@/lib/sys/sync/mutex.fr");
+#use("@/lib/sys/threads.fr");
 globals :: @static(@struct{
-    heap_next: rawptr;
-    heap_end: rawptr;
+    heap_next: i64;
+    heap_end: i64;
+    grow: Mutex;
+    
+    // TODO: make this less chunky. also merge all the Grow
+    jit_events: List(Jit.Event);
+    jit: Mutex;
 });
 
 wasm_page_size :: 65536;
 
+Jit :: import("@/backend/wasm/jit.fr");
 Overrides :: @struct {
+    FR_wasm_jit_event :: fn(event: Jit.Event) i64 = {
+        @match(event) {
+            fn Assign(it) => @if(it.src == it.dest) return(0);
+            fn Grow(it) => @assert(it.delta != 0, "can't check the size like that because i don't store results");
+            fn Module(it) => {
+                @trace("jit(size = %)", it.wasm.len);
+                it.wasm = it.wasm.shallow_copy(general_allocator());
+            }
+            fn Sync() => ();
+        };
+        
+        result := 0;
+        with globals.jit& {
+            // replay all the events done by other threads first. 
+            i := get_current_tls()[].known_wasm_jit_event&;
+            for globals.jit_events.items().rest(i[]) { it |
+                Jit'impl'run(it);
+            };
+            
+            if !event&.is(.Sync) {
+                globals.jit_events&.push(event);
+                result = Jit'impl'run(event);
+            };
+
+            i[] = globals.jit_events.len;
+        };
+        result
+    }
+    
     yield_file :: fn(ptr: *u8, len: i64) void = {
         r := Host'js_write(0xBBBB0001, ptr, len);
         @assert_eq(r, len, "failed yield_file");
@@ -129,19 +168,23 @@ Overrides :: @struct {
 
     mmap :: fn(addr: rawptr, len: i64, prot: i64, flags: i64, fd: Fd, off: i64) rawptr = {
         len := len.ualign_to(wasm_page_size);
-        start := globals.heap_next;
-        globals.heap_next = globals.heap_next.offset(len);
-        if ptr_diff(globals.heap_next, globals.heap_end) < 0 {
-            len *= 2;
-            prev := memory_grow(len.udiv(wasm_page_size).intcast()).intcast().mul(wasm_page_size);
-            @assert(prev != -1, "oom");
-            @assert_eq(prev, globals.heap_end.int_from_rawptr(), "TODO: someone else is growing the memory");
-            globals.heap_end = globals.heap_end.offset(len);
+        start := i64.atomic_add(globals.heap_next&, len);
+        if start + len > globals.heap_end {
+            with globals.grow& {
+                len := len * 2;
+                prev := memory_grow(len.udiv(wasm_page_size).intcast()).intcast().mul(wasm_page_size);
+                @assert(prev != -1, "oom");
+                @assert_eq(prev, globals.heap_end, "TODO: someone else is growing the memory");
+                old := i64.atomic_add(globals.heap_end&, len);
+                @assert_eq(prev, old, "TODO: someone else is growing the memory");
+            };
         };
-        start
+        @trace("mmap(%) = %", len, start);
+        start.rawptr_from_int()
     };
     
     munmap :: fn(addr: rawptr, len: i64) i64 = {
+        @trace("munmap(%, %)", addr, len);
         0
     };
     

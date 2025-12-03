@@ -167,6 +167,7 @@ let weak_imports = [
     "yield_file",
     "puts", "putchar", "abort", "exit", "munmap", "mprotect", "fsync", "fetch_file", "mmap", "write", "null",
     "posix_getdents", "FR_openat", 
+    "FR_wasm_jit_event",
 ];
 
 for (const it of weak_imports) {

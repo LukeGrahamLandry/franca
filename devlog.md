@@ -9,6 +9,13 @@
 - don't need the fetch_file hack anymore. just bundle everything in the wasm module like i do for os. 
   don't need to collect_fs in web/build.fr anymore, have the ui just (SLOWLY) ask for the file contents. 
 - remove todo_inject, use my fake dlopen instead
+- for threads to work, i need to keep track of all the modules i jit 
+  and all the changes i make to the indirect function table 
+  because you can't share a table between web workers. 
+  so then you can replay them all when starting a new thread, 
+  and sync them so you can dlopen on one thread and call a function from another. 
+  this is gonna be so incredibly slow, sad day. 
+- use the starting env inside jit shims since i need get_current_tls to work 
 
 ## (Dec 2)
 

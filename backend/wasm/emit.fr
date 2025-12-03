@@ -290,7 +290,7 @@ fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
                             if e.m.goal.type == .JitOnly && is_function {
                                 if symbol.got_lookup_offset == -1 {
                                     // reserve an index in the table early. it will be filled in by make_exec();
-                                    symbol.got_lookup_offset = table_grow(1).intcast();
+                                    symbol.got_lookup_offset = (e.m.target.wasm_jit_event)(Grow = (delta = 1));
                                     @debug_assert_ne(symbol.got_lookup_offset, -1, "failed to grow table");
                                     //@println("reserve T[%] = %", symbol.got_lookup_offset, symbol.name);
                                 };
@@ -905,7 +905,7 @@ fn output_wasm_module_jit(m: *QbeModule, indirect_table_base: i64) [][]u8 = {
                 if s.got_lookup_offset == -1 {
                     s.got_lookup_offset = addr;
                 } else {
-                    table_assign(s.got_lookup_offset.intcast(), s.jit_addr.int_from_rawptr().intcast());
+                    (m.target.wasm_jit_event)(Assign = (dest = s.got_lookup_offset, src = s.jit_addr.int_from_rawptr()));
                 }
             };
             
@@ -1020,7 +1020,7 @@ make_exec :: fn(m: *Qbe.Module) void = {
     m.exports&.push_all(m.local_needs_reloc.items());
     @if(m.exports.len == 0) return();
 
-    first_export := table_grow(m.exports.len.intcast()).intcast();
+    first_export := (m.target.wasm_jit_event)(Grow = (delta = m.exports.len));
     @debug_assert_gt(first_export, 0, "failed to grow table");
     
     module := output_wasm_module_jit(m, first_export);
@@ -1031,16 +1031,13 @@ make_exec :: fn(m: *Qbe.Module) void = {
         import("@/examples/dump_wasm.fr")'dump(module);
     };
     
-    // creates the module and appends the exported functions to our indirect function table. 
-    jit_instantiate_module :: fn(address: *u8, length: i64, table_start: i64, table_index: u32) void #weak #import("libc");
-    
-    jit_instantiate_module(module.ptr, module.len, first_export, 0);
+    (m.target.wasm_jit_event)(Module = (wasm = module, table_start = first_export));
 
     enumerate m.exports& { i, id |
         use_symbol(m, id[]) { s |
             @debug_assert_ne(s.got_lookup_offset, -1);
             if s.got_lookup_offset != -1 && s.got_lookup_offset != first_export + i {
-                table_assign(s.got_lookup_offset.intcast(), intcast(first_export + i));
+                (m.target.wasm_jit_event)(Assign = (dest = s.got_lookup_offset, src = first_export + i));
             };
             s.jit_addr = s.got_lookup_offset.rawptr_from_int();
             
@@ -1061,37 +1058,6 @@ make_exec :: fn(m: *Qbe.Module) void = {
     // TODO: could reuse the memory instead
     m.goal.commands_size_guess = m.segments&[.Code]&.len();
 };
-
-// This relies on indirect function table being index 0. 
-// Grow it by delta and fill the new entries with the zeroth function. 
-// Returns the old size of the table. 
-table_grow :: AsmFunctionWasmOnly(fn(delta: i32) i32 = (), fn(out) = {
-    out.push(0x00);  // 0 locals
-    out.push(0x41);  // i32.const(0)
-    out.push(0x00);  // ^
-    out.push(0x25);  // table.get(0)
-    out.push(0x00);  // ^
-    out.push(0x20);  // local.get(0)
-    out.push(0x00);  // ^
-    out.push(0xFC);  // table.grow(0)
-    out.push(0x0F);  // ^
-    out.push(0x00);  // ^
-    out.push(0x0B);  // end
-});
-
-// table[dest] = table[src]
-table_assign :: AsmFunctionWasmOnly(fn(dest: i32, src: i32) void = (), fn(out) = {
-    out.push(0x00);  // 0 locals
-    out.push(0x20);  // local.get(0)
-    out.push(0x00);  // ^
-    out.push(0x20);  // local.get(1)
-    out.push(0x01);  // ^
-    out.push(0x25);  // table.get(0)
-    out.push(0x00);  // ^
-    out.push(0x26);  // table.set(0)
-    out.push(0x00);  // ^
-    out.push(0x0B);  // end
-});
 
 //
 // After the magic + version, the thing is a list of sections. 
