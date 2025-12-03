@@ -1,4 +1,6 @@
 
+- simple standalone wasm web example (without workers) to show you don't need to do my whole os-userspace thing 
+  (maybe provide same api as my old ChessBot would be an easy thing that isn't totally trivial)
 - make a driver demo that gives warnings for unused variables
 - should default to -keep-names so you get nice stack traces. 
   have -strip be explicit if you want small binaries. 

@@ -364,8 +364,7 @@ redo_relocations_static_linux :: fn() void = {
     };
 };
 
-temporary_libc_import :: fn(name: Str, dest: *rawptr, allow_null: bool) void = {
-    exports := @static(RawHashMap(Str, rawptr)) {
+libc_exports :: @static(RawHashMap(Str, rawptr)) {
         it := ScopeId.list(temp());
         it&.push(Type.scope_of(LIBC));
         dirs := @slice("examples/os/user/libc", "examples/os/user/libc/impl");
@@ -378,25 +377,27 @@ temporary_libc_import :: fn(name: Str, dest: *rawptr, allow_null: bool) void = {
             };
         };
         
-        fr := current_compiler_context();
-        out: HashMap(Str, rawptr) = init(ast_alloc());
+        out: RawHashMap(Str, rawptr) = init();
         for it { s |
-            for get_constants(s) { n |
-                continue :: local_return;
-                // TODO: this should work. :fUCEKD :ThisIsTheProblemIdiot
-                //if get_constant(FuncId, s, n) { fid |
-                val, ty := get_constant(s, n) || continue();
-                @if(ty != FuncId) continue();
-                fid := FuncId.ptr_from_raw(val)[];
-                    old := out&.insert(n.str(), fr.get_jitted(fid));
-                    @assert(old.is_none(), "duplicate libc export: %", n.str());
-                //};
-            };
+            collect_from_scope(out&, s, false);
         };
-        out.raw
+        out
+};
+
+fn collect_from_scope(out: *RawHashMap(Str, rawptr), s: ScopeId, allow_stomp: bool) void = {
+    fr := current_compiler_context();
+    for get_constants(s) { n |
+        continue :: local_return;
+        val, ty := get_constant(s, n) || continue();
+        @if(ty != FuncId) continue();
+        fid := FuncId.ptr_from_raw(val)[];
+        old := out.insert(n.str(), fr.get_jitted(fid), fr.get_alloc());
+        @assert(allow_stomp || old.is_none(), "duplicate libc export: %", n.str());
     };
-    
-    if exports.get(name) { it |
+}
+
+temporary_libc_import :: fn(name: Str, dest: *rawptr, allow_null: bool) void = {
+    if libc_exports.get(name) { it |
         dest[] = it;
         return()
     };

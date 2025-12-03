@@ -1,4 +1,22 @@
 
+## (Dec 3)
+
+
+
+## (Dec 2)
+
+- it seems i have to set the shared flag in the wasm module so you can't just detect at runtime if crossOriginIsolated. that sucks,
+ - also they helpfully didn't bother to update the spec to tell you the magic number 
+    https://web.archive.org/web/20251202112704/https://webassembly.github.io/threads/core/binary/types.html
+    the structure section for memtype says its shared|unshared but thats not in the binary format section...
+    you have to go read an ocaml program https://github.com/WebAssembly/threads/blob/ff17701446d8e2086142423ef77ae947a025e26f/interpreter/binary/decode.ml#L185
+    ah!!!! no, no, they did in 2 Jan 2023, they just took it out....
+    https://web.archive.org/web/20230102170317/https://webassembly.github.io/threads/core/binary/types.html
+    browser sure doesn't accept it if you don't set the flag tho. 
+- always call wasm imports indirectly so i can replace them in the table at runtime and a program can fill its own imports. 
+  so then things like converting memory.grow to mmap api can happen on the franca side without changing anything. 
+  make a Dat for the names of imports so you know where to look
+
 ## (Dec 1)
 
 - import_c/ffi.fr/include: cache the generated .frc file 

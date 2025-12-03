@@ -235,7 +235,9 @@ R.Str = function (i) {
     let len = this.i64(i + 8n);
     if (len == 0) return "";
     let buf = new Uint8Array(G.M(), ptr, len);
-    return new TextDecoder().decode(buf);
+    const wasteofmytime = new ArrayBuffer(buf.byteLength);
+    new Uint8Array(wasteofmytime).set(new Uint8Array(buf));
+    return new TextDecoder().decode(wasteofmytime);
 };
 R.Bool = function (i) {
     return this.u32(i) != 0;

@@ -443,7 +443,7 @@ fn fixup_wasm32(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_re
         // used when the value is an immediate 
         fn WasmIndex() => {
             @debug_assert(symbol.segment == .Code);
-            @debug_assert(self.goal.type != .JitOnly || symbol.kind == .Local, "wasm jit cannot direct call an import: %", symbol.name);
+            @debug_assert(symbol.kind == .Local, "wasm cannot direct call an import: %", symbol.name);
             @debug_assert_ne(symbol.wasm_module_function_index, -1, "WasmIndex: missing index for $%", symbol.name);
             lst: List(u8) = fixed_list(ptr = u8.ptr_from_raw(fixup.patch_at), len = WASM_INDEX_PADDING);
             value := symbol.wasm_module_function_index.intcast();
@@ -499,8 +499,51 @@ fn push_global_index(e: *EmitWasmFn, id: Qbe.Sym) void = @if_else {
 //
 // The order of segments matters. 
 fn output_wasm_module(m: *QbeModule) [][]u8 = {
-    min_mem_pages := 500; // TODO: set this to something good
     stack_size := 1.shift_left(23); // 8MB
+
+    @debug_assert(m.imports.len == 0);
+    
+    // this is hacky! lets the program intercept by replacing things in the indirect table. 
+    imports_symbol := m.intern("__franca_wasm_import_names");
+    import_names := u8.list(temp());
+    
+    {
+        // make sure the zeroth function pointer is invalid. 
+        // i could just change the mapping to table indices and put a nullref there, 
+        // but also i think it's nicer if you can give your own error message instead of the engine doing it. 
+        // (but since the signeture won't match you don't really get that away, so idk) 
+        id := m.intern("null");
+        m.imports&.push(id);
+        import_names&.push_all("null");
+        import_names&.push(0);
+        use_symbol(m, id) { s |
+            s.wasm_type_index = 0;  // don't care
+        };
+    };
+    
+    for_symbols m { id, symbol |
+        @assert(symbol.got_lookup_offset == -1, "got_lookup_offset %", symbol.name);
+        @assert(symbol.wasm_module_function_index == -1, "wasm_module_function_index %", symbol.name);
+    };
+    
+    // import functions ids start at zero. 
+    // we need to know how many imports there are before we can start patching anything. 
+    for_symbols m { id, symbol | // :SLOW  just keep list of pending symbols instead
+        is_import := id != imports_symbol && @is(symbol.kind, .Pending, .DynamicPatched);
+        if is_import && (symbol.fixups.len != 0 || symbol.referenced) && symbol.alias == Qbe.no_symbol_S {
+            @debug_assert_eq(symbol.wasm_module_function_index, -1);
+            @debug_assert(symbol.segment == .Code, "% segment", symbol.name);
+            symbol.got_lookup_offset = m.imports.len;
+            symbol.wasm_module_function_index = m.imports.len.intcast();
+            m.imports&.push(id); 
+            import_names&.push_all(symbol.name);
+            import_names&.push(0);
+            symbol.kind = .DynamicPatched;
+        };
+    };
+    
+    import_names&.push(0);
+    m.emit_data(id = imports_symbol, template = (Bytes = import_names.items()), align = 8, relocations = empty());
     
     memory_reserved := wasm_page_size;  // :WasmZeroPage
     data_seg := m.segments&[.MutableData]&;
@@ -515,39 +558,6 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     code_count := m.segments&[.Code]&.len() - m.goal.commands_size_guess;
     @if(show_backend_stats())
     @eprintln(">>> % bytes of code, % bytes of data.", code_count, data_size);
-    
-    @debug_assert(m.imports.len == 0);
-    
-    {
-        // make sure the zeroth function pointer is invalid. 
-        // i could just change the mapping to table indices and put a nullref there, 
-        // but also i think it's nicer if you can give your own error message instead of the engine doing it. 
-        // (but since the signeture won't match you don't really get that away, so idk) 
-        id := m.intern("null");
-        m.imports&.push(id);
-        use_symbol(m, id) { s |
-            s.wasm_type_index = 0;  // don't care
-        };
-    };
-    
-    for_symbols m { id, symbol |
-        @assert(symbol.got_lookup_offset == -1, "got_lookup_offset %", symbol.name);
-        @assert(symbol.wasm_module_function_index == -1, "wasm_module_function_index %", symbol.name);
-    };
-    
-    // import functions ids start at zero. 
-    // we need to know how many imports there are before we can start patching anything. 
-    for_symbols m { id, symbol | // :SLOW  just keep list of pending symbols instead
-        is_import := @is(symbol.kind, .Pending, .DynamicPatched);
-        if is_import && (symbol.fixups.len != 0 || symbol.referenced) && symbol.alias == Qbe.no_symbol_S {
-            @debug_assert_eq(symbol.wasm_module_function_index, -1);
-            @debug_assert(symbol.segment == .Code, "% segment", symbol.name);
-            symbol.got_lookup_offset = m.imports.len;
-            symbol.wasm_module_function_index = m.imports.len.intcast();
-            m.imports&.push(id); 
-            symbol.kind = .DynamicPatched;
-        };
-    };
     
     // our own function ids come after all the imports, but we already started assigning numbers so apply that offset here. 
     // this is also where we do fixups (ie. to get a function pointer out of a table). 
@@ -606,7 +616,12 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     push_buf { buf |
         buf.push(@as(u8) Wasm.Section.Import);
         uleb_patch_delta buf {
-            leb128_unsigned(buf, m.imports.len);
+            leb128_unsigned(buf, m.imports.len + 1);
+            
+            push_qual_name(buf, "main", "memory");
+            push(buf, @as(u8) Wasm.ImportType.Memory);
+            write_limits(buf, 0, (Some = 1.shift_left(32-16)), m.goal.wasm_shared_memory);
+            
             for m.imports& { id |
                 use_symbol(m, id) { s |
                     mod, name := m.wasm_name(s);
@@ -635,15 +650,7 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
             number_of_functions := f_count + m.imports.len;
             // TODO: it seems polite to promise it wont grow for most progams but i can't have a max if the module jits
             //      but it might force me to if i want threads? idk if that rule is only for memories. 
-            write_limits(buf, number_of_functions, .None);
-        };
-    };
-    
-    push_buf { buf |
-        buf.push(@as(u8) Wasm.Section.Memory);
-        uleb_patch_delta buf {
-            buf.push(1); // length of memories vec
-            write_limits(buf, min_mem_pages, .None);
+            write_limits(buf, number_of_functions, .None, false);
         };
     };
     
@@ -700,8 +707,8 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
                 };
             };
             
-            // TODO: let the user choose if they want to import a memory or export the memory and what the name should be. 
             {
+                // it's convenient to re-export it so i can' just use the whole module as the imports for a new jitted module. 
                 name := "memory";
                 leb128_unsigned(buf, name.len);
                 push_all(buf, name);
@@ -797,7 +804,6 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     };
     @if(show_backend_stats())
     @eprintln(">>> % bytes total module", total_size); 
-    @assert_le(memory_reserved, min_mem_pages * wasm_page_size);
     
     chunks.items()
 }
@@ -815,8 +821,9 @@ fn write_function_section(m: *Qbe.Module, buf: *List(u8)) void = {
     };
 }
 
-fn write_limits(buf: *List(u8), min: i64, max: ?i64) void = {
-    buf.push(int(max.is_some()).trunc());
+fn write_limits(buf: *List(u8), min: i64, max: ?i64, shared: bool) void = {
+    @assert(!shared || max.is_some(), "wasm limits: shared memory must have max");
+    buf.push(int(max.is_some()).add(shared.int().shift_left(1)).trunc());
     leb128_unsigned(buf, min);
     if max { max |
         leb128_unsigned(buf, max);
@@ -937,12 +944,12 @@ fn output_wasm_module_jit(m: *QbeModule, indirect_table_base: i64) [][]u8 = {
             
             push_qual_name(buf, "main", "memory");
             push(buf, @as(u8) Wasm.ImportType.Memory);
-            write_limits(buf, 0, .None);
+            write_limits(buf, 0, (Some = 1.shift_left(32-16)), m.goal.wasm_shared_memory);
             
             push_qual_name(buf, "main", "__indirect_table");
             push(buf, @as(u8) Wasm.ImportType.Table);
             buf.push(@as(u8) Wasm.ValType.FuncRef); 
-            write_limits(buf, 0, .None);  // TODO: do these numbers need to match the other one? i think so
+            write_limits(buf, 0, .None, false);
             
             push_qual_name(buf, "main", "__stackbase");
             push(buf, @as(u8) Wasm.ImportType.Global);

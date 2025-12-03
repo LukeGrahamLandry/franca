@@ -1,0 +1,139 @@
+#include_std("compiler/lib.fr");
+DEBUG_SPAM_LOG :: false;
+DISABLE_IMPORT_FRC :: false;
+#include_std("graphics/lib.fr");
+SOKOL_BACKEND :: RenderBackend.WGPU;
+GRAPHICS_TARGET_WEB :: true;
+::Sapp.Wgpu;
+
+#use("@/examples/os/libkernel.fr");
+
+// this is what the browser calls when compiled with -dynamiclib
+// it just sees the ones marked #export
+#export
+fn main(argc: i64, argv: *CStr, envp: *CStr, sp: i64) void = {
+    franca_runtime_init(argc, argv, main2, envp, sp);
+}
+
+// this is what you get if you compile without -dynamiclib
+// because get_unique_named looks for void->void overload. 
+// used for testing as an exe with import_wasm. 
+fn main() void = {
+    main2();
+}
+
+// TODO: #use should probably be illegal since it also declares a `main` 
+//       which should conflict with ours, but it's very convient that it works (tho order dependent)
+#use("@/examples/os/user/init.fr");
+
+main2 :: fn() void = {
+    redo_relocations_wasm();
+    
+    @assert_ne(memory_grow(0), -1);
+    if memory_grow(0) == -1 {
+        import("@/examples/os/user/init.fr")'main();
+    };
+    
+    import("@/examples/web/demo.fr")'main();
+}
+
+redo_relocations_wasm :: fn() void #inline = {
+    @run {
+        libc_exports.clear();  // TODO
+        collect_from_scope(libc_exports, Type.scope_of(Overrides), true);
+    };
+
+    globals.heap_next = memory_grow(0).intcast().mul(wasm_page_size).rawptr_from_int();
+    globals.heap_end = globals.heap_next;
+    
+    import_names_raw := @import_symbol("__franca_wasm_import_names");
+    import_names_raw := u8.ptr_from_raw(import_names_raw).slice(1.shift_left(16));
+    i := 0;
+    dowhile {
+        name := import_names_raw&.pop_cstr();
+        if libc_exports.get(name) { addr |
+            table_assign :: import("@/backend/wasm/emit.fr").table_assign;
+            table_assign(i.intcast(), addr.int_from_rawptr().intcast());
+        };
+        
+        i += 1;
+        name.len > 0
+    };
+};
+
+Host :: @struct {
+    jit_instantiate_module :: fn(address: *u8, length: i64, table_start: i64, table_index: u32) void #weak #import("libc");
+    js_fetch_file :: fn(ptr: *u8, len: i64, len_out: *i64, dest_p: *u8, dest_len: i64) *u8 #weak #import("libc");
+    js_performace_now :: fn() f64 #weak #import("libc");
+    // TODO: spawn worker
+    // TODO: sleep worker
+};
+
+globals :: @static(@struct{
+    heap_next: rawptr;
+    heap_end: rawptr;
+});
+
+wasm_page_size :: 65536;
+
+Overrides :: @struct {
+    fetch_file :: fn(ptr: *u8, len: i64, len_out: *i64) *u8 = {
+        p := Host'js_fetch_file(ptr, len, len_out, zeroed(*u8), 0);
+        @assert(p.is_null() || len_out[] == 0);
+        mem := general_allocator().alloc_uninit(u8, len_out[]);
+        p := Host'js_fetch_file(ptr, len, len_out, mem.ptr, mem.len);
+        @assert(p.identical(mem.ptr));
+        mem.ptr
+    }
+
+    mmap :: fn(addr: rawptr, len: i64, prot: i64, flags: i64, fd: Fd, off: i64) rawptr = {
+        len := len.ualign_to(wasm_page_size);
+        start := globals.heap_next;
+        globals.heap_next = globals.heap_next.offset(len);
+        if ptr_diff(globals.heap_next, globals.heap_end) < 0 {
+            len *= 2;
+            prev := memory_grow(len.udiv(wasm_page_size).intcast()).intcast().mul(wasm_page_size);
+            @assert(prev != -1, "oom");
+            @assert_eq(prev, globals.heap_end.int_from_rawptr(), "TODO: someone else is growing the memory");
+            globals.heap_end = globals.heap_end.offset(len);
+        };
+        start
+    };
+    
+    munmap :: fn(addr: rawptr, len: i64) i64 = {
+        0
+    };
+    
+    mprotect :: fn() = 0;
+    
+    clock_gettime :: fn(clock_id: i64, time_spec: *TimeSpec) i64 = {
+        ms := Host'js_performace_now();
+        s := int(ms) / 1000;
+        time_spec[] = (seconds = s, nanoseconds = int((ms - float(s*MS_PER_S)) * NS_PER_MS));
+        0
+    };
+    
+    /*
+    nanosleep :: fn(duration: *TimeSpec, nullable_remainder_out: i64) i64 = {
+        0
+    };
+    
+    pthread_create :: fn(out: *pthread_t, attr: *ThreadAttr, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) i64 = {
+    
+    };
+    */
+};
+
+// returns old size
+memory_grow :: AsmFunctionWasmOnly(fn(page_delta: i32) i32 = (), fn(out) = {
+    out.push(0x00);  // 0 locals
+    out.push(0x20);  // local.get(0)
+    out.push(0x00);  // ^
+    out.push(0x40);  // memory.grow()
+    out.push(0x00);  // ^
+    out.push(0x0B);  // end
+});
+
+// TODO
+// record all calls to table_assign and jit_instantiate_module so i can replay them when spawning a thread
+// 

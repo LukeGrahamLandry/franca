@@ -62,6 +62,14 @@ function write_args(args) {
 
 import { webgpu_wasm_exports, init_gpu, G, ESCAPE_MAIN } from "./target/gfx.js";
 export const imports = {
+    main: {
+        memory: new WebAssembly.Memory({
+          initial: 300,
+          maximum: 1<<(32-16),
+          // TODO: if the module wants unshared, catch the exception and change this to a normal memory. this is stupid. 
+          shared: true,
+        }),
+    },
     webgpu: webgpu_wasm_exports,
     env: {
         fmodf: (a, b) => a % b,
@@ -85,18 +93,6 @@ export const imports = {
             return len;
         },
         putchar: (c) => show(String.fromCharCode(c)),
-        clock_gettime: (clock_id, ptr) => {
-            const ms = performance.now();
-            // @struct(seconds: i64, nanoseconds: i64);
-            const time_spec = new BigInt64Array(
-                Franca.memory.buffer,
-                Number(ptr),
-                2,
-            );
-            const seconds = Math.floor(ms / 1000);
-            time_spec[0] = BigInt(seconds);
-            time_spec[1] = BigInt(Math.floor((ms - seconds*1000) * 1000000));
-        },
         abort: () => {
             throw new Error("called abort");
         },
@@ -105,6 +101,7 @@ export const imports = {
             cancelAnimationFrame(G.animation_id);
             throw new Error("called exit " + status);
         },
+        // TODO: dont call this for passing cli args. jsut have a magic file name?
         mmap: (addr, len_, prot, flags, fd, offset) => {
             const start = FrancaXXX.__heap_base + bump;
 
@@ -113,6 +110,7 @@ export const imports = {
             if (start + len >= FrancaXXX.__heap_end) {
                 const pages = len / page_size + 1n;
                 Franca.memory.grow(Number(pages));
+                show(`JS len=${len} old=${FrancaXXX.__heap_end} new=${FrancaXXX.__heap_end + pages * page_size} \n`)
                 FrancaXXX.__heap_end += pages * page_size;
             }
             return start;
@@ -139,26 +137,26 @@ export const imports = {
             return 0n;
         },
         fsync: (fd) => 0n,
-        fetch_file: (ptr, len, p_file_length) => {
+        fetch_file: (ptr, len, p_file_length) => { throw "fetch_file"; },
+        js_fetch_file: (ptr, len, p_file_length, dest_p, dest_len) => {
             let path = get_wasm_string(ptr, len);
             if (path.startsWith("./")) path = path.slice(2);
             const offset_length = fs_index[path];
             if (offset_length == undefined) return 0n;
             // note: not shadowing the paremeter called 'len' or the worker silently doesn't run and there's no error in the console. 
             const [off, lenXXX] = offset_length;
-            let src = new Uint8Array(fs_bytes, off, lenXXX);
-            const p = imports.env.mmap(0, BigInt(src.byteLength), 0, 0, 0, 0);
-            let dest = new Uint8Array(Franca.memory.buffer, Number(p), src.byteLength);
-            dest.set(src);
-            
             const file_length = new BigInt64Array(
                 Franca.memory.buffer,
                 Number(p_file_length),
                 1,
             );
-            file_length[0] = BigInt(src.byteLength);
+            file_length[0] = BigInt(lenXXX);
+            if (BigInt(lenXXX) > dest_len) return 0n;
             
-            return p;
+            let src = new Uint8Array(fs_bytes, off, lenXXX);
+            let dest = new Uint8Array(Franca.memory.buffer, Number(dest_p), src.byteLength);
+            dest.set(src);
+            return dest_p;
         },
         yield_file: (ptr, len) => {
             const bytes = new Uint8Array(
@@ -172,6 +170,7 @@ export const imports = {
                 name: "a.out",
             });
         },
+        js_performace_now: () => performance.now(),
         null: () => {
             throw new Error("wasm guest tried to call a null function pointer");
         }
@@ -219,6 +218,9 @@ let weak_imports = [
     "strtod", "localtime_r", "time",
     "snprintf",
     "ppoll", "execve",
+    "tcgetattr",
+    "tcsetattr",
+    "clock_gettime",
 ];
 
 for (const it of weak_imports) {
@@ -276,7 +278,9 @@ function get_wasm_string(ptr, len) {
         Number(ptr),
         Number(len),
     );
-    return new TextDecoder().decode(buffer);
+    const wasteofmytime = new ArrayBuffer(buffer.byteLength);
+    new Uint8Array(wasteofmytime).set(new Uint8Array(buffer));
+    return new TextDecoder().decode(wasteofmytime);
 }
 
 self.onmessage = handle;
