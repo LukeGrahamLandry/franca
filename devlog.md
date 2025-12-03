@@ -3,6 +3,12 @@
 
 - import_wasm: do a dumb thing to make memory.grow work
 - get rid of a bunch of libc functions in worker.js since they can use my libc now
+- make -keep-names work on wasm by just exporting everything so you get names in the browser's stack trace
+- hacky thing for openat/getdents without a syscall for now, have to fix that properly eventually. 
+- stop making wasm always !is_linking_libc so now i don't need the stupid for_exports thing anymore
+- don't need the fetch_file hack anymore. just bundle everything in the wasm module like i do for os. 
+  don't need to collect_fs in web/build.fr anymore, have the ui just (SLOWLY) ask for the file contents. 
+- remove todo_inject, use my fake dlopen instead
 
 ## (Dec 2)
 

@@ -2,8 +2,6 @@
 let Franca;
 let start = performance.now();
 let version;
-let fs_index;
-let fs_bytes;
 let canvas;
 
 export async function handleWasmLoaded(wasm, args) {
@@ -91,26 +89,6 @@ export const imports = {
                 i += 1;
             }
         },
-        js_fetch_file: (ptr, len, p_file_length, dest_p, dest_len) => {
-            let path = get_wasm_string(ptr, len);
-            if (path.startsWith("./")) path = path.slice(2);
-            const offset_length = fs_index[path];
-            if (offset_length == undefined) return 0n;
-            // note: not shadowing the paremeter called 'len' or the worker silently doesn't run and there's no error in the console. 
-            const [off, lenXXX] = offset_length;
-            const file_length = new BigInt64Array(
-                Franca.memory.buffer,
-                Number(p_file_length),
-                1,
-            );
-            file_length[0] = BigInt(lenXXX);
-            if (BigInt(lenXXX) > dest_len) return 0n;
-            
-            let src = new Uint8Array(fs_bytes, off, lenXXX);
-            let dest = new Uint8Array(Franca.memory.buffer, Number(dest_p), src.byteLength);
-            dest.set(src);
-            return dest_p;
-        },
         FR_debug_write: (ptr, len) => show(get_wasm_string(ptr, len)),
         js_write: (id, ptr, len) => { 
             switch(id){
@@ -188,6 +166,7 @@ let weak_imports = [
     "clock_gettime",
     "yield_file",
     "puts", "putchar", "abort", "exit", "munmap", "mprotect", "fsync", "fetch_file", "mmap", "write", "null",
+    "posix_getdents", "FR_openat", 
 ];
 
 for (const it of weak_imports) {
@@ -202,8 +181,6 @@ const handle = (_msg) => {
     switch (msg.tag) {
         case "start": {
             version = msg.version;
-            fs_index = msg.fs_index;
-            fs_bytes = msg.fs_bytes;
             canvas = msg.canvas;
             WebAssembly.instantiateStreaming(fetch(`target/${msg.url}?v=${version}`), imports)
                 .then(it => handleWasmLoaded(it, msg.args))

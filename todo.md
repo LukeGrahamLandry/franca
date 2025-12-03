@@ -1,4 +1,5 @@
 
+- need more printf to run the import_c and ssa tests
 - simple standalone wasm web example (without workers) to show you don't need to do my whole os-userspace thing 
   (maybe provide same api as my old ChessBot would be an easy thing that isn't totally trivial)
 - make a driver demo that gives warnings for unused variables

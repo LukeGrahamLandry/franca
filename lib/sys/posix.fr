@@ -60,6 +60,11 @@ openat :: fn(parent: Fd, path: CStr, flags: Mask(O), mode: Mask(S)) SysResult(Fd
         @default => unreachable();
     };
     
+    @if(TODOWASM) if query_current_arch() == .wasm32 {
+        FR_openat :: fn(dirfd: Fd, pathname: CStr, flags: i64, mode: i64) i64 #weak #libc;
+        return Fd.sys_ret(FR_openat(parent, path, flags, mode));
+    };
+    
     errno()[] = 0/*HACK*/;
     Fd.sys_ret(Syscall'openat(parent, path, flags, mode).intcast())
 };
@@ -104,7 +109,7 @@ fn fstatat(parent: Fd, path: CStr, out: *Stat, flags: i64) SysResult(void) = {
     f := choose_inode64_on_applex8664(Syscall'fstatat, Syscall'@"fstatat$INODE64");
     
     @debug_assert_eq(flags, 0, "TODO: remap AT_SYMLINK_NOFOLLOW");
-    result := if current_os() == .linux {
+    result := if current_os() == .linux && query_current_arch() != .wasm32 {
         // old glibc won't give you fstatat with a sane name and i don't want to deal with it
         errno()[] = 0/*HACK*/;
         Syscall'fstatat_nolibc(parent, path, r&, flags)
@@ -307,11 +312,17 @@ opendir :: fn(path: CStr) SysResult(*DIR) = {
 
 readdir :: fn(dir: *DIR) SysResult(*dirent) = {
     r := @if(dir.impl.valid, {
+        @if(IS_BOOTSTRAPPING) unreachable();
         self, entry := (dir.impl&, dir.entry&);
         @if(self.done) return(Ok = zeroed(*dirent), Err = (_ = 0));
         if self.cur >= self.end {
             self.cur = 0;
-            self.end = Syscall'getdents(self.fd, self.buf.ptr, self.buf.len, @ref 0/*macos*/);
+            self.end = if TODOWASM && query_current_arch() == .wasm32 {
+                posix_getdents :: fn(f: Fd, buf: *u8, len: i64, mode: i64) i64 #weak #libc;
+                posix_getdents(self.fd, self.buf.ptr, self.buf.len, 0)
+            } else {
+                Syscall'getdents(self.fd, self.buf.ptr, self.buf.len, @ref 0/*macos*/)
+            };
             self.done = self.end <= 0;
             if self.done {
                 return(sys_ret(*dirent, self.end))

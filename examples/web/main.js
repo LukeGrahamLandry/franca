@@ -76,7 +76,7 @@ const toggle_worker = () => {
             compiler.name,
             "-target",
             document.getElementById("target").value,
-            ...(dbg.length == 0 ? [] : ["-d", dbg]),
+            ...(dbg.length == 0 ? [] : (dbg.includes("-") ? dbg.split(" ") : ["-d", dbg])),
         ];
         worker = new Worker(`worker.js?v=${version}`, { type: "module" });
         worker.onmessage = handle;
@@ -101,7 +101,6 @@ const toggle_worker = () => {
         enable_graphics(need_canvas);
         
         let surface = canvas.transferControlToOffscreen();
-        
         const send = (handler, ...args) => 
             worker.postMessage({ tag: "event", handler, args });
         if (need_canvas) add_events(0, canvas, send);
@@ -113,7 +112,7 @@ const toggle_worker = () => {
         surface.height = canvas.clientHeight * window.devicePixelRatio;
         if (!need_canvas) surface = undefined;
         let transfer = need_canvas ? [surface] : [];
-        worker.postMessage({ tag: "start", url: url, args: args, version: version, fs_bytes: fs_bytes, fs_index: manifest.filesystem, canvas: surface }, transfer);
+        worker.postMessage({ tag: "start", url: url, args: args, version: version, canvas: surface }, transfer);
         document.getElementById("btn").innerText = "Kill";
     } else {
         worker.terminate();
@@ -124,19 +123,35 @@ const toggle_worker = () => {
     }
 };
 
+// this is a super slow way to do this, 
+// eventually i'll have the worker be persistant and everything just live in one canvas 
+async function get_file(path) {
+    return new Promise((resolve) => {
+        let url = "demo.wasm"; 
+        const args = [url, "-yield", path];
+        let w = new Worker(`worker.js?v=${version}`, { type: "module" });
+        w.onmessage = async (msg) => {
+            if (msg.data.tag != "download") {
+                console.log(msg.data);
+            } else {
+                w.terminate();
+                resolve(await msg.data.content.text());
+            }
+        };
+        w.postMessage({ tag: "start", url: url, args: args, version: version }, []);
+    });
+}
+
 let manifest = await (await fetch("target/manifest.json?v=" + manifest_version)).json();
 const version = manifest.commit.slice(0, 8);
 console.log(manifest);
 document.getElementById("version").innerText = manifest.commit;
-let fs_bytes = await (await fetch(`target/${manifest.commit}.txt`)).arrayBuffer();
 
 const load_example = async (path) => {
-    let it = manifest.filesystem[path];
-    if (it === undefined) alert(path + " not found");
-    let [off, len] = it;
-    let src = new TextDecoder().decode(new Uint8Array(fs_bytes, off, len));
+    document.getElementById("err").innerText = "SLOW\n";
+    document.getElementById("in").value = await get_file(path); 
+    document.getElementById("err").innerText = "";
     document.getElementById("stale").hidden = false;
-    document.getElementById("in").value = src;
 };
 const show_examples = (lang_i) => {
     let src = `<option selected disabled> Load Example </option>`;

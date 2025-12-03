@@ -24,6 +24,15 @@ main :: fn() void = {
         @case("kaleidoscope") => kaleidoscope_main();
         @default => println("other");
     };
+    
+    range(0, a.len - 1) { i |
+        value := a[i + 1].str();
+        if a[i] == "-yield" {
+            bytes := read_entire_file_or_crash(temp(), value);
+            yield_file :: fn(p: *u8, l: i64) void #weak #libc;
+            yield_file(bytes.ptr, bytes.len);
+        };
+    };
 }
 
 #use("@/examples/kaleidoscope.fr")
@@ -86,17 +95,8 @@ get_args :: fn(default_src: Str) CompileArgs = {
             out.logging = value;
         }
         
-        // TODO: this is dumb. should do a more official wasi thing? 
         if a[i] == "-file" {
-            if query_current_arch() == .wasm32 {
-                fetch_file :: fn(ptr: *u8, name_len: i64, len_out: *i64) *u8 #weak #import("libc");
-                length := -1;
-                result := fetch_file(value.ptr, value.len, length&);
-                @assert(!result.is_null() && length >= 0, "failed to read %", value);
-                out.src = result.slice(length);
-            } else {
                 out.src = read_entire_file_or_crash(temp(), value);
-            }
         }
         if a[i] == "-target" {
             out.target.type = @if(value == "wasm-jit", .JitOnly, .Exe);
@@ -124,87 +124,12 @@ FnTypeOf :: fn(fid: FuncId) Type #fold = {
     intern_type(Fn = f_ty)
 }
 
-for_exports :: fn($body: @Fn(name: Str, addr: rawptr) void #duplicated) void = {
-    do_export :: fn(name: Str, $T: Type, $F: FuncId) void => {
-        ff: T : F;
-        f: rawptr = ff;
-        body(name, f);
-    };
-   
-    WellKnown :: import("@/examples/os/user/libc/string.fr");
-    inline_for get_constants(WellKnown) { $name |
-        fid :: get_constant(FuncId, WellKnown, name[]).unwrap();
-        do_export(::name[].str(), FnTypeOf(fid), fid);
-    };
-    
-    do_export("labs", @Fn(c: i64) i64, fn(c) = { import("@/examples/os/user/libc/stdlib.fr")'labs(c) });
-    do_export("puts", @Fn(c: CStr) i32, fn(c) = { import("@/examples/os/user/libc/stdio.fr")'puts(c) });
-    do_export("putchar", @Fn(c: u8) i32, fn(c) = { import("@/examples/os/user/libc/stdio.fr")'putchar(c) });
-    
-    do_export("exit", @Fn(c: i32) Never, fn(c) = { Syscall'exit(c.intcast()) });
-    do_export("write", @Fn(fd: Fd, p: *u8, l: i64) i64Result, Syscall'write);
-    do_export("mprotect", @Fn(a: rawptr, b: i64, c: i64) voidResult, Syscall'mprotect);
-    do_export("mmap", @Fn(a: rawptr, b: i64, c: i64, d: i64, e: i32, f: i64) i64, Syscall'mmap);
-    do_export("munmap", @Fn(a: rawptr, b: i64) voidResult, Syscall'munmap);
-    do_export("fsync", @Fn(a: u32) voidResult, fn(a) voidResult = (value = 0));
-    jit_instantiate_module :: fn(a: *u8, b: i64, c: i64, d: u32) void #weak #import("libc");
-    do_export("jit_instantiate_module", @Fn(a: *u8, b: i64, c: i64, d: u32) void, jit_instantiate_module);
-
-    do_export("calloc", @Fn(m: u32, n: u32) i64, fn(m, n) = {
-        n := m.mul(n).zext().align_to(65536);
-        Syscall'mmap(zeroed(rawptr), n, 0, 0, (fd = -1), 0)  // only works on wasm cause i don't care about flags
-    });
-    
-    Run :: import("@/examples/import_wasm/run.fr");
-    do_export("printf", @Fn(fmt: *u8, va: CVariadic) i32, fn(fmt, va) = {
-        // TODO: this won't work on amd64 (env + vararg)
-        out := u8.list(temp());
-        Run'printf_impl(out&, (ptr = fmt), va&.start());
-        print(out.items());
-        out.len.intcast()
-    });
-    
-    do_export("sprintf", @Fn(dest: *u8, fmt: *u8, va: CVariadic) i32, fn(dest, fmt, va) = {
-        // TODO: this won't work on amd64 (env + vararg)
-        out := u8.list(temp());
-        Run'printf_impl(out&, (ptr = fmt), va&.start());
-        dest.slice(out.len).copy_from(out.items());
-        out.len.intcast()
-    });
-    
-    do_export("clock_gettime", @Fn(c: i64, p: *TimeSpec) void, fn(c, p) = { Syscall'clock_gettime(c, p); });
-    
-    fetch_file :: fn(ptr: *u8, len: i64, len_out: *i64) *u8 #weak #import("libc");
-    do_export("fetch_file", @Fn(p: *u8, l: i64, len_out: *i64) *u8, fetch_file);
-    
-    do_export("fmodf", @Fn(a: f32, b: f32) f32, @as(@Fn(a: f32, b: f32) f32) fmodf);
-    fmod :: fn(a: f64, b: f64) f64 #libc;
-    do_export("fmod", @Fn(a: f64, b: f64) f64, fmod);
-    do_export("sinf", @Fn(a: f32) f32, @as(@Fn(a: f32) f32) sinf);
-    do_export("cosf", @Fn(a: f32) f32, @as(@Fn(a: f32) f32) cosf);
-    
-    weak :: Run.weak_imports;
-    inline_for weak { $name |
-        // TODO: use the right signetures so you actually get the message. 
-        do_export(::name[], @Fn() void, fn() = @panic("comptime code tried to call a weak import"));
-    };
-}
-
 yield_module_main :: fn(m: *Qbe.Module) void = {
     ::enum(@type m.goal.type);
     backend'compile_suspended(m);
     if m.goal.type == .JitOnly {
-        for_exports { name, f |
-            id := m.intern(name);
-            use_symbol(m, id) { s |
-                ::enum(@type s.kind);
-                // it's fine if they declared thier own function with one of the well known names (ie. backend/test/strcmp.ssa)
-                if s.kind == .Pending {
-                    m.put_jit_addr(id, f);
-                };
-            };
-        };
-    
+        import("@/backend/meta/qbe_frontend.fr")'fill_from_libc(m);
+
         m.make_exec();
         f, _ := m.get_addr(m.intern("main")) 
             || @panic("missing function main()");

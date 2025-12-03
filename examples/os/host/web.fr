@@ -31,10 +31,46 @@ main2 :: fn() void = {
     Vfs'init_vfs();
     xxx := Vfs.fs;  // :compilerbug ?? Type Error: field 'fs' does not exist
     xxx.stdin.poll = fn(a, b) = ();
-    //shell.strace = true;
     
+    // the reverse: anything we imported from js and didn't override should still be accessible with dlopen 
+    _ := reach_webgpu_imports();
+    for_wasm_imports { i, name |
+        if libc_exports.get(name).is_none() {
+            libc_exports.insert(name, i.rawptr_from_int(), general_allocator());
+        };
+    };
+
+    shell.strace = cli_args().contains(fn(it) => it[] == "-strace");
+    context(DefaultContext)[].prefer_syscalls = false;
     import("@/examples/web/demo.fr")'main();
 }
+
+reach_webgpu_imports :: fn() []rawptr #noinline = @run {
+    force_reachable := rawptr.list(ast_alloc());
+    WGPU :: import("@/target/franca/webgpu.g.fr");
+    fr := current_compiler_context();
+    fid := get_constant(FuncId, Sapp.Wgpu, @symbol francaRequestState).unwrap();
+    addr := fr.get_jitted(fid);
+    force_reachable&.push(addr);
+    for WGPU.get_constants() { n |
+        name := n.str();
+        if name.starts_with("wgpu") {
+            fid := get_constant(FuncId, WGPU, n).unwrap();
+            addr := fr.get_jitted(fid);
+            force_reachable&.push(addr);
+        };
+    };
+    fmodf :: fn() void #libc;
+    fmod :: fn() void #libc;
+    sinf :: fn() void #libc;
+    cosf :: fn() void #libc;
+    for (@slice(fmodf, fmod, sinf, cosf)) { fid |
+        addr := fr.get_jitted(fid);
+        force_reachable&.push(addr);
+    };
+    
+    force_reachable.items()
+};
 
 redo_relocations_wasm :: fn() void #inline = {
     @run {
@@ -44,24 +80,28 @@ redo_relocations_wasm :: fn() void #inline = {
     globals.heap_next = memory_grow(0).intcast().mul(wasm_page_size).rawptr_from_int();
     globals.heap_end = globals.heap_next;
     
+    for_wasm_imports { i, name |
+        if libc_exports.get(name) { addr |
+            table_assign :: import("@/backend/wasm/emit.fr").table_assign;
+            table_assign(i.intcast(), addr.int_from_rawptr().intcast());
+        };
+    };
+};
+
+for_wasm_imports :: fn($body: @Fn(i: i64, name: Str) void) void = {
     import_names_raw := @import_symbol("__franca_wasm_import_names");
     import_names_raw := u8.ptr_from_raw(import_names_raw).slice(1.shift_left(16));
     i := 0;
     dowhile {
         name := import_names_raw&.pop_cstr();
-        if libc_exports.get(name) { addr |
-            table_assign :: import("@/backend/wasm/emit.fr").table_assign;
-            table_assign(i.intcast(), addr.int_from_rawptr().intcast());
-        };
-        
+        @if(name.len > 0) body(i, name);
         i += 1;
         name.len > 0
     };
-};
+}
 
 Host :: @struct {
     jit_instantiate_module :: fn(address: *u8, length: i64, table_start: i64, table_index: u32) void #weak #import("libc");
-    js_fetch_file :: fn(ptr: *u8, len: i64, len_out: *i64, dest_p: *u8, dest_len: i64) *u8 #weak #import("libc");
     js_performace_now :: fn() f64 #weak #import("libc");
     js_write :: fn(id: i64, ptr: *u8, len: i64) i64 #weak #import("libc");
     js_worker_stop :: fn(status: i64) void #weak #import("libc");
@@ -78,17 +118,6 @@ globals :: @static(@struct{
 wasm_page_size :: 65536;
 
 Overrides :: @struct {
-    fetch_file :: fn(ptr: *u8, len: i64, len_out: *i64) *u8 = {
-        len_out[] = -1;
-        p := Host'js_fetch_file(ptr, len, len_out, zeroed(*u8), 0);
-        @if(p.is_null() && len_out[] == -1) return(p);
-        @assert(p.is_null() || len_out[] == 0);
-        mem := general_allocator().alloc_uninit(u8, len_out[]);
-        p := Host'js_fetch_file(ptr, len, len_out, mem.ptr, mem.len);
-        @assert(p.identical(mem.ptr));
-        mem.ptr
-    }
-    
     yield_file :: fn(ptr: *u8, len: i64) void = {
         r := Host'js_write(0xBBBB0001, ptr, len);
         @assert_eq(r, len, "failed yield_file");
