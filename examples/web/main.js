@@ -61,7 +61,7 @@ const handle = (_msg) => {
                 handle(msg);
             };
             running_threads.push(w);
-            w.postMessage({ tag: "start", url: "demo.wasm", args: [], version: version, child: msg.child, memory: msg.memory });
+            w.postMessage({ tag: "start", args: [], version: version, child: msg.child, memory: msg.memory });
             break
         }
         default:
@@ -110,15 +110,22 @@ const toggle_worker = async () => {
         
         let compiler_i = document.getElementById("compiler").value;
         const compiler = manifest.compilers[parseInt(compiler_i)];
-        let url = "demo.wasm"; 
         document.getElementById("err").innerText = "";
-        document.getElementById("time").innerText = "(" + url + ")";
+        document.getElementById("time").innerText = ".";
         document.getElementById("out").value = "";
         document.getElementById("stale").hidden = true;
         const input = document.getElementById("in").value;
         const dbg = document.getElementById("dbg").value;
+        
+        {
+            const url = new URL(window.location);
+            url.searchParams.set("dbg", dbg);
+            if (dbg === "") url.searchParams.delete("dbg");
+            history.replaceState(null, '', url);
+        }
+        
         const args = [
-            url,
+            "demo.wasm",
             "---literal_input",
             input,
             "-lang",
@@ -161,7 +168,7 @@ const toggle_worker = async () => {
         surface.height = canvas.clientHeight * window.devicePixelRatio;
         if (!need_canvas) surface = undefined;
         let transfer = need_canvas ? [surface] : [];
-        worker.postMessage({ tag: "start", url: url, args: args, version: version, canvas: surface, memory: new_memory() }, transfer);
+        worker.postMessage({ tag: "start", args: args, version: version, canvas: surface, memory: new_memory(), devicePixelRatio: window.devicePixelRatio }, transfer);
         document.getElementById("btn").innerText = "Kill";
     } else {
         // don't just reset because if they pressed kill maybe its because it hung
@@ -177,8 +184,7 @@ const toggle_worker = async () => {
 // eventually i'll have the worker be persistant and everything just live in one canvas 
 async function get_file(path) {
     return new Promise((resolve) => {
-        let url = "demo.wasm"; 
-        const args = [url, "-yield", path];
+        const args = ["demo.wasm", "-yield", path];
         let w = get_worker(); 
         w.onmessage = async (msg) => {
             if (msg.data.tag != "download") {
@@ -186,16 +192,17 @@ async function get_file(path) {
             } else {
                 w.postMessage({ tag: "reset" });
                 thread_pool.push(w);
+                document.getElementById("time").innerText = ".";
                 resolve(await msg.data.content.text());
             }
         };
-        w.postMessage({ tag: "start", url: url, args: args, version: version, memory: new_memory() }, []);
+        w.postMessage({ tag: "start",args: args, version: version, memory: new_memory() }, []);
     });
 }
 
 function new_memory() {
     return new WebAssembly.Memory({
-        initial: 300,
+        initial: 300,  // write_args grows it if needed
         maximum: 1 << (32 - 16),
         // TODO: if the module wants unshared, catch the exception and change this to a normal memory. this is stupid. 
         shared: true,
@@ -242,13 +249,40 @@ document.getElementById("btn").onclick = toggle_worker;
 
 document.getElementById("compiler").onchange = function () {
     document.getElementById("stale").hidden = false;
-    show_examples(parseInt(this.value));
+    const i = parseInt(this.value);
+    show_examples(i);
+    
+    const url = new URL(window.location);
+    url.searchParams.delete("file");
+    history.replaceState(null, '', url);
 };
 document.getElementById("example").onchange = function () {
     load_example(this.value);
+    
+    const url = new URL(window.location);
+    url.searchParams.set("file", this.value);
+    history.replaceState(null, '', url);
 };
 show_compilers();
-await load_example(manifest.compilers[0].examples[navigator.gpu === undefined ? 1 : 0]);
+
+const p = new URLSearchParams(window.location.search);
+const dbg = p.get("dbg");
+if (dbg !== null) document.getElementById("dbg").value = dbg;
+
+const path = p.get("file");
+if (path !== null) {
+    for (const [i, it] of manifest.compilers.entries()) {
+        let idx = it.examples.indexOf(path);
+        if (idx != -1) {
+            show_examples(i);
+            document.getElementById("compiler").options.selectedIndex = i;
+            document.getElementById("example").options.selectedIndex = idx+1;
+        }
+    }
+    await load_example(path);
+} else {
+    await load_example(manifest.compilers[0].examples[navigator.gpu === undefined ? 1 : 0]);
+}
 
 {
     let targets = ["wasm-jit", "wasm-aot", "arm64-macos", "amd64-macos", "arm64-linux", "amd64-linux", "riscv64-linux"];
@@ -263,6 +297,7 @@ enable_graphics(true);  // TODO: only do this if the program being compiled need
 toggle_worker();
 
 document.getElementById("all").onclick = async () => {
+    let start = performance.now();
     document.getElementById("target").options.selectedIndex = 0;
     let saved = document.getElementById("in").value;
     let err = document.getElementById("err");
@@ -289,10 +324,12 @@ document.getElementById("all").onclick = async () => {
         }
     }
     compiler.options.selectedIndex = saved_c;
+    let msg = `Passed ${passed}/${all} tests in ${Math.round(performance.now() - start)}ms.`;
     document.getElementById("out").value =
-        `Passed ${passed}/${all} tests.\n\n${results}`;
+        `${msg}\n\n${results}`;
     document.getElementById("in").value = saved;
     document.getElementById("stale").hidden = false;
+    document.getElementById("time").innerText = msg; 
 };
 
 let line = "";

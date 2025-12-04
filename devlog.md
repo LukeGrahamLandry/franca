@@ -1,4 +1,23 @@
 
+## (Dec 4)
+
+- make Jit.Event.Close less n^2
+- reuse the wasm module on the worker, just reinstantiate
+- retyping `-strace` every time is going to drive me crazy. use searchParams. 
+- i want should_skip_frame to work in the browser so you don't burn 40% of a cpu on WindowServer while the tab is open. 
+  - wasted some time on making it over complicated with switching between getanimationframe 
+    and ever increasing setinterval so instead of skipping thjat frame you'd delay the next frame. 
+    tried to do the pre_frame stuff in get_swapchain once you know you're actually going to render.
+    got to a point where it works by copying to a different texture and then when you want to 
+    skip a frame you copy the saved one back to the real texture. 
+  - very confusing if you accidently release null and then reuse that slot, so check that.  
+    manifested as occlusionQuerySet being some junk. 
+  - i was assuming that the implicit present(surface) was after you returned from the requestAnimationFrame
+    callback, but it only happens if you call getCurrentTexture. so i can get the behaviour i want 
+    where you choose to skip the frame at the end by always rendering into a different texture 
+    and if !noframe at the end, copy it into the getCurrentTexture. 
+  - now just need to resize the scratch buffer
+
 ## (Dec 3)
 
 - import_wasm: do a dumb thing to make memory.grow work

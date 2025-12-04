@@ -7,12 +7,13 @@ main :: fn() void = {
     src&.push_all("""#include_std("lib/core.fr");""");
     src&.push_all(args.src);
     // :HackyGraphicsDetection
-    gfx := args.src.contains("graphics/lib.fr") && args.target.type == .JitOnly && query_current_arch() == .wasm32;
+    gfx := args.src.contains("graphics/lib.fr");
     if gfx {
         src&.push_all("\n:: Sapp.Wgpu;");
         src&.push_all("\nSOKOL_BACKEND :: RenderBackend.WGPU;");
         src&.push_all("\nGRAPHICS_TARGET_WEB :: true;");
-        src&.push_all("\nEASY_GRAPHICS_IS_JITTING_HACK :: false;");
+        src&.push_all("\nEASY_GRAPHICS_IS_JITTING_HACK :: true;");
+        @assert(args.target.type == .JitOnly && query_current_arch() == .wasm32, "TODO: web cross compile graphcis programs");
     };
     src := src.items();
     
@@ -23,7 +24,7 @@ main :: fn() void = {
     vtable := init_driver_vtable();
     opts := vtable.default_build_options();
     opts.retain_function_names = true;
-    if true {  // TODO: ui toggle for this
+    if false {  // TODO: ui toggle for this
         it := opts.safety_checks&;
         it.insert(.Bounds, false);
         it.insert(.DebugAssertions, false);
@@ -53,6 +54,7 @@ main :: fn() void = {
     fid := c.get_unique_named("main") || @panic("no function called 'main'");
     
     SAME_MODULE :: false;
+    m := general_allocator().box_uninit(QbeModule);
     f := if !SAME_MODULE {
         // TODO: this is what i want but unfortunatly it's slower
         //       because it doesn't allow jit shims so it has to compile the whole program
@@ -60,7 +62,6 @@ main :: fn() void = {
         
         name := c.fmt_fn_name(fid);
     
-        m := general_allocator().box_uninit(QbeModule);
         backend'init_module(m, args.target);
         m.set_debug_types(args.logging, true);
         self.other_module&.push(m, self.get_alloc());
@@ -84,6 +85,7 @@ main :: fn() void = {
         context(DefaultContext)[].cli_arguments = empty();
         f();
     };
+    @if(!SAME_MODULE) drop(m);
     c'vtable'destroy_compiler(c.data);
 }
 

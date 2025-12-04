@@ -1,5 +1,6 @@
 
 let Franca;
+let module;
 let version;
 let canvas;
 
@@ -16,8 +17,9 @@ function handle_child_thread(child) {
     self.postMessage({ tag: "recycle" });
 }
 
-export async function handleWasmLoaded(wasm, args, child) {
-    Franca = wasm.instance.exports;
+export async function handleWasmLoaded(wasm_instance, msg) {
+    const { args, child, devicePixelRatio } = msg;
+    Franca = wasm_instance.exports;
     if (child !== undefined) {
         handle_child_thread(child);
         return;
@@ -25,7 +27,7 @@ export async function handleWasmLoaded(wasm, args, child) {
     
     let load_end = performance.now();
 
-    if (canvas !== undefined) await init_gpu(wasm, canvas);
+    if (canvas !== undefined) await init_gpu(wasm_instance, canvas, devicePixelRatio);
     
     let ok = true;
     let p = write_args(args);
@@ -44,6 +46,14 @@ export async function handleWasmLoaded(wasm, args, child) {
 
 // i this so much
 function write_args(args) {
+    // this is important even without the arguments because the 300 
+    // starting pages is arbitrary and might not be enough for the module
+    let extra = Franca.__stackbase.value - (Franca.memory.grow(0) * 65536);
+    if (extra > 0) {
+        let pages = Math.round((extra + 65535) / 65536);
+        Franca.memory.grow(pages);
+    }
+    
     var e = new TextEncoder();
     let length = (args.length + 1) * 8;
     let off = length;
@@ -52,7 +62,7 @@ function write_args(args) {
         length += args[i].byteLength + 1;
     }
     
-    length += (8 - length / 8 * 8);
+    length = Math.round((length + 15) / 16) * 16;
     let p = BigInt(Franca.__stackbase.value) - BigInt(length);
     Franca.__stackbase.value = Number(p);
     let pointers = new DataView(Franca.memory.buffer);
@@ -79,6 +89,14 @@ export const imports = {
         fmod: (a, b) => a % b,
         sinf: (a) => Math.sin(a),
         cosf: (a) => Math.cos(a),
+        sqrt: (a) => Math.sqrt(a),
+        pow: (a, b) => Math.pow(a, b),
+        acos: (a) => Math.acos(a),
+        cos: (a) => Math.cos(a),
+        fabs: (a) => Math.fabs(a),
+        floor: (a) => Math.floor(a),
+        ceil: (a) => Math.ceil(a),
+
         js_worker_stop: (status) => {
             let G = get_G();
             if (status == 0n) throw "called exit 0";
@@ -204,9 +222,18 @@ function handle(_msg) {
             imports.main.memory = msg.memory;
             version = msg.version;
             canvas = msg.canvas;
-            WebAssembly.instantiateStreaming(fetch(`target/${msg.url}?v=${version}`), imports)
-                .then(it => handleWasmLoaded(it, msg.args, msg.child))
-                .catch(show_error);
+            if (module === undefined) {
+                WebAssembly.instantiateStreaming(fetch(`target/demo.wasm?v=${version}`), imports)
+                    .then(it => { 
+                        module = it.module;
+                        handleWasmLoaded(it.instance, msg)
+                    })
+                    .catch(show_error);
+            } else {
+                WebAssembly.instantiate(module, imports)
+                    .then(it => handleWasmLoaded(it, msg))
+                    .catch(show_error);
+            }
             break;
         }
         case "event": {
@@ -214,7 +241,7 @@ function handle(_msg) {
             if (!G.valid || G.I === null || canvas === undefined) break;
             msg.args[0] = G.I;
             if (msg.handler == "resize_event") {
-                let [clientWidth, clientHeight, devicePixelRatio] = [msg.args[4], msg.args[5], msg.args[6]];
+                let [clientWidth, clientHeight, devicePixelRatio] = [msg.args[2], msg.args[3], msg.args[4]];
                 canvas.width = clientWidth * devicePixelRatio;
                 canvas.height = clientHeight * devicePixelRatio;
             }
@@ -228,6 +255,7 @@ function handle(_msg) {
             canvas = undefined;
             known_wasm_jit_event = 0n;
             imports.main.memory = undefined;
+            // not resetting `module`, it gets reused
             reset_G();
             break
         }

@@ -1,4 +1,6 @@
 
+- make sure not to keep sending events after a graphics program panics
+- don't hardcode pixel format in init_browser_wip_frame
 - implement threads in import_wasm for tests/exe/wasm.fr
 - need more printf to run the import_c and ssa tests
 - simple standalone wasm web example (without workers) to show you don't need to do my whole os-userspace thing 

@@ -25,9 +25,11 @@ RealGraphicsState :: @struct {
     depth_view: WGPU.TextureView;
     msaa_view: WGPU.TextureView;
     swapchain_view: WGPU.TextureView;
-    old_frame: WGPU.TextureView;
     
+    wip_frame: Ty(WGPU.Texture, WGPU.TextureView);
     noframe: bool;
+    is_browser: bool;
+    is_animation_frame: bool;
 };
 
 // TODO: do i have to do anything to get logging info? 
@@ -92,7 +94,7 @@ pre_init :: fn(sapp: *Sapp.Self) void = {
     
     web.config = (
         device = web.device,
-        usage = (_ = WGPU.TextureUsage.RenderAttachment),
+        usage = (_ = @or(WGPU.TextureUsage.CopySrc, WGPU.TextureUsage.RenderAttachment)),
         format = caps.formats[],
         presentMode = .Fifo,
         alphaMode = caps.alphaModes[],
@@ -100,7 +102,6 @@ pre_init :: fn(sapp: *Sapp.Self) void = {
         height = trunc sapp.framebuffer_height,
     );
     web.surface.configure(web.config&);
-    
     // TODO: what about depth texture / msaa :DEPTH
 }
 
@@ -111,10 +112,19 @@ fn get_swapchain(wgpu: *GraphicsState) Sg.WgpuSwapchain = (
 );
 
 pre_frame :: fn(sapp: *Sapp.Self) void = {
-    surface_tex := zeroed WGPU.SurfaceTexture;
     web := sapp.webgpu&;
+    
+    if web.is_browser {
+        web.swapchain_view = web.wip_frame._1;
+    } else {
+        release(get_current_surface(web));
+    };
+}
+
+get_current_surface :: fn(web: *GraphicsState) WGPU.Texture = {
     web.instance.processEvents();  // TODO: does this do anything? does it need to go at the end?
     
+    surface_tex := zeroed WGPU.SurfaceTexture;
     web.surface.getCurrentTexture(surface_tex&);
     
     ::enum(@type surface_tex.status);
@@ -128,18 +138,76 @@ pre_frame :: fn(sapp: *Sapp.Self) void = {
     if !@is(surface_tex.status, .SuccessOptimal, .SuccessSuboptimal) {
         @panic("getCurrentTexture");
     };
-    @debug_assert(!surface_tex.texture._.is_null());
+    @debug_assert(!surface_tex.texture._.is_null(), "failed getCurrentTexture");    
     web.swapchain_view = createView(surface_tex.texture, zeroed(*WGPU.TextureViewDescriptor));
-    release(surface_tex.texture);
-    @debug_assert(!web.swapchain_view._.is_null());    
+    @debug_assert(!web.swapchain_view._.is_null(), "failed to create swapchain_view");   
+    surface_tex.texture 
 }
 
 post_frame :: fn(sapp: *Sapp.Self) void = {
     web := sapp.webgpu&;
-    release(web.swapchain_view);
-    web.swapchain_view = zeroed @type web.swapchain_view;
-    @if(web.noframe) return();
-    present(web.surface);
+    if web.is_browser {
+        @if(web.noframe) return();
+        surface_tex := get_current_surface(web);
+        copy_scratch_to_surface(web, surface_tex);
+        release(surface_tex);
+        release(web.swapchain_view);
+    } else {
+        release(web.swapchain_view);
+        web.swapchain_view = zeroed @type web.swapchain_view;
+        @if(web.noframe) return();
+        present(web.surface);
+    };
+}
+
+copy_scratch_to_surface :: fn(web: *GraphicsState, surface_tex: WGPU.Texture) void = {
+    // maybe wasteful to not do it as part of the same encoder as the rest of the frame, 
+    // but its not like one copy is slow so it's fine for now.  
+    q := web.device.getQueue();
+    enc := createCommandEncoder(web.device, @ref(zeroed WGPU.CommandEncoderDescriptor));
+    dest, src := (surface_tex, web.wip_frame._0);
+    enc.copyTextureToTexture(
+        @ref(@as(WGPU.TexelCopyTextureInfo) (texture = src, origin = zeroed(WGPU.Origin3D))), 
+        @ref(@as(WGPU.TexelCopyTextureInfo) (texture = dest, origin = zeroed(WGPU.Origin3D))), 
+        @ref(@as(WGPU.Extent3D) (width = web.config.width, height = web.config.height)),
+    );
+    buf := finish(enc, @ref(zeroed WGPU.CommandBufferDescriptor));
+    submit(q, 1, buf&);
+    release(buf);
+    release(enc);
+    release(q);
+}
+
+init_browser_wip_frame :: fn(web: *GraphicsState) void = {
+    if web.is_browser {
+        ::Sg.Webgpu;
+        release(web.wip_frame._0);
+        release(web.wip_frame._1);
+    };
+    ::Sg.Webgpu;
+    tex := createTexture(web.device, @ref(@as(WGPU.TextureDescriptor) (
+        label = "saved-frame",
+        usage = (_ = @or(WGPU.TextureUsage.CopySrc, WGPU.TextureUsage.CopyDst, WGPU.TextureUsage.RenderAttachment)),
+        dimension = ._2D,
+        size = (
+            width = web.config.width,
+            height = web.config.height,
+        ),
+        format = .BGRA8Unorm, // TODO: navigator.gpu.getPreferredCanvasFormat(),
+        mipLevelCount = 1,
+        sampleCount = 1,
+    )));
+    view := createView(tex, @ref(@as(WGPU.TextureViewDescriptor)(
+        usage = (_ = 0),
+        label = "saved-frame",
+        dimension = ._2D,
+        mipLevelCount = 1,
+        arrayLayerCount = 1,
+        aspect = .All,
+    )));
+    @assert(!tex._.is_null(), "failed to create wip_frame");
+    web.wip_frame = (tex, view);
+    web.is_browser = true;
 }
 
 native_shutdown :: fn(sapp: *Sapp.Self) void = {
@@ -168,31 +236,35 @@ Impl :: @struct {
 }
 
 // this asks the js side to call francaSaveState
-francaRequestState :: fn(web: *Impl, frame: @FnPtr(web: *Impl) bool, init: @FnPtr(web: *Impl, adapter: WGPU.Adapter, device: WGPU.Device, surface: WGPU.Surface, width: i64, height: i64, devicePixelRatio: f64) void) void #import("webgpu");
+francaRequestState :: fn(web: *Impl, frame: @FnPtr(web: *Impl) void, francaSaveState: @FnPtr(web: *Impl, adapter: WGPU.Adapter, device: WGPU.Device, surface: WGPU.Surface, w: f64, h: f64, devicePixelRatio: f64) void) void #import("webgpu");
 
 fn run(web: *Impl, desc: *Sapp.Desc) Never = {
     web.env = get_dynamic_context();
-    francaRequestState(web, fn(web: *Impl) bool = {
+    francaRequestState(web, fn(web: *Impl) void = {
         set_dynamic_context(web.env);
         web.common().frame();
-        web.common()[].webgpu.noframe
     }, francaSaveState);
     unreachable()
 }
 
 #export
-fn francaSaveState(web: *Impl, adapter: WGPU.Adapter, device: WGPU.Device, surface: WGPU.Surface, width: i64, height: i64, devicePixelRatio: f64) void = {
+fn francaSaveState(web: *Impl, adapter: WGPU.Adapter, device: WGPU.Device, surface: WGPU.Surface, w: f64, h: f64, devicePixelRatio: f64) void = {
     set_dynamic_context(web.env);
     sapp := web.common();
     sapp.webgpu.adapter = adapter;
     sapp.webgpu.device = device;
     sapp.webgpu.surface = surface;
     sapp.valid = true;
-    sapp.framebuffer_width = width;
-    sapp.framebuffer_height = height;
-    sapp.window_width = width;
-    sapp.window_height = height;
+    // confusing that these are already multiplied by devicePixelRatio but not in resize event
+    sapp.framebuffer_width = w.int();  
+    sapp.framebuffer_height = h.int();
+    sapp.window_width = (w / devicePixelRatio).int();
+    sapp.window_height = (h / devicePixelRatio).int();
     sapp.dpi_scale = devicePixelRatio.cast();
+    
+    sapp.webgpu.config.width =  sapp.framebuffer_width.trunc();
+    sapp.webgpu.config.height = sapp.framebuffer_height.trunc();
+    init_browser_wip_frame(sapp.webgpu&);
 }
 
 fn set_icon(web: *Impl, desc: []Sapp.ImageDesc) void = {
@@ -269,7 +341,14 @@ fn key_event(web: *Impl, type: Sapp.EventType, key: u32, alt: bool, ctrl: bool, 
     set_dynamic_context(web.env);
     sapp.init_event(type);
     sapp.event.key_code = @as(Sapp.Keycode) @as(u16) key.trunc();
+    if key == 13 {
+        sapp.event.key_code = .ENTER;
+    };
     sapp.event.key_repeat = repeat;
+    if type == .CHAR {
+        sapp.event.char_code = key;
+    };
+    
     // TODO: alt, ctrl, meta, shift, repeat
     sapp.event.modifiers = web.modifiers;
     sapp.call_event(sapp.event&);
@@ -280,19 +359,23 @@ fn key_event(web: *Impl, type: Sapp.EventType, key: u32, alt: bool, ctrl: bool, 
     //super        := 1,  // command
 }
 
+// TODO: respect app.desc.high_dpi somehow
 #export
-fn resize_event(web: *Impl, type: Sapp.EventType, fw: f64, fh: f64, ww: f64, wh: f64, devicePixelRatio: f64) void = {
+fn resize_event(web: *Impl, type: Sapp.EventType, w: f64, h: f64,devicePixelRatio: f64) void = {
     ::enum(Sapp.EventType);
     sapp := web.common();
     if(!sapp.events_enabled(), => return());
     set_dynamic_context(web.env);
     sapp.init_event(type);
-    sapp.window_width = ww.int();
-    sapp.window_height = wh.int();
-    sapp.framebuffer_width = fw.int();
-    sapp.framebuffer_height = fh.int();
+    sapp.window_width = w.int();
+    sapp.window_height = h.int();
+    sapp.framebuffer_width = (w * devicePixelRatio).int();
+    sapp.framebuffer_height = (h * devicePixelRatio).int();
     sapp.dpi_scale = devicePixelRatio.cast();
     sapp.event.modifiers = web.modifiers;
+    sapp.webgpu.config.width = sapp.framebuffer_width.trunc();
+    sapp.webgpu.config.height = sapp.framebuffer_height.trunc();
+    sapp.webgpu&.init_browser_wip_frame();
     sapp.call_event(sapp.event&);
 }
 

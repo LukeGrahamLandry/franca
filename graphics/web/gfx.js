@@ -9,7 +9,7 @@ export function get_G() {
     return G;
 }
 export function create() { return {
-    wasm: null,
+    wasm_instance: null,
     canvas: null,
     adapter: null,
     device: null,
@@ -17,6 +17,7 @@ export function create() { return {
     valid: false,
     I: null,
     animation_id: null,
+    devicePixelRatio: 1,
     
     objects: [undefined],
     refs: [0],
@@ -43,6 +44,7 @@ export function create() { return {
     },
     release: function(it) {
         it = Number(it);
+        if (it == 0) return;
         this.refs[it] -= 1;
         if (this.refs[it] <= 0) {
             this.objects[it] = undefined;
@@ -50,14 +52,14 @@ export function create() { return {
         }
     },
     M: function() {
-        return this.wasm.instance.exports.memory.buffer;
+        return this.wasm_instance.exports.memory.buffer;
     }
 }};
 
 export const webgpu_wasm_exports = webgpu;
-export const init_gpu = async (wasm, canvas) => {
+export const init_gpu = async (wasm_instance, canvas, devicePixelRatio) => {
     if (navigator.gpu === undefined) return;  // should be unreachable but clearly not
-    G.wasm = wasm;
+    G.wasm_instance = wasm_instance;
     G.canvas = canvas;
     const adapter = await navigator.gpu.requestAdapter();
     G.adapter = G.push(adapter);
@@ -70,26 +72,23 @@ export const init_gpu = async (wasm, canvas) => {
     surface.configure({
       device,
       format: navigator.gpu.getPreferredCanvasFormat(),
+      usage: 2,  // CopyDst
     });
+    G.devicePixelRatio = devicePixelRatio;
     G.valid = true;
 };
 
 export const ESCAPE_MAIN = "escape main";
 
-webgpu.francaRequestState = (I, frame_callback_p, init_callback_p) => {
+webgpu.francaRequestState = (I, frame_callback_p, francaSaveState) => {
     if (!G.valid) console.error("called francaRequestState before init_gpu");
     G.I = I;
-    let [width, height] = [BigInt(G.canvas.width), BigInt(G.canvas.height)];
-    let ratio = 2; // TODO: window.devicePixelRatio
-    const init_callback = G.wasm.instance.exports.__indirect_table.get(Number(init_callback_p));
-    init_callback(I, G.adapter, G.device, G.surface, width, height, ratio);
+    francaSaveState = G.wasm_instance.exports.__indirect_table.get(Number(francaSaveState));
+    francaSaveState(I, G.adapter, G.device, G.surface, G.canvas.width, G.canvas.height, G.devicePixelRatio);
     G.animation_id = requestAnimationFrame(call_frame);
-    const frame_callback = G.wasm.instance.exports.__indirect_table.get(Number(frame_callback_p));
+    const frame_callback = G.wasm_instance.exports.__indirect_table.get(Number(frame_callback_p));
     function call_frame() {
-        let noframe = frame_callback(I) != 0;
-        // TODO: figure out how to make should_skip_frame work. 
-        //       there's no present() call so if you try to just drop the frame 
-        //       you get black instead of the previous frame. 
+        frame_callback(I) != 0;
         G.animation_id = requestAnimationFrame(call_frame);
     }
     
@@ -182,6 +181,13 @@ webgpu.wgpuQueueSubmit = (self, command_count, commands) => {
     let o = R.array_loaded(R.CommandBuffer, 8n, command_count, commands);
     G.get(self).submit(o);
 }
+
+webgpu.wgpuCommandEncoderCopyTextureToTexture = (self, source, destination, copy_size) => {
+    source = R.TexelCopyTextureInfo(source);
+    destination = R.TexelCopyTextureInfo(destination);
+    copy_size = R.Extent3D(copy_size);
+    G.get(self).copyTextureToTexture(source, destination, copy_size);
+};
 
 webgpu.wgpuCommandEncoderFinish = (self, i) => {
     let o = R.CommandBufferDescriptor(i);

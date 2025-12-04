@@ -31,13 +31,17 @@ export const add_events = (I, canvas, send) => {
         send("key_event", I, 2, e.keyCode, e.altKey, e.ctrlKey, e.metaKey, e.shiftKey, e.repeat);
     });
     event("keypress", (e) => {
+        if (e.key == "Enter") {
+            send("key_event", I, 3, 13, e.altKey, e.ctrlKey, e.metaKey, e.shiftKey, e.repeat);
+            return;
+        }
         for (let c of e.key) {
             send("key_event", I, 3, c.codePointAt(0), e.altKey, e.ctrlKey, e.metaKey, e.shiftKey, e.repeat);
         }
     });
     E(window, "resize", () => {
         let [w, h] = [canvas.clientWidth, canvas.clientHeight];
-        send("resize_event", I, 10, w, h, w, h, window.devicePixelRatio);
+        send("resize_event", I, 10, w, h, window.devicePixelRatio);
     });
     event("wheel", (e) => {
         send("scroll_event", I, e.deltaX, e.deltaY);

@@ -55,7 +55,9 @@ main2 :: fn() void = {
     shell.strace = cli_args().contains(fn(it) => it[] == "-strace");
     globals.ready = true;
     context(DefaultContext)[].prefer_syscalls = false;
-    import("@/examples/web/demo.fr")'main();
+    push_dynamic_context {
+        import("@/examples/web/demo.fr")'main();
+    };
 }
 
 reach_webgpu_imports :: fn() []rawptr #noinline = @run {
@@ -77,7 +79,15 @@ reach_webgpu_imports :: fn() []rawptr #noinline = @run {
     fmod :: fn() void #libc;
     sinf :: fn() void #libc;
     cosf :: fn() void #libc;
-    for (@slice(fmodf, fmod, sinf, cosf)) { fid |
+    sqrt :: fn() void #libc;
+    pow :: fn() void #libc;
+    acos :: fn() void #libc;
+    cos :: fn() void #libc;
+    fabs :: fn() void #libc;
+    floor :: fn() void #libc;
+    ceil :: fn() void #libc;
+    
+    for (@slice(fmodf, fmod, sinf, cosf, sqrt, pow, acos, cos, fabs, floor, ceil)) { fid |
         addr := fr.get_jitted(fid);
         force_reachable&.push(addr);
     };
@@ -150,6 +160,49 @@ fn wasm_init_thread(franca_userdata: rawptr, known_wasm_jit_event: i64) i64 #exp
     get_current_tls()[].known_wasm_jit_event
 }
 
+fn close_modules(events: []i64) void = {
+    @debug_assert(globals.jit&.locked_by_me());
+    indices: HashMap(i64, void) = init(temp());
+    event_i := 0;
+    range(events[0], globals.jit_events.len) { i |
+        event := globals.jit_events.index(i);
+        @match(event) {
+            // to start with, all the functions creating by this module are now dead
+            fn Module(it) => if event_i < events.len && events[event_i] == i {
+                Vfs.fs.allocator.dealloc(u8, it.wasm);
+                @trace("jit_close(%, %..+%)", i, it.table_start, it.count);
+                range(it.table_start, it.table_start+it.count) { i |
+                    indices&.insert(i, ());
+                };
+                event[] = .Sync;
+                event_i += 1;
+            }
+            // now follow through all the assignments to get the final set of dead slots
+            fn Assign(it) => {
+                if indices&.get(it.src).is_some() {
+                    // src is dead so dest is dead too. 
+                    indices&.insert(it.dest, ());
+                    // when a new thread grows the table, entry start off as null, so its fine to do nothing
+                    event[] = .Sync;
+                } else {
+                    // src is live so dest is no longer dead.
+                    indices&.remove(it.dest);
+                }
+            }
+            @default => ();
+        }
+    };
+    @assert_eq(event_i, events.len, "closed multiple times or unordered events");
+    // for threads that have already seen the functions we're removing, 
+    // tell them to move null into that slot so it crashes if they try to call it. 
+    // also my hope is this lets the module be gc-ed. 
+    each indices& { i, _ |
+        event: Jit.Event = (Assign = (dest = i, src = 0));
+        Jit'impl'run(event);
+        globals.jit_events&.push(event);
+    };
+}
+
 Jit :: import("@/backend/wasm/jit.fr");
 Overrides :: @struct {
     FR_wasm_jit_event :: fn(event: Jit.Event) i64 = {
@@ -178,55 +231,15 @@ Overrides :: @struct {
             };
             
             result = Jit'impl'run(event);
-            i[] = globals.jit_events.len;
             @match(event&) {
                 fn Module(it) => {
-                    result = globals.jit_events.len - 1;
+                    result = globals.jit_events.len - 1;   // return the handle for closing
                     @trace("jit_open(size = %) = %, %..+%", it.wasm.len, result, it.table_start, it.count);
                 }
-                fn Close(it) => {
-                    event_index := it.event_index;
-                    event := globals.jit_events.index(event_index);
-                    @assert(event.is(.Module), "tried to close %", event.tag());
-                    it := event.Module&;
-                    @trace("jit_close(%, %..+%)", event_index, it.table_start, it.count);
-                    Vfs.fs.allocator.dealloc(u8, it.wasm);
-                    jt := it[];
-                    event[] = .Sync;
-                    
-                    // TODO: Close: []i64 because i have a bunch of tiny modules so this is n^2 instead of n
-                    indices: HashMap(i64, void) = init(temp());
-                    // to start with, all the functions creating by this module are now dead
-                    range(jt.table_start, jt.table_start+it.count) { i |
-                        indices&.insert(i, ());
-                    };
-                    // now follow through all the assignments to get the final set of dead slots
-                    each globals.jit_events&.items().rest(event_index) { event |
-                        @if_let(event) fn Assign(it) => {
-                            if indices&.get(it.src).is_some() {
-                                // src is dead so dest is dead too. 
-                                indices&.insert(it.dest, ());
-                                // when a new thread grows the table, entry start off as null, so its fine to do nothing
-                                event[] = .Sync;
-                            } else {
-                                // src is live so dest is no longer dead.
-                                indices&.remove(it.dest);
-                            }
-                        }
-                    };
-                    // for threads that have already seen the functions we're removing, 
-                    // tell them to move null into that slot so it crashes if they try to call it. 
-                    // also my hope is this lets the module be gc-ed. 
-                    each indices& { i, _ |
-                        event: Jit.Event = (Assign = (dest = i, src = 0));
-                        Jit'impl'run(event);
-                        globals.jit_events&.push(event);
-                    };
-                    
-                    i[] = globals.jit_events.len;
-                }
+                fn Close(it) => close_modules(it.events);
                 @default => ();
             };
+            i[] = globals.jit_events.len;
 
         };
         result
