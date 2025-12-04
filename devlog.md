@@ -29,6 +29,26 @@
   i guess i just need a new Fixup type. 
   HACK: for now just scan for the exact bytes of the function where i do memory.init and poke in the sizes. 
   it does work, and it does make it faster. mandelbrot_ui: 600ms -> 400ms. 
+- reuse workers after the thread exits. 
+  - i can produce a benchmark where it really helps. 
+    multithread.fr/threads_counting done 100 times: 18607ms -> 2218ms. 
+    native is 4000ms (without a thread pool). 
+  - idk if the big win is just that spawning a worker is slow or that this lets you not JitEvent.Sync every time. 
+  - also needed to make my shitty Overrides.mmap reuse memory for that to work. 
+  - spent a while being confused that i made mandelbrot_ui take 600 ms again, 
+    difference was counting the time to w.terminate() the one thread which takes 200ms somehow. 
+    sending it a message that does self.close is just as slow. 
+    i really don't understand because if you time the call to terminate with performance.now its like 0.003ms 
+    which is clearly a lie. so like the operation isn't slow, it just makes the next thing you do slow? 
+    but if i do it with 1ms delay with setTimeout, its fast again. 
+    tho it seems sometimes you need a bigger timeout so there's something about the synchronization rules i don't understand. 
+  - reuse workers between different programs as well. 
+    only need to terminate if you kill it, if it exits cleanly, just reset all the variables and use it again. 
+    now it doesn't matter that terminate is slow because i don't do it in the steady state.  
+  - threads_countingx100 with reset after recycle is 13367ms. 
+    so 5s saved by not spawning new workers and 11s saved by not reinstantiating wasm modules.   
+  - close modules and remove thier functions from the table so hopefully they can be gc-ed. 
+    maybe not worth the hassle, but if i want the wasm instance to be more persistant i have to not leak stuff. 
 
 ## (Dec 2)
 

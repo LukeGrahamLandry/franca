@@ -2,7 +2,12 @@
 
 
 export const add_events = (I, canvas, send) => {
-    const event = (name, f) => canvas.addEventListener(name, f);
+    const removers = [];
+    const E = (element, name, f) => {
+        element.addEventListener(name, f);
+        removers.push([element, name, f]);
+    }
+    const event = (name, f) => E(canvas, name, f);
     event("contextmenu", (e) => { 
         e.preventDefault();
     });
@@ -30,7 +35,7 @@ export const add_events = (I, canvas, send) => {
             send("key_event", I, 3, c.codePointAt(0), e.altKey, e.ctrlKey, e.metaKey, e.shiftKey, e.repeat);
         }
     });
-    window.addEventListener("resize", () => {
+    E(window, "resize", () => {
         let [w, h] = [canvas.clientWidth, canvas.clientHeight];
         send("resize_event", I, 10, w, h, w, h, window.devicePixelRatio);
     });
@@ -42,6 +47,8 @@ export const add_events = (I, canvas, send) => {
     // MOUSE_ENTER, MOUSE_LEAVE,
     // ICONIFIED, RESTORED, FOCUSED, UNFOCUSED, QUIT_REQUESTED,
     // CLIPBOARD_PASTED, FILES_DROPPED
+    
+    return removers;
 }
 
 export const set_icon = () => {

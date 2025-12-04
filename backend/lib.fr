@@ -157,6 +157,7 @@ QbeModule :: @rec @struct(
     wasm_types_cache: HashMap([]u8, i32),
     libraries: RawList(Str),  // :SLOW but n=4 so like it's probably fine 
     scratch_for_blink_smc: List(u8),
+    wasm_exec_handles: List(i64),
     
     codemap: ?*CodeMap,
     macho_entitlements: Str,
@@ -413,6 +414,9 @@ fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
             // TODO: make this size configurable on .goal
             mem := forever.alloc_uninit(u8, 1.shift_left(11));
             m.wasm_types = (mmapped = mem, next = mem.ptr);
+            if m.goal.type == .JitOnly {
+                m.wasm_exec_handles = list(forever);
+            };
         };
     };
     
@@ -541,6 +545,10 @@ fn show_backend_stats() bool =
     get_environment_variable("FRANCA_LOG_STATS").is_some();
 
 fn drop(m: *QbeModule) void = {
+    for m.wasm_exec_handles& { it |
+        (m.target.wasm_jit_event)(Close = (event_index = it));
+    };
+
     fst := m.segments.data&[0].mmapped;
     page_allocator.dealloc(u8, (ptr = fst.ptr, len = fst.len * 3)); // ZeroInitData has no allocation
     @if(enable_incremental()) if m.save { save |

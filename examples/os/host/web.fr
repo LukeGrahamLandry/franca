@@ -38,6 +38,7 @@ main2 :: fn() void = {
     context(DefaultContext)[].thread = Thread.raw_from_ptr(@static(Thread));
     globals.jit_events = list(128, Arena'stack_alloc(2048));
     redo_relocations_wasm();
+    globals.free = list(4096, general_allocator());
     globals.jit_events = globals.jit_events.items().clone(general_allocator());
     Vfs'init_vfs();
     xxx := Vfs.fs;  // :compilerbug ?? Type Error: field 'fs' does not exist
@@ -52,6 +53,7 @@ main2 :: fn() void = {
     };
 
     shell.strace = cli_args().contains(fn(it) => it[] == "-strace");
+    globals.ready = true;
     context(DefaultContext)[].prefer_syscalls = false;
     import("@/examples/web/demo.fr")'main();
 }
@@ -88,9 +90,6 @@ redo_relocations_wasm :: fn() void #inline = {
         collect_from_scope(libc_exports, Type.scope_of(Overrides), true);
     };
 
-    globals.heap_next = memory_grow(0).intcast().mul(wasm_page_size);
-    globals.heap_end = globals.heap_next;
-    
     for_wasm_imports { i, name |
         if libc_exports.get(name) { addr |
             Overrides'FR_wasm_jit_event(Assign = (dest = i, src = addr.int_from_rawptr()));
@@ -123,10 +122,10 @@ Host :: @struct {
 
 #use("@/lib/sys/sync/mutex.fr");
 #use("@/lib/sys/threads.fr");
-globals :: @static(@struct{
-    heap_next: i64;
-    heap_end: i64;
+globals :: @static(@struct {
+    free: List([]u8);  // sorted by address
     grow: Mutex;
+    ready: bool;
     
     // TODO: make this less chunky. also merge all the Grow
     //       and when you drop the Qbe.Module, drop the corrisponding Event.Module. 
@@ -137,9 +136,10 @@ globals :: @static(@struct{
 wasm_page_size :: 65536;
 
 // don't need to preserve callee because it's always franca_runtime_init_thread
-fn wasm_init_thread(franca_userdata: rawptr) void #export = {
+fn wasm_init_thread(franca_userdata: rawptr, known_wasm_jit_event: i64) i64 #export = {
     thread := Thread.ptr_from_raw(franca_userdata);
     set_dynamic_context(DefaultContext.raw_from_ptr(thread.first_environment&));
+    get_current_tls()[].known_wasm_jit_event = known_wasm_jit_event;
     thread.first_environment.panic_hook = fn(msg) = {
         Overrides'FR_debug_write(msg.ptr, msg.len);
         Overrides'exit(123);
@@ -147,6 +147,7 @@ fn wasm_init_thread(franca_userdata: rawptr) void #export = {
     };
     Overrides'FR_wasm_jit_event(.Sync);
     franca_runtime_init_thread(franca_userdata);
+    get_current_tls()[].known_wasm_jit_event
 }
 
 Jit :: import("@/backend/wasm/jit.fr");
@@ -156,10 +157,10 @@ Overrides :: @struct {
             fn Assign(it) => @if(it.src == it.dest) return(0);
             fn Grow(it) => @assert(it.delta != 0, "can't check the size like that because i don't store results");
             fn Module(it) => {
-                @trace("jit(size = %)", it.wasm.len);
-                it.wasm = it.wasm.shallow_copy(general_allocator());
+                it.wasm = it.wasm.shallow_copy(Vfs.fs.allocator);
             }
             fn Sync() => ();
+            fn Close() => ();
         };
         
         result := 0;
@@ -172,12 +173,61 @@ Overrides :: @struct {
             };
             @if(to_sync.len != 0) @trace("jit_sync(%..+%)", i[], to_sync.len);
             
-            if !event&.is(.Sync) {
+            if !@is(event&, .Sync, .Close) {
                 globals.jit_events&.push(event);
-                result = Jit'impl'run(event);
+            };
+            
+            result = Jit'impl'run(event);
+            i[] = globals.jit_events.len;
+            @match(event&) {
+                fn Module(it) => {
+                    result = globals.jit_events.len - 1;
+                    @trace("jit_open(size = %) = %, %..+%", it.wasm.len, result, it.table_start, it.count);
+                }
+                fn Close(it) => {
+                    event_index := it.event_index;
+                    event := globals.jit_events.index(event_index);
+                    @assert(event.is(.Module), "tried to close %", event.tag());
+                    it := event.Module&;
+                    @trace("jit_close(%, %..+%)", event_index, it.table_start, it.count);
+                    Vfs.fs.allocator.dealloc(u8, it.wasm);
+                    jt := it[];
+                    event[] = .Sync;
+                    
+                    // TODO: Close: []i64 because i have a bunch of tiny modules so this is n^2 instead of n
+                    indices: HashMap(i64, void) = init(temp());
+                    // to start with, all the functions creating by this module are now dead
+                    range(jt.table_start, jt.table_start+it.count) { i |
+                        indices&.insert(i, ());
+                    };
+                    // now follow through all the assignments to get the final set of dead slots
+                    each globals.jit_events&.items().rest(event_index) { event |
+                        @if_let(event) fn Assign(it) => {
+                            if indices&.get(it.src).is_some() {
+                                // src is dead so dest is dead too. 
+                                indices&.insert(it.dest, ());
+                                // when a new thread grows the table, entry start off as null, so its fine to do nothing
+                                event[] = .Sync;
+                            } else {
+                                // src is live so dest is no longer dead.
+                                indices&.remove(it.dest);
+                            }
+                        }
+                    };
+                    // for threads that have already seen the functions we're removing, 
+                    // tell them to move null into that slot so it crashes if they try to call it. 
+                    // also my hope is this lets the module be gc-ed. 
+                    each indices& { i, _ |
+                        event: Jit.Event = (Assign = (dest = i, src = 0));
+                        Jit'impl'run(event);
+                        globals.jit_events&.push(event);
+                    };
+                    
+                    i[] = globals.jit_events.len;
+                }
+                @default => ();
             };
 
-            i[] = globals.jit_events.len;
         };
         result
     }
@@ -192,23 +242,41 @@ Overrides :: @struct {
     };
 
     mmap :: fn(addr: rawptr, len: i64, prot: i64, flags: i64, fd: Fd, off: i64) rawptr = {
-        len := len.ualign_to(wasm_page_size);
-        start := i64.atomic_add(globals.heap_next&, len);
-        if start + len > globals.heap_end {
-            with globals.grow& {
-                len := len * 2;
-                prev := memory_grow(len.udiv(wasm_page_size).intcast()).intcast().mul(wasm_page_size);
-                @assert(prev != -1, "oom");
-                @assert_eq(prev, globals.heap_end, "TODO: someone else is growing the memory");
-                old := i64.atomic_add(globals.heap_end&, len);
-                @assert_eq(prev, old, "TODO: someone else is growing the memory");
+        result := zeroed(rawptr);
+        with globals.grow& {
+            break :: local_return;
+            len := len.ualign_to(wasm_page_size);
+            
+            enumerate_rev globals.free.items() { i, buf |
+                if buf.len >= len {
+                    result = u8.raw_from_ptr(buf.ptr);
+                    buf[].slice(0, len).set_zeroed();  // this is kinda unfortunate
+                    buf[] = buf[].rest(len);
+                    check_merges(i);
+                    break();
+                };
             };
+            
+            prev := memory_grow(len.udiv(wasm_page_size).intcast()).intcast();
+            @assert(prev != -1, "oom");
+            result = rawptr_from_int(prev * wasm_page_size);
         };
-        @trace("mmap(%) = %", len, start);
-        start.rawptr_from_int()
+        @trace("mmap(%) = %", len, result);
+        result
     };
     
     munmap :: fn(addr: rawptr, len: i64) i64 = {
+        @if(globals.ready) with globals.grow& {
+            break :: local_return;
+            buf := u8.ptr_from_raw(addr).slice(len.ualign_to(wasm_page_size));
+            
+            i := 0;  // TODO: binary search
+            while => i < globals.free.len && buf.ptr.in_memory_after(globals.free[i].ptr) {
+                i += 1;
+            };
+            globals.free&.insert(i, buf);
+            check_merges(i);
+        };
         @trace("munmap(%, %)", addr, len);
         0
     };
@@ -246,6 +314,16 @@ Overrides :: @struct {
         out.opaque = userdata;
         @trace("pthread_create(%) = %", userdata, id);
         0
+    };
+};
+
+check_merges :: fn(i: i64) void = {
+    free := globals.free&;
+    range(i-1, i+1) { i |
+        while => i > 0 && i < free.len - 1 && free[i].end_pointer().identical(free[i + 1].ptr) {
+            free[i].len += free[i + 1].len;
+            free.ordered_remove(i + 1);
+        }
     };
 };
 

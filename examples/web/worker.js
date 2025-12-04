@@ -1,43 +1,45 @@
 
 let Franca;
-let start = performance.now();
 let version;
 let canvas;
 
+let known_wasm_jit_event = 0n;
+
+function handle_child_thread(child) {
+    const [userdata, stack, exit_futex] = child;
+    Franca.__stackbase.value = Number(stack);
+    known_wasm_jit_event = Franca.wasm_init_thread(userdata, known_wasm_jit_event);
+    let mem = new DataView(Franca.memory.buffer);
+    mem.setInt32(Number(exit_futex), 0);
+    let buf = new Int32Array(Franca.memory.buffer, Number(exit_futex), 1);
+    Atomics.notify(buf, 0);
+    self.postMessage({ tag: "recycle" });
+}
+
 export async function handleWasmLoaded(wasm, args, child) {
-    console.log("handleWasmLoaded");
-    console.dir(wasm.module.data);
     Franca = wasm.instance.exports;
     if (child !== undefined) {
-        console.log("spawned a new worker");
-        const [userdata, stack, exit_futex] = child;
-        Franca.__stackbase.value = Number(stack);
-        Franca.wasm_init_thread(userdata);
-        console.log("child returned");
-        let mem = new DataView(Franca.memory.buffer);
-        mem.setInt32(Number(exit_futex), 0);
-        let buf = new Int32Array(Franca.memory.buffer, Number(exit_futex), 1);
-        Atomics.notify(buf, 0);
+        handle_child_thread(child);
         return;
     }
     
     let load_end = performance.now();
-    show_log(" Loaded in " + Math.round(load_end - start) + "ms.");
-    // console.log(Franca);
 
     if (canvas !== undefined) await init_gpu(wasm, canvas);
     
+    let ok = true;
     let p = write_args(args);
     try {
         Franca.main(BigInt(args.length), p, 0n, 0n);
     } catch (e) {
         if (e !== "called exit 0" && e !== ESCAPE_MAIN) {
             show_error(e);
+            ok = false;
         }
     }
     let time = Math.round(performance.now() - load_end);
     show_log(" Ran in " + time + "ms.");
-    self.postMessage({ tag: "done" });
+    self.postMessage({ tag: "done", ok: ok, });
 }
 
 // i this so much
@@ -66,8 +68,7 @@ function write_args(args) {
     return p;
 }
 
-let children = [];
-import { webgpu_wasm_exports, init_gpu, G, ESCAPE_MAIN } from "./target/gfx.js";
+import { webgpu_wasm_exports, init_gpu, ESCAPE_MAIN, reset_G, get_G } from "./target/gfx.js";
 export const imports = {
     main: {
         memory: null,
@@ -79,6 +80,7 @@ export const imports = {
         sinf: (a) => Math.sin(a),
         cosf: (a) => Math.cos(a),
         js_worker_stop: (status) => {
+            let G = get_G();
             if (status == 0n) throw "called exit 0";
             cancelAnimationFrame(G.animation_id);
             throw new Error("called exit " + Number(status));
@@ -92,7 +94,6 @@ export const imports = {
             );
             const module = new WebAssembly.Module(buffer);
             const instance = new WebAssembly.Instance(module, { main: Franca });
-            // console.log(instance);
 
             let i = Number(first_export);
             for (let func in instance.exports) {
@@ -129,7 +130,6 @@ export const imports = {
         },
         js_performace_now: () => performance.now(),
         js_worker_spawn: (userdata, stack, exit_futex) => {
-            console.log("spawning a new worker");
             self.postMessage({ tag: "spawn", child: [userdata, stack, exit_futex], memory: imports.main.memory });
         }
     },
@@ -196,7 +196,11 @@ function handle(_msg) {
     const msg = _msg.data;
     switch (msg.tag) {
         case "start": {
-            console.log(msg.memory);
+            if (known_wasm_jit_event != 0n) {
+                if (msg.child === undefined) throw "expected to be a child thread";
+                handle_child_thread(msg.child);
+                return;
+            }
             imports.main.memory = msg.memory;
             version = msg.version;
             canvas = msg.canvas;
@@ -206,6 +210,7 @@ function handle(_msg) {
             break;
         }
         case "event": {
+            let G = get_G();
             if (!G.valid || G.I === null || canvas === undefined) break;
             msg.args[0] = G.I;
             if (msg.handler == "resize_event") {
@@ -218,6 +223,14 @@ function handle(_msg) {
             break;
         }
         case "ready": break
+        case "reset": {
+            Franca = undefined;
+            canvas = undefined;
+            known_wasm_jit_event = 0n;
+            imports.main.memory = undefined;
+            reset_G();
+            break
+        }
         default:
             throw msg;
     }
@@ -246,6 +259,5 @@ function get_wasm_string(ptr, len) {
     return new TextDecoder().decode(wasteofmytime);
 }
 
-console.log("HELLO")
 self.onmessage = handle;
 self.postMessage({ tag: "ready" })

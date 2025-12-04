@@ -4,7 +4,8 @@ if (typeof WebAssembly === "undefined")
 if (typeof Worker === "undefined")
     alert("Your browser does not support web workers.");
 
-let children = []
+let thread_pool = []
+let running_threads = []
 const handle = (_msg) => {
     const msg = _msg.data;
     switch (msg.tag) {
@@ -28,6 +29,12 @@ const handle = (_msg) => {
             let end = performance.now();
             document.getElementById("time").innerText += " Wall: " + Math.round(end - real_start_time) + "ms.";
             flush();
+
+            // calling terminate has a viral slowness where it just makes random later operations slow. 
+            // might as well reuse the workers anyway. 
+            for (let w of thread_pool) {
+                w.postMessage({ tag: "reset" });
+            }
             break;
         }
         case "download": {
@@ -42,10 +49,18 @@ const handle = (_msg) => {
         case "ready": break
         // dear google claims you can spawn a worker from a worker but it sure doesn't work so here we are ??
         case "spawn": {
-            let w = new Worker(`worker.js?v=${version}`, { type: "module" });
-            children.push(w);
-            w.onmessage = handle;
-            w.onerror = (e) => console.error(e);
+            let w = get_worker(); 
+            w.onmessage = (msg) => {
+                if (msg.data.tag == "recycle") {
+                    running_threads.splice(running_threads.indexOf(w));
+                    // don't call reset here. the point is to avoid replaying all the jit events if they're in the same program. 
+                    // just reset in toggle_worker when the main thread exits and you run a new thing.  
+                    thread_pool.push(w);
+                    return;
+                }
+                handle(msg);
+            };
+            running_threads.push(w);
             w.postMessage({ tag: "start", url: "demo.wasm", args: [], version: version, child: msg.child, memory: msg.memory });
             break
         }
@@ -54,6 +69,16 @@ const handle = (_msg) => {
     }
 };
 
+function get_worker() {
+    if (thread_pool.length == 0) {
+        let w = new Worker(`worker.js?v=${version}`, { type: "module" });
+        w.onerror = (e) => console.error(e);
+        w.onmessage = (e) => console.error(e);
+        thread_pool.push(w);
+    };
+    return thread_pool.pop();
+}
+
 
 import { add_events } from "./target/app.js";
 
@@ -61,10 +86,23 @@ let real_start_time;
 const start_message = "Run";
 let worker = null;
 let running = false;
-const toggle_worker = () => {
-    if (!running && worker !== null) {
-        worker.terminate();
+let removers = [];
+const toggle_worker = async () => {
+    if (!running && worker !== null) {  // means it sent "done" so not stuck
+        thread_pool.push(worker);
         worker = null;
+    }
+    for (let w of running_threads) {  // any children that were still running might be stuck
+        w.terminate();
+    }
+    running_threads = []
+    for (let w of thread_pool) {  // children that already returned from wasm_init_thread are not stuck
+        w.postMessage({ tag: "reset" });
+    }
+    for (let a of removers) {
+        for (let b of a) {
+            b[0].removeEventListener(b[1], b[2]);
+        }
     }
     running = worker === null;
     if (running) {
@@ -89,8 +127,7 @@ const toggle_worker = () => {
             document.getElementById("target").value,
             ...(dbg.length == 0 ? [] : (dbg.includes("-") ? dbg.split(" ") : ["-d", dbg])),
         ];
-        worker = new Worker(`worker.js?v=${version}`, { type: "module" });
-        worker.onerror = (e) => console.error(e);
+        worker = get_worker();
         worker.onmessage = handle;
         let need_canvas = input.includes("graphics/lib.fr");  // :HackyGraphicsDetection
         
@@ -115,7 +152,7 @@ const toggle_worker = () => {
         let surface = canvas.transferControlToOffscreen();
         const send = (handler, ...args) => 
             worker.postMessage({ tag: "event", handler, args });
-        if (need_canvas) add_events(0, canvas, send);
+        if (need_canvas) removers.push(add_events(0, canvas, send));
         
         // TODO: i don't understand why you have to do this but it makes it not suck ass.
         //       (its not the same as multiplying framebuffer_(w/h)
@@ -127,10 +164,11 @@ const toggle_worker = () => {
         worker.postMessage({ tag: "start", url: url, args: args, version: version, canvas: surface, memory: new_memory() }, transfer);
         document.getElementById("btn").innerText = "Kill";
     } else {
+        // don't just reset because if they pressed kill maybe its because it hung
         worker.terminate();
+        worker = null;
         show("");
         document.getElementById("err").innerText += "KILLED";
-        worker = null;
         document.getElementById("btn").innerText = start_message;
     }
 };
@@ -141,13 +179,13 @@ async function get_file(path) {
     return new Promise((resolve) => {
         let url = "demo.wasm"; 
         const args = [url, "-yield", path];
-        let w = new Worker(`worker.js?v=${version}`, { type: "module" });
-        w.onerror = (e) => console.error(e);
+        let w = get_worker(); 
         w.onmessage = async (msg) => {
             if (msg.data.tag != "download") {
                 console.log(msg.data);
             } else {
-                w.terminate();
+                w.postMessage({ tag: "reset" });
+                thread_pool.push(w);
                 resolve(await msg.data.content.text());
             }
         };

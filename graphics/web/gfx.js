@@ -1,6 +1,14 @@
 import { webgpu, reader as R, writer as W } from "./webgpu.g.js";
 
-export const G = {
+let G = create(); 
+export function reset_G() {
+    cancelAnimationFrame(G.animation_id);
+    G = create();
+}
+export function get_G() {
+    return G;
+}
+export function create() { return {
     wasm: null,
     canvas: null,
     adapter: null,
@@ -44,7 +52,7 @@ export const G = {
     M: function() {
         return this.wasm.instance.exports.memory.buffer;
     }
-};
+}};
 
 export const webgpu_wasm_exports = webgpu;
 export const init_gpu = async (wasm, canvas) => {

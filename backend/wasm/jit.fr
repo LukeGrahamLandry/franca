@@ -1,9 +1,30 @@
+//
+// single threaded programs can call the `impl` functions directly.
+// 
+// browsers allow using web workers as threads with shared memory
+// but not shared tables. the way you jit code inside wasm is creating 
+// a new module and adding all its exports to a table but that only affects 
+// one thread. the solution is to record all events and replay them every time 
+// you spawn a new thread (and sync occasionally). the result is that one thread 
+// can jit code that is called on a different thread. pthread_create and dlopen need to collude. 
+// this needs a much more invasive runtime than "eh, just mmap(MAP_EXEC)" that native targets allow. 
+// for me that's examples/os/host/web.fr/Overrides/FR_wasm_jit_event. 
+// 
+// other hoops you have to jump through: 
+// - the page needs to be a secure context and cross origin isolated to make a SharedArrayBuffer. 
+//   (see the comment on QbeTargetEnv.wasm_shared_memory)
+// - the data segment must be passive so it isn't re-initialized every time the module is 
+//   instantiated on a new thread. the runtime code needs to execute the `memory.init` 
+//   instruction exactly once and then new threads import the same shared memory and see the same variables. 
+//   for now my hack is to detect exactly the byte pattern of init_the_memory_code and patch in the right sizes. 
+// 
 
 Event :: @tagged(
     Assign: @struct(dest: i64, src: i64),
     Grow: @struct(delta: i64),
-    Module: @struct(wasm: []u8, table_start: i64),
+    Module: @struct(wasm: []u8, table_start: i64, count: i64),
     Sync,
+    Close: @struct(event_index: i64),
 );
 
 impl :: @struct {
@@ -14,6 +35,7 @@ run :: fn(event: Event) i64 = {
         fn Grow(it)   => return(table_grow(it.delta.intcast()).intcast());
         fn Module(it) => jit_instantiate_module(it.wasm.ptr, it.wasm.len, it.table_start, 0);
         fn Sync()     => ();
+        fn Close()    => ();
     };
     0
 };
