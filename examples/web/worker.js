@@ -4,11 +4,26 @@ let start = performance.now();
 let version;
 let canvas;
 
-export async function handleWasmLoaded(wasm, args) {
+export async function handleWasmLoaded(wasm, args, child) {
+    console.log("handleWasmLoaded");
+    console.dir(wasm.module.data);
+    Franca = wasm.instance.exports;
+    if (child !== undefined) {
+        console.log("spawned a new worker");
+        const [userdata, stack, exit_futex] = child;
+        Franca.__stackbase.value = Number(stack);
+        Franca.wasm_init_thread(userdata);
+        console.log("child returned");
+        let mem = new DataView(Franca.memory.buffer);
+        mem.setInt32(Number(exit_futex), 0);
+        let buf = new Int32Array(Franca.memory.buffer, Number(exit_futex), 1);
+        Atomics.notify(buf, 0);
+        return;
+    }
+    
     let load_end = performance.now();
     show_log(" Loaded in " + Math.round(load_end - start) + "ms.");
-    Franca = wasm.instance.exports;
-    console.log(Franca);
+    // console.log(Franca);
 
     if (canvas !== undefined) await init_gpu(wasm, canvas);
     
@@ -51,15 +66,11 @@ function write_args(args) {
     return p;
 }
 
+let children = [];
 import { webgpu_wasm_exports, init_gpu, G, ESCAPE_MAIN } from "./target/gfx.js";
 export const imports = {
     main: {
-        memory: new WebAssembly.Memory({
-          initial: 300,
-          maximum: 1<<(32-16),
-          // TODO: if the module wants unshared, catch the exception and change this to a normal memory. this is stupid. 
-          shared: true,
-        }),
+        memory: null,
     },
     webgpu: webgpu_wasm_exports,
     env: {
@@ -68,9 +79,9 @@ export const imports = {
         sinf: (a) => Math.sin(a),
         cosf: (a) => Math.cos(a),
         js_worker_stop: (status) => {
-            if (status == 0) throw "called exit 0";
+            if (status == 0n) throw "called exit 0";
             cancelAnimationFrame(G.animation_id);
-            throw new Error("called exit " + status);
+            throw new Error("called exit " + Number(status));
         },
         jit_instantiate_module: (ptr, len, first_export, table_index) => {
             if (table_index != 0) throw new Error("table_index");
@@ -117,6 +128,10 @@ export const imports = {
             }
         },
         js_performace_now: () => performance.now(),
+        js_worker_spawn: (userdata, stack, exit_futex) => {
+            console.log("spawning a new worker");
+            self.postMessage({ tag: "spawn", child: [userdata, stack, exit_futex], memory: imports.main.memory });
+        }
     },
 };
 
@@ -177,14 +192,16 @@ for (const it of weak_imports) {
     };
 }
 
-const handle = (_msg) => {
+function handle(_msg) {
     const msg = _msg.data;
     switch (msg.tag) {
         case "start": {
+            console.log(msg.memory);
+            imports.main.memory = msg.memory;
             version = msg.version;
             canvas = msg.canvas;
             WebAssembly.instantiateStreaming(fetch(`target/${msg.url}?v=${version}`), imports)
-                .then(it => handleWasmLoaded(it, msg.args))
+                .then(it => handleWasmLoaded(it, msg.args, msg.child))
                 .catch(show_error);
             break;
         }
@@ -200,6 +217,7 @@ const handle = (_msg) => {
             Franca[msg.handler].apply(Franca, msg.args);
             break;
         }
+        case "ready": break
         default:
             throw msg;
     }
@@ -228,4 +246,6 @@ function get_wasm_string(ptr, len) {
     return new TextDecoder().decode(wasteofmytime);
 }
 
+console.log("HELLO")
 self.onmessage = handle;
+self.postMessage({ tag: "ready" })

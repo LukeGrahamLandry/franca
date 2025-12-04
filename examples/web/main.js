@@ -4,6 +4,7 @@ if (typeof WebAssembly === "undefined")
 if (typeof Worker === "undefined")
     alert("Your browser does not support web workers.");
 
+let children = []
 const handle = (_msg) => {
     const msg = _msg.data;
     switch (msg.tag) {
@@ -37,6 +38,16 @@ const handle = (_msg) => {
             a.click();
             window.URL.revokeObjectURL(url);
             break;
+        }
+        case "ready": break
+        // dear google claims you can spawn a worker from a worker but it sure doesn't work so here we are ??
+        case "spawn": {
+            let w = new Worker(`worker.js?v=${version}`, { type: "module" });
+            children.push(w);
+            w.onmessage = handle;
+            w.onerror = (e) => console.error(e);
+            w.postMessage({ tag: "start", url: "demo.wasm", args: [], version: version, child: msg.child, memory: msg.memory });
+            break
         }
         default:
             throw msg;
@@ -79,6 +90,7 @@ const toggle_worker = () => {
             ...(dbg.length == 0 ? [] : (dbg.includes("-") ? dbg.split(" ") : ["-d", dbg])),
         ];
         worker = new Worker(`worker.js?v=${version}`, { type: "module" });
+        worker.onerror = (e) => console.error(e);
         worker.onmessage = handle;
         let need_canvas = input.includes("graphics/lib.fr");  // :HackyGraphicsDetection
         
@@ -112,7 +124,7 @@ const toggle_worker = () => {
         surface.height = canvas.clientHeight * window.devicePixelRatio;
         if (!need_canvas) surface = undefined;
         let transfer = need_canvas ? [surface] : [];
-        worker.postMessage({ tag: "start", url: url, args: args, version: version, canvas: surface }, transfer);
+        worker.postMessage({ tag: "start", url: url, args: args, version: version, canvas: surface, memory: new_memory() }, transfer);
         document.getElementById("btn").innerText = "Kill";
     } else {
         worker.terminate();
@@ -130,6 +142,7 @@ async function get_file(path) {
         let url = "demo.wasm"; 
         const args = [url, "-yield", path];
         let w = new Worker(`worker.js?v=${version}`, { type: "module" });
+        w.onerror = (e) => console.error(e);
         w.onmessage = async (msg) => {
             if (msg.data.tag != "download") {
                 console.log(msg.data);
@@ -138,8 +151,17 @@ async function get_file(path) {
                 resolve(await msg.data.content.text());
             }
         };
-        w.postMessage({ tag: "start", url: url, args: args, version: version }, []);
+        w.postMessage({ tag: "start", url: url, args: args, version: version, memory: new_memory() }, []);
     });
+}
+
+function new_memory() {
+    return new WebAssembly.Memory({
+        initial: 300,
+        maximum: 1 << (32 - 16),
+        // TODO: if the module wants unshared, catch the exception and change this to a normal memory. this is stupid. 
+        shared: true,
+    }); 
 }
 
 let manifest = await (await fetch("target/manifest.json?v=" + manifest_version)).json();

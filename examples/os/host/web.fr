@@ -12,6 +12,7 @@ GRAPHICS_TARGET_WEB :: true;
 // it just sees the ones marked #export
 #export
 fn main(argc: i64, argv: *CStr, envp: *CStr, sp: i64) void = {
+    init_the_memory();
     franca_runtime_init(argc, argv, main2, envp, sp);
 }
 
@@ -19,8 +20,15 @@ fn main(argc: i64, argv: *CStr, envp: *CStr, sp: i64) void = {
 // because get_unique_named looks for void->void overload. 
 // used for testing as an exe with import_wasm. 
 fn main() void = {
+    init_the_memory();
     main2();
 }
+
+// static data needs to be in a passive segment instead of an active segment 
+// so it doesn't get reset when you spawn a new thread. 
+// this is called from the main entry point but not wasm_init_thread. 
+init_the_memory :: AsmFunctionWasmOnly(fn() void = (), 
+    fn(out) = out.push_all(Jit.impl.init_the_memory_code));
 
 // TODO: #use should probably be illegal since it also declares a `main` 
 //       which should conflict with ours, but it's very convient that it works (tho order dependent)
@@ -106,6 +114,7 @@ Host :: @struct {
     jit_instantiate_module :: fn(address: *u8, length: i64, table_start: i64, table_index: u32) void #weak #import("libc");
     js_performace_now :: fn() f64 #weak #import("libc");
     js_write :: fn(id: i64, ptr: *u8, len: i64) i64 #weak #import("libc");
+    js_worker_spawn :: fn(userdata: rawptr, stack: *u8, exit_futex: *u32) void #weak #import("libc");
     js_worker_stop :: fn(status: i64) void #weak #import("libc");
     
     // TODO: spawn worker
@@ -120,16 +129,30 @@ globals :: @static(@struct{
     grow: Mutex;
     
     // TODO: make this less chunky. also merge all the Grow
+    //       and when you drop the Qbe.Module, drop the corrisponding Event.Module. 
     jit_events: List(Jit.Event);
     jit: Mutex;
 });
 
 wasm_page_size :: 65536;
 
+// don't need to preserve callee because it's always franca_runtime_init_thread
+fn wasm_init_thread(franca_userdata: rawptr) void #export = {
+    thread := Thread.ptr_from_raw(franca_userdata);
+    set_dynamic_context(DefaultContext.raw_from_ptr(thread.first_environment&));
+    thread.first_environment.panic_hook = fn(msg) = {
+        Overrides'FR_debug_write(msg.ptr, msg.len);
+        Overrides'exit(123);
+        unreachable()
+    };
+    Overrides'FR_wasm_jit_event(.Sync);
+    franca_runtime_init_thread(franca_userdata);
+}
+
 Jit :: import("@/backend/wasm/jit.fr");
 Overrides :: @struct {
     FR_wasm_jit_event :: fn(event: Jit.Event) i64 = {
-        @match(event) {
+        @match(event&) {
             fn Assign(it) => @if(it.src == it.dest) return(0);
             fn Grow(it) => @assert(it.delta != 0, "can't check the size like that because i don't store results");
             fn Module(it) => {
@@ -143,9 +166,11 @@ Overrides :: @struct {
         with globals.jit& {
             // replay all the events done by other threads first. 
             i := get_current_tls()[].known_wasm_jit_event&;
-            for globals.jit_events.items().rest(i[]) { it |
+            to_sync := globals.jit_events.items().rest(i[]);
+            for to_sync { it |
                 Jit'impl'run(it);
             };
+            @if(to_sync.len != 0) @trace("jit_sync(%..+%)", i[], to_sync.len);
             
             if !event&.is(.Sync) {
                 globals.jit_events&.push(event);
@@ -211,7 +236,16 @@ Overrides :: @struct {
     
     #use("@/lib/sys/threads.fr");
     pthread_create :: fn(out: *pthread_t, attr: *ThreadAttr, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) i64 = {
-        panic("TODO: pthread_create");
+        attr := bit_cast_unchecked(*ThreadAttr, *MyAttr, attr);
+        thread := Thread.ptr_from_raw(userdata);
+        id: i32 = thread.first_environment.thread_index.intcast();
+        @debug_assert_gt(id, 0, "too many threads");
+        thread.tid_futex = id.bitcast();
+        thread.tid = id;
+        Host'js_worker_spawn(userdata, attr.stack.end_pointer(), thread.tid_futex&);
+        out.opaque = userdata;
+        @trace("pthread_create(%) = %", userdata, id);
+        0
     };
 };
 

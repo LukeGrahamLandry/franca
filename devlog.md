@@ -16,6 +16,19 @@
   and sync them so you can dlopen on one thread and call a function from another. 
   this is gonna be so incredibly slow, sad day. 
 - use the starting env inside jit shims since i need get_current_tls to work 
+- if i try to spawn a worker from a worker it just silently does nothing?
+  works if i send a message to the main thread to ask it to do it, 
+  but my program's still super broken. 
+- fuck ok so my static variabels are getting reset every time 
+  because it re-copies active data segments each time you create a module for a new thread.
+  so i need to make it a passive data segment and then the first thing the program does is 
+  run the memory.init instruction, but it needs to know the size of the data 
+  so i have to somehow smuggle that information to it. which SUCKS. 
+  the js side can't pass it in because instantiateStreaming just gives you a Module and an Instance 
+  and it seems those only let you reflect on the imports/exports. 
+  i guess i just need a new Fixup type. 
+  HACK: for now just scan for the exact bytes of the function where i do memory.init and poke in the sizes. 
+  it does work, and it does make it faster. mandelbrot_ui: 600ms -> 400ms. 
 
 ## (Dec 2)
 
