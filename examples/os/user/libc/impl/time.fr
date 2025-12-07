@@ -9,16 +9,14 @@ clock_gettime :: fn(clock_id: i64, time_spec: *TimeSpec) i64 = {
 //       if multiple threads are sleeping, just have one yield like this for the shortest duration and the rest futex wait.
 nanosleep :: fn(duration: *TimeSpec, nullable_remainder_out: i64) i64 = {
     @debug_assert_eq(nullable_remainder_out, 0, "todo: sleep remainder");
-    zeroes := zeroed Array(i64, 6);
-        now := system_counter_uptime();
-        @trace("nanosleep(%)", duration[]);
-        end := now + duration[];
-        dowhile {
-            _ := Syscall'perform_syscall(zeroes&, 0xFFFF0002);  // yield
-            now := system_counter_uptime();
-            end > now
-        };
-        0
+    ticks_per_s := i64.sys_get(.CNTFRQ_EL0);
+    s, ns := (duration.seconds, duration.nanoseconds);
+    ticks := (s * ticks_per_s) + ((ns * ticks_per_s) / NS_PER_S);
+    until := i64.sys_get(.CNTVCT_EL0) + ticks;
+    @trace("nanosleep(%)", duration[]);
+    args: Array(i64, 6) = (until, 0, 0, 0, 0, 0);
+    _ := Syscall'perform_syscall(args&, 0xFFFF0002);  // yield
+    0
 };
 
 localtime_r :: fn(time_in: *time_t, time_out: *BigTime) *BigTime = {

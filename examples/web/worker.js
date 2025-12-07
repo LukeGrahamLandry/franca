@@ -3,18 +3,24 @@ let Franca;
 let module;
 let version;
 let canvas;
+let current_exit_futex;
 
 let known_wasm_jit_event = 0n;
 
 function handle_child_thread(child) {
     const [userdata, stack, exit_futex] = child;
     Franca.__stackbase.value = Number(stack);
+    current_exit_futex = exit_futex;
     known_wasm_jit_event = Franca.wasm_init_thread(userdata, known_wasm_jit_event);
+    set_zero_and_wake(exit_futex);
+    self.postMessage({ tag: "recycle" });
+}
+
+function set_zero_and_wake(exit_futex) {
     let mem = new DataView(Franca.memory.buffer);
     mem.setInt32(Number(exit_futex), 0);
     let buf = new Int32Array(Franca.memory.buffer, Number(exit_futex), 1);
     Atomics.notify(buf, 0);
-    self.postMessage({ tag: "recycle" });
 }
 
 export async function handleWasmLoaded(wasm_instance, msg) {
@@ -98,6 +104,7 @@ export const imports = {
         ceil: (a) => Math.ceil(a),
 
         js_worker_stop: (status) => {
+            if (current_exit_futex !== undefined) set_zero_and_wake(current_exit_futex);
             let G = get_G();
             if (status == 0n) throw "called exit 0";
             cancelAnimationFrame(G.animation_id);
@@ -225,6 +232,7 @@ function handle(_msg) {
             imports.main.memory = msg.memory;
             version = msg.version;
             canvas = msg.canvas;
+            current_exit_futex = undefined;
             if (module === undefined) {
                 WebAssembly.instantiateStreaming(fetch(`target/demo.wasm?v=${version}`), imports)
                     .then(it => { 
@@ -258,6 +266,7 @@ function handle(_msg) {
             canvas = undefined;
             known_wasm_jit_event = 0n;
             imports.main.memory = undefined;
+            current_exit_futex = undefined;
             // not resetting `module`, it gets reused
             reset_G();
             break

@@ -24,13 +24,12 @@ it also runs doom (i don't have a keyboard driver yet so just the intro render)
 - virtual file system in userspace 
   - makes it easy to port programs that expect a unix-like everything-is-a-file interface
 - a subset of libc
+- use multiple cores
 
 ## incomplete
 
 - mprotect
 - multiple address spaces
-- multiple cores
-- sleep
 - block device
 - persistant file system
 - exec and capture stdout
@@ -47,17 +46,14 @@ it also runs doom (i don't have a keyboard driver yet so just the intro render)
 - gpu
 - check for needs_reset flag when waiting for virt queue
 - make volatile pointers less painful in my language
-- accel-hvf and vzf use 100% cpu when spinning in wfi
 - vzf: sometimes you don't get the `>>>` prompt until you hit a key
 - why does mmap die sometimes??
-- replace the web demo with the userspace part of the os so i don't have two hacky subsets of libc
 - be able to spawn a thread that's disallowed from using specific libc functions. 
   ie. my compiler's codegen thread needs mmap+futex+exit and nothing else
 - rest of the libc functions needed for all my tests:
 ```
    "unlinkat", 
    "wait4", "pipe", "mkstemp", "dup2",
-   "renameat", 
    "readlinkat", "mkdirat", 
    "sigaction",
    "localtime_r", 

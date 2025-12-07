@@ -16,6 +16,12 @@
   so that was one of these many timer problems too i guess.  
 - web: firefox says "TypeError: first argument must be an ArrayBuffer or typed array object" 
   if you try to use one backed by a sharedarraybuffer (chrome and safari don't care)
+- have the kernel know about sleeping so now it can go idle when every thread is sleeping 
+  and test_screen doesn't take a whole core. (before if everyone yielded you'd just 
+  loop back around to the first guy without wfi-ing). 
+  - for web, can just use the futex timeout on an address that i know will never be signaled. 
+- web: js_worker_stop needs to wake the exit_futex. when i do processes and want to propagate 
+  dying to all the threads when one panics: want to do it in userspace anyway so i can share with native. 
 
 ## (Dec 6)
 

@@ -1,3 +1,8 @@
+// this allows compiling the userspace part of my os to wasm and running it in a web browser. 
+// the core syscalls that would normally be provided by the kernel map quite directly to browser apis:
+// thread -> WebWorker, mmap -> memory.grow, futex -> memory.atomics.(wait, notify), virtio-gpu -> webgpu. 
+// there's an example of the js side in examples/web/(main.js, worker.js). 
+
 #include_std("compiler/lib.fr");
 DEBUG_SPAM_LOG :: false;
 DISABLE_IMPORT_FRC :: false;
@@ -125,9 +130,6 @@ Host :: @struct {
     js_write :: fn(id: i64, ptr: *u8, len: i64) i64 #weak #import("libc");
     js_worker_spawn :: fn(userdata: rawptr, stack: *u8, exit_futex: *u32) void #weak #import("libc");
     js_worker_stop :: fn(status: i64) void #weak #import("libc");
-    
-    // TODO: spawn worker
-    // TODO: sleep worker
 };
 
 #use("@/lib/sys/sync/mutex.fr");
@@ -300,7 +302,8 @@ Overrides :: @struct {
     clock_gettime :: fn(clock_id: i64, time_spec: *TimeSpec) i64 = {
         ms := Host'js_performace_now();
         s := int(ms) / 1000;
-        time_spec[] = (seconds = s, nanoseconds = int((ms - float(s*MS_PER_S)) * NS_PER_MS));
+        xxx := (ms - float(s*MS_PER_S));
+        time_spec[] = (seconds = s, nanoseconds = int(xxx * NS_PER_MS));
         0
     };
     
@@ -312,7 +315,9 @@ Overrides :: @struct {
     };
 
     nanosleep :: fn(duration: *TimeSpec, nullable_remainder_out: i64) i64 = {
-        eprintln("TODO: nanosleep");
+        ns := duration.seconds * NS_PER_S + duration.nanoseconds;
+        zero: u32 = 0;
+        _ := import("@/lib/sys/sync/futex.fr")'wasm_atomic_wait(zero&, zero, ns);
         0
     };
     
@@ -350,7 +355,3 @@ memory_grow :: AsmFunctionWasmOnly(fn(page_delta: i32) i32 = (), fn(out) = {
     out.push(0x00);  // ^
     out.push(0x0B);  // end
 });
-
-// TODO
-// record all calls to table_assign and jit_instantiate_module so i can replay them when spawning a thread
-// 
