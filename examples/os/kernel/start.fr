@@ -1,5 +1,6 @@
 
 #use("@/examples/os/kernel/pages.fr");
+#use("@/lib/sys/sync/mutex.fr");
 
 kernel :: @static(Kernel);
 Kernel :: @struct {
@@ -8,11 +9,11 @@ Kernel :: @struct {
     // so you can tell which address space a pointer is in for debugging. 
     next_vaddr: i64;
     tasks: Array(Task, 16);
-    next_task_to_run: i64;
+    next_task_to_run: Array(i64, 16);
     next_task_id: i64;
     env: rawptr;
-    interrupt_stack: []u8;
-    idle_task: Task;
+    interrupt_stack: Array([]u8, 8);
+    idle_task: Array(Task, 8);
     page_size: i64;
     page_index_bits: []i64;
     kernel_image: []u8;
@@ -22,6 +23,9 @@ Kernel :: @struct {
     mmu_enabled: bool;
     devices: FixedList(Virt.Device, 8);
     handles: FixedList(Virt.DeviceHandle, 16);
+    syscall_lock: SpinMutex;
+    gic: Gic.Self;
+    spin_lock_ticks: i64;
 };
 
 fn FixedList($T: Type, $capacity: i64) Type = {
@@ -38,6 +42,15 @@ fn FixedList($T: Type, $capacity: i64) Type = {
     fn len(self: *Self) i64 = 
         self.len;
     
+    fn pop(self: *Self) ?T = {
+        @if(self.len <= 0) return(.None);
+        self.len -= 1;
+        (Some = self.maybe_uninit&[self.len])
+    }
+    
+    fn cap(self: *Self) i64 = 
+        capacity;
+    
     ::DeriveAsSliceIndexable(*Self, T); 
     
     Self
@@ -47,6 +60,7 @@ DT :: import("@/examples/os/drivers/devicetree.fr");
 
 // this is called by emit_entry's _start
 main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
+    ::enum(Task.State);
     kernel.uart = .None;
     FullHeader :: import("@/examples/os/build.fr").FullHeader;
     if device_tree == 0 || kernel_image_base == -4 {
@@ -108,6 +122,7 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
         };
     };
     gic := Gic'find(DT'iter(device_tree_bytes));
+    kernel.gic = gic;
     init_interrupt_vector();
     init(gic);
     init_timer(gic);
@@ -160,16 +175,20 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
         Xhci'discover_all(pci, gic);
     };
     
-    kstack := kernel.physical&.map_contiguous(16 * 1.shift_left(16), 1);
-    kernel.interrupt_stack = kstack;
+    each kernel.interrupt_stack& { it |
+        it[] = kernel.physical&.map_contiguous(16 * 1.shift_left(16), 1);
+    };
 
     ::[]Task;
-    task := kernel.idle_task&;
-    task.slice(1).set_zeroed();
-    task.mem.root = tt;
-    task.kernel_sp = kernel.interrupt_stack.end_pointer();
-    init_task(task, spin);
+    each kernel.idle_task& { task |
+        task.slice(1).set_zeroed();
+        task.mem.root = tt;
+        init_task(task, spin);
+    };
 
+    each kernel.tasks& { it |
+        it.state = .Free;
+    };
     kernel.next_task_id = 1;
     task := alloc_task(tt);
     init_task(task, user_exec);
@@ -184,7 +203,11 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
         mem.slice(0, device_tree_bytes.len).copy_from(device_tree_bytes);
         u8.int_from_ptr(mem.ptr)
     };
-    
+    task.state = .Runnable;
+    wake_secondary_cores(DT'iter(device_tree_bytes));
+    sys_set(*Task, .TPIDR_EL1, kernel.idle_task&.index(0));
+    kernel.syscall_lock&.lock();
+    reset_countdown();
     return_to_scheduler();
 }
 
@@ -221,7 +244,7 @@ check_system_registers :: fn() void = {
         kprint_label("el ", el);
         kpanic("expected to run in el1");
     };
-    if i64.sys_get(.ID_AA64ISAR0_EL1).shift_right_logical(20).bit_and(0b1111) == 0 {
+    if i64.sys_get(.ID_AA64ISAR0_EL1).shift_right_logical(20).bit_and(0b0010) == 0 {
         kprint("WARNING: atomic instructions are not implemented on this cpu (qemu: try -cpu cortex-a76)\n");
     };
     if i64.sys_get(.ICC_SRE_EL1).bit_and(1) == 0 {
@@ -253,14 +276,10 @@ VirtFuse :: import("@/examples/os/drivers/fs/virtio.fr");
 
 alloc_task :: fn(tt: *TranslationTable) *Task = {
     each kernel.tasks& { it |
-        if !it.active {
+        if Task.State.cas(it.state&, .Free, .Suspended) == .Free {
             it.slice(1).set_zeroed();
-            it.active = true;
-            it.thread_id = kernel.next_task_id;
-            kernel.next_task_id += 1;
-            // TODO: its dumb to store this on every task but it makes it easy for the interrupt handler to get it. 
-            // TODO: really it needs to be local to the core if multiple threads are allowed to be in the kernel at once. 
-            it.kernel_sp = kernel.interrupt_stack.end_pointer();
+            it.state = .Suspended;
+            it.thread_id = i64.atomic_inc(kernel.next_task_id&);
             it.mem.root = tt;
             return it;
         };
@@ -280,6 +299,7 @@ init_task :: fn(task: *Task, callee: rawptr) void = {
 }
 
 fn kill_task(task: *Task) void = {
+    task.state = .Uninit;
     // TODO: deallocate its pages and stuff
     //       (but for now everything is thread-like not process-like)
     if task.thread_id == 1 {
@@ -289,7 +309,8 @@ fn kill_task(task: *Task) void = {
     @if(task.exit_futex[] != task.thread_id.trunc()) kprint("WARN: corrupt exit_futex");
     task.exit_futex[] = 0;
     futex_wake(u32.int_from_ptr(task.exit_futex), MAX_i32);
-    task.active = false;
+    task.state = .Free;
+    sys_set(*Task, .TPIDR_EL1, kernel.idle_task&.index(current_core_index()));
 }
 
 get_current_task :: fn() *Task = 
@@ -349,9 +370,10 @@ init_interrupt_vector :: fn() void #use(Arm) = {
     @run assert_eq(size_of(InterruptVector), 0x800);
 }
 
-// EL1 Physical Timer. INTID defined by the Server Base System Architecture 
+// EL1 Virtual Timer. INTID defined by the Server Base System Architecture 
 // device tree: timer.interrupts[4] + 16 (Private Peripheral Interrupts)
-timer_irq :: 30;
+// TODO: how do yo we know it's the last one in devicetree.timer.interrupts?
+timer_irq :: 16 + 0xb;
 init_timer :: fn(gic: Gic.Self) void = {
     // any priority/ICFGR is fine.
     gic.set_group1(timer_irq);
@@ -370,28 +392,25 @@ reset_countdown :: fn() void = {
 }
 
 Arm :: import("@/backend/arm64/bits.fr");
-// - don't need to save sp here, sp=SP_EL1 already, have to explicitly access SP_EL0 to get the userspace one. 
 interrupt_trampoline :: AsmFunctionArmOnly(fn() void = (), interrupt_trampoline_code);
 interrupt_trampoline_code :: {
     #use(Arm);
     out := u32.list(64, ast_alloc());
     emit :: fn(inst) => out&.push(inst);
     
-    // briefly save x0 so i can use it to save the rest 
-    // TODO: this is not ok if its el1 code being interrupted. its fine if its el0 because that uses a different sp. 
-    emit(str_uo(.X64, x0, sp, 0));  
-    emit(mrs(x0, .TPIDR_EL1));
+    // return_to_user_impl left sp_el1 pointing at the Task
+    // TODO: is it a problem if it's not 16 aligned?
     
     @debug_assert_eq(SavedRegisters.offset_of(.gpr), 0);
     range(0, 16) { r |
         a, b := (r*2, r*2+1);
         off := r * 2;
-        emit(stp_so(.X64, a, b, x0, @as(i7) off));
+        emit(stp_so(.X64, a, b, sp, @as(i7) off));
     };
-    emit(ldr_uo(.X64, x1, sp, 0));  // move the saved x0 to gpr[0]
-    emit(str_uo(.X64, x1, x0, 0));  // ^
+    emit(add_im(.X64, x0, sp, 0, 0));  
     
     // since syscall_func never returns, it never unwinds its stack frame, so manually reset sp at the beginning. 
+    // (extra needed now that sp_el1 stores the task while in userspace)
     off := Task.offset_of(.kernel_sp) / 8;
     @debug_assert_lt(off, 1.shift_left(12));
     emit(ldr_uo(.X64, x1, x0, off));
@@ -404,30 +423,58 @@ interrupt_trampoline_code :: {
         emit(f_stp_so(FType.Q128, a, b, x0, @as(i7) off));
     };
     
+    // save special registers
+    emit(mrs(x1, .ELR_EL1)); 
+    emit(mrs(x2, .SPSR_EL1)); 
+    emit(mrs(x3, .SP_EL0)); 
+    off := SavedRegisters.offset_of(.elr);
+    @debug_assert_eq(off, SavedRegisters.offset_of(.spsr) - 8);
+    off /= 8;
+    emit(stp_so(.X64, x1, x2, x0, @as(i7) off));
+    @debug_assert_eq(SavedRegisters.offset_of(.gpr), 0);
+    emit(str_uo(.X64, x3, x0, @as(i7) sp));
+    
     // call syscall_func(task = x0)
-    // (which will save some special registers to task.mcontext itself)
     emit(arm_nop);  // :patch
     @debug_assert_eq(out.items().index_of(arm_nop).unwrap(), out.len - 1, "patch must be first nop");
     out.items()
 };
 
+return_to_user :: fn(new_task: *Task) Never = {
+    old_task := get_current_task();
+    if identical(old_task, new_task) {
+        new_task.state = .Running;
+    } else {
+        old_task.state = .Runnable;
+        new_task.state = .Running;
+    };
+    new_task.kernel_sp = kernel.interrupt_stack&[current_core_index()].end_pointer();
+    kernel.syscall_lock&.unlock();
+    return_to_user_impl(new_task)
+}
+
 // read SavedRegisters
-return_to_user :: AsmFunctionArmOnly(fn(task_x0: *Task) Never = (), {
+return_to_user_impl :: AsmFunctionArmOnly(fn(task_x0: *Task) Never = (), {
     #use(Arm);
     out := u32.list(64, ast_alloc());
     emit :: fn(inst) => out&.push(inst);
+    
+    // leave SP_EL1 pointing to a unique place per core so when interrupt_trampoline_code
+    // needs to save a register it doesn't stomp anything.
+    // doesn't need to point to a real stack because its reset below
+    emit(add_im(.X64, sp, x0, 0, 0)); 
+    emit(msr(.TPIDR_EL1, x0)); 
     
     // restore special registers
     off := SavedRegisters.offset_of(.elr);
     @debug_assert_eq(off, SavedRegisters.offset_of(.spsr) - 8);
     off /= 8;
     emit(ldp_so(.X64, x1, x2, x0, @as(i7) off));
+    @debug_assert_eq(SavedRegisters.offset_of(.gpr), 0);
+    emit(ldr_uo(.X64, x3, x0, @as(i7) sp));
     emit(msr(.ELR_EL1, x1)); 
     emit(msr(.SPSR_EL1, x2)); 
-    @debug_assert_eq(SavedRegisters.offset_of(.gpr), 0);
-    emit(ldr_uo(.X64, x1, x0, @as(i7) sp));
-    emit(msr(.SP_EL0, x1)); 
-    emit(msr(.TPIDR_EL1, x0)); 
+    emit(msr(.SP_EL0, x3)); 
     // TODO: set TTBR0_EL1
     // (because each task should have its own address space)
     
@@ -452,29 +499,37 @@ return_to_user :: AsmFunctionArmOnly(fn(task_x0: *Task) Never = (), {
     out.items()
 });
 
+// TODO: don't take syscall_lock for the preemption switching to new task interrupt
+// TODO: instead of using the timer to wake and poll for runnable tasks, 
+//       have other core send an interrupt when making a new task runnable?
 return_to_scheduler :: fn() Never = {
+    get_current_task()[].state = .Runnable;
+    
+    task := choose_task_to_run();
+    // if the guy before you used most of their time slice and then did a syscall that yielded,
+    // the next guy should still get a full time slice, 
+    // otherwise you could starve people by controlling the order processes get spawned. 
+    reset_countdown();
+    return_to_user(task)
+}
+
+choose_task_to_run :: fn() *Task = {
     cap := size_of(@type kernel.tasks) / size_of(Task);
-    i := kernel.next_task_to_run&;
+    i := kernel.next_task_to_run&.index(current_core_index());
     range(0, cap) { _ |
         task := kernel.tasks&[i[]]&;
         i[] = i[].add(1).mod(cap);
-        if task.active && task.futex_wait == 0 {
-            // TODO: doing this means i can't use it for actual timer
-            // if the guy before you used most of their time slice and then did a syscall that yielded,
-            // the next guy should still get a full time slice, 
-            // otherwise you could starve people by controlling the order processes get spawned. 
-            reset_countdown();
-            
-            return_to_user(task);
+        if task.futex_wait == 0 && Task.State.cas(task.state&, .Runnable, .Running) == .Runnable {
+            return task;
         };
     };
-    reset_countdown();
-    return_to_user(kernel.idle_task&)
+    kernel.idle_task&.index(current_core_index())
 }
 
 stop :: fn() Never = {
+    kprint_label("spin_lock_ticks ", kernel.spin_lock_ticks);
     kprint("goodbye!\n");
-    poweroff()
+    PSCI'system_off()
 }
 
 aligned_static :: fn($T: Type, $need_align: i64) *T #generic #inline = {
@@ -522,7 +577,8 @@ Task :: @struct {
     signal_stack: i64;
     thread_id: i64;
     futex_wait: i64;  // *u32
-    active: bool;
+    state: State;
+    State :: @enum(u32) (Uninit, Runnable, Running, Suspended, Free);
 };
 
 SavedRegisters :: MContext;
@@ -530,13 +586,11 @@ SavedRegisters :: MContext;
 syscall_func :: fn(task: *Task) void = {
     return :: ();  // must do it via return_to_user
     
+    kernel.syscall_lock&.lock();
     set_dynamic_context(kernel.env);
+    @if(!identical(task, get_current_task())) kpanic("bad task??");
+    task.state = .Suspended;
     args := task.mcontext&;
-    
-    // these are restored by return_to_user
-    args.elr = i64.sys_get(.ELR_EL1);
-    args.spsr = i64.sys_get(.SPSR_EL1);
-    args.gpr&[31] = i64.sys_get(.SP_EL0);
     
     // these being in SavedRegisters isn't important because i don't restore them 
     // but it seems convient to have one context thing you can pass around.
@@ -547,6 +601,11 @@ syscall_func :: fn(task: *Task) void = {
     intid0 := i64.sys_get(.ICC_IAR0_EL1).bit_and(0xfff);
     if intid0 != Gic.null_interrupt_id {
         kpanic("intid0");
+    };
+    
+    if intid == timer_irq {
+        i64.sys_set(.ICC_EOIR1_EL1, intid);
+        return_to_scheduler();    // calls reset_countdown and moves to someone else
     };
         
     ::if_opt(Pl011.Self, i64);
@@ -586,12 +645,23 @@ syscall_func :: fn(task: *Task) void = {
             if commit_if_reserved(task.mem&, vaddr, pte) {
                 return_to_user(task);
             };
+
+            // problem is if the above late commit happens on one core and then another core 
+            // tries to access the memory, the tlb might have cached that that entry was invalid. 
+            // TODO: idk if there's a cleaner way to make clear_tlb propagate to all the cores
+            is_translation_fault := args.esr.bit_and(0b111100) == 0b000100;  // ie. not a permission fault
+            if is_translation_fault && pte.map.get(.tag) == 0b11 {
+                clear_tlb(vaddr);
+                return_to_user(task);
+            };
             
             kprint("data abort from el0\n");
             kprint_label("fault address: ", args.far);
             kprint_label("ip: ", args.elr);
             inst := u32.ptr_from_int(args.elr)[];
             kprint_label("instruction: ", inst.zext());
+            kprint_label("spsr: ", args.spsr);
+            kprint_label("esr: ", args.esr);
             send_signal(task);  // give userspace a chance to print a stack trace
         };
         
@@ -650,11 +720,6 @@ syscall_func :: fn(task: *Task) void = {
         send_signal(task);
     };
     
-    if intid == timer_irq {
-        i64.sys_set(.ICC_EOIR1_EL1, intid);
-        return_to_scheduler();    // calls reset_countdown and moves to someone else
-    };
-    
     handled := false;
     each kernel.devices& { console |
         if intid == console.intid {
@@ -669,7 +734,7 @@ syscall_func :: fn(task: *Task) void = {
     };
     
     i64.sys_set(.ICC_EOIR1_EL1, intid);
-    if identical(task, kernel.idle_task&) {
+    if task.thread_id == 0 {
         return_to_scheduler();  
     };
     return_to_user(task);
@@ -714,6 +779,10 @@ fn sigstack(t: *ThreadConfig) Ty(i64, i64) =
 SyscallFunc :: @FnPtr(x0: i64, x1: i64, x2: i64, x3: i64, x4: i64, x5: i64) i64;
 
 send_signal :: fn(task: *Task) Never = {
+    if task.thread_id == 0 {
+        @if(kernel.tasks&.items().contains_address(task)) kpanic("non-idle_task has id 0");
+        kpanic("send_signal to idle task");
+    };
     push_signal_context(task);
     return_to_scheduler()
 }
@@ -740,16 +809,85 @@ user_virtq_poll :: fn(it: *UQueue, _: i64) void = {
 
 Crash :: import("@/lib/crash_report.fr");
 
-poweroff :: fn() Never = {
-    hypervisor_call :: @AsmFunctionArmOnly(fn(n: i64) Never = ()) => (
-        hvc,
-        ret(), 
-    );
-    // not listed in the devicetree's psci section which is strange (cpu_off is there but doesn't do what i want). 
-    // Arm Power State Coordination Interface. Version 1.3 issue F.b
-    SYSTEM_OFF :: 0x84000008;
-    hypervisor_call(SYSTEM_OFF)
+PSCI :: @struct {
+    system_off :: fn() Never = {
+        // not listed in the devicetree's psci section which is strange (cpu_off is there but doesn't do what i want). 
+        // Arm Power State Coordination Interface. Version 1.3 issue F.b
+        SYSTEM_OFF :: 0x84000008;
+        f(SYSTEM_OFF);
+        f :: @AsmFunctionArmOnly(fn(n: i64) Never = ())
+            => (hvc, ret());
+    }
+    
+    cpu_on :: fn(cpu: i64, callee: @FnPtr(ctx: *u8) void, ctx: *u8) void = {
+        CPU_ON :: 0xC4000003;  // TODO: get this from device tree? it has a specific value in the pdf tho. 
+        f(CPU_ON, cpu, callee, ctx);
+        f :: @AsmFunctionArmOnly(fn(n: i64, cpu: i64, callee: @FnPtr(ctx: *u8) void, ctx: *u8) void = ()) 
+            => (hvc, ret());
+    }
+};
+
+wake_secondary_cores :: fn(dt: DT.Iter) void = {
+    fence();
+    dt&.consume_root();
+    dt&.find_node(.BEGIN_NODE, fn(it) => it.name == "cpus") || {
+        kprint("missing devicetree.cpus");
+        return()
+    };
+    
+    // TODO: check #address-cells = 1
+    loop {
+        dt&.find_node(.BEGIN_NODE, fn(it) => it.name.starts_with("cpu@")) 
+            || return();
+        // TODO: check enable-method = "psci";
+        node := dt&.find_node(.PROP, fn(it) => it.name == "reg")
+            .expect("missing devicetree.cpus.cpu@#.reg");
+        mpidr: i64 = node.read_32(0).zext();
+        if mpidr != 0 {
+            stack := kernel.physical&.map_contiguous(1.shift_left(16), 1);
+            @assert(size_of(DefaultContext) < stack.len);
+            p := rawptr.reinterpret_bytes(stack);
+            p[p.len - 2] = cpu_on_main;
+            sp := stack.end_pointer().offset(-16);
+            PSCI'cpu_on(mpidr, cpu_on_trampoline, sp);
+        };
+        dt&.skip_current_object();
+    };
 }
+
+// can't pass cpu_on_main to cpu_on directly because need to set sp first. 
+cpu_on_trampoline :: @AsmFunctionArmOnly(fn(new_sp: *u8) void = ()) => (
+    add_im(.X64, sp, x0, 0, 0),
+    ldr_uo(.X64, x0, x0, 0),
+    br(x0, 0),
+    b(0, 0),
+);
+
+cpu_on_main :: fn() void = {
+    _, c := create_and_set_unsafe_environment();
+    i := current_core_index();
+    
+    check_system_registers();
+    init_interrupt_vector();
+    gic := kernel.gic;
+    init(gic);
+    init_timer(gic);
+    task := kernel.idle_task&.index(current_core_index());
+    set_mmu_reg(task.mem.root.entries&.items());
+    
+    with kernel.syscall_lock& {
+        kprint_label("thread_index ", i + 1);
+    };
+    
+    // needs a value because return_to_user writes to task.state
+    sys_set(*Task, .TPIDR_EL1, task);  
+    kernel.syscall_lock&.lock();
+    return_to_scheduler();
+    unreachable();
+}
+
+current_core_index :: fn() i64 = 
+    i64.sys_get(.MPIDR_EL1).bit_and(0xFF);
 
 fn tpanic(msg: Str) Never = 
     tpanic(get_current_task(), msg);
@@ -768,7 +906,7 @@ kpanic :: fn(msg: Str) Never = {
     kprint("we're so fucked\n===\n");
     kprint(msg);
     kprint("\n===\ni repeat, we're so fucked\n");
-    poweroff()
+    PSCI'system_off()
 };
 
 kprint_label :: fn(msg: Str, value: i64) void = {
@@ -777,14 +915,10 @@ kprint_label :: fn(msg: Str, value: i64) void = {
     kprint("\n");
 }
 
-spin :: fn() Never = {
-    loop {
-        (@AsmFunctionArmOnly(fn() void = ()) => (
-            wfi,
-            ret(), 
-        ))();
-    };
-}
+spin :: (@AsmFunctionArmOnly(fn() Never = ()) => (
+    wfi,
+    b(-1, 0),
+));
 
 kprint :: fn(s: Str) void = {
     if kernel.uart& { it |
@@ -902,3 +1036,28 @@ fn unresolve_scopes(expr: *FatExpr) void = {
 
 #use("@/examples/os/libkernel.fr");
 #use("@/lib/sys/process.fr");  // TODO: maybe sys_get/sys_set should go somewhere else
+
+SpinMutex :: @struct(thread: i64);
+
+fn lock(self: *SpinMutex) void = {
+    my_thread := current_core_index() + 1;
+    @if(self.thread == my_thread) kpanic("relocked mutex");
+    while => i64.cas(self.thread&, 0, my_thread) != 0 {
+        i64.atomic_inc(kernel.spin_lock_ticks&);
+        // spin
+    };
+    fence();
+}
+
+fn unlock(self: *SpinMutex) void = {
+    fence();
+    my_thread := current_core_index() + 1;
+    prev := i64.cas(self.thread&, my_thread, 0);
+    @if(prev != my_thread) kpanic("unlocked unowned mutex");
+}
+
+fn with(self: *SpinMutex, $body: @Fn() void) void = {
+    self.lock();
+    @must_return body();
+    self.unlock();  // TODO: defer
+}

@@ -1,4 +1,49 @@
 
+## (Dec 6)
+
+- since im trying to use the same idle_task on all the cores, 
+  make it an asmfunction so it never touches the stack. seems to have helped
+- just the slight disadvantage that it's actually slower when i use more cores. 
+- second core not getting preemption interrupt so its just in idle_task, probably need to set gicr waker
+- important note, when i switched to virtual timer to make it work in hvf, 
+  i didn't switch the interrupt id so that just didn't work at all this whole time. 
+  fixed that and it works in vzf and qemu-tcg but not qemu-hvf. 
+- vzf with -smp 2 i don't get serial interrupt anymore, so thats fun, 
+  with -append to test it anyway it now uses both cores but crashes while running the compiler. 
+  qemu-tcg works and is faster with -smp 2 so thats progress.
+- vzf interrupt fixed by using a seperate idle_task per core. 
+  since return_to_user writes task.kernel_sp and it needs to stay the same until you get an interrupt. 
+- vzf dies in vnew and the fault address pte is fine, and it works if i just return there and try again. 
+  so that's probably i have to flush the page table more somehow. 
+  problem happens when commit_if_reserved on one core and then access on the other core. 
+  so i guess TLBI_VALE1IS doesn't affect all cores and it does cache the invalidness in the page table? 
+  TLBI_VALE1OS doesn't fix it. 
+- now vzf -smp (1 -> 2) makes kaleidoscope (1500ms -> 1020ms). 
+  (time with nocache=true)
+
+## (Dec 5)
+
+- `-smp` to qemu asks for more cores and i see them in the device tree,   
+  now have to figure out what `enable-method = "psci";` means  
+  https://docs.kernel.org/arch/arm64/booting.html  
+  oh PowerStateCoordinationInterface, i've been to this pdf before.  
+  that wasn't too bad, setup a new stack and do the magic hvc.  
+  now i have two probems... :)
+  ```
+  send wake
+  HELLO FRnoOM OTHER CORE mo
+  MPIDR_EL1 re c21474ores
+  83649
+  ```
+- when i do a cas on the other thread on hvf/vzf it hangs. 
+  even not in a loop, just once, it dies. it works in qemu-tcg tho. 
+  problem was not setting up the mmu on the new core, and even when i thought of
+  that i forgot to set MAIR_EL1 so it still didn't work. 
+  i guess you're not allowed atomics on nGnRnE memory, that's fair. 
+- have task in sp_el1 while in userspace so can directly save registers in interrupt handler 
+  instead of stomping where ever the old kernel sp was, 
+  so it's safe before taking the mutex if another core is using the kernel stack 
+
 ## (Dec 4)
 
 - make Jit.Event.Close less n^2

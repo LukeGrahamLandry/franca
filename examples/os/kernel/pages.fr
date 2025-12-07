@@ -241,21 +241,6 @@ setup_virtual_memory :: fn(ram: []u8, pci: ?Pci.MemoryRegion) *TranslationTable 
     });
     tt := mem.root.entries&.items();
     
-    mmfr := Aa64Mmfr.sys_get(.ID_AA64MMFR0_EL1);
-    // make sure its turned off before we start fucking with the tables
-    barrier();
-    i64.sys_set(.SCTLR_EL1, 0);
-    barrier(); 
-    
-    // Memory Attribute Indirection Register
-    // each slot is 1 byte, describes a caching behaviour, 
-    // page table entries contain an index of which slot to use.
-    // [0] = normal, [1..=7] = device nGnRnE
-    i64.sys_set(.MAIR_EL1, 0xff);
-    
-    // TODO: shouldn't it be this: kernel.page_index_bits[kernel.page_index_bits.len - 1];
-    nbit := 48; 
-    
     // map everything below ram as device memory for kernel
     map_identity(mem&, u8.ptr_from_int(0).slice(u8.int_from_ptr(ram.ptr)), false, true, true);
     // TODO: only kimage should be kernel executable
@@ -295,7 +280,30 @@ setup_virtual_memory :: fn(ram: []u8, pci: ?Pci.MemoryRegion) *TranslationTable 
         index_page_table(mem&, i * page_size)[].map.repr = 0;
     };
     
+    set_mmu_reg(tt);
+    kernel.mmu_enabled = true;
+    
+    mem.root
+}
+
+set_mmu_reg :: fn(tt: []PTE) void = {
+    // make sure its turned off before we start fucking with the tables
+    barrier();
+    i64.sys_set(.SCTLR_EL1, 0);
+    barrier(); 
+
+    // Memory Attribute Indirection Register
+    // each slot is 1 byte, describes a caching behaviour, 
+    // page table entries contain an index of which slot to use.
+    // [0] = normal, [1..=7] = device nGnRnE
+    i64.sys_set(.MAIR_EL1, 0xff);
+
+    mmfr := Aa64Mmfr.sys_get(.ID_AA64MMFR0_EL1);
     sys_set(*PTE, .TTBR0_EL1, tt.ptr);
+    page_size := kernel.page_size;
+    
+    // TODO: shouldn't it be this: kernel.page_index_bits[kernel.page_index_bits.len - 1];
+    nbit := 48; 
     
     tcr := TcrEl1.zeroed();
     sctlr := SctlrEl1.zeroed();
@@ -326,11 +334,7 @@ setup_virtual_memory :: fn(ram: []u8, pci: ?Pci.MemoryRegion) *TranslationTable 
     barrier();
     SctlrEl1.sys_set(.SCTLR_EL1, sctlr);
     barrier();
-    kernel.mmu_enabled = true;
-    
-    mem.root
 }
-
 fn check_user_remap(addr: i64, len: i64) []u8 = 
     check_user_memory(addr, len, 0);
 
