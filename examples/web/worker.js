@@ -110,7 +110,10 @@ export const imports = {
                 Number(ptr),
                 Number(len),
             );
-            const module = new WebAssembly.Module(buffer);
+            
+            const wasteofmytime = new ArrayBuffer(buffer.byteLength);  // firefox
+            new Uint8Array(wasteofmytime).set(new Uint8Array(buffer));
+            const module = new WebAssembly.Module(wasteofmytime);
             const instance = new WebAssembly.Instance(module, { main: Franca });
 
             let i = Number(first_export);
@@ -267,6 +270,7 @@ function handle(_msg) {
 const show = (s) => self.postMessage({ tag: "show", text: s });
 const show_error = (s) => {
     if (s instanceof Error) {
+        show(`${s.toString()}\n\n${s.stack}`);
         console.error(s);
         s = s.toString();
     }

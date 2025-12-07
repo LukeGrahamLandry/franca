@@ -9,11 +9,11 @@ Kernel :: @struct {
     // so you can tell which address space a pointer is in for debugging. 
     next_vaddr: i64;
     tasks: Array(Task, 16);
-    next_task_to_run: Array(i64, 16);
-    next_task_id: i64;
+    next_task_to_run: OnePerCore(i64);
+    next_task_to_spawn: i64;
     env: rawptr;
-    interrupt_stack: Array([]u8, 8);
-    idle_task: Array(Task, 8);
+    interrupt_stack: OnePerCore([]u8);
+    idle_task: OnePerCore(Task);
     page_size: i64;
     page_index_bits: []i64;
     kernel_image: []u8;
@@ -175,39 +175,26 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
         Xhci'discover_all(pci, gic);
     };
     
-    each kernel.interrupt_stack& { it |
-        it[] = kernel.physical&.map_contiguous(16 * 1.shift_left(16), 1);
+    each kernel.interrupt_stack.items& { it |
+        it[] = kernel.physical&.map_contiguous(8.shift_left(16), 1);
     };
 
     ::[]Task;
-    each kernel.idle_task& { task |
-        task.slice(1).set_zeroed();
+    each kernel.idle_task.items& { task |
         task.mem.root = tt;
-        init_task(task, spin);
+        task.mcontext.elr = launder_to_user_pointer(spin);
+        // no stack is fine because spin is an asmfunction with no callees
     };
 
     each kernel.tasks& { it |
         it.state = .Free;
     };
-    kernel.next_task_id = 1;
-    task := alloc_task(tt);
-    init_task(task, user_exec);
-    elf_bytes := root_task_elf_bytes;
-    task.mcontext.gpr&[0] = launder_to_user_pointer(u8.raw_from_ptr(elf_bytes.ptr));
-    task.mcontext.gpr&[1] = elf_bytes.len;
-    task.mcontext.gpr&[2] = {
-        size := device_tree_bytes.len.align_to(kernel.page_size);
-        mem := vmap_reserve(task.mem&, size / kernel.page_size);
-        sys_set(*Task, .TPIDR_EL1, task);
-        mem := u8.check_user_write(mem, size);
-        mem.slice(0, device_tree_bytes.len).copy_from(device_tree_bytes);
-        u8.int_from_ptr(mem.ptr)
-    };
-    task.state = .Runnable;
+    kernel.next_task_to_spawn = 1;
+    init_root_task(tt, root_task_elf_bytes, device_tree_bytes);
+    
     wake_secondary_cores(DT'iter(device_tree_bytes));
-    sys_set(*Task, .TPIDR_EL1, kernel.idle_task&.index(0));
+    sys_set(*Task, .TPIDR_EL1, kernel.idle_task&.current());
     kernel.syscall_lock&.lock();
-    reset_countdown();
     return_to_scheduler();
 }
 
@@ -279,7 +266,7 @@ alloc_task :: fn(tt: *TranslationTable) *Task = {
         if Task.State.cas(it.state&, .Free, .Suspended) == .Free {
             it.slice(1).set_zeroed();
             it.state = .Suspended;
-            it.thread_id = i64.atomic_inc(kernel.next_task_id&);
+            it.thread_id = i64.atomic_inc(kernel.next_task_to_spawn&);
             it.mem.root = tt;
             return it;
         };
@@ -287,15 +274,28 @@ alloc_task :: fn(tt: *TranslationTable) *Task = {
     kpanic("too many tasks running")
 }
 
-init_task :: fn(task: *Task, callee: rawptr) void = {
-    stack_size := 1.shift_left(21);
-    user_stack := vmap_reserve(task.mem&, stack_size / kernel.page_size);
-    // stack grows left, so start at the right of the allocation. 
-    user_stack += stack_size;
-    
-    task.mcontext.gpr&[31] = user_stack;
-    // TODO: remove the remapping hack, just copy the bytes. 
-    task.mcontext.elr = launder_to_user_pointer(callee);
+init_root_task :: fn(tt: *TranslationTable, elf_bytes: []u8, device_tree_bytes: []u8) void = {
+    task := alloc_task(tt);
+    gpr := task.mcontext.gpr&;
+    gpr[0] = launder_to_user_pointer(u8.raw_from_ptr(elf_bytes.ptr));
+    gpr[1] = elf_bytes.len;
+    gpr[2] = {
+        size := device_tree_bytes.len.align_to(kernel.page_size);
+        mem := vmap_reserve(task.mem&, size / kernel.page_size);
+        sys_set(*Task, .TPIDR_EL1, task);
+        mem := u8.check_user_write(mem, size);
+        mem.slice(0, device_tree_bytes.len).copy_from(device_tree_bytes);
+        u8.int_from_ptr(mem.ptr)
+    };
+    gpr[31] = {
+        stack_size := 1.shift_left(21);
+        s := vmap_reserve(task.mem&, stack_size / kernel.page_size);
+        // stack grows left, so start at the right of the allocation. 
+        s += stack_size;
+        s
+    };
+    task.mcontext.elr = launder_to_user_pointer(user_exec);
+    task.state = .Runnable;
 }
 
 fn kill_task(task: *Task) void = {
@@ -310,7 +310,7 @@ fn kill_task(task: *Task) void = {
     task.exit_futex[] = 0;
     futex_wake(u32.int_from_ptr(task.exit_futex), MAX_i32);
     task.state = .Free;
-    sys_set(*Task, .TPIDR_EL1, kernel.idle_task&.index(current_core_index()));
+    sys_set(*Task, .TPIDR_EL1, kernel.idle_task&.current());
 }
 
 get_current_task :: fn() *Task = 
@@ -320,13 +320,10 @@ fn futex_wake(addr: i64, val: i64) i64 = {
     // TODO: unfair and :slow, maybe i want a queue per futex
     n := 0;
     i := 0;
-    cap := size_of(@type kernel.tasks) / size_of(Task);
+    cap := kernel.tasks&.len();
     while => i < cap && n < val {
         it := kernel.tasks&[i]&;
-        if it.futex_wait == addr {
-            it.futex_wait = 0;
-            n += 1;
-        };
+        n += int(i64.cas(it.futex_wait&, addr, 0) == addr);
         i += 1;
     };
     n
@@ -378,8 +375,7 @@ init_timer :: fn(gic: Gic.Self) void = {
     // any priority/ICFGR is fine.
     gic.set_group1(timer_irq);
     gic.enable(timer_irq);
-
-    reset_countdown();
+    reset_countdown();  // BEFORE
     i64.sys_set(.CNTV_CTL_EL0, 1);  // turn it on
 }
 
@@ -448,7 +444,7 @@ return_to_user :: fn(new_task: *Task) Never = {
         old_task.state = .Runnable;
         new_task.state = .Running;
     };
-    new_task.kernel_sp = kernel.interrupt_stack&[current_core_index()].end_pointer();
+    new_task.kernel_sp = kernel.interrupt_stack&.current()[].end_pointer();
     kernel.syscall_lock&.unlock();
     return_to_user_impl(new_task)
 }
@@ -514,8 +510,8 @@ return_to_scheduler :: fn() Never = {
 }
 
 choose_task_to_run :: fn() *Task = {
-    cap := size_of(@type kernel.tasks) / size_of(Task);
-    i := kernel.next_task_to_run&.index(current_core_index());
+    cap := kernel.tasks&.len();
+    i := kernel.next_task_to_run&.current();
     range(0, cap) { _ |
         task := kernel.tasks&[i[]]&;
         i[] = i[].add(1).mod(cap);
@@ -523,7 +519,7 @@ choose_task_to_run :: fn() *Task = {
             return task;
         };
     };
-    kernel.idle_task&.index(current_core_index())
+    kernel.idle_task&.current()
 }
 
 stop :: fn() Never = {
@@ -604,8 +600,9 @@ syscall_func :: fn(task: *Task) void = {
     };
     
     if intid == timer_irq {
+        reset_countdown();  // BEFORE
         i64.sys_set(.ICC_EOIR1_EL1, intid);
-        return_to_scheduler();    // calls reset_countdown and moves to someone else
+        return_to_scheduler();
     };
         
     ::if_opt(Pl011.Self, i64);
@@ -622,6 +619,7 @@ syscall_func :: fn(task: *Task) void = {
         
         // always the init task! not whatever task was interrupted. 
         init := kernel.tasks&[0]&;
+        @if(init.state == .Running) kpanic("TODO: input while init running on other core");
         @if(init.signal_stack_buf.len == 0) kpanic("got input before init signal handler");
         push_signal_context(init);
         init.mcontext.gpr&[1] = intid;
@@ -703,6 +701,7 @@ syscall_func :: fn(task: *Task) void = {
                     return_to_user(task);
                 }
             };
+
             // unknown syscall
             send_signal(task);
         };
@@ -739,6 +738,31 @@ syscall_func :: fn(task: *Task) void = {
     };
     return_to_user(task);
 };
+
+show_registers :: fn(task: *Task) void = {
+    args := task.mcontext&;
+    out := u8.list(2048, Arena'stack_alloc(2048));
+    @fmt(out&, "=== task: %, core: % ===\n", task.thread_id, current_core_index());
+    range(0, 32) { i |
+        @fmt(out&, "%: %, ", i, args.gpr&[i]);
+        if i.add(1).mod(8) == 0 {
+            @fmt(out&, "\n");
+        };
+    };
+    @fmt(out&, "spsr: %, ", args.spsr);
+    @fmt(out&, "elr: %, ", args.elr);
+    @fmt(out&, "inst: %, ", u32.ptr_from_int(args.elr)[].zext());
+    @fmt(out&, "esr: %, ", args.esr);
+    @fmt(out&, "far: %, ", args.far);
+    @fmt(out&, "\n");
+    @fmt(out&, "CNTV_TVAL_EL0: %, ", i64.sys_get(.CNTV_TVAL_EL0));
+    @fmt(out&, "CNTV_CVAL_EL0: %, ", i64.sys_get(.CNTV_CVAL_EL0));
+    @fmt(out&, "CNTVCT_EL0: %, ", i64.sys_get(.CNTVCT_EL0));
+    @fmt(out&, "CNTV_CTL_EL0: %, ", i64.sys_get(.CNTV_CTL_EL0));
+    
+    @fmt(out&, "\n");
+    kprint(out.items());
+} 
 
 push_signal_context :: fn(task: *Task) void = {
     task.futex_wait = 0;
@@ -793,7 +817,7 @@ launder_to_user_pointer :: fn(a: rawptr) i64 #noinline = {
     u8.int_from_ptr(kernel.user_image.ptr) + i
 }
 
-user_unwind_signal :: @AsmFunctionArmOnly(fn(intid_x0: i64) Never = ()) => (
+user_unwind_signal :: @AsmFunctionArmOnly(fn(intid_x0: i64, ctx_x1: *MContext) Never = ()) => (
     add_im(.X64, x2, sp, 0, 0),
     movz(.X64, x16, 0xFFFF, Hw.Left16),
     movk(.X64, x16, 0x0004, Hw.Left0),
@@ -828,7 +852,7 @@ PSCI :: @struct {
 };
 
 wake_secondary_cores :: fn(dt: DT.Iter) void = {
-    fence();
+    barrier();
     dt&.consume_root();
     dt&.find_node(.BEGIN_NODE, fn(it) => it.name == "cpus") || {
         kprint("missing devicetree.cpus");
@@ -857,6 +881,7 @@ wake_secondary_cores :: fn(dt: DT.Iter) void = {
 
 // can't pass cpu_on_main to cpu_on directly because need to set sp first. 
 cpu_on_trampoline :: @AsmFunctionArmOnly(fn(new_sp: *u8) void = ()) => (
+    0xd50041bf, // msr SPSel, #0x1; probably already the case but just make sure. 
     add_im(.X64, sp, x0, 0, 0),
     ldr_uo(.X64, x0, x0, 0),
     br(x0, 0),
@@ -872,12 +897,8 @@ cpu_on_main :: fn() void = {
     gic := kernel.gic;
     init(gic);
     init_timer(gic);
-    task := kernel.idle_task&.index(current_core_index());
+    task := kernel.idle_task&.current();
     set_mmu_reg(task.mem.root.entries&.items());
-    
-    with kernel.syscall_lock& {
-        kprint_label("thread_index ", i + 1);
-    };
     
     // needs a value because return_to_user writes to task.state
     sys_set(*Task, .TPIDR_EL1, task);  
@@ -1046,18 +1067,21 @@ fn lock(self: *SpinMutex) void = {
         i64.atomic_inc(kernel.spin_lock_ticks&);
         // spin
     };
-    fence();
+    barrier();
 }
 
 fn unlock(self: *SpinMutex) void = {
-    fence();
+    barrier();
     my_thread := current_core_index() + 1;
     prev := i64.cas(self.thread&, my_thread, 0);
     @if(prev != my_thread) kpanic("unlocked unowned mutex");
 }
 
-fn with(self: *SpinMutex, $body: @Fn() void) void = {
-    self.lock();
-    @must_return body();
-    self.unlock();  // TODO: defer
+fn OnePerCore($T: Type) Type = {
+    Self :: @struct(items: Array(T, 8));
+    
+    fn current(self: *Self) *T = 
+        self.items&.index(current_core_index());
+    
+    Self
 }

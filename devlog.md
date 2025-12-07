@@ -1,4 +1,22 @@
 
+## (Dec 7)
+
+- now i'm at the point of just fiddling with random code in the hopes that forcing myself to look at all of it will reveal a problem
+- vzf eventually `send_signal to idle task` if you leave it running long enough, so it's not just qemu
+- it seems to me that when i return from the timer interrupt, i immediatly get it again
+  but (but with ICC_IAR1_EL1 reading null_interrupt_id), so it re-does whatever the
+  esr/far values from last synchronous exception say. so if last thing you did 
+  was a syscall, now you do a new syscall with whatever the current register values 
+  happen to be, which is very bad for business. 
+  you need to reset_countdown BEFORE setting end-of-interrupt. 
+  now qemu-hvf-smp1 works, and vzf is less flaky. 
+  qemu-hvf-smp2 still dies immediatly, it happens on the first instruction of spin on the other core.
+  same ordering situation in init_timer. now it works!
+- side benifit after all this, vzf no longer pegs a core while in wfi,
+  so that was one of these many timer problems too i guess.  
+- web: firefox says "TypeError: first argument must be an ArrayBuffer or typed array object" 
+  if you try to use one backed by a sharedarraybuffer (chrome and safari don't care)
+
 ## (Dec 6)
 
 - since im trying to use the same idle_task on all the cores, 
