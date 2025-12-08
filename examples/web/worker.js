@@ -1,7 +1,6 @@
 
 let Franca;
 let module;
-let version;
 let canvas;
 let current_exit_futex;
 
@@ -230,21 +229,12 @@ function handle(_msg) {
                 return;
             }
             imports.main.memory = msg.memory;
-            version = msg.version;
             canvas = msg.canvas;
             current_exit_futex = undefined;
-            if (module === undefined) {
-                WebAssembly.instantiateStreaming(fetch(`target/demo.wasm?v=${version}`), imports)
-                    .then(it => { 
-                        module = it.module;
-                        handleWasmLoaded(it.instance, msg)
-                    })
-                    .catch(show_error);
-            } else {
-                WebAssembly.instantiate(module, imports)
-                    .then(it => handleWasmLoaded(it, msg))
-                    .catch(show_error);
-            }
+            if (module === undefined) show_error("must setmodule before start"); 
+            WebAssembly.instantiate(module, imports)
+                .then(it => handleWasmLoaded(it, msg))
+                .catch(show_error);
             break;
         }
         case "event": {
@@ -270,6 +260,10 @@ function handle(_msg) {
             // not resetting `module`, it gets reused
             reset_G();
             break
+        }
+        case "setmodule": {
+            module = msg.module;
+            break;
         }
         default:
             throw msg;

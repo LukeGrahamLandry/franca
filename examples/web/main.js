@@ -61,7 +61,7 @@ const handle = (_msg) => {
                 handle(msg);
             };
             running_threads.push(w);
-            w.postMessage({ tag: "start", args: [], version: version, child: msg.child, memory: msg.memory });
+            w.postMessage({ tag: "start", args: [], child: msg.child, memory: msg.memory });
             break
         }
         default:
@@ -74,6 +74,8 @@ function get_worker() {
         let w = new Worker(`worker.js?v=${version}`, { type: "module" });
         w.onerror = (e) => console.error(e);
         w.onmessage = (e) => console.error(e);
+        if (wasm_module === undefined) throw "get_worker before load_wasm";
+        w.postMessage({ tag: "setmodule", module: wasm_module });
         thread_pool.push(w);
     };
     return thread_pool.pop();
@@ -168,7 +170,7 @@ const toggle_worker = async () => {
         surface.height = canvas.clientHeight * window.devicePixelRatio;
         if (!need_canvas) surface = undefined;
         let transfer = need_canvas ? [surface] : [];
-        worker.postMessage({ tag: "start", args: args, version: version, canvas: surface, memory: new_memory(), devicePixelRatio: window.devicePixelRatio }, transfer);
+        worker.postMessage({ tag: "start", args: args, canvas: surface, memory: new_memory(), devicePixelRatio: window.devicePixelRatio }, transfer);
         document.getElementById("btn").innerText = "Kill";
     } else {
         // don't just reset because if they pressed kill maybe its because it hung
@@ -196,7 +198,7 @@ async function get_file(path) {
                 resolve(await msg.data.content.text());
             }
         };
-        w.postMessage({ tag: "start",args: args, version: version, memory: new_memory() }, []);
+        w.postMessage({ tag: "start",args: args, memory: new_memory() }, []);
     });
 }
 
@@ -264,6 +266,29 @@ document.getElementById("example").onchange = function () {
     history.replaceState(null, '', url);
 };
 show_compilers();
+
+let wasm_module = await load_wasm();
+async function load_wasm() {
+    let res = await fetch(`target/demo.wasm?v=${version}`);
+    if (res.status !== 200) document.getElementById("err").innerText = res.status;
+    // TODO: this is the compressed size but progress is uncompressed :(
+    const total = res.headers.get("content-length");
+    res = res.body.getReader();
+    let bytes = [];
+    let progress = 0;
+    while (true) {
+        const { done, value } = await res.read();
+        if (done) break;
+        progress += value.byteLength;
+        document.getElementById("time").innerText = `Loading ${progress}/${total}`; 
+        bytes.push(value);
+    }
+    document.getElementById("time").innerText = "Compiling"; 
+    bytes = await (new Blob(bytes)).arrayBuffer();
+    let result = await WebAssembly.compile(bytes);
+    document.getElementById("time").innerText = "Ready"; 
+    return result;
+}
 
 const p = new URLSearchParams(window.location.search);
 const dbg = p.get("dbg");
