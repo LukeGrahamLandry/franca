@@ -8,6 +8,7 @@ Crash :: import("@/lib/crash_report.fr");
 //       and using the host's backend when running as a driver 
 //       (see import_c for an example). 
 
+Wasm :: import("@/examples/import_wasm/runtime.fr");
 main :: fn() void = {
     Crash'hook_backtrace();
     args := cli_args();
@@ -66,9 +67,14 @@ main :: fn() void = {
                 };
             };
             insert(Type.scope_of(E), @symbol webgpu, webgpu);
+        } else {
+            insert(Type.scope_of(E), @symbol webgpu, @struct { _HACK :: 1; });
         };
         
-        E
+        @struct {
+            env :: wrap_fns_with_load_memory(Type.scope_of(E.env));
+            webgpu :: wrap_fns_with_load_memory(Type.scope_of(E.webgpu));
+        }
     };
     
     #use("@/lib/sys/fs.fr");
@@ -77,82 +83,87 @@ main :: fn() void = {
 }
 
 fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str, args: []CStr) void = {
-    module := QbeModule.zeroed(); m := module&;
-    init_default_module(m, (type = .JitOnly, os = query_current_os(), arch = query_current_arch(), link_libc = false));
-    
-    arena: Arena.Allocator = init(page_allocator, 1.shift_left(12));
-    a := arena&.borrow();
-    m.set_debug_types(logging, true);
-    
-    w: WasmModule = empty(a);
-    p: ParseWasm = (w = w&, src = bytes);
-    or parse_wasm(p&) { e |
-        @panic("% (at byte index %)", e, p.cursor);
-    };
-    
     // TODO: need 33 bits becase memarg has offset 
     //       (but nobody uses it that way because you'd need to know statically which half you're on)
     // TODO: can't do this if i want to run in wasm (meta-circularly). so at least need an option to be normal. 
     //       this also doesn't work if i want to support memory64. 
     // relies on page allocator giving zeroes
     buf := page_allocator.alloc_uninit(u8, 1.shift_left(32)); // wasm.w.memories[0].min.zext() * wasm_page_size);
-    wasm_context_pointer := buf.ptr;
     heap_base[] = trunc(buf.len - 1);
 
     heap_base[] = align_back(heap_base[], 65536);
     
-    self: LoadWasm = init(m, w&, a);
-    self&.load_module();
+    #use("@/examples/import_wasm/ffi.fr");
+
     // TODO: save the typeinfo and at least do arity checking
     exports := comptime_exports(Exports);
-    fill_imports(self&, exports&);
-    self&.instantiate(wasm_context_pointer);
-    main_module[] = self&;
     
-    trace := Crash'push_resolver(QbeModule, m, find_ip_in_module);
+    memory: SaneRawList(u8) = (ptr = buf.ptr, len = 0, cap = buf.len);
+    main_exports: RawHashMap(Str, Rt.Export) = init();
+    main_exports&.insert("memory", (Memory = memory&), temp());
+    exports&.insert("main", main_exports, temp());
     
-    // TODO: there's a segment where it tells you the entry point
-    exports := self&.collect_exports(temp());
-    
-    // TODO: this should be in create_init_func
-    {  // TODO
-        enumerate self.w.exports& { i, it |
-            @if_let(it.type) fn Table() => {
-                addr, _ := m.get_addr(exports[i]).unwrap();
-                // TODO: this shouldn't need the '::'
-                the_table[] = bit_cast_unchecked(rawptr, ::*[]rawptr, addr);
+    // ehhhh HACK
+    FakeInstance :: @struct {
+        memory: *SaneRawList(u8); 
+        env: rawptr;
+    };
+    fake: FakeInstance = (memory = memory&, env = get_dynamic_environment());
+    each exports& { _, v |
+        each v { _, v |
+            @if_let(v) fn Function(it) => {
+                it.context = FakeInstance.raw_from_ptr(fake&);
             };
         };
     };
     
+    a := general_allocator();
+    target: Qbe.QbeTargetEnv = (type = .JitOnly, os = query_current_os(), arch = query_current_arch(), link_libc = false);
+    rt: Wasm.Engine = init(a, buf, target, logging);
+    the_engine[] = rt&;
+    mod := rt&.compile(bytes);
+    instance := mod.instantiate(exports&);
+    
+    trace := Crash'push_resolver(QbeModule, mod.m&, find_ip_in_module);
+    
+    ::tagged(Wasm.Export);    
+    if instance.exports&.get("__indirect_table") { it |
+        @assert(it&.is(.Table));
+        the_table[] = it.Table;
+    };
+    
     // unfortunate that i depend on a specific symbol name
-    stackbase := self&.get_export("__stackbase")
+    stackbase := instance.exports&.get("__stackbase")
         || @panic("expected export called '__stackbase'");
-    stackbase := bit_cast_unchecked(rawptr, *u32, stackbase);
+    stackbase := stackbase.Global.i32&;
     
     // TODO: should use the limits in the wasm binary instead of this HACK
-    memory_size, _ := m.get_addr(self.memory_size).unwrap();
-    memory_size := u32.ptr_from_raw(memory_size);
-    memory_size[] = memory_size[].max(stackbase[].align_to(wasm_page_size).div(wasm_page_size));
+    memory.len = stackbase[].zext().align_to(wasm_page_size);
     wasm_page_size :: 1.shift_left(16);
     
     argc, argv := write_cli_args(args, buf, stackbase);
     
-    f := self&.get_export("main")
+    the_header[] = instance;
+    
+    // TODO: there's a segment where it tells you the entry point
+    func := instance.exports&.get("main")
         || @panic("expected export called 'main'");
-    f := assume_types_fn(Arg = Ty(*u8, u32, u32, u32, u32), Ret = i64, ptr = f);
-    result := f(wasm_context_pointer, argc.trunc(), argv.trunc(), 0, 0);
+    @debug_assert(func&.is(.Function));
+    func := func.Function;
+    f := assume_types_fn(Arg = Ty(rawptr, u32, u32, u32, u32), Ret = i64, ptr = func.callee);
+    result := f(func.context, argc.trunc(), argv.trunc(), 0, 0);
     if result != 0 {
         @eprintln(">>> returned %", result);
     };
     
     pop_resolver(trace);
-    drop(m);
-    page_allocator.dealloc(u8, buf);
-    arena&.deinit();
+    // TODO
+    //drop(m);
+    //page_allocator.dealloc(u8, buf);
+    //arena&.deinit();
 }
 
-fn write_cli_args(args: []CStr, buf: []u8, stackbase: *u32) Ty(i64, i64) = {
+fn write_cli_args(args: []CStr, buf: []u8, stackbase: *i32) Ty(i64, i64) = {
     i := stackbase[].zext();
     // write the cli arguments into memory the module can access. 
     // i'm making each entry in argv 8 bytes because then my programs 
@@ -176,8 +187,9 @@ fn write_cli_args(args: []CStr, buf: []u8, stackbase: *u32) Ty(i64, i64) = {
 
 // TODO: use rt'memory_grow instead
 heap_base :: @static(u32) 0;  // TODO: BAD!
-main_module :: @static(*LoadWasm);
-the_table :: @static(*[]rawptr);
+the_table :: @static(*SaneRawList(Rt.Callable));
+the_header :: @static(*Rt.Instance);
+the_engine :: @static(*Wasm.Engine);
 
 // TODO
 // Generate a wrapper to promote offsets in linear memory to native pointers. 
@@ -339,31 +351,17 @@ Exports :: @struct {
             
             // TODO: should probably just allow userdata
             
-            a := general_allocator(); // TODO
-            m := a.box_uninit(Qbe.Module);
-            init_default_module(m, (type = .JitOnly, os = query_current_os(), arch = query_current_arch(), link_libc = false));
-            m.debug = main_module.m.debug;
-            w: WasmModule = empty(a);
-            p: ParseWasm = (w = w&, src = module_bytes);
-            or parse_wasm(p&) { e |
-                @panic("% (at byte index %)", e, p.cursor);
-            };
-            
-            new: LoadWasm = init(m, w&, a);
-            new.module_name = "other";  // TODO
-            new&.load_module();
-            new&.fill_imports("main", main_module[]);
-            new&.instantiate(ctx);
-
-            exports := new&.collect_exports(temp());
+            mod := the_engine[].compile(module_bytes);
+            exports := zeroed RawHashMap(Str, RawHashMap(Str, Wasm.Export));
+            exports&.insert("main", the_header.exports, temp());
+            new := mod.instantiate(exports&);
             
             table := the_table[][];
+            table := table.from_sane();
             j := first_export;
-            enumerate new.w.exports& { i, it |
-                @if_let(it.type) fn Func() => {
-                    addr, _ := m.get_addr(exports[i]) 
-                        || @panic("missing addr for export % id=% %", i, it.id, it.name.items());
-                    table[j] = addr;
+            enumerate new.ordered_exports& { i, it |
+                @if_let(it) fn Function(it) => {
+                    table[j] = it[];
                     j += 1;
                 };
             };
@@ -371,11 +369,11 @@ Exports :: @struct {
             // TODO: make the api nice so it's not more painful than the js version
         }
         
-        js_worker_spawn :: fn(userdata: i64, stack: i64, exit_futex: i64) void = {
+        js_worker_spawn :: fn(ctx: *u8, userdata: i64, stack: i64, exit_futex: i64) void = {
             panic("TODO: js_worker_spawn");
         }
         
-        js_worker_stop :: fn(status: i64) void = {
+        js_worker_stop :: fn(ctx: *u8, status: i64) void = {
             eprintln("TODO: only exit the current worker");
             Syscall'exit(status);
         }

@@ -1,10 +1,18 @@
 
+## (Dec 8)
+
 - not locking syscall_mutex for preemption: spin_lock_ticks 962k -> 260k
 - import_wasm
   - reflect on the runtime functions and just emit calls for those instructions 
     instead of needing to type out the boring stack manipulation every time. 
   - need to support passive data. convert the init_func to just calling memory.init a bunch
   - change the format of dump_wasm a bit so zed will let me collapse sections
+  - to do threads i need to be able to instantiate the same module multiple times 
+    with new copies of its globals. since i have to change a bunch of stuff for that 
+    anyway i make it so the code doesn't bake any pointers at all so its easy to cache. 
+  - pass around an instance with more info instead of just the memory base. 
+    ugh, each instance needs its own so calling an import from another instance 
+    can't just be a normal function pointer anymore. i guess tables should have fat pointers. 
 
 ## (Dec 7)
 

@@ -116,6 +116,91 @@ fn translate_types(writer: *Writer, w: []Wasm.ValType, prepend_pointer: bool) []
     types.items()
 }
 
+// Call this at comptime. 
+// Take a struct like { Module :: { Func :: fn(); } } and create a map [func^module -> fnptr]
+fn comptime_exports(Exports: Type) RawHashMap(Str, RawHashMap(Str, Rt.Export)) #fold = {
+    // TODO: sane error message if you try to have this be the whole HashMap that includes ast_alloc as a rawptr
+    //       but it wont have been baked before so you cant bake it now and don't know why but the error makes it sound like its a rawptr value in the map. 
+    fr := current_compiler_context();
+    a := ast_alloc();
+    exports: HashMap(Str, RawHashMap(Str, Rt.Export)) = init(a);
+    s := scope_of(Type, Exports);
+    for get_constants(s) { module_name |
+        s2 := scope_of(Type, get_constant(Type, s, module_name)
+             || @panic("?? failed to get constant %", module_name));
+        func_names := get_constants(s2);
+        for func_names { func_name | 
+            // note: get_constant(rawptr, _, _) when the value is an Expr::Closure does not bake it properly
+            fid := get_constant(FuncId, s2, func_name)
+                || @panic("?? failed to get constant %", func_name.str());
+            addr := fr.get_jitted(fid);
+            
+            it: Rt.Export = (Function = (callee = addr, context = zeroed(rawptr)));
+            exports := exports&.get_or_insert(module_name.str(), => init());
+            exports.insert(func_name.str(), it, a);
+        }
+    }
+    exports.raw&.zero_unused_slots();
+    exports.raw
+} 
+
+// `s` is contains functions with first argument *u8 wasm linear memory base. 
+// returns scope of functions with first argument *Rt.Header that sets dynenv and then forwards to the one in s. 
+fn wrap_fns_with_load_memory(s: ScopeId) Type = {
+    E2 := Type.const_eval(@{ @struct {  } });
+    fr := current_compiler_context();
+    for s.get_constants() { name |
+        continue :: local_return;
+        val, ty := get_constant(s, name) || continue();
+        @if(ty != FuncId) continue();
+        fid := FuncId.ptr_from_raw(val)[];
+        
+        func := get_function_ast(fid, false, false, false, false);
+        loc := func.loc;
+        if func.arg.bindings[0].ty&.is(.Finished) && func.arg.bindings[0].ty.Finished == void {
+            func.arg.bindings[0].ty = (Finished = *u8);
+            func.arg.bindings[0].name = (Ident = @symbol __mem);
+        };
+        
+        pars := func.arg.bindings&.items().shallow_copy(ast_alloc());
+        pars[0].ty = (Finished = *Rt.Instance);
+        wrapper_func: Func = empty_fn(name, loc);
+        wrapper_func.resolve_scope = Type.scope_of(E2);  // :WhatScope 
+        wrapper_func.arg = (bindings = pars.as_raw_list(), loc = loc);
+        wrapper_func.ret = func.ret;
+        
+        wrapper_fid := fr.intern_func(wrapper_func&);
+        wrapper_func := get_function_ast(wrapper_fid, true, true, true, false);
+        
+        args := FatExpr.list(pars.len, ast_alloc());
+        get :: fn(b: *Binding) FatExpr => (expr = (GetVar = b.name.Var), ty = b.ty.Finished, loc = func.loc, done = false);
+        each pars { it |
+            args&.push(get(it));
+        };
+    
+        new_body := @{
+            ctx := @[get(pars.index(0))];
+            set_dynamic_context(ctx.env);
+            mem := ctx.memory.ptr;
+            @[@literal fid](@[{
+                args[0] = @{ mem };
+                args: FatExpr = @if(args.len == 1, 
+                    args[0], 
+                    (expr = (Tuple = args.as_raw()), ty = UnknownType, done = false, loc = func.loc),
+                );
+                args
+            }])
+        };
+        
+        wrapper_func.body = (Normal = new_body);
+        
+        insert :: fn(scope, name, value) => 
+            (fr.vtable.add_to_scope)(fr.data, scope, name, @type value, raw_from_ptr(@type value, value&));
+        insert(Type.scope_of(E2), name, wrapper_fid);
+    };
+    E2
+}
+
 #use("@/compiler/ast_external.fr");
 #use("@/backend/incremental.fr");
 #use("@/backend/lib.fr");

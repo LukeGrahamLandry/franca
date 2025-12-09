@@ -16,37 +16,38 @@
 // TODO: support aot. needs extra work because of import_wasm/runtime.fr
 // TODO: provide standard c api so could run other people's tests? https://github.com/WebAssembly/wasm-c-api/blob/main/include/wasm.h
 
-LoadWasm :: @struct(
+LoadWasm :: @rec @struct(
     m: *QbeModule,
     w: *WasmModule,
     src := "",
     cursor := 0,
     module_name := "module",
-    global_names: []Qbe.Sym = empty(),
     global_cls: []Qbe.Cls = empty(),
-    tables: []Qbe.Sym = empty(),
-    datas: []Data = empty(),
-    functions: []Qbe.Sym = empty(),  // [...imports, ...exports]
+    functions: []Qbe.Sym = empty(),  // [padding for imports, ...exports]
     function_types: []Wasm.TypeIdx = empty(),
-    preserve_franca_env: bool,
-    memory_size: Qbe.Sym,
+    counts := zeroed Rt.Counts,
+    function_names: []Str = empty(),
+    
+    datas: []Data = empty(),
+    elems: []Elem = empty(),
+    init_global_values: []Rt.GlobalValue = empty(),  // not including imports
+    init_table_sizes: []i64 = empty(),  // not including imports
     
     stack: List(Qbe.Ref),
     blocks: List(BlockEntry),
     locals: []Qbe.Ref,  // TODO: we can't store a 128 bit vector in a temporary 
     f := zeroed(*Qbe.Fn),
-    base_pointer := QbeNull,
+    local_rt_header := QbeNull,
+    local_memory_base := Qbe.Null,
     return_types: []Wasm.ValType = empty(),
     link := zeroed(**Qbe.Blk),
-    franca_env := QbeNull,
     alloc: Alloc,
     
-    imports_needed: Qbe.BSet,
-    fixed_memory_base := Qbe.no_symbol_S,  // TODO
     log_local_func_i := 0,
 );
 
 Data :: @struct(id: Qbe.Sym, size: i64, active_at: ?i64);
+Elem :: @struct(functions: []i64, active_at: ?@struct(table: i64, offset: i64));
 
 fn init(m: *QbeModule, w: *WasmModule, a: Alloc) LoadWasm = (
     m = m,
@@ -54,142 +55,11 @@ fn init(m: *QbeModule, w: *WasmModule, a: Alloc) LoadWasm = (
     stack = list(temp()),
     locals = empty(),
     blocks = list(temp()),
-    // for now this always needs to be true because of import_wasm/runtime.fr
-    preserve_franca_env = true,
     alloc = a,
-    imports_needed = bsinit_full(w.imports.len),
-    memory_size = m.intern("__importwasm__memorysize"),
 );
-
-fn assert_all_imports_filled(self: *LoadWasm) void = {
-    missing := 0;
-    for self.imports_needed& { i |
-        it := self.w.imports&.index(i);
-        ::tagged(@type it.desc);
-        if !it.desc&.is(.Memory) {  // TODO
-            missing += 1;
-            @eprintln("ERROR: missing import '%'", it.mangle_name());
-        };
-    };
-    @assert_eq(missing, 0, "had missing imports");
-}
 
 fn mangle_name(it: *Wasm.Import) Str = 
     @tfmt("%^%", it.name.items(), it.module.items());  // :NamespaceChar
-
-fn fill_imports(self: *LoadWasm, imports: *RawHashMap(Str, rawptr)) void = {
-    enumerate self.w.imports& { i, it |
-        name := it.mangle_name();
-        if imports.get(name) { addr |
-            self.m.put_jit_addr(self.m.intern(name), addr);
-            @debug_assert(self.imports_needed&.bshas(i), "% was filled twice", name);
-            self.imports_needed&.bsclr(i);
-        };
-    };
-}
-
-fn fill_imports(self: *LoadWasm, name: Str, imports: *LoadWasm) void = {
-    // TODO: use some hashmaps :SLOW
-    exports := imports.collect_exports(temp());
-    enumerate self.w.imports& { i, it |
-        @if(!it.desc&.is(.Memory))  // TODO
-        if it.module.items() == name {
-            enumerate imports.w.exports { j, jt |
-                if it.name.items() == jt.name.items() {
-                    id := exports[j];
-                    name := it.mangle_name();
-                    addr, _ := imports.m.get_addr(id).unwrap();
-                    self.m.put_jit_addr(self.m.intern(name), addr);
-                    @debug_assert(self.imports_needed&.bshas(i), "% was filled twice", name);
-                    self.imports_needed&.bsclr(i);
-                }
-            };
-        }
-    };
-}
-
-fn fill_import(self: *LoadWasm, module: Str, name: Str, addr: rawptr) bool = {
-    // :SLOW
-    i := self.w.imports&.items().index_of(fn(it) => it.module.items() == module && it.name.items() == name)
-        || return(false);
-    it := self.w.imports.index(i);
-    name := it.mangle_name();
-    self.m.put_jit_addr(self.m.intern(name), addr);
-    @debug_assert(self.imports_needed&.bshas(i), "% was filled twice", name);
-    self.imports_needed&.bsclr(i);
-    true
-}
-
-fn get_export(self: *LoadWasm, name: Str) ?rawptr = {
-    each self.w.exports& { it |
-        if it.name.items() == name {
-            symbols := self.get_symbols(it.type);
-            id := symbols[it.id.zext()];
-            addr, _ := self.m.get_addr(id) || return(.None);
-            return(Some = addr);
-        }
-    };
-    .None
-}
-
-fn collect_exports(self: *LoadWasm, a: Alloc) []Qbe.Sym = {
-    a.alloc_init(Qbe.Sym, self.w.exports.len) { i |
-        it := self.w.exports.index(i);
-        symbols := self.get_symbols(it.type);
-        symbols[it.id.zext()]
-    }
-}
-
-fn get_symbols(self: *LoadWasm, type: Wasm.ImportType) []Qbe.Sym #inline/*semantic*/ = {
-    ::enum(Wasm.ImportType);
-    @match(type) {
-        fn Func()   => self.functions;
-        fn Global() => self.global_names;
-        fn Table()  => self.tables;
-        // TODO
-        fn Memory() => @slice(self.fixed_memory_base);
-    }
-}
-
-// Call this at comptime. 
-// Take a struct like { Module :: { Func :: fn(); } } and create a map [func^module -> fnptr]
-fn comptime_exports(Exports: Type) RawHashMap(Str, rawptr) #fold = {
-    // TODO: sane error message if you try to have this be the whole HashMap that includes ast_alloc as a rawptr
-    //       but it wont have been baked before so you cant bake it now and don't know why but the error makes it sound like its a rawptr value in the map. 
-    fr := current_compiler_context();
-    a := ast_alloc();
-    exports: HashMap(Str, rawptr) = init(a);
-    s := scope_of(Type, Exports);
-    for get_constants(s) { module_name |
-        s2 := scope_of(Type, get_constant(Type, s, module_name).unwrap());
-        func_names := get_constants(s2);
-        for func_names { func_name | 
-            // note: get_constant(rawptr, _, _) when the value is an Expr::Closure does not bake it properly
-            fid := get_constant(FuncId, s2, func_name).unwrap();
-            addr := fr.get_jitted(fid);
-            
-            // :NamespaceChar
-            mangled_name := (@tfmt("%^%", func_name.str(), module_name.str())).shallow_copy(a);
-            exports&.insert(mangled_name, addr);
-        }
-    }
-    exports.raw&.zero_unused_slots();
-    exports.raw
-} 
-
-fn instantiate(self: *LoadWasm, wasm_context_pointer: *u8) void = {
-    m := self.m;
-    ::enum(@type m.goal.type);
-    @debug_assert_eq(m.goal.type, .JitOnly);
-    self.assert_all_imports_filled();
-    initializer := self.create_init_func();
-    m.emit_suspended_inlinables();
-    m.make_exec();
-    
-    init_data, _ := m.get_addr(initializer).expect("init compiled");
-    init_data := assume_types_fn(Arg = *u8, Ret = void, ptr = init_data);
-    init_data(wasm_context_pointer);
-}
 
 fn const_eval_wasm_expr(expr: []u8) Ty(i64, Qbe.Cls) = {
     o := @as(Wasm.Inst) expr[0];
@@ -209,31 +79,6 @@ fn const_eval_wasm_expr(expr: []u8) Ty(i64, Qbe.Cls) = {
 // :NamespaceChar
 fn private_symbol(self: *LoadWasm, name: Str) Qbe.Sym = {
     self.m.intern(@tfmt("%__^%", name, self.module_name))
-}
-
-fn create_init_func(self: *LoadWasm) Qbe.Sym = {
-    f := Qbe.Fn.zeroed(); f := f&;
-    f.default_init(self.m);
-    f.lnk.id = self.private_symbol("init");
-    f.lnk.export = true;
-    f.start = newblk();
-    f.start.jmp = (type = .ret0, arg = QbeNull);
-    f.nblk = 1;
-    // TODO: i think i need to keep the data symbols for passive segments and then need to do this at the beginning before the other functions. 
-    base := f.newtmp("base", .Kl);
-    f.emit(.par, .Kl, base, QbeNull, QbeNull);
-    each self.datas { it |
-        if it.active_at { off |
-            dest := f.newtmp("dat", .Kl);
-            f.emit(.add, .Kl, dest, base, f.getcon(off));
-            f.emit(.blit0, .Kw, QbeNull, f.symcon(it.id), dest);
-            f.emit(.blit1, .Kw, QbeNull, INT(it.size), QbeNull);
-            @assert_eq(INT(it.size).rsval().intcast(), it.size, "TODO: large data");
-        };
-    };
-    f.copy_instructions_from_scratch_reversed_which_means_forwards(f.start);
-    run_qbe_passes(f);  // :ThisIsWhereWeEmit
-    f.lnk.id
 }
 
 preleb :: import("@/backend/wasm/isel.fr").wasm_type_preleb;
@@ -268,19 +113,21 @@ fn translate_func(self: *LoadWasm, local_func_i: i64, f: *Qbe.Fn) void = {
     self.locals = temp().alloc_uninit(Qbe.Ref, code.total_local_count + signature.arg.len);
     self.blocks = list(temp());
     self.stack = list(temp());
-    self.base_pointer = self.f.newtmp("wasm_globals", .Kl);
-    if self.preserve_franca_env {
-        self.franca_env = self.f.newtmp("env", .Kl);
-        self.f.emit(.pare, .Kl, self.franca_env, QbeNull, QbeNull);
-    }
-    self.f.emit(.par, .Kl, self.base_pointer, QbeNull, QbeNull);
+    self.local_rt_header = self.f.newtmp("wasm_globals", .Kl);
+    self.local_memory_base = self.f.newtmp("memory", .Kl);
     
+    self.f.emit(.par, .Kl, self.local_rt_header, QbeNull, QbeNull);
     // parameters come in as locals not on the stack
     range(0, signature.arg.len) { i |
         k := signature.arg[i].cls();
         self.locals[i] = self.f.newtmp(@tfmt("L%", i), k);
         self.f.emit(.par, k, self.locals[i], QbeNull, QbeNull);
     };
+    
+    @run @assert_eq(offset_of(Rt.Instance, .memory), 0, "memory must be the first field of instance");
+    memory_ptr := self.f.newtmp("memory", .Kl);
+    self.f.emit(.load, .Kl, memory_ptr, self.local_rt_header, QbeNull);
+    self.f.emit(.load, .Kl, self.local_memory_base, memory_ptr, QbeNull);
     
     {
         i := signature.arg.len;
@@ -323,16 +170,21 @@ fn declare_functions(self: *LoadWasm) void = {
     count := self.w.functions.len + self.w.import_count&[.Func];
     self.functions = a.alloc_uninit(Qbe.Sym, count); // :Leak
     self.function_types = a.alloc_uninit(Wasm.TypeIdx, count);
+    self.function_names = a.alloc_zeroed(Str, count);
     f_i := 0;
     each self.w.imports& { import |
         @if_let(import.desc&) fn Function(id) => {
-            self.functions[f_i] = self.m.intern(import.mangle_name());
+            self.functions[f_i] = Qbe.no_symbol_S;  // called through Rt.Instance instead
             self.function_types[f_i] = id[];
+            self.function_names[f_i] = import.name.items();
             f_i += 1;
         };
     };
+    self.counts&[.imports] = f_i;
     range(0, self.w.functions.len) { i |
-        self.functions[f_i] = self.private_symbol(@tfmt("F%", f_i));
+        id := self.private_symbol(@tfmt("F%", f_i));;
+        self.functions[f_i] = id;
+        self.function_names[f_i] = self.m.str(id);
         self.function_types[f_i] = self.w.functions[i];
         f_i += 1;
     };
@@ -341,9 +193,11 @@ fn declare_functions(self: *LoadWasm) void = {
     // actually, if it's an export it's nicer to use the real names. TODO: same thing for globals
     each self.w.exports& { it |
         ::enum(@type it.type);
-        if it.type == .Func {
+        if it.type == .Func && it.id.zext() >= self.w.import_count&[.Func] {
             // :NamespaceChar
-            self.functions[it.id.zext()] = self.m.intern(@tfmt("%^%", it.name.items(), self.module_name));
+            id := self.m.intern(@tfmt("%^%", it.name.items(), self.module_name));
+            self.functions[it.id.zext()] = id;
+            self.function_names[it.id.zext()] = self.m.str(id);
         };
     };
 }
@@ -351,96 +205,47 @@ fn declare_functions(self: *LoadWasm) void = {
 fn declare_globals(self: *LoadWasm) void = {
     a := self.alloc;
     count := self.w.globals.len + self.w.import_count&[.Global];
-    self.global_names = a.alloc_uninit(Qbe.Sym, count);
     self.global_cls = a.alloc_uninit(Qbe.Cls, count);
+    self.counts&[.globals] = count;
     
     i := 0;
     each self.w.imports& { import |
         @if_let(import.desc&) fn Global(it) => {
-            self.global_names[i] = self.m.intern(import.mangle_name());
             self.global_cls[i] = it.ref_type.cls();
             i += 1;
         };
     };
     
-    each self.w.globals& { global |
-        id := self.private_symbol(@tfmt("G%", i));
-        self.global_names[i] = id;
+    self.init_global_values = a.alloc_init(Rt.GlobalValue, self.w.globals.len) { local_i |
+        global := self.w.globals.index(local_i);
         value, k := const_eval_wasm_expr(global.init_expr.items());
         self.global_cls[i] = k;
-        @debug_assert_eq(k, global.type.cls());
-        
-        self.m.emit_data(
-            id = id, 
-            template = (Bytes = (ptr = ptr_cast_unchecked(i64, u8, value&), len = 4 + 4 * int(k.is_wide()))), 
-            relocations = empty(),
-        );
         i += 1;
+        @debug_assert_eq(k, global.type.cls());
+        (i64 = value)
     };
     @debug_assert_eq(i, count);
-    
-    self.m.emit_data(
-        id = self.memory_size, 
-        template = (Bytes = @slice(0x2c, 0x01, 0x00, 0x00)), 
-        relocations = empty(),
-    );
 }
 
 fn declare_tables(self: *LoadWasm) void = {
     a := self.alloc;
     count := self.w.tables.len + self.w.import_count&[.Table];
-    self.tables = a.alloc_uninit(Qbe.Sym, count);
+    self.counts&[.tables] = count;
     
-    table_i := 0;
-    each self.w.imports& { import |
-        @if_let(import.desc&) fn Table(it) => {
-            self.tables[table_i] = self.m.intern(import.mangle_name());
-            table_i += 1;
-        };
+    self.init_table_sizes = a.alloc_init(i64, self.w.tables.len) { i |
+        self.w.tables[i].limits.min.zext()
     };
     
-    each self.w.tables { table | 
-        table_pointer := self.private_symbol(@tfmt("T%", table_i));
-        table_initial := self.private_symbol(@tfmt("T%_init", table_i));
-        
-        ::enum(@type table.type);
-        @assert(table.type == .FuncRef, "TODO: non-func tables");
-        
-        // Reserve some memory for the starting values in the table. 
-        found := false;
-        each self.w.elements { elem | 
-            if elem.table.id.zext() == table_i {
-                @assert(!found, "TODO: init multiple parts of a table");
-                found = true;
-                off, k := const_eval_wasm_expr(elem.active_offset_expr.items());
-                @assert_eq(off, 0, "TODO: init table offset non-zero");
-                @assert_ge(elem.funcs.len, table.limits.min.zext(), "TODO: init table < table.min");
-                r := temp().alloc_init(Dat2.Reloc, elem.funcs.len) { i |
-                    f_id := elem.funcs[i];
-                    (off = trunc(off + i * size_of(rawptr)), id = self.functions[f_id.id.zext()])
-                };
-                self.m.emit_data(
-                    id = table_initial, 
-                    template = (Zeroes = r.len * size_of(rawptr)), 
-                    relocations = r,
-                );
-            };
-        };
-        @assert(found, "TODO: uninit table");
-        repr: []rawptr = (ptr = zeroed(*rawptr), len = table.limits.min.zext());
-        ::[][]rawptr;
-        
-        // Reserve a symbol to hold the address of the table since we want to be able to resize it later
-        self.m.emit_data(
-            id = table_pointer, 
-            template = (Bytes = repr&.slice(1).interpret_as_bytes()), 
-            relocations = @slice(@as(Dat2.Reloc) (off = 0, id = table_initial)),
-        );
-        
-        self.tables[table_i] = table_pointer;
-        table_i += 1;
+    self.elems = a.alloc_init(Elem, self.w.elements.len) { i |
+        elem := self.w.elements.index(i);
+        functions := a.alloc_init(i64, elem.funcs.len, fn(i) => elem.funcs[i].id.zext());
+        (functions = functions, active_at = @if(elem.active_offset_expr.len == 0, .None, {
+            off, k := const_eval_wasm_expr(elem.active_offset_expr.items());
+            @assert(k == .Kl || k == .Kw, "expected integer not % for elem[%] active_offset_expr", k, i);
+            @assert(elem.table.id.zext() < count, "active elem has oob table index");
+            (Some = (table = elem.table.id.zext(), offset = off))
+        }))
     };
-    @debug_assert_eq(count, table_i);
 }   
 
 fn declare_datas(self: *LoadWasm) void = {
@@ -547,8 +352,12 @@ fn emit_the_code(self: *LoadWasm) void = {
                 type_index := self.read_u();
                 table := self.read_u();
                 index := self.stack&.pop().expect("call index on stack");
-                callee := self.table_get(table, index);
-                self.emit_call_from_stack(callee, (id = type_index.trunc()));
+                externref := self.table_get(table, index);
+                r := temp().alloc_init(Qbe.Ref, 3, fn(_) => self.f.newtmp("", .Kl));
+                self.f.emit(.add, .Kl, r[2], externref, self.f.getcon(8));
+                self.f.emit(.load, .Kl, r[0], externref, Qbe.Null);
+                self.f.emit(.load, .Kl, r[1], r[2], Qbe.Null);
+                self.emit_call_from_stack(r[0], r[1], (id = type_index.trunc()));
             }
             fn TableGet() => {
                 table := self.read_u();
@@ -561,25 +370,39 @@ fn emit_the_code(self: *LoadWasm) void = {
                 value := self.stack&.pop().unwrap();
                 index := self.stack&.pop().unwrap();
                 table_slot := self.compute_table_slot(table, index);
-                self.f.emit(.storel, .Kw, Qbe.Null, value, table_slot);
+                self.f.emit(.blit0, .Kw, QbeNull, value, table_slot);
+                self.f.emit(.blit1, .Kw, Qbe.Null, INT(size_of(Rt.Callable)), Qbe.Null);
             }
             fn Call() => {
                 callee := self.read_index(Wasm.FuncIdx);
-                type_index := self.function_types[callee.id.zext()];
-                callee := self.f.symcon(self.functions[callee.id.zext()]);
-                self.emit_call_from_stack(callee, type_index);
+                callee := callee.id.zext();
+                type_index := self.function_types[callee];
+                
+                if callee < self.counts&[.imports] {
+                    off := Rt'Instance'compute_offset(self.counts&, .imports, callee);
+                    r := temp().alloc_init(Qbe.Ref, 4, fn(_) => self.f.newtmp("", .Kl));
+                    r[0] = self.f.newtmp(self.function_names[callee], .Kl);
+                    self.f.emit(.add, .Kl, r[3], self.local_rt_header, self.f.getcon(off));  // *Callable
+                    self.f.emit(.add, .Kl, r[2], r[3], self.f.getcon(8));
+                    self.f.emit(.load, .Kl, r[0], r[3], Qbe.Null);
+                    self.f.emit(.load, .Kl, r[1], r[2], Qbe.Null);
+                    self.emit_call_from_stack(r[0], r[1], type_index);
+                } else {
+                    callee := self.f.symcon(self.functions[callee]);
+                    self.emit_call_from_stack(callee, self.local_rt_header, type_index);
+                };
             }
             fn Return() => self.emit_return();
             fn GlobalSet() => {
                 i: i64 = self.read_u().bitcast();
-                g := self.f.symcon(self.global_names[i]);
+                g := self.compute_global_slot(i);
                 val := self.stack&.pop().expect("enough stack");
                 k := self.global_cls[i];
                 self.f.emit(k.store_op(), .Kw, QbeNull, val, g); 
             }
             fn GlobalGet() => {
                 i: i64 = self.read_u().bitcast();
-                g := self.f.symcon(self.global_names[i]);
+                g := self.compute_global_slot(i);
                 k := self.global_cls[i];
                 val := self.f.newtmp("global_get", k);
                 self.stack&.push(val);
@@ -707,9 +530,6 @@ fn choose_runtime_call(self: *LoadWasm, start: i64) void = {
             self.src[start], start, self.m.str(self.f.lnk.id), self.log_local_func_i + self.w.import_count&[.Func]);
     // found the right instruction so emit a call to the function in Rt
 
-    // TODO: get it from base_pointer instead? it's dumb to pass two things around. 
-    @debug_assert(self.preserve_franca_env, "need env for runtime call");
-    
     args := self.stack.items().rest(self.stack.len - it.stacked.len);
     externrefs := Qbe.Ref.list(temp());
     i := 0;
@@ -720,9 +540,17 @@ fn choose_runtime_call(self: *LoadWasm, start: i64) void = {
             var := @match(it) {
                 fn memory() => {
                     @assert_eq(indices[i], 0, "TODO: multiple memories");
-                    self.f.symcon(self.memory_size)
+                    memory_ptr := self.f.newtmp("memory", .Kl);
+                    self.f.emit(.load, .Kl, memory_ptr, self.local_rt_header, QbeNull);
+                    memory_ptr
                 }
-                fn table() => self.f.symcon(self.tables[indices[i]]);
+                fn table() => {
+                    off := Rt'Instance'compute_offset(self.counts&, .tables, indices[i]);
+                    r := temp().alloc_init(Qbe.Ref, 2, fn(_) => self.f.newtmp("", .Kl));
+                    self.f.emit(.add, .Kl, r[0], self.local_rt_header, self.f.getcon(off));  // **Table
+                    self.f.emit(.load, .Kl, r[1], r[0], QbeNull);  // *Table
+                    r[1]
+                }
                 fn data() => self.f.symcon(self.datas[indices[i]].id);
                 fn memarg() => {
                     _align, off := (indices[i], indices[i + 1]);
@@ -736,8 +564,7 @@ fn choose_runtime_call(self: *LoadWasm, start: i64) void = {
         }
     };
     
-    self.f.emit(.arge, .Kl, QbeNull, self.franca_env, QbeNull);
-    self.f.emit(.arg, .Kl, QbeNull, self.base_pointer, QbeNull);
+    self.f.emit(.arg, .Kl, QbeNull, self.local_rt_header, QbeNull);
     for externrefs { it |
         self.f.emit(.arg, .Kl, QbeNull, it, QbeNull);
     };
@@ -853,24 +680,41 @@ fn eqz(self: *LoadWasm, o: Qbe.O) void = {
 fn table_get(self: *LoadWasm, table_index: u64, index_in_table_W: Qbe.Ref) Qbe.Ref = {
     table_slot := self.compute_table_slot(table_index, index_in_table_W);
     result := self.f.newtmp("table.get", .Kl);
-    self.f.emit(.load, .Kl, result, table_slot, QbeNull);
+    // TODO: this will have to change when i want to support returning (func/extern)ref
+    self.f.emit(.alloc8, .Kl, result, self.f.getcon(size_of(Rt.Callable)), Qbe.Null);
+    self.f.emit(.blit0, .Kw, QbeNull, table_slot, result);
+    self.f.emit(.blit1, .Kw, Qbe.Null, INT(size_of(Rt.Callable)), Qbe.Null);
     result
 }
 
 fn compute_table_slot(self: *LoadWasm, table_index: u64, index_in_table_W: Qbe.Ref) Qbe.Ref = {
-    table_var        := self.tables[table_index.bitcast()];
-    table_var        := self.f.symcon(table_var);
+    off := Rt'Instance'compute_offset(self.counts&, .tables, table_index.bitcast());
+    r := temp().alloc_init(Qbe.Ref, 2, fn(_) => self.f.newtmp("", .Kl));
+    self.f.emit(.add, .Kl, r[0], self.local_rt_header, self.f.getcon(off));  // **Table
+    self.f.emit(.load, .Kl, r[1], r[0], QbeNull);  // *Table
+
+    table_var        := r[1];
     index_in_table_L := self.f.newtmp("Iindex", .Kl);
     table_slot       := self.f.newtmp("Islot", .Kl);
     table_offset     := self.f.newtmp("Ioff", .Kl);
     table_base       := self.f.newtmp("Ibase", .Kl);
-    
-    self.f.emit(.load, .Kl, table_base, table_var, QbeNull);
+
+    @run @assert_eq(offset_of(Rt.Table, .ptr), 0);    
+    self.f.emit(.load, .Kl, table_base, table_var, QbeNull);  // *Callable
     self.f.emit(.extuw, .Kl, index_in_table_L, index_in_table_W, QbeNull);
-    self.f.emit(.mul, .Kl, table_offset, index_in_table_L, self.f.getcon(8));
+    self.f.emit(.mul, .Kl, table_offset, index_in_table_L, self.f.getcon(size_of(Rt.Callable)));
     self.f.emit(.add, .Kl, table_slot, table_base, table_offset);
     table_slot
 }
+
+// TODO: cache these per function in the same way i do for the memory base address
+fn compute_global_slot(self: *LoadWasm, i: i64) Qbe.Ref = {
+    off := Rt'Instance'compute_offset(self.counts&, .globals, i);
+    r := temp().alloc_init(Qbe.Ref, 2, fn(_) => self.f.newtmp("", .Kl)); 
+    self.f.emit(.add, .Kl, r[0], self.local_rt_header, self.f.getcon(off));  // **GlobalValue
+    self.f.emit(.load, .Kl, r[1], r[0], QbeNull);  // *GlobalValue
+    r[1]
+} 
 
 fn parse_branch_target(self: *LoadWasm) *Qbe.Blk = {
     depth: i64 = self.read_u().bitcast();
@@ -972,7 +816,7 @@ fn compute_address(self: *LoadWasm, addr: Qbe.Ref, offset: i64) Qbe.Ref = {
     r0 := f.newtmp("a", .Kl);
     r1 := f.newtmp("a", .Kl);
     f.emit(.extuw, .Kl, r0, addr, QbeNull);
-    f.emit(.add, .Kl, r1, self.base_pointer, r0);
+    f.emit(.add, .Kl, r1, self.local_memory_base, r0);
     if(offset == 0, => return(r1));
     r2 := f.newtmp("a", .Kl);
     f.emit(.add, .Kl, r2, r1, f.getcon(offset));
@@ -1012,18 +856,15 @@ fn emit_return(self: *LoadWasm) void = {
     };
 }
 
-fn emit_call_from_stack(self: *LoadWasm, callee: Qbe.Ref, type: Wasm.TypeIdx) void = {
+fn emit_call_from_stack(self: *LoadWasm, callee: Qbe.Ref, header: Qbe.Ref, type: Wasm.TypeIdx) void = {
     type := self.w.types[type.id.zext()]&;
     @assert_le(
         type.arg.len, self.stack.len, 
         "not enough stack for call to % %", callee, 
         @if(rtype(callee) == .RCon, self.m.str(self.f.get_constant(callee)[].sym), ""),
     );
-    if self.preserve_franca_env {
-        self.f.emit(.arge, .Kl, QbeNull, self.franca_env, QbeNull);
-    }
-    
-    self.f.emit(.arg, .Kl, QbeNull, self.base_pointer, QbeNull);
+
+    self.f.emit(.arg, .Kl, QbeNull, header, QbeNull);
     range(0, type.arg.len) { i |
         ref := self.stack[self.stack.len - type.arg.len + i];
         k := type.arg[i].cls();
@@ -1044,4 +885,3 @@ fn emit_call_from_stack(self: *LoadWasm, callee: Qbe.Ref, type: Wasm.TypeIdx) vo
         @default => panic("TODO: handle multiple returns");
     };
 }
-

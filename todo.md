@@ -1,4 +1,30 @@
 
+- wasm: if no stack frame don't load, sub 0, and store sp. test with env.ssa/main. 
+- also, import_wasm of env.ssa/main, wtf are we doing man
+```
+// should use LocalTee
+LocalSet(3);
+LocalGet(3);
+// wasteful and also generates dumb asm. should fix both
+I64_Const(42);
+I32_ceql();
+I32_EqZero();
+// stack thing again
+LocalGet(0);
+I32_Const(0);
+I32_add();
+LocalTee(0);
+GlobalSet(0);
+---
+%wasm.92 =w ceql %getL3.91, 42
+%eqz.93 =w ceqw %wasm.92, 0
+---
+cmp	x0, #42
+cset	w0, eq
+cmp	w0, #0
+cset	w0, eq   
+```
+- bake_relocatable_value for incremental.Header and runtime.Instance
 - produce a benchmark that is helped by aligning things in qring.fr to cache line size
 - interactive_read_line prints garbage spam when the line is wider than your terminal
 - make sure not to keep sending events after a graphics program panics

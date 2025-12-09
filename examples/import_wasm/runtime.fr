@@ -1,33 +1,297 @@
+
+// stores just the compiled code, can be instantiated multiple times
+Module :: @rec @struct {
+    engine: *Engine;
+    m: Qbe.Module;
+    loader: LoadWasm;  // TODO: don't have this here forever
+    w: WasmModule;
+    counts: Counts;
+};
+
+// the code linked with imports and storage for globals/tables
+// this is passed as the first parameter to every wasm function.
+Instance :: @struct {
+    memory: *SaneRawList(u8);
+    env: rawptr;
+    gpa: Alloc;
+    mod: *Module;
+    exports := zeroed RawHashMap(Str, Export);
+    ordered_exports: []Export = empty();
+    // TODO: use these
+    runtime: []rawptr;  // function pointers from runtime.fr
+    
+    fn size(self: *Instance) i64 = 
+        compute_offset(self.mod.counts&, .imports, self.mod.counts&[.imports]);
+    
+    fn view(self: *Instance) View = {
+        result := zeroed Array(Ty(i64, i64), Fields(View).enum_count());
+        enumerate result& { i, it |
+            field := @as(Fields(View)) i;
+            it[] = (
+                Instance.int_from_ptr(self) + compute_offset(self.mod.counts&, field, 0),
+                self.mod.counts&.get(field),
+            );
+        };
+        bit_cast_unchecked(@type result, View, result)
+    }
+    
+    compute_offset :: fn(counts: *Counts, field: Fields(View), i: i64) i64 = {
+        off := size_of(Instance);
+        inline_for_enum Fields(View) { $it |
+            T :: FieldType(View, it[]).Element;
+            xxx := it[];
+            xxx := (@as(i64) xxx) < (@as(i64) field);
+            if xxx {
+                off += size_of(T) * counts[it[]];
+            };
+            ::enum(@type field);
+            if it[] == field {
+                off += size_of(T) * i;
+            };
+        };
+        off
+    }
+};
+
+Counts :: EnumMap(Fields(View), i64);
+
+// TODO: store non-imported globals/tables inline as well so it's one less level of indirection
+// this data is stored inline after the fields of Instance
+View :: @struct {
+    globals: []*GlobalValue;
+    tables: []*Table;
+    imports: []Callable;  // functions only
+};
+
+GlobalValue :: @union(i64: i64, i32: i32, f64: f64, f32: f32);
+Table :: SaneRawList(Callable);
+
+Callable :: @struct {
+    callee: rawptr;
+    context: rawptr;
+};
+
+Export :: @tagged(
+    Function: Callable,
+    Global: *GlobalValue,
+    Table: *Table,
+    Memory: *SaneRawList(u8),
+);
+
+Engine :: @struct {
+    modules: HashMap([]u8, *Module);
+    debug: Str;
+    memory: []u8;
+    lock := zeroed Mutex;
+    target: Qbe.QbeTargetEnv;
+    runtime: []rawptr;  // function pointers from runtime.fr
+    gpa: Alloc;
+};
+
+fn init(a: Alloc, memory: []u8, target: Qbe.QbeTargetEnv, debug: Str) Engine = (
+    modules = init(a), 
+    memory = memory,
+    target = target,
+    runtime = @run {
+        calls := collect_runtime_calls();
+        ast_alloc().alloc_init(rawptr, calls.len, fn(i) => calls[i].callee)
+    },
+    debug = debug,
+    gpa = a,
+);
+
+fn compile(self: *Engine, wasm: []u8) *Module = {
+    self.lock&.lock();
+    a := self.gpa;
+    mod := self.modules.raw&.get_or_insert_pinky_swear_not_to_mutate_the_key(wasm, a) { wasm |
+        wasm[] = wasm[].shallow_copy(a);
+        self.compile_uncached(wasm[])
+    };
+    self.lock&.unlock();
+    mod[]
+}
+
+fn compile_uncached(self: *Engine, wasm: []u8) *Module = {
+    a := self.gpa;
+    mod := a.box_zeroed(Module);
+    mod.engine = self;
+    init_default_module(mod.m&, self.target);
+    mod.m&.set_debug_types(self.debug, true);
+    mod.w = empty(a);
+    p: ParseWasm = (w = mod.w&, src = wasm);
+    or parse_wasm(p&) { e |
+        @panic("% (at byte index %)", e, p.cursor);
+    };
+    mod.loader = init(mod.m&, mod.w&, a);
+    mod.loader&.load_module();
+    mod.counts = mod.loader.counts;
+    mod.m&.emit_suspended_inlinables();
+    mod.m&.make_exec();
+    mod
+}
+
+fn instantiate(mod: *Module, imports: *RawHashMap(Str, RawHashMap(Str, Export))) *Instance = {
+    instance := {
+        it: Instance = (
+            memory = zeroed(*SaneRawList(u8)),
+            env = get_dynamic_environment(),
+            gpa = general_allocator(),
+            mod = mod,
+            runtime = mod.engine.runtime,
+        );
+        r := it.gpa.alloc_zeroed(i64, it&.size() / size_of(i64));
+        r := bit_cast_unchecked(*i64, *Instance, r.ptr);
+        r[] = it;
+        r
+    };
+    view := instance.view();
+
+    found := zeroed Instance.Counts;
+    missing := 0;
+    enumerate mod.w.imports& { i, it |
+        continue :: local_return;
+        module_s, name_s := (it.module.items(), it.name.items());
+        source := imports.get_ptr(module_s) || {
+            @eprintln("tried to import % (from missing module %)", name_s, module_s);
+            missing += 1;
+            continue()
+        };
+        value := source.get_ptr(name_s) || {
+            @eprintln("missing import % (in module %)", name_s, module_s);
+            missing += 1;
+            continue()
+        };
+        @if(missing != 0) continue();
+        
+        @match(it.desc) {
+            fn Function() => {
+                @assert(value.is(.Function));
+                view.imports[found&[.imports]] = value.Function;
+                found&[.imports] += 1;
+            }
+            fn Table() => {
+                @assert(value.is(.Table));
+                view.tables[found&[.tables]] = value.Table;
+                found&[.tables] += 1;
+            }
+            fn Memory() => {
+                @assert(value.is(.Memory));
+                instance.memory = value.Memory;
+            }
+            fn Global() => {
+                @assert(value.is(.Global));
+                view.globals[found&[.globals]] = value.Global;
+                found&[.globals] += 1;
+            }
+        };
+    };
+    @assert_eq(missing, 0, "had missing imports");
+    ::ptr_utils(@type instance.memory[]);
+    @assert(!instance.memory.is_null(), "didn't import a memory");
+    
+    enumerate mod.loader.init_global_values { i, it |
+        view.globals[found&[.globals] + i] = instance.gpa.boxed(GlobalValue, it[]);
+    };
+    enumerate mod.loader.init_table_sizes { i, it |
+        it := instance.gpa.alloc_zeroed(Callable, it[]);
+        it: Table = (ptr = it.ptr, len = it.len, cap = it.len);
+        view.tables[found&[.tables] + i] = instance.gpa.boxed(Table, it);
+    };
+    
+    instance.ordered_exports = instance.gpa.alloc_init(Export, mod.w.exports.len) { i |
+        it := mod.w.exports.index(i);
+        ::?Callable;
+        e: Export = @match(it.type) {
+            fn Func() => (Function = get_callable(instance, it.id.zext()) 
+                || @panic("uncompiled export %", it.name.items()));
+            fn Global() => (Global = view.globals[it.id.zext()]);
+            fn Table() => (Table = view.tables[it.id.zext()]);
+            fn Memory() => (Memory = instance.memory);
+        };
+        instance.exports&.insert(it.name.items(), e, instance.gpa);
+        e
+    };
+    
+    instance.run_initializers();
+    
+    instance
+}
+
+fn run_initializers(self: *Instance) void = {
+    each self.mod.loader.datas { it |
+        if it.active_at { off |
+            use_symbol(self.mod.m&, it.id) { s |
+                src := self.mod.m.segments&[s.segment].mmapped.subslice(s.offset, s.size.zext());
+                self.memory.len = max(self.memory.len, off + src.len);
+                self.memory_init(src.ptr, self.memory, off.trunc(), 0, src.len.trunc());
+            };
+        };
+    };
+    
+    view := self.view();
+    each self.mod.loader.elems { it |
+        if it.active_at { active_at |
+            table := view.tables[active_at.table][].from_sane().items();
+            dest := table.subslice(active_at.offset, it.functions.len);
+            enumerate dest { i, dest |
+                dest[] = self.get_callable(it.functions[i]) 
+                    || @panic("failed to get callable for active elem");
+            };
+        };
+    };
+}
+
+fn get_callable(self: *Instance, global_i: i64) ?Callable = {
+    view := self.view();
+    if global_i < view.imports.len {
+        return(Some = view.imports[global_i]);
+    };
+    f, _ := self.mod.m&.get_addr(self.mod.loader.functions[global_i])
+        || return(.None);
+    (Some = (callee = f, context = Instance.raw_from_ptr(self)))
+}
+
+fn SaneRawList($T: Type) Type = {
+    Self :: @struct(ptr: *T, len: i64, cap: i64, Element :: T);
+    
+    fn to_sane(self: RawList(T)) Self = 
+        (ptr = self.ptr, len = self.len, cap = self.cap);
+    
+    fn from_sane(self: Self) RawList(T) = 
+        (ptr = self.ptr, len = self.len, cap = self.cap);
+    
+    Self
+}
+
 // some wasm instructions don't map directly to native instructions 
 // and do heavy weight things that don't need super tight code generation. 
+// see convert.fr/choose_runtime_call
 
-// TODO: do something fancy with this annotation
 #wasm(0xFC, 0x0F, .table)
-table_grow :: fn(ctx: *u8, table: *[]rawptr, fill: rawptr, delta: i32) i32 = {
+table_grow :: fn(ctx: *Instance, table_in: *SaneRawList(Instance.Callable), fill: *Callable, delta: i32) i32 = {
+    set_dynamic_context(ctx.env);
+    fill := fill[];
+    table := table_in[].from_sane();
     if delta < 0 || table.len + delta.intcast() > MAX_i32 {
         return(-1);
     };
+    // TODO: free here is wrong because the first time its static memory in the module
+    //       but i have to change that to make threads work anyway :cantfreeinitdata
     
     // TODO: don't rely on having a dynamicenv here. 
     //       store an allocator somewhere you can get to from the linear memory base pointer
-    // TODO: store capacity and amortize the resizing as well
-    new := general_allocator().alloc_uninit(rawptr, table.len + delta.intcast());
-    new.slice(0, table.len).copy_from(table[]);
-    each new.rest(table.len) { it |
-        it[] = fill;
+    table&.reserve(delta.intcast(), ctx.gpa);
+    range(0, delta.intcast()) { _ |
+        table&.push_assume_capacity(fill);
     };
-    table[] = new;
-    // TODO: free the old table, :LEAK
-    //       but only if this isn't the first time resizing because initial is in data segment.  
     
+    table_in[] = table.to_sane(); 
     table.len.intcast() - delta
 }
 
-// TODO: actually call these 
-//       (my stuff doesn't use multiple threads yet so it's pointless)
-
 #wasm(0xFE, 0x00, .memarg)
-atomic_notify :: fn(ctx: *u8, addr: *u32, count: u32) i32 = {
+atomic_notify :: fn(ctx: *Instance, addr: *u32, count: u32) i32 = {
+    set_dynamic_context(ctx.env);
     _ := Futex'wake(addr, count);
     
     // TODO: return the number that waiters that were woken
@@ -35,7 +299,8 @@ atomic_notify :: fn(ctx: *u8, addr: *u32, count: u32) i32 = {
 };
 
 #wasm(0xFE, 0x01, .memarg)
-atomic_wait32 :: fn(ctx: *u8, addr: *u32, expect: u32, timeout_ns: i64) Futex.WasmWaitResult = {
+atomic_wait32 :: fn(ctx: *Instance, addr: *u32, expect: u32, timeout_ns: i64) Futex.WasmWaitResult = {
+    set_dynamic_context(ctx.env);
     forever := timeout_ns < 0;
     @assert(forever, "TODO(import_wasm): atomic.wait with timeout");
     _ := Futex'wait(addr, expect);
@@ -43,26 +308,37 @@ atomic_wait32 :: fn(ctx: *u8, addr: *u32, expect: u32, timeout_ns: i64) Futex.Wa
     .Ok
 }
 
-atomic_fence :: fn(ctx: *u8) void #wasm(0xFE, 0x03, 0x00) = fence();
+#wasm(0xFE, 0x03, 0x00) 
+atomic_fence :: fn(ctx: *Instance) void = {
+    fence();
+}
 
 // i always preallocate the whole memory so it doesn't have to resize, 
 // but keep track of a smaller "length" value so user code can use memory_grow as the page allocator.
 #wasm(0x40, .memory)
-memory_grow :: fn(ctx: *u8, memory_size: *i32, delta_pages: i32) i32 = {
-    old := i32.cas(memory_size) { old |
-        new := old + delta_pages;
-        limit: i32 = 65536;  // 4gb
-        @if(new > limit) return(-1);
+memory_grow :: fn(ctx: *Instance, memory: *SaneRawList(u8), delta_pages: i32) i32 = {
+    set_dynamic_context(ctx.env);
+    delta := delta_pages.intcast().shift_left(16);
+    old := i64.cas(memory.len&) { old |
+        new := old + delta;
+        @if(new > memory.cap) return(-1);
         new
     };
-    old
+    old.intcast().shift_right_arithmetic(16)
 }
 
 #wasm(0xFC, 0x08, .data, .memory)
-memory_init :: fn(ctx: *u8, data_start: *u8, _: *i32, dest: u32, src_offset: u32, size: u32) void = {
+memory_init :: fn(ctx: *Instance, data_start: *u8, _: *SaneRawList(u8), dest: u32, src_offset: u32, size: u32) void = {
+    set_dynamic_context(ctx.env);
+    ctx := ctx.memory.ptr;
     src := data_start.offset(src_offset.zext()).slice(size.zext());
     dest := ctx.offset(dest.zext()).slice(size.zext());
     dest.copy_from(src);
 }
 
 Futex :: import("@/lib/sys/sync/futex.fr");
+#use("@/lib/sys/threads.fr");
+#use("@/lib/sys/sync/mutex.fr");
+#use("@/examples/import_wasm/convert.fr");
+#use("@/examples/import_wasm/parse.fr");
+Qbe :: import("@/backend/ir.fr");
