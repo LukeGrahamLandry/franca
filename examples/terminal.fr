@@ -702,14 +702,29 @@ open_link :: fn(full_link: Str) void = {
     
     link, line, col := parse_file_line_col(full_link) 
         || (full_link, 0, 0);
+        
+    // TODO: do something less insane than this. need out of band links. 
+    //       rn you can type @@B1234, click it, and crash yourself, which is stupid. 
+    if link.starts_with("@@B") {
+        break :: local_return;
+        for link.rest(3) { c |
+            @if(!c.is_ascii_digit()) break();
+        };
+        dest := link.rest(3).parse_int();
+        dest := TextBuffer.ptr_from_int(dest);
+        i64.atomic_inc(dest.ref_count&);
+        old := push_as_current_buffer(dest);
+
+        dest.cursor = (x = col.float(), y = line.float());
+        dest.render = dest.cursor;
+        dest.render.y -= old.num_lines_fit_on_screen.float()/2;
+        
+        return();
+    };
     contents := read_entire_file(temp(), link) || return();
     
     dest: *TextBuffer = empty(general_allocator());
-    dest.at = state.buffers[0].at;
-    old := state.buffers[state.selected_buffer];
-    state.buffer_stack&.push(old);
-    state.buffers[state.selected_buffer] = dest;
-    
+    old := push_as_current_buffer(dest);
     if choose_opener_for(contents) { program |
         // not using the embedded repl to execute the program because this way it doesn't crash the temrinal if the opener parser asserts. 
         // TODO: instead of relying on `franca` being in path, have a cli arg that lets it re-exec itself to do this. 
@@ -722,7 +737,15 @@ open_link :: fn(full_link: Str) void = {
     
     dest.cursor = (x = col.float(), y = line.float());
     dest.render = dest.cursor;
-    dest.render.y -= old.num_lines_fit_on_screen.float();
+    dest.render.y -= old.num_lines_fit_on_screen.float()/2;
+}
+
+fn push_as_current_buffer(dest: *TextBuffer) *TextBuffer = {
+    dest.at = state.buffers[0].at;
+    old := state.buffers[state.selected_buffer];
+    state.buffer_stack&.push(old);
+    state.buffers[state.selected_buffer] = dest;
+    old
 }
 
 // "file:line:col"
@@ -777,7 +800,8 @@ find_link_at :: fn(b: *TextBuffer, line: i64, col: i64) ?Ty(i64, i64, i64) = {
     text := b.lines[line]&.str();
     if(col >= text.len || col < 0, => return(.None));
     
-    stop :: fn(c: u8) => c.is_ascii_whitespace() || "[],\"(){}".contains(c);
+    stop_chars :: "[],\"(){}'`";
+    stop :: fn(c: u8) => c.is_ascii_whitespace() || stop_chars.contains(c);
     
     // spread along the text in both directions
     start := col;
@@ -882,6 +906,8 @@ TextBuffer :: @struct(
     //       - when new text comes in from a process
     //       - when you type and add text to the line
     hover: ?Ty(i64, i64, i64),   // (line, start col, end col)
+    
+    ref_count: i64,
 );
 
 #use("@/lib/sys/sync/mutex.fr");
@@ -935,6 +961,7 @@ fn draw_text(self: *TextBuffer) void = {
     
     // building the highlight rectangle out of single char cells like this is stupid
     // and slow but like... it's fine for this program. 
+    // also a link should keep a reference to the buffer alive. 
     
     @if(state.show_hover)
     if self.hover { line, startH, endH | 
@@ -1102,10 +1129,12 @@ fn empty(a: Alloc) *TextBuffer = {
     b.lines&.push(empty_line, b.gpa);
     b.selection = .None;
     b.hover = .None;
+    b.ref_count = 1;
     b
 }
 
 fn drop(self: *TextBuffer) void = {
+    @if(i64.atomic_add(self.ref_count&, -1) != 1) return();
     each self.lines { it |
         it.drop(self.gpa);
     };
@@ -1256,8 +1285,15 @@ search_for_selected :: fn(b: *TextBuffer) void = {
         state.search_tasks&.push(it);
         it&  // ugh... this is fine because of how stack frames work
     };
+    dest: *TextBuffer = empty(general_allocator());
     b.get_selection(self.needle&);
     self.buffer = b;
+    self.dest_buffer = dest;
+    i64.atomic_inc(b.ref_count&);
+    i64.atomic_inc(dest.ref_count&);
+    old := push_as_current_buffer(dest);
+    dest.render = (x = 0, y = -old.num_lines_fit_on_screen.float()/2);
+    dest.cursor = (x = 0, y = 0);
     self.have_work = 1;
     Futex'wake(self.have_work&, 1);
 };
@@ -1265,6 +1301,7 @@ search_for_selected :: fn(b: *TextBuffer) void = {
 SearchTask :: @struct {
     needle: List(u8);
     buffer: *TextBuffer;
+    dest_buffer: *TextBuffer;
     thread: *Thread;
     have_work: u32;
 };
@@ -1287,17 +1324,32 @@ fn run(self: *SearchTask) void = {
         // TODO: could imagine allowing this, its just a big inconvenient. 
         //       currently the real terminal i use doesn't let you so its not a big deal for me yet. 
         if needle.contains("\n") {
-            @println("searches containing new line are not supported");
+            with self.dest_buffer.line_lock& {
+                self.dest_buffer.append_string("searches containing new line are not supported");
+            };
+            drop(self.dest_buffer);
+            drop(self.buffer);
+        
             self.needle&.clear();
             self.have_work = 0;
             continue();
         }
         if needle.len == 0 {
+            with self.dest_buffer.line_lock& {
+                self.dest_buffer.append_string("empty search");
+            };
+            drop(self.dest_buffer);
+            drop(self.buffer);
+        
             self.needle&.clear();
             self.have_work = 0;
             continue();
         };
-        @println("SEARCH:\n%", needle);
+        
+        with self.dest_buffer.line_lock& {
+            self.dest_buffer.append_string(@tfmt("%\n", needle));
+            self.dest_buffer.append_string(@tfmt("=== searching in @@B%:1:1 ===\n", TextBuffer.int_from_ptr(self.buffer)));
+        };
         // TODO: allow case insensitive
         
         n := 0;
@@ -1305,23 +1357,38 @@ fn run(self: *SearchTask) void = {
             n = self.buffer.lines.len;
         };
         matches := 0;
+        msg := u8.list(temp());
         range_rev(0, n) { n |
             with self.buffer.line_lock& {
                 line := self.buffer.lines[n]&.str();
                 // TODO: collect the locations that match and let you click around to them
-                if line.contains(needle) {
-                    @println("found needle on line %: %", n, line);
+                if line.index_of_slice(needle) { col |
+                    msg&.clear();
+                    @fmt(msg&, "@@B%:%:%\n%\n", TextBuffer.int_from_ptr(self.buffer), n + 1, col + 2, line);
                     matches += 1;
-                }
+                    with self.dest_buffer.line_lock& {
+                        self.dest_buffer.append_string(msg.items());
+                    };
+                };
             };
             // drop the lock after each line in case the search takes multiple frames to complete. 
             // gives the other thread a chance to take the lock. 
             // TODO: that sucks if there are super long lines, maybe allow splitting them up more. 
             // TODO: it would be nice if i had some way to give the ui thread priority if they contend. 
         };
-        println("done searching");
+        
+        drop(self.dest_buffer);
+        drop(self.buffer);
         ms := timestamp() - start;
-        @println("matched %/% lines in % ms", matches, n, ms);
+        msg&.clear();
+        @fmt(msg&, "=== found % matches in %ms ===\n", matches, ms);
+        @fmt(msg&, "%\n", needle);
+        
+        with self.dest_buffer.line_lock& {
+            self.dest_buffer.append_string(msg.items());
+            self.dest_buffer.render = (x = 0, y = -self.dest_buffer.num_lines_fit_on_screen.float());
+            self.dest_buffer.cursor = (x = 0, y = 0);
+        };
         self.needle&.clear();
         self.have_work = 0;
     }

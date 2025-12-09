@@ -1,4 +1,11 @@
 
+## (Dec 9)
+
+- terminal
+  - cmd+click center the screen on the cursor in a sane way instead of putting it in the bottom left. 
+  - open a new buffer for search results
+  - hacky way of linking to a non-file buffer. 
+
 ## (Dec 8)
 
 - not locking syscall_mutex for preemption: spin_lock_ticks 962k -> 260k
