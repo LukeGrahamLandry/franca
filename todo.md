@@ -1,4 +1,6 @@
 
+- produce a benchmark that is helped by aligning things in qring.fr to cache line size
+- interactive_read_line prints garbage spam when the line is wider than your terminal
 - make sure not to keep sending events after a graphics program panics
 - don't hardcode pixel format in init_browser_wip_frame
 - implement threads in import_wasm for tests/exe/wasm.fr
@@ -376,30 +378,17 @@ different subsets of the same resources.
   that needs data relocations for function pointers, at which point i should just give up and follow the convention other tools use. 
   - https://github.com/WebAssembly/tool-conventions/blob/main/DynamicLinking.md
   - https://github.com/WebAssembly/tool-conventions/blob/main/Linking.md
-- a page_allocator that can reclaim
-- do the libc replacement stuff with (unimplemented) vtable.fill_import. 
-  - so you can have a layer that's wasm aware and exposes a tighter interface to the host. 
-  - rn most of the Exports in run.fr are just to make the ssa tests work without changes, 
-    not because they really need to be provided by the host. 
-  - maybe this should be wrapped up in getting official about exposing libc api from a .frc 
-    since i want to do that for static native binaries anyway. 
 - make import_c work without hacks
   - setjmp/longjmp with exceptions
 - import_wasm working in wasm would be cute. 
   - dont reserve giant virtual memory
   - don't depend on libc (import_wasm/run.fr/Exports for the .ssa tests)
-- what to do about file system
-    - can't decide if i want drop in posix-ish like wasip1 or declare that it's better
-      for programs to make themselves embedable and the compiler shouldn't be opening files
-      anyway, you should pass in a vtable of how to get imports when creating the compiler, 
-      so you just have two different entry points. 
 - syscall wrappers support wasip1
 - stack traces
 - make the wasmtime version work
 - add a .ssa test that tests dynalloc with a deeper callstack
 - in wasm/make_exec use debug_out when dumping module so you can redirect it
 - make sure `::@as(rawptr)(fn() void = ())` gives you the got_lookup_offset not the junk jit_addr. 
-- for examples/web, instead of `url?v=version` the sane thing is to just put content hash in the file name
 - pass the tests
   - cast.c, float.c, literal.c, fpcnv.ssa: `e` in float literals
   - macro.c: `__FILE__; 1 != 0; ends_with(main_filename1, "test/macro.c")`
@@ -412,18 +401,12 @@ different subsets of the same resources.
 - autotest run tests/exe/wasm.fr
 - add the small franca tests to the web demo
 - add the import_c things with dependencies to the web demo
-- threads. it's a pain in the ass tho. 
-  - need cors to use sharedarraybuffer which limits the environments people can use your thing in.
-    (no github pages, no `python3 -m http.server`)
-  - no shared tables so have to keep them in sync manually so need to keep a list of every
-    time you load jitted code or do a table assignment and replay them when you span a new thread. 
 - web demo: hare, wuffs, more nontrivial c programs
 - use dump_wasm to disassemble one function at a time (like i do with llvm-mc) 
   instead of only all at once in output_wasm_module_jit
 - improve import_wasm until it can cope with bootstrapping zig1.wasm
 - kinda lame that web/demo.fr has to special case the graphics programs instead of drivers working properly
 - examples/terminal.fr stbtt__run_charstring panic! missing br_if target @120 -> @122
-- examples/web/build.fr don't leak old target/dev-time.txt files. seems rude that you have to go clean them up yourself. 
 
 ## backend 
 

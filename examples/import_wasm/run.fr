@@ -99,25 +99,6 @@ fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str, args: []CStr) void 
     wasm_context_pointer := buf.ptr;
     heap_base[] = trunc(buf.len - 1);
 
-    // write the cli arguments into memory the module can access. 
-    // i'm making each entry in argv 8 bytes because then my programs 
-    // that use Kl for pointers don't need to change, but it means 
-    // you probably won't have success using this with anyone else's wasm modules. 
-    argc, argv := {
-        arg_offsets := i64.list(temp());
-        for args { s | 
-            s := s.str();
-            heap_base[] -= align_to(s.len.trunc() + 1, 16);
-            buf.subslice(heap_base[].zext(), s.len).copy_from(s);
-            buf[heap_base[].zext() + s.len] = 0;
-            arg_offsets&.push(heap_base[].zext());
-        };
-        arg_offsets&.push(0);
-        src := arg_offsets.items().interpret_as_bytes();
-        heap_base[] -= align_to(src.len, 16).trunc();
-        buf.subslice(heap_base[].zext(), src.len).copy_from(src);
-        (arg_offsets.len - 1, heap_base[])
-    };
     heap_base[] = align_back(heap_base[], 65536);
     
     self: LoadWasm = init(m, w&, a);
@@ -133,6 +114,7 @@ fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str, args: []CStr) void 
     // TODO: there's a segment where it tells you the entry point
     exports := self&.collect_exports(temp());
     
+    // TODO: this should be in create_init_func
     {  // TODO
         enumerate self.w.exports& { i, it |
             @if_let(it.type) fn Table() => {
@@ -143,16 +125,23 @@ fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str, args: []CStr) void 
         };
     };
     
-    // :NamespaceChar
-    main := exports.index_of(fn(it) => m.str(it[]) == "main^module")
+    // unfortunate that i depend on a specific symbol name
+    stackbase := self&.get_export("__stackbase")
+        || @panic("expected export called '__stackbase'");
+    stackbase := bit_cast_unchecked(rawptr, *u32, stackbase);
+    
+    // TODO: should use the limits in the wasm binary instead of this HACK
+    memory_size, _ := m.get_addr(self.memory_size).unwrap();
+    memory_size := u32.ptr_from_raw(memory_size);
+    memory_size[] = memory_size[].max(stackbase[].align_to(wasm_page_size).div(wasm_page_size));
+    wasm_page_size :: 1.shift_left(16);
+    
+    argc, argv := write_cli_args(args, buf, stackbase);
+    
+    f := self&.get_export("main")
         || @panic("expected export called 'main'");
-    n := exports[main];
-    f, _ := or m.get_addr(n) {
-        @panic("couldn't find %: %", n.id, m.str(n));
-    };
-    //@println(">>> Calling %", wasm.m.str(n));
     f := assume_types_fn(Arg = Ty(*u8, u32, u32, u32, u32), Ret = i64, ptr = f);
-    result := f(wasm_context_pointer, argc.trunc(), argv, 0, 0);
+    result := f(wasm_context_pointer, argc.trunc(), argv.trunc(), 0, 0);
     if result != 0 {
         @eprintln(">>> returned %", result);
     };
@@ -163,7 +152,29 @@ fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str, args: []CStr) void 
     arena&.deinit();
 }
 
-// note: this is on the opposite end of how i did it in wasm_test.html
+fn write_cli_args(args: []CStr, buf: []u8, stackbase: *u32) Ty(i64, i64) = {
+    i := stackbase[].zext();
+    // write the cli arguments into memory the module can access. 
+    // i'm making each entry in argv 8 bytes because then my programs 
+    // that use Kl for pointers don't need to change, but it means 
+    // you probably won't have success using this with anyone else's wasm modules. 
+    arg_offsets := i64.list(temp());
+    for args { s | 
+        s := s.str();
+        i -= align_to(s.len + 1, 16);
+        buf.subslice(i, s.len).copy_from(s);
+        buf[i + s.len] = 0;
+        arg_offsets&.push(i);
+    };
+    arg_offsets&.push(0);
+    src := arg_offsets.items().interpret_as_bytes();
+    i -= align_to(src.len, 16);
+    buf.subslice(i, src.len).copy_from(src);
+    stackbase[] = i.trunc();
+    (arg_offsets.len - 1, i)
+}
+
+// TODO: use rt'memory_grow instead
 heap_base :: @static(u32) 0;  // TODO: BAD!
 main_module :: @static(*LoadWasm);
 the_table :: @static(*[]rawptr);
@@ -191,6 +202,8 @@ weak_imports :: @const_slice(
    "snprintf", 
    "ppoll", "execve",
    "posix_getdents", "FR_openat",
+   "sqrt", "pow", "acos", "cos", "fabs", "floor", "ceil",
+   "FR_wasm_jit_event", 
 );
 
 WellKnown :: import("@/examples/os/user/libc/string.fr");
@@ -258,7 +271,6 @@ Exports :: @struct {
             }
             Syscall'exit(status.zext());
         }
-        js_worker_stop :: exit;
         strcmp :: fn(ctx: *u8, a: u32, b: u32) i32 = 
             WellKnown'strcmp(ctx.offset(a.zext()), ctx.offset(b.zext()));
         
@@ -357,6 +369,15 @@ Exports :: @struct {
             };
             
             // TODO: make the api nice so it's not more painful than the js version
+        }
+        
+        js_worker_spawn :: fn(userdata: i64, stack: i64, exit_futex: i64) void = {
+            panic("TODO: js_worker_spawn");
+        }
+        
+        js_worker_stop :: fn(status: i64) void = {
+            eprintln("TODO: only exit the current worker");
+            Syscall'exit(status);
         }
         
         yield_file :: fn(ctx: *u8, ptr: i64, length: i64) void = {

@@ -3,7 +3,7 @@
 
 // TODO: do something fancy with this annotation
 #wasm(0xFC, 0x0F, .table)
-table_grow :: fn(ctx: *u8, table: *[]rawptr, delta: i32, fill: rawptr) i32 = {
+table_grow :: fn(ctx: *u8, table: *[]rawptr, fill: rawptr, delta: i32) i32 = {
     if delta < 0 || table.len + delta.intcast() > MAX_i32 {
         return(-1);
     };
@@ -26,7 +26,7 @@ table_grow :: fn(ctx: *u8, table: *[]rawptr, delta: i32, fill: rawptr) i32 = {
 // TODO: actually call these 
 //       (my stuff doesn't use multiple threads yet so it's pointless)
 
-#wasm(0xFE, 0x02, .memarg)
+#wasm(0xFE, 0x00, .memarg)
 atomic_notify :: fn(ctx: *u8, addr: *u32, count: u32) i32 = {
     _ := Futex'wake(addr, count);
     
@@ -35,7 +35,7 @@ atomic_notify :: fn(ctx: *u8, addr: *u32, count: u32) i32 = {
 };
 
 #wasm(0xFE, 0x01, .memarg)
-atomic_wait :: fn(ctx: *u8, addr: *u32, expect: u32, timeout_ns: i64) WasmWaitResult = {
+atomic_wait32 :: fn(ctx: *u8, addr: *u32, expect: u32, timeout_ns: i64) Futex.WasmWaitResult = {
     forever := timeout_ns < 0;
     @assert(forever, "TODO(import_wasm): atomic.wait with timeout");
     _ := Futex'wait(addr, expect);
@@ -44,3 +44,25 @@ atomic_wait :: fn(ctx: *u8, addr: *u32, expect: u32, timeout_ns: i64) WasmWaitRe
 }
 
 atomic_fence :: fn(ctx: *u8) void #wasm(0xFE, 0x03, 0x00) = fence();
+
+// i always preallocate the whole memory so it doesn't have to resize, 
+// but keep track of a smaller "length" value so user code can use memory_grow as the page allocator.
+#wasm(0x40, .memory)
+memory_grow :: fn(ctx: *u8, memory_size: *i32, delta_pages: i32) i32 = {
+    old := i32.cas(memory_size) { old |
+        new := old + delta_pages;
+        limit: i32 = 65536;  // 4gb
+        @if(new > limit) return(-1);
+        new
+    };
+    old
+}
+
+#wasm(0xFC, 0x08, .data, .memory)
+memory_init :: fn(ctx: *u8, data_start: *u8, _: *i32, dest: u32, src_offset: u32, size: u32) void = {
+    src := data_start.offset(src_offset.zext()).slice(size.zext());
+    dest := ctx.offset(dest.zext()).slice(size.zext());
+    dest.copy_from(src);
+}
+
+Futex :: import("@/lib/sys/sync/futex.fr");

@@ -1,4 +1,11 @@
 
+- not locking syscall_mutex for preemption: spin_lock_ticks 962k -> 260k
+- import_wasm
+  - reflect on the runtime functions and just emit calls for those instructions 
+    instead of needing to type out the boring stack manipulation every time. 
+  - need to support passive data. convert the init_func to just calling memory.init a bunch
+  - change the format of dump_wasm a bit so zed will let me collapse sections
+
 ## (Dec 7)
 
 - now i'm at the point of just fiddling with random code in the hopes that forcing myself to look at all of it will reveal a problem

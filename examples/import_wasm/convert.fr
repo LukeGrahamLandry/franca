@@ -25,6 +25,7 @@ LoadWasm :: @struct(
     global_names: []Qbe.Sym = empty(),
     global_cls: []Qbe.Cls = empty(),
     tables: []Qbe.Sym = empty(),
+    datas: []Data = empty(),
     functions: []Qbe.Sym = empty(),  // [...imports, ...exports]
     function_types: []Wasm.TypeIdx = empty(),
     preserve_franca_env: bool,
@@ -42,7 +43,10 @@ LoadWasm :: @struct(
     
     imports_needed: Qbe.BSet,
     fixed_memory_base := Qbe.no_symbol_S,  // TODO
+    log_local_func_i := 0,
 );
+
+Data :: @struct(id: Qbe.Sym, size: i64, active_at: ?i64);
 
 fn init(m: *QbeModule, w: *WasmModule, a: Alloc) LoadWasm = (
     m = m,
@@ -58,12 +62,16 @@ fn init(m: *QbeModule, w: *WasmModule, a: Alloc) LoadWasm = (
 );
 
 fn assert_all_imports_filled(self: *LoadWasm) void = {
+    missing := 0;
     for self.imports_needed& { i |
         it := self.w.imports&.index(i);
         ::tagged(@type it.desc);
-        @if(!it.desc&.is(.Memory))  // TODO
-        @panic("ERROR: missing import '%'", it.mangle_name());
+        if !it.desc&.is(.Memory) {  // TODO
+            missing += 1;
+            @eprintln("ERROR: missing import '%'", it.mangle_name());
+        };
     };
+    @assert_eq(missing, 0, "had missing imports");
 }
 
 fn mangle_name(it: *Wasm.Import) Str = 
@@ -214,17 +222,14 @@ fn create_init_func(self: *LoadWasm) Qbe.Sym = {
     // TODO: i think i need to keep the data symbols for passive segments and then need to do this at the beginning before the other functions. 
     base := f.newtmp("base", .Kl);
     f.emit(.par, .Kl, base, QbeNull, QbeNull);
-    enumerate self.w.data { i, data |
-        expr := data.active_offset_expr;
-        @assert_ne(expr.len, 0, "TODO: passive data");
-        off, k := const_eval_wasm_expr(expr.items());
-        @debug_assert_eq(k, .Kw, "offset expression");
-        id := self.private_symbol(@tfmt("data%", i));
-        self.m.emit_data(template = (Bytes = data.bytes.items()), id = id, relocations = empty());
-        dest := f.newtmp("dat", .Kl);
-        f.emit(.add, .Kl, dest, base, f.getcon(off));
-        f.emit(.blit0, .Kw, QbeNull, f.symcon(id), dest);
-        f.emit(.blit1, .Kw, QbeNull, INT(data.bytes.len), QbeNull);
+    each self.datas { it |
+        if it.active_at { off |
+            dest := f.newtmp("dat", .Kl);
+            f.emit(.add, .Kl, dest, base, f.getcon(off));
+            f.emit(.blit0, .Kw, QbeNull, f.symcon(it.id), dest);
+            f.emit(.blit1, .Kw, QbeNull, INT(it.size), QbeNull);
+            @assert_eq(INT(it.size).rsval().intcast(), it.size, "TODO: large data");
+        };
     };
     f.copy_instructions_from_scratch_reversed_which_means_forwards(f.start);
     run_qbe_passes(f);  // :ThisIsWhereWeEmit
@@ -238,6 +243,7 @@ fn load_module(self: *LoadWasm) void = {
     self.declare_functions();
     self.declare_globals();
     self.declare_tables();
+    self.declare_datas();
     
     range(0, self.w.code.len) { i |
         mark := mark_temporary_storage();
@@ -289,6 +295,7 @@ fn translate_func(self: *LoadWasm, local_func_i: i64, f: *Qbe.Fn) void = {
     };
     
     self.src = code.insts.items();
+    self.log_local_func_i = local_func_i;
     self.cursor = 0;
     
     self.link = self.f.start&;
@@ -436,6 +443,25 @@ fn declare_tables(self: *LoadWasm) void = {
     @debug_assert_eq(count, table_i);
 }   
 
+fn declare_datas(self: *LoadWasm) void = {
+    a := self.alloc;    
+    count := self.w.data.len;
+    self.datas = a.alloc_uninit(Data, count);
+    
+    enumerate self.w.data { i, data | 
+        expr := data.active_offset_expr;
+        off: ?i64 = @if(expr.len == 0, .None, {
+            off, k := const_eval_wasm_expr(expr.items());
+            @debug_assert_eq(k, .Kw, "offset expression");
+            @debug_assert_eq(data.active_mem.id, 0, "TODO: multiple memories");
+            (Some = off)
+        });
+        id := self.private_symbol(@tfmt("data%", i));
+        self.m.emit_data(template = (Bytes = data.bytes.items()), id = id, relocations = empty());
+        self.datas[i] = (id = id, size = data.bytes.len, active_at = off);
+    };
+}   
+
 Rt :: import("@/examples/import_wasm/runtime.fr");
 BlockEntry :: @struct(continue: *Qbe.Blk, break: *Qbe.Blk, current: *Qbe.Blk, loop: bool);
 
@@ -445,6 +471,7 @@ fn emit_the_code(self: *LoadWasm) void = {
     while => self.cursor < self.src.len {
         continue :: local_return;
         
+        start_cursor := self.cursor;
         b := self.src[self.cursor];
         self.cursor += 1;
         inst := @as(Wasm.Inst) b;
@@ -628,33 +655,12 @@ fn emit_the_code(self: *LoadWasm) void = {
                 offset: u64 = @if(opcode == 3, 0, self.read_u());
                 
                 k: Qbe.Cls = @switch(opcode) {
-                    @case(0) => {  // atomic.notify
-                        count := self.stack&.pop().unwrap();
-                        p := self.stack&.pop().unwrap();
-                        p := self.compute_address(p, offset.bitcast());
-                        woken_count := Qbe.ConZero;
-                        self.stack&.push(woken_count);
-                        //@eprintln("TODO: atomic.notify");
-                        continue()
-                    };
-                    @case(1) => {  // atomic.wait
-                        timeout := self.stack&.pop().unwrap();
-                        expect := self.stack&.pop().unwrap();
-                        p := self.stack&.pop().unwrap();
-                        p := self.compute_address(p, offset.bitcast());
-                        result := Qbe.ConZero;
-                        self.stack&.push(result);
-                        //@eprintln("TODO: atomic.wait");
-                        continue()
-                    };
-                    @case(3) => {
-                        @assert_eq(align, 0, "the number after atomic(3)");
-                        //@eprintln("TODO: atomic.fence");
-                        continue()
-                    };
                     @case(72) => .Kw;
                     @case(73) => .Kl;
-                    @default => @panic("TODO: support more atomic ops (%)", opcode);
+                    @default => {
+                        self.choose_runtime_call(start_cursor);
+                        continue()
+                    };
                 };
                 
                 new := self.stack&.pop().expect("stack for cas-new");
@@ -686,57 +692,156 @@ fn emit_the_code(self: *LoadWasm) void = {
                     }
                     continue();
                 };
-                
-                @assert_eq(opcode, 15, "TODO: implement more table ops (only grow is supported)");
-                table := self.read_u();
-                
-                delta := self.stack&.pop().expect("stack for delta");  // i32
-                fill := self.stack&.pop().expect("stack for fill");  // externref
-                f: rawptr = Rt.table_grow;
-                f := bit_cast_unchecked(rawptr, i64, f);
-                callee := self.f.getcon(f);
-                table_var := self.f.symcon(self.tables[table.bitcast()]);
-                result := self.f.newtmp("prev_size", .Kw);
-                
-                // TODO: comptime thing to just iterate the Rt scope and generate what's needed
-                //       but it does need some decoding for the immediate index. 
-                //       self.runtime_call(.table_get, @slice(table_var, delta, fill));
-                //       at least you could get a bit of static signeture checking. 
-                //       and maybe comptime generate a module for Rt like for static_memmove and then i can do AOT of the wasm. 
-                
-                // TODO: get it from base_pointer instead? it's dumb to pass two things around. 
-                @debug_assert(self.preserve_franca_env, "need env for runtime call");
-                self.f.emit(.arge, .Kl, QbeNull, self.franca_env, QbeNull);
-                self.f.emit(.arg, .Kl, QbeNull, self.base_pointer, QbeNull);
-                self.f.emit(.arg, .Kl, QbeNull, table_var, QbeNull);
-                self.f.emit(.arg, .Kw, QbeNull, delta, QbeNull);
-                self.f.emit(.arg, .Kl, QbeNull, fill, QbeNull);
-                self.f.emit(.call, .Kw, result, callee, QbeNull);
-                self.stack&.push(result);
+                self.choose_runtime_call(start_cursor);
             }
             fn I32_EqZero() => self.eqz(.ceqw);
             fn I64_EqZero() => self.eqz(.ceql);
-            fn Memory_Grow() => {
-                _memory_index := @as(u64) self.read_u();
-                // TODO: more sane implementation of this. 
-                //       for now i always preallocate the whole memory so it doesn't have to resize, 
-                //       but keep track of a smaller "length" value so user code can use memory_grow as the page allocator.
-                //       only support one memory, arbitrary 300 page starting size is enough for my programs constant data.  
-                
-                delta_pages := self.stack&.pop().expect("stack for delta");  // i32
-                old_pages := self.f.newtmp("memold", .Kw);
-                new_pages := self.f.newtmp("memnew", .Kw);
-                p := self.f.symcon(self.memory_size);
-                
-                self.f.emit(.load, .Kw, old_pages, p, Qbe.Null);
-                self.f.emit(.add, .Kw, new_pages, old_pages, delta_pages);
-                self.f.emit(.storew, .Kw, Qbe.Null, new_pages, p);
-                self.stack&.push(old_pages);
-            }
-            @default => @panic("unhandled unstruction %", self.src[self.cursor - 1]);
+            @default => self.choose_runtime_call(start_cursor);
         }
     }
 }
+
+fn choose_runtime_call(self: *LoadWasm, start: i64) void = {
+    it, indices := self.match_runtime_call(start)
+        || @panic("unhandled instruction %\n(at byte index % of % = global function %)", 
+            self.src[start], start, self.m.str(self.f.lnk.id), self.log_local_func_i + self.w.import_count&[.Func]);
+    // found the right instruction so emit a call to the function in Rt
+
+    // TODO: get it from base_pointer instead? it's dumb to pass two things around. 
+    @debug_assert(self.preserve_franca_env, "need env for runtime call");
+    
+    args := self.stack.items().rest(self.stack.len - it.stacked.len);
+    externrefs := Qbe.Ref.list(temp());
+    i := 0;
+    for it.match { it |
+        continue :: local_return;
+        ::enum(InstSeq.Arg);
+        @if_let(it) fn int(it) => {
+            var := @match(it) {
+                fn memory() => {
+                    @assert_eq(indices[i], 0, "TODO: multiple memories");
+                    self.f.symcon(self.memory_size)
+                }
+                fn table() => self.f.symcon(self.tables[indices[i]]);
+                fn data() => self.f.symcon(self.datas[indices[i]].id);
+                fn memarg() => {
+                    _align, off := (indices[i], indices[i + 1]);
+                    args[0] = self.compute_address(args[0], off);
+                    i += 2;
+                    continue()
+                }
+            };
+            externrefs&.push(var);
+            i += 1;
+        }
+    };
+    
+    self.f.emit(.arge, .Kl, QbeNull, self.franca_env, QbeNull);
+    self.f.emit(.arg, .Kl, QbeNull, self.base_pointer, QbeNull);
+    for externrefs { it |
+        self.f.emit(.arg, .Kl, QbeNull, it, QbeNull);
+    };
+    range(0, args.len) { i |
+        self.f.emit(.arg, it.stacked[i], QbeNull, args[i], QbeNull);
+    };
+    self.stack.len -= it.stacked.len;
+    callee := self.f.getcon(bit_cast_unchecked(rawptr, i64, it.callee));
+    if it.result == .Kx {
+        self.f.emit(.call, .Kw, Qbe.Null, callee, Qbe.Null);
+    } else {
+        result := self.f.newtmp(it.name, it.result);
+        self.f.emit(.call, it.result, result, callee, Qbe.Null);
+        self.stack&.push(result);
+    };
+}
+
+fn match_runtime_call(self: *LoadWasm, start: i64) ?Ty(*InstSeq, []i64) = {
+    indices := i64.list(temp());
+    each collect_runtime_calls() { it |
+        continue :: local_return;
+        self.cursor = start;
+        indices&.clear();
+        for it.match { it |
+            @match(it) {
+                fn byte(it) => {
+                    @if(self.src[self.cursor] != it) continue();
+                    self.cursor += 1;
+                };
+                fn int(it) => range(0, 1 + int(it == .memarg)) { _ |
+                    indices&.push(self.read_u().bitcast());
+                };
+            };
+        };
+        return(Some = (it, indices.items()));
+    };
+    .None
+}
+        
+InstSeq :: @struct {
+    Arg :: @enum(u8) (memory, table, data, memarg);
+    Inst :: @tagged(byte: u8, int: Arg);
+    callee: rawptr;
+    match: []Inst;
+    stacked: []Qbe.Cls;
+    result: Qbe.Cls;
+    name: Str;
+};
+
+fn collect_runtime_calls() []InstSeq #fold = {
+    out := InstSeq.list(ast_alloc());
+    fr := current_compiler_context();
+    for get_constants(Rt) { name |
+        continue :: local_return;
+        val, ty := get_constant(Rt, name) || continue();
+        @if(ty != FuncId) continue();
+        fid := FuncId.ptr_from_raw(val)[];
+        func := get_function_ast(fid, true, true, true, false);
+        i := func.annotations&.index_of(fn(it) => it.name == @symbol wasm)
+            || continue();
+        args := func.annotations[i].args&.items();
+        insts := InstSeq.Inst.list(args.len, ast_alloc());
+        const_args := 1 /*base_pointer*/;
+        ::enum(InstSeq.Arg);
+        each args { it |
+            if it.expr&.is(.ContextualField) {
+                it[] = @{ @as(InstSeq.Arg) @[it[]] };
+            };
+            it[] = compile_ast(it[]);
+            @switch(it.ty) {
+                @case(u8) => insts&.push(byte = u8.const_eval(it[]));
+                @case(InstSeq.Arg) => {
+                    value := InstSeq.Arg.const_eval(it[]);
+                    insts&.push(int = value);
+                    const_args += int(value != .memarg);
+                };
+                @default => compile_error("invalid type", it.loc);
+            };
+        };
+        stacked := Qbe.Cls.list(ast_alloc());
+        #use("@/compiler/ast_external.fr");
+        for fr.arg_types(func.finished_arg.unwrap()).rest(const_args) { ty |
+            stacked&.push(fr_ty_to_cls(ty));
+        };
+        out&.push(
+            callee = fr.get_jitted(fid), 
+            match = insts.items(), 
+            stacked = stacked.items(),
+            result = fr_ty_to_cls(func.finished_ret.unwrap()),
+            name = fr.get_string(name),
+        );
+    };
+    out.items()
+};
+
+fr_ty_to_cls :: fn(ty: Type) Qbe.Cls = @switch(ty) {
+    @case(i32) => .Kw;
+    @case(u32) => .Kw;
+    @case(i64) => .Kl;
+    @case(f32) => .Ks;
+    @case(f64) => .Kd;
+    @case(void) => .Kx;
+    @default => .Kl;
+};
 
 fn eqz(self: *LoadWasm, o: Qbe.O) void = {
     result := self.f.newtmp("eqz", .Kw);

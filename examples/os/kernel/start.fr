@@ -194,7 +194,6 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
     
     wake_secondary_cores(DT'iter(device_tree_bytes));
     sys_set(*Task, .TPIDR_EL1, kernel.idle_task&.current());
-    kernel.syscall_lock&.lock();
     return_to_scheduler();
 }
 
@@ -436,16 +435,17 @@ interrupt_trampoline_code :: {
     out.items()
 };
 
+return_to_current_user :: fn() Never = {
+    task := get_current_task();
+    @if(task.state != .Suspended) kpanic("expected to be suspended");
+    task.state = .Running;
+    return_to_user(task);
+}
+
 return_to_user :: fn(new_task: *Task) Never = {
-    old_task := get_current_task();
-    if identical(old_task, new_task) {
-        new_task.state = .Running;
-    } else {
-        old_task.state = .Runnable;
-        new_task.state = .Running;
-    };
+    @if(new_task.state != .Running) kpanic("caller should set state");
     new_task.kernel_sp = kernel.interrupt_stack&.current()[].end_pointer();
-    kernel.syscall_lock&.unlock();
+    kernel.syscall_lock&.maybe_unlock();
     return_to_user_impl(new_task)
 }
 
@@ -495,7 +495,6 @@ return_to_user_impl :: AsmFunctionArmOnly(fn(task_x0: *Task) Never = (), {
     out.items()
 });
 
-// TODO: don't take syscall_lock for the preemption switching to new task interrupt
 // TODO: instead of using the timer to wake and poll for runnable tasks, 
 //       have other core send an interrupt when making a new task runnable?
 return_to_scheduler :: fn() Never = {
@@ -520,7 +519,9 @@ choose_task_to_run :: fn() *Task = {
             return task;
         };
     };
-    kernel.idle_task&.current()
+    task := kernel.idle_task&.current();
+    task.state = .Running;
+    task
 }
 
 stop :: fn() Never = {
@@ -584,10 +585,11 @@ SavedRegisters :: MContext;
 syscall_func :: fn(task: *Task) void = {
     return :: ();  // must do it via return_to_user
     
-    kernel.syscall_lock&.lock();
+    prev := Task.State.cas(task.state&, .Running, .Suspended);
     set_dynamic_context(kernel.env);
-    @if(!identical(task, get_current_task())) kpanic("bad task??");
-    task.state = .Suspended;
+    @if(prev != .Running) kpanic("interrupted but not running");
+    on_this_core := identical(task.kernel_sp, kernel.interrupt_stack&.current()[].end_pointer());
+    @if(!on_this_core) kpanic("running on other core");
     args := task.mcontext&;
     
     // these being in SavedRegisters isn't important because i don't restore them 
@@ -606,7 +608,8 @@ syscall_func :: fn(task: *Task) void = {
         i64.sys_set(.ICC_EOIR1_EL1, intid);
         return_to_scheduler();
     };
-        
+    
+    kernel.syscall_lock&.lock();
     ::if_opt(Pl011.Self, i64);
     irq_uart: i64 = if(kernel.uart, fn(it) => it.irq, => -1);
     if intid == irq_uart {
@@ -621,11 +624,14 @@ syscall_func :: fn(task: *Task) void = {
         
         // always the init task! not whatever task was interrupted. 
         init := kernel.tasks&[0]&;
-        @if(init.state == .Running) kpanic("TODO: input while init running on other core");
+        state := init.state;
+        state2 := Task.State.cas(init.state&, state, .Suspended);
+        @if(state != state2 || !@is(state, .Suspended, .Runnable)) kpanic("TODO: input while init running on other core");
         @if(init.signal_stack_buf.len == 0) kpanic("got input before init signal handler");
         push_signal_context(init);
         init.mcontext.gpr&[1] = intid;
         init.mcontext.gpr&[2] = byte.zext();  // HACK
+        init.state = .Running;
         // run the signal handler BEFORE acknowledging the signal by setting ICC_EOIR1_EL1 (its done in sig_return). 
         // if interrupts are being spammed (ie you pasted some text), this lets them be processed 
         // in queue order instead of stack order.  
@@ -643,7 +649,7 @@ syscall_func :: fn(task: *Task) void = {
             // TODO: don't create a L2 table for it if its just a junk pointer 
             pte := index_page_table(task.mem&, vaddr);
             if commit_if_reserved(task.mem&, vaddr, pte) {
-                return_to_user(task);
+                return_to_current_user();
             };
 
             // problem is if the above late commit happens on one core and then another core 
@@ -652,7 +658,7 @@ syscall_func :: fn(task: *Task) void = {
             is_translation_fault := args.esr.bit_and(0b111100) == 0b000100;  // ie. not a permission fault
             if is_translation_fault && pte.map.get(.tag) == 0b11 {
                 clear_tlb(vaddr);
-                return_to_user(task);
+                return_to_current_user();
             };
             
             kprint("data abort from el0\n");
@@ -700,7 +706,7 @@ syscall_func :: fn(task: *Task) void = {
                 callee, n := @run it[];
                 if syscall_number == n {
                     args.gpr&[0] = callee(args.gpr&[0], args.gpr&[1], args.gpr&[2], args.gpr&[3], args.gpr&[4], args.gpr&[5]);
-                    return_to_user(task);
+                    return_to_current_user();
                 }
             };
 
@@ -738,7 +744,7 @@ syscall_func :: fn(task: *Task) void = {
     if task.thread_id == 0 {
         return_to_scheduler();  
     };
-    return_to_user(task);
+    return_to_current_user();
 };
 
 show_registers :: fn(task: *Task) void = {
@@ -757,16 +763,11 @@ show_registers :: fn(task: *Task) void = {
     @fmt(out&, "esr: %, ", args.esr);
     @fmt(out&, "far: %, ", args.far);
     @fmt(out&, "\n");
-    @fmt(out&, "CNTV_TVAL_EL0: %, ", i64.sys_get(.CNTV_TVAL_EL0));
-    @fmt(out&, "CNTV_CVAL_EL0: %, ", i64.sys_get(.CNTV_CVAL_EL0));
-    @fmt(out&, "CNTVCT_EL0: %, ", i64.sys_get(.CNTVCT_EL0));
-    @fmt(out&, "CNTV_CTL_EL0: %, ", i64.sys_get(.CNTV_CTL_EL0));
-    
-    @fmt(out&, "\n");
     kprint(out.items());
 } 
 
 push_signal_context :: fn(task: *Task) void = {
+    @if(task.state != .Suspended) kpanic("push_signal_context to running task");
     task.futex_wait = 0;
     task.sleep_until = 0;
     if task.signal_stack_buf.len == 0 {
@@ -905,7 +906,6 @@ cpu_on_main :: fn() void = {
     
     // needs a value because return_to_user writes to task.state
     sys_set(*Task, .TPIDR_EL1, task);  
-    kernel.syscall_lock&.lock();
     return_to_scheduler();
     unreachable();
 }
@@ -1073,11 +1073,10 @@ fn lock(self: *SpinMutex) void = {
     barrier();
 }
 
-fn unlock(self: *SpinMutex) void = {
+fn maybe_unlock(self: *SpinMutex) void = {
     barrier();
     my_thread := current_core_index() + 1;
-    prev := i64.cas(self.thread&, my_thread, 0);
-    @if(prev != my_thread) kpanic("unlocked unowned mutex");
+    _ := i64.cas(self.thread&, my_thread, 0);
 }
 
 fn OnePerCore($T: Type) Type = {
