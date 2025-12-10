@@ -1,4 +1,10 @@
-
+- i track more jit pointers to show nice names in tracy and fail a debug check
+```
+FRANCA_TRACY=true franca examples/default_driver.fr build compiler/main.fr -o trace.out
+FRANCA_MORE_CACHE=1 ./trace.out examples/bf/via_wasm_rt.fr
+>>> Compiler includes tracy instrumentation.
+panic! created_jit_fn_ptr_value cannot be null
+```
 - make my sort less ass. when collect_with_extension sorted before filtering, 
   after generating all the extra files for examples/import_wasm/spectest.fr, 
   the folder has 3262 files and takes 9600ms to sort. 
@@ -437,6 +443,22 @@ different subsets of the same resources.
 - improve import_wasm until it can cope with bootstrapping zig1.wasm
 - kinda lame that web/demo.fr has to special case the graphics programs instead of drivers working properly
 - examples/terminal.fr stbtt__run_charstring panic! missing br_if target @120 -> @122
+
+## import_wasm 
+
+convert.fr:  
+// TODO: this could be hella faster: 
+//       - there's a wasteful prepass that splits up bits of the module into a big data structure. 
+//       - the parser+wasm->ir could be on a different thread from the ir->asm 
+//         (i have the machinery to do this already because the Franca compiler works that way)
+//         + you could compile multiple functions in parallel (but that would need more work).
+//       - the number of bounds checks the parser does per byte is a bit sad. 
+//       - could inline more if we pre-sorted based on callgraph,
+//         but maybe the expectation with wasm is that the first compiler did that already?
+
+// TODO: validation
+// TODO: support aot. needs extra work because of import_wasm/runtime.fr
+// TODO: provide standard c api so could run other people's tests? https://github.com/WebAssembly/wasm-c-api/blob/main/include/wasm.h
 
 ## backend 
 

@@ -1,35 +1,38 @@
 
 // stores just the compiled code, can be instantiated multiple times
 Module :: @rec @struct {
-    engine: *Engine;
     m: Qbe.Module;
-    loader: LoadWasm;  // TODO: don't have this here forever
+    loader: import("@/examples/import_wasm/convert.fr").Loaded;
     w: WasmModule;
     counts: Counts;
+    // function pointers from runtime.fr 
+    // (only the ones reachable from this module)
+    runtime: []rawptr;  
 };
 
 // the code linked with imports and storage for globals/tables
 // this is passed as the first parameter to every wasm function.
-Instance :: @struct {
+Instance :: @struct {  // !Sized
     memory: *SaneRawList(u8);
     env: rawptr;
     gpa: Alloc;
-    mod: *Module;
+    counts: Counts;
     exports := zeroed RawHashMap(Str, Export);
     ordered_exports: []Export = empty();
-    // TODO: use these
-    runtime: []rawptr;  // function pointers from runtime.fr
+    // unsized: View #inline;
     
-    fn size(self: *Instance) i64 = 
-        compute_offset(self.mod.counts&, .imports, self.mod.counts&[.imports]);
+    fn size(self: *Instance) i64 = {
+        last := @as(Fields(View)) @as(i64) Fields(View).enum_count() - 1;
+        compute_offset(self.counts&, last, self.counts&[last])
+    }
     
     fn view(self: *Instance) View = {
         result := zeroed Array(Ty(i64, i64), Fields(View).enum_count());
         enumerate result& { i, it |
             field := @as(Fields(View)) i;
             it[] = (
-                Instance.int_from_ptr(self) + compute_offset(self.mod.counts&, field, 0),
-                self.mod.counts&.get(field),
+                Instance.int_from_ptr(self) + compute_offset(self.counts&, field, 0),
+                self.counts&.get(field),
             );
         };
         bit_cast_unchecked(@type result, View, result)
@@ -61,6 +64,7 @@ View :: @struct {
     globals: []*GlobalValue;
     tables: []*Table;
     imports: []Callable;  // functions only
+    runtime: []rawptr;  // function pointers from runtime.fr
 };
 
 GlobalValue :: @union(i64: i64, i32: i32, f64: f64, f32: f32);
@@ -71,31 +75,27 @@ Callable :: @struct {
     context: rawptr;
 };
 
+// order must match ImportType
 Export :: @tagged(
     Function: Callable,
-    Global: *GlobalValue,
     Table: *Table,
     Memory: *SaneRawList(u8),
+    Global: *GlobalValue,
 );
 
-Engine :: @struct {
+Engine :: @rec @struct {
+    // TODO: could do much better than this if most modules are [large, of unique length, instantiated once]  
+    //       if i just hash the length instead of needing to look at all the bytes. 
     modules: HashMap([]u8, *Module);
     debug: Str;
-    memory: []u8;
     lock := zeroed Mutex;
     target: Qbe.QbeTargetEnv;
-    runtime: []rawptr;  // function pointers from runtime.fr
     gpa: Alloc;
 };
 
-fn init(a: Alloc, memory: []u8, target: Qbe.QbeTargetEnv, debug: Str) Engine = (
+fn init(a: Alloc, target: Qbe.QbeTargetEnv, debug: Str) Engine = (
     modules = init(a), 
-    memory = memory,
     target = target,
-    runtime = @run {
-        calls := collect_runtime_calls();
-        ast_alloc().alloc_init(rawptr, calls.len, fn(i) => calls[i].callee)
-    },
     debug = debug,
     gpa = a,
 );
@@ -114,30 +114,42 @@ fn compile(self: *Engine, wasm: []u8) *Module = {
 fn compile_uncached(self: *Engine, wasm: []u8) *Module = {
     a := self.gpa;
     mod := a.box_zeroed(Module);
-    mod.engine = self;
-    init_default_module(mod.m&, self.target);
+    Qbe'backend'init_module(mod.m&, self.target);
     mod.m&.set_debug_types(self.debug, true);
     mod.w = empty(a);
     p: ParseWasm = (w = mod.w&, src = wasm);
     or parse_wasm(p&) { e |
         @panic("% (at byte index %)", e, p.cursor);
     };
-    mod.loader = init(mod.m&, mod.w&, a);
-    mod.loader&.load_module();
+    msg :: "TODO: support module with its own memory. rn it must be imported";
+    @assert_eq(mod.w.memories.len, 0, msg);
+    
+    mod.loader = load(mod.m&, mod.w&, a);
     mod.counts = mod.loader.counts;
-    mod.m&.emit_suspended_inlinables();
-    mod.m&.make_exec();
+    mod.m&.Qbe'backend'compile_suspended();
+    ::enum(@type mod.m.goal.type);
+    if mod.m.goal.type == .JitOnly {
+        mod.m&.make_exec();
+    };
+    
+    // this copy step means if you compile at comptime and then bake the module, 
+    // you'll only get the parts of the runtime you need. 
+    mod.runtime = a.alloc_zeroed(rawptr, collect_runtime_calls().len());
+    calls := collect_runtime_calls();
+    for mod.loader.rt_needed& { i |
+        mod.runtime[i] = calls[i].callee;
+    };
+    
     mod
 }
 
-fn instantiate(mod: *Module, imports: *RawHashMap(Str, RawHashMap(Str, Export))) *Instance = {
+fn instantiate(mod: *Module, imports: *ExportsEnv) *Instance = {
     instance := {
         it: Instance = (
             memory = zeroed(*SaneRawList(u8)),
             env = get_dynamic_environment(),
             gpa = general_allocator(),
-            mod = mod,
-            runtime = mod.engine.runtime,
+            counts = mod.counts,
         );
         r := it.gpa.alloc_zeroed(i64, it&.size() / size_of(i64));
         r := bit_cast_unchecked(*i64, *Instance, r.ptr);
@@ -145,41 +157,40 @@ fn instantiate(mod: *Module, imports: *RawHashMap(Str, RawHashMap(Str, Export)))
         r
     };
     view := instance.view();
+    view.runtime.copy_from(mod.runtime);
 
     found := zeroed Instance.Counts;
     missing := 0;
     enumerate mod.w.imports& { i, it |
         continue :: local_return;
         module_s, name_s := (it.module.items(), it.name.items());
-        source := imports.get_ptr(module_s) || {
-            @eprintln("tried to import % (from missing module %)", name_s, module_s);
-            missing += 1;
-            continue()
-        };
-        value := source.get_ptr(name_s) || {
-            @eprintln("missing import % (in module %)", name_s, module_s);
+        value := imports.get(module_s, name_s) || {
+            @eprintln("tried to import % from %", name_s, module_s);
             missing += 1;
             continue()
         };
         @if(missing != 0) continue();
         
+        // TODO: be able to say it's an @tagged with tag ImportType
+        ::tagged(@type it.desc);
+        ::tagged(@type value);
+        a := value&.tag();
+        b := it.desc&.tag();
+        @assert_eq(@as(i64) a, @as(i64) b, "wrong import type % %", module_s, name_s);
+        
         @match(it.desc) {
             fn Function() => {
-                @assert(value.is(.Function));
                 view.imports[found&[.imports]] = value.Function;
                 found&[.imports] += 1;
             }
             fn Table() => {
-                @assert(value.is(.Table));
                 view.tables[found&[.tables]] = value.Table;
                 found&[.tables] += 1;
             }
             fn Memory() => {
-                @assert(value.is(.Memory));
                 instance.memory = value.Memory;
             }
             fn Global() => {
-                @assert(value.is(.Global));
                 view.globals[found&[.globals]] = value.Global;
                 found&[.globals] += 1;
             }
@@ -202,7 +213,7 @@ fn instantiate(mod: *Module, imports: *RawHashMap(Str, RawHashMap(Str, Export)))
         it := mod.w.exports.index(i);
         ::?Callable;
         e: Export = @match(it.type) {
-            fn Func() => (Function = get_callable(instance, it.id.zext()) 
+            fn Func() => (Function = get_callable(instance, mod, it.id.zext()) 
                 || @panic("uncompiled export %", it.name.items()));
             fn Global() => (Global = view.globals[it.id.zext()]);
             fn Table() => (Table = view.tables[it.id.zext()]);
@@ -212,16 +223,16 @@ fn instantiate(mod: *Module, imports: *RawHashMap(Str, RawHashMap(Str, Export)))
         e
     };
     
-    instance.run_initializers();
+    instance.run_initializers(mod);
     
     instance
 }
 
-fn run_initializers(self: *Instance) void = {
-    each self.mod.loader.datas { it |
+fn run_initializers(self: *Instance, mod: *Module) void = {
+    each mod.loader.datas { it |
         if it.active_at { off |
-            use_symbol(self.mod.m&, it.id) { s |
-                src := self.mod.m.segments&[s.segment].mmapped.subslice(s.offset, s.size.zext());
+            use_symbol(mod.m&, it.id) { s |
+                src := mod.m.segments&[s.segment].mmapped.subslice(s.offset, s.size.zext());
                 self.memory.len = max(self.memory.len, off + src.len);
                 self.memory_init(src.ptr, self.memory, off.trunc(), 0, src.len.trunc());
             };
@@ -229,26 +240,54 @@ fn run_initializers(self: *Instance) void = {
     };
     
     view := self.view();
-    each self.mod.loader.elems { it |
+    each mod.loader.elems { it |
         if it.active_at { active_at |
             table := view.tables[active_at.table][].from_sane().items();
             dest := table.subslice(active_at.offset, it.functions.len);
             enumerate dest { i, dest |
-                dest[] = self.get_callable(it.functions[i]) 
+                dest[] = self.get_callable(mod, it.functions[i]) 
                     || @panic("failed to get callable for active elem");
             };
         };
     };
 }
 
-fn get_callable(self: *Instance, global_i: i64) ?Callable = {
+fn get_callable(self: *Instance, mod: *Module, global_i: i64) ?Callable = {
     view := self.view();
     if global_i < view.imports.len {
         return(Some = view.imports[global_i]);
     };
-    f, _ := self.mod.m&.get_addr(self.mod.loader.functions[global_i])
+    f, _ := mod.m&.get_addr(mod.loader.functions[global_i])
         || return(.None);
     (Some = (callee = f, context = Instance.raw_from_ptr(self)))
+}
+
+ExportsEnv :: @struct(_: HashMap(Str, RawHashMap(Str, Export)));
+
+fn insert(self: *ExportsEnv, module: Str, name: Str, value: Export) void = {
+    exports := self._&.get_or_insert(module, => init());
+    exports.insert(name, value, self._.alloc);
+}
+
+fn insert(self: *ExportsEnv, module: Str, name: Str, callee: rawptr, context: ~T) void #where = {
+    it: Export = (Function = (
+        callee = callee, 
+        context = bit_cast_unchecked(T, rawptr, context),
+    ));
+    self.insert(module, name, it);
+}
+
+fn get(self: *ExportsEnv, module: Str, name: Str) ?Export = {
+    m := self._&.get_ptr(module) || return(.None);
+    m.get(name)
+}
+
+UserContext :: @struct(memory: *SaneRawList(u8), env: rawptr);
+fn new_memory(engine: *Engine, initial: i64, max_bytes: i64) Ty(Export, *UserContext) = {
+    buf := page_allocator.alloc_uninit(u8, max_bytes);  // page allocator always gives zeros
+    buf := engine.gpa.boxed(SaneRawList(u8), (ptr = buf.ptr, cap = buf.len, len = initial));
+    ctx := engine.gpa.boxed(UserContext, (memory = buf, env = get_dynamic_environment()));
+    ((Memory = buf), ctx)
 }
 
 fn SaneRawList($T: Type) Type = {
@@ -259,6 +298,12 @@ fn SaneRawList($T: Type) Type = {
     
     fn from_sane(self: Self) RawList(T) = 
         (ptr = self.ptr, len = self.len, cap = self.cap);
+    
+    fn maybe_uninit(self: *Self) []T = 
+        self[].from_sane().maybe_uninit();
+    
+    fn items(self: *Self) []T = 
+        self[].from_sane().items();
     
     Self
 }
@@ -339,6 +384,6 @@ memory_init :: fn(ctx: *Instance, data_start: *u8, _: *SaneRawList(u8), dest: u3
 Futex :: import("@/lib/sys/sync/futex.fr");
 #use("@/lib/sys/threads.fr");
 #use("@/lib/sys/sync/mutex.fr");
-#use("@/examples/import_wasm/convert.fr");
 #use("@/examples/import_wasm/parse.fr");
+#use("@/lib/collections/map.fr");
 Qbe :: import("@/backend/ir.fr");

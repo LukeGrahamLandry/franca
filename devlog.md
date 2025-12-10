@@ -1,4 +1,12 @@
 
+## (Dec 10)
+
+- i wrote LoadWasm in a kinda dumb mutate-y style. break it up into two structs
+  so its more clear which fields are output and which are scratch while compiling. 
+  don't zero init something and then poke fields in if i can make it so the fields have no interdependencies. 
+  - put the runtime fns in View
+  - looking for less annoying api for imports than nested hashmap
+
 ## (Dec 9)
 
 - i want to run the wasm spec's tests

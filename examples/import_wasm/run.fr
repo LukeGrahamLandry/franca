@@ -83,43 +83,22 @@ main :: fn() void = {
 }
 
 fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str, args: []CStr) void = {
-    // TODO: need 33 bits becase memarg has offset 
-    //       (but nobody uses it that way because you'd need to know statically which half you're on)
-    // TODO: can't do this if i want to run in wasm (meta-circularly). so at least need an option to be normal. 
-    //       this also doesn't work if i want to support memory64. 
-    // relies on page allocator giving zeroes
-    buf := page_allocator.alloc_uninit(u8, 1.shift_left(32)); // wasm.w.memories[0].min.zext() * wasm_page_size);
-    heap_base[] = trunc(buf.len - 1);
-
-    heap_base[] = align_back(heap_base[], 65536);
-    
     #use("@/examples/import_wasm/ffi.fr");
-
-    // TODO: save the typeinfo and at least do arity checking
-    exports := comptime_exports(Exports);
-    
-    memory: SaneRawList(u8) = (ptr = buf.ptr, len = 0, cap = buf.len);
-    main_exports: RawHashMap(Str, Rt.Export) = init();
-    main_exports&.insert("memory", (Memory = memory&), temp());
-    exports&.insert("main", main_exports, temp());
-    
-    // ehhhh HACK
-    FakeInstance :: @struct {
-        memory: *SaneRawList(u8); 
-        env: rawptr;
-    };
-    fake: FakeInstance = (memory = memory&, env = get_dynamic_environment());
-    each exports& { _, v |
-        each v { _, v |
-            @if_let(v) fn Function(it) => {
-                it.context = FakeInstance.raw_from_ptr(fake&);
-            };
-        };
-    };
     
     a := general_allocator();
+    Qbe :: import("@/backend/ir.fr");
     target: Qbe.QbeTargetEnv = (type = .JitOnly, os = query_current_os(), arch = query_current_arch(), link_libc = false);
-    rt: Wasm.Engine = init(a, buf, target, logging);
+    rt: Wasm.Engine = init(a, target, logging);
+    exports: Rt.ExportsEnv = (_ = init(temp()));
+    
+    memory, fake := rt&.new_memory(0, 1.shift_left(32));
+    // TODO: save the typeinfo and at least do arity checking
+    for comptime_exports(Exports) { m, n, it |
+        exports&.insert(m, n, it.Function.callee, fake);
+    };
+    exports&.insert("main", "memory", memory);
+    heap_base[] = fake.memory.cap.trunc();
+    
     the_engine[] = rt&;
     mod := rt&.compile(bytes);
     instance := mod.instantiate(exports&);
@@ -132,17 +111,18 @@ fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str, args: []CStr) void 
         the_table[] = it.Table;
     };
     
+    argc, argv := (0, 0);
     // unfortunate that i depend on a specific symbol name
-    stackbase := instance.exports&.get("__stackbase")
-        || @panic("expected export called '__stackbase'");
-    stackbase := stackbase.Global.i32&;
+    if instance.exports&.get("__stackbase") { stackbase |
+        stackbase := stackbase.Global.i32&;
+        // TODO: should use the limits in the wasm binary instead of this HACK
+        fake.memory.len = stackbase[].zext().align_to(wasm_page_size);
+        argc_, argv_ := write_cli_args(args, fake.memory.maybe_uninit(), stackbase);
+        argc = argc_;
+        argv = argv_;
+    };
     
-    // TODO: should use the limits in the wasm binary instead of this HACK
-    memory.len = stackbase[].zext().align_to(wasm_page_size);
     wasm_page_size :: 1.shift_left(16);
-    
-    argc, argv := write_cli_args(args, buf, stackbase);
-    
     the_header[] = instance;
     
     // TODO: there's a segment where it tells you the entry point
@@ -352,8 +332,10 @@ Exports :: @struct {
             // TODO: should probably just allow userdata
             
             mod := the_engine[].compile(module_bytes);
-            exports := zeroed RawHashMap(Str, RawHashMap(Str, Wasm.Export));
-            exports&.insert("main", the_header.exports, temp());
+            exports: Rt.ExportsEnv = (_ = init(temp()));
+            each the_header.exports& { k, v |
+                exports&.insert("main", k, v[]);
+            };
             new := mod.instantiate(exports&);
             
             table := the_table[][];

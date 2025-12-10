@@ -1,65 +1,131 @@
-//! === WARNING === This is not a sandbox! === WARNING ===
 
-#use("@/backend/lib.fr");
-#use("@/examples/import_wasm/parse.fr");
+// convert a wasm module into a Qbe.Module. 
+// an important constraint is that anything unique to an instantiation 
+// (imports, global/table storage) must be passed around at runtime,
+// not baked into the code. this allows compiling once an instantiating 
+// multiple times without a linking step. 
 
-// TODO: this could be hella faster: 
-//       - there's a wasteful prepass that splits up bits of the module into a big data structure. 
-//       - the parser+wasm->ir could be on a different thread from the ir->asm 
-//         (i have the machinery to do this already because the Franca compiler works that way)
-//         + you could compile multiple functions in parallel (but that would need more work).
-//       - the number of bounds checks the parser does per byte is a bit sad. 
-//       - could inline more if we pre-sorted based on callgraph,
-//         but maybe the expectation with wasm is that the first compiler did that already?
+Loaded :: @rec @struct {
+    datas: []Data;
+    elems: []Elem;
+    global_cls: []Qbe.Cls;  // including imports
+    init_global_values: []Rt.GlobalValue;  // not including imports
+    init_table_sizes: []i64;  // not including imports
+    rt_needed: RtNeeded;
+    counts: Rt.Counts;
+    functions: []Qbe.Sym;  // [padding for imports, ...exports]
+    function_types: []Wasm.TypeIdx;
+};
 
-// TODO: validation
-// TODO: support aot. needs extra work because of import_wasm/runtime.fr
-// TODO: provide standard c api so could run other people's tests? https://github.com/WebAssembly/wasm-c-api/blob/main/include/wasm.h
-
-LoadWasm :: @rec @struct(
-    m: *QbeModule,
-    w: *WasmModule,
-    src := "",
-    cursor := 0,
-    module_name := "module",
-    global_cls: []Qbe.Cls = empty(),
-    functions: []Qbe.Sym = empty(),  // [padding for imports, ...exports]
-    function_types: []Wasm.TypeIdx = empty(),
-    counts := zeroed Rt.Counts,
-    function_names: []Str = empty(),
-    
-    datas: []Data = empty(),
-    elems: []Elem = empty(),
-    init_global_values: []Rt.GlobalValue = empty(),  // not including imports
-    init_table_sizes: []i64 = empty(),  // not including imports
-    
-    stack: List(Qbe.Ref),
-    blocks: List(BlockEntry),
-    locals: []Qbe.Ref,  // TODO: we can't store a 128 bit vector in a temporary 
-    f := zeroed(*Qbe.Fn),
-    local_rt_header := QbeNull,
-    local_memory_base := Qbe.Null,
-    return_types: []Wasm.ValType = empty(),
-    link := zeroed(**Qbe.Blk),
-    alloc: Alloc,
-    
-    log_local_func_i := 0,
-);
-
+RtNeeded :: StaticBitSet(collect_runtime_calls().len());
 Data :: @struct(id: Qbe.Sym, size: i64, active_at: ?i64);
 Elem :: @struct(functions: []i64, active_at: ?@struct(table: i64, offset: i64));
 
-fn init(m: *QbeModule, w: *WasmModule, a: Alloc) LoadWasm = (
-    m = m,
-    w = w,
-    stack = list(temp()),
-    locals = empty(),
-    blocks = list(temp()),
-    alloc = a,
-);
+fn load(m: *Qbe.Module, w: *WasmModule, a: Alloc) Loaded = {
+    ::require_layout_ready(LoadWasm);
+    counts := zeroed Rt.Counts;
+    counts&[.imports] = w.import_count&[.Func];
+    counts&[.tables] = w.tables.len + w.import_count&[.Table];
+    counts&[.runtime] = RtNeeded.capacity;
+    counts&[.globals] = w.globals.len + w.import_count&[.Global];
+    
+    global_cls := a.alloc_uninit(Qbe.Cls, counts&[.globals]);
+    {
+        i := 0;
+        each w.imports& { import |
+            @if_let(import.desc&) fn Global(it) => {
+                global_cls[i] = it.ref_type.cls();
+                i += 1;
+            };
+        };
+        @debug_assert_eq(i, w.import_count&[.Global]);
+    };
 
-fn mangle_name(it: *Wasm.Import) Str = 
-    @tfmt("%^%", it.name.items(), it.module.items());  // :NamespaceChar
+    functions, function_types, function_names := declare_functions(m, w, a);
+    
+    loaded: Loaded = (
+        rt_needed = zeroed(RtNeeded),
+        counts = counts,
+        functions = functions,
+        function_types = function_types,
+        init_global_values = a.alloc_init(Rt.GlobalValue, w.globals.len) { local_i |
+            global := w.globals.index(local_i);
+            value, k := const_eval_wasm_expr(global.init_expr.items());
+            global_cls[w.import_count&[.Global] + local_i] = k;
+            @debug_assert_eq(k, global.type.cls());
+            (i64 = value)
+        },
+        global_cls = global_cls,
+        init_table_sizes = a.alloc_init(i64, w.tables.len) { i |
+            w.tables[i].limits.min.zext()
+        },
+        elems = a.alloc_init(Elem, w.elements.len) { i |
+            elem := w.elements.index(i);
+            functions := a.alloc_init(i64, elem.funcs.len, fn(i) => elem.funcs[i].id.zext());
+            (functions = functions, active_at = @if(elem.active_offset_expr.len == 0, .None, {
+                off, k := const_eval_wasm_expr(elem.active_offset_expr.items());
+                @assert(k == .Kl || k == .Kw, "expected integer not % for elem[%] active_offset_expr", k, i);
+                @assert(elem.table.id.zext() < counts&[.tables], "active elem has oob table index");
+                (Some = (table = elem.table.id.zext(), offset = off))
+            }))
+        },
+        datas = a.alloc_init(Data, w.data.len) { i |
+            data := w.data.index(i);
+            expr := data.active_offset_expr;
+            off: ?i64 = @if(expr.len == 0, .None, {
+                off, k := const_eval_wasm_expr(expr.items());
+                @debug_assert_eq(k, .Kw, "offset expression");
+                @debug_assert_eq(data.active_mem.id, 0, "TODO: multiple memories");
+                (Some = off)
+            });
+            id := m.intern(@tfmt("data%@W", i));
+            m.Qbe'backend'compile_dat(template = (Bytes = data.bytes.items()), id = id, relocations = empty());
+            (id = id, size = data.bytes.len, active_at = off)
+        },
+    );
+    
+    range(0, w.code.len) { i |
+        translate_func(w, m, loaded&, function_names, i);
+    };
+    
+    loaded
+};
+
+fn declare_functions(m: *Qbe.Module, w: *WasmModule, a: Alloc) Ty([]Qbe.Sym, []Wasm.TypeIdx, []Str) = {
+    count := w.functions.len + w.import_count&[.Func];
+    ids := a.alloc_uninit(Qbe.Sym, count); // :Leak
+    types := a.alloc_uninit(Wasm.TypeIdx, count);
+    names := a.alloc_zeroed(Str, count);
+    f_i := 0;
+    each w.imports& { import |
+        @if_let(import.desc&) fn Function(id) => {
+            ids[f_i] = Qbe.no_symbol_S;  // called through Rt.Instance instead
+            types[f_i] = id[];
+            names[f_i] = @tfmt("%@%", import.name.items(), import.module.items());
+            f_i += 1;
+        };
+    };
+    range(0, w.functions.len) { i |
+        id := m.intern(@tfmt("F%@W", f_i));;
+        ids[f_i] = id;
+        names[f_i] = m.str(id);
+        types[f_i] = w.functions[i];
+        f_i += 1;
+    };
+    @debug_assert_eq(count, f_i);    
+    
+    // actually, if it's an export it's nicer to use the real names. TODO: same thing for globals
+    each w.exports& { it |
+        ::enum(@type it.type);
+        if it.type == .Func && it.id.zext() >= w.import_count&[.Func] {
+            id := m.intern(it.name.items());
+            ids[it.id.zext()] = id;
+            names[it.id.zext()] = m.str(id);
+        };
+    };
+    
+    (ids, types, names)
+}
 
 fn const_eval_wasm_expr(expr: []u8) Ty(i64, Qbe.Cls) = {
     o := @as(Wasm.Inst) expr[0];
@@ -76,46 +142,61 @@ fn const_eval_wasm_expr(expr: []u8) Ty(i64, Qbe.Cls) = {
     })
 } 
 
-// :NamespaceChar
-fn private_symbol(self: *LoadWasm, name: Str) Qbe.Sym = {
-    self.m.intern(@tfmt("%__^%", name, self.module_name))
-}
+// the rest of this file handles compiling one wasm function body to one Qbe.Fn. 
+// stack -> ssa, locals -> mutable temporaries, structured control flow -> cfg, block params -> phi nodes. 
 
-preleb :: import("@/backend/wasm/isel.fr").wasm_type_preleb;
-
-fn load_module(self: *LoadWasm) void = {
-    // :Leak
-    self.declare_functions();
-    self.declare_globals();
-    self.declare_tables();
-    self.declare_datas();
+LoadWasm :: @struct {
+    m: *Qbe.Module;
+    w: *WasmModule;
+    src: []u8;
+    cursor: i64;
+    function_names: []Str;
     
-    range(0, self.w.code.len) { i |
-        mark := mark_temporary_storage();
-        f := Qbe.Fn.zeroed();
-        self.translate_func(i, f&);
-        run_qbe_passes(f&);  // :ThisIsWhereWeEmit
-        reset_temporary_storage(mark);
-    };
+    stack: List(Qbe.Ref);
+    blocks: List(BlockEntry);
+    locals: []Qbe.Ref;  // TODO: we can't store a 128 bit vector in a temporary 
+    f: *Qbe.Fn;
+    local_rt_header: Qbe.Ref;
+    local_memory_base: Qbe.Ref;
+    return_types: []Wasm.ValType;
+    link: **Qbe.Blk;
+    
+    loaded: *Loaded #use;
 };
 
-fn translate_func(self: *LoadWasm, local_func_i: i64, f: *Qbe.Fn) void = {
-    code := self.w.code.index(local_func_i);
-    global_func_i := local_func_i + self.w.import_count&[.Func];
-    self.f = f;
-    self.f.default_init(self.m);
+fn translate_func(w: *WasmModule, m: *Qbe.Module, loaded: *Loaded, function_names: []Str, local_func_i: i64) void = {
+    mark := mark_temporary_storage();
+    f := @ref Qbe.Fn.zeroed();
+    f.default_init(m);
     
-    f.lnk.id = self.functions[global_func_i];
+    global_func_i := local_func_i + w.import_count&[.Func];
+    f.lnk.id = loaded.functions[global_func_i];
+    type_index := loaded.function_types[global_func_i];
+    signature := w.types[type_index.id.zext()]&;
+    code := w.code.index(local_func_i);
     
-    type_index := self.function_types[global_func_i];
-    
-    signature := self.w.types[type_index.id.zext()]&;
-    self.locals = temp().alloc_uninit(Qbe.Ref, code.total_local_count + signature.arg.len);
-    self.blocks = list(temp());
-    self.stack = list(temp());
-    self.local_rt_header = self.f.newtmp("wasm_globals", .Kl);
-    self.local_memory_base = self.f.newtmp("memory", .Kl);
-    
+    self: LoadWasm = (
+        m = m,
+        w = w,
+        f = f,
+        loaded = loaded,
+        function_names = function_names,
+        src = code.insts.items(),
+        locals = temp().alloc_uninit(Qbe.Ref, code.total_local_count + signature.arg.len),
+        blocks = list(temp()),
+        stack = list(temp()),
+        local_rt_header = f.newtmp("wasm_globals", .Kl),
+        local_memory_base = f.newtmp("memory", .Kl),
+        cursor = 0,
+        return_types = signature.ret.items(),
+        link = f.start&,
+    );
+    self&.translate_func(code, signature);
+    Qbe'backend'compile_fn(f);
+    reset_temporary_storage(mark);
+}
+
+fn translate_func(self: *LoadWasm, code: *Wasm.Func, signature: *Wasm.FuncType) void = {
     self.f.emit(.par, .Kl, self.local_rt_header, QbeNull, QbeNull);
     // parameters come in as locals not on the stack
     range(0, signature.arg.len) { i |
@@ -141,16 +222,10 @@ fn translate_func(self: *LoadWasm, local_func_i: i64, f: *Qbe.Fn) void = {
         @debug_assert_eq(self.locals.len, i);
     };
     
-    self.src = code.insts.items();
-    self.log_local_func_i = local_func_i;
-    self.cursor = 0;
-    
-    self.link = self.f.start&;
     // you can't br targtting the outer scope of the function so only `current` matters. 
     self.blocks&.push(current = self.link_new_block(), continue = Qbe.Blk.ptr_from_int(0), break = Qbe.Blk.ptr_from_int(0), loop = false);
     self.push_block(preleb(.EmptyBlock).intcast(), false);
     
-    self.return_types = signature.ret.items();
     self.emit_the_code();
     
     // implicit fallthrough return at the end of the function. 
@@ -165,111 +240,11 @@ fn translate_func(self: *LoadWasm, local_func_i: i64, f: *Qbe.Fn) void = {
     self.f.lnk.export = true; // TODO: kind depends if this is the final thing. if it's aot into a franca program, you want to to TOFKALTO
 }
 
-fn declare_functions(self: *LoadWasm) void = {
-    a := self.alloc;
-    count := self.w.functions.len + self.w.import_count&[.Func];
-    self.functions = a.alloc_uninit(Qbe.Sym, count); // :Leak
-    self.function_types = a.alloc_uninit(Wasm.TypeIdx, count);
-    self.function_names = a.alloc_zeroed(Str, count);
-    f_i := 0;
-    each self.w.imports& { import |
-        @if_let(import.desc&) fn Function(id) => {
-            self.functions[f_i] = Qbe.no_symbol_S;  // called through Rt.Instance instead
-            self.function_types[f_i] = id[];
-            self.function_names[f_i] = import.name.items();
-            f_i += 1;
-        };
-    };
-    self.counts&[.imports] = f_i;
-    range(0, self.w.functions.len) { i |
-        id := self.private_symbol(@tfmt("F%", f_i));;
-        self.functions[f_i] = id;
-        self.function_names[f_i] = self.m.str(id);
-        self.function_types[f_i] = self.w.functions[i];
-        f_i += 1;
-    };
-    @debug_assert_eq(count, f_i);    
-    
-    // actually, if it's an export it's nicer to use the real names. TODO: same thing for globals
-    each self.w.exports& { it |
-        ::enum(@type it.type);
-        if it.type == .Func && it.id.zext() >= self.w.import_count&[.Func] {
-            // :NamespaceChar
-            id := self.m.intern(@tfmt("%^%", it.name.items(), self.module_name));
-            self.functions[it.id.zext()] = id;
-            self.function_names[it.id.zext()] = self.m.str(id);
-        };
-    };
-}
-
-fn declare_globals(self: *LoadWasm) void = {
-    a := self.alloc;
-    count := self.w.globals.len + self.w.import_count&[.Global];
-    self.global_cls = a.alloc_uninit(Qbe.Cls, count);
-    self.counts&[.globals] = count;
-    
-    i := 0;
-    each self.w.imports& { import |
-        @if_let(import.desc&) fn Global(it) => {
-            self.global_cls[i] = it.ref_type.cls();
-            i += 1;
-        };
-    };
-    
-    self.init_global_values = a.alloc_init(Rt.GlobalValue, self.w.globals.len) { local_i |
-        global := self.w.globals.index(local_i);
-        value, k := const_eval_wasm_expr(global.init_expr.items());
-        self.global_cls[i] = k;
-        i += 1;
-        @debug_assert_eq(k, global.type.cls());
-        (i64 = value)
-    };
-    @debug_assert_eq(i, count);
-}
-
-fn declare_tables(self: *LoadWasm) void = {
-    a := self.alloc;
-    count := self.w.tables.len + self.w.import_count&[.Table];
-    self.counts&[.tables] = count;
-    
-    self.init_table_sizes = a.alloc_init(i64, self.w.tables.len) { i |
-        self.w.tables[i].limits.min.zext()
-    };
-    
-    self.elems = a.alloc_init(Elem, self.w.elements.len) { i |
-        elem := self.w.elements.index(i);
-        functions := a.alloc_init(i64, elem.funcs.len, fn(i) => elem.funcs[i].id.zext());
-        (functions = functions, active_at = @if(elem.active_offset_expr.len == 0, .None, {
-            off, k := const_eval_wasm_expr(elem.active_offset_expr.items());
-            @assert(k == .Kl || k == .Kw, "expected integer not % for elem[%] active_offset_expr", k, i);
-            @assert(elem.table.id.zext() < count, "active elem has oob table index");
-            (Some = (table = elem.table.id.zext(), offset = off))
-        }))
-    };
-}   
-
-fn declare_datas(self: *LoadWasm) void = {
-    a := self.alloc;    
-    count := self.w.data.len;
-    self.datas = a.alloc_uninit(Data, count);
-    
-    enumerate self.w.data { i, data | 
-        expr := data.active_offset_expr;
-        off: ?i64 = @if(expr.len == 0, .None, {
-            off, k := const_eval_wasm_expr(expr.items());
-            @debug_assert_eq(k, .Kw, "offset expression");
-            @debug_assert_eq(data.active_mem.id, 0, "TODO: multiple memories");
-            (Some = off)
-        });
-        id := self.private_symbol(@tfmt("data%", i));
-        self.m.emit_data(template = (Bytes = data.bytes.items()), id = id, relocations = empty());
-        self.datas[i] = (id = id, size = data.bytes.len, active_at = off);
-    };
-}   
-
 Rt :: import("@/examples/import_wasm/runtime.fr");
 BlockEntry :: @struct(continue: *Qbe.Blk, break: *Qbe.Blk, current: *Qbe.Blk, loop: bool);
 
+// doing this iteratively instead of recursively is cute because you can't run out of callstack 
+// on pathological functions but the BlockEntry/IfNode bookkeeping is super confusing :(
 fn emit_the_code(self: *LoadWasm) void = {
     IfNode :: @struct(src: *Qbe.Blk, block_type: i64 /* needed for op else */, stack: []Qbe.Ref);
     if_stack := list(IfNode, temp());
@@ -301,13 +276,13 @@ fn emit_the_code(self: *LoadWasm) void = {
                     if encoding.op == .truncl {
                         encoding.op = .copy;
                     };
-                    r = self.f.newtmp("wasm", encoding.cls);
+                    r = self.f.newtmp("w", encoding.cls);
                     a := self.stack[self.stack.len - 1]&;
                     a0 = a[];
                     a[] = r;
                 };
                 fn binary() => {
-                    r = self.f.newtmp("wasm", encoding.cls);
+                    r = self.f.newtmp("w", encoding.cls);
                     a1 = self.stack[self.stack.len - 1];
                     b := self.stack[self.stack.len - 2]&;
                     self.stack.len -= 1;
@@ -315,7 +290,7 @@ fn emit_the_code(self: *LoadWasm) void = {
                     b[] = r;
                 };
                 fn load() => {
-                    align := self.read_u();
+                    _align := self.read_u();
                     offset := self.read_u();
                     addr := self.stack&.pop().expect("stack for load addr");
                     addr := self.compute_address(addr, offset.bitcast());
@@ -325,7 +300,7 @@ fn emit_the_code(self: *LoadWasm) void = {
                     a0 = addr; a1 = QbeNull; r = result; 
                 };
                 fn store() => {
-                    align := self.read_u();
+                    _align := self.read_u();
                     offset := self.read_u();
                     value := self.stack&.pop().expect("stack for store value");
                     addr := self.stack&.pop().expect("stack for store addr");
@@ -353,7 +328,7 @@ fn emit_the_code(self: *LoadWasm) void = {
                 table := self.read_u();
                 index := self.stack&.pop().expect("call index on stack");
                 externref := self.table_get(table, index);
-                r := temp().alloc_init(Qbe.Ref, 3, fn(_) => self.f.newtmp("", .Kl));
+                r := self.temporaries(3);
                 self.f.emit(.add, .Kl, r[2], externref, self.f.getcon(8));
                 self.f.emit(.load, .Kl, r[0], externref, Qbe.Null);
                 self.f.emit(.load, .Kl, r[1], r[2], Qbe.Null);
@@ -380,7 +355,7 @@ fn emit_the_code(self: *LoadWasm) void = {
                 
                 if callee < self.counts&[.imports] {
                     off := Rt'Instance'compute_offset(self.counts&, .imports, callee);
-                    r := temp().alloc_init(Qbe.Ref, 4, fn(_) => self.f.newtmp("", .Kl));
+                    r := self.temporaries(4);
                     r[0] = self.f.newtmp(self.function_names[callee], .Kl);
                     self.f.emit(.add, .Kl, r[3], self.local_rt_header, self.f.getcon(off));  // *Callable
                     self.f.emit(.add, .Kl, r[2], r[3], self.f.getcon(8));
@@ -474,7 +449,7 @@ fn emit_the_code(self: *LoadWasm) void = {
             }
             fn AtomicPrefix() => {
                 opcode := self.read_u();
-                align := self.read_u();
+                _align := self.read_u();
                 offset: u64 = @if(opcode == 3, 0, self.read_u());
                 
                 k: Qbe.Cls = @switch(opcode) {
@@ -525,9 +500,9 @@ fn emit_the_code(self: *LoadWasm) void = {
 }
 
 fn choose_runtime_call(self: *LoadWasm, start: i64) void = {
-    it, indices := self.match_runtime_call(start)
-        || @panic("unhandled instruction %\n(at byte index % of % = global function %)", 
-            self.src[start], start, self.m.str(self.f.lnk.id), self.log_local_func_i + self.w.import_count&[.Func]);
+    it, rt_i, indices := self.match_runtime_call(start)
+        || @panic("unhandled instruction %\n(at byte index % of %)", 
+            self.src[start], start, self.m.str(self.f.lnk.id));
     // found the right instruction so emit a call to the function in Rt
 
     args := self.stack.items().rest(self.stack.len - it.stacked.len);
@@ -546,7 +521,7 @@ fn choose_runtime_call(self: *LoadWasm, start: i64) void = {
                 }
                 fn table() => {
                     off := Rt'Instance'compute_offset(self.counts&, .tables, indices[i]);
-                    r := temp().alloc_init(Qbe.Ref, 2, fn(_) => self.f.newtmp("", .Kl));
+                    r := self.temporaries(2);
                     self.f.emit(.add, .Kl, r[0], self.local_rt_header, self.f.getcon(off));  // **Table
                     self.f.emit(.load, .Kl, r[1], r[0], QbeNull);  // *Table
                     r[1]
@@ -564,6 +539,11 @@ fn choose_runtime_call(self: *LoadWasm, start: i64) void = {
         }
     };
     
+    off := Rt'Instance'compute_offset(self.counts&, .runtime, rt_i);
+    callee, b := (self.f.newtmp(it.name, .Kl), self.f.newtmp("rt_slot", .Kl));
+    self.f.emit(.add, .Kl, b, self.local_rt_header, self.f.getcon(off));  // *rawptr
+    self.f.emit(.load, .Kl, callee, b, QbeNull);  // rawptr
+    
     self.f.emit(.arg, .Kl, QbeNull, self.local_rt_header, QbeNull);
     for externrefs { it |
         self.f.emit(.arg, .Kl, QbeNull, it, QbeNull);
@@ -572,7 +552,6 @@ fn choose_runtime_call(self: *LoadWasm, start: i64) void = {
         self.f.emit(.arg, it.stacked[i], QbeNull, args[i], QbeNull);
     };
     self.stack.len -= it.stacked.len;
-    callee := self.f.getcon(bit_cast_unchecked(rawptr, i64, it.callee));
     if it.result == .Kx {
         self.f.emit(.call, .Kw, Qbe.Null, callee, Qbe.Null);
     } else {
@@ -582,9 +561,9 @@ fn choose_runtime_call(self: *LoadWasm, start: i64) void = {
     };
 }
 
-fn match_runtime_call(self: *LoadWasm, start: i64) ?Ty(*InstSeq, []i64) = {
+fn match_runtime_call(self: *LoadWasm, start: i64) ?Ty(*InstSeq, i64, []i64) = {
     indices := i64.list(temp());
-    each collect_runtime_calls() { it |
+    enumerate collect_runtime_calls() { i, it |
         continue :: local_return;
         self.cursor = start;
         indices&.clear();
@@ -599,7 +578,8 @@ fn match_runtime_call(self: *LoadWasm, start: i64) ?Ty(*InstSeq, []i64) = {
                 };
             };
         };
-        return(Some = (it, indices.items()));
+        self.rt_needed&.set(i);
+        return(Some = (it, i, indices.items()));
     };
     .None
 }
@@ -614,7 +594,9 @@ InstSeq :: @struct {
     name: Str;
 };
 
-fn collect_runtime_calls() []InstSeq #fold = {
+// TODO: i want #fold to mean the return value is cached without the extra @run
+//       so it's fine that i call this in like 4 places. :compiler
+fn collect_runtime_calls() []InstSeq #fold = @run {
     out := InstSeq.list(ast_alloc());
     fr := current_compiler_context();
     for get_constants(Rt) { name |
@@ -689,7 +671,7 @@ fn table_get(self: *LoadWasm, table_index: u64, index_in_table_W: Qbe.Ref) Qbe.R
 
 fn compute_table_slot(self: *LoadWasm, table_index: u64, index_in_table_W: Qbe.Ref) Qbe.Ref = {
     off := Rt'Instance'compute_offset(self.counts&, .tables, table_index.bitcast());
-    r := temp().alloc_init(Qbe.Ref, 2, fn(_) => self.f.newtmp("", .Kl));
+    r := self.temporaries(2);
     self.f.emit(.add, .Kl, r[0], self.local_rt_header, self.f.getcon(off));  // **Table
     self.f.emit(.load, .Kl, r[1], r[0], QbeNull);  // *Table
 
@@ -710,7 +692,7 @@ fn compute_table_slot(self: *LoadWasm, table_index: u64, index_in_table_W: Qbe.R
 // TODO: cache these per function in the same way i do for the memory base address
 fn compute_global_slot(self: *LoadWasm, i: i64) Qbe.Ref = {
     off := Rt'Instance'compute_offset(self.counts&, .globals, i);
-    r := temp().alloc_init(Qbe.Ref, 2, fn(_) => self.f.newtmp("", .Kl)); 
+    r := self.temporaries(2);
     self.f.emit(.add, .Kl, r[0], self.local_rt_header, self.f.getcon(off));  // **GlobalValue
     self.f.emit(.load, .Kl, r[1], r[0], QbeNull);  // *GlobalValue
     r[1]
@@ -885,3 +867,15 @@ fn emit_call_from_stack(self: *LoadWasm, callee: Qbe.Ref, header: Qbe.Ref, type:
         @default => panic("TODO: handle multiple returns");
     };
 }
+
+fn temporaries(self: *LoadWasm, $n: i64) []Qbe.Ref #inline/*semantic*/ = {
+    r := @uninitialized Array(Qbe.Ref, n);
+    each r& { it | it[] = self.f.newtmp("", .Kl); };
+    r&.items()
+}
+
+#use("@/lib/collections/bit_set.fr");
+QbeNull :: Qbe.Null;
+Qbe :: import("@/backend/ir.fr");
+#use("@/examples/import_wasm/parse.fr");
+preleb :: import("@/backend/wasm/isel.fr").wasm_type_preleb;
