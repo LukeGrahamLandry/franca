@@ -1,3 +1,9 @@
+
+- better error message if you try to bake an allocator with a data pointer. 
+  should also be more careful about passing around the source location 
+  and keeping track of the tree of types you saw before the error. 
+  its a bad sign that every time i make that mistake 
+  i have to add spammy logging and recompile the compiler. 
 - i track more jit pointers to show nice names in tracy and fail a debug check
 ```
 FRANCA_TRACY=true franca examples/default_driver.fr build compiler/main.fr -o trace.out

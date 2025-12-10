@@ -1,13 +1,18 @@
 
 // stores just the compiled code, can be instantiated multiple times
 Module :: @rec @struct {
-    m: Qbe.Module;
     loader: import("@/examples/import_wasm/convert.fr").Loaded;
     w: WasmModule;
     counts: Counts;
     // function pointers from runtime.fr 
     // (only the ones reachable from this module)
     runtime: []rawptr;  
+    
+    // instead of always getting them from the *Qbe.Module,
+    // this makes it more sane to compile() at comptime and then bake the whole thing. 
+    functions: []rawptr;
+    datas: [][]u8;
+    m: ?*Qbe.Module;
 };
 
 // the code linked with imports and storage for globals/tables
@@ -114,8 +119,10 @@ fn compile(self: *Engine, wasm: []u8) *Module = {
 fn compile_uncached(self: *Engine, wasm: []u8) *Module = {
     a := self.gpa;
     mod := a.box_zeroed(Module);
-    Qbe'backend'init_module(mod.m&, self.target);
-    mod.m&.set_debug_types(self.debug, true);
+    m := a.box_uninit(Qbe.Module);
+    Qbe'backend'init_module(m, self.target);
+    mod.m = (Some = m);
+    m.set_debug_types(self.debug, true);
     mod.w = empty(a);
     p: ParseWasm = (w = mod.w&, src = wasm);
     or parse_wasm(p&) { e |
@@ -124,12 +131,26 @@ fn compile_uncached(self: *Engine, wasm: []u8) *Module = {
     msg :: "TODO: support module with its own memory. rn it must be imported";
     @assert_eq(mod.w.memories.len, 0, msg);
     
-    mod.loader = load(mod.m&, mod.w&, a);
+    mod.loader = load(m, mod.w&, a);
     mod.counts = mod.loader.counts;
-    mod.m&.Qbe'backend'compile_suspended();
-    ::enum(@type mod.m.goal.type);
-    if mod.m.goal.type == .JitOnly {
-        mod.m&.make_exec();
+    m.Qbe'backend'compile_suspended();
+    ::enum(@type m.goal.type);
+    if m.goal.type == .JitOnly {
+        m.make_exec();
+        
+        mod.datas = a.alloc_uninit([]u8, mod.loader.datas.len);
+        enumerate mod.loader.datas { i, it |
+            use_symbol(m, it.id) { s |
+                mod.datas[i] = m.segments&[s.segment].mmapped.subslice(s.offset, s.size.zext());
+            };
+        };
+        mod.functions = a.alloc_zeroed(rawptr, mod.loader.functions.len);
+        enumerate mod.loader.functions { i, it |
+            if it[] != Qbe.no_symbol_S {
+                f, _ := m.get_addr(it[]).unwrap();
+                mod.functions[i] = f;
+            };
+        };
     };
     
     // this copy step means if you compile at comptime and then bake the module, 
@@ -229,13 +250,16 @@ fn instantiate(mod: *Module, imports: *ExportsEnv) *Instance = {
 }
 
 fn run_initializers(self: *Instance, mod: *Module) void = {
-    each mod.loader.datas { it |
+    // it would work if you just did this part at comptime but you don't want to 
+    // bake the whole memory if theres a bunch of zero padding in there. 
+    // better to keep it in the split form like in the wasm module. 
+    @debug_assert_eq(mod.loader.datas.len, mod.datas.len, "TODO: delay run_initializers when not jitting");
+    
+    enumerate mod.loader.datas { i, it |
         if it.active_at { off |
-            use_symbol(mod.m&, it.id) { s |
-                src := mod.m.segments&[s.segment].mmapped.subslice(s.offset, s.size.zext());
-                self.memory.len = max(self.memory.len, off + src.len);
-                self.memory_init(src.ptr, self.memory, off.trunc(), 0, src.len.trunc());
-            };
+            src := mod.datas[i];
+            self.memory.len = max(self.memory.len, off + src.len);
+            self.memory_init(src.ptr, self.memory, off.trunc(), 0, src.len.trunc());
         };
     };
     
@@ -253,12 +277,12 @@ fn run_initializers(self: *Instance, mod: *Module) void = {
 }
 
 fn get_callable(self: *Instance, mod: *Module, global_i: i64) ?Callable = {
+    @debug_assert_ne(mod.functions.len, 0, "when not jitted you have to manually copy functions/datas");
     view := self.view();
     if global_i < view.imports.len {
         return(Some = view.imports[global_i]);
     };
-    f, _ := mod.m&.get_addr(mod.loader.functions[global_i])
-        || return(.None);
+    f := mod.functions[global_i];
     (Some = (callee = f, context = Instance.raw_from_ptr(self)))
 }
 
@@ -283,15 +307,21 @@ fn get(self: *ExportsEnv, module: Str, name: Str) ?Export = {
 }
 
 UserContext :: @struct(memory: *SaneRawList(u8), env: rawptr);
-fn new_memory(engine: *Engine, initial: i64, max_bytes: i64) Ty(Export, *UserContext) = {
+fn new_memory(initial: i64, max_bytes: i64) Ty(Export, *UserContext) = {
     buf := page_allocator.alloc_uninit(u8, max_bytes);  // page allocator always gives zeros
-    buf := engine.gpa.boxed(SaneRawList(u8), (ptr = buf.ptr, cap = buf.len, len = initial));
-    ctx := engine.gpa.boxed(UserContext, (memory = buf, env = get_dynamic_environment()));
+    a := general_allocator();
+    buf := a.boxed(SaneRawList(u8), (ptr = buf.ptr, cap = buf.len, len = initial));
+    ctx := a.boxed(UserContext, (memory = buf, env = get_dynamic_environment()));
     ((Memory = buf), ctx)
 }
 
 fn SaneRawList($T: Type) Type = {
     Self :: @struct(ptr: *T, len: i64, cap: i64, Element :: T);
+    
+    fn bake_relocatable_value(self: *Self) Slice(BakedEntry) = {
+        ptr_len := bake_relocatable_slice_erased(T.raw_from_ptr(self.ptr), self.len, T);
+        @slice(ptr_len[0], ptr_len[1], ptr_len[1]) ast_alloc()
+    }
     
     fn to_sane(self: RawList(T)) Self = 
         (ptr = self.ptr, len = self.len, cap = self.cap);
@@ -320,11 +350,7 @@ table_grow :: fn(ctx: *Instance, table_in: *SaneRawList(Instance.Callable), fill
     if delta < 0 || table.len + delta.intcast() > MAX_i32 {
         return(-1);
     };
-    // TODO: free here is wrong because the first time its static memory in the module
-    //       but i have to change that to make threads work anyway :cantfreeinitdata
     
-    // TODO: don't rely on having a dynamicenv here. 
-    //       store an allocator somewhere you can get to from the linear memory base pointer
     table&.reserve(delta.intcast(), ctx.gpa);
     range(0, delta.intcast()) { _ |
         table&.push_assume_capacity(fill);
@@ -387,3 +413,19 @@ Futex :: import("@/lib/sys/sync/futex.fr");
 #use("@/examples/import_wasm/parse.fr");
 #use("@/lib/collections/map.fr");
 Qbe :: import("@/backend/ir.fr");
+
+fn bake_relocatable_value(self: *Module) []BakedEntry = {
+    msg :: "you can't bake a jitted Module. see import_wasm/ffi.fr";
+    @assert(self.m.is_none()/* || self.m.Some.goal.type != .JitOnly*/, msg);
+
+    // HACK: because you can't bake the ast_alloc
+    // TODO: really i should deal with that more generally
+    inline_for WasmModule.get_fields() { $f |
+        @if(@run IsCollection(List)(f.ty)) {
+            it := WasmModule.get_field_ptr(self.w&, f);
+            it.gpa = zeroed(Alloc);
+        }
+    };
+    
+    dyn_bake_relocatable_value(Module.cast_to_bytes(self), Module, true)
+}

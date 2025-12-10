@@ -530,7 +530,10 @@ handle_event :: fn(event: *Sapp.Event) void = {
         }
         
         if event.key_code == .A && event.modifiers.get(.control) != 0 {
-            buffer.cursor.x = 0;
+            buffer.move_to(buffer.cursor.y.int(), 0);
+        };
+        if event.key_code == .E && event.modifiers.get(.control) != 0 {
+            buffer.move_to(buffer.cursor.y.int(), buffer.lines[buffer.cursor.y.int()]&.len());
         };
         
         if event.key_code == .LEFT {
@@ -761,15 +764,21 @@ open_link :: fn(full_link: Str) void = {
 }
 
 fn move_to(dest: *TextBuffer, line: i64, col: i64) = {
+    line := line.max(0).min(dest.lines.len - 1);
     dest.cursor = (x = col.float(), y = line.float());
-    // TODO: only move each axis if the cursor doesn't fit on the screen on that axis    
-    dest.render = dest.cursor;
-    dest.render.y -= dest.num_lines_fit_on_screen.float() / 2;
+    
+    // only move the screen if the cursor isn't still in view
+    if dest.cursor.y < dest.render.y || dest.cursor.y > dest.render.y + dest.num_lines_fit_on_screen.float() {
+        dest.render.y = dest.cursor.y - dest.num_lines_fit_on_screen.float() / 2;
+    };
     chars_that_fit := dest.at.w / state.scale;
-    if dest.render.x > chars_that_fit {
-        dest.render.x -= chars_that_fit/2;
-    } else {
-        dest.render.x = 0;
+    if dest.cursor.x < dest.render.x || dest.cursor.x > dest.render.x + chars_that_fit {
+        if dest.cursor.x > chars_that_fit {
+            dest.render.x = dest.cursor.x - chars_that_fit / 2;
+        } else {
+            // don't center it if it would be in view when aligned to the left
+            dest.render.x = 0;
+        };
     };
 }
 
@@ -1077,6 +1086,7 @@ Line :: @struct(
     repr: RawList(u8),
 );
 
+// :SketchyNullSliceAsTag
 // len = 0 means it has an allocation. this has the high bit set so it's in small mode. 
 empty_line: Line : (repr = (ptr = zeroed(*u8), cap = 0, len = 0x80.shift_left(64-8)));
 
@@ -1482,4 +1492,5 @@ left+drag           (select text)
 2x/3x click         (select word/line)
 cmd+c/v             (copy / paste)
 backspace           (delete text)
+ctrl+a/e            (go to start/end of line)
 """;

@@ -2,30 +2,47 @@
 // then import the wasm module to call it from franca. 
 
 main :: fn() void = {
-    mem := temp().alloc_zeroed(u8, 30000);
-    print_hello_world(u8.raw_from_ptr(mem.ptr), 0);
+    module := @run {
+        bf_source := import("@/examples/bf/README.fr").HELLO_WORLD;
+        wasm := to_wasm_module(ast_alloc(), bf_source).items();
+        #use("@/examples/import_wasm/ffi.fr");
+        public    := scope_of(Type, Exports);
+        include(wasm, current_compiler_context(), public)
+    };
+    // TODO: you should be able to instantiate at comptime too 
+    //       and then generate wrappers that close over the *Instance 
+    //       so you can call the exports like normal functions. 
+    
+    memory, ctx := new_memory(65536, 65536);
+    exports := collect_exports(memory, ctx);
+    instance := module.instantiate(exports&);
+    f := instance.exports&.get("main").unwrap();
+    callee, ctx := (f.Function.callee, f.Function.context);
+    callee := bit_cast_unchecked(rawptr, @FnPtr(ctx: rawptr, p: u32) void, callee);
+    
+    callee(ctx, 0);
 }
-
-// :NamespaceChar
-print_hello_world :: to_function(import("@/examples/bf/README.fr").HELLO_WORLD)'@"main^module";
 
 // These are the functions we allow the wasm module to import. 
 Exports :: @struct {
     env :: @struct {
-        putchar :: fn(_: *u8, c: u8) void = {
+        putchar :: fn(ctx: *Rt.UserContext, c: u8) void = {
+            set_dynamic_environment(ctx.env);
             putchar_UNBUFFERED(c);
         }
-        getchar :: fn(_: *u8) i32 = 
-            getchar_UNBUFFERED();
+        getchar :: fn(ctx: *Rt.UserContext) i32 = {
+            set_dynamic_environment(ctx.env);
+            getchar_UNBUFFERED()
+        }
     }
 };
 
-fn to_function(bf_source: []u8) ScopeId #fold = {
-    wasm := to_wasm_module(temp(), bf_source).items();
-    #use("@/examples/import_wasm/ffi.fr");
-    public    := scope_of(Type, Exports);
-    namespace := include(wasm, current_compiler_context(), public);
-    namespace
+collect_exports :: fn(memory: Rt.Export, ctx: *Rt.UserContext) Rt.ExportsEnv = {
+    exports: Rt.ExportsEnv = (_ = init(temp()));
+    exports&.insert("env", "putchar", Exports.env.putchar, ctx);
+    exports&.insert("env", "getchar", Exports.env.getchar, ctx);
+    exports&.insert("main", "memory", memory);
+    exports
 }
 
 // 
@@ -37,6 +54,7 @@ fn to_function(bf_source: []u8) ScopeId #fold = {
 // imports = [putchar, getchar], locals[0] = the pointer
 // since all the indices are low, leb encoding is always one byte and i don't have to worry about it. 
 to_wasm_bytecode :: fn(out: *List(u8), code: Str) void = {
+    #use("@/backend/lib.fr");  // overkill just to get wasm/bits.fr but i also need O/Cls for lookup
     #use("@/examples/bf/README.fr");
     ::enum(Bf);
     ::enum(Wasm.Inst);
@@ -112,13 +130,14 @@ to_wasm_bytecode :: fn(out: *List(u8), code: Str) void = {
 // in general you need to use leb128_unsigned but i don't because i know the indices are low enough to fit in one byte. 
 // this returns a normal wasm module (you can write it to a file and run it with examples/import_wasm/run.fr if you want). 
 to_wasm_module :: fn(a: Alloc, code: Str) List(u8) = {
+    Wasm :: import("@/backend/wasm/bits.fr");
     out := u8.list(a); out := out&;
     out.push_all(Wasm.version_magic); 
+    string :: fn(s) => uleb_patch_delta(out, => out.push_all(s));
     
     // We need 3 function types: putchar, getchar, and our exported function. 
-    {
-        out.push(@as(u8) Wasm.Section.Type);
-        out.push(1+4+5+4); // number of bytes
+    out.push(@as(u8) Wasm.Section.Type);
+    uleb_patch_delta out {
         out.push(3);  // number of types
         
         // (u32) -> (u32)
@@ -141,54 +160,41 @@ to_wasm_module :: fn(a: Alloc, code: Str) List(u8) = {
         out.push(0);
     };
     
-    // We need two imports: putchar and getchar
-    {
-        out.push(@as(u8) Wasm.Section.Import);
-        out.leb128_unsigned(1+(1+3+1+7+2)*2);  // number of bytes
-        out.push(2);  // number of imports
+    // We need two function imports and a memory. 
+    out.push(@as(u8) Wasm.Section.Import);
+    uleb_patch_delta out {
+        out.push(3);  // number of imports
         
-        out.push(3);  // module name length
-        out.push_all("env");
-        out.push(7);  // function name length
-        out.push_all("putchar");  
+        string "env";
+        string "putchar";
         out.push(@as(u8) Wasm.ImportType.Func);
         out.push(0);  // type index
         
-        out.push(3);
-        out.push_all("env");
-        out.push(7);
-        out.push_all("getchar");
+        string "env";
+        string "getchar";
         out.push(@as(u8) Wasm.ImportType.Func);
         out.push(1);
-    };
-    
-    // We are required to forward declare our function. 
-    {
-        out.push(@as(u8) Wasm.Section.Function);
-        out.push(2);  // number of bytes
         
-        out.push(1);  // number of local functions
-        out.push(2);  // type index
-    };
-    
-    // We need to ask for "a memory" (even tho everyone wants a memory?)
-    {
-        out.push(@as(u8) Wasm.Section.Memory);
-        out.push(3); // number of bytes
-        out.push(1); // number of memories
-        
+        string "main";
+        string "memory";
+        out.push(@as(u8) Wasm.ImportType.Memory);
         out.push(0); // has max?
         out.push(1); // min number of pages
     };
     
+    // We are required to forward declare our function. 
+    out.push(@as(u8) Wasm.Section.Function);
+    uleb_patch_delta out {
+        out.push(1);  // number of local functions
+        out.push(2);  // type index
+    };
+    
     // Make our one function public
-    {
-        out.push(@as(u8) Wasm.Section.Export);
-        out.leb128_unsigned(1+1+4+1+1);  // number of bytes
+    out.push(@as(u8) Wasm.Section.Export);
+    uleb_patch_delta out {
         out.push(1);  // number of exports
         
-        out.push(4);  // name length
-        out.push_all("main");
+        string "main";
         out.push(@as(u8) Wasm.ImportType.Func);
         out.push(2);  // function index (includes imports)
     };
@@ -208,4 +214,4 @@ to_wasm_module :: fn(a: Alloc, code: Str) List(u8) = {
     out[]
 }
 
-#use("@/backend/lib.fr"); // TODO: you shouldn't need this here
+Rt :: import("@/examples/import_wasm/runtime.fr");

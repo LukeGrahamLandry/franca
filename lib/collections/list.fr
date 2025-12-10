@@ -8,6 +8,13 @@ fn list($T: Type, cap: i64, a: Alloc) List(T) #generic #inline = {
 
 fn List($T: Type) Type = {
     Self :: @struct(maybe_uninit: Slice(T), len: i64, gpa: Alloc, Element :: T);
+
+    fn bake_relocatable_value(self: *Self) Slice(BakedEntry) = {
+        // trim the extra capacity so don't put uninit memory in the binary
+        self.maybe_uninit.len = self.len;  
+        dyn_bake_relocatable_value(Self.cast_to_bytes(self), Self, true)
+    }
+    
     fn list(cap: i64, gpa: Alloc) Self #inline = 
         (maybe_uninit = gpa.alloc_uninit(T, cap), len = 0, gpa = gpa);  // todo: no alloc if len 0 since i dont free
     fn list(gpa: Alloc) Self #inline = list(0, gpa);
@@ -253,6 +260,13 @@ fn alloc_extra(a: Alloc, $T: Type, cap: i64) []T #generic = {
 fn RawList($T: Type) Type = {
     Self :: @struct(cap: i64, ptr: *T, len: i64, Element :: T);
    
+    // pain in the ass because it doesn't have a slice as a field because 
+    // many moons ago i needed to match what rustc's vec layout happened to be at the time. 
+    fn bake_relocatable_value(self: *Self) Slice(BakedEntry) = {
+        ptr_len := bake_relocatable_slice_erased(T.raw_from_ptr(self.ptr), self.len, T);
+        @slice(ptr_len[1], ptr_len[0], ptr_len[1]) ast_alloc()
+    }
+    
     fn init(a: Alloc, cap: i64) Self = {
         m := a.alloc_extra(T, cap);
         (ptr = m.ptr, len = 0, cap = m.len)

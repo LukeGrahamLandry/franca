@@ -83,19 +83,20 @@ main :: fn() void = {
 }
 
 fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str, args: []CStr) void = {
-    #use("@/examples/import_wasm/ffi.fr");
-    
     a := general_allocator();
     Qbe :: import("@/backend/ir.fr");
     target: Qbe.QbeTargetEnv = (type = .JitOnly, os = query_current_os(), arch = query_current_arch(), link_libc = false);
     rt: Wasm.Engine = init(a, target, logging);
     exports: Rt.ExportsEnv = (_ = init(temp()));
     
-    memory, fake := rt&.new_memory(0, 1.shift_left(32));
+    memory, fake := new_memory(0, 1.shift_left(32));
+;{
+    #use("@/examples/import_wasm/ffi.fr");
     // TODO: save the typeinfo and at least do arity checking
     for comptime_exports(Exports) { m, n, it |
         exports&.insert(m, n, it.Function.callee, fake);
     };
+};
     exports&.insert("main", "memory", memory);
     heap_base[] = fake.memory.cap.trunc();
     
@@ -103,7 +104,7 @@ fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str, args: []CStr) void 
     mod := rt&.compile(bytes);
     instance := mod.instantiate(exports&);
     
-    trace := Crash'push_resolver(QbeModule, mod.m&, find_ip_in_module);
+    trace := Crash'push_resolver(Qbe.Module, mod.m.unwrap(), find_ip_in_module);
     
     ::tagged(Wasm.Export);    
     if instance.exports&.get("__indirect_table") { it |

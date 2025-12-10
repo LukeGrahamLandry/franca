@@ -3,19 +3,29 @@
 
 // This works well enough for the examples/bf demo but pretty much nothing else. 
 // TODO: many problems to fix:
-// - don't append "$module" to the names of all the exports
 // - convert tables/globals to baked var id
-// - export the initializer func
 // - wasm doesn't have type info so you need some way to give it bindings 
 //   and have it deal with generating code for offseting the pointers from 
 //   the base memory so it's not such a massive pain to use. 
 
+// this is an unusual situation where everybody has to be bake-aware. 
+// it doesn't just work magically because bake_relocatable_value can't 
+// work for the physical jitted code. instead you have to launder it 
+// through import_frc so you get the right bytes on both sides. 
+// it's less noticible in the import_c example because there you also 
+// get type info so don't have to write bindings and the result 
+// shows up as normal functions. here there's no side benifit other
+// than being able to bake a Rt.Module. 
+// TODO: should talk about this in docs/aot_bake.md
+
 // import_from :: @struct { module_name :: @struct { function_name : FuncId : fn(); }; };  
-fn include(wasm: []u8, fr: CompCtx, import_from: ScopeId) ScopeId = {
+fn include(wasm: []u8, fr: CompCtx, import_from: ScopeId) *Rt.Module = {
     mark := mark_temporary_storage();
-    m := @uninitialized QbeModule; m := m&;
     // TODO: "need to be consistant about how to handle modules like this that don't actually compile anything"
-    init_default_module_dyn(m, fr.vtable, (arch = query_current_arch(), os = query_current_os(), type = .CachedEarly));
+    rt: Rt.Engine = init(ast_alloc(), (arch = query_current_arch(), os = query_current_os(), type = .CachedEarly), "");
+    // TODO: allow Engine without cache, don't need to keep the wasm bytes like in hashmap? 
+    mod := rt&.compile(wasm);
+    m := mod.m.unwrap();
     writer := m.save.unwrap();
     // TODO: making everyone remember to do this is kinda lame
     range(0, FTy.COUNT) { _ |
@@ -23,78 +33,38 @@ fn include(wasm: []u8, fr: CompCtx, import_from: ScopeId) ScopeId = {
     };
     decls := Fld.list(temp());
     
-    w: WasmModule = empty(temp());
-    p: ParseWasm = (w = w&, src = wasm);
-    or parse_wasm(p&) { e |
-        @panic("% (at byte index %)", e, p.cursor);
-    };
-    
-    self: LoadWasm = init(m, w&, temp());
-    self&.load_module();
-    initializer := self&.create_init_func();
-    
-    n := self.w.import_count&[.Func];
-    i := 0;
-    each self.w.imports { it |
-        ::tagged(@type it.desc);
-        if it.desc&.is(.Function) {            
-            module, name := (it.module.items(), it.name.items());
-            
-            // TODO: this is bad this is very very bad! you need to use `fr` :FUCKED
-            //       this means this needs to run in the same compilation context (not a precompiled driver). 
-            val, ty := get_constant(import_from, fr.intern_string(module)) 
-                || @panic("expected to import module '%'", module);
-            s := scope_from_value(ty, val) 
-                || @panic("expected to import module '%'", module);
-            fid := zeroed FuncId;
-            get_constant(s, fr.intern_string(name), FuncId, FuncId.raw_from_ptr(fid&)) // :get_or_create_type
-                || @panic("expected to import '%' from module '%'", name, module);
-
-            sign := self.w.types[self.function_types[i].id.zext()]&;
-            type := function_type(writer, sign.arg.items(), sign.ret.items());
-            mangled := @tfmt("%^%", name, module);  // :NamespaceChar
-            id  := m.intern(mangled);
-            idx := writer.map_sym(m, id);
-            decls&.push(
-                name = writer.push(mangled),
-                type = type,
-                payload = (offset = trunc idx),
-            );
-            
-            m.set_library(id, "W");
-            writer.sym[idx].imp.temporary_funcid = bit_cast_unchecked(FuncId, u32, fid);
-            
-            i += 1;
-            
-            // TODO: check that the signeture matches-ish
-        };
-    };
-    @debug_assert_eq(i, n);
-    
-    range(0, self.w.code.len) { i |
-        f := temp().box_uninit(Qbe.Fn);
-        self&.translate_func(i, f);
-        
-        sign := self.w.types[self.function_types[n+i].id.zext()]&;
+    n := mod.w.import_count&[.Func];
+    range(0, mod.w.code.len) { i |
+        sign := mod.w.types[mod.loader.function_types[n+i].id.zext()]&;
         type := function_type(writer, sign.arg.items(), sign.ret.items());
         
-        fr'vtable'run_qbe_passes(Qbe.Fn.raw_from_ptr(f));
+        id := mod.loader.functions[n+i];
         decls&.push(
-            name = writer.push(m.str(f.lnk.id)),
+            name = writer.push(m.str(id)),
             type = type,
-            payload = (offset = trunc writer.map_sym(m, f.lnk.id))
+            payload = (offset = trunc writer.map_sym(m, id))
         );
     };
     
     meta: Meta = (arch_os = 0x0F0F, root_scope = save_fields(writer, .Scope, decls.items()));
     b := writer.to_bytes(meta, m);
     bytes := concat(b, ast_alloc());
+    mod.m = .None;
     drop(m);
     result := fr'vtable'import_frc(fr.data, bytes);
     root_scope := result.or(fn(err) => fr.report_error(err));
+    
+    fns, _ := import("@/compiler/incremental.fr")'collect_fns_from_scope(fr, root_scope);
+    @assert_eq(mod.loader.datas.len, 0, "TODO: import_wasm/ffi data");
+    @assert_eq(mod.loader.functions.len - n, fns.len);
+    mod.functions = ast_alloc().alloc_zeroed(rawptr, mod.loader.functions.len);
+    enumerate fns { i, fid | 
+        mod.functions[n + i] = fr.get_jitted(fid[]);
+    };
+
     reset_temporary_storage(mark);
     
-    root_scope
+    mod
 }
 
 // TODO: deduplicate
@@ -116,14 +86,13 @@ fn translate_types(writer: *Writer, w: []Wasm.ValType, prepend_pointer: bool) []
     types.items()
 }
 
-// Call this at comptime. 
 // Take a struct like { Module :: { Func :: fn(); } } and create a map [func^module -> fnptr]
-fn comptime_exports(Exports: Type) RawHashMap(Str, RawHashMap(Str, Rt.Export)) #fold = {
+fn comptime_exports(Exports: Type) []Ty(Str, Str, Rt.Export) #fold = {
     // TODO: sane error message if you try to have this be the whole HashMap that includes ast_alloc as a rawptr
     //       but it wont have been baked before so you cant bake it now and don't know why but the error makes it sound like its a rawptr value in the map. 
     fr := current_compiler_context();
     a := ast_alloc();
-    exports: HashMap(Str, RawHashMap(Str, Rt.Export)) = init(a);
+    exports := Ty(Str, Str, Rt.Export).list(a);
     s := scope_of(Type, Exports);
     for get_constants(s) { module_name |
         s2 := scope_of(Type, get_constant(Type, s, module_name)
@@ -136,12 +105,10 @@ fn comptime_exports(Exports: Type) RawHashMap(Str, RawHashMap(Str, Rt.Export)) #
             addr := fr.get_jitted(fid);
             
             it: Rt.Export = (Function = (callee = addr, context = zeroed(rawptr)));
-            exports := exports&.get_or_insert(module_name.str(), => init());
-            exports.insert(func_name.str(), it, a);
+            push(exports&, (module_name.str(), func_name.str(), it));
         }
     }
-    exports.raw&.zero_unused_slots();
-    exports.raw
+    exports.items()
 } 
 
 // `s` is contains functions with first argument *u8 wasm linear memory base. 
@@ -204,3 +171,4 @@ fn wrap_fns_with_load_memory(s: ScopeId) Type = {
 #use("@/compiler/ast_external.fr");
 #use("@/backend/incremental.fr");
 #use("@/backend/lib.fr");
+Wasm :: import("@/backend/wasm/bits.fr");

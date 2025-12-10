@@ -6,6 +6,23 @@
   don't zero init something and then poke fields in if i can make it so the fields have no interdependencies. 
   - put the runtime fns in View
   - looking for less annoying api for imports than nested hashmap
+- fixing bf/via_wasm
+  - the via_wasm_rt one was simple
+  - the new import_wasm doesn't work with the way i was doing ffi. 
+    but the old thing was super hacky anyway and relied on not having initialized memory,
+    and using temporary_funcid side channel. so the new thing just forces you to deal 
+    with the impedance mismatch. acceptable trade off to make simple cases hard and complex cases possible. 
+  - while im at it, make the sizes in to_wasm_module less error prone
+  - for now just do the compile() at comptime, at runtime still do instantiate() and verbose 
+    passing extra parameter to the call. it proves the point about not including the compiler 
+    in the binary but it's not as slick as the old version. its a good start tho. 
+  - lots of woes with bake_relocatable_value. terrible error if you try to bake a list with a wierd allocator. 
+    also apparently this was the first time i tried to bake a RawList. 
+    force_default_handling goes down through fields so its hard to use. 
+    somehow adding one for RawList breaks examples/terminal.fr,
+    oh because empty_line is playing fucky games with the length field. 
+  - tests finally pass again tho so that's good for morale
+- terminal: less jumpy when following the cursor
 
 ## (Dec 9)
 
