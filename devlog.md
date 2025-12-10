@@ -1,6 +1,9 @@
 
 ## (Dec 9)
 
+- i want to run the wasm spec's tests
+  - had to add prefix support in my un-tar
+  - better error reporting in json_reflect.fr. peek to deal with lists sanely. 
 - terminal
   - cmd+click center the screen on the cursor in a sane way instead of putting it in the bottom left. 
   - open a new buffer for search results

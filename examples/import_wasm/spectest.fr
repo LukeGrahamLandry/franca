@@ -1,0 +1,123 @@
+// #foreign("wasm/spec", "wabt/wast2json");
+
+main :: fn() void = {
+    #use("@/examples/testing.fr");
+    root := fetch_or_crash("https://github.com/WebAssembly/spec/archive/6e4c4bcaf7a4747f7a13623889727ee117550336.tar.gz", 12781429, "c525ed66f56e6b49b53e466beee2dd5af6dca905c84b3cc9caa609e5163db1da", "spec-6e4c4bcaf7a4747f7a13623889727ee117550336");
+    start := get_working_directory(temp()).items();
+    tests_dir := @fmt_cstr("%/test/core", root);
+    Syscall'chdir(tests_dir).unwrap();
+    println(root);
+    
+    wast_files := collect_with_extension(".", ".wast") 
+        || panic("failed to collect wast files");
+    for wast_files { name |
+        continue :: local_return;
+        mark := temp().mark();
+        @if(skip.contains(name)) continue();
+        json_name := @tfmt("%.json", name.slice(0, name.len - 5));
+        if !file_exists(json_name) {
+            hush(@slice("wast2json", "--enable-all", name));
+        };
+        contents := read_entire_file_or_crash(temp(), json_name);
+        json: JsonParser = new_json(contents, temp());
+        it := zeroed Wast;
+        ok := parse_json(json&, it&);
+        if !ok {
+            // TODO: this and the thing in @error_tok and fmt_error_loc are all very similar. factor something out? 
+            line := 1; // zero indexed is unintuative for error messages
+            col  := 0;
+            line_start := 0;
+            range(0, min(contents.len, json.current)) {i|
+                col += 1;
+                if contents[i] == "\n".ascii() {
+                    line_start = i + 1; // dont include the new line
+                    line += 1;
+                    col = 0;
+                };
+            };
+            // TODO: do this as part of JsonParser.error()
+            @panic("error at byte % of %/%:%:%%", json.current, tests_dir, json_name, line, col, json.error);
+        };
+        
+        println(json_name);
+        each it.commands { it |
+            continue :: local_return;
+            ::enum(@type it.type);
+            @match(it.type) {
+                fn module() => {
+                    @println("module %", it.filename.unwrap());
+                }
+                fn register() => {
+                    
+                }
+                fn action() => {
+                    a := it.action.unwrap();
+                    @println("action %(...)", a.field);
+                }
+                fn assert_return() => {
+                    a := it.action.unwrap();
+                    @println("assert_return %(...)", a.field);
+                }
+                // i don't do verification or traps yet so don't try to compile the ones that aren't supposed to work
+                @default => continue();
+            };
+            @println("%/%:%:1", tests_dir, name, it.line);
+        };
+        println("todo");
+        Syscall'exit(0);
+        temp().reset(mark);
+    };
+    Syscall'chdir(start.as_cstr()).unwrap();
+}
+
+skip :: @const_slice(
+    // wast2json --version 1.0.39 doesn't work on these 
+    "id.wast", "ref.wast", "elem.wast", "align.wast", "br_if.wast", "table.wast", 
+    "global.wast", "memory.wast", "select.wast", "linking.wast", "br_table.wast", 
+    "call_ref.wast", "instance.wast", "ref_null.wast", "type-rec.wast", "local_tee.wast", 
+    "br_on_null.wast", "local_init.wast", "type-canon.wast", "annotations.wast", "ref_is_null.wast", 
+    "br_on_non_null.wast", "ref_as_non_null.wast", "return_call_ref.wast", "unreached-valid.wast", 
+    "type-equivalence.wast", "unreached-invalid.wast", 
+    // i haven't bothered with string escapes in json.fr yet
+    "names.wast", 
+);
+
+Wasm :: import("@/examples/import_wasm/runtime.fr");
+
+Wast :: @struct {
+    commands: []Command;
+    Command :: @struct {
+        Tag :: @enum(
+            module, action, register, 
+            assert_unlinkable, assert_return, assert_trap, assert_invalid,
+            assert_malformed, assert_exhaustion, assert_uninstantiable, 
+        );
+        type: Tag;
+        filename: ?Str;
+        action: ?Action;
+        as: ?Str;
+        line: i64;
+    };
+    Action :: @struct {
+        Tag :: @enum(invoke, get);
+        type: Tag;
+        field: Str;
+        args: []Value = empty();
+        expected: []Value = empty();
+    };
+    Value :: @struct {
+        Tag :: @enum(i32, i64, f32, f64, externref, funcref);
+        type: Tag;
+        value: Str;
+    };
+};
+
+#use("@/lib/encoding/json.fr");
+#use("@/lib/encoding/json_reflect.fr");
+::DeriveJson(Wast);
+::DeriveJson(Wast.Command);
+::DeriveJson(Wast.Command.Tag);
+::DeriveJson(Wast.Action);
+::DeriveJson(Wast.Action.Tag);
+::DeriveJson(Wast.Value);
+::DeriveJson(Wast.Value.Tag);

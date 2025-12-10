@@ -1,4 +1,8 @@
 
+- make my sort less ass. when collect_with_extension sorted before filtering, 
+  after generating all the extra files for examples/import_wasm/spectest.fr, 
+  the folder has 3262 files and takes 9600ms to sort. 
+  doesn't sound very quick to me. pick random pivot? 
 - wasm: if no stack frame don't load, sub 0, and store sp. test with env.ssa/main. 
 - also, import_wasm of env.ssa/main, wtf are we doing man
 ```
@@ -882,6 +886,8 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
 
 ### Terminal
 
+- should seperate the text editing model part from the rendering. 
+  i need to make it more structured anyway to allow undo. 
 - tab to autocomplete a file path 
 - escape codes: colour, move the cursor, clear the screen
 - send input to stdin
@@ -893,7 +899,6 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
 - multiline franca commands
 - save cmd history to file as well (not just output) so up/down work across restarts (and maybe auto save)
 - jump around past commands like warp
-- ui for showing search results
 - ui for canceling search
 - environment variable syntax
 - tell child programs that im a terminal. ie. ls gives me one column instead of two.
@@ -906,7 +911,7 @@ actually that's a bit too agressive but certainly stop processing ANSI escape co
 - auto-scroll if you put the mouse at the edge of the screen while highlighting to grow your selection
 - undo
 - factor out a text widget so its not a big deal to make other gui examples that want a bit of text input. 
-- paste at the cursor instead of always at the end of the buffer
+- paste containing new line in middle of line shift the end 
 - allow limiting scroll back so it doesn't eat memory forever. 
   maybe an option to have it dump to a file when it scrolls off to far so it doesn't delete information. 
 - triple clicking past the end of a line should count as clicking on the line and select it all

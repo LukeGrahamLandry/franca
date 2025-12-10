@@ -125,14 +125,18 @@ chop_file_name :: fn(s: Str) Str = {
 
 fn collect_with_extension(path: Str, extension: Str) Result(List(Str), void) = {
     @debug_assert(extension.starts_with("."));
-    entries := collect_directory_ordered(path, temp(), temp()) 
-        || return(.Err);
+    
     out := Str.list(temp());
-    each entries { e |
+    ok := walk_directory_unordered(path.as_cstr()) { e |
         if e.name.ends_with(extension) && e.name.len != extension.len {
-            out&.push(e.name);
+            out&.push(e.name.shallow_copy(temp()));
         };
     };
+    // TODO: deal with error while iterating dir seperatly from err while opening. 
+    @if(!ok) return(.Err);
+    Sort :: import("@/lib/sort.fr");
+    sort :: Sort'quicksort(Str, Sort'order_strings);
+    sort(out.items());
     (Ok = out)
 }
 
@@ -221,10 +225,13 @@ extract_archive :: fn(compressed: []u8, dir: Str, HACK_name: Str, is_zip: bool) 
         @assert_eq(err, .Ok, "failed to un-gzip (for output path: %/%)", dir, HACK_name);
         err := Tar'iter(o.items()) { h, b |
             name: CStr = (ptr = h.name&.as_ptr());
+            prefix: CStr = (ptr = h.prefix&.as_ptr());
             name := name.str();
-            
-            // TODO: use prefix for longer than 100 char names
-            //       (careful of checking for /../ that spans between prefix and name)
+            prefix := prefix.str();
+            if prefix.len != 0 {
+                name = @tfmt("%/%", prefix, name);
+            };
+
             @switch(h.typeflag) {
                 @case(Tar.TYPE.REG) => {
                     // TODO: maybe want to set executable bit based on mode field
@@ -235,6 +242,10 @@ extract_archive :: fn(compressed: []u8, dir: Str, HACK_name: Str, is_zip: bool) 
                     files&.push(name = name, contents = b, dir = true);
                 };
                 @case(Tar.TYPE.PAX) => ();  // TODO: get whatever data's in there since it might change the meaning of other stuff?
+                @case(Tar.TYPE.PAX2) => ();
+                @case(Tar.TYPE.SYM) => {
+                    @eprintln("WARNING: ignoring symlink in tar. %", name);
+                };
                 @default => @panic("unhandled tar block type % for %", h.typeflag, name);
             }
         };

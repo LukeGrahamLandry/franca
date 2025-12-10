@@ -14,6 +14,7 @@ JsonParser :: @struct(
     last_thing_was_key: bool = false,
     is_skipping := false,
     is_dict: import("@/lib/collections/bit_set.fr")'StaticBitSet(json_max_nesting_depth) = empty(),
+    error := "",
 );
 
 // TODO: if the first thing doesn't have a payload, you get an unwrap in export_ffi. -- Jul 4
@@ -98,16 +99,21 @@ fn next(self: *JsonParser) Result(JsonPart, Str) = {
                 self.current += 1;
             };
             @default => {
-                return(Err = @tfmt("invalid json character: %", self.input.slice(self.current, self.current + 1)))
+                return(Err = self.error(@tfmt("invalid json character: %", self.input.slice(self.current, self.current + 1))))
             };
         };
     };
     unreachable()
 }
 
+fn error(self: *JsonParser, s: Str) Str = {
+    self.error = @tfmt("\n- %", s);
+    s
+}
+
 fn literal(self: *JsonParser, keyword: Str, value: JsonPart) Result(JsonPart, Str) #inline = {
     if self.input.subslice(self.current, keyword.len) != keyword {
-        return(Err = "invalid identifer");
+        return(Err = self.error("invalid identifer"));
     };
     self.last_thing_was_key = false;
     self.current += keyword.len();
@@ -132,7 +138,7 @@ fn skip_next_value(self: *JsonParser) Result(void, Str) = {
         (fn BoolValue(_) => return(.Ok));
         (fn Float(_) => return(.Ok));
         (fn Null() => return(.Ok));
-        @default => return(Err = "Expected start of json value.");
+        @default => return(Err = self.error("Expected start of json value."));
     }; // TODO: the compiler segfaults if you forget this semicolon. :FUCKED -- Jul 4
     .Ok
 }
@@ -152,7 +158,7 @@ fn skip_until_depth(self: *JsonParser, end_depth: i64) Result(void, Str) = {
     };
     self.is_skipping = false; // TODO: reset if err in loop
     if self.at_end() && end_depth < self.depth {
-        return(Err = "hit end before depth");
+        return(Err = self.error("hit end before depth"));
     };
     .Ok
 }
@@ -170,7 +176,7 @@ fn skip_until_key(self: *JsonParser, name: Str) Result(void, Str) = {
             @try(self.skip_next_value()) return;
         } else {
             // if its End, we got to the end of the object. otherwise malformed input. 
-            return(Err = "key not found");
+            return(Err = self.error("key not found"));
         };
     };
     unreachable()
@@ -180,12 +186,14 @@ JsonMark :: @struct {
     depth: i64;
     current: i64;
     last_thing_was_key: bool;
+    error: Str;
 };
 
 fn mark(self: *JsonParser) JsonMark = (
     depth = self.depth,
     current = self.current,
     last_thing_was_key = self.last_thing_was_key,
+    error = self.error,
 );
 
 fn reset(self: *JsonParser, mark: JsonMark) void = {
@@ -193,6 +201,7 @@ fn reset(self: *JsonParser, mark: JsonMark) void = {
     self.depth = mark.depth;
     self.current = mark.current;
     self.last_thing_was_key = mark.last_thing_was_key;
+    self.error = mark.error;
 }
 
 // TODO: have a simple lexer library? this is the third one ive written. 
@@ -246,7 +255,7 @@ fn lex_str(self: *JsonParser) Result(Str, Str) = {
             if self.is_skipping {
                 self.current += 1;  // it might be a quote
             } else {
-                return(Err = "TODO: json string escapes are not supported");
+                return(Err = self.error("TODO: json string escapes are not supported"));
             };
         };
         c != "\"".ascii()

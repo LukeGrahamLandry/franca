@@ -33,6 +33,12 @@ fn DeriveJson($T: Type) void = {
                                 inner[] = .None;
                                 found&.set(i);
                             };
+                            
+                            if !found&.get(i) {
+                                json.error = @tfmt("%\n- missing field '%' of '%'", 
+                                    json.error, @run f.name.str(), @run T.typename().str());
+                            };
+                            
                             i += 1;
                         };
                         
@@ -58,6 +64,17 @@ fn DeriveJson($T: Type) void = {
                     continue();
                 };
             });
+            fn Enum(it) => {
+                token := json.next().or(fn(_: Str) => return(false));
+                ::tagged(@type token);
+                if(!token&.is(.StringValue), => return(false));
+                ::?T;
+                self[] = T.from_name(token.StringValue) || {
+                    json.error = @tfmt("%\n- invalid enum varient '%' for '%'", json.error, token.StringValue, @run T.typename().str());
+                    return(false)
+                };
+                true
+            }
             @default => {
                 panic("Unsupported type for DeriveJson");
             };
@@ -106,19 +123,20 @@ fn parse_json(json: *JsonParser, self: ~S) bool = {
     token := json.next().or(fn(_: Str) => return(false));
     if(!token&.is(.StartList), => return(false));
     
+    
     out := Deref(S).Element.list(a);
-    // TODO: aaaa need to check that the error was because its a ']'
-    //       because can't peek. :fucked
-    dowhile {
+    loop {
+        json.skip_whitespace();
+        if json.peek_c() == "]".ascii() {
+            _ := json.next();
+            json.skip_whitespace();
+            self[] = out.items();
+            return true;
+        };
         self := out&.push_uninit();
         ok := parse_json(json, self);
-        if !ok {
-            out.len -= 1;
-        }
-        ok
+        @if(!ok) return(false);
     };
-    self[] = out.items();
-    true
 }
 
 IsRawHashMap :: fn(T: Type) bool = {
