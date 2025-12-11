@@ -169,17 +169,34 @@ fetch_or_crash :: fn(url: Str, zip_size_bytes: i64, sha256_hash: Str, HACK_name:
     
     zip_bytes := "";
     if !file_exists(zip_file_path) {
-        @eprintln(">>> downloading [%]...", url);
-        ok, out, err := exec_and_catch("curl", @slice(url, "-s", "-L"), temp());
-        @assert(ok, "failed curl %\n%", url, err.items());
-        zip_bytes = out.items();
-        
-        @eprintln(">>> verifying [%]...", zip_file_path);
-        @assert_eq(zip_bytes.len, zip_size_bytes, "bad size: %", url);
-        digest := Sha256'hex(zip_bytes);
-        @assert_eq(digest, sha256_hash, "bad hash %", url);
-        
-        write_entire_file_or_crash(zip_file_path, zip_bytes);
+        fetch :: fn(url: Str) ?[]u8 => {
+            return :: local_return;
+            @eprintln(">>> downloading [%]...", url);
+            ok, out, err := exec_and_catch("curl", @slice(url, "-s", "-L"), temp());
+            if !ok {
+                @eprintln("failed curl %\n%", url, err.items());
+                return(.None);
+            };
+            
+            zip_bytes = out.items();
+            
+            @eprintln(">>> verifying [%]...", zip_file_path);
+            if zip_bytes.len != zip_size_bytes {
+                @eprintln("bad size: %", url);
+                return(.None);
+            };
+            digest := Sha256'hex(zip_bytes);
+            if digest != sha256_hash {
+                @eprintln("bad hash %", url);
+                return(.None);
+            };
+            
+            write_entire_file_or_crash(zip_file_path, zip_bytes);
+            (Some = zip_bytes)
+        };
+        // sometimes github is down but not cloudflare... 
+        zip_bytes = fetch(url) || fetch(@tfmt("https://lukegrahamlandry.ca/franca/mirror/%", sha256_hash))
+            || @panic("failed to download dependency");
     };
     @eprintln(">>> unpacking [%]...", zip_file_path);
     

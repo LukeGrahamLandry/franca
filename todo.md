@@ -1,4 +1,5 @@
 
+- mirror bdf681b2c963d39f839b6590a25a739fa3a64f68ac9e0e8c0dc6d85f48c087ec
 - the thing where when you dot access a scope and it doesn't have that constant it recurses up all the way to the root scope is confusing. 
 - better error message if you try to bake an allocator with a data pointer. 
   should also be more careful about passing around the source location 
@@ -453,6 +454,7 @@ different subsets of the same resources.
 
 ## import_wasm 
 
+- FRANCA_NO_CACHE=1 franca tests/exe/wasm.fr crashes on crazy memory corruption
 - speed it up! go back to f15cf8315db7d0040f4a3ebf017637c5273ae00b make it that fast again. 
   the two big changes were:
   - intercepting calls to use examples/os/user/libc
