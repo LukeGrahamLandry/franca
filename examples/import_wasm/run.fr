@@ -72,8 +72,8 @@ main :: fn() void = {
         };
         
         @struct {
-            env :: wrap_fns_with_load_memory(Type.scope_of(E.env));
-            webgpu :: wrap_fns_with_load_memory(Type.scope_of(E.webgpu));
+            env :: wrap_fns_with_load_memory(Globals, Type.scope_of(E.env));
+            webgpu :: wrap_fns_with_load_memory(Globals, Type.scope_of(E.webgpu));
         }
     };
     
@@ -82,25 +82,34 @@ main :: fn() void = {
     exec_wasm_file(E, bytes, logging, args);
 }
 
+create_exports :: fn($Exports: Type, globals: *Globals) Rt.ExportsEnv = {
+    exports: Rt.ExportsEnv = (_ = init(temp()));
+    #use("@/examples/import_wasm/ffi.fr");
+    // TODO: save the typeinfo and at least do arity checking
+    for comptime_exports(Exports) { m, n, it |
+        exports&.insert(m, n, it.Function.callee, globals);
+    };
+    exports&.insert("main", "memory", (Memory = globals.memory));
+    exports
+}
+
 fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str, args: []CStr) void = {
     a := general_allocator();
     Qbe :: import("@/backend/ir.fr");
     target: Qbe.QbeTargetEnv = (type = .JitOnly, os = query_current_os(), arch = query_current_arch(), link_libc = false);
     rt: Wasm.Engine = init(a, target, logging);
-    exports: Rt.ExportsEnv = (_ = init(temp()));
     
-    memory, fake := new_memory(0, 1.shift_left(32));
-;{
-    #use("@/examples/import_wasm/ffi.fr");
-    // TODO: save the typeinfo and at least do arity checking
-    for comptime_exports(Exports) { m, n, it |
-        exports&.insert(m, n, it.Function.callee, fake);
-    };
-};
-    exports&.insert("main", "memory", memory);
-    heap_base[] = fake.memory.cap.trunc();
     
-    the_engine[] = rt&;
+    buf := page_allocator.alloc_uninit(u8, 1.shift_left(32));  // page allocator always gives zeros
+    memory := a.boxed(SaneRawList(u8), (ptr = buf.ptr, cap = buf.len, len = 0));
+    globals := a.box_zeroed(Globals);
+    globals.thread = .None;
+    globals.memory = memory;
+    globals.env = get_dynamic_environment();
+    globals.heap_base = memory.cap.trunc();
+    globals.create_exports = fn(self) = create_exports(Exports, self);
+    exports := (globals.create_exports)(globals);
+    globals.engine = rt&;
     mod := rt&.compile(bytes);
     instance := mod.instantiate(exports&);
     
@@ -109,7 +118,7 @@ fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str, args: []CStr) void 
     ::tagged(Wasm.Export);    
     if instance.exports&.get("__indirect_table") { it |
         @assert(it&.is(.Table));
-        the_table[] = it.Table;
+        globals.table = it.Table;
     };
     
     argc, argv := (0, 0);
@@ -117,14 +126,15 @@ fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str, args: []CStr) void 
     if instance.exports&.get("__stackbase") { stackbase |
         stackbase := stackbase.Global.i32&;
         // TODO: should use the limits in the wasm binary instead of this HACK
-        fake.memory.len = stackbase[].zext().align_to(wasm_page_size);
-        argc_, argv_ := write_cli_args(args, fake.memory.maybe_uninit(), stackbase);
+        memory.len = stackbase[].zext().align_to(wasm_page_size);
+        argc_, argv_ := write_cli_args(args, memory.maybe_uninit(), stackbase);
         argc = argc_;
         argv = argv_;
     };
     
     wasm_page_size :: 1.shift_left(16);
-    the_header[] = instance;
+    globals.instance = instance;
+    globals.mod = mod;
     
     // TODO: there's a segment where it tells you the entry point
     func := instance.exports&.get("main")
@@ -166,11 +176,19 @@ fn write_cli_args(args: []CStr, buf: []u8, stackbase: *i32) Ty(i64, i64) = {
     (arg_offsets.len - 1, i)
 }
 
-// TODO: use rt'memory_grow instead
-heap_base :: @static(u32) 0;  // TODO: BAD!
-the_table :: @static(*SaneRawList(Rt.Callable));
-the_header :: @static(*Rt.Instance);
-the_engine :: @static(*Wasm.Engine);
+Globals :: @rec @struct {
+    memory: *SaneRawList(u8);
+    env: rawptr;
+    heap_base: u32;  // TODO: use rt'memory_grow instead
+    table: *SaneRawList(Rt.Callable);
+    instance: *Rt.Instance;
+    engine: *Rt.Engine;
+    mod: *Rt.Module;
+    create_exports: (@FnPtr(globals: *Globals) Rt.ExportsEnv);
+    exit_futex: *u32;
+    thread: ?*Thread;
+    exit_thread: ?import("@/lib/sys/jump.fr").JumpBuf;
+};
 
 // TODO
 // Generate a wrapper to promote offsets in linear memory to native pointers. 
@@ -221,9 +239,9 @@ Exports :: @struct {
             WellKnown'strlen(@as(CStr) (ptr = ctx.offset(p.zext())));
         labs :: fn(ctx: *u8, i: i64) i64 = 
             import("@/examples/os/user/libc/stdlib.fr")'labs(i);
-        calloc :: fn(ctx: *u8, m: u32, n: u32) u32 = {  // HACK
-            heap_base[] -= align_to(m*n, 16);
-            heap_base[]
+        calloc :: fn(ctx: *Globals, m: u32, n: u32) u32 #ctx = {  // HACK
+            ctx.heap_base -= align_to(m*n, 16);
+            ctx.heap_base
         }
         // clocking in for my shift at the garbage pasta factory FIXME PLEASE
         vprintf :: fn(ctx: *u8, fmt: u32, valist: u32) u32 = {
@@ -281,13 +299,13 @@ Exports :: @struct {
             strncmp :: fn(a: *u8, b: *u8, n: i64) i32 #libc;
             strncmp(a, b, n.zext())
         }
-        mmap :: fn(ctx: *u8, addr: u32, len: u32, prot: u32, flags: u32, fd: u32, offset: u32) i64 = {
-            heap_base[] = align_back(heap_base[], 65536);
+        mmap :: fn(ctx: *Globals, addr: u32, len: u32, prot: u32, flags: u32, fd: u32, offset: u32) i64 #ctx = {
+            ctx.heap_base = align_back(ctx.heap_base, 65536);
             calloc(ctx, 1, len.align_to(65536)).zext()
         }
         munmap :: fn(ctx: *u8, addr: u32, len: u32) i64 = 0;
           free :: fn(ctx: *u8, p: u32) i64 = 0;
-        malloc :: fn(ctx: *u8, len: u32) i64 = calloc(ctx, 1, len).zext();
+        malloc :: fn(ctx: *Globals, len: u32) i64 #ctx = calloc(ctx, 1, len).zext();
          write :: fn(ctx: *u8, fd: i32, addr: u32, len: u32) i64 = {
             if fd != 1 && fd != 2 {
                 return(-1);
@@ -326,20 +344,20 @@ Exports :: @struct {
         tcgetattr :: fn() i64 = 0;
         tcsetattr :: fn() i64 = 0;
 
-        jit_instantiate_module :: fn(ctx: *u8, address: i64, length: i64, first_export: i64, table_index: u32) void = {
+        jit_instantiate_module :: fn(ctx: *Globals, address: i64, length: i64, first_export: i64, table_index: u32) void #ctx = {
             @debug_assert_eq(table_index, 0);
-            module_bytes := ctx.offset(address).slice(length);
+            module_bytes := ctx.memory.ptr.offset(address).slice(length);
             
             // TODO: should probably just allow userdata
             
-            mod := the_engine[].compile(module_bytes);
+            mod := ctx.engine.compile(module_bytes);
             exports: Rt.ExportsEnv = (_ = init(temp()));
-            each the_header.exports& { k, v |
+            each ctx.instance.exports& { k, v |
                 exports&.insert("main", k, v[]);
             };
             new := mod.instantiate(exports&);
             
-            table := the_table[][];
+            table := ctx.table[];
             table := table.from_sane();
             j := first_export;
             enumerate new.ordered_exports& { i, it |
@@ -352,12 +370,24 @@ Exports :: @struct {
             // TODO: make the api nice so it's not more painful than the js version
         }
         
-        js_worker_spawn :: fn(ctx: *u8, userdata: i64, stack: i64, exit_futex: i64) void = {
-            panic("TODO: js_worker_spawn");
+        js_worker_spawn :: fn(ctx: *Globals, userdata: i64, stack: i64, exit_futex: i64) void #ctx = {            
+            child := general_allocator().boxed(Child, (
+                userdata = userdata,
+                stack = stack,
+                globals = ctx[],
+            ));       
+            child.globals.thread = .None;
+            child.globals.exit_thread = .None;
+            child.globals.exit_futex = u32.ptr_from_int(u8.int_from_ptr(ctx.memory.ptr) + exit_futex);            
+            t := Child.start_thread_data(child, handle_child_thread);
+            child.globals.thread = (Some = t);
         }
+        js_worker_stop :: fn(ctx: *Globals, status: i64) void #ctx = {
+            if ctx.thread { _ |
+                jump := ctx.exit_thread&.unwrap();
+                throw(jump);
+            };
         
-        js_worker_stop :: fn(ctx: *u8, status: i64) void = {
-            eprintln("TODO: only exit the current worker");
             Syscall'exit(status);
         }
         
@@ -371,6 +401,43 @@ Exports :: @struct {
         }
     }
 }
+
+Child :: @struct {
+    userdata: i64;
+    stack: i64;
+    globals: Globals;
+};
+
+handle_child_thread :: fn(child: *Child) void = {
+    exports := (child.globals.create_exports)(child.globals&);
+    instance := child.globals.mod.instantiate(exports&);
+    child.globals.instance = instance;
+    it := instance.exports&.get("__indirect_table").unwrap();
+    @assert(it&.is(.Table));
+    child.globals.table = it.Table;
+    stackbase := instance.exports&.get("__stackbase").unwrap();
+    stackbase.Global.i64 = child.stack;
+    
+    // TODO: make this suck less
+    wasm_init_thread := instance.exports&.get("wasm_init_thread").unwrap();
+    f, c := (wasm_init_thread.Function.callee, wasm_init_thread.Function.context);
+    f := bit_cast_unchecked(rawptr, @FnPtr(c: rawptr, a: i64, b: i64) i64, f);
+    
+    child.globals.exit_thread = (Some = zeroed(@type child.globals.exit_thread.Some));
+    @match(try(child.globals.exit_thread.Some&)) {
+        fn Try() => {
+            known_wasm_jit_event := 0;  // TODO: keep this once i do thread pool
+            known_wasm_jit_event := (f)(c, child.userdata, known_wasm_jit_event);
+        }
+        fn Catch() => ();
+    };
+    child.globals.exit_thread = .None;
+    
+    child.globals.exit_futex[] = 0;
+    _ := Rt'atomic_notify(instance, child.globals.exit_futex, MAX_i32);
+    // TODO: recycle old threads? 
+    general_allocator().dealloc_one(Child, child);
+};
 
 // 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 
 // blehhhhh todo
@@ -514,4 +581,6 @@ fn printf_impl(
         };
     };
 }
+
 #use("@/lib/variadic.fr");
+#use("@/lib/sys/threads.fr");

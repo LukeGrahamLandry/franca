@@ -452,6 +452,24 @@ different subsets of the same resources.
 
 ## import_wasm 
 
+- speed it up! go back to f15cf8315db7d0040f4a3ebf017637c5273ae00b make it that fast again. 
+  the two big changes were:
+  - intercepting calls to use examples/os/user/libc
+  - import_wasm generating pic and passing around the runtime context to allow threads. 
+    made it slower to access memory, globals, and imports. 
+  `./target/w.out examples/web/target/demo.wasm -- -lang franca -file examples/kaleidoscope.fr`
+  f15cf83-importwasm: 2676  
+  current-importwasm: 5359  
+  lots of the extra time (1770 samples) is jit_instantiate_module calling insert.
+  now that i have to hash it to reuse between threads. 
+
+```
+franca tests/exe/wasm.fr   # builds w.out & demo.wasm
+./target/w.out examples/web/target/demo.wasm -- -lang franca -file examples/terminal.fr
+more instructions @5 which has already been terminated.
+function $push_aot_debug_resolver__42805() {
+```
+
 convert.fr:  
 // TODO: this could be hella faster: 
 //       - there's a wasteful prepass that splits up bits of the module into a big data structure. 

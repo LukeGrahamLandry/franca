@@ -1,4 +1,9 @@
 
+## (Dec 11)
+
+- now that convert is PIC, implement run.Exports.js_worker_spawn. 
+  need to make passing around user context less hacky eventually but it works. 
+
 ## (Dec 10)
 
 - i wrote LoadWasm in a kinda dumb mutate-y style. break it up into two structs

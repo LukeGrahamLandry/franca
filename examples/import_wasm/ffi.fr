@@ -113,7 +113,7 @@ fn comptime_exports(Exports: Type) []Ty(Str, Str, Rt.Export) #fold = {
 
 // `s` is contains functions with first argument *u8 wasm linear memory base. 
 // returns scope of functions with first argument *Rt.Header that sets dynenv and then forwards to the one in s. 
-fn wrap_fns_with_load_memory(s: ScopeId) Type = {
+fn wrap_fns_with_load_memory($UserContext: Type, s: ScopeId) Type = {
     E2 := Type.const_eval(@{ @struct {  } });
     fr := current_compiler_context();
     for s.get_constants() { name |
@@ -128,9 +128,10 @@ fn wrap_fns_with_load_memory(s: ScopeId) Type = {
             func.arg.bindings[0].ty = (Finished = *u8);
             func.arg.bindings[0].name = (Ident = @symbol __mem);
         };
+        pass_through := func.annotations.contains(fn(it) => it.name == @symbol ctx);
         
         pars := func.arg.bindings&.items().shallow_copy(ast_alloc());
-        pars[0].ty = (Finished = *Rt.Instance);
+        pars[0].ty = (Finished = *UserContext);
         wrapper_func: Func = empty_fn(name, loc);
         wrapper_func.resolve_scope = Type.scope_of(E2);  // :WhatScope 
         wrapper_func.arg = (bindings = pars.as_raw_list(), loc = loc);
@@ -150,7 +151,9 @@ fn wrap_fns_with_load_memory(s: ScopeId) Type = {
             set_dynamic_context(ctx.env);
             mem := ctx.memory.ptr;
             @[@literal fid](@[{
-                args[0] = @{ mem };
+                if !pass_through {
+                    args[0] = @{ mem };
+                };
                 args: FatExpr = @if(args.len == 1, 
                     args[0], 
                     (expr = (Tuple = args.as_raw()), ty = UnknownType, done = false, loc = func.loc),

@@ -1,6 +1,7 @@
 ## Entry Points
 
 - run: execute a wasm module as though it were a native program.
+  (a host that provides libc-like imports for my tests but doesn't follow a standard abi)
 - ffi: import a wasm module so that another franca program can call its functions.
   (see examples/bf/via_wasm.fr for simple usage)
 
@@ -32,7 +33,8 @@ function, native code should also let you do that.
 - basic arithmetic and control flow
 - globals, functions, data segments
 - tables: call_indirect, set, get, grow
-- threads: i32.rmw.cmpxchg, i64.rmw.cmpxchg
+- memory: init, grow
+- atomics: rmw.cmpxchg, rmw.cmpxchg, wait32, notify, fence
 
 ### NOT IMPLEMENTED
 
@@ -42,9 +44,9 @@ function, native code should also let you do that.
 - saturating conversions
 - memory.copy: allow non-constant size. allow overlapping where you need to copy backwards. 
 - br_table
-- memory ops: grow/init/size/fill/drop
+- memory ops: size/fill/drop
 - more atomic ops
-- shared memory, wake/wait/fence, conditional data segment initializers
+- atomic wait with timeout
 - more table ops: size/fill/copy/init/drop
 - 0x1B version of select
 - multivalue returns
