@@ -3,6 +3,28 @@
 
 - now that convert is PIC, implement run.Exports.js_worker_spawn. 
   need to make passing around user context less hacky eventually but it works. 
+- its soooooo slow. most of the new time is in the hashing for jit_instantiate_module. 
+  tried not hashing the module bytes and passing an id with jit_instantiate_module 
+  so the embedder can keep the Module object instead of needing to look it up by the bytes every time. 
+  didn't help in browser because im not sharing that map between workers, so it would only matter in a 
+  program that joins and then respawns threads which my compiler doesn't. 
+  there's no universe where it's taking me almost two seconds to put 2017 items in a hashmap.
+  like my hash function is dumb but that's actually not possible. what's going on. 
+  even when i was doing the whole module bytes idk who i entertained the idea that it 
+  should be slow, the whole reason this is a problem is that i jit a bunch of tiny modules 
+  so they're all tiny and should be fast to hash. 
+  it's still hashing strings not ints. ohhh its for `exports&.insert("main", k, v[]);` 
+  and i keep-names so the main module exports a bunch of shit and i was in fact hashing 13483091 function names 
+  (number of functions in the main module * number of modules instantiated) and the string "main" that many times again. 
+  just so the new module could import memory/stack/env/table from the main module. 
+  5359ms -> 3331ms. still 2x chrome but not quite as embarrassing as it was. 
+  now i can back to hashing module bytes and yeah the uid thing doesn't help me that much since just doing on the bytes is so fast anyway. 
+- store non-imported globals/tables inline in View so it's one less level of indirection
+- hoist the stack slots for table_get to the start block so they become fast-allocs
+- tests/exe/wasm.fr spends all its time recompiling the big demo.wasm. 32724. 
+  so don't exec it everytime so the Engine is reused and it naturally stays cached. 6298. 
+  don't hold the lock while compiling. 5376. 
+  don't re-lookup the main module from the bytes every time. 3747. 
 
 ## (Dec 10)
 

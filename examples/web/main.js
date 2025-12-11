@@ -72,7 +72,11 @@ const handle = (_msg) => {
 function get_worker() {
     if (thread_pool.length == 0) {
         let w = new Worker(`worker.js?v=${version}`, { type: "module" });
-        w.onerror = (e) => console.error(e);
+        w.onerror = (e) => {
+            console.error(e);
+            show(e.message);
+            flush();
+        };
         w.onmessage = (e) => console.error(e);
         if (wasm_module === undefined) throw "get_worker before load_wasm";
         w.postMessage({ tag: "setmodule", module: wasm_module });

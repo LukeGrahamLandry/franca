@@ -1,20 +1,33 @@
-// TODO: import_wasm/run.fr should cache a dynamic library
-// TODO: autotest run this
 
 main :: fn() void = {
-    threads := @slice(
-        start_thread_nodata {
-            franca := get_executable_path(temp());
-            hush(@slice(franca, "examples/web/build.fr"));
-        },
-        start_thread_nodata {
-            franca := get_executable_path(temp());
-            hush(@slice(franca, "examples/default_driver.fr", "build", "examples/import_wasm/run.fr", "-o", "target/w.out", "-keep-names"));
-        },
-    );
-    for(threads, join);
+    franca := get_executable_path(temp());
+    hush(@slice(franca, "graphics/web/webgpu_api.fr"));
+    hush(@slice(franca, "examples/default_driver.fr", "build", "examples/os/host/web.fr", "-o", "examples/web/target/demo.wasm", "-arch", "wasm32", "-unsafe", "-dynamiclib", "-keep-names"));
+    wasm := temp().read_to_string_or_crash("examples/web/target/demo.wasm").items();
+    a := general_allocator();
+    target: Qbe.QbeTargetEnv = (type = .JitOnly, os = query_current_os(), arch = query_current_arch(), link_libc = false);
+    rt: Rt.Engine = init(a, target, "");
+    hello_world(rt&);
+    mod := rt&.compile(wasm);
     
-    hello_world();
+    manifest := collect_tests();
+    each manifest.compilers { it |
+        State :: @struct(rt: *Rt.Engine, mod: *Rt.Module, name: CStr);
+        state: State = (rt = rt&, mod = mod, name = it.name.as_cstr());
+        run_tests_main_threaded(*State, Str, state&, it.examples, fn(_, it) = it[], fn(state, file) = {
+            a: []CStr = @slice(as_cstr "examples/web/target/demo.wasm", "-lang", state.name, "-file", as_cstr file[]);
+            out := u8.list(temp());
+            log: Runner.Log = (ctx = List(u8).raw_from_ptr(out&), f = fn(out, _, msg) = {
+                out := List(u8).ptr_from_raw(out);
+                out.push_all(msg);
+            });
+            Runner'exec_wasm_file(Runner.AugmentedExports, state.rt, state.mod, a, log);
+            (true, out, list(temp()), "")
+        });
+    };
+}
+
+collect_tests :: fn() = {
     B :: import("@/examples/web/build.fr");
     manifest := B'manifest("");
     
@@ -52,25 +65,21 @@ main :: fn() void = {
         && !it[].ends_with("load4.ssa")  // TODO: why fail?
         && !it[].ends_with("env.ssa")    // TODO: why fail?
     );
-    manifest.compilers.len = 3;  // [3] tries to read mandel.txt which is created in examples/web/build.fr
-    each manifest.compilers { it |
-        run_tests_main_threaded(Str, Str, it.name, it.examples, fn(_, it) = it[], fn(name, file) = {
-            a := @slice("examples/web/target/demo.wasm", "--", "-lang", name, "-file", file[]);
-            ok, o, e := exec_and_catch("target/w.out", a, temp());
-            (ok, o, e, "")
-        });
-    };
+    manifest
 }
 
 // tiny example that doesn't even have a __stackbase
-hello_world :: fn() void = {
+hello_world :: fn(rt: *Rt.Engine) void = {
     #use("@/examples/bf/via_wasm.fr");
     #use("@/examples/bf/README.fr");
     wasm := to_wasm_module(temp(), HELLO_WORLD).items();
-    write_entire_file_or_crash("target/hello.wasm", wasm);
-    sh(@slice("target/w.out", "target/hello.wasm"));
+    mod := rt.compile(wasm);
+    Runner'exec_wasm_file(Runner.AugmentedExports, rt, mod, empty(), Runner.standard_log);
 };
 
 #use("@/lib/sys/process.fr");
 #use("@/lib/sys/subprocess.fr");
 #use("@/examples/testing.fr");
+Rt :: import("@/examples/import_wasm/runtime.fr");
+Runner :: import("@/examples/import_wasm/run.fr");
+Qbe :: import("@/backend/ir.fr");

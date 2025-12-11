@@ -312,7 +312,6 @@ fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
         writer := forever.boxed(Incremental.Writer, init(gpa));
         m.save = (Some = writer);
     };
-    m.segments = EnumMap(SegmentType, SegmentCursor).zeroed();
     goal.expecting_wx = goal.expecting_wx && goal.type == .JitOnly && goal.arch != .wasm32;
     m.use_map_jit_on_apple_silicon = goal.expecting_wx && goal.arch == .aarch64 && goal.os == .macos;
     
@@ -321,7 +320,9 @@ fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
         msg :: "trying to jit to the wrong os.\nthe abi will be wrong if you try to call external functions (like apple disagrees about how varargs should be passed).";
         @if(goal.arch == .aarch64) @assert_eq(goal.os, query_current_os(), msg);
     };
+    need_segments := !@is(goal.type, .Cached, .CachedEarly);
     
+if need_segments {
     mem := if !m.use_map_jit_on_apple_silicon {
         // relies on page allocator always giving zeroed memory
         page_allocator.alloc_uninit(u8, segment_size * 3)
@@ -372,7 +373,8 @@ fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
     make_segment :: fn(mem: []u8, s: SegmentType, start: i64, end: i64) void => {
         m.segments&.insert(s, (mmapped = mem.slice(start, end), next = mem.index(start)));
     };
-    
+};
+
     m.initialized = true;
     m.exports = list(gpa);
     m.imports = list(gpa);
@@ -387,8 +389,9 @@ fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
         enabled = !@is(goal.type, .Cached, .CachedEarly),
         macho_function_starts = list(gpa),
     );
-    {   // TODO: this is kinda ass
+    if need_segments {
         // :GotAtConstantDataBase
+        // TODO: this is kinda ass
         next := m.segments&[.ConstantData].next&;
         m.got = (mmapped = (ptr = next[], len = goal.max_got_size), next = next[]);
         next[] = next[].offset(goal.max_got_size); 
@@ -420,7 +423,7 @@ fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
         };
     };
     
-    m.goal.blink_smc = m.goal.blink_smc && goal.expecting_wx;
+    m.goal.blink_smc = goal.blink_smc && goal.expecting_wx && goal.arch == .x86_64;
     if m.goal.blink_smc {
         m.scratch_for_blink_smc = list(func_size_limit_bytes, forever);
     };
@@ -429,8 +432,6 @@ fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
     m.debug_out = m.debug_out_storage&;
     
     m.insb   = forever.box_uninit(@type m.insb[]);
-    // coconut.jpg
-    //forever.box_zeroed(Qbe.Ins);
     
     m.curi = m.insb.index_unchecked(Qbe.MaxInstructions);
     if !m.goal.link_libc {

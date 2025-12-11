@@ -34,7 +34,23 @@ main :: fn() void = {
     }
     args := args.rest(i - 1);  // meh, for now: argv[0] == "--"
     
-    E :: {  
+    #use("@/lib/sys/fs.fr");
+    bytes := temp().read_to_string_or_crash(wasm_file).items(); // :panic
+    
+    a := general_allocator();
+    target: Qbe.QbeTargetEnv = (type = .JitOnly, os = query_current_os(), arch = query_current_arch(), link_libc = false);
+    rt: Wasm.Engine = init(a, target, logging);
+    mod := rt&.compile(bytes);
+    exec_wasm_file(AugmentedExports, rt&, mod, args, standard_log);
+}
+
+standard_log: Log : (ctx = zeroed(rawptr), f = fn(_, err, msg) = if err {
+    eprint(msg);
+} else {
+    print(msg);
+});
+
+AugmentedExports :: {  
         insert :: fn(scope, name, value) => 
             (fr.vtable.add_to_scope)(fr.data, scope, name, @type value, raw_from_ptr(@type value, value&));
         E :: Exports;
@@ -75,12 +91,7 @@ main :: fn() void = {
             env :: wrap_fns_with_load_memory(Globals, Type.scope_of(E.env));
             webgpu :: wrap_fns_with_load_memory(Globals, Type.scope_of(E.webgpu));
         }
-    };
-    
-    #use("@/lib/sys/fs.fr");
-    bytes := temp().read_to_string_or_crash(wasm_file).items(); // :panic
-    exec_wasm_file(E, bytes, logging, args);
-}
+};
 
 create_exports :: fn($Exports: Type, globals: *Globals) Rt.ExportsEnv = {
     exports: Rt.ExportsEnv = (_ = init(temp()));
@@ -90,15 +101,17 @@ create_exports :: fn($Exports: Type, globals: *Globals) Rt.ExportsEnv = {
         exports&.insert(m, n, it.Function.callee, globals);
     };
     exports&.insert("main", "memory", (Memory = globals.memory));
+    
+    // HACK to undo :MultiDylibLibc 
+    exports._&.insert("libc***", exports._&.get("env").unwrap());
+    
     exports
 }
 
-fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str, args: []CStr) void = {
+Log :: @struct(f: @FnPtr(self: rawptr, err: bool, msg: []u8) void, ctx: rawptr);
+
+fn exec_wasm_file($Exports: Type, rt: *Rt.Engine, mod: *Wasm.Module, args: []CStr, log: Log) void = {
     a := general_allocator();
-    Qbe :: import("@/backend/ir.fr");
-    target: Qbe.QbeTargetEnv = (type = .JitOnly, os = query_current_os(), arch = query_current_arch(), link_libc = false);
-    rt: Wasm.Engine = init(a, target, logging);
-    
     
     buf := page_allocator.alloc_uninit(u8, 1.shift_left(32));  // page allocator always gives zeros
     memory := a.boxed(SaneRawList(u8), (ptr = buf.ptr, cap = buf.len, len = 0));
@@ -108,9 +121,9 @@ fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str, args: []CStr) void 
     globals.env = get_dynamic_environment();
     globals.heap_base = memory.cap.trunc();
     globals.create_exports = fn(self) = create_exports(Exports, self);
+    globals.log = log;
     exports := (globals.create_exports)(globals);
-    globals.engine = rt&;
-    mod := rt&.compile(bytes);
+    globals.engine = rt;
     instance := mod.instantiate(exports&);
     
     trace := Crash'push_resolver(Qbe.Module, mod.m.unwrap(), find_ip_in_module);
@@ -142,9 +155,15 @@ fn exec_wasm_file($Exports: Type, bytes: []u8, logging: Str, args: []CStr) void 
     @debug_assert(func&.is(.Function));
     func := func.Function;
     f := assume_types_fn(Arg = Ty(rawptr, u32, u32, u32, u32), Ret = i64, ptr = func.callee);
-    result := f(func.context, argc.trunc(), argv.trunc(), 0, 0);
-    if result != 0 {
-        @eprintln(">>> returned %", result);
+    
+    @match(try(globals.exit_thread&)) {
+        fn Try() => {
+            result := f(func.context, argc.trunc(), argv.trunc(), 0, 0);
+            if result != 0 {
+                @eprintln(">>> returned %", result);
+            };
+        }
+        fn Catch() => ();
     };
     
     pop_resolver(trace);
@@ -187,18 +206,9 @@ Globals :: @rec @struct {
     create_exports: (@FnPtr(globals: *Globals) Rt.ExportsEnv);
     exit_futex: *u32;
     thread: ?*Thread;
-    exit_thread: ?import("@/lib/sys/jump.fr").JumpBuf;
+    exit_thread: import("@/lib/sys/jump.fr").JumpBuf;
+    log: Log;
 };
-
-// TODO
-// Generate a wrapper to promote offsets in linear memory to native pointers. 
-// This avoids writing a lot of verbose code like `ctx.offset(ptr.zext())`. 
-// (fn(a: *T, b: i32, c: *U) *R) -> (fn(ctx: *u8, a_off: u32, b: i32, c_off: u32) u32)
-PromotePointers :: fn(fid: FuncId) FuncId #fold = {
-    callee := get_function_ast(fid, true, false, true, false);
-    todo();
-    intern_func(wrapper&)
-}
 
 weak_imports :: @const_slice(
    "__libc_start_main", "__error", "__errno_location", "__clear_cache", 
@@ -306,21 +316,24 @@ Exports :: @struct {
         munmap :: fn(ctx: *u8, addr: u32, len: u32) i64 = 0;
           free :: fn(ctx: *u8, p: u32) i64 = 0;
         malloc :: fn(ctx: *Globals, len: u32) i64 #ctx = calloc(ctx, 1, len).zext();
-         write :: fn(ctx: *u8, fd: i32, addr: u32, len: u32) i64 = {
+         write :: fn(ctx: *Globals, fd: i32, addr: u32, len: u32) i64 #ctx = {
             if fd != 1 && fd != 2 {
                 return(-1);
             };
-            r := Syscall'write((fd = fd), ctx.offset(addr.zext()), len.zext());
-            r.value
+            msg := ctx.memory.items().subslice(addr.zext(), len.zext());
+            ctx.engine.lock&.lock();
+            (ctx.log.f)(ctx.log.ctx, fd != 1, msg);
+            ctx.engine.lock&.unlock();
+            len.zext()
         };
         
-        FR_debug_write :: fn(ctx: *u8, addr: u32, len: u32) void = {
+        FR_debug_write :: fn(ctx: *Globals, addr: u32, len: u32) void #ctx = {
             write(ctx, 1, addr, len);
         }
-        js_write :: fn(ctx: *u8, id: i64, addr: u32, len: u32) i64 = {
+        js_write :: fn(ctx: *Globals, id: i64, addr: u32, len: u32) i64 #ctx = {
             @if(id == 0xBBBB0000) return(write(ctx, 1, addr, len));
             if id == 0xBBBB0001 {
-                yield_file(ctx, addr.zext(), len.zext());
+                yield_file(ctx.memory.ptr, addr.zext(), len.zext());
                 return(len.zext());
             }
             write(ctx, 2, addr, len);
@@ -347,14 +360,10 @@ Exports :: @struct {
         jit_instantiate_module :: fn(ctx: *Globals, address: i64, length: i64, first_export: i64, table_index: u32) void #ctx = {
             @debug_assert_eq(table_index, 0);
             module_bytes := ctx.memory.ptr.offset(address).slice(length);
-            
-            // TODO: should probably just allow userdata
-            
             mod := ctx.engine.compile(module_bytes);
+            
             exports: Rt.ExportsEnv = (_ = init(temp()));
-            each ctx.instance.exports& { k, v |
-                exports&.insert("main", k, v[]);
-            };
+            exports._&.insert("main", ctx.instance.exports);
             new := mod.instantiate(exports&);
             
             table := ctx.table[];
@@ -366,8 +375,6 @@ Exports :: @struct {
                     j += 1;
                 };
             };
-            
-            // TODO: make the api nice so it's not more painful than the js version
         }
         
         js_worker_spawn :: fn(ctx: *Globals, userdata: i64, stack: i64, exit_futex: i64) void #ctx = {            
@@ -377,18 +384,13 @@ Exports :: @struct {
                 globals = ctx[],
             ));       
             child.globals.thread = .None;
-            child.globals.exit_thread = .None;
             child.globals.exit_futex = u32.ptr_from_int(u8.int_from_ptr(ctx.memory.ptr) + exit_futex);            
             t := Child.start_thread_data(child, handle_child_thread);
             child.globals.thread = (Some = t);
         }
         js_worker_stop :: fn(ctx: *Globals, status: i64) void #ctx = {
-            if ctx.thread { _ |
-                jump := ctx.exit_thread&.unwrap();
-                throw(jump);
-            };
-        
-            Syscall'exit(status);
+            @if(ctx.thread.is_none() && status != 0) @eprintln(">>> exited with status %", status);
+            throw(ctx.exit_thread&);
         }
         
         yield_file :: fn(ctx: *u8, ptr: i64, length: i64) void = {
@@ -423,15 +425,13 @@ handle_child_thread :: fn(child: *Child) void = {
     f, c := (wasm_init_thread.Function.callee, wasm_init_thread.Function.context);
     f := bit_cast_unchecked(rawptr, @FnPtr(c: rawptr, a: i64, b: i64) i64, f);
     
-    child.globals.exit_thread = (Some = zeroed(@type child.globals.exit_thread.Some));
-    @match(try(child.globals.exit_thread.Some&)) {
+    @match(try(child.globals.exit_thread&)) {
         fn Try() => {
             known_wasm_jit_event := 0;  // TODO: keep this once i do thread pool
             known_wasm_jit_event := (f)(c, child.userdata, known_wasm_jit_event);
         }
         fn Catch() => ();
     };
-    child.globals.exit_thread = .None;
     
     child.globals.exit_futex[] = 0;
     _ := Rt'atomic_notify(instance, child.globals.exit_futex, MAX_i32);
@@ -584,3 +584,4 @@ fn printf_impl(
 
 #use("@/lib/variadic.fr");
 #use("@/lib/sys/threads.fr");
+Qbe :: import("@/backend/ir.fr");

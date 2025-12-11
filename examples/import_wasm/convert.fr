@@ -28,6 +28,8 @@ fn load(m: *Qbe.Module, w: *WasmModule, a: Alloc) Loaded = {
     counts&[.tables] = w.tables.len + w.import_count&[.Table];
     counts&[.runtime] = RtNeeded.capacity;
     counts&[.globals] = w.globals.len + w.import_count&[.Global];
+    counts&[.local_globals] = w.globals.len;
+    counts&[.local_tables] = w.tables.len;
     
     global_cls := a.alloc_uninit(Qbe.Cls, counts&[.globals]);
     {
@@ -221,6 +223,7 @@ fn translate_func(self: *LoadWasm, code: *Wasm.Func, signature: *Wasm.FuncType) 
         };
         @debug_assert_eq(self.locals.len, i);
     };
+    // note: more alloc8 instructions are added to f.start as needed
     
     // you can't br targtting the outer scope of the function so only `current` matters. 
     self.blocks&.push(current = self.link_new_block(), continue = Qbe.Blk.ptr_from_int(0), break = Qbe.Blk.ptr_from_int(0), loop = false);
@@ -663,19 +666,14 @@ fn table_get(self: *LoadWasm, table_index: u64, index_in_table_W: Qbe.Ref) Qbe.R
     table_slot := self.compute_table_slot(table_index, index_in_table_W);
     result := self.f.newtmp("table.get", .Kl);
     // TODO: this will have to change when i want to support returning (func/extern)ref
-    self.f.emit(.alloc8, .Kl, result, self.f.getcon(size_of(Rt.Callable)), Qbe.Null);
+    self.f.start.push(make_ins(.alloc8, .Kl, result, self.f.getcon(size_of(Rt.Callable)), Qbe.Null));
     self.f.emit(.blit0, .Kw, QbeNull, table_slot, result);
     self.f.emit(.blit1, .Kw, Qbe.Null, INT(size_of(Rt.Callable)), Qbe.Null);
     result
 }
 
 fn compute_table_slot(self: *LoadWasm, table_index: u64, index_in_table_W: Qbe.Ref) Qbe.Ref = {
-    off := Rt'Instance'compute_offset(self.counts&, .tables, table_index.bitcast());
-    r := self.temporaries(2);
-    self.f.emit(.add, .Kl, r[0], self.local_rt_header, self.f.getcon(off));  // **Table
-    self.f.emit(.load, .Kl, r[1], r[0], QbeNull);  // *Table
-
-    table_var        := r[1];
+    table_var        := self.compute_slot(table_index.bitcast(), .Table, .tables, .local_tables);
     index_in_table_L := self.f.newtmp("Iindex", .Kl);
     table_slot       := self.f.newtmp("Islot", .Kl);
     table_offset     := self.f.newtmp("Ioff", .Kl);
@@ -691,11 +689,22 @@ fn compute_table_slot(self: *LoadWasm, table_index: u64, index_in_table_W: Qbe.R
 
 // TODO: cache these per function in the same way i do for the memory base address
 fn compute_global_slot(self: *LoadWasm, i: i64) Qbe.Ref = {
-    off := Rt'Instance'compute_offset(self.counts&, .globals, i);
-    r := self.temporaries(2);
-    self.f.emit(.add, .Kl, r[0], self.local_rt_header, self.f.getcon(off));  // **GlobalValue
-    self.f.emit(.load, .Kl, r[1], r[0], QbeNull);  // *GlobalValue
-    r[1]
+    self.compute_slot(i, .Global, .globals, .local_globals)
+} 
+
+fn compute_slot(self: *LoadWasm, i: i64, A: Wasm.ImportType, B: Fields(Rt.View), C: Fields(Rt.View)) Qbe.Ref = {
+    n := self.w.import_count&[A];
+    if i < n {
+        off := Rt'Instance'compute_offset(self.counts&, B, i);
+        r := self.temporaries(2);
+        self.f.emit(.add, .Kl, r[0], self.local_rt_header, self.f.getcon(off));  // **T
+        self.f.emit(.load, .Kl, r[1], r[0], QbeNull);  // *T
+        return r[1];
+    };
+    off := Rt'Instance'compute_offset(self.counts&, C, i - n);
+    r := self.f.newtmp("", .Kl);
+    self.f.emit(.add, .Kl, r, self.local_rt_header, self.f.getcon(off));  // *T
+    r
 } 
 
 fn parse_branch_target(self: *LoadWasm) *Qbe.Blk = {

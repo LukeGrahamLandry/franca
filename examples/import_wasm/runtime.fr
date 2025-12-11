@@ -63,9 +63,10 @@ Instance :: @struct {  // !Sized
 
 Counts :: EnumMap(Fields(View), i64);
 
-// TODO: store non-imported globals/tables inline as well so it's one less level of indirection
 // this data is stored inline after the fields of Instance
 View :: @struct {
+    local_globals: []GlobalValue;
+    local_tables: []Table;
     globals: []*GlobalValue;
     tables: []*Table;
     imports: []Callable;  // functions only
@@ -91,11 +92,12 @@ Export :: @tagged(
 Engine :: @rec @struct {
     // TODO: could do much better than this if most modules are [large, of unique length, instantiated once]  
     //       if i just hash the length instead of needing to look at all the bytes. 
-    modules: HashMap([]u8, *Module);
+    modules: HashMap([]u8, @tagged(Ready: *Module, Compiling));
     debug: Str;
     lock := zeroed Mutex;
     target: Qbe.QbeTargetEnv;
     gpa: Alloc;
+    generation: u32 = 0;
 };
 
 fn init(a: Alloc, target: Qbe.QbeTargetEnv, debug: Str) Engine = (
@@ -105,15 +107,34 @@ fn init(a: Alloc, target: Qbe.QbeTargetEnv, debug: Str) Engine = (
     gpa = a,
 );
 
+// todo: not holding the lock means gpa can't be an arena
+// - don't want to hold the lock while compiling because that's slow
+// - don't want multiple threads to compile the same module redundantly
 fn compile(self: *Engine, wasm: []u8) *Module = {
     self.lock&.lock();
-    a := self.gpa;
-    mod := self.modules.raw&.get_or_insert_pinky_swear_not_to_mutate_the_key(wasm, a) { wasm |
-        wasm[] = wasm[].shallow_copy(a);
-        self.compile_uncached(wasm[])
+    if self.modules&.get(wasm) { it |
+        ::tagged(@type it);
+        while => it&.is(.Compiling) {
+            value := self.generation;
+            self.lock&.unlock();
+            Futex'wait(self.generation&, value);
+            self.lock&.lock();
+            it = self.modules&.get(wasm).unwrap();
+        };
+        self.lock&.unlock();
+        return it.Ready;
     };
+    wasm = wasm.shallow_copy(self.gpa);
+    // TODO: sad to refind the bucket here when it can't have changed
+    _ := self.modules&.insert(wasm, .Compiling);
     self.lock&.unlock();
-    mod[]
+    mod := self.compile_uncached(wasm);
+    self.lock&.lock();
+    _ := self.modules&.insert(wasm, (Ready = mod));
+    self.generation += 1;
+    Futex'wake(self.generation&, MAX_i32);
+    self.lock&.unlock();
+    mod
 }
 
 fn compile_uncached(self: *Engine, wasm: []u8) *Module = {
@@ -160,6 +181,8 @@ fn compile_uncached(self: *Engine, wasm: []u8) *Module = {
     for mod.loader.rt_needed& { i |
         mod.runtime[i] = calls[i].callee;
     };
+    // TODO: most of the stuff in *Qbe.Module should be dropped. 
+    //       just need the active part of code and data segments. 
     
     mod
 }
@@ -201,19 +224,22 @@ fn instantiate(mod: *Module, imports: *ExportsEnv) *Instance = {
         
         @match(it.desc) {
             fn Function() => {
-                view.imports[found&[.imports]] = value.Function;
-                found&[.imports] += 1;
+                i := found&[.imports]&;
+                view.imports[i[]] = value.Function;
+                i[] += 1;
             }
             fn Table() => {
-                view.tables[found&[.tables]] = value.Table;
-                found&[.tables] += 1;
+                i := found&[.tables]&;
+                view.tables[i[]] = value.Table;
+                i[] += 1;
             }
             fn Memory() => {
                 instance.memory = value.Memory;
             }
             fn Global() => {
-                view.globals[found&[.globals]] = value.Global;
-                found&[.globals] += 1;
+                i := found&[.globals]&;
+                view.globals[i[]] = value.Global;
+                i[] += 1;
             }
         };
     };
@@ -221,13 +247,14 @@ fn instantiate(mod: *Module, imports: *ExportsEnv) *Instance = {
     ::ptr_utils(@type instance.memory[]);
     @assert(!instance.memory.is_null(), "didn't import a memory");
     
-    enumerate mod.loader.init_global_values { i, it |
-        view.globals[found&[.globals] + i] = instance.gpa.boxed(GlobalValue, it[]);
+    view.local_globals.copy_from(mod.loader.init_global_values);
+    enumerate view.local_globals { i, it |
+        view.globals[found&[.globals] + i] = it;
     };
     enumerate mod.loader.init_table_sizes { i, it |
         it := instance.gpa.alloc_zeroed(Callable, it[]);
-        it: Table = (ptr = it.ptr, len = it.len, cap = it.len);
-        view.tables[found&[.tables] + i] = instance.gpa.boxed(Table, it);
+        view.local_tables[i] = (ptr = it.ptr, len = it.len, cap = it.len);
+        view.tables[found&[.tables] + i] = view.local_tables[i]&;
     };
     
     instance.ordered_exports = instance.gpa.alloc_init(Export, mod.w.exports.len) { i |

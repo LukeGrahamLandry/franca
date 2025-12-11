@@ -1,4 +1,5 @@
 
+- the thing where when you dot access a scope and it doesn't have that constant it recurses up all the way to the root scope is confusing. 
 - better error message if you try to bake an allocator with a data pointer. 
   should also be more careful about passing around the source location 
   and keeping track of the tree of types you saw before the error. 
@@ -459,12 +460,10 @@ different subsets of the same resources.
     made it slower to access memory, globals, and imports. 
   `./target/w.out examples/web/target/demo.wasm -- -lang franca -file examples/kaleidoscope.fr`
   f15cf83-importwasm: 2676  
-  current-importwasm: 5359  
-  lots of the extra time (1770 samples) is jit_instantiate_module calling insert.
-  now that i have to hash it to reuse between threads. 
+  0196148-importwasm: 5359  
+  current-importwasm: 3197  
 
 ```
-franca tests/exe/wasm.fr   # builds w.out & demo.wasm
 ./target/w.out examples/web/target/demo.wasm -- -lang franca -file examples/terminal.fr
 more instructions @5 which has already been terminated.
 function $push_aot_debug_resolver__42805() {
