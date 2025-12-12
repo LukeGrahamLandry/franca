@@ -13,6 +13,7 @@ Module :: @rec @struct {
     functions: []rawptr;
     datas: [][]u8;
     m: ?*Qbe.Module;
+    trace: ?*Crash.LocationResolverNode;
 };
 
 // the code linked with imports and storage for globals/tables
@@ -100,6 +101,9 @@ Engine :: @rec @struct {
     generation: u32 = 0;
 };
 
+fn init_for_jit(a: Alloc, debug: Str) Engine = 
+    init(a, (type = .JitOnly, os = query_current_os(), arch = query_current_arch(), link_libc = false), debug);
+
 fn init(a: Alloc, target: Qbe.QbeTargetEnv, debug: Str) Engine = (
     modules = init(a), 
     target = target,
@@ -140,6 +144,7 @@ fn compile(self: *Engine, wasm: []u8) *Module = {
 fn compile_uncached(self: *Engine, wasm: []u8) *Module = {
     a := self.gpa;
     mod := a.box_zeroed(Module);
+    mod.trace = .None;
     m := a.box_uninit(Qbe.Module);
     Qbe'backend'init_module(m, self.target);
     mod.m = (Some = m);
@@ -149,8 +154,6 @@ fn compile_uncached(self: *Engine, wasm: []u8) *Module = {
     or parse_wasm(p&) { e |
         @panic("% (at byte index %)", e, p.cursor);
     };
-    msg :: "TODO: support module with its own memory. rn it must be imported";
-    @assert_eq(mod.w.memories.len, 0, msg);
     
     mod.loader = load(m, mod.w&, a);
     mod.counts = mod.loader.counts;
@@ -158,6 +161,7 @@ fn compile_uncached(self: *Engine, wasm: []u8) *Module = {
     ::enum(@type m.goal.type);
     if m.goal.type == .JitOnly {
         m.make_exec();
+        mod.trace = (Some = Crash'push_resolver(Qbe.Module, m, Qbe.find_ip_in_module));
         
         mod.datas = a.alloc_uninit([]u8, mod.loader.datas.len);
         enumerate mod.loader.datas { i, it |
@@ -202,6 +206,15 @@ fn instantiate(mod: *Module, imports: *ExportsEnv) *Instance = {
     };
     view := instance.view();
     view.runtime.copy_from(mod.runtime);
+    
+    @assert_le(mod.w.memories.len, 1, "TODO: multiple memories");
+    for mod.w.memories { it |
+        // max=MAX_u32 means no max was specified, clamp to 2^16 pages = 4gb
+        len, cap := (it.min.zext() * wasm_page_size, it.max.zext().min(wasm_page_size) * wasm_page_size);
+        buf := page_allocator.alloc_uninit(u8, cap);  // page allocator always gives zeros
+        buf := instance.gpa.boxed(SaneRawList(u8), (ptr = buf.ptr, cap = buf.len, len = len));
+        instance.memory = buf;
+    };
 
     found := zeroed Instance.Counts;
     missing := 0;
@@ -243,6 +256,8 @@ fn instantiate(mod: *Module, imports: *ExportsEnv) *Instance = {
                 i[] += 1;
             }
             fn Memory() => {
+                ::ptr_utils(@type instance.memory[]);
+                @assert(instance.memory.is_null(), "TODO: multiple memories");
                 instance.memory = value.Memory;
             }
             fn Global() => {
@@ -254,7 +269,6 @@ fn instantiate(mod: *Module, imports: *ExportsEnv) *Instance = {
     };
     @assert_eq(missing, 0, "had missing imports");
     ::ptr_utils(@type instance.memory[]);
-    @assert(!instance.memory.is_null(), "didn't import a memory");
     
     view.local_globals.copy_from(mod.loader.init_global_values);
     enumerate view.local_globals { i, it |
@@ -449,6 +463,8 @@ Futex :: import("@/lib/sys/sync/futex.fr");
 #use("@/examples/import_wasm/parse.fr");
 #use("@/lib/collections/map.fr");
 Qbe :: import("@/backend/ir.fr");
+Crash :: import("@/lib/crash_report.fr");
+wasm_page_size :: 65536;
 
 fn bake_relocatable_value(self: *Module) []BakedEntry = {
     msg :: "you can't bake a jitted Module. see import_wasm/ffi.fr";

@@ -262,12 +262,17 @@ fn emit_the_code(self: *LoadWasm) void = {
         
         ::enum(Qbe.J);
         if self.get_blk()[].jmp.type != .Jxxx && !@is(inst, .End, .Unreachable, .Nop) {
-            printfn(self.f, self.f.globals.debug_out);
-            @panic("more instructions @% which has already been terminated. (TODO: this happens when there is unreachable code after a BR instruction but that is likely not what you wanted anyway)", self.get_blk()[].id);
+            // the block has unreachable code
+            self.cursor -= 1;
+            self.skip_current_instruction();
+            continue();
         };
         
         // Single byte unary/binary instructions are found in the table. 
         encoding := lookup_wasm_encoding(b);
+        if b == 0xC4 {
+            encoding = (kind = .unary, op = .extsw, cls = .Kl);
+        };
         
         ::enum(@type encoding.kind);
         if encoding.kind != .other {
@@ -881,6 +886,68 @@ fn temporaries(self: *LoadWasm, $n: i64) []Qbe.Ref #inline/*semantic*/ = {
     r := @uninitialized Array(Qbe.Ref, n);
     each r& { it | it[] = self.f.newtmp("", .Kl); };
     r&.items()
+}
+
+// todo: unfortunate to need so much extra code for this. 
+//       when there's unreachable code at the end of a block, 
+//       don't want to emit anything and it doesn't have to typecheck 
+//       but since instructions are variable width, they can't be skipped without decoding.
+fn skip_current_instruction(self: *LoadWasm) void = {
+    start := self.cursor;
+    b := self.src[self.cursor];
+    self.cursor += 1;
+    inst := @as(Wasm.Inst) b;
+    
+    encoding := lookup_wasm_encoding(b);
+    if encoding.kind != .other {
+        if @is(encoding.kind, .load, .store) {
+            self.read_u();
+            self.read_u();
+        };
+        return();
+    };
+    
+    if @is(inst, .LocalGet, .LocalSet, .LocalTee, .GlobalGet, .GlobalSet, .TableGet, .TableSet, .Call, .Br, .BrIf, .Select, .I32_Const, .I64_Const, .Loop, .Block, .If) {
+        self.read_u();
+        return();
+    };
+
+    if @is(inst, .CallIndirect) {
+        self.read_u();
+        self.read_u();
+        return();
+    };
+    
+    if @is(inst, .Return, .Nop, .Unreachable, .End, .Else, .Drop, .I32_EqZero, .I64_EqZero) {
+        return();
+    }
+    
+    @match(inst) {
+        fn F64_Const() => { 
+            self.cursor += 8; 
+            return();
+        };
+        fn F32_Const() => { 
+            self.cursor += 4; 
+            return();
+        };
+        fn AtomicPrefix() => {
+            opcode := self.read_u();
+            if opcode == 72 || opcode == 73 {
+                self.read_u();
+                self.read_u();
+                return();
+            };
+        }
+        fn PrefixFC() => if self.read_u() == 10 {  // memory.copy
+            self.cursor += 2;
+            return();
+        };
+        @default => ();
+    };
+    self.match_runtime_call(start)
+        || @panic("unknown instruction in unreachable code can't be decoded. %\n(at byte index % of %)", 
+            self.src[start], start, self.m.str(self.f.lnk.id));
 }
 
 #use("@/lib/collections/bit_set.fr");

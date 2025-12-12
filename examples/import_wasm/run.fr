@@ -38,8 +38,7 @@ main :: fn() void = {
     bytes := temp().read_to_string_or_crash(wasm_file).items(); // :panic
     
     a := general_allocator();
-    target: Qbe.QbeTargetEnv = (type = .JitOnly, os = query_current_os(), arch = query_current_arch(), link_libc = false);
-    rt: Wasm.Engine = init(a, target, logging);
+    rt: Wasm.Engine = init_for_jit(a, logging);
     mod := rt&.compile(bytes);
     exec_wasm_file(AugmentedExports, rt&, mod, args, standard_log);
 }
@@ -125,9 +124,7 @@ fn exec_wasm_file($Exports: Type, rt: *Rt.Engine, mod: *Wasm.Module, args: []CSt
     exports := (globals.create_exports)(globals);
     globals.engine = rt;
     instance := mod.instantiate(exports&);
-    
-    trace := Crash'push_resolver(Qbe.Module, mod.m.unwrap(), find_ip_in_module);
-    
+        
     ::tagged(Wasm.Export);    
     if instance.exports&.get("__indirect_table") { it |
         @assert(it&.is(.Table));
@@ -166,7 +163,6 @@ fn exec_wasm_file($Exports: Type, rt: *Rt.Engine, mod: *Wasm.Module, args: []CSt
         fn Catch() => ();
     };
     
-    pop_resolver(trace);
     // TODO
     //drop(m);
     //page_allocator.dealloc(u8, buf);
@@ -336,6 +332,15 @@ Exports :: @struct {
                 yield_file(ctx.memory.ptr, addr.zext(), len.zext());
                 return(len.zext());
             }
+            if id == 0xBBBB0002 {
+                #use("@/examples/testing.fr");
+                dest := ctx.memory.ptr.offset(addr.zext()).slice(len.zext());
+                sha256_hash := dest.slice(0, 64);
+                url := @tfmt("https://lukegrahamlandry.ca/franca/mirror/%", sha256_hash);
+                src := fetch(url, dest.len, sha256_hash) || return(-1);
+                dest.copy_from(src);
+                return dest.len;
+            };
             write(ctx, 2, addr, len);
             -1
         }
@@ -584,4 +589,3 @@ fn printf_impl(
 
 #use("@/lib/variadic.fr");
 #use("@/lib/sys/threads.fr");
-Qbe :: import("@/backend/ir.fr");

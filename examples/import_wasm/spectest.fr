@@ -7,15 +7,22 @@ main :: fn() void = {
     tests_dir := @fmt_cstr("%/test/core", root);
     Syscall'chdir(tests_dir).unwrap();
     println(root);
-    
+        
     wast_files := collect_with_extension(".", ".wast") 
         || panic("failed to collect wast files");
-    for wast_files { name |
-        continue :: local_return;
+    
+    ordered_retain wast_files& { name |
+        raw_name := name[].slice(0, name.len - ".wast".len());
+        !skip.contains(raw_name)
+    };
+    any_fails := false;
+    enumerate wast_files { i, name |
         mark := temp().mark();
-        @if(skip.contains(name)) continue();
-        json_name := @tfmt("%.json", name.slice(0, name.len - 5));
+        name := name[];
+        raw_name := name.slice(0, name.len - ".wast".len());
+        json_name := @tfmt("%.json", raw_name);
         if !file_exists(json_name) {
+            // TODO: we can't be execing shit, but also i don't care enough to write a wat parser
             hush(@slice("wast2json", "--enable-all", name));
         };
         contents := read_entire_file_or_crash(temp(), json_name);
@@ -39,13 +46,22 @@ main :: fn() void = {
             @panic("error at byte % of %/%:%:%%", json.current, tests_dir, json_name, line, col, json.error);
         };
         
-        println(json_name);
+        @println("=== % (%/%) ===", raw_name, i, wast_files.len);
+        @println("%/%", tests_dir, name);
+        rt: Rt.Engine = init_for_jit(temp(), ""); rt := rt&;
+        instance: ?*Rt.Instance = .None;
+        passed, total := (0, 0);
         each it.commands { it |
             continue :: local_return;
             ::enum(@type it.type);
             @match(it.type) {
                 fn module() => {
-                    @println("module %", it.filename.unwrap());
+                    @println("module %/%", tests_dir, it.filename.unwrap());
+                    wasm := read_entire_file_or_crash(temp(), it.filename.unwrap());
+                    mod := rt.compile(wasm);
+                    exports: Rt.ExportsEnv = (_ = init(temp()));
+                    it := mod.instantiate(exports&);
+                    instance = (Some = it);
                 }
                 fn register() => {
                     
@@ -55,34 +71,126 @@ main :: fn() void = {
                     @println("action %(...)", a.field);
                 }
                 fn assert_return() => {
-                    a := it.action.unwrap();
-                    @println("assert_return %(...)", a.field);
+                    a := it.action&.unwrap();
+                    instance := instance.unwrap();
+                    ok := assert_return(instance, a, it.expected);
+                    passed += int(ok);
+                    total += 1;
+                    if !ok {
+                        @print("at %/%:%:1\n\n", tests_dir, name, it.line);
+                    };
                 }
                 // i don't do verification or traps yet so don't try to compile the ones that aren't supposed to work
                 @default => continue();
             };
-            @println("%/%:%:1", tests_dir, name, it.line);
         };
-        println("todo");
-        Syscall'exit(0);
+        @print("passed %/% tests in %\n", passed, total, name);
+        if passed != total {
+            any_fails = true;
+        };
+        // todo: drop the modules
         temp().reset(mark);
     };
     Syscall'chdir(start.as_cstr()).unwrap();
+    @assert(!any_fails, "didn't pass all tests");
+}
+
+fn assert_return(instance: *Rt.Instance, action: *Wast.Action, expected: []Wast.Value) bool = {
+    ::enum(@type action.type);
+    @match(action.type) {
+        fn invoke() => {
+            args := SafeValue.list(temp());
+            expect := SafeValue.list(temp());
+            for action.args { it |
+                args&.push(it.parse_value());
+            };
+            for expected { it |
+                expect&.push(it.parse_value());
+            };
+            out := expect.items().shallow_copy(temp());
+            each out { it |
+                it._1.i64 = 7777;
+            };
+            
+            out := instance.invoke(action.field, args.items(), out)
+                || @panic("failed to call %", action.field);
+            
+            ::display_slice(SafeValue);
+            if out != expect.items() {
+                @print("% %\nexpect: %\nreturn: %\n", action.field, args.items(), expect.items(), out);
+                return false;
+            }
+        }
+        fn get() => {
+            panic("TODO: get");
+        }
+    };
+    true
 }
 
 skip :: @const_slice(
     // wast2json --version 1.0.39 doesn't work on these 
-    "id.wast", "ref.wast", "elem.wast", "align.wast", "br_if.wast", "table.wast", 
-    "global.wast", "memory.wast", "select.wast", "linking.wast", "br_table.wast", 
-    "call_ref.wast", "instance.wast", "ref_null.wast", "type-rec.wast", "local_tee.wast", 
-    "br_on_null.wast", "local_init.wast", "type-canon.wast", "annotations.wast", "ref_is_null.wast", 
-    "br_on_non_null.wast", "ref_as_non_null.wast", "return_call_ref.wast", "unreached-valid.wast", 
-    "type-equivalence.wast", "unreached-invalid.wast", 
+    "id", "ref", "elem", "align", "br_if", "table", 
+    "global", "memory", "select", "linking", "br_table", 
+    "call_ref", "instance", "ref_null", "type-rec", "local_tee", 
+    "br_on_null", "local_init", "type-canon", "annotations", "ref_is_null", 
+    "br_on_non_null", "ref_as_non_null", "return_call_ref", "unreached-valid", 
+    "type-equivalence", "unreached-invalid", 
     // i haven't bothered with string escapes in json.fr yet
-    "names.wast", 
+    "names", 
+    // multiple return values
+    "br", "if", "fac", "call", "func",
+    // if without else
+    "if", "stack", "labels", "local_get",
+    // more instructions. ceil, etc.
+    "f32", "f64", "float_misc", "f32_bitwise", "f64_bitwise", 
+    // 0x1B select
+    "nop", "loop", "block", "left-to-right", 
+    // complex constant expressions
+    "data",
+    // br_table
+    "load", "store", "return", "switch", "unwind", 
+    // idk. it wants me to change the bits of infinities/subnormals from what strtod gives me?
+    "const",
+    // might be the same as "const" but maybe i do it wrong, idk
+    "f64_cmp", "f32_cmp", "float_exprs", 
+    // start section
+    "start",
+    // give it the host imports it expects 
+    "token", "func_ptrs", 
+    // parse more Element kinds. currently only flags=0 is supported.
+    "binary", "ref_func", "table_get", "table_set", "return_call_indirect",
+    // i spam "skipping custom section"
+    "custom",
+    // no point since i don't run assert_trap/assert_malformed/etc. anyway also  don't parse the wast myself. 
+    "traps", "skip-stack-guard-page", 
+    "comments", "obsolete-keywords", "inline-module", 
+    "utf8-invalid-encoding", "utf8-custom-section-id", "utf8-import-module", "utf8-import-field", 
+    // keep multiple modules around in the host
+    "exports",
+    // !! i crash
+    "forward",
+    // exceptions
+    "imports",
+    // zero init undefined local
+    "local_set",
+    // "invalid instruction output type Kl in storeh" my "this being Kl is subtle" hack
+    "endianness",
+    // externref table.size
+    "table_grow", "table_size",
+    // saturating
+    "conversions", 
+    // memory.size
+    "memory_grow", "memory_size", "memory_trap", 
+    // tail call
+    "return_call", 
+    // float globals
+    "unreachable", "call_indirect", 
+    // !! safety check
+    "binary-leb128", 
+    // !! fails
+    "memory_redundancy", "float_literals", "float_memory", "address", 
 );
-
-Wasm :: import("@/examples/import_wasm/runtime.fr");
 
 Wast :: @struct {
     commands: []Command;
@@ -97,21 +205,122 @@ Wast :: @struct {
         action: ?Action;
         as: ?Str;
         line: i64;
+        expected: []Value = empty();
     };
     Action :: @struct {
         Tag :: @enum(invoke, get);
         type: Tag;
         field: Str;
         args: []Value = empty();
-        expected: []Value = empty();
     };
     Value :: @struct {
         Tag :: @enum(i32, i64, f32, f64, externref, funcref);
         type: Tag;
-        value: Str;
+        value: Str = "";
     };
 };
 
+SafeValue :: Ty(Qbe.Cls, Rt.GlobalValue);
+fn invoke(self: *Rt.Instance, name: Str, args: []SafeValue, out: []SafeValue) ?[]SafeValue = {
+    it := self.exports&.get(name) || return(.None);
+    @if(!it&.is(.Function)) return(.None);
+    // TODO: typecheck
+    
+    // these arguments fit in registers so you can call any subset of this signeture without knowing the types
+    I :: @FnPtr(i: rawptr, a: i64, b: i64, c: i64, d: i64, e: i64, fa: f64, fb: f64, fc: f64, fd: f64, fe: f64) i64;
+    F :: @FnPtr(i: rawptr, a: i64, b: i64, c: i64, d: i64, e: i64, fa: f64, fb: f64, fc: f64, fd: f64, fe: f64) f64;
+    
+    int := @ref(zeroed Array(i64, 5)); i := 0;
+    flo := @ref(zeroed Array(f64, 5)); f := 0;
+    for args { k, v |
+        if k.is_int() {
+            int[i] = v.i64;
+            i += 1;
+        } else {
+            flo[f] = v.f64;
+            f += 1;
+        };
+    };
+    
+    f, c := (it.Function.callee, it.Function.context);
+    @if(out.len > 1) return(.None);
+    if out.len == 0 || out[0]._0.is_int() {
+        f := bit_cast_unchecked(rawptr, I, f);
+        v := f(c, 
+            int[0], int[1], int[2], int[3], int[4], 
+            flo[0], flo[1], flo[2], flo[3], flo[4], 
+        );
+        if out.len > 0 {
+            out[0]._1.i64 = v;
+        };
+    } else {
+        f := bit_cast_unchecked(rawptr, F, f);
+        v := f(c, 
+            int[0], int[1], int[2], int[3], int[4], 
+            flo[0], flo[1], flo[2], flo[3], flo[4], 
+        );
+        out[0]._1.f64 = v;
+    };
+    (Some = out)
+}
+
+fn parse_value(it: Wast.Value) SafeValue = {
+    ::enum(@type it.type);
+    k := it.type.cls();
+    if k.is_int() {
+        value: i64 = if it.value.starts_with("0x") {
+            hex(it.value.rest(2)).unwrap()
+        } else {
+            parse_int(it.value)
+        };
+        value: Rt.GlobalValue = (i64 = value);
+        return(k, value);
+    };
+    strtod :: fn(str: CStr, end_out: *CStr) f64 #weak #libc;    // TODO: write my own 
+    end := zeroed(CStr);
+    f := strtod(it.value.as_cstr(), end&);
+    if end.ptr[] != 0 {
+        @panic("didn't parse whole float: %", it.value);
+    };
+    value: Rt.GlobalValue = (f64 = f);
+    if k == .Ks {
+        value.f32 = f.cast();
+    };
+    (k, value)
+}
+
+fn cls(self: Wast.Value.Tag) Qbe.Cls = @match(self) {
+    fn i32() => .Kw;
+    fn i64() => .Kl;
+    fn f32() => .Ks;
+    fn f64() => .Kd;
+    @default => @panic("TODO: %", self);
+};
+
+fn eq(a: *SafeValue, b: *SafeValue) bool = {
+    @if(a._0 != b._0) return(false);
+    @match(a._0) {
+        fn Kw() => a._1.i32 == b._1.i32;
+        fn Kl() => a._1.i64 == b._1.i64;
+        fn Ks() => a._1.f32 == b._1.f32;
+        fn Kd() => a._1.f64 == b._1.f64;
+        @default => false;
+    }
+}
+
+fn display(self: *SafeValue, out: *List(u8)) void = {
+    @match(self._0) {
+        fn Kw() => @fmt(out, "%", self._1.i32);
+        fn Kl() => @fmt(out, "%", self._1.i64);
+        fn Ks() => @fmt(out, "%", fmt_hex(self._1.f32));
+        fn Kd() => @fmt(out, "%", fmt_hex(self._1.f64));
+        @default => ();
+    };
+    @fmt(out, "_%", self._0);
+}
+
+Qbe :: import("@/backend/ir.fr");
+Rt :: import("@/examples/import_wasm/runtime.fr");
 #use("@/lib/encoding/json.fr");
 #use("@/lib/encoding/json_reflect.fr");
 ::DeriveJson(Wast);

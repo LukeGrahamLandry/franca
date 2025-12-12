@@ -150,6 +150,18 @@ export const imports = {
                     });
                     return len;
                 }
+                case 0xBBBB0002n: {
+                    const sha256_hash = get_wasm_string(ptr, 64);
+                    // caller (fetch_or_crash) checks that the hash matches. 
+                    // should allow any url not just mine but you need to be strict 
+                    // about cors for threads/gpu to work so it wouldn't matter anyway. 
+                    const url = "https://lukegrahamlandry.ca/franca/mirror/" + sha256_hash;
+                    const result = sync_fetch(url);
+                    if (result === null || result.byteLength > Number(len)) return -1n;
+                    const dest = new Uint8Array(Franca.memory.buffer, Number(ptr), result.byteLength);
+                    dest.set(new Uint8Array(result));
+                    return BigInt(result.byteLength);
+                }
                 default:
                     console.log(get_wasm_string(ptr, len));
                     return -1n;
@@ -293,6 +305,16 @@ function get_wasm_string(ptr, len) {
     new Uint8Array(wasteofmytime).set(new Uint8Array(buffer));
     return new TextDecoder().decode(wasteofmytime);
 }
+
+function sync_fetch(url) {
+    let it = new XMLHttpRequest();
+    it.responseType = "arraybuffer";
+    it.open("GET", url, false);
+    it.send(null);
+    if (it.status !== 200) return null;
+    return it.response;
+}
+
 
 self.onmessage = handle;
 self.postMessage({ tag: "ready" })

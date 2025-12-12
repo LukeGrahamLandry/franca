@@ -1,4 +1,12 @@
 
+## (Dec 12)
+
+- import_wasm: spectest runner
+  - some have unreachable code so have to get rid of the "... which has already been terminated" check
+    but that also means i have to decode to skip instructions without emitting anything which is annoying. 
+- debugtext: i don't understand what `ctx->pos.x = (ctx->pos.x - fmodf(ctx->pos.x, ctx->tab_width)) + ctx->tab_width;`
+  is supposed to do but just not doing that makes my horizontal scrolling work better. 
+
 ## (Dec 11)
 
 - now that convert is PIC, implement run.Exports.js_worker_spawn. 
@@ -25,6 +33,11 @@
   so don't exec it everytime so the Engine is reused and it naturally stays cached. 6298. 
   don't hold the lock while compiling. 5376. 
   don't re-lookup the main module from the bytes every time. 3747. 
+- let the web demo fetch urls. since i need to put it on my domain to defeat the cors police,
+  might as well use it as a mirror for when github dies as well. 
+- prospero: fixed dead_code removing par so sigenture matches for wasm.
+- chess/perft: don't write the position twice when the only thing that changes is whose turn it is
+  - confused myself with unstable sort when checking i didn't break the test results
 
 ## (Dec 10)
 

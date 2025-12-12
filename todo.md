@@ -1,5 +1,8 @@
 
-- mirror bdf681b2c963d39f839b6590a25a739fa3a64f68ac9e0e8c0dc6d85f48c087ec
+- prospero wrong output in wasm because my atof doesn't support `_1069 const 4.76837e-07`
+- prospero doesn't compile in import_wasm `__franca_aot_debug_info`?
+- add a test for the shallow force_default_handling bake
+- deal with the webgpu wasm imports having hacky thing that doesn't work with caching in an attempt to make dawn.json optional
 - the thing where when you dot access a scope and it doesn't have that constant it recurses up all the way to the root scope is confusing. 
 - better error message if you try to bake an allocator with a data pointer. 
   should also be more careful about passing around the source location 

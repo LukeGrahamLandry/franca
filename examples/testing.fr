@@ -165,48 +165,65 @@ fetch_or_crash :: fn(url: Str, zip_size_bytes: i64, sha256_hash: Str, HACK_name:
         @else => panic("expected zip or tar.gz");
     };
     
-    zip_file_path := @tfmt("%.%", folder_path, extension);
-    
-    zip_bytes := "";
-    if !file_exists(zip_file_path) {
-        fetch :: fn(url: Str) ?[]u8 => {
-            return :: local_return;
-            @eprintln(">>> downloading [%]...", url);
-            ok, out, err := exec_and_catch("curl", @slice(url, "-s", "-L"), temp());
-            if !ok {
-                @eprintln("failed curl %\n%", url, err.items());
-                return(.None);
-            };
-            
-            zip_bytes = out.items();
-            
-            @eprintln(">>> verifying [%]...", zip_file_path);
-            if zip_bytes.len != zip_size_bytes {
-                @eprintln("bad size: %", url);
-                return(.None);
-            };
-            digest := Sha256'hex(zip_bytes);
-            if digest != sha256_hash {
-                @eprintln("bad hash %", url);
-                return(.None);
-            };
-            
-            write_entire_file_or_crash(zip_file_path, zip_bytes);
-            (Some = zip_bytes)
-        };
-        // sometimes github is down but not cloudflare... 
-        zip_bytes = fetch(url) || fetch(@tfmt("https://lukegrahamlandry.ca/franca/mirror/%", sha256_hash))
-            || @panic("failed to download dependency");
-    };
-    @eprintln(">>> unpacking [%]...", zip_file_path);
-    
-    if zip_bytes.len == 0 {
-        zip_bytes = read_entire_file_or_crash(temp(), zip_file_path);
-    };
+    zip_bytes := fetch(url, zip_size_bytes, sha256_hash) 
+        || @panic("failed to download dependency");
     extract_archive(zip_bytes, FRANCA_CACHE_PATH, HACK_name, extension == "zip");
     
     temp().reset(mark);
     folder_path
+};
+
+
+fetch :: fn(url: Str, zip_size_bytes: i64, sha256_hash: Str) ?[]u8 = {
+    @debug_assert_eq(sha256_hash.len, 64);
+    for(sha256_hash, fn(c) => @debug_assert(hex_digit(c).is_some()));
+    zip_file_path := @tfmt("%/%.out", FRANCA_CACHE_PATH, sha256_hash);
+    
+    zip_bytes := "";
+    if !file_exists(zip_file_path) {
+        s, h, p := (zip_size_bytes, sha256_hash, zip_file_path);
+        // sometimes github is down but not cloudflare... 
+        zip_bytes = fetch_one(url, s, h, p) 
+            || fetch_one(@tfmt("https://lukegrahamlandry.ca/franca/mirror/%", sha256_hash), s, h, p)
+            || return(.None);
+    };
+    
+    if zip_bytes.len == 0 {
+        zip_bytes = read_entire_file_or_crash(temp(), zip_file_path);
+    };
+    (Some = zip_bytes)
+};
+
+fetch_one :: fn(url: Str, zip_size_bytes: i64, sha256_hash: Str, zip_file_path: Str) ?[]u8 = {
+    @eprintln(">>> downloading [%]...", url);
+    zip_bytes := if query_current_arch() == .wasm32 {
+        js_write :: fn(id: i64, ptr: *u8, len: i64) i64 #weak #import("libc");
+        dest := temp().alloc_uninit(u8, zip_size_bytes);
+        dest.slice(0, sha256_hash.len).copy_from(sha256_hash);
+        result := js_write(0xBBBB0002, dest.ptr, dest.len);
+        @if(result == -1) return(.None);
+        dest.slice(0, result)
+    } else {
+        ok, out, err := exec_and_catch("curl", @slice(url, "-s", "-L", "-f"), temp());
+        if !ok {
+            @eprintln("failed curl %\n%", url, err.items());
+            return(.None);
+        };
+        out.items()
+    };
+    @eprintln(">>> verifying [%]...", zip_file_path);
+    if zip_bytes.len != zip_size_bytes {
+        @eprintln("bad size: %", url);
+        return(.None);
+    };
+    digest := Sha256'hex(zip_bytes);
+    if digest != sha256_hash {
+        @eprintln("bad hash %", url);
+        return(.None);
+    };
+    
+    write_entire_file_or_crash(zip_file_path, zip_bytes);
+    (Some = zip_bytes)
 };
 
 extract_archive :: fn(compressed: []u8, dir: Str, HACK_name: Str, is_zip: bool) void = {
@@ -313,27 +330,9 @@ extract_archive :: fn(compressed: []u8, dir: Str, HACK_name: Str, is_zip: bool) 
 };
 
 // 🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡
-fetch_text_or_crash :: fn(url: Str, size: i64, sha256_hash: Str, a: Alloc) Str = {
-    path := @tfmt("%/%.txt", FRANCA_CACHE_PATH, sha256_hash);
-    if read_entire_file(a, path) { s |
-        return s;
-    };
-    make_dirs_or_crash(FRANCA_CACHE_PATH);
-    
-    @eprintln(">>> downloading [%]...", url);
-    ok, out, err := exec_and_catch("curl", @slice(url, "-s", "-L"), a);
-    @assert(ok, "failed curl %\n%", url, err.items());
-    err&.drop();
-    
-    @eprintln(">>> verifying [%]...", path);
-    @assert_eq(out.len, size, "bad size: %", url);
-    digest := Sha256'hex(out.items());
-    @assert_eq(digest, sha256_hash, "bad hash %", url);
-    
-    write_entire_file_or_crash(path, out.items());
-    
-    // TODO: need a `shink_to_fit(List) -> Slice` so you can free it in allocators that don't track size.
-    out.items()
+fetch_text_or_crash :: fn(url: Str, size: i64, sha256_hash: Str) Str = {
+    fetch(url, size, sha256_hash) 
+        || @panic("failed to download dependency")
 };
 
 // 🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡

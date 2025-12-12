@@ -13,10 +13,9 @@ fastSkipCount :: 40;
 hush :: @static(bool) false;
 
 main :: fn() void = {
-    Crash :: import("@/lib/crash_report.fr");
-    //Crash'hook_backtrace();
-    
     import("@/examples/chess/precalc.fr")'initTables(temp());
+    // TODO: this doesn't work without initTables but don't want to bake that
+    //perfts := @run parsePerfts(positionData, ast_alloc()).or(fn(e) => panic(e));
     perfts := parsePerfts(positionData, temp()).or(fn(e) => panic(e));
         
     fast := false;
@@ -49,7 +48,7 @@ main :: fn() void = {
     };
 
     // For best parallelism, don't put the longest tasks at the end. You don't want time at the end where only one therad is working.
-    sort :: import("@/lib/sort.fr")'quicksort(Perfts, fn(a, b) => 
+    sort :: import("@/lib/sort.fr")'insertion_sortXXX(Perfts, fn(a, b) => 
         a.allCount >= b.allCount);
     perfts.sort();
     if fast {
@@ -60,7 +59,6 @@ main :: fn() void = {
     taskIndex := 0;
     workers := temp().alloc_uninit(Worker, cores);
     enumerate workers { i, it |
-        it.id = i;
         it.lists = init(temp());  // :DontStoreTheAllocator
         it.nextTask = taskIndex&;
         it.tasks = perfts;
@@ -94,7 +92,6 @@ Perft :: @struct {
 };
 
 Worker :: @struct {
-    id: i64;
     thread: *Thread;
     lists: ListPool;
     nextTask: *i64;
@@ -136,7 +133,7 @@ fn workerFn(self: *Worker) void = {
     if (self.failedCount == 0) {
         endTime := timestamp();
         ms := endTime - startTime;
-        @print("Thread % finished % perfts in %ms. % nodes / second.\n", self.id, passedCount, ms, totalNodes * 1000 / ms);
+        @print("finished % perfts in %ms. % nodes / second.\n", passedCount, ms, totalNodes * 1000 / ms);
     }
 }
 
@@ -183,7 +180,15 @@ fn parsePerfts(s: Str, a: Alloc) Result([]Perfts, Str) = {
             i += 1;
         };
         fen := s.slice(start, i);
+        
+        turn_i := fen.index_of(" ".ascii()).unwrap() + 1;
+        flip := fen[turn_i] == "x".ascii();
+        if flip {
+            fen[turn_i] = "w".ascii();
+        };
+        
         ::?Board;
+        ::Uci;
         _: Board = fromFen(fen)
             || return(Err = "failed to parse fen");
         perfts := Perft.list(a);
@@ -204,9 +209,14 @@ fn parsePerfts(s: Str, a: Alloc) Result([]Perfts, Str) = {
             
             perfts&.push(depth = depth, nodes = nodes);
             total += nodes;
-            
         }
         all&.push(fen = fen, levels = perfts&.shrink_to_fit(), allCount = total);
+        if flip {
+            it := all[all.len - 1];
+            it.fen = fen.shallow_copy(a);
+            it.fen[turn_i] = "b".ascii();
+            all&.push(it);
+        };
     };
 
     (Ok = all&.shrink_to_fit())
