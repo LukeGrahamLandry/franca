@@ -13,7 +13,6 @@ and some things are dumb enough that I should defend myself.
 - comptime: example usecases for full compile time execution
 - debugging
 - caching: details about `.frc` files
-- concessions: rambling defense of some language design decisions
 - lib_summary: list of useful code provided with the franca distribution 
 - builtins: list of magic functions provided by the franca compiler 
 - graphics: notes about the franca `graphics` library (gpu rendering)

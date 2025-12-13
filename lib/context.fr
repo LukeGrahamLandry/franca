@@ -22,6 +22,8 @@ DefaultContext :: @struct(
     reserved3: Array(i64, 6),
 );
 
+franca_required_stack_bits :: 24;
+
 // These are things that need to be inherited between compliation units. 
 // ie. if comptime code starts a thread, its next_thread_id needs to continue 
 //     from the compiler's, not reset at 1 or mutexes don't work. 
@@ -164,7 +166,7 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
 // surely we don't need to call uname... right... right...?
 fn query_current_os() Os = {
     @if(IS_BOOTSTRAPPING) return(Os.macos);
-    @as(Os) @as(i64) context(DefaultContext)[].current_os.zext()
+    @as(Os) @as(i64) tls(.current_os)[].zext()
 }
 
 // On macos (argc, argv) are passed to the entry point in registers so we're good to go. 
@@ -314,22 +316,6 @@ fn push_zeroed_dynamic_context($body: @Fn() void) void = {
     set_dynamic_context(old_context);
 }
 
-fn push_dynamic_context($body: @Fn() void) void = {
-    old_context := get_dynamic_context();
-    new_context := @uninitialized Array(u8, size_of_dynamic_context);
-    new_context := raw_from_ptr(@type new_context, new_context&);
-    if !old_context.is_null() {
-        copy_no_alias(new_context, old_context, size_of_dynamic_context); 
-    } else {
-        scary_log("Tried to inherit null context.");
-    };
-    set_dynamic_context(new_context);
-    @must_return body();
-    // there are places where i early return from body so you can't do anything interesting here. 
-    // but the environment is stored in a local variable this set() only matters if the caller does something after the push() block. 
-    set_dynamic_context(old_context);
-}
-
 fn push_emergency_dynamic_environment($body: @Fn() void) void = {
     push_zeroed_dynamic_context { // restores .os from a static 
         a: Arena.Allocator = init(page_allocator, 16000);  // :leak
@@ -338,6 +324,18 @@ fn push_emergency_dynamic_environment($body: @Fn() void) void = {
         context(DefaultContext)[].panic_hook = emergency_panic;
         body();
     };
+}
+
+fn push_tls_value($name: Fields(DefaultContext), value: FieldType(DefaultContext, name), $body: @Fn() void) void #generic = {
+    it := tls(name);
+    prev := it[];
+    it[] = value;
+    body();
+    it[] = prev;
+}
+
+fn tls($name: Fields(DefaultContext)) *FieldType(DefaultContext, name) #generic = {
+    DefaultContext.get_field(context(DefaultContext), name)
 }
 
 emergency_panic :: fn(msg: Str) Never = {
@@ -377,21 +375,19 @@ fn scary_log(s: Str) void = {
 }
 
 fn temp() Alloc = {
-    c := context(DefaultContext);
-    @if(IS_BOOTSTRAPPING) return(c.temporary_allocator.borrow());
-    @if(::(__builtin_compiler_abi < 1263)) return(c.temporary_allocator.borrow());
-    c.temporary_allocator_i
+    @if(IS_BOOTSTRAPPING) return(tls(.temporary_allocator)[].borrow());
+    @if(::(__builtin_compiler_abi < 1263)) return(tls(.temporary_allocator)[].borrow());
+    tls(.temporary_allocator_i)[]
 }
 
 // TODO: make this take an Alloc instead and get rid of the old ArenaAlloc field. need to kinda keep it around for isbootstrapping i think. 
-fn set_temporary_allocator(a: *Arena.Allocator) void = {
-    c := context(DefaultContext);
-    c.temporary_allocator = a;
-    c.temporary_allocator_i = a.borrow();
+fn set_temporary_allocator(a: *Arena.Allocator) void #noinline /*:UpdateBoot*/ = {
+    tls(.temporary_allocator)[] = a;
+    tls(.temporary_allocator_i)[] = a.borrow();
 }
     
 fn general_allocator() Alloc = 
-    context(DefaultContext)[].general_allocator;
+    tls(.general_allocator)[];
 
 fn mark_temporary_storage() Alloc.Mark = 
     temp().mark();
@@ -407,7 +403,7 @@ fn set_new_thread_id(ctx: *DefaultContext) void = {
 // - We saved (argc, argv) from the entry point (but someone might have changed it in the context).  
 // - The memory returned here is shared with other threads. So it's probably a bad plan to mutate it. 
 fn cli_args() []CStr = {
-    context(DefaultContext)[].cli_arguments
+    tls(.cli_arguments)[]
 }
 
 // - We saved (envp) from the entry point (but someone might have changed it in the context).  

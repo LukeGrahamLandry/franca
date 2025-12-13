@@ -63,7 +63,6 @@ SelfHosted :: @rec @struct(
     stack_trace_last_callee: ?FuncId, // bleh
     backtrace_node: *Crash.LocationResolverNode,
     recycle_funcid: List([]FuncId),
-    shim_callback_general_alloc: Alloc,
     debug_deny_jit_shim_calls := false,
     main_thread_index: i64,
     stats := zeroed @struct {
@@ -277,7 +276,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
             drop(m);
             general_allocator().dealloc_one(QbeModule, m);
             c'vtable'destroy_compiler(c.data);
-            context(DefaultContext)[].comptime = rawptr_from_int(0); 
+            tls(.comptime)[] = rawptr_from_int(0); 
 
             // this doesn't re-read the files to check if they changed since you started compiling, that would feel a bit creepy. 
             z := zone_begin(.CheckCache);
@@ -299,8 +298,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
     };
     
     callee := callee.unwrap();
-    push_dynamic_context {
-        context(DefaultContext)[].comptime = rawptr_from_int(0);
+    push_tls_value(.comptime, zeroed(rawptr)) {
         callee(vtable);
     };
     
@@ -415,9 +413,8 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
         stack_trace_last_callee = .None,
         backtrace_node = push_resolver(SelfHosted, self, find_function_aa),
         recycle_funcid = list(a),
-        shim_callback_general_alloc = general_allocator(),
         library_scope = NOSCOPE, // patched in make_top_level
-        main_thread_index = context(DefaultContext)[].thread_index,
+        main_thread_index = tls(.thread_index)[],
         jit_shim_env = a.box_zeroed(DefaultContext),
     );
     self.comptime_codegen.m.codemap = (Some = self.codemap);
@@ -441,7 +438,7 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
         };
     };
     
-    c := context(DefaultContext)[].comptime&;
+    c := tls(.comptime);
     @assert(c[].is_null(), "Cannot call init_self_hosted inside another compiler. push_context with comptime=null first.");
     c[] = SelfHosted.raw_from_ptr(self);
     
@@ -459,7 +456,6 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
     c[] = context(DefaultContext)[];
     c.temporary_allocator = self.shim_callback_alloc&;
     c.temporary_allocator_i = self.shim_callback_alloc&.borrow();
-    c.general_allocator = self.shim_callback_general_alloc;
     c.panic_hook = fn(msg) = {
         println("[while handling a jit shim callback]");
         if query_current_arch() == .wasm32 {
@@ -718,7 +714,7 @@ fn add_function(self: *SelfHosted, f: Func) FuncId = {
 // because user code is allowed to just copy Ast nodes around and give us back aliased trees.
 // This might be something to address when i rework the macro system.  
 fn get_alloc(self: *SelfHosted) Alloc = {
-    @debug_assert_eq(self.main_thread_index, context(DefaultContext)[].thread_index, "ast_alloc is not thread safe");
+    @debug_assert_eq(self.main_thread_index, tls(.thread_index)[], "ast_alloc is not thread safe");
     self.ast_alloc.borrow()
 }
 

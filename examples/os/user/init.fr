@@ -1,12 +1,15 @@
 
 main :: fn() void = {
     buf := page_allocator.alloc_uninit(u8, 1.shift_left(16) * 10);
+    s := 0;
+    a := u8.int_from_ptr(buf.ptr).bit_and(bit_not(1.shift_left(franca_required_stack_bits) - 1));
+    b := i64.int_from_ptr(s&).bit_and(bit_not(1.shift_left(franca_required_stack_bits) - 1));
+    @assert_eq(a, b, "TODO: make signal stack be in the same chunk so tls works");
     _ := set_signal_handler(callee = handle_signal, stack = buf);
     
     if query_current_arch() != .wasm32 {
         redo_relocations_static_linux();
     };
-    push_dynamic_context {
         c := context(DefaultContext);
         c.prefer_syscalls = false;
         
@@ -23,7 +26,6 @@ main :: fn() void = {
         throw_panic_hook :: fn(s: Str) Never = {
             fs := shell;
             panicking :: @static(bool);
-            c := context(DefaultContext);
             old := fs.strace;
             fs.strace = false;
             @if(panicking[]) Crash'backtracing_panic_handler(s);
@@ -33,8 +35,8 @@ main :: fn() void = {
             panicking[] = false;
             fs.strace = old;
             // TODO: don't leak the compiler, etc.
-            @if(c.thread_index != 1) {
-                @println("child thread % panicked", c.thread_index);
+            @if(tls(.thread_index)[] != 1) {
+                @println("child thread % panicked", tls(.thread_index)[]);
                 Syscall'exit(1); 
             };
             throw(jumpbuf);
@@ -68,18 +70,17 @@ main :: fn() void = {
             print("\n");
             shell.strace = old;
             
-            push_dynamic_context {
-                context(DefaultContext)[].panic_hook = throw_panic_hook;
+            push_tls_value(.panic_hook, throw_panic_hook) {
                 @match(try(jumpbuf)) {
                     fn Try() => decode_and_run_cmd(buf.items());
                     fn Catch() => println("main thread panicked.");
                 };
             };
+            // TODO: reset panic_hook even if jumped
             
             buf&.clear();
             temp().reset(mark);
         };
-    }
 }
 
 Vfs :: import("@/examples/os/user/vfs.fr");
@@ -176,18 +177,18 @@ fn set_signal_handler(new: SignalHandler) SignalHandler = {
 Command :: @struct(command: Str, parts: []Str);
 run_command :: fn(cmd: *Command) void = {
     command, parts := (cmd.command, cmd.parts);
-    push_dynamic_context { 
-        c := context(DefaultContext);
         args := CStr.list(temp());
         args&.push("franca".as_cstr());
         for parts { it |
             args&.push(it.as_cstr());
         };
-        c.cli_arguments = args.items();
+push_tls_value(.comptime, zeroed(rawptr)) {
+    push_tls_value(.cli_arguments, args.items()) { 
         fs := Vfs.fs;
         // TODO: passing nocache here is weaker than FRANCA_NO_CACHE=1 because some user code only checks the envvar
         import("@/compiler/main.fr")'main2(command, shell.nocache);
     };
+};
 }
 
 search_path :: fn(command: Str) ?Str = {
@@ -430,7 +431,7 @@ LIBC :: @struct {
 };
 
 fn get_current_tls() *ThreadData = {
-    thread := Thread.ptr_from_raw(context(DefaultContext)[].thread);
+    thread := Thread.ptr_from_raw(tls(.thread)[]);
     @run @assert_eq(size_of(@type thread.runtime_data), size_of(ThreadData));
     ::ptr_utils(Thread);
     @assert(!thread.is_null(), "missing env.thread");
@@ -454,28 +455,26 @@ system_counter_uptime :: fn() TimeSpec = {
 }
 
 fn with_syscalls($body: @Fn() i64) i64 = {
-    c := context(DefaultContext);
-    old := c.prefer_syscalls;
-    c.prefer_syscalls = true;
+    old := tls(.prefer_syscalls)[];
+    tls(.prefer_syscalls)[] = true;
     result := @must_return body();
-    c.prefer_syscalls = old;
+    tls(.prefer_syscalls)[] = old;
     result
 }
 
 fn trace(arg: FatExpr) FatExpr #macro = @{
     if shell.strace {
-        c := context(DefaultContext);
-        t := c.temporary_allocator_i;
+        t := tls(.temporary_allocator_i)[];
         old := shell.strace;    // TODO: not thread safe
-        old_sys := c.prefer_syscalls;
-        c.prefer_syscalls = false;
+        old_sys := tls(.prefer_syscalls)[];
+        tls(.prefer_syscalls)[] = false;
         shell.strace = false;
-        c.temporary_allocator_i = Arena'stack_alloc(1024);
-        @print("%) ", c.thread_index);
+        tls(.temporary_allocator_i)[] = Arena'stack_alloc(1024);
+        @print("%) ", tls(.thread_index)[]);
         @[println arg];
-        c.temporary_allocator_i = t;
+        tls(.temporary_allocator_i)[] = t;
         shell.strace = old;
-        c.prefer_syscalls = old_sys;
+        tls(.prefer_syscalls)[] = old_sys;
     };
 };
 
