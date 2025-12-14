@@ -30,7 +30,7 @@ fn exec_and_catch(path: Str, args: Slice(Str), alloc: Alloc, input: []u8) Ty(boo
         fn Ok(p) => {
             buf := @slice(out&, err&);
             bool.loop() { $break |
-                @match(poll(p&, buf, true, input&, true)) {
+                @match(poll(p&, buf, true, input&, true, true)) {
                     fn Ok(status) => {
                         if status { status |
                             break(status == 0);
@@ -41,7 +41,6 @@ fn exec_and_catch(path: Str, args: Slice(Str), alloc: Alloc, input: []u8) Ty(boo
                         break(false);
                     };
                 };
-                usleep(1000);  // TODO: this is stupid but i don't want to just spin. blocking poll instead?
             }
         }
     };
@@ -51,7 +50,7 @@ fn exec_and_catch(path: Str, args: Slice(Str), alloc: Alloc, input: []u8) Ty(boo
 RunningProcess :: @struct {
     pipes: Array(Fd, 3);  // in, out, err
     pid: i32;
-    status: i32;
+    status: ?i32 = .None;
 };
 
 // TODO: let caller set cwd
@@ -96,7 +95,7 @@ sys_capture_exec :: fn(args: []CStr) Result(RunningProcess, Str) = {
     Syscall'close(pipes&[1]&[1]).unwrap();  // close the write end
     Syscall'close(pipes&[2]&[1]).unwrap();  // "
     
-    (Ok = (pid = pid, pipes = @array(pipes&[0]&[1], pipes&[1]&[0], pipes&[2]&[0]), status = -1))
+    (Ok = (pid = pid, pipes = @array(pipes&[0]&[1], pipes&[1]&[0], pipes&[2]&[0])))
 };
 
 exec :: fn(args: []CStr) Never = {
@@ -136,7 +135,7 @@ static_execvp :: fn(path: CStr, argv: *CStr) i32 = {
 // (which exec_and_catch will do for you if you want it to block until all done). 
 // 
 // buf = (out, err); it's legal for all to be the same list
-fn poll(self: *RunningProcess, buf: []*List(u8), realloc: bool, input: *[]u8, last_input: bool) Result(?i32, Str) #use("@/lib/sys/posix.fr") = {
+fn poll(self: *RunningProcess, buf: []*List(u8), realloc: bool, input: *[]u8, last_input: bool, blocking: bool) Result(?i32, Str) #use("@/lib/sys/posix.fr") = {
     @debug_assert_eq(buf.len, 2);  // TODO: pass *Array.
     poll_data := @array(@as(pollfd)
         (fd = self.pipes&[0], events = POLL.OUT, revents = 0),
@@ -148,25 +147,25 @@ fn poll(self: *RunningProcess, buf: []*List(u8), realloc: bool, input: *[]u8, la
         poll_data = poll_data.rest(1);
     };
     
-    status: i32 = 0;
-    done := @if(self.status == -1, {
+    n := poll(poll_data, @if(blocking, -1, 0)) || return(Err = "libc::poll() failed");
+    
+    o_closed := poll_data[poll_data.len - 1].revents.bit_and(POLL.HUP) != 0;
+    e_closed := poll_data[poll_data.len - 2].revents.bit_and(POLL.HUP) != 0;
+    if o_closed && e_closed && self.status.is_none() {
+        status: i32 = 0;
         done := waitpid(self.pid, status&, W.NOHANG)
             || return(Err = "libc::wait4 failed");
         if done > 0 {
-            self.status = status;
+            self.status = (Some = status);
         };
-        done
-    }, {
-        status = self.status;
-        self.pid
-    });
+    };
     
-    n := poll(poll_data, 0) || return(Err = "libc::poll() failed");
-    
-    if done == 0 && n == 0 {
+    if self.status.is_none() && n == 0 {
+        @debug_assert(!blocking);
         return(Ok = .None);
     };
     
+    // TODO: do i have to ask for it to be nonblocking when i create the pipe?
     if input.len > 0 {
         p := poll_data.index(0);
         if p.revents.bit_and(POLL.OUT) != 0 {
@@ -203,12 +202,11 @@ fn poll(self: *RunningProcess, buf: []*List(u8), realloc: bool, input: *[]u8, la
         };
     };
     
-    if done != 0 && !full {
+    @if(!full) if self.status { _ |
         Syscall'close(self.pipes&[0]);
         Syscall'close(self.pipes&[1]);
         Syscall'close(self.pipes&[2]);
-        
-        return(Ok = (Some = status));
+        return(Ok = self.status);
     };
     
     (Ok = .None)

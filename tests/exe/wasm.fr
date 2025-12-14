@@ -1,15 +1,21 @@
 
-main :: fn() void = {
+driver :: fn() void = {
     franca := get_executable_path(temp());
     hush(@slice(franca, "graphics/web/webgpu_api.fr"));
     hush(@slice(franca, "examples/default_driver.fr", "build", "examples/os/host/web.fr", "-o", "examples/web/target/demo.wasm", "-arch", "wasm32", "-unsafe", "-dynamiclib", "-keep-names"));
+    main();
+}
+
+main :: fn() void = {
     wasm := temp().read_to_string_or_crash("examples/web/target/demo.wasm").items();
+    manifest := collect_tests();
+
+    start := timestamp();
     a := general_allocator();
     rt: Rt.Engine = init_for_jit(a, "");
     hello_world(rt&);
     mod := rt&.compile(wasm);
     
-    manifest := collect_tests();
     each manifest.compilers { it |
         State :: @struct(rt: *Rt.Engine, mod: *Rt.Module, name: CStr);
         state: State = (rt = rt&, mod = mod, name = it.name.as_cstr());
@@ -24,6 +30,11 @@ main :: fn() void = {
             (true, out, list(temp()), "")
         });
     };
+    end := timestamp();
+    // TODO: release instances when im done with them and have a pool of memories/tables allocations. 
+    //       rn its 630 samples in this drop call (for reference: 780 samples in the first call to compile())
+    drop(rt&);  // waste of time
+    @println("wall: %ms, drop: %ms", end - start, timestamp() - end);
 }
 
 collect_tests :: fn() = {

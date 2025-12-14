@@ -99,19 +99,29 @@ Engine :: @rec @struct {
     target: Qbe.QbeTargetEnv;
     gpa: Alloc;
     generation: u32 = 0;
+    storage: *Arena.Allocator;
+    memories := zeroed RawList([]u8);
+    instances := zeroed RawList(*Instance);
 };
 
 fn init_for_jit(a: Alloc, debug: Str) Engine = 
     init(a, (type = .JitOnly, os = query_current_os(), arch = query_current_arch(), link_libc = false), debug);
 
-fn init(a: Alloc, target: Qbe.QbeTargetEnv, debug: Str) Engine = (
-    modules = init(a), 
+fn init(a: Alloc, target: Qbe.QbeTargetEnv, debug: Str) Engine = {
+    arena: Arena.Allocator = init(a, 1.shift_left(16));
+    aa := arena&.borrow().box_uninit(@type arena);
+    aa[] = arena;
+    arena := aa;
+    locked := arena.borrow().boxed(LockedAlloc, (parent = arena.borrow()));
+(
+    modules = init(locked.borrow()), 
     target = target,
     debug = debug,
-    gpa = a,
-);
+    gpa = locked.borrow(),
+    storage = arena,
+)
+}
 
-// todo: not holding the lock means gpa can't be an arena
 // - don't want to hold the lock while compiling because that's slow
 // - don't want multiple threads to compile the same module redundantly
 fn compile(self: *Engine, wasm: []u8) *Module = {
@@ -191,7 +201,8 @@ fn compile_uncached(self: *Engine, wasm: []u8) *Module = {
     mod
 }
 
-fn instantiate(mod: *Module, imports: *ExportsEnv) *Instance = {
+fn instantiate(engine: *Engine, mod: *Module, imports: *ExportsEnv) *Instance = {
+    a := engine.gpa;
     instance := {
         it: Instance = (
             memory = zeroed(*SaneRawList(u8)),
@@ -199,7 +210,7 @@ fn instantiate(mod: *Module, imports: *ExportsEnv) *Instance = {
             gpa = general_allocator(),
             counts = mod.counts,
         );
-        r := it.gpa.alloc_zeroed(i64, it&.size() / size_of(i64));
+        r := a.alloc_zeroed(i64, it&.size() / size_of(i64));
         r := bit_cast_unchecked(*i64, *Instance, r.ptr);
         r[] = it;
         r
@@ -212,7 +223,8 @@ fn instantiate(mod: *Module, imports: *ExportsEnv) *Instance = {
         // max=MAX_u32 means no max was specified, clamp to 2^16 pages = 4gb
         len, cap := (it.min.zext() * wasm_page_size, it.max.zext().min(wasm_page_size) * wasm_page_size);
         buf := page_allocator.alloc_uninit(u8, cap);  // page allocator always gives zeros
-        buf := instance.gpa.boxed(SaneRawList(u8), (ptr = buf.ptr, cap = buf.len, len = len));
+        engine.memories&.push(buf, a);
+        buf := a.boxed(SaneRawList(u8), (ptr = buf.ptr, cap = buf.len, len = len));
         instance.memory = buf;
     };
 
@@ -280,7 +292,7 @@ fn instantiate(mod: *Module, imports: *ExportsEnv) *Instance = {
         view.tables[found&[.tables] + i] = view.local_tables[i]&;
     };
     
-    instance.ordered_exports = instance.gpa.alloc_init(Export, mod.w.exports.len) { i |
+    instance.ordered_exports = a.alloc_init(Export, mod.w.exports.len) { i |
         it := mod.w.exports.index(i);
         ::?Callable;
         e: Export = @match(it.type) {
@@ -290,12 +302,13 @@ fn instantiate(mod: *Module, imports: *ExportsEnv) *Instance = {
             fn Table() => (Table = view.tables[it.id.zext()]);
             fn Memory() => (Memory = instance.memory);
         };
-        instance.exports&.insert(it.name.items(), e, instance.gpa);
+        instance.exports&.insert(it.name.items(), e, a);
         e
     };
     
     instance.run_initializers(mod);
     
+    engine.instances&.push(instance, a);
     instance
 }
 
@@ -357,12 +370,36 @@ fn get(self: *ExportsEnv, module: Str, name: Str) ?Export = {
 }
 
 UserContext :: @struct(memory: *SaneRawList(u8), env: rawptr);
-fn new_memory(initial: i64, max_bytes: i64) Ty(Export, *UserContext) = {
+fn new_memory(engine: *Engine, initial: i64, max_bytes: i64) Ty(Export, *UserContext) = {
     buf := page_allocator.alloc_uninit(u8, max_bytes);  // page allocator always gives zeros
-    a := general_allocator();
+    a := engine.gpa;
+    engine.memories&.push(buf, a);
     buf := a.boxed(SaneRawList(u8), (ptr = buf.ptr, cap = buf.len, len = initial));
     ctx := a.boxed(UserContext, (memory = buf, env = get_dynamic_environment()));
     ((Memory = buf), ctx)
+}
+
+fn drop(self: *Engine) void = {
+    self.lock&.lock();
+    for self.instances { it |
+        view := it.view();
+        for view.local_tables { t |
+            t := t.from_sane();
+            drop(t&, it.gpa);
+        };
+    };
+    for self.memories { it |
+        page_allocator.dealloc(u8, it);
+    };
+    each self.modules& { k, v |
+        @if_let(v) fn Ready(mod) => {
+            if mod.m { m |
+                drop(m);
+            };
+        };
+    };
+    arena := self.storage[];
+    arena&.deinit();
 }
 
 fn SaneRawList($T: Type) Type = {

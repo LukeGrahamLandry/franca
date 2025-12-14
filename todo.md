@@ -1,3 +1,4 @@
+
 - better error messages when you have an unfilled fixup on wasm. 
 - please please cleanup the got_lookup_offset stuff for wasm
 - `./q.out examples/default_driver.fr build tests/exe/wasm.fr && FRANCA_BACKTRACE=1 ./a.out`
@@ -9,7 +10,6 @@
   (the confusing example was report_called_uncompiled_or_just_fix_the_problem)
 - removing pare broke ENABLE_GVN=false `compile_expr__1691 Wanted alias for RTmp:1849`
 - prospero wrong output in wasm because my atof doesn't support `_1069 const 4.76837e-07`
-- prospero doesn't compile in import_wasm `__franca_aot_debug_info`?
 - add a test for the shallow force_default_handling bake
 - deal with the webgpu wasm imports having hacky thing that doesn't work with caching in an attempt to make dawn.json optional
 - the thing where when you dot access a scope and it doesn't have that constant it recurses up all the way to the root scope is confusing. 
@@ -337,6 +337,19 @@ i think it's just a race where it gets confused if two programs try to cache the
   `failed to write 4935560 bytes to 'target/franca/cache/__backend_meta_qbe_frontend_fr.frc'`
   when running backend/meta/test.fr without -bin so it recompiles and tries to cache on multiple threads. 
 
+- `./target/f.out tests/exe/wasm.fr` doesn't work with SLOW_MEMORY_DEBUGGING=true
+- TODO: i broke compiler/test.fr running examples/repl.fr (Cached) on riscv
+- spurious failures
+  - (repro) diff target/release/franca-linux-arm64-sta a.out 
+  - the crash in copy_bytes_static (but happening locally is an improvement kinda)
+  - TODO: i broke repro. only of linux-rv64-sta and the only difference is two instructions swapped:
+```
+00154490  93 02 05 00 13 83 05 00  b3 84 62 40 93 03 00 00
+00154490  13 83 05 00 93 02 05 00  b3 84 62 40 93 03 00 00
+```
+it seems to work most of the time? so thread ordering problem?
+
+
 ## import_symbol / weak
 
 TODO: my @import_symbol always does a weak symbol even though it in the macro body i say weak=false.
@@ -454,7 +467,6 @@ different subsets of the same resources.
   - echo.ssa: `$main(w %argc, l %argv)`
   - vararg1.ssa, vararg2.ssa: vprintf
   - compiler/main.fr jit: `wasm-jit $__franca_aot_debug_info should have known got_lookup_offset`
-- autotest run tests/exe/wasm.fr
 - add the small franca tests to the web demo
 - add the import_c things with dependencies to the web demo
 - web demo: hare, wuffs, more nontrivial c programs
@@ -466,7 +478,6 @@ different subsets of the same resources.
 
 ## import_wasm 
 
-- FRANCA_NO_CACHE=1 franca tests/exe/wasm.fr crashes on crazy memory corruption
 - speed it up! go back to f15cf8315db7d0040f4a3ebf017637c5273ae00b make it that fast again. 
   the two big changes were:
   - intercepting calls to use examples/os/user/libc
@@ -476,12 +487,6 @@ different subsets of the same resources.
   f15cf83-importwasm: 2676  
   0196148-importwasm: 5359  
   current-importwasm: 3197  
-
-```
-./target/w.out examples/web/target/demo.wasm -- -lang franca -file examples/terminal.fr
-more instructions @5 which has already been terminated.
-function $push_aot_debug_resolver__42805() {
-```
 
 convert.fr:  
 // TODO: this could be hella faster: 

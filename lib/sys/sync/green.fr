@@ -37,7 +37,7 @@ fn runtime() *Runtime =
     Runtime.ptr_from_raw(tls(.global)[].green_threads);
 
 start_main_thread :: fn(user_main: @FnPtr() void) void = {
-    @debug_assert_ne(query_current_arch(), .wasm32, "green.fr stack switching is not supported on wasm");
+    @assert_ne(query_current_arch(), .wasm32, "green.fr stack switching is not supported on wasm");
     self := zeroed Runtime; self := self&;
     tls(.global)[].green_threads = Runtime.raw_from_ptr(self);
     self.alloc = general_allocator();
@@ -76,7 +76,7 @@ start_main_thread :: fn(user_main: @FnPtr() void) void = {
 };
 
 fn spawn_first_thread(self: *Runtime, user_main: @FnPtr() void) void = {
-    stack := page_allocator.alloc_uninit(u8, 1.shift_left(25));  // :leak
+    stack := allocate_stack(prefer_syscalls(), query_current_os());  // :leak
     callee := bit_cast_unchecked(@type user_main, @FnPtr(userdata: rawptr) void, user_main);
     main_thread := init_thread_data(stack, callee, zeroed(rawptr));
     self.new_task(main_thread);
@@ -93,6 +93,7 @@ fn is_runnable(self: *Runtime, state: *ThreadState) bool = {
             now := now();
             now.seconds > it.until.seconds || { now.seconds == it.until.seconds && now.nanoseconds > it.until.nanoseconds }
         }
+        // TODO: this is wrong. its not supposed to recheck every time, needs to sleep until wake. 
         fn Futex(it) => it.addr[] != it.expect;
         fn Join(it) => self.tasks[it.task_index].state&.is(.Done);
     }
@@ -127,13 +128,14 @@ raw_create_thread :: fn(t: *Thread) void = {
 new_task :: fn(self: *Runtime, thread: *Thread) void = {
     push(self.tasks&, (fake_thread = thread), self.alloc);
     task := self.tasks.index(self.tasks.len - 1);
-
+    s := task.fake_thread.stack.usable;
+    
     // Bootstrap a jumpbuf that will call the thread's entry point. 
     r := task.resume&;
     r.fp = zeroed(rawptr);
     r.lr = ::@as(rawptr) franca_runtime_init_thread;
     // amd64 needs the -16 because throw() expects to be able to pop something off. 
-    r.sp = u8.raw_from_ptr(task.fake_thread.stack.ptr.offset(task.fake_thread.stack.len - int(current_arch() == .x86_64)*16));
+    r.sp = u8.raw_from_ptr(s.ptr.offset(s.len - int(current_arch() == .x86_64)*16));
     r.userdata = Thread.raw_from_ptr(task.fake_thread);  // becomes the first argument to lr=franca_runtime_init_thread
 };
 
@@ -156,7 +158,7 @@ end_current_task :: fn() Never = {
 // TODO: check which tasks have this `wait_addr` and wake the right person 
 //       (another thing to randomize is who gets woken when there are multiple people waiting). 
 wake :: fn(addr: *u32, count: u32) void = {
-    @debug_assert_eq(count, 1);
+    //@debug_assert_eq(count, 1);
     yield();
 };
 

@@ -10,6 +10,12 @@
   - import_c/ffi: sema_frc_import_fid of an import isn't working when jitting on wasm. 
     problem is i put_jit_addr(strlen) but called the table slot for strlen__33310. 
     i always fix this by adding more random places i move got_lookup_offset around, making it more and more garbage
+- leak police in import_wasm/runtime.fr
+- stop being dumb with sleeping in exec_and_catch. poll returns when the pipe closes so don't have to hyperactively waitpid. 
+  - now aot tests/exe/wasm.fr doesn't eat a billion cores, you can actually see the problem: 
+    assumes `args[0]` is franca binary and tries to run graphics/web/webgpu_api.fr. 
+    oh and it spams because it's execing itself over and over again assuming surely this will be the time it gets the compiler instead, lol. 
+
 
 ## (Dec 13)
 
