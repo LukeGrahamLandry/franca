@@ -120,6 +120,8 @@ S :: fn(name: FatExpr, fid: FatExpr) FatExpr #macro = {
     };
     args := FatExpr.list(pars.len + 1, ast_alloc());
     args&.push(@literal fid);
+    args&.push(@{ prefer_syscalls() });
+    args&.push(@{ query_current_os() });
     get :: fn(b: *Binding) FatExpr => (expr = (GetVar = b.name.Var), ty = b.ty.Finished, loc = func.loc, done = false);
     each pars { it |
         args&.push(get(it));
@@ -163,7 +165,10 @@ fn syscall(arg: FatExpr) FatExpr #macro = {
     loc := arg.loc;
     arg := arg&.items();
     
-    fid := arg[0]; arg := arg.rest(1);
+    fid := arg[0]; 
+    perfer_sys := arg[1];
+    os := arg[2];
+    arg := arg.rest(3);
     fid := const_eval(FuncId)(fid);
     func := get_function_ast(fid, true, true, true, false);
 
@@ -176,7 +181,10 @@ fn syscall(arg: FatExpr) FatExpr #macro = {
         };
         if it.name == (@symbol syscall) {
             can_syscall = true;
-            sys = const_eval(Array(i64, 3))(it.args);
+            // sys = const_eval(Array(i64, 3))(it.args);
+            enumerate sys& { i, xxx |
+                xxx[] = i64.const_eval(it.args&.items()[i]);
+            };
             if sys&[2] != NOSYS {
                 // only needed on amd but it works fine on arm too and saves an extra bit of fucking around
                 sys&[2] += 0x2000000;  // macos
@@ -251,12 +259,13 @@ fn syscall(arg: FatExpr) FatExpr #macro = {
             // TODO: you really really want these to be read only
             // TODO: "You can't have a void pointer 6518175468 as a constant" :CompilerBug
             //        when doing a DataSymbol it doesn't have a FuncId to put in the pagemap. 
+            // now it also wouldn't work because i allocate_stack before do_relocations_static_linux
             //vtable := @static(SyscallVTable) (n = @[@literal sys], libc = ::@as(rawptr) @[callee]);
             vtable := @static(SyscallVTable) (n = @[@literal sys], libc = (it = zeroed rawptr));
             f := @as(rawptr) @[callee];
             vtable.libc.it = f;  // not a race, we're in a macro; one per customer
             args := @array(@[arg_expr_padded]);
-            result := choose_syscall(args&, vtable);
+            result := choose_syscall(args&, vtable, @[perfer_sys], @[os]);
             bit_cast_unchecked(i64, @[@literal ret], result)
         })
     };
@@ -269,10 +278,10 @@ SyscallVTable :: @struct {
 
 // TODO: this really needs to return if we did libc or sys so you know where to look for errno 
 //       or maybe sys_ret should just get pulled into here as well? 
-choose_syscall :: fn(a: *Array(i64, 6), info: *SyscallVTable) i64 = {
-    want_syscall := prefer_syscalls() || info.libc.it.is_null();
+choose_syscall :: fn(a: *Array(i64, 6), info: *SyscallVTable, perfer_sys: bool, os: Os) i64 = {
+    want_syscall := perfer_sys || info.libc.it.is_null();
     if want_syscall {
-        sys_index := @if(query_current_os() == .macos, 2, @if(query_current_arch() == .aarch64 || query_current_arch() == .rv64, 0, 1));
+        sys_index := @if(os == .macos, 2, @if(query_current_arch() == .aarch64 || query_current_arch() == .rv64, 0, 1));
         n := info.n&[sys_index];
         if n == NOSYS {
             panic("unimplemented syscall")

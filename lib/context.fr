@@ -47,7 +47,7 @@ OS :: @static(ClearOnAotBake(Os)) (it = ComptimeEnvironment.ptr_from_raw(get_bui
 // note: whatever you had in the context at comptime is NOT baked into your program (unlike all other reachable memory).
 // For jitted code, you inherit the compiler's context. (TODO: maybe that should only be for comptime/drivers)
 // This also is not called for cached .frc programs run by the compiler (even though they're technically AOT too). 
-franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CStr, sp: i64) void #no_trace = {
+franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CStr, kernel_sp: i64) void #no_trace = {
     // TODO: this will be wrong if you pass >4096 cli arguments
     is_sane_pointer :: fn(p: ~T) bool #where = {
         p := bit_cast_unchecked(@type p, i64, p);
@@ -55,11 +55,11 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
     };
     ::ptr_utils(CStr);
     
-    align_stack(sp);
+    align_stack(kernel_sp);
     #use("@/lib/sys/process.fr");
     a := query_current_arch();
     // This is very fragile. relies on compiler/worker.fr/wrap_with_runtime_init and backend/<arch>/emit.fr
-    sp += @if(a == .aarch64, 0x40, @if(a == .rv64, 0x50, 0x48));
+    kernel_sp += @if(a == .aarch64, 0x40, @if(a == .rv64, 0x50, 0x48));
     
     // TODO: this is probably a stupid idea. for now it feels clever that i can guess the os by apple passing the 
     //       normal c args to the entry point in registers and linux passing them on the stack. 
@@ -67,7 +67,7 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
     is_linux := is_sane_pointer(argc) || !is_sane_pointer(envp) || !is_sane_pointer(argv);
     
     if is_linux && a != .wasm32 {
-        entry_args_from_stack_linux(argc&, argv&, envp&, sp);
+        entry_args_from_stack_linux(argc&, argv&, envp&, kernel_sp);
     } else {
         // if the args to main looked reasonable, assume we're in a hosted libc. 
         // which is always true on macos, and true on linux if we didn't make the exe ourself 
@@ -94,15 +94,18 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
     // the distinction matters for examples/os/user/init.fr where the os doesn't ship a libc but i want to fake it by redoing the relocations once i get to main().
     have_libc :: @static(bool);
     
-    impl2 :: fn(argc: i64, argv: *CStr, envp: *CStr) void #no_trace = {
-        push_zeroed_dynamic_context {   // for now this sets c.current_os=OS[]
+    impl2 :: fn() Never #no_trace = {
+        thread := get_current_thread();
+        set_dynamic_context(DefaultContext.raw_from_ptr(thread.first_environment&));
             c := context(DefaultContext);
+            c.current_os = (@as(i64) @as(Os) OS[].it).trunc();
             temporary_allocator: Arena.Allocator = init(page_allocator, 1.shift_left(20));
             set_temporary_allocator(temporary_allocator&);
             c.panic_hook = print_and_exit1;
             c.global = @static(GlobalFrancaRuntime);
             c.global.next_thread_id = 1;  // :ThreadIdStartsAtOne
             c.prefer_syscalls = !have_libc[] || !is_linking_libc();
+            c.thread = raw_from_ptr(@type thread[], thread);
             
             @if(SLOW_DEBUG_ALLOC, {
                 general_allocator: import("@/lib/alloc/debug_alloc.fr").DebugAlloc = init();
@@ -117,8 +120,6 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
                 };
             });
             
-            c.cli_arguments = (ptr = argv, len = argc);
-            c.environment_variables = envp;
             @if(use_threads) set_new_thread_id(c);
             
             @if(!TODOWASM || query_current_arch() != .wasm32)
@@ -139,28 +140,72 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
             temporary_allocator&.deinit(); // bleh, waste of time
             @if(SLOW_DEBUG_ALLOC) general_allocator().deinit();
             Syscall'exit(0);
-        };
     };
     
-    have_libc[] = IS_BOOTSTRAPPING;
-    @if(!IS_BOOTSTRAPPING)
-    {
+    @if(IS_BOOTSTRAPPING) {
+        have_libc[] = true;
+        stack := import("@/lib/sys/threads.fr")'allocate_stack(!have_libc[], OS[].it);
+        thread := bit_cast_unchecked(*u8, *import("@/lib/sys/threads.fr").Thread, stack.usable.ptr);
+        thread.stack = stack;
+        thread.first_environment.cli_arguments = (ptr = argv, len = argc);
+        thread.first_environment.environment_variables = envp;
+        call_in_stack(thread.stack.usable.end_pointer(), impl2);
+        return();
+    };
     
-    __libc_start_main :: fn(user: @FnPtr(argc: i64, argv: *CStr, envp: *CStr) void, argc: i64, argv: *CStr, i: i64, f: i64, l: i64) i64 #weak #libc;
+    __libc_start_main :: fn(user: @FnPtr() Never, argc: i64, argv: *CStr, i: i64, f: i64, l: i64) i64 #weak #libc;
     start := @as(rawptr) __libc_start_main;
     have_libc[] = !is_linux || !start.is_null();
     if query_current_arch() == .wasm32 {
         have_libc[] = false;  // ugh. null check doesn't work because weak imports aren't a thing, they're just stubs that crash. 
     };
 
+    stack := import("@/lib/sys/threads.fr")'allocate_stack(!have_libc[], OS[].it);
+    thread := bit_cast_unchecked(*u8, *import("@/lib/sys/threads.fr").Thread, stack.usable.ptr);
+    thread.stack = stack;
+    thread.first_environment.cli_arguments = (ptr = argv, len = argc);
+    thread.first_environment.environment_variables = envp;
+    thread.stack_reserved_size = 1.shift_left(16);  // matters because examples/os uses after this as signal stack
+    
     @if(!TODOWASM || query_current_arch() != .wasm32)
     if is_linux && have_libc[] {
-        __libc_start_main(impl2, argc, argv, 0, 0, 0);
+        impl3 :: fn() Never #no_trace = {
+            thread := get_current_thread();
+            c := thread.first_environment.cli_arguments;
+            __libc_start_main(impl2, c.len, c.ptr, 0, 0, 0);
+            unreachable()
+        };
+    
+        call_in_stack(thread.stack.usable.end_pointer(), impl3);
         unreachable();
     };
-    };
     
-    impl2(argc, argv, envp);
+    call_in_stack(thread.stack.usable.end_pointer(), impl2);
+    
+    #use("@/backend/amd64/bits.fr");
+    #use("@/backend/arm64/bits.fr");
+    #use("@/backend/rv64/bits.fr");
+    call_in_stack :: AsmFunction(fn(new_sp: *u8, callback: @FnPtr() Never) Never = (), @const_slice(
+        add_im(.X64, sp, x0, @as(u12) 0, 0b0),
+        movz(.X64, lr, 0, .Left0),  // noreturn
+        br(x1, 0b0),
+    ), fn(out: *List(u8)) => @asm_x64(  // rdi, rsi, rdx
+        encode_bin(PrimaryOp.MovReg, X86Reg.rsp, X86Reg.rdi),
+        encode_call_reg(ModrmMode.Direct, X86Reg.rsi),
+    ) out, fn(out: *List(u8)) => out.push_all(@slice(
+        0x00, // 0 locals
+        0x20, 0x00, // local.get(0)
+        0xA7, // truncl
+        0x24, 0x00, // global.set(0) stackbase
+        0x20, 0x01, // local.get(1)
+        0xA7, // truncl
+        0x11, 0x00, 0x00, // call indirect :WasmTypeZeroIsVoidToVoid
+        0x0B,  // end
+    )), @const_slice(
+        I(0, RvReg.A0.bits(), @as(u3) OpI.add, RvReg.SP.bits(), .op_imm),
+        I(0, RvReg.RA.bits(), @as(u3) OpI.add, RvReg.Zero.bits(), .op_imm),  // noreturn
+        jalr(.A1, 0, .Zero),
+    ));
 };
 
 // surely we don't need to call uname... right... right...?
@@ -281,11 +326,24 @@ do_relocations_static_linux :: fn() void = {
 
 size_of_dynamic_context :: DefaultContext.size_of(); // @builtin size_of_dynamic_context;
 
-fn get_dynamic_context() rawptr = 
-    builtin_get_dynamic_context(0);
+__driver_abi_version :: @if(IS_BOOTSTRAPPING, 1119, __builtin_compiler_abi);
 
-builtin_get_dynamic_context :: fn(_: i64) rawptr #intrinsic(INTRINSIC_GET_ENV);  // :UpdateBoot
-set_dynamic_context :: fn(context: rawptr) i64 #intrinsic(INTRINSIC_SET_ENV);  // :UpdateBoot
+fn get_dynamic_context() rawptr = {
+    builtin_get_dynamic_context :: fn(_: i64) rawptr #intrinsic(INTRINSIC_GET_ENV);  // :UpdateBoot
+    @if(__driver_abi_version < 1512) return(builtin_get_dynamic_context(0));
+
+    a := 0;
+    base := i64.int_from_ptr(a&).bit_and(bit_not(1.shift_left(franca_required_stack_bits) - 1));
+    base.rawptr_from_int()
+}
+
+fn set_dynamic_context(context: rawptr) void #inline/*semantic*/ = {
+    builtin_set_dynamic_context :: fn(context: rawptr) i64 #intrinsic(INTRINSIC_SET_ENV);  // :UpdateBoot
+    if __driver_abi_version < 1512 {
+        builtin_set_dynamic_context(context);
+    }
+}
+
 
 get_dynamic_environment :: get_dynamic_context;
 set_dynamic_environment :: set_dynamic_context;
@@ -293,44 +351,11 @@ set_dynamic_environment :: set_dynamic_context;
 INTRINSIC_GET_ENV :: 64;
 INTRINSIC_SET_ENV :: 65;
 
-fn create_and_set_unsafe_environment() Ty(rawptr, *DefaultContext) #inline/*semantic*/ = {
-    new_context := @uninitialized Array(u8, size_of_dynamic_context);
-    new_context&.items().set_bytes(0);
-    new_context := raw_from_ptr(@type new_context, new_context&);
-    old_context := get_dynamic_context();
-    set_dynamic_context(new_context);
-    (old_context, context(DefaultContext))
-}
-
-fn push_zeroed_dynamic_context($body: @Fn() void) void = {
-    old_context, c := create_and_set_unsafe_environment();
-    c.current_os = (@as(i64) @as(Os) OS[].it).trunc();  // unfortunate we're not doing what the name of the function would imply
-    c.prefer_syscalls = !is_linking_libc();
-    
-    // TODO: really this should be @must_return because it will leak outside 
-    //       if you do something after the push block in the same function before returning 
-    //       (but not outside the function because it's stored in a local). but im not quite 
-    //       sure if i want to commit to doing things this way enough to make 
-    //       compiler/main.fr/do_signals()/handle_signal() more ugly.  -- Jul 27, 2025. 
-    body();
-    set_dynamic_context(old_context);
-}
-
-fn push_emergency_dynamic_environment($body: @Fn() void) void = {
-    push_zeroed_dynamic_context { // restores .os from a static 
-        a: Arena.Allocator = init(page_allocator, 16000);  // :leak
-        set_temporary_allocator(a&);
-        context(DefaultContext)[].general_allocator = temp();
-        context(DefaultContext)[].panic_hook = emergency_panic;
-        body();
-    };
-}
-
 fn push_tls_value($name: Fields(DefaultContext), value: FieldType(DefaultContext, name), $body: @Fn() void) void #generic = {
     it := tls(name);
     prev := it[];
     it[] = value;
-    body();
+    body();  // TODO: this should probably be @must_return
     it[] = prev;
 }
 

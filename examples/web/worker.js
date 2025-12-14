@@ -129,6 +129,11 @@ export const imports = {
             }
         },
         FR_debug_write: (ptr, len) => show(get_wasm_string(ptr, len)),
+        write: (id, ptr, len) => {
+            show("CALLED WRITE TOO EARLY\n");
+            show(get_wasm_string(ptr, len));
+            return len;
+        },
         js_write: (id, ptr, len) => { 
             switch(id){
                 case 0xBBBB0000n: {

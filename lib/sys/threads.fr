@@ -1,5 +1,7 @@
 
 Thread :: @struct {
+    first_environment: DefaultContext;
+    
     // These are only used when starting the thread. 
     userdata: rawptr;
     callee: @FnPtr(userdata: rawptr) void;
@@ -10,15 +12,12 @@ Thread :: @struct {
     tid: i32;
     
     stack_reserved_size: i64;
-    stack: []u8;  // free-ed on join
+    stack: AlignedStack;  // free-ed on join
     first_temporary_allocator: Arena.Allocator;  // free-ed on join
     
     // used when running on my os with my libc. avoids an extra allocation for pthread_t
     // TODO: use it for green.fr as well
     runtime_data: Array(i64, 5);  
-    
-    first_environment: DefaultContext;
-    extra: Array(u8, size_of_dynamic_context - size_of(DefaultContext));
 };
 
 // size_of(Thread) is the same on macos and glibc.
@@ -31,7 +30,6 @@ ThreadAttr :: @struct(sig: i64, opaque: Array(u8, 56));
 
 fn start_thread_nodata(callee: @FnPtr() void) *Thread = {
     start_thread(
-        page_allocator.alloc_uninit(u8, 1.shift_left(25)), 
         @as(@FnPtr(userdata: rawptr) void) (fn(userdata: rawptr) void = { bit_cast_unchecked(rawptr, @FnPtr() void, userdata)(); }),
         bit_cast_unchecked(@FnPtr() void, rawptr, callee)
     )
@@ -40,29 +38,25 @@ fn start_thread_nodata(callee: @FnPtr() void) *Thread = {
 fn start_thread_data($T: Type, userdata: *T, callee: @FnPtr(userdata: *T) void) *Thread #generic = 
     start_thread(T, callee, userdata);
 
-fn start_thread($T: Type, callee: @FnPtr(userdata: *T) void, userdata: *T) *Thread #generic = {
-    stack := page_allocator.alloc_uninit(u8, 1.shift_left(25));
-    start_thread(stack, T, callee, userdata)
-}
-
 // stack gets free-ed into the page_allocator on join
-fn start_thread(stack: []u8, $T: Type, callee: @FnPtr(userdata: *T) void, userdata: *T) *Thread #generic = {
+fn start_thread($T: Type, callee: @FnPtr(userdata: *T) void, userdata: *T) *Thread #generic = {
     callee := ptr_cast_unchecked(@type callee, @FnPtr(rawptr) void, callee&)[]; // TODO: make this less painful
-    start_thread(stack, callee, T.raw_from_ptr(userdata))
+    start_thread(callee, T.raw_from_ptr(userdata))
 }
 
-fn start_thread(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) *Thread = {
+fn start_thread(callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) *Thread #noinline = {
+    stack := allocate_stack(prefer_syscalls(), query_current_os());
     thread := init_thread_data(stack, callee, userdata);
     raw_create_thread(thread);
     thread
 }
 
 // this uses the first page of `stack` for the dynamic context. 
-fn init_thread_data(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) *Thread = {
+fn init_thread_data(stack: AlignedStack, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) *Thread = {
     macos_page_size :: 16384;  // TODO: don't assume this is the highest possible page size
-    thread := bit_cast_unchecked(*u8, *Thread, stack.ptr);
+
+    thread := bit_cast_unchecked(*u8, *Thread, stack.usable.ptr);
     @debug_assert_ult(size_of(Thread), macos_page_size);
-    
     // TODO: put it at the end and offset forward to give the thread less memory so the stack grows left away from the context. instead of left towards the context. 
     // TODO: do we trust it to not stomp in my stuff in between? 
     copy_bytes(DefaultContext.raw_from_ptr(thread.first_environment&), get_dynamic_context(), size_of_dynamic_context);
@@ -85,7 +79,7 @@ fn raw_create_thread(t: *Thread) void = {
     @if(SLOW_USERSPACE_THREADS) return(import("@/lib/sys/sync/green.fr")'raw_create_thread(t));
     
     callee :: franca_runtime_init_thread;
-    stack := t.stack.rest(t.stack_reserved_size);
+    stack := t.stack.usable.rest(t.stack_reserved_size);
     @assert_eq(u8.int_from_ptr(stack.ptr).mod(16), 0, "start_thread unaligned stack");  // TODO: return error
     userdata := Thread.raw_from_ptr(t);
     
@@ -142,7 +136,7 @@ fn join(t: *Thread) void = {
     
     // TODO: reuse these
     t.first_temporary_allocator&.deinit();
-    page_allocator.dealloc(u8, t.stack);
+    page_allocator.dealloc(u8, t.stack.padded);
 }
 
 fn sys_join(t: *Thread) void = {
@@ -159,6 +153,39 @@ fn sys_join(t: *Thread) void = {
         value = t.tid_futex;
     };
 }
+
+fn get_current_thread() *Thread = {
+    a := 0;
+    base := i64.int_from_ptr(a&).bit_and(bit_not(1.shift_left(franca_required_stack_bits) - 1));
+    Thread.ptr_from_int(base)
+}
+
+AlignedStack :: @struct(padded: []u8, usable: []u8);
+allocate_stack :: fn(prefer_sys: bool, os: Os) AlignedStack = {
+    ::Syscall;
+    RW := bit_or(@as(i64) MapProt.Read, @as(i64) MapProt.Write);
+    NONE := 0;
+    
+    padded_size := 1.shift_left(franca_required_stack_bits + 1);
+    flags := bit_or(0b00010, @if(os == .macos, 4096, 32));
+    xxx := @as(Fd)(fd = -1);
+    padded := @syscall(Syscall.mmap, prefer_sys, os, 
+        zeroed(rawptr), padded_size, NONE, flags, xxx, 0);
+    @assert(padded != 0, "failed to allocate stack");
+    padded := u8.ptr_from_int(padded).slice(padded_size);
+    
+    base := u8.int_from_ptr(padded.ptr);
+    a := base.bit_and(bit_not(1.shift_left(franca_required_stack_bits) - 1));
+    b := a + 1.shift_left(franca_required_stack_bits);
+    start := @if(a > base, a, b);
+    usable := padded.subslice(start - base, 1.shift_left(franca_required_stack_bits));
+    
+    res := @syscall(Syscall.mprotect, prefer_sys, os, 
+        u8.raw_from_ptr(usable.ptr), usable.len, RW);
+    @assert(res.is_ok(), "failed to unprotect stack"); 
+    
+    (padded = padded, usable = usable)
+};
 
 // TODO: the NOSYS is a HACK to make -syscalls make a real static binary
 fn pthread_attr_init(out: *ThreadAttr) voidResult #weak #libc #syscall(NOSYS, NOSYS, NOSYS);

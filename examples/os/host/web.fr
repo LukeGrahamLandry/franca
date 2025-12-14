@@ -18,15 +18,17 @@ GRAPHICS_TARGET_WEB :: true;
 #export
 fn main(argc: i64, argv: *CStr, envp: *CStr, sp: i64) void = {
     init_the_memory();
+    
+    // this is done twice so mmap works in allocate_stack
+    for_wasm_imports { i, name |
+        if wasm_libc_exports.get(name) { addr |
+            Jit'impl'run(Assign = (dest = i, src = addr.int_from_rawptr()));
+        };
+    };
+    
+    // TODO: don't waste the memory of the original stack
+    
     franca_runtime_init(argc, argv, main2, envp, sp);
-}
-
-// this is what you get if you compile without -dynamiclib
-// because get_unique_named looks for void->void overload. 
-// used for testing as an exe with import_wasm. 
-fn main() void = {
-    init_the_memory();
-    main2();
 }
 
 // static data needs to be in a passive segment instead of an active segment 
@@ -40,11 +42,9 @@ init_the_memory :: AsmFunctionWasmOnly(fn() void = (),
 #use("@/examples/os/user/init.fr");
 
 main2 :: fn() void = {
-    tls(.thread)[] = Thread.raw_from_ptr(@static(Thread));
-    globals.jit_events = list(128, Arena'stack_alloc(2048));
-    redo_relocations_wasm();
+    globals.jit_events = list(4096, general_allocator());
+    redo_relocations_wasm();  // do it again to record 
     globals.free = list(4096, general_allocator());
-    globals.jit_events = globals.jit_events.items().clone(general_allocator());
     Vfs'init_vfs();
     xxx := Vfs.fs;  // :compilerbug ?? Type Error: field 'fs' does not exist
     xxx.stdin.poll = fn(a, b) = ();
@@ -99,15 +99,16 @@ reach_webgpu_imports :: fn() []rawptr #noinline = @run {
 };
 
 redo_relocations_wasm :: fn() void #inline = {
-    @run {
-        collect_from_scope(libc_exports, Type.scope_of(Overrides), true);
-    };
-
     for_wasm_imports { i, name |
-        if libc_exports.get(name) { addr |
+        if wasm_libc_exports.get(name) { addr |
             Overrides'FR_wasm_jit_event(Assign = (dest = i, src = addr.int_from_rawptr()));
         };
     };
+};
+
+wasm_libc_exports :: {  // note: evaluating this mutates libc_exports as well
+    @run collect_from_scope(libc_exports, Type.scope_of(Overrides), true);
+    libc_exports
 };
 
 for_wasm_imports :: fn($body: @Fn(i: i64, name: Str) void) void = {
@@ -256,6 +257,13 @@ Overrides :: @struct {
     };
 
     mmap :: fn(addr: rawptr, len: i64, prot: i64, flags: i64, fd: Fd, off: i64) rawptr = {
+        if !globals.ready {
+            len := len.ualign_to(wasm_page_size);
+            prev := memory_grow(len.udiv(wasm_page_size).intcast()).intcast();
+            @assert(prev != -1, "oom");
+            return rawptr_from_int(prev * wasm_page_size);
+        };
+        
         result := zeroed(rawptr);
         with globals.grow& {
             break :: local_return;
@@ -295,7 +303,9 @@ Overrides :: @struct {
         0
     };
     
-    mprotect :: fn(addr: i64, len: i64, prot: i64) i64 = 0;
+    mprotect :: fn(addr: i64, len: i64, prot: i64) i64 = {
+        0
+    };
     
     clock_gettime :: fn(clock_id: i64, time_spec: *TimeSpec) i64 = {
         ms := Host'js_performace_now();

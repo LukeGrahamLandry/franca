@@ -1,6 +1,4 @@
-call_in_stack :: AsmFunctionOld(call_in_stack_arm, call_in_stack_amd);
-
-call_in_stack_arm :: fn(new_sp: *i64, callback: @FnPtr(ctx: rawptr) void, ctx: rawptr) void = (
+call_in_stack :: AsmFunction(fn(new_sp: *i64, callback: @FnPtr(ctx: rawptr) void, ctx: rawptr) void = (), @const_slice(
     // setup new stack
     add_im(.X64, x16, sp, @as(u12) 0, 0b0),  // mov can't encode sp!
     sub_im(.X64, sp, x0, @as(u12) 32, 0b0),
@@ -18,13 +16,7 @@ call_in_stack_arm :: fn(new_sp: *i64, callback: @FnPtr(ctx: rawptr) void, ctx: r
     // restore original stack
     add_im(.X64, sp, x16, @as(u12) 0, 0b0),  // mov can't encode sp!
     ret(),
-);
-
-#use("@/backend/amd64/bits.fr");
-#use("@/backend/arm64/bits.fr");
-#use("@/tests/removed.fr");  // for AsmFunctionOld
-
-call_in_stack_amd :: fn(/*rdi*/ new_sp: *i64, /*rsi*/ callback: @FnPtr(ctx: rawptr) void, /*rdx*/ ctx: rawptr) void = (fn(out) = @asm_x64(
+), fn(out: *List(u8)) => @asm_x64(  // rdi, rsi, rdx
     // setup new stack
     encode_bin(PrimaryOp.MovReg, X86Reg.rcx, X86Reg.rsp),
     encode_bin(PrimaryOp.MovReg, X86Reg.rsp, X86Reg.rdi),
@@ -39,7 +31,27 @@ call_in_stack_amd :: fn(/*rdi*/ new_sp: *i64, /*rsi*/ callback: @FnPtr(ctx: rawp
     // restore original stack
     encode_op_reg(PrimaryOp.PopBase, X86Reg.rsp),
     PrimaryOp.Ret,
-) out);
+) out, fn(out: *List(u8)) => {
+    out.push_all(@slice(0x00, 0x0B)); // 0 locals. end.
+}, @const_slice(
+    I(0, RvReg.SP.bits(), @as(u3) OpI.add, RvReg.T0.bits(), .op_imm),
+    I(s_trunc(-16, 12), RvReg.A0.bits(), @as(u3) OpI.add, RvReg.SP.bits(), .op_imm),
+    
+    store(.RA, .SP, 0, 8, false),
+    store(.T0, .SP, 8, 8, false),
+
+    I(0, RvReg.A2.bits(), @as(u3) OpI.add, RvReg.A0.bits(), .op_imm),
+    jalr(.A1, 0, .RA),
+    
+    load(.RA, .SP, 0, 8, false, false),
+    load(.SP, .SP, 8, 8, false, false),
+   
+    jalr(.RA, 0, .Zero),
+));
+
+#use("@/backend/amd64/bits.fr");
+#use("@/backend/arm64/bits.fr");
+#use("@/backend/rv64/bits.fr");
 
 SECRET :: 31415926535897;
 write_secret :: fn(ctx: rawptr) void = {
@@ -53,7 +65,6 @@ write_secret :: fn(ctx: rawptr) void = {
 fn multistack() #test = {
     #use("@/lib/sys/process.fr");
     @if(query_current_arch() == .wasm32) return();  // SKIP: TODOWASM
-    @if(query_current_arch() == .rv64) return();    // SKIP :TodoRiscv
 
     stack_size := 30;
     new_stack  := page_allocator.alloc_zeroed(i64, stack_size);

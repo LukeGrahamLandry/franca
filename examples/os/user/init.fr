@@ -1,10 +1,9 @@
 
 main :: fn() void = {
-    buf := page_allocator.alloc_uninit(u8, 1.shift_left(16) * 10);
-    s := 0;
-    a := u8.int_from_ptr(buf.ptr).bit_and(bit_not(1.shift_left(franca_required_stack_bits) - 1));
-    b := i64.int_from_ptr(s&).bit_and(bit_not(1.shift_left(franca_required_stack_bits) - 1));
-    @assert_eq(a, b, "TODO: make signal stack be in the same chunk so tls works");
+    t := get_current_thread();
+    signal_stack_size := 1.shift_left(16) * 10;
+    buf := t.stack.usable.subslice(t.stack_reserved_size, signal_stack_size);
+    t.stack_reserved_size += signal_stack_size;
     _ := set_signal_handler(callee = handle_signal, stack = buf);
     
     if query_current_arch() != .wasm32 {
@@ -13,11 +12,9 @@ main :: fn() void = {
         c := context(DefaultContext);
         c.prefer_syscalls = false;
         
-        // need storage for thread.runtime_data (ex. for test_faults)
-        t := @static(Thread);
+        t := get_current_thread();
         args: Array(i64, 6) = (Thread.int_from_ptr(t), ..0);
         _ := Syscall'perform_syscall(args&, 0xAAAA0002);
-        c.thread = Thread.raw_from_ptr(t);
         
         Crash'push_aot_debug_resolver();
         

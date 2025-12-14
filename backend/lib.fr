@@ -389,6 +389,8 @@ if need_segments {
         enabled = !@is(goal.type, .Cached, .CachedEarly),
         macho_function_starts = list(gpa),
     );
+    // :leak
+    m.wasm_types_cache      = init(gpa);
     if need_segments {
         // :GotAtConstantDataBase
         // TODO: this is kinda ass
@@ -417,6 +419,15 @@ if need_segments {
             // TODO: make this size configurable on .goal
             mem := forever.alloc_uninit(u8, 1.shift_left(11));
             m.wasm_types = (mmapped = mem, next = mem.ptr);
+            
+            // :WasmTypeZeroIsVoidToVoid HACK
+            s := m.wasm_types&;
+            s.reserve(Wasm.ValType)[] = .ResultStart;
+            s.reserve(u8)[] = 0;
+            s.reserve(u8)[] = 0;
+            i := import("@/backend/wasm/emit.fr")'pack_wasm_result_type_outlined(m, 0);
+            @assert_eq(i, 0);
+            
             if m.goal.type == .JitOnly {
                 m.wasm_exec_handles = list(forever);
             };
@@ -461,7 +472,6 @@ if need_segments {
     };
     
     // :leak
-    m.wasm_types_cache      = init(gpa);
     m.libraries&.push("", general_allocator());
     
     if !@is(m.goal.type, .Exe, .Dynamic) {

@@ -12,8 +12,17 @@ fn init_driver_vtable() *ImportVTable = {
     }
 }
 
+next_abi_version :: fn() i64 = {
+    previous :: { fr := current_compiler_context(); fr.vtable.driver_abi_version };
+    @if_else {
+        @if(IS_BOOTSTRAPPING) => 1119;
+        @if(previous < 1349) => 1349;
+        @else => 1512;
+    }
+};
+
 fn fill_driver_vtable(vtable: *ImportVTable) void = {
-    vtable.driver_abi_version = @if(IS_BOOTSTRAPPING, 1119, 1349);
+    vtable.driver_abi_version = next_abi_version();
     vtable.magic = 0;  // unused
     
     vtable.find_unique_func = fn(c: Compiler, name: Symbol) ?FuncId = { 
@@ -330,18 +339,18 @@ fn get_fns_with_tag(c: Compiler, tag: Symbol) [] FuncId = {
 
 fn current_comptime() *SelfHosted = {
     s := SelfHosted.ptr_from_raw(tls(.comptime)[]);
-    @debug_assert_ne(SelfHosted.int_from_ptr(s), 0, "current_comptime is null");
+    @debug_assert_ne(SelfHosted.int_from_ptr(s), 0, "current_comptime is null t=%", get_dynamic_environment());
     @if(use_threads && !SLOW_USERSPACE_THREADS/*TODO*/) @debug_assert_eq(tls(.thread_index)[], s.main_thread_index, "you can only call into comptime compiler functions on the main thread.");
     s
 }
 
 fn fill_export_ffi(out: *List(u8)) void = {
     @fmt(out, """
-        __builtin_compiler_abi :: 1263;
+        __builtin_compiler_abi :: %;
         
         // TODO: take this out of the compiler
         fn size_of(T: Type) i64 #fold = { t := get_meta(T); t.stride_bytes.zext() }
-    """);
+    """, next_abi_version());
     
     data :: {
         s := Type.scope_of(compiler_exports);

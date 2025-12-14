@@ -284,8 +284,14 @@ init_root_task :: fn(tt: *TranslationTable, elf_bytes: []u8, device_tree_bytes: 
         u8.int_from_ptr(mem.ptr)
     };
     gpr[31] = {
+        // see threads/allocate_stack
+        padded_stack_size := 1.shift_left(franca_required_stack_bits + 1);
+        s := vmap_reserve(task.mem&, padded_stack_size / kernel.page_size);
         stack_size := 1.shift_left(franca_required_stack_bits);
-        s := vmap_reserve(task.mem&, stack_size / kernel.page_size);
+        a := s.bit_and(bit_not(stack_size - 1));
+        b := a + stack_size;
+        s := @if(a > s, a, b);
+        
         // stack grows left, so start at the right of the allocation. 
         s += stack_size;
         s
@@ -549,7 +555,7 @@ barrier :: @AsmFunctionArmOnly(fn() void = ()) => (
 );
 
 user_exec :: fn(elf_bytes: []u8, devicetree: *u8) void = {
-    _, c := create_and_set_unsafe_environment();
+    c := context(DefaultContext);
     c.panic_hook = print_and_exit1;
     c.prefer_syscalls = true;
     c.current_os = 1;
