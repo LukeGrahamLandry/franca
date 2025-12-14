@@ -1,4 +1,10 @@
 
+## (Dec 13)
+
+- no arge. 913k -> 856k bytes of code. not any faster tho. 
+  no pare. down to 845k, which is strange, shouldn't do anything if not used. 
+  so that's missed backend optimisation. 
+
 ## (Dec 12)
 
 - import_wasm: spectest runner

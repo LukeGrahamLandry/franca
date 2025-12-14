@@ -1,4 +1,4 @@
-
+- removing pare broke ENABLE_GVN=false `compile_expr__1691 Wanted alias for RTmp:1849`
 - prospero wrong output in wasm because my atof doesn't support `_1069 const 4.76837e-07`
 - prospero doesn't compile in import_wasm `__franca_aot_debug_info`?
 - add a test for the shallow force_default_handling bake
