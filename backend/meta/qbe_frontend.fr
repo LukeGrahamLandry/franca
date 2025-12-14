@@ -137,7 +137,7 @@ main :: fn() void = {
     if args.r {
         Crash :: import("@/lib/crash_report.fr");
     
-        @if(is_linking_libc()) m.fill_from_libc();
+        @if(is_linking_libc()) m.Qbe'fill_from_libc();
         m.make_exec();
         f := m.get_addr(m.goal.entry_point) 
             || @panic("couldn't find %", m.goal.entry_point);
@@ -167,54 +167,6 @@ fn parse_from_args(args: []CStr, i: *i64) TargetId = {
     n: Str = parse_from_args(args, i);
     t := TargetId.from_name(n);
     t || @panic("invalid target '%'", n)
-}
-
-// This is not what you want if you care about cross compiling!
-fill_from_libc :: fn(self: *Qbe.Module) void = {
-    Dyn :: import("@/lib/dynamic_lib.fr");
-
-    // :SLOW insanely inefficient way of doing this. especially when someone tries to add multiple libs. 
-    // TODO: store a list of the pending ones so don't have to iterate them all. 
-    // This is not what you want if you care about cross compiling!
-    fill_pending_dynamic_imports :: fn(self: *Qbe.Module, lib: Dyn.Handle) void = {
-        for_symbols self { id, symbol |  // :SLOW  just keep list of pending symbols instead
-            if symbol.kind == .Pending && (symbol.fixups.len != 0 || query_current_arch() == .wasm32) {
-                self.imports&.push(id); 
-                if lib.get(symbol.name) { found |
-                    self.put_jit_addr(id, found);
-                };
-            };
-        };
-    }
-
-    for find_os_libc_dylib() { libc_path | 
-        if Dyn'open(libc_path) { libc |
-            self.fill_pending_dynamic_imports(libc);
-        };
-    };
-    
-    if TODOWASM && query_current_arch() == .wasm32 {
-        self.imports&.clear();
-    };
-    
-    // :UnfilledGotAccessStillNeedsPatch
-    @debug_assert_eq(self.goal.type, .JitOnly, "fill_from_libc is only sane when jitting because i want to be able to cross compile.");
-    unfilled := 0;
-    for self.imports& { id | 
-        use_symbol(self, id) { s |
-            if s.kind == .Pending {
-                if s.strong {
-                    @eprintln("unfilled strong import: %", s.name);
-                    unfilled += 1;
-                } else {
-                    self.put_jit_addr(id, zeroed(rawptr));
-                };
-            }
-        };
-    };
-    @assert_eq(unfilled, 0, "unfilled strong imports");
-    
-    self.flush_debug();
 }
 
 #use("@/lib/sys/fs.fr");

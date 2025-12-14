@@ -410,6 +410,7 @@ fn declare_alias(m: *Qbe.Module, target: Qbe.Sym, alias: *Qbe.Lnk) void = {
         use_symbol(m, target) { t | 
             mark_referenced(m, target, t);
             target_kind = t.kind;
+            when_debug(m, .Patch, fn(o) => @fmt(o, "# declare_alias(%) = % %\n", a.name, t.name, target_kind));
             
             if target_kind == .Pending {
                 for a.fixups { it |
@@ -461,6 +462,8 @@ fn finish_alias(m: *Qbe.Module, target: Qbe.Sym, alias: Qbe.Sym, export: bool) v
             };
             a.got_lookup_offset = t.got_lookup_offset;
             a.wasm_module_function_index = t.wasm_module_function_index;
+            
+            when_debug(m, .Patch, fn(o) => @fmt(o, "# finish_alias(%) = %\n", a.name, t.name));
             m.do_fixups(a);
         };
     };
@@ -499,6 +502,7 @@ fn align_to(s: *SegmentCursor, align: i64) void = {
 fn put_jit_addr(self: *QbeModule, name: Qbe.Sym, addr: rawptr) void = {
     @debug_assert_eq(self.goal.type, .JitOnly);
     use_symbol(self, name) { symbol |
+        when_debug(self, .Patch, fn(o) => @fmt(o, "# put_jit_addr(%, %)\n", symbol.name, addr));
         @if(TODOWASM)
         if self.goal.arch == .wasm32 {
             // TODO: only do this if it's a function
@@ -506,6 +510,7 @@ fn put_jit_addr(self: *QbeModule, name: Qbe.Sym, addr: rawptr) void = {
             if symbol.got_lookup_offset == -1 {
                 symbol.got_lookup_offset = addr;
             } else {
+                when_debug(self, .Patch, fn(o) => @fmt(o, "# Assign T[%] = T[%]\n", symbol.got_lookup_offset, addr));
                 (self.target.wasm_jit_event)(Assign = (dest = symbol.got_lookup_offset, src = addr));
             };
         };
@@ -845,7 +850,7 @@ fn seal_debug_info(m: *QbeModule, debug_source_code: []u8, include: bool, files_
     };
     
     ::[]u64;
-    if @is(m.goal.type, .Cached, .CachedEarly, .Relocatable) {
+    if @is(m.goal.type, .Cached, .CachedEarly, .Relocatable, .JitOnly) {
         b := FRHOSTED_MAGIC;
         m.emit_data(id = base_p, template = (Bytes = b&.slice(1).interpret_as_bytes()), align = 8, relocations = empty());
     };

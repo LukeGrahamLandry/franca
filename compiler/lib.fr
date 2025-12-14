@@ -204,19 +204,11 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
         
         self := c.data.cast()[][];
         
-        // not doing this is faster because then codegen for the driver and its comptime execution can happen on different threads, 
-        // but means when you call a function pointer value it might be in the other module which is creepy, 
-        // and we end up compiling many things an extra time. 
-        // ie. if you put #log_ir on libc_allocator_fn, you'll see it 3 times. 
-        // when true, the driver can have jit shims (so it might not be fully compiled before you call into it). 
-        USE_SAME_MODULE := false;  // note: this doesn't work anymore anyway
-        
-        cache_it := !no_cache && enable_incremental() && !USE_SAME_MODULE;
+        cache_it := !no_cache && enable_incremental();
         
         
         was_bootstrapping :: { fr := current_compiler_context(); IS_BOOTSTRAPPING || fr.vtable.driver_abi_version == 1119 };
 
-        shared := @if(USE_SAME_MODULE, self.comptime_codegen, {
             m := general_allocator().box_uninit(QbeModule);
             backend'init_module(m, (
                 arch = query_current_arch(), 
@@ -229,9 +221,6 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
             ));
             self.other_module&.push(m, self.get_alloc());
             shared := init_codegen(m, self.get_alloc(), true);
-            shared
-        });
-        m := shared.m;
         
         apple_thread_jit_write_protect(true);  // :JitMemProtect this thread wants to execute
         
@@ -241,21 +230,17 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
         
         name := c.fmt_fn_name(f);
         cc := zeroed rawptr;
-        @if(USE_SAME_MODULE, {
-            // treat it the same as any other comptime call
-            cc = c.get_jitted(f);
-        }, {
             main_thread_pump(self.comp(), shared, @slice(f), true);
-            // if nocache, the module is jitonly so things aren't baked so function pointers in memory can still be jit-shims. 
-            // TODO: maybe the driver should always use ExecStyle.AOT so you get the baking 
-            //       because it changes semantics which seems like an unnessisary confusion. 
-            //       should seperate the semantic split where you're program has a part that runs without 
-            //       access to the compiler's address space from the reality of whether it actually got output to an exe. 
-            self.debug_deny_jit_shim_calls = !no_cache;
+
+            self.debug_deny_jit_shim_calls = true;
             if no_cache {
+                seal_debug_info(m, empty(), false, empty());
+                each self.comptime_libraries& { _, lib |
+                    Qbe'fill_pending_dynamic_imports(m, lib[]);
+                };
+                Qbe'seal_imports(m);
                 m.make_exec();
-            }
-        });
+            };
         
         if show_backend_stats() { // :TodoLinux
             frontend := clock_ms(MacosLibc.CLOCK_THREAD_CPUTIME_ID);
@@ -286,15 +271,9 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
             zone_end(z);
             break();
         };
-        if !cache_it {
-            // don't crash on unfilled fixup for Crash'push_aot_debug_resolver. 
-            seal_debug_info(m, empty(), false, empty());
-        };
         to_free_c = (Some = c);
-        if !USE_SAME_MODULE {
             to_free = (Some = (m, zeroed(*Crash'LocationResolverNode)));
             cc = m.get_addr(name) || @panic("ICE: lost %", name);
-        };
         
         callee = (Some = assume_types_fn(Arg = *ImportVTable, Ret = void, ptr = cc));
     };
@@ -526,7 +505,7 @@ fn main_thread_pump(comp: CompCtx, shared: *FrontendCodegen, fns: []FuncId, wrap
     env    := comp.get_comptime_env();
     opts   := comp.get_build_options();
     ::enum(@type shared.m.goal.type);
-    when := @if(shared.m.goal.type == .JitOnly, ExecStyle.Jit, .Aot);
+    when := @if(IS_BOOTSTRAPPING && shared.m.goal.type == .JitOnly, ExecStyle.Jit, .Aot);
     // TODO: dynamiclib is kinda broken because i rely on OS being set by runtime_init
     dynamiclib := shared.m.goal.type == .Dynamic;
     wrap_main := wrap_main && when == .Aot && !dynamiclib;

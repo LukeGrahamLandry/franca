@@ -1,4 +1,16 @@
 
+## (Dec 14)
+
+- i've wanted to bake things even when jitting for a while anyway
+  because it changes semantics (like ClearOnAotBake). 
+  does make it slower. mandelbrot_ui.fr -jit 215ms -> 240ms.
+  which makes sense because that's the aot time for both. 
+  its just spread out, the old way some were jitted on first call so didn't count in the time (can see in tracy). 
+- now always have to fill_from_libc. 
+  - import_c/ffi: sema_frc_import_fid of an import isn't working when jitting on wasm. 
+    problem is i put_jit_addr(strlen) but called the table slot for strlen__33310. 
+    i always fix this by adding more random places i move got_lookup_offset around, making it more and more garbage
+
 ## (Dec 13)
 
 - no arge. 913k -> 856k bytes of code. not any faster tho. 
@@ -19,7 +31,6 @@
     so `d_l_c_1` probably was a shim because fnptr but not in memory. 
     i don't quite understand why the shim checking its own got slot doesn't fix the problem. 
     oh, it doesn't get added to pending because its in applicationDidFinishLaunching which is in memory. 
-    forcing it to be reached earlier makes it not crash, but still doesn't render stuff. 
 - took a detour to add some logging so you can see whats going on in the frontend like you can in the backend with -d
   also made more value types printable in the compiler.
 

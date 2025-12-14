@@ -894,6 +894,58 @@ fn usecheck(k_ref: Qbe.Cls, k_tmp: Qbe.Cls) bool #inline =
 
 wasm_page_size :: 65536;
 
+// This is not what you want if you care about cross compiling!
+Dyn :: import("@/lib/dynamic_lib.fr");
+fill_from_libc :: fn(self: *Qbe.Module) void = {
+    for find_os_libc_dylib() { libc_path | 
+        if Dyn'open(libc_path) { libc |
+            self.fill_pending_dynamic_imports(libc);
+        };
+    };
+    seal_imports(self);
+};
+
+// :SLOW insanely inefficient way of doing this. especially when someone tries to add multiple libs. 
+// TODO: store a list of the pending ones so don't have to iterate them all. 
+// This is not what you want if you care about cross compiling!
+fill_pending_dynamic_imports :: fn(self: *Qbe.Module, lib: Dyn.Handle) void = {
+    for_symbols self { id, symbol |  // :SLOW  just keep list of pending symbols instead
+        if symbol.kind == .Pending && (symbol.fixups.len != 0 || query_current_arch() == .wasm32) {
+            self.imports&.push(id);
+            if lib.get(symbol.name) { found |
+                self.put_jit_addr(id, found);
+            };
+        };
+    };
+};
+
+seal_imports :: fn(self: *Qbe.Module) void = {
+    if TODOWASM && query_current_arch() == .wasm32 {
+        self.imports&.clear();
+    };
+    
+    ::enum(@type self.goal.type);
+    // :UnfilledGotAccessStillNeedsPatch
+    @debug_assert_eq(self.goal.type, .JitOnly, "fill_from_libc is only sane when jitting because i want to be able to cross compile.");
+    unfilled := 0;
+    for self.imports& { id | 
+        use_symbol(self, id) { s |
+            ::enum(@type s.kind);
+            if s.kind == .Pending {
+                if s.strong {
+                    @eprintln("unfilled strong import: %", s.name);
+                    unfilled += 1;
+                } else {
+                    self.put_jit_addr(id, zeroed(rawptr));
+                };
+            }
+        };
+    };
+    @assert_eq(unfilled, 0, "unfilled strong imports");
+    
+    self.flush_debug();
+};
+
 // 
 // This api makes it easy to have your frontend and the backend run on seperate threads. 
 // 

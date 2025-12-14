@@ -288,11 +288,29 @@ fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
                             
                             is_function := symbol.wasm_type_index != -1;
                             if e.m.goal.type == .JitOnly && is_function {
+                                // HACK: i didn't need to do this before always using execstyle.aot
+                                // TODO: clearly i need to be more structured about htis. 
+                                //       like being an alias should produce a fixup or just always ask for the got slot on declare not finish. 
+                                if symbol.got_lookup_offset == -1 && symbol.alias != Qbe.no_symbol_S {
+                                    use_symbol(e.m, symbol.alias) { a |
+                                        symbol.got_lookup_offset = a.got_lookup_offset;
+                                    };
+                                };
+                            
                                 if symbol.got_lookup_offset == -1 {
                                     // reserve an index in the table early. it will be filled in by make_exec();
                                     symbol.got_lookup_offset = (e.m.target.wasm_jit_event)(Grow = (delta = 1));
                                     @debug_assert_ne(symbol.got_lookup_offset, -1, "failed to grow table");
-                                    //@println("reserve T[%] = %", symbol.got_lookup_offset, symbol.name);
+                                    when_debug(e.m, .Patch, fn(out) => @fmt(out, "# reserve T[%] = %\n", symbol.got_lookup_offset, symbol.name));
+                                
+                                    // HACK: i didn't need to do this before always using execstyle.aot
+                                    if symbol.alias != Qbe.no_symbol_S {
+                                        use_symbol(e.m, symbol.alias) { a |
+                                            if a.got_lookup_offset == -1 {
+                                                a.got_lookup_offset = symbol.got_lookup_offset;
+                                            };
+                                        };
+                                    };
                                 };
                                 @debug_assert(c.bits() == 0 && symbol.segment == .Code);
                                 leb128_signed(e.a&, symbol.got_lookup_offset);
