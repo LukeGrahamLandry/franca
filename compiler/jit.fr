@@ -162,6 +162,7 @@ fn create_jit_shim(self: CompCtx, shared: *FrontendCodegen, fid: FuncId, handler
     
     m := shared.m;
     c := self.data.cast()[][];
+    c.when_debug(.Shim, fn(o) => @fmt(o, "S: create %", fmt_func(c, fid)));
     id := Qbe.no_symbol_S;
     enter_task shared { entry |
         id = m.intern(@tfmt("%__shim", fid));
@@ -340,7 +341,7 @@ fn save_in_got(self: *SelfHosted, fid: FuncId, addr: rawptr) void = {
 // TODO: it's a massive problem if a jitted program starts threads and calls this on one of them. :FUCKED
 // TODO: it would be nice if i had the arguments here for reporting what call you actually tried to make. 
 //       but this way will be even better once i can lazily compile it and just lean on the backend to make the args flow through. 
-report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHosted, fid: FuncId) rawptr = {
+report_called_uncompiled_or_just_fix_the_problem :: fn(self: *SelfHosted, fid: FuncId) rawptr = {
     fence();
     result := rawptr_from_int(0);
     // You want to allow a shim being called from an extern function so we can't assume we have a valid context here. (ie. examples/farm_game.fr has this problem). 
@@ -353,6 +354,8 @@ report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHo
         m := self.comptime_codegen.m;
         // important: have to be careful about which comptime is in the context if the driver program gets compiled lazily. 
         func := self.get_function(fid);
+        
+        self.when_debug(.Shim, fn(o) => @fmt(o, "S: call %", fmt_func(self, fid)));
         if func.get_flag(.AvoidJitShim) {
             @panic("Called an #avoid_shim function through a jit_shim");
         };

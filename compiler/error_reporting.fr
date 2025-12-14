@@ -224,6 +224,18 @@ fn log(values: *Values, self: *SelfHosted, out: *List(u8), ty: Type) void = {
             };
         }
         fn Label() => show_label();
+        fn Tagged(it) => {  // :tag_is_i64
+            tag := values.bytes().peek_type(i64)[];
+            enumerate it.cases { i, it |
+                if tag == i {
+                    @fmt(out, "% = ", self.pool.get(it._0));
+                    stride := self.type_extra&.nested_index(it._1.as_index())[].stride_bytes.zext();
+                    values: Values = (Big = values.bytes().subslice(8, stride).as_raw_list());
+                    log(values&, self, out, it._1);
+                    return();
+                };
+            };
+        };
         @default => ();
     };
     if ty == FuncId {
@@ -282,9 +294,19 @@ fn log(values: *Values, self: *SelfHosted, out: *List(u8), ty: Type) void = {
             return();
         };
     };
+    if self.string_type { string |
+        if ty == string {
+            length := values.bytes().rest(8).peek_type(i64)[];
+            if length < 64 {
+                values := Str.assume_cast(values)[];
+                safe_print(values, out);
+                return();
+            }
+        };
+    };
     
     // if we don't know how to draw this type, just fall back to something useless
-    @fmt(out, "%", values);
+    @fmt(out, "% is %", values, self.log_type(ty));
 }
 
 fn display(value: *Values, out: *List(u8)) void = {
@@ -292,9 +314,24 @@ fn display(value: *Values, out: *List(u8)) void = {
         fn Small(f) => {@fmt(out, "<<%>>", f._0); };
         fn Big(f)   => {
             @fmt(out, "<<% bytes: [ ", f.len);
-            for f { b | 
-                @fmt(out, "% ", b);
+            zeroes := 0;
+            flush_zeroes :: fn() => if zeroes > 0 {
+                if zeroes > 1 {
+                    @fmt(out, "[% 0s] ", zeroes);
+                } else {
+                    @fmt(out, "0 ");
+                };
+                zeroes = 0;
             };
+            for f { b | 
+                if b == 0 {
+                    zeroes += 1;
+                } else {
+                    flush_zeroes();
+                    @fmt(out, "% ", b);
+                }
+            };
+            flush_zeroes();
             @fmt(out, "]>>");
         };
     };
@@ -872,3 +909,34 @@ fn find_function(self: *SelfHosted, addr: i64, callee: *?FuncId, m: *QbeModule) 
     };
     .None
 }
+
+FrDebugKey :: @enum(i64) (
+    Shim = "S".char(),
+    Bake = "B".char(),
+    Emit = "E".char(),
+);
+
+fn when_debug(m: *SelfHosted, category: FrDebugKey, $body: @Fn(out: *List(u8)) void) void = {  
+    ::enum(FrDebugKey);
+    if m.debug.bit_and(1.shift_left(category.raw() - "A".ascii())) != 0 {
+        with m.comptime_codegen.m.forever.mutex& {
+            out := u8.list(4096, Arena'stack_alloc(4096));
+            body(out&);
+            println(out.items());
+        };
+    };
+}
+
+FmtFunc :: @struct(self: *SelfHosted, fid: FuncId);
+fn fmt_func(self: *SelfHosted, fid: FuncId) FmtFunc = (self = self, fid = fid);
+fn display(it: FmtFunc, out: *List(u8)) void = {
+    func := it.self.get_function(it.fid);
+    @fmt(out, "[% % at %]", it.self.pool.get(func.name), it.fid, it.self.fmt_loc(func.loc));
+}
+
+FmtLoc :: @struct(self: *SelfHosted, loc: Span);
+fn fmt_loc(self: *SelfHosted, loc: Span) FmtLoc = (self = self, loc = loc);
+fn display(it: FmtLoc, out: *List(u8)) void = {
+    _ := it.self.codemap.fmt_error_loc(it.loc, out, false);
+}
+

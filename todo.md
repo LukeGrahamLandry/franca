@@ -1,3 +1,6 @@
+
+- `f :: @as(rawptr) fn() = println("A");` you don't get an inferred name so it doesn't show nicely in trace. 
+  (the confusing example was report_called_uncompiled_or_just_fix_the_problem)
 - removing pare broke ENABLE_GVN=false `compile_expr__1691 Wanted alias for RTmp:1849`
 - prospero wrong output in wasm because my atof doesn't support `_1069 const 4.76837e-07`
 - prospero doesn't compile in import_wasm `__franca_aot_debug_info`?

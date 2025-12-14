@@ -4,6 +4,24 @@
 - no arge. 913k -> 856k bytes of code. not any faster tho. 
   no pare. down to 845k, which is strange, shouldn't do anything if not used. 
   so that's missed backend optimisation. 
+- graphics/macos might be a problem. there's some extra work to make it do frame callback on the 
+  main thread but i already do that and i briefly checked that it kept the same stack base before starting this. 
+  but that's just for display_link_callback2 where i actually do the work, 
+  display_link_callback1 is still called on a different thread.
+  current situation is it works aot and dies jitted because it calls a shim.  
+  `CVDisplayLink::runIOThread > jit:display_link_callback1 > aot:report_called_uncompiled_or_just_fix_the_problem > aot:mark_temporary_storage > aot:mark > null`
+  - :JitShimsUnfilledWhenExecStyleJit
+    the reason jit shims used to work even after setting comptime=0 was the compiler 
+    pointer was baked into the jit shim code and then got jit_shim_env from there. 
+    noticed that problem when FRANCA_NO_CACHE but it also affects build_for_graphics. 
+    i was imagining main_thread_pump always got rid of jit shims but no, 
+    when ExecStyle.Jit it doesn't bake things so if there's a function pointer in memory it won't get remapped. 
+    so `d_l_c_1` probably was a shim because fnptr but not in memory. 
+    i don't quite understand why the shim checking its own got slot doesn't fix the problem. 
+    oh, it doesn't get added to pending because its in applicationDidFinishLaunching which is in memory. 
+    forcing it to be reached earlier makes it not crash, but still doesn't render stuff. 
+- took a detour to add some logging so you can see whats going on in the frontend like you can in the backend with -d
+  also made more value types printable in the compiler.
 
 ## (Dec 12)
 

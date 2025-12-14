@@ -75,6 +75,8 @@ SelfHosted :: @rec @struct(
     },
     expr_pair_type := UnknownType,
     jit_shim_env: *DefaultContext,
+    debug := 0,
+    string_type: ?Type,
 );
 
 OverloadKey :: @struct(arg: Type, req: Type);
@@ -298,6 +300,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
     };
     
     callee := callee.unwrap();
+    // :JitShimsUnfilledWhenExecStyleJit
     // TODO: after changing tls abi, not all shims are removed when nocache. maybe thats what i want tho? 
     //       concerning that it changed. oh i guess the env used to get passed all the way through 
     //       but now since i still includes franca_runtime_init it allocates a new stack
@@ -424,6 +427,7 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
         library_scope = NOSCOPE, // patched in make_top_level
         main_thread_index = tls(.thread_index)[],
         jit_shim_env = a.box_zeroed(DefaultContext),
+        string_type = .None,
     );
     self.comptime_codegen.m.codemap = (Some = self.codemap);
     self.add_function(zeroed Func);  // just for good luck. life is better when FuncId=0 is invalid. 
@@ -459,6 +463,14 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
         compiler
     };
     self.legacy_indirection = self.stable_compiler_context();
+    
+    if get_environment_variable("FRANCA_LOG_DEBUG") { s |
+        d := self.debug;
+        for s.str() { c | 
+            d = d.bit_or(1.shift_left(c.zext() - "A".ascii()));
+        };
+        self.debug = d;
+    };
     
     //c := self.jit_shim_env;
     //c[] = context(DefaultContext)[];
