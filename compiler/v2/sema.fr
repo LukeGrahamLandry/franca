@@ -567,8 +567,6 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
             @case(Flag.libc.ident()) => {
                 done :: local_return;
                 good = true;
-                func.set_flag(.NoContext);
-                
                 find_import(Flag.libc.ident());
             };
             @case(Flag.import.ident()) => {
@@ -592,23 +590,18 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                 func.body = (DynamicImport = (comptime = ptr, name = func.name, lib = Flag.comptime_addr.ident(), weak = false));
                 ptr := ptr.rawptr_from_int();
                 self.put_jitted_import(fid, ptr);
-                func.set_flag(.YesContext);
                 func.set_flag(.ComptimeOnly);
             };
+            // :UpdateBoot
             @case(Flag.intrinsic.ident()) => {
                 good = true;
                 value := @unwrap(tag.non_void_arg(), "#intrinsic requires arg") return;
-                intrinsic_ty := @unwrap(self.env.intrinsic_type, "used #intrinsic during boot") return;
+                intrinsic_ty := i64;
                 @err_assert(func.body&.is(.Empty), "#intrinsic function must not have a body") return;
                 op := @check(self.immediate_eval_expr(value, intrinsic_ty)) return;
                 op := i64.assume_cast(op&)[];
                 func.set_flag(.Intrinsic);
                 func.body = (Intrinsic = op);
-                if op != INTRINSIC_GET_ENV {
-                    func.set_flag(.NoContext);
-                } else { 
-                    func.set_flag(.YesContext);
-                };
             };
             // TODO: im afraid this is slow :( its especially dumb because i do it for a billion int_from_ptr instantiations that do nothing
             @case(Flag.ir.ident()) => {
@@ -1727,8 +1720,7 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
     //    :CompileIntrinsicsFirst jun 24, 2025: 
     //    also the intution below is actively harmful because you really want to 
     //    sema called intrinsics before emitting the call to them to allow them to be inlined, 
-    //    otherwise the first call won't be inlined which in general is just sad but for 
-    //    set_dynamic_context is a miscompilation. 
+    //    otherwise the first call won't be inlined 
     // 
     // you kinda want to do this but its wrong when its only available for some backends but some have a normal body. 
     // seems dumb to add callees when we know its an intrinsic we're going to emit inline. 
@@ -1849,11 +1841,6 @@ fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, request
     //       but since i have jit-shims now, tracking accurately is less of a big deal.   -- May 27, 2025
     // @err_assert(func.mutual_callees.is_empty(), "TODO: you can't really refer to inlined things so how'd you make it recursive?") return;
     
-    if self.dispatch.enclosing_function { caller | 
-        if func.get_flag(.YesContext) {
-            self.get_function(caller).set_flag(.YesContext);
-        };
-    };
     may_have_early_return := !aliased_body.expr&.is(.Value);
     arg := func.arg&;
     pattern := self.clone(arg);
@@ -2251,10 +2238,6 @@ fn bind_const_arg(self: *SelfHosted, o_f: FuncId, arg_name: Var, arg_value: Valu
             arg_func_obj.set_flag(.Inline);
             func.set_flag(.Inline);
             
-            if arg_func_obj.get_flag(.YesContext) {
-                func.set_flag(.YesContext);
-            };
-            
             // :NotForCorrectness
             if arg_func_obj.get_flag(.WasLambdaLiteral) {
                 // Currently, we only every bind const args for a specific callsite 
@@ -2354,9 +2337,6 @@ fn infer_arguments(self: *SelfHosted, fid: FuncId) Maybe(Type) = {
     if types.len > 0 && types[types.len - 1] == CVariadicType {
         func.set_flag(.NoInline);
         func.set_flag(.AvoidJitShim);
-        // on amd64 variadic functions need to use rax so we can't use it for the environment pointer
-        // so for consistancy, you can't use the environment stuff on any platform. 
-        func.set_flag(.NoContext);
     };
     type := self.tuple_of(types);
     func.finished_arg = (Some = type);  // :const_args_are_not_const_in_tuple
@@ -3376,7 +3356,6 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
             };
             @case(Flag.ct.ident()) => {
                 func.set_flag(.ComptimeOnly);
-                func.set_flag(.YesContext);
             };
             @case(Flag.avoid_shim.ident()) => func.set_flag(.AvoidJitShim);
             @case(Flag.no_trace.ident())  => func.set_flag(.NoTrace);

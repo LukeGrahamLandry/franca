@@ -30,6 +30,7 @@ EmitIr :: @struct(
     label_depth: u32,
     blk: *Qbe.Blk, 
     debug: bool,
+    // for old env abi, only used when next_abi_version() < 1513
     context := QbeNull,
     func: FuncId,
     blocks: List(*Qbe.Blk),
@@ -136,11 +137,6 @@ fn emit_ir(comp: CompCtx, shared: *FrontendCodegen, f: FuncId, when: ExecStyle, 
     };
     
     if !result&.is_err() {
-            has_context := func.get_flag(.YesContext) && !func.get_flag(.NoContext);  // :copy-pastrae
-            if !has_context {
-                func.set_flag(.NoContext);
-            };
-            
             // you could do this with nested enter_task instead of collecting them in reference_constant(). 
             // but thats a tiny tiny bit slower. i guess most are trivial so it's better to send them in a batch 
             // and let the worker just crank on it instead of dealing with the queues more often.   -- Jul 26, 2025
@@ -475,13 +471,10 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = {
     body: *FatExpr = @match(func.body&) {
         fn Normal(body) => body;
         fn Intrinsic(op) => {
-            // Direct calls will be inlined but someone might be trying to call through a function pointer. 
-            // TODO: don't add to callees for direct calls. -- Jul 24
-            if op[] == INTRINSIC_GET_ENV {
-                self.context_par_e();
-            };
-            a0, a1, ret := self.intrinsic_shim(func);
-            self.blk.jmp.arg = @try(self.emit_intrinsic_old(op, .ScalarTransient, @slice(a0, a1), func, ret)) return;
+            // INTRINSIC_GET_ENV :UpdateBoot
+            self.context_par_e();
+            self.f.ret_cls = .Kl;
+            self.blk.jmp = (type = .retl, arg = self.context);
             self.finalize_blocks();
             return(.Ok)
         }
@@ -513,9 +506,6 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = {
         };
         fn Redirect(fid) => {
             callee := self.program.get_function(fid[]);
-            if !callee.get_flag(.NoContext) {
-                func.set_flag(.YesContext);
-            };
             self.bounce_body_call(self.func_sym(fid[]));
             self.pending.push(fid[]);
             return(.Ok)
@@ -659,10 +649,9 @@ fn emit_runtime_call(
     args: []Qbe.Ins,
     p: Placement,
     callee: Qbe.Ref,
-    dyn_context: bool,
 ) CRes(Qbe.Ref) = { 
     self.f.leaf = false;
-    if dyn_context && self.context != QbeNull && next_abi_version() < 1513 {
+    @if(next_abi_version() < 1513) if self.context != QbeNull {
         self.emit(.arge, .Kl, QbeNull, self.context, QbeNull);
     };
     append(self.blk.ins&, args.ptr, args.ptr.offset(args.len));
@@ -1022,6 +1011,7 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
             
             @match(func.body&) {
                 fn NewIntrinsic(op) => {
+                    // i kinda want to get rid of this and let the backend handle all inlining,
                     arg := arg.items();
                     a0 := if arg[0].ty == void {
                         QbeNull
@@ -1034,14 +1024,13 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
                     return(self.emit_intrinsic_new(op, p, @slice(a0, a1), caller, f_ty.ret));
                 }
                 fn Intrinsic(op) => {
-                    // i kinda want to get rid of this and let the backend handle all inlining,
-                    // and see if that's slower but you can't for set_dynamic_context. see :CompileIntrinsicsFirst
-
                     ::if(Qbe.Ref);
-                    arg := arg.items();
-                    a0 := @try(self.compile_expr(arg[0]&, .Scalar)) return;
-                    a1 := if(arg.len == 1, => QbeNull, => @try(self.compile_expr(arg[1]&, .ScalarTransient)) return);
-                    return(self.emit_intrinsic_old(op, p, @slice(a0, a1), caller, f_ty.ret));
+                    @debug_assert(next_abi_version() < 1513);  // :UpdateBoot
+                    a0 := @try(self.compile_expr(arg, .Scalar)) return;
+                    a0 := @if(op[] == INTRINSIC_GET_ENV, self.context, /*INTRINSIC_SET_ENV*/ a0);
+                    self.unify_placement(p&, f_ty.ret);
+                    self.emit(.copy, .Kl, self.context, a0, QbeNull);
+                    return(Ok = self.scalar_result(p, self.context, f_ty.ret))
                 }
                 fn DynamicImport(info) => if self.when == .Aot {
                     @err_assert(info.name == func.name, "this isn't the output of linkrename on the comptime arch") return;
@@ -1050,15 +1039,11 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
                 };
                 @default => ();
             };
-            context := !callee.get_flag(.NoContext);
-            if context {
-                caller.set_flag(.YesContext);
-            };
             
             args := @try(self.compile_for_arg(arg)) return;
             dbg := @if(func.get_flag(.NoTrace), 3, 0);  // :DebugTag
             self.dbgloc(arg.loc, dbg);
-            self.emit_runtime_call(f_ty.ret, args, p, callee_r, context)
+            self.emit_runtime_call(f_ty.ret, args, p, callee_r)
         }
         //
         // :ADistinctionWithoutADifference  -- May 31, 2025 
@@ -1075,13 +1060,10 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
                 for(args, fn(a) => @if(a == CVariadicType) return(true));
                 false
             }
-            context := !self.program.data.cast()[][].is_variadic(f_ty.ty);
-            
-            @if(context) caller.set_flag(.YesContext);
             callee := @try(self.compile_expr(f, .Scalar)) return;
             args   := @try(self.compile_for_arg(arg)) return;
             self.dbgloc(arg.loc, 0);
-            self.emit_runtime_call(f_ty.ty.ret, args, p, callee, context)
+            self.emit_runtime_call(f_ty.ty.ret, args, p, callee)
         }
         fn Label(_) => {
             label := @unwrap(f.as_const(), "called label must be const") return;
@@ -1114,25 +1096,6 @@ fn emit_intrinsic_new(self: *EmitIr, op: *NewIntrinsicPayload, p: Placement, arg
         r = self.f.newtmp("f", k);
     };
     self.emit(o, k, r, arg[0], arg[1]);
-    (Ok = self.scalar_result(p, r, expr_ty))
-}
-
-fn emit_intrinsic_old(self: *EmitIr, op: *i64, p: Placement, arg: []Qbe.Ref, caller: *Func, expr_ty: Type) CRes(Qbe.Ref) = {
-    r := @switch(op[]) {
-        @case(INTRINSIC_GET_ENV) => {
-            caller.set_flag(.YesContext);  // TODO: you might have setcontext for yourself
-            self.unify_placement(p&, expr_ty); // because we don't know if they'll set again before using. meh. 
-            self.context
-        };
-        @case(INTRINSIC_SET_ENV) => {
-            if self.context == QbeNull {
-                self.context = self.f.newtmp("context", .Kl);
-            };
-            self.emit(.copy, .Kl, self.context, arg[0], QbeNull);
-            QbeConZero
-        };
-        @default => @panic("unchandled old intrinsic %", op[]);
-    };
     (Ok = self.scalar_result(p, r, expr_ty))
 }
 
