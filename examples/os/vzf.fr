@@ -31,7 +31,6 @@ run_vm :: fn(args: Cfg) Never #use(apple) = {
         window: NSWindow = (_ = @objc cls("NSWindow").alloc());
         
         state: State = (
-            env = get_dynamic_context(),
             window = window,
             cfg = args,
         );
@@ -118,12 +117,9 @@ start_vm :: fn(args: Cfg, view: ?FuncId.scope_of(apple).VZVirtualMachineView) vo
     
     register_objc_class(FrancaVmDelegate);
     del := new "FrancaVmDelegate";
-    // TODO: HACK: this name shouldn't be hardcoded in register_objc_class
-    object_setInstanceVariable(del, "franca_sapp", get_dynamic_context());
     @objc vm.setDelegate(del);
     
-    blk := new_global_block(general_allocator(), get_dynamic_context(), fn(self: *Block_literal_1, err: ObjCId) void = {
-        set_dynamic_context(self.userdata);
+    blk := new_global_block(general_allocator(), zeroed(rawptr), fn(self: *Block_literal_1, err: ObjCId) void = {
         @assert(err.is_nil(), "failed to start vm");
     });
     
@@ -141,16 +137,11 @@ FrancaVmDelegate :: @struct {
     
     #use(apple);
     guestDidStopVirtualMachine :: fn(self: ObjCId, _: VZVirtualMachine) void = {
-        out := zeroed(rawptr);
-        object_getInstanceVariable(self, "franca_sapp", out&);
-        set_dynamic_context(out);
-        
         Syscall'exit(0);
     }
 }
 
 State :: @struct {
-    env: rawptr;
     window: FuncId.scope_of(apple).NSWindow;
     cfg: Cfg;
 };
@@ -164,7 +155,6 @@ FrancaVmAppDelegate :: @struct {
         state := zeroed(rawptr);
         object_getInstanceVariable(self, "franca_sapp", state&);
         state := State.ptr_from_raw(state);
-        set_dynamic_context(state.env);
     
         app := NSApplication'sharedApplication();
         @objc app.activateIgnoringOtherApps(true);

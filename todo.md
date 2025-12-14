@@ -338,6 +338,8 @@ i think it's just a race where it gets confused if two programs try to cache the
   when running backend/meta/test.fr without -bin so it recompiles and tries to cache on multiple threads. 
 
 - `./target/f.out tests/exe/wasm.fr` doesn't work with SLOW_MEMORY_DEBUGGING=true
+- `franca examples/os/build.fr -vzf -smp 2 -append "nocache on;spawn kaleidoscope;kaleidoscope;"`
+  it doesn't like two at once? (with -smp 1 it works but is SUPER slow which should also be fixed)
 - TODO: i broke compiler/test.fr running examples/repl.fr (Cached) on riscv
 - spurious failures
   - (repro) diff target/release/franca-linux-arm64-sta a.out 

@@ -1,20 +1,15 @@
 
 main :: fn() void = {
     t := get_current_thread();
-    signal_stack_size := 1.shift_left(16) * 10;
-    buf := t.stack.usable.subslice(t.stack_reserved_size, signal_stack_size);
-    t.stack_reserved_size += signal_stack_size;
+    buf := t.allocate_signal_stack();
     _ := set_signal_handler(callee = handle_signal, stack = buf);
     
     if query_current_arch() != .wasm32 {
         redo_relocations_static_linux();
     };
-        c := context(DefaultContext);
-        c.prefer_syscalls = false;
+        tls(.prefer_syscalls)[] = false;
         
         t := get_current_thread();
-        args: Array(i64, 6) = (Thread.int_from_ptr(t), ..0);
-        _ := Syscall'perform_syscall(args&, 0xAAAA0002);
         
         Crash'push_aot_debug_resolver();
         
@@ -40,16 +35,12 @@ main :: fn() void = {
         };
         
         shell.device_tree_bytes = {
-            devicetree := c.cli_arguments[0].ptr;
+            devicetree := tls(.cli_arguments)[0].ptr;
             h := bit_cast_unchecked(*u8, *DT.Header, devicetree)[];
             DT.Header.byte_swap_fields(h&);
             devicetree.slice(h.totalsize.zext())
         };
-        c.cli_arguments = empty();
         
-        signal_env[] = c[];
-        signal_env.thread_index = -1;  // make handle_signal NOT count as the same thread for reenterant mutex
-
         Vfs'init_vfs();
         buf := u8.list(general_allocator());
         timer := false;
@@ -137,13 +128,14 @@ decode_and_run_cmd :: fn(full_command: Str) void = {
                     };
                     
                     cmd: Command = (command = command, parts = parts);
+                    // allocating this is dumb but passing a pointer to the stack would be a race
+                    cmd := general_allocator().boxed(Command, cmd);  
                     if spawn {
                         #use("@/lib/sys/threads.fr");
-                        start_thread(Command, run_command, cmd&);
-                        usleep(5000); // HACK
+                        start_thread(Command, run_command, cmd);
                     } else {
                         start := timestamp();
-                        run_command(cmd&);
+                        run_command(cmd);
                         if shell.timer {
                             #use("@/lib/sys/process.fr");
                             @print("(%ms)\n", timestamp() - start);
@@ -186,6 +178,7 @@ push_tls_value(.comptime, zeroed(rawptr)) {
         import("@/compiler/main.fr")'main2(command, shell.nocache);
     };
 };
+    general_allocator().dealloc_one(Command, cmd);
 }
 
 search_path :: fn(command: Str) ?Str = {
@@ -208,8 +201,6 @@ shell :: @static(@struct {
     nocache: bool;
     device_tree_bytes: []u8;
 });
-
-signal_env :: @static(DefaultContext);
 
 pl011_int_poll :: fn(q: *UQueue, who: i64) void = {
     fs := Vfs.fs;
@@ -235,23 +226,17 @@ pl011_int_poll :: fn(q: *UQueue, who: i64) void = {
     fs.stdin.pipe.done&.push(entry);
 }
 
+// note: you can't use a mutex here because it has the same thread_index as the interrupted task
 handle_signal :: fn(ctx: *MContext, intid: i64, data: i64) Ty(i64, *MContext) = {
-    set_dynamic_context(DefaultContext.raw_from_ptr(signal_env));
     fs := Vfs.fs;
 
-    thread := Thread.ptr_from_raw(ctx.userdata);
-    ::ptr_utils(Thread);
-    if !thread.is_null() {
-        // not get_current_tls because env is wrong 
-        // (set_dynamic_context above but even without that might be a signal while it was in the wrong register)
-        thread := bit_cast_unchecked(@type thread.runtime_data&, *ThreadData, thread.runtime_data&);
+        thread := get_current_tls();
         if bit_cast_unchecked(@type thread.signal_handler, i64, thread.signal_handler) != 0 {
             result, _ := thread'signal_handler(ctx, intid, data);
             if result == intid {
                 return(intid, ctx);
             };
         };
-    };
     
     // TODO: don't hardcode the 33. get it from device tree. 
     //       the kernel side now knows the right numbers. just have to use them here. 
@@ -297,14 +282,6 @@ handle_signal :: fn(ctx: *MContext, intid: i64, data: i64) Ty(i64, *MContext) = 
         @case(79) => { x :: unistd.fstatat; @as(rawptr) x };
         @case(64) => { x :: unistd.write; @as(rawptr) x };
         @case(61) => { x :: dirent.posix_getdents; @as(rawptr) x };       
-        @case(0xAAAA0001) => {  // get thread data
-            ctx.gpr&[0] = ctx.userdata.int_from_rawptr();  // *Thread
-            return(intid, ctx);
-        };
-        @case(0xAAAA0002) => {  // set thread data
-            ctx.userdata = ctx.gpr&[0].rawptr_from_int();  // *Thread
-            return(intid, ctx);
-        };
         @default => @panic("invalid syscall %", syscall_number);
     };
     
@@ -480,6 +457,15 @@ ThreadData :: @struct {
     known_wasm_jit_event: i64;
     _: Array(i64, 3);
 };
+
+// signal stack must be in the same franca_required_stack_bits aligned chunk for tls to work. 
+// see threads/allocate_stack.
+fn allocate_signal_stack(t: *Thread) []u8 = {
+    signal_stack_size := 1.shift_left(16) * 10;
+    buf := t.stack.usable.subslice(t.stack_reserved_size, signal_stack_size);
+    t.stack_reserved_size += signal_stack_size;
+    buf
+}
 
 Term :: import("@/lib/sys/terminal.fr");
 #use("@/lib/sys/threads.fr");

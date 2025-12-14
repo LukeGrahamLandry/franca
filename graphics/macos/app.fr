@@ -31,7 +31,6 @@ Impl :: @struct(
     cursors: EnumMap(Sapp.MouseCursor, NSCursor),
     mtl_device: MTLDevice,
     classes: Classes,
-    env: rawptr,  // franca dynamic environment pointer since we do stuff inside OS callbacks that don't follow our abi
     display_link: CVDisplayLinkRef,
     display_source: dispatch_source_t,
     depth_texture: id"MTLTexture",
@@ -48,7 +47,6 @@ Classes :: @struct(
 fn run(m: *Impl, desc: *Sapp.Desc) Never = {
     sapp := m.common();
     c := m.classes&;
-    m.env = get_dynamic_context();
 
     register_objective_c_classes(m);
     c.NSApp = NSApplication'sharedApplication();
@@ -71,7 +69,6 @@ fn run(m: *Impl, desc: *Sapp.Desc) Never = {
 
 keyup_monitor :: fn(self: *Block_literal_1, event: NSEvent) NSEvent = {
     macos := Impl.ptr_from_raw(self.userdata);
-    set_dynamic_context(macos.env);
     flags := event.modifierFlags();
     NSEventModifierFlagCommand :: 1.shift_left(20);
     if flags.bit_and(NSEventModifierFlagCommand) != 0 {
@@ -403,16 +400,13 @@ fn frame(macos: *Impl) void = {
 // This is probably pointless. 
 // Instead of just putting the app state in a static variable, i put it as 
 // a instance variable on all my objc classes and get it back for every message received. 
-// You'd have to do something to get the dynamic environment pointer back anyway. 
 // Is there any situation where you'd want two whole application contexts in the same process? 
 // Does it even let you do that? NSApplication.sharedApplication() makes it seem like no? 
 // 
-// The #inline is important for set_dynamic_context() to do what we want :ThisWillBreakIfYouMoveAstInliningToTheBackend
 fn GET(obj: id"T") Ty(*Sapp.Self, *Impl) #inline = {
     out := zeroed(rawptr);
     object_getInstanceVariable(obj, "franca_sapp", out&);
     i := Impl.ptr_from_raw(out);
-    set_dynamic_context(i.env);
     (i.common(), i)
 }
 
@@ -925,14 +919,12 @@ setup_display_link :: fn(macos: *Impl) void = {
 
 display_link_callback1 :: fn(displayLink: CVDisplayLinkRef, now: rawptr, outputTime: rawptr, flagsIn: i64, flagsOut: *i64, displayLinkContext: rawptr) voidResult = {
     macos := bit_cast_unchecked(rawptr, *Impl, displayLinkContext);
-    set_dynamic_context(macos.env);
     dispatch_source_merge_data(macos.display_source, 1);
     (value = 0)
 }
 
 display_link_callback2 :: fn(userdata: rawptr) void = {
     macos := Impl.ptr_from_raw(userdata);
-    set_dynamic_context(macos.env);
     // TODO: produce a test where you can tell this does somethings
     /* Catch any last-moment input events */
     macos.poll_input_events();

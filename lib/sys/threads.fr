@@ -1,6 +1,6 @@
 
 Thread :: @struct {
-    first_environment: DefaultContext;
+    first_environment: StaticTls;  // must be the first field
     
     // These are only used when starting the thread. 
     userdata: rawptr;
@@ -58,19 +58,19 @@ fn init_thread_data(stack: AlignedStack, callee: @FnPtr(userdata: rawptr) void, 
     thread := bit_cast_unchecked(*u8, *Thread, stack.usable.ptr);
     @debug_assert_ult(size_of(Thread), macos_page_size);
     // TODO: put it at the end and offset forward to give the thread less memory so the stack grows left away from the context. instead of left towards the context. 
-    // TODO: do we trust it to not stomp in my stuff in between? 
-    copy_bytes(DefaultContext.raw_from_ptr(thread.first_environment&), get_dynamic_context(), size_of_dynamic_context);
-    set_new_thread_id(thread.first_environment&);
+    c := thread.first_environment&;
+    c[] = get_current_thread()[].first_environment;
+    set_new_thread_id(c);
     
     thread.userdata = userdata;
     thread.callee = callee;
     thread.tid_futex = MAX_u32;
     thread.stack = stack;
     thread.first_temporary_allocator = init(page_allocator, 1.shift_left(20));
-    thread.first_environment.temporary_allocator = thread.first_temporary_allocator&;
-    thread.first_environment.temporary_allocator_i = thread.first_environment.temporary_allocator.borrow();
+    c.temporary_allocator = thread.first_temporary_allocator&;
+    c.temporary_allocator_i = c.temporary_allocator.borrow();
     thread.stack_reserved_size = macos_page_size;
-    thread.first_environment.thread = Thread.raw_from_ptr(thread);
+    c.thread = Thread.raw_from_ptr(thread);
     thread
 }
 
@@ -114,7 +114,7 @@ fn prefer_pthread() bool =
 franca_runtime_init_thread :: fn(franca_userdata: rawptr) void = {
     thread := Thread.ptr_from_raw(franca_userdata);
     fence();
-    set_dynamic_context(DefaultContext.raw_from_ptr(thread.first_environment&));
+    set_legacy_dynamic_environment(franca_userdata);
     thread'callee(thread.userdata);
     @if(SLOW_USERSPACE_THREADS) import("@/lib/sys/sync/green.fr")'end_current_task();
     // not freeing the stack here, the sane thing is to free it on the joining side (since on amd64 you return by popping something off it). 
@@ -160,6 +160,7 @@ fn get_current_thread() *Thread = {
     Thread.ptr_from_int(base)
 }
 
+// TODO: guard page between the stack and tls. (careful to move it when allocate_signal_stack in examples/os)
 AlignedStack :: @struct(padded: []u8, usable: []u8);
 allocate_stack :: fn(prefer_sys: bool, os: Os) AlignedStack = {
     ::Syscall;

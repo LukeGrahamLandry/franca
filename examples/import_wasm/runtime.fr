@@ -20,7 +20,6 @@ Module :: @rec @struct {
 // this is passed as the first parameter to every wasm function.
 Instance :: @struct {  // !Sized
     memory: *SaneRawList(u8);
-    env: rawptr;
     gpa: Alloc;
     counts: Counts;
     exports := zeroed RawHashMap(Str, Export);
@@ -206,7 +205,6 @@ fn instantiate(engine: *Engine, mod: *Module, imports: *ExportsEnv) *Instance = 
     instance := {
         it: Instance = (
             memory = zeroed(*SaneRawList(u8)),
-            env = get_dynamic_environment(),
             gpa = general_allocator(),
             counts = mod.counts,
         );
@@ -240,12 +238,11 @@ fn instantiate(engine: *Engine, mod: *Module, imports: *ExportsEnv) *Instance = 
                 continue()
             };
             // HACK: it's not ok to file_exists("target/franca/webgpu.g.fr") because it tricks the caching :(
-            crash :: fn(env: rawptr) void = {
-                set_dynamic_environment(env);
+            crash :: fn() void = {
                 @panic("TODO: import_wasm does not support webgpu");
             };
             f: rawptr = crash;
-            @as(Export) (Function = (callee = f, context = get_dynamic_environment()))
+            @as(Export) (Function = (callee = f, context = zeroed(rawptr)))
         };
         @if(missing != 0) continue();
         
@@ -375,7 +372,7 @@ fn new_memory(engine: *Engine, initial: i64, max_bytes: i64) Ty(Export, *UserCon
     a := engine.gpa;
     engine.memories&.push(buf, a);
     buf := a.boxed(SaneRawList(u8), (ptr = buf.ptr, cap = buf.len, len = initial));
-    ctx := a.boxed(UserContext, (memory = buf, env = get_dynamic_environment()));
+    ctx := a.boxed(UserContext, (memory = buf, env = zeroed(rawptr)));
     ((Memory = buf), ctx)
 }
 
@@ -431,7 +428,6 @@ fn SaneRawList($T: Type) Type = {
 
 #wasm(0xFC, 0x0F, .table)
 table_grow :: fn(ctx: *Instance, table_in: *SaneRawList(Instance.Callable), fill: *Callable, delta: i32) i32 = {
-    set_dynamic_context(ctx.env);
     fill := fill[];
     table := table_in[].from_sane();
     if delta < 0 || table.len + delta.intcast() > MAX_i32 {
@@ -449,7 +445,6 @@ table_grow :: fn(ctx: *Instance, table_in: *SaneRawList(Instance.Callable), fill
 
 #wasm(0xFE, 0x00, .memarg)
 atomic_notify :: fn(ctx: *Instance, addr: *u32, count: u32) i32 = {
-    set_dynamic_context(ctx.env);
     _ := Futex'wake(addr, count);
     
     // TODO: return the number that waiters that were woken
@@ -458,7 +453,6 @@ atomic_notify :: fn(ctx: *Instance, addr: *u32, count: u32) i32 = {
 
 #wasm(0xFE, 0x01, .memarg)
 atomic_wait32 :: fn(ctx: *Instance, addr: *u32, expect: u32, timeout_ns: i64) Futex.WasmWaitResult = {
-    set_dynamic_context(ctx.env);
     forever := timeout_ns < 0;
     @assert(forever, "TODO(import_wasm): atomic.wait with timeout");
     _ := Futex'wait(addr, expect);
@@ -475,7 +469,6 @@ atomic_fence :: fn(ctx: *Instance) void = {
 // but keep track of a smaller "length" value so user code can use memory_grow as the page allocator.
 #wasm(0x40, .memory)
 memory_grow :: fn(ctx: *Instance, memory: *SaneRawList(u8), delta_pages: i32) i32 = {
-    set_dynamic_context(ctx.env);
     delta := delta_pages.intcast().shift_left(16);
     old := i64.cas(memory.len&) { old |
         new := old + delta;
@@ -487,7 +480,6 @@ memory_grow :: fn(ctx: *Instance, memory: *SaneRawList(u8), delta_pages: i32) i3
 
 #wasm(0xFC, 0x08, .data, .memory)
 memory_init :: fn(ctx: *Instance, data_start: *u8, _: *SaneRawList(u8), dest: u32, src_offset: u32, size: u32) void = {
-    set_dynamic_context(ctx.env);
     ctx := ctx.memory.ptr;
     src := data_start.offset(src_offset.zext()).slice(size.zext());
     dest := ctx.offset(dest.zext()).slice(size.zext());

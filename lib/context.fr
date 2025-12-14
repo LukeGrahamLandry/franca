@@ -3,7 +3,7 @@
 
 // A pointer to this struct is passed as a hidden parameter to (almost) every function. 
 // (Soon you will be able to add your own things, to use this as tls).
-DefaultContext :: @struct(
+StaticTls :: @struct(
     comptime: rawptr,  // Will be null at runtime (unless you call into the compiler as a library). 
     reserved2 := 0,
     thread_index: i64,
@@ -95,9 +95,9 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
     have_libc :: @static(bool);
     
     impl2 :: fn() Never #no_trace = {
-        thread := get_current_thread();
-        set_dynamic_context(DefaultContext.raw_from_ptr(thread.first_environment&));
-            c := context(DefaultContext);
+            thread := get_current_thread();
+            c := thread.first_environment&;
+            set_legacy_dynamic_environment(StaticTls.raw_from_ptr(c));
             c.current_os = (@as(i64) @as(Os) OS[].it).trunc();
             temporary_allocator: Arena.Allocator = init(page_allocator, 1.shift_left(20));
             set_temporary_allocator(temporary_allocator&);
@@ -324,34 +324,21 @@ do_relocations_static_linux :: fn() void = {
     };
 };
 
-size_of_dynamic_context :: DefaultContext.size_of(); // @builtin size_of_dynamic_context;
-
 __driver_abi_version :: @if(IS_BOOTSTRAPPING, 1119, __builtin_compiler_abi);
 
-fn get_dynamic_context() rawptr = {
-    builtin_get_dynamic_context :: fn(_: i64) rawptr #intrinsic(INTRINSIC_GET_ENV);  // :UpdateBoot
-    @if(__driver_abi_version < 1512) return(builtin_get_dynamic_context(0));
-
-    a := 0;
-    base := i64.int_from_ptr(a&).bit_and(bit_not(1.shift_left(franca_required_stack_bits) - 1));
-    base.rawptr_from_int()
-}
-
-fn set_dynamic_context(context: rawptr) void #inline/*semantic*/ = {
-    builtin_set_dynamic_context :: fn(context: rawptr) i64 #intrinsic(INTRINSIC_SET_ENV);  // :UpdateBoot
+// :UpdateBoot
+set_legacy_dynamic_environment :: fn(context: rawptr) void #inline/*semantic*/ = {
     if __driver_abi_version < 1512 {
-        builtin_set_dynamic_context(context);
+        f :: fn(context: rawptr) i64 #intrinsic(INTRINSIC_SET_ENV);
+        f(context);
     }
-}
+};
 
-
-get_dynamic_environment :: get_dynamic_context;
-set_dynamic_environment :: set_dynamic_context;
-
+// :UpdateBoot
 INTRINSIC_GET_ENV :: 64;
 INTRINSIC_SET_ENV :: 65;
 
-fn push_tls_value($name: Fields(DefaultContext), value: FieldType(DefaultContext, name), $body: @Fn() void) void #generic = {
+fn push_tls_value($name: Fields(StaticTls), value: FieldType(StaticTls, name), $body: @Fn() void) void #generic = {
     it := tls(name);
     prev := it[];
     it[] = value;
@@ -359,32 +346,18 @@ fn push_tls_value($name: Fields(DefaultContext), value: FieldType(DefaultContext
     it[] = prev;
 }
 
-fn tls($name: Fields(DefaultContext)) *FieldType(DefaultContext, name) #generic = {
-    DefaultContext.get_field(context(DefaultContext), name)
-}
+fn tls($name: Fields(StaticTls)) *FieldType(StaticTls, name) #generic = {
+    c := @if(__driver_abi_version < 1512, {
+        f :: fn(_: i64) rawptr #intrinsic(INTRINSIC_GET_ENV);
+        f(0)
+    }, {
+        a := 0;
+        base := i64.int_from_ptr(a&).bit_and(bit_not(1.shift_left(franca_required_stack_bits) - 1));
+        base.rawptr_from_int()
+    });
 
-emergency_panic :: fn(msg: Str) Never = {
-    scary_log("panicked inside push_emergency_dynamic_environment\n");
-    scary_log(msg);
-    Syscall'exit(1)
-};
-
-// TODO: let the driver program add new fields. 
-fn get_offset_to_dynamic_context_field(T: Type) i64 = {
-    if T == DefaultContext {
-        0
-    } else {
-        scary_exit()
-    }
-}
-
-fn context($T: Type) *T #generic = {
-    off :: {
-        env := get_comptime_environment();
-        get_offset_to_dynamic_context_field(T)  
-    };
-    c := get_dynamic_context().offset(off);
-    T.ptr_from_raw(c)
+    c := StaticTls.ptr_from_raw(c);
+    StaticTls.get_field(c, name)
 }
 
 ::if(rawptr);
@@ -400,8 +373,7 @@ fn scary_log(s: Str) void = {
 }
 
 fn temp() Alloc = {
-    @if(IS_BOOTSTRAPPING) return(tls(.temporary_allocator)[].borrow());
-    @if(::(__builtin_compiler_abi < 1263)) return(tls(.temporary_allocator)[].borrow());
+    @if(__driver_abi_version < 1263) return(tls(.temporary_allocator)[].borrow());
     tls(.temporary_allocator_i)[]
 }
 
@@ -421,7 +393,7 @@ fn reset_temporary_storage(mark: Alloc.Mark) void =
     temp().reset(mark);
     
 #inline #use("@/lib/sys/sync/atomics.fr") 
-fn set_new_thread_id(ctx: *DefaultContext) void = {
+fn set_new_thread_id(ctx: *StaticTls) void = {
     ctx.thread_index = i64.atomic_inc(ctx.global.next_thread_id&);
 }
 
@@ -436,7 +408,8 @@ fn cli_args() []CStr = {
 // - The memory returned here is shared with other threads. So it's probably a bad plan to mutate it. 
 // - fn getenv(name: CStr) CStr #libc;
 fn get_environment_variable(name: Str) ?CStr = {
-    envp := context(DefaultContext)[].environment_variables;
+    @if(IS_BOOTSTRAPPING) return(.None);
+    envp := tls(.environment_variables)[];
     while => !envp[].ptr.is_null() {
         if starts_with(envp[], name) && envp[][name.len] == "=".ascii() {
             return(Some = (ptr = envp[].ptr.offset(name.len + 1)));

@@ -11,7 +11,6 @@ Kernel :: @struct {
     tasks: Array(Task, 16);
     next_task_to_run: OnePerCore(i64);
     next_task_to_spawn: i64;
-    env: rawptr;
     interrupt_stack: OnePerCore([]u8);
     idle_task: OnePerCore(Task);
     page_size: i64;
@@ -94,7 +93,6 @@ main :: fn(device_tree: i64, _sp: i64, kernel_image_base: i64) void = {
     );
     // offset chosen by fair die roll, just has to not overlap ram
     kernel.next_vaddr = u8.int_from_ptr(ram.end_pointer()) + 0x40000000;  
-    kernel.env = get_dynamic_context();
     
     // if device tree is too close to start of ram, 
     // we'll stomp it before being able to copy to user space, 
@@ -555,7 +553,7 @@ barrier :: @AsmFunctionArmOnly(fn() void = ()) => (
 );
 
 user_exec :: fn(elf_bytes: []u8, devicetree: *u8) void = {
-    c := context(DefaultContext);
+    c := get_current_thread()[].first_environment&;
     c.panic_hook = print_and_exit1;
     c.prefer_syscalls = true;
     c.current_os = 1;
@@ -589,7 +587,6 @@ syscall_func :: fn(task: *Task) void = {
     return :: ();  // must do it via return_to_user
     
     prev := Task.State.cas(task.state&, .Running, .Suspended);
-    set_dynamic_context(kernel.env);
     @if(prev != .Running) kpanic("interrupted but not running");
     on_this_core := identical(task.kernel_sp, kernel.interrupt_stack&.current()[].end_pointer());
     @if(!on_this_core) kpanic("running on other core");
@@ -876,7 +873,6 @@ wake_secondary_cores :: fn(dt: DT.Iter) void = {
         mpidr: i64 = node.read_32(0).zext();
         if mpidr != 0 {
             stack := kernel.physical&.map_contiguous(1.shift_left(16), 1);
-            @assert(size_of(DefaultContext) < stack.len);
             p := rawptr.reinterpret_bytes(stack);
             p[p.len - 2] = cpu_on_main;
             sp := stack.end_pointer().offset(-16);
