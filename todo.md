@@ -1,4 +1,5 @@
 
+- instead of printing pointers in @trace, print thread local allocation index and offset so it changes less in diff?
 - why creating jit shims for examples/import_wasm/runtime.fr when compiling the compiler
 - maybe lost some speed on baking tls() so many times?
 - better error messages when you have an unfilled fixup on wasm. 

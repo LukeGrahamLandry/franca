@@ -372,6 +372,8 @@ init_interrupt_vector :: fn() void #use(Arm) = {
 // TODO: how do yo we know it's the last one in devicetree.timer.interrupts?
 timer_irq :: 16 + 0xb;
 init_timer :: fn(gic: Gic.Self) void = {
+    @if(NO_PREEMPT) return(); // set by -no_preempt in build.fr
+    
     // any priority/ICFGR is fine.
     gic.set_group1(timer_irq);
     gic.enable(timer_irq);
@@ -382,9 +384,15 @@ init_timer :: fn(gic: Gic.Self) void = {
 Gic :: import("@/examples/os/drivers/gic3.fr");
 Pl011 :: import("@/examples/os/drivers/console/pl011.fr");
 
-reset_countdown :: fn() void = {
+// TODO: am i smoking crack? after changing it from just frequency/200, 
+//       this makes -vzf sometimes hang if it's not #noinline :compilerbug ???
+//       but it works in qemu-hvf so i don't see how it could be my fault. 
+reset_countdown :: fn() void #noinline = {
+    @if(NO_PREEMPT) return();
+    ms := 5; 
     frequency := i64.sys_get(.CNTFRQ_EL0);
-    i64.sys_set(.CNTV_TVAL_EL0, frequency / 200);
+    ticks := frequency.mul(ms).udiv(MS_PER_S);
+    i64.sys_set(.CNTV_TVAL_EL0, ticks);
 }
 
 Arm :: import("@/backend/arm64/bits.fr");
@@ -526,7 +534,7 @@ choose_task_to_run :: fn() *Task = {
 }
 
 stop :: fn() Never = {
-    kprint_label("spin_lock_ticks ", kernel.spin_lock_ticks);
+    @if(kernel.spin_lock_ticks != 0) kprint_label("spin_lock_ticks ", kernel.spin_lock_ticks);
     kprint("goodbye!\n");
     PSCI'system_off()
 }
@@ -562,7 +570,10 @@ user_exec :: fn(elf_bytes: []u8, devicetree: *u8) void = {
     // TODO: its sad that i have to commit new pages for the bytes copied 
     //       for Load commands but not accessed by the running program.
     import("@/examples/elf_loader.fr")'load_elf_file(elf_bytes, (
-        args = @slice(@as(CStr) (ptr = devicetree)),
+        args = @slice(
+            @as(CStr) (ptr = devicetree), 
+            @fmt_cstr("page_size=%", kernel.page_size),
+        ),
         env = empty(),
     ));
 }

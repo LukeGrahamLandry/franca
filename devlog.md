@@ -19,6 +19,10 @@ TODO: pass in the dump_wasm disassembler when running in web
 - the lit_fns aren't a big deal on native but self compile on wasm: 2680ms -> 2320ms. 
 - fix save_guessed_name getting stompped in get_info
 - infer function name from const assignment when the expr isn't a literal (like `foo :: AsmFunction(...)`)
+- i broke examples/os -vzf. it doesn't like the 0 length print(self.log&.items()). 
+  while debugging that, made it possible to get consistant virtual addresses so you can diff them. 
+  also i tried to change reset_countdown and it produced very strange bugs? 
+
 
 ## (Dec 14)
 

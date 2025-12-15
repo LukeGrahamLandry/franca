@@ -47,6 +47,8 @@ main :: fn() void = {
         boottime := timestamp();
         @println("The system took %ms to boot.", boottime);
         @if(boottime > 750) @println("that's really slow, i hope you're not using hardware virtualization");
+        
+        sync_vaddr();
         run_startup_commands();
         
         // TODO: this shell should share some logic with examples/terminal.fr
@@ -383,6 +385,19 @@ temporary_libc_import :: fn(name: Str, dest: *rawptr, allow_null: bool) void = {
     if !allow_null {
         dest[] = fn() void = panic("called a weak import");
     };
+}
+
+// if you do `build.fr -smp 1 -no_preempt` this gives a better chance of getting the same pointers 
+// between runs so you can print them and diff exactly what happens if one of qemu/vzf doesn't work. 
+// this avoids differences in vaddr caused by different startup code depending which devices are available.  
+sync_vaddr :: fn() void = {
+    prefix := "page_size=";
+    s := cli_args()[1].str();
+    @assert(s.starts_with(prefix));
+    page_size := s.rest(prefix.len).parse_int();
+    next_vaddr := u8.int_from_ptr(page_allocator.alloc_uninit(u8, 1).as_ptr()) + page_size;
+    waste := next_vaddr.align_to(1.shift_left(34)) - next_vaddr;
+    _ := page_allocator.alloc_uninit(u8, waste);
 }
 
 MyAttr :: @struct {
