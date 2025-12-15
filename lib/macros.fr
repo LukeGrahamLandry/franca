@@ -496,25 +496,36 @@ fn enum(names: FatExpr) FatExpr = {
     @{ @enum(i64) @[varients] }
 }
 
-// TODO: @comptime_var which is like this but a constant at runtime. 
+::@if(IS_BOOTSTRAPPING, {
+
 #macro fn static(T: FatExpr) FatExpr = {
-    t := @literal const_eval(Type)(T);
-    // TODO: you really shouldn't be reading before writing anyway but it doesn't work with ast_alloc being todo_allocator without the zeroed(). 
-    @{ :: box_zeroed(ast_alloc(), @[t]) }
+    @{ :: box_zeroed(ast_alloc(), @[@literal const_eval(Type)(T)]) }
 }
 
-// TODO: instead of this, you should be able to take the address of a normal :: constant,
-//       but i should know which pointers are const. 
-//       but that doesn't fix the problem of needing the constant to be ready so you can use it in functions that it contains pointers to. 
-//       need !rec to work for anything, not just types?    -- Jun 18
 #macro fn static(T: FatExpr, value: FatExpr) FatExpr = {
-    t := @literal const_eval(Type)(T);
     @{ :: {
-        mem := ast_alloc().box_uninit(@[t]);
+        mem := ast_alloc().box_uninit(@[@literal const_eval(Type)(T)]);
         mem[] = @[value];
         mem
     }}
 }
+},{
+#macro fn static(T: FatExpr) FatExpr = {
+    t := const_eval(Type)(T);
+    p := alloc_raw(ast_alloc(), size_of(t), align_of(t));
+    p.set_bytes(0);
+    p := u8.raw_from_ptr(p.ptr);
+    @{ @run ptr_from_raw(@[@literal t], @[@literal p]) }
+}
+
+#macro fn static(T: FatExpr, value: FatExpr) FatExpr = {
+    t := const_eval(Type)(T);
+    p := alloc_raw(ast_alloc(), size_of(t), align_of(t));
+    p := u8.raw_from_ptr(p.ptr);
+    const_eval(value, t, p);
+    @{ @run ptr_from_raw(@[@literal t], @[@literal p]) }
+}
+});
 
 // @array(1, 2, 3) creates an Array(i64, 3)
 // because was a pain to make a constant one before you could coerce from tuple. 
@@ -558,7 +569,8 @@ get_enum_raw_type :: fn(T: Type) Type #fold = {
     i.Enum.raw 
 };
     
-fn enum_basic($T: Type) void = {
+enum_basic :: enum;
+fn enum($T: Type) void = {
     fn eq(a: T, b: T) bool #inline #fold = a.raw() == b.raw();
     fn ne(a: T, b: T) bool #inline #fold = a.raw() != b.raw();
     
@@ -566,10 +578,6 @@ fn enum_basic($T: Type) void = {
     
     fn raw(e: T) RAW = @as(RAW) e;
     fn raw(e: *T) *RAW #ir(.copy, .Kl);
-}
-
-fn enum($T: Type) void = {
-    ::enum_basic(T);
     
     fn ordinal(e: T) i64 #inline = {
         :: ?i64;
@@ -675,7 +683,7 @@ fn expand(e: FatExpr) FatExpr #macro =
 
 fn inline_for(container: FatExpr, body: FatExpr) FatExpr #macro = {
     container := compile_ast(@{ :: @[container] });
-    len := (const_eval(i64)(@{ v := @[container]; v.len() }));
+    len := (const_eval(i64)(@{ @[container].len() }));
     if len == 0 {
         return(@{});
     };
@@ -692,7 +700,8 @@ fn inline_for(container: FatExpr, body: FatExpr) FatExpr #macro = {
     
     actions: List(FatExpr) = list(len, ast_alloc());
     range(0, len) { i | 
-        actions&.push(@{ @[body](:: @[indexer](@[container], @[@literal i])) });
+        // the no_inline means it only needs a lit_fn the first time indexer is compiled, then it can use a dyncall. 
+        actions&.push(@{ @[body](@run @no_inline @[indexer](@[container], @[@literal i])) });
     };
     // TODO: dumpster fire garbage error message if you try to make a single length tuple
     //       "Expr::Tuple should have struct type"
@@ -922,7 +931,14 @@ fn is(arg: FatExpr) FatExpr #macro #outputs(bool) = {
     low    := MAX_i64;
     high   := MIN_i64;
     for opts.slice(1, opts.len) { o | 
-        o   := const_eval(i64)(@{ (@as(@[type_ast])@[o]).raw().int() });  // :slow don't resolve these overloads every time
+        o := if o.expr&.is(.ContextualField) {
+            // this is by far the common case and saves a lot of lit_fn
+            it := info.Enum.fields.items().find(fn(it) => it._0 == o.expr.ContextualField)
+                || compile_error("invalid enum field", o.loc);
+            it._1.Small._0
+        } else {
+            const_eval(i64)(@{ (@as(@[type_ast])@[o]).raw().int() })  // :slow don't resolve these overloads every time
+        };
         values&.add_unique(o);
         high = high.max(o);
         low  = low.min(o);
@@ -1101,6 +1117,13 @@ fn must_return(call: FatExpr) FatExpr #macro = {
     @ct_assert(call.expr&.is(.Call), call.loc, "@must_return expected a call expression");
     it := call.expr.Call&;
     it.flags = it.flags.bit_or(1.shift_left(@as(i64) CallFlags.MustReturn));
+    call
+}
+
+fn no_inline(call: FatExpr) FatExpr #macro = {
+    @ct_assert(call.expr&.is(.Call), call.loc, "@no_inline expected a call expression");
+    it := call.expr.Call&;
+    it.flags = it.flags.bit_or(1.shift_left(@as(i64) CallFlags.NoInline));
     call
 }
 

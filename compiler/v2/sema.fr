@@ -47,6 +47,10 @@ fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(Ty(bool, bool)) #once =
             (Ok = (f.default.done, false))
         }
         fn Set(f) => {
+            // this is cute but maybe not worth checking every time (example where it helps: fill_driver_vtable)
+            //@if_let(f.place.expr&) fn FieldAccess(it) => {
+            //    infer_function_name(f.value&, it.name);
+            //};
             if f.place.expr&.is(.GetVar) {
                 @err_assert(f.place.expr.GetVar.kind != .Const, "Cannot assign to a ::constant: %", self.pool.get(f.place.expr.GetVar.name)) return;
                 @check(self.compile_get_var(f.place&, .None, false)) return;
@@ -1625,7 +1629,8 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
     };
     
     capturing   := func.get_flag(.AllowRtCapture).or(func.get_flag(.MayHaveAquiredCaptures));
-    will_inline := capturing || func.get_flag(.Inline);
+    once_deny_inline := expr.expr.Call.flags.bit_and(1.shift_left(@as(i64) CallFlags.NoInline)) != 0;
+    will_inline := capturing || (func.get_flag(.Inline) && !once_deny_inline);
     deny_inline := func.get_flag(.NoInline);
     if(will_inline && deny_inline, => return(@err("must inline a function marked #noinline")));
     
@@ -3439,9 +3444,7 @@ fn find_const(self: *SelfHosted, name: Var, requested: ResultType) Maybe(Ty(Valu
         //     (need to change the expression to create function pointers because they might not be compiled yet)
         @if_let(var.expr.expr&) fn Value(f) => {
             if var.expr.ty == Type {
-                // TODO: want to do something like this but it needs to work with graphics/wgpu.fr 
-                //       so need to be smarter about knowing which are useful names to save 
-                //self.save_guessed_name(Type.assume_cast(f.bytes&)[], name.name, var.expr.loc);
+                self.save_guessed_name(Type.assume_cast(f.bytes&)[], name.name, var.expr.loc);
             };
         
             return(Ok = (f.bytes, var.expr.ty));
@@ -3469,14 +3472,6 @@ fn handle_declare_constant(self: *SelfHosted, name: Var, ty: *LazyType, value: *
     @debug_assert(self.dispatch.enclosing_function.is_none(), "ICE: handle_declare_constant should have no enclosing function");
     
     is_rec := is_rec_hack(value);
-    
-    // infer the more useful name when you do `foo :: fn() = { ... };`
-    @if_let(value.expr) fn Closure(func) => {
-        if func.get_flag(.NoName) {
-            func.name = name.name;
-            func.unset_flag(.NoName);
-        };
-    };
     
     want := ResultType.None;
     if @check(self.infer_type(ty)) return { known |
@@ -3512,6 +3507,7 @@ fn handle_declare_constant(self: *SelfHosted, name: Var, ty: *LazyType, value: *
     };
     
     @check(self.coerce_const_expr(value, want, false)) return;
+    @debug_assert(value.expr&.is(.Value));
     //@if_let(want) fn Specific(ty) => {
     //    @check(self.can_assign(ty, value.ty)) return;
     //};
@@ -3519,10 +3515,17 @@ fn handle_declare_constant(self: *SelfHosted, name: Var, ty: *LazyType, value: *
     self.finish_layout_deep(value.ty);
     
     if value.ty == Type {
-        @debug_assert(value.expr&.is(.Value));
         type_value := Type.assume_cast(value.expr.Value.bytes&)[];
         // You're still gonna get a lot of T/Self/RAW which is unhelpful. 
         self.save_guessed_name(type_value, name.name, value.loc);
+    };
+    if value.ty == FuncId {
+        fid := FuncId.assume_cast(value.expr.Value.bytes&)[];
+        func := self.get_function(fid);
+        if func.get_flag(.NoName) {
+            func.name = name.name;
+            func.unset_flag(.NoName);
+        };
     };
     
     // TODO: do this if it is a slice as well. 
@@ -3559,9 +3562,10 @@ fn set(self: *SelfHosted, expr: *FatExpr, $T: Type, value: T) void #generic = {
 }
 
 fn handle_finish_rec_type(self: *SelfHosted, hole: Type, name: Var, value: *FatExpr) Maybe(void) = {
+    loc := value.loc;
     result_type := @check(self.eval(value, Type)) return;
     @debug_assert(result_type != hole, "ICE: @rec resolved to itself");
-    self.update_placeholder(hole, result_type, name.name);
+    self.update_placeholder(hole, result_type, name.name, loc);
     .Ok
 }
 
@@ -4018,6 +4022,10 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
     fake_func&.set_flag(.ResolvedBody);
     fake_func&.set_flag(.ResolvedSign);
     self.stats.lit_fn += 1;
+    self.when_debug(.LitFn) { o |
+        e := self.comp().log(expr);
+        @fmt(o, "L: % %", fmt_loc(self, expr.loc), e.slice(0, min(e.len, 64)));
+    };
     
     // SyntheticImmEval prevents call_direct() from handling any #fold in the body expression. 
     // If you have a complicated constant expression that calls a bunch of #fold functions, there's no 
@@ -4109,6 +4117,7 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
                         };
                         f_id := FuncId.assume_cast(it.f.expr.Value.bytes&)[];
                         if self.get_fn_callable(f_id) { f_ptr |
+                            @debug_assert(!f_ptr.is_null());
                             func := self.get_function(f_id);
                             if(func.get_flag(.AvoidJitShim), => return(.None));
                             self.finish_layout_deep(it.f.ty);

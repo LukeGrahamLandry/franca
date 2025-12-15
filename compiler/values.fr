@@ -568,17 +568,21 @@ fn get_guessed_name(self: *SelfHosted, type: Type) ?Symbol = {
     }
 }
 
-fn update_placeholder(self: *SelfHosted, placeholder_slot: Type, real_type: Type, name: Symbol) void = {
+fn update_placeholder(self: *SelfHosted, placeholder_slot: Type, real_type: Type, name: Symbol, loc: Span) void = {
     idx := placeholder_slot.as_index();
     slot := self.types&.nested_index(idx);
     @debug_assert(slot.is(.Placeholder));
     slot[] = (Named = (real_type, name));
     @debug_assert(self.type_lookup&.get(slot&).is_none());
+    self.save_guessed_name(real_type, name, loc);
     
     // just in case.    copy-paste call to truncate but now want to have the list full size ahead of time. 
     i := self.type_extra.len - 1; // we happen to know this can't underflow because there are builtin types.  
     while => i > idx {
-        self.type_extra&.nested_index(i)[] = TypeMeta.zeroed(); // is_sized = false
+        it := self.type_extra&.nested_index(i);
+        if it.is_sized {
+            it[] = TypeMeta.zeroed(); // is_sized = false
+        };
         i -= 1;
     };
 }
@@ -655,7 +659,11 @@ fn get_info(self: *SelfHosted, ty_original: Type) *TypeMeta = {
     old := if ty != ty_original {
         old := self.type_extra&.nested_index(ty.as_index());
         if old.is_sized {
+            loc := old_original.loc;
+            inferred_name := old_original.inferred_name;
             old_original[] = old[];
+            old_original.loc = loc;
+            old_original.inferred_name = inferred_name;
             return(old_original);
         };
         old

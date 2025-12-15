@@ -1,11 +1,12 @@
 
+- why creating jit shims for examples/import_wasm/runtime.fr when compiling the compiler
+- maybe lost some speed on baking tls() so many times?
 - better error messages when you have an unfilled fixup on wasm. 
 - please please cleanup the got_lookup_offset stuff for wasm
 - `./q.out examples/default_driver.fr build tests/exe/wasm.fr && FRANCA_BACKTRACE=1 ./a.out`
   mega crash loop. should work. 
 - (when jitting) FRANCA_BACKTRACE from host in import_wasm show both wasm and normal function names.
   need to be able to inherit the resolver from the compiler. 
-- FRANCA_LOG_DEBUG is annoying to type it should be a cli arg and passed in buildoptions
 - `f :: @as(rawptr) fn() = println("A");` you don't get an inferred name so it doesn't show nicely in trace. 
   (the confusing example was report_called_uncompiled_or_just_fix_the_problem)
 - removing pare broke ENABLE_GVN=false `compile_expr__1691 Wanted alias for RTmp:1849`
@@ -213,7 +214,6 @@ cset	w0, eq
 - clock_gettime
 
 > (note) solutions for others: SLOW_USERSPACE_THREADS, NEVER_USE_LIBC_ALLOC
-> TODO: should make docs/debugging.md and document strategies for narrowing down bugs. 
 
 ## tooling for debugging
 

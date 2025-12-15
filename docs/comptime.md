@@ -1,19 +1,27 @@
 # Metaprogramming in Franca 
 
 Franca allows full compile time execution. 
-Anything you can do at runtime, you can do at comptime too.
+Approximately anything you can do at runtime, you can do at comptime too.
 In fact, you have more power at comptime than runtime because you can dynamically generate code to be added to your program. 
-I claim our version of this is more powerful than `comptime` in zig, `constexpr` in C++, or `const fn` in Rust.
+I claim my version of this is more powerful than `comptime` in zig, `constexpr` in C++, or `const fn` in Rust.
 In Franca, comptime code is just-in-time compiled to native machine code, following the same calling conventions. 
 So you can freely call between JIT and AOT code (even extern-c code written in another language). 
 
-There are exactly two limitations: 
+There are some limitations: 
   - you can't call pthread_jit_write_protect_np(false) on macos. 
     (because you'll make the comptime code itself non-executable)
-  - you can't call fork (starting new threads is fine).
+  - you can't call fork. 
     (because the child process won't have the compiler's thread 
     so if you try to call a function that hasn't been compiled yet, it never will be).
-    
+  - you shouldn't spawn new threads, 
+    because some indirect calls are converted to shims to break dependency cycles. 
+    instead of being compiled when reached, the callee is compiled the first time it's called, 
+    and that will break if it happens on a different thread than the rest of the frontend. 
+    same for swapping stacks because if you hit a shim, the compiler won't be able to access its thread locals. 
+
+You can do all those things from jitted code just fine, but not 
+from the more malleable state of jitted code running inside the compiler. 
+
 ## Alternative Frontends
 
 The best example by far is `examples/import_c/ffi.fr`, which is a C11 compiler that outputs binary ir + type info 
@@ -30,6 +38,9 @@ but some examples of libraries that do work:
 - wuffs
 - stbimage, stbtruetype
 - lua (PUC Rio -- not jit)
+- doom (see examples/os/bin/doom.fr)
+
+frontends for simpler languages: examples/import_wasm, examples/bf/bf2ir.fr
 
 ## DSLs in Strings
 
@@ -115,8 +126,6 @@ it's much faster if you manually write out a bit switch statement.
 
 ## String Formatting
 
-> Zig can do this too so if you've used that this section will be boring and you should skip it. 
-
 @fmt("% to %", a, z);
 
 You probably don't want runtime overhead of parsing the string to look for percent signs every time you print something. 
@@ -125,19 +134,18 @@ This plays nicely with function overloading so @fmt can handle user defined type
 
 ## Generics
 
-> Zig can do this too so if you've used that this section will be boring and you should skip it. 
-
 Types are first class values. You can write a function that takes a type as an argument, 
 returns a type, and have the compiler generate code specialized for each different version.  
 
 ## Generating Tables
 
-> Zig can do this too so if you've used that this section will be boring and you should skip it. 
-
 When outputting Mach-O executables (for macOS), you need to include a section with the sha256 hash of each page of memory. 
 
 nothing up my sleeve numbers.  
 pasting tables.  
+
+repacking tables so you can lookup in both directions efficiently:  
+see backend/wasm/bits.fr/lookup_wasm_encoding
 
 ## Adhoc Library Loading
 
@@ -150,10 +158,10 @@ long add_with_ffi(long a, long b) {
 }
 """;
 
-:: {
+@run {
     write_entire_file_or_crash("./add.c", SRC);
     args := @slice("add.c", "-dynamiclib", "-o", "adder_dependency.dylib");
-    run_cmd_blocking("clang", args) || @panic("failed compile");
+    run_cmd_blocking("cc", args) || @panic("failed compile");
     lib := dlopen("adder_dependency.dylib", DlFlag.Lazy);
     ctx := current_compiler_context();
     ctx.add_comptime_library(@symbol "adder", lib);
@@ -161,9 +169,13 @@ long add_with_ffi(long a, long b) {
 
 fn add_with_ffi(a: i64, b: i64) i64 #import("adder");
 
-fn main() void = {
-  println(add_with_ffi(1, 2));
+main :: fn() void = {
+  @run println(add_with_ffi(1, 2));
 }
+
+#use("@/lib/sys/fs.fr");
+#use("@/lib/sys/subprocess.fr");
+#use("@/lib/dynamic_lib.fr");
 ```
 
 This snippet has many flaws: 
@@ -174,6 +186,8 @@ into the final executable. This would be fine if only other comptime
 code needed that library. 
 - It spews random files around. 
 - You add a dependency on another compiler. 
+
+(that trivial example could use import_c instead to avoid all those problems)
 
 ## Observing the Environment
 

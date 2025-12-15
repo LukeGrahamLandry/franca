@@ -43,6 +43,8 @@ to rerun all the comptime code which defeats the whole point of the caching. The
 to things that interact with compiler apis like `@macros` and import_c. If your c code `#include`s 
 something, that file is not part of the cache validation. 
 
+Files read with include_bytes ARE part of cache validation. 
+
 ## contents of a .frc file
 
 See `@/backend/incremental.fr` for the exact binary layout and some helper code for loading/storing it. 
@@ -69,3 +71,6 @@ compiles a c program into a single binary .frc blob to be loaded by the compiler
 more disk space and is slower to load than the post-regalloc-ir, but it colocates interface and 
 implementation so you don't have to write seperate bindings and it maintains the ability to be 
 cross compiled (and thus used transparently at comptime). 
+
+Currently import caching is only enabled when you set the FRANCA_MORE_CACHE environment
+variable (otherwise import_frc(X) is the same as import(X).exports). 

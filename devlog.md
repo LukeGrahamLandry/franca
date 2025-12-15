@@ -1,4 +1,25 @@
 
+TODO: use the compiler baked into jitshim to check that tls is still the main thread 
+      (store pointer on SelfHosted so don't have to assume the tls is valud to load .comptime) 
+      and print error if not. 
+
+TODO: pass in the dump_wasm disassembler when running in web
+
+## (Dec 15)
+
+- compiling the compiler makes shims for import_wasm/runtime because it includes dump_wasm 
+  which needs the type LoadWasm (which needs collect_runtime_calls to get size of a bitset) 
+  to resolve overloads of read_u because i put them in parse.fr instead of convert.fr. 
+  909ms -> 892ms. nice win from being able to log `-D SE`
+- add a CallFlags for no_inline and use it in inline_for so the index expression
+  stays as a simple call so it's fast to immediate_eval_expr. lit_fn: 2853 -> 2521
+- special case ContextualField in @is. lit_fn: 2018
+- outline in fix_number. lit_fn: 1993 -> 1967
+- de-generic @static, outline (byte_swappable_fields, create_arary_type). lit_fn: 1906
+- the lit_fns aren't a big deal on native but self compile on wasm: 2680ms -> 2320ms. 
+- fix save_guessed_name getting stompped in get_info
+- infer function name from const assignment when the expr isn't a literal (like `foo :: AsmFunction(...)`)
+
 ## (Dec 14)
 
 - i've wanted to bake things even when jitting for a while anyway
@@ -15,7 +36,7 @@
   - now aot tests/exe/wasm.fr doesn't eat a billion cores, you can actually see the problem: 
     assumes `args[0]` is franca binary and tries to run graphics/web/webgpu_api.fr. 
     oh and it spams because it's execing itself over and over again assuming surely this will be the time it gets the compiler instead, lol. 
-
+- wrap_main=false, mandelbrot.fr 100ms -> 75ms. 
 
 ## (Dec 13)
 

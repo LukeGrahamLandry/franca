@@ -722,8 +722,8 @@ current_os :: query_current_os;
 
 fn fix_flags();
 fn fix_flags($macos: Type, $linux: Type, $public: Type, agree: i64, preserve_high_bits: bool, flags: i64) i64 = {
-    m :: create_flags_data(Type.scope_of(macos), Type.scope_of(public));
-    l :: create_flags_data(Type.scope_of(linux), Type.scope_of(public));
+    m :: create_flags_data(macos, public);
+    l :: create_flags_data(linux, public);
     fix_flags(m, l, agree, preserve_high_bits, flags)
 } 
 
@@ -742,8 +742,7 @@ fn fix_flags(macos: []FlagInfo, linux: []FlagInfo, agree: i64, preserve_high_bit
 }
 
 fn fix_flags($Dest: Type, $Src: Type, d: i64, s: i64) i64 = {
-    D :: Type.scope_of(Dest); S :: Type.scope_of(Src);
-    fix_flags(d, s, ::create_flags_data(D, S))
+    fix_flags(d, s, create_flags_data(Dest, Src))
 };
 
 fn fix_flags(d: i64, s: i64, data: []FlagInfo) i64 = {
@@ -755,7 +754,9 @@ fn fix_flags(d: i64, s: i64, data: []FlagInfo) i64 = {
 }
 
 FlagInfo :: @struct(dest: u8, src: u8);
-create_flags_data :: fn(D: ScopeId, S: ScopeId) []FlagInfo = {
+create_flags_data :: fn(Dest: Type, Src: Type) []FlagInfo #fold = {
+    D := Type.scope_of(Dest); 
+    S := Type.scope_of(Src);
     out := FlagInfo.list(ast_alloc());
     for get_constants(S) { name |
         d_flag := get_constant(i64, D, name);
@@ -782,20 +783,25 @@ fn fix_number($macos: Type, $linux: Type, $public: Type, s: i64) i64 = {
 }
 
 fn fix_number($Dest: Type, $Src: Type, s: i64) i64 = {
-    D :: Type.scope_of(Dest); S :: Type.scope_of(Src);
-    
-    inline_for get_constants(S) { $name |
-        s_flag :: get_constant(i64, S, name[]).unwrap();
-        if s == s_flag {
-            d_flag :: get_constant(i64, D, name[]);
-            if d_flag { d_flag |
-                return(d_flag);
-            };
-            return(s_flag);
-        };
+    for create_numbers_data(Dest, Src) { src, dest |
+        if s == src {
+            return dest;
+        }
     };
     @panic("invalid fix_number %", s)
 }
+
+create_numbers_data :: fn(Dest: Type, Src: Type) []Ty(i64, i64) #fold = {
+    D := Type.scope_of(Dest); 
+    S := Type.scope_of(Src);
+    out := Ty(i64, i64).list(ast_alloc());
+    for get_constants(S) { name |
+        s_flag := get_constant(i64, S, name).unwrap();
+        d_flag := get_constant(i64, D, name) || s_flag;
+        push(out&, (s_flag, d_flag));
+    };
+    out.items()
+};
 
 // TODO: be more strictly typed about bit flags and make or-ing them together less painful
 fn Mask();

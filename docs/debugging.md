@@ -9,8 +9,8 @@ crash_report.fr, hook_backtrace
 
 ## Invasive Library Configuration
 
-These all rely on one special super power: your whole program is compiled from source every time 
-and you have the source for all the libraries. So you can just... edit the code, even low level 
+These all rely on your whole program being compiled from source every time 
+and having the source for all the libraries. So you can just... edit the code, even low level 
 syscall wrappers, allocators, etc. 
 
 You do have to be careful when doing this because comptime code 
@@ -35,26 +35,25 @@ let you trade off performance for extra runtime safety checks.
 - SLOW_ARENA_CANARY
 - SLOW_LEAK_ARENAS
 
-## Losing the Dynamic Environment
+## Thread Locals
 
-Some important state is passed around as a hidden parameter in function calls. 
+Some important state is stored in StaticTls. 
 This includes the current operating system, temporary allocator, and panic hook.
-So when external code calls franca code, if you don't use one of the functions 
-in `lib/context.fr` to reestablish a sane state, you can get into a confusing situation 
-where you can't safely do any syscalls, allocate memory, or even panic so you'll just 
-crash and burn pretty quickly. Similarly, when loading a dynamic library written in franca, 
-there are static variables (mostly just `OS`) that won't have a chance to get initialized by franca_runtime_init. 
-Anything with multiple compilation units (static.o files, .frc files) can have the same problem 
-if they try to create a new environment (which currently relies on restoring state from statics) 
-for interacting with external code. 
+When external code calls franca code from a thread that didn't go through franca_runtime_init,
+you can get into a confusing situation where you can't safely do any syscalls,
+allocate memory, or even panic so you'll just crash and burn pretty quickly. 
+
+I don't follow the extern-c/elf/whatever abi. Instead, callstacks are allocated a with certain alignment 
+and the tls area placed at the left where it can be accessed by masking off the low bits of sp.
+This works even if the other language (or its libc) needs to control the FS/TPIDR_EL0/TP 
+register for their own thread locals. As long as the franca side created the thread, 
+or you swap to a stack with the correct arrangement (like franca_runtime_init does), 
+you can call between languages safely. 
 
 This feature is mainly used for:
 - running the frontend once and getting IR that dynamically chooses the right behaviour for the current operating system
 - comptime code inheriting state from the compiler
-- me not needing to implement thread locals
-
-all of which are things i like and don't want to get rid of, 
-but I'm definitly considering moving to a less fragile (and more efficient) abi to enable them. 
+- me not needing to implement the "normal" thread local abi
 
 These problems can be avoided, you just have to know they exist, and it's a bit tedious. 
 As proof, the graphics programs on macos are a nest of franca callbacks handed out 

@@ -74,6 +74,7 @@ SelfHosted :: @rec @struct(
     },
     expr_pair_type := UnknownType,
     debug := 0,
+    log: List(u8),
     string_type: ?Type,
 );
 
@@ -228,7 +229,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
         
         name := c.fmt_fn_name(f);
         cc := zeroed rawptr;
-            main_thread_pump(self.comp(), shared, @slice(f), true);
+            main_thread_pump(self.comp(), shared, @slice(f), false);
 
             self.debug_deny_jit_shim_calls = true;
             if no_cache {
@@ -343,10 +344,6 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
     os := query_current_os();
     ::assert(enum_count(Os) <= 32 && enum_count(Arch) <= 32, "not enough bits for arch/os");
 
-    // TODO: always call franca_runtime_init (but then you have to compile more shit which is sad, maybe have a lite version?) 
-    // (ex. `franca examples/repl.fr -testrepl` on linux)
-    OS := OS; OS.it = os;
-    
     // Sadly this can't use default fields, I think because it loads too early. 
     env: ComptimeEnvironment = (
         make_slice_t = .None,
@@ -403,6 +400,7 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
         library_scope = NOSCOPE, // patched in make_top_level
         main_thread_index = tls(.thread_index)[],
         string_type = .None,
+        log = list(a),
     );
     self.comptime_codegen.m.codemap = (Some = self.codemap);
     self.add_function(zeroed Func);  // just for good luck. life is better when FuncId=0 is invalid. 
@@ -439,13 +437,12 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
     };
     self.legacy_indirection = self.stable_compiler_context();
     
-    if get_environment_variable("FRANCA_LOG_DEBUG") { s |
         d := self.debug;
-        for s.str() { c | 
+        for opts.frontend_logging { c | 
             d = d.bit_or(1.shift_left(c.zext() - "A".ascii()));
         };
         self.debug = d;
-    };
+        @if(d != 0) self.log&.reserve(1.shift_left(20));
     
     self
 }
@@ -555,6 +552,10 @@ fn main_thread_pump(comp: CompCtx, shared: *FrontendCodegen, fns: []FuncId, wrap
     @if(dynamiclib) for fns { f |
         emit_export_wrapper(comp, shared.worker, f);
     };
+    
+    c := comp.data.cast()[][];
+    print(c.log.items()); 
+    c.log&.clear();
     
     shared.join_codegen_thread();
     self.funcs_done
