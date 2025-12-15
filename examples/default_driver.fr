@@ -29,6 +29,7 @@ Command :: @struct(
     freestanding := false,
     d := "",
     D := "",
+    notracy := false,
 );
 
 Action  :: @enum(i64) (run, build, test); ::enum(Action);
@@ -81,9 +82,8 @@ fn do_it(vtable: *ImportVTable, cmd: *Command) void = {
     enable_tracy := get_environment_variable("FRANCA_TRACY").is_some();
     libs := Str.list(temp());
     @if(ENABLE_COMMANDS)
-    @if(enable_tracy) {
-        f  :: import("@/examples/testing.fr").fetch_or_crash;
-        _ := f("https://github.com/wolfpld/tracy/archive/ec455c8ee634569447462af7bc42b8ac57b1dda7.zip", 6352360, "09176722dd58b134852be663ea07b2ed12088f702599e9fddf4ba176d4035809", "tracy-ec455c8ee634569447462af7bc42b8ac57b1dda7");
+    @if(enable_tracy && !cmd.notracy) {
+        fetch_tracy(vtable);
         libs&.push(c.add_lib(tracy_lib));
         cmd.goal = .Relocatable;
     };
@@ -149,7 +149,7 @@ fn do_it(vtable: *ImportVTable, cmd: *Command) void = {
         @eprintln(">>> don't forget to pass -Wl,-undefined,dynamic_lookup to your linker");
     };
     
-    @if(enable_tracy) {
+    @if(enable_tracy && !cmd.notracy) {
         @if(!ENABLE_COMMANDS) panic("tried to run command");
         start := timestamp();
         args := Str.list(temp());
@@ -479,6 +479,28 @@ fn add_lib(ctx: CompCtx, lib: ForeignLibrary) Str = {
     };
     
     aot_path
+}
+
+fetch_tracy :: fn(vtable: *ImportVTable) void = {
+    // TODO: should have a dlopen like api for doing this that caches stuff
+    // it takes ~50ms to compile fetch_or_crash -- Dec 15, 2025
+    cmd: Command = (
+        arch = query_current_arch(), 
+        os = query_current_os(),
+        input_file = "examples/testing.fr",
+        action = .run,
+        notracy = true, // don't recurse
+        output_file = "target/fetch.out",
+        child_args = @slice(
+            "fetch",
+            "https://github.com/wolfpld/tracy/archive/ec455c8ee634569447462af7bc42b8ac57b1dda7.zip",
+            "6352360", "09176722dd58b134852be663ea07b2ed12088f702599e9fddf4ba176d4035809",
+            "tracy-ec455c8ee634569447462af7bc42b8ac57b1dda7",
+        ),
+    );
+    push_tls_value(.comptime, zeroed(rawptr)) {
+        do_it(vtable, cmd&);
+    };
 }
 
 #use("@/backend/lib.fr"); 

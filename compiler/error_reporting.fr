@@ -242,6 +242,17 @@ fn log(values: *Values, self: *SelfHosted, out: *List(u8), ty: Type) void = {
                 return();
             };
         }
+        fn Struct(it) => if it.layout_done && it.is_tuple {
+            @fmt(out, "(");
+            for it.fields { it |
+                stride := self.type_extra&.nested_index(it.ty.as_index())[].stride_bytes.zext();
+                values: Values = (Big = values.bytes().subslice(it.byte_offset, stride).as_raw_list());
+                log(values&, self, out, it.ty);
+                @fmt(out, ",");
+            };
+            @fmt(out, ")");
+            return();
+        };
         @default => ();
     };
     if ty == FuncId {
@@ -922,14 +933,16 @@ FrDebugKey :: @enum(i64) (
     Bake = "B".char(),
     Emit = "E".char(),
    LitFn = "L".char(),
+ConstArgs= "C".char(),
 );
 
 fn when_debug(m: *SelfHosted, category: FrDebugKey, $body: @Fn(out: *List(u8)) void) void = {  
     ::enum(FrDebugKey);
     if m.debug.bit_and(1.shift_left(category.raw() - "A".ascii())) != 0 {
         with m.comptime_codegen.m.forever.mutex& {
+            i := m.log.len;
             body(m.log&);
-            m.log&.push_all("\n");
+            @if(i != m.log.len) m.log&.push_all("\n");
         };
     };
 }

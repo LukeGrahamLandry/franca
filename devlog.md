@@ -3,8 +3,6 @@ TODO: use the compiler baked into jitshim to check that tls is still the main th
       (store pointer on SelfHosted so don't have to assume the tls is valud to load .comptime) 
       and print error if not. 
 
-TODO: pass in the dump_wasm disassembler when running in web
-
 ## (Dec 15)
 
 - compiling the compiler makes shims for import_wasm/runtime because it includes dump_wasm 
@@ -22,7 +20,11 @@ TODO: pass in the dump_wasm disassembler when running in web
 - i broke examples/os -vzf. it doesn't like the 0 length print(self.log&.items()). 
   while debugging that, made it possible to get consistant virtual addresses so you can diff them. 
   also i tried to change reset_countdown and it produced very strange bugs? 
-
+- pass in the dump_wasm disassembler as target.dis when running in web instead of always including it. saves 20kb 30ms
+- compiling the fetching of tracy lazily saves 50ms the first uncached time you build the driver if you're not going to use tracy. 
+- fetch_or_crash: 
+  - rename instead of writting directly to target folder
+  - seperate the files that can be re-extracted trivially from the ones that have to touch the network
 
 ## (Dec 14)
 

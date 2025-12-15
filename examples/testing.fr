@@ -142,21 +142,19 @@ fn collect_with_extension(path: Str, extension: Str) Result(List(Str), void) = {
 
 // TODO: go through everything and stop messing around with paths
 //       especially relative paths! do everything with file descriptors. 
-FRANCA_CACHE_PATH :: "target/franca/deps";
+FRANCA_PATH_DEPS :: "target/franca/deps";
+FRANCA_PATH_FETCH :: "target/franca/fetch";
 // 🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡
 // cached download of a compressed resource 
 // returns path to the output folder
 // for now we assume the zip file will contain a directory named `HACK_name`
-// TODO: don't directly dump stuff into the cache directory. 
-//       check hash at the beginning, do the work, check hash again, then rename it, 
-//       so you don't clobber another process that has the same dependency. t
-fetch_or_crash :: fn(url: Str, zip_size_bytes: i64, sha256_hash: Str, HACK_name: Str) Str = {    
-    folder_path := @tfmt("%/%", FRANCA_CACHE_PATH, HACK_name);
+fetch_or_crash :: fn(url: Str, zip_size_bytes: i64, sha256_hash: Str, HACK_name: Str) Str = { 
+    @debug_assert(!HACK_name.ends_with("/"));
+    folder_path := @tfmt("%/%", FRANCA_PATH_DEPS, HACK_name);
     if path_exists(folder_path) {
         return(folder_path);
     };
     mark := temp().mark();
-    make_dirs_or_crash(FRANCA_CACHE_PATH);
     
     // 🤡 no just look at whats in the file my guy
     extension := @if_else { 
@@ -167,20 +165,34 @@ fetch_or_crash :: fn(url: Str, zip_size_bytes: i64, sha256_hash: Str, HACK_name:
     
     zip_bytes := fetch(url, zip_size_bytes, sha256_hash) 
         || @panic("failed to download dependency");
-    extract_archive(zip_bytes, FRANCA_CACHE_PATH, HACK_name, extension == "zip");
+
+    // i skip the extract if the final path exists so if the extract fails for some reason, 
+    // and you rerun the program, don't treat it as though it succeeded. 
+    make_dirs_or_crash(FRANCA_PATH_DEPS);
+    scratch_path := @tfmt("%/%.%", FRANCA_PATH_DEPS, sha256_hash, timestamp());
+    make_dirs_or_crash(scratch_path);
+    extract_archive(zip_bytes, scratch_path, HACK_name, extension == "zip");
+    if path_exists(folder_path) {
+        // another thread won the race.
+        // TODO: don't leak scratch_path. but need to do a whole recursive delete situation
+    } else {
+        // TODO: this is still fragile if you write to the directory, which i shouldn't do but i do in tests/external/wuffs,lua,tcc
+        rename(scratch_path.as_cstr(), folder_path.as_cstr())
+            || @panic("failed to rename to %", folder_path);
+    };
     
     temp().reset(mark);
     folder_path
 };
 
-
 fetch :: fn(url: Str, zip_size_bytes: i64, sha256_hash: Str) ?[]u8 = {
     @debug_assert_eq(sha256_hash.len, 64);
     for(sha256_hash, fn(c) => @debug_assert(hex_digit(c).is_some()));
-    zip_file_path := @tfmt("%/%.out", FRANCA_CACHE_PATH, sha256_hash);
+    zip_file_path := @tfmt("%/%.out", FRANCA_PATH_FETCH, sha256_hash);
     
     zip_bytes := "";
     if !file_exists(zip_file_path) {
+        make_dirs_or_crash(FRANCA_PATH_FETCH);
         s, h, p := (zip_size_bytes, sha256_hash, zip_file_path);
         // sometimes github is down but not cloudflare... 
         zip_bytes = fetch_one(url, s, h, p) 
@@ -194,6 +206,7 @@ fetch :: fn(url: Str, zip_size_bytes: i64, sha256_hash: Str) ?[]u8 = {
     (Some = zip_bytes)
 };
 
+// uncached!
 fetch_one :: fn(url: Str, zip_size_bytes: i64, sha256_hash: Str, zip_file_path: Str) ?[]u8 = {
     @eprintln(">>> downloading [%]...", url);
     zip_bytes := if query_current_arch() == .wasm32 {
@@ -292,17 +305,13 @@ extract_archive :: fn(compressed: []u8, dir: Str, HACK_name: Str, is_zip: bool) 
     sort(files.items());
     // TODO: instead of hashing the compressed archive before, hash the file contents now. 
     
-    // TODO: i skip extract_archive if the directory exists, so if any of these writes fail
-    //       i need to delete the outer directory so trying again doesn't just assume it's fine. 
-    
     p := u8.list(temp());
     each files { it |
         p&.clear();
         p&.push_all(dir);
         p&.push_all("/");
-        if !it.name.starts_with(HACK_name) {  // HACK
-            p&.push_all(HACK_name);
-            p&.push_all("/");
+        if it.name.starts_with(HACK_name) {
+            it.name = it.name.rest(HACK_name.len + 1);
         };
         p&.push_all(it.name);
         @assert(!it.name.has_path_escapes(), "'%' is a path with special dots, i don't like that", it.name);
@@ -430,4 +439,12 @@ has_path_escapes :: fn(path: Str) bool = {
         path = prefix;
     };
     path.starts_with("/")
+};
+
+main :: fn() void = {
+    args := cli_args();
+    @assert_ge(args.len, 6, "not enough arguments to fetch");
+    @assert_eq(args[1].str(), "fetch");
+    result := fetch_or_crash(args[2].str(), args[3].str().parse_int(), args[4].str(), args[5].str());
+    print(result);
 };
