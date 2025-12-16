@@ -90,13 +90,13 @@ finalize_symbols :: fn(m: *Qbe.Module) SymbolTableInfo = {
                 @assert(!it.symbol.strong, "importing non-weak symbol '%' in static binary", it.symbol.name);
                 @match(it.fix.type&) {
                     fn DataAbsolute() => {
-                        i64.ptr_from_raw(it.fix.patch_at)[] = 0;
+                        it.fix.patch_at.i64[] = 0;
                     };
                     fn InReg(info) => @match(m.goal.arch) {
                         fn aarch64() => {
                             // i use adr when in range but i don't want to deal with another relocation type rn
                             reg := @as(u5) info.r;
-                            inst: []u32 = (ptr = u32.ptr_from_raw(it.fix.patch_at), len = 2);
+                            inst := it.fix.patch_at.u32.slice(2);
                             inst[0] = movz(.X64, reg, 0, .Left0);
                             inst[1] = Arm.arm_nop;
                         };
@@ -640,13 +640,13 @@ create_rela_table :: fn(
         // - exe: the virtual base address of the executable
         // - linker: the start of the segment
         off := @if(reloc, 
-            ptr_diff(section_base_address, fix.fix.patch_at),
-            ptr_diff(m.segments&[.Code].mmapped.ptr, fix.fix.patch_at) + Elf.MYSTERY_SPICE, 
+            ptr_diff(section_base_address, fix.fix.patch_at.addr),
+            ptr_diff(m.segments&[.Code].mmapped.ptr, fix.fix.patch_at.addr) + Elf.MYSTERY_SPICE, 
         );
         
         type, increment := @match(fix.fix.type&) {
             fn DataAbsolute(it) => {
-                i64.ptr_from_raw(fix.fix.patch_at)[] = 0;
+                fix.fix.patch_at.i64[] = 0;
                 (@match(m.goal.arch) {
                     fn x86_64()  => Elf.R_AMD64_64;
                     fn aarch64() => Elf.R_AARCH64_ABS64;
@@ -660,7 +660,7 @@ create_rela_table :: fn(
                 
                 // TODO: probably don't need this and it shouldn't be at risc of having aslr 
                 //       bytes like the DataAbsolute case so don't bother. 
-                u32.ptr_from_raw(fix.fix.patch_at)[] = 0;
+                fix.fix.patch_at.u32[] = 0;
                 
                 extern := fix.symbol.kind == .DynamicPatched;
                 (@if_else {
@@ -684,7 +684,7 @@ create_rela_table :: fn(
                 if m.goal.arch == .aarch64 {
                     // i use adr when in range but i don't want to deal with another relocation type rn
                     reg := @as(u5) it.r;
-                    inst: []u32 = (ptr = u32.ptr_from_raw(fix.fix.patch_at), len = 2);
+                    inst := fix.fix.patch_at.u32.slice(2);
                     inst[0] = adrp(0, 0, reg);
                     inst[1] = if(it.got_load, => ldr_uo(.X64, reg, reg, 0), => add_im(.X64, reg, reg, 0, 0));
                 };
@@ -834,7 +834,7 @@ emit_linker_relocations :: fn(e: *EmitElf, base: PayloadBase) void = {
         s := m.get_symbol_info(id);
         symbols[i] = s; i += 1;
         each s.fixups& { it |
-            seg, _ := compiler_address_to_segment_offset(m, it.patch_at);
+            seg, _ := compiler_address_to_segment_offset(m, it.patch_at.addr);
             case := cases&.index(seg);
             case.push(symbol = s, fix = it);
         };

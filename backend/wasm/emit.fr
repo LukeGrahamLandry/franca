@@ -323,9 +323,8 @@ fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
                                 leb128_signed(e.a&, base + c.bits());
                             } else {
                                 @debug_assert(symbol.segment != .ConstantData, "TODO: ConstantData");
-                                patch_at := u8.raw_from_ptr(e.a.maybe_uninit.ptr.offset(e.a.len));
                                 push_fixup(e.m, symbol, (
-                                    patch_at = patch_at, 
+                                    patch_at = (u8 = e.a.maybe_uninit.ptr.offset(e.a.len)), 
                                     type = (WasmAddr = (increment = c.bits().trunc())),
                                 ));
                                 e.pad(WASM_INDEX_PADDING);
@@ -429,8 +428,8 @@ fn push_bits(e: *EmitWasmFn, c: *Qbe.Con, k: Qbe.Cls) void = @match(k) {
 
 fn index_patch(e: *EmitWasmFn, id: Qbe.Sym, _space: Wasm.ImportType) void = {
     use_symbol(e.m, id) { s |
-        patch_at := u8.raw_from_ptr(e.a.maybe_uninit.ptr.offset(e.a.len));
-        push_fixup(e.m, s, (patch_at = patch_at, type = .WasmIndex));
+        patch_at := e.a.maybe_uninit.ptr.offset(e.a.len);
+        push_fixup(e.m, s, (patch_at = (u8 = patch_at), type = .WasmIndex));
     };
     e.pad(WASM_INDEX_PADDING);
 }
@@ -466,14 +465,14 @@ fn fixup_wasm32(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_re
             @debug_assert(symbol.segment == .Code);
             @debug_assert(symbol.kind == .Local, "wasm cannot direct call an import: %", symbol.name);
             @debug_assert_ne(symbol.wasm_module_function_index, -1, "WasmIndex: missing index for $%", symbol.name);
-            lst: List(u8) = fixed_list(ptr = u8.ptr_from_raw(fixup.patch_at), len = WASM_INDEX_PADDING);
+            lst: List(u8) = fixed_list(ptr = fixup.patch_at.u8, len = WASM_INDEX_PADDING);
             value := symbol.wasm_module_function_index.intcast();
             when_debug(self, .Patch, fn(out) => @fmt(out, "# WasmIndex(%) = %\n", symbol.name, value)); self.flush_debug();
             leb128_unsigned(lst&, value, WASM_INDEX_PADDING);
         }
         // used when producing the value on the stack
         fn WasmAddr(it) => {
-            lst: List(u8) = fixed_list(ptr = u8.ptr_from_raw(fixup.patch_at), len = WASM_INDEX_PADDING);
+            lst: List(u8) = fixed_list(ptr = fixup.patch_at.u8, len = WASM_INDEX_PADDING);
             base := @if(self.goal.type == .JitOnly, indirect_index, symbol.offset);
             value := if(symbol.segment == .Code, => indirect_index, => base + it.increment.zext());
             @if(symbol.name != "__franca_base_address"/*HACK*/) 
@@ -491,7 +490,7 @@ fn fixup_wasm32(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_re
                 base + it.increment
             };
             when_debug(self, .Patch, fn(out) => @fmt(out, "# DataAbsolute(%) = %\n", symbol.name, value)); self.flush_debug();
-            i64.ptr_from_raw(fixup.patch_at)[] = value;
+            fixup.patch_at.i64[] = value;
         }
         @default => @panic("invalid fixup type for wasm %", fixup.type&.tag());
     };

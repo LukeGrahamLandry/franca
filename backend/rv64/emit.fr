@@ -491,7 +491,7 @@ fn load_symbol(e: *EmitRv, c: *Qbe.Con, dest_reg: RvReg) void = {
     inc := @if(import, 0, c.bits());
     use_symbol(e.m, c.sym) { symbol |
         patch_addr := e.m.segment_address(.Code, e.m.current_offset(.Code));
-        patch: Fixup = (patch_at = patch_addr, type = (InReg = (r = dest_reg.raw().zext(), increment = inc)));
+        patch: Fixup = (patch_at = (addr = patch_addr), type = (InReg = (r = dest_reg.raw().zext(), increment = inc)));
         @match(symbol.kind) {
             fn DynamicPatched() => immediate_fixup_got(e, patch, symbol);
             fn Pending() => immediate_fixup_got(e, patch, symbol);
@@ -544,7 +544,7 @@ immediate_fixup_got :: fn(e: *EmitRv, patch: Fixup, symbol: *SymbolInfo) void = 
     if e.m.goal.got_indirection_instead_of_patches || symbol.kind == .DynamicPatched {
         it := patch.type.InReg&;
         it.got_load = true;
-        inst: []u32 = (ptr = u32.ptr_from_raw(patch.patch_at), len = 2);
+        inst := patch.patch_at.u32.slice(2);
         new_got_slot := load_from_got(e.m, symbol, it.r, inst, symbol.jit_addr);
         if new_got_slot { it |
             push_fixup(e.m, symbol, it);
@@ -625,9 +625,9 @@ fixup_rv64 :: fn(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_r
             panic("TODO: rv fixup Call");
         }
         fn InReg(it) => {
-            inst: []u32 = (ptr = u32.ptr_from_raw(fixup.patch_at), len = 2);
+            inst := fixup.patch_at.u32.slice(2);
             if local {
-                i_page, i_off := rel_off(address.offset(it.increment), fixup.patch_at, @as(RvReg) @as(u8) it.r.trunc(), false);
+                i_page, i_off := rel_off(address.offset(it.increment), fixup.patch_at.addr, @as(RvReg) @as(u8) it.r.trunc(), false);
                 inst[0] = i_page;
                 inst[1] = i_off;
             } else {
@@ -638,7 +638,7 @@ fixup_rv64 :: fn(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_r
             };
         }
         fn DataAbsolute(it) => {
-            rawptr.ptr_from_raw(fixup.patch_at)[] = address.offset(it.increment);
+            fixup.patch_at.raw[] = address.offset(it.increment);
             m := self;
             @debug_assert(!(m.goal.got_indirection_instead_of_patches && m.goal.type == .JitOnly && address.is_null()), "you cant do that bro");
         }

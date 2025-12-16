@@ -19,8 +19,9 @@
 // TODO: doesn't work with -c if stuff gets rearranged 
 
 // SAFETY: trace_(start, prev, return) must be kept in sync with the stack frame layout in backend/<arch>/emit.fr. 
+Frame :: @rec @struct(prev: *Frame /*nullable*/, ip: rawptr);
 
-trace_start :: AsmFunction(fn() rawptr = (), { #use("@/backend/arm64/bits.fr"); @const_slice(
+trace_start :: AsmFunction(fn() *Frame = (), { #use("@/backend/arm64/bits.fr"); @const_slice(
     add_im(.X64, x0, fp, @as(u12) 0, 0b0),
     ret(),
 )}, (fn(out) #use("@/backend/amd64/bits.fr") = @asm_x64(
@@ -32,14 +33,12 @@ trace_start :: AsmFunction(fn() rawptr = (), { #use("@/backend/arm64/bits.fr"); 
 }));
 
 // same on arm64 and amd64
-trace_prev :: fn(frame: rawptr) rawptr = 
-    rawptr.ptr_from_raw(frame)[];
+trace_prev :: fn(frame: *Frame) *Frame = 
+    frame.prev;
 
 // same on arm64 and amd64
-trace_return :: fn(frame: rawptr) rawptr = {
-    xxx := rawptr.ptr_from_raw(frame);
-    ::ptr_utils(rawptr);
-    xxx.offset(1)[]
+trace_return :: fn(frame: *Frame) rawptr = {
+    frame.ip
 };
 
 hook_backtrace :: fn() void = {
@@ -106,7 +105,7 @@ show_trace_and_exit :: fn(s: i64, info: *SigInfo, ctx: *UContext) void = {
     
     prev := LOOPING[]; 
     LOOPING[] = 2;  // incase we crash in this switch somehow
-    ip, fp := (ctx.ip, ctx.fp);
+    ip, fp := (ctx.ip, Frame.ptr_from_raw(ctx.fp));
     LOOPING[] = prev;
     if LOOPING[] == 1 {
         LOOPING[] = 2;
@@ -165,7 +164,7 @@ MAX_SHOWN :: 40;
 MAX_LOOPS :: 2000;
 
 
-FpIp :: @struct(fp: rawptr, ip: rawptr);
+FpIp :: @struct(fp: *Frame, ip: rawptr);
 
 fn report_backtrace(start: FpIp) void = {
     shown := 0;
@@ -188,6 +187,7 @@ fn report_backtrace(start: FpIp) void = {
 walk_stack_trace :: fn(it: FpIp, max_loops: i64, $body: @Fn(i: i64, ip: rawptr, fp: rawptr) void) void = {
     fp, ip := (it.fp, it.ip);  // it's too easy to swap these and call it wrong otherwise
     i := 0;
+    ::ptr_utils(@type fp[]);
     while => !fp.is_null() && i < max_loops {
         body(i, ip, fp);
         ip = trace_return(fp);
@@ -222,7 +222,7 @@ fn report_backtrace_safe(start: FpIp) void = {
             scary_log(": ");
             scary_log(ip);
             scary_log(" ");
-            scary_log(fp);
+            scary_log(Frame.int_from_ptr(fp));
             shown += 1;
         };
         last_ip = ip;

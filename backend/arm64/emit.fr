@@ -41,9 +41,9 @@ fn fixup_arm64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
     @match(fixup.type) {
         fn Call(it) => {
             when_debug(self, .Patch) { out |
-                @fmt(out, "# patch call % calls %\n", fixup.patch_at, symbol.name);
+                @fmt(out, "# patch call % calls %\n", fixup.patch_at.addr, symbol.name);
             };
-            distance := ptr_diff(fixup.patch_at, address) / 4;
+            distance := ptr_diff(fixup.patch_at.addr, address) / 4;
             in_range := distance.abs() < 1.shift_left(26);
             @debug_assert(!local || in_range, "local symbol too far away");
             if !local {
@@ -66,19 +66,19 @@ fn fixup_arm64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
                     };
                 };
                 stub_trampoline := self.segment_address(.Code, symbol.offset);
-                distance = ptr_diff(fixup.patch_at, stub_trampoline) / 4;
+                distance = ptr_diff(fixup.patch_at.addr, stub_trampoline) / 4;
             };
             @assert_lt(distance.abs(), 1.shift_left(26), "can't even jump to trampoline, thats bad.");
-            inst := u32.ptr_from_raw(fixup.patch_at);
+            inst := fixup.patch_at.u32;
             inst[] = b_jmp(s_trunc(distance, 26), 1);
         }
         fn InReg(it) => {
             when_debug(self, .Patch) { out |
-                @fmt(out, "# patch addr % refs %=%\n", fixup.patch_at, address, symbol.name);
+                @fmt(out, "# patch addr % refs %=%\n", fixup.patch_at.addr, address, symbol.name);
             };
-            inst: []u32 = (ptr = u32.ptr_from_raw(fixup.patch_at), len = 2);
+            inst := fixup.patch_at.u32.slice(2);
             if local {
-                i_page, i_off := encode_adrp_add(address.offset(it.increment), fixup.patch_at, @as(u5) it.r);
+                i_page, i_off := encode_adrp_add(address.offset(it.increment), fixup.patch_at.addr, @as(u5) it.r);
                 inst[0] = i_page;
                 inst[1] = i_off;
             } else {
@@ -90,7 +90,7 @@ fn fixup_arm64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
             };
         }
         fn DataAbsolute(it) => {
-            rawptr.ptr_from_raw(fixup.patch_at)[] = address.offset(it.increment);
+            fixup.patch_at.raw[] = address.offset(it.increment);
             m := self;
             @debug_assert(!(m.goal.got_indirection_instead_of_patches && m.goal.type == .JitOnly && address.is_null()), "you cant do that bro");
         }
@@ -336,7 +336,7 @@ fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
         // So for now i just generate a few extra instructions when making a relinkable object
         //
         inc := if(deny_addend, => 0, => c.bits());
-        patch: Fixup = (patch_at = patch_addr, type = (InReg = (r = dest_reg, increment = inc)));
+        patch: Fixup = (patch_at = (addr = patch_addr), type = (InReg = (r = dest_reg, increment = inc)));
         @match(symbol.kind) {
             fn DynamicPatched() => self.immediate_fixup_got(dest_reg, inc, symbol);
             fn Local() => {
@@ -378,7 +378,7 @@ fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
 
 fn immediate_fixup_got(self: *ArmState, dest_reg: i64, inc: i64, symbol: *SymbolInfo) void = {
     patch_addr := self.m.segment_address(.Code, self.m.current_offset(.Code));
-    patch: Fixup = (patch_at = patch_addr, type = (InReg = (r = dest_reg, increment = 0, got_load = true)));
+    patch: Fixup = (patch_at = (addr = patch_addr), type = (InReg = (r = dest_reg, increment = 0, got_load = true)));
     if self.m.goal.type != .JitOnly { 
         push_fixup(self.m, symbol, patch); 
     };
@@ -907,8 +907,8 @@ fn decode_mem(self: *ArmState, a: Qbe.Ref, other: Qbe.Ref, size: i64) Ty(u5, u12
 fn call_symbol(self: *ArmState, sym: Qbe.Sym) void #once = {
     use_symbol(self.m, sym) { symbol |
         kind := symbol.kind;
-        patch_at := u8.raw_from_ptr(self.m.segments&[.Code].next);
-        patch: Fixup = (patch_at = patch_at, type = .Call);
+        patch_at := self.m.segments&[.Code].next;
+        patch: Fixup = (patch_at = (u8 = patch_at), type = .Call);
         @match(kind) {
             fn DynamicPatched() => {
                 new_got_slot: ?Fixup = .None;

@@ -94,7 +94,15 @@ FixupType :: @tagged(
 );
 
 Fixup :: @struct(
-    patch_at: rawptr,
+    patch_at: @union(
+        addr: rawptr,
+        raw: *rawptr,
+        u8: *u8,
+        u32: *u32,
+        i32: *i32,
+        i64: *i64,
+        //chain: *import("@/backend/macho/bits.fr").ChainedReloc,  // TODO: this crashes :compilerbug
+    ),
     type: FixupType,
 );
 
@@ -333,7 +341,7 @@ fn emit_data(self: *QbeModule, dat: Dat2) void = {
             };
             ::enum(@type symbol.kind);
             // Since we need the absolute address in memory, even local symbols need a relocation. 
-            push_fixup(self, symbol, (patch_at = i64.raw_from_ptr(ptr), type = (DataAbsolute = (increment = r.addend))));
+            push_fixup(self, symbol, (patch_at = (i64 = ptr), type = (DataAbsolute = (increment = r.addend))));
             @if(symbol.kind == .Local)
             if self.goal.arch != .wasm32 && self.goal.type == .Relocatable && !symbol.local_but_marked_for_relocation {
                 self.local_needs_reloc&.push(r.id);
@@ -644,7 +652,7 @@ fn ensure_got_slot(self: *QbeModule, symbol: *SymbolInfo, jit_address: rawptr) ?
         when_debug(self, .Patch) { out |
             @fmt(out, "# reserve __got[%] = %\n", symbol.got_lookup_offset / 8, symbol.name);
         };
-        new_got_reloc = (Some = (patch_at = rawptr.raw_from_ptr(got), type = (DataAbsolute = (increment = 0))));
+        new_got_reloc = (Some = (patch_at = (raw = got), type = (DataAbsolute = (increment = 0))));
         if !(self.goal.got_indirection_instead_of_patches && jit_address.is_null()) { // TODO: remove this condition
             got[] = jit_address; // because we don't loop again to handle `new_got_reloc`
         }

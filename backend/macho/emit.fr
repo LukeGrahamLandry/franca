@@ -396,7 +396,7 @@ fn emit_exe_fixups(e: *EmitMacho, chained: *List(u8)) void #inline = {
     
     fixups, symbols := collect_aot_fixups(m);
     @debug_assert_ge(fixups.len, e.m.got&.len() / 8, "at least each __got entry needs a fixup");
-    sort :: quicksort(FixP, fn(a, b) => ptr_diff(a.fix.patch_at, b.fix.patch_at) >= 0);
+    sort :: quicksort(FixP, fn(a, b) => ptr_diff(a.fix.patch_at.addr, b.fix.patch_at.addr) >= 0);
     sort(fixups);
     // at this point, `fixups` is in the order of the patch targets in virtual memory which is the order we need to emit the fixup chains. 
     import_count := 0;
@@ -526,7 +526,7 @@ unprocessed_sentinal :: 0; // TODO: scope this
 fn emit_one_exe_fixup(e: *EmitMacho, fix: *FixP, prev_fixup: *?WipFixup, import_count: i64, chained: *List(u8)) void #inline = {
     m := e.m;
     @debug_assert(fix.fix.type&.is(.DataAbsolute), "expected fixup for .Exe to be .DataAbsolute");
-    seg, off_in_segment := compiler_address_to_segment_offset(m, fix.fix.patch_at);
+    seg, off_in_segment := compiler_address_to_segment_offset(m, fix.fix.patch_at.addr);
     segment_index := seg.raw() + 1;  // :MySegmentsStartAt1
     page_index, offset_in_page := off_in_segment.div_mod(macos_page_size);
     if e.offset_to_csis[segment_index] == unprocessed_sentinal.trunc() {
@@ -594,7 +594,7 @@ fn emplace_fixup(e: *EmitMacho, fix: *FixP, next_encoded: i64, import_count: i64
     @debug_assert_ge(next_encoded, 0, "fixups cant go backwards. we sorted them so this can't happen.");
     is_bind := fix.symbol.kind != .Local;
     ::assert_eq(size_of(ChainedReloc), size_of(i64));
-    r := ChainedReloc.ptr_from_raw(fix.fix.patch_at);
+    r := ChainedReloc.ptr_from_raw(fix.fix.patch_at.addr);
     r[] = zeroed @type r[];
     set(r.bind&, .next, next_encoded);
     set(r.bind&, .is_bind, int(is_bind));
@@ -720,7 +720,7 @@ fn append_relocations(symbol_table_index: i64, id: Qbe.Sym, m: *QbeModule, reloc
     s := m.get_symbol_info(id);
     each s.fixups { fix | 
         continue :: local_return;
-        patch_segment, patch_segment_offset := compiler_address_to_segment_offset(m, fix.patch_at);
+        patch_segment, patch_segment_offset := compiler_address_to_segment_offset(m, fix.patch_at.addr);
         if patch_segment == .ConstantData && patch_segment_offset < m.got&.len() {
             // :track_got_reloc
             // We bound this symbol for jitting and reserved a __got slot for it.
@@ -755,7 +755,7 @@ fn append_relocations(symbol_table_index: i64, id: Qbe.Sym, m: *QbeModule, reloc
                 // even tho it's redundant because it knows from the relocation below. 
                 // but thankfully the error message is helpful. 
                 reg := @as(u5) it.r;
-                inst: []u32 = (ptr = u32.ptr_from_raw(fix.patch_at), len = 2);
+                inst := fix.patch_at.u32.slice(2);
                 inst[0] = adrp(0, 0, reg);
                 inst[1] = if(it.got_load, => ldr_uo(Bits.X64, reg, reg, 0), => add_im(Bits.X64, reg, reg, 0, 0));  // TODO: does it need to go in both slots? 
                 
@@ -775,7 +775,7 @@ fn append_relocations(symbol_table_index: i64, id: Qbe.Sym, m: *QbeModule, reloc
             }
             fn Call() => {
                 // in the instruction we tell it: set link bit
-                inst: []u32 = (ptr = u32.ptr_from_raw(fix.patch_at), len = 1);
+                inst := fix.patch_at.u32.slice(2);
                 inst[0] = b(0, 1);
                 
                 set(p, .relative, 1);
@@ -784,7 +784,7 @@ fn append_relocations(symbol_table_index: i64, id: Qbe.Sym, m: *QbeModule, reloc
             fn DataAbsolute(it) => {
                 set(p, .type, ARM64_RELOC_UNSIGNED);
                 set(p, .length, 3);  // one pointer
-                i64.ptr_from_raw(fix.patch_at)[] = it.increment;  // TODO: a test that gets here with non-zero
+                fix.patch_at.i64[] = it.increment;  // TODO: a test that gets here with non-zero
             }
             fn RipDisp32(it) => {
                 set(p, .relative, 1);
@@ -795,7 +795,7 @@ fn append_relocations(symbol_table_index: i64, id: Qbe.Sym, m: *QbeModule, reloc
                     @else            => X86_64_RELOC_SIGNED;
                 });
                 // mach-o does :IncOffByFour for us without asking for it explicitly. 
-                i32.ptr_from_raw(fix.patch_at)[] = it.increment.intcast();
+                fix.patch_at.i32[] = it.increment.intcast();
             }
             @default => panic("invalid fixup type for mach-o");
         };
