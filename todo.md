@@ -24,13 +24,6 @@
   and keeping track of the tree of types you saw before the error. 
   its a bad sign that every time i make that mistake 
   i have to add spammy logging and recompile the compiler. 
-- i track more jit pointers to show nice names in tracy and fail a debug check
-```
-FRANCA_TRACY=true franca examples/default_driver.fr build compiler/main.fr -o trace.out
-FRANCA_MORE_CACHE=1 ./trace.out examples/bf/via_wasm_rt.fr
->>> Compiler includes tracy instrumentation.
-panic! created_jit_fn_ptr_value cannot be null
-```
 - make my sort less ass. when collect_with_extension sorted before filtering, 
   after generating all the extra files for examples/import_wasm/spectest.fr, 
   the folder has 3262 files and takes 9600ms to sort. 
@@ -1397,7 +1390,6 @@ StbTrueType :: include { C |
 
 - Wasip1Libc
 - things that should be cleaned up next time i :UpdateBoot
-  - :DumbNameAlias NoMangle
   - AbiHackSpan
   - `@rec` in backend/ir.fr and wasm/instructions:Wasm
   - use sqrt/min/max

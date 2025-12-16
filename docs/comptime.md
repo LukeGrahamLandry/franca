@@ -13,8 +13,8 @@ There are some limitations:
   - you can't call fork. 
     (because the child process won't have the compiler's thread 
     so if you try to call a function that hasn't been compiled yet, it never will be).
-  - you shouldn't spawn new threads, 
-    because some indirect calls are converted to shims to break dependency cycles. 
+  - you can't spawn new threads, 
+    because indirect calls are converted to shims to break dependency cycles. 
     instead of being compiled when reached, the callee is compiled the first time it's called, 
     and that will break if it happens on a different thread than the rest of the frontend. 
     same for swapping stacks because if you hit a shim, the compiler won't be able to access its thread locals. 

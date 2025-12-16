@@ -1,8 +1,4 @@
 
-TODO: use the compiler baked into jitshim to check that tls is still the main thread 
-      (store pointer on SelfHosted so don't have to assume the tls is valud to load .comptime) 
-      and print error if not. 
-
 ## (Dec 16)
 
 - annoys me that temp() isn't inlined. bump max_cost and fix a bad #redirect in examples/lox.
@@ -11,6 +7,13 @@ TODO: use the compiler baked into jitshim to check that tls is still the main th
   `bscopy(live_stack&, f.escaping_slots&);` are different lengths and doesn't do a bounds check. 
 - not sure if i did something to fix armlinux_vararg_slots_example.c but seems to work with elide_abi_slots enabled.
   shall declare it a test and see if the problem shows up again. 
+- franca_runtime_init: don't bother aligning the stack if im just going to allocate a new one
+- use the compiler baked into jitshim to check that you're still on the main thread (without dereferencing tls)
+- why does wait_for_symbol every return null. happens in one of the tests with an invoke_specialized in a #where.
+  emit_ir returns after -d R but before -d D ??
+  problem is comptime_jit_symbol_id != intern(fmt_fn_name).
+  because it's already set on the version that HasConstArgs and then gets copied. 
+  just need to only compute the id after checking that either the function or shim should be ready.  
 
 ## (Dec 15)
 

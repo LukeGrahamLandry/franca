@@ -157,7 +157,18 @@ fn int_value(value: *Values, int: IntTypeInfo) Res(i64) = {
         return(@err("bad int size %", len));
     };
     ::tagged(@type value[]);
-    @debug_assert(value.is(.Small));
+    if !value.is(.Small) {
+        // this is a bit dumb but it lets me be lazy when debug printing slices of existing values (see error_reporting/log). 
+        // (the normal invarient is that small values are stored inline on creation)
+        i := @switch(len) {
+            @case(1) => @as(i64) u8.assume_cast(value)[].zext();
+            @case(2) => u16.assume_cast(value)[].zext();
+            @case(4) => u32.assume_cast(value)[].zext();
+            @case(8) => i64.assume_cast(value)[];
+            @default => unreachable();
+        };
+        value = @ref(@as(Values) (Small = (i, len.trunc())));
+    };
     i := if int.signed {
         // TODO: are negative i8/i16/i32 stored sign extended? 
         value.Small._0
@@ -308,11 +319,6 @@ fn from_index(idx: i64) ScopeId = {
     }
     fn eq(a: OverloadSet, b: OverloadSet) bool #redirect(Ty(FuncId, FuncId), bool);
     DerefEq(OverloadSet);
-    
-    // TODO: this isn't a deep clone but it's probably fine since you won't be specializing a c function? idk -- Apr 13, 2025
-    fn deep_clone(out: *PrecompiledIr, self: *PrecompiledIr, a: Alloc) void = {
-        out[] = self[];
-    } 
 };
 
 MarkNotDone :: @struct();

@@ -51,11 +51,11 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
     };
     ::ptr_utils(CStr);
     
-    align_stack(kernel_sp);
     #use("@/lib/sys/process.fr");
     a := query_current_arch();
     // This is very fragile. relies on compiler/worker.fr/wrap_with_runtime_init and backend/<arch>/emit.fr
     kernel_sp += @if(a == .aarch64, 0x40, @if(a == .rv64, 0x50, 0x48));
+    // note: kernel doesn't align sp to 16 but i have to allocate a new stack for tls anyway so it doesn't matter
     
     // TODO: this is probably a stupid idea. for now it feels clever that i can guess the os by apple passing the 
     //       normal c args to the entry point in registers and linux passing them on the stack. 
@@ -147,7 +147,6 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
         thread.first_environment.cli_arguments = (ptr = argv, len = argc);
         thread.first_environment.environment_variables = envp;
         call_in_stack(thread.stack.usable.end_pointer(), impl2);
-        return();
     };
     
     __libc_start_main :: fn(user: @FnPtr() Never, argc: i64, argv: *CStr, i: i64, f: i64, l: i64) i64 #weak #libc;
@@ -174,7 +173,6 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
         };
     
         call_in_stack(thread.stack.usable.end_pointer(), impl3);
-        unreachable();
     };
     
     call_in_stack(thread.stack.usable.end_pointer(), impl2);
@@ -211,34 +209,10 @@ fn query_current_os() Os = {
     @as(Os) @as(i64) tls(.current_os)[].zext()
 }
 
+//
 // On macos (argc, argv) are passed to the entry point in registers so we're good to go. 
 // But on linux, they're passed on the stack, so we have to grab them from our caller's frame. 
-// Also on linux glib expects the stack to be 16 byte aligned but the kernel doesn't do that for you. 
-//
-// The forced #inline is important! We need this call to not fuck with the stack. 
-fn align_stack(s: i64) void #inline = {
-    #use("@/backend/amd64/bits.fr");
-    #use("@/backend/arm64/bits.fr");
-    #use("@/backend/rv64/bits.fr");
-    
-    fix_stack :: AsmFunction(fn() void = (), {
-        @const_slice(ret(),ret())  // hopefully unreachable. i think the stack alignment hting is much more strict on arm. 
-    }, fn(out: *List(u8)) => @asm_x64(
-        // We just want to sub 8 from sp but we have to return by popping something off the stack. 
-        encode_op_reg(PrimaryOp.PopBase, X86Reg.rax),
-        encode_op_reg(PrimaryOp.PushBase, X86Reg.rax),
-        encode_op_reg(PrimaryOp.PushBase, X86Reg.rax), 
-        PrimaryOp.Ret,
-    ) out, fn(out: *List(u8)) => {
-        out.push_all(@slice(0x00, 0x0B)); // 0 locals. end.
-    }, @const_slice(jalr(.RA, 0, .Zero), jalr(.RA, 0, .Zero)));
-    
-    @debug_assert_eq(s.mod(8), 0);
-    if s.mod(16) != 0 {
-        fix_stack();
-    };
-}
-
+// see examples/elf_loader.fr/write_argc_argv_envp
 //
 // <low addresses>
 // 
@@ -345,17 +319,20 @@ fn push_tls_value($name: Fields(StaticTls), value: FieldType(StaticTls, name), $
 
 fn tls($name: Fields(StaticTls)) *FieldType(StaticTls, name) #generic = {
     c := @if(__driver_abi_version < 1512, {
-        f :: fn(_: i64) rawptr #intrinsic(INTRINSIC_GET_ENV);
+        f :: fn(_: i64) i64 #intrinsic(INTRINSIC_GET_ENV);
         f(0)
     }, {
-        // TODO: this generates dumb code because a gets a new slot each time its inlined and the backend doesn't know base is the same every time
-        a := @uninitialized i64;
-        base := i64.int_from_ptr(a&).bit_and(bit_not(1.shift_left(franca_required_stack_bits) - 1));
-        base.rawptr_from_int()
+        get_stack_base_for_tls()
     });
 
-    c := StaticTls.ptr_from_raw(c);
+    c := StaticTls.ptr_from_int(c);
     StaticTls.get_field(c, name)
+}
+
+fn get_stack_base_for_tls() i64 = {
+    // TODO: this generates dumb code because a gets a new slot each time its inlined and the backend doesn't know base is the same every time
+    a := @uninitialized i64;
+    i64.int_from_ptr(a&).bit_and(bit_not(1.shift_left(franca_required_stack_bits) - 1))
 }
 
 ::if(rawptr);
