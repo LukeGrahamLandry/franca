@@ -1,7 +1,11 @@
 
+- fill_pending_dynamic_imports should care which lib the symbol comes from.
+- compile_cached should use comptime_libs not fill_from_libc.
+  but that's the codepath where you don't make a CompCtx, so .frc needs to tell you where to find the dylibs?
+  usecase is letting graphics programs be cached. 
+  probably better to have easy.fr use some api that lets you add libs like wasm imports do
 - instead of printing pointers in @trace, print thread local allocation index and offset so it changes less in diff?
 - why creating jit shims for examples/import_wasm/runtime.fr when compiling the compiler
-- maybe lost some speed on baking tls() so many times?
 - better error messages when you have an unfilled fixup on wasm. 
 - please please cleanup the got_lookup_offset stuff for wasm
 - `./q.out examples/default_driver.fr build tests/exe/wasm.fr && FRANCA_BACKTRACE=1 ./a.out`
@@ -344,7 +348,6 @@ i think it's just a race where it gets confused if two programs try to cache the
 - TODO: i broke compiler/test.fr running examples/repl.fr (Cached) on riscv
 - spurious failures
   - (repro) diff target/release/franca-linux-arm64-sta a.out 
-  - the crash in copy_bytes_static (but happening locally is an improvement kinda)
   - TODO: i broke repro. only of linux-rv64-sta and the only difference is two instructions swapped:
 ```
 00154490  93 02 05 00 13 83 05 00  b3 84 62 40 93 03 00 00
@@ -557,9 +560,6 @@ need to be careful about the refs which have tags in the high bits so won't leb 
   qbe stores it at 4 byte granularity but i don't because i wanted elide_abi_slots to work on smaller types 
 - get rid of gvm.fr/sink. but first need to make rega do better live range spiltting in large functions. 
 - cmpneg is unsound for floats so if a cmp gets folded into a jnz it can behave wrong for nans. 
-- don't just disable elide_abi_slots when the function has variadic parameters. 
-  im not convinced i understand the aliasing mistake. 
-  it must be that somehow it uses am address that goes past the save area? 
 - why go i get faster core mark with my import_c than my qbe_frontend on cproc's ir? 
   differences i see in the ir:
   - i insert redundant cnew 0 before jnz
@@ -953,6 +953,7 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
 
 ### Terminal
 
+- if you have the same buffer open multiple times, each should have its own cursor position. 
 - should seperate the text editing model part from the rendering. 
   i need to make it more structured anyway to allow undo. 
 - tab to autocomplete a file path 

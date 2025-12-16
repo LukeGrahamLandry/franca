@@ -1,5 +1,3 @@
-// TODO: make this work without just disabling elide_abi_slots for variadic
-
 #include "stdio.h"
 #include "stdarg.h"
 
@@ -8,6 +6,7 @@ int main() {
     signed short x = 0x8080;
     int result = !f((unsigned short) x, (unsigned short) x);
     printf("%04x", (unsigned short) x);
+    puts("\nOK");
     return result;
 }
 

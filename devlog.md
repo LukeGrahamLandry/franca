@@ -3,6 +3,15 @@ TODO: use the compiler baked into jitshim to check that tls is still the main th
       (store pointer on SelfHosted so don't have to assume the tls is valud to load .comptime) 
       and print error if not. 
 
+## (Dec 16)
+
+- annoys me that temp() isn't inlined. bump max_cost and fix a bad #redirect in examples/lox.
+- rv: don't bother with pending_immediate_fixup_got
+- mystery solved perhaps. time to rewrite it in rust.
+  `bscopy(live_stack&, f.escaping_slots&);` are different lengths and doesn't do a bounds check. 
+- not sure if i did something to fix armlinux_vararg_slots_example.c but seems to work with elide_abi_slots enabled.
+  shall declare it a test and see if the problem shows up again. 
+
 ## (Dec 15)
 
 - compiling the compiler makes shims for import_wasm/runtime because it includes dump_wasm 

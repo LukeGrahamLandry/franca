@@ -4,13 +4,14 @@
 // TODO: a test for overflowing 32 bit add to make sure it's sign extended after discarding 
 //       the overflow instead of using a 64 bit add. (if those are different, idk)
 // TODO: what should go in the static float rounding field? 
+// TODO: some things where im being lazy and making worse code: 
+//      direct calls, other cond_jmp, nonstack memarg. (need isel support too)
 
 EmitRv :: @struct {
     f: *Qbe.Fn;
     m: *Qbe.Module;
     start_of_function: i64;
     patches: List(Patch);
-    pending_immediate_fixup_got: List(Ty(Fixup, Qbe.Sym));
 };
 
 rv64_emitfn :: fn(f: *Qbe.Fn) []Ty(Fixup, Qbe.Sym) = {
@@ -19,10 +20,9 @@ rv64_emitfn :: fn(f: *Qbe.Fn) []Ty(Fixup, Qbe.Sym) = {
         m = f.globals,
         start_of_function = f.globals.segments&.index(.Code).len(),
         patches = Patch.list(f.nblk.zext(), temp()),
-        pending_immediate_fixup_got = list(temp()),
     );
     emit_the_code(e&);
-    e.pending_immediate_fixup_got.items()
+    empty()
 }
 
 rv_scratch_int :: TMP(RvReg._T6);
@@ -493,15 +493,8 @@ fn load_symbol(e: *EmitRv, c: *Qbe.Con, dest_reg: RvReg) void = {
         patch_addr := e.m.segment_address(.Code, e.m.current_offset(.Code));
         patch: Fixup = (patch_at = patch_addr, type = (InReg = (r = dest_reg.raw().zext(), increment = inc)));
         @match(symbol.kind) {
-            fn DynamicPatched() => {
-                patch.type.InReg.got_load = true;
-                if e.m.goal.type != .JitOnly || !e.m.goal.got_indirection_instead_of_patches {
-                    push_fixup(e.m, symbol, patch); 
-                };
-                e.inst(ebreak);
-                e.inst(ebreak);
-                push(e.pending_immediate_fixup_got&, (patch, symbol.id));
-            }
+            fn DynamicPatched() => immediate_fixup_got(e, patch, symbol);
+            fn Pending() => immediate_fixup_got(e, patch, symbol);
             fn Local() => {
                 dest := e.m.segment_address(symbol.segment, symbol.offset + inc);
                 i_page, i_off := rel_off(dest, patch_addr, dest_reg, false);
@@ -511,18 +504,6 @@ fn load_symbol(e: *EmitRv, c: *Qbe.Con, dest_reg: RvReg) void = {
                 if e.m.goal.type == .Relocatable {
                     push_fixup(e.m, symbol, patch);
                 };
-            }
-            // TODO: load from got now if got_indirection_instead_of_patches
-            fn Pending() => {
-                e.inst(ebreak);
-                e.inst(ebreak);
-                if e.m.goal.got_indirection_instead_of_patches {
-                    patch.type.InReg.got_load = true;
-                    push(e.pending_immediate_fixup_got&, (patch, symbol.id));
-                };
-                if e.m.goal.type != .JitOnly || !e.m.goal.got_indirection_instead_of_patches {
-                    push_fixup(e.m, symbol, patch);
-                }
             }
         };
     };
@@ -553,6 +534,27 @@ fn load_symbol(e: *EmitRv, c: *Qbe.Con, dest_reg: RvReg) void = {
         e.emit(.add, .Kl, TMP(dest_reg), TMP(dest_reg), rv_scratch_int);
     };
 }
+
+// this doesn't need to do the same indirection with pending_immediate_fixup_got as arm
+// because i never use direct calls (because i'm lazy and don't care as much about performace on rv)
+immediate_fixup_got :: fn(e: *EmitRv, patch: Fixup, symbol: *SymbolInfo) void = {
+    e.inst(ebreak);
+    e.inst(ebreak);
+    
+    if e.m.goal.got_indirection_instead_of_patches || symbol.kind == .DynamicPatched {
+        it := patch.type.InReg&;
+        it.got_load = true;
+        inst: []u32 = (ptr = u32.ptr_from_raw(patch.patch_at), len = 2);
+        new_got_slot := load_from_got(e.m, symbol, it.r, inst, symbol.jit_addr);
+        if new_got_slot { it |
+            push_fixup(e.m, symbol, it);
+        };
+    };
+    
+    if e.m.goal.type != .JitOnly || !e.m.goal.got_indirection_instead_of_patches {
+        push_fixup(e.m, symbol, patch); 
+    };
+};
 
 fn simple_op(e: *EmitRv, i: *Qbe.Ins, o: OpI, funct7: u7) void = {
     @debug_assert(i.cls().is_int(), "float %", i.op());
