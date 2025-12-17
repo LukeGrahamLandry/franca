@@ -36,15 +36,14 @@ Mention "tried to call uncompiled function" errors.
 
 ## Assembly
 
-TODO: update to talk about AsmFunction instead of removed annotations (but the idea is the same).  
-
-### asm
-
-Instead of treating the body as normal franca code, it is evaluated at comptime 
+AsmFunction takes a function signeture and some code evaluated at comptime 
 to produce some machine code that will execute when the function is called. 
-Requires `#aarch64` or `#x86_bytes` to declare which architecture you're supporting. 
-An overload set can contain functions with the same arg/ret types but different 
-`#asm` architectures. There are some basic examples in `tests/inline_asm_jit.fr`. 
+You provide an implementation for each architecture you might want to target. 
+- arm/rv: the value is a slice of u32 machine code instructions.
+- amd/wasm: the value is a function `fn(out: *List(u8)) void`. 
+  whatever bytes you append to that list will be inserted into your program as machine code.
+You can import `@/backend/<arch>/bits.fr` for definitions of some useful constants. 
+There are some basic examples in `tests/inline_asm_jit.fr`. 
 
 Since I need to support full compile time execution and also cross compilation, 
 having a very structured system for target splits like this is very important. 
@@ -57,18 +56,3 @@ and assembly in the same function body and assembly can't access local variables
 - I don't provide an assembler so you have to construct the bytes with awkward function calls. 
 However, since you can run arbitrary code at comptime, you can write your own assembler if you're 
 excited about that. 
-
-### aarch64
-
-Requires `#asm` and targets arm64. The body is a tuple of u32 machine code instructions. 
-You can import `@/backend/arm64/bits.fr` for definitions of some useful constants. 
-
-### x86_bytes
-
-Requires `#asm` and targets amd64. The body is a function `fn(out: *List(u8)) void`. 
-Whatever bytes you append to that list will be inserted into your program as machine code. 
-You can import `@/backend/amd64/bits.fr` for definitions of some useful constants. 
-
-
-## Bindings vs Ports
-

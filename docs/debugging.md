@@ -55,17 +55,45 @@ This feature is mainly used for:
 - comptime code inheriting state from the compiler
 - me not needing to implement the "normal" thread local abi
 
-These problems can be avoided, you just have to know they exist, and it's a bit tedious. 
-As proof, the graphics programs on macos are a nest of franca callbacks handed out 
-to the system's objective c frameworks and it all works out just fine in the end 
-(see graphics/macos/app.fr for nontrivial example). 
+Notably this is a library feature, not a language feature. 
+The compiler itself never generates tls accesses that didn't exist in your program. 
+Franca code can safely run in a foreign stack as long as you don't use any libraries that try to use tls. 
+To prove the point, there's no precompiled runtime that sets up tls for your program. 
+franca_runtime_init is just normal code that's appended to most programs and compiling as usual. 
+Similarly, examples/os/kernel/start.fr is a free standing aarch64 program that doesn't use tls. 
 
 ## Compiler Logging
 
--d  
-dump_bin.fr  
-#log_ir  
-#log_ast  
+- when running default_driver.fr you can pass `-d <options>` and `-D <options>` 
+  to spam a bunch of extra information. 
+  see compiler/error_reporting.fr/FrDebugKey and backend/ir.fr/DebugKey to see which options exist.
+- you can put #log_ir or #log_ast on a specific function for a less spammy option
+- backend/meta/dump_bin.fr lets you inspect .frc files
+
+## Compilation Unit Abi
+
+Life is good when your whole program is statically linked together in the same compilation unit. 
+If you compile things at different times, you have to be careful not to change struct layouts 
+and try to share values between two versions of the code. Franca structs use the same layout as c: 
+determined by the order of fields and the size/alignment of thier types. 
+It only changes when you modify the source.
+
+Situations this comes up in the compiler codebase:
+- changing layouts in lib/driver_api.fr. 
+  it is assumed that the compiler and the newly compilied comptime code 
+  use the same layout for all the ast nodes, etc. and can freely pass them around. 
+  this was a nice shortcut at the beginning and gets progressively more annoying as time goes on. 
+  eventually i'll have to add a remapping step. for now im just careful which feature the compiler itself uses 
+  and occasionally hack around it with `__driver_abi_version` / `__builtin_compiler_has_feature` to 
+  avoid committing a new bootstrap binary.  
+- changing layouts in backend/(lib.fr, incremental.fr) without either 
+  (bumping `incremental.MAGIC` to disable gen_do_fold_impl) or (rerunning `boot/strap.sh`)
+- if you try to use a new version of the compiler binary without a new copy of the lib folder, you're in for a world of hurt. 
+
+Same as most languages, you can avoid this problem with type erased interfaces (aka struct of function pointers). 
+For example, calling Arena.borrow() depends on the layout of Arena.Self 
+but once you have an Alloc, the data-pointer is tied to the v-pointer, 
+and you can pass that to other compilation units freely. 
 
 ## Finding Compiler Bugs
 

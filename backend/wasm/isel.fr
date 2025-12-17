@@ -18,7 +18,7 @@
 // TODO: address offset fold into load/store (rn i only do it for stack slots)
 // TODO: more tests for dynalloc
 // TODO: make it work with elide_abi_slots and simplify_jump_chains
-//       - delay lowering RSlot like the other targets (need to fix abi to use alloc)
+//       - delay lowering RSlot like the other targets 
 //       - split legalization part of isel from the stackification part so it's still ssa going into opt/slots.fr
 // TODO: some dead code elimination is done by liveness+spill+rega on native targets. make sure to do that for wasm as well. 
 // TODO: might be better to not always convert phis to stack block arguments. 
@@ -43,7 +43,6 @@ fn wasm_isel(f: *Qbe.Fn) void = {
     // so use a local that doesn't escape so it doesn't have to reload it on every single stack access. 
     stackbase := f.symcon(f.globals.wasm_symbol_stackbase);
     did_sp_load := false; // :UGLY
-    f.slot = align_to(f.slot, 16);
     fslot := f.slot;
     // TODO: don't load sp if slot==0 and no late allocas (but you don't know that up front)
     // TODO: using retr+env_par as globals with the wrong names is kinda dumb
@@ -88,13 +87,20 @@ fn wasm_isel(f: *Qbe.Fn) void = {
             r := f.newtmp("isel", k_mem);
             f.emitter_for_wasm(.copy, k_mem, SP, BP, Qbe.Null);  // TODO: only if dynalloc
             f.emitter_for_wasm(.sub, k_mem, BP, r, f.getcon(f.slot.intcast()));
+            if f.start.ins.len > 0 && f.start.ins.index(0).op() == .pare {
+                f.emitter_for_wasm(.load, .Kl, f.start.ins[0].to, r, Qbe.Null);
+            };
             f.emitter_for_wasm(.global_get, k_mem, r, stackbase, Qbe.Null);
             did_sp_load = true;
         };
         
         for_insts_rev b { i |
-            if(i[].op() == .par, => maybe_sp_load());
-            sel_wasm(f, i[]);
+            if(i[].op().is_par(), => maybe_sp_load());
+            if i[].op() == .arge {
+                f.emitter_for_wasm(.storel, .Kw, Qbe.Null, i.arg&[0], SP);
+            } else {
+                sel_wasm(f, i[]);
+            };
         };
         
         if(f.start.identical(b), => maybe_sp_load());

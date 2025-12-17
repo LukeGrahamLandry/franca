@@ -23,6 +23,10 @@ the `arg` field has `Binding`s which has a `nullable_tag` field.
 - `get_fields` gives a list of struct fields which have a `nullable_tag` field. 
 - in a macro you might find a `Decl` or `StructLiteralP` ast node which holds a `Binding` which has a `nullable_tag` field. 
 
+The annotations are not automatically included in your runtime binary, 
+but since comptime code can generate arbitrary data structures, 
+you can choose to embed any information you want. 
+
 ## Real Usecases 
 
 - asking the compiler for special treatment without adding new syntax (see builtins below)
@@ -127,6 +131,10 @@ It's just hard to think about because you can't really do anything until you can
 So if you want to implement `import` as normal comptime code, you really need to already have access
 to basic OS stuff that you'd generally get from libc. 
 
+### weak
+
+TODO: explain
+
 ### ir
 
 Used internally to implement functions that should map to some cpu instruction 
@@ -163,6 +171,8 @@ you could replace `log_asm`, `log_ir`, and `log_ast` with something in "userspac
 
 When you call this function its body will be pasted into the caller instead of generating a function call instruction. 
 Inlined functions cannot be recursive. 
+This has the same effect as declaring the function with `=>` instead of `=` 
+except that you can't access variables from the surrounding scope.
 
 ### noinline
 
@@ -214,12 +224,6 @@ syntactic reminder that something weird is going on. Maybe this should be moved 
 check that you can choose to enable if you care a lot about binary size. Maybe I should just 
 implement real closures and fallback to that instead of generating redundant copies of the same code. 
 
-### intrinsic
-
-Used internally to implement builtin_get_dynamic_context/set_dynamic_context. 
-In the old comptime jit, all math operations used this but it has been mostly replaced by `#ir`. 
-Should probably be removed and merged into something else since it's used so little. 
-
 ### comptime_addr
 
 Used internally to implement the builtin comptime functions. 
@@ -249,6 +253,10 @@ In the bootstrap compiler this was used to simplify type inference but it is cur
 This is for functions where you have to lie about parameter types like objc_msgSend.  
 TODO: explain why
 This is implied by CVariadic
+
+### no_trace
+
+TODO: explain
 
 ### align
 

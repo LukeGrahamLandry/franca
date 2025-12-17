@@ -3,18 +3,20 @@
 //! - aggragate return pointer is prepended to arguments
 //! - varargs pointer is appended to arguments
 //! - need an entry in the type table for the function's signeture. 
-//! - hidden env parameter is passed in a global
+//! - env parameter (handled by isel. here just passes through the arge/pare)
+//!   passed by storing it at the caller's sp (so callee gets it by doing a load before decrementing sp). 
+//!   normally sp points at uninitialized memory that the calle will use. 
+//!   since there's no limit to number of args, never have to spill 
+//!   to the stack like on native so no complicated interaction with that.
 
 // TODO: untangle Kw vs Kl: vararg, indirect return
-//       should use the same k_mem as isel does and it should be dynamic so i can support memory64 as well. 
-// TODO: use alloc instead of direct RSlot for varargs so it's consistant with the other targets. 
+//       should use the same k_mem as isel does and it should be dynamic so i can support memory64 as well.
+k_mem :: Qbe.Cls.Kl;
 // TODO: blit for argc
 
 #use("@/backend/abi.fr");
 fn wasm_abi(f: *Qbe.Fn) void = {
     f.native_abi(Qbe.Ref, selpar, sel_call, selvastart, selvaarg, selret);
-    // assign_alloc_slots provides up to 16 alignment and assumes it starts aligned (because it's 0 on other backends). 
-    f.slot = f.slot.align_to(16);
 }
 
 selpar :: fn(f: *Qbe.Fn, par_i: []Qbe.Ins) Qbe.Ref = {
@@ -27,7 +29,7 @@ selpar :: fn(f: *Qbe.Fn, par_i: []Qbe.Ins) Qbe.Ref = {
         f.ret_cls = k;
         f.retty = Qbe.Null;
     };
-    f.retr = @if(f.retty != QbeNull, f.newtmp("abi", .Kl), QbeNull);
+    f.retr = @if(f.retty != QbeNull, f.newtmp("abi", k_mem), QbeNull);
     
     each par_i { i |
         @if_let(i.op()) fn parc() => if f.scalar_struct(i.arg&[0]) { k |
@@ -39,10 +41,10 @@ selpar :: fn(f: *Qbe.Fn, par_i: []Qbe.Ins) Qbe.Ref = {
         };
     };
     
-    va_base := @if(f.vararg, f.newtmp("va", .Kl), Qbe.Null);
+    va_base := @if(f.vararg, f.newtmp("va", k_mem), Qbe.Null);
     if va_base != QbeNull {
         // append varargs pointer
-        f.emit(.par, .Kl, va_base, QbeNull, QbeNull);
+        f.emit(.par, k_mem, va_base, QbeNull, QbeNull);
     };
     
     m := f.globals;
@@ -50,8 +52,7 @@ selpar :: fn(f: *Qbe.Fn, par_i: []Qbe.Ins) Qbe.Ref = {
     each_rev par_i { i |
         @match(i.op()) {
             fn pare() => {
-                f.emit(.global_get, .Kl, i.to, f.symcon(m.wasm_symbol_env_parameter), QbeNull);
-                f.env_par = i.to;
+                f.emit(i);
             }
             fn parc() => {
                 // TODO: the par should be .Kw for the abi
@@ -68,13 +69,13 @@ selpar :: fn(f: *Qbe.Fn, par_i: []Qbe.Ins) Qbe.Ref = {
     
     if f.retr != QbeNull {
         // prepend aggragate return pointer to our parameters
-        f.emit(.par, .Kl, f.retr, QbeNull, QbeNull);
+        f.emit(.par, k_mem, f.retr, QbeNull, QbeNull);
     };
     
     type := pack_wasm_result_type m { $yield_arg #duplicated |
-        @if(f.retr != Qbe.Null) yield_arg(.Kl);
+        @if(f.retr != Qbe.Null) yield_arg(k_mem);
         for_rev(par_cls, yield_arg);
-        @if(va_base != Qbe.Null) yield_arg(.Kl);
+        @if(va_base != Qbe.Null) yield_arg(k_mem);
     } and { $yield_ret |
         if(!@is(f.ret_cls, .Ke, .Kx), => yield_ret(f.ret_cls));
     };
@@ -126,7 +127,7 @@ sel_call :: fn(f: *Qbe.Fn, args: []Qbe.Ins, il: *List(Qbe.Ins)) *Qbe.Ins = {
         i.set_cls(k);
         i.arg&[1] = Qbe.Null;
         f.emit(k.store_op(), .Kw, Qbe.Null, r, i.to);
-        f.emit(.alloc8, .Kw, i.to, f.getcon(8), Qbe.Null);
+        il.push(make_ins(.alloc8, .Kw, i.to, f.getcon(8), Qbe.Null));
         i.to = r;
     };
     
@@ -166,28 +167,35 @@ sel_call :: fn(f: *Qbe.Fn, args: []Qbe.Ins, il: *List(Qbe.Ins)) *Qbe.Ins = {
     // varargs are passed by writing them to memory and appending that pointer as an argument. 
     is_va := false;
     va_slot := QbeNull;
+    va_size := 0;
     enumerate args { j, i |
         if is_va {
             @debug_assert_eq(i.op(), .arg);
             ::if(i32);
             // write the argument to the next stack slot
-            size: i32 = if(i.cls().is_wide(), => 8, => 4);
-            f.slot = f.slot.align_to(size);
-            f.emit(i.cls().store_op(), .Kw, QbeNull, i.arg&[0], SLOT(f.slot));
-            f.slot += size;
+            size := if(i.cls().is_wide(), => 8, => 4);
+            va_size = va_size.align_to(size);
+            r := f.newtmp("abi", k_mem);
+            f.emit(i.cls().store_op(), .Kw, QbeNull, i.arg&[0], r);
+            f.emit(.add, k_mem, r, va_slot, f.getcon(va_size));
+            va_size += size;
         };
         if i.op() == .argv {
             @debug_assert(!is_va);
-            // TODO: why does this need to be 16 not 8? am i losing my mind? 8 fails abi1.ssa
-            //       im afraid it's just luck that this works
             f.slot = f.slot.align_to(16);  
-            va_slot = SLOT(f.slot);
+            va_slot = f.newtmp("abi", k_mem);
             is_va = true;
             args = args.slice(0, j);  // remove the rest of the args
         };
     };
+    
+    if args.len > 0 && args.index(0).op() == .arge {
+        f.emit(args[0]);
+    };
+    
     if is_va {
-        f.emit(.push, .Kl, QbeNull, va_slot, QbeNull);
+        f.emit(.push, k_mem, QbeNull, va_slot, QbeNull);
+        il.push(make_ins(.alloc8, k_mem, va_slot, f.getcon(va_size), Qbe.Null));
     };
     
     each_rev args { i |
@@ -197,6 +205,7 @@ sel_call :: fn(f: *Qbe.Fn, args: []Qbe.Ins, il: *List(Qbe.Ins)) *Qbe.Ins = {
                 //       but this doesn't work. maybe just because the dynalloc isnt respecting alignment? 
                 //       (TODO: try again now that i fixed which end the SP local points to). 
                 //       it doesn't matter for franca because emit_ir.fr/compile_for_arg_impl() uses NewMemory anyway. 
+                // TODO: add a .ssa test that cares about this
                 
                 //k := i.cls();
                 //dest := f.newtmp("abi", k);
@@ -213,25 +222,18 @@ sel_call :: fn(f: *Qbe.Fn, args: []Qbe.Ins, il: *List(Qbe.Ins)) *Qbe.Ins = {
             fn arg()  => {
                 f.emit(.push, i.cls(), QbeNull, i.arg&[0], QbeNull);
             }
-            fn arge() => if i.arg&[0] != f.env_par {
-                // TODO: this is wrong. we leak it if we didn't have one
-                // :FUCKED
-                env := f.symcon(m.wasm_symbol_env_parameter);
-                f.emit(.global_set, .Kl, QbeNull, env, i.arg&[0]);
-                if f.env_par != Qbe.Null {
-                    placeholder[] = make_ins(.global_set, .Kl, QbeNull, env, f.env_par);
-                };
-            }
+            fn arge() => ();
             @default => unreachable();
         };
     };
     
     if pending_indirect_return != QbeNull {
         t := m.get_type(call_arg1.val());
-        f.slot = align_to(f.slot, 1.shift_left(t.header.align_log2.zext()));
-        f.emit(.push, .Kl, QbeNull, SLOT(f.slot), QbeNull);
-        f.emit(.copy, i.cls(), pending_indirect_return, SLOT(f.slot), QbeNull);
-        f.slot += t.header.size.bitcast();
+        op := alloc_op(t.header.align_log2.zext());
+        r := pending_indirect_return;
+        s := f.getcon(t.header.size.zext());
+        il.push(make_ins(op, k_mem, r, s, Qbe.Null));
+        f.emit(.push, k_mem, QbeNull, r, QbeNull);
     };
     for(before, fn(i) => f.emit(i));
     

@@ -1,4 +1,13 @@
 
+## (Dec 17)
+
+- do SLOW_ARENA_CANARY to the last chunk when resetting to a mark
+- get rid of Arena.Self.canary field because you shouldn't borrow() if you didn't create. 
+  don't want struct layout as part of the abi, pass around the interface instead.
+- make wasm/abi more similar to others
+  - use alloc instead of RSlot
+  - pass env parameter on the stack instead of in a global. much less invasive. 
+
 ## (Dec 16)
 
 - annoys me that temp() isn't inlined. bump max_cost and fix a bad #redirect in examples/lox.

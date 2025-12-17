@@ -498,10 +498,6 @@ fn fixup_wasm32(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_re
 
 fn push_global_index(e: *EmitWasmFn, id: Qbe.Sym) void = @if_else {
     @if(id == e.m.wasm_symbol_stackbase) => e.a&.push(0);
-    @if(id == e.m.wasm_symbol_env_parameter) => {
-        e.m.wasm_any_pare = true;
-        e.a&.push(1);
-    };
     @else => panic("unknown symbol for wasm global");  // :OnlyTwoGlobals e.index_patch(id, .Global);
 };
 
@@ -676,7 +672,7 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     };
     
     {
-        // :OnlyTwoGlobals [__stackbase, __env_parameter] so don't need patches
+        // :OnlyTwoGlobals [__stackbase] so don't need patches
         // TODO: this will have to change if we want to allow frontends to create thier own wasm globals. 
     
         // Create a global for the stack pointer
@@ -687,7 +683,7 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
         push_buf { buf |
             buf.push(@as(u8) Wasm.Section.Global);
             uleb_patch_delta buf {
-                push(buf, 1 + int(m.wasm_any_pare).trunc()); // length of globals vector
+                push(buf, 1); // length of globals vector
                 
                 // __stackbase
                 push(buf, @as(u8) Wasm.ValType.I32); // type k_mem
@@ -697,17 +693,6 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
                 push(buf, @as(u8) Wasm.Inst.I32_Const);
                 leb128_signed(buf, stack_base);
                 push(buf, @as(u8) Wasm.Inst.End);
-                
-                if m.wasm_any_pare {
-                    // __env_parameter
-                    push(buf, @as(u8) Wasm.ValType.I64); // type
-                    push(buf, 1); // mutable
-                    
-                    // initial value
-                    push(buf, @as(u8) Wasm.Inst.I64_Const);
-                    leb128_signed(buf, 0);
-                    push(buf, @as(u8) Wasm.Inst.End);
-                };
             };
         };
     };
@@ -715,7 +700,7 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     push_buf { buf |
         buf.push(@as(u8) Wasm.Section.Export);
         uleb_patch_delta buf {
-            leb128_unsigned(buf, m.exports.len + 2 + int(m.wasm_has_any_indirect_calls) + int(m.wasm_any_pare));
+            leb128_unsigned(buf, m.exports.len + 2 + int(m.wasm_has_any_indirect_calls));
             for m.exports& { id |
                 name := m.str(id);
                 id = m.follow_alias(id);
@@ -743,14 +728,6 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
                 push_all(buf, name);
                 buf.push(@as(u8) Wasm.ImportType.Global);
                 leb128_unsigned(buf, 0);
-            };
-            
-            if m.wasm_any_pare {
-                name := "__env_parameter";
-                leb128_unsigned(buf, name.len);
-                push_all(buf, name);
-                buf.push(@as(u8) Wasm.ImportType.Global);
-                leb128_unsigned(buf, 1);
             };
             
             if m.wasm_has_any_indirect_calls {
@@ -996,7 +973,7 @@ fn output_wasm_module_jit(m: *QbeModule, indirect_table_base: i64) [][]u8 = {
     push_buf { buf |
         buf.push(@as(u8) Wasm.Section.Import);
         uleb_patch_delta buf {
-            leb128_unsigned(buf, 3 + int(m.wasm_any_pare));
+            leb128_unsigned(buf, 3);
             
             push_qual_name(buf, "main", "memory");
             push(buf, @as(u8) Wasm.ImportType.Memory);
@@ -1011,13 +988,6 @@ fn output_wasm_module_jit(m: *QbeModule, indirect_table_base: i64) [][]u8 = {
             push(buf, @as(u8) Wasm.ImportType.Global);
             push(buf, @as(u8) Wasm.ValType.I32); // type k_mem
             push(buf, 1); // mutable
-            
-            if m.wasm_any_pare {
-                push_qual_name(buf, "main", "__env_parameter");
-                push(buf, @as(u8) Wasm.ImportType.Global);
-                push(buf, @as(u8) Wasm.ValType.I64); // type
-                push(buf, 1); // mutable
-            };
         };
     };
     
@@ -1061,7 +1031,7 @@ fn output_wasm_module_jit(m: *QbeModule, indirect_table_base: i64) [][]u8 = {
     chunks.items()
 }
 
-// the new module imports our [function table, memory, __stack_base, __env_parameter], 
+// the new module imports our [function table, memory, __stack_base], 
 // so function/data imports are just the literal values from the current module, same as native. 
 make_exec :: fn(m: *Qbe.Module) void = {
     @if(!TODOWASM) unreachable();

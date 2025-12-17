@@ -6,7 +6,9 @@ Self :: @struct(
     end: i64,
     base_size: i64,
     making_new_chunk: bool,
-    canary: bool = SLOW_ARENA_CANARY,
+    // TODO: changing the size of this struct is an abi break
+    //       because Qbe.Module.forever_storage is stored inline 
+    //       and gen_do_fold_impl sketchily accesses fields of a module it didn't create.  
 );
 
 Header :: @rec @struct(
@@ -142,19 +144,18 @@ fn reset_retaining_capacity(self: *Self, mark: ArenaMarker) void = {
     };
     chunk := mark.chunk.unwrap();
     
-    @if(SLOW_ARENA_CANARY) if self.canary {
+    @if(SLOW_ARENA_CANARY) {
         c := self.chunk.unwrap();
         c.used = self.start;
         ::ptr_utils(Header);
         while => !identical(c, chunk) {
-            consume_canaries(c, c.used);
+            consume_canaries(c, c.used, Header.size_of());
             if !SLOW_MEMORY_DEBUGGING {
                 c.used = Header.size_of();
             };
             c = c.prev.unwrap();
         };
-        // TODO: the debug stuff isn't done to the last chunk
-        //scary_log("---");
+        consume_canaries(c, c.used, mark.start);
     };
     
     @if(SLOW_PROTECT_ARENA) {
@@ -183,19 +184,18 @@ fn reset_retaining_capacity(self: *Self, mark: ArenaMarker) void = {
     chunk.used = self.start;
 }
 
-fn consume_canaries(c: *Header, used: i64) void = {
+fn consume_canaries(c: *Header, used: i64, reset_to: i64) void = {
+    @if(!SLOW_ARENA_CANARY) return();
     base := Header.raw_from_ptr(c);
     it := base.offset(used);
+    end := base.offset(reset_to);
     @assert(used.ule(c.size), "chunk.used oob");
-    //scary_log(used); scary_log(" "); scary_log(base); scary_log(" XXX ");
     
-    while => !(identical(it, base) || identical(it, base.offset(Header.size_of()))){
+    while => !identical(it, end) {
         @assert(base.int_from_rawptr().ult(it.int_from_rawptr()));
         canary := ArenaCanary.ptr_from_raw(it.offset(-size_of(ArenaCanary)));
         start := u8.raw_from_ptr(canary.start);
-        //scary_log("size="); scary_log(canary.size); scary_log(" start="); scary_log(start); scary_log(" "); scary_log(" secret="); scary_log(canary.secret); scary_log(" ");
         saved := it.offset(-canary.size);
-        //scary_log(start); scary_log("_"); scary_log(saved); scary_log(" | ");
         if canary.secret != ArenaCanary.GOOD {
             scary_log(" secret="); scary_log(canary.secret);
         };
@@ -244,9 +244,7 @@ fn reset_retaining_capacity(self: *Self) void = {
     if self.chunk { chunk |
         chunk.used = self.start;
         while => chunk.prev { c | 
-            @if(SLOW_ARENA_CANARY) if self.canary {
-                consume_canaries(chunk, chunk.used);
-            };
+            consume_canaries(chunk, chunk.used, Header.size_of());
             @if(SLOW_MEMORY_DEBUGGING) {
                 // TODO: this doesn't happen to the last chunk
                 S :: Header.size_of();
@@ -256,9 +254,7 @@ fn reset_retaining_capacity(self: *Self) void = {
             chunk.used = Header.size_of();
             chunk = c;
         };
-        @if(SLOW_ARENA_CANARY) if self.canary {
-            consume_canaries(chunk, chunk.used);
-        };
+        consume_canaries(chunk, chunk.used, Header.size_of());
         self.start = Header.size_of();
         self.end = chunk.size;
         self.chunk = (Some = chunk);
@@ -277,9 +273,7 @@ fn deinit(self: *Self) void = {
             chunk = it;
         };
         loop {
-            @if(SLOW_ARENA_CANARY) if self.canary {
-                consume_canaries(chunk, chunk.used);
-            };
+            consume_canaries(chunk, chunk.used, Header.size_of());
             
             prev := chunk.prev;
             

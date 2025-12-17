@@ -1,7 +1,7 @@
 # notes about `@/backend`
 
 See backend/README.md for some info:
-- jit/aot codegen for arm64/amd64 machO/elf
+- jit/aot codegen for arm64/amd64/riscv64/wasm machO/elf
 - platform independent ssa cfg ir
 - extern-c abi, stack slot promotion, inlining, dead code elimination, constant folding, reg alloc
 - adapted from qbe, changed to output machine code without assembler/linker/codesign dependency
@@ -51,7 +51,7 @@ the function pointers to the backend.
 ## notes
 
 - We're very often iterating backwards so `emit` inserts into the block buffer backwards!
-  For now we use the buffer in Qbe.Globals but that will move out eventually.
+  For now we use the buffer in Qbe.Module but that will move out eventually.
 - When looking at the debug dumps, register numbers are off by one. ie. first argument on arm (x0) is in R1.
 - When trying to understand what phi instructions do, remember that they're totally isomorphic to block arguments and then it's suddenly super simple.
   It's just a choice to represent it as the callee knowing which value to use for each argument for each caller.
@@ -69,16 +69,16 @@ Many instructions are valid for multiple classes. When instructions do not have 
 Some operations require multi-instruction sequences to supply extra arguments. 
 
 - integer overflow is wrapping
-- signed integers are two's compliment so there are no seperate instrucitons for signed vs unsigned add/sub/mul. 
+- signed integers are two's compliment so there are no seperate instructions for signed vs unsigned add/sub/mul. 
   div/mod have udiv/umod varients that act on unsigned values. 
 - add/sub/mul/div/neg act on integers or floats (depending on class)
-- integer division can trap on x86_64 
+- integer division can trap on x86_64 and wasm
 - floats are IEEE 754 
 - shifts (shl, shr, sar, rotr, rotl) are done modulo the data size. so `(.shl, .Kw, dest, x, 33) == (.shl, .Kw, dest, x, 1)`
   - shl/shr (logical-shift left/right): new bits are 0
   - shl (arithmetic-shift right): sign extension. new bits are the same as the original sign bit
   - rotr/rotl (rotate right/left)
-- neg is a unary instruciton equivilent to subtracting its argument from zero
+- neg is a unary instruction equivilent to subtracting its argument from zero
 - there is no instruction for bitwise not. instead use xor with -1. 
 - min/max/sqrt are only implemented for floats
 - unary bit manipulation: byteswap, ctz (count trailing zeros), clz (count leading zeros), ones (count ones / popcnt)
@@ -86,6 +86,10 @@ Some operations require multi-instruction sequences to supply extra arguments.
   - a0 is the value, a1 is the destination address (note: BACKWARDS). no result. 
 - load works for any class. for smaller loads, there's an instruction corresponding to each extension instruction.
 - alloc reserves space on the call stack. it goes away when the function returns. 
+  - you'll get better code if you put all the alloc instructions in the start block. 
+    if it's in other blocks, you get a new allocation every time it executes like c's alloca.
+    if all the allocations are in the start block with constant arguments, 
+    they can be fixed offsets into a statically sized stack frame. 
   - there are different instructions for different byte alignments (4/8/16). 
   - the argument is the size in bytes. 
   - (note: since temporaries are mutable, frontends are not required to alloc for variables if their address is not taken), 
@@ -100,6 +104,9 @@ Float comparisons return false when either argument is NaN, except for uo which 
 
 - integer: eq, ne, sge, sgt, sle, slt, uge, utl, ult, ult. 
 - float: eq, ge, gt, le, lt, ne, o, uo
+
+The block terminator J.jnz compares THE LOW 32 BITS of its argument against 0. 
+If you want to branch on a pointer being null you need ceql + jnz. 
 
 ### Casts
 

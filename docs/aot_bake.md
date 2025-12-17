@@ -46,6 +46,8 @@ However, some types have special requirements.
   An alternate solution would be represent the struct as (items, cap) instead of (maybe_uninit, len).
 - Any collection containing an `Alloc` implies that it would be valid to call free on it, but that doesn't make any sense for data stored in the executable.
   You really don't want a naive heap allocator putting read-only memory in its free-list to crash on later when it tries to fulfill an allocation.
+- `HashMap(T)` is interspersed with uninitialized memory for unused buckets. 
+  They might even have aslr bytes if T contains pointers and some values were added and then removed. 
 - A type representing an operating system resource (like a file descriptor) probably doesn't make sense to include as constant data.
 
 This is addressed by allowing user code to add overloads of `fn bake_relocatable_value(self: *T) Slice(BakedEntry)`.
@@ -64,6 +66,7 @@ Currently `bake_relocatable_value` is only called if the type contains some type
 
 this even works on internal pointers. TODO: explain more
 but it's fragile and relies on the outer most thing being seen first. which is dumb and needs to be fixed. 
+ditto cyclic data structures are allowed and will remain cycles when baked. 
 
 - ClearOnAotBake(T)
 - note similar to tracing garbage collection
@@ -78,3 +81,27 @@ but it's fragile and relies on the outer most thing being seen first. which is d
   ```
 
 - talk about how jit-shims are used to avoid compiling for comptime but still give you something that bakes to the same thing. 
+
+## Jitted Code
+
+An exception to bake_relocatable_value just magically working is if you mmap executable memory 
+at comptime and then expect it to be available at runtime. 
+Since I care about seamless cross compiling, you need to give the code to the compiler 
+in a form that can be translated to different architectures efficiently. 
+The serialiazation format for the compiler's ir is in backend/incremental.fr. 
+If you generate a module and pass it to import_frc, 
+the functions you get back can be called at comptime or runtime, just like normal code. 
+See examples/import_c/ffi.fr for a complex example of this or examples/bf/bf2ir.fr for a simple one. 
+
+Functions added by import_frc are subject to the same reachability analysis as the rest of your program. 
+So you can add a large module, then call lots of big functions at comptime 
+and one small function at runtime without bloating your binary.
+
+Alternatively, if you want to generate the machine code yourself, you can use AsmFunction 
+and provide a version of each function for each architecture you might want to target, 
+and the compiler will choose the right one to call. Again, this will work at comptime or runtime. 
+My examples use `backend/<arch>/bits.fr` as a verbose assembler so they look declaritive 
+but it's just normal code, you could do whatever you want there. 
+Currently there's no easy way to do relocations (like accessing symbols). 
+There's a painful workaround in examples/os/build.fr/emit_entry 
+(but hopefull i'll fix it properly eventually). 
