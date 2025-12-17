@@ -1,5 +1,3 @@
-//! Unlike Qbe, we don't rely on a seperate assembler. We just put the bytes in memory and jump there. 
-//! This means we also have to handle updating forward references to functions that haven't been compiled yet. 
 
 #use("@/backend/lib.fr");
 #use(Amd);
@@ -151,19 +149,17 @@ fn fixup_amd64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
 // and we need the vararg slots for saving floats to be 16 aligned
 
 fn framesz(e: *AmdState) void = {
-    /* specific to NAlign == 3 */
-    o := 0;
-    if !e.f.leaf {
-        // checking if clobber save area is aligned to 16 bytes
-        o = e.f.reg.bit_and(SysV'amd64_sysv_rclob_mask).count_ones().zext().mod(2);
-    };
+    @debug_assert_eq(e.f.slot, e.f.slot.ualign_to(16));
+    // checking if clobber save area is aligned to 16 bytes
+    o := e.f.reg.bit_and(SysV'amd64_sysv_rclob_mask).count_ones().zext().umod(2);
     
-    f := e.f.slot / 4;
-    f = bit_and(f + 3, -4);
-    if f > 0 && e.fp == .RSP && e.f.salign == 4 {
-        f += 2;
+    f := e.f.slot.zext();
+    if f > 0 && e.fp == .RSP {
+        // if didn't save rbp: so not 16 aligned after caller pushed return address. fix it. 
+        f += 8;
+        // if f=0 don't need to provide alignment for alloc16 and we're a leaf so won't call function that requires it
     };
-    e.fsz = 4*f.zext() + 8*o + (176)*e.f.vararg.int();
+    e.fsz = f + 8*o + (176)*e.f.vararg.int();
 }
 
 fn next_inst_offset(self: *AmdState) i64 = self.a.len;

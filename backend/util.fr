@@ -337,7 +337,7 @@ fn get_type(f: *Qbe.Fn, r: Qbe.Ref) *Qbe.Typ = {
 }
 
 fn alloc_op(align_log2: i32) Qbe.O #inline = {
-    /* specific to NAlign == 3 */
+    @debug_assert(align_log2 <= 4);
     al := if(align_log2 >= 2, => align_log2 - 2, => 0);
     @as(Qbe.O) @as(i32) Qbe.O.alloc4.raw() + al
 }
@@ -509,25 +509,14 @@ fn vgrow(vpr: rawptr, len: i64) void = {
     vp[] = ptr_from_raw(QListHeader, v1);
 }
 
-fn debug_clear_owned_memory(v: *QListHeader) void = {
-    len := v.cap * v.esz;
-    p := ptr_cast_unchecked(@type v[], u8, v.offset(1));
-    @if(SLOW_MEMORY_DEBUGGING) p.slice(len).set_bytes(SLOW_MEMORY_JUNK);
-}
-
 fn vfree(p: rawptr) void = @if(::safety_check_enabled(.DebugAssertions)) {
     v := QListHeader.ptr_from_raw(p).offset(-1);
     w := v.where;
     v.where = QLIST_DOUBLE_FREE;
-    if w == VMagTemp {
-        debug_clear_owned_memory(v);
-        return();
-    };
-    @debug_assert_eq(w, VMagLong, "bad QList magic");
-    debug_clear_owned_memory(v);
-    // not a thing now that we're using module.forever. should profile to see which is better. 
-    //a := general_allocator();
-    //free(QListHeader.raw_from_ptr(v));
+    @debug_assert(w == VMagTemp || w == VMagLong, "bad QList magic");
+    len := v.cap * v.esz;
+    p := ptr_cast_unchecked(@type v[], u8, v.offset(1));
+    @if(SLOW_MEMORY_DEBUGGING) p.slice(len).set_bytes(SLOW_MEMORY_JUNK);
 };
 
 // This is a header that goes before the allocated memory for the array. 
@@ -573,14 +562,6 @@ fn QList($T: Type) Type = {
         v := Self.raw_from_ptr(s);
         vgrow(v, len);
     }
-    
-    fn free(s: Self) void = {
-        v := T.raw_from_ptr(s.first);
-        vfree(v);
-    }
-    
-    // TODO: bounds checking but its hard as long as i have to keep qbe's memory layout because the fields aren't together. 
-    //       and anyway it would be sad to add alignment padding just for bounds checks. 
     
    fn header(s: Self) *QListHeader = {
         v := ptr_cast_unchecked(T, QListHeader, s.first);

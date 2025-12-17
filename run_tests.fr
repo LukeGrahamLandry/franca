@@ -23,10 +23,6 @@ test_cmds :: @S(
     @S("./target/f.out", "examples/chess/perft.fr", "-fast", "-hush"),
     @S("./target/f.out", "examples/os/build.fr"),
     @S("./target/f.out", "tests/exe/cli_args.fr", "a", "b", "c", "d"),
-);
-
-// TODO: sysv abi does not support variadic env calls
-test_cmds_skip_amd :: @S(
     @S("./target/f.out", "examples/import_c/test/ffi.fr"),
 );
 
@@ -39,10 +35,6 @@ with_deps :: @S(
     @S("./target/r.out", "all", "-bin", "./target/q.out", "-cc", "-force_linker"), // dep:clang
     @S("./target/r.out", "all", "-bin", "./target/q.out"),  // dep:clang
     @S("./target/f.out", "examples/lox/test.fr", "-pass", "-hush"), // dep:lox
-);
-
-with_deps_arm_only :: @S(
-    // amd: sysv abi does not support variadic env calls
     @S("./target/f.out", "examples/import_wuffs/test.fr"),
 );
 
@@ -122,9 +114,6 @@ fn driver(vtable: *ImportVTable) void = {
                     sh(cmd);
                 };
                 
-                if query_current_arch() != .x86_64 {
-                    for(test_cmds_skip_amd, fn(it) => sh(it));
-                };
                 if query_current_arch() != .x86_64 || query_current_os() != .linux {
                     for(test_cmds_skip_linux_amd, fn(it) => sh(it));
                 };
@@ -146,9 +135,6 @@ fn driver(vtable: *ImportVTable) void = {
                 };
                 
                 ci := get_environment_variable("GITHUB_REPOSITORY").is_some();
-                if query_current_arch() == .aarch64 {
-                    for(with_deps_arm_only, fn(it) => sh(it));
-                };
                 if query_current_os() != .linux || query_current_arch() != .x86_64 || !ci {
                     with_deps_skip_linux_amd := with_deps_skip_linux_amd;
                     if query_current_arch() == .rv64 {
@@ -173,6 +159,9 @@ fn driver(vtable: *ImportVTable) void = {
                 };
                 
                 if query_current_arch() != .rv64 {  // TODO: it's a pain because it needs an assembler
+                    // (orb) 17-alloc.ha rosetta error: could not find free space for allocation size 1c6bf52635000
+                    // they're trying to test allocation failure and rosetta cannot cope i guess?
+                    @if(ci || query_current_arch() != .x86_64)  
                     if current_os() == .linux {
                         sh(@slice("./target/f.out", "tests/external/hare.fr"));
                     };

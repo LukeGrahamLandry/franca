@@ -1,21 +1,30 @@
 
+- examples/web/build.fr on linux :MultiDylibLibc 
+  `TypeError: WebAssembly.instantiate(): Import #8 "libc***": module is not an object or function`
+  TODO: add that binary to repro
+- instead of having comptime in tls, fill_export_ffi should wrap them to 
+  bake it into the code like create_jit_shim does. 
+  then wouldn't need the "Cannot call init_self_hosted inside another compiler...".
+  also have to get rid of the places i was lazy and call current_comptime() directly. 
+  (@unwrap,@err,make_error,set_type,log_it)
+- os: use envvars instead of `nocache on` so it gets inherited properly and this:
+  `franca examples/os/build.fr -vzf -append "nocache on;compiler/main.fr"`
+  behaves the same as on native. add logging init_self_hosted so you can tell. 
+  it should loop repeatedly compiling itself. similarly in web demo, should inherit cli args the same way.  
 - fill_pending_dynamic_imports should care which lib the symbol comes from.
 - compile_cached should use comptime_libs not fill_from_libc.
   but that's the codepath where you don't make a CompCtx, so .frc needs to tell you where to find the dylibs?
   usecase is letting graphics programs be cached. 
   probably better to have easy.fr use some api that lets you add libs like wasm imports do
 - instead of printing pointers in @trace, print thread local allocation index and offset so it changes less in diff?
-- why creating jit shims for examples/import_wasm/runtime.fr when compiling the compiler
 - better error messages when you have an unfilled fixup on wasm. 
 - please please cleanup the got_lookup_offset stuff for wasm
-- `./q.out examples/default_driver.fr build tests/exe/wasm.fr && FRANCA_BACKTRACE=1 ./a.out`
-  mega crash loop. should work. 
 - (when jitting) FRANCA_BACKTRACE from host in import_wasm show both wasm and normal function names.
   need to be able to inherit the resolver from the compiler. 
 - `f :: @as(rawptr) fn() = println("A");` you don't get an inferred name so it doesn't show nicely in trace. 
   (the confusing example was report_called_uncompiled_or_just_fix_the_problem)
 - removing pare broke ENABLE_GVN=false `compile_expr__1691 Wanted alias for RTmp:1849`
-- prospero wrong output in wasm because my atof doesn't support `_1069 const 4.76837e-07`
+- prospero doesn't work in wasm because my atof doesn't support `_1069 const 4.76837e-07`
 - add a test for the shallow force_default_handling bake
 - deal with the webgpu wasm imports having hacky thing that doesn't work with caching in an attempt to make dawn.json optional
 - the thing where when you dot access a scope and it doesn't have that constant it recurses up all the way to the root scope is confusing. 
@@ -58,7 +67,6 @@ cset	w0, eq
 - interactive_read_line prints garbage spam when the line is wider than your terminal
 - make sure not to keep sending events after a graphics program panics
 - don't hardcode pixel format in init_browser_wip_frame
-- implement threads in import_wasm for tests/exe/wasm.fr
 - need more printf to run the import_c and ssa tests
 - simple standalone wasm web example (without workers) to show you don't need to do my whole os-userspace thing 
   (maybe provide same api as my old ChessBot would be an easy thing that isn't totally trivial)
@@ -97,11 +105,9 @@ cset	w0, eq
 - make all the tests pass on linux
 - fake assembler to be drop in for hare
 - real test for dynamic libraries
-- lite version of franca_runtime_init when running drivers so theres a sane place to make sure OS gets set
 - make stack trace debug info work accross multiple compilers. it needs to go in GlobalFrancaRuntime
   (test with crashing in examples/repl.fr when running it as a driver)
 - `f :: fn() = ` isn't getting an inferred name (report_called_uncompiled_or_just_fix_the_problem)
-- autotest all the stuff from the web demo in import_wasm 
 - make it easy to run all the tests with qemu-user
   - -L /usr/x86_64-linux-gnu
   - document what needs to be installed: qemu-user-static, libc6-amd64-cross, libc6-riscv64-cross
@@ -116,8 +122,6 @@ cset	w0, eq
   - tests for backtraces
   - programatic access to the data from resolvers instead of just a string. 
   - disassembly annotated with the debug info
-  - annotate functions to skip dbgloc for. rn, `if` gets 3 entries in the trace which is useless. 
-    kinda like rust's `#[track_caller]`
 - life would be better if i tracked line numbers instead of byte offsets. 
   also that would make it trivial to move them between .frc modules. 
 - you need a trace of what was being compiled when you get a compile error. 
@@ -155,14 +159,14 @@ cset	w0, eq
 - set a good example; don't have tests that rely on layout of codegenentry. use the functions on the vtable. i think import_c/test/test.fr does this wrong
 - always zero struct padding when baking constants (even when behind a pointer and even when the struct contains no pointers). 
 - why don't lldb/gdb like my linux binaries?
-- not all the tests pass with FRANCA_NO_CACHE=1
+- not all the tests pass with FRANCA_NO_CACHE=1 (fail debug assert: `need_reify on threaded codegen`)
   - examples/import_c/test/test.fr
   - examples/import_wuffs/test.fr
-  - examples/repl.fr
+- can't boot/strap.sh with FRANCA_NO_CACHE=1
 - not all the tests pass with import_module caching enabled
+  - examples/import_wuffs/test.fr `Assertion Failed: (put_jit_addr) redeclared symbol 10107: exit`
 - can almost enable cacching when -syscalls 
 - document `store v, [Sxxx]` vs `store v, Sxxx` on amd64
-- add a test for #discard_static_scope now that i gave up on scc. 
 - extend the cross repro tests to all the example programs. not just the compiler. maybe just add a file with hashes of binaries to the released artifact. 
 - I need to improve @enum for bit flags so i can use that in posix.fr so it doesn't suck as much to call mmap. 
 - i think bake_relocatable_value always gets a jit shim which is a bit wasteful. 
@@ -187,7 +191,8 @@ cset	w0, eq
   > Assertion Failed: need_reify on threaded codegen of wuffs_base__io_reader__read_u8__46298
 - `FRANCA_NO_CACHE=1 ./target/f.out examples/import_c/test/ffi.fr`
   > Assertion Failed: need_reify on threaded codegen of get_s__40986
-- repl.fr doesn't work jitted with FRANCA_NO_CACHE=1 on arm-macos because it needs to call apple_thread_jit_write_protect.
+- repl.fr doesn't work at comptime (`main :: fn() = @run { ...`) 
+  on arm-macos because it needs to call apple_thread_jit_write_protect.
   should allow not writing to exec memory and call a tiny bit of aot code to do the copy when you're done each function. 
 - #log_ir needs to do something in declare_alias
 - stop doing superstitious fence()
@@ -575,6 +580,24 @@ need to be careful about the refs which have tags in the high bits so won't leb 
     if its spilled on both ends? temps can overlap tho so thats another place where 
     you want to be able to split them. rn they can only have a single stack slot. 
 - be drop in qbe replacement for cproc. its string literals use `\012\000` instead of `\n\0`
+- wasm elide_abi_slots
+```
+// TODO: if they don't do it already: 
+//       - track known truthyness per block (based on jumps in dominators)
+//         to remove redundant checks (like bounds checks). that use kinda relies on inlining tho.
+//       - jmp on the not (xor -1) of a cmp should just flip the cmp. 
+// TODO: don't bother emitting nops (when copying with emiti() anyway)? is avoiding a branch worth your blocks using extra memory
+// TODO: :Explain :UnacceptablePanic :SketchyIterTargets :nullable
+//       :MakeATestThatFails places where i don't know why qbe did something and all my current tests work if you change it. 
+//                           so try to make a test case that requires qbe's behaviour or remove the extra code. 
+//       :force_dep_on_memmove_hack
+// TODO: look at the asm and make sure im not uxtb before every cmp #0 on a bool. have to fix the ir i generate.
+//       do i need to be able to express that a function returns exactly 0 or 1?
+//       once i expose w ops to the language i can just generate those instead of l for working with bools and then it should be fine?
+// TODO: dead store elimination would make small examples generate tighter code. 
+// TODO: don't do extra copies of arg/ret when just passing through to another call.
+// TODO: ir test that uses opaque types
+```
 
 ## backend symbols rework
 

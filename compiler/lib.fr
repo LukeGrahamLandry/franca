@@ -229,6 +229,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
         
         name := c.fmt_fn_name(f);
         cc := zeroed rawptr;
+            // no wrap_main so don't waste time compiling a new franca_runtime_init. 
             main_thread_pump(self.comp(), shared, @slice(f), false);
 
             self.debug_deny_jit_shim_calls = true;
@@ -262,7 +263,6 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
             drop(m);
             general_allocator().dealloc_one(QbeModule, m);
             c'vtable'destroy_compiler(c.data);
-            tls(.comptime)[] = rawptr_from_int(0); 
 
             // this doesn't re-read the files to check if they changed since you started compiling, that would feel a bit creepy. 
             z := zone_begin(.CheckCache);
@@ -278,18 +278,9 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
     };
     
     callee := callee.unwrap();
-    // :JitShimsUnfilledWhenExecStyleJit
-    // TODO: after changing tls abi, not all shims are removed when nocache. maybe thats what i want tho? 
-    //       concerning that it changed. oh i guess the env used to get passed all the way through 
-    //       but now since i still includes franca_runtime_init it allocates a new stack
-    //  - franca examples/os/build.fr -vzf  -append "time on;nocache on;kaleidoscope;"
-    //  - FRANCA_NO_CACHE=1 ./q.out examples/kaleidoscope.fr  when FRANCA_NO_CACHE
-    // TODO: don't waste the memory of our old stack / don't leak 
-    //       the new one allocatted in the callee's franca_runtime_init 
-    //       (especially offensive in wasm that doesn't have virtual memory)
-    //push_tls_value(.comptime, zeroed(rawptr)) {
+    push_as_tls(.comptime, zeroed(rawptr)) {
         callee(vtable);
-    //};
+    };
     
     if to_free { m, r |
         Crash'pop_resolver(r);
@@ -306,7 +297,6 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
     .Ok
 }
 
-// TODO: pass requested type through generic args so this isn't so clunky. -- Jun 23
 fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
     stack_base := 0;
     a: Arena.Allocator = init(page_allocator, 1.shift_left(23));
@@ -337,12 +327,8 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
     b := a.boxed(Baked, b);
     b.values&.push(zeroed BakedValue); // skip one for good luck
     
-    // TODO: this annoys me, generally this could just be compiled into the binary, 
-    //       but i want to experiment with ape/comsmolibc eventually where you don't know where you're going to run up front,
-    //       tho they still need to compile the x86 and arm parts seperatly so i guess there should be somewhere to stick this information? 
     arch := query_current_arch();
     os := query_current_os();
-    ::assert(enum_count(Os) <= 32 && enum_count(Arch) <= 32, "not enough bits for arch/os");
 
     // Sadly this can't use default fields, I think because it loads too early. 
     env: ComptimeEnvironment = (
@@ -487,9 +473,9 @@ fn main_thread_pump(comp: CompCtx, shared: *FrontendCodegen, fns: []FuncId, wrap
     opts   := comp.get_build_options();
     ::enum(@type shared.m.goal.type);
     when := @if(IS_BOOTSTRAPPING && shared.m.goal.type == .JitOnly, ExecStyle.Jit, .Aot);
-    // TODO: dynamiclib is kinda broken because i rely on OS being set by runtime_init
+    // TODO: dynamiclib is kinda broken because i rely on being called in a stack with tls setup
     dynamiclib := shared.m.goal.type == .Dynamic;
-    wrap_main := wrap_main && when == .Aot && !dynamiclib;
+    wrap_main := wrap_main && !dynamiclib;
     shared.m.codemap = (Some = comp'vtable'get_codemap(comp.data));
     
     for fns { f |
@@ -583,8 +569,6 @@ fn push_callees(self: *MainThreadPump, callees: []FuncId, first_time: bool) bool
         };
         
         if self.enable_tracy {
-            // TODO: it's super not ok to disable this when using tracy 
-            //       (it will cause miscompilation of small programs)
             //       but otherwise the stack of zones gets messed up and you don't see anything
             continue();
         };

@@ -124,7 +124,7 @@ fn typclass(a: *AClass, t: *Qbe.Typ, m: *QbeModule) void = {
      * in registers
      */
     al := al.max(8);
-    sz := (sz + al-1).bit_and(-al);
+    sz := sz.ualign_to(al);
 
     a.type = t.header;
     a.size = sz.trunc();
@@ -459,7 +459,7 @@ fn selpar_amd64(f: *Qbe.Fn, par_i: []Qbe.Ins) RCallAmd = {
                     @panic("sysv abi requires alignments of 16 or less (found log2=%) in $%", a.align, f.name());
                 };
                 if a.align == 4 {
-                    s = (s+3).bit_and(-4);
+                    s = s.ualign_to(4);
                 };
                 f.tmp[i.to.val()].slot = -s.intcast() * 4;
                 s += a.size.zext() / 4;
@@ -498,30 +498,31 @@ fn selpar_amd64(f: *Qbe.Fn, par_i: []Qbe.Ins) RCallAmd = {
 
 fn selvaarg(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) void = {
     isint     := is_int(i.cls());
-    if_0_4    := if(isint, => 0, => 4);
-    if_8_16   := if(isint, => 8, => 16);
-    if_48_176 := if(isint, => 48, => 176);
+    offset_field := if(isint, => 0, => 4);
+    reg_width := if(isint, => 8, => 16);
+    max_offset := if(isint, => 48, => 176);
+    // TODO: the pdf says max fp_offset is 6*8+6*16 not 6*8+6*8? 
+    //       but that doesn't make sense because you only pass up to 8 xmm args
     
-    @emit_instructions((f = f, b = b), (i.arg&[0], if_0_4, if_8_16, if_48_176, i.to, i.cls()), """
+    @emit_instructions((f = f, b = b), (i.arg&[0], offset_field, reg_width, max_offset, i.to, i.cls()), """
     @b
         # as we continue in the outer loop, remaining code will be inserted here
-        %r0a =l add %0, %1
-        %nr =l loadsw %r0a
-        %r1a =w cultw %nr, %3
-        jnz %r1a, @breg, @bstk    # this will replace the current terminator of `b` and the old will be moved down to @b0
+        %offset =l add %0, %1
+        %nr =l loadsw %offset
+        %cond =w cultw %nr, %3
+        jnz %cond, @breg, @bstk    # this will replace the current terminator of `b` and the old will be moved down to @b0
     @breg
-        %r0b =l add %0, 16
-        %r1b =l loadl %r0b
+        %reg_save_area =l add %0, 16
+        %r1b =l loadl %reg_save_area
         %lreg =l add %r1b, %nr
-        %r0c =w add %nr, %2
-        %r1c =l add %0, %1
-        storew %r0c, %r1c
+        %nextr =w add %nr, %2
+        storew %nextr, %offset
         jmp @b0
     @bstk
-        %r0d =l add %0, 8
-        %lstk =l loadl %r0d
-        %r1d =l add %lstk, 8
-        storel %r1d, %r0d
+        %overflow_arg_area =l add %0, 8
+        %lstk =l loadl %overflow_arg_area
+        %nexts =l add %lstk, 8
+        storel %nexts, %overflow_arg_area
         jmp @b0
     @b0
         %loc =l phi @breg %lreg, @bstk %lstk
@@ -539,14 +540,14 @@ fn selvastart(f: *Qbe.Fn, fa: RCallAmd, ap: Qbe.Ref) void = {
     @emit_instructions((f = f), (ap, gp, fp, sp, TMP(Amd64Reg.RBP)), """
     @start
         storew %1, %0 
-        %ap4 =l add %0, 4
-        storew %2, %ap4
-        %ap8 =l add %0, 8
+        %fp_offset =l add %0, 4
+        storew %2, %fp_offset
+        %overflow_arg_area =l add %0, 8
         %rbp_sp =l add %4, %3
-        storel %rbp_sp, %ap8
-        %ap16 =l add %0, 16
+        storel %rbp_sp, %overflow_arg_area
+        %reg_save_area =l add %0, 16
         %rbp_n176 =l add %4, -176
-        storel %rbp_n176, %ap16
+        storel %rbp_n176, %reg_save_area
     """);
 }
 

@@ -6,8 +6,6 @@
 //! - https://github.com/ARM-software/abi-aa/releases
 //! Also just for fun apple has slightly different rules. 
 //! - https://developer.apple.com/documentation/xcode/writing-arm64-code-for-apple-platforms
-//! It's crazy to me that this is more code than register allocation. 
-// :Explain but this stuff isn't super subtle, it's just tedius. 
 
 ArgClass :: @enum(u8) (
     CNone = 0,
@@ -49,38 +47,33 @@ RCallArm :: @bit_fields(
     tag      := 3,
 );
 
-fn isfloatv(t: *Qbe.Typ, cls: *Qbe.Cls, count: *u8, globals: *QbeModule) bool = {
+// all fields are float and the same size
+fn isfloatv(t: *Qbe.Typ, cls: *Qbe.Cls, globals: *QbeModule) bool = {
     ::enum_basic(Qbe.FieldType);
     ::ptr_utils(Qbe.Typ);
     i := 0;
-    biggest := 0;
     for_unions(t, i&) { 
-        case: u8 = 0;
         for_fields(t, i&) { type, len |
             @match(type) {
                 fn Fs() => {
                     if(cls[] == .Kd, => return(false));
                     cls[] = .Ks;
-                    case += 1;
                 }
                 fn Fd() => {
                     if(cls[] == .Ks, => return(false));
                     cls[] = .Kd;
-                    case += 1;
                 }
                 fn FTyp() => {
                     type := globals.get_type(len.zext());
-                    if !isfloatv(type, cls, case&, globals) {
+                    if !isfloatv(type, cls, globals) {
                         return(false);
                     }
                 }
                 @default => return(false);
             };
         };
-        biggest = biggest.max(case.zext());
     };
-    count[] += biggest.trunc();  // TODO: overflow
-    count[] <= 4
+    true
 }
 
 fn typclass(c: *Class, t: *Qbe.Typ, gp: []Arm64Reg, fp: []Arm64Reg, globals: *QbeModule) void = {
@@ -94,15 +87,17 @@ fn typclass(c: *Class, t: *Qbe.Typ, gp: []Arm64Reg, fp: []Arm64Reg, globals: *Qb
     @assert(t.header.align_log2 <= 3, "alignments larger than 8 are not supported");
 
     c.hfa.base = .Kx;
-    c.hfa.size = 0;
     unsized := t.is_dark() || sz == 0;
-    c.ishfa = !unsized && isfloatv(t, c.hfa.base&, c.hfa.size&, globals);
+    c.ishfa = !unsized && isfloatv(t, c.hfa.base&, globals);
+    hfa_step: u32 = (4 + 4 * c.hfa.base.is_wide().int().trunc());
+    hfa_size := t.header.size / hfa_step;
+    c.ishfa = c.ishfa && hfa_size <= 4;
+    c.hfa.size = @if(c.ishfa, hfa_size.trunc(), 0);
     
     if !c.ishfa && (unsized || sz > 16) {
         /* large structs are replaced by a
          * pointer to some caller-allocated
          * memory */
-        c.hfa.size = 0;
         c.class&.with(.Cptr);
         c.size = 8;
         c.ngp = 1;
@@ -114,7 +109,6 @@ fn typclass(c: *Class, t: *Qbe.Typ, gp: []Arm64Reg, fp: []Arm64Reg, globals: *Qb
     c.size = bitcast sz;
 
     if c.ishfa {
-        @debug_assert_eq(@as(i64) c.hfa.size.zext(), t.header.size.zext() / if(is_wide(c.hfa.base), => 8, => 4), "hfa size");
         range(0, c.hfa.size.zext()) { n |
             c.reg&[n] = fp.index_unchecked(0)[];
             fp = fp.slice_pop_first();
@@ -123,7 +117,6 @@ fn typclass(c: *Class, t: *Qbe.Typ, gp: []Arm64Reg, fp: []Arm64Reg, globals: *Qb
         };
         c.nreg = c.nfp;
     } else {
-        c.hfa.size = 0;
         range(0, sz.zext() / 8) { n |
             c.reg&[n] = gp.index_unchecked(0)[];
             gp = gp.slice_pop_first();
@@ -341,17 +334,14 @@ b
 
 fn stkblob(r: Qbe.Ref, c: *Class, f: *Qbe.Fn, il: *List(Qbe.Ins)) void = {
     @debug_assert(r != QbeNull, "stkblob null dest");
-    al := (@as(i32) c.t.align_log2.zext()) - 2; /* NAlign == 3 */
-    if al < 0 {
-        al = 0;
-    };
+    o := alloc_op(c.t.align_log2.zext());
     // If we're pulling the struct out of registers, use the rounded size computed in typclass. 
     sz := if(c.class.has(.Cptr), => c.t.size, => c.size.bitcast());
-    il.push(make_ins(@as(Qbe.O) @as(i32) Qbe.O.alloc4.raw() + al, .Kl, r, f.getcon(zext sz), QbeNull));
+    il.push(make_ins(o, .Kl, r, f.getcon(zext sz), QbeNull));
 }
 
 fn align(x: i32, al: i32) i32 #inline = 
-    (x + al - 1).bit_and(-al);
+    x.ualign_to(al);
 
 selcall :: fn(f: *Qbe.Fn, arg_i: []Qbe.Ins, ilp: *List(Qbe.Ins)) void = {
     i0, i1 := (arg_i.ptr, arg_i.ptr.offset(arg_i.len));
@@ -558,27 +548,26 @@ fn apple_selvaarg(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) void =
 
 fn arm64_selvaarg(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) void = {
     isint     := is_int(i.cls());
-    if_24_28  := if(isint, => 24, => 28);
+    offs_field:= if(isint, => 24, => 28);
     if_8_16   := if(isint, => 8, => 16);
     
-    @emit_instructions((f = f, b = b), (i.arg&[0], if_24_28, if_8_16, i.to, i.cls()), """
+    @emit_instructions((f = f, b = b), (i.arg&[0], offs_field, if_8_16, i.to, i.cls()), """
     @b
-        %r0a =l add %0, %1
-        %nr =l loadsw %r0a
-        %r1a =w csltw %nr, 0
-        jnz %r1a, @breg, @bstk
+        %offs =l add %0, %1
+        %nr =l loadsw %offs
+        %cond =w csltw %nr, 0
+        jnz %cond, @breg, @bstk
     @breg
-        %r0b =l add %0, %2
-        %r1b =l loadl %r0b
+        %top =l add %0, %2
+        %r1b =l loadl %top
         %lreg =l add %r1b, %nr
-        %r0c =w add %nr, %2
-        %r1c =l add %0, %1
-        storew %r0c, %r1c
+        %nextr =w add %nr, %2
+        storew %nextr, %offs
         jmp @b0
     @bstk
         %lstk =l loadl %0
-        %r1d =l add %lstk, 8
-        storel %r1d, %0
+        %nexts =l add %lstk, 8
+        storel %nexts, %0
         jmp @b0
     @b0
         %loc =l phi @breg %lreg, @bstk %lstk
@@ -597,17 +586,17 @@ fn apple_selvastart(f: *Qbe.Fn, p: Params, ap: Qbe.Ref) void =
 fn arm64_selvastart(f: *Qbe.Fn, p: Params, ap: Qbe.Ref) void = 
     @emit_instructions((f = f), ((p.nfp.zext()-8)*16, (p.ngp.zext()-8)*8, p.stk.zext() + 192, ap), """
     @start
-        %ap28 =l add %3, 28
-        storew %0, %ap28
-        %ap24 =l add %3, 24
-        storew %1, %ap24
-        %ap16 =l add %3, 16
+        %vr_offs =l add %3, 28
+        storew %0, %vr_offs
+        %gr_offs =l add %3, 24
+        storew %1, %gr_offs
+        %vr_top =l add %3, 16
         %rsave =l addr S-1
         %save192 =l add %rsave, 192
-        storel %save192, %ap16
-        %ap8 =l add %3, 8
+        storel %save192, %vr_top
+        %gr_top =l add %3, 8
         %save64 =l add %rsave, 64
-        storel %save64, %ap8
+        storel %save64, %gr_top
         %r0 =l add %rsave, %2
         storel %r0, %3
     """);

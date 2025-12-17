@@ -144,21 +144,20 @@ fn assign_alloc_slots(f: *Qbe.Fn) void = {
     
     allocs := @slice(Qbe.O.alloc4, Qbe.O.alloc8, Qbe.O.alloc16); // TODO: for_enum_range (these are sequentual)
     
-    /* specific to NAlign == 3 */ /* or change align=4 and size /= 4 below */
     align := 4;
     for allocs { alloc_type |
         break :: local_return; // TODO: make break less of a pain in this language
+        f.slot = f.slot.ualign_to(align.intcast());
         for_insts_forward f.start { i |
             if i.op() == alloc_type {
                 if f.get_int(i.arg&[0]) { size |
                     if size < 0 || size >= MAX_i32 - 15 {
                         @panic("invalid alloc size %", size);
                     };
-                    size = size.add(align - 1).bit_and(-align);
+                    size = size.ualign_to(align);
                     t := f.get_temporary(i.to);
                     t.slot = f.slot;
                     f.slot += size.intcast();
-                    f.salign = 2 + alloc_type.raw() - Qbe.O.alloc4.raw();
                 
                     // TODO: unfortunate that all my tests still work if you don't do this
                     //       i think it will matter more if i get store elimination working?  -- Jan 15
@@ -177,18 +176,6 @@ fn assign_alloc_slots(f: *Qbe.Fn) void = {
             }
         };
         align *= 2; // :break
-        
-        if f.slot.intcast().mod(align) != 0 {
-            f.slot += align.intcast() / 2;
-        };
-        
-        // on arm: ~23KB -- Nov 6
-        //         It's actually fine if they're unaligned, you just can't use the immediate in ldr/str,
-        //         so doing it this way lets fuse_addressing catch a few more cases at the cost of wasting 4 bytes of stack half the time. 
-        //if align == 8 && f.slot.intcast().mod(align) != 0 {
-        //    f.slot += 4;
-        //    f.salign = 3;
-        //};
     };
     @debug_assert_ge(approx, f.slot.zext(), "failed at guessing stack size");
 };
@@ -395,7 +382,7 @@ fn salloc(rt: Qbe.Ref, rs: Qbe.Ref, f: *Qbe.Fn) bool = {
         if sz < 0 || sz >= MAX_i32 - 15 {
             @panic("invalid alloc size %", sz);
         };
-        sz = (sz + 15).bit_and(-16);
+        sz = sz.ualign_to(16);
         f.emit(.salloc, .Kl, rt, f.getcon(sz), QbeNull);
         false
     } else {

@@ -175,8 +175,7 @@ Slot  :: @rec @struct(
     unknown_bits: u64,
     live_range: Range,
     replacement: *Slot,
-    stores: QList(Store),
-    n_stores: i32,
+    stores: RawList(Store),
 );
 
 fn rin(r: Range, n: i32) bool #inline =
@@ -284,7 +283,6 @@ fn coalesce(f: *Qbe.Fn) void = {
     each sl { s |
         total += s.sz;
         if s.live_range.b == 0 {
-            //free(s.stores);
             dead_slot_stack&.push(s.t);
             freed += s.sz;
         } else {
@@ -362,10 +360,6 @@ fn coalesce(f: *Qbe.Fn) void = {
         @fmt(out, "#\tsums %/%/% (killed/fused/total)\n\n", freed, fused, total);
         printfn(f, out);
     };
-
-    each sl { s | 
-        free(s.stores);
-    };
 }
 
 fn collect_local_slots(f: *Qbe.Fn) []Slot #once = {
@@ -383,8 +377,7 @@ fn collect_local_slots(f: *Qbe.Fn) []Slot #once = {
                 sz = t.alias.u.loc.sz,
                 ever_written_bits = t.alias.u.loc.m,
                 replacement = Slot.ptr_from_int(0),
-                stores = new(0),
-                n_stores = 0,
+                stores = empty(),
                 live_range = (a = 0, b = 0),
                 unknown_bits = 0,
             );
@@ -443,15 +436,15 @@ fn store(r: Qbe.Ref, affected_bits: u64, clock: i32, i: *Qbe.Ins, f: *Qbe.Fn, sl
         // since we're writing these bits now, we don't care about thier value earlier in the block.
         s.unknown_bits = s.unknown_bits.bit_and(bit_not(affected_bits.shift_left(off)));
     } else {
-        push(s.stores&, s.n_stores&, (clock = clock, i = i));
+        push(s.stores&, (clock = clock, i = i), temp());
     };
 }
 
 fn kill_dead_stores(sl: []Slot) void #once = {
     each sl { s |
-        range(0, s.n_stores.intcast()) { n |
-            if !rin(s.live_range, s.stores[n].clock) {
-                i := s.stores[n].i;
+        for s.stores { it |
+            if !rin(s.live_range, it.clock) {
+                i := it.i;
                 if i.op() == .blit0 {
                     i.offset(1).set_nop();
                 };

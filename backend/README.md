@@ -47,7 +47,8 @@ You can still print out the ir as human readable text between passes and modify 
   - conditional select (ie. `a ? b : c`)
 - Binary serialization of the ir that's faster to load than the text form. 
   (could be a building block for incremental compilation, see @/docs/caching.md)
-- Removed support for thread locals. Franca achieves an equivilent by passing around an implicit env parameter.
+- Removed support for thread locals. 
+  Franca achieves an equivalent by putting them at the end of the stack with fixed alignment.
 - Removed support for custom section names.
 
 #### fixed upstream
@@ -67,8 +68,7 @@ You can still print out the ir as human readable text between passes and modify 
 - Convert simple phi instructions into conditional select 
 - elide some redundant memory operations introduced when the abi passes aggregates in registers. (see opt/slots.fr)
 - reuse constants that are produced multiple times in the same basic block (but not across calls) 
-- simplified matching of amd64 addressing modes: instead of 1600 lines of ocaml implementing a dsl
-  with 150 lines of glue code to use the results, just write 150 lines of tedious code to solve the problem directly.
+- simplified matching of amd64 addressing modes: removed 1600 lines of ocaml dsl compiler
 - Strength reduction for signed div/rem by power of two (using a conditional move to get the right rounding for negative numbers). 
 
 ## Qbe License
@@ -97,7 +97,9 @@ DEALINGS IN THE SOFTWARE.
 
 > notable contributions by other people that i inherited from qbe
 
-- [global value numbering, Roland Paterson-Jones](https://lists.sr.ht/~mpu/qbe/patches/54774)
-- [single block inlining, Roland Paterson-Jones](https://lists.sr.ht/~mpu/qbe/patches/55945)
-- [phi to sel ifopt, Roland Paterson-Jones](https://lists.sr.ht/~mpu/qbe/patches/55968)
-- [riscv64 isel/abi, Michael Forney](https://lists.sr.ht/~mpu/qbe/patches/29328)
+- Roland Paterson-Jones: 
+[global value numbering](https://lists.sr.ht/~mpu/qbe/patches/54774),
+[single block inlining](https://lists.sr.ht/~mpu/qbe/patches/55945),
+[phi to sel ifopt](https://lists.sr.ht/~mpu/qbe/patches/55968),
+- Michael Forney: 
+[riscv64 isel/abi](https://lists.sr.ht/~mpu/qbe/patches/29328),

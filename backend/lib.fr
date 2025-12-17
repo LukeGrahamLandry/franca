@@ -78,23 +78,6 @@ fn emit_qbe_included_dyn(m: *QbeModule, comp: *CompCtx, fns: [] FuncId, entry: P
     {comp.vtable.emit_qbe_included}(QbeModule.raw_from_ptr(m), comp, fns, entry)
 }
 
-// easy-ish (?) things to try to get used to making changes. 
-// TODO: if they don't do it already: 
-//       - track known truthyness per block (based on jumps in dominators)
-//         to remove redundant checks (like bounds checks). that use kinda relies on inlining tho.
-//       - jmp on the not (xor -1) of a cmp should just flip the cmp. 
-// TODO: don't bother emitting nops (when copying with emiti() anyway)? is avoiding a branch worth your blocks using extra memory
-// TODO: :Explain :UnacceptablePanic :SketchyIterTargets :nullable
-//       :MakeATestThatFails places where i don't know why qbe did something and all my current tests work if you change it. 
-//                           so try to make a test case that requires qbe's behaviour or remove the extra code. 
-//       :force_dep_on_memmove_hack
-// TODO: look at the asm and make sure im not uxtb before every cmp #0 on a bool. have to fix the ir i generate.
-//       do i need to be able to express that a function returns exactly 0 or 1?
-//       once i expose w ops to the language i can just generate those instead of l for working with bools and then it should be fine?
-// TODO: dead store elimination would make small examples generate tighter code. 
-// TODO: don't do extra copies of arg/ret when just passing through to another call.
-// TODO: ir test that uses opaque types
-
 QbeModule :: @rec @struct(
     save: ?@if(enable_incremental(), *Incremental.Writer, i64),
     types: RawList(Qbe.Typ),
@@ -608,6 +591,7 @@ run_qbe_passes_common :: fn(f: *Qbe.Fn) bool = {
         };
     };
     
+    f.set_block_id();  // fails_typecheck uses them in bit sets and its bad vibes to only mutate when debug checks enabled
     if fails_typecheck(f) { err | 
         printfn(f, f.globals.debug_out);
         @panic("IR failed typecheck ($%)\n %", f.name(), err);
@@ -746,7 +730,6 @@ fn finish_qbe_passes_wasm(f: *Qbe.Fn) void = {
     emit_fn(f);
 }
 
-// TODO: detect non-unique block ids. 
 fn fails_typecheck(f: *Qbe.Fn) ?Str = {
     @if(!::safety_check_enabled(.DebugAssertions)) return(.None);
     
@@ -1098,9 +1081,10 @@ fn enter_task(shared: *CodegenShared, $body: @Fn(it: *CodegenEntry) void) void =
     @must_return body(entry);
     shared'enqueue(shared, entry);
     if shared.threaded {
-        tls(.temporary_allocator)[] = old;
+        if __driver_abi_version < 1263 {
+            tls(.temporary_allocator)[] = old;
+        };
         tls(.temporary_allocator_i)[] = old_i;
-        //set_temporary_allocator(old);
     } else {
         temp().reset(marker);
     };

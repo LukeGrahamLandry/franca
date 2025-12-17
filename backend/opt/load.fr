@@ -45,13 +45,12 @@ Insert :: @struct(
 LoadCtx :: @struct(
     f: *Qbe.Fn,
     inum: u32,            /* current insertion number */
-    ilog: QList(Insert),  /* global insertion log */
-    nlog: i64,            /* number of entries in the log */
+    ilog: List(Insert),  /* global insertion log */
 );
 
 /* require rpo ssa alias */
 loadopt :: fn(f: *Qbe.Fn) void = {
-    c: LoadCtx = (f = f, ilog = new(0), nlog = 0, inum = 0); c := c&;
+    c: LoadCtx = (f = f, ilog = list(temp()), inum = 0); c := c&;
     for_blocks f { b |
         b.visit = 0;
         for_insts_forward b { i |
@@ -60,7 +59,7 @@ loadopt :: fn(f: *Qbe.Fn) void = {
                 sl: MSlice = (ref = i.arg&[0], off = 0, size = size, cls = i.cls());
                 l: Loc = (type = .LRoot, index_in_block = ptr_diff(b.ins.ptr, i).trunc(), blk = b);
                 @debug_assert(i.arg&[1] == QbeNull, "load pass runs after isel so my arm thingy wont mess with it");
-                nlog := c.nlog;
+                nlog := c.ilog.len;
                 i.arg&[1] = c.def(sl, ones_mask_of_size(size), b, (Some = i), l&);
                 // note: leave it as a load so future loads can deduplicate to this one.
                 //       its converted to a copy at the end in emit_insertions.  
@@ -71,7 +70,7 @@ loadopt :: fn(f: *Qbe.Fn) void = {
                     when_debug(f, .Memory) { o |
                         @fmt(o, "\n# ");
                         printins(f, i, o);
-                        each c.ilog.slice(nlog, c.nlog) { i |
+                        each c.ilog.items().rest(nlog) { i |
                             @fmt(o, "\n# |> @%: ", f.rpo[i.bid].name());
                             if i.is_phi {
                                 printphi(f, i.new.phi.p, o);
@@ -85,16 +84,16 @@ loadopt :: fn(f: *Qbe.Fn) void = {
         }
     };
     
-    emit_insertions(f, c.ilog, c.nlog);
+    emit_insertions(f, c.ilog&);
     
     when_debug_printfn(f, .Memory, "\n## After load elimination:\n");
 };
 
-emit_insertions :: fn(f: *Qbe.Fn, ilog: QList(Insert), nlog: i64) void = {
+emit_insertions :: fn(f: *Qbe.Fn, ilog: *List(Insert)) void = {
     // Sort them so we can just scan through the blocks in order. 
     // All insertions for a block together, phis first, insts sequential. 
     sort :: quicksort(Insert, icmp);
-    sort(ilog.slice(0, nlog));
+    sort(ilog.items());
     icmp :: fn(a: *Insert, b: *Insert) bool = {
         if(a.bid != b.bid, => return(a.bid < b.bid));
         if(a.is_phi && b.is_phi, => return(true));
@@ -104,11 +103,10 @@ emit_insertions :: fn(f: *Qbe.Fn, ilog: QList(Insert), nlog: i64) void = {
         a.num <= b.num
     }; // TODO: should be able to pass this as an argument when its an overload set and do the resolve. 
     
-    ilog&.grow(nlog + 1);
-    ilog[nlog].bid = f.nblk.bitcast(); /* add a sentinel */
+    ilog.push_uninit()[].bid = f.nblk.bitcast(); /* add a sentinel */
     
     new: RawList(Qbe.Ins) = init(temp(), 0);
-    next_insertion := ilog.first;
+    next_insertion := ilog.maybe_uninit.ptr;
     range(0, f.nblk.zext()) { current_bid |
         move_to_next_block :: local_return; 
         b := f.rpo[current_bid];
@@ -157,7 +155,6 @@ emit_insertions :: fn(f: *Qbe.Fn, ilog: QList(Insert), nlog: i64) void = {
             push(new&, i[], temp());
         };
     };
-    free(ilog);
 };
 
 convert_load_to_move :: fn(i: *Qbe.Ins) void = {
@@ -193,12 +190,12 @@ def :: fn(c: *LoadCtx, sl: MSlice, requested_bits: u64, b: *Qbe.Blk, i: ?*Qbe.In
      *     original load)
      */
     @debug_assert(dom(b, il.blk));
-    oldl := c.nlog;
+    oldl := c.ilog.len;
     oldt := c.f.ntmp;
     give_up_and_do_load :: fn() Never => {
         // Unwind any insertions we queued while trying to remove the load. 
         c.f.ntmp = oldt;
-        c.nlog = oldl;
+        c.ilog.len = oldl;
         
         if(il.type != .LLoad, => return(QbeNull));
         return(c.load_masked(sl, requested_bits, il))
@@ -322,7 +319,7 @@ def :: fn(c: *LoadCtx, sl: MSlice, requested_bits: u64, b: *Qbe.Blk, i: ?*Qbe.In
     // - we didn't see a potentially aliasing write
     
     // We might have already inserted a phi for this memory that we can reuse. 
-    each c.ilog.slice(0, c.nlog) { ist | 
+    each c.ilog.items() { ist | 
         m := ist.new.phi.m;
         if ist.is_phi
         && ist.bid == b.id.bitcast()
@@ -375,7 +372,7 @@ def :: fn(c: *LoadCtx, sl: MSlice, requested_bits: u64, b: *Qbe.Blk, i: ?*Qbe.In
         blk = new(b.npred.zext()),
         link = zeroed(*Qbe.Phi),
     ));
-    push(c.ilog&, c.nlog&, (
+    push(c.ilog&, (
         is_phi = true, 
         bid = b.id.bitcast(), 
         new = (phi = (m = sl, p = p)),
@@ -427,7 +424,7 @@ cast :: fn(c: *LoadCtx, r: *Qbe.Ref, cls: Qbe.Cls, l: *Loc) void = {
 
 iins :: fn(c: *LoadCtx, cls: Qbe.Cls, op: Qbe.O, a0: Qbe.Ref, a1: Qbe.Ref, l: *Loc) Qbe.Ref = {
     r := c.f.newtmp("ld", cls);
-    push(c.ilog&, c.nlog&, (
+    push(c.ilog&, (
         is_phi = false,
         num = c.inum,
         bid = l.blk.id.bitcast(),

@@ -14,6 +14,16 @@
   problem is comptime_jit_symbol_id != intern(fmt_fn_name).
   because it's already set on the version that HasConstArgs and then gets copied. 
   just need to only compute the id after checking that either the function or shim should be ready.  
+- little cleanup
+  - some outdated comments
+  - don't require `push_tls_value(.comptime` for paired init+destroy
+  - give up on TK_discard_static_scope, can just do it manually like os/bin/doom.fr does
+  - tracking Fn.salign seems convoluted. 
+    i don't understand why i need to align to 32 in assign_alloc_slots but amd64_sysv crashes without it
+    and i was doing it before getting rid of salign (by aligning after `align *= 2` in the loop). 
+    fixed by updating `franca_runtime_init.kernel_sp`.
+  - purge all the `s = (s + a-1) & -a` i stole from qbe, i think its ugly. 
+  - variable names in varargs abi
 
 ## (Dec 15)
 

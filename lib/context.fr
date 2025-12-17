@@ -1,8 +1,7 @@
 //! Your globals will be safe in the invisible hash table in the sky. 
 //! This is mostly useful for letting me avoid implementing thread locals. 
 
-// A pointer to this struct is passed as a hidden parameter to (almost) every function. 
-// (Soon you will be able to add your own things, to use this as tls).
+// see threads/allocate_stack.
 StaticTls :: @struct(
     comptime: rawptr,  // Will be null at runtime (unless you call into the compiler as a library). 
     reserved2 := 0,
@@ -13,6 +12,7 @@ StaticTls :: @struct(
     reserved: Array(i64, 2),
     environment_variables: *CStr,  // a null terminated array of null terminated strings
     cli_arguments: []CStr,
+    // :UpdateBoot remove this field in favour of temporary_allocator_i
     temporary_allocator: *Arena.Allocator,  // each thread has its own
     panic_hook: @FnPtr(msg: Str) Never,
     extra := 0,
@@ -54,7 +54,11 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
     #use("@/lib/sys/process.fr");
     a := query_current_arch();
     // This is very fragile. relies on compiler/worker.fr/wrap_with_runtime_init and backend/<arch>/emit.fr
-    kernel_sp += @if(a == .aarch64, 0x40, @if(a == .rv64, 0x50, 0x48));
+    if __driver_abi_version < 1349 {
+        kernel_sp += @if(a == .aarch64, 0x40, @if(a == .rv64, 0x50, 0x48));
+    } else {
+        kernel_sp += @if(a == .aarch64, 0x30, @if(a == .rv64, 0x40, 0x38));
+    };
     // note: kernel doesn't align sp to 16 but i have to allocate a new stack for tls anyway so it doesn't matter
     
     // TODO: this is probably a stupid idea. for now it feels clever that i can guess the os by apple passing the 
@@ -309,6 +313,7 @@ set_legacy_dynamic_environment :: fn(context: rawptr) void #inline/*semantic*/ =
 INTRINSIC_GET_ENV :: 64;
 INTRINSIC_SET_ENV :: 65;
 
+// TODO: the "tls" part should be at the end of the name so you can always search for "tls(.foo" to find all the places that access foo
 fn push_tls_value($name: Fields(StaticTls), value: FieldType(StaticTls, name), $body: @Fn() void) void #generic = {
     it := tls(name);
     prev := it[];
@@ -316,6 +321,8 @@ fn push_tls_value($name: Fields(StaticTls), value: FieldType(StaticTls, name), $
     body();  // TODO: this should probably be @must_return
     it[] = prev;
 }
+
+push_as_tls :: push_tls_value;
 
 fn tls($name: Fields(StaticTls)) *FieldType(StaticTls, name) #generic = {
     c := @if(__driver_abi_version < 1512, {
@@ -352,9 +359,10 @@ fn temp() Alloc = {
     tls(.temporary_allocator_i)[]
 }
 
-// TODO: make this take an Alloc instead and get rid of the old ArenaAlloc field. need to kinda keep it around for isbootstrapping i think. 
 fn set_temporary_allocator(a: *Arena.Allocator) void #noinline /*:UpdateBoot*/ = {
-    tls(.temporary_allocator)[] = a;
+    if __driver_abi_version < 1263 {
+        tls(.temporary_allocator)[] = a;
+    };
     tls(.temporary_allocator_i)[] = a.borrow();
 }
     
