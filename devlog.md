@@ -1,5 +1,5 @@
 
-## (Dec 17)
+## (Dec 17/18)
 
 - do SLOW_ARENA_CANARY to the last chunk when resetting to a mark
 - get rid of Arena.Self.canary field because you shouldn't borrow() if you didn't create. 
@@ -16,6 +16,20 @@
   - sad that it will make it even harder to change Func layout 
     but at this point i'll need to support multiple when i want to transition anyway. 
     the real problem is it's much slower. like 840->880. 
+- part of the problem is that i generate monumentally stupid code for forwarding large arguments/returns. 
+  did a very hacky blit elimination pass which works well enough to generate optimal code for those wrappers. 
+  didn't help. same speed. 
+  - it does make the assembly more readable because there's less junk tho. 
+    i guess store and immediately reload from the stack is free as long as instruction cache isn't my bottleneck. 
+    same sort of discovery as saving 50k of env parameter not helping. it would seem cpus are just good at shit.  
+- thought maybe it's doing more work inlining all the wrappers. no different if they're marked #noinline
+- it's 2k more dyn_call. also 1k more macro_calls and 500 more spec_const_fn.
+  - maybe it's mad about needing to evaluate the signetures twice.
+  - tried hack special ast node for operator_star_prefix, didn't help, but fun fact 32k/40k dyn_calls are for that.
+  - woah woah woah is it seriously because im calling find()?? lol....... my language is so garbage....
+    the difference between `I(self).find(where)` and `self := I(self); self.find(where)` is 30ms. 
+    i've invented swift and i don't even get 3 trillion dollars for it :(
+    11794 -> 11141 spec_const_fn. 
 
 ## (Dec 16)
 

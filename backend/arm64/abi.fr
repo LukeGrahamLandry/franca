@@ -403,14 +403,14 @@ selcall :: fn(f: *Qbe.Fn, arg_i: []Qbe.Ins, ilp: *List(Qbe.Ins)) void = {
 
     if get(cty, .indirect) != 0 {
         /* struct return argument */
-        f.emit(.copy, .Kl, TMP(Arm64Reg.R8), i1.to, QbeNull);
+        f.emit(.copy, .Kl, TMP(Arm64Reg.R8), i1.to, f.get_type(i1.arg&[1])[].header.as_ref(-1));
     };
 
     c := ca.ptr;
     for(i0, i1) { i | 
         if !c.class.has(.Cstk) {
             if i.op() == .arg || i.op() == .arge {
-                f.emit(.copy, c.cls&[0], TMP(c.reg&[0]), i.arg&[0], QbeNull);
+                f.emit(.copy, c.cls&[0], TMP(c.reg&[0]), i.arg&[0], c.t.as_ref(1));
             };
             if i.op() == .argc {
                 ldregs(c.reg&.as_ptr(), c.cls&.as_ptr(), c.nreg, i.arg&[1], f);
@@ -435,7 +435,7 @@ selcall :: fn(f: *Qbe.Fn, arg_i: []Qbe.Ins, ilp: *List(Qbe.Ins)) void = {
                 f.emit(o, .Kw, QbeNull, i.arg&[0], r);
             } else {
                 @debug_assert(i.op() == .argc, "bad arg op");
-                f.emit(.blit1, .Kw, QbeNull, INT(c.size.intcast()), QbeNull);
+                f.emit(.blit1, .Kw, QbeNull, c.t.as_ref(1), QbeNull);
                 f.emit(.blit0, .Kw, QbeNull, i.arg&[1], r);
             };
             f.emit(.add, .Kl, r, TMP(Arm64Reg.SP), f.getcon(off.intcast()));
@@ -451,7 +451,7 @@ selcall :: fn(f: *Qbe.Fn, arg_i: []Qbe.Ins, ilp: *List(Qbe.Ins)) void = {
     c := ca.ptr;
     for(i0, i1) { i | 
         if c.class.has(.Cptr) {
-            f.emit(.blit1, .Kw, QbeNull, INT(zext c.t.size), QbeNull);
+            f.emit(.blit1, .Kw, QbeNull, c.t.as_ref(1), QbeNull);
             f.emit(.blit0, .Kw, QbeNull, i.arg&[1], i.arg&[0]);
         };
         c = c.offset(1);
@@ -491,7 +491,7 @@ fn selpar(f: *Qbe.Fn, par_i: []Qbe.Ins) Params = {
         if cr.class.has(.Cptr) {
             f.retr = f.newtmp("abi", .Kl);  // :SetRetr
             r8: i64 = zext Arm64Reg.R8.raw();
-            f.emit(.copy, .Kl, f.retr, TMP(r8), QbeNull);
+            f.emit(.copy, .Kl, f.retr, TMP(r8), type.header.as_ref(1));
             f.reg = f.reg.bit_or(BIT(r8));
         };
     };
@@ -520,7 +520,7 @@ fn selpar(f: *Qbe.Fn, par_i: []Qbe.Ins) Params = {
                 f.emit(.load, c.cls&[0], i.to, SLOT(-(off+2)), QbeNull);
                 off += c.size;
             } else {
-                f.emit(.copy, c.cls&[0], i.to, TMP(c.reg&[0]), QbeNull);
+                f.emit(.copy, c.cls&[0], i.to, TMP(c.reg&[0]), c.t.as_ref(-1));
             }
         };
         c = c.offset(1);
@@ -531,6 +531,11 @@ fn selpar(f: *Qbe.Fn, par_i: []Qbe.Ins) Params = {
         ngp = get(cty, .gp_arg).intcast(),
         nfp = get(cty, .fp_arg).intcast(),
     );
+}
+
+fn as_ref(t: Qbe.TypHeader, scale: i64) Qbe.Ref = {
+    @if(t.size == 0) return(Qbe.Null);
+    INT(scale * t.size.zext())
 }
 
 fn apple_selvaarg(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) void = 

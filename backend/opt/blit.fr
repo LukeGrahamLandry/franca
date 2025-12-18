@@ -1,0 +1,188 @@
+// TODO: MAKE THIS BETTER OR REMOVE IT -- Dec 18, 2025
+//       i only cared about this to see if redundant copies were why the compiler was slowed down 
+//       by generate_compctx_wrapper (seems like that was not the problem). 
+//       currently this is not worth it. 
+//       adds more code than it saves (it does help a tiny bit if you don't count the extra code in this file).
+//       most of them would be fixed by slots.fr anyway. 
+//
+// TODO: optimise accross blocks. 
+//       for now the situation that offends me is single block wrappers so this is all i need
+// TODO: do it for all architectures. abi pass needs to preserve sizes as RInt. 
+// TODO: should still remove a blit if a pointer escapes but is only read from. 
+//       i have a whole alias analysis situation doing on, could have that keep track.
+// TODO: know about (par,arg)c so could experiment with running this earlier (before save for inlining)
+// TODO: do it in place without the extra Move struct? but it's easier to think about this way.  
+//
+
+
+//
+// treat copying blobs of memory as moving linear values. 
+// parc/call are sources, argc/ret are sinks. 
+// if an allocation is used only as copy dest then copy src, the copy can be eliminated. 
+// this runs after abi so (par,arg)c have already been converted to reg copy + blit. 
+// this relies on abi inserting RInt in those copy instructions to preserve the size information. 
+//
+elide_blits :: fn(f: *Qbe.Fn) void = {
+    @if(f.nblk > 1) return();  
+    @if(IS_BOOTSTRAPPING) return();
+    @if(f.globals.goal.arch != .aarch64) return();  
+
+    fillrpo(f);
+    fill_use(f);
+    
+    invalid := init_bitset(f.ntmp.zext());
+    
+    ret_sink: ?i64 = .None;
+    ops := Move.list(temp());
+    for_blocks f { b |
+        for_insts_forward b { i |
+            blit_related :: local_return;
+            @match(i.op()) {
+                fn copy() => if i.arg&[1].rtype() == .RInt {
+                    s := i.arg&[1].rsval().intcast();
+                    if i.to.isreg() || i.arg&[0].isreg() {
+                        r := @if(i.to.isreg(), i.arg&[0], i.to);
+                        if s < 0 {
+                            ops&.push(tag = .Source, dest = r, i = i);
+                        } else {
+                            if !i.to.isreg() {
+                                @debug_assert(ret_sink.is_none());
+                                ret_sink = (Some = ops.len);
+                            };
+                            ops&.push(tag = .Sink, src = r, i = i);
+                        };
+                        blit_related();
+                    }
+                }
+                fn blit0() => {
+                    continue :: local_return;
+                    def0, def1 := (f.def_size(i.arg&[0]) || -1, f.def_size(i.arg&[1]) || -1);
+                    use := i.offset(1)[].arg&[0].rsval().abs().intcast();
+                    if def0 != def1 || def0 != use || def0 == -1 {
+                        continue();
+                    };
+                    
+                    for i.arg& { r |
+                        t := f.get_temporary(r);
+                        @if(bshas(invalid&, r.val())) continue();
+                        each t.uses() { u |
+                            if u.type != .UIns || !@is(u.u.ins.op(), .blit0, .copy, .nop) {
+                                continue();
+                            };
+                        };
+                    };
+                    
+                    ops&.push(tag = .Copy, dest = i.arg&[1], src = i.arg&[0], i = i);
+                    
+                    blit_related();
+                }
+                @default => {
+                    if identical(b, f.start) && is_alloc(i.op()) {
+                        blit_related();
+                    };
+                };
+            };
+            
+            for i.arg& { r |
+                if rtype(r) == .RTmp {
+                    bsset(invalid&, r.val());
+                };
+            };
+            bsset(invalid&, i.to.val());
+        };
+    };
+    if ret_sink { ret_sink |
+        xxx := ops&.ordered_remove(ret_sink);
+        ops&.push(xxx.unwrap());
+    };
+    
+    @if(ops.len == 0) return();
+    
+    ::AutoHash(Qbe.Ref, TrivialHasher);
+    ::AutoEq(Qbe.Ref);
+    needed: HashSet(Qbe.Ref) = init(temp());
+    changed := false;
+    each_rev ops { it |
+        ::enum(@type it.tag);
+        if it.tag == .Copy && !needed&.insert(it.src) {
+            if kill_blit(f, it.i) { 
+                changed = true;
+                it.tag = .Move;
+            };
+        };
+        needed&.remove(it.dest);
+    };
+    
+    when_debug(f.globals, .Blits) { out |
+        if changed {
+            f.dump_ops(ops.items());
+            @fmt(out, "\n##\n#  After blit elimination:");
+            @fmt(out, "\n");
+            printfn(f, out);
+        } else {
+            f.dump_ops(ops.items());
+            @fmt(out, "\n# no blits removed ($%) ^\n##\n", f.name());
+        }
+    };
+};
+
+kill_blit :: fn(f: *Qbe.Fn, i: *Qbe.Ins) bool = {
+    range(0, 2) { a |
+        continue :: local_return;
+        t := f.get_temporary(i.arg&[a]);
+        @if(!t.def.op().is_alloc()) continue();
+        old, new := (t.def.to, i.arg&[int(a == 0)]);
+        
+        each t.uses() { u |
+            import("@/backend/opt/gvn.fr")'replaceuse(f, u, old, new);
+        };
+        t.nuse = 0;
+        
+        t.def.set_nop();
+        i.set_nop();
+        i.offset(1).set_nop();
+        
+        return true;
+    };
+    false
+};
+
+Move :: @struct {
+    tag: @enum(Sink, Source, Move, Copy);
+    src := Qbe.Null;
+    dest := Qbe.Null;
+    i: *Qbe.Ins;
+};
+
+def_size :: fn(f: *Qbe.Fn, r: Qbe.Ref) ?i64 = {
+    t := f.get_tmp(r) || return(.None);
+    @if(t.def.is_null() || isreg(r)) return(.None);
+    if t.def.op().is_alloc() {
+        return f.get_int(t.def.arg&[0]);
+    };
+    if t.def.op() == .copy && rtype(t.def.arg&[1]) == .RInt {
+        s := t.def.arg&[1].rsval().intcast().abs();
+        @if(s == 0) return(.None);
+        return(Some = s);
+    };
+    .None
+};
+
+dump_ops :: fn(f: *Qbe.Fn, ops: []Move) void = {
+    when_debug(f.globals, .Blits) { out |
+        @fmt(out, "\n##");
+        each ops { it |
+            @fmt(out, "\n#   ");
+            printref(it.dest, f, out);
+            @fmt(out, " = ");
+            printref(it.src, f, out);
+            @match(it.tag) {
+                fn Move() => @fmt(out, "; kill");
+                fn Copy() => @fmt(out, "; blit");
+                @default => ();
+            };
+        };
+    };
+};
+
+#use("@/backend/lib.fr");

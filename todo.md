@@ -1,4 +1,8 @@
 
+- add a way to -d log all the comptime code from the driver. rn it only affects the runtime module. 
+- mangle symbols in a more stable way than fucking sequential ids. 
+  the current way is fast but makes diffing them a pain in the ass.
+- things that are inlined and whose body contains a single call still don't reliably show in backtrace
 - examples/web/build.fr on linux :MultiDylibLibc 
   `TypeError: WebAssembly.instantiate(): Import #8 "libc***": module is not an object or function`
   TODO: add that binary to repro

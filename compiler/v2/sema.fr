@@ -2492,6 +2492,7 @@ fn adjust_named_arguments(self: *SelfHosted, fid: FuncId, arg_expr: *FatExpr) Re
 //
 fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *OverloadAttempt) Maybe(FuncId) #once = {
     overloads := self.dispatch.overloads&.nested_index(attempt.os.as_index());
+    self.stats.os_resolve += 1;
     
     // THIS IS GARBAGE 
     // i should just give up and have a `defer` ast node. 
@@ -2561,6 +2562,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
         new := overloads.ready.items().slice(attempt.last_ready_count.zext(), overloads.ready.len);
         attempt.options&.reserve(new.len);
         want_arity := arity(arg_expr);
+        self.stats.os_resolve_add += new.len;
         for new { option | 
             if self.filter_overload_sync(arg_expr, want_arity, option) {
                 @check(self.ensure_resolved_sign(option)) return2; // TODO: dont let this suspend cause it cant
@@ -2677,6 +2679,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
                     continue();
                 };
                 
+                self.stats.os_resolve_iter += 1;
                 b := func.arg.bindings.index(arg_index);
                 if @check(self.infer_type(b.ty&)) return2 { param | 
                     if !self.ask_can_assign(param, type) {
@@ -2715,6 +2718,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
                 };
                 fid := attempt.options[f_i];
                 func := self.get_function(fid);
+                self.stats.os_resolve_iter += 1;
                 if !func.get_flag(.Generic) && func.finished_ret.is_none() {
                     @check(self.infer_return(fid)) return2;
                 };
@@ -2964,6 +2968,7 @@ fn evaluate_where_clauses(self: *SelfHosted, fid: FuncId, generic_types: []Type,
         if ann.name == Flag.where.ident() {
             if ann.non_void_arg() { where_expr |
                 if !where_expr.is_raw_unit() {
+                    self.stats.where_clause += 1;
                     // TODO: it needs to know this is in a const context. 
                     _ := self.poll_in_place(void, => self.compile_expr(where_expr, (Specific = f_ty)));
                     condition := @check(self.eval(where_expr, FuncId)) return;

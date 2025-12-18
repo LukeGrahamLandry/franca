@@ -130,7 +130,7 @@ fn compile_cached(header: *Header, to_free: *?Ty(*QbeModule, *Crash'LocationReso
     assume_types_fn(Arg = *ImportVTable, Ret = void, ptr = cc)
 }
 
-fn write_deps(writer: *Writer, codemap: *import("@/compiler/codemap.fr")'CodeMap, start_path: Str, self_hash: *Array(u32, 8)) u32 = {
+fn write_deps(writer: *Writer, codemap: *import("@/compiler/codemap.fr")'CodeMap, start_path: Str, self_hash: *Array(u32, 8)) Ty(u32, Sha256.Digest) = {
     writer.dep&.reserve(codemap.files.len+1);
     writer.dep&.push(
         file_len = 0,
@@ -153,7 +153,11 @@ fn write_deps(writer: *Writer, codemap: *import("@/compiler/codemap.fr")'CodeMap
             );
         }
     };
-    entry_dep
+    
+    // TODO: maybe i don't want it to be order dependent
+    all_deps := Sha256'hash(writer.dep.items().interpret_as_bytes());
+    
+    (entry_dep, all_deps)
 }
 
 fn write_cache(m: *QbeModule, c: CompCtx, fid: FuncId, outpath2: Str, start_path: Str) *Header = {
@@ -163,13 +167,14 @@ fn write_cache(m: *QbeModule, c: CompCtx, fid: FuncId, outpath2: Str, start_path
     writer := m.save.unwrap();
     backend'writer_finish_imports(writer, m);
     
-    entry_dep := write_deps(writer, self.codemap, start_path, self_hash);
+    entry_dep, all_deps := write_deps(writer, self.codemap, start_path, self_hash);
     name := c.fmt_fn_name(fid);
     ::enum(@type m.goal.type);
     meta: Meta = (
         arch_os = @if(m.goal.type == .CachedEarly, 0x0F0F, pack_current_target()),
         entry_sym = (off = writer.map_sym(m, m.intern(name)).trunc()),
         entry_dep = (off = entry_dep),
+        all_deps = all_deps,
     );
     chunks := writer.to_bytes(meta, m);
     bytes := concat(chunks, general_allocator());  // not c.get_alloc because we're going to drop the compiler at the end
@@ -901,7 +906,7 @@ fn build_the_exports_scope(c: *ExportCtx, start_path: Str, entry_source: Str) CR
     
     backend'writer_finish_imports(c.writer, c.m);
     root_scope := export_root_scope(c, fns, funcs_done&, names);
-    entry_dep := write_deps(c.writer, fr'vtable'get_codemap(fr.data), start_path, self_hash);
+    entry_dep, all_deps := write_deps(c.writer, fr'vtable'get_codemap(fr.data), start_path, self_hash);
     
     meta: Incremental.Meta = (
         arch_os = 0x0F0F,
@@ -910,6 +915,7 @@ fn build_the_exports_scope(c: *ExportCtx, start_path: Str, entry_source: Str) CR
         // TODO: don't call this debug_name if im going to use it for stuff
         debug_name = c.writer.push(mangle_name_for_cache(start_path)),
         entry_source = c.writer.push(entry_source),
+        all_deps = all_deps,
     );
     bytes := c.writer.to_bytes(meta, c.m);
     (Ok = bytes)
