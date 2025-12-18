@@ -2,9 +2,7 @@
 - examples/web/build.fr on linux :MultiDylibLibc 
   `TypeError: WebAssembly.instantiate(): Import #8 "libc***": module is not an object or function`
   TODO: add that binary to repro
-- instead of having comptime in tls, fill_export_ffi should wrap them to 
-  bake it into the code like create_jit_shim does. 
-  then wouldn't need the "Cannot call init_self_hosted inside another compiler...".
+- get rid of comptime in tls. 
   also have to get rid of the places i was lazy and call current_comptime() directly. 
   (@unwrap,@err,make_error,set_type,log_it)
 - os: use envvars instead of `nocache on` so it gets inherited properly and this:

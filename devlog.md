@@ -7,6 +7,15 @@
 - make wasm/abi more similar to others
   - use alloc instead of RSlot
   - pass env parameter on the stack instead of in a global. much less invasive. 
+- experimenting with more convoluted fill_export_ffi. 
+  - i need to stop using tls(.comptime) so you can have shims between threads and multiple compctx at once. 
+    so my idea is bake the pointer into the code like create_jit_shim does. 
+  - since i need to look at the signeture to forward the right arguments,
+    might as well also generate the string for the new compiler instead of 
+    typing it again in #export. big win for being less error prone. 
+  - sad that it will make it even harder to change Func layout 
+    but at this point i'll need to support multiple when i want to transition anyway. 
+    the real problem is it's much slower. like 840->880. 
 
 ## (Dec 16)
 

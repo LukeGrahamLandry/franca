@@ -62,13 +62,14 @@ Placement :: @tagged(Assign: Qbe.Ref, Scalar, Blit: Qbe.Ref, NewMemory, Discard,
 fn emit_ir(comp: CompCtx, shared: *FrontendCodegen, f: FuncId, when: ExecStyle, pending: *List(FuncId), export: bool) CRes(void) = {
     func := comp.get_function(f); 
 
+    c := comp.data.cast()[][];
     if when == .Aot {
         // TODO: really you want the callgraph of why we think this is reachable 
         // TODO: this will need to change again when i want to be able to cache #macro, etc. 
         //       really #comptime_addr should be expressed as a strong import and someone needs to check 
         //       that all imports are fulfilled. But for now, it's better to give an error message than have the dynamic loader do it. 
         //       -- Jun 17, 2025 
-        @err_assert(!func.get_flag(.ComptimeOnly), "cannot .Aot .ComptimeOnly % %", f, comp.log(func)) return;
+        @err_assert(!func.get_flag(.ComptimeOnly), "attempted to call ComptimeOnly function % at runtime", fmt_func(c, f)) return;
         
         // :bake_relocatable_value
         {comp.vtable.check_for_new_aot_bake_overloads}(comp.data); 
@@ -76,7 +77,6 @@ fn emit_ir(comp: CompCtx, shared: *FrontendCodegen, f: FuncId, when: ExecStyle, 
     
     z := zone_begin(.EmitIr);
     
-    c := comp.data.cast()[][];
     c.when_debug(.Emit, fn(o) => @fmt(o, "E: % %", when, fmt_func(c, f)));
     
     // currently this needs to make funcids eagarly so it might involve making jitshims for imports which has to happen before we grab the codegenentry
@@ -1221,7 +1221,7 @@ fn emit_constant(self: *EmitIr, value: *Values, p: Placement, expr_ty: Type, loc
             @debug_assert_eq(value.len(), info.stride_bytes.zext(), "value size mismatch");
             if value.len() < 64 && value.len().mod(8) == 0 {
                 // if it's not that big, hoist the load to right now so the backend knows the parts are constant. 
-                parts: []i64 = (ptr = i64.ptr_from_int(value.jit_addr()), len = value.len() / 8);
+                parts := i64.reinterpret_bytes(value.bytes());
                 enumerate parts { i, value |
                     self.emit(.storel, .Kw, QbeNull, self.f.getcon(value[]), self.offset(dest, i * 8));
                 };
