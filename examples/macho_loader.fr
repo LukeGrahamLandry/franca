@@ -171,22 +171,21 @@ fn collect_imports(full_bytes: []u8, fixups_header_data: []u8) []rawptr #use("@/
     
     
     // TODO: don't just assume we want /usr/lib/libSystem.B.dylib
-    libc_path := as_cstr macos_dylib_paths[0];
-    libc := dlopen(libc_path, .Lazy);
-    @assert(!libc.lib.is_null(), "failed to find libc. TODO: don't assume you want this but you normally do.");
+    libc_path := macos_dylib_paths[0];
+    libc := import("@/lib/dynamic_lib.fr")'open(libc_path)
+        || panic("failed to find libc. TODO: don't assume you want this but you normally do.");
     
     list_of_function_pointers := general_allocator().alloc_init(rawptr, header.imports_count.zext()) { i |
         import := imports_data&.pop_type(ChainedImport)[];
-        n: CStr = (ptr = symbols_data.ptr.offset(get(import, .name_offset)));
-        name := n.str();
+        name := symbols_data.rest(get(import, .name_offset)).peek_cstr();
         @assert_eq(get(import, .lib_ordinal), 1, "TODO: where is the list of libraries? multiple of Link Library commands?");
-        if n.ptr[] == "_".ascii() {
+        if name.len > 0 && name[0] == "_".ascii() {
             // apple likes to waste my time. 
-            n.ptr = n.ptr.offset(1);
+            name = name.rest(1);
         };
-        addr := libc.dlsym(n);
-        @fmt(OUTPUT, ">>> import '%' from libc: %\n", n, addr);
-        @assert(import.get(.weak) != 0 || !addr.is_null(), "Couldn't find % in libc (TODO: allow non-libc imports).", n);
+        addr := libc.get(name) || zeroed(rawptr);
+        @fmt(OUTPUT, ">>> import '%' from libc: %\n", name, addr);
+        @assert(import.get(.weak) != 0 || !addr.is_null(), "Couldn't find % in libc (TODO: allow non-libc imports).", name);
         addr
     };
     list_of_function_pointers

@@ -72,7 +72,7 @@ fn emit_ir(comp: CompCtx, shared: *FrontendCodegen, f: FuncId, when: ExecStyle, 
         @err_assert(!func.get_flag(.ComptimeOnly), "attempted to call ComptimeOnly function % at runtime", fmt_func(c, f)) return;
         
         // :bake_relocatable_value
-        {comp.vtable.check_for_new_aot_bake_overloads}(comp.data); 
+        @try(check_for_new_aot_bake_overloads(c)) return;
     };
     
     z := zone_begin(.EmitIr);
@@ -1187,6 +1187,7 @@ fn emit_constant(self: *EmitIr, value: *Values, p: Placement, expr_ty: Type, loc
     
     @match(self.when) {
         fn Aot() => {
+            // TODO: use the one that lets it return an offset as well if the top level thing is part of a cycle?
             id := @try(self.program.emit_relocatable_constant(expr_ty, value.bytes(), loc)) return;
             baked := self.program.get_baked(id);
             if value.len() > 64 || value.len().mod(8) != 0 {  // last one unrechable because alignment?
@@ -1201,6 +1202,7 @@ fn emit_constant(self: *EmitIr, value: *Values, p: Placement, expr_ty: Type, loc
             // This generates better code for constant slices/allocators/etc 
             // (lets the backend see the individual fields are constant instead of treating it as a mutable static). 
             if baked.relocations.len == 1 && baked.len() == 8 {
+                // :NotForCorrectness single pointer can be returned as a scalar
                 bake_iter_legacy baked { part |
                     v := self.as_ref(part);
                     return(Ok = self.scalar_result(p, v, expr_ty));
@@ -1980,4 +1982,9 @@ fn seal(self: *EmitIr, $body: @Fn(b: *Qbe.Blk) void) void = {
     if self.blk.jmp.type == .Jxxx { 
         body(self.blk);
     };
+}
+
+fn as_const(self: *FatExpr) ?Values = {
+    @if_let(self.expr&) fn Value(f) => return(Some = f.bytes);
+    .None
 }

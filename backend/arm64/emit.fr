@@ -32,13 +32,11 @@ fn emit_func_arm64(f: *Qbe.Fn) []Ty(Fixup, Qbe.Sym) = {
 }
 
 fn fixup_arm64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_reloc: *?Fixup) void = {
+    log_fill_fixup(self, symbol, fixup);
     address := symbol.jit_addr;
     local  := symbol.kind == .Local;
     @match(fixup.type) {
         fn Call(it) => {
-            when_debug(self, .Patch) { out |
-                @fmt(out, "# patch call % calls %\n", fixup.patch_at.addr, symbol.name);
-            };
             distance := ptr_diff(fixup.patch_at.addr, address) / 4;
             in_range := distance.abs() < 1.shift_left(26);
             @debug_assert(!local || in_range, "local symbol too far away");
@@ -69,9 +67,6 @@ fn fixup_arm64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
             inst[] = b_jmp(s_trunc(distance, 26), 1);
         }
         fn InReg(it) => {
-            when_debug(self, .Patch) { out |
-                @fmt(out, "# patch addr % refs %=%\n", fixup.patch_at.addr, address, symbol.name);
-            };
             inst := fixup.patch_at.u32.slice(2);
             if local {
                 i_page, i_off := encode_adrp_add(address.offset(it.increment), fixup.patch_at.addr, @as(u5) it.r);
@@ -337,7 +332,7 @@ fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
                 // we've already compiled it so just compute its address directly.
                 when_debug(self.f, .Patch) { out |
                     distance := self.m.distance_between(.Code, self.m.current_offset(.Code), symbol.segment, symbol.offset + inc);
-                    @fmt(out, "# direct offset % for '%' %[%]\n", distance, symbol.name, symbol.segment, symbol.offset);
+                    @fmt(out, "# direct offset % for %\n", distance, (self.m, symbol));
                     @debug_assert(symbol.segment != .Code || distance < 0, "we must be jumping backwards");
                 };
                 dest := self.m.segment_address(symbol.segment, symbol.offset + inc);
@@ -934,9 +929,6 @@ fn call_symbol(self: *ArmState, sym: Qbe.Sym) void #once = {
                     // haven't compiled it yet so will need a patch. 
                     push_fixup(self.m, symbol, patch);
                     self.inst(brk(0x6789));
-                    when_debug(self.f, .Patch) { out |
-                        @fmt(out, "# pending call % calls %\n", patch_at, symbol.name);
-                    };
                 };
             }
         };

@@ -32,15 +32,21 @@ TODO:
     - some memory is expected to alias (stack, temp()) so should be unbakable. 
 */
 
+fn emit_relocatable_constant(c: CompCtx, ty: Type, value: []u8, loc: Span) CRes(BakedVarId) = {
+    id, off := @try(c.data.cast()[][].bake_relocatable_constant(value, ty, loc, .None)) return;
+    @assert_eq(off, 0, "TODO: internal pointers in vtable.emit_relocatable_constant");
+    (Ok = id)
+}
+
 // since pointers might have cycles, forced_id is used so you can add a cache entry for and address before it's been emitted. 
 fn bake_relocatable_constant(c: *SelfHosted, value: []u8, type: Type, loc: Span, forced_id: ?BakedVarId) Result(Ty(BakedVarId, i64), *CompileError) = {
     to_zero: ReadBytes = (bytes = value, i = 0);
     c.comp().zero_padding(type, to_zero&);  // Needed for reproducible builds!
     
     jit_ptr := u8.int_from_ptr(value.ptr);
-    // - values <= 8 bytes are stored inline so thier jit_addr is not useful. 
+
     // - when forced_id is set, it's a pointer that we've already checked the cache for (but now the placeholder will be there)
-    if value.len() > 8 && forced_id.is_none() {
+    if forced_id.is_none() {
         // TODO: this barely does anything! cause like cstr and slice don't go through this function. they call dyn_bake_relocatable_value. -- Jun 30
         //       this is the right idea, they just need to check thier pointers against the cache first. 
         // TODO: be careful about aliasing as different types with different custom_bake_constant? -- Jun 30 
@@ -63,9 +69,6 @@ fn bake_relocatable_constant(c: *SelfHosted, value: []u8, type: Type, loc: Span,
         };
         unreachable()  // TODO: this shouldn't be needed
     };
-    
-    // TODO: storing jit_ptr in put_baked is sketchy for small values,
-    //       but currently it's only used for jit constant access and if it were small you'd have just loaded it directly in emit_bc. -- Nov 3
     
     // TODO: is it really that helpful to tell the backend to use zeroinitilizer? could at least have a faster memcmp. 
     if value.all_zeroes() {
@@ -199,9 +202,7 @@ fn bake_relocatable_body(c: *SelfHosted, value: []u8, type: Type, out: *List(Bak
             @try(c.bake_relocatable_body(payload, inner, out, reloc_off + tag_size, false)) return;
             
             padding := value.rest(tag_size + payload_size);
-            if !is_all_zeroes(padding) {
-                return(@err("ICE: zero_padding() didn't work on a @tagged constant. This is required for reproducibility."));
-            };
+            @debug_assert(is_all_zeroes(padding), "ICE: zero_padding() didn't work on a @tagged constant. This is required for reproducibility.");
         }
         fn Enum(f)  => return(c.bake_relocatable_body(value, f.raw, out, reloc_off, false));
         fn Named(f) => return(c.bake_relocatable_body(value, f._0, out, reloc_off, force_default_handling));
@@ -282,9 +283,6 @@ fn reserve_baked(c: *SelfHosted, jit_ptr: ?[]u8) Ty(*BakedValue, BakedVarId) #in
 
 fn put_baked(c: *SelfHosted, v: BakedValue, jit_ptr: ?[]u8) BakedVarId #inline = {
     dest, id := c.reserve_baked(jit_ptr);
-    if jit_ptr { ptr | 
-        //v.jit_addr = ptr;
-    };
     n := dest.name;
     dest[] = v;
     dest.name = n;

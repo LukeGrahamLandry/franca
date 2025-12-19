@@ -792,6 +792,11 @@ fn push_fixup(m: *QbeModule, symbol: *SymbolInfo, fix: Fixup) void = {
         };
         return();
     };
+    
+    when_debug(m, .Patch) { out |
+        @fmt(out, "# push % at % to '%'\n", fix.type&, fmt_hex(fix.patch_at.addr), symbol.name);
+    };
+    
     symbol.fixups&.push(fix, a);
 }
 
@@ -854,19 +859,34 @@ fn seal_debug_info(m: *QbeModule, debug_source_code: []u8, include: bool, files_
     ::enum(@type m.goal.type);
     if m.goal.type == .Exe || harvard {
         // TODO: figure out how to make this work for .Relocatable
-        //       it is needed for relocations without libc on linux (in franca_runtime_init). 
-        m.do_jit_fixups(base_p, @if(harvard, .MutableData, .Code), 0);
+        //       it is needed for relocations without libc on linux (in franca_runtime_init).
+        // HACK: you have to be able to have it in the frc and then !include when importing it so just use the existing one :AnnoyingDoubleSeal
+        use_symbol(m, base_p) { s |
+            ::enum(@type s.kind);
+            if s.kind != .Local { 
+                m.do_jit_fixups(base_p, @if(harvard, .MutableData, .Code), 0);
+            };
+        };
     };
     
     ::[]u64;
-    if @is(m.goal.type, .Cached, .CachedEarly, .Relocatable, .JitOnly) {
+    if @is(m.goal.type, .Relocatable, .JitOnly) {
         b := FRHOSTED_MAGIC;
         m.emit_data(id = base_p, template = (Bytes = b&.slice(1).interpret_as_bytes()), align = 8, relocations = empty());
     };
+    if @is(m.goal.type, .Cached, .CachedEarly) {
+        //m.set_library(base_p, "franca", false);
+    };
         
     id := m.intern("__franca_aot_debug_info");
-    if harvard || !include || @is(m.goal.type, .Relocatable, .Cached, .CachedEarly) {
-        m.emit_data(id = id, template = (Zeroes = size_of(AotDebugInfo)), align = 8, relocations = empty());
+    if harvard || !include || @is(m.goal.type, .Relocatable) {
+        // HACK: you have to be able to have it in the frc and then !include when importing it so just use the existing one :AnnoyingDoubleSeal
+        use_symbol(m, id) { s |
+            ::enum(@type s.kind);
+            if s.kind != .Local {
+                m.emit_data(id = id, template = (Zeroes = size_of(AotDebugInfo)), align = 8, relocations = empty());
+            };
+        };
         return();
     };
     // TODO: figure out how to make this work for .Relocatable

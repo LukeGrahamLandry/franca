@@ -1,4 +1,31 @@
 
+## (Dec 19)
+
+- there's some stuff in importvtable that's only used in emit_ir from back when that was part of the driver
+- doing the multi-target build via .frc for the compiler binaries. the tricky one is static linux. 
+  - get rid of the constant in is_linking_libc. 
+  - i need to not set `__franca_base_address` to junk because its needed for relocations. 
+  - made patch logging a bit more consistant
+  - doesn't work as PIE doing it that way?
+  - ok new plan, maybe that was too much at once. why am i changing the way i build the releases but not the tests. 
+  - oh actually... fuck me. i thought it was behaving irratically and i've been mixing up the names 
+    and compiling to franca-linux-aarch64-sta while running franca-linux-arm64-sta like half the time 
+    that's why it seemed like turning on keep-names didn't make the disassembler work. 
+    so fired :( see thats why you need you need memory safety so you won't type the wrong string into the computer. 
+  - it seems to work now. my theory about what was crashing is i changed the rules
+    about how seal_debug_info sets up `__franca_base_pointer` to fix a crash and 
+    then every time i was running just `franca` i have it symlinked to `..-arm64`
+    so when i ran that i wasn't using the new compiler (because that was in `..-aarch64`) 
+    but when i ran `./target/f.out` it was the new compiler, so it looked like the release build 
+    was broken and i just changed how it was compiled so that made sense. 
+    sometimes the answer is just go to sleep dumb ass. 
+  - repro problem was because i was doing -debug-info which has never worked because #comptime_addr shows up in the source. 
+  - static+pie still doesn't work the new way tho
+- ive learned you have to do `strace -f` to see all the threads. 
+  that's why it looked like i never did futex_wait even though futex_wake returns 1 often. 
+  - also it disagrees about arm O_CLOEXEC. i was off by a zero. maybe that will get rid of the rare remaining errno 26. 
+- disable part of selsel_amd64 when !constfold so it works to bump incremental.magic without rebootstrapping
+
 ## (Dec 17/18)
 
 - do SLOW_ARENA_CANARY to the last chunk when resetting to a mark

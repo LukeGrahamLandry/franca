@@ -1,4 +1,19 @@
 
+- would be less confusing if i just always had prefer_libc_memmove=false.
+  but amd can't compile staticmmemove without folding which happens on boot. 
+  and means you can't bump incremental.magic without re-bootstrapping. 
+- elfheader.type=Dynamic for static PIE doesn't work when doing multitarget build via frc. 
+- `-debug-info` embedded source includes fill_export_ffi's aslr bytes in #comptime_addr. 
+  already have logic for skipping that for the cache files so just need to reuse that 
+  (but be careful because it will change the byte offsets of Span so need to leave padding?)
+- extension of that is that the embedded source doesn't have the same reachability thing 
+  as the code so if you use a big comptime thing, the functions won't be in aot binary
+  but the source might if you ask for that. maybe that's what i want because i like the idea 
+  of being able to recompile from that but it's a bit counter intuative. idk. 
+- better error message than "failed to guess type" if you do `@print("%", fmt_hex(undeclared_variable.foo.bar));`
+- never choose symbol.library based on what dylib it happened to be in because then cross compiling doesn't work. 
+- can i get rid of m.goal.link_libc?
+- default_driver should just poke out the Interp header if you ask for -syscalls. 
 - add a way to -d log all the comptime code from the driver. rn it only affects the runtime module. 
 - mangle symbols in a more stable way than fucking sequential ids. 
   the current way is fast but makes diffing them a pain in the ass.
@@ -825,7 +840,6 @@ but then need to deal with including build options in the cache (like -unsafe, -
 - dump_bin: print segment.MachineCode as something qbe_frontend.fr can parse so it can round trip
   - dump_bin: won't be able to parse back if symbol names have spaces in them
 - clear cache before tests just in case
-- whether the host compiler was built with`-syscalls` needs to go in the cache file :CacheKeySyscalls
 - caching an invalid thing i think? if you Compile Error: we hit a dynamicimport ('puts_unlocked' from 'libc') with no comptimeaddr for jit
 (happening with import_c)
 - persist #noinline

@@ -69,23 +69,25 @@ release_cmds :: @S(
 );
 
 fn driver(vtable: *ImportVTable) void = {
+    c := cli_args();
+    for c {s: CStr|
+        do_it(vtable, s.str());
+    };
+}
+
+do_it :: fn(vtable: *ImportVTable, s: Str) void = {
     #use("@/lib/sys/process.fr");
     #use("@/lib/sys/fs.fr");
-    
-    c := cli_args();
-    start := false;
-    did := 0;
-    franca_path := get_executable_path(temp());  // TODO: cli arg to set this 
     driver_path := "examples/default_driver.fr";
-    for c {s: CStr|
-        @switch(s.str()) {
+    franca_path := get_executable_path(temp());  // TODO: cli arg to set this 
+        @switch(s) {
             @case("--") => ();
             @case("strap") => {
                 if IS_BOOTSTRAPPING {
                     run_boot(vtable);
                     franca_path = "./target/franca.out";
                 };
-                sh(@slice(franca_path, "run_tests.fr", "boot2"));
+                do_it(vtable, "boot2");
                 sh(@slice("./target/f.out", driver_path, "build", "compiler/main.fr", "-o", "target/release/f.out", 
                     "-unsafe", "-keep-names", "-debug-info"));
             };
@@ -116,7 +118,15 @@ fn driver(vtable: *ImportVTable) void = {
                 println("=== re-exec ===");
                 sh(@slice("./target/f.out", "run_tests.fr", "run"));
             };
+            @case("release") => build_release(vtable);
+            @case("release_old") => {
+                for release_cmds { cmd | 
+                    sh(cmd);
+                };
+            };
             @case("run") => {
+                // TODO: instead of hardcoding ./target/f.out use get_executable_path so you can run this directly without rebootstrapping
+                //       tho then its a source of confusion if you run with the release binary and the nrewrite it have way through whe nit build_release
                 for bins { code, dest |
                     sh(@slice("./target/f.out", driver_path, "build", code, "-o", dest, "-keep-names"));
                 };
@@ -130,6 +140,7 @@ fn driver(vtable: *ImportVTable) void = {
                 };
                 
                 ::import("@/examples/testing.fr");
+                // TODO: aoc/2025 too
                 files := collect_with_extension("examples/aoc", ".fr").unwrap();
                 run_tests_main_threaded(Ty(Str, Str), Str, (franca_path, driver_path), files.items(), fn(_, a) = a[], fn(ctx, file) = {
                     franca_path, driver_path := ctx;
@@ -137,9 +148,7 @@ fn driver(vtable: *ImportVTable) void = {
                     (ok, out, err, "")
                 });
                 
-                for release_cmds { cmd | 
-                    sh(cmd);
-                };
+                do_it(vtable, "release");
                 
                 for with_deps { cmd | 
                     sh(cmd);
@@ -160,10 +169,12 @@ fn driver(vtable: *ImportVTable) void = {
                 // If running linux with libc, can still run the compiler built without libc and make sure it repros. 
                 @if(!IS_BOOTSTRAPPING)
                 if current_os() == .linux && is_linking_libc() {
-                    franca := @if(query_current_arch() == .x86_64, "target/release/franca-linux-amd64-sta", "target/release/franca-linux-arm64-sta");
-                    _ := Syscall'remove("a.out");
-                    sh(@slice(franca, "examples/default_driver.fr", "build", "compiler/main.fr", "-unsafe", "-syscalls"));
-                    sh(@slice("diff", franca, "a.out"));
+                    // TODO: have default_driver do -syscalls the same way as build_release so sta0==target/release/franca-linux-x-x-sta
+                    sta0, sta1 := ("target/sta0.out", "target/sta1.out");
+                    sh(@slice("./target/f.out", "examples/default_driver.fr", "build", "compiler/main.fr", "-unsafe", "-syscalls", "-o", sta0));
+                    _ := Syscall'remove(sta1.as_cstr());
+                    sh(@slice(sta0, "examples/default_driver.fr", "build", "compiler/main.fr", "-unsafe", "-syscalls", "-o", sta1));
+                    sh(@slice("diff", sta0, sta1));
                     println("OK: linux_native_no_libc");
                 } else {
                     println("SKIP: linux_native_no_libc(): native target is not linux+libc");
@@ -188,10 +199,105 @@ fn driver(vtable: *ImportVTable) void = {
                     //};
                 };
             };
-            @default => ();
+            @default => @eprintln("IGNORE: %", s);
         };
+};
+
+build_release :: fn(vtable: *ImportVTable) void = {
+    @if(IS_BOOTSTRAPPING) return();
+    make_dirs_or_crash("target/release");
+    
+    unsafe := true;
+    keep_names := false;
+    
+    opts := vtable.default_build_options();
+    if unsafe {
+        it := opts.safety_checks&;
+        it.insert(.Bounds, false);
+        it.insert(.DebugAssertions, false);
+        it.insert(.InvalidTag, false);
     };
-}
+    opts.retain_function_names = keep_names;
+    opts.debug_info = false;  // TODO: this being true breaks repro because it embeds source with #comptime_addr
+    c := new_with_src(vtable, """#include_std("compiler/main.fr");""", opts);
+    c := vtable.with(c);
+    m := @ref zeroed(Qbe.Module);
+    // TODO: "need to be consistant about how to handle modules like this that don't actually compile anything"
+    init_default_module_dyn(m, c.vtable, (
+        arch = .aarch64, os = .macos, type = .CachedEarly, 
+        link_libc = true, prefer_libc_memmove = false,
+        exe_debug_symbol_table = opts.retain_function_names, 
+    ));
+    fid := c.get_unique_named("main").expect("'main' when building the compiler");
+    chunks := {c.vtable.emit_qbe_included}(QbeModule.raw_from_ptr(m), c&, @slice(fid), .WrapMain);
+    bytes := concat(chunks&, temp());
+    c'vtable'drop_qbe_module(QbeModule.raw_from_ptr(m));
+
+    targets := @S((Os.macos, Arch.aarch64), (.macos, .x86_64), (.linux, .aarch64), (.linux, .x86_64), (.linux, .rv64));
+    
+    // TODO: this is still takes like 200ms each. 
+    //       it would be nice if i could just compile functions once per architecture if they don't depend on varargs abi. 
+    for targets { os, arch |
+        m := c'vtable'get_alloc(c.data).box_uninit(QbeModule);  // for good luck
+        init_default_module_dyn(m, c.vtable, (
+            arch = arch, os = os, type = .Exe, 
+            link_libc = true, prefer_libc_memmove = false,
+            exe_debug_symbol_table = opts.retain_function_names, 
+        ));
+        
+        ::Result(*Incremental.Header, Str);
+        header: *Incremental.Header = or check(bytes) { e |
+            @panic("generated an invalid frc file: %", e)
+        };
+        compile_all_symbols(header, m);
+        
+        // TODO: this is confusing. 
+        //       the module has its own debug info so need to not touch that 
+        //       but do need to fill the import of base_address so franca_runtime_init can do relocations. 
+        seal_debug_info(m, "", false, "");  // :AnnoyingDoubleSeal
+        
+        chunks := {vtable.finish_qbe_module}(QbeModule.raw_from_ptr(m));
+        
+        bytes := concat(chunks&, temp());
+        arch := @match(arch) {
+            fn x86_64() => "amd64";
+            fn aarch64() => "arm64";
+            @default => @tfmt("%", arch);
+        };
+        @println("%-%", arch, os);
+        path := @tfmt("target/release/franca-%-%", os, arch);
+        write_entire_file_or_crash(path, bytes);
+        if os == .linux {
+            // my programs detect if libc is available at runtime and make syscalls directly if not. 
+            // all you need to do to make it run as a static binary 
+            // is stomp out the header that asks the kernel to use a dynamic loader.
+            // TODO: sketchy that link_libc=false does a bunch of other shit in backend/elf/emit. need to get rid of that. 
+            // note: this trick might confuse the `file` utility but you can check it works 
+            //       by running under strace or in an environment that doesn't have a libc (like blinkenlights)
+            
+            Elf :: import("@/backend/elf/bits.fr");
+            h := bytes.peek_type(Elf.Header);
+            @debug_assert_eq(h.magic, Elf.MAGIC);
+            
+            // TODO: i think it should work as .Dynamic 
+            //       (it did before when i directly compiled to exe with link_libc=false)
+            //       but if you don't do this you crash. maybe its just my skew in do_relocations_static_linux is wrong? 
+            h.type = .Executable;
+            
+            ph := bytes.rest(h.program_header_off).peek_type(Elf.ProgramHeader);
+            ph: []Elf.ProgramHeader = ph.slice(h.program_header_num.zext());
+            each ph { it |
+                ::enum(@type it.type);
+                if it.type == .Interp {
+                    it.type = .Null;
+                };
+            };
+            write_entire_file_or_crash(@tfmt("%-sta", path), bytes);
+        };
+        
+        c'vtable'drop_qbe_module(QbeModule.raw_from_ptr(m));
+    };
+};
 
 #use("@/backend/lib.fr");
 

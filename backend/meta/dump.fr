@@ -439,6 +439,7 @@ fn when_debug(f: *Qbe.Fn, category: Qbe.DebugKey, $body: @Fn(out: *List(u8)) voi
 
 fn when_debug(m: *Qbe.Module, category: Qbe.DebugKey, $body: @Fn(out: *List(u8)) void) void = {  
     ::enum(Qbe.DebugKey);
+    @if(@run(__driver_abi_version < 1349)) return();
     if m.debug.bit_and(1.shift_left(category.raw() - "A".ascii())) != 0 {
         // you need to have some mutex around printing to debug_out because new_type 
         // is called on the frontend thread unlike everything else. (the allocation is guarded 
@@ -732,4 +733,44 @@ fn safe_print(s: Str, out: *List(u8)) void = {
     if s.len == 0 {
         out.push_all("\"\"");
     };
+}
+
+fn display(self: *FixupType, out: *List(u8)) void = {
+    ::tagged(@type self[]);
+    @fmt(out, "%", self.tag());
+    @match(self) {
+        fn InReg(it) => {
+            @fmt(out, "(R%,", it.r + 1);
+            @if(it.got_load) @fmt(out, "got,");
+            @fmt(out, "+%)", it.increment);
+        }
+        fn DataAbsolute(it) => @fmt(out, "()+%", it.increment);
+        fn RipDisp32(it) => {
+            @fmt(out, "(");
+            @if(it.call) @fmt(out, "call,");
+            @if(it.got_load) @fmt(out, "got,");
+            @fmt(out, "+%)", it.increment);
+        }
+        fn WasmAddr(it) => @fmt(out, "(+%)", it.increment);
+        @default => @fmt(out, "()");
+    };
+}
+
+
+fn log_fill_fixup(m: *Qbe.Module, s: *SymbolInfo, fix: *Fixup) void = {
+    when_debug(m, .Patch) { out |
+        @fmt(out, "# fill % at % to %\n", fix.type&, fmt_hex(fix.patch_at.addr), (m, s));
+    };
+}
+
+fn display(self: Ty(*Qbe.Module, *SymbolInfo), out: *List(u8)) void = {
+    m, s := self;
+    @fmt(out, "('%'", s.name);
+    if s.kind == .Local {
+        @fmt(out, " = %[%]", s.segment, s.offset);
+    };
+    if s.kind != .Local && m.goal.type == .JitOnly && !s.jit_addr.is_null() {
+        @fmt(out, " = %", fmt_hex(s.jit_addr));
+    };
+    @fmt(out, ")");
 }

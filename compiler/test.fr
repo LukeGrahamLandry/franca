@@ -52,18 +52,18 @@ run_lang_tests :: fn(vtable: *ImportVTable) void = {
         print(out.items());
         print(err.items());
         println("^^^ FAILED GROUP TEST ^^^ running one at a time...");
+        println("==============================");
         each tests& { file, functions | 
             @print("%", f_pad(file, 40, .After));
             src := gen_test_program(file, functions[].items());
             ok, out, err := compile_and_run(vtable, src, empty(), "./target/c.out");
             (@if(ok, passed&, failed&))[] += 1;
-            @print("[%]", if(ok, => "ok", => "failed run"));
-            print(out.items());
             if !ok {
+                print(out.items());
                 print(err.items());
                 "./target/c.out".three_trillion_dollars_does_not_buy_an_operating_system_that_works(); 
             };
-            println("");
+            @println("[%]", if(ok, => "ok", => "failed run"));
         };
         @assert_ne(failed, 0, "full test failed but all individual tests passed. \n%%", out.items(), err.items());
     };
@@ -201,6 +201,7 @@ fn compile_to_bytes(vtable: *ImportVTable, src: Str, goal: []QbeOutputPurpose) [
                     @panic("generated an invalid frc file: %", e)
                 };
                 compile_all_symbols(header, m);
+                seal_debug_info(m, "", false, "");  // :AnnoyingDoubleSeal
                 chunks := {vtable.finish_qbe_module}(QbeModule.raw_from_ptr(m));
                 
                 general_allocator().dealloc(u8, bytes);
@@ -271,7 +272,7 @@ fn gen_test_program(file: Str, functions: []Str) Str = {
         ::import("@/%");
         fn main() void = {
     """, file);
-    gen_test_program_body(src&, functions);
+    gen_test_program_body(src&, functions, true);
     push_all(src&, "\n}");
     src.items()
 }
@@ -286,16 +287,17 @@ fn gen_full_test_program(tests: *Tests) Ty(Str, i64) = {
     count := 0;
     each tests { k, v |
         @fmt(src&, "  @print(\"\\n%[ok]\", f_pad(\"%\", 40, .After));\n", "%", k);
-        gen_test_program_body(src&, v[].items());
+        gen_test_program_body(src&, v[].items(), false);
         count += v.len;
     };
     push_all(src&, "\n}");
     (src.items(), count)
 }
 
-fn gen_test_program_body(src: *List(u8), functions: []Str) void = {
+fn gen_test_program_body(src: *List(u8), functions: []Str, spam: bool) void = {
     for functions { name | 
-        @fmt(src, "    %(@uninitialized); print(\".\"); \n", name);
+        @if(spam) @fmt(src, "    print(\"\\n%:\");\n", name);
+        @fmt(src, "    %(@uninitialized); print(\".\");\n", name);
     };
 }
 

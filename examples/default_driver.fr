@@ -9,8 +9,6 @@
 // - TODO: declaritive way to add libraries. 
 // - TODO: rename this? its not the default really. its not what the compiler uses to load your driver program for example. 
 
-ENABLE_COMMANDS :: is_linking_libc();
-
 Command :: @struct(
     action := Action.build,
     input_file := "",
@@ -50,7 +48,7 @@ fn driver(vtable: *ImportVTable) void #export = {
 }
 
 fn do_it(vtable: *ImportVTable, cmd: *Command) void = {
-    no_cache := get_environment_variable("FRANCA_NO_CACHE").is_some() || !is_linking_libc(); // :CacheKeySyscalls
+    no_cache := get_environment_variable("FRANCA_NO_CACHE").is_some();
     build_options := vtable.default_build_options();
     build_options.no_cache = no_cache;
     build_options.retain_function_names = cmd.keep_names;
@@ -66,7 +64,6 @@ fn do_it(vtable: *ImportVTable, cmd: *Command) void = {
         build_options._target_os_bitset = build_options._target_os_bitset.bit_or(1.shift_left(cmd.os.raw()));
         build_options._target_arch_bitset = build_options._target_arch_bitset.bit_or(1.shift_left(cmd.arch.raw()));
     };
-    build_options.use_raw_syscalls = cmd.syscalls;
     build_options.always_track_ir_names = cmd.always_track_ir_names;
     
     ::enum(QbeOutputPurpose);
@@ -79,7 +76,6 @@ fn do_it(vtable: *ImportVTable, cmd: *Command) void = {
     
     enable_tracy := get_environment_variable("FRANCA_TRACY").is_some();
     libs := Str.list(temp());
-    @if(ENABLE_COMMANDS)
     @if(enable_tracy && !cmd.notracy) {
         fetch_tracy(vtable);
         libs&.push(c.add_lib(tracy_lib));
@@ -117,6 +113,7 @@ fn do_it(vtable: *ImportVTable, cmd: *Command) void = {
         os = cmd.os, 
         arch = cmd.arch, 
         type = cmd.goal,
+        // TODO: instead of this, do the poke out Interp header like build_release
         link_libc = !cmd.syscalls,
         exe_debug_symbol_table = cmd.keep_names,
     ));
@@ -148,7 +145,6 @@ fn do_it(vtable: *ImportVTable, cmd: *Command) void = {
     };
     
     @if(enable_tracy && !cmd.notracy) {
-        @if(!ENABLE_COMMANDS) panic("tried to run command");
         start := timestamp();
         args := Str.list(temp());
         args&.push_all(@slice("-o", cmd.output_file, cmd.output_file));
@@ -168,7 +164,6 @@ fn do_it(vtable: *ImportVTable, cmd: *Command) void = {
     };
     
     if cmd.action == .run {
-        @if(!ENABLE_COMMANDS) panic("tried to run command");
         // TODO: allow .Dynamic and dlopen it instead?
         @assert_eq(cmd.goal, .Exe, "cannot run selected artifact");
         
