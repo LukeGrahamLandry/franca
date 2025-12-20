@@ -1,11 +1,11 @@
 
+- each build_for_graphics program gets a new 300k cache file for its driver. 
+  - also it shouldn't statically call make_exec because that compiles the whole output_wasm_module_jit
+- add wasm binary to repro. really should just include hashes of everything that's expected to be platform independent in the build artifact. 
 - something that shows you unreferenced constants across compilation units. 
   also let driver do something less cringe than get_tagged.
   so maybe add back compiler event hooks
 - make backend/meta/test.fr without -bin not rely on #! / franca symlink
-- would be less confusing if i just always had prefer_libc_memmove=false.
-  but amd can't compile staticmmemove without folding which happens on boot. 
-  and means you can't bump incremental.magic without re-bootstrapping. 
 - there's a bunch of problems with how i do debug-info but i kinda don't want to fix them 
   because i should throw it all away and use dwarf instead so i can use other people's debuggers. 
 - for debug info in exe via frc, 
@@ -21,15 +21,11 @@
   of being able to recompile from that but it's a bit counter intuative. idk. 
 - better error message than "failed to guess type" if you do `@print("%", fmt_hex(undeclared_variable.foo.bar));`
 - never choose symbol.library based on what dylib it happened to be in because then cross compiling doesn't work. 
-- can i get rid of m.goal.link_libc?
 - default_driver should just poke out the Interp header if you ask for -syscalls. 
 - add a way to -d log all the comptime code from the driver. rn it only affects the runtime module. 
 - mangle symbols in a more stable way than fucking sequential ids. 
   the current way is fast but makes diffing them a pain in the ass.
 - things that are inlined and whose body contains a single call still don't reliably show in backtrace
-- examples/web/build.fr on linux :MultiDylibLibc 
-  `TypeError: WebAssembly.instantiate(): Import #8 "libc***": module is not an object or function`
-  TODO: add that binary to repro
 - get rid of comptime in tls. 
   also have to get rid of the places i was lazy and call current_comptime() directly. 
   (@unwrap,@err,make_error,set_type,log_it)
@@ -618,7 +614,6 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 // TODO: :Explain :UnacceptablePanic :SketchyIterTargets :nullable
 //       :MakeATestThatFails places where i don't know why qbe did something and all my current tests work if you change it. 
 //                           so try to make a test case that requires qbe's behaviour or remove the extra code. 
-//       :force_dep_on_memmove_hack
 // TODO: look at the asm and make sure im not uxtb before every cmp #0 on a bool. have to fix the ir i generate.
 //       do i need to be able to express that a function returns exactly 0 or 1?
 //       once i expose w ops to the language i can just generate those instead of l for working with bools and then it should be fine?
@@ -629,13 +624,7 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 
 ## backend symbols rework
 
-- prefer_libc_memmove being seperate from `link_libc` is kind of a hack to make harec static binaries work. 
-  but really link_libc is conflating two things, are you allowed to import thing 
-  (or should any weak symbols be treated as missing) vs is the compiler allowed 
-  to assume a memmove implementation exists with that name and can be imported. 
-  those are obviously different: harec wants seperate compilation units with imports 
-  between them but does not link a libc that exports a memmove symbol. 
-  hopefully this can get cleaned up as part of a symbols rework.  
+- 
   tho it's also pretty dumb for every compilation unit to have its own copy of builtin_static_memmove, 
   but if anybody doesn't have it, you're suddenly in linker hell where you need to find a compiler_rt 
   or some shit every time you try to do anything and the errors are always inscrutable. 
@@ -722,7 +711,6 @@ need to be careful about the refs which have tags in the high bits so won't leb 
   - why isn't clang giving me a static binary?
   - be a drop in replacement for qbe that harec can use. need to deal with the fact that i don't output text assembly. 
     just provide a script that you can use as hare's assembler that dispatches to a real assembler if it's actually text? 
-    (needs to pass -force_static_builtin_memmove to qbe_frontend. tho maybe that should be the default). 
 
 ## longevity
 

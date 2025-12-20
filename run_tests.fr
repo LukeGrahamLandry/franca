@@ -225,7 +225,6 @@ build_release :: fn(vtable: *ImportVTable) void = {
     // TODO: "need to be consistant about how to handle modules like this that don't actually compile anything"
     init_default_module_dyn(m, c.vtable, (
         arch = .aarch64, os = .macos, type = .CachedEarly, 
-        link_libc = true, prefer_libc_memmove = false,
         exe_debug_symbol_table = opts.retain_function_names, 
     ));
     fid := c.get_unique_named("main").expect("'main' when building the compiler");
@@ -241,7 +240,6 @@ build_release :: fn(vtable: *ImportVTable) void = {
         m := c'vtable'get_alloc(c.data).box_uninit(QbeModule);  // for good luck
         init_default_module_dyn(m, c.vtable, (
             arch = arch, os = os, type = .Exe, 
-            link_libc = true, prefer_libc_memmove = false,
             exe_debug_symbol_table = opts.retain_function_names, 
         ));
         
@@ -268,26 +266,7 @@ build_release :: fn(vtable: *ImportVTable) void = {
         path := @tfmt("target/release/franca-%-%", os, arch);
         write_entire_file_or_crash(path, bytes);
         if os == .linux {
-            // :PatchOutInterpForStatic
-            // this relies on the backend not using goal.link_libc for anything. 
-            // my programs detect if libc is available at runtime and make syscalls directly if not. 
-            // all you need to do to make it run as a static binary 
-            // is stomp out the header that asks the kernel to use a dynamic loader.
-            // note: this trick might confuse the `file` utility but you can check it works 
-            //       by running under strace or in an environment that doesn't have a libc (like blinkenlights)
-            
-            Elf :: import("@/backend/elf/bits.fr");
-            h := bytes.peek_type(Elf.Header);
-            @debug_assert_eq(h.magic, Elf.MAGIC);
-            
-            ph := bytes.rest(h.program_header_off).peek_type(Elf.ProgramHeader);
-            ph: []Elf.ProgramHeader = ph.slice(h.program_header_num.zext());
-            each ph { it |
-                ::enum(@type it.type);
-                if it.type == .Interp {
-                    it.type = .Null;
-                };
-            };
+            import("@/backend/elf/emit.fr")'patch_out_interp_header(bytes);
             write_entire_file_or_crash(@tfmt("%-sta", path), bytes);
         };
         

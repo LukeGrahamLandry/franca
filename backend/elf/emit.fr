@@ -259,15 +259,8 @@ fn output_elf(m: *QbeModule) [][]u8 = {
     
     if m.goal.type != .Relocatable {
         T := finalize_symbols(m);
-        have_any_imports := T.local_count != T.symbols.len;
         if T.symbols.len > 0 {
-            // :PatchOutInterpForStatic
-            interp_header := e.request_interp(base);
-            // TODO: does the loader do anything other than imports? (= is it ok to assume !link_libc if no imports?)
-            if !have_any_imports || !m.goal.link_libc {
-                interp_header.type = .Null;
-            };
-            
+            e.request_interp(base);
             dynamics := e.for_dynamic_loader(base, T);
             e.seal_dynamic(e.program_header(), e.program_header(), base, dynamics);
         };
@@ -908,3 +901,24 @@ fn emit_linux_start(m: *Qbe.Module, main: Qbe.Sym, start: Qbe.Sym) void = {
 
 Elf :: import("@/backend/elf/bits.fr");
 #use("@/backend/lib.fr");
+
+// my programs detect if libc is available at runtime and make syscalls directly if not. 
+// all you need to do to make it run as a static binary 
+// is stomp out the header that asks the kernel to use a dynamic loader.
+// note: this trick might confuse the `file` utility but you can check it works 
+//       by running under strace or in an environment that doesn't have a libc (like blinkenlights)
+patch_out_interp_header :: fn(elf_bytes: []u8) void = {
+    Elf :: import("@/backend/elf/bits.fr");
+    h := elf_bytes.peek_type(Elf.Header);
+    @debug_assert_eq(h.magic, Elf.MAGIC);
+    
+    ph := elf_bytes.rest(h.program_header_off).peek_type(Elf.ProgramHeader);
+    ph: []Elf.ProgramHeader = ph.slice(h.program_header_num.zext());
+    each ph { it |
+        ::enum(@type it.type);
+        if it.type == .Interp {
+            it.type = .Null;
+        };
+    };
+};
+

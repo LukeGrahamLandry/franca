@@ -224,7 +224,11 @@ document.getElementById("version").innerText = manifest.commit;
 
 const load_example = async (path) => {
     document.getElementById("err").innerText = "SLOW\n";
-    document.getElementById("in").value = await get_file(path); 
+    try {
+        document.getElementById("in").value = await get_file(path);
+    } catch (e) {
+        document.getElementById("out").value += `${s.toString()}\n\n${s.stack}`;
+    }
     document.getElementById("err").innerText = "";
     document.getElementById("stale").hidden = false;
 };

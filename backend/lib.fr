@@ -176,7 +176,7 @@ QbeTargetEnv :: @struct(
     // note: this setting is NOT fully respected on amd. it's more important on arm where cache coherency rules are more strict. 
     got_indirection_instead_of_patches := false,
     
-    link_libc := true,
+    _0 := true,  // :updateboot this used to be link_libc
 
     // When outputting an exe directly, local symbol names are not included in the symbol table (because the os 
     // doesn't care about them and they make your binary larger). However, if you want to see readable names in 
@@ -186,10 +186,7 @@ QbeTargetEnv :: @struct(
     
     blink_smc := true,
     
-    // TODO: kinda a hack but its not the same thing as link_libc 
-    // it's slower to emit very large blits inline so we generate a call to a function to do the copy. 
-    // when this is false, builtin_static_memmove will be emitted and called instead of trying to import lib's memmove. 
-    prefer_libc_memmove := true,
+    _1 := false,
     
     // call __libc_start_main and then call the entry point. 
     wrap_entry_for_linux_libc := false,
@@ -208,6 +205,7 @@ QbeTargetEnv :: @struct(
     default_wasm_import_module := "env",
     entry_point := "main",
     
+    // for https://github.com/kengorab/abra-lang
     HACK_convert_illegal_ret_to_hlt := false,
     
     // if this is true, when creating the WebAssembly.Memory in the browser you need to add `shared: true` to the arguments. 
@@ -265,9 +263,6 @@ fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
     m.goal = goal; goal := m.goal&;
     goal.have_entry_point = goal.type == .Exe;
     
-    if goal.type == .JitOnly && !is_linking_libc() {
-        goal.link_libc = false;
-    };
     @if(TODOWASM)
     if m.goal.arch == .wasm32 {
         m.goal.commands_size_guess *= 8;
@@ -426,27 +421,13 @@ if need_segments {
     m.insb   = forever.box_uninit(@type m.insb[]);
     
     m.curi = m.insb.index_unchecked(Qbe.MaxInstructions);
-    if !m.goal.link_libc {
-        // TODO: should allow user to specify a symbol to use instead of importing from libc or including a new one? 
-        m.goal.prefer_libc_memmove = false;
-    };
-    if m.goal.prefer_libc_memmove {
-        m.symbol_memmove = m.intern("memmove");
-    } else {
-        m.symbol_memmove = m.intern("__franca_builtin_static_memmove");
-    };
-    
-    if IS_BOOTSTRAPPING {
-        m.goal.prefer_libc_memmove = false;
-    };
-    
+
+    m.symbol_memmove = m.intern("__franca_builtin_static_memmove");
     @if(!IS_BOOTSTRAPPING)
     if m.goal.type == .JitOnly {
-        // when jitting there's no point not lowering blits to calls (since it's not a big deal to add imports). 
+        // when jitting it's not a big deal to add imports, so don't even bother recompiling the tiny function.
         // doing this up front instead of in emit_suspended_inlinables means it works when got_indirection_instead_of_patches. 
-        m.goal.prefer_libc_memmove = true;
         m.have_static_memmove = true;
-        m.symbol_memmove = m.intern("__franca_builtin_static_memmove");
         use_symbol(m, m.symbol_memmove) { s |
             f: @Fn(rawptr, rawptr, i64) void : copy_bytes;
             m.put_jit_addr(m.symbol_memmove, @as(rawptr) f);
@@ -467,7 +448,7 @@ if need_segments {
     //       or a library (that shouldn't) so i can't really just do the right thing automatically. 
     //       since i do emit_linux_start in elf/emit, it won't happen for .frc. 
     //       and when doing Relocatable, even if this is the one containing the entry point, you have to use a linker anyway so it can give you a _start. 
-    if goal.os != .linux || goal.arch == .wasm32 || !goal.link_libc || goal.type != .Exe {
+    if goal.os != .linux || goal.arch == .wasm32 || goal.type != .Exe {
         goal.wrap_entry_for_linux_libc = false;
     };
 }

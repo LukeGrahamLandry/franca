@@ -675,22 +675,24 @@ fn dyn_import(self: *SelfHosted, name: Symbol, lib_name: Symbol, weak: bool) Dyn
     handle2 := self.comptime_libraries&.get(lib_name);
     is_libc := lib_name == Flag.libc.ident(); 
     name_s := self.pool.get(name);
-    {
-    lib_name := lib_name;
+    search_name := lib_name;
     while => handle2 { handle |
         if handle.get(name_s) { addr |
             return(name = name, lib = lib_name, comptime = addr.int_from_rawptr(), weak = weak);
         };
         handle2 = .None;
         // :MultiDylibLibc HACK
+        // on linux libc is split into multiple dylibs (c,dl,m,pthread). 
+        // it's important that DynamicImport.lib doesn't change based on where 
+        // the symbol was found on the host (because that would break repro when cross compiling). 
+        // luckily elf doesn't make you declare which library a symbol came from so it works out. 
         if is_libc && self.comptime_codegen.m.goal.os == .linux { 
-            next_name := @tfmt("%*", self.pool.get(lib_name));
+            next_name := @tfmt("%*", self.pool.get(search_name));
             if self.pool.lookup&.get(next_name) { s |
-                lib_name = s;
-                handle2 = self.comptime_libraries&.get(lib_name);
+                search_name = s;
+                handle2 = self.comptime_libraries&.get(search_name);
             };
         };
-    };
     };
    
     // :AssumeDones

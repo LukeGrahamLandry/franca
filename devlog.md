@@ -30,6 +30,14 @@
   instead of that, have do_relocations_static_linux skip them. that also fixed multitarget static-pie. 
 - get rid of some dead code. no need to have proactive bindings. can always get them back if i need them. 
   - linux.LandLock, a few tracy_emit varients. 
+- fixed :MultiDylibLibc breaking module name when cross compiling linux -> wasm. 
+  just don't track which dylib it was found in at comptime. 
+- the problem with emit_static_memmove when !constfold is amd/isel 
+  only does the extra moves when !ENABLE_CONST_FOLD but that reads the current value, 
+  the embeded module for the memmove function was compiled by the previous compiler, 
+  so you need to treat that as not having the same frc abi. 
+  (or not alow isel to depend on constant folding by earlier passes). 
+- always have prefer_libc_memmove=false.
 
 ## (Dec 17/18)
 

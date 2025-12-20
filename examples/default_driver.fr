@@ -113,8 +113,6 @@ fn do_it(vtable: *ImportVTable, cmd: *Command) void = {
         os = cmd.os, 
         arch = cmd.arch, 
         type = cmd.goal,
-        // TODO: instead of this, do the poke out Interp header like build_release
-        link_libc = !cmd.syscalls,
         exe_debug_symbol_table = cmd.keep_names,
     ));
     @assert(!cmd.show_asm, "TODO: fix show_asm");
@@ -132,13 +130,20 @@ fn do_it(vtable: *ImportVTable, cmd: *Command) void = {
         };
         out.items()
     };
+    bytes := bytes.concat(temp());
+    if cmd.syscalls && cmd.os == .linux {
+        import("@/backend/elf/emit.fr")'patch_out_interp_header(bytes);
+    };
+    if cmd.syscalls && cmd.os != .linux {
+        @eprintln("TODO: -syscalls on macos does nothing");
+        @eprintln("(i have most of the syscall numbers transcribed, just not a way to turn it on)");
+    };
     
     if cmd.output_file == "" {
         cmd.output_file = "a.out";
     };
     
-    // we output object files directly so we just have to write the bytes
-    write_chunks_or_crash(cmd.output_file, bytes);
+    write_entire_file_or_crash(cmd.output_file, bytes);
     @eprintln(">>> Wrote % to %", cmd.goal, cmd.output_file);
     if cmd.goal == .Relocatable && cmd.os == .macos {
         @eprintln(">>> don't forget to pass -Wl,-undefined,dynamic_lookup to your linker");
