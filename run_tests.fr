@@ -87,7 +87,7 @@ do_it :: fn(vtable: *ImportVTable, s: Str) void = {
                     run_boot(vtable);
                     franca_path = "./target/franca.out";
                 };
-                do_it(vtable, "boot2");
+                sh(@slice(franca_path, "run_tests.fr", "boot2"));  // note: re-exec not recurse until :updateboot
                 sh(@slice("./target/f.out", driver_path, "build", "compiler/main.fr", "-o", "target/release/f.out", 
                     "-unsafe", "-keep-names", "-debug-info"));
             };
@@ -268,21 +268,17 @@ build_release :: fn(vtable: *ImportVTable) void = {
         path := @tfmt("target/release/franca-%-%", os, arch);
         write_entire_file_or_crash(path, bytes);
         if os == .linux {
+            // :PatchOutInterpForStatic
+            // this relies on the backend not using goal.link_libc for anything. 
             // my programs detect if libc is available at runtime and make syscalls directly if not. 
             // all you need to do to make it run as a static binary 
             // is stomp out the header that asks the kernel to use a dynamic loader.
-            // TODO: sketchy that link_libc=false does a bunch of other shit in backend/elf/emit. need to get rid of that. 
             // note: this trick might confuse the `file` utility but you can check it works 
             //       by running under strace or in an environment that doesn't have a libc (like blinkenlights)
             
             Elf :: import("@/backend/elf/bits.fr");
             h := bytes.peek_type(Elf.Header);
             @debug_assert_eq(h.magic, Elf.MAGIC);
-            
-            // TODO: i think it should work as .Dynamic 
-            //       (it did before when i directly compiled to exe with link_libc=false)
-            //       but if you don't do this you crash. maybe its just my skew in do_relocations_static_linux is wrong? 
-            h.type = .Executable;
             
             ph := bytes.rest(h.program_header_off).peek_type(Elf.ProgramHeader);
             ph: []Elf.ProgramHeader = ph.slice(h.program_header_num.zext());

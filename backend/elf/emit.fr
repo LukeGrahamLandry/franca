@@ -78,37 +78,6 @@ finalize_symbols :: fn(m: *Qbe.Module) SymbolTableInfo = {
     enumerate symbols { i, s |
         local_count += int(s.kind == .Local);
     };
-    if !m.goal.link_libc {
-        symbols.len = local_count;
-        // :SLOW
-        local_fix := FixP.list(temp());
-        for fixups { it |
-            ::enum(@type it.symbol.kind);
-            if it.symbol.kind == .Local {
-                local_fix&.push(it);
-            } else {
-                @assert(!it.symbol.strong, "importing non-weak symbol '%' in static binary", it.symbol.name);
-                @match(it.fix.type&) {
-                    fn DataAbsolute() => {
-                        it.fix.patch_at.i64[] = 0;
-                    };
-                    fn InReg(info) => @match(m.goal.arch) {
-                        fn aarch64() => {
-                            // i use adr when in range but i don't want to deal with another relocation type rn
-                            reg := @as(u5) info.r;
-                            inst := it.fix.patch_at.u32.slice(2);
-                            inst[0] = movz(.X64, reg, 0, .Left0);
-                            inst[1] = Arm.arm_nop;
-                        };
-                        fn rv64() => todo();
-                        @default => unreachable();
-                    };
-                    @default => ();
-                };
-            }
-        };
-        fixups = local_fix.items();
-    };
     (fixups = fixups, symbols = symbols, local_count = local_count)
 };
 
@@ -292,8 +261,11 @@ fn output_elf(m: *QbeModule) [][]u8 = {
         T := finalize_symbols(m);
         have_any_imports := T.local_count != T.symbols.len;
         if T.symbols.len > 0 {
-            if have_any_imports {
-                e.request_interp(e.program_header(), base);
+            // :PatchOutInterpForStatic
+            interp_header := e.request_interp(base);
+            // TODO: does the loader do anything other than imports? (= is it ok to assume !link_libc if no imports?)
+            if !have_any_imports || !m.goal.link_libc {
+                interp_header.type = .Null;
             };
             
             dynamics := e.for_dynamic_loader(base, T);
@@ -376,7 +348,8 @@ section_names :: fn(e: *EmitElf, base: PayloadBase) void = {
     };
 };
 
-request_interp :: fn(e: *EmitElf, interp_header: *Elf.ProgramHeader, base: PayloadBase) void = {
+request_interp :: fn(e: *EmitElf, base: PayloadBase) *Elf.ProgramHeader = {
+    interp_header := e.program_header();
     loader_path := @match(e.m.goal.arch) {
         fn x86_64() => "/lib64/ld-linux-x86-64.so.2\0";
         fn aarch64() => "/lib/ld-linux-aarch64.so.1\0";
@@ -397,9 +370,11 @@ request_interp :: fn(e: *EmitElf, interp_header: *Elf.ProgramHeader, base: Paylo
     );
     e.payload&.push_all(loader_path);
     e.payload&.zero_pad_to_align(8);
+    interp_header
 };
 
 // This is needed even for static executables: data relocations of local symbols are applied in franca_runtime_init. 
+// (see do_relocations_static_linux)
 for_dynamic_loader :: fn(
     e: *EmitElf, 
     base: PayloadBase, 
@@ -414,7 +389,8 @@ for_dynamic_loader :: fn(
     dynamics&.push(tag = .Flags_1, val = 1);  // ?     // TODO: does this do anything?
     dynamics&.push(tag = .Debug, val = 0);  // ?     // TODO: does this do anything?
    
-    extra_strings := @if(m.goal.link_libc, glibc_dylib_paths, empty());
+    // including Needed when !link_libc is fine. won't do anything if there's no Interp to read them. 
+    extra_strings := glibc_dylib_paths;
     table := e.create_symbol_table(T.symbols, .DynSymbolTable, extra_strings, base, false);
     for table.extra_strings { off |
         dynamics&.push(tag = .Needed, val = off);
@@ -643,6 +619,9 @@ create_rela_table :: fn(
             ptr_diff(section_base_address, fix.fix.patch_at.addr),
             ptr_diff(m.segments&[.Code].mmapped.ptr, fix.fix.patch_at.addr) + Elf.MYSTERY_SPICE, 
         );
+        
+        // unreachable because collect_aot_fixups filters
+        @debug_assert(fix.fix.type&.is(.DataAbsolute) || m.goal.type == .Relocatable);
         
         type, increment := @match(fix.fix.type&) {
             fn DataAbsolute(it) => {

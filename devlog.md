@@ -20,11 +20,16 @@
     was broken and i just changed how it was compiled so that made sense. 
     sometimes the answer is just go to sleep dumb ass. 
   - repro problem was because i was doing -debug-info which has never worked because #comptime_addr shows up in the source. 
-  - static+pie still doesn't work the new way tho
 - ive learned you have to do `strace -f` to see all the threads. 
   that's why it looked like i never did futex_wait even though futex_wake returns 1 often. 
   - also it disagrees about arm O_CLOEXEC. i was off by a zero. maybe that will get rid of the rare remaining errno 26. 
 - disable part of selsel_amd64 when !constfold so it works to bump incremental.magic without rebootstrapping
+- had a big `if !link_libc` thing in elf emit that looked reasonable because when jitting you need :UnfilledGotAccessStillNeedsPatch
+  but collect_aot_fixups filters to data relocations so it already relies on patch_pending_symbols removing and FixupType.InReg.
+  the only thing it was actually doing was removing the relocations for weak imports. 
+  instead of that, have do_relocations_static_linux skip them. that also fixed multitarget static-pie. 
+- get rid of some dead code. no need to have proactive bindings. can always get them back if i need them. 
+  - linux.LandLock, a few tracy_emit varients. 
 
 ## (Dec 17/18)
 

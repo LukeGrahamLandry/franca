@@ -195,6 +195,8 @@ async function get_file(path) {
         w.onmessage = async (msg) => {
             if (msg.data.tag != "download") {
                 console.log(msg.data);
+                if (msg.data.tag === "err" || msg.data.tag === "show") handle(msg); 
+                flush();
             } else {
                 w.postMessage({ tag: "reset" });
                 thread_pool.push(w);
@@ -293,6 +295,7 @@ async function load_wasm() {
     document.getElementById("time").innerText = "Ready"; 
     return result;
 }
+let line = "";
 
 const p = new URLSearchParams(window.location.search);
 const dbg = p.get("dbg");
@@ -361,12 +364,11 @@ document.getElementById("all").onclick = async () => {
     document.getElementById("time").innerText = msg; 
 };
 
-let line = "";
-const show = (s) => {
+function show(s) {
     line += s;
 };
 
-const flush = () => {
+function flush() {
     if (line.length != 0) {
         document.getElementById("out").value += line;
         line = "";

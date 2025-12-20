@@ -1,8 +1,17 @@
 
+- something that shows you unreferenced constants across compilation units. 
+  also let driver do something less cringe than get_tagged.
+  so maybe add back compiler event hooks
+- make backend/meta/test.fr without -bin not rely on #! / franca symlink
 - would be less confusing if i just always had prefer_libc_memmove=false.
   but amd can't compile staticmmemove without folding which happens on boot. 
   and means you can't bump incremental.magic without re-bootstrapping. 
-- elfheader.type=Dynamic for static PIE doesn't work when doing multitarget build via frc. 
+- there's a bunch of problems with how i do debug-info but i kinda don't want to fix them 
+  because i should throw it all away and use dwarf instead so i can use other people's debuggers. 
+- for debug info in exe via frc, 
+  headers&payload part need to be done when doing the exe because they have machine code offsets
+  but the source&files need to be in the cache file from the frontend. 
+  so seal_debug_info needs to be split into two. 
 - `-debug-info` embedded source includes fill_export_ffi's aslr bytes in #comptime_addr. 
   already have logic for skipping that for the cache files so just need to reuse that 
   (but be careful because it will change the byte offsets of Span so need to leave padding?)
