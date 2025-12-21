@@ -4,19 +4,20 @@ TRACK_SCOPES :: false;
 
 /// Query interface /// 
 
-fn put_constant(self: *Scopes, name: Var, value: FatExpr, ty: LazyType) void = {
+fn put_constant(c: *SelfHosted, name: Var, value: FatExpr, ty: LazyType) void = {
+    self: *Scopes = c.scopes;
     @debug_assert(name.kind == .Const);
     ptr := self.get_var_data(name);
     ptr.expr = value;
-    ptr.set_type(ty);
+    ptr.set_type(ty, c);
     ptr.ready = true;
 }
 
-fn set_type(ptr: *VarData, ty: LazyType) void #inline = {
+fn set_type(ptr: *VarData, ty: LazyType, c: *SelfHosted) void #inline = {
     ::ptr_utils(LazyType);
     if !@is(ty&, .Infer, .Finished) {
         if ptr.nullable_type.is_null() {
-            ptr.nullable_type = current_comptime().get_alloc().box_uninit(LazyType);
+            ptr.nullable_type = c.get_alloc().box_uninit(LazyType);
         };
         ptr.nullable_type[] = ty;
     };
@@ -109,7 +110,7 @@ fn fill_directory_scope(self: *SelfHosted, s: ScopeId) Res(void) = {
 
             var := @try(self.decl_var(s, name, .Const, zeroed Span /*TODO*/, .Unknown)) return;
             dest := self.scopes.get_var_data(var);
-            dest.set_type(Finished = ScopeId);
+            dest.set_type((Finished = ScopeId), self);
             dest.expr&.set(self.to_values(ScopeId, new_s), ScopeId);
             new_s
         }[];
@@ -123,7 +124,7 @@ fn fill_directory_scope(self: *SelfHosted, s: ScopeId) Res(void) = {
             name := self.pool.insert_owned(filename.slice(0, filename.len - 3));
             var := @try(self.decl_var(s, name, .Const, zeroed Span /*TODO*/, .Unknown)) return;
             dest := self.scopes.get_var_data(var);
-            dest.set_type(Finished = ScopeId);
+            dest.set_type((Finished = ScopeId), self);
             dest.expr&.set(self.to_values(ScopeId, new_s), ScopeId);
         };
         
@@ -654,7 +655,7 @@ fn decl_var(self: *SelfHosted, s: ScopeId, name: Symbol, kind: VarType, loc: Spa
     dest.expr.loc = loc;
     if kind == .Const {
         dest.expr.expr = (Poison = placeholder);
-        dest.set_type(.Infer);
+        dest.set_type((.Infer), self);
     };
     
     scope.vars&.push(var, self.get_alloc()); // includes constants!
@@ -921,7 +922,7 @@ fn decl_scope(self: *RenumberVars, name: *ScopeId) void = {
         self.compiler.codemap.show_error_line(old_scope.loc, false);
     };
     
-    new_constants := zeroed RawHashMap(Symbol, Var);
+    new_lookup := zeroed RawHashMap(Symbol, Var);
     a := self.compiler.get_alloc();
     each new_vars { old | 
         v := old;
@@ -935,14 +936,14 @@ fn decl_scope(self: *RenumberVars, name: *ScopeId) void = {
             expr := self.compiler.clone(v.expr&);
             ty := v.maybe_stack_allocated_type();
             ty := self.compiler.clone(ty);
-            self.scope.put_constant(new, expr, ty);
+            self.compiler.put_constant(new, expr, ty);
         };
         old[] = new;
-        new_constants&.insert(new.name, new, a);
+        new_lookup&.insert(new.name, new, a);
     };
     new_scope := self.scope[id]&;
     new_scope.vars = new_vars.as_raw();
-    new_scope.lookup = new_constants;
+    new_scope.lookup = new_lookup;
     name[] = id;
 }
 
@@ -1165,13 +1166,17 @@ fn add_to_scope(c: *SelfHosted, s: ScopeId, name: Symbol, type: LazyType, expr: 
     };
     // TODO: if i keep this rule it needs to be a normal error not an assert. user code can get here. 
     @debug_assert(var.kind == .Const, "stomped var with const");
-    c.scopes.put_constant(var, expr, type);
+    c.put_constant(var, expr, type);
     var
 }
 
 fn get_include_std(c: *SelfHosted, name: Str) ?WaitingParse = {
     zone := zone_begin(.LoadFile); // TODO: defer
-    src := get_include_std(c.get_alloc(), name) || return(.None);
+    src := if name == "compiler" {
+        c.export_ffi.src
+    } else {
+        get_include_std(c.get_alloc(), name) || return(.None)
+    };
     name := @if(name == "compiler", name, (@tfmt("@/%", name)).shallow_copy(c.get_alloc()));
     file := c.codemap.add_file(name, src);
     id := push_parse(c.parser, src, file);
@@ -1185,10 +1190,6 @@ STDLIB_PATH :: @static(?RawList(u8)) (.None);
 fn get_include_std(a: Alloc, name: Str) ?Str = {
     ::if(?Str);
     out := u8.list(a);
-    if name == "compiler" {
-        fill_export_ffi(out&);
-        return(Some = out.items());
-    };
     if STDLIB_PATH[] { lib |
         check := @tfmt("%/%", lib.items(), name);
         if read_and_push(out&, check) {

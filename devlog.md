@@ -1,4 +1,15 @@
 
+## (Dec 20)
+
+- make comptime_addr less weird: use indices. pass the compiler to fill_export_ffi so its more clear that the pointer is included. 
+- try to show the active tasks when reporting a compile error so you know why you're compiling this thing
+- poll_until_finished: store one stack of tasks instead of in Task.parent. 
+- waste less memory: box and recycle OverloadAttempt, keep Action boxed instead of unboxing and reboxing all the time. 
+- dump_bin was occasionally dying because i wasn't setting codemap=None in init_empty_for_template_only. 
+- there's some sort of strange memory corruption with packed_enum_names. 
+  only manifests when compiled with enough other things, can't make a tiny program with the bug. 
+  i think its about sharing it between create_enum_name_table_outlined and enum_name_from_ordinal. 
+
 ## (Dec 19)
 
 - there's some stuff in importvtable that's only used in emit_ir from back when that was part of the driver

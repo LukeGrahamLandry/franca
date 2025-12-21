@@ -61,7 +61,7 @@ SelfHosted :: @rec @struct(
     other_module: RawList(*QbeModule),
     stack_trace_last_callee: ?FuncId, // bleh
     backtrace_node: *Crash.LocationResolverNode,
-    recycle_funcid: List([]FuncId),
+    recycle_overloadattempt: List(*OverloadAttempt),
     debug_deny_jit_shim_calls := false,
     main_thread_tls: i64,
     stats := zeroed @struct {
@@ -71,6 +71,7 @@ SelfHosted :: @rec @struct(
         spec_const_fn: i64;
         dyn_call: i64;
         shim_calls: i64;
+        yield_count: i64;
         where_clause: i64;
         os_resolve: i64;
         os_resolve_iter: i64;
@@ -81,7 +82,9 @@ SelfHosted :: @rec @struct(
     log: List(u8),
     string_type: ?Type,
     comptime_prefer_syscalls: bool,  // need this inside a jit-shim where you might not have tls
+    export_ffi := zeroed ExportFfi,
 );
+ExportFfi :: @struct(src: Str, fns: []rawptr);
 
 OverloadKey :: @struct(arg: Type, req: Type);
 WhereKey :: @struct(template: FuncId, arg: Values);
@@ -385,7 +388,7 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
         other_module = empty(),
         stack_trace_last_callee = .None,
         backtrace_node = push_resolver(SelfHosted, self, find_function_aa),
-        recycle_funcid = list(a),
+        recycle_overloadattempt = list(a),
         library_scope = NOSCOPE, // patched in make_top_level
         main_thread_tls = get_stack_base_for_tls(),
         string_type = .None,
@@ -416,6 +419,7 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
     c := tls(.comptime);
     @assert(c[].is_null(), "Cannot call init_self_hosted inside another compiler. push_context with comptime=null first.");
     c[] = SelfHosted.raw_from_ptr(self);
+    self.export_ffi = fill_export_ffi(self);
     
     stable_compiler_context :: fn(self: *SelfHosted) Compiler = {
         a := self.get_alloc();

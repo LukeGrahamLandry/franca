@@ -4,26 +4,25 @@ CompilerDispatch :: @struct(
     const_bound_memo: HashMap(MemoKey, FuncId),
     yield_count: i64 = 0,
     return_labels: BucketArray(FuncId), // [LabelId]
-    root_tasks: List(*Task),
+    wip_tasks: List(*Task),
 );
 
 Task :: @rec @struct(
-    action: Action,
-    parent: ?*Task,
-    done: bool = false,
+    action: *Action,
     trace: ?TraceCtx,
+    loc: Span,
 );
 
 ExprAttempt :: @struct(expr: *FatExpr, requested: ResultType);
 VarAttempt :: @struct(name: Var, requested: ResultType);
 Action :: @rec @tagged(
-    CompileBody: FuncId,  // After this, we can generate bytecode.
+    CompileBody: FuncId,  // After this, we can emit_ir.
     Jit: FuncId, // After this, it's safe to call a function pointer. 
     EvalConstant: VarAttempt,  // find_const. 
-    ResolveOverload: OverloadAttempt,
+    ResolveOverload: *OverloadAttempt,
     FinishRecType: @struct(hole: Type, name: Var, value: *FatExpr),
     // Used for function callees, you can't call a function until ~all~ are ready.
-    All: List(*Task),
+    All: []*Task,
 );
 
 OverloadAttempt :: @struct(
@@ -42,7 +41,7 @@ fn init(a: Alloc) CompilerDispatch = {
         enclosing_function = .None,
         const_bound_memo = init(a),
         return_labels = init(10, a),
-        root_tasks = list(10, a),
+        wip_tasks = list(10, a),
     )
 }
 
@@ -53,117 +52,89 @@ poll_in_place :: fn(self: *SelfHosted, $T: Type, $f: @Fn() Maybe(T)) Res(T) #gen
             fn Ok(it)  => return(Ok = it[]);
             fn Err(it) => return(Err = it[]);
             fn Suspend(new_dep) => {
-                t := self.new_task(new_dep[][], .None);
+                t := self.new_task(new_dep[]);
                 @try(self.poll_until_finished(t)) return;
             };
         };
     }
 };
 
-fn new_task(self: *SelfHosted, action: Action, parent: ?*Task) *Task = {
+fn new_task(self: *SelfHosted, action: *Action) *Task = {
     new_task := self.get_alloc().boxed(Task, 
-        (action = action, parent = parent, trace = .None));
+        (action = action, trace = .None, loc = self.last_loc));
     new_task
 }
 
 fn poll_until_finished(self: *SelfHosted, task: *Task) Result(void, *CompileError) = {
-    self.dispatch.root_tasks&.push(task);
-    top_task := task;
     the_mark := mark_temporary_storage();
-    @debug_assert(task.parent.is_none(), "cannot poll a task with a parent. recursion bad.");
-    out := Result(void, *CompileError).zeroed();
-    loop {
+    i := self.dispatch.wip_tasks.len;
+    self.dispatch.wip_tasks&.push(task);
+    while => self.dispatch.wip_tasks.len > i {
+        continue :: local_return;
         reset_temporary_storage(the_mark);
-        if self.poll_loop_body(task&, out&) {
-            return(out);
-        };
-    }
-}
-
-// this is a dumb way to factor this but i want to call it from examples/compiler_gui too. 
-fn poll_loop_body(self: *SelfHosted, task_in: **Task, out: *Result(void, *CompileError)) bool = {
-    task := task_in[];
-    continue :: fn() Never #no_trace => {
-        task_in[] = task;
-        return(false)
-    };
-    
-    finished :: fn() void #no_trace => {
-        task.done = true;
-        if task.parent { next | 
-            task = next;
-            continue();
-        };
         
-        self.dispatch.root_tasks&.pop();
+        task := self.dispatch.wip_tasks[self.dispatch.wip_tasks.len - 1];
         
-        out[] = .Ok;
-        return(true);
-    };
-    
-    if task.done {
-        finished();
-    };
-    
-    @match(task.action&) {
-        fn All(tasks) => {
-            while => tasks.len != 0 {
-                xx := tasks.items().last();
-                next := xx.expect("none so has last")[];
-                if next.done {
-                    tasks.pop().expect("pop last");
-                } else {
-                    next.parent = (Some = task); // TODO: make this already be done 
-                    task = next;
-                    continue();
-                };
+        if task.trace.is_none() {
+            task.trace = (Some = zone_begin(.Task));
+            @if(ENABLE_TRACY) {
+                out := u8.list(temp());  // it seems to make a copy so this is fine
+                log(task.action&, self, out&);
+                out&.push(0);
+                ___tracy_emit_zone_name(task.trace.Some, out.items());
             };
-            finished();
-        }
-        @default => ();
-    };
-    
-    
-    if task.trace.is_none() {
-        task.trace = (Some = zone_begin(.Task));
-        @if(ENABLE_TRACY) {
-            out := u8.list(temp());  // it seems to make a copy so this is fine
-            log(task.action&, self, out&);
-            out&.push(0);
-            ___tracy_emit_zone_name(task.trace.Some, out.items());
         };
-    };
-    res := self.exec_task(task);
-    if !res&.is(.Suspend) {
-        zone := task.trace.unwrap();
-        zone_end(zone);
-        task.trace = .None;
+        
+        @if_let(task.action) fn All(tasks) => {
+            while => tasks.len > 0 {
+                it := tasks[tasks.len - 1];
+                tasks.len -= 1;
+                self.dispatch.wip_tasks&.push(it);
+                continue();
+            };
+            x := self.dispatch.wip_tasks&.pop().unwrap();
+            ::[]Task;
+            @if(@run safety_check_enabled(.DebugAssertions)) x.slice(1).set_zeroed();
+            continue();
+        };
+        
+        res := self.exec_task(task);
+        if !res&.is(.Suspend) {
+            zone := task.trace.unwrap();
+            zone_end(zone);
+            task.trace = .None;
+        };
+        
+        @match(res) {
+            fn Err(e) => {
+                // TODO: you want to not pop them so it shows in error trace but some errors are ok? like overloading?
+                //       not popping makes @assert_type_error bubble up
+                //       (also if not pop need to delay recycle_overloadattempt)
+                self.dispatch.wip_tasks.len = i;
+                return(Err = e);
+            }
+            fn Ok() => {
+                x := self.dispatch.wip_tasks&.pop().unwrap();
+                @if(@run safety_check_enabled(.DebugAssertions)) x.slice(1).set_zeroed();
+                continue();
+            }
+            fn Suspend(next) => {
+                t := self.new_task(next);
+                self.dispatch.wip_tasks&.push(t);
+                continue();
+            }
+        };
+        unreachable();
     };
     
-    @match(res) {
-        fn Err(e) => {
-            self.dispatch.root_tasks&.pop();
-            out[] = (Err = e);
-            return(true);
-        }
-        fn Ok() => finished();
-        fn Suspend(next) => {
-            t := self.new_task(next[], (Some = task));
-            task = t;
-            continue();
-        }
-    };
-    unreachable()
+    .Ok
 }
 
 ::tagged(Action);
 fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
-    if task.done {
-        return(.Ok);
-    };
     self.dispatch.enclosing_function = .None;
     
-    @match(task.action&) {
+    @match(task.action) {
         fn EvalConstant(v) => {
             name := v.name;
             var  := self.scopes.get_constant(name);
@@ -194,16 +165,15 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
             };
             
             // when possible, you want to emit callees first so they can be inlined. 
+            // but anything you miss here will still get a jit-shim in create_jit_shim (via EmitIr.pending) so it's not a big deal
             waiting: List(*Task) = list(self.get_alloc());
             for func.callees { callee |
                 callee_func := self.get_function(callee);
                 if !callee_func.get_flag(.AsmDone) {
-                    if is_mutually_recursive(task, callee) {
-                        // TODO: add to mutual_callees and remove from callees. 
-                        // TODO: make sure all mutual_callees are compiled somewhere. but rn this only decides mutual if we see that we're already working on it.
-                        //       (easy direct cases are added in sema tho)
+                    if is_mutually_recursive(self, callee) {
+                        // if it's AvoidJitShim there's kinda no hope but you'll find out if you try to call it :)
                     } else {
-                        t := self.new_task((Jit = callee), .None);
+                        t := self.new_task(self.wait_for(Jit = callee));
                         waiting&.push(t);
                     };
                 } else {
@@ -212,15 +182,10 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                 };
             };
             if waiting.len != 0 {
-                return(Suspend = self.wait_for(All = waiting));
+                return(Suspend = self.wait_for(All = waiting.items()));
             };
             
-            arg_ty := @check(self.infer_arguments(fid)) return;
-            ret_ty := @check(self.infer_return(fid)) return;
-            
-            arg_ty := func.finished_arg.expect("fill arg");
-            ret_ty := func.finished_ret.expect("fill ret");
-            @err_assert(!arg_ty.is_unknown() && !ret_ty.is_unknown(), "unknown fn types!!") return;
+            @debug_assert(func.finished_arg.is_some() && func.finished_ret.is_some());
             
             func := self.get_function(fid);
             if !func.get_flag(.RealAsmDone) {
@@ -235,12 +200,12 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
             for func.mutual_callees { callee |
                 callee_func := self.get_function(callee);
                 if callee_func.get_flag(.AvoidJitShim) && !callee_func.get_flag(.AsmDone) {
-                    t := self.new_task((Jit = callee), .None);
+                    t := self.new_task(self.wait_for(Jit = callee));
                     waiting&.push(t);
                 };
             };
             if waiting.len != 0 {
-                return(Suspend = self.wait_for(All = waiting));
+                return(Suspend = self.wait_for(All = waiting.items()));
             };
 
             // :AssumeDone
@@ -256,10 +221,10 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                 real_name := self.pool.get(overloads.name);
                 ___tracy_emit_zone_name(zone, real_name);
             };
-            res := self.resolve_in_overload_set_new(call.arg, f);
+            res := self.resolve_in_overload_set_new(call.arg, f[]);
             zone_end(zone);
             if !res&.is(.Suspend) {
-                self.recycle_funcid&.push(f.options.maybe_uninit);
+                self.recycle_overloadattempt&.push(f[]);
             };
             fid := @check(res) return;
             f_value := self.to_values(FuncId, fid);
@@ -273,11 +238,10 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
     .Ok
 }
 
-fn is_mutually_recursive(task: *Task, callee: FuncId) bool = {
-    while => task.parent.is_some() {
-        task = task.parent.expect("some so unwrap");
+fn is_mutually_recursive(self: *SelfHosted, callee: FuncId) bool = {
+    for self.dispatch.wip_tasks { task |
         @if_let(task.action) fn Jit(other) => {
-            if other == callee {
+            if other[] == callee {
                 return(true);
             };
         };
@@ -296,7 +260,7 @@ fn Maybe($T: Type) Type = {
 }
 
 fn wait_for(s: *SelfHosted, t: Action) *Action = {
-    s.dispatch.yield_count += 1;
+    s.stats.yield_count += 1;
     s.get_alloc().boxed(Action, t)
 }
 

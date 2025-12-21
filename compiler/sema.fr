@@ -550,8 +550,10 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
     if func.get_flag(.EnsuredCompiled) {
         return(Ok = false);
     };
+    @err_assert(!func.get_flag(.Inline), "cannot be both inline and special") return;
     good := false;
     fn eval_str(self: *SelfHosted, e: *FatExpr) Maybe(Symbol) = {
+        @if_let(e.expr&) fn String(it) => return(Ok = it[]);
         str := self.get_runtime_string_type();
         ir := @check(self.immediate_eval_expr(e, str)) return;
         ir := Str.assume_cast(ir&)[];
@@ -575,10 +577,8 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
             };
             @case(Flag.import.ident()) => {
                 // :io_driver
-                lib_name := @match(tag.non_void_arg()) {
-                    fn Some(lib_name) => @check(self.eval_str(lib_name)) return;
-                    fn None() => Flag.SYMBOL_ZERO.ident();
-                };
+                lib_name := @unwrap(tag.non_void_arg(), "#import requires arg") return;
+                lib_name := @check(self.eval_str(lib_name)) return;
                 
                 find_import(lib_name);
                 
@@ -588,7 +588,9 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                 good = true;
                 ::as_ref(FatExpr);
                 value := @unwrap(tag.non_void_arg(), "#comptime_addr requires arg") return;
-                ptr := @check(self.eval(value, i64)) return;
+                i := @check(self.eval(value, i64)) return;
+                @err_assert(i.ult(self.export_ffi.fns.len), "#comptime_addr oob (do not use outside fill_expor_ffi)") return;
+                ptr := self.export_ffi.fns[i].int_from_rawptr();
                 @err_assert(func.body&.is(.Empty), "#comptime_addr function must not have a body") return;
                 // only the comptime field matters here. emit_ir checks that aot code never tries to call something marked .ComptimeOnly
                 func.body = (DynamicImport = (comptime = ptr, name = func.name, lib = Flag.comptime_addr.ident(), weak = false));
@@ -1488,14 +1490,19 @@ fn compile_call_overload_set(self: *SelfHosted, expr: *FatExpr, requested: Resul
     if data.ready.len == 1 && data.pending.len == 0 {
         self.set(f, FuncId, data.ready[0]);
     } else {
-        mem := self.recycle_funcid&.pop() || empty();
-        return(Suspend = self.wait_for(ResolveOverload = (
+        a := self.get_alloc();
+        // reuse these because need one 55716 times but only allocate 30 -- Dec 20, 2025. 
+        it := self.recycle_overloadattempt&.pop() || 
+            a.box_zeroed(OverloadAttempt);
+        mem := it.options.maybe_uninit;
+        it[] = (
             os = os, 
             call = (expr = expr, requested = requested), 
             callsite = self.dispatch.enclosing_function,
             last_ready_count = 0,
-            options = (maybe_uninit = mem, len = 0, gpa = self.get_alloc()),
-        )));
+            options = (maybe_uninit = mem, len = 0, gpa = a),
+        );
+        return(Suspend = self.wait_for(ResolveOverload = it));
     };
     .Ok
 }
@@ -3009,7 +3016,7 @@ fn instantiate_where_generic(self: *SelfHosted, template: FuncId, generic_types:
             type := generic_types[n];
             b.ty = (Finished = type);
             //b.ty = (PendingEval = (expr = (GetVar = new), ty = Type, loc = template_func.loc, done = false));
-            self.scopes.put_constant(new, self.to_expr(Type, type, template_func.loc), (Finished = Type)); // :get_or_create_type
+            self.put_constant(new, self.to_expr(Type, type, template_func.loc), (Finished = Type)); // :get_or_create_type
             n += 1;
         };
     };
@@ -3152,7 +3159,6 @@ fn resolve_in_overload_set(self: *SelfHosted, f_ty: FnType, i: OverloadSet, loc:
     };
         
     ::if([]FatExpr);
-    blocked: List(*Action) = list(temp());
     still_interesting: List(FuncId) = list(temp());
     for interesting& { opt | 
         continue :: local_return;
@@ -3202,10 +3208,6 @@ fn resolve_in_overload_set(self: *SelfHosted, f_ty: FnType, i: OverloadSet, loc:
     };
 
     interesting = still_interesting;
-    
-    if !blocked.is_empty() {
-        return(Suspend = blocked[0]);  // TODO: return all? don't just pick one. 
-    };
     
     if interesting.len == 1 {
         return(Ok = interesting[0]);
@@ -3270,7 +3272,7 @@ fn hoist_constants(self: *SelfHosted, body: []FatStmt) Maybe(void) #once = {
             }
             fn Decl(f) => if f.kind == .Const {
                 @debug_assert(f.name&.is(.Var), "tried to hoist unresovled decl");
-                self.scopes.put_constant(f.name.Var, f.default, f.ty);
+                self.put_constant(f.name.Var, f.default, f.ty);
                 stmt.stmt = .Noop;
             };
             @default => ();
@@ -3370,7 +3372,6 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
                 func.set_flag(.Intrinsic);
             };
             @case(Flag.inline.ident()) => {
-                // TODO: error on conflicting annotations. 
                 func.set_flag(.Inline);
             };
             @case(Flag.avoid_shim.ident()) => func.set_flag(.AvoidJitShim);
@@ -3589,7 +3590,7 @@ fn save_const(self: *SelfHosted, name: Var, val_expr: Expr, final_ty: Type, loc:
     val := self.scopes.get_var_data(name);
     val.expr.expr = val_expr;
     val.expr.ty = final_ty;
-    val.set_type(Finished = final_ty);
+    val.set_type((Finished = final_ty), self);
     .Ok
 }
 
@@ -4317,8 +4318,6 @@ fn builtin_macro(self: *SelfHosted, builtin_name: Symbol) Result(Ty(Values, Type
         @case(Flag.Never.ident())       => builtin_type(Never);
         @case(Flag.true.ident())        => return(Ok = (((Small = (1, 1)), self.get_or_create_type(bool))));
         @case(Flag.false.ident())       => return(Ok = (((Small = (0, 1)), self.get_or_create_type(bool))));
-        @case(Flag.f64.ident())         => builtin_type(f64);
-        @case(Flag.f32.ident())         => builtin_type(f32);
         @case(Flag.UnknownType.ident()) => builtin_type(UnknownType);
         @case(Flag.CVariadic.ident())   => builtin_type(CVariadicType);
         @default => {
@@ -4337,12 +4336,10 @@ fn struct_type(self: *SelfHosted, pattern: *Pattern, is_union: bool) Maybe(Type)
                 // TODO: this scope means a totally different thing (nothing), its not where variables in the struct will be looked up
                 scope = self.scopes.new_scope(scope_from_index(0), self.get_alloc(), pattern.loc);
             };
-            name := b.ident().expect("field name");
-            expr := @unwrap(b.get_default(), "constant field % must have a value.", self.pool.get(name)) return;
-            v := self.unique_const(name);
-            self.scopes.put_constant(v, expr[], b.ty);
-            self.scopes[scope].lookup&.insert(name, v, self.get_alloc());
-            expr.expr = (GetVar = v);  // Save our work because we might yield on a later field. 
+            
+            // contextual_field only has the name so find_var_in_scope to lookup the var
+            self.lift_to_const(b, (Some = scope))
+                || return(@err("constant field must have a value"));
         };
     };
     
@@ -4365,6 +4362,22 @@ fn struct_type(self: *SelfHosted, pattern: *Pattern, is_union: bool) Maybe(Type)
     )))
 }
 
+fn lift_to_const(self: *SelfHosted, b: *Binding, scope: ?ScopeId) ?Var = {
+    expr := b.get_default() || return(.None);
+    // for `@struct { a := 0; }` b.name will already be Var(kind = Var) 
+    // because it's resolved before knowing it will be used as a type. 
+    // still need to make a new one with Var(kind = Const) for the field's default value. 
+    // (changing var.kind is sketchy because its stored on the Var not referenced by id) 
+    name := b.ident().expect("field name");
+    v := self.unique_const(name);
+    self.put_constant(v, expr[], b.ty);
+    if scope { scope |
+        self.scopes[scope].lookup&.insert(v.name, v, self.get_alloc());
+    };
+    expr.expr = (GetVar = v);
+    (Some = v)
+}
+
 fn make_runtime_field(self: *SelfHosted, b: *Binding) Maybe(Field) #inline = {
     name := b.ident().expect("field name");
 
@@ -4377,15 +4390,10 @@ fn make_runtime_field(self: *SelfHosted, b: *Binding) Maybe(Field) #inline = {
         default.ty
     };
     
-    ::if_opt(*FatExpr, Var);
-    default := if b.get_default() { (expr: *FatExpr) |
-        v := self.unique_const(name);
-        self.scopes.put_constant(v, expr[], b.ty);
-        expr.expr = (GetVar = v);  // Save our work because we might yield on a later field. 
-        v
-    } else {
-        zeroed(Var)
-    };
+    // no scopes.lookup&.insert because this is only accessed in construct_struct_literal where you already have the Var
+    default := self.lift_to_const(b, .None)
+        || zeroed(Var);
+    
     (Ok = (
         name = name,
         ty = ty,

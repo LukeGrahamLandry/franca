@@ -1,5 +1,11 @@
+// the api exposed by the compiler to comptime code. 
 
 fn init_driver_vtable() *ImportVTable = {
+    ::if false {
+        // HACK compilation order. it puts type annotations and some of the vtable fns need to call them directly. 
+        fill_export_ffi(SelfHosted.ptr_from_int(0));
+    };
+
     @static(ImportVTable) {
         storage := ImportVTable.zeroed();
         fill_driver_vtable(storage&);
@@ -21,7 +27,6 @@ next_abi_version :: fn() i64 = {
 
 fn fill_driver_vtable(vtable: *ImportVTable) void = {
     vtable.driver_abi_version = next_abi_version();
-    vtable.magic = 0;  // unused
     
     vtable.find_unique_func = fn(c: Compiler, name: Symbol) ?FuncId = { 
         c := c.cast()[][];
@@ -332,46 +337,38 @@ fn current_comptime() *SelfHosted = {
     s
 }
 
-fn fill_export_ffi(out: *List(u8)) void = {
-    @fmt(out, """
+fn fill_export_ffi(self: *SelfHosted) ExportFfi = {
+    prefix :: """
         __builtin_compiler_abi :: %;
         
         // TODO: take this out of the compiler
         fn size_of(T: Type) i64 #fold = { t := get_meta(T); t.stride_bytes.zext() }
-    """, next_abi_version());
-    
+    """;
     data :: {
         s := Type.scope_of(compiler_exports);
         names := get_constants(s);
         src := u8.list(names.len * 70, ast_alloc());
+        @fmt(src&, prefix, next_abi_version());
+        
         fns := rawptr.list(names.len, ast_alloc());
         fr := current_compiler_context();
         for names { name |
             fid := get_constant(FuncId, s, name) 
                 || @panic("fill_export_ffi '%' is not a function", name.str());
             
-            if generate_compctx_wrapper(fid, src&) {
+            if generate_compctx_wrapper(fid, src&, fns.len) {
                 fns&.push(fr.get_jitted(fid));
             };
         };
+        @fmt(src&, "__baked_compctx :: "); // addr patched in at runtime
         (src.items(), fns.items())
     };
     
     src, fns := data;
-    
-    @fmt(out, "__baked_compctx :: %;", tls(.comptime)[]);
-    out.reserve(src.len + fns.len*10);
-    i := 0;
-    for src { b |
-        if b == "%".ascii() {
-            @fmt(out, "%", fns&[i]);
-            i += 1;
-        } else {
-            out.push(b);
-        };
-    };
-    @assert_eq(i, fns.len, "fill_export_ffi missing templates");
-    //@fmt(out, src, ..fns);  this would be kinda cool
+    out := @ref u8.list(src.len + 15, self.get_alloc());
+    out.push_all(src);
+    @fmt(out, "%;", SelfHosted.int_from_ptr(self));  // patch       ^
+    (src = out.items(), fns = fns)
 }
 
 // TODO: instead of ComptimeOnly these should be expressed as imports that won't be filled at runtime 
@@ -728,6 +725,7 @@ compiler_exports :: @struct {
                 };
                 enumerate it.fields { i, it | 
                     if it._0 == name {
+                        ::tagged(Values);
                         @debug_assert(it._1&.is(.Small), "called tag_value but value was .Big");
                         return(it._1.Small._0);
                     };
@@ -921,7 +919,7 @@ compiler_exports :: @struct {
 // extra *SelfHosted parameter so the functions are tied to thier compctx and comptime code 
 // doesn't have to pass that around. 
 // ctx as last param means the wrapper just has to set one register not rotate them. 
-generate_compctx_wrapper :: fn(fid: FuncId, src: *List(u8)) bool = {
+generate_compctx_wrapper :: fn(fid: FuncId, src: *List(u8), i: i64) bool = {
     func := get_function_ast(fid, false, false, false, false);
     sign := func.annotations.find(fn(it) => it.name == (@symbol export)) 
         || return(false);
@@ -951,7 +949,7 @@ generate_compctx_wrapper :: fn(fid: FuncId, src: *List(u8)) bool = {
     @fmt(src, " % #noinline = {\n", tags);
     @fmt(src, "    % :: fn(", export_name);
     sig("_ctx: i64");
-    @fmt(src, " #comptime_addr(%) %;\n", "%", tags);  // :updateboot \%
+    @fmt(src, " #comptime_addr(%) %;\n", i, tags);
     @fmt(src, "    %(", export_name);
     each args { it |
         @fmt(src, "%, ", it.name.unwrap().str());

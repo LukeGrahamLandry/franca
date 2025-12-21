@@ -1,4 +1,8 @@
 
+- i really need to make the zero value of Option be None
+- should have a thing for getting the current scope. 
+  get_constant doesn't recurse up parents. 
+  ex. builtin_macro would like to eval a symbol as though it were written in the source.
 - each build_for_graphics program gets a new 300k cache file for its driver. 
   - also it shouldn't statically call make_exec because that compiles the whole output_wasm_module_jit
 - add wasm binary to repro. really should just include hashes of everything that's expected to be platform independent in the build artifact. 
@@ -12,7 +16,7 @@
   headers&payload part need to be done when doing the exe because they have machine code offsets
   but the source&files need to be in the cache file from the frontend. 
   so seal_debug_info needs to be split into two. 
-- `-debug-info` embedded source includes fill_export_ffi's aslr bytes in #comptime_addr. 
+- `-debug-info` embedded source includes fill_export_ffi's `__baked_compctx :: <aslr bytes>`. 
   already have logic for skipping that for the cache files so just need to reuse that 
   (but be careful because it will change the byte offsets of Span so need to leave padding?)
 - extension of that is that the embedded source doesn't have the same reachability thing 
@@ -20,7 +24,6 @@
   but the source might if you ask for that. maybe that's what i want because i like the idea 
   of being able to recompile from that but it's a bit counter intuative. idk. 
 - better error message than "failed to guess type" if you do `@print("%", fmt_hex(undeclared_variable.foo.bar));`
-- never choose symbol.library based on what dylib it happened to be in because then cross compiling doesn't work. 
 - default_driver should just poke out the Interp header if you ask for -syscalls. 
 - add a way to -d log all the comptime code from the driver. rn it only affects the runtime module. 
 - mangle symbols in a more stable way than fucking sequential ids. 

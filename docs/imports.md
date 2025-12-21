@@ -6,7 +6,6 @@ See `../annotations.md` for info about builtin tags you can put on functions.
 #import
 #ir
 #intrinsic
-#comptime_addr
 #redirect
 #macro
 ```
