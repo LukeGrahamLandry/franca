@@ -449,8 +449,6 @@ Parse Error: unterminated block (mismatched '{')
 - @bit_fields in incremental.fr don't work inline in the structs
 - #ir tries to ignore zero-sized params but not if they're first which is sad
 - "need to be consistant about how to handle modules like this that don't actually compile anything"
-- fix examples/terminal.fr -jit so it doesn't freak out about nested compiler contexts because of the repl
-  (get rid of EASY_GRAPHICS_IS_JITTING_HACK)
 - reduce disk usage bloat. rn fetch_or_crash stores the unzipped thing and the zip file so you have everything twice. 
 many of the things i use i don't need everything from so it could make you tell it which files are important and 
 delete the rest. thing to think about is that you want to union those between different projects that depend on 
@@ -987,7 +985,6 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
 
 ### Terminal
 
-- if you have the same buffer open multiple times, each should have its own cursor position. 
 - should seperate the text editing model part from the rendering. 
   i need to make it more structured anyway to allow undo. 
 - tab to autocomplete a file path 
@@ -1031,6 +1028,7 @@ actually that's a bit too agressive but certainly stop processing ANSI escape co
   (which is still slow but better. and also wrong because then its a blocking poll 
    until the process doesn't get a turn to run between reads tho its fine for my terminal because it has realloc=false)
 - let you get out of lock_to_bottom while a process is spamming output
+- scrollbar feels bad because i stop sending events when the mouse goes off the window
 
 ## Graphics
 

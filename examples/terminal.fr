@@ -18,11 +18,6 @@ UGLY :: false || query_current_arch() == .wasm32;
 ReplFns :: import_module("@/examples/repl.fr");
 Repl :: import("@/examples/repl.fr");
 
-// TODO: THIS IS UNACCEPTABLE FIXME FIXME FIXME
-//       what happened to anything you can do at runtime you can do at comptime bro...? 
-//       you can run the fancy gpu stuff just fine but you can't start a new compiler somehow? 
-ENABLE_FRANCA_REPL :: !EASY_GRAPHICS_IS_JITTING_HACK;
-
 Replay :: import("@/graphics/replay.fr");
 
 State :: @struct(
@@ -48,6 +43,7 @@ State :: @struct(
     search_tasks: List(*SearchTask),
     save_file: ?Str,
     show_hover: bool,
+    scrolling: bool,
 );
 
 ProcessInfo :: @struct {
@@ -61,17 +57,15 @@ ColourTheme :: @struct {
     highlight := pack_rgba(0.09, 0.09, 0.09, 1);
     selection := pack_rgba(62, 70, 67, 255);
     cursor := pack_rgba(0, 204, 255, 255);
+    scrollbar := pack_rgba(0.05, 0.05, 0.05, 1);
 }
 
 // This needs the extra level of indirection so it can be shared with the repl. 
 state :: @static(*State);
 
 on_init :: fn(userdata: rawptr) void = {
-    // TODO: don't get in a crash loop if dynenv gets messed up
     // TODO: make request_backtrace_on_panic also push the resolver if it's not already there so it works without doing signals too
-    if ENABLE_FRANCA_REPL {
         import("@/lib/crash_report.fr")'hook_backtrace();  
-    };
     
     sapp := state.app&;
     allocator := general_allocator();
@@ -79,9 +73,8 @@ on_init :: fn(userdata: rawptr) void = {
         environment = Easy'glue_environment(sapp),
         allocator = allocator,
     );
-    @if(ENABLE_FRANCA_REPL) {
         prelude := "#include_std(\"lib/core.fr\");#include_std(\"examples/terminal.fr\");\n";
-        prelude := @tfmt("%\nSOKOL_BACKEND :: RenderBackend.%;EASY_GRAPHICS_IS_JITTING_HACK :: %;\n", prelude, SOKOL_BACKEND, true);
+        prelude := @tfmt("%\nSOKOL_BACKEND :: RenderBackend.%;\n", prelude, SOKOL_BACKEND);
         state.repl = ReplFns'init(allocator, prelude);
         if Repl.STDLIB_PATH { path |
             cd(path.items());
@@ -94,7 +87,6 @@ on_init :: fn(userdata: rawptr) void = {
             fr'vtable'fmt_error(fr.data, res.Err, out&);
             panic(out.items());
         };
-    };
     state.scratch = list(u8, 4*1024*1024, allocator);  // :BigOutputBuffer
     state.lock_to_bottom = true;
     state.history_index = 0;
@@ -302,7 +294,7 @@ fn insert_string(buffer: *TextBuffer, new: Str, col_i: i64, line_i: i64) void = 
             col_i = 0;
             line_i += 1;
             buffer.lines&.insert(line_i, empty_line, buffer.gpa);
-            last = buffer.lines[line_i]&;
+            last = buffer.storage.lines[line_i]&;
             start = i + 1;
             if state[].lock_to_bottom && buffer.lines.len > buffer.num_lines_fit_on_screen && line_i == buffer.lines.len - 1 {
                 // If you're already near the bottom of the document, scroll down as new text
@@ -348,10 +340,21 @@ fn exit() void = {
 
 on_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
     b := selected_buffer();
-    if(b, fn(b) => b.line_lock&.lock());
+    if(b, fn(b) => b.lock());
     handle_event(event);
-    if(b, fn(b) => b.line_lock&.unlock());
+    if(b, fn(b) => b.unlock());
 };
+
+// holding the lock counts as a reference so its fine if it's dropped inside handle_event
+fn lock(b: *TextBuffer) void = {
+    i64.atomic_add(b.threads_ref_count&, 1);
+    b.line_lock&.lock();
+}
+
+fn unlock(b: *TextBuffer) void = {
+    b.line_lock&.unlock();
+    i64.atomic_add(b.threads_ref_count&, -1);
+}
 
 handle_event :: fn(event: *Sapp.Event) void = {
     if state.recording& { it |
@@ -366,6 +369,17 @@ handle_event :: fn(event: *Sapp.Event) void = {
         if event.modifiers.get(.left_mouse) != 0 {
             break :: local_return;
             b, pos := find_mouse(event) || break();
+            
+            if state.scrolling {
+                update_scroll_position(b, pos);
+                fn update_scroll_position(b: *TextBuffer, pos: Pos) void = {
+                    percentage := (pos.y - b.render.y) / (b.num_lines_fit_on_screen - 2).float();
+                    b.render.y = percentage * b.lines.len.float();
+                    state.dirty = true;
+                }
+                break();
+            };
+            
             b.set_cursor(pos);
             state.dirty = true;
             if b.selection& { sel |
@@ -376,9 +390,19 @@ handle_event :: fn(event: *Sapp.Event) void = {
         }
     };
     
+    if event.type == .MOUSE_UP {
+        state.scrolling = false;
+    };
     if event.type == .MOUSE_DOWN && event.modifiers.get(.left_mouse) != 0 {
         b, pos := find_mouse(event) || return();
         line, col := (pos.y.int(), pos.x.int());
+        
+        bar := scrollbar_logical_pos(b);
+        if pos.x + 0.5 > bar.x && pos.x < bar.x + 1.5 {
+            state.scrolling = true;
+            update_scroll_position(b, pos);
+            return();
+        };
         
         now := timestamp();
         multiclick := now - state.last_click_time < 400;
@@ -730,9 +754,12 @@ open_link :: fn(full_link: Str) void = {
         };
         dest := link.rest(3).parse_int();
         dest := TextBuffer.ptr_from_int(dest);
-        i64.atomic_inc(dest.ref_count&);
-        old := push_as_current_buffer(dest);
-        dest.move_to(line, col);
+        
+        // keep the same storage but don't share cursor position, etc.
+        new := dest.gpa.boxed(TextBuffer, dest[]);
+        i64.atomic_inc(new.storage.ref_count&);
+        old := push_as_current_buffer(new);
+        new.move_to(line, col);
         return();
     };
     
@@ -931,26 +958,29 @@ main :: fn() void = {
 driver :: fn(vtable: *ImportVTable) void = 
     Easy'build_for_graphics(vtable, "examples/terminal.fr");
 
-TextBuffer :: @struct(
+TextStorage :: @struct(
     lines: RawList(Line),
-    at: Rect,
     gpa: Alloc,
+    line_lock: Mutex,
+    ref_count: i64,
+);
+    
+TextBuffer :: @struct(
+    storage: *TextStorage #use,
+    threads_ref_count: i64,
+    at: Rect,
     cursor: Pos,
     render: Pos,  // visual scroll position
     max_x: f64,
-    dead: bool,
     num_lines_fit_on_screen: i64,
     
     selection: ?Selection,
-    line_lock: Mutex,
     
     // TODO: can be stale. should call update_hover more (so it shouldn't 
     //       take an Event, i should just remember the last mouse position)
     //       - when new text comes in from a process
     //       - when you type and add text to the line
     hover: ?Ty(i64, i64, i64),   // (line, start col, end col)
-    
-    ref_count: i64,
 );
 
 #use("@/lib/sys/sync/mutex.fr");
@@ -979,7 +1009,6 @@ fn set_cursor(self: *TextBuffer, pos: Pos) void = {
 }
 
 fn draw_text(self: *TextBuffer) void = {
-    if(self.dead, => return());
     w, h := (self.at.w, self.at.h);
     max_line_width := self.max_x - (w / state.scale);
     self.render.x = max(0, min(self.render.x, max_line_width));
@@ -1039,6 +1068,15 @@ fn draw_text(self: *TextBuffer) void = {
         };
     };
     
+    
+    {   // scroll bar
+        bar := scrollbar_logical_pos(self);
+        sdtx.pos.x = cast(self.at.pos.x + bar.x - self.render.x);
+        sdtx.pos.y = cast(bar.y - self.render.y);
+        sdtx.color = state.theme.scrollbar; 
+        sdtx.put(0);
+    };
+    
     // draw the cursor as a narrow bar
     // TODO: this is an overly hacky thing to do. just have another character slot with a narrow texture (like byte 1 or whatever)
     {
@@ -1070,6 +1108,13 @@ fn draw_text(self: *TextBuffer) void = {
         sdtx.pos.y += 1;
         sdtx.pos.x = x;
     };
+}
+
+// TODO: it's not at the edge until you resize
+fn scrollbar_logical_pos(self: *TextBuffer) Pos = {
+    scroll_percentage := self.render.y / self.lines.len.float();
+    (x = (self.render.x + self.at.w) / state.scale - 1,
+     y = self.render.y + scroll_percentage * (self.num_lines_fit_on_screen - 2).float())
 }
 
 Line :: @struct(
@@ -1169,21 +1214,27 @@ fn remove_at(self: *Line, i: i64) void = {
 
 fn empty(a: Alloc) *TextBuffer = {
     b := a.box_zeroed(TextBuffer);
+    b.storage = a.box_zeroed(TextStorage);
+    b.storage.ref_count = 1;
     b.gpa = a;
     b.lines&.push(empty_line, b.gpa);
     b.selection = .None;
     b.hover = .None;
-    b.ref_count = 1;
+    b.threads_ref_count = 1;
     b
 }
 
 fn drop(self: *TextBuffer) void = {
+    @if(i64.atomic_add(self.threads_ref_count&, -1) != 1) return();
+    s := self.storage;
+    self.gpa.dealloc_one(TextBuffer, self);
+    self := s;
     @if(i64.atomic_add(self.ref_count&, -1) != 1) return();
     each self.lines { it |
         it.drop(self.gpa);
     };
     self.lines&.drop(self.gpa);
-    self.gpa.dealloc_one(TextBuffer, self);
+    self.gpa.dealloc_one(TextStorage, self);
 }
 
 fn contains(r: Rect, p: Pos) bool = 
@@ -1226,7 +1277,6 @@ exec_franca :: fn(buffer: *TextBuffer, raw_command: Str) void = {
     }
     
     buffer.append_string("\n");
-    @if(ENABLE_FRANCA_REPL, {
         result := ReplFns'run(state.repl&, raw_command);
         if result&.is_err() {
             out: List(u8) = list(temp());
@@ -1234,7 +1284,6 @@ exec_franca :: fn(buffer: *TextBuffer, raw_command: Str) void = {
             fr'vtable'fmt_error(fr.data, result.Err, out&);
             buffer.append_string(out.items());
         };
-    }, echo("This copy of terminal.fr was not compiled with FRANCA_REPL_ENABLED"));
     buffer.append_string("\n");
 }
 
@@ -1333,8 +1382,8 @@ search_for_selected :: fn(b: *TextBuffer) void = {
     b.get_selection(self.needle&);
     self.buffer = b;
     self.dest_buffer = dest;
-    i64.atomic_inc(b.ref_count&);
-    i64.atomic_inc(dest.ref_count&);
+    i64.atomic_inc(b.threads_ref_count&);
+    i64.atomic_inc(dest.threads_ref_count&);
     push_as_current_buffer(dest);
     self.have_work = 1;
     Futex'wake(self.have_work&, 1);

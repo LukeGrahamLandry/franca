@@ -4,6 +4,10 @@
 - hacked around the aliased bake problem from yesterday. 
   was very easy to tell what was going on once i added a new logging for all of vmem at the end. 
   maybe i should be working on better visualizations of the compiler's data structures. 
+- terminal: 
+  - if you have the same buffer open multiple times, each gets its own cursor position. 
+  - scrollbar
+
 ## (Dec 20)
 
 - make comptime_addr less weird: use indices. pass the compiler to fill_export_ffi so its more clear that the pointer is included. 
