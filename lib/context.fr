@@ -82,8 +82,7 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
         is_linux = !is_sane_pointer(p[]);
     };
     
-    OS :: @static(ClearOnAotBake(Os));
-    OS[].it = @if(is_linux, .linux, .macos);
+    OS: Os = @if(is_linux, .linux, .macos);
     @if(query_current_arch() != .wasm32)
     @assert(!(is_sane_pointer(argc) || !is_sane_pointer(envp) || !is_sane_pointer(argv)), "failed to guess os");
     
@@ -97,7 +96,6 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
             thread := get_current_thread();
             c := thread.first_environment&;
             set_legacy_dynamic_environment(StaticTls.raw_from_ptr(c));
-            c.current_os = (@as(i64) @as(Os) OS[].it).trunc();
             temporary_allocator: Arena.Allocator = init(page_allocator, 1.shift_left(20));
             set_temporary_allocator(temporary_allocator&);
             c.panic_hook = print_and_exit1;
@@ -143,11 +141,12 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
     
     @if(IS_BOOTSTRAPPING) {
         have_libc[] = true;
-        stack := import("@/lib/sys/threads.fr")'allocate_stack(!have_libc[], OS[].it);
+        stack := import("@/lib/sys/threads.fr")'allocate_stack(!have_libc[], OS);
         thread := bit_cast_unchecked(*u8, *import("@/lib/sys/threads.fr").Thread, stack.usable.ptr);
         thread.stack = stack;
         thread.first_environment.cli_arguments = (ptr = argv, len = argc);
         thread.first_environment.environment_variables = envp;
+        thread.first_environment.current_os = (@as(i64) @as(Os) OS).trunc();
         call_in_stack(thread.stack.usable.end_pointer(), impl2);
     };
 
@@ -159,11 +158,12 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
         have_libc[] = false;  // ugh. null check doesn't work because weak imports aren't a thing, they're just stubs that crash. 
     };
 
-    stack := import("@/lib/sys/threads.fr")'allocate_stack(!have_libc[], OS[].it);
+    stack := import("@/lib/sys/threads.fr")'allocate_stack(!have_libc[], OS);
     thread := bit_cast_unchecked(*u8, *import("@/lib/sys/threads.fr").Thread, stack.usable.ptr);
     thread.stack = stack;
     thread.first_environment.cli_arguments = (ptr = argv, len = argc);
     thread.first_environment.environment_variables = envp;
+    thread.first_environment.current_os = (@as(i64) @as(Os) OS).trunc();
     thread.stack_reserved_size = 1.shift_left(16);  // matters because examples/os uses after this as signal stack
     
     @if(!TODOWASM || query_current_arch() != .wasm32)

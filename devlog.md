@@ -1,4 +1,9 @@
 
+## (Dec 21)
+
+- hacked around the aliased bake problem from yesterday. 
+  was very easy to tell what was going on once i added a new logging for all of vmem at the end. 
+  maybe i should be working on better visualizations of the compiler's data structures. 
 ## (Dec 20)
 
 - make comptime_addr less weird: use indices. pass the compiler to fill_export_ffi so its more clear that the pointer is included. 
@@ -9,6 +14,8 @@
 - there's some sort of strange memory corruption with packed_enum_names. 
   only manifests when compiled with enough other things, can't make a tiny program with the bug. 
   i think its about sharing it between create_enum_name_table_outlined and enum_name_from_ordinal. 
+  - it didn't happen before changing how tasks work but i might have just 
+    changed complation order or allocation pattern and revealed an existing problem?
 
 ## (Dec 19)
 

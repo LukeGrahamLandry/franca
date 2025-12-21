@@ -624,10 +624,7 @@ fn enum_name_from_ordinal($E: Type, i: i64) Str #inline = {
 }
 
 packed_enum_names :: fn($E: Type) *PackedStrings #fold = {
-    // TODO: this is :FUCKED problem with bake aliasing with create_enum_name_table_outlined?
     @static(PackedStrings) pack_strings(get_enum_names(E))
-    //       this works better but isn't what i want
-    //ast_alloc().boxed(PackedStrings, pack_strings(get_enum_names(E)))
 };
 
 PackedStrings :: Ty(Str, []u16);
@@ -644,6 +641,22 @@ pack_strings :: fn(names: []Str) PackedStrings = {
     enumerate names { i, n |
         bytes.subslice(offs[i*2].zext(), offs[i*2 + 1].zext()).copy_from(n[]);
     };
+    
+    if __driver_abi_version > 1263 {
+        // TODO: this should be fixed in the compiler instead. can't force everyone to remember to do this. :FUCKED
+        //       i don't correctly handling internal pointers in baked values if you bake the small one first. 
+        //       a binary with both create_enum_name_table_outlined and enum_name_from_ordinal is compilation order dependent. 
+        //       so make sure the hashmap doesn't get baked before the string.  -- Dec 21, 2025
+        fr := current_compiler_context();
+        id := fr'vtable'reserve_baked(fr.data, (Some = bytes));
+        arr := create_array_type(u8, bytes.len);
+        fr'vtable'put_baked_var(fr.data, id, (Bytes = bytes.as_raw_list()), arr);
+        // this should work instead of all that shit but somehow it breaks specifically for loading the repl in examples/terminal.fr. who fucking knows man. 
+        // Type Error: expected @tagged(Some: @struct(_0: BakedVarId,_1: i32,),None: void,) but found @tagged(Some: @struct(_0: @struct(id: u32,),_1: i32,),None: void,)
+        // bake_relocatable_slice_erased(u8.raw_from_ptr(bytes.ptr), bytes.len, u8);
+    };
+    
+    
     // TODO: should be able to .sym().str() on bytes but that breaks a test in a very confusing way.  -- Mar 12, 2025
     (bytes, offs)
 };

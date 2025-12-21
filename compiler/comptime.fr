@@ -75,6 +75,7 @@ fn fill_driver_vtable(vtable: *ImportVTable) void = {
     };
     vtable.destroy_compiler = fn(c: Compiler) void = {
         c := c.cast()[][];
+        when_debug(c, .VMem, fn(o) => dump_baked_vmem(c, o));
         print(c.log.items()); c.log&.clear();
         pop_resolver(c.backtrace_node);
         opts := c.get_build_options();
@@ -158,10 +159,6 @@ fn fill_driver_vtable(vtable: *ImportVTable) void = {
     };
     vtable.log_func = fn(c: Compiler, e: *Func) Str = {
         log(e, c.cast()[][])
-    };
-    
-    vtable.emit_relocatable_constant_body = fn(c: Compiler, bytes: []u8, ty: Type, force_default_handling: bool) Res(Slice(BakedEntry)) = {
-        c.cast()[][].emit_relocatable_constant_body(bytes, ty, force_default_handling)
     };
     
     // :UpdateBoot get rid of this
@@ -260,11 +257,12 @@ fn fill_driver_vtable(vtable: *ImportVTable) void = {
         self.comp().fmt_fn_name(fid)
     };
     
-    vtable.put_baked_var = fn(c, id, v) = {
+    vtable.put_baked_var = fn(c, id, v, type) = {
         self := c.cast()[][];
         dest := self.baked.values&.nested_index(id.id.zext());
         n := dest.name;
         dest[] = self.from_legacy(v);
+        dest.type = type;
         dest.name = n;
     };
     
@@ -381,7 +379,10 @@ compiler_exports :: @struct {
     #export("lookup_baked_vbytes")
     lookup_baked_vbytes :: fn(vbytes: []u8, self) ?Ty(BakedVarId, i32) = {
         addr := u8.raw_from_ptr(vbytes.ptr);
-        if self.baked.vmem&.get(addr) { it, addend |
+        if self.baked.vmem&.get(addr) { it, addend, size |
+            if size - addend < vbytes.len {
+                // :fucked
+            };
             @if_let(it) fn BakedVarId(it) => return(Some = (it, addend.intcast()));
         };
         .None

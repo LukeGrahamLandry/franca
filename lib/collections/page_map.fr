@@ -2,7 +2,6 @@
 
 fn PageMap($T: Type) Type = {
     PageMap :: @struct {
-        Tag :: @enum(u8) (Unknown, FuncId, BakedVarId);
         Entry :: @struct {
             value: T;
             off: u16;  // how far from the start of the page does this object start
@@ -30,7 +29,7 @@ fn PageMap($T: Type) Type = {
     fn insert_at(self: *PageMap, vbytes: []u8, value: T) void = {
         hi, lo := self.split(u8.raw_from_ptr(vbytes.ptr));
         p := self.get_page(hi);
-        e, off := self.find_entry(p, lo, true, vbytes.len).unwrap();
+        e, off, size := self.find_entry(p, lo, true, vbytes.len).unwrap();
     
         // TODO: assert not stomping something exactly either
         @debug_assert_eq(off, 0, "TODO: baked the same address multiple times");
@@ -40,12 +39,11 @@ fn PageMap($T: Type) Type = {
     // TODO: replace addr with vbytes and assert if it's too big for an existing bake 
     //       (eventually handle that properly somehow)
     // SAFETY: pointer invalidated by insert()
-    fn get_at(self: *PageMap, addr: rawptr) ?Ty(*T, i64) = {
+    fn get_at(self: *PageMap, addr: rawptr) ?Ty(*T, i64, i64) = {
         hi, lo := self.split(addr);
         p := self.get_page(hi);
-        if self.find_entry(p, lo, false, 0) { e, off | 
-            ::enum(PageMap.Tag);
-            return(Some = (e.value&, off));
+        if self.find_entry(p, lo, false, 0) { e, off, size | 
+            return(Some = (e.value&, off, size));
         };
         .None
     }
@@ -65,10 +63,10 @@ fn PageMap($T: Type) Type = {
         p
     }
     
-    fn find_entry(self: *PageMap, p: *PageMap.Page, lo: i64, create: bool, length: i64) ?Ty(*PageMap.Entry, i64) = {
+    fn find_entry(self: *PageMap, p: *PageMap.Page, lo: i64, create: bool, length: i64) ?Ty(*PageMap.Entry, i64, i64) = {
         maybe_append :: fn() Never => {
             @if(!create) return(.None);
-            return(Some = (self.create_entry(p, p.entries.len, lo, length), 0))
+            return(Some = (self.create_entry(p, p.entries.len, lo, length), 0, length))
         };
         
         if(p.entries.len == 0, maybe_append);
@@ -86,18 +84,28 @@ fn PageMap($T: Type) Type = {
             e := search.index(i);
             if lo >= e.off.zext() {
                 if lo < zext(e.off + e.len) {
+                    end_of_page :u16: 1.shift_left(PageMap.page_bits) - 1;
+                    size := {
+                        e := e;
+                        s: i64 = e.len.zext() + int(e.len == end_of_page);
+                        while => e.forward {
+                            prev_page := self.get_page(p.high_bits + 1);
+                            @debug_assert(prev_page.entries.len > 0);
+                            e = prev_page.entries.index(prev_page.entries.len - 1);
+                            s += e.len.zext() + int(e.len == end_of_page);
+                        };
+                        s
+                    };
                     offset_in_allocation := lo - e.off.zext();
-                    if e.backward {
+                    while => e.backward {
                         // Walk backwards to find the start of the allocation. 
                         prev_page := self.get_page(p.high_bits - 1);
-                        end_of_page :: 1.shift_left(PageMap.page_bits) - 1;
-                        prev_e, off2 := self.find_entry(prev_page, end_of_page, false, 0)
-                            || @panic("find_entry: missing before hi=%; for lo=%", p.high_bits, lo);
-                        e = prev_e;
-                        offset_in_allocation += off2 + 1;
+                        @debug_assert(prev_page.entries.len > 0);
+                        e = prev_page.entries.index(prev_page.entries.len - 1);
+                        @debug_assert(e.forward);
+                        offset_in_allocation += e.len.zext() + int(e.len == end_of_page);
                     };
-                    @debug_assert(!e.backward);
-                    return(Some = (e, offset_in_allocation));
+                    return(Some = (e, offset_in_allocation, size + offset_in_allocation));
                 };
                 search = search.rest(i + 1);
             } else {
@@ -105,7 +113,7 @@ fn PageMap($T: Type) Type = {
             };
         };
         if(!create, => return(.None));
-        (Some = (self.create_entry(p, i, lo, length), 0))
+        (Some = (self.create_entry(p, i, lo, length), 0, length))
     }
     
     fn create_entry(self: *PageMap, p: *PageMap.Page, i: i64, lo: i64, length: i64) *PageMap.Entry = {

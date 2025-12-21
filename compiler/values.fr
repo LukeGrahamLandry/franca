@@ -50,7 +50,11 @@ fn bake_relocatable_constant(c: *SelfHosted, value: []u8, type: Type, loc: Span,
         // TODO: this barely does anything! cause like cstr and slice don't go through this function. they call dyn_bake_relocatable_value. -- Jun 30
         //       this is the right idea, they just need to check thier pointers against the cache first. 
         // TODO: be careful about aliasing as different types with different custom_bake_constant? -- Jun 30 
-        if c.baked.vmem&.get(rawptr_from_int jit_ptr) { it, addend |
+        if c.baked.vmem&.get(rawptr_from_int jit_ptr) { it, addend, size |
+            if size - addend < value.len {
+                // :fucked
+            };
+            
             @if_let(it) fn BakedVarId(it) => return(Ok = (it, addend));
         };
     };
@@ -58,8 +62,10 @@ fn bake_relocatable_constant(c: *SelfHosted, value: []u8, type: Type, loc: Span,
     info := c.get_info(type);
     finish :: fn(v: BakedValue) Never => {
         v.align = info.align_bytes.zext();
+        v.type = type;
         if forced_id { id |
             dest := c.baked.values&.nested_index(id.id.zext());
+            @debug_assert(!dest.init, "forced_id already filled");
             n := dest.name;
             dest[] = v;
             dest.name = n;
@@ -125,18 +131,10 @@ fn bake_relocatable_body(c: *SelfHosted, value: []u8, type: Type, out: *List(Bak
     // :ScaryIfAliasWrongType
     // If we've already seen this pointer, don't emit it again, just alias the old one. 
     if only_one_word {
-        if c.baked.vmem&.get(rawptr_from_int first_word) { it, addend |
-            @match(it) {
-                fn FuncId(fid) => {
-                    out.push(off = reloc_off, target = (FuncId = fid), addend = addend);
-                    return(.Ok);
-                }
-                fn BakedVarId(v) => {
-                    out.push(off = reloc_off, target = (BakedVarId = v), addend = addend);
-                    return(.Ok);
-                }
-                fn Var() => todo();
-            };
+        if c.baked.vmem&.get(rawptr_from_int first_word) { it, addend, size |
+            @debug_assert(addend == 0 || !it&.is(.FuncId), "func with addend doesn't make sense");
+            out.push(off = reloc_off, target = it, addend = addend);
+            return(.Ok);
         };
     };
     @debug_assert_ge(value.len, 8, "we only support 64-bit targets so how can it contains_pointers but be small?");
@@ -229,32 +227,12 @@ fn from_legacy(self: *SelfHosted, legacy: BakedVar) BakedValue = {
     }
 }
 
-fn bake_legacy(self: *SelfHosted, legacy: BakedVar, jit_addr: ?[]u8) BakedVarId = {
-    value: BakedValue = self.from_legacy(legacy);
-    self.put_baked(value, jit_addr)
-}
-
 // This avoids needing to linearly scan all the functions when they try to emit_relocatable_constant of a function pointer. 
 // You only need to call it if they created a Values of it, so we might need to emit it as a constant later 
 // (like for vtables where you construct the value in memory as with comptime pointers and then we emit relocations). 
-// [Jun 30] building the compiler ends up with ~17000 FuncIds created and 21 calls to this function. So thats pretty good. 
-// TODO: tho that means we wont find it if someone cheats somehow and gets the pointer in a way i didn't think of. 
-//       it relies on them only being created through '!fn_ptr'/const_coerce expressions. 
+// TODO: get here a lot because you always do it for shims and you make a shim for every bake_relocatable_value even tho you know you're going to call it immediately
 fn created_jit_fn_ptr_value(self: *SelfHosted, f: FuncId, ptr: i64) void = {
     @debug_assert(ptr != 0, "created_jit_fn_ptr_value cannot be null");
-    
-    @if(false)
-    if self.baked.functions&.get(ptr) { old_f | 
-        if old_f != f {
-            // TODO: i don't want to have warning!
-            @eprintln("warn: the address % is baked to multiple functions:\n- %\n- %", 
-                ptr,
-                self.comp().log(self.get_function(f)), 
-                self.comp().log(self.get_function(old_f)),
-            );
-        }
-    };
-    
     // TODO: make vbytes from SymbolInfo.size and that can be used for faster backtraces. 
     self.baked.vmem&.insert(rawptr_from_int ptr, (FuncId = f));
 }
@@ -262,12 +240,15 @@ fn created_jit_fn_ptr_value(self: *SelfHosted, f: FuncId, ptr: i64) void = {
 fn reserve_baked(c: *SelfHosted, jit_ptr: ?[]u8) Ty(*BakedValue, BakedVarId) #inline = {
     v := c.baked.values&;
     id: BakedVarId = (id = v.len.trunc());
-    v.push(zeroed BakedValue);
+    v.push(zeroed BakedValue);  // .init = false
     dest := v.nested_index(id.id.zext());
     if jit_ptr { ptr | 
-        prev := c.baked.vmem&.insert(ptr, (BakedVarId = id));
-        // TODO: this should be true but it's not
-        //@debug_assert(prev.is_none(), "reserved_baked stomped an address");
+        // TODO: redundant lookup. insert() should return the old one
+        if c.baked.vmem&.get(u8.raw_from_ptr(ptr.ptr)) { _ |
+            @panic("ICE: reserved_baked stomped an address");
+        };
+    
+        c.baked.vmem&.insert(ptr, (BakedVarId = id));
         
         // :BringBackDataNames 
         // but have to get more serious about it
@@ -574,7 +555,6 @@ fn update_placeholder(self: *SelfHosted, placeholder_slot: Type, real_type: Type
     @debug_assert(self.type_lookup&.get(slot&).is_none());
     self.save_guessed_name(real_type, name, loc);
     
-    // just in case.    copy-paste call to truncate but now want to have the list full size ahead of time. 
     i := self.type_extra.len - 1; // we happen to know this can't underflow because there are builtin types.  
     while => i > idx {
         it := self.type_extra&.nested_index(i);
@@ -904,19 +884,22 @@ AddressSpace :: @struct {
         self.insert_at(vbytes, @match(value) {
             fn FuncId(it) => (idx = (fid = it), tag = .FuncId);
             fn BakedVarId(it) => (idx = (baked = it), tag = .BakedVarId);
-            fn Var() => todo();
         });
     }
     
     // TODO: replace addr with vbytes and assert if it's too big for an existing bake 
     //       (eventually handle that properly somehow)
-    fn get(self: *Map, addr: rawptr) ?Ty(SymIdx, i64) = {
-        e, off := self.get_at(addr) || return(.None);
+    fn get(self: *Map, addr: rawptr) ?Ty(SymIdx, i64, i64) = {
+        e, off, size := self.get_at(addr) || return(.None);
         ::enum(Tag);
-        return(Some = (@match(e.tag) {
+        return(Some = (as_tagged(e), off, size));
+    }
+    
+    fn as_tagged(e: *T) SymIdx = {
+        @match(e.tag) {
             fn Unknown() => panic("PageMap.get on valid address but uninit tag");
             fn FuncId() => (FuncId = e.idx.fid);
             fn BakedVarId() => (BakedVarId = e.idx.baked);
-        }, off));
+        }
     }
 };

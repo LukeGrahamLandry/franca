@@ -541,6 +541,11 @@ fn log_type_inner(self: *SelfHosted, safe_rec: *DynamicBitSet, out: *List(u8), t
         @fmt(out, "%", self.pool.get(name));
         return();
     };
+    // TODO: should do better at inferring names for generics
+    if(self.string_type, fn(string) => @if(ty == string) {  // HACK
+        @fmt(out, "Str");
+        return();
+    });
     if safe_rec.get(ty.as_index()) {
         @fmt(out, "TY%", ty.as_index());
         return();
@@ -946,6 +951,7 @@ FrDebugKey :: @enum(i64) (
     Emit = "E".char(),
    LitFn = "L".char(),
 ConstArgs= "C".char(),
+    VMem = "V".char(),
 );
 
 fn when_debug(m: *SelfHosted, category: FrDebugKey, $body: @Fn(out: *List(u8)) void) void = {  
@@ -972,3 +978,49 @@ fn display(it: FmtLoc, out: *List(u8)) void = {
     _ := it.self.codemap.fmt_error_loc(it.loc, out, false);
 }
 
+// TODO: this is extra spam because every time you emit_ir.emit_constant and then decide 
+//       to emit the parts inline it gets a new entry. so like it shows every reference 
+//       to a string instead of just the bytes of the string. similarly every empty() or .None. 
+//       (both are interesting, just need to sort them in a more useful way)
+fn dump_baked_vmem(c: *SelfHosted, out: *List(u8)) void = {
+    pages := Ty(i64, *AddressSpace.Map.Page).list(temp());
+    each c.baked.vmem.lookup& { k, v |
+        push(pages&, (k, v[]));
+    };
+    sort :: import("@/lib/sort.fr")'quicksort(@type pages[0], fn(a, b) => a._0 <= b._0);
+    pages.items().sort();
+    for pages { hi, page |
+        @fmt(out, "- %:\n", hi);
+        for page.entries { it |
+            @fmt(out, "  - %..+%: ", it.off, it.len);
+            if it.value.tag != .Unknown {
+                @fmt(out, "%", (c, as_tagged(it.value&)));
+            };
+            @fmt(out, "\n");
+        
+        };
+    };
+}
+
+fn display(itXX: Ty(*SelfHosted, SymIdx), out: *List(u8)) void = {
+    c, it := itXX;
+    @match(it) {
+        fn FuncId(it) => {
+            @fmt(out, "%", fmt_func(c, it));
+        }
+        fn BakedVarId(id) => {
+            it := c.baked.values&.nested_index(id.id.zext());
+            @fmt(out, "B% % (", id.id, c.log_type(it.type));
+            for it.relocations& { it |
+                @match(it.target) {
+                    fn FuncId(it) => @fmt(out, "%,", it);
+                    fn BakedVarId(id) => @fmt(out, "B%,", id.id);
+                };
+            };
+            @fmt(out, ")");
+            if it.loc.low != 0 {
+                @fmt(out, " at %", fmt_loc(c, it.loc));
+            };
+        }
+    }
+}
