@@ -756,15 +756,28 @@ fn fails_typecheck(f: *Qbe.Fn) ?Str = {
                 return(Some = @tfmt("predecessors not matched in phi %%", "%", t.name()));
             };
         };
+        j := -1;
         for_insts_forward b { i |
             continue :: local_return;
+            error :: fn(e: Str) => return(report(f, b, j, e));
+            report :: fn(f: *Qbe.Fn, b: *Qbe.Blk, i: i64, e: Str) ?Str = {
+                out := e.clone(temp());
+                @fmt(out&, "\nat @%[%] (", b.name(), i);
+                printins(f, b.ins.index(i), out&);
+                @fmt(out&, ")");
+                (Some = out.items())
+            };
+            
+            j += 1;
             range(0, 2) { n |
                 continue :: local_return;
+                
                 k := argcls(i, n);
                 r := i.arg&[n];
                 if k == .Ke {
-                    return(Some = @tfmt("invalid instruction output type % in %", i.cls(), i.op()));
+                    error "invalid instruction output type";
                 };
+                word := if(n == 1, => "second", => "first");
                 if rtype(r) == .RType {
                     N := @match(i.op()) {
                         fn parc() => 0;
@@ -773,29 +786,28 @@ fn fails_typecheck(f: *Qbe.Fn) ?Str = {
                         @default => -1;
                     };
                     if n != N {
-                        return(Some = @tfmt("% arg[%] cannot be RType in block @%", i.op(), n, b.name()));
+                        error @tfmt("% operand cannot be RType", word);
                     };
                     continue();
                 };
-                word :: fn() => if(n == 1, => "second", => "first");
                 if rtype(r) != .RNull && k == .Kx {
-                    return(Some = @tfmt("no % operand expected in %: %", word(), i.op(), r));
+                    error @tfmt("no % operand expected", word);
                 };
                 if rtype(r) == .RNull && k != .Kx {
-                    return(Some = @tfmt("missing % operand in %", word(), i.op()));
+                    error @tfmt("missing % operand", word);
                 };
                 if !usecheck(r, k, f) {
-                    return(Some = @tfmt("invalid type for % operand % of % in block @%", word(), r, i.op(), b.name()));
+                    error @tfmt("invalid type for % operand", word);
                 };
             };
             if is_store(i.op()) && i.to != QbeNull { 
-                return(Some = @tfmt("store instruction must not have result"));
+                error "store instruction must not have result";
             };
             if i.op() == .blit1 && rtype(i.arg&[0]) != .RInt {
-                return(Some = @tfmt("blit1 expected a0 to be RInt not %", rtype(i.arg&[0])));
+                error @tfmt("blit1 expected a0 to be RInt not %", rtype(i.arg&[0]));
             };
             if i.op() == .vastart && !f.vararg {
-                return(Some = "used vastart in non-variadic function");
+                error "used vastart in non-variadic function";
             };
         };
     

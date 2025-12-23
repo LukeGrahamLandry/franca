@@ -1,11 +1,13 @@
 #!/usr/bin/env franca
 //! This is just for running Qbe's test files. 
-//! As a convinence you can pass -r to run directly (if the qbe ir has a main() function and doesn't require a driver c program).
+//! As a convinence you can pass -r to jit and run directly.
+//! Some of the tests include c functions for testing abi. 
+//! When passing -r or -cc, they will be compiled by import_c instead of an external c compiler.
 //! For Franca's normal interaction with the backend we just generate the ir in memory. 
+//! You can also use this with other frontends that output qbe ir text 
+//! (but I output executables directly instead of assembly text so not a drop in replacement)
 
 Qbe :: import("@/backend/lib.fr");
-
-INCLUDE_MY_C_COMPILER :: true;
 
 Args :: @struct {
     t: TargetId #help("target environment") = .native;
@@ -71,7 +73,6 @@ main :: fn() void = {
         @if(args.frc) => .Cached;
         @else => .Exe;
     };
-    @assert(!args.cc || INCLUDE_MY_C_COMPILER, "didn't INCLUDE_MY_C_COMPILER can't -cc");
     @assert_le(int(args.c) + int(args.r) + int(args.frc), 1, "conflicting output type");
     m := Qbe.Module.zeroed(); m := m&;
     Qbe'backend'init_module(m, (
@@ -84,7 +85,6 @@ main :: fn() void = {
     set_debug_types(m, args.d, true);
     
     src := temp().read_to_string_or_crash(inpath);
-    src&.push_all("\n"); // HACK
     src := src.items();
     
     magic8 := ptr_cast_unchecked(u8, u64, src.ptr)[];
@@ -99,24 +99,26 @@ main :: fn() void = {
         Qbe'backend'load_all(header, m);
     } else {
         parse :: import("@/backend/meta/parse.fr").parse_top_level;
-        res := parse(m, src, Qbe'backend'compile_dat, Qbe.backend.compile_fn, args.cc);
+        res := parse(m, src, Qbe'backend'compile_dat, Qbe.backend.compile_fn);
         if res&.is_err() {
             panic(res.Err);
         };
         
-        if args.cc && res.Ok.len > 0 {
+    if args.cc {
+        sections := import("@/backend/meta/test.fr")'extract_sections(src);
+        if sections&.get("driver") { src |
             #use("@/examples/import_c/lib.fr");
             #use("@/examples/import_c/ffi.fr");
             c := Compile.Ctx.zeroed();
             ctx := init_codegen_worker(m, false);
             import_c'init_c(c&, m, ctx);
             // TODO: this way of doing it means you lose location information which sucks
-            result := import_c'compile_c(c&, ">>>driver", res.Ok&.items());
+            result := import_c'compile_c(c&, ">>>driver", src);
             result.or(fn(e) => panic(e));
             c.arena_storage&.deinit();
             Qbe'backend'worker_join(ctx);
-            res.Ok&.drop();
         };
+    };
         m.Qbe'backend'compile_suspended();
     };
     

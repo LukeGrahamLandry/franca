@@ -17,7 +17,6 @@
 //! - allow hexadecimal integer constants (0x prefix)
 //! 
 
-// TODO: be stricter about checking for invalid input
 // TODO: `%.6 =s mul s_0x1p-1, s_0x1.fffffe091ff3dp+127`
 
 Replacement :: @struct(key: i64, r: Qbe.Ref);
@@ -30,14 +29,12 @@ QParseCtx :: @struct(
     input: Str,
     cursor := 0,
     f: *Qbe.Fn,
-    line := 0,
+    line := 1,
     out: Alloc,
     blk := Qbe.Blk.ptr_from_int(0),
     types: HashMap(Str, i64),
     m: *QbeModule,
-    c_comments: List(u8),
     ret := Qbe.J.Jxxx,
-    collect_c_comments := false,
     // TODO: use this for reporting more errors that are only allowed when used as a template. 
     allow_unterminated_block := false, // for comptime templates
 );
@@ -48,12 +45,9 @@ QParseCtx :: @struct(
 // but it doesn't really matter because if you care enough about performace to parse and compile on seperate threads, 
 // you will want to generate the ir in memory instead of uselessly writing out text and parsing it back again. 
 //
-// TODO: this is more useful if you let them pass a userdata pointer but for now i want to match the qbe interface. 
-fn parse_top_level(m: *QbeModule, src: Str, yield_data: @FnPtr(m: *Qbe.Module, d: Dat2) void, yield_func: @FnPtr(*Qbe.Fn) void, collect_c_comments: bool) Result(List(u8), Str) = {
+fn parse_top_level(m: *QbeModule, src: Str, yield_data: @FnPtr(m: *Qbe.Module, d: Dat2) void, yield_func: @FnPtr(*Qbe.Fn) void) Result(void, Str) = {
     self: QParseCtx = init(m, src);
-    self.collect_c_comments = collect_c_comments;
     self := self&;
-    self.f.default_init(m);  // :NeedFunctionInitForData
     
     mark := mark_temporary_storage();
     loop {
@@ -68,7 +62,7 @@ fn parse_top_level(m: *QbeModule, src: Str, yield_data: @FnPtr(m: *Qbe.Module, d
         if self.eat("function") {
             self.blocks = init(temp());
             self.tmps = init(temp());
-            self.f = temp().box_uninit(Qbe.Fn);  // TODO: shouldn't really need to do this? but debug_stomp_after breaks otherwise. 
+            self.f = temp().box_uninit(Qbe.Fn);
             self.f.default_init(m);
             self.blk = Qbe.Blk.ptr_from_int(0);
             
@@ -91,6 +85,9 @@ fn parse_top_level(m: *QbeModule, src: Str, yield_data: @FnPtr(m: *Qbe.Module, d
                 return(Err = "expected '}' after function body");
             };
             yield_func(f);  // might reset temp
+            self.f = Qbe.Fn.ptr_from_int(0);
+            self.tmps.raw.arr = empty();
+            self.blocks.raw.arr = empty();
             continue();
         };
         if self.eat("type") {
@@ -104,8 +101,9 @@ fn parse_top_level(m: *QbeModule, src: Str, yield_data: @FnPtr(m: *Qbe.Module, d
             if thread { 
                 return(Err = "I don't support thread locals. use real qbe instead. sorry");
             };
-            self.f = temp().box_uninit(Qbe.Fn);  // TODO: shouldn't really need to do this? but debug_stomp_after breaks otherwise. 
+            self.f = temp().box_uninit(Qbe.Fn);   // :NeedFunctionInitForData
             self.f.default_init(m);
+            self.f.lnk.id = Qbe.no_symbol_S;
             
             @match(self.parse_data(export)) {
                 fn Err(msg) => {
@@ -114,6 +112,7 @@ fn parse_top_level(m: *QbeModule, src: Str, yield_data: @FnPtr(m: *Qbe.Module, d
                 };
                 fn Ok(dat) => yield_data(m, dat);
             };
+            self.f = Qbe.Fn.ptr_from_int(0);
             continue();
         };
         if self.eat("section") {  // not implemented! 
@@ -126,7 +125,7 @@ fn parse_top_level(m: *QbeModule, src: Str, yield_data: @FnPtr(m: *Qbe.Module, d
         };
         
         if self.cursor >= self.input.len {
-            return(Ok = self.c_comments);
+            return(.Ok);
         };
         if self.skip_lines() == 1 && self.cursor < self.input.len {
             return(Err = @tfmt("expected new line. near line %\n", self.line));
@@ -158,11 +157,7 @@ fn skip_lines(self: *QParseCtx) i64 = {
         n += 1;
         self.skip_blanks();
         if self.eat("#") {  // comment
-            if self.collect_c_comments && self.eat(">>> driver") {
-                self.collect_c_comment();
-            } else {
-                self.eat_line();
-            }
+            self.eat_line();
         };
         self.eat("\n") && self.cursor < self.input.len
     };
@@ -177,31 +172,20 @@ fn eat_line(self: *QParseCtx) void #inline = {
     };
 }
 
-fn collect_c_comment(self: *QParseCtx) void = {
-    dowhile {
-        start := self.cursor;
-        self.eat_line();
-        self.cursor += int(self.cursor < self.input.len);
-        self.c_comments&.push_all(self.input.slice(start, self.cursor));
-        
-        self.eat("#") && !self.eat("<<<")
-    }
-}
-
 fn init(m: *QbeModule, src: Str) QParseCtx = (
     blocks = init(temp()),
     tmps = init(temp()),
     input = src,
     error = list(temp()),
     replacements = list(temp()), // only need this for cls 
-    f = temp().box_zeroed(Qbe.Fn),
+    f = Qbe.Fn.ptr_from_int(0),
     out = temp(),
     types = init(m.forever&.borrow()), // see :ThreadSafety comment above!
     m = m,
-    c_comments = list(general_allocator()),
 );
 
 fn parse_body(self: *QParseCtx) Result(Ty(*Qbe.Fn, []Replacement), Str) = {
+    self.skip_lines();
     dowhile(=> self.parse_line());
     self.end_block(.None);
     if self.error.len != 0 {
@@ -255,7 +239,7 @@ fn parse_header(self: *QParseCtx, export: bool) void = {
     };
     name := self.eat_word();
     self.f.lnk.export = export;
-    self.f.lnk.id = self.f.globals.intern(name);
+    self.f.lnk.id = self.m.intern(name);
     self.f.leaf = true;
     self.parse_args(true);
 }
@@ -368,12 +352,11 @@ fn eat_b_or_h(self: *QParseCtx, u: bool, o: *Qbe.O, variable: ?*Qbe.Ref) Qbe.Cls
 }
 
 fn parse_line(self: *QParseCtx) bool = {
-    self.skip_lines();
     if self.check("}") || self.cursor >= self.input.len {
         return(false);
     };
     
-    if self.parse_blk() { blk | 
+    while => self.parse_blk() { blk | 
         if self.f.nblk == 0 {
             self.f.start = blk;
         } else {
@@ -382,11 +365,18 @@ fn parse_line(self: *QParseCtx) bool = {
         self.blk = blk;
         blk.id = self.f.nblk;
         self.f.nblk += 1;
-        self.parse_line();
+        self.skip_lines();
     };
     self.parse_inst();
+    
+    if self.error.len == 0 && self.skip_lines() == 1 && self.cursor < self.input.len {
+        if self.cursor == self.input.len - 1 {
+            return false;
+        };
+        @fmt(self.error&, "expected new line");
+    };
     if self.error.len != 0 {
-        @fmt(self.error&, " near line %\n", self.line);
+        self.where_am_i();
         return(false);
     };
     true
@@ -417,6 +407,7 @@ fn end_block(self: *QParseCtx, new_blk: ?*Qbe.Blk) void = {
         self.blk.link = bb;  // direction matters!
     };
     self.f.copy_instructions_from_scratch_reversed_which_means_forwards(self.blk);
+    self.blk = Qbe.Blk.ptr_from_int(0);
 }
 
 fn parse_inst(self: *QParseCtx) void = {
@@ -665,12 +656,12 @@ fn parse_ref(self: *QParseCtx) Qbe.Ref = {
             self.skip_blanks();
             off = self.parse_number();
         };
-        id := self.f.globals.intern(name);
+        id := self.m.intern(name);
         
         // just in case its an import; if you say its weak and then try to static link, you don't get one. 
         // in the normal api you're always forced to specify what you want 
         // but in the text ir tests this is more convenient (and it's what other compiler will expect because qbe doesn't do weak symbols). 
-        use_symbol(self.f.globals, id) { s |
+        use_symbol(self.m, id) { s |
             s.strong = true;
         };
         return self.f.symcon(id, off);
@@ -801,7 +792,7 @@ fn parse_data(self: *QParseCtx, export: bool) Result(Dat2, Str) = {
         return(Err = "expected '$name' after 'data'");
     };
     name := self.eat_word();
-    id := self.f.globals.intern(name);
+    id := self.m.intern(name);
     if !self.eat("=") {
         return(Err = "expected '=' after 'data $name'");
     };
@@ -948,7 +939,7 @@ fn parse_type(self: *QParseCtx) Result(void, Str) = {
         };
         typ.set_is_dark(true);
         if !size.ult(MAX_u32) {
-            when_debug(self.f, .Warn, fn(out) => @fmt(out, "very large abi type: %", typ.name));
+            when_debug(self.m, .Warn, fn(out) => @fmt(out, "very large abi type: %", typ.name));
             size = MAX_u32; // TODO: error if you try to use it
         };
         typ.size = size.trunc();
@@ -976,7 +967,7 @@ fn parse_type(self: *QParseCtx) Result(void, Str) = {
 fn parse_type_fields(self: *QParseCtx, typ: *Qbe.Typ, fields: *List(u32)) Result(void, Str) = {
     self.skip_blanks();
     
-    m := self.f.globals;
+    m := self.m;
     my_align: i64 = @if(typ.align_log2 == 255, -1, typ.align_log2.zext());
     my_size := 0;
     while => self.cursor < self.input.len && !self.check("}") {
@@ -1041,7 +1032,7 @@ fn parse_type_fields(self: *QParseCtx, typ: *Qbe.Typ, fields: *List(u32)) Result
     my_size = my_size.max(zext typ.size);
     my_size := bit_and(my_size + align - 1, -align);
     if !my_size.ult(MAX_u32) {
-        when_debug(self.f, .Warn, fn(out) => @fmt(out, "very large abi type: %", typ.name));
+        when_debug(self.m, .Warn, fn(out) => @fmt(out, "very large abi type: %", typ.name));
         my_size = MAX_u32; // TODO: error if you try to use it
     };
     typ.size = trunc my_size;
@@ -1129,6 +1120,24 @@ fn eat_quoted_word(self: *QParseCtx) Str = {
             ""
         }
     }
+}
+
+fn where_am_i(self: *QParseCtx) void = {
+    @fmt(self.error&, "\n");
+    if self.f.len_scratch() > 0 {
+        @fmt(self.error&, "after (");
+        i := self.f.scratch_next();
+        printins(self.f, i, self.error&);
+        @fmt(self.error&, "), ");
+    };
+    if !self.blk.is_null() {
+        @fmt(self.error&, "in block @%, ", self.blk.name());
+    };
+    ::ptr_utils(Qbe.Fn);
+    if !self.f.is_null() && self.f.lnk.id != Qbe.no_symbol_S {
+        @fmt(self.error&, "of func $%, ", self.f.name());
+    };
+    @fmt(self.error&, "on line %", self.line);
 }
 
 #use("@/lib/collections/map.fr");

@@ -1,4 +1,11 @@
 
+## (Dev 23)
+
+- backend/meta/parse.fr: error instead of hang on `add %a, %b, 24`
+  - show last instruction in parse error messages
+  - also don't collect_c_comments, just have those who want that call extract_sections themselves. 
+    going over the input twice doesn't matter when its just for my tiny .ssa tests. 
+
 ## (Dev 22)
 
 - only created_jit_fn_ptr_value the first time. 5869 -> 269. not faster but feels better. 

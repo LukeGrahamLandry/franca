@@ -610,6 +610,9 @@ need to be careful about the refs which have tags in the high bits so won't leb 
     you want to be able to split them. rn they can only have a single stack slot. 
 - be drop in qbe replacement for cproc. its string literals use `\012\000` instead of `\n\0`
 - wasm elide_abi_slots
+- detect mutable variable that's used undefined in a loop. 
+  its annoying because maybe you want to allow it if the user knows the path that leads to it being undefined is unreachable. 
+  but if it can't possibly be defined that should probably be an error. 
 ```
 // TODO: if they don't do it already: 
 //       - track known truthyness per block (based on jumps in dominators)
