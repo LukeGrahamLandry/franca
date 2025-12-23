@@ -892,6 +892,22 @@ fn compile_expr(self: *EmitIr, expr: *FatExpr, p: Placement) CRes(Qbe.Ref) = {
         fn FnPtr(arg) => {
             f := @unwrap(arg[].as_const(), "expected fn for ptr") return;
             f := FuncId.assume_cast(f&)[];
+
+            c := self.program.data.cast()[][];
+            if self.m.goal.arch == .wasm32 && self.m.goal.type == .JitOnly && identical(c.comptime_codegen.m, self.m) {
+                // required after i stopped doing MarkNotDone when making lit_fn. 
+                // because emit.push.CAddr needs to know its a function when emitting the code 
+                // but if it hasn't been compiled yet and the expression was already marked 
+                // done so not added to the callee list of the jit_fn, i'll only 
+                // save_signeture when making the jit-shim for everything in pending, 
+                // but then it's too late. alternatively, could just reserve the got slot 
+                // in fixup_wasm32 instead of requiring it to be done early. 
+                id := c.comptime_jit_symbol_id(f);
+                use_symbol(self.m, id) { s |
+                    s.pledge_function = true;
+                };
+            };
+            
             callee_r := self.func_ref(f);
             self.scalar_result(p, callee_r, i64)  // :get_or_create_type
         };

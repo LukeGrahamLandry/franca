@@ -1,4 +1,25 @@
 
+## (Dev 22)
+
+- only created_jit_fn_ptr_value the first time. 5869 -> 269. not faster but feels better. 
+  (so it doesn't happen every single time you get_fn_callable and thus every time you bake). 
+  similarly, don't have to carefully do it in create_import_body because it goes through shallow_jit_func anyway.
+- vauge cohesion improvement in the comptime jit stuff. 
+- i think the MarkNotDone when making a lit_fn was only needed before i had jit-shims. 
+  - getting rid of it hits `save_in_got missing slot`, 
+    which is concerning because do_codegen.Shim sets one so it seems to have gotten lost?
+    its because it's a #redirect and finish_alias copies the slot around in confusing ways. 
+  - it also changed when errors get noticed for @assert_type_error but that's fine. 
+    that's the compromise of jit-shims. 
+  - caused unfilled fixup in wasm. 
+    problem is you get to emit.push.CAddr before ever trying to compile it so don't know its wasm_type_index.
+    its for passing function pointers to create an AsmFunction so there's no callsite to infer the types from. 
+  - it does make shim_calls 55 -> 198 which is kinda bad. 
+    but it's kinda less confusing to just embrace not needing 
+    to worry about callee bookkeeping being correct. so maybe that's worth it. 
+    i certainly wouldn't do the other direction as an optimisation 
+    (walk over the tree for any consteval to avoid needing shims), so thats a good sign. 
+    
 ## (Dec 21)
 
 - hacked around the aliased bake problem from yesterday. 

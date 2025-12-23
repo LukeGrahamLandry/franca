@@ -1,5 +1,7 @@
 //! - Call a function pointer with a dynamically known type on an array of bytes.
 //! - Create a shim around an uncompiled function that redirects into the compiler and then forwards to the real callee. 
+//! - Track which FuncId escape to user code as a pointer in comptime address space that might need to be baked. 
+//! - Require a function be jitted to be called at comptime.
 
 DynCallShim :: @tagged(Pending: Qbe.Sym, Ready: rawptr);
 
@@ -55,6 +57,18 @@ fn wait_for_symbol(shared: *FrontendCodegen, id: Qbe.Sym) rawptr = {
         @debug_assert(!c.is_null(), "%", symbol.name);
     };
     c
+}
+
+fn comptime_jit_symbol_id(self: *SelfHosted, fid: FuncId) Qbe.Sym = {
+    func := self.get_function(fid);
+    if !func.has_comptime_jit_symbol_id {
+        @debug_assert(!func.get_flag(.AnyConstArgs) && !func.get_flag(.UnboundGenerics));
+        m := self.comptime_codegen.m;
+        id := m.intern(self.comp().fmt_fn_name(fid));
+        func.comptime_jit_symbol_id = id.id;
+        func.has_comptime_jit_symbol_id = true;
+    };
+    (id = func.comptime_jit_symbol_id)
 }
 
 // Creates a function with the signeture (arg_array: *u8, ret_array: *u8, callee: fnptr) -> void.
@@ -158,11 +172,12 @@ fn create_dyncall_shim(self: *SelfHosted, f_ty: FnType) DynCallShim = {
 //       - i save the registers used only on the slow path at entry of the function. 
 //       - it loads from the got twice on the fast path because i don't deduplicate RCon across blocks.
 //       - redundant copies of aggregates. 
-fn create_jit_shim(self: CompCtx, shared: *FrontendCodegen, fid: FuncId, handler_callee_address: rawptr) void = {
+fn emit_jit_shim(c: *SelfHosted, fid: FuncId) void = {
+    self := c.comp();
+    shared := c.comptime_codegen;
+    handler_callee_address: rawptr = report_called_uncompiled_or_just_fix_the_problem;
+    m := shared.m; 
     func := self.get_function(fid);
-    
-    m := shared.m;
-    c := self.data.cast()[][];
     c.when_debug(.Shim, fn(o) => @fmt(o, "S: create %", fmt_func(c, fid)));
     id := Qbe.no_symbol_S;
     enter_task shared { entry |
@@ -179,7 +194,7 @@ fn create_jit_shim(self: CompCtx, shared: *FrontendCodegen, fid: FuncId, handler
         not_ready := newblk(); name_block(not_ready, "not_ready"); not_ready.id = 2;
         
         f.nblk = 3;
-        target_id := self.data.cast()[][].comptime_jit_symbol_id(fid);
+        target_id := c.comptime_jit_symbol_id(fid);
         entry.task = (Shim = (f = f, shim_for = target_id));
         
         // collect parameters
@@ -281,8 +296,31 @@ fn create_jit_shim(self: CompCtx, shared: *FrontendCodegen, fid: FuncId, handler
     @debug_assert(!shared.worker.threaded);
     if func.get_flag(.TookPointerValue) || ENABLE_TRACY {
         // TODOWASM: don't make_exec for this, just assign a got_lookup_offset
-        self.data.cast()[][].created_jit_fn_ptr_value(fid, shared.wait_for_symbol(id).int_from_rawptr());
+        c.created_jit_fn_ptr_value(fid, shared.wait_for_symbol(id));
     };
+}
+
+fn create_jit_shim(self: *SelfHosted, fid: FuncId) Res(void) = {
+    opts := self.get_build_options();
+    func := self.get_function(fid);
+    if func.get_flag(.AlreadyHasShim) || func.get_flag(.RealAsmDone) { 
+        return(.Ok);
+    };
+    
+    // Need to know types to do ABI stuff.
+    res := self.poll_in_place(void) {
+        r :: local_return;
+        @check(self.infer_arguments(fid)) r;
+        @check(self.infer_return(fid)) r;
+        .Ok
+    };
+    @try(res) return;
+    
+    emit_jit_shim(self, fid);
+    @debug_assert(!func.get_flag(.RealAsmDone), "we didn't actually compile it why do we think we did??"); 
+    func.set_flag(.AlreadyHasShim);
+    
+    .Ok
 }
 
 fn shallow_jit_func(self: *SelfHosted, fid: FuncId) Res(void) = {
@@ -311,7 +349,7 @@ fn shallow_jit_func(self: *SelfHosted, fid: FuncId) Res(void) = {
     @debug_assert(!shared.worker.threaded);
     if func.get_flag(.TookPointerValue) || ENABLE_TRACY {
         id := self.comptime_jit_symbol_id(fid);
-        self.created_jit_fn_ptr_value(fid, shared.wait_for_symbol(id).int_from_rawptr());
+        self.created_jit_fn_ptr_value(fid, shared.wait_for_symbol(id));
     };
     
     func.set_flag(.RealAsmDone);
@@ -345,7 +383,6 @@ fn save_in_got(self: *SelfHosted, fid: FuncId, addr: rawptr) void = {
 // TODO: it would be nice if i had the arguments here for reporting what call you actually tried to make. 
 //       but this way will be even better once i can lazily compile it and just lean on the backend to make the args flow through. 
 report_called_uncompiled_or_just_fix_the_problem :: fn(self: *SelfHosted, fid: FuncId) rawptr = {
-    result := rawptr_from_int(0);
         @if(__driver_abi_version >= 1513)
         if get_stack_base_for_tls() != self.main_thread_tls {
             // even once i allow threads, should keep some varient of this check to detect uninit tls (like display_link_callback1)
@@ -362,15 +399,10 @@ report_called_uncompiled_or_just_fix_the_problem :: fn(self: *SelfHosted, fid: F
         if func.get_flag(.AvoidJitShim) {
             @panic("Called an #avoid_shim function through a jit_shim");
         };
+        result := zeroed(rawptr);
         if func.get_flag(.RealAsmDone) { 
-            if self.get_fn_callable(fid) { addr | 
-                // the shim itself checks that the address in GOT matches the shim address before calling into the compiler. 
-                // so replacing it with the real address now makes future calls faster (even if they go through the old function pointer). 
-                save_in_got(self, fid, addr);
-                result = addr;
-            };
+            result = self.get_fn_callable(fid).unwrap();
         };
-    
     // you're required to already be on the same thread but this makes it more likely to work 
     // if you have multiple CompCtxs floating around and trying to call each other, 
     // which is a bit sketchy but would be nice if it worked. 
@@ -383,11 +415,8 @@ report_called_uncompiled_or_just_fix_the_problem :: fn(self: *SelfHosted, fid: F
             addr := self.poll_in_place(rawptr) { () Maybe(rawptr) |
                 r :: local_return;
                 if func.get_flag(.RealAsmDone) {
-                    // TODO: why can't .expect("must have pointer if done")? -- Dec 15 
-                    //       this changed when i stopped compiling in the old backend when NEW_COMPTIME_JIT
-                    if self.get_fn_callable(fid) { p |
-                        r(Ok = p);
-                    };
+                    p := self.get_fn_callable(fid).unwrap();
+                    r(Ok = p);
                 };
                 if !first {
                     // If its an import we're never gonna make progress by trying to compile it. 
@@ -400,13 +429,16 @@ report_called_uncompiled_or_just_fix_the_problem :: fn(self: *SelfHosted, fid: F
                 r(Suspend = self.wait_for(Jit = fid))
             };
             result = self.unwrap_report_error(rawptr, addr);
-            save_in_got(self, fid, result);
             reset_temporary_storage(mark);
         };
     };
+    // the shim itself checks that the address in GOT matches the shim address before calling into the compiler. 
+    // so replacing it with the real address now makes future calls faster (even if they go through the old function pointer). 
+    save_in_got(self, fid, result);
     result
 };
 
+// return existing jit_addr or shim_addr.
 // currently i rely on W+X memory so this function doesn't need to change permissions. 
 fn get_fn_callable(self: *SelfHosted, fid: FuncId) ?rawptr = {
     m := self.comptime_codegen.m;
@@ -417,10 +449,57 @@ fn get_fn_callable(self: *SelfHosted, fid: FuncId) ?rawptr = {
     @debug_assert(!func.get_flag(.AnyConstArgs) && !func.get_flag(.UnboundGenerics));
     id := self.comptime_jit_symbol_id(fid);
     c := wait_for_symbol(self.comptime_codegen, id);
-        if func.get_flag(.TookPointerValue) || ENABLE_TRACY {
-            self.created_jit_fn_ptr_value(fid, c.int_from_rawptr());
-        };
+    if func.get_flag(.TookPointerValue) || ENABLE_TRACY {
+        // created_jit_fn_ptr_value is done when creating it
+        @debug_assert(self.baked.vmem&.get(c).is_some());
+    };
     (Some = c)
+}
+
+// create shim if not yet ready. 
+// assume the pointer escapes to user code and might need to be baked. 
+fn get_jitted_ptr(self: *SelfHosted, f: FuncId) CRes(rawptr) = {
+    self.took_pointer_value(f);
+    p := self.get_fn_callable(f) || {
+        @try(self.create_jit_shim(f)) return; 
+        self.get_fn_callable(f).unwrap()
+    };
+    (Ok = p)
+}
+
+fn took_pointer_value(self: *SelfHosted, fid: FuncId) void = {
+    func := self.get_function(fid);
+    if func.get_flag(.TookPointerValue) {
+        // not `Suspend = self.wait_for(Jit = fid)` because of cycles, we defer to the backend to deal with finializing it.
+        // since the flag is set, create_jit_shim/shallow_jit_func will record when a new pointer is created. 
+        return();
+    };
+    // We might have already compiled the function but didn't know we'd need to remember its address. (ie. #test fn large_struct_ret_return).
+    // no address just means haven't get_fn_callable/shallow_jit_func (might never happen if not needed in the comptime module). 
+    m := self.comptime_codegen.m;
+    id := self.comptime_jit_symbol_id(fid);
+    use_symbol(m, id) { s |
+        // TODO: make sure im testing the case where is was already jitted so these are not null
+        if !s.shim_addr.is_null() && !identical(s.shim_addr, s.jit_addr) {
+            self.created_jit_fn_ptr_value(fid, s.shim_addr);
+        };
+        if !s.jit_addr.is_null() {
+            self.created_jit_fn_ptr_value(fid, s.jit_addr);
+        };
+    };
+    func.set_flag(.TookPointerValue);
+}
+
+// This avoids needing to linearly scan all the functions when they try to emit_relocatable_constant of a function pointer. 
+// You only need to call it if they created a Values of it, so we might need to emit it as a constant later 
+// (like for vtables where you construct the value in memory as with comptime pointers and then we emit relocations). 
+// TODO: 72/251 times you get here is because you always do it for shims 
+//       and you make a shim for each unique type in get_custom_bake_handler overload
+//       even tho you know you're going to call it immediately.  -- Dec 22, 2025
+fn created_jit_fn_ptr_value(self: *SelfHosted, f: FuncId, ptr: rawptr) void = {
+    @debug_assert(!ptr.is_null(), "created_jit_fn_ptr_value cannot be null");
+    // TODO: make vbytes from SymbolInfo.size and that can be used for faster backtraces. 
+    self.baked.vmem&.insert(ptr, (FuncId = f));
 }
 
 fn zone_begin_dyncall(self: *SelfHosted, f_ptr: rawptr) TraceCtx = {

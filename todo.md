@@ -1,4 +1,8 @@
 
+- without MarkNotDone in for lit_fn, its sketchy if you use something 
+  that's #avoid_shim inside an @run block (like CVariadic). 
+  maybe it's fine. the workaround is just wrap it in `(fn=())()` 
+  which is dumb but since it never comes up who cares. 
 - i really need to make the zero value of Option be None
 - should have a thing for getting the current scope. 
   get_constant doesn't recurse up parents. 
