@@ -698,26 +698,44 @@ unwrap_report_error :: fn(self: *SelfHosted, $T: Type, value: Res(T)) T #generic
     }
 };
 
+fn update_main_span(err: *CompileError, new_loc: Span) ?Span = {
+    // TODO: this is kinda dumb
+    old_loc := @match(err) {
+        fn Msg(it)          => it.span&;
+        fn TypeMismatch(it) => it.span&;
+        fn CoerceConst(it)  => it.span&;
+        fn InvalidField(it) => it.span&;
+        fn MissingField(it) => it.span&;
+        fn Parse(it) => it.span&;
+        fn ExpectedCompileError(span) => span;
+        @default => @ref(zeroed Span);
+    };
+    
+    if old_loc[].is_null() {
+        old_loc[] = new_loc;
+    };
+    @if(old_loc[].is_null(), .None, (Some = old_loc[]))
+    
+}
+
 fn fmt_error(self: *SelfHosted, err: *CompileError, out: *List(u8), color: bool) void = {
-    err.update_main_span(self.last_loc);
+    if err.update_main_span(self.last_loc) { span |
+        self.codemap.fmt_error_line(span, out, color);
+    };
     @match(err) {
         fn Msg(it) => {
-            self.codemap.fmt_error_line(it.span, out, color);
             @fmt(out, "Compile Error: %", it.msg);
         };
         fn ExpectedCompileError(loc) => {
-            self.codemap.fmt_error_line(loc[], out, color);
             @fmt(out, "Compile Error: @assert_compile_error did not find compile error");
         }
         fn Parse(it) => {
-            self.codemap.fmt_error_line(it.span, out, color);
             @fmt(out, "Parse Error: %", it.msg);
         }
         fn TypeMismatch(it) => {
             // TODO: if it was in matching arguments, just report the problem fields. 
             //       for all tuples i guess since we know they're structural. 
             //       bring back the nicer detailed printing i had for a bit in rust. 
-            self.codemap.fmt_error_line(it.span, out, color);
             want := self.get_type(it.wanted);
             found := self.get_type(it.found);
             if want.is(.Struct) && found.is(.Struct) {
@@ -741,14 +759,12 @@ fn fmt_error(self: *SelfHosted, err: *CompileError, out: *List(u8), color: bool)
             @fmt(out, "Type Error: expected % but found %", self.log_type(it.wanted), self.log_type(it.found));
         }
         fn CoerceConst(it) => {
-            self.codemap.fmt_error_line(it.span, out, color);
             @fmt(out, 
                 "Type Error: expected % but found %\nWhile coercing constant: %", 
                 self.log_type(it.wanted), self.log_type(it.found), it.expr.log(self)
             );
         }
         fn InvalidField(it) => {
-            self.codemap.fmt_error_line(it.span, out, color);
             extra := if(self.has_fields(it.container), => "", => "\n(only @struct/@tagged/@union support field access)");
             @fmt(out, 
                 "Type Error: field '%' does not exist on type % %\n", 
@@ -757,7 +773,6 @@ fn fmt_error(self: *SelfHosted, err: *CompileError, out: *List(u8), color: bool)
             show_type_declaration(self, out, it.container, color);
         }
         fn MissingField(it) => {
-            self.codemap.fmt_error_line(it.span, out, color);
             @fmt(out, 
                 "Missing required field '%' (no default value provided)\n",
                 self.pool.get(it.name), 
@@ -778,7 +793,6 @@ fn fmt_error(self: *SelfHosted, err: *CompileError, out: *List(u8), color: bool)
             };  
         }
         fn InvalidContextualField(it) => {
-            self.codemap.fmt_error_line(it.span, out, color);
             @fmt(out, "contextual field % not found for %\n", self.pool.get(it.name), self.log_type(it.type));
             show_type_declaration(self, out, it.type, color);
         }
@@ -987,18 +1001,65 @@ fn dump_baked_vmem(c: *SelfHosted, out: *List(u8)) void = {
     each c.baked.vmem.lookup& { k, v |
         push(pages&, (k, v[]));
     };
-    sort :: import("@/lib/sort.fr")'quicksort(@type pages[0], fn(a, b) => a._0 <= b._0);
+    sort :: import("@/lib/sort.fr")'insertion_sortXXX(@type pages[0], fn(a, b) => a._0 <= b._0);
     pages.items().sort();
     for pages { hi, page |
-        @fmt(out, "- %:\n", hi);
-        for page.entries { it |
-            @fmt(out, "  - %..+%: ", it.off, it.len);
-            if it.value.tag != .Unknown {
-                @fmt(out, "%", (c, as_tagged(it.value&)));
+        dump_baked_page(c, out, hi, page);
+    };
+}
+
+// this feels like it would be slow but its ~50 microseconds on the compiler itself. 
+fn panic_on_volatile_bake(c: *SelfHosted) void = {
+    out := u8.list(temp());
+    bad_ranges := list([]u8, temp());
+    bad_ranges&.push(get_current_thread()[].stack.usable);
+    t := temp();
+    a := c.get_alloc();
+    @assert(!identical(t.data, a.data), "setting ast_alloc=temp doesn't make sense");
+    collect_arena_memory(bad_ranges&, temp());
+    
+    @debug_assert_le(1.shift_left(AddressSpace.Map.page_bits), page_size());
+    each c.baked.vmem.lookup& { hi, page |
+        for bad_ranges { check |
+            addr := hi.shift_left(AddressSpace.Map.page_bits);
+            base := u8.int_from_ptr(check.ptr);
+            if base.ule(addr) && addr - base < check.len {
+                // TODO: its sketchy to do this at the end. 
+                //       the problem being reported is that its volatile so might be uninit by now. 
+                dump_baked_page(c, out&, hi, page[]);
             };
-            @fmt(out, "\n");
-        
         };
+    };
+    if out.len > 0 {
+        c.last_loc = zeroed(Span);
+        out := @tfmt("baked volatile pages (stack or temp())\n%", out.items());
+        c.report_error(make_error(out), false);
+    };
+}
+
+fn dump_baked_page(c: *SelfHosted, out: *List(u8), hi: i64, page: *AddressSpace.Map.Page) void = {
+    @fmt(out, "- %:\n", hi);
+    for page.entries { it |
+        @fmt(out, "  - %..+%: ", it.off, it.len);
+        if it.value.tag != .Unknown {
+            @fmt(out, "%", (c, as_tagged(it.value&)));
+        };
+        @fmt(out, "\n");
+    };
+}
+
+fn collect_arena_memory(out: *List([]u8), t: Alloc) void = {
+    v := bit_cast_unchecked(@type t.vptr, rawptr, t.vptr);
+    @if(!identical(v, Arena'arena_allocator_fn)) return();
+    t := Arena.Allocator.ptr_from_raw(t.data);
+    c := t.chunk.unwrap();
+    while => c.next { cc |
+        c = cc;
+    };
+    loop {
+        bytes := bit_cast_unchecked(*Arena.Header, *u8, c).slice(c.size);
+        out.push(bytes);
+        c = c.prev || return();
     };
 }
 

@@ -15,7 +15,8 @@ fn PageMap($T: Type) Type = {
         };
         // must be <= 15 because im using u16-s,
         // can make it smaller to test that spanning multiple pages works properly
-        page_bits :: 14;
+        // with the way i do panic_on_volatile_bake, it can't be larger than page_size (4k on linux)
+        page_bits :: 12;
         
         lookup: RawHashMap(i64, *Page);
         gpa: Alloc;
@@ -86,12 +87,13 @@ fn PageMap($T: Type) Type = {
                 if lo < zext(e.off + e.len) {
                     end_of_page :u16: 1.shift_left(PageMap.page_bits) - 1;
                     size := {
+                        p := p;
                         e := e;
                         s: i64 = e.len.zext() + int(e.len == end_of_page);
                         while => e.forward {
-                            prev_page := self.get_page(p.high_bits + 1);
-                            @debug_assert(prev_page.entries.len > 0);
-                            e = prev_page.entries.index(prev_page.entries.len - 1);
+                            p = self.get_page(p.high_bits + 1);
+                            @debug_assert(p.entries.len > 0);
+                            e = p.entries.index(p.entries.len - 1);
                             s += e.len.zext() + int(e.len == end_of_page);
                         };
                         s
@@ -99,9 +101,9 @@ fn PageMap($T: Type) Type = {
                     offset_in_allocation := lo - e.off.zext();
                     while => e.backward {
                         // Walk backwards to find the start of the allocation. 
-                        prev_page := self.get_page(p.high_bits - 1);
-                        @debug_assert(prev_page.entries.len > 0);
-                        e = prev_page.entries.index(prev_page.entries.len - 1);
+                        p = self.get_page(p.high_bits - 1);
+                        @debug_assert(p.entries.len > 0);
+                        e = p.entries.index(p.entries.len - 1);
                         @debug_assert(e.forward);
                         offset_in_allocation += e.len.zext() + int(e.len == end_of_page);
                     };

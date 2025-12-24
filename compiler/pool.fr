@@ -24,13 +24,14 @@ fn get_c_str(self: *StringPool, i: Symbol) CStr = {
     ::if(CStr);
     if self.null_terminated&.get(index) {
         (ptr = s.ptr)
-    } {
+    } else {
         self.null_terminated&.set(index);
-        owned := s.clone(self.values.gpa);
-        owned&.push(0);
+        owned := self.values.gpa.alloc_uninit(u8, s.len + 1);
+        owned.slice(0, s.len).copy_from(s);
+        owned[s.len] = 0;
         owned.len -= 1; // next time we lookup the string, don't include the zero.
-        self.values[index] = owned.items(); // TODO: free on drop()
-        (ptr = owned.maybe_uninit.ptr)
+        self.values[index] = owned;
+        (ptr = owned.ptr)
     }
 }
     
@@ -61,13 +62,6 @@ fn slow_integrity_check(self: *StringPool) void = {
         j := self.lookup&.get(s[]) || @panic("slow_integrity_check: % %", i, s);
         @assert_eq(i+1, j.id().zext(), "slow_integrity_check: % %", i, s);
     };
-}
-
-// TODO: derive drop impls
-// TODO: should I drop the strings? should take lists so ownership is clear. but then you're forced to make copies. what if you know the strings will outlive the pool? 
-fn drop(self: *StringPool) void = {
-    self[].lookup&.drop();
-    self[].values&.drop();
 }
 
 fn fill_fixed_flags(pool: *StringPool) void = {

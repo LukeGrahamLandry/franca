@@ -1,4 +1,20 @@
 
+## (Dev 24)
+
+- examples/bloat2.fr: elf & wasm
+- detect if you try to bake memory in temp() or the stack since it can change between
+  when the comptime code runs and when i get around to baking it. 
+  also just doesn't fit the conceptual model of taking a snapshot of the address space at the end of compilation. 
+  - STDLIB_PATH in make_top_level is insert_owned(".") in the general_allocator
+    (and that happens first so any other string literals will use it)
+    which seems to randomly trigger panic_on_volatile_bake in the sta1.out test. 
+    was because i was letting the PageMap have larger granularity than an mmap page. 
+- also there's something making it loop forever spamming the same get_page. 
+  very sensitive to layout / page_bits. 
+  missing `p = prev_page;` when walking to the end to get the size
+  so it got stuck any time something spanned multiple pages. 
+  forgot to do the classic "set page_bits way too low" test when i made it not recursive. 
+
 ## (Dev 23)
 
 - backend/meta/parse.fr: error instead of hang on `add %a, %b, 24`
