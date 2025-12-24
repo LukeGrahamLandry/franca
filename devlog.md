@@ -5,6 +5,16 @@
   - show last instruction in parse error messages
   - also don't collect_c_comments, just have those who want that call extract_sections themselves. 
     going over the input twice doesn't matter when its just for my tiny .ssa tests. 
+- output a perfmap file so perf can see symbol names for my jitted code. 
+  it's intended for jitted code but can i just do it for the aot code as well based on my AotDebugInfo? 
+  it actually doesn't matter in samply (both on linux and macos), it just looks at the symbol table in my exe. 
+  but trying to use perf directly on linux, it doesn't like that have two symbol tables 
+  (i have one for doing relocations and one for everything), it only shows the ones with relocations. 
+  trying to do perfmap based on AotDebugInfo didn't work. idk if it just won't look there if it thinks it's aot 
+  or i have to not use virtual addresses (the numbers it shows in perf are the low ones before aslr i think?)
+  i tried various skew things that didn't work. 
+  maybe just giving up and using one symbol table will fix it in lldb too, that would be nice. 
+  indeed it does.  
 
 ## (Dev 22)
 

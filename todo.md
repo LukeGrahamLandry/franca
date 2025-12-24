@@ -551,7 +551,6 @@ hould just make them local constants in each file like they are here in riscv
 - be able to output frc/frc_inlinable in the same module as compiling normally so you don't have to do two passes over things to cache it
 - fix those two ^ and then compiler/test.fr can create all at once and assert that they make the same exe instead of running them all
 - elf: don't include names for local symbol with DataAbsolute relocations when exe_debug_symbol_table=false,
-  and do include all symbol names when exe_debug_symbol_table=true. 
 - test that makes a dylib
 - macho exe_debug_symbol_table doesn't work i clion profiler (dtrace?)
 - debug assert that all tmps have a definition in rega. 
@@ -760,8 +759,6 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 - how are you supposed to ask for page size? blink wants 64k instead of 4k. 
 - standalone import_c/cc.fr and meta/qbe_backend.fr can't make statically linked binaries because the `_init` is written in franca
 - elf_loader.fr doesn't work on linker output: `panic! not divisible by page size`
-- lldb doesn't have symbol names or let you set break points. do i need to do dwarf stuff?
-  (it kinda works in gdb!)
 - once is_linking_libc isn't #fold, if you have a static compiler and want to link a libc thing
   and notice that the path to dynamic loader is valid, 
   it would be cool to try to do something where you morph by poking in the Dynamic header
@@ -775,7 +772,6 @@ q.out`impl2__7041:
 ```
 - shader translation for the gui examples
 - mprotect .ConstantData segment after applying relocations
-- readelf: Error: File contains multiple dynamic string tables
 - linux amd: consistantly fails in actions but not in orb rosetta. 
   - wuffs/(png, jpeg, deflate) 
   - import_c/tests/(macro, varargs, function, attribute, usualconv)

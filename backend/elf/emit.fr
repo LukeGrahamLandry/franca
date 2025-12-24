@@ -55,19 +55,28 @@ finalize_symbols :: fn(m: *Qbe.Module) SymbolTableInfo = {
     @debug_assert(m.goal.type != .Relocatable); // TODO: does this really need a different code path?
     fixups, symbols := collect_aot_fixups(m);
     
-    // TODO: would it be nicer to have multiple symbol tables (put exports elsewhere?)
-    //       if not, still have collect_aot_fixups return the list so you keep the extra capacity. :SLOW
-    if m.goal.type == .Dynamic {
+    // for exe_debug_symbol_table, many programs won't look at multiple symbol tables 
+    // (bad: [lldb, perf, blinkenlights]; good: [llvm-objdump, samply];)
+    // so can't do it how i do it on macos, have to include all symbols even if no fixups. 
+    if m.goal.exe_debug_symbol_table {
+        for m.local_needs_reloc { id |
+            s := m.get_symbol_info(id);
+            if s.fixups.len == 0 {  // relies on do_jit_fixups doing unordered_retain(dataabsolute)
+                symbols&.push(s);
+            }
+        };
+    };
+    
+    if m.goal.type == .Dynamic && !m.goal.exe_debug_symbol_table {
         ::List(@type symbols[0]);
-        s := symbols.assume_owned(temp());
         for m.exports { id | 
             it := m.get_symbol_info(id);
             if it.fixups.len == 0 {
-                s&.push(it);
+                symbols&.push(it);
             }
         };
-        symbols = s.items();
     };
+    symbols := symbols.items();
     
     // local symbols are kept seperate from imports. 
     // dynsym.sh_info is the index of the first global symbol. 
@@ -417,12 +426,6 @@ for_dynamic_loader :: fn(
     dynamics&.push(tag = .RelA, val = r_table.rela);
     dynamics&.push(tag = .RelASz, val = r_table.relasz);
     dynamics&.push(tag = .RelAEnt, val = size_of(Elf.RelA));
-    
-    if m.goal.exe_debug_symbol_table {
-        symbols := temp().alloc_init(*SymbolInfo, m.local_needs_reloc.len, 
-            fn(i) => m.get_symbol_info(m.local_needs_reloc[i]));
-        table := e.create_symbol_table(symbols, .SymbolTable, empty(), base, true);
-    };
     
     dynamics
 };

@@ -121,7 +121,7 @@ QbeModule :: @rec @struct(
     need_static_memmove: bool,
     have_static_memmove: bool,
     
-    _: *u8,  // :UpdateBoot
+    last_perfmap_end: *u8,
     
     debug_info: @struct {
         headers: List(u8);  // crash_report.AotDebugInfo.headers
@@ -387,6 +387,7 @@ if need_segments {
         m.commands = (mmapped = (ptr = next[], len = m.goal.commands_size_guess), next = next[]);
         next[] = next[].offset(m.goal.commands_size_guess); 
         m.start_of_writable_code = next[];
+        m.last_perfmap_end = m.start_of_writable_code;
         
         if m.goal.arch == .wasm32 {
             // :WasmZeroPage Skip the low page so we don't live in crazy town where the null pointer is valid. 
@@ -519,6 +520,7 @@ fn show_backend_stats() bool =
     get_environment_variable("FRANCA_LOG_STATS").is_some();
 
 fn drop(m: *QbeModule) void = {
+    m.write_perfmap_symbols();
     if m.wasm_exec_handles.len != 0 {
         (m.target.wasm_jit_event)(Close = (events = m.wasm_exec_handles.items()));
     };
@@ -1290,3 +1292,52 @@ find_ip_in_module :: fn(m: *QbeModule, addr: rawptr) ?Str = {
     
     find_in_debug_info(AotDebugInfo.raw_from_ptr(debug&), addr)
 };
+
+// TODO: the compiler could call this before running the user program so it works even if they exit() instead of returning
+fn write_perfmap_symbols(m: *Qbe.Module) void = {
+    ::enum(@type m.goal.type);
+    @if(m.goal.type != .JitOnly) return();
+    @if(m.goal.arch == .wasm32) return();
+    @if(identical(m.last_perfmap_end, m.last_function_end)) return();
+    @if(get_environment_variable("FRANCA_PERFMAP").is_none()) return(); 
+    
+    write_perfmap_symbols { $yield | 
+        for_symbols m { _, s |
+            @if(s.segment == .Code)
+            @if(s.alias == Qbe.no_symbol_S)
+            @if(!identical(s.jit_addr, s.shim_addr))
+            @if(ptr_diff(m.last_perfmap_end, s.jit_addr) >= 0)  
+                yield(s.jit_addr, s.size, s.name);
+        };
+    };
+    // don't spam the file if called multiple times
+    m.last_perfmap_end = m.last_function_end;
+}
+
+// - TODO: https://github.com/torvalds/linux/blob/master/tools/perf/Documentation/jitdump-specification.txt 
+//         so it can show me the assembly as well. 
+// - it's fine to do this all at the end (giving them names after they've been called)
+// - useful even when not os=linux because samply understands the same symbol info and works on macos. 
+// - TODO: is there some way to detect when running under perf without setting an extra environment variable? 
+// https://github.com/torvalds/linux/blob/0fe7d7e9761ec7e23350b5543ddac470bb3cde1e/tools/perf/Documentation/jit-interface.txt
+fn write_perfmap_symbols($iter: @Fn(yield: @Fn(p: rawptr, size: i64, name: Str) void) void) void = {
+    out := @ref u8.list(temp());
+    iter { ptr, len, name |
+        if !ptr.is_null() && len > 0 {
+            // they say don't put the 0x but it seems fine
+            @fmt(out, "% % %\n", fmt_hex(ptr), fmt_hex(len), name);
+        }
+    };
+    pid := Syscall'getpid();
+    path := @tfmt("/tmp/perf-%.map", pid);
+    #use("@/lib/sys/fs.fr");
+    if !append_to_file(path, out.items()) {
+        @eprintln("failed to write symbol info for profiling (%)", path);
+    };
+}
+
+// TODO: /tmp/marker-pid-tid.txt (start end name\n)
+//       for zone_begin/zone_end
+
+// franca examples/default_driver.fr build compiler/main.fr -o target/qq.out -unsafe -keep-names && FRANCA_PERFMAP=1 samply record --unlink-aux-files --output target/profile.json.gz target/qq.out examples/default_driver.fr build compiler/main.fr -unsafe -keep-names
+// https://github.com/mstange/samply
