@@ -628,6 +628,7 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 // TODO: don't do extra copies of arg/ret when just passing through to another call.
 // TODO: ir test that uses opaque types
 ```
+- elf can have relocations in bss so should use that for export_ffi_data instead of having 12k of zeroes
 
 ## backend symbols rework
 

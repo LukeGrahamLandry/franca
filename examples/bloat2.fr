@@ -1,70 +1,144 @@
-// TODO: finish this
 
 main :: fn() void = {
     args := cli_args();
-    assert(args.len > 1, "Last argument is path to executable");
+    msg :: "Last argument is path to executable";
+    assert(args.len > 1, msg);
     path := args[args.len - 1].str(); 
     bytes := temp().read_to_string_or_crash(path).items(); // :panic
     
-    // TODO: elf
-    results := load_symbols_macho(bytes);
+    @assert(bytes.len > 4);
+    magic4 := bytes.peek_type(u32)[];
+    total, results := @switch(magic4) {
+        @case(Macho.macho_magic) => load_symbols_macho(bytes);
+        @case(Elf.MAGIC)         => load_symbols_elf(bytes);
+        @case(Wasm.MAGIC4)       => load_symbols_wasm(bytes);
+        @default => @panic("% (% had bad magic)", msg, path);
+    };
     
-    sort :: import("@/lib/sort.fr")'quicksort(FuncEntry, fn(a, b) => a.size <= b.size);
+    sort :: import("@/lib/sort.fr")'insertion_sortXXX(FuncEntry, fn(a, b) => a.size <= b.size);
     results.sort();
     
     for results { func |
         @println("%: %", func.size, func.name);
     };
+    println("======");
+    @println("FOUND: % bytes", total);
+    @println("EXTRA: % bytes", bytes.len - total);
+    @println("INPUT: %", path);
 }
 
-#use("@/backend/macho/bits.fr")
-load_symbols_macho :: fn(full_bytes: []u8) []FuncEntry = {
-    results := FuncEntry.list(temp());
-    bytes := full_bytes;
+load_symbols_macho :: fn(full_bytes: []u8) Ty(i64, []FuncEntry) #use(Macho) = {
+    total, results := (0, FuncEntry.list(temp()));
+    header := full_bytes.peek_type(MachoHeader);
+    @debug_assert_eq(header.magic, macho_magic);
     
-    header := bytes&.pop_type(MachoHeader);
-    
-    @assert_ne(header.magic, Elf.MAGIC, "expected a Mach-O file but that is an ELF file");
-    @assert_eq(header.magic, macho_magic, "macho bad magic");
-    
-    total := 0;
-    start := bytes.ptr;
-    unknown := 0;
-    range(0, header.commands_count.zext()) { i |
-        header := bytes&.pop_type(LoadCommandHeader);
+    for_sections full_bytes { header_type, bytes | 
         ::enum(LoadCommand);
-        @switch(header.type) {
+        @switch(header_type) {
             @case(LoadCommand.LinkEditSymbolTable.raw()) => {
+                @assert_eq(24, bytes.len);
                 command := bytes&.pop_type(LinkEditSymbolTable);
-                @assert_eq(24, @as(i64) header.size.zext());
-                symbols_bytes := full_bytes.slice(command.symbols_offset.zext(), full_bytes.len);
+                n := command.symbol_count.zext();
+                it := full_bytes.rest(command.symbols_offset.zext());
+                symbols := it.peek_slice(SymbolEntry, n);
                 strings_bytes := full_bytes.slice(command.strings_offset.zext(), full_bytes.len);
                 
-                range(0, command.symbol_count.zext()) { i |
-                    symbol := symbols_bytes&.pop_type(SymbolEntry);
-                    name: CStr = (ptr = strings_bytes.ptr.offset(symbol.name_offset.zext()));
-                    // TODO: this doesn't work!
-                    //       you're not allowed to assume they'll be in order. 
-                    //       should use functionstarts to get the size of everything instead? 
-                    next_symbol := symbols_bytes.peek_type(SymbolEntry);
-                    size := next_symbol.symbol_address - symbol.symbol_address;
-                    size: i64 = bitcast size;
-                    results&.push(name = name.str(), size = size);
+                sort :: import("@/lib/sort.fr")'insertion_sortXXX(SymbolEntry, fn(a, b) => a.symbol_address <= b.symbol_address);
+                symbols.sort();
+                
+                range(0, symbols.len - 1) { i |
+                    symbol := symbols[i]&;
+                    name := strings_bytes.rest(symbol.name_offset.zext()).peek_cstr();
+                    next_symbol := symbols[i + 1]&;
+                    @if(symbol.section_number != 4)  // HACK: that's the one i use for bss
+                    if next_symbol.section_number == symbol.section_number {
+                        size := next_symbol.symbol_address - symbol.symbol_address;
+                        size: i64 = bitcast size;
+                        total += size;
+                        if size != 0 {
+                            results&.push(name = name, size = size);
+                        }
+                    } else {
+                        // TODO: use section_number and get the bounds of this segment from the load command. 
+                        @eprintln("TODO: size for last thing in the segment: %", name);
+                    }
                 };
+                symbol := symbols[symbols.len - 1]&;
+                name := strings_bytes.rest(symbol.name_offset.zext()).peek_cstr();
+                @eprintln("TODO: size for last thing in the segment: %", name);
             };
-            @default => {
-                unknown += 1;
-                // -8 because we already ate the header
-                bytes.ptr = bytes.ptr.offset(header.size.zext() - 8);
-                bytes.len -= header.size.zext() - 8;
+            @default => ();
+        };
+    };
+    
+    (total, results.items())
+}
+
+load_symbols_elf :: fn(in: []u8) Ty(i64, []FuncEntry) = {
+    total, results := (0, FuncEntry.list(temp()));
+    h := in.peek_type(Elf.Header);
+    @debug_assert_eq(h.magic, Elf.MAGIC);
+    sh := in.rest(h.section_header_off).peek_type(Elf.SectionHeader);
+    sh: []Elf.SectionHeader = sh.slice(h.section_header_num.zext());
+    
+    ::enum(Elf.SectionType);
+    enumerate sh { i, it |
+        if @is(it.type, .DynSymbolTable, .SymbolTable) {  // TODO: don't double count if multiple symbol tables
+            @assert_eq(it.ent_size, size_of(Elf.Symbol));
+            section_bytes :: fn(i) => in.subslice(sh[i].offset, sh[i].size);
+            
+            symbols := Elf.Symbol.reinterpret_bytes(section_bytes(i));
+            strings_bytes := section_bytes(it.link.int());
+            i := 0;
+            each symbols { it |
+                name := strings_bytes.rest(it.name.zext()).peek_cstr();
+                total += it.size;
+                if it.size != 0 {
+                    results&.push(name = name, size = it.size);
+                };
             };
         };
     };
     
-    results.items()
+    (total, results.items())
+}
+
+load_symbols_wasm :: fn(in: []u8) Ty(i64, []FuncEntry) = {
+    total, results := (0, FuncEntry.list(temp()));
+    magic := in&.pop_type(u64)[];
+    @assert_eq(magic, Wasm.MAGIC);
+    while => in.len > 0 {
+        section_type := in&.pop_type(u8)[];
+        section_size, r, ok := read_leb128_unsigned(in);
+        section_size := section_size.bitcast();
+        @assert(ok);
+        in = r;
+        ::enum(Wasm.Section);
+        @match(@as(Wasm.Section) section_type) {
+            fn Code() => {
+                count, r, ok := read_leb128_unsigned(in);
+                count := count.bitcast();
+                in = r;
+                range(0, count) { i |
+                    size, r, ok := read_leb128_signed(in);
+                    @assert(ok);
+                    in = r.rest(size);
+                    total += size;
+                    results&.push(name = @tfmt("F%", i), size = size);
+                };
+            }
+            @default => {  // TODO: collect nice names from exports
+                in = in.rest(section_size);
+            };
+        };
+    };
+    
+    (total, results.items())
 }
 
 FuncEntry :: @struct(name: Str, size: i64);
 
 #use("@/lib/sys/fs.fr");
+Macho :: import("@/backend/macho/bits.fr");
 Elf :: import("@/backend/elf/bits.fr");
+Wasm :: import("@/backend/wasm/bits.fr");
