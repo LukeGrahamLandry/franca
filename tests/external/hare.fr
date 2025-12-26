@@ -1,7 +1,9 @@
 // #foreign("harec", "clang", "env");
 // https://harelang.org
-// TODO: flag to use tcc instead of clang
-// TODO: don't depend on system clang for compiling harec and the .s files. 
+// this program is equivalent to running "make check" for harec and hare. 
+// it uses my import_c to compile harec and my backend to compile the text ir it outputs. 
+
+// TODO: don't depend on system clang for assembling/linking the .s files. 
 // TODO: error if the tests fail !!! (but i don't pass them all yet anyway)
 main :: fn() void = {
     start := get_working_directory(temp()).items();
@@ -12,32 +14,8 @@ main :: fn() void = {
     @assert_eq(query_current_os(), .linux, "TODO: hare os");
     
     mark := temp().mark();
-    files := collect_directory_ordered("src", temp(), temp()).unwrap();
-    cmd := Str.list(temp());
-    clang_triple := import("@/examples/default_driver.fr")'target_triple(query_current_arch(), query_current_os());
-    cmd&.push("clang");
-    cmd&.push("-target");
-    cmd&.push(clang_triple);
-    cmd&.push("-o");
-    cmd&.push(".bin/harec");  // this path matters because the tests exec it
-    @assert make_dir(".out");
-    @assert make_dir(".bin");
-    arch := to_harec_arch(query_current_arch());
-    target := @tfmt("-DDEFAULT_TARGET=\"%\"", arch);
-    for files { it |
-        if it.name.ends_with(".c") {  // if you had run the harec makefile there it shits .o files everywhere
-            // TODO: use import_c instead of clang
-            dest := @tfmt(".out/%.o", it.name.slice(0, it.name.len - 2));
-            sh(@slice(
-                "clang", "-Iinclude", "-c", target, "-DVERSION=\"xxx\"", 
-                "-target", clang_triple, 
-                @tfmt("src/%", it.name), "-o", dest,
-            ));
-            cmd&.push(dest);
-        }
-    };
-    sh(cmd.items());
-    
+    compile_harec();
+    temp().reset(mark);
     test_harec();
     Syscall'chdir(start.as_cstr());
     temp().reset(mark);
@@ -45,6 +23,63 @@ main :: fn() void = {
     verbose := cli_args().contains(fn(it) => it[].str() == "-verbose");
     test_hare(@tfmt("%/.bin/harec", root), verbose);
     temp().reset(mark);
+}
+
+// the output path (.bin/harec) matters because the tests exec it
+compile_harec :: fn() void = {
+    files := collect_directory_ordered("src", temp(), temp()).unwrap();
+    start_time := timestamp();
+    arch := to_harec_arch(query_current_arch());
+    files2 := Str.list(temp());
+    
+    for files { it |
+        if it.name.ends_with(".c") {
+            files2&.push(@tfmt("src/%", it.name));
+        };
+    };
+    
+    // TODO: use it through import_module
+    C :: import("@/examples/import_c/lib.fr");
+    
+    c := @ref zeroed(C.Compile.Ctx);
+    m := @ref zeroed(Qbe.Module);
+    Qbe'backend'init_module(m, (
+        arch = query_current_arch(),
+        os = query_current_os(),
+        type = .Exe,
+        wrap_entry_for_linux_libc = true,
+        exe_debug_symbol_table = true,
+    ));
+    ctx := init_codegen_worker(m, true);
+    C'init_ctx(c, m, ctx);
+    c.include_paths&.push("include");
+    
+    for files2 { it |
+        // :discard_static_scope
+        c.macros&.clear();
+        C'Preprocess'init_macros(c);
+        c.define_macro("VERSION", "\"xxx\"");
+        c.define_macro("DEFAULT_TARGET", @tfmt("\"%\"", arch));
+        c.scope.vars&.clear();
+    
+        src := read_entire_file_or_crash(temp(), it);
+        result := C'catch_call(c, void) {
+            tok := c.tokenize_string(it, src);
+            tok  = c.C'Preprocess'preprocess(tok);
+            c.C'Compile'parse(tok);
+        };
+        @if_let(result) fn Err(msg) => {
+            @panic("failed to compile %\n%", "", msg);
+        };
+    };
+    
+    ctx.join_codegen_thread();
+    chunks := {m.target.finish_module}(m);
+    @assert make_dir(".bin");
+    write_chunks_or_crash(".bin/harec", chunks);
+    c.arena_storage&.deinit();
+    drop(m);
+    @println("compiled harec in %ms", timestamp() - start_time);
 }
 
 // the "harec" repo has a minimal rt implementation and some tests. 
@@ -70,6 +105,7 @@ test_harec :: fn() void = {
         "rt/+linux/segmalloc.ha",
     );
     
+    @assert make_dir(".out");
     td :: @const_slice(
         ("rt", ".out/rt.td.tmp"),
         ("testmod", ".out/testmod.td.tmp"),
@@ -82,7 +118,8 @@ test_harec :: fn() void = {
         t = (Some = ".out/rt.td.tmp"),
         N = (Some = "rt"),
         td = empty(),
-    ), "./.bin/harec", temp()).unwrap();
+    ), "./.bin/harec", temp())
+        .or(fn(msg) => @panic("failed to compile rt\n%", msg.items()));
     
     obj := run_backend(in.items()).unwrap();
     write_entire_file_or_crash(rt_o, obj);
@@ -104,7 +141,7 @@ test_harec :: fn() void = {
     tests := collect_directory_ordered("tests", temp(), temp()).unwrap();
     tests&.ordered_retain(fn(it) => it.name.ends_with(".ha"));
     
-    // HACK
+    // SKIP
     // (orb) 17-alloc.ha rosetta error: could not find free space for allocation size 1c6bf52635000
     // they're trying to test allocation failure and rosetta cannot cope i guess?
     ci := get_environment_variable("GITHUB_REPOSITORY").is_some();
@@ -283,7 +320,7 @@ synthetic_prefix :: @const_slice(
     ".test.", ".init.", ".fini.",
 );
 
-mangle :: fn(m: *Qbe.Module, id: *Qbe.Sym, prefix: Str) void = {
+fn mangle(m: *Qbe.Module, id: *Qbe.Sym, prefix: Str) void = {
     @if(id[] == Qbe.no_symbol_S) return();
     old := m.str(id[]);
     @if(!synthetic_prefix.contains(fn(it) => old.starts_with(it[]))) return();
@@ -313,8 +350,11 @@ test_hare :: fn(harec: Str, verbose: bool) void = {
     active_tags := @slice("linux", arch, "test");
     
     make_dirs_or_crash(@tfmt("%/.out", root));
+    start_time := timestamp();
     ssa := compile_to_ssa(modules, po, active_tags, harec, root);
+    @println("frontend: %ms", timestamp() - start_time);
     
+    start_time := timestamp();
     m, sections := start_module(.Relocatable);
     for po { i |
         name := modules[i].name;
@@ -322,12 +362,14 @@ test_hare :: fn(harec: Str, verbose: bool) void = {
             write_entire_file_or_crash(@tfmt("%/.out/%.ssa", root, i), ssa[i]);
         };
         
+        // :discard_static_scope throwing away QParseCtx.types each time is intentional
         load_ir_text(m, ssa[i], sections, name)
             .or(fn(msg) => @panic("failed to compile ssa: %\n%", name, msg));
     };
     obj := end_module(m, sections);
     obj_o := @tfmt("%/.out/test.o", root);
     write_entire_file_or_crash(obj_o, obj);
+    @println("backend:  %ms", timestamp() - start_time);
     
     asm_blob := @ref u8.list(temp());
     each modules { it |
@@ -441,6 +483,7 @@ collect_modules :: fn(root: Str) []HareModule = {
                     fn File() => {
                         if name.ends_with(".ha") {
                             hare&.push(name);
+                            // TODO: don't read the whole file just to look at the first few bytes
                             scratch&.read_and_push_or_crash(@tfmt("%/%", root, name));
                             collect_use(use&, scratch.items());
                             scratch&.clear();

@@ -16,6 +16,11 @@
        nearbyintf64(f(0xbfe0000000000000)) == f(0xbff0000000000000)
   amd: fail 17
 ```
+- wasn't using bss for debug.traces `let traces: [TRACE_BUCKETS][]trace = [[]...];`
+  because i ignore section directives. treat `{ l 0, l 0, ... }` the same as explicitly using `{ z size }`
+- bit more import_c/include.fr so it can deal with harec (instead of using clang). 
+  - time for that part 800ms -> 160ms. 
+    which is great because its still a win if you include the time to compile import_c itself. 
 
 ## (Dec 25)
 

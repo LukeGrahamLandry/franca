@@ -1,10 +1,9 @@
 
-- use bss (i ignore section directives)
-```
-def TRACE_BUCKETS = 65535;
-let traces: [TRACE_BUCKETS][]trace = [[]...];
-// (bloat2) 1572840: debug.traces
-```
+- `Compile Error: redeclared constant mangle as overloadset` 
+  means you can have things that work if one is main program and imports the other but not the reverse. 
+  because `foo :: fn` in the imported thing will be scoped correctly but `fn foo` will be lifted. 
+- tests/external/hare.fr i fail some
+- bloat2: don't count bss. rn EXTRA can be negative. 
 - add a test that tries to bake a bunch of stuff in the general allocator to catch the mistake i made with panic_on_volatile_bake more reliably. 
 - tests that are supposed to panic_on_volatile_bake
 ```
