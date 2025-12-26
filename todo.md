@@ -1,4 +1,7 @@
 
+- fix tests that depend on order they run in for binaries to be compiled. 
+  (ie franca examples/import_c/test/test.fr -w target/w.out).
+  they should always compile the thing themself so its easy to test multiarch/orb/whatever. 
 - `Compile Error: redeclared constant mangle as overloadset` 
   means you can have things that work if one is main program and imports the other but not the reverse. 
   because `foo :: fn` in the imported thing will be scoped correctly but `fn foo` will be lifted. 
@@ -549,6 +552,7 @@ convert.fr:
 
 ## backend 
 
+- tests/todo/apple_arm_subword_abi.ssa
 - macho/emit.fr/emplace_fixup() allow negative offset for DataAbsolute of dynamic import in .Exe
 - arm64/emit.fr/loadaddr_bits() allow large offset in .Relocatable
 - rm64/emit.fr/fixup_arm64(): offset from dynamic import

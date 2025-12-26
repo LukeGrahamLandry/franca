@@ -21,6 +21,23 @@
 - bit more import_c/include.fr so it can deal with harec (instead of using clang). 
   - time for that part 800ms -> 160ms. 
     which is great because its still a win if you include the time to compile import_c itself. 
+  - yikes, dies on amd. problem with va_list pointer-ness when it's a function parameter. 
+    `while ((val = va_arg(ap, struct qbe_value *))) {`
+    - it works if i change it to `va_arg(*ap,`, but that's wrong and also breaks it on arm. 
+      seems i broke it when playing with musl. at least now i have a test for why you can't do that. 
+    - my repro for that bug also doesn't work on apple-arm.
+      but for a different reason. literal 0 not getting promoted 
+      to long so when you read 8 bytes they might not be zero? 
+      oh that's why they type NULL all the time. 
+      ok so the abi is you assign them to 8 aligned slots 
+      and clang uses 8 byte store (so extra is zeroed) and i use 4 byte store so the extra is junk. 
+      and i think mine's not... wrong. because it's jail to va_arg with a different type than passed,
+      and the default argument promotion is to int not long. 
+      - pcs-aarch64 says "Any part of a register or a stack slot that is 
+        not used for an argument (padding bits) has unspecified content 
+        at the callee entry point."
+  - also now amd fail 19?? so thats a concern. 
+- backend/parse: multiline comments are convenient
 
 ## (Dec 25)
 

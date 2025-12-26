@@ -15,6 +15,7 @@
 //! - { p 00 } for padding fields in types (not useful but seems like a bad idea to have dump_type hide it)
 //! - Removed: thread and section keywords 
 //! - allow hexadecimal integer constants (0x prefix)
+//! - skip c/++ style comments (// and /**/)
 //! 
 
 // TODO: `%.6 =s mul s_0x1p-1, s_0x1.fffffe091ff3dp+127`
@@ -165,28 +166,6 @@ fn skip_section_directive(self: *QParseCtx) Result(Section, Str) = {
     (Ok = (name = name, flags = flags))
 }
 
-fn skip_lines(self: *QParseCtx) i64 = {
-    self.skip_blanks();
-    n := 0;
-    dowhile {
-        n += 1;
-        self.skip_blanks();
-        if self.eat("#") {  // comment
-            self.eat_line();
-        };
-        self.eat("\n") && self.cursor < self.input.len
-    };
-    self.line += n - 1;
-    self.skip_blanks();
-    n
-}
-
-fn eat_line(self: *QParseCtx) void #inline = {
-    while => !self.check("\n") && self.cursor < self.input.len {
-        self.cursor += 1;
-    };
-}
-
 fn init(m: *QbeModule, src: Str) QParseCtx = (
     blocks = init(temp()),
     tmps = init(temp()),
@@ -210,7 +189,6 @@ fn parse_body(self: *QParseCtx) Result(Ty(*Qbe.Fn, []Replacement), Str) = {
 }
 
 fn parse_header(self: *QParseCtx, export: bool) void = {
-    self.skip_blanks();
     if self.eat(":") {
         name := self.eat_word();
         type := or self.find_type(name) {
@@ -253,7 +231,6 @@ fn parse_header(self: *QParseCtx, export: bool) void = {
         };
         self.f.retty = QbeNull;
     };
-    self.skip_blanks();
     if !self.eat("$") {
         @fmt(self.error&, "expected function name");
         return()
@@ -266,7 +243,6 @@ fn parse_header(self: *QParseCtx, export: bool) void = {
 }
 
 fn parse_args(self: *QParseCtx, is_par: bool) void = {
-    self.skip_blanks();
     ::if(Qbe.O);
     base_op := if(is_par, => Qbe.O.par,  => .arg);
     abi_op  := if(is_par, => Qbe.O.parc, => .argc);
@@ -649,7 +625,6 @@ fn cls_from_char(c: u8) ?Qbe.Cls = {
 }
 
 fn parse_ref(self: *QParseCtx) Qbe.Ref = {
-    self.skip_blanks();
     if self.eat("%") {  // tmp
         placeholder := self.input[self.cursor].is_ascii_digit();
         name := if placeholder {
@@ -677,7 +652,6 @@ fn parse_ref(self: *QParseCtx) Qbe.Ref = {
             name = /* SLOW */ @tfmt("%$%", name, module); // TODO: do something more formal (store this in Qbe.Sym?)
         };
         off := 0;
-        self.skip_blanks();
         if self.eat("+") {
             self.skip_blanks();
             off = self.parse_number();
@@ -1079,14 +1053,60 @@ fn find_type(self: *QParseCtx, n: Str) ?i64 = {
     self.types&.get(n)
 }
 
-fn skip_blanks(self: *QParseCtx) void = {
-    while => self.cursor < self.input.len {
+fn skip_blanks(self: *QParseCtx, $lines: bool) i64 = {
+    n := 0;
+    v := ();  // HACK
+    void.loop() { $break |
+        if self.cursor >= self.input.len {
+            break(v);
+        };
         @switch(self.input[self.cursor]) {
             @case(" ".ascii())  => ();
             @case("\t".ascii()) => ();
             @case("\r".ascii()) => ();
-            @default => return();
+            @case("#".ascii())  => {
+                @if(!lines) break(v);
+                self.eat_line();
+                n += 1;
+            };
+            // really this should be lines=false too but meh
+            @case("/".ascii()) => {
+                @if(!lines) break(v);
+                n += self.skip_c_style_comment();
+                self.cursor -= 1;
+            };
+            @case("\n".ascii()) => {
+                @if(!lines) break(v);
+                n += 1;
+            };
+            @default => {
+                break(v);
+            };
         };
+        self.cursor += 1;
+    };
+    self.line += n;
+    n + 1
+}
+
+fn skip_lines(self: *QParseCtx) i64 = 
+    self.skip_blanks(true);
+
+fn skip_blanks(self: *QParseCtx) void = {
+    self.skip_blanks(false);
+}
+
+skip_c_style_comment :: fn(self: *QParseCtx) i64 = {
+    unterminated := false;  // TODO
+    import("@/lib/tokenize.fr")'skip_whitespace(
+        fn(n) => @if(self.cursor + n >= self.input.len, 0, self.input[self.cursor + n]), 
+        => { self.cursor += 1; },
+        true, true, unterminated&,
+    )
+};
+
+fn eat_line(self: *QParseCtx) void #inline = {
+    while => !self.check("\n") && self.cursor < self.input.len {
         self.cursor += 1;
     };
 }

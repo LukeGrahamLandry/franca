@@ -1,0 +1,77 @@
+/*
+apple-arm abi: im wrong about no stack arguments smaller than 4 bytes.
+can't remove subword arg/par because on apple-arm CStk is not forced to 4 byte alignment. 
+which is a pain in the ass because emit_ir discards that information even before getting here. 
+but harec does it wrong too. 
+qbe_func_param; param->type = qtype_lookup(ctx, type, false); xtype=false, never uses par(u,s)(b,h)
+i guess they don't care about apple because thats a company. fair enough. 
+but why do they use subword arg if not par? that doesn't make any sense to me. 
+like if it did anything, it wouldn't work anyway. 
+
+"Function arguments may consume slots on the stack that are not multiples of 8 bytes. 
+If the total number of bytes for stack-based arguments is not a multiple of 8 bytes, 
+insert padding on the stack to maintain the 8-byte alignment requirements."
+
+int foo(char, char, char, char, char, char, char, char, char, char, char);
+int main() {  return foo(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10); }
+
+      clang aarch64-apple-darwin
+      d0: 910003e9     	mov	x9, sp
+      d4: 52800108     	mov	w8, #0x8                ; =8
+      d8: 39000128     	strb	w8, [x9]
+      dc: 52800128     	mov	w8, #0x9                ; =9
+      e0: 39000528     	strb	w8, [x9, #0x1]
+      e4: 52800148     	mov	w8, #0xa                ; =10
+      e8: 39000928     	strb	w8, [x9, #0x2]
+      
+      import_c aarch64-macos WRONG
+      98: 52800140     	mov	w0, #0xa                ; =10
+      9c: b9000be0     	str	w0, [sp, #0x8]
+      a0: 52800120     	mov	w0, #0x9                ; =9
+      a4: b90007e0     	str	w0, [sp, #0x4]
+      a8: 52800100     	mov	w0, #0x8                ; =8
+      ac: b90003e0     	str	w0, [sp]
+      
+      clang aarch64-linux-gnu 
+      14010: 52800140     	mov	w0, #0xa                // =10
+      14014: b90013e0     	str	w0, [sp, #0x10]
+      14018: 52800120     	mov	w0, #0x9                // =9
+      1401c: b9000be0     	str	w0, [sp, #0x8]
+      14020: 52800100     	mov	w0, #0x8                // =8
+      14024: b90003e0     	str	w0, [sp]
+      (import_c does that one right)
+      
+qbe also does it right because they preserve sub-word arg/par for longer than i do. 
+*/
+
+export
+function ub $add10q(ub %x1, ub %x2, ub %x3, ub %x4, ub %x5, ub %x6, ub %x7, ub %x8, ub %x9, ub %x10) {
+@start
+    %x =w add 0, %x1
+    %x =w add %x, %x2
+    %x =w add %x, %x3
+    %x =w add %x, %x4
+    %x =w add %x, %x5
+    %x =w add %x, %x6
+    %x =w add %x, %x7
+    %x =w add %x, %x8
+    %x =w add %x, %x9
+    %x =w add %x, %x10
+    ret %x
+}
+
+export
+function ub $call_add10c() {
+@start
+    %x =w call $add10c(ub 1, ub 2, ub 3, ub 4, ub 5, ub 6, ub 7, ub 8, ub 9, ub 10)
+    ret %x
+}
+
+# >>> driver
+# extern char add10q(char, char, char, char, char, char, char, char, char, char);
+# extern char call_add10c();
+# char add10c(char x1, char x2, char x3, char x4, char x5, char x6, char x7, char x8, char x9, char x10) {
+#     return x1 + x2 + x3 + x4 + x5 + x6 + x7 + x8 + x9 + x10;
+# }
+# int main() { return !(55 == add10q(1, 2, 3, 4, 5, 6, 7, 8, 9, 10) && 55 == call_add10c()); }
+# <<<
