@@ -1,4 +1,44 @@
 
+## (Dec 26)
+
+- elf/emit: don't rely on pre-sizing payload
+- the hare tests run
+  - oh sweet, the pretty output is in the test binary.  
+    i was afraid it would do it from the outside and want to run lots of tiny executables 
+  - this is kinda the best case situation, it's close enough that it it feels achivable 
+    (there are ~581 total) but revealed some problems in my thing so wasn't a waste of time.
+```
+  arm: fail 2. 
+       isnan(tanhf64(NAN))
+       calike(v.1, sqrtc128(v.0))
+   rv: fail 2. 
+       sat_mulu32(65536, 65536) == types::U32_MAX
+       nearbyintf64(f(0xbfe0000000000000)) == f(0xbff0000000000000)
+  amd: fail 17
+```
+
+## (Dec 25)
+
+want to run the "hare" tests. 
+- don't really want to use their build thingy. 
+  - have to teach it that i don't output assembly.
+  - you first have to bootstrap it with 250 line makefile committed per platform. 
+  - i don't like the billion object files compilation model anyway. 
+  - its easier if i can use one backend module (and no linker) so i don't have to do sections for test_array. 
+    which i think should be fine because they mangle the names by hare module anyway. 
+    (tho not things like `data $strdata.1` so have to do something about that)
+- the annoying thing is you need to exec it on each module in topological order 
+  so it can have the previous td files.  
+- i think i can just cheat because they always put the `use` statements 
+  at the top and modules aren't a first class value in the language 
+  so its always trivial to tell that things a file depends on by looking at the code. 
+- steal my backend/opt/cfg.fr/fillrpo
+- https://harelang.org/documentation/usage/modules.html#conditional-file-inclusion
+- ah, need to allow arbitrary nesting: `/debug/+linux/+aarch64/ucontext`
+- remap synthetic names
+- can't just use dat2.relocations for test_array because there's strings in there which have some fixed bytes. 
+- fix parsing of s(b,h) arg/par/ret
+
 ## (Dev 24)
 
 - examples/bloat2.fr: elf & wasm
@@ -14,6 +54,7 @@
   missing `p = prev_page;` when walking to the end to get the size
   so it got stuck any time something spanned multiple pages. 
   forgot to do the classic "set page_bits way too low" test when i made it not recursive. 
+- hare tests: pass through testmod, hack in symbols for `(init,fini)_array`
 
 ## (Dev 23)
 

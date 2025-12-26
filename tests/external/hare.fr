@@ -1,30 +1,36 @@
 // #foreign("harec", "clang", "env");
-// TODO: this is only the 'harec' tests, should run the 'hare' ones as well
+// https://harelang.org
 // TODO: flag to use tcc instead of clang
-driver :: fn() void = {
-    franca := get_executable_path(temp());
+// TODO: don't depend on system clang for compiling harec and the .s files. 
+// TODO: error if the tests fail !!! (but i don't pass them all yet anyway)
+main :: fn() void = {
     start := get_working_directory(temp()).items();
-    backend := @tfmt("%/target/q.out", start);
-    sh(@slice(franca, "examples/default_driver.fr", "build", "backend/meta/qbe_frontend.fr", "-o", backend));
 
-    root := fetch_git_commit("bc75c323739c390026cf5052cd108bd23106769b", "harec", "https://git.sr.ht/~sircmpwn/harec");
+    root := fetch_git_commit("8aa482a29964136cbe2874cd330fe07e34efe8a2", "harec", "https://git.sr.ht/~sircmpwn/harec");
     Syscall'chdir(root.as_cstr());
     
-    arch := to_harec_arch(query_current_arch());
     @assert_eq(query_current_os(), .linux, "TODO: hare os");
     
+    mark := temp().mark();
     files := collect_directory_ordered("src", temp(), temp()).unwrap();
     cmd := Str.list(temp());
+    clang_triple := import("@/examples/default_driver.fr")'target_triple(query_current_arch(), query_current_os());
     cmd&.push("clang");
+    cmd&.push("-target");
+    cmd&.push(clang_triple);
     cmd&.push("-o");
     cmd&.push(".bin/harec");  // this path matters because the tests exec it
-    @assert make_dir("out");
+    @assert make_dir(".out");
     @assert make_dir(".bin");
+    arch := to_harec_arch(query_current_arch());
+    target := @tfmt("-DDEFAULT_TARGET=\"%\"", arch);
     for files { it |
         if it.name.ends_with(".c") {  // if you had run the harec makefile there it shits .o files everywhere
-            dest := @tfmt("out/%.o", it.name.slice(0, it.name.len - 2));
+            // TODO: use import_c instead of clang
+            dest := @tfmt(".out/%.o", it.name.slice(0, it.name.len - 2));
             sh(@slice(
-                "clang", "-Iinclude", "-c", @tfmt("-DDEFAULT_TARGET=\"%\"", arch), "-DVERSION=\"xxx\"", 
+                "clang", "-Iinclude", "-c", target, "-DVERSION=\"xxx\"", 
+                "-target", clang_triple, 
                 @tfmt("src/%", it.name), "-o", dest,
             ));
             cmd&.push(dest);
@@ -32,6 +38,20 @@ driver :: fn() void = {
     };
     sh(cmd.items());
     
+    test_harec();
+    Syscall'chdir(start.as_cstr());
+    temp().reset(mark);
+    
+    verbose := cli_args().contains(fn(it) => it[].str() == "-verbose");
+    test_hare(@tfmt("%/.bin/harec", root), verbose);
+    temp().reset(mark);
+}
+
+// the "harec" repo has a minimal rt implementation and some tests. 
+// each test is an exe with a main() function (not @test functions). 
+// TODO: share more code with the hare tests? when i wrote this i was being extra linker-y
+test_harec :: fn() void = {
+    arch := to_harec_arch(query_current_arch());
     rt_hare := @slice(
         "rt/abort.ha", 
         "rt/compile.ha",
@@ -50,43 +70,555 @@ driver :: fn() void = {
         "rt/+linux/segmalloc.ha",
     );
     
-    rt_o := "out/rt.o";
-    run((
+    td :: @const_slice(
+        ("rt", ".out/rt.td.tmp"),
+        ("testmod", ".out/testmod.td.tmp"),
+    );
+    
+    rt_o := ".out/rt.o";
+    in := run((
         a = query_current_arch(), 
         input = rt_hare,
-        o = (Some = "out/rt.ssa"),
-        t = (Some = "out/rt.td.tmp"),
+        t = (Some = ".out/rt.td.tmp"),
         N = (Some = "rt"),
         td = empty(),
     ), "./.bin/harec", temp()).unwrap();
-    sh(@slice(backend, "out/rt.ssa", "-o", rt_o, "-c"));
+    
+    obj := run_backend(in.items()).unwrap();
+    write_entire_file_or_crash(rt_o, obj);
+    
+    testmod_o := ".out/testmod.o";
+    in := run((
+        a = query_current_arch(), 
+        input = @slice("testmod/measurement.ha", "testmod/testmod.ha"),
+        t = (Some = ".out/testmod.td.tmp"),
+        N = (Some = "testmod"),
+        td = slice(
+            @ref ("rt", ".out/rt.td.tmp"),
+        ),
+    ), "./.bin/harec", temp()).unwrap();
+    
+    obj := run_backend(in.items()).unwrap();
+    write_entire_file_or_crash(testmod_o, obj);
     
     tests := collect_directory_ordered("tests", temp(), temp()).unwrap();
-    tests&.ordered_retain(fn(it) => it.name.ends_with(".ha") && !(@const_slice(
-        "09-funcs.ha", // TODO: init,fini
-        // TODO: testmod
-        "15-enums.ha", "06-structs.ha", "24-imports.ha", "10-binarithms.ha", "37-annotations.ha", "34-declarations.ha"
-    )).contains(it.name));
-    run_tests_main(@type tests[0], tests.items(), fn(it) => it.name, fn(it) => {
-        ssa := @tfmt("out/%.ssa", it.name);
-        o := @tfmt("out/%.o", it.name);
-        exe := @tfmt("out/%.out", it.name);
-        td := ("rt", "out/rt.td.tmp");
-        run((
+    tests&.ordered_retain(fn(it) => it.name.ends_with(".ha"));
+    
+    // HACK
+    // (orb) 17-alloc.ha rosetta error: could not find free space for allocation size 1c6bf52635000
+    // they're trying to test allocation failure and rosetta cannot cope i guess?
+    ci := get_environment_variable("GITHUB_REPOSITORY").is_some();
+    if !ci && query_current_arch() == .x86_64 {
+        tests&.ordered_retain(fn(it) => !it.name.ends_with("17-alloc.ha"));
+    };
+    
+    Ctx :: @struct(rt_o: Str, testmod_o: Str);
+    ctx: Ctx = (rt_o = rt_o, testmod_o = testmod_o);
+    // TODO: if you say => instead of =, the error should say expected fnptr not expected type annotation. :compilerbug
+    run_tests_main_threaded(Ctx, DirEntry, ctx, tests.items(), fn(_, it) = it.name, fn(c, it) = {
+        yield :: return;
+        o := @tfmt(".out/%.o", it.name);
+        exe := @tfmt(".out/%.out", it.name);
+        in := run((
             a = query_current_arch(), 
             input = @slice(@tfmt("tests/%", it.name)),
-            o = (Some = ssa),
-            td = td&.slice(1),
-        ), "./.bin/harec", temp()).unwrap();
+            td = td,
+        ), "./.bin/harec", temp()).or(fn(err) => yield(false, list(u8, temp()), err, ""));
+        
+        obj := @match(run_backend(in.items())) {
+            fn Ok(it) => it;
+            fn Err(msg) => yield(false, list(u8, temp()), msg.assume_owned(temp()), "");
+        };
         // TODO: have an option to make it patch_out_interp_header? 
-        sh(@slice(backend, ssa, "-o", o, "-c"));
-        sh(@slice("clang", o, rt_o, @tfmt("rt/+linux/start+%.s", arch), @tfmt("rt/+linux/syscall+%.s", arch), "-o", exe, "-nostartfiles"));
-        sh(@slice("env", "HARE_TD_rt=out/rt.td.tmp", exe));  // compile() in the tests execs harec
-        (true, list(u8, temp()), list(u8, temp()), "")
+        write_entire_file_or_crash(o, obj);
+        general_allocator().dealloc(u8, obj);
+        
+        clang_triple := import("@/examples/default_driver.fr")'target_triple(query_current_arch(), query_current_os());
+        arch := to_harec_arch(query_current_arch());
+        sh(@slice("clang", "-target", clang_triple, o, c.rt_o, c.testmod_o, @tfmt("rt/+linux/start+%.s", arch), @tfmt("rt/+linux/syscall+%.s", arch), "-o", exe, "-nostartfiles"));
+        // compile() in the tests execs harec so need to give it the td files
+        ok, out, err := exec_and_catch("env", @slice(
+            td_to_env(td[0]),
+            td_to_env(td[1]),
+            exe,
+        ), temp()); 
+        (ok, out, err, "")
     });
 }
 
-#use("@/examples/testing.fr");
+// like qbe_frontend.fr but collects section directives
+// and uses them to makes init,fini,test arrays
+run_backend :: fn(ssa: []u8) Result([]u8, Str) = {
+    m, sections := start_module(.Relocatable);
+    @try(load_ir_text(m, ssa, sections, "")) return;
+    return(Ok = end_module(m, sections));
+}
+
+Sections :: HashMap(Str, List(Qbe.Dat2));
+start_module :: fn(t: Qbe.OutputPurpose) Ty(*Qbe.Module, *Sections) #inline /*semantic*/ = {
+    sections: Sections = init(temp());
+    m := @ref zeroed(Qbe.Module);
+    Qbe'backend'init_module(m, (
+        arch = query_current_arch(),
+        os = query_current_os(),
+        type = t,
+    ));
+    for @slice("init", "fini", "test") { s |
+        insert(sections&, @tfmt(".%_array", s), list(m.forever&.borrow()));
+    };
+    (m, sections&)
+}
+
+
+load_ir_text :: fn(m: *Qbe.Module, ssa: []u8, sections: *Sections, mangle_prefix: Str) Result(void, Str) = {
+    #use("@/backend/meta/parse.fr");
+    self: QParseCtx = init(m, ssa);
+    mark := mark_temporary_storage();
+    section: ?Section = .None;
+    loop {
+        reset_temporary_storage(mark);
+        @match(self&.parse_one()) {
+            fn Func(f) => {
+                section = .None;
+                if mangle_prefix.len > 0 {
+                    mangle(m, f.lnk.id&, mangle_prefix);
+                    each f.con.slice(0, f.ncon.zext()) { it |
+                        mangle(m, it.sym&, mangle_prefix);
+                    };
+                };
+                
+                Qbe'backend'compile_fn(f);
+            }
+            fn Data(d) => {
+                continue :: local_return;
+                if mangle_prefix.len > 0 {
+                    mangle(m, d.id&, mangle_prefix);
+                    each d.relocations { it |
+                        mangle(m, it.id&, mangle_prefix);
+                    };
+                };
+                
+                if section { s |
+                    if sections.get_ptr(s.name) { it |
+                        d.relocations = d.relocations.shallow_copy(m.forever&.borrow());
+                        @if_let(d.template&) fn Bytes(it) => {
+                            it[] = it[].shallow_copy(m.forever&.borrow());
+                        };
+                        it.push(d);
+                        continue();
+                    }
+                };
+                
+                Qbe'backend'compile_dat(m, d);
+                section = .None;
+            };
+            fn Type() => ();
+            fn Err(msg) => return(Err = msg);
+            fn Section(s) => {
+                section = (Some = s);
+            }
+            fn Eof() => return(.Ok);
+        };
+    };
+}
+
+// i don't support sections. 
+// to make the init/fini tests work, add the array symbols manually. 
+// this works without thier linker script but relies on there only being 
+// one compilation unit that wants to add things to the arrays. 
+seal_array_sections :: fn(m: *Qbe.Module, sections: *Sections) void = {
+    each sections { name, values |
+        continue :: local_return;
+        @if(values.len == 0) continue();
+        name := name.subslice(1, 4);
+        // rt/+linux/start.ha looks for these symbols
+        start := m.intern(@tfmt("__%_array_start", name));
+        end := m.intern(@tfmt("__%_array_end", name));
+        ids := @ref Qbe.Sym.list(values.len + 1, temp());
+        
+        // HACK: need it to put start..end sequentially
+        //       and rn i don't use bss if there are relocations 
+        //       so can't use (Zeroes=_) because that would go to bss. 
+        
+        values[0].id = start;
+        values[0].export = true;
+        
+        for values { d |
+            @if_let(d.template) fn Zeroes(size) => {
+                d.template = (Bytes = temp().alloc_init(u8, size, fn(_) => 1));
+            };
+            ids.push(d.id);
+            Qbe'backend'compile_dat(m, d);
+        };
+        
+        Qbe'backend'compile_dat(m, (
+            id = end,
+            template = (Bytes = @slice(@as(u8) 1)),
+            relocations = empty(),
+            export = true,
+        ));
+        ids.push(end);
+        assert_sequential(m, ids.items()); 
+    };
+}
+
+end_module :: fn(m: *Qbe.Module, sections: *Sections) []u8 = {
+    seal_array_sections(m, sections);
+    m.Qbe'backend'compile_suspended();
+    chunks := {m.target.finish_module}(m);
+    out := concat(chunks, general_allocator());
+    drop(m);
+    out
+}
+
+// :discard_static_scope
+// i want to do it all in one compilation unit and that mostly works because 
+// harec mangles symbols by prepending the module name, except for local 
+// data that doesn't correspond to a symbol in the user program (like string literals, etc.). 
+// have to be careful not to disrupt exports/imports. 
+// HACK: rn all the synthetic names harec uses have these prefixes but it's dumb to break if they add some
+synthetic_prefix :: @const_slice(
+    "strliteral.", "strdata.", "sldata.", "static.", 
+    "testfunc", "initfunc", "finifunc",
+    ".test.", ".init.", ".fini.",
+);
+
+mangle :: fn(m: *Qbe.Module, id: *Qbe.Sym, prefix: Str) void = {
+    @if(id[] == Qbe.no_symbol_S) return();
+    old := m.str(id[]);
+    @if(!synthetic_prefix.contains(fn(it) => old.starts_with(it[]))) return();
+    id[] = m.intern(@tfmt("%.%", prefix, old));
+}
+
+// the "hare" repo has another rt implementation and modules with @test functions. 
+test_hare :: fn(harec: Str, verbose: bool) void = {
+    root := fetch_git_commit("e787c6f74c69d89530d542580c747a11e605ff8d", "hare", "https://git.sr.ht/~sircmpwn/hare");
+
+    // TODO: respect HAREPATH
+    modules, po := collect_ordered_deps(root);
+    
+    if verbose {
+        ::display_slice(Str);
+        ::display_slice(i64);
+        out := @ref u8.list(temp());
+        for po { i |
+            it := modules[i]&;
+            @fmt(out, "[%] %\n", i, it.name);
+            @fmt(out, "- %\n- %\n- use %\n", it.hare, it.asm, it.use);
+        };
+        print(out.items());
+    }
+    
+    arch := to_harec_arch(query_current_arch()); 
+    active_tags := @slice("linux", arch, "test");
+    
+    make_dirs_or_crash(@tfmt("%/.out", root));
+    ssa := compile_to_ssa(modules, po, active_tags, harec, root);
+    
+    m, sections := start_module(.Relocatable);
+    for po { i |
+        name := modules[i].name;
+        if verbose && ssa[i].len > 0 {
+            write_entire_file_or_crash(@tfmt("%/.out/%.ssa", root, i), ssa[i]);
+        };
+        
+        load_ir_text(m, ssa[i], sections, name)
+            .or(fn(msg) => @panic("failed to compile ssa: %\n%", name, msg));
+    };
+    obj := end_module(m, sections);
+    obj_o := @tfmt("%/.out/test.o", root);
+    write_entire_file_or_crash(obj_o, obj);
+    
+    asm_blob := @ref u8.list(temp());
+    each modules { it |
+        asm := filter_tags(it.asm, active_tags);
+        for asm { it |
+            @fmt(asm_blob, "// (include %)\n", it);
+            @assert(it.starts_with("/"));
+            read_and_push(asm_blob, @tfmt("%%", root, it));
+        };
+    };
+    asm_s := @tfmt("%/.out/test_asm.s", root);
+    write_entire_file_or_crash(asm_s, asm_blob.items());
+    
+    exe := @tfmt("%/.out/test.out", root);
+    
+    clang_triple := import("@/examples/default_driver.fr")'target_triple(query_current_arch(), query_current_os());
+    sh(@slice("clang", "-target", clang_triple, asm_s, obj_o, "-o", exe, "-nostartfiles"));
+    
+    println(exe);
+    success := run_cmd_blocking(exe, empty());
+    //@assert(success);  // TODO
+}
+
+fn compile_to_ssa(modules: []HareModule, po: []i64, active_tags: []Str, harec: Str, root: Str) []Str = {
+    td := Ty(Str, Str).list(temp());
+    ssa := temp().alloc_zeroed(Str, modules.len);
+    for po { i |
+        continue :: local_return;
+        it := modules[i]&;
+        
+        @if(it.name == "") continue();
+        @assert(it.name.starts_with("/"));
+        name := it.name.rest(1);
+        
+        hare := filter_tags(it.hare, active_tags);
+        input := temp().alloc_init(Str, hare.len, fn(i) => @tfmt("%%", root, hare[i]));
+        
+        name := replace_slice(name, "", "/", "::");
+        @if(hare.len == 0) continue();
+        out_td := @tfmt("%/.out/%.td", root, i);
+        out := run((
+            a = query_current_arch(), 
+            input = input,
+            td = td.items(),  // TODO: inefficient to rebuild the env vars every time
+            N = (Some = name),
+            t = (Some = out_td),
+            tests = true,
+        ), harec, temp())
+            .or(fn(err) => @panic("failed to compile %\n%", it.name, err.items()));
+        ssa[i] = out.items();
+        
+        // future modules may depend on this one
+        push(td&, (name, out_td));
+    };
+    ssa
+}
+
+HareModule :: @struct {
+    name: Str;
+    hare: []Str;
+    asm: []Str;
+    use: []i64;
+    id := -1;
+};
+
+collect_ordered_deps :: fn(root: Str) Ty([]HareModule, []i64) = {
+    modules := collect_modules(root);
+    
+    // make everything reachable. 
+    @assert_eq(modules[0].name, "");  // root
+    modules[0].use = temp().alloc_init(i64, modules.len - 1, fn(i) => i + 1);
+    
+    // need to compile them in order because harec needs a .td file for each dependency. 
+    fillrpo(modules);
+    po := temp().alloc_zeroed(i64, modules.len);
+    enumerate modules { i, it |
+        po[po.len - it.id - 1] = i;
+        
+        for it.use { u |
+            uu := modules[u]&;
+            @assert_lt(it.id, uu.id, "cyclic dependency: % uses %", it.name, uu.name);
+        };
+    };
+
+    (modules, po)
+}
+
+// TODO: should seperate out the part where i collect use
+//       and do it after filtering out tags so don't add false dependencies. 
+//       (plus then don't have to read files that won't be used)
+
+// a module is a folder of hare and assembly files. 
+// in each module, find all the lines like `use foo::bar`. 
+collect_modules :: fn(root: Str) []HareModule = {
+    stack := Str.list(temp());
+    stack&.push("");
+    scratch := u8.list(temp());
+    out := HareModule.list(temp());
+    ids: HashMap(Str, i64) = init(temp());
+    dirs := Str.list(temp());
+    while => stack&.pop() { name |
+        asm, use, hare := (Str.list(temp()), ..Str.list(temp()));
+        dirs&.push(name);
+        
+        while => dirs&.pop() { name |
+            walk_directory_unordered(@fmt_cstr("%/%", root, name)) { entry |
+                continue :: local_return;
+                ::enum(DirEntType);
+                name := @tfmt("%/%", name, entry.name);
+                @match(entry.type) {
+                    fn File() => {
+                        if name.ends_with(".ha") {
+                            hare&.push(name);
+                            scratch&.read_and_push_or_crash(@tfmt("%/%", root, name));
+                            collect_use(use&, scratch.items());
+                            scratch&.clear();
+                        }
+                        if name.ends_with(".s") {
+                            asm&.push(name);
+                        }
+                    }
+                    fn Directory() => {
+                        @if(entry.name.starts_with(".")) continue();  // notably .git,.bin
+                        
+                        if !(entry.name.starts_with("+")) {
+                            stack&.push(name);
+                            continue();
+                        };
+                        
+                        // directories named with a tag like +platform are not new modules, 
+                        // instead treat all the files inside as having that tag (flattened into the parent). 
+                        // (importantly all symbols of the module are still implicitly available). 
+                        
+                        dirs&.push(name);
+                    }
+                    @default => continue();
+                };
+            };
+        };
+        
+        // compiler inserts calls to rt functions so it's implicitly used by everything. 
+        if name != "/rt" && name != "" && !use.contains("/rt") {
+            use&.push("/rt");
+        };
+        
+        find :: fn(name) => 
+            ids&.get_or_insert(name, => { out&.push(zeroed(HareModule)); out.len - 1 })[];
+        u := temp().alloc_init(i64, use.len, fn(i) => find(use[i]));
+        i := find(name);
+        out[i] = ( 
+            name = name,
+            hare = hare.items(),
+            asm = asm.items(),
+            use = u,
+        );
+    };
+    
+    // TODO: sort out,hare,asm,use so repro regardless of file system order. 
+    //       use matters because there are multiple topological orders and which is chosen is arbitrary. 
+    
+    enumerate out { i, it |
+        if it.id != -1 {
+            each ids& { k, v |
+                @if(v[] == i) @panic("ERROR: module % is used but not declared", k);
+            };
+            unreachable();
+        };
+    };
+    
+    out.items()
+}
+
+fn fillrpo(it: []HareModule) void = {
+    n := rporec(it, 0, it.len - 1) + 1;
+    @assert_eq(n, 0);
+    rporec :: fn(it: []HareModule, i: i64, x: i64) i64 = {
+        @if(it[i].id != -1) return(x);
+        it[i].id = 1;
+        for it[i].use { i |
+            x = rporec(it, i, x);
+        };
+        it[i].id = x;
+        x - 1
+    }
+}
+
+// HACK: relies on all `use` being at the top 
+//       and */{} only refering to functions not nested modules. 
+collect_use :: fn(out: *List(Str), in: Str) void = {
+    while => in.len > 0 {
+        continue :: local_return;
+        if in.starts_with("\n") {
+            in = in.rest(1);
+            continue();
+        };
+        if in.starts_with("//") {
+            while => !in.starts_with("\n") {
+                in = in.rest(1);
+            };
+            continue();
+        };
+        prefix := "use ";
+        if in.starts_with(prefix) {
+            in = in.rest(prefix.len);
+            i := 0;
+            while => !in.rest(i).starts_with(";") && !in.rest(i).starts_with("::{") && !in.rest(i).starts_with("::*") {
+                i += 1;
+            };
+            name := in.slice(0, i);
+            
+            o := replace_slice(name, "/", "::", "/");
+            if !out.items().contains(o) {
+                out.push(o);
+            };
+            in = in.rest(i + 1);
+            while => !in.starts_with("\n") {
+                in = in.rest(1);
+            };
+            continue();
+        };
+        return();
+    }
+}
+
+filter_tags :: fn(files: []Str, active_tags: []Str) []Str = {
+    Case :: @struct(name: Str, tags: []Str);
+    cases: HashMap(Str, Case) = init(temp());
+    
+    for files { it |
+        continue :: local_return;
+
+        base, tags := split_tags(it);
+        
+        for tags { tag |
+            if !active_tags.contains(tag) {
+                continue();
+            }
+        };
+        
+        new: Case = (name = it, tags = tags);
+        old := cases&.get_or_insert(base, => new);
+        if old.tags.len < new.tags.len {
+            // the new one is more specific so override 
+            old[] = new;
+        };
+        // TODO: what happens if you have a conflict like [/foo/bar+linux, /foo/bar+aarch64]? do you get both? 
+    };
+    
+    out := Str.list(cases.raw.len_including_tombstones, temp());
+    each cases& { _, case |
+        out&.push(case.name);
+    };
+    out.items()
+}
+
+split_tags :: fn(it: Str) Ty(Str, []Str) = {
+    base, tags := (u8.list(temp()), Str.list(temp()));
+    i := 0;
+    while => i < it.len {
+        continue :: local_return;
+        // TODO: there's also -libc
+        if it[i] != "+".ascii() {
+            base&.push(it[i]);
+            i += 1;
+            continue();
+        };
+        i += 1;
+        start := i;
+        while => i < it.len && !"/+-.".contains(it[i]) {
+            i += 1;
+        };
+        tag := it.slice(start, i);
+        tags&.push(tag);
+    };
+    (base.items(), tags.items())
+}
+
+replace_slice :: fn(in: Str, prefix: Str, old: Str, new: Str) Str = {
+    o := @ref u8.list(in.len, temp());
+    o.push_all(prefix);
+    while => in.len > 0 {
+        if in.starts_with(old) {
+            o.push_all(new);
+            in = in.rest(old.len);
+        } else {
+            o.push(in[0]);
+            in = in.rest(1);
+        }
+    }
+    o.items()
+}
 
 HareCmd :: @struct {
     N: ?Str = .None;
@@ -95,13 +627,17 @@ HareCmd :: @struct {
     a: Arch;
     input: []Str;
     td: []Ty(Str, Str);
+    tests := false;
 };
+
+td_to_env :: fn(it: Ty(Str, Str)) Str #inline = 
+    @tfmt("HARE_TD_%=%", it._0, it._1);
 
 fn run(cmd: HareCmd, bin: Str, a: Alloc) Result(List(u8), List(u8)) = {
     args := Str.list(temp());
     for cmd.td { it |
         @debug_assert(!it._0.contains("="));
-        args&.push(@tfmt("HARE_TD_%=%", it._0, it._1));
+        args&.push(td_to_env(it));
     };
     args&.push(bin);
     args&.push("-a");
@@ -117,6 +653,9 @@ fn run(cmd: HareCmd, bin: Str, a: Alloc) Result(List(u8), List(u8)) = {
     if cmd.o { o |
         args&.push("-o");
         args&.push(o);
+    };
+    if cmd.tests { 
+        args&.push("-T");
     };
     for cmd.input { it |
         args&.push(it);
@@ -138,3 +677,8 @@ fn to_harec_arch(a: Arch) Str = @match(a) {
 };
 
 sh :: hush;
+
+#use("@/lib/collections/map.fr");
+#use("@/lib/sys/fs.fr");
+Qbe :: import("@/backend/lib.fr").Qbe;
+#use("@/examples/testing.fr");

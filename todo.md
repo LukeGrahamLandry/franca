@@ -1,4 +1,20 @@
 
+- use bss (i ignore section directives)
+```
+def TRACE_BUCKETS = 65535;
+let traces: [TRACE_BUCKETS][]trace = [[]...];
+// (bloat2) 1572840: debug.traces
+```
+- add a test that tries to bake a bunch of stuff in the general allocator to catch the mistake i made with panic_on_volatile_bake more reliably. 
+- tests that are supposed to panic_on_volatile_bake
+```
+main :: fn() void = {
+    foo :: @ref 123;
+    bar :: temp().boxed(i64, 456);    
+    println(foo[]);
+    println(bar[]);
+}
+```
 - without MarkNotDone in for lit_fn, its sketchy if you use something 
   that's #avoid_shim inside an @run block (like CVariadic). 
   maybe it's fine. the workaround is just wrap it in `(fn=())()` 
@@ -231,7 +247,6 @@ cset	w0, eq
 - might be able to get rid of is_wrongly_illegal_instruction now, but maybe it's safer just to leave it for good luck. 
 - remove implicit dependencies in the tests.
   ex. some of the tests/extenal depend on import_c being compiled at target/cc.out
-- don't exec `diff` in run_tests.fr
 - use O_EXCL for fetch_or_crash, write_entire_file
 - be more structured about the random temporary files in tests. 
   i don't care about the names so should use mkstemp or whatever 

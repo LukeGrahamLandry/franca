@@ -47,27 +47,48 @@ QParseCtx :: @struct(
 //
 fn parse_top_level(m: *QbeModule, src: Str, yield_data: @FnPtr(m: *Qbe.Module, d: Dat2) void, yield_func: @FnPtr(*Qbe.Fn) void) Result(void, Str) = {
     self: QParseCtx = init(m, src);
-    self := self&;
     
     mark := mark_temporary_storage();
     loop {
-        continue :: local_return;
         reset_temporary_storage(mark);
-        
-        self.skip_lines();
+        @match(self&.parse_one()) {
+            fn Func(f) => yield_func(f);
+            fn Data(dat) => yield_data(m, dat);
+            fn Type(_) => ();
+            fn Err(msg) => return(Err = msg);
+            fn Section(_) => ();  // not implemented
+            fn Eof() => return(.Ok);
+        };
+    };
+}
+
+Item :: @tagged(Func: *Qbe.Fn, Data: Qbe.Dat2, Type: i64, Section: Section, Err: Str, Eof);
+Section :: @struct(name: Str, flags: Str);
+
+fn parse_one(self: *QParseCtx) Item = {
+    self.skip_lines();
+    
+    self.f = Qbe.Fn.ptr_from_int(0);
+    m := self.m;
         
         export := self.eat("export");
         self.skip_lines();
+    
+    if self.eat("section") {
+        @assert(!export, "TODO: 'export' before (ignored) 'section' directive will be lost");
+        s := @try(self.skip_section_directive()) return;
+        return(Section = s);
+    };
+    
         
         if self.eat("function") {
             self.blocks = init(temp());
             self.tmps = init(temp());
             self.f = temp().box_uninit(Qbe.Fn);
             self.f.default_init(m);
-            self.blk = Qbe.Blk.ptr_from_int(0);
+            @debug_assert_eq(self.f.len_scratch(), 0);
             
             self.skip_lines();
-            self.f.reset_scratch();
             parse_header(self, export);
             if self.error.len != 0 {
                 @fmt(self.error&, " near line %", self.line);
@@ -84,17 +105,16 @@ fn parse_top_level(m: *QbeModule, src: Str, yield_data: @FnPtr(m: *Qbe.Module, d
             if !self.eat("}") {
                 return(Err = "expected '}' after function body");
             };
-            yield_func(f);  // might reset temp
-            self.f = Qbe.Fn.ptr_from_int(0);
+            self.blk = Qbe.Blk.ptr_from_int(0);
             self.tmps.raw.arr = empty();
             self.blocks.raw.arr = empty();
-            continue();
+            return(Func = f);
         };
         if self.eat("type") {
             self.m.types_mutex&.lock();
-            @try(self.parse_type()) return;
+            t := @try(self.parse_type()) return;
             self.m.types_mutex&.unlock();
-            continue();
+            return(Type = t);
         };
         thread := self.eat("thread");
         if self.eat("data") {
@@ -110,44 +130,39 @@ fn parse_top_level(m: *QbeModule, src: Str, yield_data: @FnPtr(m: *Qbe.Module, d
                     @fmt(self.error&, "% near line %", msg, self.line);
                     return(Err = self.error.items());
                 };
-                fn Ok(dat) => yield_data(m, dat);
+                fn Ok(dat) => return(Data = dat);
             };
-            self.f = Qbe.Fn.ptr_from_int(0);
-            continue();
-        };
-        if self.eat("section") {  // not implemented! 
-            @try(self.skip_section_directive()) return;
-            continue();
         };
         if self.eat("dbgfile") {  // not implemented!
             self.eat_line();
-            continue();
+            return(self.parse_one());
         };
         
         if self.cursor >= self.input.len {
-            return(.Ok);
+            return(.Eof);
         };
         if self.skip_lines() == 1 && self.cursor < self.input.len {
             return(Err = @tfmt("expected new line. near line %\n", self.line));
         };
-    };
-    unreachable()
+        (Err = "invalid top level keyword")
 }
 
-fn skip_section_directive(self: *QParseCtx) Result(void, Str) = {
+fn skip_section_directive(self: *QParseCtx) Result(Section, Str) = {
     // I don't support the 'section` keyword but i want to be able to compile hare programs. 
     // they use the sections but it's just for --gc-sections which i don't care about. 
     // so just ignore them for now. 
     self.skip_blanks();
-    if self.input[self.cursor] == "\"".ascii() {
-        _ := @try(self.consume_string()) return;
+    if self.input[self.cursor] != "\"".ascii() {
+        return(Err = "expected quoted name after 'section'")
     };
+    name := @try(self.consume_string()) return;
     self.skip_blanks();
+    flags := "";
     if self.input[self.cursor] == "\"".ascii() {
-        _ := @try(self.consume_string()) return;
+        flags = @try(self.consume_string()) return;
     };
     self.skip_lines();
-    .Ok
+    (Ok = (name = name, flags = flags))
 }
 
 fn skip_lines(self: *QParseCtx) i64 = {
@@ -210,21 +225,27 @@ fn parse_header(self: *QParseCtx, export: bool) void = {
             break :: local_return;
             kk := self.input[self.cursor];
             self.cursor += 1;
-            if cls_from_char(kk) { k |
-                self.ret = k.retk();
-                self.f.ret_cls = k;
-                break();
-            };
+            
+            // TODO: clean this up
             o := Qbe.O.par;
-            @if_else {
-                @if(kk == "u".ascii()) => self.eat_b_or_h(true, o&, .None);
-                @if(kk == "s".ascii()) => self.eat_b_or_h(false, o&, .None);
-                @else => {
-                    @fmt(self.error&, "invalid cls char");
-                    return()
+            if kk == "s".ascii() && (self.input[self.cursor] == "b".ascii() || self.input[self.cursor] == "h".ascii()) {
+                self.eat_b_or_h(false, o&, .None);
+            } else {
+                if cls_from_char(kk) { k |
+                    self.ret = k.retk();
+                    self.f.ret_cls = k;
+                    break();
+                };
+                @if_else {
+                    @if(kk == "u".ascii()) => self.eat_b_or_h(true, o&, .None);
+                    @else => {
+                        @fmt(self.error&, "invalid cls char");
+                        return()
+                    };
                 };
             };
-            self.ret = @as(Qbe.J) @as(i32) Qbe.J.retsb.raw() + o.raw() - Qbe.O.par.raw();
+            
+            self.ret = @as(Qbe.J) @as(i32) Qbe.J.retsb.raw() + o.raw() - Qbe.O.parsb.raw();
             self.f.ret_cls = .Kw;
         } else {
             self.ret = .ret0;
@@ -268,10 +289,15 @@ fn parse_args(self: *QParseCtx, is_par: bool) void = {
             variable = self.parse_ref();
             abi_op
         } else {
+            break :: local_return;
             kk := self.input[self.cursor];
             self.cursor += 1;
             variable = self.parse_ref();
             o := base_op;
+            if kk == "s".ascii() && (self.input[self.cursor] == "b".ascii() || self.input[self.cursor] == "h".ascii()) {
+                k = self.eat_b_or_h(false, o&, (Some = variable&));
+                break(o);
+            };
             k = or cls_from_char(kk) {  
                 @if_else {
                 @if(kk == ".".ascii()) => {
@@ -304,7 +330,6 @@ fn parse_args(self: *QParseCtx, is_par: bool) void = {
                     .Kw
                 };
                 @if(kk == "u".ascii()) => self.eat_b_or_h(true, o&, (Some = variable&));
-                @if(kk == "s".ascii()) => self.eat_b_or_h(false, o&, (Some = variable&));
                 @else => {
                     @fmt(self.error&, "invalid ref cls char=%", kk);
                     return() 
@@ -314,7 +339,7 @@ fn parse_args(self: *QParseCtx, is_par: bool) void = {
             o
         };
         if variable == QbeNull {
-            @fmt(self.error&, "args expected (:type or cls)(ref)");
+            @fmt(self.error&, "args expected (:type or cls)(ref) cls=% o=%", k, o);
             return();
         };
         self.eat(",");
@@ -344,6 +369,7 @@ fn eat_b_or_h(self: *QParseCtx, u: bool, o: *Qbe.O, variable: ?*Qbe.Ref) Qbe.Cls
         return(.Ke);
     };
     
+    base_op := o[];
     o[] = @as(Qbe.O) @as(i32) ((@as(i32) o[]) + u.int().intcast() + @if(b, 1, 3));
     if variable { variable |
         variable[] = self.parse_ref();
@@ -906,7 +932,7 @@ fn consume_string(self: *QParseCtx) Result(Str, Str) = {
     (Ok = s)
 }
 
-fn parse_type(self: *QParseCtx) Result(void, Str) = {
+fn parse_type(self: *QParseCtx) Result(i64, Str) = {
     if !self.eat(":") {
         return(Err = "expected ':' before type name");
     };
@@ -961,7 +987,7 @@ fn parse_type(self: *QParseCtx) Result(void, Str) = {
     // types can't refer to themselves so adding it at the end is fine
     t := m.new_type(typ[]);
     self.types&.insert(name, t);
-    .Ok
+    (Ok = t)
 }
 
 fn parse_type_fields(self: *QParseCtx, typ: *Qbe.Typ, fields: *List(u32)) Result(void, Str) = {

@@ -2,6 +2,7 @@ EmitElf :: @struct {
     m: *Qbe.Module;
     header: *Elf.Header;
     program_headers: []Elf.ProgramHeader;
+    // note: commands is pointer stable but payload is not
     commands: List(u8); // only contains (elf, program, section) headers
     payload: List(u8);  // everything else
     // these are the final bytes that will be emitted
@@ -141,7 +142,7 @@ start_elf :: fn(m: *Qbe.Module) EmitElf #inline = {
         commands = commands,
         header = h,
         program_headers = ph,
-        payload = u8.list(m.goal.chained_size_guess, temp()),
+        payload = u8.list(1.shift_left(18), temp()),
         section_names = Str.list(10, temp()),
     )
 };
@@ -313,10 +314,7 @@ fn output_elf(m: *QbeModule) [][]u8 = {
     @assert_le(end, m.goal.commands_size_guess, "we guessed wrong so the array resized and all the pointers are junk");
     e.commands.len = m.goal.commands_size_guess;
     e.commands.items().rest(end).set_zeroed();
-    @assert_le(e.payload.len, m.goal.chained_size_guess, "resized and now the pointers are junk");  // TODO: don't think i need this here, just mach-o did
-    if e.payload.len != 0 {
-        e.chunks&.push(e.payload.items());
-    };
+    e.chunks&.push(e.payload.items());
     
     e.chunks.items()
 }
@@ -435,6 +433,7 @@ fn emit_dynamic_exports_hash(e: *EmitElf, T: SymbolTableInfo) void = {
     nbucket := 1;
     nchain  := T.symbols.len + 1;
     e.payload&.reserve((1 + 1 + nbucket + nchain) * size_of(u32));
+    cap := e.payload.maybe_uninit.len;
     e.payload&.reserve_type(u32)[] = nbucket.trunc();
     e.payload&.reserve_type(u32)[] = nchain.trunc();
     bucket := e.payload&.reserve_type(u32, nbucket);
@@ -448,6 +447,7 @@ fn emit_dynamic_exports_hash(e: *EmitElf, T: SymbolTableInfo) void = {
         prev = idx;
     };
     bucket[0] = prev.trunc();
+    @debug_assert_eq(cap, e.payload.maybe_uninit.len, "resized");
 }
 
 SymbolTableResults :: @struct {
@@ -512,11 +512,13 @@ create_symbol_table :: fn(
     
     e.payload&.zero_pad_to_align(8);
     symbol_table_start := e.payload.len;
-    e.payload&.reserve_type(Elf.Symbol)[] = Elf.Symbol.zeroed();  // null
+    
+    symbol_table := e.payload&.reserve_type(Elf.Symbol, symbols.len + 1);
+    cap := e.payload.maybe_uninit.len;
+    symbol_table[0] = Elf.Symbol.zeroed();  // null
     symbol_index := 0;
     
     for symbols { symbol |
-        xx := e.payload&.reserve_type(Elf.Symbol);
         local := symbol.kind == .Local;
 
         segment_base := Elf.MYSTERY_SPICE + ptr_diff(e.m.segments&[.Code].mmapped.ptr, e.m.segments&[symbol.segment].mmapped.ptr);
@@ -553,7 +555,7 @@ create_symbol_table :: fn(
         STT_OBJECT :: 1; STT_FUNC :: 2;
         type := @if(symbol.segment == .Code, STT_FUNC, STT_OBJECT);   // TODO: does anyone care about this? 
         
-        xx[] = (
+        symbol_table[symbol_index + 1] = (
             name = imported_symbol_name_offsets[symbol_index],
             info = bind.shift_left(4).bit_or(type).trunc(),
             value = @if(local, segment_base + symbol.offset, 0),
@@ -564,6 +566,7 @@ create_symbol_table :: fn(
         symbol.got_lookup_offset = symbol_index;
         symbol_index += 1;
     };
+    @debug_assert_eq(cap, e.payload.maybe_uninit.len, "resized");
     
     // ugh
     out.symbol_table_index = e.header.section_header_num;
