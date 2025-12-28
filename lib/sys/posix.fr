@@ -222,18 +222,24 @@ pollfd :: @struct {
 poll :: fn(fds: []pollfd, timeout: i32) SysResult(i64) = {
     poll :: @(Syscall.S)("poll") fn(fd_p: *pollfd, fd_n: i64, timeout: i32) i64 #weak #libc #syscall(NOSYS, NOSYS, 230);
     ppoll :: @(Syscall.S)("ppoll") fn(fd_p: *pollfd, fd_n: i64, timeout: *TimeSpec, /*sigmask*/) i64 #weak #libc #syscall(73, 271, NOSYS);
-    result := @match(query_current_os()) {
-        fn macos() => poll(fds.ptr, fds.len, timeout);
-        fn linux() => {
-            @if(IS_BOOTSTRAPPING) unreachable();
-            time := @if(timeout >= 0, 
-                @ref from_ms(timeout.zext()),
-                zeroed(*TimeSpec));
-            ppoll(fds.ptr, fds.len, time)
-        }
-        @default => todo();
-    };
-    i64.sys_ret(result)
+   
+    loop {
+        EINTR :: 4;
+        result := @match(query_current_os()) {
+            fn macos() => poll(fds.ptr, fds.len, timeout);
+            fn linux() => {
+                @if(IS_BOOTSTRAPPING) unreachable();
+                time := @if(timeout >= 0, 
+                    @ref from_ms(timeout.zext()),
+                    zeroed(*TimeSpec));
+                ppoll(fds.ptr, fds.len, time)
+            }
+            @default => todo();
+        };
+        if result >= 0 || !(query_current_os() == .linux && errno()[].intcast() == EINTR) {
+            return i64.sys_ret(result);
+        };
+    }
 };
 
 // <wait.h>

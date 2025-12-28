@@ -8,7 +8,9 @@
 main :: fn() void = {
     start := get_working_directory(temp()).items();
 
-    root := fetch_git_commit("8aa482a29964136cbe2874cd330fe07e34efe8a2", "harec", "https://git.sr.ht/~sircmpwn/harec");
+    //root := fetch_git_commit("8aa482a29964136cbe2874cd330fe07e34efe8a2", "harec", "https://git.sr.ht/~sircmpwn/harec");
+    root := fetch_or_crash("mirror.tar.gz", 217154, "0c4456f174ade789ef496f1462431a075ed10afde20aeb801c8f0a16ffa5cadd", "harec-8aa482a29964136cbe2874cd330fe07e34efe8a2");
+    
     Syscall'chdir(root.as_cstr());
     
     @assert_eq(query_current_os(), .linux, "TODO: hare os");
@@ -28,6 +30,7 @@ main :: fn() void = {
 // the output path (.bin/harec) matters because the tests exec it
 compile_harec :: fn() void = {
     files := collect_directory_ordered("src", temp(), temp()).unwrap();
+
     start_time := timestamp();
     arch := to_harec_arch(query_current_arch());
     files2 := Str.list(temp());
@@ -111,8 +114,7 @@ test_harec :: fn() void = {
         ("testmod", ".out/testmod.td.tmp"),
     );
     
-    rt_o := ".out/rt.o";
-    in := run((
+    rt_ssa := run((
         a = query_current_arch(), 
         input = rt_hare,
         t = (Some = ".out/rt.td.tmp"),
@@ -121,11 +123,7 @@ test_harec :: fn() void = {
     ), "./.bin/harec", temp())
         .or(fn(msg) => @panic("failed to compile rt\n%", msg.items()));
     
-    obj := run_backend(in.items()).unwrap();
-    write_entire_file_or_crash(rt_o, obj);
-    
-    testmod_o := ".out/testmod.o";
-    in := run((
+    testmod_ssa := run((
         a = query_current_arch(), 
         input = @slice("testmod/measurement.ha", "testmod/testmod.ha"),
         t = (Some = ".out/testmod.td.tmp"),
@@ -134,9 +132,6 @@ test_harec :: fn() void = {
             @ref ("rt", ".out/rt.td.tmp"),
         ),
     ), "./.bin/harec", temp()).unwrap();
-    
-    obj := run_backend(in.items()).unwrap();
-    write_entire_file_or_crash(testmod_o, obj);
     
     tests := collect_directory_ordered("tests", temp(), temp()).unwrap();
     tests&.ordered_retain(fn(it) => it.name.ends_with(".ha"));
@@ -149,8 +144,8 @@ test_harec :: fn() void = {
         tests&.ordered_retain(fn(it) => !it.name.ends_with("17-alloc.ha"));
     };
     
-    Ctx :: @struct(rt_o: Str, testmod_o: Str);
-    ctx: Ctx = (rt_o = rt_o, testmod_o = testmod_o);
+    Ctx :: @struct(rt_ssa: Str, testmod_ssa: Str);
+    ctx: Ctx = (rt_ssa = rt_ssa.items(), testmod_ssa = testmod_ssa.items());
     // TODO: if you say => instead of =, the error should say expected fnptr not expected type annotation. :compilerbug
     run_tests_main_threaded(Ctx, DirEntry, ctx, tests.items(), fn(_, it) = it.name, fn(c, it) = {
         yield :: return;
@@ -162,17 +157,24 @@ test_harec :: fn() void = {
             td = td,
         ), "./.bin/harec", temp()).or(fn(err) => yield(false, list(u8, temp()), err, ""));
         
-        obj := @match(run_backend(in.items())) {
-            fn Ok(it) => it;
-            fn Err(msg) => yield(false, list(u8, temp()), msg.assume_owned(temp()), "");
+        ssa := @slice((c.rt_ssa, "rt"), (c.testmod_ssa, "testmod"), (in.items(), it.name));
+        m, sections := start_module(.Relocatable);
+        for ssa { ssa, name |
+            load_ir_text(m, ssa, sections, name)
+                .or(fn(msg) => {
+                    msg := @tfmt("failed to backend %\n%", name, msg);
+                    yield(false, list(u8, temp()), msg.assume_owned(temp()), "")
+                });
         };
+        obj := end_module(m, sections);
+
         // TODO: have an option to make it patch_out_interp_header? 
         write_entire_file_or_crash(o, obj);
         general_allocator().dealloc(u8, obj);
         
         clang_triple := import("@/examples/default_driver.fr")'target_triple(query_current_arch(), query_current_os());
         arch := to_harec_arch(query_current_arch());
-        sh(@slice("clang", "-target", clang_triple, o, c.rt_o, c.testmod_o, @tfmt("rt/+linux/start+%.s", arch), @tfmt("rt/+linux/syscall+%.s", arch), "-o", exe, "-nostartfiles"));
+        sh(@slice("clang", "-target", clang_triple, o, @tfmt("rt/+linux/start+%.s", arch), @tfmt("rt/+linux/syscall+%.s", arch), "-o", exe, "-nostartfiles"));
         // compile() in the tests execs harec so need to give it the td files
         ok, out, err := exec_and_catch("env", @slice(
             td_to_env(td[0]),
@@ -185,11 +187,6 @@ test_harec :: fn() void = {
 
 // like qbe_frontend.fr but collects section directives
 // and uses them to makes init,fini,test arrays
-run_backend :: fn(ssa: []u8) Result([]u8, Str) = {
-    m, sections := start_module(.Relocatable);
-    @try(load_ir_text(m, ssa, sections, "")) return;
-    return(Ok = end_module(m, sections));
-}
 
 Sections :: HashMap(Str, List(Qbe.Dat2));
 start_module :: fn(t: Qbe.OutputPurpose) Ty(*Qbe.Module, *Sections) #inline /*semantic*/ = {
@@ -205,7 +202,6 @@ start_module :: fn(t: Qbe.OutputPurpose) Ty(*Qbe.Module, *Sections) #inline /*se
     };
     (m, sections&)
 }
-
 
 load_ir_text :: fn(m: *Qbe.Module, ssa: []u8, sections: *Sections, mangle_prefix: Str) Result(void, Str) = {
     #use("@/backend/meta/parse.fr");
@@ -329,8 +325,9 @@ fn mangle(m: *Qbe.Module, id: *Qbe.Sym, prefix: Str) void = {
 
 // the "hare" repo has another rt implementation and modules with @test functions. 
 test_hare :: fn(harec: Str, verbose: bool) void = {
-    root := fetch_git_commit("e787c6f74c69d89530d542580c747a11e605ff8d", "hare", "https://git.sr.ht/~sircmpwn/hare");
-
+    //root := fetch_git_commit("e787c6f74c69d89530d542580c747a11e605ff8d", "hare", "https://git.sr.ht/~sircmpwn/hare");
+    root := fetch_or_crash("mirror.tar.gz", 997896, "17661d89d2a04e1c03551dcacf31284159cf7fe398159486fa4725d35775bf2c", "hare-e787c6f74c69d89530d542580c747a11e605ff8d");
+    
     // TODO: respect HAREPATH
     modules, po := collect_ordered_deps(root);
     
@@ -390,9 +387,10 @@ test_hare :: fn(harec: Str, verbose: bool) void = {
     
     println(exe);
     success := run_cmd_blocking(exe, empty());
-    //@assert(success);  // TODO
+    @assert(success || query_current_arch() != .x86_64);  // TODO
 }
 
+// TODO: paralellize
 fn compile_to_ssa(modules: []HareModule, po: []i64, active_tags: []Str, harec: Str, root: Str) []Str = {
     td := Ty(Str, Str).list(temp());
     ssa := temp().alloc_zeroed(Str, modules.len);
@@ -707,8 +705,10 @@ fn run(cmd: HareCmd, bin: Str, a: Alloc) Result(List(u8), List(u8)) = {
     // TODO: use execvpe instead of the env binary 🤡
     ok, out, err := exec_and_catch("env", args.items(), a);
     if ok {
+        @if(err.len > 0) eprintln(err.items());
         return(Ok = out);
     };
+    @if(out.len > 0) eprintln(out.items());
     (Err = err)
 }
 

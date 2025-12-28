@@ -391,24 +391,15 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
                 assemble(e, i&);
             } else {
                 // You can't just lower these in isel because we insert new ones to handle 3-address subtract. 
-                // TODO: this is so garbage. im doing extra work just to do a worse job. should just do what qbe does. 
+                // `r = 0.0 - a0` is not the same as `r = -1.0 * a0` because of -0.0. 
+                // clang does PXOR with 1<<(31 or 63) in memory (so add to data segment here). 
                 
                 @debug_assert_ne(amd64_xmm_scratch, i.arg&[0]);
-                
-                // xmm15 = 0 
-                xmm15 :: int_reg_d(amd64_xmm_scratch);  // TODO: compiler hangs if you typo `xmm15 :: int_reg_d(xmm15);`
-                e.a&.push(0x66);
-                e.a&.push(pack_rex_si(true, xmm15, xmm15, DONT_CARE_REG));
-                e.a&.push_all(@slice(0x0F, 0xEF)); // PXOR
-                e.a&.push(pack_modrm(.Direct, xmm15, xmm15));
-                
-                // xmm15 = 0 - a0
-                ins := make_ins(.sub, i&.cls(), amd64_xmm_scratch, amd64_xmm_scratch, i.arg&[0]);
-                emitins(ins, e);
-                
-                // to = xmm15
-                ins := make_ins(.copy, i&.cls(), i.to, amd64_xmm_scratch, QbeNull);
-                emitins(ins, e);
+                e.a&.encode_op_reg(PrimaryOp.PushBase, X86Reg.rax);
+                emitins(make_ins(.copy, .Kw, TMP(Amd64Reg.RAX), e.f.getcon(-1), Qbe.Null), e);
+                emitins(make_ins(.swtof, i&.cls(), amd64_xmm_scratch, TMP(Amd64Reg.RAX), Qbe.Null), e);
+                emitins(make_ins(.mul, i&.cls(), i.to, i.arg&[0], amd64_xmm_scratch), e);
+                e.a&.encode_op_reg(PrimaryOp.PopBase, X86Reg.rax);
             };
         }
         fn div() => {

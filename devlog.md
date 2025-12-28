@@ -1,4 +1,32 @@
 
+## (Dec 28)
+
+these are the two extra that started failing on amd when i started using my c compiler. 
+```
+cveryclose(sqrtc128(pt.0), sqrtc128(pt.1))
+cveryclose(powc128(pt.0, (0.1, 0f64)), powc128(pt.1, (0.1, 0f64)))
+```
+the difference in ssa is slice data where it contains -0f64. 
+not surprising because i have a wuffs test turned off on amd where it has -0. 
+clang gives 9223372036854775808 (high bit set) and i give 0. 
+oh i convert float neg to `0 - a0` which is not the same because `0 - 0 = 0`. 
+now all pass and i get the same .ssa as i did when using clang. 
+
+quest for why the fuck does it work with import_c for me but not in github actions. 
+- just dies with no error message the first time i run harec. 
+- i trust git less than curl because i don't do the hashing myself when fetching a dependency that way.
+  maybe its getting the wrong code somehow? nope, identical binary. 
+- tried updating the version of ubuntu i use in orb, maybe then it will share the problem. 
+  started getting EINTR in poll() calls but that wasn't the problem. 
+- is it specific to the `harec/rt` code? no, same if i skip to `hare/@test`
+- what if i use import_c to make an object file for each source file 
+  and then clang to link them together? oh works! and also if i make one 
+  object file and clang to link it against nothing. 
+- so problem must be my wrap_entry_for_linux_libc. 
+  oh im aligning to 16 bytes but then since not doing another call, 
+  when it saves rbp in my fake function it makes it 8 aligned again and libc doesn't like that. 
+- debugged in only 11 `git commit --amend`
+
 ## (Dec 26)
 
 - elf/emit: don't rely on pre-sizing payload
