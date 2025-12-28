@@ -26,6 +26,12 @@ quest for why the fuck does it work with import_c for me but not in github actio
   oh im aligning to 16 bytes but then since not doing another call, 
   when it saves rbp in my fake function it makes it 8 aligned again and libc doesn't like that. 
 - debugged in only 11 `git commit --amend`
+- that also fixed a bunch of other tests i had disabled in ci. very pleasing. 
+
+i was going to use tcc as the assembler but they don't have an arm64 one, 
+and also maybe that's silly, there's actually very little of it. 
+for arm at least they only use like 20 unique instructions. 
+i could just write my own. 
 
 ## (Dec 26)
 

@@ -1,4 +1,10 @@
 
+- less trash error message for missing `=>` in switch prong than
+```
+panic! lib/macros.fr:381:55
+                        body = @{ @if(@[cond], @[action](), @[body]) };
+Compile Error: not callable V:()
+```
 - fix tests that depend on order they run in for binaries to be compiled. 
   (ie franca examples/import_c/test/test.fr -w target/w.out).
   they should always compile the thing themself so its easy to test multiarch/orb/whatever. 
@@ -123,6 +129,7 @@ cset	w0, eq
 - elf: fix the first 0x4000 (commands_size_guess) of text section (at least when Relocatable probably also exe)
   being marked as executable but being elf header junk, etc.
   so objdump tries to disassemble it and you get something confusing. 
+- elf: names for the symbol import stubs that show in objdump
 - Terminos/tcsetattr confuses me. 
   theres like a parallel thing for configuring if you're going to do a blocking read or poll
   if the file descriptor feels in its heart that it's a terminal? 
@@ -730,11 +737,7 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 - dlsym, dlopen, dlclose
 
 ## hare
-  - enable the tests that use testmod
-  - fix 09-funcs so it gets as far as the assertion failing because i don't do init/fini.
-  - compile harec with import_c
-  - pass the library tests as well
-  - why isn't clang giving me a static binary?
+
   - be a drop in replacement for qbe that harec can use. need to deal with the fact that i don't output text assembly. 
     just provide a script that you can use as hare's assembler that dispatches to a real assembler if it's actually text? 
 
@@ -769,14 +772,8 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 
 - linux fault-na.ssa need to do the signal struct (rn it's skipped in backend/meta/test.fr)
 - :TodoLinux CLOCK_REALTIME
-- can't cross compile from (macos) to (linux -syscalls) if you call 
-  write_entire_file at comptime because it wants gettime (for atomic file name, bleh)
-  which i havn't transcribed syscall for on macos. will be fixed when i make prefer_syscall
-  not a constant which i want to do anyway for reusing frc_inlinable when cross compiling. 
-  (same for linux-sta -> linux-dyn)
 - :TodoMacosSyscall
 - how are you supposed to ask for page size? blink wants 64k instead of 4k. 
-- standalone import_c/cc.fr and meta/qbe_backend.fr can't make statically linked binaries because the `_init` is written in franca
 - elf_loader.fr doesn't work on linker output: `panic! not divisible by page size`
 - once is_linking_libc isn't #fold, if you have a static compiler and want to link a libc thing
   and notice that the path to dynamic loader is valid, 
@@ -791,9 +788,6 @@ q.out`impl2__7041:
 ```
 - shader translation for the gui examples
 - mprotect .ConstantData segment after applying relocations
-- linux amd: consistantly fails in actions but not in orb rosetta. 
-  - wuffs/(png, jpeg, deflate) 
-  - import_c/tests/(macro, varargs, function, attribute, usualconv)
 - some memory corruption thing the first time you run after fixing a compile error (so not when cached). 
   ```
   panic! lib/sys/threads.fr:146:5
@@ -805,9 +799,6 @@ q.out`impl2__7041:
 
 ## amd64
 
-- amd64: `std/json        cc      FAIL test_wuffs_strconv_parse_number_f64_regular: "-0.000e0": have 0x0000000000000000, want 0x8000000000000000`
-- import_c can't compile lua targetting amd64 (makes an exe but it crashes immediately)
-- import_c/test/ffi.fr: panic! sysv abi does not support variadic env calls
 - be less strict about amd64 address folding when there's a large constant pointer (which is valid when jitting)
   - idk, i might have done this already? 
 - CLOCK_REALTIME
@@ -850,8 +841,6 @@ program_source:26:5: error: constant sampler must be declared constexpr
 - crash backtrace with source location
 - keep caches for multiple targets at once?
 - need to be careful if start caching both main+driver from one source file
-- api for import() of a string that you want to involve in the cache file. 
-rn it just assumes it's generated from your input files so can be safely ignored. 
 - have examples/default_driver and graphics/easy do it for main(). 
 but then need to deal with including build options in the cache (like -unsafe, -wgpu, ENABLE_TRACY) 
 - do automatic caching for big comptime things (like import_c'include)

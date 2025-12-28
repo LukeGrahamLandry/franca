@@ -1,0 +1,361 @@
+
+main :: fn() void = {
+    #use("@/lib/sys/fs.fr");
+    
+    s := @slice(
+        ("target/test_asm_arm.s", Arch.aarch64), 
+        ("target/test_asm_rv.s", .rv64), 
+        ("target/test_asm_amd.s", .x86_64),
+    );
+    for s { path, arch |
+        in := read_entire_file_or_crash(temp(), path);
+        
+        @match(parse(in, arch)) {
+            fn Ok(asm) => {
+                @print("%", asm&);
+            }
+            fn Err(msg) => panic(msg);
+        }
+    };
+}
+
+Asm :: @struct {
+    stmts: []Directive;
+    insts: []Inst;
+};
+
+Inst :: @struct {
+    op: Str;
+    // TODO: amd can have imm and disp
+    imm := 0;
+    arg := zeroed Array(Arg, 3);
+    cond := "";
+    label := "";
+    
+    Mode :: @enum(u8) (
+        PreIndex, PostIndex, Index, 
+    );
+    Arg :: @struct(r: i64, cls: u8);
+};
+
+Directive :: @tagged(
+    Section: @struct(name: Str, flags: Str),
+    Global: @struct(name: Str),
+    Type: @struct(name: Str, type: Str),
+    Bss,
+    Text,
+    Align: @struct(bytes: i64),
+    Skip: @struct(bytes: i64),
+    Label: @struct(name: Str, i: i64),  // i: index in asm.insts
+);
+
+Parse :: @struct {
+    input: Str;
+    cursor := 0;
+    line := 1;
+    error: List(u8);
+    arch: Arch;
+};
+
+parse :: fn(in: Str, arch: Arch) Result(Asm, Str) = {
+    self := @ref @as(Parse) (
+        input = in,
+        error = list(temp()),
+        arch = arch,
+    );
+    stmts := @ref Directive.list(temp());
+    insts := @ref Inst.list(temp());
+    while => self.cursor < self.input.len {
+        self.skip_lines();
+        if self.eat(".") {
+            stmts.push(self.parse_directive());
+        } else {
+            self.parse_body(stmts, insts);
+        };
+    
+        if self.error.len > 0 {
+            return(Err = @tfmt("failed to assemble (at line %): %", self.line, self.error&.items()));
+        };
+    };
+    (Ok = (stmts = stmts.items(), insts = insts.items()))
+}
+
+fn parse_directive(self: *Parse) Directive = {
+    name := self.eat_word();
+    @switch(name) {
+        @case("section") => {
+            n := self.eat_word();
+            self.skip_blanks();
+            f := if self.eat(",") {
+                self.eat_word()
+            } else {
+                ""
+            };
+            (Section = (name = n, flags = f))
+        };
+        @case("type") => {
+            n := self.eat_word();
+            self.skip_blanks();
+            if !self.eat(",") || (!self.eat("@") && !self.eat("%")) {
+                @fmt(self.error&, "expected type ident, (@ | \%)ident");
+            };
+            t := self.eat_word();
+            (Type = (name = n, type = t))
+        };
+        @case("text") => .Text;
+        @case("bss") => .Bss;
+        @case("balign") => {
+            self.skip_blanks();
+            (Align = (bytes = self.parse_number()))
+        };
+        @case("skip") => {
+            self.skip_blanks();
+            (Skip = (bytes = self.parse_number()))
+        };
+        @default => {
+            if !(name == "global" || name == "globl") {
+                @fmt(self.error&, "found '%' ", name);
+                return zeroed(Directive);
+            };
+            n := self.eat_word();
+            (Global = (name = n))
+        };
+    }
+}
+
+fn parse_body(self: *Parse, stmts: *List(Directive), insts: *List(Inst)) void = {
+    symbol := self.eat_word();
+    if !self.eat(":") {
+        @fmt(self.error&, "expected .directive | ident:");
+        return();
+    };
+    
+    self.skip_blanks();
+    stmts.push(Label = (name = symbol, i = insts.len));
+    
+    self.skip_lines();
+    loop {
+        continue :: local_return;
+        if self.cursor >= self.input.len || self.input[self.cursor] == ".".ascii() {
+            return();
+        };
+        
+        start := self.cursor;
+        op := self.eat_word();
+        
+        if self.eat(":") {
+            self.cursor = start;
+            return();
+        };
+        
+        if op.len > 0 && op[0].is_ascii_digit() {
+            if self.eat(":") {
+                stmts.push(Label = (name = op, i = insts.len));
+                continue();
+            }
+        }
+        
+        inst: Inst = (op = op);
+        
+        a := 0;
+        dowhile {
+            X :: local_return;
+            break :: fn() => X(self.eat(","));
+        
+            self.skip_blanks();
+            
+            if self.parse_reg() { it |
+                inst.arg&[a] = it; a += 1;
+                break();
+            };
+            if self.eat("#") {
+                inst.imm = self.parse_signed_number();
+                break();
+            };
+            if self.eat("[") {
+                it := self.parse_reg() || {
+                    @fmt(self.error&, "expected reg after [");
+                    return();
+                };
+                inst.arg&[a] = it; a += 1;
+                if self.eat(",") {
+                    self.eat("#");
+                    inst.imm = self.parse_signed_number();
+                };
+                if !self.eat("]") {
+                    @fmt(self.error&, "expected closing ]");
+                    return();
+                };
+                break();
+            };
+            
+            if self.input[self.cursor] == "\n".ascii() {
+                break();
+            };
+            
+            imm := false;
+            if self.eat("$") || self.input[self.cursor].is_ascii_digit() || self.eat("-") {
+                if inst.op.starts_with("b") || inst.op.starts_with("j") {
+                    inst.label = self.eat_word();
+                    break();
+                };
+            
+                inst.imm = self.parse_signed_number();
+                imm = true;
+            };
+            
+            if self.eat("(") {
+                it := self.parse_reg() || {
+                    @fmt(self.error&, "expected reg after )");
+                    return();
+                };
+                inst.arg&[a] = it; a += 1;
+                
+                if !self.eat(")") {
+                    @fmt(self.error&, "expected closing )");
+                    return();
+                };
+                break();
+            };
+            @if(imm) break();
+            
+            inst.label = self.eat_word();
+            
+            break()
+        };
+        insts.push(inst);
+        
+        if self.eat("# ") {
+            self.eat_line();
+        };
+        
+        line := self.line;
+        self.skip_lines();
+        if self.line == line {
+            @fmt(self.error&, "expected newline after instruction");
+            return();
+        };
+    };
+}
+
+fn parse_signed_number(self: *Parse) i64 = {
+    negative := self.eat("-");
+    n := self.parse_number();
+    n * (1 - int(negative) * 2)
+}
+
+fn parse_reg(self: *Parse) ?Inst.Arg = {
+    start := self.cursor;
+    @match(self.arch) {
+        fn aarch64() => {
+            c := self.input[self.cursor];
+            if self.eat("sp") {
+                return(Some = (r = 31, cls = "p".ascii()));
+            };
+            if !"xwsdq".contains(c) {
+                return(.None);
+            };
+            self.cursor += 1;
+            if self.eat("zr") {
+                return(Some = (r = 31, cls = c));
+            };
+            r := self.parse_number();
+            (Some = (r = r, cls = c))
+        }
+        fn rv64() => {
+            // TODO: RA, SP, GP, TP
+            c := self.input[self.cursor];
+            f := c == "f".ascii();
+            if f && self.cursor + 1 < self.input.len {
+                c = self.input[self.cursor + 1];
+            };
+            if !"ats".contains(c) {
+                return(.None);
+            };
+            if self.eat("sp") {
+                return(Some = (r = 1, cls = "p".ascii()));
+            };
+            self.cursor += 1 + int(f);
+            r := self.parse_number();
+            // TODO: rebase to 32
+            (Some = (r = r, cls = @if(f, "f".ascii(), "r".ascii())))
+        }
+        // :SLOW
+        fn x86_64() => {
+            if !self.eat("%") {
+                return(.None);
+            };
+            c := self.input[self.cursor];
+            if "xyz".contains(c) && self.input.rest(self.cursor + 1).starts_with("mm") {
+                self.cursor += 3;
+                r := self.parse_number();
+                @if(r >= 16) { self.cursor = start; return(.None); };
+                return(Some = (r = r, cls = c));
+            };
+            r := self.eat_word();
+            if c != "r".ascii() && r.len == 3 {
+                r = @tfmt("r%", r.rest(1));
+            };
+            if r.len == 2 && "abcd".contains(c) {
+                c = "w".ascii();
+                r = @tfmt("r%", r);
+            };
+            if r.ends_with("h") {
+                c = "h".ascii();
+                r = @tfmt("%x", r.slice(0, r.len - 1));
+            };
+            X86Reg :: import("@/backend/amd64/bits.fr")'X86Reg;
+            n := X86Reg.from_name(r) 
+                || { self.cursor = start; return(.None); };
+            (Some = (
+                r = @as(i64) n, 
+                cls = c,
+            ))
+        }
+        @default => @panic("TODO: assemble.fr %", self.arch);
+    }
+}
+
+fn display(self: *Asm, out: *List(u8)) void = {
+    i := 0;
+    for self.stmts { it |
+        @if_let(it) fn Label(it) => {
+            while => i < it.i && i < self.insts.len {
+                @fmt(out, "    %\n", self.insts[i]&);
+                i += 1;
+            }
+        };
+        @fmt(out, "%\n", it&);
+    };
+    each self.insts.rest(i) { it |
+        @fmt(out, "    %\n", it);
+    };
+}
+
+fn display(it: *Directive, out: *List(u8)) void = {
+    ::tagged(@type it[]);
+    @if_let(it) fn Label(it) => {
+        @fmt(out, "%:", it.name);
+        return();
+    };
+    
+    ::tagged(@type it[]);
+    @fmt(out, "% ", it.tag());
+    if @is(it, .Section, .Global, .Type) {
+        @fmt(out, "%", it.Section.name);
+    };
+    if @is(it, .Align, .Skip) {
+        @fmt(out, "%", it.Align.bytes);
+    };
+}
+
+fn display(it: *Inst, out: *List(u8)) void = {
+    @fmt(out, "    % % % % ", it.op, it.cond, it.label, it.imm);
+    each it.arg& { it |
+        out.push(it.cls);
+        @fmt(out, "% ", it.r);
+    };
+}
+
+Qbe :: import("@/backend/lib.fr").Qbe;
+::import("@/backend/meta/parse.fr");
