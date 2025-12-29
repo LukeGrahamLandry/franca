@@ -31,13 +31,22 @@ fixarg :: fn(r: *Qbe.Ref, k: Qbe.Cls, i: *Qbe.Ins, f: *Qbe.Fn) void = {
                 break();
             }
         };
+        
+        // note: k != i.cls (because cmp, etc.)
+        b := @if(k == .Kw, c.bits().sign_extend_low32(), c.bits());
+        if b != c.bits() { // just because getcon is :SLOW
+            r1 = f.getcon(b);
+            r0 = r1;
+        };
+        
         if c.type() == .CBits && o == .copy && !is_float(k) {
             break();
-        }
+        };
+        
         // the I immediates are 12 bits, sign extended
         if !is_float(k)
         && c.type() == .CBits && immarg(r, o, i)
-        && -2048 <= c.bits() && c.bits() < 2048 {
+        && -2048 <= b && b < 2048 {
             break();
         }
         r1 = f.newtmp("isel", k);
@@ -74,10 +83,12 @@ fixarg :: fn(r: *Qbe.Ref, k: Qbe.Cls, i: *Qbe.Ins, f: *Qbe.Fn) void = {
         }
         t := f.get_temporary(r0);
         if k == .Kw && t.cls == .Kl {
-            /* TODO: this sign extension isn't needed
-             * for 32-bit arithmetic instructions */
-            r1 = f.newtmp("isel", k);
-            f.emit(.extsw, .Kl, r1, r0, Qbe.Null);
+            // these are the ones that have seperate op/op32 in emit.simple_op
+            need_ext := i.is_null() || !@is(i.op(), .add, .sub, .mul, .div, .udiv, .rem, .urem);
+            if need_ext {
+                r1 = f.newtmp("isel", k);
+                f.emit(.extsw, .Kl, r1, r0, Qbe.Null);
+            };
         } else {
             // TODO: this isn't always true. like =l extub Kw -> =l and Kw, 255
             // @debug_assert_eq(k, t.cls, "wrong cls in $%: %(%)", f.name(), i.op(), r);
@@ -185,6 +196,7 @@ sel :: fn(i: *Qbe.Ins, f: *Qbe.Fn) void = {
             fixarg(i0.arg&[0]&, k, i0, f);
             
             // cond is the same in both
+            // TODO: this will carefully sign extend the result of a cmp (0 or 1 already) which is dumb
             fixarg(i0.arg&[1]&, .Kw, i0, f);
             i1.arg&[1] = i0.arg&[1];
             chuse(i0.arg&[1], 1, f);

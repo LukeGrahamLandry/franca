@@ -208,6 +208,7 @@ fn emit_the_code(self: *ArmState) void #once = {
             };  // else fall through; we're about to emit the target block
             fn switch() => unreachable();
             @default => {
+                continue :: local_return;
                 Jjf :: Qbe.J.jfieq; // TODO: use this everywhere
                 c: i32 = b.jmp.type.raw() - Jjf.raw();
                 @debug_assert(!(c < 0 || c > Qbe.NCmp), "unhandled jump");
@@ -217,6 +218,12 @@ fn emit_the_code(self: *ArmState) void #once = {
                     b.s1 = b.s2;
                     b.s2 = t;
                 } else {
+                    // TODO: i don't have a test where this matters but i feel in my heart that it's true. 
+                    if c >= Qbe.CmpICount {  // :InverseIsUnsoundForNanCmp
+                        self.jmp(b.s1, c);
+                        self.jmp(b.s2, -1);
+                        continue();
+                    };
                     // we jump to s2 when condition c is true, so flip the condition. 
                     c = cmpneg(c);
                 };
@@ -618,6 +625,16 @@ fn emitins(self: *ArmState, i: *Qbe.Ins, block: *Qbe.Blk) void = {
         if c < 0 || c > Qbe.NCmp {
             panic("unhandled flag")
         };
+        if c >= Qbe.CmpICount {  // :InverseIsUnsoundForNanCmp
+            cond := arm_condition_codes[c.zext()];
+            d := i.to.int_reg();
+            self.inst(cset(si, d, cond));
+            imm := @run encode_bitmask(1, true).unwrap();
+            self.inst(@bits(Bits.X64, 0b10, 0b100100, @as(u13) imm, d, d));
+            // TODO: could flip to unordered compares i think. same for jnz. 
+            return();
+        };
+        
         c = cmpneg(c); // cset is an alias for CSINC so encoding is backwards from what you'd type in an assembler. 
         cond := arm_condition_codes[c.zext()];
         self.inst(cset(si, i.to.int_reg(), cond));

@@ -612,7 +612,7 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 - get rid of gvm.fr/sink. but first need to make rega do better live range spiltting in large functions. 
 - i wish i could get rid of the parts of fold.fr and copy.fr that were replaced by gvn,
   but it feels wrong as long as gvn is still slower. like maybe this is dumb and i should go back to the old way. 
-- cmpneg is unsound for floats so if a cmp gets folded into a jnz it can behave wrong for nans. 
+- :InverseIsUnsoundForNanCmp on non-arm?
 - why go i get faster core mark with my import_c than my qbe_frontend on cproc's ir? 
   differences i see in the ir:
   - i insert redundant cnew 0 before jnz

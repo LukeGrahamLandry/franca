@@ -201,7 +201,7 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
                 fn RCon() => {
                     c := f.get_constant(a0);
                     @match(c.type()) {
-                        fn CBits() => e.load_number(c.bits(), i.to, i.cls());
+                        fn CBits() => e.load_number(c.bits(), i.to);
                         fn CAddr() => e.load_symbol(c, i.to.rv());
                     }
                 }
@@ -263,25 +263,25 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
         fn extsw() => e.inst(R(0, 0, a0.rv().bits(), @as(u3) OpI.add, i.to.rv().bits(), .opw));
         fn add() => @if(i.cls().is_int(), 
             e.simple_op(i, .add, 0),
-            e.float_op(i, .add, 0b000));
+            e.float_op(i, .add, 0b111));
         fn sub() => @if(i.cls().is_int(), 
             e.simple_op(i, .add, 0b0100000),
-            e.float_op(i, .sub, 0b000));
+            e.float_op(i, .sub, 0b111));
         fn and() => e.simple_op(i, .and, 0);
         fn xor() => e.simple_op(i, .xor, 0);
         fn or() => e.simple_op(i, .or, 0);
         fn mul() => @if(i.cls().is_int(), 
             e.simple_op(i, @as(OpI) 0b000, 1),
-            e.float_op(i, .mul, 0b000));
+            e.float_op(i, .mul, 0b111));
         fn div()  => @if(i.cls().is_int(), 
             e.simple_op(i, @as(OpI) 0b100, 1),
-            e.float_op(i, .div, 0b000));
+            e.float_op(i, .div, 0b111));
         fn udiv() => e.simple_op(i, @as(OpI) 0b101, 1);
         fn rem()  => e.simple_op(i, @as(OpI) 0b110, 1);
         fn urem() => e.simple_op(i, @as(OpI) 0b111, 1);
         fn min() => e.float_op(i, .min_max, 0b000);
         fn max() => e.float_op(i, .min_max, 0b001);
-        fn sqrt() => e.float_op(i, .sqrt, 0b000);
+        fn sqrt() => e.float_op(i, .sqrt, 0b111);
         
         fn csltl() => e.simple_op(i, .slt, 0);
         fn cultl() => e.simple_op(i, .sltu, 0);
@@ -406,16 +406,11 @@ fn encode_shift(e: *EmitRv, i: *Qbe.Ins) void = {
     e.inst(@bits(0b0, arith, rot, 0b0000, rs2, rs1, right, 0b01, rd, 0b0, con, 0b1, kw, 0b011));
 }
 
-fn load_number(e: *EmitRv, off: i64, to: Qbe.Ref, k: Qbe.Cls) void = {
+fn load_number(e: *EmitRv, off: i64, to: Qbe.Ref) void = {
     fits_double_extend :: fn(i) => true
         && i >= -(1.shift_left(31)) - 1.shift_left(11) 
         && i <= 1.shift_left(31) - 1.shift_left(11) - 1;
-    @debug_assert(k.is_int());
     @debug_assert_lt(to.val(), 32);
-    if k == .Kw {
-        // if the high bits don't matter, sign extended is easier to encode. 
-        off = off.sign_extend_low32();
-    };
     r := to.rv().bits();
     @if_else {
         @if(off.fits_sext(11)) => {
@@ -427,32 +422,32 @@ fn load_number(e: *EmitRv, off: i64, to: Qbe.Ref, k: Qbe.Cls) void = {
             e.inst(I(lo, r, @as(u3) OpI.add, r, .op_imm));
         }
         @if(fits_double_extend(off.bit_not())) => {
-            e.load_number(off.bit_not(), to, .Kl);
+            e.load_number(off.bit_not(), to);
             e.inst(R(0b0100000, r, 0b00000, 0b110, r, .op));  // orn. r = 0 | ~r
         }
         @else => {
             // TODO: this is convoluted. just put it in memory and load it. 
-            hi, lo := (off.shift_right_logical(32), off.bit_and(MAX_u32));
+            hi, lo := (off.shift_right_logical(32).sign_extend_low32(), off.bit_and(MAX_u32).sign_extend_low32());
             
             if lo == 0 {
-                e.load_number(hi, to, .Kw);
+                e.load_number(hi, to);
                 e.emit(.shl, .Kl, to, to, e.f.getcon(32));
                 return();
             };
             @debug_assert_ne(to, rv_scratch_int);
             
-            if hi == 0 || k == .Kw {
+            if hi == 0 {
                 hi := @as(i64) lo.imm(31, 12);
                 lo := bit_and(@as(i64) lo.imm(11, 0), 1.shift_left(13) - 1);
             
-                e.load_number(lo, rv_scratch_int, .Kl);
+                e.load_number(lo, rv_scratch_int);
                 e.inst(U(hi, r, .lui));
                 e.inst(R(0b0000100, rv_scratch_int.rv().bits(), r, 0b000, r, .op32));  // add.uw 
                 return();
             };
             
-            e.load_number(lo, to, .Kw);
-            e.load_number(hi, rv_scratch_int, .Kw);
+            e.load_number(lo, to);
+            e.load_number(hi, rv_scratch_int);
             
             e.emit(.shl, .Kl, rv_scratch_int, rv_scratch_int, e.f.getcon(32));
             // add.uw (zero extends rs1, thats why high bits of lo don't matter)

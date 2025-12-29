@@ -21,6 +21,26 @@
     to assemble all 100 instructions because that's nothing. 
     so now i don't need the linker and can save 60ms of clang. 
     more impressive for harec tests (had to clang 38 times, tho on smaller programs): 1057ms -> 468ms. 
+- arm: sqrtc128(-infinity nan) is giving (nan -infinity) instead of (nan infinity). 
+  - :InverseIsUnsoundForNanCmp
+  - this is known. "cmpneg is unsound for floats so if a cmp gets folded into a jnz it can behave wrong for nans."
+  - it works if i always do the slow path in isel/seljmp. 
+    but somehow not if i just don't do cmpneg in emit and always emit two branches. 
+  - oh some bonus sources of confusion 
+    - the lowering for flag sel has the same problem because CSINC encoding 
+      so just always indirecting through an int value like that maybe only works by canceling out in a confusing way. 
+    - i've been using unordered compares instead of ordered ones 
+  - i can almost convence myself that makes sense for why it wasn't failing those tests on all arches. 
+- rv: 
+  - sat_mulu32 was fixed by sign extending Kw constants in isel
+  - fround failed because i had rm=RNE for all the basic ops. 
+    that test wants to set the magic rounding mode register so i have to say rm=DYN. 
+    which like, seems kinda dumb universe state, but if that's what everyone does i should be predictable. 
+  - now passes all the hare tests
+  - while im looking at it, 
+    - fixarg should sign extend when checking if in range for immediate if Kw. 
+      lets it see negative i32 stored with high bits zeroed. 
+    - don't insert as many sign extensions for tmps for 32 bit math
 
 ## (Dec 28)
 
