@@ -149,7 +149,6 @@ test_harec :: fn() void = {
     // TODO: if you say => instead of =, the error should say expected fnptr not expected type annotation. :compilerbug
     run_tests_main_threaded(Ctx, DirEntry, ctx, tests.items(), fn(_, it) = it.name, fn(c, it) = {
         yield :: return;
-        o := @tfmt(".out/%.o", it.name);
         exe := @tfmt(".out/%.out", it.name);
         in := run((
             a = query_current_arch(), 
@@ -158,7 +157,16 @@ test_harec :: fn() void = {
         ), "./.bin/harec", temp()).or(fn(err) => yield(false, list(u8, temp()), err, ""));
         
         ssa := @slice((c.rt_ssa, "rt"), (c.testmod_ssa, "testmod"), (in.items(), it.name));
-        m, sections := start_module(.Relocatable);
+        have_assembler := query_current_arch() == .aarch64;
+        m, sections := start_module(@if(have_assembler, .Exe, .Relocatable));
+        arch := to_harec_arch(query_current_arch());
+        if have_assembler {
+            asm_blob := @ref u8.list(temp());
+            read_and_push_or_crash(asm_blob, @tfmt("rt/+linux/start+%.s", arch));
+            read_and_push_or_crash(asm_blob, @tfmt("rt/+linux/syscall+%.s", arch));
+            import("@/examples/import_c/assemble.fr")'parse_and_emit(m, asm_blob.items());
+            m.goal.entry_point = "_start";
+        };
         ctx := init_codegen_worker(m, false);
         for ssa { ssa, name |
             load_ir_text(ctx, ssa, sections, name)
@@ -171,12 +179,15 @@ test_harec :: fn() void = {
         obj := end_module(m, sections);
 
         // TODO: have an option to make it patch_out_interp_header? 
-        write_entire_file_or_crash(o, obj);
+        if have_assembler {
+            write_entire_file_or_crash(exe, obj);
+        } else {
+            o := @tfmt(".out/%.o", it.name);
+            write_entire_file_or_crash(o, obj);
+            clang_triple := import("@/examples/default_driver.fr")'target_triple(query_current_arch(), query_current_os());
+            sh(@slice("clang", "-target", clang_triple, o, @tfmt("rt/+linux/start+%.s", arch), @tfmt("rt/+linux/syscall+%.s", arch), "-o", exe, "-nostartfiles"));
+        };
         general_allocator().dealloc(u8, obj);
-        
-        clang_triple := import("@/examples/default_driver.fr")'target_triple(query_current_arch(), query_current_os());
-        arch := to_harec_arch(query_current_arch());
-        sh(@slice("clang", "-target", clang_triple, o, @tfmt("rt/+linux/start+%.s", arch), @tfmt("rt/+linux/syscall+%.s", arch), "-o", exe, "-nostartfiles"));
         // compile() in the tests execs harec so need to give it the td files
         ok, out, err := exec_and_catch("env", @slice(
             td_to_env(td[0]),
@@ -198,6 +209,8 @@ start_module :: fn(t: Qbe.OutputPurpose) Ty(*Qbe.Module, *Sections) #inline /*se
         arch = query_current_arch(),
         os = query_current_os(),
         type = t,
+        wrap_entry_for_linux_libc = false,
+        exe_debug_symbol_table = true,
     ));
     for @slice("init", "fini", "test") { s |
         insert(sections&, @tfmt(".%_array", s), list(m.forever&.borrow()));
@@ -280,11 +293,26 @@ load_ir_text :: fn(shared: *Qbe.CodegenShared, ssa: []u8, sections: *Sections, m
 seal_array_sections :: fn(m: *Qbe.Module, sections: *Sections) void = {
     each sections { name, values |
         continue :: local_return;
-        @if(values.len == 0) continue();
         name := name.subslice(1, 4);
         // rt/+linux/start.ha looks for these symbols
         start := m.intern(@tfmt("__%_array_start", name));
         end := m.intern(@tfmt("__%_array_end", name));
+        
+        if values.len == 0 {
+            Qbe'backend'compile_dat(m, (
+                id = start,
+                template = (Zeroes = 0),
+                relocations = empty(),
+                export = true,
+            ));
+            Qbe'backend'compile_dat(m, (
+                id = end,
+                template = (Zeroes = 0),
+                relocations = empty(),
+                export = true,
+            ));
+            continue();
+        };
         ids := @ref Qbe.Sym.list(values.len + 1, temp());
         
         // HACK: need it to put start..end sequentially
@@ -347,6 +375,7 @@ test_hare :: fn(harec: Str, verbose: bool) void = {
     //root := fetch_git_commit("e787c6f74c69d89530d542580c747a11e605ff8d", "hare", "https://git.sr.ht/~sircmpwn/hare");
     root := fetch_or_crash("mirror.tar.gz", 997896, "17661d89d2a04e1c03551dcacf31284159cf7fe398159486fa4725d35775bf2c", "hare-e787c6f74c69d89530d542580c747a11e605ff8d");
     
+    have_assembler := query_current_arch() == .aarch64;
     start_time := timestamp();
     // TODO: respect HAREPATH
     modules, po := collect_ordered_deps(root);
@@ -368,7 +397,23 @@ test_hare :: fn(harec: Str, verbose: bool) void = {
     
     make_dirs_or_crash(@tfmt("%/.out", root));
     start_time := timestamp();
-    m, sections := start_module(.Relocatable);
+    m, sections := start_module(@if(have_assembler, .Exe, .Relocatable));
+    
+    asm_blob := @ref u8.list(temp());
+    each modules { it |
+        asm := filter_tags(it.asm, active_tags);
+        for asm { it |
+            @fmt(asm_blob, "// (include %)\n", it);
+            @assert(it.starts_with("/"));
+            read_and_push(asm_blob, @tfmt("%%", root, it));
+        };
+    };
+    
+    if have_assembler {
+        import("@/examples/import_c/assemble.fr")'parse_and_emit(m, asm_blob.items());
+        m.goal.entry_point = "_start";
+    };
+    
     send: TaskTube = (ring = m.forever&.borrow().alloc_zeroed(Ty(Str, Str), 4));
     
     Worker :: @struct {
@@ -383,14 +428,13 @@ test_hare :: fn(harec: Str, verbose: bool) void = {
         send = send&,
         count = modules.len,
     ), work);
-    compile_to_ssa(modules, po, active_tags, harec, root, send&);
+    compile_to_ssa(modules, po, active_tags, harec, root, send&, verbose);
     
     work :: fn(self: *Worker) void = {
         ctx := init_codegen_worker(self.m, true);
         while => self.count > 0 {
             name, ssa := self.send.pop();
-            self.count -= 1;
-            
+            self.count -= 1;            
             // :discard_static_scope throwing away QParseCtx.types each time is intentional
             load_ir_text(ctx, ssa, self.sections, name)
                 .or(fn(msg) => @panic("failed to compile ssa: %\n%", name, msg));
@@ -399,28 +443,25 @@ test_hare :: fn(harec: Str, verbose: bool) void = {
     };
     
     thread.join();
-    
-    obj := end_module(m, sections);
-    obj_o := @tfmt("%/.out/test.o", root);
-    write_entire_file_or_crash(obj_o, obj);
-    @println("frontend+backend wall: %ms", timestamp() - start_time);
-    
-    asm_blob := @ref u8.list(temp());
-    each modules { it |
-        asm := filter_tags(it.asm, active_tags);
-        for asm { it |
-            @fmt(asm_blob, "// (include %)\n", it);
-            @assert(it.starts_with("/"));
-            read_and_push(asm_blob, @tfmt("%%", root, it));
-        };
-    };
-    asm_s := @tfmt("%/.out/test_asm.s", root);
-    write_entire_file_or_crash(asm_s, asm_blob.items());
+    m.flush_debug();
     
     exe := @tfmt("%/.out/test.out", root);
     
-    clang_triple := import("@/examples/default_driver.fr")'target_triple(query_current_arch(), query_current_os());
-    sh(@slice("clang", "-target", clang_triple, asm_s, obj_o, "-o", exe, "-nostartfiles"));
+    if have_assembler {
+        obj := end_module(m, sections);
+        write_entire_file_or_crash(exe, obj);
+    } else {
+        obj := end_module(m, sections);
+        obj_o := @tfmt("%/.out/test.o", root);
+        write_entire_file_or_crash(obj_o, obj);
+        asm_s := @tfmt("%/.out/test_asm.s", root);
+        write_entire_file_or_crash(asm_s, asm_blob.items());
+        clang_triple := import("@/examples/default_driver.fr")'target_triple(query_current_arch(), query_current_os());
+        sh(@slice("clang", "-target", clang_triple, asm_s, obj_o, "-o", exe, "-nostartfiles"));
+    };
+    
+    @println("frontend+backend wall: %ms", timestamp() - start_time);
+    
     
     println(exe);
     success := run_cmd_blocking(exe, empty());
@@ -435,7 +476,7 @@ test_hare :: fn(harec: Str, verbose: bool) void = {
 // but im already getting more threads than i have p-cores. 
 // the problem isn't that it's not parallel, the problem is that it spends 60% of its time 
 // re-parsing the .td files every 128 times you exec it. 
-fn compile_to_ssa(modules: []HareModule, po: []i64, active_tags: []Str, harec: Str, root: Str, send: *TaskTube) void = {
+fn compile_to_ssa(modules: []HareModule, po: []i64, active_tags: []Str, harec: Str, root: Str, send: *TaskTube, verbose: bool) void = {
     #use("@/lib/sys/subprocess.fr");
     
     td, names, out_td := build_td(modules, root);
@@ -457,10 +498,9 @@ fn compile_to_ssa(modules: []HareModule, po: []i64, active_tags: []Str, harec: S
         ssa := out.items();
         push(send, (names[it.i], ssa));
         
-        // TODO
-        //if verbose && ssa.len > 0 {
-        //    write_entire_file_or_crash(@tfmt("%/.out/%.ssa", root, it.i), ssa[it.i]);
-        //};
+        if verbose && ssa.len > 0 {
+            write_entire_file_or_crash(@tfmt("%/.out/%.ssa", root, it.i), ssa);
+        };
         
         done&.bsset(it.i);
         // start running any whose last dependency was this one. 

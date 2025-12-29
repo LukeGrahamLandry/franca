@@ -1,3 +1,8 @@
+// this is an aarch64/x86_64/riscv64 assembler. 
+// currently it's just used for tests/external/hare.fr 
+// but i plan to use it for c's inline asm statements eventually. 
+// WIP: only implements a tiny subset of instructions 
+// WIP: only done arm encoding so far
 
 main :: fn() void = {
     #use("@/lib/sys/fs.fr");
@@ -10,14 +15,26 @@ main :: fn() void = {
     for s { path, arch |
         in := read_entire_file_or_crash(temp(), path);
         
-        @match(parse(in, arch)) {
-            fn Ok(asm) => {
-                @print("%", asm&);
-            }
-            fn Err(msg) => panic(msg);
-        }
+        m := @ref zeroed(Qbe.Module);
+        Qbe'backend'init_module(m, (
+            arch = arch,
+            os = query_current_os(),
+            type = .Relocatable,
+        ));
+        
+        parse_and_emit(m, in);
+        
+        m.flush_debug();
+        chunks := {m.target.finish_module}(m);
+        write_chunks_or_crash("target/a.o", chunks);
+        return(); // TODO: other arches
+        
     };
 }
+
+// the lex/parse part is mostly shared between the arcitectures. 
+// it supports the union of all the syntaxes. 
+// splits the text up into directives, instructions, arguments, etc.
 
 Asm :: @struct {
     stmts: []Directive;
@@ -31,9 +48,11 @@ Inst :: @struct {
     arg := zeroed Array(Arg, 3);
     cond := "";
     label := "";
+    mode := Mode.None;
     
     Mode :: @enum(u8) (
         PreIndex, PostIndex, Index, 
+        Imm, None,
     );
     Arg :: @struct(r: i64, cls: u8);
 };
@@ -46,7 +65,12 @@ Directive :: @tagged(
     Text,
     Align: @struct(bytes: i64),
     Skip: @struct(bytes: i64),
-    Label: @struct(name: Str, i: i64),  // i: index in asm.insts
+    Label: @struct {
+        label: Str;
+        i: i64;  // index in asm.insts
+        length := MIN_i64; // how many asm.insts until next label
+        directive_count := MIN_i64;  // how many directives until next label
+    },
 );
 
 Parse :: @struct {
@@ -55,7 +79,97 @@ Parse :: @struct {
     line := 1;
     error: List(u8);
     arch: Arch;
+    last_label: ?i64 = .None;
 };
+
+SymbolPatch :: @struct {
+    i: i64;
+    label: Str;
+    fixup: Qbe.FixupType;
+};
+
+parse_and_emit :: fn(m: *Qbe.Module, in: Str) void = {
+    arch := m.goal.arch;
+    @match(parse(in, arch)) {
+        fn Ok(asm) => {
+            //@print("%", asm&);
+            @assert(arch == .aarch64);
+            insts := u32.list(temp());
+            relocs := Ty(Reloc, i64).list(temp());
+            each asm.insts { it |
+                reloc: ?Reloc = .None;
+                inst := EncodeArm'encode(it, reloc&);
+                if reloc& { it |
+                    push(relocs&, (it[], insts.len));
+                };
+                insts&.push(inst);
+            };
+            
+            base_address := m.segments&[.Code]&.len();
+            patches := list(SymbolPatch, temp());
+            do_patches(asm&, insts.items(), relocs.items(), patches&);
+            off := 0;
+            each asm.stmts { it |
+                @if_let(it) fn Label(it) => {
+                    code := zeroed Qbe.MultiArchAsm;
+                    @assert_eq(off, it.i, "lost bytes between symbols. reloc offset won't work");
+                    code&[.aarch64] = insts.items().subslice(it.i, it.length).interpret_as_bytes();
+                    off = it.i + it.length;
+                    id := m.intern(it.label);
+                    // NOTE: don't insert bti!! it would fuckup the offsets. 
+                    m.add_code_bytes(id, code&, false); 
+                    m.maybe_add_export(id, true);
+                }
+            };
+            each patches { it |
+                use_symbol(m, m.intern(it.label)) { s |
+                    @assert_eq(s.segment, .Code, "TODO: track all base_addresses");
+                    addr := m.segment_address(.Code, base_address + it.i * 4);
+                    push_fixup(m, s, (patch_at = (addr = addr), type = it.fixup));
+                    
+                    // for now relying on doing asm at the beginning. 
+                    // (and not doing fix() here) but thats wrong anyway once i want to do .Relocatable. 
+                    // TODO: shouldn't require that but also want to unify them anyway
+                    //       so never just directly do fixup. 
+                };
+            };
+        }
+        fn Err(msg) => panic(msg);
+    };
+}
+
+fn do_patches(asm: *Asm, insts: []u32, relocs: []Ty(Reloc, i64), patches: *List(SymbolPatch)) void = {
+    // TODO: O(^) but n=2 :SLOW :SLOW :SLOW :SLOW :SLOW :SLOW :SLOW
+    @assert(relocs.len < 5, "TODO: make this not slow as fuck");
+    for relocs { it, patch_at |
+        continue :: local_return;
+        inst := insts[patch_at]&;
+        @match(it) {
+            fn Dist(it) => {
+                label := it.label;
+                forward := true;
+                if label[0].is_ascii_digit() {
+                    forward = it.label.ends_with("f");
+                    label = label.slice(0, label.len - 1);
+                };
+                each asm.stmts { stmt |
+                    @if_let(stmt) fn Label(stmt) => {
+                        if stmt.label == label && (!forward || stmt.i > patch_at) {
+                            distance := (stmt.i - patch_at) * 4 / it.scale;
+                            inst[] = inst[].bit_or(distance.trunc().bit_and(1.shift_left(it.width) - 1).shift_left(it.shift));
+                            // TODO: if it's a function still need to record the fixup
+                            continue();
+                        }
+                    };
+                };
+                
+                // TODO: it might be bl
+                @assert(it.width == 26 && it.shift == 0, "TODO: only b can be symbol patch");
+                push(patches, (i = patch_at, label = it.label, fixup = (Call = (link = false))));
+            };
+        };
+    };
+}
 
 parse :: fn(in: Str, arch: Arch) Result(Asm, Str) = {
     self := @ref @as(Parse) (
@@ -68,7 +182,9 @@ parse :: fn(in: Str, arch: Arch) Result(Asm, Str) = {
     while => self.cursor < self.input.len {
         self.skip_lines();
         if self.eat(".") {
-            stmts.push(self.parse_directive());
+            it := self.parse_directive();
+            @debug_assert(!it&.is(.Label), "need to update last_label");
+            stmts.push(it);
         } else {
             self.parse_body(stmts, insts);
         };
@@ -77,6 +193,12 @@ parse :: fn(in: Str, arch: Arch) Result(Asm, Str) = {
             return(Err = @tfmt("failed to assemble (at line %): %", self.line, self.error&.items()));
         };
     };
+    if self.last_label { old_i |
+        old := stmts[old_i].Label&;
+        old.length = insts.len - old.i;
+        old.directive_count = stmts.len - old_i;
+    };
+    self.last_label = .None;
     (Ok = (stmts = stmts.items(), insts = insts.items()))
 }
 
@@ -123,6 +245,18 @@ fn parse_directive(self: *Parse) Directive = {
     }
 }
 
+fn add_label(self: *Parse, stmts: *List(Directive), insts: *List(Inst), label: Str) void = {
+    it: Directive = (Label = (label = label, i = insts.len));
+    new := it.Label&;
+    if self.last_label { old_i |
+        old := stmts[old_i].Label&;
+        old.length = new.i - old.i;
+        old.directive_count = stmts.len - old_i;
+    };
+    self.last_label = (Some = stmts.len);
+    stmts.push(it);
+}
+
 fn parse_body(self: *Parse, stmts: *List(Directive), insts: *List(Inst)) void = {
     symbol := self.eat_word();
     if !self.eat(":") {
@@ -131,7 +265,7 @@ fn parse_body(self: *Parse, stmts: *List(Directive), insts: *List(Inst)) void = 
     };
     
     self.skip_blanks();
-    stmts.push(Label = (name = symbol, i = insts.len));
+    self.add_label(stmts, insts, symbol);
     
     self.skip_lines();
     loop {
@@ -150,13 +284,13 @@ fn parse_body(self: *Parse, stmts: *List(Directive), insts: *List(Inst)) void = 
         
         if op.len > 0 && op[0].is_ascii_digit() {
             if self.eat(":") {
-                stmts.push(Label = (name = op, i = insts.len));
+                self.add_label(stmts, insts, op);
                 continue();
             }
         }
         
         inst: Inst = (op = op);
-        
+        ::enum(@type inst.mode);
         a := 0;
         dowhile {
             X :: local_return;
@@ -170,6 +304,7 @@ fn parse_body(self: *Parse, stmts: *List(Directive), insts: *List(Inst)) void = 
             };
             if self.eat("#") {
                 inst.imm = self.parse_signed_number();
+                inst.mode = @if(inst.mode == .Index, .PostIndex, .Imm);
                 break();
             };
             if self.eat("[") {
@@ -178,6 +313,7 @@ fn parse_body(self: *Parse, stmts: *List(Directive), insts: *List(Inst)) void = 
                     return();
                 };
                 inst.arg&[a] = it; a += 1;
+                inst.mode = .Index;
                 if self.eat(",") {
                     self.eat("#");
                     inst.imm = self.parse_signed_number();
@@ -185,6 +321,9 @@ fn parse_body(self: *Parse, stmts: *List(Directive), insts: *List(Inst)) void = 
                 if !self.eat("]") {
                     @fmt(self.error&, "expected closing ]");
                     return();
+                };
+                if self.eat("!") {
+                    inst.mode = .PreIndex;
                 };
                 break();
             };
@@ -201,6 +340,7 @@ fn parse_body(self: *Parse, stmts: *List(Directive), insts: *List(Inst)) void = 
                 };
             
                 inst.imm = self.parse_signed_number();
+                inst.mode = .Imm;
                 imm = true;
             };
             
@@ -316,6 +456,178 @@ fn parse_reg(self: *Parse) ?Inst.Arg = {
     }
 }
 
+// the actual instruction encoding is target specific.  
+// for now, just doing the dumbest possible thing to get the hare tests working. 
+// eventually maybe i want to generate this in some way. 
+// arm has giant xml file of encodings and im sure the others have something equivalent. 
+// or maybe just type out patterns like (and+imm: 0b0101010, a0, a1, log_imm, 0b10101). idk. 
+// it would be nice if one information source gave me an assembler and a disassembler. 
+// so there's a temptation to make it not just be code like this. 
+// it would also be nice if these bits could be shared with backend/<arch>/emit.fr 
+// but i'm not okay with that depending on giant xml file so hard to decide what to do. 
+
+Reloc :: @tagged(
+    // (arm/rv) insert a distance in bits [shift..+width] of a u32 instruction
+    Dist: @struct(scale: i64, label: Str, width: i64, shift: i64),
+);
+
+EncodeArm :: @struct {
+#use("@/backend/arm64/bits.fr");
+
+encode :: fn(it: *Inst, reloc_out: *?Reloc) u32 = {
+    ::if(u32);
+    ::enum(Inst.Mode);
+    ::enum(Bits);
+    ::enum(FType);
+    if it.op.starts_with("b.") {
+        it.cond = it.op.rest(2);
+        it.op = "b";
+    };
+
+    reloc: ?Reloc = .None;
+    si := @if("xp".contains(it.arg&[0].cls), Bits.X64, .W32);
+    sf := @if("d".contains(it.arg&[0].cls), FType.D64, .S32);
+    float := "sd".contains(it.arg&[0].cls);
+    @switch(it.op) {
+        @case("mrs") => {
+            o0, op1, CRn, CRm, op2 := sysreg(it.label);
+            SYS(0b1, o0, op1, CRn, CRm, op2, it.arg&[0].r)
+        };
+        @case("msr") => {
+            o0, op1, CRn, CRm, op2 := sysreg(it.label);
+            SYS(0b0, o0, op1, CRn, CRm, op2, it.arg&[0].r)
+        };
+        @case("mov") => {
+            @assert(!"sd".contains(it.arg&[0].cls), "TODO: mov float");
+            if it.mode == .Imm {
+                @assert(it.imm.bit_and(1.shift_left(16) - 1) == it.imm, "TODO: mov big imm");
+                movz(si, it.arg&[0].r, it.imm.trunc(), .Left0)
+            } else {
+                if it.arg&[0].cls == "p".ascii() || it.arg&[1].cls == "p".ascii() {
+                    add_im(si, it.arg&[0].r, it.arg&[1].r, 0, 0)
+                } else {
+                    // the above would work but this disassembles prettier
+                    mov(si, it.arg&[0].r, it.arg&[1].r)
+                }
+            }
+        };
+        @case("add") => {
+            @assert_eq(it.mode, .Imm, "TODO: add reg");
+            @assert(!float, "TODO: add float");
+            negate := (-it.imm).bit_and(1.shift_left(12) - 1) == -it.imm;
+            @assert(it.imm.bit_and(1.shift_left(12) - 1) == it.imm || negate, "TODO: add big imm");
+            if negate {
+                sub_im(si, it.arg&[0].r, it.arg&[1].r, -it.imm, 0)
+            } else {
+                add_im(si, it.arg&[0].r, it.arg&[1].r, it.imm, 0)
+            }
+        };
+        @case("and") => logical(it, 0b00);
+        @case("orr") => logical(it, 0b01);
+        @case("xor") => logical(it, 0b10);
+        @case("bic") => if it.mode == .Imm {
+            it.imm = it.imm.bit_not();
+            it.op = "and";
+            encode(it, reloc_out)
+        } else {
+            @bits(si, 0b00, 0b01010, 0b00, 0b1, @as(u5) it.arg&[2].r, 0b000000, @as(u5) it.arg&[1].r, @as(u5) it.arg&[0].r)
+        };
+        @case("stp") => load_or_store(it);
+        @case("str") => load_or_store(it);
+        @case("ldp") => load_or_store(it);
+        @case("ldr") => load_or_store(it);
+        @case("csinc") => {
+            cc := condition(it.label);
+            m, n, d := (@as(u5) it.arg&[2].r, @as(u5) it.arg&[1].r, @as(u5) it.arg&[0].r);
+            @bits(si, 0b00, 0b11010100, m, cc, 0b01, n, d)
+        }
+        @case("cmn") => {
+            @assert_eq(it.mode, .Imm, "TODO: cmp reg");
+            @assert(it.imm.bit_and(1.shift_left(12) - 1) == it.imm, "TODO: cmn big imm");
+            cmn_im(si, it.arg&[0].r, it.imm, 0)
+        };
+        @case("cmp") => {
+            @assert_eq(it.mode, .Imm, "TODO: cmp reg");
+            @assert(it.imm.bit_and(1.shift_left(12) - 1) == it.imm, "TODO: cmp big imm");
+            cmp_im(si, it.arg&[0].r, it.imm, 0)
+        };
+        @case("ret") => ret();
+        @case("svc") => {
+            @assert_eq(it.imm, 0, "TODO: svc immediate");
+            svc
+        };
+        @case("br") => br(it.arg&[0].r, 0);
+        @case("b") => if it.cond == "" {
+            reloc_out[] = (Some = (Dist = (scale = 4, label = it.label, width = 26, shift = 0)));
+            b(0, 0)
+        } else {
+            reloc_out[] = (Some = (Dist = (scale = 4, label = it.label, width = 19, shift = 5)));
+            cc := condition(it.cond);
+            b_cond(0, cc)
+        };
+        @default => @panic("TODO: %", it.op);
+    }
+}
+
+load_or_store :: fn(it: *Inst) u32 = {
+    si := @if("xp".contains(it.arg&[0].cls), Bits.X64, .W32);
+    sf := @if("d".contains(it.arg&[0].cls), FType.D64, .S32);
+    float := "sd".contains(it.arg&[0].cls);
+    inst := if it.op.ends_with("p") {
+        @assert_eq(it.mode, .Index, "TODO: stp");
+        if float {
+            words := it.imm / (@if(sf == .D64, 8, 4));
+            f_stp_so(sf, it.arg&[0].r, it.arg&[1].r, it.arg&[2].r, words)
+        } else {
+            words := it.imm / (@if(si == .X64, 8, 4));
+            stp_so(si, it.arg&[0].r, it.arg&[1].r, it.arg&[2].r, words)
+        }
+    } else {
+        @assert_eq(it.mode, .Index, "TODO: str");
+        @assert(!float, "TODO: str float");
+        @assert(it.imm >= 0, "TODO: str signed offset");
+        words := it.imm / (@if(si == .X64, 8, 4));
+        str_uo(si, it.arg&[0].r, it.arg&[1].r, words)
+    };
+    
+    if it.op.starts_with("l") {
+        inst = inst.bit_or(1.shift_left(22));
+    };
+    inst
+}
+
+logical :: fn(it: *Inst, hi: u2) u32 = {
+    w := "xp".contains(it.arg&[0].cls);
+    si := @if(w, Bits.X64, .W32);
+    if it.mode == .None {
+        @bits(si, hi, 0b01010, Shift.LSL, 0b0, @as(u5) it.arg&[2].r, 0b000000, @as(u5) it.arg&[1].r, @as(u5) it.arg&[0].r)
+    } else {
+        imm := encode_bitmask(it.imm, w)
+            || @panic("can't encode logical immediate %", fmt_hex(it.imm));
+        @bits(si, hi, 0b100100, @as(u13) imm, @as(u5) it.arg&[1].r, @as(u5) it.arg&[0].r)
+    }
+}
+
+sysreg :: fn(name: Str) Ty(u2, u3, u4, u4, u3) = {
+    @switch(name) {
+        @case("fpcr") => (0b11, 0b011, 0b0100, 0b0100, 0b000);
+        @case("fpsr") => (0b11, 0b011, 0b0100, 0b0100, 0b001);
+        @default => @panic("TODO: msr/mrs %", name);
+    }
+}
+
+condition :: fn(name: Str) Cond = {
+    @switch(name) {
+        @case("eq") => .EQ;
+        @case("ne") => .NE;
+        @default => @panic("TODO: cond %", name);
+    }
+}
+
+};
+
+// fmt junk for debugging
+
 fn display(self: *Asm, out: *List(u8)) void = {
     i := 0;
     for self.stmts { it |
@@ -335,7 +647,7 @@ fn display(self: *Asm, out: *List(u8)) void = {
 fn display(it: *Directive, out: *List(u8)) void = {
     ::tagged(@type it[]);
     @if_let(it) fn Label(it) => {
-        @fmt(out, "%:", it.name);
+        @fmt(out, "%:", it.label);
         return();
     };
     
@@ -355,6 +667,8 @@ fn display(it: *Inst, out: *List(u8)) void = {
         out.push(it.cls);
         @fmt(out, "% ", it.r);
     };
+    ::enum(@type it.mode);
+    @fmt(out, "%", it.mode);
 }
 
 Qbe :: import("@/backend/lib.fr").Qbe;

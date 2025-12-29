@@ -75,7 +75,7 @@ FixupType :: @tagged(
     //  local: b(l) to the address
     // import: b(l) to a trampoline which adrp,ldr,br from __got
     //         but currently its adrp,add,br to the address directly
-    Call,
+    Call: @struct(link := true),
     // all 
     //  local: rebase.
     //         It's a local symbol but since we want its absolute address in memory, we need the loader to add our base address.  
@@ -384,6 +384,10 @@ MultiArchAsm :: EnumMap(Arch, []u8);
 
 // :ThreadSafety we can't have both threads fucking with self.segments
 fn add_code_bytes(m: *QbeModule, name_id: Qbe.Sym, code: *MultiArchAsm) void = {
+    add_code_bytes(m, name_id, code, true);
+}
+
+fn add_code_bytes(m: *QbeModule, name_id: Qbe.Sym, code: *MultiArchAsm, want_marker: bool) void = {
     when_debug(m, .AddAsm, fn(out) => print_multi_asm(code, m.str(name_id), out));
 
     @if(enable_incremental())
@@ -396,6 +400,15 @@ fn add_code_bytes(m: *QbeModule, name_id: Qbe.Sym, code: *MultiArchAsm) void = {
     m.currently_emitting_function = true;
     
     bytes := code[m.goal.arch];
+    
+    ::enum(@type m.goal.arch);
+    ::enum(@type m.goal.type);
+    @if(m.goal.arch != .wasm32 || m.goal.type != .JitOnly)
+    when_debug(m, .Disassemble) { out |
+        @fmt(out, "# disassembly of '%' (% bytes)\n", m.str(name_id), bytes.len);
+        dis := m.goal.dis;
+        dis(out, bytes, m.goal.arch);
+    };
     
     code := m.segments&[.Code]&;
     
@@ -411,6 +424,9 @@ fn add_code_bytes(m: *QbeModule, name_id: Qbe.Sym, code: *MultiArchAsm) void = {
     
     dest := "";
     marker := function_start_marker(m.goal.arch);
+    if !want_marker {
+        marker = .None;
+    };
     with_write_protect m {
         if marker { i |
             // TODO: probably shouldn't this. it's kinda creepy. but it's convient to be able to check if something is a valid function pointer. 

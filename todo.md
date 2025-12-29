@@ -1,4 +1,6 @@
 
+- arm has ldr(base reg + shifted offset reg)
+  should match that in isel (good for indexing arrays)
 - less trash error message for missing `=>` in switch prong than
 ```
 panic! lib/macros.fr:381:55

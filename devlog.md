@@ -14,7 +14,14 @@
   - zeroing fp in callinstack changes whether "main" (from wrapwithruntimeinit) shows in FRANCA_BACKTRACE=1
   - a source of confusion is that franca programs use ^ instead of emitlinuxstart. 
   - im a bit concerned that i might be disagreeing about who owns where the stack points or something. 
-  
+- my arm assembler works well enough to do the hare tests. 
+  - the actual encoding part was fine. had trouble with the fixups. 
+    forgot add_code_bytes added bti and broke the offsets.
+  - pleasingly it takes the correct amount of time (so little you can't measure) 
+    to assemble all 100 instructions because that's nothing. 
+    so now i don't need the linker and can save 60ms of clang. 
+    more impressive for harec tests (had to clang 38 times, tho on smaller programs): 1057ms -> 468ms. 
+
 ## (Dec 28)
 
 these are the two extra that started failing on amd when i started using my c compiler. 
