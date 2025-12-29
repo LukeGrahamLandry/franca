@@ -151,7 +151,7 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
     };
 
     // TODO: bring back the ability to ask for direct syscalls on macos, just as a fun trick as long as they don't change the abi.
-    __libc_start_main :: fn(user: @FnPtr() Never, argc: i64, argv: *CStr, i: i64, f: i64, l: i64) i64 #weak #libc;
+    __libc_start_main :: fn(user: @FnPtr() Never, argc: i64, argv: *CStr, i: i64, f: i64, l: i64, s: i64) i64 #weak #libc;
     start := @as(rawptr) __libc_start_main;
     have_libc[] = !is_linux || !start.is_null();
     if query_current_arch() == .wasm32 {
@@ -171,11 +171,11 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
         impl3 :: fn() Never #no_trace = {
             thread := get_current_thread();
             c := thread.first_environment.cli_arguments;
-            __libc_start_main(impl2, c.len, c.ptr, 0, 0, 0);
+            __libc_start_main(impl2, c.len, c.ptr, 0, 0, 0, 0);
             unreachable()
         };
-    
-        call_in_stack(thread.stack.usable.end_pointer(), impl3);
+        // TODO: it's a concern that only the one that calls into libc needs extra padding to avoid junk addresses in the stack trace. 
+        call_in_stack(thread.stack.usable.end_pointer().offset(-32), impl3);
     };
     
     call_in_stack(thread.stack.usable.end_pointer(), impl2);
@@ -185,10 +185,13 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
     #use("@/backend/rv64/bits.fr");
     call_in_stack :: AsmFunction(fn(new_sp: *u8, callback: @FnPtr() Never) Never = (), @const_slice(
         add_im(.X64, sp, x0, @as(u12) 0, 0b0),
+        movz(.X64, fp, 0, .Left0),
         movz(.X64, lr, 0, .Left0),  // noreturn
         br(x1, 0b0),
     ), fn(out: *List(u8)) => @asm_x64(  // rdi, rsi, rdx
         encode_bin(PrimaryOp.MovReg, X86Reg.rsp, X86Reg.rdi),
+        encode_bin(PrimaryOp.XorReg, X86Reg.rbp, X86Reg.rbp),
+        // note: not the no-push jmp because need to leave sp.mod(16)=8
         encode_call_reg(ModrmMode.Direct, X86Reg.rsi),
     ) out, fn(out: *List(u8)) => out.push_all(@slice(
         0x00, // 0 locals
@@ -201,6 +204,7 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
         0x0B,  // end
     )), @const_slice(
         I(0, RvReg.A0.bits(), @as(u3) OpI.add, RvReg.SP.bits(), .op_imm),
+        I(0, RvReg.Zero.bits(), @as(u3) OpI.add, RvReg.FP.bits(), .op_imm),
         I(0, RvReg.RA.bits(), @as(u3) OpI.add, RvReg.Zero.bits(), .op_imm),  // noreturn
         jalr(.A1, 0, .Zero),
     ));

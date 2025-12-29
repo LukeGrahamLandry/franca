@@ -855,18 +855,19 @@ fn emit_linux_start(m: *Qbe.Module, main: Qbe.Sym, start: Qbe.Sym) void = {
 
     // (experimentally) I think only amd64 needs me to align sp myself 
     // but it doesn't hurt to do it for the others as well just for good luck. 
-    // TODO: set fp/lr to zero so backtraces can stop safely?
     code: MultiArchAsm = (data = ({
         #use(Arm);
         imm :: encode_bitmask(-16, true).unwrap();
         (@const_slice(
             add_im(.X64, x0, sp, 0, 0), 
+            movz(.X64, fp, 0, .Left0),
             // TODO: shouldn't need the @as(u5), the constants have a type annotation :CompilerBug
             @bits(Bits.X64, 0b00, 0b100100, @as(u13) imm, @as(u5) x0, @as(u5) sp),  // :SpEncoding
         )).interpret_as_bytes()
     }, { 
         #use(Amd);
         b := u8.list(temp());
+        b&.encode_bin(.XorReg, .rbp, .rbp);
         b&.encode_bin(.MovReg, .rdi, .rsp);
         b&.encode_extended_op(.Direct, 0x83, 4, .rsp);  // r/m64 AND imm8 (sign-extended)
         b&.push(@as(u8) 0 - 16);         // 16 aligned
@@ -876,6 +877,7 @@ fn emit_linux_start(m: *Qbe.Module, main: Qbe.Sym, start: Qbe.Sym) void = {
         #use("@/backend/rv64/bits.fr");
         (@const_slice(
             I(0, RvReg.SP.bits(), @as(u3) OpI.add, RvReg.A0.bits(), .op_imm),
+            I(0, RvReg.Zero.bits(), @as(u3) OpI.add, RvReg.FP.bits(), .op_imm),
             I(-16, RvReg.SP.bits(), @as(u3) OpI.and, RvReg.SP.bits(), .op_imm),
         )).interpret_as_bytes()
     },

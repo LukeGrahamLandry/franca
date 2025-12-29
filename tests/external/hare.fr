@@ -159,13 +159,15 @@ test_harec :: fn() void = {
         
         ssa := @slice((c.rt_ssa, "rt"), (c.testmod_ssa, "testmod"), (in.items(), it.name));
         m, sections := start_module(.Relocatable);
+        ctx := init_codegen_worker(m, false);
         for ssa { ssa, name |
-            load_ir_text(m, ssa, sections, name)
+            load_ir_text(ctx, ssa, sections, name)
                 .or(fn(msg) => {
                     msg := @tfmt("failed to backend %\n%", name, msg);
                     yield(false, list(u8, temp()), msg.assume_owned(temp()), "")
                 });
         };
+        ctx.join_codegen_thread();
         obj := end_module(m, sections);
 
         // TODO: have an option to make it patch_out_interp_header? 
@@ -203,13 +205,17 @@ start_module :: fn(t: Qbe.OutputPurpose) Ty(*Qbe.Module, *Sections) #inline /*se
     (m, sections&)
 }
 
-load_ir_text :: fn(m: *Qbe.Module, ssa: []u8, sections: *Sections, mangle_prefix: Str) Result(void, Str) = {
+// :ugly
+load_ir_text :: fn(shared: *Qbe.CodegenShared, ssa: []u8, sections: *Sections, mangle_prefix: Str) Result(void, Str) = {
     #use("@/backend/meta/parse.fr");
+    m := shared.m;
     self: QParseCtx = init(m, ssa);
-    mark := mark_temporary_storage();
     section: ?Section = .None;
-    loop {
-        reset_temporary_storage(mark);
+    result: ?Result(void, Str ) = .None;
+    while => result&.is_none() {
+    enter_task shared { e |
+        yield :: local_return;
+        loop {
         @match(self&.parse_one()) {
             fn Func(f) => {
                 section = .None;
@@ -219,8 +225,8 @@ load_ir_text :: fn(m: *Qbe.Module, ssa: []u8, sections: *Sections, mangle_prefix
                         mangle(m, it.sym&, mangle_prefix);
                     };
                 };
-                
-                Qbe'backend'compile_fn(f);
+                e.task = (Func = f);
+                yield();
             }
             fn Data(d) => {
                 continue :: local_return;
@@ -242,17 +248,29 @@ load_ir_text :: fn(m: *Qbe.Module, ssa: []u8, sections: *Sections, mangle_prefix
                     }
                 };
                 
-                Qbe'backend'compile_dat(m, d);
                 section = .None;
+                e.task = (AotVar2 = temp().alloc_init(Qbe.Dat2, 1, fn(_) => d));
+                yield();
             };
             fn Type() => ();
-            fn Err(msg) => return(Err = msg);
+            fn Err(msg) => {
+                result = (Some = (Err = msg));
+                e.task = (AotVar2 = empty());
+                yield();
+            }
             fn Section(s) => {
                 section = (Some = s);
             }
-            fn Eof() => return(.Ok);
+            fn Eof() => {
+                result = (Some = .Ok);
+                e.task = (AotVar2 = empty());
+                yield();
+            }
         };
+        }
     };
+    };
+    .Ok
 }
 
 // i don't support sections. 
@@ -324,10 +342,12 @@ fn mangle(m: *Qbe.Module, id: *Qbe.Sym, prefix: Str) void = {
 }
 
 // the "hare" repo has another rt implementation and modules with @test functions. 
+// :ugly
 test_hare :: fn(harec: Str, verbose: bool) void = {
     //root := fetch_git_commit("e787c6f74c69d89530d542580c747a11e605ff8d", "hare", "https://git.sr.ht/~sircmpwn/hare");
     root := fetch_or_crash("mirror.tar.gz", 997896, "17661d89d2a04e1c03551dcacf31284159cf7fe398159486fa4725d35775bf2c", "hare-e787c6f74c69d89530d542580c747a11e605ff8d");
     
+    start_time := timestamp();
     // TODO: respect HAREPATH
     modules, po := collect_ordered_deps(root);
     
@@ -348,25 +368,42 @@ test_hare :: fn(harec: Str, verbose: bool) void = {
     
     make_dirs_or_crash(@tfmt("%/.out", root));
     start_time := timestamp();
-    ssa := compile_to_ssa(modules, po, active_tags, harec, root);
-    @println("frontend: %ms", timestamp() - start_time);
-    
-    start_time := timestamp();
     m, sections := start_module(.Relocatable);
-    for po { i |
-        name := modules[i].name;
-        if verbose && ssa[i].len > 0 {
-            write_entire_file_or_crash(@tfmt("%/.out/%.ssa", root, i), ssa[i]);
-        };
-        
-        // :discard_static_scope throwing away QParseCtx.types each time is intentional
-        load_ir_text(m, ssa[i], sections, name)
-            .or(fn(msg) => @panic("failed to compile ssa: %\n%", name, msg));
+    send: TaskTube = (ring = m.forever&.borrow().alloc_zeroed(Ty(Str, Str), 4));
+    
+    Worker :: @struct {
+        m: *Qbe.Module;
+        sections: *Sections;
+        send: *TaskTube;
+        count: i64;
     };
+    thread := Worker.start_thread_data(@ref @as(Worker) (
+        m = m,
+        sections = sections, 
+        send = send&,
+        count = modules.len,
+    ), work);
+    compile_to_ssa(modules, po, active_tags, harec, root, send&);
+    
+    work :: fn(self: *Worker) void = {
+        ctx := init_codegen_worker(self.m, true);
+        while => self.count > 0 {
+            name, ssa := self.send.pop();
+            self.count -= 1;
+            
+            // :discard_static_scope throwing away QParseCtx.types each time is intentional
+            load_ir_text(ctx, ssa, self.sections, name)
+                .or(fn(msg) => @panic("failed to compile ssa: %\n%", name, msg));
+        };
+        ctx.join_codegen_thread();
+    };
+    
+    thread.join();
+    
     obj := end_module(m, sections);
     obj_o := @tfmt("%/.out/test.o", root);
     write_entire_file_or_crash(obj_o, obj);
-    @println("backend:  %ms", timestamp() - start_time);
+    @println("frontend+backend wall: %ms", timestamp() - start_time);
     
     asm_blob := @ref u8.list(temp());
     each modules { it |
@@ -390,39 +427,87 @@ test_hare :: fn(harec: Str, verbose: bool) void = {
     @assert(success || query_current_arch() != .x86_64);  // TODO
 }
 
-// TODO: paralellize
-fn compile_to_ssa(modules: []HareModule, po: []i64, active_tags: []Str, harec: Str, root: Str) []Str = {
-    td := Ty(Str, Str).list(temp());
-    ssa := temp().alloc_zeroed(Str, modules.len);
-    for po { i |
-        continue :: local_return;
+// SAFETY: don't reset(temp()) here because strings of ssa are passed to the other thread
+// 
+// it's a bit dumb that im just blocking on the first one. 
+// it might be a big thing at the end of a chain 
+// and the next thing could already be done and unblock a lot of new things. 
+// but im already getting more threads than i have p-cores. 
+// the problem isn't that it's not parallel, the problem is that it spends 60% of its time 
+// re-parsing the .td files every 128 times you exec it. 
+fn compile_to_ssa(modules: []HareModule, po: []i64, active_tags: []Str, harec: Str, root: Str, send: *TaskTube) void = {
+    #use("@/lib/sys/subprocess.fr");
+    
+    td, names, out_td := build_td(modules, root);
+    Task :: @struct(i: i64, p: RunningProcess);
+    work: RawDeque(Task) = init(temp(), 32);
+    err := u8.list(temp());
+    done := init_bitset(po.len);
+    started := init_bitset(po.len);
+    start(po[0]);
+    while => work&.pop_front() { it |
+        out := u8.list(temp());
+        status := poll_until_exit(it.p&, out&, err&, "");
+        if status != 0 {
+            @panic("failed to compile % (status %)\n%", names[it.i], status, err.items());
+        };
+        @if(err.len > 0) eprint(err.items());
+        err&.clear();
+        
+        ssa := out.items();
+        push(send, (names[it.i], ssa));
+        
+        // TODO
+        //if verbose && ssa.len > 0 {
+        //    write_entire_file_or_crash(@tfmt("%/.out/%.ssa", root, it.i), ssa[it.i]);
+        //};
+        
+        done&.bsset(it.i);
+        // start running any whose last dependency was this one. 
+        // silly to recheck everything every time but if you can't see it in the profile it doesn't matter. 
+        po_i := po.len - modules[it.i].id - 1;
+        for po.rest(po_i) { i |
+            break :: local_return;
+            for modules[i].use { j |
+                if !done&.bshas(j) {
+                    break();
+                };
+            };
+            
+            start(i);
+        };
+    };
+    
+    start :: fn(i: i64) void => {
+        break :: local_return;
+        @if(started&.bshas(i)) break();
+        started&.bsset(i);
         it := modules[i]&;
-        
-        @if(it.name == "") continue();
-        @assert(it.name.starts_with("/"));
-        name := it.name.rest(1);
-        
         hare := filter_tags(it.hare, active_tags);
         input := temp().alloc_init(Str, hare.len, fn(i) => @tfmt("%%", root, hare[i]));
-        
-        name := replace_slice(name, "", "/", "::");
-        @if(hare.len == 0) continue();
-        out_td := @tfmt("%/.out/%.td", root, i);
-        out := run((
+        if hare.len == 0 || it.name.len == 0 {
+            done&.bsset(i);
+            // need to send even when empty because the other side is counting to know when we're done. 
+            push(send, ("", ""));
+            break();
+        };
+        args := build_args((
             a = query_current_arch(), 
             input = input,
-            td = td.items(),  // TODO: inefficient to rebuild the env vars every time
-            N = (Some = name),
-            t = (Some = out_td),
+            td = td,  // TODO: inefficient to rebuild the env vars every time
+            N = (Some = names[i]),
+            t = (Some = out_td[i]),
             tests = true,
-        ), harec, temp())
-            .or(fn(err) => @panic("failed to compile %\n%", it.name, err.items()));
-        ssa[i] = out.items();
-        
-        // future modules may depend on this one
-        push(td&, (name, out_td));
+        ), harec); 
+        // TODO: don't use 'env'
+        args := make_args_for_exec("env", args, temp());
+        ::Result(RunningProcess, Str);
+        work&.push_back((
+            p = sys_capture_exec(args)
+                .or(fn(msg) => @panic("failed to spawn harec. %", msg)),
+            i = i, 
+        ), temp());
     };
-    ssa
 }
 
 HareModule :: @struct {
@@ -674,7 +759,40 @@ HareCmd :: @struct {
 td_to_env :: fn(it: Ty(Str, Str)) Str #inline = 
     @tfmt("HARE_TD_%=%", it._0, it._1);
 
+fn build_td(modules: []HareModule, root: Str) Ty([]Ty(Str, Str), []Str, []Str) = {
+    // future modules may depend on this one
+    // modules may only depend on ones compiled after themselves, 
+    // but it's fine to build the whole td env vars up front 
+    // because it only looks for ones you `use` in the program. 
+    td := Ty(Str, Str).list(temp());
+    names := temp().alloc_zeroed(Str, modules.len);
+    out_td := temp().alloc_zeroed(Str, modules.len);
+    enumerate modules& { i, it |
+        if it.name != "" {
+            @assert(it.name.starts_with("/"));
+            name := it.name.rest(1);
+            name := replace_slice(name, "", "/", "::");
+            names[i] = name;
+            out_td[i] = @tfmt("%/.out/%.td", root, i);
+            push(td&, (names[i], out_td[i]));
+        }
+    };
+    (td.items(), names, out_td)
+}
+
 fn run(cmd: HareCmd, bin: Str, a: Alloc) Result(List(u8), List(u8)) = {
+    args := build_args(cmd, bin);
+    // TODO: use execvpe instead of the env binary 🤡
+    ok, out, err := exec_and_catch("env", args, a);
+    if ok {
+        @if(err.len > 0) eprintln(err.items());
+        return(Ok = out);
+    };
+    @if(out.len > 0) eprintln(out.items());
+    (Err = err)
+}
+
+fn build_args(cmd: HareCmd, bin: Str) []Str = {
     args := Str.list(temp());
     for cmd.td { it |
         @debug_assert(!it._0.contains("="));
@@ -701,15 +819,7 @@ fn run(cmd: HareCmd, bin: Str, a: Alloc) Result(List(u8), List(u8)) = {
     for cmd.input { it |
         args&.push(it);
     };
-    
-    // TODO: use execvpe instead of the env binary 🤡
-    ok, out, err := exec_and_catch("env", args.items(), a);
-    if ok {
-        @if(err.len > 0) eprintln(err.items());
-        return(Ok = out);
-    };
-    @if(out.len > 0) eprintln(out.items());
-    (Err = err)
+    args.items()
 }
 
 fn to_harec_arch(a: Arch) Str = @match(a) {
@@ -725,3 +835,6 @@ sh :: hush;
 #use("@/lib/sys/fs.fr");
 Qbe :: import("@/backend/lib.fr").Qbe;
 #use("@/examples/testing.fr");
+#use("@/lib/sys/sync/qring.fr");
+#use("@/lib/sys/threads.fr");
+TaskTube :: Tube(Ty(Str, Str));

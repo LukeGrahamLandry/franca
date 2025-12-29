@@ -31,7 +31,6 @@ QParseCtx :: @struct(
     cursor := 0,
     f: *Qbe.Fn,
     line := 1,
-    out: Alloc,
     blk := Qbe.Blk.ptr_from_int(0),
     types: HashMap(Str, i64),
     m: *QbeModule,
@@ -40,12 +39,6 @@ QParseCtx :: @struct(
     allow_unterminated_block := false, // for comptime templates
 );
 
-// :ThreadSafety
-// this is not thread safe because QParseCtx.types uses QbeModule.forever. 
-// if you want to use this threaded change init() (but you can't use temp() unless you also reset_temporary_storage in this loop). 
-// but it doesn't really matter because if you care enough about performace to parse and compile on seperate threads, 
-// you will want to generate the ir in memory instead of uselessly writing out text and parsing it back again. 
-//
 fn parse_top_level(m: *QbeModule, src: Str, yield_data: @FnPtr(m: *Qbe.Module, d: Dat2) void, yield_func: @FnPtr(*Qbe.Fn) void) Result(void, Str) = {
     self: QParseCtx = init(m, src);
     
@@ -81,15 +74,16 @@ fn parse_one(self: *QParseCtx) Item = {
         return(Section = s);
     };
     
-        
         if self.eat("function") {
+            // note: init() not clear() so you can reset temp() in the outer loop
             self.blocks = init(temp());
             self.tmps = init(temp());
             self.f = temp().box_uninit(Qbe.Fn);
             self.f.default_init(m);
-            @debug_assert_eq(self.f.len_scratch(), 0);
             
             self.skip_lines();
+            self.f.start = temp().box_zeroed(Qbe.Blk);
+            self.blk = self.f.start;
             parse_header(self, export);
             if self.error.len != 0 {
                 @fmt(self.error&, " near line %", self.line);
@@ -173,8 +167,7 @@ fn init(m: *QbeModule, src: Str) QParseCtx = (
     error = list(temp()),
     replacements = list(temp()), // only need this for cls 
     f = Qbe.Fn.ptr_from_int(0),
-    out = temp(),
-    types = init(m.forever&.borrow()), // see :ThreadSafety comment above!
+    types = init(m.forever&.borrow()),
     m = m,
 );
 
@@ -285,7 +278,7 @@ fn parse_args(self: *QParseCtx, is_par: bool) void = {
                     if is_par {
                         self.f.vararg = true;
                     } else {
-                        self.f.emit(.argv, .Kw, QbeNull, QbeNull, QbeNull);
+                        self.emit(.argv, .Kw, QbeNull, QbeNull, QbeNull);
                     };
                     self.eat(",");
                     continue();
@@ -321,13 +314,13 @@ fn parse_args(self: *QParseCtx, is_par: bool) void = {
         self.eat(",");
         if is_par {
             self.f.get_temporary(variable)[].cls = k;  // :PatchCls TODO?
-            self.f.emit(o, k, variable, type, QbeNull);
+            self.emit(o, k, variable, type, QbeNull);
         } else {
             if type == QbeNull {
                 type = variable;
                 variable = QbeNull;
             };
-            self.f.emit(o, k, QbeNull, type, variable);
+            self.emit(o, k, QbeNull, type, variable);
         };
     };
     
@@ -359,9 +352,7 @@ fn parse_line(self: *QParseCtx) bool = {
     };
     
     while => self.parse_blk() { blk | 
-        if self.f.nblk == 0 {
-            self.f.start = blk;
-        } else {
+        if self.f.nblk != 0 {
             self.end_block(Some = blk);
         };
         self.blk = blk;
@@ -408,7 +399,6 @@ fn end_block(self: *QParseCtx, new_blk: ?*Qbe.Blk) void = {
     if new_blk { bb | 
         self.blk.link = bb;  // direction matters!
     };
-    self.f.copy_instructions_from_scratch_reversed_which_means_forwards(self.blk);
     self.blk = Qbe.Blk.ptr_from_int(0);
 }
 
@@ -451,9 +441,9 @@ fn parse_inst(self: *QParseCtx) void = {
             arg1 := self.parse_ref();
             self.eat(",");
             arg2 := self.parse_ref();
-            self.f.emit(.blit0, .Kw, QbeNull, arg0, arg1);
+            self.emit(.blit0, .Kw, QbeNull, arg0, arg1);
             if self.f.get_int(arg2) { size |
-                self.f.emit(.blit1, .Kw, QbeNull, INT(size), QbeNull);
+                self.emit(.blit1, .Kw, QbeNull, INT(size), QbeNull);
             } else {
                 @fmt(self.error&, "blit third argument must be interger literal");  
             };
@@ -509,7 +499,7 @@ fn parse_inst(self: *QParseCtx) void = {
             };
             arg1 = return_type_for_call;
         };
-        self.f.emit(o, k, to, arg0, arg1);
+        self.emit(o, k, to, arg0, arg1);
         return();
     };
     
@@ -585,7 +575,7 @@ fn parse_switch(self: *QParseCtx) void = {
 
 fn parse_phi(self: *QParseCtx, to: Qbe.Ref, k: u8) void = {
     // example: `%s  =w phi @start 0, @loop %s1`
-    phi := self.out.box_zeroed(Qbe.Phi);
+    phi := temp().box_zeroed(Qbe.Phi);
     phi.arg = new(0);
     phi.blk = new(0);
     phi.to = to;
@@ -758,7 +748,7 @@ fn parse_blk(self: *QParseCtx) ?*Qbe.Blk = {
         return(Some = b);
     };
     // TODO: check that all referenced blocks get defined.
-    b := self.out.box_zeroed(Qbe.Blk);
+    b := @if(self.f.nblk == 0, self.f.start, temp().box_zeroed(Qbe.Blk));
     b.name = name; 
     self.blocks&.insert(name, b);
     (Some = b)
@@ -1173,15 +1163,19 @@ fn eat_quoted_word(self: ~QParseCtx) Str #where = {
     }
 }
 
+// not using self.f.emit so this doesn't use m.scratch and is thread safe. 
+fn emit(self: *QParseCtx, o: Qbe.O, k: Qbe.Cls, r: Qbe.Ref, a: Qbe.Ref, b: Qbe.Ref) void = 
+    self.blk.push(o, k, r, a, b);
+
 fn where_am_i(self: *QParseCtx) void = {
     @fmt(self.error&, "\n");
-    if self.f.len_scratch() > 0 {
-        @fmt(self.error&, "after (");
-        i := self.f.scratch_next();
-        printins(self.f, i, self.error&);
-        @fmt(self.error&, "), ");
-    };
     if !self.blk.is_null() {
+        if self.blk.ins.len > 0 {
+            @fmt(self.error&, "after (");
+            i := self.blk.ins.index(self.blk.ins.len - 1);
+            printins(self.f, i, self.error&);
+            @fmt(self.error&, "), ");
+        };
         @fmt(self.error&, "in block @%, ", self.blk.name());
     };
     ::ptr_utils(Qbe.Fn);

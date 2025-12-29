@@ -1,4 +1,20 @@
 
+## (Dec 29)
+
+- run harec in parallel when modules don't depend on each other. 
+  - frontend time: before = 2836ms, after = 928ms.  
+  - which is good enough because that makes it less than the backend time (1539ms). 
+    so stick that on another thread and now the whole operation is down to 1914ms. 
+    - don't love that its not the speed of the slowest part. getting into the shitty cores perhaps. 
+  - made backend/meta/parse.fr thread safe. 1750ms.
+  - oh also im always running it directly so the backend is compiled with debug assertions. 
+    aot with -unsafe it's 1460ms which is a bit more respectable. 
+- add some padding to the stack when francaruntimeinit calls libcstartmain.
+  fixes the random junk addresses on the side of flamegraph in samply. 
+  - zeroing fp in callinstack changes whether "main" (from wrapwithruntimeinit) shows in FRANCA_BACKTRACE=1
+  - a source of confusion is that franca programs use ^ instead of emitlinuxstart. 
+  - im a bit concerned that i might be disagreeing about who owns where the stack points or something. 
+  
 ## (Dec 28)
 
 these are the two extra that started failing on amd when i started using my c compiler. 
@@ -32,6 +48,11 @@ i was going to use tcc as the assembler but they don't have an arm64 one,
 and also maybe that's silly, there's actually very little of it. 
 for arm at least they only use like 20 unique instructions. 
 i could just write my own. 
+
+tried https://github.com/Gankra/abi-cafe with import_c, 
+only found the problem i already know about (apple-arm more than 8 u8/u16) 
+which is reassuring but useless. tho to be fair, i didn't know about that problem  
+for 6 months so it would have been helpful if i had tried it any time before this week. 
 
 ## (Dec 26)
 
