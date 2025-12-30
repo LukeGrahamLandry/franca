@@ -1,4 +1,8 @@
 
+- things i broke when making @enum and @tagged auto derive
+  - // :TodoLostTypeName 
+  - // HACK: @rec
+- more tests: https://harelang.org/documentation/extlib.html, https://harelang.org/project-library/
 - arm has ldr(base reg + shifted offset reg)
   should match that in isel (good for indexing arrays)
 - less trash error message for missing `=>` in switch prong than

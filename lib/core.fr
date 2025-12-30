@@ -14,7 +14,6 @@ f32 :: intern_type(.F32);
 :: bootstrap_compiler_environment_post();
 
 // :blessed:
-// Code behind the @late macro is only enabled after this function runs. 
 // Non-builtin_prefix_macro macros cannot be expanded before this function runs, 
 // because the compiler doesn't have the type 'FatExpr', so it can't resolve the overload.
 fn bootstrap_compiler_environment_pre() void = {
@@ -28,17 +27,32 @@ fn bootstrap_compiler_environment_pre() void = {
     env.unquote_placeholders = (Some = q);
     env.c_str_type = CStr;
     
-    // you have to do tagged TypeInfo before you enable @late code. 
-    // but now since these are all compiled in one block, it instantiates the const arg functions first regardless of lexical order, so its fine. 
-    tagged(TypeInfo); 
-    tagged(Expr);
-    tagged(Stmt);
-    tagged(LazyType);
-    tagged(Name);
-}
+    // once the normal @enum/@tagged are compiled this is done automatically. 
+    // need to do it manually for the types that are needed early using builtin_macro. 
+
+    T :: tagged_derive;
+    T(TypeInfo); 
+    T(Expr);
+    T(Stmt);
+    T(LazyType);
+    T(Name);
+    T(?Var);
+    T(?Type);
+    T(?LabelId);
+    T(?FuncId);
+    T(?OverloadSet);
+    T(?Symbol);
+    T(?i64);
+    T(FuncImpl);
+    T(Values);
+    E :: enum_derive;
+    E(Os);
+    E(Arch);
+    E(PlaceholderValue);
+    E(VarType);
+};
 
 fn bootstrap_compiler_environment_post() void = {
-    // :link_rename
     env := get_comptime_environment(); // TODO: this can just be a thing on the comptime context but it starts to get a bit circular...
     env.compile_error_pointer = (Some = *CompileError);
     env.os_type = (Some = Os);
@@ -77,9 +91,28 @@ SLOW_ARENA_CANARY :: false && !IS_BOOTSTRAPPING;
 SLOW_LEAK_ARENAS :: false; 
 TODOWASM :: true && !IS_BOOTSTRAPPING;
 
+// TODO: clean this up. 
+//       it point is to wrap the @tagged and @enum provided by the compiler 
+//       with the something that derives eq, is, tag, etc.
+
+fn enum(T: Type) void = ();
+fn tagged(Tagged: Type) void = ();
+
+fn enum(a: FatExpr, b: FatExpr) FatExpr #macro #outputs(Type) = @{
+    X :: @[import("@/lib/scope_hack.fr")'enum(a, b)];
+    ::enum_derive(X);
+    X
+};
+
+fn tagged(a: FatExpr) FatExpr #macro #outputs(Type) = @{
+    X :: @[import("@/lib/scope_hack.fr")'tagged(a)];
+    ::tagged_derive(X);
+    X
+};
+
 // TODO: these are still somewhat order dependent because of `:: expr;`.
 //       should go through and make sure everything weird is pulled up into bootstrap_compiler_environment. 
-#include_std("compiler");
+#use("@/lib/scope_hack.fr");
 #include_std("lib/driver_api.fr");
 #include_std("lib/sugar.fr");
 #include_std("lib/math.fr");
