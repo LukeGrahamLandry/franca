@@ -513,7 +513,6 @@ different subsets of the same resources.
 - import_wasm working in wasm would be cute. 
   - dont reserve giant virtual memory
   - don't depend on libc (import_wasm/run.fr/Exports for the .ssa tests)
-- syscall wrappers support wasip1
 - stack traces
 - make the wasmtime version work
 - add a .ssa test that tests dynalloc with a deeper callstack
@@ -1444,7 +1443,6 @@ StbTrueType :: include { C |
 
 ##
 
-- Wasip1Libc
 - things that should be cleaned up next time i :UpdateBoot
   - AbiHackSpan
   - `@rec` in backend/ir.fr and wasm/instructions:Wasm

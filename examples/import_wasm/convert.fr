@@ -54,7 +54,6 @@ fn load(m: *Qbe.Module, w: *WasmModule, a: Alloc) Loaded = {
             global := w.globals.index(local_i);
             value, k := const_eval_wasm_expr(global.init_expr.items());
             global_cls[w.import_count&[.Global] + local_i] = k;
-            ::enum(@type k);  // TODO: fragile ordering with FRANCA_MORE_CACHE=1
             @debug_assert_eq(k, global.type.cls());
             (i64 = value)
         },
@@ -119,7 +118,6 @@ fn declare_functions(m: *Qbe.Module, w: *WasmModule, a: Alloc) Ty([]Qbe.Sym, []W
     
     // actually, if it's an export it's nicer to use the real names. TODO: same thing for globals
     each w.exports& { it |
-        ::enum(@type it.type);
         if it.type == .Func && it.id.zext() >= w.import_count&[.Func] {
             id := m.intern(it.name.items());
             ids[it.id.zext()] = id;
@@ -132,7 +130,6 @@ fn declare_functions(m: *Qbe.Module, w: *WasmModule, a: Alloc) Ty([]Qbe.Sym, []W
 
 fn const_eval_wasm_expr(expr: []u8) Ty(i64, Qbe.Cls) = {
     o := @as(Wasm.Inst) expr[0];
-    ::enum(Wasm.Inst);
     @assert(@is(o, .I32_Const, .I64_Const), "TODO: complex expr");
     v, _, ok := read_leb128_signed(expr.rest(1));
     @debug_assert(ok, "bad constant expression");
@@ -233,7 +230,6 @@ fn translate_func(self: *LoadWasm, code: *Wasm.Func, signature: *Wasm.FuncType) 
     self.emit_the_code();
     
     // implicit fallthrough return at the end of the function. 
-    ::enum(Qbe.J);
     @if(self.get_blk()[].jmp.type == .Jxxx)
     if self.stack.len >= self.return_types.len {
         self.emit_return();
@@ -259,9 +255,7 @@ fn emit_the_code(self: *LoadWasm) void = {
         b := self.src[self.cursor];
         self.cursor += 1;
         inst := @as(Wasm.Inst) b;
-        ::enum(Wasm.Inst);
         
-        ::enum(Qbe.J);
         if self.get_blk()[].jmp.type != .Jxxx && !@is(inst, .End, .Unreachable, .Nop) {
             // the block has unreachable code
             self.cursor -= 1;
@@ -275,13 +269,11 @@ fn emit_the_code(self: *LoadWasm) void = {
             encoding = (kind = .unary, op = .extsw, cls = .Kl);
         };
         
-        ::enum(@type encoding.kind);
         if encoding.kind != .other {
             a0, a1, r := (QbeNull, QbeNull, QbeNull);
             @match(encoding.kind) {
                 fn other() => unreachable();
                 fn unary() => {
-                    ::enum(Qbe.O);
                     if encoding.op == .truncl {
                         encoding.op = .copy;
                     };
@@ -519,7 +511,6 @@ fn choose_runtime_call(self: *LoadWasm, start: i64) void = {
     i := 0;
     for it.match { it |
         continue :: local_return;
-        ::enum(InstSeq.Arg);
         @if_let(it) fn int(it) => {
             var := @match(it) {
                 fn memory() => {
@@ -619,7 +610,6 @@ fn collect_runtime_calls() []InstSeq #fold = @run {
         args := func.annotations[i].args&.items();
         insts := InstSeq.Inst.list(args.len, ast_alloc());
         const_args := 1 /*base_pointer*/;
-        ::enum(InstSeq.Arg);
         each args { it |
             if it.expr&.is(.ContextualField) {
                 it[] = @{ @as(InstSeq.Arg) @[it[]] };
@@ -757,7 +747,7 @@ fn get_blk(self: *LoadWasm) *Qbe.Blk =
 
 fn push_block(self: *LoadWasm, block_type: i64, loop: bool) void = {
     arg, ret := self.decode_block_type(block_type);
-    ::enum(Wasm.ValType);  ::DerefEq(Wasm.ValType);
+    ::DerefEq(Wasm.ValType);
     
     old := self.blocks[self.blocks.len - 1]&;
     new := self.link_new_block();
@@ -837,7 +827,6 @@ fn local_inst(self: *LoadWasm, delta: i64) void = {
 }
 
 fn emit_return(self: *LoadWasm) void = {
-    ::enum(Qbe.Cls);
     @debug_assert(self.get_blk()[].jmp.type == .Jxxx, "tried to return from terminated block");
     @switch(self.return_types.len) {
         @case(0) => {

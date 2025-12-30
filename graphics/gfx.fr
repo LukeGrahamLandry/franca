@@ -537,13 +537,11 @@ fn _sg_pass_action_defaults(action: *PassAction) PassAction = {
     res := action[];
     range(0, SG_MAX_COLOR_ATTACHMENTS) { i |
         it := res.colors&[i]&;
-        ::enum(@type it.load_action);
         if (it.load_action == .DEFAULT) {
             it.load_action = .CLEAR;
             // random colour chosen by fair die roll
             it.clear_value = (r = 0.5, g = 0.5, b = 0.5, a = 1.0);
         }
-        ::enum(@type it.store_action);
         if (it.store_action == .DEFAULT) {
             it.store_action = .STORE;
         }
@@ -718,7 +716,6 @@ fn validate(sg: *Self, desc: *Buffer.Desc) bool = @validate(sg) {
         @V(desc.data.ptr.is_null(), VALIDATE_BUFFERDESC_EXPECT_NO_DATA);
         @V(desc.data.len == 0, VALIDATE_BUFFERDESC_EXPECT_ZERO_DATA_SIZE);
     };
-    ::enum(@type desc.type);
     if (desc.type == .STORAGEBUFFER) {
         @V(sg.features.compute, VALIDATE_BUFFERDESC_STORAGEBUFFER_SUPPORTED);
         @V(_sg_multiple_u64(desc.size, 4), VALIDATE_BUFFERDESC_STORAGEBUFFER_SIZE_MULTIPLE_4);
@@ -1060,7 +1057,6 @@ fn validate(sg: *Self, desc: *Pipeline.Desc) bool = @validate(sg) {
                 }
                 @V(attrs_cont, VALIDATE_PIPELINEDESC_NO_CONT_ATTRS);
                 @debug_assert(a_state.buffer_index < SG_MAX_VERTEXBUFFER_BINDSLOTS);
-                ::enum(ShaderAttrBaseType);
                 // vertex format must match expected shader attribute base type (if provided)
                 if (shd.cmn.attrs&[attr_index].base_type != .Undefined) {
                     if (vertexformat_basetype(a_state.format) != shd.cmn.attrs&[attr_index].base_type) {
@@ -1088,8 +1084,6 @@ fn validate(sg: *Self, desc: *Pipeline.Desc) bool = @validate(sg) {
     }
     range(0, intcast desc.color_count) { color_index |
         bs := desc.colors&[color_index].blend;
-        ::enum(@type bs.op_rgb);
-        ::enum(@type bs.src_factor_rgb);
         if ((bs.op_rgb == .MIN) || (bs.op_rgb == .MAX)) {
             @V((bs.src_factor_rgb == .ONE) && (bs.dst_factor_rgb == .ONE), VALIDATE_PIPELINEDESC_BLENDOP_MINMAX_REQUIRES_BLENDFACTOR_ONE);
         }
@@ -1349,7 +1343,6 @@ fn validate_apply_bindings(sg: *Self, bindings: *Bindings) bool = @validate(sg) 
                 // buffers in vertex-buffer-slots must be of type SG_BUFFERTYPE_VERTEXBUFFER
                 if sg.lookup(bindings.vertex_buffers&[i]) { buf |
                     if buf.slot.state == .VALID {
-                        ::enum(@type buf.cmn.type);
                         @V(buf.cmn.type == .VERTEXBUFFER, VALIDATE_ABND_VB_TYPE);
                         @V(!buf.cmn.append_overflow, VALIDATE_ABND_VB_OVERFLOW);
                     }
@@ -1394,7 +1387,6 @@ fn validate_apply_bindings(sg: *Self, bindings: *Bindings) bool = @validate(sg) 
                 continue()
             };
             if(img.slot.state != .VALID, => continue());
-            ::enum(@type img.cmn.type);
             @V(img.cmn.type == shd.cmn.images&[i].image_type, VALIDATE_ABND_IMAGE_TYPE_MISMATCH);
             if (!sg.features.msaa_image_bindings) {
                 @V(img.cmn.sample_count == 1, VALIDATE_ABND_IMAGE_MSAA);
@@ -1403,7 +1395,6 @@ fn validate_apply_bindings(sg: *Self, bindings: *Bindings) bool = @validate(sg) 
                 @V(img.cmn.sample_count > 1, VALIDATE_ABND_EXPECTED_MULTISAMPLED_IMAGE);
             }
             info := sg.formats&[img.cmn.pixel_format]&;
-            ::enum(ImageSampleType);
             @match(shd.cmn.images&[i].sample_type) {
                 fn FLOAT() => @V(info[.filter], VALIDATE_ABND_EXPECTED_FILTERABLE_IMAGE);
                 fn DEPTH() => @V(info[.depth], VALIDATE_ABND_EXPECTED_DEPTH_IMAGE);
@@ -1421,9 +1412,6 @@ fn validate_apply_bindings(sg: *Self, bindings: *Bindings) bool = @validate(sg) 
                 @V(false, VALIDATE_ABND_SMP_EXISTS);
                 continue()
             };
-            ::enum(SamplerType);
-            ::enum(CompareFunc);
-            ::enum(Filter);
             if (shd.cmn.samplers&[i].sampler_type == .COMPARISON) {
                 @V(smp.cmn.compare != .NEVER, VALIDATE_ABND_UNEXPECTED_SAMPLER_COMPARE_NEVER);
             } else {
@@ -1448,7 +1436,6 @@ fn validate_apply_bindings(sg: *Self, bindings: *Bindings) bool = @validate(sg) 
             @V(sbuf.cmn.type == .STORAGEBUFFER, VALIDATE_ABND_STORAGEBUFFER_BINDING_BUFFERTYPE);
             // read/write bindings are only allowed for immutable buffers
             if (!shd.cmn.storage_buffers&[i].readonly) {
-                ::enum(Usage);
                 @V(sbuf.cmn.usage == .IMMUTABLE, VALIDATE_ABND_STORAGEBUFFER_READWRITE_IMMUTABLE);
             }
         }
@@ -1488,7 +1475,6 @@ fn _sg_validate_dispatch(sg: *Self, num_groups_x: i32, num_groups_y: i32, num_gr
 
 fn validate_update_buffer(sg: *Self, buf: *Buffer.T, data: []u8) bool = @validate(sg) {
     @debug_assert(!data.ptr.is_null());
-    ::enum(@type buf.cmn.usage);
     @V(buf.cmn.usage != .IMMUTABLE, VALIDATE_UPDATEBUF_USAGE);
     @V(buf.cmn.size.intcast() >= data.len, VALIDATE_UPDATEBUF_SIZE);
     @V(buf.cmn.update_frame_index != sg.frame_index, VALIDATE_UPDATEBUF_ONCE);
@@ -1561,7 +1547,6 @@ fn desc_defaults(_: *Self, desc: *Shader.Desc) Shader.Desc = {
             ub_desc.layout = _sg_def(ub_desc.layout, .NATIVE);
             rangeb(0, SG_MAX_UNIFORMBLOCK_MEMBERS) { u_index, $break |
                 u_desc := ub_desc.glsl_uniforms&[u_index]&;
-                ::enum(@type u_desc.type);
                 if (u_desc.type == .INVALID) {
                     break();
                 }
@@ -1606,7 +1591,6 @@ fn desc_defaults(sg: *Self, desc: *Pipeline.Desc) Pipeline.Desc = {
     def.stencil.back.depth_fail_op = _sg_def(def.common.stencil.back.depth_fail_op, .KEEP);
     def.stencil.back.pass_op = _sg_def(def.common.stencil.back.pass_op, .KEEP);
 
-    ::enum(@type def.common.depth.compare);
     def.depth.compare = _sg_def(def.common.depth.compare, .ALWAYS);
     def.depth.pixel_format = _sg_def(def.common.depth.pixel_format, sg.desc.environment.defaults.depth_format);
     if (def.colors&[0].pixel_format == .NONE) {
@@ -1625,7 +1609,6 @@ fn desc_defaults(sg: *Self, desc: *Pipeline.Desc) Pipeline.Desc = {
         bs := def.colors&[i].blend&;
         bs.op_rgb = _sg_def(bs.op_rgb, .ADD);
         bs.src_factor_rgb = _sg_def(bs.src_factor_rgb, .ONE);
-        ::enum(@type bs.op_rgb);
         if ((bs.op_rgb == .MIN) || (bs.op_rgb == .MAX)) {
             bs.dst_factor_rgb = _sg_def(bs.dst_factor_rgb, .ONE);
         } else {
@@ -1717,7 +1700,7 @@ Shader :: Resource(.Shader, ShaderDesc, ShaderCommon, Backend.Shader);  // verte
 Pipeline :: Resource(.Pipeline, PipelineDesc, PipelineCommon, Backend.Pipeline);  // associated shader and vertex-layouts, and render states
 Attachments :: Resource(.Attachments, AttachmentsDesc, AttachmentsCommon, Backend.Attachments);  // a baked collection of render pass attachment images
 
-PoolType :: { X :: @enum(u8) (Buffer, Image, Sampler, Shader, Pipeline, Attachments); enum(X); X };
+PoolType :: { X :: @enum(u8) (Buffer, Image, Sampler, Shader, Pipeline, Attachments); X };
 
 DynPool :: @struct {
     size: i32;
@@ -1766,7 +1749,6 @@ fn Resource($_Tag: PoolType, $_Desc: Type, $_Common: Type, $_Impl: Type) Type = 
         id: I = sg.alloc();
         if id.id != Sg.INVALID_ID {
             it := sg.at(id);
-            ::enum(@type it.slot.state);
             @debug_assert(it.slot.state == .ALLOC);
             it.slot.state = sg.init(it, desc_def&);
             @debug_assert(@is(it.slot.state, .VALID, .FAILED));
@@ -2110,7 +2092,6 @@ fn apply_pipeline(sg: *Self, pip_id: Pipeline) void #trace(.tail) = {
     sg.cur_pipeline = pip_id;
     pip := sg.lookup(pip_id) || @panic("tried to apply invalid pipeline");
 
-    ::enum(@type pip.slot.state);
     sg.next_draw_valid = pip.slot.state == .VALID;
     if(!sg.next_draw_valid, => return());
 
@@ -2164,7 +2145,6 @@ fn apply_bindings(sg: *Self, bindings: *Bindings) void = {
                 ::?*Buffer.T;
                 bnd.vbs&[i] = sg.lookup(bindings.vertex_buffers&[i]) || panic("invalid vertex bind");
                 bnd.vb_offsets&[i] = bindings.vertex_buffer_offsets&[i];
-                ::enum(ResourceState);
                 check(bnd.vbs&[i].slot.state == .VALID);
                 check(!bnd.vbs&[i].cmn.append_overflow);
             };
@@ -2176,7 +2156,6 @@ fn apply_bindings(sg: *Self, bindings: *Bindings) void = {
             check(!bnd.ib.cmn.append_overflow);
         }
     }
-    ::enum(@type shd.cmn.images&[0].stage);
     range(0, SG_MAX_IMAGE_BINDSLOTS) { i |
         if shd.cmn.images&[i].stage != .NONE {
             bnd.imgs&[i] = sg.lookup(bindings.images&[i]) || panic("invalid image bind");
@@ -2370,7 +2349,6 @@ fn map_enum(key: FatExpr, cases: FatExpr) FatExpr #macro = {
         name := b.ident().unwrap();
         for fields { it |
             if it._0 == name {
-                ::tagged(@type it._1); 
                 @debug_assert(it._1&.is(.Small));
                 push(branches&, (it._1.Small._0, b.default));
                 continue();

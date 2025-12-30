@@ -167,7 +167,6 @@ fn find_library(m: *QbeModule, name: Str) ?u32 = {
 }
 
 fn make_exec(self: *QbeModule) void = {
-    ::enum(Arch); ::enum(@type self.goal.type);
     @debug_assert_eq(self.goal.arch, query_current_arch());
     @debug_assert_eq(self.goal.type, .JitOnly);
     if self.goal.expecting_wx {
@@ -227,13 +226,11 @@ fn get_addr(self: *QbeModule, name: Str) ?rawptr = {
 }
 
 fn get_addr(self: *QbeModule, symbol: *SymbolInfo) ?Ty(rawptr, i64) = {
-    ::enum(SymbolKind);
     (Some = (symbol.jit_addr, symbol.size.zext()))
 }
 
 // TODO: add_asm functions don't go through this currently but they should
 fn maybe_add_export(self: *QbeModule, id: Qbe.Sym, export: bool) void = if export {
-    ::enum(@type self.goal.type);
     if (self.goal.arch == .wasm32 || @is(self.goal.type, .Relocatable, .Dynamic)) {
         self.exports&.push(id);
     };
@@ -263,7 +260,6 @@ Dat2 :: @struct {
 // The memory in `dat` is not needed after this call, caller can free it. 
 fn emit_data(self: *QbeModule, dat: Dat2) void = {
     @debug_assert(!self.fixups_locked, "you cannot add more data after emitting for aot");
-    ::tagged(@type dat.template);
    
     when_debug(self, .Data) { out |
         print_data(self, dat&, out);
@@ -285,7 +281,6 @@ fn emit_data(self: *QbeModule, dat: Dat2) void = {
         // TODO: i want to remvoe this limitation so you can use this function
         //       to materialize things made by import_c or meta/parse. 
         //@debug_assert_ne(self.goal.type, .JitOnly, "TODO: the franca compiler doens't do this because the data's already in the comptime address space\nat the very least you need to mmap something for ZeroInitData before you can turn this on.");
-        ::enum(@type self.goal.type);
         if self.goal.type == .JitOnly || self.goal.arch == .wasm32 {
             @debug_assert_ne(dat.seg, .ZeroInitData, "no allocation for jitted/wasm bss");
         } else {
@@ -343,7 +338,6 @@ fn emit_data(self: *QbeModule, dat: Dat2) void = {
             } else {
                 ptr[] = 0;
             };
-            ::enum(@type symbol.kind);
             // Since we need the absolute address in memory, even local symbols need a relocation. 
             push_fixup(self, symbol, (patch_at = (i64 = ptr), type = (DataAbsolute = (increment = r.addend))));
             @if(symbol.kind == .Local)
@@ -360,8 +354,6 @@ fn assert_sequential(m: *Qbe.Module, id: []Qbe.Sym) void = {
     range(0, id.len - 1) { i |
         use_symbol(m, id[i]) { l |
             use_symbol(m, id[i + 1]) { r |
-                ::enum(@type r.kind);
-                ::enum(@type m.goal.type);
                 @assert(true
                     && r.kind == .Local
                     && l.kind == .Local
@@ -401,8 +393,6 @@ fn add_code_bytes(m: *QbeModule, name_id: Qbe.Sym, code: *MultiArchAsm, want_mar
     
     bytes := code[m.goal.arch];
     
-    ::enum(@type m.goal.arch);
-    ::enum(@type m.goal.type);
     @if(m.goal.arch != .wasm32 || m.goal.type != .JitOnly)
     when_debug(m, .Disassemble) { out |
         @fmt(out, "# disassembly of '%' (% bytes)\n", m.str(name_id), bytes.len);
@@ -533,7 +523,6 @@ fn finish_function(m: *QbeModule, dest: []u8, name_id: Qbe.Sym) void #inline = {
         m.local_needs_reloc&.push(name_id);
     };
     
-    ::enum(@type m.goal.type);
     if m.goal.expecting_wx && m.goal.type == .JitOnly && m.goal.arch == .aarch64 {
         // :SLOW this is done redundantly in emit_fn
         clear_instruction_cache(u8.raw_from_ptr(dest.ptr), dest.len);
@@ -590,7 +579,6 @@ fn for_symbols(m: *QbeModule, $body: @Fn(id: Qbe.Sym, s: *SymbolInfo) void) void
 fn do_jit_fixups(self: *QbeModule, id: Qbe.Sym, segment: SegmentType, final_offset: i64) void = {
     use_symbol(self, id) { symbol | 
         break :: local_return;
-        ::enum(@type symbol.kind);
         inbounds := segment == .ZeroInitData || (final_offset >= 0 && final_offset < self.segments&[segment].mmapped.len);
         @debug_assert(inbounds, "thats not in the segment $% = %[%]", symbol.name, segment, final_offset);
         @debug_assert(int_from_ptr(@type symbol[], symbol) != 0, "fixups for a null symbol! (forgot to set Fn.lnk.id?)"); // only catches it if you haven't had something hash to 0 yet. 
@@ -619,13 +607,11 @@ fn do_jit_fixups(self: *QbeModule, id: Qbe.Sym, segment: SegmentType, final_offs
         // Since it's a local symbol, we don't care about the relocations anymore. The linker never needs to know. 
         // TODO: actually thats also true for imports becuase calls go through __got. 
         // TODO: for jitonly you do need to keep __got for weak. 
-        ::tagged(@type fixups[0].type);
         unordered_retain(fixups, fn(it) => it.type&.is(.DataAbsolute));
     };
 }
 
 fn do_fixups(self: *QbeModule, symbol: *SymbolInfo) void = {
-    ::tagged(FixupType);
     with_write_protect self { 
         do_fixups_impl(self, symbol);
     };
@@ -633,7 +619,6 @@ fn do_fixups(self: *QbeModule, symbol: *SymbolInfo) void = {
 
 fn do_fixups_impl(self: *QbeModule, symbol: *SymbolInfo) void = {
     @debug_assert(!self.fixups_locked, "you cannot add more fixups after emitting for aot");
-    ::enum(@type symbol.kind);
     // confusing: on wasm you need to make_exec and thus fill patches, 
     // which can reference something that has a shim before i want to mark it as Local.  
     // this feels bad, idk. 
@@ -668,7 +653,6 @@ fn do_fixups_impl(self: *QbeModule, symbol: *SymbolInfo) void = {
         };
     };
     
-    ::enum(@type symbol.kind);
     @debug_assert(symbol.kind == .Local || !symbol.pledge_local, "trying to fixup an import (%, %) but pledge_local=true", symbol.kind, symbol.name);
     
     fixups := symbol.fixups.items();
@@ -899,13 +883,11 @@ fn seal_debug_info(m: *QbeModule, debug_source_code: []u8, include: bool, files_
     base_p    := m.intern("__franca_base_address");
     harvard := m.goal.arch == .wasm32;
     
-    ::enum(@type m.goal.type);
     if m.goal.type == .Exe || harvard {
         // TODO: figure out how to make this work for .Relocatable
         //       it is needed for relocations without libc on linux (in franca_runtime_init).
         // HACK: you have to be able to have it in the frc and then !include when importing it so just use the existing one :AnnoyingDoubleSeal
         use_symbol(m, base_p) { s |
-            ::enum(@type s.kind);
             if s.kind != .Local { 
                 m.do_jit_fixups(base_p, @if(harvard, .MutableData, .Code), 0);
             };
@@ -925,7 +907,6 @@ fn seal_debug_info(m: *QbeModule, debug_source_code: []u8, include: bool, files_
     if harvard || !include || @is(m.goal.type, .Relocatable) {
         // HACK: you have to be able to have it in the frc and then !include when importing it so just use the existing one :AnnoyingDoubleSeal
         use_symbol(m, id) { s |
-            ::enum(@type s.kind);
             if s.kind != .Local {
                 m.emit_data(id = id, template = (Zeroes = size_of(AotDebugInfo)), align = 8, relocations = empty());
             };
@@ -1073,7 +1054,6 @@ fn collect_aot_fixups(m: *QbeModule) Ty([]FixP, List(*SymbolInfo)) = {
     for_symbols m { id, s | 
         first := true;
         each s.fixups& { f | 
-            ::tagged(@type f.type);
             if f.type&.is(.DataAbsolute) { 
                 fixups&.push(symbol = s, fix = f);
                 if first {
