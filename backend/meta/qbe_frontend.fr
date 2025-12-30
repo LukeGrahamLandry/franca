@@ -104,7 +104,7 @@ main :: fn() void = {
         };
         
     if args.cc {
-        sections := import("@/tests/backend.fr")'extract_sections(src);
+        sections := extract_sections(src);
         if sections&.get("driver") { src |
             #use("@/examples/import_c/lib.fr");
             #use("@/examples/import_c/ffi.fr");
@@ -168,4 +168,81 @@ fn parse_from_args(args: []CStr, i: *i64) TargetId = {
     t || @panic("invalid target '%'", n)
 }
 
+extract_sections :: fn(src: Str) HashMap(Str, Str) = {
+    results: HashMap(Str, Str) = init(temp());
+    start_section := "# >>> ";
+    while => src.len != 0 {
+        while => src[0] != "#".ascii() {
+            src = src.skip_line();
+            if(src.len == 0, => return(results));
+        };
+        if src.starts_with(start_section) {
+            name := {
+                i := start_section.len;
+                while => !src[i].is_ascii_whitespace() {
+                    i += 1;
+                };
+                src.slice(start_section.len, i)
+            };
+            src = src.skip_line();
+            out, new_src, nested := consume_section(src, name);
+            prev := results&.insert(name, out);
+            if prev { prev |  // allow split sections. see tests/abi8.ssa for example. 
+                results&.insert(name, @tfmt("%%", prev, out));
+            };
+            if !nested {
+                src = new_src;
+            };
+        };
+        src = src.skip_line();
+    };
+    results
+}
+
+consume_section :: fn(src: Str, name: Str) Ty(Str, Str, bool) = {
+    start_of_this_section := src.ptr;
+    out: List(u8) = list(temp());
+    strip_hashes := src.starts_with("#");
+    depth := 1;
+    nested := false;
+    while => depth > 0 {
+        chunk := src;
+        src = src.skip_line();
+        if strip_hashes {
+            chunk = chunk.slice(0, chunk.len - src.len);
+            @assert(chunk.starts_with("# "), "bad format for section: %\nline: |%|\nmust start with <hash><space>", name, chunk);
+            if chunk.ends_with("#\n") {
+                out&.push_all(chunk.slice(2, chunk.len - 2));
+                out&.push_all("\n");
+            } else {
+                out&.push_all(chunk.slice(2, chunk.len));
+            };
+        };
+        
+        if src.starts_with("# >>>") {
+            depth += 1;
+            nested = true;
+        };
+        depth -= src.starts_with("# <<<").int();
+    };
+    out := if strip_hashes {
+        out.items()
+    } else {
+        between(start_of_this_section, src.ptr)
+    };
+    
+    (out, src, nested)
+}
+
+fn skip_line(s: Str) Str = {
+    loop {
+        if(s.len <= 0, => return(s));
+        if s[0] == "\n".ascii() {
+            return(s.slice_pop_first());
+        };
+        s = s.slice_pop_first();
+    }
+}
+
 #use("@/lib/sys/fs.fr");
+#use("@/lib/collections/map.fr");

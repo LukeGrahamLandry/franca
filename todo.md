@@ -1,4 +1,14 @@
 
+- the hare test runner is much prettier than mine
+- should make this work again (even without examples/os/host/web.fr)
+```
+franca examples/default_driver.fr build examples/toy/hello.fr -arch wasm32 -o a.wasm
+franca examples/import_wasm/run.fr a.wasm
+```
+  (at least part of it is just a problem with my run.fr memory.cap vs hacky heap_base)
+- allow #fold on a single argument and have it specilize the function if that argument is constant. 
+  use that to make println("string literal") not do two syscalls. 
+  need to be able to check if an expression is constant. 
 - run the basic tests in @run as well
 - things i broke when making @enum and @tagged auto derive
   - // :TodoLostTypeName 
@@ -59,7 +69,6 @@ main :: fn() void = {
   but the source might if you ask for that. maybe that's what i want because i like the idea 
   of being able to recompile from that but it's a bit counter intuative. idk. 
 - better error message than "failed to guess type" if you do `@print("%", fmt_hex(undeclared_variable.foo.bar));`
-- default_driver should just poke out the Interp header if you ask for -syscalls. 
 - add a way to -d log all the comptime code from the driver. rn it only affects the runtime module. 
 - mangle symbols in a more stable way than fucking sequential ids. 
   the current way is fast but makes diffing them a pain in the ass.
@@ -160,12 +169,7 @@ cset	w0, eq
 - Type Error when calling a function ugently needs to show both the call site and the declaration site
 - don't just crash at runtime when you `import_c/cc.fr -r`
   and try to call a function that was forward declared but not linked against
-- seperate all the tests that exec stuff or download stuff
-  and make run them seperatly. 
-  it's not acceptable that if i update macos and fuck up my clang, my normal tests fail. 
 - make all the tests pass on linux
-- fake assembler to be drop in for hare
-- real test for dynamic libraries
 - make stack trace debug info work accross multiple compilers. it needs to go in GlobalFrancaRuntime
   (test with crashing in examples/repl.fr when running it as a driver)
 - `f :: fn() = ` isn't getting an inferred name (report_called_uncompiled_or_just_fix_the_problem)
@@ -450,7 +454,6 @@ Compile Error: 54 matching options for index
 
 TODO: end of loop. still too many options for 'index'
 ```
-- // TODO: only the first element of the @slice in unquote_placeholders is getting typechecked that it wants FatExpr not *FatExpr? 
 - #inline returning Never doesn't remember that it returns Never
 - there's still a compilation order problem with inlining intrinsics. look at copy_bytes(). 
 - :ThisIsNotOkBecauseMemoryWillBeReused
@@ -582,7 +585,6 @@ hould just make them local constants in each file like they are here in riscv
 - be able to output frc/frc_inlinable in the same module as compiling normally so you don't have to do two passes over things to cache it
 - fix those two ^ and then compiler/test.fr can create all at once and assert that they make the same exe instead of running them all
 - elf: don't include names for local symbol with DataAbsolute relocations when exe_debug_symbol_table=false,
-- test that makes a dylib
 - macho exe_debug_symbol_table doesn't work i clion profiler (dtrace?)
 - debug assert that all tmps have a definition in rega. 
   (especially because @emit_instructions doesn't catch it)
@@ -598,6 +600,7 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 - why does llvm-mc disassembler arm think my cas is invalid instruction encoding? (check with cas.ssa -d D). 
   objdump thinks it's fine and it clearly runs correctly. 
 - TODO: harec/src/gen.c: `[arm64/emit.fr/fixup_arm64] offset from dynamic import builtin_type_nomem+4` but would work when done as one compilation unit.
+  when doing .Relocatable, i shouldn't complain early because it might be local. need to leave it for the linker to deal with. 
 - mem3.ssa fails without opt/load.fr/loadopt()
 - some instructions don't have a .ssa test: float(sqrt, min, max, swap, truncd), int(extsb, extsh, extuh)
 - support fini/init sections in elf (and macho i think has a special load command for them)
@@ -781,7 +784,7 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 - :TodoMacosSyscall
 - how are you supposed to ask for page size? blink wants 64k instead of 4k. 
 - elf_loader.fr doesn't work on linker output: `panic! not divisible by page size`
-- once is_linking_libc isn't #fold, if you have a static compiler and want to link a libc thing
+- if you have a static compiler and want to link a libc thing
   and notice that the path to dynamic loader is valid, 
   it would be cool to try to do something where you morph by poking in the Dynamic header
   and reexecing the compiler to get it. 
@@ -1077,6 +1080,7 @@ just a problem with how that program is doing directions not with the app lib)
 - bindgroups_cache 
 - comptime thing to generate SgShaderDesc
 - this happens occasionally: (but i have to redo the whole wgpu shit anyway because just yoloing a specific version of libwebgpu_dawn.dylib is not acceptable) 
+  - seems fixed. probably by -jit always using ExecStlye.AOT so baked happen normally (even tho it doesn't actually produce a binary)
 ```
 franca examples/mandelbrot_ui.fr -wgpu -jit
 panic! graphics/web/webgpu.fr:1221:34
@@ -1089,18 +1093,14 @@ TODO: this happens when compiling targetting libc from a compiler built without 
   - safari
   - remap key codes (keytable)
   - modifiers
-  - should_skip_frame
   - make test programs that force me to implement the rest of the wgpu api surface
   - a bunch of the bindings im writing manually in gfx.js could be generated
   - do the rest of the events in app.js
   - all the app commands are stubs
   - might want to limit the scrolling so the scale of the numbers is the same as native. 
     ie. i had to clamp mandelbrot_ui so you can't overshoot and that isn't a problem in the macos version. 
-  - import("@/examples/terminal.fr")'main();  // TODO: wrong signeture for exit()
-  - make chess/gui.fr work jitted in the browser
   - make demo.fr work in import_wasm using dawn for graphics. 
   - the franca side should call requestAdapter/requestDevice/configure so it can pass arguments. 
-  - app_events starts off small and then zooms in the first time you cause a resize event. 
   - make the js code less messy and make it less painful to integrate into your own project. 
     ideally i could just spit out a wasm file and a js file and it would just work. 
   - its cringe that im pre-generating webgpu.g.js and webgpu.g.fr instead of doing it in the browser like everything else. 
@@ -1133,7 +1133,7 @@ through the ImportVTable explicitly. but that feels a bit too wishy washy to me?
 - :NoInlineImport
 - ._N and .len on Array
 - #use field in guess_type for #where
-- make auto deref always work (you shouldn't need to `[]` for constants or returned structs)
+- make auto deref always work (you shouldn't need to `[]` for returned structs)
 - compiler/values.fr has a big comment
 - make namespacing nice enough that i can have less stuff loaded in every program by `core.fr`
 - if constant folding can get rid of all the branchs that use an import, the binary shouldn't need that import
@@ -1229,30 +1229,29 @@ and not need to serialize the arguments to a string.
 
 ## tests
 
-- dylibs
-- pending repros: uninit_stack_slot, typchk_unquote
 - have a test where you force inline everything that's not recursive to stress test the backend dealing with large functions.
 - compiler/test.fr run for jit as well
 - automated test that builds are still reproducible (including with -debug-info which doesn't repro currently)
+  (currently i only do it for the compiler via `run_tests release` in ci but should do it for all the programs)
 - fix the test programs to not all write to `./a.out` or whatever so they can run in parallel.  
   (including cross for different arches at the same time)
 - test compile error for conflicting #use
 - compile all the examples in run_tests: toy
 - repro doesn't work when you do `-repeat`
 - have one command that lets me run the tests on all targets
-- tests for failing progeams. ie. panic backtrace
+- tests for failing progeams. 
+  - panic backtrace
+    - including inferred function names
+  - compile error locations
 - compiler/tests.fr stops when something doesn't compile but it should show which other tests passed like it does for runtime failures
 - make it clear that you can't do this: `franca self.fr && ./a.out driver.dylib run b.fr`. 
 it doesn't like that you stomp a.out, default_driver:run should pick a unique path probably. 
 or just default to jitting and force you to enable aot by specifying an output path. 
 - think about how to test the gui programs more convincingly than just that they produce a binary
 - test using import_(c, wasm)/ffi from a precompiled driver to make sure they're not relying on being in their own compilation context 
-- test crash stack traces
 - make the crash examples work without needing to set the env variable / run jitted
-- TODO: i should probably be making tests for error locations
 - instead of hardcoding `clang`, use env var CC or something more sane.
   could try clang and fall back to a self-compiled tcc if it's not available. 
-- make it easy to skip any tests that have external dependencies
 
 ## error messages
 
@@ -1266,6 +1265,10 @@ or just default to jitting and force you to enable aot by specifying an output p
 - need chained compile errors.
   - maybe loc should be a specific token so you don't highlight the whole expression just to complain about a function signature
   - macros should show both expansion site and code that generated it.
+- fmt_error wip_tasks stack doesn't work when you get "failed compile foo" 
+  in main_thread_pump because of failed overload resolution. 
+  probably anything that politely returns error all the way up (instead of poll_in_place)
+  since i pop the stack when poll_until_finished returns an error. 
 - better error message from backend if you forget nunion=1 on a struct
 - `pattern match on non-tuple but expected % args` should show the callee as well
 - when it tells you a #import is null at comptime, say whether the library string was registered. 
@@ -1274,11 +1277,13 @@ or just default to jitting and force you to enable aot by specifying an output p
 - contextual field not found should show the type's declaration location 
 - "arity mismatch" should check if last aparameter is CVariadic and suggest @va
 - "arg type mismatch after removing const args" error message needs to tell you the types
+  and index of the argument. 
 - i need to be able to easily identify the Anon generated functions. 
   try to be smarter about giving them a name. like for const eval of a `::` var it should just be the name on the left. 
   use FnDef.line and make it more elegant somehow, idk 
 - give data symbols readable names now that they show up in symbol table
 - error instead of hang on recursive inline
+  and recursive constant declaration
 
 ## language decisions
 
@@ -1293,7 +1298,10 @@ so you could say `fn fmt(out: *List(u8), template: Str, arg: FatExpr #macro) Fat
 then you need a new way to express that you need `template` to be constant in the program but 
 it can be runtime known in the body of the fmt macro. 
 - #generic is painful
-- get more strict about calling conventions
+  (the type annotations can only use previous const parameters, not later ones)
+- do i want to represent different calling conventions in function pointer types? 
+  currently i've solved it by only supporting one calling convention 
+  and if you want something else you use an AsmFunction to translate. 
 - more powerful driver program. it should be able to see all your functions stream by and poke things in. 
 ie. ptrace demo (see libc.fr). 
 the more immediate problem that would solve for me is being able to use newer language features 
@@ -1326,8 +1334,7 @@ fn invoke($o: Qbe.O, $k: Qbe.Cls, a0: ~A0, a1: ~A1) ~R #ir(o, k);
 //!           should be constant, and only materialized it upon seeing a 
 //!           non-arithmetic #fold, and otherwise just defer until the backend.  
 - shims advanced version: don't comptime jit until the first time you call something. can't decide if thats too creepy.
-- context() leak allocator
-- generic Read/Write instead of hardcoding List(u8).
+- tls(.leak_allocator) could just always be an arena instead of wasting general_allocator's time
 - seperate fn stride_of and fn size_of so you can avoid extra padding in nested structs.
   then need to allow different reprs.
 - test that struct padding is zeroed before emitting comptime data and before being used as a key to cache const args instantiations.
@@ -1384,7 +1391,8 @@ A :: @struct {
 - fix examples/compiler_gui
 - rust format! macro. they have format_args! builtin to the compiler which is kinda funny
 - make graphics/shaders translation support a more interesting subset of the language 
-- profiler gui. it's silly that i have to open CLion just for it to run DTrace and draw a graph
+- profiler gui 
+  - samply solves my problem but it would be nice to have something basic that works without installing random stuff
 - something that generates point clouds / LAZ files so you can use the geo demo without 
 needing to go find some data in the right format (and without me including a blob for it)   
 - http://www.xmailserver.org/diff2.pdf
@@ -1423,11 +1431,13 @@ need to support them being different at comptime and runtime in a uniform way.
 - using foreign libraries. as soon as you need to write your own driver it's super annoying. 
 - nested error messages. need to be able to show more than one source location. 
 - keep reducing the amount of stuff in the prelude 
-- allow adding your own fields to the dynamic environment parameter
+- allow adding your own fields to tls
 - i really need to output debug info
 - nested array syntax is kinda ass. `Symbol.Array(2).Array(3)` and `Array(Array(Symbol, 2), 3)` 
 is much worse than zig's `[3][2]Symbol`, even c's `Symbol the_name_in_the_middle[3][2]` 
 has the numbers in the right order at least. rust has my problem too `[[Symbol; 2]; 3]` but nicer special case syntax for it. 
+  - could just... swap the argments. idk why i made such a big deal about it. 
+    Array(3, Array(2, Symbol)) is an (array of 3 (arrays of 2 (symbols))).
 - bit flags, @tagged abi. see sys/linux/LandLock
 - this would be much less messy
 ```
@@ -1446,13 +1456,9 @@ StbTrueType :: include { C |
 
 - things that should be cleaned up next time i :UpdateBoot
   - AbiHackSpan
-  - `@rec` in backend/ir.fr and wasm/instructions:Wasm
-  - use sqrt/min/max
 - fix overflow when lexing large float literals
 - show const fields better in log_type
 - less verbose if let/let else? think about how to express with a macro.
-- i still think wasi's kinda dumb but running the compiler in a browser would be very pleasing.
-  tho i could just use blink https://trungnt2910.com/blink/blink.html
 - be nicer about warning invalid arguments in examples/default_driver and compiler/first
 - parse zig headers and generate extern declarations (like examples/c_bindgen). then i could use bits of thier standard libary.
   they have a bunch of fun stuff that doesn't use use comptime in the api and im not interested in writing myself:
@@ -1468,18 +1474,14 @@ StbTrueType :: include { C |
 // TODO: derive ne from eq so you can use != more often. 
 // TODO: better error message for *T vs **T, should say dereference not unsafe cast. 
 
-/* List of grievances. 
 - write f64 to string (better)
 - derive eq/display for unique types. 
 - derive recursive drop/default.
 - nicer switch over incomplete enum. 
 - jump table switch, mine is gonna be so slow. 
-- passing arch overload set to typed Fn 
 - need smarter overload resolution so you can use enum contextual fields more often. I hate typing the name a bunch. 
-- debug state stack should include eval const ident. 
 - multiple cases with one handler in switch. 
 - expand macros in switch
-*/
 
 ## data structure changes
 
@@ -1497,21 +1499,15 @@ StbTrueType :: include { C |
 
 - should make a derivable (fn arbitrary(rng) T) for testing hashes or stuff on psudorandom valid values of a type.
   like eq and hash would be nice to test like that. also ffi with c.
-- tail recursion
 - https://llvm.org/docs/CoverageMappingFormat.html https://llvm.org/docs/LangRef.html#llvm-instrprof-increment-intrinsic
 - good error message for accidently using ' as character literal.
 - embeding other languages would be a good demo of the comptime/meta programming stuff.
   - need a raw string syntax that passes it to a macro (like nim?)
   - lualit would be cool cause they have c abi stuff and dynamic language so notably different from mine.
-- adding 'e->name(a) === (e.vptr.name)(e, a)' would make <- the "function oriented programming" operator and -> the "object-al programming" operator.
 - annotations should be powerful enough to derive recursively eq/clone/drop/hash based on fields.
   - need to let you access the default even if you override.
     like adding extra drop logic shouldn't mean manually dropping all fields.
-- fold infinite loops so it knows when you dont need a return at the end of the function to typecheck
-- anon structs for named return values. maybe commit to no !struct but what if you want an enum maybe its better to have no blessed default case
 - maybe anon struct literals with inferred type should be fine.
-- const SafetyCheck = @flagset(Bounds, Overflow, DivByZero, UnreachableCode, WrongEnumTag, CastBounds, Align, FfiNull, UseUninitCanary);
-  safety(Bounds, fn= lt(i, len(self));
 - enum bitset
 - quick union types: fn Enum(Arr(Type)) Type; so Enum(A, B, C) === (A: A, B: B, C: C)!enum;
   - if you had all the tags unique (use TypeId) instead of starting at 0, you could make it free to convert to a super set.
@@ -1519,7 +1515,6 @@ StbTrueType :: include { C |
 - user defined operators so you can pick what meaning of &T makes sense for you (per module)
 - function that take a slice of args called like variadic functions.
 - u32/u16 pointers as indexes into per type arrays. deref trait so that can be a library feature? want to be able to toggle easily not at every use so can benchmark
-- command line argument parser
 - should really have a more extensible way of describing an environment.
   - ie. what arch? do you have the compiler context? what os? do you have libc?
   - the end goal for this would be to expose what imports each module needs and let the comptime resolve differently if you really wanted.
@@ -1530,9 +1525,6 @@ StbTrueType :: include { C |
   - could just say you have to put it at the outer stack frame and not let it escape.
   - would be nice to change between current inlining and closures without changing source so you could opt for size or speed.
 - https://github.com/arun11299/How-not-to-async-rs/tree/main
-- I like multi-argument functions just taking tuples so you can refer to function types generically.
-  but that means if tuple type is written as tuple of types, you can't have a function that takes multiple types as arguments in a row
-  because it doesn't know where to split them if you flatten too soon. when fn f(X: Type, Y: Type) then f((a, b), c) vs f(a, (b, c))
 - https://btmc.substack.com/p/tracing-garbage-collection-for-arenas
 
 ## behaviour considered disrespectful

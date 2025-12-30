@@ -25,6 +25,8 @@ test_cmds :: @S(
     @S("./target/f.out", "tests/exe/cli_args.fr", "a", "b", "c", "d"),
     @S("./target/f.out", "tests/exe/c_ffi.fr"),
     @S("./target/f.out", "tests/c.fr"),
+    @S("./target/f.out", "examples/default_driver.fr", "build", "examples/parsegen/main.fr", "-dynamiclib", "-o", "target/out/parser.dylib"),
+    @S("./target/f.out", "tests/exe/dylibs.fr"),
 );
 
 with_deps :: @S(
@@ -35,17 +37,11 @@ with_deps :: @S(
     @S("./target/f.out", "tests/exe/generate.fr"),
 );
 
-with_deps_macos_arm_only :: @S(
-    // TODO: linux: need to transcribe signal.h
-    @S("./target/f.out", "tests/external/lua.fr"),  // dep:lua
-    // TODO: need to write config.h for non-macos-arm
-    @S("./target/f.out", "tests/external/tcc.fr", "-ddc"),  // dep:tcc dep:clang
-);
-
 with_deps_skip_rv :: @S(
     // TODO: rv: lzip, lzma, xz: Expected (RTmp:31 != RTmp:31
     //       rv: json: FAIL test_wuffs_strconv_parse_number_f64_options
     @S("./target/f.out", "tests/external/wuffs.fr"),  // dep:wuffs
+    // TODO: this only has deps because it runs webgpu_api.fr but don't really need that
     @S("./target/f.out", "tests/exe/wasm.fr"),
 );
 
@@ -101,10 +97,16 @@ do_it :: fn(vtable: *ImportVTable, s: Str) void = {
             };
             @case("release") => build_release(vtable);
             @case("run") => {
+                do_it(vtable, "run-no-deps");
+                // the rules are everything before this must not download dependencies or exec system binaries. 
+                println("=== end of dependency free tests ===");
+                do_it(vtable, "run-yes-deps");
+            };
+            @case("run-no-deps") => {
                 // TODO: instead of hardcoding ./target/f.out use get_executable_path so you can run this directly without rebootstrapping
                 //       tho then its a source of confusion if you run with the release binary and the nrewrite it have way through whe nit build_release
                 for bins { code, dest |
-                    sh(@slice("./target/f.out", driver_path, "build", code, "-o", dest, "-keep-names"));
+                    sh(@slice(franca_path, driver_path, "build", code, "-o", dest, "-keep-names"));
                 };
                 
                 make_dirs_or_crash("examples/web/target");
@@ -114,56 +116,37 @@ do_it :: fn(vtable: *ImportVTable, s: Str) void = {
                 };
                 
                 ::import("@/examples/testing.fr");
-                // TODO: aoc/2025 too
-                files := collect_with_extension("examples/aoc/2024", ".fr").unwrap();
-                run_tests_main_threaded(Ty(Str, Str), Str, (franca_path, driver_path), files.items(), fn(_, a) = a[], fn(ctx, file) = {
-                    franca_path, driver_path := ctx;
-                    ok, out, err := exec_and_catch(franca_path, @slice(driver_path, "build", @tfmt("examples/aoc/2024/%", file[]), "-o", "/dev/null"), temp());
-                    (ok, out, err, "")
-                });
-                
+                build_aoc();
                 do_it(vtable, "release");
-                
+                test_static_repro(franca_path);
+            };
+            @case("run-yes-deps") => {
+                prospero(franca_path);
                 for with_deps { cmd | 
                     sh(cmd);
                 };
-                ci := get_environment_variable("GITHUB_REPOSITORY").is_some();
+                build_graphics(franca_path);
 
                 if query_current_arch() != .rv64 {
                     for(with_deps_skip_rv, fn(it) => sh(it));
                 };
+                if query_current_os() == .macos {
+                    // TODO: linux: need to transcribe signal.h
+                    sh(@S("./target/f.out", "tests/external/lua.fr"));  // dep:lua
+                };
                 if query_current_os() == .macos && query_current_arch() == .aarch64 {
-                    for(with_deps_macos_arm_only, fn(it) => sh(it));
+                    // TODO: need to write config.h for non-macos-arm
+                    sh(@S("./target/f.out", "tests/external/tcc.fr", "-ddc"));  // dep:tcc dep:clang
                 };
-                
-                // If running linux with libc, can still run the compiler built without libc and make sure it repros. 
-                @if(!IS_BOOTSTRAPPING)
-                if current_os() == .linux && is_linking_libc() {
-                    // TODO: have default_driver do -syscalls the same way as build_release so sta0==target/release/franca-linux-x-x-sta
-                    sta0, sta1 := ("target/sta0.out", "target/sta1.out");
-                    sh(@slice("./target/f.out", "examples/default_driver.fr", "build", "compiler/main.fr", "-unsafe", "-syscalls", "-o", sta0));
-                    _ := Syscall'remove(sta1.as_cstr());
-                    sh(@slice(sta0, "examples/default_driver.fr", "build", "compiler/main.fr", "-unsafe", "-syscalls", "-o", sta1));
-                    diff(sta0, sta1);
-                    println("OK: linux_native_no_libc");
-                } else {
-                    println("SKIP: linux_native_no_libc(): native target is not linux+libc");
-                };
-                
-                    if current_os() == .linux {
-                        sh(@slice("./target/f.out", "tests/external/hare.fr"));
-                    };
-                if !ci {
-                    // TODO: this hangs occasionally :(
-                    //if query_current_os() == .macos && query_current_arch() == .aarch64 {
-                    //    sh(@slice("./target/f.out", "examples/os/build.fr", "-vzf", "-smp", "2", "-append", "sudoku;quit;"));
-                    //};
+                if current_os() == .linux {  // SKIP: non-free operating systems
+                    sh(@slice(franca_path, "tests/external/hare.fr"));
                 };
             };
             @default => @eprintln("IGNORE: %", s);
         };
 };
 
+#use("@/backend/lib.fr")
 build_release :: fn(vtable: *ImportVTable) void = {
     @if(IS_BOOTSTRAPPING) return();
     make_dirs_or_crash("target/release");
@@ -241,7 +224,68 @@ build_release :: fn(vtable: *ImportVTable) void = {
     };
 };
 
-#use("@/backend/lib.fr");
+// seperate because they need the build_for_graphics driver. 
+// (also they have deps: stb, fonts, dawn.json)
+// interactive so we just compile them. 
+// TODO: run one frame and show screen shot as a sanity check? 
+graphics_demos :: @S(
+    "examples/terminal.fr",  // dep:stb
+    "examples/farm_game.fr",
+    "examples/app_events.fr",
+    "examples/geo/main.fr",
+    "examples/hello_triangle.fr",
+    "examples/depth_test.fr",
+    "examples/epicycles.fr",
+    "examples/lambda.fr",
+    "examples/chess/gui.fr",  // dep:stb
+);
+
+build_graphics :: fn(franca: Str) void = {
+    run_tests_main_threaded(Str, Str, franca, graphics_demos, fn(_, a) = a[], fn(franca, it) = {
+        ok, out, err := exec_and_catch(franca, @slice(it[], "-arch", "aarch64", "-os", "macos", "-o", "target/gfx.out"), temp());
+        @if(file_exists("target/franca/webgpu.g.fr"))
+        if it[] != "examples/terminal.fr" {  // TODO
+            ok, out, err := exec_and_catch(franca, @slice(it[], "-arch", "wasm32", "-wgpu", "-o", "target/gfx.out"), temp());
+            if !ok {
+                return(ok, out, err, "");
+            };
+        };
+        (ok, out, err, "")
+    });
+};
+
+test_static_repro :: fn(franca_path: Str) void = {
+    @if(IS_BOOTSTRAPPING) return();
+    // If running linux with libc, can still run the compiler built without libc and make sure it repros. 
+    if !(query_current_os() == .linux && is_linking_libc()) {
+        println("SKIP: linux_native_no_libc(): native target is not linux+libc");
+        return();
+    };
+    
+    // TODO: have default_driver do -syscalls the same way as build_release so sta0==target/release/franca-linux-x-x-sta
+    sta0, sta1 := ("target/sta0.out", "target/sta1.out");
+    sh(@slice(franca_path, "examples/default_driver.fr", "build", "compiler/main.fr", "-unsafe", "-syscalls", "-o", sta0));
+    _ := Syscall'remove(sta1.as_cstr());
+    sh(@slice(sta0, "examples/default_driver.fr", "build", "compiler/main.fr", "-unsafe", "-syscalls", "-o", sta1));
+    diff(sta0, sta1);
+    println("OK: linux_native_no_libc");
+};
+
+build_aoc :: fn() void = {
+    // TODO: aoc/2025 too
+    files := collect_with_extension("examples/aoc/2024", ".fr").unwrap();
+    run_tests_main_threaded(void, Str, (), files.items(), fn(_, a) = a[], fn(ctx, file) = {
+        ok, out, err := exec_and_catch("target/f.out", @slice("examples/default_driver.fr", "build", @tfmt("examples/aoc/2024/%", file[]), "-o", "/dev/null"), temp());
+        (ok, out, err, "")
+    });
+};
+
+prospero :: fn(franca_path: Str) void = {
+    args := @slice("examples/prospero.fr", "-width", "64", "-hush");
+    ok, o, e := exec_and_catch(franca_path, args, temp());
+    @assert(ok && e.items().contains("23/253:3578\nok!"), "failed prospero\n%%", o.items(), e.items());
+    print(e.items());
+};
 
 // :UpdateBoot this can go away if i replace boot/franca-macos-arm64
 fn run_boot(vtable: *ImportVTable) void = {
@@ -253,6 +297,7 @@ fn run_boot(vtable: *ImportVTable) void = {
     println("ok!");
 }
 
+#use("@/backend/lib.fr")
 fn stage0_driver(vtable: *ImportVTable) void = {
     opts := vtable.default_build_options();
     opts.safety_checks&.insert(SafetyCheck.Bounds, false);

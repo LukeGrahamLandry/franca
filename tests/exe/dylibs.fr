@@ -1,0 +1,51 @@
+// - using import or import_c directly instead of compiling to dylib first is more sane,
+//   i just want to test that dylibs actually work. 
+// - add_comptime_library only makes it callable at comptime so the usage has to also be in an @run. 
+//   it's fine that this block had to be compiled before the lib was added: the magic of jit-shims. 
+// - since everything's in the @run, this program doesn't actually do anything once compiled. 
+// TODO: exec like this is bad style. should just import cc.fr and call compile()
+//       i just did it this way to mirror the example in docs/comptime.md. main :: fn() void = {
+main :: fn() void = {   
+    SRC_c :: """
+    long add_with_ffi(long a, long b) {
+        return a + b;
+    }
+    """;
+    add_with_ffi :: fn(a: i64, b: i64) i64 #import("add");
+    @run {
+        cmd := @slice(get_executable_path(temp()), "examples/import_c/cc.fr", "-dynamiclib", "", "-o", "");
+        compile_to_dylib(SRC_c, cmd, "add", "c");
+        assert_eq(3, add_with_ffi(1, 2));
+    };
+    
+    SRC_fr :: """
+    fn sub_with_ffi(a: i64, b: i64) i64 #export = {
+        a - b
+    }
+    """;
+    sub_with_ffi :: fn(a: i64, b: i64) i64 #import("sub");
+    @run {
+        cmd := @slice(get_executable_path(temp()), "examples/default_driver.fr", "build", "", "-o", "", "-dynamiclib");
+        compile_to_dylib(SRC_fr, cmd, "sub", "fr");
+        assert_eq(-1, sub_with_ffi(1, 2));
+    };
+}
+
+compile_to_dylib :: fn(src: Str, cmd: []Str, name: Str, ext: Str) void = {
+    // TODO: kinda dumb that my programs care about file extensions
+    src_path := @tfmt("target/%.%", name, ext);
+    o_path := @tfmt("target/%.dylib", name);
+    write_entire_file_or_crash(src_path, src);
+    franca := get_executable_path(temp());
+    cmd[3] = src_path;
+    cmd[5] = o_path;
+    run_cmd_blocking(cmd[0], cmd.rest(1)) || @panic("failed compile");
+    lib := Dyn'open(o_path).unwrap();
+    fr := current_compiler_context();
+    fr.add_comptime_library(fr.intern_string(name), lib);
+}
+
+#use("@/lib/sys/fs.fr");
+#use("@/lib/sys/subprocess.fr");
+#use("@/lib/sys/process.fr");
+Dyn :: import("@/lib/dynamic_lib.fr");

@@ -1,4 +1,20 @@
 
+## (Dec 30)
+
+- the most annoying of my order dependance is having to type `::enum(@type m.goal.type)` 
+  every time you use the backend api slightly differently. that at a least is fixable. 
+- moved the tests. columns vs. rows is always hard to decide. 
+  - they have more in common with each other than with the things they're testing. 
+    everything in ./tests is iterate over a directory of programs and run them. 
+  - i like seperating the code that does nothing from the code that does stuff
+    so it's easier to tell how big the interesting part is. 
+  - it's a good trait that nothing outside the tests folder depends on anything inside it.
+- instead of always report_threaded_jit_shim, if it has tls setup (which it will 
+  when spawning a new thread from comptime code). signal the main thread to do the compile for you. 
+- get_working_directory: syscall returns length
+- finish seperating deps tests
+- add a minimal dylib test
+
 ## (Dec 29)
 
 - run harec in parallel when modules don't depend on each other. 
