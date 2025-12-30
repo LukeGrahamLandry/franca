@@ -1,4 +1,5 @@
 
+- run the basic tests in @run as well
 - things i broke when making @enum and @tagged auto derive
   - // :TodoLostTypeName 
   - // HACK: @rec

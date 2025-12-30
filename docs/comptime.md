@@ -13,11 +13,10 @@ There are some limitations:
   - you can't call fork. 
     (because the child process won't have the compiler's thread 
     so if you try to call a function that hasn't been compiled yet, it never will be).
-  - you can't spawn new threads, 
+  - functions called from foreign threads/stacks must be marked #avoid_shim 
     because indirect calls are converted to shims to break dependency cycles. 
-    instead of being compiled when reached, the callee is compiled the first time it's called, 
-    and that will break if it happens on a different thread than the rest of the frontend. 
-    same for swapping stacks because if you hit a shim, the compiler won't be able to access its thread locals. 
+    it only matters if you create a function pointer and hand it to a library 
+    written in another language that wants to spawn its own threads or swap stacks. 
 
 You can do all those things from jitted code just fine, but not 
 from the more malleable state of jitted code running inside the compiler. 

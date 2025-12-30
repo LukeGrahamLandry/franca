@@ -383,9 +383,16 @@ fn save_in_got(self: *SelfHosted, fid: FuncId, addr: rawptr) void = {
 report_called_uncompiled_or_just_fix_the_problem :: fn(self: *SelfHosted, fid: FuncId) rawptr = {
         @if(__driver_abi_version >= 1513)
         if get_stack_base_for_tls() != self.main_thread_tls {
-            // even once i allow threads, should keep some varient of this check to detect uninit tls (like display_link_callback1)
-            report_threaded_jit_shim(self, fid);
-        };
+            // TODO: this check might fault if not a franca thread and sp&mask happens to be unmapped 
+            if get_stack_base_for_tls() != tls(.thread)[].int_from_rawptr() {            
+                report_threaded_jit_shim(self, fid);
+            };
+            // it was a franca thread (just not the main one).
+            // the frontend data structures are not thread safe. 
+            // need to request the main thread compile the function and just wait for it here.
+            // since its a franca thread, tls(.current_os) will be set so it's safe to futex().   
+            return wait_threaded_jit_shim(self, fid);
+        };      
         @debug_assert(!self.debug_deny_jit_shim_calls);
         self.stats.shim_calls += 1;
         
@@ -399,7 +406,8 @@ report_called_uncompiled_or_just_fix_the_problem :: fn(self: *SelfHosted, fid: F
         };
         result := zeroed(rawptr);
         if func.get_flag(.RealAsmDone) { 
-            result = self.get_fn_callable(fid).unwrap();
+            xxx := self.get_fn_callable(fid);
+            result = xxx.unwrap();
         };
     // you're required to already be on the same thread but this makes it more likely to work 
     // if you have multiple CompCtxs floating around and trying to call each other, 
@@ -514,31 +522,55 @@ fn zone_begin_dyncall(self: *SelfHosted, f_ptr: rawptr) TraceCtx = {
     zone
 }
 
-// trying to spawn a thread at comptime will always hit this because 
-// it requires an indirect call to franca_runtime_init_thread which isn't used for anything else. 
+wait_threaded_jit_shim :: fn(self: *SelfHosted, fid: FuncId) rawptr = {
+    @debug_assert_ne(get_stack_base_for_tls(), self.main_thread_tls);
+    it := self.threaded_jit_shim.slots&.items().find(fn(it) => 
+        WipJitShim.State.cas(it.state&, .Uninit, .Claimed) == .Uninit)
+            || @panic("TODO: wait when self.threaded_jit_shim.slots full");
+    
+    it.fid = fid;
+    it.state = .Waiting;
+    fence();
+    u32.atomic_inc(self.threaded_jit_shim.kiki&);
+    
+    tmp := it.state;
+    while => tmp != .Done {
+        Futex'wait(bit_cast_unchecked(*WipJitShim.State, *u32, it.state&), tmp.raw());
+        tmp = it.state;
+    };
+    addr := it.callable;
+    fence();
+    it.state = .Uninit;
+    addr
+};
+
+wake_threaded_jit_shim :: fn(self: *SelfHosted) void = {
+    @debug_assert_eq(get_stack_base_for_tls(), self.main_thread_tls);
+    @debug_assert_ne(self.threaded_jit_shim.bouba, self.threaded_jit_shim.kiki);
+    it := self.threaded_jit_shim.slots&.items().find(fn(it) => 
+        WipJitShim.State.cas(it.state&, .Waiting, .Working) == .Waiting)
+            || unreachable();
+    self.threaded_jit_shim.bouba += 1;
+    it.callable = report_called_uncompiled_or_just_fix_the_problem(self, it.fid);
+    fence();
+    it.state = .Done;
+    Futex'wake(bit_cast_unchecked(*WipJitShim.State, *u32, it.state&), MAX_i32);
+};
+
 report_threaded_jit_shim :: fn(self: *SelfHosted, fid: FuncId) Never = {
     // @syscall will go through even if my tls is not set up (ie. someone else allocated the stack).
     os := self.comptime_codegen.m.goal.os;
-    msg := "called jit-shim from non-main thread (or swapped stacks)\nTODO: allow spawning threads at comptime\n";
+    msg := "called jit-shim from non-main thread (or swapped stacks) without franca tls\nTODO: allow non-franca threads at comptime without #avoid_shim\n";
     sys := self.comptime_prefer_syscalls;
     _ := @syscall(Syscall.write, sys, os, 
         STD_ERR, msg.ptr, msg.len);
     // this check will might fault if not a franca thread and sp&mask happens to be unmapped 
     // but at least we already printed enough info to debug the problem.
-    if get_stack_base_for_tls() == tls(.thread)[].int_from_rawptr() {            
-        // it was a franca thread (just not the main one).
         // StringPool/CodeMap aren't thread safe so it's luck if this works. 
-        // init_thread_data's temp().vptr might also be a jit-shim so override it. 
-        push_tls_value(.temporary_allocator_i, Arena'stack_alloc(1.shift_left(16))) {
-            @eprintln("callee: %", fmt_func(self, fid));
-            panic("jit-shim !Send");
-        };
-    } else {
         msg := self.pool.get(self.get_function(fid)[].name);  // luck^
         _ := @syscall(Syscall.write, sys, os, 
             STD_ERR, msg.ptr, msg.len);
         _ := @syscall(Syscall.exit, sys, os, 
             1);
-    };
     unreachable();
 };
