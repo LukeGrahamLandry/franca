@@ -233,7 +233,7 @@ fn eval(rt_o: Op, rt_k: Cls, a0: Bits, a1: Bits) Bits = {
 }
 ```
 
-The full code for this is in `backend/test/folding.fr` (the do_fold_old function). 
+The full code for this is in `tests/exe/folding.fr` (the do_fold_old function). 
 It's more code than I'd like and it's less obvious than the giant switch but it does the job 
 and I'm sure the language can be refined farther to make it less painful. The version actually 
 used by the backend (the do_fold function in `backend/opt/fold.fr`), takes it a step further 

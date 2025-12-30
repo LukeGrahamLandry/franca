@@ -4,7 +4,7 @@ url=""
 hash=""
 case "$target_name" in
     Darwin_arm64)
-        FRANCA_BACKTRACE=1 ./boot/franca-macos-arm64 run_tests.fr -- github; exit 0;;
+        FRANCA_BACKTRACE=1 ./boot/franca-macos-arm64 tests/run_tests.fr -- github; exit 0;;
     Darwin_x86_64)
         url="bd44f7952dd8a61ad73a3e6796068ec60c890409/franca-macos-amd64";
         hash="791713ded192972525d3ceac291b65bcafb7ae5ca037b128d684dc5b56c8e095";
@@ -30,4 +30,4 @@ if [ ! -x "$exe_path" ]; then
     sha256sum --check ./target/${hash}.hash
     chmod +x "$exe_path"
 fi
-FRANCA_BACKTRACE=1 "$exe_path" run_tests.fr -- core
+FRANCA_BACKTRACE=1 "$exe_path" tests/run_tests.fr -- core

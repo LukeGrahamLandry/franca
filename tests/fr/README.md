@@ -1,7 +1,7 @@
 ## Franca "Unit" Tests
 
 These are trivial tests of specific features and minimal reproductions of 
-specific bugs. There's a script (compiler/test.fr) that collects all the 
+specific bugs. There's a script that collects all the 
 functions with the `#test` annotation in this directory and runs them (this 
 is part of run_tests.fr). 
 

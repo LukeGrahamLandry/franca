@@ -348,10 +348,10 @@ int main() {
 #undef foo
 
     ASSERT(1, __STDC__);
-    ASSERT(1, ends_with(main_filename1, "test/macro.c"));
+    ASSERT(1, ends_with(main_filename1, "c/macro.c"));
     ASSERT(5, main_line1);
     ASSERT(7, main_line2);
-    ASSERT(1, ends_with(include1_filename, "test/include1.h"));
+    ASSERT(1, ends_with(include1_filename, "c/include1.h"));
     ASSERT(4, include1_line);
 
 #define M14(...) 3
@@ -407,7 +407,7 @@ int main() {
     //TODO
     // ASSERT(24, strlen(__TIMESTAMP__));
     
-    ASSERT(1, ends_with(__BASE_FILE__, "test/macro.c"));
+    ASSERT(1, ends_with(__BASE_FILE__, "c/macro.c"));
 
 #define M30(buf, fmt, ...) sprintf(buf, fmt __VA_OPT__(,) __VA_ARGS__)
     ASSERT(0, ({ char buf[100]; M30(buf, "foo"); strcmp(buf, "foo"); }));
