@@ -1,4 +1,8 @@
 
+- wasteful that i actually produce 0xDEADDEAD in a register when 
+  there's a codepath with a stack slot used before defined and can't prove its unreachable. 
+  but if you don't do that its crazy town where uninit memory can have a different value every time it's observed. 
+- deduplicate identical basic blocks
 - the hare test runner is much prettier than mine
 - should make this work again (even without examples/os/host/web.fr)
 ```

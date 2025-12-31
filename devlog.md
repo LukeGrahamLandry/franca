@@ -1,4 +1,9 @@
 
+## (Dec 31)
+
+- rv: load_number 0xDEADDEAD (ConUndef) to scratch_int in wuffs_lzma__decoder__do_transform_io@14
+  - simplified load_number so it compiles now but all the same tests still fail. sad. 
+
 ## (Dec 30)
 
 - the most annoying of my order dependance is having to type `::enum(@type m.goal.type)` 
@@ -14,6 +19,10 @@
 - get_working_directory: syscall returns length
 - finish seperating deps tests
 - add a minimal dylib test
+- delete a bunch of vertex buffer code. 
+  i don't like the thing where you make the graphics api load things from the array for you, 
+  i'd rather just index it myself so you can tell what's going on. 
+  at which point vertex buffers are just storage buffers (and that's what i was doing in all my examples anyway). 
 
 ## (Dec 29)
 

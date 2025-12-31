@@ -25,7 +25,6 @@ test_cmds :: @S(
     @S("./target/f.out", "tests/exe/cli_args.fr", "a", "b", "c", "d"),
     @S("./target/f.out", "tests/exe/c_ffi.fr"),
     @S("./target/f.out", "tests/c.fr"),
-    @S("./target/f.out", "examples/default_driver.fr", "build", "examples/parsegen/main.fr", "-dynamiclib", "-o", "target/out/parser.dylib"),
     @S("./target/f.out", "tests/exe/dylibs.fr"),
 );
 
@@ -38,10 +37,11 @@ with_deps :: @S(
 );
 
 with_deps_skip_rv :: @S(
-    // TODO: rv: lzip, lzma, xz: Expected (RTmp:31 != RTmp:31
+    // TODO: rv: lzip, lzma, xz: fault
     //       rv: json: FAIL test_wuffs_strconv_parse_number_f64_options
     @S("./target/f.out", "tests/external/wuffs.fr"),  // dep:wuffs
     // TODO: this only has deps because it runs webgpu_api.fr but don't really need that
+    // TODO: rv: trace trap: compiler inserted break instruction
     @S("./target/f.out", "tests/exe/wasm.fr"),
 );
 
@@ -117,8 +117,13 @@ do_it :: fn(vtable: *ImportVTable, s: Str) void = {
                 
                 ::import("@/examples/testing.fr");
                 build_aoc();
-                do_it(vtable, "release");
                 test_static_repro(franca_path);
+                
+                for dylib_compile_only { file |
+                    sh(@slice(franca_path, "examples/default_driver.fr", "build", file, "-dynamiclib", "-o", "target/out/compileonly.dylib"));
+                };
+                
+                do_it(vtable, "release");
             };
             @case("run-yes-deps") => {
                 prospero(franca_path);
@@ -126,6 +131,9 @@ do_it :: fn(vtable: *ImportVTable, s: Str) void = {
                     sh(cmd);
                 };
                 build_graphics(franca_path);
+                for deps_compile_only { file |
+                    sh(@slice(franca_path, "examples/default_driver.fr", "build", file, "-o", "target/a.out"));
+                };
 
                 if query_current_arch() != .rv64 {
                     for(with_deps_skip_rv, fn(it) => sh(it));
@@ -224,6 +232,19 @@ build_release :: fn(vtable: *ImportVTable) void = {
     };
 };
 
+// these are annoying to actually test for various reasons but at least make sure they compile. 
+dylib_compile_only :: @const_slice(
+    "examples/default_driver.fr",  // so meta, many wow
+    "examples/60fps.fr",  // interactive
+    "examples/soft_draw.fr", // interactive & no aot
+    "examples/parsegen/main.fr",  // TODO: bootstrapping decision
+);
+
+deps_compile_only :: @S(
+    "examples/view_image.fr",  // dep:wuffs
+    "examples/ascii_table.fr",  // dep:stb
+);
+
 // seperate because they need the build_for_graphics driver. 
 // (also they have deps: stb, fonts, dawn.json)
 // interactive so we just compile them. 
@@ -241,9 +262,9 @@ graphics_demos :: @S(
 );
 
 build_graphics :: fn(franca: Str) void = {
+    sh(@slice(franca, "graphics/web/webgpu_api.fr"));
     run_tests_main_threaded(Str, Str, franca, graphics_demos, fn(_, a) = a[], fn(franca, it) = {
         ok, out, err := exec_and_catch(franca, @slice(it[], "-arch", "aarch64", "-os", "macos", "-o", "target/gfx.out"), temp());
-        @if(file_exists("target/franca/webgpu.g.fr"))
         if it[] != "examples/terminal.fr" {  // TODO
             ok, out, err := exec_and_catch(franca, @slice(it[], "-arch", "wasm32", "-wgpu", "-o", "target/gfx.out"), temp());
             if !ok {

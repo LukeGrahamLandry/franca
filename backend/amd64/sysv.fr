@@ -2,6 +2,40 @@
 
 //! The System V ABI describes how function arguments and returns are passed on amd64 linux/macOS.
 
+fn fill_target_amd(t: *Qbe.Target) void = {
+    Emit :: import("@/backend/amd64/emit.fr");
+
+    t.finish_passes = finish_qbe_passes_native;
+    t.isel = import("@/backend/amd64/isel.fr").amd64_isel;
+    t.abi1 = amd64_sysv_abi;
+    t.argregs = amd64_sysv_argregs;
+    t.retregs = amd64_sysv_retregs;
+    t.fixup = Emit.fixup_amd64;
+    t.emit_fn = Emit.emit_func_amd64;
+    
+    t.gpr0 = zext Amd64Reg.RAX.raw();
+    t.ngpr = 16; 
+    t.fpr0 = zext Amd64Reg.XMM0.raw();
+    t.nfpr = zext Amd64Reg.XMM14.raw() - Amd64Reg.XMM0.raw() + 1 /* reserve XMM15 */;
+    t.rglob = BIT(Amd64Reg.RBP).bit_or(BIT(Amd64Reg.RSP));
+    assert_eq(size_of(Amd64Reg), size_of(u8));
+    t.caller_saved = @run amd64_sysv_rsave.interpret_as_bytes().bytes_to_bit_mask();
+    t.hack_builtin_memmove = @const_slice(TMP(8), TMP(7), TMP(3), CALL(0b110001), TMP(1));
+}
+
+// Note: these numbers are NOT the ones you encode in the instructions. ints are of by 1, floats are off by 1+16
+Amd64Reg :: @enum(u8) (
+    RXX, // reserve zero for QbeNull
+    
+    // ints (ordered by encoding, NOT by usage in calling convention). 
+    RAX, RCX, RDX, RBX, RSP, RBP, RSI, RDI,
+    R8, R9, R10, R11, R12, R13, R14, R15,
+    
+    /* sse */
+    XMM0, XMM1, XMM2,  XMM3,  XMM4,  XMM5,  XMM6,  XMM7,
+    XMM8, XMM9, XMM10, XMM11, XMM12, XMM13, XMM14, XMM15,
+);
+
 // Caller Saved
 // first 6 ints are in order for argument passing. 
 amd64_sysv_rsave :: @const_slice(
@@ -551,8 +585,10 @@ fn selvastart(f: *Qbe.Fn, fa: RCallAmd, ap: Qbe.Ref) void = {
     """);
 }
 
+fn CALL(r: RCallAmd) Qbe.Ref = CALL(@as(i64) r.repr.zext());
+fn TMP(r: Amd64Reg) Qbe.Ref = TMP(@as(i64) r.raw().zext());
+fn BIT(r: Amd64Reg) u64 = BIT(@as(i64) r.raw().zext());
 zip_args :: zip_args_g(AClass);
 
-#use("@/backend/amd64/target.fr");
 #use("@/backend/lib.fr");
 #use("@/backend/abi.fr");

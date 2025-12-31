@@ -488,17 +488,16 @@ fn spill(f: *Qbe.Fn) void = {
                     bsset(prioritize&, t);
                 };
             };
-            j := {T.memargs}(i[].op());
-            // TODO: should deal with this properly but im not in the mood for intel hellscape today
-            if !i[].cls().is_int() {
-                j = 0;
-            };
-            for i.arg& { r |
-                if rtype(r) == .RMem {
-                    j -= 1;
+            j := 0;
+            if f.globals.goal.arch == .x86_64 {
+                // TODO: should deal with this properly but im not in the mood for intel hellscape today
+                if i[].cls().is_int() {
+                    j = amd64_memargs(i[].op());
+                };
+                for i.arg& { r |
+                    j -= int(rtype(r) == .RMem);
                 };
             };
-            
             arg_used_again := Array(bool, 2).zeroed();
             range(0, 2) { n | 
                 @match(rtype(i.arg&[n])) {
@@ -586,5 +585,16 @@ fn spill(f: *Qbe.Fn) void = {
     
     when_debug(f, .Spill, fn(out) => pass&.dump_spill(out));
 }
+
+// 
+// Note: explicit memory access like load/store/cas HAS NO MEM ARGS HERE. 
+// The number returned here is WHICH (not how many) arguments are allowed to be accessed 
+// indirectly from thier spill slot in memory if there's a lot of register pressure. 
+// 0 means none. 1 means only the first. 2 means either (but not both in the same instruction). 
+// TODO: this happens a grand total of 27 times in the compiler. why bother? 
+//
+amd64_memargs :: fn(o: Qbe.O) i64 = {
+    OpTab.tables[intcast @as(i32) o].shift_right_logical(24).bit_and(2)
+};
 
 #use("@/backend/lib.fr");

@@ -1,9 +1,6 @@
 // RV64I Zicond M Zacas F D B
 
 // in contrast to amd/arm, the riscv 32 bit instructions generally sign extend the result. 
-// TODO: a test for overflowing 32 bit add to make sure it's sign extended after discarding 
-//       the overflow instead of using a 64 bit add. (if those are different, idk)
-// TODO: what should go in the static float rounding field? 
 // TODO: some things where im being lazy and making worse code: 
 //      direct calls, other cond_jmp, nonstack memarg. (need isel support too)
 
@@ -139,7 +136,7 @@ emit_the_code :: fn(e: *EmitRv) void = {
         if p.cond >= 0 {
             patch[] = cond_jmp(distance, @as(Qbe.Cmp) p.cond, p.reg);
         } else {
-            @debug_assert(distance.fits_sext(20), "TODO: rv branch too far");
+            @debug_assert(distance.fits_sign_ext(20), "TODO: rv branch too far");
             patch[] = jal(@as(i21) distance, .Zero); 
         };
     };
@@ -151,7 +148,7 @@ fn cond_jmp(distance: i64, cond: Qbe.Cmp, r: Qbe.Ref) u32 = {
         fn Cine() => .bne;
         @default => todo();
     };
-    @debug_assert(distance.fits_sext(12), "TODO: rv branch too far: %", distance);
+    @debug_assert(distance.fits_sign_ext(12), "TODO: rv branch too far: %", distance);
     B(@as(i13) distance, RvReg.Zero.bits(), r.rv().bits(), @as(u3) kind, .bcmp)
 }
 
@@ -413,7 +410,7 @@ fn load_number(e: *EmitRv, off: i64, to: Qbe.Ref) void = {
     @debug_assert_lt(to.val(), 32);
     r := to.rv().bits();
     @if_else {
-        @if(off.fits_sext(11)) => {
+        @if(off.fits_sign_ext(11)) => {
             e.inst(I(@as(i12) off, 0b00000, @as(u3) OpI.add, r, .op_imm));
         }
         @if(off.fits_double_extend()) => {
@@ -426,32 +423,16 @@ fn load_number(e: *EmitRv, off: i64, to: Qbe.Ref) void = {
             e.inst(R(0b0100000, r, 0b00000, 0b110, r, .op));  // orn. r = 0 | ~r
         }
         @else => {
-            // TODO: this is convoluted. just put it in memory and load it. 
-            hi, lo := (off.shift_right_logical(32).sign_extend_low32(), off.bit_and(MAX_u32).sign_extend_low32());
-            
-            if lo == 0 {
-                e.load_number(hi, to);
-                e.emit(.shl, .Kl, to, to, e.f.getcon(32));
+            // TODO: prove this always works (it probably doesn't). 
+            //       the intuition is just it's easier to do when the bits are more to the right. 
+            shift := off.trailing_zeros();
+            if off.bit_not().trailing_zeros() > shift {
+                e.load_number(off.bit_not(), to);
+                e.inst(R(0b0100000, r, 0b00000, 0b110, r, .op));  // orn. r = 0 | ~r
                 return();
             };
-            @debug_assert_ne(to, rv_scratch_int);
-            
-            if hi == 0 {
-                hi := @as(i64) lo.imm(31, 12);
-                lo := bit_and(@as(i64) lo.imm(11, 0), 1.shift_left(13) - 1);
-            
-                e.load_number(lo, rv_scratch_int);
-                e.inst(U(hi, r, .lui));
-                e.inst(R(0b0000100, rv_scratch_int.rv().bits(), r, 0b000, r, .op32));  // add.uw 
-                return();
-            };
-            
-            e.load_number(lo, to);
-            e.load_number(hi, rv_scratch_int);
-            
-            e.emit(.shl, .Kl, rv_scratch_int, rv_scratch_int, e.f.getcon(32));
-            // add.uw (zero extends rs1, thats why high bits of lo don't matter)
-            e.inst(R(0b0000100, rv_scratch_int.rv().bits(), r, 0b000, r, .op32));
+            e.load_number(off.shift_right_arithmetic(shift), to);
+            e.emit(.shl, .Kl, to, to, e.f.getcon(shift));
         };
     };
 }
@@ -477,7 +458,7 @@ fn decode_mem(e: *EmitRv, a: Qbe.Ref, other: Qbe.Ref) Ty(RvReg, i12) = {
     if rtype(other) == .RInt {
         offset += other.rsval().zext();
     };
-    @debug_assert(offset.fits_sext(11), "decode_mem: %", offset);
+    @debug_assert(offset.fits_sign_ext(11), "decode_mem: %", offset);
     (addr.rv(), @as(i12) offset)
 }
 
@@ -559,7 +540,7 @@ fn simple_op(e: *EmitRv, i: *Qbe.Ins, o: OpI, funct7: u7) void = {
     i := if rtype(a1) == .RCon {
         c := e.f.get_constant(a1);
         off := c.bits();
-        @debug_assert(c.type() == .CBits && off.fits_sext(11), "out of range %", off);
+        @debug_assert(c.type() == .CBits && off.fits_sign_ext(11), "out of range %", off);
         @debug_assert_eq(0, @as(i64) funct7, "bad simple_op % should not have immediate", i.op());
         op := @if(i.cls().is_wide() || !@is(i.op(), .add), 
             Opcode.op_imm, Opcode.opw);

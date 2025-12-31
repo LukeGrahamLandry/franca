@@ -7,6 +7,67 @@
 //! Also just for fun apple has slightly different rules. 
 //! - https://developer.apple.com/documentation/xcode/writing-arm64-code-for-apple-platforms
 
+fn fill_target_arm(t: *Qbe.Target) void = {
+    ::List(Arm64Reg);
+    Emit :: import("@/backend/arm64/emit.fr");
+
+    t.finish_passes = finish_qbe_passes_native;
+    t.isel = import("@/backend/arm64/isel.fr").arm64_isel;
+    t.abi1 = arm64_abi;
+    t.argregs = arm64_argregs;
+    t.retregs = arm64_retregs;
+    t.fixup = Emit.fixup_arm64;
+    t.emit_fn = Emit.emit_func_arm64;
+    
+    t.gpr0 = Arm64Reg.R0.raw().zext();
+    t.ngpr = (Arm64Reg.SP.raw() - Arm64Reg.R0.raw() + 1).zext();
+    t.fpr0 = Arm64Reg.V0.raw().zext();
+    t.nfpr = (Arm64Reg.V30.raw() - Arm64Reg.V0.raw() + 1).zext();
+    // can't use x18 and reserve x17 for scratch in emit (swap, etc.)
+    RGLOB :: @const_slice(Arm64Reg.FP, .SP, .PLA, .IP1);
+    t.rglob = @run RGLOB.interpret_as_bytes().bytes_to_bit_mask();
+    
+    assert_eq(size_of(Arm64Reg), size_of(u8));
+    t.caller_saved = @run arm64_rsave.interpret_as_bytes().bytes_to_bit_mask();
+    t.hack_builtin_memmove = @const_slice(TMP(1), TMP(2), TMP(3), CALL(0b001100001), TMP(1));
+}
+
+// Caller Saved
+arm64_rsave :: @const_slice(
+    Arm64Reg.R0,  .R1,  .R2,  .R3,  .R4,  .R5,  .R6,  .R7,
+            .R8,  .R9,  .R10, .R11, .R12, .R13, .R14, .R15,
+            .IP0,             .LR,
+            .V0,  .V1,  .V2,  .V3,  .V4,  .V5,  .V6,  .V7,
+            .V16, .V17, .V18, .V19, .V20, .V21, .V22, .V23,
+            .V24, .V25, .V26, .V27, .V28, .V29, .V30,
+);
+
+// Callee Saved
+arm64_rclob :: @const_slice(
+          Arm64Reg.R19, .R20, .R21, .R22, .R23, .R24, .R25, .R26, .R27, .R28,
+             .V8,  .V9, .V10, .V11, .V12, .V13, .V14, .V15,
+);
+
+// Note: these numbers are NOT the ones you encode in the instructions. ints are of by 1, floats are off by 1+32
+//        it's nice to be able to zero init stuff and have that as a sentinal value. (tmp.phi, arrays in rega)
+//        TMP(0) is QbeNull
+Arm64Reg :: @enum(u8) (
+    RXX,
+     R0,  R1,  R2,  R3,  R4,  R5,  R6,  R7,  
+     R8,  R9, R10, R11, R12, R13, R14, R15, 
+    IP0, IP1, PLA, R19, R20, R21, R22, R23,
+    R24, R25, R26, R27, R28,  FP,  LR,  SP,
+    
+     V0,  V1,  V2,  V3,  V4,  V5,  V6,  V7,
+     V8,  V9, V10, V11, V12, V13, V14, V15,
+    V16, V17, V18, V19, V20, V21, V22, V23,
+    V24, V25, V26, V27, V28, V29, V30, /* V31, // we wasted a bit so don't have space :V31 */
+);
+::assert(Arm64Reg.enum_count() <= Qbe.Tmp0, "too many reg names");
+
+fn TMP(r: Arm64Reg) Qbe.Ref = TMP(@as(i64) r.raw().zext());
+
+
 ArgClass :: @enum(u8) (
     CNone = 0,
     Cstk  = 1, /* pass on the stack */
@@ -630,6 +691,5 @@ fn with(a: *ArgClass, b: ArgClass) void #inline = {
 
 fn CALL(r: RCallArm) Qbe.Ref = CALL(@as(i64) r.repr.zext());
 
-#use("@/backend/arm64/target.fr");
 #use("@/backend/lib.fr");
 #use("@/backend/abi.fr");

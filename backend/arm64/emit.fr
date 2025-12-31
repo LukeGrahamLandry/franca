@@ -1051,5 +1051,35 @@ fn sub_er(sf: Bits, dest: RegO, a: RegI, b: RegI) u32 =
 fn add_er(sf: Bits, dest: RegO, a: RegI, b: RegI) u32 =
     @bits(sf, 0b0001011001, b, 0b011 /*option*/, 0b000 /*imm3*/, a, dest);
 
-#use("@/backend/arm64/target.fr");
+arm64_clob_mask :: Abi.arm64_rclob.interpret_as_bytes().bytes_to_bit_mask();
+
+fn is_float(r: Arm64Reg) bool #inline = 
+    r.raw() >= Arm64Reg.V0.raw();
+
+fn int_id(r: Arm64Reg) u5 #fold = {
+    x := @as(u8) r.raw() - Arm64Reg.R0.raw();
+    @debug_assert_lt(x, 32, "not an int reg");
+    @as(i64) x.zext()
+} 
+
+fn float_id(r: Arm64Reg) u5 #inline = 
+    @as(i64) zext(@as(u8) r.raw() - Arm64Reg.V0.raw());
+
+fn int_reg(r: Qbe.Ref) u5 = {
+    @debug_assert(r.rtype() == .RTmp && r.val() < Qbe.Tmp0, "int_reg %", r);
+    @as(i64) int_id(@as(Arm64Reg) @as(u8) trunc r.val())
+}
+    
+fn float_reg(r: Qbe.Ref) u5 = 
+    @as(i64) float_id(@as(Arm64Reg) @as(u8) trunc r.val());
+
+arm_condition_codes :: @const_slice( // :CmpOrder
+    // Cieq Cine Cisge Cisgt Cisle Cislt Ciuge Ciugt Ciule Ciult
+    Cond.EQ, .NE,  .GE,  .GT,  .LE,  .LT,  .HS,  .HI,  .LS,  .LO,
+    // Cfeq Cfge Cfgt Cfle Cflt Cfne  Cfo Cfuo
+        .EQ, .GE, .GT, .LS, .LO, .NE, .VC, .VS
+);
+
+Abi :: import("@/backend/arm64/abi.fr");
+Arm64Reg :: Abi.Arm64Reg;
 #use("@/backend/lib.fr");
