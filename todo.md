@@ -801,14 +801,6 @@ q.out`impl2__7041:
 ```
 - shader translation for the gui examples
 - mprotect .ConstantData segment after applying relocations
-- some memory corruption thing the first time you run after fixing a compile error (so not when cached). 
-  ```
-  panic! lib/sys/threads.fr:146:5
-  #use("@/lib/sys/sync/atomics.
-  Parse Error: Expected begin expression, found UnterminatedStr
-  ```
-  happens in many different places. 
-  (orb arm is the one i mostly use but it might happen elsewhere as well)
 
 ## amd64
 

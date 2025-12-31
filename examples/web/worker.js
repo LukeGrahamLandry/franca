@@ -228,6 +228,7 @@ let weak_imports = [
     "posix_getdents", "FR_openat", 
     "FR_wasm_jit_event",
     "getpid", "gettid", 
+    "pread", 
 ];
 
 for (const it of weak_imports) {

@@ -3,6 +3,28 @@
 
 - rv: load_number 0xDEADDEAD (ConUndef) to scratch_int in wuffs_lzma__decoder__do_transform_io@14
   - simplified load_number so it compiles now but all the same tests still fail. sad. 
+- the thing with UnterminatedStr when i edit a file and run it in orb (that i thought was memory corruption). 
+  - is definitly a race against zed auto saving when i cmd+tab
+    where my lseek to get the file size is the old one and then i read the new content. 
+  - checked by saving self.lex.src to a file when parse error,
+    spamming it until it happened, and then undoing. 
+    it's truncated to the length it was before my edit.
+  - i guess something about the extra indirection from orb having a linux kernel that shares the file sytem
+    makes it slow enough that i hit that race super frequently? 
+    because the lseek->read gap is always there but i never crash on it when running natively. 
+  - is checking the length again at the end enough? 
+    - is the problem just that its writing between my lseek and read,
+      or is write not atomic and if i try to read while another process is writing i just lose. 
+      like if i edit my 200k sema.fr and add a `{` near the beginning and a `}` near the end 
+      can i observe the first one but not the second? 
+    - rust's fs::read_to_string checks the length just as a hint for the allocation
+      but then reads until it reads nothing. 
+  - might as well also save a syscall by using pread instead of read so don't have to reset the seek position
+  - checking length at the end is not enough. 
+    i can lseek (see old size), read (see new content), lseek (see old size). 
+    that's gotta be an orb bug. it does seem to happen less often tho, maybe. 
+    same thing if you do another read call with the length as the offset and makes sure it returns 0 (which means eof). 
+    also tried calling fsync, didn't help.
 
 ## (Dec 30)
 

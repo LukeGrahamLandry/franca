@@ -1,0 +1,54 @@
+// see devlog/Dec 31, 2025
+// ./target/release/franca-macos-arm64 examples/toy/orbstack_race.fr a & orb ./target/release/franca-linux-arm64 examples/toy/orbstack_race.fr
+// >>> panic! mangled output
+main :: fn() void = {
+    path: CStr = "target/race.txt";
+    buf := u8.list(temp());
+    n := 0;
+    iters := 20_000;
+    if cli_args()[cli_args().len() - 1] == "a" {
+        range(0, iters) { _ |
+            buf&.clear();
+            buf&.reserve(n * 2);
+            set_bytes(buf.maybe_uninit.subslice(0, n), 1);
+            set_bytes(buf.maybe_uninit.subslice(n, n), 2);
+            buf.len = n * 2;
+            msg := buf.items();
+            n += 2;
+            
+            fd := open_trunc(path).unwrap();
+            written := Syscall'write(fd, msg.ptr, msg.len).unwrap();
+            _ := Syscall'close(fd);
+            @assert_eq(written, msg.len);
+        };
+    } else {
+        _ := Syscall'remove(path);
+        _ := Syscall'close(open_trunc(path).unwrap());
+    
+        range(0, iters) { _ |
+            fd := open_read(path).unwrap();
+            length_seek_0 := Syscall'lseek(fd, 0, .End).unwrap();
+            buf&.clear();
+            buf&.reserve(length_seek_0);
+            length_read := Syscall'pread(fd, buf.maybe_uninit.ptr, length_seek_0, 0).unwrap();
+            b: u8 = 0;
+            extra := Syscall'pread(fd, b&, 1, length_read).unwrap();
+            length_seek_1 := Syscall'lseek(fd, 0, .End).unwrap();
+            _ := Syscall'close(fd);
+            
+            if extra == 0 && length_seek_0 == length_read && length_seek_0 == length_seek_1 {
+                buf.len = length_read;
+                buf := buf.items();
+                
+                a, b := (0, 0);
+                for buf { c |
+                    a += int(c == 1);
+                    b += int(c == 2);
+                };
+                @assert_eq(a, b, "mangled output");
+            }
+        };
+    };
+}
+
+#use("@/lib/sys/fs.fr");
