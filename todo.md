@@ -1052,6 +1052,7 @@ actually that's a bit too agressive but certainly stop processing ANSI escape co
 
 ## Graphics
 
+- offsets on storage buffers (they added it in Resource View Update)
 - https://github.com/floooh/sokol/commit/50bbbe4521af356c3b0879e1d46e30114feb4e6b
 - tests that reach discard(), compute shader dispatch(), and create(Attachments)
   - finish gfx-webgpu

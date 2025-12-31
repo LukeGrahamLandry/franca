@@ -136,10 +136,6 @@ bindgroup_t :: @struct {
 };
 
 bindings_cache_t :: @struct {
-    vbs: Array(@struct {
-        buffer: Sg.Buffer;
-        offset: i64;
-    }, Sg.SG_MAX_VERTEXBUFFER_BINDSLOTS);
     ib: @struct {
         buffer: Sg.Buffer;
         offset: i64;
@@ -181,7 +177,7 @@ fn to_wgpu(t: Sg.BufferType, u: Sg.Usage) WGPU.BufferUsage = {
     
     // TODO: better things for flags and then put these numbers in the bindings instead so 
     //       you can sanely use wgpu from franca without the gfx abstraction layer. :LazyMagicNumbers
-    res: i64 = @map_enum(t) (VERTEXBUFFER = 0x20, STORAGEBUFFER = 0x80, INDEXBUFFER = 0x10);
+    res: i64 = @map_enum(t) (STORAGEBUFFER = 0x80, INDEXBUFFER = 0x10);
     (_ = res.bit_or(@if(u == .IMMUTABLE, 0, 0x8))) // CopyDst
 }
 
@@ -224,20 +220,6 @@ fn to_wgpu(prim_type: Sg.PrimitiveType, idx_type: Sg.IndexType) WGPU.IndexFormat
     if(@is(prim_type, .LINE_STRIP, .TRIANGLE_STRIP), => return(to_wgpu(idx_type)));
     .Undefined
 }
-
-fn to_wgpu(it: Sg.VertexStep) WGPU.VertexStepMode = {
-    @if(it == .PER_VERTEX, .Vertex, .Instance)
-}
-
-fn to_wgpu(it: Sg.VertexFormat) WGPU.VertexFormat = @map_enum(it) (
-    FLOAT = .Float32, FLOAT2 = .Float32x2, FLOAT3 = .Float32x3, FLOAT4 = .Float32x4, 
-    INT   = .Sint32,  INT2   = .Sint32x2,  INT3   = .Sint32x3,  INT4   = .Sint32x4, 
-    UINT  = .Uint32,  UINT2  = .Uint32x2,  UINT3  = .Uint32x3,  UINT4  = .Uint32x4, 
-    BYTE4 = .Sint8x4, BYTE4N = .Snorm8x4,  UBYTE4 = .Uint8x4,  UBYTE4N = .Unorm8x4, 
-    SHORT2 = .Sint16x2, SHORT2N = .Snorm16x2, USHORT2 = .Uint16x2, USHORT2N = .Unorm16x2, 
-    SHORT4 = .Sint16x4, SHORT4N = .Snorm16x4, USHORT4 = .Uint16x4, USHORT4N = .Unorm16x4, 
-    UINT10_N2 = .Unorm10_10_10_2, HALF2 = .Float16x2, HALF4 = .Float16x4,
-);
 
 fn to_wgpu(it: Sg.PrimitiveType) WGPU.PrimitiveTopology = @map_enum(it)
     (POINTS = .PointList, LINES = .LineList, LINE_STRIP = .LineStrip, TRIANGLES = .TriangleList, TRIANGLE_STRIP = .TriangleStrip);
@@ -334,7 +316,6 @@ fn init_caps(wgpu: *Impl) void = {
         max_image_size_3d = bitcast l.maxTextureDimension3D,
         max_image_size_array = bitcast l.maxTextureDimension2D,
         max_image_array_layers = bitcast l.maxTextureArrayLayers,
-        max_vertex_attrs = Sg.SG_MAX_VERTEX_ATTRIBUTES,
     );
     
     f := wgpu.sg.formats&;
@@ -657,26 +638,6 @@ fn bindings_cache_clear(wgpu: *Impl) void = {
     wgpu.bindings_cache = zeroed @type wgpu.bindings_cache;
 }
 
-fn bindings_cache_vb_dirty(wgpu: *Impl, index: i64, vb: *Sg.Buffer.T, offset: i64) bool = {
-    @debug_assert((index >= 0) && (index < Sg.SG_MAX_VERTEXBUFFER_BINDSLOTS));
-    dest := wgpu.bindings_cache.vbs&[index]&;
-    if !vb.is_null() {
-        dest.buffer.id != vb.slot.id || dest.offset != offset
-    } else {
-        dest.buffer.id != 0
-    }
-}
-
-fn bindings_cache_vb_update(wgpu: *Impl, index: i64, vb: *Sg.Buffer.T, offset: i64) void = {
-    @debug_assert((index >= 0) && (index < Sg.SG_MAX_VERTEXBUFFER_BINDSLOTS));
-    dest := wgpu.bindings_cache.vbs&[index]&;
-    if !vb.is_null() {
-        dest[] = (buffer = (id = vb.slot.id), offset = offset);
-    } else {
-        dest[] = zeroed @type dest[];
-    }
-}
-
 fn bindings_cache_ib_dirty(wgpu: *Impl, ib: *Sg.Buffer.T, offset: i64) bool = {
     dest := wgpu.bindings_cache.ib&;
     if !ib.is_null() {
@@ -778,8 +739,6 @@ fn apply_bindgroup(wgpu: *Impl, bnd: *Sg.ResolvedBindings) bool = {
     true
 }
 
-// TODO: same shape: apply_X_buffer, bindings_cache_X_dirty, bindings_cache_X_update
-
 fn apply_index_buffer(wgpu: *Impl, bnd: *Sg.ResolvedBindings) bool = {
     rpass_enc := wgpu.rpass_enc.expect("in render pass");
     ib := bnd.ib;
@@ -801,31 +760,6 @@ fn apply_index_buffer(wgpu: *Impl, bnd: *Sg.ResolvedBindings) bool = {
     */
     }
     wgpu.sg.stat(.wgpu_bindings_num_set_index_buffer, 1);
-    true
-}
-
-fn apply_vertex_buffers(wgpu: *Impl, bnd: *Sg.ResolvedBindings) bool = {
-    rpass_enc := wgpu.rpass_enc.expect("in render pass");
-    rangec(0, Sg.SG_MAX_VERTEXBUFFER_BINDSLOTS) { slot, $continue |
-        vb := bnd.vbs&[slot];
-        offset: i64 = intcast bnd.vb_offsets&[slot];
-        if !wgpu.bindings_cache_vb_dirty(slot, vb, offset) {
-            wgpu.sg.stat(.wgpu_bindings_num_skip_redundant_vertex_buffer, 1);
-            continue();
-        };
-        wgpu.bindings_cache_vb_update(slot, vb, offset);
-        if !vb.is_null() {
-            buf_size: i64 = intcast vb.cmn.size;
-            @debug_assert(buf_size > offset);
-            max_bytes := buf_size - offset;
-            setVertexBuffer(rpass_enc, trunc slot, vb.mtl.buf, offset, max_bytes);
-        /* FIXME: the else-pass should actually set a null vertex buffer, but that doesn't seem to work yet
-        } else {
-            setVertexBuffer(rpass_enc, slot, 0, 0, 0);
-        */
-        }
-        wgpu.sg.stat(.wgpu_bindings_num_set_vertex_buffer, 1);
-    };
     true
 }
 
@@ -1355,33 +1289,6 @@ fn create(wgpu: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg.Pipelin
             return(.FAILED);
         }
     } else {
-        wgpu_vb_layouts := zeroed Array(WGPU.VertexBufferLayout, Sg.SG_MAX_VERTEXBUFFER_BINDSLOTS);
-        wgpu_vtx_attrs := zeroed Array(Array(WGPU.VertexAttribute, Sg.SG_MAX_VERTEXBUFFER_BINDSLOTS), Sg.SG_MAX_VERTEX_ATTRIBUTES);
-        wgpu_vb_num := 0;
-        rangeb(0, Sg.SG_MAX_VERTEXBUFFER_BINDSLOTS) { vb_idx, $break |
-            vbl_state := desc.layout.buffers&[vb_idx]&;
-            if(vbl_state.stride == 0, => break());
-            wgpu_vb_layouts&[vb_idx] = (
-                arrayStride = zext vbl_state.stride,
-                stepMode = to_wgpu(vbl_state.step_func),
-                attributes = wgpu_vtx_attrs&[vb_idx]&.as_ptr(),
-                attributeCount = 0,  // set by loop below
-            );
-            wgpu_vb_num += 1;
-        }
-        rangeb(0, Sg.SG_MAX_VERTEX_ATTRIBUTES) { va_idx, $break |
-            va_state := desc.layout.attrs&[va_idx]&;
-            if(va_state.format == .INVALID, => break());
-            vb_idx := va_state.buffer_index;
-            @debug_assert(pip.cmn.vertex_buffer_layout_active&[zext vb_idx]);
-            layout := wgpu_vb_layouts&[zext vb_idx]&;
-            wgpu_vtx_attrs&[zext vb_idx]&[layout.attributeCount] = (
-                format = to_wgpu va_state.format,
-                offset = zext va_state.offset,
-                shaderLocation = trunc va_idx,
-            );
-            layout.attributeCount += 1;
-        }
         ::if(*WGPU.FragmentState);
         ::if(*WGPU.DepthStencilState);
         pip.mtl.rpip = createRenderPipeline(wgpu.dev, @ref @as(WGPU.RenderPipelineDescriptor) (
@@ -1390,8 +1297,6 @@ fn create(wgpu: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg.Pipelin
             vertex = (
                 module = shd.mtl.vertex_func.module,
                 entryPoint = shd.mtl.vertex_func.entry,
-                bufferCount = wgpu_vb_num,
-                buffers = wgpu_vb_layouts&.as_ptr(),
             ),
             primitive = (
                 topology = to_wgpu(desc.primitive_type),
@@ -1774,7 +1679,6 @@ fn apply_bindings(wgpu: *Impl, bnd: *Sg.ResolvedBindings) bool = {
     retval := true;
     if (!wgpu.sg.cur_pass.is_compute) {
         retval = wgpu.apply_index_buffer(bnd) && retval;
-        retval = wgpu.apply_vertex_buffers(bnd) && retval;
     }
     retval = wgpu.apply_bindgroup(bnd) && retval;
     retval

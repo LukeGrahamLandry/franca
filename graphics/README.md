@@ -30,32 +30,34 @@ Various things useful for creating cross platform graphical applications.
 - (macos) no dependency on an objective-c compiler
 - (macos) wait until after setActivationPolicy to set the startup icon/fullscreen (otherwise it doesn't work)
 - (macos) use CAMetalLayer directly (instead of MTKView)
-- (macos) removed ios and opengl support (temporarily?)
+- (macos) removed ios and opengl support
+- (web) no dependency on emscripten
 - glue code for initializing webgpu native (dawn)
 - UNFINISHED
+  - linux, windows
   - don't have timing stuff (frame_duration)
-  - only implemented for macos
   - (macos) msaa
+  - (web) rest of the owl
 
 ### gfx
 
-- generics are a surprise tool that can help us later
+- no special handling of vertex buffers. just use storage buffers. 
 - removed the `query_*_(desc/info/____)` functions
 - no limit for commit listeners. removing doesn't make holes in the array 
   so the order will be different. 
 - (macos) no dependency on an objective-c compiler
-- (macos) removed ios, opengl, and macos <13 support (temporarily?)
+- (macos) removed ios, opengl, and macos <13 support
+- (web) no dependency on emscripten
 - UNFINISHED
+  - linux, windows
   - webgpu
   - logging and trace hooks don't work
   - init(Attachments) 
   - compute shaders
   - validate Shader.Desc `_sg_validate_slot_bits`
   - shutdown (dealloc/deinit/fail resources)
-  - move structs from bindings/sokol to here
   - clean up defaults
   - append/update buffer/image
-  - only implemented for macos
   - (macos) im not setting labels
 
 ### debugtext

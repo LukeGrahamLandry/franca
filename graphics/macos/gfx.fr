@@ -79,7 +79,7 @@ Attachments :: Sg'AttachmentsImpl(Impl, @struct {
 // resource binding state cache
 _SG_MTL_MAX_STAGE_UB_BINDINGS :: Sg.SG_MAX_UNIFORMBLOCK_BINDSLOTS;
 _SG_MTL_MAX_STAGE_UB_SBUF_BINDINGS :: _SG_MTL_MAX_STAGE_UB_BINDINGS + Sg.SG_MAX_STORAGEBUFFER_BINDSLOTS;
-_SG_MTL_MAX_STAGE_BUFFER_BINDINGS :: _SG_MTL_MAX_STAGE_UB_SBUF_BINDINGS + Sg.SG_MAX_VERTEXBUFFER_BINDSLOTS;
+_SG_MTL_MAX_STAGE_BUFFER_BINDINGS :: _SG_MTL_MAX_STAGE_UB_SBUF_BINDINGS;
 _SG_MTL_MAX_STAGE_IMAGE_BINDINGS :: Sg.SG_MAX_IMAGE_BINDSLOTS;
 _SG_MTL_MAX_STAGE_SAMPLER_BINDINGS :: Sg.SG_MAX_SAMPLER_BINDSLOTS;
 
@@ -92,7 +92,6 @@ StateCache :: @struct {
     cur_indexbuffer: *Sg.Buffer.T;
     cur_indexbuffer_id: Sg.Buffer;
     cur_indexbuffer_offset: i32;
-    cur_vs_buffer_offsets: Array(i32, _SG_MTL_MAX_STAGE_BUFFER_BINDINGS);
     buffer: StateCacheEntry(Sg.Buffer, _SG_MTL_MAX_STAGE_BUFFER_BINDINGS);
     image: StateCacheEntry(Sg.Image, _SG_MTL_MAX_STAGE_IMAGE_BINDINGS);
     sampler: StateCacheEntry(Sg.Sampler, _SG_MTL_MAX_STAGE_SAMPLER_BINDINGS);
@@ -140,19 +139,6 @@ fn to_mtl(mtl: *Impl, it: Sg.Usage) M("MTLResourceOptions") = {
     };
     x
 }
-
-fn to_mtl(it: Sg.VertexStep) M("MTLVertexStepFunction") = @map_enum(it)
-    (PER_VERTEX = 1, PER_INSTANCE = 2);
-
-fn to_mtl(it: Sg.VertexFormat) M("MTLVertexFormat") = @map_enum(it) (
-    FLOAT = 28, FLOAT2 = 29, FLOAT3 = 30, FLOAT4 = 31,
-    INT = 32, INT2 = 33, INT3 = 34, INT4 = 35,
-    UINT = 36, UINT2 = 37, UINT3 = 38, UINT4 = 39,
-    BYTE4 = 6, BYTE4N = 12, UBYTE4 = 3, UBYTE4N = 9, 
-    SHORT2 = 16, SHORT2N = 22, USHORT2 = 13, USHORT2N = 19,
-    SHORT4 = 18, SHORT4N = 24, USHORT4 = 15, USHORT4N = 21,
-    UINT10_N2 = 41, HALF2 = 25, HALF4 = 27,
-);
 
 fn to_mtl(it: Sg.PrimitiveType) M("MTLPrimitiveType") = @map_enum(it) 
     (POINTS = 0, LINES = 1, LINE_STRIP = 2, TRIANGLES = 3, TRIANGLE_STRIP = 3);
@@ -234,9 +220,6 @@ fn mtl_minmag(it: Sg.Filter) M("MTLSamplerMinMagFilter") = @map_enum(it)
 
 fn mtl_mipmap(it: Sg.Filter) M("MTLSamplerMipFilter") = @map_enum(it) 
     (NEAREST = 1, LINEAR = 2);
-
-fn _sg_mtl_vertexbuffer_bindslot(sokol_bindslot: i64) i64 =
-    sokol_bindslot + _SG_MTL_MAX_STAGE_UB_SBUF_BINDINGS;
 
 //-- a pool for all Metal resource objects, with deferred release queue ---------
 fn init_pool(mtl: *Impl, desc: *Sg.Desc) void = {
@@ -402,7 +385,6 @@ fn init_caps(mtl: *Impl) void = {
         max_image_size_3d = 2 * 1024,
         max_image_size_array = 16 * 1024,
         max_image_array_layers = 2 * 1024,
-        max_vertex_attrs = Sg.SG_MAX_VERTEX_ATTRIBUTES,
     );
     
     ASSERT_NOT_IOS();
@@ -903,46 +885,10 @@ fn create(mtl: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg.Pipeline
         pip.mtl.winding = to_mtl(desc.face_winding);
         pip.mtl.stencil_ref = zext desc.stencil.ref;
 
-        // create vertex-descriptor
-        vtx_desc := @objc cls("MTLVertexDescriptor").vertexDescriptor();
-        
-        rangeb(0, Sg.SG_MAX_VERTEX_ATTRIBUTES) { attr_index, $break |
-            a_state := desc.layout.attrs&[attr_index]&;
-            if a_state.format == .INVALID {
-                break();
-            }
-            @debug_assert(a_state.buffer_index < Sg.SG_MAX_VERTEXBUFFER_BINDSLOTS);
-            @debug_assert(pip.cmn.vertex_buffer_layout_active&[intcast a_state.buffer_index]);
-            xx := @objc vtx_desc.attributes();
-            it := @objc xx.objectAtIndexedSubscript(attr_index);
-            @objc it.setFormat(to_mtl(a_state.format));
-            @objc it.setOffset(@as(i64) intcast a_state.offset);
-            @objc it.setBufferIndex(_sg_mtl_vertexbuffer_bindslot(intcast a_state.buffer_index));
-        }
-        range(0, Sg.SG_MAX_VERTEXBUFFER_BINDSLOTS) { layout_index | 
-            if pip.cmn.vertex_buffer_layout_active&[layout_index] {
-                l_state := desc.layout.buffers&.index(layout_index);
-                mtl_vb_slot := _sg_mtl_vertexbuffer_bindslot(layout_index);
-                @debug_assert(l_state.stride > 0);
-                xx := @objc vtx_desc.layouts();
-                it := @objc xx.objectAtIndexedSubscript(mtl_vb_slot);
-                @objc_set(it) (
-                    stride = @as(i64) intcast l_state.stride,
-                    stepFunction = to_mtl(l_state.step_func),
-                    stepRate = @as(i64) intcast l_state.step_rate,
-                );
-                if l_state.step_func == .PER_INSTANCE {
-                    // NOTE: not actually used in _sg_mtl_draw()
-                    pip.cmn.use_instanced_draw = true;
-                }
-            }
-        }
-
         rp_desc := new "MTLRenderPipelineDescriptor";
         @debug_assert(shd.mtl.vertex_func.mtl_func != _SG_MTL_INVALID_SLOT_INDEX);
         @debug_assert(shd.mtl.fragment_func.mtl_func != _SG_MTL_INVALID_SLOT_INDEX);
         @objc_set(rp_desc) (
-            vertexDescriptor = vtx_desc,
             vertexFunction = mtl.get_id(shd.mtl.vertex_func.mtl_func),
             fragmentFunction = mtl.get_id(shd.mtl.fragment_func.mtl_func),
             rasterSampleCount = @as(i64) intcast desc.sample_count,
@@ -973,13 +919,7 @@ fn create(mtl: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg.Pipeline
                 sourceRGBBlendFactor = to_mtl(cs.blend.src_factor_rgb),
             );
         }
-        // set buffer mutability for all read-only buffers (vertex buffers and read-only storage buffers)
-        range(0, Sg.SG_MAX_VERTEXBUFFER_BINDSLOTS) { i |
-            if (pip.cmn.vertex_buffer_layout_active&[i]) {
-                mtl_slot := _sg_mtl_vertexbuffer_bindslot(i);
-                set_immutable(@objc rp_desc.vertexBuffers(), mtl_slot);
-            }
-        }
+        // set buffer mutability for read-only storage buffers
         range(0, Sg.SG_MAX_STORAGEBUFFER_BINDSLOTS) { i |
             mtl_slot := shd.mtl.sbuf_buffer_n&[i];
             stage := shd.cmn.storage_buffers&[i].stage;
@@ -1449,31 +1389,6 @@ fn apply_bindings(mtl: *Impl, bnd: *Sg.ResolvedBindings) bool = {
             @debug_assert(bnd.pip.cmn.index_type == .NONE);
             Sg.Sg.INVALID_ID
         };
-        // apply vertex buffers
-        range(0, Sg.SG_MAX_VERTEXBUFFER_BINDSLOTS) { i |
-            continue :: local_return;
-            vb := bnd.vbs&[i];
-            if(vb.is_null(), => continue());
-            mtl_slot := _sg_mtl_vertexbuffer_bindslot(i);
-            @debug_assert(mtl_slot < _SG_MTL_MAX_STAGE_BUFFER_BINDINGS);
-            vb_offset := bnd.vb_offsets&[i];
-            cur := sc.buffer&.index(.VERTEX).index(mtl_slot);
-            sc_off := sc.cur_vs_buffer_offsets&.index(mtl_slot);
-            if cur.id != vb.slot.id || sc_off[] != vb_offset {
-                sc_off[] = vb_offset;
-                if (cur.id != vb.slot.id) {
-                    // vertex buffer has changed
-                    cur.id = vb.slot.id;
-                    @debug_assert(vb.mtl.buf&[intcast vb.cmn.active_slot] != 0);
-                    id := mtl.get_id(vb.mtl.buf&[intcast vb.cmn.active_slot]);
-                    @objc mtl.render_cmd_encoder.setVertexBuffer(id, offset = @as(i64) intcast vb_offset, atIndex = mtl_slot);
-                } else {
-                    // only vertex buffer offset has changed
-                    @objc mtl.render_cmd_encoder.setVertexBufferOffset(@as(i64) intcast vb_offset, atIndex = mtl_slot);
-                }
-                mtl.sg.stat(.mtl_bindings_num_set_vertex_buffer, 1);
-            }
-        }
     }
     
     F :: @Fn(e: ObjCId, s: i32) Sg.Stat;
