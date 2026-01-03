@@ -5,44 +5,42 @@ S :: const_slice;
 bins :: @S(
     ("examples/import_c/cc.fr",     "target/cc.out"),
     ("backend/meta/qbe_frontend.fr", "target/q.out"),
-    ("tests/backend.fr",             "target/r.out"),
     ("examples/import_wasm/run.fr",  "target/w.out"),
 );
 
 // TODO: pass in ./cc.out and ./w.out instead of assuming
 test_cmds :: @S(
-    @S("./target/f.out", "tests/compiler.fr"),
-    @S("./target/r.out", "all", "-bin", "./target/q.out", "-jit"),
-    @S("./target/r.out", "all", "-bin", "./target/q.out", "-w"),
-    @S("./target/r.out", "all", "-bin", "./target/q.out", "-frc"),
-    @S("./target/r.out", "all", "-bin", "./target/q.out", "-frc_inlinable"),
-    @S("./target/f.out", "tests/exe/folding.fr"),
-    @S("./target/f.out", "tests/exe/sys.fr"),
-    @S("./target/f.out", "examples/default_driver.fr", "build", "examples/60fps.fr", "-dynamiclib"),
-    @S("./target/f.out", "tests/c.fr", "-w", "target/w.out"),
-    @S("./target/f.out", "examples/chess/perft.fr", "-fast", "-hush"),
-    @S("./target/f.out", "examples/os/build.fr"),
-    @S("./target/f.out", "tests/exe/cli_args.fr", "a", "b", "c", "d"),
-    @S("./target/f.out", "tests/exe/c_ffi.fr"),
-    @S("./target/f.out", "tests/c.fr"),
-    @S("./target/f.out", "tests/exe/dylibs.fr"),
+    @S("tests/compiler.fr"),
+    @S("tests/backend.fr", "all", "-bin", "./target/q.out", "-jit"),
+    @S("tests/backend.fr", "all", "-bin", "./target/q.out", "-w"),
+    @S("tests/backend.fr", "all", "-bin", "./target/q.out", "-frc"),
+    @S("tests/backend.fr", "all", "-bin", "./target/q.out", "-frc_inlinable"),
+    @S("tests/exe/folding.fr"),
+    @S("tests/exe/sys.fr"),
+    @S("tests/c.fr", "-w", "target/w.out"),
+    @S("examples/chess/perft.fr", "-fast", "-hush"),
+    @S("examples/os/build.fr"),
+    @S("tests/exe/cli_args.fr", "a", "b", "c", "d"),
+    @S("tests/exe/c_ffi.fr"),
+    @S("tests/c.fr"),
+    @S("tests/exe/dylibs.fr"),
 );
 
 with_deps :: @S(
-    @S("./target/r.out", "all", "-bin", "./target/q.out", "-cc", "-force_linker"), // dep:clang
-    @S("./target/r.out", "all", "-bin", "./target/q.out"),  // dep:clang
-    @S("./target/f.out", "tests/external/lox.fr", "-pass", "-hush"), // dep:lox
-    @S("./target/f.out", "examples/import_wuffs/test.fr"),
-    @S("./target/f.out", "tests/exe/generate.fr"),
+    @S("tests/backend.fr", "all", "-bin", "./target/q.out", "-cc", "-force_linker"), // dep:clang
+    @S("tests/backend.fr", "all", "-bin", "./target/q.out"),  // dep:clang
+    @S("tests/external/lox.fr", "-pass", "-hush"), // dep:lox
+    @S("examples/import_wuffs/test.fr"),
+    @S("tests/exe/generate.fr"),
 );
 
 with_deps_skip_rv :: @S(
     // TODO: rv: lzip, lzma, xz: fault
     //       rv: json: FAIL test_wuffs_strconv_parse_number_f64_options
-    @S("./target/f.out", "tests/external/wuffs.fr"),  // dep:wuffs
+    @S("tests/external/wuffs.fr"),  // dep:wuffs
     // TODO: this only has deps because it runs webgpu_api.fr but don't really need that
     // TODO: rv: trace trap: compiler inserted break instruction
-    @S("./target/f.out", "tests/exe/wasm.fr"),
+    @S("tests/exe/wasm.fr"),
 );
 
 fn driver(vtable: *ImportVTable) void = {
@@ -56,7 +54,12 @@ do_it :: fn(vtable: *ImportVTable, s: Str) void = {
     #use("@/lib/sys/process.fr");
     #use("@/lib/sys/fs.fr");
     driver_path := "examples/default_driver.fr";
-    franca_path := get_executable_path(temp());  // TODO: cli arg to set this 
+    franca_path := get_executable_path(temp());
+    ::display_slice(Str);
+    run :: fn(args) => {
+        run_cmd_blocking(franca_path, args) || @panic("failed %", args);
+    };
+    
         @switch(s) {
             @case("--") => ();
             @case("strap") => {
@@ -103,51 +106,49 @@ do_it :: fn(vtable: *ImportVTable, s: Str) void = {
                 do_it(vtable, "run-yes-deps");
             };
             @case("run-no-deps") => {
-                // TODO: instead of hardcoding ./target/f.out use get_executable_path so you can run this directly without rebootstrapping
-                //       tho then its a source of confusion if you run with the release binary and the nrewrite it have way through whe nit build_release
                 for bins { code, dest |
                     sh(@slice(franca_path, driver_path, "build", code, "-o", dest, "-keep-names"));
                 };
                 
-                make_dirs_or_crash("examples/web/target");
-                
                 for test_cmds { cmd | 
-                    sh(cmd);
+                    run(cmd);
                 };
                 
                 ::import("@/examples/testing.fr");
-                build_aoc();
+                build_aoc(franca_path);
                 test_static_repro(franca_path);
                 
                 for dylib_compile_only { file |
                     sh(@slice(franca_path, "examples/default_driver.fr", "build", file, "-dynamiclib", "-o", "target/out/compileonly.dylib"));
                 };
                 
+                // TODO: this is a source of confusion if you had run run_tests.fr with the release compiler
                 do_it(vtable, "release");
             };
             @case("run-yes-deps") => {
                 prospero(franca_path);
-                for with_deps { cmd | 
-                    sh(cmd);
-                };
+                for(with_deps, fn(it) => run(it));
                 build_graphics(franca_path);
                 for deps_compile_only { file |
                     sh(@slice(franca_path, "examples/default_driver.fr", "build", file, "-o", "target/a.out"));
                 };
 
                 if query_current_arch() != .rv64 {
-                    for(with_deps_skip_rv, fn(it) => sh(it));
+                    for(with_deps_skip_rv, fn(it) => run(it));
                 };
                 if query_current_os() == .macos {
                     // TODO: linux: need to transcribe signal.h
-                    sh(@S("./target/f.out", "tests/external/lua.fr"));  // dep:lua
+                    run(@slice("tests/external/lua.fr"));  // dep:lua
                 };
                 if query_current_os() == .macos && query_current_arch() == .aarch64 {
                     // TODO: need to write config.h for non-macos-arm
-                    sh(@S("./target/f.out", "tests/external/tcc.fr", "-ddc"));  // dep:tcc dep:clang
+                    run(@slice("tests/external/tcc.fr", "-ddc"));  // dep:tcc dep:clang
                 };
                 if current_os() == .linux {  // SKIP: non-free operating systems
                     sh(@slice(franca_path, "tests/external/hare.fr"));
+                };
+                if current_os() == .linux {
+                    run(@slice("tests/external/bubblewrap.fr"));
                 };
             };
             @default => @eprintln("IGNORE: %", s);
@@ -236,7 +237,7 @@ build_release :: fn(vtable: *ImportVTable) void = {
 dylib_compile_only :: @const_slice(
     "examples/default_driver.fr",  // so meta, many wow
     "examples/60fps.fr",  // interactive
-    "examples/soft_draw.fr", // interactive & no aot
+    "examples/soft_draw.fr", // interactive & no aot so just make sure the driver still compiles
     "examples/parsegen/main.fr",  // TODO: bootstrapping decision
 );
 
@@ -292,11 +293,11 @@ test_static_repro :: fn(franca_path: Str) void = {
     println("OK: linux_native_no_libc");
 };
 
-build_aoc :: fn() void = {
+build_aoc :: fn(franca: Str) void = {
     // TODO: aoc/2025 too
     files := collect_with_extension("examples/aoc/2024", ".fr").unwrap();
-    run_tests_main_threaded(void, Str, (), files.items(), fn(_, a) = a[], fn(ctx, file) = {
-        ok, out, err := exec_and_catch("target/f.out", @slice("examples/default_driver.fr", "build", @tfmt("examples/aoc/2024/%", file[]), "-o", "/dev/null"), temp());
+    run_tests_main_threaded(Str, Str, franca, files.items(), fn(_, a) = a[], fn(franca, file) = {
+        ok, out, err := exec_and_catch(franca, @slice("examples/default_driver.fr", "build", @tfmt("examples/aoc/2024/%", file[]), "-o", "/dev/null"), temp());
         (ok, out, err, "")
     });
 };

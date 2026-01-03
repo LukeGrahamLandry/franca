@@ -1,4 +1,13 @@
 
+- nightmare hour: don't hardcode "target" everywhere
+- i'm not sure what to do with open_temp_file. is it better to use the TMPDIR (/tmp or whatever) 
+  so the os knows it can discard them at some point 
+  or to have a blanket policy of "i never write outside the ./target directory"
+- it's dumb that my opt/promote is defeated by add 0 
+  so if your frontend is lazy and always emits the add for struct fields,
+  i won't promote single field structs to scalars early. 
+- sort the yes-deps tests that need clang vs ones that just need to download something but then use only my compilers. 
+  - sort the ones that need libc out of the no-deps tests
 - wasteful that i actually produce 0xDEADDEAD in a register when 
   there's a codepath with a stack slot used before defined and can't prove its unreachable. 
   but if you don't do that its crazy town where uninit memory can have a different value every time it's observed. 

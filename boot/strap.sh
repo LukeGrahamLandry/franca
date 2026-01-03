@@ -21,13 +21,13 @@ case "$target_name" in
     echo "Unsupported target: ${target}"; exit 2;;
 esac
 
-mkdir -p target
-exe_path="./target/${hash}.out"
+mkdir -p target/franca/fetch
+exe_path="./target/franca/fetch/${hash}.out"
 if [ ! -x "$exe_path" ]; then
     # TODO: curling stuff is not acceptable
     curl "https://lukegrahamlandry.ca/franca/bin/${url}" -o "$exe_path"
-    echo "$hash $exe_path" > ./target/${hash}.hash 
-    sha256sum --check ./target/${hash}.hash
+    echo "$hash $exe_path" > ./target/franca/fetch/${hash}.hash 
+    sha256sum --check ./target/franca/fetch/${hash}.hash
     chmod +x "$exe_path"
 fi
 FRANCA_BACKTRACE=1 "$exe_path" tests/run_tests.fr -- core

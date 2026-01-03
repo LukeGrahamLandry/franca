@@ -1,10 +1,11 @@
 # openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout target/key.pem -out target/cert.pem
-# https://localhost:8000/examples/web/hello.html
+# https://localhost:8000/index.html
 
 HOST = "localhost"
 PORT = 8000
 import http.server
 import ssl
+import os
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     def end_headers(self):
@@ -12,9 +13,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Cross-Origin-Opener-Policy", "same-origin")
         super().end_headers()
 
+os.chdir("target/web")
 with http.server.HTTPServer((HOST, PORT), Handler) as httpd:
     print("Web Server listening at => " + HOST + ":" + str(PORT))
     sslcontext = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    sslcontext.load_cert_chain(keyfile="target/key.pem", certfile="target/cert.pem")
+    sslcontext.load_cert_chain(keyfile="../key.pem", certfile="../cert.pem")
     httpd.socket = sslcontext.wrap_socket(httpd.socket, server_side=True)
     httpd.serve_forever()

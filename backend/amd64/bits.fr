@@ -12,8 +12,11 @@ opcode (ref[po]) selects the instruction. [byte] or [0x0F] [byte]          (some
 sometimes the same opcode has multiple meanings
     - opcode extension (ref[o]) stored in reg field of modR/M.
        ref[o] can be 0-7 or r means it encodes a register. fel notation is /0, /1, etc or /r
+       note that takes up a register slot so it will be instructions with 
+         - an implied register (i.e. shift amount always in rcx or push/pop address is the stack)
+         - one arg is an immediate
     - mandetory prefix (ref[pf]) 
-sometimes operand register is stored in the opcode number, (like pop is 50+r with r being register number 0-7).
+sometimes operand register is stored in the opcode number, (like pop is 58+r with r being register number 0-7).
     with extension bit in REX to encode the high 8 registers (TODO: which bits of rex? all?).
 for ones with a condition code thats often in the opcode number as well. (like 70+X86cc for jump short). 
 
@@ -22,6 +25,9 @@ The opcode decides which arg is memory. (ie. 0x29 is sub with memory on the left
 - since every instruction is a load or a store, you suddenly care about the difference between operand sizes more than on arm. 
   like 32 bit and 64 bit or are not interchangeable because they stomp different amounts of memory. 
 - most instructions are 2-address where the left input is also the output.
+- when direct (both args in reg), everything has redundant encoding 
+  because you can swap both "left" vs "right" and which reg is in r and m. 
+  like 'a = sub a b' can be encoded as r = 0x2B r m; (r=a, m=b)' OR 'm = 0x29 m r; (r=b, m=a)'
 
 modR/M has 3 fields: mod:2, reg:3, rm:3.
 the meanings of the fields change based on mod and rm. see fn table_modrm.
@@ -40,12 +46,20 @@ some observations:
 - modR/M + SIB is mostly orthogonal to opcode (except for the extension in reg). 
 
 REX byte has 4 fields: 0b0100, W:1, R:1, X:1, B:1
-W changes the operand size of some instructions. fel has `REX.W` in the opcode column.
+W changes the operand size of some instructions (to 64 bit). fel has `REX.W` in the opcode column.
 The others are extensions to change 3 bit fields to 4 bit. (R=reg, X=index, B=rm or base).
+   because the registers past 8 were added later and they didn't have space in the 3 bit r/m/s/i fields anymore. 
 - note that when you select sib, the 0 and 1 extended rm mean the same thing so you don't need B for that and its used for base instead. 
+Most of the time the REX byte is optional (if all the fields are 0, don't need the extra byte), 
+but for some instructions the presence of REX at all changes the meaning (see force_rex in emit.fr). 
 
 The important take away is that you can't just encode whatever registers you want, because some are magic placeholders 
 that change the meaning of the fields, so you can't express all combinations of registers used + meanings. 
+
+Float instructions often have prefix 0xF2/0xF3 that chooses the size of operand (sd vs ss). 
+(fel) NP stands for No Prefix.
+
+RIP relative disp is from the end of the instruction. (unlike arm) so jmp 0 is a nop. 
 
 */
 
@@ -116,7 +130,6 @@ precision_prefix :: 0x66;
 endbr64 :: 0xfa1e0ff3;
 
 // note: a,b,c,d are NOT in order!
-// note: names matter! i use them in x86_encoding test to compare against llvm-mc's disassembly. 
 X86Reg :: @enum(u4) (
     rax = 0b0000, // 0
     rcx = 0b0001,
@@ -176,6 +189,7 @@ fn table_modrm(mode: ModrmMode, rm: X86Reg) ModRmMeaning #fold = {
 }
 
 fn table_sib(mode: ModrmMode, index: X86Reg, base: X86Reg) SibMeaning #fold = {
+    // pleasing parallel with arm: on amd index=sp means no index register, on arm sp and xzr having same encoding. 
     sp := index == X86Reg.rsp;  // no index register is encoded??
     bp_r13 := rm.eq(X86Reg.rbp).or(rm == X86Reg.r13);   // no base register is encoded?? just the extension bit i guess?
     @match(mode) {
@@ -185,13 +199,6 @@ fn table_sib(mode: ModrmMode, index: X86Reg, base: X86Reg) SibMeaning #fold = {
         fn Direct()     => panic("no sib byte with direct addressing");
     }
 }
-
-// REX prefix lets you use new numbered registers
-// (fixed:u4 = 0100, 64_bit_operand?:u1, reg_extend:u1 = 1 for r8-r15, indexing_extend:u1, rm_extend:u1 = 1 for r8-r15)
-// TODO: i dont understand what 64_bit_operand does for me. r__ instead of e__ makes sense, same as arm,
-//       but it also lets me `mov rsp, -256` which seems unrelated? 
-// and then the modrm byte is 
-// (??:u2:11, reg:u3 = src, rm:u3 = accumulator)
 
 ModrmMode :: @enum(u2) (
     Indirect00 = 0b00, // one operand is an address
@@ -208,7 +215,7 @@ fn pack_modrm(mode: ModrmMode, rm__dest_or_addr: X86Reg, reg__src: X86Reg) u8 = 
 }
 
 // 0100WRXB
-// W = use 64-bit operand?? idk
+// W = use 64-bit operand
 // R = extend modrm.reg
 // X = extend sib.index
 // B = extend modrm.rm OR sib.base

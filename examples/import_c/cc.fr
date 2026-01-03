@@ -12,6 +12,8 @@ Args :: @struct {
     no_builtin_headers := false;
     jit_args: []CStr = empty();
     prelude := "";
+    // this lets you do tremendously hacky things
+    inject: ?C.Compile.TransformCall = .None;
 };
 
 Crash :: import("@/lib/crash_report.fr");
@@ -172,10 +174,10 @@ fn compile(args: Args) Result(void, Str) = {
     // it's nicer to just generate a string and pass it in, so it can just be treated as an opaque blob in FrcModule.dep 
     // when deciding if a cache file can be reused. 
     src := create_single_source(args&);
-    compile(src, args.target, args.debug, args.output_path, args.no_builtin_headers, args.jit_args)
+    compile(src, args.target, args.debug, args.output_path, args.no_builtin_headers, args.jit_args, args.inject)
 }
 
-fn compile(src: Str, target: QbeTargetEnv, debug: Str, output_path: Str, no_builtin_headers: bool, jit_args: []CStr) Result(void, Str) = {
+fn compile(src: Str, target: QbeTargetEnv, debug: Str, output_path: Str, no_builtin_headers: bool, jit_args: []CStr, inject: ?C.Compile.TransformCall) Result(void, Str) = {
     m := @uninitialized QbeModule;
     
     backend'init_module(m&, target);
@@ -186,6 +188,9 @@ fn compile(src: Str, target: QbeTargetEnv, debug: Str, output_path: Str, no_buil
     
     c := C'Compile.Ctx.zeroed();
     import_c'init_c(c&, m&, ctx);
+    if inject { inject |
+        c.transform = inject;
+    };
     c.allow_builtin_headers = !no_builtin_headers;
     
     prog := @try(c&.import_c'compile_c("-", src)) return;

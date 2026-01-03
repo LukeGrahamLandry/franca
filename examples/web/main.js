@@ -6,6 +6,7 @@ if (typeof Worker === "undefined")
 
 let thread_pool = []
 let running_threads = []
+let doing_test = false;
 const handle = (_msg) => {
     const msg = _msg.data;
     switch (msg.tag) {
@@ -127,7 +128,7 @@ const toggle_worker = async () => {
             const url = new URL(window.location);
             url.searchParams.set("dbg", dbg);
             if (dbg === "") url.searchParams.delete("dbg");
-            history.replaceState(null, '', url);
+            if (!doing_test) history.replaceState(null, '', url);
         }
         
         const args = [
@@ -226,7 +227,7 @@ const load_example = async (path) => {
     document.getElementById("err").innerText = "SLOW\n";
     try {
         document.getElementById("in").value = await get_file(path);
-    } catch (e) {
+    } catch (s) {
         document.getElementById("out").value += `${s.toString()}\n\n${s.stack}`;
     }
     document.getElementById("err").innerText = "";
@@ -266,14 +267,14 @@ document.getElementById("compiler").onchange = function () {
     
     const url = new URL(window.location);
     url.searchParams.delete("file");
-    history.replaceState(null, '', url);
+    if (!doing_test) history.replaceState(null, '', url);
 };
 document.getElementById("example").onchange = function () {
     load_example(this.value);
     
     const url = new URL(window.location);
     url.searchParams.set("file", this.value);
-    history.replaceState(null, '', url);
+    if (!doing_test) history.replaceState(null, '', url);
 };
 show_compilers();
 
@@ -340,9 +341,12 @@ document.getElementById("all").onclick = async () => {
     let results = "";
     let all = 0;
     let passed = 0;
-
+    
+    // (safari) this avoids "Unhandled Promise Rejection: SecurityError: Attempt to use history.replaceState() more than 100 times per 10 seconds"
+    doing_test = true;
     let compiler = document.getElementById("compiler");
     let saved_c = compiler.options.selectedIndex;
+    let errors = "";
     for (const [i, it] of manifest.compilers.entries()) {
         compiler.options.selectedIndex = i;
         let examples = it.examples;
@@ -354,15 +358,18 @@ document.getElementById("all").onclick = async () => {
             await wait(() => !running, 25, 10000);
             let ok = err.innerText.length == 0;
             results += " " + (ok ? "ok" : "FAIL") + "\n";
+            if (!ok) errors += "\n\n" + it + "\n";
+            errors += err.innerText;
             if (ok) passed += 1;
             err.innerText = "";
             all += 1;
         }
     }
+    doing_test = false;
     compiler.options.selectedIndex = saved_c;
     let msg = `Passed ${passed}/${all} tests in ${Math.round(performance.now() - start)}ms.`;
     document.getElementById("out").value =
-        `${msg}\n\n${results}`;
+        `${msg}\n\n${results}\n${errors}`;
     document.getElementById("in").value = saved;
     document.getElementById("stale").hidden = false;
     document.getElementById("time").innerText = msg; 

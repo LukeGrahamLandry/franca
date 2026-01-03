@@ -192,10 +192,12 @@ Ctx :: @rec @struct {
     
     speculate: bool; // hack
     
-    franca_env: Qbe.Ref;
     emitter: *CodegenShared;
     import_type_cache: []Array(*CType, 2);
     codemap: import("@/compiler/codemap.fr")'CodeMap;
+    
+    transform: @FnPtr(c: *Ctx, obj: *Obj, task: *CodegenTask) void;
+    // transform: TransformCall;  // tests/todo/rec_fnptr_field.fr
     
     /// Tokenize
     current_file: *File;
@@ -219,6 +221,8 @@ Ctx :: @rec @struct {
     allow_builtin_headers: bool;
     cached_number_tokens: Array(*Token, 2);
 };
+
+TransformCall :: @FnPtr(c: *Ctx, obj: *Obj, task: *CodegenTask) void;
 
 fn align_down(n: i64, align: i64) i64 = 
     align_to(n - align + 1, align);
@@ -1030,7 +1034,8 @@ fn declaration(c: *Ctx, tok: *Token, basety: *CType, attr: ?*VarAttr, first_decl
             continue();
         };
         
-        var := c.new_lvar(c.get_ident(ty.name), ty);
+        name := c.get_ident(ty.name);
+        var := c.new_lvar(name, ty);
         if attr { attr |
             if attr.align != 0 {
                 var.align = attr.align;  // TODO
@@ -1051,8 +1056,7 @@ fn declaration(c: *Ctx, tok: *Token, basety: *CType, attr: ?*VarAttr, first_decl
         if consume(tok&, tok, "=") {
             c.lvar_initializer(tok&, tok, var);
         };
-
-        if(var.ty.size < 0,         => @error_tok(c, ty.name, "variable has incomplete type"));
+        if(var.ty.size < 0,         => @error_tok(c, ty.name, "variable '%' has incomplete type", name));
         if(var.ty.kind == .TY_VOID, => @error_tok(c, ty.name, "variable declared void"));
     };
     
@@ -2256,7 +2260,6 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *T
     
     c.leave_scope();
     c.current_fn = .None;
-    c.franca_env = QbeNull;
     c.f = Qbe.Fn.ptr_from_int(0);
     c.yield(f);
     @debug_assert_eq(depth, c.scope_depth);

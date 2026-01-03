@@ -1,0 +1,184 @@
+//
+// --clearenv --setenv PATH $PATH --new-session --dev /dev --die-with-parent --unshare-all --proc /proc --dir /tmp --ro-bind /usr /usr --symlink usr/lib64 /lib64 --symlink usr/lib /lib --ro-bind . foo --bind ./target foo/target --chdir foo -- ./target/release/franca-linux-arm64 tests/run_tests.fr core
+// - /dev/null for external/hare.fr 
+// - /proc/self/cmdline for exe/cli_args.fr 
+// - /tmp for open_temp_file 
+// - /usr, /lib for dynamically linked exes. 
+//   /usr/bin   the run-yes-deps tests need clang 
+//   $PATH      "
+// - /lib64 for amd
+//
+// TODO: file listing all the deps so they can be downloaded before entering the sandbox 
+//       and i don't have to give it network access. 
+// TODO: make fetch_git_commit first save to target/franca/fetch 
+//       so that's the only part i need to share and the rest can be --tmpfs
+// what works now:
+// --tmpfs foo/target --ro-bind target/franca/fetch foo/target/franca/fetch --bind target/franca/deps foo/target/franca/deps --bind ./target/release foo/target/release
+//       really i also shouldn't let it write to the real release/, just copy in the starting binary
+// TODO: preset args for the different groups of my tests. 
+//       syscalls, dynamic, deps_fetch, deps_cc 
+// 
+// TODO: make it work on rv. i need to to work on the multiarch thing, at that point do i just have to ask your c compiler for include path?
+//       /usr/lib/gcc-cross/riscv64-linux-gnu/14/../../../../riscv64-linux-gnu/include
+//
+
+// usage: franca tests/external/bubblewrap.fr -- [OPTIONS...] [--] COMMAND [ARGS...]
+// everything after the first '--' is passed to a newly compiled bwrap. 
+main :: fn() void = {
+    if query_current_os() != .linux {
+        eprintln("WARN: bubblewrap only supports linux");
+        eprintln("      and i don't bundle enough headers for this one so it probably won't even compile.");
+    };
+    path := "target/bwrap.out";
+    compile_bubblewrap(path);
+    
+    args := cli_args();
+    i := args.index_of(fn(it) => it[] == "--") || {
+        // running something is optional. else just exit after compiling. 
+        @println("compiled %", path);
+        return();  
+    };
+    args := build_exec_args(path, args.rest(i + 1));
+    import("@/lib/sys/subprocess.fr")'exec(args);
+    unreachable();
+}
+
+// this requires the system headers (not import_c's builtin ones)
+compile_bubblewrap :: fn(out_path: Str) void = {
+    // if you update this be careful of the realpath hack below
+    get  :: import("@/examples/testing.fr").fetch_or_crash;
+    root := get("https://github.com/containers/bubblewrap/archive/d6180f25b164c708b8b0a0d86d6a9642f30cd9a9.tar.gz", 131018, "781193d6c6ed4dfd4294ccf90d46b508b2c149132ab594da1debcf09f308e0d2", "bubblewrap-d6180f25b164c708b8b0a0d86d6a9642f30cd9a9");
+    
+    include_dir := "target/bwrap_include";
+    make_dirs_or_crash(@tfmt("%/sys", include_dir));
+    write_entire_file_or_crash(@tfmt("%/config.h", include_dir), config_h);
+    write_entire_file_or_crash(@tfmt("%/sys/capability.h", include_dir), capability_h);
+    target_arch := query_current_arch();
+    arch_name := @match(target_arch) {
+        fn x86_64()  => "x86_64";
+        fn aarch64() => "aarch64";
+        fn rv64()    => "riscv64";
+        @default     => todo();
+    };
+    
+    files := @slice("bubblewrap.c", "bind-mount.c", "network.c", "utils.c");
+    CCC'compile(
+        output_path = out_path,
+        input_path = files,
+        includes = @slice(
+            root, 
+            include_dir, 
+            // TODO: echo | clang -E -Wp,-v -
+            //       but then have to filter out the one with arg,def,bool etc. because the builtin ones are always last but makes more sense to use them
+            "/usr/local/include",
+            @tfmt("/usr/include/%-linux-gnu", arch_name),
+            "/usr/include", 
+        ),
+        target = (
+            type = .Exe, 
+            os = .linux, 
+            arch = target_arch,
+            wrap_entry_for_linux_libc = true,
+        ),
+        no_builtin_headers = true,
+        // TODO: this is what the system headers expect. move it into the compiler perhaps. 
+        prelude = """
+            #define __signed__ signed
+
+            // hope this is only used in structs. TODO: still wrong because alignment
+            typedef struct { long[2]; } __uint128_t;  
+            
+            /// TODO: these should be in the compiler 
+            typedef unsigned long __SIZE_TYPE__;
+            typedef unsigned long __UINTPTR_TYPE__;
+            typedef long __INTMAX_TYPE__;
+            typedef unsigned long __UINTMAX_TYPE__;
+            typedef short __WCHAR_TYPE__;
+            typedef long __INTPTR_TYPE__;
+            typedef long __PTRDIFF_TYPE__;
+            #define __SIZE_MAX__ ((unsigned long) ~0)
+            #define __LONG_MAX__ ((long) ~(1<<63))
+            
+            // :NoDoubleUnderscoreArch
+            #if __x86_64
+            #define __x86_64__
+            #define __LP64__ 1
+            #endif
+        """,
+        inject = (Some = transform_null_realpath),
+    ).or(fn(msg) => @panic("failed to compile bubblewrap\n%", msg));
+}
+
+// HACK: THIS IS STUPID but somehow less of a pain in the ass than dealing with glibc symbol versioning :FUCKED
+// - if you just import realpath without asking for a specific version you get one (__old_realpath in the glibc source)
+//   that errors if you pass null as the second argument (which bubblewrap does). 
+// - only needed on amd
+// - i've achieved the worst of both worlds: im using the system headers so it won't just work you have that installed
+//   but also they don't have enough information so i still have to tweak random shit like this.
+// - this only works because the happen to call realpath with the literal NULL not with a variable whose value is null.  
+// - the sane thing to do would just be to use a blessed linker, 
+//   which wouldn't be a big loss because i already depend on a c toolchain being installed for the headers, 
+//   but i don't like linkers and nobody else uses my code so sanity is not number one priority.
+
+fn transform_null_realpath(c: *CCC.C.Compile.Ctx, obj: *CCC.C.Compile.Obj, task: *Qbe.CodegenTask) void = {
+    @if(c.m.goal.type == .Relocatable) return();
+    @if_let(task[]) fn Func(f) => {
+        for_blocks f { b |
+            each b.ins { i |
+                if i.op() == .call {
+                    transform_null_realpath(f, b, i);
+                }
+            };
+        };
+    };
+}
+
+fn transform_null_realpath(f: *Qbe.Fn, b: *Qbe.Blk, call: *Qbe.Ins) void = {
+    @if(rtype(call.arg&[0]) != .RCon) return();
+    callee := f.get_constant(call.arg&[0]);
+    @if(callee.type() != .CAddr) return();
+    name := f.globals.str(callee.sym);
+    @if(name != "realpath") return();
+    ins := igroup(b, call);
+    @debug_assert_eq(ins.len, 3, "wrong realpath signeture or TODO: arge");
+    @if(ins[1].arg&[0] != Qbe.ConZero) return();
+    ins[1] = ins[2];
+    ins[1].arg&[0] = f.symcon("canonicalize_file_name");
+    ins[2]&.set_nop();
+}
+
+// alternatively: [apt-get install libcap-dev], [cc *.c -lcap -o bwrap]. 
+capability_h :: """
+    #include <linux/capability.h>
+    #include <sys/syscall.h>
+    
+    // adding a 15k line dependency for these 2 syscall wrappers is not reasonable. 
+    int capset(void *h, void *d) {
+        return syscall(SYS_capset, h, d);
+    }
+    int capget(void *h, void *d) {
+        return syscall(SYS_capget, h, d);
+    }
+    
+    // this is only needed for --cap-add/--cap-drop which i don't care about rn.
+    static int cap_from_name(const char *a, int *b) { return -1; }
+    typedef int cap_value_t;
+""";
+
+config_h :: """
+    #pragma once
+    #define _GNU_SOURCE 1
+    #define PACKAGE_STRING "franca"
+""";
+
+build_exec_args :: fn(bin: Str, args: []CStr) []CStr = {
+    a := temp().alloc_uninit(CStr, args.len + 2);
+    a[0] = bin.as_cstr();
+    a.subslice(1, args.len).copy_from(args);
+    a[a.len - 1] = zeroed(CStr);
+    a
+}
+
+#use("@/lib/sys/fs.fr");
+CCC :: import("@/examples/import_c/cc.fr");
+Qbe :: CCC.C.Compile.Qbe;

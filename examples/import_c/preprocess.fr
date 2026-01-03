@@ -655,7 +655,7 @@ fn search_include_paths(c: *Ctx, filename: Str) ?Str = {
         };
     };
     
-    @if(c.allow_builtin_headers)
+    @if(c.allow_builtin_headers || (c.m.goal.os == .linux && compiler_magic_headers.contains(filename)))
     if find_builtin_header(filename) { _ |
         return(Some = @tfmt("%%", HACK_BUILTIN_FOLDER_PREFIX, filename));
     };
@@ -673,7 +673,7 @@ fn search_include_next(c: *Ctx, filename: Str) ?Str = {
         };
     };
    
-    @if(c.allow_builtin_headers) 
+    @if(c.allow_builtin_headers || (c.m.goal.os == .linux && compiler_magic_headers.contains(filename)))
     if find_builtin_header(filename) { _ |
         return(Some = @tfmt("%%", HACK_BUILTIN_FOLDER_PREFIX, filename));
     };
@@ -798,6 +798,18 @@ fn read_line_marker(c: *Ctx, rest: **Token, tok: *Token) void = {
     start.file.display_name = tok.val.str_buf.slice(tok.ty.size.intcast() - 1);  // no null terminator
 }
 
+fn read_warn_text(c: *Ctx, tok: **Token) Str = {
+    tok := c.copy_line(tok, tok.next);
+    tok := c.preprocess2(tok);
+    c.join_adjacent_string_literals(tok);
+    msg := @ref u8.list(temp());
+    while => tok.kind != .TK_EOF {
+        @fmt(msg, "% ", tok.string_value() || tok.str());
+        tok = tok.next;
+    };
+    msg.items()
+}
+
 fn check_hide(c: *Ctx, tok: *Token) void = {
     if c.hide_stack&.last() { hide | 
         if identical(hide._1, tok) {
@@ -843,6 +855,7 @@ fn preprocess2(c: *Ctx, tok: *Token) *Token = {
         start := tok;
         tok = tok.next;
         
+    start_kw := tok.next;
     @match(contextual_keyword(tok.str(), Directive)) {
         fn include() => {
             start := tok.next;
@@ -940,10 +953,13 @@ fn preprocess2(c: *Ctx, tok: *Token) *Token = {
                 !tok.at_bol
             };
         }
-        fn error() => @error_tok(c, tok, "error");
+        fn error() => {
+            msg := c.read_warn_text(tok&);
+            @error_tok(c, start_kw, "error: %", msg);
+        }
         fn warning() => {
-            @warn_tok(c, tok, "warning");
-            tok = skip_line(tok.next.next);
+            msg := c.read_warn_text(tok&);
+            @warn_tok(c, start_kw, "warning: %", msg);
         };
         
         // TODO: maybe add_include_path should be `#pragma franca FOO` instead of `#FOO`
@@ -1103,13 +1119,25 @@ fn init_macros(c: *Ctx) void = {
         localtime_r(now&, c.macro_time&);
     */
     
+    // made up names i've been using
     c.define_macro(@tfmt("__%", c.m.goal.os), "1");
     c.define_macro(@tfmt("__%", c.m.goal.arch), "1");
+    
+    // the standard ones have two underscores. 
+    // TODO: if i do this then tcc tries to rt_getcontext which i don't want to do the headers for. :NoDoubleUnderscoreArch
+    //c.define_macro(@tfmt("__%__", c.m.goal.arch), "1");
+    
     // #if defined(__unix__) || defined(__MACH__)
     //c.define_macro("__MACH__", "1");
 }
 
 HACK_BUILTIN_FOLDER_PREFIX :: "__builtin://";
+
+// these don't live in the normal system include paths, 
+// they're in clang/gcc version specific places, 
+// so i guess i'm supposed to always provide my own. 
+// which makes sense. 
+compiler_magic_headers :: @const_slice("stddef.h", "stdarg.h", "stdbool.h");
 
 fn find_builtin_header(filename: Str) ?Str = {
     if filename.ends_with(".h") {

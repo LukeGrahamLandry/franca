@@ -2,11 +2,11 @@
 driver :: fn(vtable: *ImportVTable) void = {
     ci := get_environment_variable("GITHUB_REPOSITORY").is_some();
     franca := get_executable_path(temp());
-    make_dirs_or_crash("examples/web/target");
+    make_dirs_or_crash("target/web/target");
 
     ok := run_cmd_blocking(franca, @slice("graphics/web/webgpu_api.fr"));
     @assert(ok, "failed build");
-    ok := run_cmd_blocking(franca, @slice("examples/default_driver.fr", "build", "examples/os/host/web.fr", "-o", "examples/web/target/demo.wasm", "-arch", "wasm32", "-unsafe", "-dynamiclib", "-keep-names"));
+    ok := run_cmd_blocking(franca, @slice("examples/default_driver.fr", "build", "examples/os/host/web.fr", "-o", "target/web/target/demo.wasm", "-arch", "wasm32", "-unsafe", "-dynamiclib", "-keep-names"));
     @assert(ok, "failed build");
     
     commit := if ci {
@@ -32,10 +32,14 @@ driver :: fn(vtable: *ImportVTable) void = {
     manifest := u8.list(temp());
     m&.dump_json(manifest&);
     
-    write_entire_file_or_crash("examples/web/target/manifest.json", manifest.items());
-    write_entire_file_or_crash("examples/web/target/app.js", read_entire_file_or_crash(temp(), "graphics/web/app.js"));
-    write_entire_file_or_crash("examples/web/target/gfx.js", read_entire_file_or_crash(temp(), "graphics/web/gfx.js"));
-    write_entire_file_or_crash("examples/web/target/webgpu.g.js", read_entire_file_or_crash(temp(), "target/franca/webgpu.g.js"));
+    copy :: fn(dest, src) => write_entire_file_or_crash(dest, read_entire_file_or_crash(temp(), src));
+    write_entire_file_or_crash("target/web/target/manifest.json", manifest.items());
+    copy("target/web/target/app.js", "graphics/web/app.js");
+    copy("target/web/target/gfx.js", "graphics/web/gfx.js");
+    copy("target/web/target/webgpu.g.js", "target/franca/webgpu.g.js");
+    copy("target/web/main.js", "examples/web/main.js");
+    copy("target/web/worker.js", "examples/web/worker.js");
+    copy("target/web/index.html", "examples/web/index.html");
     
     // TODO: this is slowly approching crazy town...
     if ci {
@@ -148,9 +152,7 @@ collect_paths :: fn(a: Alloc, root: []Str) List(Str) = {
         (walk_directory_unordered(as_cstr s) { e |
             continue :: local_return;
             if e.is(.Directory) {
-                skip := @const_slice(".git", "target", "examples/web/target");
-                if(s == "." && skip.contains(e.name), => continue());
-                skip := @const_slice(".", "..", "node_modules", "tracy", "cimgui", "test_wasm_rt");
+                skip := @const_slice(".", "..", ".git", "node_modules", "target");
                 if(skip.contains(e.name), => continue());
                 
                 dirs&.push(@tfmt("%/%", s, e.name));

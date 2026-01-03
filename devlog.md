@@ -1,4 +1,51 @@
 
+## (Jan 2)
+
+on amd clang's binary works but mine doesn't. 
+- `bwrap: Can't find source path /usr: Invalid argument`
+- the place that says that error is realpath. 
+- man page: "(Before glibc 2.3, this error is also returned if resolved_path is NULL."
+- works if i change thier code to pass malloc(PATH_MAX) instead of NULL
+- uggghh. clang imports `realpath@GLIBC_2.3` not `realpath`,
+- i'm even using thier header files now so unlike apple the symbol versioning information is elsewhere?
+- i can't even just cheat and alias the name to that because the symbol versioning stuff
+  needs to go in as special elf section too, it's not just a name. 
+  (i tried and it just crashes in the same way it does if i alias the name to junkjunkjunk or whatever). 
+  tho it is also in the name, it's not just readelf putting it there because my dump_elf.fr shows it that way too. 
+- it also works if i do Relocatable and have clang link it. 
+  so im right that the magic isn't in the header. 
+  its the linker goes and looks at the library? 
+- i haven't been giving zig enough credit for making this sane. 
+  https://github.com/ziglang/libc-abi-tools
+- for now just super hacky redirect the call. 
+  - first idea was just replace "realpath (" in the source with "realpathXXX("
+    which worked but is ugly because works against my vauge goal of eventually letting target/franca/deps be read only. 
+  - instead added a transform_call callback to C.Ctx at the end of gen_call so you can just poke in the ir 
+
+actually the new preprocessor stuff i did yesterday i don't need 
+because they're only in arg,def,bool which seem to be more tightly 
+distributed with the compiler by the normal toolchains (clang and gcc
+have thier own but share the rest of the include path)
+
+## (Jan 1)
+
+- playing with bubblewrap
+  - clean up a few places my stuff writes outside the target directory
+- getting import_c to deal with the system headers.
+  - `__has_include_next, __has_feature, __building_module`
+  - wasted a while on i had started writing out empty versions of files it 
+    included because i was going to just type out the signetures it needed 
+    but then gave up on that but still had those files on the include path 
+    so it saw that before the real poll.h. oops. 
+  - but now it can deal with /usr/lib/llvm-20/lib/clang/20/include
+    enough to compile bwrap myself. 
+
+> if you don't give cloudflare pages a 404.html it always returns status 200? 
+> oh it assumes im react or whatever and want to just read the url myself. 
+
+# ^^ 2026 ^^ 
+# vv 2025 vv
+
 ## (Dec 31)
 
 - rv: load_number 0xDEADDEAD (ConUndef) to scratch_int in wuffs_lzma__decoder__do_transform_io@14
