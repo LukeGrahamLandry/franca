@@ -77,6 +77,7 @@ do_it :: fn(vtable: *ImportVTable, s: Str) void = {
                 HUSH[] = true;
             };
             @case("boot") => run_boot(vtable);
+            @case("stage0_driver") => stage0_driver(vtable);
             @case("github") => {
                 make_dirs_or_crash("target/release");
                 run_boot(vtable);
@@ -326,7 +327,21 @@ reach_all_deps :: fn() void = {
 fn run_boot(vtable: *ImportVTable) void = {
     make_dirs_or_crash("target/out");
     make_dirs_or_crash("target/franca");
-    stage0_driver(vtable);
+
+    // :UpdateBoot
+    // this is stupid... the version of the compiler i committed 11 months ago had bugs 
+    // that have since been fixed in later versions but its not worth it to me to update it yet. 
+    // so for now just try it in a loop a few times. its nondeterministic so it tends to work eventually. 
+    franca := get_executable_path(temp());
+    n, limit := (0, 15);
+    dowhile {
+        ok, out, err := exec_and_catch(franca, @slice("tests/run_tests.fr", "stage0_driver"), temp());
+        n += 1;
+        !ok && n < limit
+    };
+    @if(n == limit) stage0_driver(vtable);
+    println(n);
+    
     rename(@as(CStr) "a.out", @as(CStr) "target/franca/b.out");
     sh(@slice("./target/franca/b.out", "examples/default_driver.fr", "build", "compiler/main.fr", "-o", "target/franca.out"));
     println("ok!");

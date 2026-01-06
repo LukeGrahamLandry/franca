@@ -21,6 +21,9 @@
   so setup the right settings for running my tests. 
 - add clox as an import_c test
 - tcc config.h for arm-linux
+- i seem to have triggered a bug in the ancient boot compiler with the parse_cls change. 
+  the first run seems more fragile and it always dies in parse_inst. 
+  im not ready to update it yet so maybe just stick it in a loop and hope it works eventually...
 
 ## (Jan 5)
 
