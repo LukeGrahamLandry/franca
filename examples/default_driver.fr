@@ -1,4 +1,3 @@
-// #foreign("tracy", "g++"); 
 //
 //! For large programs, you'll probably want to write your own driver to have more control, 
 //! and to ensure that all information required to build your program is contained in the code of your program
@@ -48,7 +47,7 @@ fn driver(vtable: *ImportVTable) void #export = {
 }
 
 fn do_it(vtable: *ImportVTable, cmd: *Command) void = {
-    no_cache := get_environment_variable("FRANCA_NO_CACHE").is_some();
+    no_cache := Foreign.ENV.FRANCA_NO_CACHE.get_environment_variable().is_some();
     build_options := vtable.default_build_options();
     build_options.no_cache = no_cache;
     build_options.retain_function_names = cmd.keep_names;
@@ -73,7 +72,7 @@ fn do_it(vtable: *ImportVTable, cmd: *Command) void = {
     
     c := load_file(cmd.input_file, vtable, build_options);
     
-    enable_tracy := get_environment_variable("FRANCA_TRACY").is_some();
+    enable_tracy := Foreign.ENV.FRANCA_TRACY.get_environment_variable().is_some();
     libs := Str.list(temp());
     @if(enable_tracy && !cmd.notracy) {
         fetch_tracy(vtable);
@@ -159,7 +158,8 @@ fn do_it(vtable: *ImportVTable, cmd: *Command) void = {
         args&.push_all(@slice("-o", cmd.output_file, cmd.output_file));
         args&.push_all(libs.items());
         args&.push("-Wl,-undefined,dynamic_lookup");  // clang cares not for weak symbols
-        success := run_cmd_blocking("g++", args.items()); 
+        cc := Foreign.EXE.cc; 
+        success := run_cmd_blocking(cc, args.items()); 
         assert(success, "link failed");
         end := timestamp();
         @println("[link time: %ms]", end - start);
@@ -329,7 +329,11 @@ fn parse_cli_args() Command = {
     panic(choose_action)
 }
 
-// #foreign("clang"); 
+// 
+// TODO: don't be compiling a c++ program. it's immediately linker hell just to get thier standard library. 
+//       see if firefox profiler markers are usable and then maybe i can get rid of all this, 
+//       because samply makes that work by writing /tmp/marker-pid-tid.txt instead of linking against something. 
+// 
 
 LinkTime :: @enum(i64) (Static, Dynamic);
 
@@ -384,6 +388,11 @@ fn build_foreign_cached(lib: ForeignLibrary, env: Ty(Arch, Os), linking: LinkTim
     
     if lib.cpp {
         args&.push_all(@slice ("-x", "c++"));
+        // TODO: convince myself this works on linux
+        //       >>> /usr/bin/aarch64-linux-gnu-ld: cannot find -lc++: No such file or directory
+        //       without it you get it dying on every std::__ function.
+        //       execing clang++ i think mostly works but doesn't fix 
+        //       >> undefined reference to `main'
         args&.push("-lc++");    
     };
     
@@ -426,7 +435,8 @@ fn build_foreign_cached(lib: ForeignLibrary, env: Ty(Arch, Os), linking: LinkTim
     args&.push(target_triple(env._0, env._1));
     #use("@/lib/sys/subprocess.fr");
     @println("[build %] %;", lib.name, args.items());
-    success := run_cmd_blocking("clang", args.items());  // TODO: use the right clang (might not want ++ for something that can be compiled as either)
+    cc := Foreign.EXE.clang; 
+    success := run_cmd_blocking(cc, args.items());
     if(not(success), => return(.Err));
     
     if src_file { f |
@@ -484,16 +494,11 @@ fetch_tracy :: fn(vtable: *ImportVTable) void = {
     cmd: Command = (
         arch = query_current_arch(), 
         os = query_current_os(),
-        input_file = "examples/testing.fr",
+        input_file = "examples/fetch.fr",
         action = .run,
         notracy = true, // don't recurse
         output_file = "target/fetch.out",
-        child_args = @slice(
-            "fetch",
-            "https://github.com/wolfpld/tracy/archive/ec455c8ee634569447462af7bc42b8ac57b1dda7.zip",
-            "6352360", "09176722dd58b134852be663ea07b2ed12088f702599e9fddf4ba176d4035809",
-            "tracy-ec455c8ee634569447462af7bc42b8ac57b1dda7",
-        ),
+        child_args = Foreign.tracy,
     );
     push_tls_value(.comptime, zeroed(rawptr)) {
         do_it(vtable, cmd&);

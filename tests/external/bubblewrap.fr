@@ -46,8 +46,7 @@ main :: fn() void = {
 // this requires the system headers (not import_c's builtin ones)
 compile_bubblewrap :: fn(out_path: Str) void = {
     // if you update this be careful of the realpath hack below
-    get  :: import("@/examples/testing.fr").fetch_or_crash;
-    root := get("https://github.com/containers/bubblewrap/archive/d6180f25b164c708b8b0a0d86d6a9642f30cd9a9.tar.gz", 131018, "781193d6c6ed4dfd4294ccf90d46b508b2c149132ab594da1debcf09f308e0d2", "bubblewrap-d6180f25b164c708b8b0a0d86d6a9642f30cd9a9");
+    root := Foreign'bubblewrap();
     
     include_dir := "target/bwrap_include";
     make_dirs_or_crash(@tfmt("%/sys", include_dir));
@@ -85,8 +84,8 @@ compile_bubblewrap :: fn(out_path: Str) void = {
         prelude = """
             #define __signed__ signed
 
-            // hope this is only used in structs. TODO: still wrong because alignment
-            typedef struct { long[2]; } __uint128_t;  
+            // i don't implement u128 math but it's used in the arm mcontext structs. 
+            typedef struct __attribute__((aligned(16))) { long _[2]; } __uint128_t;  
             
             /// TODO: these should be in the compiler 
             typedef unsigned long __SIZE_TYPE__;
@@ -149,16 +148,13 @@ fn transform_null_realpath(f: *Qbe.Fn, b: *Qbe.Blk, call: *Qbe.Ins) void = {
 
 // alternatively: [apt-get install libcap-dev], [cc *.c -lcap -o bwrap]. 
 capability_h :: """
+    #pragma once
     #include <linux/capability.h>
     #include <sys/syscall.h>
     
     // adding a 15k line dependency for these 2 syscall wrappers is not reasonable. 
-    int capset(void *h, void *d) {
-        return syscall(SYS_capset, h, d);
-    }
-    int capget(void *h, void *d) {
-        return syscall(SYS_capget, h, d);
-    }
+    static int capset(void *h, void *d) { return syscall(SYS_capset, h, d); }
+    static int capget(void *h, void *d) { return syscall(SYS_capget, h, d); }
     
     // this is only needed for --cap-add/--cap-drop which i don't care about rn.
     static int cap_from_name(const char *a, int *b) { return -1; }

@@ -1,4 +1,14 @@
-
+- actually use hash_archive !!!
+- tests/external/tcc.fr: might as well run tests/tests2 with import_c too. 
+- tests/external/wuffs.fr uses thier committed generated c code. 
+  do i care enough to bootstrap a go? probably. the more import_c tests the merrier. 
+  https://github.com/golang/go/tree/release-branch.go1.4/src/cmd/dist
+  its only 1.4 -> 1.17 -> 1.20
+- replace all the `start := getcwd(); chdir(foo); work(); chdir(start);` 
+  with `push_cwd(foo) {| work(); };` = `start := open("."); chdir(foo); work(); fchdir(start);`
+- #reexport something with main doesn't get picked up by find_unique_func. 
+  because find_in_scope doesn't recurse. idk if i want that to work. 
+  need to decide how get_constants should work because they should stay consistant. 
 - nightmare hour: don't hardcode "target" everywhere
 - i'm not sure what to do with open_temp_file. is it better to use the TMPDIR (/tmp or whatever) 
   so the os knows it can discard them at some point 
@@ -1136,6 +1146,10 @@ through the ImportVTable explicitly. but that feels a bit too wishy washy to me?
 
 ## language consistancy
 
+- `@Fn` vs `@FnPtr` vs `FuncId` is more confusing than necessary. 
+  it would be nice if @Fn was always const and @FnPtr was always runtime and they were the same type. 
+  because then assigning a const @Fn to a runtime variable would give you something callable without typing out the signeture again. 
+  but they have different representations and you can have a the other combinations they're just not useful. 
 - :NoInlineImport
 - ._N and .len on Array
 - #use field in guess_type for #where
@@ -1403,6 +1417,9 @@ A :: @struct {
 needing to go find some data in the right format (and without me including a blob for it)   
 - http://www.xmailserver.org/diff2.pdf
 - https://spidermonkey.dev/blog/2025/10/28/iongraph-web.html
+- runner for 
+  - https://github.com/ertdfgcvb/play.core/tree/master/src/programs/demos
+  - https://github.com/bellard/quickjs
 
 ### assembler
 
@@ -1448,11 +1465,8 @@ has the numbers in the right order at least. rust has my problem too `[[Symbol; 
 - this would be much less messy
 ```
 #use("@/examples/import_c/ffi.fr");
-Stb :: fetch(
-  "https://github.com/nothings/stb/archive/f0569113c93ad095470c54bf34a17b36646bbbb5.zip", 
-  1754150, "b62be3009cb9d4b6385bd4854bddf72d8e91f4e19d1347d6cf9589b19f70d45d",
-);
 StbTrueType :: include { C |
+  Stb := Foreign'stb();
   C.define("STB_TRUETYPE_IMPLEMENTATION");
   C.include(Stb, "stb_truetype.h");
 };

@@ -1,0 +1,441 @@
+// 🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡
+// TODO: don't just hope there's a curl+git to exec
+
+// TODO: everything should be lists of urls so you can have lots of mirrors
+
+fn single(args: @struct {
+    url: Str = "";
+    hash: Str;
+    extract := zeroed(@struct {  // fallback if url fails
+        url: Str;  // of an archive that contains this file (and other junk to discard)
+        legacy: Str;  // hash of compressed archive to check mirror
+        path: Str; 
+    });
+}) Str = {
+    if args.url != "" {
+        // TODO: fallback to extract if it fails
+        return fetch_text_or_crash(args.url, 0, args.hash);
+    };
+    if args.extract.url != "" {
+        root := fetch_or_crash(args.extract.url, args.extract.legacy, args.extract.legacy, empty());
+        path := @tfmt("%/%", root, args.extract.path);
+        return read_entire_file_or_crash(temp(), path);
+    };
+    @panic("failed to fetch");
+};
+
+fn group(args: @struct {
+    url: Str;
+    // TODO: this must not be optional
+    hash: Str = "";  // hash of unpacked content
+    discard: []Str = empty();  // directories to remove (before hashing)
+    legacy: Str = "";  // hash of compressed archive to check mirror
+}) Str = {
+    @assert(args.legacy != "", "TODO: fetch group");
+    fetch_or_crash(args.url, args.legacy, args.legacy, args.discard)
+};
+
+fn git(args: @struct {
+    repo: Str;  // url
+    commit: Str;
+    // TODO: this must not be optional
+    hash: Str = "";  // hash of unpacked content
+    legacy: Str = "";  // hash of compressed archive to check mirror
+    discard: []Str = empty();
+}) Str = {
+    // TODO: maybe i always want to prioritize upstream over my mirror 
+    //       but also its faster not to and maybe its rude to make the other guy do work. 
+    //       for cold hare: curl=00560, shallow-clone=06400, deep-clone=14000. 
+    //       it feels creepy to mitm everything but the premise is it doesn't matter because hashes. 
+    if args.legacy != "" {
+        // TODO: fallback to git if it fails
+        return fetch_or_crash("mirror", args.legacy, args.legacy, args.discard);
+    };
+    
+    fetch_git_commit(args.commit, "", args.repo)
+};
+
+// TODO: go through everything and stop messing around with paths
+//       especially relative paths! do everything with file descriptors. 
+FRANCA_PATH_DEPS :: "target/franca/deps";
+FRANCA_PATH_FETCH :: "target/franca/fetch";
+// cached download of a compressed resource 
+// returns path to the output folder
+fetch_or_crash :: fn(url: Str, sha256_hash: Str, HACK_name: Str, discard: []Str) Str = { 
+    @debug_assert(!HACK_name.ends_with("/") && HACK_name != "");
+    // TODO: the name just being a hash is annoying. should set HACK_name to something sane again. 
+    folder_path := @tfmt("%/%", FRANCA_PATH_DEPS, HACK_name);
+    if dir_exists(folder_path) {
+        return(folder_path);
+    };
+    mark := temp().mark();
+    
+    zip_bytes := fetch(url, sha256_hash) 
+        || @panic("failed to download dependency");
+
+    // i skip the extract if the final path exists so if the extract fails for some reason, 
+    // and you rerun the program, don't treat it as though it succeeded. 
+    make_dirs_or_crash(FRANCA_PATH_DEPS);
+    scratch_path := anon_temp_path(@tfmt("%/%", FRANCA_PATH_DEPS, sha256_hash));
+    make_dirs_or_crash(scratch_path);
+    extract_archive(zip_bytes, scratch_path, discard);
+    move_scratch_folder(folder_path, scratch_path);
+    temp().reset(mark);
+    if folder_path.ends_with("/") {
+        folder_path.len -= 1;
+    };
+    folder_path
+};
+
+move_scratch_folder :: fn(folder_path: Str, scratch_path: Str) void = {
+    src, dest := (scratch_path.as_cstr(), folder_path.as_cstr());
+    if dir_exists(folder_path) {
+        // another thread won the race.
+        // TODO: don't leak scratch_path. but need to do a whole recursive delete situation
+    } else {
+        // TODO: this is still fragile if you write to the directory, which i shouldn't do but i do in tests/external/wuffs,lua,tcc
+        // TODO: there's still a race. it could be created here by another thread and renaming over a non-empty directory errors. 
+        rename(src, dest)
+            || @panic("failed to rename to %", folder_path);
+    };
+};
+
+fetch :: fn(url: Str, sha256_hash: Str) ?[]u8 = {
+    @debug_assert_eq(sha256_hash.len, 64);
+    for(sha256_hash, fn(c) => @debug_assert(hex_digit(c).is_some()));
+    zip_file_path := @tfmt("%/%.out", FRANCA_PATH_FETCH, sha256_hash);
+    
+    zip_bytes := "";
+    if !file_exists(zip_file_path) {
+        make_dirs_or_crash(FRANCA_PATH_FETCH);
+        h := sha256_hash;
+        // sometimes github is down but not cloudflare... 
+        zip_bytes = @match(fetch_one(url, h)) {
+            fn Ok(it) => it;
+            fn Err(_) => @match(fetch_one(@tfmt("https://lukegrahamlandry.ca/franca/mirror/%", sha256_hash), h)) {
+                fn Ok(it) => it;
+                fn Err(_) => return(.None);
+            }
+        };
+        write_entire_file_or_crash(zip_file_path, zip_bytes);
+    } else {
+        zip_bytes = read_entire_file_or_crash(temp(), zip_file_path);
+    };
+    (Some = zip_bytes)
+};
+
+// uncached!
+fetch_one :: fn(url: Str, sha256_hash: Str) Result([]u8, Str) = {
+    @if(IS_BOOTSTRAPPING) unreachable();
+    zip_bytes := if query_current_arch() == .wasm32 {
+        sha256_hash := sha256_hash; // || return(Err = "my js fetch needs hash");
+        js_write :: fn(id: i64, ptr: *u8, len: i64) i64 #weak #import("libc");
+        dest := temp().alloc_uninit(u8, 1.shift_left(16));
+        dest.slice(0, sha256_hash.len).copy_from(sha256_hash);
+        result := js_write(0xBBBB0002, dest.ptr, dest.len);
+        @if(result == -1) return(Err = "failed js fetch");
+        if result > dest.len {
+            dest = temp().alloc_uninit(u8, result);
+            dest.slice(0, sha256_hash.len).copy_from(sha256_hash);
+            result := js_write(0xBBBB0002, dest.ptr, dest.len);
+            @if(result != dest.len) return(Err = "failed js fetch");
+        };
+        dest.slice(0, result)
+    } else {
+        curl := Foreign.EXE.curl;
+        ok, out, err := exec_and_catch(curl, @slice(url, "-s", "-L", "-f"), temp());
+        if !ok {
+            return(Err = @tfmt("failed curl %\n%", url, err.items()));
+        };
+        out.items()
+    };
+    //if sha256_hash { sha256_hash |
+        digest := Sha256'hex(zip_bytes);
+        if digest != sha256_hash {
+            return(Err = @tfmt("bad hash %\n%\n%", url, digest, sha256_hash));
+        };
+    //};
+    
+    (Ok = zip_bytes)
+};
+
+File :: @struct {
+    name: Str;
+    contents: []u8;
+    dir: bool;
+};
+
+// it's silly to have all the uncompressed contents in memory at the same time but also it doesn't matter
+load_archive :: fn(compressed: []u8) Result([]File, Str) = {
+    Deflate :: import("@/lib/encoding/deflate.fr");
+    GZip :: import("@/lib/encoding/gzip.fr");
+    Zip :: import("@/lib/encoding/pkzip.fr");
+    Tar :: import("@/lib/encoding/tar.fr");
+    
+    files := File.list(temp());
+    // check pkzip then gzipped tar then raw tar. 
+    if Zip'find(compressed) { ecd |
+        Zip'iter(compressed, ecd) { it |
+            name := it.name;
+            if name.ends_with(PATH_SEP) {
+                name = name.slice(0, name.len - 1);
+            };
+            files&.push(
+                name = name,
+                contents = it&.data(temp()),
+                dir = it.name.ends_with("/") && it.data.len == 0
+            );
+        };
+    } else {
+        skip := GZip'header_size(compressed);
+        uncompressed := if skip.is_some() {
+            o := u8.list(temp());
+            _, err := Deflate'decompress(compressed.rest(skip.unwrap()), o&);
+            @if(err != .Ok) return(Err = @tfmt("%: failed to un-gzip", err));
+            o.items()
+        } else {
+            compressed
+        };
+        err := Tar'iter(uncompressed) { h, b |
+            name: CStr = (ptr = h.name&.as_ptr());
+            prefix: CStr = (ptr = h.prefix&.as_ptr());
+            name := name.str();
+            prefix := prefix.str();
+            if prefix.len != 0 {
+                name = @tfmt("%/%", prefix, name);
+            };
+            if name.ends_with(PATH_SEP) {
+                name = name.slice(0, name.len - 1);
+            };
+
+            @switch(h.typeflag) {
+                @case(Tar.TYPE.REG) => {
+                    // ignoring mode field. don't be putting executables in there. 
+                    // the whole point of being obsessive about dependencies is that i want to build everything from source. 
+                    files&.push(name = name, contents = b, dir = false);
+                };
+                @case(Tar.TYPE.DIR) => {
+                    @assert_eq(b.len, 0, "non zero size directory: %", name);
+                    files&.push(name = name, contents = b, dir = true);
+                };
+                @case(Tar.TYPE.PAX) => ();  // TODO: get whatever data's in there since it might change the meaning of other stuff?
+                @case(Tar.TYPE.PAX2) => ();
+                @case(Tar.TYPE.SYM) => {
+                    @eprintln("WARNING: ignoring symlink in tar. %", name);
+                };
+                @default => return(Err = @tfmt("unhandled tar block type % for %", h.typeflag, name));
+            }
+        };
+        err.or(fn(e) => return(Err = @tfmt("%: failed to un-tar", e)));
+    };
+    (Ok = files.items())
+};
+
+// need to identify a dependency by a hash that doesn't include things that don't matter
+// - archive format (tar/zip/git)
+// - compression settings 
+// - order of files
+// - redundantly listing directories that contain files
+// avoid my stuff breaking if github changes which zip library it uses to generate archives.
+
+// TODO: listing discards is kinda dumb. if it was includes instead
+//       you could use a source that added extra junk top level files 
+//       and it would be fine if you only included specific subdirectories. 
+//       it's just annoying to always have to list license. 
+
+hash_archive :: fn(files: *[]File, discard: []Str) Ty(Sha256.Digest, []Str) = {
+    // lua-5.4.7-tests.tar.gz: 
+    // - you're allowed to have files in nested directories without explicitly making them
+    // - you're allowed to have directories with no files and they need to get made 
+    //   (like attrib.lua needs libs/P1 to pre-exist)
+    // achieve that without a bunch of redundant syscalls. 
+    needed_dirs: HashSet(Str) = init(temp());
+    
+    dir_prefix := get_dir_prefix(files[]);
+    unordered_retain files { it |
+        yield :: local_return;
+        @assert(it.name.starts_with(dir_prefix), "inconsistant prefixes: % doesn't start with %", it.name, dir_prefix);
+        it.name = it.name.rest(dir_prefix.len);
+        if it.name.starts_with(PATH_SEP) {
+            it.name = it.name.rest(1);
+        };
+        it.name.len -= int(it.name.ends_with(PATH_SEP));
+        @assert(!it.name.has_path_escapes(), "'%' is a path with special dots, i don't like that", it.name);
+        
+        // :SLOW
+        for discard { check |
+            if it.name.starts_with(check) {
+                yield(false);
+            };
+        };
+        
+        dir := @if(it.dir, it.name, it.name.pop_path_segment());
+        dir.len -= int(dir.ends_with(PATH_SEP));
+        while => dir.len != 0 && !needed_dirs&.insert(dir) {
+            dir = dir.pop_path_segment();
+            dir.len -= int(dir.ends_with(PATH_SEP));
+        };
+        !it.dir
+    };
+    
+    Sort :: import("@/lib/sort.fr");
+    sort :: Sort'insertion_sortXXX(File, fn(a, b) => Sort'order_strings(a.name&, b.name&));
+    sort(files[]);
+    
+    // sort low->high length means parents before children 
+    // so they can be created in order without calling make_dirs (= fewer syscalls). 
+    dirs := @ref Str.list(needed_dirs.raw.len_including_tombstones, temp());
+    each needed_dirs& { s, _ |
+        dirs.push(s);
+    };
+    sort2 :: Sort'insertion_sortXXX(Str, Sort'order_strings);
+    sort2(dirs.items());
+    
+    hash_blob := @ref u8.list(files.len * 50, temp());
+    hash_blob.reserve_type(u32)[] = files.len.trunc();
+    each files { it |
+        // its easier to not hash the name and contents together because my hasher wants one slice. 
+        // idk if it matters but it feels like putting the length here avoids a phase shift attack where you put bytes that look like a hash in the file name.
+        // TODO: is alignment real?
+        hash_blob.push_all(it.name);
+        hash_blob.push(0);
+        hash_blob.reserve_type(Sha256.Digest)[] = Sha256'hash(it.contents);
+    };
+    for dirs { it |
+        hash_blob.push_all(it);
+        hash_blob.push(0);
+    };
+    digest := Sha256'hash(hash_blob.items());
+    
+    (digest, dirs.items())
+};
+
+extract_archive :: fn(compressed: []u8, dest_dir: Str, discard: []Str) void = {
+    @if(IS_BOOTSTRAPPING) unreachable();
+    @debug_assert(!dest_dir.ends_with(PATH_SEP) && dest_dir.len > 0);
+    files := load_archive(compressed)
+        .or(fn(msg) => @panic("% (%)", msg, dest_dir));
+    
+    digest, sorted_dirs := hash_archive(files&, discard);
+    @println("XXX % %", dest_dir, digest&);
+    // TODO: use this `digest` as the source of truth instead of hash of the archive
+    _ := digest;
+    // TODO: has_path_escapes doesn't matter if i check the hash before starting to create.
+    //       you trust that Wanted is well formed and that Found one has the same content as Wanted. 
+    // TODO: ditto: don't have to check for duplicate file paths. they'd just make the hash not match. 
+    
+    write_to_files(dest_dir, files, sorted_dirs);
+};
+
+write_to_files :: fn(dest_dir: Str, files: []File, sorted_dirs: []Str) void = {
+    for sorted_dirs { path |
+        path := @tfmt("%/%", dest_dir, path);
+        Posix'mkdir(as_cstr path, Posix.S.IRWXU).is_ok()
+            || @panic("failed to create %", path);
+    };
+    
+    p := u8.list(temp());
+    each files { it |
+        name := it.name;
+        p&.clear();
+        p&.push_all(dest_dir);
+        p&.push_all("/");
+        p&.push_all(it.name);
+        p&.push(0);
+        
+        if !it.dir {
+            // don't need to do the atomic rename on each file 
+            // because dest_dir is already an unshared temp path. 
+            // saves a syscall per file. 
+            write_file_direct((ptr = p.maybe_uninit.ptr), it.contents) 
+                || @panic("failed to write %", p.items());
+        }
+    };
+};
+
+// TODO: this is wrong. aaaa/foo, aabb/bar -> should be "" not aa. 
+//       the right thing is actually simpler i just need a pop_path_segment for prefix. 
+get_dir_prefix :: fn(files: []File) Str = {
+    @if(files.len <= 1) return("");
+    a, b := (files[0].name, files[files.len - 1].name);
+    i := 0;
+    while => i < a.len && i < b.len && a[i] == b[i] && a[i] != "/".ascii() {
+        i += 1;
+    };
+    a.slice(0, i)
+};
+
+fetch_text_or_crash :: fn(url: Str, size: i64, sha256_hash: Str) Str = {
+    fetch(url, sha256_hash) 
+        || @panic("failed to download dependency")
+};
+
+// TODO: save something in FRANCA_PATH_FETCH first so that's the only thing i need to give the sandbox
+fetch_git_commit :: fn(commit: Str, name: Str, url: Str) Str = {
+    make_dirs_or_crash(FRANCA_PATH_DEPS);
+    root := @tfmt("%/%_%", FRANCA_PATH_DEPS, name, commit);
+    if root.dir_exists() {
+        return(root);
+    };
+    start := get_working_directory(temp()).items();
+    
+    scratch_path := anon_temp_path(@tfmt("%/%", FRANCA_PATH_DEPS, commit));
+    make_dirs_or_crash(scratch_path);
+    
+    // TODO: chdir is trash because it will fuck up other threads. 
+    //       should pass the new cwd when execing a command (chdir after forking). 
+    Syscall'chdir(scratch_path.as_cstr()) || @panic("failed to set cwd to %", scratch_path);
+    // TODO: this is annoying. it doesn't fit with my general pattern of just give me a url to a .tar.gz file. 
+    //       but i can't really blame them for not wanting to use the microsoft thing. 
+    //       i don't really want to use some random persons mirror of it but maybe that would be a better option.
+    //       there's a hash so it doesn't really matter what the url is. 
+    //       also my program should be hashing some bytes itself. trusting whatever we exec does not spark joy. 
+    // TODO: don't leak scratch_path if one of these commands fails. 
+    // TODO: return error instead of crashing so caller can try other mirrors
+    ::display_slice(Str);
+    sh :: fn(a) => @assert(run_cmd_blocking(a[0], a.slice(1, a.len)), "%", a);
+    git := Foreign.EXE.git; 
+    sh(@slice(git, "clone", "--depth=1", url, "."));
+    sh(@slice(git, "config", "advice.detachedHead", "false"));  // shutup!!
+    sh(@slice(git, "fetch", "--depth=1", "origin", commit));
+    sh(@slice(git, "checkout", commit));
+    sh(@slice(git, "fsck"));
+    Syscall'chdir(start.as_cstr()) || @panic("failed to set cwd");
+    
+    // TODO: still do the content based hash_archive
+    move_scratch_folder(root, scratch_path);
+    root
+};
+
+// weird names that won't come out right:
+// - "a//b" means "a/b" because can't have directory called ""
+// - "a/../b" means "b" because ".." is parent directory
+// - "a/./b" means "a/b" because "." means current directory 
+// - similarly can't end with "." or ".." as a file name because they're taken
+// - leading "/" is root, which doesn't matter if im putting a prefix anyway but still seems like a weird thing to do.  
+// idk if i should just allow the ones that aren't harmful just confusing. 
+has_path_escapes :: fn(path: Str) bool = {
+    @run @ct_assert(PATH_SEP == "/", @source_location(), "");
+    while => path.len > 0 {
+        prefix := path.pop_path_segment();
+        segment := path.rest(prefix.len);  // will end with a / when its not the last one. 
+        if segment == "../" || segment == "./" || segment == ".." || segment == "." || segment == "/" {
+            return(true);
+        };
+        path = prefix;
+    };
+    path.starts_with("/")
+};
+
+// TODO: get rid of this. replace it with module caching that works for single/group/git functions directly. 
+main :: fn() void = {
+    args := cli_args();
+    @assert_ge(args.len, 6, "not enough arguments to fetch");
+    @assert_eq(args[1].str(), "fetch");
+    result := fetch_or_crash(args[2].str(), args[4].str(), args[5].str(), empty());
+    print(result);
+};
+
+#use("@/lib/sys/subprocess.fr");
+#use("@/lib/sys/fs.fr");
+#use("@/lib/collections/map.fr");

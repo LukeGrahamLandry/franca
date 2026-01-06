@@ -147,21 +147,30 @@ DirEntry :: @struct(
 
 // TODO: @try for the libc result types. 
 fn write_entire_file(path: Str, content: Str) bool = {
-    @if(path == "/dev/null") return(true);  // HACK
-    #use("@/lib/sys/process.fr");
-    tmp_path := @fmt_cstr("%.%.%.atomic", path, Syscall'getpid_cached(), tls(.thread_index)[]);
-    fd := open_trunc(tmp_path) || return(false);
-    written := Syscall'write(fd, content.ptr, content.len) || (-1);
-    fd.Syscall'close() || return(false);
-    // TODO: loop if we couldn't write the whole thing at once. 
-    if(written != content.len, => return(false));
+    @if(path == Foreign.PATH.dev_null) return(true);  // HACK
+    tmp_path := anon_temp_path(path).as_cstr();
+    write_file_direct(tmp_path, content) || return(false);
     rename(tmp_path, as_cstr path) || return(false);
     true
 }
 
+fn anon_temp_path(path: Str) Str = {
+    #use("@/lib/sys/process.fr");
+    @tfmt("%.%.%.atomic", path, Syscall'getpid_cached(), tls(.thread_index)[])
+}
+
+fn write_file_direct(path: CStr, content: Str) bool = {
+    fd := open_trunc(path) || return(false);
+    written := Syscall'write(fd, content.ptr, content.len) || (-1);
+    fd.Syscall'close() || return(false);
+    // TODO: loop if we couldn't write the whole thing at once. 
+    if(written != content.len, => return(false));
+    true
+}
+
 fn write_chunks_or_crash(outpath: Str, chunks /*: [][]u8*/) void #where = {
-    @if(outpath == "/dev/null") return();  // HACK
-    tmp_path := @fmt_cstr("%.%.%.atomic", outpath, Syscall'getpid_cached(), tls(.thread_index)[]);
+    @if(outpath == Foreign.PATH.dev_null) return();  // HACK
+    tmp_path := anon_temp_path(outpath).as_cstr();
     file := open_trunc(tmp_path) 
         || @panic("failed to open %", tmp_path);
     for chunks { chunk | 

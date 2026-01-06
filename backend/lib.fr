@@ -103,7 +103,7 @@ QbeModule :: @rec @struct(
     inlinable_but_referenced_later: List(Qbe.Sym),
     
     initialized: bool,
-    currently_emitting_function: bool,
+    currently_emitting_function: u32,
     
     forever_storage: Arena.Allocator,
     forever: LockedAlloc,
@@ -523,7 +523,7 @@ fn init_empty_for_template_only(m: *QbeModule, gpa: Alloc) void = {
 
 // TODO: this should go away eventually 
 fn show_backend_stats() bool = 
-    get_environment_variable("FRANCA_LOG_STATS").is_some();
+    Foreign.ENV.FRANCA_LOG_STATS.get_environment_variable().is_some();
 
 fn drop(m: *QbeModule) void = {
     m.write_perfmap_symbols();
@@ -531,8 +531,17 @@ fn drop(m: *QbeModule) void = {
         (m.target.wasm_jit_event)(Close = (events = m.wasm_exec_handles.items()));
     };
 
+    @run assert_eq(enum_count(SegmentType), 4);
     fst := m.segments.data&[0].mmapped;
-    page_allocator.dealloc(u8, (ptr = fst.ptr, len = fst.len * 3)); // ZeroInitData has no allocation
+    mem := fst.ptr.slice(fst.len * 3);  // ZeroInitData has no allocation
+    if m.permap_enabled() {
+        // :LEAK
+        // if i free the memory it can be reused for a new module which makes the profile completely useless. 
+        Syscall'mprotect(u8.raw_from_ptr(fst.ptr), fst.len, 0); 
+        page_allocator.dealloc(u8, mem.rest(fst.len)); 
+    } else {
+        page_allocator.dealloc(u8, mem); 
+    };
     @if(enable_incremental()) if m.save { save |
         save.drop();
     };
@@ -1123,7 +1132,7 @@ codegen_thread_main :: fn(shared: *CodegenShared) void = {
     };
 };
 
-ENABLE_ENABLE_TRACY :: get_environment_variable("FRANCA_TRACY").is_some();
+ENABLE_ENABLE_TRACY :: Foreign.ENV.FRANCA_TRACY.get_environment_variable().is_some();
 
 fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
     zone := @if(ENABLE_ENABLE_TRACY, zone_begin(.Backend), ());
@@ -1163,6 +1172,7 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
                 @debug_assert(s.jit_addr.is_null(), "making a shim but it already has a jit_addr slot. %", s.name);
                 s.jit_addr = jit_addr;
                 s.shim_addr = jit_addr;
+                s.size = shim_s.size;
                 // TODO: it sucks that im doing this differently on wasm than on native. 
                 
                 @if(TODOWASM)
@@ -1292,11 +1302,15 @@ find_ip_in_module :: fn(m: *QbeModule, addr: rawptr) ?Str = {
     find_in_debug_info(AotDebugInfo.raw_from_ptr(debug&), addr)
 };
 
+permap_enabled :: fn(m: *Qbe.Module) bool = !(false
+    || m.goal.type != .JitOnly
+    || m.goal.arch == .wasm32
+    || Foreign.ENV.FRANCA_PERFMAP.get_environment_variable().is_none()
+);
+
 fn write_perfmap_symbols(m: *Qbe.Module) void = {
-    @if(m.goal.type != .JitOnly) return();
-    @if(m.goal.arch == .wasm32) return();
     @if(identical(m.last_perfmap_end, m.last_function_end)) return();
-    @if(get_environment_variable("FRANCA_PERFMAP").is_none()) return(); 
+    @if(!m.permap_enabled()) return();
     
     write_perfmap_symbols { $yield | 
         for_symbols m { _, s |
@@ -1326,7 +1340,7 @@ fn write_perfmap_symbols($iter: @Fn(yield: @Fn(p: rawptr, size: i64, name: Str) 
         }
     };
     pid := Syscall'getpid_cached();
-    path := @tfmt("/tmp/perf-%.map", pid);
+    path := @tfmt(Foreign.PATH.tmp_perf_map, pid);
     #use("@/lib/sys/fs.fr");
     if !append_to_file(path, out.items()) {
         @eprintln("failed to write symbol info for profiling (%)", path);

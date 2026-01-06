@@ -1,4 +1,3 @@
-// #foreign("harec", "clang", "env");
 // https://harelang.org
 // this program is equivalent to running "make check" for harec and hare. 
 // it uses my import_c to compile harec and my backend to compile the text ir it outputs. 
@@ -8,11 +7,14 @@
 // TODO: it would be nice to patch_out_interp_header since they do their own syscalls 
 //       but i don't think they do their own relocations? 
 // TODO: don't depend on system clang for assembling/linking the .s files. 
+// TODO: use execvpe instead of the env binary 🤡
+clang :: Foreign.EXE.clang; 
+env :: Foreign.EXE.env; 
+
 main :: fn() void = {
     start := get_working_directory(temp()).items();
 
-    //root := fetch_git_commit("8aa482a29964136cbe2874cd330fe07e34efe8a2", "harec", "https://git.sr.ht/~sircmpwn/harec");
-    root := fetch_or_crash("mirror.tar.gz", 217154, "0c4456f174ade789ef496f1462431a075ed10afde20aeb801c8f0a16ffa5cadd", "harec-8aa482a29964136cbe2874cd330fe07e34efe8a2");
+    root := Foreign'harec();
     
     Syscall'chdir(root.as_cstr());
     
@@ -142,9 +144,10 @@ test_harec :: fn() void = {
     // SKIP
     // (orb) 17-alloc.ha rosetta error: could not find free space for allocation size 1c6bf52635000
     // they're trying to test allocation failure and rosetta cannot cope i guess?
-    ci := get_environment_variable("GITHUB_REPOSITORY").is_some();
+    ci := Foreign.ENV.GITHUB_REPOSITORY.get_environment_variable().is_some();
     if !ci && query_current_arch() == .x86_64 {
         tests&.ordered_retain(fn(it) => !it.name.ends_with("17-alloc.ha"));
+        @eprint("Skipped 17-alloc.ha: confuses rosetta\n");
     };
     
     Ctx :: @struct(rt_ssa: Str, testmod_ssa: Str);
@@ -187,11 +190,11 @@ test_harec :: fn() void = {
             o := @tfmt(".out/%.o", it.name);
             write_entire_file_or_crash(o, obj);
             clang_triple := import("@/examples/default_driver.fr")'target_triple(query_current_arch(), query_current_os());
-            sh(@slice("clang", "-target", clang_triple, o, @tfmt("rt/+linux/start+%.s", arch), @tfmt("rt/+linux/syscall+%.s", arch), "-o", exe, "-nostartfiles"));
+            sh(@slice(clang, "-target", clang_triple, o, @tfmt("rt/+linux/start+%.s", arch), @tfmt("rt/+linux/syscall+%.s", arch), "-o", exe, "-nostartfiles"));
         };
         general_allocator().dealloc(u8, obj);
         // compile() in the tests execs harec so need to give it the td files
-        ok, out, err := exec_and_catch("env", @slice(
+        ok, out, err := exec_and_catch(env, @slice(
             td_to_env(td[0]),
             td_to_env(td[1]),
             exe,
@@ -374,8 +377,7 @@ fn mangle(m: *Qbe.Module, id: *Qbe.Sym, prefix: Str) void = {
 // the "hare" repo has another rt implementation and modules with @test functions. 
 // :ugly
 test_hare :: fn(harec: Str, verbose: bool) void = {
-    //root := fetch_git_commit("e787c6f74c69d89530d542580c747a11e605ff8d", "hare", "https://git.sr.ht/~sircmpwn/hare");
-    root := fetch_or_crash("mirror.tar.gz", 997896, "17661d89d2a04e1c03551dcacf31284159cf7fe398159486fa4725d35775bf2c", "hare-e787c6f74c69d89530d542580c747a11e605ff8d");
+    root := Foreign'hare();
     
     have_assembler := query_current_arch() == .aarch64;
     start_time := timestamp();
@@ -383,11 +385,11 @@ test_hare :: fn(harec: Str, verbose: bool) void = {
     modules, po := collect_ordered_deps(root);
     
     // i want to be able to run it in a sandbox that doesn't have a shell. 
-    have_shell := file_exists("/bin/sh");
+    have_shell := file_exists(Foreign.PATH.bin_sh);
     skip_msg := @ref u8.list(temp());
     @if(!have_shell) if modules.find(fn(it) => it.name == "/wordexp") { it |
         ::display_slice(Str);
-        @fmt(skip_msg, "SKIP (because they want to exec /bin/sh): %\n", it.hare);
+        @fmt(skip_msg, "Skipped %: Requires /bin/sh\n", it.hare);
         it.hare.len = 0;
     };
     
@@ -468,7 +470,7 @@ test_hare :: fn(harec: Str, verbose: bool) void = {
         asm_s := @tfmt("%/.out/test_asm.s", root);
         write_entire_file_or_crash(asm_s, asm_blob.items());
         clang_triple := import("@/examples/default_driver.fr")'target_triple(query_current_arch(), query_current_os());
-        sh(@slice("clang", "-target", clang_triple, asm_s, obj_o, "-o", exe, "-nostartfiles"));
+        sh(@slice(clang, "-target", clang_triple, asm_s, obj_o, "-o", exe, "-nostartfiles"));
     };
     
     @println("frontend+backend wall: %ms", timestamp() - start_time);
@@ -550,7 +552,7 @@ fn compile_to_ssa(modules: []HareModule, po: []i64, active_tags: []Str, harec: S
             tests = true,
         ), harec); 
         // TODO: don't use 'env'
-        args := make_args_for_exec("env", args, temp());
+        args := make_args_for_exec(env, args, temp());
         ::Result(RunningProcess, Str);
         work&.push_back((
             p = sys_capture_exec(args)
@@ -831,8 +833,7 @@ fn build_td(modules: []HareModule, root: Str) Ty([]Ty(Str, Str), []Str, []Str) =
 
 fn run(cmd: HareCmd, bin: Str, a: Alloc) Result(List(u8), List(u8)) = {
     args := build_args(cmd, bin);
-    // TODO: use execvpe instead of the env binary 🤡
-    ok, out, err := exec_and_catch("env", args, a);
+    ok, out, err := exec_and_catch(env, args, a);
     if ok {
         @if(err.len > 0) eprintln(err.items());
         return(Ok = out);

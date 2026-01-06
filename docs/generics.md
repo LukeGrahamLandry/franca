@@ -89,6 +89,7 @@ name but different parameter types and the compiler will choose the right one fo
 each callsite. 
 
 ```
+// a generic function that operates on existing types
 fn count($T: Type) void = {
   fn count(arr: []T, value: T) i64 = {
     n := 0;
@@ -106,6 +107,7 @@ ints := @slice(1, 4, 3, 4);
 n := count(ints, 4);
 @assert_eq(n, 2);
 
+// type creation linked with instantiating functions that operate on it
 Pair :: fn($Left: Type, $Right: Type) Type = {
   Self :: @struct(left: Left, right: Right);
   
@@ -124,6 +126,12 @@ one_1: Pair(Str, i64) = (left = "one", right = 1);
 in the first example is arbitrary (they could have different names), it 
 just makes it easy to remember which function to call to instantiate it. 
 - You can mix the styles. A function in an overload set can still have `$const` parameters. 
+- In the first example (`count`) your program is dependent on compliation order 
+  because it can only be called after being explicitly instantiated
+  which can be very annoying. 
+  The second example (`left_is`) avoids this problem because one of the types 
+  in its signature is returned by the same function that instantiates it. 
+  So you can't refer to the type that would require that overload until it's been created. 
 
 ## Where Synthesis
 
@@ -173,6 +181,10 @@ Alternatively, you can provide a predicate as and argument to the `#where` annot
 That predicate is called at comptime for each unique set of parameter types used. 
 It is passed the types of the placeholders and returns true to allow the call (or false to deny it). 
 This can be used to build up something similar to a trait system. 
+
+All the information for resolving an overload must be in the function signature (type annotations and #where predicate). 
+Once it matches, the code in the body can't cause it to be rejected and try other options
+(it can cause a complile error that halts compilation tho). 
 
 TODO: example
 

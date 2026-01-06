@@ -162,7 +162,8 @@ export const imports = {
                     // about cors for threads/gpu to work so it wouldn't matter anyway. 
                     const url = "https://lukegrahamlandry.ca/franca/mirror/" + sha256_hash;
                     const result = sync_fetch(url);
-                    if (result === null || result.byteLength > Number(len)) return -1n;
+                    if (result === null) return -1n;
+                    if (result.byteLength > Number(len)) return BigInt(result.byteLength);
                     const dest = new Uint8Array(Franca.memory.buffer, Number(ptr), result.byteLength);
                     dest.set(new Uint8Array(result));
                     return BigInt(result.byteLength);

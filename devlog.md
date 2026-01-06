@@ -1,4 +1,23 @@
 
+## (Jan 5)
+
+- also move out the magic strings for exec, env vars, special paths
+- fetch
+  - sort directory segments so don't need to call make_dirs to do parents. 
+    - 3400 lines of strace. only that dramatic because i make_dirs in a silly TOCTOU way but i'll take it. 
+  - allow listing directories to discard. 
+    ie. for wuffs im only using the c & tests rn so i don't need the go. 2601 lines.
+- missing end tracy zone
+
+## (Jan 4)
+
+- fetch
+  - start switching to content based hash instead of hashing the compressed archive. 
+  - keep track of which directories need to be made when unpacking an archive. 
+    uncached view_image lines of strace output: (before: 6153, after: 4823)
+  - don't do the rename each file: 4074 lines
+- never free `m.segments[.Code]` when doing PERFMAP becuase it makes the profile super confusing if the memory is reused for new symbols. 
+
 ## (Jan 2)
 
 on amd clang's binary works but mine doesn't. 

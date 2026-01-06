@@ -79,14 +79,12 @@ fn poll_until_finished(self: *SelfHosted, task: *Task) Result(void, *CompileErro
         
         task := self.dispatch.wip_tasks[self.dispatch.wip_tasks.len - 1];
         
-        if task.trace.is_none() {
-            task.trace = (Some = zone_begin(.Task));
-            @if(ENABLE_TRACY) {
+        @if(ENABLE_TRACY) if task.trace.is_none() {
+                task.trace = (Some = zone_begin(.Task));
                 out := u8.list(temp());  // it seems to make a copy so this is fine
-                log(task.action&, self, out&);
+                log(task.action, self, out&);
                 out&.push(0);
                 ___tracy_emit_zone_name(task.trace.Some, out.items());
-            };
         };
         
         @if_let(task.action) fn All(tasks) => {
@@ -97,16 +95,18 @@ fn poll_until_finished(self: *SelfHosted, task: *Task) Result(void, *CompileErro
                 continue();
             };
             x := self.dispatch.wip_tasks&.pop().unwrap();
+            @if(ENABLE_TRACY) {
+                zone_end(x.trace&.take().unwrap());
+            };
+            
             ::[]Task;
             @if(@run safety_check_enabled(.DebugAssertions)) x.slice(1).set_zeroed();
             continue();
         };
         
         res := self.exec_task(task);
-        if !res&.is(.Suspend) {
-            zone := task.trace.unwrap();
-            zone_end(zone);
-            task.trace = .None;
+        @if(ENABLE_TRACY) if !res&.is(.Suspend) {
+            zone_end(task.trace&.take().unwrap());
         };
         
         @match(res) {
