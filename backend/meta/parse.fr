@@ -118,7 +118,6 @@ fn parse_one(self: *QParseCtx) Item = {
             };
             self.f = temp().box_uninit(Qbe.Fn);   // :NeedFunctionInitForData
             self.f.default_init(m);
-            self.f.lnk.id = Qbe.no_symbol_S;
             
             @match(self.parse_data(export)) {
                 fn Err(msg) => {
@@ -182,51 +181,32 @@ fn parse_body(self: *QParseCtx) Result(Ty(*Qbe.Fn, []Replacement), Str) = {
 }
 
 fn parse_header(self: *QParseCtx, export: bool) void = {
-    if self.eat(":") {
-        name := self.eat_word();
-        type := or self.find_type(name) {
-            @fmt(self.error&, "type '%' must be declared before use as function return class", name);
+    if self.eat("$") {
+        self.ret = .ret0;
+        self.f.ret_cls = .Kx;
+        self.f.retty = QbeNull;
+    } else {
+        cls := self.parse_cls().or(fn(msg) => {
+            self.error&.push_all(msg);
+            return();
+        });
+        self.f.retty = cls.t;
+        if cls.f == .FTyp {
+            name := self.eat_word();
+            self.ret = .retc;
+            self.f.ret_cls = .Ke;
+        } else {
+            self.f.ret_cls = cls.k;
+            if is_argbh(cls.arg) {
+                self.ret = @as(Qbe.J) @as(i32) Qbe.J.retsb.raw() + cls.arg.raw() - Qbe.O.argsb.raw();
+            } else {
+                self.ret = cls.k.retk();
+            };
+        };
+        if !self.eat("$") {
+            @fmt(self.error&, "expected function name");
             return()
         };
-        self.ret = .retc;
-        self.f.retty = TYPE(type);
-        self.f.ret_cls = .Ke;
-    } else {
-        if !self.check("$") {
-            break :: local_return;
-            kk := self.input[self.cursor];
-            self.cursor += 1;
-            
-            // TODO: clean this up
-            o := Qbe.O.par;
-            if kk == "s".ascii() && (self.input[self.cursor] == "b".ascii() || self.input[self.cursor] == "h".ascii()) {
-                self.eat_b_or_h(false, o&, .None);
-            } else {
-                if cls_from_char(kk) { k |
-                    self.ret = k.retk();
-                    self.f.ret_cls = k;
-                    break();
-                };
-                @if_else {
-                    @if(kk == "u".ascii()) => self.eat_b_or_h(true, o&, .None);
-                    @else => {
-                        @fmt(self.error&, "invalid cls char");
-                        return()
-                    };
-                };
-            };
-            
-            self.ret = @as(Qbe.J) @as(i32) Qbe.J.retsb.raw() + o.raw() - Qbe.O.parsb.raw();
-            self.f.ret_cls = .Kw;
-        } else {
-            self.ret = .ret0;
-            self.f.ret_cls = .Kx;
-        };
-        self.f.retty = QbeNull;
-    };
-    if !self.eat("$") {
-        @fmt(self.error&, "expected function name");
-        return()
     };
     name := self.eat_word();
     self.f.lnk.export = export;
@@ -244,74 +224,37 @@ fn parse_args(self: *QParseCtx, is_par: bool) void = {
         return()
     };
     if(self.eat(")"), => return()); // no args
-    while => !self.check(")") && self.cursor < self.input.len {
+    done := false;
+    while => !self.check(")") && self.cursor < self.input.len && !done {
         continue :: local_return;
-        k := Qbe.Cls.Kl;
-        type := QbeNull;
-        variable := QbeNull;
-        o := if self.eat(":") {
-            name := self.eat_word();
-            type = TYPE(or self.find_type(name) {
-                @fmt(self.error&, "type '%' must be declared before use as arg/par", name);
-                return();
-            });
-            variable = self.parse_ref();
-            abi_op
-        } else {
-            break :: local_return;
-            kk := self.input[self.cursor];
-            self.cursor += 1;
-            variable = self.parse_ref();
-            o := base_op;
-            if kk == "s".ascii() && (self.input[self.cursor] == "b".ascii() || self.input[self.cursor] == "h".ascii()) {
-                k = self.eat_b_or_h(false, o&, (Some = variable&));
-                break(o);
+        cls := self.parse_cls().or(fn(msg) => {
+            self.error&.push_all(msg);
+            return();
+        });
+        type := cls.t;
+        o := cls.arg;
+        variable := self.parse_ref();
+        done = !self.eat(",");
+        if o == .argv {
+            @if(variable != Qbe.Null) self.error&.push_all("shouldn't have name after variadic ... marker");
+            if is_par {
+                self.f.vararg = true;
+            } else {
+                self.emit(.argv, .Kw, QbeNull, QbeNull, QbeNull);
             };
-            k = or cls_from_char(kk) {  
-                @if_else {
-                @if(kk == ".".ascii()) => {
-                    if !self.eat("..") {
-                        @fmt(self.error&, "expected '...' in arg");
-                        return();
-                    };
-                    @debug_assert(variable == QbeNull);
-                    if is_par {
-                        self.f.vararg = true;
-                    } else {
-                        self.emit(.argv, .Kw, QbeNull, QbeNull, QbeNull);
-                    };
-                    self.eat(",");
-                    continue();
-                };
-                @if(kk == "e".ascii()) => {
-                    if !self.eat("nv") {
-                        @fmt(self.error&, "expected 'env' in arg");
-                        return();
-                    };
-                    @debug_assert(variable == QbeNull, "should have tried to parse_ref('nv')");
-                    variable = self.parse_ref();
-                    o = if(is_par, => .pare, => .arge);
-                    .Kl
-                };
-                @if(kk.is_ascii_digit()) => {
-                    // placeholder for @emit_instructions
-                    self.replacements&.push(key = kk.zext() - "0".char(), r = variable);
-                    .Kw
-                };
-                @if(kk == "u".ascii()) => self.eat_b_or_h(true, o&, (Some = variable&));
-                @else => {
-                    @fmt(self.error&, "invalid ref cls char=%", kk);
-                    return() 
-                };
-                }
-            };
-            o
+            continue();
         };
+        if is_par {
+            o = rebase(o, .par, .arg);
+        };
+        if cls.template != 255 {
+            self.replacements&.push(key = cls.template.zext(), r = variable);
+        };
+        k := cls.k;
         if variable == QbeNull {
             @fmt(self.error&, "args expected (:type or cls)(ref) cls=% o=%", k, o);
             return();
         };
-        self.eat(",");
         if is_par {
             self.f.get_temporary(variable)[].cls = k;  // :PatchCls TODO?
             self.emit(o, k, variable, type, QbeNull);
@@ -328,22 +271,6 @@ fn parse_args(self: *QParseCtx, is_par: bool) void = {
         @fmt(self.error&, "expected ')' after function args");
         return()
     };
-}
-
-fn eat_b_or_h(self: *QParseCtx, u: bool, o: *Qbe.O, variable: ?*Qbe.Ref) Qbe.Cls = {
-    b := self.eat("b");
-    h := !b && self.eat("h");
-    if !b && !h {
-        @fmt(self.error&, "expected ub/uh/sb/sh in arg");
-        return(.Ke);
-    };
-    
-    base_op := o[];
-    o[] = @as(Qbe.O) @as(i32) ((@as(i32) o[]) + u.int().intcast() + @if(b, 1, 3));
-    if variable { variable |
-        variable[] = self.parse_ref();
-    };
-    .Kw
 }
 
 fn parse_line(self: *QParseCtx) bool = {
@@ -407,7 +334,7 @@ fn parse_inst(self: *QParseCtx) void = {
         return();
     };
     to := QbeNull;
-    k := "w".ascii();
+    k := Qbe.Cls.Kw;
     return_type_for_call := QbeNull;
     if self.check("%") || self.check("R") {
         to = self.parse_ref();
@@ -415,22 +342,17 @@ fn parse_inst(self: *QParseCtx) void = {
             @fmt(self.error&, "Missing equals sign");
             return();
         };
-        k = self.input[self.cursor];
-        self.cursor += 1;
-        if k == ":".ascii() {
-            name := self.eat_word();
-            return_type_for_call = TYPE(or self.find_type(name) {
-                @fmt(self.error&, "type '%' must be declared before use as call return class", name);
-                return();
-            });
-            k = "l".ascii();
-        } else {
-            // in addition to wlsd we allow numbers (used as argument indices, see meta/template.fr).
-            if !"wlsd".contains(k&) && !k.is_ascii_digit() {
-                @fmt(self.error&, "Missing operation class character after '='");
-                return();
-            };
-        }
+        cls := self.parse_cls().or(fn(msg) => {
+            self.error&.push_all(msg);
+            return();
+        });
+        k = cls.k;
+        if cls.f == .FTyp {
+            return_type_for_call = cls.t;
+        };
+        if cls.template != 255 {
+            self.replacements&.push(key = cls.template.zext(), r = to);
+        };
     };
     n := self.eat_word();
     arg0 := self.parse_ref();
@@ -467,11 +389,12 @@ fn parse_inst(self: *QParseCtx) void = {
             };
             if n.starts_with("arg") {
                 @assert(n.len == 4, "expected 'argK' found '%'", n);
-                k = n[3];
-                if "cev".contains(k) {
-                    k = "l".ascii();
+                if "cev".contains(n[3]) {
+                    k = .Kl;
                 } else {
-                    @assert("wlsd".contains(k), "expected 'argK' found '%'", n);
+                    @assert("wlsd".contains(n[3]), "expected 'argK' found '%'", n);
+                    ::?Qbe.Cls;
+                    k = cls_from_char(n[3]).unwrap();
                     n = "arg";
                 };
             };
@@ -482,10 +405,6 @@ fn parse_inst(self: *QParseCtx) void = {
     if from_name(Qbe.O, n) { o | 
         ::if(Qbe.Ref);
         arg1 := if(self.eat(","), => self.parse_ref(), => QbeNull);
-        k := or cls_from_char(k) {
-            self.replacements&.push(key = k.zext() - "0".char(), r = to);
-            .Kw
-        };
         if to != QbeNull {
             self.f.get_temporary(to)[].cls = k;  // :PatchCls
         };
@@ -557,7 +476,7 @@ fn parse_switch(self: *QParseCtx) void = {
         return()
     };
     if self.f.switch_count == 0 {
-        self.f.switches = new(0);
+        self.f.switches = new(1);
     };
     self.f.switch_count += 1;
     self.f.switches&.grow(self.f.switch_count.zext());
@@ -572,23 +491,12 @@ fn parse_switch(self: *QParseCtx) void = {
     self.blk.jmp = (type = .switch, arg = INT(i));
 }
 
-fn parse_phi(self: *QParseCtx, to: Qbe.Ref, k: u8) void = {
+fn parse_phi(self: *QParseCtx, to: Qbe.Ref, k: Qbe.Cls) void = {
     // example: `%s  =w phi @start 0, @loop %s1`
-    phi := temp().box_zeroed(Qbe.Phi);
-    phi.arg = new(0);
-    phi.blk = new(0);
-    phi.to = to;
-    ::?Qbe.Cls;
-    phi.cls = or cls_from_char(k) {
-        self.replacements&.push(key = k.zext() - "0".char(), r = to);
-        .Kw
-    };
+    p := new_phi(self.blk, k, 0, to);
     parse_block_arg_list(self, "phi instruction") { b, a |
-        push(phi, b, a);
+        push(p, b, a);
     };
-    phi.link = self.blk.phi;
-    self.blk.phi = phi;
-    return();
 }
 
 fn parse_block_arg_list(self: *QParseCtx, why: Str, $body: @Fn(blk: *Qbe.Blk, arg: Qbe.Ref) void) void = {
@@ -809,18 +717,10 @@ fn parse_data(self: *QParseCtx, export: bool) Result(Dat2, Str) = {
     while => self.cursor < self.input.len && !self.check("}") {
         // allow { b 1 2 3 } instead of { b 1, b 2, b 3 }
         if had_comma {
-            dat_type = @switch(self.input[self.cursor]) {
-                @case("b".ascii()) => 1;
-                @case("l".ascii()) => 8;
-                @case("z".ascii()) => -1;
-                @case("h".ascii()) => 2;
-                @case("w".ascii()) => 4;
-                // These don't mean anything different from w/l but harec wants to use them 
-                @case("s".ascii()) => 4;
-                @case("d".ascii()) => 8;
-                @default => return(Err = @tfmt("expected b/h/w/l/z prefix for data entry in %", name));
-            };
-            self.cursor += 1;
+            cls := @try(self.parse_cls()) return;
+            @if(cls.f == .FTyp) return(Err = ":Type syntax is only for abi. not valid in constants");
+            @if(cls.f == .FPad) return(Err = "p syntax is only for lossless dump of struct padding. not valid in constants");
+            dat_type = cls.size;
         };
         self.skip_blanks();
         if self.input[self.cursor] == "\"".ascii() {
@@ -938,15 +838,16 @@ fn parse_type(self: *QParseCtx) Result(i64, Str) = {
         typ.size = size.trunc();
     } else {
         fields := u32.list(m.forever&.borrow());
+        err :: fn(msg: Str) => return(Err = @tfmt("% in :% on line %", msg, name, self.line));
         if self.check("{") {
             typ.set_is_union(true);
             while => !self.eat("}") { // TODO: bounds
                 self.eat("{");
-                @try(self.parse_type_fields(typ, fields&)) return;
+                self.parse_type_fields(typ, fields&).or(err);
                 self.eat(",");
             };
         } else {
-            @try(self.parse_type_fields(typ, fields&)) return;
+            self.parse_type_fields(typ, fields&).or(err);
         };
         typ.fields = fields.items();
     };
@@ -965,35 +866,29 @@ fn parse_type_fields(self: *QParseCtx, typ: *Qbe.Typ, fields: *List(u32)) Result
     my_size := 0;
     while => self.cursor < self.input.len && !self.check("}") {
         continue :: local_return;
-        value_to_put_in_len_field := -1;
-        c := self.input[self.cursor];
-        self.cursor += 1;
-        (tag: Qbe.FieldType, size: i64, align: i64) := @switch(c) {
-            @case(":".ascii()) => {
-                n := self.eat_word();
-                value_to_put_in_len_field = (or self.find_type(n) {
-                    return(Err = "type name must be declared before useas field type")
-                });
-                inner := m.get_type(value_to_put_in_len_field);
-                (.FTyp, inner.size.zext(), inner.align_log2.zext())
-            };
-            @case("{".ascii()) => return(Err = "types cannot be nested inline. \nuse seperate declarations and refer to them by name. \nsorry that this is a waste of your time.");
-            @case("l".ascii()) => (.Fl, 8, 3);
-            @case("w".ascii()) => (.Fw, 4, 2);
-            @case("h".ascii()) => (.Fh, 2, 1);
-            @case("b".ascii()) => (.Fb, 1, 0);
-            @case("d".ascii()) => (.Fd, 8, 3);
-            @case("s".ascii()) => (.Fs, 4, 2);
-            @case("p".ascii()) => {
+        self.skip_lines();
+        cls := @try(self.parse_cls()) return;
+        tag, size, align := (cls.f, cls.size, @as(i64) cls.align.zext());
+        value_to_put_in_len_field := size;
+        @match(cls.f) {
+            fn FTyp() => {
+                value_to_put_in_len_field = cls.t.val();
+                // don't do this in parse_cls so don't have to take the types_mutex at other callsites. 
+                inner := self.m.get_type(value_to_put_in_len_field);
+                size = inner.size.zext();
+                align = inner.align_log2.zext();
+            }
+            fn FPad() => {
                 // TODO: make sure we're not losing alignment info
                 self.skip_blanks();
-                len := self.parse_number(); 
+                len := size;
                 self.eat(",");
                 push(fields, pack(type = .FPad, len = len.trunc()));
                 my_size += len;
                 continue()
-            };
-            @default => return(Err = @tfmt("invalid character % to begin field type", c));
+            }
+            fn FEnd() => return(Err = "invalid cls in field");
+            @default => ();
         };
         
         my_align = my_align.max(align);
@@ -1003,9 +898,6 @@ fn parse_type_fields(self: *QParseCtx, typ: *Qbe.Typ, fields: *List(u32)) Result
         self.skip_blanks();
         count := if(self.input[self.cursor].is_ascii_digit(), => self.parse_number(), => 1);
         my_size += count * size;
-        if tag == .FTyp {
-            size = value_to_put_in_len_field;
-        };
         
         // harec wants to make giant array types and not use them. 
         // TODO: this :HACK goes away when i truncate in a more structured way (see next comment)
@@ -1014,8 +906,9 @@ fn parse_type_fields(self: *QParseCtx, typ: *Qbe.Typ, fields: *List(u32)) Result
         // TODO: its kinda sad how much memory i use to represent Array(u8, 80), etc.
         //       but also the abi only looks at the first few anyway so this could be improved. 
         //       (careful, can't just truncate in add_type because of how i represent unions)
-        fields.push_repeated(count, pack(len = size.trunc(), type = tag));
+        fields.push_repeated(count, pack(len = value_to_put_in_len_field.trunc(), type = tag));
         self.eat(",");
+        self.skip_lines();
     };
     if !self.eat("}") {
         return(Err = "expected '}' to end type declaration");
@@ -1158,6 +1051,80 @@ fn eat_quoted_word(self: ~QParseCtx) Str #where = {
             ""
         }
     }
+}
+
+BigCls :: @struct {
+    k := Qbe.Cls.Kw;   // for inst
+    arg := Qbe.O.arg;  // for call / header
+    t := Qbe.Null;     // RType for call / header
+    f := Qbe.FieldType.FEnd;  // for type
+    align: u8 = 255;
+    template: u8 = 255;  // placeholder for @emit_instructions
+    size := -1;    // for const / type
+};
+
+// note: each callsite only wants a subset of what this can parse. 
+fn parse_cls(self: *QParseCtx) Result(BigCls, Str) = {
+    c := self.input[self.cursor];
+    self.cursor += 1;
+    (Ok = @switch(c) {
+        @case(":".ascii()) => {
+            n := self.eat_word();
+            type_index := self.find_type(n)
+                || return(Err = @tfmt("type :% must be declared before use", n));
+            (k = .Kl, f = .FTyp, arg = .argc, t = TYPE(type_index))
+        };
+        @case("{".ascii()) => return(Err = "types cannot be nested inline. \nuse seperate declarations and refer to them by name. \nsorry that this is a waste of your time.");
+        @case("l".ascii()) => (f = .Fl, size = 8, align = 3, k = .Kl);
+        @case("w".ascii()) => (f = .Fw, size = 4, align = 2);
+        @case("h".ascii()) => (f = .Fh, size = 2, align = 1, arg = .arguh);
+        @case("b".ascii()) => (f = .Fb, size = 1, align = 0, arg = .argub);
+        @case("d".ascii()) => (f = .Fd, size = 8, align = 3, k = .Kd);
+        @case("s".ascii()) => {
+            self.cursor += 1;
+            @switch(self.input[self.cursor - 1]) {
+                @case("b".ascii()) => (f = .Fb, size = 1, align = 0, arg = .argsb);
+                @case("h".ascii()) => (f = .Fh, size = 2, align = 1, arg = .argsh);
+                @default => {
+                    self.cursor -= 1;
+                    (k = .Ks, f = .Fs, size = 4, align = 2)
+                };
+            }
+        };
+        @case("u".ascii()) => {
+            self.cursor += 1;
+            @switch(self.input[self.cursor - 1]) {
+                @case("b".ascii()) => (f = .Fb, size = 1, align = 0, arg = .argub);
+                @case("h".ascii()) => (f = .Fh, size = 2, align = 1, arg = .arguh);
+                @default => return(Err = "expected cls found 'u' (maybe wanted ub/uh?)");
+            }
+        };
+        @case("z".ascii()) => (k = .Kx, arg = .nop);  // for const
+        @case("p".ascii()) => {  // for field
+            // TODO: make sure we're not losing alignment info
+            self.skip_blanks();
+            len := self.parse_number(); 
+            (f = .FPad, size = len, k = .Kx, arg = .nop)
+        };
+        @case("e".ascii()) => {  // for call/header
+            @if(!self.eat("nv")) return(Err = "expected 'env' in arg");
+            (k = .Kl, arg = .arge)
+        };
+        @case(".".ascii()) => {
+            if !self.eat("..") {
+                return(Err = "expected '...' in arg");
+            };
+            (arg = .argv)
+        };
+        @default => {
+            if !is_ascii_digit(c) {
+                return(Err = @tfmt("invalid character % to begin field type", c));
+            };
+            self.cursor -= 1;
+            n := self.parse_number(); 
+            (template = n.trunc())
+        };
+    })
 }
 
 // not using self.f.emit so this doesn't use m.scratch and is thread safe. 

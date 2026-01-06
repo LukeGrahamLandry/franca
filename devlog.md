@@ -16,6 +16,7 @@
     oh i should have looked at the code: i don't do struct types in va_arg. 
     works if i add `&` to the caller. 
 - found a few new fr bugs for tests/todo
+- only parse the subword cls syntax in one place
 
 ## (Jan 5)
 
