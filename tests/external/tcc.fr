@@ -4,6 +4,8 @@
 //   then use tcc compile itself and make sure the result is 
 //   byte for byte identical to if you had started with your system c compiler instead. 
 
+// TODO: bootstrap on (macos-amd, linux-amd, linux-rv). abitest on (linux-arm, ...). 
+
 main :: fn() void = {
     compare_to_clang := false;
     for(cli_args(), fn(it) => if(it == "-ddc", => { compare_to_clang = true; }));
@@ -23,7 +25,7 @@ main :: fn() void = {
     // these ones they commit the output so i can test my import_c before compiling tcc at all. 
     test_import_c(root, cc_path);
     
-    if query_current_arch() != .aarch64 || query_current_os() != .macos {
+    if query_current_arch() != .aarch64 {
         eprintln("SKIP: bootstrapping tcc. TODO: config.h on other targets.");
         return();
     };
@@ -42,13 +44,20 @@ main :: fn() void = {
     };
     
     // this needs to be after compiling libtcc1.a because the tcc needs to link the jitted code against it. 
-    // TODO: i don't care about running this with tcc as the host. i need to run it with import_c as the host because it uses tcc to jit at runtime. 
-    //       but that dies with "tcc: error: mprotect failed (did you mean to configure --with-selinux?)"
+    if query_current_os() == .macos && query_current_arch() == .aarch64 {  
     run_abitest(cc_path);
+    } else {
+        // TODO: dies on ret_2float_test on linux-arm
+        eprintln("=== Skipped abitest.c (TODO) ===");
+    };
     
     if compare_to_clang {
         remove(dest_path.as_cstr()).unwrap();
         cc := Foreign.EXE.cc;
+        if !file_exists(Foreign.PATH.bin_sh) {
+            // :HACK :HACK :HACK :HACK the point of the sandboxing is kinda defeated if i have to change the programs to accommodate it 
+            cc = Foreign.EXE.clang;
+        };
         boot_compiler(cc, dest_path, false);
         bytes := read_entire_file_or_crash(temp(), dest_path);
         digest_b := show_hash(dest_path, cc);
@@ -73,7 +82,7 @@ fn boot_rt_libs(tcc: Str) void = {
     sh(@slice(tcc, "-c", "stdatomic.c", "-o", "stdatomic.o", "-I.."));
     sh(@slice(tcc, "-c", "atomic.S", "-o", "atomic.o", "-I.."));
     sh(@slice(tcc, "-c", "builtin.c", "-o", "builtin.o", "-I.."));
-    sh(@slice(tcc, "-c", "tcov.c", "-o", "tcov.o", "-I.."));
+    sh(@slice(tcc, "-c", "tcov.c", "-o", "tcov.o", "-I..", "-I../include"));
     sh(@slice(tcc, "-ar", "rcs", "../libtcc1.a", "lib-arm64.o", "stdatomic.o", "atomic.o", "builtin.o", "tcov.o"));
     sh(@slice(tcc, "-c", "runmain.c", "-o", "../runmain.o", "-I.."));
     
@@ -83,7 +92,8 @@ fn boot_rt_libs(tcc: Str) void = {
 fn boot_compiler(host_cc: Str, dest: Str, need_rt_libs: bool) void = {
     @println("=== bootstrapping tinycc with % ===", host_cc);
     tmp_cc := "./tcc_boot.out";
-    sh(@slice(host_cc, "tcc.c", "-I.", "-o", tmp_cc, "-DTCC_IS_NATIVE=1", "-Denviron=0" /*hack*/));
+    hack := @if(host_cc.ends_with(".out"), "-Denviron=0", "-DXXXXX");
+    sh(@slice(host_cc, "tcc.c", "-I.", "-o", tmp_cc, "-DTCC_IS_NATIVE=1", hack));
     if need_rt_libs {
         boot_rt_libs(@tfmt("../%", tmp_cc));
     };
@@ -91,19 +101,40 @@ fn boot_compiler(host_cc: Str, dest: Str, need_rt_libs: bool) void = {
     remove(tmp_cc.as_cstr()).unwrap();
 }
 
-// TODO: non-macos-arm
 config_h :: """
 // @generated
 #define TCC_VERSION "frfrfrfrfr"
-
-#define TCC_TARGET_ARM64 1
-#define TCC_TARGET_MACHO 1
 #define CONFIG_DWARF_VERSION 4
-#define CONFIG_CODESIGN 1
-#define CONFIG_USR_INCLUDE "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include"
-
 #define CONFIG_TCC_PREDEFS 0
 #define ONE_SOURCE 1
+
+// i don't implement f80/f128
+#define TCC_USING_DOUBLE_FOR_LDOUBLE 1
+
+#if __aarch64 || __aarch64__
+    #define TCC_TARGET_ARM64 1
+    #if __linux || __linux__
+        #define CONFIG_TRIPLET "aarch64-linux-gnu"
+    #endif
+#endif
+
+#if __x86_64 || __x86_64__
+    #define TCC_TARGET_X86_64 1
+    #if __linux || __linux__
+        #define CONFIG_TRIPLET "x86_64-linux-gnu"
+    #endif
+#endif
+
+#if __macos || __APPLE__
+#define TCC_TARGET_MACHO 1
+#define CONFIG_CODESIGN 1
+#define CONFIG_USR_INCLUDE "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include"
+#endif 
+
+#if __linux || __linux__
+    // TODO: THIS IS NOT OK
+    static void __clear_cache(void *a, void *b) {}
+#endif
 """;
 
 // it uses libtcc to jit one side of the calls.
@@ -131,7 +162,7 @@ run_abitest :: fn(import_c: Str) void = {
     );
     ok, out, err := exec_and_catch(import_c, args, temp());
     n := out.items().count_occurances("... success");
-    @assert(ok && n == 24, "\n%%", out.items(), err.items());
+    @assert(ok && n == 24, "\npassed %\n%%", n, out.items(), err.items());
     @println("OK (% x success) ===", n);
 };
 

@@ -2,9 +2,9 @@
 //! and runs those tests on my @/examples/lox interpreter. 
 //! Currently checks exact output for programs that are not supposed to error but otherwise just expects 
 //! runtime vs compile error to be correct (my error messages don't match). 
-
 // note: since i don't check exact error messages it will look like i pass tests that are supposed to error just because they use features i don't support yet
-// TODO: since im depending on it anyway, use clox as a test for import_c
+// as a fun bonus, the lox repo has a lox interpreter written in c 
+// that i can compile with my c compiler (examples/import_c) and run on the same tests. 
 
 #use("@/examples/testing.fr");
 main :: fn() void = {
@@ -27,6 +27,10 @@ main :: fn() void = {
             if s == "-hush" {
                 HUSH[] = true;
             }
+            if s == "-clox" {
+                path := compile_c_lox(root);
+                CLOX[] = (Some = path);
+            };
             continue();
         };
         @assert(!do_skips[], "only skip failing tests when running all");
@@ -51,8 +55,9 @@ main :: fn() void = {
 
 do_skips :: @static(bool) false;
 HUSH :: @static(bool) false;
+CLOX :: @static(?Str) (.None);
 
-skip :: @const_slice(
+skip_ :: @const_slice(
     "string/multiline.lox",   // TODO: my test runner is dumb about multiline prints
     "number/literals.lox",  // i don't print -0
     "operator/multiply.lox",  // i don't print decimals
@@ -85,14 +90,14 @@ skip :: @const_slice(
 
 ::if(Ty(i64, i64));
 fn run_test_at_path(prefix: Str, s: Str) Ty(i64, i64) = {
-    if do_skips[] && skip.contains(fn(check) => s.ends_with(@tfmt("/%", check[]))) {
+    if do_skips[] && skip_.contains(fn(check) => s.ends_with(@tfmt("/%", check[]))) {
         return(0, 0);
     };
     if s.ends_with(".lox") {
         src := temp().read_to_string_or_crash(s);
         ::FmtPad(Str);
         @if(!HUSH[]) @print("%", f_pad(s.rest(prefix.len), 40, .After));
-        ok := run_test(src);
+        ok := run_test(src, s);
         @if(!HUSH[]) @println("[%]", @if(ok, "ok", "fail"));
         (int(ok), int(!ok))
     } else {
@@ -112,20 +117,42 @@ fn run_test_at_path(prefix: Str, s: Str) Ty(i64, i64) = {
     }
 }
 
-fn run_test(src: List(u8)) bool = {
+#use(Lox)
+fn run_test(src: List(u8), lox_filename: Str) bool = {
     want := expected_output(src.items());
-    src&.push_all("\nreturn nil;"); // todo: remove
-        
+    
     found: List(Str) = list(temp());
-    vm: Vm = init_vm();
-    result := vm&.interpret(src.items(), true) { value | 
-        found&.push(@tfmt("%", value));
+    result := InterpretResult.CompileError;
+    errors := u8.list(temp());
+    if CLOX[] { path |
+        cargs := make_args_for_exec(path, @slice(lox_filename), temp());
+        out := u8.list(temp());
+        it := sys_capture_exec(cargs).unwrap();
+        status := it&.poll_until_exit(out&, errors&, "");
+        // TODO: where am i getting non-8bit numbers. this has been happening forever. fix it in poll() instead. 
+        result = @switch(status.shift_right_logical(8)) {
+            @case(0) => .Ok;
+            @case(70) => .RuntimeError;
+            @case(65) => .CompileError;
+            @default => @panic("bad status %\n%", status.shift_right_logical(8), errors.items());
+        };
+        lines := out.items().split("\n", temp()).items();
+        lines.len -= 1;
+        found&.push_all(lines);
+    } else {
+        src&.push_all("\nreturn nil;"); // todo: remove
+        vm: Vm = init_vm();
+        result = vm&.interpret(src.items(), true) { value | 
+            found&.push(@tfmt("%", value));
+        };
+        errors = vm.errors.items().clone(temp());
+        vm&.drop();  // test a forced full collection
     };
     
     pass := @match(want) {
         fn Ok(want) => {
-            print(vm.errors.items());
-            if(result != .Ok || vm.errors.len != 0, => return(false));
+            print(errors.items());
+            if(result != .Ok || errors.len != 0, => return(false));
             if want.len != found.len {
                 @println("Expected % outputs but found %", want.len, found.len);
                 return(false);
@@ -138,7 +165,6 @@ fn run_test(src: List(u8)) bool = {
                 };
             };
             
-            vm&.drop();  // test a forced full collection
             
             true
         }
@@ -152,7 +178,7 @@ fn run_test(src: List(u8)) bool = {
     }
 
     if !want&.is(.Ok) && !pass {
-        print(vm.errors.items());
+        print(errors.items());
         print("(expected an error)");
     };
     
@@ -194,10 +220,55 @@ fn expected_output(src: Str) TestResult = {
     (Ok = want)
 }
 
+// TODO: far too verbose. can't just cc.fr all the files because need to discardstaticscope
+compile_c_lox :: fn(root: Str) Str = {
+    files := collect_with_extension(@tfmt("%/c", root), ".c").unwrap();
+    
+    // TODO: use it through import_module
+    Qbe :: import("@/backend/ir.fr");
+    C :: import("@/examples/import_c/lib.fr");
+    
+    c := @ref zeroed(C.Compile.Ctx);
+    m := @ref zeroed(Qbe.Module);
+    Qbe'backend'init_module(m, (
+        arch = query_current_arch(),
+        os = query_current_os(),
+        type = .Exe,
+        wrap_entry_for_linux_libc = true,
+        exe_debug_symbol_table = true,
+    ));
+    ctx := init_codegen_worker(m, true);
+    C'init_ctx(c, m, ctx);
+    c.include_paths&.push(@tfmt("%/c", root));
+    
+    for files { it |
+        // :discard_static_scope
+        c.macros&.clear();
+        C'Preprocess'init_macros(c);
+        c.scope.vars&.clear();
+    
+        it := @tfmt("%/c/%", root, it);
+        src := read_entire_file_or_crash(temp(), it);
+        result := C'catch_call(c, void) {
+            tok := c.tokenize_string(it, src);
+            tok  = c.C'Preprocess'preprocess(tok);
+            c.C'Compile'parse(tok);
+        };
+        @if_let(result) fn Err(msg) => {
+            @panic("failed to compile %\n%", "", msg);
+        };
+    };
+    
+    path := "target/clox.out";
+    ctx.join_codegen_thread();
+    chunks := {m.target.finish_module}(m);
+    write_chunks_or_crash(path, chunks);
+    c.arena_storage&.deinit();
+    drop(m);
+    path
+}
+
 #use("@/lib/collections/map.fr");
 #use("@/lib/sys/fs.fr");
-#include_std("examples/lox/chunk.fr");  // TODO: rename this macro
-#include_std("examples/lox/value.fr");
-#include_std("examples/lox/vm.fr");
-#include_std("examples/lox/scanner.fr");
-#include_std("examples/lox/compile.fr");
+
+Lox :: import("@/examples/lox/lox_main.fr").Lox;

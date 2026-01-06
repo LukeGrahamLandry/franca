@@ -1,5 +1,4 @@
 //
-// --clearenv --setenv PATH $PATH --new-session --dev /dev --die-with-parent --unshare-all --proc /proc --dir /tmp --ro-bind /usr /usr --symlink usr/lib64 /lib64 --symlink usr/lib /lib --ro-bind . foo --bind ./target foo/target --chdir foo -- ./target/release/franca-linux-arm64 tests/run_tests.fr core
 // - /dev/null for external/hare.fr 
 // - /proc/self/cmdline for exe/cli_args.fr 
 // - /tmp for open_temp_file 
@@ -7,14 +6,11 @@
 //   /usr/bin   the run-yes-deps tests need clang 
 //   $PATH      "
 // - /lib64 for amd
+// - target/franca/fetch for cached deps (so sandbox doesn't need network)
 //
-// TODO: file listing all the deps so they can be downloaded before entering the sandbox 
-//       and i don't have to give it network access. 
 // TODO: make fetch_git_commit first save to target/franca/fetch 
 //       so that's the only part i need to share and the rest can be --tmpfs
-// what works now:
-// --tmpfs foo/target --ro-bind target/franca/fetch foo/target/franca/fetch --bind target/franca/deps foo/target/franca/deps --bind ./target/release foo/target/release
-//       really i also shouldn't let it write to the real release/, just copy in the starting binary
+//       rn it works because i always use the mirror. 
 // TODO: preset args for the different groups of my tests. 
 //       syscalls, dynamic, deps_fetch, deps_cc 
 // 
@@ -22,9 +18,31 @@
 //       /usr/lib/gcc-cross/riscv64-linux-gnu/14/../../../../riscv64-linux-gnu/include
 //
 
+settings :: @const_slice(
+    "--clearenv", 
+    "--setenv", "PATH", "$PATH",
+    "--new-session", 
+    "--unshare-all", 
+    "--die-with-parent", 
+    "--dev", "/dev", 
+    "--proc", "/proc", 
+    "--dir", "/tmp", 
+    "--ro-bind", "/usr", "/usr", 
+    "--symlink", "/usr/lib64", "/lib64", 
+    "--symlink", "/usr/lib", "/lib", 
+    "--chdir", "/foo", 
+    "--ro-bind", ".", "/foo", 
+    "--tmpfs", "/foo/target", 
+    "--ro-bind", "target/franca/fetch", "/foo/target/franca/fetch", 
+    "--ro-bind", "$FRANCA", "/foo/target/boot.out", 
+    "--", "target/boot.out", "tests/run_tests.fr", "$MODE",
+);
+
+// usage: franca tests/external/bubblewrap.fr -run $MODE
+// will run `franca run_tests.fr $MODE` sandboxed with the `settings` above. 
 // usage: franca tests/external/bubblewrap.fr -- [OPTIONS...] [--] COMMAND [ARGS...]
 // everything after the first '--' is passed to a newly compiled bwrap. 
-main :: fn() void = {
+driver :: fn(_: *ImportVTable) void = {
     if query_current_os() != .linux {
         eprintln("WARN: bubblewrap only supports linux");
         eprintln("      and i don't bundle enough headers for this one so it probably won't even compile.");
@@ -32,14 +50,36 @@ main :: fn() void = {
     path := "target/bwrap.out";
     compile_bubblewrap(path);
     
+    franca := get_executable_path(temp());
     args := cli_args();
+    if args.index_of(fn(it) => it[] == "-run") { i |
+        @assert(i < args.len - 1, "expected '-run $MODE' (same as argument to run_tests.fr)");
+        mode := args[i + 1].str();
+        settings := settings.shallow_copy(temp());
+        each settings { it |
+            it[] = @switch(it[]) {
+                @case("$FRANCA") => franca;
+                @case("$PATH") => (get_environment_variable("PATH") || "").str();
+                @case("$MODE") => mode;
+                @default => it[];
+            };
+        };
+        // TODO: for mode == run-yes-deps (instead of mode == core) to work i need to recompile cc.out/q.out
+        // TODO: if mode == run-no-deps, don't do this and don't --bind target/franca/fetch
+        @assert Subprocess'run_cmd_blocking(franca, @slice("tests/run_tests.fr", "fetch"));
+        
+        args := Subprocess'make_args_for_exec(path, settings, temp());
+        Subprocess'exec(args);
+        unreachable();
+    };
+    
     i := args.index_of(fn(it) => it[] == "--") || {
         // running something is optional. else just exit after compiling. 
         @println("compiled %", path);
         return();  
     };
     args := build_exec_args(path, args.rest(i + 1));
-    import("@/lib/sys/subprocess.fr")'exec(args);
+    Subprocess'exec(args);
     unreachable();
 }
 
@@ -178,3 +218,5 @@ build_exec_args :: fn(bin: Str, args: []CStr) []CStr = {
 #use("@/lib/sys/fs.fr");
 CCC :: import("@/examples/import_c/cc.fr");
 Qbe :: CCC.C.Compile.Qbe;
+Subprocess :: import("@/lib/sys/subprocess.fr");
+#use("@/lib/sys/process.fr");

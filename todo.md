@@ -1,5 +1,7 @@
+- tests that look at ir after opt and compare two versions of functions to make sure they generate the same thing. 
+  ie. a function that does a div twice and make sure gvn fixes it. 
 - actually use hash_archive !!!
-- tests/external/tcc.fr: might as well run tests/tests2 with import_c too. 
+- tests/external/tcc.fr: fix my arm-linux abi. bootstrap on other targets.
 - tests/external/wuffs.fr uses thier committed generated c code. 
   do i care enough to bootstrap a go? probably. the more import_c tests the merrier. 
   https://github.com/golang/go/tree/release-branch.go1.4/src/cmd/dist
@@ -9,7 +11,7 @@
 - #reexport something with main doesn't get picked up by find_unique_func. 
   because find_in_scope doesn't recurse. idk if i want that to work. 
   need to decide how get_constants should work because they should stay consistant. 
-- nightmare hour: don't hardcode "target" everywhere
+- nightmare hour: don't hardcode "./target" everywhere
 - i'm not sure what to do with open_temp_file. is it better to use the TMPDIR (/tmp or whatever) 
   so the os knows it can discard them at some point 
   or to have a blanket policy of "i never write outside the ./target directory"
@@ -48,7 +50,7 @@ Compile Error: not callable V:()
 - fix tests that depend on order they run in for binaries to be compiled. 
   (ie franca examples/import_c/test/test.fr -w target/w.out).
   they should always compile the thing themself so its easy to test multiarch/orb/whatever. 
-- `Compile Error: redeclared constant mangle as overloadset` 
+- `Compile Error: redeclared constant % as overloadset` 
   means you can have things that work if one is main program and imports the other but not the reverse. 
   because `foo :: fn` in the imported thing will be scoped correctly but `fn foo` will be lifted. 
 - tests/external/hare.fr i fail some
@@ -686,6 +688,9 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 // TODO: ir test that uses opaque types
 ```
 - elf can have relocations in bss so should use that for export_ffi_data instead of having 12k of zeroes
+- https://c9x.me/git/qbe.git/commit/?id=73f0accb45f80d697e054ee95e9c82adbc512c99
+  i already had a debug_assert for that problem but should actually fix it. 
+  need a non-insane repo case. 
 
 ## backend symbols rework
 
@@ -790,8 +795,6 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 - make the platform detection in franca_runtime_init less hacky
 - support (free, net, open)bsd
 - the bootstrapping system can't be committing a macos-arm binary. linux-amd seems more old / emulator enthused, could use blink, etc. 
-- seperate out the tests that download things and run them as an extra thing at the end. so if they disappear it's not a bit deal. 
-  like it's nice to test import_c on lua,tcc, etc. but it doesn't matter for the main franca stuff if you can't run those tests. 
 - fix the non-deterministic test failures
 - report all test failures instead of stopping on the first one
 - i want the transcribed magic numbers for syscalls, sys struct layouts, instruction encoding, object formats, etc. to be more auditable. 

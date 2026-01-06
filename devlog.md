@@ -17,6 +17,10 @@
     works if i add `&` to the caller. 
 - found a few new fr bugs for tests/todo
 - only parse the subword cls syntax in one place
+- the fetch rework i did makes it possible to finish the bubblewrap thing since you can prefetch. 
+  so setup the right settings for running my tests. 
+- add clox as an import_c test
+- tcc config.h for arm-linux
 
 ## (Jan 5)
 
