@@ -1,4 +1,22 @@
 
+## (Jan 6)
+
+- import_c on tcc/tests/tests2. 
+  - found some legit fails! just documented them for now. 
+- trying to run tcc/tests/abitest.c with import_c as the host 
+  so it's my aot abi vs tcc's jit abi. 
+  - "tcc: error: mprotect failed (did you mean to configure --with-selinux?)"
+    but same with my first generation tcc (before bootstrapping itself). 
+    so problem is with my includes maybe? 
+  - part of it is helped by -DCONFIG_RUNMEM_RO=1 because i'm not saying im `__APPLE__`
+    because i don't want it to try to use libdispatch. 
+    now it's just flaky. which is fixed by PAGESIZE. 
+    and now it passes until stdarg_test which makes sense for the same APPLE thing. 
+    both sizes agree sizeof(va_list) == 8.
+    oh i should have looked at the code: i don't do struct types in va_arg. 
+    works if i add `&` to the caller. 
+- found a few new fr bugs for tests/todo
+
 ## (Jan 5)
 
 - also move out the magic strings for exec, env vars, special paths

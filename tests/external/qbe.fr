@@ -1,38 +1,22 @@
-#use("@/examples/testing.fr");
-
 // TODO: test that i can compile qbe itself as well, not just minic
-main :: fn() void = {
-    //qbe_commit := "120f316162879b6165deba77815cd4193fb2fb59";  // 2025
-    qbe_commit := "d9f1121763c126316ab338ca8b1b9d51967a33b1"; // 2017, before minic put "..." after every call, for reproducing queen.ssa
-    root := fetch_or_crash_qbe_source(qbe_commit);
-    build_qbe_minic(root);
-}
+//       could also use its output as more tests for my (very limmited) assembler. 
 
-// TODO: maybe dont stomp a fixed path so could call this concurrently with different `qbe_commit`s
 // This is called to generate queen.ssa
-compile_with_minic :: fn($qbe_commit: Str, c_source: Str) Str = {
-    root := fetch_or_crash_qbe_source(qbe_commit);
-    build_qbe_minic(root);
-    ok, out, err := exec_and_catch("target/qbe_minic.out", empty(), temp(), c_source);
-    @assert(ok, "minic failed! output:\n%%", out.items(), err.items());
-    if err.len != 0 {
-        println(err.items());
-    };
-    out.items()
-}
-
 // note: (recent) minic always puts the varargs marker at the end of a call so it doesn't work on apple-arm or riscv
 //       (and doesn't reproduce the committed queen.ssa)
-build_qbe_minic :: fn(root: Str) void = {
-    // TODO: compile the c compiler
-    // TODO: why doesn't this work:
-    //sh(@slice("target/cc.out", "-r", @tfmt("%/minic/yacc.c", root), "--", @tfmt("%/minic/minic.y", root)));
-    sh(@slice("target/cc.out", @tfmt("%/minic/yacc.c", root), "-o", "target/qbe_miniyacc.out"));
-    sh(@slice("./target/qbe_miniyacc.out", "-b", "target/y", @tfmt("%/minic/minic.y", root)));
-    sh(@slice("target/cc.out", "target/y.tab.c", "-o", "target/qbe_minic.out"));
-}
-
-fetch_or_crash_qbe_source :: fn(qbe_commit: Str) Str = {
+// TODO: compile the c compiler instead of hoping cc.out already exists. 
+compile_with_minic :: fn($qbe_commit: Str, c_source: Str) Str = {
+    #use("@/examples/testing.fr");
     @assert_eq(qbe_commit, "d9f1121763c126316ab338ca8b1b9d51967a33b1");
-    Foreign'qbeminic()
+    root := Foreign'qbeminic();
+    // use qbe's yacc to generate minic's source. 
+    sh(@slice("target/cc.out", @tfmt("%/minic/yacc.c", root), "-r", "--", 
+         "-b", "target/y", @tfmt("%/minic/minic.y", root)));
+    // use minic to generate ir.
+    ok, out, err := exec_and_catch("target/cc.out", @slice(
+        "target/y.tab.c", "-r", "--",
+    ), temp(), c_source);
+    @assert(ok, "minic failed! output:\n%%", out.items(), err.items());
+    @if(err.len != 0) println(err.items());
+    out.items()
 }

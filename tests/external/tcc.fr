@@ -1,27 +1,53 @@
-#use("@/examples/testing.fr");
+// - since it's a c compiler, they have lots of little test programs i can run with my c compiler. 
+// - since it implements the same abi as me, i can test them calling each other. 
+// - since it's written in c, i can bootstrap it with my c compiler. 
+//   then use tcc compile itself and make sure the result is 
+//   byte for byte identical to if you had started with your system c compiler instead. 
 
 main :: fn() void = {
     compare_to_clang := false;
     for(cli_args(), fn(it) => if(it == "-ddc", => { compare_to_clang = true; }));
-
-    // TODO: compile the c compiler
+    
     start := get_working_directory(temp()).items();
     cc_path := @tfmt("%/target/cc.out", start);
+    
+    // compile a fresh import_c
+    franca := get_executable_path(temp());
+    sh(@slice(franca, "examples/default_driver.fr", "build", "examples/import_c/cc.fr", "-o", cc_path));
+    
     root := Foreign'tinycc();
     root := @fmt_cstr("%/%", start, root);
     Syscall'chdir(root) || @panic("failed to set cwd to %", root);
     println(root);
     
+    // these ones they commit the output so i can test my import_c before compiling tcc at all. 
+    test_import_c(root, cc_path);
+    
+    if query_current_arch() != .aarch64 || query_current_os() != .macos {
+        eprintln("SKIP: bootstrapping tcc. TODO: config.h on other targets.");
+        return();
+    };
+    
     write_entire_file_or_crash("config.h", config_h);
     write_entire_file_or_crash("tccdefs.h", read_entire_file_or_crash(temp(), "include/tccdefs.h"));
     
     dest_path := "./tcc.out";
+    _ := remove(dest_path.as_cstr());
     boot_compiler(cc_path, dest_path, true);
     digest_a := show_hash(dest_path, "franca");
-    sh(@slice(dest_path, "-L.", "-I.", "-run", @tfmt("%/tests/c/hello.c", start)));
-    remove(dest_path.as_cstr()).unwrap();
+    
+    ;{  // sanity test that the bootstrapped tcc can jit hello world. 
+        ok, out, err := exec_and_catch(dest_path, @slice("-L.", "-I.", "-run", @tfmt("%/tests/c/hello.c", start)), temp());
+        @assert(ok && err.len == 0 && out.items() == "Hello World!\nOK\n", "failed hello: %%", out.items(), err.items());
+    };
+    
+    // this needs to be after compiling libtcc1.a because the tcc needs to link the jitted code against it. 
+    // TODO: i don't care about running this with tcc as the host. i need to run it with import_c as the host because it uses tcc to jit at runtime. 
+    //       but that dies with "tcc: error: mprotect failed (did you mean to configure --with-selinux?)"
+    run_abitest(cc_path);
     
     if compare_to_clang {
+        remove(dest_path.as_cstr()).unwrap();
         cc := Foreign.EXE.cc;
         boot_compiler(cc, dest_path, false);
         bytes := read_entire_file_or_crash(temp(), dest_path);
@@ -55,6 +81,7 @@ fn boot_rt_libs(tcc: Str) void = {
 }
 
 fn boot_compiler(host_cc: Str, dest: Str, need_rt_libs: bool) void = {
+    @println("=== bootstrapping tinycc with % ===", host_cc);
     tmp_cc := "./tcc_boot.out";
     sh(@slice(host_cc, "tcc.c", "-I.", "-o", tmp_cc, "-DTCC_IS_NATIVE=1", "-Denviron=0" /*hack*/));
     if need_rt_libs {
@@ -66,6 +93,7 @@ fn boot_compiler(host_cc: Str, dest: Str, need_rt_libs: bool) void = {
 
 // TODO: non-macos-arm
 config_h :: """
+// @generated
 #define TCC_VERSION "frfrfrfrfr"
 
 #define TCC_TARGET_ARM64 1
@@ -77,3 +105,202 @@ config_h :: """
 #define CONFIG_TCC_PREDEFS 0
 #define ONE_SOURCE 1
 """;
+
+// it uses libtcc to jit one side of the calls.
+// so this is testing that tcc and import_c agree on the abi. 
+run_abitest :: fn(import_c: Str) void = {
+    print("=== abitest.c: import_c-aot vs tinycc-jit: ");
+    SRC :: """
+        // @generated
+        #define TCC_IS_NATIVE 1
+        #define environ 0
+        #include <libtcc.c>
+        // see easy_long_double_abi
+        #define LONG_DOUBLE double
+        #define LONG_DOUBLE_LITERAL(x) x
+        #include <tests/abitest.c>
+    """;
+    tmp_c_path := "tests/_abitest.c";
+    write_entire_file_or_crash(tmp_c_path, SRC);
+    args := @slice(
+        tmp_c_path, 
+        "-I.", 
+        "-DCONFIG_RUNMEM_RO=1", @tfmt("-DPAGESIZE=%", page_size()), 
+        // "-L.", "-Iinclude",   // only for tcc
+        "-run", "--", "-L.", "-Iinclude", 
+    );
+    ok, out, err := exec_and_catch(import_c, args, temp());
+    n := out.items().count_occurances("... success");
+    @assert(ok && n == 24, "\n%%", out.items(), err.items());
+    @println("OK (% x success) ===", n);
+};
+
+test_import_c :: fn(root: CStr, cc_path: Str) void = {
+    println("=== tinycc's tests on my import_c ===");
+    files, skipped := collect_tests2(root);
+    Ctx :: @struct(root: CStr, cc_path: Str);
+    ctx: Ctx = (root = root, cc_path = cc_path);
+    run_tests_main_threaded(Ctx, Str, ctx, files, fn(_, it) = it[], fn(ctx, file) = {
+        path := @tfmt("%/tests/tests2/%", ctx.root, file[]);
+        args := @slice(path, "-r");
+        ok, out, err := exec_and_catch(ctx.cc_path, args, temp());
+        if ok {
+            @assert(path.ends_with(".c"));
+            path := @tfmt("%expect", path.slice(0, path.len - 1));
+            expect := read_entire_file_or_crash(temp(), path);
+            ok = out.items().trim_each_line() == expect.trim_each_line();
+            @if(ok) out&.clear();
+        };
+        (ok, out, err, "")
+    });
+    @println("> Skipped % of tinycc's tests.", skipped);
+}
+
+collect_tests2 :: fn(root: CStr) Ty([]Str, i64) = {
+    files := collect_with_extension(@tfmt("%/tests/tests2", root), ".c") 
+        || panic("didn't find tcc tests");
+    
+    total := files.len;
+    files&.ordered_retain(fn(it) => !skip.contains(it[]));
+    
+    easy_long_double_abi := query_current_os() == .macos && query_current_arch() == .aarch64;
+    if !easy_long_double_abi {
+        // printf(%Lf) means long double. 
+        // apple-arm: f64 (i do correctly so the test works).  
+        // linux-(arm, rv): f128 (i don't implement this)
+        // (macos, linux)-amd: f80 (i don't implement this)
+        // 
+        // this is me doing the abi wrong but i don't super care
+        // cause like 64 bits ought to be enough to anybody... 
+        // the real programs i've tried to compile so far don't use them. 
+        files&.ordered_retain(fn(it) => it[] != "22_floating_point.c");
+    };
+    
+    if query_current_arch() == .rv64 {
+        // TODO: my import_c gets wrong output 
+        //       (clang gets it right tho so its not a tcc/non-rv specific test)
+        files&.ordered_retain(fn(it) => it[] != "115_bound_setjmp.c");
+    };
+    (files.items(), total - files.len)
+}
+
+skip :: @const_slice(
+    // TODO: i compile these but give wrong output!
+    "129_scopes.c",
+    "18_include.c",
+    "93_integer_promotion.c",
+    "77_push_pop_macro.c",
+    "79_vla_continue.c",
+    "92_enum_bitfield.c",
+    "122_vla_reuse.c",
+    "73_arm64.c",  // segmentation fault
+    
+    // TODO: void main() needs to return 0. (i thought i did that but clearly not)
+    "137_funcall_struct_args.c",
+    
+    // TODO: panic! trying to pad struct to smaller size
+    "131_return_struct_in_reg.c",
+    // TODO: void fooc(int x[const 5]); unexpected (prefix) token const
+    "100_c99array-decls.c",
+    // TODO: ({ while (1) printf(""); }) unknown type for right of ND_COND
+    "89_nocode_wanted.c",
+    // TODO: __alignof__ should be the same as _Alignof
+    "95_bitfields.c",
+    // TODO: __typeof and __typeof__ should be the same as typeof
+    "33_ternary_op.c",
+    "94_generic.c",
+    // TODO: union UV guv3 = {.b = 8, .a = 7}; expected } but found ,
+    "90_struct-init.c",
+    // TODO: panic! sorry can't do unaligned constants yet
+    "80_flexarray.c",
+    // TODO: goto some_label; unknown type for right of ND_COND
+    //       (looks unreachable but has labels? ive had similar bug. clearly didn't fix it well enough)
+    "87_dead_code.c",
+    // TODO: __SIZE_TYPE__ should be a magic builtin
+    "123_vla_bug.c",
+    "88_codeopt.c",
+    // TODO: int _Alignas(int __attribute__((aligned(16)))) i8; expected ) but found i8
+    "102_alignas.c",
+    // TODO: unknown enum type. you're supposed to allow without declaration because it doesn't change the size?
+    "81_types.c",
+    "17_enum.c",
+    
+    // need to pass cli arguments
+    "46_grep.c", "31_args.c",
+    // multiple compilation units
+    "104+_inline.c", "104_inline.c", "120+_alias.c", "120_alias.c", 
+    // case ranges
+    "118_switch.c",
+    // __builtin_abort and others
+    "117_builtins.c",
+    // attribute ((constructor))
+    "108_constructor.c", "128_run_atexit.c",
+    // attribute ((cleanup))
+    "101_cleanup.c", "03_struct.c",
+    // wchar.h
+    "97_utf8_string_literal.c",
+    // stdatomic.h
+    "136_atomic_gcc_style.c", "125_atomic_misc.c",
+    // pthread.h
+    "124_atomic_counter.c", "116_bound_setjmp2.c", "114_bound_signal.c", "106_versym.c",
+    // more includes
+    "24_math_library.c",
+    // inline assembly
+    "85_asm-outside-function.c", "98_al_ax_extend.c", "127_asm_goto.c",
+    // labels-as-values
+    "119_random_stuff.c",
+    // i don't have the same error messages and i don't report multiple and it expects to be run multiple times
+    "60_errors_and_warnings.c", "96_nodata_wanted.c",  
+    // TCC extension
+    "70_floating_point_literals.c",  // binary floating constant 
+    "112_backtrace.c",               // tcc_backtrace
+    "126_bound_global.c",            // BCHECK
+    // (clang agrees with me) error: array type 'int[4]' is not assignable
+    "34_array_assignment.c",
+    // (clang agrees with me) im not microsoft 
+    "95_bitfields_ms.c",
+    "82_attribs_position.c",  // stdcall
+    "99_fastcall.c",          // __fastcall, also inline assembly
+    "113_btdll.c",            // __declspec(dllexport) 
+);
+
+//
+// they have more standalone tests!
+// 
+// TODO: tests/tcctest.c (one big file). but i have lots of problems:
+// - void funny_line_continuation (int, ..\
+// - ACCEPT_LF_IN_STRINGS: i don't but its in an ifdef but i die tokenizing before getting to the preprocessor 
+// - ditto CORRECT_CR_HANDLING
+// - printf("\\
+// - #include incname (i add spaces the same as clang which apparently is wrong. can get past that by -D__clang__)
+// - then i hang
+// also they don't commit the output so run it with tcc first and compare mine to that. 
+//
+// TODO: tests/vla_test.c: i'm supposed to reuse stack when you make a vla in a loop. 
+//
+
+#use("@/examples/testing.fr");
+
+count_occurances :: fn(haystack: Str, needle: Str) i64 = {
+    count := 0;
+    while => index_of_slice(haystack, needle) { i | 
+        count += 1;
+        haystack = haystack.rest(i + needle.len);
+    };
+    count
+}
+
+// tcc's Makefile uses diff -b (--ignore-space-change) to check tests output. 
+// so these .expect files are wrong: [76_dollars_in_identifiers.c, 71_macro_empty_arg.c, 38_multiple_array_index.c]
+trim_each_line :: fn(in: Str) Str = {
+    out := @ref u8.list(in.len, temp());
+    lines := in.split("\n", temp());
+    for lines { it |
+        it := it.trim();
+        if it.len > 0 {
+            out.push_all(it.trim());
+            out.push_all("\n");
+        };
+    };
+    out.items()
+}
