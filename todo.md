@@ -1,7 +1,18 @@
+
+- deal with Crash'hook_backtrace();
+  - when aot it gives you more information 
+    but when running jitted it replaces the compiler's one 
+    so you have to keep toggling back and forth which is ass. 
+  - and you don't want to just not request_backtrace_on_signal
+    if __franca_aot_debug_info is null because they might 
+    be going to add thier own later (like the compiler does).
 - tests that look at ir after opt and compare two versions of functions to make sure they generate the same thing. 
   ie. a function that does a div twice and make sure gvn fixes it. 
 - actually use hash_archive !!!
-- tests/external/tcc.fr: fix my arm-linux abi. bootstrap on other targets.
+- tests/external/tcc.fr
+  - fix my arm-linux abi
+  - bootstrap on amd/rv
+  - skip fewer tests (import_c is missing some features)
 - tests/external/wuffs.fr uses thier committed generated c code. 
   do i care enough to bootstrap a go? probably. the more import_c tests the merrier. 
   https://github.com/golang/go/tree/release-branch.go1.4/src/cmd/dist
@@ -194,7 +205,6 @@ cset	w0, eq
 - Type Error when calling a function ugently needs to show both the call site and the declaration site
 - don't just crash at runtime when you `import_c/cc.fr -r`
   and try to call a function that was forward declared but not linked against
-- make all the tests pass on linux
 - make stack trace debug info work accross multiple compilers. it needs to go in GlobalFrancaRuntime
   (test with crashing in examples/repl.fr when running it as a driver)
 - `f :: fn() = ` isn't getting an inferred name (report_called_uncompiled_or_just_fix_the_problem)
@@ -217,7 +227,6 @@ cset	w0, eq
 - you need a trace of what was being compiled when you get a compile error. 
   like the chain of references so you know why you're trying to compile that function. 
 - replace import_c/includes.fr with a .frc module generated from the franca libc bindings. 
-- run all the tests on linux
 - enable caching of the .frc between -syscalls and normal. (they're one byte different)
 - better apis for working with paths and temporary files
 - use `#macro #outputs(T)` to give a more sane error message for `x: i64 = @is(foo, .A, .B);` etc. 
@@ -248,14 +257,12 @@ cset	w0, eq
 - allow trailing lambda to be passed as a function pointer but still infer types of arguments. (ie. when calling run_tests_main_threaded)
 - set a good example; don't have tests that rely on layout of codegenentry. use the functions on the vtable. i think import_c/test/test.fr does this wrong
 - always zero struct padding when baking constants (even when behind a pointer and even when the struct contains no pointers). 
-- why don't lldb/gdb like my linux binaries?
 - not all the tests pass with FRANCA_NO_CACHE=1 (fail debug assert: `need_reify on threaded codegen`)
   - examples/import_c/test/test.fr
   - examples/import_wuffs/test.fr
 - can't boot/strap.sh with FRANCA_NO_CACHE=1
 - not all the tests pass with import_module caching enabled
   - examples/import_wuffs/test.fr `Assertion Failed: (put_jit_addr) redeclared symbol 10107: exit`
-- can almost enable cacching when -syscalls 
 - document `store v, [Sxxx]` vs `store v, Sxxx` on amd64
 - extend the cross repro tests to all the example programs. not just the compiler. maybe just add a file with hashes of binaries to the released artifact. 
 - I need to improve @enum for bit flags so i can use that in posix.fr so it doesn't suck as much to call mmap. 
@@ -354,11 +361,9 @@ bufs: [][]u8 = (ptr = bit_cast_unchecked(i64, @run(*[]u8), buf_ptr), len = buf_l
 
 - C23: `__has_c_attribute`, allow `[[]]` instead of `__attribute__`
 - import_c add a test for the incorrect include guard thing i fixed on jul16
-- import_c faults on function without parameter name: `int aaa(char*) { return 1; }`
 - import_c/cc.fr searches include path for the starting file before your current working directory which is super confusing
 - turn off Qbe.Fn.track_ir_names in import_c
 - :ReWalkTokens
-- what is the deal with load_opt::def taking so long for import_c
 - implement _Atomic in import_c
 - :AttributesNotYetImplemented
 - import_c: `__constructor__, __aligned__`
@@ -372,10 +377,6 @@ bodies on different targets which i don't deal with well.
   interaction between spawning threads at comptime and jit-shims is super broken 
 - hoist the enter_task call so temp() can be reset more often
 - either do tokens lazily or try doing it on another thread
-- now using enter_task instead of c'enqueue_task but that means it will compile slower. 
-- why does threaded=true not work when running jitted sometimes (random mutex failures)? 
-  there shouldn't be jit-shims if it's not at comptime so that theory doesn't explain it 
-  although it seemed to have similar symptoms. 
 - need more control over exports. currently any frc file has all the libc stuff you included reexported. 
   which will be confusing if you try to #use it in franca
 - implement the rest of import_cache_file: variadic, union/enum/pointer
@@ -415,20 +416,14 @@ All is fine! (passed 35 tests)
 - `./q.out examples/default_driver.fr build compiler/main.fr -o q.out -d t` very rarely prints junk
 - `FRANCA_NO_CACHE=1 franca examples/import_c/test/test.fr` 
   dies in init_codegen_worker. spawning threads from a shim doesn't work? 
+- can't run tests/c.fr at comptime (@run main() hangs)
 - tests/exe/sys.fr might not work with SLOW_LEAK_ARENAS=true?
 - i've seen this a couple times on actions:
 ```
 >>> unpacking [target/franca/deps/fonts.zip]...
 Assertion Failed: failed to read file 'target/franca/deps/fonts/ttf/JetBrainsMonoNL-Bold.ttf'
 ```
-🤡 which is extra plausible because i'm not even checking that unzip was successful because it complains about weird filenames in wuffs. 
-all the more reason to continue sequestering the tests with dependencies. 
 i think it's just a race where it gets confused if two programs try to cache the same dependency at the same time. 
-- similarly i think write_entire_file doesn't work at all. 
-  should probably have more targetted tests for library stuff like that. 
-  `failed to write 4935560 bytes to 'target/franca/cache/__backend_meta_qbe_frontend_fr.frc'`
-  when running backend/meta/test.fr without -bin so it recompiles and tries to cache on multiple threads. 
-
 - `./target/f.out tests/exe/wasm.fr` doesn't work with SLOW_MEMORY_DEBUGGING=true
 - `franca examples/os/build.fr -vzf -smp 2 -append "nocache on;spawn kaleidoscope;kaleidoscope;"`
   it doesn't like two at once? (with -smp 1 it works but is SUPER slow which should also be fixed)
@@ -468,7 +463,6 @@ TODO: be consistant about spelling: zeros or zeroes
 - same string constant as Str and CStr :MiscompileCStr
 - :ConstInFuncOrLoseTemp
 - literal for a 64 bit integer with the high bit set shouldn't need a bit cast 
-- `fn vec2(x, y) = (v = (x, y));` miscompiles if inlined but i can't reproduce it in a simple test. 
 - :UseDoesntWork
 - :BitFieldsCompileError there's places in Qbe and Incremental where it won't let you have 
 a field of type @bit_fields or you get:
@@ -482,17 +476,6 @@ TODO: end of loop. still too many options for 'index'
 - #inline returning Never doesn't remember that it returns Never
 - there's still a compilation order problem with inlining intrinsics. look at copy_bytes(). 
 - :ThisIsNotOkBecauseMemoryWillBeReused
-- rarely:
-```
-orb ./boot/temporary/linux-arm64.sh
-mkdir: cannot create directory ‘target’: File exists
-  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
-                                 Dload  Upload   Total   Spent    Left  Speed
-100 1001k  100 1001k    0     0  5822k      0 --:--:-- --:--:-- --:--:-- 5858k
-panic! backend/lib.fr:1171:58
-find_ip_in_module :: fn(m: *QbeModule, addr: rawptr) ?Str = {
-Parse Error: unterminated block (mismatched '{')
-```
 
 ## random failures
 
@@ -516,7 +499,6 @@ Parse Error: unterminated block (mismatched '{')
 many of the things i use i don't need everything from so it could make you tell it which files are important and 
 delete the rest. thing to think about is that you want to union those between different projects that depend on 
 different subsets of the same resources. 
-- run tests in landlock so it's less scary to miscompile something that's doing random syscalls
 - document #weak: docs/(annotations.md, imports.md)
 - deal with `NOSYS`
 - make #log_asm work for the #asm replacement 
@@ -525,7 +507,6 @@ different subsets of the same resources.
 ## wasm
 
 - remove all the TODOWASM (ifdefs/comments)
-- wasm instruction for wait/wake/fence
 - let frontends directly provide signeture for imports since they probably know instead of only trying to infer from callsites. 
   (currently emit_ir just always outputs a shim with a direct call which works but is hacky and not something i'd be proud to explain). 
 - generate better code (see comments in wasm/isel.fr)
@@ -748,7 +729,6 @@ need to be careful about the refs which have tags in the high bits so won't leb 
   i guess there's no winning, one of them can't be done in isel if i don't want to having boring instructions. 
 - to make -cc work with static linking, import_c needs to not make weak symbols
 - llvm-mc doesn't disassemble float instructions
-- isel fixarg is doing redundant sign extensions
 - isel address folding into load/store like arm
 - isel replace cmp+jnz with bcmp (they don't have a flags register)
 - (fixup1.ssa, fpcnv.ssa, encoding.ssa) work in qemu but not libriscv. report bugs? 
@@ -764,7 +744,7 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 - `thread backtrace` doesn't work in lldb. is my stack layout wrong? 
 - riscv_flush_icache syscall vs FENCE.I instruction for clear_instruction_cache
 - :TodoRiscv
-- ./target/f.out backend/test/folding.fr: panic! TODO: copy slot float
+- panic! TODO: copy slot float
 
 ## don't rely on libc
 
@@ -808,7 +788,6 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 
 ## linux 
 
-- linux fault-na.ssa need to do the signal struct (rn it's skipped in backend/meta/test.fr)
 - :TodoLinux CLOCK_REALTIME
 - :TodoMacosSyscall
 - how are you supposed to ask for page size? blink wants 64k instead of 4k. 
@@ -877,7 +856,6 @@ but then need to deal with including build options in the cache (like -unsafe, -
 - allow smaller compilation units. like not making you recompile the backend when you work on the frontend. 
 - test that .frc files repro and that you can pass them directly
 - dump_bin: print segment.MachineCode as something qbe_frontend.fr can parse so it can round trip
-  - dump_bin: won't be able to parse back if symbol names have spaces in them
 - clear cache before tests just in case
 - caching an invalid thing i think? if you Compile Error: we hit a dynamicimport ('puts_unlocked' from 'libc') with no comptimeaddr for jit
 (happening with import_c)
@@ -952,7 +930,7 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
     like you can't have every compilation unit eat 15ms on @syscall, @match, etc
   - use the multiple scopes thing
   - every module has it's own copy of lib/runtime/etc stuff which is terrible, especially for statics, they really need to share 
-    or everything's confusing, like OS, RESOLVERS, really need to only have one. 
+    or everything's confusing, like RESOLVERS, really need to only have one. 
     the functions being duplicated is also very sad but not as fundamentally crippling. 
   - when a module depends on another it shouldn't pull all the code into itself and then cache that, it should just reference 
     the other module. like (qbe_frontend->(import_c, backend), import_c->(backend)), you'll have 3 copies of the backend code on disk. 
@@ -1173,7 +1151,8 @@ ie. `fn init() Self = (arr = @as(Slice(Entry)) empty(), len_including_tombstones
 - make compilation order of struct sizing less sketchy for offset_of
 - propagate types through constants. `a: u32 : 0; b := a;` b should have type u32 even though int literals default to i64.
   (to fix `foo.id != SG_INVALID_ID.trunc()`)
-- still allow coerce to c string if there was a `\` escape.- this should work
+- still allow coerce to c string if there was a `\` escape.
+- this should work
 ```
 A :: @struct();
 B :: @tagged(a: A);
@@ -1186,7 +1165,6 @@ b = .a;
 - `@Fn(a, b) ...` means a different thing than `fn(a, b) ...` (the former sees types, the latter sees parameter names). 
 - there are no clear rules about how const coercion works
 - the body of a `=>` function gets re-sema-ed every time you call it (which makes inline_for hurt compile times more than it should)
-- having the crt linux stuff in franca_runtime_init means you can't use the backend without the franca frontend and target linux exe
 - @rec and #generic suck
 - reporducible builds depend on compilation order because of var id (like if you iterate a scope) 
 or function ids which end up in your binary. this is actually fine currently because 
@@ -1196,7 +1174,7 @@ the frontend is single threaded but maybe it's not a great idea in the long term
 
 ## library robustness
 
-- dynamiclib is kinda broken because i rely on OS being set by runtime_init
+- dynamiclib is kinda broken because i rely on tls being set up by runtime_init
 - ask the os for the correct page size
 - :TodoLinux :HardcodeOs
 - cure remaining stds
@@ -1206,7 +1184,6 @@ the right/fast/safe/whatever thing to do is also the easy thing to do.
   - make number casts less annoying and less error prone 
   - do a pass at trying to replace pointer<->int casts with some higher level thing
   - be consistant about using rawptr when it's a pointer (not i64)
-  - replacement for thread locals by dynamically adding things to the context. 
   need to be able to do it from jit as well (ie. it can't just be extra fields on the struct). 
   - rename print() to debug()? make it clear that it's not what you should be using if you just want 
   to output text (it's unbuffered because i think it's more important to not lose things if you crash). 
@@ -1221,17 +1198,14 @@ the right/fast/safe/whatever thing to do is also the easy thing to do.
 - is :jnz_is_Kw really what i want the semantic to be?
 - RSlot overflow
 - default arg values (any const expr and inject at callsite? or based on other args so generate shims or multiple entry points to the function)
-- make fetching dependencies (ie. lua for testing import_c) not embarrassing
-- implement examples/testing.fr/fetch_or_crash() with import_c (wuffs and libcurl) instead of exec-ing shit
+- implement examples/testing.fr/fetch_or_crash() with import_c (libcurl) instead of exec-ing shit
 - fetch_or_crash hashes are of the compressed file which is garbage. will break if github changes compression level or whatever. 
-- use import_c for the parts of sokol i haven't ported yet (can't for the mac stuff because thats objective c)
 - bake for list/hashmap need to get rid of uninit memory
 - List.shrink_to_fit for places that i push and then return a slice so you can free it on allocators that don't track size
 
 ## cleanup 
 
 - ImportVTable: implement add_to_scope with add_expr_to_scope
-- make comptime.fr exporting stuff less painful 
 - sema needs to get simplified. 
 - fix the hack that requires `#ir({ (o, k) })`. it should allow just a tuple and still evaluate it as an expression instead of just grabbing the identifiers. 
 - backend fails_typecheck make sure sel0:sel1 and blit0:blit1 and cas0:cas1. 
@@ -1244,14 +1218,12 @@ also stop pasting around code for handling the multi-part ops
   - x64/arm/wasm/macho/elf but there's no winning there
   - boot but i really don't want to write the compiler again... so idk what to do about that
   - some of the qbe ssa tests are generated: strspn, strcmp, mem3, cprime, abi8
-  - graphics/web/webgpu.fr which is extra bad because the abi isn't stable so it's useless
   - if i ever get serious about using tcc for anything, we can't be having thier lib/atomic.S
 - as an extension of argparse it would be cool if all the demo programs could be both 
 and exe and a dylib so if you want to run from cli it parses to a struct and calls the impl,
 but if you're calling from a program you can import the struct, dlopen the thing, 
 and not need to serialize the arguments to a string. 
 - seperate out the platform specific fields of QbeModule
-- finish curing stds
 
 ## tests
 
@@ -1269,10 +1241,10 @@ and not need to serialize the arguments to a string.
   - panic backtrace
     - including inferred function names
   - compile error locations
+  - `franca examples/import_c/cc.fr a.c -r` with a.c being the empty program
+    should say "missing function main()". previously it was segfaulting because get_addr never returned None. 
 - compiler/tests.fr stops when something doesn't compile but it should show which other tests passed like it does for runtime failures
-- make it clear that you can't do this: `franca self.fr && ./a.out driver.dylib run b.fr`. 
-it doesn't like that you stomp a.out, default_driver:run should pick a unique path probably. 
-or just default to jitting and force you to enable aot by specifying an output path. 
+- `default_driver.fr run` should jit instead of stomping a.out and exec-ing it. 
 - think about how to test the gui programs more convincingly than just that they produce a binary
 - test using import_(c, wasm)/ffi from a precompiled driver to make sure they're not relying on being in their own compilation context 
 - make the crash examples work without needing to set the env variable / run jitted
@@ -1347,6 +1319,7 @@ and make sure to deduplicate by type (rn we re-sema every call which is sad).
 - combine include_bytes and #include_std somehow
 - @switch should just be @inline_switch if the thing is constant.
 - local_return and return implciitly rebinding is a bit confusing
+  nicer syntax than `{|\n continue :: local_return;\n continue(); \n }` might be `{|'continue\n continue(); \n }`
 - would be cool if #where could let you infer new types instead of just checking them: 
 ```
 #where(=> /* let us access $o and $k and then we can use argcls() to get the cls of A0/A1/R and can tell you what types are allowed somehow */)
@@ -1485,7 +1458,6 @@ StbTrueType :: include { C |
 - fix overflow when lexing large float literals
 - show const fields better in log_type
 - less verbose if let/let else? think about how to express with a macro.
-- be nicer about warning invalid arguments in examples/default_driver and compiler/first
 - parse zig headers and generate extern declarations (like examples/c_bindgen). then i could use bits of thier standard libary.
   they have a bunch of fun stuff that doesn't use use comptime in the api and im not interested in writing myself:
   http, hashing, random, zip, magic numbers for wasm/elf/dwarf/macho

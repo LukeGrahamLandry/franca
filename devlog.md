@@ -1,4 +1,23 @@
 
+## (Jan 7)
+
+- passing more of tcc's tests
+  - 129_scopes: `if/do/while` need a scope around them like `for` :WackyConstScope. 
+    ex. `if (size_of(enum { foo = 1 })) body;` declares foo=1 as a constant only accessable in body.
+  - 137_funcall_struct_args: fix `void main() {`
+    i was returning 0 when you fall off the end but only if the return type was already int. 
+  - 131_return_struct_in_reg: calling ir_index on something with bit fields. 
+    - too bad i never tried compiling qbe, i would have caught it with passing `struct Ins` to functions. 
+  - 100_c99array-decls: allow `[const *]` in function parameters. 
+  - 89_nocode_wanted: statement expression whose result is a statement without return type (like while)
+  - 123_vla_bug: just needed `__SIZE_TYPE__`
+- gen_par: don't segfault on unnamed parameter
+- includes.fr for lua and fault-na.fr on linux
+- get rid of some pasted lines in the tests i stole from chibicc. 
+- pruned todo.md
+- fixed os/bin/doom.fr to cope with fetch.fr/single returning contents instead of file path. 
+ - would be great if i could autotest that but i assume github actions isn't going to want to give me kvm (i tried vzf and it doesn't have)
+
 ## (Jan 6)
 
 - import_c on tcc/tests/tests2. 

@@ -24,7 +24,17 @@ int main() {
   ASSERT(5*16+2, ({ int n=10; int x[n+1][n+6]; int *p=x; for (int i = 0; i<sizeof(x)/4; i++) p[i]=i; x[5][2]; }));
 
   ASSERT(10, ({ int n=5; sizeof(char[2][n]); }));
+  
+  // make sure prefix '*' as vla size isn't mistaken as bare [*] (which is allowed on parameters)
+  ASSERT(123 * sizeof(int), ({ int x = 123; int *xx = &x; int a[*xx]; sizeof(a); }));
 
   printf("OK\n");
   return 0;
 }
+
+/* TODO: rn i say (undefined variable: 'x') for this. 
+// you're allowed to claim you're passing a vla 
+// but it decays to a pointer without remembering the size. 
+int fake_vla_parameter(size_t x, int a[x]) { return sizeof a; }
+    ASSERT(sizeof(int*), ({ int x = 123; int a[x]; fake_vla_parameter(x, a); }));
+*/

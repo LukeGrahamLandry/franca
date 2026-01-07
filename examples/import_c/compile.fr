@@ -242,6 +242,7 @@ fn enter_scope(c: *Ctx) void = {
     c.scope_depth += 1;
 }
 
+// TODO: reuse if it's empty (which it often will be because of :WackyConstScope) :SLOW
 fn leave_scope(c: *Ctx) void = {
     c.scope = c.scope.next;
     c.scope_depth -= 1;
@@ -446,6 +447,7 @@ fn new_var(c: *Ctx, name: Str, ty: *CType, a: Alloc) *Obj = {
 
 fn new_lvar(c: *Ctx, name: Str, ty: *CType) *Obj = {
     var := c.new_var(name, ty, temp());
+    var.tok = ty.name;
     var.is_local = true;
     c.locals = var;
 
@@ -465,6 +467,7 @@ fn create_stack_slot(c: *Ctx, var: *Obj) void = {
     // :ZeroSizeTypes chibicc has empty structs with sizeof(0) but thats an extension
     // what if you tried to diy static_assert with that, now we broke your code?
     if var.ty.size < 0 {
+        // TODO: this is a dumb error message since it happens when its just an undeclared struct type. 
         @error_tok(c, var.tok, "tried to create stack slot for a variable with negative size (%)", var.ty.size);
     };
     if var.stack_slot == QbeNull {
@@ -776,12 +779,21 @@ fn func_params(c: *Ctx, rest: **Token, tok: *Token, ret: *CType) *CType = {
     ty
 }
 
-// array-dimensions = ("static" | "restrict")* const-expr? "]" type-suffix
 fn array_dimensions(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *CType #once = {
     dowhile {
-        ignore(tok&, tok, @const_slice("static", "restrict"))
+        // when its a function parameter it can have any qualifier that's allowed on pointers. 
+        // TODO: be consistant about allowing __keyword__ and __keyword
+        // TODO: reuse the list of keywords between here and declspec
+        ignore(tok&, tok, @const_slice("static", "restrict", "const", "volatile"))
     };
-
+    
+    // in function parameter a bare [*] is allowed and means vla of unknown size which is still just a pointer. 
+    // but `int a[*x];` as a local variable is a valid vla declaration if x is a pointer. 
+    c.lookahead(tok, 1);
+    if tok.kind == .@"*" && tok.next.kind == .@"]" {
+        tok = c.skip(tok, "*");
+    };
+    
     if consume(tok&, tok, "]") {
         ty = c.type_suffix(rest, tok, ty);
         // :StaticArrayOfUnknownLength
@@ -1514,8 +1526,15 @@ fn access_member(c: *Ctx, lhs: *Node, mem: *Member, tok: *Token) *Node = {
     node.lhs = lhs;
     node.member = mem;
     node.ty = node.member.ty;
-    node.lvalue = c.emit(.add, .Kl, node.lhs.lvalue, c.getcon(node.member.offset.intcast()));
+    node.lvalue = c.emit_add(node.lhs.lvalue, node.member.offset.intcast());
     node
+}
+
+fn emit_add(c: *Ctx, addr: Qbe.Ref, off: i64) Qbe.Ref #inline = {
+    if off != 0 {  // silly but helps opt/promote to registers
+        addr = c.emit(.add, .Kl, addr, c.getcon(off));
+    };
+    addr
 }
 
 fn create_lvar_init(c: *Ctx, init: *Initializer, ty: *CType, desg: *InitDesg, tok: *Token) *Node = {
@@ -2245,10 +2264,14 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *T
     _ := c.compound_stmt(tok&, tok);
     if c.b.jmp.type == .Jxxx {
         c.b.jmp = @if_else {
+            // for main() falling off the end is legal and means returning 0
+            @if(f.name == "main") => {
+                c.f.ret_cls = .Kw;  // even if they declared it as void
+                c.f.retty = Qbe.Null;
+                (type = .retw, arg = QbeConZero)
+            };
             // void functions are allowed to just fall off the end
             @if(rty.is_void())    => (type = .ret0, arg = QbeNull);
-            // for main() falling off the end is legal and means returning 0
-            @if(f.name == "main") => (type = .retw, arg = QbeConZero);
             // it would be nice to give an error otherwise but it's non-trivial to decide if this codepath is reachable. 
             // TODO: does the spec say i have to just give you garbage or is it ub that lets me crash?
             @else                 => (type = .hlt, arg = QbeNull);
@@ -2799,6 +2822,7 @@ parse_bracketed :: fn(c, rest, tok) #prefix(.@"(") = {
                 c.new_var_node(var, start)
             } else {  // local
                 var := c.new_lvar("", ty);
+                var.tok = tok;
                 lhs := c.lvar_initializer(rest, tok, var);
                 rhs := c.new_var_node(var, tok);
                 c.gen_expr(lhs);
@@ -2815,8 +2839,9 @@ parse_bracketed :: fn(c, rest, tok) #prefix(.@"(") = {
             // This is a [GNU] statement expresssion.
             node := c.compound_stmt(tok&, tok);
             ::ptr_utils(@type node.ty[]);
-            //@if(node.ty.is_null() || node.ty.kind == .TY_VOID)
-            //@error_tok(c, node.tok, "statement expression returning void is not supported");
+            if node.ty.is_null() {  // last statement wasn't a value. 
+                node.ty = c.ty_void;
+            };
             node
         } else {
             // just a braketed expression like in math
@@ -3111,6 +3136,10 @@ funcall :: fn(c, rest, tok, f) #infix(.@"(", .PostFix) = {
                 arg = c.new_cast(arg, c.ty_int);
             }
             
+            if @is(arg.ty.kind, .TY_STRUCT, .TY_UNION) {
+                @warn_tok(c, tok, "TODO: non-scalar variadic argument");
+            };
+            
             // HACK: my official position on passing structs as varargs is "don't do that" 
             //       but just letting it slide fixes tcc/test/abitest.c which is nice to be able to run. 
             //       TODO: maybe use TransformCall for this instead? i think i just need argc->arg. 
@@ -3185,6 +3214,9 @@ va_arg :: fn(c, rest, tok) #prefix(.__builtin_va_arg) = {
     ap := c.parse_expr(tok&, tok, .Assign);
     tok = c.skip(tok, ",");
     type := c.typename(tok&, tok);
+    if @is(type.kind, .TY_STRUCT, .TY_UNION) {
+        @warn_tok(c, tok.origin, "TODO: non-scalar variadic parameter");
+    };
     rest[] = c.skip(tok, ")");
     ap := c.gen_expr(ap);
     r := c.emit(.vaarg, type.cls(), ap, QbeNull);
@@ -3232,6 +3264,7 @@ return :: fn(c, rest, tok) #prefix(.return, .ND_STMT) = {
     c.new_node(.ND_STMT, tok)
 };
 if_ :: fn(c, rest, tok) #prefix(.if, .ND_STMT) = {
+    c.enter_scope();  // :WackyConstScope
     c.next(tok&, tok);
     tok = c.skip(tok, "(");
     cond := c.parse_expr(tok&, tok, .None);
@@ -3257,9 +3290,11 @@ if_ :: fn(c, rest, tok) #prefix(.if, .ND_STMT) = {
         c.b = join_block;
 
     rest[] = tok;
+    c.leave_scope();
     c.new_node(.ND_STMT, tok)
 };
 switch_ :: fn(c, rest, tok) #prefix(.switch, .ND_STMT) = {
+    c.enter_scope();  // :WackyConstScope
     payload := temp().box_zeroed(Qbe.SwitchPayload);
     c.next(tok&, tok);
     tok = c.skip(tok, "(");
@@ -3306,6 +3341,7 @@ switch_ :: fn(c, rest, tok) #prefix(.switch, .ND_STMT) = {
         };
         push(c.f.switches&, c.f.switch_count&, payload[]);
     };
+    c.leave_scope();
     c.new_node(.ND_STMT, tok)
 };
 case :: fn(c, rest, tok) #prefix(.case, .ND_STMT) = {
@@ -3400,6 +3436,7 @@ for_ :: fn(c, rest, tok) #prefix(.for, .ND_STMT) = {
     c.new_node(.ND_STMT, tok)
 };
 while_ :: fn(c, rest, tok) #prefix(.while, .ND_STMT) = {
+    c.enter_scope();  // :WackyConstScope
     push_loop c { brk_label, cont_label |
         c.jmp_if_unterminated(cont_label);
         c.b = cont_label;
@@ -3417,9 +3454,11 @@ while_ :: fn(c, rest, tok) #prefix(.while, .ND_STMT) = {
         c.jmp_if_unterminated(cont_label);
         c.b = brk_label;
     };
+    c.leave_scope();
     c.new_node(.ND_STMT, tok)
 };
 do :: fn(c, rest, tok) #prefix(.do, .ND_STMT) = {
+    c.enter_scope();  // :WackyConstScope
     body_block := c.new_block();
     c.jmp_if_unterminated(body_block);
     brk_label, cont_label := push_loop c { _, _ |
@@ -3439,6 +3478,7 @@ do :: fn(c, rest, tok) #prefix(.do, .ND_STMT) = {
     
     c.jnz_if_unterminated(cond, body_block, brk_label);
     c.b = brk_label;
+    c.leave_scope();
     c.new_node(.ND_STMT, tok)
 };
 asm :: fn(c, rest, tok) #prefix(.asm, .ND_STMT) = {
@@ -3888,7 +3928,10 @@ fn gen_par(c: *Ctx, ty: *CType) void = {
         @error_tok(c, ty.params[ty.param_names.len].name_pos, "parameter name omitted")
     }
     obj_params := temp().alloc_init(*Obj, ty.params.len) { i |
-        c.new_lvar(c.get_ident(ty.param_names[i]), ty.params[i])
+        name := ty.param_names[i];
+        // C23 (WG14-N2510): allow unnamed parameter even if it has a body. 
+        name := @if(name.is_null(), "", c.get_ident(name)); 
+        c.new_lvar(name, ty.params[i])
     };
     
     f := c.f; 
@@ -3990,13 +4033,7 @@ fn gen_zero_var(c: *Ctx, var: *Obj, tok: *Token) void = {
     off := 0;
     each Qbe.Simplify.blit_op_table { o |
         while => size >= o.size {
-            d := if off == 0 {
-                dest 
-            } else {
-                d := c.f.newtmp("c", .Kl);
-                c.emit(.add, .Kl, d, dest, c.getcon(off));
-                d
-            };
+            d := c.emit_add(dest, off);
             c.emit(o.store, .Kw, QbeNull, QbeConZero, d);
             size -= o.size;
             off  += o.size;

@@ -169,7 +169,6 @@ signal :: """
     #pragma once
     typedef int sig_atomic_t;
     
-    #define sigemptyset(set) (*(set) = 0, 0)
     int sigaction(int, struct sigaction *, struct sigaction *);
     
     #define SIGINT  2
@@ -182,6 +181,9 @@ signal :: """
     #define SIGSEGV 11
     #define SIGPIPE 13
     #define SIGPROF 27
+    
+    #define SIG_DFL         (void (*)())0
+    #define SIG_IGN         (void (*)())1
     
 #if __macos
     typedef struct siginfo_t {
@@ -199,6 +201,7 @@ signal :: """
 
     void (*signal(int sig, void (*func)(int)))(int);
     typedef unsigned int sigset_t;
+    #define sigemptyset(set) (*(set) = 0, 0)
     struct sigaction {
         union {
             void (*sa_handler)(int);
@@ -208,12 +211,9 @@ signal :: """
         int     sa_flags;
     };
             
-    // TODO
     #define SA_SIGINFO 0x0040  
     
     // TODO
-    #define SIG_DFL         (void (*)())0
-    #define SIG_IGN         (void (*)())1
     #define SIG_HOLD        (void (*)())5
     #define SIG_ERR         ((void (*)())-1)
     
@@ -243,26 +243,30 @@ signal :: """
     #define SIG_UNBLOCK     2 
 #endif
 #if __linux
-    typedef long sigset_t;
+    typedef struct { long _[16]; } sigset_t;
+    #define sigemptyset(set) ((set)->_[0] = 0, 0)
     typedef struct siginfo_t {
         int si_signo;
         int si_errno;
         int si_code;
         int _;
-        long payload[14];
+        void *si_addr;
+        long payload[13];
     } siginfo_t;
     
     struct sigaction {
-        void *sa_sigaction;
-        long sa_mask[16];
+        union {
+            void *sa_handler;
+            void *sa_sigaction;
+        };
+        sigset_t sa_mask;
         long sa_flags;
         void *sa_restorer;
     };
     
+    #define SA_SIGINFO 4  
     #define SIG_UNBLOCK 1
-    
     #define SIGBUS  7
-    
 #endif
 
     int sigaddset(sigset_t *set, int signo); 
@@ -677,18 +681,15 @@ types :: """
 """;
 wait :: """
     #pragma once    
+    #define WTERMSIG(x)     ((x) & 0177)
+    #define WIFEXITED(x)    (WTERMSIG(x) == 0)
+    #define WEXITSTATUS(x)  (((x) >> 8) & 0xff)
 #ifdef __macos
-    #define _WSTOPPED       0177          
-    #define _WSTATUS(x)     ((x) & _WSTOPPED)
-    #define WSTOPSIG(x)     ((x) >> 8)
-    #define WIFCONTINUED(x) (_WSTATUS(x) == _WSTOPPED && WSTOPSIG(x) == 0x13)
-    #define WIFSTOPPED(x)   (_WSTATUS(x) == _WSTOPPED && WSTOPSIG(x) != 0x13)
-    #define WIFEXITED(x)    (_WSTATUS(x) == 0)
-    #define WIFSIGNALED(x)  (_WSTATUS(x) != _WSTOPPED && _WSTATUS(x) != 0)
-    #define WTERMSIG(x)     (_WSTATUS(x))
-    #define WEXITSTATUS(x)  ((x) >> 8)
+    #define WIFSIGNALED(x)  (WTERMSIG(x) != 0177 && WTERMSIG(x) != 0)
 #endif
-
+#if __linux
+    #define WIFSIGNALED(x)  (((x) & 0xffff) - 1 < 0xff)
+#endif
 """;
 
 mman :: """

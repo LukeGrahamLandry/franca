@@ -205,6 +205,8 @@ void ret_none_early(int c) {
     exit(1);
 }
 
+void unnamed_parameter(char*) { /*nop*/ }
+
 int main() {
   ASSERT(3, ret3());
   ASSERT(8, add2(3, 5));
@@ -225,7 +227,6 @@ int main() {
   g1 = 3;
 
   ASSERT(3, *g1_ptr());
-  ASSERT(5, int_to_char(261));
   ASSERT(5, int_to_char(261));
   ASSERT(-5, div_long(-10, 2));
 
@@ -252,8 +253,6 @@ int main() {
 
   ASSERT(6, add_all(3,1,2,3));
   ASSERT(5, add_all(4,1,2,3,-1));
-
-  { char buf[100]; fmt(buf, "%d %d %s", 1, 2, "foo"); printf("%s\n", buf); }
 
   ASSERT(0, ({ char buf[100]; sprintf(buf, "%d %d %s", 1, 2, "foo"); strcmp("1 2 foo", buf); }));
 
@@ -387,6 +386,7 @@ int main() {
   ASSERT(0, to_ldouble(5.0) == 5.2);
   
   ret_none_early(1);
+  unnamed_parameter("");
 
   printf("OK\n");
 }

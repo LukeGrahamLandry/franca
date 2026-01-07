@@ -43,6 +43,8 @@ with_deps_skip_rv :: @S(
     // TODO: this only has deps because it runs webgpu_api.fr but don't really need that
     // TODO: rv: trace trap: compiler inserted break instruction
     @S("tests/exe/wasm.fr"),
+    // TODO: rv: crashes
+    @S("tests/external/lua.fr"),
 );
 
 fn driver(vtable: *ImportVTable) void = {
@@ -59,6 +61,7 @@ do_it :: fn(vtable: *ImportVTable, s: Str) void = {
     franca_path := get_executable_path(temp());
     ::display_slice(Str);
     run :: fn(args) => {
+        @println("%", args);
         run_cmd_blocking(franca_path, args) || @panic("failed %", args);
     };
     
@@ -133,22 +136,28 @@ do_it :: fn(vtable: *ImportVTable, s: Str) void = {
                 for(with_deps, fn(it) => run(it));
                 build_graphics(franca_path);
                 for deps_compile_only { file |
-                    sh(@slice(franca_path, "examples/default_driver.fr", "build", file, "-o", "target/a.out"));
+                    run(@slice("examples/default_driver.fr", "build", file, "-o", "target/a.out"));
                 };
 
                 if query_current_arch() != .rv64 {
                     for(with_deps_skip_rv, fn(it) => run(it));
                 };
-                if query_current_os() == .macos {
-                    // TODO: linux: need to transcribe signal.h
-                    run(@slice("tests/external/lua.fr"));  // dep:lua
-                };
-                if current_os() == .linux {  // SKIP: non-free operating systems
-                    sh(@slice(franca_path, "tests/external/hare.fr"));
-                };
-                @if(query_current_arch() != .rv64)  // TODO: doesn't work with my multiarch situation so idk if it actually works. this is why we can't be depending on the system headers. 
+                
                 if current_os() == .linux {
+                    // SKIP: "Hare does not and will not officially support proprietary operating systems upstream."
+                    run(@slice("tests/external/hare.fr"));
+                    
+                    // SKIP: bubblewrap does linux specific sandboxing stuff. 
+                    @if(query_current_arch() != .rv64)  // TODO: doesn't work with my multiarch situation so idk if it actually works. this is why we can't be depending on the system headers. 
                     run(@slice("tests/external/bubblewrap.fr"));
+                };
+                
+                ci := Foreign.ENV.GITHUB_REPOSITORY.get_environment_variable().is_some();
+                if current_os() == .macos && !ci {
+                    // TODO: -smp 1 frequently hangs
+                    // TODO: need to error if it errors (host/vzf.fr doesn't know if you crashed) 
+                    //       but still occasionally get: `panic! some sort of corruption is going on`
+                    run(@slice("examples/os/build.fr", "-vzf", "-smp", "2", "-append", "nocache on; kaleidoscope; quit;"));
                 };
             };
             @case("fetch") => reach_all_deps();

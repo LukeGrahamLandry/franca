@@ -82,6 +82,8 @@ int main() {
     
     ASSERT(0, ({ long *a = (long[]){0}; *a; }));
     
+    (1 ? 0 : ({ while (1) 0; }) );
+    
     if (0) return 1;  // can't speculate() because:
     
     printf("OK\n");

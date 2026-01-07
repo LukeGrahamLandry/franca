@@ -360,7 +360,18 @@ fn ir_index(c: *Ctx, ty: *CType) Qbe.Ref = {
             type_info.nunion = 1;
             off := 0;
             mem := ty.members;
+            last_off: i32 = -1;
             for_linked mem { mem | 
+                continue :: local_return;
+                if mem.is_bitfield {
+                    // multiple bitfields are stored in one real field of the backing type. 
+                    // TODO: this relies on all fields with the same offset having the same backing type as the first. 
+                    //       struct S { unsigned char a:4; int b:8; };
+                    //       i say { b, p 3, } which seems wrong because some real bits are in the padding. 
+                    //       either { w } or { b, p 3, w } would be more reasonable. 
+                    @if(mem.offset == last_off) continue();
+                    last_off = mem.offset;
+                };
                 add_padding(out, off&, mem.offset.intcast());
                 c.push_as_fields(mem.ty, out);
                 off += mem.ty.size.intcast();
@@ -372,6 +383,7 @@ fn ir_index(c: *Ctx, ty: *CType) Qbe.Ref = {
             mem := ty.members;
             type_info&.set_is_union(true);
             for_linked mem { mem | 
+                @debug_assert(!mem.is_bitfield, "unions don't have bitfields");
                 c.push_as_fields(mem.ty, out);
                 push(out, pack(type = .FEnd, len = 0));
                 type_info.nunion += 1;
