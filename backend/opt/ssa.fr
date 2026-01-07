@@ -4,9 +4,8 @@
 // So this is where we fixup variable to be assigned once and represent conditional mutation with phi nodes.
 // This requires computing usage/liveness information which is used by some other passes as well (generally needs to be recomputed after making changes). 
 
-/* require rpo and use */
-// breaks use
 fn convert_to_ssa(f: *Qbe.Fn) void = {
+    f.consumes(.Use); f.requires(.Rpo);
     ::ptr_utils(QbeName);
     nt: i64 = f.ntmp.zext();
     stk := temp().alloc_zeroed(*QbeName, nt);
@@ -32,6 +31,7 @@ fn convert_to_ssa(f: *Qbe.Fn) void = {
     renumber_block(f.start, stk, f);
     f.globals.debug = prev_debug;
     when_debug_printfn(f, .Ssa, "\n## After SSA construction:\n");
+    f.creates(.Ssa);
 }
 
 // :Explain
@@ -194,7 +194,7 @@ fn refindex(f: *Qbe.Fn, t: i64) Qbe.Ref #inline =
  * must not change .visit fields
  */
 fn fill_use(f: *Qbe.Fn) void = {
-    f.clear_usage_info(); // fill_use gets called muliple times. 
+    f.clear_usage_info(); // fill_use gets called multiple times. 
     for_blocks f { b | 
         b.clear_nops(); 
         for_phi b { p |
@@ -234,6 +234,7 @@ fn fill_use(f: *Qbe.Fn) void = {
         
         adduse(f, b.jmp.arg, .UJmp, b);
     };
+    f.creates(.Use); f.creates(.UseCounts);
 }
 
 fn adduse(f: *Qbe.Fn, r: Qbe.Ref, ty: Qbe.UseType, b: *Qbe.Blk, $T: Type, t: *T) bool #inline #generic = 
@@ -295,11 +296,12 @@ fn source_width(i: *Qbe.Ins) Qbe.TmpType #inline = {
     w
 }
 
-/* require use and ssa */
 // Checks that we correctly constructed ssa form. 
 // Running this is optional, but life will be very confusing if you don't do this and get it wrong. 
 fn ssacheck(f: *Qbe.Fn) void = {
     @if(!::safety_check_enabled(.DebugAssertions)) return();
+    f.requires(.Use); f.requires(.Ssa); f.requires(.Dom);
+    
     tmps := f.tmps();
     each tmps.slice(Qbe.Tmp0, tmps.len) { t |
         if t.ndef > 1 {
@@ -370,10 +372,8 @@ fn phicheck(p: *Qbe.Phi, b: *Qbe.Blk, t: Qbe.Ref) bool = {
 }
 
 // used by convert_to_ssa and spill
-/* liveness analysis
- * requires rpo computation
- */
 fn fill_liveness(f: *Qbe.Fn) void = {
+    f.requires(.Rpo);
     target := f.globals.target&;
     
     // all the places we loop twice is once for floats and one for ints. 

@@ -60,6 +60,8 @@ fn fillpreds(f: *Qbe.Fn) void = {
         bc.pred[bc.visit.zext()] = bp;
         bc.visit += 1;
     };
+    
+    f.creates(.Pred);
 }
 
 fn rporec(b: *Qbe.Blk, x: i32) i32 = {
@@ -81,7 +83,6 @@ fn rporec(b: *Qbe.Blk, x: i32) i32 = {
     x - 1
 }
 
-/* fill the rpo information */
 fn fillrpo(f: *Qbe.Fn) void = {
     for_blocks f { b | 
         b.id = -1;
@@ -107,7 +108,10 @@ fn fillrpo(f: *Qbe.Fn) void = {
             f.rpo[b.id.zext()] = b;
             p = b.link&;
         }
-    }
+    };
+    
+    // this breaks Tmp.defining_block and Use.bid because it changes the indices (fixed by fill_use)
+    f.breaks(.Use); f.creates(.Rpo);
 }
 
 /* for dominators computation, read
@@ -132,6 +136,8 @@ fn inter(b1: *Qbe.Blk, b2: *Qbe.Blk) *Qbe.Blk = {
 }
 
 fn filldom(f: *Qbe.Fn) void = {
+    f.requires(.Rpo); f.creates(.Dom);
+    
     for_blocks f { b |
         b.idom = Qbe.Blk.ptr_from_int(0);
         b.dom = Qbe.Blk.ptr_from_int(0);
@@ -257,11 +263,12 @@ fn fillloop(f: *Qbe.Fn) void = {
     };
 }
 
-/* requires rpo and no phis, breaks cfg */
 // - Replaces returns with jumps to a single new block so the codegen only needs to emit one epilogue. 
 // - Replaces chains of unconditional jumps through empty blocks with just jumping directly to the end.  
 // - Replaces conditional jumps that go to the same place (perhaps created by the above) with unconditional jumps.
 fn simplify_jump_chains(f: *Qbe.Fn) void = {
+    f.consumes(.Rpo); f.breaks(.Dom); f.breaks(.Pred);
+    
     epilogue := newblk();
     epilogue.id = f.nblk;
     f.nblk += 1;
@@ -342,10 +349,9 @@ fn killblks(f: *Qbe.Fn) void = {
     };
 }
 
-/* merge linear jmp chains */
-/* requires rpo pred, breaks cfg use */
 // [a -> b -> c -> (d or e)] becomes [abc -> (d or e)]
 fn blkmerge(f: *Qbe.Fn) void = {
+    f.requires(.Rpo); f.requires(.Pred); f.breaks(.Dom);
     when_debug(f, .Block) { out |
         write(out, "\n## Block merge:\n");
     };
@@ -387,8 +393,8 @@ fn blkmerge(f: *Qbe.Fn) void = {
             @debug_assert_eq(b.s1.id.zext(), bid + 1, "rpo not in order in $%: @% -> @% (expected @%)", f.name(), b.name(), b.s1.name(), f.rpo[bid + 1].name());
             when_debug(f, .Block) { out |
                 @fmt(out, "#    merging blocks @% -> @%\n", b.name(), b.s1.name());
-                changed = true;
             };
+            changed = true;
             if vins.len == 0 {
                 vins = b.ins;
                 b.ins = empty();
@@ -399,9 +405,12 @@ fn blkmerge(f: *Qbe.Fn) void = {
         bid += 1;
     };
     @debug_assert(curb.is_null() && vins.len == 0, "still have blocks??");
-    killblks(f);
+    if changed {
+        killblks(f);
+        fillcfg(f);
+    };
     when_debug(f, .Block) { out |
-        @if(changed, printfn(f, out), @fmt(out, "# (no change)\n\n"));
+        @if(changed, printfn(f, out), @fmt(out, "# $% (no change)\n\n", f.name()));
     };
     flush_debug(f.globals);
 }

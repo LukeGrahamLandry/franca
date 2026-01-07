@@ -254,6 +254,7 @@ TRACK_IR_NAMES :: true;
         leaf: bool,
         read_only: bool,
         track_ir_names: bool,
+        flag: u16,
         lnk: Qbe.Lnk,
         
         escaping_slots: Qbe.BSet,
@@ -264,6 +265,17 @@ TRACK_IR_NAMES :: true;
         ret_cls: Qbe.Cls,  // Ke=aggragate, Kx=void
         
         env_par: Qbe.Ref,
+    );
+    // TODO: be more rigorous about calling f.breaks(it) everywhere
+    // for debug-assert-ing that invarients of the ir are upheld at different phases of compilation.  
+    Flag :: @enum(
+        Ssa,        // Tmp.ndef <= 1. 
+        Use,        // Use.u.ins are into Blk.ins and Use.bid are Blk.id indices to Fn.rpo. 
+        UseCounts,  // Tmp.(nuse,ndef) isn't broken by resizing Blk.ins. 
+        Rpo,  
+        Dom, 
+        Pred, 
+        Alias, 
     );
     InlineFn :: @struct {
         blocks: []Qbe.Blk;
@@ -633,3 +645,18 @@ fn name(s: *Qbe.Blk) Str = @if(s.is_null(), "(NULL)",
     @if(s.name.len == 0, @tfmt("%", s.id), s.name));
 fn name(s: *Qbe.Fn)  Str = s.globals.str(s.lnk.id);
 fn name(s: *Qbe.Typ) Str = s.name;
+
+fn creates(f: *Qbe.Fn, it: Qbe.Flag) void = {
+    @if(!@run safety_check_enabled(.DebugAssertions)) return();
+    f.flag = f.flag.bit_or(1.shift_left(@as(i64) it));
+}
+fn breaks(f: *Qbe.Fn, it: Qbe.Flag) void = {
+    @if(!@run safety_check_enabled(.DebugAssertions)) return();
+    f.flag = f.flag.bit_and(1.shift_left(@as(i64) it).bit_not().trunc());
+}
+fn requires(f: *Qbe.Fn, it: Qbe.Flag) void = {
+    @debug_assert(f.flag.bit_and(1.shift_left(@as(i64) it)) != 0);
+}
+fn consumes(f: *Qbe.Fn, it: Qbe.Flag) void = {
+    f.requires(it); f.breaks(it);
+}

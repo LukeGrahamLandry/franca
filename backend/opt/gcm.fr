@@ -175,8 +175,8 @@ lateblk :: fn(f: *Qbe.Fn, b: *Qbe.Blk) void = {
     }
 }
 
-// breaks use
 addgcmins :: fn(f: *Qbe.Fn, vins: []Qbe.Ins) void = {
+    f.breaks(.Use);
     each vins { i |
         t := f.get_temporary(i.to);
         b := f.rpo[t.gcmbid];
@@ -189,6 +189,7 @@ addgcmins :: fn(f: *Qbe.Fn, vins: []Qbe.Ins) void = {
  * before-def errors are fixed by
  * schedblk */
 gcmmove :: fn(f: *Qbe.Fn) void = {
+    f.requires(.Use);
     vins := Qbe.Ins.list(temp());
     each f.tmp.slice(0, f.ntmp.zext()) { t |
         continue :: local_return;
@@ -225,6 +226,7 @@ schedins :: fn(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins, vins: *List(Qbe.Ins)) i64 =
 
 /* order ins within a block */
 schedblk :: fn(f: *Qbe.Fn) void = {
+    f.breaks(.Use);
     vins := Qbe.Ins.list(temp());
     for_blocks f { b |
         vins&.clear();
@@ -270,9 +272,9 @@ sinkref :: fn(f: *Qbe.Fn, b: *Qbe.Blk, pr: *Qbe.Ref) void = {
 
 /* redistribute trivial ops to point of
  * use to reduce register pressure
- * requires rpo, use; breaks use
  */
 sink :: fn(f: *Qbe.Fn) void = {
+    f.consumes(.Use); f.requires(.Rpo);
     for_blocks f { b | 
         for_insts_forward b { i |
             if is_load(i.op()) {
@@ -289,11 +291,8 @@ sink :: fn(f: *Qbe.Fn) void = {
     f.reset_scratch();
 }
 
-/* requires use dom
- * maintains rpo pred dom
- * breaks use
- */
 gcm :: fn(f: *Qbe.Fn) void = {
+    f.requires(.Use); f.requires(.Dom);
     filldepth(f);
     fillloop(f);
 
@@ -319,6 +318,7 @@ gcm :: fn(f: *Qbe.Fn) void = {
     schedblk(f);
     
     when_debug_printfn(f, .GCM, "\n## After GCM:\n");
+    f.creates(.Ssa);
 }
 
 #use("@/backend/lib.fr");

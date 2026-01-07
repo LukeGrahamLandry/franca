@@ -691,6 +691,9 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 - https://c9x.me/git/qbe.git/commit/?id=73f0accb45f80d697e054ee95e9c82adbc512c99
   i already had a debug_assert for that problem but should actually fix it. 
   need a non-insane repo case. 
+- should run the tests with inlining disabled as well. 
+  a bunch of stuff just compiles to nothing. 
+  currently some i try to order the functions in the ir to prevent it but that's fragile. 
 
 ## backend symbols rework
 

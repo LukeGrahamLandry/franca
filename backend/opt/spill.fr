@@ -28,17 +28,13 @@ fn tmpuse(f: *Qbe.Fn, r: Qbe.Ref, is_use: bool, loop: i32) void = {
     
     if rtype(r) == .RTmp && r.val() >= Qbe.Tmp0 {
         t := f.get_temporary(r.val());
-        t.nuse += int(is_use).trunc();
-        t.ndef += int(!is_use).trunc();
         t.cost += loop.bitcast();
     };
 }
 
-/* evaluate spill costs of temporaries,
- * this also fills usage information
- * requires rpo, preds
- */
+// TODO: qbe had this update nuse,ndef. why? it's only called after isel. 
 fn fillcost(f: *Qbe.Fn) void = {
+    f.requires(.Rpo); f.requires(.Pred); 
     loopiter(f, aggreg);
     when_debug(f, .Spill, fn(out) => dump_loop_cost(f, out));
     
@@ -47,8 +43,6 @@ fn fillcost(f: *Qbe.Fn) void = {
         is_reg := i < Qbe.Tmp0;
         ::if(u32);
         t.cost = if(is_reg, => MAX_u32, => 0); 
-        t.nuse = 0;
-        t.ndef = 0;
     };
     
     for_blocks f { b |
@@ -333,7 +327,7 @@ fn merge(f: *Qbe.Fn, u: *Qbe.BSet, bu: *Qbe.Blk, v: *Qbe.BSet, bv: *Qbe.Blk) voi
 }
 
 /* spill code insertion
- * requires spill costs, rpo, liveness
+ * requires spill costs, liveness
  *
  * Note: this will replace liveness
  * information (in, out) with temporaries
@@ -346,6 +340,7 @@ fn merge(f: *Qbe.Fn, u: *Qbe.BSet, bu: *Qbe.Blk, v: *Qbe.BSet, bv: *Qbe.Blk) voi
  */
 
 fn spill(f: *Qbe.Fn) void = {
+    f.requires(.Rpo); f.breaks(.Ssa); f.breaks(.Use);
     T := f.globals.target&;
     ntmp: i64 = f.ntmp.zext();
     pass: SpillPass = (
