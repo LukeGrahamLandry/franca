@@ -1,0 +1,82 @@
+// multiply each element of an array by 2. 
+// don't limit your graphics processing unit to merely processing graphics. 
+// TODO: doesn't work on webgpu yet because i don't do wgsl pointers right. 
+
+main :: fn() void = {
+    sg := @ref zeroed(Sg.Self);
+    setup(sg, (
+        environment = Easy'headless_environment(),
+        allocator = general_allocator(),
+    ));
+    
+    group_size := 32;  // TODO: how to choose this
+    shd: Sg.ShaderDesc = (
+        mtl_threads_per_threadgroup = (x = group_size.intcast()),
+    );
+    choose_shader_impl(SOKOL_BACKEND, shd&, Shaders);
+    shd.storage_buffers&[0] = (
+        stage = .COMPUTE,
+        readonly = true,
+        msl_buffer_n = 0,
+        wgsl_group1_binding_n = 0,
+    );
+    shd.storage_buffers&[1] = (
+        stage = .COMPUTE,
+        readonly = false,
+        msl_buffer_n = 1,
+        wgsl_group1_binding_n = 1,
+    );
+    
+    pipe: Sg.Pipeline = sg.make(
+        compute = true,
+        shader = sg.make(shd),
+    );
+    
+    n := 1.shift_left(12);
+    
+    bind := zeroed Sg.Bindings;
+    input := temp().alloc_init(f32, n, fn(i) => i.add(1).float().cast());
+    bind.storage_buffers&[0] = sg.make(
+        type = .STORAGEBUFFER,
+        data = input.interpret_as_bytes(),
+    );
+    bind.storage_buffers&[1] = sg.make(
+        type = .STORAGEBUFFER,
+        size = n * size_of(f32),
+    );
+    
+    pass := zeroed Sg.Pass;
+    pass.compute = true;
+    sg.begin_pass(pass&);
+    sg.apply_pipeline(pipe);
+    sg.apply_bindings(bind&);
+    sg.dispatch(n / group_size, 1, 1);
+    sg.end_pass();
+    sg.commit(true);
+    
+    @if(SOKOL_BACKEND == .METAL_MACOS, {
+        mtl := sg.mtl&;
+        sbuf := bind.storage_buffers&[1];
+        sbuf := sg.lookup(sbuf).unwrap();
+        it := mtl.get_id(sbuf.mtl.buf&[@as(i64) sbuf.cmn.active_slot.intcast()]);
+        result := @objc @as(*f32) it.contents();
+        result := result.slice(n);
+        range(0, n) { i |
+            @assert_eq(result[i], input[i] * 2, "i=%", i);
+        };
+        println("the gpu did math!");
+    }, {
+        panic("TODO: abstract copy from buffer to cpu");
+    });
+}
+
+Shaders :: @struct {
+    It  :: @struct(it: f32);
+    cs   :: fn(in: Buf(Shaders.It) #buffer(0), out: Buf(Shaders.It) #buffer(1), v: u32 #thread_position_in_grid) void = {
+        out[v].it = in[v].it * 2;
+    };
+};
+
+#include_std("graphics/lib.fr");
+driver :: fn(vtable: *ImportVTable) void = 
+    Easy'build_for_graphics(vtable, "examples/gpu/trivial_compute.fr");

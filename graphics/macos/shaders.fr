@@ -40,8 +40,17 @@ emit_all :: fn(self: *Function, out: *List(u8)) void = {
         }
     };
     
-    @debug_assert(self.stage != .COMPUTE);
-    @fmt(out, "\n% T% %(", if(self.stage == .VERTEX, => "vertex", => "fragment"), self.ret, "main0");
+    stage := @match(self.stage) {
+        fn VERTEX() => "vertex";
+        fn FRAGMENT() => "fragment";
+        fn COMPUTE() => "kernel";
+        fn NONE() => unreachable();
+    };
+    if self.stage == .COMPUTE {
+        @fmt(out, "\n% void %(", stage, "main0");
+    } else {
+        @fmt(out, "\n% T% %(", stage, self.ret, "main0");
+    };
     enumerate self.input { i, it |
         self.ann_field(it, out, @tfmt("v%", i+1), n&);
         if i != self.input.len - 1 {
@@ -76,6 +85,7 @@ ann_field :: fn(self: *Function, it: *IoField, out: *List(u8), name: Str, n: *Co
     
     @match(it.builtin) {
         fn vertex_index() => @fmt(out, " [[vertex_id]]");
+        fn thread_position_in_grid() => @fmt(out, " [[thread_position_in_grid]]");
         fn position()     => @fmt(out, " [[position]]");
         fn colour()       => @fmt(out, " [[color(0)]]");  // todo: don't think this does anything
         fn input()        => @fmt(out, " [[stage_in]]");
@@ -213,7 +223,7 @@ emit_body :: fn(self: *Function, out: *List(u8)) void = {
             fn SetDeref() => @fmt(out, "*v% = v%", inst.a, inst.b);
             fn AddrField() => {
                 name: Symbol = inst.b.symbol_from_id();
-                @fmt(out, "&v%.%", inst.a, name.str());
+                @fmt(out, "&v%->%", inst.a, name.str());
             }
             fn GetField() => {
                 name: Symbol = inst.b.symbol_from_id();

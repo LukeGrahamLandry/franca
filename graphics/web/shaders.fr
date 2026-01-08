@@ -46,7 +46,6 @@ emit_all :: fn(self: *Function, out: *List(u8)) void = {
         }
     };
     #use("@/lib/collections/bit_set.fr");
-    @debug_assert(self.stage != .COMPUTE);
     
     was_var: DynamicBitSet = empty(temp());
     next_id := self.body.len;
@@ -71,7 +70,13 @@ emit_all :: fn(self: *Function, out: *List(u8)) void = {
             }
         };
     };
-    @fmt(out, "\n% fn %(", if(self.stage == .VERTEX, => "@vertex", => "@fragment"), self.name.str());
+    stage := @match(self.stage) {
+        fn VERTEX() => "@vertex";
+        fn FRAGMENT() => "@fragment";
+        fn COMPUTE() => "@compute";
+        fn NONE() => unreachable();
+    };
+    @fmt(out, "\n% fn %(", stage, self.name.str());
     enumerate self.input { i, it |
         if !was_var&.get(i) && !junk_types.items().contains(it.type) {
             ok := self.ann_field(it, out, @tfmt("v%", i+1), n&);
@@ -80,7 +85,11 @@ emit_all :: fn(self: *Function, out: *List(u8)) void = {
             }
         }
     };
-    @fmt(out, ") -> T% {\n", self.ret);
+    if self.ret == 0 {
+        @fmt(out, ") {\n");
+    } else {
+        @fmt(out, ") -> T% {\n", self.ret);
+    };
     emit_body(self, out, junk_types.items(), resource_fields&);
 }
 
@@ -91,6 +100,7 @@ ann_field :: fn(self: *Function, it: *IoField, out: *List(u8), name: Str, n: *Co
     }
     @match(it.builtin) {
         fn vertex_index() => @fmt(out, "@builtin(vertex_index) ");
+        fn thread_position_in_grid() => @fmt(out, "@builtin(global_invocation_id) ");
         fn position()     => @fmt(out, "@builtin(position) ");
         fn colour()       => @fmt(out, "@location(0) ");
         fn input()        => ();

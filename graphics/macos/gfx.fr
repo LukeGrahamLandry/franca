@@ -7,6 +7,8 @@
 // without finding a copy of the Metal.framework headers. If I ever do more
 // serious bindings to metal, this should be updated to use that instead. 
 // 
+// you should probably run your program with METAL_DEVICE_WRAPPER_TYPE=1 
+// 
 
 #use("@/graphics/macos/frameworks.fr");
 
@@ -715,6 +717,7 @@ fn create_shader_func(mtl: *Impl, func: *Sg.ShaderFunction, label: CStr, label_e
     @debug_assert(res.mtl_lib == _SG_MTL_INVALID_SLOT_INDEX);
     @debug_assert(res.mtl_func == _SG_MTL_INVALID_SLOT_INDEX);
     err := zeroed id("NSError");
+    ::if(ObjCId);
     mtl_lib: id("MTLLibrary") = if !func.bytecode.ptr.is_null() {
         @debug_assert(func.bytecode.len > 0);
         // TODO: where to #import from?
@@ -849,7 +852,7 @@ fn create(mtl: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg.Pipeline
         );
         range(0, Sg.SG_MAX_STORAGEBUFFER_BINDSLOTS) { i |
             stage := shd.cmn.storage_buffers&[i].stage;
-            @debug_assert(!@is(stage, .VERTEX, .FRAGMENT));
+            @debug_assert(!@is(stage, .VERTEX, .FRAGMENT), "% buffer in compute pipeline", stage);
             if stage == .COMPUTE && shd.cmn.storage_buffers&[i].readonly {
                 mtl_slot := shd.mtl.sbuf_buffer_n&[i];
                 set_immutable(@objc cp_desc.buffers(), mtl_slot);
@@ -1287,13 +1290,16 @@ fn end_pass(mtl: *Impl) void = {
     }
 }
 
-fn commit(mtl: *Impl) void = {
+fn commit(mtl: *Impl, stall: bool) void = {
     @debug_assert(mtl.render_cmd_encoder.is_nil());
     @debug_assert(mtl.compute_cmd_encoder.is_nil());
     @debug_assert(!mtl.cmd_buffer.is_nil());
 
     // commit the frame's command buffer
     @objc mtl.cmd_buffer.commit();
+    if stall {
+        @objc mtl.cmd_buffer.waitUntilCompleted();
+    };
 
     // garbage-collect resources pending for release
     mtl.garbage_collect(mtl.sg.frame_index);
@@ -1544,10 +1550,9 @@ fn draw(mtl: *Impl, base_element: i32, num_elements: i32, num_instances: i32) vo
     }
 }
 
-// TODO
-fn dispatch(mtl: *Impl, num_groups_x: i32, num_groups_y: i32, num_groups_z: i32) void = {
+fn dispatch(mtl: *Impl, num_groups_x: i64, num_groups_y: i64, num_groups_z: i64) void = {
     @debug_assert(!mtl.compute_cmd_encoder.is_nil());
-    @debug_assert(mtl.state_cache.cur_pipeline && (mtl.state_cache.cur_pipeline.slot.id == mtl.state_cache.cur_pipeline_id.id));
+    @debug_assert(!mtl.state_cache.cur_pipeline.is_null() && (mtl.state_cache.cur_pipeline.slot.id == mtl.state_cache.cur_pipeline_id.id));
     cur_pip := mtl.state_cache.cur_pipeline;
     thread_groups: MTLSize = (
         width  = @as(i64) num_groups_x,

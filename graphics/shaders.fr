@@ -49,22 +49,29 @@ fn pack(u: u16, v: u16) UShort2 =
 
 DUMP_SHADERS :: false;
 fn choose_shader_impl($backend: RenderBackend, shd_desc: *Sg.ShaderDesc, $data: Type) void = {
-    vv, ff := (shd_desc.vertex_func&, shd_desc.fragment_func&);
+    vv, ff, cc := (shd_desc.vertex_func&, shd_desc.fragment_func&, shd_desc.compute_func&);
     @if(is_metal(backend)) {
         vv.entry = "main0";
         ff.entry = "main0";
+        cc.entry = "main0";
     };
-    vv.source = :: compile_to_shader_source(data.vs, backend, true).sym().c_str();
-    ff.source = :: compile_to_shader_source(data.fs, backend, false).sym().c_str();
+    @if(@run has_const_field(data, @symbol cs)) {
+        cc.source = :: compile_to_shader_source(data.cs, backend, .COMPUTE).sym().c_str();
+    };
+    @if(@run has_const_field(data, @symbol vs)) {
+        vv.source = :: compile_to_shader_source(data.vs, backend, .VERTEX).sym().c_str();
+        ff.source = :: compile_to_shader_source(data.fs, backend, .FRAGMENT).sym().c_str();
+    };
     if DUMP_SHADERS {
         @println("%", vv.source);
         @println("%", ff.source);
+        @println("%", cc.source);
     };
 }
 
 // This must be called at comptime!
 #use("@/compiler/ast_external.fr") 
-fn compile_to_shader_source(fid: FuncId, backend: RenderBackend, is_vertex: bool) Str = {
+fn compile_to_shader_source(fid: FuncId, backend: RenderBackend, stage: Sg.ShaderStage) Str = {
     ::AutoHash(VarId, TrivialHasher); ::AutoEq(VarId);
     fr := current_compiler_context();
     func := get_function_ast(fid, true, true, true, true);
@@ -77,7 +84,7 @@ fn compile_to_shader_source(fid: FuncId, backend: RenderBackend, is_vertex: bool
         types = list(a),
         type_lookup = init(a),
         locals = init(a),
-        stage = @if(is_vertex, .VERTEX, .FRAGMENT),
+        stage = stage,
         name = @if(SOKOL_BACKEND == .METAL_MACOS, @symbol main0, @symbol main),
         ret = 0,
         gpa = a,
@@ -128,6 +135,9 @@ fn set_annotations(info: *IoField, annotations: []Annotation) void = {
             };
             @case(@symbol vertex_id) => {
                 info.builtin = .vertex_index;
+            };
+            @case(@symbol thread_position_in_grid) => {
+                info.builtin = .thread_position_in_grid;
             };
             @case(@symbol position) => {
                 info.builtin = .position;
@@ -419,7 +429,8 @@ fn msl_stmt(self: *Function, e: *FatStmt) void = {
                 value := self.msl_expr(it.value&);
                 self.body&.push(op = .SetVar, a = place, b = value);
             } else {
-                place := self.place_expr(it.place&);
+                @ct_assert(it.place.expr&.is(.Deref), it.place.loc, "assignment dest must be deref");
+                place := self.place_expr(it.place.expr.Deref);
                 value := self.msl_expr(it.value&);
                 self.body&.push(op = .SetDeref, a = place, b = value);
             }
@@ -654,6 +665,7 @@ BuiltinProperty :: @enum(u32) (
     position,
     point_size,
     vertex_index,
+    thread_position_in_grid,
     colour, 
     input,
     user,

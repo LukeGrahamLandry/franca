@@ -70,6 +70,7 @@ as input to a seperate program to generate some new tokens.
 probably that's just because i have a different version of apple's shader compiler but who knows. 
 
 ```
+// the exact format of this is no longer up to date but it's the same idea. see graphics/debugtext.fr
 Shaders :: @struct(
     InV  :: @struct(position: Vec2 #attribute(0), texcoord0: Vec2 #attribute(1), color0: Vec4 #attribute(2)),
     OutV :: @struct(uv: Vec2 #user(locn0), color: Vec4 #user(locn1), pos: Vec4 #position),

@@ -37,18 +37,39 @@ pre_init :: fn(sapp: *Sapp.Self) void = {
     macos: *Sapp.Macos.Impl = sapp.impl();
     layer := @objc @as(rawptr) macos.view.layer();
     web := sapp.webgpu&;
+    web.native_init_device(Some = layer);
+    caps := zeroed WGPU.SurfaceCapabilities;
+    getCapabilities(web.surface, web.adapter, caps&);
+    @debug_assert(caps.formatCount > 0 && caps.alphaModeCount > 0);
     
+    web.config = (
+        device = web.device,
+        usage = (_ = @or(WGPU.TextureUsage.CopySrc, WGPU.TextureUsage.RenderAttachment)),
+        format = caps.formats[],
+        presentMode = .Fifo,
+        alphaMode = caps.alphaModes[],
+        width = trunc sapp.framebuffer_width,
+        height = trunc sapp.framebuffer_height,
+    );
+    web.surface.configure(web.config&);
+    // TODO: what about depth texture / msaa :DEPTH
+}
+
+fn native_init_device(web: *RealGraphicsState, metal_layer: ?rawptr) void = {
     web.instance = WGPU'wgpuCreateInstance(zeroed(*WGPU.InstanceDescriptor));
     
-    web.surface = createSurface(web.instance, @ref @as(WGPU.SurfaceDescriptor) (
-        nextInChain = (@ref @as(WGPU.SurfaceSourceMetalLayer) (
-            chain = (sType = .SurfaceSourceMetalLayer),
-            layer = layer,
-        ))[].chain&,
-    ));
-    @debug_assert(!web.surface._.is_null(), "createSurface");
+    if metal_layer { layer |
+        web.surface = createSurface(web.instance, @ref @as(WGPU.SurfaceDescriptor) (
+            nextInChain = (@ref @as(WGPU.SurfaceSourceMetalLayer) (
+                chain = (sType = .SurfaceSourceMetalLayer),
+                layer = layer,
+            ))[].chain&,
+        ));
+        @debug_assert(!web.surface._.is_null(), "createSurface");
+    };
     
     web.instance.requestAdapter(@ref @as(WGPU.RequestAdapterOptions) (
+        // optional: it's fine if null when headless
         compatibleSurface = web.surface,
     ), (
         callback = fn(status, adapter, message, userdata1, _userdata2) void = {
@@ -82,22 +103,6 @@ pre_init :: fn(sapp: *Sapp.Self) void = {
         mode = .AllowSpontaneous,
     ));
     @debug_assert(!web.device._.is_null(), "we don't fuck with async here");
-    
-    caps := zeroed WGPU.SurfaceCapabilities;
-    getCapabilities(web.surface, web.adapter, caps&);
-    @debug_assert(caps.formatCount > 0 && caps.alphaModeCount > 0);
-    
-    web.config = (
-        device = web.device,
-        usage = (_ = @or(WGPU.TextureUsage.CopySrc, WGPU.TextureUsage.RenderAttachment)),
-        format = caps.formats[],
-        presentMode = .Fifo,
-        alphaMode = caps.alphaModes[],
-        width = trunc sapp.framebuffer_width,
-        height = trunc sapp.framebuffer_height,
-    );
-    web.surface.configure(web.config&);
-    // TODO: what about depth texture / msaa :DEPTH
 }
 
 fn get_swapchain(wgpu: *GraphicsState) Sg.WgpuSwapchain = (

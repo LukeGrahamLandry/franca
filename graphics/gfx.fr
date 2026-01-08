@@ -1359,7 +1359,7 @@ fn validate_draw(sg: *Self, base_element: i32, num_elements: i32, num_instances:
     @V(sg.required_bindings_and_uniforms == sg.applied_bindings_and_uniforms, VALIDATE_DRAW_REQUIRED_BINDINGS_OR_UNIFORMS_MISSING);
 };
 
-fn _sg_validate_dispatch(sg: *Self, num_groups_x: i32, num_groups_y: i32, num_groups_z: i32) bool = @validate(sg) {
+fn validate_dispatch(sg: *Self, num_groups_x: i64, num_groups_y: i64, num_groups_z: i64) bool = @validate(sg) {
     @V(sg.cur_pass.in_pass && sg.cur_pass.is_compute, VALIDATE_DISPATCH_COMPUTEPASS_EXPECTED);
     @V((num_groups_x >= 0) && (num_groups_x < 1.shift_left(16)), VALIDATE_DISPATCH_NUMGROUPSX);
     @V((num_groups_y >= 0) && (num_groups_y < 1.shift_left(16)), VALIDATE_DISPATCH_NUMGROUPSY);
@@ -2058,10 +2058,10 @@ fn draw(sg: *Self, base: i32, elements: i32, instances: i32) void #trace(.tail) 
 }
 
 // TODO
-fn dispatch(sg: *Self, num_groups_x: i32, num_groups_y: i32, num_groups_z: i32) void #trace(.tail) = {
+fn dispatch(sg: *Self, num_groups_x: i64, num_groups_y: i64, num_groups_z: i64) void #trace(.tail) = {
     @debug_assert(sg.valid);
-    if(!_sg_validate_dispatch(num_groups_x, num_groups_y, num_groups_z), => return());
-    _sg_stats_add(num_dispatch, 1);
+    if(!sg.validate_dispatch(num_groups_x, num_groups_y, num_groups_z), => return());
+    sg.stat(.num_dispatch, 1);
     if(!sg.cur_pass.valid || !sg.next_draw_valid, => return());
     // skip no-op dispatches
     if((0 == num_groups_x) || (0 == num_groups_y) || (0 == num_groups_z), => return());
@@ -2081,11 +2081,13 @@ fn end_pass(sg: *Self) void #trace = {
     sg.cur_pass = zeroed @type sg.cur_pass;
 }
 
-fn commit(sg: *Self) void #trace = {
+fn commit(sg: *Self) void = sg.commit(false);
+
+fn commit(sg: *Self, stall: bool) void #trace = {
     @debug_assert(sg.valid);
     @debug_assert(!sg.cur_pass.valid);
     @debug_assert(!sg.cur_pass.in_pass);
-    sg.impl().commit();
+    sg.impl().commit(stall);
     sg.stats&[.frame_index] = sg.frame_index;
     sg.prev_stats = sg.stats;
     sg.stats = zeroed @type sg.stats;
@@ -2687,7 +2689,7 @@ ShaderUniformBlock :: @struct(
     size: u32,
     hlsl_register_b_n: u8 = 0,
     msl_buffer_n: u8,
-    wgsl_group0_binding_n: u8 = 0,
+    wgsl_group0_binding_n: u8,
     layout := UniformLayout.DEFAULT,
     glsl_uniforms := zeroed Array(GlslShaderUniform, 16),
 );
@@ -2711,8 +2713,8 @@ ShaderStorageBuffer :: @struct(
     stage: ShaderStage,
     readonly: bool,
     hlsl_register_t_n: u8 = 0,
-    msl_buffer_n: u8 = 0,
-    wgsl_group1_binding_n: u8 = 0,
+    msl_buffer_n: u8,
+    wgsl_group1_binding_n: u8,
     glsl_binding_n: u8 = 0,
 );
 ShaderImageSamplerPair :: @struct(
@@ -2730,11 +2732,11 @@ ShaderDesc :: @struct(
     images := zeroed Array(ShaderImage, 16),
     samplers := zeroed Array(ShaderSampler, 16),
     image_sampler_pairs := zeroed Array(ShaderImageSamplerPair, 16),
-    mtl_threads_per_threadgroup := zeroed MtlShaderThreadsPerThreadGroup,
+    mtl_threads_per_threadgroup: MtlShaderThreadsPerThreadGroup = (x = 0),
     label := zeroed CStr,
 );
 MtlShaderThreadsPerThreadGroup :: @struct {
-    x: i32; y: i32; z: i32;
+    x: i32; y: i32 = 1; z: i32 = 1;
 };
 StencilFaceState :: @struct(
     compare := CompareFunc.ALWAYS,
