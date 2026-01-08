@@ -17,6 +17,8 @@
 // TODO: make it work on rv. i need to to work on the multiarch thing, at that point do i just have to ask your c compiler for include path?
 //       /usr/lib/gcc-cross/riscv64-linux-gnu/14/../../../../riscv64-linux-gnu/include
 //
+// fun trick: alias fr="orb ./target/release/franca-linux-arm64 tests/external/bubblewrap.fr -fr"
+//
 
 settings :: @const_slice(
     "--clearenv", 
@@ -35,11 +37,12 @@ settings :: @const_slice(
     "--tmpfs", "/foo/target", 
     "--ro-bind", "target/franca/fetch", "/foo/target/franca/fetch", 
     "--ro-bind", "$FRANCA", "/foo/target/boot.out", 
-    "--", "target/boot.out", "tests/run_tests.fr", "$MODE",
+    "--", "target/boot.out", 
 );
 
-// usage: franca tests/external/bubblewrap.fr -run $MODE
-// will run `franca run_tests.fr $MODE` sandboxed with the `settings` above. 
+// usage: franca tests/external/bubblewrap.fr -fr [ARGS...]
+// will run `franca [ARGS...]` sandboxed with the `settings` above. 
+// (note it doesn't persist writes so it defeats .frc caching)
 // usage: franca tests/external/bubblewrap.fr -- [OPTIONS...] [--] COMMAND [ARGS...]
 // everything after the first '--' is passed to a newly compiled bwrap. 
 driver :: fn(_: *ImportVTable) void = {
@@ -52,23 +55,25 @@ driver :: fn(_: *ImportVTable) void = {
     
     franca := get_executable_path(temp());
     args := cli_args();
-    if args.index_of(fn(it) => it[] == "-run") { i |
-        @assert(i < args.len - 1, "expected '-run $MODE' (same as argument to run_tests.fr)");
-        mode := args[i + 1].str();
-        settings := settings.shallow_copy(temp());
+    if args.index_of(fn(it) => it[] == "-fr") { i |
+        a := @ref CStr.list(settings.len() + 1 + args.len - i, temp());
+        a.push(path.as_cstr());
         each settings { it |
-            it[] = @switch(it[]) {
-                @case("$FRANCA") => franca;
-                @case("$PATH") => (get_environment_variable("PATH") || "").str();
-                @case("$MODE") => mode;
-                @default => it[];
-            };
+            ::?CStr;
+            a.push(@switch(it[]) {
+                @case("$FRANCA") => franca.as_cstr();
+                @case("$PATH") => get_environment_variable("PATH") || "".as_cstr();
+                @default => it[].as_cstr();
+            });
         };
+        a.push_all(args.rest(i + 1));
+        a.push(zeroed(CStr));
+        args := a.items();
+        
         // TODO: for mode == run-yes-deps (instead of mode == core) to work i need to recompile cc.out/q.out
         // TODO: if mode == run-no-deps, don't do this and don't --bind target/franca/fetch
-        @assert Subprocess'run_cmd_blocking(franca, @slice("tests/run_tests.fr", "fetch"));
-        
-        args := Subprocess'make_args_for_exec(path, settings, temp());
+        ok, o, e := Subprocess'exec_and_catch(franca, @slice("tests/run_tests.fr", "fetch"), temp());
+        @assert ok;
         Subprocess'exec(args);
         unreachable();
     };

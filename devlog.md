@@ -1,4 +1,14 @@
 
+## (Jan 8)
+
+- gfx
+  - compute shaders technically work. 
+    wasted some time on not setting msl_buffer_n, should auto generate those. 
+  - stop manually writing the file name in build_for_graphics
+- tests that look at ir after opt and asserts all the opt passes did thier work. 
+  - had to add a bake_relocatable_value for Incremental.Header because it's unsized. that was confusing. 
+- bwrap: make it easy to run a single franca program
+
 ## (Jan 7)
 
 - passing more of tcc's tests

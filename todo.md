@@ -1,4 +1,5 @@
-
+- go through and add cases to check_opt.fr for everything in backend/opt
+- should error if you try to make a bake_relocatable_value which will never be called because the type doesn't contain pointers
 - deal with Crash'hook_backtrace();
   - when aot it gives you more information 
     but when running jitted it replaces the compiler's one 
@@ -6,8 +7,6 @@
   - and you don't want to just not request_backtrace_on_signal
     if __franca_aot_debug_info is null because they might 
     be going to add thier own later (like the compiler does).
-- tests that look at ir after opt and compare two versions of functions to make sure they generate the same thing. 
-  ie. a function that does a div twice and make sure gvn fixes it. 
 - actually use hash_archive !!!
 - tests/external/tcc.fr
   - fix my arm-linux abi

@@ -1,0 +1,109 @@
+// most of the backend tests exist to ensure optimisations don't break program behaviour
+// but they can be tricked by just not doing the optimisation. 
+// the functions in each group below should end up with the same ir after all optimisation passes
+// (and that property is asserted by main() at the end of the file). 
+// TODO: some of these are more impressive than they look 
+//       because my frontend generates super dumb ir so there's a lot of cleaning to do. 
+//       which isn't great because it takes time so maybe i should make emit_ir do a better job. 
+tests :: @struct {
+
+gvn_dedup :: @struct {
+    a :: fn(x: i64) = { y := x / 2; y + y };
+    b :: fn(x: i64) = { two := 6 / 3; y, z := (x / 2, x / two); y + z };
+    c :: fn(x: i64) = { b(x) };
+    d :: fn(x: i64) = { y, _ := x.div_mod(2); y + y };
+};
+
+promote_array :: @struct {
+    a :: fn(x: i64) = { x + x };
+    b :: fn(x: i64) = { y := @slice(x, x); y[0] + y[1] };
+    c :: fn(x: i64) = { y := @array(x, x); y&[0] + y&[1] };
+    d :: fn(x: i64) = { y := (x, x); y._0 + y._1 };
+    e :: fn(x: i64) = { b(x) };
+};
+
+bool_var :: @struct {
+    a :: fn(x: i64) = { @if(x > 0, 1, 2) };
+    b :: fn(x: i64) = { cond := x > 0; @if(cond, 1, 2) };
+    c :: fn(x: i64) = { cond := false; c := cond&; c[] = x > 0; @if(cond, 1, 2) };
+    d :: fn(x: i64) = { y := 0; if x > 0 {| y = 1 } else {| y = 2; }; y };
+    e :: fn(x: i64) = { c(x) };
+};
+
+dead_branches :: @struct {
+    a :: fn(x: i64) = { x };
+    b :: fn(x: i64) = { y: (@tagged(A: i64, B: Str)) = (A = x); @match(y) { fn A(it) => it; fn B(it) => it.len; } };
+    c :: fn(x: i64) = { y: ?i64 = (Some = x); y.unwrap() };
+    d :: fn(x: i64) = { y := 1; @if((y == 1 && y != 2 && !(y == 3)) || false || x == 0, x, 0) }
+};
+
+};
+
+main :: fn() void = {
+    h, cases := @run compile_test_cases();
+    for cases { case |
+        prev, prev_name, n := ("", "", 0);
+        for(h, h.all(Qbe.Incremental.Sym)) { _, it |
+            continue :: local_return;
+            name := h.get(it.name);
+            @if(!case.names.contains(name)) continue();
+            
+            // for now im just checking that the structure is the same,
+            // not looking at the values in the Refs
+            ops := @ref u8.list(temp());
+            each h.get(it.fnc.blk) { b |
+                each h.get(b.ins) { i |
+                    if !@is(i.op(), .dbgloc) {
+                        @fmt(ops, "%,", i.op());
+                    };
+                };
+                @fmt(ops, "%|", b.jmp.type);
+            };
+            
+            @if(prev.len != 0) @assert_eq(prev, ops.items(), "%: % vs %", case.name, prev_name, name);
+            prev = ops.items();
+            prev_name = name;
+            n += 1;
+        };
+        @assert_eq(n, case.names.len);
+        ::FmtPad(Str);
+        @println("- % %", f_pad(case.name, 15, .After), prev);
+        
+    };
+}
+
+Case :: @struct(names: []Str, name: Str);
+compile_test_cases :: fn() Ty(*Qbe.Incremental.Header, []Case) = {
+    fr := current_compiler_context();
+    @assert_eq(fr.vtable.frc_module_magic_v, Qbe.Incremental.MAGIC, 
+        "check_opt requires matching_comptime_incremental_abi");
+    cases := Case.list(ast_alloc());
+    tests := Type.scope_of(tests);
+    fids := FuncId.list(temp());
+    for tests.get_constants() { group_name |
+        group := Type.get_constant(tests, group_name).unwrap();
+        group := Type.scope_of(group);
+        names := Str.list(ast_alloc());
+        for group.get_constants() { case_name |
+            fid := FuncId.get_constant(group, case_name).unwrap();
+            fids&.push(fid);
+            name := fr'vtable'mangle_name(fr.data, fid).shallow_copy(ast_alloc());
+            names&.push(name);
+        };
+        cases&.push(names = names.items(), name = group_name.str());
+    };
+    
+    m := ast_alloc().box_uninit(Qbe.Module);
+    init_default_module_dyn(m, fr.vtable, (
+        arch = query_current_arch(), 
+        os = query_current_os(), 
+        type = .Cached,
+    ));
+    it := {fr.vtable.emit_qbe_included}(Qbe.Module.raw_from_ptr(m), fr&, fids.items(), .GiveMeTheCodeAndGiveItToMeRaw);
+    it := concat(it&, ast_alloc());
+    fr'vtable'drop_qbe_module(Qbe.Module.raw_from_ptr(m));
+    h := check(it).unwrap();
+    (h, cases.items())
+}
+
+Qbe :: import("@/backend/lib.fr").Qbe;
