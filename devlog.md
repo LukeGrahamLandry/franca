@@ -1,4 +1,20 @@
 
+TODO: deal with FR_openat in a way that isn't toggling commenting it out every time
+TODO: now need to remake general allocator's vptr every time. 
+      the current crash is when the easy_abi jitted driver calls the aot init_self_hosted. 
+
+## (Jan 9)
+
+- ImportVTable also needs to be wrapped to change the abi 
+  but now i also need to be clear about when it's the compiler itself 
+  calling through the vtable and when it's the user code. 
+- AsmFunction and DynamicImport also need wrapping.
+- its at the point that i can run sudoku with the simplified abi. 
+- i think my plan is to go back to emit_ir always accessing the compiler state by the vtable. 
+  then i can do the same as when bootstrapping from rust: 
+  have the boot compiler that can't do aot and it jits the real emit_ir+backend 
+  to make an executable. 
+
 ## (Jan 8)
 
 - gfx
@@ -8,6 +24,18 @@
 - tests that look at ir after opt and asserts all the opt passes did thier work. 
   - had to add a bake_relocatable_value for Incremental.Header because it's unsized. that was confusing. 
 - bwrap: make it easy to run a single franca program
+
+thinking about bootstrapping stuff
+- how much can i simplify the minimal first compiler you need?
+  - i think i can get rid of a lot of emit_ir by using my old flat call abi. 
+    which then means a sane path to being able to use a simpler backend for the bootstrap. 
+    then maybe i just write a c one instead of committing a binary. 
+- the boundary where you have an old compiler with the real abi 
+  and you need to have a dyncall_shim that doesn't know if it's going to 
+  be calling a aot function or a new jitted one with the easy abi. 
+  for the #ct things at least, i can another layer of wrapper easily 
+  because im already doing comptime generation stuff there. 
+- extra annoying part is the allocators because there's a function pointer. 
 
 ## (Jan 7)
 

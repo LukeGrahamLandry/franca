@@ -1,0 +1,46 @@
+
+extern_to_easy_abi_dyncall_shim :: fn(arg: *u8, ret: *u8, callee: @FnPtr(ret: *u8, arg: *u8) void) void = {
+    callee(ret, arg);
+}
+
+easy_abi_emit_shim :: fn(c: *SelfHosted, fid: FuncId) void = {
+    shared := c.comptime_codegen;
+    handler_callee_address: rawptr = report_called_uncompiled_or_just_fix_the_problem;
+    m := shared.m; 
+    func := c.get_function(fid);
+    c.when_debug(.Shim, fn(o) => @fmt(o, "S: create %", fmt_func(c, fid)));
+    id := Qbe.no_symbol_S;
+    enter_task shared { entry |
+        id = m.intern(@tfmt("%__shim", fid));
+        
+        // create a new function
+        f := temp().box_uninit(Qbe.Fn);
+        f.default_init(m);
+        f.lnk.no_inline = true;
+        f.lnk.id = id;
+        f.start = newblk(); 
+        f.nblk = 1;
+        target_id := c.comptime_jit_symbol_id(fid);
+        entry.task = (Shim = (f = f, shim_for = target_id));
+        
+        input, output := (f.newtmp("input", .Kl), f.newtmp("output", .Kl));
+        b := f.start;
+        push(b, make_ins(.par, .Kl, output, QbeNull, QbeNull));
+        push(b, make_ins(.par, .Kl, input, QbeNull, QbeNull));
+        
+        // call into the compiler to get the real callee
+        // TODO: only right first generation
+        callee := f.newtmp("callee", .Kl);
+        push(b, make_ins(.arg,  .Kl, QbeNull, f.getcon(SelfHosted.int_from_ptr(c)), QbeNull));
+        push(b, make_ins(.arg,  .Kw, QbeNull, f.getcon(fid.as_index()), QbeNull));
+        push(b, make_ins(.call, .Kl, callee, f.getcon(handler_callee_address.int_from_rawptr()), QbeNull));
+
+        push(b, make_ins(.arg, .Kl, QbeNull, output, QbeNull));
+        push(b, make_ins(.arg, .Kl, QbeNull, input, QbeNull));
+        push(b, make_ins(.call, .Kw, Qbe.Null, callee, Qbe.Null));
+        
+        f.ret_cls = .Kx;
+        b.jmp.type = .ret0;
+    };
+    c.created_jit_fn_ptr_value(fid, shared.wait_for_symbol(id));
+}

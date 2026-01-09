@@ -74,6 +74,7 @@ fn comptime_jit_symbol_id(self: *SelfHosted, fid: FuncId) Qbe.Sym = {
 // It starts compiling on self.comptime_codegen and you have to get the result out of self.dyncalls when it's ready. 
 // TODO: reuse functions when they have different nominal types but the same repr. 
 fn create_dyncall_shim(self: *SelfHosted, f_ty: FnType) DynCallShim = {
+    @if(DUMB_EMIT_IR) return(Ready = import("@/boot/src/vm.fr")'extern_to_easy_abi_dyncall_shim);
     shared := self.comptime_codegen;
     ins: RawList(Qbe.Ins) = empty();
     id := Qbe.no_symbol_S; 
@@ -172,6 +173,7 @@ fn create_dyncall_shim(self: *SelfHosted, f_ty: FnType) DynCallShim = {
 //       - it loads from the got twice on the fast path because i don't deduplicate RCon across blocks.
 //       - redundant copies of aggregates. 
 fn emit_jit_shim(c: *SelfHosted, fid: FuncId) void = {
+    @if(DUMB_EMIT_IR) return(import("@/boot/src/vm.fr")'easy_abi_emit_shim(c, fid));
     self := c.comp();
     shared := c.comptime_codegen;
     handler_callee_address: rawptr = report_called_uncompiled_or_just_fix_the_problem;
@@ -292,7 +294,7 @@ fn emit_jit_shim(c: *SelfHosted, fid: FuncId) void = {
     };
     
     @debug_assert(!shared.worker.threaded);
-    if func.get_flag(.TookPointerValue) || ENABLE_TRACY {
+    if func.get_flag(.TookPointerValue) || ENABLE_TRACY || SPAM_DYN_CALL {
         // TODOWASM: don't make_exec for this, just assign a got_lookup_offset
         c.created_jit_fn_ptr_value(fid, shared.wait_for_symbol(id));
     };
@@ -345,7 +347,7 @@ fn shallow_jit_func(self: *SelfHosted, fid: FuncId) Res(void) = {
     
     shared := self.comptime_codegen;
     @debug_assert(!shared.worker.threaded);
-    if func.get_flag(.TookPointerValue) || ENABLE_TRACY {
+    if func.get_flag(.TookPointerValue) || ENABLE_TRACY || SPAM_DYN_CALL {
         id := self.comptime_jit_symbol_id(fid);
         self.created_jit_fn_ptr_value(fid, shared.wait_for_symbol(id));
     };
@@ -455,7 +457,7 @@ fn get_fn_callable(self: *SelfHosted, fid: FuncId) ?rawptr = {
     @debug_assert(!func.get_flag(.AnyConstArgs) && !func.get_flag(.UnboundGenerics));
     id := self.comptime_jit_symbol_id(fid);
     c := wait_for_symbol(self.comptime_codegen, id);
-    if func.get_flag(.TookPointerValue) || ENABLE_TRACY {
+    if func.get_flag(.TookPointerValue) || ENABLE_TRACY || SPAM_DYN_CALL {
         // created_jit_fn_ptr_value is done when creating it
         @debug_assert(self.baked.vmem&.get(c).is_some());
     };
@@ -510,12 +512,13 @@ fn created_jit_fn_ptr_value(self: *SelfHosted, f: FuncId, ptr: rawptr) void = {
 
 fn zone_begin_dyncall(self: *SelfHosted, f_ptr: rawptr) TraceCtx = {
     zone := zone_begin(.CallDynamic);
-    @if(ENABLE_TRACY) {
+    @if(ENABLE_TRACY || SPAM_DYN_CALL) {
         if self.baked.vmem&.get(f_ptr) { it, _, __ |
             @if_let(it) fn FuncId(it) => {
                 m := self.comptime_codegen.m;
                 name := m.str(self.comptime_jit_symbol_id(it));
-                ___tracy_emit_zone_name(zone, name);
+                @if(SPAM_DYN_CALL) println(name);
+                @if(ENABLE_TRACY) ___tracy_emit_zone_name(zone, name);
             };
         };
     };

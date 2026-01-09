@@ -21,6 +21,7 @@
 
 // TODO: always check for zero sized type instead of == void
 
+DUMB_EMIT_IR :: false;
 EmitIr :: @struct(
     f: *Qbe.Fn,
     program: CompCtx,
@@ -38,7 +39,6 @@ EmitIr :: @struct(
     m: *QbeModule,
     entry: *CodegenEntry,
     next_block_name := 0,
-    last_line := -1,
     new_constants: *List(BakedVarId),
     shared: *FrontendCodegen,
     // you wouldn't need this if sema tracked callees correctly,
@@ -216,9 +216,6 @@ fn baked_var_to_dat(comp: CompCtx, m: *QbeModule, id: BakedVarId) Dat2 = {
             },
     )
 }
-
-// TODO: this is going to change the calling convention for small strange aggragates maybe (to match c). 
-//       hopefully i don't use any of those for something important. 
 
 ArgInfo :: @struct(r: Qbe.Ref, type: Type, name: ?Var, scalar: bool, k: Qbe.Cls, type_index: Qbe.Ref);
 
@@ -489,7 +486,7 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = {
             };
             
             a0, a1, ret := self.intrinsic_shim(func);
-            self.blk.jmp.arg = @try(self.emit_intrinsic_new(op, .ScalarTransient, @slice(a0, a1), func, ret)) return;
+            self.blk.jmp.arg = @try(self.emit_intrinsic_new(op, .ScalarTransient, @slice(a0, a1), ret)) return;
             self.finalize_blocks();
             return(.Ok)
         }
@@ -700,16 +697,6 @@ fn is_local_scalar(self: CompCtx, v: Var, ty: Type) bool #inline = {
 }
 
 fn compile_stmt(self: *EmitIr, stmt: *FatStmt) CRes(void) = {
-    if self.debug && !(stmt.stmt&.is(.Eval) && stmt.stmt.Eval.expr&.is(.Block)) {
-        //place := self.program.get_whole_line(stmt.loc); // :SLOW
-        //if self.last_line != place.line {
-        //    // TODO: dbgfile too because it might be something inlined from elsewhere. 
-        //    // TODO: have the backend remove consecutive dbgloc instructions and just keep the last one 
-        //    //       when all the stuff between them was optimised out. 
-        //    self.emit(.dbgloc, .Kw, QbeNull, INT(place.line), INT(0));  
-        //    self.last_line = place.line;
-        //};
-    };
     self.last_loc = stmt.loc;
     @match(stmt.stmt&) {
         fn Eval(expr) => {
@@ -1007,7 +994,6 @@ fn guess_can_assign(e: *FatExpr) bool = {
 }
 
 fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.Ref) #once = {
-    caller := self.program.get_function(self.func);
     @match(self.program.get_type(f.ty)) {
         fn Fn(f_ty) => {
             f_id := @unwrap(f.as_const(), "ice: tried to call non-const fn %", self.program.log(f)) return;
@@ -1017,7 +1003,8 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
             @debug_assert(!func.get_flag(.MayHaveAquiredCaptures), "tried to emit call to unlowered maybe '=>'");
 
             // TODO: audit: is this f_ty different from the one we just got from the expression type? -- Jul 8
-            f_ty := func.finished_ty().unwrap(); // kinda HACK to fix unaligned store? 
+            //       YES: see tests/todo/wrong_call_type.fr
+            f_ty := func.finished_ty().unwrap();
             callee := func;
            
             callee_r := self.func_ref(f_id);
@@ -1034,7 +1021,7 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
                     };
                     // the || void is for :DoFoldInvalidArity
                     a1 := if(arg.len == 1 || arg[1].ty == void, => QbeNull, => @try(self.compile_expr(arg[1]&, .ScalarTransient)) return);
-                    return(self.emit_intrinsic_new(op, p, @slice(a0, a1), caller, f_ty.ret));
+                    return(self.emit_intrinsic_new(op, p, @slice(a0, a1), f_ty.ret));
                 }
                 fn Intrinsic(op) => {
                     ::if(Qbe.Ref);
@@ -1068,11 +1055,6 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
         // (see also objective_c.fr/choose_objc_dispatcher())
         //
         fn FnPtr(f_ty) => {
-            fn is_variadic(self: *SelfHosted, f_ty: FnType) bool = {
-                args := self.arg_types(f_ty.arg);
-                for(args, fn(a) => @if(a == CVariadicType) return(true));
-                false
-            }
             callee := @try(self.compile_expr(f, .Scalar)) return;
             args   := @try(self.compile_for_arg(arg)) return;
             self.dbgloc(arg.loc, 0);
@@ -1100,7 +1082,7 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
     }
 }
 
-fn emit_intrinsic_new(self: *EmitIr, op: *NewIntrinsicPayload, p: Placement, arg: []Qbe.Ref, caller: *Func, expr_ty: Type) CRes(Qbe.Ref) = {
+fn emit_intrinsic_new(self: *EmitIr, op: *NewIntrinsicPayload, p: Placement, arg: []Qbe.Ref, expr_ty: Type) CRes(Qbe.Ref) = {
     @debug_assert(op.ir_op != 0, "no ir op");
     o := @as(Qbe.O) op.ir_op;
     k := @as(Qbe.Cls) op.ir_cls;
@@ -1248,16 +1230,6 @@ fn emit_constant(self: *EmitIr, value: *Values, p: Placement, expr_ty: Type, loc
             (Ok = dest)
         }
     }
-}
-
-fn all_zeroes(value: *Values) bool = 
-    (value.is(.Small) && value.Small._0 == 0) || value.bytes().all_zeroes();
-
-fn all_zeroes(b: []u8) bool = {
-    for b { b |
-        if(b != 0, => return(false));
-    };
-    true
 }
 
 fn reference_constant(self: *EmitIr, id: BakedVarId) void = {
@@ -1593,8 +1565,6 @@ fn record_var_decl(self: *EmitIr, name: Var, value: IrVar) void #inline = {
     };
 }
 
-ir_op_count :: @static(i64);
-
 // IMPORTANT: you can't use f.emit because threads. 
 fn emit(self: *EmitIr, o: Qbe.O, k: Qbe.Cls, dest: Qbe.Ref, a0: Qbe.Ref, a1: Qbe.Ref) void #inline = {
     self.program.data.cast()[][].stats.ir_ops += 1;
@@ -1750,7 +1720,7 @@ fn get_aggregate(self: CompCtx, m: *FrontendCodegen, ty: Type) Qbe.Ref = {
                 n := 0;
                 rt_count: i64 = it.fields.len;
                 f := u32.list(rt_count * 2 + 1, m.m.forever&.borrow()); f := f&;
-                @assert(!it.is_union || it.fields.len <= 0xFFFF, "too many union fields");
+                @assert(!it.is_union || it.fields.len <= MAX_u16.zext(), "too many union fields");
                 result.header.nunion = @if(it.is_union, rt_count.trunc(), 1);
                 result&.set_is_union(it.is_union);
                 @assert(it.layout_done, "tried to get_aggregate before layout %", self.log(ty));

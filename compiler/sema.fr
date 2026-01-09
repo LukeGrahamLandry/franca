@@ -1183,7 +1183,7 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
     };
     self.last_loc = old_loc;
     self.dispatch.enclosing_function = todo_dont_lose;
-    @debug_assert(!expr.ty.is_unknown(), "[compile_expr] Unknown type for %", expr.log(self));
+    @debug_assert(!expr.ty.is_unknown(), "[compile_expr] Unknown type for %\n%", expr.log(self), fmt_loc(self, expr.loc));
     .Ok
 }
 
@@ -1456,11 +1456,11 @@ fn contextual_field(self: *SelfHosted, name: Symbol, expr_out: *FatExpr, type: T
                     info := self.get_info(type);
                     @debug_assert(info.is_sized, "unsized type for tagged contextual field");
                     size: i64 = info.stride_bytes.zext(); // TODO: allow yield on sizing here. 
-                    bytes := 0x00.repeated(size, self.get_alloc());
+                    bytes := self.get_alloc().alloc_zeroed(u8, size);
                     assert(i <= 255, "TODO: giant ass @tagged"); 
                     assert(info.align_bytes <= 8, "TODO: handle large alignment");
                     bytes[0] = i.trunc(); // :endian
-                    expr_out.set(bytes.items().to_value(), type);
+                    expr_out.set(bytes.to_value(), type);
                     expr_out.ty = type;
                     expr_out.done = true;
                     return(.Ok);
@@ -1680,6 +1680,7 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
     };
     
     ret_ty := @check(self.infer_return(fid))    return;
+    @debug_assert(!ret_ty.is_unknown(), "infer_return(%) unknown", self.pool.get(func.name));
     is_const_context := self.dispatch.enclosing_function.is_none();
     // TODO: its a bit of a hack to check is_const_context? 
     //       it fixes a problem where you try to compile too soon and then think you're already done even if you make a function for it later.
@@ -2316,6 +2317,7 @@ fn infer_type(self: *SelfHosted, b: *LazyType) Maybe(?Type) #inline = {
     @match(b) {
         fn PendingEval(e) => {
             ty := @check(self.eval(e, Type)) return;
+            @debug_assert(!ty.is_unknown());
             b[] = (Finished = ty);
             (Ok = (Some = ty))
         }
@@ -3984,8 +3986,9 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
     bindings&.if_empty_add_unit();
     arg: Pattern = (bindings = bindings.as_raw(), loc = expr.loc);
     def: FnDef = (name = .None, arg = arg, ret = (Finished = ret_ty), tags = list(temp()), loc = expr.loc);
-    //def.line = self.pool.insert_borrowed(self.comp().log(expr), self.get_alloc());
-    
+    if SPAM_DYN_CALL {
+        def.line = self.pool.insert_borrowed(@tfmt("lit_fn(%)", fmt_loc(self, expr.loc)), self.get_alloc());
+    };
     // we might have already tried to compile the expression in a different context,
     // so things won't be added to callees of the newly created function, but that's fine 
     // jit-shims will be created when emit_ir notices the problem. 
@@ -4194,8 +4197,16 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
     assert(f_ty.ret == fat_expr_type, "tried to call macro with bad ret type. missing overload? \nresolve_in_overloadset assumes someone later will typecheck so giving a garabge match is fine");
     assert(f_ty.arg.eq(fat_expr_type).or(f_ty.arg == pair), "tried to call macro with bad arg type. missing overload? \nresolve_in_overloadset assumes someone later will typecheck so giving a garabge match is fine");
     expr.expr = (Poison = .InProgressMacro);  // they call me RefCell<FatExpr> because im always refing cells 
-    zone := self.zone_begin_dyncall(fn_ptr);
     self.stats.macro_calls += 1;
+    
+    self.when_debug(.Macro, fn(o) => @fmt(o, "M: % %", self.pool.get(func.name), fmt_loc(self, expr.loc)));
+    
+if abi_shift_native_to_easy {
+    args_value := @slice(invocation.arg[], invocation.target[]).interpret_as_bytes();
+    values := self.call_dynamic_values(fn_ptr.int_from_rawptr(), f_ty, args_value);
+    expr[] = FatExpr.assume_cast(values&)[];
+} else {
+    zone := self.zone_begin_dyncall(fn_ptr);
     @if(TODOWASM, {
         // TODO: wrong! what if they actually passed unit?
         if single {
@@ -4213,6 +4224,7 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
         expr[] = callee(invocation.arg[], invocation.target[]);  // :call_dynamic_values
     });
     zone_end(zone);
+};
     .Ok
 }
 

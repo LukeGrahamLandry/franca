@@ -1,9 +1,9 @@
 // the api exposed by the compiler to comptime code. 
 
-fn init_driver_vtable() *ImportVTable = {
+fn init_driver_vtable($for_driver: bool) *ImportVTable = {
     @static(ImportVTable) {
         storage := ImportVTable.zeroed();
-        fill_driver_vtable(storage&);
+        fill_driver_vtable(storage&, for_driver);
         storage
     }
 }
@@ -20,12 +20,65 @@ next_abi_version :: fn() i64 = {
     }
 };
 
-fn fill_driver_vtable(vtable: *ImportVTable) void = {
+fn fill_driver_vtable(vtable: *ImportVTable, for_driver: bool) void = {
     vtable.driver_abi_version = next_abi_version();
+    vtable.self_hash = Incr.self_hash;
+    if enable_incremental() && !DISABLE_IMPORT_FRC {
+        vtable.frc_module_magic_v = Incremental.MAGIC;
+    };
+    fill_backend_vtable(vtable);
     
-    vtable.find_unique_func = fn(c: Compiler, name: Symbol) ?FuncId = { 
+    
+    driver_vtable_exports := Type.scope_of(driver_vtable_exports);
+    fields := get_fields(ImportVTable);
+    fr := current_compiler_context();
+
+    vtable.host_abi = fr.vtable.target_abi;
+    vtable.target_abi = @if(DUMB_EMIT_IR, 1, 0);
+    
+    for get_constants(driver_vtable_exports) { name |
+        fid := FuncId.get_constant(driver_vtable_exports, name)
+            || @panic("failed to get %", name.str());
+        f := fields.find(fn(it) => it.name == name)
+            || @panic("% is not a field of ImportVTable", name.str());
+        off := f.byte_offset;
+        p := bit_cast_unchecked(*ImportVTable, *rawptr, vtable).offset_bytes(off);
+        
+        if abi_shift_native_to_easy && for_driver {
+            // TODO: but this breaks all the places the compiler itself calls through the vtable
+            fid = wrap_with_easy_abi(fid);
+        };
+        
+        // TODO: type check against the func's annotations
+        p[] = fr.get_jitted(fid);
+    };
+}
+
+abi_shift_native_to_easy :: { 
+    fr := current_compiler_context(); 
+    DUMB_EMIT_IR && fr.vtable.target_abi == 0
+};
+
+// TODO: this is garbage! the way my scoping works you can't access 
+//       the old overload set once you shadow it with a constant. 
+_get_build_options :: get_build_options;
+_fmt_error :: fmt_error;
+_get_function :: get_function;
+_get_jitted_ptr :: get_jitted_ptr;
+_get_whole_line :: get_whole_line;
+_log_type :: log_type;
+_intern_type :: intern_type;
+_add_file :: add_file;
+_get_alloc :: get_alloc;
+_add_to_scope :: add_to_scope;
+_reserve_baked :: reserve_baked;
+_import_frc :: import_frc;
+parse_stmts :: driver_vtable_exports.parse_stmts;
+
+driver_vtable_exports :: @struct {
+    find_unique_func :: fn(c: Compiler, name: Symbol) ?FuncId = { 
         c := c.cast()[][];
-        f_ty := c.intern_type(Fn = (arg = void, ret = void, unary = true)); // :get_or_create_type
+        f_ty := c._intern_type(Fn = (arg = void, ret = void, unary = true)); // :get_or_create_type
         
         value := c.poll_in_place(?Values, => c.find_in_scope(TOP_LEVEL_SCOPE, name, f_ty));
         value := c.unwrap_report_error(?Values, value) || return(.None);
@@ -33,41 +86,77 @@ fn fill_driver_vtable(vtable: *ImportVTable) void = {
         (Some = fid)
     };
     
-    vtable.get_jitted_ptr = fn(c: Compiler, f: FuncId) CRes(rawptr) = {
-        c.cast()[][].get_jitted_ptr(f)
+    get_jitted_ptr :: fn(c: Compiler, f: FuncId) CRes(rawptr) = {
+        c.cast()[][]._get_jitted_ptr(f)
     };
     
-    vtable.init_compiler = fn(options: *BuildOptions) Compiler = {
+    init_compiler :: fn(options: *BuildOptions) Compiler = {
         mem := init_self_hosted(options);
         mem.legacy_indirection
     };
-    
-    vtable.compile_func = compile_func;
     
     compile_func :: fn(c: Compiler, f: FuncId, when: ExecStyle) CRes(void) = {
         self := c.cast()[][];
         self.poll_in_place(void, => self.compile_body(f))
     };
     
-    vtable.make_and_resolve_and_compile_top_level = fn(cc: Compiler, body: Slice(FatStmt)) CRes(void) = 
+    make_and_resolve_and_compile_top_level :: fn(cc: Compiler, body: Slice(FatStmt)) CRes(void) = 
         make_top_level(cc.cast()[][], body);
     
-    vtable.add_file = add_file;
-    vtable.parse_stmts = parse_stmts;
-    vtable.intern_string = intern_string;
-    vtable.get_string = get_string;
-    vtable.get_fns_with_tag = get_fns_with_tag;
-    vtable.get_function = fn(c: Compiler, f: FuncId) *Func = {
-        c.cast()[][].get_function(f)
+    add_file :: fn(c: Compiler, name: Str, content: Str) AbiHackSpan = {
+        c := c.cast();
+        loc := c.codemap._add_file(name, content);
+        (low = loc.low.zext(), high = loc.high.zext())
     };
-    vtable.destroy_compiler = destroy_compiler;
+    
+    parse_stmts :: fn(c: Compiler, f: *Span) Res(Slice(FatStmt)) = {
+        c := c.cast();
+        @debug_assert_ge(f.high, f.low);
+        source := c.codemap.source_slice(f[]);
+        @debug_assert(source.len == f[].len(), "source_slice failed");
+        id := c.parser.push_parse(source, f[]);
+        stmts := @try(c.parser.finish_pending_stmts(id)) return; // TODO: don't return RawList -- Jun 29
+        (Ok = stmts.items())
+    };
+    
+    intern_string :: fn(c: Compiler, s: Str) Symbol = {
+        c := c.cast();
+        c.pool.insert_borrowed(s, c[][]._get_alloc())
+    };
+    
+    get_string :: fn(c: Compiler, s: Symbol) Str = {
+        c := c.cast();
+        c.pool.get(s)
+    };
+    
+    get_fns_with_tag :: fn(c: Compiler, tag: Symbol) [] FuncId = {
+        c := c.cast();
+        found: List(FuncId) = list(temp());
+        i := 0;
+        each c.functions& { func |
+            continue :: local_return;
+            each func.annotations { a |
+                if a.name == tag {
+                    found&.push(from_index(i));
+                    i += 1; 
+                    continue();
+                };
+            };
+            i += 1; 
+        };
+        found.items()
+    };
+    
+    get_function :: fn(c: Compiler, f: FuncId) *Func = {
+        c.cast()[][]._get_function(f)
+    };
     destroy_compiler :: fn(c: Compiler) void = {
         c := c.cast()[][];
         when_debug(c, .VMem, fn(o) => dump_baked_vmem(c, o));
         print(c.log.items()); c.log&.clear();
         panic_on_volatile_bake(c);
         pop_resolver(c.backtrace_node);
-        opts := c.get_build_options();
+        opts := c._get_build_options();
         m := c.comptime_codegen.m;
         c.comptime_codegen.join_codegen_thread();
         m.drop(); 
@@ -83,33 +172,32 @@ fn fill_driver_vtable(vtable: *ImportVTable) void = {
         c[] = SelfHosted.zeroed();  // BEFORE releasing ast_arena;
         arena&.deinit();
     };
-    vtable.get_build_options = fn(c: Compiler) *BuildOptions = {
+    get_build_options :: fn(c: Compiler) *BuildOptions = {
         c := c.cast()[][];
-        c.get_build_options()
+        c._get_build_options()
     };
-
    
-    vtable.get_baked = fn(c, id) = 
+    get_baked :: fn(c: Compiler, id: BakedVarId) rawptr = 
         BakedValue.raw_from_ptr(c.cast()[].baked.values&.nested_index(@as(i64) id.id.zext()));
     
-    vtable.fmt_error = fn(c: Compiler, err: *CompileError, out: *List(u8)) void = {
-        c.cast()[][].fmt_error(err, out, true /*TODO*/);
+    fmt_error :: fn(c: Compiler, err: *CompileError, out: *List(u8)) void = {
+        c.cast()[][]._fmt_error(err, out, true /*TODO*/);
     };
     
-    vtable.add_comptime_library = fn(c: Compiler, lib_name: Symbol, handle: rawptr) void = {
+    add_comptime_library :: fn(c: Compiler, lib_name: Symbol, handle: rawptr) void = {
         handle := bit_cast_unchecked(rawptr, Dyn.Handle, handle);
         c.cast()[][].comptime_libraries&.insert(lib_name, handle); // TODO: report conflicts?
     };
-    vtable.get_type_meta = fn(c: Compiler, type: Type) *TypeMeta = {
+    get_type_meta :: fn(c: Compiler, type: Type) *TypeMeta = {
         c.cast()[][].get_info(type)
     };
-    vtable.get_type_info = fn(c: Compiler, type: Type) *TypeInfo = {
+    get_type_info :: fn(c: Compiler, type: Type) *TypeInfo = {
         c.cast()[][].get_type(type)
     };
-    vtable.get_whole_line = fn(c: Compiler, span: Span) FrancaCodeLine = {
-        c.cast()[][].codemap.get_whole_line(span)
+    get_whole_line :: fn(c: Compiler, span: Span) FrancaCodeLine = {
+        c.cast()[][].codemap._get_whole_line(span)
     };
-    vtable.report_aot_progress = fn(c: Compiler, fid: FuncId, is_start: bool, zone_tag: i64) void = {
+    report_aot_progress :: fn(c: Compiler, fid: FuncId, is_start: bool, zone_tag: i64) void = {
         @if(!ENABLE_TRACY) return();
             zone_tag := @as(TraceZone) zone_tag;
             self := c.cast()[][];
@@ -137,21 +225,21 @@ fn fill_driver_vtable(vtable: *ImportVTable) void = {
             };
     };
 
-    vtable.log_expr = fn(c: Compiler, e: *FatExpr) Str = {
+    log_expr :: fn(c: Compiler, e: *FatExpr) Str = {
         log(e, c.cast()[][])
     };
-    vtable.log_stmt = fn(c: Compiler, e: *FatStmt) Str = {
+    log_stmt :: fn(c: Compiler, e: *FatStmt) Str = {
         log(e, c.cast()[][])
     };
-    vtable.log_type = fn(c: Compiler, e: Type) Str = {
-        log_type(c.cast()[][], e)
+    log_type :: fn(c: Compiler, e: Type) Str = {
+        _log_type(c.cast()[][], e)
     };
-    vtable.log_func = fn(c: Compiler, e: *Func) Str = {
+    log_func :: fn(c: Compiler, e: *Func) Str = {
         log(e, c.cast()[][])
     };
     
     // :UpdateBoot get rid of this
-    vtable.emit_qbe_included_old = ::@as(rawptr) fn(mm: rawptr, comp: *CompCtx, fns: [] FuncId, entry: ProgramEntry) BucketArray(u8) = {
+    emit_qbe_included_old :: fn(mm: rawptr, comp: *CompCtx, fns: [] FuncId, entry: ProgramEntry) BucketArray(u8) = {
         chunks := emit_qbe_included(mm, comp, fns, entry);
         aaa: BucketArray(u8) = init(0, temp());
         for chunks { c |
@@ -160,15 +248,13 @@ fn fill_driver_vtable(vtable: *ImportVTable) void = {
         aaa
     };
     
-    vtable.emit_qbe_included = emit_qbe_included;
-    
     emit_qbe_included :: fn(mm: rawptr, comp: *CompCtx, fns: [] FuncId, entry: ProgramEntry) [][]u8 = {    
         m := QbeModule.ptr_from_raw(mm);
         threaded := entry != .GiveMeTheCodeAndGiveItToMeRawAlsoSingleThreadCodegen;
-        shared := init_codegen(m, comp[].get_alloc(), threaded);
+        shared := init_codegen(m, comp[]._get_alloc(), threaded);
         self := comp.data.cast()[][];
         main_thread_pump(comp[], shared, fns, entry == .WrapMain);
-        opts := comp[].get_build_options();
+        opts := comp[]._get_build_options();
         ::if(Ty([]u8, []u8));
         source, files := if opts[].debug_info {
             encode_debug_files(self.codemap.files.items())
@@ -191,62 +277,57 @@ fn fill_driver_vtable(vtable: *ImportVTable) void = {
         };
         chunks
     };
-    fill_backend_vtable(vtable);
     
-    vtable.get_alloc = fn(c) = c.cast()[][].get_alloc();
-    vtable.compile_ast = fn(c: Compiler, expr: *FatExpr, hint: Type) void = {
+    get_alloc :: fn(c: Compiler) Alloc = c.cast()[][]._get_alloc();
+    compile_ast :: fn(c: Compiler, expr: *FatExpr, hint: Type) void = {
         self := c.cast()[][];
         res := self.poll_in_place(void, => self.compile_expr(expr, hint.want()));
         self.unwrap_report_error(void, res);
     };
     
-    vtable.intern_type = fn(c, info) = 
-        c.cast()[][].intern_type(info[]);
+    intern_type :: fn(c: Compiler, info: *TypeInfo) = 
+        c.cast()[][]._intern_type(info[]);
         
-    vtable.intern_func = fn(c, info) = 
+    intern_func :: fn(c: Compiler, info: *Func) = 
         c.cast()[][].add_function(info[]);
 
-    vtable.add_to_scope = fn(c, s, name, type, value) = {
+    add_to_scope :: fn(c: Compiler, s: ScopeId, name: Symbol, type: Type, value: rawptr) void = {
         loc   := zeroed Span;
         c     := c.cast()[][];
         value := u8.ptr_from_raw(value).slice(c.get_info(type)[].stride_bytes.zext());
-        e: FatExpr = (expr = (Value = (bytes = to_value(value, c.get_alloc()))), ty = type, loc = loc, done = true);
-        add_to_scope(c, s, name, (Finished = type), e);
+        e: FatExpr = (expr = (Value = (bytes = to_value(value, c._get_alloc()))), ty = type, loc = loc, done = true);
+        _add_to_scope(c, s, name, (Finished = type), e);
     };
     
     // TODO: replace ^ with this one V in user space
-    vtable.add_expr_to_scope = fn(c, s, name, expr) = {
+    add_expr_to_scope :: fn(c: Compiler, s: ScopeId, name: Symbol, expr: FatExpr) void = {
         c     := c.cast()[][];
         scope := c.scopes.index(s);
-        add_to_scope(c, s, name, .Infer, expr);
+        _add_to_scope(c, s, name, .Infer, expr);
     };
     // TODO: return addend like lookup_baked so you don't have to call both?
-    vtable.reserve_baked = fn(c, jit_addr) = {
-        _, id := c.cast()[][].reserve_baked(jit_addr);
+    reserve_baked :: fn(c: Compiler, jit_addr: ?[]u8) BakedVarId = {
+        _, id := c.cast()[][]._reserve_baked(jit_addr);
         id
     };
  
-    vtable.import_frc = fn(c: Compiler, bytes: []u8) CRes(ScopeId) = {
+    import_frc :: fn(c: Compiler, bytes: []u8) CRes(ScopeId) = {
         self := c.cast()[][];
         @if(DISABLE_IMPORT_FRC) return(@err("TODO: DISABLE_IMPORT_FRC because scoping when you import the compiler is messed up"));
-        self.import_frc(bytes)
+        self._import_frc(bytes)
     };
     
-    vtable.cached_compile_module = fn(path: Str, opts: *BuildOptions, out_alloc: Alloc) CRes([]u8) = {
+    cached_compile_module :: fn(path: Str, opts: *BuildOptions, out_alloc: Alloc) CRes([]u8) = {
         @if(DISABLE_IMPORT_FRC) return(@err("TODO: DISABLE_IMPORT_FRC because scoping when you import the compiler is messed up"));
         Incr'cached_compile_module(path, opts, out_alloc)
     };
     
-    if enable_incremental() && !DISABLE_IMPORT_FRC {
-        vtable.frc_module_magic_v = Incremental.MAGIC;
-    };
-    
-    vtable.mangle_name = fn(c, fid) = {
+    mangle_name :: fn(c: Compiler, fid: FuncId) Str = {
         self := c.cast()[][];
         self.comp().fmt_fn_name(fid)
     };
     
-    vtable.put_baked_var = fn(c, id, v, type) = {
+    put_baked_var :: fn(c: Compiler, id: BakedVarId, v: BakedVar, type: Type) void = {
         self := c.cast()[][];
         dest := self.baked.values&.nested_index(id.id.zext());
         n := dest.name;
@@ -255,66 +336,21 @@ fn fill_driver_vtable(vtable: *ImportVTable) void = {
         dest.name = n;
     };
     
-    vtable.get_codemap = fn(c) = {
+    get_codemap :: fn(c: Compiler) *CodeMap = {
         self := c.cast()[][];
         self.codemap
     };
     
-    vtable.get_constants = fn(c, scope) = 
+    get_constants :: fn(c: Compiler, scope: ScopeId) []Symbol = 
         compiler_exports'get_names(scope, c.cast()[][]);
     
-    vtable.get_constant = fn(c, scope, name) = 
+    get_constant :: fn(c: Compiler, scope: ScopeId, name: Symbol) ?Ty(rawptr, Type) = 
         compiler_exports'get_field(scope, name, c.cast()[][]);
-    
-    vtable.self_hash = Incr.self_hash;
-}
+};
 
 CompilerRs :: ***SelfHosted;  // TODO: really this should be a new type so you can't accidently implement call functions by just adding extra indirection. hopefully the number of pointers makes it clear something's weird. 
 fn cast(c: Compiler) CompilerRs #ir(.copy, .Kl);
 
-fn add_file(c: Compiler, name: Str, content: Str) AbiHackSpan = {
-    c := c.cast();
-    loc := c.codemap.add_file(name, content);
-    (low = loc.low.zext(), high = loc.high.zext())
-}
-
-fn parse_stmts(c: Compiler, f: *Span) Res(Slice(FatStmt)) = {
-    c := c.cast();
-    @debug_assert_ge(f.high, f.low);
-    source := c.codemap.source_slice(f[]);
-    @debug_assert(source.len == f[].len(), "source_slice failed");
-    id := c.parser.push_parse(source, f[]);
-    stmts := @try(c.parser.finish_pending_stmts(id)) return; // TODO: don't return RawList -- Jun 29
-    (Ok = stmts.items())
-}
-
-fn intern_string(c: Compiler, s: Str) Symbol = {
-    c := c.cast();
-    c.pool.insert_borrowed(s, c[][].get_alloc())
-}
-
-fn get_string(c: Compiler, s: Symbol) Str = {
-    c := c.cast();
-    c.pool.get(s)
-}
-
-fn get_fns_with_tag(c: Compiler, tag: Symbol) [] FuncId = {
-    c := c.cast();
-    found: List(FuncId) = list(temp());
-    i := 0;
-    each c.functions& { func |
-        continue :: local_return;
-        each func.annotations { a |
-            if a.name == tag {
-                found&.push(from_index(i));
-                i += 1; 
-                continue();
-            };
-        };
-        i += 1; 
-    };
-    found.items()
-}
 
 /////////////////////////////////////////////////////////////////////////////////
 
@@ -342,8 +378,8 @@ export_ffi_data :: {
             fid := get_constant(FuncId, s, name) 
                 || @panic("fill_export_ffi '%' is not a function", name.str());
             
-            if generate_compctx_wrapper(fid, src&, fns.len) {
-                fns&.push(fr.get_jitted(fid));
+            if generate_compctx_wrapper(fid, src&, fns.len) { p |
+                fns&.push(p);
             };
         };
         @fmt(src&, "__baked_compctx :: "); // addr patched in at runtime
@@ -768,12 +804,18 @@ compiler_exports_s :: @struct {
         self.get_info(s)[];
     
     #export("ast_alloc")
-    get_aa :: fn(self) Alloc = 
-        self.get_alloc();
+    get_aa :: fn(self) Alloc = {
+        @if(abi_shift_native_to_easy) {
+            a := self.get_alloc();
+            a.vptr = bit_cast_unchecked(rawptr, @type a.vptr, translate_arena_allocator_fn);
+            return a;
+        };
+        self.get_alloc()
+    };
     
     #export("current_compiler_context")
     get_cc :: fn(self) CompCtx = {
-        vtable := init_driver_vtable();
+        vtable := init_driver_vtable(true);
         (data = self.legacy_indirection, vtable = vtable)
     };
     
@@ -909,15 +951,19 @@ compiler_exports_s :: @struct {
     };
 };
 
+translate_arena_allocator_fn :: fn(r: *[]u8, a: *Ty(rawptr, Alloc.Action, rawptr, i64, i64)) void = {
+    r[] = Arena'arena_allocator_fn(@splat_tuple a);
+};
+
 // reflects on the signeture to create a string that can be parsed by the runtime compiler 
 // so the new compilation unit has a type safe way to call the functions. also injects an 
 // extra *SelfHosted parameter so the functions are tied to thier compctx and comptime code 
 // doesn't have to pass that around. 
 // ctx as last param means the wrapper just has to set one register not rotate them. 
-generate_compctx_wrapper :: fn(fid: FuncId, src: *List(u8), i: i64) bool = {
+generate_compctx_wrapper :: fn(fid: FuncId, src: *List(u8), i: i64) ?rawptr = {
     func := get_function_ast(fid, false, false, false, false);
     sign := func.annotations.find(fn(it) => it.name == (@symbol export)) 
-        || return(false);
+        || return(.None);
     if !func.get_flag(.ResolvedSign) {
         b := func.arg.bindings.index(func.arg.bindings.len - 1);
         @ct_assert(b.ty&.is(.Infer), func.loc, "missing implicit compctx parameter");
@@ -950,8 +996,47 @@ generate_compctx_wrapper :: fn(fid: FuncId, src: *List(u8), i: i64) bool = {
         @fmt(src, "%, ", it.name.unwrap().str());
     };
     @fmt(src, "__baked_compctx)\n}\n");
-    true
+    
+    // TODO: only on the transition. 
+    if abi_shift_native_to_easy {
+        fid = wrap_with_easy_abi(fid);
+    };
+    
+    fr := current_compiler_context();
+    (Some = fr.get_jitted(fid))
 };
+
+fn wrap_with_easy_abi(fid: FuncId) FuncId = {
+    func := get_function_ast(fid, true, true, true, false);
+    arg := func.finished_arg.unwrap();
+    ret := func.finished_ret.unwrap();
+    fid := FuncId.const_eval(@{ 
+        R :: @[@literal ret];
+        A :: @[@literal arg];
+        callee :: @[@literal fid];
+        (fn(r: *R, a: *A) void = {
+            r[] = callee(@splat_tuple a);
+        })
+    });
+    fid
+}
+
+fn splat_tuple(arg: FatExpr) FatExpr #macro = {
+    arg = compile_ast(arg);
+    info := get_type_info_ref(arg.ty);
+    @ct_assert(info.is(.Ptr), arg.loc, "@splat_tuple expected pointer");
+    T := info.Ptr;
+    info := get_type_info_ref(T);
+    if !(info.is(.Struct) && info.Struct.is_tuple) {
+        return @{ @[arg][] };
+    };
+    result := FatExpr.list(ast_alloc());
+    require_layout_ready(T);
+    each info.Struct.fields { f |
+        result&.push(@{ @[@literal T].get_field_ptr(@[arg], @[@literal f])[] })
+    };
+    (expr = (Tuple = result.as_raw()), ty = UnknownType, done = false, loc = arg.loc)
+}
 
 fn show_type(it: Type) Str = {
     fr := current_compiler_context();
