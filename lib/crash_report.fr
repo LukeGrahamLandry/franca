@@ -168,14 +168,23 @@ FpIp :: @struct(fp: *Frame, ip: rawptr);
 fn report_backtrace(start: FpIp) void = {
     shown := 0;
     last_ip := 0.rawptr_from_int();
+    prev_resolver := 0;
+    out := @ref u8.list(temp());
     walk_stack_trace(start, MAX_LOOPS) { i, ip, _ |
         if shown >= MAX_SHOWN {
             scary_log("\n...hidden frames\n");
             return();
         };
         if !identical(ip, last_ip) {
-            if name_from_ip(RESOLVERS[], ip) { s | 
-                @println("  %: %", i, s);
+            if name_from_ip(RESOLVERS[], ip) { s, resolver_i | 
+                @fmt(out, "  %: %", i, s);
+                if prev_resolver != resolver_i {
+                    @fmt(out, "<(%)v", resolver_i);
+                    prev_resolver = resolver_i;
+                };
+                @fmt(out, "\n");
+                print(out.items());
+                out.clear();
                 shown += 1;
             };
         };
@@ -195,12 +204,14 @@ walk_stack_trace :: fn(it: FpIp, max_loops: i64, $body: @Fn(i: i64, ip: rawptr, 
     };
 };
 
-name_from_ip :: fn(node: *LocationResolverNode, ip: rawptr) ?Str = {
+name_from_ip :: fn(node: *LocationResolverNode, ip: rawptr) ?Ty(Str, i64) = {
     ::ptr_utils(LocationResolverNode);
+    i := 0;
     while => !node.is_null() {
         if node'func(node.data, ip) { s |
-            return(Some = s);
+            return(Some = (s, i));
         };
+        i += 1;
         node = node.next;
     };
     .None

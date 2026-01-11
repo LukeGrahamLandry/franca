@@ -1,0 +1,56 @@
+
+driver :: fn(_: *ImportVTable) void = {
+    println(DUMB_EMIT_IR);
+    println(abi_shift_native_to_easy);
+    println("Hello World");
+    
+    m := @ref @uninitialized Qbe.Module;
+    init_default_module(m, (
+        os = current_os(), 
+        arch = current_arch(), 
+        type = .Exe,
+        exe_debug_symbol_table = true,
+    ));
+    
+    if false {
+        inpath := "tests/ssa/mandel.ssa";
+        src := temp().read_to_string_or_crash(inpath);
+        src := src.items();
+        parse :: import("@/backend/meta/parse.fr").parse_top_level;
+        res := parse(m, src, Qbe'backend'compile_dat, Qbe.backend.compile_fn);
+        if res&.is_err() {
+            panic(res.Err);
+        };
+    };
+    if true {
+        vtable := init_driver_vtable(false);
+        @if(DUMB_EMIT_IR) @println("host_abi=%, target_abi=%", vtable.host_abi, vtable.target_abi);
+        
+        build_options := vtable.default_build_options();
+        src := """#include_std("lib/core.fr"); #include_std("compiler/main.fr"); """;
+        c := vtable.new_with_src(src, "entry_file", build_options);
+        c := vtable.with(c);
+        
+        fid := or c.get_unique_named("main") {
+            panic("expected exactly one function called 'main'")
+        };
+        pending := FuncId.list(temp());
+        shared := init_codegen(m, c.get_alloc(), false);
+        // always the real emit_ir.fr, just can't re-import() if it was already #include_std-ed.
+        E :: @if(DUMB_EMIT_IR, EmitIr2'EmitIrA(), EmitIr);  
+        main_thread_pump(c, shared, @slice(fid), true, E);
+        seal_debug_info(m, empty(), false, empty());
+    };
+    
+    bytes := {m.target.finish_module}(m);
+    bytes := concat(bytes, temp());
+    outfile := "target/a.out";
+    write_entire_file_or_crash(outfile, bytes);
+    println(outfile);
+};
+
+#include_std("compiler/lib.fr");
+
+EmitIr2 :: import("@/compiler/emit_ir.fr");
+DISABLE_IMPORT_FRC :: true;
+DEBUG_SPAM_LOG :: false;

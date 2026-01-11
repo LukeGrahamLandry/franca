@@ -1,6 +1,30 @@
+    
+TODO: only emit_jit_shim, create_dyncall_shim need to only be used when abi_shift_native_to_easy. 
+      in fact i need the reverse since now the jitted compiler is using real emit_ir which does the extern abi. 
+      is it easier to do that or to have comptime and runtime use different abis? 
+      the latter is a pain because of things like XXX in openat 
+      and tls_stack_bits couldn't be a normal constant. 
+      also need to be careful because sometimes it will be calling something exported from the compiler already has easy_abi
 
-TODO: deal with FR_openat in a way that isn't toggling commenting it out every time
-      make disallow_syscalls field that forces it to use FR_openat?
+## (Jan 11)
+
+- emit_intrinsic_new: alignment padding because i declare shifts always with amount: i64. 
+- similarly can't use #redirect for `fn bit_or(u16, u16) u16;`
+- at this point i can jit the backend in easy_abi and use it to aot mandel.ssa
+- heck, apple_thread_jit_write_protect doesn't work even tho expecting_wx=false 
+  because im trying to do ExecStyle.Jit even for the main module so i don't have to do bakes
+  but that means function pointers and jit-shims will still be pointing into the comptime module with expecting_wx=true. 
+  - doing map_fixed rx without map_jit over the prevously map_jit memory doesn't work. 
+    because it gets new pages so they're zeroed. cant use mprotect because map_jit is a flag not a prot. 
+  - i can copy to new memory, then map-fixed rw, then copy back, then mprotect rx. 
+  - but now when it goes to fill a shim later it dies because it's not writable anymore. 
+  - made an attempt at toggling exec<->write every time you emit but 
+    that's too error prone because you end up with a stack and have to return back out to a shim,
+    and even if it worked it would be too slow.
+  - instead just keep the list of all the shims made and compile them before calling the driver. 
+- have name_from_ip for crash report say the index of the resolver 
+  that found it so you can kinda tell what's in the aot module vs the jitted one, 
+  because this is going to get super confusing. im on to my third layer of compiler running at once. 
 
 ## (Jan 10)
 

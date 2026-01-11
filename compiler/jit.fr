@@ -114,6 +114,7 @@ fn create_dyncall_shim(self: *SelfHosted, f_ty: FnType) DynCallShim = {
                     addins(ins&, make_ins(load, k, r, ref, QbeNull));
                     make_ins(.arg, k, QbeNull, r, QbeNull)
                 } else {  // aggregate
+                    ::EmitIr;
                     r_type := self.comp().get_aggregate(shared, ty);
                     make_ins(.argc, .Kl, QbeNull, r_type, ref)
                 };
@@ -173,6 +174,7 @@ fn create_dyncall_shim(self: *SelfHosted, f_ty: FnType) DynCallShim = {
 //       - it loads from the got twice on the fast path because i don't deduplicate RCon across blocks.
 //       - redundant copies of aggregates. 
 fn emit_jit_shim(c: *SelfHosted, fid: FuncId) void = {
+    @if(DUMB_EMIT_IR) c.have_jit_shim&.push(fid, c.get_alloc());
     @if(DUMB_EMIT_IR) return(import("@/boot/src/vm.fr")'easy_abi_emit_shim(c, fid));
     self := c.comp();
     shared := c.comptime_codegen;
@@ -343,7 +345,7 @@ fn shallow_jit_func(self: *SelfHosted, fid: FuncId) Res(void) = {
     // ugh. can't be temp() because threaded=false wants to reset it. 
     pending := FuncId.list(general_allocator()); 
     
-    EmitIr;
+    emit_ir :: EmitIr.emit;
     @try(emit_ir(self.comp(), self.comptime_codegen, fid, .Jit, pending&, true)) return;
     
     shared := self.comptime_codegen;
@@ -419,6 +421,7 @@ report_called_uncompiled_or_just_fix_the_problem :: fn(self: *SelfHosted, fid: F
         if result.is_null() {
             mark := mark_temporary_storage();
             @debug_assert(!self.comptime_codegen.worker.no_more_functions);
+            @debug_assert(!self.debug_deny_unfilled_jit_shim_calls, "expected all shims done");
             // :ugly
             first := true;
             addr := self.poll_in_place(rawptr) { () Maybe(rawptr) |

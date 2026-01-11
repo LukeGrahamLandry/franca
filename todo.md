@@ -1,3 +1,6 @@
+- i broke macos-amd ./boot/strap.sh but tests pass if you cross compile 
+  so its just the boot version specifically. 
+  maybe i can ignore it long enough to replace it with the new boot stuff. 
 - go through and add cases to check_opt.fr for everything in backend/opt
 - should error if you try to make a bake_relocatable_value which will never be called because the type doesn't contain pointers
 - deal with Crash'hook_backtrace();

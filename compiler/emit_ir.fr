@@ -47,6 +47,7 @@ EmitIr :: @struct(
     pending: *List(FuncId), 
     unreachable_block: *Qbe.Blk,
     P :: Placement,
+    emit :: emit_ir,
 );
 
 IrVar :: @tagged(Alloca: Qbe.Ref, Local: Qbe.Ref);
@@ -60,7 +61,7 @@ ReturnTarget :: @struct(
 
 Placement :: @tagged(Assign: Qbe.Ref, Scalar, Blit: Qbe.Ref, NewMemory, Discard, ScalarTransient);
 
-fn emit_ir(comp: CompCtx, shared: *FrontendCodegen, f: FuncId, when: ExecStyle, pending: *List(FuncId), export: bool) CRes(void) = {
+emit_ir :: fn(comp: CompCtx, shared: *FrontendCodegen, f: FuncId, when: ExecStyle, pending: *List(FuncId), export: bool) CRes(void) = {
     func := comp.get_function(f); 
 
     c := comp.data.cast()[][];
@@ -122,6 +123,7 @@ fn emit_ir(comp: CompCtx, shared: *FrontendCodegen, f: FuncId, when: ExecStyle, 
         self.f.lnk.no_inline = func.get_flag(.NoInline);
         self.f.lnk.id = m.intern(self&.fmt_fn_name(self.func));  // TODO: set export 
         
+        ::ptr_utils(Qbe.Module);
         if identical(comp.data.cast()[][].comptime_codegen.m, m) && func.has_comptime_jit_symbol_id {
             @debug_assert_eq(self.f.lnk.id.id, func.comptime_jit_symbol_id);
         };
@@ -178,7 +180,7 @@ fn emit_ir(comp: CompCtx, shared: *FrontendCodegen, f: FuncId, when: ExecStyle, 
     
     zone_end(z);
     result
-}
+};
 
 fn set_lib(self: *EmitIr, it: Ty(Qbe.Sym, Str, bool)) void = {
     enter_task self.shared { entry |
@@ -1007,8 +1009,6 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
             // TODO: audit: is this f_ty different from the one we just got from the expression type? -- Jul 8
             //       YES: see tests/todo/wrong_call_type.fr
             f_ty := func.finished_ty().unwrap();
-            callee := func;
-           
             callee_r := self.func_ref(f_id);
             
             @match(func.body&) {
@@ -1862,37 +1862,6 @@ fn as_const(self: *FatExpr) ?Values = {
     .None
 }
 
-EmitIr
-};
-
-
-fn is_tag_only(self: CompCtx, t: *TypeInfo.get_variant_type(.Tagged)) bool = {
-    each t.cases { case | 
-        if case._1 != void {  // :get_or_create_type
-            return(false);
-        };
-    };
-    true
-}
-
-fn repr_transparent(self: CompCtx, it: *TypeInfo.get_variant_type(.Struct)) ?Type = {
-    @switch(it.fields.len) {
-        @case(0) => (Some = void); // :get_or_create_type
-        @case(1) => return(Some = it.fields[0].ty);
-        @default => { 
-            sized_field := void;
-            if(it.is_union, => return(.None));
-            each it.fields { f | 
-                field_size := self.get_info(f.ty)[].stride_bytes;
-                if field_size != 0 {
-                    if(sized_field != void, => return(.None));
-                    sized_field = f.ty;
-                }; // else :NoRuntimeRepr
-            }; 
-            (Some = sized_field)
-        };
-    }
-}
 
 fn hlt_if_never(self: *EmitIr, ty: Type) void #inline = {
     if ty.is_never() && self.blk.jmp.type == .Jxxx {
@@ -1902,52 +1871,11 @@ fn hlt_if_never(self: *EmitIr, ty: Type) void #inline = {
     };
 }
 
-// returns .Ke for aggregates
 fn load_op(self: *EmitIr, ty: Type) Ty(Qbe.O, Qbe.Cls) #inline = 
     load_op(self.program, ty);
-    
-fn load_op(self: CompCtx, ty: Type) Ty(Qbe.O, Qbe.Cls) = {
-    l, k, _ := self.load_store_op(ty);
-    (l, k)
-};
-
-fn load_store_op(self: CompCtx, ty: Type) Ty(Qbe.O, Qbe.Cls, Qbe.O) = @match(self.get_type(ty)) {
-    fn Int(it)   => @switch(it.bit_count) {
-        @case(8)  => (@if(it.signed, .loadsb, .loadub), .Kw, .storeb);
-        @case(16) => (@if(it.signed, .loadsh, .loaduh), .Kw, .storeh);
-        @case(32) => (@if(it.signed, .loadsw, .loaduw), .Kw, .storew);
-        @default  => (.load, .Kl, .storel);
-    }
-    fn F32()     => (.load, .Ks, .stores);
-    fn F64()     => (.load, .Kd, .stored);
-    fn Ptr(_)    => (.load, .Kl, .storel);
-    fn FnPtr(_)  => (.load, .Kl, .storel);
-    fn VoidPtr() => (.load, .Kl, .storel);
-    fn Label(_)  => (.loaduw, .Kw, .storew);
-    fn Fn(_)     => (.loaduw, .Kw, .storew);
-    fn Named(it) => self.load_store_op(it._0);
-    fn Enum(it)  => self.load_store_op(it.raw);
-    fn Bool()    => (.loadub, .Kw, .storeb);
-    fn Tagged(it) => {
-        if self.is_tag_only(it) {
-            return(.load, .Kl, .storel);
-        };
-        (.nop, .Ke, .Oxxx)
-    }
-    fn Struct(it) => self.load_store_op(or self.repr_transparent(it) {
-        return(.nop, .Ke, .Oxxx)
-    });
-    fn Array(it) => @if(it.len == 1, self.load_store_op(it.inner), (.nop, .Ke, .Oxxx));
-    @default     => (.nop, .Ke, .Oxxx);
-};
 
 fn store_op(self: *EmitIr, ty: Type) Qbe.O #inline = 
     store_op(self.program, ty);
-
-fn store_op(self: CompCtx, ty: Type) Qbe.O = {
-    _0, _1, o := self.load_store_op(ty);
-    o
-}
 
 fn fmt_fn_name(self: *EmitIr, f: FuncId) []u8 = 
     self.program.fmt_fn_name(f);
@@ -1957,3 +1885,6 @@ fn seal(self: *EmitIr, $body: @Fn(b: *Qbe.Blk) void) void = {
         body(self.blk);
     };
 }
+
+EmitIr
+};

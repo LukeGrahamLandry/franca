@@ -26,8 +26,9 @@ fn fill_driver_vtable(vtable: *ImportVTable, for_driver: bool) void = {
     if enable_incremental() && !DISABLE_IMPORT_FRC {
         vtable.frc_module_magic_v = Incremental.MAGIC;
     };
-    fill_backend_vtable(vtable);
-    
+    if !abi_shift_native_to_easy {
+        fill_backend_vtable(vtable);
+    };
     
     driver_vtable_exports := Type.scope_of(driver_vtable_exports);
     fields := get_fields(ImportVTable);
@@ -45,12 +46,25 @@ fn fill_driver_vtable(vtable: *ImportVTable, for_driver: bool) void = {
         p := bit_cast_unchecked(*ImportVTable, *rawptr, vtable).offset_bytes(off);
         
         if abi_shift_native_to_easy && for_driver {
+            @if(@run(__driver_abi_version < 1512)) unreachable();
+            if name == (@symbol get_alloc) {
+                fid = (fn(c: Compiler) Alloc = {
+                    a := c.cast()[][]._get_alloc();
+                    a.vptr = bit_cast_unchecked(rawptr, @type a.vptr, translate_arena_allocator_fn);
+                    a
+                });
+            };
             // TODO: but this breaks all the places the compiler itself calls through the vtable
             fid = wrap_with_easy_abi(fid);
         };
         
         // TODO: type check against the func's annotations
         p[] = fr.get_jitted(fid);
+    };
+    
+    if abi_shift_native_to_easy {
+        vtable.emit_qbe_included = (fn(_0, _1, _2, _3) = panic("can't emit_qbe_included because module has vtables"));
+        vtable.emit_qbe_included_old = (fn() = panic("can't emit_qbe_included because module has vtables"));
     };
 }
 

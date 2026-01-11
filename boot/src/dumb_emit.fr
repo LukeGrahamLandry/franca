@@ -40,6 +40,7 @@ EmitIr :: @struct(
     unreachable_block: *Qbe.Blk,
     next_fake_label: u32 = 0,
     link: **Qbe.Blk,
+    emit :: emit_ir,
 );
 
 ReturnTarget :: @struct(
@@ -51,7 +52,7 @@ ReturnTarget :: @struct(
 
 Placement :: @tagged(Assign: Qbe.Ref, Scalar, Blit: Qbe.Ref, NewMemory);
 
-fn emit_ir(comp: CompCtx, shared: *FrontendCodegen, f: FuncId, _: ExecStyle, pending: *List(FuncId), export: bool) CRes(void) = {
+emit_ir :: fn(comp: CompCtx, shared: *FrontendCodegen, f: FuncId, _: ExecStyle, pending: *List(FuncId), export: bool) CRes(void) = {
     func := comp.get_function(f); 
     c := comp.data.cast()[][];
     
@@ -77,7 +78,7 @@ fn emit_ir(comp: CompCtx, shared: *FrontendCodegen, f: FuncId, _: ExecStyle, pen
             unreachable_block = zeroed(*Qbe.Blk),
             link = ff.start&,
         );
-        @debug_assert(func.get_flag(.EnsuredCompiled), "fn not compiled?");
+        @debug_assert(func.get_flag(.EnsuredCompiled), "fn not compiled? %", comp.get_string(func.name));
         self.f.default_init(m);
         self.f.leaf = true;
         self.f.lnk.no_inline = func.get_flag(.NoInline);
@@ -96,7 +97,7 @@ fn emit_ir(comp: CompCtx, shared: *FrontendCodegen, f: FuncId, _: ExecStyle, pen
     };
     
     .Ok
-}
+};
 
 fn set_lib(self: *EmitIr, it: Ty(Qbe.Sym, Str, bool)) void = {
     enter_task self.shared { entry |
@@ -153,7 +154,14 @@ fn emit_body(self: *EmitIr, f: FuncId) void #once = {
         };
         fn Asm(it) => {
             name := self.program.get_string(func.name);
-            crash := @const_slice("perform_syscall", "wasm_atomic_notify", "_msr", "wasm_atomic_wait", "aarch64_clear_instruction_cache_f");
+            // TODO: support wasm
+            crash := @const_slice(
+                "perform_syscall", "wasm_atomic_notify", "_msr", 
+                "wasm_atomic_wait", 
+                "table_assign", "table_grow", 
+                "throw_impl", "perform_clone", 
+                "trace_start",
+            );
             if crash.contains(name) {
                 self.f.start.jmp.type = .hlt;
                 return();
@@ -164,6 +172,14 @@ fn emit_body(self: *EmitIr, f: FuncId) void #once = {
                 @case("current_arch") => {
                     arch := current_arch();  // always jitting. 
                     self.emit(.storel, .Kw, Qbe.Null, self.f.getcon(@as(i64) arch), output);
+                };
+                @case("repmovs") => {
+                    @assert_ne(current_arch(), .x86_64, "repmovs");
+                    self.f.start.jmp.type = .hlt;
+                };
+                @case("aarch64_clear_instruction_cache_f") => {
+                    f :: wrap_with_easy_abi(aarch64_clear_instruction_cache_f);
+                    self.entry.task = (JitImport = (lnk = self.f.lnk&, addr = f));
                 };
                 @default => @panic("unsupported AsmFunction: %", name);
             };
@@ -202,18 +218,26 @@ fn emit_body(self: *EmitIr, f: FuncId) void #once = {
 fn check_import(self: CompCtx, info: *DynamicImport) void = {
     lib := self.get_string(info.lib);
     name := self.get_string(info.name);
-    @switch(lib) {
-        @case("comptime_addr") => return();
-        @case("libc") => {
+    if lib == "comptime_addr" {
+        return();
+    };
+    info.comptime = check_import(name, lib).int_from_rawptr();
+}
+
+fn check_import(name: Str, lib: Str) rawptr = {
+    @assert_eq(lib, "libc", "check_import");
             errno :: @static(i32);
             weak :: @const_slice(
                 "wait4", "nanosleep", "execvp", "execve", "fork", 
                 "openat", "fstatat$INODE64", "mkstemp", 
-                "dlopen", "dlsym", 
+                "jit_instantiate_module", "FR_wasm_jit_event", 
+                "pthread_join", "readdir$INODE64", "posix_getdents", 
+                "opendir$INODE64", "pthread_create", "pthread_attr_setstack", 
+                "pthread_attr_init", 
+                "read", "poll", "ppoll", "dup2", "pipe", 
             );
             if weak.contains(name) {
-                info.comptime = 0;
-                return();
+                return(fn() = panic("called weak import"));
             };
             if name == "__error" {
                 name = "__errno_location";
@@ -223,39 +247,48 @@ fn check_import(self: CompCtx, info: *DynamicImport) void = {
             syscalls :: @const_slice(
                 "write", "exit", "clock_gettime", "renameat", "close", "getpid",
                 "unlinkat", "fstatat", "mkdirat", "pread", "lseek", "mprotect", 
+                "mmap", "munmap", "readdir", "opendir", 
             );
             
-            wrap :: fn($fid) => int_from_rawptr(@run wrap_with_easy_abi(fid));
+            wrap :: fn($fid) => (@run wrap_with_easy_abi(fid));
             inline_for syscalls { $n |
                 if name == n[] {
                     fid :: get_constant(FuncId, Syscall, n[].sym()).unwrap();
-                    info.comptime = wrap(fid);
-                    return();
+                    return wrap(fid);
                 };
             };
             
             @switch(name) {
                 @case("__errno_location") => {
                     xxx :: errno;  // TODO: compilerbug
-                    info.comptime = int_from_rawptr(fn(r: **i32, a: *void) void = {
+                    (fn(r: **i32, a: *void) void = {
                         r[] = xxx;
-                    });
+                    })
                 };
                 @case("FR_openat") => {
-                    info.comptime = wrap(Syscall'openat);
+                    wrap(Syscall'openat)
                 };
                 @case("__clear_cache") => {
                     fid :: resolve_overload(clear_instruction_cache, Ty(rawptr, rawptr), void, @source_location);
-                    info.comptime = wrap(fid);
+                    wrap(fid)
                 };
                 @case("pthread_jit_write_protect_np") => {
-                    info.comptime = wrap(MacosLibc.pthread_jit_write_protect_np);
+                     wrap(MacosLibc.pthread_jit_write_protect_np)
+                };
+                @case("closedir") => {
+                    closedir :: fn(dir: rawptr) i64 #weak #libc;
+                    wrap(closedir)
+                };
+                @case("dlopen") => {
+                    wrap(fn(name: CStr) i64 = 1234)
+                };
+                @case("dlsym") => {
+                    wrap(fn(lib: rawptr, name: CStr) rawptr = {
+                        check_import(name.str(), "libc")
+                    })
                 };
                 @default => @panic("unsupported DynamicImport: % from %", name, lib);
-            };
-        };
-        @default => @panic("unsupported DynamicImport: % from %", name, lib);
-    };
+            }
 }
 
 fn intrinsic_shim(self: *EmitIr, func: *Func, op: *NewIntrinsicPayload, input: Qbe.Ref, output: Qbe.Ref) void = {
@@ -264,9 +297,6 @@ fn intrinsic_shim(self: *EmitIr, func: *Func, op: *NewIntrinsicPayload, input: Q
     
     f_ty := func.finished_ty().unwrap();
     arg_ty := self.program.arg_types(f_ty.arg);
-    
-    // this is wrong if there's alignment padding but that doesn't happen here so its fine. 
-    off: i64 = self.program.get_info(arg_ty[0])[].stride_bytes.zext();
     
     o, k0 := self.load_op(arg_ty[0]);
     a0 := self.f.newtmp("a", k0);
@@ -280,6 +310,11 @@ fn intrinsic_shim(self: *EmitIr, func: *Func, op: *NewIntrinsicPayload, input: Q
     // `!= void` makes do_fold() work. it wants to pass extra void args to a #ir function.
     // TODO: allow any zero sized types as trailing args?
     if arg.len == 2 && arg_ty[1] != void {
+        // there can be alignment padding even tho the args are supposed to be the same type:
+        // fn shift_left(value: u32, shift_amount: i64) u32 #ir(.shl, .Kw);
+        a, b := (self.program.get_info(arg_ty[0]), self.program.get_info(arg_ty[1]));
+        off: i64 = a.stride_bytes.zext().align_to(b.align_bytes.zext());
+    
         o, k1 := self.load_op(arg_ty[1]);
         a1 = self.f.newtmp("a", k1);
         addr := self.offset(input, off);
@@ -535,6 +570,7 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) Qbe.Ref #o
                 arg := arg.items();
                 @assert(arg[0].ty != void);
                 a0 := self.compile_expr(arg[0]&, .Scalar);
+                ::if(Qbe.Ref);
                 // the || void is for :DoFoldInvalidArity
                 a1 := if(arg.len == 1 || arg[1].ty == void, => QbeNull, => self.compile_expr(arg[1]&, .Scalar));
                 return(self.emit_intrinsic_new(op, p, @slice(a0, a1), f_ty.ret));
@@ -572,13 +608,25 @@ fn return_to_label(self: *EmitIr, ret: *ReturnTarget, arg: *FatExpr) void = {
     };
 }
 
-fn emit_intrinsic_new(self: *EmitIr, op: *NewIntrinsicPayload, p: Placement, arg: []Qbe.Ref, expr_ty: Type) Qbe.Ref = {
-    @debug_assert(op.ir_op != 0, "no ir op");
-    o := @as(Qbe.O) op.ir_op;
-    k := @as(Qbe.Cls) op.ir_cls;
+fn emit_intrinsic_new(self: *EmitIr, _op: *NewIntrinsicPayload, p: Placement, arg: []Qbe.Ref, expr_ty: Type) Qbe.Ref = {
+    @debug_assert(_op.ir_op != 0, "no ir op");
+    o := @as(Qbe.O) _op.ir_op;
+    k := @as(Qbe.Cls) _op.ir_cls;
     r := self.scalar_dest(p, k); 
     if r == QbeNull && o != .cas0 {
         r = self.f.newtmp("f", k);
+    };
+    if o == .cas1 {
+        // HACK: #ir(.casN) are done as two seperate calls and rely on there being no operations between them, 
+        //       but with easy_abi you end up with loads. its easier to just fix it like this than fix it properly. 
+        //       that's the only multi-op sequence i use via #ir. 
+        i := self.blk.ins.len;
+        dowhile {
+            i -= 1;
+            self.blk.ins[i]&.op() != .cas0 
+        };
+        i := self.blk.ins&.ordered_remove(i).unwrap();
+        self.blk.ins&.push(i, temp());
     };
     self.emit(o, k, r, arg[0], arg[1]);
     self.scalar_result(p, r, expr_ty)
@@ -889,6 +937,29 @@ fn new_block(self: *EmitIr, debug: Str) *Qbe.Blk = {
 fn as_const(self: *FatExpr, $T: Type) T #generic = {
     @assert(self.expr&.is(.Value), "as_const");
     T.assume_cast(self.expr.Value.bytes&)[]
+}
+
+fn hlt_if_never(self: *EmitIr, ty: Type) void #inline = {
+    if ty.is_never() && self.blk.jmp.type == .Jxxx {
+        self.blk.jmp = (type = .hlt, arg = QbeNull);
+        // something unreachable so don't have to worry about adding junk instructions to it.
+        self.blk = self.unreachable_block;
+    };
+}
+
+fn load_op(self: *EmitIr, ty: Type) Ty(Qbe.O, Qbe.Cls) #inline = 
+    load_op(self.program, ty);
+
+fn store_op(self: *EmitIr, ty: Type) Qbe.O #inline = 
+    store_op(self.program, ty);
+
+fn fmt_fn_name(self: *EmitIr, f: FuncId) []u8 = 
+    self.program.fmt_fn_name(f);
+
+fn seal(self: *EmitIr, $body: @Fn(b: *Qbe.Blk) void) void = {
+    if self.blk.jmp.type == .Jxxx { 
+        body(self.blk);
+    };
 }
 
 EmitIr

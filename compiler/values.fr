@@ -146,6 +146,7 @@ fn bake_relocatable_body(c: *SelfHosted, value: []u8, type: Type, out: *List(Bak
     if !force_default_handling {
         xx := @try(c.get_custom_bake_handler(type)) return;
         if xx { f |
+            @assert(!abi_shift_native_to_easy, "bake abi_shift_native_to_easy");
             values := f(u8.raw_from_ptr(value.ptr));
             bytes_out := fixed_list(value);
             bake_translate_legacy(values, bytes_out&, out, reloc_off);
@@ -900,4 +901,73 @@ fn all_zeroes(b: []u8) bool = {
         if(b != 0, => return(false));
     };
     true
+}
+
+fn is_tag_only(self: CompCtx, t: *TypeInfo.get_variant_type(.Tagged)) bool = {
+    each t.cases { case | 
+        if case._1 != void {  // :get_or_create_type
+            return(false);
+        };
+    };
+    true
+}
+
+fn repr_transparent(self: CompCtx, it: *TypeInfo.get_variant_type(.Struct)) ?Type = {
+    @switch(it.fields.len) {
+        @case(0) => (Some = void); // :get_or_create_type
+        @case(1) => return(Some = it.fields[0].ty);
+        @default => { 
+            sized_field := void;
+            if(it.is_union, => return(.None));
+            each it.fields { f | 
+                field_size := self.get_info(f.ty)[].stride_bytes;
+                if field_size != 0 {
+                    if(sized_field != void, => return(.None));
+                    sized_field = f.ty;
+                }; // else :NoRuntimeRepr
+            }; 
+            (Some = sized_field)
+        };
+    }
+}
+
+// returns .Ke for aggregates
+fn load_op(self: CompCtx, ty: Type) Ty(Qbe.O, Qbe.Cls) = {
+    l, k, _ := self.load_store_op(ty);
+    (l, k)
+};
+
+fn load_store_op(self: CompCtx, ty: Type) Ty(Qbe.O, Qbe.Cls, Qbe.O) = @match(self.get_type(ty)) {
+    fn Int(it)   => @switch(it.bit_count) {
+        @case(8)  => (@if(it.signed, .loadsb, .loadub), .Kw, .storeb);
+        @case(16) => (@if(it.signed, .loadsh, .loaduh), .Kw, .storeh);
+        @case(32) => (@if(it.signed, .loadsw, .loaduw), .Kw, .storew);
+        @default  => (.load, .Kl, .storel);
+    }
+    fn F32()     => (.load, .Ks, .stores);
+    fn F64()     => (.load, .Kd, .stored);
+    fn Ptr(_)    => (.load, .Kl, .storel);
+    fn FnPtr(_)  => (.load, .Kl, .storel);
+    fn VoidPtr() => (.load, .Kl, .storel);
+    fn Label(_)  => (.loaduw, .Kw, .storew);
+    fn Fn(_)     => (.loaduw, .Kw, .storew);
+    fn Named(it) => self.load_store_op(it._0);
+    fn Enum(it)  => self.load_store_op(it.raw);
+    fn Bool()    => (.loadub, .Kw, .storeb);
+    fn Tagged(it) => {
+        if self.is_tag_only(it) {
+            return(.load, .Kl, .storel);
+        };
+        (.nop, .Ke, .Oxxx)
+    }
+    fn Struct(it) => self.load_store_op(or self.repr_transparent(it) {
+        return(.nop, .Ke, .Oxxx)
+    });
+    fn Array(it) => @if(it.len == 1, self.load_store_op(it.inner), (.nop, .Ke, .Oxxx));
+    @default     => (.nop, .Ke, .Oxxx);
+};
+
+fn store_op(self: CompCtx, ty: Type) Qbe.O = {
+    _0, _1, o := self.load_store_op(ty);
+    o
 }
