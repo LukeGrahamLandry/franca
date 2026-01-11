@@ -14,8 +14,10 @@
 #include_std("compiler/sema.fr"); 
 #include_std("compiler/ast_boring.fr");
 #use("@/compiler/ast_external.fr");  
+DUMB_EMIT_IR :: false;
+EmitIr :: @if(DUMB_EMIT_IR, EmitIrB(), EmitIrA()); 
 #include_std("compiler/emit_ir.fr");  
-//#include_std("boot/src/dumb_emit.fr"); 
+#include_std("boot/src/dumb_emit.fr"); 
 #include_std("compiler/jit.fr");
 Incr :: import("@/compiler/incremental.fr");
 
@@ -255,7 +257,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
             // no wrap_main so don't waste time compiling a new franca_runtime_init. 
             main_thread_pump(self.comp(), shared, @slice(f), false);
 
-            self.debug_deny_jit_shim_calls = true;
+            self.debug_deny_jit_shim_calls = !DUMB_EMIT_IR;
             if no_cache {
                 seal_debug_info(m, empty(), false, empty());
                 each self.comptime_libraries& { _, lib |
@@ -305,17 +307,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
         @if(abi_shift_native_to_easy, {
             callee := bit_cast_unchecked(@type callee, @FnPtr(r: *void, a: **ImportVTable) void, callee);
             r, a := ((), init_driver_vtable(true));
-            it :: resolve_overload(print_and_exit1, Str, Never, @source_location);
-            hook := bit_cast_unchecked(rawptr, @type tls(.panic_hook)[], @run wrap_with_easy_abi(it));
-            push_tls_value(.panic_hook, hook) {
-                A :: import("@/lib/alloc/fixed_block.fr").BlockAlloc;
-                t: A = init(page_allocator);
-                t := t&.borrow();
-                t.vptr = bit_cast_unchecked(rawptr, @type t.vptr, @run wrap_with_easy_abi(A.A));
-                push_tls_value(.general_allocator, t) {
-                    callee(r&, a&);
-                };
-            };
+            callee(r&, a&);
         }, {
             callee(vtable);
         });
@@ -454,6 +446,12 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
     c[] = SelfHosted.raw_from_ptr(self);
     self.export_ffi = fill_export_ffi(self);
     
+    if abi_shift_native_to_easy {
+        n := franca_required_stack_bits - 1;
+        opts.tls_stack_bits = n;
+        import("@/boot/src/vm.fr")'init_child_tls(a, n);
+    };
+    
     stable_compiler_context :: fn(self: *SelfHosted) Compiler = {
         a := self.get_alloc();
         mem1 := a.boxed(*SelfHosted, self);
@@ -559,6 +557,7 @@ fn main_thread_pump(comp: CompCtx, shared: *FrontendCodegen, fns: []FuncId, wrap
             continue();
         };
         
+        EmitIr;
         xx := emit_ir(comp, shared, fid, when, self.pending&, false);
         or xx { err | 
             comp.report_error(err);

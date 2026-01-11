@@ -44,3 +44,27 @@ easy_abi_emit_shim :: fn(c: *SelfHosted, fid: FuncId) void = {
     };
     c.created_jit_fn_ptr_value(fid, shared.wait_for_symbol(id));
 }
+
+init_child_tls :: fn(a: Alloc, n: i64) void = {
+    @if(@run(__driver_abi_version < 1512)) unreachable();
+    // get_stack_base_for_tls
+    aa := @uninitialized i64;
+    base := i64.int_from_ptr(aa&).bit_and(bit_not(1.shift_left(n) - 1));
+    t := StaticTls.ptr_from_int(base);
+    
+    t[] = StaticTls.ptr_from_int(get_stack_base_for_tls())[];
+    
+    it :: resolve_overload(print_and_exit1, Str, Never, @source_location);
+    hook := bit_cast_unchecked(rawptr, @type tls(.panic_hook)[], @run wrap_with_easy_abi(it));
+    t.panic_hook = hook;
+    A :: import("@/lib/alloc/fixed_block.fr").BlockAlloc;
+    gen := a.boxed(A, init(page_allocator));
+    gen := gen.borrow();
+    gen.vptr = bit_cast_unchecked(rawptr, @type gen.vptr, @run wrap_with_easy_abi(A.A));
+    t.general_allocator = gen;
+    tmp := a.boxed(Arena.Allocator, init(page_allocator, 1.shift_left(20)));
+    t.temporary_allocator = tmp;  // TODO: not needed
+    tmp := tmp.borrow();
+    tmp.vptr = bit_cast_unchecked(rawptr, @type tmp.vptr, @run wrap_with_easy_abi(Arena.arena_allocator_fn));
+    t.temporary_allocator_i = tmp;
+}

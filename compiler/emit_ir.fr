@@ -21,7 +21,8 @@
 
 // TODO: always check for zero sized type instead of == void
 
-DUMB_EMIT_IR :: false;
+EmitIrA :: fn() = {
+
 EmitIr :: @struct(
     f: *Qbe.Fn,
     program: CompCtx,
@@ -45,6 +46,7 @@ EmitIr :: @struct(
     // but it's much easier to just fudge it with shims. 
     pending: *List(FuncId), 
     unreachable_block: *Qbe.Blk,
+    P :: Placement,
 );
 
 IrVar :: @tagged(Alloca: Qbe.Ref, Local: Qbe.Ref);
@@ -1844,6 +1846,26 @@ fn as_field(self: CompCtx, m: *FrontendCodegen, ty: Type) Qbe.Field = {
     }
 }
 
+fn new_block(self: *EmitIr, debug: Str) *Qbe.Blk = {   
+    b := temp().box_zeroed(Qbe.Blk);
+    @if(self.f.track_ir_names()) {
+        b.name = @tfmt("b%_%", self.next_block_name, debug);
+        self.next_block_name += 1; // not the same as blocks.len because we remove for unused local returns. 
+    };
+    b.visit = -1;
+    self.blocks&.push(b);
+    b
+}
+
+fn as_const(self: *FatExpr) ?Values = {
+    @if_let(self.expr&) fn Value(f) => return(Some = f.bytes);
+    .None
+}
+
+EmitIr
+};
+
+
 fn is_tag_only(self: CompCtx, t: *TypeInfo.get_variant_type(.Tagged)) bool = {
     each t.cases { case | 
         if case._1 != void {  // :get_or_create_type
@@ -1875,85 +1897,56 @@ fn repr_transparent(self: CompCtx, it: *TypeInfo.get_variant_type(.Struct)) ?Typ
 fn hlt_if_never(self: *EmitIr, ty: Type) void #inline = {
     if ty.is_never() && self.blk.jmp.type == .Jxxx {
         self.blk.jmp = (type = .hlt, arg = QbeNull);
+        // something unreachable so don't have to worry about adding junk instructions to it.
+        self.blk = self.unreachable_block;
     };
 }
-
-// TODO: single field array
 
 // returns .Ke for aggregates
 fn load_op(self: *EmitIr, ty: Type) Ty(Qbe.O, Qbe.Cls) #inline = 
     load_op(self.program, ty);
+    
+fn load_op(self: CompCtx, ty: Type) Ty(Qbe.O, Qbe.Cls) = {
+    l, k, _ := self.load_store_op(ty);
+    (l, k)
+};
 
-fn load_op(self: CompCtx, ty: Type) Ty(Qbe.O, Qbe.Cls) = @match(self.get_type(ty)) {
+fn load_store_op(self: CompCtx, ty: Type) Ty(Qbe.O, Qbe.Cls, Qbe.O) = @match(self.get_type(ty)) {
     fn Int(it)   => @switch(it.bit_count) {
-        @case(8)  => (@if(it.signed, .loadsb, .loadub), .Kw);
-        @case(16) => (@if(it.signed, .loadsh, .loaduh), .Kw);
-        @case(32) => (@if(it.signed, .loadsw, .loaduw), .Kw);
-        @default  => (.load, .Kl);
+        @case(8)  => (@if(it.signed, .loadsb, .loadub), .Kw, .storeb);
+        @case(16) => (@if(it.signed, .loadsh, .loaduh), .Kw, .storeh);
+        @case(32) => (@if(it.signed, .loadsw, .loaduw), .Kw, .storew);
+        @default  => (.load, .Kl, .storel);
     }
-    fn F32()     => (.load, .Ks);
-    fn F64()     => (.load, .Kd);
-    fn Ptr(_)    => (.load, .Kl);
-    fn FnPtr(_)  => (.load, .Kl);
-    fn VoidPtr() => (.load, .Kl);
-    fn Label(_)  => (.loaduw, .Kw);
-    fn Fn(_)     => (.loaduw, .Kw);
-    fn Named(it) => self.load_op(it._0);
-    fn Enum(it)  => self.load_op(it.raw);
-    fn Bool()    => (.loadub, .Kw);
+    fn F32()     => (.load, .Ks, .stores);
+    fn F64()     => (.load, .Kd, .stored);
+    fn Ptr(_)    => (.load, .Kl, .storel);
+    fn FnPtr(_)  => (.load, .Kl, .storel);
+    fn VoidPtr() => (.load, .Kl, .storel);
+    fn Label(_)  => (.loaduw, .Kw, .storew);
+    fn Fn(_)     => (.loaduw, .Kw, .storew);
+    fn Named(it) => self.load_store_op(it._0);
+    fn Enum(it)  => self.load_store_op(it.raw);
+    fn Bool()    => (.loadub, .Kw, .storeb);
     fn Tagged(it) => {
         if self.is_tag_only(it) {
-            return(.load, .Kl);
+            return(.load, .Kl, .storel);
         };
-        (.nop, .Ke)
+        (.nop, .Ke, .Oxxx)
     }
-    fn Struct(it) => self.load_op(or self.repr_transparent(it) {
-        return(.nop, .Ke)
+    fn Struct(it) => self.load_store_op(or self.repr_transparent(it) {
+        return(.nop, .Ke, .Oxxx)
     });
-    fn Array(it) => @if(it.len == 1, self.load_op(it.inner), (.nop, .Ke));
-    @default     => (.nop, .Ke);
+    fn Array(it) => @if(it.len == 1, self.load_store_op(it.inner), (.nop, .Ke, .Oxxx));
+    @default     => (.nop, .Ke, .Oxxx);
 };
 
 fn store_op(self: *EmitIr, ty: Type) Qbe.O #inline = 
     store_op(self.program, ty);
 
-fn store_op(self: CompCtx, ty: Type) Qbe.O = @match(self.get_type(ty)) {
-    fn Int(it)   => @switch(it.bit_count) {
-        @case(8)  => .storeb;
-        @case(16) => .storeh;
-        @case(32) => .storew;
-        @default  => .storel;
-    }
-    fn F32()     => .stores;
-    fn F64()     => .stored;
-    fn Ptr(_)    => .storel;
-    fn FnPtr(_)  => .storel;
-    fn VoidPtr() => .storel;
-    fn Label(_)  => .storew;
-    fn Fn(_)     => .storew;
-    fn Named(it) => self.store_op(it._0);
-    fn Enum(it)  => self.store_op(it.raw);
-    fn Bool()    => .storeb;
-    fn Tagged(it) => {
-        if !self.is_tag_only(it) {
-            return(.Oxxx);
-        };
-        .storel
-    }
-    fn Struct(it) => self.store_op(self.repr_transparent(it) || return(.Oxxx));
-    fn Array(it) => @if(it.len == 1, self.store_op(it.inner), .Oxxx);
-    @default     => .Oxxx;
-};
-
-fn new_block(self: *EmitIr, debug: Str) *Qbe.Blk = {   
-    b := temp().box_zeroed(Qbe.Blk);
-    @if(self.f.track_ir_names()) {
-        b.name = @tfmt("b%_%", self.next_block_name, debug);
-        self.next_block_name += 1; // not the same as blocks.len because we remove for unused local returns. 
-    };
-    b.visit = -1;
-    self.blocks&.push(b);
-    b
+fn store_op(self: CompCtx, ty: Type) Qbe.O = {
+    _0, _1, o := self.load_store_op(ty);
+    o
 }
 
 fn fmt_fn_name(self: *EmitIr, f: FuncId) []u8 = 
@@ -1963,9 +1956,4 @@ fn seal(self: *EmitIr, $body: @Fn(b: *Qbe.Blk) void) void = {
     if self.blk.jmp.type == .Jxxx { 
         body(self.blk);
     };
-}
-
-fn as_const(self: *FatExpr) ?Values = {
-    @if_let(self.expr&) fn Value(f) => return(Some = f.bytes);
-    .None
 }

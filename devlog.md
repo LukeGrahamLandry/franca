@@ -1,7 +1,12 @@
 
 TODO: deal with FR_openat in a way that isn't toggling commenting it out every time
-TODO: now need to remake general allocator's vptr every time. 
-      the current crash is when the easy_abi jitted driver calls the aot init_self_hosted. 
+      make disallow_syscalls field that forces it to use FR_openat?
+
+## (Jan 10)
+
+- give the different abis also had different stack sizes
+  so they have different copies of tls so its easy to put different fn pointers there. 
+  then bonus is it makes it possible to change the stack size. 
 
 ## (Jan 9)
 
