@@ -81,7 +81,7 @@ fn comptime_jit_symbol_id(self: *SelfHosted, fid: FuncId) Qbe.Sym = {
 // It starts compiling on self.comptime_codegen and you have to get the result out of self.dyncalls when it's ready. 
 // TODO: reuse functions when they have different nominal types but the same repr. 
 fn create_dyncall_shim(self: *SelfHosted, f_ty: FnType) DynCallShim = {
-    @if(DUMB_EMIT_IR) return(Ready =Vm'extern_to_easy_abi_dyncall_shim);
+    @if(abi_shift_easy_to_native) return(Vm'easy_to_native_dyncall_shim(self, f_ty));
     shared := self.comptime_codegen;
     ins: RawList(Qbe.Ins) = empty();
     id := Qbe.no_symbol_S; 
@@ -107,6 +107,12 @@ fn create_dyncall_shim(self: *SelfHosted, f_ty: FnType) DynCallShim = {
         addins(ins&, make_ins(.par, .Kl, ret_p, QbeNull, QbeNull));
         addins(ins&, make_ins(.par, .Kl, callee, QbeNull, QbeNull));
         
+        ins = emit_dyncall_shim_epilogue(self, shared, f, f_ty, arg_p, ret_p, callee, env, ins);
+    };
+    (Pending = id)
+}
+
+emit_dyncall_shim_epilogue :: fn(self: *SelfHosted, shared: *FrontendCodegen, f: *Qbe.Fn, f_ty: FnType, arg_p: Qbe.Ref, ret_p: Qbe.Ref, callee: Qbe.Ref, env: Qbe.Ref, ins: RawList(Qbe.Ins)) RawList(Qbe.Ins) = {
         // :EmitIrCall
         // arg instructions that read from arg_p
         scratch: List(Qbe.Ins) = list(temp());
@@ -172,9 +178,8 @@ fn create_dyncall_shim(self: *SelfHosted, f_ty: FnType) DynCallShim = {
         f.nblk = 1;
         f.start.ins = ins;
         f.start.jmp.type = .ret0;
-    };
-    (Pending = id)
-}
+        ins
+};
 
 // TODO: this generates shitty code. 
 //       - i save the registers used only on the slow path at entry of the function. 
@@ -182,7 +187,9 @@ fn create_dyncall_shim(self: *SelfHosted, f_ty: FnType) DynCallShim = {
 //       - redundant copies of aggregates. 
 fn emit_jit_shim(c: *SelfHosted, fid: FuncId) void = {
     @if(DUMB_EMIT_IR) c.have_jit_shim&.push(fid, c.get_alloc());
-    @if(DUMB_EMIT_IR) return(Vm'easy_abi_emit_shim(c, fid));
+    @if(abi_shift_native_to_easy) return(Vm'easy_abi_emit_shim(c, fid));
+    @if(abi_shift_easy_to_native) return(Vm'native_abi_emit_shim(c, fid));
+    
     self := c.comp();
     shared := c.comptime_codegen;
     handler_callee_address: rawptr = report_called_uncompiled_or_just_fix_the_problem;
@@ -275,6 +282,19 @@ fn emit_jit_shim(c: *SelfHosted, fid: FuncId) void = {
         if next_abi_version() < 1513 {
             push(do_the_call, make_ins(.arge, .Kl, QbeNull, env, QbeNull));
         };
+        emit_native_shim_epilogue(self, shared, f, ret_ty, do_the_call, pars, callee);
+        f.start.link = do_the_call;
+        do_the_call.link = not_ready;
+    };
+    
+    @debug_assert(!shared.worker.threaded);
+    if func.get_flag(.TookPointerValue) || ENABLE_TRACY || SPAM_DYN_CALL {
+        // TODOWASM: don't make_exec for this, just assign a got_lookup_offset
+        c.created_jit_fn_ptr_value(fid, shared.wait_for_symbol(id));
+    };
+}
+
+emit_native_shim_epilogue :: fn(self: CompCtx, shared: *FrontendCodegen, f: *Qbe.Fn, ret_ty: Type, do_the_call: *Qbe.Blk, pars: []RealEmitIr.ArgInfo, callee: Qbe.Ref) void = {
         each pars { p |
             @if_else {
                 @if(p.scalar) => push(do_the_call, make_ins(.arg,  p.k, QbeNull, p.r, QbeNull));
@@ -297,17 +317,7 @@ fn emit_jit_shim(c: *SelfHosted, fid: FuncId) void = {
         // return the result to our caller
         f.retty = type_r;
         do_the_call.jmp = (type = jmp, arg = result_r);
-        
-        f.start.link = do_the_call;
-        do_the_call.link = not_ready;
-    };
-    
-    @debug_assert(!shared.worker.threaded);
-    if func.get_flag(.TookPointerValue) || ENABLE_TRACY || SPAM_DYN_CALL {
-        // TODOWASM: don't make_exec for this, just assign a got_lookup_offset
-        c.created_jit_fn_ptr_value(fid, shared.wait_for_symbol(id));
-    };
-}
+};
 
 fn create_jit_shim(self: *SelfHosted, fid: FuncId) Res(void) = {
     opts := self.get_build_options();
@@ -468,7 +478,7 @@ fn get_fn_callable(self: *SelfHosted, fid: FuncId) ?rawptr = {
     @debug_assert(!func.get_flag(.AnyConstArgs) && !func.get_flag(.UnboundGenerics));
     id := self.comptime_jit_symbol_id(fid);
     c := wait_for_symbol(self.comptime_codegen, id);
-    if func.get_flag(.TookPointerValue) || ENABLE_TRACY || SPAM_DYN_CALL {
+    if func.get_flag(.TookPointerValue) || ENABLE_TRACY {
         // created_jit_fn_ptr_value is done when creating it
         @debug_assert(self.baked.vmem&.get(c).is_some());
     };

@@ -15,9 +15,9 @@
 #include_std("compiler/ast_boring.fr");
 #use("@/compiler/ast_external.fr");  
 DUMB_EMIT_IR :: false;
-USE_VM :: true && DUMB_EMIT_IR;
-EmitIr :: @if(DUMB_EMIT_IR, EmitIrB(), EmitIrA()); 
-#include_std("compiler/emit_ir.fr");  
+USE_VM :: false && abi_shift_native_to_easy;
+EmitIr :: @if(abi_shift_native_to_easy, EmitIrB(), RealEmitIr'EmitIrA()); 
+RealEmitIr :: import("@/compiler/emit_ir.fr");
 #include_std("boot/src/dumb_emit.fr"); 
 #include_std("compiler/jit.fr");
 Incr :: import("@/compiler/incremental.fr");
@@ -263,13 +263,11 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
             done := main_thread_pump(self.comp(), shared, @slice(f), false);
             self.debug_deny_jit_shim_calls = !DUMB_EMIT_IR;
             if no_cache {
-                if !DUMB_EMIT_IR {
                 seal_debug_info(m, empty(), false, empty());
                 each self.comptime_libraries& { _, lib |
                     Qbe'fill_pending_dynamic_imports(m, lib[]);
                 };
                 Qbe'seal_imports(m);
-                };
                 m.make_exec();
                 
                 c_m := self.comptime_codegen.m;
@@ -342,6 +340,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
     @if(abi_shift_native_to_easy, {
         callee := bit_cast_unchecked(@type callee, i64, callee);
         r, a := ((), init_driver_vtable(true));
+        @assert(!abi_shift_easy_to_native, "wrap_vtable_with_native");
         self := to_free_c.unwrap();
         self := self.data.cast()[][];
         self.vm.eval(callee, void.cast_to_bytes(r&), cast_to_bytes(*ImportVTable, a&));
@@ -458,6 +457,7 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
         log = list(a),
         comptime_prefer_syscalls = prefer_syscalls(),
     );
+    @if(DUMB_EMIT_IR) @println("self = %", fmt_hex(self));
     self.comptime_codegen.m.codemap = (Some = self.codemap);
     self.add_function(zeroed Func);  // just for good luck. life is better when FuncId=0 is invalid. 
     self.other_module&.push(self.comptime_codegen.m, self.get_alloc());
@@ -488,6 +488,12 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
     opts.tls_stack_bits = franca_required_stack_bits;
     
     @if(abi_shift_native_to_easy) Vm'init_vm_and_tls(self);
+    @if(abi_shift_easy_to_native) {
+        // back to the real one 
+        // TODO: allow changing stack_bits and also will have to get more compilated when boot isn't self hosted
+        n := franca_required_stack_bits + 1;
+        opts.tls_stack_bits = n;
+    };
     
     stable_compiler_context :: fn(self: *SelfHosted) Compiler = {
         a := self.get_alloc();

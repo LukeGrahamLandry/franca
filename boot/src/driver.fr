@@ -1,7 +1,8 @@
 
-driver :: fn(_: *ImportVTable) void = {
+driver :: fn(parent_vtable: *ImportVTable) void = {
     println(DUMB_EMIT_IR);
     println(abi_shift_native_to_easy);
+    println(abi_shift_easy_to_native);
     println("Hello World");
     
     m := @ref @uninitialized Qbe.Module;
@@ -26,18 +27,18 @@ driver :: fn(_: *ImportVTable) void = {
         vtable := init_driver_vtable(false);
         @if(DUMB_EMIT_IR) @println("host_abi=%, target_abi=%", vtable.host_abi, vtable.target_abi);
         
-        build_options := vtable.default_build_options();
+        opts := vtable.default_build_options();
+        opts.retain_function_names = true;
         src := """#include_std("lib/core.fr"); #include_std("compiler/main.fr"); """;
-        c := vtable.new_with_src(src, "entry_file", build_options);
+        c := new_with_src2(parent_vtable, vtable, src, "entry_file", opts);
         c := vtable.with(c);
-        
         fid := or c.get_unique_named("main") {
             panic("expected exactly one function called 'main'")
         };
+        self := c.data.cast()[][];
         pending := FuncId.list(temp());
         shared := init_codegen(m, c.get_alloc(), false);
-        // always the real emit_ir.fr, just can't re-import() if it was already #include_std-ed.
-        E :: @if(DUMB_EMIT_IR, EmitIr2'EmitIrA(), EmitIr);  
+        E :: @if(DUMB_EMIT_IR, RealEmitIr'EmitIrA(), EmitIr);  
         main_thread_pump(c, shared, @slice(fid), true, E);
         seal_debug_info(m, empty(), false, empty());
     };
@@ -49,8 +50,26 @@ driver :: fn(_: *ImportVTable) void = {
     println(outfile);
 };
 
+new_with_src2 :: fn(parent_vtable: *ImportVTable, vtable: *ImportVTable, src: Str, filename: Str, options: *BuildOptions) Compiler = {
+    comp := {vtable.init_compiler}(options);
+    self := comp.cast()[][];
+    (parent_vtable.temporary_track_module)(Qbe.Module.raw_from_ptr(self.comptime_codegen.m));
+    src := src.shallow_copy(vtable'get_alloc(comp));
+    filename := filename.shallow_copy(vtable'get_alloc(comp));
+    file := {vtable.add_file}(comp, filename, src).shrink();
+    stmts := {vtable.parse_stmts}(comp, file&);
+    stmts := or stmts { err |
+        vtable.with(comp).report_error(err)
+    };
+    //@debug_assert(stmts.len != 0, "parse_stmts returned 0");
+    res := {vtable.make_and_resolve_and_compile_top_level}(comp, stmts);
+    or res { err |
+        vtable.with(comp).report_error(err)
+    };
+    comp
+}
+
 #include_std("compiler/lib.fr");
 
-EmitIr2 :: import("@/compiler/emit_ir.fr");
 DISABLE_IMPORT_FRC :: true;
 DEBUG_SPAM_LOG :: false;

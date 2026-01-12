@@ -591,6 +591,9 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                 i := @check(self.eval(value, i64)) return;
                 @err_assert(i.ult(self.export_ffi.fns.len), "#comptime_addr oob (do not use outside fill_expor_ffi)") return;
                 ptr := self.export_ffi.fns[i].int_from_rawptr();
+                @if(abi_shift_easy_to_native) {
+                    ptr = Vm'wrap_with_native_abi(self, func, ptr).int_from_rawptr();
+                };
                 @err_assert(func.body&.is(.Empty), "#comptime_addr function must not have a body") return;
                 // only the comptime field matters here. emit_ir checks that aot code never tries to call something marked .ComptimeOnly
                 func.body = (DynamicImport = (comptime = ptr, name = func.name, lib = Flag.comptime_addr.ident(), weak = false));
@@ -662,6 +665,10 @@ fn create_import_body(self: *SelfHosted, func: *Func, fid: FuncId, lib_name: Sym
     @err_assert(func.body&.is(.Empty), "#import function must not have a body") return;
     func.set_flag(.BodyIsSpecial);
     info := self.dyn_import(func.name, lib_name, weak);
+    @if(abi_shift_easy_to_native) {  // don't have the real dlopen
+        @debug_assert_eq(self.pool.get(info.lib), "libc");
+        info.comptime = Vm'wrap_with_native_abi(self, func, info.comptime).int_from_rawptr();
+    };
     func.body = (DynamicImport = info);
     .Ok
 }
@@ -3986,7 +3993,7 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
     bindings&.if_empty_add_unit();
     arg: Pattern = (bindings = bindings.as_raw(), loc = expr.loc);
     def: FnDef = (name = .None, arg = arg, ret = (Finished = ret_ty), tags = list(temp()), loc = expr.loc);
-    if SPAM_DYN_CALL {
+    if SPAM_DYN_CALL || DUMB_EMIT_IR {
         def.line = self.pool.insert_borrowed(@tfmt("lit_fn(%)", fmt_loc(self, expr.loc)), self.get_alloc());
     };
     // we might have already tried to compile the expression in a different context,
@@ -4201,7 +4208,7 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
     
     self.when_debug(.Macro, fn(o) => @fmt(o, "M: % %", self.pool.get(func.name), fmt_loc(self, expr.loc)));
     
-if abi_shift_native_to_easy {
+if DUMB_EMIT_IR {
     args_value := @slice(invocation.arg[], invocation.target[]).interpret_as_bytes();
     values := self.call_dynamic_values(fn_ptr.int_from_rawptr(), f_ty, args_value);
     expr[] = FatExpr.assume_cast(values&)[];

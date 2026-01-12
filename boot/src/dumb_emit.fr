@@ -53,6 +53,7 @@ ReturnTarget :: @struct(
 Placement :: @tagged(Assign: Qbe.Ref, Scalar, Blit: Qbe.Ref, NewMemory);
 
 emit_ir :: fn(comp: CompCtx, shared: *FrontendCodegen, f: FuncId, _: ExecStyle, pending: *List(FuncId), export: bool) CRes(void) = {
+    @debug_assert(abi_shift_native_to_easy, "called the wrong emit_ir");
     func := comp.get_function(f); 
     c := comp.data.cast()[][];
     
@@ -108,6 +109,7 @@ fn set_lib(self: *EmitIr, it: Ty(Qbe.Sym, Str, bool)) void = {
 
 fn emit_body(self: *EmitIr, f: FuncId) void #once = {
     func := self.program.get_function(f);
+    arg_ty := func.finished_arg.unwrap();
     
     if func.get_flag(.LogAst) {
         @eprintln("[#log_ast %] %", f, self.program.log(func));
@@ -188,10 +190,14 @@ fn emit_body(self: *EmitIr, f: FuncId) void #once = {
         @default => @panic("no acceptable impl %", self.program.log(func));
     };
     
-    func := self.program.get_function(self.func);
-    arg_ty := func.finished_arg.unwrap();
-    
     self.program.data.cast()[][].finish_layout(arg_ty); // :extra
+    if false {
+        r := self.f.newtmp("input", .Kl);
+        arg_size := self.program.get_info(arg_ty)[].stride_bytes.zext();
+        self.emit(.alloc8, .Kl, r, self.f.getcon(arg_size), Qbe.Null);
+        self.blit(r, input, arg_size);
+        input = r;
+    };
     
     self.blk = self.new_block("body");
     
@@ -235,6 +241,8 @@ fn check_import(name: Str, lib: Str) rawptr = {
                 "opendir$INODE64", "pthread_create", "pthread_attr_setstack", 
                 "pthread_attr_init", 
                 "read", "poll", "ppoll", "dup2", "pipe", 
+                "malloc", "free", "__libc_start_main", "sigaction", 
+                "readlinkat", "_NSGetExecutablePath", 
             );
             if weak.contains(name) {
                 return(fn() = panic("called weak import"));

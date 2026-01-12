@@ -26,7 +26,7 @@ fn fill_driver_vtable(vtable: *ImportVTable, for_driver: bool) void = {
     if enable_incremental() && !DISABLE_IMPORT_FRC {
         vtable.frc_module_magic_v = Incremental.MAGIC;
     };
-    if !abi_shift_native_to_easy {
+    if !DUMB_EMIT_IR {
         fill_backend_vtable(vtable);
     };
     
@@ -45,24 +45,30 @@ fn fill_driver_vtable(vtable: *ImportVTable, for_driver: bool) void = {
         off := f.byte_offset;
         p := bit_cast_unchecked(*ImportVTable, *rawptr, vtable).offset_bytes(off);
         
-        if abi_shift_native_to_easy && for_driver {
+        if DUMB_EMIT_IR && for_driver {
             @if(@run(__driver_abi_version < 1512)) unreachable();
             if name == (@symbol get_alloc) {
-                fid = (fn(c: Compiler) Alloc = {
-                    a := c.cast()[][]._get_alloc();
-                    a.vptr = bit_cast_unchecked(rawptr, @type a.vptr, translate_arena_allocator_fn);
+                wrapped_get_alloc :: (fn(c: Compiler) Alloc = {
+                    self := c.cast()[][];
+                    a := self._get_alloc();
+                    @if(abi_shift_easy_to_native) Vm'wrap_alloc_with_native(self, a&);
+                    @if(abi_shift_native_to_easy) {
+                        a.vptr = bit_cast_unchecked(rawptr, @type a.vptr, translate_arena_allocator_fn);
+                    };
                     a
                 });
+                fid = wrapped_get_alloc;
             };
-            // TODO: but this breaks all the places the compiler itself calls through the vtable
-            fid = wrap_with_easy_abi(fid);
+            if abi_shift_native_to_easy {
+                fid = wrap_with_easy_abi(fid);
+            };  // abi_shift_easy_to_native: done in current_compiler_context
         };
         
         // TODO: type check against the func's annotations
         p[] = fr.get_jitted(fid);
     };
     
-    if abi_shift_native_to_easy {
+    if DUMB_EMIT_IR {
         vtable.emit_qbe_included = (fn(_0, _1, _2, _3) = panic("can't emit_qbe_included because module has vtables"));
         vtable.emit_qbe_included_old = (fn() = panic("can't emit_qbe_included because module has vtables"));
     };
@@ -71,6 +77,10 @@ fn fill_driver_vtable(vtable: *ImportVTable, for_driver: bool) void = {
 abi_shift_native_to_easy :: { 
     fr := current_compiler_context(); 
     DUMB_EMIT_IR && fr.vtable.target_abi == 0
+};
+abi_shift_easy_to_native :: { 
+    fr := current_compiler_context(); 
+    DUMB_EMIT_IR && fr.vtable.target_abi == 1
 };
 
 // TODO: this is garbage! the way my scoping works you can't access 
@@ -195,7 +205,7 @@ driver_vtable_exports :: @struct {
         BakedValue.raw_from_ptr(c.cast()[].baked.values&.nested_index(@as(i64) id.id.zext()));
     
     fmt_error :: fn(c: Compiler, err: *CompileError, out: *List(u8)) void = {
-        if abi_shift_native_to_easy {
+        if DUMB_EMIT_IR {
             out.gpa = temp();  // HACK
         };
         c.cast()[][]._fmt_error(err, out, true /*TODO*/);
@@ -324,7 +334,8 @@ driver_vtable_exports :: @struct {
     };
     // TODO: return addend like lookup_baked so you don't have to call both?
     reserve_baked :: fn(c: Compiler, jit_addr: ?[]u8) BakedVarId = {
-        _, id := c.cast()[][]._reserve_baked(jit_addr);
+        self := c.cast()[][];
+        _, id := self._reserve_baked(jit_addr);
         id
     };
  
@@ -363,6 +374,17 @@ driver_vtable_exports :: @struct {
     
     get_constant :: fn(c: Compiler, scope: ScopeId, name: Symbol) ?Ty(rawptr, Type) = 
         compiler_exports'get_field(scope, name, c.cast()[][]);
+    
+    // TODO: delete this. 
+    temporary_track_module :: fn(m: *Qbe.Module) void = {
+        // really what you want is to put RESOLVERS in tls.global so it can be shared accross compilation units 
+        // but that wouldn't even work here because LocationResolverNode has a function pointer
+        // which is a massive pain in the ass when the abis don't match. 
+        // so this is just a hack to let me see both stack traces. 
+        // relies on QbeModule layout being the same everywhere. 
+        @assert(abi_shift_native_to_easy); 
+        _ := push_resolver(QbeModule, m, find_ip_in_module);
+    };
 };
 
 CompilerRs :: ***SelfHosted;  // TODO: really this should be a new type so you can't accidently implement call functions by just adding extra indirection. hopefully the number of pointers makes it clear something's weird. 
@@ -824,17 +846,22 @@ compiler_exports_s :: @struct {
     
     #export("ast_alloc")
     get_aa :: fn(self) Alloc = {
+        a := self.get_alloc();
         @if(abi_shift_native_to_easy) {
-            a := self.get_alloc();
             a.vptr = bit_cast_unchecked(rawptr, @type a.vptr, translate_arena_allocator_fn);
-            return a;
         };
-        self.get_alloc()
+        @if(abi_shift_easy_to_native) Vm'wrap_alloc_with_native(self, a&);
+        a
     };
     
     #export("current_compiler_context")
     get_cc :: fn(self) CompCtx = {
         vtable := init_driver_vtable(true);
+        @if(abi_shift_easy_to_native) {
+            hack :: @static(bool);  // because init_driver_vtable returns @static
+            @if(!hack[]) Vm'wrap_vtable_with_native(self, vtable);
+            hack[] = true;
+        };
         (data = self.legacy_indirection, vtable = vtable)
     };
     
@@ -1016,7 +1043,6 @@ generate_compctx_wrapper :: fn(fid: FuncId, src: *List(u8), i: i64) ?rawptr = {
     };
     @fmt(src, "__baked_compctx)\n}\n");
     
-    // TODO: only on the transition. 
     if abi_shift_native_to_easy {
         fid = wrap_with_easy_abi(fid);
     };
@@ -1026,6 +1052,7 @@ generate_compctx_wrapper :: fn(fid: FuncId, src: *List(u8), i: i64) ?rawptr = {
 };
 
 fn wrap_with_easy_abi(fid: FuncId) FuncId = {
+    @debug_assert(abi_shift_native_to_easy);
     func := get_function_ast(fid, true, true, true, false);
     arg := func.finished_arg.unwrap();
     ret := func.finished_ret.unwrap();
@@ -1037,6 +1064,8 @@ fn wrap_with_easy_abi(fid: FuncId) FuncId = {
             r[] = callee(@splat_tuple a);
         })
     });
+    wrapped := get_function_ast(fid, false, false, false, false);
+    wrapped.name = sym(@tfmt("easy_abi(%)", func.name.str()));
     fid
 }
 

@@ -146,8 +146,21 @@ fn bake_relocatable_body(c: *SelfHosted, value: []u8, type: Type, out: *List(Bak
     if !force_default_handling {
         xx := @try(c.get_custom_bake_handler(type)) return;
         if xx { f |
-            @assert(!abi_shift_native_to_easy, "bake abi_shift_native_to_easy");
-            values := f(u8.raw_from_ptr(value.ptr));
+            values := @if(DUMB_EMIT_IR, {
+                self := c;
+                args_value := cast_to_bytes(*u8, value.ptr&);
+                f_ty: FnType = ( // :get_or_create_type
+                    arg = i64,
+                    ret = self.tuple_of(@slice(i64, i64)),
+                    unary = true,
+                );
+                // TODO: `@type f` doesn't work? :compilerbug `Type Error: (pointerness) expected T but found T. T=u32`
+                fn_ptr := bit_cast_unchecked(BakeHandler, i64, f);
+                values := self.call_dynamic_values(fn_ptr, f_ty, args_value);
+                assume_cast(Slice(BakedEntry), values&)[]
+            }, {
+                f(u8.raw_from_ptr(value.ptr))
+            });
             bytes_out := fixed_list(value);
             bake_translate_legacy(values, bytes_out&, out, reloc_off);
             return(.Ok);

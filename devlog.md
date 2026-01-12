@@ -1,10 +1,14 @@
     
-TODO: only emit_jit_shim, create_dyncall_shim need to only be used when abi_shift_native_to_easy. 
-      in fact i need the reverse since now the jitted compiler is using real emit_ir which does the extern abi. 
-      is it easier to do that or to have comptime and runtime use different abis? 
+TODO: instead of abi_shift_easy_to_native it might have ben easier to 
+      have comptime and runtime use different abis? 
       the latter is a pain because of things like XXX in openat 
       and tls_stack_bits couldn't be a normal constant. 
       also need to be careful because sometimes it will be calling something exported from the compiler already has easy_abi
+      but if i did that i'd either have to keep a version of dumb_emit in my language
+      or forever match abi with the bootstrap compiler 
+      and the stretch goal of this whole thing is to make it possible to change layout of structs in driver_api. 
+      
+TODO: examples/terminal.fr is broken because i want to import(emit_ir)
 
 ## (Jan 12)
 
@@ -12,6 +16,17 @@ TODO: only emit_jit_shim, create_dyncall_shim need to only be used when abi_shif
 - classic blunder i was having the vm's stack_top grow up but my tls relies on it growing down. 
 - now im at the point i was at before but it works on the vm. 
   takes 15 seconds instead of 3 seconds. 
+- wrapping the compiler_exports in the other direction isn't a big deal because there's already a func to hang off of so i know the types. 
+  doing it for the returned ast_alloc and ImportVTable is a bit more annoying 
+  because need to get the shapes in the child compctx, pack those into a fake func and then finally do the shim. 
+- confusing times with the child's temp() being `easy_abi(arena_allocator_fn)`
+  because i didn't set tls_stack_bits back to the parent one. (not using vm or it would have just died and been obvious)
+- similar problem where the hosted compiler can't get the real dlopen
+  so the ones it gives the child with native_abi comptime are still in easy_abi. 
+- it looks suspiciously like i have a dyncallNE calling a dyncallNE which doesn't make any sense. 
+  problem is that the memory is @static() so wrapping the vtable happens multiple times
+- now it gets as far as producing a binary (which doesn't work). 
+  hopefully it's just that dumb_emit_ir still =true,
 
 ## (Jan 11)
 

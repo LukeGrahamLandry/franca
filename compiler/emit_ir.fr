@@ -21,6 +21,8 @@
 
 // TODO: always check for zero sized type instead of == void
 
+ArgInfo :: @struct(r: Qbe.Ref, type: Type, name: ?Var, scalar: bool, k: Qbe.Cls, type_index: Qbe.Ref);
+
 EmitIrA :: fn() = {
 
 EmitIr :: @struct(
@@ -220,8 +222,6 @@ fn baked_var_to_dat(comp: CompCtx, m: *QbeModule, id: BakedVarId) Dat2 = {
             },
     )
 }
-
-ArgInfo :: @struct(r: Qbe.Ref, type: Type, name: ?Var, scalar: bool, k: Qbe.Cls, type_index: Qbe.Ref);
 
 // :EmitIrCall
 // note: mirrors compile_for_arg
@@ -864,7 +864,16 @@ fn compile_expr(self: *EmitIr, expr: *FatExpr, p: Placement) CRes(Qbe.Ref) = {
             
             if info.lib != Flag.SYMBOL_ZERO.ident() {
                 if self.when == .Jit && info.comptime != 0 {
-                    return(Ok = self.scalar_result(p, self.f.getcon(info.comptime), i64));   // :get_or_create_type
+                    addr := info.comptime;
+                    @if(abi_shift_easy_to_native) {  // don't have the real dlopen
+                        self := self.program.data.cast()[][];
+                        @if_let(self.get_type(expr.ty)) fn FnPtr(it) => {
+                            @debug_assert_eq(self.pool.get(info.lib), "libc");
+                            func := Vm'make_fake_func(self, info.name, it.ty);
+                            addr = Vm'wrap_with_native_abi(self, func&, addr).int_from_rawptr();
+                        };
+                    };
+                    return(Ok = self.scalar_result(p, self.f.getcon(addr), i64));   // :get_or_create_type
                 };
                 // TODO: if jitting and not ready yet, we could make this be a call to a shim that returns the symbol?
                 set_lib(self, (id, self.program.get_string(info.lib), info.weak));

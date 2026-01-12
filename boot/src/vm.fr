@@ -1,19 +1,53 @@
 
-extern_to_easy_abi_dyncall_shim :: fn(arg: *u8, ret: *u8, callee: @FnPtr(ret: *u8, arg: *u8) void) void = {
-    unreachable();
-    // TODO: probably need to copy arg
-    callee(ret, arg);
+// TODO: the combinatorics of (shim, dyncall) x (native, easy_abi) are getting annoying. 
+//       but the plan is to convert the boot part to another language so adding abstraction now isn't super useful.  
+
+// caller: easy_abi, compiler: easy_abi, callee: native
+easy_to_native_dyncall_shim :: fn(self: *SelfHosted, f_ty: FnType) DynCallShim = {
+    @debug_assert(abi_shift_easy_to_native);
+    shared := self.comptime_codegen;
+    ins: RawList(Qbe.Ins) = empty();
+    id := Qbe.no_symbol_S; 
+    enter_task shared { entry |
+        f := temp().box_uninit(Qbe.Fn);
+        m := shared.m;
+        f.default_init(m);
+        f.leaf = false;
+        f.lnk.no_inline = true;
+        id = shared.m.intern(@tfmt("dyncallEN%_%_%", f_ty.arg.as_index(), f_ty.ret.as_index(), int(f_ty.unary)));
+        f.lnk.id = id;
+        entry.task = (Func = f);
+        
+        input, output := (f.newtmp("input", .Kl), f.newtmp("output", .Kl));
+        addins(ins&, make_ins(.par, .Kl, output, QbeNull, QbeNull));
+        addins(ins&, make_ins(.par, .Kl, input, QbeNull, QbeNull));
+        
+        arg_p  := f.newtmp("arg", .Kl);
+        ret_p  := f.newtmp("ret", .Kl);
+        callee := f.newtmp("call", .Kl);
+        
+        a, r, c := (input, f.newtmp("r", .Kl), f.newtmp("c", .Kl));
+        addins(ins&, make_ins(.add, .Kl, r, input, f.getcon(8)));
+        addins(ins&, make_ins(.add, .Kl, c, input, f.getcon(16)));
+        addins(ins&, make_ins(.load, .Kl, arg_p, a, QbeNull));
+        addins(ins&, make_ins(.load, .Kl, ret_p, r, QbeNull));
+        addins(ins&, make_ins(.load, .Kl, callee, c, QbeNull));
+        
+        ins = emit_dyncall_shim_epilogue(self, shared, f, f_ty, arg_p, ret_p, callee, Qbe.Null, ins);
+    };
+    (Pending = id)
 };
 
+// caller: easy_abi, compiler: easy_abi, callee: easy_abi
 easy_abi_emit_shim :: fn(c: *SelfHosted, fid: FuncId) void = {
+    @debug_assert(abi_shift_native_to_easy);
     shared := c.comptime_codegen;
     handler_callee_address: rawptr = @run wrap_with_easy_abi(report_called_uncompiled_or_just_fix_the_problem);
     m := shared.m; 
-    func := c.get_function(fid);
     c.when_debug(.Shim, fn(o) => @fmt(o, "S: create %", fmt_func(c, fid)));
     id := Qbe.no_symbol_S;
     enter_task shared { entry |
-        id = m.intern(@tfmt("%__shim", fid));
+        id = m.intern(@tfmt("%__Eshim", fid));
         
         f := temp().box_uninit(Qbe.Fn);
         f.default_init(m);
@@ -29,8 +63,6 @@ easy_abi_emit_shim :: fn(c: *SelfHosted, fid: FuncId) void = {
         push(b, make_ins(.par, .Kl, output, QbeNull, QbeNull));
         push(b, make_ins(.par, .Kl, input, QbeNull, QbeNull));
         
-        // call into the compiler to get the real callee
-        // TODO: only right first generation
         callee := f.newtmp("callee", .Kl);
         arg, arg2, ret := (f.newtmp("input", .Kl), f.newtmp("input", .Kl), f.newtmp("output", .Kl));
         push(b, make_ins(.alloc8, .Kl, arg, f.getcon(16), Qbe.Null));
@@ -53,6 +85,185 @@ easy_abi_emit_shim :: fn(c: *SelfHosted, fid: FuncId) void = {
     c.created_jit_fn_ptr_value(fid, shared.wait_for_symbol(id));
 };
 
+// caller: native, compiler: easy_abi, callee: native
+native_abi_emit_shim :: fn(c: *SelfHosted, fid: FuncId) void = {
+    @debug_assert(abi_shift_easy_to_native);
+    shared := c.comptime_codegen;
+    handler_callee_address: rawptr = report_called_uncompiled_or_just_fix_the_problem;
+    m := shared.m; 
+    func := c.get_function(fid);
+    c.when_debug(.Shim, fn(o) => @fmt(o, "S: create %", fmt_func(c, fid)));
+    id := Qbe.no_symbol_S;
+    enter_task shared { entry |
+        id = m.intern(@tfmt("%__Nshim", fid));
+        
+        f := temp().box_uninit(Qbe.Fn);
+        f.default_init(m);
+        f.lnk.no_inline = true;
+        f.lnk.id = id;
+        f.start = newblk(); 
+        f.nblk = 1;
+        target_id := c.comptime_jit_symbol_id(fid);
+        entry.task = (Shim = (f = f, shim_for = target_id));
+        
+        arg_ty := func.finished_arg.expect("arg infered");
+        ret_ty := func.finished_ret.expect("ret infered");
+        pars := emit_par_instructions(c.comp(), shared, func.arg&, arg_ty, f, .None);
+        
+        input, output := (f.newtmp("input", .Kl), f.newtmp("output", .Kl));
+        b := f.start;
+        
+        callee := f.newtmp("callee", .Kl);
+        arg, arg2, ret := (f.newtmp("input", .Kl), f.newtmp("input", .Kl), f.newtmp("output", .Kl));
+        push(b, make_ins(.alloc8, .Kl, arg, f.getcon(16), Qbe.Null));
+        push(b, make_ins(.alloc8, .Kl, ret, f.getcon(8), Qbe.Null));
+        push(b, make_ins(.add, .Kl, arg2, arg, f.getcon(8)));
+        push(b, make_ins(.storel, .Kw, QbeNull, f.getcon(SelfHosted.int_from_ptr(c)), arg));
+        push(b, make_ins(.storew, .Kw, QbeNull, f.getcon(fid.as_index()), arg2));
+        push(b, make_ins(.arg,  .Kl, QbeNull, ret, QbeNull));
+        push(b, make_ins(.arg,  .Kl, QbeNull, arg, QbeNull));
+        push(b, make_ins(.call, .Kw, QbeNull, f.getcon(handler_callee_address.int_from_rawptr()), QbeNull));
+        push(b, make_ins(.load, .Kl, callee, ret, QbeNull));
+        
+        emit_native_shim_epilogue(c.comp(), shared, f, ret_ty, b, pars, callee);
+    };
+    c.created_jit_fn_ptr_value(fid, shared.wait_for_symbol(id));
+};
+
+// this is the inverse of create_dyncall_shim. 
+// caller: native, callee: easy_abi
+wrap_with_native_abi :: fn(self: *SelfHosted, func: *Func, callee: i64) rawptr = {
+    // its not as simple as just calling vm.eval because if you get here 
+    // it means you're running in the vm right now, you need to call into 
+    // the parent's vm not a new one. 
+    @if(callee == 0) return(zeroed(rawptr));
+    // TODO: also jitted comptime with the vm as the host gets confusing because someone needs to make sure tls is setup on the real stack. 
+    @assert(callee > 0, "TODO: vm call %", callee);
+    
+    @debug_assert(abi_shift_easy_to_native);
+    shared := self.comptime_codegen;
+    m := shared.m; 
+    f_ty := func.finished_ty().unwrap();
+    
+    name := @tfmt("dyncallNE_%_%_%_%_%", 
+        callee, f_ty.arg, f_ty.ret, f_ty.unary.int(), self.pool.get(func.name));
+    id := m.intern(name);
+    if m.get_addr(id) { p, _ |
+        return p;
+    };
+    enter_task shared { entry |
+        f := temp().box_uninit(Qbe.Fn);
+        f.default_init(m);
+        f.lnk.no_inline = true;
+        f.lnk.id = id;
+        f.start = newblk(); 
+        f.nblk = 1;
+        entry.task = (Func = f);
+        
+        arg_ty := func.finished_arg.expect("arg infered");
+        ret_ty := func.finished_ret.expect("ret infered");
+        pars := emit_par_instructions(self.comp(), shared, func.arg&, arg_ty, f, .None);
+        
+        input, output := (f.newtmp("input", .Kl), f.newtmp("output", .Kl));
+        b := f.start;
+        
+        push(b, .alloc8, .Kl, output, f.getcon(self.get_info(f_ty.ret)[].stride_bytes.zext()), Qbe.Null);
+        push(b, .alloc8, .Kl, input, f.getcon(self.get_info(f_ty.arg)[].stride_bytes.zext()), Qbe.Null);
+        
+        off := 0;
+        enumerate pars { i, it |
+            dest := f.newtmp("in", .Kl);  
+            info := self.get_info(it.type);
+            size: i64 = info.stride_bytes.zext();
+            off = off.ualign_to(info.align_bytes.zext());
+            push(b, .add, .Kl, dest, input, f.getcon(off));
+            off = off.add(size);
+            if it.type_index != Qbe.Null {
+                push(b, .blit0, .Kw, Qbe.Null, it.r, dest);
+                push(b, .blit1, .Kw, Qbe.Null, INT(size), Qbe.Null);
+            } else {
+                if size != 0 {
+                    o := store_op(self.comp(), it.type);
+                    push(b, o, .Kw, Qbe.Null, it.r, dest);
+                };
+            };
+        };
+        
+        push(b, .arg, .Kl, Qbe.Null, output, Qbe.Null);
+        push(b, .arg, .Kl, Qbe.Null, input, Qbe.Null);
+        push(b, .call, .Kw, Qbe.Null, f.getcon(callee), Qbe.Null);
+        
+        o, k := load_op(self.comp(), f_ty.ret);
+        if k == .Ke {
+            if self.get_info(f_ty.ret)[].stride_bytes != 0 {
+                f.retty = get_aggregate(self.comp(), shared, f_ty.ret);
+                f.ret_cls = .Ke;
+                b.jmp = (type = .retc, arg = output);
+            } else {
+                b.jmp.type = .ret0;
+            };
+        } else {
+            r := f.newtmp("r", k);
+            push(b, .load, k, r, output, Qbe.Null);
+            b.jmp = (type = retk(k), arg = r);
+            f.ret_cls = k;
+        };
+    };
+    shared.wait_for_symbol(id)
+};
+
+make_fake_func :: fn(self: *SelfHosted, name: Symbol, f_ty: FnType) Func = {
+    args := self.arg_types(f_ty.arg);
+    func := zeroed Func;
+    func.name = name;
+    enumerate args { i, a |
+        func.arg.bindings&.push((
+            name = (Ident = self.comp().get_tuple_field_name(i)),
+            ty = (Finished = a[]),
+            nullable_tag = zeroed(*Annotations),
+            default = binding_missing_default(zeroed(Span)),
+            kind = .Var,
+        ), temp());
+    };
+    func.finished_arg = (Some = f_ty.arg);
+    func.finished_ret = (Some = f_ty.ret);
+    func
+};
+
+// :SLOW memo this
+wrap_alloc_with_native :: fn(self: *SelfHosted, a: *Alloc) void = {
+    name := self.pool.insert_owned("anon_alloc");
+    func := make_fake_func(self, name, (  // :get_or_create_type
+        arg = self.tuple_of(@slice(i64, i64, i64, i64, i64)),
+        ret = self.tuple_of(@slice(i64, i64)),
+        unary = false,
+    ));
+    callee := bit_cast_unchecked(@type a.vptr, i64, a.vptr);
+    callee := wrap_with_native_abi(self, func&, callee);
+    a.vptr = bit_cast_unchecked(rawptr, @type a.vptr, callee);
+};
+
+// :SLOW memo this
+wrap_vtable_with_native :: fn(self: *SelfHosted, vtable: *ImportVTable) void = {
+    var := find_var_in_scope(self, self.pool.insert_owned("ImportVTable"), TOP_LEVEL_SCOPE).unwrap();
+    res := self.poll_in_place(Ty(Values, Type), => self.find_const(var, (Specific = Type)));
+    value, type := self.unwrap_report_error(Ty(Values, Type), res);
+    @assert_eq(type, Type);  // :get_or_create_type
+    T := Type.assume_cast(value&)[];
+    T := self.raw_type(T);
+    info := self.get_type(T);
+    @assert(info.is(.Struct));
+    for info.Struct.fields { f |
+        info := self.get_type(f.ty);
+        @if_let(info) fn FnPtr(it) => {
+            func := Vm'make_fake_func(self, f.name, it.ty);
+            off := f.byte_offset;
+            p := bit_cast_unchecked(*ImportVTable, *rawptr, vtable).offset_bytes(off);
+            p[] = Vm'wrap_with_native_abi(self, func&, p[].int_from_rawptr());
+        };
+    };
+};
+
 init_vm_and_tls :: fn(self: *SelfHosted) void = {
     n := franca_required_stack_bits - 1;
     opts := BuildOptions.ptr_from_raw(self.env.build_options);
@@ -71,19 +282,27 @@ init_vm_and_tls :: fn(self: *SelfHosted) void = {
         Vm'init_child_tls(a, t);
         tls(.panic_hook)[] = vm_backtracing_panic_handler;
     } else {
-        aa := @uninitialized i64;
-        base := i64.int_from_ptr(aa&).bit_and(bit_not(1.shift_left(n) - 1));
-        t := StaticTls.ptr_from_int(base);
+        t := get_tls_from_sp(n);
         Vm'init_child_tls(a, t);
     };
+};
+
+get_tls_from_sp :: fn(n: i64) *StaticTls = {
+    aa := @uninitialized i64;
+    base := i64.int_from_ptr(aa&).bit_and(bit_not(1.shift_left(n) - 1));
+    StaticTls.ptr_from_int(base)
 };
 
 // TODO: since `t` is on the vm's stack, i don't have to change franca_required_stack_bits.
 //       so could get rid of the extra code i added for getting it out of BuildOptions. 
 init_child_tls :: fn(a: Alloc, t: *StaticTls) void = {
     @if(@run(__driver_abi_version < 1512)) unreachable();
+    @debug_assert(abi_shift_native_to_easy);
     
-    t[] = StaticTls.ptr_from_int(get_stack_base_for_tls())[];
+    real_tls := StaticTls.ptr_from_int(get_stack_base_for_tls());
+    ::ptr_utils(StaticTls);
+    @assert(!identical(t, real_tls));
+    t[] = real_tls[];
     // the jitted code gets it from `__baked_compctx` instead. 
     // this needs to be null at the end when calling into the driver 
     // since it wants to run the fully jitted compiler. might as well do it now. 
