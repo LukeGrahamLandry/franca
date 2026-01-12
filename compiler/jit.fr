@@ -6,8 +6,17 @@
 DynCallShim :: @tagged(Pending: Qbe.Sym, Ready: rawptr);
 
 fn call_dynamic_values(self: *SelfHosted, f_ptr: i64, f_ty: FnType, args_value: []u8) Values = {
+    ret_size: i64 = self.get_info(f_ty.ret)[].stride_bytes.zext();
+    ret_buf := temp().alloc_zeroed(u8, ret_size);  // TODO: alignment?
     zone := self.zone_begin_dyncall(f_ptr.rawptr_from_int());
     self.stats.dyn_call += 1;
+    
+    @if(abi_shift_native_to_easy) {
+        self.vm.eval(f_ptr, ret_buf, args_value);
+        zone_end(zone);
+        return self.from_bytes(ret_buf);
+    };
+    
     callee := self.dyncalls&.get_or_insert(f_ty) {
         // 
         // This is super stupid. we should reuse the shim when the types have the same repr. 
@@ -28,11 +37,9 @@ fn call_dynamic_values(self: *SelfHosted, f_ptr: i64, f_ty: FnType, args_value: 
             c
         }
     };
-    callee := assume_types_fn(Arg = Ty(*u8, *u8, i64), Ret = void, ptr = callee);
    
     // TODO: canary?
-    ret_size: i64 = self.get_info(f_ty.ret)[].stride_bytes.zext();
-    ret_buf := temp().alloc_zeroed(u8, ret_size);  // TODO: alignment?
+    callee := assume_types_fn(Arg = Ty(*u8, *u8, i64), Ret = void, ptr = callee);
     callee(args_value.ptr, ret_buf.ptr, f_ptr);
     zone_end(zone);
     self.from_bytes(ret_buf)
@@ -74,7 +81,7 @@ fn comptime_jit_symbol_id(self: *SelfHosted, fid: FuncId) Qbe.Sym = {
 // It starts compiling on self.comptime_codegen and you have to get the result out of self.dyncalls when it's ready. 
 // TODO: reuse functions when they have different nominal types but the same repr. 
 fn create_dyncall_shim(self: *SelfHosted, f_ty: FnType) DynCallShim = {
-    @if(DUMB_EMIT_IR) return(Ready = import("@/boot/src/vm.fr")'extern_to_easy_abi_dyncall_shim);
+    @if(DUMB_EMIT_IR) return(Ready =Vm'extern_to_easy_abi_dyncall_shim);
     shared := self.comptime_codegen;
     ins: RawList(Qbe.Ins) = empty();
     id := Qbe.no_symbol_S; 
@@ -175,7 +182,7 @@ fn create_dyncall_shim(self: *SelfHosted, f_ty: FnType) DynCallShim = {
 //       - redundant copies of aggregates. 
 fn emit_jit_shim(c: *SelfHosted, fid: FuncId) void = {
     @if(DUMB_EMIT_IR) c.have_jit_shim&.push(fid, c.get_alloc());
-    @if(DUMB_EMIT_IR) return(import("@/boot/src/vm.fr")'easy_abi_emit_shim(c, fid));
+    @if(DUMB_EMIT_IR) return(Vm'easy_abi_emit_shim(c, fid));
     self := c.comp();
     shared := c.comptime_codegen;
     handler_callee_address: rawptr = report_called_uncompiled_or_just_fix_the_problem;
@@ -517,16 +524,23 @@ fn created_jit_fn_ptr_value(self: *SelfHosted, f: FuncId, ptr: rawptr) void = {
 fn zone_begin_dyncall(self: *SelfHosted, f_ptr: rawptr) TraceCtx = {
     zone := zone_begin(.CallDynamic);
     @if(ENABLE_TRACY || SPAM_DYN_CALL) {
+        if self.get_debug_name(f_ptr) { name |
+            @if(SPAM_DYN_CALL) println(name);
+            @if(ENABLE_TRACY) ___tracy_emit_zone_name(zone, name);
+        };
+    };
+    zone
+}
+
+fn get_debug_name(self: *SelfHosted, f_ptr: rawptr) ?Str = {
         if self.baked.vmem&.get(f_ptr) { it, _, __ |
             @if_let(it) fn FuncId(it) => {
                 m := self.comptime_codegen.m;
                 name := m.str(self.comptime_jit_symbol_id(it));
-                @if(SPAM_DYN_CALL) println(name);
-                @if(ENABLE_TRACY) ___tracy_emit_zone_name(zone, name);
+                return(Some = name);
             };
         };
-    };
-    zone
+    .None
 }
 
 wait_threaded_jit_shim :: fn(self: *SelfHosted, fid: FuncId) rawptr = {

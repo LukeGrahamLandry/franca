@@ -326,7 +326,7 @@ fn intrinsic_shim(self: *EmitIr, func: *Func, op: *NewIntrinsicPayload, input: Q
 }
 
 fn dbgloc(self: *EmitIr, loc: Span, tag: i64) void = {
-    if self.debug||true {
+    if self.debug {
         n: i64 = loc.low.zext();
         // :DebugTag
         // TODO: factor out all the places i do this bit fiddling. this is getting stupid. 
@@ -692,7 +692,6 @@ fn emit_constant(self: *EmitIr, value: *Values, p: Placement, expr_ty: Type, loc
     dest
 }
 
-// :PlaceExpr
 fn addr_macro(self: *EmitIr, arg: *FatExpr, p: Placement) Qbe.Ref #once = {
     var := arg.expr.GetVar;
     @debug_assert(arg.expr&.is(.GetVar) && var.kind != .Const, "took address of r-value");
@@ -728,7 +727,6 @@ fn emit_switch(self: *EmitIr, arg: *FatExpr, p: Placement) Qbe.Ref #once = {
         };
     };
     
-    //name := self.program.get_string(self.program.get_function(self.func)[].name);
     n: i64 = self.f.switch_count.zext();
     ss := self.f.switches&;
     if n == 0 {
@@ -745,7 +743,6 @@ fn emit_switch(self: *EmitIr, arg: *FatExpr, p: Placement) Qbe.Ref #once = {
     
     result := self.unify_placement(p&, arg.ty);
    
-    // This is where we rejoin with the value of the whole switch expression.
     end_blk  := self.new_block("joins"); 
     rejoined := false;
     values := i64.list(parts.cases.len, temp());
@@ -758,16 +755,13 @@ fn emit_switch(self: *EmitIr, arg: *FatExpr, p: Placement) Qbe.Ref #once = {
         self.blk = case_block; 
         
         _ := self.compile_expr(body, p);
-        seal self { b |
-            b.jmp.type = .jmp;
-            b.s1 = end_blk;
-            rejoined = true;
-        };
+        end();
     };
     
     self.blk = ss[n].default;
     _ := self.compile_expr(parts.default, p);
-    seal self { b |
+    end();
+    end :: fn() => seal self { b |
         b.s1 = end_blk;
         b.jmp.type = .jmp;
         rejoined = true;
@@ -777,7 +771,6 @@ fn emit_switch(self: *EmitIr, arg: *FatExpr, p: Placement) Qbe.Ref #once = {
         end_blk.jmp = (type = .hlt, arg = QbeNull); // TODO: remove the useless block
     };
     self.blk = end_blk;
-    @debug_assert_eq(ss[n].case_count, parts.cases.len);
     result
 }
 

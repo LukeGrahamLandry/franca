@@ -414,7 +414,11 @@ fn try_fold(op: Qbe.O, cls: Qbe.Cls, cl: *Qbe.Con, cr: *Qbe.Con) ?Qbe.Con = {
 // This is more verbose than using `inline_for` and `#ir` on individual functions but it compiles much faster (saves ~40ms, Jun 2025). 
 //
 fn do_fold(rt_o: Qbe.O, rt_k: Qbe.Cls, a0: i64, a1: i64) i64 = {
-    impl :: gen_do_fold_impl();
+    impl :: gen_do_fold_impl(fn(o) = OpTab'get(o, .can_fold));
+    do_fold(rt_o, rt_k, a0, a1, impl)
+}
+
+fn do_fold(rt_o: Qbe.O, rt_k: Qbe.Cls, a0: i64, a1: i64, $impl: ScopeId) i64 = {
     if rt_o.iscmp() {
         // cmp returning Kw vs Kl doesn't matter, it's always 0 or 1
         rt_k = .Kl;
@@ -431,7 +435,7 @@ fn do_fold(rt_o: Qbe.O, rt_k: Qbe.Cls, a0: i64, a1: i64) i64 = {
 }
 
 // TODO: make the frcmodule api less painful for small useages like this
-fn gen_do_fold_impl() ScopeId = {
+fn gen_do_fold_impl(filter: @FnPtr(o: Qbe.O) bool) ScopeId = {
     a := temp();
     fr := current_compiler_context();
     msg := "gen_do_fold_impl: frc module abi mismatch\nrecompile your franca compiler";
@@ -494,7 +498,7 @@ fn gen_do_fold_impl() ScopeId = {
             flags := argcls[i];
             k0    := ops_table_argscls(flags, k, 0);
             k1    := ops_table_argscls(flags, k, 1);
-            allow := flags.read_op_bit(.can_fold) && k0 != .Ke && o != .sel1;
+            allow := filter(o) && k0 != .Ke && o != .sel1;
             if(!allow, => continue());
             // cmp returning Kw vs Kl doesn't matter, it's always 0 or 1
             if(o.iscmp() && k == .Kw, => continue());

@@ -15,6 +15,7 @@
 #include_std("compiler/ast_boring.fr");
 #use("@/compiler/ast_external.fr");  
 DUMB_EMIT_IR :: false;
+USE_VM :: true && DUMB_EMIT_IR;
 EmitIr :: @if(DUMB_EMIT_IR, EmitIrB(), EmitIrA()); 
 #include_std("compiler/emit_ir.fr");  
 #include_std("boot/src/dumb_emit.fr"); 
@@ -31,6 +32,7 @@ HACK_PARSER_ALLOC :: false;
 SPAM_DYN_CALL :: false;
 
 Crash :: import("@/lib/crash_report.fr");
+Vm :: import("@/boot/src/vm.fr");
 
 // TODO: don't individually allocate all these. 
 SelfHosted :: @rec @struct(
@@ -94,6 +96,7 @@ SelfHosted :: @rec @struct(
         slots := zeroed Array(WipJitShim, 32);
     } = (),
     have_jit_shim := @if(IS_BOOTSTRAPPING, (), zeroed(RawList(FuncId))),
+    vm := @if(@run(!DUMB_EMIT_IR), (), zeroed(*Vm.Vm)),
 );
 ExportFfi :: @struct(src: Str, fns: []rawptr);
 WipJitShim :: @struct {
@@ -260,15 +263,18 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
             done := main_thread_pump(self.comp(), shared, @slice(f), false);
             self.debug_deny_jit_shim_calls = !DUMB_EMIT_IR;
             if no_cache {
+                if !DUMB_EMIT_IR {
                 seal_debug_info(m, empty(), false, empty());
                 each self.comptime_libraries& { _, lib |
                     Qbe'fill_pending_dynamic_imports(m, lib[]);
                 };
                 Qbe'seal_imports(m);
+                };
                 m.make_exec();
                 
                 c_m := self.comptime_codegen.m;
-                if DUMB_EMIT_IR && c_m.use_map_jit_on_apple_silicon {
+                // TODO: why does this matter if USE_VM?
+                @if(DUMB_EMIT_IR) if c_m.use_map_jit_on_apple_silicon {
                     @if(IS_BOOTSTRAPPING) unreachable();
                     f := ();
                     // can't add anything to comptime_codegen after undo_map_jit so finish all shims now. 
@@ -293,7 +299,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
                         };
                     };
                     self.debug_deny_unfilled_jit_shim_calls = true;
-                    import("@/boot/src/vm.fr")'undo_map_jit(m);
+                    Vm'undo_map_jit(m);
                 };
             };
         
@@ -333,15 +339,17 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
     };
     
     callee := callee.unwrap();
-    push_as_tls(.comptime, zeroed(rawptr)) {
-        @if(abi_shift_native_to_easy, {
-            callee := bit_cast_unchecked(@type callee, @FnPtr(r: *void, a: **ImportVTable) void, callee);
-            r, a := ((), init_driver_vtable(true));
-            callee(r&, a&);
-        }, {
+    @if(abi_shift_native_to_easy, {
+        callee := bit_cast_unchecked(@type callee, i64, callee);
+        r, a := ((), init_driver_vtable(true));
+        self := to_free_c.unwrap();
+        self := self.data.cast()[][];
+        self.vm.eval(callee, void.cast_to_bytes(r&), cast_to_bytes(*ImportVTable, a&));
+    }, {
+        push_as_tls(.comptime, zeroed(rawptr)) {
             callee(vtable);
-        });
-    };
+        };
+    });
     
     if to_free { m, r |
         Crash'pop_resolver(r);
@@ -476,14 +484,10 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
     c[] = SelfHosted.raw_from_ptr(self);
     self.export_ffi = fill_export_ffi(self);
     
-    if abi_shift_native_to_easy {
-        n := franca_required_stack_bits - 1;
-        opts.tls_stack_bits = n;
-        import("@/boot/src/vm.fr")'init_child_tls(a, n);
-    } else {
-        // TODO: allow not matching the compiler even when keeping the same abi
-        opts.tls_stack_bits = franca_required_stack_bits;
-    };
+    // TODO: allow not matching the compiler even when keeping the same abi
+    opts.tls_stack_bits = franca_required_stack_bits;
+    
+    @if(abi_shift_native_to_easy) Vm'init_vm_and_tls(self);
     
     stable_compiler_context :: fn(self: *SelfHosted) Compiler = {
         a := self.get_alloc();
@@ -505,6 +509,12 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
     self
 }
 
+vm_backtracing_panic_handler :: fn(msg: Str) Never = {
+    self := current_comptime();
+    @if(!self.is_null()) self.vm.log_backtrace();
+    Crash'backtracing_panic_handler(msg);
+};
+
 FrontendCodegen :: @struct {
     worker: *CodegenShared;
     m: *QbeModule;
@@ -515,9 +525,14 @@ FrontendCodegen :: @struct {
 };
 
 fn init_codegen(m: *Qbe.Module, a: Alloc, threaded: bool) *FrontendCodegen = {
+    threaded := threaded && !abi_shift_native_to_easy;
     worker := init_codegen_worker(m, threaded);
     if abi_shift_native_to_easy {
         m.target.hack_builtin_memmove.len = 0;
+        @if(USE_VM) {
+            worker.enqueue = Vm'enqueue;
+            worker.join = fn(_0) = ();
+        };
     };
     a.boxed(FrontendCodegen, (
         worker = worker,

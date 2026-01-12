@@ -6,6 +6,13 @@ TODO: only emit_jit_shim, create_dyncall_shim need to only be used when abi_shif
       and tls_stack_bits couldn't be a normal constant. 
       also need to be careful because sometimes it will be calling something exported from the compiler already has easy_abi
 
+## (Jan 12)
+
+- easy_abi_emit_shim now needs to wrap_with_easy_abi since vm can't do real calls.
+- classic blunder i was having the vm's stack_top grow up but my tls relies on it growing down. 
+- now im at the point i was at before but it works on the vm. 
+  takes 15 seconds instead of 3 seconds. 
+
 ## (Jan 11)
 
 - emit_intrinsic_new: alignment padding because i declare shifts always with amount: i64. 
@@ -25,6 +32,12 @@ TODO: only emit_jit_shim, create_dyncall_shim need to only be used when abi_shif
 - have name_from_ip for crash report say the index of the resolver 
   that found it so you can kinda tell what's in the aot module vs the jitted one, 
   because this is going to get super confusing. im on to my third layer of compiler running at once. 
+- my plan is to do a vm eventually anyway so maybe do that now since 
+  it will make the boundary between the two abis more clear. 
+  - pass in ops to gen_do_fold_impl so can use it for memory access as well. 
+  - init_child_tls has to be on the vm's stack, not the real one. 
+  - careful not to always run until the very first frame. 
+    can have a stack of real calls that enter the vm. 
 
 ## (Jan 10)
 

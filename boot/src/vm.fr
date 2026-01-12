@@ -1,12 +1,13 @@
 
 extern_to_easy_abi_dyncall_shim :: fn(arg: *u8, ret: *u8, callee: @FnPtr(ret: *u8, arg: *u8) void) void = {
+    unreachable();
     // TODO: probably need to copy arg
     callee(ret, arg);
 };
 
 easy_abi_emit_shim :: fn(c: *SelfHosted, fid: FuncId) void = {
     shared := c.comptime_codegen;
-    handler_callee_address: rawptr = report_called_uncompiled_or_just_fix_the_problem;
+    handler_callee_address: rawptr = @run wrap_with_easy_abi(report_called_uncompiled_or_just_fix_the_problem);
     m := shared.m; 
     func := c.get_function(fid);
     c.when_debug(.Shim, fn(o) => @fmt(o, "S: create %", fmt_func(c, fid)));
@@ -14,7 +15,6 @@ easy_abi_emit_shim :: fn(c: *SelfHosted, fid: FuncId) void = {
     enter_task shared { entry |
         id = m.intern(@tfmt("%__shim", fid));
         
-        // create a new function
         f := temp().box_uninit(Qbe.Fn);
         f.default_init(m);
         f.lnk.no_inline = true;
@@ -32,10 +32,17 @@ easy_abi_emit_shim :: fn(c: *SelfHosted, fid: FuncId) void = {
         // call into the compiler to get the real callee
         // TODO: only right first generation
         callee := f.newtmp("callee", .Kl);
-        push(b, make_ins(.arg,  .Kl, QbeNull, f.getcon(SelfHosted.int_from_ptr(c)), QbeNull));
-        push(b, make_ins(.arg,  .Kw, QbeNull, f.getcon(fid.as_index()), QbeNull));
-        push(b, make_ins(.call, .Kl, callee, f.getcon(handler_callee_address.int_from_rawptr()), QbeNull));
-
+        arg, arg2, ret := (f.newtmp("input", .Kl), f.newtmp("input", .Kl), f.newtmp("output", .Kl));
+        push(b, make_ins(.alloc8, .Kl, arg, f.getcon(16), Qbe.Null));
+        push(b, make_ins(.alloc8, .Kl, ret, f.getcon(8), Qbe.Null));
+        push(b, make_ins(.add, .Kl, arg2, arg, f.getcon(8)));
+        push(b, make_ins(.storel, .Kw, QbeNull, f.getcon(SelfHosted.int_from_ptr(c)), arg));
+        push(b, make_ins(.storew, .Kw, QbeNull, f.getcon(fid.as_index()), arg2));
+        push(b, make_ins(.arg,  .Kl, QbeNull, ret, QbeNull));
+        push(b, make_ins(.arg,  .Kl, QbeNull, arg, QbeNull));
+        push(b, make_ins(.call, .Kw, QbeNull, f.getcon(handler_callee_address.int_from_rawptr()), QbeNull));
+        push(b, make_ins(.load, .Kl, callee, ret, QbeNull));
+        
         push(b, make_ins(.arg, .Kl, QbeNull, output, QbeNull));
         push(b, make_ins(.arg, .Kl, QbeNull, input, QbeNull));
         push(b, make_ins(.call, .Kw, Qbe.Null, callee, Qbe.Null));
@@ -46,18 +53,44 @@ easy_abi_emit_shim :: fn(c: *SelfHosted, fid: FuncId) void = {
     c.created_jit_fn_ptr_value(fid, shared.wait_for_symbol(id));
 };
 
-init_child_tls :: fn(a: Alloc, n: i64) void = {
+init_vm_and_tls :: fn(self: *SelfHosted) void = {
+    n := franca_required_stack_bits - 1;
+    opts := BuildOptions.ptr_from_raw(self.env.build_options);
+    a := self.get_alloc();
+    opts.tls_stack_bits = n;
+    if USE_VM {
+        stack := import("@/lib/sys/threads.fr")'allocate_stack_raw(prefer_syscalls(), current_os(), n);
+        self.vm = self.get_alloc().boxed(Vm.Vm, (
+            stack = stack.usable,
+            frame = self.get_alloc().box_zeroed(Vm.Frame),
+            fns = list(self.get_alloc()),
+        ));
+        self.vm.frame.stack_top = self.vm.stack.len;
+        self.vm.fns&.push(zeroed(Vm.FnPair));
+        t := bit_cast_unchecked(*u8, *StaticTls, stack.usable.ptr);
+        Vm'init_child_tls(a, t);
+        tls(.panic_hook)[] = vm_backtracing_panic_handler;
+    } else {
+        aa := @uninitialized i64;
+        base := i64.int_from_ptr(aa&).bit_and(bit_not(1.shift_left(n) - 1));
+        t := StaticTls.ptr_from_int(base);
+        Vm'init_child_tls(a, t);
+    };
+};
+
+// TODO: since `t` is on the vm's stack, i don't have to change franca_required_stack_bits.
+//       so could get rid of the extra code i added for getting it out of BuildOptions. 
+init_child_tls :: fn(a: Alloc, t: *StaticTls) void = {
     @if(@run(__driver_abi_version < 1512)) unreachable();
-    // get_stack_base_for_tls
-    aa := @uninitialized i64;
-    base := i64.int_from_ptr(aa&).bit_and(bit_not(1.shift_left(n) - 1));
-    t := StaticTls.ptr_from_int(base);
     
     t[] = StaticTls.ptr_from_int(get_stack_base_for_tls())[];
+    // the jitted code gets it from `__baked_compctx` instead. 
+    // this needs to be null at the end when calling into the driver 
+    // since it wants to run the fully jitted compiler. might as well do it now. 
     t.comptime = zeroed(rawptr);
     
     Crash :: import("@/lib/crash_report.fr");
-    it :: Crash'backtracing_panic_handler;
+    it :: vm_backtracing_panic_handler;
     hook := bit_cast_unchecked(rawptr, @type tls(.panic_hook)[], @run wrap_with_easy_abi(it));
     t.panic_hook = hook;
     A :: import("@/lib/alloc/fixed_block.fr").BlockAlloc;
@@ -71,6 +104,8 @@ init_child_tls :: fn(a: Alloc, n: i64) void = {
     t.temporary_allocator_i = tmp;
 };
 
+// TODO: get rid of this if vm works out (and isn't too painfully slow). 
+//       then also won't need to track have_jit_shim. 
 undo_map_jit :: fn(m: *Qbe.Module) void = {
     // need to allow the jitted code to call apple_thread_jit_write_protect
     // even tho im not doing bake so the fnptrs created at comptime 
@@ -97,3 +132,318 @@ undo_map_jit :: fn(m: *Qbe.Module) void = {
     
     temp().reset(mark);
 };
+
+enqueue :: fn(shared: *CodegenShared, entry: *CodegenEntry) void = {
+    @if(@run(__driver_abi_version < 1512)) unreachable();
+    @debug_assert(!shared.threaded, "threaded");
+    vm, m := (current_comptime()[].vm, shared.m);
+    
+    log := entry.logging.len != 0;// || true;
+    @match(entry.task) {
+        fn Func(f) => {
+            if log {
+                f.set_block_id();
+                printfn(f, m.debug_out);
+                m.flush_debug();
+            };
+        
+            use_symbol(m, f.lnk.id) { s |
+                s.jit_addr = vm.push_fn(f);
+                s.kind = .Local;
+                @debug_assert_le(s.fixups.len, 1);  // no emitdat, just the one for Shim
+                m.do_fixups(s);
+            };
+        }
+        fn JitImport(it) => put_jit_addr(m, it.lnk.id, it.addr);
+        fn Bounce(it) => {
+            use_symbol(m, it.target) { target_s |
+                use_symbol(m, it.lnk.id) { alias_s |
+                    @assert(!target_s.jit_addr.is_null(), "TODO: bounce");
+                    alias_s.jit_addr = target_s.jit_addr;
+                    @assert_eq(alias_s.fixups.len, 0);
+                };
+            };
+        }
+        fn Shim(it) => {
+            if log {
+                f := it.f;
+                f.set_block_id();
+                printfn(f, m.debug_out);
+                m.flush_debug();
+            };
+            use_symbol(m, it.shim_for) { s |
+                s.jit_addr = vm.push_fn(it.f);
+                s.shim_addr = s.jit_addr;
+                use_symbol(m, it.f.lnk.id) { shim_s |
+                    shim_s.jit_addr = s.jit_addr;
+                    @debug_assert_eq(shim_s.fixups.len, 0);
+                };
+                @debug_assert_eq(s.fixups.len, 0);
+                if ensure_got_slot(m, s, s.jit_addr) { fix |
+                    push_fixup(m, s, fix);
+                };
+            };
+        }
+        @default => @panic("boot/enqueue: %", entry.task&.tag());     
+    };
+    
+    // TODO: annoying that you have to remember to do this
+    shared.pipe.done&.push(entry);
+};
+
+fn push_fn(self: *Vm, f: *Qbe.Fn) rawptr = {
+    m := f.globals;
+    replace_switches(f);
+    f := clone(f);
+    i := self.fns.len;
+    self.fns&.push(f = f, m = m);
+    rawptr_from_int(-i)
+}
+
+// tag is the high bit of the function pointer. 
+// real function pointers are just their value so just wrap_with_easy_abi is enough and it's easy to toggle USE_VM. 
+fn unpack_callable(self: *Vm, f: i64) Callable = {
+    @if(f < 0) return(Fn = self.fns[-f]);
+    (EasyAbi = bit_cast_unchecked(i64, EasyAbiFn, f))
+}
+
+Vm :: @struct {
+    // must be AlignedStack because the child program will needs to have its own tls. 
+    stack: []u8;  
+    frame: *Frame;
+    fns: List(FnPair);
+};
+Frame :: @rec @struct {
+    prev: *Frame;
+    f: *Qbe.InlineFn;
+    m: *Qbe.Module;
+    // index into .stack of next unused byte. starts at vm.stack.len and grows down. 
+    stack_top: i64;  
+    refs: []rawptr;  // [RTmp]
+    b: *Qbe.Blk;
+    i: i64;          // b.ins[i]
+    par: Array(rawptr, 2);
+    dbgloc := zeroed(*Qbe.Ins);
+    is_entry := false;
+};
+FnPair :: @struct(f: *Qbe.InlineFn, m: *Qbe.Module);
+EasyAbiFn :: @FnPtr(r: rawptr, a: rawptr) void;
+Callable :: @tagged(
+    Fn: FnPair,
+    EasyAbi: EasyAbiFn,
+);
+
+fn eval(self: *Vm, f: i64, r: []u8, a: []u8) void = {
+    rr, aa := (u8.raw_from_ptr(r.ptr), u8.raw_from_ptr(a.ptr));
+    @match(self.unpack_callable(f)) {
+        fn Fn(f) => self.eval(f, rr, aa);
+        fn EasyAbi(f) => f(rr, aa);
+    };
+}
+
+fn eval(self: *Vm, f: FnPair, output: rawptr, input: rawptr) void = {
+    end_frame := self.frame;
+    self.push_frame(f, output, input);
+    self.frame.is_entry = true;
+    self.spin(end_frame);
+}
+
+// :SLOW
+// this could be made much faster if i ran the opt passes on the ir first. 
+// especially converting to an ir designed for interpreting not compiling (ie. not ssa). 
+// but the point is to eventually rewrite it in c (where it can't depend my opt stuff)
+// and only use it once to bootstrap so maybe there's no point. 
+fn spin(self: *Vm, end_frame: *Frame) void = {
+    args := @slice(zeroed(rawptr), zeroed(rawptr));
+    n_arg := 0;
+    loop {
+        break :: local_return;
+        n_par := 0;
+        frame := self.frame;
+        b := frame.b;
+        idx := frame.i;
+        while => idx < b.ins.len {
+            i := b.ins[idx]&; 
+            idx += 1;
+            @match(i.op()) {
+                fn par() => {
+                    frame.set_ref(i.to, frame.par&[n_par]);
+                    n_par += 1;
+                }
+                fn arg() => {
+                    args[n_arg] = self.get_ref(i.arg&[0]);
+                    n_arg += 1;
+                }
+                fn call() => {
+                    @debug_assert_eq(n_arg, 2);
+                    n_arg = 0;
+                    frame.b = b;
+                    frame.i = idx;
+                    
+                    f := self.get_ref(i.arg&[0]).int_from_rawptr();
+                    @match(self.unpack_callable(f)) {
+                        fn Fn(f) => self.push_frame(f, args[0], args[1]);
+                        // it might call self.eval again so must be re-entrant. 
+                        // (and end_frame isn't always the one with stack_top=stack.len)
+                        fn EasyAbi(f) => f(args[0], args[1]);
+                    };
+                    break();  // tail self.spin();
+                }
+                fn cas0() => {
+                    args[0] = self.get_ref(i.arg&[0]);
+                }
+                fn cas1() => {
+                    p, old, new := (args[0], self.get_ref(i.arg&[0]), self.get_ref(i.arg&[1]));
+                    result := @if(i.cls() == .Kw, 
+                        do_cas(.Kw, p, old, new), 
+                        do_cas(.Kl, p, old, new));
+                    frame.set_ref(i.to, result);
+                }
+                fn blit0() => {
+                    args[0] = self.get_ref(i.arg&[0]);
+                    args[1] = self.get_ref(i.arg&[1]);
+                }
+                fn blit1() => {
+                    src, dest, size := (args[0], args[1], i.arg&[0].rsval().intcast().abs());
+                    copy_bytes(dest, src, size);
+                }
+                fn nop() => ();
+                fn dbgloc() => {
+                    frame.dbgloc = i;
+                }
+                fn copy() => {
+                    frame.set_ref(i.to, self.get_ref(i.arg&[0]));
+                }
+                @default => self.simple_op(frame, i);
+            };
+        };
+        
+        frame.i = 0;
+        @match(b.jmp.type) {
+            fn ret0() => {
+                self.frame = frame.prev;
+                ::ptr_utils(Frame);
+                if identical(self.frame, end_frame) {
+                    return();
+                };
+            }
+            fn jmp() => {
+                frame.b = b.s1;
+            }
+            fn jnz() => {
+                c := self.get_ref(b.jmp.arg);
+                c: u32 = c.int_from_rawptr().trunc();  // :jnz_is_Kw
+                c := c != 0;
+                frame.b = @if(c, b.s1, b.s2);
+            }
+            fn hlt() => panic("vm halted");
+            @default => @panic("vm bad jmp: %", b.jmp.type);
+        };
+        // tail self.spin();
+    };
+}
+
+fn simple_op(self: *Vm, frame: *Frame, i: *Qbe.Ins) void = {
+    if @is(i.op(), .alloc4, .alloc8) {
+        size := frame.f.con[i.arg&[0].val()]&;
+        @debug_assert(rtype(i.arg&[0]) == .RCon && size.type() == .CBits);
+        size := size.bits();
+        frame.stack_top -= size.ualign_to(8);
+        result := bit_cast_unchecked(*u8, rawptr, self.stack.index(frame.stack_top));
+        frame.set_ref(i.to, result);
+        return();
+    };
+    
+    a0, a1 := (
+        self.get_ref(i.arg&[0]).int_from_rawptr(),
+        self.get_ref(i.arg&[1]).int_from_rawptr(),
+    );
+    
+    #use("@/backend/opt/fold.fr");
+    is_memory :: fn(o: Qbe.O) = @is(o, 
+        .storeb, .storeh, .storew, .storel, .stores, .stored,
+        .loadsb, .loadub, .loadsh, .loaduh, .loadsw, .loaduw, .load,
+    );
+    result := if is_memory(i.op()) {
+        impl :: gen_do_fold_impl(is_memory);
+        do_fold(i.op(), i.cls(), a0, a1, impl)
+    } else {
+        @debug_assert(OpTab'get(i.op(), .can_fold), "bad vm op %", i.op());
+        do_fold(i.op(), i.cls(), a0, a1)
+    };
+    frame.set_ref(i.to, result.rawptr_from_int());
+};
+
+fn do_cas($k: Qbe.Cls, p: rawptr, old: rawptr, new: rawptr) rawptr = {
+    @run enable_franca_ir_types(Ty(Qbe.O, Qbe.Cls));
+    part0 :: fn(p: rawptr) void #ir(.cas0, .Kw);
+    part1 :: fn(old: rawptr, new: rawptr) rawptr #ir({ (.cas1, k) });
+    part0(p);
+    part1(old, new)
+};
+
+fn set_ref(frame: *Frame, r: Qbe.Ref, result: rawptr) void = {
+    @debug_assert(@is(rtype(r), .RTmp, .RNull), "bad set_ref");
+    frame.refs[r.val()] = result;
+}
+
+fn get_ref(self: *Vm, r: Qbe.Ref) rawptr = {
+    @match(rtype(r)) {
+        fn RTmp() => self.frame.refs[r.val()];
+        fn RCon() => {
+            c := self.frame.f.con[r.val()]&;
+            base := @match(c.type()) {
+                fn CBits() => zeroed(rawptr);
+                fn CAddr() => {
+                    a, _ := get_addr(self.frame.m, c.sym).unwrap();  // :SLOW
+                    @debug_assert(!a.is_null());
+                    a
+                };
+            };
+            base.offset(c.bits())
+        }
+        fn RNull() => zeroed(rawptr);  // avoids special casing unary ops
+        @default => @panic("get_ref %", r);
+    }
+}
+
+fn push_frame(self: *Vm, f: FnPair, output: rawptr, input: rawptr) void = {
+    frame_start := self.frame.stack_top - size_of(Frame);
+    frame := bit_cast_unchecked(*u8, *Frame, self.stack.index(frame_start));
+    n := f.f.ntmp.zext();
+    refs_start := frame_start - (n * size_of(rawptr));
+    refs := bit_cast_unchecked(*u8, *rawptr, self.stack.index(refs_start));
+    frame[] = (
+        stack_top = refs_start,
+        refs = refs.slice(n),
+        f = f.f,
+        m = f.m,
+        prev = self.frame,
+        b = f.f.blocks[0]&,
+        i = 0,
+        par = (output, input),
+    );
+    self.frame = frame;
+}
+
+fn log_backtrace(self: *Vm) void = {
+    @if(!USE_VM) return();
+    frame := self.frame;
+    @if(frame.stack_top == self.stack.len) return();
+    out := @ref u8.list(temp());
+    @fmt(out, "\n--- vm backtrace ---\n");
+    while => frame.stack_top != self.stack.len {
+        @fmt(out, "- $% @%[%] ", frame.m.str(frame.f.lnk.id), frame.b.name(), frame.i);
+        @if(!frame.dbgloc.is_null()) if frame.m.codemap { codemap |
+            // TODO: instead of tracking frame.dbgloc, just walk backwards from frame.i
+            //       then can also skip DebugTag.HIDE
+            dump_dbgloc(codemap, frame.dbgloc, out);
+        };
+        @fmt(out, "\n");
+        if frame.is_entry {
+            @fmt(out, "---\n");
+        }
+        frame = frame.prev;
+    };
+    print(out.items());
+}
