@@ -7,8 +7,6 @@ TODO: instead of abi_shift_easy_to_native it might have ben easier to
       but if i did that i'd either have to keep a version of dumb_emit in my language
       or forever match abi with the bootstrap compiler 
       and the stretch goal of this whole thing is to make it possible to change layout of structs in driver_api. 
-      
-TODO: examples/terminal.fr is broken because i want to import(emit_ir)
 
 ## (Jan 12)
 
@@ -27,6 +25,7 @@ TODO: examples/terminal.fr is broken because i want to import(emit_ir)
   problem is that the memory is @static() so wrapping the vtable happens multiple times
 - now it gets as far as producing a binary (which doesn't work). 
   hopefully it's just that dumb_emit_ir still =true,
+  yeah. works now (still no vm). there's a path through easy_abi that gets back to a real compiler that repros. 
 
 ## (Jan 11)
 

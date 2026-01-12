@@ -34,8 +34,13 @@ fn fill_driver_vtable(vtable: *ImportVTable, for_driver: bool) void = {
     fields := get_fields(ImportVTable);
     fr := current_compiler_context();
 
-    vtable.host_abi = fr.vtable.target_abi;
-    vtable.target_abi = @if(DUMB_EMIT_IR, 1, 0);
+    if DUMB_EMIT_IR {
+        vtable.generation = fr.vtable.generation;
+        vtable.generation += 1;
+        if vtable.generation > 2 {
+            vtable.generation = 0;
+        };
+    };
     
     for get_constants(driver_vtable_exports) { name |
         fid := FuncId.get_constant(driver_vtable_exports, name)
@@ -74,14 +79,8 @@ fn fill_driver_vtable(vtable: *ImportVTable, for_driver: bool) void = {
     };
 }
 
-abi_shift_native_to_easy :: { 
-    fr := current_compiler_context(); 
-    DUMB_EMIT_IR && fr.vtable.target_abi == 0
-};
-abi_shift_easy_to_native :: { 
-    fr := current_compiler_context(); 
-    DUMB_EMIT_IR && fr.vtable.target_abi == 1
-};
+abi_shift_native_to_easy :: DUMB_EMIT_IR && { fr := current_compiler_context(); fr.vtable.generation == 0 };
+abi_shift_easy_to_native :: DUMB_EMIT_IR && { fr := current_compiler_context(); fr.vtable.generation == 1 };
 
 // TODO: this is garbage! the way my scoping works you can't access 
 //       the old overload set once you shadow it with a constant. 
@@ -374,17 +373,6 @@ driver_vtable_exports :: @struct {
     
     get_constant :: fn(c: Compiler, scope: ScopeId, name: Symbol) ?Ty(rawptr, Type) = 
         compiler_exports'get_field(scope, name, c.cast()[][]);
-    
-    // TODO: delete this. 
-    temporary_track_module :: fn(m: *Qbe.Module) void = {
-        // really what you want is to put RESOLVERS in tls.global so it can be shared accross compilation units 
-        // but that wouldn't even work here because LocationResolverNode has a function pointer
-        // which is a massive pain in the ass when the abis don't match. 
-        // so this is just a hack to let me see both stack traces. 
-        // relies on QbeModule layout being the same everywhere. 
-        @assert(abi_shift_native_to_easy); 
-        _ := push_resolver(QbeModule, m, find_ip_in_module);
-    };
 };
 
 CompilerRs :: ***SelfHosted;  // TODO: really this should be a new type so you can't accidently implement call functions by just adding extra indirection. hopefully the number of pointers makes it clear something's weird. 

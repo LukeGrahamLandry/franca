@@ -1,10 +1,14 @@
 
-driver :: fn(parent_vtable: *ImportVTable) void = {
-    println(DUMB_EMIT_IR);
-    println(abi_shift_native_to_easy);
-    println(abi_shift_easy_to_native);
-    println("Hello World");
-    
+driver :: fn(_: *ImportVTable) void = {
+    outfile := "target/a.out";
+    if cli_args().contains(fn(it) => it[] == "-notfirst") {
+        jit_then_aot(outfile);
+    } else {
+        who_drives_the_driver(outfile);
+    };
+};
+
+jit_then_aot :: fn(outfile: Str) void = {
     m := @ref @uninitialized Qbe.Module;
     init_default_module(m, (
         os = current_os(), 
@@ -13,24 +17,17 @@ driver :: fn(parent_vtable: *ImportVTable) void = {
         exe_debug_symbol_table = true,
     ));
     
-    if false {
-        inpath := "tests/ssa/mandel.ssa";
-        src := temp().read_to_string_or_crash(inpath);
-        src := src.items();
-        parse :: import("@/backend/meta/parse.fr").parse_top_level;
-        res := parse(m, src, Qbe'backend'compile_dat, Qbe.backend.compile_fn);
-        if res&.is_err() {
-            panic(res.Err);
-        };
-    };
-    if true {
         vtable := init_driver_vtable(false);
-        @if(DUMB_EMIT_IR) @println("host_abi=%, target_abi=%", vtable.host_abi, vtable.target_abi);
-        
         opts := vtable.default_build_options();
+        if cli_args().contains(fn(it) => it[] == "-unsafe") {
+            it := opts.safety_checks&;
+            it.insert(.Bounds, false);
+            it.insert(.DebugAssertions, false);
+            it.insert(.InvalidTag, false);
+        };
         opts.retain_function_names = true;
         src := """#include_std("lib/core.fr"); #include_std("compiler/main.fr"); """;
-        c := new_with_src2(parent_vtable, vtable, src, "entry_file", opts);
+        c := new_with_src(vtable, src, "entry_file", opts);
         c := vtable.with(c);
         fid := or c.get_unique_named("main") {
             panic("expected exactly one function called 'main'")
@@ -38,36 +35,63 @@ driver :: fn(parent_vtable: *ImportVTable) void = {
         self := c.data.cast()[][];
         pending := FuncId.list(temp());
         shared := init_codegen(m, c.get_alloc(), false);
-        E :: @if(DUMB_EMIT_IR, RealEmitIr'EmitIrA(), EmitIr);  
-        main_thread_pump(c, shared, @slice(fid), true, E);
+        main_thread_pump(c, shared, @slice(fid), true, EmitIrA());
         seal_debug_info(m, empty(), false, empty());
-    };
     
     bytes := {m.target.finish_module}(m);
     bytes := concat(bytes, temp());
-    outfile := "target/a.out";
     write_entire_file_or_crash(outfile, bytes);
-    println(outfile);
+    drop(m);
+    c'vtable'destroy_compiler(c.data);
 };
 
-new_with_src2 :: fn(parent_vtable: *ImportVTable, vtable: *ImportVTable, src: Str, filename: Str, options: *BuildOptions) Compiler = {
-    comp := {vtable.init_compiler}(options);
-    self := comp.cast()[][];
-    (parent_vtable.temporary_track_module)(Qbe.Module.raw_from_ptr(self.comptime_codegen.m));
-    src := src.shallow_copy(vtable'get_alloc(comp));
-    filename := filename.shallow_copy(vtable'get_alloc(comp));
-    file := {vtable.add_file}(comp, filename, src).shrink();
-    stmts := {vtable.parse_stmts}(comp, file&);
-    stmts := or stmts { err |
-        vtable.with(comp).report_error(err)
+who_drives_the_driver :: fn(outfile: Str) void = {
+    unsafe := cli_args().contains(fn(it) => it[] == "-unsafe");
+    safety := @if(unsafe, "-unsafe", "-safe");
+    println(":SLOW this takes ~17 seconds");
+    parent := get_executable_path(temp());
+    DUMB_EMIT_IR := @tfmt("%=1", Foreign.ENV.DUMB_EMIT_IR);
+    
+    // build the one that's compiled natively but will compile new things to easy_abi.
+    // eventually this will be written in a different language. 
+    args := @slice(DUMB_EMIT_IR, parent, "examples/default_driver.fr", "build", "compiler/main.fr", "-o", outfile);
+    run_cmd_blocking(Foreign.EXE.env, args)
+        || @panic("failed stage 1");
+    
+    // that compiler can't output executables. 
+    // use it to jit one that's compiled easy_abi but compiles to native. 
+    // and then use that jitted one to output a native one. 
+    args := @slice(DUMB_EMIT_IR, outfile, @source_file_name(), "-notfirst");
+    run_cmd_blocking(Foreign.EXE.env, args)
+        || @panic("failed stage 2");
+    
+    // TODO: the above steps don't work with -unsafe
+    
+    // the one we have now is native and outputs native
+    // but still doesn't export the backend so can't run the normal default_driver. 
+    // once again use it to jit new one and use the jitted one to output an exe. 
+    // TODO: this step is silly, it works if you export it one earlier...
+    //       but then the stabilization takes 4 steps instead of 3 so meh. 
+    args := @slice(@source_file_name(), "-notfirst", safety);
+    run_cmd_blocking(outfile, args)
+        || @panic("failed stage 3");
+
+    // now we have the full compiler. 
+    // rebuild until it repros
+    digest := Sha256'hex(read_entire_file_or_crash(temp(), outfile));
+    i := 0;
+    dowhile {
+        @println("stabilizing; %: %", i, digest);
+        i += 1;
+        args := @slice("examples/default_driver.fr", "build", "compiler/main.fr", "-o", outfile, safety);
+        run_cmd_blocking(outfile, args)
+            || @panic("failed stabilization %", i);
+        
+        old := digest;
+        digest = Sha256'hex(read_entire_file_or_crash(temp(), outfile));
+        digest != old
     };
-    //@debug_assert(stmts.len != 0, "parse_stmts returned 0");
-    res := {vtable.make_and_resolve_and_compile_top_level}(comp, stmts);
-    or res { err |
-        vtable.with(comp).report_error(err)
-    };
-    comp
-}
+};
 
 #include_std("compiler/lib.fr");
 

@@ -14,10 +14,10 @@
 #include_std("compiler/sema.fr"); 
 #include_std("compiler/ast_boring.fr");
 #use("@/compiler/ast_external.fr");  
-DUMB_EMIT_IR :: false;
+DUMB_EMIT_IR :: Foreign.ENV.DUMB_EMIT_IR.get_environment_variable().is_some();
 USE_VM :: false && abi_shift_native_to_easy;
-EmitIr :: @if(abi_shift_native_to_easy, EmitIrB(), RealEmitIr'EmitIrA()); 
-RealEmitIr :: import("@/compiler/emit_ir.fr");
+EmitIr :: @if(abi_shift_native_to_easy, EmitIrB(), EmitIrA()); 
+#include_std("compiler/emit_ir.fr");
 #include_std("boot/src/dumb_emit.fr"); 
 #include_std("compiler/jit.fr");
 Incr :: import("@/compiler/incremental.fr");
@@ -150,8 +150,6 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
     callee: ?F = .None;
     cachepath := choose_cache_filename(path);
     
-    @if(DUMB_EMIT_IR) @println("host_abi=%, target_abi=%", vtable.host_abi, vtable.target_abi);
-    
     a := general_allocator();
     to_free: ?Ty(*QbeModule, *Crash'LocationResolverNode) = .None;
     to_free_h: ?*Incremental.Header = .None;
@@ -282,9 +280,10 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
                         id := self.comptime_jit_symbol_id(fid);
                         use_symbol(c_m, id) { s |
                             @if(done&.get(fid.as_index()))
-                            if m.get_addr(s.name) { addr |
+                            if m.get_addr(m.intern(s.name)) { addr, size |
                                 // TODO: do fixups?
                                 s.jit_addr = addr;
+                                s.size = size.trunc();
                                 self.get_function(fid).set_flag(.RealAsmDone);
                             };
                             have_shim = identical(s.jit_addr, s.shim_addr);
@@ -297,6 +296,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
                         };
                     };
                     self.debug_deny_unfilled_jit_shim_calls = true;
+                    c_m.write_perfmap_symbols();
                     Vm'undo_map_jit(m);
                 };
             };
@@ -457,7 +457,6 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
         log = list(a),
         comptime_prefer_syscalls = prefer_syscalls(),
     );
-    @if(DUMB_EMIT_IR) @println("self = %", fmt_hex(self));
     self.comptime_codegen.m.codemap = (Some = self.codemap);
     self.add_function(zeroed Func);  // just for good luck. life is better when FuncId=0 is invalid. 
     self.other_module&.push(self.comptime_codegen.m, self.get_alloc());
