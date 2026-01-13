@@ -1,12 +1,36 @@
-    
-TODO: instead of abi_shift_easy_to_native it might have ben easier to 
-      have comptime and runtime use different abis? 
-      the latter is a pain because of things like XXX in openat 
-      and tls_stack_bits couldn't be a normal constant. 
-      also need to be careful because sometimes it will be calling something exported from the compiler already has easy_abi
-      but if i did that i'd either have to keep a version of dumb_emit in my language
-      or forever match abi with the bootstrap compiler 
-      and the stretch goal of this whole thing is to make it possible to change layout of structs in driver_api. 
+
+## (Jan 13)
+
+- getting import_c to handle raylib
+  - tried to get x11 forwarding working with xquartz and orb. waste of time, no success. 
+    even tho im sure ive done it before. 
+  - give up and try apple.
+    framework includes. somehow immediately transitive hell pulls in a billion headers. 
+    only marginally less painful than the linux stuff :(
+  - have to skip the `(^void)()` syntax
+  - a bunch more places to ignore `__attributes__`
+  - raylib uses fucking \r\n in one file which my `\` new line removal thing doesn't cope with.
+    but it sucks because i can't even paste that into a new file and test it because it deletes the shitty line endings magically. 
+  - builtin_clz
+  - remove `_` prefix in asm alias because i add it back. otherwise you get `__opendir`, etc. 
+  - without TARGET_OS_OSX you don't get a bunch of the typedefs (like CFAttributedStringRef) but you still get the functions that use them
+    same thing with `__BLOCKS__` (and that one they're not even consistant about not doing the typedefs)
+  - only thing stopping it from compiling if you just concat all the files 
+    is that the FOO_IMPLEMENTATION things only include-guard the header part not the implementation part
+    so have to undef it at the end. 
+  - somehow va_list being `struct { long[1] }` isn't the same as `char*` 
+    the former you get junk and the later works, but then bootstrapping tcc doesn't work. 
+    - the difference is whether its par or parc decides if abi inserts an extra load. 
+      and perhaps also indirectly if i pass the thing or a pointer to the thing to va_start and va_arg.
+      this is also what the extra ap := new_addr(ap) in my va_arg was about.
+    - also import_c inserts a bunch of redundant loads when just taking address 
+      and loadopt doesn't know va_start changes its argument? 
+      that fixes tcc with `valist=*char`. it's a qbe bug as well. 
+  - can't be listing all the frameworks to look for. 
+    hopefully the child_framework has to be a child of the one containing the current header. 
+    seems like that works. 
+  - wrongly treating `static const char *foo;` as constant only broke bubblewrap (at runtime). 
+    clearly that should be in autotest. 
 
 ## (Jan 12)
 
@@ -23,6 +47,7 @@ TODO: instead of abi_shift_easy_to_native it might have ben easier to
   so the ones it gives the child with native_abi comptime are still in easy_abi. 
 - it looks suspiciously like i have a dyncallNE calling a dyncallNE which doesn't make any sense. 
   problem is that the memory is @static() so wrapping the vtable happens multiple times
+- also don't have the real dlopen so have to rewrap those
 - now it gets as far as producing a binary (which doesn't work). 
   hopefully it's just that dumb_emit_ir still =true,
   yeah. works now (still no vm). there's a path through easy_abi that gets back to a real compiler that repros. 

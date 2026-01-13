@@ -32,6 +32,7 @@ A C11 compiler adapted from <https://github.com/rui314/chibicc>.
 - don't segfault on `puts(*&"");`
 - allow a union declaration with a single expression assigning the whole union 
   instead of a treating it as a single element initializer list initializing only the first member. 
+- allow reading const variables in constant expressions
 
 ### Features
 
@@ -40,9 +41,9 @@ A C11 compiler adapted from <https://github.com/rui314/chibicc>.
 (for demos, see `examples/bf/c_source.fr` and `examples/view_image.fr`). 
 - optionally use the franca calling convention (passing a hidden environment pointer)
 - allow some function attributes
-  - ignored: `__format__`, `__const__`, `format`, `noreturn`
 - show chain of macro declarations in error report
 - declare symbol aliases with the `asm` keyword
+- `__builtin`: clz
 
 ### Refactors 
 

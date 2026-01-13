@@ -24,6 +24,7 @@ Obj :: @struct(
     tok: *Token,
     align: i32,  // TODO
     stack_slot: Qbe.Ref, 
+    // TODO: use @bit_fields :SLOW
     is_function: bool,
     is_definition: bool,
     is_static: bool,
@@ -33,10 +34,11 @@ Obj :: @struct(
     is_inline: bool,
     yielded: bool,
     is_weak: bool,
+    is_const: bool,  // allowed to be read in constant expressions?
+    par_r: Qbe.Ref,  // when reused for :ConstVarInConstExpr, always in c.top_level_fn
     init_data: []u8,
     rel: []Dat2.Reloc,
     f: *Qbe.Fn,
-    par_r: Qbe.Ref,
     global_symbol: ?Qbe.Sym,  // TODO: use this more
 );
 Node :: @rec @struct(
@@ -109,6 +111,7 @@ VarAttr :: @struct {
     is_extern:  bool;
     is_inline:  bool;
     is_tls:     bool;
+    is_const:   bool;
     align:       i32;
 };
 
@@ -164,6 +167,7 @@ Ctx :: @rec @struct {
     m: *QbeModule;
     f: *Qbe.Fn;
     b: *Qbe.Blk;
+    top_level_fn: *Qbe.Fn;
     
     labels: HashMap(Str, *Qbe.Blk);
     brk_label: ?*Qbe.Blk;
@@ -220,6 +224,7 @@ Ctx :: @rec @struct {
     hide_stack: List(Ty(*Macro, *Token));
     allow_builtin_headers: bool;
     cached_number_tokens: Array(*Token, 2);
+    macos_framework_path: Str;
 };
 
 TransformCall :: @FnPtr(c: *Ctx, obj: *Obj, task: *CodegenTask) void;
@@ -585,13 +590,22 @@ fn declspec(c: *Ctx, rest: **Token, tok: *Token, attr: ?*VarAttr) *CType = {
             };
             
             // Handle storage class specifiers.
-            if @is(tok.kind, .typedef, .static, .extern, .inline, ._Thread_local, .__thread) {
-                attr := attr || @error_tok(c, tok, "storage class specifier is not allowed in this context");
+            if @is(tok.kind, .typedef, .static, .extern, .inline, ._Thread_local, .__thread, .const) {
+                break :: local_return;
+                // :ConstVarInConstExpr need to track to deny reading a non-const static at compile time
+                // but const is also a pointer modifer so need to allow `(const char *foo,` and ``
+                attr := attr || {
+                    @if(tok.kind == .const) break();
+                    @error_tok(c, tok, "storage class specifier is not allowed in this context");
+                };
+                @if(tok.kind == .const && attr.is_typedef) break();
+                
                 field := @match(tok.kind) {
                     fn typedef() => attr.is_typedef&;
                     fn static()  => attr.is_static&;
                     fn extern()  => attr.is_extern&;
                     fn inline()  => attr.is_inline&;
+                    fn const()   => attr.is_const&;
                     @default     => attr.is_tls&;
                 };
                 field[] = true;
@@ -832,6 +846,12 @@ fn type_suffix(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *CType = {
 
 // pointers = ("*" ("const" | "volatile" | "restrict")*)*
 fn pointers(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *CType = {
+    if consume(rest, tok, "^") {
+        // HACK: skip apple block syntax and hope you just don't use those typedefs. 
+        //       (just disabling __BLOCKS__ with the preprocessor doesn't get them all)
+        // TODO: poison the declaration so error instead of miscompile if you actually try to use it?
+        return c.pointer_to(ty);
+    };
     while => consume(tok&, tok, "*") {
         ty = c.pointer_to(ty);
         dowhile {
@@ -941,6 +961,9 @@ fn enum_specifier(c: *Ctx, rest: **Token, tok: *Token) *CType #once = {
         name := c.get_ident(tok);
         c.next(tok&, tok);
 
+        if equal(tok, "__attribute__") {
+            _ := c.attribute_list(tok&, tok);
+        };
         if consume(tok&, tok, "=") {
             val = c.const_expr(tok&, tok);
         };
@@ -1233,6 +1256,10 @@ fn comma_sep(c: *Ctx, tok: **Token, $end: Str, $body: @Fn() void) void = {
         };
         first = false;
         body();
+        
+        if equal(tok[], "__attribute__") {
+            _ := c.attribute_list(tok, tok[]);
+        };
     };
 }
 
@@ -1724,6 +1751,12 @@ fn size(init: *Initializer) i64 =
 // initializer list contains a non-constant expression.
 fn gvar_initializer(c: *Ctx, rest: **Token, tok: *Token, var: *Obj) void = {
     init := c.initializer(rest, tok, var.ty&);
+    if var.is_const && !init.expr.is_null() && init.expr.r.rtype() == .RCon {
+        // :ConstVarInConstExpr
+        con := c.f.get_constant(init.expr.r);
+        var.par_r = c.top_level_fn.newcon(con);
+    };
+    
     if init.all_zeros {
         return();
     };
@@ -1844,6 +1877,10 @@ fn struct_members(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) void = {
             };
             cur.next = mem;
             cur = cur.next;
+            
+            if equal(tok, "__attribute__") {
+                _ := c.attribute_list(tok&, tok);
+            };
         };
     };
 
@@ -1989,6 +2026,11 @@ fn parse_typedef(c: *Ctx, tok: *Token, basety: *CType) *Token = {
     comma_sep(c, tok&, ";") {
         ty := c.declarator(tok&, tok, basety);
         if(ty.name.is_null(), => @error_tok(c, ty.name_pos, "typedef name omitted"));
+        
+        if equal(tok, "__attribute__") {
+            _ := c.attribute_list(tok&, tok);
+        };
+        
         if !equal(tok, ";") && !equal(tok, ",") {
             @error_tok(c, ty.name_pos, "invalid type after 'typedef'");
         };
@@ -2036,6 +2078,14 @@ AttrName :: @enum(
     noreturn, 
     deprecated,
     may_alias,
+    unused,
+    swift_name,
+    warn_unused_result,
+    availability,
+    swift_wrapper,
+    transparent_union,
+    unavailable,
+    swift_attr,
     _,
 );
 
@@ -2077,7 +2127,14 @@ fn one_attribute(c: *Ctx, tok: *Token, result: *Attributes) *Token #once = {
     start := tok;
     c.next(tok&, tok);
     @match(kind) {
-        fn _() => @error_tok(c, start, "unknown attribute");
+        fn _() => {
+            if equal(tok, "format_arg") {
+                // TODO: my read_punct takes the shorter one when one is a prefix of another.
+                tok = c.skip_attribute(tok.next);
+                return(tok);    
+            };
+            @error_tok(c, start, "unknown attribute: %", start.str());
+        }
         fn packed() => {
             result.packed = true;
         }
@@ -2088,11 +2145,13 @@ fn one_attribute(c: *Ctx, tok: *Token, result: *Attributes) *Token #once = {
             result.alias = (Some = tok);
         };
         fn visibility() => str_arg { vis |
-            if vis == "hidden" {
-                // :AttributesNotYetImplemented
-                result.hidden = true;
-            } else {
-                @error_tok(c, tok, "unknown visibility attribute: %", vis);
+            @switch(vis) {
+                @case("hidden") => {
+                    // :AttributesNotYetImplemented
+                    result.hidden = true;
+                }
+                @case("default") => ();
+                @default => @error_tok(c, tok, "unknown visibility attribute: %", vis);
             };
         };
         fn constructor() => {
@@ -2175,6 +2234,10 @@ fn asm_alias(c: *Ctx, tok: *Token, obj: *Obj) *Token = {
         || @error_tok(c, tok, "expected a string (treating asm keyword after function as symbol alias)");
     c.next(tok&, tok);
     tok = c.skip(tok, ")");
+    if c.m.goal.os == .macos && alias.starts_with("_") {  
+        // HACK: i do it automatically in the backend
+        alias = alias.rest(1);
+    };
     obj.global_symbol = (Some = c.m.intern(alias));
     tok
 }
@@ -2331,6 +2394,7 @@ fn global_variable(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, first_d
         var := prev_var;
         if var.is_null() {
             var = c.new_gvar(c.get_ident(ty.name), ty, ty.name_pos, attr.is_static);
+            var.is_const = attr.is_const && !@is(ty.kind, .TY_PTR, .TY_FUNC);  // :ConstVarInConstExpr
         } else {
             if var.is_static != attr.is_static {
                 @warn_tok(c, var.tok, "forward declared here");
@@ -2879,6 +2943,12 @@ parse_ident :: fn(c, rest, tok) #prefix(.TK_IDENT) = {
             var := sc.var;
             node := c.new_var_node(var, start);
             node.ty = var.ty;
+            if var.is_const && var.par_r != Qbe.Null {
+                // :ConstVarInConstExpr need to do this early so is_const_expr works.
+                con := c.top_level_fn.get_constant(var.par_r);
+                node.r = c.f.newcon(con);
+                @debug_assert_eq(node.r.rtype(), .RCon, "const var");
+            };
             return(node);
         };
         ::ptr_utils(@type sc.enum_ty[]);
@@ -3212,6 +3282,9 @@ va_arg :: fn(c, rest, tok) #prefix(.__builtin_va_arg) = {
     c.next(tok&, tok);
     tok = c.skip(tok, "(");
     ap := c.parse_expr(tok&, tok, .Assign);
+    if c.m.goal.arch != .x86_64 {  // TODO: why not always? if it's already a struct this should do nothing. 
+        ap = c.new_addr(ap, tok);
+    };
     tok = c.skip(tok, ",");
     type := c.typename(tok&, tok);
     if @is(type.kind, .TY_STRUCT, .TY_UNION) {
@@ -3221,6 +3294,16 @@ va_arg :: fn(c, rest, tok) #prefix(.__builtin_va_arg) = {
     ap := c.gen_expr(ap);
     r := c.emit(.vaarg, type.cls(), ap, QbeNull);
     c.ir_node(type, r, QbeNull, start)
+};
+clz :: fn(c, rest, tok) #prefix(.__builtin_clz) = {
+    start := tok;
+    c.next(tok&, tok);
+    tok = c.skip(tok, "(");
+    node := c.parse_expr(tok&, tok, .Assign);
+    rest[] = c.skip(tok, ")");
+    r := c.gen_expr(node);
+    r := c.emit(.clz, node.ty.cls(), r, QbeNull);
+    c.ir_node(node.ty, r, QbeNull, start)
 };
 compatible :: fn(c, rest, tok) #prefix(.__builtin_types_compatible_p) = {
     start := tok;
@@ -3940,6 +4023,7 @@ fn gen_par(c: *Ctx, ty: *CType) void = {
     
     for obj_params { loc |
         k := loc.ty.cls();
+        @debug_assert(!loc.is_const);
         loc.par_r = f.newtmp(loc.name, k);
         i := c.ir_index(loc.ty);
         o: Qbe.O = @if(i == QbeNull, .par, .parc);

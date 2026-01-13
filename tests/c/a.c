@@ -22,7 +22,17 @@ long __syscall_cp(long a, long b) { return 0; }
 #define __syscall_cp(...) __SYSCALL_DISP(__syscall_cp,__VA_ARGS__)
 #define syscall_cp(...) __syscall_cp(__VA_ARGS__)
 
+static const int var0 = 123 + 456;
+static const int var1 = var0 + 1;        // apple's CGFont.h kCGGlyphMax does this. 
+static const char *not_a_constant = "";  // still allow const as a type modifier. 
+typedef const int *(*unused_fn_ty)(int a);
+
 int main() {
+    ASSERT(580, var1);
+    ASSERT(0, strlen(not_a_constant));
+    not_a_constant = "abc";
+    ASSERT(3, strlen(not_a_constant));
+    
     make_empty_struct2(); make_empty_struct();
     
     // :ThisShouldBeValidUndef
@@ -95,3 +105,10 @@ int main() {
 
 int foo(void) { return 1; }
 int bar(char* a) { return 1; }
+
+#define unused_macro_with_invalid_token ..hello_world..
+
+// chibicc does defined() in #if before expanding macros. apple wants to use it in a macro. 
+#define macro1() defined(macro2)
+#if macro1()
+#endif

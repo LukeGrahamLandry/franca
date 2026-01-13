@@ -194,40 +194,26 @@ fn valid_macro_name(tok: *Token) bool = {
 fn valid_macro_name(kind: Tokens.TokenKind) bool = 
     kind.raw() >= Tokens.TokenKind.return.raw() && kind.raw() <= Tokens.TokenKind._Generic.raw();
 
-fn read_const_expr(c: *Ctx, rest: **Token, tok: *Token) *Token = {
-    tok = c.copy_line(rest, tok);
-    head := Token.zeroed();
-    cur := head&;
-
-    while => tok.kind != .TK_EOF {
-        // "defined(foo)" or "defined foo" becomes "1" if macro "foo"
-        // is defined. Otherwise "0".
-        if equal(tok, "defined") {
-            start := tok;
-            has_paren := consume(tok&, tok.next, "(");
-
-            if(!tok.valid_macro_name(), => @error_tok(c, start, "macro name must be an identifier"));
-            m := c.find_macro(tok);
-            tok = tok.next;
-            if has_paren {
-                tok = c.skip(tok, ")");
-            };
-            new := c.new_num_token(m.is_some().int(), start);
-            c.append_one(cur&, new, false);
-        } else {
-            c.append_one(cur&, tok, false);
-            tok = tok.next;
-        };
+// "defined(foo)" or "defined foo" becomes "1" if macro "foo" is defined. Otherwise "0".
+replace_defined :: fn(c: *Ctx, tok: **Token) *Token = {
+    start := tok[];
+    @debug_assert(equal(start, "defined"));
+    has_paren := consume(tok, tok.next, "(");
+    
+    if(!tok[].valid_macro_name(), => @error_tok(c, start, "macro name must be an identifier"));
+    m := c.find_macro(tok[]);
+    tok[] = tok[].next;
+    if has_paren {
+        tok[] = c.skip(tok[], ")");
     };
-
-    cur.next = tok;
-    head.next
+    new := c.new_num_token(m.is_some().int(), start);
+    new
 }
 
 // Read and evaluate a constant expression.
 fn eval_const_expr(c: *Ctx, rest: **Token, tok: *Token) bool = {
     start := tok;
-    expr := c.read_const_expr(rest, tok.next);
+    expr := c.copy_line(rest, tok.next);
     expr = c.preprocess2(expr);
 
     if(expr.kind == .TK_EOF, => @error_tok(c, start, "no expression"));
@@ -575,9 +561,15 @@ append_one :: fn(c: *Ctx, cur: **Token, tok: *Token, $copy: bool) void = {
     cur[] = cur.next;
 };
 
-// If tok is a macro, expand it and return true.
-// Otherwise, do nothing and return false.
 fn expand_macro(c: *Ctx, rest: **Token, tok: *Token) bool #once = {
+    // TODO: only if inside an #if? (but can't do it after before expansion because apple)
+    if equal(tok, "defined") {
+        t := tok;
+        rest[] = c.replace_defined(t&);
+        rest.next = t;
+        return(true)
+    };
+
     m := c.find_macro(tok) || return(false);
     
     // If a funclike macro token is not followed by an argument list,
@@ -635,24 +627,55 @@ fn until_eof(t: *Token, $body: @Fn(t: *Token) void) *Token = {
     t
 }
 
-fn search_include_paths(c: *Ctx, filename: Str) ?Str = {
+// checks the directory of parent_file first 
+fn search_include_paths(c: *Ctx, filename: Str, is_dquote: bool, parent_file: Str) ?Str = {
     if(filename.len > 0 && filename[0] == "/".ascii(), => return(Some = filename));
+    
+    if filename[0] != "/".ascii() {
+        // Treat it as relative to the folder of the file containing the include directive. 
+        dirname := @if(!parent_file.contains("/"), "./", parent_file.pop_path_segment());
+        @debug_assert(dirname.ends_with("/"));
+        path := @tfmt("%%", dirname, filename);
+        
+        check_nocache :: fn(path: Str) void => if file_exists(path) {
+            return(Some = path.shallow_copy(c.arena));
+        };
+        if is_dquote {
+            check_nocache(path);
+        };
+        
+        @if(c.macos_framework_path.len > 0)
+        if path.starts_with(c.macos_framework_path) {
+            break :: local_return;
+            @assert(!c.macos_framework_path.ends_with("/"));
+            path := path.rest(c.macos_framework_path.len + 1);
+            i := path.index_of(".".ascii()) || break();
+            framework := path.subslice(0, i);
+            i := filename.index_of("/".ascii()) || break();
+            child_framework, file := (filename.subslice(0, i), filename.rest(i + 1));
+            path := @tfmt("%/%.framework/Frameworks/%.framework/Headers/%", 
+                c.macos_framework_path, framework, child_framework, file);
+            check_nocache(path);
+        };
+        
+        // fallthrough
+    };
+    check :: fn(path: Str, i: i64) void => if file_exists(path) {
+        path := path.shallow_copy(c.arena);
+        c.filename_cache&.insert(filename, path);
+        c.include_next_idx = i;
+        return(Some = path);
+    };
 
     // The assumption being you'll include the same thing many times and it's slow to check if a file exists. 
     if c.filename_cache&.get(filename) { it |
         return(Some = it)  
     };
 
-    // Search a file from the include paths.
     // TODO: have this be a vtable thing instead of a list of file paths. just provide this as the default implementation. 
     enumerate c.include_paths { i, include_path |
-        path := u8.list(c.arena);
-        @fmt(path&, "%/%", include_path, filename);
-        if file_exists(path.items()) {
-            c.filename_cache&.insert(filename, path.items());
-            c.include_next_idx = i + 1;
-            return(Some = path.items());
-        };
+        path := @tfmt("%/%", include_path, filename);
+        check(path, i + 1);
     };
     
     @if(c.allow_builtin_headers || (c.m.goal.os == .linux && compiler_magic_headers.contains(filename)))
@@ -660,6 +683,13 @@ fn search_include_paths(c: *Ctx, filename: Str) ?Str = {
         return(Some = @tfmt("%%", HACK_BUILTIN_FOLDER_PREFIX, filename));
     };
     
+    // TODO: track which are used so can auto link them?
+    if c.macos_framework_path.len > 0 {
+        i := filename.index_of("/".ascii()) || return(.None);
+        framework, file := (filename.subslice(0, i), filename.rest(i + 1));
+        path := @tfmt("%/%.framework/Headers/%", c.macos_framework_path, framework, file);
+        check(path, c.include_paths.len + 1);
+    };
     .None
 }
 
@@ -860,23 +890,7 @@ fn preprocess2(c: *Ctx, tok: *Token) *Token = {
         fn include() => {
             start := tok.next;
             filename, is_dquote := c.read_include_filename(tok&, tok.next);
-
-            if filename[0] != "/".ascii() && is_dquote {
-                // Treat it as relative to the folder of the file containing the include directive. 
-                dirname :: fn(s: Str) Str = {
-                    if(!s.contains("/"), => return("./"));
-                    s.pop_path_segment()
-                };
-                // pop_path_segment has trailing slash
-                path := @tfmt("%%", dirname(start.file.name), filename);
-                if c.include_file(tok, path, start.next.next) { t |
-                    tok = t;
-                    continue();
-                };
-                // fallthrough
-            };
-
-            path := c.search_include_paths(filename) || filename;
+            path := c.search_include_paths(filename, is_dquote, start.file.name) || filename;
             tok   = c.include_file(tok, path, start.next.next)
                 || @error_tok(c, start, "Failed to open file: %", path);
         };
@@ -955,6 +969,8 @@ fn preprocess2(c: *Ctx, tok: *Token) *Token = {
         }
         fn error() => {
             msg := c.read_warn_text(tok&);
+            hack := c.m.goal.os == .macos && msg == "unknown compiler " && tok.file.name.ends_with("ConditionalMacros.h");
+            @if(hack) continue();
             @error_tok(c, start_kw, "error: %", msg);
         }
         fn warning() => {

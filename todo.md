@@ -1,6 +1,3 @@
-- i broke macos-amd ./boot/strap.sh but tests pass if you cross compile 
-  so its just the boot version specifically. 
-  maybe i can ignore it long enough to replace it with the new boot stuff. 
 - go through and add cases to check_opt.fr for everything in backend/opt
 - should error if you try to make a bake_relocatable_value which will never be called because the type doesn't contain pointers
 - deal with Crash'hook_backtrace();
@@ -361,6 +358,8 @@ bufs: [][]u8 = (ptr = bit_cast_unchecked(i64, @run(*[]u8), buf_ptr), len = buf_l
 
 ## import_c
 
+- make sure my detect_include_guard is working on all the system headers 
+- i get "unterminated conditional directive" on apple's unistd.h without -D_POSIX_C_SOURCE=200809L
 - C23: `__has_c_attribute`, allow `[[]]` instead of `__attribute__`
 - import_c add a test for the incorrect include guard thing i fixed on jul16
 - import_c/cc.fr searches include path for the starting file before your current working directory which is super confusing
