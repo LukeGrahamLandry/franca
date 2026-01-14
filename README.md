@@ -4,10 +4,10 @@ A self sufficient programming language.
 
 ## Features
 
-The main gimmick is full compile-time code execution: anything you can do at runtime, you can do at comptime.  
-Comptime code doesn't run in an interpreter. It's JITted to machine code by the same backend as the rest of your program.  
-Supporting that while also allowing cross compilation and reproducible builds is... nontrivial, but it mostly works.  
-Comptime code can dynamically allocate memory (and generate code). Any data structures that are reachable from 
+The main gimmick is full compile-time code execution: anything you can do at runtime, you can do at comptime. 
+Comptime code doesn't run in an interpreter. It's JITted to machine code by the same backend as the rest of your program. 
+Supporting that while also allowing cross compilation and reproducible builds is... nontrivial, but it mostly works. 
+Comptime code can dynamically allocate memory, make syscalls, and generate code. Any data structures that are reachable from 
 runtime code will automatically be included in the final binary. 
 
 - macros are functions that run at compile time, call compiler apis, and return ast nodes
@@ -27,16 +27,13 @@ There is no dependency on assemblers, linkers, llvm, or xcode-codesign.
 
 - mach-o (macos), elf (linux)
 - executables, dynamic libraries, relocatable object files
-- jit: for comptime execution 
+- jit for comptime execution 
 
-All the tests pass on macos-arm64 and most on macos-amd64.  
-On linux-(amd64,arm64,riscv64) the compiler can compile itself but not all tests pass.  
-(I haven't transcribed all the platform specific struct layouts/magic numbers yet). 
 On windows you can use WSL. 
 
 The compiler does not depend on libc (on linux, when built with -syscalls). 
 
-The webassembly target is still a work in progress (no threads, doesn't follow c abi, poor codegen, etc), 
+The webassembly target is still a work in progress (doesn't follow c abi, poor codegen, etc), 
 but the compiler can (slowly) compile itself. 
 
 ## Documentation
@@ -45,13 +42,16 @@ Some does exist, see the `docs/README.md`.
 
 ## Nontrivial Example Programs
 
+[![](https://builds.sr.ht/~lukegrahamlandry/franca.svg)](https://builds.sr.ht/~lukegrahamlandry/franca)
+[![](https://github.com/LukeGrahamLandry/franca/actions/workflows/test.yml/badge.svg)](https://github.com/LukeGrahamLandry/franca/actions/workflows/test.yml)
+
 > The following philosophical objections apply: The most significant program written in your language is its own compiler.
 
 - The franca compiler itself is written in franca [@/compiler](./compiler)
 - Lightly optimising codegen backend [@/backend](./backend) (based on Qbe)
-  - outputs native machine code for arm64/amd64, JIT or AOT(machO/elf), without an external assembler/linker
-- A C11 compiler (using that backend^) good enough to compile the lua interpreter [@/examples/import_c](./examples/import_c) (based on Chibicc)
+- C compiler (using that backend^) [@/examples/import_c](./examples/import_c) (based on Chibicc)
   - can run at comptime so franca programs can import c libraries directly without depending on another compiler
+  - compiles real programs: see tests/external/(lua, hare, bubblewrap, raylib, ...).fr
 - Windowing/3d graphics library [@/graphics](./graphics) (based on Sokol)
   - very unfinished! macos-arm64-metal only currently
 - You can try the [WebAssembly demo](https://franca.lukegrahamlandry.ca) in your browser without installing anything. 
@@ -120,8 +120,8 @@ there must be proportional terrible things or I'm probably just lying.
 - I don't have a nice debug mode that detects undefined behaviour (overflow, wrong tagged field, etc).
 - The compiler does an insane amount of redundant work.
   Like sometimes it reparses and re-resolves names for each specialization of a generic.
-  There just happens to only be ~75k lines of code ever written in this langauge so its not a big deal yet.
-  See examples/60fps.fr before judging its performace.
+  There just happens to only be ~90k lines of code ever written in this langauge so its not a big deal yet.
+  See examples/60fps.fr for a fun speed test.
 - There's some hoops you need to jump through when you want conditional compilation on different platforms 
   (because I care about cross compiling working seamlessly). 
 - It has only been used by (approximately) one person so I'm sure there are hella compiler bugs that I haven't stumbled upon yet. 

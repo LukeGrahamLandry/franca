@@ -1,3 +1,9 @@
+- make it more sane to jit a franca program from another directory
+  - don't just always shit a "traget" dir in the current dir
+  - be consistant about always checking the franca lib root dir then the current dir. 
+    ie. `franca examples/sudoku.fr` works anywhere you run it but `franca examples/chess/gui.fr -jit` 
+    doesn't because include_bytes doesn't fallback to the root dir. 
+  - make sure the inverse works too. you should be able to write a .fr script that doesn't live in the root dir
 - go through and add cases to check_opt.fr for everything in backend/opt
 - should error if you try to make a bake_relocatable_value which will never be called because the type doesn't contain pointers
 - deal with Crash'hook_backtrace();
@@ -358,6 +364,8 @@ bufs: [][]u8 = (ptr = bit_cast_unchecked(i64, @run(*[]u8), buf_ptr), len = buf_l
 
 ## import_c
 
+- the line numbers in my error messages are wrong sometimes!
+  shows the right text tho so its not a massive deal but kinda cringe 
 - make sure my detect_include_guard is working on all the system headers 
 - i get "unterminated conditional directive" on apple's unistd.h without -D_POSIX_C_SOURCE=200809L
 - C23: `__has_c_attribute`, allow `[[]]` instead of `__attribute__`

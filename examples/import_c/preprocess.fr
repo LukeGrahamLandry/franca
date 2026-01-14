@@ -584,8 +584,6 @@ fn expand_macro(c: *Ctx, rest: **Token, tok: *Token) bool #once = {
     // Built-in dynamic macro application such as __LINE__
     if m.handler { handler | 
         rest[] = handler(c, tok);
-        // note: this means a dynamic macro is never allowed to return multiple tokens. 
-        rest.next = tok.next;
         return(true);
     };
     
@@ -712,7 +710,13 @@ fn search_include_next(c: *Ctx, filename: Str) ?Str = {
 }
 
 // Read an #include argument.
-fn read_include_filename(c: *Ctx, rest: **Token, tok: *Token) Ty(Str, bool) = @if_else {  // (_, is_dquote)
+fn read_include_filename(c: *Ctx, rest: **Token, tok: *Token) Ty(Str, bool) = {
+    s, q := read_include_filename_no_skip_line(c, tok&, tok);
+    rest[] = skip_line(tok);
+    (s, q)
+}
+
+fn read_include_filename_no_skip_line(c: *Ctx, rest: **Token, tok: *Token) Ty(Str, bool) = @if_else {  // (_, is_dquote)
     // Pattern 1: #include "foo.h"
     @if(tok.kind == .TK_STR) => {
         // A double-quoted filename for #include is a special kind of
@@ -720,8 +724,8 @@ fn read_include_filename(c: *Ctx, rest: **Token, tok: *Token) Ty(Str, bool) = @i
         // For example, "\f" in "C:\foo" is not a formfeed character but
         // just two non-control characters, backslash and f.
         // So we don't want to use token.str.
-        rest[] = skip_line(tok.next);
         s := tok.str().slice(1, tok.len.intcast() - 1);
+        rest[] = tok.next;
         (s, true)
     };
     // Pattern 2: #include <foo.h>
@@ -736,7 +740,7 @@ fn read_include_filename(c: *Ctx, rest: **Token, tok: *Token) Ty(Str, bool) = @i
             tok = tok.next;
         };
 
-        rest[] = skip_line(tok.next);
+        rest[] = tok.next;
         s := join_tokens(start.next, tok);
         (s, false)
     };
@@ -744,8 +748,8 @@ fn read_include_filename(c: *Ctx, rest: **Token, tok: *Token) Ty(Str, bool) = @i
     // In this case FOO must be macro-expanded to either
     // a single string token or a sequence of "<" ... ">".
     @if(tok.valid_macro_name()) => {
-        tok2 := c.preprocess2(c.copy_line(rest, tok));
-        c.read_include_filename(tok2&, tok2)
+        tok2 := c.preprocess2(c.copy_line(tok&, tok));
+        c.read_include_filename_no_skip_line(tok2&, tok2)
     };
     @else => @error_tok(c, tok, "expected a filename");
 };
@@ -856,6 +860,7 @@ Directive :: @enum(
     if, ifdef, ifndef, elif, else, endif, 
     pragma, error, warning, line,
     add_include_path, // TODO: my extensions should probably be pragmas
+    discard_static_scope,
     _,
 );
 
@@ -983,13 +988,13 @@ fn preprocess2(c: *Ctx, tok: *Token) *Token = {
         // for convenience in caching i want to represent -Ifoo as something in source text 
         // so i don't have to add a new thing to .frc files. 
         fn add_include_path() => {
-            t := tok.next;
-            if t.kind != .TK_STR {
-                @error_tok(c, t, "expected string");
-            };
-            tok = skip_line(t.next);
-            s := t.str().slice(1, t.len.intcast() - 1);
+            s, _ := c.read_include_filename(tok&, tok.next);
             c.include_paths&.push(s);
+        };
+        fn discard_static_scope() => {
+            tok.kind = .TK_discard_static_scope;
+            c.append_one(cur&, tok, false);
+            tok = tok.next;
         };
         fn _() => {
             if tok.kind == .TK_PP_NUM {
@@ -1060,18 +1065,22 @@ builtins :: @struct {
     // - __USER_LABEL_PREFIX__ __C99_MACRO_WITH_VA_ARGS
     
     __FILE__ :: fn(c: *Ctx, tmpl: *Token) *Token = {
+        start := tmpl;
         while => !tmpl.origin.is_null() {
             tmpl = tmpl.origin;
         };
         c.new_str_token(tmpl.file.display_name, tmpl)
+            .set_next(start.next)
     };
     
     __LINE__ :: fn(c: *Ctx, tmpl: *Token) *Token = {
+        start := tmpl;
         while => !tmpl.origin.is_null() {
             tmpl = tmpl.origin;
         };
         i := tmpl.line_no + tmpl.file.line_delta;
         c.new_num_token(i.intcast(), tmpl)
+            .set_next(start.next)
     };
 
     // expanded to serial values starting from 0.
@@ -1079,6 +1088,7 @@ builtins :: @struct {
         i := c.counter_macro_next_id;
         c.counter_macro_next_id += 1;
         c.new_num_token(i, tmpl)
+            .set_next(tmpl.next)
     };
     
     // expanded to a string describing the last
@@ -1094,10 +1104,12 @@ builtins :: @struct {
         //buf[24] = '\0';
         buf := "??? ??? ?? ??:??:?? ????";  // TODO
         c.new_str_token(buf, tmpl)
+            .set_next(tmpl.next)
     };
     
     __BASE_FILE__ :: fn(c: *Ctx, tmpl: *Token) *Token = {
         c.new_str_token(c.macro_base_file, tmpl)
+            .set_next(tmpl.next)
     };
     
     // expanded to the current date as a string literal, e.g. "May 17 2020".
@@ -1109,6 +1121,7 @@ builtins :: @struct {
         tm := c.macro_time&;
         s := @tfmt("\"% % %\"", month[tm.mon.zext()], tm.mday, tm.year + 1900);
         c.new_str_token(s, tmpl)
+            .set_next(tmpl.next)
     };
     
     // expanded to the current time as a string literal, e.g. "13:34:03".
@@ -1116,8 +1129,36 @@ builtins :: @struct {
         tm := c.macro_time&;
         s := @tfmt("\"%:%:%\"", tm.hour, tm.min, tm.sec);  // TODO: pad with zeros
         c.new_str_token(s, tmpl)
+            .set_next(tmpl.next)
+    };
+    
+    __has_include :: fn(c: *Ctx, tok: *Token) *Token = {
+        parent := tok.file.name;
+        tok = tok.next;
+        tok = c.skip(tok, "(");
+        filename, is_dquote := c.read_include_filename_no_skip_line(tok&, tok);
+        tok = c.skip(tok, ")");
+        
+        found := c.search_include_paths(filename, is_dquote, parent).is_some();
+        c.new_num_token(int(found), tok)
+            .set_next(tok)
+    };
+    __has_feature :: fn(c: *Ctx, tok: *Token) *Token = {
+        tok = tok.next;
+        tok = c.skip(tok, "(");
+        tok = tok.next;
+        tok = c.skip(tok, ")");
+        
+        c.new_num_token(0, tok)
+            .set_next(tok)
     };
 };
+
+fn set_next(rest: *Token, tok: *Token) *Token = {
+    rest.next = tok;
+    rest
+}
+
 Ctx :: Compile.Ctx;
 
 fn init_macros(c: *Ctx) void = {

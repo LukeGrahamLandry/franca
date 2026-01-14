@@ -1,0 +1,220 @@
+// #foreign("this example requires system headers");
+// 
+// This program compiles raylib and its examples with my c compiler (import_c). 
+// Examples run one at a time. Press escape to exit the program and run the next. 
+// cli arguments: -filter <string> -skip_to <integer> -compileonly
+// 
+// TODO: do it on linux too. i can't test it until i figure out how to make xquartz+orb work. 
+// TODO: autotest this somehow. could just do it with -compileonly 
+//       but it's kinda prone to failing at runtime (like it does now 
+//       for many of the examples) so that's not a big reassurance. 
+//       also it annoys me because its a big blob of resources and depends on a big blob of xcode. 
+// TODO: could use https://github.com/hexops/xcode-frameworks to make cross compiling from linux work
+// TODO: avoid linker. just need to support -framework myself. 
+//      it works in franca (graphics/easy.fr), need to do it for c too. 
+//      hackily keep track of which header the symbol was in so it can be used as lib when importing in the exe.
+// TODO: the audio examples need atomics
+// TODO: first class support for using system headers instead of beeding to add all these defines manually for each program
+// TODO: end goal is a gui that lets you click an example program to run it. 
+// TODO: wasm but i loathe emscripten so that ain't gonna happen
+// 
+// i can't use PLATFORM_DESKTOP_GLFW on macos because part of it is written in 
+// objective c (src/external/glfw/src/*.m) so doesn't work with only using my c compiler. 
+// but it seems a bunch of things don't work on macos with PLATFORM_DESKTOP_RGFW.
+// i'm reassured that it's not my fault because`cmake -DPLATFORM=RGFW . && make`
+// spews linker errors and if i manually compile with clang it behaves the same way as mine.    
+// - core_highdpi_demo pressing n just makes the window move around randomly instead of going to other monitor. 
+// - core_scissor_test the red square is tiny and doesn't work
+// - "Linking ES shaders with non-ES shaders is not supported." so most of the shaders/ ones don't work
+// - core_window_flags full screen makes my whole computer blurry until you exit 
+// - core_render_texture is tiny and in the corner
+// - rlgl_compute_shader crashes
+// - shapes_ball_physics once you press ctrl once it thinks its always pressed
+// - etc.
+// 
+// TODO: broken on mine but works with clang (even with RGFW)
+//     70. models_loading_gltf is like crazy flat mesh not a creature 
+//     88. models_directional_billboard it looks tilted?
+//     89. models_animation_gpu_skinning its flat not 3d
+//    162. shaders_shadowmap_rendering
+//
+
+main :: fn() void = {
+    // TODO: should go in deps.fr but it's big and i don't autotest it yet
+    root := group(
+        url = "https://github.com/raysan5/raylib/archive/cfb81e4a0000b1ad1bd5726a697aaa66c82ba73d.tar.gz", 
+        legacy = "c554e0e31cd9095331918114b560181f21c185f93742d19ea4efeaf32bc60e42",
+        discard = @const_slice("cmake", "projects", "logo", "examples/other/external/lib", "tools/rlparser/output", "tools/rexm/VS2022", "tools/rexm/reports"),
+    );
+    write_entire_file_or_crash(@tfmt("%/src/emmintrin.h", root), "");  // HACK
+    
+    examples := collect_examples(root);
+    skip_to, compileonly := parse_args_and_filter(examples&, cli_args());
+    
+    enumerate examples.rest(skip_to) { i, it |
+        @println("[%/%] %/%", i + skip_to, examples.len, root, it);
+        run_example(root, it[], compileonly);
+    };
+}
+
+run_example :: fn(root: Str, file: Str, compileonly: bool) void = {
+    start := timestamp();
+
+    // TODO: don't recompile the library every time :SLOW
+    outfile := "target/raylib_example.o";
+    arch := current_arch();  // can cross compile: Arch.x86_64 / Arch.aarch64
+    // note: when compiling exes like this you don't get deadcode elimination (that lives in the franca frontend so only dce if the entry point is in franca and you import_c the c part)
+    CCC'compile(
+        output_path = outfile,
+        input_path = @slice(file),
+        target = (
+            type = .Relocatable,  // TODO 
+            os = .macos,  // TODO 
+            arch = arch,
+        ),
+        prelude = @tfmt("""
+            // TODO: be less hacky!
+            #include "__builtin://float.h"  // apple's one just does #define FOO __FOO__
+            #define __FLOAT_H  // pretend already included apple's
+            
+            #define __APPLE__
+            #define TARGET_OS_OSX 1 
+            #define MAC_OS_X_VERSION_MIN_REQUIRED MAC_OS_X_VERSION_10_5
+            
+            #define __LITTLE_ENDIAN__ 1
+            #define __FP__
+            #define CF_INLINE inline 
+            #define UC_INLINE inline
+            #define ATS_UNAVAILABLE
+            #define XPC_DEBUGGER_EXCL
+            #define __BLOCKS__ 1 
+            #define TYPE_LONGLONG 1
+            #define XPC_GIVES_REFERENCE
+            #define _POSIX_C_SOURCE 200809L
+            
+            typedef short _Float16;
+            typedef struct __attribute__((aligned(16))) { long _[2]; } __uint128_t;  
+            #define __asm asm 
+            #define __asm__ asm 
+            #define __inline__ inline 
+            
+            #ifdef __x86_64
+            #define _OS_OSBYTEORDERMACHINE_H 
+            typedef __uint128_t __m128;
+            typedef __uint128_t __m128i;
+            typedef __uint128_t __m128d;
+            #else 
+            #define __nan() (0.0/0.0)
+            #endif 
+            
+            #if __aarch64
+                #define __arm64__ 1
+                #define TARGET_CPU_ARM64 1
+            #else
+                #define __x86_64__ 1
+                #define TARGET_CPU_X86_64 1
+            #endif
+            
+            #add_include_path "%"
+            #add_include_path "%/src"
+            #add_include_path "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include"
+            
+            #define PLATFORM_DESKTOP_RGFW
+            #define GRAPHICS_API_OPENGL_33
+            #define STBIR_NO_SIMD 
+            #define SINFL_NO_SIMD
+            #define STBI_NO_SIMD
+
+            #include "rcore.c"
+            #undef RLGL_IMPLEMENTATION      // because later ones include it again
+            #undef RCAMERA_IMPLEMENTATION   // "
+            #include "rtext.c"
+            #include "rtextures.c"
+            #include "rmodels.c"
+            #include "rshapes.c"
+            // #include "raudio.c"  // TODO: atomics
+            
+            #discard_static_scope 
+            // it's using that define to detect being in the same compilation unit to access the static texShapes from rshapes.c
+            #undef SUPPORT_QUADS_DRAW_MODE  
+        """, root, root),
+    ).or(fn(msg) => @panic("failed to compile raylib\n%", msg));
+    
+    @println("%ms", timestamp() - start);
+    exe_path := "target/raylib_example.out";
+    clang_target := import("@/examples/default_driver.fr")'target_triple(arch, .macos);
+    ok := run_cmd_blocking("cc", @slice(
+        outfile, 
+        "-target", clang_target, 
+        "-lobjc", "-framework", "OpenGL", "-framework", "Cocoa", "-framework", "IOKit", "-framework", "CoreAudio", "-framework", "CoreVideo", 
+        "-o", exe_path,
+    ));
+    @assert(ok, "failed link");
+    @if(compileonly) return();
+    
+    // it wants to access the resources folder by relative path
+    start := get_working_directory(temp()).items().as_cstr();
+    dir := pop_path_segment(@tfmt("%/%", root, file)).as_cstr();
+    Syscall'chdir(dir).unwrap();
+    ok := run_cmd_blocking(@tfmt("%/%", start, exe_path), empty());
+    Syscall'chdir(start).unwrap();
+    @assert(ok, "failed run");
+}
+
+collect_examples :: fn(root: Str) []Str = {
+    dirs := collect_directory_ordered(@tfmt("%/examples", root), temp(), temp()).unwrap();
+    examples := Str.list(temp());
+    for dirs { it |
+        #use("@/examples/testing.fr");
+        if it.type == .Directory {
+            c := collect_with_extension(@tfmt("%/examples/%", root, it.name), ".c").unwrap();
+            for c { file |
+                examples&.push(@tfmt("examples/%/%", it.name, file));
+            };
+        };
+    };
+    examples.items()
+}
+
+parse_args_and_filter :: fn(examples: *[]Str, args: []CStr) Ty(i64, bool) = {
+    examples.ordered_retain(fn(it) => !(false 
+        || it[].contains("audio/audio_")                 // TODO: raudio
+        || it[].ends_with("rlgl_standalone.c")           // needs glfw
+        || it[].ends_with("rlgl_compute_shader.c")       // crashes
+        || it[].ends_with("embedded_files_loading.c")    // TODO: raudio
+        || it[].ends_with("textures_sprite_button.c")    // TODO: raudio
+        || it[].ends_with("textures_sprite_explosion.c") // TODO: raudio
+    ));
+    
+    i := 0;
+    skip_to := 0;
+    compileonly := false;
+    while => i < args.len {
+        @switch(args[i].str()) {
+            @case("-filter") => {
+                keep := args[i + 1].str(); i += 1;
+                old := examples.len;
+                examples.ordered_retain(fn(it) => it.contains(keep));
+                @println("filter(%): % => %", keep, old, examples.len);
+            };
+            @case("-skip_to") => {
+                n := args[i + 1].str(); i += 1;
+                n := parse_int(n);
+                skip_to = n;
+                @println("skip_to(%)", n);
+            };
+            @case("-compileonly") => {
+                compileonly = true;
+                @println("compileonly()");
+            };
+            @default => ();
+        };
+        i += 1;
+    };
+    
+    (skip_to, compileonly)
+}
+
+#use("@/lib/sys/process.fr");
+#use("@/examples/fetch.fr");
+CCC :: import("@/examples/import_c/cc.fr");

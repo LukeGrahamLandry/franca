@@ -8,6 +8,8 @@
 //       but i don't think they do their own relocations? 
 // TODO: don't depend on system clang for assembling/linking the .s files. 
 // TODO: use execvpe instead of the env binary 🤡
+//       static_execvp already uses tls(.environment_variables)[];
+//       pass that to the libc one too, then do that here. 
 clang :: Foreign.EXE.clang; 
 env :: Foreign.EXE.env; 
 
@@ -144,10 +146,13 @@ test_harec :: fn() void = {
     // SKIP
     // (orb) 17-alloc.ha rosetta error: could not find free space for allocation size 1c6bf52635000
     // they're trying to test allocation failure and rosetta cannot cope i guess?
-    ci := Foreign.ENV.GITHUB_REPOSITORY.get_environment_variable().is_some();
-    if !ci && query_current_arch() == .x86_64 {
-        tests&.ordered_retain(fn(it) => !it.name.ends_with("17-alloc.ha"));
-        @eprint("Skipped 17-alloc.ha: confuses rosetta\n");
+    if query_current_arch() == .x86_64 {
+        // on macos it's `sysctl -n sysctl.proc_translated` but that doesn't work in orb and hare doesn't support macos anyway. 
+        ok, o, e := exec_and_catch("sysctl", @slice("-n", "fs.binfmt_misc.rosetta"), temp());
+        if ok && o.items().contains("enabled\ninterpreter [rosetta]") {
+            tests&.ordered_retain(fn(it) => !it.name.ends_with("17-alloc.ha"));
+            @eprint("Skipped 17-alloc.ha: confuses rosetta\n");
+        };
     };
     
     Ctx :: @struct(rt_ssa: Str, testmod_ssa: Str);

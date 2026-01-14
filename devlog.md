@@ -1,4 +1,16 @@
 
+## (Jan 14)
+
+- more raylib
+  - going through and running each example to see if it looks reasonable. 
+    kinda waste of time but nice break. 
+  - one example has Zero Width No-Break Space :(   
+  - they have a EaseCubicInOut in reasings.h and rshapes.c so do need multiple compilation units. 
+    - maybe i was right the first time and it's easier if discard_static_scope
+      is something you can ask for so you can just have one input file. 
+  - bring back has_include and has_feature so don't have to cheat for apple's AvailabilityInternal.h
+    seems to also have fixed my ConditionalMacros.h woes. which makes sense.
+
 ## (Jan 13)
 
 - getting import_c to handle raylib
@@ -31,6 +43,9 @@
     seems like that works. 
   - wrongly treating `static const char *foo;` as constant only broke bubblewrap (at runtime). 
     clearly that should be in autotest. 
+  - convert the cli args i've collected to build program
+
+> 10 stars for sourcehut letting you debug your build failure with ssh as though it were a computer. love it. 
 
 ## (Jan 12)
 
