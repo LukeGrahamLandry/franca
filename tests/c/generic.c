@@ -9,6 +9,8 @@ int main() {
   ASSERT(2, _Generic('a', char: 1, int: 2));
   ASSERT(2, _Generic(1 || "abc", _Bool: 1, int: 2));
   
+  ASSERT(2, ({ int *a, b; _Generic(b, int*: 1, int: 2); }));
+  ASSERT(1, ({ typeof(int*) a, b; _Generic(b, int*: 1, int: 2); }));
   /* 
   {  // :BrokenCGeneric long is exactly the same as long long except that clang can tell them apart:
       long l = 0;

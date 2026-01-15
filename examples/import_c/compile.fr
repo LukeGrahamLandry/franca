@@ -85,8 +85,6 @@ NodeKind :: @enum(i32) (
     ND_INVALID,
 );
 
-// Scope for local variables, global variables, typedefs
-// or enum constants
 VarScope :: @struct {
     var: *Obj;
     type_def: *CType;
@@ -94,7 +92,6 @@ VarScope :: @struct {
     enum_val: i64;
 };
 
-// Represents a block scope.
 Scope :: @rec @struct {
     next: *Scope;
 
@@ -104,7 +101,6 @@ Scope :: @rec @struct {
     tags: HashMap(Str, *CType);
 };
 
-// Variable attributes such as typedef or extern.
 VarAttr :: @struct {
     is_typedef: bool;
     is_static:  bool;
@@ -115,9 +111,7 @@ VarAttr :: @struct {
     align:       i32;
 };
 
-// This struct represents a variable initializer. Since initializers
-// can be nested (e.g. `int x[2][2] = {{1, 2}, {3, 4}}`), this struct
-// is a tree data structure.
+// Initializers can be nested (e.g. `int x[2][2] = {{1, 2}, {3, 4}}`). 
 Initializer :: @rec @struct {
     next: *Initializer;
     ty: *CType;
@@ -152,16 +146,7 @@ InitDesg :: @rec @struct {
 #use(Preprocess);
 
 Ctx :: @rec @struct {
-    // All local variable instances created during parsing are
-    // accumulated to this list.
-    locals: *Obj;
-    
-    // Likewise, global variables are accumulated to this list.
-    globals: *Obj;
-    
     scope: *Scope;
-    
-    // Points to the function object the parser is currently parsing.
     current_fn: ?*Obj;
     
     m: *QbeModule;
@@ -173,8 +158,7 @@ Ctx :: @rec @struct {
     brk_label: ?*Qbe.Blk;
     cont_label: ?*Qbe.Blk;
     
-    // Points to a node representing a switch if we are parsing
-    // a switch statement.
+    // while inside a switch statement case/default can be arbitrarily nested inside other statements. 
     current_switch: ?*Qbe.SwitchPayload;
     
     builtin_alloca: *Obj;
@@ -454,7 +438,6 @@ fn new_lvar(c: *Ctx, name: Str, ty: *CType) *Obj = {
     var := c.new_var(name, ty, temp());
     var.tok = ty.name;
     var.is_local = true;
-    c.locals = var;
 
     if c.current_fn { current_fn |
         if var.ty.size >= 0 {  // :StaticArrayOfUnknownLength
@@ -488,7 +471,6 @@ fn new_gvar(c: *Ctx, name: Str, ty: *CType, tok: *Token, is_static: bool) *Obj =
     var.is_static = is_static;
     var.tok = tok;
     var.global_symbol = (Some = c.m.mangle(var));
-    c.globals = var;
     var
 }
 
@@ -533,14 +515,8 @@ fn push_tag_scope(c: *Ctx, tok: *Token, ty: *CType) void = {
     c.scope.tags&.insert(tok.str(), ty);
 }
 
-// declspec = ("void" | "_Bool" | "char" | "short" | "int" | "long"
-//                         | "typedef" | "static" | "extern" | "inline"
-//                         | "_Thread_local" | "__thread"
-//                         | "signed" | "unsigned"
-//                         | struct-decl | union-decl | typedef-name
-//                         | enum-specifier | typeof-specifier
-//                         | "const" | "volatile" | "auto" | "register" | "restrict"
-//                         | "__restrict" | "__restrict__" | "_Noreturn")+
+// (when you declare multiple variables on one line, 
+//  this is the base type that you don't repeat every time)
 //
 // The order of typenames in a type-specifier doesn't matter. For
 // example, `int long static` means the same as `static long int`.
@@ -653,14 +629,16 @@ fn declspec(c: *Ctx, rest: **Token, tok: *Token, attr: ?*VarAttr) *CType = {
             if ty2.is_some() || @is(tok.kind, .struct, .union, .enum, .typeof) {
                 if(counter != 0, => break());
     
-                start := tok;
-                c.next(tok&, tok);
-                ty = @match(start.kind) {
+                // struct/union/enum can be a reference to existing or declaration of new (anonymous)
+                ty = @match(tok.kind) {
                     fn struct() => c.struct_decl(tok&, tok);
                     fn union()  => c.union_decl(tok&, tok);
                     fn enum()   => c.enum_specifier(tok&, tok);
                     fn typeof() => c.typeof_specifier(tok&, tok);
-                    @default    => ty2.unwrap();
+                    @default    => {
+                        c.next(tok&, tok);
+                        ty2.unwrap()
+                    };
                 };
     
                 counter += 1.shift_left(Specifier_Other);
@@ -736,14 +714,12 @@ fn declspec(c: *Ctx, rest: **Token, tok: *Token, attr: ?*VarAttr) *CType = {
     ty
 }
 
-// func-params = ("void" | param ("," param)* ("," "...")?)? ")"
-// param             = declspec declarator
-// returns a function type
 fn func_params(c: *Ctx, rest: **Token, tok: *Token, ret: *CType) *CType = {
+    tok = c.skip(tok, "(");
     c.lookahead(tok, 1);
     if equal(tok, "void") && equal(tok.next, ")") {
-        c.next(tok&, tok);
-        c.next(rest, tok);
+        tok = c.skip(tok, "void");
+        rest[] = c.skip(tok, ")");
         return(c.func_type(ret));
     };
 
@@ -794,6 +770,7 @@ fn func_params(c: *Ctx, rest: **Token, tok: *Token, ret: *CType) *CType = {
 }
 
 fn array_dimensions(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *CType #once = {
+    tok = c.skip(tok, "[");
     dowhile {
         // when its a function parameter it can have any qualifier that's allowed on pointers. 
         // TODO: be consistant about allowing __keyword__ and __keyword
@@ -834,17 +811,13 @@ fn array_dimensions(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *CType #onc
     }
 }
 
-// type-suffix = "(" func-params
-//                         | "[" array-dimensions
-//                         | ε
 fn type_suffix(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *CType = {
-    if(consume(tok&, tok, "("), => return(c.func_params(rest, tok, ty)));
-    if(consume(tok&, tok, "["), => return(c.array_dimensions(rest, tok, ty)));
+    @if(equal(tok, "(")) return(c.func_params(rest, tok, ty));
+    @if(equal(tok, "[")) return(c.array_dimensions(rest, tok, ty));
     rest[] = tok;
     ty
 }
 
-// pointers = ("*" ("const" | "volatile" | "restrict")*)*
 fn pointers(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *CType = {
     if consume(rest, tok, "^") {
         // HACK: skip apple block syntax and hope you just don't use those typedefs. 
@@ -854,6 +827,8 @@ fn pointers(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *CType = {
     };
     while => consume(tok&, tok, "*") {
         ty = c.pointer_to(ty);
+        // TODO: should tell the backend volatile pointers escape after every access.
+        //       need to be able to use them for memory mapped io where loads can have side effects, etc. 
         dowhile {
             ignore(tok&, tok, @const_slice("const", "volatile", "restrict", "__restrict", "__restrict__"))
         };
@@ -869,12 +844,19 @@ fn ignore(rest: **Token, tok: *Token, $ignored: []Str) bool #inline = {
     false
 }
 
-// declarator = pointers ("(" ident ")" | "(" declarator ")" | ident) type-suffix
 fn declarator(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *CType = {
     ty = c.pointers(tok&, tok, ty);
 
+    // "declaration mirrors use"
+    // parens have the same grouping effect as for expressions:
+    //     int (*foo[4])(int a, int b);
+    // foo is an array of 4 function pointers. usage:
+    //     (*foo[0])(a, b);
+    // skip to the closing paren to finish the inner most type, 
+    // then use that as the base type to be modified by the parenthesized tokens.
     if consume(tok&, tok, "(") {
         // :RewalkTokens
+        // TODO: instead of parsing twice, keep a pointer to the hole in the outer type to be patched when finished?
         start := tok;
         dummy := CType.zeroed();
         c.declarator(tok&, start, dummy&);
@@ -901,7 +883,7 @@ fn declarator(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *CType = {
     ty
 }
 
-// abstract-declarator = pointers ("(" abstract-declarator ")")? type-suffix
+// same as declarator but without an identifier
 fn abstract_declarator(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *CType = {
     ty = c.pointers(tok&, tok, ty);
     if consume(tok&, tok, "(") {
@@ -917,7 +899,6 @@ fn abstract_declarator(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *CType =
     }
 }
 
-// type-name = declspec abstract-declarator
 fn typename(c: *Ctx, rest: **Token, tok: *Token) *CType = {
     ty := c.declspec(tok&, tok, .None);
     c.abstract_declarator(rest, tok, ty)
@@ -928,11 +909,8 @@ fn is_end(c: *Ctx, tok: *Token) bool = {
     equal(tok, "}") || (equal(tok, ",") && equal(tok.next, "}"))
 }
 
-// enum-specifier = ident? "{" enum-list? "}"
-//                                | ident ("{" enum-list? "}")?
-//
-// enum-list            = ident ("=" num)? ("," ident ("=" num)?)* ","?
 fn enum_specifier(c: *Ctx, rest: **Token, tok: *Token) *CType #once = {
+    tok = c.skip(tok, "enum");
     ty := c.new_type(.TY_ENUM, 4, 4);
 
     // Read a struct tag.
@@ -982,8 +960,8 @@ fn enum_specifier(c: *Ctx, rest: **Token, tok: *Token) *CType #once = {
     ty
 }
 
-// typeof-specifier = "(" (expr | typename) ")"
 fn typeof_specifier(c: *Ctx, rest: **Token, tok: *Token) *CType #once = {
+    tok = c.skip(tok, "typeof");
     tok = c.skip(tok, "(");
     ty := if c.is_type_name(tok) {
         c.typename(tok&, tok)
@@ -1027,7 +1005,8 @@ fn declarators(c: *Ctx, tok: **Token, basety: *CType, first_declarator: *CType, 
     };
 }
 
-// declaration = declspec (declarator ("=" expr)? ("," declarator ("=" expr)?)*)? ";"
+// TODO: share more code with global_variable? 
+//       it's weird that static global and static local mean the same thing and have the same syntax but totally different code paths. 
 fn declaration(c: *Ctx, tok: *Token, basety: *CType, attr: ?*VarAttr, first_declarator: *CType, expect_var: bool) *Token = {
     start := tok;
     declarators(c, tok&, basety, first_declarator) { ty |
@@ -1135,8 +1114,6 @@ fn string_initializer(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) v
     c.next(rest, tok);
 }
 
-// array-designator = "[" const-expr "]"
-//
 // C99 added the designated initializer to the language, which allows
 // programmers to move the "cursor" of an initializer to any element.
 // The syntax looks like this:
@@ -1161,7 +1138,7 @@ fn string_initializer(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) v
 //
 // The above initializer sets x.c to 5.
 fn array_designator(c: *Ctx, rest: **Token, tok: *Token, ty: *CType, is_flexible: bool) Ty(i64, i64) = {  // (begin, end)
-    c.next(tok&, tok);
+    tok = c.skip(tok, "[");
     begin := c.const_expr(tok&, tok);
     if(begin >= ty.array_len.intcast() && !is_flexible, => @error_tok(c, tok, "array designator index (%) exceeds array bounds (%)", begin, ty.array_len));
     
@@ -1176,7 +1153,6 @@ fn array_designator(c: *Ctx, rest: **Token, tok: *Token, ty: *CType, is_flexible
     (begin, end)
 }
 
-// struct-designator = "." ident
 fn struct_designator(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *Member = {
     start := tok;
     tok = c.skip(tok, ".");
@@ -1204,9 +1180,8 @@ fn struct_designator(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *Member = 
     @error_tok(c, tok, "struct has no such member")
 }
 
-// designation = ("[" const-expr "]" | "." ident)* "="? initializer
-fn designation(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) void = {
-    if equal(tok, "[") {
+fn designation(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) void = @match(tok.kind) {
+    fn @"["() => {
         if(init.ty.kind != .TY_ARRAY, => @error_tok(c, tok, "array index in non-array initializer"));
 
         begin, end := c.array_designator(tok&, tok, init.ty, init.is_flexible);
@@ -1218,10 +1193,8 @@ fn designation(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) void = {
             c.designation(tok2&, tok, init[i]);
         };
         c.array_initializer2(rest, tok2, init, begin + 1);
-        return();
     };
-
-    @if(equal(tok, ".")) @match(init.ty.kind) {
+    fn @"."() => @match(init.ty.kind) {
         fn TY_STRUCT() => {
             mem := c.struct_designator(tok&, tok, init.ty);
             c.designation(tok&, tok, init.children[mem.idx.intcast()]);
@@ -1230,23 +1203,23 @@ fn designation(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) void = {
                 // TODO: im not super confident i could explain why but this seems to work. 
                 //       i think we're jsut saying the middle struct can't have other fields until after the comma (which is true syntactically)
                 rest[] = tok;
-                return()
-            }
-            init.expr = Node.ptr_from_int(0);
-            c.struct_initializer2(rest, tok, init, mem.next);
-            return();
+            } else {
+                init.expr = Node.ptr_from_int(0);
+                c.struct_initializer2(rest, tok, init, mem.next);
+            };
         }
         fn TY_UNION() => {
             mem := c.struct_designator(tok&, tok, init.ty);
             init.mem = mem;
             c.designation(rest, tok, init.children[mem.idx.intcast()]);
-            return();
         }
         @default => @error_tok(c, tok, "field name not in struct or union initializer"); 
     };
-    _ := consume(tok&, tok, "=");
-    c.initializer2(rest, tok, init);
-}
+    @default => {
+        _ := consume(tok&, tok, "=");
+        c.initializer2(rest, tok, init);
+    };
+};
 
 fn comma_sep(c: *Ctx, tok: **Token, $end: Str, $body: @Fn() void) void = {
     first := true;
@@ -1434,9 +1407,6 @@ fn union_initializer(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) vo
     };
 }
 
-// initializer = string-initializer | array-initializer
-//                         | struct-initializer | union-initializer
-//                         | assign
 fn initializer2(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) void = @match(init.ty.kind) {
     fn TY_ARRAY() => @if_else {
         @if(tok.kind == .TK_STR) => c.string_initializer(rest, tok, init);
@@ -1788,7 +1758,7 @@ fn push_loop(c: *Ctx, $body: @Fn(brk: *Qbe.Blk, cnt: *Qbe.Blk) void) Ty(*Qbe.Blk
     (brk_label, cont_label)
 }
 
-// compound-stmt = (typedef | declaration | stmt)* "}"
+// the body of a block (after '{')
 fn compound_stmt(c: *Ctx, rest: **Token, tok: *Token) *Node = {
     cur: ?*Node = .None;
 
@@ -1827,22 +1797,12 @@ fn compound_stmt(c: *Ctx, rest: **Token, tok: *Token) *Node = {
     cur || c.new_node(.ND_NULL_EXPR, tok)
 }
 
-// expr-stmt = expr? ";"
-fn expr_stmt(c: *Ctx, rest: **Token, tok: *Token) *Node = if equal(tok, ";") {
-    c.next(rest, tok);
-    c.new_node(.ND_NULL_EXPR, tok)
-} else {
-    node := c.parse_expr(tok&, tok, .None);
-    rest[] = c.skip(tok, ";");
-    node
-};
-
-// struct-members = (declspec declarator (","    declarator)* ";")*
-fn struct_members(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) void = {
+fn struct_members(c: *Ctx, rest: **Token, tok: *Token, parent_struct: *CType) void = {
     head := Member.zeroed();
     cur  := head&;
     idx  := 0;
 
+    tok = c.skip(tok, "{");
     while => !equal(tok, "}") {
         continue :: local_return;
         attr   := VarAttr.zeroed();
@@ -1861,7 +1821,6 @@ fn struct_members(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) void = {
             continue();
         };
 
-        // Regular struct members
         comma_sep(c, tok&, ";") {
             mem := c.arena.box_zeroed(Member);
             mem.tok = tok;
@@ -1884,6 +1843,7 @@ fn struct_members(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) void = {
         };
     };
 
+    ty := parent_struct;
     // If the last element is an array of incomplete type, it's
     // called a "flexible array member". It should behave as if
     // if were a zero-sized array.
@@ -1896,7 +1856,6 @@ fn struct_members(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) void = {
     ty.members = head.next;
 }
 
-// struct-union-decl = attribute? ident? ("{" struct-members)?
 fn struct_union_decl(c: *Ctx, rest: **Token, tok: *Token) *CType = {
     ty := c.new_type(.TY_STRUCT, 0, 1);
     tok = c.attribute_list(tok, ty);
@@ -1923,9 +1882,6 @@ fn struct_union_decl(c: *Ctx, rest: **Token, tok: *Token) *CType = {
         }
     };
 
-    tok = c.skip(tok, "{");
-
-    // Construct a struct object.
     c.struct_members(tok&, tok, ty);
     rest[] = c.attribute_list(tok, ty);
 
@@ -1943,8 +1899,8 @@ fn struct_union_decl(c: *Ctx, rest: **Token, tok: *Token) *CType = {
     ty
 }
 
-// struct-decl = struct-union-decl
 fn struct_decl(c: *Ctx, rest: **Token, tok: *Token) *CType = {
+    tok = c.skip(tok, "struct");
     ty := c.struct_union_decl(rest, tok);
     ty.kind = .TY_STRUCT;
     // -1 means it's an incomplete forward declaration. 
@@ -1954,6 +1910,7 @@ fn struct_decl(c: *Ctx, rest: **Token, tok: *Token) *CType = {
 }
 
 fn struct_layout(c: *Ctx, ty: *CType) void = {
+    @debug_assert_eq(ty.kind, .TY_STRUCT, "TODO: ffi/import_members wrongly calls this on a union. add a test where it matters!");
     // Assign offsets within the struct to members.
     bits := 0;
     for_linked ty.members { mem |
@@ -1993,16 +1950,16 @@ fn struct_layout(c: *Ctx, ty: *CType) void = {
     ty.size = align_to(bits, ty.align.intcast() * 8).intcast() / 8;
 }
 
-// union-decl = struct-union-decl
 fn union_decl(c: *Ctx, rest: **Token, tok: *Token) *CType = {
+    tok = c.skip(tok, "union");
     ty := c.struct_union_decl(rest, tok);
     ty.kind = .TY_UNION;
+    // -1 means it's an incomplete forward declaration. 
     if(ty.size < 0, => return(ty));
 
-    // If union, we don't have to assign offsets because they
-    // are already initialized to zero. We need to compute the
-    // alignment and the size though.
+    // members of a union overlap.
     for_linked ty.members { mem |
+        @debug_assert_eq(mem.offset, 0);
         ty.align = max(ty.align, mem.align);
         ty.size  = max(ty.size, mem.ty.size);
     };
@@ -2297,7 +2254,6 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *T
     c.b = c.f.start;
     
     c.labels = init(temp());
-    c.locals = ptr_from_int(@type c.locals[], 0);
     c.enter_scope();
     c.f.vararg = ty.is_variadic;
     rty := ty.return_ty;
@@ -2460,8 +2416,7 @@ discard_static_scope :: fn(c: *Ctx) void = {
     };
 }
 
-// program = (typedef | function-definition | global-variable)*
-fn parse(c: *Ctx, tok: *Token) *Obj = {
+fn parse(c: *Ctx, tok: *Token) void = {
     c.declare_builtin_functions();
     //c.speculate = true;
     ::if(*Token);
@@ -2522,8 +2477,6 @@ fn parse(c: *Ctx, tok: *Token) *Obj = {
         c.yield(var[]);
     };
     c.tentative&.clear();
-    
-    c.globals
 }
 
 fn static_assert(c: *Ctx, tok: *Token) *Token = {
@@ -3089,11 +3042,6 @@ pre_dec :: fn(c, rest, tok) #prefix(.@"--") = { // Read --i as i-=1
     node
 };
 
-// generic-selection = "(" assign "," generic-assoc ("," generic-assoc)* ")"
-//
-// generic-assoc = type-name ":" assign
-//                             | "default" ":" assign
-//
 // This is just a switch statement over types. 
 // A branch is chosen based on the ~type~ of the first expression. 
 generic_selection :: fn(c, rest, tok) #prefix(._Generic) = {
@@ -3181,10 +3129,9 @@ prefix_ampamp :: fn(c, rest, tok) #prefix(.@"&&") = {
     @error_tok(c, tok, "[GNU] labels-as-values is not supported (name = %)", label);
 };
 
-// funcall = (assign ("," assign)*)? ")"
 funcall :: fn(c, rest, tok, f) #infix(.@"(", .PostFix) = {
     start := tok;
-    c.next(tok&, tok);
+    tok = c.skip(tok, "(");
     c.add_type(f);
 
     if (f.ty.kind != .TY_FUNC && (f.ty.kind != .TY_PTR || f.ty.base.kind != .TY_FUNC)) {
@@ -3502,7 +3449,10 @@ for_ :: fn(c, rest, tok) #prefix(.for, .ND_STMT) = {
             ty := c.declarator(tok&, tok, basety);
             tok = c.declaration(tok, basety, .None, ty, expect_var);
         } else {
-            c.expr_stmt(tok&, tok);
+            if !equal(tok, ";") {
+                 _ := c.parse_expr(tok&, tok, .None);
+            };
+            tok = c.skip(tok, ";");
         };
         c.jmp_if_unterminated(cond_block);
 
@@ -4292,7 +4242,7 @@ fn gen_cast(c: *Ctx, src: Qbe.Ref, from: *CType, to: *CType, tok: *Token) Qbe.Re
 fn gen_call(c: *Ctx, callee: *Node, function_ty: *CType, arg: []*Node, tok: *Token) *Node #once = {
     // TODO: don't just take random variable names!
     //       call this __builtin_alloca and provide alloca.h
-    if callee.kind == .ND_VAR && callee.var.name == "alloca" {
+    if callee.kind == .ND_VAR && identical(callee.var, c.builtin_alloca) {
         @if(arg.len != 1) @error_tok(c, tok, "alloca arity error");
         size := c.gen_expr(arg[0]);
         r := c.f.newtmp("alloca", .Kl);
