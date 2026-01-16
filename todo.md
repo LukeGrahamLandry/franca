@@ -1,3 +1,7 @@
+-     very concerning that boot with USE_VM doesn't work when -unsafe and 
+      opt passes somehow doesn't work specifically for replace_switches (had to skip it to get the measurement). 
+      doesn't matter because its going to be rewritten anyway
+      but it might be revealing an actual bug so should investigate further
 - make it more sane to jit a franca program from another directory
   - don't just always shit a "traget" dir in the current dir
   - be consistant about always checking the franca lib root dir then the current dir. 

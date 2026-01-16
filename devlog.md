@@ -1,4 +1,24 @@
 
+## (Jan 15)
+
+- c: fewer useless comments. pull some of the c.skip(tok, "") closer 
+  so its easier to tell where you are in the grammar just from the code. 
+- backend: vaarg is also a write.
+- wrap_with_native_abi and native_abi_emit_shim need to be careful when running in the vm 
+  because the easy_abi function being called might a tagged vm function pointer so can't just do a real call. 
+- works on vm now. takes 23 minutes lol 
+  - index_unchecked and inline get_addr without mutex in get_ref. 19.5 min. 
+  - unroll the multi-instruction decoding instead of retaking the loop. didn't help but easier to read. 
+  - run opt passes and RSlot. 7.6 min.
+    - added phi and sel to the vm
+- i can make sure the driver code also inherits the -unsafe. doesn't work with vm tho. 
+- wanted to use same same function pointer tagging when !USE_VM 
+  so you can test that part without it being slow. 
+  but thats an infinite nightmare because they can be in memory 
+  so every call instruction has to check the tag. 
+  could do a pass over the ir to wrap all call instructions, 
+  and would be faster than my dumb vm but dont want to. 
+
 ## (Jan 14)
 
 - more raylib

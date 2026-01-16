@@ -1,6 +1,7 @@
 #include "test.h"
 
 void *fn(int x, void *p, int y) { return p; }
+void *alloca_is_not_a_keyword(long a) { return (void *) a; }
 
 // makes this work on other compilers with -Wimplicit-function-declaration
 void *alloca(unsigned long);
@@ -26,6 +27,8 @@ int main() {
   ASSERT(0, memcmp(p1, "0123456789abcdef", 16));
   ASSERT(0, memcmp(p2, "ghijklmnopqrstuv", 16));
   ASSERT(0, memcmp(p3, "wxy", 3));
+  
+  ASSERT(32, ({ void *(*alloca)(long) = alloca_is_not_a_keyword; (long) alloca(32); }));
 
   printf("OK\n");
   return 0;

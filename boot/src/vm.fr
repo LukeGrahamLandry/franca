@@ -10,8 +10,7 @@ easy_to_native_dyncall_shim :: fn(self: *SelfHosted, f_ty: FnType) DynCallShim =
     id := Qbe.no_symbol_S; 
     enter_task shared { entry |
         f := temp().box_uninit(Qbe.Fn);
-        m := shared.m;
-        f.default_init(m);
+        f.default_init(shared.m);
         f.leaf = false;
         f.lnk.no_inline = true;
         id = shared.m.intern(@tfmt("dyncallEN%_%_%", f_ty.arg.as_index(), f_ty.ret.as_index(), int(f_ty.unary)));
@@ -38,19 +37,17 @@ easy_to_native_dyncall_shim :: fn(self: *SelfHosted, f_ty: FnType) DynCallShim =
     (Pending = id)
 };
 
-// caller: easy_abi, compiler: easy_abi, callee: easy_abi
+// caller: easy_abi, compiler: native, callee: easy_abi
 easy_abi_emit_shim :: fn(c: *SelfHosted, fid: FuncId) void = {
     @debug_assert(abi_shift_native_to_easy);
     shared := c.comptime_codegen;
-    handler_callee_address: rawptr = @run wrap_with_easy_abi(report_called_uncompiled_or_just_fix_the_problem);
-    m := shared.m; 
-    c.when_debug(.Shim, fn(o) => @fmt(o, "S: create %", fmt_func(c, fid)));
+    handler: rawptr = @run wrap_with_easy_abi(report_called_uncompiled_or_just_fix_the_problem);
     id := Qbe.no_symbol_S;
     enter_task shared { entry |
-        id = m.intern(@tfmt("%__Eshim", fid));
+        id = shared.m.intern(@tfmt("%__Eshim", fid));
         
         f := temp().box_uninit(Qbe.Fn);
-        f.default_init(m);
+        f.default_init(shared.m);
         f.lnk.no_inline = true;
         f.lnk.id = id;
         f.start = newblk(); 
@@ -58,29 +55,24 @@ easy_abi_emit_shim :: fn(c: *SelfHosted, fid: FuncId) void = {
         target_id := c.comptime_jit_symbol_id(fid);
         entry.task = (Shim = (f = f, shim_for = target_id));
         
-        input, output := (f.newtmp("input", .Kl), f.newtmp("output", .Kl));
-        b := f.start;
-        push(b, make_ins(.par, .Kl, output, QbeNull, QbeNull));
-        push(b, make_ins(.par, .Kl, input, QbeNull, QbeNull));
-        
-        callee := f.newtmp("callee", .Kl);
-        arg, arg2, ret := (f.newtmp("input", .Kl), f.newtmp("input", .Kl), f.newtmp("output", .Kl));
-        push(b, make_ins(.alloc8, .Kl, arg, f.getcon(16), Qbe.Null));
-        push(b, make_ins(.alloc8, .Kl, ret, f.getcon(8), Qbe.Null));
-        push(b, make_ins(.add, .Kl, arg2, arg, f.getcon(8)));
-        push(b, make_ins(.storel, .Kw, QbeNull, f.getcon(SelfHosted.int_from_ptr(c)), arg));
-        push(b, make_ins(.storew, .Kw, QbeNull, f.getcon(fid.as_index()), arg2));
-        push(b, make_ins(.arg,  .Kl, QbeNull, ret, QbeNull));
-        push(b, make_ins(.arg,  .Kl, QbeNull, arg, QbeNull));
-        push(b, make_ins(.call, .Kw, QbeNull, f.getcon(handler_callee_address.int_from_rawptr()), QbeNull));
-        push(b, make_ins(.load, .Kl, callee, ret, QbeNull));
-        
-        push(b, make_ins(.arg, .Kl, QbeNull, output, QbeNull));
-        push(b, make_ins(.arg, .Kl, QbeNull, input, QbeNull));
-        push(b, make_ins(.call, .Kw, Qbe.Null, callee, Qbe.Null));
+        @emit_instructions((f = f), (SelfHosted.int_from_ptr(c), fid.as_index(), handler.int_from_rawptr()), """
+        @start
+            %output =l par
+            %input =l par
+            %arg =l alloc8 16
+            %ret =l alloc8 8
+            %arg2 =l add %arg, 8
+            storel %0, %arg
+            storel %1, %arg2
+            call %2(l %ret, l %arg)
+            %callee =l load %ret
+            call %callee(l %output, l %input)
+        """);
+        f.start.ins&.push_all(f.slice_pending_scratch(), temp());
+        f.reset_scratch();
         
         f.ret_cls = .Kx;
-        b.jmp.type = .ret0;
+        f.start.jmp.type = .ret0;
     };
     c.created_jit_fn_ptr_value(fid, shared.wait_for_symbol(id));
 };
@@ -89,10 +81,9 @@ easy_abi_emit_shim :: fn(c: *SelfHosted, fid: FuncId) void = {
 native_abi_emit_shim :: fn(c: *SelfHosted, fid: FuncId) void = {
     @debug_assert(abi_shift_easy_to_native);
     shared := c.comptime_codegen;
-    handler_callee_address: rawptr = report_called_uncompiled_or_just_fix_the_problem;
+    handler: rawptr = report_called_uncompiled_or_just_fix_the_problem;
     m := shared.m; 
     func := c.get_function(fid);
-    c.when_debug(.Shim, fn(o) => @fmt(o, "S: create %", fmt_func(c, fid)));
     id := Qbe.no_symbol_S;
     enter_task shared { entry |
         id = m.intern(@tfmt("%__Nshim", fid));
@@ -109,36 +100,40 @@ native_abi_emit_shim :: fn(c: *SelfHosted, fid: FuncId) void = {
         arg_ty := func.finished_arg.expect("arg infered");
         ret_ty := func.finished_ret.expect("ret infered");
         pars := emit_par_instructions(c.comp(), shared, func.arg&, arg_ty, f, .None);
-        
-        input, output := (f.newtmp("input", .Kl), f.newtmp("output", .Kl));
-        b := f.start;
-        
         callee := f.newtmp("callee", .Kl);
-        arg, arg2, ret := (f.newtmp("input", .Kl), f.newtmp("input", .Kl), f.newtmp("output", .Kl));
-        push(b, make_ins(.alloc8, .Kl, arg, f.getcon(16), Qbe.Null));
-        push(b, make_ins(.alloc8, .Kl, ret, f.getcon(8), Qbe.Null));
-        push(b, make_ins(.add, .Kl, arg2, arg, f.getcon(8)));
-        push(b, make_ins(.storel, .Kw, QbeNull, f.getcon(SelfHosted.int_from_ptr(c)), arg));
-        push(b, make_ins(.storew, .Kw, QbeNull, f.getcon(fid.as_index()), arg2));
-        push(b, make_ins(.arg,  .Kl, QbeNull, ret, QbeNull));
-        push(b, make_ins(.arg,  .Kl, QbeNull, arg, QbeNull));
-        push(b, make_ins(.call, .Kw, QbeNull, f.getcon(handler_callee_address.int_from_rawptr()), QbeNull));
-        push(b, make_ins(.load, .Kl, callee, ret, QbeNull));
         
-        emit_native_shim_epilogue(c.comp(), shared, f, ret_ty, b, pars, callee);
+        // running on the vm but jitting to real code, handler is in the compiler 
+        // so can't direct call it, need to escape to the vm. 
+        @emit_instructions((f = f), (SelfHosted.int_from_ptr(c), fid.as_index(), handler.int_from_rawptr(), FR_vm_escape_call.int_from_rawptr(), callee), """
+        @start
+            %arg =l alloc8 16
+            %ret =l alloc8 8
+            %arg2 =l add %arg, 8
+            storel %0, %arg
+            storel %1, %arg2
+            %r0 =l alloc8 24
+            %r1 =l add %r0, 8
+            %r2 =l add %r0, 16
+            storel %ret, %r0
+            storel %arg, %r1
+            storel %2, %r2
+            call %3(l 0, l %r0)
+            %4 =l load %ret
+        """);
+        f.start.ins&.push_all(f.slice_pending_scratch(), temp());
+        f.reset_scratch();
+        
+        emit_native_shim_epilogue(c.comp(), shared, f, ret_ty, f.start, pars, callee);
     };
     c.created_jit_fn_ptr_value(fid, shared.wait_for_symbol(id));
 };
 
+FR_vm_escape_call :: fn() void #weak #libc;
+
 // this is the inverse of create_dyncall_shim. 
-// caller: native, callee: easy_abi
+// caller: native, compiler: easy_abi, callee: easy_abi
 wrap_with_native_abi :: fn(self: *SelfHosted, func: *Func, callee: i64) rawptr = {
-    // its not as simple as just calling vm.eval because if you get here 
-    // it means you're running in the vm right now, you need to call into 
-    // the parent's vm not a new one. 
     @if(callee == 0) return(zeroed(rawptr));
-    // TODO: also jitted comptime with the vm as the host gets confusing because someone needs to make sure tls is setup on the real stack. 
-    @assert(callee > 0, "TODO: vm call %", callee);
     
     @debug_assert(abi_shift_easy_to_native);
     shared := self.comptime_codegen;
@@ -189,6 +184,21 @@ wrap_with_native_abi :: fn(self: *SelfHosted, func: *Func, callee: i64) rawptr =
             };
         };
         
+        if callee < 0 {
+            // its not as simple as just calling vm.eval because if you get here 
+            // it means you're running in the vm right now, you need to call into 
+            // the parent's vm not a new one. 
+            r0, r1, r2 := (f.newtmp("stash", .Kl), f.newtmp("stash", .Kl), f.newtmp("stash", .Kl));
+            push(b, .alloc8, .Kl, r0, f.getcon(24), Qbe.Null);
+            push(b, .add, .Kl, r1, r0, f.getcon(8));
+            push(b, .add, .Kl, r2, r0, f.getcon(16));
+            push(b, .storel, .Kw, Qbe.Null, output, r0);
+            push(b, .storel, .Kw, Qbe.Null, input, r1);
+            push(b, .storel, .Kw, Qbe.Null, f.getcon(callee), r2);
+            input = r0;
+            callee = int_from_rawptr(@as(rawptr) FR_vm_escape_call);
+        };
+        
         push(b, .arg, .Kl, Qbe.Null, output, Qbe.Null);
         push(b, .arg, .Kl, Qbe.Null, input, Qbe.Null);
         push(b, .call, .Kw, Qbe.Null, f.getcon(callee), Qbe.Null);
@@ -211,6 +221,17 @@ wrap_with_native_abi :: fn(self: *SelfHosted, func: *Func, callee: i64) rawptr =
     };
     shared.wait_for_symbol(id)
 };
+
+vm_escape_call :: fn(output: *u8, input: *u8, callee: i64) void = {
+    @if(USE_VM) @debug_assert_lt(callee, 0, "vm_escape_call");
+    self := current_comptime();
+    // TODO: pass in the right sizes
+    self.vm.eval(callee, output.slice(4096), input.slice(4096));
+};
+
+hack_trace_module :: fn(m: *Qbe.Module) void = {
+    _ := push_resolver(QbeModule, m, find_ip_in_module);  // :LEAK
+}
 
 make_fake_func :: fn(self: *SelfHosted, name: Symbol, f_ty: FnType) Func = {
     args := self.arg_types(f_ty.arg);
@@ -323,41 +344,12 @@ init_child_tls :: fn(a: Alloc, t: *StaticTls) void = {
     t.temporary_allocator_i = tmp;
 };
 
-// TODO: get rid of this if vm works out (and isn't too painfully slow). 
-//       then also won't need to track have_jit_shim. 
-undo_map_jit :: fn(m: *Qbe.Module) void = {
-    // need to allow the jitted code to call apple_thread_jit_write_protect
-    // even tho im not doing bake so the fnptrs created at comptime 
-    // and jit-shims are still in expecting_wx=true. 
-
-    mark := temp().mark();
-    // TODO: wasteful! only do up to last_function_end
-    saved_code := m.segments&[.Code].mmapped.shallow_copy(temp());
-
-    F :: LibcType(.macos).MapFlag; // only apple makes us the MAP_JIT shenanigans. 
-    fd: Fd = (fd = -1);
-    prot_RX := @or(Posix'PROT'READ, Posix'PROT'EXEC);
-    prot_RW := @or(Posix'PROT'READ, Posix'PROT'WRITE);
-    flag := @or(Posix'MAP'PRIVATE, Posix'MAP'ANON, Posix'MAP'FIXED);
-    mem := m.segments&[.Code].mmapped;
-    
-    p := u8.raw_from_ptr(mem.ptr);
-    res := or Posix'mmap(p, mem.len, prot_RW, flag, fd, 0) {
-        @panic("mmap Fixed failed")
-    };
-    @assert(identical(res, p));
-    mem.copy_from(saved_code);
-    Syscall'mprotect(p, mem.len, prot_RX).unwrap();
-    
-    temp().reset(mark);
-};
-
 enqueue :: fn(shared: *CodegenShared, entry: *CodegenEntry) void = {
     @if(@run(__driver_abi_version < 1512)) unreachable();
     @debug_assert(!shared.threaded, "threaded");
     vm, m := (current_comptime()[].vm, shared.m);
     
-    log := entry.logging.len != 0;// || true;
+    log := entry.logging.len != 0;
     @match(entry.task) {
         fn Func(f) => {
             if log {
@@ -379,7 +371,9 @@ enqueue :: fn(shared: *CodegenShared, entry: *CodegenEntry) void = {
                 use_symbol(m, it.lnk.id) { alias_s |
                     @assert(!target_s.jit_addr.is_null(), "TODO: bounce");
                     alias_s.jit_addr = target_s.jit_addr;
-                    @assert_eq(alias_s.fixups.len, 0);
+                    alias_s.kind = target_s.kind;
+                    @debug_assert_le(alias_s.fixups.len, 1);  // no emitdat, just the one for Shim
+                    m.do_fixups(alias_s);
                 };
             };
         }
@@ -412,12 +406,40 @@ enqueue :: fn(shared: *CodegenShared, entry: *CodegenEntry) void = {
 
 fn push_fn(self: *Vm, f: *Qbe.Fn) rawptr = {
     m := f.globals;
-    replace_switches(f);
+    if f.name().starts_with("replace_switches") {
+        // HACK: todo: how can this possibly be the only one it doesn't work for, thats a crazy coincidence
+        replace_switches(f);
+    } else {
+        run_qbe_passes_common(f);
+        //Simplify'simplify(f);
+        f.assign_alloc_slots();
+        f.collapse_addr();
+        f.assign_rslot();
+        //import("@/backend/opt/slots.fr")'elide_abi_slots(f); 
+    };
+    slots := f.slot.intcast();
     f := clone(f);
     i := self.fns.len;
-    self.fns&.push(f = f, m = m);
+    self.fns&.push(f = f, m = m, slots = slots.ualign_to(8));
     rawptr_from_int(-i)
 }
+
+assign_rslot :: fn(f: *Qbe.Fn) void = {
+    for_blocks f { b | 
+        fix :: fn(r: *Qbe.Ref) => if f.get_tmp(r[]) { t |
+            if t.slot != -1 {
+                r[] = SLOT(t.slot);
+            };
+        };
+        for_phi b { p |
+            each(p.arg.slice(0, p.narg.zext()), fix);
+        };
+        each b.ins { i |
+            each(i.arg&, fix);
+        };
+        fix(b.jmp.arg&);
+    };
+};
 
 // tag is the high bit of the function pointer. 
 // real function pointers are just their value so just wrap_with_easy_abi is enough and it's easy to toggle USE_VM. 
@@ -438,6 +460,7 @@ Frame :: @rec @struct {
     m: *Qbe.Module;
     // index into .stack of next unused byte. starts at vm.stack.len and grows down. 
     stack_top: i64;  
+    stack_base: i64;  // stack[RSlot(0)]
     refs: []rawptr;  // [RTmp]
     b: *Qbe.Blk;
     i: i64;          // b.ins[i]
@@ -445,7 +468,7 @@ Frame :: @rec @struct {
     dbgloc := zeroed(*Qbe.Ins);
     is_entry := false;
 };
-FnPair :: @struct(f: *Qbe.InlineFn, m: *Qbe.Module);
+FnPair :: @struct(f: *Qbe.InlineFn, m: *Qbe.Module, slots := 0);
 EasyAbiFn :: @FnPtr(r: rawptr, a: rawptr) void;
 Callable :: @tagged(
     Fn: FnPair,
@@ -473,8 +496,7 @@ fn eval(self: *Vm, f: FnPair, output: rawptr, input: rawptr) void = {
 // but the point is to eventually rewrite it in c (where it can't depend my opt stuff)
 // and only use it once to bootstrap so maybe there's no point. 
 fn spin(self: *Vm, end_frame: *Frame) void = {
-    args := @slice(zeroed(rawptr), zeroed(rawptr));
-    n_arg := 0;
+    operator_index :: index_unchecked;
     loop {
         break :: local_return;
         n_par := 0;
@@ -490,40 +512,40 @@ fn spin(self: *Vm, end_frame: *Frame) void = {
                     n_par += 1;
                 }
                 fn arg() => {
-                    args[n_arg] = self.get_ref(i.arg&[0]);
-                    n_arg += 1;
-                }
-                fn call() => {
-                    @debug_assert_eq(n_arg, 2);
-                    n_arg = 0;
+                    a0 := self.get_ref(i.arg&[0]);
+                    i := b.ins[idx]&; idx += 1;
+                    @debug_assert_eq(i.op(), .arg);
+                    a1 := self.get_ref(i.arg&[0]);
+                    i := b.ins[idx]&; idx += 1;
+                    @debug_assert_eq(i.op(), .call);
                     frame.b = b;
                     frame.i = idx;
                     
                     f := self.get_ref(i.arg&[0]).int_from_rawptr();
                     @match(self.unpack_callable(f)) {
-                        fn Fn(f) => self.push_frame(f, args[0], args[1]);
+                        fn Fn(f) => self.push_frame(f, a0, a1);
                         // it might call self.eval again so must be re-entrant. 
                         // (and end_frame isn't always the one with stack_top=stack.len)
-                        fn EasyAbi(f) => f(args[0], args[1]);
+                        fn EasyAbi(f) => f(a0, a1);
                     };
                     break();  // tail self.spin();
                 }
                 fn cas0() => {
-                    args[0] = self.get_ref(i.arg&[0]);
-                }
-                fn cas1() => {
-                    p, old, new := (args[0], self.get_ref(i.arg&[0]), self.get_ref(i.arg&[1]));
+                    a0 := self.get_ref(i.arg&[0]);
+                    i := b.ins[idx]&; idx += 1;
+                    @debug_assert_eq(i.op(), .cas1);
+                    p, old, new := (a0, self.get_ref(i.arg&[0]), self.get_ref(i.arg&[1]));
                     result := @if(i.cls() == .Kw, 
                         do_cas(.Kw, p, old, new), 
                         do_cas(.Kl, p, old, new));
                     frame.set_ref(i.to, result);
                 }
                 fn blit0() => {
-                    args[0] = self.get_ref(i.arg&[0]);
-                    args[1] = self.get_ref(i.arg&[1]);
-                }
-                fn blit1() => {
-                    src, dest, size := (args[0], args[1], i.arg&[0].rsval().intcast().abs());
+                    a0 := self.get_ref(i.arg&[0]);
+                    a1 := self.get_ref(i.arg&[1]);
+                    i := b.ins[idx]&; idx += 1;
+                    @debug_assert_eq(i.op(), .blit1);
+                    src, dest, size := (a0, a1, i.arg&[0].rsval().intcast().abs());
                     copy_bytes(dest, src, size);
                 }
                 fn nop() => ();
@@ -532,6 +554,15 @@ fn spin(self: *Vm, end_frame: *Frame) void = {
                 }
                 fn copy() => {
                     frame.set_ref(i.to, self.get_ref(i.arg&[0]));
+                }
+                // only if doing opt passes
+                fn sel0() => {
+                    c := i.arg&[0];
+                    i := b.ins[idx]&; idx += 1;
+                    @debug_assert_eq(i.op(), .sel1);
+                    r := int(!self.eval_cond(c));
+                    r := self.get_ref(i.arg&[r]);
+                    frame.set_ref(i.to, r);
                 }
                 @default => self.simple_op(frame, i);
             };
@@ -547,13 +578,11 @@ fn spin(self: *Vm, end_frame: *Frame) void = {
                 };
             }
             fn jmp() => {
-                frame.b = b.s1;
+                self.jump_to(frame, b.s1);
             }
             fn jnz() => {
-                c := self.get_ref(b.jmp.arg);
-                c: u32 = c.int_from_rawptr().trunc();  // :jnz_is_Kw
-                c := c != 0;
-                frame.b = @if(c, b.s1, b.s2);
+                c := self.eval_cond(b.jmp.arg);
+                self.jump_to(frame, @if(c, b.s1, b.s2));
             }
             fn hlt() => panic("vm halted");
             @default => @panic("vm bad jmp: %", b.jmp.type);
@@ -562,7 +591,26 @@ fn spin(self: *Vm, end_frame: *Frame) void = {
     };
 }
 
+fn eval_cond(self: *Vm, r: Qbe.Ref) bool #inline = {
+    c := self.get_ref(r);
+    c: u32 = c.int_from_rawptr().trunc();  // :jnz_is_Kw
+    c != 0
+}
+
+fn jump_to(self: *Vm, frame: *Frame, b: *Qbe.Blk) void #inline = {
+    // only if doing opt passes
+    for_phi b { p |
+        a := index_in_phi(frame.b, p);
+        frame.set_ref(p.to, self.get_ref(p.arg[a]));
+    };
+    
+    frame.b = b;
+}
+
 fn simple_op(self: *Vm, frame: *Frame, i: *Qbe.Ins) void = {
+    operator_index :: index_unchecked;
+    
+    // only if not doing opt passes
     if @is(i.op(), .alloc4, .alloc8) {
         size := frame.f.con[i.arg&[0].val()]&;
         @debug_assert(rtype(i.arg&[0]) == .RCon && size.type() == .CBits);
@@ -604,11 +652,13 @@ fn do_cas($k: Qbe.Cls, p: rawptr, old: rawptr, new: rawptr) rawptr = {
 };
 
 fn set_ref(frame: *Frame, r: Qbe.Ref, result: rawptr) void = {
+    operator_index :: index_unchecked;
     @debug_assert(@is(rtype(r), .RTmp, .RNull), "bad set_ref");
     frame.refs[r.val()] = result;
 }
 
 fn get_ref(self: *Vm, r: Qbe.Ref) rawptr = {
+    operator_index :: index_unchecked;
     @match(rtype(r)) {
         fn RTmp() => self.frame.refs[r.val()];
         fn RCon() => {
@@ -616,12 +666,23 @@ fn get_ref(self: *Vm, r: Qbe.Ref) rawptr = {
             base := @match(c.type()) {
                 fn CBits() => zeroed(rawptr);
                 fn CAddr() => {
-                    a, _ := get_addr(self.frame.m, c.sym).unwrap();  // :SLOW
+                    // a, _ := get_addr(self.frame.m, c.sym).unwrap();
+                    // use_threads=false
+                    m, id := (self.frame.m, c.sym);
+                    bid: i64 = id.id.zext().bit_and(IMask);
+                    bucket := m.symbols[bid]&;
+                    idx := id.id.shift_right_logical(IBits);
+                    symbol := bucket.data.index(idx.zext());
+                    a := symbol.jit_addr;
                     @debug_assert(!a.is_null());
                     a
                 };
             };
             base.offset(c.bits())
+        }
+        fn RSlot() => {
+            p := self.stack.index(self.frame.stack_base).offset(r.val());
+            u8.raw_from_ptr(p)
         }
         fn RNull() => zeroed(rawptr);  // avoids special casing unary ops
         @default => @panic("get_ref %", r);
@@ -634,8 +695,10 @@ fn push_frame(self: *Vm, f: FnPair, output: rawptr, input: rawptr) void = {
     n := f.f.ntmp.zext();
     refs_start := frame_start - (n * size_of(rawptr));
     refs := bit_cast_unchecked(*u8, *rawptr, self.stack.index(refs_start));
+    stack_base := refs_start - f.slots;
     frame[] = (
-        stack_top = refs_start,
+        stack_base = stack_base,
+        stack_top = stack_base,
         refs = refs.slice(n),
         f = f.f,
         m = f.m,

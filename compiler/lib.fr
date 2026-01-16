@@ -219,6 +219,15 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
         start := timestamp();
         opts := vtable.default_build_options(); 
         opts.retain_function_names = true;
+        
+        // HACK: inherit safety mode just because it's really slow if running in the vm
+        @if(DUMB_EMIT_IR && !@run safety_check_enabled(.DebugAssertions)) {
+            it := opts.safety_checks&;
+            it.insert(.Bounds, false);
+            it.insert(.DebugAssertions, false);
+            it.insert(.InvalidTag, false);
+        };
+        
         // this needs to be set based on the host. 
         // ie. if you build the compiler targetting an environment without a libc, 
         // we can't just produce a libc when loading a driver program. 
@@ -269,19 +278,15 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
                 m.make_exec();
                 
                 c_m := self.comptime_codegen.m;
-                // TODO: why does this matter if USE_VM?
-                @if(DUMB_EMIT_IR) if c_m.use_map_jit_on_apple_silicon {
+                @if(DUMB_EMIT_IR) {
                     @if(IS_BOOTSTRAPPING) unreachable();
                     f := ();
-                    // can't add anything to comptime_codegen after undo_map_jit so finish all shims now. 
-                    // TODO: should probably do this loop even when not map_jit just for consistancy
                     while => self.have_jit_shim&.pop() { fid |
                         have_shim := false;
                         id := self.comptime_jit_symbol_id(fid);
                         use_symbol(c_m, id) { s |
                             @if(done&.get(fid.as_index()))
                             if m.get_addr(m.intern(s.name)) { addr, size |
-                                // TODO: do fixups?
                                 s.jit_addr = addr;
                                 s.size = size.trunc();
                                 self.get_function(fid).set_flag(.RealAsmDone);
@@ -297,7 +302,6 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
                     };
                     self.debug_deny_unfilled_jit_shim_calls = true;
                     c_m.write_perfmap_symbols();
-                    Vm'undo_map_jit(m);
                 };
             };
         
@@ -538,6 +542,10 @@ fn init_codegen(m: *Qbe.Module, a: Alloc, threaded: bool) *FrontendCodegen = {
             worker.enqueue = Vm'enqueue;
             worker.join = fn(_0) = ();
         };
+    };
+    @if(abi_shift_easy_to_native) {
+        FR_hack_trace_module :: fn(m: *Qbe.Module) void #weak #libc;
+        FR_hack_trace_module(m);
     };
     a.boxed(FrontendCodegen, (
         worker = worker,
