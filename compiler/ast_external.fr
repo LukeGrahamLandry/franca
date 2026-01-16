@@ -60,9 +60,6 @@ fn unptr_ty(c: CompCtx, ty: Type) ?Type = {
     }
 }
 
-fn get_comptime_env(comp: CompCtx) *ComptimeEnvironment = 
-    ComptimeEnvironment.ptr_from_raw(comp.get_build_options()[].env);
-
 fn fmt_fn_name(program: CompCtx, f: FuncId) Str = {
     opts := program.get_build_options();
     func := program.get_function(f);
@@ -73,19 +70,6 @@ fn fmt_fn_name(program: CompCtx, f: FuncId) Str = {
     } else {
         @tfmt("F%", f.to_index())
     }
-}
-
-fn mangle_name(program: CompCtx, id: BakedVarId) Str = {
-    opts := program.get_build_options();
-    if opts.retain_function_names {
-        it := program.get_baked(id);
-        if it.name != Flag.SYMBOL_ZERO.ident() {
-            real_name := program.get_string(it.name);
-            return(@tfmt("%__g%", real_name, id.id));
-        };
-    };
-    // TODO: assert that you don't set the name after getting here
-    @tfmt("g%", id.id)
 }
 
 fn tuple_types(self: CompCtx, ty: Type) ?[]Type = {
@@ -111,18 +95,6 @@ fn tuple_types(self: CompCtx, ty: Type) ?[]Type = {
 }
 
 max_homogeneous_tuple :: 50;
-
-fn is_unary(self: CompCtx, ty: Type) bool = {
-    @match(self.get_type(ty)) {
-        fn Struct(f) => !f.is_tuple || f.fields.len <= 1;
-        // :hacky_type_compression
-        // this is a :HACK to fix @slice(>50 elements)
-        // TODO: but does this miscompile `fn foo(a: Array(Bar, 51)) void;`? 
-        //       or do we makes sure it's wrapped in an extra tuple? if so then we don't need the second case maybe? -- Nov 18
-        fn Array(it) => it.len.zext() <= max_homogeneous_tuple;
-        @default => true;
-    }
-}
 
 fn arg_types(self: CompCtx, ty: Type) []Type = {
     @match(self.get_type(ty)) {
@@ -192,6 +164,7 @@ fn tuple_of(self: CompCtx, types: []Type) Type = {
 
 fn get_tuple_field_name(self: CompCtx, i: i64) Symbol #inline = {
     ::if(Symbol);
+    @debug_assert_ge(i, 0);
     if i <= 20 {  // don't allocate for common numbers
         @as(Symbol) @as(u32) trunc(@as(i64) Flag._0.raw() + i)
     } else {
@@ -282,23 +255,6 @@ fn make_error(msg: Str) *CompileError = {
 fn is_unit(t: Type) bool = t == void;
 fn is_unknown(t: Type) bool = t == UnknownType;
 fn is_never(t: Type) bool = t == Never;
-
-fn raw_type(c: CompCtx, ty: Type) Type = {
-    loop {
-        @match(c.get_type(ty)) {
-            fn Named(f) => {
-                ty = f._0;
-            }
-            fn Enum(f) => {
-                ty = f.raw;
-            }
-            @default => {
-                return(ty);
-            };
-        };
-    };
-    ty
-}
 
 // fn from_values
 fn assume_cast($T: Type, self: *Values) *T #generic = {
@@ -410,9 +366,6 @@ fn find_struct_field(f: *get_variant_type(TypeInfo, .Struct), name: Symbol, inde
     };
     (Some = f.fields.index(field))
 }
-
-fn log(v: *Var, pool: CompCtx) Str = 
-    @tfmt("%%%", pool.get_string(v.name), "%", v.id.id);
 
 fn unwrap_ty(self: *Binding) Type = {
     @debug_assert(self.ty&.is(.Finished), "type not ready!");

@@ -32,8 +32,8 @@ TODO:
     - some memory is expected to alias (stack, temp()) so should be unbakable. 
 */
 
-fn emit_relocatable_constant(c: CompCtx, ty: Type, value: []u8, loc: Span) CRes(BakedVarId) = {
-    id, off := @try(c.data.cast()[][].bake_relocatable_constant(value, ty, loc, .None)) return;
+fn emit_relocatable_constant(c: *SelfHosted, ty: Type, value: []u8, loc: Span) CRes(BakedVarId) = {
+    id, off := @try(c.bake_relocatable_constant(value, ty, loc, .None)) return;
     @assert_eq(off, 0, "TODO: internal pointers in vtable.emit_relocatable_constant");
     (Ok = id)
 }
@@ -41,7 +41,7 @@ fn emit_relocatable_constant(c: CompCtx, ty: Type, value: []u8, loc: Span) CRes(
 // since pointers might have cycles, forced_id is used so you can add a cache entry for and address before it's been emitted. 
 fn bake_relocatable_constant(c: *SelfHosted, value: []u8, type: Type, loc: Span, forced_id: ?BakedVarId) Result(Ty(BakedVarId, i64), *CompileError) = {
     to_zero: ReadBytes = (bytes = value, i = 0);
-    c.comp().zero_padding(type, to_zero&);  // Needed for reproducible builds!
+    c.zero_padding(type, to_zero&);  // Needed for reproducible builds!
     
     jit_ptr := u8.int_from_ptr(value.ptr);
 
@@ -398,7 +398,7 @@ fn chop_prefix(self: *SelfHosted, prefix: Type, t: *ReadBytes) ?Values #once = {
 // Without calling this on when baking constants, you can leak comptime addresses in @tagged padding (which happened in get_or_create_type in the compiler).
 // TODO: decide if i need to do this for baked arg key hashing. 
 // TODO: this should probably go through pointers but for baking constants that's handled as we recurse. 
-fn zero_padding(program: CompCtx, ty: Type, bytes: *ReadBytes) PRes = {
+fn zero_padding(program: *SelfHosted, ty: Type, bytes: *ReadBytes) PRes = {
     info := program.get_info(ty);
 
     @debug_assert_eq(bytes.i.mod(info.align_bytes.zext()), 0);
@@ -776,9 +776,6 @@ fn get_info_outlined(self: *SelfHosted, ty_original: Type, old_original: *TypeMe
     old_original
 }
 
-fn raw_type(c: *SelfHosted, ty: Type) Type = 
-    c.comp().raw_type(ty);
-
 fn finish_layout_deep(self: *SelfHosted, ty: Type) void = {
     @debug_assert_ule(ty.as_index(), self.types.len);
     if(self.finished_layout_deep&.get(ty.as_index()), => return());
@@ -916,7 +913,7 @@ fn all_zeroes(b: []u8) bool = {
     true
 }
 
-fn is_tag_only(self: CompCtx, t: *TypeInfo.get_variant_type(.Tagged)) bool = {
+fn is_tag_only(self: *SelfHosted, t: *TypeInfo.get_variant_type(.Tagged)) bool = {
     each t.cases { case | 
         if case._1 != void {  // :get_or_create_type
             return(false);
@@ -925,7 +922,7 @@ fn is_tag_only(self: CompCtx, t: *TypeInfo.get_variant_type(.Tagged)) bool = {
     true
 }
 
-fn repr_transparent(self: CompCtx, it: *TypeInfo.get_variant_type(.Struct)) ?Type = {
+fn repr_transparent(self: *SelfHosted, it: *TypeInfo.get_variant_type(.Struct)) ?Type = {
     @switch(it.fields.len) {
         @case(0) => (Some = void); // :get_or_create_type
         @case(1) => return(Some = it.fields[0].ty);
@@ -945,12 +942,12 @@ fn repr_transparent(self: CompCtx, it: *TypeInfo.get_variant_type(.Struct)) ?Typ
 }
 
 // returns .Ke for aggregates
-fn load_op(self: CompCtx, ty: Type) Ty(Qbe.O, Qbe.Cls) = {
+fn load_op(self: *SelfHosted, ty: Type) Ty(Qbe.O, Qbe.Cls) = {
     l, k, _ := self.load_store_op(ty);
     (l, k)
 };
 
-fn load_store_op(self: CompCtx, ty: Type) Ty(Qbe.O, Qbe.Cls, Qbe.O) = @match(self.get_type(ty)) {
+fn load_store_op(self: *SelfHosted, ty: Type) Ty(Qbe.O, Qbe.Cls, Qbe.O) = @match(self.get_type(ty)) {
     fn Int(it)   => @switch(it.bit_count) {
         @case(8)  => (@if(it.signed, .loadsb, .loadub), .Kw, .storeb);
         @case(16) => (@if(it.signed, .loadsh, .loaduh), .Kw, .storeh);
@@ -980,7 +977,7 @@ fn load_store_op(self: CompCtx, ty: Type) Ty(Qbe.O, Qbe.Cls, Qbe.O) = @match(sel
     @default     => (.nop, .Ke, .Oxxx);
 };
 
-fn store_op(self: CompCtx, ty: Type) Qbe.O = {
+fn store_op(self: *SelfHosted, ty: Type) Qbe.O = {
     _0, _1, o := self.load_store_op(ty);
     o
 }

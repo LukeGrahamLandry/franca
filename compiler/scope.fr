@@ -70,7 +70,7 @@ fn maybe_stack_allocated_type(var: *VarData) *LazyType #inline = {
 make_top_level :: fn(self: *SelfHosted, body: []FatStmt) Res(void) #once = {
     @assert(body.len != 0, "tried to make_top_level with no statements");
     name := self.pool.insert_owned("@toplevel@");
-    fid := @try(make_function_scope(self, body, name, scope_from_index(0))) return;
+    fid := make_function_scope(self, body, name, scope_from_index(0));
     @try(self.ensure_resolved_body(fid)) return;
     @debug_assert_eq(self.get_function(fid)[].use_scope, TOP_LEVEL_SCOPE);
     
@@ -139,7 +139,7 @@ fn fill_directory_scope(self: *SelfHosted, s: ScopeId) Res(void) = {
 // This is a bit of a hack to avoid special representation for a block of declarations that can be imported but don't exist in a parent 
 // that act as a root for the resolving process. so the top level scope and #use/import() but not @struct because that's reached as a normal expression. 
 // TODO: this provides an obvious extension point for being able to pass arguments when importing a library (replace the arg=empty_pattern).  
-fn make_function_scope(c: *SelfHosted, body: []FatStmt, name: Symbol, scope: ScopeId) Res(FuncId) = {
+fn make_function_scope(c: *SelfHosted, body: []FatStmt, name: Symbol, scope: ScopeId) FuncId = {
     loc := @if(body.len == 0, zeroed Span, body[0].loc);
     @debug_assert_ne(scope, NOSCOPE, "make_function_scope %", c.pool.get(name));
     result := c.box(synthetic_ty((Value = (bytes = unit_value)), loc, void));
@@ -148,16 +148,16 @@ fn make_function_scope(c: *SelfHosted, body: []FatStmt, name: Symbol, scope: Sco
     func := make_func(def, (Some = result&), false, true);
     r: ResolveScope = new(c, scope, func.loc);
     zone := zone_begin(.Scope); // TODO: defer
+    @debug_assert(!func&.get_flag(.AllowRtCapture));  // only case where resolve_func can return an error
     res := r&.resolve_func(func&);
+    @debug_assert(res&.is_ok());
     zone_end(zone);
-    @try(res) return;
-    f := c.add_function(func);
-    (Ok = f)
+    c.add_function(func)
 }
 
 fn resolve_sign(self: *SelfHosted, func: *Func) PRes #once = {
     s := func.resolve_scope;
-    @debug_assert_ne(s, NOSCOPE, "function must have scope %", self.comp().log(func));
+    @debug_assert_ne(s, NOSCOPE, "function must have scope %", self.log(func));
     r: ResolveScope = new(self, s, func.loc);
     zone := zone_begin(.Scope); // TODO: defer
     res := r&.resolve_func_args(func);
@@ -379,7 +379,7 @@ fn value_to_scope(self: *SelfHosted, value: Values, type: Type, save_scope_as: ?
     };
     if type == Type {
         type := Type.assume_cast(value&)[];
-        info := self.get_type(raw_type(self.comp(), type));
+        info := self.get_type(raw_type(self, type));
         @err_assert(info.is(.Struct), "can only #use structs, not %", self.log_type(type)) return;
         return(Ok = info.Struct.scope);
     };
@@ -391,7 +391,7 @@ fn value_to_scope(self: *SelfHosted, value: Values, type: Type, save_scope_as: ?
             @try(self.resolve_body(use_func)) return;
             @err_assert(use_func.body&.is(.Normal), "#use fn no body") return;
             e := use_func.body.Normal&;
-            @err_assert(e.expr&.is(.Block), "#use fn non Block body %", self.comp().log(use_func)) return;
+            @err_assert(e.expr&.is(.Block), "#use fn non Block body %", self.log(use_func)) return;
             @debug_assert(!(e.expr.Block.scope == NOSCOPE), "ICE: #use unresolved block"); 
             use_func.use_scope = e.expr.Block.scope;
             if save_scope_as { name |
@@ -418,7 +418,7 @@ fn apply_annotations(self: *ResolveScope, a: []Annotation) PRes = {
 fn add_use(self: *ResolveScope, a: *Annotation, reexport: bool) PRes = {
     scope_with_use := self.scope;
     arg := @unwrap(a.non_void_arg(), "#use requires an argument") return;
-    @if(TRACK_SCOPES) @eprintln("[S] Starting #use %", self.compiler.comp().log(arg));
+    @if(TRACK_SCOPES) @eprintln("[S] Starting #use %", self.compiler.log(arg));
     @try(self.walk_expr(arg)) return;
     
     each arg.items() { arg | 
@@ -1031,12 +1031,6 @@ fn handle_pattern(self: *RenumberVars, p: *Pattern) Result(DoMore, void) #once =
     (Ok = .Continue)
 }
 
-fn log(s: *SelfHosted, e: *FatExpr) void = {
-    out: List(u8) = list(temp());
-    e.log(s.pool, out&, 0);
-    println(out.items());
-}
-
 // most blocks aren't using #include_std.
 // doing it this way means you scan_const_decls twice anything in a block before a #include_std, but that doesn't matter.
 fn slow_body(self: *ResolveScope, body: *List(FatStmt)) PRes #once = {
@@ -1128,7 +1122,7 @@ fn import_as_scope(self: *SelfHosted, name: Symbol, _loc: Span, force_scope: ?Sc
         stmts = stmts[0].stmt.Eval.expr.Block.body; // TODO: assert no result
     };
     // TODO: think about what the parent scope should be here. 
-    fake_fid := @try(make_function_scope(self, stmts.items(), name, TOP_LEVEL_SCOPE)) return;
+    fake_fid := make_function_scope(self, stmts.items(), name, TOP_LEVEL_SCOPE);
     if force_scope { s |
         it := self.get_function(fake_fid)[].body&;
         @debug_assert(it.is(.Normal) && it.Normal.expr&.is(.Block));

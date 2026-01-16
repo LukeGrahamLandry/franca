@@ -27,7 +27,7 @@ EmitIrA :: fn() = {
 
 EmitIr :: @struct(
     f: *Qbe.Fn,
-    program: CompCtx,
+    program: *SelfHosted,
     last_loc: Span,
     var_lookup: HashMap(VarId, IrVar),
     inlined_return_addr: HashMap(LabelId, ReturnTarget),
@@ -63,10 +63,10 @@ ReturnTarget :: @struct(
 
 Placement :: @tagged(Assign: Qbe.Ref, Scalar, Blit: Qbe.Ref, NewMemory, Discard, ScalarTransient);
 
-emit_ir :: fn(comp: CompCtx, shared: *FrontendCodegen, f: FuncId, when: ExecStyle, pending: *List(FuncId), export: bool) CRes(void) = {
+emit_ir :: fn(comp: *SelfHosted, shared: *FrontendCodegen, f: FuncId, when: ExecStyle, pending: *List(FuncId), export: bool) CRes(void) = {
     func := comp.get_function(f); 
 
-    c := comp.data.cast()[][];
+    c := comp;
     if when == .Aot {
         // TODO: really you want the callgraph of why we think this is reachable 
         // TODO: this will need to change again when i want to be able to cache #macro, etc. 
@@ -86,7 +86,7 @@ emit_ir :: fn(comp: CompCtx, shared: *FrontendCodegen, f: FuncId, when: ExecStyl
     // currently this needs to make funcids eagarly so it might involve making jitshims for imports which has to happen before we grab the codegenentry
     @if(!DISABLE_IMPORT_FRC)
     @if_let(func.body&) fn FrcImport(it) => {
-        _ := @try(find_module(comp.data.cast()[][], shared, Incr'FrcModule.ptr_from_int(it.module))) return;
+        _ := @try(find_module(comp, shared, Incr'FrcModule.ptr_from_int(it.module))) return;
         @if(ENABLE_TRACY) ___tracy_emit_zone_color(z, import_cache_colour);
     };
     
@@ -99,7 +99,7 @@ emit_ir :: fn(comp: CompCtx, shared: *FrontendCodegen, f: FuncId, when: ExecStyl
     enter_task shared { entry |
         opts := comp.get_build_options();
         
-        env := comp.get_comptime_env();
+        env := comp.env;
         self: EmitIr = (
             f = temp().box_uninit(Qbe.Fn),
             program = comp,
@@ -126,7 +126,7 @@ emit_ir :: fn(comp: CompCtx, shared: *FrontendCodegen, f: FuncId, when: ExecStyl
         self.f.lnk.id = m.intern(self&.fmt_fn_name(self.func));  // TODO: set export 
         
         ::ptr_utils(Qbe.Module);
-        if identical(comp.data.cast()[][].comptime_codegen.m, m) && func.has_comptime_jit_symbol_id {
+        if identical(comp.comptime_codegen.m, m) && func.has_comptime_jit_symbol_id {
             @debug_assert_eq(self.f.lnk.id.id, func.comptime_jit_symbol_id);
         };
         
@@ -167,7 +167,7 @@ emit_ir :: fn(comp: CompCtx, shared: *FrontendCodegen, f: FuncId, when: ExecStyl
                         if baked.need_reify {
                             @debug_assert(!shared.worker.threaded, "need_reify on threaded codegen of %", comp.fmt_fn_name(f));
                             baked.need_reify = false;
-                            c := comp.data.cast()[][];
+                            c := comp;
                             sym := m.intern(comp.mangle_name(id));
                             use_symbol(m, sym) { symbol |
                                 c.baked.vmem&.insert(symbol.jit_addr, (BakedVarId = id));
@@ -194,7 +194,7 @@ fn set_lib(self: *EmitIr, it: Ty(Qbe.Sym, Str, bool)) void = {
 // this puts a bunch of stuff in temp(), it's expected to be used in the context of a CodegenEntry. 
 // TODO: this is so annoying. the data structures are so similar because the two sides need to know the same information. 
 //       but i can't quite make them the same because you need to allow multiple modules on one frontend context. 
-fn baked_var_to_dat(comp: CompCtx, m: *QbeModule, id: BakedVarId) Dat2 = {
+fn baked_var_to_dat(comp: *SelfHosted, m: *QbeModule, id: BakedVarId) Dat2 = {
     value := comp.get_baked(id);
     (
         id = m.intern(comp.mangle_name(id)),  
@@ -227,7 +227,7 @@ fn baked_var_to_dat(comp: CompCtx, m: *QbeModule, id: BakedVarId) Dat2 = {
 // note: mirrors compile_for_arg
 // appends par/parc instructions to f.start
 // zero sized types do not generate a par instruction but are added to zero_sized_vars instead. 
-fn emit_par_instructions(program: CompCtx, shared: *FrontendCodegen, arguments: *Pattern, arg_ty: Type, f: *Qbe.Fn, zero_sized_vars: ?*HashMap(VarId, IrVar)) []ArgInfo = {
+fn emit_par_instructions(program: *SelfHosted, shared: *FrontendCodegen, arguments: *Pattern, arg_ty: Type, f: *Qbe.Fn, zero_sized_vars: ?*HashMap(VarId, IrVar)) []ArgInfo = {
     count := arguments.bindings.len;
     args := ArgInfo.list(count, temp());
     reserve(f.start.ins&, count, temp());
@@ -403,7 +403,7 @@ fn bounce_body_call(self: *EmitIr, target: Qbe.Sym) void = {
     self.entry.task = (Bounce = (lnk = self.f.lnk&, target = target));
 }
 
-fn save_signeture(program: CompCtx, shared: *FrontendCodegen, id: Qbe.Sym, ty: Type) void = { 
+fn save_signeture(program: *SelfHosted, shared: *FrontendCodegen, id: Qbe.Sym, ty: Type) void = { 
     @if(shared.m.goal.arch != .wasm32 && !@is(shared.m.goal.type, .Cached, .CachedEarly)) return();
     f_ty := @match(program.get_type(ty)) {
         fn Fn(it) => it[];
@@ -414,7 +414,7 @@ fn save_signeture(program: CompCtx, shared: *FrontendCodegen, id: Qbe.Sym, ty: T
 }
 
 // kinda sucks that this is yet another mirror of emit_par_instructions
-fn save_signeture(program: CompCtx, shared: *FrontendCodegen, id: Qbe.Sym, f_ty: FnType) void = { 
+fn save_signeture(program: *SelfHosted, shared: *FrontendCodegen, id: Qbe.Sym, f_ty: FnType) void = { 
     @if(shared.m.goal.arch != .wasm32 && !@is(shared.m.goal.type, .Cached, .CachedEarly)) return();
     enter_task shared.worker { entry |
         f := temp().box_uninit(Qbe.Fn);
@@ -461,7 +461,7 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = {
     
     if func.get_flag(.LogAst) {
         @eprintln("[#log_ast %] %", f, self.program.log(func));
-        self.program.data.cast()[][].codemap.show_error_line(func.loc, true /*TODO*/);
+        self.program.codemap.show_error_line(func.loc, true /*TODO*/);
     };
     m := self.shared.m;
     
@@ -522,7 +522,7 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = {
             ));
             
             // TODO: be not fucking ugly
-            f_ty := @unwrap(self.program.data.cast()[][].func_type(f), "unknown signeture") return;
+            f_ty := @unwrap(self.program.func_type(f), "unknown signeture") return;
             save_signeture(self.program, self.shared, self.f.lnk.id, f_ty);
             
             return(.Ok)
@@ -695,9 +695,9 @@ fn emit_runtime_call(
     })
 }
 
-fn is_local_scalar(self: CompCtx, v: Var, ty: Type) bool #inline = {
+fn is_local_scalar(self: *SelfHosted, v: Var, ty: Type) bool #inline = {
     _, k := load_op(self, ty);
-    k != .Ke && !self.data.cast()[][].scopes.get_var_data(v)[].took_address
+    k != .Ke && !self.scopes.get_var_data(v)[].took_address
 }
 
 fn compile_stmt(self: *EmitIr, stmt: *FatStmt) CRes(void) = {
@@ -866,7 +866,7 @@ fn compile_expr(self: *EmitIr, expr: *FatExpr, p: Placement) CRes(Qbe.Ref) = {
                 if self.when == .Jit && info.comptime != 0 {
                     addr := info.comptime;
                     @if(abi_shift_easy_to_native) {  // don't have the real dlopen
-                        self := self.program.data.cast()[][];
+                        self := self.program;
                         @if_let(self.get_type(expr.ty)) fn FnPtr(it) => {
                             @debug_assert_eq(self.pool.get(info.lib), "libc");
                             func := Vm'make_fake_func(self, info.name, it.ty);
@@ -890,7 +890,7 @@ fn compile_expr(self: *EmitIr, expr: *FatExpr, p: Placement) CRes(Qbe.Ref) = {
             f := @unwrap(arg[].as_const(), "expected fn for ptr") return;
             f := FuncId.assume_cast(f&)[];
 
-            c := self.program.data.cast()[][];
+            c := self.program;
             if self.m.goal.arch == .wasm32 && self.m.goal.type == .JitOnly && identical(c.comptime_codegen.m, self.m) {
                 // required after i stopped doing MarkNotDone when making lit_fn. 
                 // because emit.push.CAddr needs to know its a function when emitting the code 
@@ -1578,7 +1578,7 @@ fn record_var_decl(self: *EmitIr, name: Var, value: IrVar) void #inline = {
 
 // IMPORTANT: you can't use f.emit because threads. 
 fn emit(self: *EmitIr, o: Qbe.O, k: Qbe.Cls, dest: Qbe.Ref, a0: Qbe.Ref, a1: Qbe.Ref) void #inline = {
-    self.program.data.cast()[][].stats.ir_ops += 1;
+    self.program.stats.ir_ops += 1;
     @debug_assert(k.raw() < 4, "ICE: invalid base % in emit_ir:emit %", k, o);
     @debug_assert(o != .Oxxx, "ICE: null inst emit_ir:emit");
     push(self.blk, make_ins(o, k, dest, a0, a1));
@@ -1710,7 +1710,7 @@ fn get_aggregate(self: *EmitIr, ty: Type) Qbe.Ref #inline =
 
 // TODO: reuse types for different nominal types with the same repr?  -- new_type does this now. might not be worth it tho. 
 // if you fix this to set the name don't forget to update the hash in new_type
-fn get_aggregate(self: CompCtx, m: *FrontendCodegen, ty: Type) Qbe.Ref = {
+fn get_aggregate(self: *SelfHosted, m: *FrontendCodegen, ty: Type) Qbe.Ref = {
     info := self.get_info(ty);
     // not get_or_insert because this is recursive
     ir_index := m.type_indices&.get(ty) || {
@@ -1814,7 +1814,7 @@ fn get_aggregate(self: CompCtx, m: *FrontendCodegen, ty: Type) Qbe.Ref = {
 fn as_field(self: *EmitIr, ty: Type) Qbe.Field #inline = 
     as_field(self.program, self.shared, ty);
 
-fn as_field(self: CompCtx, m: *FrontendCodegen, ty: Type) Qbe.Field = {
+fn as_field(self: *SelfHosted, m: *FrontendCodegen, ty: Type) Qbe.Field = {
     ::if(Qbe.Field);
     type := self.get_type(ty);
     @match(type) {
@@ -1897,3 +1897,17 @@ fn seal(self: *EmitIr, $body: @Fn(b: *Qbe.Blk) void) void = {
 
 EmitIr
 };
+
+
+fn mangle_name(program: *SelfHosted, id: BakedVarId) Str = {
+    opts := program.get_build_options();
+    if opts.retain_function_names {
+        it := program.get_baked(id);
+        if it.name != Flag.SYMBOL_ZERO.ident() {
+            real_name := program.get_string(it.name);
+            return(@tfmt("%__g%", real_name, id.id));
+        };
+    };
+    // TODO: assert that you don't set the name after getting here
+    @tfmt("g%", id.id)
+}

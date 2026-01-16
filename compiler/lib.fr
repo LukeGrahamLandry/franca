@@ -116,29 +116,18 @@ WhereKey :: @struct(template: FuncId, arg: Values);
 
 PRes :: Result(void, *CompileError);
 
-fn load_file_in_compiler(vtable: *ImportVTable, path: Str, opts: *BuildOptions) CRes(CompCtx) = {
-    // :io_driver
-    // TODO: put this somewhere else? 
-    //if source.len > prelude.len + 4 {
-    //    maybe_magic := source.items().subslice(prelude.len, 4);
-    //    check_magic :: fn(M: u32) => 
-    //        maybe_magic.starts_with(ptr = ptr_cast_unchecked(u32, u8, M&), len = 4);
-    //    // TODO: comment on architecture 
-    //    @err_assert(!check_magic(import("@/backend/macho/bits.fr").macho_magic), "load_file_in_compiler: the bytes in '%' look like a Mach-O file, not source code.", path) return;
-    //};
-    
-    comp := {vtable.init_compiler}(opts);
-    c := vtable.with(comp);
-    s := u8.list(c.get_alloc());
+fn load_file_in_compiler(vtable: *ImportVTable, path: Str, opts: *BuildOptions) *SelfHosted = {
+    self := init_self_hosted(opts);
+    c := self.comp();
+    s := u8.list(self.get_alloc());
     @fmt(s&, """#include_std("lib/core.fr");#include_std("%");""", path);
-    file := c.add_file("-", s.items());
-    self := c.data.cast();
+    file := self.codemap.add_file("-", s.items());
     stmts := c.data.parse_stmts(file&);
     // TODO: handle error
-    stmts := self[][].unwrap_report_error([]FatStmt, stmts); 
+    stmts := self.unwrap_report_error([]FatStmt, stmts); 
     // TODO: you want to be able to return an error but they can't do anything with a CompileError because they don't have the compiler instance. 
-    self[][].unwrap_report_error(void, {c.vtable.make_and_resolve_and_compile_top_level}(c.data, stmts));
-    (Ok = c)
+    self.unwrap_report_error(void, self.make_top_level(stmts));
+    self
 }
 
 Dyn :: import("@/lib/dynamic_lib.fr");
@@ -149,11 +138,12 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
     F :: @FnPtr(*ImportVTable) void;
     callee: ?F = .None;
     cachepath := choose_cache_filename(path);
+    ::driver_vtable_exports;
     
     a := general_allocator();
     to_free: ?Ty(*QbeModule, *Crash'LocationResolverNode) = .None;
     to_free_h: ?*Incremental.Header = .None;
-    to_free_c: ?CompCtx = .None;
+    to_free_c: ?*SelfHosted = .None;
     
     if !path.ends_with(".fr") {
         if Dyn'open(path) { handle |
@@ -232,13 +222,11 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
         // ie. if you build the compiler targetting an environment without a libc, 
         // we can't just produce a libc when loading a driver program. 
         opts.no_cache = no_cache;
-        c := @try(vtable.load_file_in_compiler(path, opts)) return;
-        env := c.get_comptime_env();
+        self := vtable.load_file_in_compiler(path, opts);
+        env := self.env;
         @if(show_backend_stats())
         @eprintln(">>> compiler configuration: threads=%, debug_assertions=%, host = (%, %), nocache=%, syscalls=%", 
             use_threads, safe, current_arch(), current_os(), no_cache, prefer_syscalls());
-        
-        self := c.data.cast()[][];
         
         cache_it := !no_cache && enable_incremental();
         
@@ -260,6 +248,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
         
         apple_thread_jit_write_protect(true);  // :JitMemProtect this thread wants to execute
         
+        c := self;
         f := c.get_unique_named("driver") 
             || c.get_unique_named("main") 
             || panic("expected a function called main or driver.");
@@ -267,7 +256,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
         name := c.fmt_fn_name(f);
         cc := zeroed rawptr;
             // no wrap_main so don't waste time compiling a new franca_runtime_init. 
-            done := main_thread_pump(self.comp(), shared, @slice(f), false);
+            done := main_thread_pump(self, shared, @slice(f), false);
             self.debug_deny_jit_shim_calls = !DUMB_EMIT_IR;
             if no_cache {
                 seal_debug_info(m, empty(), false, empty());
@@ -321,11 +310,11 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
             seal_debug_info(m, empty(), false, empty());
             
             make_dirs_or_crash(cache_dir());
-            header := write_cache(m, c, f, cachepath, path);
+            header := write_cache(m, self, f, cachepath, path);
             to_free_h = (Some = header);
             drop(m);
             general_allocator().dealloc_one(QbeModule, m);
-            c'vtable'destroy_compiler(c.data);
+            c.drop();
 
             // this doesn't re-read the files to check if they changed since you started compiling, that would feel a bit creepy. 
             z := zone_begin(.CheckCache);
@@ -346,7 +335,6 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
         r, a := ((), init_driver_vtable(true));
         @assert(!abi_shift_easy_to_native, "wrap_vtable_with_native");
         self := to_free_c.unwrap();
-        self := self.data.cast()[][];
         self.vm.eval(callee, void.cast_to_bytes(r&), cast_to_bytes(*ImportVTable, a&));
     }, {
         push_as_tls(.comptime, zeroed(rawptr)) {
@@ -363,7 +351,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
         a.dealloc(u8, it.as_bytes());
     };
     if to_free_c { it |
-        it'vtable'destroy_compiler(it.data);
+        it.drop();
     };
     reset_temporary_storage(mark);
     .Ok
@@ -557,14 +545,15 @@ fn init_codegen(m: *Qbe.Module, a: Alloc, threaded: bool) *FrontendCodegen = {
 }
 
 MainThreadPump :: @struct {
-    comp: CompCtx;
+    comp: *SelfHosted;
     funcs_done: DynamicBitSet;
     funcs_seen: DynamicBitSet;
     work_stack: List(FuncId);
     pending: List(FuncId);
     enable_tracy: bool = @if(ENABLE_ENABLE_TRACY, ENABLE_TRACY, false);
 };
-fn main_thread_pump(comp: CompCtx, shared: *FrontendCodegen, fns: []FuncId, wrap_main: bool) DynamicBitSet = {
+fn main_thread_pump(comp: *SelfHosted, shared: *FrontendCodegen, fns: []FuncId, wrap_main: bool) DynamicBitSet = {
+    ::driver_vtable_exports;
     main_thread_pump(comp, shared, fns, wrap_main, EmitIr)
 }
 
@@ -572,15 +561,15 @@ fn main_thread_pump(comp: CompCtx, shared: *FrontendCodegen, fns: []FuncId, wrap
 // so it's suitable for AOT compilation, but you can still use it for JIT if you want. 
 // since there will be no shims, it's safe to use this when you want to set comptime=null 
 // before calling the function (like for drivers in `run_franca_file`). 
-fn main_thread_pump(comp: CompCtx, shared: *FrontendCodegen, fns: []FuncId, wrap_main: bool, $EmitIr: Type) DynamicBitSet = {
+fn main_thread_pump(comp: *SelfHosted, shared: *FrontendCodegen, fns: []FuncId, wrap_main: bool, $EmitIr: Type) DynamicBitSet = {
     a      := comp.get_alloc();
-    env    := comp.get_comptime_env();
+    env    := comp.env;
     opts   := comp.get_build_options();
     when := @if(IS_BOOTSTRAPPING && shared.m.goal.type == .JitOnly, ExecStyle.Jit, .Aot);
     // TODO: dynamiclib is kinda broken because i rely on being called in a stack with tls setup
     dynamiclib := shared.m.goal.type == .Dynamic;
     wrap_main := wrap_main && !dynamiclib;
-    shared.m.codemap = (Some = comp'vtable'get_codemap(comp.data));
+    shared.m.codemap = (Some = comp.codemap);
     
     for fns { f |
         id := shared.m.intern(comp.fmt_fn_name(f));
@@ -610,10 +599,10 @@ fn main_thread_pump(comp: CompCtx, shared: *FrontendCodegen, fns: []FuncId, wrap
         };
         
         first_time := !self.funcs_seen&.get_set(fid_i);
-        comp'vtable'report_aot_progress(comp.data, fid, true, 1 /*AotPump*/);
+        comp.report_progress(fid, true, .AotPump);
         func := comp.get_function(fid);
         // Note: compile before checking callees!
-        xx := comp'vtable'compile_func(comp.data, fid, .Aot);
+        xx := comp.poll_in_place(void, => comp.compile_body(fid));
         or xx { err | 
             @println("failed compile %", comp.get_string(func.name));
             comp.report_error(err)
@@ -629,7 +618,7 @@ fn main_thread_pump(comp: CompCtx, shared: *FrontendCodegen, fns: []FuncId, wrap
             comp.report_error(err);
         };
         
-        comp'vtable'report_aot_progress(comp.data, fid, false, 1 /*AotPump*/);
+        comp.report_progress(fid, false, .AotPump);
         current := self.work_stack&.pop().unwrap();
         @debug_assert_eq(current, fid, "order messed up");
         self&.add_work(self.pending&.items());  // HACK
@@ -644,8 +633,8 @@ fn main_thread_pump(comp: CompCtx, shared: *FrontendCodegen, fns: []FuncId, wrap
         emit_export_wrapper(comp, shared.worker, f);
     };
     
-    c := comp.data.cast()[][];
-    print(c.log.items()); 
+    c := comp;
+    @if(c.log.len > 0) print(c.log.items()); 
     c.log&.clear();
     
     shared.join_codegen_thread();
@@ -703,7 +692,7 @@ fn add_work(self: *MainThreadPump, new: []FuncId) void = {
     };
 }
 
-fn emit_export_wrapper(comp: CompCtx, shared: *CodegenShared, f: FuncId) void = {
+fn emit_export_wrapper(comp: *SelfHosted, shared: *CodegenShared, f: FuncId) void = {
     enter_task shared { entry |
         func := comp.get_function(f);
         real_name := comp.get_string(func.name);
@@ -717,8 +706,8 @@ fn emit_export_wrapper(comp: CompCtx, shared: *CodegenShared, f: FuncId) void = 
 
 // On macos, we want to save the arguments to the exe entry point. 
 // On linux, franca_runtime_init does some extra stuff to grab them from the stack. 
-fn wrap_with_runtime_init(comp: CompCtx, shared: *CodegenShared, user_main: FuncId) void = {
-    env := comp.get_comptime_env();
+fn wrap_with_runtime_init(comp: *SelfHosted, shared: *CodegenShared, user_main: FuncId) void = {
+    env := comp.env;
     runtime_init := env.runtime_init.expect("declaration of franca_runtime_init (forgot to include lib/core.fr?)");
     enter_task shared { entry |
         f := temp().box_uninit(Qbe.Fn);
@@ -750,7 +739,7 @@ fn wrap_with_runtime_init(comp: CompCtx, shared: *CodegenShared, user_main: Func
     };
 }
 
-fn get_log_types(comp: CompCtx, fid: FuncId) Str = {
+fn get_log_types(comp: *SelfHosted, fid: FuncId) Str = {
     #use("@/compiler/ast_external.fr");
     func := comp.get_function(fid);
     if(!func.get_flag(.LogIr), => return(""));
@@ -818,7 +807,15 @@ fn clone(self: *SelfHosted, e: *Pattern) Pattern = {
     out
 }
 
-::DeriveFmt(get_variant_type(BakedEntry, BakedEntry.Tag().Num));
-::DeriveFmt(BakedEntry);
-::DeriveFmt(BakedVarId);
-::display_slice(BakedEntry);
+fn get_string(self: *SelfHosted, s: Symbol) Str = self.pool.get(s);
+fn report_error(self: *SelfHosted, e: *CompileError) Never = self.comp().report_error(e);
+fn fmt_fn_name(program: *SelfHosted, f: FuncId) Str = program.comp().fmt_fn_name(f);
+fn get_baked(c: *SelfHosted, id: BakedVarId) *BakedValue = 
+    c.baked.values&.nested_index(@as(i64) id.id.zext());
+fn log(c: *SelfHosted, e: *FatExpr) Str = e.log(c);
+fn log(c: *SelfHosted, e: *FatStmt) Str = e.log(c);
+fn log(c: *SelfHosted, e: *Func) Str = e.log(c);
+fn log(c: *SelfHosted, e: Type) Str = c.log_type(e);
+fn get_tuple_field_name(c: *SelfHosted, i: i64) Symbol = c.comp().get_tuple_field_name(i);
+fn get_unique_named(c: *SelfHosted, name: Str) ?FuncId = c.comp().get_unique_named(name);
+fn intern_string(c: *SelfHosted, s: Str) Symbol = c.pool.insert_borrowed(s, c.get_alloc());

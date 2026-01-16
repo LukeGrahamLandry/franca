@@ -26,7 +26,7 @@ EmitIrB :: fn() = {
 
 EmitIr :: @struct(
     f: *Qbe.Fn,
-    program: CompCtx,
+    program: *SelfHosted,
     var_lookup: HashMap(VarId, Qbe.Ref),
     inlined_return_addr: HashMap(LabelId, ReturnTarget),
     label_depth: u32,
@@ -52,16 +52,16 @@ ReturnTarget :: @struct(
 
 Placement :: @tagged(Assign: Qbe.Ref, Scalar, Blit: Qbe.Ref, NewMemory);
 
-emit_ir :: fn(comp: CompCtx, shared: *FrontendCodegen, f: FuncId, _: ExecStyle, pending: *List(FuncId), export: bool) CRes(void) = {
+emit_ir :: fn(comp: *SelfHosted, shared: *FrontendCodegen, f: FuncId, _: ExecStyle, pending: *List(FuncId), export: bool) CRes(void) = {
     @debug_assert(abi_shift_native_to_easy, "called the wrong emit_ir");
     func := comp.get_function(f); 
-    c := comp.data.cast()[][];
+    c := comp;
     
     m := shared.m;
     enter_task shared { entry |
         opts := comp.get_build_options();
         
-        env := comp.get_comptime_env();
+        env := comp.env;
         ff := temp().box_uninit(Qbe.Fn);
         self: EmitIr = (
             f = ff,
@@ -85,7 +85,7 @@ emit_ir :: fn(comp: CompCtx, shared: *FrontendCodegen, f: FuncId, _: ExecStyle, 
         self.f.lnk.no_inline = func.get_flag(.NoInline);
         self.f.lnk.id = m.intern(self&.fmt_fn_name(self.func));  // TODO: set export 
         
-        if identical(comp.data.cast()[][].comptime_codegen.m, m) && func.has_comptime_jit_symbol_id {
+        if identical(comp.comptime_codegen.m, m) && func.has_comptime_jit_symbol_id {
             @debug_assert_eq(self.f.lnk.id.id, func.comptime_jit_symbol_id);
         };
         
@@ -113,7 +113,7 @@ fn emit_body(self: *EmitIr, f: FuncId) void #once = {
     
     if func.get_flag(.LogAst) {
         @eprintln("[#log_ast %] %", f, self.program.log(func));
-        self.program.data.cast()[][].codemap.show_error_line(func.loc, true /*TODO*/);
+        self.program.codemap.show_error_line(func.loc, true /*TODO*/);
     };
     
     self.f.start = self.new_block("start");
@@ -190,7 +190,7 @@ fn emit_body(self: *EmitIr, f: FuncId) void #once = {
         @default => @panic("no acceptable impl %", self.program.log(func));
     };
     
-    self.program.data.cast()[][].finish_layout(arg_ty); // :extra
+    self.program.finish_layout(arg_ty); // :extra
     if true {
         r := self.f.newtmp("input", .Kl);
         arg_size := self.program.get_info(arg_ty)[].stride_bytes.zext();
@@ -221,7 +221,7 @@ fn emit_body(self: *EmitIr, f: FuncId) void #once = {
     self.f.ret_cls = .Kx;
 }
 
-fn check_import(self: CompCtx, info: *DynamicImport) void = {
+fn check_import(self: *SelfHosted, info: *DynamicImport) void = {
     lib := self.get_string(info.lib);
     name := self.get_string(info.name);
     if lib == "comptime_addr" {
@@ -510,7 +510,7 @@ fn compile_expr(self: *EmitIr, expr: *FatExpr, p: Placement) Qbe.Ref = {
             };
             @assert(!(p&.is(.Scalar) || p&.is(.Assign)), "ICE: non single field struct as scalar");
             raw := self.program.raw_type(expr.ty); // TODO: do i need this? 
-            self.program.data.cast()[][].finish_layout(raw);  // :extra
+            self.program.finish_layout(raw);  // :extra
             // TODO: this is sad/pastey
             @match(self.program.get_type(raw)) {
                fn Struct(f) => {
@@ -567,7 +567,7 @@ fn deref(self: *EmitIr, src: Qbe.Ref, p: Placement, expr_ty: Type) Qbe.Ref = {
 }
 
 fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) Qbe.Ref #once = {
-    self.program.data.cast()[][].finish_layout(arg.ty); // :extra
+    self.program.finish_layout(arg.ty); // :extra
     callee, f_ty := @match(self.program.get_type(f.ty)) {
         fn Fn() => {
             f_id := f.as_const(FuncId);
@@ -804,7 +804,7 @@ fn emit_call_loop(self: *EmitIr, arg: *FatExpr) Qbe.Ref #once = {
 
 fn construct_aggregate(self: *EmitIr, pattern: *Pattern, requested: Type, p: Placement) Qbe.Ref #once = {
     raw_container_ty := self.program.raw_type(requested);
-    self.program.data.cast()[][].finish_layout(raw_container_ty);  // :extra
+    self.program.finish_layout(raw_container_ty);  // :extra
     (@match(self.program.get_type(raw_container_ty)) {
         fn Struct(f) => {
             base := self.get_memory(p, raw_container_ty);

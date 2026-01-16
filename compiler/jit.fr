@@ -73,7 +73,7 @@ fn comptime_jit_symbol_id(self: *SelfHosted, fid: FuncId) Qbe.Sym = {
     if !func.has_comptime_jit_symbol_id {
         @debug_assert(!func.get_flag(.AnyConstArgs) && !func.get_flag(.UnboundGenerics));
         m := self.comptime_codegen.m;
-        id := m.intern(self.comp().fmt_fn_name(fid));
+        id := m.intern(self.fmt_fn_name(fid));
         func.comptime_jit_symbol_id = id.id;
         func.has_comptime_jit_symbol_id = true;
     };
@@ -123,15 +123,14 @@ emit_dyncall_shim_epilogue :: fn(self: *SelfHosted, shared: *FrontendCodegen, f:
             if self.get_info(ty)[].stride_bytes != 0 {
                 ref := f.newtmp("a", .Kl);
                 addins(ins&, make_ins(.add, .Kl, ref, arg_p, f.getcon(offset)));
-                load, k := self.comp().load_op(ty);
+                load, k := self.load_op(ty);
                 ::if(Qbe.Ins);
                 ins := if k != .Ke {  // scalar
                     r := f.newtmp("a", k);
                     addins(ins&, make_ins(load, k, r, ref, QbeNull));
                     make_ins(.arg, k, QbeNull, r, QbeNull)
                 } else {  // aggregate
-                    ::EmitIr;
-                    r_type := self.comp().get_aggregate(shared, ty);
+                    r_type := self.get_aggregate(shared, ty);
                     make_ins(.argc, .Kl, QbeNull, r_type, ref)
                 };
                 scratch&.push(ins);
@@ -153,7 +152,7 @@ emit_dyncall_shim_epilogue :: fn(self: *SelfHosted, shared: *FrontendCodegen, f:
         scratch&.clear();
         
         // do the call and write the results to ret_p
-        _, k0 := self.comp().load_op(f_ty.ret);
+        _, k0 := self.load_op(f_ty.ret);
         info := self.get_info(f_ty.ret);
         ret_size: i64 = info.stride_bytes.zext();
         @assert(info.is_sized, "comptime call with unsized argument");
@@ -161,7 +160,7 @@ emit_dyncall_shim_epilogue :: fn(self: *SelfHosted, shared: *FrontendCodegen, f:
             @if(ret_size == 0) => (QbeNull, Qbe.Cls.Kw, QbeNull);
             @if(k0 != .Ke) => {  // scalar
                 r := f.newtmp("result", k0);
-                o := self.comp().store_op(f_ty.ret);
+                o := self.store_op(f_ty.ret);
                 @debug_assert(o != .Oxxx, "cannot store %", self.log_type(f_ty.ret));
                 scratch&.push(make_ins(o, .Kw, QbeNull, r, ret_p));
                 (r, k0, QbeNull)
@@ -170,7 +169,7 @@ emit_dyncall_shim_epilogue :: fn(self: *SelfHosted, shared: *FrontendCodegen, f:
                 r := f.newtmp("result", .Kl);
                 scratch&.push(make_ins(.blit0, .Kw, QbeNull, r, ret_p));
                 scratch&.push(make_ins(.blit1, .Kw, QbeNull, INT(ret_size), QbeNull));
-                (r, Qbe.Cls.Kl, self.comp().get_aggregate(shared, f_ty.ret))
+                (r, Qbe.Cls.Kl, self.get_aggregate(shared, f_ty.ret))
             };
         };
         addins(ins&, make_ins(.call, k, result_r, callee, type_r));
@@ -193,7 +192,7 @@ fn emit_jit_shim(c: *SelfHosted, fid: FuncId) void = {
     @if(abi_shift_native_to_easy) return(Vm'easy_abi_emit_shim(c, fid));
     @if(abi_shift_easy_to_native) return(Vm'native_abi_emit_shim(c, fid));
     
-    self := c.comp();
+    self := c;
     shared := c.comptime_codegen;
     handler_callee_address: rawptr = report_called_uncompiled_or_just_fix_the_problem;
     m := shared.m; 
@@ -224,6 +223,7 @@ fn emit_jit_shim(c: *SelfHosted, fid: FuncId) void = {
         };
         arg_ty := func.finished_arg.expect("arg infered");
         ret_ty := func.finished_ret.expect("ret infered");
+        ::EmitIr;
         pars := emit_par_instructions(self, shared, func.arg&, arg_ty, f, .None);
         
         // If the entry in __got for the target symbol is not this shim, call it directly.
@@ -297,7 +297,7 @@ fn emit_jit_shim(c: *SelfHosted, fid: FuncId) void = {
     };
 }
 
-emit_native_shim_epilogue :: fn(self: CompCtx, shared: *FrontendCodegen, f: *Qbe.Fn, ret_ty: Type, do_the_call: *Qbe.Blk, pars: []ArgInfo, callee: Qbe.Ref) void = {
+emit_native_shim_epilogue :: fn(self: *SelfHosted, shared: *FrontendCodegen, f: *Qbe.Fn, ret_ty: Type, do_the_call: *Qbe.Blk, pars: []ArgInfo, callee: Qbe.Ref) void = {
         each pars { p |
             @if_else {
                 @if(p.scalar) => push(do_the_call, make_ins(.arg,  p.k, QbeNull, p.r, QbeNull));
@@ -366,7 +366,7 @@ fn shallow_jit_func(self: *SelfHosted, fid: FuncId) Res(void) = {
     pending := FuncId.list(general_allocator()); 
     
     emit_ir :: EmitIr.emit;
-    @try(emit_ir(self.comp(), self.comptime_codegen, fid, .Jit, pending&, true)) return;
+    @try(emit_ir(self, self.comptime_codegen, fid, .Jit, pending&, true)) return;
     
     shared := self.comptime_codegen;
     @debug_assert(!shared.worker.threaded);

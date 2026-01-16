@@ -99,7 +99,7 @@ native_abi_emit_shim :: fn(c: *SelfHosted, fid: FuncId) void = {
         
         arg_ty := func.finished_arg.expect("arg infered");
         ret_ty := func.finished_ret.expect("ret infered");
-        pars := emit_par_instructions(c.comp(), shared, func.arg&, arg_ty, f, .None);
+        pars := emit_par_instructions(c, shared, func.arg&, arg_ty, f, .None);
         callee := f.newtmp("callee", .Kl);
         
         // running on the vm but jitting to real code, handler is in the compiler 
@@ -123,7 +123,7 @@ native_abi_emit_shim :: fn(c: *SelfHosted, fid: FuncId) void = {
         f.start.ins&.push_all(f.slice_pending_scratch(), temp());
         f.reset_scratch();
         
-        emit_native_shim_epilogue(c.comp(), shared, f, ret_ty, f.start, pars, callee);
+        emit_native_shim_epilogue(c, shared, f, ret_ty, f.start, pars, callee);
     };
     c.created_jit_fn_ptr_value(fid, shared.wait_for_symbol(id));
 };
@@ -157,7 +157,7 @@ wrap_with_native_abi :: fn(self: *SelfHosted, func: *Func, callee: i64) rawptr =
         
         arg_ty := func.finished_arg.expect("arg infered");
         ret_ty := func.finished_ret.expect("ret infered");
-        pars := emit_par_instructions(self.comp(), shared, func.arg&, arg_ty, f, .None);
+        pars := emit_par_instructions(self, shared, func.arg&, arg_ty, f, .None);
         
         input, output := (f.newtmp("input", .Kl), f.newtmp("output", .Kl));
         b := f.start;
@@ -178,7 +178,7 @@ wrap_with_native_abi :: fn(self: *SelfHosted, func: *Func, callee: i64) rawptr =
                 push(b, .blit1, .Kw, Qbe.Null, INT(size), Qbe.Null);
             } else {
                 if size != 0 {
-                    o := store_op(self.comp(), it.type);
+                    o := store_op(self, it.type);
                     push(b, o, .Kw, Qbe.Null, it.r, dest);
                 };
             };
@@ -203,10 +203,10 @@ wrap_with_native_abi :: fn(self: *SelfHosted, func: *Func, callee: i64) rawptr =
         push(b, .arg, .Kl, Qbe.Null, input, Qbe.Null);
         push(b, .call, .Kw, Qbe.Null, f.getcon(callee), Qbe.Null);
         
-        o, k := load_op(self.comp(), f_ty.ret);
+        o, k := load_op(self, f_ty.ret);
         if k == .Ke {
             if self.get_info(f_ty.ret)[].stride_bytes != 0 {
-                f.retty = get_aggregate(self.comp(), shared, f_ty.ret);
+                f.retty = get_aggregate(self, shared, f_ty.ret);
                 f.ret_cls = .Ke;
                 b.jmp = (type = .retc, arg = output);
             } else {
@@ -239,7 +239,7 @@ make_fake_func :: fn(self: *SelfHosted, name: Symbol, f_ty: FnType) Func = {
     func.name = name;
     enumerate args { i, a |
         func.arg.bindings&.push((
-            name = (Ident = self.comp().get_tuple_field_name(i)),
+            name = (Ident = self.get_tuple_field_name(i)),
             ty = (Finished = a[]),
             nullable_tag = zeroed(*Annotations),
             default = binding_missing_default(zeroed(Span)),

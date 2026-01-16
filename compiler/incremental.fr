@@ -161,15 +161,13 @@ fn write_deps(writer: *Writer, codemap: *import("@/compiler/codemap.fr")'CodeMap
     (entry_dep, all_deps)
 }
 
-fn write_cache(m: *QbeModule, c: CompCtx, fid: FuncId, outpath2: Str, start_path: Str) *Header = {
-    self := c.data.cast()[][];
-    
+fn write_cache(m: *QbeModule, self: *SelfHosted, fid: FuncId, outpath2: Str, start_path: Str) *Header = {
     @if(!enable_incremental()) @panic("write_cache");
     writer := m.save.unwrap();
     backend'writer_finish_imports(writer, m);
     
     entry_dep, all_deps := write_deps(writer, self.codemap, start_path, self_hash);
-    name := c.fmt_fn_name(fid);
+    name := self.fmt_fn_name(fid);
     meta: Meta = (
         arch_os = @if(m.goal.type == .CachedEarly, 0x0F0F, pack_current_target()),
         entry_sym = (off = writer.map_sym(m, m.intern(name)).trunc()),
@@ -506,7 +504,7 @@ fn import_type_info(self: *SelfHosted, module: *FrcModule, it: *FTy) TypeInfo = 
             ::if(Symbol);
             fields&.push(
                 name = if is_tuple {
-                    get_tuple_field_name(self.comp(), j)
+                    get_tuple_field_name(self, j)
                 } else {
                     self.pool.insert_owned(module.header.get(it.name))
                 },
@@ -581,7 +579,7 @@ fn move_from_module(emit_ir: *EmitIr, import: *FrcImport) CRes(CodegenTask) = {
     zone := zone_begin(.ImportCache);
     module       := FrcModule.ptr_from_int(import.module); 
     header, m, f := (module.header, emit_ir.m, emit_ir.f);
-    self := emit_ir.program.data.cast()[][];
+    self := emit_ir.program;
     instance := @try(find_module(self, emit_ir.shared, module)) return;
     @debug_assert(identical(m, f.globals), "move_from_module bad f.m");
 
@@ -649,7 +647,7 @@ import_baked_var :: fn(self: *SelfHosted, shared: *FrontendCodegen, inst: *FrcMo
         // :TheOtherWayDoesNotWorkOnExamplesTerminal
         // TODO: don't do this every time but find_module puts junk in there
         //if inst.syms[zext sym.off].id == Qbe.no_symbol {
-            inst.syms[zext sym.off] = shared.m.intern(self.comp().mangle_name(id)); 
+            inst.syms[zext sym.off] = shared.m.intern(self.mangle_name(id)); 
         //}
         //@println("reuse % = g%", h.get(it.name), id.id);
         return(Ok = id);
@@ -658,7 +656,7 @@ import_baked_var :: fn(self: *SelfHosted, shared: *FrontendCodegen, inst: *FrcMo
     // reserve early to not get fucked by cycles
     dest, id := reserve_baked(self, .None);
     slot[] = bit_cast_unchecked(BakedVarId, u32, id);
-    inst.syms[zext sym.off] = shared.m.intern(self.comp().mangle_name(id));
+    inst.syms[zext sym.off] = shared.m.intern(self.mangle_name(id));
     
     // TODO: should be able to do this but i guess cycles
     //       actually i think its because of use_got_instead_of_patches
@@ -699,14 +697,14 @@ import_baked_var :: fn(self: *SelfHosted, shared: *FrontendCodegen, inst: *FrcMo
 fn emit_import_ref(self: *EmitIr, it: *FrcImport, p: EmitIr.P) CRes(Qbe.Ref) = {
     inst := @try(self.find_module(it)) return;
     @debug_assert_eq(it.table, SYM_TABLE);
-    id := @try(import_baked_var(self.program.data.cast()[][], self.shared, inst, (off = it.index))) return;
+    id := @try(import_baked_var(self.program, self.shared, inst, (off = it.index))) return;
     ref := self.as_ref(AddrOf = id);
     //@println("emit_import_ref g%", id.id);
     (Ok = self.scalar_result(p, ref, i64))  // :get_or_create_type
 } 
 
 fn find_module(self: *EmitIr, it: *FrcImport) CRes(*FrcModuleInstance) = 
-    find_module(self.program.data.cast()[][], self.shared, Incr'FrcModule.ptr_from_int(it.module));
+    find_module(self.program, self.shared, Incr'FrcModule.ptr_from_int(it.module));
 
 fn find_module(self: *SelfHosted, shared: *FrontendCodegen, module: *FrcModule) CRes(*FrcModuleInstance) = {
     a := self.get_alloc();
@@ -728,7 +726,7 @@ fn find_module(self: *SelfHosted, shared: *FrontendCodegen, module: *FrcModule) 
             continue :: local_return;
             
             if @try(self.get_fid(module, i)) return { fid |
-                name := self.comp().fmt_fn_name(fid);
+                name := self.fmt_fn_name(fid);
                 syms[i.off.zext()] = shared.m.intern(name);
                 //@println("prep fid for % sym=%", name, syms[i.off.zext()].id)
             } else {
@@ -891,7 +889,7 @@ fn build_the_exports_scope(c: *ExportCtx, start_path: Str, entry_source: Str) CR
     
     fr := c.fr;
     shared := init_codegen(c.m, fr.get_alloc(), true);
-    funcs_done := main_thread_pump(fr, shared, fns, false);
+    funcs_done := main_thread_pump(fr.data.cast()[][], shared, fns, false);
     @debug_assert(c.m.inlinable_but_referenced_later.len == 0);
     
     backend'writer_finish_imports(c.writer, c.m);

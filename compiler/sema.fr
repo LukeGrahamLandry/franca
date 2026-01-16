@@ -42,8 +42,8 @@ fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(Ty(bool, bool)) #once =
             (Ok = res)
         }
         fn Decl(f) => {
-            @assert(f.kind != .Const, "hit unhoisted constant %", self.comp().log(stmt));
-            @assert(f.name&.is(.Var), "hit unresolved var %", self.comp().log(stmt));
+            @assert(f.kind != .Const, "hit unhoisted constant %", self.log(stmt));
+            @assert(f.name&.is(.Var), "hit unresolved var %", self.log(stmt));
             @check(self.decl_var(f.name.Var, f.ty&, f.default&)) return;
             (Ok = (f.default.done, false))
         }
@@ -290,7 +290,7 @@ fn compile_deref_place(self: *SelfHosted, place: *FatExpr, requested: ResultType
     // When you see a !deref, treat the expression as a pointer value.
     if arg.expr&.is(.GetVar) && !want_deref && arg.expr.GetVar.kind != .Const {
         @check(self.compile_get_var(arg, requested, true)) return; // :?
-        @debug_assert(arg.expr&.is(.Deref), "compile_get_var should make &[] not %", self.comp().log(arg));
+        @debug_assert(arg.expr&.is(.Deref), "compile_get_var should make &[] not %", self.log(arg));
     };
     req := requested.specific().map(fn(r) => self.ptr_type(r));
     @check(self.compile_expr(arg, req.want())) return;
@@ -380,7 +380,7 @@ fn decl_var(self: *SelfHosted, name: Var, ty: *LazyType, value: *FatExpr) Maybe(
     };
     @check(self.compile_expr(value, want)) return;
     final_ty := value.ty;
-    @debug_assert(!final_ty.is_unknown(), "if we didn't yield, we should know the type %", self.comp().log(value));
+    @debug_assert(!final_ty.is_unknown(), "if we didn't yield, we should know the type %", self.log(value));
     if no_type {
         // Since there was no type annotation, we don't need a type check. Whatever we got is the type of this variable now. 
         ty[] = (Finished = final_ty);
@@ -616,7 +616,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                 args  := value.items();
                 ::if(Ty(Qbe.O, Qbe.Cls));
                 o, k := if args.len != 2 {
-                    env := self.comp().get_comptime_env();
+                    env := self.env;
                     @err_assert(env.ir_op_cls_types != UnknownType, "expected #ir(.op, .cls) or to have called enable_franca_ir_types()") return;
                     payload := @check(self.immediate_eval_expr(value, env.ir_op_cls_types)) return;
                     Ty(Qbe.O, Qbe.Cls).assume_cast(payload&)[]
@@ -644,7 +644,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                 payload := self.tuple_of(@slice(Type, Type, OverloadSet));
                 payload := @check(self.immediate_eval_expr(value, payload)) return;
                 payload := RedirectType.assume_cast(payload&)[];
-                f_ty: FnType = (arg = payload.arg, ret = payload.ret, unary = self.comp().is_unary(payload.arg));
+                f_ty: FnType = (arg = payload.arg, ret = payload.ret, unary = self.is_unary(payload.arg));
                 target := @check(self.resolve_by_type(payload.os, f_ty, func.loc)) return;
                 func.body = (Redirect = target);
                 func.callees&.push(target, self.get_alloc());
@@ -720,7 +720,7 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
 
 fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(void) = {
     if expr.done {
-        @debug_assert(expr.ty != UnknownType, "ICE: done but unknown type %", self.comp().log(expr));
+        @debug_assert(expr.ty != UnknownType, "ICE: done but unknown type %", self.log(expr));
         return(.Ok);
     };
     todo_dont_lose := self.dispatch.enclosing_function;
@@ -1162,7 +1162,7 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
                 expr.expr = (GetVar = v);
                 @check(self.compile_expr(expr, requested)) return;
             } else {
-                return(@err("%", self.comp().log(expr)));
+                return(@err("%", self.log(expr)));
             };
         }
         // TODO: it's bad that this is a totally different codepath from imported functions 
@@ -2069,7 +2069,7 @@ MemoKey :: Ty(FuncId, Values);
 fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg_expr: *FatExpr, zone: TraceCtx) Maybe(FuncId) #once = {
     value, type := @check(self.const_args_key(original_f, arg_expr)) return;
     key: MemoKey = (original_f, value);
-    @if(ENABLE_TRACY) ___tracy_emit_zone_name(zone, self.comp().log(arg_expr));
+    @if(ENABLE_TRACY) ___tracy_emit_zone_name(zone, self.log(arg_expr));
     
     // this doesn't help. remove it? 
     //to_zero: ReadBytes = (bytes = key._1&.bytes(), i = 0);
@@ -4005,7 +4005,7 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
     fake_func&.set_flag(.ResolvedSign);
     self.stats.lit_fn += 1;
     self.when_debug(.LitFn) { o |
-        e := self.comp().log(expr);
+        e := self.log(expr);
         @fmt(o, "L: % %", fmt_loc(self, expr.loc), e.slice(0, min(e.len, 64)));
     };
     

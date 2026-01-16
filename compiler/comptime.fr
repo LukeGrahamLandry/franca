@@ -175,6 +175,10 @@ driver_vtable_exports :: @struct {
     };
     destroy_compiler :: fn(c: Compiler) void = {
         c := c.cast()[][];
+        c.drop();
+    };
+    
+    fn drop(c: *SelfHosted) void = {
         when_debug(c, .VMem, fn(o) => dump_baked_vmem(c, o));
         print(c.log.items()); c.log&.clear();
         panic_on_volatile_bake(c);
@@ -227,6 +231,11 @@ driver_vtable_exports :: @struct {
         @if(!ENABLE_TRACY) return();
             zone_tag := @as(TraceZone) zone_tag;
             self := c.cast()[][];
+            self.report_progress(fid, is_start, zone_tag);
+    };
+    
+    fn report_progress(self: *SelfHosted, fid: FuncId, is_start: bool, zone_tag: TraceZone) void = {
+            @if(!ENABLE_TRACY) return();
             mem :: @static(?HashMap(Ty(FuncId, i64), TraceCtx)) (.None);
             if mem.is(.None) {
                 mem[] = (Some = init(general_allocator()));
@@ -249,7 +258,7 @@ driver_vtable_exports :: @struct {
                     m.remove(key);
                 };
             };
-    };
+    }
 
     log_expr :: fn(c: Compiler, e: *FatExpr) Str = {
         log(e, c.cast()[][])
@@ -279,7 +288,7 @@ driver_vtable_exports :: @struct {
         threaded := entry != .GiveMeTheCodeAndGiveItToMeRawAlsoSingleThreadCodegen;
         shared := init_codegen(m, comp[]._get_alloc(), threaded);
         self := comp.data.cast()[][];
-        main_thread_pump(comp[], shared, fns, entry == .WrapMain);
+        main_thread_pump(self, shared, fns, entry == .WrapMain);
         opts := comp[]._get_build_options();
         ::if(Ty([]u8, []u8));
         source, files := if opts[].debug_info {
@@ -351,7 +360,7 @@ driver_vtable_exports :: @struct {
     
     mangle_name :: fn(c: Compiler, fid: FuncId) Str = {
         self := c.cast()[][];
-        self.comp().fmt_fn_name(fid)
+        self.fmt_fn_name(fid)
     };
     
     put_baked_var :: fn(c: Compiler, id: BakedVarId, v: BakedVar, type: Type) void = {
@@ -573,7 +582,7 @@ compiler_exports_s :: @struct {
     
     #export("Fn #fold")
     fn_type :: fn(arg: Type, ret: Type, c) Type = {
-        c.intern_type(Fn = (arg = arg, ret = ret, unary = c.comp().is_unary(arg)))
+        c.intern_type(Fn = (arg = arg, ret = ret, unary = c.is_unary(arg)))
     };
     
     #export("IntType #fold")
@@ -755,7 +764,7 @@ compiler_exports_s :: @struct {
     #export("debug_log_func")
     debug_log_f :: fn(e: *Func, self) void = {
         self.codemap.show_error_line(e.loc, true /*TODO*/);
-        @println("[debug_log_func] %", self.comp().log(e));
+        @println("[debug_log_func] %", self.log(e));
     };
     
     #export("intern_type_ref")
@@ -824,7 +833,7 @@ compiler_exports_s :: @struct {
     
     #export("FnPtr #fold")
     fn_ptr :: fn(arg: Type, ret: Type, self) Type = {
-        f_ty: FnType = (arg = arg, ret = ret, unary = self.comp().is_unary(arg));
+        f_ty: FnType = (arg = arg, ret = ret, unary = self.is_unary(arg));
         self.intern_type(FnPtr = (ty = f_ty))
     };
     
@@ -855,7 +864,7 @@ compiler_exports_s :: @struct {
     
     #export("resolve_overload #fold")
     resolve_os :: fn(os: OverloadSet, arg: Type, ret: Type, loc: Span, self) FuncId = {
-        f_ty: FnType = (arg = arg, ret = ret, unary = self.comp().is_unary(arg));
+        f_ty: FnType = (arg = arg, ret = ret, unary = self.is_unary(arg));
         res := self.poll_in_place(FuncId, => self.resolve_by_type(os, f_ty, loc));
         self.unwrap_report_error(FuncId, res)
     };
