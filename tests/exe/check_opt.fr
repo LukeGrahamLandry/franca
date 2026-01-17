@@ -53,28 +53,39 @@ main :: fn() void = {
             name := h.get(it.name);
             @if(!case.names.contains(name)) continue();
             
-            // for now im just checking that the structure is the same,
-            // not looking at the values in the Refs
-            ops := @ref u8.list(temp());
-            each h.get(it.fnc.blk) { b |
-                each h.get(b.ins) { i |
-                    if !@is(i.op(), .dbgloc) {
-                        @fmt(ops, "%,", i.op());
-                    };
-                };
-                @fmt(ops, "%|", b.jmp.type);
-            };
-            
-            @if(prev.len != 0) @assert_eq(prev, ops.items(), "%: % vs %", case.name, prev_name, name);
-            prev = ops.items();
+            ops := flatten_ir(h, it);
+            @if(prev.len != 0) @assert_eq(prev, ops, "%: % vs %", case.name, prev_name, name);
+            prev = ops;
             prev_name = name;
             n += 1;
         };
         @assert_eq(n, case.names.len);
         ::FmtPad(Str);
         @println("- % %", f_pad(case.name, 15, .After), prev);
-        
     };
+    
+    check_ssa_tests();
+}
+
+// +1 for simplify_jump_chains's epilogue
+single_block_ish :: fn(h: *Qbe.Incremental.Header, it: *Qbe.Incremental.Sym) bool = {
+    b := h.get(it.fnc.blk)[1];
+    it.fnc.blk.count == 2 && b.ins.count == 0
+}
+
+flatten_ir :: fn(h: *Qbe.Incremental.Header, it: *Qbe.Incremental.Sym) Str = {
+    // for now im just checking that the structure is the same,
+    // not looking at the values in the Refs
+    ops := @ref u8.list(temp());
+    each h.get(it.fnc.blk) { b |
+        each h.get(b.ins) { i |
+            if !@is(i.op(), .dbgloc) {
+                @fmt(ops, "%,", i.op());
+            };
+        };
+        @fmt(ops, "%|", b.jmp.type);
+    };
+    ops.items()
 }
 
 Case :: @struct(names: []Str, name: Str);
@@ -109,6 +120,77 @@ compile_test_cases :: fn() Ty(*Qbe.Incremental.Header, []Case) = {
     fr'vtable'drop_qbe_module(Qbe.Module.raw_from_ptr(m));
     h := check(it).unwrap();
     (h, cases.items())
+}
+
+// similarly some of the tests/ssa/*.ssa have comments about what should be optimised out. assert that it happens. 
+check_ssa_tests :: fn() void = {
+    all_const :: @const_slice("fold1", "fold2", "mem4");
+    inline_for all_const { $name |
+        h := load_ssa_text(@run name[]);
+        for(h, h.all(Qbe.Incremental.Sym)) { _, it |
+            @assert_eq("copy,jmp|ret0|", flatten_ir(h, it), "%", h.get(it.name));
+        };
+    };
+    
+    // folds to 1 block. +1 for simplify_jump_chains's epilogue.
+    h := load_ssa_text("gvn2");
+    @assert_eq(h.sym.count, 1);
+    it := h.get(h.all(Qbe.Incremental.Sym))[0]&;
+    @assert(single_block_ish(h, it), "gvn2: %", flatten_ir(h, it));
+    
+    h := load_ssa_text("fold3");
+    for(h, h.all(Qbe.Incremental.Sym)) { _, it |
+        s := @slice("fold_sel", "useless_sel");
+        if s.contains(h.get(it.name)) {
+            s := flatten_ir(h, it);
+            @assert(single_block_ish(h, it) && !s.contains("sel"), "fold3 expect no sel in %", s);
+        };
+    };
+    
+    // loadopt+gvn reduces to only stores. +1 block for simplify_jump_chains's epilogue.
+    no_loads :: @const_slice("ldbits", "load2", "load3");
+    inline_for no_loads { $name |
+        //h := load_ssa_text(@run name[]);  // :compilerbug doesn't work here but worked before??
+        xxx :: name[];
+        h := load_ssa_text(xxx);
+        it := h.get(h.all(Qbe.Incremental.Sym))[0]&;
+        n := h.get(it.name);
+        @assert(n == "tests" || n == "f" || n == "main");
+        s := flatten_ir(h, it);
+        @assert(single_block_ish(h, it) && !s.contains("load"), "% %", name[], s);
+    };
+    
+    // SIB addressing
+    if query_current_arch() == .x86_64 {  // TODO: wrong if cross compiling because load_ssa_text is #fold
+        h := load_ssa_text("isel4");
+        for(h, h.all(Qbe.Incremental.Sym)) { _, it |
+            // TODO: the extra copies are because i made the register allocator dumber than qbe's 
+            @assert_eq("copy,copy,loadsw,jmp|ret0|", flatten_ir(h, it), "%", h.get(it.name));
+        };
+    };
+}
+
+load_ssa_text :: fn(file: Str) *Qbe.Incremental.Header #fold = {
+    m := ast_alloc().box_uninit(Qbe.Module);
+    fr := current_compiler_context();
+    init_default_module_dyn(m, fr.vtable, (
+        arch = query_current_arch(), 
+        os = query_current_os(), 
+        type = .Cached,
+    ));
+    #use("@/lib/sys/fs.fr");
+    src := include_bytes(@tfmt("tests/ssa/%.ssa", file));
+    parse :: import("@/backend/meta/parse.fr").parse_top_level;
+    res := parse(m, src, Qbe'backend'compile_dat, Qbe.backend.compile_fn);
+    if res&.is_err() {
+        panic(res.Err);
+    };
+    m.Qbe'backend'compile_suspended();
+    it := {m.target.finish_module}(m);
+    it := concat(it&, ast_alloc());
+    fr'vtable'drop_qbe_module(Qbe.Module.raw_from_ptr(m));
+    h := check(it).unwrap();
+    h
 }
 
 Qbe :: import("@/backend/lib.fr").Qbe;
