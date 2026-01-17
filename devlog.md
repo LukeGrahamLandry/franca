@@ -1,4 +1,14 @@
 
+## (Jan 17)
+
+- continuing the spirit of avoiding comment rot: more check_opt tests
+- raylib precompile the lib part so the examples aren't so slow. 
+  - bigger stress test for import_c/ffi.fr/compile_to_module.
+    handle unions and variadic functions in import_c_type.
+  - division by zero for struct with no fields because i wasn't setting align=1 in import_c_type. on amd thats a sigfpe
+  - import_c_type(Number) for char was getting ty_void instead. i was assuming they'd all be float/int. 
+    hopefully nothing breaks if i make void size 0 instead of 1. 
+
 ## (Jan 15)
 
 - c: fewer useless comments. pull some of the c.skip(tok, "") closer 

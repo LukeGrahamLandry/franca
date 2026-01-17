@@ -359,6 +359,9 @@ fn import_cache_file(c: *Ctx, tok: *C.Tokens.Token) void = {
         };
 }
 
+// TODO: the fields for Array/Tagged don't have a name (can't be a string outside the "file")
+//       so get_struct_member will treat them as anon which isn't what you want. 
+//       also makes a franca Tagged value unusable from the c, i just don't have an example that wants to do that yet. 
 fn import_c_type(c: *Ctx, h: *Qbe.Incremental.Header, ty_i: One(Qbe.Incremental.FTy), array_would_decay: bool) *CType = {
     cache_slot := c.import_type_cache[ty_i.off.zext()]&[int(array_would_decay)]&;
     if !cache_slot[].is_null() {
@@ -368,7 +371,7 @@ fn import_c_type(c: *Ctx, h: *Qbe.Incremental.Header, ty_i: One(Qbe.Incremental.
         @case(1) => return(c.ty_void);
         @case(3) => return(c.ty_long);
         @case(4) => return(c.ty_bool);
-        @case(5) => @panic("TODO: import_c_type variadic function");
+        @case(5) => @panic("VARIADIC is just a marker in func params");
         @case(6) => return(c.ty_void);  // Never
         @case(7) => return(c.ty_double);
         @case(10) => return(c.ty_uint);
@@ -381,12 +384,18 @@ fn import_c_type(c: *Ctx, h: *Qbe.Incremental.Header, ty_i: One(Qbe.Incremental.
         fn Func() => {
             ret := c.import_c_type(h, ty.payload.func.ret, true);
             f_ty := c.func_type(ret);
+            f_ty.is_variadic = false;
             
             params := list(*CType, c.arena);
             arg := h.get(ty.payload.func.arg);
             @match(arg.tag) {
                 fn Params() => {
-                    for(h, arg.payload.fields) { i, it |
+                    args := h.get(arg.payload.fields);
+                    if args.len > 0 && args[args.len - 1].type.off == 5 {
+                        f_ty.is_variadic = true;
+                        args.len -= 1;
+                    };
+                    each args { it |
                         params&.push(c.import_c_type(h, it.type, true));
                     };
                 }
@@ -396,7 +405,6 @@ fn import_c_type(c: *Ctx, h: *Qbe.Incremental.Header, ty_i: One(Qbe.Incremental.
                 }};
             }
             
-            f_ty.is_variadic = false; // TODO
             f_ty.params = params.items();
             f_ty
         }
@@ -407,13 +415,13 @@ fn import_c_type(c: *Ctx, h: *Qbe.Incremental.Header, ty_i: One(Qbe.Incremental.
                 return array;
             };
             
-            result := c.new_type(.TY_STRUCT, 0, 0);
+            // if it's for a function param, wrapping it in another struct is the only way to prevent decay. 
+            result := c.new_type(.TY_STRUCT, 0, 1);
             head := C.Types.Member.zeroed();
             cur  := head&;
             
             mem := c.arena.box_zeroed(C.Types.Member);
             mem.ty = array;
-            //mem.name = c.new_token(.TK_IDENT, name.index(0), name.index_unchecked(name.len));
             mem.idx = 0;
             mem.align = mem.ty.align;
             cur.next = mem;
@@ -436,11 +444,11 @@ fn import_c_type(c: *Ctx, h: *Qbe.Incremental.Header, ty_i: One(Qbe.Incremental.
         fn Number() => {
             it := ty.payload.int&;
             @assert(!it.bitfield, "TODO: import_c import frc bitfield");
-            
             ::[]@type c.prims;
             fields := (*CType).reinterpret_bytes(interpret_as_bytes(c.prims&.slice(1)));
             for fields { check |
                 if it.signed == !check.is_unsigned && it.bits == check.size.bitcast() * 8 && it.float == check.is_flonum() {
+                    @debug_assert(check.is_numeric());
                     return(check);
                 };
             };
@@ -472,7 +480,6 @@ fn import_c_type(c: *Ctx, h: *Qbe.Incremental.Header, ty_i: One(Qbe.Incremental.
             
             mem := c.arena.box_zeroed(C.Types.Member);
             mem.ty = c.ty_long;
-            //mem.name = c.new_token(.TK_IDENT, name.index(0), name.index_unchecked(name.len));
             mem.idx = 0;
             mem.align = mem.ty.align;
             cur.next = mem;
@@ -480,7 +487,6 @@ fn import_c_type(c: *Ctx, h: *Qbe.Incremental.Header, ty_i: One(Qbe.Incremental.
             
             mem := c.arena.box_zeroed(C.Types.Member);
             mem.ty = c.import_members(h, ty, .TY_UNION);
-            //mem.name = c.new_token(.TK_IDENT, name.index(0), name.index_unchecked(name.len));
             mem.idx = 1;
             mem.align = mem.ty.align;
             cur.next = mem;
@@ -491,12 +497,14 @@ fn import_c_type(c: *Ctx, h: *Qbe.Incremental.Header, ty_i: One(Qbe.Incremental.
             result
         }
         fn Alias() => c.import_c_type(h, ty.payload.alias, array_would_decay);
-        @default => @panic("TODO: import_c import frc type % %", ty.tag, ty_i.off);
+        fn AbiOnly() => panic("TODO: should use AbiOnly when its not exported (more efficient) but i don't");
+        fn Invalid() => unreachable();
+        fn Scope() => unreachable();
     }
 }
 
 import_members :: fn(c: *Ctx, h: *Qbe.Incremental.Header, ty: *Qbe.Incremental.FTy, kind: C.Compile.TypeKind) *CType = { 
-    result := c.new_type(kind, 0, 0);
+    result := c.new_type(kind, 0, 1);
     
     // TODO: make this not a linked list :(
     head := C.Types.Member.zeroed();
@@ -506,9 +514,6 @@ import_members :: fn(c: *Ctx, h: *Qbe.Incremental.Header, ty: *Qbe.Incremental.F
         mem := c.arena.box_zeroed(C.Types.Member);
         mem.ty = c.import_c_type(h, it.type, false);
         name := h.get(it.name);
-        if name.len == 0 {
-            name = "-";
-        };
         
         mem.name = c.new_token(.TK_IDENT, name.index(0), name.index_unchecked(name.len));
         mem.idx = idx.intcast();
@@ -519,7 +524,11 @@ import_members :: fn(c: *Ctx, h: *Qbe.Incremental.Header, ty: *Qbe.Incremental.F
     };
     result.members = head.next;
     
-    c.struct_layout(result);
+    if result.kind == .TY_UNION {
+        c.union_layout(result);
+    } else {
+        c.struct_layout(result);
+    };
     result
 }
 

@@ -368,6 +368,8 @@ bufs: [][]u8 = (ptr = bit_cast_unchecked(i64, @run(*[]u8), buf_ptr), len = buf_l
 
 ## import_c
 
+- deduplicate string constants. 
+  - raylib has 190 of "%s:%d: failed assertion `%s'\n\0"
 - the line numbers in my error messages are wrong sometimes!
   shows the right text tho so its not a massive deal but kinda cringe 
 - make sure my detect_include_guard is working on all the system headers 
@@ -395,6 +397,9 @@ bodies on different targets which i don't deal with well.
 - implement the rest of import_cache_file: variadic, union/enum/pointer
 - extend test/ffi.fr to have simpler usage of #include a .frc file 
   (currently only used by import_wuffs which has a lot going on)
+    - bugs i had in import_c_type that should be recreated in tests:
+      - struct with no fields crashed on amd when i was defaulting alignment to 0 (SIGFPE)
+      - Number(char) was hitting ty_void when it had size 0 instead of 1. 
 - when including a .frc but also outputting a .frc, don't copy everything into the new file, 
   just have it as imported symbols that reference the old one. 
 - :BrokenCGeneric i think erroring on conflicting `_Generic` cases is correct but you're supposed to treat `long` and `long long`

@@ -10,6 +10,10 @@
 //       for many of the examples) so that's not a big reassurance. 
 //       also it annoys me because its a big blob of resources and depends on a big blob of xcode. 
 // TODO: could use https://github.com/hexops/xcode-frameworks to make cross compiling from linux work
+//       they have a linux one too https://github.com/hexops/x11-headers opengl-headers linux-audio-headers wayland-headers
+//       which might be less painful than apt install 10 libFOO-dev that raylib's docs want you to do. 
+//       not everything raylib wants is on that list tho. 
+//       idk why they feel the need to lie: "NO external dependencies, all required libraries are included into raylib". false!
 // TODO: avoid linker. just need to support -framework myself. 
 //      it works in franca (graphics/easy.fr), need to do it for c too. 
 //      hackily keep track of which header the symbol was in so it can be used as lib when importing in the exe.
@@ -30,6 +34,7 @@
 // - core_render_texture is tiny and in the corner
 // - rlgl_compute_shader crashes
 // - shapes_ball_physics once you press ctrl once it thinks its always pressed
+// - it plays the unaccepted keybind pop noise when you hold down a key
 // - etc.
 // 
 // TODO: broken on mine but works with clang (even with RGFW)
@@ -39,7 +44,7 @@
 //    162. shaders_shadowmap_rendering
 //
 
-main :: fn() void = {
+fetch_and_compile :: fn() Ty(Str, Str) = {
     // TODO: should go in deps.fr but it's big and i don't autotest it yet
     root := group(
         url = "https://github.com/raysan5/raylib/archive/cfb81e4a0000b1ad1bd5726a697aaa66c82ba73d.tar.gz", 
@@ -48,83 +53,36 @@ main :: fn() void = {
     );
     write_entire_file_or_crash(@tfmt("%/src/emmintrin.h", root), "");  // HACK
     
+    raylib := "target/franca/cache/raylib.frc";
+    compile_lib(root, query_current_arch(), raylib);
+    _ := include_bytes(raylib);
+    (root.shallow_copy(ast_alloc()), raylib)
+};
+
+main :: fn() void = {
+    root, raylib := @run fetch_and_compile();
+    
     examples := collect_examples(root);
     skip_to, compileonly := parse_args_and_filter(examples&, cli_args());
     
     enumerate examples.rest(skip_to) { i, it |
         @println("[%/%] %/%", i + skip_to, examples.len, root, it);
-        run_example(root, it[], compileonly);
+        run_example(root, it[], compileonly, raylib);
     };
 }
 
-run_example :: fn(root: Str, file: Str, compileonly: bool) void = {
-    start := timestamp();
-
-    // TODO: don't recompile the library every time :SLOW
-    outfile := "target/raylib_example.o";
-    arch := current_arch();  // can cross compile: Arch.x86_64 / Arch.aarch64
-    // note: when compiling exes like this you don't get deadcode elimination (that lives in the franca frontend so only dce if the entry point is in franca and you import_c the c part)
-    CCC'compile(
-        output_path = outfile,
-        input_path = @slice(file),
-        target = (
-            type = .Relocatable,  // TODO 
-            os = .macos,  // TODO 
-            arch = arch,
-        ),
-        prelude = @tfmt("""
-            // TODO: be less hacky!
-            #include "__builtin://float.h"  // apple's one just does #define FOO __FOO__
-            #define __FLOAT_H  // pretend already included apple's
-            
-            #define __APPLE__
-            #define TARGET_OS_OSX 1 
-            #define MAC_OS_X_VERSION_MIN_REQUIRED MAC_OS_X_VERSION_10_5
-            
-            #define __LITTLE_ENDIAN__ 1
-            #define __FP__
-            #define CF_INLINE inline 
-            #define UC_INLINE inline
-            #define ATS_UNAVAILABLE
-            #define XPC_DEBUGGER_EXCL
-            #define __BLOCKS__ 1 
-            #define TYPE_LONGLONG 1
-            #define XPC_GIVES_REFERENCE
-            #define _POSIX_C_SOURCE 200809L
-            
-            typedef short _Float16;
-            typedef struct __attribute__((aligned(16))) { long _[2]; } __uint128_t;  
-            #define __asm asm 
-            #define __asm__ asm 
-            #define __inline__ inline 
-            
-            #ifdef __x86_64
-            #define _OS_OSBYTEORDERMACHINE_H 
-            typedef __uint128_t __m128;
-            typedef __uint128_t __m128i;
-            typedef __uint128_t __m128d;
-            #else 
-            #define __nan() (0.0/0.0)
-            #endif 
-            
-            #if __aarch64
-                #define __arm64__ 1
-                #define TARGET_CPU_ARM64 1
-            #else
-                #define __x86_64__ 1
-                #define TARGET_CPU_X86_64 1
-            #endif
+compile_lib :: fn(root: Str, arch: Arch, outfile: Str) void = {
+    c_source := @tfmt("""
+            /* prelude */ %
             
             #add_include_path "%"
             #add_include_path "%/src"
-            #add_include_path "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include"
             
             #define PLATFORM_DESKTOP_RGFW
             #define GRAPHICS_API_OPENGL_33
             #define STBIR_NO_SIMD 
-            #define SINFL_NO_SIMD
             #define STBI_NO_SIMD
-
+                
             #include "rcore.c"
             #undef RLGL_IMPLEMENTATION      // because later ones include it again
             #undef RCAMERA_IMPLEMENTATION   // "
@@ -133,11 +91,58 @@ run_example :: fn(root: Str, file: Str, compileonly: bool) void = {
             #include "rmodels.c"
             #include "rshapes.c"
             // #include "raudio.c"  // TODO: atomics
+        """, prelude, root, root);
+
+    #use("@/examples/import_c/ffi.fr");
+    name := "raylib";
+    fr := current_compiler_context();
+    c := import_c'init_fr(fr);
+    // TODO: allow mixed. so can pre-regalloc for the lib and import to the exe
+    // c.m.goal.type = .Cached;  
+    bytes := import_c'compile_fr(fr, c_source, c, "raylib");
+    write_entire_file_or_crash(outfile, bytes);
+    println(outfile);
+    // TODO: cache this like include() does
+    // TODO: have the bytes in the exe and write at runtime?
+    // TODO: don't reexport all the system imports. 
+    // TODO: go through h.deps and make sure each header is there only once. 
+    //       the duplicates are places where the include-guard detection didn't work? 
+    //       or if they actually don't have include guards, still don't count them multiple times. 
+    // TODO: do run_example through the franca compiler so get dce
+}   
+
+run_example :: fn(root: Str, file: Str, compileonly: bool, raylib: Str) void = {
+    start := timestamp();
+
+    outfile := "target/raylib_example.o";
+    arch := current_arch();  // can cross compile: Arch.x86_64 / Arch.aarch64
+    // note: when compiling exes like this you don't get deadcode elimination (that lives in the franca frontend so only dce if the entry point is in franca and you import_c the c part)
+    CCC'compile(
+        output_path = outfile,
+        input_path = empty(),
+        target = (
+            type = .Relocatable,  // TODO 
+            os = .macos,  // TODO 
+            arch = arch,
+        ),
+        prelude = @tfmt("""
+            #include "%"
+            #define PLATFORM_DESKTOP_RGFW
+            #define GRAPHICS_API_OPENGL_33
+            #define STBIR_NO_SIMD 
+            #define SINFL_NO_SIMD
+            #define STBI_NO_SIMD
             
-            #discard_static_scope 
-            // it's using that define to detect being in the same compilation unit to access the static texShapes from rshapes.c
-            #undef SUPPORT_QUADS_DRAW_MODE  
-        """, root, root),
+            #add_include_path "%"
+            #add_include_path "%/src"
+            // note: don't need xcode here. only the lib does. 
+
+            // they want the lib to export and the exe to use the inline functions as forward declarations? 
+            // TODO: if it's just `inline` am i supposed to allow conflicting definitions and just pick one at random?
+            #define RAYMATH_H  // already in the .frc
+            
+            #include "%"
+        """, raylib, root, root, file),
     ).or(fn(msg) => @panic("failed to compile raylib\n%", msg));
     
     @println("%ms", timestamp() - start);
@@ -184,6 +189,8 @@ parse_args_and_filter :: fn(examples: *[]Str, args: []CStr) Ty(i64, bool) = {
         || it[].ends_with("embedded_files_loading.c")    // TODO: raudio
         || it[].ends_with("textures_sprite_button.c")    // TODO: raudio
         || it[].ends_with("textures_sprite_explosion.c") // TODO: raudio
+        // (clang agrees): headers are setup wrong so doesn't work with RGFW unless you do one compilation unit (even when xcode on include path for exe too)
+        || it[].ends_with("raylib_opengl_interop.c") 
     ));
     
     i := 0;
@@ -218,3 +225,51 @@ parse_args_and_filter :: fn(examples: *[]Str, args: []CStr) Ty(i64, bool) = {
 #use("@/lib/sys/process.fr");
 #use("@/examples/fetch.fr");
 CCC :: import("@/examples/import_c/cc.fr");
+
+// TODO: this stuff should move into the c compiler so it's easy to use the system headers
+prelude :: """
+    // TODO: be less hacky!
+    #include "__builtin://float.h"  // apple's one just does #define FOO __FOO__
+    #define __FLOAT_H  // pretend already included apple's
+    
+    #define __APPLE__ 1
+    #define TARGET_OS_OSX 1 
+    #define MAC_OS_X_VERSION_MIN_REQUIRED MAC_OS_X_VERSION_10_5
+    
+    #define __LITTLE_ENDIAN__ 1
+    #define __FP__
+    #define CF_INLINE inline 
+    #define UC_INLINE inline
+    #define ATS_UNAVAILABLE
+    #define XPC_DEBUGGER_EXCL
+    #define __BLOCKS__ 1 
+    #define TYPE_LONGLONG 1
+    #define XPC_GIVES_REFERENCE
+    #define _POSIX_C_SOURCE 200809L
+    
+    typedef short _Float16;
+    typedef struct __attribute__((aligned(16))) { long _[2]; } __uint128_t;  
+    #define __asm asm 
+    #define __asm__ asm 
+    #define __inline__ inline 
+    
+    #ifdef __x86_64
+    #define _OS_OSBYTEORDERMACHINE_H 
+    typedef __uint128_t __m128;
+    typedef __uint128_t __m128i;
+    typedef __uint128_t __m128d;
+    #define __FIXMATH__
+    #else 
+    #define __nan() (0.0/0.0)
+    #endif 
+    
+    #if __aarch64
+        #define __arm64__ 1
+        #define TARGET_CPU_ARM64 1
+    #else
+        #define __x86_64__ 1
+        #define TARGET_CPU_X86_64 1
+    #endif
+    
+    #add_include_path "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include"
+""";
