@@ -1,4 +1,23 @@
 
+## (Jan 18)
+
+- linux tcc needs extra padding in bss somehow. 
+  - previously it was getting it from empty strings. 
+    works if i double emit and don't use the second one
+    or if i bump the wasted alignment in emit_data from 8 to 16. 
+  - problem was i was using 4 byte sem_t (which is right on macos). 
+    ```
+    typedef struct { int init; sem_t sem; } TCCSem;
+    casa   x0, x1, [x2]; x2 = tcc_boot.out'tcc_compile_sem#10875 + 4; SIGBUS: illegal alignment
+    ```
+  - i don't understand why the hack skipping 32 bytes of bss fixed it. 
+    it still started at 8 alignment so the sem_t would still be unaligned. 
+    can see that in lldb, cas on 0x0000aaaab0ad01c4. are alignment faults not guarenteed? 
+    huh the rule isn't `p%8 == 0`, it's `p%16 != 12`, and it can reproduce that in a simple program. 
+    i wonder what you have to type into google to get that information. 
+    it's cool that you can use that to tell the difference between qemu -accel hvf and tcg. 
+- in related news, bumping up jmpbuf to the right size fixes lua on riscv. 
+
 ## (Jan 17)
 
 - continuing the spirit of avoiding comment rot: more check_opt tests
@@ -8,6 +27,10 @@
   - division by zero for struct with no fields because i wasn't setting align=1 in import_c_type. on amd thats a sigfpe
   - import_c_type(Number) for char was getting ty_void instead. i was assuming they'd all be float/int. 
     hopefully nothing breaks if i make void size 0 instead of 1. 
+- c
+  - new_string_literal dedup: raylib.frc: 7865k -> 7734k.
+    - somehow breaks tcc on linux ??
+  - promote const locals to be usable in constexpr
 
 ## (Jan 15)
 

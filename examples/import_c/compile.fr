@@ -173,6 +173,7 @@ Ctx :: @rec @struct {
     
     consts: *HashMap(Qbe.Con, Qbe.Ref);
     cache_con01: Array(Qbe.Ref, 2);  // because eval_const_expr does true/false so many times
+    strings: RawHashMap([]u8, *Obj);
     
     // I'm probably going to regret this. 
     error_buf: List(u8);
@@ -485,11 +486,19 @@ fn new_anon_gvar(c: *Ctx, ty: *CType, tok: *Token) *Obj =
     c.new_gvar(c.new_unique_name(), ty, tok, true);
 
 fn new_string_literal(c: *Ctx, p: []u8, ty: *CType, tok: *Token) *Obj = {
-    var := c.new_anon_gvar(ty, tok);
-    var.init_data = p;
-    if !c.speculate {
+    // [/n1570#6.4.5p7] String Literals
+    // "If the program attempts to modify such an array, the behavior is undefined." 
+    // (so it's ok to deduplicate them)
+    var := (c.strings&.get_or_insert(p, c.arena) { 
+        // TODO: does ty actually matter?
+        var := c.new_anon_gvar(ty, tok);
+        var.is_const = true;  // see translate_data()
+        var.init_data = p;
+        var
+    })[];
+    if !c.speculate && !var.yielded {
         c.yield(var);
-    }
+    };
     var
 }
 
@@ -1017,10 +1026,13 @@ fn declaration(c: *Ctx, tok: *Token, basety: *CType, attr: ?*VarAttr, first_decl
             @error_tok(c, ty.name_pos, "variable name omitted");
         };
         
+        is_const := false;
         if attr { attr |
+            is_const = attr.is_const && !@is(ty.kind, .TY_PTR, .TY_FUNC);  // :ConstVarInConstExpr
             if attr.is_static {
                 // static locals are secretly globals
                 var := c.new_anon_gvar(ty, start);
+                var.is_const = is_const;
                 c.push_scope(c.get_ident(ty.name))[].var = var;
                 if consume(tok&, tok, "=") {
                     c.gvar_initializer(tok&, tok, var);
@@ -1068,6 +1080,9 @@ fn declaration(c: *Ctx, tok: *Token, basety: *CType, attr: ?*VarAttr, first_decl
         };
 
         if consume(tok&, tok, "=") {
+            // if marked const and initializer is a constexpr it can be used in constexpr even tho it's local. 
+            var.is_const = is_const;
+            
             c.lvar_initializer(tok&, tok, var);
         };
         if(var.ty.size < 0,         => @error_tok(c, ty.name, "variable '%' has incomplete type", name));
@@ -1582,6 +1597,7 @@ fn create_lvar_init(c: *Ctx, init: *Initializer, ty: *CType, desg: *InitDesg, to
 fn lvar_initializer(c: *Ctx, rest: **Token, tok: *Token, var: *Obj) *Node = {
     loc := tok;
     init := c.initializer(rest, tok, var.ty&);
+    c.check_constness(var, init);
     desg := InitDesg.zeroed();
     desg.var = var;
     
@@ -1717,12 +1733,7 @@ fn size(init: *Initializer) i64 =
 // initializer list contains a non-constant expression.
 fn gvar_initializer(c: *Ctx, rest: **Token, tok: *Token, var: *Obj) void = {
     init := c.initializer(rest, tok, var.ty&);
-    if var.is_const && !init.expr.is_null() && init.expr.r.rtype() == .RCon {
-        // :ConstVarInConstExpr
-        con := c.f.get_constant(init.expr.r);
-        var.par_r = c.top_level_fn.newcon(con);
-    };
-    
+    c.check_constness(var, init);
     if init.all_zeros {
         return();
     };
@@ -1732,6 +1743,14 @@ fn gvar_initializer(c: *Ctx, rest: **Token, tok: *Token, var: *Obj) void = {
     c.write_gvar_data(rel&, init, var.ty, buf, 0);
     var.init_data = buf;
     var.rel = rel.items();
+}
+
+fn check_constness(c: *Ctx, var: *Obj, init: *Initializer) void #inline = {
+    if var.is_const && !init.expr.is_null() && init.expr.r.rtype() == .RCon {
+        // :ConstVarInConstExpr
+        con := c.f.get_constant(init.expr.r);
+        var.par_r = c.top_level_fn.newcon(con);
+    };
 }
 
 fn is_type_name(c: *Ctx, tok: *Token) bool #inline #use(Tokens) = {
@@ -2043,7 +2062,6 @@ AttrName :: @enum(
     transparent_union,
     unavailable,
     swift_attr,
-    weak_import,
     _,
 );
 
@@ -2072,7 +2090,8 @@ fn attribute_list(c: *Ctx, rest: **Token, tok: *Token) Attributes = {
 }
 
 fn one_attribute(c: *Ctx, tok: *Token, result: *Attributes) *Token #once = {
-    kind := tok.str().attribute();
+    name := tok.str();
+    kind := name.attribute();
     
     str_arg :: fn($yield: @Fn(s: Str) void) => {
         tok = c.skip(tok, "(");
@@ -2086,10 +2105,15 @@ fn one_attribute(c: *Ctx, tok: *Token, result: *Attributes) *Token #once = {
     c.next(tok&, tok);
     @match(kind) {
         fn _() => {
-            if equal(tok, "format_arg") {
+            if name == "format_arg" {
                 // TODO: my read_punct takes the shorter one when one is a prefix of another.
-                tok = c.skip_attribute(tok.next);
+                tok = c.skip_attribute(tok);
                 return(tok);    
+            };
+            if name == "weak_import" {  // apple
+                result.weak = true;
+                tok = c.skip_attribute(tok);
+                return(tok);
             };
             @error_tok(c, start, "unknown attribute: %", start.str());
         }
@@ -2097,9 +2121,6 @@ fn one_attribute(c: *Ctx, tok: *Token, result: *Attributes) *Token #once = {
             result.packed = true;
         }
         fn weak() => {
-            result.weak = true;
-        }
-        fn weak_import() => {  // apple
             result.weak = true;
         }
         fn alias() => str_arg { _ |
@@ -2264,8 +2285,10 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *T
     
     tok = c.skip(tok, "{");
 
-    f_name := str(as_cstr f.name);  // TODO: SLOW LSOW SLOW :SLOW 
-    f_name.len += 1;  // null terminator
+    // TODO: SLOW LSOW SLOW :SLOW 
+    f_name := c.arena.alloc_uninit(u8, f.name.len + 1);
+    f_name.slice(0, f.name.len).copy_from(f.name);
+    f_name[f.name.len] = 0;
     
     // TODO: this `ty` is not the same as `obj.ty` because it `obj.ty` might be from a forward declaration
     //       with different parameter names, and we store those names in the type, which is silly. 
@@ -2370,27 +2393,28 @@ fn global_variable(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, first_d
         
         c.parse_symbol_attributes(tok&, tok, var);
         
+        is_tentative := false;
         if equal(tok, "=") {
             if(attr.is_extern, => @error_tok(c, tok, "extern symbol with a value doesn't make any sense?"));
             if(ty.kind == .TY_FUNC, => @error_tok(c, tok, "function can't be declared with '='"));
             c.next(tok&, tok);
             c.gvar_initializer(tok&, tok, var);
+            var.is_tentative = false;
         } else {
             var.is_definition = false;
             if ty.kind == .TY_FUNC {
                 var.is_function = true;
                 continue();
             };
-            var.is_tentative = var.is_tentative || (!attr.is_extern && !attr.is_tls);
+            is_tentative = var.is_tentative || (!attr.is_extern && !attr.is_tls);
         };
         
-        if var.is_tentative {
+        if is_tentative {
             if prev_is_definition || prev_is_tentative {
                 continue(); 
             };
-            if !prev_is_tentative {  // might be filled later
-                c.tentative&.insert(var.name, var);  
-            };
+            var.is_tentative = true;
+            c.tentative&.insert(var.name, var);  
         } else {
             if prev_is_tentative {  // the old definition refers to the new variable
                 c.tentative&.remove(var.name);
@@ -2475,6 +2499,7 @@ fn parse(c: *Ctx, tok: *Token) void = {
     };
 
     each c.tentative& { name, var |
+        @debug_assert(var.rel.len == 0 && var.init_data.ptr.is_null() && var.is_tentative && !var.is_local, "expected tentative %", var.name);
         c.yield(var[]);
     };
     c.tentative&.clear();
@@ -2679,6 +2704,7 @@ fn parse_binary_inner(c: *Ctx, rest: **Token, tok: *Token, lhs: *Node) *Node = {
         c.to_assign(rule.op, lhs, rhs, tok)
     } else {
         if tok.kind == .@"=" {
+            c.check_assignable(lhs, tok);
             c.add_type(lhs);
             c.add_type(rhs);
             check_types(c, tok, lhs.ty, rhs.ty);
@@ -2695,6 +2721,10 @@ fn parse_binary_inner(c: *Ctx, rest: **Token, tok: *Token, lhs: *Node) *Node = {
     };
     node
 }
+
+fn check_assignable(c: *Ctx, lhs: *Node, tok: *Token) void #inline = 
+    @if(lhs.kind == .ND_VAR && lhs.var.is_const) 
+        @error_tok(c, tok, "assign to const var %", lhs.var.name);
 
 // if immediately jumping on a value that's already <= 32 bits, don't insert an extra comparison. 
 fn cast_cond(c: *Ctx, cond: *Node) *Node = {
@@ -3879,6 +3909,7 @@ fn to_assign(c: *Ctx, kind: NodeKind, lhs: *Node, rhs: *Node, tok: *Token) *Node
     if c.speculate {
         return(lhs);
     };
+    c.check_assignable(lhs, tok);
     //c.add_type(lhs);
     //c.add_type(rhs);
     

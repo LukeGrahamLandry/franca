@@ -96,6 +96,7 @@ fn emit_one(c: *Compile.Ctx, obj: *Compile.Obj) void = {
             f := obj.f;
             entry.task = (Func = f);
         } else {
+            @if(obj.align > 8) @error_tok(c, obj.tok, "TODO: var % align %", obj.name, obj.align.intcast());
             entry.task = (AotVar2 = translate_data(ctx.m, obj));
         };
         c'transform(c, obj, entry.task&);
@@ -106,7 +107,7 @@ fn emit_one(c: *Compile.Ctx, obj: *Compile.Obj) void = {
 fn translate_data(m: *QbeModule, obj: *Compile.Obj) []Dat2 = {
     no_init_data := obj.init_data.ptr.is_null();
     // can't just be obj.ty.size because it might have a flexible array member
-    total_size   := if(no_init_data, => obj.ty.size.intcast(), => obj.init_data.len);
+    total_size   := max(obj.ty.size.intcast(), obj.init_data.len);
     is_zeroed    := no_init_data || is_all_zeroes(obj.init_data);
     
     out := Dat2.list(1, temp());
@@ -115,6 +116,7 @@ fn translate_data(m: *QbeModule, obj: *Compile.Obj) []Dat2 = {
         id = obj.global_symbol.expect("mangle"),
         template = @if(is_zeroed, (Zeroes = total_size), (Bytes = obj.init_data)),
         relocations = obj.rel,
+        seg = @if(obj.is_const, .ConstantData, .MutableData),
     );    
     out.items()
 }
