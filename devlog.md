@@ -1,4 +1,9 @@
 
+## (Jan 19)
+
+- simple test for c importing frc. repros for the bugs ive been fixing. 
+  - deal with franca symbol being mangled
+
 ## (Jan 18)
 
 - linux tcc needs extra padding in bss somehow. 
@@ -17,6 +22,23 @@
     i wonder what you have to type into google to get that information. 
     it's cool that you can use that to tell the difference between qemu -accel hvf and tcg. 
 - in related news, bumping up jmpbuf to the right size fixes lua on riscv. 
+- include_file: don't iterate and copy the whole linked list of tokens of the new file.
+  - append_until_eof to build raylib.frc: (iterations: 4809011 -> 316435 (-93%), samples: 35 -> 2)
+  - just makes empty files awkward. musl arm limits.h
+- raylib: avoid linker
+  - track which framework header an import is from so can SetLibrary 
+    and pass it through to the mach-o file without asking clang where the symbols live
+      - infinite nightmare. idea was just wrap in push pop tokens when including the file. 
+      - need to set is_bol so copy_line can't eat the pop.  
+      - need to handle when framework includes nonframework so then was adding the extra tokens always
+        but that fucks you if you #include something not at top level. 
+      - the information you need is still technically in the headers but this is on very thin ice for not being worth the hassle
+  - as i discovered with my register_objective_c_classes, need to explicitly link some things even when no imports
+  - speed for 193 examples: 1:12 -> 0:56 
+  - broke core_custom_logging.c: i'm doing `mov	w0, w0` for `SetTraceLogCallback(CustomTraceLog)`
+    normally in func_params() i convert TY_FUNC with pointer_to() but wasn't doing that in import_c_type so got the wrong cls()
+- being more strict about TY_VOID
+  - i was allowing `case UNDEFINED_IDENTIFIER:`, parsing it as a label, and silently miscompiling tccrun.c/sig_error()
 
 ## (Jan 17)
 

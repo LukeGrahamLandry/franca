@@ -22,6 +22,8 @@ long __syscall_cp(long a, long b) { return 0; }
 #define __syscall_cp(...) __SYSCALL_DISP(__syscall_cp,__VA_ARGS__)
 #define syscall_cp(...) __syscall_cp(__VA_ARGS__)
 
+void voidexpr() {}
+
 int main() {
     make_empty_struct2(); make_empty_struct();
     
@@ -78,11 +80,13 @@ int main() {
     
     // don't let speculate() stomp live block's jmp. 
     ASSERT(4, sizeof(({ return 1; 0; })));
-    // 0 ? ({ return 1; }) : 0;  // TODO: this crashes
+    0 ? ({ return 1; }) : 0;
     
     ASSERT(0, ({ long *a = (long[]){0}; *a; }));
     
     (1 ? 0 : ({ while (1) 0; }) );
+    int nonconstant = 0; nonconstant = 1;
+    (nonconstant ? voidexpr() : voidexpr());
     
     if (0) return 1;  // can't speculate() because:
     

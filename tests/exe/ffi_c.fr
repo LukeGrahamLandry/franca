@@ -1,0 +1,46 @@
+// make frc file from franca and import it from c (reverse of c_ffi.fr), then import it back to franca. 
+main :: fn() void = {
+    @run {
+        fr := current_compiler_context();
+        path := @tfmt("@/%", @source_file_name());
+        opts := get_build_options();
+        s := fr'vtable'cached_compile_module(path, opts, ast_alloc());
+        s := s.or(fn(err) => fr.report_error(err));
+        // TODO: allow including the bytes without writing to a file and hardcoding the path
+        #use("@/lib/sys/fs.fr");
+        write_entire_file_or_crash("target/ffi_c_exports_fr.frc", s);
+    };
+
+    c :: import("@/examples/import_c/ffi.fr")'include(C_SRC);
+    @assert_eq(c'test_callback(), 10);
+}
+
+C_SRC :: """
+    #include "target/ffi_c_exports_fr.frc"
+    
+    int add7(int a) { return a + 6 + sizeof(invoke_callback); }
+    int test_callback() {
+        use_char(0);
+        get_nothing();
+        set_callback(add7);
+        int three = one_va(3);
+        return invoke_callback(three);
+    }
+""";
+
+F :: @FnPtr(a: i64) i64;
+callback :: @static(F);
+Empty :: @struct();
+
+// TODO: allow exporting types and data. rn build_the_exports_scope only does functions. 
+exports :: Type.scope_of(@struct {
+    set_callback :: fn(f: F) void = {
+        callback[] = f;
+    };
+    invoke_callback :: fn(a: i64) i64 = callback[](a);
+    use_char :: fn(a: i8) i8 = a;
+    one_va :: fn(va: CVariadic) i32 = va&.start().next(i32);
+    get_nothing :: fn() Empty = ();
+});
+
+#use("@/lib/variadic.fr");

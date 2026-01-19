@@ -24,24 +24,23 @@ MacroHandler :: @FnPtr(c: *Ctx, tmpl: *Token) *Token;
 Macro :: @struct {
     name: Str;
     is_objlike: bool; // Object-like or function-like
+    enabled: bool; // TODO: this means you can only run one thread at a time
     params: []Str;    // names in #define foo(param1, param2)
     // TODO: i assume most macros aren't variadic. 
     //       so this should be a flag and we just treat the last entry of params differently? 
     va_args_name: ?Str;  
     body: *Token;
     handler: ?MacroHandler;
-    enabled: bool; // TODO: this means you can only run one thread at a time
 };
 
 // `#if` can be nested, so we use a stack to manage nested `#if`s.
 CondIncl :: @rec @struct {
-    next: ?*CondIncl;  // TODO: the Ctx should just have a List of these
-    ctx: IfKind;
     tok: *Token;
+    ctx: IfKind;
     included: bool;
 };
 
-IfKind :: @enum(Then, Elif, Else);
+IfKind :: @enum(u8) (Then, Elif, Else);
 
 fn is_hash(tok: *Token) bool #inline =
     tok.at_bol && equal(tok, "#");
@@ -104,6 +103,7 @@ fn skip_cond_incl(tok: *Token) *Token = {
             };
             depth -= int(@is(it, .endif));
             depth += int(@is(it, .if, .ifdef, .ifndef));
+            @debug_assert_ge(depth, 1);
         };
         tok = tok.next;
     }
@@ -242,15 +242,12 @@ fn eval_const_expr(c: *Ctx, rest: **Token, tok: *Token) bool = {
     val != 0
 }
 
-fn push_cond_incl(c: *Ctx, tok: *Token, included: bool) *CondIncl = {
-    ci := temp().boxed(CondIncl, (
-        next = c.cond_incl,
+fn push_cond_incl(c: *Ctx, tok: *Token, included: bool) void = {
+    c.cond_incl&.push((
         ctx = .Then,
         tok = tok,
         included = included,
-    ));
-    c.cond_incl = (Some = ci);
-    ci
+    ), c.arena);
 }
 
 fn find_macro(c: *Ctx, tok: *Token) ?*Macro = {
@@ -600,6 +597,7 @@ fn expand_macro(c: *Ctx, rest: **Token, tok: *Token) bool #once = {
         c.subst(m.body, args)
     };
     end := tok.next;
+    // TODO: don't walk this twice
     until_eof body { t |
         t.origin = macro_token;
     };
@@ -626,7 +624,7 @@ fn until_eof(t: *Token, $body: @Fn(t: *Token) void) *Token = {
 }
 
 // checks the directory of parent_file first 
-fn search_include_paths(c: *Ctx, filename: Str, is_dquote: bool, parent_file: Str) ?Str = {
+fn search_include_paths(c: *Ctx, filename: Str, is_dquote: bool, parent_file: Str, fw: *Str) ?Str = {
     if(filename.len > 0 && filename[0] == "/".ascii(), => return(Some = filename));
     
     if filename[0] != "/".ascii() {
@@ -653,7 +651,9 @@ fn search_include_paths(c: *Ctx, filename: Str, is_dquote: bool, parent_file: St
             child_framework, file := (filename.subslice(0, i), filename.rest(i + 1));
             path := @tfmt("%/%.framework/Frameworks/%.framework/Headers/%", 
                 c.macos_framework_path, framework, child_framework, file);
+            fw[] = framework;
             check_nocache(path);
+            fw[] = "";
         };
         
         // fallthrough
@@ -686,7 +686,9 @@ fn search_include_paths(c: *Ctx, filename: Str, is_dquote: bool, parent_file: St
         i := filename.index_of("/".ascii()) || return(.None);
         framework, file := (filename.subslice(0, i), filename.rest(i + 1));
         path := @tfmt("%/%.framework/Headers/%", c.macos_framework_path, framework, file);
+        fw[] = framework;
         check(path, c.include_paths.len + 1);
+        fw[] = "";
     };
     .None
 }
@@ -794,7 +796,7 @@ fn detect_include_guard(c: *Ctx, tok: *Token) ?Str = {
     .None
 }
 
-fn include_file(c: *Ctx, tok: *Token, path: Str, filename_tok: *Token) ?*Token = {
+fn include_file(c: *Ctx, tok: *Token, path: Str, filename_tok: *Token, fw: Str) ?*Token = {
     // Check for "#pragma once"
     if(c.pragma_once&.get(path).is_some(), => return(Some = tok));
 
@@ -805,15 +807,57 @@ fn include_file(c: *Ctx, tok: *Token, path: Str, filename_tok: *Token) ?*Token =
         if(c.macros&.get(guard_name).is_some(), => return(Some = tok));
     };
 
-    tok2 := c.tokenize_file(path, filename_tok) || return(.None);
+    tok2, end := c.tokenize_file(path, filename_tok) || return(.None);
 
     if detect_include_guard(c, tok2) { guard_name | 
         // detect_include_guard returns a borrow of the token but we need it to live past this file. 
         guard_name := guard_name.shallow_copy(c.arena);  
         c.include_guards&.insert(path, guard_name);
     };
+    
+    if tok2.kind == .TK_EOF {  // if it's an empty file end=head& is junk
+        return(Some = tok);
+    };
+    @debug_assert_eq(end.next.kind, .TK_EOF);
 
-    (Some = c.append(tok2, tok))
+    c.current_file = tok.file;
+    
+    if c.macos_framework_path.len > 0 {
+        break :: local_return;
+        if fw == "" && path.contains("/objc/") {  
+            // HACK: libobjc path layout isn't the same as the frameworks 
+            //       but the symbols still need to be imported from the right library
+            fw = "objc";
+        };
+        if fw != "" {   
+            tok2.file.is_framework = true;
+        };
+        // pushing the empty string handles the case where a framework #include-s a normal header,
+        // but don't want to always inject the extra tokens if not in a framework at all 
+        // because you're allowed to #include inside expressions. 
+        // can't just be a field on *Ctx because tokenize_file doesn't call preprocess, it happens after we return. 
+        if fw == "" && !tok.file.is_framework {
+            break();
+        };
+        p := tok.str().as_ptr();
+        t := c.new_token(.TK_push_framework, p, p);
+        t.val.str_buf = fw.alloc_cstr(c.arena).as_ptr();
+        t.next = tok2;
+        t.at_bol = true;
+        t.origin = filename_tok;
+        tok2 = t;
+        
+        t := end.next;
+        t.kind = .TK_pop_framework; 
+        // important or if it ends with #endif without new line the skip_line will eat the pop too
+        t.at_bol = true;  
+        t.origin = filename_tok;
+        end = t;
+        end.next = c.new_token(.TK_EOF, p, p);
+    };
+    
+    end.next = tok;
+    (Some = tok2)
 }
 
 // Read #line arguments
@@ -861,6 +905,7 @@ Directive :: @enum(
     pragma, error, warning, line,
     add_include_path, // TODO: my extensions should probably be pragmas
     discard_static_scope,
+    link_macos_framework,
     _,
 );
 
@@ -895,15 +940,16 @@ fn preprocess2(c: *Ctx, tok: *Token) *Token = {
         fn include() => {
             start := tok.next;
             filename, is_dquote := c.read_include_filename(tok&, tok.next);
-            path := c.search_include_paths(filename, is_dquote, start.file.name) || filename;
-            tok   = c.include_file(tok, path, start.next.next)
+            fw := "";
+            path := c.search_include_paths(filename, is_dquote, start.file.name, fw&) || filename;
+            tok   = c.include_file(tok, path, start, fw)
                 || @error_tok(c, start, "Failed to open file: %", path);
         };
         fn include_next() => {
             start := tok.next;
             filename, _ := c.read_include_filename(tok&, tok.next);
             path := c.search_include_next(filename) || filename;
-            tok = c.include_file(tok, path, start.next.next)
+            tok = c.include_file(tok, path, start, "")
                 || @error_tok(c, start, "Failed to open file: %", path);
         };
         fn define() => c.read_macro_definition(tok&, tok.next);
@@ -937,25 +983,24 @@ fn preprocess2(c: *Ctx, tok: *Token) *Token = {
             };
         };
         fn elif() => {
-            cond_incl := c.move_cond_incl(start, true, .Elif);
+            i := c.move_cond_incl(start, true, .Elif);
 
-            if !cond_incl.included && c.eval_const_expr(tok&, tok) {
-                cond_incl.included = true;
+            if !c.cond_incl[i].included && c.eval_const_expr(tok&, tok) {
+                c.cond_incl[i].included = true;
             } else {
                 tok = skip_cond_incl(tok);
             };
         };
         fn else() => {
-            cond_incl := c.move_cond_incl(start, true, .Else);
+            i := c.move_cond_incl(start, true, .Else);
             tok = skip_line(tok.next);
 
-            if cond_incl.included {
+            if c.cond_incl[i].included {
                 tok = skip_cond_incl(tok);
             };
         };
         fn endif() => {
-            cond_incl := c.cond_incl || @error_tok(c, start, "stray #endif");
-            c.cond_incl = cond_incl.next;
+            _ := c.cond_incl&.pop() || @error_tok(c, start, "stray #endif");
             tok = skip_line(tok.next);
         };
         fn line() => c.read_line_marker(tok&, tok.next);
@@ -996,6 +1041,12 @@ fn preprocess2(c: *Ctx, tok: *Token) *Token = {
             c.append_one(cur&, tok, false);
             tok = tok.next;
         };
+        // `#link_macos_framework "foo"` is like passing `-framework foo` to clang
+        fn link_macos_framework() => {  
+            s, _ := c.read_include_filename(tok&, tok.next);
+            a := c.m.forever&.borrow();
+            c.m.extra_macos_frameworks&.push(s.shallow_copy(a), a);
+        }
         fn _() => {
             if tok.kind == .TK_PP_NUM {
                 c.read_line_marker(tok&, tok);
@@ -1014,11 +1065,13 @@ fn preprocess2(c: *Ctx, tok: *Token) *Token = {
     head.next
 }
 
-fn move_cond_incl(c: *Ctx, start: *Token, require_non_else: bool, new_state: IfKind) *CondIncl = {
-    cond_incl := c.cond_incl || @error_tok(c, start, "stray #%", new_state);
+fn move_cond_incl(c: *Ctx, start: *Token, require_non_else: bool, new_state: IfKind) i64 = {
+    @if(c.cond_incl.len == 0) @error_tok(c, start, "stray #%", new_state);
+    i := c.cond_incl.len - 1;
+    cond_incl := c.cond_incl[i]&;
     if(require_non_else && cond_incl.ctx == .Else, => @error_tok(c, start, "stray #%", new_state));
     cond_incl.ctx = new_state;
-    cond_incl
+    i
 }
     
 fn define_macro(c: *Ctx, name: Str, buf: Str) void = {
@@ -1139,7 +1192,7 @@ builtins :: @struct {
         filename, is_dquote := c.read_include_filename_no_skip_line(tok&, tok);
         tok = c.skip(tok, ")");
         
-        found := c.search_include_paths(filename, is_dquote, parent).is_some();
+        found := c.search_include_paths(filename, is_dquote, parent, @ref "").is_some();
         c.new_num_token(int(found), tok)
             .set_next(tok)
     };
@@ -1351,10 +1404,13 @@ fn promote_to_wide_string_literal(c: *Ctx, tok: *Token, basety: *Types.CType) *T
 
 // Entry point function of the preprocessor.
 fn preprocess(c: *Ctx, tok: *Token) *Token = {
+    cond_incl := c.cond_incl; 
+    c.cond_incl = empty();
     tok = c.preprocess2(tok);
-    if c.cond_incl { cond_incl |
-        @error_tok(c, cond_incl.tok, "unterminated conditional directive");
+    if c.cond_incl.len != 0 {
+        @error_tok(c, c.cond_incl[c.cond_incl.len - 1].tok, "unterminated conditional directive");
     };
+    c.cond_incl = cond_incl;
     c.convert_pp_tokens(tok);
     c.join_adjacent_string_literals(tok);
     tok

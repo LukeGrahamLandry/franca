@@ -25,6 +25,8 @@ File :: @struct(
     // For #line directive
     display_name: Str,
     line_delta: i32,
+    
+    is_framework := false,
 );
 
 /*********************
@@ -38,6 +40,8 @@ Unicode :: import("@/examples/import_c/unicode.fr");
 
 fn str(tok: *Token) Str = {
     if(tok.is_null(), => return("?NULL?"));
+    ::ptr_utils(File);
+    if(tok.file.is_null(), => return("?NULLFILE?"));
     tok.file.contents.subslice(tok.off.intcast(), tok.len.intcast())
 }
 
@@ -74,7 +78,13 @@ fn skip(c: *Compile.Ctx, tok: *Token, $op: Str) *Token #inline = {
     };
     tok.next
 }
-
+// eat() is the same as skip() but used when you know by construction it will succeed. 
+// it's not a possible syntax error (because was already checked) 
+// but makes it easier to read by being explicit about out where you are in the program. 
+fn eat(c: *Compile.Ctx, tok: **Token, $op: Str) void = {
+    @debug_assert(equal(tok[], op), "expected % but found %", op, tok[].str());
+    tok[] = tok.next;
+}
 fn consume_end(tok: **Token, $end: Str) bool #inline = {
     if equal(tok[], end) {
         tok[] = tok.next;
@@ -130,7 +140,8 @@ fn fmt_error_prefix(tok: *Token, msg: *List(u8)) void = {
     // if it's somehow not in the file don't try to print something. 
     // this will happen for error_at if you pass in a pointer that's not in c.current_file. 
     ::ptr_utils(Token);
-    if tok.is_null() || tok.off < 0 || tok.off.intcast() > tok.file.contents.len {
+    ::ptr_utils(File);
+    if tok.is_null() || tok.off < 0 || tok.file.is_null() || tok.off.intcast() > tok.file.contents.len {
         return();
     };
     
@@ -618,8 +629,12 @@ fn convert_pp_tokens(c: *Ctx, tok: *Token) void = {
     };
 }
 
-// Tokenize a given string and returns new tokens.
 fn tokenize(c: *Ctx, file: *File) *Token = {
+    tok, _ := c.tokenize_raw(file);
+    tok
+}
+
+fn tokenize_raw(c: *Ctx, file: *File) Ty(*Token, *Token) = {
     c.current_file = file;
     
     p := file.contents.ptr;
@@ -631,7 +646,7 @@ fn tokenize(c: *Ctx, file: *File) *Token = {
         a := c.new_token(.TK_FRC, p, p);
         b := c.new_token(.TK_EOF, p, p);
         a.next = b;
-        return a;
+        return(a, a);
     };
     
     // U+FEFF ZeroWidthNo-BreakSpace is put at the start of a file as a ByteOrderMarker if you're insane. 
@@ -834,8 +849,11 @@ fn tokenize(c: *Ctx, file: *File) *Token = {
     };
     
     cur.next = c.new_token(.TK_EOF, p, p);
-    cur = cur.next;
-    head.next
+    if identical(cur, head&) {
+        cur = zeroed(*Token);  // HACK for empty file
+    };
+    // return the end as well so caller can append to it without iterating the chain
+    (head.next, cur)
 }
 
 // TODO
@@ -876,7 +894,7 @@ fn new_file(c: *Ctx, name: Str, contents: Str) *File = {
     file
 }
 
-fn tokenize_file(c: *Ctx, path: Str, tok: *Token) ?*Token = {
+fn tokenize_file(c: *Ctx, path: Str, tok: *Token) ?Ty(*Token, *Token) = {
     prefix := Preprocess.HACK_BUILTIN_FOLDER_PREFIX;
     src := u8.list(c.arena);   // TODO: can probably be temp() since we copy string literals out
     if path.starts_with(prefix) {
@@ -889,10 +907,15 @@ fn tokenize_file(c: *Ctx, path: Str, tok: *Token) ?*Token = {
         c.codemap&.add_file((@tfmt("@/%", path)).shallow_copy(c.arena), src.items().shallow_copy(c.arena));
     };
     
-    (Some = c.tokenize_string(path, src&.items()))
+    (Some = c.tokenize_string_raw(path, src&.items()))
 }
 
 fn tokenize_string(c: *Ctx, path: Str, src: Str) *Token = {
+    tok, _ := tokenize_string_raw(c, path, src);
+    tok
+}
+
+fn tokenize_string_raw(c: *Ctx, path: Str, src: Str) Ty(*Token, *Token) = {
     // TODO: chibicc does some extra stuff here: 
     //       but we can't be doing like 17 passes over the file man, common. 
     //canonicalize_newline(p);
@@ -900,7 +923,7 @@ fn tokenize_string(c: *Ctx, path: Str, src: Str) *Token = {
     //convert_universal_chars(p);
     
     file := c.new_file(path, src); 
-    c.tokenize(file)
+    c.tokenize_raw(file)
 }
 
 fn contextual_keyword(s: Str, $E: Type) E #generic = {
@@ -922,6 +945,8 @@ TokenKind :: @enum(u8) (
     TK_EOF,     // End-of-file markers
     TK_BLANK,
     TK_discard_static_scope,
+    TK_push_framework,
+    TK_pop_framework,
     TK_FRC,
     TK_ERROR,   // Only used for calling @error_tok
     

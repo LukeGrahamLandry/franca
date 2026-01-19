@@ -1,3 +1,4 @@
+- when import_c/ffi makes a cache file it needs to include itself as a dep!
 -     very concerning that boot with USE_VM doesn't work when -unsafe and 
       opt passes somehow doesn't work specifically for replace_switches (had to skip it to get the measurement). 
       doesn't matter because its going to be rewritten anyway
@@ -394,12 +395,6 @@ bodies on different targets which i don't deal with well.
 - either do tokens lazily or try doing it on another thread
 - need more control over exports. currently any frc file has all the libc stuff you included reexported. 
   which will be confusing if you try to #use it in franca
-- implement the rest of import_cache_file: variadic, union/enum/pointer
-- extend test/ffi.fr to have simpler usage of #include a .frc file 
-  (currently only used by import_wuffs which has a lot going on)
-    - bugs i had in import_c_type that should be recreated in tests:
-      - struct with no fields crashed on amd when i was defaulting alignment to 0 (SIGFPE)
-      - Number(char) was hitting ty_void when it had size 0 instead of 1. 
 - when including a .frc but also outputting a .frc, don't copy everything into the new file, 
   just have it as imported symbols that reference the old one. 
 - :BrokenCGeneric i think erroring on conflicting `_Generic` cases is correct but you're supposed to treat `long` and `long long`

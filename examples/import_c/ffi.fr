@@ -58,6 +58,7 @@ fn include(fr: CompCtx, c_source: Str) ScopeId = {
             entry_source := header.get(header.entry_source);
             // checking entry_source is redundant rn because its hash is used as the file name 
             if FrIncr'files_unchanged(header, read_entire_file, fr.vtable.self_hash) && entry_source == c_source {
+                @if(show_backend_stats()) @eprintln(">>> (c) hit: %", cachepath);
                 result := fr'vtable'import_frc(fr.data, header.as_bytes());
                 return result.or(fn(err) => fr.report_error(err));
             };
@@ -76,6 +77,7 @@ include_cold :: fn(fr: CompCtx, c_source: Str, name: Str) ScopeId = {
     no_cache := Foreign.ENV.FRANCA_NO_CACHE.get_environment_variable().is_some();
     if query_current_arch() != .wasm32 && !no_cache {
         cachepath := FrIncr'choose_cache_filename(name);
+        @if(show_backend_stats()) @eprintln(">>> (c) save: %", cachepath);
         make_dirs(FrIncr'cache_dir()) && write_entire_file(cachepath, bytes);
     };
     fr'vtable'drop_qbe_module(QbeModule.raw_from_ptr(c.m));
@@ -327,6 +329,7 @@ fn export_members(c: *Ctx, type: *CType, is_union: bool) FTy = {
 fn import_cache_file(c: *Ctx, tok: *C.Tokens.Token) void = {
     ::Result(*Header, Str);
     c.current_file = tok.file;
+    @if(show_backend_stats()) @eprintln(">>> import_cache_file %", tok.file.name);
     h: *Header = or check(tok.file.contents) { e |
         @error_tok(c, tok, "include frc: %", e)
     };
@@ -344,11 +347,23 @@ fn import_cache_file(c: *Ctx, tok: *C.Tokens.Token) void = {
         };
         
         ty := c.import_c_type(h, it.type, false);
+        c.import_type_cache[it.type.off.zext()]&[0] = ty;
+        
+        if h.get(it.type)[].tag == .Func {
+            @debug_assert(ty.kind == .TY_PTR && ty.base.kind == .TY_FUNC);
+            ty = ty.base;
+        };
         
         // TODO: if it was static (not exported) it won't get remangled so can collide because i just mangle by appending file index. 
         // TODO: should find_func in case it was forward declared 
         obj := c.new_gvar(name_str, ty, tok, false);
         obj.is_function = ty.kind == .TY_FUNC;
+
+        // != name_str if its from franca and mangled as foo = foo__FUNCID
+        // TODO: there will be duplicates if reexported by compile_to_module
+        sym := h.get(it.payload.sym);  
+        sym_name := c.m.intern(h.get(sym.name));
+        obj.global_symbol = (Some = sym_name);
     };
     c.import_type_cache = empty();
     
@@ -401,13 +416,17 @@ fn import_c_type(c: *Ctx, h: *Qbe.Incremental.Header, ty_i: One(Qbe.Incremental.
                     };
                 }
                 // TODO: why does this need extra {}?
-                @default => {if ty.payload.func.arg.off != 1 {
-                    params&.push(c.import_c_type(h, ty.payload.func.arg, true));
+                @default => {@switch(ty.payload.func.arg.off) {
+                    @case(1) => ();
+                    @case(5) => {
+                        f_ty.is_variadic = true;
+                    };
+                    @default => params&.push(c.import_c_type(h, ty.payload.func.arg, true));
                 }};
-            }
+            };
             
             f_ty.params = params.items();
-            f_ty
+            c.pointer_to(f_ty)
         }
         fn Array() => {
             inner := c.import_c_type(h, ty.payload.array.inner, false);

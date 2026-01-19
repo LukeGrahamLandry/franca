@@ -101,6 +101,8 @@ int main() {
   ASSERT(8, sizeof(1.0/2));
 
   ASSERT(1, sizeof(main));
+  static int (*main_p)() = main;
+  ASSERT(8, sizeof(main_p));
   
   ASSERT(1, sizeof(f));
   ASSERT(1, sizeof(g));

@@ -114,16 +114,17 @@ compile_lib :: fn(root: Str, arch: Arch, outfile: Str) void = {
 run_example :: fn(root: Str, file: Str, compileonly: bool, raylib: Str) void = {
     start := timestamp();
 
-    outfile := "target/raylib_example.o";
+    exe_path := "target/raylib_example.out";
     arch := current_arch();  // can cross compile: Arch.x86_64 / Arch.aarch64
     // note: when compiling exes like this you don't get deadcode elimination (that lives in the franca frontend so only dce if the entry point is in franca and you import_c the c part)
     CCC'compile(
-        output_path = outfile,
+        output_path = exe_path,
         input_path = empty(),
         target = (
-            type = .Relocatable,  // TODO 
+            type = .Exe,
             os = .macos,  // TODO 
             arch = arch,
+            exe_debug_symbol_table = true,
         ),
         prelude = @tfmt("""
             #include "%"
@@ -141,20 +142,15 @@ run_example :: fn(root: Str, file: Str, compileonly: bool, raylib: Str) void = {
             // TODO: if it's just `inline` am i supposed to allow conflicting definitions and just pick one at random?
             #define RAYMATH_H  // already in the .frc
             
+            // even tho not using any functions from it, 
+            // need to say it's a dependency to allow subclassing its objc classes. 
+            #link_macos_framework "Cocoa"
+            
             #include "%"
         """, raylib, root, root, file),
     ).or(fn(msg) => @panic("failed to compile raylib\n%", msg));
     
     @println("%ms", timestamp() - start);
-    exe_path := "target/raylib_example.out";
-    clang_target := import("@/examples/default_driver.fr")'target_triple(arch, .macos);
-    ok := run_cmd_blocking("cc", @slice(
-        outfile, 
-        "-target", clang_target, 
-        "-lobjc", "-framework", "OpenGL", "-framework", "Cocoa", "-framework", "IOKit", "-framework", "CoreAudio", "-framework", "CoreVideo", 
-        "-o", exe_path,
-    ));
-    @assert(ok, "failed link");
     @if(compileonly) return();
     
     // it wants to access the resources folder by relative path

@@ -436,6 +436,7 @@ int main() {
     s = M32(M32(M32, M32), M32);
     
     ASSERT(0, strcmp(s, "M32(M32, M32)M32"));
+    #include "include5.h"
     
     printf("OK\n");
     return 0;

@@ -197,7 +197,7 @@ Ctx :: @rec @struct {
     
     /// Preprocess
     macros: HashMap(Str, *Macro);
-    cond_incl: ?*CondIncl;
+    cond_incl: RawList(CondIncl);
     pragma_once: HashMap(Str, void);
     include_guards: HashMap(Str, Str);  // path -> guard name
     include_next_idx: i64;
@@ -209,7 +209,9 @@ Ctx :: @rec @struct {
     hide_stack: List(Ty(*Macro, *Token));
     allow_builtin_headers: bool;
     cached_number_tokens: Array(*Token, 2);
+    
     macos_framework_path: Str;
+    current_framework: RawList(Str);
 };
 
 TransformCall :: @FnPtr(c: *Ctx, obj: *Obj, task: *CodegenTask) void;
@@ -1845,6 +1847,9 @@ fn struct_members(c: *Ctx, rest: **Token, tok: *Token, parent_struct: *CType) vo
             idx += 1;
             mem.align = if(attr.align != 0, => attr.align, => mem.ty.align);
 
+            if mem.ty.kind == .TY_FUNC {
+                @error_tok(c, tok, "field must be function pointer, not function");
+            };
             if consume(tok&, tok, ":") {
                 mem.is_bitfield = true;
                 mem.bit_width = c.const_expr(tok&, tok).intcast();
@@ -2230,6 +2235,23 @@ fn find_func(c: *Ctx, tok: *Token) ?*Obj = {
     (Some = it.var)
 }
 
+fn imported(c: *Ctx, var: *Obj) void = {
+    var.is_definition = false;
+    if c.current_framework.len > 0 {
+        fw := c.current_framework[c.current_framework.len - 1];
+        @if(fw.len == 0) return();
+        
+        id := var.global_symbol.unwrap();
+        enter_task c.emitter { entry | 
+            T :: Ty(@slice(Qbe.Sym, Str, bool));
+            it := temp().alloc_init(T, 1, fn(_) => (
+                id, fw, var.is_weak, 
+            ));
+            entry.task = (SetLibrary = it);
+        };
+    };
+}
+
 fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *Token = {
     t := ty.name_pos;
     if(ty.name.is_null(), => @error_tok(c, tok, "function name omitted"));
@@ -2253,13 +2275,13 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *T
     c.parse_symbol_attributes(tok&, tok, f);
     
     if consume(tok&, tok, ";") {
-        f.is_definition = false;
+        c.imported(f);
         return(tok);
     };
 
     if equal(tok, ",") {
-        f.is_definition = false;
         tok = c.skip(tok, ",");
+        c.imported(f);
         ty := c.declarator(tok&, tok, basety);
         return c.global_variable(tok, basety, attr, ty, true);
     };
@@ -2401,7 +2423,7 @@ fn global_variable(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, first_d
             c.gvar_initializer(tok&, tok, var);
             var.is_tentative = false;
         } else {
-            var.is_definition = false;
+            c.imported(var);
             if ty.kind == .TY_FUNC {
                 var.is_function = true;
                 continue();
@@ -2459,6 +2481,17 @@ fn parse(c: *Ctx, tok: *Token) void = {
             c.next(tok&, tok);
             continue();
         };
+        fn TK_push_framework() => {
+            s: CStr = (ptr = tok.val.str_buf);
+            c.current_framework&.push(s.str(), c.arena);
+            c.eat(tok&, "TK_push_framework");
+            continue();
+        }
+        fn TK_pop_framework() => {
+            _ := c.current_framework&.pop();
+            c.eat(tok&, "TK_pop_framework");
+            continue();
+        }
         fn _Static_assert() => {
             tok = c.static_assert(tok);
             continue();
@@ -2503,6 +2536,8 @@ fn parse(c: *Ctx, tok: *Token) void = {
         c.yield(var[]);
     };
     c.tentative&.clear();
+    
+    @debug_assert_eq(c.current_framework.len, 0, "leaked current_framework")
 }
 
 fn static_assert(c: *Ctx, tok: *Token) *Token = {
@@ -2539,7 +2574,7 @@ Prec :: @enum(i32) (
     Unary, PostFix, Primary,
 );
 
-N1: ParseFn1 : fn(c, b, t) = @error_tok(c, t, "unexpected (prefix) token %", t.str()); 
+N1: ParseFn1 : fn(c, b, t) = @error_tok(c, t, "unexpected (prefix) token % (%)", t.str(), t.kind); 
 N2: ParseFn2 : fn(c, b, t, d) = @error_tok(c, t, "unexpected (infix) token %", t.str()); 
 ParseFn1   :: @FnPtr(c: *Ctx, rest: **Token, tok: *Token) *Node;
 ParseFn2   :: @FnPtr(c: *Ctx, rest: **Token, tok: *Token, node: *Node) *Node;
@@ -2856,7 +2891,7 @@ conditional :: fn(c, rest, tok, cond) #infix(.@"?", .Conditional) = {
         };
         if(is_false, => else_r, => then_r)
     } else {
-        if !c.speculate {
+        if !c.speculate && ty.kind != .TY_VOID {
             p := new_phi(c.f, join_block, ty.cls(), 2);
             p.push(then_phi_src, then_r);
             p.push(else_phi_src, else_r);
@@ -2963,9 +2998,8 @@ parse_ident :: fn(c, rest, tok) #prefix(.TK_IDENT) = {
         // might be a label: the colon will be treated as an infix operator
         // this case can't skip the var lookup tho because of `a?b:c;`, from here we can't tell that b is not a label.
         node := c.new_node(.ND_STMT, start);
-        // Undef makes sure gen_expr/gen_addr skip it
-        node.r = QbeUndef;
-        node.lvalue = QbeUndef;
+        node.r = Qbe.Null;
+        node.lvalue = Qbe.Null;
         node.ty = c.ty_int;  // HACK: without this, it crashes on `"" + a` when a is undeclared 
         return(node);
     };  
@@ -3327,7 +3361,7 @@ return :: fn(c, rest, tok) #prefix(.return, .ND_STMT) = {
         };
         r := c.assert_gen_expr(exp);
           
-        k := ty.cls(); // TODO: retc
+        k := ty.cls();
         j := k.retk(); // TODO: also sb,etc.
         if c.f.retty != QbeNull {
             j = .retc;
@@ -3848,7 +3882,7 @@ fn eval(c: *Ctx, node: *Node) i64 = {
 // expression for a global variable.
 fn eval2(c: *Ctx, node: *Node) Ty(i64, ?Qbe.Sym) = {  // (off, label)
     if !c.is_const_expr(node) {
-        @error_tok(c, node.tok, "expected a constant expression");
+        @error_tok(c, node.tok, "expected a constant expression %", node.kind);
     };
     
     // verbose sign extension:
@@ -4065,8 +4099,8 @@ fn gen_expr(c: *Ctx, node: *Node) Qbe.Ref = {
 fn gen_expr_inner(c: *Ctx, node: *Node) Qbe.Ref = {
     @if(SPAM) @println("E % %; %", node.kind, Node.int_from_ptr(node), node.tok.str());
     @match(node.kind) {
-        fn ND_NULL_EXPR() => QbeUndef;
-        fn ND_STMT() => QbeUndef;
+        fn ND_NULL_EXPR() => Qbe.Null;
+        fn ND_STMT() => Qbe.Null;
         fn ND_VAR() => {
             addr := c.gen_addr(node); 
             c.gen_load(addr, node.ty)
@@ -4317,13 +4351,13 @@ fn gen_call(c: *Ctx, callee: *Node, function_ty: *CType, arg: []*Node, tok: *Tok
     };
     
     callee := c.gen_expr(callee);
-    k := function_ty.return_ty.cls();
     is_void := function_ty.return_ty.kind == .TY_VOID;
+    k := @if(is_void, Qbe.Cls.Kw, function_ty.return_ty.cls());
     r := if(is_void, => QbeNull, => c.f.newtmp("c", k)); 
     i := c.ir_index(function_ty.return_ty);
     c.emit(.call, k, r, callee, i);
     // TODO: it seems like just returning QbeNull for void would work but fails wuffs/lzma.c :FUCKED
-    r := if(is_void, => QbeConZero, => r); 
+    r := if(is_void, => QbeNull, => r); 
     lvalue := if(i != QbeNull, => r, => QbeNull); // for gen_addr so you can do `foo().field`
     c.ir_node(function_ty.return_ty, r, lvalue, tok)
 }
