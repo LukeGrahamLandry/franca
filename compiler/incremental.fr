@@ -545,17 +545,21 @@ fn import_type_info(self: *SelfHosted, module: *FrcModule, it: *FTy) TypeInfo = 
             sequential, last := (true, -1);
             args := Ty(Symbol, Values).list(zext it.payload.fields.count, self.get_alloc());
             
+            raw := u32; 
+            if it.payload.fields.count > 0 {
+                t := module.header.get(it.payload.fields)[0];
+                raw = import_type(self, module, t.type);
+            };
+            
             for(module.header, it.payload.fields) { i, it |
                 name := self.pool.insert_owned(module.header.get(it.name));
+                // TODO: allow value that doesn't fit in u32 (rn writer asserts it doesn't happen because can't be encoded)
                 val: i64 = it.payload.offset.zext();
                 sequential = sequential && val == last + 1;
                 last = val;
-                // TODO
-                //@debug_assert_eq(it.type.off, FTy.U32, "expected enum value u32");
-                push(args&, (name, self.to_values(u32, trunc val)));
+                push(args&, (name, self.to_values(i64, val)));
             };
             
-            raw := u32;  // TODO: non-u32 // :get_or_create_type 
             (Enum = (raw = raw, fields = args.as_raw(), sequential = sequential))
         }
         fn Alias() => (Named = (import_type(self, module, it.payload.alias), Flag.SYMBOL_ZERO.ident()));
@@ -1003,10 +1007,13 @@ export_type_info :: fn(c: *ExportCtx, type: Type) FTy = {
         fn Enum(it) => {
             args := Fld.list(it.fields.len, temp());
             inner := export_type(c, it.raw);
+            @assert(!c.fr.get_info(type)[].contains_pointers, "TODO: export emum with pointers %", c.fr.log(type));
             for it.fields { it |
                 name, value := it;
+                @assert(value&.is(.Small) && value.Small._0 == value.Small._0.bit_and(MAX_u32), 
+                    "TODO: export_type_info enum oob %", c.fr.log(type));
                 args&.push(
-                    name = writer.push(c.fr.get_string(name)),
+                    name = c.get_string(name),
                     type = inner,
                     payload = (offset = trunc value.Small._0),
                 );
@@ -1030,7 +1037,7 @@ export_type_info :: fn(c: *ExportCtx, type: Type) FTy = {
             args := Fld.list(it.fields.len, temp());
             each it.fields { it |
                 args&.push(
-                    name = writer.push(c.fr.get_string(it.name)),
+                    name = c.get_string(it.name),
                     type = c.export_type(it.ty),
                     payload = (offset = it.byte_offset.trunc()), 
                 );
@@ -1043,7 +1050,7 @@ export_type_info :: fn(c: *ExportCtx, type: Type) FTy = {
             for it.cases { it |
                 name, type := it;
                 args&.push(
-                    name = writer.push(c.fr.get_string(name)),
+                    name = c.get_string(name),
                     type = c.export_type(type),
                     payload = (offset = 0), 
                 );
@@ -1060,7 +1067,7 @@ export_type_info :: fn(c: *ExportCtx, type: Type) FTy = {
         fn Named(it) => (
             tag = .Alias,
             payload = (alias = c.export_type(it._0)),
-        )
+        );
         @default => {
             info := c.fr.get_info(type);
             if info.loc.low != 0 {
@@ -1071,6 +1078,11 @@ export_type_info :: fn(c: *ExportCtx, type: Type) FTy = {
         };
     }
 };
+
+fn get_string(c: *ExportCtx, s: Symbol) Ref(u8) = {
+    writer := c.m.save.Some;
+    writer.push(c.fr.get_string(s))
+}
 
 // for now it's just always the toplevel identifier `exports` but eventually i should expose a more powerful api
 collect_fns_from_exports :: fn(c: *ExportCtx) CRes(Ty([]FuncId, []Str)) = {

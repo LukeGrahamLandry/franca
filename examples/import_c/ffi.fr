@@ -310,6 +310,7 @@ fn export_members(c: *Ctx, type: *CType, is_union: bool) FTy = {
     args := Fld.list(c.arena);  // TODO: cap
     for_linked type.members { mem |
         if mem.is_bitfield {
+            // TODO: at least just put the backing type so layout is right even if franca can't access it properly
             @eprintln("TODO: export bit field to franca: %->%", type.name.str(), mem.name.str());
         };
         args&.push(
@@ -441,6 +442,7 @@ fn import_c_type(c: *Ctx, h: *Qbe.Incremental.Header, ty_i: One(Qbe.Incremental.
             cur  := head&;
             
             mem := c.arena.box_zeroed(C.Types.Member);
+            mem.name = c.hack_field_name(h, "data");
             mem.ty = array;
             mem.idx = 0;
             mem.align = mem.ty.align;
@@ -499,6 +501,7 @@ fn import_c_type(c: *Ctx, h: *Qbe.Incremental.Header, ty_i: One(Qbe.Incremental.
             cur  := head&;
             
             mem := c.arena.box_zeroed(C.Types.Member);
+            mem.name = c.hack_field_name(h, "tag");
             mem.ty = c.ty_long;
             mem.idx = 0;
             mem.align = mem.ty.align;
@@ -506,6 +509,7 @@ fn import_c_type(c: *Ctx, h: *Qbe.Incremental.Header, ty_i: One(Qbe.Incremental.
             cur = cur.next;
             
             mem := c.arena.box_zeroed(C.Types.Member);
+            // name=null means anonymous so you just access by case name. 
             mem.ty = c.import_members(h, ty, .TY_UNION);
             mem.idx = 1;
             mem.align = mem.ty.align;
@@ -521,6 +525,21 @@ fn import_c_type(c: *Ctx, h: *Qbe.Incremental.Header, ty_i: One(Qbe.Incremental.
         fn Invalid() => unreachable();
         fn Scope() => unreachable();
     }
+}
+
+// the Token's off,len can only point to bytes inside the file. 
+// hacky way to cope without creating a fake file:
+// there's a field reserved in the Header that stores the bytes needed for these synthetic names. 
+hack_field_name :: fn(c: *Ctx, h: *Qbe.Incremental.Header, $s: Str) *C.Compile.Token = {
+    it := h.meta.hack_name_bytes_for_importc&;
+    @debug_assert_eq(it[], "tagdata\0".peek_type(i64)[]);
+    lo, hi := @inline_switch(s) {
+        @case("tag")  => (0, 3);
+        @case("data") => (3, 7);
+        @default => @run unreachable();
+    };
+    it := it.slice(1).interpret_as_bytes();
+    c.new_token(.TK_IDENT, it.index(lo), it.index(hi))
 }
 
 import_members :: fn(c: *Ctx, h: *Qbe.Incremental.Header, ty: *Qbe.Incremental.FTy, kind: C.Compile.TypeKind) *CType = { 

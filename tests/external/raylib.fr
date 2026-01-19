@@ -9,14 +9,13 @@
 //       but it's kinda prone to failing at runtime (like it does now 
 //       for many of the examples) so that's not a big reassurance. 
 //       also it annoys me because its a big blob of resources and depends on a big blob of xcode. 
-// TODO: could use https://github.com/hexops/xcode-frameworks to make cross compiling from linux work
+// TODO: could use this to make cross compiling from linux work
+//       https://github.com/hexops/xcode-frameworks/archive/8a1cfb373587ea4c9bb1468b7c986462d8d4e10e.tar.gz 8ed818e25f2ed3bb77dc8202d003ecd0efa2be198962eca1452e545cbe17aac8
+//       - doesn't have OpenGL so not enough. does https://github.com/hexops/opengl-headers work for apple too?
 //       they have a linux one too https://github.com/hexops/x11-headers opengl-headers linux-audio-headers wayland-headers
 //       which might be less painful than apt install 10 libFOO-dev that raylib's docs want you to do. 
 //       not everything raylib wants is on that list tho. 
 //       idk why they feel the need to lie: "NO external dependencies, all required libraries are included into raylib". false!
-// TODO: avoid linker. just need to support -framework myself. 
-//      it works in franca (graphics/easy.fr), need to do it for c too. 
-//      hackily keep track of which header the symbol was in so it can be used as lib when importing in the exe.
 // TODO: the audio examples need atomics
 // TODO: first class support for using system headers instead of beeding to add all these defines manually for each program
 // TODO: end goal is a gui that lets you click an example program to run it. 
@@ -44,7 +43,7 @@
 //    162. shaders_shadowmap_rendering
 //
 
-fetch_and_compile :: fn() Ty(Str, Str) = {
+fetch_and_compile :: fn(arch: Arch) Ty(Str, Str) = {
     // TODO: should go in deps.fr but it's big and i don't autotest it yet
     root := group(
         url = "https://github.com/raysan5/raylib/archive/cfb81e4a0000b1ad1bd5726a697aaa66c82ba73d.tar.gz", 
@@ -54,20 +53,42 @@ fetch_and_compile :: fn() Ty(Str, Str) = {
     write_entire_file_or_crash(@tfmt("%/src/emmintrin.h", root), "");  // HACK
     
     raylib := "target/franca/cache/raylib.frc";
-    compile_lib(root, query_current_arch(), raylib);
+    compile_lib(root, arch, raylib);
     _ := include_bytes(raylib);
     (root.shallow_copy(ast_alloc()), raylib)
 };
 
 main :: fn() void = {
-    root, raylib := @run fetch_and_compile();
+    arch :: query_current_arch();  // can cross compile: Arch.x86_64 / Arch.aarch64
+    root, raylib := @run fetch_and_compile(arch);
     
     examples := collect_examples(root);
     skip_to, compileonly := parse_args_and_filter(examples&, cli_args());
+    exe_path :: "target/raylib_example.out";
+    
+    if compileonly {
+        Ctx :: @struct(root: Str, raylib: Str, arch: Arch);
+        ctx: Ctx = (root = root, raylib = raylib, arch = arch);
+        #use("@/examples/testing.fr");
+        run_tests_main_threaded(Ctx, Str, ctx, examples.rest(skip_to), fn(_, it) = it[], fn(ctx, it) = {
+            run_example(ctx.root, it[], ctx.raylib, ctx.arch, exe_path);
+            (true, u8.list(temp()), u8.list(temp()), "")
+        });
+        return();
+    };
     
     enumerate examples.rest(skip_to) { i, it |
         @println("[%/%] %/%", i + skip_to, examples.len, root, it);
-        run_example(root, it[], compileonly, raylib);
+        start := timestamp();
+        run_example(root, it[], raylib, arch, exe_path);
+        @println("%ms", timestamp() - start);
+        // it wants to access the resources folder by relative path
+        start := get_working_directory(temp()).items().as_cstr();
+        dir := pop_path_segment(@tfmt("%/%", root, it[])).as_cstr();
+        Syscall'chdir(dir).unwrap();
+        ok := run_cmd_blocking(@tfmt("%/%", start, exe_path), empty());
+        Syscall'chdir(start).unwrap();
+        @assert(ok, "failed run");
     };
 }
 
@@ -96,9 +117,19 @@ compile_lib :: fn(root: Str, arch: Arch, outfile: Str) void = {
     #use("@/examples/import_c/ffi.fr");
     name := "raylib";
     fr := current_compiler_context();
-    c := import_c'init_fr(fr);
-    // TODO: allow mixed. so can pre-regalloc for the lib and import to the exe
-    // c.m.goal.type = .Cached;  
+    
+    // note: late Cached so not the same as init_fr. avoids redoing rega every time
+    Qbe :: CCC.Qbe;
+    FTy :: Qbe.Incremental.FTy;
+    m := fr.get_alloc().box_uninit(Qbe.Module);
+    c := fr.get_alloc().box_zeroed(C'Compile.Ctx);
+    init_default_module_dyn(m, fr.vtable, (arch = arch, os = .macos, type = .Cached));
+    ctx := init_codegen_worker(m, false, fr.vtable);
+    import_c'init_ctx(c, m, ctx);
+    range(0, FTy.COUNT) { _ |
+        m.save.unwrap()[].fty&.push(zeroed FTy);   // skip builtin types so offsets work out
+    };
+    
     bytes := import_c'compile_fr(fr, c_source, c, "raylib");
     write_entire_file_or_crash(outfile, bytes);
     println(outfile);
@@ -111,11 +142,7 @@ compile_lib :: fn(root: Str, arch: Arch, outfile: Str) void = {
     // TODO: do run_example through the franca compiler so get dce
 }   
 
-run_example :: fn(root: Str, file: Str, compileonly: bool, raylib: Str) void = {
-    start := timestamp();
-
-    exe_path := "target/raylib_example.out";
-    arch := current_arch();  // can cross compile: Arch.x86_64 / Arch.aarch64
+run_example :: fn(root: Str, file: Str, raylib: Str, arch: Arch, exe_path: Str) void = {
     // note: when compiling exes like this you don't get deadcode elimination (that lives in the franca frontend so only dce if the entry point is in franca and you import_c the c part)
     CCC'compile(
         output_path = exe_path,
@@ -149,17 +176,7 @@ run_example :: fn(root: Str, file: Str, compileonly: bool, raylib: Str) void = {
             #include "%"
         """, raylib, root, root, file),
     ).or(fn(msg) => @panic("failed to compile raylib\n%", msg));
-    
-    @println("%ms", timestamp() - start);
-    @if(compileonly) return();
-    
-    // it wants to access the resources folder by relative path
-    start := get_working_directory(temp()).items().as_cstr();
-    dir := pop_path_segment(@tfmt("%/%", root, file)).as_cstr();
-    Syscall'chdir(dir).unwrap();
-    ok := run_cmd_blocking(@tfmt("%/%", start, exe_path), empty());
-    Syscall'chdir(start).unwrap();
-    @assert(ok, "failed run");
+    // TODO: return error so threaded -compileonly can report all fails
 }
 
 collect_examples :: fn(root: Str) []Str = {

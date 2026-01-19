@@ -3,6 +3,15 @@
 
 - simple test for c importing frc. repros for the bugs ive been fixing. 
   - deal with franca symbol being mangled
+- use late Cached: speed for 193 examples: -> 0:20. threaded -> 0:08
+- allow using tagged/array when imported to c
+- fix stragglers that didn't work with MORE_CACHE/NO_CACHE
+  - avoid double put_jit_addr of import (because they aren't mangled). 
+    ditto symbol_memmove. 
+  - wasm: Arch enum needs backing type i64. 
+    don't need to expand FTY.enum encoding because call cases still fit in u32
+  - need_reify was being overly conservative. don't need to bake if not for comptime. 
+    that restriction was from when i thought i was going to materialize memory for it there instead of in the backend. 
 
 ## (Jan 18)
 

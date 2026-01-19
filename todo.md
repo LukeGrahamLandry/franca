@@ -1,3 +1,9 @@
+- find someone who will give me ci that runs on riscv
+- delay evaluating top level code when import()-ing a file?
+  like if you try to `@run println("a")` in alloc/arena.fr it's "Poison expression InProgressMacro."
+  either make it work or make top level code a hard error. 
+  don't just have magic files that give an insane message if you try there. 
+- setting FRANCA_MORE_CACHE=1 also needs to invalidate the FrIncr'files_unchanged
 - when import_c/ffi makes a cache file it needs to include itself as a dep!
 -     very concerning that boot with USE_VM doesn't work when -unsafe and 
       opt passes somehow doesn't work specifically for replace_switches (had to skip it to get the measurement). 
@@ -74,7 +80,6 @@ Compile Error: not callable V:()
 - `Compile Error: redeclared constant % as overloadset` 
   means you can have things that work if one is main program and imports the other but not the reverse. 
   because `foo :: fn` in the imported thing will be scoped correctly but `fn foo` will be lifted. 
-- tests/external/hare.fr i fail some
 - bloat2: don't count bss. rn EXTRA can be negative. 
 - add a test that tries to bake a bunch of stuff in the general allocator to catch the mistake i made with panic_on_volatile_bake more reliably. 
 - tests that are supposed to panic_on_volatile_bake
@@ -236,8 +241,9 @@ cset	w0, eq
   also that would make it trivial to move them between .frc modules. 
 - you need a trace of what was being compiled when you get a compile error. 
   like the chain of references so you know why you're trying to compile that function. 
+  - wip: kinda works but often i pop off all the errors because they're allowed when doing overload signetures (which is stupid). 
 - replace import_c/includes.fr with a .frc module generated from the franca libc bindings. 
-- enable caching of the .frc between -syscalls and normal. (they're one byte different)
+  - wip: only did it for string.h so far
 - better apis for working with paths and temporary files
 - use `#macro #outputs(T)` to give a more sane error message for `x: i64 = @is(foo, .A, .B);` etc. 
 - improve interactive_read_line
@@ -258,6 +264,7 @@ cset	w0, eq
 - i need a way of testing the global debug settings in core.fr. 
   maybe -DFOO=true passed to default_driver could replace a declaration like `FOO :: false`
 - need to auto-test static linux. i wonder if you can landlock away `libc.so` to make sure you can't cheat 
+  (answer: yes! easy way is to just use bubblewrap)
 - create a guard page when allocating a new stack to spawn a thread
   and have the backend do the probing thing where you read a byte every page when you have a large stack frame so you can't miss the guard page. 
 - since do_codegen tries to do tracy stuff, FRANCA_TRACY=1 doesn't work if you try to run something 
@@ -267,12 +274,8 @@ cset	w0, eq
 - allow trailing lambda to be passed as a function pointer but still infer types of arguments. (ie. when calling run_tests_main_threaded)
 - set a good example; don't have tests that rely on layout of codegenentry. use the functions on the vtable. i think import_c/test/test.fr does this wrong
 - always zero struct padding when baking constants (even when behind a pointer and even when the struct contains no pointers). 
-- not all the tests pass with FRANCA_NO_CACHE=1 (fail debug assert: `need_reify on threaded codegen`)
-  - examples/import_c/test/test.fr
-  - examples/import_wuffs/test.fr
 - can't boot/strap.sh with FRANCA_NO_CACHE=1
-- not all the tests pass with import_module caching enabled
-  - examples/import_wuffs/test.fr `Assertion Failed: (put_jit_addr) redeclared symbol 10107: exit`
+  - :UpdateBoot
 - document `store v, [Sxxx]` vs `store v, Sxxx` on amd64
 - extend the cross repro tests to all the example programs. not just the compiler. maybe just add a file with hashes of binaries to the released artifact. 
 - I need to improve @enum for bit flags so i can use that in posix.fr so it doesn't suck as much to call mmap. 
@@ -281,12 +284,6 @@ cset	w0, eq
   is the same thing handed out to user code for builting vtables so it delays compiling hoping 
   you wont actually try to call it (which is often the right choice, like for objc bindings, etc.). 
 - everywhere i ENABLE_ENABLE_TRACY is garbage. i need a better pattern for that. 
-- compile error if you try to bake something that is not in ast_alloc 
-  because it's so easy to accedently type foo :: read_entire_file(temp(), path),
-  and then you waste so much fucking time. 
-  or is it better to just make a copy? 
-  really i should nail down the semantics of when the bake snapshot happens. 
-  (all at once at the end of compilation probably?). 
 - make #export work on `foo :: fn() #` instead of only `fn foo() #`
 - at some point i have to go through and make error handling not suck as bad. 
   there's a bunch of places i do `if thing_should_work then do_thing else not_that` instead of 
@@ -294,10 +291,6 @@ cset	w0, eq
   twice the syscalls and you produce toctou problems for no reason. 
   the reason it's annoying to fix is you want to know why something failed not 
   just that it failed so then i need to deal with remapping errno values for the different targets. 
-- `FRANCA_NO_CACHE=1 ./q.out examples/import_wuffs/test.fr`
-  > Assertion Failed: need_reify on threaded codegen of wuffs_base__io_reader__read_u8__46298
-- `FRANCA_NO_CACHE=1 ./target/f.out examples/import_c/test/ffi.fr`
-  > Assertion Failed: need_reify on threaded codegen of get_s__40986
 - repl.fr doesn't work at comptime (`main :: fn() = @run { ...`) 
   on arm-macos because it needs to call apple_thread_jit_write_protect.
   should allow not writing to exec memory and call a tiny bit of aot code to do the copy when you're done each function. 
@@ -369,8 +362,6 @@ bufs: [][]u8 = (ptr = bit_cast_unchecked(i64, @run(*[]u8), buf_ptr), len = buf_l
 
 ## import_c
 
-- deduplicate string constants. 
-  - raylib has 190 of "%s:%d: failed assertion `%s'\n\0"
 - the line numbers in my error messages are wrong sometimes!
   shows the right text tho so its not a massive deal but kinda cringe 
 - make sure my detect_include_guard is working on all the system headers 
@@ -504,7 +495,6 @@ TODO: end of loop. still too many options for 'index'
 - why was the quicksort wrapper trying to be emitted for import_module (when not marked #fold)
 - get compilation order dependence under control!!
 - fix callgraph sorting to improve inlining. like make sure the ge/le in lex_int/is_ascii_digit are inlined 
-- make AsmFunction get an inferred name
 - @bit_fields in incremental.fr don't work inline in the structs
 - #ir tries to ignore zero-sized params but not if they're first which is sad
 - "need to be consistant about how to handle modules like this that don't actually compile anything"
@@ -558,6 +548,9 @@ different subsets of the same resources.
 - improve import_wasm until it can cope with bootstrapping zig1.wasm
 - kinda lame that web/demo.fr has to special case the graphics programs instead of drivers working properly
 - examples/terminal.fr stbtt__run_charstring panic! missing br_if target @120 -> @122
+  - ugly=false
+- examples/terminal.fr: Uncaught RuntimeError: function signature mismatch
+  - ugly=true. regression! this used to work. (in browser) 
 
 ## import_wasm 
 
@@ -570,6 +563,7 @@ different subsets of the same resources.
   f15cf83-importwasm: 2676  
   0196148-importwasm: 5359  
   current-importwasm: 3197  
+  current-importwasm: 2904  
 
 convert.fr:  
 // TODO: this could be hella faster: 
@@ -589,17 +583,13 @@ convert.fr:
 
 - tests/todo/apple_arm_subword_abi.ssa
 - macho/emit.fr/emplace_fixup() allow negative offset for DataAbsolute of dynamic import in .Exe
-- arm64/emit.fr/loadaddr_bits() allow large offset in .Relocatable
 - rm64/emit.fr/fixup_arm64(): offset from dynamic import
 - isel5.ssa -w: fails with inlining disabled
 - (mem3.ssa, isel5.ssa) -w: fails when constant folding is disabled. 
   `IR failed typecheck: invalid type for first operand RTmp:144 of add in block @4`
 - "you really want to lock the module in case there's another thread trying to compile into it"
 - rv64/isel: fuse cmp+jnz
-- error prone that the other isels have overloads called fixarg,fixargs etc and i rely on the types being different. 
-hould just make them local constants in each file like they are here in riscv
 - test for phi of stack slot? 
-- remove redundant extension for `b := a & 31; c := extub b;`
 - i don't like that direct to exe vs to frc_inlinable then to exe give different binaries. 
 - be able to output frc/frc_inlinable in the same module as compiling normally so you don't have to do two passes over things to cache it
 - fix those two ^ and then compiler/test.fr can create all at once and assert that they make the same exe instead of running them all
@@ -608,9 +598,6 @@ hould just make them local constants in each file like they are here in riscv
 - debug assert that all tmps have a definition in rega. 
   (especially because @emit_instructions doesn't catch it)
 - arm relocatable import: relocation to fold symbol offsets into the adrp+add instead of wasting an extra instruction :SLOW
-- fixup2.ssa: "this should work without the indirection, i just don't handle folding the offset into the constant correctly."
-  i think that's fixed now. add a little test of that too
-- "this works here but not in it's original place under f()."
 - apple has different c variadic abi. that's pretty unfortunate for my grand plans. 
   it feels pretty invasive to have the backend compile two versions of anything variadic. 
   but most functions don't use varargs so those could be rega-ed once for linux+macos when compiling for all targets together. 
@@ -791,7 +778,6 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 - make the platform detection in franca_runtime_init less hacky
 - support (free, net, open)bsd
 - the bootstrapping system can't be committing a macos-arm binary. linux-amd seems more old / emulator enthused, could use blink, etc. 
-- fix the non-deterministic test failures
 - report all test failures instead of stopping on the first one
 - i want the transcribed magic numbers for syscalls, sys struct layouts, instruction encoding, object formats, etc. to be more auditable. 
   maybe make it structured consistantly enough that i can generate a c program that asserts everything matches
