@@ -195,7 +195,7 @@ let weak_imports = [
     "wait4",
     "pipe",
     "nanosleep",
-    "execvp",
+    "execve",
     "read",
     "mkstemp",
     "dup2",

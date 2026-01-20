@@ -7,11 +7,7 @@
 // TODO: it would be nice to patch_out_interp_header since they do their own syscalls 
 //       but i don't think they do their own relocations? 
 // TODO: don't depend on system clang for assembling/linking the .s files. 
-// TODO: use execvpe instead of the env binary 🤡
-//       static_execvp already uses tls(.environment_variables)[];
-//       pass that to the libc one too, then do that here. 
 clang :: Foreign.EXE.clang; 
-env :: Foreign.EXE.env; 
 
 main :: fn() void = {
     start := get_working_directory(temp()).items();
@@ -121,12 +117,13 @@ test_harec :: fn() void = {
         ("testmod", ".out/testmod.td.tmp"),
     );
     
+    env := build_env_vars(td);
+push_as_tls(.environment_variables, env) {
     rt_ssa := run((
         a = query_current_arch(), 
         input = rt_hare,
         t = (Some = ".out/rt.td.tmp"),
         N = (Some = "rt"),
-        td = empty(),
     ), "./.bin/harec", temp())
         .or(fn(msg) => @panic("failed to compile rt\n%", msg.items()));
     
@@ -135,9 +132,6 @@ test_harec :: fn() void = {
         input = @slice("testmod/measurement.ha", "testmod/testmod.ha"),
         t = (Some = ".out/testmod.td.tmp"),
         N = (Some = "testmod"),
-        td = slice(
-            @ref ("rt", ".out/rt.td.tmp"),
-        ),
     ), "./.bin/harec", temp()).unwrap();
     
     tests := collect_directory_ordered("tests", temp(), temp()).unwrap();
@@ -164,7 +158,6 @@ test_harec :: fn() void = {
         in := run((
             a = query_current_arch(), 
             input = @slice(@tfmt("tests/%", it.name)),
-            td = td,
         ), "./.bin/harec", temp()).or(fn(err) => yield(false, list(u8, temp()), err, ""));
         
         ssa := @slice((c.rt_ssa, "rt"), (c.testmod_ssa, "testmod"), (in.items(), it.name));
@@ -199,13 +192,10 @@ test_harec :: fn() void = {
         };
         general_allocator().dealloc(u8, obj);
         // compile() in the tests execs harec so need to give it the td files
-        ok, out, err := exec_and_catch(env, @slice(
-            td_to_env(td[0]),
-            td_to_env(td[1]),
-            exe,
-        ), temp()); 
+        ok, out, err := exec_and_catch(exe, empty(), temp()); 
         (ok, out, err, "")
     });
+};
 }
 
 // like qbe_frontend.fr but collects section directives
@@ -497,6 +487,9 @@ fn compile_to_ssa(modules: []HareModule, po: []i64, active_tags: []Str, harec: S
     #use("@/lib/sys/subprocess.fr");
     
     td, names, out_td := build_td(modules, root);
+    td := build_env_vars(td);  // wasteful to allocate td just to reallcoate here
+push_as_tls(.environment_variables, td) {
+    
     Task :: @struct(i: i64, p: RunningProcess);
     work: RawDeque(Task) = init(temp(), 32);
     err := u8.list(temp());
@@ -548,16 +541,14 @@ fn compile_to_ssa(modules: []HareModule, po: []i64, active_tags: []Str, harec: S
             push(send, ("", ""));
             break();
         };
-        args := build_args((
+        args := build_args(
             a = query_current_arch(), 
             input = input,
-            td = td,  // TODO: inefficient to rebuild the env vars every time
             N = (Some = names[i]),
             t = (Some = out_td[i]),
             tests = true,
-        ), harec); 
-        // TODO: don't use 'env'
-        args := make_args_for_exec(env, args, temp());
+        ); 
+        args := make_args_for_exec(harec, args, temp());
         ::Result(RunningProcess, Str);
         work&.push_back((
             p = sys_capture_exec(args)
@@ -565,6 +556,7 @@ fn compile_to_ssa(modules: []HareModule, po: []i64, active_tags: []Str, harec: S
             i = i, 
         ), temp());
     };
+};
 }
 
 HareModule :: @struct {
@@ -808,12 +800,8 @@ HareCmd :: @struct {
     t: ?Str = .None;
     a: Arch;
     input: []Str;
-    td: []Ty(Str, Str);
     tests := false;
 };
-
-td_to_env :: fn(it: Ty(Str, Str)) Str #inline = 
-    @tfmt("HARE_TD_%=%", it._0, it._1);
 
 fn build_td(modules: []HareModule, root: Str) Ty([]Ty(Str, Str), []Str, []Str) = {
     // future modules may depend on this one
@@ -837,8 +825,8 @@ fn build_td(modules: []HareModule, root: Str) Ty([]Ty(Str, Str), []Str, []Str) =
 }
 
 fn run(cmd: HareCmd, bin: Str, a: Alloc) Result(List(u8), List(u8)) = {
-    args := build_args(cmd, bin);
-    ok, out, err := exec_and_catch(env, args, a);
+    args := build_args(cmd);
+    ok, out, err := exec_and_catch(bin, args, a);
     if ok {
         @if(err.len > 0) eprintln(err.items());
         return(Ok = out);
@@ -847,13 +835,8 @@ fn run(cmd: HareCmd, bin: Str, a: Alloc) Result(List(u8), List(u8)) = {
     (Err = err)
 }
 
-fn build_args(cmd: HareCmd, bin: Str) []Str = {
+fn build_args(cmd: HareCmd) []Str = {
     args := Str.list(temp());
-    for cmd.td { it |
-        @debug_assert(!it._0.contains("="));
-        args&.push(td_to_env(it));
-    };
-    args&.push(bin);
     args&.push("-a");
     args&.push(to_harec_arch(cmd.a));
     if cmd.N { N |
@@ -876,6 +859,21 @@ fn build_args(cmd: HareCmd, bin: Str) []Str = {
     };
     args.items()
 }
+
+build_env_vars :: fn(td: []Ty(Str, Str)) *CStr = {
+    envp := tls(.environment_variables)[];
+    i := 0;
+    while => !envp.offset(i)[].ptr.is_null() {
+        i += 1;
+    };
+    new := @ref CStr.list(i + td.len + 1, temp());
+    new.push_all(envp.slice(i));
+    for td { it |
+        new.push(@fmt_cstr("HARE_TD_%=%", it._0, it._1));
+    };
+    new.push(zeroed(CStr));
+    new.as_ptr()
+};
 
 fn to_harec_arch(a: Arch) Str = @match(a) {
     fn x86_64()  => "x86_64";

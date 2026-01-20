@@ -2,9 +2,11 @@
 // TODO: use posix_spawnp instead? that makes it easier to return an error to the caller. using fork is a pain. 
 fn run_cmd_blocking(path: Str, args: Slice(Str)) bool = {
     cargs := make_args_for_exec(path, args, temp());
+    envp := tls(.environment_variables)[];
+    exe := search_path(envp, cargs[0]);
     pid := Syscall'fork();
     if pid == 0 {
-        exec(cargs);
+        exec(exe, cargs);
     };
     
     status: i32 = 0;
@@ -59,6 +61,10 @@ RunningProcess :: @struct {
 // TODO: handle sending input to the child process
 // TODO: deal with being sent signals while waiting
 // TODO: deal with waiting on multiple processes at once
+// 
+// tls.environment_variables:
+// - used to resolve arg[0] in PATH if it doesn't contain / 
+// - inherited by the child 
 sys_capture_exec :: fn(args: []CStr) Result(RunningProcess, Str) = {
     if TODOWASM && query_current_arch() == .wasm32 {
         err := u8.list(temp());
@@ -72,6 +78,8 @@ sys_capture_exec :: fn(args: []CStr) Result(RunningProcess, Str) = {
             || return(Err = "libc::pipe() failed");
     };
     @debug_assert(args[args.len - 1].ptr.is_null());
+    envp := tls(.environment_variables)[];
+    exe := search_path(envp, args[0]);
     
     pid := Syscall'fork();
     if pid == 0 { // Child
@@ -89,7 +97,7 @@ sys_capture_exec :: fn(args: []CStr) Result(RunningProcess, Str) = {
         Syscall'dup2(pipes&[2]&[1], STD_ERR)
             || panic("failed to dup2(err)");
         
-        exec(args);
+        exec(exe, args);
     };
     // else: Parent
 
@@ -100,18 +108,21 @@ sys_capture_exec :: fn(args: []CStr) Result(RunningProcess, Str) = {
     (Ok = (pid = pid, pipes = @array(pipes&[0]&[1], pipes&[1]&[0], pipes&[2]&[0])))
 };
 
-exec :: fn(args: []CStr) Never = {
-    execvp :: fn(pathname: CStr, null_terminated_argv: *CStr) i32 #weak #libc;
-    libc_execvp: rawptr = execvp;
+exec :: fn(resolved_exe_path: CStr, args: []CStr) Never = {
+    // execvpe is a glibc thing. macos doesn't have it. 
+    execve :: fn(pathname: CStr, null_terminated_argv: *CStr, envp: *CStr) i32 #weak #libc;
+    
+    libc_exec: rawptr = execve;
     Syscall;
-    use_sys := prefer_syscalls() || libc_execvp.is_null();
-    e: (@FnPtr(p: CStr, v: *CStr) i32) = @if(use_sys, static_execvp, execvp);
+    use_sys := prefer_syscalls() || libc_exec.is_null();
+    e: (@FnPtr(p: CStr, v: *CStr, e: *CStr) i32) = @if(use_sys, Syscall'execve, execve);
+    envp := tls(.environment_variables)[];
     
     // HACK: it may appear that i am bad at my job... but so is everyone else... it just can't be done apparently?
     //       https://github.com/golang/go/commit/a4b2c5efbc259c7d23159d304f9cb4266cd64643
     i := 0;
     loop {
-        never := e(args[0], args.ptr);
+        never := e(resolved_exe_path, args.ptr, envp);
         error := @if(use_sys, -never, Posix'errno()[]);
         if query_current_os() != .linux || error != 26 || i >= 10 {
             err := u8.list(temp());
@@ -124,13 +135,6 @@ exec :: fn(args: []CStr) Never = {
         i += 1;
     }
 };
-
-// TODO: search PATH
-static_execvp :: fn(path: CStr, argv: *CStr) i32 = {
-    envp := tls(.environment_variables)[];
-    Syscall'execve(path, argv, envp)
-};
-
 
 // TODO: allow using a hanging poll for when you're just calling this in a loop to collect everything
 //       but need to do the right thing if the process dies while you're polling it so it never writes anything else. 
@@ -222,6 +226,29 @@ make_args_for_exec :: fn(path: Str, args: []Str, a: Alloc) []CStr = {
     for(args, fn(it) => cargs&.push(it.as_cstr()));
     cargs&.push(zeroed CStr);
     cargs.items()
+};
+
+search_path :: fn(envp: *CStr, needle_c: CStr) CStr = {
+    needle := needle_c.str();
+    if needle.contains("/") {
+        return needle_c;
+    };
+    path := find_environment_variable(envp, "PATH") 
+        || return(needle_c);
+    i := 0;
+    while => path.ptr.offset(i)[] != 0 {
+        start := i;
+        while => path.ptr.offset(i)[] != ":".ascii() && path.ptr.offset(i)[] != 0 {
+            i += 1;
+        };
+        prefix := path.ptr.offset(start).slice(i - start);
+        s := @tfmt("%/%\0", prefix, needle);
+        if file_exists(s.slice(0, s.len - 1)) {
+            return(ptr = s.ptr);
+        };
+        i += int(path.ptr.offset(i)[] != 0);
+    };
+    needle_c
 };
 
 report_exec_error :: fn(err: *List(u8), cargs: []CStr) void = {
