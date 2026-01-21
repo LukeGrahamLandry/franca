@@ -1,0 +1,352 @@
+// #foreign("this example requires system headers");
+// TODO: macos (need to fix config_h and deal with system includes)
+// TODO: enable_tls works but you have to manually get the generated files from a real mbedtls build (which clearly is not acceptable)
+//       psa_crypto_driver_wrappers psa_crypto_driver_wrappers_no_static
+// TODO: no linker. cope with multiple compilation units another way. 
+// TODO: the decompression stuff?
+// TODO: run their tests
+//       - seperate out the ones that don't need network to play nice with my sandboxing
+//       - move group(_) to deps.fr for prefetch
+// TODO: autotest
+// TODO: fetch.fr should use the libcurl i compile here instead of exec system installed curl. bootstrapping problem tho. 
+// TODO: this is far too much build-system-ish code for this :(
+
+main :: fn() void = {
+    mbedtls := group(
+        url = "https://github.com/Mbed-TLS/mbedtls/archive/7294fc1c1a3c5e0641fdc7dcdc7c9d9c716a4c4e.tar.gz", 
+        legacy = "6d4825f0c9c6d648da75555c6822795f127c478e3b63a8e217c4dd3c24e52ea6",
+        discard = @const_slice("cmake", "scripts"),
+    );
+    tfpsa := group(
+        url = "https://github.com/Mbed-TLS/TF-PSA-Crypto/archive/f7ad6b6931e179c2e40b3d04f3e6d207a7e3c36e.tar.gz", 
+        legacy = "7de6f5e278362ec03c064c1a58db190eb5baae098917ecbcf31b6eaa9e662966",
+        discard = @const_slice("cmake", "scripts"),
+    );
+    
+    enable_tls := false;  // TODO: enable by default once i can generate the files myself
+    mbedtls_ar := "target/curl/mbedtls.a";
+    if enable_tls {
+        start := timestamp();
+
+        // TODO: this is generated TODO TODO TODO TODO TODO
+        HACK := read_entire_file_or_crash(temp(), "/Users/luke/Downloads/mbedtls-7294fc1c1a3c5e0641fdc7dcdc7c9d9c716a4c4e/tf-psa-crypto/core/psa_crypto_driver_wrappers.h");
+        write_entire_file_or_crash(@tfmt("%/core/psa_crypto_driver_wrappers.h", tfpsa), HACK);
+        HACK := read_entire_file_or_crash(temp(), "/Users/luke/Downloads/mbedtls-7294fc1c1a3c5e0641fdc7dcdc7c9d9c716a4c4e/tf-psa-crypto/core/psa_crypto_driver_wrappers_no_static.c");
+        write_entire_file_or_crash(@tfmt("%/core/psa_crypto_driver_wrappers_no_static.c", tfpsa), HACK);
+        
+        // these can be empty
+        write_entire_file_or_crash(@tfmt("%/library/mbedtls_config_check_before.h", mbedtls), "");
+        write_entire_file_or_crash(@tfmt("%/library/mbedtls_config_check_final.h", mbedtls), "");
+        write_entire_file_or_crash(@tfmt("%/library/mbedtls_config_check_user.h", mbedtls), "");
+        write_entire_file_or_crash(@tfmt("%/library/tf_psa_crypto_config_check_before.h", mbedtls), "");
+        write_entire_file_or_crash(@tfmt("%/library/tf_psa_crypto_config_check_user.h", mbedtls), "");
+        write_entire_file_or_crash(@tfmt("%/library/tf_psa_crypto_config_check_final.h", mbedtls), "");
+        
+        write_entire_file_or_crash(@tfmt("%/library/userconfigfile.h", mbedtls), """
+            #undef MBEDTLS_DEBUG_C
+            #undef MBEDTLS_SELF_TEST
+            #undef MBEDTLS_AESNI_C   // amd: needs asm/intrinsics
+        """);
+        write_entire_file_or_crash(@tfmt("%/library/error.c", mbedtls), """
+            void mbedtls_strerror(int ret, char *buf, long buflen) {
+                if (buflen > 0) buf[0] = 0;
+            }
+        """);
+        
+        objs := @ref Str.list(temp());
+        
+        make_dirs_or_crash("target/curl");
+        library := collect_with_extension(@tfmt("%/library", mbedtls), ".c").unwrap();
+        drivers := collect_with_extension(@tfmt("%/drivers/builtin/src", tfpsa), ".c").unwrap();
+        core := collect_with_extension(@tfmt("%/core", tfpsa), ".c").unwrap();
+        parts := @slice( (library, "library"), (drivers, "drivers"), (core, "core"));
+        
+        objs.push_all(@slice("rc", mbedtls_ar));
+        
+        for parts { files, prefix |
+            for files { it |
+                src := @ref u8.list(temp());
+                src.push_all(prelude);
+                @fmt(src, "#add_include_path \"%/include\"\n", mbedtls);
+                @fmt(src, "#add_include_path \"%/include\"\n", tfpsa);
+                @fmt(src, "#add_include_path \"%/drivers/builtin/include\"\n", tfpsa);
+                
+                @fmt(src, "#add_include_path \"%/library\"\n", mbedtls);
+                @fmt(src, "#add_include_path \"%/core\"\n", tfpsa);
+                @fmt(src, "#add_include_path \"%/drivers/builtin/src\"\n", tfpsa);
+                
+                @fmt(src, "#define MBEDTLS_USER_CONFIG_FILE \"userconfigfile.h\"\n");
+                @fmt(src, "#define TF_PSA_CRYPTO_USER_CONFIG_FILE \"userconfigfile.h\"\n");
+               
+                @fmt(src, "#include \"%\"\n", it);
+                
+                out_path := @tfmt("target/curl/%-%.o", prefix, it);
+                objs.push(out_path);
+                // TODO: if this is always going to be the pattern of how i use this (mostly just building up one source string myself), make a version that's less verbose to call
+                // TODO: use this through import_module
+                CCC'compile(
+                    output_path = out_path,
+                    input_path = empty(),
+                    includes = empty(),
+                    target = (
+                        type = .Relocatable, 
+                        os = .linux, 
+                        arch = query_current_arch(),
+                    ),
+                    no_builtin_headers = true,
+                    prelude = src.items(),
+                ).or(fn(msg) => @panic("failed to compile %\n%", it, msg));
+            };
+        };
+        @println("mbedtls: %ms", timestamp() - start);
+        start := timestamp();
+        run_cmd_blocking("ar", objs.items())  // TODO: Foreign.EXE.ar
+            || @panic("failed ar mbedtls");
+        @println("link: %ms", timestamp() - start);
+    };
+    
+    root := group(
+        url = "https://github.com/curl/curl/archive/3e3d526c4ce4fea3c3a1b46bf55cc1b64fa10c5d.tar.gz", 
+        legacy = "b08d770e9dd31729c0287edd8b0b2184376603f9dbdad033eeb93bc2bc177a08",
+        discard = @const_slice("CMake", "m4", "projects", "scripts", ".github"),
+    );
+    
+    // TODO: instead of write and HAVE_CONFIG_H, just push it to src
+    write_entire_file_or_crash(@tfmt("%/lib/curl_config.h", root), config_h);
+    
+    src_files := collect_with_extension(@tfmt("%/src", root), ".c").unwrap();
+    toolx := collect_with_extension(@tfmt("%/src/toolx", root), ".c").unwrap();
+    @assert(query_current_arch() != .rv64 && query_current_os() == .linux, "TODO: move include path stuff into the compiler");
+    
+    src := @ref u8.list(temp());
+    @fmt(src, "#define HAVE_CONFIG_H\n");
+    src.push_all(prelude);
+    
+    @fmt(src, "#add_include_path \"%/src\"\n", root);
+    @fmt(src, "#add_include_path \"%/lib\"\n", root);
+    @fmt(src, "#add_include_path \"%/include\"\n", root);
+    
+    if enable_tls {
+        @fmt(src, "#define USE_MBEDTLS\n");
+        @fmt(src, "#define CURL_CA_PATH \"/etc/ssl/certs\"\n");
+        
+        @fmt(src, "#add_include_path \"%/include\"\n", mbedtls);
+        @fmt(src, "#add_include_path \"%/include\"\n", tfpsa);
+        @fmt(src, "#add_include_path \"%/drivers/builtin/include\"\n", tfpsa);
+    };
+    
+    dirs := @slice("", "curlx/", "vtls/", "vauth/", "vssh/", "vquic/");
+    for dirs { dir |
+        files := collect_with_extension(@tfmt("%/lib/%", root, dir), ".c").unwrap();
+        for files { it |
+            @fmt(src, "#include \"%%\"\n", dir, it);
+        };
+    };
+    @fmt(src, "#discard_static_scope\n");
+    for src_files { it |
+        @if(it != "curlinfo.c")
+        @fmt(src, "#include \"%\"\n", it);
+    };
+    for toolx { it |
+        @fmt(src, "#include \"toolx/%\"\n", it);
+    };
+    
+    out_path := "target/curl.out";
+    curl_o := "target/curl/curl.o";
+    start := timestamp();
+    CCC'compile(
+        output_path = @if(enable_tls, curl_o, out_path),
+        input_path = empty(),
+        includes = empty(),
+        target = (
+            type = @if(enable_tls, .Relocatable, .Exe), 
+            os = .linux, 
+            arch = query_current_arch(),
+            wrap_entry_for_linux_libc = true,
+            exe_debug_symbol_table = true,
+        ),
+        no_builtin_headers = true,
+        prelude = src.items(),
+    ).or(fn(msg) => @panic("failed to compile curl\n%", msg));
+    @println("curl: %ms", timestamp() - start);
+    
+    if enable_tls {
+        start := timestamp();
+        run_cmd_blocking(Foreign.EXE.cc, @slice(curl_o, mbedtls_ar, "-o", out_path))
+            || @panic("failed link curl+mbedtls");
+        @println("link: %ms", timestamp() - start);
+    };
+    println(out_path);
+    
+    paths := @slice("http://franca.lukegrahamlandry.ca/", "https://franca.lukegrahamlandry.ca/");
+    if !enable_tls {
+        paths = paths.slice(0, 1);
+    };
+    for paths { it |
+        ok, o, e := exec_and_catch(out_path, @slice("-f", it), temp());
+        @assert(ok && o.contains("<html"), "failed to run my curl\n%%", o.items(), e.items());
+    };
+}
+
+prelude :: """
+#define __unix__
+
+// TODO: echo | clang -E -Wp,-v -
+//       but then have to filter out the one with arg,def,bool etc. because the builtin ones are always last but makes more sense to use them
+#add_include_path "/usr/local/include"
+#if __aarch64
+#add_include_path "/usr/include/aarch64-linux-gnu"
+#elif __x86_64
+#add_include_path "/usr/include/x86_64-linux-gnu"
+// :NoDoubleUnderscoreArch
+#define __x86_64__
+#define __LP64__ 1
+#define __asm__ asm
+#endif
+#add_include_path "/usr/include"
+
+// TODO: this is a paste of what makes the system headers work for bubblewrap. it should all be in the compiler
+#define __signed__ signed
+
+// i don't implement u128 math but it's used in the arm mcontext structs. 
+typedef struct __attribute__((aligned(16))) { long _[2]; } __uint128_t;  
+
+/// TODO: these should be in the compiler 
+typedef unsigned long __SIZE_TYPE__;
+typedef unsigned long __UINTPTR_TYPE__;
+typedef long __INTMAX_TYPE__;
+typedef unsigned long __UINTMAX_TYPE__;
+typedef short __WCHAR_TYPE__;
+typedef long __INTPTR_TYPE__;
+typedef long __PTRDIFF_TYPE__;
+#define __SIZE_MAX__ ((unsigned long) ~0)
+#define __LONG_MAX__ ((long) ~(1<<63))
+
+#define __inline__ inline 
+#define _GNU_SOURCE 1
+
+// TODO
+#define __builtin_constant_p(_) 0
+""";
+
+CCC :: import("@/examples/import_c/cc.fr");
+#use("@/examples/testing.fr");
+#use("@/examples/fetch.fr");
+#use("@/lib/sys/fs.fr");
+
+config_h :: """
+// #define HAVE_ATOMIC 1
+// #define HAVE_STDATOMIC_H 1
+// #define HAVE_REALPATH 1  // see bubblewrap.fr for symbol versioning nightmare when they want NULL as second arg
+
+#define CURL_DISABLE_LDAP
+#define CURL_EXTERN_SYMBOL 
+#define USE_IPV6 1
+#define HAVE_ALARM 1
+#define HAVE_ARPA_INET_H 1
+#define HAVE_ACCEPT4 1
+#define HAVE_FNMATCH 1
+#define HAVE_BASENAME 1
+#define HAVE_BOOL_T 1
+#define HAVE_CLOCK_GETTIME_MONOTONIC 1
+#define HAVE_CLOCK_GETTIME_MONOTONIC_RAW 1
+#define HAVE_DIRENT_H 1
+#define HAVE_OPENDIR 1
+#define HAVE_FCNTL 1
+#define HAVE_FCNTL_H 1
+#define HAVE_FCNTL_O_NONBLOCK 1
+#define HAVE_FREEADDRINFO 1
+#define HAVE_FSEEKO 1
+#define HAVE_DECL_FSEEKO 1
+#define HAVE_FTRUNCATE 1
+#define HAVE_GETADDRINFO 1
+#define HAVE_GETADDRINFO_THREADSAFE 1
+#define HAVE_GETEUID 1
+#define HAVE_GETPPID 1
+#define HAVE_GETHOSTBYNAME_R 1
+#define HAVE_GETHOSTBYNAME_R_6 1
+#define HAVE_GETHOSTNAME 1
+#define HAVE_GETIFADDRS 1
+#define HAVE_GETPEERNAME 1
+#define HAVE_GETSOCKNAME 1
+#define HAVE_IF_NAMETOINDEX 1
+#define HAVE_GETPWUID 1
+#define HAVE_GETPWUID_R 1
+#define HAVE_GETRLIMIT 1
+#define HAVE_GETTIMEOFDAY 1
+#define HAVE_GLIBC_STRERROR_R 1
+#define HAVE_GMTIME_R 1
+#define HAVE_IFADDRS_H 1
+#define HAVE_INET_NTOP 1
+#define HAVE_INET_PTON 1
+#define HAVE_SA_FAMILY_T 1
+#define HAVE_IOCTL_FIONBIO 1
+#define HAVE_IOCTL_SIOCGIFADDR 1
+#define HAVE_LIBGEN_H 1
+#define HAVE_LOCALE_H 1
+#define HAVE_LOCALTIME_R 1
+#define HAVE_SUSECONDS_T 1
+#define HAVE_MSG_NOSIGNAL 1
+#define HAVE_NETDB_H 1
+#define HAVE_NETINET_IN_H 1
+#define HAVE_NETINET_TCP_H 1
+#define HAVE_NETINET_UDP_H 1
+#define HAVE_LINUX_TCP_H 1
+#define HAVE_NET_IF_H 1
+#define HAVE_PIPE 1
+#define HAVE_PIPE2 1
+#define HAVE_EVENTFD 1
+#define HAVE_POLL 1
+#define HAVE_POLL_H 1
+#define HAVE_PTHREAD_H 1
+#define HAVE_PWD_H 1
+#define HAVE_RECV 1
+#define HAVE_SELECT 1
+#define HAVE_SEND 1
+#define HAVE_SENDMSG 1
+#define HAVE_SENDMMSG 1
+#define HAVE_STDINT_H 1
+#define HAVE_FSETXATTR 1
+#define HAVE_FSETXATTR_5 1
+#define HAVE_SETLOCALE 1
+#define HAVE_SETRLIMIT 1
+#define HAVE_SIGACTION 1
+#define HAVE_SIGINTERRUPT 1
+#define HAVE_SIGNAL 1
+#define HAVE_SIGSETJMP 1
+#define HAVE_SNPRINTF 1
+#define HAVE_SOCKADDR_IN6_SIN6_SCOPE_ID 1
+#define HAVE_SOCKET 1
+#define HAVE_SOCKETPAIR 1
+#define HAVE_STDBOOL_H 1
+#define HAVE_STRERROR_R 1
+#define HAVE_STRUCT_SOCKADDR_STORAGE 1
+#define HAVE_STRUCT_TIMEVAL 1
+#define HAVE_SYS_EVENTFD_H 1
+#define HAVE_SYS_IOCTL_H 1
+#define HAVE_SYS_PARAM_H 1
+#define HAVE_SYS_POLL_H 1
+#define HAVE_SYS_RESOURCE_H 1
+#define HAVE_SYS_SELECT_H 1
+#define HAVE_SYS_TYPES_H 1
+#define HAVE_SYS_UN_H 1
+#define HAVE_TERMIOS_H 1
+#define HAVE_TERMIO_H 1
+#define HAVE_UNISTD_H 1
+#define HAVE_UTIME 1
+#define HAVE_UTIMES 1
+#define HAVE_UTIME_H 1
+#define HAVE_WRITABLE_ARGV 1
+#define CURL_OS "franca"
+#define SIZEOF_INT 4
+#define SIZEOF_LONG 8
+#define SIZEOF_OFF_T 8
+#define SIZEOF_CURL_OFF_T 8
+#define SIZEOF_CURL_SOCKET_T 4
+#define SIZEOF_SIZE_T 8
+#define SIZEOF_TIME_T 8
+#define STDC_HEADERS 1
+#define USE_THREADS_POSIX 1
+#define USE_UNIX_SOCKETS 1
+#define _FILE_OFFSET_BITS 64
+""";

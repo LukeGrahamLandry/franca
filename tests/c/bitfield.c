@@ -1,10 +1,16 @@
 #include "test.h"
+#include "stddef.h"
 
 struct {
   char a;
   int b : 5;
   int c : 10;
 } g45 = {1, 2, 3}, g46={};
+
+typedef struct { unsigned int a : 1; char b; } Bit0;
+typedef struct { char b; unsigned int a: 1; } Bit1;
+int bit0(Bit0 x) { return x.b; }
+int bit1(Bit1 x) { return x.b; }
 
 int main() {
   ASSERT(4, sizeof(struct {int x:1; }));
@@ -52,6 +58,9 @@ int main() {
   ASSERT(4, sizeof(struct {int a:3; int b:1; int c:5;}));  
   ASSERT(8, sizeof(struct {int a:3; int:0; int c:5;})); // zero width bitfield forces alignment padding
   ASSERT(4, sizeof(struct {int a:3; int:0;}));
+  
+  ASSERT(12, bit0((Bit0) { .a = 1, .b = 5 }) + bit1((Bit1) { .a = 1, .b = 7 }));
+  ASSERT(1, (offsetof(Bit0, b) == 1) && (offsetof(Bit1, b) == 0) && sizeof(Bit0) == 4 && sizeof(Bit1) == 4);
 
   printf("OK\n");
   return 0;

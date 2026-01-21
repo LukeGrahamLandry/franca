@@ -360,24 +360,28 @@ fn ir_index(c: *Ctx, ty: *CType) Qbe.Ref = {
         fn TY_STRUCT() => {
             type_info.nunion = 1;
             off := 0;
-            mem := ty.members;
-            last_off: i32 = -1;
-            for_linked mem { mem | 
+            for_linked ty.members { mem |
                 continue :: local_return;
+                // TODO: the aarch64 abi pdf does have rules about how you're supposed to lay them out
                 if mem.is_bitfield {
-                    // multiple bitfields are stored in one real field of the backing type. 
-                    // TODO: this relies on all fields with the same offset having the same backing type as the first. 
-                    //       struct S { unsigned char a:4; int b:8; };
-                    //       i say { b, p 3, } which seems wrong because some real bits are in the padding. 
-                    //       either { w } or { b, p 3, w } would be more reasonable. 
-                    @if(mem.offset == last_off) continue();
-                    last_off = mem.offset;
+                    // the fields will just be FPad
+                    continue();
                 };
                 add_padding(out, off&, mem.offset.intcast());
                 c.push_as_fields(mem.ty, out);
                 off += mem.ty.size.intcast();
             };
             add_padding(out, off&, ty.size.intcast());
+            
+            // HACK: amd64/sysv/retr doesn't like if all are FPad because all are bit fields (tcc/131_return_struct_in_reg)
+            // TODO: decide what the rules are
+            if out.len == 1 {
+                f := out[0].unpack();
+                if f.type == .FPad && f.len < field_by_size.len().trunc() {
+                    out[0] = pack(type = field_by_size[f.len.zext()], len = f.len);
+                };
+            };
+            
             push(out, pack(type = .FEnd, len = 0));
         }
         fn TY_UNION() => {
@@ -420,16 +424,14 @@ fn push_as_fields(c: *Ctx, ty: *CType, out: *List(u32)) void = {
         fn TY_DOUBLE()  => .Fd;
         fn TY_LDOUBLE() => .Fd;
         @default => {
-            @switch(ty.size) {
-                @case(1) => .Fb;
-                @case(2) => .Fh;
-                @case(4) => .Fw;
-                @case(8) => .Fl;
-                @default => panic("invalid size for primitive in push_fields");
-            }
+            it := field_by_size[ty.size.intcast()];
+            @debug_assert_ne(it, .FPad);
+            it
         };
     };
     push(out, pack(type = tag, len = ty.size.bitcast()));
 }
+
+field_by_size :: @const_slice(Qbe.FieldType.FPad, .Fb, .Fh, .FPad, .Fw, .FPad, .FPad, .FPad, .Fl);
 
 #use("@/backend/lib.fr");

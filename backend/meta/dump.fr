@@ -444,11 +444,8 @@ fn when_debug(f: *Qbe.Fn, category: Qbe.DebugKey, $body: @Fn(out: *List(u8)) voi
 fn when_debug(m: *Qbe.Module, category: Qbe.DebugKey, $body: @Fn(out: *List(u8)) void) void = {  
     @if(@run(__driver_abi_version < 1349)) return();
     if m.debug.bit_and(1.shift_left(category.raw() - "A".ascii())) != 0 {
-        // you need to have some mutex around printing to debug_out because new_type 
-        // is called on the frontend thread unlike everything else. (the allocation is guarded 
-        // by this mutex already but that's not the same because they can still fight once it has capactity). 
-        // TODO: i still get junk from `-d t` occasionally!
-        with m.forever.mutex& {
+        // guard: [new_type, when_debug, flush_debug] touch [m.debug_out, m.types] on both threads
+        with m.types_mutex& {
             body(m.debug_out);
         };
     };
@@ -690,7 +687,8 @@ fn dump_flow_cfg(f: *Qbe.Fn, out: *List(u8)) void = {
 
 fn flush_debug(m: *QbeModule) void #inline = {
     o := m.debug_out;
-    if o.len != 0 {
+    @if(o.len != 0)
+    with m.types_mutex& {  // same one as when_debug()
         eprint(o.items());
         o.clear();
     };

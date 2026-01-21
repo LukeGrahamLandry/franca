@@ -66,6 +66,14 @@ int sum_va(int foo, ...) {
     return sum;
 }
 
+int adder(int a, int b) { return a + b; }
+int call_pair(int a, int b, ...) {
+    va_list ap;
+    va_start(ap);
+    int (*f)(int, int) = va_arg(ap, typeof(f));
+    return f(a, b);
+}
+
 int main() {
   ASSERT(6, sum1(1, 2, 3, 0));
   ASSERT(55, sum1(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0));
@@ -74,6 +82,7 @@ int main() {
   ASSERT(210, sum2(1, 2.0, 3, 4.0, 5, 6.0, 7, 8.0, 9, 10.0, 11, 12.0, 13, 14.0, 15, 16.0, 17, 18.0, 19, 20.0, 0));
   ASSERT(0, ({ char buf[100]; fmt(buf, "%d %d", 2, 3); strcmp(buf, "2 3"); }));
   ASSERT(1, ({ short x = 0x8080; is_8080((unsigned short) x, (unsigned short) x); }));
+  ASSERT(5, call_pair(2, 3, adder));
   
   // default-argument-promotion for literal 0 is to int, so if you do that instead of NULL, 
   // i think its legal that i don't zero the alignment padding for apple-arm. 

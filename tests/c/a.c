@@ -34,6 +34,7 @@ int main() {
         else t_3 = 2;
         t_3;  // definitely initialized
     }));
+    int unused_undef; (void) unused_undef;
     
     ASSERT(9, ({
         typedef struct { char nactvar; } X;
@@ -87,6 +88,12 @@ int main() {
     (1 ? 0 : ({ while (1) 0; }) );
     int nonconstant = 0; nonconstant = 1;
     (nonconstant ? voidexpr() : voidexpr());
+    
+    enum { value_0 };  // shadowed by a label
+    switch(1) {
+        value_0: case value_0: break;
+        default: goto value_0;
+    }
     
     if (0) return 1;  // can't speculate() because:
     

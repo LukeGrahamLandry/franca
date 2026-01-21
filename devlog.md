@@ -1,4 +1,46 @@
 
+## (Jan 21)
+
+- for mbedtls, do a bunch of object files.
+  they sure do use the preprocessor but worth it cause found more bugs.
+  - `extern foo[2]; int foo[2];`, wasn't copying the type from the tentative definition, 
+    so linker thinks it's unfilled. but even without linker, sizeof is wrong 
+    and it doesn't get allocated space so overlaps with the next tentative thing. 
+  - another "slot _ is read but never stored to" `int x; x;`, 
+    i think that's technically UB (n1570#6.3.2.1p2) but clang and gcc very reasonably allow it.
+    i don't want to take that check out of the backend because it can still catch mistakes 
+    in frontends that don't want to allow uninit vars (and qbe has it too so i'm not being too strict for compat). 
+    so just zero small vars in declaration(). 
+  - md5_test_buf removed by undef MBEDTLS_SELF_TEST but bad sign that i say its an unaligned reloc. 
+    `char foo[7][81] = { { "" }, ` should be flat but im doing it as an array of pointers (works if integer literals). chibicc has the same problem. 
+  - ripemd160.c takes me 7 seconds to compile! 
+    loadopt.emit_insertions. so that's the last straw on my sorting, next thing shall be fixing that. 148ms. 
+- improve a few error messages. 
+- got it to the point of compiling and erroring on `curl: (60) mbedTLS: The certificate is not correctly signed by the trusted CA`
+  but if i pass `-k` it works so i think that means much of the cryptography stuff is fine. 
+  ha, `SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt` makes it work 
+  (got that path from strace-ing the real curl and the var from curl's website in the error message). 
+  define to set the default. 
+- think i finally fixed `-d t` rare junk
+
+> Zed 0.205.5 39de188584f3fd3d966290dfe8577d44f231c4df
+> two zeds open (looking at folders that don't overlap at all) hangs a core until the end of time + can't save files :(
+
+## (Jan 20)
+
+- c bugs revealed by compiling curl 
+  - infix label when the identifier was an enum value (was looking at node instead of token)
+  - promoting TY_FUNC when passed as a variadic argument
+- much respect for curl mostly compiling when you just concatenate all the files. 
+  got a curl binary that can do an http request. 
+- the ssl part seems like its going to be a big of a nightmare. 
+  openssel is really quite large and has far too much perl generating assembly. 
+  ugh mbedtls also wants to generate stuff, they're on thin ice. 
+  test_certs.h, psa_crypto_driver_wrappers.h
+- fetch.fr: tar: need to stop name at 100 chars even if no null terminator
+- c: another bit field ir_index packing problem (psa_cipher_operation_s). 
+  a thing that's confusing is that the "backing field" can overlap other real fields. 
+
 ## (Jan 19)
 
 - simple test for c importing frc. repros for the bugs ive been fixing. 

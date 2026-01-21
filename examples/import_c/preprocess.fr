@@ -22,6 +22,7 @@ MacroArg :: @struct {
 MacroHandler :: @FnPtr(c: *Ctx, tmpl: *Token) *Token;
 
 Macro :: @struct {
+    defined_at: *Token;
     name: Str;
     is_objlike: bool; // Object-like or function-like
     enabled: bool; // TODO: this means you can only run one thread at a time
@@ -257,6 +258,7 @@ fn find_macro(c: *Ctx, tok: *Token) ?*Macro = {
 
 fn add_macro(c: *Ctx, name: Str, is_objlike: bool, body: *Token, params: []Str, va_args_name: ?Str) *Macro ={
     m := c.arena.boxed(Macro, (
+        defined_at = zeroed(*Token),
         name = name,
         is_objlike = is_objlike,
         body = body,
@@ -297,6 +299,7 @@ fn read_macro_params(c: *Ctx, rest: **Token, tok: *Token) Ty([]Str, ?Str) #once 
 fn read_macro_definition(c: *Ctx, rest: **Token, tok: *Token) void #once = {
     if(!tok.valid_macro_name(), => @error_tok(c, tok, "macro name must be an identifier"));
     name := tok.str().shallow_copy(c.arena);
+    start := tok;
     tok = tok.next;
 
     if !tok.has_space && equal(tok, "(") {
@@ -306,9 +309,11 @@ fn read_macro_definition(c: *Ctx, rest: **Token, tok: *Token) void #once = {
         m := c.add_macro(name, false, c.copy_line(rest, tok), params, va_args_name);
         m.params = params;
         m.va_args_name = va_args_name;
+        m.defined_at = start;
     } else {
         // Object-like macro
-        c.add_macro(name, true, c.copy_line(rest, tok), empty(), .None);
+        m := c.add_macro(name, true, c.copy_line(rest, tok), empty(), .None);
+        m.defined_at = start;
     };
 }
 
@@ -334,10 +339,11 @@ fn read_macro_arg_one(c: *Ctx, rest: **Token, tok: *Token, read_rest: bool, name
     (name = name, tok = head.next, is_va_args = read_rest)
 }
 
-fn read_macro_args(c: *Ctx, rest: **Token, tok: *Token, params: []Str, va_args_name: ?Str) []MacroArg = {
+fn read_macro_args(c: *Ctx, rest: **Token, tok: *Token, m: *Macro) []MacroArg = {
     start := tok;
     tok = tok.next.next;
 
+    params, va_args_name := (m.params, m.va_args_name);
     args  := MacroArg.list(params.len + int(va_args_name.is_some()), c.arena);
     first := true;
     for params { name | 
@@ -366,6 +372,7 @@ fn read_macro_args(c: *Ctx, rest: **Token, tok: *Token, params: []Str, va_args_n
         //       was `for (; pp; pp = pp->next) {`, so you can't get out until pp is null? 
         //       im confused
         if !equal(tok, ")") {
+            @warn_tok(c, m.defined_at, "macro expected % args", params.len);
             @error_tok(c, start, "too many arguments")
         };
     };
@@ -593,7 +600,7 @@ fn expand_macro(c: *Ctx, rest: **Token, tok: *Token) bool #once = {
         
         m.body
     } else {  // Function-like macro application
-        args   := c.read_macro_args(tok&, tok, m.params, m.va_args_name);
+        args   := c.read_macro_args(tok&, tok, m);
         c.subst(m.body, args)
     };
     end := tok.next;

@@ -12,6 +12,8 @@ extern int g6;
 int g6 = 789;
 extern int g7;
 int g7;  // tentative
+extern int g8[];
+int g8[2];  // tentative
 
 int main() {
   ASSERT(3, ({ int a; a=3; a; }));
@@ -77,6 +79,7 @@ int main() {
   ASSERT(123, g4);
   ASSERT(456, g5);
   ASSERT(789, g6);
+  ASSERT(8, sizeof(g8));
 
   printf("OK\n");
   return 0;

@@ -272,7 +272,13 @@ int main() {
     T66 *b = a->next->next->next; 
     a->data == 1 && a->next->data == 2 && a->next->next->data == 3 && b->data == 1 && a == b; 
   }));
-
+  
+  static char strlit[3][4] = { { "1234" }, "5678", { 57, 0 } };
+  ASSERT(0, strcmp(strlit[0], "123456789")); 
+  ASSERT(12, sizeof(strlit));  // flat bytes
+  ASSERT(16, ({ char *(x[2]) = { "", { "" } }; sizeof(x); }));  // array of pointers
+  ASSERT('A', ({ char foo[1][2] = { { "A" } }; foo[0][0]; }));
+  
   printf("OK\n");
   return 0;
 }

@@ -1085,6 +1085,11 @@ fn declaration(c: *Ctx, tok: *Token, basety: *CType, attr: ?*VarAttr, first_decl
             var.is_const = is_const;
             
             c.lvar_initializer(tok&, tok, var);
+        } else {
+            // trick opt/mem/promote
+            // unfortunate that this hides mistakes if you use uninit var. 
+            // but `int main() { int foo; (void)foo; return 0; }` is a valid c program so i should accept it. 
+            @if(var.ty.size.ule(8)) c.gen_zero_var(var, tok);  
         };
         if(var.ty.size < 0,         => @error_tok(c, ty.name, "variable '%' has incomplete type", name));
         if(var.ty.kind == .TY_VOID, => @error_tok(c, ty.name, "variable declared void"));
@@ -1255,6 +1260,12 @@ fn comma_sep(c: *Ctx, tok: **Token, $end: Str, $body: @Fn() void) void = {
 fn array_initializer1(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) void = {
     c.eat(tok&, "{");
 
+    if tok.kind == .TK_STR && init.ty.base.kind == .TY_CHAR {
+        c.string_initializer(tok&, tok, init);
+        rest[] = c.skip(tok, "}");
+        return();
+    };
+    
     // An array length can be omitted if an array has an initializer
     // (e.g. `int x[] = {1,2,3}`). If it's omitted, count the number
     // of initializer elements as we go. 
@@ -2404,6 +2415,10 @@ fn global_variable(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, first_d
                 @warn_tok(c, var.tok, "forward declared here");
                 @error_tok(c, ty.name_pos, "static-ness must match forward declaration");
             };
+            
+            if var.ty.size <= 0 {  // declared as flexible[]; 
+                var.ty = ty;
+            };
         };
         var.is_definition = !attr.is_extern;
         var.is_tls = attr.is_tls;
@@ -2954,7 +2969,8 @@ parse_bracketed :: fn(c, rest, tok) #prefix(.@"(") = {
 
 label :: fn(c, rest, tok, prev) #infix(.@":", .Stmt) = {
     // :LabelAsInfix
-    if !@is(prev.kind, .ND_VAR, .ND_STMT) {
+    // TODO: won't work if it was __builtin_clz, etc.
+    if prev.tok.kind != .TK_IDENT {
         @error_tok(c, tok, "treating infix ':' as a label but the expression on the left was not an indentifier");
     };
     unique_label := c.get_block(prev.tok.str());
@@ -3173,6 +3189,9 @@ sizeof :: fn(c, rest, tok) #prefix(.sizeof) = {
         if(node.kind == .ND_MEMBER && node.member.is_bitfield, => @error_tok(c, tok, "sizeof(bitfield) is illegal"));
         node.ty
     };
+    if ty.kind != .TY_VLA && ty.size < 0 {
+        @error_tok(c, start, "sizeof(incomplete type)");
+    };
     r := if(ty.kind == .TY_VLA, => c.compute_vla_size(ty), => c.getcon(ty.size.intcast()));
     c.ir_node(c.ty_ulong, r, QbeNull, start)
 };
@@ -3221,7 +3240,7 @@ funcall :: fn(c, rest, tok, f) #infix(.@"(", .PostFix) = {
                     // not the same as variadic! ub if callee is actually variadic. 
                     @warn_tok(c, tok, "too many arguments (callee does not have a prototype)");
                 } else {
-                    @error_tok(c, tok, "too many arguments");
+                    @error_tok(c, tok, "too many arguments (expected %)", ty.params.len);
                 }
             };
             // "default argument promotions" when parameter type is omitted (e.g. in "..."). 
@@ -3235,6 +3254,10 @@ funcall :: fn(c, rest, tok, f) #infix(.@"(", .PostFix) = {
             
             if @is(arg.ty.kind, .TY_STRUCT, .TY_UNION) {
                 @warn_tok(c, tok, "TODO: non-scalar variadic argument");
+            };
+            
+            if @is(arg.ty.kind, .TY_FUNC) {
+                arg.ty = c.pointer_to(arg.ty);
             };
             
             // HACK: my official position on passing structs as varargs is "don't do that" 
@@ -4354,7 +4377,6 @@ fn gen_call(c: *Ctx, callee: *Node, function_ty: *CType, arg: []*Node, tok: *Tok
     r := if(is_void, => QbeNull, => c.f.newtmp("c", k)); 
     i := c.ir_index(function_ty.return_ty);
     c.emit(.call, k, r, callee, i);
-    // TODO: it seems like just returning QbeNull for void would work but fails wuffs/lzma.c :FUCKED
     r := if(is_void, => QbeNull, => r); 
     lvalue := if(i != QbeNull, => r, => QbeNull); // for gen_addr so you can do `foo().field`
     c.ir_node(function_ty.return_ty, r, lvalue, tok)

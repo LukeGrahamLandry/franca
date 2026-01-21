@@ -1,3 +1,5 @@
+- add a test that reproduces whatever ripemd160.c does to hit a pathological case of my sort in loadopt
+- use peek_cstr everywhere i `s: []u8; s: CStr = (ptr = s.ptr); s := s.str();`
 - find someone who will give me ci that runs on riscv
 - delay evaluating top level code when import()-ing a file?
   like if you try to `@run println("a")` in alloc/arena.fr it's "Poison expression InProgressMacro."
@@ -417,9 +419,6 @@ All is fine! (passed 35 tests)
 1.fr                                    note: run with `FRANCA_BACKTRACE=1` environment variable to display a backtrace%     
 ```
 - import_c can't do SLOW_USERSPACE_THREADS when run directly on a compiler that was build with real threads because of "using host backend"
-- `./q.out examples/default_driver.fr build compiler/main.fr -o q.out -d t` very rarely prints junk
-- `FRANCA_NO_CACHE=1 franca examples/import_c/test/test.fr` 
-  dies in init_codegen_worker. spawning threads from a shim doesn't work? 
 - can't run tests/c.fr at comptime (@run main() hangs)
 - tests/exe/sys.fr might not work with SLOW_LEAK_ARENAS=true?
 - i've seen this a couple times on actions:
