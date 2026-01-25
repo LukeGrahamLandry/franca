@@ -2,7 +2,6 @@
 // TODO: macos (need to fix config_h and deal with system includes)
 // TODO: enable_tls works but you have to manually get the generated files from a real mbedtls build (which clearly is not acceptable)
 //       psa_crypto_driver_wrappers psa_crypto_driver_wrappers_no_static
-// TODO: no linker. cope with multiple compilation units another way. 
 // TODO: the decompression stuff?
 // TODO: run their tests
 //       - seperate out the ones that don't need network to play nice with my sandboxing
@@ -10,6 +9,7 @@
 // TODO: autotest
 // TODO: fetch.fr should use the libcurl i compile here instead of exec system installed curl. bootstrapping problem tho. 
 // TODO: this is far too much build-system-ish code for this :(
+// TODO: rv64 is untested
 
 main :: fn() void = {
     mbedtls := group(
@@ -25,6 +25,20 @@ main :: fn() void = {
     
     enable_tls := false;  // TODO: enable by default once i can generate the files myself
     mbedtls_ar := "target/curl/mbedtls.a";
+    
+    c := @ref zeroed(C.Compile.Ctx);
+    m := @ref zeroed(Qbe.Module);
+    Qbe'backend'init_module(m, (
+        arch = query_current_arch(),
+        os = .linux,
+        type = .Exe,
+        wrap_entry_for_linux_libc = true,
+        exe_debug_symbol_table = true,
+    ));
+    ctx := init_codegen_worker(m, true);
+    C'init_ctx(c, m, ctx);
+    c.allow_builtin_headers = false;
+    
     if enable_tls {
         start := timestamp();
 
@@ -53,15 +67,11 @@ main :: fn() void = {
             }
         """);
         
-        objs := @ref Str.list(temp());
-        
         make_dirs_or_crash("target/curl");
         library := collect_with_extension(@tfmt("%/library", mbedtls), ".c").unwrap();
         drivers := collect_with_extension(@tfmt("%/drivers/builtin/src", tfpsa), ".c").unwrap();
         core := collect_with_extension(@tfmt("%/core", tfpsa), ".c").unwrap();
         parts := @slice( (library, "library"), (drivers, "drivers"), (core, "core"));
-        
-        objs.push_all(@slice("rc", mbedtls_ar));
         
         for parts { files, prefix |
             for files { it |
@@ -80,29 +90,28 @@ main :: fn() void = {
                
                 @fmt(src, "#include \"%\"\n", it);
                 
-                out_path := @tfmt("target/curl/%-%.o", prefix, it);
-                objs.push(out_path);
-                // TODO: if this is always going to be the pattern of how i use this (mostly just building up one source string myself), make a version that's less verbose to call
-                // TODO: use this through import_module
-                CCC'compile(
-                    output_path = out_path,
-                    input_path = empty(),
-                    includes = empty(),
-                    target = (
-                        type = .Relocatable, 
-                        os = .linux, 
-                        arch = query_current_arch(),
-                    ),
-                    no_builtin_headers = true,
-                    prelude = src.items(),
-                ).or(fn(msg) => @panic("failed to compile %\n%", it, msg));
+                result := C'catch_call(c, void) {
+                    tok := c.tokenize_string("prelude", src.items());
+                    tok  = c.C'Preprocess'preprocess(tok);
+                    c.C'Compile'parse(tok);
+                };
+                @if_let(result) fn Err(msg) => {
+                    @panic("failed to compile %\n%", it, msg);
+                };
+                
+                // :discard_static_scope
+                c.macros&.clear();
+                C'Preprocess'init_macros(c);
+                c.scope.vars&.clear();
+                c.pragma_once&.clear();
+                c.include_paths&.clear();  // because src adds it back. don't want it to get redundantly long or it gets slow
+                // TODO: make it possible to reset temp() here
             };
+            
+            // ie. version.c exists in both mbedtls and curl and they have different include paths
+            c.filename_cache&.clear();  
         };
         @println("mbedtls: %ms", timestamp() - start);
-        start := timestamp();
-        run_cmd_blocking("ar", objs.items())  // TODO: Foreign.EXE.ar
-            || @panic("failed ar mbedtls");
-        @println("link: %ms", timestamp() - start);
     };
     
     root := group(
@@ -111,16 +120,13 @@ main :: fn() void = {
         discard = @const_slice("CMake", "m4", "projects", "scripts", ".github"),
     );
     
-    // TODO: instead of write and HAVE_CONFIG_H, just push it to src
-    write_entire_file_or_crash(@tfmt("%/lib/curl_config.h", root), config_h);
-    
     src_files := collect_with_extension(@tfmt("%/src", root), ".c").unwrap();
     toolx := collect_with_extension(@tfmt("%/src/toolx", root), ".c").unwrap();
     @assert(query_current_arch() != .rv64 && query_current_os() == .linux, "TODO: move include path stuff into the compiler");
     
     src := @ref u8.list(temp());
-    @fmt(src, "#define HAVE_CONFIG_H\n");
     src.push_all(prelude);
+    src.push_all(config_h);
     
     @fmt(src, "#add_include_path \"%/src\"\n", root);
     @fmt(src, "#add_include_path \"%/lib\"\n", root);
@@ -152,31 +158,26 @@ main :: fn() void = {
     };
     
     out_path := "target/curl.out";
-    curl_o := "target/curl/curl.o";
     start := timestamp();
-    CCC'compile(
-        output_path = @if(enable_tls, curl_o, out_path),
-        input_path = empty(),
-        includes = empty(),
-        target = (
-            type = @if(enable_tls, .Relocatable, .Exe), 
-            os = .linux, 
-            arch = query_current_arch(),
-            wrap_entry_for_linux_libc = true,
-            exe_debug_symbol_table = true,
-        ),
-        no_builtin_headers = true,
-        prelude = src.items(),
-    ).or(fn(msg) => @panic("failed to compile curl\n%", msg));
-    @println("curl: %ms", timestamp() - start);
     
-    if enable_tls {
-        start := timestamp();
-        run_cmd_blocking(Foreign.EXE.cc, @slice(curl_o, mbedtls_ar, "-o", out_path))
-            || @panic("failed link curl+mbedtls");
-        @println("link: %ms", timestamp() - start);
+    result := C'catch_call(c, void) {
+        tok := c.tokenize_string("prelude", src.items());
+        tok  = c.C'Preprocess'preprocess(tok);
+        c.C'Compile'parse(tok);
     };
-    println(out_path);
+    @if_let(result) fn Err(msg) => {
+        @panic("failed to compile curl\n%", msg);
+    };
+    
+    ctx.join_codegen_thread();
+    chunks := {m.target.finish_module}(m);
+    data := concat(chunks, temp());
+    write_entire_file_or_crash(out_path, data);
+    c.arena_storage&.deinit();
+    drop(m);
+    
+    @println("curl: %ms", timestamp() - start);
+    @println("enable_tls = %, bin = %", enable_tls, out_path);
     
     paths := @slice("http://franca.lukegrahamlandry.ca/", "https://franca.lukegrahamlandry.ca/");
     if !enable_tls {
@@ -229,7 +230,11 @@ typedef long __PTRDIFF_TYPE__;
 #define __builtin_constant_p(_) 0
 """;
 
+
+// TODO: use it through import_module
+C :: import("@/examples/import_c/lib.fr");
 CCC :: import("@/examples/import_c/cc.fr");
+Qbe :: C.Compile.Qbe;
 #use("@/examples/testing.fr");
 #use("@/examples/fetch.fr");
 #use("@/lib/sys/fs.fr");

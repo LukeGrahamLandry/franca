@@ -2,9 +2,11 @@ set -e
 target_name="$(uname -s)_$(uname -m)"
 url=""
 hash=""
+exe_path=""
 case "$target_name" in
     Darwin_arm64)
-        FRANCA_BACKTRACE=1 ./boot/franca-macos-arm64 tests/run_tests.fr -- github; exit 0;;
+        exe_path="./boot/franca-macos-arm64";
+    ;;
     Darwin_x86_64)
         url="bd44f7952dd8a61ad73a3e6796068ec60c890409/franca-macos-amd64";
         hash="791713ded192972525d3ceac291b65bcafb7ae5ca037b128d684dc5b56c8e095";
@@ -22,7 +24,9 @@ case "$target_name" in
 esac
 
 mkdir -p target/franca/fetch
-exe_path="./target/franca/fetch/${hash}.out"
+if [ -z "${exe_path}" ]; then
+    exe_path="./target/franca/fetch/${hash}.out"
+fi
 if [ ! -x "$exe_path" ]; then
     # TODO: curling stuff is not acceptable
     curl "https://lukegrahamlandry.ca/franca/bin/${url}" -o "$exe_path"
@@ -30,4 +34,21 @@ if [ ! -x "$exe_path" ]; then
     sha256sum --check ./target/franca/fetch/${hash}.hash
     chmod +x "$exe_path"
 fi
-FRANCA_BACKTRACE=1 "$exe_path" tests/run_tests.fr -- core
+
+
+# [[ "$*" == *"-no-test"* ]] but i want it to not need bash
+notest=""
+for it in "$@"; do
+  if [ "$it" = "-no-test" ]; then
+    notest="true"
+    break
+  fi
+done
+
+if [ ! -z "$notest" ]
+then
+    FRANCA_BACKTRACE=1 "$exe_path" tests/run_tests.fr strap
+    ./target/f.out tests/run_tests.fr release
+else
+    FRANCA_BACKTRACE=1 "$exe_path" tests/run_tests.fr -- core
+fi

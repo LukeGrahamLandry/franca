@@ -567,15 +567,14 @@ fn main_thread_pump(comp: *SelfHosted, shared: *FrontendCodegen, fns: []FuncId, 
     opts   := comp.get_build_options();
     when := @if(IS_BOOTSTRAPPING && shared.m.goal.type == .JitOnly, ExecStyle.Jit, .Aot);
     // TODO: dynamiclib is kinda broken because i rely on being called in a stack with tls setup
-    dynamiclib := shared.m.goal.type == .Dynamic;
-    wrap_main := wrap_main && !dynamiclib;
+    wrap_export := !wrap_main && @is(shared.m.goal.type, .Dynamic, .Relocatable);
     shared.m.codemap = (Some = comp.codemap);
     
     for fns { f |
         id := shared.m.intern(comp.fmt_fn_name(f));
         use_symbol(shared.m, id) { s |
             s.referenced = true;
-            if !dynamiclib && !wrap_main {
+            if wrap_export {
                 s.export = true;
             };
         };
@@ -629,7 +628,7 @@ fn main_thread_pump(comp: *SelfHosted, shared: *FrontendCodegen, fns: []FuncId, 
     
     @if(wrap_main) wrap_with_runtime_init(comp, shared.worker, fns[0]);
     
-    @if(dynamiclib) for fns { f |
+    @if(wrap_export) for fns { f |
         emit_export_wrapper(comp, shared.worker, f);
     };
     

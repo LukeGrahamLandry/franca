@@ -1,4 +1,41 @@
 
+## (Jan 25)
+
+- spent far too long doing trial and error to do ar on macos-arm and linux-amd. 
+  macos has different symbol table format as well. 
+  everyone has slightly different rules about alignment and contents of padding.
+- none of it matters tho because if i just name the file .a but just have it be 
+  a .o file without the wrapper, the linker still takes it, it's just cargo that 
+  only wants an archive but it never looks in the file. ugh, wasted so much time :(
+- external/curl: for mbedtls (use one Ctx+Module and just reset macros+vars each compilation unit)
+  instead of (each c file in its own Module + .o file, then ar them together, then link that with curl.o)
+  - (4.015 s ±  0.036 s) -> (3.486 s ±  0.047 s)
+
+## (Jan 24)
+
+- miscompilation elide_abi_slots. only on arm. 
+  coalesce created the situation in the original program but can reproduce without.
+  made_addr_escape_mistake wasn't doing the whole range that could overlap a store. 
+- linker wants .a file. write my own instead of exec-ing ar.
+- now also need to do whatever ranlib does to make a symbol table. 
+- ugh, linux and macos deal with long file names differently. 
+  the sane thing to do would just declare i don't care because i get to pick the file names and they don't matter. 
+  really i should only ever be putting one object file in an archive because its faster to not drop and recreate a modules many times. 
+
+ ## (Jan 22/23)
+
+maybe i'll try making a rustc codegen backend 
+- there's a bunch of stuff that's going to be a pain 
+  but i think some i can fake, and some most programs don't need, and some are good incentive to implement and will benifit my other stuff. 
+  - thread locals, atomics, i128/f16/f128, inline assembly, unwinding, rust abi, simd, llvm intrinsics
+- rustc isn't like a normal crate? its a wizard you just import and it's there?
+- got to the point of rustc calling my dylib and then using my object file 
+  (which i made from a different program unrelated to what it asked for... baby steps)
+- build script to get it to link against franca code so i can call the backend
+- for now it seems easier to just pass a blob of .frc instead of having bindings for
+  all the builder functions that need to be kept in sync. 
+  did structs for the writing format and some rust api for emitting it. 
+
 ## (Jan 21)
 
 - for mbedtls, do a bunch of object files.
